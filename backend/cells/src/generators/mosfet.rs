@@ -1,6 +1,6 @@
 //! MOSFET cell generator: finger decomposition, interdigitation, contacts.
 
-use substrate3::{CellBuilder, CellError, Direction, PatternType, PortDef};
+use substrate3::{CellBuilder, CellError, DeviceType, Direction, MatchingType, PatternType, PortDef};
 
 use crate::device::DeviceRecord;
 use super::{CellSpec, Pdk};
@@ -11,6 +11,9 @@ pub struct MosfetSpec {
     pub nf: u16,
     pub style: PatternType,
     pub dummies_per_edge: u8,
+    /// Sizing axis: Mirror (L-dominated, current mirrors) vs Cross (W·L, diff pairs).
+    /// ponytail: was hardcoded Cross; now threaded from constraints.
+    pub match_kind: Option<MatchingType>,
 }
 
 const MAX_VARIANTS: usize = 16;
@@ -33,6 +36,7 @@ impl CellSpec for MosfetSpec {
                             nf,
                             style,
                             dummies_per_edge: d,
+                            match_kind: None,
                         })
                     })
             })
@@ -95,7 +99,10 @@ impl CellSpec for MosfetSpec {
         let poly_ext = pdk.poly_ext;
         let gate_l = ref_dev.l;
         let sd_w = pdk.sd_width.max(430 - gate_l);
-        let pitch = sd_w + gate_l + sd_w;
+        // ponytail: pitch floor from met1.2 spacing — mcon + 2*m1_enc + met1_space
+        // kills residual m1.2 DRC violations by construction
+        let m1_pitch = pdk.mcon_size + 2 * pdk.m1_enc + pdk.met1_space;
+        let pitch = (sd_w + gate_l + sd_w).max(m1_pitch);
 
         let sequence = finger_sequence(devices, self.style, drawn_fingers);
 
@@ -140,6 +147,12 @@ impl CellSpec for MosfetSpec {
             b.pin(&format!("{dev_name}:{other}"), &ly.li, dx, cy, ct, ct)?;
         }
 
+        // ponytail: dummy gates tied to supply — GND for NMOS, VDD for PMOS
+        // (AOAL ch13 13.2.2 Rule 12: dummy must sit in cutoff)
+        let supply_net = match ref_dev.device_type {
+            DeviceType::Nmos | DeviceType::Ncap => "GND",
+            _ => "VDD",
+        };
         for k in 0..i32::from(self.dummies_per_edge) {
             let off = (k + 1) * (gate_l + sd_w);
             let dummy_positions = [
@@ -148,6 +161,29 @@ impl CellSpec for MosfetSpec {
             ];
             for dx in dummy_positions {
                 b.rect(&ly.poly, dx, -poly_ext, gate_l, finger_w + 2 * poly_ext)?;
+                // Contact stack: licon → li → mcon → met1 on dummy poly endcap
+                let cx = dx + gate_l / 2 - ct / 2;
+                let cy = -(poly_ext / 2) - ct / 2;
+                b.rect(&ly.licon, cx, cy, ct, ct)?;
+                // li encloses mcon (sky130: 30nm enclosure)
+                let li_enc = 30;
+                let li_x = cx - li_enc;
+                let li_y = cy - li_enc;
+                let li_sz = ct + 2 * li_enc;
+                b.rect(&ly.li, li_x, li_y, li_sz, li_sz)?;
+                b.rect(&ly.mcon, cx, cy, ct, ct)?;
+                // met1 strap — sized to meet min_area (sky130: 83000 nm²)
+                let m1_w = ct + 2 * pdk.m1_enc;
+                let m1_min_area = 83_000;
+                let m1_h = (m1_min_area / m1_w).max(ct + 2 * pdk.m1_enc);
+                let m1_x = cx - pdk.m1_enc;
+                let m1_y = cy - (m1_h - ct) / 2;
+                b.rect(&ly.met1, m1_x, m1_y, m1_w, m1_h)?;
+                b.pin(
+                    &format!("dummy:{supply_net}"),
+                    &ly.met1,
+                    m1_x, m1_y, m1_w, m1_h,
+                )?;
             }
         }
 
@@ -186,7 +222,8 @@ fn est_dims(spec: &MosfetSpec, devices: &[DeviceRecord], pdk: &Pdk) -> (i32, i32
     let ref_dev = &devices[0];
     let gate_l = ref_dev.l;
     let sd_w = pdk.sd_width.max(430 - gate_l);
-    let pitch = 2 * sd_w + gate_l;
+    let m1_pitch = pdk.mcon_size + 2 * pdk.m1_enc + pdk.met1_space;
+    let pitch = (2 * sd_w + gate_l).max(m1_pitch);
     let per_dev = i32::from(spec.nf.max(1)) * i32::from(ref_dev.multiplier.max(1));
     let seq_len = per_dev * devices.len() as i32;
     let dummy_span = i32::from(spec.dummies_per_edge) * (gate_l + sd_w);
@@ -248,6 +285,9 @@ mod tests {
             ("diff", 65, 20),
             ("poly", 66, 20),
             ("li", 67, 20),
+            ("licon", 66, 44),
+            ("mcon", 67, 44),
+            ("met1", 68, 20),
         ])
     }
 

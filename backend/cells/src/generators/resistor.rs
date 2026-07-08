@@ -36,9 +36,15 @@ impl CellSpec for ResistorSpec {
         let ref_dev = &devices[0];
         let seg_l = ref_dev.l / self.n_segments.max(1);
         let seg_pitch = ref_dev.w + pdk.res_seg_gap;
-        let per_dev = self.n_segments * seg_pitch;
         let n = devices.len() as i32;
-        let total_w = per_dev * n + pdk.device_gap * (n - 1).max(0);
+        // ponytail: interdig lays all segments in one row; single separates per device
+        let total_w = match self.pattern {
+            PatternType::Interdig => self.n_segments * n * seg_pitch,
+            _ => {
+                let per_dev = self.n_segments * seg_pitch;
+                per_dev * n + pdk.device_gap * (n - 1).max(0)
+            }
+        };
         let total_h = pdk.res_head + seg_l + pdk.res_head;
         (total_w, total_h)
     }
@@ -76,55 +82,152 @@ impl CellSpec for ResistorSpec {
         let seg_l = body_l / n_segments;
         let seg_pitch = body_w + pdk.res_seg_gap;
 
-        for (di, dev) in devices.iter().enumerate() {
-            let dev_x_off = di as i32 * (n_segments as i32 * seg_pitch + pdk.device_gap);
+        // Build segment sequence: (device_index, segment_index_for_that_device)
+        let sequence = res_segment_sequence(devices, self.pattern, n_segments);
+        // Track per-device segment counter for P/N pin placement
+        let mut dev_seg_placed: Vec<i32> = vec![0; devices.len()];
 
-            for seg in 0..n_segments {
-                let orient = if seg % 2 == 1 {
-                    Orientation::MY
-                } else {
-                    Orientation::R0
-                };
-                let sx = dev_x_off + seg as i32 * seg_pitch;
-                let total_h = head_l + seg_l + head_l;
+        for (slot, &(di, _seg_of_dev)) in sequence.iter().enumerate() {
+            let dev = &devices[di];
+            let seg_idx = dev_seg_placed[di];
+            dev_seg_placed[di] += 1;
 
-                let (bx, by, bw, bh) =
-                    orient.transform_rect(0, 0, body_w, total_h, body_w, total_h);
-                b.rect(&ly.poly, sx + bx, by, bw, bh)?;
+            let orient = if seg_idx % 2 == 1 {
+                Orientation::MY
+            } else {
+                Orientation::R0
+            };
+            let sx = slot as i32 * seg_pitch;
+            let total_h = head_l + seg_l + head_l;
 
-                let cy_top = head_l / 2 - ct / 2;
-                let cy_bot = head_l + seg_l + head_l / 2 - ct / 2;
-                let cx = body_w / 2 - ct / 2;
+            let (bx, by, bw, bh) =
+                orient.transform_rect(0, 0, body_w, total_h, body_w, total_h);
+            b.rect(&ly.poly, sx + bx, by, bw, bh)?;
 
-                let (tx, ty, _, _) = orient.transform_rect(cx, cy_top, ct, ct, body_w, total_h);
-                b.rect(&ly.licon, sx + tx, ty, ct, ct)?;
-                b.rect(&ly.li, sx + tx, ty, ct, ct)?;
+            let cy_top = head_l / 2 - ct / 2;
+            let cy_bot = head_l + seg_l + head_l / 2 - ct / 2;
+            let cx = body_w / 2 - ct / 2;
 
-                let (bx2, by2, _, _) = orient.transform_rect(cx, cy_bot, ct, ct, body_w, total_h);
-                b.rect(&ly.licon, sx + bx2, by2, ct, ct)?;
-                b.rect(&ly.li, sx + bx2, by2, ct, ct)?;
+            let (tx, ty, _, _) = orient.transform_rect(cx, cy_top, ct, ct, body_w, total_h);
+            b.rect(&ly.licon, sx + tx, ty, ct, ct)?;
+            b.rect(&ly.li, sx + tx, ty, ct, ct)?;
 
-                let ext = 250;
-                if seg == 0 {
-                    b.rect(&ly.li, sx + tx, ty - ext, ct, ext + ct)?;
-                    b.pin(&format!("{}:P", dev.name), &ly.li, sx + tx, ty - ext, ct, ct)?;
-                }
-                if seg == n_segments - 1 {
-                    b.rect(&ly.li, sx + bx2, by2, ct, ext + ct)?;
-                    b.pin(
-                        &format!("{}:N", dev.name),
-                        &ly.li,
-                        sx + bx2,
-                        by2 + ext,
-                        ct,
-                        ct,
-                    )?;
-                }
+            let (bx2, by2, _, _) = orient.transform_rect(cx, cy_bot, ct, ct, body_w, total_h);
+            b.rect(&ly.licon, sx + bx2, by2, ct, ct)?;
+            b.rect(&ly.li, sx + bx2, by2, ct, ct)?;
+
+            let ext = 250;
+            if seg_idx == 0 {
+                b.rect(&ly.li, sx + tx, ty - ext, ct, ext + ct)?;
+                b.pin(&format!("{}:P", dev.name), &ly.li, sx + tx, ty - ext, ct, ct)?;
+            }
+            if seg_idx == n_segments - 1 {
+                b.rect(&ly.li, sx + bx2, by2, ct, ext + ct)?;
+                b.pin(
+                    &format!("{}:N", dev.name),
+                    &ly.li,
+                    sx + bx2,
+                    by2 + ext,
+                    ct,
+                    ct,
+                )?;
             }
         }
 
         Ok(())
     }
+}
+
+/// Build the segment placement sequence for resistor layout.
+/// For `Single`, devices are placed sequentially.
+/// For `Interdig`, segments are interleaved in centroid-symmetric order
+/// (ABBA pattern) to cancel linear process gradients.
+/// Returns `(device_index, segment_index_for_that_device)`.
+fn res_segment_sequence(
+    devices: &[DeviceRecord],
+    pattern: PatternType,
+    n_segments: i32,
+) -> Vec<(usize, i32)> {
+    let n_dev = devices.len();
+    if n_dev == 0 {
+        return vec![];
+    }
+    match pattern {
+        PatternType::Interdig if n_dev >= 2 => {
+            // ponytail: greedy centroid interleave — ratio-preserving for
+            // unequal segment counts, extends to N>2 devices.
+            let counts: Vec<usize> = devices
+                .iter()
+                .map(|_| n_segments as usize) // each device contributes n_segments
+                .collect();
+            greedy_centroid_sequence(&counts)
+                .into_iter()
+                .map(|di| {
+                    // segment index within that device will be assigned by
+                    // the caller via dev_seg_placed counter
+                    (di, 0)
+                })
+                .collect()
+        }
+        _ => {
+            // Sequential: all segments of device 0, then device 1, etc.
+            (0..n_dev)
+                .flat_map(|di| (0..n_segments).map(move |seg| (di, seg)))
+                .collect()
+        }
+    }
+}
+
+/// Greedy centroid-symmetric interleave over N devices with arbitrary
+/// segment counts. Places slots from the outside in, always picking the
+/// device with the highest remaining fraction (count/total).
+/// Returns device indices in placement order.
+fn greedy_centroid_sequence(counts: &[usize]) -> Vec<usize> {
+    let total: usize = counts.iter().sum();
+    if total == 0 {
+        return vec![];
+    }
+    let mut remaining: Vec<usize> = counts.to_vec();
+    let mut seq = vec![0usize; total];
+    let mut lo = 0usize;
+    let mut hi = total - 1;
+
+    while lo <= hi {
+        // Pick device with highest remaining fraction
+        let pick = remaining
+            .iter()
+            .enumerate()
+            .filter(|(_, &r)| r > 0)
+            .max_by(|(_, a), (_, b)| a.cmp(b))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        seq[lo] = pick;
+        remaining[pick] -= 1;
+
+        if lo < hi {
+            // Mirror: place same device on the other end for symmetry
+            if remaining[pick] > 0 {
+                seq[hi] = pick;
+                remaining[pick] -= 1;
+            } else {
+                // Pick next best for the mirror slot
+                let pick2 = remaining
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &r)| r > 0)
+                    .max_by(|(_, a), (_, b)| a.cmp(b))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                seq[hi] = pick2;
+                remaining[pick2] = remaining[pick2].saturating_sub(1);
+            }
+            if hi == 0 { break; }
+            hi -= 1;
+        }
+        lo += 1;
+    }
+    seq
 }
 
 /// Fold-count domain: aspect-driven default, then a shallower even fold.
