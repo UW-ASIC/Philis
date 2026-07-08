@@ -217,6 +217,12 @@ pub struct PlaceCold {
     /// Per-cell layer bitmask (bit = PDK LayerId present in cell geometry).
     /// Cells overlap only when masks intersect. Empty → all cells conflict.
     pub layer_mask: Vec<u64>,
+    /// Per-device stress constraint: (device_idx, max_centroid_distance_nm).
+    /// Cost term pulls device toward die center.
+    pub stress: Vec<(u32, f32)>,
+    /// DTI forbidden zones: (device_a, device_b, min_gap_nm, max_gap_nm).
+    /// Devices must be abutting (gap < min) or far apart (gap > max).
+    pub dti_zones: Vec<(u32, u32, f32, f32)>,
 }
 
 #[inline]
@@ -277,6 +283,15 @@ pub fn soft_terms(cold: &PlaceCold, xs: &[f32], ys: &[f32]) -> f64 {
         for &c in cells {
             t += f64::from((coords[c as usize] - mean).abs());
         }
+    }
+    // stress: penalize distance from die center beyond max_centroid_distance
+    let (cx, cy) = (cold.die.0 / 2.0, cold.die.1 / 2.0);
+    for &(dev, max_d) in &cold.stress {
+        let dx = xs[dev as usize] - cx;
+        let dy = ys[dev as usize] - cy;
+        let d = (dx * dx + dy * dy).sqrt();
+        let ex = (d - max_d).max(0.0);
+        t += f64::from(ex * ex) * 1e-3;
     }
     t
 }
@@ -1061,6 +1076,22 @@ impl Legality<PlaceDomain> for HardGaps {
                 }
             }
         }
+        // DTI forbidden zones: gap must be < min (abutting) or > max (far apart)
+        for &(a, b, min_gap, max_gap) in &cold.dti_zones {
+            if touches(mv, a) || touches(mv, b) {
+                let g = {
+                    let (ax, ay) = mv.new_pos(a, hot);
+                    let (bx, by) = mv.new_pos(b, hot);
+                    let (ai, bi) = (a as usize, b as usize);
+                    let gx = (ax - bx).abs() - (cold.hw[ai] + cold.hw[bi]);
+                    let gy = (ay - by).abs() - (cold.hh[ai] + cold.hh[bi]);
+                    gx.max(gy)
+                };
+                if g >= min_gap && g <= max_gap {
+                    return false;
+                }
+            }
+        }
         true
     }
 }
@@ -1254,6 +1285,89 @@ pub fn run_detailed<Lg: Ledger<PlaceDomain>>(
             alpha: cfg.alpha,
             range0: cfg.range0,
             range_decay: 0.96,
+            range_min: cold.grid / cold.die.0.max(cold.die.1),
+            moves_per_step: cfg.moves_per_cell * n as u32,
+        },
+        stop: SaStop {
+            max_iters: cfg.max_iters,
+            min_iters: cfg.min_iters,
+            min_accept_rate: cfg.min_accept_rate,
+        },
+        _d: PhantomData,
+    };
+    stage.run(hot, cold, ledger, rng)
+}
+
+// ---------------------------------------------------------------------------
+// Refinement stage — low-temp SA with boosted constraint weights
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct RefinementCfg {
+    pub max_iters: u32,
+    pub min_iters: u32,
+    pub moves_per_cell: u32,
+    pub alpha: f64,
+    pub range0: f32,
+    pub min_accept_rate: f32,
+    pub constraint_boost: f64,
+}
+
+impl Default for RefinementCfg {
+    fn default() -> Self {
+        Self {
+            max_iters: 80,
+            min_iters: 10,
+            moves_per_cell: 40,
+            alpha: 0.96,
+            range0: 0.1,
+            min_accept_rate: 0.01,
+            constraint_boost: 4.0,
+        }
+    }
+}
+
+/// Refinement: same core + cost, lower temperature, boosted constraint weights.
+pub fn run_refinement<Lg: Ledger<PlaceDomain>>(
+    hot: &mut PlaceHot,
+    cold: &PlaceCold,
+    ledger: &mut Lg,
+    cfg: &RefinementCfg,
+    rng: &mut SplitMix64,
+) -> Telemetry {
+    let n = hot.x.len().max(1);
+
+    let core = SymSaCore;
+    let cost = SaCost;
+    let probe = Control { temp: 0.0, step: 0.0, range: cfg.range0, moves_per_step: 0 };
+    let mut sum = 0.0f64;
+    let mut cnt = 0u32;
+    let mut sc = ();
+    for _ in 0..64 {
+        if let Some(mv) = core.propose(hot, cold, &mut sc, &probe, rng) {
+            sum += cost.delta(hot, cold, &mv).abs();
+            cnt += 1;
+        }
+    }
+    // ponytail: start at 2x average delta — low temp, mostly downhill
+    let t0 = (sum / f64::from(cnt.max(1))).max(1.0) * 2.0;
+
+    let cost0 = cost_at(cold, &hot.x, &hot.y).max(1.0);
+    let area: f64 = cold.hw.iter().zip(&cold.hh).map(|(w, h)| 4.0 * f64::from(w * h)).sum();
+    let w0 = (cost0 / area.max(1.0)) * cfg.constraint_boost;
+
+    let stage = Stage {
+        cost: SaCost,
+        density: OverlapDensity,
+        legality: HardGaps,
+        weights: RampWeights { w0, gain: 1.04, w_max: w0 * 1e5 },
+        core: SymSaCore,
+        accept: Metropolis,
+        schedule: Geometric {
+            t0,
+            alpha: cfg.alpha,
+            range0: cfg.range0,
+            range_decay: 0.98,
             range_min: cold.grid / cold.die.0.max(cold.die.1),
             moves_per_step: cfg.moves_per_cell * n as u32,
         },

@@ -1,29 +1,48 @@
 //! Constraint digestion: raw pnr-constraints types → placement/routing-ready views.
 //!
-//! Consumers (placement, routing) currently define their own `ConstraintRecord`.
-//! This module provides a unified digest that both can consume, plus helpers to
-//! extract constraints from the annotation/hypergraph context.
+//! Single digest consumed by placement, routing, and cell-gen. Each consumer
+//! reads the fields it needs. `PlaceCold` does the domain-specific SoA transform.
 
 use pnr_constraints::{
-    CcGroup, CrosstalkExclusion, DeviceId, IsolationConstraint, MatchingTier,
-    NetClassification, ParasiticBudget, ProximityRule, StraightNet, SymmetryGroup,
-    ThermalGradientConstraint,
+    AgingConstraint, AntennaConstraint, BiasCurrentTag, CcGroup, CrosstalkExclusion,
+    CurrentFlowTag, DeviceId, DtiPair, DummyConstraint, EnvironmentalConstraint,
+    EsdConstraint, GuardRingRequirement, IsolationConstraint, LdeBound, MatchingSpec,
+    MatchingTier, NetClassification, ParasiticBudget, ProximityRule, StressConstraint,
+    StraightNet, SymmetryGroup, ThermalGradientConstraint, UnitizationConstraint,
 };
 
 /// Digested constraint set ready for backend consumption.
-/// Same shape as placement's `ConstraintRecord` today — will evolve to add
-/// routing-specific views (shielding, length-matching) and feedback hints.
 #[derive(Clone, Default)]
 pub struct DigestedConstraints {
+    // -- placement-level --
     pub symmetry: Vec<SymmetryGroup>,
     pub cc: Vec<CcGroup>,
     pub proximity: Vec<ProximityRule>,
     pub isolation: Vec<IsolationConstraint>,
     pub thermal: Vec<ThermalGradientConstraint>,
+    pub matching_spec: Vec<MatchingSpec>,
+    pub dti: Vec<DtiPair>,
+    pub stress: Vec<StressConstraint>,
+
+    // -- routing-level --
     pub net_class: Vec<NetClassification>,
     pub crosstalk: Vec<CrosstalkExclusion>,
     pub straight: Vec<StraightNet>,
     pub parasitic: Vec<ParasiticBudget>,
+    pub antenna: Vec<AntennaConstraint>,
+    pub current_flow: Vec<CurrentFlowTag>,
+    pub esd: Vec<EsdConstraint>,
+
+    // -- cell-level --
+    pub dummy: Vec<DummyConstraint>,
+    pub guard_ring: Vec<GuardRingRequirement>,
+    pub unitization: Vec<UnitizationConstraint>,
+    pub lde: Vec<LdeBound>,
+    pub aging: Vec<AgingConstraint>,
+    pub environment: Vec<EnvironmentalConstraint>,
+
+    // -- metadata --
+    pub bias_current: Vec<BiasCurrentTag>,
 }
 
 impl DigestedConstraints {
@@ -68,5 +87,60 @@ impl DigestedConstraints {
             iso.device_a = r(iso.device_a);
             iso.device_b = r(iso.device_b);
         }
+        for d in &mut self.dti {
+            d.device_a = r(d.device_a);
+            d.device_b = r(d.device_b);
+        }
+        for s in &mut self.stress {
+            s.device_id = r(s.device_id);
+        }
+        for d in &mut self.dummy {
+            d.device_id = r(d.device_id);
+        }
+        for g in &mut self.guard_ring {
+            g.device_id = r(g.device_id);
+        }
+        for u in &mut self.unitization {
+            u.devices = u.devices.iter().map(|&d| r(d)).collect();
+        }
+        for l in &mut self.lde {
+            l.pair = (r(l.pair.0), r(l.pair.1));
+        }
+        for a in &mut self.aging {
+            a.device_id = r(a.device_id);
+        }
+        for e in &mut self.environment {
+            e.scope = e.scope.iter().map(|&d| r(d)).collect();
+        }
+        for b in &mut self.bias_current {
+            b.device_id = r(b.device_id);
+        }
+        for c in &mut self.current_flow {
+            c.device_id = r(c.device_id);
+        }
     }
+
+    /// Read-only view of cell-level constraints for cell generators.
+    pub fn cell_constraints(&self) -> CellConstraintView<'_> {
+        CellConstraintView {
+            dummy: &self.dummy,
+            guard_ring: &self.guard_ring,
+            unitization: &self.unitization,
+            lde: &self.lde,
+            aging: &self.aging,
+            environment: &self.environment,
+            stress: &self.stress,
+        }
+    }
+}
+
+/// Read-only view into cell-level constraints, passed to cell generators.
+pub struct CellConstraintView<'a> {
+    pub dummy: &'a [DummyConstraint],
+    pub guard_ring: &'a [GuardRingRequirement],
+    pub unitization: &'a [UnitizationConstraint],
+    pub lde: &'a [LdeBound],
+    pub aging: &'a [AgingConstraint],
+    pub environment: &'a [EnvironmentalConstraint],
+    pub stress: &'a [StressConstraint],
 }
