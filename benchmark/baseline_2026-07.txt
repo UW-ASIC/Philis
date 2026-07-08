@@ -1,0 +1,2963 @@
+   Compiling pnr-constraints v0.1.0 (/home/omare/Documents/Projects/PNR_UPGRADED/backend/constraints)
+warning: unused import: `Deck`
+ --> verify/src/lvs/derived.rs:9:21
+  |
+9 | use crate::params::{Deck, LayerTable};
+  |                     ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `reduce_netlist`
+  --> verify/src/lvs/hierarchical.rs:13:44
+   |
+13 | use super::extract::{extract_netlist_opts, reduce_netlist};
+   |                                            ^^^^^^^^^^^^^^
+
+warning: struct `RawDrc` is never constructed
+   --> verify/src/params.rs:504:16
+    |
+504 |         struct RawDrc {
+    |                ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `kind_name` is never used
+  --> verify/src/lvs/compare.rs:23:4
+   |
+23 | fn kind_name(tag: u32) -> &'static str {
+   |    ^^^^^^^^^
+
+warning: function `flavor_name` is never used
+  --> verify/src/lvs/compare.rs:26:4
+   |
+26 | fn flavor_name(tag: u32) -> &'static str {
+   |    ^^^^^^^^^^^
+
+warning: function `two_term_kind_label` is never used
+  --> verify/src/lvs/compare.rs:38:4
+   |
+38 | fn two_term_kind_label(tag: u32) -> &'static str {
+   |    ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ROLE_BODY` is never used
+  --> verify/src/lvs/compare.rs:65:7
+   |
+65 | const ROLE_BODY: u8 = 3;
+   |       ^^^^^^^^^
+
+warning: `gdsverify` (lib) generated 7 warnings (run `cargo fix --lib -p gdsverify` to apply 2 suggestions)
+warning: unused variable: `aspect`
+   --> tools/visualizer/src/lib.rs:809:61
+    |
+809 | pub fn build_legend(polys: &[Poly], layer_names: &LayerMap, aspect: f32) -> Vec<Vertex> {
+    |                                                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_aspect`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `overlay_line_pipeline` is never read
+    --> tools/visualizer/src/lib.rs:1004:5
+     |
+ 996 | struct Gpu {
+     |        --- field in this struct
+...
+1004 |     overlay_line_pipeline: wgpu::RenderPipeline,
+     |     ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `pnr-visualizer` (lib) generated 2 warnings (run `cargo fix --lib -p pnr-visualizer` to apply 1 suggestion)
+warning: unused import: `matching_pair::*`
+  --> backend/constraints/src/placement_level/mod.rs:16:9
+   |
+16 | pub use matching_pair::*;
+   |         ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling pnr-engine v0.1.0 (/home/omare/Documents/Projects/PNR_UPGRADED/backend/engine)
+   Compiling pnr-annotator v0.1.0 (/home/omare/Documents/Projects/PNR_UPGRADED/frontend/annotator)
+warning: function `same_samel` is never used
+  --> frontend/annotator/src/catalog.rs:88:10
+   |
+88 | const fn same_samel(r: u8) -> Slot {
+   |          ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `pnr-constraints` (lib) generated 1 warning (run `cargo fix --lib -p pnr-constraints` to apply 1 suggestion)
+   Compiling pnr-placement v0.1.0 (/home/omare/Documents/Projects/PNR_UPGRADED/backend/placement)
+warning: `pnr-annotator` (lib) generated 1 warning
+   Compiling pnr-routing v0.1.0 (/home/omare/Documents/Projects/PNR_UPGRADED/backend/routing)
+   Compiling pnr-core v0.1.0 (/home/omare/Documents/Projects/PNR_UPGRADED/frontend/core)
+warning: unused variable: `set`
+   --> frontend/core/src/orchestrator.rs:292:9
+    |
+292 |     let set: HashSet<u32> = cell_indices.iter().copied().collect();
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_set`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `gen`
+   --> frontend/core/src/orchestrator.rs:425:18
+    |
+425 |             let (ref gen, ref sizes, ref variant_sizes, ref lmasks) = *cells_out;
+    |                  ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_gen`
+
+warning: `pnr-core` (lib) generated 2 warnings (run `cargo fix --lib -p pnr-core` to apply 2 suggestions)
+   Compiling pnr-benchmark v0.1.0 (/home/omare/Documents/Projects/PNR_UPGRADED/benchmark)
+warning: fields `description` and `ref_gds_path` are never read
+  --> benchmark/src/fixtures.rs:45:9
+   |
+41 | pub struct BenchmarkCircuit {
+   |            ---------------- fields in this struct
+...
+45 |     pub description: String,
+   |         ^^^^^^^^^^^
+46 |     pub ref_gds_path: Option<PathBuf>,
+   |         ^^^^^^^^^^^^
+   |
+   = note: `BenchmarkCircuit` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `name` is never read
+   --> benchmark/src/fixtures.rs:468:5
+    |
+467 | struct PdkPreprocess {
+    |        ------------- field in this struct
+468 |     name: String,
+    |     ^^^^
+
+warning: `pnr-benchmark` (bin "bench") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 6.13s
+     Running `target/release/bench all`
+Discovered 99 circuits
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (6 net weights, 5 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (6 net weights, 5 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (6 net weights, 5 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (6 net weights, 5 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (6 net weights, 5 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (6 net weights, 5 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (6 net weights, 5 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (6 net weights, 5 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (6 net weights, 5 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Local] ota                                 309 ms  5 cells, 9 nets | WL 279070 nm, unrouted 0, overuse 0 | DRC 0 (+1 density waived) | LVS MATCH | C 18.0 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (28 net weights, 32 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (28 net weights, 32 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (28 net weights, 32 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (28 net weights, 32 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (28 net weights, 32 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (28 net weights, 32 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (28 net weights, 32 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (28 net weights, 32 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (28 net weights, 32 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] VCO_type2_65                      22080 ms  32 cells, 28 nets | WL 623500 nm, unrouted 0, overuse 214 | DRC 26 (+1 density waived) | LVS MISMATCH | C 173.6 fF
+  [      Align] adder                                 0 ms  parse failed: line 19: device `R0`: model `rb` not found in PDK device table
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (2 net weights, 3 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (2 net weights, 3 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (2 net weights, 3 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (2 net weights, 3 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (2 net weights, 3 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=3.87, clean=true, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (2 net weights, 3 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (2 net weights, 3 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=4.72, clean=true, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (2 net weights, 3 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (2 net weights, 3 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] block_spacing_bug                  1067 ms  3 cells, 7 nets | WL 132010 nm, unrouted 0, overuse 0 | DRC 43 (+1 density waived) | LVS MISMATCH | C 69.1 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=4.05, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (5 net weights, 4 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=2.23, clean=true, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (5 net weights, 4 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=2.08, clean=true, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (5 net weights, 4 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=2.08, clean=true, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (5 net weights, 4 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=2.53, clean=true, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (5 net weights, 4 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=2.10, clean=true, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (5 net weights, 4 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=1.87, clean=true, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (5 net weights, 4 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=3.88, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (5 net weights, 4 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=3.85, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (5 net weights, 4 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] buffer                              246 ms  4 cells, 5 nets | WL 35690 nm, unrouted 0, overuse 10 | DRC 0 (+1 density waived) | LVS MISMATCH | C 10.1 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (18 net weights, 20 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (18 net weights, 20 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (18 net weights, 20 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (18 net weights, 20 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (18 net weights, 20 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (18 net weights, 20 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (18 net weights, 20 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (18 net weights, 20 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (18 net weights, 20 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] cascode_current_mirror_ota         9185 ms  20 cells, 20 nets | WL 363780 nm, unrouted 0, overuse 131 | DRC 8 (+1 density waived) | LVS MISMATCH | C 95.2 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=3.19, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (3 net weights, 2 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=3.19, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (3 net weights, 2 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=3.19, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (3 net weights, 2 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=3.19, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (3 net weights, 2 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=3.19, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (3 net weights, 2 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=3.19, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (3 net weights, 2 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=3.19, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (3 net weights, 2 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=3.19, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (3 net weights, 2 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=3.19, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (3 net weights, 2 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] common_source                        58 ms  2 cells, 4 nets | WL 16340 nm, unrouted 1, overuse 0 | DRC 0 (+1 density waived) | LVS MISMATCH | C 11.2 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (14 net weights, 22 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (14 net weights, 22 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (14 net weights, 22 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (14 net weights, 22 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (14 net weights, 22 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (14 net weights, 22 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (14 net weights, 22 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (14 net weights, 22 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (14 net weights, 22 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] comparator1                       11332 ms  22 cells, 18 nets | WL 368940 nm, unrouted 0, overuse 45 | DRC 10 (+1 density waived) | LVS MISMATCH | C 98.9 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=4.19, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (10 net weights, 12 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (10 net weights, 12 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (10 net weights, 12 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (10 net weights, 12 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (10 net weights, 12 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (10 net weights, 12 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (10 net weights, 12 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (10 net weights, 12 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (10 net weights, 12 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] current_mirror_ota                 2361 ms  12 cells, 12 nets | WL 170280 nm, unrouted 0, overuse 119 | DRC 16 (+1 density waived) | LVS MISMATCH | C 51.3 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=3.66, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (10 net weights, 14 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (10 net weights, 14 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (10 net weights, 14 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=3.02, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (10 net weights, 14 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (10 net weights, 14 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=3.81, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (10 net weights, 14 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=3.44, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (10 net weights, 14 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=2.88, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (10 net weights, 14 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=4.79, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (10 net weights, 14 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] double_tail_sense_amplifier        3481 ms  14 cells, 12 nets | WL 245960 nm, unrouted 0, overuse 7 | DRC 10 (+1 density waived) | LVS MISMATCH | C 54.2 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=4.13, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (5 net weights, 5 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (5 net weights, 5 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (5 net weights, 5 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (5 net weights, 5 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (5 net weights, 5 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=3.53, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (5 net weights, 5 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=3.51, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (5 net weights, 5 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (5 net weights, 5 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=3.54, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (5 net weights, 5 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] five_transistor_ota                6741 ms  5 cells, 8 nets | WL 180170 nm, unrouted 1, overuse 12 | DRC 4 (+1 density waived) | LVS MISMATCH | C 101.0 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (5 net weights, 5 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=3.18, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (5 net weights, 5 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (5 net weights, 5 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=4.71, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (5 net weights, 5 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=4.89, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (5 net weights, 5 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=4.54, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (5 net weights, 5 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=4.27, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (5 net weights, 5 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (5 net weights, 5 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=3.54, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (5 net weights, 5 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] five_transistor_ota_Bulk           7937 ms  5 cells, 8 nets | WL 62350 nm, unrouted 3, overuse 0 | DRC 2 (+1 density waived) | LVS MISMATCH | C 60.2 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=2.70, clean=true, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (6 net weights, 6 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=4.16, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (6 net weights, 6 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=3.30, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (6 net weights, 6 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=2.26, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (6 net weights, 6 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=2.11, clean=true, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (6 net weights, 6 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (6 net weights, 6 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=2.87, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (6 net weights, 6 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=2.11, clean=true, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (6 net weights, 6 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=2.13, clean=true, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (6 net weights, 6 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] five_transistor_ota_high_frequency    461 ms  6 cells, 8 nets | WL 40420 nm, unrouted 0, overuse 0 | DRC 0 (+1 density waived) | LVS MISMATCH | C 11.0 fF
+  [      Align] fixed_height                          0 ms  no PDK devices resolved
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=3.69, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (10 net weights, 15 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (10 net weights, 15 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=1.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (10 net weights, 15 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (10 net weights, 15 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (10 net weights, 15 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=4.94, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (10 net weights, 15 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (10 net weights, 15 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (10 net weights, 15 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (10 net weights, 15 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] high_speed_comparator             18218 ms  15 cells, 12 nets | WL 450640 nm, unrouted 3, overuse 64 | DRC 8 (+1 density waived) | LVS MISMATCH | C 174.9 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=3.69, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (10 net weights, 15 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (10 net weights, 15 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=1.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (10 net weights, 15 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (10 net weights, 15 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (10 net weights, 15 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=4.94, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (10 net weights, 15 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (10 net weights, 15 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (10 net weights, 15 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (10 net weights, 15 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] high_speed_comparator_charge_flow  18227 ms  15 cells, 12 nets | WL 450640 nm, unrouted 3, overuse 64 | DRC 8 (+1 density waived) | LVS MISMATCH | C 174.9 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (7 net weights, 7 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (7 net weights, 7 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=1.91, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (7 net weights, 7 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=4.09, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (7 net weights, 7 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (7 net weights, 7 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (7 net weights, 7 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=4.79, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (7 net weights, 7 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=4.18, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (7 net weights, 7 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=4.54, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (7 net weights, 7 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] inverter_current_starved           3244 ms  7 cells, 8 nets | WL 261440 nm, unrouted 1, overuse 17 | DRC 0 (+1 density waived) | LVS MISMATCH | C 105.3 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=1.00, clean=true, 0 hints
+[engine] iter 0/10 — converged (max_weight 1.00 < threshold 1.20)
+  [      Align] inverter_v1                           6 ms  2 cells, 4 nets | WL 4300 nm, unrouted 0, overuse 0 | DRC 0 (+1 density waived) | LVS MATCH | C 2.3 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=1.00, clean=true, 0 hints
+[engine] iter 0/10 — converged (max_weight 1.00 < threshold 1.20)
+  [      Align] inverter_v2                           5 ms  2 cells, 4 nets | WL 4300 nm, unrouted 0, overuse 0 | DRC 0 (+1 density waived) | LVS MATCH | C 2.3 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=2.32, clean=true, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (3 net weights, 3 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=2.13, clean=true, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (3 net weights, 3 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=2.34, clean=true, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (3 net weights, 3 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=2.21, clean=true, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (3 net weights, 3 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=1.20, clean=true, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (3 net weights, 3 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=1.99, clean=true, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (3 net weights, 3 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=1.98, clean=true, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (3 net weights, 3 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=2.48, clean=true, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (3 net weights, 3 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=1.83, clean=true, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (3 net weights, 3 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] inverter_v3                         101 ms  3 cells, 4 nets | WL 9890 nm, unrouted 0, overuse 0 | DRC 0 (+1 density waived) | LVS MATCH | C 4.4 fF
+  [      Align] linear_equalizer                      0 ms  parse failed: line 15: device `R1` (resistor): missing W/L and no PDK defaults
+  [      Align] mimo_bulk                             3 ms  parse failed: line 51: device `xi0/xi11/xi1/r18_1__dmy0`: model `100` not found in PDK device table
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=2.13, clean=true, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (1 net weights, 1 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=2.13, clean=true, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (1 net weights, 1 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=2.13, clean=true, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (1 net weights, 1 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=2.13, clean=true, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (1 net weights, 1 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=2.13, clean=true, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (1 net weights, 1 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=2.13, clean=true, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (1 net weights, 1 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=2.13, clean=true, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (1 net weights, 1 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=2.13, clean=true, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (1 net weights, 1 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=2.13, clean=true, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (1 net weights, 1 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] powertrain                           25 ms  1 cells, 3 nets | WL 29670 nm, unrouted 0, overuse 0 | DRC 18 (+1 density waived) | LVS MISMATCH | C 19.7 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=1.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (7 net weights, 63 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=1.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (7 net weights, 63 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=1.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (7 net weights, 63 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=1.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (7 net weights, 63 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=1.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (7 net weights, 63 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=1.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (7 net weights, 63 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=1.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (7 net weights, 63 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=1.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (7 net weights, 63 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=1.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (7 net weights, 63 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] powertrain_binary                 13338 ms  63 cells, 8 nets | WL 0 nm, unrouted 7, overuse 0 | DRC 0 (+1 density waived) | LVS MISMATCH | C 204.3 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (2 net weights, 16 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (2 net weights, 16 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (2 net weights, 16 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (2 net weights, 16 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (2 net weights, 16 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (2 net weights, 16 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (2 net weights, 16 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (2 net weights, 16 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (2 net weights, 16 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] powertrain_thermo                  5022 ms  16 cells, 18 nets | WL 243380 nm, unrouted 0, overuse 0 | DRC 37 (+1 density waived) | LVS MISMATCH | C 152.5 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=3.77, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (7 net weights, 10 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=4.21, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (7 net weights, 10 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=3.50, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (7 net weights, 10 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (7 net weights, 10 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=4.20, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (7 net weights, 10 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=3.37, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (7 net weights, 10 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (7 net weights, 10 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=3.87, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (7 net weights, 10 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (7 net weights, 10 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] ring_oscillator                    2029 ms  10 cells, 8 nets | WL 193070 nm, unrouted 0, overuse 75 | DRC 10 (+1 density waived) | LVS MISMATCH | C 53.4 fF
+  [      Align] sc_dc_dc_converter                    0 ms  parse failed: line 9: device `c1`: model `1e-12` not found in PDK device table
+  [      Align] single_to_differential_converter      0 ms  parse failed: line 14: device `R2` (resistor): missing W/L and no PDK defaults
+  [      Align] switched_capacitor_filter             0 ms  parse failed: line 45: device `c9`: model `60e-15` not found in PDK device table
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (13 net weights, 10 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=3.79, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (13 net weights, 10 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (13 net weights, 10 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (13 net weights, 10 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (13 net weights, 10 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (13 net weights, 10 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=3.76, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (13 net weights, 10 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=3.15, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (13 net weights, 10 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (13 net weights, 10 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] telescopic_ota                     1336 ms  10 cells, 15 nets | WL 173290 nm, unrouted 0, overuse 46 | DRC 0 (+1 density waived) | LVS MISMATCH | C 44.8 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=3.90, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (13 net weights, 10 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (13 net weights, 10 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (13 net weights, 10 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (13 net weights, 10 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (13 net weights, 10 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (13 net weights, 10 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (13 net weights, 10 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=3.52, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (13 net weights, 10 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (13 net weights, 10 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] telescopic_ota_guard_ring          1386 ms  10 cells, 16 nets | WL 95030 nm, unrouted 0, overuse 7 | DRC 4 (+1 density waived) | LVS MISMATCH | C 26.1 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (12 net weights, 10 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (12 net weights, 10 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=3.96, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (12 net weights, 10 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (12 net weights, 10 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (12 net weights, 10 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=4.93, clean=true, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (12 net weights, 10 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (12 net weights, 10 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=4.16, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (12 net weights, 10 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=3.98, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (12 net weights, 10 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] telescopic_ota_multi_connection    1011 ms  10 cells, 14 nets | WL 98470 nm, unrouted 0, overuse 7 | DRC 0 (+1 density waived) | LVS MISMATCH | C 25.2 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (36 net weights, 36 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (36 net weights, 36 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (36 net weights, 36 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (36 net weights, 36 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (36 net weights, 36 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (36 net weights, 36 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (36 net weights, 36 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (36 net weights, 36 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (36 net weights, 36 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] telescopic_ota_with_bias          22729 ms  36 cells, 36 nets | WL 688860 nm, unrouted 0, overuse 270 | DRC 22 (+1 density waived) | LVS MISMATCH | C 193.5 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (143 net weights, 156 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (143 net weights, 156 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (143 net weights, 156 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (143 net weights, 156 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (143 net weights, 156 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (143 net weights, 156 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (143 net weights, 156 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (143 net weights, 156 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (143 net weights, 156 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] test_vga                         620118 ms  156 cells, 143 nets | WL 4352460 nm, unrouted 27, overuse 644 | DRC 27 (+1 density waived) | LVS MISMATCH | C 1388.0 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (49 net weights, 50 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (49 net weights, 50 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (49 net weights, 50 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (49 net weights, 50 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (49 net weights, 50 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (49 net weights, 50 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (49 net weights, 50 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (49 net weights, 50 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (49 net weights, 50 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] unity_gain_buffers               110002 ms  50 cells, 49 nets | WL 886660 nm, unrouted 23, overuse 100 | DRC 14 (+1 density waived) | LVS MISMATCH | C 391.8 fF
+  [      Align] variable_gain_amplifier               0 ms  parse failed: line 21: device `R5`: model `rl` not found in PDK device table
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (115 net weights, 144 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (115 net weights, 144 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (115 net weights, 144 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (115 net weights, 144 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (115 net weights, 144 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (115 net weights, 144 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (115 net weights, 144 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (115 net weights, 144 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (115 net weights, 144 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] vco_dtype_12_hierarchical        397925 ms  144 cells, 115 nets | WL 4286240 nm, unrouted 0, overuse 1066 | DRC 46 (+1 density waived) | LVS MISMATCH | C 1175.8 fF
+  [      Align] vco_dtype_12_hierarchical_res         1 ms  parse failed: line 62: device `R0<1>`: model `5000` not found in PDK device table
+  [      Align] vco_dtype_12_hierarchical_res_constrained      0 ms  parse failed: line 47: device `xI2/R0<1>`: model `5000` not found in PDK device table
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=2.14, clean=true, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (2 net weights, 4 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=2.75, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (2 net weights, 4 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=2.23, clean=true, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (2 net weights, 4 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=2.45, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (2 net weights, 4 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=2.23, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (2 net weights, 4 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=2.51, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (2 net weights, 4 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=2.55, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (2 net weights, 4 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=2.09, clean=true, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (2 net weights, 4 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=2.43, clean=true, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (2 net weights, 4 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [      Align] vga_stage                           252 ms  4 cells, 9 nets | WL 13330 nm, unrouted 0, overuse 0 | DRC 4 (+1 density waived) | LVS MATCH | C 3.5 fF
+  [    Magical] ADC_CORE                              3 ms  parse failed: line 268: device `e0`: model `1` not found in PDK device table
+  [    Magical] CTDSM_CORE_NEW                        1 ms  parse failed: line 11: device `I160/C21` (cap): missing W/L and no PDK defaults
+  [    Magical] CTDSM_CORE_NEW_test                   0 ms  parse failed: line 1: instance `simulator`: no positional tokens (expected nodes + model)
+  [    Magical] CTDSM_TOP                             1 ms  parse failed: line 177: device `R47_1__dmy0` (res): missing W/L and no PDK defaults
+  [    Magical] CTDSM_TOP_test                        0 ms  parse failed: line 1: instance `simulator`: no positional tokens (expected nodes + model)
+  [    Magical] CTDTDSM_V3                            4 ms  parse failed: line 64: device `xi58/xi172/xi159/xc0` (cap): missing W/L and no PDK defaults
+  [    Magical] COMPARATOR_2LEVEL_BIDIRECTIONAL_MAC_SKEW      0 ms  parse failed: line 25: device `I3/C2` (cap): missing W/L and no PDK defaults
+  [    Magical] COMPARATOR_2LEVEL_BIDIRECTIONAL_MAC_SKEW_test      0 ms  parse failed: line 1: instance `simulator`: no positional tokens (expected nodes + model)
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (10 net weights, 17 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (10 net weights, 17 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (10 net weights, 17 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=4.29, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (10 net weights, 17 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=4.64, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (10 net weights, 17 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=4.94, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (10 net weights, 17 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=4.02, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (10 net weights, 17 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=4.24, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (10 net weights, 17 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=4.54, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (10 net weights, 17 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] COMPARATOR_PRE_AMP                12800 ms  17 cells, 12 nets | WL 380550 nm, unrouted 0, overuse 16 | DRC 0 (+1 density waived) | LVS MISMATCH | C 66.5 fF
+  [    Magical] COMPARATOR_PRE_AMP_test               0 ms  parse failed: line 1: instance `simulator`: no positional tokens (expected nodes + model)
+  [    Magical] COMP_GM_STAGE_0415                    0 ms  no PDK devices resolved
+  [    Magical] COMP_GM_STAGE_0415_test               0 ms  parse failed: line 1: instance `simulator`: no positional tokens (expected nodes + model)
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (15 net weights, 28 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (15 net weights, 28 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (15 net weights, 28 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (15 net weights, 28 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (15 net weights, 28 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (15 net weights, 28 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (15 net weights, 28 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (15 net weights, 28 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (15 net weights, 28 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] Comparator_1to7_0p7_lvt           51824 ms  28 cells, 15 nets | WL 953740 nm, unrouted 1, overuse 251 | DRC 2 (+1 density waived) | LVS MISMATCH | C 211.5 fF
+  [    Magical] Comparator_1to7_0p7_lvt_test          0 ms  parse failed: line 1: instance `simulator`: no positional tokens (expected nodes + model)
+  [    Magical] Gm1_v5_Practice                       0 ms  parse failed: line 12: device `xc21` (cap): missing W/L and no PDK defaults
+  [    Magical] OTA_4                                 0 ms  parse failed: line 3: device `C6` (cap): missing W/L and no PDK defaults
+  [    Magical] OTA_4_test                            0 ms  parse failed: line 1: instance `simulator`: no positional tokens (expected nodes + model)
+  [    Magical] OTA_FF_2s_v3e                         0 ms  parse failed: line 37: device `xc4` (cap): missing W/L and no PDK defaults
+  [    Magical] OTA_XT_MAGICAL                        0 ms  parse failed: line 3: device `IPRB0`: model `iprobe` not found in PDK device table
+  [    Magical] OTA_XT_MAGICAL_test                   0 ms  parse failed: line 1: instance `simulator`: no positional tokens (expected nodes + model)
+  [    Magical] Telescopic_Three_stage                0 ms  parse failed: line 32: device `C8` (cap): missing W/L and no PDK defaults
+  [    Magical] Telescopic_Three_stage_test           0 ms  parse failed: line 1: instance `simulator`: no positional tokens (expected nodes + model)
+  [    Magical] BUFFER_VCM                            0 ms  parse failed: line 22: device `c1`: model `5e-12` not found in PDK device table
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (14 net weights, 20 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (14 net weights, 20 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (14 net weights, 20 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (14 net weights, 20 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (14 net weights, 20 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (14 net weights, 20 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (14 net weights, 20 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (14 net weights, 20 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (14 net weights, 20 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VCM1                       10307 ms  20 cells, 15 nets | WL 418390 nm, unrouted 0, overuse 158 | DRC 12 (+1 density waived) | LVS MISMATCH | C 117.8 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (14 net weights, 21 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=4.69, clean=true, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (14 net weights, 21 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (14 net weights, 21 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=4.96, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (14 net weights, 21 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=4.23, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (14 net weights, 21 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (14 net weights, 21 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (14 net weights, 21 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (14 net weights, 21 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (14 net weights, 21 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VCM_FINAL                  76350 ms  21 cells, 16 nets | WL 1114990 nm, unrouted 0, overuse 136 | DRC 2 (+1 density waived) | LVS MISMATCH | C 127.8 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (14 net weights, 21 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (14 net weights, 21 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (14 net weights, 21 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (14 net weights, 21 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (14 net weights, 21 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (14 net weights, 21 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (14 net weights, 21 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (14 net weights, 21 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (14 net weights, 21 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VCM_FINAL1                 12586 ms  21 cells, 15 nets | WL 414950 nm, unrouted 0, overuse 111 | DRC 12 (+1 density waived) | LVS MISMATCH | C 105.1 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (14 net weights, 21 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (14 net weights, 21 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (14 net weights, 21 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (14 net weights, 21 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (14 net weights, 21 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (14 net weights, 21 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (14 net weights, 21 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (14 net weights, 21 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (14 net weights, 21 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VCM_FINAL2                 12586 ms  21 cells, 15 nets | WL 414950 nm, unrouted 0, overuse 111 | DRC 12 (+1 density waived) | LVS MISMATCH | C 105.1 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (13 net weights, 30 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (13 net weights, 30 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (13 net weights, 30 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (13 net weights, 30 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (13 net weights, 30 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (13 net weights, 30 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (13 net weights, 30 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (13 net weights, 30 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (13 net weights, 30 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VCM_FINAL3                 26890 ms  30 cells, 13 nets | WL 542230 nm, unrouted 0, overuse 132 | DRC 10 (+1 density waived) | LVS MISMATCH | C 125.6 fF
+  [    Magical] BUFFER_VCM_FINAL3_test                0 ms  parse failed: line 1: instance `simulator`: no positional tokens (expected nodes + model)
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (7 net weights, 19 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (7 net weights, 19 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=4.63, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (7 net weights, 19 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (7 net weights, 19 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (7 net weights, 19 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=4.82, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (7 net weights, 19 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=4.29, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (7 net weights, 19 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (7 net weights, 19 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (7 net weights, 19 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VCM_FINAL4                  8297 ms  19 cells, 8 nets | WL 231770 nm, unrouted 0, overuse 90 | DRC 12 (+1 density waived) | LVS MISMATCH | C 62.3 fF
+  [    Magical] BUFFER_VCM_FINAL_test                 0 ms  parse failed: line 6: instance `simulator`: no positional tokens (expected nodes + model)
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (18 net weights, 57 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (18 net weights, 57 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (18 net weights, 57 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (18 net weights, 57 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (18 net weights, 57 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (18 net weights, 57 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (18 net weights, 57 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (18 net weights, 57 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (18 net weights, 57 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VREFP_ud                  107427 ms  57 cells, 19 nets | WL 1062530 nm, unrouted 0, overuse 58 | DRC 22 (+1 density waived) | LVS MISMATCH | C 231.7 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (16 net weights, 39 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (16 net weights, 39 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (16 net weights, 39 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (16 net weights, 39 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (16 net weights, 39 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (16 net weights, 39 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (16 net weights, 39 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (16 net weights, 39 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (16 net weights, 39 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] Reference_buffer_core            142286 ms  39 cells, 19 nets | WL 1492960 nm, unrouted 0, overuse 140 | DRC 0 (+1 density waived) | LVS MISMATCH | C 211.1 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (7 net weights, 9 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=4.92, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (7 net weights, 9 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (7 net weights, 9 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (7 net weights, 9 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (7 net weights, 9 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=4.51, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (7 net weights, 9 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (7 net weights, 9 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (7 net weights, 9 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=4.07, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (7 net weights, 9 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] VCM4                               2019 ms  9 cells, 8 nets | WL 166840 nm, unrouted 0, overuse 90 | DRC 0 (+1 density waived) | LVS MISMATCH | C 42.0 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (12 net weights, 16 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (12 net weights, 16 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (12 net weights, 16 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=4.87, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (12 net weights, 16 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (12 net weights, 16 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=4.58, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (12 net weights, 16 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (12 net weights, 16 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (12 net weights, 16 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (12 net weights, 16 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] VCM5                               6231 ms  16 cells, 12 nets | WL 226180 nm, unrouted 0, overuse 34 | DRC 4 (+1 density waived) | LVS MISMATCH | C 56.5 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (16 net weights, 55 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (16 net weights, 55 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (16 net weights, 55 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (16 net weights, 55 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (16 net weights, 55 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (16 net weights, 55 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (16 net weights, 55 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (16 net weights, 55 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (16 net weights, 55 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VREFP                      71872 ms  55 cells, 16 nets | WL 1044470 nm, unrouted 0, overuse 215 | DRC 18 (+1 density waived) | LVS MISMATCH | C 278.3 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (48 net weights, 64 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (48 net weights, 64 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (48 net weights, 64 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (48 net weights, 64 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (48 net weights, 64 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (48 net weights, 64 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (48 net weights, 64 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (48 net weights, 64 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (48 net weights, 64 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VREFP1                    104114 ms  64 cells, 48 nets | WL 1710540 nm, unrouted 0, overuse 550 | DRC 28 (+1 density waived) | LVS MISMATCH | C 481.9 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (48 net weights, 64 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (48 net weights, 64 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (48 net weights, 64 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (48 net weights, 64 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (48 net weights, 64 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (48 net weights, 64 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (48 net weights, 64 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (48 net weights, 64 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (48 net weights, 64 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VREFP2                    104263 ms  64 cells, 48 nets | WL 1710540 nm, unrouted 0, overuse 550 | DRC 28 (+1 density waived) | LVS MISMATCH | C 481.9 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (48 net weights, 64 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (48 net weights, 64 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (48 net weights, 64 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (48 net weights, 64 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (48 net weights, 64 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (48 net weights, 64 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (48 net weights, 64 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (48 net weights, 64 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (48 net weights, 64 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VREFP_FINAL2              110362 ms  64 cells, 48 nets | WL 1572940 nm, unrouted 0, overuse 443 | DRC 14 (+1 density waived) | LVS MISMATCH | C 421.4 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (10 net weights, 14 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=4.76, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (10 net weights, 14 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (10 net weights, 14 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (10 net weights, 14 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=3.81, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (10 net weights, 14 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (10 net weights, 14 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (10 net weights, 14 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=4.73, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (10 net weights, 14 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (10 net weights, 14 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VREFP_ZHU                   4778 ms  14 cells, 11 nets | WL 191350 nm, unrouted 0, overuse 31 | DRC 10 (+1 density waived) | LVS MISMATCH | C 44.1 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (18 net weights, 57 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (18 net weights, 57 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (18 net weights, 57 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (18 net weights, 57 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (18 net weights, 57 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (18 net weights, 57 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (18 net weights, 57 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (18 net weights, 57 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (18 net weights, 57 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] BUFFER_VREFP_ud                  107268 ms  57 cells, 19 nets | WL 1062530 nm, unrouted 0, overuse 58 | DRC 22 (+1 density waived) | LVS MISMATCH | C 231.7 fF
+  [    Magical] BUFFER_VREFP_ud_test                  0 ms  parse failed: line 6: instance `simulator`: no positional tokens (expected nodes + model)
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (16 net weights, 39 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (16 net weights, 39 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (16 net weights, 39 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (16 net weights, 39 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (16 net weights, 39 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (16 net weights, 39 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (16 net weights, 39 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (16 net weights, 39 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (16 net weights, 39 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] Reference_buffer_core            142245 ms  39 cells, 19 nets | WL 1492960 nm, unrouted 0, overuse 140 | DRC 0 (+1 density waived) | LVS MISMATCH | C 211.1 fF
+  [    Magical] Reference_buffer_core_test            0 ms  parse failed: line 1: instance `simulator`: no positional tokens (expected nodes + model)
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (30 net weights, 84 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (30 net weights, 84 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (30 net weights, 84 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (30 net weights, 84 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (30 net weights, 84 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (30 net weights, 84 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (30 net weights, 84 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (30 net weights, 84 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (30 net weights, 84 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [    Magical] Reference_buffer_core_v2         152188 ms  84 cells, 30 nets | WL 1530370 nm, unrouted 0, overuse 387 | DRC 76 (+1 density waived) | LVS MISMATCH | C 467.9 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (6 net weights, 7 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=2.15, clean=true, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (6 net weights, 7 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=3.10, clean=true, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (6 net weights, 7 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=4.34, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (6 net weights, 7 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (6 net weights, 7 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=4.83, clean=true, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (6 net weights, 7 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (6 net weights, 7 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=3.88, clean=true, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (6 net weights, 7 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=2.81, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (6 net weights, 7 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [TinyTapeout] TT08                               1428 ms  7 cells, 8 nets | WL 114380 nm, unrouted 0, overuse 12 | DRC 0 (+1 density waived) | LVS MISMATCH | C 69.8 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=4.30, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (6 net weights, 6 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=2.96, clean=true, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (6 net weights, 6 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (6 net weights, 6 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (6 net weights, 6 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=2.29, clean=true, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (6 net weights, 6 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (6 net weights, 6 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=3.65, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (6 net weights, 6 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (6 net weights, 6 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (6 net weights, 6 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [TinyTapeout] tt06-sar                            444 ms  6 cells, 13 nets | WL 41710 nm, unrouted 0, overuse 0 | DRC 0 (+1 density waived) | LVS MISMATCH | C 9.1 fF
+  [TinyTapeout] tt07-12bit_SAR_ADC                    2 ms  parse failed: line 2096: device `XSAR_ADC_12bit_0`: model `uo_out[0]` not found in PDK device table
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (11 net weights, 13 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (11 net weights, 13 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (11 net weights, 13 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=4.69, clean=true, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (11 net weights, 13 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (11 net weights, 13 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (11 net weights, 13 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=3.57, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (11 net weights, 13 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (11 net weights, 13 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=3.78, clean=true, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (11 net weights, 13 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [TinyTapeout] tt08-analog-adc                    1332 ms  13 cells, 13 nets | WL 236500 nm, unrouted 0, overuse 0 | DRC 0 (+1 density waived) | LVS MATCH | C 29.5 fF
+  [TinyTapeout] tt08-analog-bias-generator            0 ms  parse failed: line 23: device `x0`: model `bias_generator` not found in PDK device table
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=3.05, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (8 net weights, 10 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=3.29, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (8 net weights, 10 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (8 net weights, 10 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (8 net weights, 10 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=4.75, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (8 net weights, 10 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=2.85, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (8 net weights, 10 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=3.16, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (8 net weights, 10 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=3.51, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (8 net weights, 10 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (8 net weights, 10 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [TinyTapeout] tt08-analog-r2r-dac-3v3            3513 ms  10 cells, 9 nets | WL 226610 nm, unrouted 0, overuse 20 | DRC 8 (+1 density waived) | LVS MISMATCH | C 39.4 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=4.30, clean=true, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (5 net weights, 4 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (5 net weights, 4 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (5 net weights, 4 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=4.25, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (5 net weights, 4 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (5 net weights, 4 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (5 net weights, 4 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (5 net weights, 4 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (5 net weights, 4 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (5 net weights, 4 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [TinyTapeout] tt08-analog-ring-osc               1063 ms  4 cells, 5 nets | WL 200380 nm, unrouted 0, overuse 0 | DRC 0 (+1 density waived) | LVS MATCH | C 41.1 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=1.09, clean=true, 0 hints
+[engine] iter 0/10 — converged (max_weight 1.09 < threshold 1.20)
+  [TinyTapeout] tt08-analog-vco                       6 ms  2 cells, 4 nets | WL 5590 nm, unrouted 0, overuse 0 | DRC 0 (+1 density waived) | LVS MATCH | C 1.6 fF
+  [TinyTapeout] tt08-bgr                              0 ms  parse failed: line 11: device `V2`: model `0` not found in PDK device table
+  [TinyTapeout] tt09-analog-opamp-3stage              0 ms  parse failed: line 52: device `x1`: model `bias_generator` not found in PDK device table
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (2 net weights, 2 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (2 net weights, 2 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (2 net weights, 2 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (2 net weights, 2 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (2 net weights, 2 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (2 net weights, 2 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (2 net weights, 2 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (2 net weights, 2 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (2 net weights, 2 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [TinyTapeout] tt09-analog-tdc                      59 ms  2 cells, 4 nets | WL 37840 nm, unrouted 0, overuse 0 | DRC 0 (+1 density waived) | LVS MATCH | C 2.9 fF
+[engine] iter 0/10 — cells (0 hints)
+[engine] iter 0/10 — place (0 net weights, 0 inflation)
+[engine] iter 0/10 — route
+[engine] iter 0/10 — extracting feedback
+[engine] iter 0/10 — feedback: max_weight=4.43, clean=false, 0 hints
+[engine] iter 1/10 — cells (0 hints)
+[engine] iter 1/10 — place (13 net weights, 19 inflation)
+[engine] iter 1/10 — route
+[engine] iter 1/10 — extracting feedback
+[engine] iter 1/10 — feedback: max_weight=4.51, clean=false, 0 hints
+[engine] iter 2/10 — cells (0 hints)
+[engine] iter 2/10 — place (13 net weights, 19 inflation)
+[engine] iter 2/10 — route
+[engine] iter 2/10 — extracting feedback
+[engine] iter 2/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 3/10 — cells (0 hints)
+[engine] iter 3/10 — place (13 net weights, 19 inflation)
+[engine] iter 3/10 — route
+[engine] iter 3/10 — extracting feedback
+[engine] iter 3/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 4/10 — cells (0 hints)
+[engine] iter 4/10 — place (13 net weights, 19 inflation)
+[engine] iter 4/10 — route
+[engine] iter 4/10 — extracting feedback
+[engine] iter 4/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 5/10 — cells (0 hints)
+[engine] iter 5/10 — place (13 net weights, 19 inflation)
+[engine] iter 5/10 — route
+[engine] iter 5/10 — extracting feedback
+[engine] iter 5/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 6/10 — cells (0 hints)
+[engine] iter 6/10 — place (13 net weights, 19 inflation)
+[engine] iter 6/10 — route
+[engine] iter 6/10 — extracting feedback
+[engine] iter 6/10 — feedback: max_weight=3.86, clean=false, 0 hints
+[engine] iter 7/10 — cells (0 hints)
+[engine] iter 7/10 — place (13 net weights, 19 inflation)
+[engine] iter 7/10 — route
+[engine] iter 7/10 — extracting feedback
+[engine] iter 7/10 — feedback: max_weight=5.00, clean=false, 0 hints
+[engine] iter 8/10 — cells (0 hints)
+[engine] iter 8/10 — place (13 net weights, 19 inflation)
+[engine] iter 8/10 — route
+[engine] iter 8/10 — extracting feedback
+[engine] iter 8/10 — feedback: max_weight=5.00, clean=true, 0 hints
+[engine] iter 9/10 — cells (0 hints)
+[engine] iter 9/10 — place (13 net weights, 19 inflation)
+[engine] iter 9/10 — route
+[engine] iter 9/10 — max iters reached, returning
+  [TinyTapeout] tt10-OTA_FC                      168769 ms  19 cells, 15 nets | WL 1184220 nm, unrouted 0, overuse 41 | DRC 0 (+1 density waived) | LVS MISMATCH | C 313.0 fF
+  [TinyTapeout] ttsky-analog-PLL                      0 ms  parse failed: line 55: device `x2`: model `phase_frequency_detector_5` not found in PDK device table
+  [TinyTapeout] ttsky25a-2stageCMOSOpAmp              0 ms  parse failed: line 4: device `C1`: model `0.8p` not found in PDK device table
+58/99 circuits placed+routed; debug in target/bench_debug/
+48 SVGs exported to assets/
+Removed tt07-12bit_SAR_ADC
+Removed tt06-sar
+Removed tt08-analog-adc
+Removed tt08-analog-r2r-dac-3v3
+Removed tt08-analog-ring-osc
+Removed ttsky25a-2stageCMOSOpAmp
+Removed MAGICAL-CIRCUITS
+Removed tt08-bgr
+Removed TT08
+Removed tt08-analog-bias-generator
+Removed ttsky-analog-PLL
+Removed tt08-analog-vco
+Removed tt09-analog-opamp-3stage
+Removed ALIGN
+Removed tt09-analog-tdc
+Removed tt10-OTA_FC
