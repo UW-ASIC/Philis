@@ -31,15 +31,24 @@ pub fn build_cold(
     margin: i32,
     net_weight_overrides: &HashMap<String, f64>,
     layer_masks: &[u64],
+    variant_sizes: &[Vec<(i32, i32)>],
 ) -> PlaceCold {
     let n = g.cells.len();
     let m = margin as f32 / 2.0;
+    let variants: Vec<Vec<(f32, f32)>> = (0..n).map(|i| {
+        if i < variant_sizes.len() && variant_sizes[i].len() > 1 {
+            variant_sizes[i].iter().map(|&(w, h)| (w as f32 / 2.0 + m, h as f32 / 2.0 + m)).collect()
+        } else {
+            Vec::new()
+        }
+    }).collect();
     let mut cold = PlaceCold {
         hw: sizes.iter().map(|s| s.0 as f32 / 2.0 + m).collect(),
         hh: sizes.iter().map(|s| s.1 as f32 / 2.0 + m).collect(),
         layer_mask: layer_masks.to_vec(),
         die,
         grid,
+        variants,
         ..Default::default()
     };
 
@@ -172,6 +181,51 @@ pub fn build_cold(
             }
         }
     }
+
+    // -- 2.2 + 2.3 + 3.3: per-pair min-distance + class-pair spacing table --
+    // Populate pair_min_dist from isolation constraints
+    for i in &rec.isolation {
+        let (a, b) = (i.device_a.0, i.device_b.0);
+        if (a as usize) < n && (b as usize) < n {
+            cold.pair_min_dist.push((a, b, i.min_distance_um as f32 * UM));
+        }
+    }
+
+    // 2.3: assign device class index from DeviceType
+    // ponytail: 5 classes (nmos=0, pmos=1, res=2, cap=3, other=4) — extend when PDK needs finer
+    cold.class_count = 5;
+    cold.class_idx = g.cells.iter().map(|c| {
+        match &c.device {
+            Some(d) => match d.device_type {
+                pnr_cells::DeviceType::Nmos => 0,
+                pnr_cells::DeviceType::Pmos => 1,
+                pnr_cells::DeviceType::Res => 2,
+                pnr_cells::DeviceType::Cap | pnr_cells::DeviceType::Ncap | pnr_cells::DeviceType::Pcap => 3,
+                _ => 4,
+            },
+            None => 4,
+        }
+    }).collect();
+
+    // Dense class-pair spacing table (5x5)
+    // ponytail: default spacing from typical analog rules; override from PDK when available
+    let nc = cold.class_count as usize;
+    cold.class_spacing = vec![0.0; nc * nc];
+    // NMOS-PMOS: nwell spacing ~1500nm
+    cold.class_spacing[0 * nc + 1] = 1500.0;
+    cold.class_spacing[1 * nc + 0] = 1500.0;
+    // PMOS-PMOS: nwell-to-nwell = 0 (same well type)
+    // RES-MOS: ~500nm general
+    cold.class_spacing[2 * nc + 0] = 500.0;
+    cold.class_spacing[0 * nc + 2] = 500.0;
+    cold.class_spacing[2 * nc + 1] = 500.0;
+    cold.class_spacing[1 * nc + 2] = 500.0;
+    // CAP-MOS: ~500nm
+    cold.class_spacing[3 * nc + 0] = 500.0;
+    cold.class_spacing[0 * nc + 3] = 500.0;
+    cold.class_spacing[3 * nc + 1] = 500.0;
+    cold.class_spacing[1 * nc + 3] = 500.0;
+
     cold
 }
 

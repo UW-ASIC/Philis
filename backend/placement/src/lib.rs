@@ -18,7 +18,7 @@ use pnr_constraints::{
 };
 use pnr_cells::netlist::BipartiteHypergraph;
 use pnr_cells::DeviceType;
-use pnr_engine::placement::{self as place, hpwl, total_overlap};
+use pnr_engine::placement::{self as place, hpwl, total_overlap, Orient};
 use pnr_engine::{SplitMix64, Telemetry};
 
 pub mod model;
@@ -90,6 +90,8 @@ pub struct Placement {
     /// Chosen variant index per cell (indexes into `PlacementConfig::variant_sizes`).
     /// All zeros when the placer has no variant choice.
     pub variant: Vec<usize>,
+    /// Per-cell orientation from placement (N for normal, FN for mirror partners).
+    pub orient: Vec<Orient>,
 }
 
 pub struct PlacementReport {
@@ -194,7 +196,7 @@ pub fn run_placement(
     let side = (side + cfg.grid - 1) / cfg.grid * cfg.grid;
     let die = (side as f32, side as f32);
 
-    let cold = model::build_cold(g, sizes, rec, die, cfg.grid as f32, cfg.cell_margin, &cfg.net_weight_overrides, layer_masks);
+    let cold = model::build_cold(g, sizes, rec, die, cfg.grid as f32, cfg.cell_margin, &cfg.net_weight_overrides, layer_masks, &cfg.variant_sizes);
     let mut ledger = model::PlaceLedger::build(g, rec);
     let mut hot = place::initial_state(&cold, &mut rng);
     let hpwl_initial = hpwl(&cold, &hot.x, &hot.y);
@@ -245,8 +247,8 @@ pub fn run_placement(
         sizes: sizes.to_vec(),
         die: (side, side),
         axes: hot.axis.iter().map(|&v| v as i32).collect(),
-        // ponytail: variant selection during SA is the upgrade path
-        variant: vec![0; n],
+        variant: hot.variant_idx.iter().map(|&v| v as usize).collect(),
+        orient: hot.orient.clone(),
     };
 
     if let Some(dir) = &cfg.debug_dir {
