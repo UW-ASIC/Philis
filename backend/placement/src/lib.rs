@@ -12,6 +12,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use pnr_constraints::contract::ContractValidation;
+pub use pnr_constraints::{ConstraintContract, ConstraintStatus};
 use pnr_constraints::{
     CcGroup, CrosstalkExclusion, GuardRingRequirement, IsolationConstraint, NetClassification,
     ParasiticBudget, ProximityRule, StraightNet, SymmetryGroup, ThermalGradientConstraint,
@@ -102,6 +103,8 @@ pub struct PlacementReport {
     pub overlap_final: f64,
     pub validation: ContractValidation,
     pub contract_lines: String,
+    /// Per-constraint contracts from placement, for per-type satisfaction reporting.
+    pub contracts: Vec<ConstraintContract>,
 }
 
 impl fmt::Display for PlacementReport {
@@ -239,6 +242,7 @@ pub fn run_placement(
         detailed: dt,
         validation: ledger.validation(),
         contract_lines: ledger.summary(),
+        contracts: std::mem::take(&mut ledger.contracts),
     };
 
     let placement = Placement {

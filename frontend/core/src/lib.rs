@@ -37,8 +37,8 @@ pub mod backend {
     //! `ConstraintContract`.
 
     pub use pnr_placement::{
-        estimate_sizes, run_placement, ConstraintRecord, DetailedCfg, GlobalCfg, Placement,
-        PlacementConfig, PlacementReport, PlacementResult,
+        estimate_sizes, run_placement, ConstraintRecord, ConstraintContract, ConstraintStatus,
+        DetailedCfg, GlobalCfg, Placement, PlacementConfig, PlacementReport, PlacementResult,
     };
     pub use pnr_routing::{
         run_routing, DetailedRouteCfg, GlobalRouteCfg, RoutingConfig, RoutingReport,

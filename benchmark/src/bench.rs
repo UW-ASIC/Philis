@@ -9,7 +9,7 @@
 
 mod fixtures;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -17,7 +17,7 @@ use fixtures::{
     clone_repos_if_needed, cleanup_fixtures, discover_all, preprocess_spice, BenchmarkCircuit,
     Suite,
 };
-use pnr_core::backend::ConstraintRecord;
+use pnr_core::backend::{ConstraintContract, ConstraintRecord, ConstraintStatus};
 use pnr_core::orchestrator::{run_flow, FlowConfig};
 use pnr_core::frontend::{parse_spice, Pdk};
 
@@ -38,12 +38,14 @@ struct Row {
     suite: String,
     outcome: String,
     ms: u128,
+    /// Placement contracts for per-type satisfaction reporting (empty on failure).
+    contracts: Vec<ConstraintContract>,
 }
 
-fn run_circuit(c: &BenchmarkCircuit, pdk: &Pdk, deck_json: &str, pdk_json: &Path) -> String {
+fn run_circuit(c: &BenchmarkCircuit, pdk: &Pdk, deck_json: &str, pdk_json: &Path) -> (String, Vec<ConstraintContract>) {
     let raw = match std::fs::read_to_string(&c.spice_path) {
         Ok(t) => t,
-        Err(e) => return format!("read failed: {e}"),
+        Err(e) => return (format!("read failed: {e}"), Vec::new()),
     };
     // Generic-netlist preprocessing (backslash joins, bare R/C, nfin->W).
     let text = preprocess_spice(&raw, pdk_json).unwrap_or(raw);
@@ -51,13 +53,13 @@ fn run_circuit(c: &BenchmarkCircuit, pdk: &Pdk, deck_json: &str, pdk_json: &Path
     // pre-parse only to size-gate before committing to the full flow
     let g = match parse_spice(&text, pdk, &HashSet::new()) {
         Ok(g) => g,
-        Err(e) => return format!("parse failed: {e}"),
+        Err(e) => return (format!("parse failed: {e}"), Vec::new()),
     };
     if g.cells.is_empty() {
-        return "no PDK devices resolved".into();
+        return ("no PDK devices resolved".into(), Vec::new());
     }
     if g.cells.len() > MAX_CELLS {
-        return format!("skipped ({} cells > {MAX_CELLS})", g.cells.len());
+        return (format!("skipped ({} cells > {MAX_CELLS})", g.cells.len()), Vec::new());
     }
 
     let cfg = FlowConfig {
@@ -66,10 +68,10 @@ fn run_circuit(c: &BenchmarkCircuit, pdk: &Pdk, deck_json: &str, pdk_json: &Path
     };
     let r = match run_flow(&text, deck_json, &ConstraintRecord::default(), &cfg) {
         Ok(r) => r,
-        Err(e) => return format!("flow failed: {e}"),
+        Err(e) => return (format!("flow failed: {e}"), Vec::new()),
     };
     let s = &r.signoff;
-    format!(
+    let outcome = format!(
         "{} cells, {} nets | WL {} nm, unrouted {}, overuse {} | DRC {} (+{} density waived) | LVS {} | C {:.1} fF",
         r.graph.cells.len(),
         r.graph.nets.len(),
@@ -80,7 +82,58 @@ fn run_circuit(c: &BenchmarkCircuit, pdk: &Pdk, deck_json: &str, pdk_json: &Path
         s.drc_waived_density,
         if s.lvs.matched { "MATCH" } else { "MISMATCH" },
         s.pex.total_cap() / 1000.0,
-    )
+    );
+    (outcome, r.placement.report.contracts)
+}
+
+// ── Per-constraint-type satisfaction summary ──
+
+struct TypeStats {
+    count: usize,
+    satisfied: usize,
+    violated: usize,
+    worst_metric: f64,
+}
+
+/// Aggregate placement contracts by kind and print per-type satisfaction.
+fn print_constraint_summary(all_contracts: &[&ConstraintContract]) {
+    if all_contracts.is_empty() { return; }
+    let mut by_kind: HashMap<&str, TypeStats> = HashMap::new();
+    for c in all_contracts {
+        let e = by_kind.entry(&c.kind).or_insert(TypeStats {
+            count: 0, satisfied: 0, violated: 0, worst_metric: 0.0,
+        });
+        e.count += 1;
+        match c.status {
+            ConstraintStatus::Satisfied => e.satisfied += 1,
+            ConstraintStatus::Violated => {
+                e.violated += 1;
+                if let Some(m) = c.violation_metric {
+                    if m > e.worst_metric { e.worst_metric = m; }
+                }
+            }
+            _ => {}
+        }
+    }
+    println!("\n  {:<22} {:>5} {:>5} {:>5} {:>6}  {:>12}",
+        "Constraint type", "total", "sat", "viol", "rate", "worst(um)");
+    println!("  {}", "-".repeat(70));
+    let mut kinds: Vec<&&str> = by_kind.keys().collect();
+    kinds.sort();
+    let (mut total, mut total_sat) = (0usize, 0usize);
+    for kind in kinds {
+        let s = &by_kind[kind];
+        let rate = if s.count > 0 { s.satisfied as f64 / s.count as f64 } else { 0.0 };
+        let worst = if s.violated > 0 { format!("{:.3}", s.worst_metric) } else { "-".into() };
+        println!("  {:<22} {:>5} {:>5} {:>5} {:>5.0}%  {:>12}",
+            kind, s.count, s.satisfied, s.violated, rate * 100.0, worst);
+        total += s.count;
+        total_sat += s.satisfied;
+    }
+    let overall = if total > 0 { total_sat as f64 / total as f64 } else { 0.0 };
+    println!("  {}", "-".repeat(70));
+    println!("  {:<22} {:>5} {:>5} {:>5} {:>5.0}%",
+        "OVERALL", total, total_sat, total - total_sat, overall * 100.0);
 }
 
 fn main() {
@@ -126,12 +179,13 @@ fn main() {
             }
         };
         let t = Instant::now();
-        let outcome = run_circuit(c, pdk, deck_json, &pdk_json);
+        let (outcome, contracts) = run_circuit(c, pdk, deck_json, &pdk_json);
         rows.push(Row {
             name: c.name.clone(),
             suite: format!("{:?}", c.suite),
             outcome,
             ms: t.elapsed().as_millis(),
+            contracts,
         });
         let r = rows.last().unwrap();
         println!("  [{:>11}] {:32} {:6} ms  {}", r.suite, r.name, r.ms, r.outcome);
@@ -139,6 +193,15 @@ fn main() {
 
     let ok = rows.iter().filter(|r| r.outcome.contains("cells,")).count();
     println!("{ok}/{} circuits placed+routed; debug in target/bench_debug/", rows.len());
+
+    // Per-constraint-type satisfaction summary across all circuits
+    let all_contracts: Vec<&ConstraintContract> = rows.iter()
+        .flat_map(|r| r.contracts.iter())
+        .collect();
+    if !all_contracts.is_empty() {
+        println!("\n── Constraint satisfaction ──");
+        print_constraint_summary(&all_contracts);
+    }
 
     // Export SVGs for successful circuits
     let assets = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("assets");
