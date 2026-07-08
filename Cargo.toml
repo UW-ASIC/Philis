@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    # Signoff check
+    "verify",
+    "benchmark",
+
+    # Frontend
+    "frontend/substrate3",
+    "frontend/annotator",
+    "frontend/core",
+
+    # Backend
+    "backend/engine",
+    "backend/cells",
+    "backend/constraints",
+    "backend/placement",
+    "backend/routing",
+
+    # Tools
+    "tools/visualizer",
+]

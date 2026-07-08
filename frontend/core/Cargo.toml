@@ -1,0 +1,18 @@
+[package]
+name = "pnr-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+visualizer = []
+
+[dependencies]
+gdsverify = { path = "../../verify" }
+pnr-annotator = { path = "../annotator" }
+pnr-cells = { path = "../../backend/cells" }
+pnr-constraints = { path = "../../backend/constraints" }
+pnr-engine = { path = "../../backend/engine" }
+pnr-placement = { path = "../../backend/placement" }
+pnr-routing = { path = "../../backend/routing" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

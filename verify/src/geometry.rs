@@ -1,0 +1,361 @@
+//! Data-oriented geometry core.
+//!
+//! Everything the checkers touch lives here in struct-of-arrays (SoA) form. There are no
+//! per-polygon heap objects and no pointers between shapes — references are `u32` indices
+//! into flat arrays. This is what makes the store (a) cache-friendly for the CPU scanline
+//! passes and (b) trivially uploadable to a GPU as flat buffers (see `gpu` module).
+//!
+//! Coordinates are `i32` database units (nm in the conformance suite).
+//!
+//! Layout, per the DOD skill:
+//!   * `verts_x` / `verts_y`  — parallel arrays of every vertex of every polygon (hot).
+//!   * `poly_layer`           — layer id per polygon (warm; used to filter).
+//!   * `poly_vert_start/len`  — index range into the vertex arrays (the "handle").
+//! A polygon is therefore an index range, not an object. Iterating all met1 edges never
+//! loads a byte of any other layer's coordinates it doesn't need.
+
+/// A layer identifier. Small integer, indexes the layer table. `u16` keeps references tiny.
+pub type LayerId = u16;
+
+/// Handle to a polygon: just an index into the SoA arrays. Copyable, pointer-free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PolyId(pub u32);
+
+/// An axis-aligned bounding box, kept alongside polygons for fast reject (hot/cold split:
+/// bbox is hot for spatial queries, the full vertex list is colder).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bbox {
+    pub xmin: i32,
+    pub ymin: i32,
+    pub xmax: i32,
+    pub ymax: i32,
+}
+
+impl Bbox {
+    #[inline]
+    pub fn empty() -> Self {
+        Bbox { xmin: i32::MAX, ymin: i32::MAX, xmax: i32::MIN, ymax: i32::MIN }
+    }
+    #[inline]
+    pub fn include(&mut self, x: i32, y: i32) {
+        if x < self.xmin { self.xmin = x; }
+        if y < self.ymin { self.ymin = y; }
+        if x > self.xmax { self.xmax = x; }
+        if y > self.ymax { self.ymax = y; }
+    }
+    #[inline]
+    pub fn width(&self) -> i32 { self.xmax - self.xmin }
+    #[inline]
+    pub fn height(&self) -> i32 { self.ymax - self.ymin }
+    /// Do two bboxes come within `dist` of each other? Used to prune spacing pairs.
+    #[inline]
+    pub fn within(&self, o: &Bbox, dist: i32) -> bool {
+        self.xmin - dist <= o.xmax
+            && o.xmin - dist <= self.xmax
+            && self.ymin - dist <= o.ymax
+            && o.ymin - dist <= self.ymax
+    }
+    #[inline]
+    pub fn overlaps(&self, o: &Bbox) -> bool { self.within(o, 0) }
+}
+
+/// The one big flat store. All checkers operate over borrowed slices of this — never over
+/// owned per-shape objects. This is the primary public data structure the library exposes:
+/// users can build one directly (immediate mode) instead of going through GDS.
+#[derive(Default, Clone)]
+pub struct GeometryStore {
+    // --- vertex arrays (hot) ---
+    pub verts_x: Vec<i32>,
+    pub verts_y: Vec<i32>,
+    // --- per-polygon (warm) ---
+    pub poly_layer: Vec<LayerId>,
+    pub poly_vert_start: Vec<u32>,
+    pub poly_vert_len: Vec<u32>,
+    pub poly_bbox: Vec<Bbox>,
+    // --- net label annotations (cold) ---
+    /// Maps polygon index to a net name label. Callers assign labels; LVS extraction checks
+    /// that polygons sharing the same net carry consistent labels (or no label). Empty by
+    /// default — label-driven extraction is opt-in.
+    pub net_labels: std::collections::HashMap<u32, String>,
+    // --- text annotations (cold) ---
+    pub text_x: Vec<i32>,
+    pub text_y: Vec<i32>,
+    pub text_layer: Vec<i32>,
+    pub text_datatype: Vec<i32>,
+    pub text_string: Vec<String>,
+}
+
+impl GeometryStore {
+    pub fn new() -> Self { Self::default() }
+
+    #[inline]
+    pub fn poly_count(&self) -> usize { self.poly_layer.len() }
+
+    #[inline]
+    pub fn text_count(&self) -> usize { self.text_string.len() }
+
+    pub fn add_text(&mut self, layer: i32, datatype: i32, x: i32, y: i32, text: String) {
+        self.text_x.push(x);
+        self.text_y.push(y);
+        self.text_layer.push(layer);
+        self.text_datatype.push(datatype);
+        self.text_string.push(text);
+    }
+
+    /// Append a polygon given as (x,y) vertex pairs. Returns its handle.
+    /// The vertices are assumed to be a closed ring given without repeating the first point.
+    pub fn add_polygon(&mut self, layer: LayerId, pts: &[(i32, i32)]) -> PolyId {
+        let start = self.verts_x.len() as u32;
+        let mut bb = Bbox::empty();
+        for &(x, y) in pts {
+            self.verts_x.push(x);
+            self.verts_y.push(y);
+            bb.include(x, y);
+        }
+        let id = PolyId(self.poly_layer.len() as u32);
+        self.poly_layer.push(layer);
+        self.poly_vert_start.push(start);
+        self.poly_vert_len.push(pts.len() as u32);
+        self.poly_bbox.push(bb);
+        id
+    }
+
+    /// Convenience: append an axis-aligned rectangle.
+    pub fn add_rect(&mut self, layer: LayerId, x: i32, y: i32, w: i32, h: i32) -> PolyId {
+        self.add_polygon(layer, &[(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
+    }
+
+    /// Borrow a polygon's vertex slice range. Zero-copy; returns index bounds.
+    #[inline]
+    pub fn poly_range(&self, p: PolyId) -> (usize, usize) {
+        let s = self.poly_vert_start[p.0 as usize] as usize;
+        let n = self.poly_vert_len[p.0 as usize] as usize;
+        (s, s + n)
+    }
+
+    #[inline]
+    pub fn poly_vertex(&self, base: usize, i: usize) -> (i32, i32) {
+        (self.verts_x[base + i], self.verts_y[base + i])
+    }
+
+    /// Iterate polygon indices on a given layer. Existence-based filtering: the caller loops
+    /// only the polygons it cares about. Kept as an explicit vec to stay simple; for very
+    /// large stores you'd bucket polygons by layer at build time.
+    pub fn polys_on_layer(&self, layer: LayerId) -> Vec<PolyId> {
+        (0..self.poly_count() as u32)
+            .filter(|&i| self.poly_layer[i as usize] == layer)
+            .map(PolyId)
+            .collect()
+    }
+
+    /// Signed area*2 of a polygon (shoelace). Positive => CCW. Used by min_area and by
+    /// orientation-dependent checks.
+    pub fn signed_area2(&self, p: PolyId) -> i64 {
+        let (s, e) = self.poly_range(p);
+        let n = e - s;
+        let mut a: i64 = 0;
+        for i in 0..n {
+            let (x0, y0) = self.poly_vertex(s, i);
+            let (x1, y1) = self.poly_vertex(s, (i + 1) % n);
+            a += (x0 as i64) * (y1 as i64) - (x1 as i64) * (y0 as i64);
+        }
+        a
+    }
+
+    pub fn area(&self, p: PolyId) -> i64 { self.signed_area2(p).abs() / 2 }
+}
+
+/// A directed edge, materialized for scanline / edge-pair passes. This is the SoA "edge
+/// stream" the DRC spacing/width algorithms consume. We build it on demand for a layer so
+/// the hot loop iterates a dense array of edges with no polygon indirection.
+#[derive(Clone, Copy, Debug)]
+pub struct Edge {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+    pub poly: u32, // which polygon this edge belongs to (for same-poly filtering)
+}
+
+impl Edge {
+    #[inline]
+    pub fn dx(&self) -> i32 { self.x1 - self.x0 }
+    #[inline]
+    pub fn dy(&self) -> i32 { self.y1 - self.y0 }
+    #[inline]
+    pub fn len2(&self) -> i64 {
+        let dx = self.dx() as i64;
+        let dy = self.dy() as i64;
+        dx * dx + dy * dy
+    }
+    #[inline]
+    pub fn is_horizontal(&self) -> bool { self.y0 == self.y1 }
+    #[inline]
+    pub fn is_vertical(&self) -> bool { self.x0 == self.x1 }
+}
+
+/// Build the dense edge list for one layer. Output is a flat Vec<Edge> — SoA-adjacent and
+/// GPU-uploadable. Edges are emitted in polygon order (CCW ring => interior on the left).
+pub fn build_edges(store: &GeometryStore, layer: LayerId) -> Vec<Edge> {
+    let mut edges = Vec::new();
+    for p in store.polys_on_layer(layer) {
+        let (s, e) = store.poly_range(p);
+        let n = e - s;
+        for i in 0..n {
+            let (x0, y0) = store.poly_vertex(s, i);
+            let (x1, y1) = store.poly_vertex(s, (i + 1) % n);
+            edges.push(Edge { x0, y0, x1, y1, poly: p.0 });
+        }
+    }
+    edges
+}
+
+/// Squared Euclidean distance between two axis-aligned segments' closest points.
+/// Returns 0 if they touch/cross. This is the primitive both spacing and corner checks use.
+pub fn seg_seg_dist2(a: &Edge, b: &Edge) -> i64 {
+    // If bounding boxes overlap and the segments intersect, distance is 0.
+    if segments_intersect(a, b) {
+        return 0;
+    }
+    let mut best = i64::MAX;
+    for &(px, py) in &[(a.x0, a.y0), (a.x1, a.y1)] {
+        best = best.min(point_seg_dist2(px, py, b));
+    }
+    for &(px, py) in &[(b.x0, b.y0), (b.x1, b.y1)] {
+        best = best.min(point_seg_dist2(px, py, a));
+    }
+    best
+}
+
+#[inline]
+fn point_seg_dist2(px: i32, py: i32, e: &Edge) -> i64 {
+    let vx = e.dx() as i64;
+    let vy = e.dy() as i64;
+    let wx = (px - e.x0) as i64;
+    let wy = (py - e.y0) as i64;
+    let c1 = vx * wx + vy * wy;
+    if c1 <= 0 {
+        return wx * wx + wy * wy;
+    }
+    let c2 = vx * vx + vy * vy;
+    if c2 <= c1 {
+        let dx = (px - e.x1) as i64;
+        let dy = (py - e.y1) as i64;
+        return dx * dx + dy * dy;
+    }
+    // projection falls on the segment
+    let b = c1 as f64 / c2 as f64;
+    let projx = e.x0 as f64 + b * vx as f64;
+    let projy = e.y0 as f64 + b * vy as f64;
+    let dx = px as f64 - projx;
+    let dy = py as f64 - projy;
+    (dx * dx + dy * dy).round() as i64
+}
+
+fn orient(ax: i64, ay: i64, bx: i64, by: i64, cx: i64, cy: i64) -> i64 {
+    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+}
+
+fn on_seg(ax: i64, ay: i64, bx: i64, by: i64, cx: i64, cy: i64) -> bool {
+    cx >= ax.min(bx) && cx <= ax.max(bx) && cy >= ay.min(by) && cy <= ay.max(by)
+}
+
+pub fn segments_intersect(a: &Edge, b: &Edge) -> bool {
+    let (ax, ay, bx, by) = (a.x0 as i64, a.y0 as i64, a.x1 as i64, a.y1 as i64);
+    let (cx, cy, dx, dy) = (b.x0 as i64, b.y0 as i64, b.x1 as i64, b.y1 as i64);
+    let d1 = orient(cx, cy, dx, dy, ax, ay);
+    let d2 = orient(cx, cy, dx, dy, bx, by);
+    let d3 = orient(ax, ay, bx, by, cx, cy);
+    let d4 = orient(ax, ay, bx, by, dx, dy);
+    if ((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0)) {
+        return true;
+    }
+    (d1 == 0 && on_seg(cx, cy, dx, dy, ax, ay))
+        || (d2 == 0 && on_seg(cx, cy, dx, dy, bx, by))
+        || (d3 == 0 && on_seg(ax, ay, bx, by, cx, cy))
+        || (d4 == 0 && on_seg(ax, ay, bx, by, dx, dy))
+}
+
+/// Area of a polygon clipped to an axis-aligned window (Sutherland–Hodgman + shoelace).
+/// Exact for rectilinear geometry; f64 for the fractional intersection points diagonal
+/// edges can produce. This is what density checks need — a bbox-based coverage estimate
+/// wildly overstates non-convex shapes like combs.
+pub fn clipped_area(
+    store: &GeometryStore, p: PolyId, xmin: i32, ymin: i32, xmax: i32, ymax: i32,
+) -> f64 {
+    let (s, e) = store.poly_range(p);
+    let mut ring: Vec<(f64, f64)> = (s..e)
+        .map(|i| (store.verts_x[i] as f64, store.verts_y[i] as f64))
+        .collect();
+    // clip against each half-plane: keep(pt) true => inside
+    let planes: [(f64, bool, bool); 4] = [
+        (xmin as f64, true, true),   // x >= xmin
+        (xmax as f64, true, false),  // x <= xmax
+        (ymin as f64, false, true),  // y >= ymin
+        (ymax as f64, false, false), // y <= ymax
+    ];
+    for &(c, is_x, keep_ge) in &planes {
+        if ring.is_empty() { return 0.0; }
+        let val = |pt: (f64, f64)| if is_x { pt.0 } else { pt.1 };
+        let inside = |pt: (f64, f64)| if keep_ge { val(pt) >= c } else { val(pt) <= c };
+        let mut out: Vec<(f64, f64)> = Vec::with_capacity(ring.len() + 4);
+        for i in 0..ring.len() {
+            let a = ring[i];
+            let b = ring[(i + 1) % ring.len()];
+            let (ia, ib) = (inside(a), inside(b));
+            let cross = |a: (f64, f64), b: (f64, f64)| -> (f64, f64) {
+                let t = (c - val(a)) / (val(b) - val(a));
+                (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1))
+            };
+            if ia {
+                out.push(a);
+                if !ib { out.push(cross(a, b)); }
+            } else if ib {
+                out.push(cross(a, b));
+            }
+        }
+        ring = out;
+    }
+    let mut a2 = 0.0;
+    for i in 0..ring.len() {
+        let (x0, y0) = ring[i];
+        let (x1, y1) = ring[(i + 1) % ring.len()];
+        a2 += x0 * y1 - x1 * y0;
+    }
+    (a2 / 2.0).abs()
+}
+
+/// Is a point strictly inside a polygon? Even-odd ray cast; points exactly on the boundary
+/// return false. Integer-exact for the on-edge test, half-open on crossing counts.
+pub fn point_in_poly(store: &GeometryStore, p: PolyId, px: i32, py: i32) -> bool {
+    let (s, e) = store.poly_range(p);
+    let n = e - s;
+    let (px, py) = (px as i64, py as i64);
+    let mut inside = false;
+    for i in 0..n {
+        let (x0, y0) = store.poly_vertex(s, i);
+        let (x1, y1) = store.poly_vertex(s, (i + 1) % n);
+        let (x0, y0, x1, y1) = (x0 as i64, y0 as i64, x1 as i64, y1 as i64);
+        // on-boundary => not strictly inside
+        if orient(x0, y0, x1, y1, px, py) == 0 && on_seg(x0, y0, x1, y1, px, py) {
+            return false;
+        }
+        if (y0 > py) != (y1 > py) {
+            // exact crossing test: px < x-intersection of the edge with the horizontal ray
+            let lhs = (x1 - x0) * (py - y0);
+            let rhs = (px - x0) * (y1 - y0);
+            let cross = if y1 > y0 { lhs > rhs } else { lhs < rhs };
+            if cross { inside = !inside; }
+        }
+    }
+    inside
+}
+
+/// Integer sqrt floor, for reporting measured distances from squared values.
+pub fn isqrt(n: i64) -> i64 {
+    if n < 0 { return 0; }
+    let mut x = (n as f64).sqrt() as i64;
+    while (x + 1) * (x + 1) <= n { x += 1; }
+    while x * x > n { x -= 1; }
+    x
+}

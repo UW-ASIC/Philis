@@ -1,0 +1,7 @@
+target/
+benchmark/cloned_fixtures/
+.pdk/
+.venv/
+result/
+.claude/
+docs/books/

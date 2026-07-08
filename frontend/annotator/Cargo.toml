@@ -1,0 +1,8 @@
+[package]
+name = "pnr-annotator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pnr-cells = { path = "../../backend/cells" }
+pnr-constraints = { path = "../../backend/constraints" }

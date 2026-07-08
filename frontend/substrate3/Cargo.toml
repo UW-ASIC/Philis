@@ -1,0 +1,8 @@
+[package]
+name = "substrate3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gdsverify = { path = "../../verify" }
+thiserror = "2"

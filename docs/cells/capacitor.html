@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Capacitor Cell — Shape/Variant Diagrams</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; background:#fafafa; color:#222; margin:24px; }
+  h1 { font-size:22px; } h2 { font-size:17px; margin-top:36px; border-bottom:1px solid #ddd; padding-bottom:4px; }
+  .panel { background:#fff; border:1px solid #ddd; border-radius:6px; padding:12px; margin:12px 0; display:inline-block; }
+  .cap { font-size:12px; color:#555; max-width:760px; }
+  svg text { font-family:inherit; }
+  .legend { display:flex; flex-wrap:wrap; gap:14px; background:#fff; border:1px solid #ddd; border-radius:6px; padding:10px 14px; max-width:900px; }
+  .legend .it { display:flex; align-items:center; gap:6px; font-size:12px; }
+  .sw { width:22px; height:14px; border:1px solid #666; display:inline-block; }
+</style>
+</head>
+<body>
+<h1>Capacitor cell — shape &amp; variant diagrams</h1>
+<p class="cap">Companion to <code>docs/cells/capacitor.md</code>. Sources: Hastings AOAL ch7/ch8, PNR_ANALOG §7.1/§7.A. Colors follow the shared PDK palette below.</p>
+
+<div class="legend">
+  <span class="it"><span class="sw" style="background:rgba(194,59,34,.7)"></span>poly</span>
+  <span class="it"><span class="sw" style="background:rgba(46,139,87,.55)"></span>diff</span>
+  <span class="it"><span class="sw" style="background:#111"></span>contact / via</span>
+  <span class="it"><span class="sw" style="background:rgba(70,130,180,.5)"></span>li</span>
+  <span class="it"><span class="sw" style="background:rgba(30,144,255,.4)"></span>met1 (met_n)</span>
+  <span class="it"><span class="sw" style="background:rgba(147,112,219,.4)"></span>met2 (met_n+1)</span>
+  <span class="it"><span class="sw" style="background:rgba(255,140,0,.5)"></span>MIM / capm plate</span>
+  <span class="it"><span class="sw" style="background:rgba(245,222,179,.35); border:1px dashed #b8860b"></span>nwell</span>
+  <span class="it"><span class="sw" style="background:repeating-linear-gradient(45deg,#fff,#fff 3px,#888 3px,#888 5px)"></span>dummy (hatched)</span>
+</div>
+
+<h2>(a) Single MIM unit — top view</h2>
+<div class="panel">
+<svg width="480" height="420" viewBox="0 0 480 420">
+  <defs>
+    <pattern id="hatchA" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="none"/><line x1="0" y1="0" x2="0" y2="8" stroke="#888" stroke-width="2.5"/>
+    </pattern>
+  </defs>
+  <!-- bottom plate met_n -->
+  <rect x="40" y="60" width="280" height="280" fill="#1E90FF" fill-opacity="0.4" stroke="#1E90FF"/>
+  <!-- bottom plate pin tab -->
+  <rect x="320" y="180" width="70" height="40" fill="#1E90FF" fill-opacity="0.4" stroke="#1E90FF"/>
+  <!-- capm plate inset -->
+  <rect x="60" y="80" width="240" height="240" fill="#FF8C00" fill-opacity="0.5" stroke="#FF8C00"/>
+  <!-- met_n+1 top strap -->
+  <rect x="150" y="18" width="80" height="322" fill="#9370DB" fill-opacity="0.4" stroke="#9370DB"/>
+  <!-- via array capm -> met_n+1 -->
+  <g fill="#111">
+    <rect x="90" y="110" width="12" height="12"/><rect x="150" y="110" width="12" height="12"/><rect x="210" y="110" width="12" height="12"/><rect x="270" y="110" width="12" height="12"/>
+    <rect x="90" y="170" width="12" height="12"/><rect x="150" y="170" width="12" height="12"/><rect x="210" y="170" width="12" height="12"/><rect x="270" y="170" width="12" height="12"/>
+    <rect x="90" y="230" width="12" height="12"/><rect x="150" y="230" width="12" height="12"/><rect x="210" y="230" width="12" height="12"/><rect x="270" y="230" width="12" height="12"/>
+    <rect x="90" y="290" width="12" height="12"/><rect x="150" y="290" width="12" height="12"/><rect x="210" y="290" width="12" height="12"/><rect x="270" y="290" width="12" height="12"/>
+  </g>
+  <text x="46" y="356" font-size="12" fill="#1565c0">bottom plate met_n (25–100 µm/side, square)</text>
+  <text x="64" y="98" font-size="12" fill="#b45f00">capm plate (inset for enclosure)</text>
+  <text x="156" y="14" font-size="12" fill="#5e35b1">met_n+1 top strap (TOP)</text>
+  <text x="330" y="212" font-size="12" fill="#1565c0">BOT</text>
+  <text x="228" y="128" font-size="11" fill="#111">via array</text>
+  <text x="40" y="392" font-size="12" fill="#555">Square unit [ch8 Rule 2]; only vias inside capm (enclosure) — corners may be chamfered per PDK.</text>
+</svg>
+</div>
+<p class="cap">Backs md §1 (MIM, VERTICAL plate-over-plate) and §2 (unit geometry). Note plate asymmetry: BOT tab vs TOP strap exits differ — this is why mirrors matter (§4).</p>
+
+<h2>(b) MOM interdigitated finger capacitor — top view (lateral flux)</h2>
+<div class="panel">
+<svg width="500" height="360" viewBox="0 0 500 360">
+  <!-- electrode A: left spine + fingers (met1) -->
+  <g fill="#1E90FF" fill-opacity="0.4" stroke="#0b3d91" stroke-width="1.5">
+    <rect x="30" y="36" width="24" height="272"/>
+    <rect x="54" y="44" width="330" height="20"/>
+    <rect x="54" y="112" width="330" height="20"/>
+    <rect x="54" y="180" width="330" height="20"/>
+    <rect x="54" y="248" width="330" height="20"/>
+  </g>
+  <!-- electrode B: right spine + fingers (met1, distinguished by stroke only) -->
+  <g fill="#1E90FF" fill-opacity="0.4" stroke="#8b0000" stroke-width="1.5" stroke-dasharray="5 3">
+    <rect x="410" y="36" width="24" height="272"/>
+    <rect x="82" y="78" width="328" height="20"/>
+    <rect x="82" y="146" width="328" height="20"/>
+    <rect x="82" y="214" width="328" height="20"/>
+    <rect x="82" y="282" width="328" height="20"/>
+  </g>
+  <text x="24" y="26" font-size="13" fill="#0b3d91">A (solid outline)</text>
+  <text x="356" y="26" font-size="13" fill="#8b0000">B (dashed outline)</text>
+  <text x="150" y="332" font-size="12" fill="#555">both electrodes same metal layer — outline style marks net only</text>
+  <line x1="384" y1="56" x2="384" y2="76" stroke="#333"/>
+  <text x="390" y="72" font-size="11" fill="#333">lateral flux across gap</text>
+  <text x="24" y="352" font-size="12" fill="#555">Stack the same pattern on several metals + vias → vertical-bar / woven lateral-flux cap [Hastings ch7].</text>
+</svg>
+</div>
+<p class="cap">Backs md §1 rank 3 (MOM = LATERAL flux, interdigitated). Finger direction is an orientation axis like resistor orientation (md §4): all matched units must share it.</p>
+
+<h2>(c) 4-bit binary-ratio common-centroid array (1:2:4:8) with dummy ring</h2>
+<div class="panel">
+<svg width="640" height="500" viewBox="0 0 640 500">
+  <defs>
+    <pattern id="hatchC" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="none"/><line x1="0" y1="0" x2="0" y2="8" stroke="#888" stroke-width="2.5"/>
+    </pattern>
+  </defs>
+  <!-- nwell under whole array -->
+  <rect x="26" y="36" width="376" height="376" fill="#F5DEB3" fill-opacity="0.35" stroke="#b8860b" stroke-dasharray="6 4"/>
+  <!-- dummy ring: 6x6 border cells, grid start (40,50), pitch 58, cell 52 -->
+  <g fill="url(#hatchC)" stroke="#666">
+    <rect x="40" y="50" width="52" height="52"/><rect x="98" y="50" width="52" height="52"/><rect x="156" y="50" width="52" height="52"/><rect x="214" y="50" width="52" height="52"/><rect x="272" y="50" width="52" height="52"/><rect x="330" y="50" width="52" height="52"/>
+    <rect x="40" y="340" width="52" height="52"/><rect x="98" y="340" width="52" height="52"/><rect x="156" y="340" width="52" height="52"/><rect x="214" y="340" width="52" height="52"/><rect x="272" y="340" width="52" height="52"/><rect x="330" y="340" width="52" height="52"/>
+    <rect x="40" y="108" width="52" height="52"/><rect x="40" y="166" width="52" height="52"/><rect x="40" y="224" width="52" height="52"/><rect x="40" y="282" width="52" height="52"/>
+    <rect x="330" y="108" width="52" height="52"/><rect x="330" y="166" width="52" height="52"/><rect x="330" y="224" width="52" height="52"/><rect x="330" y="282" width="52" height="52"/>
+  </g>
+  <!-- core 4x4: rows y=108,166,224,282; cols x=98,156,214,272 -->
+  <!-- row1: D C C D -->
+  <rect x="98"  y="108" width="52" height="52" fill="#9370DB" fill-opacity="0.4" stroke="#5e35b1"/>
+  <rect x="156" y="108" width="52" height="52" fill="#1E90FF" fill-opacity="0.4" stroke="#1565c0"/>
+  <rect x="214" y="108" width="52" height="52" fill="#1E90FF" fill-opacity="0.4" stroke="#1565c0"/>
+  <rect x="272" y="108" width="52" height="52" fill="#9370DB" fill-opacity="0.4" stroke="#5e35b1"/>
+  <!-- row2: B D D X -->
+  <rect x="98"  y="166" width="52" height="52" fill="#4682B4" fill-opacity="0.5" stroke="#2c5d80"/>
+  <rect x="156" y="166" width="52" height="52" fill="#9370DB" fill-opacity="0.4" stroke="#5e35b1"/>
+  <rect x="214" y="166" width="52" height="52" fill="#9370DB" fill-opacity="0.4" stroke="#5e35b1"/>
+  <rect x="272" y="166" width="52" height="52" fill="#2E8B57" fill-opacity="0.55" stroke="#1d5c39"/>
+  <!-- row3: A D D B -->
+  <rect x="98"  y="224" width="52" height="52" fill="#FF8C00" fill-opacity="0.5" stroke="#b45f00"/>
+  <rect x="156" y="224" width="52" height="52" fill="#9370DB" fill-opacity="0.4" stroke="#5e35b1"/>
+  <rect x="214" y="224" width="52" height="52" fill="#9370DB" fill-opacity="0.4" stroke="#5e35b1"/>
+  <rect x="272" y="224" width="52" height="52" fill="#4682B4" fill-opacity="0.5" stroke="#2c5d80"/>
+  <!-- row4: D C C D -->
+  <rect x="98"  y="282" width="52" height="52" fill="#9370DB" fill-opacity="0.4" stroke="#5e35b1"/>
+  <rect x="156" y="282" width="52" height="52" fill="#1E90FF" fill-opacity="0.4" stroke="#1565c0"/>
+  <rect x="214" y="282" width="52" height="52" fill="#1E90FF" fill-opacity="0.4" stroke="#1565c0"/>
+  <rect x="272" y="282" width="52" height="52" fill="#9370DB" fill-opacity="0.4" stroke="#5e35b1"/>
+  <!-- labels -->
+  <g font-size="16" text-anchor="middle" fill="#222">
+    <text x="124" y="140">8</text><text x="182" y="140">4</text><text x="240" y="140">4</text><text x="298" y="140">8</text>
+    <text x="124" y="198">2</text><text x="182" y="198">8</text><text x="240" y="198">8</text><text x="298" y="198">X</text>
+    <text x="124" y="256">1</text><text x="182" y="256">8</text><text x="240" y="256">8</text><text x="298" y="256">2</text>
+    <text x="124" y="314">8</text><text x="182" y="314">4</text><text x="240" y="314">4</text><text x="298" y="314">8</text>
+  </g>
+  <g font-size="13" text-anchor="middle" fill="#666">
+    <text x="66" y="82">D</text><text x="124" y="82">D</text><text x="182" y="82">D</text><text x="240" y="82">D</text><text x="298" y="82">D</text><text x="356" y="82">D</text>
+  </g>
+  <!-- centroid mark -->
+  <circle cx="211" cy="221" r="4" fill="none" stroke="#c00" stroke-width="2"/>
+  <line x1="199" y1="221" x2="223" y2="221" stroke="#c00"/><line x1="211" y1="209" x2="211" y2="233" stroke="#c00"/>
+  <!-- legend -->
+  <g font-size="13">
+    <rect x="430" y="60" width="24" height="16" fill="#9370DB" fill-opacity="0.4" stroke="#5e35b1"/><text x="462" y="73">C8 — 8 units (MSB)</text>
+    <rect x="430" y="88" width="24" height="16" fill="#1E90FF" fill-opacity="0.4" stroke="#1565c0"/><text x="462" y="101">C4 — 4 units</text>
+    <rect x="430" y="116" width="24" height="16" fill="#4682B4" fill-opacity="0.5" stroke="#2c5d80"/><text x="462" y="129">C2 — 2 units</text>
+    <rect x="430" y="144" width="24" height="16" fill="#FF8C00" fill-opacity="0.5" stroke="#b45f00"/><text x="462" y="157">C1 — 1 unit (LSB)</text>
+    <rect x="430" y="172" width="24" height="16" fill="#2E8B57" fill-opacity="0.55" stroke="#1d5c39"/><text x="462" y="185">X — spare, balances C1</text>
+    <rect x="430" y="200" width="24" height="16" fill="url(#hatchC)" stroke="#666"/><text x="462" y="213">D — dummy ring, exact unit</text>
+    <rect x="430" y="228" width="24" height="16" fill="#F5DEB3" fill-opacity="0.35" stroke="#b8860b" stroke-dasharray="4 3"/><text x="462" y="241">nwell/NBL under array [Rule 6]</text>
+  </g>
+  <g font-size="12" fill="#555">
+    <text x="430" y="286">Block-chessboard assignment [PNR_ANALOG §7.1]:</text>
+    <text x="430" y="304">C8 corners + inner 2×2, C4 edge-pairs, C2</text>
+    <text x="430" y="322">antipodal pair — all centroids at + mark.</text>
+    <text x="430" y="344">C1 (1 unit) cannot self-centroid: X spare is</text>
+    <text x="430" y="362">its point-symmetric partner. Spiral variant:</text>
+    <text x="430" y="380">owners spiral outward from center instead.</text>
+    <text x="430" y="402">Dummies: both electrodes tied to a node</text>
+    <text x="430" y="420">[ch8 Rule 7]; equal spacing everywhere.</text>
+  </g>
+  <text x="40" y="440" font-size="12" fill="#555">6×6 grid = 16 core units (1+2+4+8+spare) + 20 perimeter dummies. Aspect chosen ≈1:1 [ch8 Rule 4].</text>
+</svg>
+</div>
+<p class="cap">Backs md §3 (array formation, ratio decomposition, spiral vs block-chessboard) and §5 (dummy ring, well under array).</p>
+
+<h2>(d) MOM unit under the 8 dihedral transforms</h2>
+<div class="panel">
+<svg width="680" height="360" viewBox="0 0 680 360">
+  <defs>
+    <!-- asymmetric MOM unit icon, centered at origin, extents ±34 -->
+    <g id="momu">
+      <rect x="-34" y="-30" width="10" height="60" fill="#1E90FF" fill-opacity="0.4" stroke="#0b3d91"/>
+      <rect x="-24" y="-26" width="48" height="10" fill="#1E90FF" fill-opacity="0.4" stroke="#0b3d91"/>
+      <rect x="-24" y="6" width="48" height="10" fill="#1E90FF" fill-opacity="0.4" stroke="#0b3d91"/>
+      <rect x="24" y="-30" width="10" height="60" fill="#1E90FF" fill-opacity="0.4" stroke="#8b0000" stroke-dasharray="4 2"/>
+      <rect x="-16" y="-10" width="40" height="10" fill="#1E90FF" fill-opacity="0.4" stroke="#8b0000" stroke-dasharray="4 2"/>
+      <circle cx="-29" cy="-34" r="4" fill="#FF8C00" stroke="#b45f00"/>
+    </g>
+  </defs>
+  <g font-size="12" text-anchor="middle" fill="#333">
+    <use href="#momu" x="0" y="0" transform="translate(70,80)"/>
+    <use href="#momu" transform="translate(230,80) rotate(90)"/>
+    <use href="#momu" transform="translate(390,80) rotate(180)"/>
+    <use href="#momu" transform="translate(550,80) rotate(270)"/>
+    <use href="#momu" transform="translate(70,230) scale(1,-1)"/>
+    <use href="#momu" transform="translate(230,230) scale(-1,1)"/>
+    <use href="#momu" transform="translate(390,230) rotate(90) scale(1,-1)"/>
+    <use href="#momu" transform="translate(550,230) rotate(90) scale(-1,1)"/>
+    <text x="70" y="140">R0</text><text x="230" y="140">R90</text><text x="390" y="140">R180</text><text x="550" y="140">R270</text>
+    <text x="70" y="290">MX</text><text x="230" y="290">MY</text><text x="390" y="290">MX·R90</text><text x="550" y="290">MY·R90</text>
+  </g>
+  <g font-size="12" fill="#555">
+    <text x="20" y="322">Orange dot = A-terminal strap corner (routing asymmetry). Square symmetric plates → all 8 transforms geometrically legal,</text>
+    <text x="20" y="340">BUT: R90/R270 rotate finger direction (litho bias axis — all matched units must agree, like resistor orientation); mirrors move the strap corner → re-balance lead capacitance [ch8 Rule 10] or forbid.</text>
+  </g>
+</svg>
+</div>
+<p class="cap">Backs md §4. For VERTICAL kinds (MIM/poly-poly) transforms never swap plates (stack order is process-fixed), only strap/pin geometry.</p>
+
+<h2>(e) 3-D exploded isometric — MIM stack and poly-poly stack (30° parallelogram projection)</h2>
+<div class="panel">
+<svg width="760" height="640" viewBox="0 0 760 640">
+  <g stroke="#333" stroke-width="1">
+    <!-- ===== MIM (left), slabs bottom-up; each slab: front, top, right faces ===== -->
+    <!-- met_n bottom plate: ox=80 oy=580 w=200 t=22 dx=104 dy=60 -->
+    <path d="M80,580 L280,580 L280,558 L80,558 Z" fill="#1E90FF" fill-opacity="0.4"/>
+    <path d="M80,558 L280,558 L384,498 L184,498 Z" fill="#1E90FF" fill-opacity="0.55"/>
+    <path d="M280,580 L384,520 L384,498 L280,558 Z" fill="#1E90FF" fill-opacity="0.3"/>
+    <!-- dielectric: ox=90 oy=500 w=180 t=8 dx=94 dy=54 -->
+    <path d="M90,500 L270,500 L270,492 L90,492 Z" fill="#cccccc" fill-opacity="0.9"/>
+    <path d="M90,492 L270,492 L364,438 L184,438 Z" fill="#dddddd" fill-opacity="0.9"/>
+    <path d="M270,500 L364,446 L364,438 L270,492 Z" fill="#bbbbbb" fill-opacity="0.9"/>
+    <!-- capm: ox=95 oy=440 w=170 t=12 dx=88 dy=51 -->
+    <path d="M95,440 L265,440 L265,428 L95,428 Z" fill="#FF8C00" fill-opacity="0.5"/>
+    <path d="M95,428 L265,428 L353,377 L183,377 Z" fill="#FF8C00" fill-opacity="0.65"/>
+    <path d="M265,440 L353,389 L353,377 L265,428 Z" fill="#FF8C00" fill-opacity="0.4"/>
+    <!-- via cube: ox=165 oy=380 w=26 t=20 dx=22 dy=13 -->
+    <path d="M165,380 L191,380 L191,360 L165,360 Z" fill="#111"/>
+    <path d="M165,360 L191,360 L213,347 L187,347 Z" fill="#333"/>
+    <path d="M191,380 L213,367 L213,347 L191,360 Z" fill="#000"/>
+    <!-- met_n+1 strap: ox=120 oy=320 w=120 t=18 dx=104 dy=60 -->
+    <path d="M120,320 L240,320 L240,302 L120,302 Z" fill="#9370DB" fill-opacity="0.4"/>
+    <path d="M120,302 L240,302 L344,242 L224,242 Z" fill="#9370DB" fill-opacity="0.55"/>
+    <path d="M240,320 L344,260 L344,242 L240,302 Z" fill="#9370DB" fill-opacity="0.3"/>
+  </g>
+  <!-- explode guides -->
+  <g stroke="#999" stroke-dasharray="4 4">
+    <line x1="180" y1="558" x2="180" y2="310"/><line x1="178" y1="370" x2="178" y2="330"/>
+  </g>
+  <g font-size="13" fill="#222">
+    <text x="396" y="540">met_n — bottom plate (BOT)</text>
+    <text x="376" y="470">dielectric (thin nitride/oxide) [Rule 11]</text>
+    <text x="366" y="404">capm — MIM top plate</text>
+    <text x="226" y="366">via</text>
+    <text x="356" y="280">met_n+1 — top strap (TOP)</text>
+    <text x="80" y="612" font-size="14" font-weight="bold">MIM: VERTICAL plate-over-plate stack</text>
+  </g>
+
+  <!-- ===== poly-poly (right), w=140... slabs ===== -->
+  <g stroke="#333" stroke-width="1">
+    <!-- poly1: ox=470 oy=560 w=140 t=16 dx=69 dy=40 -->
+    <path d="M470,560 L610,560 L610,544 L470,544 Z" fill="#C23B22" fill-opacity="0.7"/>
+    <path d="M470,544 L610,544 L679,504 L539,504 Z" fill="#C23B22" fill-opacity="0.8"/>
+    <path d="M610,560 L679,520 L679,504 L610,544 Z" fill="#C23B22" fill-opacity="0.55"/>
+    <!-- dielectric: ox=476 oy=498 w=128 t=6 dx=63 dy=37 -->
+    <path d="M476,498 L604,498 L604,492 L476,492 Z" fill="#cccccc"/>
+    <path d="M476,492 L604,492 L667,455 L539,455 Z" fill="#dddddd"/>
+    <path d="M604,498 L667,461 L667,455 L604,492 Z" fill="#bbbbbb"/>
+    <!-- poly2: ox=480 oy=448 w=120 t=14 dx=60 dy=35 -->
+    <path d="M480,448 L600,448 L600,434 L480,434 Z" fill="#C23B22" fill-opacity="0.45"/>
+    <path d="M480,434 L600,434 L660,399 L540,399 Z" fill="#C23B22" fill-opacity="0.55"/>
+    <path d="M600,448 L660,413 L660,399 L600,434 Z" fill="#C23B22" fill-opacity="0.35"/>
+    <!-- contact cube: ox=530 oy=392 w=18 t=14 dx=15 dy=9 -->
+    <path d="M530,392 L548,392 L548,378 L530,378 Z" fill="#111"/>
+    <path d="M530,378 L548,378 L563,369 L545,369 Z" fill="#333"/>
+    <path d="M548,392 L563,383 L563,369 L548,378 Z" fill="#000"/>
+    <!-- li strap: ox=495 oy=344 w=90 t=12 dx=69 dy=40 -->
+    <path d="M495,344 L585,344 L585,332 L495,332 Z" fill="#4682B4" fill-opacity="0.5"/>
+    <path d="M495,332 L585,332 L654,292 L564,292 Z" fill="#4682B4" fill-opacity="0.65"/>
+    <path d="M585,344 L654,304 L654,292 L585,332 Z" fill="#4682B4" fill-opacity="0.4"/>
+  </g>
+  <g font-size="12" fill="#222">
+    <text x="470" y="582">poly1 — bottom plate (opaque)</text>
+    <text x="608" y="475">ONO / nitride dielectric</text>
+    <text x="470" y="424">poly2 — top plate (lighter tint)</text>
+    <text x="568" y="384">contact</text>
+    <text x="470" y="318">li strap</text>
+    <text x="470" y="612" font-size="14" font-weight="bold">poly-poly: VERTICAL stack</text>
+  </g>
+  <text x="80" y="40" font-size="13" fill="#555">Exploded vertically for clarity — in silicon each layer sits directly on the one below. Depth axis at 30°.</text>
+  <text x="80" y="60" font-size="12" fill="#555">Poly-poly top plate depletes (±5 % V-mod) [ch7]; MIM metallic plates do not — hence ranking in md §1.</text>
+</svg>
+</div>
+<p class="cap">Backs md §1 — the two VERTICAL construction kinds. MOM (view b) is the LATERAL counterpart.</p>
+
+<h2>(f) Shield cross-section — array with electrostatic shield above and well below</h2>
+<div class="panel">
+<svg width="780" height="360" viewBox="0 0 780 360">
+  <defs>
+    <pattern id="hatchF" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="none"/><line x1="0" y1="0" x2="0" y2="8" stroke="#888" stroke-width="2.5"/>
+    </pattern>
+  </defs>
+  <!-- substrate -->
+  <rect x="40" y="280" width="700" height="40" fill="#2E8B57" fill-opacity="0.25" stroke="#2E8B57"/>
+  <text x="50" y="305" font-size="12" fill="#1d5c39">p-substrate</text>
+  <!-- nwell bottom shield -->
+  <rect x="70" y="252" width="620" height="28" fill="#F5DEB3" fill-opacity="0.35" stroke="#b8860b" stroke-dasharray="6 4"/>
+  <text x="290" y="271" font-size="12" fill="#8a6d1a">nwell / NBL under array — bottom shield, tied to quiet supply [ch8 Rule 6]</text>
+  <!-- unit caps: x = 100,190,280,370,460,550, width 70 -->
+  <g>
+    <!-- dummy left -->
+    <rect x="100" y="210" width="70" height="14" fill="#1E90FF" fill-opacity="0.4" stroke="#1565c0"/>
+    <rect x="108" y="196" width="54" height="10" fill="#FF8C00" fill-opacity="0.5" stroke="#b45f00"/>
+    <rect x="100" y="196" width="70" height="28" fill="url(#hatchF)" stroke="#666"/>
+    <!-- active 4 -->
+    <rect x="190" y="210" width="70" height="14" fill="#1E90FF" fill-opacity="0.4" stroke="#1565c0"/>
+    <rect x="198" y="196" width="54" height="10" fill="#FF8C00" fill-opacity="0.5" stroke="#b45f00"/>
+    <rect x="220" y="186" width="10" height="10" fill="#111"/>
+    <rect x="280" y="210" width="70" height="14" fill="#1E90FF" fill-opacity="0.4" stroke="#1565c0"/>
+    <rect x="288" y="196" width="54" height="10" fill="#FF8C00" fill-opacity="0.5" stroke="#b45f00"/>
+    <rect x="310" y="186" width="10" height="10" fill="#111"/>
+    <rect x="370" y="210" width="70" height="14" fill="#1E90FF" fill-opacity="0.4" stroke="#1565c0"/>
+    <rect x="378" y="196" width="54" height="10" fill="#FF8C00" fill-opacity="0.5" stroke="#b45f00"/>
+    <rect x="400" y="186" width="10" height="10" fill="#111"/>
+    <rect x="460" y="210" width="70" height="14" fill="#1E90FF" fill-opacity="0.4" stroke="#1565c0"/>
+    <rect x="468" y="196" width="54" height="10" fill="#FF8C00" fill-opacity="0.5" stroke="#b45f00"/>
+    <rect x="490" y="186" width="10" height="10" fill="#111"/>
+    <!-- dummy right -->
+    <rect x="550" y="210" width="70" height="14" fill="#1E90FF" fill-opacity="0.4" stroke="#1565c0"/>
+    <rect x="558" y="196" width="54" height="10" fill="#FF8C00" fill-opacity="0.5" stroke="#b45f00"/>
+    <rect x="550" y="196" width="70" height="28" fill="url(#hatchF)" stroke="#666"/>
+  </g>
+  <text x="96" y="244" font-size="11" fill="#555">dummy</text>
+  <text x="546" y="244" font-size="11" fill="#555">dummy</text>
+  <text x="300" y="244" font-size="11" fill="#555">active units (bottom plate met_n, capm, via)</text>
+  <!-- top shield -->
+  <rect x="88" y="130" width="544" height="18" fill="#9370DB" fill-opacity="0.4" stroke="#5e35b1"/>
+  <text x="180" y="122" font-size="12" fill="#5e35b1">electrostatic shield plate (met_n+2, analog ground) [ch8 Rule 8]</text>
+  <!-- ground symbol on shield -->
+  <line x1="660" y1="139" x2="700" y2="139" stroke="#5e35b1"/><line x1="700" y1="139" x2="700" y2="158" stroke="#5e35b1"/>
+  <line x1="690" y1="158" x2="710" y2="158" stroke="#5e35b1" stroke-width="2"/><line x1="694" y1="164" x2="706" y2="164" stroke="#5e35b1" stroke-width="2"/><line x1="697" y1="170" x2="703" y2="170" stroke="#5e35b1" stroke-width="2"/>
+  <!-- overhang annotation -->
+  <line x1="88" y1="160" x2="100" y2="160" stroke="#c00" stroke-width="1.5"/>
+  <line x1="88" y1="152" x2="88" y2="168" stroke="#c00"/><line x1="100" y1="152" x2="100" y2="168" stroke="#c00"/>
+  <text x="40" y="182" font-size="12" fill="#c00">overhang ≥5 µm (with dummies)</text>
+  <text x="40" y="198" font-size="12" fill="#c00">≥50 µm if no dummies [Rule 8]</text>
+  <!-- crossing lead over shield -->
+  <line x1="60" y1="96" x2="720" y2="96" stroke="#1E90FF" stroke-width="6" stroke-opacity="0.5"/>
+  <text x="300" y="88" font-size="11" fill="#1565c0">unrelated analog lead — may cross only above the shield (never digital) [Rule 8]</text>
+</svg>
+</div>
+<p class="cap">Backs md §5. Shield contains fringing (allows narrow dummies), blocks coupling; well/NBL isolates the bottom plates from substrate noise.</p>
+
+</body>
+</html>

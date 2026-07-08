@@ -1,0 +1,13 @@
+[package]
+name = "pnr-placement"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pnr-engine = { path = "../engine" }
+pnr-cells = { path = "../cells" }
+pnr-constraints = { path = "../constraints" }
+
+[dev-dependencies]
+# tests parse SPICE fixtures; dev-only so pnr-core can re-export the backend
+pnr-core = { path = "../../frontend/core" }

@@ -1,0 +1,8 @@
+[package]
+name = "pnr-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pnr-cells = { path = "../cells" }
+pnr-constraints = { path = "../constraints" }

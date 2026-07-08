@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BJT shape catalog — diagrams</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:24px auto;max-width:1060px;color:#222;background:#fff}
+  h1{font-size:22px} h2{font-size:17px;margin-top:40px;border-bottom:1px solid #ddd;padding-bottom:4px}
+  p.cap{font-size:13px;color:#555;max-width:900px}
+  .views{display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start}
+  svg{background:#fdfdfd;border:1px solid #e5e5e5;border-radius:4px}
+  .legend{display:flex;flex-wrap:wrap;gap:10px 22px;font-size:13px;margin:12px 0 4px 0}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:22px;height:14px;display:inline-block;border:1px solid #999}
+  text{font-family:system-ui,sans-serif}
+  /* shared layer palette */
+  .diff  {fill:#2E8B57;fill-opacity:.55}
+  .poly  {fill:#C23B22;fill-opacity:.70}
+  .ct    {fill:#111}
+  .li    {fill:#4682B4;fill-opacity:.50}
+  .m1    {fill:#1E90FF;fill-opacity:.40}
+  .tank  {fill:#F5DEB3;fill-opacity:.35;stroke:#8B7355;stroke-width:1.5;stroke-dasharray:6 4}
+  .nbl   {fill:#DAA520;fill-opacity:.30;stroke:#DAA520;stroke-width:1.2;stroke-dasharray:4 3}
+  .dnp   {fill:#B8860B;fill-opacity:.50}
+  .pbase {fill:#C71585;fill-opacity:.35}
+  .nem   {fill:#2E8B57;fill-opacity:.70}
+  .lbl   {font-size:11px;fill:#333}
+  .lbl2  {font-size:10px;fill:#666}
+  .ttl   {font-size:12px;font-weight:600;fill:#222}
+  .lead  {stroke:#888;stroke-width:.8;fill:none}
+  .iarrow{stroke:#D22;stroke-width:2.2;fill:none}
+</style>
+</head>
+<body>
+
+<h1>BJT shape/variant catalog — diagrams</h1>
+<p class="cap">Companion to <a href="bjt.md">bjt.md</a>. Sources: Hastings AOAL ch9/ch10, PNR_ANALOG 01_S0 §3.A.4/4.A.2/6.A.0/9.A.5.</p>
+
+<div class="legend">
+  <span><i class="sw" style="background:rgba(46,139,87,.55)"></i>diff / active</span>
+  <span><i class="sw" style="background:rgba(46,139,87,.70)"></i>N+ emitter</span>
+  <span><i class="sw" style="background:rgba(194,59,34,.70)"></i>poly</span>
+  <span><i class="sw" style="background:#111"></i>contact</span>
+  <span><i class="sw" style="background:rgba(70,130,180,.50)"></i>li</span>
+  <span><i class="sw" style="background:rgba(30,144,255,.40)"></i>met1 / field plate</span>
+  <span><i class="sw" style="background:rgba(245,222,179,.35);border:1.5px dashed #8B7355"></i>N-well / tank</span>
+  <span><i class="sw" style="background:rgba(218,165,32,.30);border:1.2px dashed #DAA520"></i>NBL</span>
+  <span><i class="sw" style="background:rgba(184,134,11,.50)"></i>deep-N+</span>
+  <span><i class="sw" style="background:rgba(199,21,133,.35)"></i>P-base / P-type</span>
+  <span><i class="sw" style="background:repeating-linear-gradient(45deg,#fff 0 3px,#999 3px 5px)"></i>dummy</span>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="view-a">(a) Vertical NPN — top view, concentric C-B-E ring order</h2>
+<p class="cap">Collector ring outermost, base ring, square emitter innermost (CBE) — packs
+emitters of matched devices closest for thermal matching [Hastings ch10 §10.2.3]. Tank and
+NBL dashed; deep-N+ sinker under the collector ring's right edge.</p>
+<svg width="380" height="340" viewBox="0 0 380 340" role="img" aria-label="vertical NPN top view">
+  <rect class="tank" x="22" y="22" width="296" height="296"/>
+  <rect class="nbl"  x="34" y="34" width="272" height="272"/>
+  <!-- collector: N+ diff annulus -->
+  <path class="diff" fill-rule="evenodd"
+        d="M52,52 H288 V288 H52 Z M84,84 H256 V256 H84 Z"/>
+  <!-- deep-N+ sinker strip under right collector leg -->
+  <rect class="dnp" x="258" y="56" width="26" height="228"/>
+  <!-- collector contacts -->
+  <g class="ct">
+    <rect x="62" y="62" width="8" height="8"/><rect x="62" y="132" width="8" height="8"/>
+    <rect x="62" y="202" width="8" height="8"/><rect x="62" y="268" width="8" height="8"/>
+    <rect x="268" y="62" width="8" height="8"/><rect x="268" y="132" width="8" height="8"/>
+    <rect x="268" y="202" width="8" height="8"/><rect x="268" y="268" width="8" height="8"/>
+    <rect x="132" y="62" width="8" height="8"/><rect x="200" y="62" width="8" height="8"/>
+    <rect x="132" y="268" width="8" height="8"/><rect x="200" y="268" width="8" height="8"/>
+  </g>
+  <!-- P-base island -->
+  <rect class="pbase" x="100" y="100" width="140" height="140"/>
+  <!-- base contact ring (must be common-centroid for matched arrays) -->
+  <g class="ct">
+    <rect x="108" y="108" width="7" height="7"/><rect x="166" y="108" width="7" height="7"/><rect x="224" y="108" width="7" height="7"/>
+    <rect x="108" y="166" width="7" height="7"/><rect x="224" y="166" width="7" height="7"/>
+    <rect x="108" y="224" width="7" height="7"/><rect x="166" y="224" width="7" height="7"/><rect x="224" y="224" width="7" height="7"/>
+  </g>
+  <!-- N+ emitter, square, contacts match emitter shape -->
+  <rect class="nem" x="140" y="140" width="60" height="60"/>
+  <g class="ct">
+    <rect x="152" y="152" width="9" height="9"/><rect x="179" y="152" width="9" height="9"/>
+    <rect x="152" y="179" width="9" height="9"/><rect x="179" y="179" width="9" height="9"/>
+  </g>
+  <text class="ttl" x="26" y="16">Vertical NPN (plan)</text>
+  <text class="lbl" x="56" y="304">C ring (N+ diff)</text>
+  <text class="lbl" x="104" y="252">B ring (P-base)</text>
+  <text class="lbl" x="146" y="134">E (N+)</text>
+  <text class="lbl2" x="230" y="48">deep-N+ sinker</text>
+  <line class="lead" x1="266" y1="52" x2="270" y2="60"/>
+  <text class="lbl2" x="26" y="332">tank (dashed) · NBL (gold dashed) — oversize NBL &ge;150% epi vs pattern shift</text>
+</svg>
+
+<!-- ================================================================ -->
+<h2 id="view-b">(b) Lateral PNP — top view, circular/annular with field plate</h2>
+<p class="cap">Central minimum-size circular emitter (base diffusion), annular collector
+(base diffusion), neutral N-epi base between them. Met1 field plate tied to the emitter
+covers the whole base gap and overlaps the collector 2–3&nbsp;µm — <b>REQUIRED</b>
+[PNR_ANALOG 6.A.00; Hastings ch9 §9.2.3]. Radially symmetric &rarr; orientation-immune.</p>
+<svg width="430" height="340" viewBox="0 0 430 340" role="img" aria-label="lateral PNP top view">
+  <rect class="tank" x="20" y="26" width="330" height="294"/>
+  <rect class="nbl"  x="32" y="38" width="306" height="270"/>
+  <!-- annular collector (P base-diff) with contact tab to the right -->
+  <path class="pbase" fill-rule="evenodd"
+        d="M185,63 a110,110 0 1,0 0.0001,0 Z M185,113 a60,60 0 1,0 0.0001,0 Z"/>
+  <rect class="pbase" x="280" y="158" width="58" height="30"/>
+  <g class="ct">
+    <rect x="290" y="166" width="8" height="8"/><rect x="306" y="166" width="8" height="8"/>
+    <rect x="322" y="166" width="8" height="8"/>
+  </g>
+  <!-- field plate (met1, tied to emitter) over neutral base, overlapping collector -->
+  <circle class="m1" cx="185" cy="173" r="78"/>
+  <!-- circular emitter (P base-diff plug), min size, 32/64-gon in real layout -->
+  <circle class="pbase" cx="185" cy="173" r="30" style="fill-opacity:.55"/>
+  <circle class="ct" cx="185" cy="173" r="5"/>
+  <!-- base contact: N+ strip in tank -->
+  <rect class="diff" x="40" y="286" width="290" height="16"/>
+  <g class="ct">
+    <rect x="60" y="290" width="8" height="8"/><rect x="140" y="290" width="8" height="8"/>
+    <rect x="220" y="290" width="8" height="8"/><rect x="300" y="290" width="8" height="8"/>
+  </g>
+  <text class="ttl" x="24" y="18">Lateral PNP (plan)</text>
+  <text class="lbl" x="168" y="152">E (min!)</text>
+  <text class="lbl" x="120" y="86">C (annular)</text>
+  <text class="lbl" x="344" y="176">C tab</text>
+  <text class="lbl" x="336" y="298">B (N+ tank contact)</text>
+  <text class="lbl2" x="240" y="248">field plate (met1&rarr;E)</text>
+  <line class="lead" x1="238" y1="243" x2="228" y2="222"/>
+  <text class="lbl2" x="24" y="334">neutral base = exposed tank between E and C · NBL must reach inner C edge</text>
+</svg>
+
+<!-- ================================================================ -->
+<h2 id="view-c">(c) 8:1 ratioed pair — 3×3 "eight around one"</h2>
+<p class="cap">Center unit = 1&times; device Q<sub>B</sub>; the 8 surrounding identical units form
+the 8&times; device Q<sub>A</sub>. Spans 1/3 the length of a linear array &rarr; ~10&times; lower
+quadratic gradient residue [Hastings ch10 fig 10.24B; PNR_ANALOG 4.A.2]. Shared tank: each
+NPN needs its deep-N+ plug [PNR_ANALOG 6.A.0].</p>
+<svg width="400" height="400" viewBox="0 0 400 400" role="img" aria-label="3x3 eight around one array">
+  <rect class="tank" x="18" y="26" width="364" height="348"/>
+  <rect class="nbl"  x="30" y="38" width="340" height="324"/>
+  <!-- 3x3 unit emitters: unit = P-base square + N+ emitter + contact -->
+  <g>
+    <!-- row/col pitch 110, origin 55,60 ; unit box 90 -->
+    <!-- unit template drawn explicitly for the 9 positions -->
+    <!-- labels: A = 8x device unit, B = 1x center -->
+    <!-- r0c0 --><rect class="pbase" x="55"  y="60"  width="90" height="90"/><rect class="nem" x="77"  y="82"  width="46" height="46"/><rect class="ct" x="96"  y="101" width="8" height="8"/><text class="lbl" x="60"  y="76">A1</text>
+    <!-- r0c1 --><rect class="pbase" x="155" y="60"  width="90" height="90"/><rect class="nem" x="177" y="82"  width="46" height="46"/><rect class="ct" x="196" y="101" width="8" height="8"/><text class="lbl" x="160" y="76">A2</text>
+    <!-- r0c2 --><rect class="pbase" x="255" y="60"  width="90" height="90"/><rect class="nem" x="277" y="82"  width="46" height="46"/><rect class="ct" x="296" y="101" width="8" height="8"/><text class="lbl" x="260" y="76">A3</text>
+    <!-- r1c0 --><rect class="pbase" x="55"  y="160" width="90" height="90"/><rect class="nem" x="77"  y="182" width="46" height="46"/><rect class="ct" x="96"  y="201" width="8" height="8"/><text class="lbl" x="60"  y="176">A4</text>
+    <!-- r1c1 CENTER 1x -->
+    <rect class="pbase" x="155" y="160" width="90" height="90" style="stroke:#C71585;stroke-width:2"/>
+    <rect class="nem" x="177" y="182" width="46" height="46"/><rect class="ct" x="196" y="201" width="8" height="8"/>
+    <text class="lbl" x="160" y="176" style="font-weight:700">B (1&times;)</text>
+    <!-- r1c2 --><rect class="pbase" x="255" y="160" width="90" height="90"/><rect class="nem" x="277" y="182" width="46" height="46"/><rect class="ct" x="296" y="201" width="8" height="8"/><text class="lbl" x="260" y="176">A5</text>
+    <!-- r2c0 --><rect class="pbase" x="55"  y="260" width="90" height="90"/><rect class="nem" x="77"  y="282" width="46" height="46"/><rect class="ct" x="96"  y="301" width="8" height="8"/><text class="lbl" x="60"  y="276">A6</text>
+    <!-- r2c1 --><rect class="pbase" x="155" y="260" width="90" height="90"/><rect class="nem" x="177" y="282" width="46" height="46"/><rect class="ct" x="196" y="301" width="8" height="8"/><text class="lbl" x="160" y="276">A7</text>
+    <!-- r2c2 --><rect class="pbase" x="255" y="260" width="90" height="90"/><rect class="nem" x="277" y="282" width="46" height="46"/><rect class="ct" x="296" y="301" width="8" height="8"/><text class="lbl" x="260" y="276">A8</text>
+  </g>
+  <text class="ttl" x="22" y="16">8:1 ratioed pair — Q_A = A1..A8 (8&times;), Q_B = center (1&times;)</text>
+  <text class="lbl2" x="22" y="392">base contacts of the 9 units form their own common-centroid pattern (omitted for clarity)</text>
+</svg>
+
+<!-- ================================================================ -->
+<h2 id="view-d">(d) Ratioed quad 4:1:1:4</h2>
+<p class="cap">Two 4&times; devices (Q1, Q4) and two 1&times; devices (Q2, Q3):
+&Delta;V<sub>BE</sub> = V<sub>T</sub>·ln(4·4/1·1) = V<sub>T</sub>·ln(16) = <b>72&nbsp;mV</b>
+[Hastings ch10 Eq 10.14]. Cross-coupled 2&times;5 unit grid — centroids of all four devices
+coincide, cancelling linear thermal <i>and</i> stress gradients. Hatched columns = dummy
+units at the array edges (§5).</p>
+<svg width="520" height="240" viewBox="0 0 520 240" role="img" aria-label="ratioed quad 4:1:1:4">
+  <defs>
+    <pattern id="hatch-d" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+      <rect width="6" height="6" fill="#fff"/><rect width="2.5" height="6" fill="#999"/>
+    </pattern>
+  </defs>
+  <rect class="tank" x="14" y="30" width="492" height="176"/>
+  <rect class="nbl"  x="24" y="40" width="472" height="156"/>
+  <!-- 2 rows x 7 cols, pitch 68, unit 58; cols 0 and 6 are dummies -->
+  <g>
+    <!-- dummies left -->
+    <rect x="34"  y="52"  width="58" height="58" fill="url(#hatch-d)" stroke="#999"/>
+    <rect x="34"  y="126" width="58" height="58" fill="url(#hatch-d)" stroke="#999"/>
+    <!-- row 1: Q1 Q1 Q2 Q4 Q4 -->
+    <rect class="pbase" x="102" y="52" width="58" height="58"/><rect class="nem" x="117" y="67" width="28" height="28"/><rect class="ct" x="127" y="77" width="8" height="8"/><text class="lbl" x="106" y="64">Q1</text>
+    <rect class="pbase" x="170" y="52" width="58" height="58"/><rect class="nem" x="185" y="67" width="28" height="28"/><rect class="ct" x="195" y="77" width="8" height="8"/><text class="lbl" x="174" y="64">Q1</text>
+    <rect class="pbase" x="238" y="52" width="58" height="58" style="stroke:#C71585;stroke-width:2"/><rect class="nem" x="253" y="67" width="28" height="28"/><rect class="ct" x="263" y="77" width="8" height="8"/><text class="lbl" x="242" y="64" style="font-weight:700">Q2</text>
+    <rect class="pbase" x="306" y="52" width="58" height="58"/><rect class="nem" x="321" y="67" width="28" height="28"/><rect class="ct" x="331" y="77" width="8" height="8"/><text class="lbl" x="310" y="64">Q4</text>
+    <rect class="pbase" x="374" y="52" width="58" height="58"/><rect class="nem" x="389" y="67" width="28" height="28"/><rect class="ct" x="399" y="77" width="8" height="8"/><text class="lbl" x="378" y="64">Q4</text>
+    <!-- row 2: Q4 Q4 Q3 Q1 Q1 (cross-coupled) -->
+    <rect class="pbase" x="102" y="126" width="58" height="58"/><rect class="nem" x="117" y="141" width="28" height="28"/><rect class="ct" x="127" y="151" width="8" height="8"/><text class="lbl" x="106" y="138">Q4</text>
+    <rect class="pbase" x="170" y="126" width="58" height="58"/><rect class="nem" x="185" y="141" width="28" height="28"/><rect class="ct" x="195" y="151" width="8" height="8"/><text class="lbl" x="174" y="138">Q4</text>
+    <rect class="pbase" x="238" y="126" width="58" height="58" style="stroke:#C71585;stroke-width:2"/><rect class="nem" x="253" y="141" width="28" height="28"/><rect class="ct" x="263" y="151" width="8" height="8"/><text class="lbl" x="242" y="138" style="font-weight:700">Q3</text>
+    <rect class="pbase" x="306" y="126" width="58" height="58"/><rect class="nem" x="321" y="141" width="28" height="28"/><rect class="ct" x="331" y="151" width="8" height="8"/><text class="lbl" x="310" y="138">Q1</text>
+    <rect class="pbase" x="374" y="126" width="58" height="58"/><rect class="nem" x="389" y="141" width="28" height="28"/><rect class="ct" x="399" y="151" width="8" height="8"/><text class="lbl" x="378" y="138">Q1</text>
+    <!-- dummies right -->
+    <rect x="442" y="52"  width="58" height="58" fill="url(#hatch-d)" stroke="#999"/>
+    <rect x="442" y="126" width="58" height="58" fill="url(#hatch-d)" stroke="#999"/>
+  </g>
+  <text class="ttl" x="16" y="20">Ratioed quad 4:1:1:4 — Q1=4&times;, Q2=1&times;, Q3=1&times;, Q4=4&times;, common centroid &oplus;</text>
+  <text class="lbl" x="262" y="122" style="font-size:14px">&oplus;</text>
+  <text class="lbl2" x="16" y="228">dummy units (hatched) equalize the edge environment of the outer active units</text>
+</svg>
+
+<!-- ================================================================ -->
+<h2 id="view-e">(e) Orientation chart — 8 dihedral transforms</h2>
+<p class="cap">An <i>asymmetric</i> stripe-emitter NPN (emitter stripe offset left, base contact
+top-left) under the 8 dihedral transforms. All 8 are DRC-legal for BJTs, but matched devices
+must be <b>superimposable by translation only</b> — mixing transforms inside a matched group
+introduces misalignment- and stress-asymmetry [Hastings ch10/ch13; PNR_ANALOG 9.A.3/9.A.5].
+Right: circular lateral PNP — identical under all 8 &rarr; <b>orientation-immune</b>.</p>
+<svg width="960" height="220" viewBox="0 0 960 220" role="img" aria-label="orientation chart">
+  <defs>
+    <g id="bjt-glyph-e">
+      <rect class="tank" x="2" y="2" width="66" height="66"/>
+      <rect class="pbase" x="10" y="10" width="34" height="50"/>
+      <rect class="nem" x="16" y="16" width="12" height="38"/>
+      <rect class="ct" x="19" y="20" width="6" height="6"/>
+      <rect class="diff" x="50" y="10" width="12" height="50"/>
+      <rect class="ct" x="53" y="14" width="6" height="6"/>
+    </g>
+  </defs>
+  <!-- 8 tiles, 70x70 glyph, x pitch 105, top row y=30 -->
+  <g>
+    <use href="#bjt-glyph-e" transform="matrix(1 0 0 1 20 40)"/>       <text class="lbl" x="40" y="128">R0</text>
+    <use href="#bjt-glyph-e" transform="matrix(0 1 -1 0 195 40)"/>     <text class="lbl" x="140" y="128">R90</text>
+    <use href="#bjt-glyph-e" transform="matrix(-1 0 0 -1 300 150)"/>   <text class="lbl" x="245" y="128">R180</text>
+    <use href="#bjt-glyph-e" transform="matrix(0 -1 1 0 335 150)"/>    <text class="lbl" x="345" y="128">R270</text>
+    <use href="#bjt-glyph-e" transform="matrix(1 0 0 -1 440 150)"/>    <text class="lbl" x="452" y="128">MX</text>
+    <use href="#bjt-glyph-e" transform="matrix(-1 0 0 1 615 40)"/>     <text class="lbl" x="558" y="128">MY</text>
+    <use href="#bjt-glyph-e" transform="matrix(0 1 1 0 650 40)"/>      <text class="lbl" x="650" y="128">MX&middot;R90</text>
+    <use href="#bjt-glyph-e" transform="matrix(0 -1 -1 0 825 150)"/>   <text class="lbl" x="750" y="128">MY&middot;R90</text>
+  </g>
+  <!-- circular lateral PNP: orientation-immune -->
+  <g transform="translate(845,40)">
+    <rect class="tank" x="0" y="0" width="90" height="70"/>
+    <path class="pbase" fill-rule="evenodd" d="M45,7 a28,28 0 1,0 0.0001,0 Z M45,21 a14,14 0 1,0 0.0001,0 Z"/>
+    <circle class="pbase" cx="45" cy="35" r="7" style="fill-opacity:.55"/>
+    <circle class="ct" cx="45" cy="35" r="2"/>
+  </g>
+  <text class="lbl" x="848" y="128">circular lateral PNP:</text>
+  <text class="lbl" x="848" y="141">all 8 identical</text>
+  <text class="lbl2" x="20" y="170">Stripe/one-sided cells: transforms change bbox pin sides and stress axis alignment — record chi + transform per instance.</text>
+  <text class="lbl2" x="20" y="186">Square concentric cell (view a): invariant under all 8. Vertical devices: prefer vertical PNP for bandgaps — &pi;_T = &minus;13.3 vs &minus;43.4 &times;10&supmin;&sup1;&sup2; Pa&supmin;&sup1; for NPN (100 Si).</text>
+  <text class="lbl2" x="20" y="202">Lateral PNP &pi;_R = +11.6 &times;10&supmin;&sup1;&sup2; Pa&supmin;&sup1; (small); radial symmetry cancels in-plane stress orientation entirely [PNR_ANALOG 9.A.5].</text>
+</svg>
+
+<!-- ================================================================ -->
+<h2 id="view-f">(f) Vertical NPN — 3D isometric cutaway + cross-section (REQUIRED: vertical-current device)</h2>
+<p class="cap">Current leaves the N+ emitter <b>downward</b> through the P-base into the N-epi
+drift region, is collected by the NBL buried layer, flows <b>laterally</b> through the NBL,
+then <b>up</b> the deep-N+ sinker column to the surface collector contact
+[Hastings ch9 §9.2.1, fig 9.11]. Plan views hide this entirely — hence the 3D view.
+30&deg; parallelogram projection; depth axis = (+0.866, &minus;0.5).</p>
+<div class="views">
+<svg width="560" height="380" viewBox="0 0 560 380" role="img" aria-label="isometric cutaway vertical NPN">
+  <defs>
+    <marker id="ah-f" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#D22"/>
+    </marker>
+  </defs>
+  <!-- ============ P-substrate slab (h=50) ============ -->
+  <polygon class="pbase" points="60,320 340,320 340,270 60,270" style="fill-opacity:.28"/>
+  <polygon class="pbase" points="340,320 444,260 444,210 340,270" style="fill-opacity:.20"/>
+  <!-- ============ NBL slab (h=18) ============ -->
+  <polygon class="nbl" points="60,270 340,270 340,252 60,252"/>
+  <polygon class="nbl" points="340,270 444,210 444,192 340,252" style="fill-opacity:.22"/>
+  <!-- ============ N-epi tank slab (h=55) ============ -->
+  <polygon class="tank" points="60,252 340,252 340,197 60,197"/>
+  <polygon class="tank" points="340,252 444,192 444,137 340,197" style="fill-opacity:.25"/>
+  <polygon class="tank" points="60,197 340,197 444,137 164,137" style="fill-opacity:.45"/>
+  <!-- ============ deep-N+ sinker column, x 296..330, full epi height, depth 30 ============ -->
+  <polygon class="dnp" points="296,252 330,252 330,197 296,197"/>
+  <polygon class="dnp" points="330,252 356,237 356,182 330,197" style="fill-opacity:.38"/>
+  <polygon class="dnp" points="296,197 330,197 356,182 322,182"/>
+  <!-- collector contact on sinker top -->
+  <rect class="ct" x="314" y="186" width="9" height="7"/>
+  <!-- ============ P-base island: front notch + top parallelogram (depth 60 -> +52,-30) ====== -->
+  <polygon class="pbase" points="120,197 220,197 220,217 120,217"/>
+  <polygon class="pbase" points="120,197 220,197 272,167 172,167"/>
+  <!-- base contact on base top -->
+  <rect class="ct" x="238" y="176" width="8" height="7"/>
+  <!-- ============ N+ emitter: front notch + top parallelogram (depth 40 -> +35,-20) ======== -->
+  <polygon class="nem" points="140,197 180,197 180,207 140,207"/>
+  <polygon class="nem" points="140,197 180,197 215,177 175,177"/>
+  <rect class="ct" x="172" y="184" width="8" height="7"/>
+  <!-- ============ current path E -> down -> NBL lateral -> up sinker ============ -->
+  <polyline class="iarrow" marker-end="url(#ah-f)"
+            points="160,202 160,258 313,258 313,205"/>
+  <text class="lbl" x="166" y="240" fill="#D22" style="fill:#D22">I_C</text>
+  <!-- ============ labels ============ -->
+  <text class="ttl" x="20" y="20">Vertical NPN — isometric cutaway (front face = cross-section)</text>
+  <text class="lbl" x="60" y="338">P-substrate</text>
+  <text class="lbl" x="20" y="266">NBL</text><line class="lead" x1="46" y1="262" x2="62" y2="261"/>
+  <text class="lbl" x="20" y="225">N-epi tank</text><line class="lead" x1="66" y1="221" x2="80" y2="220"/>
+  <text class="lbl" x="356" y="230">deep-N+ sinker</text><line class="lead" x1="354" y1="226" x2="332" y2="224"/>
+  <text class="lbl" x="252" y="160">P-base</text><line class="lead" x1="250" y1="162" x2="240" y2="172"/>
+  <text class="lbl" x="120" y="168">N+ emitter</text><line class="lead" x1="160" y1="171" x2="168" y2="180"/>
+  <text class="lbl" x="330" y="176">C contact</text>
+  <text class="lbl2" x="20" y="362">E&rarr;C path: down through base + drift region, laterally along NBL, up the sinker.</text>
+  <text class="lbl2" x="20" y="376">Omitting the sinker: R_C ~5 k&Omega; vs ~200 &Omega; with it [Hastings ch9 §9.2.1].</text>
+</svg>
+
+<svg width="360" height="240" viewBox="0 0 360 240" role="img" aria-label="2D cross section vertical NPN">
+  <text class="ttl" x="16" y="20">Same device — 2D cross-section</text>
+  <!-- substrate -->
+  <rect class="pbase" x="20" y="180" width="320" height="40" style="fill-opacity:.28"/>
+  <!-- NBL -->
+  <rect class="nbl" x="40" y="162" width="280" height="18"/>
+  <!-- epi -->
+  <rect class="tank" x="20" y="70" width="320" height="110" style="fill:none"/>
+  <rect class="tank" x="21" y="71" width="318" height="91" style="stroke:none"/>
+  <!-- sinker -->
+  <rect class="dnp" x="256" y="70" width="34" height="94"/>
+  <!-- base island -->
+  <rect class="pbase" x="80" y="70" width="110" height="28"/>
+  <!-- emitter -->
+  <rect class="nem" x="100" y="70" width="40" height="12"/>
+  <!-- contacts -->
+  <rect class="ct" x="114" y="62" width="10" height="8"/>
+  <rect class="ct" x="164" y="62" width="10" height="8"/>
+  <rect class="ct" x="266" y="62" width="12" height="8"/>
+  <text class="lbl" x="106" y="56">E</text><text class="lbl" x="160" y="56">B</text><text class="lbl" x="264" y="56">C</text>
+  <text class="lbl" x="24" y="212">P-substrate</text>
+  <text class="lbl" x="46" y="176">NBL</text>
+  <text class="lbl" x="30" y="120">N-epi</text>
+  <text class="lbl2" x="294" y="120">deep-N+</text>
+  <text class="lbl" x="86" y="112">P-base</text>
+  <polyline class="iarrow" marker-end="url(#ah-f)" points="120,84 120,168 272,168 272,102"/>
+</svg>
+</div>
+
+</body>
+</html>

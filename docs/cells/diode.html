@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Diode shape catalog — diagrams</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px auto; max-width: 1080px; color: #222; }
+  h1 { font-size: 22px; } h2 { font-size: 17px; margin-top: 40px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  p.note { font-size: 13px; color: #555; max-width: 72ch; }
+  svg { background: #fff; border: 1px solid #e0e0e0; margin: 8px 0; }
+  .lbl { font: 12px system-ui, sans-serif; fill: #222; }
+  .lbl-s { font: 10px system-ui, sans-serif; fill: #444; }
+  .ttl { font: bold 13px system-ui, sans-serif; fill: #111; }
+  .leader { stroke: #888; stroke-width: 1; fill: none; }
+  /* shared layer palette */
+  .diff  { fill: #2E8B57; fill-opacity: .55; }
+  .poly  { fill: #C23B22; fill-opacity: .7; }
+  .ct    { fill: #111; }
+  .li    { fill: #4682B4; fill-opacity: .5; }
+  .m1    { fill: #1E90FF; fill-opacity: .4; }
+  .nwell { fill: #F5DEB3; fill-opacity: .35; stroke: #8B7355; stroke-width: 1.5; stroke-dasharray: 6 3; }
+  .psdm  { fill: none; stroke: #C71585; stroke-width: 1.5; stroke-dasharray: 5 3; }
+  .nsdm  { fill: none; stroke: #2E8B57; stroke-width: 1.5; stroke-dasharray: 5 3; }
+  .nbl   { fill: #DAA520; fill-opacity: .3; stroke: #DAA520; stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .schk  { fill: #708090; fill-opacity: .6; }
+  .dummy { fill: url(#hatch); stroke: #999; }
+  .sub   { fill: #EDE4D8; }
+  .subcut{ fill: #DCCFBC; stroke: #6b5d4c; stroke-width: 1; }
+  .subside{ fill: #C8BBA8; stroke: #6b5d4c; stroke-width: 1; }
+  .cur   { stroke: #B22222; stroke-width: 2.5; fill: none; }
+</style>
+</head>
+<body>
+
+<h1>Diode — shape catalog diagrams</h1>
+<p class="note">Companion to <code>docs/cells/diode.md</code>. Sources: Hastings AOAL ch11 (diodes), ch14 (ESD).
+All views share the palette below. Junction diodes are <b>vertical-current</b> devices — see view (f).</p>
+
+<!-- shared defs + legend -->
+<svg width="1040" height="60" viewBox="0 0 1040 60" role="img" aria-label="legend">
+  <defs>
+    <pattern id="hatch" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+      <rect width="6" height="6" fill="#f2f2f2"/><line x1="0" y1="0" x2="0" y2="6" stroke="#999" stroke-width="2"/>
+    </pattern>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#B22222"/>
+    </marker>
+  </defs>
+  <g>
+    <rect x="10"  y="12" width="26" height="16" class="diff"/><text x="42"  y="24" class="lbl">diff/active</text>
+    <rect x="120" y="12" width="26" height="16" class="poly"/><text x="152" y="24" class="lbl">poly</text>
+    <rect x="200" y="14" width="12" height="12" class="ct"/><text x="218" y="24" class="lbl">contact</text>
+    <rect x="285" y="12" width="26" height="16" class="li"/><text x="317" y="24" class="lbl">li</text>
+    <rect x="350" y="12" width="26" height="16" class="m1"/><text x="382" y="24" class="lbl">met1</text>
+    <rect x="425" y="12" width="26" height="16" class="nwell"/><text x="457" y="24" class="lbl">nwell</text>
+    <rect x="510" y="12" width="26" height="16" class="psdm"/><text x="542" y="24" class="lbl">psdm (P+)</text>
+    <rect x="615" y="12" width="26" height="16" class="nsdm"/><text x="647" y="24" class="lbl">nsdm (N+)</text>
+    <rect x="720" y="12" width="26" height="16" class="nbl"/><text x="752" y="24" class="lbl">NBL</text>
+    <rect x="800" y="12" width="26" height="16" class="schk"/><text x="832" y="24" class="lbl">silicide/Schottky</text>
+    <rect x="945" y="12" width="26" height="16" class="dummy"/><text x="977" y="24" class="lbl">dummy</text>
+  </g>
+</svg>
+
+<!-- ============================ (a) ============================ -->
+<h2>(a) Square P+/N-well junction diode — top view</h2>
+<p class="note">P+ anode island centered in an N-well; N+ cathode ring contacts the well.
+Square (max area/perimeter) geometry is the matching-preferred shape [Hastings 11.3 Rule 6].
+Doc §1, §2, §6.</p>
+<svg width="440" height="330" viewBox="0 0 440 330">
+  <text x="10" y="18" class="ttl">(a) P+/N-well junction diode</text>
+  <rect x="40" y="40" width="280" height="250" class="nwell"/>
+  <!-- N+ cathode ring: four diff bands + nsdm outline -->
+  <rect x="60" y="60" width="240" height="38" class="diff"/>
+  <rect x="60" y="232" width="240" height="38" class="diff"/>
+  <rect x="60" y="98" width="38" height="134" class="diff"/>
+  <rect x="262" y="98" width="38" height="134" class="diff"/>
+  <rect x="55" y="55" width="250" height="220" class="nsdm"/>
+  <!-- cathode contacts -->
+  <g class="ct">
+    <rect x="72" y="74" width="10" height="10"/><rect x="112" y="74" width="10" height="10"/>
+    <rect x="152" y="74" width="10" height="10"/><rect x="192" y="74" width="10" height="10"/>
+    <rect x="232" y="74" width="10" height="10"/><rect x="272" y="74" width="10" height="10"/>
+    <rect x="72" y="246" width="10" height="10"/><rect x="112" y="246" width="10" height="10"/>
+    <rect x="152" y="246" width="10" height="10"/><rect x="192" y="246" width="10" height="10"/>
+    <rect x="232" y="246" width="10" height="10"/><rect x="272" y="246" width="10" height="10"/>
+    <rect x="72" y="120" width="10" height="10"/><rect x="72" y="160" width="10" height="10"/><rect x="72" y="200" width="10" height="10"/>
+    <rect x="278" y="120" width="10" height="10"/><rect x="278" y="160" width="10" height="10"/><rect x="278" y="200" width="10" height="10"/>
+  </g>
+  <!-- P+ anode island -->
+  <rect x="140" y="130" width="80" height="74" class="diff"/>
+  <rect x="134" y="124" width="92" height="86" class="psdm"/>
+  <g class="ct">
+    <rect x="156" y="146" width="10" height="10"/><rect x="194" y="146" width="10" height="10"/>
+    <rect x="156" y="180" width="10" height="10"/><rect x="194" y="180" width="10" height="10"/>
+  </g>
+  <rect x="148" y="138" width="64" height="58" class="li"/>
+  <rect x="164" y="40" width="32" height="130" class="m1"/>
+  <!-- labels -->
+  <text x="330" y="70" class="lbl">N+ cathode ring (K)</text>
+  <path class="leader" d="M328,66 L290,74"/>
+  <text x="330" y="150" class="lbl">P+ anode (A)</text>
+  <path class="leader" d="M328,146 L226,160"/>
+  <text x="330" y="295" class="lbl">N-well</text>
+  <path class="leader" d="M328,291 L318,286"/>
+  <text x="150" y="34" class="lbl">A (met1)</text>
+</svg>
+
+<!-- ============================ (b) ============================ -->
+<h2>(b) Interdigitated stripe ESD diode — top view</h2>
+<p class="note">Alternating anode/cathode fingers: minimum series R (&le;3&nbsp;&Omega; for 2&nbsp;kV HBM)
+and maximum junction periphery. P+ strips are drawn outermost so all N+ fingers conduct
+uniformly [Hastings 11.2.1]. Hatched end strips = optional dummies for matched arrays.
+Doc §1, §2, §3.</p>
+<svg width="560" height="300" viewBox="0 0 560 300">
+  <text x="10" y="18" class="ttl">(b) interdigitated PSD/N-well ESD diode</text>
+  <rect x="40" y="40" width="400" height="240" class="nwell"/>
+  <!-- top anode bus, bottom cathode bus -->
+  <rect x="55" y="48" width="370" height="22" class="m1"/>
+  <rect x="55" y="250" width="370" height="22" class="m1"/>
+  <text x="430" y="64" class="lbl">A bus</text>
+  <text x="430" y="266" class="lbl">K bus</text>
+  <!-- dummy end strips -->
+  <rect x="62" y="80" width="18" height="160" class="dummy"/>
+  <rect x="400" y="80" width="18" height="160" class="dummy"/>
+  <!-- fingers: P at 92, 188, 284, 380-ish; N at 140, 236, 332 -->
+  <g>
+    <!-- P anode fingers (connect up) -->
+    <rect x="92"  y="70" width="20" height="160" class="diff"/><rect x="88"  y="66" width="28" height="168" class="psdm"/>
+    <rect x="188" y="70" width="20" height="160" class="diff"/><rect x="184" y="66" width="28" height="168" class="psdm"/>
+    <rect x="284" y="70" width="20" height="160" class="diff"/><rect x="280" y="66" width="28" height="168" class="psdm"/>
+    <rect x="378" y="70" width="20" height="160" class="diff"/><rect x="374" y="66" width="28" height="168" class="psdm"/>
+    <!-- N cathode fingers (connect down) -->
+    <rect x="140" y="90" width="20" height="160" class="diff"/><rect x="136" y="86" width="28" height="168" class="nsdm"/>
+    <rect x="236" y="90" width="20" height="160" class="diff"/><rect x="232" y="86" width="28" height="168" class="nsdm"/>
+    <rect x="330" y="90" width="20" height="160" class="diff"/><rect x="326" y="86" width="28" height="168" class="nsdm"/>
+  </g>
+  <!-- contacts along fingers -->
+  <g class="ct">
+    <rect x="97"  y="84" width="10" height="10"/><rect x="97"  y="124" width="10" height="10"/><rect x="97"  y="164" width="10" height="10"/><rect x="97"  y="204" width="10" height="10"/>
+    <rect x="193" y="84" width="10" height="10"/><rect x="193" y="124" width="10" height="10"/><rect x="193" y="164" width="10" height="10"/><rect x="193" y="204" width="10" height="10"/>
+    <rect x="289" y="84" width="10" height="10"/><rect x="289" y="124" width="10" height="10"/><rect x="289" y="164" width="10" height="10"/><rect x="289" y="204" width="10" height="10"/>
+    <rect x="383" y="84" width="10" height="10"/><rect x="383" y="124" width="10" height="10"/><rect x="383" y="164" width="10" height="10"/><rect x="383" y="204" width="10" height="10"/>
+    <rect x="145" y="104" width="10" height="10"/><rect x="145" y="144" width="10" height="10"/><rect x="145" y="184" width="10" height="10"/><rect x="145" y="224" width="10" height="10"/>
+    <rect x="241" y="104" width="10" height="10"/><rect x="241" y="144" width="10" height="10"/><rect x="241" y="184" width="10" height="10"/><rect x="241" y="224" width="10" height="10"/>
+    <rect x="335" y="104" width="10" height="10"/><rect x="335" y="144" width="10" height="10"/><rect x="335" y="184" width="10" height="10"/><rect x="335" y="224" width="10" height="10"/>
+  </g>
+  <!-- finger metal stubs -->
+  <g class="m1">
+    <rect x="94"  y="48" width="16" height="140"/><rect x="190" y="48" width="16" height="140"/>
+    <rect x="286" y="48" width="16" height="140"/><rect x="380" y="48" width="16" height="140"/>
+    <rect x="142" y="112" width="16" height="160"/><rect x="238" y="112" width="16" height="160"/><rect x="334" y="112" width="16" height="160"/>
+  </g>
+  <text x="452" y="120" class="lbl">P+ fingers outermost</text>
+  <path class="leader" d="M450,116 L400,110"/>
+  <text x="452" y="170" class="lbl">dummy strip</text>
+  <path class="leader" d="M450,166 L420,160"/>
+</svg>
+
+<!-- ============================ (c) ============================ -->
+<h2>(c) Waffle diode — top view</h2>
+<p class="note">3&times;3 array of small P+ anode islands in a common N+ cathode plane inside one
+N-well: periphery scales with island count at fixed anode area (tunable A/P), and the array
+doubles as a unit-device formation [Hastings 11.3 Rule 5 — arrays of moderate devices].
+Doc §2, §3.</p>
+<svg width="440" height="340" viewBox="0 0 440 340">
+  <text x="10" y="18" class="ttl">(c) 3&times;3 waffle diode</text>
+  <rect x="40" y="40" width="290" height="280" class="nwell"/>
+  <!-- common cathode N+ plane -->
+  <rect x="55" y="55" width="260" height="250" class="diff"/>
+  <rect x="50" y="50" width="270" height="260" class="nsdm"/>
+  <!-- islands: wells punched in plane, P+ inside -->
+  <g>
+    <!-- row/col centers at 100, 185, 270 (x), 105, 180, 255 (y) -->
+    <g>
+      <rect x="75"  y="80"  width="50" height="50" fill="#fff"/><rect x="80"  y="85"  width="40" height="40" class="diff"/><rect x="77"  y="82"  width="46" height="46" class="psdm"/><rect x="94"  y="99"  width="12" height="12" class="ct"/>
+      <rect x="160" y="80"  width="50" height="50" fill="#fff"/><rect x="165" y="85"  width="40" height="40" class="diff"/><rect x="162" y="82"  width="46" height="46" class="psdm"/><rect x="179" y="99"  width="12" height="12" class="ct"/>
+      <rect x="245" y="80"  width="50" height="50" fill="#fff"/><rect x="250" y="85"  width="40" height="40" class="diff"/><rect x="247" y="82"  width="46" height="46" class="psdm"/><rect x="264" y="99"  width="12" height="12" class="ct"/>
+      <rect x="75"  y="155" width="50" height="50" fill="#fff"/><rect x="80"  y="160" width="40" height="40" class="diff"/><rect x="77"  y="157" width="46" height="46" class="psdm"/><rect x="94"  y="174" width="12" height="12" class="ct"/>
+      <rect x="160" y="155" width="50" height="50" fill="#fff"/><rect x="165" y="160" width="40" height="40" class="diff"/><rect x="162" y="157" width="46" height="46" class="psdm"/><rect x="179" y="174" width="12" height="12" class="ct"/>
+      <rect x="245" y="155" width="50" height="50" fill="#fff"/><rect x="250" y="160" width="40" height="40" class="diff"/><rect x="247" y="157" width="46" height="46" class="psdm"/><rect x="264" y="174" width="12" height="12" class="ct"/>
+      <rect x="75"  y="230" width="50" height="50" fill="#fff"/><rect x="80"  y="235" width="40" height="40" class="diff"/><rect x="77"  y="232" width="46" height="46" class="psdm"/><rect x="94"  y="249" width="12" height="12" class="ct"/>
+      <rect x="160" y="230" width="50" height="50" fill="#fff"/><rect x="165" y="235" width="40" height="40" class="diff"/><rect x="162" y="232" width="46" height="46" class="psdm"/><rect x="179" y="249" width="12" height="12" class="ct"/>
+      <rect x="245" y="230" width="50" height="50" fill="#fff"/><rect x="250" y="235" width="40" height="40" class="diff"/><rect x="247" y="232" width="46" height="46" class="psdm"/><rect x="264" y="249" width="12" height="12" class="ct"/>
+    </g>
+  </g>
+  <!-- anode metal columns -->
+  <g class="m1">
+    <rect x="92" y="40" width="16" height="240"/><rect x="177" y="40" width="16" height="240"/><rect x="262" y="40" width="16" height="240"/>
+  </g>
+  <!-- cathode contacts on plane edges -->
+  <g class="ct">
+    <rect x="60" y="60" width="10" height="10"/><rect x="60" y="140" width="10" height="10"/><rect x="60" y="220" width="10" height="10"/><rect x="60" y="290" width="10" height="10"/>
+    <rect x="300" y="60" width="10" height="10"/><rect x="300" y="140" width="10" height="10"/><rect x="300" y="220" width="10" height="10"/><rect x="300" y="290" width="10" height="10"/>
+  </g>
+  <text x="340" y="70" class="lbl">common N+</text>
+  <text x="340" y="84" class="lbl">cathode plane</text>
+  <path class="leader" d="M338,66 L312,64"/>
+  <text x="340" y="170" class="lbl">P+ anode</text>
+  <text x="340" y="184" class="lbl">islands (A)</text>
+  <path class="leader" d="M338,166 L292,178"/>
+</svg>
+
+<!-- ============================ (d) ============================ -->
+<h2>(d) Schottky diode — top view, mandatory guard ring</h2>
+<p class="note">Silicide barrier over lightly doped N moat. The P+ <b>field-relief guard ring is
+mandatory</b> around the Schottky contact edge — it eliminates edge field intensification;
+breakdown becomes the PSD/N-well avalanche [Hastings 11.1.3, 11.2.3]. Elongated contact +
+surrounding cathode contacts mitigate the high CMOS series R. Doc §1, §5.</p>
+<svg width="480" height="330" viewBox="0 0 480 330">
+  <text x="10" y="18" class="ttl">(d) guard-ringed Schottky</text>
+  <rect x="40" y="40" width="320" height="270" class="nwell"/>
+  <!-- outer N+ cathode ring -->
+  <rect x="55" y="55" width="290" height="32" class="diff"/>
+  <rect x="55" y="263" width="290" height="32" class="diff"/>
+  <rect x="55" y="87" width="32" height="176" class="diff"/>
+  <rect x="313" y="87" width="32" height="176" class="diff"/>
+  <rect x="50" y="50" width="300" height="245" class="nsdm"/>
+  <g class="ct">
+    <rect x="66" y="66" width="10" height="10"/><rect x="126" y="66" width="10" height="10"/><rect x="186" y="66" width="10" height="10"/><rect x="246" y="66" width="10" height="10"/><rect x="306" y="66" width="10" height="10"/>
+    <rect x="66" y="274" width="10" height="10"/><rect x="126" y="274" width="10" height="10"/><rect x="186" y="274" width="10" height="10"/><rect x="246" y="274" width="10" height="10"/><rect x="306" y="274" width="10" height="10"/>
+    <rect x="66" y="130" width="10" height="10"/><rect x="66" y="180" width="10" height="10"/><rect x="66" y="230" width="10" height="10"/>
+    <rect x="324" y="130" width="10" height="10"/><rect x="324" y="180" width="10" height="10"/><rect x="324" y="230" width="10" height="10"/>
+  </g>
+  <!-- central moat -->
+  <rect x="120" y="115" width="160" height="120" class="diff"/>
+  <!-- P+ guard ring around Schottky contact edge -->
+  <rect x="135" y="128" width="130" height="94" class="psdm"/>
+  <rect x="146" y="138" width="108" height="74" class="psdm"/>
+  <!-- Schottky barrier (silicide) inside guard ring -->
+  <rect x="152" y="144" width="96" height="62" class="schk"/>
+  <g class="ct">
+    <rect x="162" y="154" width="10" height="10"/><rect x="196" y="154" width="10" height="10"/><rect x="230" y="154" width="10" height="10"/>
+    <rect x="162" y="186" width="10" height="10"/><rect x="196" y="186" width="10" height="10"/><rect x="230" y="186" width="10" height="10"/>
+  </g>
+  <rect x="184" y="40" width="32" height="140" class="m1"/>
+  <!-- labels -->
+  <text x="368" y="70" class="lbl">N+ cathode ring (K)</text>
+  <path class="leader" d="M366,66 L346,70"/>
+  <text x="368" y="140" class="lbl">P+ field-relief</text>
+  <text x="368" y="154" class="lbl">guard ring</text>
+  <text x="368" y="168" class="lbl">(MANDATORY)</text>
+  <path class="leader" d="M366,150 L268,160"/>
+  <text x="368" y="210" class="lbl">Schottky barrier</text>
+  <text x="368" y="224" class="lbl">(silicide, A)</text>
+  <path class="leader" d="M366,206 L250,196"/>
+  <text x="170" y="34" class="lbl">A (met1)</text>
+</svg>
+
+<!-- ============================ (e) ============================ -->
+<h2>(e) Orientation chart — stripe diode under the 8 dihedral transforms</h2>
+<p class="note">A stripe diode with distinct anode (top, met1 stub + chirality dot) and cathode ends.
+All 8 transforms are DRC-legal for a standalone junction diode; for <b>matched</b> pairs with
+asymmetric layouts, devices must be superimposable by <b>translation only</b> [doc §4;
+Hastings 11.3 Rules 7-8; GENERATOR_MODULARITY §2.3]. R90-family swaps the bbox aspect.</p>
+<svg width="900" height="180" viewBox="0 0 900 180">
+  <defs>
+    <g id="stripecell">
+      <rect x="-20" y="-40" width="40" height="80" class="diff"/>
+      <rect x="-24" y="-44" width="48" height="44" class="psdm"/>
+      <rect x="-24" y="0"   width="48" height="44" class="nsdm"/>
+      <rect x="-6" y="-30" width="12" height="12" class="ct"/>
+      <rect x="-6" y="18"  width="12" height="12" class="ct"/>
+      <rect x="-8" y="-52" width="16" height="30" class="m1"/>
+      <rect x="-8" y="16"  width="16" height="30" class="li"/>
+      <rect x="-18" y="-38" width="7" height="7" class="ct"/><!-- chirality marker -->
+    </g>
+  </defs>
+  <g transform="translate(60,90)"><use href="#stripecell"/></g><text x="52" y="165" class="lbl">R0</text>
+  <g transform="translate(170,90) rotate(90)"><use href="#stripecell"/></g><text x="158" y="165" class="lbl">R90</text>
+  <g transform="translate(280,90) rotate(180)"><use href="#stripecell"/></g><text x="264" y="165" class="lbl">R180</text>
+  <g transform="translate(390,90) rotate(270)"><use href="#stripecell"/></g><text x="374" y="165" class="lbl">R270</text>
+  <g transform="translate(500,90) scale(-1,1)"><use href="#stripecell"/></g><text x="490" y="165" class="lbl">MY</text>
+  <g transform="translate(610,90) scale(1,-1)"><use href="#stripecell"/></g><text x="600" y="165" class="lbl">MX</text>
+  <g transform="translate(720,90) scale(-1,1) rotate(90)"><use href="#stripecell"/></g><text x="698" y="165" class="lbl">MY·R90</text>
+  <g transform="translate(830,90) scale(1,-1) rotate(90)"><use href="#stripecell"/></g><text x="808" y="165" class="lbl">MX·R90</text>
+</svg>
+
+<!-- ============================ (f) ============================ -->
+<h2>(f) 3D isometric cutaway — P+/N-well diode (vertical current)</h2>
+<p class="note">Front half of the die removed at the anode centerline. Forward current crosses the
+P+/N-well junction <b>vertically</b>, spreads through the well, and returns to the surface N+
+cathode ring — this vertical path is why junction diodes get a 3D view. 30° isometric
+projection. Doc §1.</p>
+<svg width="600" height="480" viewBox="0 0 600 480">
+  <text x="10" y="18" class="ttl">(f) isometric cutaway, P+/N-well junction diode</text>
+  <!-- right side face of substrate (x=200 plane, y 100..200, depth 90) -->
+  <g transform="matrix(-0.866,0.5,0,1,443.2,240)">
+    <rect x="100" y="0" width="100" height="90" class="subside"/>
+  </g>
+  <!-- top face (y in 100..200 visible) origin O=(270,140) -->
+  <g transform="matrix(0.866,0.5,-0.866,0.5,270,140)">
+    <rect x="0" y="100" width="200" height="100" class="sub" stroke="#6b5d4c" stroke-width="1"/>
+    <rect x="10" y="100" width="180" height="90" class="nwell"/>
+    <!-- N+ ring visible portions -->
+    <rect x="20" y="160" width="160" height="20" class="diff"/>
+    <rect x="20" y="100" width="20" height="60" class="diff"/>
+    <rect x="160" y="100" width="20" height="60" class="diff"/>
+    <rect x="16" y="100" width="168" height="84" class="nsdm"/>
+    <!-- P+ island back half -->
+    <rect x="70" y="100" width="60" height="30" class="diff"/>
+    <rect x="66" y="100" width="68" height="34" class="psdm"/>
+    <rect x="90" y="104" width="20" height="14" class="ct"/>
+    <rect x="26" y="164" width="12" height="12" class="ct"/>
+    <rect x="162" y="164" width="12" height="12" class="ct"/>
+  </g>
+  <!-- cut face at y=100: origin (183.4, 190), x along iso-X, z straight down -->
+  <g transform="matrix(0.866,0.5,0,1,183.4,190)">
+    <rect x="0" y="0" width="200" height="90" class="subcut"/>
+    <rect x="10" y="0" width="180" height="55" fill="#F5DEB3" fill-opacity="0.7" stroke="#8B7355" stroke-width="1.5" stroke-dasharray="6 3"/>
+    <!-- N+ ring cross sections -->
+    <rect x="20" y="0" width="20" height="12" class="diff"/>
+    <rect x="160" y="0" width="20" height="12" class="diff"/>
+    <!-- P+ anode cross section -->
+    <rect x="70" y="0" width="60" height="12" class="diff"/>
+    <line x1="70" y1="12" x2="130" y2="12" stroke="#C71585" stroke-width="2"/>
+    <!-- vertical current arrows: down from anode, spread to cathode ring -->
+    <path class="cur" d="M100,14 L100,42" marker-end="url(#arr)"/>
+    <path class="cur" d="M100,42 C 72,58 42,44 31,16" marker-end="url(#arr)"/>
+    <path class="cur" d="M100,42 C 128,58 158,44 169,16" marker-end="url(#arr)"/>
+  </g>
+  <!-- labels -->
+  <text x="290" y="120" class="lbl">P+ anode island (A)</text>
+  <path class="leader" d="M288,124 L232,160"/>
+  <text x="440" y="170" class="lbl">N+ cathode ring (K)</text>
+  <path class="leader" d="M438,174 L392,208"/>
+  <text x="60" y="240" class="lbl">P+/N-well junction</text>
+  <path class="leader" d="M120,244 L250,252"/>
+  <text x="60" y="300" class="lbl">N-well tub</text>
+  <path class="leader" d="M112,296 L230,286"/>
+  <text x="60" y="360" class="lbl">P-substrate</text>
+  <path class="leader" d="M116,356 L220,338"/>
+  <text x="330" y="300" class="lbl" fill="#B22222">vertical current:</text>
+  <text x="330" y="314" class="lbl" fill="#B22222">A &#8595; junction &#8595; well &#8594; K ring</text>
+  <path class="leader" d="M328,296 L292,268"/>
+  <text x="440" y="380" class="lbl-s">30&#176; isometric, front half cut away</text>
+</svg>
+
+<h3 style="font-size:15px">2D cross-section of the same device</h3>
+<svg width="560" height="240" viewBox="0 0 560 240">
+  <text x="10" y="18" class="ttl">cross-section A&#8211;A' (through anode center)</text>
+  <rect x="40" y="60" width="440" height="150" class="sub" stroke="#6b5d4c"/>
+  <rect x="60" y="60" width="400" height="100" fill="#F5DEB3" fill-opacity="0.6" stroke="#8B7355" stroke-width="1.5" stroke-dasharray="6 3"/>
+  <!-- N+ ring -->
+  <rect x="80" y="60" width="50" height="22" class="diff"/>
+  <rect x="390" y="60" width="50" height="22" class="diff"/>
+  <rect x="78" y="56" width="54" height="28" class="nsdm"/>
+  <rect x="388" y="56" width="54" height="28" class="nsdm"/>
+  <!-- P+ anode -->
+  <rect x="210" y="60" width="100" height="22" class="diff"/>
+  <rect x="208" y="56" width="104" height="28" class="psdm"/>
+  <!-- contacts + metal -->
+  <rect x="250" y="44" width="20" height="18" class="ct"/>
+  <rect x="96" y="44" width="18" height="18" class="ct"/>
+  <rect x="406" y="44" width="18" height="18" class="ct"/>
+  <rect x="230" y="30" width="60" height="16" class="m1"/>
+  <rect x="86" y="30" width="40" height="16" class="m1"/>
+  <rect x="396" y="30" width="40" height="16" class="m1"/>
+  <text x="248" y="26" class="lbl">A</text>
+  <text x="100" y="26" class="lbl">K</text>
+  <text x="410" y="26" class="lbl">K</text>
+  <!-- current arrows -->
+  <path class="cur" d="M260,84 L260,125" marker-end="url(#arr)"/>
+  <path class="cur" d="M260,125 C 210,150 140,120 108,88" marker-end="url(#arr)"/>
+  <path class="cur" d="M260,125 C 310,150 380,120 412,88" marker-end="url(#arr)"/>
+  <text x="490" y="100" class="lbl">N-well</text>
+  <text x="490" y="200" class="lbl">P-sub</text>
+  <line x1="210" y1="82" x2="310" y2="82" stroke="#C71585" stroke-width="2"/>
+  <text x="318" y="96" class="lbl-s">junction (vertical current)</text>
+</svg>
+
+</body>
+</html>

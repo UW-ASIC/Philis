@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MOSFET Variant Catalog — Layout Views</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+         color: #111; background: #fff; max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+  h1 { font-size: 1.5em; border-bottom: 2px solid #ccc; padding-bottom: 6px; }
+  h2 { font-size: 1.15em; margin-top: 2em; }
+  figure { margin: 1.5em 0; border: 1px solid #ddd; border-radius: 6px; padding: 12px; background: #fcfcfc; }
+  figcaption { font-size: 0.9em; color: #333; margin-top: 8px; line-height: 1.4; }
+  .legend { border: 1px solid #bbb; border-radius: 6px; padding: 10px 14px; display: inline-block; background: #fafafa; }
+  .legend table { border-collapse: collapse; font-size: 0.85em; }
+  .legend td { padding: 3px 8px; }
+  .lg { display:inline-block; width: 26px; height: 14px; vertical-align: middle; border: 1px solid #999; }
+  svg text { font-family: inherit; }
+  code { background:#f0f0f0; padding: 1px 4px; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<h1>MOSFET Variant Catalog — GDS-style Layout Views</h1>
+<p>Companion to <code>docs/cells/mosfet.md</code>. All views are top-down layout (except the cross-section, Fig. g). Shared layer palette below.</p>
+
+<div class="legend">
+<strong>Layer legend</strong>
+<table>
+<tr><td><span class="lg" style="background:rgba(46,139,87,0.55)"></span></td><td>diff / active (#2E8B57, 55%)</td>
+    <td><span class="lg" style="background:rgba(194,59,34,0.7)"></span></td><td>poly gate (#C23B22, 70%)</td></tr>
+<tr><td><span class="lg" style="background:#111111"></span></td><td>licon / contact cut (#111)</td>
+    <td><span class="lg" style="background:rgba(70,130,180,0.5)"></span></td><td>li local interconnect (#4682B4, 50%)</td></tr>
+<tr><td><span class="lg" style="background:rgba(30,144,255,0.4)"></span></td><td>met1 (#1E90FF, 40%)</td>
+    <td><span class="lg" style="background:rgba(245,222,179,0.35); border:1px dashed #8B7355"></span></td><td>nwell (#F5DEB3, 35%, dashed outline)</td></tr>
+<tr><td><span class="lg" style="border:1px dashed #2E8B57; background:#fff"></span></td><td>nsdm implant (dashed, no fill)</td>
+    <td><span class="lg" style="border:1px dashed #C71585; background:#fff"></span></td><td>psdm implant (dashed, no fill)</td></tr>
+<tr><td><span class="lg" style="background:rgba(194,59,34,0.7); position:relative"><svg width="26" height="14"><rect width="26" height="14" fill="url(#h0)"/></svg></span></td>
+    <td colspan="3">dummy structures: layer color + diagonal hatch overlay</td></tr>
+</table>
+</div>
+
+<!-- shared defs for hatch used in legend swatch -->
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <pattern id="h0" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="6" stroke="#333" stroke-width="1.4"/>
+    </pattern>
+  </defs>
+</svg>
+
+<h2>Fig. (a) — Single-finger NMOS</h2>
+<figure>
+<svg width="420" height="300" viewBox="0 0 420 300">
+  <defs>
+    <pattern id="hatch" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="6" stroke="#333" stroke-width="1.4"/>
+    </pattern>
+  </defs>
+  <!-- nsdm implant outline -->
+  <rect x="60" y="70" width="220" height="120" fill="none" stroke="#2E8B57" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <!-- diff strip -->
+  <rect x="75" y="85" width="190" height="90" fill="#2E8B57" opacity="0.55"/>
+  <!-- poly gate with endcap extension -->
+  <rect x="160" y="60" width="20" height="140" fill="#C23B22" opacity="0.7"/>
+  <!-- gate landing stub below endcap -->
+  <rect x="160" y="200" width="20" height="34" fill="#C23B22" opacity="0.7"/>
+  <!-- li pads over S and D contact columns -->
+  <rect x="100" y="95" width="24" height="70" fill="#4682B4" opacity="0.5"/>
+  <rect x="216" y="95" width="24" height="70" fill="#4682B4" opacity="0.5"/>
+  <!-- licon squares: S column -->
+  <rect x="107" y="103" width="10" height="10" fill="#111111"/>
+  <rect x="107" y="125" width="10" height="10" fill="#111111"/>
+  <rect x="107" y="147" width="10" height="10" fill="#111111"/>
+  <!-- licon squares: D column -->
+  <rect x="223" y="103" width="10" height="10" fill="#111111"/>
+  <rect x="223" y="125" width="10" height="10" fill="#111111"/>
+  <rect x="223" y="147" width="10" height="10" fill="#111111"/>
+  <!-- met1 pads on pins -->
+  <rect x="98" y="93" width="28" height="74" fill="#1E90FF" opacity="0.4"/>
+  <rect x="214" y="93" width="28" height="74" fill="#1E90FF" opacity="0.4"/>
+  <rect x="156" y="204" width="28" height="26" fill="#1E90FF" opacity="0.4"/>
+  <!-- pin labels -->
+  <text x="112" y="82" font-size="15" font-weight="bold" text-anchor="middle">S</text>
+  <text x="228" y="82" font-size="15" font-weight="bold" text-anchor="middle">D</text>
+  <text x="170" y="252" font-size="15" font-weight="bold" text-anchor="middle">G</text>
+  <!-- dimension notes -->
+  <text x="300" y="130" font-size="12" fill="#555">poly endcap extension</text>
+  <line x1="296" y1="126" x2="184" y2="70" stroke="#888" stroke-width="1"/>
+  <text x="300" y="222" font-size="12" fill="#555">gate landing stub</text>
+  <line x1="296" y1="218" x2="184" y2="216" stroke="#888" stroke-width="1"/>
+</svg>
+<figcaption><strong>Fig. (a)</strong> Single-finger NMOS: diff strip (green), one vertical poly gate with endcap
+extension beyond the moat and a landing stub below for the met1 gate pad, S/D licon columns under li + met1 pads.
+Referenced from mosfet.md §1, §3. nsdm dashed outline marks the N+ S/D implant.</figcaption>
+</figure>
+
+<h2>Fig. (b) — 4-finger single device (shared S/D)</h2>
+<figure>
+<svg width="560" height="260" viewBox="0 0 560 260">
+  <rect x="40" y="60" width="480" height="110" fill="none" stroke="#2E8B57" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <!-- diff strip -->
+  <rect x="55" y="75" width="450" height="80" fill="#2E8B57" opacity="0.55"/>
+  <!-- 4 poly gates at pitch 90, first at x=130 -->
+  <rect x="130" y="50" width="18" height="130" fill="#C23B22" opacity="0.7"/>
+  <rect x="220" y="50" width="18" height="130" fill="#C23B22" opacity="0.7"/>
+  <rect x="310" y="50" width="18" height="130" fill="#C23B22" opacity="0.7"/>
+  <rect x="400" y="50" width="18" height="130" fill="#C23B22" opacity="0.7"/>
+  <!-- 5 S/D diffusion regions with li + licons, centers 92,184,274,364,455 -->
+  <rect x="80" y="85" width="20" height="60" fill="#4682B4" opacity="0.5"/>
+  <rect x="85" y="95" width="10" height="10" fill="#111111"/>
+  <rect x="85" y="120" width="10" height="10" fill="#111111"/>
+  <rect x="169" y="85" width="20" height="60" fill="#4682B4" opacity="0.5"/>
+  <rect x="174" y="95" width="10" height="10" fill="#111111"/>
+  <rect x="174" y="120" width="10" height="10" fill="#111111"/>
+  <rect x="259" y="85" width="20" height="60" fill="#4682B4" opacity="0.5"/>
+  <rect x="264" y="95" width="10" height="10" fill="#111111"/>
+  <rect x="264" y="120" width="10" height="10" fill="#111111"/>
+  <rect x="349" y="85" width="20" height="60" fill="#4682B4" opacity="0.5"/>
+  <rect x="354" y="95" width="10" height="10" fill="#111111"/>
+  <rect x="354" y="120" width="10" height="10" fill="#111111"/>
+  <rect x="438" y="85" width="20" height="60" fill="#4682B4" opacity="0.5"/>
+  <rect x="443" y="95" width="10" height="10" fill="#111111"/>
+  <rect x="443" y="120" width="10" height="10" fill="#111111"/>
+  <!-- labels S D S D S -->
+  <text x="90" y="205" font-size="15" font-weight="bold" text-anchor="middle">S</text>
+  <text x="179" y="205" font-size="15" font-weight="bold" text-anchor="middle">D</text>
+  <text x="269" y="205" font-size="15" font-weight="bold" text-anchor="middle">S</text>
+  <text x="359" y="205" font-size="15" font-weight="bold" text-anchor="middle">D</text>
+  <text x="448" y="205" font-size="15" font-weight="bold" text-anchor="middle">S</text>
+  <text x="280" y="235" font-size="12" fill="#555" text-anchor="middle">N_f = 4: interior diffusions shared &rarr; only 2 drain diffusions instead of 4</text>
+</svg>
+<figcaption><strong>Fig. (b)</strong> One device folded into 4 fingers on a single diff strip. Interior S/D
+diffusions are shared between adjacent fingers (S D S D S). Odd diffusion regions = source here
+(source-outer / drain-inner assignment, mosfet.md §5). Referenced from mosfet.md §2.1, §3.</figcaption>
+</figure>
+
+<h2>Fig. (c) — Matched pair, CC-1D ABBA with edge dummies</h2>
+<figure>
+<svg width="680" height="260" viewBox="0 0 680 260">
+  <rect x="30" y="60" width="620" height="110" fill="none" stroke="#2E8B57" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <!-- diff strip, stretched moat past dummies -->
+  <rect x="45" y="75" width="590" height="80" fill="#2E8B57" opacity="0.55"/>
+  <!-- dummy poly left (hatched) -->
+  <rect x="85" y="50" width="18" height="130" fill="#C23B22" opacity="0.7"/>
+  <rect x="85" y="50" width="18" height="130" fill="url(#hatch)" opacity="0.6"/>
+  <!-- active gates A B B A at x=185,285,385,485 -->
+  <rect x="185" y="50" width="18" height="130" fill="#C23B22" opacity="0.7"/>
+  <rect x="285" y="50" width="18" height="130" fill="#C23B22" opacity="0.7"/>
+  <rect x="385" y="50" width="18" height="130" fill="#C23B22" opacity="0.7"/>
+  <rect x="485" y="50" width="18" height="130" fill="#C23B22" opacity="0.7"/>
+  <!-- dummy poly right (hatched) -->
+  <rect x="585" y="50" width="18" height="130" fill="#C23B22" opacity="0.7"/>
+  <rect x="585" y="50" width="18" height="130" fill="url(#hatch)" opacity="0.6"/>
+  <!-- S/D li + licons between active gates: centers 144,244,344,444,544 -->
+  <rect x="134" y="85" width="20" height="60" fill="#4682B4" opacity="0.5"/>
+  <rect x="139" y="95" width="10" height="10" fill="#111111"/>
+  <rect x="139" y="120" width="10" height="10" fill="#111111"/>
+  <rect x="234" y="85" width="20" height="60" fill="#4682B4" opacity="0.5"/>
+  <rect x="239" y="95" width="10" height="10" fill="#111111"/>
+  <rect x="239" y="120" width="10" height="10" fill="#111111"/>
+  <rect x="334" y="85" width="20" height="60" fill="#4682B4" opacity="0.5"/>
+  <rect x="339" y="95" width="10" height="10" fill="#111111"/>
+  <rect x="339" y="120" width="10" height="10" fill="#111111"/>
+  <rect x="434" y="85" width="20" height="60" fill="#4682B4" opacity="0.5"/>
+  <rect x="439" y="95" width="10" height="10" fill="#111111"/>
+  <rect x="439" y="120" width="10" height="10" fill="#111111"/>
+  <rect x="534" y="85" width="20" height="60" fill="#4682B4" opacity="0.5"/>
+  <rect x="539" y="95" width="10" height="10" fill="#111111"/>
+  <rect x="539" y="120" width="10" height="10" fill="#111111"/>
+  <!-- gate labels -->
+  <text x="94" y="42" font-size="13" text-anchor="middle" fill="#555">dummy</text>
+  <text x="194" y="42" font-size="16" font-weight="bold" text-anchor="middle">A</text>
+  <text x="294" y="42" font-size="16" font-weight="bold" text-anchor="middle">B</text>
+  <text x="394" y="42" font-size="16" font-weight="bold" text-anchor="middle">B</text>
+  <text x="494" y="42" font-size="16" font-weight="bold" text-anchor="middle">A</text>
+  <text x="594" y="42" font-size="13" text-anchor="middle" fill="#555">dummy</text>
+  <!-- sequence notation -->
+  <text x="340" y="205" font-size="14" text-anchor="middle">D<tspan baseline-shift="sub" font-size="10">S</tspan> A<tspan baseline-shift="sub" font-size="10">D</tspan> B<tspan baseline-shift="sub" font-size="10">S</tspan> B<tspan baseline-shift="sub" font-size="10">D</tspan> A<tspan baseline-shift="sub" font-size="10">S</tspan> D &nbsp;&nbsp;[Hastings ch13, Table 13.3]</text>
+  <text x="340" y="232" font-size="12" fill="#555" text-anchor="middle">common centroid at array midpoint; chi(A) = chi(B) = 0; moat stretch &ge; 5 &micro;m past last active gate for exceptional tier</text>
+</svg>
+<figcaption><strong>Fig. (c)</strong> CC-1D ABBA matched pair on one shared diff strip with hatched dummy poly
+gates at each edge (same OD — an island dummy buffers nothing). Referenced from mosfet.md §3, §7.</figcaption>
+</figure>
+
+<h2>Fig. (d) — CC-2D cross-quad (AB / BA)</h2>
+<figure>
+<svg width="480" height="360" viewBox="0 0 480 360">
+  <!-- 2x2 cells at (60,40) and (250,40), (60,180), (250,180); each cell: diff 150x90, gate center -->
+  <!-- row 1: A B -->
+  <rect x="60" y="45" width="150" height="90" fill="#2E8B57" opacity="0.55"/>
+  <rect x="126" y="30" width="18" height="120" fill="#C23B22" opacity="0.7"/>
+  <rect x="80" y="65" width="10" height="10" fill="#111111"/>
+  <rect x="80" y="105" width="10" height="10" fill="#111111"/>
+  <rect x="180" y="65" width="10" height="10" fill="#111111"/>
+  <rect x="180" y="105" width="10" height="10" fill="#111111"/>
+  <text x="240" y="98" font-size="18" font-weight="bold" text-anchor="middle">A</text>
+
+  <rect x="270" y="45" width="150" height="90" fill="#2E8B57" opacity="0.55"/>
+  <rect x="336" y="30" width="18" height="120" fill="#C23B22" opacity="0.7"/>
+  <rect x="290" y="65" width="10" height="10" fill="#111111"/>
+  <rect x="290" y="105" width="10" height="10" fill="#111111"/>
+  <rect x="390" y="65" width="10" height="10" fill="#111111"/>
+  <rect x="390" y="105" width="10" height="10" fill="#111111"/>
+  <text x="450" y="98" font-size="18" font-weight="bold" text-anchor="middle">B</text>
+
+  <!-- row 2: B A -->
+  <rect x="60" y="195" width="150" height="90" fill="#2E8B57" opacity="0.55"/>
+  <rect x="126" y="180" width="18" height="120" fill="#C23B22" opacity="0.7"/>
+  <rect x="80" y="215" width="10" height="10" fill="#111111"/>
+  <rect x="80" y="255" width="10" height="10" fill="#111111"/>
+  <rect x="180" y="215" width="10" height="10" fill="#111111"/>
+  <rect x="180" y="255" width="10" height="10" fill="#111111"/>
+  <text x="240" y="248" font-size="18" font-weight="bold" text-anchor="middle">B</text>
+
+  <rect x="270" y="195" width="150" height="90" fill="#2E8B57" opacity="0.55"/>
+  <rect x="336" y="180" width="18" height="120" fill="#C23B22" opacity="0.7"/>
+  <rect x="290" y="215" width="10" height="10" fill="#111111"/>
+  <rect x="290" y="255" width="10" height="10" fill="#111111"/>
+  <rect x="390" y="215" width="10" height="10" fill="#111111"/>
+  <rect x="390" y="255" width="10" height="10" fill="#111111"/>
+  <text x="450" y="248" font-size="18" font-weight="bold" text-anchor="middle">A</text>
+
+  <!-- centroid marker -->
+  <circle cx="240" cy="165" r="4" fill="none" stroke="#111" stroke-width="1.5"/>
+  <line x1="232" y1="165" x2="248" y2="165" stroke="#111" stroke-width="1.5"/>
+  <line x1="240" y1="157" x2="240" y2="173" stroke="#111" stroke-width="1.5"/>
+  <text x="240" y="340" font-size="12" fill="#555" text-anchor="middle">shared centroid (+): both chi_H and chi_V must match; ~60% of the residual mismatch of 1-D ABBA [Hastings ch13]</text>
+</svg>
+<figcaption><strong>Fig. (d)</strong> Cross-quad: 2&times;2 common-centroid array, diagonal sections belong to the same
+device (AB over BA). Best for W &asymp; L sections. Referenced from mosfet.md §3.</figcaption>
+</figure>
+
+<h2>Fig. (e) — Orientation chart: 8 dihedral transforms of an asymmetric F-marker device</h2>
+<figure>
+<svg width="880" height="420" viewBox="0 0 880 420">
+  <defs>
+    <!-- asymmetric F-marker MOSFET: diff + off-center gate + one-sided tab, drawn in a 120x100 box centered at (0,0) -->
+    <g id="fmark">
+      <rect x="-55" y="-35" width="110" height="70" fill="#2E8B57" opacity="0.55"/>
+      <rect x="-25" y="-48" width="14" height="96" fill="#C23B22" opacity="0.7"/>
+      <!-- asymmetry: tab on the upper-right of the diff + second short poly stub upper area (F shape) -->
+      <rect x="20" y="-48" width="14" height="40" fill="#C23B22" opacity="0.7"/>
+      <rect x="-42" y="-12" width="9" height="9" fill="#111111"/>
+      <rect x="40" y="-12" width="9" height="9" fill="#111111"/>
+    </g>
+  </defs>
+
+  <!-- 2 x 4 grid, cell 210x190, centers at x=110,320,530,740 y=105,300 -->
+  <!-- R0 -->
+  <g transform="translate(110,95)"><use href="#fmark"/></g>
+  <text x="110" y="170" font-size="14" font-weight="bold" text-anchor="middle">R0</text>
+  <rect x="70" y="178" width="80" height="20" rx="4" fill="#e6f6e6" stroke="#2c8a2c"/>
+  <text x="110" y="192" font-size="12" text-anchor="middle" fill="#2c8a2c">LEGAL</text>
+
+  <!-- R90 -->
+  <g transform="translate(320,95) rotate(90)"><use href="#fmark"/></g>
+  <text x="320" y="170" font-size="14" font-weight="bold" text-anchor="middle">R90</text>
+  <rect x="270" y="178" width="100" height="20" rx="4" fill="#fdeaea" stroke="#b02a2a"/>
+  <text x="320" y="192" font-size="12" text-anchor="middle" fill="#b02a2a">FORBIDDEN</text>
+
+  <!-- R180 -->
+  <g transform="translate(530,95) rotate(180)"><use href="#fmark"/></g>
+  <text x="530" y="170" font-size="14" font-weight="bold" text-anchor="middle">R180</text>
+  <rect x="490" y="178" width="80" height="20" rx="4" fill="#e6f6e6" stroke="#2c8a2c"/>
+  <text x="530" y="192" font-size="12" text-anchor="middle" fill="#2c8a2c">LEGAL</text>
+
+  <!-- R270 -->
+  <g transform="translate(740,95) rotate(270)"><use href="#fmark"/></g>
+  <text x="740" y="170" font-size="14" font-weight="bold" text-anchor="middle">R270</text>
+  <rect x="690" y="178" width="100" height="20" rx="4" fill="#fdeaea" stroke="#b02a2a"/>
+  <text x="740" y="192" font-size="12" text-anchor="middle" fill="#b02a2a">FORBIDDEN</text>
+
+  <!-- MX: mirror about x-axis (flip vertically) -->
+  <g transform="translate(110,290) scale(1,-1)"><use href="#fmark"/></g>
+  <text x="110" y="365" font-size="14" font-weight="bold" text-anchor="middle">MX</text>
+  <rect x="70" y="373" width="80" height="20" rx="4" fill="#e6f6e6" stroke="#2c8a2c"/>
+  <text x="110" y="387" font-size="12" text-anchor="middle" fill="#2c8a2c">LEGAL</text>
+
+  <!-- MY: mirror about y-axis (flip horizontally) -->
+  <g transform="translate(320,290) scale(-1,1)"><use href="#fmark"/></g>
+  <text x="320" y="365" font-size="14" font-weight="bold" text-anchor="middle">MY</text>
+  <rect x="280" y="373" width="80" height="20" rx="4" fill="#e6f6e6" stroke="#2c8a2c"/>
+  <text x="320" y="387" font-size="12" text-anchor="middle" fill="#2c8a2c">LEGAL</text>
+
+  <!-- MX o R90 -->
+  <g transform="translate(530,290) scale(1,-1) rotate(90)"><use href="#fmark"/></g>
+  <text x="530" y="365" font-size="14" font-weight="bold" text-anchor="middle">MX&#8728;R90</text>
+  <rect x="480" y="373" width="100" height="20" rx="4" fill="#fdeaea" stroke="#b02a2a"/>
+  <text x="530" y="387" font-size="12" text-anchor="middle" fill="#b02a2a">FORBIDDEN</text>
+
+  <!-- MY o R90 -->
+  <g transform="translate(740,290) scale(-1,1) rotate(90)"><use href="#fmark"/></g>
+  <text x="740" y="365" font-size="14" font-weight="bold" text-anchor="middle">MY&#8728;R90</text>
+  <rect x="690" y="373" width="100" height="20" rx="4" fill="#fdeaea" stroke="#b02a2a"/>
+  <text x="740" y="387" font-size="12" text-anchor="middle" fill="#b02a2a">FORBIDDEN</text>
+
+  <text x="440" y="412" font-size="12" fill="#555" text-anchor="middle">Badges = matched cell under DIRECTIONAL pocket implants: rotations 0&deg;/180&deg; and mirrors OK, any 90&deg; component NEVER [Hastings ch12 12.2.7]. Unmatched cells: all 8 legal.</text>
+</svg>
+<figcaption><strong>Fig. (e)</strong> An asymmetric F-marker MOSFET (off-center gate + one-sided stub, so every
+transform is visually distinct) under the 8 dihedral transforms. Legality badges show the
+matched-under-directional-pocket-implant case; see the full legality table in mosfet.md §4.1 for the
+unmatched / plain-matched / non-self-aligned columns.</figcaption>
+</figure>
+
+<h2>Fig. (f) — Per-finger chi metric</h2>
+<figure>
+<svg width="640" height="330" viewBox="0 0 640 330">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 z" fill="#111"/>
+    </marker>
+  </defs>
+  <!-- top: chi = 0, S D S D S with alternating flow -->
+  <text x="20" y="28" font-size="14" font-weight="bold">chi = 0 (ideal): S D S D S &mdash; alternating current direction</text>
+  <rect x="40" y="45" width="420" height="60" fill="#2E8B57" opacity="0.55"/>
+  <rect x="110" y="35" width="14" height="80" fill="#C23B22" opacity="0.7"/>
+  <rect x="200" y="35" width="14" height="80" fill="#C23B22" opacity="0.7"/>
+  <rect x="290" y="35" width="14" height="80" fill="#C23B22" opacity="0.7"/>
+  <rect x="380" y="35" width="14" height="80" fill="#C23B22" opacity="0.7"/>
+  <text x="72" y="132" font-size="13" text-anchor="middle">S</text>
+  <text x="162" y="132" font-size="13" text-anchor="middle">D</text>
+  <text x="252" y="132" font-size="13" text-anchor="middle">S</text>
+  <text x="342" y="132" font-size="13" text-anchor="middle">D</text>
+  <text x="432" y="132" font-size="13" text-anchor="middle">S</text>
+  <!-- arrows: finger1 S->D right (+1), finger2 D<-S left (-1), finger3 right, finger4 left -->
+  <line x1="80" y1="75" x2="150" y2="75" stroke="#111" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="245" y1="75" x2="172" y2="75" stroke="#111" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="260" y1="75" x2="330" y2="75" stroke="#111" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="425" y1="75" x2="352" y2="75" stroke="#111" stroke-width="2.5" marker-end="url(#arr)"/>
+  <text x="500" y="70" font-size="13">chi_i = +1, &minus;1, +1, &minus;1</text>
+  <text x="500" y="90" font-size="13">chi = (1/4)&middot;&Sigma; = 0</text>
+
+  <!-- bottom: chi = +1, all fingers same direction (S D S D S impossible; needs S D S D pairs w/ gaps) -->
+  <text x="20" y="188" font-size="14" font-weight="bold">chi = +1: every finger flows right (S&rarr;D, S&rarr;D, ...)</text>
+  <rect x="40" y="205" width="190" height="60" fill="#2E8B57" opacity="0.55"/>
+  <rect x="110" y="195" width="14" height="80" fill="#C23B22" opacity="0.7"/>
+  <rect x="270" y="205" width="190" height="60" fill="#2E8B57" opacity="0.55"/>
+  <rect x="340" y="195" width="14" height="80" fill="#C23B22" opacity="0.7"/>
+  <text x="72" y="292" font-size="13" text-anchor="middle">S</text>
+  <text x="195" y="292" font-size="13" text-anchor="middle">D</text>
+  <text x="302" y="292" font-size="13" text-anchor="middle">S</text>
+  <text x="425" y="292" font-size="13" text-anchor="middle">D</text>
+  <line x1="80" y1="235" x2="150" y2="235" stroke="#111" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="310" y1="235" x2="380" y2="235" stroke="#111" stroke-width="2.5" marker-end="url(#arr)"/>
+  <text x="500" y="230" font-size="13">chi_i = +1, +1</text>
+  <text x="500" y="250" font-size="13">chi = +1 (no diffusion sharing</text>
+  <text x="500" y="268" font-size="13">between same-direction fingers)</text>
+  <text x="320" y="320" font-size="12" fill="#555" text-anchor="middle">Matched devices must have EQUAL chi (magnitude and sign); chi = 0 preferred &rArr; even N_f [Hastings ch13 13.2.6]</text>
+</svg>
+<figcaption><strong>Fig. (f)</strong> Per-finger orientation chi: alternating-flow shared-diffusion strip gives
+chi = 0 (top); forcing all fingers to flow the same way gives chi = +1 and forbids diffusion sharing (bottom).
+Referenced from mosfet.md §4.2, §5.</figcaption>
+</figure>
+
+<h2>Fig. (g) — Front cross-section of one finger (planar NMOS)</h2>
+<figure>
+<svg width="520" height="270" viewBox="0 0 520 270">
+  <!-- p-substrate -->
+  <rect x="30" y="150" width="460" height="90" fill="#f0e0e8" stroke="#999"/>
+  <text x="260" y="225" font-size="13" text-anchor="middle" fill="#555">P&minus; substrate / P-well (backgate B)</text>
+  <!-- n+ S/D diffusions -->
+  <rect x="80" y="150" width="110" height="34" fill="#2E8B57" opacity="0.55"/>
+  <rect x="330" y="150" width="110" height="34" fill="#2E8B57" opacity="0.55"/>
+  <text x="135" y="172" font-size="13" text-anchor="middle">N+ source</text>
+  <text x="385" y="172" font-size="13" text-anchor="middle">N+ drain</text>
+  <!-- channel marker -->
+  <line x1="190" y1="152" x2="330" y2="152" stroke="#8B7355" stroke-width="2" stroke-dasharray="3,3"/>
+  <text x="260" y="168" font-size="11" text-anchor="middle" fill="#8B7355">channel (L)</text>
+  <!-- gate oxide -->
+  <rect x="188" y="144" width="144" height="6" fill="#F5DEB3" stroke="#8B7355"/>
+  <text x="352" y="140" font-size="11" fill="#8B7355">gate oxide (t_ox)</text>
+  <!-- poly gate stack -->
+  <rect x="192" y="104" width="136" height="40" fill="#C23B22" opacity="0.7"/>
+  <text x="260" y="129" font-size="13" text-anchor="middle" fill="#fff">poly gate</text>
+  <!-- licon on S, D, G -->
+  <rect x="125" y="120" width="20" height="30" fill="#111111"/>
+  <rect x="375" y="120" width="20" height="30" fill="#111111"/>
+  <rect x="250" y="80" width="20" height="24" fill="#111111"/>
+  <!-- li -->
+  <rect x="110" y="100" width="50" height="20" fill="#4682B4" opacity="0.5"/>
+  <rect x="360" y="100" width="50" height="20" fill="#4682B4" opacity="0.5"/>
+  <rect x="235" y="60" width="50" height="20" fill="#4682B4" opacity="0.5"/>
+  <!-- met1 -->
+  <rect x="105" y="35" width="60" height="18" fill="#1E90FF" opacity="0.4"/>
+  <rect x="355" y="35" width="60" height="18" fill="#1E90FF" opacity="0.4"/>
+  <rect x="230" y="20" width="60" height="18" fill="#1E90FF" opacity="0.4"/>
+  <line x1="135" y1="53" x2="135" y2="100" stroke="#1E90FF" stroke-width="4" opacity="0.4"/>
+  <line x1="385" y1="53" x2="385" y2="100" stroke="#1E90FF" stroke-width="4" opacity="0.4"/>
+  <line x1="260" y1="38" x2="260" y2="60" stroke="#1E90FF" stroke-width="4" opacity="0.4"/>
+  <text x="135" y="30" font-size="13" font-weight="bold" text-anchor="middle">S</text>
+  <text x="260" y="14" font-size="13" font-weight="bold" text-anchor="middle">G</text>
+  <text x="385" y="30" font-size="13" font-weight="bold" text-anchor="middle">D</text>
+  <!-- STI at edges -->
+  <rect x="30" y="150" width="50" height="34" fill="#ddd" stroke="#999"/>
+  <rect x="440" y="150" width="50" height="34" fill="#ddd" stroke="#999"/>
+  <text x="55" y="200" font-size="10" text-anchor="middle" fill="#555">STI</text>
+  <text x="465" y="200" font-size="10" text-anchor="middle" fill="#555">STI</text>
+</svg>
+<figcaption><strong>Fig. (g)</strong> Front (across-the-channel) cross-section of one finger: P&minus;
+substrate/well, N+ S/D diffusions flanking the channel, thin gate oxide, poly gate stack, contact/li/met1
+above, STI at the diffusion ends (source of LOD compressive stress, mosfet.md §7). Referenced from mosfet.md §1.</figcaption>
+</figure>
+
+</body>
+</html>
