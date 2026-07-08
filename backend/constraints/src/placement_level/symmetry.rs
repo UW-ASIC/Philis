@@ -117,3 +117,60 @@ fn dn<'a>(device_names: &'a [String], id: DeviceId) -> &'a str {
         .get(id.0 as usize)
         .map_or("<unknown>", String::as_str)
 }
+
+// ── Ratioed current-mirror detection (item 1.8) ──
+
+/// Relaxed device signature: (DeviceType, L, model) — same as `device_signature`
+/// but drops W requirement. Two devices with same (type, L, model) but different W
+/// form a ratioed mirror if `W_a / W_b` reduces to a small integer ratio.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RelaxedSignature {
+    pub device_type: String,
+    pub l: i32,
+    pub model: String,
+}
+
+impl RelaxedSignature {
+    pub fn from_fields(device_type: &str, l: i32, model: &str) -> Self {
+        Self {
+            device_type: device_type.into(),
+            l,
+            model: model.into(),
+        }
+    }
+}
+
+/// Compute the reduced integer ratio `(a, b)` from two widths.
+/// Returns `None` if the ratio exceeds `max_ratio` or is not a clean integer
+/// ratio within `tolerance` (fractional).
+pub fn width_ratio(w_a: i32, w_b: i32, max_ratio: u16, tolerance: f64) -> Option<(u16, u16)> {
+    if w_a <= 0 || w_b <= 0 {
+        return None;
+    }
+    let g = gcd(w_a, w_b);
+    let ra = (w_a / g) as u16;
+    let rb = (w_b / g) as u16;
+    if ra > max_ratio || rb > max_ratio {
+        return None;
+    }
+    // Verify the ratio reconstructs cleanly
+    let reconstructed_a = i32::from(ra) * g;
+    let reconstructed_b = i32::from(rb) * g;
+    let err_a = (reconstructed_a - w_a).abs() as f64 / w_a as f64;
+    let err_b = (reconstructed_b - w_b).abs() as f64 / w_b as f64;
+    if err_a > tolerance || err_b > tolerance {
+        return None;
+    }
+    Some((ra, rb))
+}
+
+fn gcd(mut a: i32, mut b: i32) -> i32 {
+    a = a.abs();
+    b = b.abs();
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}

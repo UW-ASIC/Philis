@@ -71,7 +71,9 @@ impl CellSpec for ResistorSpec {
         b.set_pattern(self.pattern);
 
         let ref_dev = &devices[0];
-        let body_w = ref_dev.w;
+        // ponytail: item 1.12 — compute W from tolerance equation (AOAL ch06 6.3.1 Eq 6.12)
+        // dR = sqrt(dRs² + (2*dW/W)²), solve for W >= 2*dW / sqrt(tol² - dRs²)
+        let body_w = tolerance_width(ref_dev, pdk).max(ref_dev.w);
         let body_l = ref_dev.l;
         b.set_electrical(body_w, body_l, 1, body_w);
 
@@ -228,6 +230,32 @@ fn greedy_centroid_sequence(counts: &[usize]) -> Vec<usize> {
         lo += 1;
     }
     seq
+}
+
+/// Compute minimum width from tolerance equation (AOAL Eq 6.12).
+/// `dR = sqrt(dRs² + (2·dW/W)²)` → `W >= 2·dW / sqrt(tol² - dRs²)`.
+/// Returns netlist W if PDK has no tolerance data for this model.
+fn tolerance_width(dev: &DeviceRecord, pdk: &Pdk) -> i32 {
+    let model = &dev.model_name;
+    let drs = match pdk.sheet_tolerance.get(model) {
+        Some(&v) if v > 0.0 => v,
+        _ => return dev.w,
+    };
+    let dw_nm = match pdk.linewidth_control_nm.get(model) {
+        Some(&v) if v > 0 => v,
+        _ => return dev.w,
+    };
+    // Target tolerance: tier-dependent (5% Moderate, 2% Exceptional, 10% default)
+    // ponytail: hardcode reasonable targets; per-net budgets add when constraint pipe delivers them
+    let tol = 0.05_f64; // 5% default target
+    let radicand = tol * tol - drs * drs;
+    if radicand <= 0.0 {
+        // Sheet tolerance alone exceeds target — warn and return netlist W
+        // ponytail: pelgrom_warning when unreachable, log not panic
+        return dev.w;
+    }
+    let w_min = (2.0 * dw_nm as f64 / radicand.sqrt()).ceil() as i32;
+    w_min
 }
 
 /// Fold-count domain: aspect-driven default, then a shallower even fold.

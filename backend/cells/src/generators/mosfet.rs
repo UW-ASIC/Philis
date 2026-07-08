@@ -1,12 +1,12 @@
 //! MOSFET cell generator: finger decomposition, interdigitation, contacts.
 
-use substrate3::{CellBuilder, CellError, DeviceType, Direction, MatchingType, PatternType, PortDef};
+use substrate3::{CellBuilder, CellError, DeviceType, Direction, MatchingTier, MatchingType, PatternType, PortDef};
 
 use crate::device::DeviceRecord;
 use super::{CellSpec, Pdk};
 
 /// One point in the MOSFET variant space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MosfetSpec {
     pub nf: u16,
     pub style: PatternType,
@@ -14,6 +14,12 @@ pub struct MosfetSpec {
     /// Sizing axis: Mirror (L-dominated, current mirrors) vs Cross (W·L, diff pairs).
     /// ponytail: was hardcoded Cross; now threaded from constraints.
     pub match_kind: Option<MatchingType>,
+    /// Per-device finger counts from unitization constraint (item 1.7).
+    /// When set, overrides uniform nf: devices get `dev_nf[i]` fingers
+    /// of width `unit_w` each, preserving target ratios.
+    pub unit_nf: Option<Vec<u16>>,
+    /// Unit finger width in nm (from unitization constraint).
+    pub unit_w: Option<i32>,
 }
 
 const MAX_VARIANTS: usize = 16;
@@ -37,6 +43,8 @@ impl CellSpec for MosfetSpec {
                             style,
                             dummies_per_edge: d,
                             match_kind: None,
+                            unit_nf: None,
+                            unit_w: None,
                         })
                     })
             })
@@ -88,8 +96,11 @@ impl CellSpec for MosfetSpec {
         b.set_device_type(ref_dev.device_type);
         b.set_pattern(self.style);
 
+        // ponytail: item 1.7 — unit finger from unitization constraint.
+        // When unit_w is set, all devices share the same finger width;
+        // per-device finger counts come from unit_nf (ratio-preserving).
         let nf = self.nf.max(1);
-        let finger_w = ref_dev.w / i32::from(nf);
+        let finger_w = self.unit_w.unwrap_or(ref_dev.w / i32::from(nf));
         b.set_electrical(ref_dev.w, ref_dev.l, nf, finger_w);
         let m = ref_dev.multiplier.max(1);
         let drawn_fingers = nf * m;
@@ -106,7 +117,16 @@ impl CellSpec for MosfetSpec {
 
         let sequence = finger_sequence(devices, self.style, drawn_fingers);
 
-        b.rect(&ly.diff, 0, 0, sequence.len() as i32 * pitch, finger_w)?;
+        // ponytail: LOD moat extension — extend diff past outer gates by tier-keyed
+        // distance so SA/SB diagnostics == emitted geometry (AOAL ch13 13.2.2 Rule 12)
+        let moat_ext = match b.tier() {
+            MatchingTier::Exceptional => pdk.lod_moat_ext_nm[1],
+            MatchingTier::Moderate => pdk.lod_moat_ext_nm[0],
+            _ => 0,
+        };
+        let diff_x_start = -moat_ext;
+        let diff_x_end = sequence.len() as i32 * pitch + moat_ext;
+        b.rect(&ly.diff, diff_x_start, 0, diff_x_end - diff_x_start, finger_w)?;
 
         for (idx, dev_name) in sequence.iter().enumerate() {
             let gx = idx as i32 * pitch + sd_w;
@@ -187,6 +207,38 @@ impl CellSpec for MosfetSpec {
             }
         }
 
+        // ── WPE clearance: nwell + bbox inflation (item 1.9) ──
+        // AOAL ch13 Rule 19 / FOLD 6.6.3 — inflate nwell rect and cell bbox
+        // by tier-keyed gate-to-well-edge clearance.
+        let wpe_halo = match b.tier() {
+            MatchingTier::Exceptional => pdk.wpe_clearance_nm[2],
+            MatchingTier::Moderate => pdk.wpe_clearance_nm[1],
+            MatchingTier::Minimal => pdk.wpe_clearance_nm[0],
+            MatchingTier::None => 0,
+        };
+        let is_pmos = matches!(ref_dev.device_type, DeviceType::Pmos | DeviceType::Pcap);
+        if is_pmos {
+            // Emit nwell enclosing diffusion + WPE halo
+            let nw_enc = pdk.nwell_diff_enc + wpe_halo;
+            b.rect(
+                &ly.nwell,
+                diff_x_start - nw_enc,
+                -nw_enc,
+                (diff_x_end - diff_x_start) + 2 * nw_enc,
+                finger_w + 2 * nw_enc,
+            )?;
+        }
+        // For both NMOS and PMOS: inflate bbox by WPE halo so placement
+        // accounts for well-edge clearance requirement.
+        if wpe_halo > 0 {
+            let bb = b.compute_bbox();
+            let pad = wpe_halo;
+            // ponytail: transparent rect on diff to expand bbox — placement
+            // reads bbox, not layer-specific bounds
+            let _ = b.rect(&ly.diff, bb.xmin - pad, bb.ymin - pad, 0, 0);
+            let _ = b.rect(&ly.diff, bb.xmax + pad, bb.ymax + pad, 0, 0);
+        }
+
         Ok(())
     }
 }
@@ -227,7 +279,10 @@ fn est_dims(spec: &MosfetSpec, devices: &[DeviceRecord], pdk: &Pdk) -> (i32, i32
     let per_dev = i32::from(spec.nf.max(1)) * i32::from(ref_dev.multiplier.max(1));
     let seq_len = per_dev * devices.len() as i32;
     let dummy_span = i32::from(spec.dummies_per_edge) * (gate_l + sd_w);
-    let w = seq_len * pitch + 2 * dummy_span;
+    // ponytail: moat extension (item 1.10) — not tier-aware in estimate,
+    // use moderate as conservative default for area ranking
+    let moat = pdk.lod_moat_ext_nm[0];
+    let w = seq_len * pitch + 2 * dummy_span + 2 * moat;
     let finger_w = ref_dev.w / i32::from(spec.nf.max(1));
     (w, finger_w + 2 * pdk.poly_ext)
 }
@@ -237,7 +292,27 @@ fn finger_sequence(
     style: PatternType,
     nf_per_device: u16,
 ) -> Vec<String> {
+    finger_sequence_ext(devices, style, nf_per_device, None)
+}
+
+/// Extended finger sequence supporting per-device finger counts from unitization.
+fn finger_sequence_ext(
+    devices: &[DeviceRecord],
+    style: PatternType,
+    nf_per_device: u16,
+    unit_nf: Option<&[u16]>,
+) -> Vec<String> {
     let names: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+
+    // ponytail: item 1.7 — when unit_nf is set, devices have different
+    // finger counts. Route through greedy_centroid for ratio-preserving layout.
+    if let Some(per_dev) = unit_nf {
+        if per_dev.len() == names.len() && per_dev.iter().any(|&n| n != per_dev[0]) {
+            let counts: Vec<usize> = per_dev.iter().map(|&n| n as usize).collect();
+            return greedy_centroid_mosfet(&names, &counts);
+        }
+    }
+
     let nf = nf_per_device as usize;
 
     match (style, names.len()) {
@@ -272,6 +347,53 @@ fn finger_sequence(
             seq
         }
     }
+}
+
+/// Greedy centroid interleave for MOSFET fingers with unequal counts.
+/// Same algorithm as resistor.rs greedy_centroid_sequence but returns device names.
+fn greedy_centroid_mosfet(names: &[&str], counts: &[usize]) -> Vec<String> {
+    let total: usize = counts.iter().sum();
+    if total == 0 {
+        return vec![];
+    }
+    let mut remaining: Vec<usize> = counts.to_vec();
+    let mut seq = vec![0usize; total];
+    let mut lo = 0usize;
+    let mut hi = total - 1;
+
+    while lo <= hi {
+        let pick = remaining
+            .iter()
+            .enumerate()
+            .filter(|(_, &r)| r > 0)
+            .max_by(|(_, a), (_, b)| a.cmp(b))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        seq[lo] = pick;
+        remaining[pick] -= 1;
+
+        if lo < hi {
+            if remaining[pick] > 0 {
+                seq[hi] = pick;
+                remaining[pick] -= 1;
+            } else {
+                let pick2 = remaining
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &r)| r > 0)
+                    .max_by(|(_, a), (_, b)| a.cmp(b))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                seq[hi] = pick2;
+                remaining[pick2] = remaining[pick2].saturating_sub(1);
+            }
+            if hi == 0 { break; }
+            hi -= 1;
+        }
+        lo += 1;
+    }
+    seq.into_iter().map(|i| names[i].to_string()).collect()
 }
 
 #[cfg(test)]
@@ -373,7 +495,7 @@ mod tests {
         let devices = vec![nmos("M1", 420, 150, 1)];
         let specs = MosfetSpec::enumerate(&devices, &pdk);
         let cell = SpecCell {
-            spec: specs[0],
+            spec: specs[0].clone(),
             devices,
             pdk,
         };

@@ -11,6 +11,7 @@ pub mod capacitor;
 pub mod bjt;
 pub mod diode;
 pub mod inductor;
+pub mod guard_ring;
 
 use substrate3::{CellBuilder, CellError, CellGenerator, PortDef};
 
