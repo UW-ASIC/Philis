@@ -85,7 +85,8 @@ pub use lvs::gds_adapter::{
     adapt_gds_hierarchy_to_lvs, export_w3_drc_hierarchy_context, GdsAdapterObjectKind,
     GdsBlackBoxAdapterSpec, GdsDrcHierarchyContext, GdsHierarchyAdapterError,
     GdsHierarchyAdapterErrorKind, GdsHierarchyAdapterOptions, GdsHierarchyAdapterResult,
-    GdsHierarchyProvenance, GdsObjectProvenance, GdsTextEvidenceRule,
+    GdsHierarchyProvenance, GdsObjectProvenance, GdsPhysicalCorrelationStatus,
+    GdsTextEvidenceRule,
 };
 pub use erc::{run_erc, ErcReport, ErcViolation, MultipleDriverCheck, TieHighLowCheck};
 pub use signoff::*;

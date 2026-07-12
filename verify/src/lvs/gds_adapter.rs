@@ -9,16 +9,16 @@
 use super::detailed_extract::{extract_detailed_netlist, DetailedExtractionOptions};
 use super::extract::extract_netlist_opts_raw;
 use super::hier_production::{
-    HierArray, HierLayout, HierLayoutCell, HierLayoutInstance, HierTransform,
+    flatten_layout, HierArray, HierLayout, HierLayoutCell, HierLayoutInstance, HierTransform,
 };
 use super::production::*;
 use super::types::{DeviceRecognitionSource, ExtractOpts};
 use crate::gds_lossless::{
-    exact_pitch, stroke_path, GdsElement, GdsElementMeta, GdsLibrary, GdsProperty, GdsStructure,
-    GdsTransform,
+    exact_pitch, flatten_gds_library, stroke_path, GdsElement, GdsElementMeta, GdsFlattenOptions,
+    GdsGeometryPolicy, GdsLibrary, GdsProperty, GdsStructure, GdsTransform,
 };
 use crate::geometry::exact::{classify_polygon_contact, Point, PolygonContact, Ring};
-use crate::geometry::{GeometryStore, LayerId};
+use crate::geometry::{GeometryStore, LayerId, PolyId};
 use crate::params::Deck;
 use crate::traits::Backend;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -141,6 +141,8 @@ pub struct GdsHierarchyAdapterOptions {
     /// Maximum cell nesting depth. Validation is iterative, so this is a
     /// semantic/capacity limit rather than a process-stack limit.
     pub max_hierarchy_depth: usize,
+    /// W2 flattening counts geometry and reference visits, not only instances.
+    pub max_physical_flatten_visits: usize,
 }
 
 impl GdsHierarchyAdapterOptions {
@@ -160,6 +162,7 @@ impl GdsHierarchyAdapterOptions {
             max_array_copies: 1_000_000,
             max_hierarchy_expanded_instances: 1_000_000,
             max_hierarchy_depth: 4_096,
+            max_physical_flatten_visits: 10_000_000,
         }
     }
 }
@@ -201,6 +204,16 @@ pub struct GdsHierarchyAdapterResult {
     pub layout: HierLayout,
     pub equated_cells: BTreeMap<String, String>,
     pub provenance: GdsHierarchyProvenance,
+    pub physical_correlation: GdsPhysicalCorrelationStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GdsPhysicalCorrelationStatus {
+    /// Independent flattened physical extraction matched the composed hierarchy.
+    Correlated,
+    /// Geometry inside explicitly opaque cells was not flattened. Hierarchical
+    /// LVS must still compare every black-box target and complete port binding.
+    OpaqueBlackBoxes { cells: BTreeSet<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1196,6 +1209,7 @@ fn validate_options(
     if options.max_array_copies == 0
         || options.max_hierarchy_expanded_instances == 0
         || options.max_hierarchy_depth == 0
+        || options.max_physical_flatten_visits == 0
     {
         return Err(GdsHierarchyAdapterError::cell(
             GdsHierarchyAdapterErrorKind::InvalidOptions,
@@ -1987,6 +2001,250 @@ fn validate_adapter_hierarchy(
     Ok(())
 }
 
+fn canonical_physical_library(
+    library: &GdsLibrary,
+    options: &GdsHierarchyAdapterOptions,
+) -> Result<GdsLibrary, GdsHierarchyAdapterError> {
+    let mut canonical = library.clone();
+    for structure in &mut canonical.structures {
+        let mut retained = Vec::with_capacity(structure.elements.len());
+        for (element_index, mut element) in structure.elements.drain(..).enumerate() {
+            if let GdsElement::Text(text) = &mut element {
+                let Some(rule) = evidence_rule(options, text.layer, text.text_type) else {
+                    if options.reject_unconfigured_text {
+                        return Err(GdsHierarchyAdapterError::element(
+                            GdsHierarchyAdapterErrorKind::Unsupported,
+                            &structure.name,
+                            element_index,
+                            "physical flatten encountered unconfigured TEXT evidence",
+                        ));
+                    }
+                    // W2 flatten preserves all text. Remove explicitly ignored
+                    // annotations so they cannot become accidental physical nets.
+                    continue;
+                };
+                text.string = derive_text_name(&structure.name, element_index, text, rule)?;
+            }
+            retained.push(element);
+        }
+        structure.elements = retained;
+    }
+    Ok(canonical)
+}
+
+fn deduplicate_flat_store(
+    source: &GeometryStore,
+    cell: &str,
+) -> Result<GeometryStore, GdsHierarchyAdapterError> {
+    let mut out = GeometryStore::new();
+    let mut seen = BTreeMap::<(LayerId, Vec<(i32, i32)>), PolyId>::new();
+    let mut old_to_new = Vec::with_capacity(source.poly_count());
+    for polygon in 0..source.poly_count() {
+        let (start, end) = source.poly_range(PolyId(polygon as u32));
+        let points = (start..end)
+            .map(|index| Point::new(source.verts_x[index], source.verts_y[index]))
+            .collect::<Vec<_>>();
+        let mut ring = Ring::new(points).map_err(|error| {
+            GdsHierarchyAdapterError::cell(
+                GdsHierarchyAdapterErrorKind::Extraction,
+                cell,
+                format!("flattened polygon {polygon} is invalid: {error}"),
+            )
+        })?;
+        if ring.signed_area2() < 0 {
+            let mut reversed = ring.vertices().to_vec();
+            reversed.reverse();
+            ring = Ring::new(reversed).map_err(|error| {
+                GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::Extraction,
+                    cell,
+                    format!("flattened polygon {polygon} winding normalization failed: {error}"),
+                )
+            })?;
+        }
+        let key = (
+            source.poly_layer[polygon],
+            ring.vertices()
+                .iter()
+                .map(|point| (point.x, point.y))
+                .collect::<Vec<_>>(),
+        );
+        let mapped = if let Some(existing) = seen.get(&key) {
+            *existing
+        } else {
+            let created = out.add_polygon_annotated(
+                key.0,
+                &key.1,
+                source.poly_properties[polygon].clone(),
+                source.poly_hierarchy_path[polygon].clone(),
+            );
+            seen.insert(key, created);
+            created
+        };
+        old_to_new.push(mapped);
+    }
+    for (&old, label) in &source.net_labels {
+        let mapped = old_to_new.get(old as usize).ok_or_else(|| {
+            GdsHierarchyAdapterError::cell(
+                GdsHierarchyAdapterErrorKind::Extraction,
+                cell,
+                format!("flattened label references missing polygon {old}"),
+            )
+        })?;
+        if let Some(previous) = out.net_labels.insert(mapped.0, label.clone()) {
+            if !previous.eq_ignore_ascii_case(label) {
+                return Err(GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::ConflictingEvidence,
+                    cell,
+                    format!(
+                        "coincident flattened geometry has conflicting labels `{previous}` and `{label}`"
+                    ),
+                ));
+            }
+        }
+    }
+    for index in 0..source.text_count() {
+        out.add_text_annotated(
+            source.text_layer[index],
+            source.text_datatype[index],
+            source.text_x[index],
+            source.text_y[index],
+            source.text_string[index].clone(),
+            source.text_properties[index].clone(),
+            source.text_hierarchy_path[index].clone(),
+        );
+    }
+    Ok(out)
+}
+
+fn validate_physical_equivalence(
+    library: &GdsLibrary,
+    deck: &Deck,
+    options: &GdsHierarchyAdapterOptions,
+    backend: Backend,
+    layout: &HierLayout,
+) -> Result<GdsPhysicalCorrelationStatus, GdsHierarchyAdapterError> {
+    let opaque = layout
+        .cells
+        .values()
+        .flat_map(|cell| cell.instances.iter())
+        .filter(|instance| instance.black_box)
+        .map(|instance| instance.target_cell.clone())
+        .collect::<BTreeSet<_>>();
+    if !opaque.is_empty() {
+        return Ok(GdsPhysicalCorrelationStatus::OpaqueBlackBoxes { cells: opaque });
+    }
+    if options
+        .default_substrate_nets
+        .contains_key(&options.top_cell)
+        && layout.cells.values().any(|cell| !cell.instances.is_empty())
+    {
+        return Err(GdsHierarchyAdapterError::cell(
+            GdsHierarchyAdapterErrorKind::Unsupported,
+            &options.top_cell,
+            "numeric default-substrate net identity cannot be preserved across physical hierarchy flattening",
+        ));
+    }
+
+    let canonical = canonical_physical_library(library, options)?;
+    let flattened = flatten_gds_library(
+        &canonical,
+        &deck.layers,
+        &GdsFlattenOptions {
+            expansion_limit: options.max_physical_flatten_visits,
+            selected_top: Some(options.top_cell.clone()),
+            geometry_policy: GdsGeometryPolicy::Strict,
+        },
+    )
+    .map_err(|error| {
+        let kind = match error.kind {
+            crate::gds_lossless::LayoutErrorKind::CapacityExceeded
+            | crate::gds_lossless::LayoutErrorKind::ArithmeticOverflow => {
+                GdsHierarchyAdapterErrorKind::CapacityExceeded
+            }
+            crate::gds_lossless::LayoutErrorKind::UndefinedReference => {
+                GdsHierarchyAdapterErrorKind::UndefinedCell
+            }
+            crate::gds_lossless::LayoutErrorKind::HierarchyCycle => {
+                GdsHierarchyAdapterErrorKind::HierarchyCycle
+            }
+            _ => GdsHierarchyAdapterErrorKind::Unsupported,
+        };
+        GdsHierarchyAdapterError::cell(
+            kind,
+            &options.top_cell,
+            format!("strict physical GDS flatten failed: {error}"),
+        )
+    })?;
+    let store = flattened.cells.get(&options.top_cell).ok_or_else(|| {
+        GdsHierarchyAdapterError::cell(
+            GdsHierarchyAdapterErrorKind::Extraction,
+            &options.top_cell,
+            "strict physical flatten did not return the selected top",
+        )
+    })?;
+    let normalized = deduplicate_flat_store(store, &options.top_cell)?;
+    let physical = extract_detailed_netlist(
+        &normalized,
+        deck,
+        &DetailedExtractionOptions {
+            cell_name: options.top_cell.clone(),
+            extract: options.extract.clone(),
+            ports: options
+                .cell_ports
+                .get(&options.top_cell)
+                .cloned()
+                .unwrap_or_default(),
+            globals: options.global_names.clone(),
+            require_all_text_attached: true,
+            // Hierarchy legitimately creates aliases such as child port `P`
+            // attached to parent rail `VDD`; repeated labels on disconnected
+            // nets still become explicit open candidates.
+            allow_multiple_labels_per_net: true,
+            default_substrate_net: options
+                .default_substrate_nets
+                .get(&options.top_cell)
+                .copied(),
+            ..Default::default()
+        },
+        backend,
+    )
+    .map_err(|error| {
+        GdsHierarchyAdapterError::new(
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence,
+            &options.top_cell,
+            None,
+            error.hierarchy_path,
+            format!("flattened physical extraction failed: {}", error.message),
+        )
+    })?;
+    let composed = flatten_layout(layout).map_err(|message| {
+        GdsHierarchyAdapterError::cell(
+            GdsHierarchyAdapterErrorKind::Extraction,
+            &options.top_cell,
+            format!("composed hierarchy flatten failed: {message}"),
+        )
+    })?;
+    let comparison = compare_production(&physical, &composed, &ProductionCompareOptions::default());
+    if comparison.status != ProductionLvsStatus::Match {
+        let kind = if comparison.status == ProductionLvsStatus::Indeterminate {
+            GdsHierarchyAdapterErrorKind::CapacityExceeded
+        } else {
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence
+        };
+        return Err(GdsHierarchyAdapterError::cell(
+            kind,
+            &options.top_cell,
+            format!(
+                "flattened physical extraction contradicts composed hierarchy: {}; witness {:?}",
+                comparison.reason,
+                comparison.mismatches.first()
+            ),
+        ));
+    }
+    Ok(GdsPhysicalCorrelationStatus::Correlated)
+}
+
 /// Build a hierarchy-preserving W4 layout from the W2 lossless GDS database.
 pub fn adapt_gds_hierarchy_to_lvs(
     library: &GdsLibrary,
@@ -2068,10 +2326,13 @@ pub fn adapt_gds_hierarchy_to_lvs(
         cells,
     };
     validate_adapter_hierarchy(&layout, options)?;
+    let physical_correlation =
+        validate_physical_equivalence(library, deck, options, backend, &layout)?;
     Ok(GdsHierarchyAdapterResult {
         layout,
         equated_cells: options.equated_cells.clone(),
         provenance,
+        physical_correlation,
     })
 }
 
@@ -2400,6 +2661,10 @@ mod tests {
         assert!(unsupported
             .message
             .contains("W3 DRC hierarchy/context consumer is absent"));
+        assert_eq!(
+            adapted.physical_correlation,
+            GdsPhysicalCorrelationStatus::Correlated
+        );
     }
 
     #[test]
@@ -2845,6 +3110,12 @@ X0 S D G1 G2 B mid\n\
         let adapted =
             adapt_gds_hierarchy_to_lvs(&make_library(true), &deck(), &options, Backend::Cpu)
                 .expect("explicit black-box map");
+        assert_eq!(
+            adapted.physical_correlation,
+            GdsPhysicalCorrelationStatus::OpaqueBlackBoxes {
+                cells: BTreeSet::from(["macro".into()])
+            }
+        );
         let instance = &adapted.layout.cells["top"].instances[0];
         assert!(instance.black_box);
         assert_eq!(instance.target_cell, "macro");
@@ -3096,5 +3367,100 @@ X0 S D G1 G2 B mid\n\
             GdsHierarchyAdapterErrorKind::CapacityExceeded
         );
         assert!(capacity.message.contains("expanded hierarchy count"));
+    }
+
+    #[test]
+    fn physical_flatten_rejects_hidden_parent_child_and_sibling_shorts() {
+        let child = structure(
+            "child",
+            vec![boundary(7, 0, 0, 100, 100, GdsElementMeta::default())],
+        );
+        let parent_overlap = lossless_round_trip(library(vec![
+            child.clone(),
+            structure(
+                "top",
+                vec![
+                    boundary(7, 50, 0, 150, 100, GdsElementMeta::default()),
+                    sref("child", 0, 0, GdsElementMeta::default()),
+                ],
+            ),
+        ]));
+        let error = adapt_gds_hierarchy_to_lvs(
+            &parent_overlap,
+            &deck(),
+            &GdsHierarchyAdapterOptions::new("top"),
+            Backend::Cpu,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence
+        );
+        assert!(error
+            .message
+            .contains("flattened physical extraction contradicts"));
+
+        let sibling_overlap = lossless_round_trip(library(vec![
+            child,
+            structure(
+                "top",
+                vec![
+                    sref("child", 0, 0, GdsElementMeta::default()),
+                    sref("child", 50, 0, GdsElementMeta::default()),
+                ],
+            ),
+        ]));
+        let error = adapt_gds_hierarchy_to_lvs(
+            &sibling_overlap,
+            &deck(),
+            &GdsHierarchyAdapterOptions::new("top"),
+            Backend::Cpu,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence
+        );
+        assert!(error
+            .message
+            .contains("flattened physical extraction contradicts"));
+    }
+
+    #[test]
+    fn physical_flatten_rejects_cross_boundary_mos_recognition() {
+        let child = structure(
+            "child",
+            vec![
+                boundary(1, -20, -20, 120, 120, GdsElementMeta::default()),
+                boundary(2, 0, 0, 100, 100, GdsElementMeta::default()),
+                boundary(4, -10, -10, 110, 110, GdsElementMeta::default()),
+            ],
+        );
+        let top = structure(
+            "top",
+            vec![
+                boundary(3, 40, -20, 60, 120, GdsElementMeta::default()),
+                sref("child", 0, 0, GdsElementMeta::default()),
+            ],
+        );
+        let cross_boundary = lossless_round_trip(library(vec![child, top]));
+        let error = adapt_gds_hierarchy_to_lvs(
+            &cross_boundary,
+            &deck(),
+            &GdsHierarchyAdapterOptions::new("top"),
+            Backend::Cpu,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence
+        );
+        assert!(
+            error
+                .message
+                .contains("flattened physical extraction contradicts"),
+            "{}",
+            error.message
+        );
     }
 }

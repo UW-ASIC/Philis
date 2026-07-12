@@ -646,7 +646,7 @@ fn append_flat(
         }));
 }
 
-fn flatten_layout(layout: &HierLayout) -> Result<DetailedNetlist<String>, String> {
+pub(super) fn flatten_layout(layout: &HierLayout) -> Result<DetailedNetlist<String>, String> {
     fn recurse(
         layout: &HierLayout,
         name: &str,
