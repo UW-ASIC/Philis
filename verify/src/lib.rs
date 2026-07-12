@@ -56,7 +56,7 @@ pub use lvs::netlist::{
     leaf_subcircuit_to_ref_netlist, parse_engineering_number, parse_netlist,
     parse_netlist_with_includes, BjtModelBinding, EngineeringNumber, EngineeringSuffix,
     IncludeDecl, InstanceKind, MosModelBinding, NetlistAst, NetlistError, NetlistErrorKind,
-    NetlistInstance, ParameterDecl, ParameterExpr, RefConversionError,
+    ModelDecl, ModelPrimitive, NetlistInstance, ParameterDecl, ParameterExpr, RefConversionError,
     RefConversionErrorKind, RefConversionOptions, ResolvedInclude, SourceSpan, Subcircuit,
 };
 pub use lvs::production::{
@@ -66,6 +66,11 @@ pub use lvs::production::{
     ProductionCompareOptions, ProductionLvsResult, ProductionLvsStatus, ProductionMismatch,
     PropertyDelta, PropertyUnit, SoftConnection, TerminalConnection, TopologyConflictKind,
     TopologyWitness, TwoTerminalRecord, TypedProperty, UnresolvedTerminal,
+};
+pub use lvs::binding::{
+    bind_reference_hierarchy, evaluate_parameter_expression, BindingError, BindingErrorKind,
+    BlackBoxSpec, BoundReferenceCell, BoundReferenceHierarchy, BoundReferenceInstance,
+    ConfiguredModel, ParameterEnvironment, ReferenceBindingOptions,
 };
 pub use erc::{run_erc, ErcReport, ErcViolation, MultipleDriverCheck, TieHighLowCheck};
 pub use signoff::*;

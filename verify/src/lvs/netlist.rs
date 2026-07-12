@@ -210,6 +210,27 @@ pub struct ParameterDecl {
     pub span: SourceSpan,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelPrimitive {
+    Nmos,
+    Pmos,
+    Npn,
+    Pnp,
+    Diode,
+    Resistor,
+    Capacitor,
+    /// Deterministic alias to another declared/configured model.
+    Alias(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelDecl {
+    pub name: String,
+    pub primitive: ModelPrimitive,
+    pub parameters: Vec<ParameterDecl>,
+    pub span: SourceSpan,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstanceKind {
     Mos,
@@ -258,6 +279,7 @@ pub struct NetlistAst {
     pub source: String,
     pub globals: Vec<String>,
     pub parameters: Vec<ParameterDecl>,
+    pub models: Vec<ModelDecl>,
     pub top_level_instances: Vec<NetlistInstance>,
     pub subcircuits: Vec<Subcircuit>,
     pub includes: Vec<IncludeDecl>,
@@ -894,6 +916,7 @@ pub fn parse_netlist(source_name: &str, input: &str) -> Result<NetlistAst, Netli
         source: source_name.to_string(),
         globals: Vec::new(),
         parameters: Vec::new(),
+        models: Vec::new(),
         top_level_instances: Vec::new(),
         subcircuits: Vec::new(),
         includes: Vec::new(),
@@ -904,6 +927,7 @@ pub fn parse_netlist(source_name: &str, input: &str) -> Result<NetlistAst, Netli
     let mut top_instance_names = HashSet::new();
     let mut global_names = HashSet::new();
     let mut top_parameter_names = HashSet::new();
+    let mut model_names = HashSet::new();
     let mut saw_end = false;
 
     for logical in lines {
@@ -1006,6 +1030,50 @@ pub fn parse_netlist(source_name: &str, input: &str) -> Result<NetlistAst, Netli
                             ast.parameters.push(parameter);
                         }
                     }
+                }
+                ".model" => {
+                    if current_subcircuit.is_some() {
+                        return Err(syntax(
+                            &logical.tokens[0],
+                            ".model inside .subckt is outside the declared subset",
+                        ));
+                    }
+                    if logical.tokens.len() < 3 {
+                        return Err(syntax(
+                            &logical.tokens[0],
+                            ".model requires a model name and primitive/alias",
+                        ));
+                    }
+                    let name = atom(&logical.tokens[1], "model name")?;
+                    if !model_names.insert(canonical(&name)) {
+                        return Err(NetlistError::new(
+                            NetlistErrorKind::DuplicateDefinition,
+                            logical.tokens[1].span.clone(),
+                            format!("duplicate model '{name}'"),
+                        ));
+                    }
+                    let primitive_name = atom(&logical.tokens[2], "model primitive or alias")?;
+                    let primitive = match primitive_name.to_ascii_lowercase().as_str() {
+                        "nmos" => ModelPrimitive::Nmos,
+                        "pmos" => ModelPrimitive::Pmos,
+                        "npn" => ModelPrimitive::Npn,
+                        "pnp" => ModelPrimitive::Pnp,
+                        "d" | "diode" => ModelPrimitive::Diode,
+                        "r" | "res" | "resistor" => ModelPrimitive::Resistor,
+                        "c" | "cap" | "capacitor" => ModelPrimitive::Capacitor,
+                        _ => ModelPrimitive::Alias(primitive_name),
+                    };
+                    let parameters = if logical.tokens.len() == 3 {
+                        Vec::new()
+                    } else {
+                        parse_assignments(&logical.tokens, 3)?
+                    };
+                    ast.models.push(ModelDecl {
+                        name,
+                        primitive,
+                        parameters,
+                        span: logical.tokens[0].span.clone(),
+                    });
                 }
                 ".include" => {
                     if current_subcircuit.is_some() {

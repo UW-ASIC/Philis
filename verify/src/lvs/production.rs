@@ -6,7 +6,7 @@
 //! checker never reports a match after a search-capacity or input-scope failure.
 
 use super::types::*;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1698,6 +1698,7 @@ pub fn compare_production(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn identity(id: &str) -> DeviceIdentity {
         DeviceIdentity {
