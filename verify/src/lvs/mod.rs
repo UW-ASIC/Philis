@@ -13,6 +13,7 @@ pub mod spice;
 pub mod derived;
 pub mod hierarchical;
 pub mod netlist;
+pub mod production;
 
 pub use types::*;
 pub use extract::{extract_netlist, extract_netlist_opts, reduce_netlist};
@@ -21,6 +22,7 @@ pub use spice::{to_spice, SpiceOpts, PortMap};
 pub use derived::evaluate_derived_layers;
 pub use hierarchical::{compare_hierarchical, HierCell, HierLvsResult, RefHierarchy};
 pub use netlist::*;
+pub use production::*;
 
 use crate::geometry::GeometryStore;
 use crate::params::Deck;

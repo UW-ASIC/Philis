@@ -59,6 +59,14 @@ pub use lvs::netlist::{
     NetlistInstance, ParameterDecl, ParameterExpr, RefConversionError,
     RefConversionErrorKind, RefConversionOptions, ResolvedInclude, SourceSpan, Subcircuit,
 };
+pub use lvs::production::{
+    compare_production, BjtDeviceRecord, DetailedExtractedNetlist, DetailedNetlist,
+    DetailedRefNetlist, DeviceIdentity, DeviceMapping, HierarchyPath, LegacyRefDeviceBuilder,
+    MosDeviceRecord, NetIdentity, NetMapping, NumericTolerance, OpenCandidate, PortDirection,
+    ProductionCompareOptions, ProductionLvsResult, ProductionLvsStatus, ProductionMismatch,
+    PropertyDelta, PropertyUnit, SoftConnection, TerminalConnection, TopologyConflictKind,
+    TopologyWitness, TwoTerminalRecord, TypedProperty, UnresolvedTerminal,
+};
 pub use erc::{run_erc, ErcReport, ErcViolation, MultipleDriverCheck, TieHighLowCheck};
 pub use signoff::*;
 pub use gds::{read_gds, read_gds_checked, GdsLayout, GdsUnits, GdsUnmappedLayer};
