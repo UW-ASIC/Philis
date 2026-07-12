@@ -5,6 +5,7 @@
   "baseline_commit": "b4a4965a0bb51df44c5f41137ac6da8926c2c5e6",
   "score_policy": "frozen_until_general_supported_input_has_independent_correlation",
   "states": [
+    "absent",
     "foundation",
     "partial",
     "integration_pending",
@@ -17,63 +18,60 @@
     "percent": 22,
     "qualification": "unqualified"
   },
-  "engines": [
-    {
-      "id": "drc",
+  "engines": {
+    "drc": {
       "implemented": 12.0,
       "total": 44,
       "percent": 27,
       "claim": "useful prototype/in-design checker; not signoff-equivalent",
-      "groups": [
-        { "id": "input_hierarchy", "families": 4, "score": 1.5, "state": "foundation" },
-        { "id": "exact_geometry", "families": 4, "score": 0.5, "state": "foundation" },
-        { "id": "core_dimensions", "families": 4, "score": 2.5, "state": "partial" },
-        { "id": "context_tables", "families": 4, "score": 2.0, "state": "partial" },
-        { "id": "cuts_vias", "families": 4, "score": 1.5, "state": "partial" },
-        { "id": "electrical_layout_context", "families": 4, "score": 0.5, "state": "partial" },
-        { "id": "density_fill_cmp", "families": 4, "score": 1.0, "state": "partial" },
-        { "id": "antenna", "families": 4, "score": 1.5, "state": "partial" },
-        { "id": "patterning_yield", "families": 4, "score": 0.5, "state": "integration_pending" },
-        { "id": "advanced_process_package", "families": 4, "score": 0.0, "state": "foundation" },
-        { "id": "production_infrastructure", "families": 4, "score": 0.5, "state": "foundation" }
-      ]
+      "groups": {
+        "input_hierarchy": { "families": 4, "score": 1.5, "state": "foundation" },
+        "exact_geometry": { "families": 4, "score": 0.5, "state": "foundation" },
+        "core_dimensions": { "families": 4, "score": 2.5, "state": "partial" },
+        "context_tables": { "families": 4, "score": 2.0, "state": "partial" },
+        "cuts_vias": { "families": 4, "score": 1.5, "state": "partial" },
+        "electrical_layout_context": { "families": 4, "score": 0.5, "state": "partial" },
+        "density_fill_cmp": { "families": 4, "score": 1.0, "state": "partial" },
+        "antenna": { "families": 4, "score": 1.5, "state": "partial" },
+        "patterning_yield": { "families": 4, "score": 0.5, "state": "integration_pending" },
+        "advanced_process_package": { "families": 4, "score": 0.0, "state": "absent" },
+        "production_infrastructure": { "families": 4, "score": 0.5, "state": "foundation" }
+      }
     },
-    {
-      "id": "lvs",
+    "lvs": {
       "implemented": 8.0,
       "total": 36,
       "percent": 22,
       "claim": "small flat core plus production foundations; not production LVS",
-      "groups": [
-        { "id": "reference_and_layout_input", "families": 4, "score": 0.5, "state": "foundation" },
-        { "id": "connectivity", "families": 4, "score": 1.0, "state": "partial" },
-        { "id": "mos", "families": 4, "score": 1.5, "state": "partial" },
-        { "id": "other_devices", "families": 4, "score": 1.5, "state": "partial" },
-        { "id": "properties", "families": 4, "score": 1.0, "state": "partial" },
-        { "id": "matching_witnesses", "families": 4, "score": 1.0, "state": "partial" },
-        { "id": "reductions_equivalence", "families": 4, "score": 0.5, "state": "partial" },
-        { "id": "hierarchy", "families": 4, "score": 0.5, "state": "integration_pending" },
-        { "id": "production_infrastructure", "families": 4, "score": 0.5, "state": "foundation" }
-      ]
+      "groups": {
+        "reference_and_layout_input": { "families": 4, "score": 0.5, "state": "foundation" },
+        "connectivity": { "families": 4, "score": 1.0, "state": "partial" },
+        "mos": { "families": 4, "score": 1.5, "state": "partial" },
+        "other_devices": { "families": 4, "score": 1.5, "state": "partial" },
+        "properties": { "families": 4, "score": 1.0, "state": "partial" },
+        "matching_witnesses": { "families": 4, "score": 1.0, "state": "partial" },
+        "reductions_equivalence": { "families": 4, "score": 0.5, "state": "partial" },
+        "hierarchy": { "families": 4, "score": 0.5, "state": "integration_pending" },
+        "production_infrastructure": { "families": 4, "score": 0.5, "state": "foundation" }
+      }
     },
-    {
-      "id": "pex",
+    "pex": {
       "implemented": 4.5,
       "total": 32,
       "percent": 14,
       "claim": "analytical estimator; not signoff extraction",
-      "groups": [
-        { "id": "process_stack_corners", "families": 4, "score": 0.5, "state": "partial" },
-        { "id": "node_graph_terminals", "families": 4, "score": 0.5, "state": "partial" },
-        { "id": "resistance", "families": 4, "score": 0.75, "state": "partial" },
-        { "id": "ground_capacitance", "families": 4, "score": 0.75, "state": "partial" },
-        { "id": "coupling", "families": 4, "score": 1.0, "state": "partial" },
-        { "id": "device_substrate", "families": 4, "score": 0.25, "state": "partial" },
-        { "id": "rlc_frequency_thermal", "families": 4, "score": 0.0, "state": "foundation" },
-        { "id": "outputs_reduction_correlation", "families": 4, "score": 0.75, "state": "partial" }
-      ]
+      "groups": {
+        "process_stack_corners": { "families": 4, "score": 0.5, "state": "partial" },
+        "node_graph_terminals": { "families": 4, "score": 0.5, "state": "partial" },
+        "resistance": { "families": 4, "score": 0.75, "state": "partial" },
+        "ground_capacitance": { "families": 4, "score": 0.75, "state": "partial" },
+        "coupling": { "families": 4, "score": 1.0, "state": "partial" },
+        "device_substrate": { "families": 4, "score": 0.25, "state": "partial" },
+        "rlc_frequency_thermal": { "families": 4, "score": 0.0, "state": "absent" },
+        "outputs_reduction_correlation": { "families": 4, "score": 0.75, "state": "partial" }
+      }
     }
-  ],
+  },
   "external_prerequisites": [
     "selected foundry decks and model revisions",
     "licensed golden-tool adapters and runs",

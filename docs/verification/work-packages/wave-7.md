@@ -9,9 +9,9 @@ compare/freeze foundation, not vendor adapters, golden data, licenses or approva
 | Field | Requirement |
 |---|---|
 | Read first | [`verify/conformance/`](../../../verify/conformance/), correlation schemas, all selected deck operation inventories |
-| Prerequisites | stable rule/device/model IDs and supported-subset declarations from Waves 2–6 |
-| Owned files | generated corpus definitions, immutable source seeds/metadata, corpus validators |
-| Forbidden files | hand-edited expected pass counts, proprietary inputs without approved storage/license, self-generated “golden” as independent evidence |
+| Prerequisites | accepted subsets of G2.1–G2.4, D3.1–D3.5, L4.1–L4.5, P5.1–P5.5 and R6.1–R6.5 with stable IDs/capability declarations; incomplete packages may contribute only explicitly labeled foundation cases |
+| Owned files | `verify/conformance/generator/**`, planned `verify/correlation/corpus/{drc,lvs,pex,signoff}/**`, and planned corpus validators under `verify/correlation/corpus/tools/**` |
+| Forbidden files | `verify/conformance/manifest.json`, engine files under `verify/src/**`, proprietary inputs outside approved external storage, and self-produced artifacts labeled independent golden |
 | API outcome | thousands of reproducible positive/negative/boundary/adversarial cells plus representative hierarchical full-chip cases with stable IDs/hashes |
 | Tasks | parameter sweeps around every threshold; geometry degeneracies; device/topology/property variants; process corners; signoff stimulus cases; minimization and deduplication |
 | Unsupported/non-goals | synthetic corpus supplements but does not replace tapeout-representative designs |
@@ -26,9 +26,9 @@ compare/freeze foundation, not vendor adapters, golden data, licenses or approva
 | Field | Requirement |
 |---|---|
 | Read first | [`verify/correlation/`](../../../verify/correlation/), [`src/bin/correlation.rs`](../../../verify/src/bin/correlation.rs), vendor result specifications |
-| Prerequisites | vendor licenses/access, pinned tool/deck/model versions, Q7.1 corpus and legal data-handling plan |
-| Owned files | vendor-specific adapters in approved boundary, neutral artifacts, adapter tests with redistributable samples |
-| Forbidden files | vendor secrets in repo, count-only conversion, missing category -> clean, coordinate/value rounding without source preservation |
+| Prerequisites | Q7.1 accepted; `EXT-DECK`, `EXT-PROCESS`, `EXT-LICENSE` and `EXT-GOLDEN` satisfied |
+| Owned files | planned `verify/correlation/adapters/**`, redistributable adapter fixtures under planned `verify/correlation/fixtures/adapters/**`, and generated neutral artifacts in approved external storage only |
+| Forbidden files | engine files under `verify/src/**`, `verify/correlation/schemas/**` except a separately owned schema-version commit, vendor secrets anywhere in the repository, and count-only/missing-category-clean conversions |
 | API outcome | deterministic adapters emitting complete neutral DRC markers, LVS topology/witnesses, PEX topology/values and signoff status/provenance |
 | Tasks | run orchestration; parser/converter; unit/coordinate mapping; stable IDs; metadata/hashes; artifact validation/freeze; typed tolerance and exact disposition workflow |
 | Unsupported/non-goals | neutral-schema validity does not prove vendor run correctness; unsupported vendor records stop adapter |
@@ -43,9 +43,9 @@ compare/freeze foundation, not vendor adapters, golden data, licenses or approva
 | Field | Requirement |
 |---|---|
 | Read first | G2.4 tiling, D3.5 result DB/scheduler, L4.5 cache, P5.5 distributed artifacts |
-| Prerequisites | semantically correlated engines and representative full-chip corpus |
-| Owned files | benchmark/capacity harness, run manifests, failure-injection tests, published envelopes |
-| Forbidden files | unrepeatable stopwatch anecdotes, changed hardware/toolchain without metadata, result equality by count/hash without canonical artifact inspection |
+| Prerequisites | D3.5, L4.5, P5.5, Q7.1 and Q7.2 accepted; `EXT-GOLDEN` satisfied |
+| Owned files | planned `verify/correlation/capacity/**`, planned `benchmark/verification/**`, and published envelopes under planned `docs/verification/qualification-records/capacity/**` |
+| Forbidden files | engine files under `verify/src/**`, hand-edited golden artifacts, benchmark outputs without hardware/toolchain metadata, and count-only equality reports |
 | API outcome | versioned runtime/memory/capacity envelope and deterministic full/restart/incremental/distributed modes |
 | Tasks | design tiers; hardware/software metadata; thread/worker scaling; peak memory; cancellation/restart; edit invalidation; worker failure/retry; artifact equality and performance regression thresholds |
 | Unsupported/non-goals | claims outside measured envelope; one machine does not establish all-platform performance |
@@ -60,9 +60,9 @@ compare/freeze foundation, not vendor adapters, golden data, licenses or approva
 | Field | Requirement |
 |---|---|
 | Read first | correlation freeze/disposition schemas, [test-gates golden policy](../contributing/test-gates.md#golden-correlation-policy) |
-| Prerequisites | accepted Q7.2/Q7.3 artifacts and organizational owner/signing policy |
-| Owned files | release manifests, reviewed dispositions, release evidence index; secrets/keys external |
-| Forbidden files | wildcard/permanent anonymous waivers, manifests containing themselves, mutable external references, repo-stored private keys |
+| Prerequisites | Q7.2 and Q7.3 accepted; `EXT-SIGNING` satisfied |
+| Owned files | planned `verify/correlation/releases/**`, reviewed dispositions under planned `verify/correlation/releases/*/dispositions.json`, and planned `docs/verification/qualification-records/releases/**`; keys remain external |
+| Forbidden files | engine files under `verify/src/**`, wildcard/permanent anonymous waiver files, manifests containing their output directory, mutable external references, and private keys anywhere in the repository |
 | API outcome | immutable content-addressed engine/deck/model/corpus/results bundle with owner, expiry, exact deltas and optional organizational signatures |
 | Tasks | freeze all inputs/outputs/commands; verify additions/removals; triage each delta; owner/expiry; release notes and supported scope; PKI integration if required |
 | Unsupported/non-goals | v1 identity fields are not PKI; do not claim cryptographic organizational approval without external signing system |
@@ -77,9 +77,9 @@ compare/freeze foundation, not vendor adapters, golden data, licenses or approva
 | Field | Requirement |
 |---|---|
 | Read first | exact foundry/owner qualification program, Q7.1–Q7.4 evidence index, [capability matrix](../compliance/capability-matrix.md) |
-| Prerequisites | external agreement on supported process/deck/models, error bounds, corpus, capacity envelope and submission format |
-| Owned files | repository-side submission index and non-confidential acceptance metadata; external portal/materials remain controlled externally |
-| Forbidden files | self-certification, claim expansion beyond accepted versions/scope, publishing confidential qualification data |
+| Prerequisites | Q7.4 accepted and `EXT-QUALIFICATION` satisfied |
+| Owned files | planned `docs/verification/qualification-records/accepted-scope/**` and non-confidential submission indexes under planned `docs/verification/qualification-records/submissions/**`; external portal materials remain external |
+| Forbidden files | engine files under `verify/src/**`, capability-score files outside the acceptance review, self-issued approval records, claim expansion beyond accepted hashes/scope, and confidential qualification data |
 | API outcome | precise qualified-scope record: engine/deck/model/corpus hashes, process/corners, supported inputs/outputs, limits and approval identity/date |
 | Tasks | submit exact bundle; answer deltas; rerun requested cases; freeze corrections; record accepted scope and renewal/change-control triggers |
 | Unsupported/non-goals | qualification for one combination does not cover another foundry, deck revision, engine commit, model or unsupported operation |

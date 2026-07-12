@@ -12,6 +12,7 @@ Use these labels consistently in code review and status changes:
 
 | State | Meaning | May increase score? |
 |---|---|---:|
+| `absent` | No qualifying implementation foundation exists for the capability family. | No |
 | `foundation` | Shared types or algorithms exist and have focused local tests, but general consumers or end-to-end use are incomplete. | No |
 | `partial` | A documented subset works on general supported input and fails closed outside it; important production semantics remain. | No, unless already present in the audit baseline |
 | `integration_pending` | Work exists on an unmerged or unaccepted stream, or a required cross-module adapter/gate is missing. | No |

@@ -10,9 +10,9 @@ results are external prerequisites.
 | Field | Requirement |
 |---|---|
 | Read first | [`pex/mod.rs`](../../../verify/src/pex/mod.rs), L4.2 detailed connectivity, G2.1/G2.4 geometry/indexes |
-| Prerequisites | stable exact regions and LVS device/port terminal identity |
-| Owned files | new PEX graph/extraction modules, graph fixtures; legacy facade only through reviewed adapter |
-| Forbidden files | scalar sum presented as terminal network, dangling/synthetic unmapped terminals, LVS identity rewrites |
+| Prerequisites | G2.1, G2.4, L4.2 and L4.3 accepted |
+| Owned files | planned `verify/src/pex/{graph,topology}.rs`, the compatibility adapter in `verify/src/pex/mod.rs`, and planned `verify/correlation/corpus/pex/topology/**` |
+| Forbidden files | `verify/src/lvs/**`, `verify/src/geometry/**`, `verify/src/signoff/**`, `verify/conformance/manifest.json`, and any dangling/synthetic unmapped terminal export |
 | API outcome | deterministic conductor/via node-edge graph whose terminals map to extracted devices/ports and preserve source geometry/hierarchy |
 | Tasks | conductor fracture/junction nodes; via arrays/contact edges; terminal attachment; component provenance; connected-island diagnostics; selected-net graph slicing |
 | Unsupported/non-goals | unsupported geometry/terminal ambiguity blocks checked extraction; no zero-resistance invented joins |
@@ -27,9 +27,9 @@ results are external prerequisites.
 | Field | Requirement |
 |---|---|
 | Read first | current PEX params/schema, P5.1 graph, selected process-stack/model docs |
-| Prerequisites | P5.1 graph and versioned external process/corner data |
-| Owned files | process model schema, resistive extraction/reduction, analytic/field structures |
-| Forbidden files | hard-coded process constants/layer names, silent nominal fallback for missing corner/model |
+| Prerequisites | P5.1 accepted and `EXT-PROCESS` satisfied |
+| Owned files | planned `verify/src/pex/{process,resistance,reduction}.rs`, PEX-owned process records in `verify/src/schema.rs`, and planned `verify/correlation/corpus/pex/resistance/**` |
+| Forbidden files | `verify/src/lvs/**`, `verify/src/signoff/**`, DRC/LVS-owned schema records, `verify/conformance/manifest.json`, and hard-coded process constants |
 | API outcome | typed stack/dielectric/conductor/via models and multi-corner R extraction with width/thickness/temp/size effects, arrays and topology-preserving reduction |
 | Tasks | unit-safe interpolation/tables; corner composition; sheet/3D/via/contact resistance; temperature/material laws; reduction error control and protected terminals |
 | Unsupported/non-goals | undeclared extrapolation is error; process physics not supplied by foundry remain unsupported |
@@ -44,9 +44,9 @@ results are external prerequisites.
 | Field | Requirement |
 |---|---|
 | Read first | current area/fringe/lateral/interlayer code, P5.1 graph, process stack from P5.2 |
-| Prerequisites | exact conductor regions and calibrated dielectric/fill/shield parameters |
-| Owned files | capacitance extractors/model tables/correlation cells |
-| Forbidden files | bbox-only final values, inferred fill/shield factors, coupling to same electrical node |
+| Prerequisites | G2.1, P5.1 and P5.2 accepted; `EXT-PROCESS` satisfied |
+| Owned files | planned `verify/src/pex/capacitance.rs`, capacitance-owned records in planned `verify/src/pex/process.rs`, and planned `verify/correlation/corpus/pex/capacitance/**` |
+| Forbidden files | `verify/src/{lvs,signoff}/**`, `verify/src/geometry/**`, `verify/conformance/manifest.json`, and inferred fill/shield coefficients outside the versioned process model |
 | API outcome | ground, lateral, vertical and diagonal coupling elements with same-net, shield and explicit fill awareness |
 | Tasks | neighbor search/exact geometry measures; dielectric adjacency; fringe/corner models; shield interception; fill model; coupling partition and conservation; protected terminal reduction |
 | Unsupported/non-goals | model-free 3D effects remain unsupported; no generic average coefficient across arbitrary layers |
@@ -61,9 +61,9 @@ results are external prerequisites.
 | Field | Requirement |
 |---|---|
 | Read first | L4.3 device records, P5.1 graph, P5.2/P5.3 models, selected process requirements |
-| Prerequisites | validated RC graph; foundry device/substrate/frequency/thermal models |
-| Owned files | device/junction/substrate/RLC/frequency/thermal extractors and fixtures |
-| Forbidden files | zero/default parasitics, enabling optional physics without target-process requirement/model |
+| Prerequisites | L4.3, P5.1, P5.2 and P5.3 accepted; `EXT-PROCESS` and `EXT-DEVICE` satisfied |
+| Owned files | planned `verify/src/pex/{device,substrate,inductance,frequency,thermal}.rs` and planned `verify/correlation/corpus/pex/{device,substrate,rlc,thermal}/**` |
+| Forbidden files | `verify/src/lvs/**`, `verify/src/signoff/**`, `verify/conformance/manifest.json`, and enabled optional-physics code without a target-process model |
 | API outcome | typed optional junction/device/substrate networks and, where required, L/frequency/electrothermal elements with provenance |
 | Tasks | AD/AS/PD/PS-based junctions; contact/gate parasitics; well/substrate network; inductance/mutual terms; skin/proximity; thermal coupling/iteration and convergence status |
 | Unsupported/non-goals | each optional family declares scope; absent model returns unsupported/not-run, never guessed clean |
@@ -78,9 +78,9 @@ results are external prerequisites.
 | Field | Requirement |
 |---|---|
 | Read first | [`lvs/spice.rs`](../../../verify/src/lvs/spice.rs), P5 graph, correlation artifact schema, G2.4 tiles |
-| Prerequisites | P5.1–P5.4 element schema stable |
-| Owned files | DSPF/SPEF/export validators, reduction/selection, distributed orchestration tests |
-| Forbidden files | invalid dialect labeled standard, count-only compare, nondeterministic node names, dropping diagnostics |
+| Prerequisites | G2.4, P5.1, P5.2, P5.3 and P5.4 accepted |
+| Owned files | planned `verify/src/pex/{export,distributed}.rs`, PEX-owned reduction integration in planned `verify/src/pex/reduction.rs`, and planned `verify/correlation/corpus/pex/exports/**` |
+| Forbidden files | `verify/src/lvs/spice.rs` except through a separately reviewed shared-export commit, `verify/src/bin/correlation.rs`, `verify/correlation/schemas/**`, and every export that drops diagnostics or uses nondeterministic node names |
 | API outcome | validated DSPF/SPEF plus selected-net and multi-corner outputs; deterministic topology-preserving reduction and distributed/restart artifacts |
 | Tasks | canonical naming; units/header/name maps; external parser validation; protected terminals/coupling; error-bounded reduction; deterministic tile merge; partial-failure/error propagation |
 | Unsupported/non-goals | output dialects not validated by independent reader remain experimental and named accordingly |

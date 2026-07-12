@@ -34,7 +34,9 @@ Read these pages in order before choosing work:
 
 The machine-readable score record is
 [`compliance/capabilities.json`](compliance/capabilities.json), validated by
-[`compliance/capabilities.schema.json`](compliance/capabilities.schema.json).
+[`compliance/capabilities.schema.json`](compliance/capabilities.schema.json) and the
+strict cross-record checker
+[`scripts/validate_capabilities.py`](scripts/validate_capabilities.py).
 
 ## What these documents do not claim
 

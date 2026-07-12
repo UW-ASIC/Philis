@@ -5,6 +5,16 @@ or conformance-case count. The score is frozen at **24.5/112 (22%)** until revie
 independent correlation exists. The authoritative machine-readable companion is
 [`capabilities.json`](capabilities.json).
 
+Validate duplicate keys, exact engine/group identities, states, sums and percentages
+from the repository root:
+
+```bash
+python3 docs/verification/scripts/validate_capabilities.py
+```
+
+JSON Schema fixes the shape and identity sets; the script enforces cross-record
+arithmetic that JSON Schema cannot express.
+
 ## Summary
 
 | Engine | Score | Total | Coverage | Current claim |

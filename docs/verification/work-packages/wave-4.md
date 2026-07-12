@@ -10,9 +10,9 @@ baseline. The real GDS hierarchy/text/property adapter is integration pending.
 | Field | Requirement |
 |---|---|
 | Read first | [`lvs/netlist.rs`](../../../verify/src/lvs/netlist.rs), [`lvs/binding.rs`](../../../verify/src/lvs/binding.rs), selected corpus syntax inventory |
-| Prerequisites | target SPICE/CDL/Spectre subset and include-security policy fixed |
-| Owned files | parser/AST/binder/conversion and syntax fixtures |
-| Forbidden files | permissive skip of statements/options, unrestricted host includes, layout extraction |
+| Prerequisites | `EXT-NETLIST` satisfied |
+| Owned files | `verify/src/lvs/netlist.rs`, `verify/src/lvs/binding.rs`, and their inline syntax/include/expression/binding tests |
+| Forbidden files | `verify/src/lvs/{extract,detailed_extract,production,hier_production}.rs`, `verify/src/{drc,pex,signoff}/**`, unrestricted host-path fixtures, and permissive skipped-statement lists |
 | API outcome | source-spanned AST and deterministic bound hierarchy for required SPICE/CDL/Spectre parameters, expressions, buses, globals, includes, models/aliases and conditions |
 | Tasks | `.lib`/conditions/functions as required; unit/suffix semantics; bus expansion; scoped parameters; include cycle/root policy; model aliases and primitive mapping |
 | Unsupported/non-goals | dialect outside declared subset returns typed syntax/unsupported error; no best-effort line skipping |
@@ -27,9 +27,9 @@ baseline. The real GDS hierarchy/text/property adapter is integration pending.
 | Field | Requirement |
 |---|---|
 | Read first | [`lvs/extract.rs`](../../../verify/src/lvs/extract.rs), [`lvs/detailed_extract.rs`](../../../verify/src/lvs/detailed_extract.rs), G2.2 adapter, production identity types |
-| Prerequisites | G2.1/G2.2 accepted and real checked GDS-to-`HierLayout` adapter merged |
-| Owned files | connectivity/extraction/evidence adapter tests |
-| Forbidden files | bbox contact decisions, invented port labels, implicit cross-layer joins, matcher changes |
+| Prerequisites | G2.1, G2.2 and G2.4 accepted; `BA-GDS-LVS-ADAPTER` satisfied |
+| Owned files | `verify/src/lvs/extract.rs`, `verify/src/lvs/detailed_extract.rs`, planned `verify/src/lvs/gds_adapter.rs`, and their inline connectivity/evidence tests |
+| Forbidden files | `verify/src/lvs/{compare,production,hier_production}.rs`, `verify/src/geometry/**`, `verify/src/{drc,pex,signoff}/**`, and any adapter code that invents port labels |
 | API outcome | exact conductor/via connectivity, ports/text/properties/body/well, soft-connect/open candidates with source geometry and hierarchy provenance |
 | Tasks | derived conductor regions; via stacks/cut arrays; boundary-contact policies; ambiguity rules; port direction/global binding; four-terminal body/substrate identity; actionable open/short physical witness objects |
 | Unsupported/non-goals | ambiguous text/property association is error; no legacy layer-name inference in strict path |
@@ -44,9 +44,9 @@ baseline. The real GDS hierarchy/text/property adapter is integration pending.
 | Field | Requirement |
 |---|---|
 | Read first | [`params.rs`](../../../verify/src/params.rs) device config, detailed extraction, [`lvs/production.rs`](../../../verify/src/lvs/production.rs) typed records |
-| Prerequisites | L4.2 exact regions/terminals and selected foundry recognition deck/model inventory |
-| Owned files | device schema/recognizers/property extraction and golden cells |
-| Forbidden files | hard-coded generic device guesses, silently defaulted body/model/property, matcher tolerance changes |
+| Prerequisites | L4.2 accepted and `EXT-DEVICE` satisfied |
+| Owned files | device-owned records in `verify/src/schema.rs` and `verify/src/params.rs`; planned `verify/src/lvs/devices/**`; planned `verify/correlation/corpus/lvs/devices/**` |
+| Forbidden files | `verify/src/lvs/{compare,production,hier_production}.rs`, DRC-owned schema records, `verify/conformance/manifest.json`, and hard-coded/defaulted device properties |
 | API outcome | complete required MOS/R/C/diode/BJT/custom device records with model/class, terminals, typed properties, equations and source evidence |
 | Tasks | MOS S/D segmentation, W/L/M/NF, AD/AS/PD/PS; resistor/cap/diode/BJT geometry/properties; selected varactor/MOSCAP/inductor/custom devices; ambiguity and overlap precedence |
 | Unsupported/non-goals | devices outside selected deck are explicit extraction errors; no zero placeholder property presented as measured |
@@ -61,9 +61,9 @@ baseline. The real GDS hierarchy/text/property adapter is integration pending.
 | Field | Requirement |
 |---|---|
 | Read first | [`lvs/production.rs`](../../../verify/src/lvs/production.rs), [`lvs/compare.rs`](../../../verify/src/lvs/compare.rs), current reduction code |
-| Prerequisites | L4.1 bound reference and L4.2/L4.3 detailed layout identities |
-| Owned files | matcher/reduction/witness logic and graph corpora |
-| Forbidden files | probabilistic acceptance, layout-only reduction, silent seed relaxation, witness-free mismatch |
+| Prerequisites | L4.1, L4.2 and L4.3 accepted |
+| Owned files | `verify/src/lvs/compare.rs`, `verify/src/lvs/production.rs`, reduction code in `verify/src/lvs/extract.rs` only through a separately owned reduction commit, and planned `verify/correlation/corpus/lvs/matching/**` |
+| Forbidden files | `verify/src/lvs/{netlist,binding,detailed_extract,hier_production}.rs`, `verify/src/{geometry,drc,pex,signoff}/**`, and any probabilistic/witness-free acceptance path |
 | API outcome | deterministic complete matching within declared resource bounds, named-net seeds, legal pin swaps, symmetric layout/reference reductions and reproducible open/short/property witnesses |
 | Tasks | canonical partitions; equivalence rules; S/D and declared symmetry; series/parallel fixpoint both sides; resource-limit status; minimal conflicting mappings and cross-probe objects |
 | Unsupported/non-goals | exhausted bounds return indeterminate/error, not match; undeclared swaps/equivalences forbidden |
@@ -78,9 +78,9 @@ baseline. The real GDS hierarchy/text/property adapter is integration pending.
 | Field | Requirement |
 |---|---|
 | Read first | [`lvs/hier_production.rs`](../../../verify/src/lvs/hier_production.rs), binding hierarchy, G2.2 adapter/cache |
-| Prerequisites | L4.1–L4.4 APIs accepted |
-| Owned files | production hierarchy orchestration/cache, hierarchy corpus |
-| Forbidden files | synthetic-root collapse, unbound child ports, unconditional flatten, cache keys without ancestor/deck/model identity |
+| Prerequisites | L4.1, L4.2, L4.3 and L4.4 accepted; `BA-GDS-LVS-ADAPTER` satisfied |
+| Owned files | `verify/src/lvs/hierarchical.rs`, `verify/src/lvs/hier_production.rs`, hierarchy-owned cache code, and planned `verify/correlation/corpus/lvs/hierarchy/**` |
+| Forbidden files | `verify/src/lvs/{netlist,binding,detailed_extract}.rs`, `verify/src/{geometry,drc,pex,signoff}/**`, and cache records without ancestor/deck/model identity |
 | API outcome | real subcircuit binding with black boxes/equated cells/selective flattening and hierarchy/fully-flat equivalence |
 | Tasks | child-port maps; parameterized instances/arrays; matched-cell abstraction; cross-boundary reductions where legal; negative black-box semantics; cache invalidation; million-instance bounded execution |
 | Unsupported/non-goals | ambiguous/missing child reference is error; black box is not wildcard equivalence unless explicitly declared |

@@ -38,6 +38,26 @@ outcome, tasks, explicit unsupported scope, four-direction tests, focused/full g
 acceptance evidence, score policy, and parallel/fan-in hazards. An implementation
 branch that omits any field is incomplete even if its unit tests pass.
 
+## Dependency gate IDs
+
+Work-package prerequisite rows use these stable non-package gates. A gate is satisfied
+only by the named evidence; a verbal assumption is not sufficient.
+
+| Gate ID | Required evidence |
+|---|---|
+| `BA-W3-REVIEW` | all seven Wave 3 review blockers fixed, independently re-reviewed, and accepted on fan-in |
+| `BA-GDS-LVS-ADAPTER` | checked GDS-to-`HierLayout` adapter accepted with ambiguity/identity regressions |
+| `EXT-DECK` | selected foundry DRC deck revision and complete operation inventory available under approved access |
+| `EXT-NETLIST` | selected SPICE/CDL/Spectre dialect corpus and include/security policy fixed |
+| `EXT-DEVICE` | selected foundry LVS device-recognition deck, models, properties and tolerances available |
+| `EXT-PROCESS` | versioned conductor/dielectric/corner/fill/thermal process models available |
+| `EXT-ACTIVITY` | approved vector, vectorless, waveform and mission-profile inputs with provenance available |
+| `EXT-RELIABILITY` | foundry reliability equations, limits, validity domains and qualification structures available |
+| `EXT-LICENSE` | licensed independent tool/field-solver execution environment and legal data-handling plan approved |
+| `EXT-GOLDEN` | pinned independent golden artifacts and review-approved error-bound policy available |
+| `EXT-SIGNING` | organizational release owner and signing/identity policy approved |
+| `EXT-QUALIFICATION` | foundry/tapeout-owner submission program, acceptance criteria and authorized approver identified |
+
 ## Wave gates
 
 At each wave boundary:

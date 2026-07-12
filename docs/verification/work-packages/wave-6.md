@@ -10,9 +10,9 @@ reliability equations, calibrated limits and qualification data are external.
 | Field | Requirement |
 |---|---|
 | Read first | [`signoff/antenna.rs`](../../../verify/src/signoff/antenna.rs), L4 connectivity/device terminals, selected process antenna rules |
-| Prerequisites | exact connectivity/terminal identity and fabrication-step model inputs |
-| Owned files | antenna evidence extractor/model schema/integration tests |
-| Forbidden files | final-net-only connectivity, generic ratio defaults, diode credit by ambiguous marker |
+| Prerequisites | G2.1, L4.2 and L4.3 accepted; `EXT-RELIABILITY` satisfied for antenna equations/stages |
+| Owned files | planned `verify/src/signoff/antenna_evidence.rs`, antenna-evidence records in `verify/src/signoff/antenna.rs`, and planned `verify/correlation/corpus/signoff/antenna/**` |
+| Forbidden files | `verify/src/{geometry,lvs,pex}/**`, `verify/conformance/manifest.json`, generic ratio defaults, and final-net-only or ambiguous diode attribution |
 | API outcome | stage-specific gate/collector/contact/diode evidence and foundry equation evaluation with physical provenance |
 | Tasks | layer construction sequence; temporary networks; area/sidewall/contact metrics; oxide/gate class; diode attribution/bonus; cumulative rules and stage markers |
 | Unsupported/non-goals | missing stage/equation/device class is `ERROR`/`NOT_RUN`; no universal antenna formula |
@@ -27,9 +27,9 @@ reliability equations, calibrated limits and qualification data are external.
 | Field | Requirement |
 |---|---|
 | Read first | [`signoff/power.rs`](../../../verify/src/signoff/power.rs), P5 graph/models, activity/current source interfaces |
-| Prerequisites | terminal-aware P5 graph and declared vector/vectorless/current/thermal inputs |
-| Owned files | power-grid adapter, stimulus/current estimation, thermal-map adapter/tests |
-| Forbidden files | guessed loads as signoff, nominal temperature fallback, silently discarded singular islands |
+| Prerequisites | L4.2, P5.1, P5.2 and P5.5 accepted; `EXT-ACTIVITY`, `EXT-PROCESS` and `EXT-RELIABILITY` satisfied |
+| Owned files | planned `verify/src/signoff/{power_evidence,activity,thermal_map}.rs`, adapter-owned integration in `verify/src/signoff/power.rs`, and planned `verify/correlation/corpus/signoff/power/**` |
+| Forbidden files | `verify/src/{geometry,lvs,pex}/**`, `verify/conformance/manifest.json`, guessed loads/temperatures, and code that discards singular islands |
 | API outcome | extracted supply graph with source/load/current/temperature evidence per corner feeding IR/EM analyzers |
 | Tasks | supply/ground identification; source boundary conditions; vector currents and vectorless envelope; via current split; thermal interpolation; convergence/error and provenance |
 | Unsupported/non-goals | absent activity/current/thermal scope remains `NOT_RUN`; vectorless assumptions explicitly versioned |
@@ -44,9 +44,9 @@ reliability equations, calibrated limits and qualification data are external.
 | Field | Requirement |
 |---|---|
 | Read first | [`signoff/reliability.rs`](../../../verify/src/signoff/reliability.rs), L4 device terminals, mission-profile specification |
-| Prerequisites | mapped device terminals and externally generated/declared voltage-temperature histories |
-| Owned files | waveform/mission-profile adapters, mechanism models and tests |
-| Forbidden files | unnamed generic aging, extrapolation without model domain, reducing missing history to zero stress |
+| Prerequisites | L4.2 and L4.3 accepted; `EXT-ACTIVITY` and `EXT-RELIABILITY` satisfied |
+| Owned files | planned `verify/src/signoff/{waveform,mission_profile,aging_models}.rs`, adapter-owned integration in `verify/src/signoff/reliability.rs`, and planned `verify/correlation/corpus/signoff/aging/**` |
+| Forbidden files | `verify/src/{geometry,lvs,pex}/**`, `verify/conformance/manifest.json`, unnamed generic aging, and out-of-domain extrapolation/default-zero histories |
 | API outcome | terminal voltage/temperature duty histories and named aging mechanisms with coefficients, validity domain, result and provenance |
 | Tasks | waveform normalization; stress-state classification; time/temperature integration; BTI/HCI/TDDB or selected mechanisms; early/normal/end-of-life corners; uncertainty handling |
 | Unsupported/non-goals | only foundry-modeled named mechanisms run; out-of-domain input errors |
@@ -61,9 +61,9 @@ reliability equations, calibrated limits and qualification data are external.
 | Field | Requirement |
 |---|---|
 | Read first | [`signoff/esd_latchup.rs`](../../../verify/src/signoff/esd_latchup.rs), L4 device recognition, P5 point-to-point R graph |
-| Prerequisites | recognized clamps/triggers/rails/pads and resistance network; selected ESD topology/sizing rules |
-| Owned files | ESD recognizer/path adapter/rule schema and tests |
-| Forbidden files | topology-only clean when sizing/R missing, undirected path substitution, HBM/CDM qualification claim |
+| Prerequisites | L4.3, P5.1 and P5.2 accepted; `EXT-RELIABILITY` satisfied for ESD topology/sizing rules |
+| Owned files | planned `verify/src/signoff/esd_evidence.rs`, ESD-owned integration in `verify/src/signoff/esd_latchup.rs`, and planned `verify/correlation/corpus/signoff/esd/**` |
+| Forbidden files | `verify/src/{geometry,lvs,pex}/**`, `verify/conformance/manifest.json`, topology-only clean paths, undirected substitutes, and any HBM/CDM qualification claim |
 | API outcome | context-aware pad-to-rail discharge paths with clamp/trigger identity, direction, sizing, capacity and point-to-point R provenance |
 | Tasks | path contexts/modes; clamp/trigger structures; rail domains; device sizing; resistance/current capacity; competing/failure paths; localized witness |
 | Unsupported/non-goals | analysis is layout/circuit verification, not device-level HBM/CDM certification; missing model/evidence is non-clean |
@@ -78,9 +78,9 @@ reliability equations, calibrated limits and qualification data are external.
 | Field | Requirement |
 |---|---|
 | Read first | latch-up structures in [`signoff/esd_latchup.rs`](../../../verify/src/signoff/esd_latchup.rs), L4 body/well extraction, G2.1 geometry |
-| Prerequisites | exact well/substrate/body/tap connectivity and selected latch-up/guard-ring deck |
-| Owned files | substrate/well topology, injector/victim/guard-ring evidence extractor and tests |
-| Forbidden files | bbox-only guard continuity, geometry-only ring without bias proof, arbitrary injector/victim labels |
+| Prerequisites | G2.1, L4.2 and L4.3 accepted; `EXT-RELIABILITY` satisfied for latch-up/guard-ring rules |
+| Owned files | planned `verify/src/signoff/latchup_evidence.rs`, latch-up-owned integration in `verify/src/signoff/esd_latchup.rs`, and planned `verify/correlation/corpus/signoff/latchup/**` |
+| Forbidden files | `verify/src/{geometry,lvs,pex}/**`, `verify/conformance/manifest.json`, bbox-only ring continuity, unproven bias, and arbitrary injector/victim labels |
 | API outcome | context-aware injector/victim sites and geometric/electrical guard-ring evidence with continuity, width, spacing, bias, tap and provenance |
 | Tasks | well/substrate regions; parasitic path context; injector/victim recognition; danger zones; ring topology/coverage; bias connectivity and tap density/distance |
 | Unsupported/non-goals | missing substrate model or ambiguous bodies is error; geometry check alone cannot imply latch-up clean |

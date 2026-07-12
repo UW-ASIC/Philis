@@ -54,10 +54,10 @@ Every delegated task must state:
 ```text
 ID and outcome:
 Base commit / worktree / branch / isolated CARGO_TARGET_DIR:
-Read first:
-Prerequisites:
-Owned files:
-Forbidden files:
+Read first (exact source paths):
+Prerequisites (package IDs and dependency gate IDs):
+Owned files (exact repository paths/globs):
+Forbidden files (exact repository paths/globs):
 Public API or artifact outcome:
 Supported subset and explicit Unsupported cases:
 Positive / negative / boundary / adversarial tests:

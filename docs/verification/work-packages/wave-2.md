@@ -11,9 +11,9 @@ is integration pending.
 | Field | Requirement |
 |---|---|
 | Read first | [`geometry/exact.rs`](../../../verify/src/geometry/exact.rs), [`geometry.rs`](../../../verify/src/geometry.rs), then `rg "poly_bbox|bbox" verify/src/drc verify/src/lvs verify/src/pex` |
-| Prerequisites | accepted Batch A exact types; define overflow/complexity policy before exposing new operations |
-| Owned files | `verify/src/geometry/**`, focused geometry tests/fixtures; consumer files only in separately reviewed migration commits |
-| Forbidden files | deck expected results, correlation dispositions, unrelated GDS/netlist parsing |
+| Prerequisites | None beyond the documented `b4a4965` Batch A geometry baseline; freeze the overflow/complexity policy before exposing G2.1 operations |
+| Owned files | `verify/src/geometry.rs`, `verify/src/geometry/**`, and their inline `#[cfg(test)]` modules. Consumer migrations require separate commits owned by the affected package |
+| Forbidden files | `verify/src/gds*.rs`, `verify/src/oasis.rs`, `verify/src/{drc,lvs,pex,signoff}/**`, `verify/conformance/**`, and `verify/correlation/**` except in separately assigned consumer/correlation commits |
 | API outcome | validated integer/rational polygons with union/intersection/subtraction, holes/keyholes, edge classification, arbitrary-angle offsets and explicit complexity/overflow errors |
 | Tasks | add rational intersection/offset representation; canonical winding/ring ordering; exact all-angle topology; deterministic fracture; migrate every electrical/geometric decision to shared API; retain bbox only for candidate generation |
 | Unsupported/non-goals | curvilinear geometry and unbounded exact arithmetic unless selected process requires them; never fall back to bbox or floating clean on complexity limit |
@@ -29,9 +29,9 @@ is integration pending.
 | Field | Requirement |
 |---|---|
 | Read first | [`gds_lossless.rs`](../../../verify/src/gds_lossless.rs), [`gds.rs`](../../../verify/src/gds.rs), [`lib.rs`](../../../verify/src/lib.rs), [`lvs/hier_production.rs`](../../../verify/src/lvs/hier_production.rs) |
-| Prerequisites | G2.1 checked polygon contract; accepted adapter identity contract in [contracts](../contracts.md) |
-| Owned files | GDS modules, adapter module/tests, format fixtures |
-| Forbidden files | production matcher semantics, rule expectations, invented layer/text-to-net policy |
+| Prerequisites | G2.1 accepted; `BA-GDS-LVS-ADAPTER` is the exit dependency for the LVS adapter portion; identity contract in [contracts](../contracts.md) |
+| Owned files | `verify/src/gds.rs`, `verify/src/gds_lossless.rs`, planned `verify/src/lvs/gds_adapter.rs`, and planned format fixtures under `verify/conformance/gds/**` |
+| Forbidden files | `verify/src/lvs/{production,compare,hier_production}.rs`, `verify/src/drc/**`, `verify/src/pex/**`, `verify/conformance/manifest.json`, and `verify/correlation/**`; no proximity-based text-to-net policy |
 | API outcome | lossless round trip plus strict verification adapter for exact BOUNDARY/PATH, SREF/AREF, properties/text association and hierarchy paths; typed error contains record/cell/instance evidence |
 | Tasks | finish legal PATH types/width/end extensions and all-angle stroking; absolute/reflected/magnified transforms with exact representability checks; preserve PLEX/properties/text; cycle/missing-cell/array validation; build checked `GdsLibrary -> HierLayout` adapter using only declared property/text rules |
 | Unsupported/non-goals | NODE electrical meaning, vendor extensions, non-integral transform output unless explicitly modeled; ambiguity is error, never guessed ports/nets |
@@ -47,9 +47,9 @@ is integration pending.
 | Field | Requirement |
 |---|---|
 | Read first | [`oasis.rs`](../../../verify/src/oasis.rs), [`gds_lossless.rs`](../../../verify/src/gds_lossless.rs), OASIS capability constant/tests |
-| Prerequisites | G2.2 checked layout database and adapter contracts |
-| Owned files | OASIS reader/writer, capability declaration, OASIS fixtures/fuzz seeds |
-| Forbidden files | checker-specific geometry shortcuts; claiming unspecified records as supported |
+| Prerequisites | G2.2 accepted; no external gate beyond the selected OASIS production corpus supplied with `EXT-DECK` |
+| Owned files | `verify/src/oasis.rs` and OASIS-only fixtures/fuzz seeds under planned `verify/conformance/oasis/**` |
+| Forbidden files | `verify/src/{drc,lvs,pex,signoff}/**`, `verify/src/geometry/**`, `verify/conformance/manifest.json`, and every capability declaration not backed by an OASIS fixture |
 | API outcome | explicit versioned supported-feature declaration and checked OASIS-to-layout path equivalent to supported GDS semantics |
 | Tasks | implement PATH/TEXT, repetitions, properties, modal/reference tables, XYRELATIVE, placements/transforms, CBLOCK/compression as required by selected corpus; validate checksums/signatures if in target scope |
 | Unsupported/non-goals | features outside selected production subset remain typed `Unsupported` with record/offset, not silently skipped |
@@ -65,9 +65,9 @@ is integration pending.
 | Field | Requirement |
 |---|---|
 | Read first | [`hierarchy_index.rs`](../../../verify/src/hierarchy_index.rs), checked GDS adapter, DRC candidate generation |
-| Prerequisites | stable G2.1 geometry and G2.2 identity/transform semantics |
-| Owned files | hierarchy index/tile modules and equivalence/capacity fixtures |
-| Forbidden files | checker result policy, waiver DB, distributed scheduler beyond tile contract |
+| Prerequisites | G2.1 and G2.2 accepted |
+| Owned files | `verify/src/hierarchy_index.rs` and its inline hierarchy/tile/equivalence tests |
+| Forbidden files | `verify/src/drc/**`, `verify/src/lvs/**`, `verify/src/pex/**`, planned D3.5 result/waiver/scheduler files, and `verify/correlation/**` |
 | API outcome | deterministic hierarchy-aware candidate enumeration and tile ownership/halo contract that cannot lose or duplicate seam results |
 | Tasks | complete transformed bounds/exact recheck; stable instance paths; halo sizing by rule reach; canonical marker ownership; ancestor-aware invalidation keys; bounded memory enumeration |
 | Unsupported/non-goals | semantic flattening of unsupported transforms; cross-tile result reconciliation by count only |

@@ -94,6 +94,10 @@ The 386 aF fixture has a required physical disposition: **10 aF area + 176 aF fr
 + 200 aF mutual coupling = 386 aF**. Preserve the three mechanisms and units, not
 only their scalar total.
 
+The `PEX_FILL` fixture has a separate required disposition: **14.6025 aF** is the
+unmodified analytical result with an absolute tolerance of **1e-6 aF**. It must not
+acquire a synthetic size-based fill or shielding multiplier.
+
 ## Score promotion
 
 Unit or conformance tests may move a package from absent to `foundation` or `partial`.

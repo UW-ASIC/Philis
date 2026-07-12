@@ -28,16 +28,60 @@ Disable only with `"enabled": false`; zero/missing/negative/non-finite required 
 are validation errors, including on disabled entries. Every referenced layer/device/
 connectivity/model must resolve. Duplicate IDs or GDS `(layer, datatype)` aliases error.
 
-Current legacy DRC kinds include width/spacing/cross-spacing, enclosure/extension,
-area/max-width/notch/edge length/off-grid/angle, min/max density, overlap,
-corner-to-corner, antenna/CAR, EOL/PRL/wide spacing, asymmetric enclosure,
-enclosed-area/cheesing, redundant/via-array rules, tap distance, multi-patterning and
-always-on polygon validity. This enum is not a foundry rule language; see
-[DRC limitations](engines/drc.md).
+Every DRC entry accepts common fields `id` (stable nonempty identity), `kind`
+(implementation selector) and optional `enabled` (boolean, default true). These are the
+complete currently accepted legacy `kind` mappings; all dimensions are positive DBU,
+areas are positive DBU², fractions are finite `[0,1]`, and ratios are positive unitless
+values unless the row says otherwise.
 
-PEX per-layer scalar fields use explicit units: Ω/□, aF/µm², aF/µm, nm and optional
-Ω/cut or aF/µm² interlayer terms. A zero optional coefficient means that model is not
-declared, not that the physical mechanism is universally zero.
+| `kind` | Required JSON fields | Current meaning / validation |
+|---|---|---|
+| `min_width` | `layer`, `min` | minimum width |
+| `min_spacing` | `layer`, `min` | same-layer spacing |
+| `min_spacing_diff` | `layer` (or `layer_a`), `layer_b`, `min` | cross-layer spacing |
+| `min_enclosure`, `well_enclosure` | `outer`, `inner`, `min` | `well_enclosure` is a legacy alias |
+| `min_extension` | `layer`, `ref` (or `reference`), `min` | extension past reference layer |
+| `min_area` | `layer`, `min` | minimum polygon area; `min` is i64 DBU² |
+| `max_width` | `layer`, `max` | maximum narrow dimension |
+| `notch` | `layer`, `min` | exterior same-shape gap |
+| `min_edge_length` | `layer`, `min` | per-edge minimum length |
+| `off_grid` | `grid` | all vertices on positive DBU grid |
+| `angle` | `allowed` | nonempty integer degree array, each value in `[0,180)` |
+| `min_density` | `layer`, `window`, `min_frac` | positive DBU window; minimum fraction |
+| `max_density` | `layer`, `window`, `max_frac` | positive DBU window; maximum fraction |
+| `overlap` | `layer` (or `layer_a`), `layer_b`, `min` | simplified positive-overlap width |
+| `corner_to_corner` | `layer`, `min` | diagonal corner distance |
+| `antenna` | `layer`, `ratio` | simplified single-layer area ratio |
+| `antenna_car` | `layers`, `ratio`; optional `diode_layer` | nonempty unique ordered layer stack and optional diode marker |
+| `eol_spacing` | `layer`, `eol_width`, `eol_spacing` | single-threshold EOL rule |
+| `wide_dependent_spacing` | `layer`, `width_threshold`, `wide_spacing` | single wide-wire threshold |
+| `prl_spacing` | `layer`, `prl_threshold`, `prl_spacing` | single parallel-run threshold |
+| `asymmetric_enclosure` | `outer`, `inner`, `min` | `min` resolves to minimum one-side enclosure |
+| `min_enclosed_area` | `layer`, `min` | `min` resolves to minimum hole area in DBU² |
+| `cheesing` | `layer`, `max` | `max` resolves to maximum unslotted area in DBU² |
+| `redundant_via` | `layer`, `min_count`, `within` | `min_count >= 2`; `within` is DBU distance |
+| `via_array_spacing` | `layer`, `array_threshold`, `array_spacing` | `array_threshold >= 2`; spacing in DBU |
+| `max_distance_to_tap` | `layer`, `layer_b`, `max_dist` | first layer is diffusion, second is tap |
+| `multi_patterning` | `layer`, `num_colors`, `min` | colors in `[2,64]`; `min` resolves to color spacing |
+
+Always-on polygon-validity checking is policy, not a JSON `kind`. This legacy enum is
+not a production foundry rule language; see [DRC limitations](engines/drc.md).
+
+The `pex` object maps a declared layer name to this complete scalar model:
+
+| JSON field | Unit | Current use |
+|---|---|---|
+| `sheet_res_ohm_sq` | Ω/□ | required; `R = Rs * Leq/Weq` |
+| `area_cap_af_um2` | aF/µm² | required area-to-ground coefficient |
+| `fringe_cap_af_um` | aF/µm | required perimeter/fringe coefficient |
+| `coupling_cap_af_um` | aF/µm | required same-layer coupling coefficient |
+| `coupling_ref_spacing_nm` | nm | required reference spacing in coupling scale |
+| `via_res_ohm` | Ω/cut polygon | optional, nonnegative; default `0` means undeclared |
+| `interlayer_cap_af_um2` | aF/µm² | optional, nonnegative; default `0` means undeclared |
+
+All PEX coefficients are finite and nonnegative; the coupling reference spacing must be
+strictly positive when `coupling_cap_af_um > 0`. A zero optional coefficient means that
+model is not declared, not that the physical mechanism is universally zero.
 
 ## GDS input policies
 
