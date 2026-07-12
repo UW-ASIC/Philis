@@ -1,10 +1,10 @@
 # Current status and remaining work
 
 Status date: 2026-07-12. Code baseline for this document set:
-`b4a4965a0bb51df44c5f41137ac6da8926c2c5e6`, the combined Wave 2 and Wave 4
-Batch A integration point. Wave 3 fixes and the GDS-to-production-LVS hierarchy
-adapter are **integration pending** and must not be described as merged until the
-finalization checklist below passes.
+`8b5895a431727d16721466e65b0735ca82bf0c61`, the reviewed Wave 2 and Wave 4
+Batch A integration point including the checked GDS-to-production-LVS hierarchy
+adapter. The adapter is an accepted `partial` supported subset on this baseline;
+the Wave 3 fixes remain **integration pending**.
 
 ## Capability state vocabulary
 
@@ -32,7 +32,7 @@ The audited score remains **24.5/112 (22%)**:
 The settled baseline before Batch A passed 78 library tests, all 162 conformance
 cases with 51/51 negative-direction coverage entries, downstream `pnr-core` and
 `pnr-backend` compile gates, 18 backend tests, and 16 correlation-harness tests.
-Batch A's Wave 2 plus Wave 4 integration point passes 119 library tests, the same
+Batch A's Wave 2 plus Wave 4 integration point passes 137 library tests, the same
 162 conformance cases, and downstream compile gates. These are local regression
 results, not independent correlation.
 
@@ -47,8 +47,9 @@ Implemented foundations include:
 - checked, lossless GDS records and hierarchy; orthogonal hierarchy indexing and
   deterministic tiling; an explicitly declared but intentionally partial OASIS subset;
 - a fail-closed SPICE/CDL parser foundation, body-aware production LVS records,
-  deterministic comparison/witness structures, parameter binding, black-box and
-  equated-cell foundations, and abstract hierarchical comparison;
+  deterministic comparison/witness structures, parameter binding, and a checked
+  GDS hierarchy adapter with explicit text/property evidence, black boxes,
+  equated cells, physical flatten correlation and source/hierarchy provenance;
 - analytical PEX in which every supported rectilinear conductor receives R and
   ground C, incomplete extraction is diagnostic, and exported lumped networks do
   not contain dangling parasitic nodes;
@@ -63,9 +64,9 @@ Do these before starting shared Wave 5 or Wave 6 integration:
    stitch/search-limit errors; dropped invalid-geometry markers; stale waiver
    dispositions; missing ancestor invalidation; bbox/nested-polarity false-cleans;
    and invalid density ranges.
-2. Land the checked GDS hierarchy to `HierLayout` adapter. It must preserve
-   hierarchy paths and explicit text/property evidence, support declared
-   orthogonal SREF/AREF transforms, reject ambiguity, and never invent ports.
+2. Preserve the accepted checked GDS hierarchy to `HierLayout` adapter gate: it
+   preserves hierarchy paths and explicit text/property evidence, supports the
+   declared orthogonal SREF/AREF subset, rejects ambiguity, and never invents ports.
 3. Cherry-pick only reviewed feature/fix commits into the fan-in branch. Exclude
    formatting-only detours and unrelated changes.
 4. Run every [global integration gate](contributing/test-gates.md#global-integration-gate)

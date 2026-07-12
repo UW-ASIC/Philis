@@ -3,7 +3,8 @@
 Goal: deterministic, hierarchy-preserving comparison from real checked layout evidence
 to the selected foundry schematic dialect and device deck. Production record, binding,
 matching, detailed extraction and abstract hierarchy foundations exist at the documented
-baseline. The real GDS hierarchy/text/property adapter is integration pending.
+baseline. The checked GDS hierarchy/text/property adapter is accepted for its declared
+strict orthogonal subset; selected-deck breadth and independent correlation remain.
 
 ## L4.1 — complete the required reference-netlist dialect
 
@@ -28,7 +29,7 @@ baseline. The real GDS hierarchy/text/property adapter is integration pending.
 |---|---|
 | Read first | [`lvs/extract.rs`](../../../verify/src/lvs/extract.rs), [`lvs/detailed_extract.rs`](../../../verify/src/lvs/detailed_extract.rs), G2.2 adapter, production identity types |
 | Prerequisites | G2.1, G2.2 and G2.4 accepted; `BA-GDS-LVS-ADAPTER` satisfied |
-| Owned files | `verify/src/lvs/extract.rs`, `verify/src/lvs/detailed_extract.rs`, planned `verify/src/lvs/gds_adapter.rs`, and their inline connectivity/evidence tests |
+| Owned files | `verify/src/lvs/extract.rs`, `verify/src/lvs/detailed_extract.rs`, `verify/src/lvs/gds_adapter.rs`, and their inline connectivity/evidence tests |
 | Forbidden files | `verify/src/lvs/{compare,production,hier_production}.rs`, `verify/src/geometry/**`, `verify/src/{drc,pex,signoff}/**`, and any adapter code that invents port labels |
 | API outcome | exact conductor/via connectivity, ports/text/properties/body/well, soft-connect/open candidates with source geometry and hierarchy provenance |
 | Tasks | derived conductor regions; via stacks/cut arrays; boundary-contact policies; ambiguity rules; port direction/global binding; four-terminal body/substrate identity; actionable open/short physical witness objects |

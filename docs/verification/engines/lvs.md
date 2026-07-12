@@ -16,9 +16,11 @@ configured device recognition. [`lvs/detailed_extract.rs`](../../../verify/src/l
 produces production identities, body/well terminals, typed properties, soft/open
 evidence and hierarchy paths.
 
-The real checked GDS hierarchy/text/property adapter is integration pending. Abstract
-paths or a synthetic root are insufficient; adapters must preserve explicit evidence,
-reject ambiguous/missing association and never invent ports.
+[`lvs/gds_adapter.rs`](../../../verify/src/lvs/gds_adapter.rs) provides the accepted
+checked adapter for the declared strict orthogonal GDS subset. It preserves explicit
+text/property and hierarchy provenance, validates child/opaque-boundary port maps,
+and correlates nonopaque hierarchy against strict physical flattening. Unsupported,
+ambiguous or incomplete evidence errors; a synthetic root or invented port is invalid.
 
 ## Comparison and hierarchy
 
@@ -30,7 +32,8 @@ provides abstract hierarchy, transforms/arrays, policies and cache foundations.
 
 ## Production gap
 
-Complete the selected SPICE/CDL/Spectre dialect; bind real GDS labels/properties/ports;
+Complete the selected SPICE/CDL/Spectre dialect; extend checked GDS semantics beyond
+the declared subset;
 implement exact all-angle/derived connectivity and soft-connect; extract foundry MOS,
 R, C, diode, BJT and selected custom devices/properties; finish deterministic bounded
 matching, named seeds, legal swaps and symmetric reductions; implement true child-port,

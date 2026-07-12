@@ -138,8 +138,12 @@ bind_reference_hierarchy -> BoundReferenceHierarchy
 compare_production / compare_hierarchical_production -> mappings + witnesses
 ```
 
-The real checked GDS evidence adapter into production hierarchy is still integration
-pending. Do not synthesize a root path or bind ports from proximity alone.
+`adapt_gds_hierarchy_to_lvs` is the checked GDS evidence adapter into production
+hierarchy for its declared strict orthogonal subset. It preserves source/hierarchy
+provenance, requires configured text/property evidence and explicit opaque-boundary
+port maps, and correlates nonopaque hierarchy against strict physical flattening.
+Unsupported or ambiguous evidence is an error; do not synthesize a root path or bind
+ports from proximity alone.
 
 ## DRC, PEX and signoff
 

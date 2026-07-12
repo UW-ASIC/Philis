@@ -2,7 +2,7 @@
   "$schema": "capabilities.schema.json",
   "schema_version": "gdsverify.capabilities/v1",
   "status_date": "2026-07-12",
-  "baseline_commit": "b4a4965a0bb51df44c5f41137ac6da8926c2c5e6",
+  "baseline_commit": "8b5895a431727d16721466e65b0735ca82bf0c61",
   "score_policy": "frozen_until_general_supported_input_has_independent_correlation",
   "states": [
     "absent",
@@ -51,7 +51,7 @@
         "properties": { "families": 4, "score": 1.0, "state": "partial" },
         "matching_witnesses": { "families": 4, "score": 1.0, "state": "partial" },
         "reductions_equivalence": { "families": 4, "score": 0.5, "state": "partial" },
-        "hierarchy": { "families": 4, "score": 0.5, "state": "integration_pending" },
+        "hierarchy": { "families": 4, "score": 0.5, "state": "partial" },
         "production_infrastructure": { "families": 4, "score": 0.5, "state": "foundation" }
       }
     },

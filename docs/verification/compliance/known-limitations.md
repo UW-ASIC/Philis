@@ -32,8 +32,10 @@ as explicit errors until the owning work package replaces them with exact semant
 
 ## LVS
 
-- The real checked GDS hierarchy/text/property to production `HierLayout` adapter is
-  integration pending. Abstract hierarchical tests do not prove layout evidence binding.
+- The checked GDS hierarchy/text/property to production `HierLayout` adapter now
+  supports the declared strict orthogonal subset with explicit evidence and physical
+  flatten correlation. Unsupported transforms/records and ambiguous or incomplete
+  bindings remain typed errors; local correlation is not independent golden evidence.
 - Spectre and broader dialect constructs, `.lib` conditions/functions, full model
   aliasing, and production include policies remain incomplete.
 - Foundry-complete MOS/R/C/diode/BJT/custom recognition and properties are absent;

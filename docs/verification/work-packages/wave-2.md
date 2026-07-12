@@ -4,7 +4,8 @@ Goal: one checked layout representation and one exact geometry kernel shared by 
 LVS and PEX. Bboxes remain conservative candidate filters only. Current state is a
 strong `foundation`: rectilinear booleans, checked/lossless GDS, hierarchy index/tiles,
 and a partial declared OASIS subset exist. The checked GDS-to-production-LVS adapter
-is integration pending.
+is accepted for its declared strict orthogonal subset; broader format semantics and
+independent correlation remain.
 
 ## G2.1 — complete the exact polygon kernel and migrate consumers
 
@@ -29,11 +30,11 @@ is integration pending.
 | Field | Requirement |
 |---|---|
 | Read first | [`gds_lossless.rs`](../../../verify/src/gds_lossless.rs), [`gds.rs`](../../../verify/src/gds.rs), [`lib.rs`](../../../verify/src/lib.rs), [`lvs/hier_production.rs`](../../../verify/src/lvs/hier_production.rs) |
-| Prerequisites | G2.1 accepted; `BA-GDS-LVS-ADAPTER` is the exit dependency for the LVS adapter portion; identity contract in [contracts](../contracts.md) |
-| Owned files | `verify/src/gds.rs`, `verify/src/gds_lossless.rs`, planned `verify/src/lvs/gds_adapter.rs`, and planned format fixtures under `verify/conformance/gds/**` |
+| Prerequisites | G2.1 accepted; `BA-GDS-LVS-ADAPTER` is satisfied for the declared adapter subset; identity contract in [contracts](../contracts.md) |
+| Owned files | `verify/src/gds.rs`, `verify/src/gds_lossless.rs`, `verify/src/lvs/gds_adapter.rs`, and planned format fixtures under `verify/conformance/gds/**` |
 | Forbidden files | `verify/src/lvs/{production,compare,hier_production}.rs`, `verify/src/drc/**`, `verify/src/pex/**`, `verify/conformance/manifest.json`, and `verify/correlation/**`; no proximity-based text-to-net policy |
 | API outcome | lossless round trip plus strict verification adapter for exact BOUNDARY/PATH, SREF/AREF, properties/text association and hierarchy paths; typed error contains record/cell/instance evidence |
-| Tasks | finish legal PATH types/width/end extensions and all-angle stroking; absolute/reflected/magnified transforms with exact representability checks; preserve PLEX/properties/text; cycle/missing-cell/array validation; build checked `GdsLibrary -> HierLayout` adapter using only declared property/text rules |
+| Tasks | finish legal PATH types/width/end extensions and all-angle stroking; absolute/reflected/magnified transforms with exact representability checks; preserve PLEX/properties/text; extend checked `GdsLibrary -> HierLayout` support only with declared property/text rules and equivalent negative fixtures |
 | Unsupported/non-goals | NODE electrical meaning, vendor extensions, non-integral transform output unless explicitly modeled; ambiguity is error, never guessed ports/nets |
 | Tests | record-by-record round trips; malformed ordering/type/length; transform equality at representable boundaries; adversarial nested SREF/AREF, reflections, cycles, duplicate labels/properties; flattened-vs-hierarchy geometry/identity equivalence |
 | Focused gates | GDS lossless/read/write/stroke/adapter tests and malformed-input fuzz replay |

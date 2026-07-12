@@ -22,9 +22,9 @@ remains. `Integration pending` means code is not accepted on this baseline.
 | 11 | High | Open | general-polygon extension/max-width/PRL/wide-spacing/asymmetric-enclosure heuristics remain incomplete |
 | 12 | High | Integration pending | nested same-polarity material must not become a hole for enclosed-area/cheesing; fix/review pending |
 | 13 | High | Integration pending | complete bounded coloring exists only on pending stream and has stitch/search-limit review defects |
-| 14 | High | Partial | production records/matcher are body-aware; real layout adapter and full body/well extraction/correlation remain |
-| 15 | High | Partial | production named-net seed machinery exists; end-to-end GDS label binding/correlation awaits adapter |
-| 16 | High | Partial | abstract production hierarchy/binding exists; real child evidence adapter and full mixed hierarchy remain |
+| 14 | High | Partial | production records/matcher and the checked adapter preserve configured four-terminal MOS body/well evidence; foundry-complete extraction and independent correlation remain |
+| 15 | High | Fixed | checked GDS text/property evidence binds named nets end to end and ambiguity fails closed; independent general-input topology correlation remains a qualification gap |
+| 16 | High | Partial | checked nested SREF/AREF hierarchy, explicit child-port maps, black boxes and equated cells are wired to production comparison; cross-boundary reductions, arbitrary mixed hierarchy and full-chip capacity remain |
 | 17 | High | Integration pending | exact derived-layer integration is on pending Wave 3 stream with one-DBU offset defect |
 | 18 | High | Fixed | global-net remapping updates MOS terminals rather than leaving stale net IDs |
 | 19 | High | Fixed | `extract_netlist` inherits `deck.lvs_cut_required` |
@@ -37,7 +37,7 @@ remains. `Integration pending` means code is not accepted on this baseline.
 | 26 | Medium | Fixed | hard-coded fill/shield multipliers removed; effects stay explicitly unmodeled until process data exists |
 | 27 | High | Fixed | floating-metal sentinel attribution is retained for capacitance reporting |
 | 28 | High | Fixed | port-net lumped R maps a loaded internal node; endpointless scalar R is omitted with diagnostic |
-| 29 | High | Partial | checked/lossless GDS now preserves records/properties/hierarchy and validates units; production evidence adapter remains pending |
+| 29 | High | Fixed | checked/lossless GDS preserves records/properties/hierarchy and units through the accepted production evidence adapter; undeclared semantics fail closed |
 | 30 | High | Open | complete round/diagonal/odd/negative PATH semantics and all-angle stroking remain Wave 2 |
 | 31 | High | Fixed | backend final DRC no longer globally waives legacy density; richer family remains non-clean until configured |
 | 32 | High | Fixed | duplicate/out-of-range GDS layer/datatype aliases are rejected |

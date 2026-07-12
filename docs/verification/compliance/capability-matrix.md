@@ -44,20 +44,20 @@ arithmetic that JSON Schema cannot express.
 
 The retired audit table's row values summed to 8.5 while its declared/canonical LVS
 total was 8.0. This matrix preserves the frozen 8.0 total and conservatively assigns
-1.0, rather than 1.5, to matching/witnesses until the real layout-evidence adapter and
-independent topology correlation exist. This is an arithmetic disposition, not a score
-promotion or demotion.
+1.0, rather than 1.5, to matching/witnesses because the accepted layout-evidence
+adapter still lacks independent topology correlation. This is an arithmetic disposition,
+not a score promotion or demotion.
 
 | Four-family group | Score | State and remaining gap |
 |---|---:|---|
-| SPICE/CDL/Spectre, parameters/buses/globals/includes/models, layout properties | 0.5 | `foundation`: strict SPICE/CDL subset and binding; Spectre breadth and GDS evidence adapter pending |
+| SPICE/CDL/Spectre, parameters/buses/globals/includes/models, layout properties | 0.5 | `foundation`: strict SPICE/CDL subset, binding and checked GDS evidence adapter; Spectre breadth remains |
 | exact connectivity, cuts/derived layers, opens/soft-connect | 1.0 | `partial`: exact supported rectilinear contact and cut policy; all-angle/derived integration/soft-connect remain |
-| MOS recognition, S/D/body/well, W/L/NF/M | 1.5 | `partial`: body-aware production records; diffusion metrics/fingers and checked GDS binding incomplete |
+| MOS recognition, S/D/body/well, W/L/NF/M | 1.5 | `partial`: body-aware production records and checked GDS binding; diffusion metrics/fingers and foundry breadth remain incomplete |
 | R/C/diode/BJT and special/custom devices | 1.5 | `partial`: basic configured forms; foundry-complete recognition absent |
 | model/class and extraction properties/equations/reductions | 1.0 | `partial`: typed property/tolerance foundations; actual foundry properties incomplete |
-| deterministic matching, swaps, seeds, witnesses | 1.0 | `foundation/partial`: production matcher/witnesses exist; end-to-end layout label seeds require adapter/corpus |
+| deterministic matching, swaps, seeds, witnesses | 1.0 | `foundation/partial`: production matcher/witnesses and checked layout label seeds exist; independent corpus remains |
 | safe symmetric series/parallel/equivalence | 0.5 | `partial`: constrained reductions; cross-boundary and full symmetric semantics remain |
-| hierarchy, ports, black boxes/equated cells/selective flatten | 0.5 | `foundation`: abstract hierarchy/binding exists; real GDS adapter is integration pending |
+| hierarchy, ports, black boxes/equated cells/selective flatten | 0.5 | `partial`: checked GDS hierarchy, explicit port maps, black boxes/equated cells and flatten equivalence work on the declared subset; production breadth/capacity remain |
 | capacity/incremental/distributed/results/correlation | 0.5 | `foundation`: caching structures and neutral harness; production evidence absent |
 
 ## PEX — 4.5/32
