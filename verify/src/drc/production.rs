@@ -1822,4 +1822,62 @@ mod tests {
         assert_eq!(geometry.status, RuleStatus::Error);
         assert_eq!(geometry.violations[0].kind, "polygon_validity");
     }
+
+    #[test]
+    fn legacy_public_apis_reject_point_touch_lobes_but_accept_paired_keyholes() {
+        let deck =
+            Deck::from_json(r#"{"layers":{"m1":{"layer":1,"datatype":0}},"drc":{}}"#).unwrap();
+        let layer = deck.layers.id("m1").unwrap();
+        let mut malformed = GeometryStore::new();
+        malformed.add_polygon(
+            layer,
+            &[
+                (10, 0),
+                (20, 0),
+                (20, 20),
+                (0, 20),
+                (0, 0),
+                (0, -5),
+                (-5, -5),
+                (-5, 0),
+                (0, 0),
+            ],
+        );
+        let raw = run_drc(&malformed, &deck);
+        assert_eq!(raw.violations.len(), 1);
+        assert_eq!(raw.violations[0].rule_id, "__geometry__");
+        assert_eq!(raw.violations[0].kind, "polygon_validity");
+        let checked = run_legacy_adapter(&malformed, &deck);
+        assert!(!checked.is_clean());
+        let geometry = checked
+            .rules
+            .iter()
+            .find(|rule| rule.rule_id == "__geometry__")
+            .unwrap();
+        assert_eq!(geometry.status, RuleStatus::Error);
+        assert_eq!(
+            geometry.diagnostics[0].code,
+            DiagnosticCode::InvalidGeometry
+        );
+
+        let mut valid_keyhole = GeometryStore::new();
+        valid_keyhole.add_polygon(
+            layer,
+            &[
+                (0, 0),
+                (1000, 0),
+                (1000, 450),
+                (600, 450),
+                (600, 400),
+                (900, 400),
+                (900, 100),
+                (100, 100),
+                (100, 400),
+                (600, 400),
+                (600, 450),
+                (0, 450),
+            ],
+        );
+        assert!(run_drc(&valid_keyhole, &deck).violations.is_empty());
+    }
 }

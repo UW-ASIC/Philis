@@ -469,7 +469,9 @@ fn check_polygon_validity(store: &GeometryStore, lt: &LayerTable) -> Vec<Violati
     for p in 0..store.poly_count() {
         let pid = PolyId(p as u32);
         let bb = store.poly_bbox[p];
-        let issue = if poly_self_intersects(store, pid) {
+        let issue = if poly_has_unpaired_point_contact(store, pid) {
+            Some("unpaired_point_contact")
+        } else if poly_self_intersects(store, pid) {
             Some("self_intersecting")
         } else if store.area(pid) == 0 {
             Some("zero_area")
@@ -486,6 +488,34 @@ fn check_polygon_validity(store: &GeometryStore, lt: &LayerTable) -> Vec<Violati
         }
     }
     out
+}
+
+/// Non-adjacent repeated vertices are legal only when their occurrences are
+/// joined by the two directions of a retraced slit edge. This distinguishes a
+/// structurally paired GDS keyhole from two opposite-winding lobes that merely
+/// touch at one point.
+fn poly_has_unpaired_point_contact(store: &GeometryStore, polygon: PolyId) -> bool {
+    let (start, end) = store.poly_range(polygon);
+    let points: Vec<_> = (start..end)
+        .map(|index| (store.verts_x[index], store.verts_y[index]))
+        .collect();
+    let n = points.len();
+    if n < 4 { return false; }
+    let adjacent = |a: usize, b: usize| {
+        a.abs_diff(b) == 1 || (a == 0 && b == n - 1) || (b == 0 && a == n - 1)
+    };
+    for i in 0..n {
+        for j in i + 1..n {
+            if points[i] != points[j] || adjacent(i, j) { continue; }
+            let prev_i = points[(i + n - 1) % n];
+            let next_i = points[(i + 1) % n];
+            let prev_j = points[(j + n - 1) % n];
+            let next_j = points[(j + 1) % n];
+            let paired_retrace = next_i == prev_j || prev_i == next_j;
+            if !paired_retrace { return true; }
+        }
+    }
+    false
 }
 
 // --- width ------------------------------------------------------------------
