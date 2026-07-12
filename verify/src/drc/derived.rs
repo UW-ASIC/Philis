@@ -369,7 +369,7 @@ fn polygon_from_store(store: &GeometryStore, poly: PolyId) -> Result<Polygon, De
     let points = (start..end)
         .map(|index| Point::new(store.verts_x[index], store.verts_y[index]))
         .collect();
-    Ok(Polygon::from_outer(points)?)
+    Ok(Polygon::from_boundary_walk(points)?)
 }
 
 fn collect_edges(
@@ -634,6 +634,40 @@ mod tests {
                 ExactGeometryError::Unsupported { .. }
             ))
         ));
+    }
+
+    #[test]
+    fn base_layer_preserves_multiple_keyhole_holes() {
+        let mut store = GeometryStore::new();
+        store.add_polygon(
+            0,
+            &[
+                (0, 0),
+                (100, 0),
+                (100, 100),
+                (70, 100),
+                (70, 80),
+                (90, 80),
+                (90, 60),
+                (60, 60),
+                (60, 80),
+                (70, 80),
+                (70, 100),
+                (40, 100),
+                (40, 80),
+                (50, 80),
+                (50, 60),
+                (20, 60),
+                (20, 80),
+                (40, 80),
+                (40, 100),
+                (0, 100),
+            ],
+        );
+        let set = layer_polygon_set(&store, 0, Some(1)).unwrap();
+        assert_eq!(set.component_count(), 1);
+        assert_eq!(set.polygons()[0].holes().len(), 2);
+        assert_eq!(set.area2(), 17_600);
     }
 
     #[test]

@@ -112,6 +112,7 @@ pub enum ExactGeometryError {
     },
     DegenerateRing,
     ArithmeticOverflow,
+    InvalidBoundaryWalk(&'static str),
     SelfIntersection {
         edge_a: usize,
         edge_b: usize,
@@ -153,6 +154,9 @@ impl fmt::Display for ExactGeometryError {
             }
             Self::DegenerateRing => write!(f, "ring has zero signed area"),
             Self::ArithmeticOverflow => write!(f, "exact geometry arithmetic overflowed i128"),
+            Self::InvalidBoundaryWalk(reason) => {
+                write!(f, "invalid boundary walk: {reason}")
+            }
             Self::SelfIntersection {
                 edge_a,
                 edge_b,
@@ -440,6 +444,67 @@ impl Polygon {
         Self::new(Ring::new(vertices)?, Vec::new())
     }
 
+    /// Construct one polygon from a GDS-style boundary walk.
+    ///
+    /// GDS holes may be encoded by walking a slit in both directions, producing
+    /// one non-simple boundary record.  Every exact reverse-edge pair is cut at
+    /// once, yielding one simple material boundary and zero or more simple hole
+    /// rings.  The material boundary is selected by strict geometric
+    /// containment, not by input winding, so reversing the complete record does
+    /// not change its meaning.
+    pub fn from_boundary_walk(mut vertices: Vec<Point>) -> Result<Self, ExactGeometryError> {
+        while vertices.len() > 1 && vertices.first() == vertices.last() {
+            vertices.pop();
+        }
+        if vertices.len() < 3 {
+            return Err(ExactGeometryError::TooFewVertices {
+                count: vertices.len(),
+            });
+        }
+        for index in 0..vertices.len() {
+            if vertices[index] == vertices[(index + 1) % vertices.len()] {
+                return Err(ExactGeometryError::DuplicateConsecutiveVertex { index });
+            }
+        }
+
+        let mut rings = Vec::new();
+        split_boundary_walk(vertices, &mut rings)?;
+        if rings.len() == 1 {
+            let ring = rings.pop().ok_or(ExactGeometryError::InternalTopology(
+                "boundary decomposition lost its only ring",
+            ))?;
+            return Self::new(ring, Vec::new());
+        }
+
+        let mut result = None;
+        for outer_index in 0..rings.len() {
+            let outer = rings[outer_index].clone();
+            let holes: Vec<_> = rings
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != outer_index)
+                .map(|(_, ring)| ring.clone())
+                .collect();
+            // Reversing the complete walk reverses every ring and must not
+            // change the result, while a same-polarity nested lobe is still not
+            // a hole. Preserve relative polarity, not absolute orientation.
+            if holes.iter().any(|hole| hole.winding() == outer.winding()) {
+                continue;
+            }
+            if let Ok(polygon) = Self::new(outer, holes) {
+                if result.is_some() {
+                    return Err(ExactGeometryError::InvalidBoundaryWalk(
+                        "more than one ring can be the material boundary",
+                    ));
+                }
+                result = Some(polygon);
+            }
+        }
+        result.ok_or(ExactGeometryError::InvalidBoundaryWalk(
+            "slit-separated rings do not form one outer boundary with disjoint contained holes",
+        ))
+    }
+
     pub fn outer(&self) -> &Ring {
         &self.outer
     }
@@ -476,6 +541,48 @@ impl Polygon {
             }
         }
     }
+}
+
+fn split_boundary_walk(
+    vertices: Vec<Point>,
+    rings: &mut Vec<Ring>,
+) -> Result<(), ExactGeometryError> {
+    let mut pending = vec![vertices];
+    while let Some(mut walk) = pending.pop() {
+        while walk.len() > 1 && walk.first() == walk.last() {
+            walk.pop();
+        }
+        let count = walk.len();
+        let mut split = None;
+        'pairs: for first in 0..count {
+            let first_end = (first + 1) % count;
+            for second in first + 1..count {
+                let second_end = (second + 1) % count;
+                if walk[first] != walk[second_end] || walk[first_end] != walk[second] {
+                    continue;
+                }
+                let adjacent = second == first + 1 || (first == 0 && second == count - 1);
+                if adjacent {
+                    return Err(ExactGeometryError::InvalidBoundaryWalk(
+                        "an immediately retraced edge is a spike, not a keyhole slit",
+                    ));
+                }
+                split = Some((first, second));
+                break 'pairs;
+            }
+        }
+
+        if let Some((first, second)) = split {
+            let between = walk[first + 1..=second].to_vec();
+            let mut outside = walk[second + 1..].to_vec();
+            outside.extend_from_slice(&walk[..=first]);
+            pending.push(outside);
+            pending.push(between);
+        } else {
+            rings.push(Ring::new(walk)?);
+        }
+    }
+    Ok(())
 }
 
 /// A deterministic collection of polygon components. Components are sorted by
@@ -1056,6 +1163,96 @@ mod tests {
         let span = hi as i128 - lo as i128;
         assert_eq!(ring.signed_area2(), 2 * span * span);
         assert_eq!(ring.classify_point(p(0, 0)), PointClassification::Inside);
+    }
+
+    #[test]
+    fn boundary_walk_decomposition_is_orientation_invariant_and_multi_hole() {
+        let points = vec![
+            p(0, 0),
+            p(100, 0),
+            p(100, 100),
+            p(70, 100),
+            p(70, 80),
+            p(90, 80),
+            p(90, 60),
+            p(60, 60),
+            p(60, 80),
+            p(70, 80),
+            p(70, 100),
+            p(40, 100),
+            p(40, 80),
+            p(50, 80),
+            p(50, 60),
+            p(20, 60),
+            p(20, 80),
+            p(40, 80),
+            p(40, 100),
+            p(0, 100),
+        ];
+        let polygon = Polygon::from_boundary_walk(points.clone()).unwrap();
+        assert_eq!(polygon.holes().len(), 2);
+        assert_eq!(polygon.area2(), 17_600);
+
+        let reversed = Polygon::from_boundary_walk(points.into_iter().rev().collect()).unwrap();
+        assert_eq!(reversed, polygon);
+    }
+
+    #[test]
+    fn boundary_walk_rejects_external_and_disjoint_retraced_lobes() {
+        let external = vec![
+            p(0, 0),
+            p(-5, 0),
+            p(-5, -5),
+            p(-10, -5),
+            p(-10, 0),
+            p(-5, 0),
+            p(0, 0),
+            p(10, 0),
+            p(10, 10),
+            p(0, 10),
+        ];
+        assert!(matches!(
+            Polygon::from_boundary_walk(external),
+            Err(ExactGeometryError::InvalidBoundaryWalk(_))
+        ));
+
+        let disjoint = vec![
+            p(10, 5),
+            p(20, 5),
+            p(20, 10),
+            p(30, 10),
+            p(30, 0),
+            p(20, 0),
+            p(20, 5),
+            p(10, 5),
+            p(10, 10),
+            p(0, 10),
+            p(0, 0),
+            p(10, 0),
+        ];
+        assert!(matches!(
+            Polygon::from_boundary_walk(disjoint),
+            Err(ExactGeometryError::InvalidBoundaryWalk(_))
+        ));
+
+        let same_polarity = vec![
+            p(0, 0),
+            p(10, 0),
+            p(10, 10),
+            p(5, 10),
+            p(5, 8),
+            p(3, 8),
+            p(3, 3),
+            p(8, 3),
+            p(8, 8),
+            p(5, 8),
+            p(5, 10),
+            p(0, 10),
+        ];
+        assert!(matches!(
+            Polygon::from_boundary_walk(same_polarity),
+            Err(ExactGeometryError::InvalidBoundaryWalk(_))
+        ));
     }
 
     #[test]

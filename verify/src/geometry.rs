@@ -51,16 +51,29 @@ impl Bbox {
         if y > self.ymax { self.ymax = y; }
     }
     #[inline]
-    pub fn width(&self) -> i32 { self.xmax - self.xmin }
+    pub fn width_i64(&self) -> i64 { i64::from(self.xmax) - i64::from(self.xmin) }
     #[inline]
-    pub fn height(&self) -> i32 { self.ymax - self.ymin }
+    pub fn height_i64(&self) -> i64 { i64::from(self.ymax) - i64::from(self.ymin) }
+    /// Compatibility span for APIs whose declared coordinate capacity is i32.
+    /// Full-range boxes saturate instead of overflowing or panicking; exact and
+    /// validation code must use [`Self::width_i64`].
+    #[inline]
+    pub fn width(&self) -> i32 {
+        self.width_i64().clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    }
+    /// See [`Self::width`].
+    #[inline]
+    pub fn height(&self) -> i32 {
+        self.height_i64().clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    }
     /// Do two bboxes come within `dist` of each other? Used to prune spacing pairs.
     #[inline]
     pub fn within(&self, o: &Bbox, dist: i32) -> bool {
-        self.xmin - dist <= o.xmax
-            && o.xmin - dist <= self.xmax
-            && self.ymin - dist <= o.ymax
-            && o.ymin - dist <= self.ymax
+        let dist = i64::from(dist);
+        i64::from(self.xmin) - dist <= i64::from(o.xmax)
+            && i64::from(o.xmin) - dist <= i64::from(self.xmax)
+            && i64::from(self.ymin) - dist <= i64::from(o.ymax)
+            && i64::from(o.ymin) - dist <= i64::from(self.ymax)
     }
     #[inline]
     pub fn overlaps(&self, o: &Bbox) -> bool { self.within(o, 0) }
@@ -199,19 +212,41 @@ impl GeometryStore {
 
     /// Signed area*2 of a polygon (shoelace). Positive => CCW. Used by min_area and by
     /// orientation-dependent checks.
-    pub fn signed_area2(&self, p: PolyId) -> i64 {
+    pub fn signed_area2_exact(&self, p: PolyId) -> Option<i128> {
         let (s, e) = self.poly_range(p);
         let n = e - s;
-        let mut a: i64 = 0;
+        let mut area = 0_i128;
         for i in 0..n {
             let (x0, y0) = self.poly_vertex(s, i);
             let (x1, y1) = self.poly_vertex(s, (i + 1) % n);
-            a += (x0 as i64) * (y1 as i64) - (x1 as i64) * (y0 as i64);
+            let term = i128::from(x0)
+                .checked_mul(i128::from(y1))?
+                .checked_sub(i128::from(x1).checked_mul(i128::from(y0))?)?;
+            area = area.checked_add(term)?;
         }
-        a
+        Some(area)
     }
 
-    pub fn area(&self, p: PolyId) -> i64 { self.signed_area2(p).abs() / 2 }
+    /// Compatibility measurement for legacy i64 rule/report APIs. Exact
+    /// validation uses [`Self::signed_area2_exact`]; out-of-range values are
+    /// clamped here only after that validation has emitted a capacity error.
+    pub fn signed_area2(&self, p: PolyId) -> i64 {
+        match self.signed_area2_exact(p) {
+            Some(area) => i64::try_from(area)
+                .unwrap_or(if area < 0 { i64::MIN } else { i64::MAX }),
+            None => i64::MAX,
+        }
+    }
+
+    pub fn area_exact(&self, p: PolyId) -> Option<i128> {
+        self.signed_area2_exact(p)?.checked_abs().map(|area2| area2 / 2)
+    }
+
+    pub fn area(&self, p: PolyId) -> i64 {
+        self.area_exact(p)
+            .and_then(|area| i64::try_from(area).ok())
+            .unwrap_or(i64::MAX)
+    }
 }
 
 /// A directed edge, materialized for scanline / edge-pair passes. This is the SoA "edge
@@ -228,15 +263,25 @@ pub struct Edge {
 
 impl Edge {
     #[inline]
-    pub fn dx(&self) -> i32 { self.x1 - self.x0 }
+    pub fn dx_i64(&self) -> i64 { i64::from(self.x1) - i64::from(self.x0) }
     #[inline]
-    pub fn dy(&self) -> i32 { self.y1 - self.y0 }
+    pub fn dy_i64(&self) -> i64 { i64::from(self.y1) - i64::from(self.y0) }
     #[inline]
-    pub fn len2(&self) -> i64 {
-        let dx = self.dx() as i64;
-        let dy = self.dy() as i64;
+    pub fn dx(&self) -> i32 {
+        self.dx_i64().clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    }
+    #[inline]
+    pub fn dy(&self) -> i32 {
+        self.dy_i64().clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    }
+    #[inline]
+    pub fn len2_i128(&self) -> i128 {
+        let dx = i128::from(self.dx_i64());
+        let dy = i128::from(self.dy_i64());
         dx * dx + dy * dy
     }
+    #[inline]
+    pub fn len2(&self) -> i64 { i64::try_from(self.len2_i128()).unwrap_or(i64::MAX) }
     #[inline]
     pub fn is_horizontal(&self) -> bool { self.y0 == self.y1 }
     #[inline]
@@ -279,29 +324,36 @@ pub fn seg_seg_dist2(a: &Edge, b: &Edge) -> i64 {
 
 #[inline]
 fn point_seg_dist2(px: i32, py: i32, e: &Edge) -> i64 {
-    let vx = e.dx() as i64;
-    let vy = e.dy() as i64;
-    let wx = (px - e.x0) as i64;
-    let wy = (py - e.y0) as i64;
+    let vx = i128::from(e.dx_i64());
+    let vy = i128::from(e.dy_i64());
+    let wx = i128::from(px) - i128::from(e.x0);
+    let wy = i128::from(py) - i128::from(e.y0);
     let c1 = vx * wx + vy * wy;
     if c1 <= 0 {
-        return wx * wx + wy * wy;
+        return i64::try_from(wx * wx + wy * wy).unwrap_or(i64::MAX);
     }
     let c2 = vx * vx + vy * vy;
     if c2 <= c1 {
-        let dx = (px - e.x1) as i64;
-        let dy = (py - e.y1) as i64;
-        return dx * dx + dy * dy;
+        let dx = i128::from(px) - i128::from(e.x1);
+        let dy = i128::from(py) - i128::from(e.y1);
+        return i64::try_from(dx * dx + dy * dy).unwrap_or(i64::MAX);
     }
     // projection falls on the segment: d² = |w|² − c1²/c2, exact in i128
     // (f64 here loses ulps on diagonal edges at large coordinates)
-    let num = (wx as i128 * wx as i128 + wy as i128 * wy as i128) * c2 as i128
-        - c1 as i128 * c1 as i128;
-    (num / c2 as i128) as i64
+    let Some(num) = (wx * wx + wy * wy)
+        .checked_mul(c2)
+        .and_then(|lhs| c1.checked_mul(c1).and_then(|rhs| lhs.checked_sub(rhs)))
+    else {
+        // The legacy scalar-distance API cannot represent this intermediate.
+        // DRC validation rejects such coordinate extents before rule execution.
+        return i64::MAX;
+    };
+    i64::try_from(num / c2).unwrap_or(i64::MAX)
 }
 
-fn orient(ax: i64, ay: i64, bx: i64, by: i64, cx: i64, cy: i64) -> i64 {
-    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+fn orient(ax: i64, ay: i64, bx: i64, by: i64, cx: i64, cy: i64) -> i128 {
+    (i128::from(bx) - i128::from(ax)) * (i128::from(cy) - i128::from(ay))
+        - (i128::from(by) - i128::from(ay)) * (i128::from(cx) - i128::from(ax))
 }
 
 fn on_seg(ax: i64, ay: i64, bx: i64, by: i64, cx: i64, cy: i64) -> bool {
@@ -390,8 +442,8 @@ pub fn point_in_poly(store: &GeometryStore, p: PolyId, px: i32, py: i32) -> bool
         }
         if (y0 > py) != (y1 > py) {
             // exact crossing test: px < x-intersection of the edge with the horizontal ray
-            let lhs = (x1 - x0) * (py - y0);
-            let rhs = (px - x0) * (y1 - y0);
+            let lhs = i128::from(x1 - x0) * i128::from(py - y0);
+            let rhs = i128::from(px - x0) * i128::from(y1 - y0);
             let cross = if y1 > y0 { lhs > rhs } else { lhs < rhs };
             if cross { inside = !inside; }
         }
@@ -417,7 +469,7 @@ pub fn poly_self_intersects(store: &GeometryStore, p: PolyId) -> bool {
     // overlapping bboxes, so the look-ahead window stays local instead of the
     // all-pairs O(n²) that melts on many-thousand-vertex comb polygons.
     let bb = store.poly_bbox[p.0 as usize];
-    let sweep_x = bb.width() >= bb.height();
+    let sweep_x = bb.width_i64() >= bb.height_i64();
     let lo = |ed: &Edge| if sweep_x { ed.x0.min(ed.x1) } else { ed.y0.min(ed.y1) };
     let hi = |ed: &Edge| if sweep_x { ed.x0.max(ed.x1) } else { ed.y0.max(ed.y1) };
     let mut order: Vec<u32> = (0..n as u32).collect();
@@ -425,7 +477,7 @@ pub fn poly_self_intersects(store: &GeometryStore, p: PolyId) -> bool {
     for w in 0..n {
         let i = order[w] as usize;
         let a = edge(i);
-        if a.len2() == 0 { continue; }
+        if a.len2_i128() == 0 { continue; }
         let a_hi = hi(&a);
         for &jj in order[w + 1..].iter() {
             let j = jj as usize;
@@ -433,7 +485,7 @@ pub fn poly_self_intersects(store: &GeometryStore, p: PolyId) -> bool {
             if lo(&b) > a_hi { break; } // sweep window closed
             // adjacent edges share a vertex; skip (incl. the ring wrap)
             if j == (i + 1) % n || i == (j + 1) % n { continue; }
-            if b.len2() == 0 { continue; }
+            if b.len2_i128() == 0 { continue; }
             let d1 = orient(b.x0 as i64, b.y0 as i64, b.x1 as i64, b.y1 as i64, a.x0 as i64, a.y0 as i64);
             let d2 = orient(b.x0 as i64, b.y0 as i64, b.x1 as i64, b.y1 as i64, a.x1 as i64, a.y1 as i64);
             let d3 = orient(a.x0 as i64, a.y0 as i64, a.x1 as i64, a.y1 as i64, b.x0 as i64, b.y0 as i64);
@@ -449,7 +501,7 @@ pub fn poly_self_intersects(store: &GeometryStore, p: PolyId) -> bool {
 pub fn isqrt(n: i64) -> i64 {
     if n < 0 { return 0; }
     let mut x = (n as f64).sqrt() as i64;
-    while (x + 1) * (x + 1) <= n { x += 1; }
-    while x * x > n { x -= 1; }
+    while i128::from(x + 1) * i128::from(x + 1) <= i128::from(n) { x += 1; }
+    while i128::from(x) * i128::from(x) > i128::from(n) { x -= 1; }
     x
 }

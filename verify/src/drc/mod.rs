@@ -432,6 +432,14 @@ fn run_drc_impl(
     keep: impl Fn(&DrcRuleParam) -> bool + Sync,
 ) -> DrcReport {
     use rayon::prelude::*;
+    // Capacity validation must precede every legacy kernel. Several W1 rule
+    // result types still use i32/i64 measurements, so geometry outside those
+    // declared numeric limits is a typed error, never an invitation to execute
+    // overflowing candidate arithmetic.
+    let mut violations = check_polygon_validity(store, &deck.layers);
+    if violations.iter().any(|violation| violation.kind == "geometry_capacity") {
+        return DrcReport { violations };
+    }
     let rules = drc_rules_from_deck(deck, strict);
     // Rules are independent read-only scans over the store; run them in parallel
     // and concatenate in rule order so the report is deterministic.
@@ -442,9 +450,6 @@ fn run_drc_impl(
         .filter(|(_, p)| keep(p))
         .map(|(rule, _)| rule.run(store, deck, backend))
         .collect();
-    // Always-on input validity: downstream checks assume simple polygons, so a
-    // boundary that properly crosses itself is reported, not silently mis-measured.
-    let mut violations = check_polygon_validity(store, &deck.layers);
     violations.extend(per_rule.into_iter().flatten());
     // Coincident identical polygons (e.g. two pins of one device sharing a pad)
     // are one merged shape in real DRC; each copy reports the same violation.
@@ -465,119 +470,76 @@ fn run_drc_impl(
 /// self-crossing boundaries and zero-area shapes. Keyhole slits (legal GDS holes)
 /// pass; proper bow-tie crossings do not.
 fn check_polygon_validity(store: &GeometryStore, lt: &LayerTable) -> Vec<Violation> {
+    use crate::geometry::exact::{ExactGeometryError, SegmentIntersection};
+
     let mut out = Vec::new();
     for p in 0..store.poly_count() {
         let pid = PolyId(p as u32);
         let bb = store.poly_bbox[p];
-        let issue = if poly_has_invalid_nonadjacent_contact(store, pid) {
-            Some("invalid_boundary_contact")
-        } else if poly_self_intersects(store, pid) {
-            Some("self_intersecting")
-        } else if store.area(pid) == 0 {
-            Some("zero_area")
-        } else {
-            None
+        let issue = match exact_polygon_from_store(store, pid) {
+            Ok(polygon) => {
+                let area = polygon.area2() / 2;
+                let span_x = i64::from(bb.xmax) - i64::from(bb.xmin);
+                let span_y = i64::from(bb.ymax) - i64::from(bb.ymin);
+                (span_x > i64::from(i32::MAX)
+                    || span_y > i64::from(i32::MAX)
+                    || area > i128::from(i64::MAX))
+                    .then_some("geometry_capacity")
+            }
+            Err(ExactGeometryError::DegenerateRing) => Some("zero_area"),
+            Err(ExactGeometryError::ArithmeticOverflow)
+            | Err(ExactGeometryError::CapacityExceeded { .. }) => Some("geometry_capacity"),
+            Err(ExactGeometryError::SelfIntersection {
+                kind: SegmentIntersection::Proper,
+                ..
+            }) => Some("self_intersecting"),
+            Err(_) => Some("invalid_boundary_contact"),
         };
         if let Some(kind_detail) = issue {
             out.push(Violation {
-                rule_id: "__geometry__".into(), kind: "polygon_validity".into(),
+                rule_id: "__geometry__".into(),
+                kind: if kind_detail == "geometry_capacity" {
+                    "geometry_capacity".into()
+                } else {
+                    "polygon_validity".into()
+                },
                 layer: lt.name(store.poly_layer[p]).into(),
                 measured: if kind_detail == "zero_area" { 0 } else { 1 },
                 limit: 0, x: bb.xmin, y: bb.ymin,
             });
         }
     }
+    if !out.iter().any(|violation| violation.kind == "geometry_capacity")
+        && store.poly_count() > 0
+    {
+        let mut extent = Bbox::empty();
+        for bbox in &store.poly_bbox {
+            extent.include(bbox.xmin, bbox.ymin);
+            extent.include(bbox.xmax, bbox.ymax);
+        }
+        if extent.width_i64() > i64::from(i32::MAX)
+            || extent.height_i64() > i64::from(i32::MAX)
+        {
+            out.push(Violation {
+                rule_id: "__geometry__".into(), kind: "geometry_capacity".into(),
+                layer: lt.name(store.poly_layer[0]).into(), measured: 1, limit: 0,
+                x: extent.xmin, y: extent.ymin,
+            });
+        }
+    }
     out
 }
 
-/// Reject every non-adjacent touch/overlap except contacts belonging to a
-/// validated paired-retrace keyhole slit. A valid slit consists of exact reverse
-/// edges separating two simple, opposite-winding rings (outer and hole).
-fn poly_has_invalid_nonadjacent_contact(store: &GeometryStore, polygon: PolyId) -> bool {
-    use crate::geometry::exact::{
-        classify_segment_intersection, on_segment, Point, Polygon, Ring, SegmentIntersection,
-        Winding,
-    };
-    use std::collections::BTreeSet;
-
+fn exact_polygon_from_store(
+    store: &GeometryStore,
+    polygon: PolyId,
+) -> Result<crate::geometry::exact::Polygon, crate::geometry::exact::ExactGeometryError> {
+    use crate::geometry::exact::{Point, Polygon};
     let (start, end) = store.poly_range(polygon);
     let points: Vec<Point> = (start..end)
         .map(|index| Point::new(store.verts_x[index], store.verts_y[index]))
         .collect();
-    let n = points.len();
-    if n < 4 { return false; }
-    let adjacent = |a: usize, b: usize| {
-        a.abs_diff(b) == 1 || (a == 0 && b == n - 1) || (b == 0 && a == n - 1)
-    };
-
-    let valid_retrace = |i: usize, j: usize| {
-        if adjacent(i, j)
-            || points[i] != points[(j + 1) % n]
-            || points[(i + 1) % n] != points[j]
-        {
-            return false;
-        }
-        let between = points[i + 1..=j].to_vec();
-        let mut outside = points[j + 1..].to_vec();
-        outside.extend_from_slice(&points[..=i]);
-        let (Ok(between), Ok(outside)) = (Ring::new(between), Ring::new(outside)) else {
-            return false;
-        };
-        let (outer, hole) = match (between.winding(), outside.winding()) {
-            (Winding::CounterClockwise, Winding::Clockwise) => (between, outside),
-            (Winding::Clockwise, Winding::CounterClockwise) => (outside, between),
-            _ => return false,
-        };
-        // Polygon::new is the exact topology authority: the hole must be
-        // strictly contained, with no boundary touch/crossing or other contact.
-        Polygon::new(outer, vec![hole]).is_ok()
-    };
-
-    let mut retraces = BTreeSet::new();
-    let mut protected = BTreeSet::new();
-    for i in 0..n {
-        for j in i + 1..n {
-            if valid_retrace(i, j) {
-                retraces.insert((i, j));
-                protected.insert(points[i]);
-                protected.insert(points[(i + 1) % n]);
-            }
-        }
-    }
-
-    for i in 0..n {
-        let a0 = points[i];
-        let a1 = points[(i + 1) % n];
-        for j in i + 1..n {
-            let b0 = points[j];
-            let b1 = points[(j + 1) % n];
-            let contact = classify_segment_intersection(a0, a1, b0, b1);
-            if adjacent(i, j) {
-                // Normal adjacent edges touch at one endpoint. Immediate
-                // backtracking/overlap is a malformed spike, not a keyhole.
-                if matches!(contact, SegmentIntersection::Proper | SegmentIntersection::Overlap) {
-                    return true;
-                }
-                continue;
-            }
-            match contact {
-                SegmentIntersection::None => {}
-                SegmentIntersection::Proper => return true,
-                SegmentIntersection::Overlap => {
-                    if !retraces.contains(&(i, j)) { return true; }
-                }
-                SegmentIntersection::Touch => {
-                    let contacts = [a0, a1, b0, b1]
-                        .into_iter()
-                        .filter(|point| on_segment(a0, a1, *point) && on_segment(b0, b1, *point));
-                    if contacts.into_iter().any(|point| !protected.contains(&point)) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    Polygon::from_boundary_walk(points)
 }
 
 // --- width ------------------------------------------------------------------
@@ -659,8 +621,8 @@ fn facing_gaps(store: &GeometryStore, p: PolyId, interior: bool) -> Vec<(i32, i3
                 // parallel diagonal edges (45° routing): perpendicular gap where
                 // the edges overlap tangentially. Integer where it matters,
                 // f64 only for the sample-point coordinates.
-                let (adx, ady) = (a.dx() as i64, a.dy() as i64);
-                let (bdx, bdy) = (b.dx() as i64, b.dy() as i64);
+                let (adx, ady) = (a.dx_i64(), a.dy_i64());
+                let (bdx, bdy) = (b.dx_i64(), b.dy_i64());
                 if adx * bdy - ady * bdx != 0 { continue; } // not parallel
                 let len2 = adx * adx + ady * ady;
                 if len2 == 0 { continue; }
@@ -1315,11 +1277,12 @@ fn check_min_edge_length(
     let thr = (min as f32) * (min as f32) * 1.05 + 4.0;
     for (i, e) in edges.iter().enumerate() {
         if approx.as_ref().is_some_and(|a| a[i] >= thr) { continue; }
-        let l2 = e.len2();
-        if l2 > 0 && l2 < min2 {
+        let l2 = e.len2_i128();
+        if l2 > 0 && l2 < i128::from(min2) {
             out.push(Violation {
                 rule_id: rule_id.into(), kind: "min_edge_length".into(),
-                layer: lt.name(layer).into(), measured: isqrt(l2), limit: min as i64,
+                layer: lt.name(layer).into(),
+                measured: isqrt(i64::try_from(l2).unwrap_or(i64::MAX)), limit: min as i64,
                 x: e.x0, y: e.y0,
             });
         }
@@ -1623,17 +1586,21 @@ fn check_eol_spacing(
             let eb = poly_edges(store, p_other);
             let mut best: Option<(i64, i32, i32)> = None;
             for a in &ea {
-                let elen2 = a.len2();
-                if elen2 == 0 || elen2 >= (eol_width as i64) * (eol_width as i64) { continue; }
+                let elen2 = a.len2_i128();
+                if elen2 == 0
+                    || elen2 >= i128::from(eol_width) * i128::from(eol_width)
+                {
+                    continue;
+                }
                 // manhattan outward normal (diagonal EOL edges: skip, no zone defined)
-                let (udx, udy) = (a.dx().signum(), a.dy().signum());
+                let (udx, udy) = (a.dx().signum() as i32, a.dy().signum() as i32);
                 if udx != 0 && udy != 0 { continue; }
                 let (nx, ny) = if ccw { (udy, -udx) } else { (-udy, udx) };
                 let zone = Bbox {
-                    xmin: a.x0.min(a.x1) + nx.min(0) * eol_spacing,
-                    xmax: a.x0.max(a.x1) + nx.max(0) * eol_spacing,
-                    ymin: a.y0.min(a.y1) + ny.min(0) * eol_spacing,
-                    ymax: a.y0.max(a.y1) + ny.max(0) * eol_spacing,
+                    xmin: a.x0.min(a.x1).saturating_add(nx.min(0) * eol_spacing),
+                    xmax: a.x0.max(a.x1).saturating_add(nx.max(0) * eol_spacing),
+                    ymin: a.y0.min(a.y1).saturating_add(ny.min(0) * eol_spacing),
+                    ymax: a.y0.max(a.y1).saturating_add(ny.max(0) * eol_spacing),
                 };
                 for b in &eb {
                     let eb_box = Bbox {
@@ -1961,28 +1928,9 @@ fn keyhole_hole_rings(
     store: &GeometryStore,
     polygon: PolyId,
 ) -> Vec<crate::geometry::exact::Ring> {
-    let (start, end) = store.poly_range(polygon);
-    let points: Vec<_> = (start..end)
-        .map(|index| crate::geometry::exact::Point::new(
-            store.verts_x[index], store.verts_y[index],
-        ))
-        .collect();
-    let material_sign = store.signed_area2(polygon).signum();
-    let mut holes = Vec::new();
-    for i in 0..points.len() {
-        for j in i + 3..points.len() {
-            if points[i] != points[j] { continue; }
-            let Ok(ring) = crate::geometry::exact::Ring::new(points[i..j].to_vec()) else {
-                continue;
-            };
-            if ring.signed_area2().signum() != material_sign as i128 {
-                holes.push(ring);
-            }
-        }
-    }
-    holes.sort_by(|a, b| a.vertices().cmp(b.vertices()));
-    holes.dedup();
-    holes
+    exact_polygon_from_store(store, polygon)
+        .map(|component| component.holes().to_vec())
+        .unwrap_or_default()
 }
 
 // --- min enclosed area (actual hole/keyhole area) ----------------------------

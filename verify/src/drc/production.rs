@@ -477,6 +477,7 @@ pub enum DiagnosticCode {
     MissingContext,
     ContextNotApplicable,
     Unsupported,
+    CapacityExceeded,
     InvalidGeometry,
     InvalidModel,
 }
@@ -517,6 +518,10 @@ impl CheckedDrcReport {
 /// advertise production contextual semantics.
 pub fn run_legacy_adapter(store: &GeometryStore, deck: &Deck) -> CheckedDrcReport {
     let report = run_drc(store, deck);
+    let capacity_stop = report
+        .violations
+        .iter()
+        .any(|violation| violation.kind == "geometry_capacity");
     let mut by_rule = BTreeMap::<String, Vec<Violation>>::new();
     for violation in report.violations {
         by_rule
@@ -532,12 +537,24 @@ pub fn run_legacy_adapter(store: &GeometryStore, deck: &Deck) -> CheckedDrcRepor
             CheckedRuleResult {
                 rule_id: rule.id().to_owned(),
                 status: if violations.is_empty() {
-                    RuleStatus::Clean
+                    if capacity_stop {
+                        RuleStatus::NotRun
+                    } else {
+                        RuleStatus::Clean
+                    }
                 } else {
                     RuleStatus::Violations
                 },
                 violations,
-                diagnostics: Vec::new(),
+                diagnostics: if capacity_stop {
+                    vec![RuleDiagnostic {
+                        code: DiagnosticCode::CapacityExceeded,
+                        message: "rule was not run because input geometry exceeds legacy numeric capacity"
+                            .into(),
+                    }]
+                } else {
+                    Vec::new()
+                },
             }
         })
         .collect();
@@ -545,13 +562,24 @@ pub fn run_legacy_adapter(store: &GeometryStore, deck: &Deck) -> CheckedDrcRepor
     // Preserve those leftovers as errors; dropping them lets malformed layouts
     // become CLEAN through the compatibility adapter.
     for (rule_id, violations) in by_rule {
+        let capacity = violations
+            .iter()
+            .any(|violation| violation.kind == "geometry_capacity");
         rules.push(CheckedRuleResult {
             rule_id,
             status: RuleStatus::Error,
             violations,
             diagnostics: vec![RuleDiagnostic {
-                code: DiagnosticCode::InvalidGeometry,
-                message: "always-on geometry validation failed".into(),
+                code: if capacity {
+                    DiagnosticCode::CapacityExceeded
+                } else {
+                    DiagnosticCode::InvalidGeometry
+                },
+                message: if capacity {
+                    "geometry exceeds the numeric capacity of the legacy DRC rule/report API".into()
+                } else {
+                    "always-on geometry validation failed".into()
+                },
             }],
         });
     }
@@ -598,8 +626,15 @@ pub fn run_checked(
                     status: RuleStatus::Error,
                     violations: Vec::new(),
                     diagnostics: vec![RuleDiagnostic {
-                        code: match error {
+                        code: match &error {
                             RunError::Unsupported(_) => DiagnosticCode::Unsupported,
+                            RunError::Derived(DerivedError::CapacityExceeded { .. })
+                            | RunError::Derived(DerivedError::Geometry(
+                                crate::geometry::exact::ExactGeometryError::CapacityExceeded {
+                                    ..
+                                }
+                                | crate::geometry::exact::ExactGeometryError::ArithmeticOverflow,
+                            )) => DiagnosticCode::CapacityExceeded,
                             RunError::Derived(_) => DiagnosticCode::InvalidGeometry,
                             RunError::Expression(_) => DiagnosticCode::InvalidModel,
                         },
@@ -1884,21 +1919,6 @@ mod tests {
                 (10, 10),
                 (0, 10),
             ],
-            // The clockwise ring contains the CCW ring, so the winding roles
-            // are inverse to outer-with-hole topology.
-            vec![
-                (0, 0),
-                (-10, 0),
-                (-10, 10),
-                (10, 10),
-                (10, -10),
-                (-10, -10),
-                (-10, 0),
-                (0, 0),
-                (2, 0),
-                (2, 2),
-                (0, 2),
-            ],
             // Disjoint opposite-winding loops joined by a retraced edge are
             // lobes, not a containment-valid keyhole.
             vec![
@@ -1914,6 +1934,22 @@ mod tests {
                 (0, 10),
                 (0, 0),
                 (10, 0),
+            ],
+            // Containment alone cannot turn a same-polarity nested lobe into a
+            // hole; only absolute orientation is allowed to vary.
+            vec![
+                (0, 0),
+                (10, 0),
+                (10, 10),
+                (5, 10),
+                (5, 8),
+                (3, 8),
+                (3, 3),
+                (8, 3),
+                (8, 8),
+                (5, 8),
+                (5, 10),
+                (0, 10),
             ],
         ];
         for points in malformed_cases {
@@ -1950,25 +1986,146 @@ mod tests {
             );
         }
 
-        let mut valid_keyhole = GeometryStore::new();
-        valid_keyhole.add_polygon(
+        let valid_keyhole = [
+            (0, 0),
+            (1000, 0),
+            (1000, 450),
+            (600, 450),
+            (600, 400),
+            (900, 400),
+            (900, 100),
+            (100, 100),
+            (100, 400),
+            (600, 400),
+            (600, 450),
+            (0, 450),
+        ];
+        let mut reversed_keyhole = valid_keyhole;
+        reversed_keyhole.reverse();
+        let inverse_winding_keyhole = [
+            (0, 0),
+            (-10, 0),
+            (-10, 10),
+            (10, 10),
+            (10, -10),
+            (-10, -10),
+            (-10, 0),
+            (0, 0),
+            (2, 0),
+            (2, 2),
+            (0, 2),
+        ];
+        let two_keyholes = [
+            (0, 0),
+            (100, 0),
+            (100, 100),
+            (70, 100),
+            (70, 80),
+            (90, 80),
+            (90, 60),
+            (60, 60),
+            (60, 80),
+            (70, 80),
+            (70, 100),
+            (40, 100),
+            (40, 80),
+            (50, 80),
+            (50, 60),
+            (20, 60),
+            (20, 80),
+            (40, 80),
+            (40, 100),
+            (0, 100),
+        ];
+        for points in [
+            valid_keyhole.as_slice(),
+            reversed_keyhole.as_slice(),
+            inverse_winding_keyhole.as_slice(),
+            two_keyholes.as_slice(),
+        ] {
+            let mut valid = GeometryStore::new();
+            valid.add_polygon(layer, points);
+            assert!(
+                run_drc(&valid, &deck).violations.is_empty(),
+                "rejected valid keyhole boundary {points:?}"
+            );
+            assert!(run_legacy_adapter(&valid, &deck).is_clean());
+        }
+    }
+
+    #[test]
+    fn legacy_api_reports_full_i32_geometry_capacity_without_panicking() {
+        let deck = Deck::from_json(
+            r#"{"layers":{"m1":{"layer":1,"datatype":0}},
+                "drc":{"GRID":{"kind":"off_grid","grid":1}}}"#,
+        )
+        .unwrap();
+        let layer = deck.layers.id("m1").unwrap();
+        let mut full_range = GeometryStore::new();
+        let polygon = full_range.add_polygon(
             layer,
             &[
-                (0, 0),
-                (1000, 0),
-                (1000, 450),
-                (600, 450),
-                (600, 400),
-                (900, 400),
-                (900, 100),
-                (100, 100),
-                (100, 400),
-                (600, 400),
-                (600, 450),
-                (0, 450),
+                (i32::MIN, i32::MIN),
+                (i32::MAX, i32::MIN),
+                (i32::MAX, i32::MAX),
+                (i32::MIN, i32::MAX),
             ],
         );
-        assert!(run_drc(&valid_keyhole, &deck).violations.is_empty());
-        assert!(run_legacy_adapter(&valid_keyhole, &deck).is_clean());
+
+        let bbox = full_range.poly_bbox[polygon.0 as usize];
+        assert_eq!(bbox.width_i64(), i64::from(u32::MAX));
+        assert_eq!(bbox.height_i64(), i64::from(u32::MAX));
+        assert_eq!(bbox.width(), i32::MAX);
+        assert_eq!(bbox.height(), i32::MAX);
+        assert!(!crate::geometry::poly_self_intersects(&full_range, polygon));
+        assert!(full_range.area_exact(polygon).unwrap() > i128::from(i64::MAX));
+        assert_eq!(full_range.signed_area2(polygon), i64::MAX);
+        assert_eq!(full_range.area(polygon), i64::MAX);
+
+        let raw = run_drc(&full_range, &deck);
+        assert_eq!(raw.violations.len(), 1);
+        assert_eq!(raw.violations[0].rule_id, "__geometry__");
+        assert_eq!(raw.violations[0].kind, "geometry_capacity");
+
+        let checked = run_legacy_adapter(&full_range, &deck);
+        assert!(!checked.is_clean());
+        let geometry = checked
+            .rules
+            .iter()
+            .find(|rule| rule.rule_id == "__geometry__")
+            .unwrap();
+        assert_eq!(geometry.status, RuleStatus::Error);
+        assert_eq!(
+            geometry.diagnostics[0].code,
+            DiagnosticCode::CapacityExceeded
+        );
+        assert_eq!(
+            checked
+                .rules
+                .iter()
+                .find(|rule| rule.rule_id == "GRID")
+                .unwrap()
+                .status,
+            RuleStatus::NotRun
+        );
+        assert_eq!(deck.layers.name(layer), "m1");
+
+        let mut reversed = GeometryStore::new();
+        let polygon = reversed.add_polygon(
+            layer,
+            &[
+                (i32::MIN, i32::MAX),
+                (i32::MAX, i32::MAX),
+                (i32::MAX, i32::MIN),
+                (i32::MIN, i32::MIN),
+            ],
+        );
+        assert_eq!(reversed.signed_area2(polygon), i64::MIN);
+        assert_eq!(reversed.area(polygon), i64::MAX);
+        assert!(!crate::geometry::poly_self_intersects(&reversed, polygon));
+        assert_eq!(
+            run_drc(&reversed, &deck).violations[0].kind,
+            "geometry_capacity"
+        );
     }
 }
