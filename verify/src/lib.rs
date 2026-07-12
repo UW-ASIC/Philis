@@ -36,6 +36,7 @@ pub mod erc;
 pub mod signoff;
 pub mod gds;
 pub mod gds_lossless;
+pub mod hierarchy_index;
 pub mod traits;
 pub use traits as gpu;
 
@@ -66,6 +67,11 @@ pub use gds_lossless::{
     GdsEnvelope, GdsFlattenOptions, GdsGeometryPolicy, GdsLibrary, GdsNode, GdsPath, GdsProperty,
     GdsRawRecord, GdsReadMode, GdsReference, GdsStructure, GdsText,
     GdsTransform, GdsUnsupportedElement, LayoutError, LayoutErrorKind,
+};
+pub use hierarchy_index::{
+    GdsLayerIdentity, HierarchyCandidate, HierarchyIndexOptions, HierarchySpatialIndex,
+    IndexedShapeKind, InstancePathEntry, TileCandidates, TileGrid, TileId,
+    VerificationTile,
 };
 pub use traits::{Backend, VerifyCheck};
 

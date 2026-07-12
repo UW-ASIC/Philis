@@ -97,7 +97,7 @@ impl LayoutError {
         }
     }
 
-    fn layout(kind: LayoutErrorKind, message: impl Into<String>) -> Self {
+    pub(crate) fn layout(kind: LayoutErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             offset: None,
@@ -1471,7 +1471,7 @@ impl Default for GdsFlattenOptions {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Affine {
+pub(crate) struct Affine {
     a: f64,
     b: f64,
     c: f64,
@@ -1481,7 +1481,7 @@ struct Affine {
 }
 
 impl Affine {
-    const IDENTITY: Self = Self {
+    pub(crate) const IDENTITY: Self = Self {
         a: 1.0,
         b: 0.0,
         c: 0.0,
@@ -1490,7 +1490,7 @@ impl Affine {
         ty: 0.0,
     };
 
-    fn instance(transform: GdsTransform, origin: Point) -> Result<Self, LayoutError> {
+    pub(crate) fn instance(transform: GdsTransform, origin: Point) -> Result<Self, LayoutError> {
         if transform.reserved_bits != 0 {
             return Err(LayoutError::layout(
                 LayoutErrorKind::Unsupported,
@@ -1532,7 +1532,7 @@ impl Affine {
         })
     }
 
-    fn compose(self, child: Self) -> Result<Self, LayoutError> {
+    pub(crate) fn compose(self, child: Self) -> Result<Self, LayoutError> {
         let out = Self {
             a: self.a * child.a + self.b * child.c,
             b: self.a * child.b + self.b * child.d,
@@ -1554,7 +1554,7 @@ impl Affine {
         }
     }
 
-    fn apply(self, point: Point) -> Result<Point, LayoutError> {
+    pub(crate) fn apply(self, point: Point) -> Result<Point, LayoutError> {
         let x = self.a * point.x as f64 + self.b * point.y as f64 + self.tx;
         let y = self.c * point.x as f64 + self.d * point.y as f64 + self.ty;
         Ok(Point {
@@ -1674,7 +1674,7 @@ pub fn flatten_gds_library(
     })
 }
 
-fn validate_hierarchy<'a>(
+pub(crate) fn validate_hierarchy<'a>(
     library: &'a GdsLibrary,
     by_name: &HashMap<&'a str, &'a GdsStructure>,
 ) -> Result<(), LayoutError> {
@@ -1783,30 +1783,36 @@ fn append_structure(
         let mut properties = inherited_properties.to_vec();
         properties.extend(own_properties);
         match element {
-            GdsElement::Boundary(v) => append_ring(
-                v.layer,
-                v.datatype,
-                &v.ring,
-                transform,
-                layers,
-                store,
-                unmapped,
-                &properties,
-                hierarchy_path,
-                geometry_policy,
-            )?,
-            GdsElement::Box(v) => append_ring(
-                v.layer,
-                v.box_type,
-                &v.ring,
-                transform,
-                layers,
-                store,
-                unmapped,
-                &properties,
-                hierarchy_path,
-                geometry_policy,
-            )?,
+            GdsElement::Boundary(v) => {
+                ensure_meta_supported(&v.meta, "BOUNDARY")?;
+                append_ring(
+                    v.layer,
+                    v.datatype,
+                    &v.ring,
+                    transform,
+                    layers,
+                    store,
+                    unmapped,
+                    &properties,
+                    hierarchy_path,
+                    geometry_policy,
+                )?;
+            }
+            GdsElement::Box(v) => {
+                ensure_meta_supported(&v.meta, "BOX")?;
+                append_ring(
+                    v.layer,
+                    v.box_type,
+                    &v.ring,
+                    transform,
+                    layers,
+                    store,
+                    unmapped,
+                    &properties,
+                    hierarchy_path,
+                    geometry_policy,
+                )?;
+            }
             GdsElement::Path(v) => {
                 let polygons = stroke_path(v)?;
                 for ring in polygons {
@@ -1916,7 +1922,12 @@ fn append_structure(
     Ok(())
 }
 
-fn exact_pitch(endpoint: i32, origin: i32, count: u16, axis: &str) -> Result<i32, LayoutError> {
+pub(crate) fn exact_pitch(
+    endpoint: i32,
+    origin: i32,
+    count: u16,
+    axis: &str,
+) -> Result<i32, LayoutError> {
     let delta = i64::from(endpoint) - i64::from(origin);
     let count = i64::from(count);
     if delta % count != 0 {
@@ -1933,7 +1944,7 @@ fn exact_pitch(endpoint: i32, origin: i32, count: u16, axis: &str) -> Result<i32
     })
 }
 
-fn checked_array_coordinate(
+pub(crate) fn checked_array_coordinate(
     origin: i32,
     a: i32,
     ai: u16,
@@ -1954,7 +1965,7 @@ fn checked_array_coordinate(
     })
 }
 
-fn ensure_meta_supported(meta: &GdsElementMeta, kind: &str) -> Result<(), LayoutError> {
+pub(crate) fn ensure_meta_supported(meta: &GdsElementMeta, kind: &str) -> Result<(), LayoutError> {
     if meta.unhandled_records.is_empty() {
         Ok(())
     } else {
