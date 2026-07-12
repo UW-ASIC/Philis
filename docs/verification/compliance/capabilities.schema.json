@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gdsverify.capabilities.schema/v1",
+  "title": "gdsverify verification capability audit",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "status_date",
+    "baseline_commit",
+    "score_policy",
+    "states",
+    "summary",
+    "engines",
+    "external_prerequisites"
+  ],
+  "properties": {
+    "$schema": { "const": "capabilities.schema.json" },
+    "schema_version": { "const": "gdsverify.capabilities/v1" },
+    "status_date": { "type": "string", "format": "date" },
+    "baseline_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "score_policy": { "const": "frozen_until_general_supported_input_has_independent_correlation" },
+    "states": {
+      "const": ["foundation", "partial", "integration_pending", "correlated", "qualified"]
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["implemented", "total", "percent", "qualification"],
+      "properties": {
+        "implemented": { "const": 24.5 },
+        "total": { "const": 112 },
+        "percent": { "const": 22 },
+        "qualification": { "const": "unqualified" }
+      }
+    },
+    "engines": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/engine" }
+    },
+    "external_prerequisites": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "$defs": {
+    "state": {
+      "enum": ["foundation", "partial", "integration_pending", "correlated", "qualified"]
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "families", "score", "state"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "families": { "const": 4 },
+        "score": { "type": "number", "minimum": 0, "maximum": 4 },
+        "state": { "$ref": "#/$defs/state" }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "implemented", "total", "percent", "claim", "groups"],
+      "properties": {
+        "id": { "enum": ["drc", "lvs", "pex"] },
+        "implemented": { "type": "number", "minimum": 0 },
+        "total": { "enum": [44, 36, 32] },
+        "percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "claim": { "type": "string", "minLength": 1 },
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/group" }
+        }
+      }
+    }
+  }
+}
