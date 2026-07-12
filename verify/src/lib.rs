@@ -35,6 +35,7 @@ pub mod pex;
 pub mod erc;
 pub mod signoff;
 pub mod gds;
+pub mod gds_lossless;
 pub mod traits;
 pub use traits as gpu;
 
@@ -59,6 +60,13 @@ pub use lvs::netlist::{
 pub use erc::{run_erc, ErcReport, ErcViolation, MultipleDriverCheck, TieHighLowCheck};
 pub use signoff::*;
 pub use gds::{read_gds, GdsLayout, GdsUnits, GdsUnmappedLayer};
+pub use gds_lossless::{
+    flatten_gds_library, read_gds_library, stroke_path, write_gds_library,
+    GdsArrayReference, GdsBoundary, GdsBoxElement, GdsElement, GdsElementMeta,
+    GdsEnvelope, GdsFlattenOptions, GdsLibrary, GdsNode, GdsPath, GdsProperty,
+    GdsRawRecord, GdsReadMode, GdsReference, GdsStructure, GdsText,
+    GdsTransform, GdsUnsupportedElement, LayoutError, LayoutErrorKind,
+};
 pub use traits::{Backend, VerifyCheck};
 
 // GDS REAL8 values are approximate, so compare units with a tight numerical

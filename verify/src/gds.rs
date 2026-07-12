@@ -127,7 +127,25 @@ enum El {
     Node,
 }
 
+/// Backward-compatible checked import. Structure-only legacy fixtures use
+/// compatibility parsing, but all geometry reaches verification through the
+/// lossless database and exact flatten adapter.
 pub fn read_gds(bytes: &[u8], lt: &LayerTable) -> Result<GdsLayout, String> {
+    let library = crate::gds_lossless::read_gds_library(
+        bytes,
+        crate::gds_lossless::GdsReadMode::Compatibility,
+    )
+    .map_err(|error| error.to_string())?;
+    crate::gds_lossless::flatten_gds_library(
+        &library,
+        lt,
+        &crate::gds_lossless::GdsFlattenOptions::default(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[allow(dead_code)]
+fn read_gds_legacy(bytes: &[u8], lt: &LayerTable) -> Result<GdsLayout, String> {
     let mut raw: HashMap<String, RawCell> = HashMap::new();
     let mut pos = 0usize;
     let mut in_structure = false;

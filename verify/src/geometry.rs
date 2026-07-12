@@ -79,6 +79,12 @@ pub struct GeometryStore {
     pub poly_vert_start: Vec<u32>,
     pub poly_vert_len: Vec<u32>,
     pub poly_bbox: Vec<Bbox>,
+    /// Lossless stream annotations carried through checked hierarchy flattening.
+    /// Directly constructed polygons receive empty entries.
+    pub poly_properties: Vec<Vec<(i16, String)>>,
+    /// Root-to-instance path for each polygon. Directly constructed polygons
+    /// receive an empty path.
+    pub poly_hierarchy_path: Vec<Vec<String>>,
     /// Per-layer polygon buckets (index = LayerId, insertion order preserved).
     /// Maintained by `add_polygon` so `polys_on_layer` is O(k), not an O(N)
     /// full-store scan — it has 30+ call sites in DRC/LVS/PEX, many in loops.
@@ -94,6 +100,8 @@ pub struct GeometryStore {
     pub text_layer: Vec<i32>,
     pub text_datatype: Vec<i32>,
     pub text_string: Vec<String>,
+    pub text_properties: Vec<Vec<(i16, String)>>,
+    pub text_hierarchy_path: Vec<Vec<String>>,
 }
 
 impl GeometryStore {
@@ -106,16 +114,41 @@ impl GeometryStore {
     pub fn text_count(&self) -> usize { self.text_string.len() }
 
     pub fn add_text(&mut self, layer: i32, datatype: i32, x: i32, y: i32, text: String) {
+        self.add_text_annotated(layer, datatype, x, y, text, Vec::new(), Vec::new());
+    }
+
+    pub fn add_text_annotated(
+        &mut self,
+        layer: i32,
+        datatype: i32,
+        x: i32,
+        y: i32,
+        text: String,
+        properties: Vec<(i16, String)>,
+        hierarchy_path: Vec<String>,
+    ) {
         self.text_x.push(x);
         self.text_y.push(y);
         self.text_layer.push(layer);
         self.text_datatype.push(datatype);
         self.text_string.push(text);
+        self.text_properties.push(properties);
+        self.text_hierarchy_path.push(hierarchy_path);
     }
 
     /// Append a polygon given as (x,y) vertex pairs. Returns its handle.
     /// The vertices are assumed to be a closed ring given without repeating the first point.
     pub fn add_polygon(&mut self, layer: LayerId, pts: &[(i32, i32)]) -> PolyId {
+        self.add_polygon_annotated(layer, pts, Vec::new(), Vec::new())
+    }
+
+    pub fn add_polygon_annotated(
+        &mut self,
+        layer: LayerId,
+        pts: &[(i32, i32)],
+        properties: Vec<(i16, String)>,
+        hierarchy_path: Vec<String>,
+    ) -> PolyId {
         let start = self.verts_x.len() as u32;
         let mut bb = Bbox::empty();
         for &(x, y) in pts {
@@ -128,6 +161,8 @@ impl GeometryStore {
         self.poly_vert_start.push(start);
         self.poly_vert_len.push(pts.len() as u32);
         self.poly_bbox.push(bb);
+        self.poly_properties.push(properties);
+        self.poly_hierarchy_path.push(hierarchy_path);
         if self.layer_index.len() <= layer as usize {
             self.layer_index.resize_with(layer as usize + 1, Vec::new);
         }
