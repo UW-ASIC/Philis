@@ -81,6 +81,12 @@ pub use lvs::hier_production::{
     HierLayout, HierLayoutCell, HierLayoutInstance, HierLvsCache, HierProductionOptions,
     HierProductionResult, HierTransform,
 };
+pub use lvs::gds_adapter::{
+    adapt_gds_hierarchy_to_lvs, export_w3_drc_hierarchy_context, GdsAdapterObjectKind,
+    GdsBlackBoxAdapterSpec, GdsDrcHierarchyContext, GdsHierarchyAdapterError,
+    GdsHierarchyAdapterErrorKind, GdsHierarchyAdapterOptions, GdsHierarchyAdapterResult,
+    GdsHierarchyProvenance, GdsObjectProvenance, GdsTextEvidenceRule,
+};
 pub use erc::{run_erc, ErcReport, ErcViolation, MultipleDriverCheck, TieHighLowCheck};
 pub use signoff::*;
 pub use gds::{read_gds, read_gds_checked, GdsLayout, GdsUnits, GdsUnmappedLayer};
