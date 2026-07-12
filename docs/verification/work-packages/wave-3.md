@@ -1,17 +1,18 @@
 # Wave 3 work packages — production DRC
 
 Goal: load and execute every operation used by one selected foundry deck, with exact
-marker geometry and deterministic debug artifacts. Current Batch A work is
-`integration_pending`; it must close the seven defects in [status](../status.md) and
-pass independent re-review before these packages build on it.
+marker geometry and deterministic debug artifacts. The reviewed Batch A subset is an
+accepted `partial`/`foundation` base on `f646d9c`: its review blockers are closed,
+but selected-deck inventory, calibrated process data, golden markers and independent
+correlation are absent, so no package meets its exit yet.
 
 ## D3.1 — derived layers, variables and production deck schema
 
 | Field | Requirement |
 |---|---|
-| Read first | [`schema.rs`](../../../verify/src/schema.rs), [`params.rs`](../../../verify/src/params.rs), exact geometry, pending Wave 3 derived/deck commits |
+| Read first | [`production.rs`](../../../verify/src/drc/production.rs), [`derived.rs`](../../../verify/src/drc/derived.rs), [`params.rs`](../../../verify/src/params.rs), exact geometry |
 | Prerequisites | G2.1 accepted and `EXT-DECK` satisfied |
-| Owned files | DRC-owned sections of `verify/src/schema.rs` and `verify/src/params.rs`; planned `verify/src/drc/{deck,derived}.rs`; their inline parser/derived tests |
+| Owned files | accepted `verify/src/drc/{production,derived}.rs`; DRC-owned sections of `verify/src/schema.rs` and `verify/src/params.rs`; their inline parser/derived tests |
 | Forbidden files | `verify/src/drc/mod.rs` execution kernels, `verify/src/{lvs,pex,signoff}/**`, `verify/conformance/manifest.json`, and `verify/correlation/**` |
 | API outcome | versioned typed AST for boolean/sizing expressions, measurement variables, units, tables, predicates and contexts; unsupported operation stops deck loading |
 | Tasks | exact derived expressions; rational dimensional evaluation; dependency cycle detection; table monotonicity/range validation; stable rule/model IDs; source spans and capability declaration |
@@ -43,9 +44,9 @@ pass independent re-review before these packages build on it.
 
 | Field | Requirement |
 |---|---|
-| Read first | pending Wave 3 coloring code/tests, G2.1 contact API |
+| Read first | accepted [`coloring.rs`](../../../verify/src/drc/coloring.rs) and its tests, G2.1 contact API |
 | Prerequisites | G2.1, D3.1 and D3.2 accepted; `BA-W3-REVIEW` satisfied for the existing solver fixes |
-| Owned files | planned `verify/src/drc/coloring.rs` and coloring-only fixtures under planned `verify/correlation/corpus/drc/coloring/**` |
+| Owned files | accepted `verify/src/drc/coloring.rs` and coloring-only fixtures under planned `verify/correlation/corpus/drc/coloring/**` |
 | Forbidden files | `verify/src/drc/{deck,derived,results,invalidation,scheduler}.rs`, `verify/src/geometry/**`, `verify/conformance/manifest.json`, and every fallback that converts `SearchLimit` into a proof |
 | API outcome | deterministic complete bounded solver with precolors, legal stitches, objective/cost, conflict witness, and distinct `SearchLimit` |
 | Tasks | canonical graph; constraint propagation; exhaustive/branch-and-bound completeness within bounds; stitch accounting; unsat core/conflict geometry; stable tie-breaks |
@@ -62,7 +63,7 @@ pass independent re-review before these packages build on it.
 |---|---|
 | Read first | [`signoff/density_cmp.rs`](../../../verify/src/signoff/density_cmp.rs), DRC density, G2.1 booleans |
 | Prerequisites | G2.1, G2.4, D3.1 and D3.2 accepted; `EXT-DECK` and `EXT-PROCESS` satisfied for fill/CMP models |
-| Owned files | planned `verify/src/drc/{fill,cmp}.rs`, CMP/fill-owned schema records in `verify/src/schema.rs`, and planned `verify/correlation/corpus/drc/{fill,cmp}/**` |
+| Owned files | accepted `verify/src/drc/fill.rs`; planned `verify/src/drc/cmp.rs`; CMP/fill-owned schema records in `verify/src/schema.rs`; planned `verify/correlation/corpus/drc/{fill,cmp}/**` |
 | Forbidden files | `verify/src/signoff/density_cmp.rs` except through a separately reviewed shared-model API commit, `verify/src/{lvs,pex}/**`, `verify/conformance/manifest.json`, and hard-coded process constants anywhere |
 | API outcome | deterministic fill proposal/generation with exclusions and connectivity policy; multilevel calibrated CMP prediction with provenance |
 | Tasks | legal fill cells/patterns; keepouts/critical-net/context exclusions; exact density windows/gradients; iterative levels and thickness transfer; before/after artifacts |
@@ -77,9 +78,9 @@ pass independent re-review before these packages build on it.
 
 | Field | Requirement |
 |---|---|
-| Read first | pending Wave 3 result DB code, [`hierarchy_index.rs`](../../../verify/src/hierarchy_index.rs), correlation disposition logic |
+| Read first | accepted [`results.rs`](../../../verify/src/drc/results.rs), [`hierarchy_index.rs`](../../../verify/src/hierarchy_index.rs), correlation disposition logic |
 | Prerequisites | G2.4, D3.1 and D3.2 accepted |
-| Owned files | planned `verify/src/drc/{results,invalidation,scheduler}.rs` and DRC result/waiver/invalidation tests in those files |
+| Owned files | accepted `verify/src/drc/results.rs`; planned scheduler/restart modules; DRC result/waiver/invalidation tests in those files |
 | Forbidden files | `verify/src/bin/correlation.rs`, `verify/correlation/schemas/**`, `verify/src/{geometry,lvs,pex,signoff}/**`, and checked-in wildcard or unowned disposition files |
 | API outcome | stable marker DB and fingerprints/provenance, ancestor-aware invalidation, restartable deterministic distributed tile execution |
 | Tasks | canonical geometry fingerprints; source/deck/model hashes; revoke/expiry clearing; dependency DAG; content-addressed tile artifacts; deterministic fan-in and failure recovery |

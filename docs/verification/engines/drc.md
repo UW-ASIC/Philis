@@ -16,20 +16,21 @@ several forms remain single-threshold, rectangle/fragment/group heuristics.
 The checked signoff density and antenna families live under [`signoff/`](../../../verify/src/signoff/)
 and should not be conflated with their simpler legacy DRC counterparts.
 
-## Batch A integration-pending work
+## Accepted Batch A foundation
 
-The Wave 3 stream adds exact derived layers, typed production deck/context foundations,
-bounded coloring, fill/result DB/invalidation. It is not accepted at this baseline.
-Seven blocking defect classes are listed in [current status](../status.md); all require
-focused regressions and independent re-review.
+The accepted Wave 3 subset adds exact rectilinear derived layers, a typed production
+deck/context foundation, bounded coloring, deterministic fill, and result/waiver/
+invalidation APIs. Unsupported production rule execution remains an error, not a
+legacy fallback. These local foundations have no independent golden-marker evidence.
 
 ## Production gap
 
 Required remaining semantics include general conditional/table-driven measurement;
 same/different-net, voltage, region, cell and hierarchy contexts; exact general polygon
-width/spacing/PRL/EOL/enclosure/cut/holes; complete bounded decomposition; calibrated
-fill/CMP; stable cross-probe result DB; ancestor-aware incremental invalidation; and
-deterministic restart/distributed execution.
+width/spacing/PRL/EOL/enclosure/cut/holes; production geometry integration for bounded
+decomposition; calibrated fill/CMP; end-to-end use of the stable result database and
+ancestor-aware invalidation; lithography/yield, full-chip capacity, deterministic
+restart/distributed execution, and independent correlation.
 
 Every selected foundry deck operation must have a schema entry, implementation,
 unknown/negative test and golden marker. A parsed but ignored field is a deck-load bug.

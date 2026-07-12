@@ -23,10 +23,13 @@ as explicit errors until the owning work package replaces them with exact semant
 - General conditional/table-driven rule execution is incomplete. Simplified PRL,
   EOL, wide-spacing, enclosure, cut, density and antenna variants are not a foundry
   rule language.
-- Legacy overlap, hole/slot interpretation, and general-polygon heuristics are known
-  false-clean risks until the reviewed Wave 3 fixes land.
-- The Wave 3 derived-layer/coloring/result work is integration pending; seven defect
-  classes listed in [status](../status.md) block acceptance.
+- Reviewed rectilinear min-area union, must-overlap, nested-material/keyhole,
+  malformed-boundary, offset and arithmetic false-cleans are fixed on this baseline.
+  General-polygon rule heuristics and all-angle operations remain incomplete.
+- Accepted Wave 3 foundations include exact rectilinear derived layers, typed
+  production schema/context handling, bounded coloring, deterministic fill, and
+  result/waiver/invalidation infrastructure. They are not selected-deck complete or
+  independently correlated; unmigrated production rule families remain explicit errors.
 - Foundry-calibrated fill/CMP, voltage/region/cell/hierarchy contexts, advanced-node
   mask/device checks, and deterministic distributed execution remain incomplete.
 

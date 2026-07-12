@@ -17,15 +17,15 @@ remains. `Integration pending` means code is not accepted on this baseline.
 | 6 | Critical | Partial | signoff antenna is PDK-driven/fail-closed; basic legacy rule remains simplified |
 | 7 | Critical | Fixed | rule ID and kind are independent; duplicate IDs error; repeated kinds survive |
 | 8 | High | Fixed | unknown/duplicate layer/connectivity/device/PEX refs and recognized-object fields error |
-| 9 | High | Integration pending | exact union-based min-area correction belongs to Wave 3 fixes; fragment double-count false-clean blocks fan-in |
-| 10 | High | Integration pending | general must-overlap semantics still require accepted Wave 3 exact fix; bbox-only absence can false-clean |
+| 9 | High | Fixed | exact union-based min-area prevents fragment double counting on the supported rectilinear path; all-angle migration remains Wave 2/3 |
+| 10 | High | Fixed | must-overlap now requires an exact counterpart and rejects concave bbox-only contact; broader rule-language context remains |
 | 11 | High | Open | general-polygon extension/max-width/PRL/wide-spacing/asymmetric-enclosure heuristics remain incomplete |
-| 12 | High | Integration pending | nested same-polarity material must not become a hole for enclosed-area/cheesing; fix/review pending |
-| 13 | High | Integration pending | complete bounded coloring exists only on pending stream and has stitch/search-limit review defects |
+| 12 | High | Fixed | nested same-polarity material is not treated as a hole; paired contained opposite-polarity keyholes remain supported |
+| 13 | High | Fixed | stitch cost is charged and bounded-search exhaustion returns `SearchLimit`, never an unproven optimum; production geometry integration and lithography/yield remain |
 | 14 | High | Partial | production records/matcher and the checked adapter preserve configured four-terminal MOS body/well evidence; foundry-complete extraction and independent correlation remain |
 | 15 | High | Fixed | checked GDS text/property evidence binds named nets end to end and ambiguity fails closed; independent general-input topology correlation remains a qualification gap |
 | 16 | High | Partial | checked nested SREF/AREF hierarchy, explicit child-port maps, black boxes and equated cells are wired to production comparison; cross-boundary reductions, arbitrary mixed hierarchy and full-chip capacity remain |
-| 17 | High | Integration pending | exact derived-layer integration is on pending Wave 3 stream with one-DBU offset defect |
+| 17 | High | Fixed | exact rectilinear derived layers preserve one-DBU positive/negative offsets; arbitrary-angle boolean/offset remains unsupported |
 | 18 | High | Fixed | global-net remapping updates MOS terminals rather than leaving stale net IDs |
 | 19 | High | Fixed | `extract_netlist` inherits `deck.lvs_cut_required` |
 | 20 | High | Fixed | `run_lvs` enforces deck strict/floating policy; low-level `compare` intentionally has no deck policy |
@@ -49,18 +49,25 @@ remains. `Integration pending` means code is not accepted on this baseline.
 
 ## Batch A Wave 3 review blockers
 
-These seven defects must be fixed with minimal reproducers, negative-direction tests,
-full gates and independent re-review before the Wave 3 commits enter fan-in:
+The original seven defects and the later independent-review findings below are fixed on baseline
+`f646d9c5b8b17fbab775a25f0fc499a873678add` with minimal reproducers,
+negative/boundary tests, full gates and independent re-review. Closing these defects
+accepts the documented subset; it does not complete the Wave 3 exit criteria.
 
-| ID | Blocking behavior | Required regression |
-|---|---|---|
-| W3-A | truncated derived offset midpoint loses 1-DBU cells | one-DBU positive/negative offset and exact set comparison |
-| W3-B | same-color precolored stitch not selected/charged; incomplete bounded search may return nonoptimal success | stitch-cost optimum and search-limit distinction against brute force |
-| W3-C | production adapter can drop invalid `__geometry__` markers and report clean | invalid geometry remains blocking through checked facade |
-| W3-D | revoked/empty waiver set leaves stale dispositions | apply, revoke, empty and rerun lifecycle |
-| W3-E | hierarchy invalidation misses ancestor edits | ancestor edit invalidates every affected descendant/result |
-| W3-F | legacy overlap bbox false-clean and nested material misread as holes | missing counterpart, concave overlap and same-polarity nesting cases |
-| W3-G | density schema accepts `min > max` or out-of-range ratios | invalid ranges fail deck construction |
+| ID | Disposition | Blocking behavior | Required regression |
+|---|---|---|---|
+| W3-A | Fixed on `f646d9c` | truncated derived offset midpoint loses 1-DBU cells | one-DBU positive/negative offset and exact set comparison |
+| W3-B | Fixed on `f646d9c` | same-color precolored stitch not selected/charged; incomplete bounded search may return nonoptimal success | stitch-cost optimum and search-limit distinction against brute force |
+| W3-C | Fixed on `f646d9c` | production adapter can drop invalid `__geometry__` markers and report clean | invalid geometry remains blocking through checked facade |
+| W3-D | Fixed on `f646d9c` | revoked/empty waiver set leaves stale dispositions | apply, revoke, empty and rerun lifecycle |
+| W3-E | Fixed on `f646d9c` | hierarchy invalidation misses ancestor edits | ancestor edit invalidates every affected descendant/result |
+| W3-F | Fixed on `f646d9c` | legacy overlap bbox false-clean and nested material misread as holes | missing counterpart, concave overlap and same-polarity nesting cases |
+| W3-G | Fixed on `f646d9c` | density schema accepts `min > max` or out-of-range ratios | invalid ranges fail deck construction |
+| W3-H | Fixed on `f646d9c` | point/nonadjacent contacts and external, disjoint or same-polarity retraced lobes can enter exact consumers | paired-keyhole positives plus each malformed-contact negative in both orientations |
+| W3-I | Fixed on `f646d9c` | multi-keyhole decomposition depends on orientation or unbounded boundary work | reversed/multiple-keyhole equivalence and vertex/pair-work capacity failures |
+| W3-J | Fixed on `f646d9c` | full-`i32` geometry, rule limits and repair arithmetic can panic, wrap or false-clean | translated extrema, maximum limits and typed repair/capacity regressions |
+| W3-K | Fixed on `f646d9c` | density/fill/CMP windows overflow near `i32::MAX` or run unbounded at step 1 | origin/MAX equivalence plus exact 16M cap and cap+1 failure |
+| W3-L | Fixed on `f646d9c` | exact preflight changes collapsed compatibility-GDS zero-area evidence | retained zero-width boundary remains a blocking zero-area marker |
 
 ## Disposition rules
 

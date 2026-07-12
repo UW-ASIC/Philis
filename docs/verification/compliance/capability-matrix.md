@@ -29,16 +29,16 @@ arithmetic that JSON Schema cannot express.
 | Four-family group | Score | State and remaining gap |
 |---|---:|---|
 | input formats, units/properties, transforms/arrays, hierarchy | 1.5 | `foundation`: checked/lossless GDS and hierarchy plus partial OASIS exist; checked adapters and full declared format semantics remain |
-| booleans, holes/keyholes, all-angle offsets, exact PATH | 0.5 | `foundation`: exact predicates and rectilinear booleans; all-angle offset/stroking and consumer migration remain |
+| booleans, holes/keyholes, all-angle offsets, exact PATH | 0.5 | `foundation`: accepted exact rectilinear booleans, keyholes and offsets; all-angle offset/stroking and full consumer migration remain |
 | width, spacing, area, enclosure/extension | 2.5 | `partial`: broad rule presence; some general polygons/context still approximated |
-| PRL/EOL/dependent tables/corner-notch context | 2.0 | `partial`: simplified thresholds; general typed table semantics and exact execution remain |
+| PRL/EOL/dependent tables/corner-notch context | 2.0 | `partial`: typed quantity/table/context foundations exist; selected-deck breadth and exact execution remain |
 | cut classes/asymmetric enclosure/via arrays/min-cut | 1.5 | `partial`: simplified grouping/center heuristics |
-| net/voltage/region/cell/hierarchy contexts | 0.5 | `partial`: narrow strict same-net support; production contexts pending |
-| density/union/exclusions/fill/CMP | 1.0 | `partial`: checked rectangular signoff core; calibrated multilevel model/fill and legacy fixes pending |
+| net/voltage/region/cell/hierarchy contexts | 0.5 | `partial`: typed context evidence and narrow strict same-net support exist; broad exact rule execution remains |
+| density/union/exclusions/fill/CMP | 1.0 | `partial`: exact scoped density and deterministic fill foundations; calibrated multilevel CMP remains |
 | fabrication antenna/sidewall/contact/diode/gate class | 1.5 | `partial`: typed analyzer core; extraction-stage evidence and foundry equations pending |
-| decomposition/stitches/precolor/litho/yield | 0.5 | `integration_pending`: bounded solver work requires defect fixes/re-review; litho/yield absent |
+| decomposition/stitches/precolor/litho/yield | 0.5 | `partial`: bounded complete solver supports precolors, stitches, witnesses and distinct `SearchLimit`; production integration/capacity, litho/yield and correlation remain |
 | advanced-device/EUV/curvilinear/3D/package | 0.0 | absent; target-process scope must decide required subset |
-| foundry language, result DB, incremental/distributed, correlation | 0.5 | `foundation`: schema/result/correlation pieces; production execution and independent correlation absent |
+| foundry language, result DB, incremental/distributed, correlation | 0.5 | `foundation`: strict schema, stable fingerprints, waiver lifecycle, ancestor invalidation and deterministic tile merge; restart/distributed execution and correlation remain |
 
 ## LVS — 8.0/36
 

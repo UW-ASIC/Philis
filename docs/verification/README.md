@@ -14,7 +14,7 @@ as independent correlation or foundry qualification.
 
 Read these pages in order before choosing work:
 
-1. [Current status](status.md) — settled results, integration-pending work, and
+1. [Current status](status.md) — settled results, accepted foundations, and
    the exact remaining roadmap.
 2. [Architecture and source map](architecture.md), then
    [inputs, decks and APIs](inputs-and-api.md).

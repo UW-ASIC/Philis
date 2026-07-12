@@ -1,10 +1,11 @@
 # Current status and remaining work
 
 Status date: 2026-07-12. Code baseline for this document set:
-`8b5895a431727d16721466e65b0735ca82bf0c61`, the reviewed Wave 2 and Wave 4
-Batch A integration point including the checked GDS-to-production-LVS hierarchy
-adapter. The adapter is an accepted `partial` supported subset on this baseline;
-the Wave 3 fixes remain **integration pending**.
+`f646d9c5b8b17fbab775a25f0fc499a873678add`, the reviewed Batch A integration
+point for the Wave 2/4 checked GDS-to-production-LVS hierarchy adapter and the
+accepted Wave 3 DRC foundations. The adapter and supported Wave 3 execution paths
+are accepted `partial` subsets; infrastructure without an end-to-end consumer is
+accepted as `foundation`. Neither state implies correlation or qualification.
 
 ## Capability state vocabulary
 
@@ -32,9 +33,9 @@ The audited score remains **24.5/112 (22%)**:
 The settled baseline before Batch A passed 78 library tests, all 162 conformance
 cases with 51/51 negative-direction coverage entries, downstream `pnr-core` and
 `pnr-backend` compile gates, 18 backend tests, and 16 correlation-harness tests.
-Batch A's Wave 2 plus Wave 4 integration point passes 137 library tests, the same
-162 conformance cases, and downstream compile gates. These are local regression
-results, not independent correlation.
+The combined Batch A baseline passes 175 library tests, the same 162 conformance
+cases with 51/51 negative-direction coverage, and the downstream compile gates.
+These are local regression results, not independent correlation.
 
 Implemented foundations include:
 
@@ -50,29 +51,32 @@ Implemented foundations include:
   deterministic comparison/witness structures, parameter binding, and a checked
   GDS hierarchy adapter with explicit text/property evidence, black boxes,
   equated cells, physical flatten correlation and source/hierarchy provenance;
+- exact rectilinear derived-layer operations, a strict typed DRC schema/context
+  facade, a bounded complete coloring solver with precolors, stitches and explicit
+  search-limit outcomes, deterministic legal fill/recheck, stable result fingerprints,
+  waiver lifecycle, ancestor-aware invalidation and deterministic tile merge;
 - analytical PEX in which every supported rectilinear conductor receives R and
   ground C, incomplete extraction is diagnostic, and exported lumped networks do
   not contain dangling parasitic nodes;
 - a neutral deterministic correlation/freeze exchange format.
 
-## Immediate Batch A completion gate
+## Accepted Batch A integration gate
 
-Do these before starting shared Wave 5 or Wave 6 integration:
+The accepted baseline records these completed integration controls:
 
-1. Land and independently re-review the Wave 3 fixes. Review has identified
-   seven blocking classes: one-DBU derived-layer offset loss; bounded-coloring
-   stitch/search-limit errors; dropped invalid-geometry markers; stale waiver
-   dispositions; missing ancestor invalidation; bbox/nested-polarity false-cleans;
-   and invalid density ranges.
-2. Preserve the accepted checked GDS hierarchy to `HierLayout` adapter gate: it
+1. The seven Wave 3 blocker classes have focused regressions and independent
+   re-review: derived offsets, coloring stitches/search limits, invalid-geometry
+   propagation, waiver lifecycle, ancestor invalidation, exact overlap/nested
+   polarity, and density ranges.
+2. The accepted checked GDS hierarchy to `HierLayout` adapter gate remains intact: it
    preserves hierarchy paths and explicit text/property evidence, supports the
    declared orthogonal SREF/AREF subset, rejects ambiguity, and never invents ports.
-3. Cherry-pick only reviewed feature/fix commits into the fan-in branch. Exclude
-   formatting-only detours and unrelated changes.
-4. Run every [global integration gate](contributing/test-gates.md#global-integration-gate)
-   on the combined tree.
-5. Update only the dated test counts and the two pending labels in this page if
-   the combined gate passes. Do not promote a capability score.
+3. Fan-in contains the reviewed semantic sequence and excludes its formatting-only
+   detour/revert.
+4. The [global integration gate](contributing/test-gates.md#global-integration-gate)
+   passes on a freshly generated corpus.
+5. The capability score remains frozen because no independent correlation evidence
+   accompanied this integration.
 
 ## Remaining roadmap at a glance
 

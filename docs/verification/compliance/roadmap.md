@@ -45,7 +45,7 @@ only by the named evidence; a verbal assumption is not sufficient.
 
 | Gate ID | Required evidence |
 |---|---|
-| `BA-W3-REVIEW` | all seven Wave 3 review blockers fixed, independently re-reviewed, and accepted on fan-in |
+| `BA-W3-REVIEW` | satisfied on the documented Batch A baseline: all seven Wave 3 review blockers fixed, independently re-reviewed, and accepted on fan-in |
 | `BA-GDS-LVS-ADAPTER` | checked GDS-to-`HierLayout` adapter accepted with ambiguity/identity regressions |
 | `EXT-DECK` | selected foundry DRC deck revision and complete operation inventory available under approved access |
 | `EXT-NETLIST` | selected SPICE/CDL/Spectre dialect corpus and include/security policy fixed |
