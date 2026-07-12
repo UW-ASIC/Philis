@@ -16,13 +16,20 @@ Read these pages in order before choosing work:
 
 1. [Current status](status.md) — settled results, integration-pending work, and
    the exact remaining roadmap.
-2. [Verification contracts](contracts.md) — units, identity, provenance, and the
+2. [Architecture and source map](architecture.md), then
+   [inputs, decks and APIs](inputs-and-api.md).
+3. [Verification contracts](contracts.md) — units, identity, provenance, and the
    permanent fail-closed rules.
-3. [Contributor reading order and ownership](contributing/reading-order.md), then
+4. [Contributor reading order and ownership](contributing/reading-order.md), then
    [worktrees, test gates and golden policy](contributing/test-gates.md).
-4. Compliance evidence: [capability matrix](compliance/capability-matrix.md) and
-   [known limitations](compliance/known-limitations.md).
-5. [Implementation roadmap](compliance/roadmap.md) — dependency order and detailed
+5. Engine boundaries: [geometry/layout](engines/geometry-layout.md),
+   [DRC](engines/drc.md), [LVS](engines/lvs.md), [PEX](engines/pex.md), and
+   [reliability signoff](engines/signoff.md).
+6. Compliance evidence: [capability matrix](compliance/capability-matrix.md),
+   [known limitations](compliance/known-limitations.md),
+   [bug dispositions](compliance/bug-dispositions.md), and
+   [correlation/qualification](compliance/qualification.md).
+7. [Implementation roadmap](compliance/roadmap.md) — dependency order and detailed
    Wave 2–7 work packages.
 
 The machine-readable score record is

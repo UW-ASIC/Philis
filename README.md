@@ -67,3 +67,6 @@ Backend dependencies are one-way: `cells/constraints → engine → placement �
 The facade is the composition root; lower crates never depend on it.
 `substrate3` points into `pnr-cells` and exposes that backend contract to users;
 no backend crate depends on `substrate3`.
+
+Verification contributors should start with the
+[DRC/LVS/PEX compliance and implementation guide](docs/verification/README.md).

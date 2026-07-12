@@ -46,7 +46,15 @@ singular/ambiguous, boundary, and provenance cases.
 
 ## Global integration gate
 
-Run from the combined, settled fan-in tree with one isolated target directory:
+The generated conformance `manifest.json`, GDS and params are intentionally ignored.
+In a fresh worktree, generate them once before the gate; generation is setup, not
+permission to change generator sources or expected physics without review:
+
+```bash
+cargo run -p gdsverify --bin generate_conformance -- verify/conformance
+```
+
+Then run from the combined, settled fan-in tree with one isolated target directory:
 
 ```bash
 cargo test -p gdsverify --lib
