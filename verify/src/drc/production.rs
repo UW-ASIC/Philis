@@ -1870,6 +1870,51 @@ mod tests {
             ],
             // Immediate reverse-edge backtracking is a spike, not a hole cycle.
             vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0), (0, -5), (0, 0)],
+            // Exact reviewer repro: the retrace connects a clockwise lobe
+            // outside, rather than a contained hole.
+            vec![
+                (0, 0),
+                (-5, 0),
+                (-5, -5),
+                (-10, -5),
+                (-10, 0),
+                (-5, 0),
+                (0, 0),
+                (10, 0),
+                (10, 10),
+                (0, 10),
+            ],
+            // The clockwise ring contains the CCW ring, so the winding roles
+            // are inverse to outer-with-hole topology.
+            vec![
+                (0, 0),
+                (-10, 0),
+                (-10, 10),
+                (10, 10),
+                (10, -10),
+                (-10, -10),
+                (-10, 0),
+                (0, 0),
+                (2, 0),
+                (2, 2),
+                (0, 2),
+            ],
+            // Disjoint opposite-winding loops joined by a retraced edge are
+            // lobes, not a containment-valid keyhole.
+            vec![
+                (10, 5),
+                (20, 5),
+                (20, 10),
+                (30, 10),
+                (30, 0),
+                (20, 0),
+                (20, 5),
+                (10, 5),
+                (10, 10),
+                (0, 10),
+                (0, 0),
+                (10, 0),
+            ],
         ];
         for points in malformed_cases {
             let mut malformed = GeometryStore::new();

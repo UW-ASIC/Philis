@@ -495,7 +495,8 @@ fn check_polygon_validity(store: &GeometryStore, lt: &LayerTable) -> Vec<Violati
 /// edges separating two simple, opposite-winding rings (outer and hole).
 fn poly_has_invalid_nonadjacent_contact(store: &GeometryStore, polygon: PolyId) -> bool {
     use crate::geometry::exact::{
-        classify_segment_intersection, on_segment, Point, Ring, SegmentIntersection,
+        classify_segment_intersection, on_segment, Point, Polygon, Ring, SegmentIntersection,
+        Winding,
     };
     use std::collections::BTreeSet;
 
@@ -522,7 +523,14 @@ fn poly_has_invalid_nonadjacent_contact(store: &GeometryStore, polygon: PolyId) 
         let (Ok(between), Ok(outside)) = (Ring::new(between), Ring::new(outside)) else {
             return false;
         };
-        between.signed_area2().signum() != outside.signed_area2().signum()
+        let (outer, hole) = match (between.winding(), outside.winding()) {
+            (Winding::CounterClockwise, Winding::Clockwise) => (between, outside),
+            (Winding::Clockwise, Winding::CounterClockwise) => (outside, between),
+            _ => return false,
+        };
+        // Polygon::new is the exact topology authority: the hole must be
+        // strictly contained, with no boundary touch/crossing or other contact.
+        Polygon::new(outer, vec![hole]).is_ok()
     };
 
     let mut retraces = BTreeSet::new();
