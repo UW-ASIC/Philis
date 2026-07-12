@@ -15,6 +15,7 @@ pub mod hierarchical;
 pub mod netlist;
 pub mod production;
 pub mod binding;
+pub mod detailed_extract;
 
 pub use types::*;
 pub use extract::{extract_netlist, extract_netlist_opts, reduce_netlist};
@@ -25,6 +26,7 @@ pub use hierarchical::{compare_hierarchical, HierCell, HierLvsResult, RefHierarc
 pub use netlist::*;
 pub use production::*;
 pub use binding::*;
+pub use detailed_extract::*;
 
 use crate::geometry::GeometryStore;
 use crate::params::Deck;

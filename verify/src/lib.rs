@@ -72,6 +72,10 @@ pub use lvs::binding::{
     BlackBoxSpec, BoundReferenceCell, BoundReferenceHierarchy, BoundReferenceInstance,
     ConfiguredModel, ParameterEnvironment, ReferenceBindingOptions,
 };
+pub use lvs::detailed_extract::{
+    extract_detailed_netlist, DetailedExtractionError, DetailedExtractionErrorKind,
+    DetailedExtractionOptions, NamedSoftConnection,
+};
 pub use erc::{run_erc, ErcReport, ErcViolation, MultipleDriverCheck, TieHighLowCheck};
 pub use signoff::*;
 pub use gds::{read_gds, read_gds_checked, GdsLayout, GdsUnits, GdsUnmappedLayer};
