@@ -37,6 +37,7 @@ pub mod signoff;
 pub mod gds;
 pub mod gds_lossless;
 pub mod hierarchy_index;
+pub mod oasis;
 pub mod traits;
 pub use traits as gpu;
 
@@ -72,6 +73,10 @@ pub use hierarchy_index::{
     GdsLayerIdentity, HierarchyCandidate, HierarchyIndexOptions, HierarchySpatialIndex,
     IndexedShapeKind, InstancePathEntry, TileCandidates, TileGrid, TileId,
     VerificationTile,
+};
+pub use oasis::{
+    read_oasis, write_oasis, OasisCapabilities, OasisError, OasisErrorKind,
+    OASIS_CAPABILITIES,
 };
 pub use traits::{Backend, VerifyCheck};
 
