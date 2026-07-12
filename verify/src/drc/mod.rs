@@ -598,8 +598,31 @@ fn facing_gaps(store: &GeometryStore, p: PolyId, interior: bool) -> Vec<(i32, i3
 /// exact for the disjoint-boundary cases this is used on (a touching boundary counts as
 /// "not strictly inside", which is the conservative answer for both callers).
 fn poly_strictly_inside(store: &GeometryStore, inner: PolyId, outer: PolyId) -> bool {
-    let (s, e) = store.poly_range(inner);
-    (s..e).all(|i| point_in_poly(store, outer, store.verts_x[i], store.verts_y[i]))
+    let polygon = |poly: PolyId| {
+        let (start, end) = store.poly_range(poly);
+        crate::geometry::exact::Polygon::from_outer(
+            (start..end)
+                .map(|index| crate::geometry::exact::Point::new(
+                    store.verts_x[index], store.verts_y[index],
+                ))
+                .collect(),
+        )
+    };
+    let (Ok(inner), Ok(outer)) = (polygon(inner), polygon(outer)) else {
+        return false;
+    };
+    let inner_ring = inner.outer().vertices();
+    let outer_ring = outer.outer().vertices();
+    inner_ring.iter().all(|&point| {
+        outer.classify_point(point) == crate::geometry::exact::PointClassification::Inside
+    }) && (0..inner_ring.len()).all(|i| {
+        (0..outer_ring.len()).all(|j| {
+            crate::geometry::exact::classify_segment_intersection(
+                inner_ring[i], inner_ring[(i + 1) % inner_ring.len()],
+                outer_ring[j], outer_ring[(j + 1) % outer_ring.len()],
+            ) == crate::geometry::exact::SegmentIntersection::None
+        })
+    })
 }
 
 /// Enumerate polygon pairs whose bboxes come within `min` of each other, by sweep:
@@ -1111,28 +1134,31 @@ fn check_min_area(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i64,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    // Merged-shape semantics (real DRC merges before measuring): a polygon's
-    // area counts together with everything it touches. Group sum over-counts
-    // shared overlap — conservative toward passing; boolean union if that
-    // ever matters. One violation per merged group, not per fragment.
-    let polys = store.polys_on_layer(layer);
-    let idx_of: std::collections::HashMap<u32, u32> =
-        polys.iter().enumerate().map(|(i, p)| (p.0, i as u32)).collect();
-    let cands = candidate_pairs(store, &polys, None, 1);
-    let group = merge_groups(store, &cands, None, polys.len(), &idx_of);
-    let mut gsum: Vec<i64> = vec![0; polys.len()];
-    for (i, &p) in polys.iter().enumerate() {
-        gsum[group[i] as usize] += store.area(p);
-    }
-    for (i, &p) in polys.iter().enumerate() {
-        let g = group[i] as usize;
-        // report on the group root only, so a merged shape yields one violation
-        if g == i && gsum[g] < min {
-            let bb = store.poly_bbox[p.0 as usize];
+    // Real DRC measures connected union components. Summing fragment areas is
+    // a false-clean when fragments overlap, so use the shared exact boolean.
+    let merged = match derived::layer_polygon_set(store, layer, Some(lt.id_to_name.len())) {
+        Ok(merged) => merged,
+        Err(_) => {
+            let marker = store.polys_on_layer(layer).first()
+                .map(|poly| store.poly_bbox[poly.0 as usize])
+                .unwrap_or(Bbox { xmin: 0, ymin: 0, xmax: 0, ymax: 0 });
+            out.push(Violation {
+                rule_id: rule_id.into(), kind: "min_area_geometry_error".into(),
+                layer: lt.name(layer).into(), measured: -1, limit: min,
+                x: marker.xmin, y: marker.ymin,
+            });
+            return;
+        }
+    };
+    for polygon in merged.polygons() {
+        let area = polygon.area2() / 2;
+        if area < i128::from(min) {
+            let marker = polygon.outer().vertices()[0];
             out.push(Violation {
                 rule_id: rule_id.into(), kind: "min_area".into(),
-                layer: lt.name(layer).into(), measured: gsum[g], limit: min,
-                x: bb.xmin, y: bb.ymin,
+                layer: lt.name(layer).into(),
+                measured: i64::try_from(area).unwrap_or(i64::MAX), limit: min,
+                x: marker.x, y: marker.y,
             });
         }
     }
@@ -1356,6 +1382,7 @@ fn check_overlap(
     let bs = store.polys_on_layer(b);
     for pa in store.polys_on_layer(a) {
         let ba = store.poly_bbox[pa.0 as usize];
+        let mut has_overlap = false;
         for &pb in &bs {
             let bb = store.poly_bbox[pb.0 as usize];
             // overlap region
@@ -1363,7 +1390,8 @@ fn check_overlap(
             let iy0 = ba.ymin.max(bb.ymin);
             let ix1 = ba.xmax.min(bb.xmax);
             let iy1 = ba.ymax.min(bb.ymax);
-            if ix1 <= ix0 || iy1 <= iy0 { continue; } // no overlap at all: not this rule's job
+            if ix1 <= ix0 || iy1 <= iy0 { continue; }
+            has_overlap = true;
             let ov = (ix1 - ix0).min(iy1 - iy0);
             if ov < min {
                 out.push(Violation {
@@ -1372,6 +1400,13 @@ fn check_overlap(
                     measured: ov as i64, limit: min as i64, x: ix0, y: iy0,
                 });
             }
+        }
+        if !has_overlap {
+            out.push(Violation {
+                rule_id: rule_id.into(), kind: "overlap".into(),
+                layer: format!("{}:{}", lt.name(a), lt.name(b)),
+                measured: 0, limit: min as i64, x: ba.xmin, y: ba.ymin,
+            });
         }
     }
 }
@@ -2063,5 +2098,27 @@ mod tests {
         let mut out = Vec::new();
         check_spacing_same(&store, &lt, met1, 140, Backend::Cpu, false, "min_spacing", &mut out);
         assert!(out.is_empty(), "bridged gap flagged: {out:?}");
+    }
+
+    #[test]
+    fn min_area_uses_boolean_union_and_overlap_requires_a_counterpart() {
+        let mut defs = std::collections::HashMap::new();
+        defs.insert("a".to_string(), crate::params::LayerDef { layer: 1, datatype: 0 });
+        defs.insert("b".to_string(), crate::params::LayerDef { layer: 2, datatype: 0 });
+        let lt = LayerTable::from_defs(&defs);
+        let (a, b) = (lt.id("a").unwrap(), lt.id("b").unwrap());
+        let mut store = GeometryStore::new();
+        store.add_rect(a, 0, 0, 10, 10);
+        store.add_rect(a, 5, 0, 10, 10);
+
+        let mut violations = Vec::new();
+        check_min_area(&store, &lt, a, 175, "A.MIN", &mut violations);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].measured, 150);
+
+        violations.clear();
+        check_overlap(&store, &lt, a, b, 2, "A.OVERLAP.B", &mut violations);
+        assert_eq!(violations.len(), 2);
+        assert!(violations.iter().all(|violation| violation.measured == 0));
     }
 }

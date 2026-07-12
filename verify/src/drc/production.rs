@@ -254,6 +254,23 @@ pub enum ProductionRuleSchema {
         #[serde(default)]
         when: ContextSelector,
     },
+    MinEnclosedArea {
+        id: String,
+        layer: LayerSourceSchema,
+        limit: ScalarExpr,
+        #[serde(default)]
+        when: ContextSelector,
+    },
+    /// Large material components require an exact hole or explicit slot/keyhole
+    /// evidence layer that touches or interacts with the component.
+    Cheesing {
+        id: String,
+        layer: LayerSourceSchema,
+        slots: LayerSourceSchema,
+        max_area_without_slot: ScalarExpr,
+        #[serde(default)]
+        when: ContextSelector,
+    },
     CutClass {
         id: String,
         cut: LayerSourceSchema,
@@ -313,6 +330,8 @@ impl ProductionRuleSchema {
             | Self::Enclosure { id, .. }
             | Self::Extension { id, .. }
             | Self::MinArea { id, .. }
+            | Self::MinEnclosedArea { id, .. }
+            | Self::Cheesing { id, .. }
             | Self::CutClass { id, .. }
             | Self::Density { id, .. }
             | Self::Antenna { id, .. }
@@ -329,6 +348,8 @@ impl ProductionRuleSchema {
             | Self::Enclosure { when, .. }
             | Self::Extension { when, .. }
             | Self::MinArea { when, .. }
+            | Self::MinEnclosedArea { when, .. }
+            | Self::Cheesing { when, .. }
             | Self::CutClass { when, .. }
             | Self::Density { when, .. }
             | Self::Antenna { when, .. }
@@ -605,6 +626,51 @@ fn run_rule(
                         limit: saturating_i64(limit),
                         x: point.x,
                         y: point.y,
+                    });
+                }
+            }
+            Ok(violations)
+        }
+        ProductionRuleSchema::MinEnclosedArea { id, layer, limit, .. } => {
+            let set = evaluate_source(layer, layers, evaluator)?;
+            let limit = evaluate_expression(limit, deck)?.value;
+            let mut violations = Vec::new();
+            for polygon in set.polygons() {
+                for hole in polygon.holes() {
+                    let area = -(hole.signed_area2() as f64) / 2.0;
+                    if area < limit {
+                        let point = hole.vertices()[0];
+                        violations.push(Violation {
+                            rule_id: id.clone(), kind: "min_enclosed_area".into(),
+                            layer: source_name(layer), measured: saturating_i64(area),
+                            limit: saturating_i64(limit), x: point.x, y: point.y,
+                        });
+                    }
+                }
+            }
+            Ok(violations)
+        }
+        ProductionRuleSchema::Cheesing {
+            id, layer, slots, max_area_without_slot, ..
+        } => {
+            let set = evaluate_source(layer, layers, evaluator)?;
+            let slots_set = evaluate_source(slots, layers, evaluator)?;
+            let limit = evaluate_expression(max_area_without_slot, deck)?.value;
+            let mut violations = Vec::new();
+            for polygon in set.polygons() {
+                let area = polygon.area2() as f64 / 2.0;
+                if area <= limit || !polygon.holes().is_empty() { continue; }
+                let has_explicit_slot = slots_set.polygons().iter().any(|slot| {
+                    crate::geometry::exact::classify_polygon_contact(
+                        polygon.outer(), slot.outer(),
+                    ) != crate::geometry::exact::PolygonContact::Disjoint
+                });
+                if !has_explicit_slot {
+                    let point = polygon.outer().vertices()[0];
+                    violations.push(Violation {
+                        rule_id: id.clone(), kind: "cheesing".into(),
+                        layer: source_name(layer), measured: saturating_i64(area),
+                        limit: saturating_i64(limit), x: point.x, y: point.y,
                     });
                 }
             }
@@ -988,7 +1054,14 @@ fn validate_rule(
             (within.clone(), Dimension::Length),
             (limit.clone(), Dimension::Length),
         ],
-        ProductionRuleSchema::MinArea { limit, .. } => &[(limit.clone(), Dimension::Area)],
+        ProductionRuleSchema::MinArea { limit, .. }
+        | ProductionRuleSchema::MinEnclosedArea { limit, .. } => {
+            &[(limit.clone(), Dimension::Area)]
+        }
+        ProductionRuleSchema::Cheesing {
+            max_area_without_slot,
+            ..
+        } => &[(max_area_without_slot.clone(), Dimension::Area)],
         ProductionRuleSchema::CutClass {
             min_count,
             within,
@@ -1120,11 +1193,13 @@ fn rule_sources(rule: &ProductionRuleSchema) -> Vec<&LayerSourceSchema> {
         | ProductionRuleSchema::PrlSpacing { layer, .. }
         | ProductionRuleSchema::EolSpacing { layer, .. }
         | ProductionRuleSchema::MinArea { layer, .. }
+        | ProductionRuleSchema::MinEnclosedArea { layer, .. }
         | ProductionRuleSchema::MultiPatterning { layer, .. } => vec![layer],
         ProductionRuleSchema::Spacing { layer, other, .. } => {
             std::iter::once(layer).chain(other.iter()).collect()
         }
         ProductionRuleSchema::Enclosure { outer, inner, .. } => vec![outer, inner],
+        ProductionRuleSchema::Cheesing { layer, slots, .. } => vec![layer, slots],
         ProductionRuleSchema::Extension {
             layer, reference, ..
         } => vec![layer, reference],
@@ -1560,5 +1635,40 @@ mod tests {
         store.add_rect(layers.id("ko").unwrap(), 8, 0, 2, 10);
         let report = run_checked(&store, &deck, &layers, &DrcContext::default());
         assert_eq!(report.rules[0].status, RuleStatus::Clean); // 80/80 after keepout
+    }
+
+    #[test]
+    fn exact_holes_and_explicit_keyhole_slots_drive_plate_rules() {
+        let layers = layers();
+        let value = json!({
+            "schema_version":1, "deck_id":"D", "model_revision":"R", "dbu_nm":1.0,
+            "derived_layers":{"ring":{"op":"subtraction",
+                "lhs":{"op":"layer","source":{"source":"base","name":"die"}},
+                "rhs":{"op":"layer","source":{"source":"base","name":"ko"}}}},
+            "rules":[
+                {"kind":"min_enclosed_area","id":"HOLE.A",
+                    "layer":{"source":"derived","name":"ring"},
+                    "limit":{"op":"literal","value":10.0,"unit":"square_dbu"}},
+                {"kind":"cheesing","id":"PLATE.SLOT",
+                    "layer":{"source":"derived","name":"ring"},
+                    "slots":{"source":"base","name":"ko"},
+                    "max_area_without_slot":{"op":"literal","value":50.0,"unit":"square_dbu"}}
+            ]
+        });
+        let deck = ProductionDeck::from_json(&value, &layers).unwrap();
+        let mut store = GeometryStore::new();
+        store.add_rect(layers.id("die").unwrap(), 0, 0, 10, 10);
+        store.add_rect(layers.id("ko").unwrap(), 2, 2, 3, 3);
+        let report = run_checked(&store, &deck, &layers, &DrcContext::default());
+        assert_eq!(report.rules[0].status, RuleStatus::Violations);
+        assert_eq!(report.rules[0].violations[0].measured, 9);
+        assert_eq!(report.rules[1].status, RuleStatus::Clean);
+
+        // A boundary-reaching slot reconstructs as a keyhole indentation, not a hole.
+        let mut keyhole_store = GeometryStore::new();
+        keyhole_store.add_rect(layers.id("die").unwrap(), 0, 0, 10, 10);
+        keyhole_store.add_rect(layers.id("ko").unwrap(), 4, 4, 2, 6);
+        let report = run_checked(&keyhole_store, &deck, &layers, &DrcContext::default());
+        assert_eq!(report.rules[1].status, RuleStatus::Clean);
     }
 }
