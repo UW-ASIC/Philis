@@ -195,6 +195,40 @@ mod tests {
         instance.target_cell = "undefined_macro".into();
         instance.port_bindings = vec![("a".into(), "x".into()), ("b".into(), "y".into())];
         assert_black_box_mismatch(&layout, TopologyConflictKind::PartitionConflict);
+
+        let instance = &mut layout.cells.get_mut("layout_top").unwrap().instances[0];
+        instance.target_cell = "macro".into();
+        instance.port_bindings = vec![
+            ("a".into(), "undefined_net".into()),
+            ("b".into(), "y".into()),
+        ];
+        let undefined_parent = compare_hierarchical_production(
+            &layout,
+            &reference,
+            &options,
+            &mut HierLvsCache::default(),
+        );
+        assert_eq!(undefined_parent.status, ProductionLvsStatus::Error);
+        assert!(matches!(
+            undefined_parent.flattened.mismatches.first(),
+            Some(ProductionMismatch::Input { explanation, .. })
+                if explanation.contains("undefined_net")
+        ));
+
+        let instance = &mut layout.cells.get_mut("layout_top").unwrap().instances[0];
+        instance.port_bindings = vec![("a".into(), "x".into()), ("b".into(), "y".into())];
+        let missing_cell_binding = compare_hierarchical_production(
+            &layout,
+            &reference,
+            &HierProductionOptions::default(),
+            &mut HierLvsCache::default(),
+        );
+        assert_eq!(missing_cell_binding.status, ProductionLvsStatus::Mismatch);
+        assert!(matches!(
+            missing_cell_binding.flattened.mismatches.first(),
+            Some(ProductionMismatch::Topology { witness, .. })
+                if !witness.hierarchy_paths.is_empty()
+        ));
     }
 
     #[test]
@@ -398,12 +432,18 @@ fn hash(text: &str) -> String {
 
 fn hierarchy_error(reason: impl Into<String>) -> ProductionLvsResult {
     let reason = reason.into();
+    let mismatch_fingerprint = format!("hier:{}", hash(&format!("input|{reason}")));
     ProductionLvsResult {
         status: ProductionLvsStatus::Error,
         reason: reason.clone(),
         device_mappings: Vec::new(),
         net_mappings: Vec::new(),
-        mismatches: Vec::new(),
+        mismatches: vec![ProductionMismatch::Input {
+            side: "hierarchy".into(),
+            object: "layout/reference binding".into(),
+            explanation: reason.clone(),
+            fingerprint: mismatch_fingerprint,
+        }],
         explored_states: 0,
         fingerprint: format!("hier:{}", hash(&reason)),
     }
@@ -821,9 +861,7 @@ fn compare_black_boxes(
     options: &HierProductionOptions,
 ) -> Option<ProductionMismatch> {
     for (cell_name, cell) in &layout.cells {
-        let Some(reference_cell) = reference_for_layout(cell_name, reference, options) else {
-            continue;
-        };
+        let reference_cell = reference_for_layout(cell_name, reference, options);
         let mut layout_evidence = Vec::new();
         for instance in cell.instances.iter().filter(|instance| instance.black_box) {
             for column in 0..instance.array.columns {
@@ -846,18 +884,15 @@ fn compare_black_boxes(
             }
         }
         let reference_evidence = reference_cell
-            .instances
-            .iter()
+            .into_iter()
+            .flat_map(|reference_cell| reference_cell.instances.iter())
             .filter(|instance| instance.black_box)
             .map(|instance| BlackBoxEvidence {
                 signature: canonical_black_box_signature(
                     &instance.target_cell,
                     &instance.port_bindings,
                 ),
-                object: format!(
-                    "blackbox:{}/{}",
-                    reference_cell.source_cell, instance.stable_id
-                ),
+                object: format!("blackbox:reference/{}", instance.stable_id),
                 hierarchy_path: instance.hierarchy_path.clone(),
             })
             .collect::<Vec<_>>();
