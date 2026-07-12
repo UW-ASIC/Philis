@@ -665,7 +665,7 @@ mod tests {
             value: 0.0,
         };
         ExtractedNetlist {
-            devices: Vec::new(), device_sources: Vec::new(), bjt_devices: Vec::new(), net_count: 2, used_nets: 2,
+            devices: Vec::new(), bjt_devices: Vec::new(), net_count: 2, used_nets: 2,
             net_of_poly: Vec::new(), label_conflicts: Vec::new(),
             two_terminal: vec![d1, d2], floating_nets: Vec::new(),
         }

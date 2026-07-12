@@ -855,8 +855,6 @@ fn series_reduce_once(ext: &mut ExtractedNetlist, protected_nets: &HashSet<u32>)
 }
 
 fn reduce_netlist_with_protected(ext: &mut ExtractedNetlist, protected_nets: &HashSet<u32>) {
-    // Reduction destroys the one-recognized-polygon-pair-per-device relation.
-    ext.device_sources.clear();
     loop {
         let before = ext.devices.len();
         ext.devices = parallel_reduce(std::mem::take(&mut ext.devices));
@@ -917,6 +915,20 @@ pub(super) fn extract_netlist_opts_raw(
     backend: Backend,
     apply_legacy_reduction: bool,
 ) -> Result<ExtractedNetlist, String> {
+    extract_netlist_opts_raw_with_sources(store, deck, opts, backend, apply_legacy_reduction)
+        .map(|(netlist, _)| netlist)
+}
+
+/// Internal sidecar variant used by hierarchy adapters that must link every
+/// recognized MOS to exact input polygons without changing the public legacy
+/// [`ExtractedNetlist`] struct layout.
+pub(super) fn extract_netlist_opts_raw_with_sources(
+    store: &GeometryStore,
+    deck: &Deck,
+    opts: &ExtractOpts,
+    backend: Backend,
+    apply_legacy_reduction: bool,
+) -> Result<(ExtractedNetlist, Vec<DeviceRecognitionSource>), String> {
     let n = store.poly_count();
     let (conductors, vias) = resolve_connectivity(deck)?;
     let is_conn = |l: LayerId| conductors.contains(&l) || vias.contains(&l);
@@ -1394,7 +1406,6 @@ pub(super) fn extract_netlist_opts_raw(
         .collect();
     let mut ext = ExtractedNetlist {
         devices,
-        device_sources,
         net_count,
         used_nets: used.len(),
         net_of_poly,
@@ -1405,6 +1416,8 @@ pub(super) fn extract_netlist_opts_raw(
     };
     if apply_legacy_reduction {
         reduce_netlist_with_protected(&mut ext, &protected_nets);
+        // A reduced device may represent several recognized polygon pairs.
+        device_sources.clear();
     }
 
     // Phase 4C: Floating net detection — nets with polygons but no device terminal connections
@@ -1450,7 +1463,7 @@ pub(super) fn extract_netlist_opts_raw(
         }
     }
 
-    Ok(ext)
+    Ok((ext, device_sources))
 }
 
 #[cfg(test)]
@@ -1474,7 +1487,6 @@ mod reduction_tests {
     fn netlist(devices: Vec<Device>) -> ExtractedNetlist {
         ExtractedNetlist {
             devices,
-            device_sources: Vec::new(),
             bjt_devices: Vec::new(),
             net_count: 32,
             used_nets: 0,

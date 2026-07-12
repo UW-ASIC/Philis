@@ -7,7 +7,7 @@
 //! property. Unsupported transforms and ambiguous/missing evidence are errors.
 
 use super::detailed_extract::{extract_detailed_netlist, DetailedExtractionOptions};
-use super::extract::extract_netlist_opts_raw;
+use super::extract::extract_netlist_opts_raw_with_sources;
 use super::hier_production::{
     flatten_layout, HierArray, HierLayout, HierLayoutCell, HierLayoutInstance, HierTransform,
 };
@@ -211,8 +211,9 @@ pub struct GdsHierarchyAdapterResult {
 pub enum GdsPhysicalCorrelationStatus {
     /// Independent flattened physical extraction matched the composed hierarchy.
     Correlated,
-    /// Geometry inside explicitly opaque cells was not flattened. Hierarchical
-    /// LVS must still compare every black-box target and complete port binding.
+    /// Every reachable nonopaque shape was correlated. Geometry inside these
+    /// selected-top-reachable opaque cells was pruned from both physical and
+    /// composed views; hierarchical LVS must still compare every target and map.
     OpaqueBlackBoxes { cells: BTreeSet<String> },
 }
 
@@ -883,15 +884,15 @@ fn build_local_cell(
 ) -> Result<LocalCell, GdsHierarchyAdapterError> {
     let (store, source_shapes, text_elements) =
         build_local_store(structure, deck, options, provenance)?;
-    let raw = extract_netlist_opts_raw(&store, deck, &options.extract, backend, false).map_err(
-        |message| {
-            GdsHierarchyAdapterError::cell(
-                GdsHierarchyAdapterErrorKind::Extraction,
-                &structure.name,
-                message,
-            )
-        },
-    )?;
+    let (raw, device_sources) =
+        extract_netlist_opts_raw_with_sources(&store, deck, &options.extract, backend, false)
+            .map_err(|message| {
+                GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::Extraction,
+                    &structure.name,
+                    message,
+                )
+            })?;
     let ports = options
         .cell_ports
         .get(&structure.name)
@@ -1064,7 +1065,7 @@ fn build_local_cell(
         &detailed,
         &names,
         &sources,
-        &raw.device_sources,
+        &device_sources,
         &source_shapes,
     )?;
 
@@ -2009,6 +2010,17 @@ fn canonical_physical_library(
     for structure in &mut canonical.structures {
         let mut retained = Vec::with_capacity(structure.elements.len());
         for (element_index, mut element) in structure.elements.drain(..).enumerate() {
+            let opaque_target = match &element {
+                GdsElement::Sref(reference) => Some(reference.structure.as_str()),
+                GdsElement::Aref(reference) => Some(reference.structure.as_str()),
+                _ => None,
+            }
+            .is_some_and(|target| black_box(options, target).is_some());
+            if opaque_target {
+                // Opaque interiors are absent from both this physical view and
+                // W4's composed view. Surrounding/reachable geometry remains.
+                continue;
+            }
             if let GdsElement::Text(text) = &mut element {
                 let Some(rule) = evidence_rule(options, text.layer, text.text_type) else {
                     if options.reject_unconfigured_text {
@@ -2124,15 +2136,21 @@ fn validate_physical_equivalence(
     backend: Backend,
     layout: &HierLayout,
 ) -> Result<GdsPhysicalCorrelationStatus, GdsHierarchyAdapterError> {
-    let opaque = layout
-        .cells
-        .values()
-        .flat_map(|cell| cell.instances.iter())
-        .filter(|instance| instance.black_box)
-        .map(|instance| instance.target_cell.clone())
-        .collect::<BTreeSet<_>>();
-    if !opaque.is_empty() {
-        return Ok(GdsPhysicalCorrelationStatus::OpaqueBlackBoxes { cells: opaque });
+    let mut opaque = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut pending = vec![layout.top_cell.clone()];
+    while let Some(cell_name) = pending.pop() {
+        if !visited.insert(cell_name.clone()) {
+            continue;
+        }
+        let cell = &layout.cells[&cell_name];
+        for instance in &cell.instances {
+            if instance.black_box {
+                opaque.insert(instance.target_cell.clone());
+            } else {
+                pending.push(instance.target_cell.clone());
+            }
+        }
     }
     if options
         .default_substrate_nets
@@ -2242,7 +2260,11 @@ fn validate_physical_equivalence(
             ),
         ));
     }
-    Ok(GdsPhysicalCorrelationStatus::Correlated)
+    if opaque.is_empty() {
+        Ok(GdsPhysicalCorrelationStatus::Correlated)
+    } else {
+        Ok(GdsPhysicalCorrelationStatus::OpaqueBlackBoxes { cells: opaque })
+    }
 }
 
 /// Build a hierarchy-preserving W4 layout from the W2 lossless GDS database.
@@ -3461,6 +3483,123 @@ X0 S D G1 G2 B mid\n\
                 .contains("flattened physical extraction contradicts"),
             "{}",
             error.message
+        );
+    }
+
+    fn opaque_options() -> GdsHierarchyAdapterOptions {
+        let mut options = GdsHierarchyAdapterOptions::new("top");
+        options.text_evidence.push(GdsTextEvidenceRule {
+            layer: 7,
+            datatype: 99,
+            use_string: true,
+            label_property_attributes: BTreeSet::new(),
+        });
+        options.instance_binding_property_attributes.insert(88);
+        options.black_boxes.insert(
+            "macro".into(),
+            GdsBlackBoxAdapterSpec {
+                ports: vec!["A".into()],
+            },
+        );
+        options
+    }
+
+    fn append_opaque_macro(elements: &mut Vec<GdsElement>) {
+        elements.push(boundary(7, 1000, 0, 1100, 100, GdsElementMeta::default()));
+        elements.push(text(7, 1050, 50, "BB", GdsElementMeta::default()));
+        elements.push(sref("macro", 2000, 0, properties(&[(88, "A=BB")])));
+    }
+
+    #[test]
+    fn opaque_cells_never_suppress_reachable_nonopaque_physical_conflicts() {
+        let child = structure(
+            "child",
+            vec![boundary(7, 0, 0, 100, 100, GdsElementMeta::default())],
+        );
+        let mut parent_elements = vec![
+            boundary(7, 50, 0, 150, 100, GdsElementMeta::default()),
+            sref("child", 0, 0, GdsElementMeta::default()),
+        ];
+        append_opaque_macro(&mut parent_elements);
+        let parent_short = lossless_round_trip(library(vec![
+            child.clone(),
+            structure("macro", Vec::new()),
+            structure("top", parent_elements),
+        ]));
+        let error =
+            adapt_gds_hierarchy_to_lvs(&parent_short, &deck(), &opaque_options(), Backend::Cpu)
+                .unwrap_err();
+        assert_eq!(
+            error.kind,
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence
+        );
+        assert!(error
+            .message
+            .contains("flattened physical extraction contradicts"));
+
+        let mut sibling_elements = vec![
+            sref("child", 0, 0, GdsElementMeta::default()),
+            sref("child", 50, 0, GdsElementMeta::default()),
+        ];
+        append_opaque_macro(&mut sibling_elements);
+        let sibling_short = lossless_round_trip(library(vec![
+            child,
+            structure("macro", Vec::new()),
+            structure("top", sibling_elements),
+        ]));
+        let error =
+            adapt_gds_hierarchy_to_lvs(&sibling_short, &deck(), &opaque_options(), Backend::Cpu)
+                .unwrap_err();
+        assert_eq!(
+            error.kind,
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence
+        );
+
+        let device_child = structure(
+            "device_child",
+            vec![
+                boundary(1, -20, -20, 120, 120, GdsElementMeta::default()),
+                boundary(2, 0, 0, 100, 100, GdsElementMeta::default()),
+                boundary(4, -10, -10, 110, 110, GdsElementMeta::default()),
+            ],
+        );
+        let mut device_top = vec![
+            boundary(3, 40, -20, 60, 120, GdsElementMeta::default()),
+            sref("device_child", 0, 0, GdsElementMeta::default()),
+        ];
+        append_opaque_macro(&mut device_top);
+        let cross_boundary = lossless_round_trip(library(vec![
+            device_child,
+            structure("macro", Vec::new()),
+            structure("top", device_top),
+        ]));
+        let error =
+            adapt_gds_hierarchy_to_lvs(&cross_boundary, &deck(), &opaque_options(), Backend::Cpu)
+                .unwrap_err();
+        assert_eq!(
+            error.kind,
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence
+        );
+    }
+
+    #[test]
+    fn unrelated_opaque_cells_do_not_change_selected_top_scope() {
+        let mut unused = Vec::new();
+        append_opaque_macro(&mut unused);
+        let library = lossless_round_trip(library(vec![
+            structure(
+                "top",
+                vec![boundary(7, 0, 0, 100, 100, GdsElementMeta::default())],
+            ),
+            structure("unused", unused),
+            structure("macro", Vec::new()),
+        ]));
+        let adapted =
+            adapt_gds_hierarchy_to_lvs(&library, &deck(), &opaque_options(), Backend::Cpu)
+                .expect("unrelated opaque cell must not suppress or broaden top correlation");
+        assert_eq!(
+            adapted.physical_correlation,
+            GdsPhysicalCorrelationStatus::Correlated
         );
     }
 }
