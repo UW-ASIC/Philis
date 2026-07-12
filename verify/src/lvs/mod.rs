@@ -16,6 +16,7 @@ pub mod netlist;
 pub mod production;
 pub mod binding;
 pub mod detailed_extract;
+pub mod hier_production;
 
 pub use types::*;
 pub use extract::{extract_netlist, extract_netlist_opts, reduce_netlist};
@@ -27,6 +28,7 @@ pub use netlist::*;
 pub use production::*;
 pub use binding::*;
 pub use detailed_extract::*;
+pub use hier_production::*;
 
 use crate::geometry::GeometryStore;
 use crate::params::Deck;
