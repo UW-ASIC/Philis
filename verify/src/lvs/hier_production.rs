@@ -132,7 +132,7 @@ mod tests {
         );
         let reference = bind_reference_hierarchy(&ast, &binding).unwrap();
         let top = ref_cell(&reference, "top");
-        let layout = HierLayout {
+        let mut layout = HierLayout {
             top_cell: "layout_top".into(),
             cells: BTreeMap::from([(
                 "layout_top".into(),
@@ -165,6 +165,36 @@ mod tests {
             .status,
             ProductionLvsStatus::Match
         );
+        let assert_black_box_mismatch =
+            |layout: &HierLayout, expected_kind: TopologyConflictKind| {
+                let result = compare_hierarchical_production(
+                    layout,
+                    &reference,
+                    &options,
+                    &mut HierLvsCache::default(),
+                );
+                assert_eq!(result.status, ProductionLvsStatus::Mismatch);
+                let Some(ProductionMismatch::Topology { witness, .. }) =
+                    result.flattened.mismatches.first()
+                else {
+                    panic!("missing black-box topology witness: {result:#?}");
+                };
+                assert_eq!(witness.kind, expected_kind);
+                assert!(!witness.layout_devices.is_empty());
+                assert!(!witness.hierarchy_paths.is_empty());
+                assert!(!witness.path.is_empty());
+            };
+
+        layout.cells.get_mut("layout_top").unwrap().instances[0].port_bindings =
+            vec![("a".into(), "y".into()), ("b".into(), "x".into())];
+        assert_black_box_mismatch(&layout, TopologyConflictKind::IllegalPinSwap);
+        layout.cells.get_mut("layout_top").unwrap().instances[0].port_bindings =
+            vec![("a".into(), "x".into()), ("b".into(), "x".into())];
+        assert_black_box_mismatch(&layout, TopologyConflictKind::Short);
+        let instance = &mut layout.cells.get_mut("layout_top").unwrap().instances[0];
+        instance.target_cell = "undefined_macro".into();
+        instance.port_bindings = vec![("a".into(), "x".into()), ("b".into(), "y".into())];
+        assert_black_box_mismatch(&layout, TopologyConflictKind::PartitionConflict);
     }
 
     #[test]
@@ -430,18 +460,39 @@ fn validate_layout(layout: &HierLayout, limit: usize) -> Result<usize, String> {
                     *count
                 ));
             }
-            if !instance.black_box {
+            let bindings: BTreeSet<&str> = instance
+                .port_bindings
+                .iter()
+                .map(|(port, _)| port.as_str())
+                .collect();
+            if bindings.len() != instance.port_bindings.len() {
+                return Err(format!(
+                    "instance '{}': duplicate child port bindings",
+                    instance.stable_id
+                ));
+            }
+            for (_, parent_net) in &instance.port_bindings {
+                if !cell.netlist.nets.contains_key(parent_net) {
+                    return Err(format!(
+                        "instance '{}': parent net '{}' is undefined",
+                        instance.stable_id, parent_net
+                    ));
+                }
+            }
+            if instance.black_box {
+                if instance.port_bindings.is_empty() {
+                    return Err(format!(
+                        "black-box instance '{}': complete port binding map is empty",
+                        instance.stable_id
+                    ));
+                }
+            } else {
                 let child = layout.cells.get(&instance.target_cell).ok_or_else(|| {
                     format!(
                         "instance '{}': undefined target '{}'",
                         instance.stable_id, instance.target_cell
                     )
                 })?;
-                let bindings: BTreeSet<&str> = instance
-                    .port_bindings
-                    .iter()
-                    .map(|(p, _)| p.as_str())
-                    .collect();
                 if bindings.len() != instance.port_bindings.len()
                     || bindings != child.ports.iter().map(String::as_str).collect()
                 {
@@ -449,14 +500,6 @@ fn validate_layout(layout: &HierLayout, limit: usize) -> Result<usize, String> {
                         "instance '{}': port binding set does not equal child ports",
                         instance.stable_id
                     ));
-                }
-                for (_, parent_net) in &instance.port_bindings {
-                    if !cell.netlist.nets.contains_key(parent_net) {
-                        return Err(format!(
-                            "instance '{}': parent net '{}' is undefined",
-                            instance.stable_id, parent_net
-                        ));
-                    }
                 }
                 visit(&instance.target_cell, layout, active, count, limit)?;
             }
@@ -754,6 +797,179 @@ fn reference_for_layout<'a>(
         .min_by_key(|c| &c.specialization)
 }
 
+type BlackBoxSignature = (String, Vec<(String, String)>);
+
+#[derive(Clone)]
+struct BlackBoxEvidence {
+    signature: BlackBoxSignature,
+    object: String,
+    hierarchy_path: HierarchyPath,
+}
+
+fn canonical_black_box_signature(target: &str, bindings: &[(String, String)]) -> BlackBoxSignature {
+    let mut bindings = bindings
+        .iter()
+        .map(|(port, net)| (port.to_ascii_lowercase(), net.to_ascii_lowercase()))
+        .collect::<Vec<_>>();
+    bindings.sort();
+    (target.to_ascii_lowercase(), bindings)
+}
+
+fn compare_black_boxes(
+    layout: &HierLayout,
+    reference: &BoundReferenceHierarchy,
+    options: &HierProductionOptions,
+) -> Option<ProductionMismatch> {
+    for (cell_name, cell) in &layout.cells {
+        let Some(reference_cell) = reference_for_layout(cell_name, reference, options) else {
+            continue;
+        };
+        let mut layout_evidence = Vec::new();
+        for instance in cell.instances.iter().filter(|instance| instance.black_box) {
+            for column in 0..instance.array.columns {
+                for row in 0..instance.array.rows {
+                    layout_evidence.push(BlackBoxEvidence {
+                        signature: canonical_black_box_signature(
+                            &instance.target_cell,
+                            &instance.port_bindings,
+                        ),
+                        object: format!(
+                            "blackbox:{cell_name}/{}[{column},{row}]",
+                            instance.stable_id
+                        ),
+                        hierarchy_path: HierarchyPath(vec![
+                            cell_name.clone(),
+                            format!("{}[{column},{row}]", instance.stable_id),
+                        ]),
+                    });
+                }
+            }
+        }
+        let reference_evidence = reference_cell
+            .instances
+            .iter()
+            .filter(|instance| instance.black_box)
+            .map(|instance| BlackBoxEvidence {
+                signature: canonical_black_box_signature(
+                    &instance.target_cell,
+                    &instance.port_bindings,
+                ),
+                object: format!(
+                    "blackbox:{}/{}",
+                    reference_cell.source_cell, instance.stable_id
+                ),
+                hierarchy_path: instance.hierarchy_path.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut layout_by_signature = BTreeMap::<BlackBoxSignature, Vec<BlackBoxEvidence>>::new();
+        let mut reference_by_signature =
+            BTreeMap::<BlackBoxSignature, Vec<BlackBoxEvidence>>::new();
+        for evidence in layout_evidence {
+            layout_by_signature
+                .entry(evidence.signature.clone())
+                .or_default()
+                .push(evidence);
+        }
+        for evidence in reference_evidence {
+            reference_by_signature
+                .entry(evidence.signature.clone())
+                .or_default()
+                .push(evidence);
+        }
+        let signatures = layout_by_signature
+            .keys()
+            .chain(reference_by_signature.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if signatures.iter().all(|signature| {
+            layout_by_signature.get(signature).map_or(0, Vec::len)
+                == reference_by_signature.get(signature).map_or(0, Vec::len)
+        }) {
+            continue;
+        }
+        let layout_cause = signatures.iter().find_map(|signature| {
+            let layout_count = layout_by_signature.get(signature).map_or(0, Vec::len);
+            let reference_count = reference_by_signature.get(signature).map_or(0, Vec::len);
+            (layout_count > reference_count)
+                .then(|| layout_by_signature[signature].first().cloned())
+                .flatten()
+        });
+        let reference_cause = signatures.iter().find_map(|signature| {
+            let layout_count = layout_by_signature.get(signature).map_or(0, Vec::len);
+            let reference_count = reference_by_signature.get(signature).map_or(0, Vec::len);
+            (reference_count > layout_count)
+                .then(|| reference_by_signature[signature].first().cloned())
+                .flatten()
+        });
+        let layout_signature = layout_cause.as_ref().map(|cause| &cause.signature);
+        let reference_signature = reference_cause.as_ref().map(|cause| &cause.signature);
+        let layout_is_shorted = layout_signature.is_some_and(|(_, bindings)| {
+            let nets = bindings.iter().map(|(_, net)| net).collect::<BTreeSet<_>>();
+            nets.len() < bindings.len()
+        });
+        let reference_is_shorted = reference_signature.is_some_and(|(_, bindings)| {
+            let nets = bindings.iter().map(|(_, net)| net).collect::<BTreeSet<_>>();
+            nets.len() < bindings.len()
+        });
+        let kind = if layout_is_shorted && !reference_is_shorted {
+            TopologyConflictKind::Short
+        } else if layout_signature
+            .zip(reference_signature)
+            .is_some_and(|(layout, reference)| layout.0 == reference.0)
+        {
+            TopologyConflictKind::IllegalPinSwap
+        } else {
+            TopologyConflictKind::PartitionConflict
+        };
+        let explanation = format!(
+            "black-box target/port map mismatch in layout cell `{cell_name}`: layout {:?}, reference {:?}",
+            layout_signature, reference_signature
+        );
+        let witness = TopologyWitness {
+            kind,
+            layout_devices: layout_cause
+                .as_ref()
+                .map(|cause| vec![cause.object.clone()])
+                .unwrap_or_default(),
+            reference_devices: reference_cause
+                .as_ref()
+                .map(|cause| vec![cause.object.clone()])
+                .unwrap_or_default(),
+            layout_nets: Vec::new(),
+            reference_nets: reference_signature
+                .map(|(_, bindings)| bindings.iter().map(|(_, net)| net.clone()).collect())
+                .unwrap_or_default(),
+            path: layout_signature
+                .into_iter()
+                .flat_map(|(_, bindings)| bindings.iter())
+                .map(|(port, net)| format!("layout-port:{port}={net}"))
+                .chain(
+                    reference_signature
+                        .into_iter()
+                        .flat_map(|(_, bindings)| bindings.iter())
+                        .map(|(port, net)| format!("reference-port:{port}={net}")),
+                )
+                .collect(),
+            hierarchy_paths: layout_cause
+                .iter()
+                .map(|cause| cause.hierarchy_path.clone())
+                .chain(
+                    reference_cause
+                        .iter()
+                        .map(|cause| cause.hierarchy_path.clone()),
+                )
+                .collect(),
+            explanation: explanation.clone(),
+        };
+        let canonical = format!("blackbox|{witness:?}");
+        return Some(ProductionMismatch::Topology {
+            witness,
+            fingerprint: format!("hier:{}", hash(&canonical)),
+        });
+    }
+    None
+}
+
 pub fn compare_hierarchical_production(
     layout: &HierLayout,
     reference: &BoundReferenceHierarchy,
@@ -767,6 +983,28 @@ pub fn compare_hierarchical_production(
             reason: error,
             per_cell: Vec::new(),
             flattened: flat,
+            flattened_cells: Vec::new(),
+            cache_hits: 0,
+            cache_misses: 0,
+            invalidated_entries: 0,
+        };
+    }
+    if let Some(mismatch) = compare_black_boxes(layout, reference, options) {
+        let reason = "hierarchical black-box target/port map mismatch".to_string();
+        let fingerprint = format!("hier:{}", hash(&format!("{mismatch:?}")));
+        return HierProductionResult {
+            status: ProductionLvsStatus::Mismatch,
+            reason: reason.clone(),
+            per_cell: Vec::new(),
+            flattened: ProductionLvsResult {
+                status: ProductionLvsStatus::Mismatch,
+                reason,
+                device_mappings: Vec::new(),
+                net_mappings: Vec::new(),
+                mismatches: vec![mismatch],
+                explored_states: 0,
+                fingerprint,
+            },
             flattened_cells: Vec::new(),
             cache_hits: 0,
             cache_misses: 0,

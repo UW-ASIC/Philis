@@ -1444,38 +1444,6 @@ pub fn compare_production(
         }
     };
 
-    if layout.nets.len() != reference.nets.len() {
-        let explanation = format!(
-            "net count differs: layout {} vs reference {}",
-            layout.nets.len(),
-            reference.nets.len()
-        );
-        let witness = TopologyWitness {
-            kind: if layout.nets.len() < reference.nets.len() {
-                TopologyConflictKind::Short
-            } else {
-                TopologyConflictKind::Open
-            },
-            layout_devices: Vec::new(),
-            reference_devices: Vec::new(),
-            layout_nets: layout.nets.keys().copied().take(2).collect(),
-            reference_nets: reference.nets.keys().take(2).cloned().collect(),
-            path: Vec::new(),
-            hierarchy_paths: Vec::new(),
-            explanation: explanation.clone(),
-        };
-        return result(
-            ProductionLvsStatus::Mismatch,
-            explanation.clone(),
-            None,
-            vec![ProductionMismatch::Topology {
-                witness,
-                fingerprint: stable_fingerprint(&format!("net-count|{explanation}")),
-            }],
-            0,
-        );
-    }
-
     let mut layout_counts = BTreeMap::new();
     let mut reference_counts = BTreeMap::new();
     for device in &layout.devices {
@@ -1575,11 +1543,45 @@ pub fn compare_production(
             .copied()
             .collect();
         if remaining_reference.len() != remaining_layout.len() {
+            let explanation = format!(
+                "unmatched net count differs after device mapping: layout {} vs reference {}",
+                remaining_layout.len(),
+                remaining_reference.len()
+            );
+            let hierarchy_paths = remaining_layout
+                .iter()
+                .filter_map(|net| layout_netlist.nets.get(net))
+                .map(|identity| identity.hierarchy_path.clone())
+                .chain(
+                    remaining_reference
+                        .iter()
+                        .filter_map(|net| reference_netlist.nets.get(net))
+                        .map(|identity| identity.hierarchy_path.clone()),
+                )
+                .collect();
+            let witness = TopologyWitness {
+                kind: if layout.nets.len() < reference.nets.len() {
+                    TopologyConflictKind::Short
+                } else {
+                    TopologyConflictKind::Open
+                },
+                layout_devices: Vec::new(),
+                reference_devices: Vec::new(),
+                layout_nets: remaining_layout,
+                reference_nets: remaining_reference,
+                path: Vec::new(),
+                hierarchy_paths,
+                explanation: explanation.clone(),
+            };
+            let canonical = format!("unmatched-net-count|{witness:?}");
             return result(
-                ProductionLvsStatus::Error,
-                "internal unmatched-net cardinality error",
+                ProductionLvsStatus::Mismatch,
+                explanation,
                 None,
-                Vec::new(),
+                vec![ProductionMismatch::Topology {
+                    witness,
+                    fingerprint: stable_fingerprint(&canonical),
+                }],
                 diagnostics.explored,
             );
         }
@@ -1653,29 +1655,21 @@ pub fn compare_production(
                 vec![layout_device.path.clone(), reference_device.path.clone()],
             )
         } else {
-            let layout_devices = layout.devices.iter().take(2).collect::<Vec<_>>();
-            let reference_devices = reference.devices.iter().take(2).collect::<Vec<_>>();
-            let hierarchy_paths = layout_devices
-                .iter()
-                .map(|device| device.path.clone())
-                .chain(reference_devices.iter().map(|device| device.path.clone()))
-                .collect();
-            (
-                layout_devices
-                    .into_iter()
-                    .map(|device| device.id.clone())
-                    .collect(),
-                reference
-                    .devices
-                    .iter()
-                    .take(2)
-                    .map(|device| device.id.clone())
-                    .collect(),
-                layout.nets.keys().copied().take(2).collect(),
-                reference.nets.keys().take(2).cloned().collect(),
-                Vec::new(),
-                hierarchy_paths,
-            )
+            let explanation =
+                "matcher exhausted without recording a causal topology conflict".to_string();
+            let mismatch = ProductionMismatch::Input {
+                side: "matcher".into(),
+                object: "exact-search".into(),
+                explanation: explanation.clone(),
+                fingerprint: stable_fingerprint(&format!("matcher-causal-gap|{explanation}")),
+            };
+            return result(
+                ProductionLvsStatus::Error,
+                explanation,
+                None,
+                vec![mismatch],
+                diagnostics.explored,
+            );
         };
     let explanation =
         "equal device counts cannot satisfy a bijective terminal/net mapping".to_string();
@@ -1965,6 +1959,38 @@ mod tests {
             compared.mismatches.first(),
             Some(ProductionMismatch::Topology { .. })
         ));
+    }
+
+    #[test]
+    fn unmatched_net_count_reports_only_derived_identity_paths() {
+        let mut layout = DetailedExtractedNetlist::empty("layout_top");
+        add_layout_net(&mut layout, 0, None);
+        layout.nets.get_mut(&0).unwrap().hierarchy_path =
+            HierarchyPath(vec!["layout/isolated-0".into()]);
+        let mut reference = DetailedRefNetlist::empty("reference_top");
+        add_reference_net(&mut reference, "A", false);
+        add_reference_net(&mut reference, "B", false);
+        reference.nets.get_mut("A").unwrap().hierarchy_path =
+            HierarchyPath(vec!["reference/isolated-A".into()]);
+        reference.nets.get_mut("B").unwrap().hierarchy_path =
+            HierarchyPath(vec!["reference/isolated-B".into()]);
+
+        let compared = compare_production(&layout, &reference, &Default::default());
+        assert_eq!(compared.status, ProductionLvsStatus::Mismatch);
+        let Some(ProductionMismatch::Topology { witness, .. }) = compared.mismatches.first() else {
+            panic!("missing unmatched-net witness: {compared:#?}");
+        };
+        assert_eq!(witness.kind, TopologyConflictKind::Short);
+        assert_eq!(witness.layout_nets, vec![0]);
+        assert_eq!(witness.reference_nets, vec!["A", "B"]);
+        assert_eq!(
+            witness.hierarchy_paths,
+            vec![
+                HierarchyPath(vec!["layout/isolated-0".into()]),
+                HierarchyPath(vec!["reference/isolated-A".into()]),
+                HierarchyPath(vec!["reference/isolated-B".into()]),
+            ]
+        );
     }
 
     #[test]
