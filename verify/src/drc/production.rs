@@ -781,20 +781,31 @@ fn exact_density(
     let Some((xmin, ymin, xmax, ymax)) = set_bbox(region) else {
         return Err(RunError::Expression("density region is empty".into()));
     };
+    super::density_window_work(xmin, ymin, xmax, ymax, window, step)?;
     let mut violations = Vec::new();
-    let mut y = ymin;
+    let window = i64::from(window);
+    let step = i64::from(step);
+    let xmax = i64::from(xmax);
+    let ymax = i64::from(ymax);
+    let mut y = i64::from(ymin);
     loop {
-        let mut x = xmin;
+        let mut x = i64::from(xmin);
         loop {
             let x1 = x
                 .checked_add(window)
-                .ok_or_else(|| RunError::Expression("window coordinate overflow".into()))?
+                .ok_or(crate::geometry::exact::ExactGeometryError::ArithmeticOverflow)?
                 .min(xmax);
             let y1 = y
                 .checked_add(window)
-                .ok_or_else(|| RunError::Expression("window coordinate overflow".into()))?
+                .ok_or(crate::geometry::exact::ExactGeometryError::ArithmeticOverflow)?
                 .min(ymax);
-            let window_set = rectangle(x, y, x1, y1)?;
+            let (x0, y0, x1, y1) = (
+                i32::try_from(x).map_err(|_| RunError::Expression("window x overflow".into()))?,
+                i32::try_from(y).map_err(|_| RunError::Expression("window y overflow".into()))?,
+                i32::try_from(x1).map_err(|_| RunError::Expression("window x overflow".into()))?,
+                i32::try_from(y1).map_err(|_| RunError::Expression("window y overflow".into()))?,
+            );
+            let window_set = rectangle(x0, y0, x1, y1)?;
             let scoped_window = rectilinear_intersection(region, &window_set)?;
             let denominator = scoped_window.area2() as f64 / 2.0;
             if denominator > 0.0 {
@@ -815,12 +826,12 @@ fn exact_density(
                         layer: source_name(layer),
                         measured: saturating_i64(fraction * 1_000_000.0),
                         limit: saturating_i64(limit * 1_000_000.0),
-                        x,
-                        y,
+                        x: x0,
+                        y: y0,
                     });
                 }
             }
-            if x1 == xmax {
+            if i64::from(x1) == xmax {
                 break;
             }
             x = x
@@ -830,7 +841,10 @@ fn exact_density(
                 break;
             }
         }
-        if y.checked_add(window).unwrap_or(i32::MAX) >= ymax {
+        if y.checked_add(window)
+            .ok_or(crate::geometry::exact::ExactGeometryError::ArithmeticOverflow)?
+            >= ymax
+        {
             break;
         }
         y = y
@@ -1752,6 +1766,62 @@ mod tests {
         store.add_rect(layers.id("ko").unwrap(), 8, 0, 2, 10);
         let report = run_checked(&store, &deck, &layers, &DrcContext::default());
         assert_eq!(report.rules[0].status, RuleStatus::Clean); // 80/80 after keepout
+    }
+
+    #[test]
+    fn density_is_translation_safe_and_window_work_is_bounded() {
+        let layers = layers();
+        let value = json!({
+            "schema_version":1, "deck_id":"D", "model_revision":"R", "dbu_nm":1.0,
+            "rules":[{"kind":"density","id":"M1.D","layer":{"source":"base","name":"m1"},
+                "region":{"source":"base","name":"die"},"exclusion":null,
+                "window":{"op":"literal","value":10.0,"unit":"dbu"},
+                "step":{"op":"literal","value":10.0,"unit":"dbu"},
+                "min":{"op":"literal","value":1.0,"unit":"ratio"},"max":null}]
+        });
+        let deck = ProductionDeck::from_json(&value, &layers).unwrap();
+        let run_at = |origin: i32| {
+            let mut store = GeometryStore::new();
+            store.add_rect(layers.id("m1").unwrap(), origin, origin, 5, 5);
+            store.add_rect(layers.id("die").unwrap(), origin, origin, 5, 5);
+            run_checked(&store, &deck, &layers, &DrcContext::default())
+        };
+        let at_origin = run_at(0);
+        let at_max = run_at(i32::MAX - 5);
+        assert_eq!(at_origin.rules[0].status, RuleStatus::Clean);
+        assert_eq!(at_max.rules[0].status, at_origin.rules[0].status);
+
+        let cap = super::super::MAX_DENSITY_WINDOW_WORK;
+        assert_eq!(
+            super::super::density_window_work(0, 0, cap as i32, 1, 1, 1).unwrap(),
+            cap
+        );
+        assert!(matches!(
+            super::super::density_window_work(0, 0, cap as i32 + 1, 1, 1, 1),
+            Err(crate::geometry::exact::ExactGeometryError::CapacityExceeded {
+                cells,
+                limit
+            }) if cells == cap + 1 && limit == cap
+        ));
+
+        let mut over_cap_value = value;
+        over_cap_value["rules"][0]["window"]["value"] = json!(1.0);
+        over_cap_value["rules"][0]["step"]["value"] = json!(1.0);
+        let over_cap_deck = ProductionDeck::from_json(&over_cap_value, &layers).unwrap();
+        let mut over_cap_store = GeometryStore::new();
+        over_cap_store.add_rect(layers.id("m1").unwrap(), 0, 0, cap as i32 + 1, 1);
+        over_cap_store.add_rect(layers.id("die").unwrap(), 0, 0, cap as i32 + 1, 1);
+        let over_cap = run_checked(
+            &over_cap_store,
+            &over_cap_deck,
+            &layers,
+            &DrcContext::default(),
+        );
+        assert_eq!(over_cap.rules[0].status, RuleStatus::Error);
+        assert_eq!(
+            over_cap.rules[0].diagnostics[0].code,
+            DiagnosticCode::CapacityExceeded
+        );
     }
 
     #[test]

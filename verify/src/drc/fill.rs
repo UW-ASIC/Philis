@@ -354,27 +354,42 @@ fn density_samples(
     let Some((xmin, ymin, xmax, ymax)) = set_bbox(region) else {
         return Ok(Vec::new());
     };
+    super::density_window_work(xmin, ymin, xmax, ymax, window, step)?;
     let mut samples = Vec::new();
-    let mut y = ymin;
+    let window = i64::from(window);
+    let step = i64::from(step);
+    let xmax = i64::from(xmax);
+    let ymax = i64::from(ymax);
+    let mut y = i64::from(ymin);
     loop {
-        let mut x = xmin;
+        let mut x = i64::from(xmin);
         loop {
             let x1 = x
                 .checked_add(window)
-                .ok_or_else(|| FillError::InvalidConfig("window overflow".into()))?
+                .ok_or(ExactGeometryError::ArithmeticOverflow)?
                 .min(xmax);
             let y1 = y
                 .checked_add(window)
-                .ok_or_else(|| FillError::InvalidConfig("window overflow".into()))?
+                .ok_or(ExactGeometryError::ArithmeticOverflow)?
                 .min(ymax);
-            let clipped = rectilinear_intersection(region, &rectangle(x, y, x1, y1)?)?;
+            let (x0, y0, x1, y1) = (
+                i32::try_from(x)
+                    .map_err(|_| FillError::InvalidConfig("window x overflow".into()))?,
+                i32::try_from(y)
+                    .map_err(|_| FillError::InvalidConfig("window y overflow".into()))?,
+                i32::try_from(x1)
+                    .map_err(|_| FillError::InvalidConfig("window x overflow".into()))?,
+                i32::try_from(y1)
+                    .map_err(|_| FillError::InvalidConfig("window y overflow".into()))?,
+            );
+            let clipped = rectilinear_intersection(region, &rectangle(x0, y0, x1, y1)?)?;
             let scoped_area = clipped.area2() as f64 / 2.0;
             if scoped_area > 0.0 {
                 let material_area =
                     rectilinear_intersection(material, &clipped)?.area2() as f64 / 2.0;
                 samples.push(DensitySample {
-                    x0: x,
-                    y0: y,
+                    x0,
+                    y0,
                     x1,
                     y1,
                     scoped_area_dbu2: scoped_area,
@@ -382,14 +397,17 @@ fn density_samples(
                     density: material_area / scoped_area,
                 });
             }
-            if x1 == xmax {
+            if i64::from(x1) == xmax {
                 break;
             }
             x = x
                 .checked_add(step)
                 .ok_or_else(|| FillError::InvalidConfig("window step overflow".into()))?;
         }
-        if y.checked_add(window).unwrap_or(i32::MAX) >= ymax {
+        if y.checked_add(window)
+            .ok_or(ExactGeometryError::ArithmeticOverflow)?
+            >= ymax
+        {
             break;
         }
         y = y
@@ -616,5 +634,77 @@ mod tests {
         assert!(checked.density_clean);
         assert_eq!(checked.cmp_status, CmpStatus::Evaluated);
         assert!((checked.cmp_samples[0].thickness_nm - 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn density_and_cmp_windows_are_translation_safe_and_bounded() {
+        let calibration = CmpCalibration {
+            model_revision: "foundry-r1".into(),
+            points: vec![
+                CmpPoint {
+                    density: 0.0,
+                    thickness_nm: 90.0,
+                },
+                CmpPoint {
+                    density: 1.0,
+                    thickness_nm: 110.0,
+                },
+            ],
+        };
+        let mut translated_config = config();
+        translated_config.window = 10;
+        translated_config.step = 10;
+        translated_config.min_density = 1.0;
+        translated_config.max_density = 1.0;
+        let run_at = |origin: i32| {
+            let region = rect(origin, origin, origin + 5, origin + 5);
+            let inputs = FillInputs {
+                region: region.clone(),
+                existing_material: region,
+                keepouts: PolygonSet::empty(),
+                exclusions: PolygonSet::empty(),
+            };
+            let generated = generate_fill(&inputs, &translated_config).unwrap();
+            assert_eq!(generated.status, FillStatus::Converged);
+            recheck_fill(&inputs, &generated, &translated_config, Some(&calibration)).unwrap()
+        };
+        let at_origin = run_at(0);
+        let at_max = run_at(i32::MAX - 5);
+        assert_eq!(at_origin.density_samples[0].density, 1.0);
+        assert_eq!(
+            at_max.density_samples[0].density,
+            at_origin.density_samples[0].density
+        );
+        assert_eq!(
+            at_max.density_samples[0].scoped_area_dbu2,
+            at_origin.density_samples[0].scoped_area_dbu2
+        );
+        assert_eq!(at_max.cmp_status, CmpStatus::Evaluated);
+
+        let cap = super::super::MAX_DENSITY_WINDOW_WORK as i32;
+        let oversized = rect(0, 0, cap + 1, 1);
+        let inputs = FillInputs {
+            region: oversized.clone(),
+            existing_material: oversized,
+            keepouts: PolygonSet::empty(),
+            exclusions: PolygonSet::empty(),
+        };
+        let mut unit_windows = translated_config;
+        unit_windows.window = 1;
+        unit_windows.step = 1;
+        let result = FillResult {
+            status: FillStatus::Converged,
+            fill: PolygonSet::empty(),
+            samples: Vec::new(),
+            evaluated_candidates: 0,
+            accepted_shapes: 0,
+            diagnostics: Vec::new(),
+        };
+        assert!(matches!(
+            recheck_fill(&inputs, &result, &unit_windows, None),
+            Err(FillError::Geometry(
+                ExactGeometryError::CapacityExceeded { .. }
+            ))
+        ));
     }
 }

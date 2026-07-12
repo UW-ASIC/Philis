@@ -23,6 +23,48 @@ pub mod fill;
 pub mod production;
 pub mod results;
 
+/// Maximum number of sliding density windows evaluated by one rule/recheck.
+/// Each window performs at least one exact boolean operation, so this shares
+/// the rectilinear kernel's explicit 16M-work ceiling.
+pub const MAX_DENSITY_WINDOW_WORK: usize =
+    crate::geometry::exact::MAX_RECTILINEAR_BOOLEAN_CELLS;
+
+pub(crate) fn density_window_work(
+    xmin: i32,
+    ymin: i32,
+    xmax: i32,
+    ymax: i32,
+    window: i32,
+    step: i32,
+) -> Result<usize, crate::geometry::exact::ExactGeometryError> {
+    let axis_count = |lo: i32, hi: i32| -> Option<u128> {
+        let span = u128::try_from(i64::from(hi) - i64::from(lo)).ok()?;
+        let window = u128::try_from(window).ok()?;
+        let step = u128::try_from(step).ok()?;
+        if span == 0 || window == 0 || step == 0 {
+            return None;
+        }
+        let remaining = span.saturating_sub(window);
+        remaining
+            .checked_add(step - 1)?
+            .checked_div(step)?
+            .checked_add(1)
+    };
+    let requested = axis_count(xmin, xmax)
+        .and_then(|nx| axis_count(ymin, ymax).and_then(|ny| nx.checked_mul(ny)))
+        .ok_or(crate::geometry::exact::ExactGeometryError::ArithmeticOverflow)?;
+    if requested > MAX_DENSITY_WINDOW_WORK as u128 {
+        return Err(
+            crate::geometry::exact::ExactGeometryError::CapacityExceeded {
+                cells: usize::try_from(requested).unwrap_or(usize::MAX),
+                limit: MAX_DENSITY_WINDOW_WORK,
+            },
+        );
+    }
+    usize::try_from(requested)
+        .map_err(|_| crate::geometry::exact::ExactGeometryError::ArithmeticOverflow)
+}
+
 /// A single rule violation. Flat, serializable, comparable against the manifest.
 #[derive(Debug, Clone)]
 pub struct Violation {
