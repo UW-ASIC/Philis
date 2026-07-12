@@ -2588,7 +2588,9 @@ fn merge_block_geometry(
 
     // Same-net notch repair: pad-row corner slivers (landing node pads vs pin
     // pad rows) are sub-min gaps inside one merged shape — fill with metal.
-    for (layer, g) in gdsverify::same_shape_gap_fills(store, deck) {
+    for (layer, g) in gdsverify::same_shape_gap_fills(store, deck)
+        .map_err(|error| format!("same-shape gap repair failed: {error}"))?
+    {
         store.add_rect(layer, g.xmin, g.ymin, g.xmax - g.xmin, g.ymax - g.ymin);
     }
 

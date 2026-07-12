@@ -2247,5 +2247,78 @@ mod tests {
             .violations
             .iter()
             .all(|violation| violation.rule_id != "__geometry__"));
+
+        let density_deck = Deck::from_json(
+            r#"{"layers":{"m1":{"layer":1,"datatype":0}},"drc":{
+                "D":{"kind":"min_density","layer":"m1","window":10,
+                    "min_frac":0.5}}}"#,
+        )
+        .unwrap();
+        let density_layer = density_deck.layers.id("m1").unwrap();
+        let mut density_origin = GeometryStore::new();
+        density_origin.add_rect(density_layer, 0, 0, 5, 5);
+        let mut density_at_max = GeometryStore::new();
+        density_at_max.add_polygon(
+            density_layer,
+            &[
+                (i32::MAX - 5, i32::MAX - 5),
+                (i32::MAX, i32::MAX - 5),
+                (i32::MAX, i32::MAX),
+                (i32::MAX - 5, i32::MAX),
+            ],
+        );
+        let density_signature = |store: &GeometryStore| {
+            run_drc(store, &density_deck)
+                .violations
+                .into_iter()
+                .map(|violation| (violation.rule_id, violation.measured))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            density_signature(&density_origin),
+            vec![("D".into(), 250_000)]
+        );
+        assert_eq!(
+            density_signature(&density_at_max),
+            density_signature(&density_origin)
+        );
+
+        let max_limit_deck = Deck::from_json(
+            r#"{"layers":{"m1":{"layer":1,"datatype":0},
+                "via":{"layer":2,"datatype":0}},"drc":{
+                "A":{"kind":"via_array_spacing","layer":"via",
+                    "array_threshold":2,"array_spacing":2147483647},
+                "E":{"kind":"min_enclosure","outer":"m1","inner":"via",
+                    "min":2147483647}}}"#,
+        )
+        .unwrap();
+        let via = max_limit_deck.layers.id("via").unwrap();
+        let m1 = max_limit_deck.layers.id("m1").unwrap();
+        let mut via_array = GeometryStore::new();
+        via_array.add_rect(via, 0, 0, 1, 1);
+        via_array.add_rect(via, 2, 0, 1, 1);
+        via_array.add_rect(via, 4, 0, 1, 1);
+        let array_report = run_drc(&via_array, &max_limit_deck);
+        assert!(array_report
+            .violations
+            .iter()
+            .any(|violation| violation.rule_id == "A"));
+        assert!(array_report
+            .violations
+            .iter()
+            .all(|violation| violation.rule_id != "__geometry__"));
+
+        let mut enclosure = GeometryStore::new();
+        enclosure.add_rect(m1, 0, 0, 20, 20);
+        enclosure.add_rect(via, 5, 5, 5, 5);
+        let enclosure_report = run_drc(&enclosure, &max_limit_deck);
+        assert!(enclosure_report
+            .violations
+            .iter()
+            .any(|violation| violation.rule_id == "E"));
+        assert!(enclosure_report
+            .violations
+            .iter()
+            .all(|violation| violation.rule_id != "__geometry__"));
     }
 }

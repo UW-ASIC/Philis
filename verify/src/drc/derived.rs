@@ -314,7 +314,7 @@ impl<'a> DerivedEvaluator<'a> {
                         *min_length,
                         *max_length,
                         &mut edges,
-                    );
+                    )?;
                     for hole in polygon.holes() {
                         collect_edges(
                             hole.vertices(),
@@ -323,7 +323,7 @@ impl<'a> DerivedEvaluator<'a> {
                             *min_length,
                             *max_length,
                             &mut edges,
-                        );
+                        )?;
                     }
                 }
                 edges.sort();
@@ -388,7 +388,7 @@ fn collect_edges(
     min_length: Option<i32>,
     max_length: Option<i32>,
     out: &mut Vec<DerivedEdge>,
-) {
+) -> Result<(), DerivedError> {
     for index in 0..vertices.len() {
         let start = vertices[index];
         let end = vertices[(index + 1) % vertices.len()];
@@ -399,7 +399,14 @@ fn collect_edges(
             EdgeOrientation::Horizontal => horizontal,
             EdgeOrientation::Vertical => vertical,
         };
-        let length = i64::from((end.x - start.x).abs()) + i64::from((end.y - start.y).abs());
+        let dx = i64::from(end.x) - i64::from(start.x);
+        let dy = i64::from(end.y) - i64::from(start.y);
+        let length = dx
+            .checked_abs()
+            .and_then(|dx| dy.checked_abs().and_then(|dy| dx.checked_add(dy)))
+            .ok_or(DerivedError::Geometry(
+                ExactGeometryError::ArithmeticOverflow,
+            ))?;
         if accepted
             && min_length.is_none_or(|min| length >= i64::from(min))
             && max_length.is_none_or(|max| length <= i64::from(max))
@@ -411,6 +418,7 @@ fn collect_edges(
             });
         }
     }
+    Ok(())
 }
 
 /// Exact L-infinity (square-kernel) grow/shrink for canonical rectilinear sets.
@@ -677,6 +685,42 @@ mod tests {
         assert_eq!(set.component_count(), 1);
         assert_eq!(set.polygons()[0].holes().len(), 2);
         assert_eq!(set.area2(), 17_600);
+    }
+
+    #[test]
+    fn edge_selection_handles_full_i32_deltas_without_wrapping() {
+        let mut store = GeometryStore::new();
+        store.add_polygon(
+            0,
+            &[(i32::MIN, 0), (i32::MAX, 0), (i32::MAX, 1), (i32::MIN, 1)],
+        );
+        let definitions = BTreeMap::new();
+        let mut evaluator = DerivedEvaluator::new(&store, &definitions);
+        let DerivedValue::Edges(edges) = evaluator
+            .evaluate(&DerivedExpr::Edges {
+                operand: Box::new(base(0)),
+                orientation: EdgeOrientation::Horizontal,
+                min_length: None,
+                max_length: None,
+            })
+            .unwrap()
+        else {
+            panic!("edges expected")
+        };
+        assert_eq!(edges.len(), 2);
+
+        let DerivedValue::Edges(filtered) = evaluator
+            .evaluate(&DerivedExpr::Edges {
+                operand: Box::new(base(0)),
+                orientation: EdgeOrientation::Horizontal,
+                min_length: None,
+                max_length: Some(i32::MAX),
+            })
+            .unwrap()
+        else {
+            panic!("edges expected")
+        };
+        assert!(filtered.is_empty());
     }
 
     #[test]

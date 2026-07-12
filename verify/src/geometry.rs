@@ -383,16 +383,40 @@ pub fn segments_intersect(a: &Edge, b: &Edge) -> bool {
 pub fn clipped_area(
     store: &GeometryStore, p: PolyId, xmin: i32, ymin: i32, xmax: i32, ymax: i32,
 ) -> f64 {
+    clipped_area_i64(
+        store,
+        p,
+        i64::from(xmin),
+        i64::from(ymin),
+        i64::from(xmax),
+        i64::from(ymax),
+    )
+}
+
+/// Wide-coordinate density clip. Window edges may extend past the i32 layout
+/// domain even though every stored vertex is representable (for example a
+/// 10-DBU window anchored five DBU below i32::MAX).
+pub fn clipped_area_i64(
+    store: &GeometryStore, p: PolyId, xmin: i64, ymin: i64, xmax: i64, ymax: i64,
+) -> f64 {
     let (s, e) = store.poly_range(p);
+    // Work in window-relative coordinates. Shoelace on absolute coordinates
+    // catastrophically cancels a 5x5 area translated near i32::MAX.
+    let (origin_x, origin_y) = (i128::from(xmin), i128::from(ymin));
     let mut ring: Vec<(f64, f64)> = (s..e)
-        .map(|i| (store.verts_x[i] as f64, store.verts_y[i] as f64))
+        .map(|i| {
+            (
+                (i128::from(store.verts_x[i]) - origin_x) as f64,
+                (i128::from(store.verts_y[i]) - origin_y) as f64,
+            )
+        })
         .collect();
     // clip against each half-plane: keep(pt) true => inside
     let planes: [(f64, bool, bool); 4] = [
-        (xmin as f64, true, true),   // x >= xmin
-        (xmax as f64, true, false),  // x <= xmax
-        (ymin as f64, false, true),  // y >= ymin
-        (ymax as f64, false, false), // y <= ymax
+        (0.0, true, true),
+        ((i128::from(xmax) - origin_x) as f64, true, false),
+        (0.0, false, true),
+        ((i128::from(ymax) - origin_y) as f64, false, false),
     ];
     for &(c, is_x, keep_ge) in &planes {
         if ring.is_empty() { return 0.0; }

@@ -922,7 +922,24 @@ fn gap_region_covered(store: &GeometryStore, polys: &[PolyId], pa: PolyId, pb: P
 /// Gap boxes of same-shape sub-min gaps (notches). Both sides belong to one
 /// merged same-net shape, so filling the gap with metal is always electrically
 /// safe — used as a post-merge DRC repair (pad-row corner slivers etc.).
-pub fn same_shape_gap_fills(store: &GeometryStore, deck: &Deck) -> Vec<(LayerId, Bbox)> {
+pub fn same_shape_gap_fills(
+    store: &GeometryStore,
+    deck: &Deck,
+) -> Result<Vec<(LayerId, Bbox)>, crate::geometry::exact::ExactGeometryError> {
+    if store.poly_count() > 0 {
+        let mut extent = Bbox::empty();
+        for bbox in &store.poly_bbox {
+            extent.include(bbox.xmin, bbox.ymin);
+            extent.include(bbox.xmax, bbox.ymax);
+        }
+        let required = extent.width_i64().max(extent.height_i64()).max(0);
+        if required > i64::from(i32::MAX) || !legacy_rule_arithmetic_fits(&extent) {
+            return Err(crate::geometry::exact::ExactGeometryError::CapacityExceeded {
+                cells: usize::try_from(required).unwrap_or(usize::MAX),
+                limit: i32::MAX as usize,
+            });
+        }
+    }
     let mut fills = Vec::new();
     for r in &deck.drc_rules {
         let DrcRuleParam::MinSpacing { layer, min, .. } = r else { continue };
@@ -950,15 +967,28 @@ pub fn same_shape_gap_fills(store: &GeometryStore, deck: &Deck) -> Vec<(LayerId,
                 // Inflate by min/2 so the fill overlaps both sides and is
                 // itself min_width-clean; stays inside the pair's hull, where
                 // foreign metal would already be a spacing violation.
-                let h = min / 2;
-                fills.push((layer, Bbox {
-                    xmin: g.xmin - h, ymin: g.ymin - h,
-                    xmax: g.xmax + h, ymax: g.ymax + h,
-                }));
+                let h = i64::from(min / 2);
+                let clamp = |value: i64| {
+                    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+                };
+                let fill = Bbox {
+                    xmin: clamp(i64::from(g.xmin) - h),
+                    ymin: clamp(i64::from(g.ymin) - h),
+                    xmax: clamp(i64::from(g.xmax) + h),
+                    ymax: clamp(i64::from(g.ymax) + h),
+                };
+                let required = fill.width_i64().max(fill.height_i64()).max(0);
+                if required > i64::from(i32::MAX) {
+                    return Err(crate::geometry::exact::ExactGeometryError::CapacityExceeded {
+                        cells: usize::try_from(required).unwrap_or(usize::MAX),
+                        limit: i32::MAX as usize,
+                    });
+                }
+                fills.push((layer, fill));
             }
         }
     }
-    fills
+    Ok(fills)
 }
 
 // --- same-layer spacing (external) ------------------------------------------
@@ -1114,10 +1144,16 @@ fn gpu_poly_clean_mask(
 /// `cutoff` of its bbox. Two 16k-edge interlocked combs drop from 256M seg-seg
 /// evaluations to ~zero when nothing is within the limit.
 fn poly_poly_dist2_within(store: &GeometryStore, pa: PolyId, pb: PolyId, cutoff: i32) -> i64 {
+    poly_poly_dist2_within_wide(store, pa, pb, i64::from(cutoff))
+}
+
+fn poly_poly_dist2_within_wide(
+    store: &GeometryStore, pa: PolyId, pb: PolyId, cutoff: i64,
+) -> i64 {
     let ea = poly_edges(store, pa);
     let eb = poly_edges(store, pb);
     let cutoff = cutoff.max(1);
-    let cut2 = (cutoff as i64) * (cutoff as i64);
+    let cut2 = cutoff.checked_mul(cutoff).unwrap_or(i64::MAX);
 
     // small pairs (rects vs rects): brute force beats grid setup
     if ea.len() * eb.len() <= 1024 {
@@ -1133,7 +1169,7 @@ fn poly_poly_dist2_within(store: &GeometryStore, pa: PolyId, pb: PolyId, cutoff:
 
     // bucket b-edges by bbox on a cutoff-sized grid. The floor keeps tiny cutoffs
     // (the touch test uses 1nm) from exploding long edges into thousands of cells.
-    let cell = ((cutoff as i64) * 4).max(512);
+    let cell = cutoff.saturating_mul(4).max(512);
     let key = |x: i64, y: i64| ((x.div_euclid(cell)) as i32, (y.div_euclid(cell)) as i32);
     let mut grid: std::collections::HashMap<(i32, i32), Vec<u32>> =
         std::collections::HashMap::new();
@@ -1154,8 +1190,8 @@ fn poly_poly_dist2_within(store: &GeometryStore, pa: PolyId, pb: PolyId, cutoff:
     for (i, a) in ea.iter().enumerate() {
         let (ax0, ax1) = (a.x0.min(a.x1) as i64, a.x0.max(a.x1) as i64);
         let (ay0, ay1) = (a.y0.min(a.y1) as i64, a.y0.max(a.y1) as i64);
-        let (kx0, ky0) = key(ax0 - cutoff as i64, ay0 - cutoff as i64);
-        let (kx1, ky1) = key(ax1 + cutoff as i64, ay1 + cutoff as i64);
+        let (kx0, ky0) = key(ax0.saturating_sub(cutoff), ay0.saturating_sub(cutoff));
+        let (kx1, ky1) = key(ax1.saturating_add(cutoff), ay1.saturating_add(cutoff));
         for kx in kx0..=kx1 {
             for ky in ky0..=ky1 {
                 let Some(cands) = grid.get(&(kx, ky)) else { continue };
@@ -1232,7 +1268,12 @@ fn check_enclosure(
             continue;
         }
         // exact for any polygon pair, equals the per-side margins on rectangles.
-        let worst = i64::from(isqrt(poly_poly_dist2_within(store, pi, po, min + 1)) as i32);
+        let worst = isqrt(poly_poly_dist2_within_wide(
+            store,
+            pi,
+            po,
+            i64::from(min) + 1,
+        ));
         let e = best.entry(pi.0).or_insert(i64::MIN);
         *e = (*e).max(worst);
     }
@@ -1507,21 +1548,52 @@ fn check_density(
     // clipping each polygon to the window exactly (bbox coverage overstates combs badly).
     // ponytail: assumes same-layer shapes don't overlap each other (true after merge;
     // overlapping input shapes would double-count).
+    let window = i64::from(window);
     let win_area = (window as f64) * (window as f64);
-    let nx = ((gb.xmax - gb.xmin) as i64 + window as i64 - 1) / window as i64;
-    let ny = ((gb.ymax - gb.ymin) as i64 + window as i64 - 1) / window as i64;
+    let Some(nx) = gb
+        .width_i64()
+        .checked_add(window - 1)
+        .map(|span| span / window)
+    else {
+        push_geometry_capacity(store, lt, polys[0], out);
+        return;
+    };
+    let Some(ny) = gb
+        .height_i64()
+        .checked_add(window - 1)
+        .map(|span| span / window)
+    else {
+        push_geometry_capacity(store, lt, polys[0], out);
+        return;
+    };
+    if nx <= 0 || ny <= 0 { return; }
+    let Some(window_count) = nx.checked_mul(ny) else {
+        push_geometry_capacity(store, lt, polys[0], out);
+        return;
+    };
+    if window_count
+        > i64::try_from(crate::geometry::exact::MAX_RECTILINEAR_BOOLEAN_CELLS)
+            .unwrap_or(i64::MAX)
+    {
+        push_geometry_capacity(store, lt, polys[0], out);
+        return;
+    }
     let mut covered: std::collections::HashMap<(i64, i64), f64> = std::collections::HashMap::new();
     for &p in &polys {
         let b = store.poly_bbox[p.0 as usize];
-        let wi0 = ((b.xmin - gb.xmin) / window) as i64;
-        let wi1 = (((b.xmax - gb.xmin) - 1) / window) as i64;
-        let wj0 = ((b.ymin - gb.ymin) / window) as i64;
-        let wj1 = (((b.ymax - gb.ymin) - 1) / window) as i64;
+        let wi0 = (i64::from(b.xmin) - i64::from(gb.xmin)) / window;
+        let wi1 = (i64::from(b.xmax) - i64::from(gb.xmin) - 1) / window;
+        let wj0 = (i64::from(b.ymin) - i64::from(gb.ymin)) / window;
+        let wj1 = (i64::from(b.ymax) - i64::from(gb.ymin) - 1) / window;
         for wi in wi0..=wi1.min(nx - 1) {
             for wj in wj0..=wj1.min(ny - 1) {
-                let wx0 = gb.xmin + (wi as i32) * window;
-                let wy0 = gb.ymin + (wj as i32) * window;
-                let a = clipped_area(store, p, wx0, wy0, wx0 + window, wy0 + window);
+                let Some((wx0, wy0, wx1, wy1)) =
+                    density_window_bounds(gb, wi, wj, window)
+                else {
+                    push_geometry_capacity(store, lt, p, out);
+                    return;
+                };
+                let a = clipped_area_i64(store, p, wx0, wy0, wx1, wy1);
                 if a > 0.0 {
                     *covered.entry((wi, wj)).or_insert(0.0) += a;
                 }
@@ -1533,18 +1605,35 @@ fn check_density(
             let frac = *covered.get(&(wi, wj)).unwrap_or(&0.0) / win_area;
             let bad = if is_min { frac < frac_limit } else { frac > frac_limit };
             if bad {
+                let Some((wx0, wy0, _, _)) = density_window_bounds(gb, wi, wj, window)
+                else {
+                    push_geometry_capacity(store, lt, polys[0], out);
+                    return;
+                };
+                let (Ok(x), Ok(y)) = (i32::try_from(wx0), i32::try_from(wy0)) else {
+                    push_geometry_capacity(store, lt, polys[0], out);
+                    return;
+                };
                 out.push(Violation {
                     rule_id: rule_id.into(),
                     kind: if is_min { "min_density".into() } else { "max_density".into() },
                     layer: lt.name(layer).into(),
                     measured: (frac * 1_000_000.0) as i64, // frac scaled to ppm to fit i64
                     limit: (frac_limit * 1_000_000.0) as i64,
-                    x: gb.xmin + (wi as i32) * window,
-                    y: gb.ymin + (wj as i32) * window,
+                    x,
+                    y,
                 });
             }
         }
     }
+}
+
+fn density_window_bounds(
+    global: Bbox, wi: i64, wj: i64, window: i64,
+) -> Option<(i64, i64, i64, i64)> {
+    let wx0 = wi.checked_mul(window)?.checked_add(i64::from(global.xmin))?;
+    let wy0 = wj.checked_mul(window)?.checked_add(i64::from(global.ymin))?;
+    Some((wx0, wy0, wx0.checked_add(window)?, wy0.checked_add(window)?))
 }
 
 // --- overlap (two layers must overlap by >= min) ----------------------------
@@ -2159,7 +2248,12 @@ fn check_via_array_spacing(
     // track which candidate pairs are within array_spacing
     let mut close_pairs: Vec<(u32, u32)> = Vec::new();
     for &(pa, pb) in &cands {
-        let d2 = poly_poly_dist2_within(store, pa, pb, array_spacing + 1);
+        let d2 = poly_poly_dist2_within_wide(
+            store,
+            pa,
+            pb,
+            i64::from(array_spacing) + 1,
+        );
         if d2 > 0 && d2 <= as2 {
             let ia = idx_of[&pa.0];
             let ib = idx_of[&pb.0];
@@ -2183,7 +2277,12 @@ fn check_via_array_spacing(
         if !flagged_groups.insert(ga) { continue; }
         let pa = polys[ia as usize];
         let pb = polys[ib as usize];
-        let d2 = poly_poly_dist2_within(store, pa, pb, array_spacing + 1);
+        let d2 = poly_poly_dist2_within_wide(
+            store,
+            pa,
+            pb,
+            i64::from(array_spacing) + 1,
+        );
         if d2 > 0 && d2 < as2 {
             let ba = store.poly_bbox[pa.0 as usize];
             out.push(Violation {
@@ -2303,6 +2402,38 @@ mod tests {
         let mut out = Vec::new();
         check_spacing_same(&store, &lt, met1, 140, Backend::Cpu, false, "min_spacing", &mut out);
         assert!(out.is_empty(), "bridged gap flagged: {out:?}");
+    }
+
+    #[test]
+    fn same_shape_gap_repairs_saturate_at_min_and_report_wide_capacity() {
+        let deck = Deck::from_json(
+            r#"{"layers":{"m1":{"layer":1,"datatype":0}},"drc":{
+                "S":{"kind":"min_spacing","layer":"m1","min":10}}}"#,
+        )
+        .unwrap();
+        let layer = deck.layers.id("m1").unwrap();
+
+        let base = i32::MIN + 1;
+        let mut near_min = GeometryStore::new();
+        near_min.add_rect(layer, base, base, 10, 10);
+        near_min.add_rect(layer, base + 15, base, 10, 10);
+        near_min.add_rect(layer, base, base + 8, 25, 2);
+        let fills = same_shape_gap_fills(&near_min, &deck).unwrap();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].1.ymin, i32::MIN);
+
+        let mut too_wide = GeometryStore::new();
+        too_wide.add_polygon(layer, &[
+            (0, i32::MIN), (10, i32::MIN), (10, i32::MAX), (0, i32::MAX),
+        ]);
+        too_wide.add_polygon(layer, &[
+            (15, i32::MIN), (25, i32::MIN), (25, i32::MAX), (15, i32::MAX),
+        ]);
+        too_wide.add_rect(layer, 0, 0, 25, 1);
+        assert!(matches!(
+            same_shape_gap_fills(&too_wide, &deck),
+            Err(crate::geometry::exact::ExactGeometryError::CapacityExceeded { .. })
+        ));
     }
 
     #[test]
