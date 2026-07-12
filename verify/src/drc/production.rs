@@ -536,12 +536,10 @@ pub fn run_legacy_adapter(store: &GeometryStore, deck: &Deck) -> CheckedDrcRepor
             let violations = by_rule.remove(rule.id()).unwrap_or_default();
             CheckedRuleResult {
                 rule_id: rule.id().to_owned(),
-                status: if violations.is_empty() {
-                    if capacity_stop {
-                        RuleStatus::NotRun
-                    } else {
-                        RuleStatus::Clean
-                    }
+                status: if capacity_stop {
+                    RuleStatus::NotRun
+                } else if violations.is_empty() {
+                    RuleStatus::Clean
                 } else {
                     RuleStatus::Violations
                 },
@@ -2127,5 +2125,127 @@ mod tests {
             run_drc(&reversed, &deck).violations[0].kind,
             "geometry_capacity"
         );
+
+        let mut oversized = GeometryStore::new();
+        let oversized_points = vec![(0, 0); crate::geometry::exact::MAX_BOUNDARY_WALK_VERTICES + 1];
+        oversized.add_polygon(layer, &oversized_points);
+        let checked = run_legacy_adapter(&oversized, &deck);
+        let geometry = checked
+            .rules
+            .iter()
+            .find(|rule| rule.rule_id == "__geometry__")
+            .unwrap();
+        assert_eq!(geometry.status, RuleStatus::Error);
+        assert_eq!(
+            geometry.diagnostics[0].code,
+            DiagnosticCode::CapacityExceeded
+        );
+        assert_eq!(
+            checked
+                .rules
+                .iter()
+                .find(|rule| rule.rule_id == "GRID")
+                .unwrap()
+                .status,
+            RuleStatus::NotRun
+        );
+    }
+
+    #[test]
+    fn legacy_rule_arithmetic_is_translation_safe_at_i32_extrema() {
+        let deck = Deck::from_json(
+            r#"{"layers":{"m1":{"layer":1,"datatype":0}},"drc":{
+                "W":{"kind":"min_width","layer":"m1","min":7},
+                "N":{"kind":"notch","layer":"m1","min":9},
+                "S":{"kind":"min_spacing","layer":"m1","min":5}}}"#,
+        )
+        .unwrap();
+        let layer = deck.layers.id("m1").unwrap();
+        let shifted = |points: &[(i32, i32)], dx: i32, dy: i32| {
+            points
+                .iter()
+                .map(|&(x, y)| {
+                    (
+                        i32::try_from(i64::from(x) + i64::from(dx)).unwrap(),
+                        i32::try_from(i64::from(y) + i64::from(dy)).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let signature = |store: &GeometryStore| {
+            run_drc(store, &deck)
+                .violations
+                .into_iter()
+                .map(|violation| (violation.rule_id, violation.kind, violation.measured))
+                .collect::<Vec<_>>()
+        };
+
+        // A non-convex U exercises vertical/horizontal gap distances and
+        // midpoints. Translation makes every old `a+b` midpoint overflow i32.
+        let u_shape = [
+            (0, 0),
+            (20, 0),
+            (20, 20),
+            (14, 20),
+            (14, 6),
+            (6, 6),
+            (6, 20),
+            (0, 20),
+        ];
+        let mut origin = GeometryStore::new();
+        origin.add_polygon(layer, &u_shape);
+        let mut near_max = GeometryStore::new();
+        near_max.add_polygon(layer, &shifted(&u_shape, i32::MAX - 20, i32::MAX - 20));
+        let origin_signature = signature(&origin);
+        assert!(origin_signature.iter().any(|(id, _, _)| id == "W"));
+        assert!(origin_signature.iter().any(|(id, _, _)| id == "N"));
+        assert_eq!(signature(&near_max), origin_signature);
+
+        // Positive spacing used to subtract `min` from a bbox coordinate at
+        // i32::MIN inside candidate pruning.
+        let first = [(0, 0), (10, 0), (10, 10), (0, 10)];
+        let second = [(13, 0), (23, 0), (23, 10), (13, 10)];
+        let mut spacing_origin = GeometryStore::new();
+        spacing_origin.add_polygon(layer, &first);
+        spacing_origin.add_polygon(layer, &second);
+        let offset = i32::MIN + 1;
+        let mut near_min = GeometryStore::new();
+        near_min.add_polygon(layer, &shifted(&first, offset, offset));
+        near_min.add_polygon(layer, &shifted(&second, offset, offset));
+        let spacing_signature = signature(&spacing_origin);
+        assert!(spacing_signature
+            .iter()
+            .any(|(id, _, measured)| { id == "S" && *measured == 3 }));
+        assert_eq!(signature(&near_min), spacing_signature);
+
+        // Parallel diagonal edges have an 8e18 dot product and a cross² that
+        // exceeds i64, while their true perpendicular width is only sqrt(32).
+        let diagonal = [
+            (-1_000_000_000, -1_000_000_000),
+            (1_000_000_000, 1_000_000_000),
+            (999_999_996, 1_000_000_004),
+            (-1_000_000_004, -999_999_996),
+        ];
+        let mut diagonal_store = GeometryStore::new();
+        let diagonal_polygon = diagonal_store.add_polygon(layer, &diagonal);
+        let diagonal_gaps =
+            super::super::facing_gaps(&diagonal_store, diagonal_polygon, true).unwrap();
+        assert!(
+            diagonal_gaps.iter().any(|(distance, _, _)| *distance == 5),
+            "diagonal gaps: {diagonal_gaps:?}"
+        );
+        let diagonal_report = run_drc(&diagonal_store, &deck);
+        assert!(
+            diagonal_report
+                .violations
+                .iter()
+                .any(|violation| { violation.rule_id == "W" && violation.measured == 5 }),
+            "diagonal report: {:?}",
+            diagonal_report.violations
+        );
+        assert!(diagonal_report
+            .violations
+            .iter()
+            .all(|violation| violation.rule_id != "__geometry__"));
     }
 }

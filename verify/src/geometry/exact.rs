@@ -182,10 +182,12 @@ impl fmt::Display for ExactGeometryError {
             Self::Unsupported { operation, reason } => {
                 write!(f, "{operation:?} is unsupported: {reason}")
             }
-            Self::CapacityExceeded { cells, limit } => write!(
-                f,
-                "rectilinear arrangement requires {cells} cells (limit {limit})"
-            ),
+            Self::CapacityExceeded { cells, limit } => {
+                write!(
+                    f,
+                    "exact geometry requires {cells} work units (limit {limit})"
+                )
+            }
             Self::InternalTopology(reason) => {
                 write!(f, "boolean boundary reconstruction failed: {reason}")
             }
@@ -453,6 +455,12 @@ impl Polygon {
     /// containment, not by input winding, so reversing the complete record does
     /// not change its meaning.
     pub fn from_boundary_walk(mut vertices: Vec<Point>) -> Result<Self, ExactGeometryError> {
+        if vertices.len() > MAX_BOUNDARY_WALK_VERTICES {
+            return Err(ExactGeometryError::CapacityExceeded {
+                cells: vertices.len(),
+                limit: MAX_BOUNDARY_WALK_VERTICES,
+            });
+        }
         while vertices.len() > 1 && vertices.first() == vertices.last() {
             vertices.pop();
         }
@@ -467,8 +475,11 @@ impl Polygon {
             }
         }
 
+        let vertex_count = vertices.len();
+        let mut work = 0;
+        charge_boundary_work(&mut work, vertex_count)?;
         let mut rings = Vec::new();
-        split_boundary_walk(vertices, &mut rings)?;
+        split_boundary_walk(vertices, &mut rings, &mut work)?;
         if rings.len() == 1 {
             let ring = rings.pop().ok_or(ExactGeometryError::InternalTopology(
                 "boundary decomposition lost its only ring",
@@ -476,33 +487,37 @@ impl Polygon {
             return Self::new(ring, Vec::new());
         }
 
-        let mut result = None;
-        for outer_index in 0..rings.len() {
-            let outer = rings[outer_index].clone();
-            let holes: Vec<_> = rings
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| *index != outer_index)
-                .map(|(_, ring)| ring.clone())
-                .collect();
-            // Reversing the complete walk reverses every ring and must not
-            // change the result, while a same-polarity nested lobe is still not
-            // a hole. Preserve relative polarity, not absolute orientation.
-            if holes.iter().any(|hole| hole.winding() == outer.winding()) {
-                continue;
-            }
-            if let Ok(polygon) = Self::new(outer, holes) {
-                if result.is_some() {
-                    return Err(ExactGeometryError::InvalidBoundaryWalk(
-                        "more than one ring can be the material boundary",
-                    ));
-                }
-                result = Some(polygon);
-            }
+        // Strict containment implies that the material boundary has greater
+        // absolute area than every hole. Select that necessary candidate, then
+        // let Polygon::new prove containment/contact exactly once.
+        let outer_index = rings
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, ring)| ring.signed_area2().unsigned_abs())
+            .map(|(index, _)| index)
+            .ok_or(ExactGeometryError::InternalTopology(
+                "boundary decomposition produced no rings",
+            ))?;
+        let outer = rings.swap_remove(outer_index);
+        let holes = rings;
+        // Reversing the complete walk reverses every ring and must not change
+        // the result, while a same-polarity nested lobe is still not a hole.
+        if holes.iter().any(|hole| hole.winding() == outer.winding()) {
+            return Err(ExactGeometryError::InvalidBoundaryWalk(
+                "contained rings have the same relative polarity as the material boundary",
+            ));
         }
-        result.ok_or(ExactGeometryError::InvalidBoundaryWalk(
-            "slit-separated rings do not form one outer boundary with disjoint contained holes",
-        ))
+        charge_boundary_work(
+            &mut work,
+            vertex_count.checked_mul(vertex_count).unwrap_or(usize::MAX),
+        )?;
+        Self::new(outer, holes).map_err(|error| match error {
+            ExactGeometryError::CapacityExceeded { .. }
+            | ExactGeometryError::ArithmeticOverflow => error,
+            _ => ExactGeometryError::InvalidBoundaryWalk(
+                "slit-separated rings do not form one outer boundary with disjoint contained holes",
+            ),
+        })
     }
 
     pub fn outer(&self) -> &Ring {
@@ -546,6 +561,7 @@ impl Polygon {
 fn split_boundary_walk(
     vertices: Vec<Point>,
     rings: &mut Vec<Ring>,
+    work: &mut usize,
 ) -> Result<(), ExactGeometryError> {
     let mut pending = vec![vertices];
     while let Some(mut walk) = pending.pop() {
@@ -557,6 +573,7 @@ fn split_boundary_walk(
         'pairs: for first in 0..count {
             let first_end = (first + 1) % count;
             for second in first + 1..count {
+                charge_boundary_work(work, 1)?;
                 let second_end = (second + 1) % count;
                 if walk[first] != walk[second_end] || walk[first_end] != walk[second] {
                     continue;
@@ -573,15 +590,35 @@ fn split_boundary_walk(
         }
 
         if let Some((first, second)) = split {
+            charge_boundary_work(work, count)?;
             let between = walk[first + 1..=second].to_vec();
             let mut outside = walk[second + 1..].to_vec();
             outside.extend_from_slice(&walk[..=first]);
             pending.push(outside);
             pending.push(between);
         } else {
+            charge_boundary_work(work, count.checked_mul(count).unwrap_or(usize::MAX))?;
             rings.push(Ring::new(walk)?);
         }
     }
+    Ok(())
+}
+
+/// Current explicit capacity for one boundary record. The work limit below is
+/// normally tighter, while this separate bound prevents an oversized record
+/// from consuming unbounded memory before pair scanning begins.
+pub const MAX_BOUNDARY_WALK_VERTICES: usize = 65_536;
+pub const MAX_BOUNDARY_WALK_WORK: usize = 16_000_000;
+
+fn charge_boundary_work(work: &mut usize, amount: usize) -> Result<(), ExactGeometryError> {
+    let requested = work.checked_add(amount).unwrap_or(usize::MAX);
+    if requested > MAX_BOUNDARY_WALK_WORK {
+        return Err(ExactGeometryError::CapacityExceeded {
+            cells: requested,
+            limit: MAX_BOUNDARY_WALK_WORK,
+        });
+    }
+    *work = requested;
     Ok(())
 }
 
@@ -1252,6 +1289,28 @@ mod tests {
         assert!(matches!(
             Polygon::from_boundary_walk(same_polarity),
             Err(ExactGeometryError::InvalidBoundaryWalk(_))
+        ));
+    }
+
+    #[test]
+    fn boundary_walk_vertex_and_pair_work_limits_are_typed() {
+        let oversized = vec![p(0, 0); MAX_BOUNDARY_WALK_VERTICES + 1];
+        assert!(matches!(
+            Polygon::from_boundary_walk(oversized),
+            Err(ExactGeometryError::CapacityExceeded { cells, limit })
+                if cells == MAX_BOUNDARY_WALK_VERTICES + 1
+                    && limit == MAX_BOUNDARY_WALK_VERTICES
+        ));
+
+        // No reverse edges: decomposition must scan the pairs, then charge the
+        // simple-ring validation rather than entering unbounded O(n²) work.
+        let work_limited = (0..4_000)
+            .map(|index| p(index, if index % 2 == 0 { 0 } else { 1 }))
+            .collect();
+        assert!(matches!(
+            Polygon::from_boundary_walk(work_limited),
+            Err(ExactGeometryError::CapacityExceeded { limit, .. })
+                if limit == MAX_BOUNDARY_WALK_WORK
         ));
     }
 

@@ -517,8 +517,13 @@ fn check_polygon_validity(store: &GeometryStore, lt: &LayerTable) -> Vec<Violati
             extent.include(bbox.xmin, bbox.ymin);
             extent.include(bbox.xmax, bbox.ymax);
         }
+        // This is also the rule-arithmetic contract: with every coordinate
+        // delta <= i32::MAX, the worst diagonal cross is < 2*extent² and its
+        // square, dot products, rational sample numerators and distances all
+        // fit i128. Larger layouts are rejected before any legacy kernel.
         if extent.width_i64() > i64::from(i32::MAX)
             || extent.height_i64() > i64::from(i32::MAX)
+            || !legacy_rule_arithmetic_fits(&extent)
         {
             out.push(Violation {
                 rule_id: "__geometry__".into(), kind: "geometry_capacity".into(),
@@ -530,12 +535,27 @@ fn check_polygon_validity(store: &GeometryStore, lt: &LayerTable) -> Vec<Violati
     out
 }
 
+fn legacy_rule_arithmetic_fits(extent: &Bbox) -> bool {
+    let span = i128::from(extent.width_i64().max(extent.height_i64()).max(0));
+    span.checked_mul(span)
+        .and_then(|square| square.checked_mul(2))
+        .and_then(|cross_bound| cross_bound.checked_mul(cross_bound))
+        .is_some()
+}
+
 fn exact_polygon_from_store(
     store: &GeometryStore,
     polygon: PolyId,
 ) -> Result<crate::geometry::exact::Polygon, crate::geometry::exact::ExactGeometryError> {
     use crate::geometry::exact::{Point, Polygon};
     let (start, end) = store.poly_range(polygon);
+    let vertex_count = end - start;
+    if vertex_count > crate::geometry::exact::MAX_BOUNDARY_WALK_VERTICES {
+        return Err(crate::geometry::exact::ExactGeometryError::CapacityExceeded {
+            cells: vertex_count,
+            limit: crate::geometry::exact::MAX_BOUNDARY_WALK_VERTICES,
+        });
+    }
     let points: Vec<Point> = (start..end)
         .map(|index| Point::new(store.verts_x[index], store.verts_y[index]))
         .collect();
@@ -580,11 +600,18 @@ fn check_min_width(
         // arms is two violation sites, not one. Exterior gaps (notches) are excluded;
         // counting them as widths is the classic false positive naive edge scans produce
         // on U-shapes.
-        for (d, mx, my) in facing_gaps(store, p, true) {
-            if d < min {
+        let gaps = match facing_gaps(store, p, true) {
+            Ok(gaps) => gaps,
+            Err(_) => {
+                push_geometry_capacity(store, lt, p, out);
+                return;
+            }
+        };
+        for (d, mx, my) in gaps {
+            if d < i64::from(min) {
                 out.push(Violation {
                     rule_id: rule_id.into(), kind: "min_width".into(),
-                    layer: lt.name(layer).into(), measured: d as i64, limit: min as i64,
+                    layer: lt.name(layer).into(), measured: d, limit: min as i64,
                     x: mx, y: my,
                 });
             }
@@ -599,7 +626,11 @@ fn check_min_width(
 /// and its arm widths from being reported as notches.
 // ponytail: 1-dbu gaps have no strict-interior sample point and classify as exterior;
 // far below any real rule limit, so accepted.
-fn facing_gaps(store: &GeometryStore, p: PolyId, interior: bool) -> Vec<(i32, i32, i32)> {
+fn facing_gaps(
+    store: &GeometryStore, p: PolyId, interior: bool,
+) -> Result<Vec<(i64, i32, i32)>, crate::geometry::exact::ExactGeometryError> {
+    use crate::geometry::exact::ExactGeometryError;
+
     let edges = poly_edges(store, p);
     let n = edges.len();
     let mut out = Vec::new();
@@ -611,34 +642,66 @@ fn facing_gaps(store: &GeometryStore, p: PolyId, interior: bool) -> Vec<(i32, i3
                 let ylo = a.y0.min(a.y1).max(b.y0.min(b.y1));
                 let yhi = a.y0.max(a.y1).min(b.y0.max(b.y1));
                 if ylo >= yhi { continue; }
-                ((a.x0 - b.x0).abs(), (a.x0 + b.x0) / 2, (ylo + yhi) / 2)
+                (
+                    (i64::from(a.x0) - i64::from(b.x0)).abs(),
+                    midpoint_i32(a.x0, b.x0)?,
+                    midpoint_i32(ylo, yhi)?,
+                )
             } else if a.is_horizontal() && b.is_horizontal() {
                 let xlo = a.x0.min(a.x1).max(b.x0.min(b.x1));
                 let xhi = a.x0.max(a.x1).min(b.x0.max(b.x1));
                 if xlo >= xhi { continue; }
-                ((a.y0 - b.y0).abs(), (xlo + xhi) / 2, (a.y0 + b.y0) / 2)
+                (
+                    (i64::from(a.y0) - i64::from(b.y0)).abs(),
+                    midpoint_i32(xlo, xhi)?,
+                    midpoint_i32(a.y0, b.y0)?,
+                )
             } else {
                 // parallel diagonal edges (45° routing): perpendicular gap where
-                // the edges overlap tangentially. Integer where it matters,
-                // f64 only for the sample-point coordinates.
-                let (adx, ady) = (a.dx_i64(), a.dy_i64());
-                let (bdx, bdy) = (b.dx_i64(), b.dy_i64());
+                // the edges overlap tangentially. All projection/distance/sample
+                // arithmetic stays exact in i128; the marker alone is rounded.
+                let (adx, ady) = (i128::from(a.dx_i64()), i128::from(a.dy_i64()));
+                let (bdx, bdy) = (i128::from(b.dx_i64()), i128::from(b.dy_i64()));
                 if adx * bdy - ady * bdx != 0 { continue; } // not parallel
                 let len2 = adx * adx + ady * ady;
                 if len2 == 0 { continue; }
-                let t = |px: i64, py: i64| (px - a.x0 as i64) * adx + (py - a.y0 as i64) * ady;
-                let (tb0, tb1) = (t(b.x0 as i64, b.y0 as i64), t(b.x1 as i64, b.y1 as i64));
+                let t = |px: i32, py: i32| {
+                    (i128::from(px) - i128::from(a.x0)) * adx
+                        + (i128::from(py) - i128::from(a.y0)) * ady
+                };
+                let (tb0, tb1) = (t(b.x0, b.y0), t(b.x1, b.y1));
                 let lo = tb0.min(tb1).max(0);
                 let hi = tb0.max(tb1).min(len2);
                 if lo >= hi { continue; } // no tangential overlap
                 // signed offset of b's line along a's left normal (−ady, adx): d×w
-                let cross = adx * (b.y0 as i64 - a.y0 as i64) - ady * (b.x0 as i64 - a.x0 as i64);
-                let d = isqrt(cross * cross / len2) as i32;
-                // sample point: middle of the overlap span, halfway between the lines
-                let tm = (lo + hi) as f64 / 2.0 / len2 as f64;
-                let half = cross as f64 / 2.0 / len2 as f64;
-                let mx = (a.x0 as f64 + adx as f64 * tm - ady as f64 * half).round() as i32;
-                let my = (a.y0 as f64 + ady as f64 * tm + adx as f64 * half).round() as i32;
+                let cross = adx * (i128::from(b.y0) - i128::from(a.y0))
+                    - ady * (i128::from(b.x0) - i128::from(a.x0));
+                let cross2 = cross
+                    .checked_mul(cross)
+                    .ok_or(ExactGeometryError::ArithmeticOverflow)?;
+                let distance2 = cross2 / len2;
+                let d = isqrt(
+                    i64::try_from(distance2)
+                        .map_err(|_| ExactGeometryError::ArithmeticOverflow)?,
+                );
+                // Middle of tangential overlap, halfway between the lines:
+                // q = a0 + (v*(lo+hi) + normal*cross) / (2*|v|²).
+                let denominator = len2
+                    .checked_mul(2)
+                    .ok_or(ExactGeometryError::ArithmeticOverflow)?;
+                let tangent = lo + hi;
+                let dx_num = adx
+                    .checked_mul(tangent)
+                    .and_then(|value| ady.checked_mul(cross).and_then(|n| value.checked_sub(n)))
+                    .ok_or(ExactGeometryError::ArithmeticOverflow)?;
+                let dy_num = ady
+                    .checked_mul(tangent)
+                    .and_then(|value| adx.checked_mul(cross).and_then(|n| value.checked_add(n)))
+                    .ok_or(ExactGeometryError::ArithmeticOverflow)?;
+                let mx_offset = round_ratio_i128(dx_num, denominator)?;
+                let my_offset = round_ratio_i128(dy_num, denominator)?;
+                let mx = checked_i32(i128::from(a.x0) + mx_offset)?;
+                let my = checked_i32(i128::from(a.y0) + my_offset)?;
                 (d, mx, my)
             };
             if d == 0 { continue; }
@@ -647,7 +710,47 @@ fn facing_gaps(store: &GeometryStore, p: PolyId, interior: bool) -> Vec<(i32, i3
             }
         }
     }
-    out
+    Ok(out)
+}
+
+fn midpoint_i32(
+    a: i32, b: i32,
+) -> Result<i32, crate::geometry::exact::ExactGeometryError> {
+    checked_i32((i128::from(a) + i128::from(b)) / 2)
+}
+
+fn checked_i32(value: i128) -> Result<i32, crate::geometry::exact::ExactGeometryError> {
+    i32::try_from(value).map_err(|_| crate::geometry::exact::ExactGeometryError::ArithmeticOverflow)
+}
+
+fn round_ratio_i128(
+    numerator: i128, denominator: i128,
+) -> Result<i128, crate::geometry::exact::ExactGeometryError> {
+    use crate::geometry::exact::ExactGeometryError;
+    if denominator <= 0 { return Err(ExactGeometryError::ArithmeticOverflow); }
+    let half = denominator / 2;
+    if numerator >= 0 {
+        numerator
+            .checked_add(half)
+            .map(|value| value / denominator)
+            .ok_or(ExactGeometryError::ArithmeticOverflow)
+    } else {
+        numerator
+            .checked_sub(half)
+            .map(|value| value / denominator)
+            .ok_or(ExactGeometryError::ArithmeticOverflow)
+    }
+}
+
+fn push_geometry_capacity(
+    store: &GeometryStore, lt: &LayerTable, polygon: PolyId, out: &mut Vec<Violation>,
+) {
+    let bbox = store.poly_bbox[polygon.0 as usize];
+    out.push(Violation {
+        rule_id: "__geometry__".into(), kind: "geometry_capacity".into(),
+        layer: lt.name(store.poly_layer[polygon.0 as usize]).into(),
+        measured: 1, limit: 0, x: bbox.xmin, y: bbox.ymin,
+    });
 }
 
 /// Is polygon `inner` strictly inside polygon `outer`? All vertices strictly interior —
@@ -700,12 +803,16 @@ pub(crate) fn candidate_pairs(
         xlo = xlo.min(b.xmin); xhi = xhi.max(b.xmin);
         ylo = ylo.min(b.ymin); yhi = yhi.max(b.ymin);
     }
-    let sweep_x = (xhi.saturating_sub(xlo)) >= (yhi.saturating_sub(ylo));
+    let sweep_x = i64::from(xhi) - i64::from(xlo) >= i64::from(yhi) - i64::from(ylo);
+    let min = i64::from(min);
 
     // (sweep_min, sweep_max, poly, from_b)
-    let mut items: Vec<(i32, i32, PolyId, bool)> = Vec::with_capacity(
+    let mut items: Vec<(i64, i64, PolyId, bool)> = Vec::with_capacity(
         pa.len() + pb.map_or(0, |b| b.len()));
-    let key = |b: &Bbox| if sweep_x { (b.xmin, b.xmax) } else { (b.ymin, b.ymax) };
+    let key = |b: &Bbox| {
+        let (lo, hi) = if sweep_x { (b.xmin, b.xmax) } else { (b.ymin, b.ymax) };
+        (i64::from(lo), i64::from(hi))
+    };
     for &p in pa {
         let (lo, hi) = key(&store.poly_bbox[p.0 as usize]);
         items.push((lo, hi, p, false));
@@ -719,15 +826,17 @@ pub(crate) fn candidate_pairs(
     for i in 0..items.len() {
         let (_, hi_i, pi, bi) = items[i];
         for &(_, _, pj, bj) in items[i + 1..].iter()
-            .take_while(|it| it.0 <= hi_i.saturating_add(min))
+            .take_while(|it| it.0 <= hi_i + min)
         {
             if pb.is_some() && bi == bj { continue; } // cross-set pairs only
             let ba = store.poly_bbox[pi.0 as usize];
             let bb = store.poly_bbox[pj.0 as usize];
             let other_near = if sweep_x {
-                ba.ymin - min <= bb.ymax && bb.ymin - min <= ba.ymax
+                i64::from(ba.ymin) - min <= i64::from(bb.ymax)
+                    && i64::from(bb.ymin) - min <= i64::from(ba.ymax)
             } else {
-                ba.xmin - min <= bb.xmax && bb.xmin - min <= ba.xmax
+                i64::from(ba.xmin) - min <= i64::from(bb.xmax)
+                    && i64::from(bb.xmin) - min <= i64::from(ba.xmax)
             };
             if other_near {
                 // keep (set A, set B) order for cross-set queries
@@ -1249,11 +1358,18 @@ fn check_notch(
         if clean.as_ref().is_some_and(|c| c[k]) { continue; }
         // a notch is a facing pair whose gap is OUTSIDE the polygon (see facing_gaps);
         // interior pairs are widths and belong to min_width, not here.
-        for (d, mx, my) in facing_gaps(store, p, false) {
-            if d < min {
+        let gaps = match facing_gaps(store, p, false) {
+            Ok(gaps) => gaps,
+            Err(_) => {
+                push_geometry_capacity(store, lt, p, out);
+                return;
+            }
+        };
+        for (d, mx, my) in gaps {
+            if d < i64::from(min) {
                 out.push(Violation {
                     rule_id: rule_id.into(), kind: "notch".into(),
-                    layer: lt.name(layer).into(), measured: d as i64,
+                    layer: lt.name(layer).into(), measured: d,
                     limit: min as i64, x: mx, y: my,
                 });
             }
