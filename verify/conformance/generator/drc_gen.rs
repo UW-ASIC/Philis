@@ -703,27 +703,36 @@ fn asymmetric_enclosure(s: &mut Suite) {
 
 /// Minimum enclosed area: the area enclosed by a polygon ring must be >= min.
 fn min_enclosed_area(s: &mut Suite) {
-    // PASS: outer 500x500 with inner 100x100 cutout, enclosed=240000 >= 50000
+    // PASS: one keyhole boundary with an actual 300x200 hole (60000 >= 50000).
     s.gds.begin_cell("DRC_MEA_PASS");
-    s.gds.rect(MET1, 0, 0, 500, 500);
-    s.gds.rect(MET1, 100, 100, 100, 100);
+    s.gds.boundary(MET1.0, MET1.1, &[
+        (0, 0), (500, 0), (500, 500), (300, 500), (300, 400),
+        (400, 400), (400, 200), (100, 200), (100, 400), (300, 400),
+        (300, 500), (0, 500),
+    ]);
     s.gds.end_cell();
     s.add_drc("DRC_MEA_PASS", "DRC_MEA_PASS", "min_enclosed_area", 0);
 
-    // FAIL: outer 300x300 with inner 280x280, enclosed=11600 < 50000
+    // FAIL: one keyhole boundary with an actual 100x100 hole (10000 < 50000).
     s.gds.begin_cell("DRC_MEA_FAIL");
-    s.gds.rect(MET1, 0, 0, 300, 300);
-    s.gds.rect(MET1, 10, 10, 280, 280);
+    s.gds.boundary(MET1.0, MET1.1, &[
+        (0, 0), (300, 0), (300, 300), (150, 300), (150, 200),
+        (200, 200), (200, 100), (100, 100), (100, 200), (150, 200),
+        (150, 300), (0, 300),
+    ]);
     s.gds.end_cell();
     s.add_drc("DRC_MEA_FAIL", "DRC_MEA_FAIL", "min_enclosed_area", 1);
 }
 
 /// Cheesing: large metal plates (area > max) must have slots (inner cutouts).
 fn cheesing(s: &mut Suite) {
-    // PASS: large plate with slot
+    // PASS: large plate with a real keyhole slot in the same boundary.
     s.gds.begin_cell("DRC_CH_PASS");
-    s.gds.rect(MET1, 0, 0, 2000, 2000);
-    s.gds.rect(MET1, 500, 500, 100, 100);
+    s.gds.boundary(MET1.0, MET1.1, &[
+        (0, 0), (2000, 0), (2000, 2000), (1000, 2000), (1000, 1500),
+        (1050, 1500), (1050, 1400), (950, 1400), (950, 1500), (1000, 1500),
+        (1000, 2000), (0, 2000),
+    ]);
     s.gds.end_cell();
     s.add_drc("DRC_CH_PASS", "DRC_CH_PASS", "cheesing", 0);
 

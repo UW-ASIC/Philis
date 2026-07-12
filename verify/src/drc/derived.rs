@@ -494,14 +494,11 @@ fn occupied_rectangles(source: &PolygonSet) -> Result<Vec<(i32, i32, i32, i32)>,
     let mut rectangles = Vec::new();
     for y in ys.windows(2) {
         for x in xs.windows(2) {
-            let sample = Point::new(
-                i32::try_from((i64::from(x[0]) + i64::from(x[1])) / 2)
-                    .map_err(|_| ExactGeometryError::ArithmeticOverflow)?,
-                i32::try_from((i64::from(y[0]) + i64::from(y[1])) / 2)
-                    .map_err(|_| ExactGeometryError::ArithmeticOverflow)?,
-            );
-            if source.classify_point(sample) == crate::geometry::exact::PointClassification::Inside
-            {
+            // Integer midpoint truncation drops 1-DBU cells by sampling their
+            // boundary. Exact cell intersection is equivalent to a rational
+            // doubled-coordinate midpoint classification without a private kernel.
+            let cell = rectangle_set(x[0], y[0], x[1], y[1])?;
+            if rectilinear_intersection(source, &cell)?.area2() > 0 {
                 rectangles.push((x[0], y[0], x[1], y[1]));
             }
         }
@@ -637,5 +634,35 @@ mod tests {
                 ExactGeometryError::Unsupported { .. }
             ))
         ));
+    }
+
+    #[test]
+    fn unit_width_cells_survive_offsets_on_both_sides_of_zero() {
+        for x in [3, -4] {
+            let mut store = GeometryStore::new();
+            store.add_rect(0, x, -2, 1, 5);
+            let definitions = BTreeMap::new();
+            let mut evaluator = DerivedEvaluator::new(&store, &definitions);
+            let DerivedValue::Area(grown) = evaluator
+                .evaluate(&DerivedExpr::Grow {
+                    operand: Box::new(base(0)),
+                    distance: 1,
+                })
+                .unwrap()
+            else {
+                panic!("area expected")
+            };
+            assert_eq!(grown.area2(), 42, "unit-width cell at x={x} was dropped");
+            let DerivedValue::Area(shrunk) = evaluator
+                .evaluate(&DerivedExpr::Shrink {
+                    operand: Box::new(base(0)),
+                    distance: 1,
+                })
+                .unwrap()
+            else {
+                panic!("area expected")
+            };
+            assert!(shrunk.polygons().is_empty());
+        }
     }
 }

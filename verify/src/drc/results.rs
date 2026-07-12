@@ -225,6 +225,11 @@ pub fn apply_waivers(
             validate_date(expiry)?;
         }
     }
+    // Waiver state is a recomputed view, not sticky record state. Revocation,
+    // an empty waiver set, or expiry must remove a formerly Active disposition.
+    for record in &mut database.records {
+        record.waiver = None;
+    }
     let mut unmatched: BTreeSet<_> = by_fingerprint.keys().cloned().collect();
     for record in &mut database.records {
         let Some(waiver) = by_fingerprint.get(&record.fingerprint) else {
@@ -330,7 +335,7 @@ pub fn invalidated_rules(
                 dependency
                     .hierarchy_prefixes
                     .iter()
-                    .any(|prefix| path.starts_with(prefix))
+                    .any(|prefix| path.starts_with(prefix) || prefix.starts_with(path))
             });
         if layer_hit && region_hit && path_hit {
             invalid.insert(dependency.rule_id.clone());
@@ -589,6 +594,21 @@ mod tests {
             database.records[0].waiver.as_ref().unwrap().state,
             WaiverState::Expired
         );
+        let active = Waiver {
+            waiver_id: "W-2".into(),
+            fingerprint: database.records[0].fingerprint.clone(),
+            provenance: "review/456".into(),
+            owner: "physical-verification".into(),
+            justification: "temporary active waiver".into(),
+            expires_on: Some("2026-08-01".into()),
+        };
+        apply_waivers(&mut database, &[active], "2026-07-12").unwrap();
+        assert_eq!(
+            database.records[0].waiver.as_ref().unwrap().state,
+            WaiverState::Active
+        );
+        apply_waivers(&mut database, &[], "2026-07-12").unwrap();
+        assert!(database.records[0].waiver.is_none());
         assert!(apply_waivers(&mut database, &[], "2026-02-30").is_err());
     }
 
@@ -629,6 +649,34 @@ mod tests {
         assert_eq!(
             invalidated_rules(&dependencies, &changes).unwrap(),
             BTreeSet::from(["A".into(), "B".into()])
+        );
+
+        let ancestor_change = ChangeSet {
+            layers: BTreeSet::from([1]),
+            regions: Vec::new(),
+            hierarchy_paths: BTreeSet::from(["/top".into()]),
+            changed_rules: BTreeSet::new(),
+        };
+        assert!(invalidated_rules(&dependencies, &ancestor_change)
+            .unwrap()
+            .contains("A"));
+
+        let descendant_dependencies = vec![RuleDependency {
+            rule_id: "C".into(),
+            layers: BTreeSet::from([1]),
+            region: None,
+            hierarchy_prefixes: BTreeSet::from(["/top".into()]),
+            depends_on_rules: BTreeSet::new(),
+        }];
+        let descendant_change = ChangeSet {
+            layers: BTreeSet::from([1]),
+            regions: Vec::new(),
+            hierarchy_paths: BTreeSet::from(["/top/u0/x1".into()]),
+            changed_rules: BTreeSet::new(),
+        };
+        assert_eq!(
+            invalidated_rules(&descendant_dependencies, &descendant_change).unwrap(),
+            BTreeSet::from(["C".into()])
         );
     }
 

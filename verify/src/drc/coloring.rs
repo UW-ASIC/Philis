@@ -119,21 +119,40 @@ pub fn solve_coloring(problem: &ColoringProblem) -> Result<ColoringSolution, Col
     for (&node, &color) in &problem.precolors {
         solver.colors[node] = Some(color);
     }
+    // A same-color conflict fixed by precolors is not merely "permitted" by a
+    // stitch candidate: that stitch is forced and must be selected and charged.
+    for &(a, b) in &solver.conflicts {
+        if solver.colors[a].is_some() && solver.colors[a] == solver.colors[b] {
+            let pair = edge(a, b);
+            let Some(stitch) = solver.stitch_by_edge.get(&pair) else {
+                return Err(ColoringError::Uncolorable {
+                    witness: vec![a, b],
+                });
+            };
+            solver.disabled.insert(pair);
+            solver.cost = solver
+                .cost
+                .checked_add(u64::from(stitch.cost))
+                .ok_or_else(|| ColoringError::Invalid("forced stitch cost overflow".into()))?;
+        }
+    }
     if !solver.partial_consistent() {
         return Err(ColoringError::Uncolorable {
             witness: precolor_witness(problem),
         });
     }
     solver.search();
-    if let Some(mut solution) = solver.best {
-        solution.explored_states = solver.explored;
-        return Ok(solution);
-    }
+    // A provisional incumbent is not proof of optimality. If any branch was
+    // truncated, return indeterminate even when a legal solution was found.
     if solver.hit_limit {
         return Err(ColoringError::SearchLimit {
             explored: solver.explored,
             limit: problem.max_search_states,
         });
+    }
+    if let Some(mut solution) = solver.best {
+        solution.explored_states = solver.explored;
+        return Ok(solution);
     }
     Err(ColoringError::Uncolorable {
         witness: minimal_witness(problem),
@@ -270,7 +289,7 @@ impl Solver<'_> {
             self.colors[a].is_none()
                 || self.colors[b].is_none()
                 || self.colors[a] != self.colors[b]
-                || self.stitch_by_edge.contains_key(&(a, b))
+                || self.disabled.contains(&(a, b))
         })
     }
 }
@@ -482,5 +501,36 @@ mod tests {
         let a = solve_coloring(&ColoringProblem::new(4, 2, edges)).unwrap();
         let b = solve_coloring(&ColoringProblem::new(4, 2, reversed)).unwrap();
         assert_eq!(a.colors, b.colors);
+    }
+
+    #[test]
+    fn same_color_precolors_force_and_charge_their_stitch() {
+        let mut problem = ColoringProblem::new(2, 2, vec![(0, 1)]);
+        problem.precolors.insert(0, 1);
+        problem.precolors.insert(1, 1);
+        problem.stitches.push(StitchCandidate {
+            a: 0,
+            b: 1,
+            cost: 9,
+        });
+        let solution = solve_coloring(&problem).unwrap();
+        assert_eq!(solution.stitch_cost, 9);
+        assert_eq!(solution.selected_stitches, problem.stitches);
+    }
+
+    #[test]
+    fn incumbent_before_search_limit_is_not_returned_as_optimal() {
+        let mut problem = ColoringProblem::new(2, 2, vec![(0, 1)]);
+        problem.precolors.insert(0, 0);
+        problem.stitches.push(StitchCandidate {
+            a: 0,
+            b: 1,
+            cost: 9,
+        });
+        problem.max_search_states = 2;
+        assert!(matches!(
+            solve_coloring(&problem),
+            Err(ColoringError::SearchLimit { .. })
+        ));
     }
 }

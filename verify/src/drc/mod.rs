@@ -478,7 +478,7 @@ fn check_polygon_validity(store: &GeometryStore, lt: &LayerTable) -> Vec<Violati
         };
         if let Some(kind_detail) = issue {
             out.push(Violation {
-                rule_id: "polygon_validity".into(), kind: "polygon_validity".into(),
+                rule_id: "__geometry__".into(), kind: "polygon_validity".into(),
                 layer: lt.name(store.poly_layer[p]).into(),
                 measured: if kind_detail == "zero_area" { 0 } else { 1 },
                 limit: 0, x: bb.xmin, y: bb.ymin,
@@ -1381,33 +1381,69 @@ fn check_overlap(
     store: &GeometryStore, lt: &LayerTable, a: LayerId, b: LayerId, min: i32,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let bs = store.polys_on_layer(b);
-    for pa in store.polys_on_layer(a) {
-        let ba = store.poly_bbox[pa.0 as usize];
-        let mut has_overlap = false;
-        for &pb in &bs {
-            let bb = store.poly_bbox[pb.0 as usize];
-            // overlap region
-            let ix0 = ba.xmin.max(bb.xmin);
-            let iy0 = ba.ymin.max(bb.ymin);
-            let ix1 = ba.xmax.min(bb.xmax);
-            let iy1 = ba.ymax.min(bb.ymax);
-            if ix1 <= ix0 || iy1 <= iy0 { continue; }
-            has_overlap = true;
-            let ov = (ix1 - ix0).min(iy1 - iy0);
-            if ov < min {
-                out.push(Violation {
-                    rule_id: rule_id.into(), kind: "overlap".into(),
-                    layer: format!("{}:{}", lt.name(a), lt.name(b)),
-                    measured: ov as i64, limit: min as i64, x: ix0, y: iy0,
-                });
-            }
+    let b_union = match derived::layer_polygon_set(store, b, Some(lt.id_to_name.len())) {
+        Ok(set) => set,
+        Err(_) => {
+            out.push(Violation {
+                rule_id: rule_id.into(), kind: "overlap_geometry_error".into(),
+                layer: format!("{}:{}", lt.name(a), lt.name(b)),
+                measured: -1, limit: min as i64, x: 0, y: 0,
+            });
+            return;
         }
-        if !has_overlap {
+    };
+    for pa in store.polys_on_layer(a) {
+        let (start, end) = store.poly_range(pa);
+        let polygon = crate::geometry::exact::Polygon::from_outer(
+            (start..end).map(|index| crate::geometry::exact::Point::new(
+                store.verts_x[index], store.verts_y[index],
+            )).collect(),
+        );
+        let marker = store.poly_bbox[pa.0 as usize];
+        let intersection = polygon
+            .map(crate::geometry::exact::PolygonSet::from_polygon)
+            .map_err(derived::DerivedError::from)
+            .and_then(|a_set| {
+                crate::geometry::exact::rectilinear_intersection(&a_set, &b_union)
+                    .map_err(derived::DerivedError::from)
+            });
+        let Ok(intersection) = intersection else {
+            out.push(Violation {
+                rule_id: rule_id.into(), kind: "overlap_geometry_error".into(),
+                layer: format!("{}:{}", lt.name(a), lt.name(b)),
+                measured: -1, limit: min as i64, x: marker.xmin, y: marker.ymin,
+            });
+            continue;
+        };
+        let mut best = 0_i32;
+        let mut unsupported = false;
+        for component in intersection.polygons() {
+            if !component.holes().is_empty() || component.outer().vertices().len() != 4 {
+                unsupported = true;
+                break;
+            }
+            let mut xs: Vec<_> = component.outer().vertices().iter().map(|p| p.x).collect();
+            let mut ys: Vec<_> = component.outer().vertices().iter().map(|p| p.y).collect();
+            xs.sort_unstable(); xs.dedup();
+            ys.sort_unstable(); ys.dedup();
+            if xs.len() != 2 || ys.len() != 2 {
+                unsupported = true;
+                break;
+            }
+            best = best.max((xs[1] - xs[0]).min(ys[1] - ys[0]));
+        }
+        if unsupported {
+            out.push(Violation {
+                rule_id: rule_id.into(), kind: "overlap_geometry_error".into(),
+                layer: format!("{}:{}", lt.name(a), lt.name(b)),
+                measured: -1, limit: min as i64, x: marker.xmin, y: marker.ymin,
+            });
+        } else if best < min {
             out.push(Violation {
                 rule_id: rule_id.into(), kind: "overlap".into(),
                 layer: format!("{}:{}", lt.name(a), lt.name(b)),
-                measured: 0, limit: min as i64, x: ba.xmin, y: ba.ymin,
+                measured: best as i64, limit: min as i64,
+                x: marker.xmin, y: marker.ymin,
             });
         }
     }
@@ -1827,29 +1863,51 @@ fn check_asymmetric_enclosure(
     }
 }
 
-// --- min enclosed area (hole area) -------------------------------------------
-// Detect "holes" — same-layer polygons where one is strictly inside another.
-// The enclosed region's area = outer.area - inner.area. If this enclosed area
-// < min_hole_area, emit violation.
-// ponytail: simplified to bbox-based area for conformance geometry.
+// Extract actual keyhole cycles from a single GDS boundary walk. Separate
+// same-polarity boundaries are filled material, never negative-space evidence.
+fn keyhole_hole_rings(
+    store: &GeometryStore,
+    polygon: PolyId,
+) -> Vec<crate::geometry::exact::Ring> {
+    let (start, end) = store.poly_range(polygon);
+    let points: Vec<_> = (start..end)
+        .map(|index| crate::geometry::exact::Point::new(
+            store.verts_x[index], store.verts_y[index],
+        ))
+        .collect();
+    let material_sign = store.signed_area2(polygon).signum();
+    let mut holes = Vec::new();
+    for i in 0..points.len() {
+        for j in i + 3..points.len() {
+            if points[i] != points[j] { continue; }
+            let Ok(ring) = crate::geometry::exact::Ring::new(points[i..j].to_vec()) else {
+                continue;
+            };
+            if ring.signed_area2().signum() != material_sign as i128 {
+                holes.push(ring);
+            }
+        }
+    }
+    holes.sort_by(|a, b| a.vertices().cmp(b.vertices()));
+    holes.dedup();
+    holes
+}
+
+// --- min enclosed area (actual hole/keyhole area) ----------------------------
 fn check_min_enclosed_area(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, min_hole_area: i64,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let polys = store.polys_on_layer(layer);
-    // containment implies bbox overlap, so the x-sweep candidate generator
-    // replaces the old all-pairs loop (quadratic on real layouts).
-    for (pa, pb) in candidate_pairs(store, &polys, None, 0) {
-        // unordered pair: try both nestings
-        for (outer, inner) in [(pa, pb), (pb, pa)] {
-            if !poly_strictly_inside(store, inner, outer) { continue; }
-            let enclosed = store.area(outer) - store.area(inner);
-            if enclosed < min_hole_area {
-                let bb = store.poly_bbox[inner.0 as usize];
+    for polygon in store.polys_on_layer(layer) {
+        for hole in keyhole_hole_rings(store, polygon) {
+            let area = hole.signed_area2().abs() / 2;
+            if area < i128::from(min_hole_area) {
+                let marker = hole.vertices()[0];
                 out.push(Violation {
                     rule_id: rule_id.into(), kind: "min_enclosed_area".into(),
-                    layer: lt.name(layer).into(), measured: enclosed,
-                    limit: min_hole_area, x: bb.xmin, y: bb.ymin,
+                    layer: lt.name(layer).into(),
+                    measured: i64::try_from(area).unwrap_or(i64::MAX),
+                    limit: min_hole_area, x: marker.x, y: marker.y,
                 });
             }
         }
@@ -1857,26 +1915,15 @@ fn check_min_enclosed_area(
 }
 
 // --- cheesing (large unslotted plates) ---------------------------------------
-// Any polygon on the layer whose area > max_area_no_slot that does NOT have a
-// same-layer polygon strictly inside it (i.e., no slot/hole) is a violation.
+// Any over-limit polygon must carry actual hole/keyhole evidence in its own
+// boundary. Nested same-polarity polygons are material and cannot waive it.
 fn check_cheesing(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, max_area_no_slot: i64,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let polys = store.polys_on_layer(layer);
-    // only over-limit plates need a slot search; slots bbox-overlap their plate,
-    // so one sweep over (plates, all) replaces the old all-pairs scan.
-    let plates: Vec<PolyId> =
-        polys.iter().copied().filter(|&p| store.area(p) > max_area_no_slot).collect();
-    if plates.is_empty() { return; }
-    let mut slotted: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    for (plate, q) in candidate_pairs(store, &plates, Some(&polys), 0) {
-        if plate != q && poly_strictly_inside(store, q, plate) { slotted.insert(plate.0); }
-    }
-    for &p in &plates {
+    for p in store.polys_on_layer(layer) {
         let area = store.area(p);
-        let has_slot = slotted.contains(&p.0);
-        if !has_slot {
+        if area > max_area_no_slot && keyhole_hole_rings(store, p).is_empty() {
             let bb = store.poly_bbox[p.0 as usize];
             out.push(Violation {
                 rule_id: rule_id.into(), kind: "cheesing".into(),
@@ -2122,5 +2169,55 @@ mod tests {
         check_overlap(&store, &lt, a, b, 2, "A.OVERLAP.B", &mut violations);
         assert_eq!(violations.len(), 2);
         assert!(violations.iter().all(|violation| violation.measured == 0));
+    }
+
+    #[test]
+    fn overlap_uses_exact_contact_not_concave_bboxes() {
+        let mut defs = std::collections::HashMap::new();
+        defs.insert("a".to_string(), crate::params::LayerDef { layer: 1, datatype: 0 });
+        defs.insert("b".to_string(), crate::params::LayerDef { layer: 2, datatype: 0 });
+        let lt = LayerTable::from_defs(&defs);
+        let (a, b) = (lt.id("a").unwrap(), lt.id("b").unwrap());
+        let mut store = GeometryStore::new();
+        store.add_polygon(a, &[
+            (0, 0), (10, 0), (10, 2), (2, 2), (2, 10), (0, 10),
+        ]);
+        // This rectangle is inside the L-shape's bbox, but in its empty concavity.
+        store.add_rect(b, 5, 5, 3, 3);
+        let mut violations = Vec::new();
+        check_overlap(&store, &lt, a, b, 2, "A.OVERLAP.B", &mut violations);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].measured, 0);
+    }
+
+    #[test]
+    fn only_actual_keyhole_cycles_count_as_holes_or_slots() {
+        let mut defs = std::collections::HashMap::new();
+        defs.insert("m1".to_string(), crate::params::LayerDef { layer: 1, datatype: 0 });
+        let lt = LayerTable::from_defs(&defs);
+        let m1 = lt.id("m1").unwrap();
+
+        let mut nested_material = GeometryStore::new();
+        nested_material.add_rect(m1, 0, 0, 20, 20);
+        nested_material.add_rect(m1, 8, 8, 4, 4);
+        let mut violations = Vec::new();
+        check_min_enclosed_area(&nested_material, &lt, m1, 40, "M1.HOLE", &mut violations);
+        assert!(violations.is_empty(), "same-polarity material became a hole");
+        check_cheesing(&nested_material, &lt, m1, 100, "M1.SLOT", &mut violations);
+        assert_eq!(violations.len(), 1, "nested material waived cheesing");
+
+        let mut keyhole = GeometryStore::new();
+        keyhole.add_polygon(m1, &[
+            (0, 0), (20, 0), (20, 20), (12, 20), (12, 16),
+            (16, 16), (16, 12), (8, 12), (8, 16), (12, 16),
+            (12, 20), (0, 20),
+        ]);
+        violations.clear();
+        check_min_enclosed_area(&keyhole, &lt, m1, 40, "M1.HOLE", &mut violations);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].measured, 32);
+        violations.clear();
+        check_cheesing(&keyhole, &lt, m1, 100, "M1.SLOT", &mut violations);
+        assert!(violations.is_empty());
     }
 }

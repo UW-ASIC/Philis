@@ -524,7 +524,7 @@ pub fn run_legacy_adapter(store: &GeometryStore, deck: &Deck) -> CheckedDrcRepor
             .or_default()
             .push(violation);
     }
-    let rules = deck
+    let mut rules: Vec<_> = deck
         .drc_rules
         .iter()
         .map(|rule| {
@@ -541,6 +541,20 @@ pub fn run_legacy_adapter(store: &GeometryStore, deck: &Deck) -> CheckedDrcRepor
             }
         })
         .collect();
+    // Always-on geometry validation is deliberately outside the deck rule list.
+    // Preserve those leftovers as errors; dropping them lets malformed layouts
+    // become CLEAN through the compatibility adapter.
+    for (rule_id, violations) in by_rule {
+        rules.push(CheckedRuleResult {
+            rule_id,
+            status: RuleStatus::Error,
+            violations,
+            diagnostics: vec![RuleDiagnostic {
+                code: DiagnosticCode::InvalidGeometry,
+                message: "always-on geometry validation failed".into(),
+            }],
+        });
+    }
     CheckedDrcReport {
         deck_id: "legacy-w1".into(),
         model_revision: "legacy-w1".into(),
@@ -1075,7 +1089,19 @@ fn validate_rule(
             if let Some(redundancy) = redundancy {
                 values.push((redundancy.clone(), Dimension::Count));
             }
-            return validate_rule_values(rule, &values, schema, layers);
+            validate_rule_values(rule, &values, schema, layers)?;
+            for (field, expression) in std::iter::once(("min_count", min_count))
+                .chain(redundancy.iter().map(|value| ("redundancy", value)))
+            {
+                let value = rule_quantity(rule.id(), expression, schema)?.value;
+                if value.fract() != 0.0 {
+                    return Err(DeckError::Rule {
+                        id: rule.id().into(),
+                        message: format!("{field} must resolve to an integer count"),
+                    });
+                }
+            }
+            return Ok(());
         }
         ProductionRuleSchema::Density {
             window,
@@ -1090,17 +1116,48 @@ fn validate_rule(
                     message: "density needs min and/or max".into(),
                 });
             }
-            let mut values = vec![
+            let values = vec![
                 (window.clone(), Dimension::Length),
                 (step.clone(), Dimension::Length),
             ];
-            if let Some(min) = min {
-                values.push((min.clone(), Dimension::Ratio));
+            validate_rule_values(rule, &values, schema, layers)?;
+            let window_value = rule_quantity(rule.id(), window, schema)?.value;
+            let step_value = rule_quantity(rule.id(), step, schema)?.value;
+            if window_value.fract() != 0.0 || step_value.fract() != 0.0 || step_value > window_value
+            {
+                return Err(DeckError::Rule {
+                    id: rule.id().into(),
+                    message: "density window/step must be integer DBU and step <= window".into(),
+                });
             }
-            if let Some(max) = max {
-                values.push((max.clone(), Dimension::Ratio));
+            let min_value = min
+                .as_ref()
+                .map(|value| rule_quantity(rule.id(), value, schema))
+                .transpose()?;
+            let max_value = max
+                .as_ref()
+                .map(|value| rule_quantity(rule.id(), value, schema))
+                .transpose()?;
+            for (field, value) in [("min", min_value), ("max", max_value)] {
+                if let Some(value) = value {
+                    if value.dimension != Dimension::Ratio || !(0.0..=1.0).contains(&value.value) {
+                        return Err(DeckError::Rule {
+                            id: rule.id().into(),
+                            message: format!("{field} density must be a ratio in [0, 1]"),
+                        });
+                    }
+                }
             }
-            return validate_rule_values(rule, &values, schema, layers);
+            if min_value
+                .zip(max_value)
+                .is_some_and(|(min, max)| min.value > max.value)
+            {
+                return Err(DeckError::Rule {
+                    id: rule.id().into(),
+                    message: "density limits must satisfy min <= max".into(),
+                });
+            }
+            return Ok(());
         }
         ProductionRuleSchema::Antenna {
             ratio_limit,
@@ -1127,13 +1184,40 @@ fn validate_rule(
                     message: "max_search_states must be positive".into(),
                 });
             }
-            &[
+            let values = [
                 (colors.clone(), Dimension::Count),
                 (spacing.clone(), Dimension::Length),
-            ]
+            ];
+            validate_rule_values(rule, &values, schema, layers)?;
+            let colors = rule_quantity(rule.id(), colors, schema)?.value;
+            if colors.fract() != 0.0 || !(2.0..=64.0).contains(&colors) {
+                return Err(DeckError::Rule {
+                    id: rule.id().into(),
+                    message: "colors must resolve to an integer in [2, 64]".into(),
+                });
+            }
+            return Ok(());
         }
     };
     validate_rule_values(rule, expected, schema, layers)
+}
+
+fn rule_quantity(
+    id: &str,
+    expression: &ScalarExpr,
+    schema: &ProductionDeckSchema,
+) -> Result<Quantity, DeckError> {
+    eval(
+        expression,
+        &schema.variables,
+        &schema.tables,
+        schema.dbu_nm,
+        &mut Vec::new(),
+    )
+    .map_err(|message| DeckError::Rule {
+        id: id.into(),
+        message,
+    })
 }
 
 fn validate_rule_values(
@@ -1638,6 +1722,53 @@ mod tests {
     }
 
     #[test]
+    fn deck_rejects_invalid_density_and_discrete_ranges() {
+        let layers = layers();
+        let mut density = json!({
+            "schema_version":1, "deck_id":"D", "model_revision":"R", "dbu_nm":1.0,
+            "rules":[{"kind":"density","id":"M1.D",
+                "layer":{"source":"base","name":"m1"},
+                "region":{"source":"base","name":"die"},"exclusion":null,
+                "window":{"op":"literal","value":10.0,"unit":"dbu"},
+                "step":{"op":"literal","value":10.0,"unit":"dbu"},
+                "min":{"op":"literal","value":0.0,"unit":"ratio"},
+                "max":{"op":"literal","value":1.0,"unit":"ratio"}}]
+        });
+        ProductionDeck::from_json(&density, &layers).unwrap();
+
+        density["rules"][0]["min"]["value"] = json!(1.1);
+        assert!(ProductionDeck::from_json(&density, &layers)
+            .unwrap_err()
+            .to_string()
+            .contains("[0, 1]"));
+        density["rules"][0]["min"]["value"] = json!(0.8);
+        density["rules"][0]["max"]["value"] = json!(0.2);
+        assert!(ProductionDeck::from_json(&density, &layers)
+            .unwrap_err()
+            .to_string()
+            .contains("min <= max"));
+        density["rules"][0]["min"]["value"] = json!(0.0);
+        density["rules"][0]["max"]["value"] = json!(1.0);
+        density["rules"][0]["step"]["value"] = json!(11.0);
+        assert!(ProductionDeck::from_json(&density, &layers)
+            .unwrap_err()
+            .to_string()
+            .contains("step <= window"));
+
+        let coloring = json!({
+            "schema_version":1, "deck_id":"D", "model_revision":"R", "dbu_nm":1.0,
+            "rules":[{"kind":"multi_patterning","id":"M1.MP",
+                "layer":{"source":"base","name":"m1"},
+                "colors":{"op":"literal","value":2.5,"unit":"count"},
+                "spacing":{"op":"literal","value":10.0,"unit":"dbu"}}]
+        });
+        assert!(ProductionDeck::from_json(&coloring, &layers)
+            .unwrap_err()
+            .to_string()
+            .contains("integer in [2, 64]"));
+    }
+
+    #[test]
     fn exact_holes_and_explicit_keyhole_slots_drive_plate_rules() {
         let layers = layers();
         let value = json!({
@@ -1670,5 +1801,25 @@ mod tests {
         keyhole_store.add_rect(layers.id("ko").unwrap(), 4, 4, 2, 6);
         let report = run_checked(&keyhole_store, &deck, &layers, &DrcContext::default());
         assert_eq!(report.rules[1].status, RuleStatus::Clean);
+    }
+
+    #[test]
+    fn legacy_adapter_preserves_always_on_geometry_errors() {
+        let deck =
+            Deck::from_json(r#"{"layers":{"m1":{"layer":1,"datatype":0}},"drc":{}}"#).unwrap();
+        let mut store = GeometryStore::new();
+        store.add_polygon(
+            deck.layers.id("m1").unwrap(),
+            &[(0, 0), (10, 10), (10, 0), (0, 10)],
+        );
+        let report = run_legacy_adapter(&store, &deck);
+        assert!(!report.is_clean());
+        let geometry = report
+            .rules
+            .iter()
+            .find(|rule| rule.rule_id == "__geometry__")
+            .unwrap();
+        assert_eq!(geometry.status, RuleStatus::Error);
+        assert_eq!(geometry.violations[0].kind, "polygon_validity");
     }
 }
