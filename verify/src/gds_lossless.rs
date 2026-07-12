@@ -852,7 +852,7 @@ fn build_element(start: Record, f: ElementFields, strict: bool) -> Result<GdsEle
     let xy = |f: &ElementFields| require(f.xy.clone().map(|v| v.0), &start, "XY");
     match start.ty {
         BOUNDARY => {
-            let ring = closed_ring(xy(&f)?, f.xy.as_ref().unwrap().1, "BOUNDARY")?;
+            let ring = closed_ring(xy(&f)?, f.xy.as_ref().unwrap().1, "BOUNDARY", strict)?;
             Ok(GdsElement::Boundary(GdsBoundary {
                 layer: layer(&f)?,
                 datatype: datatype(&f, "DATATYPE")?,
@@ -861,7 +861,7 @@ fn build_element(start: Record, f: ElementFields, strict: bool) -> Result<GdsEle
             }))
         }
         BOX => {
-            let ring = closed_ring(xy(&f)?, f.xy.as_ref().unwrap().1, "BOX")?;
+            let ring = closed_ring(xy(&f)?, f.xy.as_ref().unwrap().1, "BOX", strict)?;
             if strict && ring.len() != 4 {
                 return Err(LayoutError::at(
                     LayoutErrorKind::Malformed,
@@ -1073,6 +1073,7 @@ fn closed_ring(
     mut points: Vec<Point>,
     offset: usize,
     kind: &str,
+    validate_geometry: bool,
 ) -> Result<Vec<Point>, LayoutError> {
     if points.len() < 4 || points.first() != points.last() {
         return Err(LayoutError::at(
@@ -1082,13 +1083,15 @@ fn closed_ring(
         ));
     }
     points.pop();
-    Ring::new(points.clone()).map_err(|e| {
-        LayoutError::at(
-            LayoutErrorKind::Malformed,
-            offset,
-            format!("invalid {kind} ring: {e}"),
-        )
-    })?;
+    if validate_geometry {
+        Ring::new(points.clone()).map_err(|e| {
+            LayoutError::at(
+                LayoutErrorKind::Malformed,
+                offset,
+                format!("invalid {kind} ring: {e}"),
+            )
+        })?;
+    }
     Ok(points)
 }
 
@@ -1443,6 +1446,18 @@ pub struct GdsFlattenOptions {
     pub expansion_limit: usize,
     /// If set, only this root cell is flattened and returned.
     pub selected_top: Option<String>,
+    /// Policy for malformed-but-historically-observed BOUNDARY records.
+    pub geometry_policy: GdsGeometryPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GdsGeometryPolicy {
+    /// Signoff/deck qualification: every polygon must be simple and non-zero-area.
+    Strict,
+    /// Legacy DRC corpus mode: retain a closed but invalid ring so the always-on
+    /// `polygon_validity` checker can produce the expected diagnostic. No signoff
+    /// flow should select this policy.
+    PreserveInvalidForPolygonValidity,
 }
 
 impl Default for GdsFlattenOptions {
@@ -1450,6 +1465,7 @@ impl Default for GdsFlattenOptions {
         Self {
             expansion_limit: 10_000_000,
             selected_top: None,
+            geometry_policy: GdsGeometryPolicy::Strict,
         }
     }
 }
@@ -1636,6 +1652,7 @@ pub fn flatten_gds_library(
             &mut unmapped,
             &mut visits,
             options.expansion_limit,
+            options.geometry_policy,
             &mut path,
             &[],
         )?;
@@ -1737,6 +1754,7 @@ fn append_structure(
     unmapped: &mut BTreeMap<(i32, i32), usize>,
     visits: &mut usize,
     limit: usize,
+    geometry_policy: GdsGeometryPolicy,
     hierarchy_path: &mut Vec<String>,
     inherited_properties: &[(i16, String)],
 ) -> Result<(), LayoutError> {
@@ -1775,6 +1793,7 @@ fn append_structure(
                 unmapped,
                 &properties,
                 hierarchy_path,
+                geometry_policy,
             )?,
             GdsElement::Box(v) => append_ring(
                 v.layer,
@@ -1786,6 +1805,7 @@ fn append_structure(
                 unmapped,
                 &properties,
                 hierarchy_path,
+                geometry_policy,
             )?,
             GdsElement::Path(v) => {
                 let polygons = stroke_path(v)?;
@@ -1800,6 +1820,7 @@ fn append_structure(
                         unmapped,
                         &properties,
                         hierarchy_path,
+                        geometry_policy,
                     )?;
                 }
             }
@@ -1853,6 +1874,7 @@ fn append_structure(
                     unmapped,
                     visits,
                     limit,
+                    geometry_policy,
                     hierarchy_path,
                     &properties,
                 )?;
@@ -1881,6 +1903,7 @@ fn append_structure(
                             unmapped,
                             visits,
                             limit,
+                            geometry_policy,
                             hierarchy_path,
                             &properties,
                         )?;
@@ -1953,6 +1976,7 @@ fn append_ring(
     unmapped: &mut BTreeMap<(i32, i32), usize>,
     properties: &[(i16, String)],
     hierarchy_path: &[String],
+    geometry_policy: GdsGeometryPolicy,
 ) -> Result<(), LayoutError> {
     let mut transformed: Vec<Point> = ring
         .iter()
@@ -1962,12 +1986,14 @@ fn append_ring(
     if transform.reverses() {
         transformed.reverse();
     }
-    Ring::new(transformed.clone()).map_err(|e| {
-        LayoutError::layout(
-            LayoutErrorKind::NonIntegralTransform,
-            format!("transformed ring is invalid: {e}"),
-        )
-    })?;
+    if geometry_policy == GdsGeometryPolicy::Strict {
+        Ring::new(transformed.clone()).map_err(|e| {
+            LayoutError::layout(
+                LayoutErrorKind::Malformed,
+                format!("transformed ring is invalid: {e}"),
+            )
+        })?;
+    }
     if let Some(layer_id) = layers.from_gds(layer as i32, datatype as i32) {
         let points: Vec<(i32, i32)> = transformed.iter().map(|p| (p.x, p.y)).collect();
         store.add_polygon_annotated(
@@ -2221,6 +2247,46 @@ mod tests {
         assert!(!compatible.envelope.units);
         assert!(!compatible.envelope.endlib);
         assert_eq!(compatible.structures.len(), 1);
+    }
+
+    #[test]
+    fn strict_rejects_zero_area_while_legacy_drc_preserves_and_flags_it() {
+        let mut library = complete_library(vec![structure("top", vec![boundary()])]);
+        let GdsElement::Boundary(shape) = &mut library.structures[0].elements[0] else {
+            unreachable!()
+        };
+        shape.ring = rectangle(0, 0, 0, 500);
+        let bytes = write_gds_library(&library).expect("lossless writer retains malformed fixture");
+
+        let strict_error = read_gds_library(&bytes, GdsReadMode::Strict).unwrap_err();
+        assert_eq!(strict_error.kind, LayoutErrorKind::Malformed);
+        assert!(strict_error
+            .message
+            .contains("duplicate consecutive vertex"));
+
+        let compatible = read_gds_library(&bytes, GdsReadMode::Compatibility)
+            .expect("compatibility parser retains the closed invalid boundary");
+        assert_eq!(
+            flatten_gds_library(&compatible, &layer_table(), &GdsFlattenOptions::default())
+                .err()
+                .unwrap()
+                .kind,
+            LayoutErrorKind::Malformed,
+            "strict flatten remains fail-closed even after compatibility parsing"
+        );
+        let options = GdsFlattenOptions {
+            geometry_policy: GdsGeometryPolicy::PreserveInvalidForPolygonValidity,
+            ..Default::default()
+        };
+        let layout = flatten_gds_library(&compatible, &layer_table(), &options)
+            .expect("legacy DRC policy retains invalid ring");
+        let deck =
+            crate::params::Deck::from_json(r#"{"layers":{"met1":{"layer":7,"datatype":0}}}"#)
+                .expect("minimal deck");
+        let report = crate::drc::run_drc(&layout.cells["top"], &deck);
+        let validity = report.by_kind("polygon_validity");
+        assert_eq!(validity.len(), 1);
+        assert_eq!(validity[0].measured, 0);
     }
 
     #[test]

@@ -59,11 +59,11 @@ pub use lvs::netlist::{
 };
 pub use erc::{run_erc, ErcReport, ErcViolation, MultipleDriverCheck, TieHighLowCheck};
 pub use signoff::*;
-pub use gds::{read_gds, GdsLayout, GdsUnits, GdsUnmappedLayer};
+pub use gds::{read_gds, read_gds_checked, GdsLayout, GdsUnits, GdsUnmappedLayer};
 pub use gds_lossless::{
     flatten_gds_library, read_gds_library, stroke_path, write_gds_library,
     GdsArrayReference, GdsBoundary, GdsBoxElement, GdsElement, GdsElementMeta,
-    GdsEnvelope, GdsFlattenOptions, GdsLibrary, GdsNode, GdsPath, GdsProperty,
+    GdsEnvelope, GdsFlattenOptions, GdsGeometryPolicy, GdsLibrary, GdsNode, GdsPath, GdsProperty,
     GdsRawRecord, GdsReadMode, GdsReference, GdsStructure, GdsText,
     GdsTransform, GdsUnsupportedElement, LayoutError, LayoutErrorKind,
 };
@@ -104,8 +104,39 @@ fn validate_gds_database_units(units: Option<GdsUnits>, deck_dbu_nm: f64) -> Res
 
 /// Convenience: read a GDS file into per-cell stores using the deck's layer table.
 pub fn load_gds(path: &str, deck: &Deck) -> Result<GdsLayout, String> {
+    load_gds_with_policy(path, deck, GdsLoadPolicy::LegacyDrcCompatibility)
+}
+
+/// Stream policy for deck-aware file loading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GdsLoadPolicy {
+    /// Preserves closed invalid polygons so the always-on DRC polygon-validity
+    /// check can report legacy/fuzz corpus defects.
+    LegacyDrcCompatibility,
+    /// Requires a complete GDS envelope and valid simple geometry. This is the
+    /// required policy for signoff and deck qualification.
+    StrictSignoff,
+}
+
+pub fn load_gds_strict(path: &str, deck: &Deck) -> Result<GdsLayout, String> {
+    load_gds_with_policy(path, deck, GdsLoadPolicy::StrictSignoff)
+}
+
+pub fn load_gds_with_policy(
+    path: &str,
+    deck: &Deck,
+    policy: GdsLoadPolicy,
+) -> Result<GdsLayout, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let layout = read_gds(&bytes, &deck.layers)?;
+    let layout = match policy {
+        GdsLoadPolicy::LegacyDrcCompatibility => read_gds(&bytes, &deck.layers)?,
+        GdsLoadPolicy::StrictSignoff => read_gds_checked(
+            &bytes,
+            GdsReadMode::Strict,
+            &deck.layers,
+            &GdsFlattenOptions::default(),
+        )?,
+    };
     validate_gds_database_units(layout.units, deck.dbu_nm)?;
     Ok(layout)
 }
