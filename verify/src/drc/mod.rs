@@ -469,8 +469,8 @@ fn check_polygon_validity(store: &GeometryStore, lt: &LayerTable) -> Vec<Violati
     for p in 0..store.poly_count() {
         let pid = PolyId(p as u32);
         let bb = store.poly_bbox[p];
-        let issue = if poly_has_unpaired_point_contact(store, pid) {
-            Some("unpaired_point_contact")
+        let issue = if poly_has_invalid_nonadjacent_contact(store, pid) {
+            Some("invalid_boundary_contact")
         } else if poly_self_intersects(store, pid) {
             Some("self_intersecting")
         } else if store.area(pid) == 0 {
@@ -490,29 +490,83 @@ fn check_polygon_validity(store: &GeometryStore, lt: &LayerTable) -> Vec<Violati
     out
 }
 
-/// Non-adjacent repeated vertices are legal only when their occurrences are
-/// joined by the two directions of a retraced slit edge. This distinguishes a
-/// structurally paired GDS keyhole from two opposite-winding lobes that merely
-/// touch at one point.
-fn poly_has_unpaired_point_contact(store: &GeometryStore, polygon: PolyId) -> bool {
+/// Reject every non-adjacent touch/overlap except contacts belonging to a
+/// validated paired-retrace keyhole slit. A valid slit consists of exact reverse
+/// edges separating two simple, opposite-winding rings (outer and hole).
+fn poly_has_invalid_nonadjacent_contact(store: &GeometryStore, polygon: PolyId) -> bool {
+    use crate::geometry::exact::{
+        classify_segment_intersection, on_segment, Point, Ring, SegmentIntersection,
+    };
+    use std::collections::BTreeSet;
+
     let (start, end) = store.poly_range(polygon);
-    let points: Vec<_> = (start..end)
-        .map(|index| (store.verts_x[index], store.verts_y[index]))
+    let points: Vec<Point> = (start..end)
+        .map(|index| Point::new(store.verts_x[index], store.verts_y[index]))
         .collect();
     let n = points.len();
     if n < 4 { return false; }
     let adjacent = |a: usize, b: usize| {
         a.abs_diff(b) == 1 || (a == 0 && b == n - 1) || (b == 0 && a == n - 1)
     };
+
+    let valid_retrace = |i: usize, j: usize| {
+        if adjacent(i, j)
+            || points[i] != points[(j + 1) % n]
+            || points[(i + 1) % n] != points[j]
+        {
+            return false;
+        }
+        let between = points[i + 1..=j].to_vec();
+        let mut outside = points[j + 1..].to_vec();
+        outside.extend_from_slice(&points[..=i]);
+        let (Ok(between), Ok(outside)) = (Ring::new(between), Ring::new(outside)) else {
+            return false;
+        };
+        between.signed_area2().signum() != outside.signed_area2().signum()
+    };
+
+    let mut retraces = BTreeSet::new();
+    let mut protected = BTreeSet::new();
     for i in 0..n {
         for j in i + 1..n {
-            if points[i] != points[j] || adjacent(i, j) { continue; }
-            let prev_i = points[(i + n - 1) % n];
-            let next_i = points[(i + 1) % n];
-            let prev_j = points[(j + n - 1) % n];
-            let next_j = points[(j + 1) % n];
-            let paired_retrace = next_i == prev_j || prev_i == next_j;
-            if !paired_retrace { return true; }
+            if valid_retrace(i, j) {
+                retraces.insert((i, j));
+                protected.insert(points[i]);
+                protected.insert(points[(i + 1) % n]);
+            }
+        }
+    }
+
+    for i in 0..n {
+        let a0 = points[i];
+        let a1 = points[(i + 1) % n];
+        for j in i + 1..n {
+            let b0 = points[j];
+            let b1 = points[(j + 1) % n];
+            let contact = classify_segment_intersection(a0, a1, b0, b1);
+            if adjacent(i, j) {
+                // Normal adjacent edges touch at one endpoint. Immediate
+                // backtracking/overlap is a malformed spike, not a keyhole.
+                if matches!(contact, SegmentIntersection::Proper | SegmentIntersection::Overlap) {
+                    return true;
+                }
+                continue;
+            }
+            match contact {
+                SegmentIntersection::None => {}
+                SegmentIntersection::Proper => return true,
+                SegmentIntersection::Overlap => {
+                    if !retraces.contains(&(i, j)) { return true; }
+                }
+                SegmentIntersection::Touch => {
+                    let contacts = [a0, a1, b0, b1]
+                        .into_iter()
+                        .filter(|point| on_segment(a0, a1, *point) && on_segment(b0, b1, *point));
+                    if contacts.into_iter().any(|point| !protected.contains(&point)) {
+                        return true;
+                    }
+                }
+            }
         }
     }
     false

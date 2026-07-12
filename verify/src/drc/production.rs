@@ -1825,13 +1825,15 @@ mod tests {
 
     #[test]
     fn legacy_public_apis_reject_point_touch_lobes_but_accept_paired_keyholes() {
-        let deck =
-            Deck::from_json(r#"{"layers":{"m1":{"layer":1,"datatype":0}},"drc":{}}"#).unwrap();
+        let deck = Deck::from_json(
+            r#"{"layers":{"m1":{"layer":1,"datatype":0}},
+                "drc":{"GRID":{"kind":"off_grid","grid":1}}}"#,
+        )
+        .unwrap();
         let layer = deck.layers.id("m1").unwrap();
-        let mut malformed = GeometryStore::new();
-        malformed.add_polygon(
-            layer,
-            &[
+        let malformed_cases = vec![
+            // Two opposite-winding lobes touch only at the repeated point.
+            vec![
                 (10, 0),
                 (20, 0),
                 (20, 20),
@@ -1842,23 +1844,66 @@ mod tests {
                 (-5, 0),
                 (0, 0),
             ],
-        );
-        let raw = run_drc(&malformed, &deck);
-        assert_eq!(raw.violations.len(), 1);
-        assert_eq!(raw.violations[0].rule_id, "__geometry__");
-        assert_eq!(raw.violations[0].kind, "polygon_validity");
-        let checked = run_legacy_adapter(&malformed, &deck);
-        assert!(!checked.is_clean());
-        let geometry = checked
-            .rules
-            .iter()
-            .find(|rule| rule.rule_id == "__geometry__")
-            .unwrap();
-        assert_eq!(geometry.status, RuleStatus::Error);
-        assert_eq!(
-            geometry.diagnostics[0].code,
-            DiagnosticCode::InvalidGeometry
-        );
+            // A vertex touches the interior of a non-adjacent edge.
+            vec![(0, 0), (10, 0), (10, 10), (0, 10), (5, 0), (5, -5)],
+            // A later edge partially retraces a non-adjacent edge.
+            vec![
+                (0, 0),
+                (10, 0),
+                (10, 10),
+                (0, 10),
+                (7, 0),
+                (3, 0),
+                (3, -5),
+                (7, -5),
+            ],
+            // Full same-direction overlap is not a paired slit.
+            vec![
+                (0, 0),
+                (10, 0),
+                (10, 10),
+                (0, 10),
+                (0, 0),
+                (10, 0),
+                (10, -5),
+                (0, -5),
+            ],
+            // Immediate reverse-edge backtracking is a spike, not a hole cycle.
+            vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0), (0, -5), (0, 0)],
+        ];
+        for points in malformed_cases {
+            let mut malformed = GeometryStore::new();
+            malformed.add_polygon(layer, &points);
+            let raw = run_drc(&malformed, &deck);
+            assert_eq!(
+                raw.violations.len(),
+                1,
+                "missed malformed boundary {points:?}"
+            );
+            assert_eq!(raw.violations[0].rule_id, "__geometry__");
+            assert_eq!(raw.violations[0].kind, "polygon_validity");
+            let checked = run_legacy_adapter(&malformed, &deck);
+            assert!(!checked.is_clean());
+            assert_eq!(
+                checked
+                    .rules
+                    .iter()
+                    .find(|rule| rule.rule_id == "GRID")
+                    .unwrap()
+                    .status,
+                RuleStatus::Clean,
+            );
+            let geometry = checked
+                .rules
+                .iter()
+                .find(|rule| rule.rule_id == "__geometry__")
+                .unwrap();
+            assert_eq!(geometry.status, RuleStatus::Error);
+            assert_eq!(
+                geometry.diagnostics[0].code,
+                DiagnosticCode::InvalidGeometry
+            );
+        }
 
         let mut valid_keyhole = GeometryStore::new();
         valid_keyhole.add_polygon(
@@ -1879,5 +1924,6 @@ mod tests {
             ],
         );
         assert!(run_drc(&valid_keyhole, &deck).violations.is_empty());
+        assert!(run_legacy_adapter(&valid_keyhole, &deck).is_clean());
     }
 }
