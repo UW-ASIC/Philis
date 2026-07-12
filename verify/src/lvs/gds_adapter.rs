@@ -2160,6 +2160,13 @@ X0 S D G1 G2 B mid\n\
                     && device.contains("gds:leaf")),
             "{witness:#?}"
         );
+        assert!(
+            witness.hierarchy_paths.iter().any(|path| path
+                .0
+                .iter()
+                .any(|part| part.contains("top/gds:top:E") && part.contains("gds:mid:E"))),
+            "{witness:#?}"
+        );
     }
 
     #[test]

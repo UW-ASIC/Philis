@@ -1634,7 +1634,7 @@ pub fn compare_production(
         );
     }
 
-    let (layout_devices, reference_devices, layout_nets, reference_nets, path) =
+    let (layout_devices, reference_devices, layout_nets, reference_nets, path, hierarchy_paths) =
         if let Some((reference_index, layout_index, assignment)) = diagnostics.first_conflict {
             let layout_device = &layout.devices[layout_index];
             let reference_device = &reference.devices[reference_index];
@@ -1650,13 +1650,19 @@ pub fn compare_production(
                 nets,
                 assignment.iter().map(|(net, _)| net.clone()).collect(),
                 path,
+                vec![layout_device.path.clone(), reference_device.path.clone()],
             )
         } else {
+            let layout_devices = layout.devices.iter().take(2).collect::<Vec<_>>();
+            let reference_devices = reference.devices.iter().take(2).collect::<Vec<_>>();
+            let hierarchy_paths = layout_devices
+                .iter()
+                .map(|device| device.path.clone())
+                .chain(reference_devices.iter().map(|device| device.path.clone()))
+                .collect();
             (
-                layout
-                    .devices
-                    .iter()
-                    .take(2)
+                layout_devices
+                    .into_iter()
                     .map(|device| device.id.clone())
                     .collect(),
                 reference
@@ -1668,6 +1674,7 @@ pub fn compare_production(
                 layout.nets.keys().copied().take(2).collect(),
                 reference.nets.keys().take(2).cloned().collect(),
                 Vec::new(),
+                hierarchy_paths,
             )
         };
     let explanation =
@@ -1679,7 +1686,7 @@ pub fn compare_production(
         layout_nets,
         reference_nets,
         path,
-        hierarchy_paths: Vec::new(),
+        hierarchy_paths,
         explanation: explanation.clone(),
     };
     let canonical = format!("topology|{witness:?}");
