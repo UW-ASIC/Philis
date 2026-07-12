@@ -19,7 +19,9 @@ use crate::params::{Deck, DrcRuleParam, LayerTable};
 
 pub mod coloring;
 pub mod derived;
+pub mod fill;
 pub mod production;
+pub mod results;
 
 /// A single rule violation. Flat, serializable, comparable against the manifest.
 #[derive(Debug, Clone)]
