@@ -17,6 +17,9 @@ use crate::geometry::*;
 use crate::traits::{self as gpu, Backend, VerifyCheck};
 use crate::params::{Deck, DrcRuleParam, LayerTable};
 
+pub mod coloring;
+pub mod derived;
+
 /// A single rule violation. Flat, serializable, comparable against the manifest.
 #[derive(Debug, Clone)]
 pub struct Violation {
@@ -1993,12 +1996,11 @@ fn check_max_distance_to_tap(
     }
 }
 
-// --- multi-patterning (greedy graph coloring) --------------------------------
+// --- multi-patterning (complete bounded graph coloring) ----------------------
 // Build a conflict graph: two polygons within color_spacing are "conflicting"
-// (can't share a color). Attempt greedy graph coloring with num_colors colors.
-// If coloring fails, emit one violation and stop.
-// ponytail: greedy coloring, not optimal — false positives possible on
-// pathological layouts; upgrade to backtracking if needed.
+// (can't share a color). The shared DSATUR/backtracking solver is complete within
+// its declared node/search bounds. Capacity exhaustion is a fail-closed marker,
+// never treated as evidence that the graph is clean or uncolorable.
 fn check_multi_patterning(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, num_colors: i32,
     color_spacing: i32, rule_id: &str, out: &mut Vec<Violation>,
@@ -2010,42 +2012,33 @@ fn check_multi_patterning(
     let cands = candidate_pairs(store, &polys, None, color_spacing);
     let idx_of: std::collections::HashMap<u32, usize> =
         polys.iter().enumerate().map(|(i, p)| (p.0, i)).collect();
-    // build adjacency list
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut conflicts = Vec::new();
     for &(pa, pb) in &cands {
         let d2 = poly_poly_dist2_within(store, pa, pb, color_spacing);
         if d2 > 0 && d2 < cs2 {
             let ia = idx_of[&pa.0];
             let ib = idx_of[&pb.0];
-            adj[ia].push(ib);
-            adj[ib].push(ia);
+            conflicts.push((ia, ib));
         }
     }
-    // greedy coloring
-    let mut color: Vec<i32> = vec![-1; n];
-    for i in 0..n {
-        let mut used = vec![false; num_colors as usize];
-        for &nb in &adj[i] {
-            if color[nb] >= 0 {
-                used[color[nb] as usize] = true;
-            }
-        }
-        let mut assigned = false;
-        for c in 0..num_colors {
-            if !used[c as usize] {
-                color[i] = c;
-                assigned = true;
-                break;
-            }
-        }
-        if !assigned {
-            let bb = store.poly_bbox[polys[i].0 as usize];
+    let problem = coloring::ColoringProblem::new(n, num_colors as usize, conflicts);
+    match coloring::solve_coloring(&problem) {
+        Ok(_) => {}
+        Err(error) => {
+            let (kind, witness) = match error {
+                coloring::ColoringError::Uncolorable { witness } => {
+                    ("multi_patterning", witness.first().copied().unwrap_or(0))
+                }
+                coloring::ColoringError::CapacityExceeded { .. }
+                | coloring::ColoringError::SearchLimit { .. }
+                | coloring::ColoringError::Invalid(_) => ("multi_patterning_error", 0),
+            };
+            let bb = store.poly_bbox[polys[witness.min(n - 1)].0 as usize];
             out.push(Violation {
-                rule_id: rule_id.into(), kind: "multi_patterning".into(),
+                rule_id: rule_id.into(), kind: kind.into(),
                 layer: lt.name(layer).into(), measured: num_colors as i64,
                 limit: num_colors as i64, x: bb.xmin, y: bb.ymin,
             });
-            return; // one violation and stop
         }
     }
 }
