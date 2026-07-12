@@ -163,6 +163,7 @@ pub const MAX_OFFSET_CELLS: usize = 2_000_000;
 pub struct DerivedEvaluator<'a> {
     store: &'a GeometryStore,
     definitions: &'a BTreeMap<String, DerivedExpr>,
+    known_layer_count: Option<usize>,
     cache: BTreeMap<String, DerivedValue>,
     stack: Vec<String>,
 }
@@ -172,6 +173,23 @@ impl<'a> DerivedEvaluator<'a> {
         Self {
             store,
             definitions,
+            known_layer_count: None,
+            cache: BTreeMap::new(),
+            stack: Vec::new(),
+        }
+    }
+
+    /// Construct an evaluator that can distinguish a valid empty layer from an
+    /// out-of-schema numeric layer ID.
+    pub fn new_checked(
+        store: &'a GeometryStore,
+        definitions: &'a BTreeMap<String, DerivedExpr>,
+        known_layer_count: usize,
+    ) -> Self {
+        Self {
+            store,
+            definitions,
+            known_layer_count: Some(known_layer_count),
             cache: BTreeMap::new(),
             stack: Vec::new(),
         }
@@ -204,7 +222,11 @@ impl<'a> DerivedEvaluator<'a> {
         match expression {
             Layer {
                 layer: LayerExprRef::Base { layer },
-            } => Ok(DerivedValue::Area(layer_polygon_set(self.store, *layer)?)),
+            } => Ok(DerivedValue::Area(layer_polygon_set(
+                self.store,
+                *layer,
+                self.known_layer_count,
+            )?)),
             Layer {
                 layer: LayerExprRef::Derived { name },
             } => self.evaluate_named(name),
@@ -329,11 +351,9 @@ impl<'a> DerivedEvaluator<'a> {
 pub fn layer_polygon_set(
     store: &GeometryStore,
     layer: LayerId,
+    known_layer_count: Option<usize>,
 ) -> Result<PolygonSet, DerivedError> {
-    let Some(max_layer) = store.poly_layer.iter().max() else {
-        return Ok(PolygonSet::empty());
-    };
-    if layer > *max_layer && !store.poly_layer.contains(&layer) {
+    if known_layer_count.is_some_and(|count| usize::from(layer) >= count) {
         return Err(DerivedError::UnknownLayer(layer));
     }
     let mut result = PolygonSet::empty();
