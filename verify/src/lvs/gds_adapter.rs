@@ -21,8 +21,12 @@ use crate::geometry::exact::{classify_polygon_contact, Point, PolygonContact, Ri
 use crate::geometry::{GeometryStore, LayerId, PolyId};
 use crate::params::Deck;
 use crate::traits::Backend;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
+
+/// Hard pre-recursion bound for the current W2/W4 flatten consumers. The
+/// adapter's iterative selected-top audit runs first and rejects deeper cones.
+pub const GDS_ADAPTER_MAX_STACK_SAFE_DEPTH: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GdsHierarchyAdapterErrorKind {
@@ -138,8 +142,8 @@ pub struct GdsHierarchyAdapterOptions {
     pub max_array_copies: usize,
     /// Maximum expanded non-black-box instance count across the selected top.
     pub max_hierarchy_expanded_instances: usize,
-    /// Maximum cell nesting depth. Validation is iterative, so this is a
-    /// semantic/capacity limit rather than a process-stack limit.
+    /// Requested maximum cell nesting depth, additionally capped by
+    /// [`GDS_ADAPTER_MAX_STACK_SAFE_DEPTH`] before recursive W2/W4 consumers.
     pub max_hierarchy_depth: usize,
     /// W2 flattening counts geometry and reference visits, not only instances.
     pub max_physical_flatten_visits: usize,
@@ -161,7 +165,7 @@ impl GdsHierarchyAdapterOptions {
             allow_boundary_port_contact: false,
             max_array_copies: 1_000_000,
             max_hierarchy_expanded_instances: 1_000_000,
-            max_hierarchy_depth: 4_096,
+            max_hierarchy_depth: GDS_ADAPTER_MAX_STACK_SAFE_DEPTH,
             max_physical_flatten_visits: 10_000_000,
         }
     }
@@ -1189,17 +1193,6 @@ fn validate_options(
             "library contains unhandled GDS records with no electrical semantics",
         ));
     }
-    if let Some(structure) = library
-        .structures
-        .iter()
-        .find(|structure| !structure.unhandled_records.is_empty())
-    {
-        return Err(GdsHierarchyAdapterError::cell(
-            GdsHierarchyAdapterErrorKind::Unsupported,
-            &structure.name,
-            "structure contains unhandled GDS records with no electrical semantics",
-        ));
-    }
     if options.top_cell.trim().is_empty() {
         return Err(GdsHierarchyAdapterError::cell(
             GdsHierarchyAdapterErrorKind::InvalidOptions,
@@ -1845,6 +1838,216 @@ fn array_for(
     })
 }
 
+fn selected_top_nonopaque_structures(
+    library: &GdsLibrary,
+    options: &GdsHierarchyAdapterOptions,
+) -> Result<BTreeSet<String>, GdsHierarchyAdapterError> {
+    #[derive(Debug)]
+    struct Frame {
+        cell: String,
+        next_element: usize,
+    }
+
+    let by_name = library
+        .structures
+        .iter()
+        .map(|structure| (structure.name.as_str(), structure))
+        .collect::<BTreeMap<_, _>>();
+    let depth_limit = options
+        .max_hierarchy_depth
+        .min(GDS_ADAPTER_MAX_STACK_SAFE_DEPTH);
+    let mut colors = BTreeMap::<String, u8>::new();
+    colors.insert(options.top_cell.clone(), 1);
+    let mut stack = vec![Frame {
+        cell: options.top_cell.clone(),
+        next_element: 0,
+    }];
+    let mut postorder = Vec::new();
+    while !stack.is_empty() {
+        let depth = stack.len();
+        let current = stack.last().unwrap().cell.clone();
+        if depth > depth_limit {
+            let path = stack
+                .iter()
+                .map(|frame| frame.cell.clone())
+                .collect::<Vec<_>>();
+            return Err(GdsHierarchyAdapterError::cell(
+                GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                &current,
+                format!(
+                    "selected-top hierarchy depth {depth} exceeds stack-safe/configured limit {depth_limit} along {}",
+                    path.join(" -> ")
+                ),
+            ));
+        }
+        let structure = by_name.get(current.as_str()).ok_or_else(|| {
+            GdsHierarchyAdapterError::cell(
+                GdsHierarchyAdapterErrorKind::UndefinedCell,
+                &current,
+                "selected-top hierarchy references an undefined nonopaque cell",
+            )
+        })?;
+        if !structure.unhandled_records.is_empty() {
+            return Err(GdsHierarchyAdapterError::cell(
+                GdsHierarchyAdapterErrorKind::Unsupported,
+                &current,
+                "reachable nonopaque structure contains unhandled GDS records",
+            ));
+        }
+        let next = stack.last().unwrap().next_element;
+        if next == structure.elements.len() {
+            let completed = stack.pop().unwrap().cell;
+            colors.insert(completed.clone(), 2);
+            postorder.push(completed);
+            continue;
+        }
+        let element = &structure.elements[next];
+        stack.last_mut().unwrap().next_element += 1;
+        let target = match element {
+            GdsElement::Sref(reference) => Some(reference.structure.as_str()),
+            GdsElement::Aref(reference) => {
+                if reference.columns == 0 || reference.rows == 0 {
+                    return Err(GdsHierarchyAdapterError::element(
+                        GdsHierarchyAdapterErrorKind::ConflictingEvidence,
+                        &current,
+                        next,
+                        format!(
+                            "AREF dimensions must be positive, got {} columns x {} rows",
+                            reference.columns, reference.rows
+                        ),
+                    ));
+                }
+                let copies = usize::from(reference.columns)
+                    .checked_mul(usize::from(reference.rows))
+                    .ok_or_else(|| {
+                        GdsHierarchyAdapterError::element(
+                            GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                            &current,
+                            next,
+                            "AREF copy count overflow",
+                        )
+                    })?;
+                if copies > options.max_array_copies {
+                    return Err(GdsHierarchyAdapterError::element(
+                        GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                        &current,
+                        next,
+                        format!(
+                            "array has {copies} copies; configured limit is {}",
+                            options.max_array_copies
+                        ),
+                    ));
+                }
+                Some(reference.structure.as_str())
+            }
+            _ => None,
+        };
+        let Some(target) = target else {
+            continue;
+        };
+        if black_box(options, target).is_some() {
+            // Configured opaque targets are terminal boundary objects whether
+            // or not a body structure exists. Never traverse their descendants.
+            continue;
+        }
+        if !by_name.contains_key(target) {
+            return Err(GdsHierarchyAdapterError::element(
+                GdsHierarchyAdapterErrorKind::UndefinedCell,
+                &current,
+                next,
+                format!("undefined nonopaque instance target `{target}`"),
+            ));
+        }
+        match colors.get(target).copied().unwrap_or(0) {
+            2 => {}
+            1 => {
+                let mut cycle = stack
+                    .iter()
+                    .map(|frame| frame.cell.clone())
+                    .collect::<Vec<_>>();
+                cycle.push(target.to_string());
+                return Err(GdsHierarchyAdapterError::element(
+                    GdsHierarchyAdapterErrorKind::HierarchyCycle,
+                    &current,
+                    next,
+                    format!("hierarchy cycle: {}", cycle.join(" -> ")),
+                ));
+            }
+            _ => {
+                colors.insert(target.to_string(), 1);
+                stack.push(Frame {
+                    cell: target.to_string(),
+                    next_element: 0,
+                });
+            }
+        }
+    }
+
+    let mut expanded = BTreeMap::<String, usize>::new();
+    for name in &postorder {
+        let structure = by_name[name.as_str()];
+        let mut total = 0usize;
+        for (element_index, element) in structure.elements.iter().enumerate() {
+            let (target, copies) = match element {
+                GdsElement::Sref(reference) => (reference.structure.as_str(), 1usize),
+                GdsElement::Aref(reference) => (
+                    reference.structure.as_str(),
+                    usize::from(reference.columns)
+                        .checked_mul(usize::from(reference.rows))
+                        .ok_or_else(|| {
+                            GdsHierarchyAdapterError::element(
+                                GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                                name,
+                                element_index,
+                                "AREF copy count overflow",
+                            )
+                        })?,
+                ),
+                _ => continue,
+            };
+            let descendants = if black_box(options, target).is_some() {
+                0
+            } else {
+                expanded[target]
+            };
+            let contribution = copies
+                .checked_mul(descendants.checked_add(1).ok_or_else(|| {
+                    GdsHierarchyAdapterError::cell(
+                        GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                        name,
+                        "expanded hierarchy count overflow",
+                    )
+                })?)
+                .ok_or_else(|| {
+                    GdsHierarchyAdapterError::cell(
+                        GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                        name,
+                        "expanded hierarchy count overflow",
+                    )
+                })?;
+            total = total.checked_add(contribution).ok_or_else(|| {
+                GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                    name,
+                    "expanded hierarchy count overflow",
+                )
+            })?;
+            if total > options.max_hierarchy_expanded_instances {
+                return Err(GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                    name,
+                    format!(
+                        "expanded hierarchy count {total} exceeds configured limit {}",
+                        options.max_hierarchy_expanded_instances
+                    ),
+                ));
+            }
+        }
+        expanded.insert(name.clone(), total);
+    }
+    Ok(postorder.into_iter().collect())
+}
+
 fn validate_adapter_hierarchy(
     layout: &HierLayout,
     options: &GdsHierarchyAdapterOptions,
@@ -1870,11 +2073,14 @@ fn validate_adapter_hierarchy(
         cell: layout.top_cell.clone(),
         next_instance: 0,
     }];
+    let depth_limit = options
+        .max_hierarchy_depth
+        .min(GDS_ADAPTER_MAX_STACK_SAFE_DEPTH);
     let mut postorder = Vec::new();
     while !stack.is_empty() {
         let depth = stack.len();
         let frame_cell = stack.last().unwrap().cell.clone();
-        if depth > options.max_hierarchy_depth {
+        if depth > depth_limit {
             let path = stack
                 .iter()
                 .map(|frame| frame.cell.clone())
@@ -1883,9 +2089,9 @@ fn validate_adapter_hierarchy(
                 GdsHierarchyAdapterErrorKind::CapacityExceeded,
                 &frame_cell,
                 format!(
-                    "hierarchy depth {} exceeds configured limit {} along {}",
+                    "hierarchy depth {} exceeds stack-safe/configured limit {} along {}",
                     depth,
-                    options.max_hierarchy_depth,
+                    depth_limit,
                     path.join(" -> ")
                 ),
             ));
@@ -2005,8 +2211,12 @@ fn validate_adapter_hierarchy(
 fn canonical_physical_library(
     library: &GdsLibrary,
     options: &GdsHierarchyAdapterOptions,
+    reachable_nonopaque: &BTreeSet<String>,
 ) -> Result<GdsLibrary, GdsHierarchyAdapterError> {
     let mut canonical = library.clone();
+    canonical
+        .structures
+        .retain(|structure| reachable_nonopaque.contains(&structure.name));
     for structure in &mut canonical.structures {
         let mut retained = Vec::with_capacity(structure.elements.len());
         for (element_index, mut element) in structure.elements.drain(..).enumerate() {
@@ -2164,7 +2374,8 @@ fn validate_physical_equivalence(
         ));
     }
 
-    let canonical = canonical_physical_library(library, options)?;
+    let reachable_nonopaque = layout.cells.keys().cloned().collect::<BTreeSet<_>>();
+    let canonical = canonical_physical_library(library, options, &reachable_nonopaque)?;
     let flattened = flatten_gds_library(
         &canonical,
         &deck.layers,
@@ -2275,21 +2486,27 @@ pub fn adapt_gds_hierarchy_to_lvs(
     backend: Backend,
 ) -> Result<GdsHierarchyAdapterResult, GdsHierarchyAdapterError> {
     validate_options(library, deck, options)?;
+    // This iterative, selected-top-only audit precedes every local extraction
+    // and every remaining recursive W2/W4 consumer.
+    let reachable_nonopaque = selected_top_nonopaque_structures(library, options)?;
     let mut provenance = GdsHierarchyProvenance::default();
     let mut locals = BTreeMap::<String, LocalCell>::new();
-    for structure in &library.structures {
+    for structure in library
+        .structures
+        .iter()
+        .filter(|structure| reachable_nonopaque.contains(&structure.name))
+    {
         locals.insert(
             structure.name.clone(),
             build_local_cell(structure, deck, options, backend, &mut provenance)?,
         );
     }
-    let structures: HashMap<&str, &GdsStructure> = library
+    let mut cells = BTreeMap::new();
+    for structure in library
         .structures
         .iter()
-        .map(|structure| (structure.name.as_str(), structure))
-        .collect();
-    let mut cells = BTreeMap::new();
-    for structure in &library.structures {
+        .filter(|structure| reachable_nonopaque.contains(&structure.name))
+    {
         let local = &locals[&structure.name];
         let mut instances = Vec::new();
         for (element_index, element) in structure.elements.iter().enumerate() {
@@ -2335,14 +2552,6 @@ pub fn adapt_gds_hierarchy_to_lvs(
             },
         );
     }
-    // Keep the lookup live as a sanity check against accidental duplicate names.
-    if structures.len() != library.structures.len() {
-        return Err(GdsHierarchyAdapterError::cell(
-            GdsHierarchyAdapterErrorKind::ConflictingEvidence,
-            &options.top_cell,
-            "duplicate structure names in lossless library",
-        ));
-    }
     let layout = HierLayout {
         top_cell: options.top_cell.clone(),
         cells,
@@ -2363,8 +2572,8 @@ mod tests {
     use super::*;
     use crate::gds::GdsUnits;
     use crate::gds_lossless::{
-        read_gds_library, write_gds_library, GdsArrayReference, GdsBoundary, GdsEnvelope, GdsPath,
-        GdsReadMode, GdsReference, GdsText,
+        read_gds_library, write_gds_library, GdsArrayReference, GdsBoundary, GdsEnvelope, GdsNode,
+        GdsPath, GdsReadMode, GdsReference, GdsText,
     };
     use crate::lvs::{
         bind_reference_hierarchy, compare_hierarchical_production, parse_netlist, ConfiguredModel,
@@ -2372,7 +2581,7 @@ mod tests {
         ProductionMismatch, ReferenceBindingOptions,
     };
     use crate::params::{
-        ConnectivityConfig, DeviceConfig, ErcParams, LayerDef, LayerTable, MosRule,
+        ConnectivityConfig, DeviceConfig, ErcParams, LayerDef, LayerTable, MosRule, ResistorRule,
     };
     use crate::schema::PropertyTolerance;
     use std::collections::HashMap;
@@ -3599,6 +3808,177 @@ X0 S D G1 G2 B mid\n\
                 .expect("unrelated opaque cell must not suppress or broaden top correlation");
         assert_eq!(
             adapted.physical_correlation,
+            GdsPhysicalCorrelationStatus::Correlated
+        );
+    }
+
+    #[test]
+    fn opaque_defined_invalid_bodies_match_undefined_boundary_semantics() {
+        let mut top_elements = Vec::new();
+        append_opaque_macro(&mut top_elements);
+        let undefined = lossless_round_trip(library(vec![structure("top", top_elements.clone())]));
+        let options = opaque_options();
+        let undefined_result =
+            adapt_gds_hierarchy_to_lvs(&undefined, &deck(), &options, Backend::Cpu)
+                .expect("configured undefined opaque boundary");
+
+        let invalid_interior = structure(
+            "macro",
+            vec![
+                text(99, 0, 0, "UNCONFIGURED", GdsElementMeta::default()),
+                GdsElement::Node(GdsNode {
+                    layer: 99,
+                    node_type: 0,
+                    points: vec![Point::new(0, 0)],
+                    meta: GdsElementMeta::default(),
+                }),
+                sref("bad_descendant", 0, 0, GdsElementMeta::default()),
+            ],
+        );
+        let bad_descendant = structure(
+            "bad_descendant",
+            vec![GdsElement::Node(GdsNode {
+                layer: 99,
+                node_type: 0,
+                points: vec![Point::new(0, 0)],
+                meta: GdsElementMeta::default(),
+            })],
+        );
+        let defined = lossless_round_trip(library(vec![
+            structure("top", top_elements.clone()),
+            invalid_interior,
+            bad_descendant,
+        ]));
+        let defined_result = adapt_gds_hierarchy_to_lvs(&defined, &deck(), &options, Backend::Cpu)
+            .expect("defined invalid opaque body and descendants are not inspected");
+        assert_eq!(undefined_result.layout, defined_result.layout);
+        assert_eq!(undefined_result.provenance, defined_result.provenance);
+        assert_eq!(
+            defined_result.physical_correlation,
+            GdsPhysicalCorrelationStatus::OpaqueBlackBoxes {
+                cells: BTreeSet::from(["macro".into()])
+            }
+        );
+
+        let mut resistor_deck = deck();
+        resistor_deck.devices.resistor_rules.push(ResistorRule {
+            name: "opaque_resistor".into(),
+            body_layer: resistor_deck.layers.id("met1").unwrap(),
+            marker_layer: resistor_deck.layers.id("nsdm").unwrap(),
+            terminal_layer: resistor_deck.layers.id("poly").unwrap(),
+        });
+        let device_interior = structure(
+            "macro",
+            vec![
+                boundary(7, 0, 0, 300, 100, GdsElementMeta::default()),
+                boundary(4, 0, 0, 300, 100, GdsElementMeta::default()),
+                boundary(3, 0, 0, 50, 100, GdsElementMeta::default()),
+                boundary(3, 250, 0, 300, 100, GdsElementMeta::default()),
+            ],
+        );
+        let defined_device = lossless_round_trip(library(vec![
+            structure("top", top_elements),
+            device_interior,
+        ]));
+        adapt_gds_hierarchy_to_lvs(&defined_device, &resistor_deck, &options, Backend::Cpu)
+            .expect("unsupported opaque device interior is pruned before recognition");
+    }
+
+    #[test]
+    fn opaque_boundary_maps_are_checked_before_ignoring_invalid_body() {
+        let mut top_elements = vec![
+            boundary(7, 1000, 0, 1100, 100, GdsElementMeta::default()),
+            text(7, 1050, 50, "BB", GdsElementMeta::default()),
+            sref("macro", 2000, 0, GdsElementMeta::default()),
+        ];
+        let invalid_body = structure(
+            "macro",
+            vec![GdsElement::Node(GdsNode {
+                layer: 99,
+                node_type: 0,
+                points: vec![Point::new(0, 0)],
+                meta: GdsElementMeta::default(),
+            })],
+        );
+        let library = lossless_round_trip(library(vec![
+            structure("top", std::mem::take(&mut top_elements)),
+            invalid_body,
+        ]));
+        let error = adapt_gds_hierarchy_to_lvs(&library, &deck(), &opaque_options(), Backend::Cpu)
+            .unwrap_err();
+        assert_eq!(error.kind, GdsHierarchyAdapterErrorKind::MissingEvidence);
+        assert!(error.message.contains("every declared port"));
+    }
+
+    fn hierarchy_chain(root: &str, prefix: &str, depth: usize) -> Vec<GdsStructure> {
+        let mut structures = Vec::with_capacity(depth);
+        let mut previous: Option<String> = None;
+        for index in 0..depth {
+            let name = if index + 1 == depth {
+                root.to_string()
+            } else {
+                format!("{prefix}{index}")
+            };
+            let elements = previous
+                .as_deref()
+                .map(|target| vec![sref(target, 0, 0, GdsElementMeta::default())])
+                .unwrap_or_default();
+            structures.push(structure(&name, elements));
+            previous = Some(name);
+        }
+        structures
+    }
+
+    #[test]
+    fn selected_top_depth_bound_precedes_recursive_consumers() {
+        let accepted = library(hierarchy_chain(
+            "top",
+            "accepted_",
+            GDS_ADAPTER_MAX_STACK_SAFE_DEPTH,
+        ));
+        let accepted_result = adapt_gds_hierarchy_to_lvs(
+            &accepted,
+            &deck(),
+            &GdsHierarchyAdapterOptions::new("top"),
+            Backend::Cpu,
+        )
+        .expect("stack-safe hard limit is accepted");
+        assert_eq!(
+            accepted_result.layout.cells.len(),
+            GDS_ADAPTER_MAX_STACK_SAFE_DEPTH
+        );
+
+        let over = library(hierarchy_chain(
+            "top",
+            "over_",
+            GDS_ADAPTER_MAX_STACK_SAFE_DEPTH + 1,
+        ));
+        let error = adapt_gds_hierarchy_to_lvs(
+            &over,
+            &deck(),
+            &GdsHierarchyAdapterOptions::new("top"),
+            Backend::Cpu,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, GdsHierarchyAdapterErrorKind::CapacityExceeded);
+        assert!(error.message.contains("stack-safe/configured limit"));
+
+        let mut unrelated = vec![structure("top", Vec::new())];
+        unrelated.extend(hierarchy_chain(
+            "unrelated_root",
+            "unrelated_",
+            GDS_ADAPTER_MAX_STACK_SAFE_DEPTH + 64,
+        ));
+        let unrelated_result = adapt_gds_hierarchy_to_lvs(
+            &library(unrelated),
+            &deck(),
+            &GdsHierarchyAdapterOptions::new("top"),
+            Backend::Cpu,
+        )
+        .expect("unrelated deep hierarchy is outside selected-top scope");
+        assert_eq!(unrelated_result.layout.cells.len(), 1);
+        assert_eq!(
+            unrelated_result.physical_correlation,
             GdsPhysicalCorrelationStatus::Correlated
         );
     }

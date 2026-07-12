@@ -86,7 +86,7 @@ pub use lvs::gds_adapter::{
     GdsBlackBoxAdapterSpec, GdsDrcHierarchyContext, GdsHierarchyAdapterError,
     GdsHierarchyAdapterErrorKind, GdsHierarchyAdapterOptions, GdsHierarchyAdapterResult,
     GdsHierarchyProvenance, GdsObjectProvenance, GdsPhysicalCorrelationStatus,
-    GdsTextEvidenceRule,
+    GdsTextEvidenceRule, GDS_ADAPTER_MAX_STACK_SAFE_DEPTH,
 };
 pub use erc::{run_erc, ErcReport, ErcViolation, MultipleDriverCheck, TieHighLowCheck};
 pub use signoff::*;
