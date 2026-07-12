@@ -529,6 +529,16 @@ fn check_polygon_validity(store: &GeometryStore, lt: &LayerTable) -> Vec<Violati
                     .then_some("geometry_capacity")
             }
             Err(ExactGeometryError::DegenerateRing) => Some("zero_area"),
+            // The admitted compatibility GDS adapter deliberately retains a
+            // collapsed boundary so this always-on scan can diagnose it. A
+            // zero-width rectangle reaches the exact constructor as duplicate
+            // consecutive vertices, but its physical defect is still zero
+            // area. Preserve that stable measurement without weakening the
+            // rejection of nonzero malformed contacts.
+            Err(
+                ExactGeometryError::DuplicateConsecutiveVertex { .. }
+                | ExactGeometryError::TooFewVertices { .. },
+            ) if store.signed_area2_exact(pid) == Some(0) => Some("zero_area"),
             Err(ExactGeometryError::ArithmeticOverflow)
             | Err(ExactGeometryError::CapacityExceeded { .. }) => Some("geometry_capacity"),
             Err(ExactGeometryError::SelfIntersection {
