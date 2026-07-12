@@ -18,30 +18,34 @@ struct Finger {
 
 impl CellGenerator for Finger {
     fn generate(&self, b: &mut CellBuilder) -> Result<(), CellError> {
-        let ct = 170; // licon.1
-        let poly_ext = 130; // poly.8
-        let sd_w = 250; // poly.7
+        // Step 1: read construction dimensions and layer roles from the same
+        // validated PDK context used by the backend's built-in generators.
+        let pdk = b.pdk()?;
+        let ct = pdk.contact;
+        let poly_ext = pdk.poly_ext;
+        let sd_w = pdk.sd_width;
+        let layers = &pdk.layers;
         let pitch = sd_w + self.l + sd_w;
 
-        // Diffusion strip
-        b.rect("diff", 0, 0, pitch, self.w)?;
+        // Step 2: emit device geometry through role names, never process names.
+        b.rect(&layers.diff, 0, 0, pitch, self.w)?;
 
         // Poly gate (centered, extends beyond diff)
         let gx = sd_w;
-        b.rect("poly", gx, -poly_ext, self.l, self.w + 2 * poly_ext)?;
+        b.rect(&layers.poly, gx, -poly_ext, self.l, self.w + 2 * poly_ext)?;
 
         // Source contact (left S/D region)
         let cy = self.w / 2 - ct / 2;
-        b.rect("li", sd_w / 2 - ct / 2, cy, ct, ct)?;
-        b.pin("S", "li", sd_w / 2 - ct / 2, cy, ct, ct)?;
+        b.rect(&layers.li, sd_w / 2 - ct / 2, cy, ct, ct)?;
+        b.pin("S", &layers.li, sd_w / 2 - ct / 2, cy, ct, ct)?;
 
         // Drain contact (right S/D region)
         let dx = gx + self.l + sd_w / 2 - ct / 2;
-        b.rect("li", dx, cy, ct, ct)?;
-        b.pin("D", "li", dx, cy, ct, ct)?;
+        b.rect(&layers.li, dx, cy, ct, ct)?;
+        b.pin("D", &layers.li, dx, cy, ct, ct)?;
 
         // Gate contact (below active)
-        b.pin("G", "poly", gx, -poly_ext, self.l, poly_ext)?;
+        b.pin("G", &layers.poly, gx, -poly_ext, self.l, poly_ext)?;
 
         Ok(())
     }
@@ -73,11 +77,15 @@ impl CellGenerator for DiffPair {
         b.set_matching_group(0);
         b.set_electrical(self.w * 2, self.l, 4, self.w);
 
-        let finger = Finger { w: self.w, l: self.l };
+        let finger = Finger {
+            w: self.w,
+            l: self.l,
+        };
 
         // Finger pitch: need enough room between fingers.
         // Compute from a trial generation.
-        let mut trial = CellBuilder::new(b.deck(), MatchingTier::None, 0);
+        let context = b.context().ok_or(CellError::MissingAnalogParams)?;
+        let mut trial = CellBuilder::with_context(context, MatchingTier::None, 0);
         finger.generate(&mut trial)?;
         let fb = trial.compute_bbox();
         let fp = fb.width() + 100; // finger pitch = finger width + spacing
@@ -99,10 +107,23 @@ impl CellGenerator for DiffPair {
         }
 
         // Dummy fingers at edges (field poly, no diff underneath)
+        let pdk = b.pdk()?;
         let dummy_x_left = -fp;
-        b.rect("poly", dummy_x_left + fp / 2 - self.l / 2, -130, self.l, self.w + 260)?;
+        b.rect(
+            &pdk.layers.poly,
+            dummy_x_left + fp / 2 - self.l / 2,
+            -pdk.poly_ext,
+            self.l,
+            self.w + 2 * pdk.poly_ext,
+        )?;
         let dummy_x_right = 4 * fp;
-        b.rect("poly", dummy_x_right + fp / 2 - self.l / 2, -130, self.l, self.w + 260)?;
+        b.rect(
+            &pdk.layers.poly,
+            dummy_x_right + fp / 2 - self.l / 2,
+            -pdk.poly_ext,
+            self.l,
+            self.w + 2 * pdk.poly_ext,
+        )?;
 
         Ok(())
     }
@@ -113,12 +134,13 @@ impl CellGenerator for DiffPair {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let deck = example_deck();
+    let (deck, pdk) = example_process();
     let dp = DiffPair { w: 420, l: 150 };
 
     println!("Ports: {:?}", dp.ports());
 
-    let mut b = CellBuilder::new(&deck, MatchingTier::Exceptional, 0);
+    let mut b =
+        CellBuilder::with_context(CellContext::new(&deck, &pdk), MatchingTier::Exceptional, 0);
     dp.generate(&mut b).expect("generate diff pair");
     let out = b.finish();
 
@@ -131,7 +153,7 @@ fn main() {
     println!("  tier: {:?}", out.meta.tier);
 }
 
-fn example_deck() -> Deck {
+fn example_process() -> (Deck, Pdk) {
     let json = r#"{
         "layers": {
             "diff":  {"layer": 65, "datatype": 20},
@@ -142,7 +164,16 @@ fn example_deck() -> Deck {
         },
         "drc": {
             "off_grid": {"grid": 5}
+        },
+        "cell": {
+            "layers": {"diff":"diff", "poly":"poly", "li":"li", "met1":"met1", "nwell":"nwell"},
+            "contact": 170,
+            "sd_width": 250,
+            "poly_ext": 130
         }
     }"#;
-    Deck::from_json(json).expect("deck")
+    (
+        Deck::from_json(json).expect("deck"),
+        Pdk::from_json(json).expect("cell PDK"),
+    )
 }

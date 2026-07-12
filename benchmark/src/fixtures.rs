@@ -14,23 +14,23 @@ use serde_json::Value;
 // Repo registry
 // ---------------------------------------------------------------------------
 
-const REPOS: &[(&str, &str)] = &[
-    ("ALIGN", "https://github.com/ALIGN-analoglayout/ALIGN-public.git"),
-    ("MAGICAL-CIRCUITS", "https://github.com/MAGICAL-eda/MAGICAL-CIRCUITS.git"),
-    ("ttsky25a-2stageCMOSOpAmp", "https://github.com/anweiteck/ttsky25a-2stageCMOSOpAmp.git"),
-    ("tt08-analog-vco", "https://github.com/gbsha/tt08-analog-vco.git"),
-    ("tt08-analog-r2r-dac-3v3", "https://github.com/mattvenn/tt08-analog-r2r-dac-3v3.git"),
-    ("TT08", "https://github.com/Sud-ana/TT08.git"),
-    ("tt08-analog-bias-generator", "https://github.com/rburt16/tt08-analog-bias-generator.git"),
-    ("tt08-analog-adc", "https://github.com/J0NTrollston/tt08-analog-adc.git"),
-    ("tt08-analog-ring-osc", "https://github.com/mattvenn/tt08-analog-ring-osc.git"),
-    ("ttsky-analog-PLL", "https://github.com/jyblue1001/ttsky-analog-PLL.git"),
-    ("tt06-sar", "https://github.com/wulffern/tt06-sar.git"),
-    ("tt09-analog-opamp-3stage", "https://github.com/rburt16/tt09-analog-opamp-3stage.git"),
-    ("tt10-OTA_FC", "https://github.com/Elettronica-UnivAQ/tt10-OTA_FC.git"),
-    ("tt09-analog-tdc", "https://github.com/13hihi31/tt09-analog-tdc.git"),
-    ("tt07-12bit_SAR_ADC", "https://github.com/rnunes2311/tt07-12bit_SAR_ADC.git"),
-    ("tt08-bgr", "https://github.com/AsalGolmanesh/tt08-bgr.git"),
+const REPOS: &[(&str, &str, &str)] = &[
+    ("ALIGN", "https://github.com/ALIGN-analoglayout/ALIGN-public.git", "e392ae4789eb49193a4865244d8cc31dbe1744b7"),
+    ("MAGICAL-CIRCUITS", "https://github.com/MAGICAL-eda/MAGICAL-CIRCUITS.git", "b2d7ed1dbf3245cff156e897a4ceba6acc065384"),
+    ("ttsky25a-2stageCMOSOpAmp", "https://github.com/anweiteck/ttsky25a-2stageCMOSOpAmp.git", "dac039b949e075582b9571b58111e49af8cdb424"),
+    ("tt08-analog-vco", "https://github.com/gbsha/tt08-analog-vco.git", "a4d9c07e88c8b2cb9a38d203a1b11cfc217b1f2e"),
+    ("tt08-analog-r2r-dac-3v3", "https://github.com/mattvenn/tt08-analog-r2r-dac-3v3.git", "fa8d779b2d746d47dfbb48536653d4313fc1a3bc"),
+    ("TT08", "https://github.com/Sud-ana/TT08.git", "8263d4744b040f021b9e221a463cc260b6d362a3"),
+    ("tt08-analog-bias-generator", "https://github.com/rburt16/tt08-analog-bias-generator.git", "b3c38399e9c92180010d6034b0735829713a2300"),
+    ("tt08-analog-adc", "https://github.com/J0NTrollston/tt08-analog-adc.git", "afdac9e8c1c12ef6e0a0849d927fb280e171cca0"),
+    ("tt08-analog-ring-osc", "https://github.com/mattvenn/tt08-analog-ring-osc.git", "db6f1fc745746f9820eb904a8aa65b75515335c1"),
+    ("ttsky-analog-PLL", "https://github.com/jyblue1001/ttsky-analog-PLL.git", "d77f5233a19eea522c2e7934fe2de25bac496c49"),
+    ("tt06-sar", "https://github.com/wulffern/tt06-sar.git", "b4ed33a6b0ac1925fa9e1671819e4d4cb6ef5eb0"),
+    ("tt09-analog-opamp-3stage", "https://github.com/rburt16/tt09-analog-opamp-3stage.git", "df3bb6ac84c52f175f521de68a4a437ee782b6c0"),
+    ("tt10-OTA_FC", "https://github.com/Elettronica-UnivAQ/tt10-OTA_FC.git", "13bb555c60f222155ff55ceb516e1d1df20644d4"),
+    ("tt09-analog-tdc", "https://github.com/13hihi31/tt09-analog-tdc.git", "deefa7b3226d3419c4dee03fefa12a90d651935e"),
+    ("tt07-12bit_SAR_ADC", "https://github.com/rnunes2311/tt07-12bit_SAR_ADC.git", "8552c5feec6dc6641e0f6fefb52748b432064b98"),
+    ("tt08-bgr", "https://github.com/AsalGolmanesh/tt08-bgr.git", "232fc4d2ddb2331bcfaae091cbc3abde3ca17d70"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -42,7 +42,9 @@ pub struct BenchmarkCircuit {
     pub name: String,
     pub suite: Suite,
     pub spice_path: PathBuf,
+    #[allow(dead_code)]
     pub description: String,
+    #[allow(dead_code)]
     pub ref_gds_path: Option<PathBuf>,
 }
 
@@ -301,7 +303,7 @@ pub fn clone_repos_if_needed(suite: Suite) -> std::io::Result<()> {
     if suite == Suite::Local {
         return Ok(()); // local fixtures need no clones
     }
-    for &(name, url) in REPOS {
+    for &(name, url, revision) in REPOS {
         let dominated_by_align = suite == Suite::Align && name != "ALIGN";
         let dominated_by_magical = suite == Suite::Magical && name != "MAGICAL-CIRCUITS";
         let skip_non_tt = suite == Suite::TinyTapeout
@@ -310,19 +312,80 @@ pub fn clone_repos_if_needed(suite: Suite) -> std::io::Result<()> {
             continue;
         }
         let dest = root.join(name);
-        if !dest.is_dir() {
-            eprintln!("Cloning {name}...");
-            let status = Command::new("git")
-                .args(["clone", "--depth", "1", url])
-                .arg(&dest)
-                .status()?;
-            if !status.success() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("git clone failed for {name}"),
-                ));
+        let created = !dest.exists();
+        if created {
+            eprintln!("Fetching pinned fixture {name}@{}...", &revision[..12]);
+            fs::create_dir_all(&dest)?;
+            if let Err(error) = checkout_revision(&dest, name, url, revision, true) {
+                let _ = fs::remove_dir_all(&dest);
+                return Err(error);
             }
+        } else if !dest.join(".git").exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("fixture path {} exists but is not a git repository", dest.display()),
+            ));
+        } else if current_revision(&dest)? != revision {
+            eprintln!("Updating fixture {name} to pinned revision {}...", &revision[..12]);
+            checkout_revision(&dest, name, url, revision, false)?;
         }
+    }
+    Ok(())
+}
+
+fn current_revision(repo: &Path) -> std::io::Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("cannot read fixture revision in {}", repo.display()),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn run_git(repo: &Path, fixture: &str, args: &[&str]) -> std::io::Result<()> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("git {} failed for {fixture}", args.first().copied().unwrap_or("command")),
+        ))
+    }
+}
+
+fn checkout_revision(
+    repo: &Path,
+    fixture: &str,
+    url: &str,
+    revision: &str,
+    initialize: bool,
+) -> std::io::Result<()> {
+    if initialize {
+        run_git(repo, fixture, &["init", "--quiet"])?;
+        run_git(repo, fixture, &["remote", "add", "origin", url])?;
+    }
+    run_git(
+        repo,
+        fixture,
+        &["fetch", "--quiet", "--depth", "1", "origin", revision],
+    )?;
+    run_git(repo, fixture, &["checkout", "--quiet", "--detach", revision])?;
+    if current_revision(repo)? != revision {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("fixture {fixture} did not resolve to pinned revision {revision}"),
+        ));
     }
     Ok(())
 }
@@ -465,6 +528,7 @@ fn fmt_um(val_um: f64) -> String {
 
 /// PDK data extracted for SPICE preprocessing.
 struct PdkPreprocess {
+    #[allow(dead_code)]
     name: String,
     cap_model: Option<String>,
     res_model: Option<String>,
@@ -726,5 +790,15 @@ mod tests {
         assert!(Suite::All.includes(Suite::Align));
         assert!(Suite::Align.includes(Suite::Align));
         assert!(!Suite::Align.includes(Suite::Magical));
+    }
+
+    #[test]
+    fn fixture_revisions_are_immutable_commit_ids() {
+        let mut names = std::collections::HashSet::new();
+        for &(name, _, revision) in REPOS {
+            assert!(names.insert(name), "duplicate fixture {name}");
+            assert_eq!(revision.len(), 40, "unpinned fixture {name}");
+            assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        }
     }
 }

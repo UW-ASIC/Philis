@@ -37,7 +37,11 @@ impl SplitMix64 {
     /// Uniform integer in [0, n). n == 0 returns 0.
     #[inline(always)]
     pub fn below(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next_u64() % n as u64) as usize }
+        if n == 0 {
+            0
+        } else {
+            (self.next_u64() % n as u64) as usize
+        }
     }
 
     /// Uniform in [-r, r].
@@ -54,10 +58,13 @@ impl SplitMix64 {
 /// The problem shape a stage runs over. `Hot` is caller-owned mutable state
 /// touched every move; `Cold` is read-only context (constraints, connectivity);
 /// `Mv` is a proposed change with any cached evaluation baked in.
+///
+/// `Mv: Default` because the driver owns ONE move buffer for the whole stage —
+/// cores refill it each proposal instead of allocating per move.
 pub trait Domain {
     type Hot;
     type Cold;
-    type Mv;
+    type Mv: Default;
 }
 
 /// Per-outer-iteration knobs produced by [`Schedule`].
@@ -103,7 +110,12 @@ pub struct Telemetry {
 
 impl Telemetry {
     fn start(cost: f64) -> Self {
-        Self { cost, initial_cost: cost, best_cost: cost, ..Self::default() }
+        Self {
+            cost,
+            initial_cost: cost,
+            best_cost: cost,
+            ..Self::default()
+        }
     }
 
     #[inline(always)]
@@ -117,8 +129,11 @@ impl Telemetry {
     }
 
     fn end_epoch(&mut self, temp: f64) {
-        self.epoch_accept_rate =
-            if self.ep_prop == 0 { 0.0 } else { self.ep_acc as f32 / self.ep_prop as f32 };
+        self.epoch_accept_rate = if self.ep_prop == 0 {
+            0.0
+        } else {
+            self.ep_acc as f32 / self.ep_prop as f32
+        };
         self.trace.push(TracePoint {
             iter: self.iters,
             cost: self.cost,
@@ -184,9 +199,11 @@ pub trait Weights<D: Domain> {
     fn blend(&self, s: Self::State, terms: f64, dens: f64) -> f64;
 }
 
-/// Slot 5: the search/solve primitive. `propose` returns `None` when it has
-/// nothing to do (converged / all work items clean) — an epoch with zero
-/// proposals ends the stage regardless of [`Stop`].
+/// Slot 5: the search/solve primitive. `propose` fills the caller-owned move
+/// buffer and returns `false` when it has nothing to do (converged / all work
+/// items clean) — an epoch with zero proposals ends the stage regardless of
+/// [`Stop`]. The buffer arrives dirty from the previous proposal; cores must
+/// clear what they use (buffer reuse keeps the hot loop allocation-free).
 pub trait Core<D: Domain> {
     type Scratch;
     fn scratch(&self, hot: &D::Hot, cold: &D::Cold) -> Self::Scratch;
@@ -197,8 +214,10 @@ pub trait Core<D: Domain> {
         sc: &mut Self::Scratch,
         ctl: &Control,
         rng: &mut SplitMix64,
-    ) -> Option<D::Mv>;
-    fn commit(&self, hot: &mut D::Hot, cold: &D::Cold, sc: &mut Self::Scratch, mv: &D::Mv);
+        mv: &mut D::Mv,
+    ) -> bool;
+    /// `mv` is `&mut` so cores can move bulk payloads out instead of cloning.
+    fn commit(&self, hot: &mut D::Hot, cold: &D::Cold, sc: &mut Self::Scratch, mv: &mut D::Mv);
     /// Once per outer iteration, after weights/schedule advance (e.g.
     /// PathFinder history-cost bump, λ adaptation inside an analytical core).
     fn epoch(&self, _hot: &mut D::Hot, _cold: &D::Cold, _sc: &mut Self::Scratch, _t: &Telemetry) {}
@@ -285,17 +304,22 @@ where
         ledger: &mut Lg,
         rng: &mut SplitMix64,
     ) -> Telemetry {
+        // Step 1: allocate every reusable buffer and initialize policy state
+        // before entering the hot loop. No proposal may allocate stage state.
         let mut sc = self.core.scratch(hot, cold);
         let mut ws = self.weights.init(hot, cold);
         let mut ss = self.schedule.start();
         let mut t = Telemetry::start(self.cost.eval(hot, cold));
+        let mut mv = D::Mv::default();
 
         loop {
+            // Step 2: propose, reject illegal moves early, and commit accepted
+            // moves. The single dirty move buffer is refilled on every pass.
             let ctl = self.schedule.control(ss);
             for _ in 0..ctl.moves_per_step {
-                let Some(mv) = self.core.propose(hot, cold, &mut sc, &ctl, rng) else {
+                if !self.core.propose(hot, cold, &mut sc, &ctl, rng, &mut mv) {
                     break;
-                };
+                }
                 t.proposed += 1;
                 t.ep_prop += 1;
                 if !self.legality.is_legal(hot, cold, &mv) {
@@ -306,21 +330,30 @@ where
                 let d_dens = self.density.delta(hot, cold, &mv);
                 let delta = self.weights.blend(ws, d_terms, d_dens);
                 if self.accept.decide(delta, ctl.temp, rng) {
-                    self.core.commit(hot, cold, &mut sc, &mv);
+                    self.core.commit(hot, cold, &mut sc, &mut mv);
                     t.record_accept(d_terms);
                 }
             }
+
+            // Step 3: advance all epoch-level policies after the proposal
+            // loop, keeping policy branches out of the per-move hot path.
             let idle = t.ep_prop == 0;
             ws = self.weights.update(ws, &t);
             ss = self.schedule.advance(ss, &t);
             self.core.epoch(hot, cold, &mut sc, &t);
             t.overflow = self.density.overflow(hot, cold);
+
+            // Step 4: reconcile constraint contracts against committed state,
+            // record telemetry, and stop only after both are current.
             ledger.reconcile(hot, cold);
             t.end_epoch(ctl.temp);
             if idle || self.stop.done(&t, ledger.open()) {
                 break;
             }
         }
+
+        // Step 5: replace incremental bookkeeping with one exact cold-path
+        // evaluation before returning the stage result.
         t.cost = self.cost.eval(hot, cold);
         t
     }
@@ -412,10 +445,18 @@ pub mod slots {
             (self.t0, self.range0)
         }
         fn advance(&self, (temp, range): (f64, f32), _: &Telemetry) -> (f64, f32) {
-            (temp * self.alpha, (range * self.range_decay).max(self.range_min))
+            (
+                temp * self.alpha,
+                (range * self.range_decay).max(self.range_min),
+            )
         }
         fn control(&self, (temp, range): (f64, f32)) -> Control {
-            Control { temp, step: 0.0, range, moves_per_step: self.moves_per_step }
+            Control {
+                temp,
+                step: 0.0,
+                range,
+                moves_per_step: self.moves_per_step,
+            }
         }
     }
 
@@ -436,7 +477,12 @@ pub mod slots {
             (s * self.decay).max(self.step_min)
         }
         fn control(&self, s: f32) -> Control {
-            Control { temp: 0.0, step: s, range: 0.0, moves_per_step: self.moves_per_step }
+            Control {
+                temp: 0.0,
+                step: s,
+                range: 0.0,
+                moves_per_step: self.moves_per_step,
+            }
         }
     }
 
@@ -452,9 +498,7 @@ pub mod slots {
             if t.iters >= self.max_iters {
                 return true;
             }
-            t.iters >= self.min_iters
-                && t.epoch_accept_rate < self.min_accept_rate
-                && open == 0
+            t.iters >= self.min_iters && t.epoch_accept_rate < self.min_accept_rate && open == 0
         }
     }
 
@@ -512,19 +556,30 @@ mod tests {
             _: &mut (),
             ctl: &Control,
             rng: &mut SplitMix64,
-        ) -> Option<(usize, f64, f64)> {
+            mv: &mut (usize, f64, f64),
+        ) -> bool {
             let i = rng.below(h.len());
             let nx = h[i] + f64::from(rng.centered(ctl.range));
             let d = (nx - c[i]).powi(2) - (h[i] - c[i]).powi(2);
-            Some((i, nx, d))
+            *mv = (i, nx, d);
+            true
         }
-        fn commit(&self, h: &mut Vec<f64>, _: &Vec<f64>, _: &mut (), mv: &(usize, f64, f64)) {
+        fn commit(&self, h: &mut Vec<f64>, _: &Vec<f64>, _: &mut (), mv: &mut (usize, f64, f64)) {
             h[mv.0] = mv.1;
         }
     }
 
-    fn stage() -> Stage<Toy, SqCost, NoDensity, AllLegal, UnitWeights, Perturb, Metropolis, Geometric, FreezeStop>
-    {
+    fn stage() -> Stage<
+        Toy,
+        SqCost,
+        NoDensity,
+        AllLegal,
+        UnitWeights,
+        Perturb,
+        Metropolis,
+        Geometric,
+        FreezeStop,
+    > {
         Stage {
             cost: SqCost,
             density: NoDensity,
@@ -540,7 +595,11 @@ mod tests {
                 range_min: 0.01,
                 moves_per_step: 200,
             },
-            stop: FreezeStop { max_iters: 300, min_iters: 5, min_accept_rate: 0.01 },
+            stop: FreezeStop {
+                max_iters: 300,
+                min_iters: 5,
+                min_accept_rate: 0.01,
+            },
             _d: PhantomData,
         }
     }
@@ -552,7 +611,12 @@ mod tests {
         let mut rng = SplitMix64::new(42);
         let t = stage().run(&mut xs, &targets, &mut (), &mut rng);
 
-        assert!(t.cost < t.initial_cost * 0.01, "cost {} vs initial {}", t.cost, t.initial_cost);
+        assert!(
+            t.cost < t.initial_cost * 0.01,
+            "cost {} vs initial {}",
+            t.cost,
+            t.initial_cost
+        );
         assert!(t.accepted > 0 && t.proposed >= t.accepted);
         assert_eq!(t.trace.len() as u32, t.iters);
     }
@@ -572,7 +636,11 @@ mod tests {
     struct CloseEnough(usize);
     impl Ledger<Toy> for CloseEnough {
         fn reconcile(&mut self, hot: &Vec<f64>, cold: &Vec<f64>) {
-            self.0 = hot.iter().zip(cold).filter(|(x, t)| (*x - *t).abs() > 0.5).count();
+            self.0 = hot
+                .iter()
+                .zip(cold)
+                .filter(|(x, t)| (*x - *t).abs() > 0.5)
+                .count();
         }
         fn open(&self) -> usize {
             self.0
@@ -586,7 +654,11 @@ mod tests {
         let mut rng = SplitMix64::new(3);
         let mut ledger = CloseEnough(usize::MAX);
         stage().run(&mut xs, &targets, &mut ledger, &mut rng);
-        assert_eq!(ledger.open(), 0, "stage must not stop with open contracts (short of max_iters)");
+        assert_eq!(
+            ledger.open(),
+            0,
+            "stage must not stop with open contracts (short of max_iters)"
+        );
     }
 
     #[test]
@@ -602,10 +674,18 @@ mod tests {
                 _: &mut (),
                 _: &Control,
                 _: &mut SplitMix64,
-            ) -> Option<(usize, f64, f64)> {
-                None
+                _: &mut (usize, f64, f64),
+            ) -> bool {
+                false
             }
-            fn commit(&self, _: &mut Vec<f64>, _: &Vec<f64>, _: &mut (), _: &(usize, f64, f64)) {}
+            fn commit(
+                &self,
+                _: &mut Vec<f64>,
+                _: &Vec<f64>,
+                _: &mut (),
+                _: &mut (usize, f64, f64),
+            ) {
+            }
         }
         let s = Stage {
             cost: SqCost,
@@ -614,8 +694,17 @@ mod tests {
             weights: UnitWeights,
             core: Never,
             accept: AlwaysAccept,
-            schedule: StepDecay { step0: 1.0, decay: 0.9, step_min: 0.1, moves_per_step: 1 },
-            stop: FreezeStop { max_iters: u32::MAX, min_iters: 0, min_accept_rate: 0.0 },
+            schedule: StepDecay {
+                step0: 1.0,
+                decay: 0.9,
+                step_min: 0.1,
+                moves_per_step: 1,
+            },
+            stop: FreezeStop {
+                max_iters: u32::MAX,
+                min_iters: 0,
+                min_accept_rate: 0.0,
+            },
             _d: PhantomData,
         };
         let mut xs = vec![0.0; 4];

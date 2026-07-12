@@ -1,25 +1,33 @@
 //! Cell generation for analog P&R.
 //!
-//! Re-exports [`substrate3`] types. [`CellRegistry`] holds custom
-//! generators; built-in generators live in [`generators`] and implement
-//! [`generators::CellSpec`].
+//! Backend-owned cell construction and built-in analog generators.
+//!
+//! The frontend `substrate3` crate re-exports this crate's construction
+//! contract for user-defined macros. [`CellRegistry`] holds those custom
+//! generators; built-ins live in [`generators`].
 
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+mod api;
 pub mod device;
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub mod fixtures;
 pub mod generators;
 pub mod netlist;
 pub mod pdk;
 #[cfg(test)]
 pub(crate) mod test_util;
 
-pub use substrate3::{
-    Bbox, CellBuilder, CellError, CellGenerator, CellMeta, CellOutput,
-    DeviceType, Direction, GeometryStore, LayerId, MatchingTier, MatchingType,
-    Orientation, PatternType, PinAccess, PolyId, PortDef, snap_to_grid,
+pub use api::{
+    run_drc, run_lvs, run_pex, snap_to_grid, verify, verify_lvs, Bbox, CellBuilder, CellContext,
+    CellError, CellGenerator, CellMeta, CellOutput, DeviceFlavor, DeviceKind, DeviceType,
+    Direction, DrcReport, GeometryStore, LayerId, LvsResult, MatchingTier, MatchingType,
+    Orientation, Parasitic, PatternType, PexReport, PinAccess, PolyId, PortDef, RefDevice,
+    RefNetlist, VerifyReport, Violation,
 };
-pub use substrate3::{Deck, LayerTable};
+pub use api::{Deck, LayerTable};
 
 // ---------------------------------------------------------------------------
 //  CellRegistry

@@ -42,7 +42,81 @@ struct Row {
     contracts: Vec<ConstraintContract>,
 }
 
-fn run_circuit(c: &BenchmarkCircuit, pdk: &Pdk, deck_json: &str, pdk_json: &Path) -> (String, Vec<ConstraintContract>) {
+#[derive(Debug)]
+struct Compactness {
+    die_area_um2: f64,
+    drawn_util_pct: f64,
+    planning_util_pct: f64,
+    bbox_fill_pct: f64,
+}
+
+impl Compactness {
+    fn measure(
+        x: &[i32],
+        y: &[i32],
+        sizes: &[(i32, i32)],
+        die: (i32, i32),
+        cell_margin: i32,
+    ) -> Self {
+        let drawn_area: f64 = sizes
+            .iter()
+            .map(|&(w, h)| f64::from(w) * f64::from(h))
+            .sum();
+        let margin = f64::from(cell_margin.max(0));
+        let planning_area: f64 = sizes
+            .iter()
+            .map(|&(w, h)| (f64::from(w) + margin) * (f64::from(h) + margin))
+            .sum();
+        let die_area = f64::from(die.0.max(0)) * f64::from(die.1.max(0));
+
+        let bbox_area = x
+            .iter()
+            .zip(y)
+            .zip(sizes)
+            .fold(None::<(i64, i64, i64, i64)>, |bounds, ((&cx, &cy), &(w, h))| {
+                let cell = (
+                    i64::from(cx - w / 2),
+                    i64::from(cy - h / 2),
+                    i64::from(cx + w / 2),
+                    i64::from(cy + h / 2),
+                );
+                Some(match bounds {
+                    None => cell,
+                    Some((xmin, ymin, xmax, ymax)) => (
+                        xmin.min(cell.0),
+                        ymin.min(cell.1),
+                        xmax.max(cell.2),
+                        ymax.max(cell.3),
+                    ),
+                })
+            })
+            .map_or(0.0, |(xmin, ymin, xmax, ymax)| {
+                (xmax - xmin).max(0) as f64 * (ymax - ymin).max(0) as f64
+            });
+        let pct = |area: f64, envelope: f64| {
+            if envelope > 0.0 {
+                100.0 * area / envelope
+            } else {
+                0.0
+            }
+        };
+
+        Self {
+            die_area_um2: die_area / 1_000_000.0,
+            drawn_util_pct: pct(drawn_area, die_area),
+            planning_util_pct: pct(planning_area, die_area),
+            bbox_fill_pct: pct(drawn_area, bbox_area),
+        }
+    }
+}
+
+fn run_circuit(
+    c: &BenchmarkCircuit,
+    pdk: &Pdk,
+    deck_json: &str,
+    pdk_json: &Path,
+    seed: u64,
+) -> (String, Vec<ConstraintContract>) {
     let raw = match std::fs::read_to_string(&c.spice_path) {
         Ok(t) => t,
         Err(e) => return (format!("read failed: {e}"), Vec::new()),
@@ -62,17 +136,20 @@ fn run_circuit(c: &BenchmarkCircuit, pdk: &Pdk, deck_json: &str, pdk_json: &Path
         return (format!("skipped ({} cells > {MAX_CELLS})", g.cells.len()), Vec::new());
     }
 
-    let cfg = FlowConfig {
+    let mut cfg = FlowConfig {
         debug_dir: Some(Path::new("target/bench_debug").join(&c.name)),
         ..Default::default()
     };
+    cfg.placement.seed = seed;
     let r = match run_flow(&text, deck_json, &ConstraintRecord::default(), &cfg) {
         Ok(r) => r,
         Err(e) => return (format!("flow failed: {e}"), Vec::new()),
     };
     let s = &r.signoff;
+    let p = &r.placement.placement;
+    let compactness = Compactness::measure(&p.x, &p.y, &p.sizes, p.die, p.cell_margin);
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}, overuse {} | DRC {} (+{} density waived) | LVS {} | C {:.1} fF",
+        "{} cells, {} nets | WL {} nm, unrouted {}, overuse {} | DRC {} (+{} density waived) | LVS {} | C {:.1} fF | area {:.1} um2 | util drawn {:.1}%, plan {:.1}%, bbox {:.1}% | best {}/{}{} | seed {}",
         r.graph.cells.len(),
         r.graph.nets.len(),
         r.routing.report.wirelength_nm,
@@ -82,6 +159,14 @@ fn run_circuit(c: &BenchmarkCircuit, pdk: &Pdk, deck_json: &str, pdk_json: &Path
         s.drc_waived_density,
         if s.lvs.matched { "MATCH" } else { "MISMATCH" },
         s.pex.total_cap() / 1000.0,
+        compactness.die_area_um2,
+        compactness.drawn_util_pct,
+        compactness.planning_util_pct,
+        compactness.bbox_fill_pct,
+        r.best_iteration + 1,
+        r.iterations,
+        if r.converged { " converged" } else { " budget" },
+        seed,
     );
     (outcome, r.placement.report.contracts)
 }
@@ -104,11 +189,11 @@ fn print_constraint_summary(all_contracts: &[&ConstraintContract]) {
             count: 0, satisfied: 0, violated: 0, worst_metric: 0.0,
         });
         e.count += 1;
-        match c.status {
+        match c.status() {
             ConstraintStatus::Satisfied => e.satisfied += 1,
             ConstraintStatus::Violated => {
                 e.violated += 1;
-                if let Some(m) = c.violation_metric {
+                if let Some(m) = c.violation_metric() {
                     if m > e.worst_metric { e.worst_metric = m; }
                 }
             }
@@ -147,8 +232,22 @@ fn main() {
         std::process::exit(1);
     }
 
-    let circuits = discover_all(suite);
-    println!("Discovered {} circuits", circuits.len());
+    let mut circuits = discover_all(suite);
+    // ponytail: extra args = name substrings (filter) or a single number (take first N)
+    let filters: Vec<String> = std::env::args().skip(2).collect();
+    if let [n] = filters.as_slice() {
+        if let Ok(n) = n.parse::<usize>() {
+            circuits.truncate(n);
+        }
+    }
+    if !filters.is_empty() && !circuits.is_empty() && filters.iter().any(|f| f.parse::<usize>().is_err()) {
+        circuits.retain(|c| filters.iter().any(|f| c.name == *f));
+    }
+    let seed = std::env::var("PNR_BENCH_SEED")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+    println!("Discovered {} circuits (seed {seed})", circuits.len());
 
     // Cache loaded PDKs by path (sky130 vs generic_finfet).
     let mut pdk_cache: std::collections::HashMap<PathBuf, (String, Pdk)> = std::collections::HashMap::new();
@@ -179,7 +278,7 @@ fn main() {
             }
         };
         let t = Instant::now();
-        let (outcome, contracts) = run_circuit(c, pdk, deck_json, &pdk_json);
+        let (outcome, contracts) = run_circuit(c, pdk, deck_json, &pdk_json, seed);
         rows.push(Row {
             name: c.name.clone(),
             suite: format!("{:?}", c.suite),
@@ -188,7 +287,8 @@ fn main() {
             contracts,
         });
         let r = rows.last().unwrap();
-        println!("  [{:>11}] {:32} {:6} ms  {}", r.suite, r.name, r.ms, r.outcome);
+        println!("  [{:>11}] {:32} {:6} ms  {}",
+            r.suite, r.name, r.ms, r.outcome);
     }
 
     let ok = rows.iter().filter(|r| r.outcome.contains("cells,")).count();
@@ -225,5 +325,25 @@ fn main() {
 
     if suite != Suite::Local {
         cleanup_fixtures();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Compactness;
+
+    #[test]
+    fn compactness_separates_drawn_and_planning_footprints() {
+        let result = Compactness::measure(
+            &[1_000],
+            &[1_000],
+            &[(1_000, 1_000)],
+            (2_000, 2_000),
+            1_000,
+        );
+        assert!((result.die_area_um2 - 4.0).abs() < 1e-9);
+        assert!((result.drawn_util_pct - 25.0).abs() < 1e-9);
+        assert!((result.planning_util_pct - 100.0).abs() < 1e-9);
+        assert!((result.bbox_fill_pct - 100.0).abs() < 1e-9);
     }
 }

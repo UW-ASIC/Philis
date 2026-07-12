@@ -1,5 +1,5 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
     DeviceId, PairConstraint,
 };
 
@@ -35,14 +35,24 @@ pub struct LdeBound {
 }
 
 impl PairConstraint for LdeBound {
-    fn device_a(&self) -> DeviceId { self.pair.0 }
-    fn device_b(&self) -> DeviceId { self.pair.1 }
-    fn distance_budget_um(&self) -> f64 { self.min_well_edge_distance_um }
+    fn device_a(&self) -> DeviceId {
+        self.pair.0
+    }
+    fn device_b(&self) -> DeviceId {
+        self.pair.1
+    }
+    fn distance_budget_um(&self) -> f64 {
+        self.min_well_edge_distance_um
+    }
 }
 
 impl Contractable for LdeBound {
-    fn strength(&self) -> ConstraintStrength { ConstraintStrength::Hard }
-    fn priority(&self) -> i32 { 85 }
+    fn strength(&self) -> ConstraintStrength {
+        ConstraintStrength::Hard
+    }
+    fn priority(&self) -> i32 {
+        85
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
         &[ConstraintStage::Placement]

@@ -70,7 +70,7 @@ impl VerifyCheck for MissingTieCheck {
     fn id(&self) -> &str { "missing_tie" }
     fn run(&self, store: &GeometryStore, deck: &Deck, backend: Backend) -> Vec<ErcViolation> {
         let mut out = Vec::new();
-        check_missing_tie(store, &deck.layers, backend, &mut out);
+        check_missing_tie(store, &deck.layers, deck.erc.tie_max_dist_nm, backend, &mut out);
         out
     }
 }
@@ -160,7 +160,7 @@ impl VerifyCheck for EmCurrentDensityCheck {
     fn id(&self) -> &str { "em_current_density" }
     fn run(&self, store: &GeometryStore, deck: &Deck, _backend: Backend) -> Vec<ErcViolation> {
         let mut out = Vec::new();
-        check_em_current_density(store, &deck.layers, &self.ext, &mut out);
+        check_em_current_density(store, &deck.layers, deck.erc.em_min_width_nm, &self.ext, &mut out);
         out
     }
 }
@@ -181,6 +181,13 @@ pub fn erc_rules(store: &GeometryStore, deck: &Deck) -> Vec<Box<dyn VerifyCheck<
         Ok(e) => e,
         Err(_) => return Vec::new(),
     });
+    erc_rules_with_ext(deck, ext)
+}
+
+fn erc_rules_with_ext(
+    deck: &Deck,
+    ext: Arc<ExtractedNetlist>,
+) -> Vec<Box<dyn VerifyCheck<Output = Vec<ErcViolation>>>> {
     vec![
         Box::new(FloatingGateCheck { ext: ext.clone() }),
         Box::new(FloatingWellCheck),
@@ -190,8 +197,7 @@ pub fn erc_rules(store: &GeometryStore, deck: &Deck) -> Vec<Box<dyn VerifyCheck<
         Box::new(SoftConnectionCheck { ext: ext.clone() }),
         Box::new(MultipleDriverCheck { ext: ext.clone() }),
         Box::new(TieHighLowCheck { ext: ext.clone() }),
-        // ponytail: hardcoded ratio; add to Deck when real PDK needs tuning
-        Box::new(AntennaElectricalCheck { ext: ext.clone(), ratio: 200.0 }),
+        Box::new(AntennaElectricalCheck { ext: ext.clone(), ratio: deck.erc.antenna_ratio }),
         Box::new(EsdTopologicalCheck { ext: ext.clone() }),
         Box::new(HvDomainCheck { ext: ext.clone() }),
         Box::new(EmCurrentDensityCheck { ext: ext.clone() }),
@@ -200,7 +206,16 @@ pub fn erc_rules(store: &GeometryStore, deck: &Deck) -> Vec<Box<dyn VerifyCheck<
 }
 
 pub fn run_erc(store: &GeometryStore, deck: &Deck) -> ErcReport {
-    let rules = erc_rules(store, deck);
+    let ext = match extract_netlist(store, deck) {
+        Ok(ext) => Arc::new(ext),
+        Err(e) => return ErcReport { violations: vec![ErcViolation {
+            check: "erc_extraction_error".into(),
+            detail: format!("ERC connectivity extraction failed: {e}"),
+            x: 0,
+            y: 0,
+        }] },
+    };
+    let rules = erc_rules_with_ext(deck, ext);
     let mut violations = Vec::new();
     for rule in &rules {
         violations.extend(rule.run(store, deck, Backend::Cpu));
@@ -291,12 +306,13 @@ fn check_floating_well(
 /// ponytail: simplified to "diff region with only one li contact at a corner,
 /// area > 4000×4000" — catches the conformance test case directly.
 fn check_missing_tie(
-    store: &GeometryStore, lt: &LayerTable, backend: Backend, out: &mut Vec<ErcViolation>,
+    store: &GeometryStore, lt: &LayerTable, max_dist_nm: i32, backend: Backend,
+    out: &mut Vec<ErcViolation>,
 ) {
     let diff_l = match lt.id("diff") { Some(l) => l, None => return };
     let li_l = match lt.id("li") { Some(l) => l, None => return };
 
-    let max_dist: i64 = 2000;
+    let max_dist: i64 = max_dist_nm as i64;
     let max_dist2 = max_dist * max_dist;
     let max_dist2_f32 = (max_dist as f32) * (max_dist as f32) * 1.05 + 4.0;
 
@@ -745,16 +761,16 @@ fn check_hv_domain_crossing(
 
 /// EM current density: flag narrow metal wires on nets that carry device current
 /// (connected to device S/D terminals). A polygon on met1/met2 whose minimum
-/// bbox dimension is below a hardcoded minimum (200nm) is flagged.
-/// ponytail: hardcoded 200nm threshold; add to Deck when real PDK needs tuning.
+/// bbox dimension is below deck.erc.em_min_width_nm is flagged.
+/// ponytail: min-width proxy for cross-section; add metal thickness + per-layer
+/// current tables for a real J check.
 fn check_em_current_density(
-    store: &GeometryStore, lt: &LayerTable, ext: &ExtractedNetlist, out: &mut Vec<ErcViolation>,
+    store: &GeometryStore, lt: &LayerTable, min_width_nm: i32, ext: &ExtractedNetlist,
+    out: &mut Vec<ErcViolation>,
 ) {
     let metal_layers: Vec<_> = ["met1", "met2"].iter()
         .filter_map(|n| lt.id(n)).collect();
     if metal_layers.is_empty() { return; }
-
-    const MIN_WIDTH_NM: i32 = 200;
 
     // Collect device S/D nets
     let mut sd_nets: HashSet<u32> = HashSet::new();
@@ -770,7 +786,7 @@ fn check_em_current_density(
             if !sd_nets.contains(&net) { continue; }
             let bb = store.poly_bbox[mp.0 as usize];
             let width = bb.width().min(bb.height());
-            if width < MIN_WIDTH_NM {
+            if width < min_width_nm {
                 out.push(ErcViolation {
                     check: "em_current_density".into(),
                     detail: format!("narrow metal ({}nm) on current-carrying net", width),
@@ -783,12 +799,10 @@ fn check_em_current_density(
 
 /// Point-to-point resistance: for each net with device terminals, estimate total
 /// wire resistance using PEX and flag if R exceeds a threshold.
-/// ponytail: hardcoded 10 ohm limit; real check would have per-net targets.
+/// Limit comes from deck.erc.p2p_r_limit_ohm; real signoff would use per-net targets.
 fn check_p2p_resistance(
     store: &GeometryStore, deck: &Deck, ext: &ExtractedNetlist, out: &mut Vec<ErcViolation>,
 ) {
-    const R_LIMIT_OHM: f64 = 10.0;
-
     // Device terminal nets
     let mut device_nets: HashSet<u32> = HashSet::new();
     for d in &ext.devices {
@@ -801,7 +815,7 @@ fn check_p2p_resistance(
 
     for (&net, par) in &by_net {
         if !device_nets.contains(&net) { continue; }
-        if par.r_ohm > R_LIMIT_OHM {
+        if par.r_ohm > deck.erc.p2p_r_limit_ohm {
             let pos = ext.net_of_poly.iter().enumerate()
                 .find(|(_, &n)| n == net)
                 .map(|(i, _)| store.poly_bbox[i])
@@ -812,5 +826,21 @@ fn check_p2p_resistance(
                 x: pos.xmin, y: pos.ymin,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extraction_failure_is_not_clean() {
+        let deck = Deck::from_json(r#"{
+            "layers": {"met1": {"layer": 1, "datatype": 0}},
+            "drc": {},
+            "pex": {}
+        }"#).unwrap();
+        let report = run_erc(&GeometryStore::new(), &deck);
+        assert_eq!(report.by_check("erc_extraction_error").len(), 1);
     }
 }

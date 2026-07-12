@@ -20,9 +20,11 @@ pub fn kind_tag(k: &DeviceKind) -> u32 {
 pub fn flavor_tag(f: &DeviceFlavor) -> u32 {
     match f { DeviceFlavor::Standard => 0, DeviceFlavor::Lvt => 1, DeviceFlavor::Hvt => 2 }
 }
+#[allow(dead_code)]
 fn kind_name(tag: u32) -> &'static str {
     if tag == 0 { "Nmos" } else { "Pmos" }
 }
+#[allow(dead_code)]
 fn flavor_name(tag: u32) -> &'static str {
     match tag { 1 => "Lvt", 2 => "Hvt", _ => "Std" }
 }
@@ -35,6 +37,7 @@ fn two_term_kind_tag(k: &TwoTerminalKind) -> u32 {
     match k { TwoTerminalKind::Resistor => 0, TwoTerminalKind::Diode => 1, TwoTerminalKind::Capacitor => 2 }
 }
 
+#[allow(dead_code)]
 fn two_term_kind_label(tag: u32) -> &'static str {
     match tag { 0 => "Resistor", 1 => "Diode", _ => "Capacitor" }
 }
@@ -62,12 +65,24 @@ const ROLE_GATE: u8 = 0;
 const ROLE_SD: u8 = 1;       // source+drain share this when non-strict
 const ROLE_SOURCE: u8 = 1;   // strict: source gets its own
 const ROLE_DRAIN: u8 = 2;    // strict: drain distinct from source
+#[allow(dead_code)]
 const ROLE_BODY: u8 = 3;
-const ROLE_TERM: u8 = 4;     // two-terminal: both pins share this (permutable)
+const ROLE_TERM: u8 = 4;     // symmetric two-terminal (R, C): pins permutable
 const ROLE_COLLECTOR: u8 = 5; // BJT collector
 const ROLE_BASE: u8 = 6;     // BJT base
 const ROLE_EMITTER: u8 = 7;  // BJT emitter
-const NUM_ROLES: usize = 8;
+const ROLE_ANODE: u8 = 8;    // diode: polarity is never permutable
+const ROLE_CATHODE: u8 = 9;
+const NUM_ROLES: usize = 10;
+
+/// Two-terminal pin roles: diodes are polar (terminal_a = anode by extraction
+/// convention), resistors and capacitors are symmetric.
+fn two_term_roles(k: &TwoTerminalKind) -> [u8; 2] {
+    match k {
+        TwoTerminalKind::Diode => [ROLE_ANODE, ROLE_CATHODE],
+        _ => [ROLE_TERM, ROLE_TERM],
+    }
+}
 
 struct GraphDev {
     seed: u32,
@@ -84,13 +99,6 @@ struct GraphDev {
 struct TopoGraph {
     devs: Vec<GraphDev>,
     net_count: usize,
-}
-
-/// Deterministic seed from device name (for two-terminal devices with different names).
-fn name_seed(base: u32, name: &str) -> u32 {
-    let mut h = base;
-    for b in name.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u32); }
-    h
 }
 
 fn graph_from_extracted(ext: &ExtractedNetlist, strict: bool) -> TopoGraph {
@@ -136,9 +144,12 @@ fn graph_from_extracted(ext: &ExtractedNetlist, strict: bool) -> TopoGraph {
     for d in &ext.two_terminal {
         let a = local(d.terminal_a);
         let b = local(d.terminal_b);
-        let seed = name_seed(100 + two_term_kind_tag(&d.kind) * 10, &d.name);
+        // seed by KIND only: matching is topology-driven, not name-driven —
+        // auto-generated layout names must never have to line up with the schematic.
+        let seed = 100 + two_term_kind_tag(&d.kind) * 10;
+        let [ra, rb] = two_term_roles(&d.kind);
         devs.push(GraphDev {
-            seed, pin_count: 2, nets: [a, b, 0, 0], roles: [ROLE_TERM, ROLE_TERM, 0, 0],
+            seed, pin_count: 2, nets: [a, b, 0, 0], roles: [ra, rb, 0, 0],
             orig_idx: u32::MAX, is_mos: false,
         });
     }
@@ -185,9 +196,10 @@ fn graph_from_reference(reference: &RefNetlist, strict: bool) -> (TopoGraph, Has
     for d in &reference.ref_two_terminal {
         let a = local(&d.terminal_a);
         let b = local(&d.terminal_b);
-        let seed = name_seed(100 + two_term_kind_tag(&d.kind) * 10, &d.name);
+        let seed = 100 + two_term_kind_tag(&d.kind) * 10;
+        let [ra, rb] = two_term_roles(&d.kind);
         devs.push(GraphDev {
-            seed, pin_count: 2, nets: [a, b, 0, 0], roles: [ROLE_TERM, ROLE_TERM, 0, 0],
+            seed, pin_count: 2, nets: [a, b, 0, 0], roles: [ra, rb, 0, 0],
             orig_idx: u32::MAX, is_mos: false,
         });
     }
@@ -634,4 +646,50 @@ pub fn compare(ext: &ExtractedNetlist, reference: &RefNetlist, opts: &CompareOpt
     }
 
     make_result(true, "match".into(), ambiguous, mismatches)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn two_diode_ext(anti_parallel: bool) -> ExtractedNetlist {
+        // nets 0 and 1; diode2 flips direction when anti_parallel
+        let d1 = TwoTerminalDevice {
+            kind: TwoTerminalKind::Diode, name: "d1".into(),
+            terminal_a: 0, terminal_b: 1, value: 0.0,
+        };
+        let d2 = TwoTerminalDevice {
+            kind: TwoTerminalKind::Diode, name: "d2".into(),
+            terminal_a: if anti_parallel { 1 } else { 0 },
+            terminal_b: if anti_parallel { 0 } else { 1 },
+            value: 0.0,
+        };
+        ExtractedNetlist {
+            devices: Vec::new(), bjt_devices: Vec::new(), net_count: 2, used_nets: 2,
+            net_of_poly: Vec::new(), label_conflicts: Vec::new(),
+            two_terminal: vec![d1, d2], floating_nets: Vec::new(),
+        }
+    }
+
+    fn two_diode_ref() -> RefNetlist {
+        let d = |a: &str, b: &str| RefTwoTerminal {
+            kind: TwoTerminalKind::Diode, name: String::new(),
+            terminal_a: a.into(), terminal_b: b.into(),
+        };
+        RefNetlist {
+            devices: Vec::new(), net_seeds: std::collections::HashMap::new(),
+            ref_two_terminal: vec![d("X", "Y"), d("X", "Y")], ref_bjt: Vec::new(),
+        }
+    }
+
+    /// Diode polarity is topology, not a permutable label: parallel pair matches
+    /// the parallel reference, the anti-parallel pair must NOT.
+    #[test]
+    fn diode_polarity_not_permutable() {
+        let opts = CompareOpts::default();
+        assert!(compare(&two_diode_ext(false), &two_diode_ref(), &opts).matched,
+            "parallel diode pair should match");
+        assert!(!compare(&two_diode_ext(true), &two_diode_ref(), &opts).matched,
+            "anti-parallel diode pair must mismatch a parallel reference");
+    }
 }

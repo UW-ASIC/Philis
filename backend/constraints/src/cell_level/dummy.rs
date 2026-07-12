@@ -1,5 +1,5 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
     DeviceConstraint, DeviceId, DummyType, MatchingTier,
 };
 
@@ -15,7 +15,9 @@ pub struct DummyConstraint {
 }
 
 impl DeviceConstraint for DummyConstraint {
-    fn device_id(&self) -> DeviceId { self.device_id }
+    fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
 }
 
 impl DummyConstraint {
@@ -57,8 +59,12 @@ impl DummyConstraint {
 }
 
 impl Contractable for DummyConstraint {
-    fn strength(&self) -> ConstraintStrength { ConstraintStrength::Soft }
-    fn priority(&self) -> i32 { 40 }
+    fn strength(&self) -> ConstraintStrength {
+        ConstraintStrength::Soft
+    }
+    fn priority(&self) -> i32 {
+        40
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
         &[ConstraintStage::CellGen]

@@ -10,10 +10,20 @@ const REC_BGNSTR: u8 = 0x05;
 const REC_STRNAME: u8 = 0x06;
 const REC_ENDSTR: u8 = 0x07;
 const REC_BOUNDARY: u8 = 0x08;
+const REC_PATH: u8 = 0x09;
+const REC_SREF: u8 = 0x0A;
+const REC_AREF: u8 = 0x0B;
 const REC_LAYER: u8 = 0x0D;
 const REC_DATATYPE: u8 = 0x0E;
+const REC_WIDTH: u8 = 0x0F;
 const REC_XY: u8 = 0x10;
 const REC_ENDEL: u8 = 0x11;
+const REC_SNAME: u8 = 0x12;
+const REC_COLROW: u8 = 0x13;
+const REC_STRANS: u8 = 0x1A;
+const REC_MAG: u8 = 0x1B;
+const REC_ANGLE: u8 = 0x1C;
+const REC_PATHTYPE: u8 = 0x21;
 
 // GDS data types
 const DT_NONE: u8 = 0x00;
@@ -36,6 +46,7 @@ pub const NSDM: (i32, i32) = (10, 0);
 pub const PSDM: (i32, i32) = (11, 0);
 pub const LVT: (i32, i32) = (12, 0);
 pub const HVT: (i32, i32) = (13, 0);
+pub const DIODE: (i32, i32) = (14, 0);
 
 // ---- GDS binary writer ----
 
@@ -137,6 +148,58 @@ impl GdsWriter {
         ]);
     }
 
+    /// Write a path element. Points are the centerline; pathtype 0=flush, 2=square.
+    pub fn path(&mut self, layer: (i32, i32), width: i32, pathtype: i16, pts: &[(i32, i32)]) {
+        self.no_data(REC_PATH);
+        self.int16_record(REC_LAYER, &[layer.0 as i16]);
+        self.int16_record(REC_DATATYPE, &[layer.1 as i16]);
+        self.int16_record(REC_PATHTYPE, &[pathtype]);
+        self.int32_record(REC_WIDTH, &[width]);
+        let mut xy = Vec::with_capacity(pts.len() * 2);
+        for &(x, y) in pts {
+            xy.push(x);
+            xy.push(y);
+        }
+        self.int32_record(REC_XY, &xy);
+        self.no_data(REC_ENDEL);
+    }
+
+    fn strans(&mut self, mirror_x: bool, mag: f64, angle_deg: f64) {
+        if mirror_x || mag != 1.0 || angle_deg != 0.0 {
+            let bits: u16 = if mirror_x { 0x8000 } else { 0 };
+            self.record(REC_STRANS, 0x01, &bits.to_be_bytes());
+            if mag != 1.0 { self.real8_record(REC_MAG, &[mag]); }
+            if angle_deg != 0.0 { self.real8_record(REC_ANGLE, &[angle_deg]); }
+        }
+    }
+
+    /// Instance reference with optional mirror (about x-axis, pre-rotation),
+    /// magnification, and CCW rotation in degrees.
+    pub fn sref(&mut self, cell: &str, x: i32, y: i32, mirror_x: bool, mag: f64, angle_deg: f64) {
+        self.no_data(REC_SREF);
+        self.ascii_record(REC_SNAME, cell);
+        self.strans(mirror_x, mag, angle_deg);
+        self.int32_record(REC_XY, &[x, y]);
+        self.no_data(REC_ENDEL);
+    }
+
+    /// Array reference: cols × rows grid at `origin` with per-step pitches.
+    pub fn aref(
+        &mut self, cell: &str, origin: (i32, i32), cols: i16, rows: i16,
+        col_pitch: (i32, i32), row_pitch: (i32, i32),
+    ) {
+        self.no_data(REC_AREF);
+        self.ascii_record(REC_SNAME, cell);
+        self.int16_record(REC_COLROW, &[cols, rows]);
+        // XY: origin, origin + cols·col_pitch, origin + rows·row_pitch
+        self.int32_record(REC_XY, &[
+            origin.0, origin.1,
+            origin.0 + col_pitch.0 * cols as i32, origin.1 + col_pitch.1 * cols as i32,
+            origin.0 + row_pitch.0 * rows as i32, origin.1 + row_pitch.1 * rows as i32,
+        ]);
+        self.no_data(REC_ENDEL);
+    }
+
     pub fn finish(&self) -> Vec<u8> {
         self.buf.clone()
     }
@@ -204,9 +267,20 @@ impl Suite {
             "expect_violations": expect,
         });
         if expect > 0 {
-            c["violations"] = json!([{"measured": measured}]);
+            // one entry per expected violation: the harness asserts the full multiset
+            c["violations"] = json!(vec![json!({"measured": measured}); expect]);
         }
         self.drc_cases.push(c);
+    }
+
+    /// Expected violations with per-violation measured values (full multiset assert).
+    pub fn add_drc_measured_multi(&mut self, id: &str, cell: &str, rule: &str, measured: &[i64]) {
+        let viols: Vec<Value> = measured.iter().map(|m| json!({"measured": m})).collect();
+        self.drc_cases.push(json!({
+            "id": id, "cell": cell, "rule": rule,
+            "expect_violations": measured.len(),
+            "violations": viols,
+        }));
     }
 
     pub fn add_drc_strict(&mut self, id: &str, cell: &str, rule: &str, expect: usize) {
@@ -257,6 +331,15 @@ impl Suite {
         }));
     }
 
+    /// Negative-direction PEX case: `expected` is deliberately wrong; the harness
+    /// passes iff the engine's measurement differs (proves the assert has teeth).
+    pub fn add_pex_mismatch(&mut self, id: &str, cell: &str, kind: &str, tol: f64, expected: Value) {
+        self.pex_cases.push(json!({
+            "id": id, "cell": cell, "kind": kind, "tol": tol, "expected": expected,
+            "expect_mismatch": true,
+        }));
+    }
+
     pub fn add_erc(&mut self, id: &str, cell: &str, check: &str, expect: usize) {
         self.erc_cases.push(json!({
             "id": id, "cell": cell, "check": check, "expect_violations": expect,
@@ -290,6 +373,7 @@ pub fn params_json() -> Value {
             "psdm":  { "layer": PSDM.0,  "datatype": PSDM.1 },
             "lvt":   { "layer": LVT.0,  "datatype": LVT.1 },
             "hvt":   { "layer": HVT.0,  "datatype": HVT.1 },
+            "diode": { "layer": DIODE.0, "datatype": DIODE.1 },
         },
         "drc": {
             "min_width":        { "layer": "met1", "min": 100 },
@@ -308,6 +392,7 @@ pub fn params_json() -> Value {
             "overlap":          { "layer_a": "met1", "layer_b": "met2", "min": 50 },
             "corner_to_corner": { "layer": "met1", "min": 150 },
             "antenna":          { "layer": "met1", "ratio": 100.0 },
+            "antenna_car":      { "layers": ["li", "met1", "met2"], "ratio": 400.0, "diode_layer": "diode" },
             "eol_spacing":      { "layer": "met1", "eol_width": 200, "eol_spacing": 150 },
             "well_enclosure":   { "outer": "nwell", "inner": "diff", "min": 50 },
             "wide_dependent_spacing": { "layer": "met1", "width_threshold": 500, "wide_spacing": 200 },
@@ -345,10 +430,16 @@ pub fn params_json() -> Value {
                 "interlayer_cap_af_um2": 10.0
             }
         },
+        "erc": {
+            "antenna_ratio": 200.0,
+            "em_min_width_nm": 200,
+            "p2p_r_limit_ohm": 10.0,
+            "tie_max_dist_nm": 2000
+        },
         "connectivity": {
             "conductors": ["diff", "poly", "li", "met1", "met2"],
             "vias": [
-                { "layer": "licon", "connects": ["diff", "li"] },
+                { "layer": "licon", "connects": ["diff", "poly", "li"] },
                 { "layer": "mcon",  "connects": ["li", "met1"] },
                 { "layer": "via1",  "connects": ["met1", "met2"] }
             ]

@@ -6,7 +6,7 @@
 use pnr_constraints::{
     AgingConstraint, AntennaConstraint, BiasCurrentTag, CcGroup, CrosstalkExclusion,
     CurrentFlowTag, DeviceId, DtiPair, DummyConstraint, EnvironmentalConstraint,
-    EsdConstraint, GuardRingRequirement, IsolationConstraint, LdeBound, MatchingSpec,
+    EsdConstraint, GuardRingRequirement, IsolationConstraint, LdeBound,
     MatchingTier, NetClassification, ParasiticBudget, ProximityRule, StressConstraint,
     StraightNet, SymmetryGroup, ThermalGradientConstraint, UnitizationConstraint,
 };
@@ -20,7 +20,6 @@ pub struct DigestedConstraints {
     pub proximity: Vec<ProximityRule>,
     pub isolation: Vec<IsolationConstraint>,
     pub thermal: Vec<ThermalGradientConstraint>,
-    pub matching_spec: Vec<MatchingSpec>,
     pub dti: Vec<DtiPair>,
     pub stress: Vec<StressConstraint>,
 

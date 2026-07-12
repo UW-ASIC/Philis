@@ -56,6 +56,7 @@ pub struct DensityRule { pub id: String, pub layer: LayerId, pub window: i32, pu
 pub struct OverlapRule { pub id: String, pub a: LayerId, pub b: LayerId, pub min: i32 }
 pub struct CornerToCornerRule { pub id: String, pub layer: LayerId, pub min: i32 }
 pub struct AntennaRule { pub id: String, pub layer: LayerId, pub ratio: f64 }
+pub struct AntennaCarRule { pub id: String, pub layers: Vec<LayerId>, pub ratio: f64, pub diode: Option<LayerId> }
 pub struct EolSpacingRule { pub id: String, pub layer: LayerId, pub eol_width: i32, pub eol_spacing: i32 }
 pub struct WideDependentSpacingRule { pub id: String, pub layer: LayerId, pub width_threshold: i32, pub wide_spacing: i32 }
 pub struct PrlSpacingRule { pub id: String, pub layer: LayerId, pub prl_threshold: i32, pub prl_spacing: i32 }
@@ -217,6 +218,16 @@ impl VerifyCheck for AntennaRule {
     }
 }
 
+impl VerifyCheck for AntennaCarRule {
+    type Output = Vec<Violation>;
+    fn id(&self) -> &str { &self.id }
+    fn run(&self, store: &GeometryStore, deck: &Deck, _backend: Backend) -> Vec<Violation> {
+        let mut out = Vec::new();
+        check_antenna_car(store, deck, &self.layers, self.ratio, self.diode, &self.id, &mut out);
+        out
+    }
+}
+
 impl VerifyCheck for EolSpacingRule {
     type Output = Vec<Violation>;
     fn id(&self) -> &str { &self.id }
@@ -318,8 +329,10 @@ impl VerifyCheck for MultiPatterningRule {
 }
 
 /// Build boxed trait objects from the deck's DRC rule parameters.
-pub fn drc_rules_from_deck(deck: &Deck, strict: bool) -> Vec<Box<dyn VerifyCheck<Output = Vec<Violation>>>> {
-    deck.drc_rules.iter().map(|p| -> Box<dyn VerifyCheck<Output = Vec<Violation>>> {
+pub fn drc_rules_from_deck(
+    deck: &Deck, strict: bool,
+) -> Vec<Box<dyn VerifyCheck<Output = Vec<Violation>> + Send + Sync>> {
+    deck.drc_rules.iter().map(|p| -> Box<dyn VerifyCheck<Output = Vec<Violation>> + Send + Sync> {
         match p {
             DrcRuleParam::MinWidth { id, layer, min } =>
                 Box::new(MinWidthRule { id: id.clone(), layer: *layer, min: *min }),
@@ -353,6 +366,8 @@ pub fn drc_rules_from_deck(deck: &Deck, strict: bool) -> Vec<Box<dyn VerifyCheck
                 Box::new(CornerToCornerRule { id: id.clone(), layer: *layer, min: *min }),
             DrcRuleParam::Antenna { id, layer, ratio } =>
                 Box::new(AntennaRule { id: id.clone(), layer: *layer, ratio: *ratio }),
+            DrcRuleParam::AntennaCar { id, layers, ratio, diode } =>
+                Box::new(AntennaCarRule { id: id.clone(), layers: layers.clone(), ratio: *ratio, diode: *diode }),
             DrcRuleParam::EolSpacing { id, layer, eol_width, eol_spacing } =>
                 Box::new(EolSpacingRule { id: id.clone(), layer: *layer, eol_width: *eol_width, eol_spacing: *eol_spacing }),
             DrcRuleParam::WideDependentSpacing { id, layer, width_threshold, wide_spacing } =>
@@ -391,12 +406,80 @@ pub fn run_drc_backend(store: &GeometryStore, deck: &Deck, backend: Backend) -> 
 }
 
 pub fn run_drc_backend_strict(store: &GeometryStore, deck: &Deck, backend: Backend, strict: bool) -> DrcReport {
+    run_drc_impl(store, deck, backend, strict, |_| true)
+}
+
+/// In-loop variant: density rules skipped. The engine's convergence loop always
+/// waives density (whole-die density is meaningless mid-iteration), so computing
+/// the window clips every iteration is a full-geometry pass of pure waste.
+pub fn run_drc_no_density(store: &GeometryStore, deck: &Deck) -> DrcReport {
+    run_drc_impl(store, deck, Backend::Cpu, deck.strict, |r| {
+        !matches!(r, DrcRuleParam::MinDensity { .. } | DrcRuleParam::MaxDensity { .. })
+    })
+}
+
+fn run_drc_impl(
+    store: &GeometryStore,
+    deck: &Deck,
+    backend: Backend,
+    strict: bool,
+    keep: impl Fn(&DrcRuleParam) -> bool + Sync,
+) -> DrcReport {
+    use rayon::prelude::*;
     let rules = drc_rules_from_deck(deck, strict);
-    let mut violations = Vec::new();
-    for rule in &rules {
-        violations.extend(rule.run(store, deck, backend));
-    }
+    // Rules are independent read-only scans over the store; run them in parallel
+    // and concatenate in rule order so the report is deterministic.
+    // `rules` is 1:1 with `deck.drc_rules` (see drc_rules_from_deck's map).
+    let per_rule: Vec<Vec<Violation>> = rules
+        .par_iter()
+        .zip(deck.drc_rules.par_iter())
+        .filter(|(_, p)| keep(p))
+        .map(|(rule, _)| rule.run(store, deck, backend))
+        .collect();
+    // Always-on input validity: downstream checks assume simple polygons, so a
+    // boundary that properly crosses itself is reported, not silently mis-measured.
+    let mut violations = check_polygon_validity(store, &deck.layers);
+    violations.extend(per_rule.into_iter().flatten());
+    // Coincident identical polygons (e.g. two pins of one device sharing a pad)
+    // are one merged shape in real DRC; each copy reports the same violation.
+    // Exact duplicates are double counts, never two distinct defects.
+    violations.sort_unstable_by(|a, b| {
+        (&a.rule_id, &a.kind, &a.layer, a.measured, a.limit, a.x, a.y)
+            .cmp(&(&b.rule_id, &b.kind, &b.layer, b.measured, b.limit, b.x, b.y))
+    });
+    violations.dedup_by(|a, b| {
+        a.rule_id == b.rule_id && a.kind == b.kind && a.layer == b.layer
+            && a.measured == b.measured && a.limit == b.limit && a.x == b.x && a.y == b.y
+    });
     DrcReport { violations }
+}
+
+/// Parse-don't-validate at the geometry boundary: every polygon is scanned once,
+/// on load, for the degeneracies the rule kernels are not defined over —
+/// self-crossing boundaries and zero-area shapes. Keyhole slits (legal GDS holes)
+/// pass; proper bow-tie crossings do not.
+fn check_polygon_validity(store: &GeometryStore, lt: &LayerTable) -> Vec<Violation> {
+    let mut out = Vec::new();
+    for p in 0..store.poly_count() {
+        let pid = PolyId(p as u32);
+        let bb = store.poly_bbox[p];
+        let issue = if poly_self_intersects(store, pid) {
+            Some("self_intersecting")
+        } else if store.area(pid) == 0 {
+            Some("zero_area")
+        } else {
+            None
+        };
+        if let Some(kind_detail) = issue {
+            out.push(Violation {
+                rule_id: "polygon_validity".into(), kind: "polygon_validity".into(),
+                layer: lt.name(store.poly_layer[p]).into(),
+                measured: if kind_detail == "zero_area" { 0 } else { 1 },
+                limit: 0, x: bb.xmin, y: bb.ymin,
+            });
+        }
+    }
+    out
 }
 
 // --- width ------------------------------------------------------------------
@@ -414,7 +497,14 @@ fn check_min_width(
         let bb = store.poly_bbox[p.0 as usize];
         let (s, e) = store.poly_range(p);
         let n = e - s;
-        if n == 4 {
+        // bbox fast path is exact ONLY for axis-aligned rectangles; a rotated
+        // parallelogram has 4 vertices too and must take the facing-gap scan.
+        let axis_aligned_rect = n == 4 && (0..4).all(|i| {
+            let (x0, y0) = store.poly_vertex(s, i);
+            let (x1, y1) = store.poly_vertex(s, (i + 1) % 4);
+            x0 == x1 || y0 == y1
+        });
+        if axis_aligned_rect {
             let w = bb.width().min(bb.height());
             if w < min {
                 out.push(Violation {
@@ -468,7 +558,28 @@ fn facing_gaps(store: &GeometryStore, p: PolyId, interior: bool) -> Vec<(i32, i3
                 if xlo >= xhi { continue; }
                 ((a.y0 - b.y0).abs(), (xlo + xhi) / 2, (a.y0 + b.y0) / 2)
             } else {
-                continue;
+                // parallel diagonal edges (45° routing): perpendicular gap where
+                // the edges overlap tangentially. Integer where it matters,
+                // f64 only for the sample-point coordinates.
+                let (adx, ady) = (a.dx() as i64, a.dy() as i64);
+                let (bdx, bdy) = (b.dx() as i64, b.dy() as i64);
+                if adx * bdy - ady * bdx != 0 { continue; } // not parallel
+                let len2 = adx * adx + ady * ady;
+                if len2 == 0 { continue; }
+                let t = |px: i64, py: i64| (px - a.x0 as i64) * adx + (py - a.y0 as i64) * ady;
+                let (tb0, tb1) = (t(b.x0 as i64, b.y0 as i64), t(b.x1 as i64, b.y1 as i64));
+                let lo = tb0.min(tb1).max(0);
+                let hi = tb0.max(tb1).min(len2);
+                if lo >= hi { continue; } // no tangential overlap
+                // signed offset of b's line along a's left normal (−ady, adx): d×w
+                let cross = adx * (b.y0 as i64 - a.y0 as i64) - ady * (b.x0 as i64 - a.x0 as i64);
+                let d = isqrt(cross * cross / len2) as i32;
+                // sample point: middle of the overlap span, halfway between the lines
+                let tm = (lo + hi) as f64 / 2.0 / len2 as f64;
+                let half = cross as f64 / 2.0 / len2 as f64;
+                let mx = (a.x0 as f64 + adx as f64 * tm - ady as f64 * half).round() as i32;
+                let my = (a.y0 as f64 + ady as f64 * tm + adx as f64 * half).round() as i32;
+                (d, mx, my)
             };
             if d == 0 { continue; }
             if point_in_poly(store, p, mx, my) == interior {
@@ -487,37 +598,55 @@ fn poly_strictly_inside(store: &GeometryStore, inner: PolyId, outer: PolyId) -> 
     (s..e).all(|i| point_in_poly(store, outer, store.verts_x[i], store.verts_y[i]))
 }
 
-/// Enumerate polygon pairs whose bboxes come within `min` of each other, by x-sweep:
-/// sort by xmin, only look ahead while x-ranges can still be close, filter on y. This is
-/// the O(P log P + K) candidate generator every pairwise rule shares; the old all-pairs
-/// loop is quadratic and dominates on real layouts.
+/// Enumerate polygon pairs whose bboxes come within `min` of each other, by sweep:
+/// sort along one axis, only look ahead while ranges can still be close, filter on
+/// the other axis. O(P log P + K) — the candidate generator every pairwise rule shares.
+///
+/// The sweep axis is chosen by bbox-min spread: sweeping the axis where shapes are
+/// spread out keeps the look-ahead window small. Hardcoding x degenerates to O(P²)
+/// on layouts of full-width horizontal bars (every xmin equal → window = everything).
 /// `pb = None` => all unordered pairs within `pa`. `pb = Some(..)` => cross pairs only.
-fn candidate_pairs(
+pub(crate) fn candidate_pairs(
     store: &GeometryStore, pa: &[PolyId], pb: Option<&[PolyId]>, min: i32,
 ) -> Vec<(PolyId, PolyId)> {
-    // (xmin, xmax, poly, from_b)
+    // pick the sweep axis with the larger min-coordinate spread
+    let mut xlo = i32::MAX; let mut xhi = i32::MIN;
+    let mut ylo = i32::MAX; let mut yhi = i32::MIN;
+    for &p in pa.iter().chain(pb.unwrap_or(&[])) {
+        let b = store.poly_bbox[p.0 as usize];
+        xlo = xlo.min(b.xmin); xhi = xhi.max(b.xmin);
+        ylo = ylo.min(b.ymin); yhi = yhi.max(b.ymin);
+    }
+    let sweep_x = (xhi.saturating_sub(xlo)) >= (yhi.saturating_sub(ylo));
+
+    // (sweep_min, sweep_max, poly, from_b)
     let mut items: Vec<(i32, i32, PolyId, bool)> = Vec::with_capacity(
         pa.len() + pb.map_or(0, |b| b.len()));
+    let key = |b: &Bbox| if sweep_x { (b.xmin, b.xmax) } else { (b.ymin, b.ymax) };
     for &p in pa {
-        let b = store.poly_bbox[p.0 as usize];
-        items.push((b.xmin, b.xmax, p, false));
+        let (lo, hi) = key(&store.poly_bbox[p.0 as usize]);
+        items.push((lo, hi, p, false));
     }
     for &p in pb.unwrap_or(&[]) {
-        let b = store.poly_bbox[p.0 as usize];
-        items.push((b.xmin, b.xmax, p, true));
+        let (lo, hi) = key(&store.poly_bbox[p.0 as usize]);
+        items.push((lo, hi, p, true));
     }
     items.sort_unstable_by_key(|it| it.0);
     let mut out = Vec::new();
     for i in 0..items.len() {
-        let (_, xmax_i, pi, bi) = items[i];
-        for &(xmin_j, _, pj, bj) in items[i + 1..].iter()
-            .take_while(|it| it.0 <= xmax_i.saturating_add(min))
+        let (_, hi_i, pi, bi) = items[i];
+        for &(_, _, pj, bj) in items[i + 1..].iter()
+            .take_while(|it| it.0 <= hi_i.saturating_add(min))
         {
-            let _ = xmin_j;
             if pb.is_some() && bi == bj { continue; } // cross-set pairs only
             let ba = store.poly_bbox[pi.0 as usize];
             let bb = store.poly_bbox[pj.0 as usize];
-            if ba.ymin - min <= bb.ymax && bb.ymin - min <= ba.ymax {
+            let other_near = if sweep_x {
+                ba.ymin - min <= bb.ymax && bb.ymin - min <= ba.ymax
+            } else {
+                ba.xmin - min <= bb.xmax && bb.xmin - min <= ba.xmax
+            };
+            if other_near {
                 // keep (set A, set B) order for cross-set queries
                 if bi { out.push((pj, pi)) } else { out.push((pi, pj)) }
             }
@@ -547,7 +676,7 @@ fn merge_groups(
     }
     for (k, &(pa, pb)) in cands.iter().enumerate() {
         if far.is_some_and(|f| f[k]) { continue; } // clearly apart: cannot touch
-        if poly_poly_dist2(store, pa, pb) == 0 {
+        if poly_poly_dist2_within(store, pa, pb, 1) == 0 {
             let (ia, ib) = (idx_of[&pa.0], idx_of[&pb.0]);
             let (ra, rb) = (find(&mut parent, ia), find(&mut parent, ib));
             if ra != rb { parent[ra as usize] = rb; }
@@ -598,6 +727,48 @@ fn gap_region_covered(store: &GeometryStore, polys: &[PolyId], pa: PolyId, pb: P
     })
 }
 
+/// Gap boxes of same-shape sub-min gaps (notches). Both sides belong to one
+/// merged same-net shape, so filling the gap with metal is always electrically
+/// safe — used as a post-merge DRC repair (pad-row corner slivers etc.).
+pub fn same_shape_gap_fills(store: &GeometryStore, deck: &Deck) -> Vec<(LayerId, Bbox)> {
+    let mut fills = Vec::new();
+    for r in &deck.drc_rules {
+        let DrcRuleParam::MinSpacing { layer, min, .. } = r else { continue };
+        let (layer, min) = (*layer, *min);
+        let polys = store.polys_on_layer(layer);
+        let min2 = (min as i64) * (min as i64);
+        let cands = candidate_pairs(store, &polys, None, min);
+        let idx_of: std::collections::HashMap<u32, u32> =
+            polys.iter().enumerate().map(|(i, p)| (p.0, i as u32)).collect();
+        let group = merge_groups(store, &cands, None, polys.len(), &idx_of);
+        for &(pa, pb) in &cands {
+            let d2 = poly_poly_dist2_within(store, pa, pb, min);
+            if d2 == 0 || d2 >= min2 { continue; }
+            if poly_strictly_inside(store, pa, pb) || poly_strictly_inside(store, pb, pa) {
+                continue;
+            }
+            if group[idx_of[&pa.0] as usize] != group[idx_of[&pb.0] as usize] {
+                continue; // different nets — not fillable
+            }
+            if gap_region_covered(store, &polys, pa, pb) {
+                continue; // already solid
+            }
+            let g = gap_rect(store.poly_bbox[pa.0 as usize], store.poly_bbox[pb.0 as usize]);
+            if g.xmax > g.xmin && g.ymax > g.ymin {
+                // Inflate by min/2 so the fill overlaps both sides and is
+                // itself min_width-clean; stays inside the pair's hull, where
+                // foreign metal would already be a spacing violation.
+                let h = min / 2;
+                fills.push((layer, Bbox {
+                    xmin: g.xmin - h, ymin: g.ymin - h,
+                    xmax: g.xmax + h, ymax: g.ymax + h,
+                }));
+            }
+        }
+    }
+    fills
+}
+
 // --- same-layer spacing (external) ------------------------------------------
 fn check_spacing_same(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, backend: Backend,
@@ -616,7 +787,7 @@ fn check_spacing_same(
         // NOTE: overlapping *bboxes* do NOT mean the shapes touch (interlocking L
         // shapes). Only actual contact — direct or through a chain of touching
         // polygons (merge_groups) — makes the pair one merged shape.
-        let d2 = poly_poly_dist2(store, pa, pb);
+        let d2 = poly_poly_dist2_within(store, pa, pb, min);
         if d2 == 0 { continue; } // abutting/crossing => merged shape
         if d2 < min2 {
             if poly_strictly_inside(store, pa, pb) || poly_strictly_inside(store, pb, pa) {
@@ -633,6 +804,14 @@ fn check_spacing_same(
             let d = isqrt(d2);
             // In STRICT mode, same-net gaps are spacing violations too
             let kind = if same_shape && !strict { "notch" } else { "min_spacing" };
+            if std::env::var("PNR_DEBUG_NOTCH").is_ok() {
+                let bb = store.poly_bbox[pb.0 as usize];
+                let (sa, ea) = store.poly_range(pa);
+                let (sb, eb) = store.poly_range(pb);
+                eprintln!("[notch-dbg] {kind} d={d} pa=({},{},{},{})v{} pb=({},{},{},{})v{} same_shape={same_shape}",
+                    ba.xmin, ba.ymin, ba.xmax, ba.ymax, ea - sa,
+                    bb.xmin, bb.ymin, bb.xmax, bb.ymax, eb - sb);
+            }
             out.push(Violation {
                 rule_id: rule_id.into(),
                 kind: kind.into(),
@@ -656,7 +835,7 @@ fn check_spacing_diff(
     for (k, &(pa, pb)) in cands.iter().enumerate() {
         if far.as_ref().is_some_and(|f| f[k]) { continue; }
         let ba = store.poly_bbox[pa.0 as usize];
-        let d2 = poly_poly_dist2(store, pa, pb);
+        let d2 = poly_poly_dist2_within(store, pa, pb, min);
         if d2 == 0 { continue; } // touching/crossing layers: not a spacing pair
         if d2 < min2 {
             if poly_strictly_inside(store, pa, pb) || poly_strictly_inside(store, pb, pa) {
@@ -735,15 +914,73 @@ fn gpu_poly_clean_mask(
     Some(flags.into_iter().map(|f| f == 0).collect())
 }
 
-/// Min squared distance between two polygons' edge sets.
-fn poly_poly_dist2(store: &GeometryStore, pa: PolyId, pb: PolyId) -> i64 {
+/// Min squared distance between two polygons' edge sets, exact below `cutoff`.
+/// Returns exactly `cutoff²` when the true distance is >= cutoff — every caller
+/// only branches on distances below its rule limit, so the far side needs no
+/// precision. Bounding the search is what kills the |Ea|×|Eb| blowup: b-edges
+/// are bucketed on a uniform grid and each a-edge only visits buckets within
+/// `cutoff` of its bbox. Two 16k-edge interlocked combs drop from 256M seg-seg
+/// evaluations to ~zero when nothing is within the limit.
+fn poly_poly_dist2_within(store: &GeometryStore, pa: PolyId, pb: PolyId, cutoff: i32) -> i64 {
     let ea = poly_edges(store, pa);
     let eb = poly_edges(store, pb);
-    let mut best = i64::MAX;
-    for x in &ea {
-        for y in &eb {
-            best = best.min(seg_seg_dist2(x, y));
-            if best == 0 { return 0; }
+    let cutoff = cutoff.max(1);
+    let cut2 = (cutoff as i64) * (cutoff as i64);
+
+    // small pairs (rects vs rects): brute force beats grid setup
+    if ea.len() * eb.len() <= 1024 {
+        let mut best = cut2;
+        for x in &ea {
+            for y in &eb {
+                best = best.min(seg_seg_dist2(x, y));
+                if best == 0 { return 0; }
+            }
+        }
+        return best;
+    }
+
+    // bucket b-edges by bbox on a cutoff-sized grid. The floor keeps tiny cutoffs
+    // (the touch test uses 1nm) from exploding long edges into thousands of cells.
+    let cell = ((cutoff as i64) * 4).max(512);
+    let key = |x: i64, y: i64| ((x.div_euclid(cell)) as i32, (y.div_euclid(cell)) as i32);
+    let mut grid: std::collections::HashMap<(i32, i32), Vec<u32>> =
+        std::collections::HashMap::new();
+    for (j, e) in eb.iter().enumerate() {
+        let (x0, x1) = (e.x0.min(e.x1) as i64, e.x0.max(e.x1) as i64);
+        let (y0, y1) = (e.y0.min(e.y1) as i64, e.y0.max(e.y1) as i64);
+        let (kx0, ky0) = key(x0, y0);
+        let (kx1, ky1) = key(x1, y1);
+        for kx in kx0..=kx1 {
+            for ky in ky0..=ky1 {
+                grid.entry((kx, ky)).or_default().push(j as u32);
+            }
+        }
+    }
+
+    let mut best = cut2;
+    let mut stamp = vec![u32::MAX; eb.len()]; // dedupe candidates per a-edge
+    for (i, a) in ea.iter().enumerate() {
+        let (ax0, ax1) = (a.x0.min(a.x1) as i64, a.x0.max(a.x1) as i64);
+        let (ay0, ay1) = (a.y0.min(a.y1) as i64, a.y0.max(a.y1) as i64);
+        let (kx0, ky0) = key(ax0 - cutoff as i64, ay0 - cutoff as i64);
+        let (kx1, ky1) = key(ax1 + cutoff as i64, ay1 + cutoff as i64);
+        for kx in kx0..=kx1 {
+            for ky in ky0..=ky1 {
+                let Some(cands) = grid.get(&(kx, ky)) else { continue };
+                for &j in cands {
+                    if stamp[j as usize] == i as u32 { continue; }
+                    stamp[j as usize] = i as u32;
+                    let b = &eb[j as usize];
+                    // bbox lower bound before the exact kernel
+                    let (bx0, bx1) = (b.x0.min(b.x1) as i64, b.x0.max(b.x1) as i64);
+                    let (by0, by1) = (b.y0.min(b.y1) as i64, b.y0.max(b.y1) as i64);
+                    let dx = (bx0 - ax1).max(ax0 - bx1).max(0);
+                    let dy = (by0 - ay1).max(ay0 - by1).max(0);
+                    if dx * dx + dy * dy >= best { continue; }
+                    best = best.min(seg_seg_dist2(a, b));
+                    if best == 0 { return 0; }
+                }
+            }
         }
     }
     best
@@ -803,7 +1040,7 @@ fn check_enclosure(
             continue;
         }
         // exact for any polygon pair, equals the per-side margins on rectangles.
-        let worst = i64::from(isqrt(poly_poly_dist2(store, pi, po)) as i32);
+        let worst = i64::from(isqrt(poly_poly_dist2_within(store, pi, po, min + 1)) as i32);
         let e = best.entry(pi.0).or_insert(i64::MIN);
         *e = (*e).max(worst);
     }
@@ -870,13 +1107,27 @@ fn check_min_area(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i64,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    for p in store.polys_on_layer(layer) {
-        let a = store.area(p);
-        if a < min {
+    // Merged-shape semantics (real DRC merges before measuring): a polygon's
+    // area counts together with everything it touches. Group sum over-counts
+    // shared overlap — conservative toward passing; boolean union if that
+    // ever matters. One violation per merged group, not per fragment.
+    let polys = store.polys_on_layer(layer);
+    let idx_of: std::collections::HashMap<u32, u32> =
+        polys.iter().enumerate().map(|(i, p)| (p.0, i as u32)).collect();
+    let cands = candidate_pairs(store, &polys, None, 1);
+    let group = merge_groups(store, &cands, None, polys.len(), &idx_of);
+    let mut gsum: Vec<i64> = vec![0; polys.len()];
+    for (i, &p) in polys.iter().enumerate() {
+        gsum[group[i] as usize] += store.area(p);
+    }
+    for (i, &p) in polys.iter().enumerate() {
+        let g = group[i] as usize;
+        // report on the group root only, so a merged shape yields one violation
+        if g == i && gsum[g] < min {
             let bb = store.poly_bbox[p.0 as usize];
             out.push(Violation {
                 rule_id: rule_id.into(), kind: "min_area".into(),
-                layer: lt.name(layer).into(), measured: a, limit: min,
+                layer: lt.name(layer).into(), measured: gsum[g], limit: min,
                 x: bb.xmin, y: bb.ymin,
             });
         }
@@ -1192,28 +1443,47 @@ fn check_eol_spacing(
     for (k, &(pa, pb)) in cands.iter().enumerate() {
         if far.as_ref().is_some_and(|f| f[k]) { continue; }
         if group[idx_of[&pa.0] as usize] == group[idx_of[&pb.0] as usize] { continue; }
-        let d2 = poly_poly_dist2(store, pa, pb);
+        let d2 = poly_poly_dist2_within(store, pa, pb, eol_spacing);
         if d2 == 0 || d2 >= eol_sp2 { continue; }
-        let ea = poly_edges(store, pa);
-        let eb = poly_edges(store, pb);
-        let has_short_facing = |edges_a: &[Edge], edges_b: &[Edge]| -> Option<(i32, i32)> {
-            for a in edges_a {
+        // A short edge projects a rectangular zone of depth eol_spacing along its
+        // OUTWARD normal; only geometry entering that zone violates. A neighbor
+        // beside the wire end is plain min_spacing territory, not EOL.
+        let zone_hit = |p_eol: PolyId, p_other: PolyId| -> Option<(i64, i32, i32)> {
+            let ccw = store.signed_area2(p_eol) > 0;
+            let ea = poly_edges(store, p_eol);
+            let eb = poly_edges(store, p_other);
+            let mut best: Option<(i64, i32, i32)> = None;
+            for a in &ea {
                 let elen2 = a.len2();
-                if elen2 >= (eol_width as i64) * (eol_width as i64) { continue; }
-                if elen2 == 0 { continue; }
-                for b in edges_b {
+                if elen2 == 0 || elen2 >= (eol_width as i64) * (eol_width as i64) { continue; }
+                // manhattan outward normal (diagonal EOL edges: skip, no zone defined)
+                let (udx, udy) = (a.dx().signum(), a.dy().signum());
+                if udx != 0 && udy != 0 { continue; }
+                let (nx, ny) = if ccw { (udy, -udx) } else { (-udy, udx) };
+                let zone = Bbox {
+                    xmin: a.x0.min(a.x1) + nx.min(0) * eol_spacing,
+                    xmax: a.x0.max(a.x1) + nx.max(0) * eol_spacing,
+                    ymin: a.y0.min(a.y1) + ny.min(0) * eol_spacing,
+                    ymax: a.y0.max(a.y1) + ny.max(0) * eol_spacing,
+                };
+                for b in &eb {
+                    let eb_box = Bbox {
+                        xmin: b.x0.min(b.x1), xmax: b.x0.max(b.x1),
+                        ymin: b.y0.min(b.y1), ymax: b.y0.max(b.y1),
+                    };
+                    if !zone.overlaps(&eb_box) { continue; }
                     let sd = seg_seg_dist2(a, b);
-                    if sd > 0 && sd < eol_sp2 {
-                        return Some((a.x0, a.y0));
+                    if sd > 0 && sd < eol_sp2 && best.is_none_or(|(bd, _, _)| sd < bd) {
+                        best = Some((sd, a.x0, a.y0));
                     }
                 }
             }
-            None
+            best
         };
-        if let Some((x, y)) = has_short_facing(&ea, &eb).or_else(|| has_short_facing(&eb, &ea)) {
+        if let Some((sd, x, y)) = zone_hit(pa, pb).or_else(|| zone_hit(pb, pa)) {
             out.push(Violation {
                 rule_id: rule_id.into(), kind: "eol_spacing".into(),
-                layer: lt.name(layer).into(), measured: isqrt(d2), limit: eol_spacing as i64,
+                layer: lt.name(layer).into(), measured: isqrt(sd), limit: eol_spacing as i64,
                 x, y,
             });
         }
@@ -1286,6 +1556,115 @@ fn check_antenna(
     }
 }
 
+// --- antenna CAR (cumulative, per fabrication stage) ---------------------------
+// During fab, metal-k is etched while only layers <= k exist. So the check runs
+// once per stack stage: connectivity is rebuilt with conductors up to layers[k]
+// (plus gate layers and any via whose endpoints are all present), and the
+// cumulative collecting area of layers[0..=k] on each gate's net is compared to
+// ratio × gate area. A shape on the diode layer connected to the net waives the
+// gate (junction leaks the charge off).
+// ponytail: connection = bbox overlap, matching extract's convention on the
+// rectangle geometry the suite uses; diffusion is NOT in the graph (poly-over-diff
+// is a gate, not a connection), so relief is explicit via the diode marker.
+fn check_antenna_car(
+    store: &GeometryStore, deck: &Deck, stack: &[LayerId], ratio: f64,
+    diode: Option<LayerId>, rule_id: &str, out: &mut Vec<Violation>,
+) {
+    let lt = &deck.layers;
+    // gate polys and their areas: gate_layer ∩ channel_layer per MOS rule
+    let mut gates: Vec<(PolyId, i64)> = Vec::new(); // (gate poly, gate area)
+    let mut gate_layers: Vec<LayerId> = Vec::new();
+    for mr in &deck.devices.mos_rules {
+        if !gate_layers.contains(&mr.gate_layer) { gate_layers.push(mr.gate_layer); }
+        for g in store.polys_on_layer(mr.gate_layer) {
+            let gb = store.poly_bbox[g.0 as usize];
+            let mut area = 0i64;
+            for d in store.polys_on_layer(mr.channel_layer) {
+                let db = store.poly_bbox[d.0 as usize];
+                let ix = gb.xmax.min(db.xmax) - gb.xmin.max(db.xmin);
+                let iy = gb.ymax.min(db.ymax) - gb.ymin.max(db.ymin);
+                if ix > 0 && iy > 0 { area += (ix as i64) * (iy as i64); }
+            }
+            if area > 0 && !gates.iter().any(|&(p, _)| p == g) { gates.push((g, area)); }
+        }
+    }
+    if gates.is_empty() { return; }
+
+    // worst cumulative ratio per gate poly across stages
+    let mut worst: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+
+    for k in 0..stack.len() {
+        // stage-active layers: gates + metals up to k + diode + vias fully present
+        let metals = &stack[..=k];
+        let mut active: Vec<LayerId> = gate_layers.clone();
+        active.extend_from_slice(metals);
+        if let Some(dl) = diode { active.push(dl); }
+        // a via exists at this stage iff every layer it connects already exists
+        for &(vl, ref connects) in &deck.connectivity.vias {
+            if !active.contains(&vl) && connects.iter().all(|c| active.contains(c)) {
+                active.push(vl);
+            }
+        }
+
+        // union-find over active polys, connected on bbox overlap
+        let polys: Vec<PolyId> = active.iter()
+            .flat_map(|&l| store.polys_on_layer(l)).collect();
+        let idx: std::collections::HashMap<u32, usize> =
+            polys.iter().enumerate().map(|(i, p)| (p.0, i)).collect();
+        let mut parent: Vec<usize> = (0..polys.len()).collect();
+        fn find(parent: &mut Vec<usize>, i: usize) -> usize {
+            let mut r = i;
+            while parent[r] != r { r = parent[r]; }
+            let mut c = i;
+            while parent[c] != r { let n = parent[c]; parent[c] = r; c = n; }
+            r
+        }
+        for (pa, pb) in candidate_pairs(store, &polys, None, 0) {
+            let ba = store.poly_bbox[pa.0 as usize];
+            let bb = store.poly_bbox[pb.0 as usize];
+            if ba.overlaps(&bb) {
+                let (ra, rb) = (find(&mut parent, idx[&pa.0]), find(&mut parent, idx[&pb.0]));
+                if ra != rb { parent[ra] = rb; }
+            }
+        }
+
+        // per-component: cumulative metal area + diode presence
+        let mut metal_area: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
+        let mut relieved: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for &p in &polys {
+            let root = find(&mut parent, idx[&p.0]);
+            let l = store.poly_layer[p.0 as usize];
+            if metals.contains(&l) {
+                *metal_area.entry(root).or_insert(0) += store.area(p);
+            }
+            if diode == Some(l) { relieved.insert(root); }
+        }
+
+        for &(g, ga) in &gates {
+            if !idx.contains_key(&g.0) { continue; }
+            let root = find(&mut parent, idx[&g.0]);
+            if relieved.contains(&root) { continue; }
+            let ma = *metal_area.get(&root).unwrap_or(&0);
+            let r = ma as f64 / ga as f64;
+            let w = worst.entry(g.0).or_insert(0.0);
+            if r > *w { *w = r; }
+        }
+    }
+
+    for (&g, &r) in &worst {
+        if r > ratio {
+            let bb = store.poly_bbox[g as usize];
+            out.push(Violation {
+                rule_id: rule_id.into(), kind: "antenna_car".into(),
+                layer: lt.name(stack[stack.len() - 1]).into(),
+                measured: (r * 1000.0) as i64,
+                limit: (ratio * 1000.0) as i64,
+                x: bb.xmin, y: bb.ymin,
+            });
+        }
+    }
+}
+
 // --- wide-dependent spacing ---------------------------------------------------
 // When EITHER polygon in a pair is "wide" (min bbox dimension >= width_threshold),
 // the pair must satisfy a larger spacing requirement (wide_spacing) instead of the
@@ -1303,7 +1682,7 @@ fn check_wide_dependent_spacing(
         let wa = ba.width().min(ba.height());
         let wb = bb.width().min(bb.height());
         if wa < width_threshold && wb < width_threshold { continue; }
-        let d2 = poly_poly_dist2(store, pa, pb);
+        let d2 = poly_poly_dist2_within(store, pa, pb, wide_spacing);
         if d2 == 0 { continue; } // overlapping/abutting, merged shape
         if poly_strictly_inside(store, pa, pb) || poly_strictly_inside(store, pb, pa) {
             continue;
@@ -1347,7 +1726,7 @@ fn check_prl_spacing(
             continue; // diagonal or overlapping, no parallel run
         };
         if prl < prl_threshold { continue; }
-        let d2 = poly_poly_dist2(store, pa, pb);
+        let d2 = poly_poly_dist2_within(store, pa, pb, prl_spacing);
         if d2 == 0 { continue; } // abutting/overlapping
         if d2 < ps2 {
             out.push(Violation {
@@ -1417,15 +1796,13 @@ fn check_min_enclosed_area(
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
     let polys = store.polys_on_layer(layer);
-    for i in 0..polys.len() {
-        for j in 0..polys.len() {
-            if i == j { continue; }
-            let inner = polys[j];
-            let outer = polys[i];
+    // containment implies bbox overlap, so the x-sweep candidate generator
+    // replaces the old all-pairs loop (quadratic on real layouts).
+    for (pa, pb) in candidate_pairs(store, &polys, None, 0) {
+        // unordered pair: try both nestings
+        for (outer, inner) in [(pa, pb), (pb, pa)] {
             if !poly_strictly_inside(store, inner, outer) { continue; }
-            let outer_area = store.area(outer);
-            let inner_area = store.area(inner);
-            let enclosed = outer_area - inner_area;
+            let enclosed = store.area(outer) - store.area(inner);
             if enclosed < min_hole_area {
                 let bb = store.poly_bbox[inner.0 as usize];
                 out.push(Violation {
@@ -1446,11 +1823,18 @@ fn check_cheesing(
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
     let polys = store.polys_on_layer(layer);
-    for &p in &polys {
+    // only over-limit plates need a slot search; slots bbox-overlap their plate,
+    // so one sweep over (plates, all) replaces the old all-pairs scan.
+    let plates: Vec<PolyId> =
+        polys.iter().copied().filter(|&p| store.area(p) > max_area_no_slot).collect();
+    if plates.is_empty() { return; }
+    let mut slotted: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for (plate, q) in candidate_pairs(store, &plates, Some(&polys), 0) {
+        if plate != q && poly_strictly_inside(store, q, plate) { slotted.insert(plate.0); }
+    }
+    for &p in &plates {
         let area = store.area(p);
-        if area <= max_area_no_slot { continue; }
-        // check if any other polygon on this layer is strictly inside
-        let has_slot = polys.iter().any(|&q| q != p && poly_strictly_inside(store, q, p));
+        let has_slot = slotted.contains(&p.0);
         if !has_slot {
             let bb = store.poly_bbox[p.0 as usize];
             out.push(Violation {
@@ -1471,23 +1855,26 @@ fn check_redundant_via(
 ) {
     let polys = store.polys_on_layer(layer);
     let within2 = (within as i64) * (within as i64);
-    // precompute bbox centers
-    let centers: Vec<(i64, i64)> = polys.iter().map(|&p| {
+    // centers sit inside their bboxes, so center-distance <= within implies the
+    // bboxes come within `within`: the x-sweep candidate set is a superset.
+    let center = |p: PolyId| -> (i64, i64) {
         let bb = store.poly_bbox[p.0 as usize];
         (((bb.xmin as i64) + (bb.xmax as i64)) / 2,
          ((bb.ymin as i64) + (bb.ymax as i64)) / 2)
-    }).collect();
-    for (i, &p) in polys.iter().enumerate() {
-        let (cx, cy) = centers[i];
-        let mut count = 0i32;
-        for (j, &(ox, oy)) in centers.iter().enumerate() {
-            if i == j { continue; }
-            let dx = cx - ox;
-            let dy = cy - oy;
-            if dx * dx + dy * dy <= within2 {
-                count += 1;
-            }
+    };
+    let mut neighbors: std::collections::HashMap<u32, i32> =
+        polys.iter().map(|p| (p.0, 0)).collect();
+    for (pa, pb) in candidate_pairs(store, &polys, None, within) {
+        let (ax, ay) = center(pa);
+        let (bx, by) = center(pb);
+        let (dx, dy) = (ax - bx, ay - by);
+        if dx * dx + dy * dy <= within2 {
+            *neighbors.get_mut(&pa.0).unwrap() += 1;
+            *neighbors.get_mut(&pb.0).unwrap() += 1;
         }
+    }
+    for &p in &polys {
+        let count = neighbors[&p.0];
         if count < min_count - 1 {
             let bb = store.poly_bbox[p.0 as usize];
             out.push(Violation {
@@ -1528,7 +1915,7 @@ fn check_via_array_spacing(
     // track which candidate pairs are within array_spacing
     let mut close_pairs: Vec<(u32, u32)> = Vec::new();
     for &(pa, pb) in &cands {
-        let d2 = poly_poly_dist2(store, pa, pb);
+        let d2 = poly_poly_dist2_within(store, pa, pb, array_spacing + 1);
         if d2 > 0 && d2 <= as2 {
             let ia = idx_of[&pa.0];
             let ib = idx_of[&pb.0];
@@ -1552,7 +1939,7 @@ fn check_via_array_spacing(
         if !flagged_groups.insert(ga) { continue; }
         let pa = polys[ia as usize];
         let pb = polys[ib as usize];
-        let d2 = poly_poly_dist2(store, pa, pb);
+        let d2 = poly_poly_dist2_within(store, pa, pb, array_spacing + 1);
         if d2 > 0 && d2 < as2 {
             let ba = store.poly_bbox[pa.0 as usize];
             out.push(Violation {
@@ -1626,7 +2013,7 @@ fn check_multi_patterning(
     // build adjacency list
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for &(pa, pb) in &cands {
-        let d2 = poly_poly_dist2(store, pa, pb);
+        let d2 = poly_poly_dist2_within(store, pa, pb, color_spacing);
         if d2 > 0 && d2 < cs2 {
             let ia = idx_of[&pa.0];
             let ib = idx_of[&pb.0];
@@ -1660,5 +2047,27 @@ fn check_multi_patterning(
             });
             return; // one violation and stop
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Repro: via pad (A) and stub leg (C) 45nm apart, bridged by bar (B)
+    // covering the gap — merged shape is solid there, no notch.
+    #[test]
+    fn bridged_same_net_gap_is_not_a_notch() {
+        let mut store = GeometryStore::new();
+        let met1: LayerId = 0;
+        store.add_rect(met1, 8335, 7945, 290, 290); // A: pad
+        store.add_rect(met1, 8335, 7945, 625, 290); // B: bar covering A..C gap
+        store.add_rect(met1, 8670, 7945, 290, 585); // C: leg
+        let mut defs = std::collections::HashMap::new();
+        defs.insert("met1".to_string(), crate::params::LayerDef { layer: 68, datatype: 20 });
+        let lt = LayerTable::from_defs(&defs);
+        let mut out = Vec::new();
+        check_spacing_same(&store, &lt, met1, 140, Backend::Cpu, false, "min_spacing", &mut out);
+        assert!(out.is_empty(), "bridged gap flagged: {out:?}");
     }
 }

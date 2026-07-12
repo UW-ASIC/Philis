@@ -1,0 +1,9 @@
+* chain4 — 4 identical nfets, source-drain chained, common gate.
+* Known optimum: single abutted row in chain order 1-2-3-4.
+* Optimal HPWL = 3 adjacent nets * pitch + gate net * 3*pitch = 6*pitch.
+.subckt chain4 a e g VSS
+XM1 a g b VSS nfet_01v8 W=2u L=0.5u
+XM2 b g c VSS nfet_01v8 W=2u L=0.5u
+XM3 c g d VSS nfet_01v8 W=2u L=0.5u
+XM4 d g e VSS nfet_01v8 W=2u L=0.5u
+.ends chain4

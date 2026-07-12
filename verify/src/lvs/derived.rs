@@ -6,7 +6,7 @@
 //!   - `Or(layers)` → union (concat polygon lists)
 
 use crate::geometry::*;
-use crate::params::{Deck, LayerTable};
+use crate::params::LayerTable;
 use crate::schema::{DerivedLayerOp, DerivedLayerSchema};
 use std::collections::HashMap;
 

@@ -18,23 +18,27 @@ struct UnitFinger {
 
 impl CellGenerator for UnitFinger {
     fn generate(&self, b: &mut CellBuilder) -> Result<(), CellError> {
-        let ct = 170;
-        let poly_ext = 130;
-        let sd_w = 250;
+        // Step 1: obtain process construction data from the builder context.
+        let pdk = b.pdk()?;
+        let ct = pdk.contact;
+        let poly_ext = pdk.poly_ext;
+        let sd_w = pdk.sd_width;
+        let layers = &pdk.layers;
         let pitch = sd_w + self.l + sd_w;
 
-        b.rect("diff", 0, 0, pitch, self.w)?;
-        b.rect("poly", sd_w, -poly_ext, self.l, self.w + 2 * poly_ext)?;
+        // Step 2: draw with PDK roles so renamed layer stacks work unchanged.
+        b.rect(&layers.diff, 0, 0, pitch, self.w)?;
+        b.rect(&layers.poly, sd_w, -poly_ext, self.l, self.w + 2 * poly_ext)?;
 
         let cy = self.w / 2 - ct / 2;
-        b.rect("li", sd_w / 2 - ct / 2, cy, ct, ct)?;
-        b.pin("S", "li", sd_w / 2 - ct / 2, cy, ct, ct)?;
+        b.rect(&layers.li, sd_w / 2 - ct / 2, cy, ct, ct)?;
+        b.pin("S", &layers.li, sd_w / 2 - ct / 2, cy, ct, ct)?;
 
         let dx = sd_w + self.l + sd_w / 2 - ct / 2;
-        b.rect("li", dx, cy, ct, ct)?;
-        b.pin("D", "li", dx, cy, ct, ct)?;
+        b.rect(&layers.li, dx, cy, ct, ct)?;
+        b.pin("D", &layers.li, dx, cy, ct, ct)?;
 
-        b.pin("G", "poly", sd_w, -poly_ext, self.l, poly_ext)?;
+        b.pin("G", &layers.poly, sd_w, -poly_ext, self.l, poly_ext)?;
         Ok(())
     }
 }
@@ -63,11 +67,15 @@ impl CellGenerator for CurrentMirror {
         b.set_pattern(PatternType::Interdig);
         b.set_matching_group(0);
 
-        let uf = UnitFinger { w: self.w, l: self.l };
+        let uf = UnitFinger {
+            w: self.w,
+            l: self.l,
+        };
         let total_fingers = 1 + self.ratio; // ref + copies
 
         // Trial generation for finger pitch
-        let mut trial = CellBuilder::new(b.deck(), MatchingTier::None, 0);
+        let context = b.context().ok_or(CellError::MissingAnalogParams)?;
+        let mut trial = CellBuilder::with_context(context, MatchingTier::None, 0);
         uf.generate(&mut trial)?;
         let fp = trial.compute_bbox().width() + 100;
 
@@ -82,7 +90,11 @@ impl CellGenerator for CurrentMirror {
                 // General: interleave
                 let mut s = Vec::new();
                 for i in 0..total_fingers {
-                    s.push(if i % (self.ratio + 1) == 0 { "REF" } else { "COPY" });
+                    s.push(if i % (self.ratio + 1) == 0 {
+                        "REF"
+                    } else {
+                        "COPY"
+                    });
                 }
                 s
             }
@@ -95,10 +107,11 @@ impl CellGenerator for CurrentMirror {
         }
 
         // Shared gate strap across all fingers (met1)
-        let gate_y = -130;
+        let pdk = b.pdk()?;
+        let gate_y = -pdk.poly_ext;
         let total_w = sequence.len() as i32 * fp;
-        b.rect("met1", 0, gate_y, total_w, 170)?;
-        b.pin("G", "met1", 0, gate_y, total_w, 170)?;
+        b.rect(&pdk.layers.met1, 0, gate_y, total_w, pdk.mcon_size)?;
+        b.pin("G", &pdk.layers.met1, 0, gate_y, total_w, pdk.mcon_size)?;
 
         b.set_electrical(
             self.w * total_fingers as i32,
@@ -112,12 +125,16 @@ impl CellGenerator for CurrentMirror {
 }
 
 fn main() {
-    let deck = example_deck();
-    let mirror = CurrentMirror { w: 840, l: 150, ratio: 2 };
+    let (deck, pdk) = example_process();
+    let mirror = CurrentMirror {
+        w: 840,
+        l: 150,
+        ratio: 2,
+    };
 
     println!("Ports: {:?}", mirror.ports());
 
-    let mut b = CellBuilder::new(&deck, MatchingTier::Moderate, 0);
+    let mut b = CellBuilder::with_context(CellContext::new(&deck, &pdk), MatchingTier::Moderate, 0);
     mirror.generate(&mut b).expect("generate mirror");
     let out = b.finish();
 
@@ -129,7 +146,7 @@ fn main() {
     println!("  finger width: {} nm", out.meta.finger_width);
 }
 
-fn example_deck() -> Deck {
+fn example_process() -> (Deck, Pdk) {
     let json = r#"{
         "layers": {
             "diff":  {"layer": 65, "datatype": 20},
@@ -140,7 +157,17 @@ fn example_deck() -> Deck {
         },
         "drc": {
             "off_grid": {"grid": 5}
+        },
+        "cell": {
+            "layers": {"diff":"diff", "poly":"poly", "li":"li", "met1":"met1", "nwell":"nwell"},
+            "contact": 170,
+            "sd_width": 250,
+            "poly_ext": 130,
+            "mcon_size": 170
         }
     }"#;
-    Deck::from_json(json).expect("deck")
+    (
+        Deck::from_json(json).expect("deck"),
+        Pdk::from_json(json).expect("cell PDK"),
+    )
 }

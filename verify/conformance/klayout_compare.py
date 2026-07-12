@@ -89,11 +89,10 @@ def make_kl_check(rule, p):
             return f'input({met1}).non_rectangles', "angle"
         return None
     elif rule == "min_density":
-        layer = ld(p["layer"])
-        # KLayout doesn't have direct density DRC → skip
-        return None
+        # manual window loop in the inner script (mirrors check_density windowing)
+        return "py", "min_density"
     elif rule == "max_density":
-        return None
+        return "py", "max_density"
     elif rule == "overlap":
         la = ld(p["layer_a"])
         lb = ld(p["layer_b"])
@@ -102,26 +101,33 @@ def make_kl_check(rule, p):
         layer = ld(p["layer"])
         return f'input({layer}).space({p["min"]}, euclidian)', "corner_to_corner"
     elif rule == "eol_spacing":
-        # KLayout doesn't have direct EOL spacing
-        return None
+        # short edges vs region edges, projection metric (inner script)
+        return "py", "eol_spacing"
     elif rule == "well_enclosure":
         outer = ld(p["outer"])
         inner = ld(p["inner"])
         return f'input({inner}).enclosed(input({outer}), {p["min"]})', "well_enclosure"
     elif rule == "wide_dependent_spacing":
-        # KLayout: width-dependent spacing needs DRC script tricks
-        return None
+        # wide/narrow partition by bbox min-dim (inner script).
+        # Note: the sized(-t/2).sized(t/2) trick collapses shapes exactly AT the
+        # threshold (500 - 2*250 = 0 width), and our rule is bbox-based anyway.
+        return "py", "wide_dependent_spacing"
     elif rule == "prl_spacing":
-        return None
+        # space_check with projection metric + min_projection = prl_threshold
+        return "py", "prl_spacing"
     elif rule == "asymmetric_enclosure":
         return None
     elif rule == "min_enclosed_area":
         layer = ld(p["layer"])
         return f'input({layer}).holes.with_area(0, {p["min"]})', "min_enclosed_area"
     elif rule == "cheesing":
-        return None
+        # NOTE: KLayout holes()/with_holes can't work here — the "slot" is a
+        # same-layer polygon INSIDE the plate, which merges away (same polarity).
+        # Raw-shape containment check in the inner script mirrors check_cheesing.
+        return "py", "cheesing"
     elif rule == "redundant_via":
-        return None
+        # independent python reimplementation from via boxes (oracle)
+        return "py", "redundant_via"
     elif rule == "via_array_spacing":
         return None
     elif rule == "max_distance_to_tap":
@@ -162,7 +168,7 @@ for case in manifest["drc"]["cases"]:
     expr, desc = check
     cases_to_test.append({
         "id": case_id, "cell": cell, "rule": rule,
-        "expect": expect, "kl_expr": expr,
+        "expect": expect, "kl_expr": expr, "p": p,
     })
 
 # Generate KLayout batch script
@@ -179,6 +185,11 @@ layout.read(gds_file)
 
 results = {}
 cases = json.loads("""CASES_JSON""")
+layer_map = json.loads("""LAYERS_JSON""")
+
+def lds(name):
+    l = layer_map[name]
+    return "%d/%d" % (l["layer"], l["datatype"])
 
 for case in cases:
     cell_name = case["cell"]
@@ -202,12 +213,19 @@ for case in cases:
     src_cell = layout.cell(cell_idx)
     dst_cell = tmp.create_cell(cell_name)
 
-    # Copy shapes from source cell
+    # Copy shapes from source cell, RECURSIVELY: SREF/AREF children must be
+    # flattened through their instance transforms or hierarchical cells test empty.
     for li in layout.layer_indices():
         info = layout.get_info(li)
         tli = tmp.layer(info)
-        for shape in src_cell.shapes(li).each():
-            dst_cell.shapes(tli).insert(shape)
+        it = layout.begin_shapes(src_cell, li)
+        while not it.at_end():
+            s = it.shape()
+            if s.is_polygon() or s.is_box() or s.is_path():
+                dst_cell.shapes(tli).insert(s.polygon.transformed(it.trans()))
+            elif s.is_text():
+                dst_cell.shapes(tli).insert(s.text.transformed(it.trans()))
+            it.next()
 
     # Run DRC check
     expr = case["kl_expr"]
@@ -363,6 +381,100 @@ for case in cases:
             for p in holes.each():
                 if abs(p.area()) < limit:
                     count += 1
+        elif rule_name == "prl_spacing":
+            p = case["p"]
+            r = get_input(lds(p["layer"]))
+            viol = r.space_check(p["prl_spacing"], False, pya.Region.Projection,
+                                 None, p["prl_threshold"], None)
+            count = len(list(viol.each()))
+        elif rule_name == "wide_dependent_spacing":
+            p = case["p"]
+            r = get_input(lds(p["layer"]))
+            r.merge()
+            t = p["width_threshold"]
+            wide = pya.Region()
+            rest = pya.Region()
+            for poly in r.each():
+                bb = poly.bbox()
+                if min(bb.width(), bb.height()) >= t:
+                    wide.insert(poly)
+                else:
+                    rest.insert(poly)
+            s_lim = p["wide_spacing"]
+            count = len(list(wide.separation_check(rest, s_lim).each()))
+            count += len(list(wide.space_check(s_lim).each()))
+        elif rule_name in ("min_density", "max_density"):
+            # windows anchored at layer bbox min, stepping by window size
+            # (mirrors check_density in src/drc/mod.rs)
+            p = case["p"]
+            r = get_input(lds(p["layer"]))
+            r.merge()
+            w = p["window"]
+            bb = r.bbox()
+            count = 0
+            if not bb.empty():
+                nx = max(1, (bb.width() + w - 1) // w)
+                ny = max(1, (bb.height() + w - 1) // w)
+                for i in range(nx):
+                    for j in range(ny):
+                        box = pya.Box(bb.left + i * w, bb.bottom + j * w,
+                                      bb.left + (i + 1) * w, bb.bottom + (j + 1) * w)
+                        frac = (r & pya.Region(box)).area() / float(w * w)
+                        if rule_name == "min_density":
+                            if frac < p["min_frac"]:
+                                count += 1
+                        elif frac > p["max_frac"]:
+                            count += 1
+        elif rule_name == "eol_spacing":
+            # edges shorter than eol_width (exclusive) vs all region edges,
+            # projection metric = facing requirement (side neighbors project 0).
+            p = case["p"]
+            r = get_input(lds(p["layer"]))
+            r.merge()
+            # 3-arg form required: 2-arg is with_length(length, inverse)
+            short = r.edges().with_length(0, p["eol_width"], False)
+            viol = short.separation_check(r.edges(), p["eol_spacing"], False,
+                                          pya.Region.Projection)
+            # dedupe symmetric pairs (short-vs-short shows up in both directions)
+            seen = set()
+            for ep in viol.each():
+                seen.add(tuple(sorted([str(ep.first), str(ep.second)])))
+            count = len(seen)
+        elif rule_name == "cheesing":
+            # raw (unmerged) shapes: plate area > max needs a same-layer poly
+            # strictly inside it (slot marker) — mirrors check_cheesing
+            p = case["p"]
+            r = get_input(lds(p["layer"]))
+            polys = list(r.each())
+            count = 0
+            for i, a in enumerate(polys):
+                if a.area() <= p["max"]:
+                    continue
+                ba = a.bbox()
+                slotted = False
+                for j, b in enumerate(polys):
+                    if i == j:
+                        continue
+                    bbb = b.bbox()
+                    if (bbb.left > ba.left and bbb.bottom > ba.bottom
+                            and bbb.right < ba.right and bbb.top < ba.top):
+                        slotted = True
+                        break
+                if not slotted:
+                    count += 1
+        elif rule_name == "redundant_via":
+            # independent oracle: via bbox centers, neighbor count within radius
+            p = case["p"]
+            r = get_input(lds(p["layer"]))
+            centers = [(pl.bbox().center().x, pl.bbox().center().y) for pl in r.each()]
+            w2 = p["within"] ** 2
+            need = p["min_count"] - 1
+            count = 0
+            for i, (x, y) in enumerate(centers):
+                n = sum(1 for j, (x2, y2) in enumerate(centers)
+                        if j != i and (x - x2) ** 2 + (y - y2) ** 2 <= w2)
+                if n < need:
+                    count += 1
         else:
             count = -2  # unhandled
 
@@ -378,6 +490,7 @@ with open(out_file, "w") as f:
 # Inject cases
 cases_json = json.dumps(cases_to_test).replace('\\', '\\\\').replace('"', '\\"')
 kl_script_final = kl_script.replace('CASES_JSON', json.dumps(cases_to_test))
+kl_script_final = kl_script_final.replace('LAYERS_JSON', json.dumps(LAYERS))
 
 # Write script + run
 with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:

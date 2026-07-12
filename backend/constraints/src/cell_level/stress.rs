@@ -1,5 +1,5 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
     DeviceConstraint, DeviceId,
 };
 
@@ -12,12 +12,18 @@ pub struct StressConstraint {
 }
 
 impl DeviceConstraint for StressConstraint {
-    fn device_id(&self) -> DeviceId { self.device_id }
+    fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
 }
 
 impl Contractable for StressConstraint {
-    fn strength(&self) -> ConstraintStrength { ConstraintStrength::Soft }
-    fn priority(&self) -> i32 { 50 }
+    fn strength(&self) -> ConstraintStrength {
+        ConstraintStrength::Soft
+    }
+    fn priority(&self) -> i32 {
+        50
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
         &[ConstraintStage::Placement]

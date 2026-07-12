@@ -1,9 +1,11 @@
 //! MOSFET cell generator: finger decomposition, interdigitation, contacts.
 
-use substrate3::{CellBuilder, CellError, DeviceType, Direction, MatchingTier, MatchingType, PatternType, PortDef};
+use crate::{
+    CellBuilder, CellError, DeviceType, Direction, MatchingTier, MatchingType, PatternType, PortDef,
+};
 
-use crate::device::DeviceRecord;
 use super::{CellSpec, Pdk};
+use crate::device::DeviceRecord;
 
 /// One point in the MOSFET variant space.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,18 +37,16 @@ impl CellSpec for MosfetSpec {
         let mut specs: Vec<Self> = feasible_styles(devices.len())
             .into_iter()
             .flat_map(|style| {
-                feasible_nf(ref_dev, pdk)
-                    .into_iter()
-                    .flat_map(move |nf| {
-                        DUMMY_OPTIONS.iter().map(move |&d| MosfetSpec {
-                            nf,
-                            style,
-                            dummies_per_edge: d,
-                            match_kind: None,
-                            unit_nf: None,
-                            unit_w: None,
-                        })
+                feasible_nf(ref_dev, pdk).into_iter().flat_map(move |nf| {
+                    DUMMY_OPTIONS.iter().map(move |&d| MosfetSpec {
+                        nf,
+                        style,
+                        dummies_per_edge: d,
+                        match_kind: None,
+                        unit_nf: None,
+                        unit_w: None,
                     })
+                })
             })
             .collect();
 
@@ -115,7 +115,8 @@ impl CellSpec for MosfetSpec {
         let m1_pitch = pdk.mcon_size + 2 * pdk.m1_enc + pdk.met1_space;
         let pitch = (sd_w + gate_l + sd_w).max(m1_pitch);
 
-        let sequence = finger_sequence(devices, self.style, drawn_fingers);
+        let sequence =
+            finger_sequence_ext(devices, self.style, drawn_fingers, self.unit_nf.as_deref());
 
         // ponytail: LOD moat extension — extend diff past outer gates by tier-keyed
         // distance so SA/SB diagnostics == emitted geometry (AOAL ch13 13.2.2 Rule 12)
@@ -126,7 +127,13 @@ impl CellSpec for MosfetSpec {
         };
         let diff_x_start = -moat_ext;
         let diff_x_end = sequence.len() as i32 * pitch + moat_ext;
-        b.rect(&ly.diff, diff_x_start, 0, diff_x_end - diff_x_start, finger_w)?;
+        b.rect(
+            &ly.diff,
+            diff_x_start,
+            0,
+            diff_x_end - diff_x_start,
+            finger_w,
+        )?;
 
         for (idx, dev_name) in sequence.iter().enumerate() {
             let gx = idx as i32 * pitch + sd_w;
@@ -137,7 +144,11 @@ impl CellSpec for MosfetSpec {
                 continue;
             }
 
-            let stub = 200;
+            // Gate met1 pad row (drawn downstream, mcon + 2*m1_enc wide, centered
+            // on the stub) must clear the S/D pad row at cy by met1_space, or
+            // small-finger_w cells get diagonal met1 gaps < min_spacing.
+            let m1_clear = pdk.mcon_size + 2 * pdk.m1_enc + pdk.met1_space;
+            let stub = 200.max(2 * (m1_clear - finger_w / 2 - poly_ext));
             b.rect(&ly.poly, gx, -(poly_ext + stub), gate_l, stub + 30)?;
             b.pin(
                 &format!("{dev_name}:G"),
@@ -181,28 +192,27 @@ impl CellSpec for MosfetSpec {
             ];
             for dx in dummy_positions {
                 b.rect(&ly.poly, dx, -poly_ext, gate_l, finger_w + 2 * poly_ext)?;
-                // Contact stack: licon → li → mcon → met1 on dummy poly endcap
+                // Contact stack: licon → li on dummy poly endcap. NO mcon/met1:
+                // the dummy tie-off is never routed (pin not in the hypergraph),
+                // so a met1 pad here is dead metal that only creates spacing
+                // hazards for landing stubs. Reinstate met1 + register the pad
+                // as a routing term when dummy tie-off routing lands.
                 let cx = dx + gate_l / 2 - ct / 2;
                 let cy = -(poly_ext / 2) - ct / 2;
                 b.rect(&ly.licon, cx, cy, ct, ct)?;
-                // li encloses mcon (sky130: 30nm enclosure)
+                // li encloses licon (sky130: 30nm enclosure)
                 let li_enc = 30;
                 let li_x = cx - li_enc;
                 let li_y = cy - li_enc;
                 let li_sz = ct + 2 * li_enc;
                 b.rect(&ly.li, li_x, li_y, li_sz, li_sz)?;
-                b.rect(&ly.mcon, cx, cy, ct, ct)?;
-                // met1 strap — sized to meet min_area (sky130: 83000 nm²)
-                let m1_w = ct + 2 * pdk.m1_enc;
-                let m1_min_area = 83_000;
-                let m1_h = (m1_min_area / m1_w).max(ct + 2 * pdk.m1_enc);
-                let m1_x = cx - pdk.m1_enc;
-                let m1_y = cy - (m1_h - ct) / 2;
-                b.rect(&ly.met1, m1_x, m1_y, m1_w, m1_h)?;
                 b.pin(
                     &format!("dummy:{supply_net}"),
-                    &ly.met1,
-                    m1_x, m1_y, m1_w, m1_h,
+                    &ly.li,
+                    li_x,
+                    li_y,
+                    li_sz,
+                    li_sz,
                 )?;
             }
         }
@@ -258,9 +268,7 @@ fn feasible_nf(dev: &DeviceRecord, pdk: &Pdk) -> Vec<u16> {
     let mut nfs = vec![dev.nf.max(1)];
     for nf in [1u16, 2, 4, 6, 8, 12, 16] {
         let w_f = dev.w / i32::from(nf);
-        if dev.w % i32::from(nf) == 0
-            && w_f >= pdk.min_finger_width
-            && w_f <= pdk.max_finger_width
+        if dev.w % i32::from(nf) == 0 && w_f >= pdk.min_finger_width && w_f <= pdk.max_finger_width
         {
             nfs.push(nf);
         }
@@ -287,6 +295,7 @@ fn est_dims(spec: &MosfetSpec, devices: &[DeviceRecord], pdk: &Pdk) -> (i32, i32
     (w, finger_w + 2 * pdk.poly_ext)
 }
 
+#[cfg(test)]
 fn finger_sequence(
     devices: &[DeviceRecord],
     style: PatternType,
@@ -388,7 +397,9 @@ fn greedy_centroid_mosfet(names: &[&str], counts: &[usize]) -> Vec<String> {
                 seq[hi] = pick2;
                 remaining[pick2] = remaining[pick2].saturating_sub(1);
             }
-            if hi == 0 { break; }
+            if hi == 0 {
+                break;
+            }
             hi -= 1;
         }
         lo += 1;
@@ -400,9 +411,9 @@ fn greedy_centroid_mosfet(names: &[&str], counts: &[usize]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::generators::SpecCell;
-    use substrate3::{CellBuilder, DeviceType, MatchingTier};
+    use crate::{CellBuilder, DeviceType, MatchingTier};
 
-    fn test_deck() -> substrate3::Deck {
+    fn test_deck() -> crate::Deck {
         crate::test_util::deck_from_layers(&[
             ("diff", 65, 20),
             ("poly", 66, 20),

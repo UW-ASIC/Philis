@@ -1,5 +1,5 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
     DeviceId, GroupConstraint, PatternType,
 };
 
@@ -33,8 +33,12 @@ impl CcGroup {
 }
 
 impl Contractable for CcGroup {
-    fn strength(&self) -> ConstraintStrength { ConstraintStrength::Soft }
-    fn priority(&self) -> i32 { 60 }
+    fn strength(&self) -> ConstraintStrength {
+        ConstraintStrength::Soft
+    }
+    fn priority(&self) -> i32 {
+        60
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
         &[ConstraintStage::CellGen, ConstraintStage::Placement]

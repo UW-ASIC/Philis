@@ -48,15 +48,22 @@ cargo run --release -p pnr-visualizer -- output.gds pdks/sky130.json
 ## Architecture
 
 ```
-frontend/          SPICE parsing, orchestrator (parse → place → route → signoff)
+frontend/          SPICE parsing + net classification; submits typed backend requests
+  substrate3/      User macro facade over pnr-cells, with read-only PDK context
 backend/
-  engine/          Generic SA/analytical optimization framework
+  src/lib.rs       Public facade; fixed constraints → cells → place → route → signoff flow
+  engine/          Generic slot traits, optimization drivers, feedback controller
   placement/       Analog placement (symmetry, CC, proximity constraints)
   routing/         Global + detailed routing (PathFinder)
   cells/           Cell generators (MOSFET, resistor, capacitor, BJT, diode)
-  constraints/     Constraint types and contract system
+  constraints/     Shared constraint record, analog theory, and contract system
 verify/            DRC, LVS, PEX (CPU + optional GPU)
 tools/visualizer/  GPU-accelerated GDS viewer + SVG export
 pdks/              PDK configurations (sky130, generic_finfet)
 benchmark/         Benchmark harness with external circuit fixtures
 ```
+
+Backend dependencies are one-way: `cells/constraints → engine → placement → routing → backend facade`.
+The facade is the composition root; lower crates never depend on it.
+`substrate3` points into `pnr-cells` and exposes that backend contract to users;
+no backend crate depends on `substrate3`.

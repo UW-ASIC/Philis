@@ -46,13 +46,15 @@ impl Core<Toy> for Perturb {
         _: &mut (),
         ctl: &Control,
         rng: &mut SplitMix64,
-    ) -> Option<(usize, f64, f64)> {
+        mv: &mut (usize, f64, f64),
+    ) -> bool {
         let i = rng.below(h.len());
         let nx = h[i] + f64::from(rng.centered(ctl.range));
-        Some((i, nx, (nx - c[i]).powi(2) - (h[i] - c[i]).powi(2)))
+        *mv = (i, nx, (nx - c[i]).powi(2) - (h[i] - c[i]).powi(2));
+        true
     }
     #[inline(always)]
-    fn commit(&self, h: &mut Vec<f64>, _: &Vec<f64>, _: &mut (), mv: &(usize, f64, f64)) {
+    fn commit(&self, h: &mut Vec<f64>, _: &Vec<f64>, _: &mut (), mv: &mut (usize, f64, f64)) {
         h[mv.0] = mv.1;
     }
 }

@@ -1,0 +1,8 @@
+* quad — 4 identical nfets sharing one drain net (star).
+* Known optimum: 2x2 cluster, shared net spans one pitch in x and one in y.
+.subckt quad n g VSS
+XM1 n g VSS VSS nfet_01v8 W=2u L=0.5u
+XM2 n g VSS VSS nfet_01v8 W=2u L=0.5u
+XM3 n g VSS VSS nfet_01v8 W=2u L=0.5u
+XM4 n g VSS VSS nfet_01v8 W=2u L=0.5u
+.ends quad

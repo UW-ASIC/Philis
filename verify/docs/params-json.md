@@ -1,14 +1,19 @@
 # Writing `params.json`
 
-One JSON = one PDK. The library reads a single `params.json` describing three things —
-the layer table, the DRC rule deck, and PEX process constants — and that is the *only*
-configuration input (`src/params.rs`, `Deck::from_json`).
+One JSON = one PDK. The library reads a single `params.json` describing the layer
+table, DRC rules, PEX constants, LVS connectivity/device recognition and ERC limits
+(`src/params.rs`, `Deck::from_json`). The repository's complete PDK documents may also
+contain top-level cell-generation/model sections owned by other consumers.
 
 ```json
 {
   "layers": { ... },   // required
   "drc":    { ... },   // required (may be empty {})
-  "pex":    { ... }    // optional
+  "pex":    { ... },   // optional analytical models
+  "lvs":    { ... },
+  "connectivity": { ... },
+  "device_recognition": { ... },
+  "erc":    { ... }
 }
 ```
 
@@ -19,7 +24,10 @@ setup, `dbu_nm = 1.0`). Areas are DBU². Density fractions are floats in [0, 1].
 
 Maps a symbolic name to a GDS `(layer, datatype)` pair. Every layer referenced anywhere
 else in the file must be declared here; an unknown name is a load error
-(`unknown layer 'x'`).
+(`unknown layer 'x'`). Names must be non-empty, pairs must be in the supported
+non-negative signed-16-bit GDS record range, and two names may not alias the same pair.
+Aliasing is rejected because the input mapper could otherwise make one symbolic layer
+silently unreachable.
 
 ```json
 "layers": {
@@ -31,23 +39,46 @@ else in the file must be declared here; an unknown name is a load error
 Internal `LayerId`s are assigned in `(layer, datatype)` order, so IDs (and report order)
 are stable across runs regardless of JSON key order.
 
-Note for LVS: connectivity is defined over well-known names — conductors
-`diff, poly, li, met1, met2` and vias `licon, mcon, via1`, plus implants `nsdm`/`psdm`
-for N/P selection (`src/lvs.rs`, `connective_layers`). Use these exact names if you want
-LVS to work; layers with other names are simply ignored by LVS.
+LVS does not infer well-known names. The `connectivity` and `device_recognition`
+sections explicitly declare conductor, via, gate/channel, implant and marker roles;
+unknown references, duplicate memberships and unsupported device/flavor names are errors.
 
 ## 2. `drc`
 
-A map of **rule-type → parameters**. The key is both the rule's ID in reports and its
-type discriminator, so each rule type appears **at most once per deck** (you cannot have
-two `min_width` entries for different layers). An unknown key is a load error.
+Every rule has an independent stable `id` (reported in violations) and `kind` (the
+implementation selector). The preferred object form maps **rule ID → parameters**;
+put `kind` in the body when the ID differs from the kind. This permits any number of
+instances of one kind:
+
+```json
+"drc": {
+  "M1.W.1": { "kind": "min_width", "layer": "met1", "min": 140 },
+  "M2.W.1": { "kind": "min_width", "layer": "met2", "min": 200 }
+}
+```
+
+An explicit array is also accepted:
+
+```json
+"drc": [
+  { "id": "M1.W.1", "kind": "min_width", "layer": "met1", "min": 140 }
+]
+```
+
+Legacy maps remain valid: for `"min_width": { ... }`, the key is used as both
+`id` and `kind`. IDs must be unique, and an unknown kind is a load error.
 
 ### Disabling rules
 
-Every PDK obeys the same unified rule superset; you hide a rule rather than delete it:
+Every PDK obeys the same unified rule superset. A configured rule is disabled only
+with `"enabled": false` (default is `true` when omitted). Required limits that are
+missing, zero, negative, non-finite, or out of range are construction errors; they
+never silently remove a check. Disabled entries are still fully parsed and validated:
+`enabled` controls execution, not whether the declared deck operation is understood.
 
-- `"enabled": false` — explicit off (default is `true` when omitted), or
-- principal limit `0` — `min: 0`, `max: 0`, or `grid: 0` disables the rule.
+Compatibility note: legacy **map syntax** is preserved. Decks that previously used
+a zero principal limit as an implicit disable must be migrated to `"enabled": false`;
+rejecting that ambiguous fail-open convention is an intentional validation change.
 
 ### The 15 rule types
 
@@ -78,7 +109,7 @@ Example:
   "min_enclosure":   { "outer": "met1", "inner": "mcon", "min": 60 },
   "min_extension":   { "layer": "poly", "ref": "diff", "min": 130 },
   "min_area":        { "layer": "met1", "min": 100000 },
-  "max_width":       { "enabled": false, "layer": "met1", "max": 0 },
+  "max_width":       { "enabled": false, "layer": "met1", "max": 5000 },
   "off_grid":        { "grid": 5 },
   "angle":           { "allowed": [0, 45, 90, 135] },
   "min_density":     { "layer": "met1", "window": 2000, "min_frac": 0.2 },
@@ -88,17 +119,19 @@ Example:
 
 Gotchas:
 
-- Missing numeric fields default to 0 — which *disables* the rule silently. Spell out
-  every limit.
-- `min_density`/`max_density` don't have the limit-0 escape; use `enabled: false`
-  (a `window` ≤ 0 also makes the check a no-op).
-- `angle` with a missing/empty `allowed` list flags **every** edge.
+- Missing or non-positive required dimensions are errors. Density fractions must be
+  finite and in `[0, 1]`; density windows must be positive.
+- `angle.allowed` must be a non-empty integer array with values in `[0, 180)`.
+- Multi-patterning color counts must be in `[2, 64]`.
+- Unknown properties inside DRC, layer, PEX, ERC, LVS, connectivity and device-recognition
+  objects are errors. Unrelated top-level sections are retained for compatibility with the
+  repository's complete PDK document, whose other consumers own those sections.
 - Rules are sorted by ID at load time, so report order is deterministic.
 
 ## 3. `pex`
 
-Optional. Maps a layer name to its process constants. Layers named here but not in
-`layers` are silently skipped.
+Optional. Maps a layer name to its process constants. A layer named here but not in
+`layers` is a descriptive deck-construction error.
 
 ```json
 "pex": {
@@ -112,7 +145,9 @@ Optional. Maps a layer name to its process constants. Layers named here but not 
 }
 ```
 
-All five fields are required per layer:
+The five base fields are required per layer. `via_res_ohm` and
+`interlayer_cap_af_um2` are optional non-negative coefficients (default `0`, meaning
+that model is not declared on the layer):
 
 | field | unit | used in |
 |---|---|---|
@@ -121,6 +156,8 @@ All five fields are required per layer:
 | `fringe_cap_af_um` | aF/µm | `C_fringe = Cf · P` |
 | `coupling_cap_af_um` | aF/µm | `C_c = Ck · Lp · (Sref/S)` |
 | `coupling_ref_spacing_nm` | nm | the `Sref` in the coupling formula |
+| `via_res_ohm` | Ω/cut polygon | fixed analytical via/contact resistance |
+| `interlayer_cap_af_um2` | aF/µm² | simplified cross-layer overlap coefficient |
 
 See [verification-rules.md](verification-rules.md) for what the checkers do with all of
 this. A complete working deck is at `conformance/params.json`.

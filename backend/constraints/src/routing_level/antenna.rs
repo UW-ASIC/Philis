@@ -1,5 +1,5 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
     NetConstraint,
 };
 
@@ -14,12 +14,18 @@ pub struct AntennaConstraint {
 }
 
 impl NetConstraint for AntennaConstraint {
-    fn net_name(&self) -> &str { &self.net_name }
+    fn net_name(&self) -> &str {
+        &self.net_name
+    }
 }
 
 impl Contractable for AntennaConstraint {
-    fn strength(&self) -> ConstraintStrength { ConstraintStrength::Hard }
-    fn priority(&self) -> i32 { 75 }
+    fn strength(&self) -> ConstraintStrength {
+        ConstraintStrength::Hard
+    }
+    fn priority(&self) -> i32 {
+        75
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
         &[ConstraintStage::Routing, ConstraintStage::Signoff]

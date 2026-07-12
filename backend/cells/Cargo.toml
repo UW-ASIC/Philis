@@ -3,8 +3,11 @@ name = "pnr-cells"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+test-fixtures = []
+
 [dependencies]
-substrate3 = { path = "../../frontend/substrate3" }
 gdsverify = { path = "../../verify" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2"

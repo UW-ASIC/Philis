@@ -1,5 +1,5 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
     DeviceConstraint, DeviceId, GuardRingType,
 };
 
@@ -8,6 +8,10 @@ use crate::types::{
 pub struct GuardRingRequirement {
     pub device_id: DeviceId,
     pub ring_type: GuardRingType,
+    /// Whether this ring may be shared with nearby devices that request the
+    /// same ring type and connection net. Pad injectors and explicitly
+    /// isolated devices must set this to false.
+    pub shareable: bool,
     /// Tap contact pitch (um).
     pub tap_pitch_um: f64,
     /// Minimum ring metal width (um).
@@ -20,15 +24,24 @@ pub struct GuardRingRequirement {
 }
 
 impl DeviceConstraint for GuardRingRequirement {
-    fn device_id(&self) -> DeviceId { self.device_id }
+    fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
 }
 
 impl Contractable for GuardRingRequirement {
-    fn strength(&self) -> ConstraintStrength { ConstraintStrength::Hard }
-    fn priority(&self) -> i32 { 80 }
+    fn strength(&self) -> ConstraintStrength {
+        ConstraintStrength::Hard
+    }
+    fn priority(&self) -> i32 {
+        80
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
-        &[ConstraintStage::CellGen, ConstraintStage::Placement]
+        // The ring outline depends on the placed device cluster. Its terminal
+        // is then consumed by routing and the completed enclosure is judged at
+        // signoff; it is deliberately not part of the device-cell footprint.
+        &[ConstraintStage::Routing, ConstraintStage::Signoff]
     }
 
     fn to_contract(&self, device_names: &[String]) -> ConstraintContract {

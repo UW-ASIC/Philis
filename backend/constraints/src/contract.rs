@@ -36,8 +36,7 @@ pub fn validate_constraint_record(contracts: &[ConstraintContract]) -> ContractV
             ConstraintStatus::Satisfied => v.satisfied += 1,
             ConstraintStatus::Violated => {
                 v.violated += 1;
-                if c.strength == crate::types::ConstraintStrength::Hard
-                    && c.waiver_reason.is_none()
+                if c.strength == crate::types::ConstraintStrength::Hard && c.waiver_reason.is_none()
                 {
                     v.hard_violations.push(c.constraint_id.clone());
                 }

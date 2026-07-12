@@ -39,6 +39,134 @@ pub fn generate(s: &mut Suite) {
     via_array_spacing(s);
     max_distance_to_tap(s);
     multi_patterning(s);
+    hierarchy(s);
+    path_elements(s);
+    antenna_car(s);
+    diagonal_width(s);
+    eol_zone_semantics(s);
+    polygon_validity(s);
+}
+
+/// 45° bars: width = perpendicular distance between the diagonal long edges.
+/// Offset (−57,57) → d² = 114²/2 = 6498 → 80nm (< 100 limit, violation);
+/// offset (−142,142) → d² = 284²/2 = 40328 → 200nm (pass).
+fn diagonal_width(s: &mut Suite) {
+    s.gds.begin_cell("DRC_MW_DIAG_FAIL");
+    s.gds.boundary(MET1.0, MET1.1, &[(0, 0), (1000, 1000), (943, 1057), (-57, 57)]);
+    s.gds.end_cell();
+    s.add_drc_measured("DRC_MW_DIAG_FAIL", "DRC_MW_DIAG_FAIL", "min_width", 1, 80);
+
+    s.gds.begin_cell("DRC_MW_DIAG_PASS");
+    s.gds.boundary(MET1.0, MET1.1, &[(0, 0), (1000, 1000), (858, 1142), (-142, 142)]);
+    s.gds.end_cell();
+    s.add_drc("DRC_MW_DIAG_PASS", "DRC_MW_DIAG_PASS", "min_width", 0);
+}
+
+/// EOL is an end-of-line rule: a neighbor BESIDE the wire end (outside the
+/// projected zone) must not fire it, even within eol_spacing.
+fn eol_zone_semantics(s: &mut Suite) {
+    s.gds.begin_cell("DRC_EOL_SIDE");
+    s.gds.rect(MET1, 0, 0, 100, 500);    // wire with 100nm EOL edges (top zone empty)
+    s.gds.rect(MET1, 200, 0, 500, 500);  // wide block 100nm to the RIGHT — not in any zone
+    s.gds.end_cell();
+    s.add_drc("DRC_EOL_SIDE", "DRC_EOL_SIDE", "eol_spacing", 0);
+}
+
+/// Always-on validity scan: bow-tie flags, keyhole slit (legal hole) does not.
+fn polygon_validity(s: &mut Suite) {
+    // bow-tie already drawn in DRC_FUZZ_SELF; zero-width sliver in DRC_FUZZ_ZERO
+    s.add_drc("DRC_VALID_SELF", "DRC_FUZZ_SELF", "polygon_validity", 1);
+    s.add_drc("DRC_VALID_ZERO", "DRC_FUZZ_ZERO", "polygon_validity", 1);
+    // keyhole: outer ring with a slit cut to an inner hole — coincident slit
+    // edges, NO proper crossing → must pass
+    s.gds.begin_cell("DRC_VALID_KEYHOLE");
+    s.gds.boundary(MET1.0, MET1.1, &[
+        (0, 0), (1000, 0), (1000, 450), (600, 450), (600, 400),
+        (900, 400), (900, 100), (100, 100), (100, 400), (600, 400),
+        (600, 450), (0, 450),
+    ]);
+    s.gds.end_cell();
+    s.add_drc("DRC_VALID_KEYHOLE", "DRC_VALID_KEYHOLE", "polygon_validity", 0);
+}
+
+/// Cumulative antenna (CAR): per-stage areas each pass the 400 limit alone
+/// (li=100, met1=300 cumulative), but the met2 stage pushes cumulative to 450.
+/// The diode variant is identical geometry plus a diode marker on the net — waived.
+fn antenna_car(s: &mut Suite) {
+    // shared geometry: gate area = 50×200 = 10000 nm²
+    let base = |s: &mut Suite| {
+        s.gds.rect(DIFF, 0, 0, 500, 200);
+        s.gds.rect(NSDM, -50, -50, 600, 300);
+        s.gds.rect(POLY, 200, -50, 50, 300);
+        s.gds.rect(LI, 210, 200, 1000, 1000);    // 1.0M nm² → stage ratio 100
+        s.gds.rect(MET1, 300, 300, 2000, 1000);  // 2.0M → cumulative 300
+    };
+
+    s.gds.begin_cell("DRC_CAR_PASS");
+    base(s);
+    s.gds.rect(MET2, 400, 400, 500, 1000);       // 0.5M → cumulative 350 < 400
+    s.gds.end_cell();
+    s.add_drc("DRC_CAR_PASS", "DRC_CAR_PASS", "antenna_car", 0);
+
+    s.gds.begin_cell("DRC_CAR_FAIL");
+    base(s);
+    s.gds.rect(MET2, 400, 400, 1500, 1000);      // 1.5M → cumulative 450 > 400
+    s.gds.end_cell();
+    // measured = worst cumulative ratio × 1000
+    s.add_drc_measured("DRC_CAR_FAIL", "DRC_CAR_FAIL", "antenna_car", 1, 450_000);
+
+    s.gds.begin_cell("DRC_CAR_DIODE");
+    base(s);
+    s.gds.rect(MET2, 400, 400, 1500, 1000);      // same 450 ratio…
+    s.gds.rect(DIODE, 2000, 1000, 100, 100);     // …but a diode on the met1 net waives it
+    s.gds.end_cell();
+    s.add_drc("DRC_CAR_DIODE", "DRC_CAR_DIODE", "antenna_car", 0);
+}
+
+/// SREF (plain / rotated / mirrored) + 2×2 AREF of a child cell containing one
+/// 80nm spacing violation. Instances are 20µm apart so violations never cross
+/// instance boundaries: expect exactly one per instance = 7.
+fn hierarchy(s: &mut Suite) {
+    // child: two met1 bars, gap 80 < 100
+    s.gds.begin_cell("HIER_CHILD");
+    s.gds.rect(MET1, 0, 0, 400, 400);
+    s.gds.rect(MET1, 480, 0, 400, 400);
+    s.gds.end_cell();
+
+    s.gds.begin_cell("DRC_HIER");
+    s.gds.sref("HIER_CHILD", 0, 0, false, 1.0, 0.0);
+    s.gds.sref("HIER_CHILD", 20_000, 0, false, 1.0, 90.0);
+    s.gds.sref("HIER_CHILD", 40_000, 0, true, 1.0, 0.0);
+    s.gds.aref("HIER_CHILD", (60_000, 0), 2, 2, (20_000, 0), (0, 20_000));
+    s.gds.end_cell();
+    s.add_drc_measured("DRC_HIER", "DRC_HIER", "min_spacing", 7, 80);
+
+    // nested: parent → mid → child, transform composition (mid rotates child 90°,
+    // top mirrors mid). Violation survives both hops.
+    s.gds.begin_cell("HIER_MID");
+    s.gds.sref("HIER_CHILD", 0, 0, false, 1.0, 90.0);
+    s.gds.end_cell();
+    s.gds.begin_cell("DRC_HIER_NEST");
+    s.gds.sref("HIER_MID", 0, 0, true, 1.0, 0.0);
+    s.gds.end_cell();
+    s.add_drc_measured("DRC_HIER_NEST", "DRC_HIER_NEST", "min_spacing", 1, 80);
+}
+
+/// PATH elements expand to their drawn width: two flush-cap paths of width 300
+/// with an 80nm edge gap violate min_spacing; an L-bend path (square joint)
+/// passes min_width at its drawn width.
+fn path_elements(s: &mut Suite) {
+    s.gds.begin_cell("DRC_PATH");
+    // horizontal centerlines: y=0 covers [-150,150], y=380 covers [230,530] → gap 80
+    s.gds.path(MET1, 300, 0, &[(0, 0), (2000, 0)]);
+    s.gds.path(MET1, 300, 0, &[(0, 380), (2000, 380)]);
+    s.gds.end_cell();
+    s.add_drc_measured("DRC_PATH", "DRC_PATH", "min_spacing", 1, 80);
+
+    s.gds.begin_cell("DRC_PATH_BEND");
+    s.gds.path(MET1, 300, 2, &[(0, 0), (2000, 0), (2000, 2000)]);
+    s.gds.end_cell();
+    s.add_drc("DRC_PATH_BEND", "DRC_PATH_BEND", "min_width", 0);
 }
 
 fn min_width(s: &mut Suite) {

@@ -6,6 +6,19 @@
 
 use serde::Deserialize;
 
+/// Optional deep-trench-isolation construction rules, in nm.
+///
+/// Absence means that the process does not expose DTI to automatic placement.
+/// Keeping this process capability in the PDK prevents circuit recognition from
+/// inventing a technology-specific 5 um keep-out on every complementary pair.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct DtiRules {
+    /// Maximum raw edge gap for two devices to share a trench.
+    pub shared_max_gap: i32,
+    /// Minimum raw edge gap when the devices do not share a trench.
+    pub separated_min_gap: i32,
+}
+
 /// Layer roles the generators draw on, mapped to this PDK's layer names.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -23,6 +36,10 @@ pub struct Layers {
     pub psdm: String,
     /// Tap diffusion layer (if separate from diff).
     pub tap: String,
+    /// Ordered routing conductors, bottom to top.
+    pub routing_metals: Vec<String>,
+    /// Ordered cuts between adjacent entries in `routing_metals`.
+    pub routing_vias: Vec<String>,
 }
 
 impl Default for Layers {
@@ -38,6 +55,14 @@ impl Default for Layers {
             nsdm: "nsdm".into(),
             psdm: "psdm".into(),
             tap: "tap".into(),
+            routing_metals: vec![
+                "met1".into(),
+                "met2".into(),
+                "met3".into(),
+                "met4".into(),
+                "met5".into(),
+            ],
+            routing_vias: vec!["via1".into(), "via2".into(), "via3".into(), "via4".into()],
         }
     }
 }
@@ -61,6 +86,10 @@ pub struct Pdk {
     pub m1_enc: i32,
     pub met1_space: i32,
     pub device_gap: i32,
+    /// Raw NMOS/PMOS edge spacing used by automatic well separation.
+    pub well_spacing: i32,
+    /// Process-specific DTI rules. `None` disables automatic DTI extraction.
+    pub dti: Option<DtiRules>,
     pub res_corner_squares: f64,
     pub res_serpentine_aspect: f64,
     pub res_min_segment: i32,
@@ -105,8 +134,9 @@ pub struct Pdk {
     pub linewidth_control_nm: std::collections::HashMap<String, i32>,
 }
 
-// ponytail: defaults are sky130 values so decks without a "cell" section
-// still load; add real per-PDK sections as they're characterized.
+// These defaults support isolated generator tests. The backend's production
+// PDK factory rejects omitted construction fields, so no real process silently
+// inherits these values.
 impl Default for Pdk {
     fn default() -> Self {
         Self {
@@ -125,6 +155,8 @@ impl Default for Pdk {
             m1_enc: 60,
             met1_space: 140,
             device_gap: 600,
+            well_spacing: 600,
+            dti: None,
             res_corner_squares: 0.56,
             res_serpentine_aspect: 10.0,
             res_min_segment: 10_000,
@@ -183,14 +215,25 @@ mod tests {
         let p = Pdk::from_json(r#"{"layers": {}}"#).unwrap();
         assert_eq!(p.contact, 170);
         assert_eq!(p.layers.diff, "diff");
+        assert_eq!(p.well_spacing, 600);
+        assert!(p.dti.is_none());
+    }
+
+    #[test]
+    fn parses_optional_dti_rules() {
+        let p = Pdk::from_json(
+            r#"{"cell":{"dti":{"shared_max_gap":500,"separated_min_gap":5000}}}"#,
+        )
+        .unwrap();
+        let dti = p.dti.expect("DTI rules");
+        assert_eq!(dti.shared_max_gap, 500);
+        assert_eq!(dti.separated_min_gap, 5000);
     }
 
     #[test]
     fn layer_roles_remap() {
-        let p = Pdk::from_json(
-            r#"{"cell": {"layers": {"diff": "Activ", "met1": "Metal1"}}}"#,
-        )
-        .unwrap();
+        let p =
+            Pdk::from_json(r#"{"cell": {"layers": {"diff": "Activ", "met1": "Metal1"}}}"#).unwrap();
         assert_eq!(p.layers.diff, "Activ");
         assert_eq!(p.layers.met1, "Metal1");
         assert_eq!(p.layers.poly, "poly", "unspecified role keeps default");

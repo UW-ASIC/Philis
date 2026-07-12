@@ -33,22 +33,6 @@ pub trait VerifyCheck {
     fn run(&self, store: &GeometryStore, deck: &Deck, backend: Backend) -> Self::Output;
 }
 
-/// An element-wise predicate for CPU/GPU dual execution.
-pub trait Kernel {
-    type Item: Copy;
-    type Out: Copy;
-    fn eval(&self, item: Self::Item) -> Self::Out;
-}
-
-/// CPU backend for a `Kernel`: plain map over a slice.
-pub fn map_cpu<K: Kernel>(kernel: &K, items: &[K::Item], out: &mut Vec<K::Out>) {
-    out.clear();
-    out.reserve(items.len());
-    for &it in items {
-        out.push(kernel.eval(it));
-    }
-}
-
 // ---------------------------------------------------------------------------
 // DRC GPU prefilters
 // ---------------------------------------------------------------------------
@@ -139,13 +123,6 @@ pub fn gpu_ready() -> bool {
     #[cfg(not(feature = "gpu"))] false
 }
 
-/// Dispatch a Kernel over items on the chosen backend.
-pub fn dispatch<K: Kernel>(backend: Backend, kernel: &K, items: &[K::Item], out: &mut Vec<K::Out>) {
-    match backend {
-        Backend::Cpu | Backend::Gpu => map_cpu(kernel, items, out),
-    }
-}
-
 /// Report which backends are usable in this build and on this machine.
 pub fn available_backends() -> Vec<Backend> {
     let mut v = vec![Backend::Cpu];
@@ -211,6 +188,9 @@ mod cube_impl {
         n_pairs: u32, total: u32, thr2: f32,
         flags: &mut Array<u32>,
     ) {
+        // 1:1 thread:eval. Tiling (8 evals/thread) was measured SLOWER on a 4060
+        // (16ms vs 10ms on 256M evals) — the unrolled body raises register
+        // pressure and drops occupancy; the div/mod it saves is cheaper.
         let i = ABSOLUTE_POS as u32;
         if i < total {
             let k = owner_of(off, n_pairs, i);
@@ -359,27 +339,36 @@ mod cube_impl {
         if ABSOLUTE_POS < run_out.len() {
             let a = pa[ABSOLUTE_POS] as usize;
             let b = pb[ABSOLUTE_POS] as usize;
+            // cubecl 0.10's cube macro cannot expand const-const float arithmetic
+            // (`-1.0f32` / `0.0 - 1.0`), so "not facing" is encoded as gap = 0.0 —
+            // callers only accept gap > 0.0, and a facing pair with zero gap is
+            // touching, which they reject too. Locals + f32::max-wrapped mut
+            // assignments dodge the same macro's From<NativeExpand<f32>> gap.
+            let axmin = bxmin[a]; let oxmin = bxmin[b];
+            let axmax = bxmax[a]; let oxmax = bxmax[b];
+            let aymin = bymin[a]; let oymin = bymin[b];
+            let aymax = bymax[a]; let oymax = bymax[b];
             let mut run = 0.0f32;
-            let mut gap = -1.0f32;
-            let mut x_lo = bxmin[a]; if bxmin[b] > x_lo { x_lo = bxmin[b]; }
-            let mut x_hi = bxmax[a]; if bxmax[b] < x_hi { x_hi = bxmax[b]; }
-            let x_overlap = x_hi - x_lo;
+            let mut gap = 0.0f32;
+            let x_overlap = f32::min(axmax, oxmax) - f32::max(axmin, oxmin);
             if x_overlap > 0.0 {
-                if bymax[a] <= bymin[b] {
-                    run = x_overlap; gap = bymin[b] - bymax[a];
-                } else if bymax[b] <= bymin[a] {
-                    run = x_overlap; gap = bymin[a] - bymax[b];
+                if aymax <= oymin {
+                    run = f32::max(x_overlap, 0.0);
+                    gap = f32::max(oymin - aymax, 0.0);
+                } else if oymax <= aymin {
+                    run = f32::max(x_overlap, 0.0);
+                    gap = f32::max(aymin - oymax, 0.0);
                 }
             }
-            if gap < 0.0 {
-                let mut y_lo = bymin[a]; if bymin[b] > y_lo { y_lo = bymin[b]; }
-                let mut y_hi = bymax[a]; if bymax[b] < y_hi { y_hi = bymax[b]; }
-                let y_overlap = y_hi - y_lo;
+            if gap <= 0.0 {
+                let y_overlap = f32::min(aymax, oymax) - f32::max(aymin, oymin);
                 if y_overlap > 0.0 {
-                    if bxmax[a] <= bxmin[b] {
-                        run = y_overlap; gap = bxmin[b] - bxmax[a];
-                    } else if bxmax[b] <= bxmin[a] {
-                        run = y_overlap; gap = bxmin[a] - bxmax[b];
+                    if axmax <= oxmin {
+                        run = f32::max(y_overlap, 0.0);
+                        gap = f32::max(oxmin - axmax, 0.0);
+                    } else if oxmax <= axmin {
+                        run = f32::max(y_overlap, 0.0);
+                        gap = f32::max(axmin - oxmax, 0.0);
                     }
                 }
             }
@@ -425,12 +414,48 @@ mod cube_impl {
         }
     }
 
+    /// Upload an edge pool, memoized by CONTENT hash: the same layer's edge set
+    /// is uploaded by several rules per run (spacing, width/notch mask, c2c, eol)
+    /// and by every run in a steady-state loop. Full-content hashing (not sampling)
+    /// keeps this sound — a false hit is impossible without a 64-bit collision on
+    /// the exact coordinate stream. Bounded to 16 pools, evicting oldest.
     fn upload_edges(client: &Client, edges: &[Edge]) -> [cubecl::server::Handle; 4] {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        use std::sync::Mutex;
+        type Pool = (u64, [cubecl::server::Handle; 4]);
+        static CACHE: Mutex<Vec<Pool>> = Mutex::new(Vec::new());
+
+        let mut h = DefaultHasher::new();
+        edges.len().hash(&mut h);
+        for e in edges {
+            (e.x0, e.y0, e.x1, e.y1).hash(&mut h);
+        }
+        let key = h.finish();
+
+        let mut cache = CACHE.lock().unwrap();
+        if let Some((_, hs)) = cache.iter().find(|(k, _)| *k == key) {
+            let t0 = std::time::Instant::now();
+            let hs = hs.clone();
+            log_time("edge-pool cache hit", t0);
+            return hs;
+        }
+        let t0 = std::time::Instant::now();
         let up = |get: fn(&Edge) -> i32| {
             client.create(Bytes::from_elems(
                 edges.iter().map(|e| get(e) as f32).collect::<Vec<f32>>()))
         };
-        [up(|e| e.x0), up(|e| e.y0), up(|e| e.x1), up(|e| e.y1)]
+        let hs = [up(|e| e.x0), up(|e| e.y0), up(|e| e.x1), up(|e| e.y1)];
+        log_time(&format!("edge-pool upload ({} edges)", edges.len()), t0);
+        if cache.len() >= 16 { cache.remove(0); }
+        cache.push((key, hs.clone()));
+        hs
+    }
+
+    fn log_time(what: &str, t0: std::time::Instant) {
+        if std::env::var_os("GDSVERIFY_GPU_LOG").is_some() {
+            eprintln!("gdsverify gpu: {what}: {:?}", t0.elapsed());
+        }
     }
 
     fn to_f32(b: &[u8], n: usize) -> Vec<f32> {
@@ -451,7 +476,9 @@ mod cube_impl {
         let run = || -> Option<Vec<u32>> {
             let ne = edges.len();
             let [ex0, ey0, ex1, ey1] = upload_edges(client, edges);
-            let mut flags = Vec::with_capacity(descs.len());
+            // two-phase: queue every chunk's kernel first, read results after —
+            // interleaving launch/read serializes the device on chunked scans.
+            let mut pending: Vec<(cubecl::server::Handle, usize)> = Vec::new();
             let mut idx = 0;
             while idx < descs.len() {
                 let (mut a0s, mut b0s, mut blens, mut offs) =
@@ -487,8 +514,14 @@ mod cube_impl {
                         ArrayArg::from_raw_parts(hf.clone(), m),
                     );
                 }
+                pending.push((hf, m));
+            }
+            let t0 = std::time::Instant::now();
+            let mut flags = Vec::with_capacity(descs.len());
+            for (hf, m) in pending {
                 flags.extend(to_u32(&client.read_one(hf).ok()?, m));
             }
+            log_time("pair_near read-back", t0);
             Some(flags)
         };
         contain(run)
@@ -500,7 +533,9 @@ mod cube_impl {
         let run = || -> Option<Vec<u32>> {
             let ne = edges.len();
             let [ex0, ey0, ex1, ey1] = upload_edges(client, edges);
-            let mut flags = Vec::with_capacity(descs.len());
+            // two-phase: queue every chunk's kernel first, read results after —
+            // interleaving launch/read serializes the device on chunked scans.
+            let mut pending: Vec<(cubecl::server::Handle, usize)> = Vec::new();
             let mut idx = 0;
             while idx < descs.len() {
                 let (mut starts, mut elens, mut offs) = (Vec::new(), Vec::new(), Vec::new());
@@ -533,6 +568,10 @@ mod cube_impl {
                         ArrayArg::from_raw_parts(hf.clone(), m),
                     );
                 }
+                pending.push((hf, m));
+            }
+            let mut flags = Vec::with_capacity(descs.len());
+            for (hf, m) in pending {
                 flags.extend(to_u32(&client.read_one(hf).ok()?, m));
             }
             Some(flags)

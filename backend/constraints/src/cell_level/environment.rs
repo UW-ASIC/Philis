@@ -1,6 +1,6 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
-    DeviceId, EnvironmentalKind,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
+    DeviceId, EnvironmentalKind, ThresholdUnit,
 };
 
 /// Environmental (layout-dependent) constraint.
@@ -15,12 +15,16 @@ pub struct EnvironmentalConstraint {
     pub scope: Vec<DeviceId>,
     pub strength: ConstraintStrength,
     pub threshold: f64,
-    pub units: String,
+    pub units: ThresholdUnit,
 }
 
 impl Contractable for EnvironmentalConstraint {
-    fn strength(&self) -> ConstraintStrength { self.strength }
-    fn priority(&self) -> i32 { 65 }
+    fn strength(&self) -> ConstraintStrength {
+        self.strength
+    }
+    fn priority(&self) -> i32 {
+        65
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
         &[ConstraintStage::Placement]

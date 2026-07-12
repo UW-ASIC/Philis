@@ -54,12 +54,18 @@ impl BipartiteHypergraph {
     }
 
     pub fn cell_id(&self, name: &str) -> Option<u32> {
-        self.cells.iter().position(|c| c.name == name).map(|i| i as u32)
+        self.cells
+            .iter()
+            .position(|c| c.name == name)
+            .map(|i| i as u32)
     }
 
     /// Pins on a net: `(cell index, pin index)`.
     pub fn pins_on_net(&self, net: NetId) -> &[(u32, u16)] {
-        let (s, e) = (self.net_start[net as usize], self.net_start[net as usize + 1]);
+        let (s, e) = (
+            self.net_start[net as usize],
+            self.net_start[net as usize + 1],
+        );
         &self.net_pins[s as usize..e as usize]
     }
 
@@ -68,12 +74,7 @@ impl BipartiteHypergraph {
     /// keep exact connectivity, renamed `{member}.{pin}`; nets internal to
     /// the group stay in the net partition (all their edges now reach the
     /// one node — zero wirelength for placement).
-    pub fn group(
-        &mut self,
-        name: &str,
-        model: &str,
-        instances: &[String],
-    ) -> Result<u32, String> {
+    pub fn group(&mut self, name: &str, model: &str, instances: &[String]) -> Result<u32, String> {
         let mut member_ids = Vec::with_capacity(instances.len());
         for inst in instances {
             let id = self

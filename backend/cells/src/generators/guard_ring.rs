@@ -4,9 +4,12 @@
 //! Emits: diffusion band + licon array + li overlay + tap implant + well layer.
 //! Mirrors tap-column recipe from mosfet.rs bulk-tap emission.
 
-use substrate3::{Bbox, CellBuilder, CellError, DeviceType};
+use crate::{Bbox, CellBuilder, CellError, DeviceType};
 
 use super::Pdk;
+
+/// Clearance from the enclosed device geometry to the collecting diffusion.
+pub const GUARD_RING_GAP: i32 = 200;
 
 /// Guard ring type — determines implant polarity and well layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +37,7 @@ pub fn draw_guard_ring(
     let ly = &pdk.layers;
     let ct = pdk.contact;
     let licon_pitch = pdk.guard_licon_pitch;
-    let gap = 200; // spacing between inner cell edge and ring diffusion
+    let gap = GUARD_RING_GAP;
 
     let ix0 = inner.xmin - gap;
     let iy0 = inner.ymin - gap;
@@ -56,8 +59,8 @@ pub fn draw_guard_ring(
 
     // Four bands: bottom, top, left, right
     let bands: [(i32, i32, i32, i32); 4] = [
-        (ox0, oy0, ox1 - ox0, ring_width),         // bottom
-        (ox0, iy1, ox1 - ox0, ring_width),          // top
+        (ox0, oy0, ox1 - ox0, ring_width),              // bottom
+        (ox0, iy1, ox1 - ox0, ring_width),              // top
         (ox0, oy0 + ring_width, ring_width, iy1 - iy0), // left
         (ix1, oy0 + ring_width, ring_width, iy1 - iy0), // right
     ];
@@ -83,6 +86,9 @@ pub fn draw_guard_ring(
             let mut cx = bx + margin;
             while cx + ct <= bx + bw - margin {
                 let _ = b.rect(&ly.licon, cx, cy, ct, ct);
+                // licon connects tap->li; mcon is separately required for
+                // li->met1. Without it the visually complete ring is floating.
+                let _ = b.rect(&ly.mcon, cx, cy, ct, ct);
                 cx += licon_pitch;
             }
         } else {
@@ -91,6 +97,7 @@ pub fn draw_guard_ring(
             let mut cy = by + margin;
             while cy + ct <= by + bh - margin {
                 let _ = b.rect(&ly.licon, cx, cy, ct, ct);
+                let _ = b.rect(&ly.mcon, cx, cy, ct, ct);
                 cy += licon_pitch;
             }
         }
@@ -101,7 +108,8 @@ pub fn draw_guard_ring(
         let _ = b.pin(
             &format!("ring:{net_name}"),
             &ly.met1,
-            bx, by,
+            bx,
+            by,
             bw.min(ct + 2 * pdk.m1_enc),
             bh.min(ct + 2 * pdk.m1_enc),
         );
@@ -110,7 +118,13 @@ pub fn draw_guard_ring(
     // N-well for NwellRing: enclose the entire ring
     if ring_type == RingType::NwellRing {
         let enc = pdk.nwell_diff_enc;
-        b.rect(&ly.nwell, ox0 - enc, oy0 - enc, (ox1 - ox0) + 2 * enc, (oy1 - oy0) + 2 * enc)?;
+        b.rect(
+            &ly.nwell,
+            ox0 - enc,
+            oy0 - enc,
+            (ox1 - ox0) + 2 * enc,
+            (oy1 - oy0) + 2 * enc,
+        )?;
     }
 
     Ok(Bbox {
@@ -119,6 +133,17 @@ pub fn draw_guard_ring(
         xmax: ox1,
         ymax: oy1,
     })
+}
+
+/// Outer mask bounds produced by [`draw_guard_ring`]. Kept separate so the
+/// post-placement planner and the geometry emitter use identical dimensions.
+pub fn guard_ring_outer_bbox(inner: &Bbox, ring_width: i32) -> Bbox {
+    Bbox {
+        xmin: inner.xmin - GUARD_RING_GAP - ring_width,
+        ymin: inner.ymin - GUARD_RING_GAP - ring_width,
+        xmax: inner.xmax + GUARD_RING_GAP + ring_width,
+        ymax: inner.ymax + GUARD_RING_GAP + ring_width,
+    }
 }
 
 /// Compute guard ring width from well/epi depth (item 1.4).

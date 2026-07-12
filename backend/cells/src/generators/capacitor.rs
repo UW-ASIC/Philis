@@ -1,9 +1,9 @@
 //! Capacitor cell generator: MIM, MOM, and single-layer capacitors.
 
-use substrate3::{CellBuilder, CellError, DeviceType, PatternType, PortDef};
+use crate::{CellBuilder, CellError, DeviceType, PatternType, PortDef};
 
-use crate::device::DeviceRecord;
 use super::{CellSpec, Pdk};
+use crate::device::DeviceRecord;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapacitorKind {
@@ -17,6 +17,7 @@ pub enum CapacitorKind {
 pub struct CapacitorSpec {
     pub kind: CapacitorKind,
     pub pattern: PatternType,
+    pub columns: u16,
 }
 
 impl CellSpec for CapacitorSpec {
@@ -29,24 +30,40 @@ impl CellSpec for CapacitorSpec {
         } else {
             vec![PatternType::Single]
         };
-        [
+        let units = devices[0].nf.max(1);
+        let columns: Vec<u16> = (1..=units).filter(|c| units % c == 0).collect();
+        let mut specs = Vec::new();
+        for kind in [
             CapacitorKind::VerticalAcrossLayers,
             CapacitorKind::HorizontalAcrossLayers,
             CapacitorKind::VerticalInOneLayer,
-        ]
-        .into_iter()
-        .flat_map(|kind| patterns.iter().map(move |&pattern| CapacitorSpec { kind, pattern }))
-        .collect()
+        ] {
+            for &pattern in &patterns {
+                for &columns in &columns {
+                    specs.push(CapacitorSpec {
+                        kind,
+                        pattern,
+                        columns,
+                    });
+                }
+            }
+        }
+        specs
     }
 
     fn estimate(&self, devices: &[DeviceRecord], pdk: &Pdk) -> (i32, i32) {
         let ref_dev = &devices[0];
         let n_units = ref_dev.nf.max(1) as i32;
+        let cols = i32::from(self.columns.max(1)).min(n_units);
+        let rows = (n_units + cols - 1) / cols;
         let unit_pitch = ref_dev.w + pdk.plate_spacing;
-        let per_dev = n_units * unit_pitch;
+        let per_dev = cols * unit_pitch - pdk.plate_spacing;
         let n = devices.len() as i32;
         let total_w = per_dev * n + pdk.device_gap * (n - 1).max(0);
-        (total_w, ref_dev.l)
+        (
+            total_w,
+            rows * (ref_dev.l + pdk.plate_spacing) - pdk.plate_spacing,
+        )
     }
 
     fn ports(&self, devices: &[DeviceRecord]) -> Vec<PortDef> {
@@ -89,19 +106,21 @@ impl CellSpec for CapacitorSpec {
         for (di, dev) in devices.iter().enumerate() {
             let n_units = dev.nf.max(1) as i32;
             let unit_pitch = plate_w + plate_spacing;
+            let cols = i32::from(self.columns.max(1)).min(n_units);
+            let tile_w = cols * unit_pitch - plate_spacing;
 
             for u in 0..n_units {
-                let ux =
-                    di as i32 * (n_units * unit_pitch + pdk.device_gap) + u * unit_pitch;
+                let ux = di as i32 * (tile_w + pdk.device_gap) + (u % cols) * unit_pitch;
+                let uy = (u / cols) * (plate_h + plate_spacing);
 
-                b.rect(bot_layer, ux, 0, plate_w, plate_h)?;
+                b.rect(bot_layer, ux, uy, plate_w, plate_h)?;
 
                 let top_inset = enclosure;
                 if plate_w > 2 * top_inset && plate_h > 2 * top_inset {
                     b.rect(
                         top_layer,
                         ux + top_inset,
-                        top_inset,
+                        uy + top_inset,
                         plate_w - 2 * top_inset,
                         plate_h - 2 * top_inset,
                     )?;
@@ -113,31 +132,20 @@ impl CellSpec for CapacitorSpec {
                 for vx in 0..n_via_x {
                     for vy in 0..n_via_y {
                         let x = ux + enclosure + vx * via_pitch;
-                        let y = enclosure + vy * via_pitch;
+                        let y = uy + enclosure + vy * via_pitch;
                         b.rect(&ly.li, x, y, ct, ct)?;
                     }
                 }
 
-                if u == 0 {
-                    b.pin(
-                        &format!("{}:BOT", dev.name),
-                        bot_layer,
-                        ux,
-                        0,
-                        plate_w,
-                        ct,
-                    )?;
-                }
-                if u == n_units - 1 {
-                    b.pin(
-                        &format!("{}:TOP", dev.name),
-                        top_layer,
-                        ux + top_inset,
-                        top_inset,
-                        (plate_w - 2 * top_inset).max(ct),
-                        ct,
-                    )?;
-                }
+                b.pin(&format!("{}:BOT", dev.name), bot_layer, ux, uy, plate_w, ct)?;
+                b.pin(
+                    &format!("{}:TOP", dev.name),
+                    top_layer,
+                    ux + top_inset,
+                    uy + top_inset,
+                    (plate_w - 2 * top_inset).max(ct),
+                    ct,
+                )?;
             }
         }
 
@@ -149,13 +157,10 @@ impl CellSpec for CapacitorSpec {
 mod tests {
     use super::*;
     use crate::generators::SpecCell;
-    use substrate3::{CellBuilder, MatchingTier};
+    use crate::{CellBuilder, MatchingTier};
 
-    fn test_deck() -> substrate3::Deck {
-        crate::test_util::deck_from_layers(&[
-            ("met1", 68, 20),
-            ("li", 67, 20),
-        ])
+    fn test_deck() -> crate::Deck {
+        crate::test_util::deck_from_layers(&[("met1", 68, 20), ("li", 67, 20)])
     }
 
     fn cap(name: &str, w: i32, l: i32, nf: u16) -> DeviceRecord {
@@ -180,6 +185,7 @@ mod tests {
         let spec = CapacitorSpec {
             kind: CapacitorKind::VerticalAcrossLayers,
             pattern: PatternType::Single,
+            columns: 1,
         };
 
         let mut b = CellBuilder::new(&deck, MatchingTier::None, 0);
@@ -197,6 +203,7 @@ mod tests {
         let spec = CapacitorSpec {
             kind: CapacitorKind::VerticalAcrossLayers,
             pattern: PatternType::Single,
+            columns: 1,
         };
 
         let mut b = CellBuilder::new(&deck, MatchingTier::None, 0);
@@ -214,6 +221,7 @@ mod tests {
             spec: CapacitorSpec {
                 kind: CapacitorKind::VerticalAcrossLayers,
                 pattern: PatternType::Single,
+                columns: 1,
             },
             devices,
             pdk,

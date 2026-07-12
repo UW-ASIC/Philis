@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
-    DeviceId, DeviceType, GroupConstraint, PatternType,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
+    DeviceId, DeviceType, GroupConstraint, PatternType, SeriesParallel,
 };
 
 /// Unitization constraint for decomposing devices into unit elements.
@@ -18,8 +18,7 @@ pub struct UnitizationConstraint {
     pub instance_unit_counts: HashMap<String, u32>,
     /// Target ratio between device instances.
     pub target_ratio: HashMap<String, u32>,
-    /// "parallel", "series", or "repeated_stage".
-    pub series_parallel_allowed: String,
+    pub series_parallel_allowed: SeriesParallel,
     pub required_pattern: PatternType,
     pub same_variant_required: bool,
     pub dummy_required: bool,
@@ -29,12 +28,18 @@ pub struct UnitizationConstraint {
 }
 
 impl GroupConstraint for UnitizationConstraint {
-    fn devices(&self) -> &[DeviceId] { &self.devices }
+    fn devices(&self) -> &[DeviceId] {
+        &self.devices
+    }
 }
 
 impl Contractable for UnitizationConstraint {
-    fn strength(&self) -> ConstraintStrength { ConstraintStrength::Hard }
-    fn priority(&self) -> i32 { 80 }
+    fn strength(&self) -> ConstraintStrength {
+        ConstraintStrength::Hard
+    }
+    fn priority(&self) -> i32 {
+        80
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
         &[ConstraintStage::CellGen]

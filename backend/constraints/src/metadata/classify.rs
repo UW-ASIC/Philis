@@ -14,5 +14,7 @@ pub struct NetClassification {
 }
 
 impl NetConstraint for NetClassification {
-    fn net_name(&self) -> &str { &self.net_name }
+    fn net_name(&self) -> &str {
+        &self.net_name
+    }
 }

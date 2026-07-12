@@ -5,18 +5,18 @@
 //! geometry. The engine drives candidate selection — generators don't
 //! rank or pick winners.
 
+pub mod bjt;
+pub mod capacitor;
+pub mod diode;
+pub mod guard_ring;
+pub mod inductor;
 pub mod mosfet;
 pub mod resistor;
-pub mod capacitor;
-pub mod bjt;
-pub mod diode;
-pub mod inductor;
-pub mod guard_ring;
 
-use substrate3::{CellBuilder, CellError, CellGenerator, PortDef};
+use crate::{CellBuilder, CellError, CellGenerator, PortDef};
 
-pub use crate::pdk::Pdk;
 use crate::device::DeviceRecord;
+pub use crate::pdk::Pdk;
 
 /// One point in a device family's layout design space.
 ///
@@ -79,10 +79,7 @@ impl<S: CellSpec> CellGenerator for SpecCell<S> {
 }
 
 /// Enumerate specs and wrap as `Box<dyn CellGenerator>` for dyn dispatch.
-pub fn candidates<S: CellSpec>(
-    devices: &[DeviceRecord],
-    pdk: &Pdk,
-) -> Vec<Box<dyn CellGenerator>> {
+pub fn candidates<S: CellSpec>(devices: &[DeviceRecord], pdk: &Pdk) -> Vec<Box<dyn CellGenerator>> {
     S::enumerate(devices, pdk)
         .into_iter()
         .map(|spec| -> Box<dyn CellGenerator> {
@@ -94,4 +91,3 @@ pub fn candidates<S: CellSpec>(
         })
         .collect()
 }
-

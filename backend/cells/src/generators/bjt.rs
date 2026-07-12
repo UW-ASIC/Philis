@@ -1,20 +1,28 @@
 //! BJT cell generator: NPN and PNP bipolar junction transistors.
 
-use substrate3::{CellBuilder, CellError, DeviceType, PatternType, PortDef};
+use crate::{CellBuilder, CellError, DeviceType, PatternType, PortDef};
 
-use crate::device::DeviceRecord;
 use super::{CellSpec, Pdk};
+use crate::device::DeviceRecord;
 
-/// BJT spec — single variant per device group.
+/// BJT group aspect variant. Individual emitter geometry is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BjtSpec;
+pub struct BjtSpec {
+    pub columns: u16,
+}
 
 impl CellSpec for BjtSpec {
     fn enumerate(devices: &[DeviceRecord], _pdk: &Pdk) -> Vec<Self> {
         if devices.is_empty() {
             return vec![];
         }
-        vec![BjtSpec]
+        let n = devices.len().max(1) as u16;
+        let mut cols = vec![1, n, (f64::from(n).sqrt().ceil() as u16).max(1)];
+        cols.sort_unstable();
+        cols.dedup();
+        cols.into_iter()
+            .map(|columns| BjtSpec { columns })
+            .collect()
     }
 
     fn estimate(&self, devices: &[DeviceRecord], pdk: &Pdk) -> (i32, i32) {
@@ -27,8 +35,11 @@ impl CellSpec for BjtSpec {
         let collector_w = (emitter_w as f64 * pdk.bjt_collector_frac).round() as i32;
         let per_dev = emitter_w + 2 * base_w + 2 * collector_w;
         let n = devices.len() as i32;
-        let total_w = per_dev * n + pdk.device_gap * (n - 1).max(0);
-        let total_h = emitter_h + 2 * base_w + 2 * collector_w;
+        let cols = i32::from(self.columns.max(1)).min(n.max(1));
+        let rows = (n + cols - 1) / cols;
+        let total_w = per_dev * cols + pdk.device_gap * (cols - 1).max(0);
+        let cell_h = emitter_h + 2 * base_w + 2 * collector_w;
+        let total_h = cell_h * rows + pdk.device_gap * (rows - 1).max(0);
         (total_w, total_h)
     }
 
@@ -72,13 +83,14 @@ impl CellSpec for BjtSpec {
         b.set_electrical(emitter_w, emitter_h, n_stripes as u16, stripe_w);
 
         for (di, dev) in devices.iter().enumerate() {
-            let dev_off =
-                di as i32 * (emitter_w + 2 * base_w + 2 * collector_w + pdk.device_gap);
-
-            let coll_x = dev_off;
-            let coll_y = 0;
             let coll_w = emitter_w + 2 * base_w + 2 * collector_w;
             let coll_h = emitter_h + 2 * base_w + 2 * collector_w;
+            let cols = usize::from(self.columns.max(1)).min(devices.len().max(1));
+            let dev_x = (di % cols) as i32 * (coll_w + pdk.device_gap);
+            let dev_y = (di / cols) as i32 * (coll_h + pdk.device_gap);
+
+            let coll_x = dev_x;
+            let coll_y = dev_y;
             b.rect(&ly.diff, coll_x, coll_y, coll_w, coll_h)?;
             b.pin(&format!("{}:C", dev.name), &ly.diff, coll_x, coll_y, ct, ct)?;
 
@@ -92,8 +104,8 @@ impl CellSpec for BjtSpec {
             )?;
             b.pin(&format!("{}:B", dev.name), &ly.poly, coll_x, coll_y, ct, ct)?;
 
-            let emitter_x = dev_off + collector_w + base_w;
-            let emitter_y = collector_w + base_w;
+            let emitter_x = dev_x + collector_w + base_w;
+            let emitter_y = dev_y + collector_w + base_w;
             let stripe_pitch = stripe_w + pdk.bjt_stripe_gap.min(stripe_w / 4);
             for s in 0..n_stripes {
                 let sx = emitter_x + s * stripe_pitch;
@@ -139,9 +151,9 @@ fn is_pnp(devices: &[DeviceRecord]) -> bool {
 mod tests {
     use super::*;
     use crate::generators::SpecCell;
-    use substrate3::{CellBuilder, MatchingTier};
+    use crate::{CellBuilder, MatchingTier};
 
-    fn test_deck() -> substrate3::Deck {
+    fn test_deck() -> crate::Deck {
         crate::test_util::deck_from_layers(&[
             ("diff", 65, 20),
             ("poly", 66, 20),
@@ -188,7 +200,7 @@ mod tests {
         let pdk = crate::test_util::sky130_pdk();
         let devices = vec![npn("Q1")];
         let cell = SpecCell {
-            spec: BjtSpec,
+            spec: BjtSpec { columns: 1 },
             devices,
             pdk,
         };

@@ -23,7 +23,7 @@ pub trait RGraph {
     fn nodes(&self) -> usize;
     fn cap(&self) -> u16;
     fn neighbors(&self, n: u32, out: &mut [(u32, f32); 6]) -> usize;
-    fn pos(&self, n: u32) -> (i32, i32, u8);
+    fn pos(&self, n: u32) -> (i32, i32, u32);
     fn region(&self, _n: u32) -> u32 {
         0
     }
@@ -45,7 +45,13 @@ impl GcellGrid {
     pub fn new(die: (i32, i32), n_per_side: u32, capacity: u16) -> Self {
         let nx = n_per_side.max(2);
         let ny = n_per_side.max(2);
-        Self { nx, ny, gw: die.0 as f32 / nx as f32, gh: die.1 as f32 / ny as f32, capacity }
+        Self {
+            nx,
+            ny,
+            gw: die.0 as f32 / nx as f32,
+            gh: die.1 as f32 / ny as f32,
+            capacity,
+        }
     }
 
     pub fn at(&self, x: f32, y: f32) -> u32 {
@@ -83,7 +89,7 @@ impl RGraph for GcellGrid {
         }
         k
     }
-    fn pos(&self, n: u32) -> (i32, i32, u8) {
+    fn pos(&self, n: u32) -> (i32, i32, u32) {
         let (x, y) = (n % self.nx, n / self.nx);
         (
             ((x as f32 + 0.5) * self.gw) as i32,
@@ -106,10 +112,14 @@ pub struct TrackGrid {
     pub pitch: i32,
     pub via_cost: f32,
     pub allowed: Vec<bool>,
-    pub n_layers: u8,
-    region_nx: u32,
-    region_w: f32,
-    region_h: f32,
+    /// Landing holes punched into blocked cell met1: usable as terminals
+    /// (via access) but not as lateral corridors — a met1 wire between two
+    /// such nodes crosses foreign in-cell pads the grid can't see.
+    pub terminal_only: Vec<bool>,
+    pub n_layers: u32,
+    /// Per-(iy*nx+ix) gcell region id — `region()` is a table load instead of
+    /// div/mod + float math per neighbor expansion in the corridor epochs.
+    region_of: Vec<u32>,
 }
 
 impl TrackGrid {
@@ -117,8 +127,10 @@ impl TrackGrid {
         Self::with_layers(die, pitch, via_cost, 2)
     }
 
-    pub fn with_layers(die: (i32, i32), pitch: i32, via_cost: f32, n_layers: u8) -> Self {
-        let n_layers = n_layers.clamp(2, 3);
+    pub fn with_layers(die: (i32, i32), pitch: i32, via_cost: f32, n_layers: u32) -> Self {
+        // Layer order comes from the PDK; even indices route horizontally and
+        // odd indices vertically. Only the graph's u32 node-id space limits it.
+        let n_layers = n_layers.max(1);
         let pitch = pitch.max(((die.0.max(die.1)) / 1200).max(1));
         let nx = (die.0 / pitch).max(2) as u32;
         let ny = (die.1 / pitch).max(2) as u32;
@@ -127,36 +139,38 @@ impl TrackGrid {
             ny,
             pitch,
             via_cost,
-            allowed: vec![true; (u32::from(n_layers) * nx * ny) as usize],
+            allowed: vec![true; (n_layers * nx * ny) as usize],
+            terminal_only: vec![false; (n_layers * nx * ny) as usize],
             n_layers,
-            region_nx: 1,
-            region_w: die.0 as f32,
-            region_h: die.1 as f32,
+            region_of: vec![0; (nx * ny) as usize],
         }
     }
 
     pub fn set_regions(&mut self, gcells: &GcellGrid) {
-        self.region_nx = gcells.nx;
-        self.region_w = gcells.gw;
-        self.region_h = gcells.gh;
+        for i in 0..self.layer_size() {
+            let (x, y, _) = self.pos(i);
+            let rx = ((x as f32 / gcells.gw) as u32).min(gcells.nx - 1);
+            let ry = (y as f32 / gcells.gh) as u32;
+            self.region_of[i as usize] = ry * gcells.nx + rx;
+        }
     }
 
     pub fn layer_size(&self) -> u32 {
         self.nx * self.ny
     }
 
-    pub fn node(&self, ix: u32, iy: u32, layer: u8) -> u32 {
-        u32::from(layer) * self.layer_size() + iy * self.nx + ix
+    pub fn node(&self, ix: u32, iy: u32, layer: u32) -> u32 {
+        layer * self.layer_size() + iy * self.nx + ix
     }
 
-    pub fn nearest(&self, x: i32, y: i32, layer: u8) -> u32 {
+    pub fn nearest(&self, x: i32, y: i32, layer: u32) -> u32 {
         let ix = ((x / self.pitch) as u32).min(self.nx - 1);
         let iy = ((y / self.pitch) as u32).min(self.ny - 1);
         self.node(ix, iy, layer)
     }
 
-    pub fn ixy(&self, n: u32) -> (u32, u32, u8) {
-        let layer = (n / self.layer_size()) as u8;
+    pub fn ixy(&self, n: u32) -> (u32, u32, u32) {
+        let layer = n / self.layer_size();
         let r = n % self.layer_size();
         (r % self.nx, r / self.nx, layer)
     }
@@ -170,6 +184,22 @@ impl TrackGrid {
                 self.allowed[n] = false;
             }
         }
+    }
+
+    /// Node ids of one layer whose centers fall inside the box (nm).
+    pub fn nodes_in_box(&self, x0: i32, y0: i32, x1: i32, y1: i32, layer: u32) -> Vec<u32> {
+        let clamp_x = |v: i32| (v / self.pitch).clamp(0, self.nx as i32 - 1) as u32;
+        let clamp_y = |v: i32| (v / self.pitch).clamp(0, self.ny as i32 - 1) as u32;
+        let mut out = Vec::new();
+        for iy in clamp_y(y0)..=clamp_y(y1) {
+            for ix in clamp_x(x0)..=clamp_x(x1) {
+                let (px, py, _) = self.pos(self.node(ix, iy, layer));
+                if px >= x0 && px <= x1 && py >= y0 && py <= y1 {
+                    out.push(self.node(ix, iy, layer));
+                }
+            }
+        }
+        out
     }
 
     pub fn claim(
@@ -195,7 +225,9 @@ impl TrackGrid {
         let cx = (x / self.pitch).clamp(0, self.nx as i32 - 1);
         let cy = (y / self.pitch).clamp(0, self.ny as i32 - 1);
         let pad = self.pitch;
-        for layer in 0..self.n_layers {
+        // Landings only on met1/met2 — geometry emission draws pin stubs on
+        // those layers only; met3 (layer 2) is a pure routing layer.
+        for layer in 0..self.n_layers.min(2) {
             for r in 0..=8i32 {
                 for dy in -r..=r {
                     for dx in -r..=r {
@@ -214,8 +246,7 @@ impl TrackGrid {
                                 ddy != 0
                                     && jy >= 0
                                     && jy < self.ny as i32
-                                    && claimed
-                                        [self.node(ix as u32, jy as u32, 1) as usize]
+                                    && claimed[self.node(ix as u32, jy as u32, 1) as usize]
                             });
                         if !claimed[n] && !stacked && (layer == 1 || ok(px, py)) {
                             // min-area check: landing wire from pin to node
@@ -227,6 +258,9 @@ impl TrackGrid {
                                 }
                             }
                             claimed[n] = true;
+                            if !self.allowed[n] {
+                                self.terminal_only[n] = true;
+                            }
                             self.allowed[n] = true;
                             return Some(n as u32);
                         }
@@ -252,7 +286,7 @@ impl TrackGrid {
         let cy = (y / self.pitch).clamp(0, self.ny as i32 - 1);
         let pad = self.pitch;
         let mut out = Vec::with_capacity(k);
-        for layer in 0..self.n_layers {
+        for layer in 0..self.n_layers.min(2) {
             for r in 0..=8i32 {
                 for dy in -r..=r {
                     for dx in -r..=r {
@@ -271,8 +305,7 @@ impl TrackGrid {
                                 ddy != 0
                                     && jy >= 0
                                     && jy < self.ny as i32
-                                    && claimed
-                                        [self.node(ix as u32, jy as u32, 1) as usize]
+                                    && claimed[self.node(ix as u32, jy as u32, 1) as usize]
                             });
                         if !claimed[n] && !stacked && (layer == 1 || ok(px, py)) {
                             if min_area > 0 {
@@ -298,7 +331,7 @@ impl TrackGrid {
 
 impl RGraph for TrackGrid {
     fn nodes(&self) -> usize {
-        (u32::from(self.n_layers) * self.layer_size()) as usize
+        (self.n_layers * self.layer_size()) as usize
     }
     fn cap(&self) -> u16 {
         1
@@ -312,46 +345,42 @@ impl RGraph for TrackGrid {
                 *k += 1;
             }
         };
-        // Layers 0 and 2 are horizontal (preferred ±x), layer 1 is vertical (preferred ±y).
-        match layer {
-            0 => {
-                // Horizontal: ±x in-layer, via up to layer 1
-                if ix > 0 {
-                    push(self.node(ix - 1, iy, 0), 1.0, out, &mut k);
-                }
-                if ix + 1 < self.nx {
-                    push(self.node(ix + 1, iy, 0), 1.0, out, &mut k);
-                }
-                push(self.node(ix, iy, 1), self.via_cost, out, &mut k);
-            }
-            1 => {
-                // Vertical: ±y in-layer, via down to layer 0
-                if iy > 0 {
-                    push(self.node(ix, iy - 1, 1), 1.0, out, &mut k);
-                }
-                if iy + 1 < self.ny {
-                    push(self.node(ix, iy + 1, 1), 1.0, out, &mut k);
-                }
-                push(self.node(ix, iy, 0), self.via_cost, out, &mut k);
-                // Via up to layer 2 when present
-                if self.n_layers >= 3 {
-                    push(self.node(ix, iy, 2), self.via_cost, out, &mut k);
+        // Even layers horizontal (±x), odd layers vertical (±y).
+        if layer % 2 == 0 {
+            // Terminal-only nodes (met1 landing holes in blocked cell area)
+            // get via access only — no lateral wire.
+            let lat = |a: u32, b: u32| {
+                layer != 0 || (!self.terminal_only[a as usize] && !self.terminal_only[b as usize])
+            };
+            if ix > 0 {
+                let m = self.node(ix - 1, iy, layer);
+                if lat(n, m) {
+                    push(m, 1.0, out, &mut k);
                 }
             }
-            _ => {
-                // Layer 2: horizontal (±x), via down to layer 1
-                if ix > 0 {
-                    push(self.node(ix - 1, iy, 2), 1.0, out, &mut k);
+            if ix + 1 < self.nx {
+                let m = self.node(ix + 1, iy, layer);
+                if lat(n, m) {
+                    push(m, 1.0, out, &mut k);
                 }
-                if ix + 1 < self.nx {
-                    push(self.node(ix + 1, iy, 2), 1.0, out, &mut k);
-                }
-                push(self.node(ix, iy, 1), self.via_cost, out, &mut k);
             }
+        } else {
+            if iy > 0 {
+                push(self.node(ix, iy - 1, layer), 1.0, out, &mut k);
+            }
+            if iy + 1 < self.ny {
+                push(self.node(ix, iy + 1, layer), 1.0, out, &mut k);
+            }
+        }
+        if layer > 0 {
+            push(self.node(ix, iy, layer - 1), self.via_cost, out, &mut k);
+        }
+        if layer + 1 < self.n_layers {
+            push(self.node(ix, iy, layer + 1), self.via_cost, out, &mut k);
         }
         k
     }
-    fn pos(&self, n: u32) -> (i32, i32, u8) {
+    fn pos(&self, n: u32) -> (i32, i32, u32) {
         let (ix, iy, layer) = self.ixy(n);
         (
             ix as i32 * self.pitch + self.pitch / 2,
@@ -360,10 +389,7 @@ impl RGraph for TrackGrid {
         )
     }
     fn region(&self, n: u32) -> u32 {
-        let (x, y, _) = self.pos(n);
-        let rx = ((x as f32 / self.region_w) as u32).min(self.region_nx - 1);
-        let ry = (y as f32 / self.region_h) as u32;
-        ry * self.region_nx + rx
+        self.region_of[(n % self.layer_size()) as usize]
     }
 }
 
@@ -387,14 +413,25 @@ pub struct RouteHot {
 
 impl RouteHot {
     pub fn new(nodes: usize, nets: usize) -> Self {
-        Self { usage: vec![0; nodes], hist: vec![0.0; nodes], trees: vec![Vec::new(); nets] }
+        Self {
+            usage: vec![0; nodes],
+            hist: vec![0.0; nodes],
+            trees: vec![Vec::new(); nets],
+        }
     }
 
     pub fn tree_nodes(&self, net: usize) -> Vec<u32> {
-        let mut v: Vec<u32> = self.trees[net].iter().flatten().copied().collect();
-        v.sort_unstable();
-        v.dedup();
+        let mut v = Vec::new();
+        self.tree_nodes_into(net, &mut v);
         v
+    }
+
+    /// Buffer-reusing variant for hot paths (propose/commit run per net per epoch).
+    pub fn tree_nodes_into(&self, net: usize, out: &mut Vec<u32>) {
+        out.clear();
+        out.extend(self.trees[net].iter().flatten().copied());
+        out.sort_unstable();
+        out.dedup();
     }
 }
 
@@ -409,6 +446,7 @@ pub struct RouteCtx<G> {
     pub max_len: Vec<Option<f32>>,
 }
 
+#[derive(Default)]
 pub struct NetRoute {
     pub net: u32,
     pub branches: Vec<Vec<u32>>,
@@ -426,6 +464,14 @@ pub struct Dij {
     seen: Vec<u32>,
     stamp: u32,
     heap: BinaryHeap<Reverse<(u32, u32)>>,
+    /// Stamp-based tree membership for the current `route_net` call —
+    /// O(1) "is this node already in the tree?" instead of a linear scan.
+    in_tree: Vec<u32>,
+    tree_stamp: u32,
+    /// Stamp-based membership in the net's previous route — O(1) lookup in
+    /// `node_cost` instead of a binary search per neighbor expansion.
+    is_old: Vec<u32>,
+    old_stamp: u32,
 }
 
 impl Dij {
@@ -436,19 +482,32 @@ impl Dij {
             seen: vec![0; nodes],
             stamp: 0,
             heap: BinaryHeap::new(),
+            in_tree: vec![0; nodes],
+            tree_stamp: 0,
+            is_old: vec![0; nodes],
+            old_stamp: 0,
         }
     }
+}
 
-    fn visit(&mut self, n: u32, d: f32, from: u32) -> bool {
-        let i = n as usize;
-        if self.seen[i] != self.stamp || d < self.dist[i] {
-            self.seen[i] = self.stamp;
-            self.dist[i] = d;
-            self.prev[i] = from;
-            true
-        } else {
-            false
-        }
+#[inline]
+fn visit(
+    seen: &mut [u32],
+    dist: &mut [f32],
+    prev: &mut [u32],
+    stamp: u32,
+    n: u32,
+    d: f32,
+    from: u32,
+) -> bool {
+    let i = n as usize;
+    if seen[i] != stamp || d < dist[i] {
+        seen[i] = stamp;
+        dist[i] = d;
+        prev[i] = from;
+        true
+    } else {
+        false
     }
 }
 
@@ -469,14 +528,34 @@ pub fn route_net<G: RGraph>(
     if terms.is_empty() {
         return Some((Vec::new(), 0.0));
     }
+    // Destructure so `node_cost` (immutable `is_old`) and the search (mutable
+    // dist/prev/seen/heap) borrow disjoint fields.
+    let Dij {
+        dist,
+        prev,
+        seen,
+        stamp,
+        heap,
+        in_tree,
+        tree_stamp,
+        is_old,
+        old_stamp,
+    } = dij;
     let mut branches = vec![vec![terms[0]]];
     let mut tree: Vec<u32> = vec![terms[0]];
+    *tree_stamp = tree_stamp.wrapping_add(1);
+    in_tree[terms[0] as usize] = *tree_stamp;
     let mut len = 0.0f64;
     let cap = g.cap();
 
+    *old_stamp = old_stamp.wrapping_add(1);
+    for &n in old_nodes {
+        is_old[n as usize] = *old_stamp;
+    }
+    let os = *old_stamp;
+    let is_old: &[u32] = is_old;
     let node_cost = |n: u32| -> f32 {
-        let eff =
-            usage[n as usize].saturating_sub(u16::from(old_nodes.binary_search(&n).is_ok()));
+        let eff = usage[n as usize].saturating_sub(u16::from(is_old[n as usize] == os));
         hist[n as usize] + p_fac * f32::from((eff + 1).saturating_sub(cap))
     };
 
@@ -489,19 +568,19 @@ pub fn route_net<G: RGraph>(
 
     let mut buf = [(0u32, 0.0f32); 6];
     for &target in &targets {
-        if tree.contains(&target) {
+        if in_tree[target as usize] == *tree_stamp {
             continue;
         }
-        dij.stamp = dij.stamp.wrapping_add(1);
-        dij.heap.clear();
+        *stamp = stamp.wrapping_add(1);
+        heap.clear();
         for &s in &tree {
-            dij.visit(s, 0.0, NONE);
-            dij.heap.push(Reverse((0.0f32.to_bits(), s)));
+            visit(seen, dist, prev, *stamp, s, 0.0, NONE);
+            heap.push(Reverse((0.0f32.to_bits(), s)));
         }
         let mut found = false;
-        while let Some(Reverse((db, n))) = dij.heap.pop() {
+        while let Some(Reverse((db, n))) = heap.pop() {
             let d = f32::from_bits(db);
-            if dij.seen[n as usize] == dij.stamp && d > dij.dist[n as usize] {
+            if seen[n as usize] == *stamp && d > dist[n as usize] {
                 continue;
             }
             if n == target {
@@ -525,8 +604,8 @@ pub fn route_net<G: RGraph>(
                         continue;
                     }
                 }
-                if dij.visit(nb, nd, n) {
-                    dij.heap.push(Reverse((nd.to_bits(), nb)));
+                if visit(seen, dist, prev, *stamp, nb, nd, n) {
+                    heap.push(Reverse((nd.to_bits(), nb)));
                 }
             }
         }
@@ -535,14 +614,15 @@ pub fn route_net<G: RGraph>(
         }
         let mut path = vec![target];
         let mut cur = target;
-        while dij.prev[cur as usize] != NONE {
-            cur = dij.prev[cur as usize];
+        while prev[cur as usize] != NONE {
+            cur = prev[cur as usize];
             path.push(cur);
         }
         path.reverse();
         len += path.len() as f64 - 1.0;
         for &n in &path {
             tree.push(n);
+            in_tree[n as usize] = *tree_stamp;
         }
         branches.push(path);
     }
@@ -560,7 +640,10 @@ impl<G: RGraph> CostFn<RouteDomain<G>> for TreeLen {
             .iter()
             .zip(&cold.net_w)
             .map(|(t, &w)| {
-                f64::from(w) * t.iter().map(|b| b.len().saturating_sub(1) as f64).sum::<f64>()
+                f64::from(w)
+                    * t.iter()
+                        .map(|b| b.len().saturating_sub(1) as f64)
+                        .sum::<f64>()
             })
             .sum()
     }
@@ -573,7 +656,10 @@ pub struct Overuse;
 impl<G: RGraph> Density<RouteDomain<G>> for Overuse {
     fn overflow(&self, hot: &RouteHot, cold: &RouteCtx<G>) -> f32 {
         let cap = cold.graph.cap();
-        hot.usage.iter().map(|&u| f32::from(u.saturating_sub(cap))).sum()
+        hot.usage
+            .iter()
+            .map(|&u| f32::from(u.saturating_sub(cap)))
+            .sum()
     }
 }
 
@@ -586,6 +672,8 @@ pub struct PfScratch {
     dij: Dij,
     cursor: usize,
     epochs: u32,
+    /// Reused old-tree node buffer — propose/commit run per net per epoch.
+    nodes_buf: Vec<u32>,
 }
 
 const CORRIDOR_EPOCHS: u32 = 8;
@@ -594,7 +682,12 @@ impl<G: RGraph> Core<RouteDomain<G>> for PathFinder {
     type Scratch = PfScratch;
 
     fn scratch(&self, _hot: &RouteHot, cold: &RouteCtx<G>) -> PfScratch {
-        PfScratch { dij: Dij::new(cold.graph.nodes()), cursor: 0, epochs: 0 }
+        PfScratch {
+            dij: Dij::new(cold.graph.nodes()),
+            cursor: 0,
+            epochs: 0,
+            nodes_buf: Vec::new(),
+        }
     }
 
     fn propose(
@@ -604,7 +697,8 @@ impl<G: RGraph> Core<RouteDomain<G>> for PathFinder {
         sc: &mut PfScratch,
         _ctl: &Control,
         _rng: &mut SplitMix64,
-    ) -> Option<NetRoute> {
+        mv: &mut NetRoute,
+    ) -> bool {
         let cap = cold.graph.cap();
         while sc.cursor < cold.order.len() {
             let net = cold.order[sc.cursor] as usize;
@@ -617,9 +711,11 @@ impl<G: RGraph> Core<RouteDomain<G>> for PathFinder {
             if !dirty || cold.terms[net].is_empty() {
                 continue;
             }
-            let old = hot.tree_nodes(net);
-            let old_len: f64 =
-                hot.trees[net].iter().map(|b| b.len().saturating_sub(1) as f64).sum();
+            hot.tree_nodes_into(net, &mut sc.nodes_buf);
+            let old_len: f64 = hot.trees[net]
+                .iter()
+                .map(|b| b.len().saturating_sub(1) as f64)
+                .sum();
             let corridor: &[u32] = if sc.epochs < CORRIDOR_EPOCHS {
                 cold.corridors.get(net).map_or(&[], std::vec::Vec::as_slice)
             } else {
@@ -630,7 +726,7 @@ impl<G: RGraph> Core<RouteDomain<G>> for PathFinder {
                 &cold.graph,
                 &hot.usage,
                 &hot.hist,
-                &old,
+                &sc.nodes_buf,
                 &cold.terms[net],
                 corridor,
                 net as u32,
@@ -645,7 +741,7 @@ impl<G: RGraph> Core<RouteDomain<G>> for PathFinder {
                         &cold.graph,
                         &hot.usage,
                         &hot.hist,
-                        &old,
+                        &sc.nodes_buf,
                         &cold.terms[net],
                         &[],
                         net as u32,
@@ -657,35 +753,38 @@ impl<G: RGraph> Core<RouteDomain<G>> for PathFinder {
                 })?
             });
             if let Some((branches, len)) = routed {
-                return Some(NetRoute { net: net as u32, branches, len, old_len });
+                *mv = NetRoute {
+                    net: net as u32,
+                    branches,
+                    len,
+                    old_len,
+                };
+                return true;
             }
         }
-        None
+        false
     }
 
     fn commit(
         &self,
         hot: &mut RouteHot,
         _cold: &RouteCtx<G>,
-        _sc: &mut PfScratch,
-        mv: &NetRoute,
+        sc: &mut PfScratch,
+        mv: &mut NetRoute,
     ) {
-        for &n in &hot.tree_nodes(mv.net as usize) {
+        hot.tree_nodes_into(mv.net as usize, &mut sc.nodes_buf);
+        for &n in &sc.nodes_buf {
             hot.usage[n as usize] -= 1;
         }
-        hot.trees[mv.net as usize] = mv.branches.clone();
-        for &n in &hot.tree_nodes(mv.net as usize) {
+        // Move the branches in — no clone of the whole route tree.
+        hot.trees[mv.net as usize] = std::mem::take(&mut mv.branches);
+        hot.tree_nodes_into(mv.net as usize, &mut sc.nodes_buf);
+        for &n in &sc.nodes_buf {
             hot.usage[n as usize] += 1;
         }
     }
 
-    fn epoch(
-        &self,
-        hot: &mut RouteHot,
-        cold: &RouteCtx<G>,
-        sc: &mut PfScratch,
-        _t: &Telemetry,
-    ) {
+    fn epoch(&self, hot: &mut RouteHot, cold: &RouteCtx<G>, sc: &mut PfScratch, _t: &Telemetry) {
         let cap = cold.graph.cap();
         for (n, &u) in hot.usage.iter().enumerate() {
             if u > cap {
@@ -712,7 +811,13 @@ pub struct GlobalRouteCfg {
 
 impl Default for GlobalRouteCfg {
     fn default() -> Self {
-        Self { gcells_per_side: 16, gcell_capacity: 6, max_iters: 40, p_fac: 3.0, hist_inc: 0.5 }
+        Self {
+            gcells_per_side: 16,
+            gcell_capacity: 6,
+            max_iters: 40,
+            p_fac: 3.0,
+            hist_inc: 0.5,
+        }
     }
 }
 
@@ -738,7 +843,11 @@ pub fn run_pathfinder<G: RGraph, Lg: Ledger<RouteDomain<G>>>(
             step_min: 0.0,
             moves_per_step: cold.terms.len().max(1) as u32,
         },
-        stop: OverflowStop { max_iters, min_iters: 1, target: 0.0 },
+        stop: OverflowStop {
+            max_iters,
+            min_iters: 1,
+            target: 0.0,
+        },
         _d: PhantomData,
     };
     stage.run(hot, cold, ledger, rng)
@@ -750,7 +859,15 @@ pub fn run_global_route(
     cfg: &GlobalRouteCfg,
     rng: &mut SplitMix64,
 ) -> Telemetry {
-    run_pathfinder(hot, cold, &mut (), cfg.p_fac, cfg.hist_inc, cfg.max_iters, rng)
+    run_pathfinder(
+        hot,
+        cold,
+        &mut (),
+        cfg.p_fac,
+        cfg.hist_inc,
+        cfg.max_iters,
+        rng,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -767,6 +884,10 @@ pub struct DetailedRouteCfg {
     pub hist_inc: f32,
     /// Minimum wire area (nm²); 0 = no enforcement.
     pub min_area: i64,
+    /// Landing-claim clearance (nm) from extra obstacles (in-cell met1 pads
+    /// the router can't model): obstacle-pad half-width + stub half-width +
+    /// met1 spacing. 0 = fall back to `pitch`.
+    pub obstacle_clearance: i32,
     /// EOL (end-of-line) spacing (nm); 0 = disabled.
     /// After routing, wire endpoints closer than this to another-net endpoint
     /// trigger a one-shot repair pass.
@@ -774,8 +895,8 @@ pub struct DetailedRouteCfg {
     /// Extra spacing required between wide (power) nets and adjacent signal
     /// nets (nm); 0 = disabled.  Post-route PRL check + selective re-route.
     pub wide_net_extra_spacing: i32,
-    /// Number of metal layers (2 or 3). Default 2 preserves legacy behaviour.
-    pub n_layers: u8,
+    /// Number of ordered routing conductors declared by the PDK.
+    pub n_layers: u32,
 }
 
 impl Default for DetailedRouteCfg {
@@ -789,6 +910,7 @@ impl Default for DetailedRouteCfg {
             p_fac: 2.0,
             hist_inc: 0.5,
             min_area: 0,
+            obstacle_clearance: 0,
             eol_spacing: 0,
             wide_net_extra_spacing: 0,
             n_layers: 2,
@@ -807,7 +929,13 @@ pub struct PinLanding {
     pub net: u32,
     pub pin: (i32, i32),
     pub node: (i32, i32),
-    pub layer: u8,
+    pub layer: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PinAccessFailure {
+    pub net: u32,
+    pub pin: (i32, i32),
 }
 
 /// Build the track graph: block met1 under every placed cell, then claim one
@@ -820,7 +948,14 @@ pub fn build_track_grid(
     nets: usize,
     cfg: &DetailedRouteCfg,
     protect_pins: bool,
-) -> (TrackGrid, Vec<Vec<u32>>, Vec<u32>, Vec<PinLanding>, Vec<u32>) {
+) -> (
+    TrackGrid,
+    Vec<Vec<u32>>,
+    Vec<u32>,
+    Vec<PinLanding>,
+    Vec<PinAccessFailure>,
+    Vec<u32>,
+) {
     let mut grid = TrackGrid::with_layers(die, cfg.pitch, cfg.via_cost, cfg.n_layers);
     let halo = if protect_pins { grid.pitch } else { 0 };
     for &(x0, y0, x1, y1) in cells {
@@ -831,10 +966,16 @@ pub fn build_track_grid(
     let mut net_terms: Vec<Vec<u32>> = vec![Vec::new(); nets];
     let mut missing = vec![0u32; nets];
     let mut landings = Vec::with_capacity(terms.len());
+    let mut failures = Vec::new();
 
     let min_area = cfg.min_area;
 
     // --- Pass 1: claim one node per terminal in original order (with min-area). ---
+    let oc = if cfg.obstacle_clearance > 0 {
+        cfg.obstacle_clearance
+    } else {
+        cfg.pitch
+    };
     for t in terms {
         let pad = cfg.pitch - 140;
         let box_clear = |nx: i32, ny: i32, ox: i32, oy: i32| {
@@ -844,6 +985,14 @@ pub fn build_track_grid(
                 || oy <= t.y.min(ny) - p
                 || oy >= t.y.max(ny) + p
         };
+        // Obstacles (in-cell met1 pads) only need pad+stub+spacing clearance
+        // from the pin->node corridor — a full-pitch box starves dense cells.
+        let obs_clear = |nx: i32, ny: i32, ox: i32, oy: i32| {
+            ox <= t.x.min(nx) - oc
+                || ox >= t.x.max(nx) + oc
+                || oy <= t.y.min(ny) - oc
+                || oy >= t.y.max(ny) + oc
+        };
         let clear = |nx: i32, ny: i32| {
             !protect_pins
                 || (terms.iter().all(|o| {
@@ -851,16 +1000,14 @@ pub fn build_track_grid(
                         return true;
                     }
                     let p = cfg.pitch;
-                    let mate = o.net == t.net
-                        && (o.x - t.x).abs() < pad
-                        && (o.y - t.y).abs() < pad;
+                    let mate = o.net == t.net && (o.x - t.x).abs() < pad && (o.y - t.y).abs() < pad;
                     if mate {
                         let (dx, dy) = ((nx - o.x).abs(), (ny - o.y).abs());
                         dx.max(dy) >= p || (dx < pad && dy < pad)
                     } else {
                         box_clear(nx, ny, o.x, o.y)
                     }
-                }) && obstacles.iter().all(|&(ox, oy)| box_clear(nx, ny, ox, oy)))
+                }) && obstacles.iter().all(|&(ox, oy)| obs_clear(nx, ny, ox, oy)))
         };
         if let Some(n) = grid.claim_minarea(t.x, t.y, &mut claimed, clear, min_area) {
             reserved[n as usize] = t.net;
@@ -869,9 +1016,18 @@ pub fn build_track_grid(
                 row.push(n);
             }
             let (nx, ny, layer) = grid.pos(n);
-            landings.push(PinLanding { net: t.net, pin: (t.x, t.y), node: (nx, ny), layer });
+            landings.push(PinLanding {
+                net: t.net,
+                pin: (t.x, t.y),
+                node: (nx, ny),
+                layer,
+            });
         } else {
             missing[t.net as usize] += 1;
+            failures.push(PinAccessFailure {
+                net: t.net,
+                pin: (t.x, t.y),
+            });
         }
     }
 
@@ -894,9 +1050,10 @@ pub fn build_track_grid(
         let mut landing_idxs: Vec<usize> = Vec::new();
         for &ti in pin_idxs {
             let t = &terms[ti];
-            if let Some(li) = landings.iter().position(|l| {
-                l.net == t.net && l.pin == (t.x, t.y)
-            }) {
+            if let Some(li) = landings
+                .iter()
+                .position(|l| l.net == t.net && l.pin == (t.x, t.y))
+            {
                 landing_idxs.push(li);
             }
         }
@@ -918,6 +1075,11 @@ pub fn build_track_grid(
         let make_clear = |ti: usize| {
             let t = &terms[ti];
             let pad = cfg.pitch - 140;
+            let oc = if cfg.obstacle_clearance > 0 {
+                cfg.obstacle_clearance
+            } else {
+                cfg.pitch
+            };
             move |nx: i32, ny: i32| -> bool {
                 let box_clear = |ox: i32, oy: i32| {
                     let p = cfg.pitch;
@@ -926,22 +1088,27 @@ pub fn build_track_grid(
                         || oy <= t.y.min(ny) - p
                         || oy >= t.y.max(ny) + p
                 };
+                let obs_clear = |ox: i32, oy: i32| {
+                    ox <= t.x.min(nx) - oc
+                        || ox >= t.x.max(nx) + oc
+                        || oy <= t.y.min(ny) - oc
+                        || oy >= t.y.max(ny) + oc
+                };
                 !protect_pins
                     || (terms.iter().all(|o| {
                         if std::ptr::eq(o, t) {
                             return true;
                         }
                         let p = cfg.pitch;
-                        let mate = o.net == t.net
-                            && (o.x - t.x).abs() < pad
-                            && (o.y - t.y).abs() < pad;
+                        let mate =
+                            o.net == t.net && (o.x - t.x).abs() < pad && (o.y - t.y).abs() < pad;
                         if mate {
                             let (dx, dy) = ((nx - o.x).abs(), (ny - o.y).abs());
                             dx.max(dy) >= p || (dx < pad && dy < pad)
                         } else {
                             box_clear(o.x, o.y)
                         }
-                    }) && obstacles.iter().all(|&(ox, oy)| box_clear(ox, oy)))
+                    }) && obstacles.iter().all(|&(ox, oy)| obs_clear(ox, oy)))
             }
         };
 
@@ -976,21 +1143,27 @@ pub fn build_track_grid(
         }
 
         // Accept only if refinement strictly reduces total displacement.
-        let old_disp: i32 = pin_idxs.iter().zip(&landing_idxs).map(|(&ti, &li)| {
-            let t = &terms[ti];
-            let l = &landings[li];
-            (t.x - l.node.0).abs() + (t.y - l.node.1).abs()
-        }).sum();
-        let new_disp: i32 = assignments.iter().enumerate().map(|(slot, asgn)| {
-            match asgn {
+        let old_disp: i32 = pin_idxs
+            .iter()
+            .zip(&landing_idxs)
+            .map(|(&ti, &li)| {
+                let t = &terms[ti];
+                let l = &landings[li];
+                (t.x - l.node.0).abs() + (t.y - l.node.1).abs()
+            })
+            .sum();
+        let new_disp: i32 = assignments
+            .iter()
+            .enumerate()
+            .map(|(slot, asgn)| match asgn {
                 Some(n) => {
                     let t = &terms[pin_idxs[slot]];
                     let (nx, ny, _) = grid.pos(*n);
                     (t.x - nx).abs() + (t.y - ny).abs()
                 }
                 None => i32::MAX / 4,
-            }
-        }).sum();
+            })
+            .sum();
 
         let all_assigned = assignments.iter().all(|a| a.is_some());
         if all_assigned && new_disp < old_disp {
@@ -1005,6 +1178,9 @@ pub fn build_track_grid(
                 let t = &terms[ti];
                 let n = assignments[slot].unwrap();
                 claimed[n as usize] = true;
+                if !grid.allowed[n as usize] {
+                    grid.terminal_only[n as usize] = true;
+                }
                 grid.allowed[n as usize] = true;
                 reserved[n as usize] = t.net;
                 if !row.contains(&n) {
@@ -1012,7 +1188,12 @@ pub fn build_track_grid(
                 }
                 let (nx, ny, layer) = grid.pos(n);
                 let li = landing_idxs[slot];
-                landings[li] = PinLanding { net: t.net, pin: (t.x, t.y), node: (nx, ny), layer };
+                landings[li] = PinLanding {
+                    net: t.net,
+                    pin: (t.x, t.y),
+                    node: (nx, ny),
+                    layer,
+                };
             }
         } else {
             // Revert: re-claim old nodes.
@@ -1022,7 +1203,7 @@ pub fn build_track_grid(
         }
     }
 
-    (grid, net_terms, missing, landings, reserved)
+    (grid, net_terms, missing, landings, failures, reserved)
 }
 
 pub fn run_detailed_route<Lg: Ledger<RouteDomain<TrackGrid>>>(
@@ -1032,7 +1213,15 @@ pub fn run_detailed_route<Lg: Ledger<RouteDomain<TrackGrid>>>(
     cfg: &DetailedRouteCfg,
     rng: &mut SplitMix64,
 ) -> Telemetry {
-    run_pathfinder(hot, cold, ledger, cfg.p_fac, cfg.hist_inc, cfg.max_iters, rng)
+    run_pathfinder(
+        hot,
+        cold,
+        ledger,
+        cfg.p_fac,
+        cfg.hist_inc,
+        cfg.max_iters,
+        rng,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,7 +1231,7 @@ pub fn run_detailed_route<Lg: Ledger<RouteDomain<TrackGrid>>>(
 #[derive(Debug, Clone, Copy)]
 pub struct Wire {
     pub net: u32,
-    pub layer: u8,
+    pub layer: u32,
     pub x0: i32,
     pub y0: i32,
     pub x1: i32,
@@ -1056,13 +1245,11 @@ pub struct Via {
     pub x: i32,
     pub y: i32,
     pub size: i32,
+    /// Index of the lower conductor in the PDK's ordered routing stack.
+    pub layer: u32,
 }
 
-pub fn extract_geometry(
-    hot: &RouteHot,
-    grid: &TrackGrid,
-    width: i32,
-) -> (Vec<Wire>, Vec<Via>) {
+pub fn extract_geometry(hot: &RouteHot, grid: &TrackGrid, width: i32) -> (Vec<Wire>, Vec<Via>) {
     extract_geometry_minarea(hot, grid, width, 0)
 }
 
@@ -1084,7 +1271,13 @@ pub fn extract_geometry_minarea(
                 let (cx, cy, cl) = grid.pos(branch[i]);
                 if pl != cl {
                     emit_run(&mut wires, grid, net as u32, &branch[run_start..i], width);
-                    vias.push(Via { net: net as u32, x: cx.min(px), y: cy.min(py), size: width });
+                    vias.push(Via {
+                        net: net as u32,
+                        x: cx.min(px),
+                        y: cy.min(py),
+                        size: width,
+                        layer: pl.min(cl),
+                    });
                     run_start = i;
                 }
             }
@@ -1109,6 +1302,10 @@ pub fn extract_geometry_minarea(
             }
         }
     }
+    // Branches sharing a junction each emit the via -> identical stacked pads
+    // -> every nearby DRC spacing violation double-counted. One via per site.
+    vias.sort_unstable_by_key(|v| (v.x, v.y, v.layer, v.net));
+    vias.dedup_by_key(|v| (v.x, v.y, v.layer));
     (wires, vias)
 }
 
@@ -1120,15 +1317,31 @@ fn emit_run(wires: &mut Vec<Wire>, grid: &TrackGrid, net: u32, nodes: &[u32], wi
     let (mut lx, mut ly, _) = grid.pos(nodes[0]);
     for &n in &nodes[1..] {
         let (x, y, _) = grid.pos(n);
-        let straight = if layer == 1 { x == lx } else { y == ly };
+        let straight = if layer % 2 == 1 { x == lx } else { y == ly };
         if !straight {
-            wires.push(Wire { net, layer, x0: sx, y0: sy, x1: lx, y1: ly, width });
+            wires.push(Wire {
+                net,
+                layer,
+                x0: sx,
+                y0: sy,
+                x1: lx,
+                y1: ly,
+                width,
+            });
             (sx, sy) = (lx, ly);
         }
         (lx, ly) = (x, y);
     }
     if (lx, ly) != (sx, sy) {
-        wires.push(Wire { net, layer, x0: sx, y0: sy, x1: lx, y1: ly, width });
+        wires.push(Wire {
+            net,
+            layer,
+            x0: sx,
+            y0: sy,
+            x1: lx,
+            y1: ly,
+            width,
+        });
     }
 }
 
@@ -1148,7 +1361,7 @@ pub fn wire_rect(w: &Wire) -> (i32, i32, i32, i32) {
 pub fn net_pair_clearance(hot: &RouteHot, grid: &TrackGrid, a: u32, b: u32) -> f32 {
     let na = hot.tree_nodes(a as usize);
     let nb = hot.tree_nodes(b as usize);
-    let mut best = f32::MAX;
+    let mut best2 = f32::MAX;
     for &x in &na {
         let (ax, ay, al) = grid.pos(x);
         for &y in &nb {
@@ -1156,11 +1369,16 @@ pub fn net_pair_clearance(hot: &RouteHot, grid: &TrackGrid, a: u32, b: u32) -> f
             if al != bl {
                 continue;
             }
-            let d = (((ax - bx) as f32).powi(2) + ((ay - by) as f32).powi(2)).sqrt();
-            best = best.min(d);
+            let d2 = ((ax - bx) as f32).powi(2) + ((ay - by) as f32).powi(2);
+            best2 = best2.min(d2);
         }
     }
-    best
+    // min of squared distances == squared min distance — sqrt once at the end.
+    if best2 == f32::MAX {
+        f32::MAX
+    } else {
+        best2.sqrt()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,13 +1388,9 @@ pub fn net_pair_clearance(hot: &RouteHot, grid: &TrackGrid, a: u32, b: u32) -> f
 /// Scan wire endpoints for EOL spacing violations (two wire tips on different
 /// nets facing each other within `eol_spacing`).  Returns the set of grid
 /// nodes to block and the nets that need re-routing.
-pub fn eol_violations(
-    wires: &[Wire],
-    grid: &TrackGrid,
-    eol_spacing: i32,
-) -> (Vec<u32>, Vec<u32>) {
+pub fn eol_violations(wires: &[Wire], grid: &TrackGrid, eol_spacing: i32) -> (Vec<u32>, Vec<u32>) {
     // Collect endpoints: (x, y, layer, net)
-    let mut endpoints: Vec<(i32, i32, u8, u32)> = Vec::new();
+    let mut endpoints: Vec<(i32, i32, u32, u32)> = Vec::new();
     for w in wires {
         endpoints.push((w.x0, w.y0, w.layer, w.net));
         endpoints.push((w.x1, w.y1, w.layer, w.net));
@@ -1228,14 +1442,24 @@ pub fn prl_violations(
     let mut affected_nets = Vec::new();
 
     for pw in wires.iter().filter(|w| power_nets.contains(&w.net)) {
-        let (px0, py0, px1, py1) = (pw.x0.min(pw.x1), pw.y0.min(pw.y1), pw.x0.max(pw.x1), pw.y0.max(pw.y1));
+        let (px0, py0, px1, py1) = (
+            pw.x0.min(pw.x1),
+            pw.y0.min(pw.y1),
+            pw.x0.max(pw.x1),
+            pw.y0.max(pw.y1),
+        );
         let pw_horiz = py0 == py1;
 
         for sw in wires.iter().filter(|w| !power_nets.contains(&w.net)) {
             if sw.layer != pw.layer {
                 continue;
             }
-            let (sx0, sy0, sx1, sy1) = (sw.x0.min(sw.x1), sw.y0.min(sw.y1), sw.x0.max(sw.x1), sw.y0.max(sw.y1));
+            let (sx0, sy0, sx1, sy1) = (
+                sw.x0.min(sw.x1),
+                sw.y0.min(sw.y1),
+                sw.x0.max(sw.x1),
+                sw.y0.max(sw.y1),
+            );
             let sw_horiz = sy0 == sy1;
 
             // Only check parallel wires
@@ -1273,4 +1497,19 @@ pub fn prl_violations(
     affected_nets.sort_unstable();
     affected_nets.dedup();
     (blocked_nodes, affected_nets)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RGraph, TrackGrid};
+
+    #[test]
+    fn track_grid_uses_the_entire_declared_stack() {
+        let grid = TrackGrid::with_layers((10_000, 10_000), 500, 4.0, 9);
+        let top = grid.node(0, 0, 8);
+
+        assert_eq!(grid.n_layers, 9);
+        assert_eq!(grid.pos(top).2, 8);
+        assert_eq!(grid.nodes(), 9 * grid.layer_size() as usize);
+    }
 }

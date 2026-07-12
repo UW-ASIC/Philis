@@ -38,6 +38,39 @@ pub fn generate(s: &mut Suite) {
     met2_area_cap(s);
     cross_tool_differential(s);
     met2_coupling(s);
+    negative_cases(s);
+}
+
+/// Negative direction for every PEX kind: deliberately wrong expected values on
+/// existing cells. The engine must measure something ELSE, or the kind is unproven
+/// (a rule whose assert can never fire proves nothing).
+fn negative_cases(s: &mut Suite) {
+    s.gds.begin_cell("PEX_NEG"); // reuse geometry shapes; distinct cell keeps cases isolated
+    s.gds.rect(MET1, 0, 0, 2000, 200);          // R = 1.0 ohm, not 1.5
+    s.gds.rect(MET1, 0, 600, 2000, 200);        // 400nm gap coupling = 100 aF, not 300
+    s.gds.rect(MET2, 0, 1200, 2000, 200);       // met2 R = 0.8 ohm, not 1.2
+    s.gds.rect(MET2, 0, 1800, 2000, 200);       // met2/met2 gap 400 → coupling 80, not 200
+    s.gds.rect(VIA1, 3000, 0, 100, 100);        // via R = 5.0, not 9.0
+    s.gds.rect(MET2, 500, 100, 200, 400);       // crosses met1 wire → interlayer 10*0.04=0.4, not 2.0
+    s.gds.rect(MET1, 8000, 8000, 1000, 1000);   // plate: area+fringe = 185 aF, not 999
+    s.gds.end_cell();
+    s.add_pex_mismatch("PEX_NEG_R", "PEX_NEG", "resistance", 1e-6, json!({"r_ohm": 1.5}));
+    s.add_pex_mismatch("PEX_NEG_R2", "PEX_NEG", "resistance_met2", 1e-6, json!({"r_ohm": 1.2}));
+    s.add_pex_mismatch("PEX_NEG_VIA", "PEX_NEG", "via_resistance", 1e-6, json!({"r_ohm": 9.0}));
+    s.add_pex_mismatch("PEX_NEG_AC", "PEX_NEG", "area_cap", 1e-6, json!({"c_af": 999.0}));
+    s.add_pex_mismatch("PEX_NEG_CC", "PEX_NEG", "coupling_cap", 1e-6, json!({"c_af": 300.0}));
+    s.add_pex_mismatch("PEX_NEG_CC2", "PEX_NEG", "coupling_cap_met2", 1e-6, json!({"c_af": 200.0}));
+    s.add_pex_mismatch("PEX_NEG_IL", "PEX_NEG", "interlayer_cap", 0.1, json!({"c_af": 2.0}));
+
+    // per_net negative: same two-wire geometry as PEX_PER_NET, wrong R on net 0
+    s.gds.begin_cell("PEX_PNET_NEG");
+    s.gds.rect(MET1, 0, 0, 2000, 200);
+    s.gds.rect(MET1, 0, 400, 2000, 200);
+    s.gds.end_cell();
+    s.add_pex_mismatch("PEX_NEG_PNET", "PEX_PNET_NEG", "per_net", 1e-6, json!({
+        "0": {"r_ohm": 2.0, "cap_af": 386.0},
+        "1": {"r_ohm": 1.0, "cap_af": 386.0}
+    }));
 }
 
 /// Per-net attribution: two distinct-net wires with coupling.
@@ -46,14 +79,16 @@ fn per_net(s: &mut Suite) {
     // Two 2000×200nm wires, 200nm gap → same as PEX_CC but tested per-net.
     // Net extraction: no poly/diff → each met1 rect is its own net (net 0, net 1).
     // R per wire: 10 squares * 0.1 = 1.0 ohm
-    // Coupling: 100 aF/um * 2.0um * (200/200) = 200 aF → accrues to BOTH nets
+    // Ground C per wire: 25*0.4 + 40*4.4 = 186 aF.
+    // Coupling: 100 aF/um * 2.0um * (200/200) = 200 aF → accrues to BOTH nets.
+    // Total budgeted C per net = 186 + 200 = 386 aF.
     s.gds.begin_cell("PEX_PNET");
     s.gds.rect(MET1, 0, 0, 2000, 200);
     s.gds.rect(MET1, 0, 400, 2000, 200);
     s.gds.end_cell();
     s.add_pex("PEX_PER_NET", "PEX_PNET", "per_net", 1e-6, json!({
-        "0": {"r_ohm": 1.0, "cap_af": 200.0},
-        "1": {"r_ohm": 1.0, "cap_af": 200.0}
+        "0": {"r_ohm": 1.0, "cap_af": 386.0},
+        "1": {"r_ohm": 1.0, "cap_af": 386.0}
     }));
 }
 
@@ -128,20 +163,16 @@ fn crossover(s: &mut Suite) {
     s.add_pex("PEX_CROSSOVER", "PEX_XOVER", "interlayer_cap", 0.1, json!({"c_af": 0.4}));
 }
 
-/// Dummy fill: small square on met1 (area < 10000 nm², aspect ~1 → fill).
+/// Small conductor: without an explicit process fill model it receives the same
+/// calibrated area/fringe equations as every other met1 polygon.
 /// Area = 90×90 = 8100 nm² = 0.0081 um². Perimeter = 360 nm = 0.36 um.
-/// Fill factor 0.5 applied to area_cap: C = (25.0 * 0.0081 * 0.5) + (40.0 * 0.36) = 14.50125 aF.
-///
-/// Note: this tests the "fill detection" path. If the engine doesn't implement the
-/// fill factor, the cell still produces a valid area_cap (14.6025 aF without fill).
-/// The tolerance of 0.2 aF accommodates either code path.
 fn dummy_fill(s: &mut Suite) {
     s.gds.begin_cell("PEX_FILL");
     s.gds.rect(MET1, 0, 0, 90, 90);
     s.gds.end_cell();
-    // Without fill factor: C = 25.0*0.0081 + 40.0*0.36 = 14.6025 aF
-    // With fill factor:    C = 25.0*0.0081*0.5 + 40.0*0.36 = 14.50125 aF
-    s.add_pex("PEX_FILL", "PEX_FILL", "area_cap", 0.2, json!({"c_af": 14.6025}));
+    // C = 25.0*0.0081 + 40.0*0.36 = 14.6025 aF exactly under this deck.
+    // Any future fill adjustment needs an explicit process parameter and a new fixture.
+    s.add_pex("PEX_FILL", "PEX_FILL", "area_cap", 1e-6, json!({"c_af": 14.6025}));
 }
 
 /// Met2 resistance: 2000×200nm met2 wire = 10 squares, R = 0.08 * 10 = 0.8 ohm.

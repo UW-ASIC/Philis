@@ -6,11 +6,12 @@ members = [
     "benchmark",
 
     # Frontend
-    "frontend/substrate3",
     "frontend/annotator",
+    "frontend/substrate3",
     "frontend/core",
 
     # Backend
+    "backend",
     "backend/engine",
     "backend/cells",
     "backend/constraints",

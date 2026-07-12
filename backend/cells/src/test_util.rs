@@ -1,6 +1,6 @@
 //! Shared test utilities for generator DRC/LVS verification.
 
-use substrate3::{CellBuilder, CellGenerator, Deck, MatchingTier, verify};
+use crate::{verify, CellBuilder, CellGenerator, Deck, MatchingTier};
 use gdsverify::schema::{LvsSchema, VerifySchema};
 
 /// Build a test deck from layer definitions (name, GDS layer, datatype).
@@ -15,6 +15,7 @@ pub fn deck_from_layers(layers: &[(&str, i32, i32)]) -> Deck {
         lvs: LvsSchema::default(),
         connectivity: Default::default(),
         devices: Default::default(),
+        erc: Default::default(),
     };
     Deck::from_schema(schema).expect("test deck")
 }
@@ -22,16 +23,14 @@ pub fn deck_from_layers(layers: &[(&str, i32, i32)]) -> Deck {
 /// Load the real sky130 deck for DRC-aware tests.
 pub fn sky130_deck() -> Deck {
     let path = format!("{}/../../pdks/sky130.json", env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("load {path}: {e}"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("load {path}: {e}"));
     Deck::from_json(&text).expect("parse sky130 deck")
 }
 
 /// Load the sky130 cell-construction params from the same deck file.
 pub fn sky130_pdk() -> crate::pdk::Pdk {
     let path = format!("{}/../../pdks/sky130.json", env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("load {path}: {e}"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("load {path}: {e}"));
     crate::pdk::Pdk::from_json(&text).expect("parse sky130 cell params")
 }
 
@@ -40,7 +39,7 @@ pub fn generate_and_verify(
     gen: &dyn CellGenerator,
     deck: &Deck,
     tier: MatchingTier,
-) -> substrate3::CellOutput {
+) -> crate::CellOutput {
     let mut b = CellBuilder::new(deck, tier, 0);
     gen.generate(&mut b).expect("generate");
     let out = b.finish();
@@ -71,4 +70,3 @@ pub fn generate_and_verify(
     assert!(!out.pins.is_empty(), "has pins");
     out
 }
-

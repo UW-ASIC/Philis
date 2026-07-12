@@ -12,6 +12,7 @@ pub mod compare;
 pub mod spice;
 pub mod derived;
 pub mod hierarchical;
+pub mod netlist;
 
 pub use types::*;
 pub use extract::{extract_netlist, extract_netlist_opts, reduce_netlist};
@@ -19,6 +20,7 @@ pub use compare::{compare, CompareOpts};
 pub use spice::{to_spice, SpiceOpts, PortMap};
 pub use derived::evaluate_derived_layers;
 pub use hierarchical::{compare_hierarchical, HierCell, HierLvsResult, RefHierarchy};
+pub use netlist::*;
 
 use crate::geometry::GeometryStore;
 use crate::params::Deck;
@@ -56,7 +58,7 @@ impl VerifyCheck for LvsCheck {
 mod tests {
     use super::*;
     use crate::params::{LayerDef, LayerTable, ConnectivityConfig, DeviceConfig, MosRule};
-    use crate::geometry::GeometryStore;
+    use crate::geometry::{Bbox, GeometryStore};
     use std::collections::HashMap;
 
     fn layer_table() -> LayerTable {
@@ -115,6 +117,7 @@ mod tests {
             w_tolerance: crate::schema::PropertyTolerance::default(),
             l_tolerance: crate::schema::PropertyTolerance::default(),
             fail_on_floating: false,
+            erc: crate::params::ErcParams::default(),
             intra_layer_touch: false,
             global_nets: Vec::new(),
         }
@@ -345,6 +348,188 @@ mod tests {
         st.add_rect(mcon, 130, 80, 40, 40);
         let ext = extract_netlist_opts(&st, &deck, &opts, Backend::Cpu).unwrap();
         assert_eq!(ext.net_count, 1, "mcon must bridge li <-> met1");
+    }
+
+    #[test]
+    fn exact_concave_geometry_does_not_bbox_short() {
+        let mut deck = test_deck();
+        deck.intra_layer_touch = true;
+        let met1 = deck.layers.id("met1").unwrap();
+        let mut st = GeometryStore::new();
+
+        // Bottom/left L and top/right L have strongly overlapping bboxes but
+        // their actual polygons are disjoint.
+        let a = st.add_polygon(met1, &[
+            (0, 0), (100, 0), (100, 20), (20, 20), (20, 100), (0, 100),
+        ]);
+        let b = st.add_polygon(met1, &[
+            (30, 110), (110, 110), (110, 30), (130, 30), (130, 130), (30, 130),
+        ]);
+        assert!(st.poly_bbox[a.0 as usize].overlaps(&st.poly_bbox[b.0 as usize]));
+
+        let ext = extract_netlist(&st, &deck).unwrap();
+        assert_eq!(ext.net_count, 2, "overlapping bboxes must not create an LVS short");
+        assert_ne!(ext.net_of_poly[a.0 as usize], ext.net_of_poly[b.0 as usize]);
+    }
+
+    #[test]
+    fn device_marker_requires_actual_channel_overlap() {
+        let deck = test_deck();
+        let diff = deck.layers.id("diff").unwrap();
+        let poly = deck.layers.id("poly").unwrap();
+        let nsdm = deck.layers.id("nsdm").unwrap();
+        let psdm = deck.layers.id("psdm").unwrap();
+        let mut st = GeometryStore::new();
+        st.add_rect(diff, 0, 0, 100, 100);
+        st.add_rect(poly, 40, -20, 20, 140);
+        let false_n = st.add_polygon(nsdm, &[
+            (-10, -10), (110, -10), (110, -1), (-1, -1), (-1, 110), (-10, 110),
+        ]);
+        st.add_rect(psdm, 30, -10, 40, 120);
+        assert!(st.poly_bbox[false_n.0 as usize].overlaps(&Bbox {
+            xmin: 40, ymin: 0, xmax: 60, ymax: 100,
+        }));
+
+        let ext = extract_netlist(&st, &deck).unwrap();
+        assert_eq!(ext.devices.len(), 1);
+        assert_eq!(ext.devices[0].kind, DeviceKind::Pmos,
+            "an implant bbox in a concave void must not classify the channel");
+    }
+
+    #[test]
+    fn unsupported_or_unclassified_geometry_fails_closed() {
+        let deck = test_deck();
+        let met1 = deck.layers.id("met1").unwrap();
+        let mut non_rect = GeometryStore::new();
+        non_rect.add_polygon(met1, &[(0, 0), (100, 0), (80, 100), (0, 100)]);
+        let err = extract_netlist(&non_rect, &deck).err().expect("all-angle polygon must fail");
+        assert!(err.contains("non-rectilinear"), "unexpected diagnostic: {err}");
+
+        let diff = deck.layers.id("diff").unwrap();
+        let poly = deck.layers.id("poly").unwrap();
+        let mut no_implant = GeometryStore::new();
+        no_implant.add_rect(diff, 0, 0, 100, 100);
+        no_implant.add_rect(poly, 40, -20, 20, 140);
+        let err = extract_netlist(&no_implant, &deck).err()
+            .expect("unclassified channel must fail");
+        assert!(err.contains("no matching MOS type implant"), "unexpected diagnostic: {err}");
+
+        let nsdm = deck.layers.id("nsdm").unwrap();
+        let psdm = deck.layers.id("psdm").unwrap();
+        let mut ambiguous_implant = GeometryStore::new();
+        ambiguous_implant.add_rect(diff, 0, 0, 100, 100);
+        ambiguous_implant.add_rect(poly, 40, -20, 20, 140);
+        ambiguous_implant.add_rect(nsdm, -10, -10, 120, 120);
+        ambiguous_implant.add_rect(psdm, -10, -10, 120, 120);
+        let err = extract_netlist(&ambiguous_implant, &deck)
+            .err()
+            .expect("overlapping N/P implants must not select the first rule");
+        assert!(err.contains("ambiguously matches MOS rules"), "{err}");
+
+        let mut flavor_deck = test_deck();
+        let hvt = flavor_deck.layers.id("nwell").unwrap();
+        let lvt = flavor_deck.layers.id("licon").unwrap();
+        flavor_deck.devices.mos_rules[0].flavor_markers =
+            vec![(hvt, "hvt".into()), (lvt, "lvt".into())];
+        let mut ambiguous_flavor = GeometryStore::new();
+        ambiguous_flavor.add_rect(diff, 0, 0, 100, 100);
+        ambiguous_flavor.add_rect(poly, 40, -20, 20, 140);
+        ambiguous_flavor.add_rect(nsdm, -10, -10, 120, 120);
+        ambiguous_flavor.add_rect(hvt, 30, -10, 40, 120);
+        ambiguous_flavor.add_rect(lvt, 30, -10, 40, 120);
+        let err = extract_netlist(&ambiguous_flavor, &flavor_deck)
+            .err()
+            .expect("overlapping HVT/LVT markers must not select the first marker");
+        assert!(err.contains("multiple flavor markers"), "{err}");
+    }
+
+    #[test]
+    fn global_net_merge_remaps_extracted_body_terminal() {
+        let mut deck = test_deck();
+        let nwell = deck.layers.id("nwell").unwrap();
+        let diff = deck.layers.id("diff").unwrap();
+        let poly = deck.layers.id("poly").unwrap();
+        let nsdm = deck.layers.id("nsdm").unwrap();
+        deck.connectivity.conductors.push(nwell);
+        deck.devices.mos_rules[0].well_layer = Some(nwell);
+        deck.global_nets.push("VBB".into());
+
+        let mut st = GeometryStore::new();
+        let remote_body = st.add_rect(nwell, -500, 0, 100, 100);
+        st.add_rect(diff, 0, 0, 100, 100);
+        st.add_rect(poly, 40, -20, 20, 140);
+        st.add_rect(nsdm, -10, -10, 120, 120);
+        let local_body = st.add_rect(nwell, -10, -10, 120, 120);
+        st.net_labels.insert(remote_body.0, "VBB".into());
+        st.net_labels.insert(local_body.0, "VBB".into());
+
+        let ext = extract_netlist(&st, &deck).unwrap();
+        assert_eq!(ext.devices.len(), 1);
+        let global = ext.net_of_poly[remote_body.0 as usize];
+        assert_eq!(global, ext.net_of_poly[local_body.0 as usize]);
+        assert_eq!(ext.devices[0].body, global,
+            "body terminal must follow global-net canonicalization");
+    }
+
+    #[test]
+    fn exact_boundary_contact_obeys_touch_policy() {
+        let mut deck = test_deck();
+        let met1 = deck.layers.id("met1").unwrap();
+        let mut st = GeometryStore::new();
+        let a = st.add_rect(met1, 0, 0, 100, 100);
+        let b = st.add_rect(met1, 100, 20, 80, 60);
+
+        deck.intra_layer_touch = false;
+        let open = extract_netlist(&st, &deck).unwrap();
+        assert_ne!(open.net_of_poly[a.0 as usize], open.net_of_poly[b.0 as usize]);
+
+        deck.intra_layer_touch = true;
+        let joined = extract_netlist(&st, &deck).unwrap();
+        assert_eq!(joined.net_count, 1, "shared boundary must connect when enabled");
+        assert_eq!(joined.net_of_poly[a.0 as usize], joined.net_of_poly[b.0 as usize]);
+    }
+
+    #[test]
+    fn cutless_mode_only_joins_declared_layer_pairs() {
+        let deck = test_deck();
+        let li = deck.layers.id("li").unwrap();
+        let met1 = deck.layers.id("met1").unwrap();
+        let met2 = deck.layers.id("met2").unwrap();
+
+        let mut unrelated = GeometryStore::new();
+        let l = unrelated.add_rect(li, 0, 0, 100, 100);
+        let m2 = unrelated.add_rect(met2, 0, 0, 100, 100);
+        let ext = extract_netlist(&unrelated, &deck).unwrap();
+        assert_ne!(ext.net_of_poly[l.0 as usize], ext.net_of_poly[m2.0 as usize],
+            "li/met2 have no common declared via and must remain isolated");
+
+        let mut related = GeometryStore::new();
+        let l = related.add_rect(li, 0, 0, 100, 100);
+        let m1 = related.add_rect(met1, 0, 0, 100, 100);
+        let ext = extract_netlist(&related, &deck).unwrap();
+        assert_eq!(ext.net_of_poly[l.0 as usize], ext.net_of_poly[m1.0 as usize],
+            "legacy cutless mode may join layers paired by declared mcon");
+    }
+
+    #[test]
+    fn vialess_legacy_fallback_is_explicitly_cutless_only() {
+        let mut deck = test_deck();
+        deck.connectivity.vias.clear();
+        let li = deck.layers.id("li").unwrap();
+        let met2 = deck.layers.id("met2").unwrap();
+        let mut st = GeometryStore::new();
+        let l = st.add_rect(li, 0, 0, 100, 100);
+        let m = st.add_rect(met2, 0, 0, 100, 100);
+
+        let legacy = extract_netlist_opts(
+            &st, &deck, &ExtractOpts { cut_required: false, ..Default::default() }, Backend::Cpu,
+        ).unwrap();
+        assert_eq!(legacy.net_of_poly[l.0 as usize], legacy.net_of_poly[m.0 as usize]);
+
+        let strict = extract_netlist_opts(
+            &st, &deck, &ExtractOpts { cut_required: true, ..Default::default() }, Backend::Cpu,
+        ).unwrap();
+        assert_ne!(strict.net_of_poly[l.0 as usize], strict.net_of_poly[m.0 as usize]);
     }
 
     /// Symmetric diff pair: two NMOS with shared source, mirrored drain/gate.

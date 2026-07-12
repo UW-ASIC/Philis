@@ -55,7 +55,10 @@ impl From<std::io::Error> for ParseError {
 }
 
 fn syntax_err(line: usize, message: impl Into<String>) -> ParseError {
-    ParseError::Syntax { line, message: message.into() }
+    ParseError::Syntax {
+        line,
+        message: message.into(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -166,11 +169,19 @@ impl SpiceExpr<'_> {
         if depth > MAX_EXPR_DEPTH {
             return None;
         }
-        let s = src.trim().trim_matches(|c: char| c == '{' || c == '}').trim();
+        let s = src
+            .trim()
+            .trim_matches(|c: char| c == '{' || c == '}')
+            .trim();
         if s.is_empty() {
             return None;
         }
-        let mut e = SpiceExpr { src: s.as_bytes(), pos: 0, params, depth };
+        let mut e = SpiceExpr {
+            src: s.as_bytes(),
+            pos: 0,
+            params,
+            depth,
+        };
         let v = e.expr()?;
         e.ws();
         (e.pos >= e.src.len()).then_some(v)
@@ -200,8 +211,14 @@ impl SpiceExpr<'_> {
         let mut v = self.term()?;
         loop {
             match self.peek() {
-                Some(b'+') => { self.pos += 1; v += self.term()?; }
-                Some(b'-') => { self.pos += 1; v -= self.term()?; }
+                Some(b'+') => {
+                    self.pos += 1;
+                    v += self.term()?;
+                }
+                Some(b'-') => {
+                    self.pos += 1;
+                    v -= self.term()?;
+                }
                 _ => return Some(v),
             }
         }
@@ -215,8 +232,14 @@ impl SpiceExpr<'_> {
                 return Some(v);
             }
             match self.peek() {
-                Some(b'*') => { self.pos += 1; v *= self.power()?; }
-                Some(b'/') => { self.pos += 1; v /= self.power()?; }
+                Some(b'*') => {
+                    self.pos += 1;
+                    v *= self.power()?;
+                }
+                Some(b'/') => {
+                    self.pos += 1;
+                    v /= self.power()?;
+                }
                 _ => return Some(v),
             }
         }
@@ -241,8 +264,14 @@ impl SpiceExpr<'_> {
 
     fn unary(&mut self) -> Option<f64> {
         match self.peek() {
-            Some(b'-') => { self.pos += 1; Some(-self.primary()?) }
-            Some(b'+') => { self.pos += 1; self.primary() }
+            Some(b'-') => {
+                self.pos += 1;
+                Some(-self.primary()?)
+            }
+            Some(b'+') => {
+                self.pos += 1;
+                self.primary()
+            }
             _ => self.primary(),
         }
     }
@@ -277,9 +306,18 @@ impl SpiceExpr<'_> {
                     "exp" => a.exp(),
                     "int" | "floor" => a.floor(),
                     "ceil" => a.ceil(),
-                    "min" => { self.eat(b','); a.min(self.expr()?) }
-                    "max" => { self.eat(b','); a.max(self.expr()?) }
-                    "pow" => { self.eat(b','); a.powf(self.expr()?) }
+                    "min" => {
+                        self.eat(b',');
+                        a.min(self.expr()?)
+                    }
+                    "max" => {
+                        self.eat(b',');
+                        a.max(self.expr()?)
+                    }
+                    "pow" => {
+                        self.eat(b',');
+                        a.powf(self.expr()?)
+                    }
                     _ => return None,
                 };
                 self.eat(b')');
@@ -340,7 +378,12 @@ struct SubcktDef {
 fn flatten_subcircuits(
     lines: &[(usize, String)],
     macros: &HashSet<String>,
-) -> (Vec<(usize, String)>, String, Vec<String>, HashMap<String, Vec<String>>) {
+) -> (
+    Vec<(usize, String)>,
+    String,
+    Vec<String>,
+    HashMap<String, Vec<String>>,
+) {
     let mut subcircuits: HashMap<String, SubcktDef> = HashMap::new();
     let mut outside: Vec<(usize, String)> = Vec::new();
     let mut current: Option<(String, Vec<String>, Vec<(usize, String)>)> = None;
@@ -385,10 +428,7 @@ fn flatten_subcircuits(
         .map_or_else(|| (Vec::new(), Vec::new()), |s| (s.body, s.ports));
     let mut result = outside;
     result.extend(expand_instances(&top_body, &subcircuits, macros, 0));
-    let port_map = subcircuits
-        .into_iter()
-        .map(|(k, v)| (k, v.ports))
-        .collect();
+    let port_map = subcircuits.into_iter().map(|(k, v)| (k, v.ports)).collect();
     (result, last_name, top_ports, port_map)
 }
 
@@ -560,7 +600,10 @@ pub fn parse_spice(
         }
         if let Some(stripped) = raw.strip_prefix('+') {
             let Some((_, last)) = cleaned.last_mut() else {
-                return Err(syntax_err(line_no, "continuation line without previous line"));
+                return Err(syntax_err(
+                    line_no,
+                    "continuation line without previous line",
+                ));
             };
             last.push(' ');
             last.push_str(stripped.trim());
@@ -572,8 +615,7 @@ pub fn parse_spice(
     let spice_params = collect_params(&cleaned);
 
     // Phase 2: flatten hierarchy, keeping macro instances whole.
-    let (flattened, top_name, top_ports, subckt_ports) =
-        flatten_subcircuits(&cleaned, macros);
+    let (flattened, top_name, top_ports, subckt_ports) = flatten_subcircuits(&cleaned, macros);
 
     let mut hg = BipartiteHypergraph {
         name: top_name,
@@ -616,7 +658,10 @@ pub fn parse_spice(
             .iter()
             .filter_map(|t| {
                 let (key, value) = t.split_once('=')?;
-                Some((key.to_ascii_lowercase(), value.trim_end_matches(',').to_string()))
+                Some((
+                    key.to_ascii_lowercase(),
+                    value.trim_end_matches(',').to_string(),
+                ))
             })
             .collect();
 
@@ -971,7 +1016,9 @@ XM1 d g s b nfet_01v8 W=0.422u L=20e-9
 
         hg.group_registry(&reg).expect("group_registry");
         assert_eq!(hg.cells.len(), 4);
-        let g = hg.cell_id("diff_pair").expect("group node named after entry");
+        let g = hg
+            .cell_id("diff_pair")
+            .expect("group node named after entry");
         assert!(hg.cells[g as usize].device.is_none());
     }
 

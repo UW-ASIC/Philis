@@ -4,4 +4,3 @@ benchmark/cloned_fixtures/
 .venv/
 result/
 .claude/
-docs/books/

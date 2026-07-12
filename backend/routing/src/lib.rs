@@ -9,21 +9,22 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use pnr_cells::netlist::BipartiteHypergraph;
 use pnr_constraints::contract::ContractValidation;
 use pnr_constraints::{
-    validate_constraint_record, ConstraintContract, ConstraintStatus, ConstraintStrength,
-    Contractable, GROUND_NAMES, SUPPLY_NAMES,
+    validate_constraint_record, ConstraintContract, ConstraintRecord, ConstraintStatus,
+    ConstraintStrength, Contractable, GROUND_NAMES, SUPPLY_NAMES,
 };
-use pnr_cells::netlist::BipartiteHypergraph;
 use pnr_engine::routing::{
-    self as route, build_track_grid, eol_violations, net_pair_clearance, prl_violations,
-    GcellGrid, RGraph, RouteCtx, RouteHot, Term, TrackGrid,
+    self as route, build_track_grid, eol_violations, net_pair_clearance, prl_violations, GcellGrid,
+    RGraph, RouteCtx, RouteHot, Term, TrackGrid,
 };
 use pnr_engine::{SplitMix64, Telemetry};
-use pnr_placement::{ConstraintRecord, Placement};
+use pnr_placement::Placement;
 
 pub use pnr_engine::routing::{
-    wire_rect, extract_geometry_minarea, DetailedRouteCfg, GlobalRouteCfg, PinLanding, Via, Wire,
+    extract_geometry_minarea, wire_rect, DetailedRouteCfg, GlobalRouteCfg, PinAccessFailure,
+    PinLanding, Via, Wire,
 };
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,17 @@ pub struct RoutingConfig {
     /// Net priority overrides from routing feedback. Nets with higher values
     /// are routed earlier in subsequent iterations.
     pub net_priority_overrides: std::collections::HashMap<String, f64>,
+    /// Per-layer PEX parameters for post-route R/C contract closure
+    /// (parasitic budgets, differential-pair matching). `None` leaves those
+    /// contracts Consumed — never judged on invented numbers.
+    pub wire_params: Option<pnr_constraints::WireParasiticParams>,
+    /// Extra keep-away points for landing claims (nm): met1 features the
+    /// router cannot see, e.g. in-cell dummy-gate contact pads.
+    pub extra_obstacles: Vec<(i32, i32)>,
+    /// Negotiated-congestion memory carried across feedback iterations.
+    pub global_history: Vec<f32>,
+    pub detailed_history: Vec<f32>,
+    pub history_decay: f32,
 }
 
 impl Default for RoutingConfig {
@@ -45,6 +57,11 @@ impl Default for RoutingConfig {
             detailed: DetailedRouteCfg::default(),
             debug_dir: None,
             net_priority_overrides: std::collections::HashMap::new(),
+            wire_params: None,
+            extra_obstacles: Vec::new(),
+            global_history: Vec::new(),
+            detailed_history: Vec::new(),
+            history_decay: 0.65,
         }
     }
 }
@@ -56,6 +73,8 @@ pub struct RoutingReport {
     pub via_count: usize,
     pub overuse: u32,
     pub unrouted: Vec<String>,
+    pub no_path: Vec<String>,
+    pub missing_pin_count: usize,
     pub validation: ContractValidation,
     pub contract_lines: String,
 }
@@ -73,7 +92,11 @@ impl fmt::Display for RoutingReport {
             "  detailed: {} iters, residual overuse {}",
             self.detailed.iters, self.overuse
         )?;
-        writeln!(f, "  wirelength {} nm, {} vias", self.wirelength_nm, self.via_count)?;
+        writeln!(
+            f,
+            "  wirelength {} nm, {} vias",
+            self.wirelength_nm, self.via_count
+        )?;
         if self.unrouted.is_empty() {
             writeln!(f, "  all nets routed")?;
         } else {
@@ -103,6 +126,27 @@ pub struct RoutingResult {
     /// Crosstalk violations: (net_a, net_b, shortfall_nm) for pairs that
     /// violated minimum spacing. Used to feed back placement pressure.
     pub crosstalk_violations: Vec<(String, String, f64)>,
+    pub landing_failures: Vec<PinAccessFailure>,
+    pub hotspots: Vec<RoutingHotspot>,
+    pub global_history: Vec<f32>,
+    pub detailed_history: Vec<f32>,
+    pub track_pitch: i32,
+}
+
+impl RoutingResult {
+    /// Write artifacts for this owned routing result. Safe to call after the
+    /// feedback engine has selected a non-final iteration as its best result.
+    pub fn write_debug(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        dump_debug(dir, &self.net_names, &self.report, &self.wires)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RoutingHotspot {
+    pub x: i32,
+    pub y: i32,
+    pub layer: u32,
+    pub pressure: f64,
 }
 
 /// Placement feedback from routing: per-net weight adjustments and per-cell
@@ -128,14 +172,140 @@ pub struct RoutingFeedback {
     /// Constraint-violation pushes: (device_a, device_b, additional_gap_nm)
     /// for pairs that violated crosstalk clearance during routing.
     pub constraint_adjustments: Vec<(String, String, f64)>,
+    /// Per-net estimated resistance (ohm) from routing wire geometry.
+    pub net_r_ohm: Vec<f64>,
+    /// Per-net estimated capacitance (fF) from routing wire geometry.
+    pub net_c_ff: Vec<f64>,
+    /// Matched-pair parasitic deltas (populated when symmetry groups provided).
+    pub matched_deltas: Vec<MatchedDelta>,
+    /// True only for capacity/no-path failure. Pin-access failures are handled
+    /// locally and must not trigger destructive global utilization halving.
+    pub spread_required: bool,
+}
+
+/// Parasitic delta between matched nets of a symmetry pair.
+#[derive(Debug, Clone)]
+pub struct MatchedDelta {
+    pub device_a: String,
+    pub device_b: String,
+    pub net_a: String,
+    pub net_b: String,
+    pub r_a: f64,
+    pub r_b: f64,
+    pub c_a: f64,
+    pub c_b: f64,
+    pub r_delta_pct: f64,
+    pub c_delta_pct: f64,
+}
+
+/// Estimate per-net resistance (ohm) and capacitance (fF) from routing wires.
+/// Same analytical model as `verify/src/pex/mod.rs` but on routing geometry.
+fn estimate_net_rc(
+    wires: &[Wire],
+    vias: &[Via],
+    n_nets: usize,
+    p: &pnr_constraints::WireParasiticParams,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut r = vec![0.0; n_nets];
+    let mut c = vec![0.0; n_nets];
+    for w in wires {
+        let ni = w.net as usize;
+        if ni >= n_nets {
+            continue;
+        }
+        let li = w.layer as usize;
+        let len_nm = ((w.x1 - w.x0).abs() + (w.y1 - w.y0).abs()) as f64;
+        let width_nm = w.width.max(1) as f64;
+        if let Some(&sr) = p.sheet_r.get(li) {
+            r[ni] += sr * len_nm / width_nm;
+        }
+        let len_um = len_nm / 1000.0;
+        let width_um = width_nm / 1000.0;
+        if let Some(&ac) = p.area_cap.get(li) {
+            c[ni] += ac * len_um * width_um;
+        }
+        if let Some(&fc) = p.fringe_cap.get(li) {
+            c[ni] += fc * 2.0 * (len_um + width_um);
+        }
+    }
+    for v in vias {
+        let ni = v.net as usize;
+        if ni < n_nets {
+            r[ni] += p.via_r;
+        }
+    }
+    // aF → fF
+    for ci in c.iter_mut() {
+        *ci /= 1000.0;
+    }
+    (r, c)
+}
+
+/// Compute matched-pair parasitic deltas from per-net R/C.
+///
+/// `device_names` maps DeviceId index → name (from hypergraph).
+/// `net_of_device` maps (device_idx, pin_name) → net index in `net_names`.
+fn compute_matched_deltas(
+    net_r: &[f64],
+    net_c: &[f64],
+    net_names: &[String],
+    symmetry: &[pnr_constraints::SymmetryGroup],
+    device_names: &[String],
+    net_of_device: &dyn Fn(u32, &str) -> Option<usize>,
+) -> Vec<MatchedDelta> {
+    let mut out = Vec::new();
+    let pins = ["G", "D", "S"];
+    for sg in symmetry {
+        for mp in &sg.pairs {
+            if mp.tier < pnr_constraints::MatchingTier::Moderate {
+                continue;
+            }
+            let (a, b) = (mp.device_a.0, mp.device_b.0);
+            for pin in &pins {
+                let (ia, ib) = match (net_of_device(a, pin), net_of_device(b, pin)) {
+                    (Some(a), Some(b)) if a != b => (a, b),
+                    _ => continue,
+                };
+                let (ra, rb) = (net_r[ia], net_r[ib]);
+                let (ca, cb) = (net_c[ia], net_c[ib]);
+                let avg_r = (ra + rb) / 2.0;
+                let avg_c = (ca + cb) / 2.0;
+                let r_delta = if avg_r > 0.0 {
+                    ((ra - rb).abs() / avg_r) * 100.0
+                } else {
+                    0.0
+                };
+                let c_delta = if avg_c > 0.0 {
+                    ((ca - cb).abs() / avg_c) * 100.0
+                } else {
+                    0.0
+                };
+                if r_delta < 0.1 && c_delta < 0.1 {
+                    continue;
+                }
+                let na = net_names.get(ia).cloned().unwrap_or_default();
+                let nb = net_names.get(ib).cloned().unwrap_or_default();
+                let da = device_names.get(a as usize).cloned().unwrap_or_default();
+                let db = device_names.get(b as usize).cloned().unwrap_or_default();
+                out.push(MatchedDelta {
+                    device_a: da,
+                    device_b: db,
+                    net_a: na,
+                    net_b: nb,
+                    r_a: ra,
+                    r_b: rb,
+                    c_a: ca,
+                    c_b: cb,
+                    r_delta_pct: r_delta,
+                    c_delta_pct: c_delta,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Extract placement feedback from a completed routing.
-///
-/// - **net_weights**: actual_wl / hpwl ratio, with 2× boost for
-///   parasitic-budgeted nets (they need shorter wires).
-/// - **cell_inflation_x/y**: directional wire-density inflation — cells
-///   near horizontal wires inflate in x, near vertical in y.
 pub fn extract_feedback(
     result: &RoutingResult,
     placement: &Placement,
@@ -143,11 +313,22 @@ pub fn extract_feedback(
     weight_cap: f64,
     inflation_cap: f64,
 ) -> RoutingFeedback {
-    extract_feedback_with_prior(result, placement, parasitic_budgets, weight_cap, inflation_cap, None)
+    extract_feedback_with_prior(
+        result,
+        placement,
+        parasitic_budgets,
+        weight_cap,
+        inflation_cap,
+        None,
+        None,
+        &[],
+        &[],
+        &|_, _| None,
+    )
 }
 
-/// Extract feedback with optional prior weights for EMA decay.
-/// `prior` maps net name → previous weight; absent nets default to 1.0.
+/// Extract feedback with optional prior weights, wire parasitic params, and
+/// symmetry groups for matched-pair delta computation.
 pub fn extract_feedback_with_prior(
     result: &RoutingResult,
     placement: &Placement,
@@ -155,6 +336,10 @@ pub fn extract_feedback_with_prior(
     weight_cap: f64,
     inflation_cap: f64,
     prior: Option<&std::collections::HashMap<String, f64>>,
+    wire_params: Option<&pnr_constraints::WireParasiticParams>,
+    symmetry: &[pnr_constraints::SymmetryGroup],
+    device_names: &[String],
+    net_of_device: &dyn Fn(u32, &str) -> Option<usize>,
 ) -> RoutingFeedback {
     let n = result.net_names.len();
     let n_cells = placement.x.len();
@@ -162,20 +347,43 @@ pub fn extract_feedback_with_prior(
     // -- per-net weights from wirelength ratio --
     let mut actual: Vec<i64> = vec![0; n];
     for w in &result.wires {
-        actual[w.net as usize] +=
-            i64::from((w.x1 - w.x0).abs() + (w.y1 - w.y0).abs());
+        actual[w.net as usize] += i64::from((w.x1 - w.x0).abs() + (w.y1 - w.y0).abs());
     }
     let mut weights: Vec<f64> = (0..n)
         .map(|i| {
             let h = result.net_hpwl[i] as f64;
-            if h > 0.0 { (actual[i] as f64 / h).clamp(1.0, weight_cap) } else { 1.0 }
+            if h > 0.0 {
+                (actual[i] as f64 / h).clamp(1.0, weight_cap)
+            } else {
+                1.0
+            }
         })
         .collect();
 
-    // parasitic-budgeted nets get 2× priority — shorter wire = less R/C
+    // -- per-net R/C estimate from routing wires --
+    let (net_r, net_c) = wire_params
+        .map(|wp| estimate_net_rc(&result.wires, &result.vias, n, wp))
+        .unwrap_or_else(|| (vec![0.0; n], vec![0.0; n]));
+
+    // ponytail: proportional parasitic boost replaces blind 2× — weight scaled
+    // by how far over budget the net is, so near-budget nets get mild pressure
+    // and heavily-over-budget nets get strong pressure.
     for budget in parasitic_budgets {
         if let Some(idx) = result.net_names.iter().position(|n| n == &budget.net_name) {
-            weights[idx] = (weights[idx] * 2.0).min(weight_cap);
+            let r_ratio = if budget.max_r > 0.0 && net_r[idx] > 0.0 {
+                (net_r[idx] / budget.max_r).max(1.0)
+            } else {
+                1.0
+            };
+            let c_ratio = if budget.max_c > 0.0 && net_c[idx] > 0.0 {
+                (net_c[idx] / budget.max_c).max(1.0)
+            } else {
+                1.0
+            };
+            let boost = r_ratio.max(c_ratio);
+            // ponytail: fall back to 2× when no wire params available
+            let boost = if wire_params.is_some() { boost } else { 2.0 };
+            weights[idx] = (weights[idx] * boost).min(weight_cap);
         }
     }
 
@@ -187,41 +395,64 @@ pub fn extract_feedback_with_prior(
         }
     }
 
-    // -- per-cell directional inflation from wire density --
-    // ponytail: split by layer — layer 0 (met1, horizontal) → x, layer 1 (met2, vertical) → y
-    let mut wire_near_x = vec![0u32; n_cells];
-    let mut wire_near_y = vec![0u32; n_cells];
-    for w in &result.wires {
-        let (x0, y0, x1, y1) = wire_rect(w);
-        let (wcx, wcy) = ((x0 + x1) / 2, (y0 + y1) / 2);
+    // -- per-cell directional pressure from actual PathFinder history and
+    // pin-access displacement, not from the midpoint of already-routed wires. --
+    let mut pressure_x = vec![0.0f64; n_cells];
+    let mut pressure_y = vec![0.0f64; n_cells];
+    let pitch = result.track_pitch.max(1);
+    let nearest_cell = |x: i32, y: i32| -> Option<usize> {
+        (0..n_cells).min_by_key(|&ci| {
+            let (w, h) = placement.sizes[ci];
+            let dx = (x - placement.x[ci]).abs().saturating_sub(w / 2);
+            let dy = (y - placement.y[ci]).abs().saturating_sub(h / 2);
+            i64::from(dx.max(0)).pow(2) + i64::from(dy.max(0)).pow(2)
+        })
+    };
+    for hs in &result.hotspots {
         for ci in 0..n_cells {
-            let (hw, hh) = (placement.sizes[ci].0, placement.sizes[ci].1);
-            if (placement.x[ci] - wcx).abs() < hw
-                && (placement.y[ci] - wcy).abs() < hh
-            {
-                if w.layer == 0 {
-                    wire_near_x[ci] += 1;
+            let (w, h) = placement.sizes[ci];
+            let dx = (hs.x - placement.x[ci]).abs().saturating_sub(w / 2).max(0);
+            let dy = (hs.y - placement.y[ci]).abs().saturating_sub(h / 2).max(0);
+            let dist = dx + dy;
+            if dist <= 3 * pitch {
+                let local = hs.pressure / (1.0 + f64::from(dist) / f64::from(pitch));
+                if hs.layer % 2 == 0 {
+                    pressure_x[ci] += local;
                 } else {
-                    wire_near_y[ci] += 1;
+                    pressure_y[ci] += local;
                 }
             }
         }
     }
-    let inflate = |counts: &[u32]| -> Vec<f64> {
-        let avg = counts.iter().sum::<u32>() as f64 / n_cells.max(1) as f64;
-        counts
+    for l in &result.landings {
+        if let Some(ci) = nearest_cell(l.pin.0, l.pin.1) {
+            pressure_x[ci] += f64::from((l.node.0 - l.pin.0).abs()) / f64::from(pitch);
+            pressure_y[ci] += f64::from((l.node.1 - l.pin.1).abs()) / f64::from(pitch);
+        }
+    }
+    for f in &result.landing_failures {
+        if let Some(ci) = nearest_cell(f.pin.0, f.pin.1) {
+            pressure_x[ci] += 4.0;
+            pressure_y[ci] += 4.0;
+        }
+    }
+    let inflate = |pressure: &[f64]| -> Vec<f64> {
+        let peak = pressure.iter().copied().fold(0.0f64, f64::max);
+        let mean = pressure.iter().sum::<f64>() / pressure.len().max(1) as f64;
+        let threshold = (1.5 * mean).max(1.0);
+        pressure
             .iter()
-            .map(|&c| {
-                if avg > 0.0 {
-                    (1.0 + 0.1 * (c as f64 / avg - 1.0)).clamp(1.0, inflation_cap)
+            .map(|&p| {
+                if peak > threshold && p > threshold {
+                    (1.0 + 0.30 * (p - threshold) / (peak - threshold)).clamp(1.0, inflation_cap)
                 } else {
                     1.0
                 }
             })
             .collect()
     };
-    let cell_inflation_x = inflate(&wire_near_x);
-    let cell_inflation_y = inflate(&wire_near_y);
+    let cell_inflation_x = inflate(&pressure_x);
+    let cell_inflation_y = inflate(&pressure_y);
 
     // -- net ordering priority from detour ratio --
     let mut net_order_priority: Vec<(String, f64)> = (0..n)
@@ -233,6 +464,16 @@ pub fn extract_feedback_with_prior(
         .collect();
     net_order_priority.sort_by(|a, b| b.1.total_cmp(&a.1));
 
+    // -- matched-pair parasitic deltas --
+    let matched_deltas = compute_matched_deltas(
+        &net_r,
+        &net_c,
+        &result.net_names,
+        symmetry,
+        device_names,
+        net_of_device,
+    );
+
     let max_weight = weights.iter().copied().fold(1.0f64, f64::max);
     let clean = result.report.unrouted.is_empty() && result.report.overuse == 0;
     RoutingFeedback {
@@ -242,8 +483,11 @@ pub fn extract_feedback_with_prior(
         max_weight,
         clean,
         net_order_priority,
-        // ponytail: constraint_adjustments filled by caller after ledger inspection
         constraint_adjustments: Vec::new(),
+        net_r_ohm: net_r,
+        net_c_ff: net_c,
+        matched_deltas,
+        spread_required: result.report.overuse > 0 || !result.report.no_path.is_empty(),
     }
 }
 
@@ -258,9 +502,35 @@ struct XtalkCheck {
     min_nm: f32,
 }
 
+struct ParaCheck {
+    contract: usize,
+    net: u32,
+    max_r: f64,
+    max_c: f64,
+}
+
+struct DiffCheck {
+    contract: usize,
+    net_a: u32,
+    net_b: u32,
+    max_len_pct: f64,
+    max_r_pct: f64,
+    max_c_pct: f64,
+    same_layer: bool,
+}
+
+struct StraightCheck {
+    contract: usize,
+    net: u32,
+    vertical: bool,
+}
+
 struct RouteLedger {
     contracts: Vec<ConstraintContract>,
     checks: Vec<XtalkCheck>,
+    para: Vec<ParaCheck>,
+    diff: Vec<DiffCheck>,
+    straight: Vec<StraightCheck>,
     open: usize,
 }
 
@@ -269,11 +539,13 @@ impl RouteLedger {
         let names: Vec<String> = g.cells.iter().map(|c| c.name.clone()).collect();
         let mut contracts = Vec::new();
         let mut checks = Vec::new();
+        let mut para = Vec::new();
+        let mut diff = Vec::new();
+        let mut straight = Vec::new();
+        let net_idx = |name: &str| g.net_id(name).and_then(|n| net_of[n as usize]);
         for x in &rec.crosstalk {
             let mut c = x.to_contract(&names);
-            let a = g.net_id(&x.net_a).and_then(|n| net_of[n as usize]);
-            let b = g.net_id(&x.net_b).and_then(|n| net_of[n as usize]);
-            if let (Some(a), Some(b)) = (a, b) {
+            if let (Some(a), Some(b)) = (net_idx(&x.net_a), net_idx(&x.net_b)) {
                 c.consume("routing");
                 checks.push(XtalkCheck {
                     contract: contracts.len(),
@@ -285,9 +557,170 @@ impl RouteLedger {
             contracts.push(c);
         }
         for p in &rec.parasitic {
-            let _ = p;
+            let mut c = p.to_contract(&names);
+            if let Some(ni) = net_idx(&p.net_name) {
+                c.consume("routing");
+                para.push(ParaCheck {
+                    contract: contracts.len(),
+                    net: ni,
+                    max_r: p.max_r,
+                    max_c: p.max_c,
+                });
+            }
+            contracts.push(c);
         }
-        Self { contracts, checks, open: usize::MAX }
+        for d in &rec.differential {
+            let mut c = d.to_contract(&names);
+            if let (Some(a), Some(b)) = (net_idx(&d.net_pos), net_idx(&d.net_neg)) {
+                c.consume("routing");
+                diff.push(DiffCheck {
+                    contract: contracts.len(),
+                    net_a: a,
+                    net_b: b,
+                    max_len_pct: d.max_length_delta_pct,
+                    max_r_pct: d.max_r_delta_pct,
+                    max_c_pct: d.max_c_delta_pct,
+                    same_layer: d.same_layer_required,
+                });
+            }
+            contracts.push(c);
+        }
+        for s in &rec.straight {
+            let mut c = s.to_contract(&names);
+            if let Some(ni) = net_idx(&s.net) {
+                c.consume("routing");
+                straight.push(StraightCheck {
+                    contract: contracts.len(),
+                    net: ni,
+                    vertical: s.vertical,
+                });
+            }
+            contracts.push(c);
+        }
+        Self {
+            contracts,
+            checks,
+            para,
+            diff,
+            straight,
+            open: usize::MAX,
+        }
+    }
+
+    /// Post-route contract closure on final geometry: parasitic budgets,
+    /// differential-pair matching, straight-net spread. R/C checks need PEX
+    /// params; without them those contracts stay Consumed (never judged on
+    /// invented numbers). Length/spread checks are pure geometry — always run.
+    fn reconcile_geometry(
+        &mut self,
+        wires: &[Wire],
+        vias: &[Via],
+        n_nets: usize,
+        wire_params: Option<&pnr_constraints::WireParasiticParams>,
+        straight_tol_nm: i32,
+    ) {
+        let mut len = vec![0i64; n_nets];
+        // Per-net sorted layer sets. This cold-path representation scales with
+        // the PDK stack instead of truncating at an arbitrary bit width.
+        let mut layers_used = vec![Vec::<u32>::new(); n_nets];
+        for w in wires {
+            len[w.net as usize] += i64::from((w.x1 - w.x0).abs() + (w.y1 - w.y0).abs());
+            layers_used[w.net as usize].push(w.layer);
+        }
+        for layers in &mut layers_used {
+            layers.sort_unstable();
+            layers.dedup();
+        }
+        let rc = wire_params.map(|wp| estimate_net_rc(wires, vias, n_nets, wp));
+
+        for ch in &self.para {
+            let Some((r, c)) = rc.as_ref() else { continue };
+            let (rn, cn) = (r[ch.net as usize], c[ch.net as usize]);
+            let over_r = if ch.max_r > 0.0 {
+                rn / ch.max_r - 1.0
+            } else {
+                0.0
+            };
+            let over_c = if ch.max_c > 0.0 {
+                cn / ch.max_c - 1.0
+            } else {
+                0.0
+            };
+            let worst = over_r.max(over_c);
+            let ct = &mut self.contracts[ch.contract];
+            if worst <= 0.0 {
+                ct.satisfy(
+                    "routing",
+                    &format!("R {rn:.2} ohm, C {cn:.3} fF within budget"),
+                );
+            } else {
+                ct.violate("routing", worst * 100.0, "% over budget");
+            }
+        }
+
+        let delta_pct = |a: f64, b: f64| {
+            let avg = (a + b) / 2.0;
+            if avg > 0.0 {
+                (a - b).abs() / avg * 100.0
+            } else {
+                0.0
+            }
+        };
+        for ch in &self.diff {
+            let (la, lb) = (len[ch.net_a as usize] as f64, len[ch.net_b as usize] as f64);
+            if la == 0.0 || lb == 0.0 {
+                continue; // one side unrouted — unrouted-net reporting covers it
+            }
+            let mut worst = delta_pct(la, lb) - ch.max_len_pct;
+            if let Some((r, c)) = rc.as_ref() {
+                worst = worst
+                    .max(delta_pct(r[ch.net_a as usize], r[ch.net_b as usize]) - ch.max_r_pct)
+                    .max(delta_pct(c[ch.net_a as usize], c[ch.net_b as usize]) - ch.max_c_pct);
+            }
+            let layers_differ =
+                ch.same_layer && layers_used[ch.net_a as usize] != layers_used[ch.net_b as usize];
+            let ct = &mut self.contracts[ch.contract];
+            if worst <= 0.0 && !layers_differ {
+                ct.satisfy("routing", &format!("len delta {:.1}%", delta_pct(la, lb)));
+            } else if layers_differ {
+                let a = &layers_used[ch.net_a as usize];
+                let b = &layers_used[ch.net_b as usize];
+                let diff_layers = a.iter().filter(|layer| !b.contains(layer)).count()
+                    + b.iter().filter(|layer| !a.contains(layer)).count();
+                ct.violate("routing", diff_layers as f64, "asymmetric layers");
+            } else {
+                ct.violate("routing", worst, "% over budget");
+            }
+        }
+
+        for ch in &self.straight {
+            if len[ch.net as usize] == 0 {
+                continue;
+            }
+            // Spread perpendicular to the required direction; pin-landing stubs
+            // on other layers count, so tolerance is one track pitch.
+            let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+            for w in wires.iter().filter(|w| w.net == ch.net) {
+                let (a, b) = if ch.vertical {
+                    (w.x0, w.x1)
+                } else {
+                    (w.y0, w.y1)
+                };
+                lo = lo.min(a.min(b));
+                hi = hi.max(a.max(b));
+            }
+            let spread = hi - lo;
+            let ct = &mut self.contracts[ch.contract];
+            if spread <= straight_tol_nm {
+                ct.satisfy("routing", &format!("spread {spread} nm within one track"));
+            } else {
+                ct.violate(
+                    "routing",
+                    f64::from(spread - straight_tol_nm) / 1000.0,
+                    "um",
+                );
+            }
+        }
     }
 
     fn validation(&self) -> ContractValidation {
@@ -301,7 +734,7 @@ impl RouteLedger {
                 "{:60} {:9} {:?}\n",
                 c.constraint_id,
                 format!("{:?}", c.strength),
-                c.status
+                c.status()
             ));
         }
         s
@@ -312,10 +745,16 @@ impl RouteLedger {
         let mut out = Vec::new();
         for ch in &self.checks {
             let c = &self.contracts[ch.contract];
-            if c.status == ConstraintStatus::Violated {
-                let shortfall = c.violation_metric.unwrap_or(0.0) * 1000.0; // um → nm
-                let na = net_names.get(ch.net_a as usize).cloned().unwrap_or_default();
-                let nb = net_names.get(ch.net_b as usize).cloned().unwrap_or_default();
+            if c.status() == ConstraintStatus::Violated {
+                let shortfall = c.violation_metric().unwrap_or(0.0) * 1000.0; // um → nm
+                let na = net_names
+                    .get(ch.net_a as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                let nb = net_names
+                    .get(ch.net_b as usize)
+                    .cloned()
+                    .unwrap_or_default();
                 out.push((na, nb, shortfall));
             }
         }
@@ -327,16 +766,18 @@ impl pnr_engine::Ledger<pnr_engine::routing::RouteDomain<TrackGrid>> for RouteLe
     fn reconcile(&mut self, hot: &RouteHot, cold: &RouteCtx<TrackGrid>) {
         let mut open = 0usize;
         for ch in &self.checks {
-            if hot.trees[ch.net_a as usize].is_empty()
-                || hot.trees[ch.net_b as usize].is_empty()
-            {
+            if hot.trees[ch.net_a as usize].is_empty() || hot.trees[ch.net_b as usize].is_empty() {
                 continue;
             }
             let d = net_pair_clearance(hot, &cold.graph, ch.net_a, ch.net_b);
             let ok = d >= ch.min_nm;
             let c = &mut self.contracts[ch.contract];
-            let want = if ok { ConstraintStatus::Satisfied } else { ConstraintStatus::Violated };
-            if c.status != want {
+            let want = if ok {
+                ConstraintStatus::Satisfied
+            } else {
+                ConstraintStatus::Violated
+            };
+            if c.status() != want {
                 if ok {
                     c.satisfy("routing", &format!("clearance {d:.0} nm"));
                 } else {
@@ -385,9 +826,11 @@ fn build_nets(
     };
     for (ni, name) in g.nets.iter().enumerate() {
         let hpins = g.pins_on_net(ni as u32);
-        if hpins.len() < 2 {
+        if hpins.is_empty() {
             continue;
         }
+        // NOTE: single-hpin nets are NOT skipped here — a one-pin net can
+        // still expand to many physical finger pads that need strapping.
         let mut pts = Vec::with_capacity(hpins.len());
         for &(ci, pi) in hpins {
             let c = ci as usize;
@@ -409,13 +852,12 @@ fn build_nets(
             continue;
         }
         let lower = name.to_ascii_lowercase();
-        let mut w = if SUPPLY_NAMES.contains(&lower.as_str())
-            || GROUND_NAMES.contains(&lower.as_str())
-        {
-            0.5
-        } else {
-            1.0
-        };
+        let mut w =
+            if SUPPLY_NAMES.contains(&lower.as_str()) || GROUND_NAMES.contains(&lower.as_str()) {
+                0.5
+            } else {
+                1.0
+            };
         if let Some(nc) = rec.net_class.iter().find(|c| c.net_name == *name) {
             use pnr_constraints::NetClass::*;
             w = match nc.net_class {
@@ -471,8 +913,15 @@ pub fn run_routing_at(
     cfg: &RoutingConfig,
 ) -> RoutingResult {
     let mut rng = SplitMix64::new(cfg.seed);
-    let nets = build_nets(g, p, pin_pos, rec, &cfg.net_priority_overrides);
+    let mut nets = build_nets(g, p, pin_pos, rec, &cfg.net_priority_overrides);
+    nets.obstacles.extend_from_slice(&cfg.extra_obstacles);
     let n_nets = nets.names.len();
+    eprintln!(
+        "[routing] {n_nets} nets ({} obstacle-only pins), die {}x{} nm",
+        nets.obstacles.len(),
+        p.die.0,
+        p.die.1
+    );
 
     // ---- Stage 3: global (gcell) ----
     let ggrid = GcellGrid::new(p.die, cfg.global.gcells_per_side, cfg.global.gcell_capacity);
@@ -480,8 +929,10 @@ pub fn run_routing_at(
         .pins
         .iter()
         .map(|pts| {
-            let mut t: Vec<u32> =
-                pts.iter().map(|&(x, y)| ggrid.at(x as f32, y as f32)).collect();
+            let mut t: Vec<u32> = pts
+                .iter()
+                .map(|&(x, y)| ggrid.at(x as f32, y as f32))
+                .collect();
             t.sort_unstable();
             t.dedup();
             t
@@ -496,15 +947,12 @@ pub fn run_routing_at(
         .names
         .iter()
         .map(|name| {
-            rec.parasitic
-                .iter()
-                .find(|b| b.net_name == *name)
-                .map(|b| {
-                    let max_len_nm = b.max_r * wire_w_nm / sheet_r;
-                    // Convert from nm to Dijkstra cost units (grid hops):
-                    // each hop = pitch nm
-                    (max_len_nm / f64::from(cfg.detailed.pitch)) as f32
-                })
+            rec.parasitic.iter().find(|b| b.net_name == *name).map(|b| {
+                let max_len_nm = b.max_r * wire_w_nm / sheet_r;
+                // Convert from nm to Dijkstra cost units (grid hops):
+                // each hop = pitch nm
+                (max_len_nm / f64::from(cfg.detailed.pitch)) as f32
+            })
         })
         .collect();
     let gcold = RouteCtx {
@@ -517,7 +965,20 @@ pub fn run_routing_at(
         max_len: vec![None; n_nets], // no length limit for global routing
     };
     let mut ghot = RouteHot::new(gcold.graph.nodes(), n_nets);
+    if cfg.global_history.len() == ghot.hist.len() {
+        for (dst, &src) in ghot.hist.iter_mut().zip(&cfg.global_history) {
+            *dst = src * cfg.history_decay.clamp(0.0, 1.0);
+        }
+    }
+    eprintln!(
+        "[routing] stage 1/2: global ({}x{} gcells, cap {})",
+        gcold.graph.nx, gcold.graph.ny, cfg.global.gcell_capacity
+    );
     let gt = route::run_global_route(&mut ghot, &gcold, &cfg.global, &mut rng);
+    eprintln!(
+        "[routing] stage 1/2 done: {} iters, residual overflow {}",
+        gt.iters, gt.overflow
+    );
 
     // Detailed-route corridors
     let gnx = gcold.graph.nx as i64;
@@ -551,7 +1012,12 @@ pub fn run_routing_at(
     let footprints: Vec<(i32, i32, i32, i32)> = (0..g.cells.len())
         .map(|i| {
             let (w, h) = p.sizes[i];
-            (p.x[i] - w / 2, p.y[i] - h / 2, p.x[i] + w / 2, p.y[i] + h / 2)
+            (
+                p.x[i] - w / 2,
+                p.y[i] - h / 2,
+                p.x[i] + w / 2,
+                p.y[i] + h / 2,
+            )
         })
         .collect();
     let terms: Vec<Term> = nets
@@ -559,10 +1025,14 @@ pub fn run_routing_at(
         .iter()
         .enumerate()
         .flat_map(|(ni, pts)| {
-            pts.iter().map(move |&(x, y)| Term { net: ni as u32, x, y })
+            pts.iter().map(move |&(x, y)| Term {
+                net: ni as u32,
+                x,
+                y,
+            })
         })
         .collect();
-    let (mut tgrid, tterms, missing_pins, landings, reserved) = build_track_grid(
+    let (mut tgrid, tterms, missing_pins, landings, landing_failures, reserved) = build_track_grid(
         p.die,
         &footprints,
         &terms,
@@ -582,9 +1052,37 @@ pub fn run_routing_at(
         max_len: net_max_len,
     };
     let mut dhot = RouteHot::new(dcold.graph.nodes(), n_nets);
+    if cfg.detailed_history.len() == dhot.hist.len() {
+        for (dst, &src) in dhot.hist.iter_mut().zip(&cfg.detailed_history) {
+            *dst = src * cfg.history_decay.clamp(0.0, 1.0);
+        }
+    }
     let mut ledger = RouteLedger::build(g, rec, &nets.net_of);
-    let dt =
-        route::run_detailed_route(&mut dhot, &dcold, &mut ledger, &cfg.detailed, &mut rng);
+    if std::env::var("PNR_DEBUG_LANDINGS").is_ok() {
+        for t in &terms {
+            eprintln!("[dbg] term net={} ({},{})", t.net, t.x, t.y);
+        }
+        for &(ox, oy) in &nets.obstacles {
+            eprintln!("[dbg] obstacle ({ox},{oy})");
+        }
+        for l in &landings {
+            eprintln!(
+                "[dbg] landing net={} pin=({},{}) node=({},{}) layer={}",
+                l.net, l.pin.0, l.pin.1, l.node.0, l.node.1, l.layer
+            );
+        }
+    }
+    eprintln!(
+        "[routing] stage 2/2: detailed ({} track nodes, {} pin landings, {} missing pins)",
+        dcold.graph.nodes(),
+        landings.len(),
+        missing_pins.iter().map(|&m| u32::from(m)).sum::<u32>()
+    );
+    let dt = route::run_detailed_route(&mut dhot, &dcold, &mut ledger, &cfg.detailed, &mut rng);
+    eprintln!(
+        "[routing] stage 2/2 done: {} iters, {} proposed, {} accepted",
+        dt.iters, dt.proposed, dt.accepted
+    );
 
     // ---- Symmetric route mirroring for matched diff pairs ----
     mirror_symmetric_routes(g, p, rec, &nets, &dcold, &mut dhot);
@@ -600,6 +1098,11 @@ pub fn run_routing_at(
         let (blocked, affected) =
             eol_violations(&probe_wires.0, &dcold.graph, cfg.detailed.eol_spacing);
         if !affected.is_empty() {
+            eprintln!(
+                "[routing] EOL repair: {} nets ripped up, {} nodes blocked",
+                affected.len(),
+                blocked.len()
+            );
             // Rip up affected nets
             for &net in &affected {
                 let ni = net as usize;
@@ -617,10 +1120,7 @@ pub fn run_routing_at(
             for &net in &affected {
                 let ni = net as usize;
                 let old = dhot.tree_nodes(ni);
-                let corridor: &[u32] = dcold
-                    .corridors
-                    .get(ni)
-                    .map_or(&[], std::vec::Vec::as_slice);
+                let corridor: &[u32] = dcold.corridors.get(ni).map_or(&[], std::vec::Vec::as_slice);
                 let ml = dcold.max_len.get(ni).copied().flatten();
                 if let Some((branches, _len)) = route::route_net(
                     &dcold.graph,
@@ -656,8 +1156,7 @@ pub fn run_routing_at(
             .enumerate()
             .filter(|(_, name)| {
                 let lower = name.to_ascii_lowercase();
-                SUPPLY_NAMES.contains(&lower.as_str())
-                    || GROUND_NAMES.contains(&lower.as_str())
+                SUPPLY_NAMES.contains(&lower.as_str()) || GROUND_NAMES.contains(&lower.as_str())
             })
             .map(|(i, _)| i as u32)
             .collect();
@@ -675,6 +1174,11 @@ pub fn run_routing_at(
                 cfg.detailed.wide_net_extra_spacing,
             );
             if !affected.is_empty() {
+                eprintln!(
+                    "[routing] PRL repair: {} nets ripped up, {} nodes blocked",
+                    affected.len(),
+                    blocked.len()
+                );
                 for &net in &affected {
                     let ni = net as usize;
                     for &n in &dhot.tree_nodes(ni) {
@@ -689,10 +1193,8 @@ pub fn run_routing_at(
                 for &net in &affected {
                     let ni = net as usize;
                     let old = dhot.tree_nodes(ni);
-                    let corridor: &[u32] = dcold
-                        .corridors
-                        .get(ni)
-                        .map_or(&[], std::vec::Vec::as_slice);
+                    let corridor: &[u32] =
+                        dcold.corridors.get(ni).map_or(&[], std::vec::Vec::as_slice);
                     let ml = dcold.max_len.get(ni).copied().flatten();
                     if let Some((branches, _len)) = route::route_net(
                         &dcold.graph,
@@ -722,27 +1224,74 @@ pub fn run_routing_at(
 
     // ---- results ----
     let cap = dcold.graph.cap();
-    let overuse: u32 =
-        dhot.usage.iter().map(|&u| u32::from(u.saturating_sub(cap))).sum();
+    let overuse: u32 = dhot
+        .usage
+        .iter()
+        .map(|&u| u32::from(u.saturating_sub(cap)))
+        .sum();
     let unrouted: Vec<String> = (0..n_nets)
         .filter(|&i| dhot.trees[i].is_empty() || missing_pins[i] > 0)
         .map(|i| nets.names[i].clone())
         .collect();
-    let (wires, vias) = extract_geometry_minarea(&dhot, &dcold.graph, cfg.detailed.wire_width, cfg.detailed.min_area);
+    let no_path: Vec<String> = (0..n_nets)
+        .filter(|&i| dhot.trees[i].is_empty() && missing_pins[i] == 0)
+        .map(|i| nets.names[i].clone())
+        .collect();
+    let max_hist = dhot.hist.iter().copied().fold(0.0f32, f32::max);
+    let hotspots: Vec<RoutingHotspot> = if max_hist > 0.0 {
+        dhot.hist
+            .iter()
+            .enumerate()
+            .filter_map(|(node, &hist)| {
+                (hist >= 0.05 * max_hist).then(|| {
+                    let (x, y, layer) = dcold.graph.pos(node as u32);
+                    RoutingHotspot {
+                        x,
+                        y,
+                        layer,
+                        pressure: f64::from(hist),
+                    }
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (wires, vias) = extract_geometry_minarea(
+        &dhot,
+        &dcold.graph,
+        cfg.detailed.wire_width,
+        cfg.detailed.min_area,
+    );
+    ledger.reconcile_geometry(
+        &wires,
+        &vias,
+        n_nets,
+        cfg.wire_params.as_ref(),
+        cfg.detailed.pitch,
+    );
     let wirelength_nm: i64 = wires
         .iter()
         .map(|w| i64::from((w.x1 - w.x0).abs() + (w.y1 - w.y0).abs()))
         .sum();
 
-    let net_hpwl: Vec<i64> = nets.pins.iter().map(|pts| {
-        if pts.len() < 2 { return 0; }
-        let (mut xn, mut xx, mut yn, mut yx) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
-        for &(x, y) in pts {
-            xn = xn.min(x); xx = xx.max(x);
-            yn = yn.min(y); yx = yx.max(y);
-        }
-        i64::from(xx - xn) + i64::from(yx - yn)
-    }).collect();
+    let net_hpwl: Vec<i64> = nets
+        .pins
+        .iter()
+        .map(|pts| {
+            if pts.len() < 2 {
+                return 0;
+            }
+            let (mut xn, mut xx, mut yn, mut yx) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+            for &(x, y) in pts {
+                xn = xn.min(x);
+                xx = xx.max(x);
+                yn = yn.min(y);
+                yx = yx.max(y);
+            }
+            i64::from(xx - xn) + i64::from(yx - yn)
+        })
+        .collect();
 
     let report = RoutingReport {
         global: gt,
@@ -751,17 +1300,42 @@ pub fn run_routing_at(
         via_count: vias.len(),
         overuse,
         unrouted,
+        no_path,
+        missing_pin_count: landing_failures.len(),
         validation: ledger.validation(),
         contract_lines: ledger.summary(),
     };
 
     let crosstalk_violations = ledger.violated_pairs(&nets.names);
 
-    if let Some(dir) = &cfg.debug_dir {
-        dump_debug(dir, &nets, &dhot, &dcold, &report, &wires);
+    let v = &report.validation;
+    eprintln!("[routing] done: WL {} nm, {} vias, {} unrouted, overuse {} | contracts {}/{} satisfied, {} violated",
+        report.wirelength_nm, report.via_count, report.unrouted.len(), report.overuse,
+        v.satisfied, v.total, v.violated);
+    if !report.unrouted.is_empty() {
+        eprintln!("[routing] UNROUTED: {}", report.unrouted.join(", "));
     }
 
-    RoutingResult { wires, vias, landings, net_names: nets.names, net_hpwl, report, crosstalk_violations }
+    if let Some(dir) = &cfg.debug_dir {
+        if let Err(e) = dump_debug(dir, &nets.names, &report, &wires) {
+            eprintln!("[routing] debug artifact write failed: {e}");
+        }
+    }
+
+    RoutingResult {
+        wires,
+        vias,
+        landings,
+        net_names: nets.names,
+        net_hpwl,
+        report,
+        crosstalk_violations,
+        landing_failures,
+        hotspots,
+        global_history: ghot.hist.clone(),
+        detailed_history: dhot.hist.clone(),
+        track_pitch: cfg.detailed.pitch,
+    }
 }
 
 /// For each symmetry pair, find matched nets (same pin name on mirrored
@@ -777,7 +1351,11 @@ fn mirror_symmetric_routes(
 ) {
     let grid = &cold.graph;
     for (gi, sg) in rec.symmetry.iter().enumerate() {
-        let axis_x = if gi < p.axes.len() { p.axes[gi] } else { continue };
+        let axis_x = if gi < p.axes.len() {
+            p.axes[gi]
+        } else {
+            continue;
+        };
 
         for pair in &sg.pairs {
             let da = pair.device_a.0 as usize;
@@ -819,9 +1397,7 @@ fn mirror_symmetric_routes(
                         let mx = 2 * axis_x - x;
                         let mn = grid.nearest(mx, y, layer);
                         // Check if the mirrored node is occupied by another net
-                        if hot.usage[mn as usize] >= grid.cap()
-                            && !cold.terms[dst].contains(&mn)
-                        {
+                        if hot.usage[mn as usize] >= grid.cap() && !cold.terms[dst].contains(&mn) {
                             conflict = true;
                             break;
                         }
@@ -847,25 +1423,23 @@ fn mirror_symmetric_routes(
 
 fn dump_debug(
     dir: &std::path::Path,
-    nets: &NetSetup,
-    hot: &RouteHot,
-    cold: &RouteCtx<TrackGrid>,
+    net_names: &[String],
     r: &RoutingReport,
     wires: &[Wire],
-) {
-    let _ = std::fs::create_dir_all(dir);
-    let w = |name: &str, content: String| {
-        let _ = std::fs::write(dir.join(name), content);
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let w = |name: &str, content: String| -> std::io::Result<()> {
+        std::fs::write(dir.join(name), content)
     };
-    w("global_route_trace.csv", r.global.trace_csv());
-    w("detailed_route_trace.csv", r.detailed.trace_csv());
-    w("route_report.txt", r.to_string());
-    w("route_contracts.txt", r.contract_lines.clone());
+    w("global_route_trace.csv", r.global.trace_csv())?;
+    w("detailed_route_trace.csv", r.detailed.trace_csv())?;
+    w("route_report.txt", r.to_string())?;
+    w("route_contracts.txt", r.contract_lines.clone())?;
     let mut txt = String::from("net layer x0 y0 x1 y1\n");
     for wire in wires {
         txt.push_str(&format!(
             "{} met{} {} {} {} {}\n",
-            nets.names[wire.net as usize],
+            net_names[wire.net as usize],
             wire.layer + 1,
             wire.x0,
             wire.y0,
@@ -873,8 +1447,8 @@ fn dump_debug(
             wire.y1
         ));
     }
-    w("routes.txt", txt);
-    let _ = (hot, cold);
+    w("routes.txt", txt)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -887,34 +1461,10 @@ mod tests {
     use pnr_constraints::{
         CrosstalkExclusion, DeviceId, MatchingPair, MatchingTier, MatchingType, SymmetryGroup,
     };
-    use pnr_core::frontend::{parse_spice, Pdk};
     use pnr_placement::{estimate_sizes, run_placement, PlacementConfig};
-    use std::collections::HashSet;
-
-    const OTA: &str = "\
-.subckt ota vinp vinm vout1 vout2 VDD VSS
-XM1 vout1 vinp vtail VSS nfet_01v8 W=10u L=1u nf=2
-XM2 vout2 vinm vtail VSS nfet_01v8 W=10u L=1u nf=2
-XM3 vout1 vbias VDD VDD pfet_01v8 W=20u L=1u
-XM4 vout2 vbias VDD VDD pfet_01v8 W=20u L=1u
-XM5 vtail vbn VSS VSS nfet_01v8 W=40u L=2u m=4
-.ends ota
-";
-
-    fn pdk() -> Pdk {
-        Pdk::from_json(
-            r#"{
-            "drc": {"off_grid": {"grid": 5}},
-            "devices": {
-                "nfet_01v8": {"type": "nmos", "cell": "mosfet", "min_w": 420, "min_l": 150},
-                "pfet_01v8": {"type": "pmos", "cell": "mosfet", "min_w": 420, "min_l": 150}
-            }}"#,
-        )
-        .unwrap()
-    }
 
     fn flow(rec: &ConstraintRecord) -> (BipartiteHypergraph, Placement, RoutingResult) {
-        let g = parse_spice(OTA, &pdk(), &HashSet::new()).unwrap();
+        let g = pnr_cells::fixtures::ota();
         let sizes = estimate_sizes(&g);
         let p = run_placement(&g, &sizes, rec, &PlacementConfig::default(), &[]).placement;
         let r = run_routing(&g, &p, rec, &RoutingConfig::default());
@@ -944,10 +1494,14 @@ XM5 vtail vbn VSS VSS nfet_01v8 W=40u L=2u m=4
 
     #[test]
     fn ota_routes_clean() {
-        let g = parse_spice(OTA, &pdk(), &HashSet::new()).unwrap();
+        let g = pnr_cells::fixtures::ota();
         let rec = ota_record(&g);
         let (_g, _p, r) = flow(&rec);
-        assert!(r.report.unrouted.is_empty(), "unrouted: {:?}", r.report.unrouted);
+        assert!(
+            r.report.unrouted.is_empty(),
+            "unrouted: {:?}",
+            r.report.unrouted
+        );
         assert_eq!(r.report.overuse, 0, "track overuse (shorts) remain");
         assert!(!r.wires.is_empty());
         assert!(r.report.wirelength_nm > 0);
@@ -958,7 +1512,7 @@ XM5 vtail vbn VSS VSS nfet_01v8 W=40u L=2u m=4
 
     #[test]
     fn crosstalk_contract_reconciled() {
-        let g = parse_spice(OTA, &pdk(), &HashSet::new()).unwrap();
+        let g = pnr_cells::fixtures::ota();
         let mut rec = ota_record(&g);
         rec.crosstalk.push(CrosstalkExclusion {
             net_a: "vtail".into(),
@@ -976,8 +1530,54 @@ XM5 vtail vbn VSS VSS nfet_01v8 W=40u L=2u m=4
     }
 
     #[test]
+    fn differential_and_parasitic_contracts_reconciled() {
+        let g = pnr_cells::fixtures::ota();
+        let mut rec = ota_record(&g);
+        rec.differential.push(pnr_constraints::DifferentialPair {
+            net_pos: "vout1".into(),
+            net_neg: "vout2".into(),
+            // Generous budgets: the check must judge, not necessarily pass tight ones.
+            max_length_delta_pct: 200.0,
+            max_r_delta_pct: 200.0,
+            max_c_delta_pct: 200.0,
+            same_layer_required: false,
+        });
+        rec.parasitic.push(pnr_constraints::ParasiticBudget {
+            net_name: "vtail".into(),
+            max_r: 1e6,
+            max_c: 1e6,
+        });
+        let g2 = pnr_cells::fixtures::ota();
+        let sizes = estimate_sizes(&g2);
+        let p = run_placement(&g2, &sizes, &rec, &PlacementConfig::default(), &[]).placement;
+        let cfg = RoutingConfig {
+            wire_params: Some(pnr_constraints::WireParasiticParams {
+                sheet_r: vec![0.1, 0.1, 0.1],
+                area_cap: vec![25.0, 25.0, 25.0],
+                fringe_cap: vec![40.0, 40.0, 40.0],
+                via_r: 5.0,
+            }),
+            ..Default::default()
+        };
+        let r = run_routing(&g2, &p, &rec, &cfg);
+        // Both contracts must leave Emitted (consumed) and, with both nets
+        // routed + params present, close to Satisfied/Violated.
+        assert_eq!(r.report.validation.total, 2);
+        assert_eq!(
+            r.report.validation.emitted, 0,
+            "{}",
+            r.report.contract_lines
+        );
+        assert!(
+            r.report.validation.satisfied + r.report.validation.violated == 2,
+            "diff/parasitic contracts must be judged post-route:\n{}",
+            r.report.contract_lines
+        );
+    }
+
+    #[test]
     fn deterministic_given_seed() {
-        let g = parse_spice(OTA, &pdk(), &HashSet::new()).unwrap();
+        let g = pnr_cells::fixtures::ota();
         let rec = ota_record(&g);
         let run = || {
             let sizes = estimate_sizes(&g);
@@ -990,13 +1590,16 @@ XM5 vtail vbn VSS VSS nfet_01v8 W=40u L=2u m=4
 
     #[test]
     fn debug_dump_writes_artifacts() {
-        let g = parse_spice(OTA, &pdk(), &HashSet::new()).unwrap();
+        let g = pnr_cells::fixtures::ota();
         let rec = ota_record(&g);
         let sizes = estimate_sizes(&g);
         let p = run_placement(&g, &sizes, &rec, &PlacementConfig::default(), &[]).placement;
         let dir = std::env::temp_dir().join("pnr_routing_debug_test");
         let _ = std::fs::remove_dir_all(&dir);
-        let cfg = RoutingConfig { debug_dir: Some(dir.clone()), ..Default::default() };
+        let cfg = RoutingConfig {
+            debug_dir: Some(dir.clone()),
+            ..Default::default()
+        };
         run_routing(&g, &p, &rec, &cfg);
         for f in [
             "global_route_trace.csv",
@@ -1007,5 +1610,90 @@ XM5 vtail vbn VSS VSS nfet_01v8 W=40u L=2u m=4
             assert!(dir.join(f).exists(), "missing {f}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn estimate_net_rc_basic() {
+        // Two wires on net 0 (layer 0, met1): 2000nm long, 200nm wide each
+        let wires = vec![
+            Wire {
+                net: 0,
+                layer: 0,
+                x0: 0,
+                y0: 0,
+                x1: 2000,
+                y1: 0,
+                width: 200,
+            },
+            Wire {
+                net: 0,
+                layer: 0,
+                x0: 0,
+                y0: 500,
+                x1: 1000,
+                y1: 500,
+                width: 200,
+            },
+        ];
+        let vias = vec![Via {
+            net: 0,
+            x: 500,
+            y: 250,
+            size: 170,
+            layer: 0,
+        }];
+        let params = pnr_constraints::WireParasiticParams {
+            sheet_r: vec![0.1],     // 0.1 ohm/sq for met1
+            area_cap: vec![25.0],   // 25 aF/um²
+            fringe_cap: vec![40.0], // 40 aF/um
+            via_r: 5.0,             // 5 ohm per via
+        };
+        let (r, c) = estimate_net_rc(&wires, &vias, 1, &params);
+        // Wire 1: 2000nm/200nm = 10 squares → 1.0 ohm
+        // Wire 2: 1000nm/200nm = 5 squares → 0.5 ohm
+        // Via: 5.0 ohm
+        // Total R = 6.5 ohm
+        assert!((r[0] - 6.5).abs() < 0.01, "R={}", r[0]);
+        // C: wire 1: area = 2.0*0.2 = 0.4 um² → 10 aF, fringe = 2*(2.0+0.2)*40 = 176 aF
+        //    wire 2: area = 1.0*0.2 = 0.2 um² → 5 aF, fringe = 2*(1.0+0.2)*40 = 96 aF
+        // Total = (10+176+5+96) aF = 287 aF = 0.287 fF
+        assert!((c[0] - 0.287).abs() < 0.01, "C={}", c[0]);
+    }
+
+    #[test]
+    fn feedback_with_parasitic_params() {
+        let g = pnr_cells::fixtures::ota();
+        let rec = ota_record(&g);
+        let (_, p, r) = flow(&rec);
+        let params = pnr_constraints::WireParasiticParams {
+            sheet_r: vec![0.1, 0.1],
+            area_cap: vec![25.0, 25.0],
+            fringe_cap: vec![40.0, 40.0],
+            via_r: 0.0,
+        };
+        let device_names: Vec<String> = g.cells.iter().map(|c| c.name.clone()).collect();
+        let net_of_device = |dev: u32, pin: &str| -> Option<usize> {
+            let cell = g.cells.get(dev as usize)?;
+            let (_, net_id) = cell.pins.iter().find(|(n, _)| n == pin)?;
+            let net_name = g.nets.get(*net_id as usize)?;
+            r.net_names.iter().position(|n| n == net_name)
+        };
+        let fb = extract_feedback_with_prior(
+            &r,
+            &p,
+            &rec.parasitic,
+            5.0,
+            1.5,
+            None,
+            Some(&params),
+            &rec.symmetry,
+            &device_names,
+            &net_of_device,
+        );
+        // net_r and net_c should be populated (nonzero for routed nets)
+        assert_eq!(fb.net_r_ohm.len(), r.net_names.len());
+        assert_eq!(fb.net_c_ff.len(), r.net_names.len());
+        let total_r: f64 = fb.net_r_ohm.iter().sum();
+        assert!(total_r > 0.0, "total R should be positive for routed OTA");
     }
 }

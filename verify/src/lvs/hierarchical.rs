@@ -10,7 +10,7 @@
 use crate::geometry::*;
 use crate::params::Deck;
 use super::types::*;
-use super::extract::{extract_netlist_opts, reduce_netlist};
+use super::extract::extract_netlist_opts;
 use super::compare::{compare, CompareOpts};
 use std::collections::HashMap;
 
@@ -82,11 +82,29 @@ pub fn compare_hierarchical(
     }
 
     // Topological sort: compare leaf cells first, then parents
-    let order = topo_sort(layout);
+    let order = match topo_sort(layout) {
+        Ok(o) => o,
+        Err(cyc) => {
+            return HierLvsResult {
+                matched: false,
+                per_cell: vec![(cyc.clone(), LvsResult {
+                    matched: false, reason: format!("circular cell reference through '{cyc}'"),
+                    mismatches: Vec::new(), extracted_devices: 0, nmos: 0, pmos: 0,
+                    ambiguous_classes: 0, label_conflicts: Vec::new(),
+                    floating_nets: Vec::new(),
+                })],
+                flattened_cells: Vec::new(),
+            };
+        }
+    };
 
     let mut matched_cells: HashMap<String, bool> = HashMap::new();
     let mut per_cell: Vec<(String, LvsResult)> = Vec::new();
     let mut flattened: Vec<String> = Vec::new();
+    // Working geometry per cell: flattened children get merged in before the
+    // parent extracts, so the parent's netlist actually contains their devices.
+    let mut work_geo: HashMap<String, GeometryStore> =
+        layout.iter().map(|(n, c)| (n.clone(), c.geometry.clone())).collect();
 
     let opts = ExtractOpts { cut_required: deck.lvs_cut_required, ..Default::default() };
     let cmp_opts = CompareOpts {
@@ -96,17 +114,29 @@ pub fn compare_hierarchical(
     };
 
     for cell_name in &order {
-        let Some(layout_cell) = layout.get(cell_name) else { continue };
+        if !layout.contains_key(cell_name) { continue; }
 
         // Find matching reference cell
         let ref_name = equiv.get(cell_name).unwrap_or(cell_name);
         let Some(ref_cell) = reference.cells.get(ref_name) else {
+            // No reference cell → flatten this cell's geometry into every parent
+            // that instantiates it. Parents come later in topo order, so their
+            // extraction sees the merged devices (the reference parent netlist is
+            // expected to list them, since it has no subcircuit for this cell).
+            let child_geo = work_geo[cell_name.as_str()].clone();
+            for (pname, pcell) in layout {
+                for inst in pcell.instances.iter().filter(|i| &i.cell_name == cell_name) {
+                    let dst = work_geo.get_mut(pname).unwrap();
+                    append_translated(dst, &child_geo, inst.dx, inst.dy);
+                }
+            }
             flattened.push(cell_name.clone());
             continue;
         };
 
         // Extract layout netlist for this cell
-        let ext = match extract_netlist_opts(&layout_cell.geometry, deck, &opts, crate::traits::Backend::Cpu) {
+        let geo = &work_geo[cell_name.as_str()];
+        let ext = match extract_netlist_opts(geo, deck, &opts, crate::traits::Backend::Cpu) {
             Ok(e) => e,
             Err(e) => {
                 per_cell.push((cell_name.clone(), LvsResult {
@@ -134,29 +164,57 @@ pub fn compare_hierarchical(
     HierLvsResult { matched: all_matched, per_cell, flattened_cells: flattened }
 }
 
+/// Copy every polygon/text of `src` into `dst`, translated by (dx, dy).
+fn append_translated(dst: &mut GeometryStore, src: &GeometryStore, dx: i32, dy: i32) {
+    let mut pts: Vec<(i32, i32)> = Vec::new();
+    for p in 0..src.poly_count() {
+        let s = src.poly_vert_start[p] as usize;
+        let n = src.poly_vert_len[p] as usize;
+        pts.clear();
+        pts.extend((0..n).map(|i| (src.verts_x[s + i] + dx, src.verts_y[s + i] + dy)));
+        dst.add_polygon(src.poly_layer[p], &pts);
+    }
+    for i in 0..src.text_count() {
+        dst.add_text(
+            src.text_layer[i], src.text_datatype[i],
+            src.text_x[i] + dx, src.text_y[i] + dy, src.text_string[i].clone(),
+        );
+    }
+}
+
 /// Topological sort of cells — leaves first, parents last.
-fn topo_sort(layout: &HashMap<String, HierCell>) -> Vec<String> {
-    let mut visited: HashMap<String, bool> = HashMap::new();
+/// Errors with the offending cell name on a circular reference: a cycle would
+/// otherwise silently produce a wrong order and a bogus compare.
+fn topo_sort(layout: &HashMap<String, HierCell>) -> Result<Vec<String>, String> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark { Gray, Black }
+    let mut mark: HashMap<String, Mark> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
 
     fn visit(
         name: &str, layout: &HashMap<String, HierCell>,
-        visited: &mut HashMap<String, bool>, order: &mut Vec<String>,
-    ) {
-        if visited.contains_key(name) { return; }
-        visited.insert(name.to_string(), true);
+        mark: &mut HashMap<String, Mark>, order: &mut Vec<String>,
+    ) -> Result<(), String> {
+        match mark.get(name) {
+            Some(Mark::Black) => return Ok(()),
+            Some(Mark::Gray) => return Err(name.to_string()),
+            None => {}
+        }
+        mark.insert(name.to_string(), Mark::Gray);
         if let Some(cell) = layout.get(name) {
             for inst in &cell.instances {
-                visit(&inst.cell_name, layout, visited, order);
+                visit(&inst.cell_name, layout, mark, order)?;
             }
         }
+        mark.insert(name.to_string(), Mark::Black);
         order.push(name.to_string());
+        Ok(())
     }
 
     for name in layout.keys() {
-        visit(name, layout, &mut visited, &mut order);
+        visit(name, layout, &mut mark, &mut order)?;
     }
-    order
+    Ok(order)
 }
 
 #[cfg(test)]
@@ -192,7 +250,7 @@ mod tests {
             devices: DeviceConfig { mos_rules, bjt_rules: Vec::new(), resistor_rules: Vec::new(),
                 diode_rules: Vec::new(), cap_rules: Vec::new() },
             w_tolerance: PropertyTolerance::default(), l_tolerance: PropertyTolerance::default(),
-            fail_on_floating: false, intra_layer_touch: false, global_nets: Vec::new(),
+            fail_on_floating: false, erc: crate::params::ErcParams::default(), intra_layer_touch: false, global_nets: Vec::new(),
         }
     }
 

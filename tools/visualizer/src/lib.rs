@@ -806,7 +806,7 @@ pub fn signoff_overlay(sd: &SignoffData) -> Vec<Vertex> {
     verts
 }
 
-pub fn build_legend(polys: &[Poly], layer_names: &LayerMap, aspect: f32) -> Vec<Vertex> {
+pub fn build_legend(polys: &[Poly], layer_names: &LayerMap, _aspect: f32) -> Vec<Vertex> {
     let mut layers: Vec<u16> = polys.iter().map(|p| p.layer).collect();
     layers.sort_unstable();
     layers.dedup();
@@ -1001,6 +1001,7 @@ struct Gpu {
     fill_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     overlay_fill_pipeline: wgpu::RenderPipeline,
+    #[allow(dead_code)]
     overlay_line_pipeline: wgpu::RenderPipeline,
     fill_buf: wgpu::Buffer,
     line_buf: wgpu::Buffer,

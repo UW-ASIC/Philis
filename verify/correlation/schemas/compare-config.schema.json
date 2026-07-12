@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gdsverify.invalid/schemas/correlation/compare-config-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "geometry_tolerance_nm", "quantities"],
+  "properties": {
+    "schema_version": { "const": "gdsverify.correlation.compare-config/v1" },
+    "geometry_tolerance_nm": { "type": "integer", "minimum": 0 },
+    "quantities": {
+      "type": "object",
+      "propertyNames": { "minLength": 1 },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["absolute", "relative"],
+        "properties": {
+          "absolute": { "type": "number", "minimum": 0 },
+          "relative": { "type": "number", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

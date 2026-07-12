@@ -1,5 +1,5 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
     DeviceId, GroupConstraint, MatchingTier, MatchingType, PairConstraint,
 };
 
@@ -19,9 +19,15 @@ pub struct MatchingPair {
 }
 
 impl PairConstraint for MatchingPair {
-    fn device_a(&self) -> DeviceId { self.device_a }
-    fn device_b(&self) -> DeviceId { self.device_b }
-    fn distance_budget_um(&self) -> f64 { 0.0 }
+    fn device_a(&self) -> DeviceId {
+        self.device_a
+    }
+    fn device_b(&self) -> DeviceId {
+        self.device_b
+    }
+    fn distance_budget_um(&self) -> f64 {
+        0.0
+    }
 }
 
 impl Contractable for MatchingPair {
@@ -119,26 +125,6 @@ fn dn<'a>(device_names: &'a [String], id: DeviceId) -> &'a str {
 }
 
 // ── Ratioed current-mirror detection (item 1.8) ──
-
-/// Relaxed device signature: (DeviceType, L, model) — same as `device_signature`
-/// but drops W requirement. Two devices with same (type, L, model) but different W
-/// form a ratioed mirror if `W_a / W_b` reduces to a small integer ratio.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RelaxedSignature {
-    pub device_type: String,
-    pub l: i32,
-    pub model: String,
-}
-
-impl RelaxedSignature {
-    pub fn from_fields(device_type: &str, l: i32, model: &str) -> Self {
-        Self {
-            device_type: device_type.into(),
-            l,
-            model: model.into(),
-        }
-    }
-}
 
 /// Compute the reduced integer ratio `(a, b)` from two widths.
 /// Returns `None` if the ratio exceeds `max_ratio` or is not a clean integer

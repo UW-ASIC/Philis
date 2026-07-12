@@ -1,9 +1,9 @@
 //! Inductor cell generator: rectangular-approximated spiral.
 
-use substrate3::{CellBuilder, CellError, DeviceType, PatternType, PortDef};
+use crate::{CellBuilder, CellError, DeviceType, PatternType, PortDef};
 
-use crate::device::DeviceRecord;
 use super::{CellSpec, Pdk};
+use crate::device::DeviceRecord;
 
 /// Inductor spec — single variant per device group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,13 +114,10 @@ impl CellSpec for InductorSpec {
 mod tests {
     use super::*;
     use crate::generators::SpecCell;
-    use substrate3::{CellBuilder, MatchingTier};
+    use crate::{CellBuilder, MatchingTier};
 
-    fn test_deck() -> substrate3::Deck {
-        crate::test_util::deck_from_layers(&[
-            ("met1", 68, 20),
-            ("li", 67, 20),
-        ])
+    fn test_deck() -> crate::Deck {
+        crate::test_util::deck_from_layers(&[("met1", 68, 20), ("li", 67, 20)])
     }
 
     fn inductor(name: &str, trace_w: i32, outer_d: i32, turns: u16) -> DeviceRecord {

@@ -1,20 +1,7 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
     EsdProtectionType, NetConstraint,
 };
-
-/// Lightweight ESD requirement for a pad net (pre-typed).
-#[derive(Debug, Clone)]
-pub struct EsdRequirement {
-    pub pad_name: String,
-    pub protection_type: String,
-    pub max_trigger_voltage_v: f64,
-    pub ecgr_required: bool,
-}
-
-impl NetConstraint for EsdRequirement {
-    fn net_name(&self) -> &str { &self.pad_name }
-}
 
 /// Typed ESD constraint for a pad net.
 #[derive(Debug, Clone)]
@@ -29,12 +16,18 @@ pub struct EsdConstraint {
 }
 
 impl NetConstraint for EsdConstraint {
-    fn net_name(&self) -> &str { &self.pad_name }
+    fn net_name(&self) -> &str {
+        &self.pad_name
+    }
 }
 
 impl Contractable for EsdConstraint {
-    fn strength(&self) -> ConstraintStrength { ConstraintStrength::Hard }
-    fn priority(&self) -> i32 { 90 }
+    fn strength(&self) -> ConstraintStrength {
+        ConstraintStrength::Hard
+    }
+    fn priority(&self) -> i32 {
+        90
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
         &[ConstraintStage::CellGen, ConstraintStage::Routing]

@@ -1,0 +1,131 @@
+{
+  "schema_version": "gdsverify.correlation.run/v1",
+  "metadata": {
+    "engine": { "name": "gdsverify", "version": "0.1.0-test" },
+    "tool": { "name": "neutral-fixture-adapter", "version": "1.0.0" },
+    "deck": {
+      "id": "fixture-deck-r1",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "model": {
+      "id": "fixture-model-r1",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "corpus": {
+      "id": "w7-small-corpus-r1",
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "process": "fixture-130nm",
+    "corner": "typical_25c",
+    "command": ["fixture-adapter", "--case", "PEX_386_AF"],
+    "created_at": "2026-07-12T12:00:00Z"
+  },
+  "cases": [
+    {
+      "case_id": "PEX_386_AF",
+      "drc_markers": [
+        {
+          "id": "M1",
+          "rule_id": "M1.SPACING.1",
+          "layer": "metal1",
+          "geometry": {
+            "bbox": { "min_x_nm": 0, "min_y_nm": 0, "max_x_nm": 100, "max_y_nm": 100 },
+            "rings": [
+              {
+                "role": "outer",
+                "points": [
+                  { "x_nm": 0, "y_nm": 0 },
+                  { "x_nm": 100, "y_nm": 0 },
+                  { "x_nm": 100, "y_nm": 100 },
+                  { "x_nm": 0, "y_nm": 100 }
+                ]
+              }
+            ]
+          },
+          "measurements": [
+            { "quantity": "spacing", "value": 80.0, "unit": "nm" }
+          ]
+        }
+      ],
+      "lvs": {
+        "nets": [
+          { "id": "GND", "pins": ["M0:B", "M0:S"] },
+          { "id": "N1", "pins": ["M0:G", "PORT:IN"] },
+          { "id": "N2", "pins": ["M0:D", "PORT:OUT"] }
+        ],
+        "devices": [
+          {
+            "id": "M0",
+            "kind": "mos",
+            "model": "nmos_1v8",
+            "terminals": { "b": "GND", "d": "N2", "g": "N1", "s": "GND" },
+            "parameters": [
+              { "quantity": "length", "value": 150.0, "unit": "nm" },
+              { "quantity": "width", "value": 1000.0, "unit": "nm" }
+            ]
+          }
+        ],
+        "mismatches": []
+      },
+      "pex": {
+        "nodes": [
+          { "id": "0", "net": "GND" },
+          { "id": "1", "net": "N1" },
+          { "id": "2", "net": "N2" }
+        ],
+        "elements": [
+          {
+            "id": "C1",
+            "kind": "capacitance",
+            "from": "1",
+            "to": "0",
+            "value": { "quantity": "capacitance", "value": 386.0, "unit": "aF" },
+            "components": [
+              {
+                "mechanism": "area_ground",
+                "value": { "quantity": "capacitance", "value": 10.0, "unit": "aF" }
+              },
+              {
+                "mechanism": "fringe_ground",
+                "value": { "quantity": "capacitance", "value": 176.0, "unit": "aF" }
+              },
+              {
+                "mechanism": "mutual_coupling",
+                "value": { "quantity": "capacitance", "value": 200.0, "unit": "aF" }
+              }
+            ]
+          },
+          {
+            "id": "R1",
+            "kind": "resistance",
+            "from": "1",
+            "to": "2",
+            "value": { "quantity": "resistance", "value": 12.0, "unit": "ohm" },
+            "components": [
+              {
+                "mechanism": "sheet",
+                "value": { "quantity": "resistance", "value": 10.0, "unit": "ohm" }
+              },
+              {
+                "mechanism": "via",
+                "value": { "quantity": "resistance", "value": 2.0, "unit": "ohm" }
+              }
+            ]
+          }
+        ]
+      },
+      "signoff": [
+        { "check_id": "antenna", "status": "clean", "result_ids": [] },
+        { "check_id": "density_cmp", "status": "clean", "result_ids": [] },
+        { "check_id": "em", "status": "clean", "result_ids": [] },
+        { "check_id": "esd_latchup", "status": "clean", "result_ids": [] },
+        { "check_id": "ir_drop", "status": "clean", "result_ids": [] },
+        { "check_id": "reliability", "status": "clean", "result_ids": [] }
+      ],
+      "metrics": {
+        "runtime": { "quantity": "runtime", "value": 0.125, "unit": "s" },
+        "peak_memory": { "quantity": "memory", "value": 1048576.0, "unit": "byte" }
+      }
+    }
+  ]
+}

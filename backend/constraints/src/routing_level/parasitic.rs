@@ -1,7 +1,17 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
     NetConstraint,
 };
+
+/// Per-layer wire parasitic parameters for routing-level R/C estimation.
+/// Indexed by routing layer (0=met1, 1=met2, ...).
+#[derive(Debug, Clone, Default)]
+pub struct WireParasiticParams {
+    pub sheet_r: Vec<f64>,
+    pub area_cap: Vec<f64>,
+    pub fringe_cap: Vec<f64>,
+    pub via_r: f64,
+}
 
 /// Parasitic budget for a net (max resistance and capacitance).
 #[derive(Debug, Clone)]
@@ -14,12 +24,18 @@ pub struct ParasiticBudget {
 }
 
 impl NetConstraint for ParasiticBudget {
-    fn net_name(&self) -> &str { &self.net_name }
+    fn net_name(&self) -> &str {
+        &self.net_name
+    }
 }
 
 impl Contractable for ParasiticBudget {
-    fn strength(&self) -> ConstraintStrength { ConstraintStrength::Soft }
-    fn priority(&self) -> i32 { 60 }
+    fn strength(&self) -> ConstraintStrength {
+        ConstraintStrength::Soft
+    }
+    fn priority(&self) -> i32 {
+        60
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
         &[ConstraintStage::Routing]

@@ -32,7 +32,12 @@ to one geometric kernel. Output is a flat `Vec<Violation>`
   are identical with or without a GPU. Below a measured break-even
   (`GPU_MIN_PAIR_WORK`/`GPU_MIN_LINEAR_WORK`) the scan stays on the CPU.
 
-### The 15 rules
+### Core rules (15 of 28 configured kinds)
+
+The table below describes the original core set. The resolved deck also contains
+antenna/CAR, EOL/PRL/wide-dependent spacing, asymmetric enclosure, enclosed-area,
+cheesing, redundant-via, via-array, tap-distance, multi-patterning and polygon-validity
+checks. These are simplified engine-specific predicates, not a foundry rule language.
 
 | rule | algorithm |
 |---|---|
@@ -57,28 +62,25 @@ Entry point: `run_lvs(store, deck, reference)` = `extract_netlist` + `compare`.
 
 Three stages:
 
-1. **Connectivity extraction** — union-find (index-based, path-halving) over all polygons
-   on connective layers. Conductors: `diff, poly, li, met1, met2`; vias: `licon, mcon,
-   via1`. Any two overlapping connective polygons are unioned — a via overlapping two
-   conductors joins them transitively. **Exception: poly over diff is NOT unioned** — that
-   overlap is a transistor gate, not a short. Union-find roots become compact net IDs.
+1. **Connectivity extraction** — the deck explicitly names conductor layers and via-to-
+   conductor relations. A sweep produces bbox candidates, then supported rectilinear
+   polygon regions are tested for real positive-area overlap or policy-controlled
+   same-layer boundary contact. Cross-layer conductor overlap is not connectivity unless
+   it is mediated by an allowed cut, or the caller explicitly selects the documented
+   cut-less compatibility mode. Non-rectilinear, degenerate and self-intersecting geometry
+   on extraction layers is an error, not an empty result.
 
-2. **Device extraction** — each poly polygon crossing a diff polygon is a MOS:
-   - *gate* = the poly's net;
-   - *source/drain* = nets of the li/met1 conductors landing on the diff to the left and
-     right of the gate (by centroid x vs gate centroid x);
-   - *N/P type* = whichever implant (`nsdm`/`psdm`) overlaps the **channel region**
-     (gate ∩ diff bbox — not the whole gate poly, which may span both diffusions);
-     default NMOS;
-   - body/well net is simplified to a constant (not structurally compared).
+2. **Device extraction** — configured gate/channel crossings split source/drain regions.
+   A MOS must match exactly one rule/type implant over the actual channel region;
+   missing, conflicting N/P, or conflicting HVT/LVT markers stop extraction. Simple
+   configured resistor, capacitor, diode and BJT recognition also exists. Body/well
+   extraction remains incomplete and body pins are not yet compared structurally.
 
-3. **Comparison** (netgen-style partition refinement, simplified Gemini):
-   - device-count check first: NMOS and PMOS counts must match the reference netlist
-     (mismatch ⇒ `device count mismatch`);
-   - then a topology invariant: devices are labeled by invariants and the induced
-     partition structure must match. For the CMOS-inverter conformance cases this reduces
-     to *shared gate net + shared drain net between the N and P device*, which
-     distinguishes match / swapped-gate / open-output.
+3. **Comparison** — device/property screening and graph refinement support legal MOS
+   source/drain permutation plus constrained series/parallel normalization. Series merge
+   requires compatible type/flavor/class/body/width, a degree-two internal S/D net, and no
+   gate/passive/named/global observation. Production named-port seeding, complete witnesses,
+   symmetric reference reductions and hierarchy-preserving comparison remain roadmap work.
 
 The reference netlist (`RefNetlist`) comes from the schematic side — the conformance
 manifest supplies it as named-net device lists.
@@ -93,13 +95,17 @@ Runs only on layers with a `pex` entry in params.json. Constants per layer:
 
 | parasitic | formula | which shapes |
 |---|---|---|
-| Resistance | `R = Rs · L/W` (sheet res × number of squares; L/W from bbox long/short side) | wire-like polygons only: aspect ratio ≥ 2 |
-| Area + fringe cap | `C = Ca·A + Cf·P` (A in µm², P = perimeter in µm, to substrate) | plate-like polygons only: aspect ratio < 2 |
+| Resistance | `R = Rs · Leq/Weq`; `Leq/Weq` is derived from actual Manhattan polygon area/perimeter | every supported rectilinear conductor |
+| Area + fringe cap | `C = Ca·A + Cf·P` using actual polygon area/perimeter | every supported rectilinear conductor, including wires |
 | Lateral coupling cap | `C_c = Ck · Lp · (Sref/S)` — parallel run length `Lp` (µm) scaled inversely with spacing `S` relative to reference spacing | same-layer bbox pairs that face each other: overlap on one axis, positive gap on the other |
+| Interlayer overlap cap | configured overlap coefficient times bbox overlap area | every configured layer pair; stack adjacency/shield semantics are not modeled |
+| Via resistance | fixed configured resistance per cut polygon | configured via/contact layers |
 
-The wire/plate split is deliberate: a shape is either a resistor (wire) or a
-substrate capacitor (plate) in this model, never both. Coupling considers horizontal
-pairs (x-overlap, y-gap) then vertical pairs (y-overlap, x-gap).
+Unsupported R/ground-C geometry emits an `ExtractionDiagnostic`; it is not converted
+to zero. `PexReport::is_complete()` and `run_pex_by_net_checked()` make that diagnostic
+blocking for signoff and parasitic budgets. Fill and shielding are not guessed from
+polygon size or layer names. Resistance remains a scalar per-net estimate, not a
+terminal-aware distributed network.
 
 Output: `PexReport` with helpers `total_resistance(layer)`, `total_cap()`, and typed
-accessors (`resistances()`, `area_caps()`, `coupling_caps()`).
+accessors (`resistances()`, `area_caps()`, `coupling_caps()`, `diagnostics()`).

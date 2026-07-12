@@ -1,5 +1,5 @@
+use pnr_core::backend::ConstraintRecord;
 use pnr_core::orchestrator::{run_flow, FlowConfig};
-use pnr_placement::ConstraintRecord;
 use std::path::PathBuf;
 
 const MINV: &str = "\
@@ -11,9 +11,10 @@ XR1 mid out res_generic_po W=0.33u L=0.1u
 ";
 
 fn main() {
-    let deck = std::fs::read_to_string(
-        format!("{}/../../pdks/sky130.json", env!("CARGO_MANIFEST_DIR")),
-    )
+    let deck = std::fs::read_to_string(format!(
+        "{}/../../pdks/sky130.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
     .unwrap();
     let dir = PathBuf::from("/tmp/pnr_label_demo");
     let _ = std::fs::create_dir_all(&dir);

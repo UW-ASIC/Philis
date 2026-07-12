@@ -11,5 +11,7 @@ pub struct BiasCurrentTag {
 }
 
 impl DeviceConstraint for BiasCurrentTag {
-    fn device_id(&self) -> DeviceId { self.device_id }
+    fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
 }

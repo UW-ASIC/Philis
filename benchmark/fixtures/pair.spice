@@ -1,0 +1,6 @@
+* pair — 2 identical nfets, one shared net.
+* Known optimum: side-by-side abutted, HPWL = 1 pitch (x) for shared nets.
+.subckt pair d g VSS
+XM1 d g VSS VSS nfet_01v8 W=2u L=0.5u
+XM2 d g VSS VSS nfet_01v8 W=2u L=0.5u
+.ends pair

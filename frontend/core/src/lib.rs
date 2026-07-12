@@ -1,11 +1,12 @@
 //! Frontend core.
 //!
-//! Orchestrates the dependency chain from annotator/substrate3, delegates
-//! each block to the backend engine, merges results, and runs signoff.
+//! Parses circuit input and converts frontend annotations into the typed
+//! request accepted by `pnr-backend`. Physical flow control and signoff live
+//! entirely in the backend facade.
 
 pub mod gds;
-pub mod orchestrator;
 mod netlist;
+pub mod orchestrator;
 mod pdk;
 
 pub mod frontend {
@@ -29,24 +30,13 @@ pub mod frontend {
 }
 
 pub mod backend {
-    //! Hypergraph + constraints -> placed, routed geometry.
-    //!
-    //! `run_placement` (global analytical + detailed symmetry-preserving SA)
-    //! then `run_routing` (gcell PathFinder + track-grid detailed). Both dump
-    //! debug artifacts when `debug_dir` is set and close every consumed
-    //! `ConstraintContract`.
+    //! Compatibility facade for the backend-owned physical-design API.
 
-    pub use pnr_placement::{
-        estimate_sizes, run_placement, ConstraintRecord, ConstraintContract, ConstraintStatus,
-        DetailedCfg, GlobalCfg, Placement, PlacementConfig, PlacementReport, PlacementResult,
+    pub use pnr_backend::strategy;
+    pub use pnr_backend::{
+        Backend, ConstraintContract, ConstraintRecord, ConstraintStatus, FlowConfig, FlowInput,
+        FlowResult, SignoffReport,
     };
-    pub use pnr_routing::{
-        run_routing, DetailedRouteCfg, GlobalRouteCfg, RoutingConfig, RoutingReport,
-        RoutingResult, Via, Wire,
-    };
-
-    // The pure algorithm layer, for callers that drive slots directly.
-    pub use pnr_engine as engine;
 }
 
 pub mod signoff {
@@ -63,12 +53,16 @@ pub mod signoff {
 
     // LVS.
     pub use gdsverify::{
-        compare, extract_netlist, run_lvs, CompareOpts, DeviceFlavor, DeviceKind,
-        ExtractedNetlist, LvsResult, RefDevice, RefNetlist,
+        compare, extract_netlist, run_lvs, CompareOpts, DeviceFlavor, DeviceKind, ExtractedNetlist,
+        LvsResult, RefDevice, RefNetlist,
     };
 
     // PEX.
-    pub use gdsverify::{run_pex, Parasitic, PexReport};
+    pub use gdsverify::{run_pex, run_pex_by_net_checked, Parasitic, PexReport};
+
+    // Tapeout checks: antenna, density/CMP, IR drop, EM, reliability,
+    // and ESD/latch-up. Missing electrical/model inputs report NOT_RUN.
+    pub use gdsverify::signoff::*;
 
     // GDS ingestion, for flows that do start from a .gds.
     pub use gdsverify::{load_gds, read_gds, GdsLayout};

@@ -21,14 +21,6 @@
 #[repr(transparent)]
 pub struct DeviceId(pub u32);
 
-/// Index into the net arena.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[repr(transparent)]
-pub struct NetId(pub u32);
-
-/// Sentinel for unresolvable device names.
-pub const DEVICE_ID_UNKNOWN: DeviceId = DeviceId(u32::MAX);
-
 // ───────────────────────────────────────────────────────────────────
 //  Enums — closed sets, encode don't polymorphize
 // ───────────────────────────────────────────────────────────────────
@@ -122,6 +114,23 @@ pub enum DummyType {
     Full,
 }
 
+/// Constraint severity: advisory vs must-fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Severity {
+    Warning,
+    Violation,
+}
+
+/// Allowed unit-element composition for unitized devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum SeriesParallel {
+    Parallel,
+    Series,
+    RepeatedStage,
+}
+
 /// Aging mechanism categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -166,48 +175,6 @@ pub enum EsdProtectionType {
     RailClamp,
 }
 
-/// Shielding type for sensitive nets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum ShieldType {
-    None,
-    Grounded,
-    DiffShield,
-}
-
-/// Allowed cell orientation transforms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum Orientation {
-    R0,
-    R90,
-    R180,
-    R270,
-    Mx,
-    My,
-    Mxy,
-    Myx,
-}
-
-/// SMP edge type in the symmetry-matching-proximity multigraph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum SmpEdgeType {
-    Symmetry,
-    Matching,
-    Proximity,
-}
-
-/// HSMPG node type in the hierarchical clustering tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum HsmpgNodeType {
-    Leaf,
-    SymmetryCluster,
-    ProximityCluster,
-    Root,
-}
-
 /// Voltage domain tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -215,6 +182,30 @@ pub enum VoltDomain {
     Core,
     Io,
     Analog,
+}
+
+/// Measurement unit for a constraint threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ThresholdUnit {
+    Um,
+    Mv,
+    Pct,
+    Celsius,
+    Ohm,
+}
+
+impl ThresholdUnit {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Um => "um",
+            Self::Mv => "mV",
+            Self::Pct => "%",
+            Self::Celsius => "C",
+            Self::Ohm => "ohm",
+        }
+    }
 }
 
 /// Environmental constraint sub-kind (tagged union discriminant).
@@ -227,17 +218,6 @@ pub enum EnvironmentalKind {
     HydrogenationKeepout,
     MetalOverGate,
     ThermalExclusion,
-}
-
-/// Recognized analog building block type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum BlockType {
-    DiffPair,
-    CurrentMirror,
-    CascodeMirror,
-    CascodePair,
-    TailSource,
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -291,6 +271,11 @@ pub trait Contractable {
 // ───────────────────────────────────────────────────────────────────
 
 /// Tracked constraint with lifecycle status.
+///
+/// Lifecycle fields (`status`, violation data, history) are private: the ONLY
+/// legal transitions are [`Self::consume`], [`Self::satisfy`],
+/// [`Self::violate`], and [`Self::waive`] — every transition is recorded in
+/// the history, so a contract can never silently change state.
 pub struct ConstraintContract {
     pub constraint_id: String,
     pub kind: String,
@@ -302,14 +287,39 @@ pub struct ConstraintContract {
     pub derived_from: Vec<String>,
     pub relaxation_policy: Option<String>,
     pub stage_consumption: Vec<ConstraintStage>,
-    pub status: ConstraintStatus,
-    pub violation_metric: Option<f64>,
-    pub violation_units: Option<String>,
-    pub waiver_reason: Option<String>,
-    pub status_history: Vec<StatusEntry>,
+    pub(crate) status: ConstraintStatus,
+    pub(crate) violation_metric: Option<f64>,
+    pub(crate) violation_units: Option<String>,
+    pub(crate) waiver_reason: Option<String>,
+    pub(crate) status_history: Vec<StatusEntry>,
 }
 
 impl ConstraintContract {
+    #[must_use]
+    pub fn status(&self) -> ConstraintStatus {
+        self.status
+    }
+
+    #[must_use]
+    pub fn violation_metric(&self) -> Option<f64> {
+        self.violation_metric
+    }
+
+    #[must_use]
+    pub fn violation_units(&self) -> Option<&str> {
+        self.violation_units.as_deref()
+    }
+
+    #[must_use]
+    pub fn waiver_reason(&self) -> Option<&str> {
+        self.waiver_reason.as_deref()
+    }
+
+    #[must_use]
+    pub fn history(&self) -> &[StatusEntry] {
+        &self.status_history
+    }
+
     pub fn consume(&mut self, stage: &str) {
         self.status = ConstraintStatus::Consumed;
         self.status_history.push(StatusEntry {

@@ -85,6 +85,7 @@ const fn same_exact(r: u8) -> Slot {
 }
 
 /// Same type as a given slot, same L with that slot.
+#[allow(dead_code)]
 const fn same_samel(r: u8) -> Slot {
     Slot {
         kind: SlotKind::SameTypeAs(r),

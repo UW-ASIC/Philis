@@ -44,6 +44,13 @@ struct Node {
     bbox: Bbox,
     layer: LayerId,
     is_diff_seg: bool,
+    /// Electrical region represented by this node.  Ordinary conductor nodes
+    /// use the polygon's full bbox as the clip; split diffusion nodes use the
+    /// original diffusion polygon clipped to one source/drain segment.  Keeping
+    /// the source polygon here lets the sweep-line remain a bbox prefilter while
+    /// the final connectivity decision uses the real rectilinear geometry.
+    poly: PolyId,
+    clip: Bbox,
 }
 
 struct GateSpan {
@@ -62,33 +69,263 @@ struct DiffSplit {
 
 // --- helpers ---
 
-#[inline]
-fn overlap_pos(a: Bbox, b: Bbox) -> bool {
-    a.xmax.min(b.xmax) > a.xmin.max(b.xmin) && a.ymax.min(b.ymax) > a.ymin.max(b.ymin)
-}
-
-/// Touching-edge overlap: polygons that share an edge (>=) connect when intra_layer_touch is on.
-#[inline]
-fn overlap_touch(a: Bbox, b: Bbox) -> bool {
-    a.xmax.min(b.xmax) >= a.xmin.max(b.xmin) && a.ymax.min(b.ymax) >= a.ymin.max(b.ymin)
-}
-
-fn intersect_bbox(a: Bbox, b: Bbox) -> Bbox {
-    Bbox {
-        xmin: a.xmin.max(b.xmin),
-        ymin: a.ymin.max(b.ymin),
-        xmax: a.xmax.min(b.xmax),
-        ymax: a.ymax.min(b.ymax),
+/// Sweep-line enumeration of node pairs whose bboxes touch or overlap (closed
+/// test — a superset of both positive-area overlap and boundary contact, which
+/// the caller re-applies to the exact polygon regions). Sorts along the axis with the larger bbox-min
+/// spread so the look-ahead window stays small: O(m log m + K) vs all-pairs O(m²).
+/// Returns pairs as (lo, hi) node indices.
+fn node_candidate_pairs(nodes: &[Node]) -> Vec<(u32, u32)> {
+    let (mut xlo, mut xhi, mut ylo, mut yhi) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+    for n in nodes {
+        xlo = xlo.min(n.bbox.xmin);
+        xhi = xhi.max(n.bbox.xmin);
+        ylo = ylo.min(n.bbox.ymin);
+        yhi = yhi.max(n.bbox.ymin);
     }
+    let sweep_x = xhi.saturating_sub(xlo) >= yhi.saturating_sub(ylo);
+    // (sweep_min, sweep_max, node)
+    let mut items: Vec<(i32, i32, u32)> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let b = &n.bbox;
+            if sweep_x { (b.xmin, b.xmax, i as u32) } else { (b.ymin, b.ymax, i as u32) }
+        })
+        .collect();
+    items.sort_unstable_by_key(|it| it.0);
+    let mut out = Vec::new();
+    for i in 0..items.len() {
+        let (_, hi_i, ni) = items[i];
+        for &(_, _, nj) in items[i + 1..].iter().take_while(|it| it.0 <= hi_i) {
+            let (ba, bb) = (&nodes[ni as usize].bbox, &nodes[nj as usize].bbox);
+            let other_near = if sweep_x {
+                ba.ymin <= bb.ymax && bb.ymin <= ba.ymax
+            } else {
+                ba.xmin <= bb.xmax && bb.xmin <= ba.xmax
+            };
+            if other_near {
+                out.push((ni.min(nj), ni.max(nj)));
+            }
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
+struct PolyRegion {
+    poly: PolyId,
+    clip: Bbox,
+}
+
+fn full_region(store: &GeometryStore, poly: PolyId) -> PolyRegion {
+    PolyRegion { poly, clip: store.poly_bbox[poly.0 as usize] }
+}
+
+fn is_rectilinear(store: &GeometryStore, poly: PolyId) -> bool {
+    let (s, e) = store.poly_range(poly);
+    let n = e - s;
+    (0..n).all(|i| {
+        let (x0, y0) = store.poly_vertex(s, i);
+        let (x1, y1) = store.poly_vertex(s, (i + 1) % n);
+        x0 == x1 || y0 == y1
+    })
+}
+
+fn validate_rectilinear_layers(
+    store: &GeometryStore, deck: &Deck, layers: &HashSet<LayerId>,
+) -> Result<(), String> {
+    let mut ordered: Vec<LayerId> = layers.iter().copied().collect();
+    ordered.sort_unstable();
+    for layer in ordered {
+        for poly in store.polys_on_layer(layer) {
+            let (s, e) = store.poly_range(poly);
+            if e - s < 4 {
+                return Err(format!(
+                    "polygon {} on '{}' has fewer than four vertices; exact rectilinear LVS cannot process it",
+                    poly.0, deck.layers.name(layer),
+                ));
+            }
+            for i in 0..(e - s) {
+                let (x0, y0) = store.poly_vertex(s, i);
+                let (x1, y1) = store.poly_vertex(s, (i + 1) % (e - s));
+                if x0 == x1 && y0 == y1 {
+                    return Err(format!(
+                        "polygon {} on '{}' has a zero-length edge; exact rectilinear LVS cannot process it",
+                        poly.0, deck.layers.name(layer),
+                    ));
+                }
+            }
+            if !is_rectilinear(store, poly) {
+                return Err(format!(
+                    "polygon {} on '{}' is non-rectilinear; exact all-angle LVS geometry is not implemented",
+                    poly.0, deck.layers.name(layer),
+                ));
+            }
+            if store.area(poly) == 0 || poly_self_intersects(store, poly) {
+                return Err(format!(
+                    "polygon {} on '{}' is degenerate or self-intersecting; LVS extraction stopped",
+                    poly.0, deck.layers.name(layer),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Interior y-intervals of a rectilinear polygon at a vertical scan coordinate
+/// represented as twice-x.  Callers only pass odd `x2`, so the scan never lies
+/// on a polygon vertex and the even/odd pairing is exact.
+fn interior_intervals_at_x2(
+    store: &GeometryStore, region: PolyRegion, x2: i64,
+) -> Vec<(i32, i32)> {
+    if x2 <= 2 * region.clip.xmin as i64 || x2 >= 2 * region.clip.xmax as i64 {
+        return Vec::new();
+    }
+    let (s, e) = store.poly_range(region.poly);
+    let n = e - s;
+    let mut crossings = Vec::new();
+    for i in 0..n {
+        let (x0, y0) = store.poly_vertex(s, i);
+        let (x1, y1) = store.poly_vertex(s, (i + 1) % n);
+        if y0 != y1 { continue; }
+        let lo2 = 2 * x0.min(x1) as i64;
+        let hi2 = 2 * x0.max(x1) as i64;
+        if lo2 < x2 && x2 < hi2 {
+            crossings.push(y0);
+        }
+    }
+    crossings.sort_unstable();
+    let mut out = Vec::with_capacity(crossings.len() / 2);
+    for ys in crossings.chunks_exact(2) {
+        let lo = ys[0].max(region.clip.ymin);
+        let hi = ys[1].min(region.clip.ymax);
+        if lo < hi { out.push((lo, hi)); }
+    }
+    out
+}
+
+fn intersect_interval_sets(a: &[(i32, i32)], b: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let (mut i, mut j) = (0, 0);
+    let mut out = Vec::new();
+    while i < a.len() && j < b.len() {
+        let lo = a[i].0.max(b[j].0);
+        let hi = a[i].1.min(b[j].1);
+        if lo < hi { out.push((lo, hi)); }
+        if a[i].1 < b[j].1 { i += 1; } else { j += 1; }
+    }
+    out
+}
+
+/// Exact positive intersection area for simple rectilinear polygon regions.
+/// Coordinate compression creates x-slabs on which every polygon's vertical
+/// cross-section is constant, then intersects the y-interval sets.  `i128`
+/// prevents overflow for the full i32 coordinate range.
+fn rectilinear_intersection_area(store: &GeometryStore, regions: &[PolyRegion]) -> i128 {
+    if regions.is_empty() || regions.iter().any(|r| !is_rectilinear(store, r.poly)) {
+        return 0;
+    }
+    let mut xs = Vec::new();
+    for region in regions {
+        xs.push(region.clip.xmin);
+        xs.push(region.clip.xmax);
+        let (s, e) = store.poly_range(region.poly);
+        xs.extend_from_slice(&store.verts_x[s..e]);
+    }
+    xs.sort_unstable();
+    xs.dedup();
+
+    let mut area = 0i128;
+    for pair in xs.windows(2) {
+        let (x0, x1) = (pair[0], pair[1]);
+        if x0 >= x1 { continue; }
+        let x2 = x0 as i64 + x1 as i64;
+        let mut common = interior_intervals_at_x2(store, regions[0], x2);
+        for &region in &regions[1..] {
+            if common.is_empty() { break; }
+            let next = interior_intervals_at_x2(store, region, x2);
+            common = intersect_interval_sets(&common, &next);
+        }
+        let covered_y: i128 = common.iter()
+            .map(|&(lo, hi)| hi as i128 - lo as i128)
+            .sum();
+        area += (x1 as i128 - x0 as i128) * covered_y;
+    }
+    area
+}
+
+fn merge_closed_intervals(mut intervals: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
+    intervals.sort_unstable();
+    let mut out: Vec<(i32, i32)> = Vec::new();
+    for (lo, hi) in intervals {
+        if lo > hi { continue; }
+        if let Some(last) = out.last_mut() {
+            if lo <= last.1 {
+                last.1 = last.1.max(hi);
+                continue;
+            }
+        }
+        out.push((lo, hi));
+    }
+    out
+}
+
+/// Closed vertical slice of a clipped rectilinear polygon at integer `x`.
+/// The closure is the union of the immediately-left/right interiors and any
+/// vertical boundary segment at x.  This distinguishes legal boundary contact
+/// from mere bbox contact without introducing floating point tolerances.
+fn closed_intervals_at_x(
+    store: &GeometryStore, region: PolyRegion, x: i32,
+) -> Vec<(i32, i32)> {
+    if x < region.clip.xmin || x > region.clip.xmax { return Vec::new(); }
+    let mut intervals = Vec::new();
+    for x2 in [2 * x as i64 - 1, 2 * x as i64 + 1] {
+        intervals.extend(interior_intervals_at_x2(store, region, x2));
+    }
+    let (s, e) = store.poly_range(region.poly);
+    let n = e - s;
+    for i in 0..n {
+        let (x0, y0) = store.poly_vertex(s, i);
+        let (x1, y1) = store.poly_vertex(s, (i + 1) % n);
+        if x0 == x1 && x0 == x {
+            let lo = y0.min(y1).max(region.clip.ymin);
+            let hi = y0.max(y1).min(region.clip.ymax);
+            if lo <= hi { intervals.push((lo, hi)); }
+        }
+    }
+    merge_closed_intervals(intervals)
+}
+
+fn closed_interval_sets_intersect(a: &[(i32, i32)], b: &[(i32, i32)]) -> bool {
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i].0.max(b[j].0) <= a[i].1.min(b[j].1) { return true; }
+        if a[i].1 < b[j].1 { i += 1; } else { j += 1; }
+    }
+    false
+}
+
+fn rectilinear_regions_touch(store: &GeometryStore, a: PolyRegion, b: PolyRegion) -> bool {
+    if rectilinear_intersection_area(store, &[a, b]) > 0 { return true; }
+    if !is_rectilinear(store, a.poly) || !is_rectilinear(store, b.poly) { return false; }
+    let mut xs = vec![a.clip.xmin, a.clip.xmax, b.clip.xmin, b.clip.xmax];
+    for region in [a, b] {
+        let (s, e) = store.poly_range(region.poly);
+        xs.extend_from_slice(&store.verts_x[s..e]);
+    }
+    xs.sort_unstable();
+    xs.dedup();
+    xs.into_iter().any(|x| {
+        let ai = closed_intervals_at_x(store, a, x);
+        let bi = closed_intervals_at_x(store, b, x);
+        closed_interval_sets_intersect(&ai, &bi)
+    })
 }
 
 fn poly_poly_overlap(store: &GeometryStore, a: PolyId, b: PolyId) -> bool {
     let ba = store.poly_bbox[a.0 as usize];
     let bb = store.poly_bbox[b.0 as usize];
     if !ba.overlaps(&bb) { return false; }
-    let ix = ba.xmax.min(bb.xmax) - ba.xmin.max(bb.xmin);
-    let iy = ba.ymax.min(bb.ymax) - ba.ymin.max(bb.ymin);
-    ix > 0 && iy > 0
+    rectilinear_intersection_area(store, &[full_region(store, a), full_region(store, b)]) > 0
 }
 
 /// Resolve connectivity from PDK config. Returns error if no conductors configured.
@@ -110,35 +347,82 @@ struct MosMatch {
 }
 
 fn pick_type_and_flavor(
-    store: &GeometryStore, deck: &Deck, gate_bb: Bbox,
+    store: &GeometryStore, deck: &Deck, gate: PolyId, channel: PolyId,
 ) -> Result<MosMatch, String> {
     if deck.devices.mos_rules.is_empty() {
         return Err("found gate crossing but no MOS rules to classify device".into());
     }
+    let gate_layer = store.poly_layer[gate.0 as usize];
+    let channel_layer = store.poly_layer[channel.0 as usize];
+    let mut matches = Vec::new();
     for (ri, rule) in deck.devices.mos_rules.iter().enumerate() {
+        if rule.gate_layer != gate_layer || rule.channel_layer != channel_layer {
+            continue;
+        }
         let implant_overlaps = store.polys_on_layer(rule.type_implant)
-            .into_iter().any(|p| store.poly_bbox[p.0 as usize].overlaps(&gate_bb));
+            .into_iter().any(|p| rectilinear_intersection_area(store, &[
+                full_region(store, p), full_region(store, gate), full_region(store, channel),
+            ]) > 0);
         if !implant_overlaps { continue; }
         let kind = match rule.device_type.as_str() {
             "pmos" => DeviceKind::Pmos,
-            _ => DeviceKind::Nmos,
+            "nmos" => DeviceKind::Nmos,
+            other => return Err(format!(
+                "MOS rule '{}' has unsupported device type '{}' during extraction",
+                rule.name, other,
+            )),
         };
-        let mut flavor = DeviceFlavor::Standard;
+        let mut flavors = HashSet::new();
         for &(marker_layer, ref flavor_name) in &rule.flavor_markers {
             let marker_overlaps = store.polys_on_layer(marker_layer)
-                .into_iter().any(|p| store.poly_bbox[p.0 as usize].overlaps(&gate_bb));
+                .into_iter().any(|p| rectilinear_intersection_area(store, &[
+                    full_region(store, p), full_region(store, gate), full_region(store, channel),
+                ]) > 0);
             if marker_overlaps {
-                flavor = match flavor_name.as_str() {
+                let flavor = match flavor_name.as_str() {
                     "hvt" | "Hvt" | "HVT" => DeviceFlavor::Hvt,
                     "lvt" | "Lvt" | "LVT" => DeviceFlavor::Lvt,
-                    _ => DeviceFlavor::Standard,
+                    other => return Err(format!(
+                        "MOS rule '{}' has unsupported flavor '{}' during extraction",
+                        rule.name, other,
+                    )),
                 };
-                break;
+                flavors.insert(flavor);
             }
         }
-        return Ok(MosMatch { kind, flavor, rule_idx: ri });
+        if flavors.len() > 1 {
+            return Err(format!(
+                "gate polygon {} crossing channel polygon {} matches multiple flavor markers for MOS rule '{}'",
+                gate.0, channel.0, rule.name,
+            ));
+        }
+        matches.push(MosMatch {
+            kind,
+            flavor: flavors
+                .iter()
+                .next()
+                .copied()
+                .unwrap_or(DeviceFlavor::Standard),
+            rule_idx: ri,
+        });
     }
-    Ok(MosMatch { kind: DeviceKind::Nmos, flavor: DeviceFlavor::Standard, rule_idx: 0 })
+    match matches.len() {
+        0 => Err(format!(
+            "gate polygon {} crossing channel polygon {} has no matching MOS type implant",
+            gate.0, channel.0,
+        )),
+        1 => Ok(matches.pop().expect("one match")),
+        _ => {
+            let names: Vec<&str> = matches
+                .iter()
+                .map(|m| deck.devices.mos_rules[m.rule_idx].name.as_str())
+                .collect();
+            Err(format!(
+                "gate polygon {} crossing channel polygon {} ambiguously matches MOS rules {:?}",
+                gate.0, channel.0, names,
+            ))
+        }
+    }
 }
 
 // --- two-terminal device extraction ---
@@ -154,22 +438,17 @@ fn extract_two_terminal_devices(
         for body in store.polys_on_layer(rule.body_layer) {
             let bb = store.poly_bbox[body.0 as usize];
             let has_marker = store.polys_on_layer(rule.marker_layer)
-                .iter().any(|&m| store.poly_bbox[m.0 as usize].overlaps(&bb));
+                .iter().any(|&m| poly_poly_overlap(store, m, body));
             if !has_marker { continue; }
             let is_gate = gate_layers.iter().any(|&gl| {
-                store.polys_on_layer(gl).iter().any(|&g| {
-                    let gb = store.poly_bbox[g.0 as usize];
-                    let ix = bb.xmax.min(gb.xmax) - bb.xmin.max(gb.xmin);
-                    let iy = bb.ymax.min(gb.ymax) - bb.ymin.max(gb.ymin);
-                    ix > 0 && iy > 0
-                })
+                store.polys_on_layer(gl).iter().any(|&g| poly_poly_overlap(store, body, g))
             });
             if is_gate { continue; }
             let mut terminals: Vec<(u32, i32)> = Vec::new();
             let long_axis_x = bb.width() >= bb.height();
             for tc in store.polys_on_layer(rule.terminal_layer) {
                 let tb = store.poly_bbox[tc.0 as usize];
-                if !tb.overlaps(&bb) { continue; }
+                if !tb.overlaps(&bb) || !poly_poly_overlap(store, tc, body) { continue; }
                 let net = net_of_poly[tc.0 as usize];
                 if net == u32::MAX { continue; }
                 let pos = if long_axis_x { (tb.xmin + tb.xmax) / 2 } else { (tb.ymin + tb.ymax) / 2 };
@@ -200,15 +479,12 @@ fn extract_two_terminal_devices(
             let ab = store.poly_bbox[anode.0 as usize];
             for cathode in store.polys_on_layer(rule.cathode_layer) {
                 let cb = store.poly_bbox[cathode.0 as usize];
-                let ix = ab.xmax.min(cb.xmax) - ab.xmin.max(cb.xmin);
-                let iy = ab.ymax.min(cb.ymax) - ab.ymin.max(cb.ymin);
-                if ix <= 0 || iy <= 0 { continue; }
-                let overlap_bb = Bbox {
-                    xmin: ab.xmin.max(cb.xmin), ymin: ab.ymin.max(cb.ymin),
-                    xmax: ab.xmax.min(cb.xmax), ymax: ab.ymax.min(cb.ymax),
-                };
+                if !ab.overlaps(&cb) || !poly_poly_overlap(store, anode, cathode) { continue; }
                 let has_implant = store.polys_on_layer(rule.implant_layer)
-                    .iter().any(|&imp| store.poly_bbox[imp.0 as usize].overlaps(&overlap_bb));
+                    .iter().any(|&imp| rectilinear_intersection_area(store, &[
+                        full_region(store, imp), full_region(store, anode),
+                        full_region(store, cathode),
+                    ]) > 0);
                 if !has_implant { continue; }
                 let a_net = net_of_poly[anode.0 as usize];
                 let c_net = net_of_poly[cathode.0 as usize];
@@ -227,25 +503,27 @@ fn extract_two_terminal_devices(
             let tb = store.poly_bbox[top.0 as usize];
             for bot in store.polys_on_layer(rule.bottom_layer) {
                 let bb = store.poly_bbox[bot.0 as usize];
-                let ix = tb.xmax.min(bb.xmax) - tb.xmin.max(bb.xmin);
-                let iy = tb.ymax.min(bb.ymax) - tb.ymin.max(bb.ymin);
-                if ix <= 0 || iy <= 0 { continue; }
+                if !tb.overlaps(&bb) { continue; }
+                let overlap_area = rectilinear_intersection_area(store, &[
+                    full_region(store, top), full_region(store, bot),
+                ]);
+                if overlap_area <= 0 { continue; }
                 if let Some(marker_l) = rule.marker_layer {
-                    let overlap_bb = Bbox {
-                        xmin: tb.xmin.max(bb.xmin), ymin: tb.ymin.max(bb.ymin),
-                        xmax: tb.xmax.min(bb.xmax), ymax: tb.ymax.min(bb.ymax),
-                    };
                     let has_marker = store.polys_on_layer(marker_l)
-                        .iter().any(|&m| store.poly_bbox[m.0 as usize].overlaps(&overlap_bb));
+                        .iter().any(|&m| rectilinear_intersection_area(store, &[
+                            full_region(store, m), full_region(store, top),
+                            full_region(store, bot),
+                        ]) > 0);
                     if !has_marker { continue; }
                 }
                 let t_net = net_of_poly[top.0 as usize];
                 let b_net = net_of_poly[bot.0 as usize];
                 if t_net == u32::MAX || b_net == u32::MAX { continue; }
-                let area = (ix as f64) * (iy as f64);
+                let dbu_um = deck.dbu_nm / 1000.0;
+                let area_um2 = overlap_area as f64 * dbu_um * dbu_um;
                 let cap_per_area = deck.pex.get(&rule.top_layer)
                     .map_or(0.0, |p| p.interlayer_cap_af_um2);
-                let value = area * cap_per_area;
+                let value = area_um2 * cap_per_area;
                 out.push(TwoTerminalDevice {
                     kind: TwoTerminalKind::Capacitor,
                     name: rule.name.clone(),
@@ -273,21 +551,17 @@ fn extract_bjt_devices(
             let eb = store.poly_bbox[emitter.0 as usize];
             for base in store.polys_on_layer(rule.base_layer) {
                 let bb = store.poly_bbox[base.0 as usize];
-                let ix_eb = eb.xmax.min(bb.xmax) - eb.xmin.max(bb.xmin);
-                let iy_eb = eb.ymax.min(bb.ymax) - eb.ymin.max(bb.ymin);
-                if ix_eb <= 0 || iy_eb <= 0 { continue; }
+                if !eb.overlaps(&bb) || !poly_poly_overlap(store, emitter, base) { continue; }
                 for collector in store.polys_on_layer(rule.collector_layer) {
                     let cb = store.poly_bbox[collector.0 as usize];
-                    let ix_bc = bb.xmax.min(cb.xmax) - bb.xmin.max(cb.xmin);
-                    let iy_bc = bb.ymax.min(cb.ymax) - bb.ymin.max(cb.ymin);
-                    if ix_bc <= 0 || iy_bc <= 0 { continue; }
-                    // Check type marker overlap at the emitter-base intersection
-                    let marker_bb = Bbox {
-                        xmin: eb.xmin.max(bb.xmin), ymin: eb.ymin.max(bb.ymin),
-                        xmax: eb.xmax.min(bb.xmax), ymax: eb.ymax.min(bb.ymax),
-                    };
+                    if !bb.overlaps(&cb) || !poly_poly_overlap(store, base, collector) { continue; }
+                    // The type marker must cover the actual emitter/base device
+                    // region, not merely overlap its bounding box.
                     let has_marker = store.polys_on_layer(rule.type_marker)
-                        .iter().any(|&m| store.poly_bbox[m.0 as usize].overlaps(&marker_bb));
+                        .iter().any(|&m| rectilinear_intersection_area(store, &[
+                            full_region(store, m), full_region(store, emitter),
+                            full_region(store, base),
+                        ]) > 0);
                     if !has_marker { continue; }
                     let e_net = net_of_poly[emitter.0 as usize];
                     let b_net = net_of_poly[base.0 as usize];
@@ -309,101 +583,132 @@ fn extract_bjt_devices(
 
 // --- netlist reduction ---
 
-/// Hash a device_class Option<String> to a u64 for use in merge keys.
-fn class_hash(dc: &Option<String>) -> u64 {
-    match dc {
-        None => 0,
-        Some(s) => {
-            let mut h: u64 = 0xcafe_babe;
-            for b in s.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
-            h
+fn parallel_reduce(devices: Vec<Device>) -> Vec<Device> {
+    // S/D are symmetric, but body, class and L are not.  Devices with unlike
+    // lengths do not have an exact single-device parallel equivalent.
+    let mut index: HashMap<(
+        DeviceKind, DeviceFlavor, u32, u32, u32, u32, i32, Option<String>,
+    ), usize> = HashMap::new();
+    let mut out: Vec<Device> = Vec::new();
+    for mut d in devices {
+        if d.source > d.drain { std::mem::swap(&mut d.source, &mut d.drain); }
+        let key = (
+            d.kind.clone(), d.flavor, d.gate, d.source, d.drain, d.body, d.l,
+            d.device_class.clone(),
+        );
+        if let Some(&idx) = index.get(&key) {
+            if let Some(width) = out[idx].w.checked_add(d.w) {
+                out[idx].w = width;
+                continue;
+            }
         }
+        index.insert(key, out.len());
+        out.push(d);
+    }
+    out
+}
+
+fn compatible_in_series(a: &Device, b: &Device) -> bool {
+    a.kind == b.kind
+        && a.flavor == b.flavor
+        && a.device_class == b.device_class
+        && a.gate == b.gate
+        && a.body == b.body
+        && a.w == b.w
+}
+
+fn other_sd_terminal(d: &Device, shared: u32) -> Option<u32> {
+    match (d.source == shared, d.drain == shared) {
+        (true, false) => Some(d.drain),
+        (false, true) => Some(d.source),
+        _ => None,
     }
 }
 
-pub fn reduce_netlist(ext: &mut ExtractedNetlist) {
+fn series_reduce_once(ext: &mut ExtractedNetlist, protected_nets: &HashSet<u32>) -> bool {
+    let mut sd_incidence: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut forbidden = protected_nets.clone();
+    for (idx, d) in ext.devices.iter().enumerate() {
+        sd_incidence.entry(d.source).or_default().push(idx);
+        sd_incidence.entry(d.drain).or_default().push(idx);
+        forbidden.insert(d.gate);
+        // Body 0 is the legacy "unresolved body" sentinel, not necessarily net 0.
+        if d.body != 0 { forbidden.insert(d.body); }
+    }
+    for d in &ext.two_terminal {
+        forbidden.insert(d.terminal_a);
+        forbidden.insert(d.terminal_b);
+    }
+    for d in &ext.bjt_devices {
+        forbidden.insert(d.collector);
+        forbidden.insert(d.base);
+        forbidden.insert(d.emitter);
+    }
+
+    let mut candidates: Vec<u32> = sd_incidence.keys().copied().collect();
+    candidates.sort_unstable();
+    for shared in candidates {
+        if forbidden.contains(&shared) { continue; }
+        let incidence = &sd_incidence[&shared];
+        // Exactly two S/D incidences on distinct devices: no branch, port,
+        // self-loop, or third device may disappear during normalization.
+        if incidence.len() != 2 || incidence[0] == incidence[1] { continue; }
+        let (i, j) = (incidence[0], incidence[1]);
+        let (a, b) = (&ext.devices[i], &ext.devices[j]);
+        if !compatible_in_series(a, b) { continue; }
+        let (Some(a_outer), Some(b_outer)) = (
+            other_sd_terminal(a, shared), other_sd_terminal(b, shared),
+        ) else { continue; };
+        if a_outer == b_outer { continue; }
+        let Some(length) = a.l.checked_add(b.l) else { continue; };
+
+        let merged = Device {
+            kind: a.kind.clone(),
+            gate: a.gate,
+            source: a_outer,
+            drain: b_outer,
+            body: a.body,
+            flavor: a.flavor,
+            w: a.w,
+            l: length,
+            device_class: a.device_class.clone(),
+        };
+        let (lo, hi) = (i.min(j), i.max(j));
+        ext.devices.remove(hi);
+        ext.devices.remove(lo);
+        ext.devices.push(merged);
+        return true;
+    }
+    false
+}
+
+fn reduce_netlist_with_protected(ext: &mut ExtractedNetlist, protected_nets: &HashSet<u32>) {
     loop {
         let before = ext.devices.len();
-
-        // parallel reduction — S/D symmetric (MOS terminals are interchangeable),
-        // normalize by sorting so interleaved-finger devices merge correctly
-        let mut par_map: HashMap<(u32, u32, u32, u32, u32, u64), usize> = HashMap::new();
-        let mut merged_par: Vec<Device> = Vec::new();
-        for mut d in ext.devices.drain(..) {
-            let kt = super::compare::kind_tag(&d.kind);
-            let ft = super::compare::flavor_tag(&d.flavor);
-            let ch = class_hash(&d.device_class);
-            if d.source > d.drain { std::mem::swap(&mut d.source, &mut d.drain); }
-            let key = (kt, ft, d.gate, d.source, d.drain, ch);
-            if let Some(&idx) = par_map.get(&key) {
-                merged_par[idx].w += d.w;
-            } else {
-                par_map.insert(key, merged_par.len());
-                merged_par.push(d);
-            }
-        }
-        ext.devices = merged_par;
-
-        // series reduction — only combine same-class devices
-        let mut merged_any_series = false;
-        let mut used = vec![false; ext.devices.len()];
-        let mut merged_ser: Vec<Device> = Vec::new();
-
-        let mut src_index: HashMap<(u32, u32, u32, u32, u64), Vec<usize>> = HashMap::new();
-        for (i, d) in ext.devices.iter().enumerate() {
-            let kt = super::compare::kind_tag(&d.kind);
-            let ft = super::compare::flavor_tag(&d.flavor);
-            let ch = class_hash(&d.device_class);
-            src_index.entry((kt, ft, d.gate, d.source, ch)).or_default().push(i);
-        }
-
-        for i in 0..ext.devices.len() {
-            if used[i] { continue; }
-            let d = &ext.devices[i];
-            let kt = super::compare::kind_tag(&d.kind);
-            let ft = super::compare::flavor_tag(&d.flavor);
-            let ch = class_hash(&d.device_class);
-            let key = (kt, ft, d.gate, d.drain, ch);
-            let mut found = None;
-            if let Some(candidates) = src_index.get(&key) {
-                for &j in candidates {
-                    if j != i && !used[j] {
-                        found = Some(j);
-                        break;
-                    }
-                }
-            }
-            if let Some(j) = found {
-                let d2 = &ext.devices[j];
-                merged_ser.push(Device {
-                    kind: d.kind.clone(), gate: d.gate, source: d.source, drain: d2.drain,
-                    body: d.body, flavor: d.flavor, w: d.w.min(d2.w), l: d.l + d2.l,
-                    device_class: d.device_class.clone(),
-                });
-                used[i] = true;
-                used[j] = true;
-                merged_any_series = true;
-            } else {
-                used[i] = true;
-                merged_ser.push(d.clone());
-            }
-        }
-        ext.devices = merged_ser;
-
-        let mut used_set = HashSet::new();
-        for d in &ext.devices {
-            used_set.insert(d.gate); used_set.insert(d.source); used_set.insert(d.drain);
-        }
-        ext.used_nets = used_set.len();
-
-        if ext.devices.len() == before && !merged_any_series { break; }
+        ext.devices = parallel_reduce(std::mem::take(&mut ext.devices));
+        let series_merged = series_reduce_once(ext, protected_nets);
+        if !series_merged && ext.devices.len() == before { break; }
     }
+    let mut used_set = HashSet::new();
+    for d in &ext.devices {
+        used_set.insert(d.gate); used_set.insert(d.source); used_set.insert(d.drain);
+    }
+    ext.used_nets = used_set.len();
+}
+
+pub fn reduce_netlist(ext: &mut ExtractedNetlist) {
+    reduce_netlist_with_protected(ext, &HashSet::new());
 }
 
 // --- main extraction pipeline ---
 
 pub fn extract_netlist(store: &GeometryStore, deck: &Deck) -> Result<ExtractedNetlist, String> {
-    extract_netlist_opts(store, deck, &ExtractOpts::default(), Backend::Cpu)
+    extract_netlist_opts(
+        store,
+        deck,
+        &ExtractOpts { cut_required: deck.lvs_cut_required, ..Default::default() },
+        Backend::Cpu,
+    )
 }
 
 pub fn extract_netlist_opts(
@@ -423,6 +728,30 @@ pub fn extract_netlist_opts(
     channel_layers.sort_unstable();
     channel_layers.dedup();
 
+    let mut exact_layers: HashSet<LayerId> = conductors.iter().copied().collect();
+    exact_layers.extend(vias.iter().copied());
+    for rule in &deck.devices.mos_rules {
+        exact_layers.extend([rule.gate_layer, rule.channel_layer, rule.type_implant]);
+        exact_layers.extend(rule.flavor_markers.iter().map(|(layer, _)| *layer));
+        if let Some(layer) = rule.well_layer { exact_layers.insert(layer); }
+    }
+    for rule in &deck.devices.resistor_rules {
+        exact_layers.extend([rule.body_layer, rule.marker_layer, rule.terminal_layer]);
+    }
+    for rule in &deck.devices.diode_rules {
+        exact_layers.extend([rule.anode_layer, rule.cathode_layer, rule.implant_layer]);
+    }
+    for rule in &deck.devices.cap_rules {
+        exact_layers.extend([rule.top_layer, rule.bottom_layer]);
+        if let Some(layer) = rule.marker_layer { exact_layers.insert(layer); }
+    }
+    for rule in &deck.devices.bjt_rules {
+        exact_layers.extend([
+            rule.collector_layer, rule.base_layer, rule.emitter_layer, rule.type_marker,
+        ]);
+    }
+    validate_rectilinear_layers(store, deck, &exact_layers)?;
+
     // Build connectivity nodes
     let mut nodes: Vec<Node> = Vec::new();
     let mut node_of_poly: Vec<u32> = vec![u32::MAX; n];
@@ -434,7 +763,14 @@ pub fn extract_netlist_opts(
         if channel_layers.contains(&li) { continue; }
         if !is_conn(li) { continue; }
         node_of_poly[i as usize] = nodes.len() as u32;
-        nodes.push(Node { bbox: store.poly_bbox[i as usize], layer: li, is_diff_seg: false });
+        let bbox = store.poly_bbox[i as usize];
+        nodes.push(Node {
+            bbox,
+            layer: li,
+            is_diff_seg: false,
+            poly: PolyId(i),
+            clip: bbox,
+        });
     }
 
     // Split each channel-layer polygon at its gate crossings
@@ -484,7 +820,13 @@ pub fn extract_netlist_opts(
                     Bbox { xmin: db.xmin, xmax: db.xmax, ymin: lo, ymax: hi }
                 };
                 seg_nodes.push(nodes.len() as u32);
-                nodes.push(Node { bbox: bb, layer: ch_l, is_diff_seg: true });
+                nodes.push(Node {
+                    bbox: bb,
+                    layer: ch_l,
+                    is_diff_seg: true,
+                    poly: d,
+                    clip: bb,
+                });
             }
             if let Some(&f) = seg_nodes.first() {
                 first_seg_of_poly[d.0 as usize] = f;
@@ -499,7 +841,6 @@ pub fn extract_netlist_opts(
         let gate_pair = (gate_layers.contains(&a.layer) && b.is_diff_seg)
             || (gate_layers.contains(&b.layer) && a.is_diff_seg);
         if gate_pair { return false; }
-        if !opts.cut_required { return true; }
         if a.layer == b.layer { return true; }
         let bridges = |via: &Node, other: &Node| -> bool {
             for &(vid, ref connects) in &deck.connectivity.vias {
@@ -511,44 +852,77 @@ pub fn extract_netlist_opts(
             }
             false
         };
-        bridges(a, b) || bridges(b, a)
+        if bridges(a, b) || bridges(b, a) { return true; }
+        if opts.cut_required { return false; }
+
+        // Backward-compatible schema fallback: old decks sometimes supplied
+        // only a conductor list and explicitly requested cut-less extraction.
+        // With no via declarations there is no layer-pair graph to consult, so
+        // retain overlap connectivity for those decks only.  As soon as the PDK
+        // declares any via relation, the bounded adjacency rule below applies.
+        if deck.connectivity.vias.is_empty() { return true; }
+
+        // Explicit compatibility mode: an omitted cut may directly join only
+        // conductor layers that a declared via is allowed to bridge.  The old
+        // fallback joined *every* pair of overlapping conductor layers, making
+        // unrelated layers electrical shorts.  Requiring co-membership in one
+        // via declaration preserves legacy cut-less fixtures without inventing
+        // connectivity absent from the PDK.
+        deck.connectivity.vias.iter().any(|(_, connects)| {
+            let a_decl = connects.contains(&a.layer)
+                || (a.is_diff_seg && connects.iter().any(|c| channel_layers.contains(c)));
+            let b_decl = connects.contains(&b.layer)
+                || (b.is_diff_seg && connects.iter().any(|c| channel_layers.contains(c)));
+            a_decl && b_decl
+        })
     };
 
     let m = nodes.len();
     let mut uf = UnionFind::new(m);
 
-    let n_pairs = m * (m.saturating_sub(1)) / 2;
-    let gpu_flags = if backend == Backend::Gpu && n_pairs >= (1 << 18) {
+    // Sweep-line candidate enumeration: O(m log m + K) bbox-touching pairs
+    // instead of the previous all-pairs O(m²) scan. Closed intervals — touching
+    // pairs are included, so the candidate set is a superset of both overlap
+    // predicates below; each pair still gets the exact predicate. Union order
+    // differs from the old scan but the partition (and therefore net ids,
+    // assigned by ascending node index afterwards) is identical.
+    let cands = node_candidate_pairs(&nodes);
+
+    let gpu_flags = if backend == Backend::Gpu && cands.len() >= (1 << 18) {
         let xmins: Vec<i32> = nodes.iter().map(|n| n.bbox.xmin).collect();
         let ymins: Vec<i32> = nodes.iter().map(|n| n.bbox.ymin).collect();
         let xmaxs: Vec<i32> = nodes.iter().map(|n| n.bbox.xmax).collect();
         let ymaxs: Vec<i32> = nodes.iter().map(|n| n.bbox.ymax).collect();
-        let mut pa = Vec::with_capacity(n_pairs);
-        let mut pb = Vec::with_capacity(n_pairs);
-        for i in 0..m { for j in (i + 1)..m { pa.push(i as u32); pb.push(j as u32); } }
+        let pa: Vec<u32> = cands.iter().map(|&(i, _)| i).collect();
+        let pb: Vec<u32> = cands.iter().map(|&(_, j)| j).collect();
         crate::traits::bbox_overlap_flags(&xmins, &ymins, &xmaxs, &ymaxs, &pa, &pb)
     } else {
         None
     };
 
-    let mut pair_idx = 0usize;
-    for i in 0..m {
-        for j in (i + 1)..m {
-            let overlaps = match &gpu_flags {
-                Some(flags) => { let r = flags[pair_idx] != 0; pair_idx += 1; r }
-                None => {
-                    // Same-layer touching edges connect when intra_layer_touch is on
-                    if intra_touch && nodes[i].layer == nodes[j].layer {
-                        overlap_touch(nodes[i].bbox, nodes[j].bbox)
-                    } else {
-                        overlap_pos(nodes[i].bbox, nodes[j].bbox)
-                    }
-                }
-            };
-            if !overlaps { continue; }
-            if !can_union(&nodes[i], &nodes[j]) { continue; }
-            uf.union(i as u32, j as u32);
+    for (pair_idx, &(i, j)) in cands.iter().enumerate() {
+        let (i, j) = (i as usize, j as usize);
+        // CPU/GPU bbox results are prefilters only.  The final decision is made
+        // against the actual (possibly clipped diffusion) rectilinear regions.
+        if let Some(flags) = &gpu_flags {
+            // The GPU kernel reports positive-area bbox overlap.  A zero cannot
+            // reject same-layer boundary contact when that policy is enabled.
+            if flags[pair_idx] == 0
+                && !(intra_touch && nodes[i].layer == nodes[j].layer)
+            {
+                continue;
+            }
         }
+        let a = PolyRegion { poly: nodes[i].poly, clip: nodes[i].clip };
+        let b = PolyRegion { poly: nodes[j].poly, clip: nodes[j].clip };
+        let overlaps = if intra_touch && nodes[i].layer == nodes[j].layer {
+            rectilinear_regions_touch(store, a, b)
+        } else {
+            rectilinear_intersection_area(store, &[a, b]) > 0
+        };
+        if !overlaps { continue; }
+        if !can_union(&nodes[i], &nodes[j]) { continue; }
+        uf.union(i as u32, j as u32);
     }
 
     // Assign compact net ids
@@ -585,8 +959,9 @@ pub fn extract_netlist_opts(
             }
             if let (Some(s), Some(dd)) = (src, drn) {
                 let gb = store.poly_bbox[gs.gate as usize];
-                let channel = intersect_bbox(gb, db);
-                let mos_match = pick_type_and_flavor(store, deck, channel)?;
+                let mos_match = pick_type_and_flavor(
+                    store, deck, PolyId(gs.gate), PolyId(sp.diff),
+                )?;
                 let matched_rule = &deck.devices.mos_rules[mos_match.rule_idx];
                 let l = gs.hi - gs.lo;
                 let w = if sp.axis_x {
@@ -596,9 +971,11 @@ pub fn extract_netlist_opts(
                 };
                 // Phase 3A: body/well extraction
                 let body = if let Some(well_layer) = matched_rule.well_layer {
-                    let chan_bb = channel;
                     store.polys_on_layer(well_layer).into_iter()
-                        .find(|&wp| store.poly_bbox[wp.0 as usize].overlaps(&chan_bb))
+                        .find(|&wp| rectilinear_intersection_area(store, &[
+                            full_region(store, wp), full_region(store, PolyId(gs.gate)),
+                            full_region(store, PolyId(sp.diff)),
+                        ]) > 0)
                         .map(|wp| net_of_poly[wp.0 as usize])
                         .unwrap_or(0)
                 } else {
@@ -628,6 +1005,8 @@ pub fn extract_netlist_opts(
                     }
                 }
             }
+            matching_nets.sort_unstable();
+            matching_nets.dedup();
             if matching_nets.len() > 1 {
                 let canonical = matching_nets[0];
                 for &other in &matching_nets[1..] {
@@ -635,6 +1014,15 @@ pub fn extract_netlist_opts(
                         // Remap all occurrences of `other` to `canonical`
                         for np in net_of_poly.iter_mut() {
                             if *np == other { *np = canonical; }
+                        }
+                        // MOS devices were recognized before global-net merging.
+                        // Keep their already-extracted terminals consistent with
+                        // the remapped polygon connectivity.
+                        for d in devices.iter_mut() {
+                            if d.gate == other { d.gate = canonical; }
+                            if d.source == other { d.source = canonical; }
+                            if d.drain == other { d.drain = canonical; }
+                            if d.body == other { d.body = canonical; }
                         }
                     }
                 }
@@ -671,11 +1059,24 @@ pub fn extract_netlist_opts(
         }
     }
 
+    if std::env::var("PNR_DEBUG_LVS_RAW").is_ok() {
+        for d in &devices {
+            eprintln!("[lvs-raw] {:?} g={} s={} d={} b={} w={} l={}",
+                d.kind, d.gate, d.source, d.drain, d.body, d.w, d.l);
+        }
+    }
+    // Any named layout net is externally observable and therefore cannot be
+    // removed as an internal series node.  This includes global-net labels
+    // after the remapping above.
+    let protected_nets: HashSet<u32> = store.net_labels.keys()
+        .filter_map(|&poly| net_of_poly.get(poly as usize).copied())
+        .filter(|&net| net != u32::MAX)
+        .collect();
     let mut ext = ExtractedNetlist {
         devices, net_count, used_nets: used.len(), net_of_poly, label_conflicts, two_terminal,
         bjt_devices, floating_nets: Vec::new(),
     };
-    reduce_netlist(&mut ext);
+    reduce_netlist_with_protected(&mut ext, &protected_nets);
 
     // Phase 4C: Floating net detection — nets with polygons but no device terminal connections
     {
@@ -717,4 +1118,115 @@ pub fn extract_netlist_opts(
     }
 
     Ok(ext)
+}
+
+#[cfg(test)]
+mod reduction_tests {
+    use super::*;
+
+    fn mos(source: u32, drain: u32, w: i32, l: i32) -> Device {
+        Device {
+            kind: DeviceKind::Nmos,
+            gate: 10,
+            source,
+            drain,
+            body: 20,
+            flavor: DeviceFlavor::Standard,
+            w,
+            l,
+            device_class: Some("core".into()),
+        }
+    }
+
+    fn netlist(devices: Vec<Device>) -> ExtractedNetlist {
+        ExtractedNetlist {
+            devices,
+            bjt_devices: Vec::new(),
+            net_count: 32,
+            used_nets: 0,
+            net_of_poly: Vec::new(),
+            label_conflicts: Vec::new(),
+            two_terminal: Vec::new(),
+            floating_nets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn series_reduction_repeats_to_fixpoint() {
+        let mut ext = netlist(vec![
+            mos(1, 2, 100, 40),
+            mos(2, 3, 100, 50),
+            mos(3, 4, 100, 60),
+        ]);
+        reduce_netlist(&mut ext);
+        assert_eq!(ext.devices.len(), 1);
+        let d = &ext.devices[0];
+        assert_eq!((d.source, d.drain), (1, 4));
+        assert_eq!((d.w, d.l), (100, 150));
+    }
+
+    #[test]
+    fn series_reduction_rejects_incompatible_or_branched_devices() {
+        let mut unequal_width = netlist(vec![mos(1, 2, 100, 40), mos(2, 3, 120, 50)]);
+        reduce_netlist(&mut unequal_width);
+        assert_eq!(unequal_width.devices.len(), 2);
+
+        let mut unlike_body = mos(2, 3, 100, 50);
+        unlike_body.body = 21;
+        let mut body = netlist(vec![mos(1, 2, 100, 40), unlike_body]);
+        reduce_netlist(&mut body);
+        assert_eq!(body.devices.len(), 2);
+
+        let mut unlike_class = mos(2, 3, 100, 50);
+        unlike_class.device_class = Some("io".into());
+        let mut class = netlist(vec![mos(1, 2, 100, 40), unlike_class]);
+        reduce_netlist(&mut class);
+        assert_eq!(class.devices.len(), 2);
+
+        let mut branch = netlist(vec![
+            mos(1, 2, 100, 40), mos(2, 3, 100, 50), mos(2, 4, 100, 60),
+        ]);
+        reduce_netlist(&mut branch);
+        assert_eq!(branch.devices.len(), 3, "degree-three net must not disappear");
+    }
+
+    #[test]
+    fn series_reduction_protects_observable_nets() {
+        let mut gate_tied = netlist(vec![mos(1, 10, 100, 40), mos(10, 3, 100, 50)]);
+        reduce_netlist(&mut gate_tied);
+        assert_eq!(gate_tied.devices.len(), 2, "gate-connected net is observable");
+
+        let mut labeled = netlist(vec![mos(1, 2, 100, 40), mos(2, 3, 100, 50)]);
+        reduce_netlist_with_protected(&mut labeled, &HashSet::from([2]));
+        assert_eq!(labeled.devices.len(), 2, "labeled/global net must be protected");
+
+        let mut passive = netlist(vec![mos(1, 2, 100, 40), mos(2, 3, 100, 50)]);
+        passive.two_terminal.push(TwoTerminalDevice {
+            kind: TwoTerminalKind::Resistor,
+            name: "tap".into(),
+            terminal_a: 2,
+            terminal_b: 5,
+            value: 1.0,
+        });
+        reduce_netlist(&mut passive);
+        assert_eq!(passive.devices.len(), 2, "passive-connected net is external");
+    }
+
+    #[test]
+    fn parallel_reduction_requires_same_body_and_length() {
+        let mut same = netlist(vec![mos(1, 2, 100, 40), mos(2, 1, 120, 40)]);
+        reduce_netlist(&mut same);
+        assert_eq!(same.devices.len(), 1);
+        assert_eq!(same.devices[0].w, 220);
+
+        let mut other_l = netlist(vec![mos(1, 2, 100, 40), mos(1, 2, 120, 50)]);
+        reduce_netlist(&mut other_l);
+        assert_eq!(other_l.devices.len(), 2);
+
+        let mut body_device = mos(1, 2, 120, 40);
+        body_device.body = 21;
+        let mut other_body = netlist(vec![mos(1, 2, 100, 40), body_device]);
+        reduce_netlist(&mut other_body);
+        assert_eq!(other_body.devices.len(), 2);
+    }
 }

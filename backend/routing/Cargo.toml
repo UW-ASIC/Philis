@@ -10,4 +10,4 @@ pnr-cells = { path = "../cells" }
 pnr-constraints = { path = "../constraints" }
 
 [dev-dependencies]
-pnr-core = { path = "../../frontend/core" }
+pnr-cells = { path = "../cells", features = ["test-fixtures"] }

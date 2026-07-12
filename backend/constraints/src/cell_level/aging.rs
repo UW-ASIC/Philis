@@ -1,6 +1,6 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
-    AgingMechanism, DeviceConstraint, DeviceId,
+    AgingMechanism, ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength,
+    Contractable, DeviceConstraint, DeviceId, Severity,
 };
 
 /// Aging/reliability constraint for a device.
@@ -10,26 +10,29 @@ use crate::types::{
 pub struct AgingConstraint {
     pub device_id: DeviceId,
     pub mechanism: AgingMechanism,
-    /// "warning" or "violation".
-    pub severity: String,
+    pub severity: Severity,
     pub description: String,
 }
 
 impl DeviceConstraint for AgingConstraint {
-    fn device_id(&self) -> DeviceId { self.device_id }
+    fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
 }
 
 impl Contractable for AgingConstraint {
     fn strength(&self) -> ConstraintStrength {
-        if self.severity == "violation" {
-            ConstraintStrength::Hard
-        } else {
-            ConstraintStrength::Soft
+        match self.severity {
+            Severity::Violation => ConstraintStrength::Hard,
+            Severity::Warning => ConstraintStrength::Soft,
         }
     }
 
     fn priority(&self) -> i32 {
-        if self.severity == "violation" { 70 } else { 30 }
+        match self.severity {
+            Severity::Violation => 70,
+            Severity::Warning => 30,
+        }
     }
 
     fn stages(&self) -> &[ConstraintStage] {

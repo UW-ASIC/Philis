@@ -1,5 +1,5 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
 };
 
 /// Crosstalk exclusion between an aggressor and victim net pair.
@@ -12,8 +12,12 @@ pub struct CrosstalkExclusion {
 }
 
 impl Contractable for CrosstalkExclusion {
-    fn strength(&self) -> ConstraintStrength { ConstraintStrength::Hard }
-    fn priority(&self) -> i32 { 70 }
+    fn strength(&self) -> ConstraintStrength {
+        ConstraintStrength::Hard
+    }
+    fn priority(&self) -> i32 {
+        70
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
         &[ConstraintStage::Routing]

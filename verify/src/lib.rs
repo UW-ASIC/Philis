@@ -33,6 +33,7 @@ pub mod drc;
 pub mod lvs;
 pub mod pex;
 pub mod erc;
+pub mod signoff;
 pub mod gds;
 pub mod traits;
 pub use traits as gpu;
@@ -40,20 +41,65 @@ pub use traits as gpu;
 pub use geometry::{Bbox, Edge, GeometryStore, LayerId, PolyId};
 pub use params::{Deck, DrcRuleParam, LayerDef, LayerTable};
 pub use schema::{DrcRuleSchema, LvsSchema, VerifySchema};
-pub use drc::{run_drc, run_drc_backend, run_drc_backend_strict, DrcReport, Violation};
-pub use pex::{run_pex, run_pex_by_net, NetParasitics, Parasitic, PexReport};
+pub use drc::{run_drc, run_drc_backend, run_drc_backend_strict, run_drc_no_density, same_shape_gap_fills, DrcReport, Violation};
+pub use pex::{
+    run_pex, run_pex_by_net, run_pex_by_net_checked, NetParasitics, Parasitic, PexReport,
+};
 pub use lvs::{compare, extract_netlist, extract_netlist_opts, reduce_netlist,
               to_spice, CompareOpts, DeviceFlavor, DeviceKind, Device,
               ExtractOpts, ExtractedNetlist, LvsResult, PortMap, RefDevice, RefNetlist,
               RefTwoTerminal, SpiceOpts, TwoTerminalKind, TwoTerminalDevice};
+pub use lvs::netlist::{
+    leaf_subcircuit_to_ref_netlist, parse_engineering_number, parse_netlist,
+    parse_netlist_with_includes, BjtModelBinding, EngineeringNumber, EngineeringSuffix,
+    IncludeDecl, InstanceKind, MosModelBinding, NetlistAst, NetlistError, NetlistErrorKind,
+    NetlistInstance, ParameterDecl, ParameterExpr, RefConversionError,
+    RefConversionErrorKind, RefConversionOptions, ResolvedInclude, SourceSpan, Subcircuit,
+};
 pub use erc::{run_erc, ErcReport, ErcViolation, MultipleDriverCheck, TieHighLowCheck};
-pub use gds::{read_gds, GdsLayout};
+pub use signoff::*;
+pub use gds::{read_gds, GdsLayout, GdsUnits, GdsUnmappedLayer};
 pub use traits::{Backend, VerifyCheck};
+
+// GDS REAL8 values are approximate, so compare units with a tight numerical
+// tolerance rather than bit equality.  The tolerance is deliberately far below
+// any meaningful process-grid difference: 1e-9 relative or 1e-12 nm absolute.
+const GDS_DBU_REL_TOLERANCE: f64 = 1.0e-9;
+const GDS_DBU_ABS_TOLERANCE_NM: f64 = 1.0e-12;
+
+fn validate_gds_database_units(units: Option<GdsUnits>, deck_dbu_nm: f64) -> Result<(), String> {
+    if !deck_dbu_nm.is_finite() || deck_dbu_nm <= 0.0 {
+        return Err(format!(
+            "deck database unit must be finite and positive, got {deck_dbu_nm} nm"
+        ));
+    }
+    let units = units.ok_or_else(|| {
+        "GDS has no UNITS record; deck-aware loading cannot establish coordinate units".to_string()
+    })?;
+    let gds_dbu_nm = units.database_unit_nm();
+    if !gds_dbu_nm.is_finite() || gds_dbu_nm <= 0.0 {
+        return Err(format!(
+            "GDS database unit must be finite and positive, got {gds_dbu_nm} nm"
+        ));
+    }
+    let tolerance = GDS_DBU_ABS_TOLERANCE_NM.max(
+        GDS_DBU_REL_TOLERANCE * deck_dbu_nm.abs().max(gds_dbu_nm.abs()),
+    );
+    if (gds_dbu_nm - deck_dbu_nm).abs() > tolerance {
+        return Err(format!(
+            "GDS database unit {gds_dbu_nm} nm does not match deck database unit \
+             {deck_dbu_nm} nm (tolerance {tolerance} nm); coordinates were not rescaled"
+        ));
+    }
+    Ok(())
+}
 
 /// Convenience: read a GDS file into per-cell stores using the deck's layer table.
 pub fn load_gds(path: &str, deck: &Deck) -> Result<GdsLayout, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    read_gds(&bytes, &deck.layers)
+    let layout = read_gds(&bytes, &deck.layers)?;
+    validate_gds_database_units(layout.units, deck.dbu_nm)?;
+    Ok(layout)
 }
 
 /// Run LVS on an extracted store against a reference netlist. Returns extraction errors
@@ -70,9 +116,41 @@ pub fn run_lvs(store: &GeometryStore, deck: &Deck, reference: &RefNetlist) -> Lv
         },
     };
     let cmp_opts = CompareOpts {
-        strict: false,
+        strict: deck.strict,
         w_tolerance: deck.w_tolerance.clone(),
         l_tolerance: deck.l_tolerance.clone(),
     };
-    compare(&ext, reference, &cmp_opts)
+    let mut result = compare(&ext, reference, &cmp_opts);
+    if deck.fail_on_floating && !ext.floating_nets.is_empty() {
+        result.matched = false;
+        result.reason = format!("{} floating extracted net(s)", ext.floating_nets.len());
+    }
+    result
+}
+
+#[cfg(test)]
+mod unit_contract_tests {
+    use super::*;
+
+    fn units(database_unit_nm: f64) -> GdsUnits {
+        GdsUnits {
+            user_units_per_database_unit: 1.0e-3,
+            meters_per_database_unit: database_unit_nm * 1.0e-9,
+        }
+    }
+
+    #[test]
+    fn deck_aware_gds_units_fail_closed() {
+        let missing = validate_gds_database_units(None, 1.0)
+            .expect_err("missing GDS UNITS must not inherit the deck unit silently");
+        assert!(missing.contains("no UNITS"), "{missing}");
+
+        let mismatch = validate_gds_database_units(Some(units(2.0)), 1.0)
+            .expect_err("mismatched coordinate units must not be silently rescaled");
+        assert!(mismatch.contains("does not match"), "{mismatch}");
+
+        validate_gds_database_units(Some(units(1.0 + 5.0e-10)), 1.0)
+            .expect("REAL8 representation noise within the documented tolerance is accepted");
+        assert!(validate_gds_database_units(Some(units(1.0 + 2.0e-9)), 1.0).is_err());
+    }
 }

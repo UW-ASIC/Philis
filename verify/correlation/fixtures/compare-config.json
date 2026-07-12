@@ -1,0 +1,8 @@
+{
+  "schema_version": "gdsverify.correlation.compare-config/v1",
+  "geometry_tolerance_nm": 0,
+  "quantities": {
+    "capacitance": { "absolute": 0.5, "relative": 0.001 },
+    "resistance": { "absolute": 0.01, "relative": 0.001 }
+  }
+}

@@ -14,6 +14,13 @@
 //! A polygon is therefore an index range, not an object. Iterating all met1 edges never
 //! loads a byte of any other layer's coordinates it doesn't need.
 
+/// Exact predicates, validated polygon sets, and fail-closed rectilinear booleans.
+///
+/// This is the migration target for checkers that currently use private geometry
+/// approximations.  See the module documentation for the supported-semantics
+/// contract; legacy helpers in this file remain available while callers migrate.
+pub mod exact;
+
 /// A layer identifier. Small integer, indexes the layer table. `u16` keeps references tiny.
 pub type LayerId = u16;
 
@@ -72,6 +79,10 @@ pub struct GeometryStore {
     pub poly_vert_start: Vec<u32>,
     pub poly_vert_len: Vec<u32>,
     pub poly_bbox: Vec<Bbox>,
+    /// Per-layer polygon buckets (index = LayerId, insertion order preserved).
+    /// Maintained by `add_polygon` so `polys_on_layer` is O(k), not an O(N)
+    /// full-store scan — it has 30+ call sites in DRC/LVS/PEX, many in loops.
+    layer_index: Vec<Vec<u32>>,
     // --- net label annotations (cold) ---
     /// Maps polygon index to a net name label. Callers assign labels; LVS extraction checks
     /// that polygons sharing the same net carry consistent labels (or no label). Empty by
@@ -117,6 +128,10 @@ impl GeometryStore {
         self.poly_vert_start.push(start);
         self.poly_vert_len.push(pts.len() as u32);
         self.poly_bbox.push(bb);
+        if self.layer_index.len() <= layer as usize {
+            self.layer_index.resize_with(layer as usize + 1, Vec::new);
+        }
+        self.layer_index[layer as usize].push(id.0);
         id
     }
 
@@ -139,13 +154,12 @@ impl GeometryStore {
     }
 
     /// Iterate polygon indices on a given layer. Existence-based filtering: the caller loops
-    /// only the polygons it cares about. Kept as an explicit vec to stay simple; for very
-    /// large stores you'd bucket polygons by layer at build time.
+    /// only the polygons it cares about. Served from the per-layer bucket index — O(k) in
+    /// the layer's polygon count, insertion order (== old scan order) preserved.
     pub fn polys_on_layer(&self, layer: LayerId) -> Vec<PolyId> {
-        (0..self.poly_count() as u32)
-            .filter(|&i| self.poly_layer[i as usize] == layer)
-            .map(PolyId)
-            .collect()
+        self.layer_index
+            .get(layer as usize)
+            .map_or_else(Vec::new, |v| v.iter().copied().map(PolyId).collect())
     }
 
     /// Signed area*2 of a polygon (shoelace). Positive => CCW. Used by min_area and by
@@ -210,7 +224,8 @@ pub fn build_edges(store: &GeometryStore, layer: LayerId) -> Vec<Edge> {
     edges
 }
 
-/// Squared Euclidean distance between two axis-aligned segments' closest points.
+/// Squared Euclidean distance between two segments' closest points (any angle:
+/// for non-crossing segments the minimum is always at an endpoint).
 /// Returns 0 if they touch/cross. This is the primitive both spacing and corner checks use.
 pub fn seg_seg_dist2(a: &Edge, b: &Edge) -> i64 {
     // If bounding boxes overlap and the segments intersect, distance is 0.
@@ -243,13 +258,11 @@ fn point_seg_dist2(px: i32, py: i32, e: &Edge) -> i64 {
         let dy = (py - e.y1) as i64;
         return dx * dx + dy * dy;
     }
-    // projection falls on the segment
-    let b = c1 as f64 / c2 as f64;
-    let projx = e.x0 as f64 + b * vx as f64;
-    let projy = e.y0 as f64 + b * vy as f64;
-    let dx = px as f64 - projx;
-    let dy = py as f64 - projy;
-    (dx * dx + dy * dy).round() as i64
+    // projection falls on the segment: d² = |w|² − c1²/c2, exact in i128
+    // (f64 here loses ulps on diagonal edges at large coordinates)
+    let num = (wx as i128 * wx as i128 + wy as i128 * wy as i128) * c2 as i128
+        - c1 as i128 * c1 as i128;
+    (num / c2 as i128) as i64
 }
 
 fn orient(ax: i64, ay: i64, bx: i64, by: i64, cx: i64, cy: i64) -> i64 {
@@ -351,6 +364,52 @@ pub fn point_in_poly(store: &GeometryStore, p: PolyId, px: i32, py: i32) -> bool
     inside
 }
 
+/// Does the polygon's boundary properly cross itself (bow-tie / figure-8)?
+/// Only PROPER crossings of non-adjacent edges count: collinear-overlap slits
+/// (the GDS keyhole representation of holes) are legal and must not flag.
+/// O(n²) over the ring — polygons are small (rects dominate); revisit with a
+/// sweep if fractured all-angle data shows up.
+pub fn poly_self_intersects(store: &GeometryStore, p: PolyId) -> bool {
+    let (s, e) = store.poly_range(p);
+    let n = e - s;
+    if n < 4 { return false; } // triangle can't self-cross
+    let edge = |i: usize| -> Edge {
+        let (x0, y0) = store.poly_vertex(s, i);
+        let (x1, y1) = store.poly_vertex(s, (i + 1) % n);
+        Edge { x0, y0, x1, y1, poly: p.0 }
+    };
+    // Sweep along the axis with more bbox-min spread: crossing edges must have
+    // overlapping bboxes, so the look-ahead window stays local instead of the
+    // all-pairs O(n²) that melts on many-thousand-vertex comb polygons.
+    let bb = store.poly_bbox[p.0 as usize];
+    let sweep_x = bb.width() >= bb.height();
+    let lo = |ed: &Edge| if sweep_x { ed.x0.min(ed.x1) } else { ed.y0.min(ed.y1) };
+    let hi = |ed: &Edge| if sweep_x { ed.x0.max(ed.x1) } else { ed.y0.max(ed.y1) };
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    order.sort_unstable_by_key(|&i| lo(&edge(i as usize)));
+    for w in 0..n {
+        let i = order[w] as usize;
+        let a = edge(i);
+        if a.len2() == 0 { continue; }
+        let a_hi = hi(&a);
+        for &jj in order[w + 1..].iter() {
+            let j = jj as usize;
+            let b = edge(j);
+            if lo(&b) > a_hi { break; } // sweep window closed
+            // adjacent edges share a vertex; skip (incl. the ring wrap)
+            if j == (i + 1) % n || i == (j + 1) % n { continue; }
+            if b.len2() == 0 { continue; }
+            let d1 = orient(b.x0 as i64, b.y0 as i64, b.x1 as i64, b.y1 as i64, a.x0 as i64, a.y0 as i64);
+            let d2 = orient(b.x0 as i64, b.y0 as i64, b.x1 as i64, b.y1 as i64, a.x1 as i64, a.y1 as i64);
+            let d3 = orient(a.x0 as i64, a.y0 as i64, a.x1 as i64, a.y1 as i64, b.x0 as i64, b.y0 as i64);
+            let d4 = orient(a.x0 as i64, a.y0 as i64, a.x1 as i64, a.y1 as i64, b.x1 as i64, b.y1 as i64);
+            if ((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0)) && d1 != 0 && d2 != 0 && d3 != 0 && d4 != 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
 /// Integer sqrt floor, for reporting measured distances from squared values.
 pub fn isqrt(n: i64) -> i64 {
     if n < 0 { return 0; }

@@ -1,22 +1,7 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
-    DeviceConstraint, DeviceId, PairConstraint,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
+    DeviceId, PairConstraint,
 };
-
-/// Thermal tag for a device, indicating power dissipation and required spacing.
-#[derive(Debug, Clone)]
-pub struct ThermalTag {
-    pub device_id: DeviceId,
-    /// Estimated power dissipation (mW).
-    pub power_mw: f64,
-    pub is_power_device: bool,
-    /// Minimum distance to matched devices for thermal gradient control (um).
-    pub min_distance_to_matched_um: f64,
-}
-
-impl DeviceConstraint for ThermalTag {
-    fn device_id(&self) -> DeviceId { self.device_id }
-}
 
 /// Pairwise thermal gradient constraint between matched-pair devices.
 ///
@@ -32,14 +17,24 @@ pub struct ThermalGradientConstraint {
 }
 
 impl PairConstraint for ThermalGradientConstraint {
-    fn device_a(&self) -> DeviceId { self.device_a }
-    fn device_b(&self) -> DeviceId { self.device_b }
-    fn distance_budget_um(&self) -> f64 { 0.0 }
+    fn device_a(&self) -> DeviceId {
+        self.device_a
+    }
+    fn device_b(&self) -> DeviceId {
+        self.device_b
+    }
+    fn distance_budget_um(&self) -> f64 {
+        0.0
+    }
 }
 
 impl Contractable for ThermalGradientConstraint {
-    fn strength(&self) -> ConstraintStrength { ConstraintStrength::Hard }
-    fn priority(&self) -> i32 { 75 }
+    fn strength(&self) -> ConstraintStrength {
+        ConstraintStrength::Hard
+    }
+    fn priority(&self) -> i32 {
+        75
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
         &[ConstraintStage::Placement]

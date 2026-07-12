@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use substrate3::DeviceType;
+use crate::DeviceType;
 
 /// One device instance from the SPICE netlist.
 #[derive(Debug, Clone)]

@@ -27,6 +27,22 @@ You still need a `Deck` (from `params.json`) even without GDS — it supplies th
 name → `LayerId` mapping and the rule/PEX parameters. See
 [params-json.md](params-json.md).
 
+## GDS imports and units
+
+`read_gds` and `load_gds` keep every coordinate as the exact `i32` database-unit
+integer stored in the file; neither silently rescales or rounds geometry.
+`GdsLayout::units` exposes the two values from the GDS `UNITS` record, including
+`database_unit_nm()`. The low-level `read_gds` parser can represent a legacy stream
+without `UNITS` as `None`. The deck-aware `load_gds` entry point is fail-closed: it
+requires `UNITS` and rejects a database-unit size that differs from `deck.dbu_nm`
+(apart from documented REAL8 representation tolerance).
+
+After import, inspect `GdsLayout::unmapped_geometry`. It is a deterministic list
+of `(layer, datatype, element_count)` diagnostics for BOUNDARY/BOX/PATH records
+not present in the supplied `LayerTable`. Callers can reject or explicitly waive
+them; geometry cannot disappear without a caller-visible count. TEXT records keep
+their raw GDS layer/datatype as metadata and are not included in this geometry count.
+
 ## The GeometryStore
 
 Struct-of-arrays; a polygon is an index range, not an object (`src/geometry.rs`):

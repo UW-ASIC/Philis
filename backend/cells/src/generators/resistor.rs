@@ -1,11 +1,9 @@
 //! Resistor cell generator: body resistors with serpentine folding.
 
-use substrate3::{
-    CellBuilder, CellError, DeviceType, Orientation, PatternType, PortDef,
-};
+use crate::{CellBuilder, CellError, DeviceType, Orientation, PatternType, PortDef};
 
-use crate::device::DeviceRecord;
 use super::{CellSpec, Pdk};
+use crate::device::DeviceRecord;
 
 /// One point in the resistor variant space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +25,10 @@ impl CellSpec for ResistorSpec {
         feasible_segments(&devices[0], pdk)
             .into_iter()
             .flat_map(|n_segments| {
-                patterns.iter().map(move |&pattern| ResistorSpec { n_segments, pattern })
+                patterns.iter().map(move |&pattern| ResistorSpec {
+                    n_segments,
+                    pattern,
+                })
             })
             .collect()
     }
@@ -102,8 +103,7 @@ impl CellSpec for ResistorSpec {
             let sx = slot as i32 * seg_pitch;
             let total_h = head_l + seg_l + head_l;
 
-            let (bx, by, bw, bh) =
-                orient.transform_rect(0, 0, body_w, total_h, body_w, total_h);
+            let (bx, by, bw, bh) = orient.transform_rect(0, 0, body_w, total_h, body_w, total_h);
             b.rect(&ly.poly, sx + bx, by, bw, bh)?;
 
             let cy_top = head_l / 2 - ct / 2;
@@ -121,7 +121,14 @@ impl CellSpec for ResistorSpec {
             let ext = 250;
             if seg_idx == 0 {
                 b.rect(&ly.li, sx + tx, ty - ext, ct, ext + ct)?;
-                b.pin(&format!("{}:P", dev.name), &ly.li, sx + tx, ty - ext, ct, ct)?;
+                b.pin(
+                    &format!("{}:P", dev.name),
+                    &ly.li,
+                    sx + tx,
+                    ty - ext,
+                    ct,
+                    ct,
+                )?;
             }
             if seg_idx == n_segments - 1 {
                 b.rect(&ly.li, sx + bx2, by2, ct, ext + ct)?;
@@ -224,7 +231,9 @@ fn greedy_centroid_sequence(counts: &[usize]) -> Vec<usize> {
                 seq[hi] = pick2;
                 remaining[pick2] = remaining[pick2].saturating_sub(1);
             }
-            if hi == 0 { break; }
+            if hi == 0 {
+                break;
+            }
             hi -= 1;
         }
         lo += 1;
@@ -258,19 +267,24 @@ fn tolerance_width(dev: &DeviceRecord, pdk: &Pdk) -> i32 {
     w_min
 }
 
-/// Fold-count domain: aspect-driven default, then a shallower even fold.
+/// Electrically equivalent fold-count domain, ranked by geometric diversity.
 fn feasible_segments(dev: &DeviceRecord, pdk: &Pdk) -> Vec<i32> {
-    let aspect = f64::from(dev.l) / f64::from(dev.w.max(1));
-    if aspect <= pdk.res_serpentine_aspect {
-        return vec![1];
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    let base = ((f64::from(dev.l) / f64::from(pdk.res_min_segment)).ceil() as i32).max(1);
-    let evenize = |n: i32| if n <= 1 { 2 } else { n + n % 2 };
-    let mut opts = vec![evenize(base)];
-    let half = evenize(base / 2);
-    if half < opts[0] && half >= 2 {
-        opts.push(half);
+    let max_segments = (dev.l / pdk.res_min_segment.max(1)).clamp(1, 64);
+    let mut opts: Vec<i32> = (1..=max_segments)
+        .filter(|&n| dev.l % n == 0 && (n == 1 || n % 2 == 0))
+        .collect();
+    opts.sort_by(|&a, &b| {
+        let quality = |n: i32| {
+            let w = f64::from(n * (dev.w + pdk.res_seg_gap));
+            let h = f64::from(2 * pdk.res_head + dev.l / n);
+            (w / h).ln().abs()
+        };
+        quality(a).total_cmp(&quality(b))
+    });
+    opts.truncate(8);
+    opts.sort_unstable();
+    if opts.is_empty() {
+        opts.push(1);
     }
     opts
 }
@@ -279,14 +293,10 @@ fn feasible_segments(dev: &DeviceRecord, pdk: &Pdk) -> Vec<i32> {
 mod tests {
     use super::*;
     use crate::generators::SpecCell;
-    use substrate3::{CellBuilder, MatchingTier};
+    use crate::{CellBuilder, MatchingTier};
 
-    fn test_deck() -> substrate3::Deck {
-        crate::test_util::deck_from_layers(&[
-            ("poly", 66, 20),
-            ("li", 67, 20),
-            ("licon", 66, 44),
-        ])
+    fn test_deck() -> crate::Deck {
+        crate::test_util::deck_from_layers(&[("poly", 66, 20), ("li", 67, 20), ("licon", 66, 44)])
     }
 
     fn res(name: &str, w: i32, l: i32) -> DeviceRecord {

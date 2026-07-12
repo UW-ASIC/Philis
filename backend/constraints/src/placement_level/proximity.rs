@@ -1,5 +1,5 @@
 use crate::types::{
-    Contractable, ConstraintContract, ConstraintStage, ConstraintStrength, ConstraintStatus,
+    ConstraintContract, ConstraintStage, ConstraintStatus, ConstraintStrength, Contractable,
     DeviceId, PairConstraint,
 };
 
@@ -13,14 +13,24 @@ pub struct ProximityRule {
 }
 
 impl PairConstraint for ProximityRule {
-    fn device_a(&self) -> DeviceId { self.device_a }
-    fn device_b(&self) -> DeviceId { self.device_b }
-    fn distance_budget_um(&self) -> f64 { self.min_distance_um }
+    fn device_a(&self) -> DeviceId {
+        self.device_a
+    }
+    fn device_b(&self) -> DeviceId {
+        self.device_b
+    }
+    fn distance_budget_um(&self) -> f64 {
+        self.min_distance_um
+    }
 }
 
 impl Contractable for ProximityRule {
-    fn strength(&self) -> ConstraintStrength { ConstraintStrength::Soft }
-    fn priority(&self) -> i32 { 40 }
+    fn strength(&self) -> ConstraintStrength {
+        ConstraintStrength::Soft
+    }
+    fn priority(&self) -> i32 {
+        40
+    }
 
     fn stages(&self) -> &[ConstraintStage] {
         &[ConstraintStage::Placement]

@@ -8,5 +8,7 @@ pub struct CurrentFlowTag {
 }
 
 impl DeviceConstraint for CurrentFlowTag {
-    fn device_id(&self) -> DeviceId { self.device_id }
+    fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
 }

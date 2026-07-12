@@ -1,5 +1,38 @@
 # Conformance Suite TODO
 
+## Open
+
+- [x] GPU: device edge-pool buffers now content-hash cached (repeat uploads ~1µs)
+  and chunked launches pipelined (queue all, read after). Measured on RTX 4060:
+  upload was never the bottleneck (79µs); the pair kernel is compute-bound at
+  ~25G evals/s. Thread-tiling (8 evals/thread) measured SLOWER (occupancy) and
+  was reverted — see comment in pair_near_kernel.
+- [ ] GPU next headroom (in measured-payoff order): (1) the far-mask enumerates
+  the full |Ea|×|Eb| brute product while the CPU grid path is linear — CPU
+  overtakes GPU around combs:16k fingers; feeding the kernel grid-localized edge
+  pairs instead would make GPU work linear too. (2) Line<f32> vectorized loads /
+  shared-memory tiling for the remaining ~6x to peak FLOPS. (3) calibration probe
+  for GPU_MIN_PAIR_WORK instead of the 4060 constant.
+
+- [ ] Boolean merge engine: min_enclosed_area / cheesing detect nested-poly holes
+  only. Holes formed by a RING of touching polys (or by keyhole slits post-merge)
+  need real polygon booleans (union + hole extraction). Also unlocks
+  merged-geometry width/spacing without the merge_groups compound heuristics.
+
+- [x] Shrink klayout_compare.py skip list — closed `prl_spacing` (space_check
+  projection metric + min_projection), `wide_dependent_spacing` (bbox min-dim
+  partition; the sized(-t/2).sized(t/2) trick collapses shapes exactly at the
+  threshold), `eol_spacing` (short edges via 3-arg with_length + edge
+  separation_check with projection metric), `min_density`/`max_density` (manual
+  window loop mirroring check_density), `cheesing` (raw-shape containment —
+  holes() can't see same-polarity slot markers), `redundant_via` (python center
+  distance oracle). All 21 new cases agree exactly (75/75). Still skipped:
+  antenna/antenna_car, asymmetric_enclosure, max_distance_to_tap,
+  multi_patterning, polygon_validity, strict variants, via_array_spacing.
+- [x] PEX W1: every supported rectilinear conductor gets both R and ground C.
+  `PEX_PER_NET` pins 10 aF area + 176 aF fringe + 200 aF mutual = 386 aF per net.
+  Unsupported R/C geometry is diagnostic and blocks checked per-net extraction.
+
 ## DRC — engine missing
 
 - [x] Width w/ length dependency (wide-metal)
@@ -46,8 +79,8 @@
 - [x] Wrong device type / flavor (Vt variants)
 - [x] Parametric W/L tolerance (runner passes W/L from manifest)
 - [x] Series merge / parallel reduction
-- [x] Hierarchical vs flat compare
-- [x] Black-box / abstract
+- [ ] Production hierarchy-preserving compare with bound child ports/instances
+- [ ] Black-box/equated-cell semantics beyond the current API placeholders
 - [x] Isomorphic-graph / automorphism trap
 - [x] Label-driven vs geometry-driven conflict
 - [x] STRICT mode
@@ -56,7 +89,7 @@
 
 - [x] Intentional open (net split)
 - [x] Parallel fingers vs multiplier
-- [x] VDD/VSS swap (needs net seeding) — net_seeds field on RefNetlist; isomorphic detection in comparator
+- [ ] VDD/VSS/name seeding that binds layout labels to reference net identities
 
 ## PEX — engine missing
 
@@ -64,14 +97,14 @@
 - [x] Fringe vs area ratio sweep
 - [x] Corner & via resistance
 - [x] Wide bus / comb / interdigitated
-- [x] Dummy-fill impact
+- [ ] Explicit process-calibrated fill impact (no size-based inference)
 - [x] Floating-metal effects
-- [x] Ground-plane & shielding
-- [x] High-aspect-ratio stacks
+- [ ] Ground-plane and shielding model from an explicit process stack
+- [ ] High-aspect-ratio/distributed conductor and via topology
 
 ## PEX — test cases missing (engine supports)
 
-- [x] Per-net attribution (engine has `run_pex_by_net`, runner doesn't use it)
+- [x] Per-net attribution, including checked extraction diagnostics and floating sentinel nets
 - [x] Spacing sweep (multiple S values)
 - [x] Width sweep
 - [x] Vertical parallel wires (only tested horizontal)

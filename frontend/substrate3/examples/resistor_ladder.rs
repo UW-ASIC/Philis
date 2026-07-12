@@ -12,30 +12,46 @@ use substrate3::*;
 // ---------------------------------------------------------------------------
 
 struct UnitResistor {
-    w: i32,   // body width (nm)
-    l: i32,   // body length (nm)
+    w: i32, // body width (nm)
+    l: i32, // body length (nm)
 }
 
 impl CellGenerator for UnitResistor {
     fn generate(&self, b: &mut CellBuilder) -> Result<(), CellError> {
-        let ct = 170;
-        let head_l = 300; // head region for contacts
+        // Step 1: use PDK construction dimensions and semantic layer roles.
+        let pdk = b.pdk()?;
+        let ct = pdk.contact;
+        let head_l = pdk.res_head;
+        let layers = &pdk.layers;
         let total_l = head_l + self.l + head_l;
 
-        // Resistor body (poly for poly resistor, diff for diffusion resistor)
-        b.rect("poly", 0, 0, self.w, total_l)?;
+        // Step 2: emit the unit segment without process-name assumptions.
+        b.rect(&layers.poly, 0, 0, self.w, total_l)?;
 
         // RPO (resistor protection oxide) — marks the resistive region
         // Only covers the body, not the heads
-        b.rect("li", 0, head_l, self.w, self.l)?;
+        b.rect(&layers.li, 0, head_l, self.w, self.l)?;
 
         // Head contacts (left/bottom and right/top)
         let cx = self.w / 2 - ct / 2;
-        b.rect("li", cx, head_l / 2 - ct / 2, ct, ct)?;
-        b.pin("A", "li", cx, head_l / 2 - ct / 2, ct, ct)?;
+        b.rect(&layers.li, cx, head_l / 2 - ct / 2, ct, ct)?;
+        b.pin("A", &layers.li, cx, head_l / 2 - ct / 2, ct, ct)?;
 
-        b.rect("li", cx, head_l + self.l + head_l / 2 - ct / 2, ct, ct)?;
-        b.pin("B", "li", cx, head_l + self.l + head_l / 2 - ct / 2, ct, ct)?;
+        b.rect(
+            &layers.li,
+            cx,
+            head_l + self.l + head_l / 2 - ct / 2,
+            ct,
+            ct,
+        )?;
+        b.pin(
+            "B",
+            &layers.li,
+            cx,
+            head_l + self.l + head_l / 2 - ct / 2,
+            ct,
+            ct,
+        )?;
 
         Ok(())
     }
@@ -66,21 +82,26 @@ impl CellGenerator for ResistorLadder {
         b.set_device_type(DeviceType::Res);
         b.set_pattern(PatternType::Single);
 
-        let unit = UnitResistor { w: self.w, l: self.l };
+        let unit = UnitResistor {
+            w: self.w,
+            l: self.l,
+        };
 
         // Trial for unit dimensions
-        let mut trial = CellBuilder::new(b.deck(), MatchingTier::None, 0);
+        let context = b.context().ok_or(CellError::MissingAnalogParams)?;
+        let mut trial = CellBuilder::with_context(context, MatchingTier::None, 0);
         unit.generate(&mut trial)?;
         let ub = trial.compute_bbox();
         let uw = ub.width();
         let uh = ub.height();
-        let col_pitch = uw + 200; // spacing between columns
+        let gap = b.pdk()?.res_seg_gap;
+        let col_pitch = uw + gap;
 
         for i in 0..self.n_units {
             let col = i % self.cols;
             let row = i / self.cols;
             let x = col as i32 * col_pitch;
-            let y = row as i32 * (uh + 400); // row spacing
+            let y = row as i32 * (uh + gap);
 
             // Serpentine: odd rows are MY-flipped so B of row N
             // aligns with A of row N+1 for series connection
@@ -105,7 +126,7 @@ impl CellGenerator for ResistorLadder {
 }
 
 fn main() {
-    let deck = example_deck();
+    let (deck, pdk) = example_process();
 
     // 8-unit ladder, 4 columns wide (2 rows serpentine)
     let ladder = ResistorLadder {
@@ -117,7 +138,7 @@ fn main() {
 
     println!("Ports: {:?}", ladder.ports());
 
-    let mut b = CellBuilder::new(&deck, MatchingTier::Moderate, 0);
+    let mut b = CellBuilder::with_context(CellContext::new(&deck, &pdk), MatchingTier::Moderate, 0);
     ladder.generate(&mut b).expect("generate ladder");
     let out = b.finish();
 
@@ -128,7 +149,7 @@ fn main() {
     println!("  total resistance segments: {}", out.meta.finger_count);
 }
 
-fn example_deck() -> Deck {
+fn example_process() -> (Deck, Pdk) {
     let json = r#"{
         "layers": {
             "diff":  {"layer": 65, "datatype": 20},
@@ -138,7 +159,16 @@ fn example_deck() -> Deck {
         },
         "drc": {
             "off_grid": {"grid": 5}
+        },
+        "cell": {
+            "layers": {"diff":"diff", "poly":"poly", "li":"li", "met1":"met1"},
+            "contact": 170,
+            "res_head": 300,
+            "res_seg_gap": 400
         }
     }"#;
-    Deck::from_json(json).expect("deck")
+    (
+        Deck::from_json(json).expect("deck"),
+        Pdk::from_json(json).expect("cell PDK"),
+    )
 }
