@@ -1821,6 +1821,7 @@ mod tests {
                 l: 100,
                 device_class: None,
             }],
+            device_sources: Vec::new(),
             bjt_devices: Vec::new(),
             net_count: 3,
             used_nets: 3,

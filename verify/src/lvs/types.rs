@@ -34,6 +34,16 @@ pub struct Device {
     pub device_class: Option<String>,
 }
 
+/// Exact source polygons used to recognize one MOS before any legacy reduction.
+/// Polygon indices address the input [`GeometryStore`](crate::geometry::GeometryStore).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceRecognitionSource {
+    pub gate_polygon: u32,
+    pub channel_polygon: u32,
+    pub well_polygon: Option<u32>,
+    pub rule_id: String,
+}
+
 /// BJT device extracted from layout.
 #[derive(Debug, Clone)]
 pub struct BjtDevice {
@@ -54,6 +64,9 @@ pub struct FloatingNet {
 
 pub struct ExtractedNetlist {
     pub devices: Vec<Device>,
+    /// One entry per `devices` item when recognition provenance is available.
+    /// Legacy/manual netlists and reduced devices deliberately leave this empty.
+    pub device_sources: Vec<DeviceRecognitionSource>,
     pub bjt_devices: Vec<BjtDevice>,
     pub net_count: usize,
     pub used_nets: usize,

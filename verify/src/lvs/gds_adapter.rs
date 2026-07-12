@@ -12,7 +12,7 @@ use super::hier_production::{
     HierArray, HierLayout, HierLayoutCell, HierLayoutInstance, HierTransform,
 };
 use super::production::*;
-use super::types::{DeviceFlavor, ExtractOpts};
+use super::types::{DeviceRecognitionSource, ExtractOpts};
 use crate::gds_lossless::{
     exact_pitch, stroke_path, GdsElement, GdsElementMeta, GdsLibrary, GdsProperty, GdsStructure,
     GdsTransform,
@@ -136,6 +136,11 @@ pub struct GdsHierarchyAdapterOptions {
     pub reject_unconfigured_text: bool,
     pub allow_boundary_port_contact: bool,
     pub max_array_copies: usize,
+    /// Maximum expanded non-black-box instance count across the selected top.
+    pub max_hierarchy_expanded_instances: usize,
+    /// Maximum cell nesting depth. Validation is iterative, so this is a
+    /// semantic/capacity limit rather than a process-stack limit.
+    pub max_hierarchy_depth: usize,
 }
 
 impl GdsHierarchyAdapterOptions {
@@ -153,6 +158,8 @@ impl GdsHierarchyAdapterOptions {
             reject_unconfigured_text: true,
             allow_boundary_port_contact: false,
             max_array_copies: 1_000_000,
+            max_hierarchy_expanded_instances: 1_000_000,
+            max_hierarchy_depth: 4_096,
         }
     }
 }
@@ -642,8 +649,8 @@ fn stable_net_names(
     cell: &str,
     detailed: &DetailedExtractedNetlist,
     sources: &BTreeMap<u32, BTreeSet<String>>,
-) -> BTreeMap<u32, String> {
-    detailed
+) -> Result<BTreeMap<u32, String>, GdsHierarchyAdapterError> {
+    let names = detailed
         .nets
         .iter()
         .map(|(&net, identity)| {
@@ -663,7 +670,21 @@ fn stable_net_names(
                 .unwrap_or_else(|| format!("gds:{cell}:derived"));
             (net, format!("{source}:N{net}"))
         })
-        .collect()
+        .collect::<BTreeMap<_, _>>();
+    let mut owners = BTreeMap::<String, (u32, String)>::new();
+    for (&net, name) in &names {
+        let folded = name.to_ascii_lowercase();
+        if let Some((other_net, other_name)) = owners.insert(folded, (net, name.clone())) {
+            return Err(GdsHierarchyAdapterError::cell(
+                GdsHierarchyAdapterErrorKind::ConflictingEvidence,
+                cell,
+                format!(
+                    "generated/configured net names collide: net {other_net} `{other_name}` and net {net} `{name}`"
+                ),
+            ));
+        }
+    }
+    Ok(names)
 }
 
 fn map_terminal(
@@ -686,7 +707,27 @@ fn stringify_netlist(
     source: &DetailedExtractedNetlist,
     names: &BTreeMap<u32, String>,
     sources: &BTreeMap<u32, BTreeSet<String>>,
-) -> DetailedNetlist<String> {
+    recognition: &[DeviceRecognitionSource],
+    source_shapes: &[SourceShape],
+) -> Result<DetailedNetlist<String>, GdsHierarchyAdapterError> {
+    if !source.two_terminal_devices.is_empty() || !source.bjt_devices.is_empty() {
+        return Err(GdsHierarchyAdapterError::cell(
+            GdsHierarchyAdapterErrorKind::Unsupported,
+            cell,
+            "GDS adapter cannot yet link two-terminal/BJT recognition to exact source geometry",
+        ));
+    }
+    if recognition.len() != source.mos_devices.len() {
+        return Err(GdsHierarchyAdapterError::cell(
+            GdsHierarchyAdapterErrorKind::Unsupported,
+            cell,
+            format!(
+                "MOS recognition provenance has {} entries for {} devices",
+                recognition.len(),
+                source.mos_devices.len()
+            ),
+        ));
+    }
     let mut out = DetailedNetlist::empty(cell);
     for (&net, identity) in &source.nets {
         let id = names[&net].clone();
@@ -706,104 +747,96 @@ fn stringify_netlist(
             },
         );
     }
-    let device_path = |kind: &str, index: usize, connected: &[u32]| {
-        let source = connected
-            .iter()
-            .filter_map(|net| sources.get(net))
-            .flat_map(|set| set.iter())
-            .min()
-            .cloned()
-            .unwrap_or_else(|| format!("gds:{cell}:derived"));
-        (
-            format!("gds:{cell}:{kind}{index}:{source}"),
-            HierarchyPath(vec![
-                format!("gds:{cell}"),
-                source,
-                format!("{kind}{index}"),
-            ]),
-        )
-    };
-    out.mos_devices = source
+    for (index, (device, recognized)) in source
         .mos_devices
         .iter()
+        .zip(recognition.iter())
         .enumerate()
-        .map(|(index, device)| {
-            let (stable_id, hierarchy_path) =
-                device_path("M", index, &[device.drain, device.gate, device.source]);
-            MosDeviceRecord {
-                identity: DeviceIdentity {
-                    stable_id,
-                    hierarchy_path: hierarchy_path.clone(),
-                    model: device.identity.model.clone(),
-                    device_class: device.identity.device_class.clone(),
-                    flavor: device.identity.flavor,
-                },
-                kind: device.kind.clone(),
-                drain: names[&device.drain].clone(),
-                gate: names[&device.gate].clone(),
-                source: names[&device.source].clone(),
-                body: map_terminal(&device.body, names, &hierarchy_path),
-                well: device
-                    .well
-                    .as_ref()
-                    .map(|terminal| map_terminal(terminal, names, &hierarchy_path)),
-                substrate: device
-                    .substrate
-                    .as_ref()
-                    .map(|terminal| map_terminal(terminal, names, &hierarchy_path)),
-                properties: device.properties.clone(),
-            }
-        })
-        .collect();
-    out.two_terminal_devices = source
-        .two_terminal_devices
-        .iter()
-        .enumerate()
-        .map(|(index, device)| {
-            let (stable_id, hierarchy_path) =
-                device_path("X", index, &[device.terminal_a, device.terminal_b]);
-            TwoTerminalRecord {
-                identity: DeviceIdentity {
-                    stable_id,
-                    hierarchy_path: hierarchy_path.clone(),
-                    model: device.identity.model.clone(),
-                    device_class: device.identity.device_class.clone(),
-                    flavor: DeviceFlavor::Standard,
-                },
-                kind: device.kind.clone(),
-                terminal_a: names[&device.terminal_a].clone(),
-                terminal_b: names[&device.terminal_b].clone(),
-                properties: device.properties.clone(),
-            }
-        })
-        .collect();
-    out.bjt_devices = source
-        .bjt_devices
-        .iter()
-        .enumerate()
-        .map(|(index, device)| {
-            let (stable_id, hierarchy_path) =
-                device_path("Q", index, &[device.collector, device.base, device.emitter]);
-            BjtDeviceRecord {
-                identity: DeviceIdentity {
-                    stable_id,
-                    hierarchy_path: hierarchy_path.clone(),
-                    model: device.identity.model.clone(),
-                    device_class: device.identity.device_class.clone(),
-                    flavor: DeviceFlavor::Standard,
-                },
-                kind: device.kind.clone(),
-                collector: names[&device.collector].clone(),
-                base: names[&device.base].clone(),
-                emitter: names[&device.emitter].clone(),
-                substrate: device
-                    .substrate
-                    .as_ref()
-                    .map(|terminal| map_terminal(terminal, names, &hierarchy_path)),
-                properties: device.properties.clone(),
-            }
-        })
-        .collect();
+    {
+        if !device
+            .identity
+            .model
+            .as_deref()
+            .is_some_and(|model| model.eq_ignore_ascii_case(&recognized.rule_id))
+        {
+            return Err(GdsHierarchyAdapterError::cell(
+                GdsHierarchyAdapterErrorKind::ConflictingEvidence,
+                cell,
+                format!(
+                    "MOS {index} model {:?} contradicts recognition rule `{}`",
+                    device.identity.model, recognized.rule_id
+                ),
+            ));
+        }
+        let gate = source_shapes
+            .get(recognized.gate_polygon as usize)
+            .ok_or_else(|| {
+                GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::Extraction,
+                    cell,
+                    format!(
+                        "MOS {index} gate polygon {} is outside source geometry",
+                        recognized.gate_polygon
+                    ),
+                )
+            })?;
+        let channel = source_shapes
+            .get(recognized.channel_polygon as usize)
+            .ok_or_else(|| {
+                GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::Extraction,
+                    cell,
+                    format!(
+                        "MOS {index} channel polygon {} is outside source geometry",
+                        recognized.channel_polygon
+                    ),
+                )
+            })?;
+        let mut hierarchy = vec![
+            format!("gds:{cell}"),
+            gate.stable_id.clone(),
+            channel.stable_id.clone(),
+        ];
+        if let Some(well) = recognized.well_polygon {
+            let well = source_shapes.get(well as usize).ok_or_else(|| {
+                GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::Extraction,
+                    cell,
+                    format!("MOS {index} well polygon {well} is outside source geometry"),
+                )
+            })?;
+            hierarchy.push(well.stable_id.clone());
+        }
+        hierarchy.push(format!("M{index}"));
+        let hierarchy_path = HierarchyPath(hierarchy);
+        let stable_id = format!(
+            "gds:{cell}:MOS:{}:{}:{}",
+            recognized.rule_id, gate.stable_id, channel.stable_id
+        );
+        out.mos_devices.push(MosDeviceRecord {
+            identity: DeviceIdentity {
+                stable_id,
+                hierarchy_path: hierarchy_path.clone(),
+                model: device.identity.model.clone(),
+                device_class: device.identity.device_class.clone(),
+                flavor: device.identity.flavor,
+            },
+            kind: device.kind.clone(),
+            drain: names[&device.drain].clone(),
+            gate: names[&device.gate].clone(),
+            source: names[&device.source].clone(),
+            body: map_terminal(&device.body, names, &hierarchy_path),
+            well: device
+                .well
+                .as_ref()
+                .map(|terminal| map_terminal(terminal, names, &hierarchy_path)),
+            substrate: device
+                .substrate
+                .as_ref()
+                .map(|terminal| map_terminal(terminal, names, &hierarchy_path)),
+            properties: device.properties.clone(),
+        });
+    }
     out.soft_connections = source
         .soft_connections
         .iter()
@@ -825,7 +858,7 @@ fn stringify_netlist(
         })
         .collect();
     out.seed_aliases = source.seed_aliases.clone();
-    out
+    Ok(out)
 }
 
 fn build_local_cell(
@@ -851,7 +884,7 @@ fn build_local_cell(
         .get(&structure.name)
         .cloned()
         .unwrap_or_default();
-    let detailed = extract_detailed_netlist(
+    let mut detailed = extract_detailed_netlist(
         &store,
         deck,
         &DetailedExtractionOptions {
@@ -892,6 +925,43 @@ fn build_local_cell(
         )
     })?;
 
+    // Electrical identity uses the configured spelling; raw TEXT spelling stays
+    // in labels/provenance. This prevents `P` vs `p` from changing hierarchy keys.
+    for identity in detailed.nets.values_mut() {
+        let mut canonical_ports = BTreeMap::new();
+        for (observed, direction) in &identity.ports {
+            let Some(configured) = ports
+                .keys()
+                .find(|name| name.eq_ignore_ascii_case(observed))
+            else {
+                return Err(GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::Extraction,
+                    &structure.name,
+                    format!("extracted port `{observed}` has no canonical configuration"),
+                ));
+            };
+            canonical_ports.insert(configured.clone(), *direction);
+        }
+        identity.ports = canonical_ports;
+        let mut canonical_globals = BTreeSet::new();
+        for observed in &identity.globals {
+            let Some(configured) = options
+                .global_names
+                .iter()
+                .chain(deck.global_nets.iter())
+                .find(|name| name.eq_ignore_ascii_case(observed))
+            else {
+                return Err(GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::Extraction,
+                    &structure.name,
+                    format!("extracted global `{observed}` has no canonical configuration"),
+                ));
+            };
+            canonical_globals.insert(configured.clone());
+        }
+        identity.globals = canonical_globals;
+    }
+
     // A repeated label on disconnected nets is ambiguous adapter evidence, not a
     // soft/open hint that may be guessed through hierarchy.
     let mut nets_by_label = BTreeMap::<String, BTreeSet<u32>>::new();
@@ -912,7 +982,7 @@ fn build_local_cell(
     }
 
     let sources = source_sets_by_net(&raw.net_of_poly, &source_shapes);
-    let names = stable_net_names(&structure.name, &detailed, &sources);
+    let names = stable_net_names(&structure.name, &detailed, &sources)?;
     if raw.net_of_poly.len() != source_shapes.len() {
         return Err(GdsHierarchyAdapterError::cell(
             GdsHierarchyAdapterErrorKind::Extraction,
@@ -976,7 +1046,14 @@ fn build_local_cell(
             }
         }
     }
-    let netlist = stringify_netlist(&structure.name, &detailed, &names, &sources);
+    let netlist = stringify_netlist(
+        &structure.name,
+        &detailed,
+        &names,
+        &sources,
+        &raw.device_sources,
+        &source_shapes,
+    )?;
 
     let mut net_shapes = Vec::new();
     for (polygon, &net) in raw.net_of_poly.iter().enumerate() {
@@ -1058,8 +1135,39 @@ fn build_local_cell(
 
 fn validate_options(
     library: &GdsLibrary,
+    deck: &Deck,
     options: &GdsHierarchyAdapterOptions,
 ) -> Result<(), GdsHierarchyAdapterError> {
+    let envelope = library.envelope;
+    if !(envelope.header
+        && envelope.bgnlib
+        && envelope.libname
+        && envelope.units
+        && envelope.endlib)
+    {
+        return Err(GdsHierarchyAdapterError::cell(
+            GdsHierarchyAdapterErrorKind::Unsupported,
+            &options.top_cell,
+            "production hierarchy adaptation requires a complete strict GDS envelope including UNITS",
+        ));
+    }
+    let gds_dbu_nm = library.units.meters_per_database_unit * 1.0e9;
+    if !gds_dbu_nm.is_finite()
+        || gds_dbu_nm <= 0.0
+        || !deck.dbu_nm.is_finite()
+        || deck.dbu_nm <= 0.0
+        || (gds_dbu_nm - deck.dbu_nm).abs()
+            > 1.0e-12 * gds_dbu_nm.abs().max(deck.dbu_nm.abs()).max(1.0)
+    {
+        return Err(GdsHierarchyAdapterError::cell(
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence,
+            &options.top_cell,
+            format!(
+                "GDS database unit {gds_dbu_nm} nm conflicts with deck DBU {} nm",
+                deck.dbu_nm
+            ),
+        ));
+    }
     if !library.unhandled_records.is_empty() {
         return Err(GdsHierarchyAdapterError::cell(
             GdsHierarchyAdapterErrorKind::Unsupported,
@@ -1085,11 +1193,14 @@ fn validate_options(
             "top_cell must not be empty",
         ));
     }
-    if options.max_array_copies == 0 {
+    if options.max_array_copies == 0
+        || options.max_hierarchy_expanded_instances == 0
+        || options.max_hierarchy_depth == 0
+    {
         return Err(GdsHierarchyAdapterError::cell(
             GdsHierarchyAdapterErrorKind::InvalidOptions,
             &options.top_cell,
-            "max_array_copies must be positive",
+            "array, expanded-hierarchy, and hierarchy-depth limits must be positive",
         ));
     }
     let cells: HashSet<&str> = library
@@ -1103,6 +1214,55 @@ fn validate_options(
             &options.top_cell,
             "configured top cell is undefined",
         ));
+    }
+    let mut folded_cells = BTreeMap::<String, String>::new();
+    for structure in &library.structures {
+        let folded = structure.name.to_ascii_lowercase();
+        if let Some(previous) = folded_cells.insert(folded, structure.name.clone()) {
+            return Err(GdsHierarchyAdapterError::cell(
+                GdsHierarchyAdapterErrorKind::ConflictingEvidence,
+                &structure.name,
+                format!(
+                    "GDS structure names `{previous}` and `{}` collide case-insensitively",
+                    structure.name
+                ),
+            ));
+        }
+    }
+    for (cell, ports) in &options.cell_ports {
+        if !cells.contains(cell.as_str()) {
+            return Err(GdsHierarchyAdapterError::cell(
+                GdsHierarchyAdapterErrorKind::InvalidOptions,
+                cell,
+                "port configuration names an undefined or non-canonical GDS structure",
+            ));
+        }
+        let mut folded_ports = BTreeSet::new();
+        for port in ports.keys() {
+            if port.is_empty()
+                || port.trim() != port
+                || !folded_ports.insert(port.to_ascii_lowercase())
+            {
+                return Err(GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::InvalidOptions,
+                    cell,
+                    format!("port `{port}` is empty, whitespace-padded, or case-duplicate"),
+                ));
+            }
+        }
+    }
+    let mut folded_globals = BTreeSet::new();
+    for global in &options.global_names {
+        if global.is_empty()
+            || global.trim() != global
+            || !folded_globals.insert(global.to_ascii_lowercase())
+        {
+            return Err(GdsHierarchyAdapterError::cell(
+                GdsHierarchyAdapterErrorKind::InvalidOptions,
+                &options.top_cell,
+                format!("global `{global}` is empty, whitespace-padded, or case-duplicate"),
+            ));
+        }
     }
     let mut text_pairs = HashSet::new();
     for rule in &options.text_evidence {
@@ -1124,6 +1284,7 @@ fn validate_options(
             ));
         }
     }
+    let mut folded_black_boxes = BTreeSet::new();
     for (name, black_box) in &options.black_boxes {
         if name.trim().is_empty() || black_box.ports.is_empty() {
             return Err(GdsHierarchyAdapterError::cell(
@@ -1132,12 +1293,24 @@ fn validate_options(
                 format!("black box `{name}` requires a nonempty complete port map"),
             ));
         }
+        if name.trim() != name || !folded_black_boxes.insert(name.to_ascii_lowercase()) {
+            return Err(GdsHierarchyAdapterError::cell(
+                GdsHierarchyAdapterErrorKind::InvalidOptions,
+                &options.top_cell,
+                format!("black box `{name}` is whitespace-padded or case-duplicate"),
+            ));
+        }
         let folded = black_box
             .ports
             .iter()
             .map(|port| port.to_ascii_lowercase())
             .collect::<BTreeSet<_>>();
-        if folded.len() != black_box.ports.len() || black_box.ports.iter().any(|p| p.is_empty()) {
+        if folded.len() != black_box.ports.len()
+            || black_box
+                .ports
+                .iter()
+                .any(|port| port.is_empty() || port.trim() != port)
+        {
             return Err(GdsHierarchyAdapterError::cell(
                 GdsHierarchyAdapterErrorKind::InvalidOptions,
                 &options.top_cell,
@@ -1345,16 +1518,15 @@ fn apply_transform(
     })
 }
 
-fn geometric_binding(
+fn geometric_candidates(
     cell: &str,
     element: usize,
-    port: &str,
     access: &[NetShape],
     parent: &LocalCell,
     transform: HierTransform,
     offset: (i64, i64),
     allow_boundary: bool,
-) -> Result<String, GdsHierarchyAdapterError> {
+) -> Result<BTreeSet<String>, GdsHierarchyAdapterError> {
     let mut candidates = BTreeSet::new();
     for child in access {
         let transformed = apply_transform(cell, element, transform, offset, &child.ring)?;
@@ -1370,6 +1542,28 @@ fn geometric_binding(
             }
         }
     }
+    Ok(candidates)
+}
+
+fn geometric_binding(
+    cell: &str,
+    element: usize,
+    port: &str,
+    access: &[NetShape],
+    parent: &LocalCell,
+    transform: HierTransform,
+    offset: (i64, i64),
+    allow_boundary: bool,
+) -> Result<String, GdsHierarchyAdapterError> {
+    let candidates = geometric_candidates(
+        cell,
+        element,
+        access,
+        parent,
+        transform,
+        offset,
+        allow_boundary,
+    )?;
     match candidates.len() {
         1 => Ok(candidates.into_iter().next().unwrap()),
         0 => Err(GdsHierarchyAdapterError::element(
@@ -1486,7 +1680,40 @@ fn build_instance(
                     .iter()
                     .find_map(|(child, parent)| child.eq_ignore_ascii_case(port).then_some(parent))
                 {
-                    lookup_parent_net(&parent_structure.name, element_index, parent, parent_name)?
+                    let explicit_net = lookup_parent_net(
+                        &parent_structure.name,
+                        element_index,
+                        parent,
+                        parent_name,
+                    )?;
+                    if let Some(port_access) = access.and_then(|access| {
+                        access.iter().find_map(|(name, shapes)| {
+                            name.eq_ignore_ascii_case(port).then_some(shapes)
+                        })
+                    }) {
+                        let physical = geometric_candidates(
+                            &parent_structure.name,
+                            element_index,
+                            port_access,
+                            parent,
+                            transform,
+                            offset,
+                            options.allow_boundary_port_contact,
+                        )?;
+                        if !physical.is_empty()
+                            && (physical.len() != 1 || !physical.contains(&explicit_net))
+                        {
+                            return Err(GdsHierarchyAdapterError::element(
+                                GdsHierarchyAdapterErrorKind::ConflictingEvidence,
+                                &parent_structure.name,
+                                element_index,
+                                format!(
+                                    "explicit binding `{port}={parent_name}` resolves to `{explicit_net}` but exact access geometry contacts {physical:?} at AREF copy [{column},{row}]"
+                                ),
+                            ));
+                        }
+                    }
+                    explicit_net
                 } else {
                     let access = access
                         .and_then(|access| {
@@ -1518,7 +1745,7 @@ fn build_instance(
             if let Some(canonical) = &canonical_bindings {
                 if canonical != &bindings {
                     return Err(GdsHierarchyAdapterError::element(
-                        GdsHierarchyAdapterErrorKind::Unsupported,
+                        GdsHierarchyAdapterErrorKind::ConflictingEvidence,
                         &parent_structure.name,
                         element_index,
                         format!(
@@ -1546,6 +1773,17 @@ fn array_for(
     element: usize,
     reference: &crate::gds_lossless::GdsArrayReference,
 ) -> Result<HierArray, GdsHierarchyAdapterError> {
+    if reference.columns == 0 || reference.rows == 0 {
+        return Err(GdsHierarchyAdapterError::element(
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence,
+            cell,
+            element,
+            format!(
+                "AREF dimensions must be positive, got {} columns x {} rows",
+                reference.columns, reference.rows
+            ),
+        ));
+    }
     let pitch = |endpoint: i32, origin: i32, count: u16, axis: &str| {
         exact_pitch(endpoint, origin, count, axis)
             .map(i64::from)
@@ -1592,38 +1830,161 @@ fn array_for(
     })
 }
 
-fn validate_adapter_hierarchy(layout: &HierLayout) -> Result<(), GdsHierarchyAdapterError> {
-    fn visit(
-        name: &str,
-        layout: &HierLayout,
-        active: &mut Vec<String>,
-    ) -> Result<(), GdsHierarchyAdapterError> {
-        if active.iter().any(|cell| cell == name) {
-            let mut cycle = active.clone();
-            cycle.push(name.to_string());
+fn validate_adapter_hierarchy(
+    layout: &HierLayout,
+    options: &GdsHierarchyAdapterOptions,
+) -> Result<(), GdsHierarchyAdapterError> {
+    #[derive(Debug)]
+    struct Frame {
+        cell: String,
+        next_instance: usize,
+    }
+
+    if !layout.cells.contains_key(&layout.top_cell) {
+        return Err(GdsHierarchyAdapterError::cell(
+            GdsHierarchyAdapterErrorKind::UndefinedCell,
+            &layout.top_cell,
+            "undefined hierarchy top cell",
+        ));
+    }
+    // 0/absent = white, 1 = active, 2 = complete. This explicit DFS avoids
+    // process-stack recursion and visits shared DAG nodes only once.
+    let mut colors = BTreeMap::<String, u8>::new();
+    colors.insert(layout.top_cell.clone(), 1);
+    let mut stack = vec![Frame {
+        cell: layout.top_cell.clone(),
+        next_instance: 0,
+    }];
+    let mut postorder = Vec::new();
+    while !stack.is_empty() {
+        let depth = stack.len();
+        let frame_cell = stack.last().unwrap().cell.clone();
+        if depth > options.max_hierarchy_depth {
+            let path = stack
+                .iter()
+                .map(|frame| frame.cell.clone())
+                .collect::<Vec<_>>();
             return Err(GdsHierarchyAdapterError::cell(
-                GdsHierarchyAdapterErrorKind::HierarchyCycle,
-                name,
-                format!("hierarchy cycle: {}", cycle.join(" -> ")),
+                GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                &frame_cell,
+                format!(
+                    "hierarchy depth {} exceeds configured limit {} along {}",
+                    depth,
+                    options.max_hierarchy_depth,
+                    path.join(" -> ")
+                ),
             ));
         }
-        let cell = layout.cells.get(name).ok_or_else(|| {
+        let cell = layout.cells.get(&frame_cell).ok_or_else(|| {
             GdsHierarchyAdapterError::cell(
                 GdsHierarchyAdapterErrorKind::UndefinedCell,
-                name,
+                &frame_cell,
                 "undefined hierarchy cell",
             )
         })?;
-        active.push(name.to_string());
-        for instance in &cell.instances {
-            if !instance.black_box {
-                visit(&instance.target_cell, layout, active)?;
+        let next_instance = stack.last().unwrap().next_instance;
+        if next_instance == cell.instances.len() {
+            let completed = stack.pop().unwrap().cell;
+            colors.insert(completed.clone(), 2);
+            postorder.push(completed);
+            continue;
+        }
+        let instance = cell.instances[next_instance].clone();
+        stack.last_mut().unwrap().next_instance += 1;
+        if instance.black_box {
+            continue;
+        }
+        match colors.get(&instance.target_cell).copied().unwrap_or(0) {
+            2 => continue,
+            1 => {
+                let mut cycle = stack
+                    .iter()
+                    .map(|frame| frame.cell.clone())
+                    .collect::<Vec<_>>();
+                cycle.push(instance.target_cell.clone());
+                return Err(GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::HierarchyCycle,
+                    &frame_cell,
+                    format!("hierarchy cycle: {}", cycle.join(" -> ")),
+                ));
+            }
+            _ => {
+                if !layout.cells.contains_key(&instance.target_cell) {
+                    return Err(GdsHierarchyAdapterError::cell(
+                        GdsHierarchyAdapterErrorKind::UndefinedCell,
+                        &frame_cell,
+                        format!("undefined hierarchy cell `{}`", instance.target_cell),
+                    ));
+                }
+                colors.insert(instance.target_cell.clone(), 1);
+                stack.push(Frame {
+                    cell: instance.target_cell.clone(),
+                    next_instance: 0,
+                });
             }
         }
-        active.pop();
-        Ok(())
     }
-    visit(&layout.top_cell, layout, &mut Vec::new())
+
+    let mut expanded = BTreeMap::<String, usize>::new();
+    for name in postorder {
+        let cell = &layout.cells[&name];
+        let mut total = 0usize;
+        for instance in &cell.instances {
+            let copies = usize::try_from(instance.array.columns)
+                .ok()
+                .and_then(|columns| {
+                    usize::try_from(instance.array.rows)
+                        .ok()
+                        .and_then(|rows| columns.checked_mul(rows))
+                })
+                .ok_or_else(|| {
+                    GdsHierarchyAdapterError::cell(
+                        GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                        &name,
+                        format!("instance `{}` copy count overflows", instance.stable_id),
+                    )
+                })?;
+            let descendants = if instance.black_box {
+                0
+            } else {
+                expanded[&instance.target_cell]
+            };
+            let contribution = copies
+                .checked_mul(descendants.checked_add(1).ok_or_else(|| {
+                    GdsHierarchyAdapterError::cell(
+                        GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                        &name,
+                        "expanded hierarchy count overflow",
+                    )
+                })?)
+                .ok_or_else(|| {
+                    GdsHierarchyAdapterError::cell(
+                        GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                        &name,
+                        "expanded hierarchy count overflow",
+                    )
+                })?;
+            total = total.checked_add(contribution).ok_or_else(|| {
+                GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                    &name,
+                    "expanded hierarchy count overflow",
+                )
+            })?;
+            if total > options.max_hierarchy_expanded_instances {
+                return Err(GdsHierarchyAdapterError::cell(
+                    GdsHierarchyAdapterErrorKind::CapacityExceeded,
+                    &name,
+                    format!(
+                        "expanded hierarchy count {total} exceeds configured limit {}",
+                        options.max_hierarchy_expanded_instances
+                    ),
+                ));
+            }
+        }
+        expanded.insert(name, total);
+    }
+    Ok(())
 }
 
 /// Build a hierarchy-preserving W4 layout from the W2 lossless GDS database.
@@ -1633,7 +1994,7 @@ pub fn adapt_gds_hierarchy_to_lvs(
     options: &GdsHierarchyAdapterOptions,
     backend: Backend,
 ) -> Result<GdsHierarchyAdapterResult, GdsHierarchyAdapterError> {
-    validate_options(library, options)?;
+    validate_options(library, deck, options)?;
     let mut provenance = GdsHierarchyProvenance::default();
     let mut locals = BTreeMap::<String, LocalCell>::new();
     for structure in &library.structures {
@@ -1706,7 +2067,7 @@ pub fn adapt_gds_hierarchy_to_lvs(
         top_cell: options.top_cell.clone(),
         cells,
     };
-    validate_adapter_hierarchy(&layout)?;
+    validate_adapter_hierarchy(&layout, options)?;
     Ok(GdsHierarchyAdapterResult {
         layout,
         equated_cells: options.equated_cells.clone(),
@@ -1724,8 +2085,8 @@ mod tests {
     };
     use crate::lvs::{
         bind_reference_hierarchy, compare_hierarchical_production, parse_netlist, ConfiguredModel,
-        DeviceKind, HierLvsCache, HierProductionOptions, ProductionLvsStatus, ProductionMismatch,
-        ReferenceBindingOptions,
+        DeviceFlavor, DeviceKind, HierLvsCache, HierProductionOptions, ProductionLvsStatus,
+        ProductionMismatch, ReferenceBindingOptions,
     };
     use crate::params::{
         ConnectivityConfig, DeviceConfig, ErcParams, LayerDef, LayerTable, MosRule,
@@ -1998,12 +2359,12 @@ mod tests {
             .all(|device| { &device.drain == middle || &device.source == middle }));
 
         for device in &leaf.netlist.mos_devices {
-            assert_eq!(device.identity.hierarchy_path.0.len(), 3);
+            assert!(device.identity.hierarchy_path.0.len() >= 4);
             assert!(device.identity.hierarchy_path.0[0].starts_with("gds:leaf"));
-            assert!(adapted
-                .provenance
-                .objects
-                .contains_key(&device.identity.hierarchy_path.0[1]));
+            for source in &device.identity.hierarchy_path.0[1..3] {
+                assert!(adapted.provenance.objects.contains_key(source));
+            }
+            assert!(device.identity.stable_id.contains(":MOS:nch:"));
             assert!(!device.properties.contains_key("raw-text-property"));
         }
         for net in leaf.netlist.nets.values() {
@@ -2497,5 +2858,243 @@ X0 S D G1 G2 B mid\n\
             .expect("black-box reference provenance");
         assert_eq!(reference.properties.len(), 2);
         assert!(reference.local_net.is_none());
+    }
+
+    #[test]
+    fn strict_envelope_and_dbu_are_mandatory() {
+        let complete = library(vec![structure("top", Vec::new())]);
+        let options = GdsHierarchyAdapterOptions::new("top");
+
+        let mut incomplete = complete.clone();
+        incomplete.envelope.units = false;
+        let error =
+            adapt_gds_hierarchy_to_lvs(&incomplete, &deck(), &options, Backend::Cpu).unwrap_err();
+        assert_eq!(error.kind, GdsHierarchyAdapterErrorKind::Unsupported);
+        assert!(error.message.contains("complete strict GDS envelope"));
+
+        let mut wrong_dbu = complete;
+        wrong_dbu.units.meters_per_database_unit = 2.0e-9;
+        let error =
+            adapt_gds_hierarchy_to_lvs(&wrong_dbu, &deck(), &options, Backend::Cpu).unwrap_err();
+        assert_eq!(
+            error.kind,
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence
+        );
+        assert!(error.message.contains("conflicts with deck DBU"));
+    }
+
+    #[test]
+    fn port_case_is_canonical_and_generated_name_collisions_are_errors() {
+        let case_library = lossless_round_trip(library(vec![structure(
+            "top",
+            vec![
+                boundary(7, 0, 0, 100, 100, GdsElementMeta::default()),
+                text(7, 50, 50, "P", GdsElementMeta::default()),
+            ],
+        )]));
+        let mut options = GdsHierarchyAdapterOptions::new("top");
+        options.text_evidence.push(GdsTextEvidenceRule {
+            layer: 7,
+            datatype: 99,
+            use_string: true,
+            label_property_attributes: BTreeSet::new(),
+        });
+        options.cell_ports.insert(
+            "top".into(),
+            BTreeMap::from([("p".into(), PortDirection::Inout)]),
+        );
+        let adapted = adapt_gds_hierarchy_to_lvs(&case_library, &deck(), &options, Backend::Cpu)
+            .expect("case-insensitive TEXT binds to configured spelling");
+        assert!(adapted.layout.cells["top"].netlist.nets.contains_key("p"));
+        assert_eq!(adapted.layout.cells["top"].ports, vec!["p"]);
+
+        options.cell_ports.insert(
+            "top".into(),
+            BTreeMap::from([
+                ("P".into(), PortDirection::Input),
+                ("p".into(), PortDirection::Output),
+            ]),
+        );
+        let duplicate =
+            adapt_gds_hierarchy_to_lvs(&case_library, &deck(), &options, Backend::Cpu).unwrap_err();
+        assert_eq!(duplicate.kind, GdsHierarchyAdapterErrorKind::InvalidOptions);
+        assert!(duplicate.message.contains("case-duplicate"));
+
+        let collision_name = "gds:top:E0:N0";
+        let collision_library = lossless_round_trip(library(vec![structure(
+            "top",
+            vec![
+                boundary(7, 0, 0, 100, 100, GdsElementMeta::default()),
+                boundary(7, 200, 0, 300, 100, GdsElementMeta::default()),
+                text(7, 250, 50, collision_name, GdsElementMeta::default()),
+            ],
+        )]));
+        let mut collision_options = GdsHierarchyAdapterOptions::new("top");
+        collision_options.text_evidence.push(GdsTextEvidenceRule {
+            layer: 7,
+            datatype: 99,
+            use_string: true,
+            label_property_attributes: BTreeSet::new(),
+        });
+        collision_options.cell_ports.insert(
+            "top".into(),
+            BTreeMap::from([(collision_name.into(), PortDirection::Inout)]),
+        );
+        let collision = adapt_gds_hierarchy_to_lvs(
+            &collision_library,
+            &deck(),
+            &collision_options,
+            Backend::Cpu,
+        )
+        .unwrap_err();
+        assert_eq!(
+            collision.kind,
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence
+        );
+        assert!(collision.message.contains("net names collide"));
+    }
+
+    #[test]
+    fn explicit_properties_cannot_contradict_exact_geometry_or_aref_copies() {
+        let child = structure(
+            "child",
+            vec![
+                boundary(7, 0, 0, 100, 100, GdsElementMeta::default()),
+                text(7, 50, 50, "P", GdsElementMeta::default()),
+            ],
+        );
+        let top = structure(
+            "top",
+            vec![
+                boundary(7, 0, 0, 100, 100, GdsElementMeta::default()),
+                boundary(7, 200, 0, 300, 100, GdsElementMeta::default()),
+                text(7, 50, 50, "A", GdsElementMeta::default()),
+                text(7, 250, 50, "B", GdsElementMeta::default()),
+                sref("child", 0, 0, properties(&[(88, "P=B")])),
+            ],
+        );
+        let contradiction_library = lossless_round_trip(library(vec![child.clone(), top]));
+        let mut options = GdsHierarchyAdapterOptions::new("top");
+        options.text_evidence.push(GdsTextEvidenceRule {
+            layer: 7,
+            datatype: 99,
+            use_string: true,
+            label_property_attributes: BTreeSet::new(),
+        });
+        options.cell_ports.insert(
+            "child".into(),
+            BTreeMap::from([("P".into(), PortDirection::Inout)]),
+        );
+        options.instance_binding_property_attributes.insert(88);
+        let contradiction =
+            adapt_gds_hierarchy_to_lvs(&contradiction_library, &deck(), &options, Backend::Cpu)
+                .unwrap_err();
+        assert_eq!(
+            contradiction.kind,
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence
+        );
+        assert!(contradiction
+            .message
+            .contains("exact access geometry contacts"));
+
+        let array_top = structure(
+            "top",
+            vec![
+                boundary(7, 0, 0, 100, 100, GdsElementMeta::default()),
+                boundary(7, 200, 0, 300, 100, GdsElementMeta::default()),
+                text(7, 50, 50, "A", GdsElementMeta::default()),
+                text(7, 250, 50, "B", GdsElementMeta::default()),
+                GdsElement::Aref(GdsArrayReference {
+                    structure: "child".into(),
+                    columns: 2,
+                    rows: 1,
+                    origin: Point::new(0, 0),
+                    column_endpoint: Point::new(400, 0),
+                    row_endpoint: Point::new(0, 0),
+                    transform: GdsTransform::default(),
+                    meta: GdsElementMeta::default(),
+                }),
+            ],
+        );
+        options.instance_binding_property_attributes.clear();
+        let inconsistent_library = lossless_round_trip(library(vec![child, array_top]));
+        let inconsistent =
+            adapt_gds_hierarchy_to_lvs(&inconsistent_library, &deck(), &options, Backend::Cpu)
+                .unwrap_err();
+        assert_eq!(
+            inconsistent.kind,
+            GdsHierarchyAdapterErrorKind::ConflictingEvidence
+        );
+        assert!(inconsistent
+            .message
+            .contains("AREF copies produce different port maps"));
+    }
+
+    #[test]
+    fn zero_arrays_and_deep_or_expansive_dags_fail_with_typed_capacity() {
+        let child = structure("child", Vec::new());
+        let top = structure(
+            "top",
+            vec![GdsElement::Aref(GdsArrayReference {
+                structure: "child".into(),
+                columns: 0,
+                rows: 1,
+                origin: Point::new(0, 0),
+                column_endpoint: Point::new(0, 0),
+                row_endpoint: Point::new(0, 0),
+                transform: GdsTransform::default(),
+                meta: GdsElementMeta::default(),
+            })],
+        );
+        let zero = adapt_gds_hierarchy_to_lvs(
+            &library(vec![child, top]),
+            &deck(),
+            &GdsHierarchyAdapterOptions::new("top"),
+            Backend::Cpu,
+        )
+        .unwrap_err();
+        assert_eq!(zero.kind, GdsHierarchyAdapterErrorKind::ConflictingEvidence);
+        assert!(zero.message.contains("dimensions must be positive"));
+
+        let deep = library(vec![
+            structure("leaf", Vec::new()),
+            structure("c1", vec![sref("leaf", 0, 0, GdsElementMeta::default())]),
+            structure("c2", vec![sref("c1", 0, 0, GdsElementMeta::default())]),
+            structure("top", vec![sref("c2", 0, 0, GdsElementMeta::default())]),
+        ]);
+        let mut depth_options = GdsHierarchyAdapterOptions::new("top");
+        depth_options.max_hierarchy_depth = 2;
+        let depth =
+            adapt_gds_hierarchy_to_lvs(&deep, &deck(), &depth_options, Backend::Cpu).unwrap_err();
+        assert_eq!(depth.kind, GdsHierarchyAdapterErrorKind::CapacityExceeded);
+        assert!(depth.message.contains("hierarchy depth"));
+
+        let expansive = library(vec![
+            structure("leaf", Vec::new()),
+            structure(
+                "mid",
+                vec![
+                    sref("leaf", 0, 0, GdsElementMeta::default()),
+                    sref("leaf", 100, 0, GdsElementMeta::default()),
+                ],
+            ),
+            structure(
+                "top",
+                vec![
+                    sref("mid", 0, 0, GdsElementMeta::default()),
+                    sref("mid", 100, 0, GdsElementMeta::default()),
+                ],
+            ),
+        ]);
+        let mut capacity_options = GdsHierarchyAdapterOptions::new("top");
+        capacity_options.max_hierarchy_expanded_instances = 3;
+        let capacity =
+            adapt_gds_hierarchy_to_lvs(&expansive, &deck(), &capacity_options, Backend::Cpu)
+                .unwrap_err();
+        assert_eq!(
+            capacity.kind,
+            GdsHierarchyAdapterErrorKind::CapacityExceeded
+        );
+        assert!(capacity.message.contains("expanded hierarchy count"));
     }
 }

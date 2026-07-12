@@ -855,6 +855,8 @@ fn series_reduce_once(ext: &mut ExtractedNetlist, protected_nets: &HashSet<u32>)
 }
 
 fn reduce_netlist_with_protected(ext: &mut ExtractedNetlist, protected_nets: &HashSet<u32>) {
+    // Reduction destroys the one-recognized-polygon-pair-per-device relation.
+    ext.device_sources.clear();
     loop {
         let before = ext.devices.len();
         ext.devices = parallel_reduce(std::mem::take(&mut ext.devices));
@@ -1217,6 +1219,7 @@ pub(super) fn extract_netlist_opts_raw(
 
     // Device extraction
     let mut devices = Vec::new();
+    let mut device_sources = Vec::new();
     for sp in &splits {
         let db = store.poly_bbox[sp.diff as usize];
         for gs in &sp.gates {
@@ -1246,7 +1249,7 @@ pub(super) fn extract_netlist_opts_raw(
                     db.xmax.min(gb.xmax) - db.xmin.max(gb.xmin)
                 };
                 // Phase 3A: body/well extraction
-                let body = if let Some(well_layer) = matched_rule.well_layer {
+                let well_polygon = if let Some(well_layer) = matched_rule.well_layer {
                     store
                         .polys_on_layer(well_layer)
                         .into_iter()
@@ -1260,11 +1263,13 @@ pub(super) fn extract_netlist_opts_raw(
                                 ],
                             ) > 0
                         })
-                        .map(|wp| net_of_poly[wp.0 as usize])
-                        .unwrap_or(u32::MAX)
+                        .map(|wp| wp.0)
                 } else {
-                    u32::MAX
+                    None
                 };
+                let body = well_polygon
+                    .map(|polygon| net_of_poly[polygon as usize])
+                    .unwrap_or(u32::MAX);
                 // Phase 3C: DMOS class tag
                 let device_class = matched_rule.device_class.clone();
                 devices.push(Device {
@@ -1277,6 +1282,12 @@ pub(super) fn extract_netlist_opts_raw(
                     w,
                     l,
                     device_class,
+                });
+                device_sources.push(DeviceRecognitionSource {
+                    gate_polygon: gs.gate,
+                    channel_polygon: sp.diff,
+                    well_polygon,
+                    rule_id: matched_rule.name.clone(),
                 });
             }
         }
@@ -1383,6 +1394,7 @@ pub(super) fn extract_netlist_opts_raw(
         .collect();
     let mut ext = ExtractedNetlist {
         devices,
+        device_sources,
         net_count,
         used_nets: used.len(),
         net_of_poly,
@@ -1462,6 +1474,7 @@ mod reduction_tests {
     fn netlist(devices: Vec<Device>) -> ExtractedNetlist {
         ExtractedNetlist {
             devices,
+            device_sources: Vec::new(),
             bjt_devices: Vec::new(),
             net_count: 32,
             used_nets: 0,
