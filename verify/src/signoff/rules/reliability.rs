@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::{CheckReport, SignoffCheck, SignoffViolation};
+use crate::signoff::{CheckReport, SignoffCheck, SignoffCtx, SignoffFinding, SignoffViolation};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VoltageStress {
@@ -216,3 +216,31 @@ pub fn check_reliability(config: &ReliabilityConfig) -> ReliabilityReport {
         aging: aging_results,
     }
 }
+
+/// Suite rule: reliability needs explicit stress observations to run.
+struct ReliabilitySignoffRule;
+
+impl<'a> crate::rule::Rule<SignoffCtx<'a>> for ReliabilitySignoffRule {
+    type Finding = SignoffFinding;
+
+    fn id(&self) -> &str {
+        "signoff.reliability"
+    }
+
+    fn check(&self, ctx: &SignoffCtx<'a>, _backend: crate::backend::Backend) -> Vec<SignoffFinding> {
+        let report = ctx.config.reliability.as_ref().map_or_else(
+            || {
+                ReliabilityReport::not_run(
+                    "reliability stress observations/models were not supplied",
+                )
+            },
+            check_reliability,
+        );
+        vec![SignoffFinding::Reliability(report)]
+    }
+}
+
+fn factory(_config: &crate::signoff::SignoffConfig) -> Option<super::BoxedRule> {
+    Some(Box::new(ReliabilitySignoffRule))
+}
+pub static FACTORY: super::Factory = factory;

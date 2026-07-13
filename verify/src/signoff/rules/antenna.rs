@@ -5,7 +5,10 @@ use crate::lvs::{extract_netlist_opts, ExtractOpts};
 use crate::params::{Deck, DrcRuleParam};
 use crate::backend::Backend;
 
-use super::{polygon_rect, rect_union_metrics, CheckReport, SignoffCheck, SignoffViolation};
+use crate::signoff::{
+    polygon_rect, rect_union_metrics, CheckReport, SignoffCheck, SignoffCtx, SignoffFinding,
+    SignoffViolation,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AntennaMeasurement {
@@ -455,3 +458,28 @@ pub fn check_antenna(store: &GeometryStore, deck: &Deck, config: &AntennaConfig)
         nets: all_results,
     }
 }
+
+/// Suite rule: run the antenna check from the explicit config, or derive one
+/// from the deck's legacy antenna entries when none was supplied.
+struct AntennaSignoffRule;
+
+impl<'a> crate::rule::Rule<SignoffCtx<'a>> for AntennaSignoffRule {
+    type Finding = SignoffFinding;
+
+    fn id(&self) -> &str {
+        "signoff.antenna"
+    }
+
+    fn check(&self, ctx: &SignoffCtx<'a>, _backend: Backend) -> Vec<SignoffFinding> {
+        let report = ctx.config.antenna.as_ref().map_or_else(
+            || check_antenna_from_deck(ctx.store, ctx.deck),
+            |c| check_antenna(ctx.store, ctx.deck, c),
+        );
+        vec![SignoffFinding::Antenna(report)]
+    }
+}
+
+fn factory(_config: &crate::signoff::SignoffConfig) -> Option<super::BoxedRule> {
+    Some(Box::new(AntennaSignoffRule))
+}
+pub static FACTORY: super::Factory = factory;
