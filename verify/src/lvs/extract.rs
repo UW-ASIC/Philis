@@ -23,56 +23,7 @@ fn bbox_overlap(
     f
 }
 
-// --- union-find ---
-
-struct UnionFind {
-    parent: Vec<u32>,
-    rank: Vec<u8>,
-}
-impl UnionFind {
-    fn new(n: usize) -> Self {
-        UnionFind {
-            parent: (0..n as u32).collect(),
-            rank: vec![0; n],
-        }
-    }
-    fn find(&mut self, x: u32) -> u32 {
-        let mut r = x;
-        while self.parent[r as usize] != r {
-            self.parent[r as usize] = self.parent[self.parent[r as usize] as usize];
-            r = self.parent[r as usize];
-        }
-        r
-    }
-    fn union(&mut self, a: u32, b: u32) {
-        let (ra, rb) = (self.find(a), self.find(b));
-        if ra == rb {
-            return;
-        }
-        if self.rank[ra as usize] < self.rank[rb as usize] {
-            self.parent[ra as usize] = rb;
-        } else if self.rank[ra as usize] > self.rank[rb as usize] {
-            self.parent[rb as usize] = ra;
-        } else {
-            self.parent[rb as usize] = ra;
-            self.rank[ra as usize] += 1;
-        }
-    }
-}
-
-/// Host union-find over collected edges. Returns per-node component labels
-/// (each node labeled with the minimum index in its component).
-fn host_union_find(edges: &[(u32, u32)], m: usize) -> Vec<u32> {
-    let mut uf = UnionFind::new(m);
-    for &(i, j) in edges {
-        uf.union(i, j);
-    }
-    let mut labels = Vec::with_capacity(m);
-    for i in 0..m as u32 {
-        labels.push(uf.find(i));
-    }
-    labels
-}
+use crate::core::connectivity::host_union_find;
 
 // --- internal types ---
 
@@ -909,7 +860,7 @@ pub fn extract_netlist_opts(
     opts: &ExtractOpts,
     backend: Backend,
 ) -> Result<ExtractedNetlist, String> {
-    let mut extracted = extract_netlist_opts_raw(store, deck, opts, backend, true)?;
+    let mut extracted = extract_raw(store, deck, opts, backend, true)?.netlist;
     for device in &mut extracted.devices {
         if device.body == u32::MAX {
             device.body = 0;
@@ -918,30 +869,32 @@ pub fn extract_netlist_opts(
     Ok(extracted)
 }
 
-/// Production extraction entry used by the detailed identity adapter. The raw
-/// result retains `u32::MAX` for unresolved body terminals and can preserve
-/// individual fingers by disabling legacy series/parallel reduction.
-pub(super) fn extract_netlist_opts_raw(
-    store: &GeometryStore,
-    deck: &Deck,
-    opts: &ExtractOpts,
-    backend: Backend,
-    apply_legacy_reduction: bool,
-) -> Result<ExtractedNetlist, String> {
-    extract_netlist_opts_raw_with_sources(store, deck, opts, backend, apply_legacy_reduction)
-        .map(|(netlist, _)| netlist)
+/// Full extraction result before the legacy body=0 conversion. Callers that
+/// need raw body terminals or device-recognition sources use this directly.
+pub struct ExtractResult {
+    pub netlist: ExtractedNetlist,
+    pub sources: Vec<DeviceRecognitionSource>,
 }
 
-/// Internal sidecar variant used by hierarchy adapters that must link every
-/// recognized MOS to exact input polygons without changing the public legacy
-/// [`ExtractedNetlist`] struct layout.
-pub(super) fn extract_netlist_opts_raw_with_sources(
+/// Production extraction: raw body terminals (`u32::MAX` = unresolved),
+/// optional legacy reduction, and device-recognition source provenance.
+pub fn extract_raw(
     store: &GeometryStore,
     deck: &Deck,
     opts: &ExtractOpts,
     backend: Backend,
     apply_legacy_reduction: bool,
-) -> Result<(ExtractedNetlist, Vec<DeviceRecognitionSource>), String> {
+) -> Result<ExtractResult, String> {
+    extract_pipeline(store, deck, opts, backend, apply_legacy_reduction)
+}
+
+fn extract_pipeline(
+    store: &GeometryStore,
+    deck: &Deck,
+    opts: &ExtractOpts,
+    backend: Backend,
+    apply_legacy_reduction: bool,
+) -> Result<ExtractResult, String> {
     let n = store.poly_count();
     let (conductors, vias) = resolve_connectivity(deck)?;
     let is_conn = |l: LayerId| conductors.contains(&l) || vias.contains(&l);
@@ -1507,7 +1460,7 @@ pub(super) fn extract_netlist_opts_raw_with_sources(
         }
     }
 
-    Ok((ext, device_sources))
+    Ok(ExtractResult { netlist: ext, sources: device_sources })
 }
 
 #[cfg(test)]

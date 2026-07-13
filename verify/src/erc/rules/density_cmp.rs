@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::geometry::{Bbox, GeometryStore, LayerId};
 
-use crate::signoff::{
-    polygon_rect, rect_union_metrics, CheckReport, SignoffCheck, SignoffCtx, SignoffFinding,
+use crate::erc::{
+    polygon_rect, rect_union_metrics, CheckReport, SignoffCheck, ErcCtx, ErcFinding,
     SignoffViolation,
 };
 
@@ -67,7 +67,7 @@ impl DensityCmpReport {
         }
     }
 
-    fn error(reason: impl Into<String>) -> Self {
+    pub(crate) fn error(reason: impl Into<String>) -> Self {
         Self {
             check: CheckReport::error(SignoffCheck::DensityCmp, reason),
             windows: Vec::new(),
@@ -342,14 +342,14 @@ pub fn check_density_cmp(store: &GeometryStore, config: &DensityCmpConfig) -> De
 /// Suite rule: validate rule layers against the deck, then run the check.
 struct DensityCmpSignoffRule;
 
-impl<'a> crate::rule::Rule<SignoffCtx<'a>> for DensityCmpSignoffRule {
-    type Finding = SignoffFinding;
+impl<'a> crate::rule::Rule<ErcCtx<'a>> for DensityCmpSignoffRule {
+    type Finding = ErcFinding;
 
     fn id(&self) -> &str {
         "signoff.density_cmp"
     }
 
-    fn check(&self, ctx: &SignoffCtx<'a>, _backend: crate::backend::Backend) -> Vec<SignoffFinding> {
+    fn check(&self, ctx: &ErcCtx<'a>, _backend: crate::backend::Backend) -> Vec<ErcFinding> {
         let report = ctx.config.density_cmp.as_ref().map_or_else(
             || DensityCmpReport::not_run("die boundary and density/CMP rules were not supplied"),
             |c| {
@@ -373,11 +373,11 @@ impl<'a> crate::rule::Rule<SignoffCtx<'a>> for DensityCmpSignoffRule {
                 }
             },
         );
-        vec![SignoffFinding::DensityCmp(report)]
+        vec![ErcFinding::DensityCmp(report)]
     }
 }
 
-fn factory(_config: &crate::signoff::SignoffConfig) -> Option<super::BoxedRule> {
+fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
     Some(Box::new(DensityCmpSignoffRule))
 }
 pub static FACTORY: super::Factory = factory;

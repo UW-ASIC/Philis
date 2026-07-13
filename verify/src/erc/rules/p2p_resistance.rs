@@ -46,6 +46,6 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for PointToPointResistanceCheck {
 }
 
 fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
-    Some(Box::new(PointToPointResistanceCheck))
+    Some(Box::new(crate::erc::Wrap(PointToPointResistanceCheck)))
 }
 pub static FACTORY: super::Factory = factory;

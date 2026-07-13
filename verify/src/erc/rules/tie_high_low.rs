@@ -42,6 +42,6 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for TieHighLowCheck {
 }
 
 fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
-    Some(Box::new(TieHighLowCheck))
+    Some(Box::new(crate::erc::Wrap(TieHighLowCheck)))
 }
 pub static FACTORY: super::Factory = factory;

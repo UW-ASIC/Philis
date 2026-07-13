@@ -1,8 +1,8 @@
 //! Electromigration analysis over a solved power grid.
 
-use crate::signoff::{
+use crate::erc::{
     CheckReport, ElectromigrationConfig, PowerEdgeKind, PowerGrid, PowerSolution, SignoffCheck,
-    SignoffCtx, SignoffFinding, SignoffViolation,
+    ErcCtx, ErcFinding, SignoffViolation,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -258,17 +258,17 @@ pub fn analyze_electromigration(
 }
 
 /// Suite rule: consumes the shared power-grid solution computed once by
-/// `run_signoff_suite` so IR-drop and EM never solve the grid twice.
+/// `run_erc` so IR-drop and EM never solve the grid twice.
 struct ElectromigrationSignoffRule;
 
-impl<'a> crate::rule::Rule<SignoffCtx<'a>> for ElectromigrationSignoffRule {
-    type Finding = SignoffFinding;
+impl<'a> crate::rule::Rule<ErcCtx<'a>> for ElectromigrationSignoffRule {
+    type Finding = ErcFinding;
 
     fn id(&self) -> &str {
         "signoff.electromigration"
     }
 
-    fn check(&self, ctx: &SignoffCtx<'a>, _backend: crate::backend::Backend) -> Vec<SignoffFinding> {
+    fn check(&self, ctx: &ErcCtx<'a>, _backend: crate::backend::Backend) -> Vec<ErcFinding> {
         let report = match (&ctx.config.power, ctx.power) {
             (Some(p), Some(solve)) => match solve {
                 Err(e) => ElectromigrationReport::error(format!("power-grid solve failed: {e}")),
@@ -285,11 +285,11 @@ impl<'a> crate::rule::Rule<SignoffCtx<'a>> for ElectromigrationSignoffRule {
                 "power-grid topology and load currents were not supplied",
             ),
         };
-        vec![SignoffFinding::Electromigration(report)]
+        vec![ErcFinding::Electromigration(report)]
     }
 }
 
-fn factory(_config: &crate::signoff::SignoffConfig) -> Option<super::BoxedRule> {
+fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
     Some(Box::new(ElectromigrationSignoffRule))
 }
 pub static FACTORY: super::Factory = factory;

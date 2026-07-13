@@ -82,6 +82,6 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for HvDomainCheck {
 }
 
 fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
-    Some(Box::new(HvDomainCheck))
+    Some(Box::new(crate::erc::Wrap(HvDomainCheck)))
 }
 pub static FACTORY: super::Factory = factory;

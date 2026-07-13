@@ -102,6 +102,6 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for MissingTieCheck {
 }
 
 fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
-    Some(Box::new(MissingTieCheck))
+    Some(Box::new(crate::erc::Wrap(MissingTieCheck)))
 }
 pub static FACTORY: super::Factory = factory;

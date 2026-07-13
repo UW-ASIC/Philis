@@ -57,6 +57,6 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for FloatingGateCheck {
 }
 
 fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
-    Some(Box::new(FloatingGateCheck))
+    Some(Box::new(crate::erc::Wrap(FloatingGateCheck)))
 }
 pub static FACTORY: super::Factory = factory;

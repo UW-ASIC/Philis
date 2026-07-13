@@ -2610,7 +2610,7 @@ fn run_signoff(
     rec: &ConstraintRecord,
     advanced_config: &gdsverify::SignoffConfig,
 ) -> SignoffReport {
-    let advanced = gdsverify::run_signoff_suite(store, deck, advanced_config);
+    let advanced = gdsverify::run_erc(store, deck, advanced_config).signoff;
     let drc = run_drc(store, deck);
     // Density is a tapeout rule, not a router-quality hint.  Keep the legacy
     // field for API compatibility, but no final-signoff density marker is

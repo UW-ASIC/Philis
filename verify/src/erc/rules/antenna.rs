@@ -5,8 +5,8 @@ use crate::lvs::{extract_netlist_opts, ExtractOpts};
 use crate::params::{Deck, DrcRuleParam};
 use crate::backend::Backend;
 
-use crate::signoff::{
-    polygon_rect, rect_union_metrics, CheckReport, SignoffCheck, SignoffCtx, SignoffFinding,
+use crate::erc::{
+    polygon_rect, rect_union_metrics, CheckReport, SignoffCheck, ErcCtx, ErcFinding,
     SignoffViolation,
 };
 
@@ -150,7 +150,7 @@ impl AntennaReport {
         }
     }
 
-    fn error(reason: impl Into<String>) -> Self {
+    pub(crate) fn error(reason: impl Into<String>) -> Self {
         Self {
             check: CheckReport::error(SignoffCheck::Antenna, reason),
             nets: Vec::new(),
@@ -463,23 +463,23 @@ pub fn check_antenna(store: &GeometryStore, deck: &Deck, config: &AntennaConfig)
 /// from the deck's legacy antenna entries when none was supplied.
 struct AntennaSignoffRule;
 
-impl<'a> crate::rule::Rule<SignoffCtx<'a>> for AntennaSignoffRule {
-    type Finding = SignoffFinding;
+impl<'a> crate::rule::Rule<ErcCtx<'a>> for AntennaSignoffRule {
+    type Finding = ErcFinding;
 
     fn id(&self) -> &str {
         "signoff.antenna"
     }
 
-    fn check(&self, ctx: &SignoffCtx<'a>, _backend: Backend) -> Vec<SignoffFinding> {
+    fn check(&self, ctx: &ErcCtx<'a>, _backend: Backend) -> Vec<ErcFinding> {
         let report = ctx.config.antenna.as_ref().map_or_else(
             || check_antenna_from_deck(ctx.store, ctx.deck),
             |c| check_antenna(ctx.store, ctx.deck, c),
         );
-        vec![SignoffFinding::Antenna(report)]
+        vec![ErcFinding::Antenna(report)]
     }
 }
 
-fn factory(_config: &crate::signoff::SignoffConfig) -> Option<super::BoxedRule> {
+fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
     Some(Box::new(AntennaSignoffRule))
 }
 pub static FACTORY: super::Factory = factory;

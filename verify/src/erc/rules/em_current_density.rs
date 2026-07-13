@@ -50,6 +50,6 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for EmCurrentDensityCheck {
 }
 
 fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
-    Some(Box::new(EmCurrentDensityCheck))
+    Some(Box::new(crate::erc::Wrap(EmCurrentDensityCheck)))
 }
 pub static FACTORY: super::Factory = factory;

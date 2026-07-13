@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::signoff::{CheckReport, SignoffCheck, SignoffCtx, SignoffFinding, SignoffViolation};
+use crate::erc::{CheckReport, SignoffCheck, ErcCtx, ErcFinding, SignoffViolation};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VoltageStress {
@@ -67,7 +67,7 @@ impl ReliabilityReport {
         }
     }
 
-    fn error(reason: impl Into<String>) -> Self {
+    pub(crate) fn error(reason: impl Into<String>) -> Self {
         Self {
             check: CheckReport::error(SignoffCheck::Reliability, reason),
             aging: Vec::new(),
@@ -220,14 +220,14 @@ pub fn check_reliability(config: &ReliabilityConfig) -> ReliabilityReport {
 /// Suite rule: reliability needs explicit stress observations to run.
 struct ReliabilitySignoffRule;
 
-impl<'a> crate::rule::Rule<SignoffCtx<'a>> for ReliabilitySignoffRule {
-    type Finding = SignoffFinding;
+impl<'a> crate::rule::Rule<ErcCtx<'a>> for ReliabilitySignoffRule {
+    type Finding = ErcFinding;
 
     fn id(&self) -> &str {
         "signoff.reliability"
     }
 
-    fn check(&self, ctx: &SignoffCtx<'a>, _backend: crate::backend::Backend) -> Vec<SignoffFinding> {
+    fn check(&self, ctx: &ErcCtx<'a>, _backend: crate::backend::Backend) -> Vec<ErcFinding> {
         let report = ctx.config.reliability.as_ref().map_or_else(
             || {
                 ReliabilityReport::not_run(
@@ -236,11 +236,11 @@ impl<'a> crate::rule::Rule<SignoffCtx<'a>> for ReliabilitySignoffRule {
             },
             check_reliability,
         );
-        vec![SignoffFinding::Reliability(report)]
+        vec![ErcFinding::Reliability(report)]
     }
 }
 
-fn factory(_config: &crate::signoff::SignoffConfig) -> Option<super::BoxedRule> {
+fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
     Some(Box::new(ReliabilitySignoffRule))
 }
 pub static FACTORY: super::Factory = factory;

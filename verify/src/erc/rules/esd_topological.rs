@@ -66,6 +66,6 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for EsdTopologicalCheck {
 }
 
 fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
-    Some(Box::new(EsdTopologicalCheck))
+    Some(Box::new(crate::erc::Wrap(EsdTopologicalCheck)))
 }
 pub static FACTORY: super::Factory = factory;

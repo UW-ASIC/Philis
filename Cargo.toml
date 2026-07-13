@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    # Signoff check
+    # Verify
     "verify",
+    "verify/macros",
     "benchmark",
 
     # Frontend

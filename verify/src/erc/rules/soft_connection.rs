@@ -69,6 +69,6 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for SoftConnectionCheck {
 }
 
 fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
-    Some(Box::new(SoftConnectionCheck))
+    Some(Box::new(crate::erc::Wrap(SoftConnectionCheck)))
 }
 pub static FACTORY: super::Factory = factory;

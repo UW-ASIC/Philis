@@ -255,7 +255,7 @@ fn run_erc_cases(manifest: &Value, deck: &Deck, layout: &GdsLayout, t: &mut Tota
         let expect_n = case["expect_violations"].as_u64().unwrap() as usize;
 
         let store = cell_store(layout, cell);
-        let report = run_erc(store, deck);
+        let report = run_erc(store, deck, &SignoffConfig::default());
         let got: Vec<&ErcViolation> = report.by_check(check);
 
         let ok = got.len() == expect_n;
@@ -584,7 +584,7 @@ fn run_differential(deck: &Deck, layout: &GdsLayout, t: &mut Totals) {
             ref_bjt: Vec::new(),
         };
         let lvs = run_lvs(store, deck, &ref_inv);
-        let erc = run_erc(store, deck);
+        let erc = run_erc(store, deck, &SignoffConfig::default());
         let erc_no_short = erc.by_check("supply_short").is_empty();
         // ponytail: LVS_INV has no met1/met2, so PEX is empty — verify
         // PEX runs without panic rather than checking for content.

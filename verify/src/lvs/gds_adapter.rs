@@ -7,7 +7,7 @@
 //! property. Unsupported transforms and ambiguous/missing evidence are errors.
 
 use super::detailed_extract::{extract_detailed_netlist, DetailedExtractionOptions};
-use super::extract::extract_netlist_opts_raw_with_sources;
+use super::extract::extract_raw;
 use super::hier_production::{
     flatten_layout, HierArray, HierLayout, HierLayoutCell, HierLayoutInstance, HierTransform,
 };
@@ -888,8 +888,8 @@ fn build_local_cell(
 ) -> Result<LocalCell, GdsHierarchyAdapterError> {
     let (store, source_shapes, text_elements) =
         build_local_store(structure, deck, options, provenance)?;
-    let (raw, device_sources) =
-        extract_netlist_opts_raw_with_sources(&store, deck, &options.extract, backend, false)
+    let extract_result =
+        extract_raw(&store, deck, &options.extract, backend, false)
             .map_err(|message| {
                 GdsHierarchyAdapterError::cell(
                     GdsHierarchyAdapterErrorKind::Extraction,
@@ -897,6 +897,7 @@ fn build_local_cell(
                     message,
                 )
             })?;
+    let (raw, device_sources) = (extract_result.netlist, extract_result.sources);
     let ports = options
         .cell_ports
         .get(&structure.name)

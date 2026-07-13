@@ -80,6 +80,40 @@ fn build_csr(edges: &[(u32, u32)], n: usize) -> (Vec<u32>, Vec<u32>) {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Host union-find over collected edges. Returns per-node component labels
+/// (each node labeled with the minimum index in its component).
+pub fn host_union_find(edges: &[(u32, u32)], n: usize) -> Vec<u32> {
+    let mut parent: Vec<u32> = (0..n as u32).collect();
+    let mut rank: Vec<u8> = vec![0; n];
+    for &(a, b) in edges {
+        let (mut ra, mut rb) = (a, b);
+        while parent[ra as usize] != ra {
+            parent[ra as usize] = parent[parent[ra as usize] as usize];
+            ra = parent[ra as usize];
+        }
+        while parent[rb as usize] != rb {
+            parent[rb as usize] = parent[parent[rb as usize] as usize];
+            rb = parent[rb as usize];
+        }
+        if ra != rb {
+            if rank[ra as usize] < rank[rb as usize] {
+                parent[ra as usize] = rb;
+            } else if rank[ra as usize] > rank[rb as usize] {
+                parent[rb as usize] = ra;
+            } else {
+                parent[rb as usize] = ra;
+                rank[ra as usize] += 1;
+            }
+        }
+    }
+    for i in 0..n {
+        let mut r = parent[i];
+        while parent[r as usize] != r { r = parent[r as usize]; }
+        parent[i] = r;
+    }
+    parent
+}
+
 /// Compute connected components over `n` nodes and the given edge list.
 ///
 /// Returns a `Vec<u32>` of length `n` where each node is labeled with the

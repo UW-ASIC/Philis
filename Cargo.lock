@@ -1552,9 +1552,19 @@ name = "gdsverify"
 version = "0.1.0"
 dependencies = [
  "cubecl",
+ "gdsverify-macros",
  "rayon",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "gdsverify-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

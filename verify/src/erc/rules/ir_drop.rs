@@ -1,8 +1,8 @@
 //! IR-drop analysis over a solved power grid.
 
-use crate::signoff::{
+use crate::erc::{
     BranchCurrent, CheckReport, IrDropConfig, NodeVoltage, PowerGrid, PowerSolution, SignoffCheck,
-    SignoffCtx, SignoffFinding, SignoffViolation,
+    ErcCtx, ErcFinding, SignoffViolation,
 };
 
 #[derive(Debug, Clone)]
@@ -143,17 +143,17 @@ pub fn analyze_ir_drop(
 }
 
 /// Suite rule: consumes the shared power-grid solution computed once by
-/// `run_signoff_suite` so IR-drop and EM never solve the grid twice.
+/// `run_erc` so IR-drop and EM never solve the grid twice.
 struct IrDropSignoffRule;
 
-impl<'a> crate::rule::Rule<SignoffCtx<'a>> for IrDropSignoffRule {
-    type Finding = SignoffFinding;
+impl<'a> crate::rule::Rule<ErcCtx<'a>> for IrDropSignoffRule {
+    type Finding = ErcFinding;
 
     fn id(&self) -> &str {
         "signoff.ir_drop"
     }
 
-    fn check(&self, ctx: &SignoffCtx<'a>, _backend: crate::backend::Backend) -> Vec<SignoffFinding> {
+    fn check(&self, ctx: &ErcCtx<'a>, _backend: crate::backend::Backend) -> Vec<ErcFinding> {
         let report = match (&ctx.config.power, ctx.power) {
             (Some(p), Some(solve)) => match solve {
                 Err(e) => IrDropReport::error(format!("power-grid solve failed: {e}")),
@@ -164,11 +164,11 @@ impl<'a> crate::rule::Rule<SignoffCtx<'a>> for IrDropSignoffRule {
             },
             _ => IrDropReport::not_run("power-grid topology and load currents were not supplied"),
         };
-        vec![SignoffFinding::IrDrop(report)]
+        vec![ErcFinding::IrDrop(report)]
     }
 }
 
-fn factory(_config: &crate::signoff::SignoffConfig) -> Option<super::BoxedRule> {
+fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
     Some(Box::new(IrDropSignoffRule))
 }
 pub static FACTORY: super::Factory = factory;

@@ -27,6 +27,3 @@ path = "conformance/generator/generator.rs"
 [[bin]]
 name = "perf"
 path = "conformance/perf.rs"
-
-[workspace]
-members = [".", "macros"]

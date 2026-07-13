@@ -42,6 +42,6 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for UnconnectedPinCheck {
 }
 
 fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
-    Some(Box::new(UnconnectedPinCheck))
+    Some(Box::new(crate::erc::Wrap(UnconnectedPinCheck)))
 }
 pub static FACTORY: super::Factory = factory;

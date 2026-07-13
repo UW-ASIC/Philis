@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use crate::signoff::{CheckReport, SignoffCheck, SignoffCtx, SignoffFinding, SignoffViolation};
+use crate::erc::{CheckReport, SignoffCheck, ErcCtx, ErcFinding, SignoffViolation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EsdNodeKind {
@@ -97,7 +97,7 @@ impl EsdLatchupReport {
         }
     }
 
-    fn error(reason: impl Into<String>) -> Self {
+    pub(crate) fn error(reason: impl Into<String>) -> Self {
         Self {
             check: CheckReport::error(SignoffCheck::EsdLatchup, reason),
             paths: Vec::new(),
@@ -401,23 +401,23 @@ pub fn check_esd_latchup(config: &EsdLatchupConfig) -> EsdLatchupReport {
 /// Suite rule: ESD/latch-up needs an explicit network and evidence to run.
 struct EsdLatchupSignoffRule;
 
-impl<'a> crate::rule::Rule<SignoffCtx<'a>> for EsdLatchupSignoffRule {
-    type Finding = SignoffFinding;
+impl<'a> crate::rule::Rule<ErcCtx<'a>> for EsdLatchupSignoffRule {
+    type Finding = ErcFinding;
 
     fn id(&self) -> &str {
         "signoff.esd_latchup"
     }
 
-    fn check(&self, ctx: &SignoffCtx<'a>, _backend: crate::backend::Backend) -> Vec<SignoffFinding> {
+    fn check(&self, ctx: &ErcCtx<'a>, _backend: crate::backend::Backend) -> Vec<ErcFinding> {
         let report = ctx.config.esd_latchup.as_ref().map_or_else(
             || EsdLatchupReport::not_run("ESD network and latch-up evidence were not supplied"),
             check_esd_latchup,
         );
-        vec![SignoffFinding::EsdLatchup(report)]
+        vec![ErcFinding::EsdLatchup(report)]
     }
 }
 
-fn factory(_config: &crate::signoff::SignoffConfig) -> Option<super::BoxedRule> {
+fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
     Some(Box::new(EsdLatchupSignoffRule))
 }
 pub static FACTORY: super::Factory = factory;

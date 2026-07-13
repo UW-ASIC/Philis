@@ -1,14 +1,23 @@
 //! LVS: extract a netlist from layout, then compare it to a reference schematic netlist.
 //!
 //! Pipeline:
-//!   1. Connectivity extraction — union-find over nodes; channel polygons are split at gate
-//!      crossings so that source and drain extract as distinct nets.
+//!   1. Connectivity extraction — sweep-line candidates → exact predicates → connected
+//!      components (host union-find or GPU FastSV via `core::connectivity`).
 //!   2. Device extraction — gate-over-channel recognized via PDK rules; type from implant.
+//!      MOS/BJT/2-terminal live in extract.rs; planned R/C/diode stubs in devices.rs (L4.3).
 //!   3. Comparison — iterative partition refinement over both extracted and reference graphs.
+//!
+//! Module ownership (Wave 4 alignment):
+//!   L4.1  netlist.rs, binding.rs         — reference netlist dialect
+//!   L4.2  extract.rs                     — connectivity + evidence binding
+//!   L4.3  devices.rs, extract.rs helpers — device recognition + properties
+//!   L4.4  compare.rs                     — graph matching + symmetric reductions
+//!   L4.5  hierarchical.rs, hier_production.rs, gds_adapter.rs — hierarchy + production
 
 pub mod types;
 pub mod extract;
 pub mod compare;
+pub mod devices;
 pub mod spice;
 pub mod derived;
 pub mod hierarchical;
@@ -20,7 +29,7 @@ pub mod hier_production;
 pub mod gds_adapter;
 
 pub use types::*;
-pub use extract::{extract_netlist, extract_netlist_opts, reduce_netlist};
+pub use extract::{extract_netlist, extract_netlist_opts, extract_raw, reduce_netlist, ExtractResult};
 pub use compare::{compare, CompareOpts};
 pub use spice::{to_spice, SpiceOpts, PortMap};
 pub use derived::evaluate_derived_layers;

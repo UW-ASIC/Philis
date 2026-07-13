@@ -39,7 +39,7 @@ pub mod backend {
     };
 }
 
-pub mod signoff {
+pub mod verify {
     //! The types a consumer needs, grouped by role.
 
     // Geometry: build a store directly (immediate mode) — no GDS required.
@@ -60,9 +60,8 @@ pub mod signoff {
     // PEX.
     pub use gdsverify::{run_pex, run_pex_by_net_checked, Parasitic, PexReport};
 
-    // Tapeout checks: antenna, density/CMP, IR drop, EM, reliability,
-    // and ESD/latch-up. Missing electrical/model inputs report NOT_RUN.
-    pub use gdsverify::signoff::*;
+    // ERC + tapeout signoff (merged engine).
+    pub use gdsverify::erc::*;
 
     // GDS ingestion, for flows that do start from a .gds.
     pub use gdsverify::{load_gds, read_gds, GdsLayout};
@@ -70,7 +69,7 @@ pub mod signoff {
 
 #[cfg(test)]
 mod tests {
-    use super::signoff::*;
+    use super::verify::*;
 
     // Smoke test: both shipped PDK decks parse, resolve their layers, and drive DRC.
     #[test]

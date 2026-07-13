@@ -78,6 +78,6 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for AntennaElectricalCheck {
 }
 
 fn factory(deck: &crate::params::Deck) -> Option<super::BoxedRule> {
-    Some(Box::new(AntennaElectricalCheck { ratio: deck.erc.antenna_ratio }))
+    Some(Box::new(crate::erc::Wrap(AntennaElectricalCheck { ratio: deck.erc.antenna_ratio })))
 }
 pub static FACTORY: super::Factory = factory;

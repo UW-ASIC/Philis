@@ -1,6 +1,6 @@
 //! Detailed layout extraction with explicit terminal validity and named-net identity.
 
-use super::extract::extract_netlist_opts_raw;
+use super::extract::extract_raw;
 use super::production::*;
 use super::types::{DeviceFlavor, DeviceKind, ExtractOpts, TwoTerminalKind};
 use crate::geometry::exact::{Point, PointClassification, Polygon};
@@ -315,7 +315,7 @@ pub fn extract_detailed_netlist(
         exact.push(exact_polygon(store, PolyId(polygon as u32), &path)?);
     }
 
-    let raw = extract_netlist_opts_raw(store, deck, &options.extract, backend, false).map_err(
+    let raw = extract_raw(store, deck, &options.extract, backend, false).map(|r| r.netlist).map_err(
         |message| {
             let kind = if message.contains("ambiguously matches MOS")
                 || message.contains("no matching MOS")

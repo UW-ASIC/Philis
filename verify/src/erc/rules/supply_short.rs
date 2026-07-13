@@ -75,6 +75,6 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for SupplyShortCheck {
 }
 
 fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
-    Some(Box::new(SupplyShortCheck))
+    Some(Box::new(crate::erc::Wrap(SupplyShortCheck)))
 }
 pub static FACTORY: super::Factory = factory;

@@ -41,6 +41,6 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for MultipleDriverCheck {
 }
 
 fn factory(_deck: &crate::params::Deck) -> Option<super::BoxedRule> {
-    Some(Box::new(MultipleDriverCheck))
+    Some(Box::new(crate::erc::Wrap(MultipleDriverCheck)))
 }
 pub static FACTORY: super::Factory = factory;

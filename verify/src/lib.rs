@@ -28,52 +28,113 @@
 
 pub mod backend;
 pub mod core;
-pub mod rule;
-pub mod session;
 pub mod drc;
+pub mod erc;
 pub mod lvs;
 pub mod pex;
-pub mod erc;
-pub mod signoff;
+pub mod rule;
+pub mod session;
 
-// Old top-level module paths, re-exported so call sites keep compiling.
-pub use crate::core::{geometry, hierarchy_index};
-// Old top-level module paths, re-exported so call sites keep compiling:
-// gds + gds_lossless merged into io::read::gds; params + schema merged into
-// io::schema; oasis moved under io::read.
-pub use crate::io::read;
-pub use crate::io::read::gds;
-pub use crate::io::read::gds as gds_lossless;
-pub use crate::io::read::oasis;
-pub use crate::io::schema;
-pub use crate::io::schema as params;
 pub use crate::backend as gpu;
+pub use crate::core::io::read;
+pub use crate::core::io::read::gds;
+pub use crate::core::io::read::gds as gds_lossless;
+pub use crate::core::io::read::oasis;
+pub use crate::core::io::schema;
+pub use crate::core::io::schema as params;
+pub use crate::core::{geometry, hierarchy_index};
 
+pub use backend::{available_backends, gpu_ready, Backend};
+pub use drc::{
+    run_drc, run_drc_backend, run_drc_backend_strict, run_drc_no_density, same_shape_gap_fills,
+    DrcReport, Violation,
+};
+pub use erc::{
+    // Electromigration
+    analyze_electromigration,
+    // IR drop
+    analyze_ir_drop,
+    // Antenna
+    check_antenna,
+    check_antenna_from_deck,
+    // Density/CMP
+    check_density_cmp,
+    // ESD/latch-up
+    check_esd_latchup,
+    // Reliability
+    check_reliability,
+    run_erc,
+    // Power grid
+    solve_power_grid,
+    AgingStress,
+    AgingStressResult,
+    AntennaCollector,
+    AntennaConfig,
+    AntennaDiode,
+    AntennaGate,
+    AntennaMeasurement,
+    AntennaNetResult,
+    AntennaReport,
+    AntennaRule,
+    BranchCurrent,
+    // Signoff types (canonical home is erc::, re-exported at crate root for compat)
+    CheckReport,
+    CheckStatus,
+    CmpModel,
+    DensityCmpConfig,
+    DensityCmpReport,
+    DensityCmpRule,
+    DensityWindowResult,
+    ElectromigrationConfig,
+    ElectromigrationReport,
+    EmBranchResult,
+    ErcCtx,
+    ErcFinding,
+    ErcReport,
+    ErcViolation,
+    EsdEdge,
+    EsdLatchupConfig,
+    EsdLatchupReport,
+    EsdNode,
+    EsdNodeKind,
+    EsdPathRequirement,
+    EsdPathResult,
+    GuardRingEvidence,
+    IrDropConfig,
+    IrDropReport,
+    LatchupSite,
+    MultipleDriverCheck,
+    NodeVoltage,
+    PowerEdge,
+    PowerEdgeKind,
+    PowerGrid,
+    PowerNode,
+    PowerSignoffConfig,
+    PowerSolution,
+    PowerSolveConfig,
+    ReliabilityConfig,
+    ReliabilityReport,
+    SignoffCheck,
+    SignoffConfig,
+    SignoffSuiteReport,
+    SignoffViolation,
+    ThermalStress,
+    TieHighLowCheck,
+    VoltageStress,
+};
+pub use gds::{read_gds, read_gds_checked, GdsLayout, GdsUnits, GdsUnmappedLayer};
+pub use gds_lossless::{
+    flatten_gds_library, read_gds_library, stroke_path, write_gds_library, GdsArrayReference,
+    GdsBoundary, GdsBoxElement, GdsElement, GdsElementMeta, GdsEnvelope, GdsFlattenOptions,
+    GdsGeometryPolicy, GdsLibrary, GdsNode, GdsPath, GdsProperty, GdsRawRecord, GdsReadMode,
+    GdsReference, GdsStructure, GdsText, GdsTransform, GdsUnsupportedElement, LayoutError,
+    LayoutErrorKind,
+};
+pub use gdsverify_macros::{kernel_fn, verify_kernel};
 pub use geometry::{Bbox, Edge, GeometryStore, LayerId, PolyId};
-pub use params::{Deck, DrcRuleParam, LayerDef, LayerTable};
-pub use schema::{DrcRuleSchema, LvsSchema, VerifySchema};
-pub use drc::{run_drc, run_drc_backend, run_drc_backend_strict, run_drc_no_density, same_shape_gap_fills, DrcReport, Violation};
-pub use pex::{
-    run_pex, run_pex_by_net, run_pex_by_net_checked, NetParasitics, Parasitic, PexReport,
-};
-pub use lvs::{compare, extract_netlist, extract_netlist_opts, reduce_netlist,
-              to_spice, CompareOpts, DeviceFlavor, DeviceKind, Device,
-              ExtractOpts, ExtractedNetlist, LvsResult, PortMap, RefDevice, RefNetlist,
-              RefTwoTerminal, SpiceOpts, TwoTerminalKind, TwoTerminalDevice};
-pub use lvs::netlist::{
-    leaf_subcircuit_to_ref_netlist, parse_engineering_number, parse_netlist,
-    parse_netlist_with_includes, BjtModelBinding, EngineeringNumber, EngineeringSuffix,
-    IncludeDecl, InstanceKind, MosModelBinding, NetlistAst, NetlistError, NetlistErrorKind,
-    ModelDecl, ModelPrimitive, NetlistInstance, ParameterDecl, ParameterExpr, RefConversionError,
-    RefConversionErrorKind, RefConversionOptions, ResolvedInclude, SourceSpan, Subcircuit,
-};
-pub use lvs::production::{
-    compare_production, BjtDeviceRecord, DetailedExtractedNetlist, DetailedNetlist,
-    DetailedRefNetlist, DeviceIdentity, DeviceMapping, HierarchyPath, LegacyRefDeviceBuilder,
-    MosDeviceRecord, NetIdentity, NetMapping, NumericTolerance, OpenCandidate, PortDirection,
-    ProductionCompareOptions, ProductionLvsResult, ProductionLvsStatus, ProductionMismatch,
-    PropertyDelta, PropertyUnit, SoftConnection, TerminalConnection, TopologyConflictKind,
-    TopologyWitness, TwoTerminalRecord, TypedProperty, UnresolvedTerminal,
+pub use hierarchy_index::{
+    GdsLayerIdentity, HierarchyCandidate, HierarchyIndexOptions, HierarchySpatialIndex,
+    IndexedShapeKind, InstancePathEntry, TileCandidates, TileGrid, TileId, VerificationTile,
 };
 pub use lvs::binding::{
     bind_reference_hierarchy, evaluate_parameter_expression, BindingError, BindingErrorKind,
@@ -84,48 +145,50 @@ pub use lvs::detailed_extract::{
     extract_detailed_netlist, DetailedExtractionError, DetailedExtractionErrorKind,
     DetailedExtractionOptions, NamedSoftConnection,
 };
-pub use lvs::hier_production::{
-    compare_hierarchical_production, HierArray, HierCellComparison, HierFlattenPolicy,
-    HierLayout, HierLayoutCell, HierLayoutInstance, HierLvsCache, HierProductionOptions,
-    HierProductionResult, HierTransform,
-};
 pub use lvs::gds_adapter::{
     adapt_gds_hierarchy_to_lvs, export_w3_drc_hierarchy_context, GdsAdapterObjectKind,
     GdsBlackBoxAdapterSpec, GdsDrcHierarchyContext, GdsHierarchyAdapterError,
     GdsHierarchyAdapterErrorKind, GdsHierarchyAdapterOptions, GdsHierarchyAdapterResult,
-    GdsHierarchyProvenance, GdsObjectProvenance, GdsPhysicalCorrelationStatus,
-    GdsTextEvidenceRule, GDS_ADAPTER_MAX_STACK_SAFE_DEPTH,
+    GdsHierarchyProvenance, GdsObjectProvenance, GdsPhysicalCorrelationStatus, GdsTextEvidenceRule,
+    GDS_ADAPTER_MAX_STACK_SAFE_DEPTH,
 };
-pub use erc::{run_erc, ErcReport, ErcViolation, MultipleDriverCheck, TieHighLowCheck};
-pub use signoff::*;
-pub use gds::{read_gds, read_gds_checked, GdsLayout, GdsUnits, GdsUnmappedLayer};
-pub use gds_lossless::{
-    flatten_gds_library, read_gds_library, stroke_path, write_gds_library,
-    GdsArrayReference, GdsBoundary, GdsBoxElement, GdsElement, GdsElementMeta,
-    GdsEnvelope, GdsFlattenOptions, GdsGeometryPolicy, GdsLibrary, GdsNode, GdsPath, GdsProperty,
-    GdsRawRecord, GdsReadMode, GdsReference, GdsStructure, GdsText,
-    GdsTransform, GdsUnsupportedElement, LayoutError, LayoutErrorKind,
+pub use lvs::hier_production::{
+    compare_hierarchical_production, HierArray, HierCellComparison, HierFlattenPolicy, HierLayout,
+    HierLayoutCell, HierLayoutInstance, HierLvsCache, HierProductionOptions, HierProductionResult,
+    HierTransform,
 };
-pub use hierarchy_index::{
-    GdsLayerIdentity, HierarchyCandidate, HierarchyIndexOptions, HierarchySpatialIndex,
-    IndexedShapeKind, InstancePathEntry, TileCandidates, TileGrid, TileId,
-    VerificationTile,
+pub use lvs::netlist::{
+    leaf_subcircuit_to_ref_netlist, parse_engineering_number, parse_netlist,
+    parse_netlist_with_includes, BjtModelBinding, EngineeringNumber, EngineeringSuffix,
+    IncludeDecl, InstanceKind, ModelDecl, ModelPrimitive, MosModelBinding, NetlistAst,
+    NetlistError, NetlistErrorKind, NetlistInstance, ParameterDecl, ParameterExpr,
+    RefConversionError, RefConversionErrorKind, RefConversionOptions, ResolvedInclude, SourceSpan,
+    Subcircuit,
+};
+pub use lvs::production::{
+    compare_production, BjtDeviceRecord, DetailedExtractedNetlist, DetailedNetlist,
+    DetailedRefNetlist, DeviceIdentity, DeviceMapping, HierarchyPath, LegacyRefDeviceBuilder,
+    MosDeviceRecord, NetIdentity, NetMapping, NumericTolerance, OpenCandidate, PortDirection,
+    ProductionCompareOptions, ProductionLvsResult, ProductionLvsStatus, ProductionMismatch,
+    PropertyDelta, PropertyUnit, SoftConnection, TerminalConnection, TopologyConflictKind,
+    TopologyWitness, TwoTerminalRecord, TypedProperty, UnresolvedTerminal,
+};
+pub use lvs::{
+    compare, extract_netlist, extract_netlist_opts, reduce_netlist, to_spice, CompareOpts, Device,
+    DeviceFlavor, DeviceKind, ExtractOpts, ExtractedNetlist, LvsResult, PortMap, RefDevice,
+    RefNetlist, RefTwoTerminal, SpiceOpts, TwoTerminalDevice, TwoTerminalKind,
 };
 pub use oasis::{
-    read_oasis, write_oasis, OasisCapabilities, OasisError, OasisErrorKind,
-    OASIS_CAPABILITIES,
+    read_oasis, write_oasis, OasisCapabilities, OasisError, OasisErrorKind, OASIS_CAPABILITIES,
 };
-pub use backend::{available_backends, gpu_ready, Backend};
+pub use params::{Deck, DrcRuleParam, LayerDef, LayerTable};
+pub use pex::{
+    run_pex, run_pex_by_net, run_pex_by_net_checked, NetParasitics, Parasitic, PexReport,
+};
 pub use rule::{run_rules, Rule};
+pub use schema::{DrcRuleSchema, LvsSchema, VerifySchema};
 pub use session::{Col, Session};
-// The proc-macro crate is a separate compilation unit by rustc requirement
-// (proc-macro = true); re-exported here so callers use one crate:
-// `use gdsverify::verify_kernel;`
-pub use gdsverify_macros::{kernel_fn, verify_kernel};
 
-// GDS REAL8 values are approximate, so compare units with a tight numerical
-// tolerance rather than bit equality.  The tolerance is deliberately far below
-// any meaningful process-grid difference: 1e-9 relative or 1e-12 nm absolute.
 const GDS_DBU_REL_TOLERANCE: f64 = 1.0e-9;
 const GDS_DBU_ABS_TOLERANCE_NM: f64 = 1.0e-12;
 
@@ -144,9 +207,8 @@ fn validate_gds_database_units(units: Option<GdsUnits>, deck_dbu_nm: f64) -> Res
             "GDS database unit must be finite and positive, got {gds_dbu_nm} nm"
         ));
     }
-    let tolerance = GDS_DBU_ABS_TOLERANCE_NM.max(
-        GDS_DBU_REL_TOLERANCE * deck_dbu_nm.abs().max(gds_dbu_nm.abs()),
-    );
+    let tolerance = GDS_DBU_ABS_TOLERANCE_NM
+        .max(GDS_DBU_REL_TOLERANCE * deck_dbu_nm.abs().max(gds_dbu_nm.abs()));
     if (gds_dbu_nm - deck_dbu_nm).abs() > tolerance {
         return Err(format!(
             "GDS database unit {gds_dbu_nm} nm does not match deck database unit \
@@ -198,15 +260,25 @@ pub fn load_gds_with_policy(
 /// Run LVS on an extracted store against a reference netlist. Returns extraction errors
 /// as a failing LvsResult (matched=false).
 pub fn run_lvs(store: &GeometryStore, deck: &Deck, reference: &RefNetlist) -> LvsResult {
-    let opts = ExtractOpts { cut_required: deck.lvs_cut_required, ..Default::default() };
+    let opts = ExtractOpts {
+        cut_required: deck.lvs_cut_required,
+        ..Default::default()
+    };
     let ext = match extract_netlist_opts(store, deck, &opts, backend::Backend::Cpu) {
         Ok(e) => e,
-        Err(e) => return LvsResult {
-            matched: false, reason: format!("extraction failed: {}", e),
-            extracted_devices: 0, nmos: 0, pmos: 0,
-            ambiguous_classes: 0, label_conflicts: Vec::new(),
-            mismatches: Vec::new(), floating_nets: Vec::new(),
-        },
+        Err(e) => {
+            return LvsResult {
+                matched: false,
+                reason: format!("extraction failed: {}", e),
+                extracted_devices: 0,
+                nmos: 0,
+                pmos: 0,
+                ambiguous_classes: 0,
+                label_conflicts: Vec::new(),
+                mismatches: Vec::new(),
+                floating_nets: Vec::new(),
+            }
+        }
     };
     let cmp_opts = CompareOpts {
         strict: deck.strict,
