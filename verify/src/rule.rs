@@ -12,8 +12,6 @@
 use rayon::prelude::*;
 
 use crate::backend::Backend;
-use crate::geometry::GeometryStore;
-use crate::params::Deck;
 
 /// One verification rule over an engine-specific context.
 pub trait Rule<Ctx: ?Sized>: Send + Sync {
@@ -43,11 +41,3 @@ where
         .collect()
 }
 
-/// A verification check that can run on CPU or GPU.
-///
-/// Legacy trait predating [`Rule`]; engines are migrating rule by rule.
-pub trait VerifyCheck {
-    type Output;
-    fn id(&self) -> &str;
-    fn run(&self, store: &GeometryStore, deck: &Deck, backend: Backend) -> Self::Output;
-}

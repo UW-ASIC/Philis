@@ -32,9 +32,6 @@ pub use detailed_extract::*;
 pub use hier_production::*;
 pub use gds_adapter::*;
 
-use crate::geometry::GeometryStore;
-use crate::params::Deck;
-use crate::backend::Backend;
 use std::cell::RefCell;
 
 /// Context handed to the check rules after the compare pipeline's
@@ -68,37 +65,11 @@ pub mod rules {
     include!(concat!(env!("OUT_DIR"), "/lvs_rules.rs"));
 }
 
-/// The full LVS check: extract a netlist, then compare it to the reference.
-pub struct LvsCheck {
-    pub reference: RefNetlist,
-}
-
-impl LvsCheck {
-    pub fn id(&self) -> &str { "lvs" }
-    pub fn run(&self, store: &GeometryStore, deck: &Deck, backend: Backend) -> LvsResult {
-        let opts = ExtractOpts { cut_required: deck.lvs_cut_required, ..Default::default() };
-        let ext = match extract_netlist_opts(store, deck, &opts, backend) {
-            Ok(e) => e,
-            Err(e) => return LvsResult {
-                matched: false, reason: format!("extraction failed: {}", e),
-                extracted_devices: 0, nmos: 0, pmos: 0,
-                ambiguous_classes: 0, label_conflicts: Vec::new(),
-                mismatches: Vec::new(), floating_nets: Vec::new(),
-            },
-        };
-        let cmp_opts = CompareOpts {
-            strict: false,
-            w_tolerance: deck.w_tolerance.clone(),
-            l_tolerance: deck.l_tolerance.clone(),
-        };
-        compare(&ext, &self.reference, &cmp_opts)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::{LayerDef, LayerTable, ConnectivityConfig, DeviceConfig, MosRule};
+    use crate::backend::Backend;
+    use crate::params::{Deck, LayerDef, LayerTable, ConnectivityConfig, DeviceConfig, MosRule};
     use crate::geometry::{Bbox, GeometryStore};
     use std::collections::HashMap;
 
