@@ -9,7 +9,9 @@ use crate::params::{Deck, LayerTable};
 use crate::pex::run_pex_by_net;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use crate::traits::{Backend, VerifyCheck};
+use crate::backend::Backend;
+use crate::rule::VerifyCheck;
+pub mod gpu;
 
 #[derive(Debug, Clone)]
 pub struct ErcViolation {
@@ -334,7 +336,7 @@ fn check_missing_tie(
             let cpy: Vec<i32> = corners.iter().map(|c| c.1).collect();
             let ctx: Vec<i32> = contacts.iter().map(|c| (c.xmin + c.xmax) / 2).collect();
             let cty: Vec<i32> = contacts.iter().map(|c| (c.ymin + c.ymax) / 2).collect();
-            if let Some(dists) = crate::traits::nearest_contact_dist2(&cpx, &cpy, &ctx, &cty) {
+            if let Some(dists) = self::gpu::nearest_contact_dist2(&cpx, &cpy, &ctx, &cty) {
                 for (k, &d2) in dists.iter().enumerate() {
                     if d2 > max_dist2_f32 {
                         out.push(ErcViolation {

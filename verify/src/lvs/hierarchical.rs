@@ -136,7 +136,7 @@ pub fn compare_hierarchical(
 
         // Extract layout netlist for this cell
         let geo = &work_geo[cell_name.as_str()];
-        let ext = match extract_netlist_opts(geo, deck, &opts, crate::traits::Backend::Cpu) {
+        let ext = match extract_netlist_opts(geo, deck, &opts, crate::backend::Backend::Cpu) {
             Ok(e) => e,
             Err(e) => {
                 per_cell.push((cell_name.clone(), LvsResult {

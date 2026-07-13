@@ -3,7 +3,7 @@
 use super::types::*;
 use crate::geometry::*;
 use crate::params::Deck;
-use crate::traits::Backend;
+use crate::backend::Backend;
 use std::collections::{HashMap, HashSet};
 
 // --- union-find ---
@@ -1154,7 +1154,7 @@ pub(super) fn extract_netlist_opts_raw_with_sources(
         let ymaxs: Vec<i32> = nodes.iter().map(|n| n.bbox.ymax).collect();
         let pa: Vec<u32> = cands.iter().map(|&(i, _)| i).collect();
         let pb: Vec<u32> = cands.iter().map(|&(_, j)| j).collect();
-        crate::traits::bbox_overlap_flags(&xmins, &ymins, &xmaxs, &ymaxs, &pa, &pb)
+        crate::lvs::gpu::bbox_overlap_flags(&xmins, &ymins, &xmaxs, &ymaxs, &pa, &pb)
     } else {
         None
     };

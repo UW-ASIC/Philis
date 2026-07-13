@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::geometry::{Bbox, GeometryStore, LayerId};
 use crate::lvs::{extract_netlist_opts, ExtractOpts};
 use crate::params::{Deck, DrcRuleParam};
-use crate::traits::Backend;
+use crate::backend::Backend;
 
 use super::{polygon_rect, rect_union_metrics, CheckReport, SignoffCheck, SignoffViolation};
 

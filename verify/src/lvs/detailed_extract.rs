@@ -6,7 +6,7 @@ use super::types::{DeviceFlavor, DeviceKind, ExtractOpts, TwoTerminalKind};
 use crate::geometry::exact::{Point, PointClassification, Polygon};
 use crate::geometry::{GeometryStore, LayerId, PolyId};
 use crate::params::{Deck, MosRule};
-use crate::traits::Backend;
+use crate::backend::Backend;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 

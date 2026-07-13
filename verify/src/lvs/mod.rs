@@ -6,6 +6,7 @@
 //!   2. Device extraction — gate-over-channel recognized via PDK rules; type from implant.
 //!   3. Comparison — iterative partition refinement over both extracted and reference graphs.
 
+pub mod gpu;
 pub mod types;
 pub mod extract;
 pub mod compare;
@@ -34,7 +35,8 @@ pub use gds_adapter::*;
 
 use crate::geometry::GeometryStore;
 use crate::params::Deck;
-use crate::traits::{Backend, VerifyCheck};
+use crate::backend::Backend;
+use crate::rule::VerifyCheck;
 
 /// LVS check implementing VerifyCheck.
 pub struct LvsCheck {

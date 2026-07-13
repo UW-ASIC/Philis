@@ -1,41 +1,10 @@
-//! Core verification traits and GPU acceleration.
+//! DRC GPU prefilters.
 //!
-//! Every DRC, ERC, LVS, and PEX rule implements [`VerifyCheck`], which gives it a
-//! uniform interface for CPU and GPU execution.
-//!
-//! ## GPU acceleration
-//!
-//! Written in CubeCL: kernels are plain Rust functions annotated `#[cube]`, compiled
-//! at runtime for the selected backend (CUDA; flip cubecl's cargo feature for
-//! ROCm/WGPU/Metal). The GPU only prunes work the exact path would have rejected
-//! anyway (DRC) or computes the same values in parallel (ERC/LVS/PEX). No GPU, no
-//! `gpu` feature, no driver => callers get `None` and silently run the full CPU path.
+//! The GPU only prunes work the exact CPU path would have rejected anyway:
+//! every wrapper returns `None` (=> caller takes the full exact path) when
+//! the `gpu` feature is off, no device is usable, or the kernel fails.
 
-use crate::geometry::{Edge, GeometryStore};
-use crate::params::Deck;
-
-// ---------------------------------------------------------------------------
-// Traits
-// ---------------------------------------------------------------------------
-
-/// Where the per-element kernels run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Backend {
-    Cpu,
-    /// CubeCL (CUDA runtime). Requires the `gpu` feature + a device; falls back to CPU.
-    Gpu,
-}
-
-/// A verification check that can run on CPU or GPU.
-pub trait VerifyCheck {
-    type Output;
-    fn id(&self) -> &str;
-    fn run(&self, store: &GeometryStore, deck: &Deck, backend: Backend) -> Self::Output;
-}
-
-// ---------------------------------------------------------------------------
-// DRC GPU prefilters
-// ---------------------------------------------------------------------------
+use crate::geometry::Edge;
 
 /// Polygon-pair prefilter: per pair, 1 iff any edge pair is within thr2 (squared).
 pub fn pair_near_flags(
@@ -69,80 +38,17 @@ pub fn offgrid_flags(xs: &[i32], ys: &[i32], grid: i32) -> Option<Vec<u32>> {
     #[cfg(not(feature = "gpu"))] { let _ = (xs, ys, grid); None }
 }
 
-// ---------------------------------------------------------------------------
-// ERC GPU kernel
-// ---------------------------------------------------------------------------
-
-/// Per-query-point minimum squared distance to any target point (f32).
-/// One thread per query; scans all targets. Used by missing_tie.
-pub fn nearest_contact_dist2(
-    px: &[i32], py: &[i32], cx: &[i32], cy: &[i32],
-) -> Option<Vec<f32>> {
-    #[cfg(feature = "gpu")] { return cube_impl::nearest_dist2(px, py, cx, cy); }
-    #[cfg(not(feature = "gpu"))] { let _ = (px, py, cx, cy); None }
-}
-
-// ---------------------------------------------------------------------------
-// LVS GPU kernel
-// ---------------------------------------------------------------------------
-
-/// Per-pair positive-area bbox overlap flags. 1 = overlaps, 0 = disjoint.
-pub fn bbox_overlap_flags(
-    xmins: &[i32], ymins: &[i32], xmaxs: &[i32], ymaxs: &[i32],
-    pairs_a: &[u32], pairs_b: &[u32],
-) -> Option<Vec<u32>> {
-    #[cfg(feature = "gpu")] {
-        return cube_impl::bbox_overlap(xmins, ymins, xmaxs, ymaxs, pairs_a, pairs_b);
-    }
-    #[cfg(not(feature = "gpu"))] { let _ = (xmins, ymins, xmaxs, ymaxs, pairs_a, pairs_b); None }
-}
-
-// ---------------------------------------------------------------------------
-// PEX GPU kernel
-// ---------------------------------------------------------------------------
-
-/// Per-pair parallel run length (nm) and gap (nm) for coupling cap.
-/// gap < 0 means the pair is not facing (overlapping or non-parallel).
-pub fn coupling_scan_gpu(
-    xmins: &[f32], ymins: &[f32], xmaxs: &[f32], ymaxs: &[f32],
-    pairs_a: &[u32], pairs_b: &[u32],
-) -> Option<(Vec<f32>, Vec<f32>)> {
-    #[cfg(feature = "gpu")] {
-        return cube_impl::coupling_scan(xmins, ymins, xmaxs, ymaxs, pairs_a, pairs_b);
-    }
-    #[cfg(not(feature = "gpu"))] { let _ = (xmins, ymins, xmaxs, ymaxs, pairs_a, pairs_b); None }
-}
-
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
-
-/// Is a CUDA device actually usable right now?
-pub fn gpu_ready() -> bool {
-    #[cfg(feature = "gpu")] { return cube_impl::ready(); }
-    #[cfg(not(feature = "gpu"))] false
-}
-
-/// Report which backends are usable in this build and on this machine.
-pub fn available_backends() -> Vec<Backend> {
-    let mut v = vec![Backend::Cpu];
-    if gpu_ready() { v.push(Backend::Gpu); }
-    v
-}
-
-// ---------------------------------------------------------------------------
-// CubeCL implementation (feature = "gpu")
-// ---------------------------------------------------------------------------
-
 #[cfg(feature = "gpu")]
 mod cube_impl {
+    use crate::backend::cube::{client, contain, log_time, to_f32, to_u32, Client, CUBE_DIM};
     use crate::geometry::Edge;
     use cubecl::bytes::Bytes;
-    use cubecl::cuda::{CudaDevice, CudaRuntime};
+    use cubecl::cuda::CudaRuntime;
     use cubecl::prelude::*;
-    use std::sync::OnceLock;
 
-    // --- shared helpers ----------------------------------------------------
+    const CHUNK: usize = 16 << 20;
+
+    // --- shared cube helpers -------------------------------------------------
 
     #[cube]
     fn pt_seg_d2(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> f32 {
@@ -179,7 +85,7 @@ mod cube_impl {
         lo
     }
 
-    // --- DRC kernels -------------------------------------------------------
+    // --- kernels ---------------------------------------------------------------
 
     #[cube(launch_unchecked)]
     fn pair_near_kernel(
@@ -284,135 +190,7 @@ mod cube_impl {
         }
     }
 
-    // --- ERC kernel --------------------------------------------------------
-
-    #[cube(launch_unchecked)]
-    fn nearest_dist2_kernel(
-        px: &Array<f32>, py: &Array<f32>,
-        cx: &Array<f32>, cy: &Array<f32>,
-        n_targets: u32,
-        out: &mut Array<f32>,
-    ) {
-        if ABSOLUTE_POS < out.len() {
-            let qx = px[ABSOLUTE_POS];
-            let qy = py[ABSOLUTE_POS];
-            let mut best = 1e30f32;
-            for t in 0..n_targets {
-                let dx = qx - cx[t as usize];
-                let dy = qy - cy[t as usize];
-                let d2 = dx * dx + dy * dy;
-                best = f32::min(best, d2);
-            }
-            out[ABSOLUTE_POS] = best;
-        }
-    }
-
-    // --- LVS kernel --------------------------------------------------------
-
-    #[cube(launch_unchecked)]
-    fn overlap_kernel(
-        xmin: &Array<i32>, ymin: &Array<i32>, xmax: &Array<i32>, ymax: &Array<i32>,
-        pa: &Array<u32>, pb: &Array<u32>,
-        flags: &mut Array<u32>,
-    ) {
-        if ABSOLUTE_POS < flags.len() {
-            let a = pa[ABSOLUTE_POS] as usize;
-            let b = pb[ABSOLUTE_POS] as usize;
-            let mut x0 = xmin[a]; if xmin[b] > x0 { x0 = xmin[b]; }
-            let mut x1 = xmax[a]; if xmax[b] < x1 { x1 = xmax[b]; }
-            let mut y0 = ymin[a]; if ymin[b] > y0 { y0 = ymin[b]; }
-            let mut y1 = ymax[a]; if ymax[b] < y1 { y1 = ymax[b]; }
-            let mut f = 0u32;
-            if x1 > x0 && y1 > y0 { f = 1u32; }
-            flags[ABSOLUTE_POS] = f;
-        }
-    }
-
-    // --- PEX kernel --------------------------------------------------------
-
-    #[cube(launch_unchecked)]
-    fn coupling_kernel(
-        bxmin: &Array<f32>, bymin: &Array<f32>, bxmax: &Array<f32>, bymax: &Array<f32>,
-        pa: &Array<u32>, pb: &Array<u32>,
-        run_out: &mut Array<f32>, gap_out: &mut Array<f32>,
-    ) {
-        if ABSOLUTE_POS < run_out.len() {
-            let a = pa[ABSOLUTE_POS] as usize;
-            let b = pb[ABSOLUTE_POS] as usize;
-            // cubecl 0.10's cube macro cannot expand const-const float arithmetic
-            // (`-1.0f32` / `0.0 - 1.0`), so "not facing" is encoded as gap = 0.0 —
-            // callers only accept gap > 0.0, and a facing pair with zero gap is
-            // touching, which they reject too. Locals + f32::max-wrapped mut
-            // assignments dodge the same macro's From<NativeExpand<f32>> gap.
-            let axmin = bxmin[a]; let oxmin = bxmin[b];
-            let axmax = bxmax[a]; let oxmax = bxmax[b];
-            let aymin = bymin[a]; let oymin = bymin[b];
-            let aymax = bymax[a]; let oymax = bymax[b];
-            let mut run = 0.0f32;
-            let mut gap = 0.0f32;
-            let x_overlap = f32::min(axmax, oxmax) - f32::max(axmin, oxmin);
-            if x_overlap > 0.0 {
-                if aymax <= oymin {
-                    run = f32::max(x_overlap, 0.0);
-                    gap = f32::max(oymin - aymax, 0.0);
-                } else if oymax <= aymin {
-                    run = f32::max(x_overlap, 0.0);
-                    gap = f32::max(aymin - oymax, 0.0);
-                }
-            }
-            if gap <= 0.0 {
-                let y_overlap = f32::min(aymax, oymax) - f32::max(aymin, oymin);
-                if y_overlap > 0.0 {
-                    if axmax <= oxmin {
-                        run = f32::max(y_overlap, 0.0);
-                        gap = f32::max(oxmin - axmax, 0.0);
-                    } else if oxmax <= axmin {
-                        run = f32::max(y_overlap, 0.0);
-                        gap = f32::max(axmin - oxmax, 0.0);
-                    }
-                }
-            }
-            run_out[ABSOLUTE_POS] = run;
-            gap_out[ABSOLUTE_POS] = gap;
-        }
-    }
-
-    // --- infrastructure ----------------------------------------------------
-
-    const CHUNK: usize = 16 << 20;
-    const CUBE_DIM: u32 = 256;
-
-    type Client = ComputeClient<CudaRuntime>;
-
-    fn client() -> Option<&'static Client> {
-        static C: OnceLock<Option<Client>> = OnceLock::new();
-        C.get_or_init(|| {
-            std::panic::catch_unwind(|| CudaRuntime::client(&CudaDevice::new(0))).ok()
-        })
-        .as_ref()
-    }
-
-    pub fn ready() -> bool { client().is_some() }
-
-    fn contain<T>(f: impl FnOnce() -> Option<T>) -> Option<T> {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-            Ok(v) => {
-                if v.is_none() && std::env::var_os("GDSVERIFY_GPU_LOG").is_some() {
-                    eprintln!("gdsverify gpu: call returned None (non-panic failure)");
-                }
-                v
-            }
-            Err(p) => {
-                if std::env::var_os("GDSVERIFY_GPU_LOG").is_some() {
-                    let msg = p.downcast_ref::<String>().map(|s| s.as_str())
-                        .or_else(|| p.downcast_ref::<&str>().copied())
-                        .unwrap_or("<non-string panic>");
-                    eprintln!("gdsverify gpu: panic: {msg}");
-                }
-                None
-            }
-        }
-    }
+    // --- host launchers ----------------------------------------------------
 
     /// Upload an edge pool, memoized by CONTENT hash: the same layer's edge set
     /// is uploaded by several rules per run (spacing, width/notch mask, c2c, eol)
@@ -451,22 +229,6 @@ mod cube_impl {
         cache.push((key, hs.clone()));
         hs
     }
-
-    fn log_time(what: &str, t0: std::time::Instant) {
-        if std::env::var_os("GDSVERIFY_GPU_LOG").is_some() {
-            eprintln!("gdsverify gpu: {what}: {:?}", t0.elapsed());
-        }
-    }
-
-    fn to_f32(b: &[u8], n: usize) -> Vec<f32> {
-        b.chunks_exact(4).take(n).map(|c| f32::from_ne_bytes(c.try_into().unwrap())).collect()
-    }
-
-    fn to_u32(b: &[u8], n: usize) -> Vec<u32> {
-        b.chunks_exact(4).take(n).map(|c| u32::from_ne_bytes(c.try_into().unwrap())).collect()
-    }
-
-    // --- DRC host launchers ------------------------------------------------
 
     pub fn pair_near(
         edges: &[Edge], descs: &[(u32, u32, u32, u32)], thr2: f32,
@@ -649,110 +411,6 @@ mod cube_impl {
                 );
             }
             Some(to_u32(&client.read_one(out).ok()?, n))
-        };
-        contain(run)
-    }
-
-    // --- ERC host launcher -------------------------------------------------
-
-    pub fn nearest_dist2(
-        px: &[i32], py: &[i32], cx: &[i32], cy: &[i32],
-    ) -> Option<Vec<f32>> {
-        let client = client()?;
-        let n_q = px.len();
-        let n_t = cx.len();
-        if n_q == 0 { return Some(Vec::new()); }
-        if n_t == 0 { return Some(vec![f32::MAX; n_q]); }
-        let run = || -> Option<Vec<f32>> {
-            let hpx = client.create(Bytes::from_elems(px.iter().map(|&x| x as f32).collect::<Vec<f32>>()));
-            let hpy = client.create(Bytes::from_elems(py.iter().map(|&y| y as f32).collect::<Vec<f32>>()));
-            let hcx = client.create(Bytes::from_elems(cx.iter().map(|&x| x as f32).collect::<Vec<f32>>()));
-            let hcy = client.create(Bytes::from_elems(cy.iter().map(|&y| y as f32).collect::<Vec<f32>>()));
-            let out = client.empty(n_q * core::mem::size_of::<f32>());
-            unsafe {
-                nearest_dist2_kernel::launch_unchecked::<CudaRuntime>(
-                    client,
-                    CubeCount::Static((n_q as u32).div_ceil(CUBE_DIM), 1, 1),
-                    CubeDim::new_1d(CUBE_DIM),
-                    ArrayArg::from_raw_parts(hpx, n_q), ArrayArg::from_raw_parts(hpy, n_q),
-                    ArrayArg::from_raw_parts(hcx, n_t), ArrayArg::from_raw_parts(hcy, n_t),
-                    n_t as u32,
-                    ArrayArg::from_raw_parts(out.clone(), n_q),
-                );
-            }
-            Some(to_f32(&client.read_one(out).ok()?, n_q))
-        };
-        contain(run)
-    }
-
-    // --- LVS host launcher -------------------------------------------------
-
-    pub fn bbox_overlap(
-        xmins: &[i32], ymins: &[i32], xmaxs: &[i32], ymaxs: &[i32],
-        pairs_a: &[u32], pairs_b: &[u32],
-    ) -> Option<Vec<u32>> {
-        let client = client()?;
-        let m = pairs_a.len();
-        if m == 0 { return Some(Vec::new()); }
-        let run = || -> Option<Vec<u32>> {
-            let n = xmins.len();
-            let hxn = client.create(Bytes::from_elems(xmins.to_vec()));
-            let hyn = client.create(Bytes::from_elems(ymins.to_vec()));
-            let hxx = client.create(Bytes::from_elems(xmaxs.to_vec()));
-            let hyx = client.create(Bytes::from_elems(ymaxs.to_vec()));
-            let hpa = client.create(Bytes::from_elems(pairs_a.to_vec()));
-            let hpb = client.create(Bytes::from_elems(pairs_b.to_vec()));
-            let flags = client.create(Bytes::from_elems(vec![0u32; m]));
-            unsafe {
-                overlap_kernel::launch_unchecked::<CudaRuntime>(
-                    client,
-                    CubeCount::Static((m as u32).div_ceil(CUBE_DIM), 1, 1),
-                    CubeDim::new_1d(CUBE_DIM),
-                    ArrayArg::from_raw_parts(hxn, n), ArrayArg::from_raw_parts(hyn, n),
-                    ArrayArg::from_raw_parts(hxx, n), ArrayArg::from_raw_parts(hyx, n),
-                    ArrayArg::from_raw_parts(hpa, m), ArrayArg::from_raw_parts(hpb, m),
-                    ArrayArg::from_raw_parts(flags.clone(), m),
-                );
-            }
-            Some(to_u32(&client.read_one(flags).ok()?, m))
-        };
-        contain(run)
-    }
-
-    // --- PEX host launcher -------------------------------------------------
-
-    pub fn coupling_scan(
-        xmins: &[f32], ymins: &[f32], xmaxs: &[f32], ymaxs: &[f32],
-        pairs_a: &[u32], pairs_b: &[u32],
-    ) -> Option<(Vec<f32>, Vec<f32>)> {
-        let client = client()?;
-        let m = pairs_a.len();
-        if m == 0 { return Some((Vec::new(), Vec::new())); }
-        let run = || -> Option<(Vec<f32>, Vec<f32>)> {
-            let n = xmins.len();
-            let hxn = client.create(Bytes::from_elems(xmins.to_vec()));
-            let hyn = client.create(Bytes::from_elems(ymins.to_vec()));
-            let hxx = client.create(Bytes::from_elems(xmaxs.to_vec()));
-            let hyx = client.create(Bytes::from_elems(ymaxs.to_vec()));
-            let hpa = client.create(Bytes::from_elems(pairs_a.to_vec()));
-            let hpb = client.create(Bytes::from_elems(pairs_b.to_vec()));
-            let run_out = client.empty(m * core::mem::size_of::<f32>());
-            let gap_out = client.empty(m * core::mem::size_of::<f32>());
-            unsafe {
-                coupling_kernel::launch_unchecked::<CudaRuntime>(
-                    client,
-                    CubeCount::Static((m as u32).div_ceil(CUBE_DIM), 1, 1),
-                    CubeDim::new_1d(CUBE_DIM),
-                    ArrayArg::from_raw_parts(hxn, n), ArrayArg::from_raw_parts(hyn, n),
-                    ArrayArg::from_raw_parts(hxx, n), ArrayArg::from_raw_parts(hyx, n),
-                    ArrayArg::from_raw_parts(hpa, m), ArrayArg::from_raw_parts(hpb, m),
-                    ArrayArg::from_raw_parts(run_out.clone(), m),
-                    ArrayArg::from_raw_parts(gap_out.clone(), m),
-                );
-            }
-            let runs = to_f32(&client.read_one(run_out).ok()?, m);
-            let gaps = to_f32(&client.read_one(gap_out).ok()?, m);
-            Some((runs, gaps))
         };
         contain(run)
     }

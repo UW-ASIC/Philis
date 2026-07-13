@@ -14,7 +14,9 @@
 //!   * density                   -> windowed coverage fraction
 
 use crate::geometry::*;
-use crate::traits::{self as gpu, Backend, VerifyCheck};
+use crate::backend::Backend;
+use crate::rule::VerifyCheck;
+pub mod gpu;
 use crate::params::{Deck, DrcRuleParam, LayerTable};
 
 pub mod coloring;

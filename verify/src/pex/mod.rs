@@ -14,7 +14,9 @@
 
 use crate::geometry::*;
 use crate::params::{Deck, LayerTable, PexLayerParams};
-use crate::traits::{Backend, VerifyCheck};
+use crate::backend::Backend;
+use crate::rule::VerifyCheck;
+pub mod gpu;
 
 #[derive(Debug, Clone)]
 pub enum Parasitic {
@@ -698,7 +700,7 @@ fn extract_coupling_cap(
             }
         }
         if let Some((runs, gaps)) =
-            crate::traits::coupling_scan_gpu(&xmins, &ymins, &xmaxs, &ymaxs, &pa, &pb)
+            self::gpu::coupling_scan_gpu(&xmins, &ymins, &xmaxs, &ymaxs, &pa, &pb)
         {
             let mut idx = 0;
             for i in 0..n {

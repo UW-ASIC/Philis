@@ -20,7 +20,7 @@ use crate::gds_lossless::{
 use crate::geometry::exact::{classify_polygon_contact, Point, PolygonContact, Ring};
 use crate::geometry::{GeometryStore, LayerId, PolyId};
 use crate::params::Deck;
-use crate::traits::Backend;
+use crate::backend::Backend;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 

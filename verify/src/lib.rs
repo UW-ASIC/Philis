@@ -26,7 +26,9 @@
 //! buffers feed the CPU scanline passes and (unchanged) a cross-platform GPU kernel via the
 //! [`gpu`] backend.
 
+pub mod backend;
 pub mod core;
+pub mod rule;
 pub mod io;
 pub mod drc;
 pub mod lvs;
@@ -35,9 +37,9 @@ pub mod erc;
 pub mod signoff;
 
 // Old top-level module paths, re-exported so call sites keep compiling.
-pub use crate::core::{geometry, hierarchy_index, traits};
+pub use crate::core::{geometry, hierarchy_index};
 pub use crate::io::{gds, gds_lossless, oasis, params, schema};
-pub use crate::core::traits as gpu;
+pub use crate::backend as gpu;
 
 pub use geometry::{Bbox, Edge, GeometryStore, LayerId, PolyId};
 pub use params::{Deck, DrcRuleParam, LayerDef, LayerTable};
@@ -105,7 +107,8 @@ pub use oasis::{
     read_oasis, write_oasis, OasisCapabilities, OasisError, OasisErrorKind,
     OASIS_CAPABILITIES,
 };
-pub use traits::{Backend, VerifyCheck};
+pub use backend::{available_backends, gpu_ready, Backend};
+pub use rule::{run_rules, DynRule, Rule, VerifyCheck};
 
 // GDS REAL8 values are approximate, so compare units with a tight numerical
 // tolerance rather than bit equality.  The tolerance is deliberately far below
@@ -183,7 +186,7 @@ pub fn load_gds_with_policy(
 /// as a failing LvsResult (matched=false).
 pub fn run_lvs(store: &GeometryStore, deck: &Deck, reference: &RefNetlist) -> LvsResult {
     let opts = ExtractOpts { cut_required: deck.lvs_cut_required, ..Default::default() };
-    let ext = match extract_netlist_opts(store, deck, &opts, traits::Backend::Cpu) {
+    let ext = match extract_netlist_opts(store, deck, &opts, backend::Backend::Cpu) {
         Ok(e) => e,
         Err(e) => return LvsResult {
             matched: false, reason: format!("extraction failed: {}", e),
