@@ -5,35 +5,45 @@
 //! foundry-qualified limits; silently substituting defaults would create a
 //! dangerous false-clean result.
 
-mod antenna;
-mod density_cmp;
-mod esd_latchup;
 mod power;
-mod reliability;
 
-pub use antenna::{
+/// One rule per file, globbed at compile time by build.rs.
+pub mod rules {
+    pub use super::BoxedRule;
+
+    /// Signoff rules always mount; each one reports `NotRun` itself when its
+    /// input is missing, so a missing config never silently drops a check.
+    pub type Factory = fn(&super::SignoffConfig) -> Option<BoxedRule>;
+
+    include!(concat!(env!("OUT_DIR"), "/signoff_rules.rs"));
+}
+
+pub use power::{
+    solve_power_grid, BranchCurrent, ElectromigrationConfig, IrDropConfig, NodeVoltage, PowerEdge,
+    PowerEdgeKind, PowerGrid, PowerNode, PowerSignoffConfig, PowerSolution, PowerSolveConfig,
+};
+pub use rules::antenna::{
     check_antenna, check_antenna_from_deck, AntennaCollector, AntennaConfig, AntennaDiode,
     AntennaGate, AntennaMeasurement, AntennaNetResult, AntennaReport, AntennaRule,
 };
-pub use density_cmp::{
+pub use rules::density_cmp::{
     check_density_cmp, CmpModel, DensityCmpConfig, DensityCmpReport, DensityCmpRule,
     DensityWindowResult,
 };
-pub use esd_latchup::{
+pub use rules::electromigration::{
+    analyze_electromigration, ElectromigrationReport, EmBranchResult,
+};
+pub use rules::esd_latchup::{
     check_esd_latchup, EsdEdge, EsdLatchupConfig, EsdLatchupReport, EsdNode, EsdNodeKind,
     EsdPathRequirement, EsdPathResult, GuardRingEvidence, LatchupSite,
 };
-pub use power::{
-    analyze_electromigration, analyze_ir_drop, solve_power_grid, BranchCurrent,
-    ElectromigrationConfig, ElectromigrationReport, EmBranchResult, IrDropConfig, IrDropReport,
-    NodeVoltage, PowerEdge, PowerEdgeKind, PowerGrid, PowerNode, PowerSignoffConfig, PowerSolution,
-    PowerSolveConfig,
-};
-pub use reliability::{
+pub use rules::ir_drop::{analyze_ir_drop, IrDropReport};
+pub use rules::reliability::{
     check_reliability, AgingStress, AgingStressResult, ReliabilityConfig, ReliabilityReport,
     ThermalStress, VoltageStress,
 };
 
+use crate::backend::Backend;
 use crate::geometry::{Bbox, GeometryStore, PolyId};
 use crate::params::Deck;
 
@@ -180,82 +190,73 @@ impl SignoffSuiteReport {
     }
 }
 
+/// One typed per-check report, as produced by a signoff rule.
+#[derive(Debug, Clone)]
+pub enum SignoffFinding {
+    Antenna(AntennaReport),
+    DensityCmp(DensityCmpReport),
+    IrDrop(IrDropReport),
+    Electromigration(ElectromigrationReport),
+    Reliability(ReliabilityReport),
+    EsdLatchup(EsdLatchupReport),
+}
+
+/// Everything a signoff rule may consult.  The power-grid solve is shared:
+/// `run_signoff_suite` computes it once so IR-drop and EM never solve twice.
+/// `None` means no power config was supplied.
+pub struct SignoffCtx<'a> {
+    pub store: &'a GeometryStore,
+    pub deck: &'a Deck,
+    pub config: &'a SignoffConfig,
+    pub power: Option<&'a Result<PowerSolution, String>>,
+}
+
+/// What the generated rule registry hands back.
+pub type BoxedRule = Box<dyn for<'a> crate::rule::Rule<SignoffCtx<'a>, Finding = SignoffFinding>>;
+
 /// Run the requested signoff suite.  Missing input is reported as `NOT_RUN`.
 pub fn run_signoff_suite(
     store: &GeometryStore,
     deck: &Deck,
     config: &SignoffConfig,
 ) -> SignoffSuiteReport {
-    let antenna = config.antenna.as_ref().map_or_else(
-        || check_antenna_from_deck(store, deck),
-        |c| check_antenna(store, deck, c),
-    );
-    let density_cmp = config.density_cmp.as_ref().map_or_else(
-        || DensityCmpReport::not_run("die boundary and density/CMP rules were not supplied"),
-        |c| {
-            if let Some(rule) = c
-                .rules
-                .iter()
-                .find(|rule| rule.layer as usize >= deck.layers.id_to_name.len())
-            {
-                DensityCmpReport {
-                    check: CheckReport::error(
-                        SignoffCheck::DensityCmp,
-                        format!(
-                            "density/CMP rule '{}' references unknown layer id {}",
-                            rule.id, rule.layer,
-                        ),
-                    ),
-                    windows: Vec::new(),
-                }
-            } else {
-                check_density_cmp(store, c)
-            }
-        },
-    );
-
-    let (ir_drop, electromigration) = match &config.power {
-        None => (
-            IrDropReport::not_run("power-grid topology and load currents were not supplied"),
-            ElectromigrationReport::not_run(
-                "power-grid topology and load currents were not supplied",
-            ),
-        ),
-        Some(p) => match solve_power_grid(&p.grid, &p.solver) {
-            Err(e) => (
-                IrDropReport::error(format!("power-grid solve failed: {e}")),
-                ElectromigrationReport::error(format!("power-grid solve failed: {e}")),
-            ),
-            Ok(solution) => {
-                let ir = p.ir_drop.as_ref().map_or_else(
-                    || IrDropReport::not_run("IR-drop limits were not supplied"),
-                    |c| analyze_ir_drop(&p.grid, &solution, c),
-                );
-                let em = p.electromigration.as_ref().map_or_else(
-                    || ElectromigrationReport::not_run("electromigration limits were not supplied"),
-                    |c| analyze_electromigration(&p.grid, &solution, c),
-                );
-                (ir, em)
-            }
-        },
+    let power_solve = config
+        .power
+        .as_ref()
+        .map(|p| solve_power_grid(&p.grid, &p.solver));
+    let ctx = SignoffCtx {
+        store,
+        deck,
+        config,
+        power: power_solve.as_ref(),
     };
+    let mounted: Vec<BoxedRule> = rules::FACTORIES.iter().filter_map(|f| f(config)).collect();
 
-    let reliability = config.reliability.as_ref().map_or_else(
-        || ReliabilityReport::not_run("reliability stress observations/models were not supplied"),
-        check_reliability,
-    );
-    let esd_latchup = config.esd_latchup.as_ref().map_or_else(
-        || EsdLatchupReport::not_run("ESD network and latch-up evidence were not supplied"),
-        check_esd_latchup,
-    );
-
+    let mut antenna = None;
+    let mut density_cmp = None;
+    let mut ir_drop = None;
+    let mut electromigration = None;
+    let mut reliability = None;
+    let mut esd_latchup = None;
+    for finding in crate::rule::run_rules(&mounted, &ctx, Backend::Cpu) {
+        match finding {
+            SignoffFinding::Antenna(r) => antenna = Some(r),
+            SignoffFinding::DensityCmp(r) => density_cmp = Some(r),
+            SignoffFinding::IrDrop(r) => ir_drop = Some(r),
+            SignoffFinding::Electromigration(r) => electromigration = Some(r),
+            SignoffFinding::Reliability(r) => reliability = Some(r),
+            SignoffFinding::EsdLatchup(r) => esd_latchup = Some(r),
+        }
+    }
+    // Every check family has exactly one always-mounted rule; a missing
+    // finding is a registry bug, not a signoff result.
     SignoffSuiteReport {
-        antenna,
-        density_cmp,
-        ir_drop,
-        electromigration,
-        reliability,
-        esd_latchup,
+        antenna: antenna.expect("antenna signoff rule did not report"),
+        density_cmp: density_cmp.expect("density/CMP signoff rule did not report"),
+        ir_drop: ir_drop.expect("IR-drop signoff rule did not report"),
+        electromigration: electromigration.expect("electromigration signoff rule did not report"),
+        reliability: reliability.expect("reliability signoff rule did not report"),
+        esd_latchup: esd_latchup.expect("ESD/latch-up signoff rule did not report"),
     }
 }
 

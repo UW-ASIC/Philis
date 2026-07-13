@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use super::{CheckReport, SignoffCheck, SignoffViolation};
+use crate::signoff::{CheckReport, SignoffCheck, SignoffCtx, SignoffFinding, SignoffViolation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EsdNodeKind {
@@ -397,3 +397,27 @@ pub fn check_esd_latchup(config: &EsdLatchupConfig) -> EsdLatchupReport {
         paths,
     }
 }
+
+/// Suite rule: ESD/latch-up needs an explicit network and evidence to run.
+struct EsdLatchupSignoffRule;
+
+impl<'a> crate::rule::Rule<SignoffCtx<'a>> for EsdLatchupSignoffRule {
+    type Finding = SignoffFinding;
+
+    fn id(&self) -> &str {
+        "signoff.esd_latchup"
+    }
+
+    fn check(&self, ctx: &SignoffCtx<'a>, _backend: crate::backend::Backend) -> Vec<SignoffFinding> {
+        let report = ctx.config.esd_latchup.as_ref().map_or_else(
+            || EsdLatchupReport::not_run("ESD network and latch-up evidence were not supplied"),
+            check_esd_latchup,
+        );
+        vec![SignoffFinding::EsdLatchup(report)]
+    }
+}
+
+fn factory(_config: &crate::signoff::SignoffConfig) -> Option<super::BoxedRule> {
+    Some(Box::new(EsdLatchupSignoffRule))
+}
+pub static FACTORY: super::Factory = factory;

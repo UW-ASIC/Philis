@@ -2,7 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::geometry::{Bbox, GeometryStore, LayerId};
 
-use super::{polygon_rect, rect_union_metrics, CheckReport, SignoffCheck, SignoffViolation};
+use crate::signoff::{
+    polygon_rect, rect_union_metrics, CheckReport, SignoffCheck, SignoffCtx, SignoffFinding,
+    SignoffViolation,
+};
 
 /// Calibrated first-order CMP thickness model for one layer.
 #[derive(Debug, Clone, PartialEq)]
@@ -335,3 +338,46 @@ pub fn check_density_cmp(store: &GeometryStore, config: &DensityCmpConfig) -> De
         windows,
     }
 }
+
+/// Suite rule: validate rule layers against the deck, then run the check.
+struct DensityCmpSignoffRule;
+
+impl<'a> crate::rule::Rule<SignoffCtx<'a>> for DensityCmpSignoffRule {
+    type Finding = SignoffFinding;
+
+    fn id(&self) -> &str {
+        "signoff.density_cmp"
+    }
+
+    fn check(&self, ctx: &SignoffCtx<'a>, _backend: crate::backend::Backend) -> Vec<SignoffFinding> {
+        let report = ctx.config.density_cmp.as_ref().map_or_else(
+            || DensityCmpReport::not_run("die boundary and density/CMP rules were not supplied"),
+            |c| {
+                if let Some(rule) = c
+                    .rules
+                    .iter()
+                    .find(|rule| rule.layer as usize >= ctx.deck.layers.id_to_name.len())
+                {
+                    DensityCmpReport {
+                        check: CheckReport::error(
+                            SignoffCheck::DensityCmp,
+                            format!(
+                                "density/CMP rule '{}' references unknown layer id {}",
+                                rule.id, rule.layer,
+                            ),
+                        ),
+                        windows: Vec::new(),
+                    }
+                } else {
+                    check_density_cmp(ctx.store, c)
+                }
+            },
+        );
+        vec![SignoffFinding::DensityCmp(report)]
+    }
+}
+
+fn factory(_config: &crate::signoff::SignoffConfig) -> Option<super::BoxedRule> {
+    Some(Box::new(DensityCmpSignoffRule))
+}
+pub static FACTORY: super::Factory = factory;
