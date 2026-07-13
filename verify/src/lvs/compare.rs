@@ -9,8 +9,11 @@
 //! Two-terminal devices (R, C, diode) are full graph participants — not count-only.
 
 use super::types::*;
+use super::{BoxedRule, LvsCtx};
+use crate::backend::Backend;
 use crate::schema::PropertyTolerance;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 // --- public helpers used by extract.rs reduce_netlist ---
 
@@ -84,7 +87,7 @@ fn two_term_roles(k: &TwoTerminalKind) -> [u8; 2] {
     }
 }
 
-struct GraphDev {
+pub(crate) struct GraphDev {
     seed: u32,
     pin_count: u8,
     nets: [u32; MAX_PINS],
@@ -92,12 +95,12 @@ struct GraphDev {
     /// Index into original device arrays for parametric checks.
     /// For MOS: index into ext.devices / reference.devices.
     /// For two-terminal: u32::MAX (no parametric check on them yet).
-    orig_idx: u32,
-    is_mos: bool,
+    pub(crate) orig_idx: u32,
+    pub(crate) is_mos: bool,
 }
 
-struct TopoGraph {
-    devs: Vec<GraphDev>,
+pub(crate) struct TopoGraph {
+    pub(crate) devs: Vec<GraphDev>,
     net_count: usize,
 }
 
@@ -424,80 +427,21 @@ impl Default for CompareOpts {
     }
 }
 
-pub fn compare(ext: &ExtractedNetlist, reference: &RefNetlist, opts: &CompareOpts) -> LvsResult {
-    let ext_n = ext.devices.iter().filter(|d| d.kind == DeviceKind::Nmos).count();
-    let ext_p = ext.devices.iter().filter(|d| d.kind == DeviceKind::Pmos).count();
-    let ref_n = reference.devices.iter().filter(|d| d.kind == DeviceKind::Nmos).count();
-    let ref_p = reference.devices.iter().filter(|d| d.kind == DeviceKind::Pmos).count();
+/// Refined class/graph state — the output of the partition-refinement stage,
+/// read (never mutated) by the post-refinement check rules.
+pub struct Refined {
+    pub(crate) ga: TopoGraph,
+    pub(crate) gb: TopoGraph,
+    pub(crate) dev_cls_a: Vec<u32>,
+    pub(crate) dev_cls_b: Vec<u32>,
+    pub(crate) net_cls_a: Vec<u32>,
+    pub(crate) net_cls_b: Vec<u32>,
+    pub(crate) ref_net_remap: HashMap<String, u32>,
+    pub(crate) ambiguous: usize,
+}
 
-    let ext_npn = ext.bjt_devices.iter().filter(|d| d.kind == DeviceKind::Npn).count();
-    let ext_pnp = ext.bjt_devices.iter().filter(|d| d.kind == DeviceKind::Pnp).count();
-    let ref_npn = reference.ref_bjt.iter().filter(|d| d.kind == DeviceKind::Npn).count();
-    let ref_pnp = reference.ref_bjt.iter().filter(|d| d.kind == DeviceKind::Pnp).count();
-
-    let mut mismatches: Vec<Mismatch> = Vec::new();
-
-    // Collect floating nets from extracted netlist
-    let floating_nets: Vec<FloatingNet> = ext.floating_nets.clone();
-
-    // Record floating nets as mismatches
-    for fnet in &floating_nets {
-        mismatches.push(Mismatch::FloatingNet {
-            net_id: fnet.net_id,
-            label: fnet.label.clone(),
-        });
-    }
-
-    // Record label conflicts as mismatches
-    for conflict in &ext.label_conflicts {
-        mismatches.push(Mismatch::LabelConflict {
-            net_id: 0,
-            labels: vec![conflict.clone()],
-        });
-    }
-
-    let make_result = |matched, reason: String, ambiguous: usize, mismatches: Vec<Mismatch>| LvsResult {
-        matched, reason, mismatches,
-        extracted_devices: ext.devices.len(), nmos: ext_n, pmos: ext_p,
-        ambiguous_classes: ambiguous, label_conflicts: ext.label_conflicts.clone(),
-        floating_nets: floating_nets.clone(),
-    };
-
-    // Fast-fail: MOS device count check
-    if ext_n != ref_n || ext_p != ref_p {
-        if ext_n != ref_n {
-            mismatches.push(Mismatch::DeviceCount {
-                kind: "Nmos".into(), extracted: ext_n, reference: ref_n,
-            });
-        }
-        if ext_p != ref_p {
-            mismatches.push(Mismatch::DeviceCount {
-                kind: "Pmos".into(), extracted: ext_p, reference: ref_p,
-            });
-        }
-        let reason = format!(
-            "device count mismatch (ext {}N/{}P vs ref {}N/{}P)", ext_n, ext_p, ref_n, ref_p);
-        return make_result(false, reason, 0, mismatches);
-    }
-
-    // Fast-fail: BJT device count check
-    if ext_npn != ref_npn || ext_pnp != ref_pnp {
-        if ext_npn != ref_npn {
-            mismatches.push(Mismatch::DeviceCount {
-                kind: "Npn".into(), extracted: ext_npn, reference: ref_npn,
-            });
-        }
-        if ext_pnp != ref_pnp {
-            mismatches.push(Mismatch::DeviceCount {
-                kind: "Pnp".into(), extracted: ext_pnp, reference: ref_pnp,
-            });
-        }
-        let reason = format!(
-            "device count mismatch (ext {}NPN/{}PNP vs ref {}NPN/{}PNP)",
-            ext_npn, ext_pnp, ref_npn, ref_pnp);
-        return make_result(false, reason, 0, mismatches);
-    }
-
+/// Pipeline stages 1-3: graph build, iterative refinement, automorphism breaking.
+fn refine(ext: &ExtractedNetlist, reference: &RefNetlist, opts: &CompareOpts) -> Refined {
     let ga = graph_from_extracted(ext, opts.strict);
     let (gb, ref_net_remap) = graph_from_reference(reference, opts.strict);
 
@@ -543,109 +487,69 @@ pub fn compare(ext: &ExtractedNetlist, reference: &RefNetlist, opts: &CompareOpt
 
     let ambiguous = count_ambiguous(&dev_cls_a, &dev_cls_b, &net_cls_a, &net_cls_b);
 
-    // --- Topology validation ---
+    Refined { ga, gb, dev_cls_a, dev_cls_b, net_cls_a, net_cls_b, ref_net_remap, ambiguous }
+}
 
-    // Device class multiset comparison
-    let mut dev_buckets_a: HashMap<u32, usize> = HashMap::new();
-    let mut dev_buckets_b: HashMap<u32, usize> = HashMap::new();
-    for &c in &dev_cls_a { *dev_buckets_a.entry(c).or_default() += 1; }
-    for &c in &dev_cls_b { *dev_buckets_b.entry(c).or_default() += 1; }
-    let all_dev_cls: HashSet<u32> = dev_buckets_a.keys().chain(dev_buckets_b.keys()).copied().collect();
-    for &c in &all_dev_cls {
-        let ca = dev_buckets_a.get(&c).copied().unwrap_or(0);
-        let cb = dev_buckets_b.get(&c).copied().unwrap_or(0);
-        if ca != cb {
-            let desc = format!(
-                "device class {} has {} in layout vs {} in reference", c, ca, cb);
-            mismatches.push(Mismatch::TopologyMismatch { description: desc.clone() });
-            return make_result(false, format!("topology mismatch: {}", desc), ambiguous, mismatches);
+// --- check stage: rules from lvs/rules/, globbed at compile time ---
+
+/// Pre-refinement rule order. Floating nets and label conflicts record
+/// non-fatal findings first; the device count rules fast-fail before the
+/// (expensive) refinement stage ever runs, exactly like the old inline code.
+const PRE_REFINEMENT: &[&str] =
+    &["floating_net", "label_conflict", "device_count_mos", "device_count_bjt"];
+
+/// Post-refinement rule order — the old sequential check precedence.
+const POST_REFINEMENT: &[&str] = &["topology", "net_seed_conflict", "parametric"];
+
+pub fn compare(ext: &ExtractedNetlist, reference: &RefNetlist, opts: &CompareOpts) -> LvsResult {
+    let ext_n = ext.devices.iter().filter(|d| d.kind == DeviceKind::Nmos).count();
+    let ext_p = ext.devices.iter().filter(|d| d.kind == DeviceKind::Pmos).count();
+
+    let floating_nets: Vec<FloatingNet> = ext.floating_nets.clone();
+    let make_result = |matched, reason: String, ambiguous: usize, mismatches: Vec<Mismatch>| LvsResult {
+        matched, reason, mismatches,
+        extracted_devices: ext.devices.len(), nmos: ext_n, pmos: ext_p,
+        ambiguous_classes: ambiguous, label_conflicts: ext.label_conflicts.clone(),
+        floating_nets: floating_nets.clone(),
+    };
+
+    let rules: Vec<BoxedRule> = super::rules::FACTORIES.iter().filter_map(|f| f(opts)).collect();
+    let by_id = |id: &str| rules.iter().find(|r| r.id() == id);
+    let mut mismatches: Vec<Mismatch> = Vec::new();
+
+    // Rules run sequentially; the first one to set the ctx fail reason ends
+    // the comparison, so both the fast-fail perf shape and the reason-string
+    // precedence of the old inline sequence are preserved. Rules that record
+    // findings without a reason (floating nets, label conflicts) are non-fatal.
+    let ctx = LvsCtx { extracted: ext, reference, opts, refined: None, fail_reason: RefCell::new(None) };
+    for id in PRE_REFINEMENT {
+        let Some(rule) = by_id(id) else { continue };
+        mismatches.extend(rule.check(&ctx, Backend::Cpu));
+        if let Some(reason) = ctx.fail_reason.borrow_mut().take() {
+            return make_result(false, reason, 0, mismatches);
         }
     }
 
-    // Net class multiset comparison (skip floating nets)
-    let mut net_buckets_a: HashMap<u32, usize> = HashMap::new();
-    let mut net_buckets_b: HashMap<u32, usize> = HashMap::new();
-    for &c in &net_cls_a { if c != u32::MAX { *net_buckets_a.entry(c).or_default() += 1; } }
-    for &c in &net_cls_b { if c != u32::MAX { *net_buckets_b.entry(c).or_default() += 1; } }
-    let all_net_cls: HashSet<u32> = net_buckets_a.keys().chain(net_buckets_b.keys()).copied().collect();
-    for &c in &all_net_cls {
-        let ca = net_buckets_a.get(&c).copied().unwrap_or(0);
-        let cb = net_buckets_b.get(&c).copied().unwrap_or(0);
-        if ca != cb {
-            let desc = format!(
-                "net class {} has {} nets in layout vs {} in reference", c, ca, cb);
-            mismatches.push(Mismatch::TopologyMismatch { description: desc.clone() });
-            return make_result(false, format!("topology mismatch: {}", desc), ambiguous, mismatches);
+    let refined = refine(ext, reference, opts);
+    let ctx = LvsCtx {
+        extracted: ext, reference, opts,
+        refined: Some(&refined), fail_reason: RefCell::new(None),
+    };
+    // Known post-refinement rules in precedence order, then any future
+    // globbed rule not named in either phase list (FACTORIES order).
+    let post = POST_REFINEMENT.iter().filter_map(|id| by_id(id)).chain(
+        rules.iter().filter(|r| {
+            !PRE_REFINEMENT.contains(&r.id()) && !POST_REFINEMENT.contains(&r.id())
+        }),
+    );
+    for rule in post {
+        mismatches.extend(rule.check(&ctx, Backend::Cpu));
+        if let Some(reason) = ctx.fail_reason.borrow_mut().take() {
+            return make_result(false, reason, refined.ambiguous, mismatches);
         }
     }
 
-    // Net seed conflict detection (VDD/VSS swap)
-    if !reference.net_seeds.is_empty() {
-        let mut seed_class_to_names: HashMap<u32, Vec<&str>> = HashMap::new();
-        for (net_name, _) in &reference.net_seeds {
-            if let Some(&local_id) = ref_net_remap.get(net_name) {
-                let c = net_cls_b[local_id as usize];
-                if c != u32::MAX {
-                    seed_class_to_names.entry(c).or_default().push(net_name.as_str());
-                }
-            }
-        }
-        for (_, names) in &seed_class_to_names {
-            if names.len() > 1 {
-                let nets: Vec<String> = names.iter().map(|s| s.to_string()).collect();
-                let reason = format!("net seed conflict: {} are isomorphic", names.join(" and "));
-                mismatches.push(Mismatch::NetSeedConflict { nets });
-                return make_result(false, reason, ambiguous, mismatches);
-            }
-        }
-    }
-
-    // --- Parametric pass (W/L on MOS devices) ---
-    let enforce_parametric = reference.devices.iter().all(|d| d.w > 0 && d.l > 0);
-    if enforce_parametric {
-        // Bucket MOS devices by their final class
-        let mut ext_wl: BTreeMap<u32, Vec<(i32, i32)>> = BTreeMap::new();
-        let mut ref_wl: BTreeMap<u32, Vec<(i32, i32)>> = BTreeMap::new();
-        for (i, d) in ga.devs.iter().enumerate() {
-            if !d.is_mos { continue; }
-            let oi = d.orig_idx as usize;
-            ext_wl.entry(dev_cls_a[i]).or_default().push((ext.devices[oi].w, ext.devices[oi].l));
-        }
-        for (i, d) in gb.devs.iter().enumerate() {
-            if !d.is_mos { continue; }
-            let oi = d.orig_idx as usize;
-            ref_wl.entry(dev_cls_b[i]).or_default().push((reference.devices[oi].w, reference.devices[oi].l));
-        }
-
-        let within_w = |got: i32, expect: i32| -> bool {
-            ((got - expect).abs() as f64) <= (opts.w_tolerance.abs_nm as f64).max(opts.w_tolerance.rel_pct * expect as f64)
-        };
-        let within_l = |got: i32, expect: i32| -> bool {
-            ((got - expect).abs() as f64) <= (opts.l_tolerance.abs_nm as f64).max(opts.l_tolerance.rel_pct * expect as f64)
-        };
-        for (cls, exts) in ext_wl.iter_mut() {
-            if let Some(refs) = ref_wl.get_mut(cls) {
-                exts.sort_unstable();
-                refs.sort_unstable();
-                for (&(gw, gl), &(rw, rl)) in exts.iter().zip(refs.iter()) {
-                    if !within_w(gw, rw) || !within_l(gl, rl) {
-                        let reason = format!(
-                            "parametric mismatch: expected W/L {}/{} got {}/{}",
-                            rw, rl, gw, gl);
-                        mismatches.push(Mismatch::ParametricMismatch {
-                            property: "W/L".into(),
-                            got: gw as f64,
-                            expected: rw as f64,
-                            tolerance: opts.w_tolerance.abs_nm as f64,
-                        });
-                        return make_result(false, reason, ambiguous, mismatches);
-                    }
-                }
-            }
-        }
-    }
-
-    make_result(true, "match".into(), ambiguous, mismatches)
+    make_result(true, "match".into(), refined.ambiguous, mismatches)
 }
 
 #[cfg(test)]
