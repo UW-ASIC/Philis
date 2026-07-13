@@ -38,7 +38,15 @@ pub mod signoff;
 
 // Old top-level module paths, re-exported so call sites keep compiling.
 pub use crate::core::{geometry, hierarchy_index};
-pub use crate::io::{gds, gds_lossless, oasis, params, schema};
+// Old top-level module paths, re-exported so call sites keep compiling:
+// gds + gds_lossless merged into io::read::gds; params + schema merged into
+// io::schema; oasis moved under io::read.
+pub use crate::io::read;
+pub use crate::io::read::gds;
+pub use crate::io::read::gds as gds_lossless;
+pub use crate::io::read::oasis;
+pub use crate::io::schema;
+pub use crate::io::schema as params;
 pub use crate::backend as gpu;
 
 pub use geometry::{Bbox, Edge, GeometryStore, LayerId, PolyId};

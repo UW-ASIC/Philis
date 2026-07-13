@@ -7,8 +7,8 @@
 //! properties, text, paths, transformed placement, validation signatures, CBLOCK,
 //! and all other records return an offset-bearing [`OasisErrorKind::Unsupported`].
 
-use crate::gds::GdsUnits;
-use crate::gds_lossless::{
+use super::gds::GdsUnits;
+use super::gds::{
     validate_hierarchy, GdsBoundary, GdsElement, GdsElementMeta, GdsEnvelope, GdsLibrary,
     GdsReference, GdsStructure, GdsTransform,
 };
@@ -781,10 +781,10 @@ fn validate_oasis_hierarchy(library: &GdsLibrary, offset: usize) -> Result<(), O
         .collect();
     validate_hierarchy(library, &by_name).map_err(|error| {
         let kind = match error.kind {
-            crate::gds_lossless::LayoutErrorKind::UndefinedReference => {
+            super::gds::LayoutErrorKind::UndefinedReference => {
                 OasisErrorKind::UndefinedReference
             }
-            crate::gds_lossless::LayoutErrorKind::HierarchyCycle => OasisErrorKind::HierarchyCycle,
+            super::gds::LayoutErrorKind::HierarchyCycle => OasisErrorKind::HierarchyCycle,
             _ => OasisErrorKind::Malformed,
         };
         OasisError::new(kind, offset, error.message)
@@ -1109,7 +1109,7 @@ fn write_end(out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gds_lossless::{read_gds_library, write_gds_library, GdsReadMode};
+    use crate::gds::{read_gds_library, write_gds_library, GdsReadMode};
     use crate::hierarchy_index::{HierarchyIndexOptions, HierarchySpatialIndex};
 
     fn rectangle(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<Point> {
@@ -1313,7 +1313,7 @@ mod tests {
         boundary
             .meta
             .properties
-            .push(crate::gds_lossless::GdsProperty {
+            .push(crate::gds::GdsProperty {
                 attribute: 1,
                 value: "not-supported".to_string(),
             });
@@ -1324,7 +1324,7 @@ mod tests {
 
         let mut source = library();
         source.structures[1].elements.push(GdsElement::Aref(
-            crate::gds_lossless::GdsArrayReference {
+            crate::gds::GdsArrayReference {
                 structure: "leaf".to_string(),
                 columns: 2,
                 rows: 2,

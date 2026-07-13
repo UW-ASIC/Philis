@@ -1,10 +1,8 @@
-//! Format boundary: everything that parses or serializes external inputs.
+//! Layout I/O: format-agnostic reading and the PDK rule schema.
 //!
-//! GDS (legacy DRC-compat reader and the lossless strict reader/writer),
-//! OASIS, the JSON verify schema, and deck/parameter resolution. Engines
-//! consume the parsed, validated outputs; they never touch bytes.
-pub mod gds;
-pub mod gds_lossless;
-pub mod oasis;
-pub mod params;
+//! * [`read`] — GDS/OASIS decoding into one lossless record database, with a
+//!   format-agnostic wrapper ([`read::read_layout`]) and checked flattening.
+//! * [`schema`] — PDK rules (input schema + resolved deck) consumed by the
+//!   rule engines through their contexts.
+pub mod read;
 pub mod schema;

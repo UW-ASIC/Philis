@@ -1,12 +1,96 @@
-//! Lossless, hierarchy-preserving GDSII ingestion and checked verification flattening.
+//! Unified GDSII reader/writer.
 //!
-//! Parsing and verification are intentionally separate. [`read_gds_library`] retains
-//! records which the polygon checkers do not understand. [`flatten_gds_library`] is the
-//! only bridge to [`GeometryStore`], and fails when a retained construct cannot be
-//! represented exactly. This prevents a valid stream from becoming an approximate
-//! verification database without an explicit error.
+//! One lossless record database ([`GdsLibrary`]) is the single source of
+//! truth: [`read_gds_library`] parses (strict or compatibility mode),
+//! [`flatten_gds_library`] resolves hierarchy into per-cell
+//! [`GeometryStore`]s ([`GdsLayout`]), and [`write_gds_library`] round-trips.
+//! The checked entry points [`read_gds`] / [`read_gds_checked`] are the
+//! layout-facing convenience wrappers over that one pipeline — there is no
+//! second parser.
+//!
+//! GDSII is a big-endian, record-based binary format. A record is:
+//!   [u16 length][u8 rec_type][u8 data_type][payload...]
 
-use crate::gds::{GdsLayout, GdsUnits, GdsUnmappedLayer};
+/// Unit metadata from the GDS `UNITS` record. Geometry coordinates remain the
+/// exact signed database-unit integers stored in the file; the reader never
+/// rescales or rounds them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GdsUnits {
+    /// Size of one database unit expressed in the library's user unit.
+    pub user_units_per_database_unit: f64,
+    /// Size of one database unit in meters.
+    pub meters_per_database_unit: f64,
+}
+
+impl GdsUnits {
+    /// Size of one database unit in nanometers.
+    pub fn database_unit_nm(self) -> f64 {
+        self.meters_per_database_unit * 1.0e9
+    }
+}
+
+/// Geometry records whose GDS `(layer, datatype)` pair was not present in the
+/// supplied [`LayerTable`]. Entries are sorted by `(layer, datatype)` so callers
+/// can deterministically reject, waive, or report them. TEXT records remain raw
+/// metadata in each [`GeometryStore`] and are not counted here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GdsUnmappedLayer {
+    pub layer: i32,
+    pub datatype: i32,
+    pub element_count: usize,
+}
+
+/// Parsed GDS: one flattened `GeometryStore` per cell (structure), keyed by name.
+pub struct GdsLayout {
+    pub cells: HashMap<String, GeometryStore>,
+    /// Cells not referenced by any other cell (usually exactly one on real layouts).
+    pub top_cells: Vec<String>,
+    /// Parsed `UNITS` metadata. `None` preserves compatibility with legacy
+    /// record streams that omit the otherwise-standard library record.
+    pub units: Option<GdsUnits>,
+    /// Counted BOUNDARY/BOX/PATH records on layer pairs absent from the supplied
+    /// layer table. Unmapped geometry is never silently invisible to callers.
+    pub unmapped_geometry: Vec<GdsUnmappedLayer>,
+}
+/// Backward-compatible checked import. Structure-only legacy fixtures use
+/// compatibility parsing, but all geometry reaches verification through the
+/// lossless database and exact flatten adapter.
+pub fn read_gds(bytes: &[u8], lt: &LayerTable) -> Result<GdsLayout, String> {
+    let options = GdsFlattenOptions {
+        geometry_policy:
+            GdsGeometryPolicy::PreserveInvalidForPolygonValidity,
+        ..Default::default()
+    };
+    read_gds_checked(
+        bytes,
+        GdsReadMode::Compatibility,
+        lt,
+        &options,
+    )
+}
+
+/// Explicit parse/geometry policy entry point. Signoff callers should select
+/// `GdsReadMode::Strict` with the default strict flatten options.
+pub fn read_gds_checked(
+    bytes: &[u8],
+    mode: GdsReadMode,
+    lt: &LayerTable,
+    options: &GdsFlattenOptions,
+) -> Result<GdsLayout, String> {
+    let library = read_gds_library(bytes, mode)
+        .map_err(|error| error.to_string())?;
+    flatten_gds_library(&library, lt, options)
+        .map_err(|error| error.to_string())
+}
+
+// Lossless, hierarchy-preserving GDSII ingestion and checked verification flattening.
+//
+// Parsing and verification are intentionally separate. [`read_gds_library`] retains
+// records which the polygon checkers do not understand. [`flatten_gds_library`] is the
+// only bridge to [`GeometryStore`], and fails when a retained construct cannot be
+// represented exactly. This prevents a valid stream from becoming an approximate
+// verification database without an explicit error.
+
 use crate::geometry::exact::{Point, Ring};
 use crate::geometry::GeometryStore;
 use crate::params::LayerTable;
@@ -2698,5 +2782,204 @@ mod tests {
                 "malformed corpus entry was accepted"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod checked_reader_tests {
+    use super::*;
+    use crate::params::{LayerDef, LayerTable};
+
+    fn record(out: &mut Vec<u8>, record: u8, data_type: u8, payload: &[u8]) {
+        let len = u16::try_from(payload.len() + 4).unwrap();
+        out.extend_from_slice(&len.to_be_bytes());
+        out.push(record);
+        out.push(data_type);
+        out.extend_from_slice(payload);
+    }
+
+    fn no_data(out: &mut Vec<u8>, record_type: u8) {
+        record(out, record_type, DT_NONE, &[]);
+    }
+
+    fn i16_record(out: &mut Vec<u8>, record_type: u8, values: &[i16]) {
+        let payload: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_be_bytes())
+            .collect();
+        record(out, record_type, DT_I16, &payload);
+    }
+
+    fn i32_record(out: &mut Vec<u8>, record_type: u8, values: &[i32]) {
+        let payload: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_be_bytes())
+            .collect();
+        record(out, record_type, DT_I32, &payload);
+    }
+
+    fn string_record(out: &mut Vec<u8>, record_type: u8, value: &str) {
+        let mut payload = value.as_bytes().to_vec();
+        if payload.len() % 2 != 0 {
+            payload.push(0);
+        }
+        record(out, record_type, DT_ASCII, &payload);
+    }
+
+    fn gds_real(value: f64) -> [u8; 8] {
+        if value == 0.0 {
+            return [0; 8];
+        }
+        let (mut mantissa, mut exponent) = (value.abs(), 64i32);
+        while mantissa >= 1.0 {
+            mantissa /= 16.0;
+            exponent += 1;
+        }
+        while mantissa < 1.0 / 16.0 {
+            mantissa *= 16.0;
+            exponent -= 1;
+        }
+        let bits = (mantissa * 2f64.powi(56)) as u64;
+        let mut bytes = bits.to_be_bytes();
+        bytes[0] = (if value < 0.0 { 0x80 } else { 0 }) | exponent as u8;
+        bytes
+    }
+
+    fn begin_structure(out: &mut Vec<u8>, name: &str) {
+        i16_record(out, BGNSTR, &[0; 12]);
+        string_record(out, STRNAME, name);
+    }
+
+    fn rectangle(out: &mut Vec<u8>, layer: i16, datatype: i16) {
+        no_data(out, BOUNDARY);
+        i16_record(out, LAYER, &[layer]);
+        i16_record(out, DATATYPE, &[datatype]);
+        i32_record(out, XY, &[0, 0, 100, 0, 100, 100, 0, 100, 0, 0]);
+        no_data(out, ENDEL);
+    }
+
+    fn layer_table() -> LayerTable {
+        let defs = [(
+            "met1".into(),
+            LayerDef {
+                layer: 7,
+                datatype: 0,
+            },
+        )]
+        .into_iter()
+        .collect();
+        LayerTable::from_defs(&defs)
+    }
+
+    #[test]
+    fn rejects_truncated_and_invalid_records() {
+        let table = layer_table();
+        let truncated = [0, 8, HEADER, DT_I16, 0, 6];
+        let error = read_gds(&truncated, &table)
+            .err()
+            .expect("declared record extending past EOF must fail");
+        assert!(error.contains("truncated record"), "{error}");
+
+        let invalid_length = [0, 2, HEADER, DT_I16];
+        let error = read_gds(&invalid_length, &table)
+            .err()
+            .expect("record shorter than header must fail");
+        assert!(error.contains("invalid record length"), "{error}");
+
+        let mut wrong_type = Vec::new();
+        record(&mut wrong_type, HEADER, DT_I32, &[0, 6]);
+        let error = read_gds(&wrong_type, &table)
+            .err()
+            .expect("wrong record data type must fail");
+        assert!(error.contains("data type"), "{error}");
+
+        let trailing_header = [0u8; 3];
+        let error = read_gds(&trailing_header, &table)
+            .err()
+            .expect("partial header must fail");
+        assert!(error.contains("truncated record header"), "{error}");
+    }
+
+    #[test]
+    fn rejects_duplicate_structures_and_missing_endstr() {
+        let table = layer_table();
+        let mut duplicate = Vec::new();
+        begin_structure(&mut duplicate, "top");
+        no_data(&mut duplicate, ENDSTR);
+        begin_structure(&mut duplicate, "top");
+        no_data(&mut duplicate, ENDSTR);
+        let error = read_gds(&duplicate, &table)
+            .err()
+            .expect("duplicate structure name must fail");
+        assert!(error.contains("duplicate structure name `top`"), "{error}");
+
+        let mut missing = Vec::new();
+        begin_structure(&mut missing, "unfinished");
+        let error = read_gds(&missing, &table)
+            .err()
+            .expect("missing ENDSTR must fail");
+        assert!(error.contains("missing ENDSTR"), "{error}");
+    }
+
+    #[test]
+    fn exposes_units_without_rescaling_geometry() {
+        let table = layer_table();
+        let mut bytes = Vec::new();
+        let mut unit_payload = Vec::new();
+        unit_payload.extend_from_slice(&gds_real(1.0e-3));
+        unit_payload.extend_from_slice(&gds_real(1.0e-9));
+        record(&mut bytes, UNITS, DT_REAL8, &unit_payload);
+        begin_structure(&mut bytes, "top");
+        no_data(&mut bytes, BOUNDARY);
+        i16_record(&mut bytes, LAYER, &[7]);
+        i16_record(&mut bytes, DATATYPE, &[0]);
+        i32_record(
+            &mut bytes,
+            XY,
+            &[100, 200, 1100, 200, 1100, 700, 100, 700, 100, 200],
+        );
+        no_data(&mut bytes, ENDEL);
+        no_data(&mut bytes, ENDSTR);
+
+        let layout = read_gds(&bytes, &table).expect("valid layout");
+        let units = layout.units.expect("UNITS metadata");
+        assert!((units.user_units_per_database_unit - 1.0e-3).abs() < 1.0e-15);
+        assert!((units.meters_per_database_unit - 1.0e-9).abs() < 1.0e-21);
+        assert!((units.database_unit_nm() - 1.0).abs() < 1.0e-12);
+
+        let bbox = layout.cells["top"].poly_bbox[0];
+        assert_eq!(
+            (bbox.xmin, bbox.ymin, bbox.xmax, bbox.ymax),
+            (100, 200, 1100, 700)
+        );
+    }
+
+    #[test]
+    fn reports_unmapped_geometry_by_layer_pair() {
+        let table = layer_table();
+        let mut bytes = Vec::new();
+        begin_structure(&mut bytes, "top");
+        rectangle(&mut bytes, 99, 7);
+        rectangle(&mut bytes, 99, 7);
+        rectangle(&mut bytes, 98, 0);
+        no_data(&mut bytes, ENDSTR);
+
+        let layout = read_gds(&bytes, &table).expect("well-formed unmapped geometry");
+        assert_eq!(layout.cells["top"].poly_count(), 0);
+        assert_eq!(
+            layout.unmapped_geometry,
+            [
+                GdsUnmappedLayer {
+                    layer: 98,
+                    datatype: 0,
+                    element_count: 1
+                },
+                GdsUnmappedLayer {
+                    layer: 99,
+                    datatype: 7,
+                    element_count: 2
+                },
+            ]
+        );
     }
 }
