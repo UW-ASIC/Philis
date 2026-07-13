@@ -27,6 +27,7 @@
 //! [`gpu`] backend.
 
 pub mod geometry;
+pub mod core;
 pub mod params;
 pub mod schema;
 pub mod drc;
