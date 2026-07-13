@@ -187,7 +187,7 @@ pub use pex::{
 };
 pub use rule::{run_rules, Rule};
 pub use schema::{DrcRuleSchema, LvsSchema, VerifySchema};
-pub use session::{Col, Session};
+pub use session::{AtomicCol, Col, ScatterKernel, ScatterOp, Session};
 
 const GDS_DBU_REL_TOLERANCE: f64 = 1.0e-9;
 const GDS_DBU_ABS_TOLERANCE_NM: f64 = 1.0e-12;
