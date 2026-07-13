@@ -1,13 +1,14 @@
 //! Execution backend selection and the shared CubeCL runtime plumbing.
 //!
-//! Engine-specific GPU kernels live with their engines (`drc::gpu`, `erc::gpu`,
-//! `lvs::gpu`, `pex::gpu`); this module only owns the backend enum and the
-//! runtime pieces every engine shares: the memoized CUDA client, panic
-//! containment, and readback helpers. Kernels are plain Rust `#[cube]`
-//! functions compiled at runtime for the selected backend (CUDA; flip
-//! cubecl's cargo feature for ROCm/WGPU/Metal). No GPU, no `gpu` feature, no
-//! driver => engine wrappers return `None` and callers silently run the full
-//! CPU path.
+//! Rule math is single-source: each rule's kernel function is annotated
+//! `#[verify_kernel]` (see `gdsverify-macros`) and compiled at build time into
+//! a CPU driver and a GPU kernel + launcher over the very same body. This
+//! module only owns the backend enum and the runtime pieces every generated
+//! launcher shares: the memoized CUDA client, panic containment, column
+//! upload, and readback. Kernels compile at runtime for the selected backend
+//! (CUDA; flip cubecl's cargo feature for ROCm/WGPU/Metal). No GPU, no `gpu`
+//! feature, no driver => launchers return `None` and dispatch runs the same
+//! code on CPU.
 
 /// Where the per-element kernels run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,14 +31,18 @@ pub fn available_backends() -> Vec<Backend> {
     v
 }
 
-/// Shared CubeCL runtime infrastructure for the engine kernel modules.
+/// Shared CubeCL runtime infrastructure for the `#[verify_kernel]`-generated
+/// launchers.
 #[cfg(feature = "gpu")]
 pub(crate) mod cube {
+    use cubecl::bytes::Bytes;
     use cubecl::cuda::{CudaDevice, CudaRuntime};
     use cubecl::prelude::*;
     use std::sync::OnceLock;
 
     pub(crate) const CUBE_DIM: u32 = 256;
+    /// Evaluation budget per cross-product launch chunk.
+    pub(crate) const CHUNK: usize = 16 << 20;
 
     pub(crate) type Client = ComputeClient<CudaRuntime>;
 
@@ -79,11 +84,77 @@ pub(crate) mod cube {
         }
     }
 
-    pub(crate) fn to_f32(b: &[u8], n: usize) -> Vec<f32> {
-        b.chunks_exact(4).take(n).map(|c| f32::from_ne_bytes(c.try_into().unwrap())).collect()
+    /// Element types the generated launchers can move across the bus.
+    pub(crate) trait DeviceElem: Copy + 'static {
+        fn to_bytes(v: &[Self]) -> Bytes;
+        fn from_bytes(b: &[u8], n: usize) -> Vec<Self>;
+        fn ne_bytes(self) -> [u8; 4];
     }
 
-    pub(crate) fn to_u32(b: &[u8], n: usize) -> Vec<u32> {
-        b.chunks_exact(4).take(n).map(|c| u32::from_ne_bytes(c.try_into().unwrap())).collect()
+    macro_rules! device_elem {
+        ($t:ty) => {
+            impl DeviceElem for $t {
+                fn to_bytes(v: &[Self]) -> Bytes {
+                    Bytes::from_elems(v.to_vec())
+                }
+                fn from_bytes(b: &[u8], n: usize) -> Vec<Self> {
+                    b.chunks_exact(core::mem::size_of::<Self>())
+                        .take(n)
+                        .map(|c| Self::from_ne_bytes(c.try_into().unwrap()))
+                        .collect()
+                }
+                fn ne_bytes(self) -> [u8; 4] {
+                    self.to_ne_bytes()
+                }
+            }
+        };
+    }
+    device_elem!(f32);
+    device_elem!(i32);
+    device_elem!(u32);
+
+    /// Upload a column, memoized by CONTENT hash for large slices: the same
+    /// layer's column set is uploaded by several rules per run and by every
+    /// run in a steady-state loop. Full-content hashing (not sampling) keeps
+    /// this sound — a false hit needs a 64-bit collision on the exact value
+    /// stream. Bounded to 64 handles, evicting oldest.
+    pub(crate) fn upload<E: DeviceElem>(client: &Client, v: &[E]) -> cubecl::server::Handle {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        use std::sync::Mutex;
+        const CACHE_MIN: usize = 4_096;
+        static CACHE: Mutex<Vec<(u64, cubecl::server::Handle)>> = Mutex::new(Vec::new());
+
+        if v.len() < CACHE_MIN {
+            return client.create(E::to_bytes(v));
+        }
+        let mut h = DefaultHasher::new();
+        std::any::TypeId::of::<E>().hash(&mut h);
+        v.len().hash(&mut h);
+        for e in v {
+            e.ne_bytes().hash(&mut h);
+        }
+        let key = h.finish();
+        let mut cache = CACHE.lock().unwrap();
+        if let Some((_, handle)) = cache.iter().find(|(k, _)| *k == key) {
+            return handle.clone();
+        }
+        let t0 = std::time::Instant::now();
+        let handle = client.create(E::to_bytes(v));
+        log_time(&format!("column upload ({} elems)", v.len()), t0);
+        if cache.len() >= 64 {
+            cache.remove(0);
+        }
+        cache.push((key, handle.clone()));
+        handle
+    }
+
+    /// Read a device buffer back as `n` elements.
+    pub(crate) fn read_out<E: DeviceElem>(
+        client: &Client,
+        handle: cubecl::server::Handle,
+        n: usize,
+    ) -> Option<Vec<E>> {
+        Some(E::from_bytes(&client.read_one(handle).ok()?, n))
     }
 }

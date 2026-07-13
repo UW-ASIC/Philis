@@ -32,10 +32,13 @@ pub type DynRule<Ctx, F> = Box<dyn Rule<Ctx, Finding = F>>;
 
 /// Run every rule against the context in parallel and sum the findings.
 /// Ordering across rules follows the rules slice (rayon preserves it).
-pub fn run_rules<Ctx, F>(rules: &[DynRule<Ctx, F>], ctx: &Ctx, backend: Backend) -> Vec<F>
+/// `R` may be a trait object (including a higher-ranked one, e.g.
+/// `dyn for<'a> Rule<DrcCtx<'a>, Finding = Violation>`).
+pub fn run_rules<Ctx, F, R>(rules: &[Box<R>], ctx: &Ctx, backend: Backend) -> Vec<F>
 where
     Ctx: Sync,
     F: Send,
+    R: Rule<Ctx, Finding = F> + ?Sized,
 {
     rules
         .par_iter()
