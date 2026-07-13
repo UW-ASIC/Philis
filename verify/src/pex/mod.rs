@@ -15,8 +15,6 @@
 use crate::geometry::*;
 use crate::params::{Deck, LayerTable, PexLayerParams};
 use crate::backend::Backend;
-use crate::rule::VerifyCheck;
-pub mod gpu;
 
 #[derive(Debug, Clone)]
 pub enum Parasitic {
@@ -196,125 +194,46 @@ impl PexReport {
     }
 }
 
-// --- Extractor structs implementing VerifyCheck ----------------------------
+// --- Rule plumbing: one extractor per file in rules/, globbed at build time --
 
-pub struct ResistanceExtractor {
-    pub layer: LayerId,
-    pub params: PexLayerParams,
-}
-pub struct ViaResistanceExtractor {
-    pub layer: LayerId,
-    pub params: PexLayerParams,
-}
-pub struct AreaFringeCapExtractor {
-    pub layer: LayerId,
-    pub params: PexLayerParams,
-}
-pub struct CouplingCapExtractor {
-    pub layer: LayerId,
-    pub params: PexLayerParams,
+/// Everything a PEX rule reads besides its own per-layer params.
+#[derive(Clone, Copy)]
+pub struct PexCtx<'a> {
+    pub store: &'a GeometryStore,
+    pub layers: &'a LayerTable,
 }
 
-impl VerifyCheck for ResistanceExtractor {
-    type Output = Vec<Parasitic>;
-    fn id(&self) -> &str {
-        "resistance"
-    }
-    fn run(&self, store: &GeometryStore, deck: &Deck, _backend: Backend) -> Vec<Parasitic> {
-        let mut out = Vec::new();
-        extract_resistance(store, &deck.layers, self.layer, &self.params, &mut out);
-        out.into_iter().map(|(p, _)| p).collect()
-    }
-}
+/// A PEX rule with the finding type fixed.
+pub type BoxedRule = Box<dyn for<'a> crate::rule::Rule<PexCtx<'a>, Finding = Attributed>>;
 
-impl VerifyCheck for ViaResistanceExtractor {
-    type Output = Vec<Parasitic>;
-    fn id(&self) -> &str {
-        "via_resistance"
-    }
-    fn run(&self, store: &GeometryStore, deck: &Deck, _backend: Backend) -> Vec<Parasitic> {
-        let mut out = Vec::new();
-        extract_via_resistance(store, &deck.layers, self.layer, &self.params, &mut out);
-        out.into_iter().map(|(p, _)| p).collect()
-    }
-}
-
-impl VerifyCheck for AreaFringeCapExtractor {
-    type Output = Vec<Parasitic>;
-    fn id(&self) -> &str {
-        "area_fringe_cap"
-    }
-    fn run(&self, store: &GeometryStore, deck: &Deck, _backend: Backend) -> Vec<Parasitic> {
-        let mut out = Vec::new();
-        extract_area_fringe_cap(
-            store,
-            &deck.layers,
-            self.layer,
-            &self.params,
-            deck,
-            &mut out,
-        );
-        out.into_iter().map(|(p, _)| p).collect()
-    }
-}
-
-impl VerifyCheck for CouplingCapExtractor {
-    type Output = Vec<Parasitic>;
-    fn id(&self) -> &str {
-        "coupling_cap"
-    }
-    fn run(&self, store: &GeometryStore, deck: &Deck, backend: Backend) -> Vec<Parasitic> {
-        let mut out = Vec::new();
-        extract_coupling_cap(
-            store,
-            &deck.layers,
-            self.layer,
-            &self.params,
-            backend,
-            &mut out,
-        );
-        out.into_iter().map(|(p, _)| p).collect()
-    }
-}
-
-/// Build PEX extractors from the deck's per-layer params.
-pub fn pex_rules_from_deck(deck: &Deck) -> Vec<Box<dyn VerifyCheck<Output = Vec<Parasitic>>>> {
-    let mut rules: Vec<Box<dyn VerifyCheck<Output = Vec<Parasitic>>>> = Vec::new();
-    for (&lid, params) in &deck.pex {
-        rules.push(Box::new(ResistanceExtractor {
-            layer: lid,
-            params: params.clone(),
-        }));
-        rules.push(Box::new(ViaResistanceExtractor {
-            layer: lid,
-            params: params.clone(),
-        }));
-        rules.push(Box::new(AreaFringeCapExtractor {
-            layer: lid,
-            params: params.clone(),
-        }));
-        rules.push(Box::new(CouplingCapExtractor {
-            layer: lid,
-            params: params.clone(),
-        }));
-    }
-    rules
+pub mod rules {
+    /// One factory per rule file: instantiate the rule for a (layer, params)
+    /// deck entry, or `None` when the params disable it.
+    pub type Factory =
+        fn(crate::geometry::LayerId, &crate::params::PexLayerParams) -> Option<super::BoxedRule>;
+    include!(concat!(env!("OUT_DIR"), "/pex_rules.rs"));
 }
 
 const NM_PER_UM: f64 = 1000.0;
 
 /// A parasitic together with the polygon(s) it came from: `[poly, u32::MAX]` for the
 /// single-polygon extractors (R, area/fringe C), `[poly_a, poly_b]` for coupling C.
-type Attributed = (Parasitic, [u32; 2]);
+pub type Attributed = (Parasitic, [u32; 2]);
 
 fn extract_all(store: &GeometryStore, deck: &Deck, backend: Backend) -> Vec<Attributed> {
-    let mut out = Vec::new();
+    let mut rule_set: Vec<BoxedRule> = Vec::new();
     for (&lid, params) in &deck.pex {
-        extract_resistance(store, &deck.layers, lid, params, &mut out);
-        extract_via_resistance(store, &deck.layers, lid, params, &mut out);
-        extract_area_fringe_cap(store, &deck.layers, lid, params, deck, &mut out);
-        extract_coupling_cap(store, &deck.layers, lid, params, backend, &mut out);
+        for factory in rules::FACTORIES {
+            if let Some(rule) = factory(lid, params) {
+                rule_set.push(rule);
+            }
+        }
     }
+    let ctx = PexCtx {
+        store,
+        layers: &deck.layers,
+    };
+    let mut out = crate::rule::run_rules(&rule_set, &ctx, backend);
     extract_interlayer_cap(store, deck, &mut out);
     out
 }
@@ -495,121 +414,6 @@ fn extraction_diagnostic(
     )
 }
 
-/// Sheet resistance of every valid conductor polygon.
-///
-/// `R = Rs * Leq/Weq`, where the equivalent dimensions come from exact polygon area and
-/// perimeter. The scalar remains a conservative analytical estimate: terminal-aware current
-/// flow and distributed reduction require an RC network extractor or field solver.
-fn extract_resistance(
-    store: &GeometryStore,
-    lt: &LayerTable,
-    layer: LayerId,
-    p: &PexLayerParams,
-    out: &mut Vec<Attributed>,
-) {
-    if p.sheet_res_ohm_sq == 0.0 {
-        return;
-    }
-    for poly in store.polys_on_layer(layer) {
-        let metrics = match rectilinear_metrics(store, poly) {
-            Ok(metrics) => metrics,
-            Err(message) => {
-                out.push(extraction_diagnostic(
-                    lt,
-                    layer,
-                    poly,
-                    "sheet_resistance",
-                    message,
-                ));
-                continue;
-            }
-        };
-        let squares = metrics.equivalent_length_nm / metrics.equivalent_width_nm;
-        let ohm = p.sheet_res_ohm_sq * squares;
-        out.push((
-            Parasitic::Resistance {
-                layer: lt.name(layer).into(),
-                ohm,
-                length_nm: report_dimension_nm(metrics.equivalent_length_nm),
-                width_nm: report_dimension_nm(metrics.equivalent_width_nm),
-            },
-            [poly.0, u32::MAX],
-        ));
-    }
-}
-
-/// Fixed per-via resistance for each polygon on a via/contact layer.
-fn extract_via_resistance(
-    store: &GeometryStore,
-    lt: &LayerTable,
-    layer: LayerId,
-    p: &PexLayerParams,
-    out: &mut Vec<Attributed>,
-) {
-    if p.via_res_ohm == 0.0 {
-        return;
-    }
-    for poly in store.polys_on_layer(layer) {
-        out.push((
-            Parasitic::ViaResistance {
-                layer: lt.name(layer).into(),
-                ohm: p.via_res_ohm,
-            },
-            [poly.0, u32::MAX],
-        ));
-    }
-}
-
-/// Area + fringe capacitance to substrate for every valid conductor polygon.
-///
-/// Fill density and ground-plane shielding need explicit process-calibrated models. They are
-/// deliberately not inferred from polygon size or hard-coded layer names here.
-fn extract_area_fringe_cap(
-    store: &GeometryStore,
-    lt: &LayerTable,
-    layer: LayerId,
-    p: &PexLayerParams,
-    _deck: &Deck,
-    out: &mut Vec<Attributed>,
-) {
-    let layer_name = lt.name(layer);
-    if p.area_cap_af_um2 == 0.0 && p.fringe_cap_af_um == 0.0 {
-        return;
-    }
-
-    for poly in store.polys_on_layer(layer) {
-        let metrics = match rectilinear_metrics(store, poly) {
-            Ok(metrics) => metrics,
-            Err(message) => {
-                out.push(extraction_diagnostic(
-                    lt,
-                    layer,
-                    poly,
-                    "ground_capacitance",
-                    message,
-                ));
-                continue;
-            }
-        };
-        let area_um2 = metrics.area_nm2 / (NM_PER_UM * NM_PER_UM);
-        let perim_um = metrics.perimeter_nm / NM_PER_UM;
-        let area_af = p.area_cap_af_um2 * area_um2;
-        let fringe_af = p.fringe_cap_af_um * perim_um;
-        let af = area_af + fringe_af;
-        out.push((
-            Parasitic::AreaCap {
-                layer: layer_name.into(),
-                af,
-                area_af,
-                fringe_af,
-                area_um2,
-                perimeter_um: perim_um,
-            },
-            [poly.0, u32::MAX],
-        ));
-    }
-}
-
 /// Inter-layer coupling capacitance between wires on DIFFERENT metal layers that cross
 /// over/under each other. C = interlayer_cap_af_um2 * overlap_area_um2 for each polygon
 /// pair that overlaps in the x-y plane.
@@ -660,132 +464,6 @@ fn extract_interlayer_cap(store: &GeometryStore, deck: &Deck, out: &mut Vec<Attr
     }
 }
 
-/// Lateral coupling capacitance between parallel same-layer wires that face each other.
-fn extract_coupling_cap(
-    store: &GeometryStore,
-    lt: &LayerTable,
-    layer: LayerId,
-    p: &PexLayerParams,
-    backend: Backend,
-    out: &mut Vec<Attributed>,
-) {
-    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
-    let n = polys.len();
-    let n_pairs = n * n.saturating_sub(1) / 2;
-
-    // GPU path: compute run length + gap for all pairs in parallel
-    if backend == Backend::Gpu && n_pairs >= (1 << 18) {
-        let xmins: Vec<f32> = polys
-            .iter()
-            .map(|q| store.poly_bbox[q.0 as usize].xmin as f32)
-            .collect();
-        let ymins: Vec<f32> = polys
-            .iter()
-            .map(|q| store.poly_bbox[q.0 as usize].ymin as f32)
-            .collect();
-        let xmaxs: Vec<f32> = polys
-            .iter()
-            .map(|q| store.poly_bbox[q.0 as usize].xmax as f32)
-            .collect();
-        let ymaxs: Vec<f32> = polys
-            .iter()
-            .map(|q| store.poly_bbox[q.0 as usize].ymax as f32)
-            .collect();
-        let mut pa = Vec::with_capacity(n_pairs);
-        let mut pb = Vec::with_capacity(n_pairs);
-        for i in 0..n {
-            for j in (i + 1)..n {
-                pa.push(i as u32);
-                pb.push(j as u32);
-            }
-        }
-        if let Some((runs, gaps)) =
-            self::gpu::coupling_scan_gpu(&xmins, &ymins, &xmaxs, &ymaxs, &pa, &pb)
-        {
-            let mut idx = 0;
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    let run_nm = runs[idx];
-                    let gap_nm = gaps[idx];
-                    idx += 1;
-                    if run_nm > 0.0 && gap_nm > 0.0 {
-                        let run_um = run_nm as f64 / NM_PER_UM;
-                        let spacing = gap_nm as i32;
-                        let scale = p.coupling_ref_spacing_nm / spacing as f64;
-                        let af = p.coupling_cap_af_um * run_um * scale;
-                        out.push((
-                            Parasitic::CouplingCap {
-                                layer: lt.name(layer).into(),
-                                af,
-                                spacing_nm: spacing,
-                                run_length_um: run_um,
-                            },
-                            [polys[i].0, polys[j].0],
-                        ));
-                    }
-                }
-            }
-            return;
-        }
-    }
-
-    // CPU fallback
-    // ponytail: all-pairs — the 1/S model has no distance cutoff, so every pair
-    // couples; add a coupling_max_spacing_nm deck param before sweep-pruning this.
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let a = store.poly_bbox[polys[i].0 as usize];
-            let b = store.poly_bbox[polys[j].0 as usize];
-            let x_overlap = a.xmax.min(b.xmax) - a.xmin.max(b.xmin);
-            let y_gap = if a.ymax <= b.ymin {
-                b.ymin - a.ymax
-            } else if b.ymax <= a.ymin {
-                a.ymin - b.ymax
-            } else {
-                -1
-            };
-            if x_overlap > 0 && y_gap > 0 {
-                let run_um = x_overlap as f64 / NM_PER_UM;
-                let spacing = y_gap;
-                let scale = p.coupling_ref_spacing_nm / spacing as f64;
-                let af = p.coupling_cap_af_um * run_um * scale;
-                out.push((
-                    Parasitic::CouplingCap {
-                        layer: lt.name(layer).into(),
-                        af,
-                        spacing_nm: spacing,
-                        run_length_um: run_um,
-                    },
-                    [polys[i].0, polys[j].0],
-                ));
-                continue;
-            }
-            let y_overlap = a.ymax.min(b.ymax) - a.ymin.max(b.ymin);
-            let x_gap = if a.xmax <= b.xmin {
-                b.xmin - a.xmax
-            } else if b.xmax <= a.xmin {
-                a.xmin - b.xmax
-            } else {
-                -1
-            };
-            if y_overlap > 0 && x_gap > 0 {
-                let run_um = y_overlap as f64 / NM_PER_UM;
-                let spacing = x_gap;
-                let scale = p.coupling_ref_spacing_nm / spacing as f64;
-                let af = p.coupling_cap_af_um * run_um * scale;
-                out.push((
-                    Parasitic::CouplingCap {
-                        layer: lt.name(layer).into(),
-                        af,
-                        spacing_nm: spacing,
-                        run_length_um: run_um,
-                    },
-                    [polys[i].0, polys[j].0],
-                ));
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
