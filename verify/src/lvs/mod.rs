@@ -6,7 +6,6 @@
 //!   2. Device extraction — gate-over-channel recognized via PDK rules; type from implant.
 //!   3. Comparison — iterative partition refinement over both extracted and reference graphs.
 
-pub mod gpu;
 pub mod types;
 pub mod extract;
 pub mod compare;
@@ -36,17 +35,47 @@ pub use gds_adapter::*;
 use crate::geometry::GeometryStore;
 use crate::params::Deck;
 use crate::backend::Backend;
-use crate::rule::VerifyCheck;
+use std::cell::RefCell;
 
-/// LVS check implementing VerifyCheck.
+/// Context handed to the check rules after the compare pipeline's
+/// extract/graph-build/refinement stages have run.
+pub struct LvsCtx<'a> {
+    pub extracted: &'a ExtractedNetlist,
+    pub reference: &'a RefNetlist,
+    pub opts: &'a CompareOpts,
+    /// Refined class/graph state; `None` while the pre-refinement
+    /// (device-count fast-fail, floating-net, label-conflict) rules run.
+    pub refined: Option<&'a compare::Refined>,
+    /// First failing rule's reason string, set via [`LvsCtx::fail`]. A rule
+    /// that records findings without setting this is non-fatal.
+    pub fail_reason: RefCell<Option<String>>,
+}
+
+impl LvsCtx<'_> {
+    /// Record this comparison's failure reason (first writer wins).
+    pub fn fail(&self, reason: String) {
+        self.fail_reason.borrow_mut().get_or_insert(reason);
+    }
+}
+
+/// A boxed LVS check rule, as handed back by the generated rule registry.
+pub type BoxedRule = Box<dyn for<'a> crate::rule::Rule<LvsCtx<'a>, Finding = Mismatch>>;
+
+pub mod rules {
+    use super::BoxedRule;
+    /// One factory per file in `src/lvs/rules/`; `None` = rule not applicable.
+    pub type Factory = fn(&super::CompareOpts) -> Option<BoxedRule>;
+    include!(concat!(env!("OUT_DIR"), "/lvs_rules.rs"));
+}
+
+/// The full LVS check: extract a netlist, then compare it to the reference.
 pub struct LvsCheck {
     pub reference: RefNetlist,
 }
 
-impl VerifyCheck for LvsCheck {
-    type Output = LvsResult;
-    fn id(&self) -> &str { "lvs" }
-    fn run(&self, store: &GeometryStore, deck: &Deck, backend: Backend) -> LvsResult {
+impl LvsCheck {
+    pub fn id(&self) -> &str { "lvs" }
+    pub fn run(&self, store: &GeometryStore, deck: &Deck, backend: Backend) -> LvsResult {
         let opts = ExtractOpts { cut_required: deck.lvs_cut_required, ..Default::default() };
         let ext = match extract_netlist_opts(store, deck, &opts, backend) {
             Ok(e) => e,

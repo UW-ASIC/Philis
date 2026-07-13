@@ -4,7 +4,24 @@ use super::types::*;
 use crate::geometry::*;
 use crate::params::Deck;
 use crate::backend::Backend;
+use gdsverify_macros::verify_kernel;
 use std::collections::{HashMap, HashSet};
+
+/// Per-pair positive-area bbox overlap: 1 = overlaps, 0 = disjoint/touching.
+/// Single source for both compilations (`bbox_overlap_kernel::{cpu,gpu,run}`).
+#[verify_kernel(shape = pair)]
+fn bbox_overlap(
+    a_xmin: i32, a_ymin: i32, a_xmax: i32, a_ymax: i32,
+    b_xmin: i32, b_ymin: i32, b_xmax: i32, b_ymax: i32,
+) -> u32 {
+    let mut x0 = a_xmin; if b_xmin > x0 { x0 = b_xmin; }
+    let mut x1 = a_xmax; if b_xmax < x1 { x1 = b_xmax; }
+    let mut y0 = a_ymin; if b_ymin > y0 { y0 = b_ymin; }
+    let mut y1 = a_ymax; if b_ymax < y1 { y1 = b_ymax; }
+    let mut f = 0u32;
+    if x1 > x0 && y1 > y0 { f = 1u32; }
+    f
+}
 
 // --- union-find ---
 
@@ -1154,7 +1171,11 @@ pub(super) fn extract_netlist_opts_raw_with_sources(
         let ymaxs: Vec<i32> = nodes.iter().map(|n| n.bbox.ymax).collect();
         let pa: Vec<u32> = cands.iter().map(|&(i, _)| i).collect();
         let pb: Vec<u32> = cands.iter().map(|&(_, j)| j).collect();
-        crate::lvs::gpu::bbox_overlap_flags(&xmins, &ymins, &xmaxs, &ymaxs, &pa, &pb)
+        // Exact integer kernel: the CPU compilation of the same function
+        // computes identical flags, so run() may fall back without changing
+        // any result — None (no prefilter) and Some(cpu flags) reject the
+        // same candidate pairs the exact-region predicates below would.
+        Some(bbox_overlap_kernel::run(backend, &xmins, &ymins, &xmaxs, &ymaxs, &pa, &pb))
     } else {
         None
     };
