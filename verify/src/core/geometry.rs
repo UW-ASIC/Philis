@@ -19,7 +19,8 @@
 /// This is the migration target for checkers that currently use private geometry
 /// approximations.  See the module documentation for the supported-semantics
 /// contract; legacy helpers in this file remain available while callers migrate.
-pub mod exact;
+/// Lives at `core::exact`; re-exported here so `geometry::exact` paths keep working.
+pub use crate::core::exact;
 
 /// A layer identifier. Small integer, indexes the layer table. `u16` keeps references tiny.
 pub type LayerId = u16;
@@ -77,6 +78,34 @@ impl Bbox {
     }
     #[inline]
     pub fn overlaps(&self, o: &Bbox) -> bool { self.within(o, 0) }
+    /// Smallest bbox covering both. `empty()` is the identity.
+    #[inline]
+    pub fn union(&self, o: &Bbox) -> Bbox {
+        Bbox {
+            xmin: self.xmin.min(o.xmin),
+            ymin: self.ymin.min(o.ymin),
+            xmax: self.xmax.max(o.xmax),
+            ymax: self.ymax.max(o.ymax),
+        }
+    }
+    /// Overlap region, `None` when disjoint. Zero-width/height touching
+    /// regions are returned, matching `overlaps`.
+    #[inline]
+    pub fn intersection(&self, o: &Bbox) -> Option<Bbox> {
+        if !self.overlaps(o) { return None; }
+        Some(Bbox {
+            xmin: self.xmin.max(o.xmin),
+            ymin: self.ymin.max(o.ymin),
+            xmax: self.xmax.min(o.xmax),
+            ymax: self.ymax.min(o.ymax),
+        })
+    }
+    /// Bbox of a point sequence; `empty()` for an empty iterator.
+    pub fn from_points(pts: impl IntoIterator<Item = (i32, i32)>) -> Bbox {
+        let mut bb = Bbox::empty();
+        for (x, y) in pts { bb.include(x, y); }
+        bb
+    }
 }
 
 /// The one big flat store. All checkers operate over borrowed slices of this — never over
@@ -201,13 +230,47 @@ impl GeometryStore {
         (self.verts_x[base + i], self.verts_y[base + i])
     }
 
+    /// Iterate a polygon's vertices in ring order. Borrowed, zero-copy view over
+    /// the SoA arrays; the ring is given without repeating the first point,
+    /// matching `add_polygon`.
+    #[inline]
+    pub fn vertices(&self, p: PolyId) -> impl Iterator<Item = (i32, i32)> + '_ {
+        let (s, e) = self.poly_range(p);
+        (s..e).map(move |i| (self.verts_x[i], self.verts_y[i]))
+    }
+
+    /// Iterate a polygon's directed edges, including the ring-closing wrap.
+    /// Absorbs the manual `poly_range` + `(i + 1) % n` idiom at call sites.
+    #[inline]
+    pub fn edges_of(&self, p: PolyId) -> impl Iterator<Item = Edge> + '_ {
+        let (s, e) = self.poly_range(p);
+        let n = e - s;
+        (0..n).map(move |i| {
+            let (x0, y0) = self.poly_vertex(s, i);
+            let (x1, y1) = self.poly_vertex(s, (i + 1) % n);
+            Edge { x0, y0, x1, y1, poly: p.0 }
+        })
+    }
+
+    /// Validated exact polygon for `p`: one fail-closed gate bundling vertex
+    /// count, capacity, degeneracy, and self-intersection checks. This is the
+    /// supported bridge from the SoA store into [`exact`] semantics — callers
+    /// must not re-implement per-site validity checks.
+    pub fn poly_as_exact(&self, p: PolyId) -> Result<exact::Polygon, exact::ExactGeometryError> {
+        let pts: Vec<exact::Point> =
+            self.vertices(p).map(|(x, y)| exact::Point { x, y }).collect();
+        exact::Polygon::from_boundary_walk(pts)
+    }
+
     /// Iterate polygon indices on a given layer. Existence-based filtering: the caller loops
     /// only the polygons it cares about. Served from the per-layer bucket index — O(k) in
     /// the layer's polygon count, insertion order (== old scan order) preserved.
-    pub fn polys_on_layer(&self, layer: LayerId) -> Vec<PolyId> {
+    /// Borrowed, allocation-free; `.collect()` at the few sites that index or sort.
+    pub fn polys_on_layer(&self, layer: LayerId) -> impl Iterator<Item = PolyId> + '_ {
         self.layer_index
             .get(layer as usize)
-            .map_or_else(Vec::new, |v| v.iter().copied().map(PolyId).collect())
+            .into_iter()
+            .flat_map(|v| v.iter().copied().map(PolyId))
     }
 
     /// Signed area*2 of a polygon (shoelace). Positive => CCW. Used by min_area and by
@@ -293,13 +356,7 @@ impl Edge {
 pub fn build_edges(store: &GeometryStore, layer: LayerId) -> Vec<Edge> {
     let mut edges = Vec::new();
     for p in store.polys_on_layer(layer) {
-        let (s, e) = store.poly_range(p);
-        let n = e - s;
-        for i in 0..n {
-            let (x0, y0) = store.poly_vertex(s, i);
-            let (x1, y1) = store.poly_vertex(s, (i + 1) % n);
-            edges.push(Edge { x0, y0, x1, y1, poly: p.0 });
-        }
+        edges.extend(store.edges_of(p));
     }
     edges
 }
@@ -528,4 +585,48 @@ pub fn isqrt(n: i64) -> i64 {
     while i128::from(x + 1) * i128::from(x + 1) <= i128::from(n) { x += 1; }
     while i128::from(x) * i128::from(x) > i128::from(n) { x -= 1; }
     x
+}
+
+#[cfg(test)]
+mod core_api_tests {
+    use super::*;
+
+    #[test]
+    fn bbox_set_ops() {
+        let a = Bbox { xmin: 0, ymin: 0, xmax: 10, ymax: 10 };
+        let b = Bbox { xmin: 5, ymin: 5, xmax: 20, ymax: 20 };
+        assert_eq!(a.union(&b), Bbox { xmin: 0, ymin: 0, xmax: 20, ymax: 20 });
+        assert_eq!(a.intersection(&b), Some(Bbox { xmin: 5, ymin: 5, xmax: 10, ymax: 10 }));
+        let far = Bbox { xmin: 100, ymin: 100, xmax: 110, ymax: 110 };
+        assert_eq!(a.intersection(&far), None);
+        assert_eq!(Bbox::from_points([(3, 4), (-1, 7)]), Bbox { xmin: -1, ymin: 4, xmax: 3, ymax: 7 });
+        assert_eq!(Bbox::from_points(std::iter::empty()), Bbox::empty());
+    }
+
+    #[test]
+    fn iterators_match_manual_walk() {
+        let mut store = GeometryStore::new();
+        let p = store.add_rect(0, 0, 0, 10, 5);
+        assert_eq!(
+            store.vertices(p).collect::<Vec<_>>(),
+            vec![(0, 0), (10, 0), (10, 5), (0, 5)]
+        );
+        let edges: Vec<Edge> = store.edges_of(p).collect();
+        assert_eq!(edges.len(), 4);
+        // ring closes back to the first vertex
+        assert_eq!((edges[3].x1, edges[3].y1), (0, 0));
+        assert!(edges.iter().all(|e| e.poly == p.0));
+    }
+
+    #[test]
+    fn poly_as_exact_is_fail_closed() {
+        let mut store = GeometryStore::new();
+        let good = store.add_rect(0, 0, 0, 10, 5);
+        assert!(store.poly_as_exact(good).is_ok());
+        // bow-tie must be a typed error, never an empty/clean result
+        let bad = store.add_polygon(0, &[(0, 0), (10, 10), (10, 0), (0, 10)]);
+        assert!(store.poly_as_exact(bad).is_err());
+        let degenerate = store.add_polygon(0, &[(0, 0), (1, 1)]);
+        assert!(store.poly_as_exact(degenerate).is_err());
+    }
 }

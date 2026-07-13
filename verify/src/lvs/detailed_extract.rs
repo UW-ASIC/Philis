@@ -100,10 +100,7 @@ fn exact_polygon(
     polygon: PolyId,
     path: &HierarchyPath,
 ) -> Result<Polygon, DetailedExtractionError> {
-    let (start, end) = store.poly_range(polygon);
-    let points = (start..end)
-        .map(|index| Point::new(store.verts_x[index], store.verts_y[index]))
-        .collect();
+    let points = store.vertices(polygon).map(|(x, y)| Point::new(x, y)).collect();
     Polygon::from_outer(points).map_err(|error| {
         DetailedExtractionError::new(
             DetailedExtractionErrorKind::InvalidGeometry,

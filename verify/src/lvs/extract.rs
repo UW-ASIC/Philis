@@ -134,13 +134,7 @@ fn full_region(store: &GeometryStore, poly: PolyId) -> PolyRegion {
 }
 
 fn is_rectilinear(store: &GeometryStore, poly: PolyId) -> bool {
-    let (s, e) = store.poly_range(poly);
-    let n = e - s;
-    (0..n).all(|i| {
-        let (x0, y0) = store.poly_vertex(s, i);
-        let (x1, y1) = store.poly_vertex(s, (i + 1) % n);
-        x0 == x1 || y0 == y1
-    })
+    store.edges_of(poly).all(|e| e.x0 == e.x1 || e.y0 == e.y1)
 }
 
 fn validate_rectilinear_layers(
@@ -159,10 +153,8 @@ fn validate_rectilinear_layers(
                     poly.0, deck.layers.name(layer),
                 ));
             }
-            for i in 0..(e - s) {
-                let (x0, y0) = store.poly_vertex(s, i);
-                let (x1, y1) = store.poly_vertex(s, (i + 1) % (e - s));
-                if x0 == x1 && y0 == y1 {
+            for edge in store.edges_of(poly) {
+                if edge.x0 == edge.x1 && edge.y0 == edge.y1 {
                     return Err(format!(
                         "polygon {} on '{}' has a zero-length edge; exact rectilinear LVS cannot process it",
                         poly.0, deck.layers.name(layer),
@@ -194,19 +186,15 @@ fn interior_intervals_at_x2(store: &GeometryStore, region: PolyRegion, x2: i64) 
     if x2 <= 2 * region.clip.xmin as i64 || x2 >= 2 * region.clip.xmax as i64 {
         return Vec::new();
     }
-    let (s, e) = store.poly_range(region.poly);
-    let n = e - s;
     let mut crossings = Vec::new();
-    for i in 0..n {
-        let (x0, y0) = store.poly_vertex(s, i);
-        let (x1, y1) = store.poly_vertex(s, (i + 1) % n);
-        if y0 != y1 {
+    for edge in store.edges_of(region.poly) {
+        if edge.y0 != edge.y1 {
             continue;
         }
-        let lo2 = 2 * x0.min(x1) as i64;
-        let hi2 = 2 * x0.max(x1) as i64;
+        let lo2 = 2 * edge.x0.min(edge.x1) as i64;
+        let hi2 = 2 * edge.x0.max(edge.x1) as i64;
         if lo2 < x2 && x2 < hi2 {
-            crossings.push(y0);
+            crossings.push(edge.y0);
         }
     }
     crossings.sort_unstable();
@@ -308,14 +296,10 @@ fn closed_intervals_at_x(store: &GeometryStore, region: PolyRegion, x: i32) -> V
     for x2 in [2 * x as i64 - 1, 2 * x as i64 + 1] {
         intervals.extend(interior_intervals_at_x2(store, region, x2));
     }
-    let (s, e) = store.poly_range(region.poly);
-    let n = e - s;
-    for i in 0..n {
-        let (x0, y0) = store.poly_vertex(s, i);
-        let (x1, y1) = store.poly_vertex(s, (i + 1) % n);
-        if x0 == x1 && x0 == x {
-            let lo = y0.min(y1).max(region.clip.ymin);
-            let hi = y0.max(y1).min(region.clip.ymax);
+    for edge in store.edges_of(region.poly) {
+        if edge.x0 == edge.x1 && edge.x0 == x {
+            let lo = edge.y0.min(edge.y1).max(region.clip.ymin);
+            let hi = edge.y0.max(edge.y1).min(region.clip.ymax);
             if lo <= hi {
                 intervals.push((lo, hi));
             }
@@ -510,16 +494,14 @@ fn extract_two_terminal_devices(
             let bb = store.poly_bbox[body.0 as usize];
             let has_marker = store
                 .polys_on_layer(rule.marker_layer)
-                .iter()
-                .any(|&m| poly_poly_overlap(store, m, body));
+                .any(|m| poly_poly_overlap(store, m, body));
             if !has_marker {
                 continue;
             }
             let is_gate = gate_layers.iter().any(|&gl| {
                 store
                     .polys_on_layer(gl)
-                    .iter()
-                    .any(|&g| poly_poly_overlap(store, body, g))
+                    .any(|g| poly_poly_overlap(store, body, g))
             });
             if is_gate {
                 continue;
@@ -578,7 +560,7 @@ fn extract_two_terminal_devices(
                 if !ab.overlaps(&cb) || !poly_poly_overlap(store, anode, cathode) {
                     continue;
                 }
-                let has_implant = store.polys_on_layer(rule.implant_layer).iter().any(|&imp| {
+                let has_implant = store.polys_on_layer(rule.implant_layer).any(|imp| {
                     rectilinear_intersection_area(
                         store,
                         &[
@@ -623,7 +605,7 @@ fn extract_two_terminal_devices(
                     continue;
                 }
                 if let Some(marker_l) = rule.marker_layer {
-                    let has_marker = store.polys_on_layer(marker_l).iter().any(|&m| {
+                    let has_marker = store.polys_on_layer(marker_l).any(|m| {
                         rectilinear_intersection_area(
                             store,
                             &[
@@ -686,7 +668,7 @@ fn extract_bjt_devices(store: &GeometryStore, deck: &Deck, net_of_poly: &[u32]) 
                     }
                     // The type marker must cover the actual emitter/base device
                     // region, not merely overlap its bounding box.
-                    let has_marker = store.polys_on_layer(rule.type_marker).iter().any(|&m| {
+                    let has_marker = store.polys_on_layer(rule.type_marker).any(|m| {
                         rectilinear_intersection_area(
                             store,
                             &[

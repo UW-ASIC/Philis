@@ -630,8 +630,8 @@ fn extract_interlayer_cap(store: &GeometryStore, deck: &Deck, out: &mut Vec<Attr
             if coeff == 0.0 {
                 continue;
             }
-            let polys_a = store.polys_on_layer(lid_a);
-            let polys_b = store.polys_on_layer(lid_b);
+            let polys_a: Vec<PolyId> = store.polys_on_layer(lid_a).collect();
+            let polys_b: Vec<PolyId> = store.polys_on_layer(lid_b).collect();
             // overlap requires bbox intersection: x-sweep candidates, not all pairs
             for (pa, pb) in crate::drc::candidate_pairs(store, &polys_a, Some(&polys_b), 0) {
                 let ba = store.poly_bbox[pa.0 as usize];
@@ -667,7 +667,7 @@ fn extract_coupling_cap(
     backend: Backend,
     out: &mut Vec<Attributed>,
 ) {
-    let polys = store.polys_on_layer(layer);
+    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let n = polys.len();
     let n_pairs = n * n.saturating_sub(1) / 2;
 

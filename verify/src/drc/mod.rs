@@ -518,7 +518,7 @@ fn check_polygon_validity(store: &GeometryStore, lt: &LayerTable) -> Vec<Violati
     for p in 0..store.poly_count() {
         let pid = PolyId(p as u32);
         let bb = store.poly_bbox[p];
-        let issue = match exact_polygon_from_store(store, pid) {
+        let issue = match store.poly_as_exact(pid) {
             Ok(polygon) => {
                 let area = polygon.area2() / 2;
                 let span_x = i64::from(bb.xmax) - i64::from(bb.xmin);
@@ -595,25 +595,6 @@ fn legacy_rule_arithmetic_fits(extent: &Bbox) -> bool {
         .is_some()
 }
 
-fn exact_polygon_from_store(
-    store: &GeometryStore,
-    polygon: PolyId,
-) -> Result<crate::geometry::exact::Polygon, crate::geometry::exact::ExactGeometryError> {
-    use crate::geometry::exact::{Point, Polygon};
-    let (start, end) = store.poly_range(polygon);
-    let vertex_count = end - start;
-    if vertex_count > crate::geometry::exact::MAX_BOUNDARY_WALK_VERTICES {
-        return Err(crate::geometry::exact::ExactGeometryError::CapacityExceeded {
-            cells: vertex_count,
-            limit: crate::geometry::exact::MAX_BOUNDARY_WALK_VERTICES,
-        });
-    }
-    let points: Vec<Point> = (start..end)
-        .map(|index| Point::new(store.verts_x[index], store.verts_y[index]))
-        .collect();
-    Polygon::from_boundary_walk(points)
-}
-
 // --- width ------------------------------------------------------------------
 // For axis-aligned polygons, width = min(bbox.width, bbox.height) is exact for convex
 // rectangles; for general rectilinear polygons we additionally scan opposing parallel edges.
@@ -623,7 +604,7 @@ fn check_min_width(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, backend: Backend,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let polys = store.polys_on_layer(layer);
+    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let clean = gpu_poly_clean_mask(store, &polys, min, backend);
     for (k, &p) in polys.iter().enumerate() {
         let bb = store.poly_bbox[p.0 as usize];
@@ -631,11 +612,8 @@ fn check_min_width(
         let n = e - s;
         // bbox fast path is exact ONLY for axis-aligned rectangles; a rotated
         // parallelogram has 4 vertices too and must take the facing-gap scan.
-        let axis_aligned_rect = n == 4 && (0..4).all(|i| {
-            let (x0, y0) = store.poly_vertex(s, i);
-            let (x1, y1) = store.poly_vertex(s, (i + 1) % 4);
-            x0 == x1 || y0 == y1
-        });
+        let axis_aligned_rect =
+            n == 4 && store.edges_of(p).all(|ed| ed.x0 == ed.x1 || ed.y0 == ed.y1);
         if axis_aligned_rect {
             let w = bb.width().min(bb.height());
             if w < min {
@@ -810,12 +788,9 @@ fn push_geometry_capacity(
 /// "not strictly inside", which is the conservative answer for both callers).
 fn poly_strictly_inside(store: &GeometryStore, inner: PolyId, outer: PolyId) -> bool {
     let polygon = |poly: PolyId| {
-        let (start, end) = store.poly_range(poly);
         crate::geometry::exact::Polygon::from_outer(
-            (start..end)
-                .map(|index| crate::geometry::exact::Point::new(
-                    store.verts_x[index], store.verts_y[index],
-                ))
+            store.vertices(poly)
+                .map(|(x, y)| crate::geometry::exact::Point::new(x, y))
                 .collect(),
         )
     };
@@ -996,7 +971,7 @@ pub fn same_shape_gap_fills(
     for r in &deck.drc_rules {
         let DrcRuleParam::MinSpacing { layer, min, .. } = r else { continue };
         let (layer, min) = (*layer, *min);
-        let polys = store.polys_on_layer(layer);
+        let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
         let min2 = (min as i64) * (min as i64);
         let cands = candidate_pairs(store, &polys, None, min);
         let idx_of: std::collections::HashMap<u32, u32> =
@@ -1048,7 +1023,7 @@ fn check_spacing_same(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, backend: Backend,
     strict: bool, rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let polys = store.polys_on_layer(layer);
+    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let min2 = (min as i64) * (min as i64);
     let cands = candidate_pairs(store, &polys, None, min);
     let far = gpu_far_mask(store, &cands, min, backend);
@@ -1101,8 +1076,8 @@ fn check_spacing_diff(
     store: &GeometryStore, lt: &LayerTable, a: LayerId, b: LayerId, min: i32, backend: Backend,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let pas = store.polys_on_layer(a);
-    let pbs = store.polys_on_layer(b);
+    let pas: Vec<PolyId> = store.polys_on_layer(a).collect();
+    let pbs: Vec<PolyId> = store.polys_on_layer(b).collect();
     let min2 = (min as i64) * (min as i64);
     let cands = candidate_pairs(store, &pas, Some(&pbs), min);
     let far = gpu_far_mask(store, &cands, min, backend);
@@ -1267,15 +1242,7 @@ fn poly_poly_dist2_within_wide(
 }
 
 fn poly_edges(store: &GeometryStore, p: PolyId) -> Vec<Edge> {
-    let (s, e) = store.poly_range(p);
-    let n = e - s;
-    let mut v = Vec::with_capacity(n);
-    for i in 0..n {
-        let (x0, y0) = store.poly_vertex(s, i);
-        let (x1, y1) = store.poly_vertex(s, (i + 1) % n);
-        v.push(Edge { x0, y0, x1, y1, poly: p.0 });
-    }
-    v
+    store.edges_of(p).collect()
 }
 
 // --- enclosure (outer must enclose inner by >= min on all sides) ------------
@@ -1283,7 +1250,7 @@ fn check_enclosure(
     store: &GeometryStore, lt: &LayerTable, outer: LayerId, inner: LayerId, min: i32,
     backend: Backend, rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let outers = store.polys_on_layer(outer);
+    let outers: Vec<PolyId> = store.polys_on_layer(outer).collect();
     // phase 1: containment (CPU point-in-poly); unhosted inners are zero-enclosure.
     // Collect EVERY containing outer: the inner passes if its BEST host
     // encloses it — merged-metal semantics (a wire clipping the corner of a
@@ -1349,7 +1316,7 @@ fn check_extension(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, reference: LayerId, min: i32,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let refs = store.polys_on_layer(reference);
+    let refs: Vec<PolyId> = store.polys_on_layer(reference).collect();
     for pl in store.polys_on_layer(layer) {
         let lb = store.poly_bbox[pl.0 as usize];
         for &pr in &refs {
@@ -1397,7 +1364,7 @@ fn check_min_area(
     let merged = match derived::layer_polygon_set(store, layer, Some(lt.id_to_name.len())) {
         Ok(merged) => merged,
         Err(_) => {
-            let marker = store.polys_on_layer(layer).first()
+            let marker = store.polys_on_layer(layer).next()
                 .map(|poly| store.poly_bbox[poly.0 as usize])
                 .unwrap_or(Bbox { xmin: 0, ymin: 0, xmax: 0, ymax: 0 });
             out.push(Violation {
@@ -1445,7 +1412,7 @@ fn check_notch(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, backend: Backend,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let polys = store.polys_on_layer(layer);
+    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let clean = gpu_poly_clean_mask(store, &polys, min, backend);
     for (k, &p) in polys.iter().enumerate() {
         if clean.as_ref().is_some_and(|c| c[k]) { continue; }
@@ -1585,7 +1552,7 @@ fn check_density(
     is_min: bool, rule_id: &str, out: &mut Vec<Violation>,
 ) {
     if window <= 0 { return; }
-    let polys = store.polys_on_layer(layer);
+    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     if polys.is_empty() { return; }
     // global bbox
     let mut gb = Bbox::empty();
@@ -1705,11 +1672,10 @@ fn check_overlap(
         }
     };
     for pa in store.polys_on_layer(a) {
-        let (start, end) = store.poly_range(pa);
         let polygon = crate::geometry::exact::Polygon::from_outer(
-            (start..end).map(|index| crate::geometry::exact::Point::new(
-                store.verts_x[index], store.verts_y[index],
-            )).collect(),
+            store.vertices(pa)
+                .map(|(x, y)| crate::geometry::exact::Point::new(x, y))
+                .collect(),
         );
         let marker = store.poly_bbox[pa.0 as usize];
         let intersection = polygon
@@ -1766,7 +1732,7 @@ fn check_corner_to_corner(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, backend: Backend,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let polys = store.polys_on_layer(layer);
+    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let min2 = (min as i64) * (min as i64);
     let cands = candidate_pairs(store, &polys, None, min);
     // edge-pair distance lower-bounds corner distance, so the same GPU prefilter applies
@@ -1789,17 +1755,15 @@ fn check_corner_to_corner(
             let y_overlap = ba.ymax.min(bb.ymax) > ba.ymin.max(bb.ymin);
             if x_overlap || y_overlap { continue; }
             // nearest corners
-            let (sa, ea) = store.poly_range(pa);
-            let (sb, eb) = store.poly_range(pb);
             let mut best = i64::MAX;
             let mut bx = 0;
             let mut by = 0;
-            for u in sa..ea {
-                for w in sb..eb {
-                    let dx = (store.verts_x[u] - store.verts_x[w]) as i64;
-                    let dy = (store.verts_y[u] - store.verts_y[w]) as i64;
+            for (ux, uy) in store.vertices(pa) {
+                for (wx, wy) in store.vertices(pb) {
+                    let dx = (ux - wx) as i64;
+                    let dy = (uy - wy) as i64;
                     let d2 = dx * dx + dy * dy;
-                    if d2 < best { best = d2; bx = store.verts_x[u]; by = store.verts_y[u]; }
+                    if d2 < best { best = d2; bx = ux; by = uy; }
                 }
             }
             if best < min2 {
@@ -1822,7 +1786,7 @@ fn check_eol_spacing(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, eol_width: i32,
     eol_spacing: i32, backend: Backend, rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let polys = store.polys_on_layer(layer);
+    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let eol_sp2 = (eol_spacing as i64) * (eol_spacing as i64);
     let cands = candidate_pairs(store, &polys, None, eol_spacing);
     let far = gpu_far_mask(store, &cands, eol_spacing, backend);
@@ -2066,7 +2030,7 @@ fn check_wide_dependent_spacing(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, width_threshold: i32,
     wide_spacing: i32, rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let polys = store.polys_on_layer(layer);
+    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let ws2 = (wide_spacing as i64) * (wide_spacing as i64);
     let cands = candidate_pairs(store, &polys, None, wide_spacing);
     for &(pa, pb) in &cands {
@@ -2098,7 +2062,7 @@ fn check_prl_spacing(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, prl_threshold: i32,
     prl_spacing: i32, rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let polys = store.polys_on_layer(layer);
+    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let ps2 = (prl_spacing as i64) * (prl_spacing as i64);
     let cands = candidate_pairs(store, &polys, None, prl_spacing);
     for &(pa, pb) in &cands {
@@ -2139,7 +2103,7 @@ fn check_asymmetric_enclosure(
     store: &GeometryStore, lt: &LayerTable, outer: LayerId, inner: LayerId, min_one_side: i32,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let outers = store.polys_on_layer(outer);
+    let outers: Vec<PolyId> = store.polys_on_layer(outer).collect();
     for pi in store.polys_on_layer(inner) {
         let ib = store.poly_bbox[pi.0 as usize];
         let mut best_ok = false;
@@ -2185,7 +2149,7 @@ fn keyhole_hole_rings(
     store: &GeometryStore,
     polygon: PolyId,
 ) -> Vec<crate::geometry::exact::Ring> {
-    exact_polygon_from_store(store, polygon)
+    store.poly_as_exact(polygon)
         .map(|component| component.holes().to_vec())
         .unwrap_or_default()
 }
@@ -2238,7 +2202,7 @@ fn check_redundant_via(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, min_count: i32, within: i32,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let polys = store.polys_on_layer(layer);
+    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let within2 = (within as i64) * (within as i64);
     // centers sit inside their bboxes, so center-distance <= within implies the
     // bboxes come within `within`: the x-sweep candidate set is a superset.
@@ -2280,7 +2244,7 @@ fn check_via_array_spacing(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, array_threshold: i32,
     array_spacing: i32, rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let polys = store.polys_on_layer(layer);
+    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let n = polys.len();
     if n == 0 { return; }
     let as2 = (array_spacing as i64) * (array_spacing as i64);
@@ -2354,10 +2318,9 @@ fn check_max_distance_to_tap(
     store: &GeometryStore, lt: &LayerTable, diff_layer: LayerId, tap_layer: LayerId,
     max_dist: i32, rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let taps = store.polys_on_layer(tap_layer);
     let md2 = (max_dist as i64) * (max_dist as i64);
     // precompute tap bbox centers
-    let tap_centers: Vec<(i64, i64)> = taps.iter().map(|&t| {
+    let tap_centers: Vec<(i64, i64)> = store.polys_on_layer(tap_layer).map(|t| {
         let tb = store.poly_bbox[t.0 as usize];
         (((tb.xmin as i64) + (tb.xmax as i64)) / 2,
          ((tb.ymin as i64) + (tb.ymax as i64)) / 2)
@@ -2397,7 +2360,7 @@ fn check_multi_patterning(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, num_colors: i32,
     color_spacing: i32, rule_id: &str, out: &mut Vec<Violation>,
 ) {
-    let polys = store.polys_on_layer(layer);
+    let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let n = polys.len();
     if n == 0 { return; }
     let cs2 = (color_spacing as i64) * (color_spacing as i64);

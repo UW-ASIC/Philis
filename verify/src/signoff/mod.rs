@@ -270,8 +270,8 @@ pub(crate) fn polygon_rect(store: &GeometryStore, p: PolyId) -> Option<Bbox> {
         return None;
     }
     let mut corners = std::collections::BTreeSet::new();
-    for i in s..e {
-        let pt = (store.verts_x[i], store.verts_y[i]);
+    for edge in store.edges_of(p) {
+        let pt = (edge.x0, edge.y0);
         if pt.0 != bb.xmin && pt.0 != bb.xmax {
             return None;
         }
@@ -283,8 +283,7 @@ pub(crate) fn polygon_rect(store: &GeometryStore, p: PolyId) -> Option<Bbox> {
         // A proper rectangle walks one horizontal or vertical side at a time.
         // Merely seeing the four bbox corners would also accept a self-crossing
         // bow-tie ordering, whose bbox area is not its polygon area.
-        let j = if i + 1 == e { s } else { i + 1 };
-        let next = (store.verts_x[j], store.verts_y[j]);
+        let next = (edge.x1, edge.y1);
         if (pt.0 == next.0) == (pt.1 == next.1) {
             return None;
         }

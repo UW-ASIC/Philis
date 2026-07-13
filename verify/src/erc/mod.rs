@@ -281,12 +281,12 @@ fn check_floating_well(
     // ponytail: checks bbox overlap only, sufficient for conformance geometry.
     for nw in store.polys_on_layer(nwell_l) {
         let nb = store.poly_bbox[nw.0 as usize];
-        let has_tap = store.polys_on_layer(diff_l).iter().any(|&dp| {
+        let has_tap = store.polys_on_layer(diff_l).any(|dp| {
             let db = store.poly_bbox[dp.0 as usize];
             if !nb.overlaps(&db) { return false; }
             // Must be n+ type (nsdm) to be a well tap in nwell
             match nsdm_l {
-                Some(nl) => store.polys_on_layer(nl).iter().any(|&ns| {
+                Some(nl) => store.polys_on_layer(nl).any(|ns| {
                     store.poly_bbox[ns.0 as usize].overlaps(&db)
                 }),
                 None => false,
@@ -320,9 +320,9 @@ fn check_missing_tie(
         let db = store.poly_bbox[dp.0 as usize];
         if (db.width() as i64) * (db.height() as i64) < max_dist * max_dist { continue; }
 
-        let contacts: Vec<Bbox> = store.polys_on_layer(li_l).iter()
-            .filter(|&&lp| store.poly_bbox[lp.0 as usize].overlaps(&db))
-            .map(|&lp| store.poly_bbox[lp.0 as usize])
+        let contacts: Vec<Bbox> = store.polys_on_layer(li_l)
+            .filter(|&lp| store.poly_bbox[lp.0 as usize].overlaps(&db))
+            .map(|lp| store.poly_bbox[lp.0 as usize])
             .collect();
 
         let corners = [(db.xmin, db.ymin), (db.xmax, db.ymin),
@@ -469,7 +469,7 @@ fn check_soft_connection(
     let li_l = match lt.id("li") { Some(l) => l, None => return };
     let nwell_l = match lt.id("nwell") { Some(l) => l, None => return };
 
-    let li_polys = store.polys_on_layer(li_l);
+    let li_polys: Vec<PolyId> = store.polys_on_layer(li_l).collect();
     if li_polys.len() < 2 { return; }
 
     let metal_layers: Vec<_> = ["met1", "met2"].iter()
@@ -492,14 +492,14 @@ fn check_soft_connection(
             let nb = ext.net_of_poly[li_polys[j].0 as usize];
             if device_nets.contains(&na) || device_nets.contains(&nb) { continue; }
 
-            let nwell_bridges = store.polys_on_layer(nwell_l).iter().any(|&nw| {
+            let nwell_bridges = store.polys_on_layer(nwell_l).any(|nw| {
                 let wb = store.poly_bbox[nw.0 as usize];
                 wb.overlaps(&a) && wb.overlaps(&b)
             });
             if !nwell_bridges { continue; }
 
             let has_metal = metal_layers.iter().any(|&ml| {
-                store.polys_on_layer(ml).iter().any(|&mp| {
+                store.polys_on_layer(ml).any(|mp| {
                     let mb = store.poly_bbox[mp.0 as usize];
                     mb.overlaps(&a) && mb.overlaps(&b)
                 })
@@ -704,7 +704,7 @@ fn check_hv_domain_crossing(
         .filter_map(|n| lt.id(n)).collect();
     if conductor_layers.is_empty() { return; }
 
-    let nwell_polys = store.polys_on_layer(nwell_l);
+    let nwell_polys: Vec<PolyId> = store.polys_on_layer(nwell_l).collect();
     if nwell_polys.is_empty() { return; }
 
     // Device terminal nets

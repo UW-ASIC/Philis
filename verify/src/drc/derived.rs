@@ -365,20 +365,7 @@ pub fn layer_polygon_set(
 }
 
 fn polygon_from_store(store: &GeometryStore, poly: PolyId) -> Result<Polygon, DerivedError> {
-    let (start, end) = store.poly_range(poly);
-    let vertex_count = end - start;
-    if vertex_count > crate::geometry::exact::MAX_BOUNDARY_WALK_VERTICES {
-        return Err(DerivedError::Geometry(
-            ExactGeometryError::CapacityExceeded {
-                cells: vertex_count,
-                limit: crate::geometry::exact::MAX_BOUNDARY_WALK_VERTICES,
-            },
-        ));
-    }
-    let points = (start..end)
-        .map(|index| Point::new(store.verts_x[index], store.verts_y[index]))
-        .collect();
-    Ok(Polygon::from_boundary_walk(points)?)
+    Ok(store.poly_as_exact(poly)?)
 }
 
 fn collect_edges(

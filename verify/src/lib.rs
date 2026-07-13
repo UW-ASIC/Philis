@@ -26,20 +26,18 @@
 //! buffers feed the CPU scanline passes and (unchanged) a cross-platform GPU kernel via the
 //! [`gpu`] backend.
 
-pub mod geometry;
-pub mod params;
-pub mod schema;
+pub mod core;
+pub mod io;
 pub mod drc;
 pub mod lvs;
 pub mod pex;
 pub mod erc;
 pub mod signoff;
-pub mod gds;
-pub mod gds_lossless;
-pub mod hierarchy_index;
-pub mod oasis;
-pub mod traits;
-pub use traits as gpu;
+
+// Old top-level module paths, re-exported so call sites keep compiling.
+pub use crate::core::{geometry, hierarchy_index, traits};
+pub use crate::io::{gds, gds_lossless, oasis, params, schema};
+pub use crate::core::traits as gpu;
 
 pub use geometry::{Bbox, Edge, GeometryStore, LayerId, PolyId};
 pub use params::{Deck, DrcRuleParam, LayerDef, LayerTable};

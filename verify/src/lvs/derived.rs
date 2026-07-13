@@ -35,14 +35,14 @@ pub fn evaluate_derived_layers(
                 // For each polygon on the first layer, check if ALL other layers overlap
                 let base = layers[0];
                 let rest = &layers[1..];
-                let base_polys: Vec<Bbox> = store.polys_on_layer(base).iter()
+                let base_polys: Vec<Bbox> = store.polys_on_layer(base)
                     .map(|p| store.poly_bbox[p.0 as usize])
                     .collect();
                 for bp in &base_polys {
                     let mut isect = *bp;
                     let mut all_overlap = true;
                     for &rl in rest {
-                        let overlaps = store.polys_on_layer(rl).iter()
+                        let overlaps = store.polys_on_layer(rl)
                             .any(|p| store.poly_bbox[p.0 as usize].overlaps(&isect));
                         if !overlaps { all_overlap = false; break; }
                         // Tighten intersection bbox
@@ -68,10 +68,10 @@ pub fn evaluate_derived_layers(
                 let base_lid = lt.id(base).or_else(|| derived_ids.get(base).copied());
                 let minus_lid = lt.id(minus).or_else(|| derived_ids.get(minus).copied());
                 let (Some(bl), Some(ml)) = (base_lid, minus_lid) else { continue };
-                let minus_bboxes: Vec<Bbox> = store.polys_on_layer(ml).iter()
+                let minus_bboxes: Vec<Bbox> = store.polys_on_layer(ml)
                     .map(|p| store.poly_bbox[p.0 as usize])
                     .collect();
-                let base_bboxes: Vec<Bbox> = store.polys_on_layer(bl).iter()
+                let base_bboxes: Vec<Bbox> = store.polys_on_layer(bl)
                     .map(|p| store.poly_bbox[p.0 as usize])
                     .collect();
                 for bp in &base_bboxes {
@@ -88,7 +88,7 @@ pub fn evaluate_derived_layers(
                     .filter_map(|n| lt.id(n).or_else(|| derived_ids.get(n).copied()))
                     .collect();
                 let all_bboxes: Vec<Bbox> = layers.iter()
-                    .flat_map(|&l| store.polys_on_layer(l).iter()
+                    .flat_map(|&l| store.polys_on_layer(l)
                         .map(|p| store.poly_bbox[p.0 as usize])
                         .collect::<Vec<_>>())
                     .collect();
@@ -165,7 +165,7 @@ mod tests {
         }];
         let ids = evaluate_derived_layers(&mut store, &lt, &derived);
         let ab_id = ids["ab"];
-        let ab_polys = store.polys_on_layer(ab_id);
+        let ab_polys: Vec<_> = store.polys_on_layer(ab_id).collect();
         assert_eq!(ab_polys.len(), 1);
         let bb = store.poly_bbox[ab_polys[0].0 as usize];
         assert_eq!((bb.xmin, bb.ymin, bb.xmax, bb.ymax), (50, 50, 100, 100));

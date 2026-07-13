@@ -2262,9 +2262,9 @@ fn deduplicate_flat_store(
     let mut seen = BTreeMap::<(LayerId, Vec<(i32, i32)>), PolyId>::new();
     let mut old_to_new = Vec::with_capacity(source.poly_count());
     for polygon in 0..source.poly_count() {
-        let (start, end) = source.poly_range(PolyId(polygon as u32));
-        let points = (start..end)
-            .map(|index| Point::new(source.verts_x[index], source.verts_y[index]))
+        let points = source
+            .vertices(PolyId(polygon as u32))
+            .map(|(x, y)| Point::new(x, y))
             .collect::<Vec<_>>();
         let mut ring = Ring::new(points).map_err(|error| {
             GdsHierarchyAdapterError::cell(
