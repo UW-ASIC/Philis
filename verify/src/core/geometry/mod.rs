@@ -30,6 +30,7 @@ pub mod bbox;
 pub mod edge;
 pub mod ids;
 pub mod ops;
+pub mod rects;
 pub mod store;
 
 pub use bbox::Bbox;
@@ -39,6 +40,7 @@ pub use ops::{
     clipped_area, clipped_area_i64, isqrt, point_in_poly, poly_self_intersects,
     seg_seg_dist2, segments_intersect,
 };
+pub use rects::{Rect, RectSet, decompose_all, decompose_rectilinear, rect_overlap_area_pos, rect_touch};
 pub use store::GeometryStore;
 
 #[cfg(test)]

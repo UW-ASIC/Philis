@@ -30,7 +30,6 @@ pub mod backend;
 pub mod core;
 pub mod rule;
 pub mod session;
-pub mod io;
 pub mod drc;
 pub mod lvs;
 pub mod pex;
