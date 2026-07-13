@@ -1,0 +1,427 @@
+//! Session-based kernel execution: an arena of read-only device buffers.
+//!
+//! Upload data once, run pure kernel functions over it — each launch produces
+//! a new immutable buffer — and read results only at the end. Nothing is ever
+//! mutated on device; the first `read` is the only synchronization point
+//! (GPU command streams pipeline enqueued launches for free).
+//!
+//! ```text
+//! Host:   upload(data)                              read(flags)
+//!           │                                            ▲
+//!           ▼                                            │
+//! Device: [xs] ──────┬──► rule_1(xs, ys, t) ──► [flags_1]
+//!         [ys] ──────┴──► rule_2(xs, ys, u) ──► [flags_2]
+//! ```
+//!
+//! [`Col<T>`] is the only currency — calling code never touches raw slices or
+//! device handles. `#[verify_kernel]` emits a `bind(...)` constructor per
+//! kernel returning a [`BoundKernel`] for [`Session::launch`].
+//!
+//! Backend note: `Session::new(Backend::Gpu)` silently falls back to a CPU
+//! arena when no device is usable, so calling code is backend-agnostic. On
+//! the CPU arena, `launch` runs the same scalar kernel function eagerly.
+
+use std::cell::RefCell;
+use std::marker::PhantomData;
+
+use crate::backend::Backend;
+
+/// Element types a session can move: fixed-size, byte-transparent scalars.
+pub trait SessionElem: Copy + 'static {
+    const SIZE: usize;
+    fn write_to(self, out: &mut Vec<u8>);
+    fn read_from(bytes: &[u8]) -> Self;
+    /// Uniform encoding (64-bit slot).
+    fn to_bits64(self) -> u64;
+    fn from_bits64(bits: u64) -> Self;
+}
+
+macro_rules! session_elem {
+    ($t:ty) => {
+        impl SessionElem for $t {
+            const SIZE: usize = core::mem::size_of::<$t>();
+            fn write_to(self, out: &mut Vec<u8>) {
+                out.extend_from_slice(&self.to_ne_bytes());
+            }
+            fn read_from(bytes: &[u8]) -> Self {
+                Self::from_ne_bytes(bytes[..Self::SIZE].try_into().unwrap())
+            }
+            fn to_bits64(self) -> u64 {
+                let mut b = [0u8; 8];
+                b[..Self::SIZE].copy_from_slice(&self.to_ne_bytes());
+                u64::from_ne_bytes(b)
+            }
+            fn from_bits64(bits: u64) -> Self {
+                Self::from_ne_bytes(bits.to_ne_bytes()[..Self::SIZE].try_into().unwrap())
+            }
+        }
+    };
+}
+session_elem!(f32);
+session_elem!(i32);
+session_elem!(u32);
+
+/// Opaque handle to a read-only buffer living in the session. Cheap to copy;
+/// typed so a `Col<f32>` cannot be fed where a `Col<u32>` is expected.
+#[derive(Clone, Copy, Debug)]
+pub struct Col<T> {
+    id: u32,
+    len: usize,
+    _t: PhantomData<T>,
+}
+
+impl<T> Col<T> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    /// Untyped reference for kernel binding (generated code only).
+    pub fn erased(&self) -> ColRef {
+        ColRef { id: self.id, len: self.len }
+    }
+}
+
+/// Untyped (id, len) pair naming a session buffer.
+#[derive(Clone, Copy, Debug)]
+pub struct ColRef {
+    pub id: u32,
+    pub len: usize,
+}
+
+/// Byte-erased uniform stack for a bound kernel (generated code only).
+#[derive(Default)]
+pub struct Uniforms(Vec<u64>);
+
+impl Uniforms {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn push<T: SessionElem>(mut self, v: T) -> Self {
+        self.0.push(v.to_bits64());
+        self
+    }
+    pub fn get<T: SessionElem>(&self, i: usize) -> T {
+        T::from_bits64(self.0[i])
+    }
+}
+
+/// CPU arena the generated `cpu_fn`s read typed columns from.
+pub struct CpuStore {
+    bufs: RefCell<Vec<Option<Vec<u8>>>>,
+}
+
+impl CpuStore {
+    /// Materialize a column as a typed vector (copies; the arena stays canonical).
+    pub fn read_vec<T: SessionElem>(&self, col: ColRef) -> Vec<T> {
+        let bufs = self.bufs.borrow();
+        let bytes = bufs[col.id as usize]
+            .as_ref()
+            .expect("column was released");
+        bytes.chunks_exact(T::SIZE).map(T::read_from).collect()
+    }
+}
+
+/// A kernel + its column bindings + uniforms, ready to launch.
+/// Construct through the generated `<kernel>_kernel::bind(...)`.
+pub struct BoundKernel {
+    pub cols: Vec<ColRef>,
+    pub uniforms: Uniforms,
+    /// Extra host-side data some shapes need (cross descriptors), byte-encoded.
+    pub host: Vec<u8>,
+    pub out_len: usize,
+    pub out_elem_size: usize,
+    /// CPU execution: read inputs from the arena, return output bytes.
+    pub cpu_fn: fn(&CpuStore, &[ColRef], &Uniforms, &[u8], usize) -> Vec<u8>,
+    /// GPU enqueue: input handles → writes into the preallocated output.
+    /// Enqueues only; never syncs.
+    #[cfg(feature = "gpu")]
+    pub gpu_fn: fn(
+        &'static crate::backend::cube::Client,
+        &[(cubecl::server::Handle, usize)],
+        (cubecl::server::Handle, usize),
+        &Uniforms,
+        &[u8],
+    ),
+}
+
+enum Inner {
+    Cpu(CpuStore),
+    #[cfg(feature = "gpu")]
+    Gpu {
+        client: &'static crate::backend::cube::Client,
+        handles: RefCell<Vec<Option<(cubecl::server::Handle, usize)>>>,
+    },
+}
+
+/// Owns the device context and every buffer created through it. All `Col`s
+/// stay valid (immutable) until [`Session::release`] or drop.
+pub struct Session {
+    inner: Inner,
+}
+
+impl Session {
+    /// Create a session. `Backend::Gpu` falls back to the CPU arena when no
+    /// device is usable, so callers never branch.
+    pub fn new(backend: Backend) -> Self {
+        #[cfg(feature = "gpu")]
+        if backend == Backend::Gpu {
+            if let Some(client) = crate::backend::cube::client() {
+                return Self {
+                    inner: Inner::Gpu { client, handles: RefCell::new(Vec::new()) },
+                };
+            }
+        }
+        let _ = backend;
+        Self {
+            inner: Inner::Cpu(CpuStore { bufs: RefCell::new(Vec::new()) }),
+        }
+    }
+
+    /// The backend actually in use (after fallback).
+    pub fn backend(&self) -> Backend {
+        match &self.inner {
+            Inner::Cpu(_) => Backend::Cpu,
+            #[cfg(feature = "gpu")]
+            Inner::Gpu { .. } => Backend::Gpu,
+        }
+    }
+
+    /// Host → device. The returned `Col` is immutable for its lifetime.
+    pub fn upload<T: SessionElem>(&self, data: &[T]) -> Col<T> {
+        let len = data.len();
+        let id = match &self.inner {
+            Inner::Cpu(store) => {
+                let mut bytes = Vec::with_capacity(len * T::SIZE);
+                for &v in data {
+                    v.write_to(&mut bytes);
+                }
+                let mut bufs = store.bufs.borrow_mut();
+                bufs.push(Some(bytes));
+                (bufs.len() - 1) as u32
+            }
+            #[cfg(feature = "gpu")]
+            Inner::Gpu { client, handles } => {
+                let mut bytes = Vec::with_capacity(len * T::SIZE);
+                for &v in data {
+                    v.write_to(&mut bytes);
+                }
+                let handle = client.create(cubecl::bytes::Bytes::from_bytes_vec(bytes));
+                let mut hs = handles.borrow_mut();
+                hs.push(Some((handle, len)));
+                (hs.len() - 1) as u32
+            }
+        };
+        Col { id, len, _t: PhantomData }
+    }
+
+    /// Run one kernel. The output is a new immutable column. On GPU this
+    /// enqueues without synchronizing; on CPU it runs eagerly.
+    pub fn launch<T: SessionElem>(&self, kernel: BoundKernel) -> Col<T> {
+        assert_eq!(
+            kernel.out_elem_size,
+            T::SIZE,
+            "launch::<T> type does not match the kernel's output element"
+        );
+        let len = kernel.out_len;
+        let id = match &self.inner {
+            Inner::Cpu(store) => {
+                let out = (kernel.cpu_fn)(
+                    store,
+                    &kernel.cols,
+                    &kernel.uniforms,
+                    &kernel.host,
+                    len,
+                );
+                debug_assert_eq!(out.len(), len * T::SIZE);
+                let mut bufs = store.bufs.borrow_mut();
+                bufs.push(Some(out));
+                (bufs.len() - 1) as u32
+            }
+            #[cfg(feature = "gpu")]
+            Inner::Gpu { client, handles } => {
+                let ins: Vec<(cubecl::server::Handle, usize)> = {
+                    let hs = handles.borrow();
+                    kernel
+                        .cols
+                        .iter()
+                        .map(|c| hs[c.id as usize].clone().expect("column was released"))
+                        .collect()
+                };
+                let out = client.empty(len * T::SIZE);
+                (kernel.gpu_fn)(client, &ins, (out.clone(), len), &kernel.uniforms, &kernel.host);
+                let mut hs = handles.borrow_mut();
+                hs.push(Some((out, len)));
+                (hs.len() - 1) as u32
+            }
+        };
+        Col { id, len, _t: PhantomData }
+    }
+
+    /// Device → host. The only synchronization point.
+    pub fn read<T: SessionElem>(&self, col: &Col<T>) -> Vec<T> {
+        match &self.inner {
+            Inner::Cpu(store) => store.read_vec(col.erased()),
+            #[cfg(feature = "gpu")]
+            Inner::Gpu { client, handles } => {
+                let handle = handles.borrow()[col.id as usize]
+                    .clone()
+                    .expect("column was released");
+                let bytes = client
+                    .read_one(handle.0)
+                    .expect("device readback failed");
+                bytes.chunks_exact(T::SIZE).map(T::read_from).collect()
+            }
+        }
+    }
+
+    /// Release a column's memory early. Subsequent reads of it panic.
+    pub fn release<T>(&self, col: Col<T>) {
+        match &self.inner {
+            Inner::Cpu(store) => {
+                store.bufs.borrow_mut()[col.id as usize] = None;
+            }
+            #[cfg(feature = "gpu")]
+            Inner::Gpu { handles, .. } => {
+                handles.borrow_mut()[col.id as usize] = None;
+            }
+        }
+    }
+}
+
+/// Encode host-side cross descriptors for [`BoundKernel::host`].
+pub fn encode_descs4(descs: &[(u32, u32, u32, u32)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(descs.len() * 16);
+    for &(a, b, c, d) in descs {
+        for v in [a, b, c, d] {
+            out.extend_from_slice(&v.to_ne_bytes());
+        }
+    }
+    out
+}
+
+pub fn decode_descs4(bytes: &[u8]) -> Vec<(u32, u32, u32, u32)> {
+    bytes
+        .chunks_exact(16)
+        .map(|c| {
+            let g = |i: usize| u32::from_ne_bytes(c[i * 4..i * 4 + 4].try_into().unwrap());
+            (g(0), g(1), g(2), g(3))
+        })
+        .collect()
+}
+
+pub fn encode_descs2(descs: &[(u32, u32)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(descs.len() * 8);
+    for &(a, b) in descs {
+        out.extend_from_slice(&a.to_ne_bytes());
+        out.extend_from_slice(&b.to_ne_bytes());
+    }
+    out
+}
+
+pub fn decode_descs2(bytes: &[u8]) -> Vec<(u32, u32)> {
+    bytes
+        .chunks_exact(8)
+        .map(|c| {
+            (
+                u32::from_ne_bytes(c[0..4].try_into().unwrap()),
+                u32::from_ne_bytes(c[4..8].try_into().unwrap()),
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::Backend;
+    use gdsverify_macros::verify_kernel;
+
+    // One body per kernel; the macro compiles each for CPU (and GPU under
+    // the `gpu` feature). These tests exercise the session CPU arena and the
+    // one-shot API against each other.
+
+    #[verify_kernel(shape = map)]
+    fn scaled_sum(x: f32, y: f32, #[uniform] k: f32) -> f32 {
+        x + y * k
+    }
+
+    #[verify_kernel(shape = map)]
+    fn above(v: f32, #[uniform] cutoff: f32) -> u32 {
+        if v > cutoff { 1 } else { 0 }
+    }
+
+    #[verify_kernel(shape = min_over)]
+    fn dist2(px: f32, py: f32, #[target] cx: f32, #[target] cy: f32) -> f32 {
+        let dx = px - cx;
+        let dy = py - cy;
+        dx * dx + dy * dy
+    }
+
+    #[verify_kernel(shape = pair)]
+    fn ranges_touch(a_lo: i32, a_hi: i32, b_lo: i32, b_hi: i32) -> u32 {
+        if a_lo <= b_hi && b_lo <= a_hi { 1 } else { 0 }
+    }
+
+    #[verify_kernel(shape = cross_self)]
+    fn within(a_x: f32, b_x: f32, #[uniform] thr: f32) -> u32 {
+        let d = if a_x > b_x { a_x - b_x } else { b_x - a_x };
+        if d < thr { 1 } else { 0 }
+    }
+
+    #[test]
+    fn session_map_matches_one_shot() {
+        let s = Session::new(Backend::Cpu);
+        let xs = s.upload(&[1.0f32, 2.0, 3.0]);
+        let ys = s.upload(&[10.0f32, 20.0, 30.0]);
+        let out: Col<f32> = s.launch(scaled_sum_kernel::bind(&xs, &ys, 2.0));
+        assert_eq!(s.read(&out), vec![21.0, 42.0, 63.0]);
+        assert_eq!(
+            s.read(&out),
+            scaled_sum_kernel::run(Backend::Cpu, &[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0], 2.0)
+        );
+    }
+
+    #[test]
+    fn session_chains_device_resident_columns() {
+        let s = Session::new(Backend::Cpu);
+        let px = s.upload(&[0.0f32, 10.0]);
+        let py = s.upload(&[0.0f32, 0.0]);
+        let cx = s.upload(&[3.0f32, 8.0]);
+        let cy = s.upload(&[4.0f32, 0.0]);
+        // Stage 1: nearest squared distance per query point.
+        let d: Col<f32> = s.launch(dist2_kernel::bind(&px, &py, &cx, &cy));
+        // Stage 2: threshold the stage-1 output without reading it back.
+        let flags: Col<u32> = s.launch(above_kernel::bind(&d, 10.0));
+        assert_eq!(s.read(&d), vec![25.0, 4.0]);
+        assert_eq!(s.read(&flags), vec![1, 0]);
+    }
+
+    #[test]
+    fn session_pair_and_cross_shapes() {
+        let s = Session::new(Backend::Cpu);
+        let lo = s.upload(&[0i32, 10, 20]);
+        let hi = s.upload(&[5i32, 15, 25]);
+        let pa = s.upload(&[0u32, 0]);
+        let pb = s.upload(&[1u32, 2]);
+        let touch: Col<u32> = s.launch(ranges_touch_kernel::bind(&lo, &hi, &pa, &pb));
+        assert_eq!(s.read(&touch), vec![0, 0]);
+
+        let xs = s.upload(&[0.0f32, 1.0, 100.0]);
+        let flags: Col<u32> = s.launch(within_kernel::bind(&xs, &[(0, 3), (1, 3)], 5.0));
+        assert_eq!(s.read(&flags), vec![1, 0]);
+        assert_eq!(
+            s.read(&flags),
+            within_kernel::cpu(&[0.0, 1.0, 100.0], &[(0, 3), (1, 3)], 5.0)
+        );
+    }
+
+    #[test]
+    fn release_frees_and_backend_reports_fallback() {
+        let s = Session::new(Backend::Gpu); // no device in tests => CPU arena
+        assert_eq!(s.backend(), Backend::Cpu);
+        let xs = s.upload(&[1.0f32]);
+        s.release(xs);
+    }
+}

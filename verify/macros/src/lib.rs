@@ -230,6 +230,34 @@ fn gpu_stub(sig_args: &TokenStream2, call_args: &TokenStream2, out_ty: &Type) ->
     }
 }
 
+/// Session support: typed column reads + uniform reads + output serialization
+/// for the generated `cpu_fn`, shared by every shape.
+fn session_cpu_prelude(cols_n: &[Ident], cols_t: &[Type], un: &[Ident], ut: &[Type]) -> TokenStream2 {
+    let col_reads = cols_n.iter().zip(cols_t).enumerate().map(|(i, (n, t))| {
+        quote! { let #n: Vec<#t> = store.read_vec::<#t>(cols[#i]); }
+    });
+    let uni_reads = un.iter().zip(ut).enumerate().map(|(i, (n, t))| {
+        quote! { let #n: #t = uniforms.get::<#t>(#i); }
+    });
+    quote! {
+        #(#col_reads)*
+        #(#uni_reads)*
+    }
+}
+
+fn session_serialize(out_ty: &Type) -> TokenStream2 {
+    quote! {
+        {
+            use crate::session::SessionElem;
+            let mut bytes = Vec::with_capacity(values.len() * <#out_ty as SessionElem>::SIZE);
+            for v in values {
+                v.write_to(&mut bytes);
+            }
+            bytes
+        }
+    }
+}
+
 fn gen_map(name: &Ident, cols: &[&Param], uniforms: &[&Param], out_ty: &Type) -> TokenStream2 {
     let cn = names(cols);
     let ct = types(cols);
@@ -243,6 +271,68 @@ fn gen_map(name: &Ident, cols: &[&Param], uniforms: &[&Param], out_ty: &Type) ->
     let run = gen_run(&sig_args, &call_args, out_ty);
     let gpu = gpu_stub(&sig_args, &call_args, out_ty);
 
+    let prelude = session_cpu_prelude(&cn, &ct, &un, &ut);
+    let serialize = session_serialize(out_ty);
+    let in_count = cn.len();
+    let ins_args = (0..in_count).map(|i| {
+        quote! { ArrayArg::from_raw_parts(ins[#i].0.clone(), ins[#i].1), }
+    });
+    let uni_args = ut.iter().enumerate().map(|(i, t)| {
+        quote! { uniforms.get::<#t>(#i), }
+    });
+    let bind = quote! {
+        /// Session binding: same kernel over device-resident columns.
+        pub fn bind(
+            #(#cn: &crate::session::Col<#ct>,)* #(#un: #ut),*
+        ) -> crate::session::BoundKernel {
+            crate::session::BoundKernel {
+                cols: vec![#(#cn.erased()),*],
+                uniforms: crate::session::Uniforms::new()#(.push(#un))*,
+                host: Vec::new(),
+                out_len: #first.len(),
+                out_elem_size: core::mem::size_of::<#out_ty>(),
+                cpu_fn: session_cpu,
+                #[cfg(feature = "gpu")]
+                gpu_fn: gpu_impl::enqueue,
+            }
+        }
+
+        fn session_cpu(
+            store: &crate::session::CpuStore,
+            cols: &[crate::session::ColRef],
+            uniforms: &crate::session::Uniforms,
+            _host: &[u8],
+            _out_len: usize,
+        ) -> Vec<u8> {
+            #prelude
+            let values = cpu(#(&#cn,)* #(#un),*);
+            #serialize
+        }
+    };
+    let session_gpu = quote! {
+        /// Session enqueue: launch over already-resident handles; never syncs.
+        pub fn enqueue(
+            client: &'static crate::backend::cube::Client,
+            ins: &[(cubecl::server::Handle, usize)],
+            out: (cubecl::server::Handle, usize),
+            uniforms: &crate::session::Uniforms,
+            _host: &[u8],
+        ) {
+            let n = out.1;
+            if n == 0 { return; }
+            unsafe {
+                device::launch_unchecked::<CudaRuntime>(
+                    client,
+                    CubeCount::Static((n as u32).div_ceil(CUBE_DIM), 1, 1),
+                    CubeDim::new_1d(CUBE_DIM),
+                    #(#ins_args)*
+                    #(#uni_args)*
+                    ArrayArg::from_raw_parts(out.0.clone(), n),
+                );
+            }
+        }
+    };
+
     quote! {
         /// CPU compilation of the same function.
         pub fn cpu(#sig_args) -> Vec<#out_ty> {
@@ -250,6 +340,7 @@ fn gen_map(name: &Ident, cols: &[&Param], uniforms: &[&Param], out_ty: &Type) ->
         }
         #gpu
         #run
+        #bind
 
         #[cfg(feature = "gpu")]
         mod gpu_impl {
@@ -263,6 +354,8 @@ fn gen_map(name: &Ident, cols: &[&Param], uniforms: &[&Param], out_ty: &Type) ->
                     out[ABSOLUTE_POS] = super::super::#name(#(#cn[ABSOLUTE_POS],)* #(#un),*);
                 }
             }
+
+            #session_gpu
 
             pub fn launch(#(#cn: &[#ct],)* #(#un: #ut),*) -> Option<Vec<#out_ty>> {
                 let client = client()?;
@@ -310,6 +403,75 @@ fn gen_min_over(
     let run = gen_run(&sig_args, &call_args, out_ty);
     let gpu = gpu_stub(&sig_args, &call_args, out_ty);
 
+    let all_n: Vec<Ident> = qn.iter().chain(&tn).cloned().collect();
+    let all_t: Vec<Type> = qt.iter().chain(&tt).cloned().collect();
+    let prelude = session_cpu_prelude(&all_n, &all_t, &un, &ut);
+    let serialize = session_serialize(out_ty);
+    let q_count = qn.len();
+    let in_count = all_n.len();
+    let ins_args = (0..in_count).map(|i| {
+        quote! { ArrayArg::from_raw_parts(ins[#i].0.clone(), ins[#i].1), }
+    });
+    let uni_args = ut.iter().enumerate().map(|(i, t)| {
+        quote! { uniforms.get::<#t>(#i), }
+    });
+    let bind = quote! {
+        /// Session binding: same kernel over device-resident columns.
+        pub fn bind(
+            #(#qn: &crate::session::Col<#qt>,)* #(#tn: &crate::session::Col<#tt>,)*
+            #(#un: #ut),*
+        ) -> crate::session::BoundKernel {
+            crate::session::BoundKernel {
+                cols: vec![#(#all_n.erased()),*],
+                uniforms: crate::session::Uniforms::new()#(.push(#un))*,
+                host: Vec::new(),
+                out_len: #first_q.len(),
+                out_elem_size: core::mem::size_of::<#out_ty>(),
+                cpu_fn: session_cpu,
+                #[cfg(feature = "gpu")]
+                gpu_fn: gpu_impl::enqueue,
+            }
+        }
+
+        fn session_cpu(
+            store: &crate::session::CpuStore,
+            cols: &[crate::session::ColRef],
+            uniforms: &crate::session::Uniforms,
+            _host: &[u8],
+            _out_len: usize,
+        ) -> Vec<u8> {
+            #prelude
+            let values = cpu(#(&#all_n,)* #(#un),*);
+            #serialize
+        }
+    };
+    let session_gpu = quote! {
+        /// Session enqueue: launch over already-resident handles; never syncs.
+        pub fn enqueue(
+            client: &'static crate::backend::cube::Client,
+            ins: &[(cubecl::server::Handle, usize)],
+            out: (cubecl::server::Handle, usize),
+            uniforms: &crate::session::Uniforms,
+            _host: &[u8],
+        ) {
+            let n = out.1;
+            if n == 0 { return; }
+            let m = ins[#q_count].1;
+            unsafe {
+                device::launch_unchecked::<CudaRuntime>(
+                    client,
+                    CubeCount::Static((n as u32).div_ceil(CUBE_DIM), 1, 1),
+                    CubeDim::new_1d(CUBE_DIM),
+                    #(#ins_args)*
+                    m as u32,
+                    <#out_ty>::MAX,
+                    #(#uni_args)*
+                    ArrayArg::from_raw_parts(out.0.clone(), n),
+                );
+            }
+        }
+    };
+
     quote! {
         /// CPU compilation of the same function.
         pub fn cpu(#sig_args) -> Vec<#out_ty> {
@@ -326,12 +488,15 @@ fn gen_min_over(
         }
         #gpu
         #run
+        #bind
 
         #[cfg(feature = "gpu")]
         mod gpu_impl {
             use cubecl::prelude::*;
             use cubecl::cuda::CudaRuntime;
             use crate::backend::cube::{client, contain, upload, read_out, CUBE_DIM};
+
+            #session_gpu
 
             #[cube(launch_unchecked)]
             fn device(
@@ -398,6 +563,76 @@ fn gen_pair(name: &Ident, cols: &[&Param], uniforms: &[&Param], out_ty: &Type) -
     let run = gen_run(&sig_args, &call_args, out_ty);
     let gpu = gpu_stub(&sig_args, &call_args, out_ty);
 
+    let prelude = session_cpu_prelude(&an, &at, &un, &ut);
+    let serialize = session_serialize(out_ty);
+    let col_count = an.len();
+    let pa_idx = col_count;
+    let pb_idx = col_count + 1;
+    let ins_args = (0..col_count).map(|i| {
+        quote! { ArrayArg::from_raw_parts(ins[#i].0.clone(), ins[#i].1), }
+    });
+    let uni_args = ut.iter().enumerate().map(|(i, t)| {
+        quote! { uniforms.get::<#t>(#i), }
+    });
+    let bind = quote! {
+        /// Session binding: same kernel over device-resident columns.
+        pub fn bind(
+            #(#an: &crate::session::Col<#at>,)*
+            pairs_a: &crate::session::Col<u32>, pairs_b: &crate::session::Col<u32>,
+            #(#un: #ut),*
+        ) -> crate::session::BoundKernel {
+            crate::session::BoundKernel {
+                cols: vec![#(#an.erased(),)* pairs_a.erased(), pairs_b.erased()],
+                uniforms: crate::session::Uniforms::new()#(.push(#un))*,
+                host: Vec::new(),
+                out_len: pairs_a.len(),
+                out_elem_size: core::mem::size_of::<#out_ty>(),
+                cpu_fn: session_cpu,
+                #[cfg(feature = "gpu")]
+                gpu_fn: gpu_impl::enqueue,
+            }
+        }
+
+        fn session_cpu(
+            store: &crate::session::CpuStore,
+            cols: &[crate::session::ColRef],
+            uniforms: &crate::session::Uniforms,
+            _host: &[u8],
+            _out_len: usize,
+        ) -> Vec<u8> {
+            #prelude
+            let pairs_a: Vec<u32> = store.read_vec::<u32>(cols[#pa_idx]);
+            let pairs_b: Vec<u32> = store.read_vec::<u32>(cols[#pb_idx]);
+            let values = cpu(#(&#an,)* &pairs_a, &pairs_b, #(#un),*);
+            #serialize
+        }
+    };
+    let session_gpu = quote! {
+        /// Session enqueue: launch over already-resident handles; never syncs.
+        pub fn enqueue(
+            client: &'static crate::backend::cube::Client,
+            ins: &[(cubecl::server::Handle, usize)],
+            out: (cubecl::server::Handle, usize),
+            uniforms: &crate::session::Uniforms,
+            _host: &[u8],
+        ) {
+            let m = out.1;
+            if m == 0 { return; }
+            unsafe {
+                device::launch_unchecked::<CudaRuntime>(
+                    client,
+                    CubeCount::Static((m as u32).div_ceil(CUBE_DIM), 1, 1),
+                    CubeDim::new_1d(CUBE_DIM),
+                    #(#ins_args)*
+                    ArrayArg::from_raw_parts(ins[#pa_idx].0.clone(), ins[#pa_idx].1),
+                    ArrayArg::from_raw_parts(ins[#pb_idx].0.clone(), ins[#pb_idx].1),
+                    #(#uni_args)*
+                    ArrayArg::from_raw_parts(out.0.clone(), m),
+                );
+            }
+        }
+    };
+
     quote! {
         /// CPU compilation of the same function.
         pub fn cpu(#sig_args) -> Vec<#out_ty> {
@@ -411,12 +646,15 @@ fn gen_pair(name: &Ident, cols: &[&Param], uniforms: &[&Param], out_ty: &Type) -
         }
         #gpu
         #run
+        #bind
 
         #[cfg(feature = "gpu")]
         mod gpu_impl {
             use cubecl::prelude::*;
             use cubecl::cuda::CudaRuntime;
             use crate::backend::cube::{client, contain, upload, read_out, CUBE_DIM};
+
+            #session_gpu
 
             #[cube(launch_unchecked)]
             fn device(
@@ -580,6 +818,126 @@ fn gen_cross(
     let gpu = gpu_stub(&sig_args, &call_args, &syn::parse_quote!(u32));
     let _ = out_ty; // cross shapes always produce per-descriptor u32 flags
 
+    let prelude = session_cpu_prelude(&an, &at, &un, &ut);
+    let (encode_fn, decode_fn): (TokenStream2, TokenStream2) = if self_pairs {
+        (
+            quote! { crate::session::encode_descs2 },
+            quote! { crate::session::decode_descs2 },
+        )
+    } else {
+        (
+            quote! { crate::session::encode_descs4 },
+            quote! { crate::session::decode_descs4 },
+        )
+    };
+    let col_count = an.len();
+    let ins_args = (0..col_count).map(|i| {
+        quote! { ArrayArg::from_raw_parts(ins[#i].0.clone(), ins[#i].1), }
+    });
+    let uni_args = ut.iter().enumerate().map(|(i, t)| {
+        quote! { uniforms.get::<#t>(#i), }
+    });
+    let bind = quote! {
+        /// Session binding: columns stay on device; the (small, host-side)
+        /// descriptor list rides in the bound kernel and is chunk-assembled
+        /// at enqueue time exactly like the one-shot launcher.
+        pub fn bind(
+            #(#an: &crate::session::Col<#at>,)* descs: &[#desc_ty], #(#un: #ut),*
+        ) -> crate::session::BoundKernel {
+            crate::session::BoundKernel {
+                cols: vec![#(#an.erased()),*],
+                uniforms: crate::session::Uniforms::new()#(.push(#un))*,
+                host: #encode_fn(descs),
+                out_len: descs.len(),
+                out_elem_size: core::mem::size_of::<u32>(),
+                cpu_fn: session_cpu,
+                #[cfg(feature = "gpu")]
+                gpu_fn: gpu_impl::enqueue,
+            }
+        }
+
+        fn session_cpu(
+            store: &crate::session::CpuStore,
+            cols: &[crate::session::ColRef],
+            uniforms: &crate::session::Uniforms,
+            host: &[u8],
+            _out_len: usize,
+        ) -> Vec<u8> {
+            #prelude
+            let descs = #decode_fn(host);
+            let values = cpu(#(&#an,)* &descs, #(#un),*);
+            {
+                use crate::session::SessionElem;
+                let mut bytes = Vec::with_capacity(values.len() * 4);
+                for v in values {
+                    v.write_to(&mut bytes);
+                }
+                bytes
+            }
+        }
+    };
+    let session_gpu = quote! {
+        /// Session enqueue: zero the flag buffer, then chunked scatter-OR
+        /// launches writing at `flag_base + k`. Never syncs.
+        pub fn enqueue(
+            client: &'static crate::backend::cube::Client,
+            ins: &[(cubecl::server::Handle, usize)],
+            out: (cubecl::server::Handle, usize),
+            uniforms: &crate::session::Uniforms,
+            host: &[u8],
+        ) {
+            let descs = #decode_fn(host);
+            let n_flags = out.1;
+            if n_flags == 0 { return; }
+            unsafe {
+                zero_fill::launch_unchecked::<CudaRuntime>(
+                    client,
+                    CubeCount::Static((n_flags as u32).div_ceil(CUBE_DIM), 1, 1),
+                    CubeDim::new_1d(CUBE_DIM),
+                    ArrayArg::from_raw_parts(out.0.clone(), n_flags),
+                );
+            }
+            let mut idx = 0;
+            let mut base: u32 = 0;
+            while idx < descs.len() {
+                let mut starts_a: Vec<u32> = Vec::new();
+                #starts_b_decl
+                let mut lens_b: Vec<u32> = Vec::new();
+                let mut offs: Vec<u32> = Vec::new();
+                let mut total: u64 = 0;
+                while idx < descs.len() && (total as usize) < CHUNK {
+                    offs.push(total as u32);
+                    total += #desc_total;
+                    #chunk_push
+                    idx += 1;
+                }
+                let m = offs.len();
+                let hsa = upload(client, &starts_a);
+                #starts_b_upload
+                let hlb = upload(client, &lens_b);
+                let ho = upload(client, &offs);
+                unsafe {
+                    device::launch_unchecked::<CudaRuntime>(
+                        client,
+                        CubeCount::Static((total as u32).div_ceil(CUBE_DIM), 1, 1),
+                        CubeDim::new_1d(CUBE_DIM),
+                        #(#ins_args)*
+                        ArrayArg::from_raw_parts(hsa, m),
+                        #starts_b_launch_arg
+                        ArrayArg::from_raw_parts(hlb, m),
+                        ArrayArg::from_raw_parts(ho, m),
+                        m as u32,
+                        total as u32,
+                        base,
+                        #(#uni_args)*
+                        ArrayArg::from_raw_parts(out.0.clone(), n_flags),
+                    );
+                }
+                base += m as u32;
+            }
+        }
+    };
+
     quote! {
         /// CPU compilation of the same function: per-descriptor OR-reduce.
         pub fn cpu(#sig_args) -> Vec<u32> {
@@ -591,6 +949,7 @@ fn gen_cross(
         }
         #gpu
         #run
+        #bind
 
         #[cfg(feature = "gpu")]
         mod gpu_impl {
@@ -610,10 +969,19 @@ fn gen_cross(
             }
 
             #[cube(launch_unchecked)]
+            fn zero_fill(out: &mut Array<u32>) {
+                if ABSOLUTE_POS < out.len() {
+                    out[ABSOLUTE_POS] = 0u32;
+                }
+            }
+
+            #session_gpu
+
+            #[cube(launch_unchecked)]
             fn device(
                 #(#an: &Array<#at>,)*
                 starts_a: &Array<u32>, #starts_b_kernel_param lens_b: &Array<u32>,
-                off: &Array<u32>, n_descs: u32, total: u32,
+                off: &Array<u32>, n_descs: u32, total: u32, flag_base: u32,
                 #(#un: #ut,)*
                 flags: &mut Array<u32>,
             ) {
@@ -622,7 +990,7 @@ fn gen_cross(
                     let k = owner_of(off, n_descs, i);
                     let local = i - off[k as usize];
                     #device_index
-                    if hit != 0 { flags[k as usize] = 1u32; }
+                    if hit != 0 { flags[(flag_base + k) as usize] = 1u32; }
                 }
             }
 
@@ -666,6 +1034,7 @@ fn gen_cross(
                                 ArrayArg::from_raw_parts(ho, m),
                                 m as u32,
                                 total as u32,
+                                0u32,
                                 #(#un,)*
                                 ArrayArg::from_raw_parts(hf.clone(), m),
                             );
