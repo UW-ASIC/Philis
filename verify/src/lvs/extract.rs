@@ -60,6 +60,20 @@ impl UnionFind {
     }
 }
 
+/// Host union-find over collected edges. Returns per-node component labels
+/// (each node labeled with the minimum index in its component).
+fn host_union_find(edges: &[(u32, u32)], m: usize) -> Vec<u32> {
+    let mut uf = UnionFind::new(m);
+    for &(i, j) in edges {
+        uf.union(i, j);
+    }
+    let mut labels = Vec::with_capacity(m);
+    for i in 0..m as u32 {
+        labels.push(uf.find(i));
+    }
+    labels
+}
+
 // --- internal types ---
 
 struct Node {
@@ -1154,7 +1168,6 @@ pub(super) fn extract_netlist_opts_raw_with_sources(
     };
 
     let m = nodes.len();
-    let mut uf = UnionFind::new(m);
 
     // Sweep-line candidate enumeration: O(m log m + K) bbox-touching pairs
     // instead of the previous all-pairs O(m²) scan. Closed intervals — touching
@@ -1180,6 +1193,8 @@ pub(super) fn extract_netlist_opts_raw_with_sources(
         None
     };
 
+    // Collect connectivity edges: sweep + bbox prefilter + exact predicates + can_union policy.
+    let mut edges: Vec<(u32, u32)> = Vec::new();
     for (pair_idx, &(i, j)) in cands.iter().enumerate() {
         let (i, j) = (i as usize, j as usize);
         // CPU/GPU bbox results are prefilters only.  The final decision is made
@@ -1210,14 +1225,40 @@ pub(super) fn extract_netlist_opts_raw_with_sources(
         if !can_union(&nodes[i], &nodes[j]) {
             continue;
         }
-        uf.union(i as u32, j as u32);
+        edges.push((i as u32, j as u32));
     }
 
-    // Assign compact net ids
+    // Compute connected components: GPU session path or host union-find.
+    // ponytail: GPU path for large graphs via FastSV-style session kernels;
+    // host UF for small graphs or when no device is available.
+    let component_labels = if backend == Backend::Gpu && m >= (1 << 18) {
+        // Try GPU session; on failure warn and fall through to host UF.
+        let gpu_result = crate::session::contained(|| {
+            match crate::session::Session::new(Backend::Gpu) {
+                Ok(session) => {
+                    crate::core::connectivity::connected_components(&session, &edges, m)
+                }
+                Err(_) => {
+                    crate::session::warn_no_gpu("lvs connectivity");
+                    // Fall back: compute on CPU session
+                    let session = crate::session::Session::cpu();
+                    crate::core::connectivity::connected_components(&session, &edges, m)
+                }
+            }
+        });
+        gpu_result.unwrap_or_else(|| {
+            // Panic in session: fall back to host union-find
+            host_union_find(&edges, m)
+        })
+    } else {
+        host_union_find(&edges, m)
+    };
+
+    // Assign compact net ids (first-occurrence of root in ascending node order)
     let mut root_to_net: HashMap<u32, u32> = HashMap::new();
     let mut net_of_node = vec![u32::MAX; m];
     for i in 0..m as u32 {
-        let r = uf.find(i);
+        let r = component_labels[i as usize];
         let next = root_to_net.len() as u32;
         net_of_node[i as usize] = *root_to_net.entry(r).or_insert(next);
     }
