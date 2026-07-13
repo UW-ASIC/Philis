@@ -402,6 +402,11 @@ mod tests {
         if d < thr { 1 } else { 0 }
     }
 
+    #[verify_kernel(shape = segmented_min)]
+    fn seg_min_val(v: u32, #[uniform] bias: u32) -> u32 {
+        v + bias
+    }
+
     #[test]
     fn session_map_matches_one_shot() {
         let s = Session::cpu();
@@ -428,6 +433,24 @@ mod tests {
         let flags: Col<u32> = s.launch(above_kernel::bind(&d, 10.0));
         assert_eq!(s.read(&d), vec![25.0, 4.0]);
         assert_eq!(s.read(&flags), vec![1, 0]);
+    }
+
+    #[test]
+    fn session_segmented_min_reduces_csr_segments() {
+        let s = Session::cpu();
+        // vals gathered through idx; segments: [0..3), [3..3) empty, [3..5)
+        let vals = s.upload(&[50u32, 20, 30, 40]);
+        let idx = s.upload(&[0u32, 1, 2, 3, 1]);
+        let seg = s.upload(&[0u32, 3, 3, 5]);
+        let out: Col<u32> = s.launch(seg_min_val_kernel::bind(&vals, &idx, &seg, 1));
+        // min(51,21,31)=21; empty=MAX; min(41,21)=21
+        assert_eq!(s.read(&out), vec![21, u32::MAX, 21]);
+        assert_eq!(
+            s.read(&out),
+            seg_min_val_kernel::run(
+                Backend::Cpu, &[50, 20, 30, 40], &[0, 1, 2, 3, 1], &[0, 3, 3, 5], 1
+            )
+        );
     }
 
     #[test]

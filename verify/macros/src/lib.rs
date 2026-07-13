@@ -23,6 +23,10 @@
 //!   `(a in a0..a1, b in b0..b1)` has `f(col..[a], col..[b], s..) != 0`
 //! * `cross_self` — per descriptor `(s,e)`: flag 1 iff any `s <= u < v < e`
 //!   has `f(col..[u], col..[v], s..) != 0`
+//! * `segmented_min` — CSR gather-reduce:
+//!   `out[i] = min over k in seg_start[i]..seg_start[i+1] of f(col..[idx[k]], s..)`;
+//!   empty segments yield `MAX`. `idx`/`seg_start` ride as two implicit u32
+//!   columns after the value columns (`seg_start.len() == out.len() + 1`).
 //!
 //! `#[kernel_fn]` marks a helper callable from kernels and plain Rust alike.
 
@@ -54,6 +58,7 @@ enum ShapeKind {
     Pair,
     CrossPairs,
     CrossSelf,
+    SegmentedMin,
 }
 
 struct Param {
@@ -108,6 +113,7 @@ pub fn verify_kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
                 "pair" => ShapeKind::Pair,
                 "cross_pairs" => ShapeKind::CrossPairs,
                 "cross_self" => ShapeKind::CrossSelf,
+                "segmented_min" => ShapeKind::SegmentedMin,
                 other => {
                     return Err(meta.error(format!("unknown shape `{other}`")));
                 }
@@ -175,6 +181,7 @@ pub fn verify_kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
         ShapeKind::Pair => gen_pair(&name, &cols, &uniforms, &out_ty),
         ShapeKind::CrossPairs => gen_cross(&name, &cols, &uniforms, &out_ty, false),
         ShapeKind::CrossSelf => gen_cross(&name, &cols, &uniforms, &out_ty, true),
+        ShapeKind::SegmentedMin => gen_segmented_min(&name, &cols, &uniforms, &out_ty),
     };
 
     quote! {
@@ -693,6 +700,174 @@ fn gen_pair(name: &Ident, cols: &[&Param], uniforms: &[&Param], out_ty: &Type) -
                         );
                     }
                     read_out::<#out_ty>(client, out, m)
+                })
+            }
+        }
+    }
+}
+
+fn gen_segmented_min(
+    name: &Ident,
+    cols: &[&Param],
+    uniforms: &[&Param],
+    out_ty: &Type,
+) -> TokenStream2 {
+    let cn = names(cols);
+    let ct = types(cols);
+    let un = names(uniforms);
+    let ut = types(uniforms);
+
+    let sig_args = quote! { #(#cn: &[#ct],)* idx: &[u32], seg_start: &[u32], #(#un: #ut),* };
+    let call_args = quote! { #(#cn,)* idx, seg_start, #(#un),* };
+
+    let run = gen_run(&sig_args, &call_args, out_ty);
+    let gpu = gpu_stub(&sig_args, &call_args, out_ty);
+
+    let prelude = session_cpu_prelude(&cn, &ct, &un, &ut);
+    let serialize = session_serialize(out_ty);
+    let col_count = cn.len();
+    let idx_i = col_count;
+    let seg_i = col_count + 1;
+    let ins_args = (0..col_count).map(|i| {
+        quote! { ArrayArg::from_raw_parts(ins[#i].0.clone(), ins[#i].1), }
+    });
+    let uni_args = ut.iter().enumerate().map(|(i, t)| {
+        quote! { uniforms.get::<#t>(#i), }
+    });
+    let bind = quote! {
+        /// Session binding: same kernel over device-resident columns.
+        /// `seg_start` has one more entry than the output.
+        pub fn bind(
+            #(#cn: &crate::session::Col<#ct>,)*
+            idx: &crate::session::Col<u32>, seg_start: &crate::session::Col<u32>,
+            #(#un: #ut),*
+        ) -> crate::session::BoundKernel {
+            crate::session::BoundKernel {
+                cols: vec![#(#cn.erased(),)* idx.erased(), seg_start.erased()],
+                uniforms: crate::session::Uniforms::new()#(.push(#un))*,
+                host: Vec::new(),
+                out_len: seg_start.len() - 1,
+                out_elem_size: core::mem::size_of::<#out_ty>(),
+                cpu_fn: session_cpu,
+                #[cfg(feature = "gpu")]
+                gpu_fn: gpu_impl::enqueue,
+            }
+        }
+
+        fn session_cpu(
+            store: &crate::session::CpuStore,
+            cols: &[crate::session::ColRef],
+            uniforms: &crate::session::Uniforms,
+            _host: &[u8],
+            _out_len: usize,
+        ) -> Vec<u8> {
+            #prelude
+            let idx: Vec<u32> = store.read_vec::<u32>(cols[#idx_i]);
+            let seg_start: Vec<u32> = store.read_vec::<u32>(cols[#seg_i]);
+            let values = cpu(#(&#cn,)* &idx, &seg_start, #(#un),*);
+            #serialize
+        }
+    };
+    let session_gpu = quote! {
+        /// Session enqueue: launch over already-resident handles; never syncs.
+        pub fn enqueue(
+            client: &'static crate::backend::cube::Client,
+            ins: &[(cubecl::server::Handle, usize)],
+            out: (cubecl::server::Handle, usize),
+            uniforms: &crate::session::Uniforms,
+            _host: &[u8],
+        ) {
+            let n = out.1;
+            if n == 0 { return; }
+            unsafe {
+                device::launch_unchecked::<CudaRuntime>(
+                    client,
+                    CubeCount::Static((n as u32).div_ceil(CUBE_DIM), 1, 1),
+                    CubeDim::new_1d(CUBE_DIM),
+                    #(#ins_args)*
+                    ArrayArg::from_raw_parts(ins[#idx_i].0.clone(), ins[#idx_i].1),
+                    ArrayArg::from_raw_parts(ins[#seg_i].0.clone(), ins[#seg_i].1),
+                    <#out_ty>::MAX,
+                    #(#uni_args)*
+                    ArrayArg::from_raw_parts(out.0.clone(), n),
+                );
+            }
+        }
+    };
+
+    quote! {
+        /// CPU compilation of the same function: per-segment min-reduce.
+        pub fn cpu(#sig_args) -> Vec<#out_ty> {
+            (0..seg_start.len() - 1)
+                .map(|i| {
+                    let mut best = <#out_ty>::MAX;
+                    for k in seg_start[i]..seg_start[i + 1] {
+                        let j = idx[k as usize] as usize;
+                        let v = super::#name(#(#cn[j],)* #(#un),*);
+                        if v < best { best = v; }
+                    }
+                    best
+                })
+                .collect()
+        }
+        #gpu
+        #run
+        #bind
+
+        #[cfg(feature = "gpu")]
+        mod gpu_impl {
+            use cubecl::prelude::*;
+            use cubecl::cuda::CudaRuntime;
+            use crate::backend::cube::{client, contain, upload, read_out, CUBE_DIM};
+
+            #session_gpu
+
+            // ponytail: one thread per segment; degree skew serializes within a
+            // thread. Upgrade path: warp-per-segment when profiles demand it.
+            #[cube(launch_unchecked)]
+            fn device(
+                #(#cn: &Array<#ct>,)* idx: &Array<u32>, seg_start: &Array<u32>,
+                init: #out_ty, #(#un: #ut,)* out: &mut Array<#out_ty>,
+            ) {
+                if ABSOLUTE_POS < out.len() {
+                    let s = seg_start[ABSOLUTE_POS];
+                    let e = seg_start[ABSOLUTE_POS + 1];
+                    let mut best = init;
+                    for k in s..e {
+                        let j = idx[k as usize] as usize;
+                        let v = super::super::#name(#(#cn[j],)* #(#un),*);
+                        if v < best { best = v; }
+                    }
+                    out[ABSOLUTE_POS] = best;
+                }
+            }
+
+            pub fn launch(
+                #(#cn: &[#ct],)* idx: &[u32], seg_start: &[u32], #(#un: #ut),*
+            ) -> Option<Vec<#out_ty>> {
+                let client = client()?;
+                let n = seg_start.len() - 1;
+                if n == 0 { return Some(Vec::new()); }
+                contain(|| {
+                    #(let n_vals = #cn.len();)*
+                    #(let #cn = upload(client, #cn);)*
+                    let hidx = upload(client, idx);
+                    let hseg = upload(client, seg_start);
+                    let out = client.empty(n * core::mem::size_of::<#out_ty>());
+                    unsafe {
+                        device::launch_unchecked::<CudaRuntime>(
+                            client,
+                            CubeCount::Static((n as u32).div_ceil(CUBE_DIM), 1, 1),
+                            CubeDim::new_1d(CUBE_DIM),
+                            #(ArrayArg::from_raw_parts(#cn, n_vals),)*
+                            ArrayArg::from_raw_parts(hidx, idx.len()),
+                            ArrayArg::from_raw_parts(hseg, seg_start.len()),
+                            <#out_ty>::MAX,
+                            #(#un,)*
+                            ArrayArg::from_raw_parts(out.clone(), n),
+                        );
+                    }
+                    read_out::<#out_ty>(client, out, n)
                 })
             }
         }
