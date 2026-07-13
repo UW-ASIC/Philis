@@ -11,14 +11,14 @@ use super::super::{
 pub struct MinSpacingDiffRule { pub id: String, pub a: LayerId, pub b: LayerId, pub min: i32 }
 
 fn check_spacing_diff(
-    store: &GeometryStore, lt: &LayerTable, a: LayerId, b: LayerId, min: i32, backend: Backend,
+    store: &GeometryStore, lt: &LayerTable, a: LayerId, b: LayerId, min: i32, gpu: Option<&DrcCtx<'_>>,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
     let pas: Vec<PolyId> = store.polys_on_layer(a).collect();
     let pbs: Vec<PolyId> = store.polys_on_layer(b).collect();
     let min2 = (min as i64) * (min as i64);
     let cands = candidate_pairs(store, &pas, Some(&pbs), min);
-    let far = gpu_far_mask(store, &cands, min, backend);
+    let far = gpu.and_then(|c| gpu_far_mask(c, &cands, min));
     for (k, &(pa, pb)) in cands.iter().enumerate() {
         if far.as_ref().is_some_and(|f| f[k]) { continue; }
         let ba = store.poly_bbox[pa.0 as usize];
@@ -40,9 +40,9 @@ fn check_spacing_diff(
 impl<'a> crate::rule::Rule<DrcCtx<'a>> for MinSpacingDiffRule {
     type Finding = Violation;
     fn id(&self) -> &str { &self.id }
-    fn check(&self, ctx: &DrcCtx<'a>, backend: Backend) -> Vec<Violation> {
+    fn check(&self, ctx: &DrcCtx<'a>, _backend: Backend) -> Vec<Violation> {
         let mut out = Vec::new();
-        check_spacing_diff(ctx.store, &ctx.deck.layers, self.a, self.b, self.min, backend, &self.id, &mut out);
+        check_spacing_diff(ctx.store, &ctx.deck.layers, self.a, self.b, self.min, Some(ctx), &self.id, &mut out);
         out
     }
 }

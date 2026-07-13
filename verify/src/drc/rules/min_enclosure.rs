@@ -11,7 +11,7 @@ pub struct MinEnclosureRule { pub id: String, pub outer: LayerId, pub inner: Lay
 
 fn check_enclosure(
     store: &GeometryStore, lt: &LayerTable, outer: LayerId, inner: LayerId, min: i32,
-    backend: Backend, rule_id: &str, out: &mut Vec<Violation>,
+    gpu: Option<&DrcCtx<'_>>, rule_id: &str, out: &mut Vec<Violation>,
 ) {
     let outers: Vec<PolyId> = store.polys_on_layer(outer).collect();
     // phase 1: containment (CPU point-in-poly); unhosted inners are zero-enclosure.
@@ -41,7 +41,7 @@ fn check_enclosure(
     // phase 2: margin = min inner-boundary-to-outer-boundary distance, best
     // host wins. The GPU clears pairs whose margin is comfortably >= min
     // (clearing the inner entirely); the rest are measured exactly.
-    let far = gpu_far_mask(store, &hosted, min, backend);
+    let far = gpu.and_then(|c| gpu_far_mask(c, &hosted, min));
     let mut best: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
     let mut cleared: std::collections::HashSet<u32> = std::collections::HashSet::new();
     for (k, &(pi, po)) in hosted.iter().enumerate() {
@@ -74,9 +74,9 @@ fn check_enclosure(
 impl<'a> crate::rule::Rule<DrcCtx<'a>> for MinEnclosureRule {
     type Finding = Violation;
     fn id(&self) -> &str { &self.id }
-    fn check(&self, ctx: &DrcCtx<'a>, backend: Backend) -> Vec<Violation> {
+    fn check(&self, ctx: &DrcCtx<'a>, _backend: Backend) -> Vec<Violation> {
         let mut out = Vec::new();
-        check_enclosure(ctx.store, &ctx.deck.layers, self.outer, self.inner, self.min, backend, &self.id, &mut out);
+        check_enclosure(ctx.store, &ctx.deck.layers, self.outer, self.inner, self.min, Some(ctx), &self.id, &mut out);
         out
     }
 }

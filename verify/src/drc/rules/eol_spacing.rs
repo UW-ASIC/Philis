@@ -16,12 +16,12 @@ pub struct EolSpacingRule { pub id: String, pub layer: LayerId, pub eol_width: i
 
 fn check_eol_spacing(
     store: &GeometryStore, lt: &LayerTable, layer: LayerId, eol_width: i32,
-    eol_spacing: i32, backend: Backend, rule_id: &str, out: &mut Vec<Violation>,
+    eol_spacing: i32, gpu: Option<&DrcCtx<'_>>, rule_id: &str, out: &mut Vec<Violation>,
 ) {
     let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let eol_sp2 = (eol_spacing as i64) * (eol_spacing as i64);
     let cands = candidate_pairs(store, &polys, None, eol_spacing);
-    let far = gpu_far_mask(store, &cands, eol_spacing, backend);
+    let far = gpu.and_then(|c| gpu_far_mask(c, &cands, eol_spacing));
     let idx_of: std::collections::HashMap<u32, u32> =
         polys.iter().enumerate().map(|(i, p)| (p.0, i as u32)).collect();
     let group = merge_groups(store, &cands, far.as_ref(), polys.len(), &idx_of);
@@ -82,9 +82,9 @@ fn check_eol_spacing(
 impl<'a> crate::rule::Rule<DrcCtx<'a>> for EolSpacingRule {
     type Finding = Violation;
     fn id(&self) -> &str { &self.id }
-    fn check(&self, ctx: &DrcCtx<'a>, backend: Backend) -> Vec<Violation> {
+    fn check(&self, ctx: &DrcCtx<'a>, _backend: Backend) -> Vec<Violation> {
         let mut out = Vec::new();
-        check_eol_spacing(ctx.store, &ctx.deck.layers, self.layer, self.eol_width, self.eol_spacing, backend, &self.id, &mut out);
+        check_eol_spacing(ctx.store, &ctx.deck.layers, self.layer, self.eol_width, self.eol_spacing, Some(ctx), &self.id, &mut out);
         out
     }
 }

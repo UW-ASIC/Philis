@@ -35,6 +35,8 @@ pub struct ErcCtx<'a> {
     pub store: &'a GeometryStore,
     pub deck: &'a Deck,
     pub ext: &'a ExtractedNetlist,
+    /// One device session per run (CPU arena when no GPU is in play).
+    pub session: &'a crate::session::Session,
 }
 
 /// A boxed ERC rule, usable with any context lifetime.
@@ -65,7 +67,10 @@ pub fn run_erc(store: &GeometryStore, deck: &Deck) -> ErcReport {
             }
         }
     };
-    let ctx = ErcCtx { store, deck, ext: &ext };
+    // ERC's public entry is CPU-backed (as at baseline); the session plumbing
+    // means a future run_erc_backend only changes this one constructor.
+    let session = crate::session::Session::cpu();
+    let ctx = ErcCtx { store, deck, ext: &ext, session: &session };
     let rules: Vec<BoxedRule> = rules::FACTORIES.iter().filter_map(|f| f(deck)).collect();
     let violations = crate::rule::run_rules(&rules, &ctx, Backend::Cpu);
     ErcReport { violations }

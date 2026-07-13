@@ -17,9 +17,10 @@
 //! device handles. `#[verify_kernel]` emits a `bind(...)` constructor per
 //! kernel returning a [`BoundKernel`] for [`Session::launch`].
 //!
-//! Backend note: `Session::new(Backend::Gpu)` silently falls back to a CPU
-//! arena when no device is usable, so calling code is backend-agnostic. On
-//! the CPU arena, `launch` runs the same scalar kernel function eagerly.
+//! Backend note: `Session::new(Backend::Gpu)` HARD-ERRORS ([`NoGpu`]) when no
+//! device is usable — the consumer owns the fallback and reports it
+//! ([`warn_no_gpu`]). On the CPU arena ([`Session::cpu`]), `launch` runs the
+//! same scalar kernel function eagerly.
 
 use std::sync::Mutex;
 use std::marker::PhantomData;
@@ -161,25 +162,56 @@ pub struct Session {
     inner: Inner,
 }
 
+/// `Backend::Gpu` was requested but no usable device exists. The consumer
+/// decides the fallback — and should say so (see [`warn_no_gpu`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoGpu;
+
+impl std::fmt::Display for NoGpu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GPU requested but no usable device (feature off, no driver, or no card)")
+    }
+}
+
+impl std::error::Error for NoGpu {}
+
+/// One warning per process: consumers that fall back to CPU must say so.
+pub fn warn_no_gpu(context: &str) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "gdsverify: {context}: GPU requested but no usable device; falling back to CPU"
+        );
+    });
+}
+
 impl Session {
-    /// Create a session. `Backend::Gpu` falls back to the CPU arena when no
-    /// device is usable, so callers never branch.
-    pub fn new(backend: Backend) -> Self {
-        #[cfg(feature = "gpu")]
-        if backend == Backend::Gpu {
-            if let Some(client) = crate::backend::cube::client() {
-                return Self {
-                    inner: Inner::Gpu { client, handles: Mutex::new(Vec::new()) },
-                };
+    /// Create a session. `Backend::Gpu` is a HARD requirement: when no device
+    /// is usable this errors instead of silently degrading, so the consumer
+    /// handles (and reports) the fallback explicitly.
+    pub fn new(backend: Backend) -> Result<Self, NoGpu> {
+        match backend {
+            Backend::Cpu => Ok(Self::cpu()),
+            Backend::Gpu => {
+                #[cfg(feature = "gpu")]
+                if let Some(client) = crate::backend::cube::client() {
+                    return Ok(Self {
+                        inner: Inner::Gpu { client, handles: Mutex::new(Vec::new()) },
+                    });
+                }
+                Err(NoGpu)
             }
         }
-        let _ = backend;
+    }
+
+    /// The CPU arena. Never fails.
+    pub fn cpu() -> Self {
         Self {
             inner: Inner::Cpu(CpuStore { bufs: Mutex::new(Vec::new()) }),
         }
     }
 
-    /// The backend actually in use (after fallback).
+    /// The backend actually in use.
     pub fn backend(&self) -> Backend {
         match &self.inner {
             Inner::Cpu(_) => Backend::Cpu,
@@ -372,7 +404,7 @@ mod tests {
 
     #[test]
     fn session_map_matches_one_shot() {
-        let s = Session::new(Backend::Cpu);
+        let s = Session::cpu();
         let xs = s.upload(&[1.0f32, 2.0, 3.0]);
         let ys = s.upload(&[10.0f32, 20.0, 30.0]);
         let out: Col<f32> = s.launch(scaled_sum_kernel::bind(&xs, &ys, 2.0));
@@ -385,7 +417,7 @@ mod tests {
 
     #[test]
     fn session_chains_device_resident_columns() {
-        let s = Session::new(Backend::Cpu);
+        let s = Session::cpu();
         let px = s.upload(&[0.0f32, 10.0]);
         let py = s.upload(&[0.0f32, 0.0]);
         let cx = s.upload(&[3.0f32, 8.0]);
@@ -400,7 +432,7 @@ mod tests {
 
     #[test]
     fn session_pair_and_cross_shapes() {
-        let s = Session::new(Backend::Cpu);
+        let s = Session::cpu();
         let lo = s.upload(&[0i32, 10, 20]);
         let hi = s.upload(&[5i32, 15, 25]);
         let pa = s.upload(&[0u32, 0]);
@@ -418,8 +450,11 @@ mod tests {
     }
 
     #[test]
-    fn release_frees_and_backend_reports_fallback() {
-        let s = Session::new(Backend::Gpu); // no device in tests => CPU arena
+    fn gpu_without_device_is_a_hard_error_and_release_frees() {
+        // No device in tests: the consumer must handle the fallback.
+        #[cfg(not(feature = "gpu"))]
+        assert!(Session::new(Backend::Gpu).is_err());
+        let s = Session::cpu();
         assert_eq!(s.backend(), Backend::Cpu);
         let xs = s.upload(&[1.0f32]);
         s.release(xs);

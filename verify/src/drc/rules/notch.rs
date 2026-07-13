@@ -8,11 +8,11 @@ use super::super::{facing_gaps, gpu_poly_clean_mask, push_geometry_capacity, Drc
 pub struct NotchRule { pub id: String, pub layer: LayerId, pub min: i32 }
 
 fn check_notch(
-    store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, backend: Backend,
+    store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, gpu: Option<&DrcCtx<'_>>,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
     let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
-    let clean = gpu_poly_clean_mask(store, &polys, min, backend);
+    let clean = gpu.and_then(|c| gpu_poly_clean_mask(c, &polys, min));
     for (k, &p) in polys.iter().enumerate() {
         if clean.as_ref().is_some_and(|c| c[k]) { continue; }
         // a notch is a facing pair whose gap is OUTSIDE the polygon (see facing_gaps);
@@ -39,9 +39,9 @@ fn check_notch(
 impl<'a> crate::rule::Rule<DrcCtx<'a>> for NotchRule {
     type Finding = Violation;
     fn id(&self) -> &str { &self.id }
-    fn check(&self, ctx: &DrcCtx<'a>, backend: Backend) -> Vec<Violation> {
+    fn check(&self, ctx: &DrcCtx<'a>, _backend: Backend) -> Vec<Violation> {
         let mut out = Vec::new();
-        check_notch(ctx.store, &ctx.deck.layers, self.layer, self.min, backend, &self.id, &mut out);
+        check_notch(ctx.store, &ctx.deck.layers, self.layer, self.min, Some(ctx), &self.id, &mut out);
         out
     }
 }

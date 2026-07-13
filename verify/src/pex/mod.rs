@@ -232,7 +232,12 @@ fn extract_all(store: &GeometryStore, deck: &Deck, backend: Backend) -> Vec<Attr
             }
         }
     }
-    let session = crate::session::Session::new(backend);
+    // GPU absence is a hard error from the session — handle the fallback
+    // here, audibly, instead of silently degrading.
+    let session = crate::session::Session::new(backend).unwrap_or_else(|_| {
+        crate::session::warn_no_gpu("pex");
+        crate::session::Session::cpu()
+    });
     let ctx = PexCtx {
         store,
         layers: &deck.layers,

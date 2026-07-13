@@ -8,14 +8,14 @@ use super::super::{candidate_pairs, gpu_far_mask, merge_groups, DrcCtx, Violatio
 pub struct CornerToCornerRule { pub id: String, pub layer: LayerId, pub min: i32 }
 
 fn check_corner_to_corner(
-    store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, backend: Backend,
+    store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, gpu: Option<&DrcCtx<'_>>,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
     let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let min2 = (min as i64) * (min as i64);
     let cands = candidate_pairs(store, &polys, None, min);
     // edge-pair distance lower-bounds corner distance, so the same GPU prefilter applies
-    let far = gpu_far_mask(store, &cands, min, backend);
+    let far = gpu.and_then(|c| gpu_far_mask(c, &cands, min));
     let idx_of: std::collections::HashMap<u32, u32> =
         polys.iter().enumerate().map(|(i, p)| (p.0, i as u32)).collect();
     let group = merge_groups(store, &cands, far.as_ref(), polys.len(), &idx_of);
@@ -59,9 +59,9 @@ fn check_corner_to_corner(
 impl<'a> crate::rule::Rule<DrcCtx<'a>> for CornerToCornerRule {
     type Finding = Violation;
     fn id(&self) -> &str { &self.id }
-    fn check(&self, ctx: &DrcCtx<'a>, backend: Backend) -> Vec<Violation> {
+    fn check(&self, ctx: &DrcCtx<'a>, _backend: Backend) -> Vec<Violation> {
         let mut out = Vec::new();
-        check_corner_to_corner(ctx.store, &ctx.deck.layers, self.layer, self.min, backend, &self.id, &mut out);
+        check_corner_to_corner(ctx.store, &ctx.deck.layers, self.layer, self.min, Some(ctx), &self.id, &mut out);
         out
     }
 }

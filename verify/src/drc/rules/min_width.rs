@@ -12,11 +12,11 @@ pub struct MinWidthRule { pub id: String, pub layer: LayerId, pub min: i32 }
 // The conformance width cases are rectangles, so the bbox measure is exact; we still emit
 // the opposing-edge scan for robustness on non-convex shapes.
 fn check_min_width(
-    store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, backend: Backend,
+    store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, gpu: Option<&DrcCtx<'_>>,
     rule_id: &str, out: &mut Vec<Violation>,
 ) {
     let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
-    let clean = gpu_poly_clean_mask(store, &polys, min, backend);
+    let clean = gpu.and_then(|c| gpu_poly_clean_mask(c, &polys, min));
     for (k, &p) in polys.iter().enumerate() {
         let bb = store.poly_bbox[p.0 as usize];
         let (s, e) = store.poly_range(p);
@@ -63,9 +63,9 @@ fn check_min_width(
 impl<'a> crate::rule::Rule<DrcCtx<'a>> for MinWidthRule {
     type Finding = Violation;
     fn id(&self) -> &str { &self.id }
-    fn check(&self, ctx: &DrcCtx<'a>, backend: Backend) -> Vec<Violation> {
+    fn check(&self, ctx: &DrcCtx<'a>, _backend: Backend) -> Vec<Violation> {
         let mut out = Vec::new();
-        check_min_width(ctx.store, &ctx.deck.layers, self.layer, self.min, backend, &self.id, &mut out);
+        check_min_width(ctx.store, &ctx.deck.layers, self.layer, self.min, Some(ctx), &self.id, &mut out);
         out
     }
 }

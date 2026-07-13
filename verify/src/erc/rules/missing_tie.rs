@@ -44,13 +44,27 @@ impl<'a> crate::rule::Rule<ErcCtx<'a>> for MissingTieCheck {
             let corners = [(db.xmin, db.ymin), (db.xmax, db.ymin),
                            (db.xmin, db.ymax), (db.xmax, db.ymax)];
 
-            // GPU path: bulk nearest-distance for all corners at once
-            if backend == Backend::Gpu && corners.len() * contacts.len() >= (1 << 18) {
+            // GPU path: bulk nearest-distance for all corners at once through
+            // the run's session (columns + result stay on device; the read is
+            // the sync; `contained` degrades failures to the exact CPU path).
+            let gpu_session = backend == Backend::Gpu
+                && ctx.session.backend() == Backend::Gpu;
+            if gpu_session && corners.len() * contacts.len() >= (1 << 18) {
                 let qpx: Vec<f32> = corners.iter().map(|c| c.0 as f32).collect();
                 let qpy: Vec<f32> = corners.iter().map(|c| c.1 as f32).collect();
                 let ccx: Vec<f32> = contacts.iter().map(|c| ((c.xmin + c.xmax) / 2) as f32).collect();
                 let ccy: Vec<f32> = contacts.iter().map(|c| ((c.ymin + c.ymax) / 2) as f32).collect();
-                if let Some(dists) = contact_dist2_kernel::gpu(&qpx, &qpy, &ccx, &ccy) {
+                let s = ctx.session;
+                let dists = crate::session::contained(|| {
+                    let cqx = s.upload(&qpx);
+                    let cqy = s.upload(&qpy);
+                    let ctx_col = s.upload(&ccx);
+                    let cty = s.upload(&ccy);
+                    let col: crate::session::Col<f32> =
+                        s.launch(contact_dist2_kernel::bind(&cqx, &cqy, &ctx_col, &cty));
+                    s.read(&col)
+                });
+                if let Some(dists) = dists {
                     for (k, &d2) in dists.iter().enumerate() {
                         if d2 > max_dist2_f32 {
                             out.push(ErcViolation {

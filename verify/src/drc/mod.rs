@@ -33,6 +33,55 @@ pub mod results;
 pub struct DrcCtx<'a> {
     pub store: &'a GeometryStore,
     pub deck: &'a Deck,
+    /// One device session per run; the canonical edge pool below lives in it.
+    pub session: &'a crate::session::Session,
+    /// Canonical per-run device edge pool: every rule's descriptors index this
+    /// ONE upload instead of building and uploading a pool per rule.
+    /// `None` on the CPU backend (and when the pool upload failed) — rules
+    /// then take their exact CPU paths, as before.
+    pub device_edges: Option<&'a DeviceEdges>,
+}
+
+/// The whole store's edges in polygon order as four device-resident f32
+/// columns, plus each polygon's (start, end) range into them. Built once per
+/// GPU run; shared by every spacing/width/notch prefilter.
+pub struct DeviceEdges {
+    pub ex0: crate::session::Col<f32>,
+    pub ey0: crate::session::Col<f32>,
+    pub ex1: crate::session::Col<f32>,
+    pub ey1: crate::session::Col<f32>,
+    pub range: Vec<(u32, u32)>,
+}
+
+fn build_device_edges(
+    session: &crate::session::Session,
+    store: &GeometryStore,
+) -> Option<DeviceEdges> {
+    if session.backend() != Backend::Gpu || store.poly_count() == 0 {
+        return None;
+    }
+    let mut x0 = Vec::new();
+    let mut y0 = Vec::new();
+    let mut x1 = Vec::new();
+    let mut y1 = Vec::new();
+    let mut range = Vec::with_capacity(store.poly_count());
+    for p in 0..store.poly_count() {
+        let start = x0.len() as u32;
+        for e in store.edges_of(PolyId(p as u32)) {
+            x0.push(e.x0 as f32);
+            y0.push(e.y0 as f32);
+            x1.push(e.x1 as f32);
+            y1.push(e.y1 as f32);
+        }
+        range.push((start, x0.len() as u32));
+    }
+    crate::session::contained(|| DeviceEdges {
+        ex0: session.upload(&x0),
+        ey0: session.upload(&y0),
+        ex1: session.upload(&x1),
+        ey1: session.upload(&y1),
+        range,
+    })
 }
 
 /// A boxed DRC rule, generic over the context lifetime.
@@ -160,7 +209,15 @@ fn run_drc_impl(
         .collect();
     // Rules are independent read-only scans over the store; run them in parallel
     // and concatenate in rule order so the report is deterministic.
-    let ctx = DrcCtx { store, deck };
+    // On GPU the canonical edge pool is uploaded ONCE here; every rule binds it.
+    // GPU absence is a hard error from the session — we own the fallback and
+    // say so, once, instead of silently degrading.
+    let session = crate::session::Session::new(backend).unwrap_or_else(|_| {
+        crate::session::warn_no_gpu("drc");
+        crate::session::Session::cpu()
+    });
+    let device_edges = build_device_edges(&session, store);
+    let ctx = DrcCtx { store, deck, session: &session, device_edges: device_edges.as_ref() };
     violations.extend(crate::rule::run_rules(&rules, &ctx, backend));
     // Coincident identical polygons (e.g. two pins of one device sharing a pad)
     // are one merged shape in real DRC; each copy reports the same violation.
@@ -724,26 +781,17 @@ pub(crate) fn edge_cols(edges: &[Edge]) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f3
 /// GPU prefilter: for each candidate polygon pair, true iff EVERY edge-pair distance is
 /// comfortably above the rule limit — such pairs can only produce "no violation" on the
 /// exact path, so they are safe to skip. None => no GPU; run everything exactly.
+///
+/// Descriptors index the run's canonical device pool (`ctx.device_edges`):
+/// nothing is uploaded here, and every rule shares the same columns.
 pub(crate) fn gpu_far_mask(
-    store: &GeometryStore, cands: &[(PolyId, PolyId)], min: i32, backend: Backend,
+    ctx: &DrcCtx<'_>, cands: &[(PolyId, PolyId)], min: i32,
 ) -> Option<Vec<bool>> {
-    if backend != Backend::Gpu || cands.is_empty() { return None; }
-    // unique edge pool: each polygon's edges are materialized (and uploaded) exactly once;
-    // the edge-pair cross product itself is enumerated on the device
-    let mut edges: Vec<Edge> = Vec::new();
-    let mut range: std::collections::HashMap<u32, (u32, u32)> = std::collections::HashMap::new();
-    for &(pa, pb) in cands {
-        for p in [pa, pb] {
-            if !range.contains_key(&p.0) {
-                let s = edges.len() as u32;
-                edges.extend(poly_edges(store, p));
-                range.insert(p.0, (s, edges.len() as u32));
-            }
-        }
-    }
+    let de = ctx.device_edges?;
+    if cands.is_empty() { return None; }
     let descs: Vec<(u32, u32, u32, u32)> = cands.iter().map(|&(pa, pb)| {
-        let (a0, a1) = range[&pa.0];
-        let (b0, b1) = range[&pb.0];
+        let (a0, a1) = de.range[pa.0 as usize];
+        let (b0, b1) = de.range[pb.0 as usize];
         (a0, a1, b0, b1)
     }).collect();
     let work: u64 = descs.iter()
@@ -751,30 +799,34 @@ pub(crate) fn gpu_far_mask(
     if work < GPU_MIN_PAIR_WORK { return None; } // CPU finishes first
     // margin over the f32 approximation; anything near the limit is exact-rechecked
     let thr2 = (min as f32) * (min as f32) * 1.05 + 4.0;
-    let (x0, y0, x1, y1) = edge_cols(&edges);
-    let flags = edge_pair_near_kernel::gpu(&x0, &y0, &x1, &y1, &descs, thr2)?;
+    let flags = crate::session::contained(|| {
+        let col: crate::session::Col<u32> = ctx.session.launch(edge_pair_near_kernel::bind(
+            &de.ex0, &de.ey0, &de.ex1, &de.ey1, &descs, thr2,
+        ));
+        ctx.session.read(&col)
+    })?;
     Some(flags.into_iter().map(|f| f == 0).collect())
 }
 
 /// GPU prefilter for the same-polygon facing-gap scans (width/notch): true per polygon
 /// iff no facing edge pair is anywhere near `min` — such polygons can skip the exact
 /// interior/exterior scan entirely. None => no GPU; scan everything exactly.
+/// Binds the same canonical pool as [`gpu_far_mask`].
 pub(crate) fn gpu_poly_clean_mask(
-    store: &GeometryStore, polys: &[PolyId], min: i32, backend: Backend,
+    ctx: &DrcCtx<'_>, polys: &[PolyId], min: i32,
 ) -> Option<Vec<bool>> {
-    if backend != Backend::Gpu || polys.is_empty() { return None; }
-    let mut edges: Vec<Edge> = Vec::new();
-    let mut descs = Vec::with_capacity(polys.len());
-    for &p in polys {
-        let s = edges.len() as u32;
-        edges.extend(poly_edges(store, p));
-        descs.push((s, edges.len() as u32));
-    }
+    let de = ctx.device_edges?;
+    if polys.is_empty() { return None; }
+    let descs: Vec<(u32, u32)> = polys.iter().map(|&p| de.range[p.0 as usize]).collect();
     let work: u64 = descs.iter().map(|&(s, e)| ((e - s) as u64).pow(2)).sum();
     if work < GPU_MIN_PAIR_WORK { return None; } // CPU finishes first
     let thr = (min as f32) * 1.02 + 1.0; // gaps are exact integers in f32; small margin
-    let (x0, y0, x1, y1) = edge_cols(&edges);
-    let flags = facing_gap_near_kernel::gpu(&x0, &y0, &x1, &y1, &descs, thr)?;
+    let flags = crate::session::contained(|| {
+        let col: crate::session::Col<u32> = ctx.session.launch(facing_gap_near_kernel::bind(
+            &de.ex0, &de.ey0, &de.ex1, &de.ey1, &descs, thr,
+        ));
+        ctx.session.read(&col)
+    })?;
     Some(flags.into_iter().map(|f| f == 0).collect())
 }
 

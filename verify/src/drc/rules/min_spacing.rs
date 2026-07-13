@@ -11,13 +11,13 @@ use super::super::{
 pub struct MinSpacingRule { pub id: String, pub layer: LayerId, pub min: i32, pub strict: bool }
 
 pub(crate) fn check_spacing_same(
-    store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, backend: Backend,
+    store: &GeometryStore, lt: &LayerTable, layer: LayerId, min: i32, gpu: Option<&DrcCtx<'_>>,
     strict: bool, rule_id: &str, out: &mut Vec<Violation>,
 ) {
     let polys: Vec<PolyId> = store.polys_on_layer(layer).collect();
     let min2 = (min as i64) * (min as i64);
     let cands = candidate_pairs(store, &polys, None, min);
-    let far = gpu_far_mask(store, &cands, min, backend);
+    let far = gpu.and_then(|c| gpu_far_mask(c, &cands, min));
     let idx_of: std::collections::HashMap<u32, u32> =
         polys.iter().enumerate().map(|(i, p)| (p.0, i as u32)).collect();
     let group = merge_groups(store, &cands, far.as_ref(), polys.len(), &idx_of);
@@ -65,9 +65,9 @@ pub(crate) fn check_spacing_same(
 impl<'a> crate::rule::Rule<DrcCtx<'a>> for MinSpacingRule {
     type Finding = Violation;
     fn id(&self) -> &str { &self.id }
-    fn check(&self, ctx: &DrcCtx<'a>, backend: Backend) -> Vec<Violation> {
+    fn check(&self, ctx: &DrcCtx<'a>, _backend: Backend) -> Vec<Violation> {
         let mut out = Vec::new();
-        check_spacing_same(ctx.store, &ctx.deck.layers, self.layer, self.min, backend, self.strict, &self.id, &mut out);
+        check_spacing_same(ctx.store, &ctx.deck.layers, self.layer, self.min, Some(ctx), self.strict, &self.id, &mut out);
         out
     }
 }
@@ -98,7 +98,7 @@ mod tests {
         defs.insert("met1".to_string(), crate::params::LayerDef { layer: 68, datatype: 20 });
         let lt = LayerTable::from_defs(&defs);
         let mut out = Vec::new();
-        check_spacing_same(&store, &lt, met1, 140, Backend::Cpu, false, "min_spacing", &mut out);
+        check_spacing_same(&store, &lt, met1, 140, None, false, "min_spacing", &mut out);
         assert!(out.is_empty(), "bridged gap flagged: {out:?}");
     }
 }
