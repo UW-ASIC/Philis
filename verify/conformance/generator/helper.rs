@@ -273,16 +273,6 @@ impl Suite {
         self.drc_cases.push(c);
     }
 
-    /// Expected violations with per-violation measured values (full multiset assert).
-    pub fn add_drc_measured_multi(&mut self, id: &str, cell: &str, rule: &str, measured: &[i64]) {
-        let viols: Vec<Value> = measured.iter().map(|m| json!({"measured": m})).collect();
-        self.drc_cases.push(json!({
-            "id": id, "cell": cell, "rule": rule,
-            "expect_violations": measured.len(),
-            "violations": viols,
-        }));
-    }
-
     pub fn add_drc_strict(&mut self, id: &str, cell: &str, rule: &str, expect: usize) {
         self.drc_cases.push(json!({
             "id": id, "cell": cell, "rule": rule,

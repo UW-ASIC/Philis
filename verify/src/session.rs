@@ -21,7 +21,7 @@
 //! arena when no device is usable, so calling code is backend-agnostic. On
 //! the CPU arena, `launch` runs the same scalar kernel function eagerly.
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 use std::marker::PhantomData;
 
 use crate::backend::Backend;
@@ -109,13 +109,13 @@ impl Uniforms {
 
 /// CPU arena the generated `cpu_fn`s read typed columns from.
 pub struct CpuStore {
-    bufs: RefCell<Vec<Option<Vec<u8>>>>,
+    bufs: Mutex<Vec<Option<Vec<u8>>>>,
 }
 
 impl CpuStore {
     /// Materialize a column as a typed vector (copies; the arena stays canonical).
     pub fn read_vec<T: SessionElem>(&self, col: ColRef) -> Vec<T> {
-        let bufs = self.bufs.borrow();
+        let bufs = self.bufs.lock().unwrap();
         let bytes = bufs[col.id as usize]
             .as_ref()
             .expect("column was released");
@@ -151,7 +151,7 @@ enum Inner {
     #[cfg(feature = "gpu")]
     Gpu {
         client: &'static crate::backend::cube::Client,
-        handles: RefCell<Vec<Option<(cubecl::server::Handle, usize)>>>,
+        handles: Mutex<Vec<Option<(cubecl::server::Handle, usize)>>>,
     },
 }
 
@@ -169,13 +169,13 @@ impl Session {
         if backend == Backend::Gpu {
             if let Some(client) = crate::backend::cube::client() {
                 return Self {
-                    inner: Inner::Gpu { client, handles: RefCell::new(Vec::new()) },
+                    inner: Inner::Gpu { client, handles: Mutex::new(Vec::new()) },
                 };
             }
         }
         let _ = backend;
         Self {
-            inner: Inner::Cpu(CpuStore { bufs: RefCell::new(Vec::new()) }),
+            inner: Inner::Cpu(CpuStore { bufs: Mutex::new(Vec::new()) }),
         }
     }
 
@@ -197,7 +197,7 @@ impl Session {
                 for &v in data {
                     v.write_to(&mut bytes);
                 }
-                let mut bufs = store.bufs.borrow_mut();
+                let mut bufs = store.bufs.lock().unwrap();
                 bufs.push(Some(bytes));
                 (bufs.len() - 1) as u32
             }
@@ -208,7 +208,7 @@ impl Session {
                     v.write_to(&mut bytes);
                 }
                 let handle = client.create(cubecl::bytes::Bytes::from_bytes_vec(bytes));
-                let mut hs = handles.borrow_mut();
+                let mut hs = handles.lock().unwrap();
                 hs.push(Some((handle, len)));
                 (hs.len() - 1) as u32
             }
@@ -235,14 +235,14 @@ impl Session {
                     len,
                 );
                 debug_assert_eq!(out.len(), len * T::SIZE);
-                let mut bufs = store.bufs.borrow_mut();
+                let mut bufs = store.bufs.lock().unwrap();
                 bufs.push(Some(out));
                 (bufs.len() - 1) as u32
             }
             #[cfg(feature = "gpu")]
             Inner::Gpu { client, handles } => {
                 let ins: Vec<(cubecl::server::Handle, usize)> = {
-                    let hs = handles.borrow();
+                    let hs = handles.lock().unwrap();
                     kernel
                         .cols
                         .iter()
@@ -251,7 +251,7 @@ impl Session {
                 };
                 let out = client.empty(len * T::SIZE);
                 (kernel.gpu_fn)(client, &ins, (out.clone(), len), &kernel.uniforms, &kernel.host);
-                let mut hs = handles.borrow_mut();
+                let mut hs = handles.lock().unwrap();
                 hs.push(Some((out, len)));
                 (hs.len() - 1) as u32
             }
@@ -265,7 +265,7 @@ impl Session {
             Inner::Cpu(store) => store.read_vec(col.erased()),
             #[cfg(feature = "gpu")]
             Inner::Gpu { client, handles } => {
-                let handle = handles.borrow()[col.id as usize]
+                let handle = handles.lock().unwrap()[col.id as usize]
                     .clone()
                     .expect("column was released");
                 let bytes = client
@@ -280,11 +280,11 @@ impl Session {
     pub fn release<T>(&self, col: Col<T>) {
         match &self.inner {
             Inner::Cpu(store) => {
-                store.bufs.borrow_mut()[col.id as usize] = None;
+                store.bufs.lock().unwrap()[col.id as usize] = None;
             }
             #[cfg(feature = "gpu")]
             Inner::Gpu { handles, .. } => {
-                handles.borrow_mut()[col.id as usize] = None;
+                handles.lock().unwrap()[col.id as usize] = None;
             }
         }
     }
@@ -424,4 +424,12 @@ mod tests {
         let xs = s.upload(&[1.0f32]);
         s.release(xs);
     }
+}
+
+/// Run a session block that may touch the device, containing panics so a GPU
+/// failure degrades to the caller's exact CPU path (`None`) instead of
+/// aborting a verification run — the session analogue of the one-shot
+/// launchers' behavior.
+pub fn contained<T>(f: impl FnOnce() -> T) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
 }

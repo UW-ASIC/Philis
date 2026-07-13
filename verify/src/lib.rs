@@ -117,7 +117,12 @@ pub use oasis::{
     OASIS_CAPABILITIES,
 };
 pub use backend::{available_backends, gpu_ready, Backend};
-pub use rule::{run_rules, DynRule, Rule, VerifyCheck};
+pub use rule::{run_rules, Rule};
+pub use session::{Col, Session};
+// The proc-macro crate is a separate compilation unit by rustc requirement
+// (proc-macro = true); re-exported here so callers use one crate:
+// `use gdsverify::verify_kernel;`
+pub use gdsverify_macros::{kernel_fn, verify_kernel};
 
 // GDS REAL8 values are approximate, so compare units with a tight numerical
 // tolerance rather than bit equality.  The tolerance is deliberately far below

@@ -101,7 +101,11 @@ impl<'a> Rule<PexCtx<'a>> for CouplingCap {
 
         // GPU path: compute run length + gap for all pairs in parallel (advisory —
         // any failure falls through to the exact CPU path).
-        if backend == Backend::Gpu && n_pairs >= (1 << 18) {
+        // Gate on the session's ACTUAL backend: with GPU requested but no
+        // device, the session fell back to the CPU arena, where the exact
+        // integer path below is both faster and the fail-closed contract.
+        let _ = backend;
+        if ctx.session.backend() == Backend::Gpu && n_pairs >= (1 << 18) {
             let xmins: Vec<f32> = polys
                 .iter()
                 .map(|q| store.poly_bbox[q.0 as usize].xmin as f32)
@@ -126,9 +130,27 @@ impl<'a> Rule<PexCtx<'a>> for CouplingCap {
                     pb.push(j as u32);
                 }
             }
-            let runs = coupling_run_kernel::gpu(&xmins, &ymins, &xmaxs, &ymaxs, &pa, &pb);
-            let gaps = coupling_gap_kernel::gpu(&xmins, &ymins, &xmaxs, &ymaxs, &pa, &pb);
-            if let (Some(runs), Some(gaps)) = (runs, gaps) {
+            // Session execution: the bbox + pair columns are uploaded ONCE and
+            // both kernels launch against the same device-resident buffers;
+            // the first read is the only sync. `contained` degrades any device
+            // failure to the exact CPU path below, like the one-shot API did.
+            let s = ctx.session;
+            let device = crate::session::contained(|| {
+                let cxmin = s.upload(&xmins);
+                let cymin = s.upload(&ymins);
+                let cxmax = s.upload(&xmaxs);
+                let cymax = s.upload(&ymaxs);
+                let cpa = s.upload(&pa);
+                let cpb = s.upload(&pb);
+                let runs: crate::session::Col<f32> = s.launch(coupling_run_kernel::bind(
+                    &cxmin, &cymin, &cxmax, &cymax, &cpa, &cpb,
+                ));
+                let gaps: crate::session::Col<f32> = s.launch(coupling_gap_kernel::bind(
+                    &cxmin, &cymin, &cxmax, &cymax, &cpa, &cpb,
+                ));
+                (s.read(&runs), s.read(&gaps))
+            });
+            if let Some((runs, gaps)) = device {
                 let mut idx = 0;
                 for i in 0..n {
                     for j in (i + 1)..n {

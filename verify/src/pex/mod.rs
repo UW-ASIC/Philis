@@ -201,6 +201,9 @@ impl PexReport {
 pub struct PexCtx<'a> {
     pub store: &'a GeometryStore,
     pub layers: &'a LayerTable,
+    /// One device session per run: rules upload shared columns once and keep
+    /// intermediate results on device; reads are the only sync points.
+    pub session: &'a crate::session::Session,
 }
 
 /// A PEX rule with the finding type fixed.
@@ -229,9 +232,11 @@ fn extract_all(store: &GeometryStore, deck: &Deck, backend: Backend) -> Vec<Attr
             }
         }
     }
+    let session = crate::session::Session::new(backend);
     let ctx = PexCtx {
         store,
         layers: &deck.layers,
+        session: &session,
     };
     let mut out = crate::rule::run_rules(&rule_set, &ctx, backend);
     extract_interlayer_cap(store, deck, &mut out);

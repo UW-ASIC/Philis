@@ -26,9 +26,6 @@ pub trait Rule<Ctx: ?Sized>: Send + Sync {
     fn check(&self, ctx: &Ctx, backend: Backend) -> Vec<Self::Finding>;
 }
 
-/// Boxed rule with the finding type fixed — what the generated rule
-/// registries hand back.
-pub type DynRule<Ctx, F> = Box<dyn Rule<Ctx, Finding = F>>;
 
 /// Run every rule against the context in parallel and sum the findings.
 /// Ordering across rules follows the rules slice (rayon preserves it).
