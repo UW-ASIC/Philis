@@ -41,10 +41,10 @@ fn two_term_kind_label(tag: u32) -> &'static str {
 
 // --- PRNG (xorshift64, deterministic) ---
 
-struct Rng { state: u64 }
+pub(super) struct Rng { state: u64 }
 impl Rng {
-    fn new(seed: u64) -> Self { Rng { state: seed } }
-    fn next(&mut self) -> u64 {
+    pub(super) fn new(seed: u64) -> Self { Rng { state: seed } }
+    pub(super) fn next(&mut self) -> u64 {
         self.state ^= self.state << 13;
         self.state ^= self.state >> 7;
         self.state ^= self.state << 17;
@@ -54,7 +54,7 @@ impl Rng {
 
 // --- graph representation ---
 
-const MAX_PINS: usize = 4;
+pub(super) const MAX_PINS: usize = 4;
 
 // Pin roles — permutable pins share the same role index so they get the
 // same pin_magic value, making the hash invariant to their ordering.
@@ -67,23 +67,23 @@ const ROLE_TERM: u8 = 4;     // two-terminal: both pins share this (permutable)
 const ROLE_COLLECTOR: u8 = 5; // BJT collector
 const ROLE_BASE: u8 = 6;     // BJT base
 const ROLE_EMITTER: u8 = 7;  // BJT emitter
-const NUM_ROLES: usize = 8;
+pub(super) const NUM_ROLES: usize = 8;
 
-struct GraphDev {
-    seed: u32,
-    pin_count: u8,
-    nets: [u32; MAX_PINS],
-    roles: [u8; MAX_PINS],
+pub(super) struct GraphDev {
+    pub(super) seed: u32,
+    pub(super) pin_count: u8,
+    pub(super) nets: [u32; MAX_PINS],
+    pub(super) roles: [u8; MAX_PINS],
     /// Index into original device arrays for parametric checks.
     /// For MOS: index into ext.devices / reference.devices.
     /// For two-terminal: u32::MAX (no parametric check on them yet).
-    orig_idx: u32,
-    is_mos: bool,
+    pub(super) orig_idx: u32,
+    pub(super) is_mos: bool,
 }
 
-struct TopoGraph {
-    devs: Vec<GraphDev>,
-    net_count: usize,
+pub(super) struct TopoGraph {
+    pub(super) devs: Vec<GraphDev>,
+    pub(super) net_count: usize,
 }
 
 /// Deterministic seed from device name (for two-terminal devices with different names).
@@ -93,7 +93,7 @@ fn name_seed(base: u32, name: &str) -> u32 {
     h
 }
 
-fn graph_from_extracted(ext: &ExtractedNetlist, strict: bool) -> TopoGraph {
+pub(super) fn graph_from_extracted(ext: &ExtractedNetlist, strict: bool) -> TopoGraph {
     let mut remap: HashMap<u32, u32> = HashMap::new();
     let mut local = |n: u32| -> u32 {
         let next = remap.len() as u32;
@@ -146,7 +146,7 @@ fn graph_from_extracted(ext: &ExtractedNetlist, strict: bool) -> TopoGraph {
     TopoGraph { devs, net_count: remap.len() }
 }
 
-fn graph_from_reference(reference: &RefNetlist, strict: bool) -> (TopoGraph, HashMap<String, u32>) {
+pub(super) fn graph_from_reference(reference: &RefNetlist, strict: bool) -> (TopoGraph, HashMap<String, u32>) {
     let mut remap: HashMap<String, u32> = HashMap::new();
     let mut local = |n: &str| -> u32 {
         if let Some(&v) = remap.get(n) { return v; }
@@ -198,7 +198,7 @@ fn graph_from_reference(reference: &RefNetlist, strict: bool) -> (TopoGraph, Has
 
 // --- probabilistic partition refinement ---
 
-fn build_pin_magic(rng: &mut Rng) -> [u64; NUM_ROLES] {
+pub(super) fn build_pin_magic(rng: &mut Rng) -> [u64; NUM_ROLES] {
     let mut m = [0u64; NUM_ROLES];
     for i in 0..NUM_ROLES { m[i] = rng.next(); }
     m
@@ -488,6 +488,16 @@ pub fn compare(ext: &ExtractedNetlist, reference: &RefNetlist, opts: &CompareOpt
 
     let ga = graph_from_extracted(ext, opts.strict);
     let (gb, ref_net_remap) = graph_from_reference(reference, opts.strict);
+
+    // GPU path for large netlists (>= 1M total devices)
+    if super::gpu_compare::should_use_gpu(ext, reference) {
+        if let Some(result) = super::gpu_compare::gpu_compare(
+            ext, reference, opts, &ga, &gb, &ref_net_remap,
+        ) {
+            return result;
+        }
+        // ponytail: GPU path returned None (no CUDA device); fall through to CPU
+    }
 
     // Initialize PRNG and magic tables
     let mut rng = Rng::new(0xDEAD_BEEF_CAFE_1234);

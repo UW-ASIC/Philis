@@ -9,6 +9,7 @@
 pub mod types;
 pub mod extract;
 pub mod compare;
+pub mod gpu_compare;
 pub mod spice;
 pub mod derived;
 pub mod hierarchical;
