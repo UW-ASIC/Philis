@@ -10,6 +10,7 @@ pub mod device_plane;
 pub mod exact;
 pub mod geometry;
 pub mod hierarchy_index;
+pub mod sort_scan;
 
 pub use geometry::{Bbox, Edge, GeometryStore, LayerId, PolyId};
 pub use geometry::rects::{
