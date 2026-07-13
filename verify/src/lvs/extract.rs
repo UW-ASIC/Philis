@@ -23,7 +23,114 @@ fn bbox_overlap(
     f
 }
 
+/// Exact rect-pair positive-area overlap (cross_pairs shape: flag 1 iff any
+/// rect from range A overlaps any rect from range B).
+#[verify_kernel(shape = cross_pairs)]
+fn rect_overlap(
+    a_x0: i32, a_y0: i32, a_x1: i32, a_y1: i32,
+    b_x0: i32, b_y0: i32, b_x1: i32, b_y1: i32,
+) -> u32 {
+    let ix0 = if a_x0 > b_x0 { a_x0 } else { b_x0 };
+    let iy0 = if a_y0 > b_y0 { a_y0 } else { b_y0 };
+    let ix1 = if a_x1 < b_x1 { a_x1 } else { b_x1 };
+    let iy1 = if a_y1 < b_y1 { a_y1 } else { b_y1 };
+    if ix1 > ix0 && iy1 > iy0 { 1 } else { 0 }
+}
+
+/// Exact rect-pair touch (cross_pairs shape: flag 1 iff any rect from
+/// range A touches or overlaps any rect from range B; closed intervals).
+#[verify_kernel(shape = cross_pairs)]
+fn rect_touch(
+    a_x0: i32, a_y0: i32, a_x1: i32, a_y1: i32,
+    b_x0: i32, b_y0: i32, b_x1: i32, b_y1: i32,
+) -> u32 {
+    if a_x1 < b_x0 || b_x1 < a_x0 || a_y1 < b_y0 || b_y1 < a_y0 { 0 } else { 1 }
+}
+
 use crate::core::connectivity::host_union_find;
+use crate::core::geometry::rects::{RectSet, decompose_rectilinear};
+
+/// Session-backed exact rect predicate over candidate pairs. For each pair,
+/// decomposes both polygons into rects and checks if any rect-pair overlaps
+/// (or touches, for intra-layer when intra_touch is set). Returns per-pair
+/// flags: 1 = connect, 0 = no geometric contact.
+fn rect_predicate_flags(
+    store: &GeometryStore,
+    nodes: &[Node],
+    cands: &[(u32, u32)],
+    intra_touch: bool,
+    backend: Backend,
+) -> Option<Vec<u32>> {
+    if cands.len() < (1 << 14) {
+        return None;
+    }
+
+    // Collect unique polys referenced by candidate nodes; decompose each.
+    let mut poly_rects: HashMap<u32, (u32, u32)> = HashMap::new();
+    let mut rx0 = Vec::new();
+    let mut ry0 = Vec::new();
+    let mut rx1 = Vec::new();
+    let mut ry1 = Vec::new();
+
+    let mut ensure_decomposed = |poly: PolyId| -> Option<(u32, u32)> {
+        if let Some(&range) = poly_rects.get(&poly.0) {
+            return Some(range);
+        }
+        let rects = decompose_rectilinear(store, poly).ok()?;
+        let start = rx0.len() as u32;
+        for r in &rects {
+            rx0.push(r.x0);
+            ry0.push(r.y0);
+            rx1.push(r.x1);
+            ry1.push(r.y1);
+        }
+        let range = (start, rx0.len() as u32);
+        poly_rects.insert(poly.0, range);
+        Some(range)
+    };
+
+    // Pre-decompose all referenced polys
+    for &(i, j) in cands {
+        ensure_decomposed(nodes[i as usize].poly)?;
+        ensure_decomposed(nodes[j as usize].poly)?;
+    }
+
+    // Split candidates into overlap vs touch groups, build cross_pairs descriptors
+    let mut overlap_descs: Vec<(u32, u32, u32, u32)> = Vec::new();
+    let mut overlap_cand_idx: Vec<usize> = Vec::new();
+    let mut touch_descs: Vec<(u32, u32, u32, u32)> = Vec::new();
+    let mut touch_cand_idx: Vec<usize> = Vec::new();
+
+    for (ci, &(i, j)) in cands.iter().enumerate() {
+        let (i, j) = (i as usize, j as usize);
+        let (a0, a1) = poly_rects[&nodes[i].poly.0];
+        let (b0, b1) = poly_rects[&nodes[j].poly.0];
+        if a0 == a1 || b0 == b1 { continue; }
+        if intra_touch && nodes[i].layer == nodes[j].layer {
+            touch_descs.push((a0, a1, b0, b1));
+            touch_cand_idx.push(ci);
+        } else {
+            overlap_descs.push((a0, a1, b0, b1));
+            overlap_cand_idx.push(ci);
+        }
+    }
+
+    let mut flags = vec![0u32; cands.len()];
+
+    if !overlap_descs.is_empty() {
+        let of = rect_overlap_kernel::run(backend, &rx0, &ry0, &rx1, &ry1, &overlap_descs);
+        for (k, &ci) in overlap_cand_idx.iter().enumerate() {
+            flags[ci] = of[k];
+        }
+    }
+    if !touch_descs.is_empty() {
+        let tf = rect_touch_kernel::run(backend, &rx0, &ry0, &rx1, &ry1, &touch_descs);
+        for (k, &ci) in touch_cand_idx.iter().enumerate() {
+            flags[ci] = tf[k];
+        }
+    }
+    Some(flags)
+}
 
 // --- internal types ---
 
@@ -1130,54 +1237,42 @@ fn extract_pipeline(
     // assigned by ascending node index afterwards) is identical.
     let cands = node_candidate_pairs(&nodes);
 
-    let gpu_flags = if backend == Backend::Gpu && cands.len() >= (1 << 18) {
-        let xmins: Vec<i32> = nodes.iter().map(|n| n.bbox.xmin).collect();
-        let ymins: Vec<i32> = nodes.iter().map(|n| n.bbox.ymin).collect();
-        let xmaxs: Vec<i32> = nodes.iter().map(|n| n.bbox.xmax).collect();
-        let ymaxs: Vec<i32> = nodes.iter().map(|n| n.bbox.ymax).collect();
-        let pa: Vec<u32> = cands.iter().map(|&(i, _)| i).collect();
-        let pb: Vec<u32> = cands.iter().map(|&(_, j)| j).collect();
-        // Exact integer kernel: the CPU compilation of the same function
-        // computes identical flags, so run() may fall back without changing
-        // any result — None (no prefilter) and Some(cpu flags) reject the
-        // same candidate pairs the exact-region predicates below would.
-        Some(bbox_overlap_kernel::run(backend, &xmins, &ymins, &xmaxs, &ymaxs, &pa, &pb))
-    } else {
-        None
-    };
+    // Exact geometry predicates: rect decomposition via cross_pairs kernel when
+    // profitable (>= 2^14 candidates), else per-pair CPU rectilinear predicates.
+    // ponytail: rect predicates are exact for unclipped rects. Clipped diffusion
+    // segments still need per-pair CPU fallback (clip bbox != poly bbox).
+    let rect_flags = rect_predicate_flags(store, &nodes, &cands, intra_touch, backend);
 
-    // Collect connectivity edges: sweep + bbox prefilter + exact predicates + can_union policy.
+    // Collect connectivity edges.
     let mut edges: Vec<(u32, u32)> = Vec::new();
     for (pair_idx, &(i, j)) in cands.iter().enumerate() {
         let (i, j) = (i as usize, j as usize);
-        // CPU/GPU bbox results are prefilters only.  The final decision is made
-        // against the actual (possibly clipped diffusion) rectilinear regions.
-        if let Some(flags) = &gpu_flags {
-            // The GPU kernel reports positive-area bbox overlap.  A zero cannot
-            // reject same-layer boundary contact when that policy is enabled.
-            if flags[pair_idx] == 0 && !(intra_touch && nodes[i].layer == nodes[j].layer) {
-                continue;
+
+        let overlaps = if let Some(flags) = &rect_flags {
+            if nodes[i].clip == nodes[i].bbox && nodes[j].clip == nodes[j].bbox {
+                // Unclipped nodes: rect decomposition is exact
+                flags[pair_idx] != 0
+            } else {
+                // Clipped diffusion segments: fall back to exact CPU predicate
+                let a = PolyRegion { poly: nodes[i].poly, clip: nodes[i].clip };
+                let b = PolyRegion { poly: nodes[j].poly, clip: nodes[j].clip };
+                if intra_touch && nodes[i].layer == nodes[j].layer {
+                    rectilinear_regions_touch(store, a, b)
+                } else {
+                    rectilinear_intersection_area(store, &[a, b]) > 0
+                }
             }
-        }
-        let a = PolyRegion {
-            poly: nodes[i].poly,
-            clip: nodes[i].clip,
-        };
-        let b = PolyRegion {
-            poly: nodes[j].poly,
-            clip: nodes[j].clip,
-        };
-        let overlaps = if intra_touch && nodes[i].layer == nodes[j].layer {
-            rectilinear_regions_touch(store, a, b)
         } else {
-            rectilinear_intersection_area(store, &[a, b]) > 0
+            let a = PolyRegion { poly: nodes[i].poly, clip: nodes[i].clip };
+            let b = PolyRegion { poly: nodes[j].poly, clip: nodes[j].clip };
+            if intra_touch && nodes[i].layer == nodes[j].layer {
+                rectilinear_regions_touch(store, a, b)
+            } else {
+                rectilinear_intersection_area(store, &[a, b]) > 0
+            }
         };
-        if !overlaps {
-            continue;
-        }
-        if !can_union(&nodes[i], &nodes[j]) {
-            continue;
-        }
+        if !overlaps { continue; }
+        if !can_union(&nodes[i], &nodes[j]) { continue; }
         edges.push((i as u32, j as u32));
     }
 
