@@ -117,7 +117,7 @@ pub use oasis::{
 };
 pub use backend::{available_backends, gpu_ready, Backend};
 pub use rule::{run_rules, Rule};
-pub use session::{Col, Session};
+pub use session::{AtomicCol, Col, ScatterKernel, ScatterOp, Session};
 // The proc-macro crate is a separate compilation unit by rustc requirement
 // (proc-macro = true); re-exported here so callers use one crate:
 // `use gdsverify::verify_kernel;`

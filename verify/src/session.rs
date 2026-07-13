@@ -320,6 +320,183 @@ impl Session {
             }
         }
     }
+
+    // ---- AtomicCol support ----
+
+    /// Create a mutable copy of an existing column.
+    pub fn scratch_from<T: SessionElem>(&self, col: &Col<T>) -> AtomicCol<T> {
+        let len = col.len;
+        let id = match &self.inner {
+            Inner::Cpu(store) => {
+                let src = {
+                    let bufs = store.bufs.lock().unwrap();
+                    bufs[col.id as usize]
+                        .as_ref()
+                        .expect("column was released")
+                        .clone()
+                };
+                let mut bufs = store.bufs.lock().unwrap();
+                bufs.push(Some(src));
+                (bufs.len() - 1) as u32
+            }
+            #[cfg(feature = "gpu")]
+            Inner::Gpu { client, handles } => {
+                // ponytail: read-back + re-upload; cubecl doesn't expose device-copy
+                let h = handles.lock().unwrap()[col.id as usize]
+                    .clone()
+                    .expect("column was released");
+                let bytes = client.read_one(h.0).expect("device readback failed");
+                let handle = client.create(cubecl::bytes::Bytes::from_bytes_vec(bytes.to_vec()));
+                let mut hs = handles.lock().unwrap();
+                hs.push(Some((handle, len)));
+                (hs.len() - 1) as u32
+            }
+        };
+        AtomicCol { id, len, _t: PhantomData }
+    }
+
+    /// Create a mutable buffer filled with a constant value.
+    pub fn scratch_fill<T: SessionElem>(&self, len: usize, val: T) -> AtomicCol<T> {
+        let mut bytes = Vec::with_capacity(len * T::SIZE);
+        for _ in 0..len {
+            val.write_to(&mut bytes);
+        }
+        let id = match &self.inner {
+            Inner::Cpu(store) => {
+                let mut bufs = store.bufs.lock().unwrap();
+                bufs.push(Some(bytes));
+                (bufs.len() - 1) as u32
+            }
+            #[cfg(feature = "gpu")]
+            Inner::Gpu { client, handles } => {
+                let handle = client.create(cubecl::bytes::Bytes::from_bytes_vec(bytes));
+                let mut hs = handles.lock().unwrap();
+                hs.push(Some((handle, len)));
+                (hs.len() - 1) as u32
+            }
+        };
+        AtomicCol { id, len, _t: PhantomData }
+    }
+
+    /// Enqueue a scatter kernel that writes atomically into an [`AtomicCol`].
+    ///
+    /// On CPU: sequential writes — determinism is guaranteed by the
+    /// commutative-idempotent property of the scatter op.
+    pub fn launch_scatter(&self, kernel: ScatterKernel) {
+        match &self.inner {
+            Inner::Cpu(store) => {
+                let pairs = (kernel.cpu_fn)(
+                    store,
+                    &kernel.cols,
+                    &kernel.uniforms,
+                    kernel.work_len,
+                );
+                let mut bufs = store.bufs.lock().unwrap();
+                let buf = bufs[kernel.target.id as usize]
+                    .as_mut()
+                    .expect("target was released");
+                for (idx, val) in pairs {
+                    let off = (idx as usize) * 4;
+                    if off + 4 > buf.len() { continue; }
+                    let cur = u32::from_ne_bytes(buf[off..off + 4].try_into().unwrap());
+                    let result = match kernel.op {
+                        ScatterOp::Min => cur.min(val),
+                        ScatterOp::Max => cur.max(val),
+                        ScatterOp::Or  => cur | val,
+                        ScatterOp::And => cur & val,
+                        ScatterOp::Write => val,
+                    };
+                    buf[off..off + 4].copy_from_slice(&result.to_ne_bytes());
+                }
+            }
+            #[cfg(feature = "gpu")]
+            Inner::Gpu { client, handles } => {
+                let ins: Vec<(cubecl::server::Handle, usize)> = {
+                    let hs = handles.lock().unwrap();
+                    kernel
+                        .cols
+                        .iter()
+                        .map(|c| hs[c.id as usize].clone().expect("column was released"))
+                        .collect()
+                };
+                let target = {
+                    let hs = handles.lock().unwrap();
+                    hs[kernel.target.id as usize].clone().expect("target was released")
+                };
+                (kernel.gpu_fn)(client, &ins, target, &kernel.uniforms, kernel.op);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AtomicCol: controlled mutability escape hatch for scatter algorithms
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a mutable buffer living in the session.
+///
+/// Only commutative-idempotent operations (Min, Max, Or, And) are supported —
+/// this guarantees determinism even when the CPU path executes sequentially
+/// and the GPU path uses actual atomics.
+///
+/// Created via [`Session::scratch_from`] or [`Session::scratch_fill`].
+/// Consumed by [`AtomicCol::freeze`] which yields an immutable [`Col<T>`].
+pub struct AtomicCol<T> {
+    id: u32,
+    len: usize,
+    _t: PhantomData<T>,
+}
+
+impl<T> AtomicCol<T> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    /// Untyped reference for scatter binding.
+    pub fn erased(&self) -> ColRef {
+        ColRef { id: self.id, len: self.len }
+    }
+    /// Consume the mutable buffer and return an immutable [`Col<T>`].
+    /// No copies — the buffer is simply reinterpreted as read-only.
+    pub fn freeze(self, _session: &Session) -> Col<T> {
+        Col { id: self.id, len: self.len, _t: PhantomData }
+    }
+}
+
+/// Which commutative-idempotent operation a scatter applies.
+#[derive(Clone, Copy, Debug)]
+pub enum ScatterOp {
+    Min,
+    Max,
+    Or,
+    And,
+    /// Unconditional write — only sound when each index is written at most once.
+    Write,
+}
+
+/// A scatter kernel: writes atomically into an [`AtomicCol`].
+pub struct ScatterKernel {
+    /// Input columns read by the scatter.
+    pub cols: Vec<ColRef>,
+    pub uniforms: Uniforms,
+    /// Target mutable buffer (the AtomicCol).
+    pub target: ColRef,
+    pub op: ScatterOp,
+    /// Number of work items (edge count, not target length).
+    pub work_len: usize,
+    /// CPU execution: for each work item, return (target_index, value) pairs.
+    /// The session applies the scatter op.
+    pub cpu_fn: fn(&CpuStore, &[ColRef], &Uniforms, usize) -> Vec<(u32, u32)>,
+    #[cfg(feature = "gpu")]
+    pub gpu_fn: fn(
+        &'static crate::backend::cube::Client,
+        &[(cubecl::server::Handle, usize)],
+        (cubecl::server::Handle, usize),
+        &Uniforms,
+        ScatterOp,
+    ),
 }
 
 /// Encode host-side cross descriptors for [`BoundKernel::host`].
