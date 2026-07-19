@@ -1,72 +1,108 @@
-# PNR
+# Philis
 
-Analog place-and-route engine. SPICE netlist in, DRC/LVS-clean GDS out.
+Analog place-and-route: a SPICE netlist plus a PDK go in, a signed-off GDS
+layout comes out. Philis parses the netlist, recognises structure, generates
+device cells, places and routes them under analog constraints (symmetry,
+matching, proximity, thermal), and runs physical verification (DRC / LVS / PEX /
+ERC) before emitting GDS.
 
-## Example outputs
+Verification is provided by [`gdsverify`](https://github.com/UW-ASIC/GPurify),
+consumed as an external crate.
 
-### OTA (5T operational transconductance amplifier)
-5 cells, 9 nets — LVS MATCH, 0 DRC
+## Quick start
 
-<p align="center"><img src="assets/ota.svg" width="500"/></p>
-
-### tt08-analog-adc (13 transistors)
-13 cells, 13 nets — LVS MATCH, 0 DRC
-
-<p align="center"><img src="assets/tt08-analog-adc.svg" width="500"/></p>
-
-### tt08-analog-ring-osc (ring oscillator driver)
-4 cells, 5 nets — LVS MATCH, 0 DRC
-
-<p align="center"><img src="assets/tt08-analog-ring-osc.svg" width="500"/></p>
-
-### TT08 (5T OTA variant, 7 cells)
-7 cells, 8 nets
-
-<p align="center"><img src="assets/TT08.svg" width="500"/></p>
-
-### tt08-analog-vco (VCO inverter, 2 cells)
-2 cells, 4 nets — LVS MATCH, 0 DRC
-
-<p align="center"><img src="assets/tt08-analog-vco.svg" width="500"/></p>
-
-## Usage
-
-```bash
-# Run the benchmark suite
-cargo run --release -p pnr-benchmark
-
-# Run with external TinyTapeout fixtures
-cargo run --release -p pnr-benchmark -- tinytapeout
-
-# Convert GDS to SVG
-cargo run --release -p pnr-benchmark --bin gds2svg -- output.gds pdks/sky130.json out.svg
-
-# Interactive GPU viewer
-cargo run --release -p pnr-visualizer -- output.gds pdks/sky130.json
+```sh
+nix develop                       # toolchain + PDK (installs sky130A into .pdk/)
+cargo build --release
+cargo run --release -- <netlist.spice> <pdk.json> [out_dir]
 ```
 
-## Architecture
+Example:
 
-```
-frontend/          SPICE parsing + net classification; submits typed backend requests
-  substrate3/      User macro facade over pnr-cells, with read-only PDK context
-backend/
-  src/lib.rs       Public facade; fixed constraints → cells → place → route → signoff flow
-  engine/          Generic slot traits, optimization drivers, feedback controller
-  placement/       Analog placement (symmetry, CC, proximity constraints)
-  routing/         Global + detailed routing (PathFinder)
-  cells/           Cell generators (MOSFET, resistor, capacitor, BJT, diode)
-  constraints/     Shared constraint record, analog theory, and contract system
-verify/            DRC, LVS, PEX (CPU + optional GPU)
-tools/visualizer/  GPU-accelerated GDS viewer + SVG export
-pdks/              PDK configurations (sky130, generic_finfet)
-benchmark/         Benchmark harness with external circuit fixtures
+```sh
+cargo run --release -- tools/benchmark/fixtures/pair.spice pdks/sky130.json out
 ```
 
-Backend dependencies are one-way: `cells/constraints → engine → placement → routing → backend facade`.
-The facade is the composition root; lower crates never depend on it.
-`substrate3` points into `pnr-cells` and exposes that backend contract to users;
-no backend crate depends on `substrate3`.
+The `philis` binary reads the netlist and PDK, runs the full flow, writes
+`<top>.gds` into `out_dir`, and prints a one-line signoff summary (DRC / LVS /
+unrouted / GDS path). It exits non-zero if signoff is not clean.
 
-Verification contributors should start with the
-[DRC/LVS/PEX compliance and implementation guide](docs/verification/README.md).
+## Flow
+
+```
+SPICE + PDK
+   │  parse            frontend/core        text → dense hypergraph
+   │  annotate         frontend/annotator   flat netlist → hierarchy
+   │  constrain        backend/constraints  symmetry / matching / proximity …
+   │  generate cells   backend/cells        devices → drawn geometry
+   │  place            backend/placement    analytical descent + SA
+   │  route            backend/routing      global + detailed
+   │  signoff          gdsverify            DRC / LVS / PEX / ERC
+   ▼
+  GDS
+```
+
+Stage order is fixed by the backend facade (`pnr_backend::Backend`); callers
+supply data through `FlowInput` and cannot reorder stages. Algorithm extensions
+plug into the data-oriented engine slots in `pnr_backend::strategy`.
+
+## Workspace
+
+```
+philis                 root CLI (src/main.rs)
+
+frontend/
+  core                 orchestrator, SPICE parse, PDK load (pnr-core)
+  annotator            structural hierarchy recognition
+  substrate3           user-facing custom-cell API
+
+backend/               constraints → cells → engine → placement → routing → facade
+  cells                device generators + netlist hypergraph + PDK cell contract
+  constraints          constraint contracts
+  engine               data-oriented SA engine (cost / schedule / accept / legality)
+  placement            analytical + simulated-annealing placement
+  routing              global + detailed routing
+  (backend)            facade / template method, GDS writer, PDK loader
+
+tools/
+  visualizer           GDS → SVG (pnr-visualizer)
+  benchmark            `bench` + `gds2svg` binaries
+```
+
+Backend crates form a strict DAG (`cells`/`constraints` → `engine` →
+`placement` → `routing` → `backend`); the direction is enforced by tests in
+`backend/src/lib.rs`. Lower crates never depend on the composition root, and the
+backend never depends on the frontend.
+
+## Benchmark
+
+```sh
+nix develop -c cargo run --release -p pnr-benchmark --bin bench [local|align|magical|tinytapeout|all]
+```
+
+`local` runs the four bundled fixtures in `tools/benchmark/fixtures/`. The other
+suites clone external circuit repos on demand and clean up afterwards. Each run
+prints a per-circuit table (timing, wirelength, unrouted, DRC/LVS, area,
+utilisation) and a constraint-satisfaction summary, and writes debug artifacts
+to `target/bench_debug/<name>/` plus SVGs to `tools/assets/`.
+
+Convert a layout to SVG directly:
+
+```sh
+cargo run -p pnr-benchmark --bin gds2svg -- <file.gds> [pdk.json] [out.svg]
+```
+
+## Dependencies
+
+`gdsverify` is pinned to a reviewed revision in the root `Cargo.toml`
+`[workspace.dependencies]`; bump the `rev` there to track new GPurify commits.
+The `nix develop` shell provides the Rust toolchain, ngspice, KLayout, the
+sky130A PDK, and (on Linux) CUDA / Vulkan for the optional `gpu` feature and the
+visualizer.
+
+## PDKs
+
+PDK JSON files live in `pdks/` (`sky130.json`, `generic_finfet.json`). This is
+Philis's own schema — device entries keyed by full model name with an
+electrical `type` and a generator `cell` — distinct from gdsverify's internal
+PDK format. `tools/pdks` symlinks to `pdks/` so the benchmark resolves them.

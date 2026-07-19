@@ -1,0 +1,21 @@
+[package]
+name = "pnr-benchmark"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+visualizer = ["pnr-core/visualizer"]
+
+[dependencies]
+gdsverify = { workspace = true }
+pnr-core = { path = "../../frontend/core" }
+pnr-visualizer = { path = "../visualizer" }
+serde_json = "1"
+
+[[bin]]
+name = "bench"
+path = "src/bench.rs"
+
+[[bin]]
+name = "gds2svg"
+path = "src/gds2svg.rs"

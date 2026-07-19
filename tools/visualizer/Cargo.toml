@@ -19,4 +19,4 @@ earcutr = "0.4"
 env_logger = "0.11"
 log = "0.4"
 serde_json = "1"
-gdsverify = { path = "../../verify", optional = true }
+gdsverify = { workspace = true, optional = true }

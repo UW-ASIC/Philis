@@ -7,7 +7,7 @@ edition = "2021"
 visualizer = ["pnr-backend/visualizer"]
 
 [dependencies]
-gdsverify = { path = "../../verify" }
+gdsverify = { workspace = true }
 pnr-annotator = { path = "../annotator" }
 pnr-backend = { path = "../../backend" }
 pnr-cells = { path = "../../backend/cells" }

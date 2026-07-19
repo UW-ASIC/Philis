@@ -1,5 +1,8 @@
 target/
-benchmark/cloned_fixtures/
+# Benchmark clones external suites as subdirs beside the tracked *.spice.
+tools/benchmark/fixtures/*/
+# Bench exports generated SVGs here (CARGO_MANIFEST_DIR/../assets).
+tools/assets/
 .pdk/
 .venv/
 result/

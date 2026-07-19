@@ -7,7 +7,7 @@ edition = "2021"
 visualizer = []
 
 [dependencies]
-gdsverify = { path = "../verify" }
+gdsverify = { workspace = true }
 pnr-cells = { path = "cells" }
 pnr-constraints = { path = "constraints" }
 pnr-engine = { path = "engine" }

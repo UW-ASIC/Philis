@@ -1,11 +1,14 @@
+[package]
+name = "philis"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pnr-core = { path = "frontend/core" }
+
 [workspace]
 resolver = "2"
 members = [
-    # Verify
-    "verify",
-    "verify/macros",
-    "benchmark",
-
     # Frontend
     "frontend/annotator",
     "frontend/substrate3",
@@ -21,4 +24,11 @@ members = [
 
     # Tools
     "tools/visualizer",
+    "tools/benchmark",
 ]
+
+# gdsverify (GPU GDS verification) is consumed as an external crate from the
+# GPurify repo, not vendored. Pinned to a reviewed rev for reproducible builds;
+# cargo locates the `gdsverify` package by name inside that workspace.
+[workspace.dependencies]
+gdsverify = { git = "https://github.com/UW-ASIC/GPurify", rev = "33cdd660b5ecb52821919c127cef2eac200777f4" }

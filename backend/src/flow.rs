@@ -2181,6 +2181,7 @@ fn build_block(
                                 strict: false,
                                 w_tolerance: deck.w_tolerance.clone(),
                                 l_tolerance: deck.l_tolerance.clone(),
+                                pin_swaps: Vec::new(),
                             };
                             compare(&ext, &ref_netlist, &cmp_opts).matched
                         }
@@ -2588,7 +2589,7 @@ fn merge_block_geometry(
 
     // Same-net notch repair: pad-row corner slivers (landing node pads vs pin
     // pad rows) are sub-min gaps inside one merged shape — fill with metal.
-    for (layer, g) in gdsverify::same_shape_gap_fills(store, deck)
+    for (layer, g) in gdsverify::drc::same_shape_gap_fills(store, deck)
         .map_err(|error| format!("same-shape gap repair failed: {error}"))?
     {
         store.add_rect(layer, g.xmin, g.ymin, g.xmax - g.xmin, g.ymax - g.ymin);
@@ -2643,6 +2644,9 @@ fn run_signoff(
                     ambiguous_classes: 0,
                     label_conflicts: Vec::new(),
                     floating_nets: Vec::new(),
+                    device_mappings: Vec::new(),
+                    net_mappings: Vec::new(),
+                    witness: None,
                 },
                 pex: PexReport {
                     parasitics: Vec::new(),
@@ -2656,6 +2660,7 @@ fn run_signoff(
         strict: deck.strict,
         w_tolerance: deck.w_tolerance.clone(),
         l_tolerance: deck.l_tolerance.clone(),
+        pin_swaps: Vec::new(),
     };
     let mut lvs: LvsResult = compare(&ext, &reference, &cmp_opts);
     if deck.fail_on_floating && !ext.floating_nets.is_empty() {
@@ -2670,7 +2675,8 @@ fn run_signoff(
         let names: Vec<String> = g.cells.iter().map(|c| c.name.clone()).collect();
         for b in &rec.parasitic {
             let mut contract = b.to_contract(&names);
-            if let Err(diagnostics) = &per_net {
+            if let Err(err) = &per_net {
+                let gdsverify::pex::PexError::UnsupportedGeometry(diagnostics) = err;
                 contract.consume("signoff");
                 contract.violate(
                     "signoff",
@@ -2756,6 +2762,7 @@ fn reference_netlist(g: &BipartiteHypergraph) -> RefNetlist {
                 w: d.w * m,
                 l: d.l,
                 flavor: DeviceFlavor::Standard,
+                body: None, ad: None, as_: None, pd: None, ps: None,
             });
         }
     }
