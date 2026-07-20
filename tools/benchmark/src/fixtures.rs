@@ -79,8 +79,7 @@ impl Suite {
 // ---------------------------------------------------------------------------
 
 fn fixtures_dir() -> PathBuf {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    root.join("benchmark").join("fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
 }
 
 // ---------------------------------------------------------------------------
@@ -519,7 +518,7 @@ fn join_backslash(text: &str) -> String {
 
 fn fmt_um(val_um: f64) -> String {
     // Match Python f"{val_um:.4g}u"
-    format!("{:.4}u", val_um)
+    format!("{:.4}", val_um)
         .trim_end_matches('0')
         .trim_end_matches('.')
         .to_owned()
@@ -538,20 +537,46 @@ struct PdkPreprocess {
 }
 
 impl PdkPreprocess {
-    /// Load from the Python-project PDK JSON format (devices as array).
+    /// Load from the PDK JSON. `devices` is a name->entry map in the current
+    /// decks (`"type"` field); the legacy Python-project array form
+    /// (`"device_type"` field) is still accepted.
     fn from_json(pdk: &Value) -> Self {
         let name = pdk["name"].as_str().unwrap_or("").to_owned();
-        let devices = pdk["devices"].as_array();
 
-        let find_device = |dtype: &str| -> Option<&Value> {
-            devices?.iter().find(|d| d["device_type"].as_str() == Some(dtype))
+        // (model name, entry) for the first device of the given type.
+        let find_device = |dtype: &str| -> Option<(String, &Value)> {
+            if let Some(map) = pdk["devices"].as_object() {
+                let mut hits: Vec<(&String, &Value)> = map
+                    .iter()
+                    .filter(|(_, d)| d["type"].as_str() == Some(dtype))
+                    .collect();
+                hits.sort_by_key(|(k, _)| k.as_str());
+                return hits.first().map(|(k, d)| ((*k).clone(), *d));
+            }
+            pdk["devices"].as_array()?.iter().find_map(|d| {
+                (d["device_type"].as_str() == Some(dtype))
+                    .then(|| Some((d["name"].as_str()?.to_owned(), d)))
+                    .flatten()
+            })
         };
 
-        let cap_dev = find_device("cap");
-        let res_dev = find_device("res");
-
-        let cap_model = cap_dev.and_then(|d| d["name"].as_str()).map(String::from);
-        let res_model = res_dev.and_then(|d| d["name"].as_str()).map(String::from);
+        let cap_model = find_device("cap").map(|(n, _)| n);
+        // Prefer the resistor model named by the deck's recognition rule
+        // (res_generic_po on sky130): alphabetical-first would pick a metal
+        // resistor whose model doesn't match the drawn rpoly body.
+        let recognized_res = pdk["device_recognition"]["resistor"][0]["name"]
+            .as_str()
+            .filter(|n| pdk["devices"][n]["type"].as_str() == Some("res"))
+            .map(String::from);
+        let res_dev = match recognized_res {
+            Some(n) => {
+                let entry = &pdk["devices"][n.as_str()];
+                Some((n, entry))
+            }
+            None => find_device("res"),
+        };
+        let res_model = res_dev.as_ref().map(|(n, _)| n.clone());
+        let res_dev = res_dev.map(|(_, d)| d);
 
         let cap_density = {
             let low = name.to_ascii_lowercase();
@@ -569,6 +594,9 @@ impl PdkPreprocess {
     fn extract_res_params(_pdk_name: &str, pdk: &Value, res_dev: Option<&Value>) -> (f64, f64) {
         let default_w = res_dev
             .and_then(|d| d["default_w"].as_f64())
+            // Current decks store default_w in nm; the legacy array format
+            // used um. ponytail: >10 means nm — no real poly res is 10um wide.
+            .map(|w| if w > 10.0 { w / 1000.0 } else { w })
             .unwrap_or(0.33);
 
         let r_sheet = res_dev
@@ -673,16 +701,90 @@ pub fn preprocess_spice(text: &str, pdk_path: &Path) -> Result<String, String> {
             continue;
         }
 
+        // Value forms accepted:
+        //   R1 a b 10k              — positional value (possibly a .param name)
+        //   R1 a b resistor r=rl    — generic model word + r=/c= kv value
+        //   C4 a b capacitor w=x l=y — generic model word, already sized
+        let kv: HashMap<String, String> = tokens[kv_start..]
+            .iter()
+            .filter_map(|t| t.split_once('='))
+            .map(|(k, v)| {
+                (
+                    k.to_ascii_lowercase(),
+                    resolve_param(v, &spice_params),
+                )
+            })
+            .collect();
         let last_pos = positional.last().unwrap();
+        let last_lower = last_pos.to_ascii_lowercase();
+        let generic_model = matches!(
+            last_lower.as_str(),
+            "resistor" | "res" | "capacitor" | "cap"
+        );
         let resolved = resolve_param(last_pos, &spice_params);
-        if !is_numeric(&resolved) {
+
+        let (nodes, value) = if is_numeric(&resolved) {
+            (&positional[..positional.len() - 1], parse_si(&resolved))
+        } else if generic_model {
+            // Sized generic cap: just swap the model word for the PDK model.
+            if first == b'c' && kv.contains_key("w") && kv.contains_key("l") {
+                if let Some(ref cap_model) = pdk.cap_model {
+                    let inst = tokens[0];
+                    let new_inst = if inst.to_ascii_uppercase().starts_with('X') {
+                        inst.to_owned()
+                    } else {
+                        format!("X{inst}")
+                    };
+                    // Original token order — HashMap iteration would make the
+                    // preprocessed netlist irreproducible run-to-run.
+                    let kvs: Vec<String> = tokens[kv_start..]
+                        .iter()
+                        .filter_map(|t| t.split_once('='))
+                        .map(|(k, v)| {
+                            format!(
+                                "{}={}",
+                                k.to_ascii_lowercase(),
+                                resolve_param(v, &spice_params)
+                            )
+                        })
+                        .collect();
+                    out.push(format!(
+                        "{new_inst} {} {cap_model} {}",
+                        positional[..positional.len() - 1].join(" "),
+                        kvs.join(" "),
+                    ));
+                    continue;
+                }
+            }
+            let val_kv = if first == b'r' { kv.get("r") } else { kv.get("c") };
+            match val_kv.filter(|v| is_numeric(v)) {
+                Some(v) => (&positional[..positional.len() - 1], parse_si(v)),
+                None => {
+                    out.push(line.to_owned());
+                    continue;
+                }
+            }
+        } else {
             out.push(line.to_owned());
             continue;
-        }
-
-        let nodes = &positional[..positional.len() - 1];
-        let kv_params = &tokens[kv_start..];
-        let value = parse_si(&resolved);
+        };
+        // Synthesized W/L replaces the r=/c= value; other kv (e.g. m=) survive
+        // in original token order for reproducible output.
+        let kv_params: Vec<String> = tokens[kv_start..]
+            .iter()
+            .filter_map(|t| t.split_once('='))
+            .filter(|(k, _)| {
+                let k = k.to_ascii_lowercase();
+                k != "r" && k != "c"
+            })
+            .map(|(k, v)| {
+                format!(
+                    "{}={}",
+                    k.to_ascii_lowercase(),
+                    resolve_param(v, &spice_params)
+                )
+            })
+            .collect();
         let inst = tokens[0];
 
         if first == b'c' {
@@ -751,6 +853,40 @@ mod tests {
         assert!((parse_si("100meg") - 1e8).abs() < 1e-6);
         assert!((parse_si("3.3p") - 3.3e-12).abs() < 1e-21);
         assert_eq!(parse_si("garbage"), 0.0);
+    }
+
+    #[test]
+    fn fmt_um_no_double_suffix() {
+        // Regression: the 'u' inside the format string used to defeat the
+        // zero-trim and yield "6.9282uu", which parse_value reads as 0.0.
+        assert_eq!(fmt_um(6.9282), "6.9282u");
+        assert_eq!(fmt_um(2.5000), "2.5u");
+        assert_eq!(fmt_um(10.0), "10u");
+        assert_eq!(fmt_um(0.33), "0.33u");
+    }
+
+    #[test]
+    fn generic_model_word_rc_rewrites() {
+        // linear_equalizer dialect: model word + r=/c= kv value, or a
+        // pre-sized generic capacitor.
+        let pdk_json = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("pdks/generic_finfet.json");
+        let text = ".param rl=500 Csw=5u\n\
+                    R1 vps vout resistor r=rl\n\
+                    C4 a b capacitor w=Csw l=Csw\n";
+        let out = preprocess_spice(text, &pdk_json).expect("preprocess");
+        let r_line = out.lines().find(|l| l.contains("vps vout")).unwrap();
+        assert!(r_line.starts_with("XR1 "), "resistor instance: {r_line}");
+        assert!(r_line.contains("W=") && r_line.contains("L="), "{r_line}");
+        assert!(!r_line.to_ascii_lowercase().contains("r=rl"), "{r_line}");
+        let c_line = out.lines().find(|l| l.contains("a b")).unwrap();
+        assert!(c_line.starts_with("XC4 "), "cap instance: {c_line}");
+        assert!(c_line.contains("w=5u") && c_line.contains("l=5u"), "{c_line}");
+        assert!(!c_line.contains("capacitor"), "{c_line}");
     }
 
     #[test]

@@ -34,8 +34,8 @@ pub mod backend {
 
     pub use pnr_backend::strategy;
     pub use pnr_backend::{
-        Backend, ConstraintContract, ConstraintRecord, ConstraintStatus, FlowConfig, FlowInput,
-        FlowResult, SignoffReport,
+        Backend, BoundaryPin, ConstraintContract, ConstraintRecord, ConstraintStatus, DieSpec,
+        FlowConfig, FlowInput, FlowResult, InterfaceSpec, SignoffReport, Side,
     };
 }
 

@@ -9,6 +9,15 @@ ERC) before emitting GDS.
 Verification is provided by [`gdsverify`](https://github.com/UW-ASIC/GPurify),
 consumed as an external crate.
 
+## Example layouts
+
+Generated end-to-end from SPICE by the benchmark suite (generic FinFET PDK):
+
+| | |
+|:---:|:---:|
+| <img src="assets/VCO_type2_65.svg" width="380"><br>**VCO_type2_65** — 30 devices, 28 nets | <img src="assets/comparator1.svg" width="380"><br>**comparator1** — 22 devices |
+| <img src="assets/cascode_current_mirror_ota.svg" width="380"><br>**cascode_current_mirror_ota** — 20 devices | <img src="assets/high_speed_comparator.svg" width="380"><br>**high_speed_comparator** — 15 devices |
+
 ## Quick start
 
 ```sh
@@ -84,7 +93,7 @@ nix develop -c cargo run --release -p pnr-benchmark --bin bench [local|align|mag
 suites clone external circuit repos on demand and clean up afterwards. Each run
 prints a per-circuit table (timing, wirelength, unrouted, DRC/LVS, area,
 utilisation) and a constraint-satisfaction summary, and writes debug artifacts
-to `target/bench_debug/<name>/` plus SVGs to `tools/assets/`.
+to `target/bench_debug/<name>/` plus SVGs to `assets/`.
 
 Convert a layout to SVG directly:
 

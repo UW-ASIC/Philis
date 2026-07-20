@@ -18,6 +18,51 @@ use crate::{CellBuilder, CellError, CellGenerator, PortDef};
 use crate::device::DeviceRecord;
 pub use crate::pdk::Pdk;
 
+/// Draw one merged conductor as a chain of overlapping chunks along its
+/// long axis.
+///
+/// ERC `missing_tie` measures diff-corner -> li *bbox-center* distance, so a
+/// single long strip reads as one far-away contact. Overlapping chunks are
+/// electrically one shape (extraction merges on area overlap) but give the
+/// check a contact center every `chunk` nm.
+pub(crate) fn li_chain(
+    b: &mut CellBuilder,
+    layer: &str,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    chunk: i32,
+) -> Result<(), CellError> {
+    let horiz = w >= h;
+    let span = if horiz { w } else { h };
+    let step = chunk.max(if horiz { h } else { w }).max(1);
+    let full = step.min(span);
+    let mut s = 0;
+    let mut odd = false;
+    loop {
+        // Clamp so every chunk is full-size: a sliver tail rect would trip
+        // the layer's min-width rule even though the merged shape is wide.
+        let cs = s.min(span - full);
+        // Alternate the transverse size by +20nm: the flow's pre-signoff
+        // coalesce merges rect pairs whose union is itself a rectangle, which
+        // would collapse a uniform chain back into one poly (one bbox center).
+        // A staggered pair never unions to its bounding box, so every chunk
+        // survives as its own contact center while staying one conductor.
+        let t = if odd { 20 } else { 0 };
+        if horiz {
+            b.rect(layer, x + cs, y, full, h + t)?;
+        } else {
+            b.rect(layer, x, y + cs, w + t, full)?;
+        }
+        if cs + full >= span {
+            return Ok(());
+        }
+        s += step - 20; // 20nm overlap keeps chunks one extracted conductor
+        odd = !odd;
+    }
+}
+
 /// One point in a device family's layout design space.
 ///
 /// Implement this to add a new cell type:

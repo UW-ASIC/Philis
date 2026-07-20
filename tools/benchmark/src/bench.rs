@@ -17,7 +17,7 @@ use fixtures::{
     clone_repos_if_needed, cleanup_fixtures, discover_all, preprocess_spice, BenchmarkCircuit,
     Suite,
 };
-use pnr_core::backend::{ConstraintContract, ConstraintRecord, ConstraintStatus};
+use pnr_core::backend::{ConstraintContract, ConstraintRecord, ConstraintStatus, InterfaceSpec};
 use pnr_core::orchestrator::{run_flow, FlowConfig};
 use pnr_core::frontend::{parse_spice, Pdk};
 
@@ -25,8 +25,13 @@ use pnr_core::frontend::{parse_spice, Pdk};
 /// with the bucket index; raise as the annealer earns it).
 const MAX_CELLS: usize = 800;
 
+/// Repo root: two levels up from tools/benchmark.
+fn repo_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap()
+}
+
 fn pdk_path(suite: Suite) -> PathBuf {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let root = repo_root();
     match suite {
         Suite::Align | Suite::Magical => root.join("pdks/generic_finfet.json"),
         _ => root.join("pdks/sky130.json"),
@@ -138,9 +143,24 @@ fn run_circuit(
 
     let mut cfg = FlowConfig {
         debug_dir: Some(Path::new("target/bench_debug").join(&c.name)),
+        // Benchmark cap: 5 feedback iterations keeps the full suite tractable
+        // (the hardened per-iter pipeline is minutes on big analog blocks).
+        max_feedback_iters: 5,
         ..Default::default()
     };
     cfg.placement.seed = seed;
+    // Constrained-interface sidecar: <stem>.interface.json beside the fixture.
+    let iface_path = c.spice_path.with_extension("interface.json");
+    if iface_path.exists() {
+        let parsed = std::fs::read_to_string(&iface_path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| serde_json::from_str::<InterfaceSpec>(&t).map_err(|e| e.to_string()))
+            .and_then(|s| s.validate().map(|()| s));
+        match parsed {
+            Ok(spec) => cfg.interface = Some(spec),
+            Err(e) => return (format!("interface spec invalid: {e}"), Vec::new()),
+        }
+    }
     let r = match run_flow(&text, deck_json, &ConstraintRecord::default(), &cfg) {
         Ok(r) => r,
         Err(e) => return (format!("flow failed: {e}"), Vec::new()),
@@ -304,7 +324,7 @@ fn main() {
     }
 
     // Export SVGs for successful circuits
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("assets");
+    let assets = repo_root().join("assets");
     let _ = std::fs::create_dir_all(&assets);
     let mut exported = 0;
     for r in &rows {
@@ -312,7 +332,7 @@ fn main() {
         let gds = Path::new("target/bench_debug").join(&r.name).join(format!("{}.gds", r.name));
         if let Ok(data) = std::fs::read(&gds) {
             let pdk_json = std::fs::read_to_string(
-                Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("pdks/sky130.json")
+                repo_root().join("pdks/sky130.json")
             ).unwrap_or_default();
             let layer_names = pnr_visualizer::parse_layer_names(&pdk_json);
             let svg = pnr_visualizer::export_svg(&data, &layer_names);

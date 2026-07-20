@@ -104,7 +104,14 @@ impl CellSpec for ResistorSpec {
             let total_h = head_l + seg_l + head_l;
 
             let (bx, by, bw, bh) = orient.transform_rect(0, 0, body_w, total_h, body_w, total_h);
-            b.rect(&ly.poly, sx + bx, by, bw, bh)?;
+            // Body on the non-conducting resistor layer so LVS extraction
+            // recognizes it (deck device_recognition.resistor: body rpoly,
+            // terminals licon) instead of shorting P to N through poly.
+            // ponytail: extraction sees one resistor per body rect, so only
+            // n_segments == 1 round-trips through LVS; folded segments were
+            // never electrically joined either — fix both when serpentine
+            // resistors are actually placed by a flow.
+            b.rect(&ly.rpoly, sx + bx, by, bw, bh)?;
 
             let cy_top = head_l / 2 - ct / 2;
             let cy_bot = head_l + seg_l + head_l / 2 - ct / 2;
@@ -118,7 +125,12 @@ impl CellSpec for ResistorSpec {
             b.rect(&ly.licon, sx + bx2, by2, ct, ct)?;
             b.rect(&ly.li, sx + bx2, by2, ct, ct)?;
 
-            let ext = 250;
+            // Pin sits `ext` off the head contact; the flow drops its own
+            // licon at the pin center, so the two cuts must clear licon
+            // min-spacing: ext - ct >= 170 (LICON.2). The flow clamps access
+            // centers to bbox + ct/2 + grid, shifting the cut one grid step
+            // inward at cell-edge pins — add one grid step of margin.
+            let ext = 340 + b.grid();
             if seg_idx == 0 {
                 b.rect(&ly.li, sx + tx, ty - ext, ct, ext + ct)?;
                 b.pin(
@@ -296,7 +308,11 @@ mod tests {
     use crate::{CellBuilder, MatchingTier};
 
     fn test_deck() -> crate::Deck {
-        crate::test_util::deck_from_layers(&[("poly", 66, 20), ("li", 67, 20), ("licon", 66, 44)])
+        crate::test_util::deck_from_layers(&[
+            ("rpoly", 66, 13),
+            ("li", 67, 20),
+            ("licon", 66, 44),
+        ])
     }
 
     fn res(name: &str, w: i32, l: i32) -> DeviceRecord {

@@ -609,7 +609,7 @@ dependencies = [
 [[package]]
 name = "gdsverify"
 version = "0.1.0"
-source = "git+https://github.com/UW-ASIC/GPurify?rev=33cdd660b5ecb52821919c127cef2eac200777f4#33cdd660b5ecb52821919c127cef2eac200777f4"
+source = "git+https://github.com/UW-ASIC/GPurify?branch=main#3f447fa5d29b5397e491132a7320bd7965f916ed"
 dependencies = [
  "gdsverify-backend",
  "gdsverify-core",
@@ -624,7 +624,7 @@ dependencies = [
 [[package]]
 name = "gdsverify-backend"
 version = "0.1.0"
-source = "git+https://github.com/UW-ASIC/GPurify?rev=33cdd660b5ecb52821919c127cef2eac200777f4#33cdd660b5ecb52821919c127cef2eac200777f4"
+source = "git+https://github.com/UW-ASIC/GPurify?branch=main#3f447fa5d29b5397e491132a7320bd7965f916ed"
 dependencies = [
  "rayon",
  "serde",
@@ -633,7 +633,7 @@ dependencies = [
 [[package]]
 name = "gdsverify-core"
 version = "0.1.0"
-source = "git+https://github.com/UW-ASIC/GPurify?rev=33cdd660b5ecb52821919c127cef2eac200777f4#33cdd660b5ecb52821919c127cef2eac200777f4"
+source = "git+https://github.com/UW-ASIC/GPurify?branch=main#3f447fa5d29b5397e491132a7320bd7965f916ed"
 dependencies = [
  "flate2",
  "gdsverify-backend",
@@ -646,7 +646,7 @@ dependencies = [
 [[package]]
 name = "gdsverify-drc"
 version = "0.1.0"
-source = "git+https://github.com/UW-ASIC/GPurify?rev=33cdd660b5ecb52821919c127cef2eac200777f4#33cdd660b5ecb52821919c127cef2eac200777f4"
+source = "git+https://github.com/UW-ASIC/GPurify?branch=main#3f447fa5d29b5397e491132a7320bd7965f916ed"
 dependencies = [
  "gdsverify-backend",
  "gdsverify-core",
@@ -660,7 +660,7 @@ dependencies = [
 [[package]]
 name = "gdsverify-erc"
 version = "0.1.0"
-source = "git+https://github.com/UW-ASIC/GPurify?rev=33cdd660b5ecb52821919c127cef2eac200777f4#33cdd660b5ecb52821919c127cef2eac200777f4"
+source = "git+https://github.com/UW-ASIC/GPurify?branch=main#3f447fa5d29b5397e491132a7320bd7965f916ed"
 dependencies = [
  "gdsverify-backend",
  "gdsverify-core",
@@ -675,7 +675,7 @@ dependencies = [
 [[package]]
 name = "gdsverify-lvs"
 version = "0.1.0"
-source = "git+https://github.com/UW-ASIC/GPurify?rev=33cdd660b5ecb52821919c127cef2eac200777f4#33cdd660b5ecb52821919c127cef2eac200777f4"
+source = "git+https://github.com/UW-ASIC/GPurify?branch=main#3f447fa5d29b5397e491132a7320bd7965f916ed"
 dependencies = [
  "gdsverify-backend",
  "gdsverify-core",
@@ -689,7 +689,7 @@ dependencies = [
 [[package]]
 name = "gdsverify-pex"
 version = "0.1.0"
-source = "git+https://github.com/UW-ASIC/GPurify?rev=33cdd660b5ecb52821919c127cef2eac200777f4#33cdd660b5ecb52821919c127cef2eac200777f4"
+source = "git+https://github.com/UW-ASIC/GPurify?branch=main#3f447fa5d29b5397e491132a7320bd7965f916ed"
 dependencies = [
  "gdsverify-backend",
  "gdsverify-core",

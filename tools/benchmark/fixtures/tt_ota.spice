@@ -1,0 +1,10 @@
+* tt_ota — TinyTapeout-style constrained OTA (sky130).
+* Harness contract in tt_ota.interface.json: 1x1 analog tile die,
+* VDD/VSS power on met5, signal pins on met4 at the tile edges.
+.subckt tt_ota vinp vinm vout1 vout2 VDD VSS
+XM1 vout1 vinp vtail VSS nfet_01v8 W=10u L=1u nf=2
+XM2 vout2 vinm vtail VSS nfet_01v8 W=10u L=1u nf=2
+XM3 vout1 vbias VDD VDD pfet_01v8 W=20u L=1u
+XM4 vout2 vbias VDD VDD pfet_01v8 W=20u L=1u
+XM5 vtail vbn VSS VSS nfet_01v8 W=40u L=2u m=4
+.ends tt_ota

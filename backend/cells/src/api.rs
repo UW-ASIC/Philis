@@ -324,6 +324,10 @@ pub struct CellBuilder<'a> {
     pins: Vec<PinAccess>,
     ports: Vec<PortDef>,
     meta: CellMeta,
+    /// Uniform halo added to the reported bbox (WPE clearance etc.) without
+    /// emitting geometry — degenerate marker rects on real layers violate
+    /// min-width rules.
+    bbox_pad: i32,
 }
 
 impl<'a> CellBuilder<'a> {
@@ -343,6 +347,7 @@ impl<'a> CellBuilder<'a> {
                 tier,
                 ..Default::default()
             },
+            bbox_pad: 0,
         }
     }
 
@@ -599,6 +604,11 @@ impl<'a> CellBuilder<'a> {
         }
     }
 
+    /// Inflate the final bbox by a uniform halo (max of all requests).
+    pub fn pad_bbox(&mut self, pad: i32) {
+        self.bbox_pad = self.bbox_pad.max(pad);
+    }
+
     pub fn compute_bbox(&self) -> Bbox {
         if self.store.poly_count() == 0 {
             return Bbox::empty();
@@ -607,6 +617,10 @@ impl<'a> CellBuilder<'a> {
         for b in &self.store.poly_bbox {
             bb.include(b.xmin, b.ymin);
             bb.include(b.xmax, b.ymax);
+        }
+        if self.bbox_pad > 0 {
+            bb.include(bb.xmin - self.bbox_pad, bb.ymin - self.bbox_pad);
+            bb.include(bb.xmax + self.bbox_pad, bb.ymax + self.bbox_pad);
         }
         bb
     }

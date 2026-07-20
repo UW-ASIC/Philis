@@ -109,10 +109,12 @@ impl CellSpec for MosfetSpec {
         let ct = pdk.contact;
         let poly_ext = pdk.poly_ext;
         let gate_l = ref_dev.l;
-        let sd_w = pdk.sd_width.max(430 - gate_l);
         // ponytail: pitch floor from met1.2 spacing — mcon + 2*m1_enc + met1_space
-        // kills residual m1.2 DRC violations by construction
+        // kills residual m1.2 DRC violations by construction. sd_w floor keeps
+        // the within-finger S->D pad centers (sd_w + gate_l apart) at that
+        // same met1 pad pitch.
         let m1_pitch = pdk.mcon_size + 2 * pdk.m1_enc + pdk.met1_space;
+        let sd_w = pdk.sd_width.max(m1_pitch - gate_l);
         let pitch = (sd_w + gate_l + sd_w).max(m1_pitch);
 
         let sequence =
@@ -158,32 +160,119 @@ impl CellSpec for MosfetSpec {
                 gate_l,
                 stub,
             )?;
-
-            let cy = finger_w / 2 - ct / 2;
-            // ponytail: multi-device ABBA needs D on even idx so shared
-            // boundaries between different devices are always sources (same net)
-            let multi = devices.len() > 1;
-            let terminal = match (multi, idx % 2 == 0) {
-                (false, true) | (true, false) => "S",
-                _ => "D",
-            };
-
-            let sx = idx as i32 * pitch + sd_w / 2 - ct / 2;
-            b.rect(&ly.li, sx, cy, ct, ct)?;
-            b.pin(&format!("{dev_name}:{terminal}"), &ly.li, sx, cy, ct, ct)?;
-
-            let other = if terminal == "S" { "D" } else { "S" };
-            let dx = gx + gate_l + sd_w / 2 - ct / 2;
-            b.rect(&ly.li, dx, cy, ct, ct)?;
-            b.pin(&format!("{dev_name}:{other}"), &ly.li, dx, cy, ct, ct)?;
         }
 
-        // ponytail: dummy gates tied to supply — GND for NMOS, VDD for PMOS
-        // (AOAL ch13 13.2.2 Rule 12: dummy must sit in cutoff)
-        let supply_net = match ref_dev.device_type {
-            DeviceType::Nmos | DeviceType::Ncap => "GND",
-            _ => "VDD",
+        // One contact pad per S/D diffusion region. The old per-finger
+        // left+right pads drew TWO pads in every shared interior region,
+        // only sd_w - ct (80nm) apart — li/licon/mcon min-spacing
+        // violations by construction and duplicated cuts.
+        // ponytail: multi-device ABBA needs D on even fingers so shared
+        // boundaries between different devices are always sources (same net).
+        let multi = devices.len() > 1;
+        let term_of = |idx: i32| -> &'static str {
+            match (multi, idx % 2 == 0) {
+                (false, true) | (true, false) => "S",
+                _ => "D",
+            }
         };
+        let n_fingers = sequence.len() as i32;
+        let cy = finger_w / 2 - ct / 2;
+        // center x of S/D region r (0 = left of first gate, n_fingers = right
+        // of last); shared between contact pads and the bulk-tap strap.
+        let region_cx = |r: i32| -> i32 {
+            if r == 0 {
+                sd_w / 2
+            } else if r == n_fingers {
+                (n_fingers - 1) * pitch + sd_w + gate_l + sd_w / 2
+            } else {
+                // center of the shared region between gates r-1 and r
+                (2 * r - 1) * pitch / 2 + sd_w + gate_l / 2
+            }
+        };
+        for r in 0..=n_fingers {
+            let left = (r > 0)
+                .then(|| sequence[(r - 1) as usize].as_str())
+                .filter(|d| *d != "dummy");
+            let right = (r < n_fingers)
+                .then(|| sequence[r as usize].as_str())
+                .filter(|d| *d != "dummy");
+            if left.is_none() && right.is_none() {
+                continue;
+            }
+            let cx = region_cx(r);
+            let px = cx - ct / 2;
+            b.rect(&ly.li, px, cy, ct, ct)?;
+            let right_pin = right.map(|d| format!("{d}:{}", term_of(r)));
+            let left_pin = left.map(|d| {
+                let t = if term_of(r - 1) == "S" { "D" } else { "S" };
+                format!("{d}:{t}")
+            });
+            if let Some(name) = &right_pin {
+                b.pin(name, &ly.li, px, cy, ct, ct)?;
+            }
+            // Same device + same terminal on both sides (interior region of
+            // one device) is one electrical pin — register it once.
+            if let Some(name) = &left_pin {
+                if right_pin.as_deref() != Some(name.as_str()) {
+                    b.pin(name, &ly.li, px, cy, ct, ct)?;
+                }
+            }
+        }
+
+        // ── ERC missing_tie coverage: li chunk chains near big-diff corners ──
+        // The check measures diff-corner -> li bbox-center distance
+        // (deck.erc.tie_max_dist_nm) for diffusions larger than tie_max², so
+        // long/tall bars need contact centers along their end columns (and
+        // along LOD-moat edges), not just one mid-height pad.
+        let tie_max = b.deck().erc.tie_max_dist_nm.max(1);
+        let chunk = (tie_max / 2).max(ct);
+        let big_diff = i64::from(diff_x_end - diff_x_start) * i64::from(finger_w)
+            >= i64::from(tie_max) * i64::from(tie_max);
+        let end_cols = [
+            sd_w / 2,
+            (n_fingers - 1) * pitch + sd_w + gate_l + sd_w / 2,
+        ];
+        if big_diff {
+            // Full-height chains on the two end S/D columns; they overlap the
+            // existing pads, so everything stays one conductor per region.
+            for ecx in end_cols {
+                super::li_chain(b, &ly.li, ecx - ct / 2, 0, ct, finger_w, chunk)?;
+            }
+            // Moat corners sit past the outer gates: run edge strips out to
+            // the diff ends, merged into the end columns (same S/D net).
+            if moat_ext > 0 {
+                for ey in [0, finger_w - ct] {
+                    super::li_chain(
+                        b,
+                        &ly.li,
+                        diff_x_start,
+                        ey,
+                        end_cols[0] - diff_x_start + ct,
+                        ct,
+                        chunk,
+                    )?;
+                    super::li_chain(
+                        b,
+                        &ly.li,
+                        end_cols[1] - ct / 2,
+                        ey,
+                        diff_x_end - end_cols[1] + ct / 2,
+                        ct,
+                        chunk,
+                    )?;
+                }
+            }
+        }
+
+        // ── Dummy gates (AOAL ch13 13.2.2 Rule 12: dummies sit in cutoff) ──
+        // The tie-off rises from a top poly stub into the bulk tap rail below,
+        // putting dummy gates at the bulk potential (GND for NMOS, VDD for
+        // PMOS). The old bottom-side licon+li pad was a floating li island —
+        // under the flow's blanket nwell it tripped ERC soft_connection on
+        // every PMOS cell.
+        let li_enc = 30;
+        let tap_y0 = finger_w + 580; // diff->tap: DIFF.3 (270) + dummy-cut clearance
+        let tap_h = ct + 80; // LICON.5: diff extends 40 past each cut edge
         for k in 0..i32::from(self.dummies_per_edge) {
             let off = (k + 1) * (gate_l + sd_w);
             let dummy_positions = [
@@ -192,29 +281,104 @@ impl CellSpec for MosfetSpec {
             ];
             for dx in dummy_positions {
                 b.rect(&ly.poly, dx, -poly_ext, gate_l, finger_w + 2 * poly_ext)?;
-                // Contact stack: licon → li on dummy poly endcap. NO mcon/met1:
-                // the dummy tie-off is never routed (pin not in the hypergraph),
-                // so a met1 pad here is dead metal that only creates spacing
-                // hazards for landing stubs. Reinstate met1 + register the pad
-                // as a routing term when dummy tie-off routing lands.
+                // Top stub hosting the tie-off cut; it stops short of the tap
+                // diff so the cut never clips diff (LICON.5) and the stub
+                // never crosses it (no phantom gate).
+                let licon_y = finger_w + 240;
+                let stub_top = licon_y + ct + 40;
+                // overlap the gate bar by 10nm so extraction merges the rects
+                b.rect(
+                    &ly.poly,
+                    dx,
+                    finger_w + poly_ext - 10,
+                    gate_l,
+                    stub_top - (finger_w + poly_ext - 10),
+                )?;
                 let cx = dx + gate_l / 2 - ct / 2;
-                let cy = -(poly_ext / 2) - ct / 2;
-                b.rect(&ly.licon, cx, cy, ct, ct)?;
-                // li encloses licon (sky130: 30nm enclosure)
-                let li_enc = 30;
-                let li_x = cx - li_enc;
-                let li_y = cy - li_enc;
-                let li_sz = ct + 2 * li_enc;
-                b.rect(&ly.li, li_x, li_y, li_sz, li_sz)?;
-                b.pin(
-                    &format!("dummy:{supply_net}"),
+                b.rect(&ly.licon, cx, licon_y, ct, ct)?;
+                // li riser: encloses the cut (30nm) and overlaps the tap rail
+                b.rect(
                     &ly.li,
-                    li_x,
-                    li_y,
-                    li_sz,
-                    li_sz,
+                    cx - li_enc,
+                    licon_y - li_enc,
+                    ct + 2 * li_enc,
+                    (tap_y0 + 60) - (licon_y - li_enc),
                 )?;
             }
+        }
+
+        // ── Bulk tap strip: n+ tap in the nwell for PMOS (ERC floating_well),
+        // p+ substrate tie for NMOS. The rail li ties into a same-net S/D
+        // column when the schematic bulk equals a local terminal net (the
+        // B==rail==source case in every fixture); routing it as a pin instead
+        // would draw met1 on bulk-only nets (chain4: VSS has *no* S/D/G pins),
+        // which ERC unconnected_pin/esd_missing cannot associate with a device.
+        let is_pmos = matches!(ref_dev.device_type, DeviceType::Pmos | DeviceType::Pcap);
+        let dpe = i32::from(self.dummies_per_edge);
+        let tap_x0 = diff_x_start.min(-(dpe * (gate_l + sd_w)));
+        let tap_x1 =
+            diff_x_end.max(n_fingers * pitch + sd_w + (dpe - 1) * (gate_l + sd_w) + gate_l);
+        let tap_w = tap_x1 - tap_x0;
+        // Tap diff + implant are optional layers (geometry-only test decks
+        // omit them); the rail li + pins are always drawn.
+        let _ = b.rect(&ly.tap, tap_x0, tap_y0, tap_w, tap_h);
+        let imp = if is_pmos { &ly.nsdm } else { &ly.psdm };
+        let imp_enc = 65; // NSDM.1/PSDM.1 min width 380 = tap_h(250) + 2*65
+        let _ = b.rect(
+            imp,
+            tap_x0 - imp_enc,
+            tap_y0 - imp_enc,
+            tap_w + 2 * imp_enc,
+            tap_h + 2 * imp_enc,
+        );
+        // licon array (guard-ring recipe): safe now that no routed pin lands
+        // on the rail — the flow's per-pin licon cuts stay at S/D and gate
+        // pads, LICON.2 clear of this row.
+        let mut lx = tap_x0 + 40;
+        while lx + ct + 40 <= tap_x1 {
+            let _ = b.rect(&ly.licon, lx, tap_y0 + 40, ct, ct);
+            lx += pdk.guard_licon_pitch;
+        }
+        // Rail li as a chunk chain: doubles as missing_tie contact centers
+        // for the tap diff itself on very wide cells.
+        super::li_chain(b, &ly.li, tap_x0, tap_y0, tap_w, tap_h, chunk)?;
+        // Strap the rail into the first S/D region whose terminal net equals
+        // the cell bulk net: the tap then joins a real device net (what ERC
+        // soft_connection / unconnected_pin key on) without any routing.
+        // ponytail: cells whose bulk matches no local terminal keep a
+        // floating tap (harmless for NMOS; a PMOS cell with an isolated bulk
+        // net would need flow-side bulk routing to fully tie its well).
+        let cell_bulk = devices[0].terminals.get("B").copied();
+        let same_bulk = devices
+            .iter()
+            .all(|d| d.terminals.get("B").copied() == cell_bulk);
+        let mut strap_x: Option<i32> = None;
+        if let (Some(bulk), true) = (cell_bulk, same_bulk) {
+            'find: for r in 0..=n_fingers {
+                let right = (r < n_fingers)
+                    .then(|| (sequence[r as usize].as_str(), term_of(r)));
+                let left = (r > 0).then(|| {
+                    let t = if term_of(r - 1) == "S" { "D" } else { "S" };
+                    (sequence[(r - 1) as usize].as_str(), t)
+                });
+                for (name, term) in [right, left].into_iter().flatten() {
+                    if name == "dummy" {
+                        continue;
+                    }
+                    let net = devices
+                        .iter()
+                        .find(|d| d.name == name)
+                        .and_then(|d| d.terminals.get(term));
+                    if net == Some(&bulk) {
+                        strap_x = Some(region_cx(r));
+                        break 'find;
+                    }
+                }
+            }
+        }
+        if let Some(sx) = strap_x {
+            // vertical li strap: S/D pad (device net) up into the rail li
+            b.rect(&ly.li, sx - ct / 2, cy, ct, (tap_y0 + 60) - cy)?;
         }
 
         // ── WPE clearance: nwell + bbox inflation (item 1.9) ──
@@ -226,28 +390,44 @@ impl CellSpec for MosfetSpec {
             MatchingTier::Minimal => pdk.wpe_clearance_nm[0],
             MatchingTier::None => 0,
         };
-        let is_pmos = matches!(ref_dev.device_type, DeviceType::Pmos | DeviceType::Pcap);
         if is_pmos {
-            // Emit nwell enclosing diffusion + WPE halo
+            // Emit nwell enclosing diffusion + tap strip + WPE halo, clamped
+            // up to the deck's nwell min-width rule (NWELL.1): a
+            // minimum-height finger plus 2x180 enclosure is only 780nm,
+            // under the 840nm rule.
             let nw_enc = pdk.nwell_diff_enc + wpe_halo;
-            b.rect(
-                &ly.nwell,
-                diff_x_start - nw_enc,
-                -nw_enc,
-                (diff_x_end - diff_x_start) + 2 * nw_enc,
-                finger_w + 2 * nw_enc,
-            )?;
+            let nwell_id = b.resolve(&ly.nwell)?;
+            let nw_min = b
+                .deck()
+                .drc_rules
+                .iter()
+                .find_map(|r| match r {
+                    gdsverify::DrcRuleParam::MinWidth { layer, min, .. }
+                        if *layer == nwell_id =>
+                    {
+                        Some(*min)
+                    }
+                    _ => None,
+                })
+                .unwrap_or(0);
+            let mut w = tap_w + 2 * nw_enc;
+            let mut h = (tap_y0 + tap_h) + 2 * nw_enc;
+            let mut x = tap_x0 - nw_enc;
+            let mut y = -nw_enc;
+            if w < nw_min {
+                x -= (nw_min - w) / 2;
+                w = nw_min;
+            }
+            if h < nw_min {
+                y -= (nw_min - h) / 2;
+                h = nw_min;
+            }
+            b.rect(&ly.nwell, x, y, w, h)?;
         }
         // For both NMOS and PMOS: inflate bbox by WPE halo so placement
-        // accounts for well-edge clearance requirement.
-        if wpe_halo > 0 {
-            let bb = b.compute_bbox();
-            let pad = wpe_halo;
-            // ponytail: transparent rect on diff to expand bbox — placement
-            // reads bbox, not layer-specific bounds
-            let _ = b.rect(&ly.diff, bb.xmin - pad, bb.ymin - pad, 0, 0);
-            let _ = b.rect(&ly.diff, bb.xmax + pad, bb.ymax + pad, 0, 0);
-        }
+        // accounts for well-edge clearance requirement. Bbox-only pad: marker
+        // rects on a real layer would trip that layer's min-width rule.
+        b.pad_bbox(wpe_halo);
 
         Ok(())
     }
@@ -281,8 +461,8 @@ fn feasible_nf(dev: &DeviceRecord, pdk: &Pdk) -> Vec<u16> {
 fn est_dims(spec: &MosfetSpec, devices: &[DeviceRecord], pdk: &Pdk) -> (i32, i32) {
     let ref_dev = &devices[0];
     let gate_l = ref_dev.l;
-    let sd_w = pdk.sd_width.max(430 - gate_l);
     let m1_pitch = pdk.mcon_size + 2 * pdk.m1_enc + pdk.met1_space;
+    let sd_w = pdk.sd_width.max(m1_pitch - gate_l);
     let pitch = (2 * sd_w + gate_l).max(m1_pitch);
     let per_dev = i32::from(spec.nf.max(1)) * i32::from(ref_dev.multiplier.max(1));
     let seq_len = per_dev * devices.len() as i32;
@@ -292,7 +472,8 @@ fn est_dims(spec: &MosfetSpec, devices: &[DeviceRecord], pdk: &Pdk) -> (i32, i32
     let moat = pdk.lod_moat_ext_nm[0];
     let w = seq_len * pitch + 2 * dummy_span + 2 * moat;
     let finger_w = ref_dev.w / i32::from(spec.nf.max(1));
-    (w, finger_w + 2 * pdk.poly_ext)
+    // +900: bulk tap strip zone above the fingers (580 gap + 250 tap + enc)
+    (w, finger_w + 2 * pdk.poly_ext + 900)
 }
 
 #[cfg(test)]

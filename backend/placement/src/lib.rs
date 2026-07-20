@@ -65,6 +65,10 @@ pub struct PlacementConfig {
     /// discard congestion feedback and output geometry remains truthful.
     pub cell_inflation_x: Vec<f64>,
     pub cell_inflation_y: Vec<f64>,
+    /// Harness-dictated die (w, h) in nm. Overrides the utilization-derived
+    /// canvas AND the post-compaction die shrink: the reported die is exactly
+    /// this, with the packed block centered inside it. `None` = adaptive.
+    pub fixed_die: Option<(i32, i32)>,
 }
 
 impl Default for PlacementConfig {
@@ -90,6 +94,7 @@ impl Default for PlacementConfig {
             compaction_slack: 0.0,
             cell_inflation_x: Vec::new(),
             cell_inflation_y: Vec::new(),
+            fixed_die: None,
         }
     }
 }
@@ -236,7 +241,11 @@ pub fn run_placement(
     // the canvas through the feedback controller.
     let side = area_side.max(largest_footprint).max(cfg.min_side);
     let side = (side + cfg.grid - 1) / cfg.grid * cfg.grid;
-    let die = (side as f32, side as f32);
+    let die = match cfg.fixed_die {
+        // Constrained interface: the harness dictates the canvas; never grown.
+        Some((w, h)) => (w as f32, h as f32),
+        None => (side as f32, side as f32),
+    };
 
     let mut cold = model::build_cold(
         g,
@@ -346,7 +355,16 @@ pub fn run_placement(
         let halo = halo.max(2.0 * grid);
         let has_fixed_axis = cold.sym.fixed.iter().any(|&f| f);
         // fixed axes are absolute coordinates — no recentering allowed
-        let (dx, dy) = if has_fixed_axis {
+        let (dx, dy) = if let Some((fw, fh)) = cfg.fixed_die {
+            // fixed die: center the packed block, but never inside the halo
+            let cx = ((fw as f32 - (maxx - minx)) * 0.5 - minx).max(halo - minx);
+            let cy = ((fh as f32 - (maxy - miny)) * 0.5 - miny).max(halo - miny);
+            if has_fixed_axis {
+                (0.0, snap(cy))
+            } else {
+                (snap(cx), snap(cy))
+            }
+        } else if has_fixed_axis {
             (0.0, snap(halo - miny))
         } else {
             (snap(halo - minx), snap(halo - miny))
@@ -364,6 +382,11 @@ pub fn run_placement(
             maxx - minx + 2.0 * halo
         });
         let die_h = snap(maxy - miny + 2.0 * halo);
+        // The fixed die is a contract, not a fit result: report it verbatim.
+        let (die_w, die_h) = match cfg.fixed_die {
+            Some((w, h)) => (w as f32, h as f32),
+            None => (die_w, die_h),
+        };
         eprintln!(
             "[placement] stage 4/4: compaction — die {:.0}x{:.0} → {:.0}x{:.0} nm",
             cold.die.0, cold.die.1, die_w, die_h

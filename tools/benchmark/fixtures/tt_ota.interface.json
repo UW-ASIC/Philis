@@ -1,0 +1,12 @@
+{
+  "die": { "w": 160000, "h": 100000 },
+  "pins": [
+    { "net": "VDD",   "side": "north", "frac": 0.5,  "layer": "met5", "width": 3000 },
+    { "net": "VSS",   "side": "south", "frac": 0.5,  "layer": "met5", "width": 3000 },
+
+    { "net": "vinp",  "side": "west",  "frac": 0.35, "layer": "met4" },
+    { "net": "vinm",  "side": "west",  "frac": 0.65, "layer": "met4" },
+    { "net": "vout1", "side": "east",  "frac": 0.35, "layer": "met4" },
+    { "net": "vout2", "side": "east",  "frac": 0.65, "layer": "met4" }
+  ]
+}

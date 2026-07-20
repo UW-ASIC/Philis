@@ -47,6 +47,18 @@ pub struct RoutingConfig {
     pub global_history: Vec<f32>,
     pub detailed_history: Vec<f32>,
     pub history_decay: f32,
+    /// Per-layer drawn wire width (nm), indexed by routing conductor.
+    /// Empty → uniform `detailed.wire_width` (legacy behavior).
+    pub layer_widths: Vec<i32>,
+    /// Per-layer minimum same-direction track center-to-center distance (nm):
+    /// worst same-layer feature (wire or via landing pad) + spacing. The
+    /// uniform-pitch grid enforces it by masking tracks to a stride of
+    /// ceil(step/pitch). Empty → legacy parity mask on layers >= met3.
+    pub layer_track_steps: Vec<i32>,
+    /// Per-layer min-area (nm²) and spacing (nm) for upper-metal island
+    /// extension. Empty → built-in sky130 met3 constants.
+    pub layer_min_areas: Vec<i64>,
+    pub layer_spacings: Vec<i32>,
 }
 
 impl Default for RoutingConfig {
@@ -62,6 +74,10 @@ impl Default for RoutingConfig {
             global_history: Vec::new(),
             detailed_history: Vec::new(),
             history_decay: 0.65,
+            layer_widths: Vec::new(),
+            layer_track_steps: Vec::new(),
+            layer_min_areas: Vec::new(),
+            layer_spacings: Vec::new(),
         }
     }
 }
@@ -1041,6 +1057,37 @@ pub fn run_routing_at(
         &cfg.detailed,
         pin_pos.is_some(),
     );
+    // Upper metals carry larger real width/spacing rules than the uniform
+    // track gap (pitch - wire_width). The grid cannot express per-layer pitch,
+    // so thin the track density instead: same-direction tracks `stride` apart
+    // give stride*pitch >= worst feature + spacing clearance by construction.
+    // With no per-layer steps configured, fall back to the legacy parity mask
+    // on layers >= met3.
+    for layer in 0..tgrid.n_layers {
+        let stride = if cfg.layer_track_steps.is_empty() {
+            i32::from(layer >= 2) + 1
+        } else {
+            let step = cfg
+                .layer_track_steps
+                .get(layer as usize)
+                .copied()
+                .unwrap_or(0);
+            track_stride(step, cfg.detailed.pitch)
+        };
+        if stride <= 1 {
+            continue;
+        }
+        for iy in 0..tgrid.ny {
+            for ix in 0..tgrid.nx {
+                // Even layers run horizontally: distinct tracks differ in y.
+                let track = if layer % 2 == 0 { iy } else { ix };
+                if track % stride as u32 != 0 {
+                    let n = tgrid.node(ix, iy, layer) as usize;
+                    tgrid.allowed[n] = false;
+                }
+            }
+        }
+    }
     tgrid.set_regions(&gcold.graph);
     let dcold = RouteCtx {
         graph: tgrid,
@@ -1257,12 +1304,23 @@ pub fn run_routing_at(
     } else {
         Vec::new()
     };
-    let (wires, vias) = extract_geometry_minarea(
+    let (mut wires, vias) = extract_geometry_minarea(
         &dhot,
         &dcold.graph,
         cfg.detailed.wire_width,
         cfg.detailed.min_area,
     );
+    // Per-layer wire widths: widen each wire to its conductor's real drawn
+    // width (>= max(layer min width, EM min width), flow-derived from deck
+    // rules) before min-area repair and RC estimation. Via cut/pad geometry
+    // is drawn by the flow from its own per-layer via dims; `Via::size` is
+    // advisory and left as extracted.
+    for w in &mut wires {
+        if let Some(&lw) = cfg.layer_widths.get(w.layer as usize) {
+            w.width = w.width.max(lw);
+        }
+    }
+    extend_upper_metal_islands(&mut wires, &cfg.layer_min_areas, &cfg.layer_spacings);
     ledger.reconcile_geometry(
         &wires,
         &vias,
@@ -1338,6 +1396,87 @@ pub fn run_routing_at(
     }
 }
 
+/// Minimum same-direction track stride for a layer whose worst feature +
+/// spacing needs `step` nm center-to-center on a uniform `pitch` grid.
+fn track_stride(step: i32, pitch: i32) -> i32 {
+    let pitch = pitch.max(1);
+    ((step + pitch - 1) / pitch).max(1)
+}
+
+/// Upper-metal (>= met3) min-area: a one-hop jog plus its via pads is a
+/// (pitch + width) x width island — under sky130's met3 minimum area (M3.AREA,
+/// 240000 nm^2). Extend each short run symmetrically along its track unless
+/// the grown rect would come within the upper-metal spacing of a foreign wire
+/// on the same layer. Per-layer min-area/spacing come from the deck via
+/// RoutingConfig; the constants are the legacy sky130 met3 fallback.
+const UPPER_MIN_AREA: i64 = 240_000;
+const UPPER_SPACING: i32 = 300;
+
+fn extend_upper_metal_islands(wires: &mut [Wire], min_areas: &[i64], spacings: &[i32]) {
+    let rects: Vec<(u32, u32, (i32, i32, i32, i32))> = wires
+        .iter()
+        .map(|w| (w.net, w.layer, wire_rect(w)))
+        .collect();
+    for i in 0..wires.len() {
+        if wires[i].layer < 2 {
+            continue;
+        }
+        let w = &wires[i];
+        let min_area = min_areas
+            .get(w.layer as usize)
+            .copied()
+            .unwrap_or(UPPER_MIN_AREA);
+        let spacing = spacings
+            .get(w.layer as usize)
+            .copied()
+            .unwrap_or(UPPER_SPACING);
+        let len = i64::from((w.x1 - w.x0).abs() + (w.y1 - w.y0).abs());
+        let width = i64::from(w.width.max(1));
+        if min_area <= 0 || (len + width) * width >= min_area {
+            continue;
+        }
+        // extra length needed, split across both ends, snapped up to 5nm grid
+        let need = (min_area + width - 1) / width - width - len;
+        #[allow(clippy::cast_possible_truncation)]
+        let ext = ((((need + 1) / 2 + 4) / 5 * 5) as i32).max(5);
+        let horiz = w.y0 == w.y1;
+        let (rx0, ry0, rx1, ry1) = wire_rect(w);
+        let grown = if horiz {
+            (rx0 - ext - spacing, ry0, rx1 + ext + spacing, ry1)
+        } else {
+            (rx0, ry0 - ext - spacing, rx1, ry1 + ext + spacing)
+        };
+        let conflict = rects.iter().enumerate().any(|(j, &(net, layer, r))| {
+            j != i
+                && layer == wires[i].layer
+                && net != wires[i].net
+                && grown.0 < r.2
+                && r.0 < grown.2
+                && grown.1 < r.3
+                && r.1 < grown.3
+        });
+        if conflict {
+            continue;
+        }
+        let w = &mut wires[i];
+        if horiz {
+            if w.x0 <= w.x1 {
+                w.x0 -= ext;
+                w.x1 += ext;
+            } else {
+                w.x1 -= ext;
+                w.x0 += ext;
+            }
+        } else if w.y0 <= w.y1 {
+            w.y0 -= ext;
+            w.y1 += ext;
+        } else {
+            w.y1 -= ext;
+            w.y0 += ext;
+        }
+    }
+}
+
 /// For each symmetry pair, find matched nets (same pin name on mirrored
 /// devices). If one net is routed but the other is not, mirror the route
 /// tree across the symmetry axis to produce the paired net's route.
@@ -1396,8 +1535,12 @@ fn mirror_symmetric_routes(
                         let (x, y, layer) = grid.pos(node);
                         let mx = 2 * axis_x - x;
                         let mn = grid.nearest(mx, y, layer);
-                        // Check if the mirrored node is occupied by another net
-                        if hot.usage[mn as usize] >= grid.cap() && !cold.terms[dst].contains(&mn) {
+                        // Mirrored node must be routable (stride-masked upper
+                        // tracks are off-limits) and free of foreign nets.
+                        if !grid.allowed[mn as usize]
+                            || (hot.usage[mn as usize] >= grid.cap()
+                                && !cold.terms[dst].contains(&mn))
+                        {
                             conflict = true;
                             break;
                         }
@@ -1658,6 +1801,46 @@ mod tests {
         //    wire 2: area = 1.0*0.2 = 0.2 um² → 5 aF, fringe = 2*(1.0+0.2)*40 = 96 aF
         // Total = (10+176+5+96) aF = 287 aF = 0.287 fF
         assert!((c[0] - 0.287).abs() < 0.01, "C={}", c[0]);
+    }
+
+    #[test]
+    fn track_stride_covers_wide_upper_layers() {
+        // met1/met2: feature+spacing fits within one pitch → full density.
+        assert_eq!(track_stride(440, 440), 1);
+        // sky130 met3: 490 pad + 300 spacing on a 440 pitch → every 2nd track.
+        assert_eq!(track_stride(790, 440), 2);
+        // sky130 met4: 1180 via4 pad + 300 spacing → every 4th track.
+        assert_eq!(track_stride(1480, 440), 4);
+        // sky130 met5: 1600 wire + 1600 spacing → every 8th track.
+        assert_eq!(track_stride(3200, 440), 8);
+        // Degenerate inputs stay sane.
+        assert_eq!(track_stride(0, 440), 1);
+    }
+
+    #[test]
+    fn per_layer_widths_and_min_area_extension() {
+        // A short met5-index wire must pick up its layer width and be extended
+        // to its layer min-area, honoring per-layer tables over the constants.
+        let mut wires = vec![Wire {
+            net: 0,
+            layer: 4,
+            x0: 0,
+            y0: 0,
+            x1: 440,
+            y1: 0,
+            width: 1600,
+        }];
+        let min_areas = vec![83_000, 67_600, 240_000, 240_000, 1_600_000];
+        let spacings = vec![140, 140, 300, 300, 1600];
+        extend_upper_metal_islands(&mut wires, &min_areas, &spacings);
+        let w = &wires[0];
+        let len = i64::from((w.x1 - w.x0).abs());
+        let rect_len = len + i64::from(w.width);
+        assert!(
+            rect_len * i64::from(w.width) >= 1_600_000,
+            "met5 island below M5.AREA: {rect_len} x {}",
+            w.width
+        );
     }
 
     #[test]

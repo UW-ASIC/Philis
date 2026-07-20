@@ -474,6 +474,7 @@ pub fn load_pdk(json: &str) -> Result<FullPdk, String> {
     const LAYER_KEYS: &[&str] = &[
         "diff",
         "poly",
+        "rpoly",
         "li",
         "licon",
         "mcon",
@@ -526,6 +527,7 @@ pub fn load_pdk(json: &str) -> Result<FullPdk, String> {
     let layer_roles = [
         ("diffusion", &doc.cell.layers.diff),
         ("gate", &doc.cell.layers.poly),
+        ("resistor body", &doc.cell.layers.rpoly),
         ("local interconnect", &doc.cell.layers.li),
         ("local contact", &doc.cell.layers.licon),
         ("metal contact", &doc.cell.layers.mcon),
@@ -653,7 +655,8 @@ mod tests {
                 process.cells.layers.routing_metals.len(),
             );
             if file == "sky130.json" {
-                assert_eq!(process.deck.devices.bjt_rules.len(), 1);
+                // pnp + npn recognition rules, each with its own marker layer.
+                assert_eq!(process.deck.devices.bjt_rules.len(), 2);
             }
         }
     }

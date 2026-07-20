@@ -286,12 +286,16 @@ pub fn run_block<C, P, R>(
         } else {
             update_pinned_bar(rows, &format!("[engine] iter 0/{max} | starting..."));
         }
+        // Per-step timing: each phase is timed so slow steps are visible and
+        // the flow ETA reflects real per-phase cost, not just iteration count.
         eprintln!(
             "[engine] iter {}/{max} — cells ({} hints)",
             iter,
             cell_hints.len()
         );
+        let t_cells = std::time::Instant::now();
         let c = cells(iter, &cell_hints);
+        let d_cells = t_cells.elapsed();
 
         eprintln!(
             "[engine] iter {}/{max} — place ({} net weights, {} inflation)",
@@ -299,6 +303,7 @@ pub fn run_block<C, P, R>(
             net_weights.len(),
             cell_inflation_x.len()
         );
+        let t_place = std::time::Instant::now();
         let p = place(
             iter,
             &c,
@@ -307,12 +312,29 @@ pub fn run_block<C, P, R>(
             &cell_inflation_y,
             &constraint_adjustments,
         );
+        let d_place = t_place.elapsed();
 
         eprintln!("[engine] iter {}/{max} — route", iter);
+        let t_route = std::time::Instant::now();
         let r = route(&c, &p);
+        let d_route = t_route.elapsed();
 
         eprintln!("[engine] iter {}/{max} — extracting feedback", iter);
+        let t_extract = std::time::Instant::now();
         let fb = extract(&c, &p, &r);
+        let d_extract = t_extract.elapsed();
+
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        let iter_ms = ms(d_cells) + ms(d_place) + ms(d_route) + ms(d_extract);
+        // Flow ETA from wall-clock over completed iterations (captures all
+        // overhead, not just the four timed phases).
+        let done = iter + 1;
+        let flow_elapsed = block_start.elapsed().as_secs_f64();
+        let flow_eta = flow_elapsed / done as f64 * (max - done) as f64;
+        eprintln!(
+            "[engine] iter {iter}/{max} — timing: cells {:.0}ms | place {:.0}ms | route {:.0}ms | extract {:.0}ms | step {:.0}ms | flow ETA {flow_eta:.0}s",
+            ms(d_cells), ms(d_place), ms(d_route), ms(d_extract), iter_ms,
+        );
         eprintln!("[engine] iter {}/{max} — feedback: max_weight={:.2}, clean={}, parasitic_clean={}, drc_blocking={}, lvs={}, {} hints, {} adjustments",
             iter, fb.max_weight, fb.clean, fb.parasitic_clean, fb.drc_blocking,
             if fb.lvs_matched { "MATCH" } else { "MISMATCH" },

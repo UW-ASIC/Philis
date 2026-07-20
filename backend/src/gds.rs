@@ -146,6 +146,33 @@ pub fn write_gds(
     std::fs::File::create(path)?.write_all(&gds_bytes(store, layers, cell_name, labels))
 }
 
+/// Serialize one advanced check: its status, plus violation/diagnostic detail
+/// for any non-Clean result so findings are triageable from the sidecar rather
+/// than hidden behind a bare status string. Power-family checks that are
+/// NotRun/Error solely because the design has no supply rail are surfaced as a
+/// distinct "NotApplicable" status (see `SignoffReport::check_not_applicable`).
+fn advanced_check_json(
+    check: &gdsverify::CheckReport,
+    s: &crate::SignoffReport,
+) -> serde_json::Value {
+    use gdsverify::CheckStatus;
+    if s.check_not_applicable(check.check) {
+        return serde_json::json!({
+            "status": "NotApplicable",
+            "reason": "no supply rails",
+        });
+    }
+    if check.status == CheckStatus::Clean {
+        return serde_json::json!({ "status": "Clean" });
+    }
+    // violations/diagnostics are serde-serializable; emit them verbatim.
+    serde_json::json!({
+        "status": format!("{:?}", check.status),
+        "violations": check.violations,
+        "diagnostics": check.diagnostics,
+    })
+}
+
 /// Serialize signoff results as JSON for the visualizer sidecar.
 pub fn signoff_json(s: &crate::SignoffReport) -> String {
     let total_r_met1 = s.pex.total_resistance("met1");
@@ -166,9 +193,25 @@ pub fn signoff_json(s: &crate::SignoffReport) -> String {
             })
         })
         .collect();
+    let erc: Vec<serde_json::Value> = s
+        .erc_violations
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "check": v.check,
+                "detail": v.detail,
+                "x": v.x,
+                "y": v.y,
+            })
+        })
+        .collect();
+    let erc_blocking = s.blocking_erc_violations().count();
     let value = serde_json::json!({
         "all_required_checks_clean": s.all_required_checks_clean(),
         "drc_violations": drc,
+        "erc_violations": erc,
+        "erc_blocking": erc_blocking,
+        "erc_waived": s.erc_violations.len() - erc_blocking,
         "lvs": {
             "matched": s.lvs.matched,
             "reason": s.lvs.reason,
@@ -177,18 +220,19 @@ pub fn signoff_json(s: &crate::SignoffReport) -> String {
             "floating_nets": s.lvs.floating_nets.len(),
         },
         "pex": {
+            "method": "analytical",
             "complete": s.pex.is_complete(),
             "diagnostic_count": s.pex.diagnostics().len(),
             "r_met1_ohm": total_r_met1,
             "total_cap_af": total_c,
         },
         "advanced": {
-            "antenna": format!("{:?}", a.antenna.check.status),
-            "density_cmp": format!("{:?}", a.density_cmp.check.status),
-            "ir_drop": format!("{:?}", a.ir_drop.check.status),
-            "electromigration": format!("{:?}", a.electromigration.check.status),
-            "reliability": format!("{:?}", a.reliability.check.status),
-            "esd_latchup": format!("{:?}", a.esd_latchup.check.status),
+            "antenna": advanced_check_json(&a.antenna.check, s),
+            "density_cmp": advanced_check_json(&a.density_cmp.check, s),
+            "ir_drop": advanced_check_json(&a.ir_drop.check, s),
+            "electromigration": advanced_check_json(&a.electromigration.check, s),
+            "reliability": advanced_check_json(&a.reliability.check, s),
+            "esd_latchup": advanced_check_json(&a.esd_latchup.check, s),
         }
     });
     serde_json::to_string_pretty(&value).expect("signoff summary contains serializable values")

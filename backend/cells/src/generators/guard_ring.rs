@@ -9,7 +9,9 @@ use crate::{Bbox, CellBuilder, CellError, DeviceType};
 use super::Pdk;
 
 /// Clearance from the enclosed device geometry to the collecting diffusion.
-pub const GUARD_RING_GAP: i32 = 200;
+/// 270 = sky130 difftap.3 diff-to-diff spacing: the enclosed cell's diffusion
+/// can reach its bbox edge, so the gap itself must satisfy diff spacing.
+pub const GUARD_RING_GAP: i32 = 270;
 
 /// Guard ring type — determines implant polarity and well layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

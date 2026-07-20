@@ -1,0 +1,50 @@
+{
+  "die": {
+    "w": 30000,
+    "h": 70000
+  },
+  "pins": [
+    {
+      "net": "vinp",
+      "side": "south",
+      "frac": 0.2,
+      "width": 800,
+      "layer": "met3"
+    },
+    {
+      "net": "vinm",
+      "side": "south",
+      "frac": 0.8,
+      "width": 800,
+      "layer": "met3"
+    },
+    {
+      "net": "vout1",
+      "side": "north",
+      "frac": 0.3,
+      "width": 800,
+      "layer": "met3"
+    },
+    {
+      "net": "vout2",
+      "side": "north",
+      "frac": 0.7,
+      "width": 800,
+      "layer": "met3"
+    },
+    {
+      "net": "VDD",
+      "side": "east",
+      "frac": 0.5,
+      "width": 800,
+      "layer": "met3"
+    },
+    {
+      "net": "VSS",
+      "side": "west",
+      "frac": 0.5,
+      "width": 800,
+      "layer": "met3"
+    }
+  ]
+}

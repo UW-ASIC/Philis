@@ -25,6 +25,9 @@ pub struct DtiRules {
 pub struct Layers {
     pub diff: String,
     pub poly: String,
+    /// Resistor-body layer: drawn poly that is NOT a conductor in the deck's
+    /// connectivity, so LVS extracts it as a resistor body instead of a wire.
+    pub rpoly: String,
     pub li: String,
     pub licon: String,
     pub mcon: String,
@@ -36,6 +39,10 @@ pub struct Layers {
     pub psdm: String,
     /// Tap diffusion layer (if separate from diff).
     pub tap: String,
+    /// NPN recognition marker layer (deck `device_recognition.bjt` type_marker).
+    pub npn: String,
+    /// PNP recognition marker layer (deck `device_recognition.bjt` type_marker).
+    pub pnp: String,
     /// Ordered routing conductors, bottom to top.
     pub routing_metals: Vec<String>,
     /// Ordered cuts between adjacent entries in `routing_metals`.
@@ -47,6 +54,7 @@ impl Default for Layers {
         Self {
             diff: "diff".into(),
             poly: "poly".into(),
+            rpoly: "rpoly".into(),
             li: "li".into(),
             licon: "licon".into(),
             mcon: "mcon".into(),
@@ -55,6 +63,8 @@ impl Default for Layers {
             nsdm: "nsdm".into(),
             psdm: "psdm".into(),
             tap: "tap".into(),
+            npn: "npn".into(),
+            pnp: "pnp".into(),
             routing_metals: vec![
                 "met1".into(),
                 "met2".into(),

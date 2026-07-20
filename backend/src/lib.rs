@@ -26,11 +26,13 @@
 
 mod flow;
 pub mod gds;
+pub mod interface;
 pub mod pdk;
 
 use pnr_cells::netlist::BipartiteHypergraph;
 
 pub use flow::{FlowConfig, FlowResult, SignoffReport};
+pub use interface::{BoundaryPin, DieSpec, InterfaceSpec, Side};
 pub use pdk::{load_pdk, CellBase, DeviceDef, FullPdk, Pdk};
 pub use pnr_constraints::{ConstraintContract, ConstraintRecord, ConstraintStatus, NetClass};
 

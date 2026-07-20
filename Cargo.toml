@@ -27,8 +27,5 @@ members = [
     "tools/benchmark",
 ]
 
-# gdsverify (GPU GDS verification) is consumed as an external crate from the
-# GPurify repo, not vendored. Pinned to a reviewed rev for reproducible builds;
-# cargo locates the `gdsverify` package by name inside that workspace.
 [workspace.dependencies]
-gdsverify = { git = "https://github.com/UW-ASIC/GPurify", rev = "33cdd660b5ecb52821919c127cef2eac200777f4" }
+gdsverify = { git = "https://github.com/UW-ASIC/GPurify", branch = "main" }
