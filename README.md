@@ -11,7 +11,7 @@ consumed as an external crate.
 
 ## Example layouts
 
-Generated end-to-end from SPICE by the benchmark suite (generic FinFET PDK):
+Generated end-to-end from SPICE by the benchmark suite (generic FinFET PDK) [5 iterations]:
 
 | | |
 |:---:|:---:|
