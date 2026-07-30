@@ -76,21 +76,71 @@ from prose (`v.rule == "routing overuse"` in `frontend/library`).
 Determinism is therefore over `(inputs, seed, neg)`. Same inputs with different
 incoming history route differently, by design.
 
-### D4 — No oracle handle on any stage trait
+### D4 — The oracle handle lives on `dp`, region-scoped, veto-not-cost *(revised)*
 
-PLAN treats DRC/PEX/LVS as callable per candidate move. **We do not buy that
-API.** Instead: `verify` measures, `frontend/library` bakes the measured value into
-a freshly-constructed `RuleBatch`, and the stage consumes it as an ordinary `reqs`
-entry. This is the mechanism `verify::drc_feedback` already uses.
+This section originally read "no oracle handle on any stage trait", justified by
+gdsverify being 99.86% of measured runtime with the GPU lane measured
+net-negative. **That justification is retired by a premise change, not by a new
+measurement**: the user directive is to treat the verify oracle as ~1 ms/call
+(free), which re-enables PLAN §1's per-move oracle signals. The per-epoch-only
+consequence is therefore reversed. What **stands** from the original decision:
+the rejection of threading a `ctx: &Ctx` with a PDK + oracle handle through
+`Rule::cost`/`satisfied`. Rules remain pure functions of `Layout`/`Routes`; the
+oracle is a *stage* input, not a *rule* input — rewriting every rule in
+`kernel/analog` buys nothing the stage-level handle doesn't already deliver.
 
-Consequence, stated so nobody "fixes" it later: parasitic and coupling gradients
-are **per-epoch, not per-move**. Accepted, because PLAN's free-oracle premise does
-not hold in this repo — gdsverify is 99.86% of measured runtime, and the GPU lane
-was already measured net-negative. Revisit only if the extraction rewrites land.
+Mechanism: `pnr_core::Oracle` (DRC summary / batched DRC / analytical PEX total /
+LVS extraction-ambiguity), implemented by `verify::LiveOracle` over gdsverify and
+by `pnr_core::NullOracle` (never vetoes, measures zero — passing it reproduces
+pre-oracle behaviour byte-identically, which is the regression anchor for every
+pre-oracle `dp` test). `DetailedPlacer::place` takes `oracle: &dyn Oracle` as a
+flat parameter (D1: visible at the call site, no context bundle). The oracle
+**gates**, it is not priced: a flagged accept reverts exactly like a rejection,
+which preserves Φ-monotonicity because vetoes only *remove* accepts.
 
-The alternative — threading a `ctx: &Ctx` with a PDK + oracle handle through
-`Rule::cost`/`satisfied` — would rewrite every rule in `kernel/analog` to buy a
-granularity we cannot afford to use.
+**Granularity is fixed by arithmetic, not preference.** A `dp` run proposes
+~5.7M candidate moves; at 1 ms serial that is 95 minutes. So:
+
+| signal | granularity | discipline |
+|---|---|---|
+| DRC veto | per **accepted** move | risk-gated (cross-abutment-group edge gap < `oracle_dilation_nm` on diffusion-bearing cells), bbox-scoped (dilated region stamp), hard-capped (`oracle_budget`) |
+| LVS merge guard (PLAN §3c) | with the veto | cross-group diffusion proximity only; same-abutment-group pairs exempt (share-by-design) |
+| full-layout DRC | per dp epoch | joins the stop criterion: frozen + clean now also requires `oracle_viol == 0` |
+| FD-PEX gradient field | every `pex_probe_every` epochs | ≤ 64 flagged cells (`RuleBatch::touched` over budget ∪ cost) × 4 bbox-scoped probes; every trial move between refreshes feels the measured slope at zero oracle cost |
+| LVS vs reference | per orchestrator epoch | `drc_feedback(…, Some(&reference))`; escalation always precedes an epoch, so this covers "after any variant move" |
+| per candidate | **never at serial cost** | `Oracle::drc_batch` is the reserved seam for the GPU batched-candidate lane; do not change any caller's granularity before it lands |
+
+**Determinism contract**, strengthening PLAN §8a: stage determinism is over
+`(inputs, seed, prices, oracle)`, and every `Oracle` implementation must be a
+deterministic pure function of the stamped shapes — every method may gate an
+accept/reject, and even the PEX *value* forks the Metropolis RNG stream through
+the gradient field. A nondeterministic backend (unordered GPU reduction, sampled
+random-walk PEX) is not an admissible oracle for a stage. The oracle paths
+themselves consume no RNG. The epoch-level `DrcSpacing` fold **stays** beside
+the live handle: the in-epoch veto prevents new findings, the fold is the
+cross-epoch repair pressure on the ones that predate the epoch.
+
+Debt accumulated by this revision:
+
+- **Oracle budget valve semantics are first-come, single-pool.** One
+  `oracle_budget` counter pays for vetoes, merge guards, epoch DRC and PEX
+  probes alike, drained in trajectory order (hence seed-deterministic), with a
+  silent degrade to proxy-only on exhaustion. No reserve is held back for the
+  epoch-tail DRC, so a veto-heavy early anneal can leave the stop criterion
+  oracle-blind; no telemetry reports the drain. Split the pool (or expose the
+  spend in the `Report`) when a real run is seen exhausting it.
+- **`dp`'s "diffusion-bearing" is a proxy with a named ceiling.** The stage has
+  no PDK, so the risk gate treats *any non-empty macro* as diffusion-bearing —
+  it over-fires on all-metal cells (rare inside `dp`; routes don't exist there)
+  and never under-fires. Likewise the merge guard's `expected_devices` is the
+  stamped-cell count, which reads a collapsed multi-device macro as a mismatch
+  and vetoes conservatively. Ceilings lift by threading a diffusion-layer set
+  and per-cell device counts (`cellgen`'s `devices_of`) through the stage —
+  do it when merged cells are seen starving the search.
+
+(The extract-only LVS fallback was **not** needed: gdsverify exposes
+`extract_netlist` directly, so `verify::lvs::extract_device_count` is
+extract-only with no dummy-reference comparison.)
 
 ### D5 — Guard rings are `&[Macro]`, as a separate parameter
 

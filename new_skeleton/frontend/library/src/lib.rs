@@ -119,6 +119,10 @@ pub struct Solution {
     pub macros: Vec<Macro>,
     /// The parsed schematic — kept so signoff (LVS) has its reference.
     pub netlist: pnr_core::Netlist,
+    /// The LVS reference netlist, built **once** in [`run`] (it is a pure
+    /// function of the schematic) and reused by the per-epoch LVS feedback and
+    /// by [`signoff`] — which used to rebuild it per call.
+    pub reference: verify::lvs::RefNetlist,
     /// Feedback-loop telemetry for the *winning* iteration (for benchmarking).
     pub stats: RunStats,
     /// Per-family budget status (met / met-without-margin / violated) plus the
@@ -441,6 +445,16 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         c
     };
 
+    // The LVS reference is a pure function of the schematic: build it once, use
+    // it for the per-epoch LVS feedback below and hand it to `signoff` through
+    // the `Solution` (it used to be rebuilt there per call).
+    let reference = cellgen::reference(&netlist);
+
+    // The live oracle (PLAN §1's oracle service, D4-revised): `dp` consumes it
+    // per accepted move / per epoch — risk-gated, bbox-scoped, budget-capped.
+    // Handed as a flat parameter (D1); rules stay pure functions of `Layout`.
+    let oracle = verify::LiveOracle { pdk };
+
     // Seed the assignment by *pricing*: draw each hypothesis and measure it, rather
     // than guessing from footprint area. PLAN §2 recommends the hybrid — price up
     // front to seed, then allow variant moves once placement feedback shows the
@@ -491,9 +505,11 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 
             // Fold in the previous epoch's DRC findings as Hard legality the placer
             // must now respect, then (at the end of the epoch) truncate them back off.
-            // This is decision D4: the oracle measures, we bake the measurement into a
-            // rule batch, and the stage consumes it as an ordinary requirement — no
-            // oracle handle is threaded into any stage.
+            // This is D4-revised's epoch half: the oracle measures, we bake the
+            // measurement into a rule batch, and the stage consumes it as an
+            // ordinary requirement. The fold **stays** alongside dp's live oracle
+            // handle — the in-epoch veto prevents *new* findings, this is the
+            // cross-epoch repair pressure on the ones that predate the epoch.
             problem.placement.hard.truncate(base_hard);
             problem.placement.hard.append(&mut drc_hard);
 
@@ -551,6 +567,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
                 &layers,
                 &fixed,
                 &mut prices,
+                &oracle,
                 seed,
             );
             // `dp` is the last stage that may move or reshape a device, so this is
@@ -625,7 +642,13 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             for r in &rings {
                 shapes.extend(r.shapes.iter().cloned());
             }
-            let feedback = verify::drc_feedback(&shapes, pdk, None);
+            // The reference enables per-epoch LVS alongside the DRC/ERC pass.
+            // PLAN §1 wants LVS "after any move that can change device
+            // structure" — a variant escalation always precedes an epoch (the
+            // outer tier re-enters the middle tier), and dp's in-epoch reshapes
+            // land here too, so per-epoch coverage is exactly that cadence. A
+            // mismatch folds forward as the same hard-rule capture DRC uses.
+            let feedback = verify::drc_feedback(&shapes, pdk, Some(&reference));
 
             // Θ for this epoch: the budget residuals, measured on the layout we just
             // produced. This used to run once, after the loop, on the winner only —
@@ -749,7 +772,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         &problem.net_classes,
     );
 
-    Ok(Solution { layout, routes, macros, netlist, stats, metadata })
+    Ok(Solution { layout, routes, macros, netlist, reference, stats, metadata })
 }
 
 /// PLAN §3b's lexicographic key: `(|V|, Θ, PEX)`, summed across every stage.
@@ -896,8 +919,7 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
 #[must_use]
 pub fn signoff(sol: &Solution, pdk: &Pdk) -> pnr_core::Report {
     let shapes = sol.geometry();
-    let reference = cellgen::reference(&sol.netlist);
     let (report, _timings) =
-        verify::signoff(&shapes, &reference, &verify::erc::SignoffConfig::default(), pdk);
+        verify::signoff(&shapes, &sol.reference, &verify::erc::SignoffConfig::default(), pdk);
     report
 }

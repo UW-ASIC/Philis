@@ -30,7 +30,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use analog::Requirements;
-use pnr_core::geom::{LayerId, Pin, Rect, Shape};
+use pnr_core::geom::{LayerId, Rect, Shape};
 use pnr_core::{Layout, Macro, Report, Routes};
 
 /// Coarse-grid tuning (docs: Global routing). Defaults mirror the ported
@@ -2165,57 +2165,7 @@ mod tests {
     }
 }
 
-/// Translate every macro into its **placed** position, matching the convention
-/// `frontend/library::geometry::collect` uses for emitted geometry.
-///
-/// Turning about the bbox lower-left corner (rather than the centre) keeps the
-/// whole macro on the fabrication grid: every D4 orientation maps grid multiples
-/// to grid multiples, whereas rotating about a centre lands half-pitch off
-/// whenever an extent is an odd number of grid steps.
-///
-/// Devices past the end of the layout keep their local coordinates, which is the
-/// same fallback `collect` applies (guard rings arrive as absolute-coordinate
-/// macros appended after the device list).
-#[must_use]
-pub fn place_macros(macros: &[Macro], l: &Layout) -> Vec<Macro> {
-    macros
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            if i >= l.x.len() {
-                return m.clone(); // already absolute
-            }
-            let (cx, cy) = (l.x[i], l.y[i]);
-            let o = l.orient.get(i).copied().unwrap_or_default();
-            let anchor = o.apply_rect(m.bbox);
-            // Centre the turned bbox on the placed centre. `Layout` is a
-            // centre + half-extents model — `gp::mechanics::half_extents` builds
-            // `hw`/`hh` from `bbox.w/2` and discards `bbox.x`/`bbox.y` — so
-            // anchoring the macro's *local origin* here instead left every drawn
-            // device offset from where the placer legalised it by
-            // `(hw + bbox.x, hh + bbox.y)`, measured up to 20 µm. Guard rings are
-            // appended past `l.x.len()` and are already absolute, so they stayed
-            // put while the devices moved, and their tap bands cut through the
-            // diffusion they were meant to surround.
-            let (hw, hh) = (l.hw[i], l.hh[i]);
-            let (ax, ay) = (cx - hw - anchor.x, cy - hh - anchor.y);
-            let shift = |r: Rect| {
-                let r = if o == pnr_core::Orient::R0 { r } else { o.apply_rect(r) };
-                Rect { x: r.x + ax, y: r.y + ay, w: r.w, h: r.h }
-            };
-            Macro {
-                bbox: shift(m.bbox),
-                shapes: m
-                    .shapes
-                    .iter()
-                    .map(|s| Shape { layer: s.layer, rect: shift(s.rect) })
-                    .collect(),
-                pins: m
-                    .pins
-                    .iter()
-                    .map(|p| Pin { at: shift(p.at), ..p.clone() })
-                    .collect(),
-            }
-        })
-        .collect()
-}
+/// Translate every macro into its **placed** position — re-exported from
+/// `pnr_core` (the body moved there so the oracle tier can stamp regions from
+/// inside `dp` without a router dependency; see `pnr_core::place_macro`).
+pub use pnr_core::place_macros;

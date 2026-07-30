@@ -74,7 +74,17 @@ pub trait DetailedPlacer {
     /// reshape that draws a locked cell reshapes every member of its lock as one move.
     ///
     /// `prices` carries the augmented-Lagrangian state across epochs; see
-    /// [`gp::Prices`]. Determinism is over `(inputs, seed, prices)`.
+    /// [`gp::Prices`].
+    ///
+    /// `oracle` is the free-signoff tier (PLAN §1, D4-revised): per-**accepted**-move
+    /// DRC vetoes and the LVS merge guard, an epoch-tail full-layout DRC in the stop
+    /// criterion, and the FD-PEX gradient field — all risk-gated, bbox-scoped, and
+    /// hard-capped by [`DetailedCfg::oracle_budget`], never per-candidate at serial
+    /// cost. It is a flat parameter (D1) and rules stay pure functions of `Layout`
+    /// (the ctx-through-`Rule` rejection of old D4 stands); passing
+    /// [`pnr_core::NullOracle`] reproduces pre-oracle behaviour byte-identically.
+    /// Determinism is over `(inputs, seed, prices, oracle)`.
+    #[allow(clippy::too_many_arguments)]
     fn place(
         &self,
         coarse: &Layout,
@@ -84,6 +94,7 @@ pub trait DetailedPlacer {
         layers: &[LayerId],
         fixed: &[bool],
         prices: &mut gp::Prices,
+        oracle: &dyn pnr_core::Oracle,
         seed: u64,
     ) -> (Layout, Report);
 }
@@ -116,6 +127,27 @@ pub struct DetailedCfg {
     /// Set from the PDK by the caller; `0` reproduces the old touch-and-go
     /// behaviour.
     pub clearance_nm: i32,
+    /// Radius (nm) of the oracle tier's *risk* and *region* scoping: an accepted
+    /// move whose cross-abutment-group edge gap to a diffusion-bearing neighbour
+    /// falls under this fires the DRC veto, and the stamped region is every cell
+    /// whose bbox intersects the moved cells' bbox dilated by this.
+    ///
+    /// Defaults to [`DetailedCfg::clearance_nm`]'s default (2000 nm) for the same
+    /// reason that value exists: the binding inter-device hazard is well/implant
+    /// merging, and a pair further apart than the worst inter-device spacing rule
+    /// cannot interact in either DRC or extraction.
+    pub oracle_dilation_nm: i32,
+    /// Hard cap on oracle calls per `place` — the valve that keeps the
+    /// per-accepted-move discipline from degenerating into per-candidate serial
+    /// cost (5.7M moves × 1 ms = 95 min). On exhaustion the stage degrades to
+    /// proxy-only scoring; the drain is trajectory-ordered, hence
+    /// seed-deterministic.
+    pub oracle_budget: u32,
+    /// Refresh the FD-PEX gradient field every this many epochs (`0` = never).
+    pub pex_probe_every: u32,
+    /// Finite-difference step (nm) for the FD-PEX probes, applied as ±probe in
+    /// x and y around each flagged cell.
+    pub pex_probe_nm: i32,
 }
 
 impl Default for DetailedCfg {
@@ -140,9 +172,17 @@ impl Default for DetailedCfg {
             // which are *honest*: the old merged super-well happened to touch one
             // tap, hiding the fact that each PMOS needs its own well tie.
             clearance_nm: 2000,
+            oracle_dilation_nm: 2000,
+            oracle_budget: 30_000,
+            pex_probe_every: 8,
+            pex_probe_nm: 64,
         }
     }
 }
+
+/// Cap on FD-PEX flagged cells per refresh: ≤ 64 cells × 4 probes keeps one
+/// refresh at ≤ 256 oracle calls, a bounded slice of the budget.
+const MAX_PEX_FLAGS: usize = 64;
 
 /// The real detailed placer: legalising Metropolis SA. Swap in at
 /// `frontend/library`.
@@ -167,6 +207,26 @@ struct Sa<'a> {
     /// incomparable, and Metropolis is only a valid sampler on a fixed energy.
     prices: &'a gp::Prices,
     cell_nets: Vec<Vec<u32>>,
+    /// The free-signoff tier. Every call through it is deterministic in the
+    /// stamped shapes (the trait's contract), so it forks no RNG and keeps the
+    /// trajectory a pure function of `(inputs, seed, prices, oracle)`.
+    oracle: &'a dyn pnr_core::Oracle,
+    /// Fallback geometry per cell for region stamping (same resolution rule as
+    /// [`choose_variants`]: the chosen alternative, else `macros[i]`).
+    macros: &'a [Macro],
+    variants: &'a [gp::VariantSpace],
+    /// [`DetailedCfg::oracle_dilation_nm`], widened once.
+    dilation: i64,
+    /// Remaining oracle calls ([`DetailedCfg::oracle_budget`]). A `Cell` so the
+    /// veto path can spend it through the `&Sa` every `try_*` already holds;
+    /// single-threaded SA, so this is bookkeeping, not synchronisation.
+    budget: std::cell::Cell<u32>,
+    /// FD-PEX gradient field: per-cell `(∂cap/∂x, ∂cap/∂y)` in fF/nm, refreshed
+    /// every [`DetailedCfg::pex_probe_every`] epochs. Empty (or all-zero, which
+    /// is what [`pnr_core::NullOracle`] measures) ⇒ the linear term below is
+    /// identically `0.0` and every accept decision is byte-identical to a
+    /// pre-oracle build.
+    grad: Vec<(f32, f32)>,
 }
 
 impl<'a> Sa<'a> {
@@ -203,6 +263,39 @@ impl<'a> Sa<'a> {
         }
         d
     }
+
+    /// The FD-PEX linear term's delta for moving `c` to `(nx, ny)`:
+    /// `gx·Δx + gy·Δy`. The base capacitance measured at the probe point cancels
+    /// in every before/after comparison, so only the gradient rides in the cost.
+    fn grad_delta(&self, l: &Layout, c: usize, nx: i32, ny: i32) -> f64 {
+        match self.grad.get(c) {
+            Some(&(gx, gy)) => {
+                f64::from(gx) * f64::from(nx - l.x[c]) + f64::from(gy) * f64::from(ny - l.y[c])
+            }
+            None => 0.0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl<'a> Sa<'a> {
+    /// Test scaffolding: an `Sa` with the oracle tier inert — `NullOracle`,
+    /// no stampable geometry, zero budget — so every pre-oracle unit test
+    /// exercises exactly the trajectory it always did.
+    fn test(nets: Nets, n: usize, reqs: &'a Requirements<Layout>, prices: &'a gp::Prices) -> Self {
+        Sa {
+            cell_nets: nets.cell_nets(n),
+            nets,
+            reqs,
+            prices,
+            oracle: &pnr_core::NullOracle,
+            macros: &[],
+            variants: &[],
+            dilation: 0,
+            budget: std::cell::Cell::new(0),
+            grad: Vec::new(),
+        }
+    }
 }
 
 impl DetailedPlacer for Annealer {
@@ -215,6 +308,7 @@ impl DetailedPlacer for Annealer {
         _layers: &[LayerId],
         fixed: &[bool],
         prices: &mut gp::Prices,
+        oracle: &dyn pnr_core::Oracle,
         seed: u64,
     ) -> (Layout, Report) {
         // Detailed placement is layer-agnostic (see the trait doc): bounded-move SA
@@ -320,6 +414,12 @@ impl DetailedPlacer for Annealer {
             nets,
             reqs,
             prices,
+            oracle,
+            macros,
+            variants,
+            dilation: i64::from(cfg.oracle_dilation_nm),
+            budget: std::cell::Cell::new(cfg.oracle_budget),
+            grad: Vec::new(),
         };
         // clamp windows are absolute coords; keep footprints within the coarse
         // bbox by clamping to [min+half, max-half].
@@ -375,6 +475,18 @@ impl DetailedPlacer for Annealer {
         let range_min = cfg.grid.max(1) as f32 / span.max(1.0);
 
         for iter in 0..cfg.max_iters {
+            // ---- FD-PEX gradient field refresh (PLAN §1: "per candidate move
+            // for the innermost parasitic gradient estimate", bought at epoch
+            // cadence) ---------------------------------------------------------
+            // Probe ≤64 flagged cells with bbox-scoped `pex_cap_ff` and store a
+            // per-cell (gx, gy); every trial move *between* refreshes then feels
+            // the measured gradient at zero oracle cost through the linear term
+            // in `pex_cost`. `NullOracle` measures 0 everywhere ⇒ all-zero field
+            // ⇒ byte-identical trajectories (the regression anchor).
+            if cfg.pex_probe_every > 0 && iter % cfg.pex_probe_every == 0 {
+                probe_gradients(&mut sa, &mut l, cfg.pex_probe_nm, n);
+            }
+
             let r = (range * span) as i32;
             let mut proposed = 0u32;
             let mut accepted = 0u32;
@@ -470,12 +582,19 @@ impl DetailedPlacer for Annealer {
             let accept_rate = accepted as f32 / proposed.max(1) as f32;
             let od = overlap_density(&l);
             let open = analog_violations(reqs, &l);
-            // Stop after min_iters when frozen, overlap gone, and hard clean
-            // (engine SaStop / docs "Stage 2 stop").
+            // Stop after min_iters when frozen, overlap gone, hard clean, AND the
+            // oracle sees a clean full layout (engine SaStop / docs "Stage 2
+            // stop"; PLAN §1's per-epoch DRC joining the stop criterion). The
+            // oracle term is last so the full-layout stamp is only paid when the
+            // proxies would otherwise terminate — this is what stops a run from
+            // exiting Φ-clean while carrying an oracle-visible implant merge the
+            // proxies cannot see. `NullOracle` reports 0, restoring the old
+            // criterion exactly.
             if iter + 1 >= cfg.min_iters
                 && accept_rate < cfg.min_accept_rate
                 && od <= 1e-4
                 && open == 0
+                && epoch_oracle_viol(&sa, &l) == 0
             {
                 break;
             }
@@ -600,6 +719,232 @@ fn project_hard(reqs: &Requirements<Layout>, l: &mut Layout, fixed: &[bool], gri
     true
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//  The free-oracle tier (PLAN §1 / §3c, D4-revised): per-accepted veto,
+//  LVS merge guard, epoch DRC, FD-PEX field — risk-gated, bbox-scoped,
+//  hard-capped, never per-candidate at serial cost.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// The macro cell `i` is currently drawn as — the same resolution rule as
+/// [`choose_variants`]: the chosen alternative, else `macros[i]`.
+fn chosen<'a>(sa: &'a Sa, l: &Layout, i: usize) -> Option<&'a Macro> {
+    sa.variants
+        .get(i)
+        .and_then(|v| v.alternatives.get(*l.variant.get(i)? as usize))
+        .or_else(|| sa.macros.get(i))
+}
+
+/// Does cell `i` carry drawn geometry the oracle could object to?
+///
+/// ponytail: "diffusion-bearing" is proxied by "any non-empty macro". `dp` has no
+/// PDK, so it cannot tell a diffusion layer from a metal one; the conservative
+/// proxy over-fires the risk gate on all-metal cells (routes don't exist inside
+/// dp, so those are rare), never under-fires. The ceiling is a real layer test —
+/// thread a diffusion `LayerId` set from the PDK through `DetailedCfg` if the
+/// budget ever drains on cells that cannot merge.
+fn bearing(sa: &Sa, l: &Layout, i: usize) -> bool {
+    chosen(sa, l, i).is_some_and(|m| !m.shapes.is_empty())
+}
+
+/// Do cells `a` and `b` share an abutment group? Sharing is by design — merged
+/// diffusion between them is intentional, so the merge guard exempts the pair.
+fn same_group(l: &Layout, a: usize, b: usize) -> bool {
+    l.groups.iter().any(|g| {
+        g.len() > 1
+            && g.iter().any(|d| d.0 as usize == a)
+            && g.iter().any(|d| d.0 as usize == b)
+    })
+}
+
+/// Cells whose bboxes intersect the dilated bbox of `moved` — the bbox-scoped
+/// oracle region. Routes don't exist inside `dp`, so cells are all there is to
+/// stamp.
+fn region_cells(sa: &Sa, l: &Layout, moved: &[usize]) -> Vec<usize> {
+    let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for &c in moved {
+        x0 = x0.min(i64::from(l.x[c]) - i64::from(l.hw[c]) - sa.dilation);
+        y0 = y0.min(i64::from(l.y[c]) - i64::from(l.hh[c]) - sa.dilation);
+        x1 = x1.max(i64::from(l.x[c]) + i64::from(l.hw[c]) + sa.dilation);
+        y1 = y1.max(i64::from(l.y[c]) + i64::from(l.hh[c]) + sa.dilation);
+    }
+    (0..l.x.len())
+        .filter(|&i| {
+            i64::from(l.x[i]) - i64::from(l.hw[i]) <= x1
+                && i64::from(l.x[i]) + i64::from(l.hw[i]) >= x0
+                && i64::from(l.y[i]) - i64::from(l.hh[i]) <= y1
+                && i64::from(l.y[i]) + i64::from(l.hh[i]) >= y0
+        })
+        .collect()
+}
+
+/// Stamp `cells` at their placed positions via [`pnr_core::place_macro`] and
+/// flatten the shapes. Returns `(cells that contributed geometry, shapes)`; the
+/// count is what the merge guard hands the oracle as `expected_devices`.
+///
+/// ponytail: expected = stamped-cell count assumes one extracted device per
+/// drawn cell. A collapsed multi-device macro extracts as N devices, so a merged
+/// pair in the region reads as a mismatch and the guard vetoes conservatively —
+/// it only removes accepts, never legality. Ceiling: thread `devices_of` counts
+/// from `cellgen` through the stage if merged cells start starving the search.
+fn stamp(sa: &Sa, l: &Layout, cells: &[usize]) -> (usize, Vec<pnr_core::Shape>) {
+    let mut drawn = 0usize;
+    let mut shapes = Vec::new();
+    for &i in cells {
+        if let Some(m) = chosen(sa, l, i) {
+            if m.shapes.is_empty() {
+                continue;
+            }
+            shapes.extend(pnr_core::place_macro(m, l, i).shapes);
+            drawn += 1;
+        }
+    }
+    (drawn, shapes)
+}
+
+/// **Per-accepted-move oracle veto** (PLAN §1's incremental DRC + §3c's LVS
+/// merge guard). Called only after [`accept`] said yes; `true` means the caller
+/// reverts exactly as it would a rejection.
+///
+/// Φ-monotonicity is preserved because the veto only *removes* accepts: every
+/// surviving move still passed the lexicographic gate, so the accepted sequence
+/// is a subsequence of a Φ-non-increasing one and remains Φ-non-increasing.
+/// Consumes no RNG, so the Metropolis stream is untouched — with
+/// [`pnr_core::NullOracle`] (never vetoes) the trajectory is byte-identical to a
+/// build without this call.
+///
+/// Cost discipline, in order:
+/// 1. **Hard cap** — a drained [`Sa::budget`] degrades to proxy-only scoring.
+///    The drain is trajectory-ordered (moves are proposed in seed order), hence
+///    seed-deterministic.
+/// 2. **Risk gate** — O(n) scan: fire only when a moved diffusion-bearing cell
+///    sits within [`Sa::dilation`] (edge-to-edge, per axis) of a cross-group
+///    diffusion-bearing neighbour. Same-abutment-group pairs are exempt:
+///    share-by-design is the legal branch of §3c's disjunction. Conservative
+///    "close after the move" rather than "created/tightened" — a moved cell's
+///    gaps all changed, and the cheap form only over-fires within the cap.
+/// 3. **Bbox scope** — stamp only [`region_cells`], not the die.
+///
+/// The DRC veto and the merge guard share one risk predicate because the
+/// diffusion proxy ([`bearing`]) cannot tell them apart; with a real layer test
+/// the merge guard would fire on the diffusion-vs-diffusion subset only.
+fn oracle_veto(sa: &Sa, l: &Layout, moved: &[usize]) -> bool {
+    if sa.budget.get() == 0 {
+        return false; // budget exhausted: proxy-only from here on.
+    }
+    let mut risky = false;
+    'scan: for &c in moved {
+        if !bearing(sa, l, c) {
+            continue;
+        }
+        for o in 0..l.x.len() {
+            if o == c || !bearing(sa, l, o) || same_group(l, c, o) {
+                continue;
+            }
+            let dx = (i64::from(l.x[c]) - i64::from(l.x[o])).abs()
+                - i64::from(l.hw[c])
+                - i64::from(l.hw[o]);
+            let dy = (i64::from(l.y[c]) - i64::from(l.y[o])).abs()
+                - i64::from(l.hh[c])
+                - i64::from(l.hh[o]);
+            if dx < sa.dilation && dy < sa.dilation {
+                risky = true;
+                break 'scan;
+            }
+        }
+    }
+    if !risky {
+        return false;
+    }
+    let cells = region_cells(sa, l, moved);
+    let (drawn, shapes) = stamp(sa, l, &cells);
+    if drawn == 0 {
+        return false;
+    }
+    sa.budget.set(sa.budget.get() - 1);
+    if sa.oracle.drc(&shapes).violations > 0 {
+        return true;
+    }
+    // LVS-after-merge guard (PLAN §3c): DRC-clean is not enough — two abutting
+    // legal devices whose implants merged extract as one wrong/ambiguous device,
+    // and nothing downstream repairs it because nothing is illegal. Ask the
+    // extractor whether it still sees one device per stamped cell.
+    if sa.budget.get() == 0 {
+        return false;
+    }
+    sa.budget.set(sa.budget.get() - 1);
+    sa.oracle.merge_ambiguous(&shapes, drawn)
+}
+
+/// Epoch-tail **full-layout** oracle DRC — the violation count the stop
+/// criterion requires to be 0 alongside frozen + overlap-free + Φ-clean.
+/// Budget-drained (or nothing drawn) reads 0: proxy-only degradation,
+/// trajectory-ordered like everything else on the budget.
+fn epoch_oracle_viol(sa: &Sa, l: &Layout) -> u32 {
+    if sa.budget.get() == 0 {
+        return 0;
+    }
+    let cells: Vec<usize> = (0..l.x.len()).collect();
+    let (drawn, shapes) = stamp(sa, l, &cells);
+    if drawn == 0 {
+        return 0;
+    }
+    sa.budget.set(sa.budget.get() - 1);
+    sa.oracle.drc(&shapes).violations
+}
+
+/// One FD-PEX probe: displace cell `c` by `(dx, dy)`, stamp its region, measure
+/// total capacitance, restore. Pure in effect — `l` comes back untouched.
+fn pex_probe(sa: &Sa, l: &mut Layout, c: usize, cells: &[usize], dx: i32, dy: i32) -> f32 {
+    let (ox, oy) = (l.x[c], l.y[c]);
+    l.x[c] = ox + dx;
+    l.y[c] = oy + dy;
+    let (_, shapes) = stamp(sa, l, cells);
+    l.x[c] = ox;
+    l.y[c] = oy;
+    sa.budget.set(sa.budget.get() - 1);
+    sa.oracle.pex_cap_ff(&shapes)
+}
+
+/// Refresh the FD-PEX gradient field: flag ≤ [`MAX_PEX_FLAGS`] cells via
+/// [`RuleBatch::touched`] over `reqs.budget ∪ reqs.cost` (sorted + deduped, so
+/// the flag set is independent of batch order), probe each ±`probe_nm` in x and
+/// y with bbox-scoped [`pnr_core::Oracle::pex_cap_ff`] (region = flagged cell +
+/// neighbours within the dilation), and store per-cell `(gx, gy)` in fF/nm.
+///
+/// Budget-capped like every oracle path: a cell is skipped once fewer than its
+/// four probes remain, leaving the field partially refreshed — deterministic,
+/// because the drain is trajectory-ordered.
+fn probe_gradients(sa: &mut Sa, l: &mut Layout, probe_nm: i32, n: usize) {
+    let mut ids: Vec<u32> = Vec::new();
+    for b in sa.reqs.budget.iter().chain(sa.reqs.cost.iter()) {
+        b.touched(&mut ids);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids.retain(|&i| (i as usize) < n);
+    ids.truncate(MAX_PEX_FLAGS);
+
+    let d = probe_nm.max(1);
+    let mut grad = vec![(0.0f32, 0.0f32); n];
+    for &id in &ids {
+        let c = id as usize;
+        // A shape-less cell cannot change the region's capacitance by moving.
+        if !bearing(sa, l, c) {
+            continue;
+        }
+        if sa.budget.get() < 4 {
+            break;
+        }
+        let cells = region_cells(sa, l, &[c]);
+        let gx = (pex_probe(sa, l, c, &cells, d, 0) - pex_probe(sa, l, c, &cells, -d, 0))
+            / (2.0 * d as f32);
+        let gy = (pex_probe(sa, l, c, &cells, 0, d) - pex_probe(sa, l, c, &cells, 0, -d))
+            / (2.0 * d as f32);
+        grad[c] = (gx, gy);
+    }
+    sa.grad = grad;
+}
+
 /// Analog-cost delta for tentatively moving `c` to `(nx, ny)`: apply, measure
 /// `Σ reqs.cost`, restore. Analog-blind (never names a term). `l` is `&mut` so
 /// the probe mutates in place without cloning the whole SoA.
@@ -698,12 +1043,17 @@ fn try_move(
     ny: i32,
 ) -> bool {
     let before_key = gate_key(sa, l, &[c]);
-    // PEX only: overlap is Φ's business now, so the objective is HPWL + analog.
-    let d = sa.hpwl_delta(l, c, nx, ny) + delta_analog(sa.reqs, sa.prices, l, c, nx, ny);
+    // PEX only: overlap is Φ's business now, so the objective is HPWL + analog
+    // + the FD-PEX gradient term (linear, so its delta is closed-form).
+    let d = sa.hpwl_delta(l, c, nx, ny)
+        + delta_analog(sa.reqs, sa.prices, l, c, nx, ny)
+        + sa.grad_delta(l, c, nx, ny);
     let (ox, oy) = (l.x[c], l.y[c]);
     l.x[c] = nx;
     l.y[c] = ny;
-    if accept(before_key, gate_key(sa, l, &[c]), d, temp, rng) {
+    // The oracle veto runs only on an *accepted* move (short-circuit) and
+    // reverts exactly like a rejection — see `oracle_veto` for the discipline.
+    if accept(before_key, gate_key(sa, l, &[c]), d, temp, rng) && !oracle_veto(sa, l, &[c]) {
         true
     } else {
         l.x[c] = ox;
@@ -738,7 +1088,9 @@ fn try_swap(
     l.x[o] = ox;
     l.y[o] = oy;
     let after_key = gate_key(sa, l, &[c, o]);
-    if accept(before_key, after_key, pex_cost(sa, l) - before_cost, temp, rng) {
+    if accept(before_key, after_key, pex_cost(sa, l) - before_cost, temp, rng)
+        && !oracle_veto(sa, l, &[c, o])
+    {
         true
     } else {
         l.x[c] = scx;
@@ -770,7 +1122,10 @@ fn try_branch(
     ids: &[pnr_core::ids::BranchId],
 ) -> bool {
     let bid = usize::from(ids[rng.below(ids.len())].0);
-    // No cell moved, so the incident-overlap term is empty on both sides.
+    // No cell moved, so the incident-overlap term is empty on both sides — and
+    // for the same reason there is no oracle veto here: the drawn geometry is
+    // identical either side of a flip, so the oracle has nothing new to judge
+    // (the FD-PEX grad term in `pex_cost` cancels too).
     let before_key = gate_key(sa, l, &[]);
     let before_cost = pex_cost(sa, l);
     l.branch[bid] = !l.branch[bid];
@@ -853,7 +1208,9 @@ fn try_rotate(
     l.x[c] = clamp_x(saved.3, l.hw[c]);
     l.y[c] = clamp_y(saved.4, l.hh[c]);
 
-    if accept(before_key, gate_key(sa, l, &[c]), pex_cost(sa, l) - before_cost, temp, rng) {
+    if accept(before_key, gate_key(sa, l, &[c]), pex_cost(sa, l) - before_cost, temp, rng)
+        && !oracle_veto(sa, l, &[c])
+    {
         true
     } else {
         (l.orient[c], l.hw[c], l.hh[c], l.x[c], l.y[c]) = saved;
@@ -980,7 +1337,9 @@ fn try_reshape(
         sa.nets.reshape_cell(m, &sa.cell_nets[m], alt);
     }
 
-    if accept(before_key, gate_key(sa, l, group), pex_cost(sa, l) - before_cost, temp, rng) {
+    if accept(before_key, gate_key(sa, l, group), pex_cost(sa, l) - before_cost, temp, rng)
+        && !oracle_veto(sa, l, group)
+    {
         true
     } else {
         for (i, &m) in group.iter().enumerate() {
@@ -999,8 +1358,21 @@ fn try_reshape(
 /// Metropolis is allowed to vote on. Overlap used to be in here behind a ramped
 /// weight and is now in [`gate_key`] instead; with it gone the term no longer depends
 /// on *which* devices moved, which is why this takes no `moved` slice.
+///
+/// The third summand is the FD-PEX gradient field's linear term `Σ gx·x + gy·y`
+/// (fF, positions in nm): the *measured* capacitance slope at each flagged cell,
+/// refreshed per [`probe_gradients`]. Linear on purpose — the base capacitance
+/// at the probe point cancels in every before/after delta, so only the slope
+/// steers, and a zero field (empty `grad`, or [`pnr_core::NullOracle`]'s
+/// all-zero measurements) contributes exactly `0.0` to every comparison.
 fn pex_cost(sa: &Sa, l: &Layout) -> f64 {
-    hpwl(&sa.nets, l) + f64::from(analog_cost(sa.reqs, l, sa.prices))
+    let grad: f64 = sa
+        .grad
+        .iter()
+        .zip(l.x.iter().zip(&l.y))
+        .map(|(&(gx, gy), (&x, &y))| f64::from(gx) * f64::from(x) + f64::from(gy) * f64::from(y))
+        .sum();
+    hpwl(&sa.nets, l) + f64::from(analog_cost(sa.reqs, l, sa.prices)) + grad
 }
 
 /// Metropolis criterion (engine `slots::Metropolis`).
@@ -1024,9 +1396,11 @@ impl DetailedPlacer for Placeholder {
         layers: &[LayerId],
         fixed: &[bool],
         prices: &mut gp::Prices,
+        oracle: &dyn pnr_core::Oracle,
         seed: u64,
     ) -> (Layout, Report) {
-        Annealer::default().place(coarse, macros, variants, reqs, layers, fixed, prices, seed)
+        Annealer::default()
+            .place(coarse, macros, variants, reqs, layers, fixed, prices, oracle, seed)
     }
 }
 
@@ -1075,7 +1449,7 @@ mod rotate_tests {
         let coarse = bench();
         let reqs = Requirements::<Layout>::default();
         let (l, _) = Annealer::default()
-            .place(&coarse, &[], &[], &reqs, &[], &[false; 4], &mut gp::Prices::new(), 42);
+            .place(&coarse, &[], &[], &reqs, &[], &[false; 4], &mut gp::Prices::new(), &pnr_core::NullOracle, 42);
 
         assert_eq!(l.orient.len(), 4);
         for i in 0..4 {
@@ -1096,7 +1470,7 @@ mod rotate_tests {
         let reqs = Requirements::<Layout>::default();
         let run = || {
             Annealer::default()
-                .place(&coarse, &[], &[], &reqs, &[], &[false; 4], &mut gp::Prices::new(), 7)
+                .place(&coarse, &[], &[], &reqs, &[], &[false; 4], &mut gp::Prices::new(), &pnr_core::NullOracle, 7)
                 .0
                 .orient
         };
@@ -1117,7 +1491,7 @@ mod rotate_tests {
         let coarse = bench();
         let reqs = Requirements::<Layout>::default();
         let (l, _) = Annealer::default()
-            .place(&coarse, &[], &[], &reqs, &[], &[false; 4], &mut gp::Prices::new(), 0);
+            .place(&coarse, &[], &[], &reqs, &[], &[false; 4], &mut gp::Prices::new(), &pnr_core::NullOracle, 0);
         assert!(
             l.orient[2..].iter().any(|&o| o != Orient::R0),
             "no ungrouped device turned: {:?}",
@@ -1209,6 +1583,7 @@ mod variant_tests {
                 &[],
                 &[false; 2],
                 &mut gp::Prices::new(),
+                &pnr_core::NullOracle,
                 seed,
             );
             fired |= l.variant != coarse.variant;
@@ -1251,6 +1626,7 @@ mod variant_tests {
                 &[],
                 &[true, false],
                 &mut gp::Prices::new(),
+                &pnr_core::NullOracle,
                 seed,
             );
             assert_eq!(l.variant[0], 0, "seed {seed}: pinned cell reshaped");
@@ -1285,6 +1661,7 @@ mod variant_tests {
                 &[],
                 &[false; 2],
                 &mut gp::Prices::new(),
+                &pnr_core::NullOracle,
                 seed,
             );
             assert_eq!(
@@ -1324,6 +1701,7 @@ mod variant_tests {
                 &[],
                 &[false; 2],
                 &mut gp::Prices::new(),
+                &pnr_core::NullOracle,
                 seed,
             );
             l.variant[0] != l.variant[1]
@@ -1388,7 +1766,7 @@ mod variant_tests {
         let nets = Nets::from_macros(&[pin_alt(0), pin_alt(0)]);
         assert_eq!(nets.count(), 1, "precondition: the two cells must share one net");
         let mut sa =
-            Sa { cell_nets: nets.cell_nets(2), nets, reqs: &reqs, prices: &prices };
+            Sa::test(nets, 2, &reqs, &prices);
         let mut rng = SplitMix64::new(1);
         // Clamps that never bind: this is about pricing, not about the die edge.
         let free = |c: i32, _half: i32| c;
@@ -1485,7 +1863,7 @@ mod acceptance_tests {
         let (reqs, mut l) = bench();
         let nets = Nets::from_macros(&[]);
         let prices = gp::Prices::new();
-        let sa = Sa { cell_nets: nets.cell_nets(2), nets, reqs: &reqs, prices: &prices };
+        let sa = Sa::test(nets, 2, &reqs, &prices);
         let mut rng = SplitMix64::new(1);
 
         // Precondition: sliding 0 onto 1 is a strict PEX improvement...
@@ -1528,7 +1906,7 @@ mod acceptance_tests {
         reqs.budget = vec![Box::new(vec![Separation])];
         let nets = Nets::from_macros(&[]);
         let prices = gp::Prices::new();
-        let sa = Sa { cell_nets: nets.cell_nets(2), nets, reqs: &reqs, prices: &prices };
+        let sa = Sa::test(nets, 2, &reqs, &prices);
         let mut rng = SplitMix64::new(1);
 
         // Closing to a 1 µm gap: no overlap (footprints are 2 µm wide, so V is
@@ -1553,7 +1931,7 @@ mod acceptance_tests {
         let (reqs, mut l) = bench();
         let nets = Nets::from_macros(&[]);
         let prices = gp::Prices::new();
-        let sa = Sa { cell_nets: nets.cell_nets(2), nets, reqs: &reqs, prices: &prices };
+        let sa = Sa::test(nets, 2, &reqs, &prices);
         let mut rng = SplitMix64::new(1);
 
         // Away from device 1: no overlap either side (Φ unchanged), and PEX rises.
@@ -1627,7 +2005,7 @@ mod branch_tests {
         let mut l = bench(100, vec![true]);
         let nets = Nets::from_macros(&[]);
         let prices = gp::Prices::new();
-        let sa = Sa { cell_nets: nets.cell_nets(2), nets, reqs: &reqs, prices: &prices };
+        let sa = Sa::test(nets, 2, &reqs, &prices);
         let mut rng = SplitMix64::new(1);
         let ids = [BranchId(0)];
 
@@ -1658,13 +2036,13 @@ mod branch_tests {
         let reqs = reqs(3, true);
         let coarse = bench(200_000, Vec::new()); // table absent entirely
         let (l, _) = Annealer::default()
-            .place(&coarse, &[], &[], &reqs, &[], &[true, true], &mut gp::Prices::new(), 9);
+            .place(&coarse, &[], &[], &reqs, &[], &[true, true], &mut gp::Prices::new(), &pnr_core::NullOracle, 9);
         assert_eq!(l.branch, vec![false, false, false, true], "resized to id 3 + seeded");
 
         // A table that is already long enough is seeded in place, not truncated.
         let coarse = bench(200_000, vec![false; 6]);
         let (l, _) = Annealer::default()
-            .place(&coarse, &[], &[], &reqs, &[], &[true, true], &mut gp::Prices::new(), 9);
+            .place(&coarse, &[], &[], &reqs, &[], &[true, true], &mut gp::Prices::new(), &pnr_core::NullOracle, 9);
         assert_eq!(l.branch, vec![false, false, false, true, false, false]);
     }
 }
@@ -1719,7 +2097,7 @@ mod projection_tests {
     fn symmetry_holds_at_exit_with_room_to_move() {
         let (reqs, coarse) = bench();
         let (l, _) = Annealer::default()
-            .place(&coarse, &[], &[], &reqs, &[], &[false; 2], &mut gp::Prices::new(), 11);
+            .place(&coarse, &[], &[], &reqs, &[], &[false; 2], &mut gp::Prices::new(), &pnr_core::NullOracle, 11);
         assert_eq!(
             analog_violations(&reqs, &l),
             0,
@@ -1747,6 +2125,7 @@ mod projection_tests {
                 &[],
                 &[true, false],
                 &mut gp::Prices::new(),
+                &pnr_core::NullOracle,
                 seed,
             );
             assert_eq!(
@@ -1766,9 +2145,243 @@ mod projection_tests {
         let run = || {
             let (reqs, coarse) = bench();
             let (l, _) = Annealer::default()
-                .place(&coarse, &[], &[], &reqs, &[], &[false; 2], &mut gp::Prices::new(), 7);
+                .place(&coarse, &[], &[], &reqs, &[], &[false; 2], &mut gp::Prices::new(), &pnr_core::NullOracle, 7);
             (l.x, l.y, l.axis)
         };
         assert_eq!(run(), run());
+    }
+}
+
+#[cfg(test)]
+mod oracle_tests {
+    use super::*;
+    use pnr_core::geom::Rect;
+    use pnr_core::{DeviceId, DrcSummary, Oracle, Shape};
+    use std::cell::Cell;
+
+    /// A macro with one drawn shape, so the diffusion proxy (`bearing`) fires.
+    fn solid() -> Macro {
+        let r = Rect { x: 0, y: 0, w: 2_000, h: 2_000 };
+        Macro {
+            shapes: vec![Shape { layer: LayerId(0), rect: r }],
+            pins: Vec::new(),
+            bbox: r,
+        }
+    }
+
+    /// Two solid 2 µm cells in separate groups, 18 µm of clear space between.
+    fn bench() -> Layout {
+        Layout {
+            x: vec![0, 20_000],
+            y: vec![0, 0],
+            hw: vec![1_000; 2],
+            hh: vec![1_000; 2],
+            variant: vec![0; 2],
+            axis: vec![0; 2],
+            branch: vec![false; 2],
+            groups: vec![vec![DeviceId(0)], vec![DeviceId(1)]],
+            orient: vec![Orient::default(); 2],
+            power_uw: vec![0; 2],
+            temp_mc: vec![0; 2],
+        }
+    }
+
+    /// An oracle that flags every region it is shown, counting DRC calls.
+    struct Flagging {
+        calls: Cell<u32>,
+    }
+    impl Oracle for Flagging {
+        fn drc(&self, _shapes: &[Shape]) -> DrcSummary {
+            self.calls.set(self.calls.get() + 1);
+            DrcSummary { violations: 1, shortfall_nm: 100 }
+        }
+        fn pex_cap_ff(&self, _shapes: &[Shape]) -> f32 {
+            0.0
+        }
+        fn merge_ambiguous(&self, _shapes: &[Shape], _expected: usize) -> bool {
+            false
+        }
+    }
+
+    /// **The veto test.** A move `accept` takes must still revert when the
+    /// oracle flags the stamped region — and the risk gate must keep the oracle
+    /// out of moves that end nowhere near a cross-group neighbour.
+    #[test]
+    fn oracle_veto_reverts_an_accepted_risky_move() {
+        let reqs = Requirements::<Layout>::default();
+        let prices = gp::Prices::new();
+        let macros = [solid(), solid()];
+        let oracle = Flagging { calls: Cell::new(0) };
+        let mut sa = Sa::test(Nets::from_macros(&[]), 2, &reqs, &prices);
+        sa.macros = &macros;
+        sa.dilation = 2_000;
+        sa.budget = Cell::new(10);
+        sa.oracle = &oracle;
+        let mut l = bench();
+        let mut rng = SplitMix64::new(1);
+
+        // Far move: ends 13 µm from the neighbour, no gap under the dilation, so
+        // the risk gate must not spend an oracle call — flat objective, accepted.
+        assert!(try_move(&sa, &mut l, &mut rng, 1e12, 0, 5_000, 0));
+        assert_eq!(oracle.calls.get(), 0, "an un-risky move must not call the oracle");
+
+        // Near move: edge gap to the neighbour is 1 µm < 2 µm dilation — risky,
+        // stamped, flagged, and therefore reverted exactly like a rejection.
+        assert!(
+            !try_move(&sa, &mut l, &mut rng, 1e12, 0, 17_000, 0),
+            "an oracle-flagged move must be vetoed"
+        );
+        assert_eq!(l.x[0], 5_000, "the vetoed move must have been reverted");
+        assert_eq!(oracle.calls.get(), 1);
+    }
+
+    /// **The budget valve.** Oracle calls never exceed the budget, and on
+    /// exhaustion the stage degrades to proxy-only: the same risky move that was
+    /// vetoed a call ago now commits, because there is nothing left to pay with.
+    #[test]
+    fn veto_budget_caps_oracle_calls_then_degrades_to_proxy() {
+        let reqs = Requirements::<Layout>::default();
+        let prices = gp::Prices::new();
+        let macros = [solid(), solid()];
+        let oracle = Flagging { calls: Cell::new(0) };
+        let mut sa = Sa::test(Nets::from_macros(&[]), 2, &reqs, &prices);
+        sa.macros = &macros;
+        sa.dilation = 2_000;
+        sa.budget = Cell::new(1);
+        sa.oracle = &oracle;
+        let mut l = bench();
+        let mut rng = SplitMix64::new(1);
+
+        assert!(!try_move(&sa, &mut l, &mut rng, 1e12, 0, 17_000, 0), "budgeted: vetoed");
+        assert_eq!(sa.budget.get(), 0);
+        assert!(
+            try_move(&sa, &mut l, &mut rng, 1e12, 0, 17_000, 0),
+            "budget exhausted: proxy-only, the move commits"
+        );
+        assert_eq!(oracle.calls.get(), 1, "calls must never exceed the budget");
+    }
+
+    /// An oracle that is DRC-clean but reports extraction ambiguity — the
+    /// PLAN §3c hazard the merge guard exists for. Records the expected count.
+    struct Ambiguous {
+        expected_seen: Cell<usize>,
+    }
+    impl Oracle for Ambiguous {
+        fn drc(&self, _shapes: &[Shape]) -> DrcSummary {
+            DrcSummary::default()
+        }
+        fn pex_cap_ff(&self, _shapes: &[Shape]) -> f32 {
+            0.0
+        }
+        fn merge_ambiguous(&self, _shapes: &[Shape], expected: usize) -> bool {
+            self.expected_seen.set(expected);
+            true
+        }
+    }
+
+    /// **The merge guard.** DRC-clean is not enough: a placement that leaves the
+    /// extractor seeing the wrong device count is vetoed, and the expected count
+    /// handed over is the number of stamped cells in the region.
+    #[test]
+    fn merge_guard_vetoes_on_extraction_ambiguity() {
+        let reqs = Requirements::<Layout>::default();
+        let prices = gp::Prices::new();
+        let macros = [solid(), solid()];
+        let oracle = Ambiguous { expected_seen: Cell::new(0) };
+        let mut sa = Sa::test(Nets::from_macros(&[]), 2, &reqs, &prices);
+        sa.macros = &macros;
+        sa.dilation = 2_000;
+        sa.budget = Cell::new(10);
+        sa.oracle = &oracle;
+        let mut l = bench();
+        let mut rng = SplitMix64::new(1);
+
+        assert!(
+            !try_move(&sa, &mut l, &mut rng, 1e12, 0, 17_000, 0),
+            "an extraction-ambiguous move must be vetoed"
+        );
+        assert_eq!(l.x[0], 0, "the vetoed move must have been reverted");
+        assert_eq!(oracle.expected_seen.get(), 2, "both region cells were stamped");
+    }
+
+    /// A PEX oracle whose total is linear in x (Σ shape rect.x, fF) — the field
+    /// whose finite difference the probe must recover exactly: 1 fF/nm in x,
+    /// 0 in y.
+    struct LinearPex;
+    impl Oracle for LinearPex {
+        fn drc(&self, _shapes: &[Shape]) -> DrcSummary {
+            DrcSummary::default()
+        }
+        fn pex_cap_ff(&self, shapes: &[Shape]) -> f32 {
+            shapes.iter().map(|s| s.rect.x as f32).sum()
+        }
+        fn merge_ambiguous(&self, _shapes: &[Shape], _expected: usize) -> bool {
+            false
+        }
+    }
+
+    /// A cost rule that names cell 0 — what flags it for the FD-PEX probe via
+    /// `RuleBatch::touched` (all touches, not just violating ones).
+    #[derive(Clone, Copy)]
+    struct Touch0;
+    impl analog::Rule for Touch0 {
+        type On = Layout;
+        fn cost(self, _: &Layout) -> f32 {
+            0.0
+        }
+        fn touches(self, out: &mut Vec<u32>) {
+            out.push(0);
+        }
+    }
+
+    /// **The FD-gradient test, measurement half**: the probe recovers the mock
+    /// field's slope at the flagged cell and leaves unflagged cells at zero.
+    #[test]
+    fn probe_measures_a_linear_pex_field() {
+        let reqs = Requirements::<Layout> {
+            hard: Vec::new(),
+            budget: Vec::new(),
+            cost: vec![Box::new(vec![Touch0])],
+        };
+        let prices = gp::Prices::new();
+        let macros = [solid(), solid()];
+        let mut sa = Sa::test(Nets::from_macros(&[]), 2, &reqs, &prices);
+        sa.macros = &macros;
+        sa.dilation = 2_000;
+        sa.budget = Cell::new(100);
+        sa.oracle = &LinearPex;
+        let mut l = bench();
+
+        probe_gradients(&mut sa, &mut l, 64, 2);
+        let (gx, gy) = sa.grad[0];
+        assert!((gx - 1.0).abs() < 1e-6, "x slope of Σ rect.x is 1 fF/nm, got {gx}");
+        assert!(gy.abs() < 1e-6, "the field is flat in y, got {gy}");
+        assert_eq!(sa.grad[1], (0.0, 0.0), "unflagged cell carries no gradient");
+        // Positions must come back untouched: the probe is pure in effect.
+        assert_eq!((l.x[0], l.y[0]), (0, 0));
+    }
+
+    /// **The FD-gradient test, decision half**: with a gradient stored, the
+    /// linear term changes accept decisions deterministically — downhill (−x)
+    /// accepted, uphill (+x) refused at temp 0 — on an otherwise flat objective.
+    #[test]
+    fn gradient_term_steers_accept_decisions() {
+        let reqs = Requirements::<Layout>::default();
+        let prices = gp::Prices::new();
+        let mut sa = Sa::test(Nets::from_macros(&[]), 2, &reqs, &prices);
+        sa.grad = vec![(1.0, 0.0), (0.0, 0.0)];
+        let mut l = bench();
+        let mut rng = SplitMix64::new(1);
+
+        assert!(
+            try_move(&sa, &mut l, &mut rng, 0.0, 0, -5_000, 0),
+            "a move down the measured capacitance slope must be accepted"
+        );
+        assert_eq!(l.x[0], -5_000);
+        assert!(
+            !try_move(&sa, &mut l, &mut rng, 0.0, 0, 0, 0),
+            "a move back up the slope must be refused at temp 0"
+        );
+        assert_eq!(l.x[0], -5_000, "the refused move must have been reverted");
     }
 }

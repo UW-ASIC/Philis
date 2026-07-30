@@ -261,6 +261,20 @@ pub trait RuleBatch<On> {
         let _ = (state, out);
     }
 
+    /// Ids touched by **every** rule in this batch, satisfied or not, appended
+    /// to `out` — contrast [`violating_ids`](RuleBatch::violating_ids), which
+    /// filters to the violated subset and therefore needs a state to score.
+    ///
+    /// This is the FD-PEX flagging seam: the oracle tier probes the cells the
+    /// budget/cost rules *care about*, not just the ones currently failing —
+    /// a satisfied coupling budget still wants its victim steered downhill.
+    /// Takes no state for the same reason: which ids a rule constrains is
+    /// static. The default pushes nothing, matching [`Rule::touches`]'s "no
+    /// targeted repair for this rule".
+    fn touched(&self, out: &mut Vec<u32>) {
+        let _ = out;
+    }
+
     /// Project `state` onto this batch's feasible set. See [`Rule::project`].
     fn project(&self, state: &mut On, grid: i32) {
         let _ = (state, grid);
@@ -313,6 +327,11 @@ impl<R: Rule> RuleBatch<R::On> for Vec<R> {
     }
     fn violating_ids(&self, s: &R::On, out: &mut Vec<u32>) {
         for r in self.iter().filter(|r| !r.satisfied(s)) {
+            r.touches(out);
+        }
+    }
+    fn touched(&self, out: &mut Vec<u32>) {
+        for r in self.iter() {
             r.touches(out);
         }
     }
@@ -513,6 +532,36 @@ mod tests {
         let (pc, ac) = (p.cost(&r), a.cost(&r));
         let spread = pc.max(ac) / pc.min(ac);
         assert!(spread > 10.0, "raw costs are incommensurable: {pc} vs {ac} (×{spread})");
+    }
+
+    /// `touched` is the unfiltered half of `violating_ids`: every rule's ids,
+    /// satisfied or not — the FD-PEX flagging contract.
+    #[test]
+    fn touched_pushes_every_rule_not_just_violating() {
+        #[derive(Clone, Copy)]
+        struct T {
+            id: u32,
+            ok: bool,
+        }
+        impl Rule for T {
+            type On = ();
+            fn cost(self, _: &()) -> f32 {
+                0.0
+            }
+            fn satisfied(self, _: &()) -> bool {
+                self.ok
+            }
+            fn touches(self, out: &mut Vec<u32>) {
+                out.push(self.id);
+            }
+        }
+        let batch: Vec<T> = vec![T { id: 1, ok: true }, T { id: 2, ok: false }];
+        let mut all = Vec::new();
+        batch.touched(&mut all);
+        assert_eq!(all, vec![1, 2], "touched must not filter on satisfaction");
+        let mut viol = Vec::new();
+        batch.violating_ids(&(), &mut viol);
+        assert_eq!(viol, vec![2], "violating_ids still filters");
     }
 
     #[test]
