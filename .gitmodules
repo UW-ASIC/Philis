@@ -1,0 +1,6 @@
+[submodule "new_skeleton/benchmarks/competition/ALIGN"]
+	path = new_skeleton/benchmarks/competition/ALIGN
+	url = https://github.com/ALIGN-analoglayout/ALIGN-public.git
+[submodule "new_skeleton/benchmarks/competition/MAGICAL-CIRCUITS"]
+	path = new_skeleton/benchmarks/competition/MAGICAL-CIRCUITS
+	url = https://github.com/MAGICAL-eda/MAGICAL-CIRCUITS.git
