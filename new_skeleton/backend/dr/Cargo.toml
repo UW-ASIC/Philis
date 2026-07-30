@@ -1,0 +1,10 @@
+[package]
+name = "dr"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pnr_core = { path = "../../kernel/core" }
+analog = { path = "../../kernel/analog" }
+# dr reuses gr's shared routing mechanics (grid, PathFinder, geometry extraction).
+gr = { path = "../gr" }

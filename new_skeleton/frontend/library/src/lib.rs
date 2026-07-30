@@ -406,7 +406,6 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // themselves.
     let cellgen::Cells { spaces: variants, cell_of, devices_of } =
         cellgen::enumerate(&netlist, injected, &problem.constraints, pdk);
-    let n_cells = variants.len();
 
     // Re-point every placement rule at the collapsed cell space. Feedback batches
     // are appended *after* this (inside the loop) and are already cell-indexed —
@@ -422,7 +421,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         b.retarget(&cell_of);
     }
     #[cfg(debug_assertions)]
-    debug_check_retargeted(&problem, n_cells, &cell_of);
+    debug_check_retargeted(&problem, variants.len(), &cell_of);
 
     // Injected-block pins, now cell-length. Injected devices never merge, so
     // any-member == all-members.
@@ -780,10 +779,10 @@ fn lex_key(
 ) -> LexKey {
     let (pv, pt, pc) = place.lex();
     let (rv, rt, rc) = route.lex();
-    // The analog Θ contribution. Still a *count* of unmet rules rather than a summed
-    // residual, because `metadata::BudgetStatus` has no measured margin to sum — see
-    // `MetadataReport::theta`, which owns that explanation and the upgrade path, and
-    // the missing-margin debt in `docs/API-WISH.md`.
+    // The analog Θ contribution: metadata's budget-arm residual sum in milli-budgets
+    // (see `MetadataReport::theta` for the deliberate ~×2 double-weighing with the
+    // pt/rt terms — the stage reports carry the same residuals; monotone-safe,
+    // cleanup deferred).
     (pv + rv + drc_hard, pt + rt + budgets.theta(), pc + rc)
 }
 

@@ -484,7 +484,7 @@ impl GlobalRouter for GlobalRoute {
             let routes = Routes {
                 wires: vec![Vec::new(); n_nets],
             };
-            let report = score(&routes, reqs, 0.0);
+            let report = score(&routes, reqs, 0.0, 0.0);
             return (routes, report);
         }
 
@@ -566,8 +566,11 @@ impl GlobalRouter for GlobalRoute {
         }
         let routes = Routes { wires };
 
-        // Built-in mechanic: residual gcell overflow. Analog objective added on top.
-        let report = score(&routes, reqs, tel.overflow);
+        // Built-in mechanic: residual gcell overflow, normalised by the grid's total
+        // wiring capacity so its Θ entry is a residual, not a raw node count. Analog
+        // objective added on top.
+        let cap_total = f32::from(cold.graph.cap()) * cold.graph.nodes() as f32;
+        let report = score(&routes, reqs, tel.overflow, cap_total);
         (routes, report)
     }
 }
@@ -620,25 +623,6 @@ fn seg_shape(ax: i32, ay: i32, bx: i32, by: i32, layer: LayerId) -> Shape {
     }
 }
 
-/// `Violation::margin` is an `i64`; a [`analog::RuleBatch::residual`] is a
-/// dimensionless fraction of the rule's own budget. Scale: **milli-budgets**
-/// (`0.5`, i.e. 50% over, becomes `500`).
-///
-/// **The authority for this factor is `gp::mechanics::report`** (its private `milli`).
-/// It is duplicated here rather than shared because `frontend/library::lex_key` *sums*
-/// Θ across the placement and routing stages — two different factors would add
-/// mismatched units into one `f64` and make Θ meaningless while every per-crate test
-/// still passed. Change one side and you must change the other; see the debt note in
-/// `docs/API-WISH.md`.
-///
-/// `ceil`, not `round`: a real violation must never scale down to `margin: 0`, which
-/// [`Report::lex`] reads as *satisfied*.
-#[inline]
-#[must_use]
-pub fn milli_budget(residual: f64) -> i64 {
-    (residual * 1000.0).ceil() as i64
-}
-
 /// The analog half of a routing [`Report`]'s two violation tiers: `(V, Θ)` from
 /// `reqs.hard` and `reqs.budget`, one entry per *violating* batch.
 ///
@@ -653,6 +637,10 @@ pub fn milli_budget(residual: f64) -> i64 {
 /// only `dyn` seam, so the rule identity inside a violating batch is unrecoverable
 /// and the entry is named `"routing {tier} batch {i}"` — a reporting-granularity
 /// limit, not a measurement one.
+///
+/// The milli-budget scale lives in `Violation::from_residual` (pnr_core), the one
+/// home for the factor — `library::lex_key` sums Θ across placement and routing, so
+/// every stage must scale a residual identically.
 #[must_use]
 pub fn analog_tiers(
     routes: &Routes,
@@ -662,10 +650,10 @@ pub fn analog_tiers(
     let mut hard = Vec::new();
     for (i, batch) in reqs.hard.iter().enumerate() {
         if batch.violations(routes) > 0 {
-            hard.push(Violation {
-                rule: format!("routing hard batch {i}"),
-                margin: milli_budget(batch.residual(routes)),
-            });
+            hard.push(Violation::from_residual(
+                format!("routing hard batch {i}"),
+                batch.residual(routes),
+            ));
         }
     }
     // Θ from the declared budgets. `ParasiticBudget`, `CouplingBudget` and
@@ -682,10 +670,8 @@ pub fn analog_tiers(
         .enumerate()
         .filter_map(|(i, batch)| {
             let residual = batch.residual(routes);
-            (residual > 0.0).then(|| Violation {
-                rule: format!("routing budget batch {i}"),
-                margin: milli_budget(residual),
-            })
+            (residual > 0.0)
+                .then(|| Violation::from_residual(format!("routing budget batch {i}"), residual))
         })
         .collect();
     (hard, budget)
@@ -701,23 +687,32 @@ pub fn analog_tiers(
 /// congestion above capacity is a budget the negotiation is still paying down, not an
 /// illegal layout, and it is exactly the number the orchestrator used to recover by
 /// string-matching the rule name.
-pub(crate) fn score(routes: &Routes, reqs: &Requirements<Routes>, overflow: f32) -> Report {
+///
+/// `cap_total` is the grid's total wiring capacity (gcell capacity × node count) —
+/// overflow's denominator. Overflow has no budget of its own to normalise by, so
+/// `Σ(usage − cap) / Σcap` is the residual that makes it commensurate with the
+/// milli-budget entries beside it in Θ (D17). `Report::cost` deliberately keeps the
+/// **raw** overflow: the PEX tier's terms are relative weights within one stage, and
+/// rescaling one of them would silently re-weight that tier.
+pub(crate) fn score(
+    routes: &Routes,
+    reqs: &Requirements<Routes>,
+    overflow: f32,
+    cap_total: f32,
+) -> Report {
     use pnr_core::report::Violation;
     let (hard_violations, mut budget_violations) = analog_tiers(routes, reqs);
-    if overflow > 0.0 {
-        budget_violations.push(Violation {
-            rule: "routing overflow".to_string(),
-            // `ceil`, not a truncating cast: Θ sums margins, so a residual that
-            // rounds to 0 reads as *satisfied* and the search would sit on it.
-            //
-            // Still a raw node-use count, *not* milli-budgets: overflow's budget is
-            // zero, so "fraction of its own budget" is undefined and the only sane
-            // denominator (gcell capacity) is not passed here. So Θ mixes units by
-            // one factor of 1000 — 1 node of overflow now weighs the same as a
-            // 0.1%-over budget. Named in `docs/API-WISH.md`; do not "fix" it by
-            // rescaling one side without a denominator.
-            margin: overflow.ceil() as i64,
-        });
+    debug_assert!(
+        cap_total > 0.0 || overflow == 0.0,
+        "gr::score: positive overflow with no capacity denominator"
+    );
+    if overflow > 0.0 && cap_total > 0.0 {
+        // Normalised by total capacity and milli-scaled by the constructor, so a
+        // congested gcell and a blown coupling budget finally weigh on one scale.
+        // `from_residual` ceils, so a real overflow can never round to a margin of
+        // 0, which `Report::lex` reads as satisfied.
+        budget_violations
+            .push(Violation::from_residual("routing overflow", f64::from(overflow / cap_total)));
     }
     // Criticality blend, matching `dr::score`: the PEX tier sums across stages
     // (`library::lex_key` adds `pc + rc`), so the two routing stages must weigh a
@@ -2095,13 +2090,13 @@ mod tests {
         reqs.budget.push(budget(1_000));
 
         // Inside the cap: no Θ entry at all, and the tier reads feasible.
-        let clean = score(&wire(900), &reqs, 0.0);
+        let clean = score(&wire(900), &reqs, 0.0, 0.0);
         assert!(clean.budget_violations.is_empty(), "900 nm is inside a 1000 nm cap");
         assert_eq!(clean.lex().1, 0.0);
 
         // 1500 / 1000 - 1 = 0.5 over ⇒ 500 milli-budgets (the `gp::mechanics::report`
         // scale). Nonzero is the load-bearing part: a margin of 0 reads as satisfied.
-        let over = score(&wire(1_500), &reqs, 0.0);
+        let over = score(&wire(1_500), &reqs, 0.0, 0.0);
         assert_eq!(over.budget_violations.len(), 1);
         assert_eq!(over.budget_violations[0].margin, 500);
         assert!(
@@ -2122,7 +2117,7 @@ mod tests {
         let margin_of = |cap: i64| {
             let mut reqs = Requirements::<Routes>::default();
             reqs.hard.push(budget(cap));
-            let r = score(&routes, &reqs, 0.0);
+            let r = score(&routes, &reqs, 0.0, 0.0);
             assert_eq!(r.hard_violations.len(), 1, "exactly one violating batch");
             r.hard_violations[0].margin
         };
@@ -2132,6 +2127,23 @@ mod tests {
         let gross = margin_of(1_000); // 3000/1000 - 1 = 2.0 ⇒ 2000
         assert_eq!((slight, gross), (500, 2_000));
         assert!(gross > slight, "a count would make these identical");
+    }
+
+    /// Overflow's Θ entry is a residual over total grid capacity, in milli-budgets —
+    /// not the raw node-use count it used to be (D17: 1 node of overflow used to
+    /// weigh the same as a budget missed by 0.1%). `Report::cost` keeps the raw
+    /// count, because rescaling it would silently re-weight the PEX tier.
+    #[test]
+    fn overflow_theta_is_a_capacity_residual_not_a_count() {
+        let reqs = Requirements::<Routes>::default();
+        // 3 nodes over on a grid with 600 total capacity ⇒ 0.005 ⇒ 5 milli-budgets.
+        let r = score(&wire(100), &reqs, 3.0, 600.0);
+        assert_eq!(r.budget_violations.len(), 1);
+        assert_eq!(r.budget_violations[0].margin, 5);
+        assert_eq!(r.cost, 3.0, "PEX keeps the raw overflow");
+        // Tiny but real overflow must not round to a satisfied 0 (ceil).
+        let tiny = score(&wire(100), &reqs, 1.0, 1_000_000.0);
+        assert_eq!(tiny.budget_violations[0].margin, 1);
     }
 
     #[test]

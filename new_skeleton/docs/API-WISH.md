@@ -333,17 +333,17 @@ Append to this list as each consumer step invents something.
 - **Set-level budgets need a set, not a pair.** PLAN §4c: no pairwise rule can
   express "Σ over all aggressors ≤ budget". A victim flanked by five
   minimum-spaced aggressors passes every pairwise check and blows the budget 5×.
-- **A batch cannot report a real margin.** `RuleBatch` is the only `dyn` seam, so
-  every stage reports `margin: violation_count` against a synthetic
-  `"analog hard batch {i}"` rule name. Both Φ and Θ sum margins (D10), so until a
-  batch can surface a per-instance measured residual, those two tiers are working off
-  counts and cannot tell a 1 nm miss from a 1 µm one.
-  Downstream symptom, so it is fixed in one place: `metadata::BudgetStatus` carries
-  `total`/`satisfied`/`criticality` and no margin, because `satisfied` is derived from
-  `RuleBatch::violations` — a count. `MetadataReport::theta()` therefore returns the
-  count of unmet rules, and that is the whole analog contribution to the lex key's
-  middle tier. The call site (`library::lex_key`) does not change when a real residual
-  arrives; only `theta()`'s body does.
+- ~~**A batch cannot report a real margin.**~~ **Closed** (Θ-realness step).
+  `RuleBatch::residual` landed (Σ per-rule overshoot, normalised by each rule's own
+  budget), every stage fills `Violation::margin` through `Violation::from_residual`,
+  and the downstream symptom is fixed too: `metadata::BudgetStatus` now carries a
+  measured `residual` (summed on family merge) plus an `arm` tag, `build()` scans the
+  hard **and** budget arms of both tiers, and `MetadataReport::theta()` sums
+  budget-arm residuals in milli-budgets rather than counting unmet rules. As
+  predicted, the call site (`library::lex_key`) did not change — only `theta()`'s
+  body did. Known leftover, documented at `theta()`: the stage reports already carry
+  the same budget residuals, so `lex_key`'s `pt + rt + theta()` double-weighs the
+  budget arm ~×2 — monotone-safe, cleanup deferred.
 - **Exact equalities: the projection operator already exists and is already wired.**
   This one was mis-scoped in earlier entries and the correction matters, because it
   moves PLAN's highest-leverage item from "not built" to "built, applied at the wrong
@@ -484,20 +484,19 @@ is left is genuinely new:
 The three-way partition (D15) and `Problem::abutment` (D16) are landed and consumed
 inside this crate. What is left, in the order it should be picked up:
 
-- **`ThermalGradient` fails D15's own three tests for `Hard` and is still `Hard`.** It
-  carries a spec (`max_delta_mc`) *and* a `margin_pct`, it is tradeable (a run may sit
-  at a positive ΔT residual while converging), and it accumulates on a *derived field*
-  — PLAN §4d does not hedge: "treat the gradient constraint as a budget in the
-  Lagrangian layer, with sensitivities obtained by the adjoint". D15 enumerates the
-  budgets as `CrosstalkExclusion` / `ParasiticBudget` / `CouplingBudget` because those
-  are the double-registrations that happened to live in `extract.rs`; that enumeration
-  is a survey of one file, not a classification, and the thermal batch is the one
-  placement-tier rule that belongs in the middle arm. Moving it is a one-line change in
-  `emit::hard_and_cost`'s call sites plus a `Rule::residual` override
-  (`over(ΔT − max_delta_mc, max_delta_mc)`, exactly the shape the routing three now
-  use). It was left alone because the instruction enumerated the budgets explicitly.
-- **`emit.rs` still registers three batches in `hard` *and* `cost`.** `SymmetryGroup`,
-  `ThermalGradient`, `Isolation`. `analog::Requirements` now documents "a batch belongs
+- ~~**`ThermalGradient` fails D15's own three tests for `Hard` and is still `Hard`.**~~
+  **Closed** (Θ-realness step). It is now registered via `emit::budget_and_cost` at
+  all four call sites (DiffPair / CurrentMirror / Cascode / Load): the budget copy is
+  what `gp::Prices` prices and Θ sums (`ThermalGradient::residual` —
+  `over(ΔT − max_delta_mc, max_delta_mc)` — already existed), and the cost copy is
+  kept **deliberately**, because `temp_mc` is epoch-frozen and a budget-only
+  registration would delete the per-move isotherm pull; the rationale lives on the
+  helper. `Prices` keys `(kind, ordinal)` over `reqs.budget`, so multiple same-kind
+  thermal batches price independently (ordinal = block order).
+- **`emit.rs` still registers two batches in `hard` *and* `cost`.** `SymmetryGroup`,
+  `Isolation` (`ThermalGradient` moved to `budget`+`cost` in the Θ-realness step; its
+  cost copy is the epoch-frozen field's per-move proxy, rationale on
+  `emit::budget_and_cost`). `analog::Requirements` now documents "a batch belongs
   to exactly one arm", so the crate contradicts its own contract. The pairing is
   deliberate and defensible on its own terms (MAGICAL's `fSYM` beside its legalizer: the
   `hard` copy says where the feasible set is, the `cost` copy is the slope that leads
@@ -707,29 +706,20 @@ implementation and `dr::score` calls it, so the two stages cannot report the sam
 two scales. The factor is **milli-budgets with `ceil`**, identical to `gp::mechanics::report`'s
 private `milli`, and `gr::milli_budget`'s doc names `gp` as the authority.
 
-- **The scale factor now exists twice and is load-bearing in both copies.** `gp::mechanics`
-  has a private `milli`; `gr` has `pub fn milli_budget`. They must agree because
-  `library::lex_key` *sums* Θ across placement and routing — a divergence adds mismatched
-  units into one `f64`, is invisible to every per-crate test, and makes Θ meaningless rather
-  than merely wrong. It was **not** moved into `pnr_core` in this step because that is a
-  `kernel` API change and `gp` is another agent's crate mid-edit. Where it belongs:
-  `pnr_core::report`, next to `Violation::margin`, as `Violation::from_residual(rule,
-  residual)` — a constructor rather than a bare factor, because the thing to prevent is a
-  caller writing `margin:` from an unnormalised quantity, not a caller mistyping `1000.0`.
-  That also gives the `ceil` rationale one home. Two duplicated call sites is the point at
-  which this is worth doing.
-- **Θ still mixes units by exactly one factor of 1000, and it is now inside a single
-  stage.** `reqs.budget` residuals arrive in milli-budgets; the built-in mechanics
-  (`gr`'s gcell `overflow`, `dr`'s track `overuse`) stay raw node/track-use counts in the
-  same `budget_violations` vector. So 1 node of unroutable congestion weighs the same as a
-  budget missed by 0.1%. This is D17's incommensurability complaint, unresolved: overflow's
-  budget is *zero*, so "fraction of its own budget" is undefined and the only sane
-  denominator is gcell capacity (`GlobalCfg::gcell_capacity` × node count), which `score`
-  is not passed. Fix: pass the capacity denominator into `score` and report
-  `Σ(usage − cap) / Σcap` in milli-budgets. Do **not** just multiply the count by 1000 —
-  that picks a denominator by accident. Until then congestion is systematically
-  *under*-weighted against the analog budgets, which is the wrong direction: a congested
-  route is closer to unroutable than a 10%-over coupling sum is to broken.
+- ~~**The scale factor now exists twice and is load-bearing in both copies.**~~
+  **Closed** (Θ-realness step). `Violation::from_residual(rule, residual)` landed in
+  `pnr_core::report`, exactly as prescribed — a constructor rather than a bare
+  factor, with the `ceil` rationale in one home. `gp::mechanics`' private `milli` and
+  `gr::milli_budget` are both deleted; every stage's margin goes through the
+  constructor.
+- ~~**Θ still mixes units by exactly one factor of 1000, and it is now inside a single
+  stage.**~~ **Closed** (Θ-realness step). `gr::score` and `dr::score` both take a
+  `cap_total` denominator (per-node capacity × node count) and report the built-in
+  mechanic as `Violation::from_residual(…, overflow / cap_total)` —
+  `Σ(usage − cap) / Σcap` in milli-budgets, in the same commit for both because
+  `library::lex_key` sums the two stages' Θ. `Report::cost` deliberately keeps the
+  **raw** overflow/overuse: the PEX tier's terms are relative weights within one
+  stage, and rescaling one silently re-weights that tier.
 - **A hard batch with no `residual` override now reports `1000 × violations`, not
   `violations`.** `Rule::residual`'s default is `1.0` when unsatisfied, so the count
   behaviour survives scaled up by the same factor `gp` uses. Harmless today — Φ is only

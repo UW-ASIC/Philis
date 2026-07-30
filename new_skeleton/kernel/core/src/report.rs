@@ -100,3 +100,29 @@ pub struct Violation {
     /// to [`Report::lex`].
     pub margin: i64,
 }
+
+impl Violation {
+    /// Build a violation from a **normalised residual** — the overshoot as a
+    /// dimensionless fraction of the rule's own budget (D17: a residual is only
+    /// comparable normalised by its own budget, which is what makes Θ summable
+    /// across incommensurable rules).
+    ///
+    /// `margin` is an `i64`, so the residual is stored in **milli-budgets**:
+    /// `0.5` (50% over) becomes `500`. `ceil`, not `round`: a real violation must
+    /// never scale down to `margin: 0`, which [`Report::lex`] reads as *satisfied*.
+    ///
+    /// **This constructor is the authority for the factor.** `frontend/library`'s
+    /// `lex_key` *sums* Θ across the placement and routing stages, so every stage
+    /// must scale a residual identically — two factors would add mismatched units
+    /// into one `f64` and make Θ meaningless while every per-crate test still
+    /// passed. It is a constructor rather than a bare `milli(f64) -> i64` because
+    /// the thing to prevent is a caller writing `margin:` from an unnormalised
+    /// quantity, not a caller mistyping `1000.0`.
+    #[must_use]
+    pub fn from_residual(rule: impl Into<String>, residual: f64) -> Self {
+        Self {
+            rule: rule.into(),
+            margin: (residual * 1000.0).ceil() as i64,
+        }
+    }
+}
