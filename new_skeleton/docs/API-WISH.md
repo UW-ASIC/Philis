@@ -425,9 +425,8 @@ The loop and its four `cellgen` bodies are landed. What they deliberately do not
   *added*, so it is named rather than discovered later. First cut if it bites: price
   DRC/ERC only for the alternatives that survive the routability half — which needs group
   collapse first, since that half does not discriminate on a one-device cell.
-- **D16's `Problem::abutment` is still derived in the loop.** Unchanged by this step and
-  called out there; the local filter in `library::run` stays until the annotator lands
-  the table.
+- ~~**D16's `Problem::abutment` is still derived in the loop.**~~ **Closed** (DTI
+  branch step, D1) — see the annotator debt list below for the resolution.
 
 ### Appended by step 2 (`backend/gp`, `backend/dp` implementation)
 
@@ -437,15 +436,18 @@ and `Layout::branch`. `gp`/`dp` fill all three tiers of `Report` from real norma
 residuals, and `gp::Prices` prices `reqs.budget` with λ/ρ instead of live headroom. What
 is left is genuinely new:
 
-- **The disjunctive branch move is state without a mover.** `Layout::branch` exists and
-  `dp` clones and returns it, but nothing in the move set ever flips a bit, so every pair
-  ships on its `false` starting commitment ("share a trench"). That is strictly worse than
-  the old situation in one respect: the search state now *advertises* a choice no stage
-  makes, so a reader can no longer tell "committed to share" from "never asked". The move
-  itself is a five-line `try_branch` in `dp` — flip, gate on the same `accept`, revert —
-  but it needs `RuleBatch` to expose *which* `BranchId`s a batch owns, or the placer has
-  to guess a `branch` index and the flip prices nothing. `Rule::touches` is the right
-  shape for it; it just names device ids, not branch ids.
+- ~~**The disjunctive branch move is state without a mover.**~~ **Closed** (DTI branch
+  step). The missing seam landed as `Rule::branch(self) -> Option<(BranchId, bool)>`
+  (the seed is the recognised-structure starting commitment, `true` = isolate) plus
+  `RuleBatch::branches`, so a batch finally names which ids it owns. `dp::try_branch`
+  is the predicted five-liner — flip, gate on the same `accept`, revert — carved out
+  of the rotate band's roll range the way `can_reshape` was, so a run with no
+  disjunctions consumes a byte-identical RNG stream. The flip is priced by `DtiBand`'s
+  branch-aware `cost` copy on the PEX tier (`satisfied`/`residual` stay branch-blind
+  by design). Remaining, deliberately: the branch table resets per epoch (`gp` hands a
+  fresh all-`false` table and `dp` re-seeds); cross-epoch persistence is a one-liner
+  in `library::run`, deferred until a circuit is seen re-discovering the same flip
+  every epoch.
 
 - ~~**`dp` cannot see the pin relocation that justifies the reshape move.**~~ **Closed.**
   `DetailedPlacer::place` now takes `macros: &[Macro]`, `Nets` carries a pin offset per
@@ -517,16 +519,26 @@ inside this crate. What is left, in the order it should be picked up:
   priority/instance order — true today, asserted nowhere. Either coalesce same-kind
   placement batches at the end of `emit::placement` (which also shrinks the `dyn` call
   count) or assert the emitted kind sequence against the block list.
-- **`frontend/library::run` must delete its local `abutment_groups` derivation.** Lines
-  ~248–264 recompute `Problem::abutment` byte-for-byte — same single-kind filter, same
-  truncate-to-one-member comment. It is the same recognition semantics living in two
-  places, which is exactly how the two tables were conflated in the first place; the
-  local copy is the one that goes. While there: the loop assigns `coarse.groups =
-  abutment_groups` before `dp` and `layout.groups = problem.groups` after it, so one
-  field means "may share diffusion" on one side of a call and "recognition table" on the
-  other. After the deletion both assignments should name their own `Problem` field, and
-  the post-`dp` one should be re-justified or changed — whatever reads `layout.groups`
-  downstream is being handed composites that span both polarities.
+- ~~**`frontend/library::run` must delete its local `abutment_groups` derivation.**~~
+  **Closed** (DTI branch step, D1). The local single-kind filter is deleted;
+  `library::run` consumes `problem.abutment` remapped through `cell_of` like every
+  other device-indexed table. The two assignments now each name their own `Problem`
+  field, and the split is documented as a two-consumer contract at the call site:
+  `coarse.groups` = remapped `abutment` (diffusion-sharing permission, for `dp`'s
+  legalizer/`rotatable`), `layout.groups` = remapped `groups` (recognition table,
+  composites included, for `Target::Group` scoring downstream — nothing moves
+  geometry after `dp`, so granting no abutment there costs nothing).
+- **Injector-on-pad-path `DtiBand` seeding is not constructible.** `dti.rs`'s seeding
+  contract names three cases; `emit` implements two (matched structures → `share`,
+  BiasGen pair → `isolate`). The third — an injector on a `<1 kΩ` path from a pad,
+  forced into a private ring — needs a pad marker and a path-resistance model, and the
+  netlist carries neither, so the seed cannot be derived from anything real. Emitting
+  a guess would be worse than the gap; add the pad/path model first.
+- **`emit`'s DTI band constants are representative, not process data.** `DTI_S_MAX_NM`
+  / `DTI_D_DTI_NM` (200 / 2000 nm) are the same numbers `dti.rs`'s own tests use,
+  `ponytail:`-marked at the definition. The real band is a per-process PDK entry
+  (trench width + well enclosure); extend the PDK schema and read it there when a
+  process disagrees — the PDK is the source of truth.
 
 ---
 
@@ -550,7 +562,7 @@ feasibility:
 | `Vec<Antenna>` (`extract::routing`) | inequality `ratio ≤ max` | no | **fine** as a set; but the repair is layer-jumping or a protection diode, neither of which is a coordinate move, so `dr` has to own it |
 | `Vec<Differential>` (`extract::routing`) | length delta inequality **∪ a set equality on layer assignment** | no | **GAP** — the layer half is exact, is *not scored by `cost` at all*, and has no projection. A pair routed on mismatched layers is a hard violation that nothing in the flow moves toward fixing. Not projectable from `Routes` (it means rerouting); the honest path is targeted rip-up in `dr` off `Rule::touches`, which already names both nets |
 | `Vec<verify::DrcSpacing>` (appended by `library::run`) | `satisfied` is hardcoded `false` | no | **by design** — a measured finding, not a rule with a feasible set. It is cleared by re-measuring next epoch, which is D4's per-epoch gradient |
-| `DtiBand` | **disjunction** `{d ≤ s_max} ∪ {d ≥ d_isolate}` | no | **GAP, and not a `project` gap.** With the branch committed each component is a projectable interval, but the missing piece is the *flip move* — `dp` says the branch move is out of scope, and nothing constructs a `DtiBand` at all yet (see below) |
+| `DtiBand` | **disjunction** `{d ≤ s_max} ∪ {d ≥ d_isolate}` | no | **closed** (DTI branch step): `annotator::emit` constructs one per recognised pair (dense `BranchId`s, structure-derived seeds) and `dp::try_branch` is the flip move, priced by the branch-aware `cost` copy; with the branch committed each component is a convex interval the optimiser closes with its gradient |
 
 Plus one that is an exact equality and is **not even in a `hard` arm**:
 
@@ -624,8 +636,11 @@ this branch-aware would report a false violation whenever a flip is pending and
 Φ-monotone acceptance in `dp` would reject the very move resolving it), and `residual` is
 band penetration normalised by band width.
 
-**Nothing constructs a `DtiBand` anywhere in the workspace.** Extraction is the annotator's
-and is unstarted. It must:
+**Landed** (DTI branch step): `annotator::emit::placement` is the producer — one
+`DtiBand` per recognised pair (DiffPair, each CurrentMirror leg, Cascode, Load →
+`share`; BiasGen pair → `isolate`), accumulated across the whole call and registered
+as ONE batch via `hard_and_cost` (the cost copy is what prices the flip). The
+contract it satisfies, kept for the next disjunctive rule:
 
 1. Allocate one `BranchId` per emitted pair, densely from `0`, and size `Layout::branch`
    to that count (`gp::mechanics` already writes the table). Two pairs must never share an
@@ -640,8 +655,9 @@ and is unstarted. It must:
    renumbering silently transfers one pair's commitment to another.
 
 Injector-exclusion and the implant-merge/LVS guard are the same disjunctive shape and want
-the same treatment. And `dp` still needs the flip move — a branch that never flips is a
-constant, and the search is then back to whichever component the annotator guessed.
+the same treatment. The flip move landed with the producer (`dp::try_branch` — see the
+closed "state without a mover" entry above); the injector-on-pad-path *seed* did not,
+because nothing models a pad or a path resistance (ledgered in the annotator debt list).
 
 ### Consumers that must now be re-pointed (not done — other agents' crates)
 

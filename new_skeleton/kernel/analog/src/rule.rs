@@ -4,6 +4,7 @@
 //! this is a static trait over per-kind arrays and not `Box<dyn Rule>` or a
 //! `Kind` enum.
 
+use pnr_core::ids::BranchId;
 use pnr_core::{BipartiteHypergraph, UnionFind};
 
 /// One piece of analog theory: a self-scoring value that also knows **where it
@@ -147,6 +148,21 @@ pub trait Rule: Copy {
         self
     }
 
+    /// The disjunctive commitment this rule owns, if it owns one: `(id, seed)` —
+    /// `seed` is the recognised-structure starting commitment, `true` = isolate.
+    ///
+    /// This is the seam the branch *move* was missing (PLAN §4b): `Layout::branch`
+    /// carries the per-pair Boolean and `dp` can flip a bit, but `RuleBatch` is
+    /// type-erased and [`touches`](Rule::touches) names device ids, not branch ids —
+    /// so without this, a flip is a guess at an index and prices nothing. A rule
+    /// whose feasible set is an either-or (`DtiBand`, and eventually
+    /// injector-exclusion and the implant-merge guard) overrides it; everything
+    /// else is a single component and has no commitment to name.
+    #[inline]
+    fn branch(self) -> Option<(BranchId, bool)> {
+        None
+    }
+
     /// Safety margin held back from the raw budget, as a fraction in `[0, 1)`.
     ///
     /// The raw spec is the *terminal hard floor* ([`satisfied`](Rule::satisfied));
@@ -255,6 +271,13 @@ pub trait RuleBatch<On> {
     fn retarget(&mut self, cell_of: &[u16]) {
         let _ = cell_of;
     }
+
+    /// Append every `(BranchId, seed)` this batch's rules own. See [`Rule::branch`].
+    /// Default no-op: a kind with no disjunctions contributes nothing, so a
+    /// consumer summing over `reqs.hard` sees exactly the ids that exist.
+    fn branches(&self, out: &mut Vec<(BranchId, bool)>) {
+        let _ = out;
+    }
 }
 
 impl<R: Rule> RuleBatch<R::On> for Vec<R> {
@@ -301,6 +324,13 @@ impl<R: Rule> RuleBatch<R::On> for Vec<R> {
     fn retarget(&mut self, cell_of: &[u16]) {
         for r in self.iter_mut() {
             *r = r.retarget(cell_of);
+        }
+    }
+    fn branches(&self, out: &mut Vec<(BranchId, bool)>) {
+        for r in self.iter() {
+            if let Some(b) = r.branch() {
+                out.push(b);
+            }
         }
     }
 }

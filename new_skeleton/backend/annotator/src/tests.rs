@@ -253,6 +253,67 @@ fn parasitic_and_coupling_report_an_overshoot_not_a_count() {
 }
 
 #[test]
+fn dti_bands_are_one_hard_batch_with_dense_ids_seeded_share() {
+    // The producer half of PLAN §4b: every matched pair in the OTA (diff pair,
+    // mirror legs, load) gets a `DtiBand`, all in ONE batch registered hard+cost —
+    // the hard copy is legality (the full disjunction), the cost copy is what makes
+    // `dp`'s branch flip priceable, and the budget arm never sees it (a disjunction
+    // is not tradeable, and `Prices::bind` asserts hard ∩ budget = ∅).
+    let p = annotate(&ota(), &NoInference, &AnnotationConfig::default());
+    let is_dti = |b: &Box<dyn RuleBatch<pnr_core::Layout>>| b.kind().ends_with("DtiBand");
+    assert_eq!(
+        p.placement.hard.iter().filter(|b| is_dti(b)).count(),
+        1,
+        "one DtiBand batch, registered once at the end of placement()"
+    );
+    assert!(p.placement.cost.iter().any(is_dti), "the cost copy prices the flip");
+    assert!(!p.placement.budget.iter().any(is_dti), "a disjunction is never a budget");
+
+    // Dense, distinct, allocation order = emission order — the id contract that
+    // keeps one pair's commitment from silently transferring to another.
+    let mut seeds = Vec::new();
+    let dti = p.placement.hard.iter().find(|b| is_dti(b)).unwrap();
+    dti.branches(&mut seeds);
+    assert!(seeds.len() >= 2, "the OTA has more than one matched pair: {seeds:?}");
+    for (i, &(id, isolate)) in seeds.iter().enumerate() {
+        assert_eq!(usize::from(id.0), i, "ids must be dense in emission order");
+        assert!(!isolate, "matched structures seed `share` — one trench by design");
+    }
+}
+
+#[test]
+fn bias_gen_pair_seeds_isolate() {
+    // The other recognised seed: a bias reference is the noisy/sensitive case and
+    // starts committed to the far component (a private trench). Built as a block
+    // directly — the unit under test is emission, not the recogniser.
+    use pnr_core::ids::GroupId;
+    let nl = Netlist {
+        devices: vec![
+            fet("XB1", DeviceKind::Nmos, 0, 0, 1, 1, 5_000, 1_000),
+            fet("XB2", DeviceKind::Nmos, 0, 2, 1, 1, 5_000, 1_000),
+        ],
+        nets: nets(&["vbias", "VSS", "iout"]),
+    };
+    let hg = pnr_core::BipartiteHypergraph::from_netlist(&nl);
+    let b = Block {
+        kind: BlockKind::BiasGen,
+        template: "bias",
+        devices: vec![DeviceId(0), DeviceId(1)],
+        group: GroupId(0),
+        depends_on: Vec::new(),
+        injected: false,
+        sub_blocks: Vec::new(),
+    };
+    let r = crate::emit::placement(&[b], &hg);
+    let mut seeds = Vec::new();
+    for batch in &r.hard {
+        batch.branches(&mut seeds);
+    }
+    assert_eq!(seeds.len(), 1, "one pair, one disjunction");
+    assert!(seeds[0].1, "a bias pair must seed `isolate`");
+}
+
+#[test]
 fn abutment_excludes_mixed_polarity_groups() {
     // D16: `groups` is the recognition table and deliberately contains composites
     // spanning both polarities; `abutment` is diffusion-sharing permission. Granting

@@ -217,15 +217,6 @@ impl DetailedPlacer for Annealer {
         prices: &mut gp::Prices,
         seed: u64,
     ) -> (Layout, Report) {
-        // Deliberately NOT implemented here: the disjunctive branch move (`DtiBand`
-        // share-vs-isolate). `Layout::branch` now carries the per-pair Boolean and is
-        // cloned and returned below, so the *state* exists — but no batch says which
-        // `BranchId`s it owns (`RuleBatch` is the only `dyn` seam and `Rule::touches`
-        // names device ids, not branch ids), so a flip here would be a guess at an index
-        // and would price nothing. Every pair therefore ships on its `false` starting
-        // commitment. Logged in `docs/API-WISH.md`; a half-typed workaround that flipped
-        // arbitrary bits would be worse than the honest gap.
-
         // Detailed placement is layer-agnostic (see the trait doc): bounded-move SA
         // over HPWL + analog cost, neither of which names a routing layer.
         let cfg = &self.cfg;
@@ -250,6 +241,39 @@ impl DetailedPlacer for Annealer {
         // check on a thermal rule reads them. Seed them for the coarse positions;
         // the epoch loop refreshes as the placement changes.
         l.refresh_temps();
+
+        // ---- disjunctive branch table: collect, size, seed --------------------
+        // Which side of each either-or (`DtiBand` share-vs-isolate) the search is
+        // committed to. The producer (`annotator::emit`) minted one dense `BranchId`
+        // per recognised pair and carried its recognised-structure seed on the rule;
+        // `RuleBatch::branches` is the seam that finally names which ids a batch
+        // owns, so the flip move below is a priced decision instead of a guess at an
+        // index. Sort + dedup: the ids are a per-batch contract, not a per-arm one,
+        // and the mover must not draw one pair's flip twice as often because two
+        // batches named it.
+        //
+        // ponytail: the branch table resets per epoch — `gp` hands a fresh
+        // `vec![false; n]` each `place`, and the seeds below overwrite it, so a flip
+        // accepted in epoch k is re-discovered in epoch k+1. Cross-epoch persistence
+        // is a one-liner in `library::run` (carry `layout.branch` into the next
+        // coarse), deferred until a circuit is seen re-finding the same flip every
+        // epoch.
+        let mut branch_seeds: Vec<(pnr_core::ids::BranchId, bool)> = Vec::new();
+        for b in &reqs.hard {
+            b.branches(&mut branch_seeds);
+        }
+        branch_seeds.sort_unstable_by_key(|&(id, _)| id.0);
+        branch_seeds.dedup();
+        if let Some(&(hi, _)) = branch_seeds.last() {
+            if l.branch.len() <= usize::from(hi.0) {
+                l.branch.resize(usize::from(hi.0) + 1, false);
+            }
+        }
+        for &(id, seed) in &branch_seeds {
+            l.branch[usize::from(id.0)] = seed;
+        }
+        let branch_ids: Vec<pnr_core::ids::BranchId> =
+            branch_seeds.iter().map(|&(id, _)| id).collect();
 
         // Carried λ/ρ bound to this epoch's batch order before anything reads the
         // objective (D9). The dual step is the single `settle` after the anneal.
@@ -329,6 +353,10 @@ impl DetailedPlacer for Annealer {
         // that passes `variants: &[]` therefore gets byte-identical behaviour to a
         // build without the move, which is what keeps the pre-variant tests honest.
         let can_reshape = variants.len() == n && l.variant.len() == n;
+        // Same shape again for the branch flip: no disjunction registered means the
+        // move is simply not in the set, and the RNG stream is byte-identical to a
+        // build without it — which is what keeps every pre-branch test honest.
+        let can_branch = !branch_ids.is_empty();
         // Who reshapes with whom. `mates[c]` is `c` plus every cell sharing its
         // `VariantSpace::lock`, sorted and deduplicated; an unlocked cell is `[c]`.
         //
@@ -373,6 +401,14 @@ impl DetailedPlacer for Annealer {
                         && !fixed.get(o).copied().unwrap_or(false)
                         && try_swap(&sa, &mut l, &mut rng, temp, c, o, &clamp_x, &clamp_y)
                     {
+                        accepted += 1;
+                    }
+                } else if can_branch && (0.90..0.925).contains(&roll) {
+                    // The flip is carved out of the bottom half of the rotate band,
+                    // exactly the way `can_reshape` took the top half: a gated range
+                    // test on the roll already drawn, so a run with no disjunctions
+                    // consumes the RNG stream it always did.
+                    if try_branch(&sa, &mut l, &mut rng, temp, &branch_ids) {
                         accepted += 1;
                     }
                 } else if can_reshape && roll >= 0.95 {
@@ -709,6 +745,39 @@ fn try_swap(
         l.y[c] = scy;
         l.x[o] = sox;
         l.y[o] = soy;
+        false
+    }
+}
+
+/// Propose, gate, accept, commit a **branch flip** — the disjunctive move of PLAN
+/// §4b, and the mover `Layout::branch` was state without.
+///
+/// Flips one commitment drawn uniformly from `ids` and gates it on the same
+/// [`accept`] every other move uses. Geometry is untouched, so on a pair sitting in
+/// a legal component V, Φ and Θ are identical on both sides of the flip
+/// (`DtiBand::satisfied`/`residual` are branch-blind **by design** — see
+/// `analog::placement::dti` for why branch-aware legality would reject the very
+/// move resolving a pending flip) and the decision lands on the PEX tier:
+/// `DtiBand::cost` is the branch-aware half, so the flip reprices the pull every
+/// subsequent displacement feels. Mid-band the residual *does* follow the committed
+/// branch, so a flip toward the nearer exit strictly lowers Φ's margin and is taken
+/// unconditionally — which is exactly the right escape from the forbidden interval.
+fn try_branch(
+    sa: &Sa,
+    l: &mut Layout,
+    rng: &mut SplitMix64,
+    temp: f64,
+    ids: &[pnr_core::ids::BranchId],
+) -> bool {
+    let bid = usize::from(ids[rng.below(ids.len())].0);
+    // No cell moved, so the incident-overlap term is empty on both sides.
+    let before_key = gate_key(sa, l, &[]);
+    let before_cost = pex_cost(sa, l);
+    l.branch[bid] = !l.branch[bid];
+    if accept(before_key, gate_key(sa, l, &[]), pex_cost(sa, l) - before_cost, temp, rng) {
+        true
+    } else {
+        l.branch[bid] = !l.branch[bid];
         false
     }
 }
@@ -1496,6 +1565,107 @@ mod acceptance_tests {
             "a Φ-neutral uphill move must still be reachable at high temperature"
         );
         assert_eq!(l.x[0], -20_000);
+    }
+}
+
+#[cfg(test)]
+mod branch_tests {
+    use super::*;
+    use analog::placement::DtiBand;
+    use pnr_core::ids::{BranchId, Target};
+    use pnr_core::DeviceId;
+
+    /// One `DtiBand` over two 2 µm-wide cells at edge gap `gap` nm, registered
+    /// hard + cost the way `annotator::emit` registers it, committed as `isolate`
+    /// says. Band: share under 200 nm, isolate past 2000 nm.
+    fn band(id: u16, seed_isolate: bool) -> Vec<DtiBand> {
+        vec![DtiBand {
+            a: Target::Device(DeviceId(0)),
+            b: Target::Device(DeviceId(1)),
+            s_max_nm: 200,
+            d_dti_nm: 2_000,
+            branch: BranchId(id),
+            seed_isolate,
+        }]
+    }
+
+    fn reqs(id: u16, seed_isolate: bool) -> Requirements<Layout> {
+        Requirements {
+            hard: vec![Box::new(band(id, seed_isolate))],
+            budget: Vec::new(),
+            cost: vec![Box::new(band(id, seed_isolate))],
+        }
+    }
+
+    fn bench(gap: i32, branch: Vec<bool>) -> Layout {
+        Layout {
+            x: vec![0, 2_000 + gap],
+            y: vec![0, 0],
+            hw: vec![1_000; 2],
+            hh: vec![1_000; 2],
+            variant: vec![0; 2],
+            axis: vec![0; 2],
+            branch,
+            groups: vec![vec![DeviceId(0)], vec![DeviceId(1)]],
+            orient: vec![Orient::default(); 2],
+            power_uw: vec![0; 2],
+            temp_mc: vec![0; 2],
+        }
+    }
+
+    /// **The pricing test**, mirroring `reshape_is_priced_on_where_the_pins_land`:
+    /// the flip must fire, and it must be decided by `DtiBand`'s branch-aware cost
+    /// on the PEX tier. Two cells abut at a 100 nm gap — dead inside the share
+    /// component — while the pair is committed to `isolate`, so the commitment is
+    /// carrying 1900 nm of pointless pull. `temp = 0` makes Metropolis greedy: the
+    /// accept can only come from the strict PEX improvement, and the refusal of the
+    /// reverse flip can only come from the strict worsening. Both sides of both
+    /// flips are `satisfied` (the disjunction), so V/Φ/Θ never enter it.
+    #[test]
+    fn branch_flip_fires_and_is_priced() {
+        let reqs = reqs(0, true);
+        let mut l = bench(100, vec![true]);
+        let nets = Nets::from_macros(&[]);
+        let prices = gp::Prices::new();
+        let sa = Sa { cell_nets: nets.cell_nets(2), nets, reqs: &reqs, prices: &prices };
+        let mut rng = SplitMix64::new(1);
+        let ids = [BranchId(0)];
+
+        // isolate → share erases the 1900 nm pull without moving anything: taken.
+        assert!(
+            try_branch(&sa, &mut l, &mut rng, 0.0, &ids),
+            "a flip that strictly lowers the priced cost must be accepted"
+        );
+        assert!(!l.branch[0], "the pair must now be committed to `share`");
+
+        // share → isolate re-prices the same 1900 nm back on: refused and reverted.
+        assert!(
+            !try_branch(&sa, &mut l, &mut rng, 0.0, &ids),
+            "a flip that strictly raises the priced cost must be refused"
+        );
+        assert!(!l.branch[0], "the refused flip must have been reverted");
+    }
+
+    /// The entry seeding: `place` must size `Layout::branch` to cover every minted
+    /// id (`gp` cannot know the count — it writes an all-`false` table at device
+    /// length) and overwrite it with the recognised-structure seeds. Both cells are
+    /// pinned so no move of any kind fires, making the returned table exactly what
+    /// seeding wrote.
+    #[test]
+    fn seeds_are_written_and_table_resized() {
+        // A deliberately non-zero id: dense allocation is the annotator's contract,
+        // but the resize must key on the *highest* id either way.
+        let reqs = reqs(3, true);
+        let coarse = bench(200_000, Vec::new()); // table absent entirely
+        let (l, _) = Annealer::default()
+            .place(&coarse, &[], &[], &reqs, &[], &[true, true], &mut gp::Prices::new(), 9);
+        assert_eq!(l.branch, vec![false, false, false, true], "resized to id 3 + seeded");
+
+        // A table that is already long enough is seeded in place, not truncated.
+        let coarse = bench(200_000, vec![false; 6]);
+        let (l, _) = Annealer::default()
+            .place(&coarse, &[], &[], &reqs, &[], &[true, true], &mut gp::Prices::new(), 9);
+        assert_eq!(l.branch, vec![false, false, false, true, false, false]);
     }
 }
 

@@ -17,7 +17,9 @@
 //!
 //! ## Enforcement partition
 //!
-//! **Hard** (legality, restricts placement): `Symmetry`, `Isolation`.
+//! **Hard** (legality, restricts placement): `Symmetry`, `Isolation`, `DtiBand`
+//! (the disjunctive trench band — one batch for the whole tier, ids minted densely
+//! by [`Dti`]; its cost copy is what prices `dp`'s branch flip).
 //! **Budget** (Θ, priced by `gp::Prices`): `ThermalGradient` — it carries a spec
 //! (`max_delta_mc`) *and* a `margin_pct`, it is tradeable (a run may sit at a
 //! positive ΔT residual while converging), and it accumulates on a derived field;
@@ -58,12 +60,12 @@
 //! [`crate::constraints`].
 
 use analog::placement::{
-    Isolation, Matching, MatchingPair, Proximity, Symmetry, ThermalGradient,
+    DtiBand, Isolation, Matching, MatchingPair, Proximity, Symmetry, ThermalGradient,
 };
 use analog::placement::cc::CentroidGroup;
 use analog::placement::symmetry::SymmetryGroup;
 use analog::Requirements;
-use pnr_core::ids::{AxisId, DeviceId, Target};
+use pnr_core::ids::{AxisId, BranchId, DeviceId, Target};
 use pnr_core::layout::Layout;
 use pnr_core::{BipartiteHypergraph, DeviceKind};
 
@@ -77,6 +79,17 @@ use crate::block::{Block, BlockKind};
 /// reference wants more derating than a bias leg) need the tier data the
 /// annotator does not carry yet.
 const THERMAL_MARGIN_PCT: u8 = 20;
+
+/// Deep-trench banding for every emitted [`DtiBand`]: abut under 200 nm (one shared
+/// trench), fully separated past 2 µm, the 1800 nm between forbidden — the same
+/// representative numbers `analog::placement::dti`'s own tests use.
+///
+/// ponytail: one band for the whole die. The real `s_max`/`d_dti` are a per-process
+/// PDK entry (trench width + well enclosure), and the PDK is the source of truth in
+/// this repo — when a process disagrees, extend the PDK schema and read them there
+/// rather than widening these constants.
+const DTI_S_MAX_NM: i32 = 200;
+const DTI_D_DTI_NM: i32 = 2_000;
 
 /// Pelgrom `A_Vth`, µV·µm — the representative per-kind constant the old
 /// `matching_pair::extract` used (real value is a PDK entry).
@@ -92,6 +105,7 @@ fn avt(kind: DeviceKind) -> i32 {
 #[must_use]
 pub fn placement(blocks: &[Block], hg: &BipartiteHypergraph) -> Requirements<Layout> {
     let mut r = Requirements::<Layout>::default();
+    let mut dti = Dti::default();
     for (bi, b) in blocks.iter().enumerate() {
         // One mirror axis per top-level block — a differential *stage* is
         // symmetric as a whole, so its diff pair, cascodes and load must share a
@@ -100,7 +114,7 @@ pub fn placement(blocks: &[Block], hg: &BipartiteHypergraph) -> Requirements<Lay
         // stage (see `analog::placement::SymmetryGroup`).
         let axis = AxisId(bi as u16);
         let mut stage = Stage::default();
-        emit_block(b, hg, &mut r, axis, &mut stage);
+        emit_block(b, hg, &mut r, axis, &mut stage, &mut dti);
         if !stage.syms.is_empty() {
             // Hard for legality, Cost for the gradient that leads there — the
             // same pairing every other hard rule gets.
@@ -137,7 +151,61 @@ pub fn placement(blocks: &[Block], hg: &BipartiteHypergraph) -> Requirements<Lay
             }));
         }
     }
+    if !dti.rules.is_empty() {
+        // Every id was minted from one counter in emission order, so density and
+        // distinctness are by construction; this assert is the tripwire for anyone
+        // who later emits a `DtiBand` without going through `Dti::pair`. Two pairs
+        // sharing an id would couple two independent disjunctions into one flip.
+        debug_assert!(
+            dti.rules.iter().enumerate().all(|(i, d)| usize::from(d.branch.0) == i),
+            "BranchIds must be dense and distinct, in emission order"
+        );
+        // ONE batch for the whole tier, hard + cost. Hard is the classification —
+        // the band is legality, and `satisfied` is the full disjunction. The cost
+        // copy is what makes a branch *flip* priceable at all: `satisfied`/`residual`
+        // are deliberately branch-blind (see `analog::placement::dti` — branch-aware
+        // legality would report a violation while a flip is pending and Φ-monotone
+        // acceptance would reject the move resolving it), so with a hard copy alone
+        // the flip would change nothing any tier can see and every commitment would
+        // ship on its seed. `DtiBand::cost` is the branch-aware half; it lands on
+        // the PEX tier, where `dp::try_branch` prices the flip. Never the budget
+        // arm: a disjunction is not tradeable at any price, and `Prices::bind`'s
+        // hard∩budget assert would rightly object.
+        hard_and_cost(dti.rules, &mut r);
+    }
     r
+}
+
+/// The DTI disjunction accumulator: one [`DtiBand`] and one densely-minted
+/// [`BranchId`] per recognised pair, across the whole `placement()` call — the
+/// three-point producer contract in `analog::placement::dti`'s module note.
+///
+/// Allocation order = emission order, which is stable because `pattern::recognize`
+/// returns matches in a deterministic priority/instance order and the annotator runs
+/// once per run (D13) — so an id never renumbers between epochs and never silently
+/// transfers one pair's commitment to another.
+#[derive(Default)]
+struct Dti {
+    rules: Vec<DtiBand>,
+    /// Next fresh id; `u16` because [`BranchId`] is.
+    next: u16,
+}
+
+impl Dti {
+    /// One pair, one fresh id, seeded from the **recognised structure** (`true` =
+    /// isolate) — never from geometry, which has not been placed yet and would only
+    /// re-derive the accident the branch exists to eliminate (PLAN §4b).
+    fn pair(&mut self, a: DeviceId, b: DeviceId, seed_isolate: bool) {
+        self.rules.push(DtiBand {
+            a: Target::Device(a),
+            b: Target::Device(b),
+            s_max_nm: DTI_S_MAX_NM,
+            d_dti_nm: DTI_D_DTI_NM,
+            branch: BranchId(self.next),
+            seed_isolate,
+        });
+        self.next += 1;
+    }
 }
 
 /// What a recognised stage contributes to its group-level constraints: the mirror
@@ -170,14 +238,15 @@ fn emit_block(
     r: &mut Requirements<Layout>,
     axis: AxisId,
     stage: &mut Stage,
+    dti: &mut Dti,
 ) {
     if !b.sub_blocks.is_empty() {
         for c in &b.sub_blocks {
-            emit_block(c, hg, r, axis, stage);
+            emit_block(c, hg, r, axis, stage, dti);
         }
         return;
     }
-    emit_leaf(b.kind, &b.devices, hg, r, axis, stage);
+    emit_leaf(b.kind, &b.devices, hg, r, axis, stage, dti);
 }
 
 /// Kind of device `d` (defaults to Nmos if out of range — only used for `avt`).
@@ -236,6 +305,15 @@ where
 }
 
 /// Emit the constraint set a leaf primitive implies (the [`BlockKind`] mapping).
+///
+/// Every recognised pair also gets a [`DtiBand`] via `dti`, seeded from what the
+/// pair *is*: a matched structure (diff pair, mirror leg, cascode, load) belongs in
+/// one trench — same well, diffusion-shareable — so it seeds `share`; a bias
+/// reference is the noisy/sensitive case and seeds `isolate` (a private ring). The
+/// third seeding rule in `dti.rs`'s note — an injector on a `<1 kΩ` path from a pad
+/// — is **not constructible today**: nothing in the netlist model names a pad or a
+/// path resistance, so it is ledgered in `docs/API-WISH.md` rather than faked.
+#[allow(clippy::too_many_arguments)]
 fn emit_leaf(
     kind: BlockKind,
     devs: &[DeviceId],
@@ -243,6 +321,7 @@ fn emit_leaf(
     r: &mut Requirements<Layout>,
     axis: AxisId,
     stage: &mut Stage,
+    dti: &mut Dti,
 ) {
     let td = |d: DeviceId| Target::Device(d);
     match kind {
@@ -250,6 +329,7 @@ fn emit_leaf(
         BlockKind::DiffPair if devs.len() >= 2 => {
             let (a, b) = (devs[0], devs[1]);
             stage.pair(a, b, axis);
+            dti.pair(a, b, false);
             r.cost.push(Box::new(vec![MatchingPair {
                 a: td(a),
                 b: td(b),
@@ -297,6 +377,9 @@ fn emit_leaf(
                 // Reference and output leg are the two sides of a matched array.
                 stage.a_side.push(refd);
                 stage.b_side.push(out);
+                // One trench per leg pair, not per mirror: each leg's commitment
+                // is its own disjunction.
+                dti.pair(refd, out, false);
             }
             r.cost.push(Box::new(mp));
             r.cost.push(Box::new(prox));
@@ -307,6 +390,7 @@ fn emit_leaf(
             let (a, b) = (devs[0], devs[1]);
             stage.a_side.push(a);
             stage.b_side.push(b);
+            dti.pair(a, b, false);
             budget_and_cost(
                 vec![ThermalGradient {
                     a: td(a),
@@ -330,6 +414,7 @@ fn emit_leaf(
             let (a, b) = (devs[0], devs[1]);
             stage.a_side.push(a);
             stage.b_side.push(b);
+            dti.pair(a, b, false);
             budget_and_cost(
                 vec![ThermalGradient {
                     a: td(a),
@@ -352,6 +437,10 @@ fn emit_leaf(
         // block carries a pair; a lone diode-connected reference has no partner to
         // relate, so it emits none (the cell-tier isolation directive covers it).
         BlockKind::BiasGen if devs.len() >= 2 => {
+            // The noisy/sensitive case: a bias reference wants its own trench, so
+            // the pair seeds `isolate` — the one recognised structure today whose
+            // starting commitment is the far component.
+            dti.pair(devs[0], devs[1], true);
             // Isolation is the clean case for the pairing: a continuous gap hinge,
             // so the penalty gradient walks straight to the feasible set.
             hard_and_cost(

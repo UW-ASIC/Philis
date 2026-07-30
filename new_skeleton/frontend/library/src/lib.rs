@@ -240,30 +240,6 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         }
     }
 
-    // Groups grant *abutment permission* to the legalizer, so they must mean
-    // "devices that may legitimately share diffusion" — a same-polarity matched
-    // primitive. `problem.groups` is the recognition DAG, where a composite block
-    // (a whole OTA core) spans both polarities; handing that through lets an NMOS
-    // and a PMOS abut, their opposite implants merge, and extraction then reports a
-    // channel that "ambiguously matches MOS rules [nmos, pmos]". Keep only
-    // single-kind groups. Pure function of the netlist + DAG ⇒ computed once.
-    let abutment_groups: Vec<Vec<pnr_core::DeviceId>> = problem
-        .groups
-        .iter()
-        .map(|members| {
-            let mut kinds = members
-                .iter()
-                .filter_map(|d| netlist.devices.get(d.0 as usize).map(|dev| dev.kind));
-            let first = kinds.next();
-            let uniform = kinds.all(|k| Some(k) == first);
-            // Truncate rather than empty: `group_index` ignores groups with fewer
-            // than two members, so a one-element group grants no abutment, while an
-            // *empty* one would panic `Layout::bbox` ("group has no members") for any
-            // rule targeting it.
-            if uniform { members.clone() } else { members.iter().take(1).copied().collect() }
-        })
-        .collect();
-
     // ---- electrical bias -------------------------------------------------
     // Solve the DC operating point once: it depends on the schematic, not on
     // where anything is placed, so it is loop-invariant. This is the only source
@@ -433,8 +409,13 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // matched group fully merged into one macro shrinks to one member — which
     // grants no abutment and boxes a single cell, both correct: the abutment is
     // now drawn inside the macro.
+    //
+    // `problem.abutment` is consumed as the annotator hands it (D16): what a group
+    // *means* — and which subset may share diffusion — is recognition semantics,
+    // and the local single-kind filter this used to recompute was exactly how the
+    // two tables came to be conflated.
     let abutment_groups: Vec<Vec<pnr_core::DeviceId>> =
-        abutment_groups.iter().map(|g| remap_members(g, &cell_of)).collect();
+        problem.abutment.iter().map(|g| remap_members(g, &cell_of)).collect();
     let cell_groups: Vec<Vec<pnr_core::DeviceId>> =
         problem.groups.iter().map(|g| remap_members(g, &cell_of)).collect();
 
@@ -533,6 +514,17 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             // resolve, and the power map is what turns `ThermalGradient` from a
             // tautology into a live constraint. Assigning them to the finished layout
             // would be too late to affect any of it.
+            // `Layout::groups` has TWO consumers with different semantics, and each
+            // side of the `dp` call gets the table it means:
+            //  - pre-dp (here): `problem.abutment` remapped — diffusion-sharing
+            //    permission. `dp`'s legalizer preserves in-group overlap as
+            //    intentional abutment and `rotatable` refuses to turn a grouped
+            //    device, so this table must never contain a mixed-polarity
+            //    composite (implants would merge; DRC-clean, LVS-fatal).
+            //  - post-dp (below): `problem.groups` remapped — the recognition
+            //    table, composites included, so `Target::Group` rules can score a
+            //    whole OTA core like a device downstream. Nothing moves geometry
+            //    after `dp`, so granting no abutment there costs nothing.
             coarse.groups = abutment_groups.clone();
             // Axis ids are per *block*, and a circuit can have more blocks than
             // devices, so the axis table has to be sized by the block count rather
@@ -564,6 +556,9 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             // `dp` is the last stage that may move or reshape a device, so this is
             // where a stacked pair stops being fixable and starts being drawn geometry.
             layout.debug_check_placed("dp::place");
+            // The other half of the two-consumer contract (see `coarse.groups`
+            // above): recognition semantics from here on — `dp` was the last stage
+            // that read groups as abutment permission.
             layout.groups = cell_groups.clone();
 
             // `dp` may have reshaped: adopt its assignment and redraw. Everything

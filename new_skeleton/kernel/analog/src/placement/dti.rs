@@ -2,12 +2,13 @@
 //!
 //! Ported from `backend/constraints/src/placement_level/dti.rs`.
 //!
-//! ## What the annotator still owes this rule
+//! ## What the annotator owes this rule (and now pays — `annotator::emit`)
 //!
-//! [`DtiBand::branch`] is an index into [`Layout::branch`], and **nothing allocates one
-//! yet** — no producer in the workspace constructs a `DtiBand` at all. Making the type
-//! and the scoring correct (done here) is only half of it; the other half is extraction,
-//! and it is the annotator's:
+//! [`DtiBand::branch`] is an index into [`Layout::branch`]. The producer is
+//! `annotator::emit::placement`, which emits one `DtiBand` per recognised pair and
+//! honours the three-point contract below; `dp`'s `try_branch` is the mover that
+//! flips the commitment. The contract stays here because it binds every future
+//! producer, not just the first one:
 //!
 //! 1. **Allocate one [`BranchId`] per emitted pair**, densely from `0`, and size
 //!    `Layout::branch` to that count (`gp` writes the table — see
@@ -72,6 +73,14 @@ pub struct DtiBand {
     /// because `RuleBatch` is type-erased: `dp` cannot reach inside a batch to find a
     /// branch, but it can flip `layout.branch[i]` and re-score.
     pub branch: BranchId,
+    /// The recognised-structure **starting commitment** for [`branch`](DtiBand::branch):
+    /// `true` = isolate. Carried on the rule (not in `Layout`) because the annotator
+    /// runs once per run while `gp` hands `dp` a fresh all-`false` table every epoch —
+    /// the seed has to survive on the one object that does, so the mover can re-write
+    /// it at entry. Seeded from what the pair *is* (matched → share, noisy reference →
+    /// isolate), never from the current gap, which would re-derive the accident the
+    /// branch exists to eliminate.
+    pub seed_isolate: bool,
 }
 
 impl DtiBand {
@@ -79,11 +88,10 @@ impl DtiBand {
     ///
     /// An out-of-range [`BranchId`] reads as `share`, matching `Layout::branch`'s
     /// documented "an all-`false` table is a valid starting commitment". That is not
-    /// defensive padding — nothing constructs a `DtiBand` with a real `BranchId` yet (the
-    /// annotator has to allocate one per pair, see the module note), so until it does,
-    /// every rule reads the `share` branch and `cost` is the abut-or-nothing pull. A
-    /// panic here would make the not-yet-wired state a crash instead of a
-    /// conservative default.
+    /// defensive padding — a caller scoring against a `Layout` whose table was never
+    /// sized (a hand-built test bench, a stage upstream of `dp`'s seeding) reads the
+    /// `share` branch and `cost` is the abut-or-nothing pull. A panic here would make
+    /// the not-yet-seeded state a crash instead of a conservative default.
     #[inline]
     fn isolating(self, l: &Layout) -> bool {
         l.branch.get(self.branch.0 as usize).copied().unwrap_or(false)
@@ -162,6 +170,14 @@ impl Rule for DtiBand {
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
     }
+
+    /// `(id, seed)` — seed is the recognised-structure starting commitment,
+    /// `true` = isolate. This is what lets `dp` learn which branch bits exist at
+    /// all: the batch seam is type-erased, so without this override a flip move
+    /// would be a guess at an index that prices nothing.
+    fn branch(self) -> Option<(BranchId, bool)> {
+        Some((self.branch, self.seed_isolate))
+    }
 }
 
 #[cfg(test)]
@@ -194,6 +210,7 @@ mod tests {
             s_max_nm: 200,
             d_dti_nm: 2_000,
             branch: BranchId(0),
+            seed_isolate: false,
         }
     }
 
@@ -239,6 +256,32 @@ mod tests {
         assert_eq!(rule().residual(&bench(3_000, false)), 0.0);
         // Mid-band, 900 nm of an 1800 nm band still to travel ⇒ half a budget.
         assert!((rule().residual(&bench(1_100, false)) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn branches_collects_ids_and_seeds_and_only_from_overrides() {
+        use crate::rule::RuleBatch;
+
+        // A batch of `DtiBand`s hands the consumer exactly its `(id, seed)` pairs, in
+        // rule order — the seam `dp`'s flip move seeds `Layout::branch` from.
+        let batch = vec![
+            DtiBand { branch: BranchId(0), seed_isolate: false, ..rule() },
+            DtiBand { branch: BranchId(1), seed_isolate: true, ..rule() },
+        ];
+        let mut out = Vec::new();
+        batch.branches(&mut out);
+        assert_eq!(out, vec![(BranchId(0), false), (BranchId(1), true)]);
+
+        // A kind without a `branch` override contributes nothing: `Symmetry` has no
+        // disjunction to commit to, so a consumer summing over every hard batch sees
+        // only the ids that exist.
+        let sym = vec![crate::placement::Symmetry {
+            a: Target::Device(DeviceId(0)),
+            b: Target::Device(DeviceId(1)),
+            axis: pnr_core::ids::AxisId(0),
+        }];
+        sym.branches(&mut out);
+        assert_eq!(out.len(), 2, "a branch-less kind must not invent ids");
     }
 
     #[test]
