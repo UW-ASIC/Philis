@@ -1,0 +1,9 @@
+[package]
+name = "pnr_core"
+version = "0.1.0"
+edition = "2021"
+
+# Zero dependencies. The shared foundation: geometry, ids, the circuit/netlist,
+# placement/routing state, and layout vocabulary. Nothing here is analog *theory*
+# — that lives in `analog`, which depends on this crate.
+[dependencies]

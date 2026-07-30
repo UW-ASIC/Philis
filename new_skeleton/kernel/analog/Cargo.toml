@@ -1,0 +1,11 @@
+[package]
+name = "analog"
+version = "0.1.0"
+edition = "2021"
+
+# Only `pnr_core` — the shared foundation (geometry, ids, netlist, layout,
+# report, blocks). Nothing else: `analog` is the theory every other crate depends
+# on, so it stays at the bottom alongside core. Want to add anything else? Stop —
+# it belongs in a consumer crate.
+[dependencies]
+pnr_core = { path = "../core" }

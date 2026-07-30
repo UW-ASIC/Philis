@@ -1,0 +1,29 @@
+[package]
+name = "library"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+# Forwarded to `verify` → `gdsverify/gpu`. Devshell-only (needs CUDA/Vulkan).
+gpu = ["verify/gpu"]
+
+# The orchestrator: it depends on everything and wires the flow. The ONLY place
+# the concrete stage algorithms are named (the hot-swap point) is `algorithms`.
+[dependencies]
+pnr_core = { path = "../../kernel/core" }
+analog = { path = "../../kernel/analog" }
+cells = { path = "../../kernel/cells" }
+macro_master = { path = "../../kernel/macroMaster" }
+visualizer = { path = "../../kernel/visualizer" }
+annotator = { path = "../../backend/annotator" }
+verify = { path = "../../backend/verify" }
+# The LVS reference (`RefNetlist`/`RefDevice`/`RefTwoTerminal`/`RefBjt`) is built
+# directly against gdsverify's schematic types — `verify` re-exports only the
+# top-level `RefNetlist`. Same git source as `verify` so the workspace `[patch]`
+# applies (builds CPU offline).
+gdsverify = { git = "https://github.com/UW-ASIC/GPurify", branch = "main" }
+gp = { path = "../../backend/gp" }
+dp = { path = "../../backend/dp" }
+gr = { path = "../../backend/gr" }
+dr = { path = "../../backend/dr" }
