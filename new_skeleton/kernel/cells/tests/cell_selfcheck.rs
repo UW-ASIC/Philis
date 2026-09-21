@@ -21,6 +21,7 @@
 //!    comparing anything.
 //! 3. **Well-hosted.** A PMOS must sit in an nwell that encloses its diffusion.
 
+use analog::cell::{SeriesParallel, Unitization};
 use cells::{Cell, mosfet::Mosfet};
 use pnr_core::{DeviceGroup, DeviceId, DeviceKind, Macro, Rect, Shape};
 
@@ -32,14 +33,62 @@ fn pdk() -> Option<verify::Pdk> {
     verify::Pdk::from_json(&json).ok()
 }
 
-/// Draw one device of `kind` with representative geometry.
-fn draw_one(kind: DeviceKind, pdk: &verify::Pdk) -> Macro {
-    let group = DeviceGroup { devices: vec![DeviceId(0)] };
-    let constraints = analog::Constraints::default();
-    let variants = Mosfet::enumerate(&group, &constraints, pdk);
-    let v = variants.first().expect("generator must offer at least one variant");
-    let _ = kind;
-    v.draw(&group, &constraints, pdk)
+/// The group + constraints for `n` matched devices of `kind`, sized so the
+/// enumeration has room to offer several `nf` refolds.
+///
+/// `dummy_required: false` is deliberate: it is what lets the zero-dummy point
+/// of the space exist at all, and a variant nobody ever draws is a variant
+/// nobody ever checks.
+fn group_of(kind: DeviceKind, n: usize, nf: u16) -> (DeviceGroup, analog::Constraints) {
+    let group = DeviceGroup { devices: (0..n).map(|i| DeviceId(i as u16)).collect() };
+    let mut c = analog::Constraints::default();
+    c.unitization.push(Unitization {
+        devices: group.devices.clone(),
+        device_type: kind,
+        dev_nf: vec![nf; n],
+        target_ratio: vec![1; n],
+        unit_w: 1680,
+        unit_l: 150,
+        series_parallel: SeriesParallel::Parallel,
+        same_variant_required: true,
+        dummy_required: false,
+        route_matching_required: false,
+    });
+    (group, c)
+}
+
+/// **Every** variant of a `n`-device group, labelled by the axis values that
+/// produced it. The old helper drew `variants.first()` under default
+/// constraints, which meant three things at once: only one point of the space
+/// was ever checked, `kind` was ignored (so the PMOS cases below silently
+/// tested an NMOS), and the sizing was degenerate. A generator self-check that
+/// skips most of what the generator can emit is not a self-check.
+fn variants(kind: DeviceKind, n: usize, nf: u16, pdk: &verify::Pdk) -> Vec<(String, Macro)> {
+    let (group, c) = group_of(kind, n, nf);
+    Mosfet::enumerate(&group, &c, pdk)
+        .into_iter()
+        .map(|v| {
+            let label = format!(
+                "{kind:?} n={n} nf={} dummies={} {:?}",
+                v.nf, v.dummies_per_edge, v.style
+            );
+            (label, v.draw(&group, &c, pdk))
+        })
+        .collect()
+}
+
+/// Every shape the generator can emit, across both polarities and the group
+/// sizes the flow actually asks for.
+fn all_variants(pdk: &verify::Pdk) -> Vec<(String, Macro)> {
+    let mut out = Vec::new();
+    for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
+        // Finger counts chosen so the centroid styles are reachable: a pair needs
+        // two fingers a side before ABBA exists, a quad needs four.
+        for (n, nf) in [(1usize, 1u16), (2, 2), (4, 4)] {
+            out.extend(variants(kind, n, nf, pdk));
+        }
+    }
+    out
 }
 
 /// Shapes on a named PDK layer.
@@ -63,23 +112,44 @@ fn any_covers(cover: &[&Shape], r: &Rect) -> bool {
 }
 
 #[test]
-fn a_lone_device_is_drc_clean() {
+fn every_variant_is_drc_clean() {
     let Some(pdk) = pdk() else {
         eprintln!("sky130 PDK unavailable — skipping");
         return;
     };
-    let m = draw_one(DeviceKind::Nmos, &pdk);
-    let findings = verify::drc(&m.shapes, &[], &pdk);
-    let mut by_rule: std::collections::BTreeMap<String, usize> = Default::default();
-    for f in &findings {
-        *by_rule.entry(format!("{}:{}", f.rule, f.layer)).or_default() += 1;
+    for (label, m) in all_variants(&pdk) {
+        let findings = verify::drc(&m.shapes, &[], &pdk);
+        let mut by_rule: std::collections::BTreeMap<String, usize> = Default::default();
+        for f in &findings {
+            *by_rule.entry(format!("{}:{}", f.rule, f.layer)).or_default() += 1;
+        }
+        assert!(
+            findings.is_empty(),
+            "{label}: a device must be DRC-clean by construction; got {} violations: {:?}",
+            findings.len(),
+            by_rule
+        );
     }
-    assert!(
-        findings.is_empty(),
-        "a single device must be DRC-clean by construction; got {} violations: {:?}",
-        findings.len(),
-        by_rule
-    );
+}
+
+/// The self-check is only worth its runtime if it covers the axes the placer
+/// can actually move along, so pin the axis values themselves. Without this the
+/// loops above stay green by covering nothing new: a dropped `dummies = 0`
+/// option, or a centroid pattern that never reaches a quad, reads as a pass.
+#[test]
+fn the_self_check_covers_every_axis_value() {
+    let Some(pdk) = pdk() else {
+        eprintln!("sky130 PDK unavailable — skipping");
+        return;
+    };
+    let labels: Vec<String> = all_variants(&pdk).into_iter().map(|(l, _)| l).collect();
+    for needle in ["dummies=0", "dummies=1", "dummies=2", "Single", "n=2 nf=2 dummies=1 Cc1d", "n=4 nf=4 dummies=1 Cc1d"] {
+        assert!(
+            labels.iter().any(|l| l.contains(needle)),
+            "no drawn variant carries `{needle}` — the checks above pass vacuously \
+             for that point of the space. Covered: {labels:?}"
+        );
+    }
 }
 
 #[test]
@@ -93,42 +163,42 @@ fn a_mosfet_channel_carries_its_type_implant() {
         eprintln!("sky130 PDK unavailable — skipping");
         return;
     };
-    let m = draw_one(DeviceKind::Nmos, &pdk);
+    for (label, m) in all_variants(&pdk) {
+        let diff = on_layer(&m, &pdk, "diff");
+        let poly = on_layer(&m, &pdk, "poly");
+        assert!(!diff.is_empty(), "{label}: a MOSFET must draw diffusion");
+        assert!(!poly.is_empty(), "{label}: a MOSFET must draw poly");
 
-    let diff = on_layer(&m, &pdk, "diff");
-    let poly = on_layer(&m, &pdk, "poly");
-    assert!(!diff.is_empty(), "a MOSFET must draw diffusion");
-    assert!(!poly.is_empty(), "a MOSFET must draw poly");
-
-    let nsdm = on_layer(&m, &pdk, "nsdm");
-    let psdm = on_layer(&m, &pdk, "psdm");
-    assert!(
-        !nsdm.is_empty() || !psdm.is_empty(),
-        "a MOSFET must draw an implant layer (nsdm/psdm)"
-    );
-
-    // Every diffusion rectangle that a poly stripe crosses is a channel, and each
-    // one needs implant cover.
-    for d in &diff {
-        let crossed = poly.iter().any(|p| {
-            let (a, b) = (&d.rect, &p.rect);
-            a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
-        });
-        if !crossed {
-            continue;
-        }
-        let implanted = any_covers(&nsdm, &d.rect) || any_covers(&psdm, &d.rect);
+        let nsdm = on_layer(&m, &pdk, "nsdm");
+        let psdm = on_layer(&m, &pdk, "psdm");
         assert!(
-            implanted,
-            "channel diffusion {:?} is crossed by poly but no implant covers it — \
-             LVS extraction cannot determine the MOS type",
-            d.rect
+            !nsdm.is_empty() || !psdm.is_empty(),
+            "{label}: a MOSFET must draw an implant layer (nsdm/psdm)"
         );
+
+        // Every diffusion rectangle that a poly stripe crosses is a channel, and
+        // each one needs implant cover.
+        for d in &diff {
+            let crossed = poly.iter().any(|p| {
+                let (a, b) = (&d.rect, &p.rect);
+                a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+            });
+            if !crossed {
+                continue;
+            }
+            let implanted = any_covers(&nsdm, &d.rect) || any_covers(&psdm, &d.rect);
+            assert!(
+                implanted,
+                "{label}: channel diffusion {:?} is crossed by poly but no implant \
+                 covers it — LVS extraction cannot determine the MOS type",
+                d.rect
+            );
+        }
     }
 }
 
 #[test]
-fn a_lone_device_extracts_unambiguously() {
+fn every_variant_extracts_unambiguously() {
     // Extraction must resolve a gate-over-diffusion crossing to exactly ONE
     // device type. Two ways to fail, and the flow hit both in turn:
     //   * no implant covers the channel  -> "no matching MOS type implant"
@@ -142,15 +212,13 @@ fn a_lone_device_extracts_unambiguously() {
     };
     // `device_count` is extract-only: `None` is the extraction abort the old
     // `run_lvs(..).reason` check watched for (implantless or double-implanted
-    // channels). The count itself is not pinned: `draw_one` ignores `kind` and
-    // draws the default-constraints variant, whose degenerate sizing recognises
-    // zero devices — the old check tolerated that too.
+    // channels). The count itself is not pinned here — how many fingers merge
+    // into how many devices is LVS's job, not the generator's.
     let mut checker = verify::Checker::new(&pdk, false).expect("deck loads");
-    for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
-        let m = draw_one(kind, &pdk);
+    for (label, m) in all_variants(&pdk) {
         assert!(
             checker.device_count(&m.shapes).is_some(),
-            "{kind:?}: a lone device must extract without aborting"
+            "{label}: a device must extract without aborting"
         );
     }
 }
@@ -161,18 +229,21 @@ fn a_pmos_sits_in_a_well_that_encloses_its_diffusion() {
         eprintln!("sky130 PDK unavailable — skipping");
         return;
     };
-    let m = draw_one(DeviceKind::Pmos, &pdk);
-    let nwell = on_layer(&m, &pdk, "nwell");
-    if nwell.is_empty() {
-        // The default variant may be NMOS; only assert when a well is drawn.
-        return;
-    }
-    for d in on_layer(&m, &pdk, "diff") {
-        assert!(
-            any_covers(&nwell, &d.rect),
-            "diffusion {:?} is not enclosed by any nwell rectangle",
-            d.rect
-        );
+    // Every PMOS variant, not just the first: the well is derived from the bulk
+    // tap span, which is the one thing `dummies_per_edge` moves, so a well that
+    // encloses the diffusion at two dummies can still fall short at zero.
+    for (n, nf) in [(1usize, 1u16), (2, 2), (4, 4)] {
+        for (label, m) in variants(DeviceKind::Pmos, n, nf, &pdk) {
+            let nwell = on_layer(&m, &pdk, "nwell");
+            assert!(!nwell.is_empty(), "{label}: a PMOS must draw an nwell");
+            for d in on_layer(&m, &pdk, "diff") {
+                assert!(
+                    any_covers(&nwell, &d.rect),
+                    "{label}: diffusion {:?} is not enclosed by any nwell rectangle",
+                    d.rect
+                );
+            }
+        }
     }
 }
 
@@ -185,15 +256,16 @@ fn the_bbox_contains_every_drawn_shape() {
         eprintln!("sky130 PDK unavailable — skipping");
         return;
     };
-    let m = draw_one(DeviceKind::Nmos, &pdk);
-    for s in &m.shapes {
-        assert!(
-            covers(&m.bbox, &s.rect),
-            "shape {:?} on layer {:?} escapes the macro bbox {:?} — placement \
-             cannot account for geometry it cannot see",
-            s.rect,
-            s.layer,
-            m.bbox
-        );
+    for (label, m) in all_variants(&pdk) {
+        for s in &m.shapes {
+            assert!(
+                covers(&m.bbox, &s.rect),
+                "{label}: shape {:?} on layer {:?} escapes the macro bbox {:?} — \
+                 placement cannot account for geometry it cannot see",
+                s.rect,
+                s.layer,
+                m.bbox
+            );
+        }
     }
 }

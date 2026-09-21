@@ -12,28 +12,38 @@ recipe. Measured alternative counts out of `cells::mosfet::Mosfet::enumerate`:
 
 | cell                                       | alternatives |
 | ------------------------------------------ | -----------: |
-| 1 device, W=420 (PDK minimum finger width) |            2 |
-| 1 device, W=1680                           |            6 |
-| matched pair, W=420                        |            6 |
-| matched pair, W=1680                       |           16 |
+| 1 device, W=420 (PDK minimum finger width) |            3 |
+| 1 device, W=1680                           |            3 |
+| matched pair, W=420                        |            3 |
+| matched pair, W=1680                       |            3 |
+| matched pair, W=1680, nf=2                 |            9 |
+| matched quad, W=1680, nf=1 or 2            |            3 |
+| matched quad, W=1680, nf=4                 |            9 |
 
-Three axes:
+Two axes, and the finger count is **not** one of them:
 
-- **`nf`** — *intended* as a refold (one total width drawn as 1 / 2 / 4 …
-  fingers), but **currently a multiplier, which is a bug**. `feasible_nf`
-  (`kernel/cells/src/mosfet.rs:575`) offers `nf` where `w_total / nf` lands
-  inside the PDK finger window — i.e. it treats `nf` as a *split* — but `draw`
-  uses `let finger_w = s.unit_w;` (`:144`) for every finger, so an `nf=4`
-  variant draws **4× the requested W**. `cellgen::reference` then expands the
-  *schematic's* `nf`, not the drawn one, so reference and layout disagree on
-  device count as well as size. `chain4` at seed 1 escalates to nf 4/1/1/2 →
-  8 drawn fingers against 4 reference cards → 12 `unpaired_device`. Seed 42
-  keeps nf=1, which is the only reason that fixture is clean. **Not fixed**:
-  one side has to change, and doing it properly needs the drawn finger count
-  plumbed into `reference()`.
-- **dummies per edge**
+- **`nf` is fixed by the schematic, not searched.** `feasible_nf`
+  (`kernel/cells/src/mosfet.rs`) used to also offer *refolds* — the same total
+  width redrawn as 2 / 4 / 8 narrower fingers — and every one of them drew the
+  wrong device. The convention everywhere else in the flow is that `w` is the
+  **finger** width and `nf` the finger count (`draw` gives every finger
+  `s.unit_w`, and `cellgen::reference` emits one reference card per *schematic*
+  finger at the full `w`), so an `nf=4` variant of a one-finger device drew a
+  4×-wide transistor against a reference expecting one card. Forcing `nf=2` on
+  the old generator fails `pair` outright with `lvs.unpaired_device`; the suite
+  was green only because the placer happened to pick `nf=1`, which is not a
+  property, it is luck. The refolds are gone. Restoring them means teaching
+  `reference()` the *drawn* finger count — which `VariantSpace` currently
+  discards, since it stores drawn `Macro`s and not the specs behind them.
+- **dummies per edge** — `1`, `2` or `0`. Zero is a real point of the space:
+  "are the dummies worth their area here?" is an answerable question. It is
+  withheld from any group whose `Unitization` sets `dummy_required` (every
+  annotator-recognised matched block), because there the dummies are a
+  constraint and not a trade.
 - **interleave pattern** — `Single` / `Cc1d` / `Cc2d`
-  (`feasible_styles`, `kernel/cells/src/mosfet.rs:564`)
+  (`feasible_styles`, `kernel/cells/src/mosfet.rs`), for **any** member count,
+  at any finger count that can form a centroid: even `nf` for a pair, `nf`
+  divisible by 4 for three or more members. See limit 3 below.
 
 ### The two paths consume that space differently
 
@@ -58,20 +68,28 @@ placement. You pick the shape yourself through
 
 ### Three limits worth knowing
 
-1. **A minimum-width device has only 2 alternatives** — the two dummy counts;
-   the geometry is otherwise identical. The space grows with *total* width,
-   because a refold has to divide it evenly and land inside the PDK's
-   finger-width window.
+1. **A one-finger device has only 3 alternatives** — the three dummy counts;
+   the geometry is otherwise identical. The space grows with the *schematic's*
+   finger count, because that is what the interleave patterns have to work with.
 
-2. **`dummies_per_edge` is never 0.** The generator only ever enumerates 1 or 2,
-   so "are dummies worth their area here?" is currently *unaskable* — no device
-   can be drawn without them. This is also why `Mos { dummies_per_edge: Some(0) }`
-   degrades silently: nothing matches the filter and `adapter.rs:92` falls back
-   to the unfiltered pool.
+2. **`dummies_per_edge = 0` is available, but it is opt-in on the manual path.**
+   The generator enumerates it, so the placer can trade the dummies away (doing
+   so cut `pair` from 10.3 fF to 7.8 fF of extracted parasitic). `Mos {
+   dummies_per_edge: Some(0) }` now resolves instead of falling through to
+   `adapter.rs`'s unfiltered pool. `None` still means *any non-zero count*: the
+   adapter breaks ties on smallest area, so plain `None` would have silently
+   redrawn every hand-placed device without its LOD/WPE dummies.
 
-3. **Common-centroid patterns exist only for pairs.** `feasible_styles` adds
-   `Cc1d`/`Cc2d` only when `n_devices == 2`; a matched quad gets `Single` only,
-   so the classic 2x2 ABBA/BAAB centroid is not in the space.
+3. **Common centroid needs enough fingers, and only in one dimension.** A
+   boundary between two different devices must land on a *source* region, and
+   `draw` alternates drain/source by region parity — so fingers pair up and the
+   two array ends fall to one device. A pair can therefore centroid at any even
+   `nf`; three or more members need `nf` divisible by 4 (only one device can own
+   the self-symmetric middle pair, so the rest need whole mirror-orbits). At
+   `nf = 1` or `2` a quad has no centroid order that is not also a drawn short,
+   and `Single` is the honest answer. The classic **2×2** ABBA/BAAB centroid is
+   still out of reach for a different reason: `mosfet::draw` draws exactly one
+   diffusion row and has no second-row concept at all.
 
 ---
 

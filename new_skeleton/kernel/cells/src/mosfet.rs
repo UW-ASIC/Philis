@@ -24,7 +24,13 @@ pub struct Mosfet {
 }
 
 const MAX_VARIANTS: usize = 16;
-const DUMMY_OPTIONS: [u8; 2] = [1, 2];
+/// Dummy counts the placer may choose from. `0` is a real point in the space:
+/// "are the dummies worth their area here?" is only an askable question if the
+/// generator can draw the device without them. Withheld from any group whose
+/// [`analog::cell::Unitization`] sets `dummy_required` — LOD/WPE matching is a
+/// hard constraint there, not a trade. Ordered last so the existing variants
+/// keep their position under the `MAX_VARIANTS` truncation.
+const DUMMY_OPTIONS: [u8; 3] = [1, 2, 0];
 
 impl Cell for Mosfet {
     fn enumerate(group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Vec<Self> {
@@ -32,17 +38,31 @@ impl Cell for Mosfet {
             return vec![];
         }
         let s = group_sizing(group, constraints, process);
+        // A group that declares `dummy_required` does not get to trade its
+        // dummies away; everyone else sees the zero option too.
+        let min_dummies = u8::from(
+            crate::builder::unitization(group, constraints).is_some_and(|u| u.dummy_required),
+        );
 
-        let mut specs: Vec<Self> = feasible_styles(group.devices.len())
+        let n_dev = group.devices.len();
+        let mut specs: Vec<Self> = feasible_styles(n_dev)
             .into_iter()
             .flat_map(|style| {
-                feasible_nf(&s, process).into_iter().flat_map(move |nf| {
-                    DUMMY_OPTIONS.iter().map(move |&d| Mosfet {
-                        nf,
-                        style,
-                        dummies_per_edge: d,
+                feasible_nf(&s, process)
+                    .into_iter()
+                    // A centroid style is only offered at a finger count that can
+                    // actually form one; otherwise `finger_sequence` falls through
+                    // to the block order and the variant is a duplicate of
+                    // `Single` wearing a misleading label.
+                    .filter(move |&nf| {
+                        style == Pattern::Single
+                            || centroid_sequence(n_dev, usize::from(nf)).is_some()
                     })
-                })
+                    .flat_map(move |nf| {
+                        DUMMY_OPTIONS.iter().filter(move |&&d| d >= min_dummies).map(
+                            move |&d| Mosfet { nf, style, dummies_per_edge: d },
+                        )
+                    })
             })
             .collect();
 
@@ -348,23 +368,35 @@ impl Cell for Mosfet {
             let dummy_positions = [diff_x_start - (k + 1) * step, diff_x_end + sd_w + k * step];
             for (edge, dx) in dummy_positions.into_iter().enumerate() {
                 b.rect(poly, Rect { x: dx, y: -poly_ext, w: gate_l, h: finger_w + 2 * poly_ext });
-                // The riser cut's poly skirt: `licon_poly_enc` above the cut,
-                // `licon_poly_side` on both horizontal sides (the stub base,
-                // 120 below the cut, is the vertical one-side).
-                let stub_top = licon_y + ct + licon_poly_enc;
-                let dpad_w = gate_l.max(ct + 2 * licon_poly_side);
-                b.rect(poly, Rect {
-                    x: dx + gate_l / 2 - dpad_w / 2,
-                    y: finger_w + poly_ext - 10,
-                    w: dpad_w,
-                    h: stub_top - (finger_w + poly_ext - 10),
-                });
                 let cx = dx + gate_l / 2 - ct / 2;
                 b.rect(licon, Rect { x: cx, y: licon_y, w: ct, h: ct });
                 let e = edge_cuts[edge].get_or_insert((cx, cx));
                 e.0 = e.0.min(cx);
                 e.1 = e.1.max(cx);
             }
+        }
+        // ONE poly skirt per edge, spanning that edge's cuts — the same merge the
+        // li strip below already does, and for the same reason. A per-column pad
+        // has to be `ct + 2 * licon_poly_side` (330 nm on sky130) to enclose its
+        // cut, while consecutive columns are only `gate_l + sd_w` (430 nm) apart:
+        // the pads ended up 100 nm apart against a 210 nm `poly_min_spacing`. So
+        // *every* `dummies_per_edge = 2` variant of every device was DRC-dirty,
+        // on both edges, and the placer could pick one — the old self-check drew
+        // `variants.first()` only, so it never saw it. Merging is free: both
+        // columns tie to the same bulk rail, so the joined poly is not a new
+        // connection, and at one dummy per edge it draws the identical rect.
+        let stub_top = licon_y + ct + licon_poly_enc;
+        let dpad_w = gate_l.max(ct + 2 * licon_poly_side);
+        for (cx0, cx1) in edge_cuts.into_iter().flatten() {
+            // Cuts are centred on their column, so growing the span by half a pad
+            // either side reproduces the per-column skirt at its two ends.
+            let x0 = cx0 + ct / 2 - dpad_w / 2;
+            b.rect(poly, Rect {
+                x: x0,
+                y: finger_w + poly_ext - 10,
+                w: (cx1 + ct / 2 + dpad_w / 2) - x0,
+                h: stub_top - (finger_w + poly_ext - 10),
+            });
         }
         // The li riser strips. Bottom edge laps the bulk rail's li by 40 nm but
         // stays ABOVE the rail's cut row: a strip that dips into it overlaps a
@@ -383,9 +415,18 @@ impl Cell for Mosfet {
         // Bulk tap strip: n+ tap in the nwell for PMOS, p+ substrate tie for NMOS.
         // Span the dummies at their new outside-the-moat positions, or the moat
         // itself when there are none.
-        let dpe = i32::from(self.dummies_per_edge);
-        let tap_x0 = diff_x_start - dpe * (gate_l + sd_w);
-        let tap_x1 = diff_x_end + sd_w + (dpe - 1).max(0) * (gate_l + sd_w) + gate_l;
+        // `dpe * (gate_l + sd_w)` on each side is exactly the outer dummy column's
+        // far edge (left: `-(k+1)*step` at `k = dpe-1`; right: `+sd_w + k*step +
+        // gate_l` at the same `k`), and it is the same expression `est_dims` uses,
+        // so the reserved and drawn footprints cannot drift. The old right-hand
+        // form spelled it out with a `(dpe - 1).max(0)` clamp that guarded the
+        // *multiplier* but left the `+ sd_w + gate_l` unconditional: identical for
+        // `dpe >= 1`, but at `dpe = 0` it hung the tap (and, for a PMOS, the nwell
+        // derived from it) 600 nm past the right moat edge and flush with the left
+        // — an asymmetry on the one axis a matched device is drawn to keep.
+        let dummy_span = i32::from(self.dummies_per_edge) * (gate_l + sd_w);
+        let tap_x0 = diff_x_start - dummy_span;
+        let tap_x1 = diff_x_end + dummy_span;
         let tap_w = tap_x1 - tap_x0;
         // The body/well tap is not optional: without it the well floats, which is
         // a latch-up path, and `erc/floating_well` reports it. This was an
@@ -563,32 +604,99 @@ fn device_kind(group: &DeviceGroup, c: &Constraints) -> Option<pnr_core::DeviceK
 
 fn feasible_styles(n_devices: usize) -> Vec<Pattern> {
     let mut styles = vec![Pattern::Single];
-    if n_devices == 2 {
+    if n_devices >= 2 {
         // Interdig (ABAB) shorts different drain nets at B-A boundaries on shared
-        // diffusion; only ABBA (Cc*) patterns are safe for a pair.
+        // diffusion; only the centroid orders are safe. Whether a given `nf` can
+        // actually form one is `centroid_sequence`'s call, and `enumerate` filters
+        // on it — a style with no feasible finger count never reaches the placer.
         styles.push(Pattern::Cc1d);
         styles.push(Pattern::Cc2d);
     }
     styles
 }
 
-fn feasible_nf(s: &Sizing, process: &dyn Process) -> Vec<u16> {
-    // Total drawn width across the group's first device, refolded within the
-    // PDK finger-width window. Without a Netlist W we treat `unit_w * dev_nf[0]`
-    // as the device width and offer refolds that divide it evenly.
-    let w_total = s.unit_w * i32::from(s.dev_nf.first().copied().unwrap_or(1).max(1));
-    let min_fw = rule(process, "min_finger_width", 420);
-    let max_fw = rule(process, "max_finger_width", 10_000);
-    let mut nfs = vec![s.dev_nf.first().copied().unwrap_or(1).max(1)];
-    for nf in [1u16, 2, 4, 6, 8, 12, 16] {
-        let w_f = w_total / i32::from(nf);
-        if w_total % i32::from(nf) == 0 && w_f >= min_fw && w_f <= max_fw {
-            nfs.push(nf);
-        }
+/// The **common-centroid finger order** for `n_dev` devices at `nf` fingers each,
+/// or `None` when that shape has none.
+///
+/// Two hard requirements, and they fight each other:
+///
+/// 1. *Common centroid.* Every device's fingers must average to the same
+///    position, so the order has to be mirror-symmetric about the array centre.
+/// 2. *No drawn short.* A boundary between two **different** devices must land on
+///    a source region. `draw`'s `term_of` makes region `r` a drain when `r` is
+///    even and a source when it is odd, and region `r` sits between fingers
+///    `r - 1` and `r`, so the device may only change at odd `r` — that is,
+///    `seq[1] == seq[2]`, `seq[3] == seq[4]`, and so on. A pattern that breaks
+///    this ties two drains together on one diffusion; DRC sees one legal
+///    rectangle and says nothing, which is the failure mode the old
+///    `feasible_styles` comment named for `Interdig`.
+///
+/// Fingers therefore come in fixed pairs, with the two array *ends* left over as
+/// singletons. Mirror symmetry maps the pair structure onto itself and forces the
+/// two ends onto the same device, so that device gets `2 + 4k` fingers and every
+/// other device gets `4k` — whence the arithmetic below:
+///
+/// * `n_dev == 2` — the classic `ABBA` repeated; works at any even `nf`, because
+///   B can take the single self-symmetric middle pair.
+/// * `n_dev > 2` — only one device can own the middle pair, so all the others
+///   need whole mirror-orbits of two pairs: `nf` must be a multiple of 4. The
+///   unit is `A BB CC .. A A .. CC BB A`, four fingers per device, repeated
+///   `nf / 4` times (the repeat is safe: the unit ends and starts on A, so the
+///   seam pair matches, and concatenating centroid-symmetric blocks keeps every
+///   centroid at the joint centre).
+///
+/// A quad thus needs `nf >= 4`; at `nf = 1` or `2` there is simply no
+/// centroid-symmetric order that also keeps drains apart, and `Single` is the
+/// honest answer rather than a pattern that draws a short.
+fn centroid_sequence(n_dev: usize, nf: usize) -> Option<Vec<usize>> {
+    if n_dev < 2 || nf == 0 || nf % 2 != 0 {
+        return None;
     }
-    nfs.sort_unstable();
-    nfs.dedup();
-    nfs
+    if n_dev == 2 {
+        return Some([0, 1, 1, 0].into_iter().cycle().take(2 * nf).collect());
+    }
+    if nf % 4 != 0 {
+        return None;
+    }
+    let mut unit = vec![0usize];
+    for d in 1..n_dev {
+        unit.extend([d, d]);
+    }
+    unit.extend([0, 0]);
+    for d in (1..n_dev).rev() {
+        unit.extend([d, d]);
+    }
+    unit.push(0);
+    Some(unit.into_iter().cycle().take(n_dev * nf).collect())
+}
+
+/// The finger count(s) this group may be drawn with: **the schematic's**, and
+/// only that.
+///
+/// This used to also offer refolds — the same total width redrawn as 2 / 4 / 8
+/// narrower fingers — and that is a genuinely useful axis, but the flow cannot
+/// honour it end to end and the halves disagreed in two places at once:
+///
+/// * `draw` took `finger_w = s.unit_w` per finger, so it read `nf` as a
+///   *multiplier*, not a split: an `nf = 4` variant of a `W = 2 µm` device drew
+///   four 2 µm fingers, an 8 µm transistor.
+/// * `cellgen::reference` emits one reference card per **schematic** finger, so
+///   even a correctly refolded layout is compared finger-for-finger against a
+///   card count that never moves. Fixing `draw` alone still leaves 4 drawn
+///   fingers facing 1 card.
+///
+/// Either way signoff reports `lvs.unpaired_device` — `Q&A.md` records `chain4`
+/// doing exactly that at seed 1, and notes that seed 42 keeping `nf = 1` "is the
+/// only reason that fixture is clean". A variant space whose soundness depends
+/// on the placer never picking most of it is not a variant space; it is a
+/// landmine. So the refolds come out until `reference` can be told the drawn
+/// finger count (it needs the chosen variant, which `VariantSpace` discards when
+/// it stores drawn `Macro`s — the real fix, and a bigger one than this).
+///
+/// `process` stays in the signature: the PDK finger-width window is what a
+/// restored refold has to consult.
+fn feasible_nf(s: &Sizing, _process: &dyn Process) -> Vec<u16> {
+    vec![s.dev_nf.first().copied().unwrap_or(1).max(1)]
 }
 
 fn est_dims(spec: &Mosfet, group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> (i32, i32) {
@@ -631,9 +739,8 @@ fn finger_sequence(n_dev: usize, style: Pattern, nf_per_device: u16, dev_nf: &[u
             .flat_map(|d| std::iter::repeat_n(Slot::Dev(d), nf))
             .collect(),
         (Pattern::Interdig, 2) => (0..nf).flat_map(|_| [Slot::Dev(0), Slot::Dev(1)]).collect(),
-        (Pattern::Cc1d | Pattern::Cc2d, 2) => {
-            let unit = [Slot::Dev(0), Slot::Dev(1), Slot::Dev(1), Slot::Dev(0)];
-            unit.into_iter().cycle().take(nf * 2).collect()
+        (Pattern::Cc1d | Pattern::Cc2d, n) if centroid_sequence(n, nf).is_some() => {
+            centroid_sequence(n, nf).unwrap_or_default().into_iter().map(Slot::Dev).collect()
         }
         _ => {
             let counts: Vec<usize> = (0..n_dev).map(|_| nf).collect();
@@ -698,4 +805,64 @@ fn greedy_centroid(counts: &[usize]) -> Vec<Slot> {
         lo += 1;
     }
     seq.into_iter().map(Slot::Dev).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two properties [`centroid_sequence`] exists to guarantee, checked over
+    /// every shape it admits. The second one is the load-bearing half: a pattern
+    /// that puts two different devices either side of an even (drain) region
+    /// draws a short across shared diffusion that DRC cannot see and only LVS
+    /// finds, five stages downstream.
+    #[test]
+    fn a_centroid_order_is_symmetric_and_never_abuts_two_drains() {
+        for n_dev in 2..=6usize {
+            for nf in 1..=12usize {
+                let Some(seq) = centroid_sequence(n_dev, nf) else { continue };
+                assert_eq!(seq.len(), n_dev * nf, "n={n_dev} nf={nf}: wrong finger count");
+
+                for d in 0..n_dev {
+                    assert_eq!(
+                        seq.iter().filter(|&&x| x == d).count(),
+                        nf,
+                        "n={n_dev} nf={nf}: device {d} got the wrong share of fingers"
+                    );
+                    // Centroid: sum of positions, compared as `2 * sum` so the
+                    // half-integer centre stays in integers.
+                    let sum: usize = seq.iter().enumerate().filter(|(_, &x)| x == d).map(|(i, _)| i).sum();
+                    assert_eq!(
+                        2 * sum,
+                        nf * (seq.len() - 1),
+                        "n={n_dev} nf={nf}: device {d}'s centroid is off the array centre"
+                    );
+                }
+
+                // Region `r` is a drain when `r` is even, and sits between
+                // fingers `r - 1` and `r`.
+                for r in (2..seq.len()).step_by(2) {
+                    assert_eq!(
+                        seq[r - 1], seq[r],
+                        "n={n_dev} nf={nf}: fingers {} and {r} are different devices across a \
+                         DRAIN region — that is a drawn short: {seq:?}",
+                        r - 1
+                    );
+                }
+            }
+        }
+    }
+
+    /// A quad has no centroid order below four fingers a side, and `Single` is
+    /// the honest answer there — pinned so a future "generalisation" that quietly
+    /// returns a non-centroid order for `nf = 2` fails here rather than in LVS.
+    #[test]
+    fn a_quad_needs_four_fingers_before_a_centroid_exists() {
+        assert!(centroid_sequence(4, 1).is_none());
+        assert!(centroid_sequence(4, 2).is_none());
+        assert!(centroid_sequence(4, 4).is_some());
+        // A pair is the exception: B can take the single self-symmetric middle.
+        assert!(centroid_sequence(2, 2).is_some());
+        assert!(centroid_sequence(2, 1).is_none());
+    }
 }

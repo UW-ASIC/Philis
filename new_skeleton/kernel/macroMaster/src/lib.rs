@@ -981,7 +981,9 @@ pub mod variants {
         pub nf: u16,
         /// Requested finger pattern; `None` = smallest legal variant.
         pub pattern: Option<cells::Pattern>,
-        /// Requested dummies per edge; `None` = generator's choice.
+        /// Requested dummies per edge. `None` means "any non-zero count" — see
+        /// [`DeviceGen::layout`] below for why zero is opt-in rather than the
+        /// default the smallest-area tie-break would otherwise reach for.
         pub dummies_per_edge: Option<u8>,
     }
 
@@ -1016,10 +1018,18 @@ pub mod variants {
                 // discarded — `Mos::new(.., nf)` drew one finger for every `nf`,
                 // and `devices()` below would report a finger count the layout
                 // does not have, which is an LVS mismatch per device.
+                // `dummies_per_edge: None` is "any non-zero count", not "any
+                // count". The generator now offers zero dummies as a real point
+                // of the space, and the adapter breaks ties on smallest area —
+                // so plain `None` would silently redraw every hand-placed device
+                // without its LOD/WPE dummies, an analog-quality change nobody
+                // asked for (it also moves every pin, which cost the 5T OTA in
+                // `examples/xlvs_dump` its pin access on one net). Dropping the
+                // dummies is a decision, so it has to be spelled `Some(0)`.
                 move |m| {
                     m.nf == nf
                         && pat.is_none_or(|p| m.style == p)
-                        && dum.is_none_or(|d| m.dummies_per_edge == d)
+                        && dum.map_or(m.dummies_per_edge > 0, |d| m.dummies_per_edge == d)
                 },
             );
             for s in &mac.shapes {

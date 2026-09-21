@@ -992,11 +992,18 @@ mod tests {
     /// A matched unitization over `devices`, the shape the annotator emits for a
     /// recognised pair.
     fn matched_unit(devices: &[u16], kind: DeviceKind) -> Constraints {
+        matched_unit_nf(devices, kind, 1)
+    }
+
+    /// [`matched_unit`] with an explicit per-member finger count. A device drawn
+    /// with ONE finger cannot interleave with anything — ABBA needs two fingers
+    /// per member — so any test about interleaving has to say so.
+    fn matched_unit_nf(devices: &[u16], kind: DeviceKind, nf: u16) -> Constraints {
         Constraints {
             unitization: vec![Unitization {
                 devices: devices.iter().map(|&d| DeviceId(d)).collect(),
                 device_type: kind,
-                dev_nf: vec![1; devices.len()],
+                dev_nf: vec![nf; devices.len()],
                 target_ratio: vec![1; devices.len()],
                 unit_w: 1000,
                 unit_l: 210,
@@ -1033,7 +1040,7 @@ mod tests {
         let Some(pdk) = pdk() else { return };
         let netlist = matched_mirror();
         let cells =
-            enumerate(&netlist, &Macros::default(), &matched_unit(&[0, 1], DeviceKind::Nmos), &pdk);
+            enumerate(&netlist, &Macros::default(), &matched_unit_nf(&[0, 1], DeviceKind::Nmos, 2), &pdk);
 
         assert_eq!(cells.spaces.len(), 1, "the pair is one placeable cell");
         assert_eq!(cells.cell_of, vec![0, 0]);
@@ -1079,6 +1086,76 @@ mod tests {
             }
         });
         assert!(interleaved, "no ABBA alternative in the merged space");
+    }
+
+    /// Four matched NMOS mirror legs: one shared gate, one shared source,
+    /// distinct drains.
+    fn matched_quad() -> Netlist {
+        let nets = ["tail", "g", "d1", "d2", "d3", "d4"]
+            .iter()
+            .map(|n| Net { name: (*n).to_string() })
+            .collect();
+        let dev = |name: &str, d: u16| Device {
+            name: name.to_string(),
+            kind: DeviceKind::Nmos,
+            terminals: vec![
+                ("D".to_string(), NetId(d)),
+                ("G".to_string(), NetId(1)),
+                ("S".to_string(), NetId(0)),
+                ("B".to_string(), NetId(0)),
+            ],
+            params: vec![("w".to_string(), 1000), ("l".to_string(), 210), ("nf".to_string(), 4)],
+        };
+        Netlist {
+            devices: vec![dev("M1", 2), dev("M2", 3), dev("M3", 4), dev("M4", 5)],
+            nets,
+        }
+    }
+
+    /// A matched **quad** reaches the merged space as a real common centroid, not
+    /// just as the block order.
+    ///
+    /// Two things had to hold for this and both are easy to get wrong. The
+    /// generator has to offer a centroid finger order for more than two devices
+    /// at all (it only ever did pairs), and the order it offers has to survive
+    /// the two shorting guards below — a pattern that is quietly dropped here is
+    /// indistinguishable, from the placer's side, from one that was never
+    /// enumerated.
+    #[test]
+    fn a_matched_quad_merges_into_a_common_centroid() {
+        let Some(pdk) = pdk() else { return };
+        let netlist = matched_quad();
+        let members = [0u16, 1, 2, 3];
+        let cells = enumerate(
+            &netlist,
+            &Macros::default(),
+            &matched_unit_nf(&members, DeviceKind::Nmos, 4),
+            &pdk,
+        );
+
+        assert_eq!(cells.spaces.len(), 1, "the quad merges into one cell");
+        for (v, m) in cells.spaces[0].alternatives.iter().enumerate() {
+            assert!(
+                shared_pads_carry_one_net(m),
+                "alternative {v} shorts two nets on one boundary pad"
+            );
+            assert!(
+                gate_straps_stay_private(m, &netlist, &cells.devices_of[0]),
+                "alternative {v} straps across a foreign gate"
+            );
+        }
+
+        // Interleaved: with four members, a centroid order puts every member's
+        // diffusion regions inside every other's span. The block order (AABB…)
+        // only ever abuts, so this is what tells the two apart.
+        let interleaved = cells.spaces[0].alternatives.iter().any(|m| {
+            let span = region_spans(m, 4);
+            span.iter().all(Option::is_some)
+                && span.iter().flatten().all(|&(a0, a1)| {
+                    span.iter().flatten().all(|&(b0, b1)| a1.min(b1) > a0.max(b0))
+                })
+        });
+        assert!(interleaved, "no common-centroid alternative in the merged quad space");
     }
 
     /// A distinct-gate pair still merges, but only into patterns that do not draw
