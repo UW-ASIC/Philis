@@ -152,6 +152,16 @@ pub fn assemble(netlist: &Netlist, blocks: &[Block]) -> Constraints {
             match class_of(d).0 {
                 DeviceKind::Pmos => c.guard_rings.push(guard_ring(d, GuardRingType::Hcgr, bulk)),
                 DeviceKind::Nmos => c.guard_rings.push(guard_ring(d, GuardRingType::Ecgr, bulk)),
+                // Bipolars stay out on purpose, and not merely because no
+                // fixture asks for a ring yet: `bulk_net` finds a device's bulk
+                // by looking for the terminal named `"B"`, and a BJT's card is
+                // `C, B, E` (`library::parse`) — `B` is its *base*. Routed
+                // through this arm, every bipolar would get a ring tapped to
+                // its own base, which is a drawn base-to-bulk short, and the
+                // flavour would be wrong besides (the substrate-injecting
+                // device here is the PNP, whose collector *is* the substrate).
+                // Give the bipolars a ring only once `bulk_net` tells the two
+                // `B`s apart.
                 _ => {}
             }
         }

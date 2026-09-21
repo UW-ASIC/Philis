@@ -269,3 +269,49 @@ fn the_bbox_contains_every_drawn_shape() {
         }
     }
 }
+
+/// Well polarity for the bipolars. In a p-substrate process an n-well buys you
+/// exactly one bipolar: the **PNP**, whose p+ emitter and p+ collector ring are
+/// diffused into the well and whose base *is* the well. sky130's own recogniser
+/// agrees — magic builds its `pnp` type as `NWELL and PNPID` and its `npn` type
+/// as `DNWELL and-not NWELL and NPNID`, and this deck ships no `dnwell`.
+///
+/// This was inverted: the NPN drew a well over its whole collector ring and the
+/// PNP drew none, so every one of `bjt_mirror`'s in-well `diff` rects belonged
+/// to the device that must not have a well. Neither DRC nor the deck's LVS can
+/// see it — there is no channel-vs-well polarity rule — which is why it is
+/// pinned here. Twin of [`post_cell`]'s `well_follows_implant_polarity`.
+#[test]
+fn only_the_pnp_bipolar_draws_a_well() {
+    let Some(pdk) = pdk() else {
+        eprintln!("sky130 PDK unavailable — skipping");
+        return;
+    };
+    for n in [1usize, 2, 4] {
+        for kind in [DeviceKind::Npn, DeviceKind::Pnp] {
+            let (group, c) = group_of(kind, n, 1);
+            for v in cells::bjt::Bjt::enumerate(&group, &c, &pdk) {
+                let label = format!("{kind:?} n={n} cols={}", v.columns);
+                let m = v.draw(&group, &c, &pdk);
+                let nwell = on_layer(&m, &pdk, "nwell");
+                if kind == DeviceKind::Npn {
+                    assert!(
+                        nwell.is_empty(),
+                        "{label}: an NPN here is a lateral device in the p-substrate — \
+                         a plain n-well puts its emitter and collector in the wrong body \
+                         (and magic's `npn` type subtracts NWELL outright)"
+                    );
+                    continue;
+                }
+                assert!(!nwell.is_empty(), "{label}: a PNP must draw the n-well that is its base");
+                for d in on_layer(&m, &pdk, "diff") {
+                    assert!(
+                        any_covers(&nwell, &d.rect),
+                        "{label}: p+ diffusion {:?} escapes the n-well base",
+                        d.rect
+                    );
+                }
+            }
+        }
+    }
+}

@@ -147,9 +147,9 @@ impl Cell for Bjt {
             b.rect(li, Rect { x: cx + cut_enc, y: c_y, w: coll_w - 2 * cut_enc, h: ct });
 
             // Base: a vertical poly bar from the B pad below the device up INTO
-            // the emitter block, crossing only the bottom collector band. Its top
-            // is the marker's top: the bar exists to give the marker its one poly
-            // terminal, not to span the ring.
+            // the emitter block, crossing only the bottom collector band. The bar
+            // exists to give the marker its one poly terminal, not to span the
+            // ring, so it stops just under the emitter's mid-height bridge.
             //
             // The B contact sits `ct + 190` below the ring so its licon CLEARS the
             // bottom band: a licon is a diff↔li via, and the extractor counts a
@@ -160,8 +160,8 @@ impl Cell for Bjt {
             // deck's `polycon_to_diff_spacing`: a poly cut keeps that much from
             // any diff.
             let ext = ct + rule(process, "polycon_to_diff_spacing", 190);
-            let marker_top = emitter_y + emitter_h / 2 - ct / 2 - cut_enc;
-            b.rect(poly, Rect { x: emitter_x, y: cy - ext, w: ct, h: marker_top - (cy - ext) });
+            let bar_top = emitter_y + emitter_h / 2 - ct / 2 - cut_enc;
+            b.rect(poly, Rect { x: emitter_x, y: cy - ext, w: ct, h: bar_top - (cy - ext) });
             // Poly skirt around the B cut: the bar is cut-sized, so alone it
             // gives zero `poly_encloses_licon` enclosure. 80 on both horizontal
             // sides and below (`poly_encloses_licon_one_side`), the symmetric
@@ -177,56 +177,80 @@ impl Cell for Bjt {
             contact(&mut b, li, licon, emitter_x, cy - ext, ct, li_enc);
             b.pin(pin_at(di, "B", emitter_x, cy - ext, ct, li));
 
-            // Recognition marker: a vertical strip hugging the RIGHT half of the
-            // base bar, from 40 nm inside the bottom collector band to just
-            // under the emitter's mid-height bridge. The S/D conductor is
-            // `sd = diff NOT poly`, so the bar splits the bottom band into a
-            // left and a right piece; a full-bar-width marker would touch BOTH
-            // plus the emitter piece — three sd polygons against the
-            // recogniser's two slots, which poisons the marker. Hugging the
-            // right half touches exactly the emitter piece (slot 1, drawn
-            // first) and the band's right piece (slot 2). The old marker
-            // covered the emitter block only, so the collector slot never
-            // filled and the device was refused (extracted 0 BJTs).
+            // Recognition marker: the device footprint. It has to cover the
+            // whole thing, not just the terminals, because NPNID/PNPID are
+            // *region* identifiers, not stencil hints: magic reads the PNP's
+            // base as `NWELL and PNPID` (sky130A.tech cifinput), so a marker
+            // that only hugs the base bar intersects the well in poly-covered
+            // area, leaves no bare `pdiff` inside the region, and no bipolar is
+            // recognised at all. Covering the footprint still gives this deck's
+            // own `[poly, sd, sd]` recogniser exactly three conductors — the
+            // base bar, the emitter block, and the collector ring (`sd = diff
+            // NOT poly`; cutting a ring at one point still leaves one piece) —
+            // with the emitter in slot 1 because it is drawn first.
             let marker = if is_pnp { layer(process, "pnp") } else { layer(process, "npn") };
             if let Some(marker) = marker {
-                b.rect(marker, Rect {
-                    x: emitter_x + ct / 2,
-                    y: cy + collector_w - cut_enc,
-                    w: ct / 2,
-                    h: marker_top - (cy + collector_w - cut_enc),
-                });
+                b.rect(marker, Rect { x: cx, y: cy, w: coll_w, h: coll_h });
             }
 
-            if !is_pnp {
+            // The n-well goes on the **PNP**, never the NPN. In a p-substrate
+            // process the only bipolar an n-well buys you is the p-type one: p+
+            // emitter and p+ collector ring diffused into the well, the well
+            // itself the base. sky130's own recogniser says so — magic's
+            // cifinput builds the `pnp` (nbase) type as `NWELL and PNPID`
+            // (sky130A.tech "layer pnp NWELL,... / and PNPID") and extracts
+            // `sky130_fd_pr__pnp_05v5` from `pnp *pdiff pwell,space/w`.
+            //
+            // The NPN gets no well at all. sky130's NPN is a *deep*-n-well
+            // device: `layer npn DNWELL / and-not NWELL / and NPNID`, extracted
+            // as `npn *ndiff dnwell space/w`. A plain n-well is not a weaker
+            // version of that — the recogniser subtracts it — and this deck has
+            // no `dnwell` layer at all (`pdks/sky130.json` "layers"), so the
+            // NPN here is a lateral device in the p-substrate and its base is
+            // the substrate.
+            //
+            // This was inverted: the NPN drew a well over its whole ring while
+            // the PNP drew none, so all five of bjt_mirror's in-well `diff`
+            // rects belonged to the one device that must not have a well, and
+            // the device that needs one had its emitter sitting in bare
+            // substrate. Same shape as the `Ecgr`/`Hcgr` guard-ring inversion
+            // in `post_cell::in_nwell`, and invisible for the same reason: the
+            // deck has no channel-vs-well polarity rule.
+            if is_pnp {
                 let well_enc = rule(process, "well_enclosure", 300);
+                // The well has to reach past the base tie, which hangs `ext`
+                // below the ring to meet the B pad.
+                let (wy0, wy1) = (cy - ext - well_enc, cy + coll_h + well_enc);
                 if let Some(nwell) = layer(process, "nwell") {
                     // 160 extra on the left: the tap strip sits at
                     // `cx - well_enc + 20`, and `nwell_encloses_ntap` wants the
                     // well 180 past it.
                     b.rect(nwell, Rect {
                         x: cx - well_enc - 160,
-                        y: cy - well_enc,
+                        y: wy0,
                         w: coll_w + 2 * well_enc + 160,
-                        h: coll_h + 2 * well_enc,
+                        h: wy1 - wy0,
                     });
                 }
-                // Well tie: a tap strip inside the nwell, left of the ring,
-                // licon'd to an li bridge that merges with the collector strap —
-                // the nwell rides at the collector potential (this toy NPN *is*
-                // a collector-in-nwell). Without a tap polygon inside the well
-                // ring, `erc/floating_nwell` flags the well; without the li
-                // bridge the tap itself is a floating conductor.
+                // Base tie: a tap strip inside the well, left of the ring,
+                // licon'd to an li bridge that runs *under* the ring to the B
+                // pad. The well IS the base, so it rides at the base potential;
+                // bridging it to the collector strap (which is what this did
+                // while the well was on the NPN and stood in for its collector)
+                // shorts B to C through the silicon. The bridge sits at the B
+                // pad's row, `ext` below the ring, so it passes clear of every
+                // diff band. Without a tap inside the well `erc/floating_nwell`
+                // flags it; without the bridge the tap is a floating conductor.
                 if let Some(tap) = layer(process, "tap") {
                     let tap_w = ct + 2 * cut_enc;
                     let tap_x = cx - well_enc + 20;
-                    b.rect(tap, Rect { x: tap_x, y: cy, w: tap_w, h: coll_h });
-                    b.rect(licon, Rect { x: tap_x + cut_enc, y: c_y, w: ct, h: ct });
-                    // One li bar from over the tap cut to the strap's left pad.
+                    let tie_y = cy - ext;
+                    b.rect(tap, Rect { x: tap_x, y: tie_y, w: tap_w, h: coll_h + ext });
+                    b.rect(licon, Rect { x: tap_x + cut_enc, y: tie_y, w: ct, h: ct });
                     b.rect(li, Rect {
                         x: tap_x + cut_enc - li_enc,
-                        y: c_y - li_enc,
-                        w: (cx + cut_enc) - (tap_x + cut_enc - li_enc),
+                        y: tie_y - li_enc,
+                        w: (emitter_x + ct + li_enc) - (tap_x + cut_enc - li_enc),
                         h: ct + 2 * li_enc,
                     });
                 }
@@ -234,7 +258,7 @@ impl Cell for Bjt {
                 // ring: an implant slicing partway across a diff polygon is
                 // exactly what `nsdm_encloses_ndiff` rejects (the sliced band
                 // fragment has zero enclosure at the cut line), covering the
-                // whole ring would stamp `ngate` where the base poly crosses it
+                // whole ring would stamp `pgate` where the base poly crosses it
                 // (a phantom MOS), and this deck's ERC never reads
                 // implant-typed ties. 20 nm short of the ring, 400 wide for
                 // NSDM.1 (380).
@@ -242,9 +266,9 @@ impl Cell for Bjt {
                     let e = 20;
                     b.rect(nsdm, Rect {
                         x: cx - e - 400,
-                        y: cy - e,
+                        y: cy - ext - e,
                         w: 400,
-                        h: coll_h + 2 * e,
+                        h: coll_h + ext + 2 * e,
                     });
                 }
             }

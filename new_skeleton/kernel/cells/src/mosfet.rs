@@ -695,12 +695,52 @@ fn centroid_sequence(n_dev: usize, nf: usize) -> Option<Vec<usize>> {
 /// doing exactly that at seed 1, and notes that seed 42 keeping `nf = 1` "is the
 /// only reason that fixture is clean". A variant space whose soundness depends
 /// on the placer never picking most of it is not a variant space; it is a
-/// landmine. So the refolds come out until `reference` can be told the drawn
-/// finger count (it needs the chosen variant, which `VariantSpace` discards when
-/// it stores drawn `Macro`s — the real fix, and a bigger one than this).
+/// landmine.
 ///
-/// `process` stays in the signature: the PDK finger-width window is what a
-/// restored refold has to consult.
+/// # That blocker is solved. Two others are not — do not re-open this blind
+///
+/// The restoration above *was* built and measured end to end (fold on the spec,
+/// `unit_w / fold` in `draw`, `Cell::fold` read back through a `Cells::folds`
+/// table into `Solution` and on into `reference`; ~330 changed lines across
+/// `cells`, `cellgen`, `lib` and `elaborate`). It works: a `quad` drawn at a
+/// uniform fold of 2 extracts 8 fingers against 8 cards and signs off LVS clean,
+/// and `pair` at fold 4 is clean on six of six seeds. The plumbing question the
+/// paragraph above poses has a yes answer and it is not expensive.
+///
+/// It still does not pay, for two reasons neither of which is about plumbing:
+///
+/// 1. **The fold has to be uniform across interchangeable devices, and nothing
+///    can express that.** gdsverify pairs LVS on structure *before* it compares
+///    params and never backtracks, so two devices that sit on the same nets at
+///    different folds put two different `w` values into a symmetric reference
+///    graph and it pairs a drawn 2 µm finger against a 1 µm card. Measured:
+///    `quad` at folds `[2, 1, 2, 2]` gives exactly two `lvs.parameter_mismatch`;
+///    the same fixture at `[2, 2, 2, 2]` is clean. The only joint constraint the
+///    search has is [`gp::VariantSpace::lock`], which pins the whole variant
+///    *index* — so it also freezes the pattern and dummy axes, and it changes
+///    `dp`'s move set (mates reshape together). On its own, over 40 fixture×seed
+///    runs, the lock took LVS failures from 2 to 4. What is actually needed is a
+///    per-digit constraint ("same fold, any dummies"), which is a new concept in
+///    `gp`/`dp`, not a table in `cellgen`.
+/// 2. **The variant price is blind to exactly what a refold changes.** `price`
+///    ranks on `(unreachable, drc, overflow, hpwl)`; a refold quadruples gate
+///    count, contacts and li pads, so it is bought on wirelength and paid for in
+///    parasitics — the term the flow's own lexicographic key ranks third.
+///    Measured over 10 seeds per fixture, refolds on vs off: `pair` mean PEX
+///    7.6 → 14.0 fF (+84%), `quad` 17.7 → 19.8, and 4 new DRC violations
+///    (0 → 4) plus 2 new `chain4` LVS failures, all from denser layouts. Pricing
+///    PEX per hypothesis would fix the choice, but the seed pass is already
+///    ~99.9% oracle time and the axis takes a MOSFET from 6 alternatives to 16.
+///
+/// So the refolds stay out until (1) has a mechanism and (2) has a measurement.
+/// The gain on offer is real and worth revisiting then — a refold is the only
+/// way a schematic `nf = 1` pair or quad can reach a common-centroid order at
+/// all (`centroid_sequence` needs an even count, and four for a quad), which
+/// took `pair`'s space from 3 alternatives to 15 and `quad`'s from 3 to 12.
+///
+/// `process` stays in the signature: the PDK finger-width window
+/// (`min_finger_width`/`max_finger_width`, plus grid and exact divisibility) is
+/// what a restored refold has to consult.
 fn feasible_nf(s: &Sizing, _process: &dyn Process) -> Vec<u16> {
     vec![s.dev_nf.first().copied().unwrap_or(1).max(1)]
 }
