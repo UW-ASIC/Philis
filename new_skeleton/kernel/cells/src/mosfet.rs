@@ -609,8 +609,14 @@ fn feasible_styles(n_devices: usize) -> Vec<Pattern> {
         // diffusion; only the centroid orders are safe. Whether a given `nf` can
         // actually form one is `centroid_sequence`'s call, and `enumerate` filters
         // on it — a style with no feasible finger count never reaches the placer.
+        //
+        // `Cc2d` is deliberately *not* offered: it is the checkerboard, which
+        // needs a second diffusion row, and `draw` lays exactly one. It shares
+        // `Cc1d`'s match arm and so drew a byte-identical macro — a third of a
+        // pair's space was a literal duplicate the placer annealed over. Still
+        // nameable through `Mos { pattern }`, and still honoured there by that
+        // shared arm; it just does not earn a slot under `MAX_VARIANTS`.
         styles.push(Pattern::Cc1d);
-        styles.push(Pattern::Cc2d);
     }
     styles
 }
