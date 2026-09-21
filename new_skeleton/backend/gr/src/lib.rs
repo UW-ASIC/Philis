@@ -772,13 +772,16 @@ fn pin_centre(at: &Rect) -> (i32, i32) {
 /// directly by net id.
 #[must_use]
 pub fn build_nets(macros: &[Macro], n_nets: usize) -> NetSetup {
-    // Gather physical points per net id.
+    // Gather physical points per net id — and the pad rects behind them, so
+    // the collapse check below can tell one shared pad from a stacking bug.
     let mut pts_of: Vec<Vec<(i32, i32)>> = vec![Vec::new(); n_nets];
+    let mut pads_of: Vec<Vec<(i32, i32, i32, i32)>> = vec![Vec::new(); n_nets];
     for m in macros {
         for p in &m.pins {
             let ni = p.net.0 as usize;
             if ni < n_nets {
                 pts_of[ni].push(pin_centre(&p.at));
+                pads_of[ni].push((p.at.x, p.at.y, p.at.w, p.at.h));
             }
         }
     }
@@ -799,15 +802,22 @@ pub fn build_nets(macros: &[Macro], n_nets: usize) -> NetSetup {
         pts.sort_unstable();
         pts.dedup();
         // Fewer than two distinct points → obstacle-only, omitted from routing.
-        // Two *pins* collapsing to one *point* is the silent-drop mode: the net
+        // Two *pads* collapsing to one *point* is the silent-drop mode: the net
         // has real terminals to connect and is dropped anyway, and nothing
         // downstream says so — it surfaces as an `unconnected_pin` at signoff.
+        // Keyed on distinct pad *rects*, not raw pins: a merged matched-group
+        // macro legitimately lands two same-net pins (one per leg) on ONE
+        // shared S/D pad — that is one physical terminal, already connected.
+        let pads = &mut pads_of[ni];
+        pads.sort_unstable();
+        pads.dedup();
         debug_assert!(
-            pts.len() >= 2 || raw < 2,
-            "gr::build_nets: net {ni} has {raw} pins that collapsed to {} distinct \
-             point(s) — it will be dropped as obstacle-only. Pin centres coincide, \
-             which usually means two macros are stacked or pins were never rebound \
-             to their real nets.",
+            pts.len() >= 2 || pads.len() < 2,
+            "gr::build_nets: net {ni} has {raw} pins on {} distinct pads that \
+             collapsed to {} distinct point(s) — it will be dropped as \
+             obstacle-only. Pad centres coincide, which usually means two macros \
+             are stacked or pins were never rebound to their real nets.",
+            pads.len(),
             pts.len()
         );
         if pts.len() < 2 {
@@ -1043,11 +1053,28 @@ impl TrackGrid {
         ok: impl Fn(i32, i32) -> bool,
         min_area: i64,
     ) -> Option<u32> {
+        self.claim_minarea_within(x, y, claimed, ok, min_area, 8)
+    }
+
+    /// [`TrackGrid::claim_minarea`] with an explicit ring radius. A tight
+    /// radius is how a caller keeps pin-access jogs SHORT: a node eight rings
+    /// out means a multi-micron blind leg crossing foreign territory, which is
+    /// the drawn-short/deleted-open pathology; better to land close (or not at
+    /// all, and let the negotiated search report the open honestly).
+    pub fn claim_minarea_within(
+        &mut self,
+        x: i32,
+        y: i32,
+        claimed: &mut [bool],
+        ok: impl Fn(i32, i32) -> bool,
+        min_area: i64,
+        rmax: i32,
+    ) -> Option<u32> {
         let cx = (x / self.pitch).clamp(0, self.nx as i32 - 1);
         let cy = (y / self.pitch).clamp(0, self.ny as i32 - 1);
         let pad = self.pitch;
         for layer in 0..self.n_layers.min(2) {
-            for r in 0..=8i32 {
+            for r in 0..=rmax {
                 for dy in -r..=r {
                     for dx in -r..=r {
                         if dx.abs().max(dy.abs()) != r {
@@ -1067,7 +1094,14 @@ impl TrackGrid {
                                     && jy < self.ny as i32
                                     && claimed[self.node(ix as u32, jy as u32, 1) as usize]
                             });
-                        if !claimed[n] && !stacked && (layer == 1 || ok(px, py)) {
+                        // `ok` gates BOTH layers: it used to be skipped on layer 1,
+                        // but the caller's jog draws its met1 legs from the node
+                        // position regardless of the node's layer, so a layer-1
+                        // site that fails the predicate shorts exactly like a
+                        // layer-0 one (measured on rc_filter: the landing that
+                        // bridged VDD to vmid was a layer-1 node the predicate
+                        // never saw).
+                        if !claimed[n] && !stacked && ok(px, py) {
                             if min_area > 0 {
                                 let span = (px - x).abs().max((py - y).abs()).max(pad);
                                 let area = i64::from(span) * i64::from(pad);
@@ -1087,6 +1121,18 @@ impl TrackGrid {
             }
         }
         None
+    }
+
+    /// Claim one specific node — the manual half of [`TrackGrid::claim_minarea`]
+    /// for callers that pick from [`TrackGrid::claim_candidates`] with their own
+    /// joint criterion (e.g. "the first node whose access jog draws clean").
+    /// Same bookkeeping: blocked nodes become via-access-only terminal holes.
+    pub fn claim_node(&mut self, n: u32, claimed: &mut [bool]) {
+        claimed[n as usize] = true;
+        if !self.allowed[n as usize] {
+            self.terminal_only[n as usize] = true;
+        }
+        self.allowed[n as usize] = true;
     }
 
     /// Up to `k` un-marked landing candidates (node, displacement) for a pin,
@@ -1126,7 +1172,14 @@ impl TrackGrid {
                                     && jy < self.ny as i32
                                     && claimed[self.node(ix as u32, jy as u32, 1) as usize]
                             });
-                        if !claimed[n] && !stacked && (layer == 1 || ok(px, py)) {
+                        // `ok` gates BOTH layers: it used to be skipped on layer 1,
+                        // but the caller's jog draws its met1 legs from the node
+                        // position regardless of the node's layer, so a layer-1
+                        // site that fails the predicate shorts exactly like a
+                        // layer-0 one (measured on rc_filter: the landing that
+                        // bridged VDD to vmid was a layer-1 node the predicate
+                        // never saw).
+                        if !claimed[n] && !stacked && ok(px, py) {
                             if min_area > 0 {
                                 let span = (px - x).abs().max((py - y).abs()).max(pad);
                                 let area = i64::from(span) * i64::from(pad);
@@ -1909,6 +1962,7 @@ mod tests {
                         w: 200,
                         h: 200,
                     },
+                    layer: LayerId(0),
                 })
                 .collect(),
             bbox: Rect {

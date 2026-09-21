@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+  "kernel/core", "kernel/analog", "kernel/cells", "kernel/macroMaster", "kernel/visualizer",
+  "backend/gp", "backend/dp", "backend/gr", "backend/dr", "backend/annotator", "backend/verify",
+  "frontend/library", "frontend/cli",
+  "benchmarks",
+  "examples/three_stage_opamp",
+  "examples/op_demo",
+]
+
+# GPurify, consumed from git at its default branch. No `rev`: `Cargo.lock`
+# still pins the exact commit, so builds stay reproducible — `cargo update -p
+# gpurify` is how you move to latest. Both entries share the URL, so the facade
+# and the geometry crate always resolve to the same commit.
+#
+# Two entries rather than one: `gdsverify` is the whole verifier (engine,
+# export, the check tiers), which `verify` and `macroMaster` want. The viewer
+# only probes a `GeometryStore`, so it takes `gdsverify-geom` alone and keeps
+# the engine out of a GPU build.
+[workspace.dependencies]
+gdsverify = { package = "gpurify", git = "https://github.com/UW-ASIC/GPurify" }
+gdsverify-geom = { package = "gpurify-geom", git = "https://github.com/UW-ASIC/GPurify" }

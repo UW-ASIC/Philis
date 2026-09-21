@@ -1,0 +1,14 @@
+[package]
+name = "cells"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pnr_core = { path = "../core" }
+analog = { path = "../analog" }
+
+[dev-dependencies]
+# Self-check tests run the real signoff DRC against a single generated device, so
+# a violation is unambiguously the generator's fault. Dev-only: `verify` does not
+# depend on `cells`, so this introduces no cycle in the build graph.
+verify = { path = "../../backend/verify" }

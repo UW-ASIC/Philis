@@ -61,33 +61,61 @@ pub fn assemble(netlist: &Netlist, blocks: &[Block]) -> Constraints {
         // `nf` = fingers/segments per instance; ratios between instances are the
         // finger counts themselves (a 1:4 mirror is `dev_nf = [1, 4]`). Unit
         // geometry is the shared finger W/L (params "w"/"l", already nm).
-        let kind = netlist
-            .devices
-            .get(b.devices[0].0 as usize)
-            .map_or(DeviceKind::Nmos, |d| d.kind);
-        let dev_nf: Vec<u16> = b
-            .devices
-            .iter()
-            .map(|&d| param(netlist, d, "nf", 1).clamp(1, i64::from(u16::MAX)) as u16)
-            .collect();
-        let unit_w = param(netlist, b.devices[0], "w", 0).clamp(0, i64::from(i32::MAX)) as i32;
-        let unit_l = param(netlist, b.devices[0], "l", 0).clamp(0, i64::from(i32::MAX)) as i32;
-        c.unitization.push(Unitization {
-            devices: b.devices.clone(),
-            device_type: kind,
-            target_ratio: dev_nf.clone(),
-            dev_nf,
-            unit_w,
-            unit_l,
-            // Resistors/caps stack in series; FETs and their mirrors parallel fingers.
-            series_parallel: match kind {
-                DeviceKind::Resistor | DeviceKind::Capacitor => SeriesParallel::Series,
-                _ => SeriesParallel::Parallel,
-            },
-            same_variant_required: true,
-            dummy_required: true,
-            route_matching_required: true,
-        });
+        //
+        // `device_type`/`unit_w`/`unit_l` are **group** scalars — one kind and one
+        // finger geometry for every member — so one per (kind, W, L) class of the
+        // block, not one per block. A block whose members disagree (a CMOS
+        // inverter: P at W=1u, N at W=0.5u) is not one unitization, and stating
+        // `b.devices[0]`'s W for all of them draws every other member at the wrong
+        // size: `cells::builder::sizing` resolves a lone device through whichever
+        // unitization *covers* it, so the N above came out 1 µm wide and LVS read
+        // `lvs.parameter_mismatch` (w: layout 1e-6 vs reference 5e-7).
+        let class_of = |d: DeviceId| {
+            (
+                netlist.devices.get(d.0 as usize).map_or(DeviceKind::Nmos, |dev| dev.kind),
+                param(netlist, d, "w", 0).clamp(0, i64::from(i32::MAX)) as i32,
+                param(netlist, d, "l", 0).clamp(0, i64::from(i32::MAX)) as i32,
+            )
+        };
+        let mut classes: Vec<(DeviceKind, i32, i32)> = Vec::new();
+        for &d in &b.devices {
+            let key = class_of(d);
+            if !classes.contains(&key) {
+                classes.push(key);
+            }
+        }
+        // Kept for the genuinely block-scoped directives below (the LDE gate).
+        // Anything *per-device* must read `class_of(d).0`, not this — see the
+        // guard-ring flavour.
+        let kind = classes[0].0;
+        for (class_kind, unit_w, unit_l) in classes {
+            let devices: Vec<DeviceId> = b
+                .devices
+                .iter()
+                .copied()
+                .filter(|&d| class_of(d) == (class_kind, unit_w, unit_l))
+                .collect();
+            let dev_nf: Vec<u16> = devices
+                .iter()
+                .map(|&d| param(netlist, d, "nf", 1).clamp(1, i64::from(u16::MAX)) as u16)
+                .collect();
+            c.unitization.push(Unitization {
+                devices,
+                device_type: class_kind,
+                target_ratio: dev_nf.clone(),
+                dev_nf,
+                unit_w,
+                unit_l,
+                // Resistors/caps stack in series; FETs and their mirrors parallel fingers.
+                series_parallel: match class_kind {
+                    DeviceKind::Resistor | DeviceKind::Capacitor => SeriesParallel::Series,
+                    _ => SeriesParallel::Parallel,
+                },
+                same_variant_required: true,
+                dummy_required: true,
+                route_matching_required: true,
+            });
+        }
 
         // Per-device structural directives over the block's members.
         for &d in &b.devices {
@@ -111,9 +139,19 @@ pub fn assemble(netlist: &Netlist, blocks: &[Block]) -> Constraints {
             // sensitive set it can see). Ring flavour follows device polarity, as
             // the old code keyed off Pmos→n-well vs else→p-sub. Scalars are the
             // old representative defaults (tap 2 µm, width 0.5 µm, R 100 Ω).
-            match kind {
-                DeviceKind::Pmos => c.guard_rings.push(guard_ring(d, GuardRingType::Hcgr)),
-                DeviceKind::Nmos => c.guard_rings.push(guard_ring(d, GuardRingType::Ecgr)),
+            //
+            // `class_of(d).0`, not the block's `kind`: ring flavour is the
+            // *device's* polarity, and a mixed block is exactly the case that
+            // matters — rc_filter's inverter (P first, then N) handed the NMOS
+            // the PMOS's `Hcgr`, a p+ ring in an n-well wrapped round an
+            // n-channel. Latent while `Hcgr` drew no well; the moment the well
+            // moved to the ring type that actually has one it buried the NMOS
+            // and magic stopped extracting the nfet. Same failure the
+            // unitization comment above describes, one loop down.
+            let bulk = bulk_net(netlist, d);
+            match class_of(d).0 {
+                DeviceKind::Pmos => c.guard_rings.push(guard_ring(d, GuardRingType::Hcgr, bulk)),
+                DeviceKind::Nmos => c.guard_rings.push(guard_ring(d, GuardRingType::Ecgr, bulk)),
                 _ => {}
             }
         }
@@ -150,10 +188,34 @@ pub fn assemble(netlist: &Netlist, blocks: &[Block]) -> Constraints {
     c
 }
 
-/// Guard ring with the old `flow.rs` §12 representative scalars. The ring ties to
-/// the substrate/well rail; the annotator has no resolved net table for it, so it
-/// uses the conventional tap net id 0 (`cells` binds the real rail downstream).
-fn guard_ring(device: DeviceId, ring_type: GuardRingType) -> GuardRingRequirement {
+/// The device's bulk (`B`) terminal net — what a guard ring ties to.
+///
+/// Falls back to `NetId(0)` for a device whose card states no bulk: the
+/// pre-existing behaviour, and no worse than it was.
+fn bulk_net(nl: &Netlist, d: DeviceId) -> NetId {
+    nl.devices
+        .get(d.0 as usize)
+        .and_then(|dev| dev.terminals.iter().find(|(t, _)| t == "B").map(|&(_, n)| n))
+        .unwrap_or(NetId(0))
+}
+
+/// Guard ring with the old `flow.rs` §12 representative scalars.
+///
+/// `connection_net` is the guarded device's **bulk** net — the substrate/well
+/// rail the ring taps. It used to be a hardcoded `NetId(0)`, the "conventional
+/// tap net", on the promise that `cells` bound the real rail downstream. Nothing
+/// did: `cellgen::bind_pins` only rewrites `d{N}:TERM` pins and a ring pin is
+/// named `"ring"`, so every ring in the design stayed on net 0 — whatever net
+/// the netlist happened to number first. `dr` folds ring pins in as real routing
+/// terminals, so the router then wired every guard ring to that signal net. On
+/// `chain4` net `a` grew 12 extra terminals spread across the die and 93 wires,
+/// and the congestion left the 4-pin gate net open. It only looked harmless on
+/// the other fixtures because their net 0 happens to be a real device net.
+fn guard_ring(
+    device: DeviceId,
+    ring_type: GuardRingType,
+    connection_net: NetId,
+) -> GuardRingRequirement {
     GuardRingRequirement {
         device,
         ring_type,
@@ -167,6 +229,6 @@ fn guard_ring(device: DeviceId, ring_type: GuardRingType) -> GuardRingRequiremen
         min_width_nm: 500,             // 0.5 µm
         max_ring_resistance_mohm: 100_000, // 100 Ω
         enclosure_complete: true,
-        connection_net: NetId(0),
+        connection_net,
     }
 }

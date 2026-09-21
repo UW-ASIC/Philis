@@ -1,0 +1,33 @@
+[package]
+name = "visualizer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "visualizer"
+
+[[bin]]
+name = "visualizer"
+path = "src/main.rs"
+
+[features]
+# In-process probing of a GPurify GeometryStore.
+probe = ["dep:gdsverify-geom"]
+
+[dependencies]
+pnr_core = { path = "../core" }
+wgpu = "24"
+winit = "0.30"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+earcutr = "0.4"
+env_logger = "0.11"
+log = "0.4"
+serde_json = "1"
+# ponytail: only GeometryStore is probed, so depend on the geometry crate alone
+# rather than the full `gpurify` facade; switch to the facade if the probe ever
+# grows. Was `gpurify-core` + `gpurify-units` until GPurify folded both (and
+# `derived`) into `gpurify-geom`, which re-exports `Dbu` — so the separate
+# dev-dependency for the round-trip test's Dbu constructor is gone too.
+gdsverify-geom = { workspace = true, optional = true }

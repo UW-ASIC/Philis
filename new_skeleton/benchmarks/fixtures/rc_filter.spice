@@ -1,0 +1,7 @@
+* rc_filter — inverter driving a poly-resistor output filter.
+* Exercises resistor generation + rpoly LVS extraction through the full flow.
+.subckt rc_filter vin vout VDD VSS
+XM1 vmid vin VDD VDD pfet_01v8 W=1u L=0.15u
+XM2 vmid vin VSS VSS nfet_01v8 W=0.5u L=0.15u
+XR1 vmid vout res_generic_po W=0.5u L=2u
+.ends rc_filter

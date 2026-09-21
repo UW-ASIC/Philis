@@ -5,16 +5,22 @@ edition = "2021"
 
 [features]
 default = []
-# Route DRC/ERC through the GPU backend (CUDA/Vulkan). Forwarded to gdsverify's
-# own `gpu` feature; only builds inside the nix devshell with CUDA/Vulkan present.
-gpu = ["gdsverify/gpu"]
+# Route DRC/ERC through the GPU backend (CUDA/Vulkan).
+#
+# Inert since the GPurify rewrite: that tree declares no `gpu` feature on any
+# crate, so there is nothing to forward to and the flag selects the CPU path
+# either way. Kept as an empty feature so `--features gpu` still resolves for
+# callers that pass it; restore the forward if the rewrite reintroduces one.
+gpu = []
 
 [dependencies]
 pnr_core = { path = "../../kernel/core" }
 analog = { path = "../../kernel/analog" }
-# gdsverify (GPurify) — real GPU-accelerated DRC/ERC/LVS/PEX. Git dep mirrors the
-# repo-root Cargo.toml.
-gdsverify = { git = "https://github.com/UW-ASIC/GPurify", branch = "main" }
+# gdsverify (GPurify rewrite) — the facade crate re-exporting the whole
+# verification pipeline (core/engine/ingest/lvs/drc/erc/pex/report/…). This
+# crate is written against the rewrite's API; the old pinned worktree is
+# no longer referenced.
+gdsverify = { workspace = true }
 # The deck's `cell` section is Philis's own (layer roles + routing stack);
 # gdsverify's reader has no field for it and drops it, so we re-read it here.
 serde_json = "1"

@@ -1,0 +1,16 @@
+[package]
+name = "three_stage_opamp"
+version = "0.1.0"
+edition = "2021"
+
+# A side-by-side consumer of the pipeline: it hands the `library` a user-authored
+# macro for ONE part of a 3-stage op-amp and lets the library auto-generate the
+# rest. Run: `cargo run -p three_stage_opamp -- <deck.json>`.
+[[bin]]
+name = "three_stage_opamp"
+path = "src/main.rs"
+
+[dependencies]
+library = { path = "../../frontend/library" }
+verify = { path = "../../backend/verify" }
+pnr_core = { path = "../../kernel/core" }

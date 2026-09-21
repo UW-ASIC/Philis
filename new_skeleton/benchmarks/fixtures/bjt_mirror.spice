@@ -1,0 +1,5 @@
+* bjt_mirror — one NPN + one PNP; exercises BJT recognition + LVS end-to-end.
+.subckt bjt_mirror in outn outp VDD VSS
+XQ1 outn in VSS npn_05v5_1x1 W=1u L=1u
+XQ2 outp in VDD pnp_05v5_W3p40L3p40
+.ends bjt_mirror

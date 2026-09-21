@@ -28,6 +28,15 @@ mod cellgen;
 mod geometry;
 mod parse;
 
+/// Substrate3 elaboration: build a `macro_master::Composition` against a PDK
+/// and route its declared nets — the "PDK on the fly" entry.
+pub mod elaborate;
+pub use elaborate::{elaborate, ElabConfig, Elaborated};
+
+/// Decompile a solved [`Solution`] into a PDK-agnostic generator (IR,
+/// interpreter, and Rust source printer).
+pub mod emit;
+
 /// GDSII stream writer — flat [`pnr_core::Shape`]s → conformant GDSII bytes, for
 /// tape-out artifacts and SVG rendering via [`visualizer::export_svg`].
 pub mod gds;
@@ -117,12 +126,10 @@ pub struct Solution {
     pub layout: Layout,
     pub routes: Routes,
     pub macros: Vec<Macro>,
-    /// The parsed schematic — kept so signoff (LVS) has its reference.
+    /// The parsed schematic — kept so signoff (LVS) can build its reference
+    /// (`verify::RefInput` is a pure, cheap function of it; see
+    /// `cellgen::reference`).
     pub netlist: pnr_core::Netlist,
-    /// The LVS reference netlist, built **once** in [`run`] (it is a pure
-    /// function of the schematic) and reused by the per-epoch LVS feedback and
-    /// by [`signoff`] — which used to rebuild it per call.
-    pub reference: verify::lvs::RefNetlist,
     /// Feedback-loop telemetry for the *winning* iteration (for benchmarking).
     pub stats: RunStats,
     /// Per-family budget status (met / met-without-margin / violated) plus the
@@ -167,9 +174,12 @@ pub struct RunStats {
     pub place_hard: usize,
     /// Winning iteration: detailed-routing hard-violation count.
     pub route_hard: usize,
-    /// Winning iteration: live-DRC feedback hard rules folded forward.
+    /// Winning iteration: **fresh oracle DRC violation count** over its drawn
+    /// geometry (the count `lex_key` scored, not the number of feedback rule
+    /// batches folded forward — that was always 0/1 and hid partial repair).
     pub drc_hard: usize,
-    /// Winning iteration: residual routing track overuse (from the router report).
+    /// Winning iteration: Σ routing budget margins — milli-budget normalised
+    /// residuals via `Violation::from_residual`, **not** a raw track-overuse count.
     pub route_overuse: i64,
 }
 
@@ -298,42 +308,21 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // ponytail: one wire width for the whole stack. Lift this by giving `dr` a
     // per-layer width/pitch, which means a per-layer track lattice in
     // `gr::TrackGrid`; worth it only when a design actually needs the upper metals.
-    let wire_w = dr::DetailedCfg::default().wire_width;
-    let layers: Vec<_> = pdk
-        .routing_layers()
-        .into_iter()
-        .take_while(|l| pdk.min_width(l.0).is_none_or(|w| w <= wire_w))
-        .collect();
-    let mut cuts = pdk.routing_vias();
-    cuts.truncate(layers.len().saturating_sub(1));
-
-    // Everything below indexes these two tables by track-layer index, so state
-    // what they must satisfy here rather than discovering it as DRC noise later.
-    assert!(
-        !layers.is_empty(),
-        "no routable layer: the deck declares no conductor that is not also a \
-         device-formation layer, so there is nowhere legal to put a wire"
-    );
-    assert_eq!(
-        cuts.len(),
-        layers.len() - 1,
-        "every adjacent pair of routing layers needs the cut that joins them; \
-         without it the deck's lvs_cut_required leaves those layers isolated"
-    );
-    for (i, &(cut, size, below, above)) in cuts.iter().enumerate() {
-        assert!(
-            size <= below && size <= above,
-            "cut {cut:?} is {size} nm but its landing pads are {below}/{above} nm — \
-             a pad smaller than its cut cannot enclose it"
-        );
-        assert!(
-            !layers.contains(&cut),
-            "cut {cut:?} (joining {:?} and {:?}) is also in the routing stack; a \
-             layer cannot be both wire metal and a via cut",
-            layers[i],
-            layers[i + 1]
-        );
-    }
+    // Reserve the bottom conductor (li) for the cells and route on met1 and up.
+    //
+    // The deck is right to list li in `routing_metals` — it is a real conductor and
+    // a wire on it is legal. But it is also the layer every generator fills with S/D
+    // pads, gate pads and tap chains, and while it was `layers[0]` the detailed
+    // PathFinder laid horizontal tracks straight across that geometry: 26 of
+    // `chain4`'s 44 DRC violations were `LI.3 min_spacing`, and no amount of
+    // rerouting clears them because the track lattice itself is the source.
+    //
+    // Pins stay on li, so it does not simply disappear — it moves from "a layer to
+    // route on" to "the layer pin access descends to", handed to `dr` as
+    // `pin_access`. That split is only expressible now that `Pin` carries its layer.
+    //
+    // Derivation + validation shared with `elaborate` — one truth.
+    let (layers, cuts, pin_access) = elaborate::routing_stack(pdk);
 
     // ── THE hot-swap point: the concrete algorithms, named directly. Change a
     //    line here (e.g. `gp::Analytical` → your placer) to swap; nothing else in
@@ -344,34 +333,8 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // Track pitch comes from the deck, not the ported default: one global pitch
     // has to clear the *worst* layer's spacing or that layer cannot be routed
     // legally at all (see `Pdk::routing_pitch`).
-    let d_router = {
-        let mut cfg = dr::DetailedCfg::default();
-        let stack: Vec<_> = layers.iter().map(|l| l.0).collect();
-        cfg.pitch = cfg.pitch.max(pdk.routing_pitch(cfg.wire_width, &stack));
-        // Two wires on adjacent tracks are `pitch - wire_width` apart. If that is
-        // under any routed layer's min_spacing, those tracks are illegal *by
-        // construction* and no amount of rerouting can clear the DRC.
-        for l in &layers {
-            let need = pdk.min_spacing(l.0).unwrap_or(0);
-            assert!(
-                cfg.pitch - cfg.wire_width >= need,
-                "track pitch {} with {} nm wires leaves {} nm between adjacent \
-                 tracks, but layer {:?} needs {need} nm",
-                cfg.pitch,
-                cfg.wire_width,
-                cfg.pitch - cfg.wire_width,
-                l
-            );
-            assert!(
-                pdk.min_width(l.0).is_none_or(|w| cfg.wire_width >= w),
-                "wire width {} is under layer {:?}'s min_width — every segment \
-                 drawn there is a violation",
-                cfg.wire_width,
-                l
-            );
-        }
-        dr::DetailedRoute { cfg }
-    };
+    // Deck-derived pitch + pin-access validation, shared with `elaborate`.
+    let d_router = elaborate::detailed_router(pdk, &layers, &cuts, pin_access);
 
     // ---- the variant space, drawn once ----------------------------------
     // Every legal joint variant of every cell, drawn up front. `(group, variant) ->
@@ -384,7 +347,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // (`n_cells ≤ n_devices`) and every device-indexed table is translated through
     // `cell_of` / `devices_of` once, right here — loop-invariant, like the tables
     // themselves.
-    let cellgen::Cells { spaces: variants, cell_of, devices_of } =
+    let cellgen::Cells { spaces: mut variants, cell_of, devices_of } =
         cellgen::enumerate(&netlist, injected, &problem.constraints, pdk);
 
     // Re-point every placement rule at the collapsed cell space. Feedback batches
@@ -445,15 +408,57 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         c
     };
 
-    // The LVS reference is a pure function of the schematic: build it once, use
-    // it for the per-epoch LVS feedback below and hand it to `signoff` through
-    // the `Solution` (it used to be rebuilt there per call).
-    let reference = cellgen::reference(&netlist);
+    // Reserve every guard ring's ground in the variant table itself: each
+    // requester cell's alternatives inflate their bbox by the ring's halo
+    // (band + gap), so the placer keeps neighbours out of the ring's footprint
+    // by construction and `post_cell::guard_rings` draws the band back inside
+    // the reservation. Without this the rings — drawn post-placement, 3 µm wide
+    // from the epi-depth sizing — landed tap/implant/li straight across
+    // neighbouring cells: rc_filter extracted as ONE net with a ghost pgate.
+    // One site on purpose: every consumer of a bbox (gp, dp's reshape pricing,
+    // the ring pass's dev_rect) reads these macros, so inflating anywhere later
+    // re-opens the clash somewhere else.
+    for r in &constraints_cells.guard_rings {
+        let Some(space) = variants.get_mut(r.device.0 as usize) else { continue };
+        let g = pdk.grid.max(1);
+        let ext = {
+            let e = cells::post_cell::ring_halo(r, pdk);
+            ((e + g - 1) / g) * g
+        };
+        for m in &mut space.alternatives {
+            m.bbox.x -= ext;
+            m.bbox.y -= ext;
+            m.bbox.w += 2 * ext;
+            m.bbox.h += 2 * ext;
+        }
+    }
+
+    let mut variants = variants;
+    // Whitespace escalation step (PLAN §3b: Θ buys feasibility, here literally):
+    // when the middle tier stalls with ROUTING overflow as the live residual,
+    // no variant swap fixes it — the die simply lacks track capacity, because
+    // every cell blocks met1 under itself. The honest lever is whitespace:
+    // inflate every alternative's bbox by half a track pitch and let the next
+    // outer iteration place with real gutters. Bounded, and only ever taken
+    // against a measured overflow — a static always-on gutter taxed compact
+    // designs measurably (chain4 +23% WL) while this fires only when routing
+    // says it is starving.
+    let whitespace_step = {
+        let g = pdk.grid.max(1);
+        let wire = dr::DetailedCfg::default().wire_width;
+        let stack: Vec<u16> = pdk.routing_layers().iter().map(|l| l.0).collect();
+        let pitch = pdk.routing_pitch(wire, &stack).max(dr::DetailedCfg::default().pitch);
+        (((pitch / 2) + g - 1) / g) * g
+    };
+    const MAX_WHITESPACE_STEPS: u32 = 3;
+    let mut whitespace_steps = 0u32;
+    let mut latest_overuse: i64 = 0;
 
     // The live oracle (PLAN §1's oracle service, D4-revised): `dp` consumes it
     // per accepted move / per epoch — risk-gated, bbox-scoped, budget-capped.
     // Handed as a flat parameter (D1); rules stay pure functions of `Layout`.
-    let oracle = verify::LiveOracle { pdk };
+    let oracle = verify::LiveOracle::new(pdk)
+        .expect("LiveOracle over a loaded Pdk cannot fail to re-parse its own deck");
 
     // Seed the assignment by *pricing*: draw each hypothesis and measure it, rather
     // than guessing from footprint area. PLAN §2 recommends the hybrid — price up
@@ -475,6 +480,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // The base rule count, so each epoch's feedback batches can be truncated back
     // off without re-deriving the whole problem.
     let base_hard = problem.placement.hard.len();
+    let base_cost = problem.placement.cost.len();
 
     // Keep the lexicographically-best solution seen (PLAN §3b: V, then Θ, then PEX)
     // and stop when it stalls — convergence, not just "first DRC-clean".
@@ -511,7 +517,15 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             // handle — the in-epoch veto prevents *new* findings, this is the
             // cross-epoch repair pressure on the ones that predate the epoch.
             problem.placement.hard.truncate(base_hard);
-            problem.placement.hard.append(&mut drc_hard);
+            problem.placement.cost.truncate(base_cost);
+            // The feedback arrives on whichever arm `verify::drc_feedback`
+            // chose (Hard default, cost behind PNR_DRC_FEEDBACK_COST); fold
+            // into the same arm.
+            if std::env::var("PNR_DRC_FEEDBACK_COST").is_ok() {
+                problem.placement.cost.append(&mut drc_hard);
+            } else {
+                problem.placement.hard.append(&mut drc_hard);
+            }
 
             // New seed per epoch so a stuck run doesn't replay one trajectory. Mixed
             // with `outer` too, or every assignment would retrace the same trajectory.
@@ -614,14 +628,21 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             // `dr` lands its terminals on these rects. Without them it derives
             // terminals from the coarse route's gcell-snapped corners and never
             // touches a pin.
-            let pin_rects: Vec<(pnr_core::NetId, pnr_core::Rect)> =
-                gr::place_macros(&macros, &layout)
+            //
+            // The placed macros go through as well, not just their pin rects: `dr`
+            // has to see the li the cells already drew or it lands access pads a
+            // sliver away from it. Projecting to `(net, rect)` here was what made
+            // the router blind to cell interiors.
+            let placed_cells = gr::place_macros(&macros, &layout);
+            let pin_rects: Vec<(pnr_core::NetId, pnr_core::Rect, pnr_core::LayerId)> =
+                placed_cells
                     .iter()
-                    .flat_map(|m| m.pins.iter().map(|p| (p.net, p.at)))
+                    .flat_map(|m| m.pins.iter().map(|p| (p.net, p.at, p.layer)))
                     .collect();
             let (routes, route_report) = d_router.route(
                 &global,
                 &pin_rects,
+                &placed_cells,
                 &rings,
                 &problem.routing,
                 &layers,
@@ -629,12 +650,14 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
                 &mut neg,
                 seed,
             );
-            routes.debug_check("dr::route");
-            // The LVS precondition, checked here rather than inferred from an
-            // `unconnected_pin` count at signoff: if a pin is not reached, its device
-            // extracts onto its own island of nets and no downstream stage can repair
-            // it, because nothing is *illegal* — the layout is merely disconnected.
-            geometry::debug_check_connected(&macros, &layout, &routes);
+            // Deliberately NO connectivity assert here: a mid-search epoch is
+            // allowed to come out open. `dr` reports each open net as a hard
+            // violation ("open net N"), so the lexicographic key below already
+            // punishes it above any budget — the epoch is scored and discarded,
+            // not treated as fatal. Panicking here (`routes.debug_check`) killed
+            // debug builds on epoch 1 of a search the next negotiation round
+            // would have repaired. Only the WINNER must be connected; that is
+            // asserted once, after the loop.
 
             // In-loop DRC over the drawn geometry (device macros + guard rings) → Hard
             // rules for the next epoch.
@@ -642,13 +665,13 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             for r in &rings {
                 shapes.extend(r.shapes.iter().cloned());
             }
-            // The reference enables per-epoch LVS alongside the DRC/ERC pass.
-            // PLAN §1 wants LVS "after any move that can change device
-            // structure" — a variant escalation always precedes an epoch (the
-            // outer tier re-enters the middle tier), and dp's in-epoch reshapes
-            // land here too, so per-epoch coverage is exactly that cadence. A
-            // mismatch folds forward as the same hard-rule capture DRC uses.
-            let feedback = verify::drc_feedback(&shapes, pdk, Some(&reference));
+            // Per-epoch LVS is gone from this seam: the rewritten oracle's
+            // DRC feedback is geometry-only, and the device-structure hazard
+            // PLAN §1 wanted covered "after any move that can change device
+            // structure" now lives where the moves are — `dp`'s per-accepted
+            // `merge_ambiguous` veto through the same LiveOracle. Full LVS
+            // remains the signoff gate.
+            let (feedback, drc_summary) = verify::drc_feedback(&oracle, &shapes);
 
             // Θ for this epoch: the budget residuals, measured on the layout we just
             // produced. This used to run once, after the loop, on the winner only —
@@ -669,16 +692,52 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             // past a hard violation. Summing the tuples (rather than scalarising with
             // weights) is the whole point: a finite penalty is a bribe the optimizer
             // will accept.
-            let key = lex_key(&place_report, &route_report, feedback.hard.len(), &budgets);
-            drc_hard = feedback.hard;
+            // The fresh violation COUNT, not batch presence: the requirements
+            // fold is one batch whether the layout carries 24 findings or 1,
+            // so scoring V off `feedback.{hard,cost}.len()` flattened every
+            // DRC state to 0/1 — a partial repair (24 → 3) never registered
+            // as improvement and the stall counter starved honest progress.
+            let fresh_drc = drc_summary.violations as usize;
+            let key = lex_key(&place_report, &route_report, fresh_drc, &budgets);
+            latest_overuse = route_report
+                .budget_violations
+                .iter()
+                .filter(|v| v.rule == "routing overuse")
+                .map(|v| v.margin)
+                .sum();
+            drc_hard = if std::env::var("PNR_DRC_FEEDBACK_COST").is_ok() {
+                feedback.cost
+            } else {
+                feedback.hard
+            };
 
+            if std::env::var("PNR_TRACE").is_ok() {
+                eprintln!(
+                    "PNR_TRACE outer {outer} epoch {iter}: V={} theta={:.3} pex={:.1} \
+                     (place {} route {} drc {} overuse {})",
+                    key.0,
+                    key.1,
+                    key.2,
+                    place_report.hard_violations.len(),
+                    route_report.hard_violations.len(),
+                    fresh_drc,
+                    latest_overuse
+                );
+                for v in route_report
+                    .hard_violations
+                    .iter()
+                    .chain(place_report.hard_violations.iter())
+                {
+                    eprintln!("PNR_TRACE   hard: {} (margin {})", v.rule, v.margin);
+                }
+            }
             let improved = best.as_ref().is_none_or(|(bk, ..)| key < *bk);
             if improved {
                 let stats = RunStats {
                     best_iteration: iter,
                     place_hard: place_report.hard_violations.len(),
                     route_hard: route_report.hard_violations.len(),
-                    drc_hard: drc_hard.len(),
+                    drc_hard: fresh_drc,
                     route_overuse: route_report
                         .budget_violations
                         .iter()
@@ -726,10 +785,46 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             break 'outer;
         }
 
-        // Case (b): escalate. `None` means the collapsed variant space is exhausted —
-        // every legal joint assignment has been tried and none is feasible. That is a
-        // real answer (the circuit as specified cannot be laid out under these
+        // Case (b): escalate. Two different escalations for two different
+        // bindings, told apart by WHICH residual is alive at the stall:
+        //
+        //   * routing overflow > 0 → capacity binding. No arrangement of these
+        //     variants routes in this whitespace; a variant swap would shuffle
+        //     pins without buying a single track. Inflate every alternative's
+        //     bbox by half a pitch (bounded) and re-place with real gutters.
+        //   * otherwise → variant-space binding, the original diagnosis; swap.
+        //
+        // `None` from the variant space means it is exhausted — a real answer
+        // (the circuit as specified cannot be laid out under these
         // constraints), not a failure to converge, so stop rather than spin.
+        if std::env::var("PNR_WHITESPACE").is_ok()
+            && latest_overuse > 0
+            && whitespace_steps < MAX_WHITESPACE_STEPS
+        {
+            whitespace_steps += 1;
+            eprintln!(
+                "[whitespace] middle tier stalled with routing overflow after \
+                 {iterations} epochs — capacity binding, inflating every cell by \
+                 {whitespace_step} nm (step {whitespace_steps}/{MAX_WHITESPACE_STEPS})"
+            );
+            for space in &mut variants {
+                for m in &mut space.alternatives {
+                    m.bbox.x -= whitespace_step;
+                    m.bbox.y -= whitespace_step;
+                    m.bbox.w += 2 * whitespace_step;
+                    m.bbox.h += 2 * whitespace_step;
+                }
+            }
+            // The inflation moves EVERY cell, so state keyed to the old
+            // coordinates is poison, not memory: PathFinder history pins
+            // pressure onto track positions that no longer correspond to
+            // anything, and captured DRC findings penalise geometry that no
+            // longer exists. Both restart; the multiplier state (`prices`)
+            // stays — budget prices are about constraints, not coordinates.
+            neg = gr::Negotiation::new();
+            drc_hard.clear();
+            continue;
+        }
         match cellgen::escalate(&variants, &assignment, cfg.seed ^ u64::from(outer)) {
             Some(next) => {
                 variant_escalations += 1;
@@ -743,7 +838,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         }
     }
 
-    let (_, layout, routes, rings, mut stats) = best.ok_or(FlowError::Empty)?;
+    let (best_key, layout, routes, rings, mut stats) = best.ok_or(FlowError::Empty)?;
     stats.iterations = iterations;
     stats.converged = converged;
     stats.outer_iterations = outer_iterations;
@@ -755,6 +850,18 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // along as extra absolute-coord macros (indices past the device count →
     // `collect` leaves them at absolute position), so signoff and GDS see them.
     let mut macros = cellgen::realize(&variants, &layout.variant);
+    // The connectivity gate the epoch loop deliberately skips (an open epoch is
+    // scored and discarded): a winner that *claims feasibility* (zero hard
+    // violations) must be whole, or the lexicographic key and the report have
+    // drifted apart. A winner returned infeasible — the variant space ran out,
+    // the documented "real answer" path above — is allowed to carry opens: they
+    // are already counted in its key and reported at signoff, so panicking here
+    // would turn an honest score into a debug-only crash. Before the rings
+    // extend `macros` — ring macros index past the layout and are absolute.
+    if best_key.0 == 0 {
+        routes.debug_check("dr::route (winner)");
+        geometry::debug_check_connected(&macros, &layout, &routes);
+    }
     macros.extend(rings);
 
     // Budget report for the winning solution: the "how close to the edge" view a
@@ -763,6 +870,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // findings, not constraints the circuit declared, and leaving them in would
     // attribute them to a rule family in the table.
     problem.placement.hard.truncate(base_hard);
+    problem.placement.cost.truncate(base_cost);
     let metadata = metadata::build(
         &problem.placement,
         &layout,
@@ -772,7 +880,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         &problem.net_classes,
     );
 
-    Ok(Solution { layout, routes, macros, netlist, reference, stats, metadata })
+    Ok(Solution { layout, routes, macros, netlist, stats, metadata })
 }
 
 /// PLAN §3b's lexicographic key: `(|V|, Θ, PEX)`, summed across every stage.
@@ -792,7 +900,7 @@ type LexKey = (usize, f64, f32);
 fn lex_key(
     place: &pnr_core::Report,
     route: &pnr_core::Report,
-    drc_hard: usize,
+    fresh_drc: usize,
     budgets: &metadata::MetadataReport,
 ) -> LexKey {
     let (pv, pt, pc) = place.lex();
@@ -801,7 +909,7 @@ fn lex_key(
     // (see `MetadataReport::theta` for the deliberate ~×2 double-weighing with the
     // pt/rt terms — the stage reports carry the same residuals; monotone-safe,
     // cleanup deferred).
-    (pv + rv + drc_hard, pt + rt + budgets.theta(), pc + rc)
+    (pv + rv + fresh_drc, pt + rt + budgets.theta(), pc + rc)
 }
 
 /// `‖λ_{k+1} − λ_k‖` below which constraint prices count as stationary (PLAN §5).
@@ -913,13 +1021,81 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
     parse::spice(spice)
 }
 
-/// Final signoff on a solution: full DRC/LVS/PEX/ERC via `verify` (GPU DRC/ERC
-/// under `--features verify/gpu`). Separate from [`run`] because it needs the
-/// schematic reference and is a gate, not part of convergence.
+/// Final signoff on a solution: full DRC/LVS/PEX/ERC via `verify`. Separate
+/// from [`run`] because it needs the schematic reference and is a gate, not
+/// part of convergence.
+///
+/// The reference is rebuilt from the solution's netlist per call (a pure, cheap
+/// function of it), its `ports` set to exactly the label names placed on the
+/// geometry — `verify` requires the two to match, and deriving both here is
+/// what makes drift impossible.
 #[must_use]
 pub fn signoff(sol: &Solution, pdk: &Pdk) -> pnr_core::Report {
     let shapes = sol.geometry();
-    let (report, _timings) =
-        verify::signoff(&shapes, &sol.reference, &verify::erc::SignoffConfig::default(), pdk);
+    let placed = pnr_core::place_macros(&sol.macros, &sol.layout);
+    let names: Vec<String> = sol.netlist.nets.iter().map(|n| n.name.clone()).collect();
+    let pins = labeled_pins(&placed, &names, pdk, &shapes);
+    let mut reference = cellgen::reference(&sol.netlist);
+    reference.ports = pins.iter().map(|p| p.name.clone()).collect();
+    let (report, _wall) = verify::signoff(&shapes, &pins, &reference, pdk);
     report
+}
+
+/// One [`verify::LabeledPin`] per net: the first placed pin sitting on a
+/// deck-labelled layer whose centre provably lies on drawn geometry of the
+/// conductor that layer names. `verify`'s `resolve_labels` **fails closed** on
+/// a label with no shape under its point, so only provable labels go in; a net
+/// with no such pin simply goes unlabelled (its extracted net stays anonymous,
+/// which LVS handles — structure, not names, drives the default comparison).
+///
+/// The label's name is the schematic net's, which is what binds the extracted
+/// net to the reference port of the same name.
+///
+/// Takes placed macros and net names rather than a [`Solution`] so the
+/// substrate3 path ([`elaborate::Elaborated::signoff`]) labels its geometry the
+/// same way. It has to be the same way: LVS pairs on these labels, so a caller
+/// that labels only its io ports hands the comparison a handful of named nets
+/// and a pile of anonymous ones, and the pairing collapses.
+pub(crate) fn labeled_pins(
+    placed: &[Macro],
+    nets: &[String],
+    pdk: &Pdk,
+    shapes: &[pnr_core::Shape],
+) -> Vec<verify::LabeledPin> {
+    let conn = &pdk.deck.connectivity;
+    // Label layer → the conductor it names (identity on both Philis decks:
+    // li/met1..met5 label themselves).
+    let conductor_of = |layer: u16| -> Option<u16> {
+        conn.label_layer
+            .iter()
+            .position(|l| l.0 == layer)
+            .map(|row| conn.label_names[row].0)
+    };
+    let mut out: Vec<verify::LabeledPin> = Vec::new();
+    let mut labelled: Vec<u16> = Vec::new(); // nets already labelled
+    // ponytail: O(pins × shapes) point-in-rect scan, run once per signoff on
+    // cell-sized designs; index the shapes per layer if it ever shows up.
+    for m in placed {
+        for p in &m.pins {
+            if labelled.contains(&p.net.0) {
+                continue;
+            }
+            let Some(conductor) = conductor_of(p.layer.0) else { continue };
+            let (x, y) = (p.at.x + p.at.w / 2, p.at.y + p.at.h / 2);
+            let on_drawn = shapes.iter().any(|s| {
+                s.layer.0 == conductor
+                    && x >= s.rect.x
+                    && x <= s.rect.x + s.rect.w
+                    && y >= s.rect.y
+                    && y <= s.rect.y + s.rect.h
+            });
+            if !on_drawn {
+                continue;
+            }
+            let Some(name) = nets.get(p.net.0 as usize) else { continue };
+            labelled.push(p.net.0);
+            out.push(verify::LabeledPin { name: name.clone(), layer: p.layer.0, x, y });
+        }
+    }
+    out
 }

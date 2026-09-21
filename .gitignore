@@ -7,3 +7,13 @@ tools/assets/
 .venv/
 result/
 .claude/
+temporary/
+
+# new_skeleton mirrors the paths above.
+__pycache__/
+# bench exports SVGs here
+new_skeleton/assets/
+# bench run log
+new_skeleton/suite_result.txt
+# externally cloned suites, beside the tracked *.spice
+new_skeleton/benchmarks/fixtures/*/

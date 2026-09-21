@@ -461,3 +461,45 @@ fn every_device_accounted_for() {
     assert!(seen.into_iter().all(|s| s), "some device unaccounted for");
 }
 
+
+#[test]
+fn a_unitization_never_mixes_kinds_or_sizes() {
+    // `unit_w`/`unit_l`/`device_type` are one-per-group scalars, so every member
+    // must genuinely carry them. When they did not (the block-level W read off
+    // `devices[0]`), `cells::builder::sizing` drew the odd member at the wrong
+    // size and LVS reported `lvs.parameter_mismatch`. The OTA mixes N/P and
+    // three widths inside its recognised blocks, so it is the case that bites.
+    let nl = ota();
+    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let param = |d: DeviceId, k: &str| {
+        nl.devices[d.0 as usize].params.iter().find(|(n, _)| n == k).map(|&(_, v)| v)
+    };
+    for u in &p.constraints.unitization {
+        for &d in &u.devices {
+            assert_eq!(nl.devices[d.0 as usize].kind, u.device_type, "unitization {:?} mixes kinds", u.devices);
+            assert_eq!(param(d, "w"), Some(i64::from(u.unit_w)), "unitization {:?} mixes W", u.devices);
+            assert_eq!(param(d, "l"), Some(i64::from(u.unit_l)), "unitization {:?} mixes L", u.devices);
+        }
+    }
+}
+
+#[test]
+fn guard_rings_tie_to_the_guarded_device_s_bulk() {
+    // A ring is a substrate/well tap: it must land on the bulk rail, never on
+    // whatever net the netlist numbered first. `connection_net` used to be a
+    // hardcoded `NetId(0)` — here `vout1` — and `dr` folds ring pins in as real
+    // routing terminals, so the router wired every guard ring in the design to
+    // that signal net.
+    let nl = ota();
+    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    assert!(!p.constraints.guard_rings.is_empty(), "matched FETs get rings");
+    for r in &p.constraints.guard_rings {
+        let dev = &nl.devices[r.device.0 as usize];
+        let bulk = dev.terminals.iter().find(|(t, _)| t == "B").expect("a FET states a bulk").1;
+        assert_eq!(
+            r.connection_net, bulk,
+            "{}'s ring ties to net {} instead of its bulk {}",
+            dev.name, r.connection_net.0, bulk.0
+        );
+    }
+}

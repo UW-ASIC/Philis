@@ -1,0 +1,9 @@
+[package]
+name = "op_demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+library = { path = "../../frontend/library" }
+verify = { path = "../../backend/verify" }
+pnr_core = { path = "../../kernel/core" }

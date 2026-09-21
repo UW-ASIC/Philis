@@ -525,7 +525,7 @@ pub fn report(
     for (bi, b) in reqs.hard.iter().enumerate() {
         if b.violations(l) > 0 {
             hard_violations
-                .push(Violation::from_residual(format!("analog hard batch {bi}"), b.residual(l)));
+                .push(Violation::from_residual(format!("analog hard batch {bi} ({:?})", b.kind()), b.residual(l)));
         }
     }
     // Θ: the budget arm, priced by `Prices` and driven to zero by the search rather

@@ -150,6 +150,23 @@ pub struct DetailedCfg {
     pub pex_probe_nm: i32,
 }
 
+/// Oracle calls allowed per placed cell, the real allowance behind
+/// [`DetailedCfg::oracle_budget`]'s ceiling.
+///
+/// Deliberately small, and it must not grow: the *cost* of a call already grows
+/// with circuit size, because [`region_cells`] stamps more geometry the denser the
+/// layout gets (measured ~2 ms/call on 2-cell `bjt_mirror`, ~35 ms/call on 4-cell
+/// `chain4`). An allowance that also scales with cells makes the tier quadratic —
+/// at 64 it put `chain4` at 20 min against 7.6 min with the tier off.
+///
+/// The tier is unproven, not just expensive. Across both circuits currently
+/// measurable it changes no outcome: `bjt_mirror` gives DRC 1 / LVS MATCH / ERC 0
+/// at every budget from 0 to 30000, and `chain4` gives DRC 42→44, ERC 22→23, LVS
+/// MISMATCH either way. Raise this only alongside a circuit that demonstrates the
+/// veto catching something — the point of the tier is real, the evidence is not
+/// there yet, and until it is, measurability wins.
+const ORACLE_CALLS_PER_CELL: u32 = 8;
+
 impl Default for DetailedCfg {
     fn default() -> Self {
         Self {
@@ -418,7 +435,17 @@ impl DetailedPlacer for Annealer {
             macros,
             variants,
             dilation: i64::from(cfg.oracle_dilation_nm),
-            budget: std::cell::Cell::new(cfg.oracle_budget),
+            // Scaled by problem size; `oracle_budget` is the ceiling, not the
+            // allowance. A flat count spends the same 30k exact-DRC calls on a
+            // 2-cell circuit as on a 200-cell one, and a 2-cell circuit has nowhere
+            // near 30k distinguishable configurations — it just burns ~2 ms per call
+            // until the cap runs out. Measured on `bjt_mirror`, budgets 0 / 500 /
+            // 5000 / 30000 all produced DRC 1, LVS MATCH, ERC 0 — at 75 ms, 1.8 s,
+            // 16.8 s and 61.8 s. The flat cap bought nothing and was what made
+            // `chain4` look like a hang.
+            budget: std::cell::Cell::new(
+                cfg.oracle_budget.min(ORACLE_CALLS_PER_CELL.saturating_mul(n as u32)),
+            ),
             grad: Vec::new(),
         };
         // clamp windows are absolute coords; keep footprints within the coarse
@@ -877,18 +904,21 @@ fn oracle_veto(sa: &Sa, l: &Layout, moved: &[usize]) -> bool {
 
 /// Epoch-tail **full-layout** oracle DRC — the violation count the stop
 /// criterion requires to be 0 alongside frozen + overlap-free + Φ-clean.
-/// Budget-drained (or nothing drawn) reads 0: proxy-only degradation,
-/// trajectory-ordered like everything else on the budget.
+///
+/// Deliberately **budget-exempt** (no gate, no drain): the budget caps the
+/// per-move veto spend, while this runs at most once per epoch and only when
+/// the proxies would otherwise terminate. Gating it on the budget made a
+/// drained budget read as "clean" — the early stop then shipped a dirty
+/// layout because *unknown* was scored as 0. Deterministic: pure function of
+/// the layout, no RNG, no reordering. Nothing drawn still reads 0 (there is
+/// nothing the oracle could object to), which also keeps every pre-oracle
+/// test trajectory byte-identical.
 fn epoch_oracle_viol(sa: &Sa, l: &Layout) -> u32 {
-    if sa.budget.get() == 0 {
-        return 0;
-    }
     let cells: Vec<usize> = (0..l.x.len()).collect();
     let (drawn, shapes) = stamp(sa, l, &cells);
     if drawn == 0 {
         return 0;
     }
-    sa.budget.set(sa.budget.get() - 1);
     sa.oracle.drc(&shapes).violations
 }
 
@@ -1719,6 +1749,7 @@ mod variant_tests {
                 name: "G".to_string(),
                 net: pnr_core::NetId(0),
                 at: Rect { x, y: 4_950, w: 100, h: 100 },
+                layer: pnr_core::LayerId(0),
             }],
             bbox: Rect { x: 0, y: 0, w: 10_000, h: 10_000 },
         }

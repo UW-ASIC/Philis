@@ -1,0 +1,12 @@
+[package]
+name = "philis"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "philis"
+path = "src/main.rs"
+
+[dependencies]
+library = { path = "../library" }
+verify = { path = "../../backend/verify" }

@@ -18,11 +18,6 @@ macro_master = { path = "../../kernel/macroMaster" }
 visualizer = { path = "../../kernel/visualizer" }
 annotator = { path = "../../backend/annotator" }
 verify = { path = "../../backend/verify" }
-# The LVS reference (`RefNetlist`/`RefDevice`/`RefTwoTerminal`/`RefBjt`) is built
-# directly against gdsverify's schematic types — `verify` re-exports only the
-# top-level `RefNetlist`. Same git source as `verify` so the workspace `[patch]`
-# applies (builds CPU offline).
-gdsverify = { git = "https://github.com/UW-ASIC/GPurify", branch = "main" }
 gp = { path = "../../backend/gp" }
 dp = { path = "../../backend/dp" }
 gr = { path = "../../backend/gr" }

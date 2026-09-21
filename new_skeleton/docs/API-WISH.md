@@ -333,9 +333,9 @@ implants merge, and extraction reports a channel that "ambiguously matches MOS r
 [nmos, pmos]" — DRC-clean and LVS-fatal, unrepairable downstream because nothing is
 illegal.
 
-**Not yet consumed:** `library::run` still derives `abutment_groups` locally. Wiring it
-to `Problem::abutment` is a follow-up, deliberately not done while the library step was
-in flight.
+~~**Not yet consumed:** `library::run` still derives `abutment_groups` locally.~~
+**Closed** (DTI branch step; re-indexed to cell space by group collapse, 2026-07-29) —
+see the annotator debt list for the two-consumer contract.
 
 ### D17 — Accepted corrections from implementation (do not re-decide)
 
@@ -420,6 +420,12 @@ Append to this list as each consumer step invents something.
   change of a few lines against machinery that is already written and tested, and it
   is a strictly better use of effort than a new representation.
 
+  **Update (feasibility pump step, 2026-07-29): the intervening win landed.**
+  `dp::project_hard` projects violated hard batches per SA epoch (Φ-monotone
+  rollback, pinned cells restored, no RNG consumed), so symmetry is exactly
+  satisfied at exit rather than terminally re-snapped. The representational change
+  remains deferred as before.
+
 - **Θ's unit is now real, and one fudge factor should die with it.**
   `Rule::residual` returns overshoot **normalised by the rule's own budget**, which is
   what makes Θ summable across incommensurable rules (D17). `CouplingBudget::cost`
@@ -435,25 +441,27 @@ Append to this list as each consumer step invents something.
 
 The loop and its four `cellgen` bodies are landed. What they deliberately do not do:
 
-- **Group collapse and merged macros are not in `enumerate`.** It emits one
-  `VariantSpace` per *device*, so PLAN §2's collapse — the thing that shrinks
-  `|Var|^|g|` to a handful of legal joint assignments — has nowhere to apply: there is
-  no group whose variant *vector* `same_variant_required` / `target_ratio` could
-  constrain, and `Problem::reuse` / `Problem::parallel` remain consumed by nobody.
-  Landing it needs, in this order: (1) a device→cell map owned by `cellgen`, because
-  `library::run` still indexes `device_power`, `fixed`, and `abutment_groups` by device
-  and every one of those becomes wrong the moment a cell holds two devices; (2) the
-  joint enumeration itself, which is where `Unitization` finally bites; (3) `cells`'
-  already-written merged interdigitated path (`mosfet`'s `n_dev > 1` ABBA
-  `finger_sequence`), currently unreachable because nothing asks for a multi-device
-  group. (3) is also what restores legitimate diffusion abutment — a merged group is one
-  macro, so the legalizer needs no same-group overlap exemption, and that exemption was
-  removed precisely because it froze non-merged devices on top of each other.
-- **Seeded pricing's routability half is near-vacuous until (1) lands.** `gr::price_group`
-  on a one-device cell finds no net with two distinct terminals inside the group, so it
-  always answers `reachable: true, overflow: 0` and only the DRC/ERC half discriminates.
-  D6's load-bearing `reachable == false` therefore cannot fire yet. The call is wired
-  anyway so collapse does not also have to invent the pricing path.
+- ~~**Group collapse and merged macros are not in `enumerate`.**~~ **Closed** (group
+  collapse step, 2026-07-29). `cellgen::enumerate` returns `Cells { spaces, cell_of,
+  devices_of }` — (1)'s device→cell map — and a multi-member unitization draws as ONE
+  cell through `mosfet`'s merged ABBA `finger_sequence`, so same-variant /
+  integer-ratio / common-centroid hold by construction and `VariantSpace::lock`
+  (D7's stopgap) is deleted along with `library::cellgen::variant_locks`.
+  `library::run` is re-indexed to cell space (`fixed`, `abutment`, `groups`,
+  `device_power`, guard rings, rule retargeting via `Target::retarget` with a
+  missing-override tripwire). Residue, by design: a unitization **declines** the
+  merge (per-device cells, exactly as before) for an injected member, an overlap
+  with an earlier unitization, MOS members not sharing one source net, or when
+  *every* drawn alternative puts a D|D boundary between different-drain devices
+  (`Single`/greedy-centroid sequences — the drawn-short hazard on the pattern
+  axis); unsafe alternatives are dropped per-alternative, an empty space declines.
+- ~~**Seeded pricing's routability half is near-vacuous until (1) lands.**~~ **Closed**
+  (group collapse step, 2026-07-29). A merged group is one macro holding several
+  devices, so `gr::price_group` finds nets with two distinct terminals inside the
+  cell and the routability half discriminates; D6's load-bearing
+  `reachable == false` can fire (`cellgen` reports a variant-space binding on
+  stderr when *every* alternative is unreachable). Single-device cells still price
+  near-vacuously, which is now the uninteresting case.
 - **`escalate` does not sample uniformly, contra D7.** It is a mixed-radix *successor*
   ordered by pin-arrangement spread. That is forced, not preferred: the function is
   memoryless (the caller keeps no tried-set) and "never return an already-tried
@@ -473,8 +481,11 @@ The loop and its four `cellgen` bodies are landed. What they deliberately do not
   it inside `gdsverify` (99.86% of measured runtime). ~0.4 s for a 5T OTA, ~1 min at the
   benchmark's 800-cell ceiling. This is the one place in the flow where oracle calls were
   *added*, so it is named rather than discovered later. First cut if it bites: price
-  DRC/ERC only for the alternatives that survive the routability half — which needs group
-  collapse first, since that half does not discriminate on a one-device cell.
+  DRC/ERC only for the alternatives that survive the routability half — **now
+  implementable** (group collapse landed 2026-07-29 and that half discriminates on
+  merged cells); collapse also shrinks the multiplier, since a merged group prices
+  one joint space instead of `|g|` per-device spaces. Still not done: nothing has
+  been seen biting.
 - ~~**D16's `Problem::abutment` is still derived in the loop.**~~ **Closed** (DTI
   branch step, D1) — see the annotator debt list below for the resolution.
 
@@ -638,7 +649,9 @@ terminally, after `legalize::separate_overlaps`. PLAN's feasibility pump wants p
 existing call site already pays for the mistake — it measures `before_proj`, rolls back,
 and hand-restores pinned macros. Moving that call inside the SA loop is a few lines in
 `dp` against tested machinery and is strictly better value than a new representation.
-`dp` is another agent's crate and was not touched.
+`dp` is another agent's crate and was not touched. **Closed** (feasibility pump step,
+2026-07-29): `dp::project_hard` now runs per SA epoch — see the updated projection
+entry in the step-5 debt list above.
 
 ### Normalisation and fudge factors
 

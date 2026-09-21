@@ -90,6 +90,15 @@ pub struct Pin {
     pub name: String,
     pub net: NetId,
     pub at: Rect,
+    /// The layer the pin is actually drawn on.
+    ///
+    /// Without it `dr` had to *guess*, and the only guess available was
+    /// `layers[0]` — the bottom of the routing stack. That forced li to stay in
+    /// the stack purely so pin access could reach a pin, which in turn let the
+    /// PathFinder lay horizontal tracks on li: the same layer every cell fills
+    /// with S/D pads and tap chains. 26 of `chain4`'s 44 DRC violations were
+    /// `LI.3 min_spacing` from exactly that. One missing field, all the way down.
+    pub layer: LayerId,
 }
 
 /// A logical terminal a generator declares. Connectivity between `Port`s is what

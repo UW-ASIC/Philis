@@ -160,7 +160,9 @@ fn device_kind(name: &str, model: &str) -> Option<DeviceKind> {
         'r' => Some(DeviceKind::Resistor),
         'c' => Some(DeviceKind::Capacitor),
         'd' => Some(DeviceKind::Diode),
-        'q' => Some(DeviceKind::Bjt),
+        // `is_p` already tests `pnp`; a bare `Q` card with an unrecognised model
+        // keeps the historical NPN default.
+        'q' => Some(if is_p { DeviceKind::Pnp } else { DeviceKind::Npn }),
         'l' => Some(DeviceKind::Inductor),
         _ => None,
     }
@@ -175,8 +177,10 @@ fn device_kind(name: &str, model: &str) -> Option<DeviceKind> {
 /// overwhelming majority of `X` instances are transistors.
 fn subckt_kind(model_lower: &str) -> Option<DeviceKind> {
     let has = |p: &str| model_lower.contains(p);
-    if has("npn") || has("pnp") {
-        Some(DeviceKind::Bjt)
+    if has("pnp") {
+        Some(DeviceKind::Pnp)
+    } else if has("npn") {
+        Some(DeviceKind::Npn)
     } else if has("res") || has("resistor") {
         Some(DeviceKind::Resistor)
     } else if has("cap") || has("capacitor") {
@@ -197,7 +201,7 @@ fn terminal_spec(kind: DeviceKind) -> (&'static [&'static str], usize) {
     match kind {
         DeviceKind::Nmos | DeviceKind::Pmos => (&["D", "G", "S", "B"], 3),
         DeviceKind::Resistor | DeviceKind::Capacitor | DeviceKind::Diode => (&["P", "N"], 2),
-        DeviceKind::Bjt => (&["C", "B", "E"], 3),
+        DeviceKind::Npn | DeviceKind::Pnp => (&["C", "B", "E"], 3),
         DeviceKind::Inductor => (&["P", "N"], 2),
     }
 }
@@ -296,8 +300,10 @@ mod x_instance_tests {
         assert_eq!(device_kind("XM1", "nfet_01v8"), Some(DeviceKind::Nmos));
         assert_eq!(device_kind("XM3", "pfet_01v8"), Some(DeviceKind::Pmos));
         // Regressions that used to silently become MOSFETs:
-        assert_eq!(device_kind("XQ1", "npn_05v5_1x1"), Some(DeviceKind::Bjt));
-        assert_eq!(device_kind("XQ2", "pnp_05v5_W3p40L3p40"), Some(DeviceKind::Bjt));
+        // Polarity, not just family: collapsing these two onto one `Bjt` variant
+        // drew, extracted and referenced the PNP as an NPN.
+        assert_eq!(device_kind("XQ1", "npn_05v5_1x1"), Some(DeviceKind::Npn));
+        assert_eq!(device_kind("XQ2", "pnp_05v5_W3p40L3p40"), Some(DeviceKind::Pnp));
         assert_eq!(device_kind("XR1", "res_generic_po"), Some(DeviceKind::Resistor));
         assert_eq!(device_kind("XC1", "cap_mim_m3_1"), Some(DeviceKind::Capacitor));
     }
@@ -305,7 +311,8 @@ mod x_instance_tests {
     #[test]
     fn explicit_primitive_letters_still_win() {
         assert_eq!(device_kind("M1", "nfet_01v8"), Some(DeviceKind::Nmos));
-        assert_eq!(device_kind("Q1", "npn"), Some(DeviceKind::Bjt));
+        assert_eq!(device_kind("Q1", "npn"), Some(DeviceKind::Npn));
+        assert_eq!(device_kind("Q2", "pnp"), Some(DeviceKind::Pnp));
         assert_eq!(device_kind("R1", "res"), Some(DeviceKind::Resistor));
     }
 

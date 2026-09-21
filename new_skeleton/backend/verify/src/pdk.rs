@@ -1,36 +1,61 @@
 //! [`Pdk`] — process data, shared by everyone. Plain data, not theory.
 //!
 //! Philis's own PDK schema. It carries the numbers a generator/checker reads
-//! (layers, rule values, grid) *and* the compiled [`gdsverify::Deck`] that the
-//! real verification engine consumes — the deck is what `run_drc`/`run_erc`/
-//! `run_pex`/LVS actually run against.
+//! (layers, rule values, grid) *and* the compiled [`gdsverify`] deck the real
+//! verification engine consumes, plus the deck **source text** — the
+//! [`crate::checker::Checker`] re-parses that into its own string table, so a
+//! `Pdk` stays a read-only query object while each checker session owns its
+//! interning.
 //!
-//! The frontend builds a `Pdk` once from a deck JSON (via [`Pdk::from_json`],
-//! which is gdsverify's own reader) and hands it to cells/stages/verify. This
-//! is the single public PDK type the whole pipeline passes around.
+//! **Units (D1).** All nm↔Dbu conversion is confined to this crate. The deck is
+//! parsed against [`nm_grid`] (1000 dbu/µm ⇒ 1 dbu = 1 nm), so a
+//! `Dbu::raw()` read anywhere in `verify` *is* nanometres. `Pdk::grid` is the
+//! **manufacturing** grid (sky130: 5 nm), read from the deck's `off_grid` rule.
 
+use gdsverify::ingest::deck::{Deck, ParamValue, RuleSpec};
+use gdsverify::ingest::StrTable;
+use gdsverify::geom::Grid;
 use pnr_core::{LayerId, Process};
+
+/// The database grid every length in this crate is expressed against:
+/// 1000 dbu/µm, so **1 dbu = 1 nm**.
+#[must_use]
+pub fn nm_grid() -> Grid {
+    Grid::new(1000).expect("1000 dbu/um is a valid grid resolution")
+}
+
+/// gdsverify's layer id type (`u16` newtype).
+pub use gdsverify::geom::LayerId as GvLayerId;
 
 /// Process design kit: layers, design-rule values, grid, and the gdsverify deck.
 pub struct Pdk {
     /// Named layers → their Philis [`LayerId`]. The index (`LayerId.0`) is the
-    /// position in this table; the name is what gdsverify's deck keys on.
+    /// deck's own layer id — gdsverify assigns ids ascending by layer *name*
+    /// (derived layers after every base one), and this table is built by
+    /// iterating those ids, so deck-index == Philis `LayerId` by construction.
     pub layers: Vec<(String, LayerId)>,
     /// Design-rule values by name (min spacing, min width…), in `nm`.
     pub rules: Vec<(String, i32)>,
-    /// Fabrication grid, `nm`. All geometry snaps to this.
+    /// Fabrication (manufacturing) grid, `nm` — the deck's `off_grid` pitch.
+    /// All geometry snaps to this.
     pub grid: i32,
-    /// The compiled verification deck — layer table, DRC rules, PEX models, LVS
-    /// tolerances. This is the object `gdsverify::run_*` consume; verify builds
-    /// its `GeometryStore` against `deck.layers` before every check.
-    pub deck: gdsverify::Deck,
+    /// The compiled verification deck: layer table, rule table, connectivity,
+    /// device recognition, process stack.
+    pub deck: Deck,
+    /// The string table `deck` was parsed against; every `StrId` in `deck`
+    /// resolves here and nowhere else.
+    pub strings: StrTable,
+    /// The deck JSON text. [`crate::checker::Checker::new`] re-parses this into
+    /// a fresh table so a checker session owns its interning (the deck is
+    /// parsed twice per session total, which is fine).
+    pub source: String,
     /// Layer **role** → deck layer name, from the deck's `cell.layers` section.
     ///
     /// Generators ask for roles (`"tap"`, `"poly"`), not physical layers, and a
-    /// deck is free to map a role onto whatever layer implements it — sky130 has
-    /// no distinct `tap` layer, so its deck maps `"tap" -> "diff"`. gdsverify's
-    /// `Deck` has no field for this section and silently drops it, which is why
-    /// it is re-read here rather than taken from `deck`.
+    /// deck is free to map a role onto whatever layer implements it — sky130
+    /// maps `"tap" -> "tap"` but another deck may map it onto `diff`.
+    /// gdsverify's reader tolerates and ignores the `cell` key, which is why it
+    /// is re-read here rather than taken from `deck`.
     pub roles: Vec<(String, String)>,
     /// The routable metal stack, bottom-up, from `cell.layers.routing_metals`.
     pub routing_metals: Vec<LayerId>,
@@ -42,9 +67,9 @@ pub struct Pdk {
 impl Pdk {
     /// Read a PDK from a deck JSON string and **validate that it is complete**.
     ///
-    /// This is gdsverify's reader for the verification half, plus a re-read of
-    /// the Philis-only `cell` section (layer roles + routing stack) that
-    /// gdsverify discards, plus [`Pdk::validate`].
+    /// This is gdsverify's deck reader plus a re-read of the Philis-only
+    /// `cell` section (layer roles + routing stack + construction scalars) that
+    /// gdsverify ignores, plus [`Pdk::validate`].
     ///
     /// Loading is the only place that can tell "the PDK does not say" apart from
     /// "the PDK says zero", so it is the only place allowed to reject. Everything
@@ -54,32 +79,19 @@ impl Pdk {
     /// # Errors
     /// gdsverify's parse error, or a list of every way the deck is incomplete.
     pub fn from_json(text: &str) -> Result<Self, String> {
-        let deck = gdsverify::Deck::from_json(text)?;
+        let mut strings = StrTable::default();
+        let deck = gdsverify::ingest::deck::parse_deck(text, nm_grid(), &mut strings)
+            .map_err(|e| format!("deck rejected: {e}"))?;
         let roles = parse_roles(text)?;
-        let pdk = Self::from_deck_and_roles(deck, roles)?;
-        pdk.validate()?;
-        Ok(pdk)
-    }
 
-    /// Mirror a compiled [`gdsverify::Deck`] into a `Pdk` with an explicit role
-    /// map and routing stack.
-    ///
-    /// # Errors
-    /// If `cell.layers` names a layer the deck's layer table does not contain, or
-    /// omits the routing stack.
-    pub fn from_deck_and_roles(
-        deck: gdsverify::Deck,
-        roles: Roles,
-    ) -> Result<Self, String> {
-        // Deck layer ids are gdsverify's u16 = position in `id_to_name`; reuse
+        // Deck layer ids are gdsverify's u16 = row of its layer table; reuse
         // them directly so a Philis Shape's LayerId round-trips to the exact
-        // deck layer.
-        let layers: Vec<(String, LayerId)> = deck
-            .layers
-            .id_to_name
-            .iter()
-            .enumerate()
-            .map(|(id, name)| (name.clone(), LayerId(id as u16)))
+        // deck layer (identity map, see `gv_layer`).
+        let layers: Vec<(String, LayerId)> = (0..deck.layers.len())
+            .map(|id| {
+                let gv = GvLayerId(id as u16);
+                (strings.resolve(deck.layers.name(gv)).to_string(), LayerId(id as u16))
+            })
             .collect();
         let find = |name: &str| {
             layers
@@ -98,30 +110,37 @@ impl Pdk {
             .iter()
             .map(|n| find(n))
             .collect::<Result<Vec<_>, _>>()?;
-        // Three sources, narrowest last so it wins: the deck's DRC ids, then
+
+        // Three sources, narrowest last so it wins: the deck's rule ids, then
         // `<layer>_min_width` / `<layer>_min_spacing` synthesised from those same
         // rules (the spelling generators use), then the explicit `cell.*`
         // dimensions.
-        let mut rules = scalar_rules(&deck);
-        for (name, id) in &layers {
-            if let Some(w) = min_width_of(&deck, id.0) {
+        let mut rules = scalar_rules(&deck, &strings);
+        let grid = deck_grid(&deck, &strings);
+
+        let mut pdk = Self {
+            layers,
+            rules: Vec::new(),
+            grid,
+            deck,
+            strings,
+            source: text.to_string(),
+            roles: roles.map,
+            routing_metals,
+            routing_cuts,
+        };
+        for (name, id) in pdk.layers.clone() {
+            if let Some(w) = pdk.min_width(id.0) {
                 rules.push((format!("{name}_min_width"), w));
             }
-            if let Some(s) = min_spacing_of(&deck, id.0) {
+            if let Some(s) = pdk.min_spacing(id.0) {
                 rules.push((format!("{name}_min_spacing"), s));
             }
         }
         rules.extend(roles.scalars);
-        let grid = deck_grid(&deck);
-        Ok(Self {
-            layers,
-            rules,
-            grid,
-            deck,
-            roles: roles.map,
-            routing_metals,
-            routing_cuts,
-        })
+        pdk.rules = rules;
+        pdk.validate()?;
+        Ok(pdk)
     }
 
     /// Every way this deck could be too incomplete to build legal geometry from,
@@ -147,6 +166,24 @@ impl Pdk {
             if !self.layers.iter().any(|(n, _)| n == layer) {
                 bad.push(format!(
                     "role {role:?} maps to layer {layer:?}, which the deck does not define"
+                ));
+            }
+        }
+
+        // The identity map `gv_layer` relies on: row i of `layers` is LayerId(i)
+        // is deck layer i. Built that way above, but a future constructor could
+        // break it silently, so it is validated rather than assumed.
+        for (i, (name, id)) in self.layers.iter().enumerate() {
+            let deck_says = self
+                .deck
+                .layers
+                .id(&self.strings, name)
+                .map_or(u16::MAX, |gv| gv.0);
+            if id.0 as usize != i || deck_says != id.0 {
+                bad.push(format!(
+                    "layer {name:?}: Philis LayerId {} / table row {i} / deck id {deck_says} \
+                     disagree — gv_layer's identity map is broken",
+                    id.0
                 ));
             }
         }
@@ -187,18 +224,17 @@ impl Pdk {
 
         // A declared cut must actually join the pair it sits between, per the
         // deck's own connectivity — otherwise the stack is not electrically
-        // continuous and `lvs_cut_required` leaves isolated islands.
+        // continuous and cut-required connectivity leaves isolated islands.
+        let conn = &self.deck.connectivity;
         for (i, cut) in self.routing_cuts.iter().enumerate() {
             let (Some(a), Some(b)) = (self.routing_metals.get(i), self.routing_metals.get(i + 1))
             else {
                 continue;
             };
-            let joins = self
-                .deck
-                .connectivity
-                .vias
-                .iter()
-                .any(|(c, js)| *c == cut.0 && js.contains(&a.0) && js.contains(&b.0));
+            let joins = conn.via_cut.iter().zip(&conn.via_connects).any(|(c, &(x, y))| {
+                c.0 == cut.0
+                    && ((x.0 == a.0 && y.0 == b.0) || (x.0 == b.0 && y.0 == a.0))
+            });
             if !joins {
                 bad.push(format!(
                     "cut {} is declared between {} and {}, but connectivity.vias does not join them",
@@ -241,17 +277,17 @@ impl Pdk {
     }
 
     /// gdsverify layer id for a Philis [`LayerId`] — the identity map, since
-    /// `from_deck` seeds `LayerId` from the deck's own ids. Returns the raw
-    /// `u16` gdsverify uses in a `GeometryStore`.
+    /// `from_json` seeds `LayerId` from the deck's own ids ([`Pdk::validate`]
+    /// re-checks the identity at load).
     #[must_use]
-    pub fn gv_layer(&self, layer: LayerId) -> gdsverify::LayerId {
-        layer.0
+    pub fn gv_layer(&self, layer: LayerId) -> GvLayerId {
+        GvLayerId(layer.0)
     }
 
     /// gdsverify layer id for a named layer, or `None` if the deck lacks it.
     #[must_use]
-    pub fn gv_layer_by_name(&self, name: &str) -> Option<gdsverify::LayerId> {
-        self.deck.layers.id(name)
+    pub fn gv_layer_by_name(&self, name: &str) -> Option<GvLayerId> {
+        self.deck.layers.id(&self.strings, name)
     }
 
     /// The full set of PDK [`LayerId`]s, in deck order — every layer in the deck,
@@ -261,20 +297,51 @@ impl Pdk {
         self.layers.iter().map(|(_, id)| *id).collect()
     }
 
+    /// `table[LayerId.0] = (gds_layer, gds_datatype)`, for the GDS writer.
+    ///
+    /// Joins the deck's `layers` block (name → gds numbers) with this `Pdk`'s
+    /// name → [`LayerId`] table, so the writer never has to re-parse the deck.
+    /// A layer the deck does not number keeps `(0, 0)`.
+    ///
+    /// Both spellings are read: `[layer, datatype]` and the older
+    /// `{"layer": .., "datatype": ..}`. When the schema moved, a reader that
+    /// knew only one form silently emitted every shape on `(0, 0)` — in-memory
+    /// signoff stayed correct while KLayout and magic saw a blank design, which
+    /// is the worst way for this to fail.
+    #[must_use]
+    pub fn layer_gds(&self) -> Vec<(u16, u16)> {
+        let max_id = self.layers.iter().map(|(_, id)| id.0 as usize).max().unwrap_or(0);
+        let mut table = vec![(0u16, 0u16); max_id + 1];
+
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&self.source) else {
+            return table;
+        };
+        let Some(layers) = v.get("layers").and_then(|l| l.as_object()) else {
+            return table;
+        };
+
+        for (name, id) in &self.layers {
+            let Some(val) = layers.get(name) else { continue };
+            let pair = match (val.as_array(), val.get("layer"), val.get("datatype")) {
+                (Some(a), ..) if a.len() >= 2 => a[0].as_i64().zip(a[1].as_i64()),
+                (_, Some(l), Some(d)) => l.as_i64().zip(d.as_i64()),
+                _ => None,
+            };
+            if let Some((l, d)) = pair {
+                table[id.0 as usize] = (l as u16, d as u16);
+            }
+        }
+        table
+    }
+
     /// The routable stack, bottom-up, as the deck declares it in
     /// `cell.layers.routing_metals`. `gr`/`dr` index this slice by their internal
     /// layer index, so its contents decide what metal a wire lands on.
     ///
-    /// Handing them [`Pdk::layers`] instead put wires on the first entries of the
-    /// deck table — `nwell`, `diff`, `rpoly` — which produced ~330 of the OTA's
-    /// 341 DRC violations (`min_width:nwell` measured 290 nm against an 840 nm
-    /// limit: a wire width, not a well) and fabricated gate-over-diff crossings
-    /// that broke LVS extraction.
-    ///
     /// Read, not inferred: the deck is the one thing that knows which of its
     /// conductors are meant to carry routing. [`Pdk::validate`] cross-checks the
-    /// declaration against `connectivity`/`device_recognition` at load, so a
-    /// typo here fails immediately instead of becoming DRC noise.
+    /// declaration against `connectivity` at load, so a typo here fails
+    /// immediately instead of becoming DRC noise.
     #[must_use]
     pub fn routing_layers(&self) -> Vec<LayerId> {
         self.routing_metals.clone()
@@ -282,31 +349,12 @@ impl Pdk {
 
     /// The cut (via) layer joining each adjacent pair of [`Pdk::routing_layers`]
     /// **and its exact drawn size in nm**, so `routing_vias()[i]` connects
-    /// `routing_layers()[i]` to `[i + 1]`. Length is one less than the stack — or
-    /// empty if the deck cannot name every cut, since a partial table would
-    /// silently mislabel every layer above the gap.
-    ///
-    /// The deck sets `lvs_cut_required`: two conductors are connected **only**
-    /// where an explicit cut shape exists. A router that emits no cuts therefore
-    /// produces electrically isolated per-layer islands, which reads downstream as
-    /// unconnected pins, floating gates and a wrong LVS device count — never as
-    /// anything that looks like a via problem.
-    ///
-    /// The size matters as much as the layer: a cut is a **fixed-size** contact,
-    /// not a wire. sky130 pairs `MCON.1 min_width 170` with `MCON.1.EXACT
-    /// max_width 170`, so drawing a cut at the wire width violates `max_width`
-    /// *and* eats the metal enclosure the cut needs on both sides.
+    /// `routing_layers()[i]` to `[i + 1]`.
     ///
     /// Each entry is `(cut layer, cut size, pad below, pad above)`. The pads are
-    /// the squares of metal the cut needs on the layers under and over it. A
-    /// router that changes two layers at once emits no wire on the layer it passes
-    /// through, leaving its cuts with literally zero enclosing metal, so the pad
-    /// has to be drawn explicitly rather than assumed from the wire.
-    ///
-    /// A pad is sized per metal layer, because a square big enough to enclose the
-    /// cut can still be an illegal piece of that metal on its own: it must also
-    /// clear the layer's `min_width` and `min_area`. `met3` is wider than `met1`,
-    /// so one global pad size cannot satisfy both.
+    /// the squares of metal the cut needs on the layers under and over it,
+    /// sized to clear that metal's own `min_width`/`min_area` and snapped to
+    /// the fabrication grid.
     ///
     /// # Panics
     /// Never in practice: [`Pdk::validate`] rejects at load any deck whose cuts
@@ -321,7 +369,13 @@ impl Pdk {
             let size = self
                 .min_width(cut)
                 .expect("validate() guarantees every cut layer has a min_width");
-            let enclosed = size + 2 * self.enclosure_of(cut);
+            // The centred pad must grant `max(min_enclosure, min_one_side)` on
+            // every side: the asymmetric rule wants its `min_one_side` on the
+            // larger side of each axis, and a centred square's two sides are
+            // equal, so the larger one only clears the rule when both do. The
+            // wider pad (320 nm for via1) is paid for in track pitch —
+            // `detailed_router` raises the pitch to clear this pad.
+            let enclosed = size + 2 * self.enclosure_of(cut).max(self.one_side_of(cut));
             cuts.push((
                 LayerId(cut),
                 size,
@@ -332,14 +386,33 @@ impl Pdk {
         cuts
     }
 
+    /// Largest `asymmetric_enclosure` `min_one_side` any layer demands of
+    /// `inner`, `0` when none does. Same shape as [`Pdk::enclosure_of`].
+    fn one_side_of(&self, inner: u16) -> i32 {
+        let Some(kind) = self.strings.get("asymmetric_enclosure") else { return 0 };
+        let Some(param) = self.strings.get("min_one_side") else { return 0 };
+        self.deck
+            .rules
+            .spec
+            .iter()
+            .filter(|s| s.kind == kind)
+            .filter(|s| self.deck.rules.layers_of(s).get(1).map(|l| l.0) == Some(inner))
+            .filter_map(|s| match self.deck.rules.param(s, param) {
+                Some(ParamValue::Length(d)) => Some(d.raw() as i32),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Smallest square that both encloses the cut (`enclosed`) and is a legal
     /// standalone piece of `metal` — clearing that layer's `min_width` and, since
     /// a lone pad may be the only metal there, its `min_area`.
     ///
     /// Rounded up to the fabrication grid: `min_area` rarely has an integral
-    /// square root (sky130 met1 wants 83000 nm², so 289 nm), and a pad off the
-    /// 5 nm grid is an `off_grid` violation on every edge it has.
-    fn pad_for(&self, metal: gdsverify::LayerId, enclosed: i32) -> i32 {
+    /// square root, and a pad off the manufacturing grid is an `off_grid`
+    /// violation on every edge it has.
+    fn pad_for(&self, metal: u16, enclosed: i32) -> i32 {
         let side_for_area = self.min_area(metal).map_or(0, |a| {
             let mut s = (a as f64).sqrt() as i32;
             while i64::from(s) * i64::from(s) < a {
@@ -354,66 +427,75 @@ impl Pdk {
         side.div_euclid(g) * g + if side.rem_euclid(g) == 0 { 0 } else { g }
     }
 
-    /// The deck's `min_area` for a layer, if it declares one.
+    /// The deck's `min_area` for a layer in nm², if it declares one. The deck
+    /// states the limit as the **side of the square** (a Length), per
+    /// gdsverify's `min_area` rule; squared here so callers keep thinking in
+    /// area.
     #[must_use]
-    pub fn min_area(&self, layer: gdsverify::LayerId) -> Option<i64> {
-        self.deck.drc_rules.iter().find_map(|r| match r {
-            gdsverify::DrcRuleParam::MinArea { layer: l, min, .. } if *l == layer => Some(*min),
-            _ => None,
-        })
+    pub fn min_area(&self, layer: u16) -> Option<i64> {
+        self.rule_limit_nm("min_area", layer).map(|side| side * side).map(|a| a as i64)
     }
 
     /// The tightest track pitch that keeps a `wire_width` wire legal on **every**
-    /// routing layer: `wire_width + max(min_spacing)` over the stack.
+    /// routing layer of `stack`: `wire_width + max(min_spacing)` over it.
     ///
     /// The track lattice has one global pitch, so it must satisfy the worst layer
-    /// or that layer is illegal by construction — sky130 `li` wants 170 nm of
-    /// spacing where `met1` wants 140, so a pitch sized for met1 makes every pair
-    /// of adjacent li tracks a violation no amount of rerouting can fix.
+    /// *of the stack actually routed on* or that layer is illegal by construction.
     ///
     /// ponytail: one pitch for the whole stack, so the upper layers are routed
     /// more coarsely than they need. Per-layer pitch means a per-layer track
     /// lattice in `gr::TrackGrid`; do that if upper-layer density ever matters.
     #[must_use]
-    pub fn routing_pitch(&self, wire_width: i32, stack: &[gdsverify::LayerId]) -> i32 {
-        // Over the layers actually routed on, NOT every conductor the deck
-        // declares. Scanning the whole deck let sky130's met5 (1600 nm spacing)
-        // set the pitch for a router that only reaches li/met1/met2: 1890 nm
-        // instead of 460, which is 4x coarser than li needs and far coarser than a
-        // 170 nm pin, so no track node ever landed on a pin.
+    pub fn routing_pitch(&self, wire_width: i32, stack: &[u16]) -> i32 {
         let worst = stack.iter().filter_map(|&l| self.min_spacing(l)).max().unwrap_or(0);
         wire_width + worst
     }
 
-    /// The deck's `min_spacing` for a layer, if it declares one.
+    /// The deck's `min_spacing` for a layer in nm, if it declares one.
     #[must_use]
-    pub fn min_spacing(&self, layer: gdsverify::LayerId) -> Option<i32> {
-        self.deck.drc_rules.iter().find_map(|r| match r {
-            gdsverify::DrcRuleParam::MinSpacing { layer: l, min, .. } if *l == layer => Some(*min),
-            _ => None,
-        })
+    pub fn min_spacing(&self, layer: u16) -> Option<i32> {
+        self.rule_limit_nm("min_spacing", layer).map(|v| v as i32)
     }
 
-    /// The deck's `min_width` for a layer, if it declares one.
+    /// The deck's `min_width` for a layer in nm, if it declares one.
     #[must_use]
-    pub fn min_width(&self, layer: gdsverify::LayerId) -> Option<i32> {
-        self.deck.drc_rules.iter().find_map(|r| match r {
-            gdsverify::DrcRuleParam::MinWidth { layer: l, min, .. } if *l == layer => Some(*min),
-            _ => None,
+    pub fn min_width(&self, layer: u16) -> Option<i32> {
+        self.rule_limit_nm("min_width", layer).map(|v| v as i32)
+    }
+
+    /// The `limit` (nm) of the first rule of `kind` whose **first** layer is
+    /// `layer` — the scanner that replaces the old flat `DrcRuleParam` matches.
+    fn rule_limit_nm(&self, kind: &str, layer: u16) -> Option<i64> {
+        let kind = self.strings.get(kind)?;
+        let limit = self.strings.get("limit")?;
+        self.deck.rules.spec.iter().find_map(|s: &RuleSpec| {
+            if s.kind != kind {
+                return None;
+            }
+            if self.deck.rules.layers_of(s).first().map(|l| l.0) != Some(layer) {
+                return None;
+            }
+            match self.deck.rules.param(s, limit) {
+                Some(ParamValue::Length(d)) => Some(d.raw()),
+                _ => None,
+            }
         })
     }
 
     /// Largest enclosure any layer must give `inner` — the binding one, since the
-    /// same pad is drawn above and below the cut.
-    #[must_use]
-    fn enclosure_of(&self, inner: gdsverify::LayerId) -> i32 {
+    /// same pad is drawn above and below the cut. A `min_enclosure` rule's layer
+    /// list is `[outer, inner]` in the deck schema, so `inner` is index 1.
+    fn enclosure_of(&self, inner: u16) -> i32 {
+        let Some(kind) = self.strings.get("min_enclosure") else { return 0 };
+        let Some(limit) = self.strings.get("limit") else { return 0 };
         self.deck
-            .drc_rules
+            .rules
+            .spec
             .iter()
-            .filter_map(|r| match r {
-                gdsverify::DrcRuleParam::MinEnclosure { inner: i, min, .. } if *i == inner => {
-                    Some(*min)
-                }
+            .filter(|s| s.kind == kind)
+            .filter(|s| self.deck.rules.layers_of(s).get(1).map(|l| l.0) == Some(inner))
+            .filter_map(|s| match self.deck.rules.param(s, limit) {
+                Some(ParamValue::Length(d)) => Some(d.raw() as i32),
                 _ => None,
             })
             .max()
@@ -429,10 +511,7 @@ impl Process for Pdk {
     /// to a layer of that literal name.
     ///
     /// The indirection is the point: a role is what a generator wants (`"tap"`),
-    /// a layer is what the process provides (sky130 has no `tap`, so its deck
-    /// maps the role onto `diff`). Before this map was parsed, `layer("tap")`
-    /// returned `None` and every caller was an `if let Some(..)` that silently
-    /// drew nothing — so no well or body tap existed in any cell.
+    /// a layer is what the process provides.
     fn layer(&self, role: &str) -> Option<LayerId> {
         let name = self
             .roles
@@ -455,29 +534,23 @@ impl Process for Pdk {
     }
 }
 
-/// Pull the scalar DRC minima (min_width / min_spacing / …) out of the deck into
+/// Pull every rule's scalar length parameter (nm) out of the deck into
 /// `(rule_id, value_nm)` pairs for the generator-facing `rules` view.
-fn scalar_rules(deck: &gdsverify::Deck) -> Vec<(String, i32)> {
-    use gdsverify::DrcRuleParam as P;
-    deck.drc_rules
+/// `limit` and `min_one_side` (asymmetric enclosure) are the two single-length
+/// spellings; ratio/count/flag parameters (density, antenna, angle…) aren't a
+/// single scalar length the generators query — skipped from this view.
+fn scalar_rules(deck: &Deck, strings: &StrTable) -> Vec<(String, i32)> {
+    let keys: Vec<_> = ["limit", "min_one_side"].iter().filter_map(|k| strings.get(k)).collect();
+    deck.rules
+        .spec
         .iter()
-        .filter_map(|r| {
-            let v = match r {
-                P::MinWidth { min, .. }
-                | P::MinSpacing { min, .. }
-                | P::MinEnclosure { min, .. }
-                | P::MinExtension { min, .. }
-                | P::Notch { min, .. }
-                | P::MinEdgeLength { min, .. }
-                | P::CornerToCorner { min, .. }
-                | P::Overlap { min, .. }
-                | P::MinSpacingDiff { min, .. } => *min,
-                P::MaxWidth { max, .. } => *max,
-                // Density/antenna/area/multi-patterning etc. aren't a single
-                // scalar minimum the generators query — skipped from this view.
-                _ => return None,
-            };
-            Some((r.id().to_string(), v))
+        .filter_map(|s| {
+            keys.iter().find_map(|&k| match deck.rules.param(s, k) {
+                Some(ParamValue::Length(d)) => {
+                    Some((strings.resolve(s.id).to_string(), d.raw() as i32))
+                }
+                _ => None,
+            })
         })
         .collect()
 }
@@ -556,7 +629,7 @@ pub struct Roles {
     pub scalars: Vec<(String, i32)>,
 }
 
-/// Read the `cell.layers` section gdsverify's `Deck` drops.
+/// Read the `cell.layers` section gdsverify's reader tolerates and ignores.
 ///
 /// `routing_metals` / `routing_vias` are lists, every other key is a role→layer
 /// string pair; they share one object in the deck format.
@@ -596,9 +669,9 @@ fn parse_roles(text: &str) -> Result<Roles, String> {
     }
     // `cell.*` siblings of `layers` are the construction dimensions (contact
     // size, S/D width, poly endcap, …). These were declared by every deck and
-    // read by none: `scalar_rules` only walked `drc_rules`, whose keys are rule
-    // *ids* (`MCON.1`), so `rule(process, "contact", 170)` never matched and
-    // every generator silently built to its hardcoded fallback instead of the
+    // read by none: `scalar_rules` only walked the rule table, whose keys are
+    // rule *ids*, so `rule(process, "contact", 170)` never matched and every
+    // generator silently built to its hardcoded fallback instead of the
     // process it was pointed at.
     for (k, val) in cell {
         if k == "layers" {
@@ -614,28 +687,17 @@ fn parse_roles(text: &str) -> Result<Roles, String> {
     Ok(roles)
 }
 
-/// `min_width` for a layer, straight off the deck's rule list.
-fn min_width_of(deck: &gdsverify::Deck, layer: gdsverify::LayerId) -> Option<i32> {
-    deck.drc_rules.iter().find_map(|r| match r {
-        gdsverify::DrcRuleParam::MinWidth { layer: l, min, .. } if *l == layer => Some(*min),
-        _ => None,
-    })
-}
-
-/// `min_spacing` for a layer, straight off the deck's rule list.
-fn min_spacing_of(deck: &gdsverify::Deck, layer: gdsverify::LayerId) -> Option<i32> {
-    deck.drc_rules.iter().find_map(|r| match r {
-        gdsverify::DrcRuleParam::MinSpacing { layer: l, min, .. } if *l == layer => Some(*min),
-        _ => None,
-    })
-}
-
-/// Manufacturing grid from the deck's `off_grid` rule, else `1`.
-fn deck_grid(deck: &gdsverify::Deck) -> i32 {
-    deck.drc_rules
+/// Manufacturing grid from the deck's `off_grid` rule (`pitch` param), else `1`.
+fn deck_grid(deck: &Deck, strings: &StrTable) -> i32 {
+    let (Some(kind), Some(pitch)) = (strings.get("off_grid"), strings.get("pitch")) else {
+        return 1;
+    };
+    deck.rules
+        .spec
         .iter()
-        .find_map(|r| match r {
-            gdsverify::DrcRuleParam::OffGrid { grid, .. } => Some(*grid),
+        .filter(|s| s.kind == kind)
+        .find_map(|s| match deck.rules.param(s, pitch) {
+            Some(ParamValue::Length(d)) => Some(d.raw() as i32),
             _ => None,
         })
         .unwrap_or(1)

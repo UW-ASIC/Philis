@@ -1,0 +1,47 @@
+[package]
+name = "macro_master"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+# Wire the gpurify engine into the Device path only: `check_device` runs real
+# DRC (via `verify`/`gdsverify`) against the hardcoded Generic PDK. Off by
+# default so the crate — and its examples/tests — build with no GPurify checkout.
+gpurify = ["dep:verify"]
+# Pull in the GPU viewer so a built/registered macro can be shown (`display`,
+# `Macros::show`). Off by default — keeps the wgpu/winit stack out of headless
+# builds, examples, and tests.
+display = ["dep:visualizer"]
+
+[dependencies]
+pnr_core = { path = "../core" }
+analog = { path = "../analog" }
+cells = { path = "../cells" }
+# Reads the embedded Generic PDK deck when `gpurify` is off, so both builds
+# answer from the same document instead of a hand-copied layer table.
+serde_json = "1"
+# Only pulled in under `gpurify` — the sole gpurify attachment point (ADR 0004).
+verify = { path = "../../backend/verify", optional = true }
+# Only under `display` — the macroMaster → visualizer bridge.
+visualizer = { path = "../visualizer", optional = true }
+
+[[example]]
+name = "inverter"
+path = "examples/inverter.rs"
+
+[[example]]
+name = "resistor"
+path = "examples/resistor.rs"
+
+[[example]]
+name = "diff_pair"
+path = "examples/diff_pair.rs"
+
+# Test-only: name `gdsverify::ingest::deck::parse_deck` + `RuleTable` types in
+# the strict-envelope test (generic_deck::tests). Dev-deps don't affect the
+# library build, so the "builds with no GPurify checkout" guarantee for
+# `cargo build` is unchanged; the test itself is `#[cfg(feature = "gpurify")]`.
+# Same tree `verify` builds against, so the Grid/StrTable types unify.
+[dev-dependencies]
+gdsverify = { workspace = true }
