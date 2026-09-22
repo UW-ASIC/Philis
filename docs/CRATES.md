@@ -7,7 +7,7 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
 ## kernel/core (`pnr_core`) — no deps
 - **In:** `Netlist` (from `library::parse`, `macroMaster`); `Layout` columns
   written by gp/dp (x, y, hw, hh, orient, variant, branch, groups, power_uw);
-  `Routes.wires` from gr/dr; `Process` impls (`verify::Pdk`, `macroMaster::GenericPdk`).
+  `Routes.wires` from gr/dr; `Process` impl (`verify::Pdk`).
 - **Out:** id types, `Macro`/`Shape`/`Pin`/`Orient`/`Dir`; `BipartiteHypergraph`,
   `UnionFind`; `Layout` helpers (bbox, centre, edge_gap, axis_x);
   `thermal::rises_mc`; `place_macro(s)`; `Report`/`Violation`/`lex`;
@@ -68,9 +68,9 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
   `signoff()` → `Report` rows `{drc|erc|lvs|engine}/rule:layer` + total C;
   `drc()`/`erc()` located findings; `extract_spice`; `Checker`.
 
-## kernel/macroMaster — deps: core, analog, cells (+verify, visualizer optional)
-- **In:** user compositions (`place`/`place_by` calls), `GenericPdk`.
-- **Out:** drawn hierarchical macros for `library::elaborate` (manual path, no gp/dp).
+## kernel/macroMaster — deps: core, analog, cells
+- **In:** user `Composition`/`DeviceGen` code, a `Process` (sky130 deck), cells geometry for `Mos`/`MatchedPair`/`Res`.
+- **Out:** `build_composition`/`build_with` → `BuiltComp` (placed macros, net names, ports, netlist) for `library::elaborate`/`emit` (manual path, no gp/dp); `Macros` override registry checked first by cellgen.
 
 ## kernel/visualizer
 - **In:** GDS bytes, deck JSON, `Shape`/`Macro`.
