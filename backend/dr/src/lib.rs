@@ -33,9 +33,12 @@ const GCELLS_PER_SIDE: u32 = 16;
 const HARD_ROUNDS: u32 = 4;
 /// Everything routed sits on the 5 nm manufacturing grid.
 const MFG_GRID: i32 = 5;
+/// DC electromigration limit of the routing metals, µA per µm of wire width
+/// (sky130 met1/met2 ≈ 1 mA/µm).
+const EM_UA_PER_UM: u64 = 1_000;
 
 /// Track-lattice configuration (set from the deck by `frontend/library`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DetailedCfg {
     pub pitch: i32,
     pub wire_width: i32,
@@ -47,11 +50,38 @@ pub struct DetailedCfg {
     /// up to `layers[0]`. Reserving it keeps tracks off the cells' own li. `None`:
     /// pins sit on a stack layer.
     pub pin_access: Option<(LayerId, Cut)>,
+    /// DC current each net carries, µA, indexed by `NetId` (operating point).
+    /// Trunks are widened to `current / EM_UA_PER_UM`. Empty = unknown.
+    pub net_current_ua: Vec<i32>,
+    /// Supply/ground nets: sized to two wire widths when no current is known.
+    pub supply_nets: Vec<NetId>,
 }
 
 impl Default for DetailedCfg {
     fn default() -> Self {
-        Self { pitch: 430, wire_width: 290, pin_access_spacing: 0, pin_access_cut_spacing: 0, pin_access: None }
+        Self {
+            pitch: 430,
+            wire_width: 290,
+            pin_access_spacing: 0,
+            pin_access_cut_spacing: 0,
+            pin_access: None,
+            net_current_ua: Vec::new(),
+            supply_nets: Vec::new(),
+        }
+    }
+}
+
+impl DetailedCfg {
+    /// EM-safe trunk width for `net`, nm, on the manufacturing grid (at least
+    /// `wire_width`).
+    fn em_width(&self, net: usize) -> i32 {
+        let need = match self.net_current_ua.get(net) {
+            Some(&ua) => (u64::from(ua.unsigned_abs()) * 1_000).div_ceil(EM_UA_PER_UM) as i32,
+            None if self.supply_nets.iter().any(|n| n.0 as usize == net) => 2 * self.wire_width,
+            None => 0,
+        };
+        let step = 2 * MFG_GRID;
+        (need.max(self.wire_width) + step - 1) / step * step
     }
 }
 
@@ -110,7 +140,7 @@ impl DetailedRouter for DetailedRoute {
         neg: &mut gr::Negotiation,
         _seed: u64,
     ) -> (Routes, Report) {
-        let cfg = self.cfg;
+        let cfg = &self.cfg;
 
         // Terminals, deduped by (net, rect) in first-seen order: landing claims nodes
         // in this order, so the order decides contested sites.
@@ -156,7 +186,7 @@ impl DetailedRouter for DetailedRoute {
         let compact: Vec<usize> = (0..n_nets).filter(|&i| !term_rects[i].is_empty()).collect();
         if compact.is_empty() {
             let routes = Routes { wires: vec![Vec::new(); n_nets] };
-            let report = score(&routes, reqs, 0.0, 0.0, &[], &[]);
+            let report = score(&routes, reqs, 0.0, 0.0, &[], &[], &[]);
             return (routes, report);
         }
         let mut ci_of = vec![usize::MAX; n_nets];
@@ -303,7 +333,7 @@ impl DetailedRouter for DetailedRoute {
                 if !point {
                     let (px, py, node_layer) = grid.pos(n);
                     let a = Access { ci, pin: r, pin_layer: r_layer, node: (px, py), node_layer, choice };
-                    claim_jog_sweep(&grid, &cfg, layers, cuts, &a, &mut claimed, &mut reserved);
+                    claim_jog_sweep(&grid, cfg, layers, cuts, &a, &mut claimed, &mut reserved);
                     access.push(a);
                 }
             }
@@ -381,7 +411,7 @@ impl DetailedRouter for DetailedRoute {
         // shapes the short resolver may sacrifice.
         let mut pre_access: Vec<usize> = routes.wires.iter().map(Vec::len).collect();
         let joins = joins(layers, cuts, cfg.pin_access);
-        add_pin_access(&mut routes, &access, &compact, &cfg, layers, cuts, &joins, &zones);
+        add_pin_access(&mut routes, &access, &compact, cfg, layers, cuts, &joins, &zones);
 
         // A drawn short must never ship. Break each by deleting access geometry (an
         // open is reported; a short is silent), counted per net so `score` reports
@@ -406,8 +436,34 @@ impl DetailedRouter for DetailedRoute {
             }
         }
 
-        // Same-net sliver and notch filling (never within spacing of foreign metal).
+        // EM: widen each trunk of a high-current net where the wider rect keeps
+        // `min_space` from foreign metal; the shortfall elsewhere goes to Θ.
         let min_space = cfg.pitch - cfg.wire_width;
+        let mut em_shortfall = vec![0.0f64; n_nets];
+        for net in 0..n_nets {
+            let need = cfg.em_width(net);
+            for i in 0..pre_access[net] {
+                let s = routes.wires[net][i];
+                let narrow = s.rect.w.min(s.rect.h);
+                if narrow >= need || s.rect.w == s.rect.h || !layers.contains(&s.layer) {
+                    continue;
+                }
+                let grown = Shape { rect: widen(s.rect, need), ..s };
+                let clear = routes.wires.iter().enumerate().all(|(n, w)| {
+                    n == net
+                        || w.iter().all(|f| {
+                            !conductor_layers_meet(f, &grown, &joins) || rect_gap(f.rect, grown.rect) >= min_space
+                        })
+                });
+                if clear {
+                    routes.wires[net][i] = grown;
+                } else {
+                    em_shortfall[net] = em_shortfall[net].max(f64::from(need - narrow) / f64::from(need));
+                }
+            }
+        }
+
+        // Same-net sliver and notch filling (never within spacing of foreign metal).
         let flat: Vec<(usize, Shape)> =
             routes.wires.iter().enumerate().flat_map(|(i, w)| w.iter().map(move |s| (i, *s))).collect();
         for (ni, wires) in routes.wires.iter_mut().enumerate() {
@@ -422,8 +478,17 @@ impl DetailedRouter for DetailedRoute {
         }
 
         let cap_total = cold.graph.nodes() as f32;
-        let report = score(&routes, reqs, overuse, cap_total, &joins, &sacrificed);
+        let report = score(&routes, reqs, overuse, cap_total, &joins, &sacrificed, &em_shortfall);
         (routes, report)
+    }
+}
+
+/// `r` with its narrow (cross-run) dimension grown to `w` about its centre line.
+fn widen(r: Rect, w: i32) -> Rect {
+    if r.w > r.h {
+        Rect { y: r.y + r.h / 2 - w / 2, h: w, ..r }
+    } else {
+        Rect { x: r.x + r.w / 2 - w / 2, w, ..r }
     }
 }
 
@@ -557,6 +622,7 @@ fn charge_rect(usage: &mut [u16], reserved: &[u32], grid: &TrackGrid, layer: u32
 /// first candidate clear of foreign zones/jogs and `pitch − wire` from foreign
 /// routed metal wins, then the first merely short-free one, then landing's choice,
 /// then the first zone-clean one. Leftover contact is the short resolver's job.
+#[allow(clippy::too_many_arguments)]
 fn add_pin_access(
     routes: &mut Routes,
     access: &[Access],
@@ -731,7 +797,8 @@ fn reroute_affected(hot: &mut RouteHot, cold: &RouteCtx<TrackGrid>, affected: &[
 }
 
 /// Report: analog tiers; open nets, sacrificed/unlanded pins and drawn shorts in
-/// V; residual overuse over total track capacity in Θ; cost = raw overuse +
+/// V; EM width shortfall per net and residual overuse over total track capacity
+/// in Θ; cost = raw overuse +
 /// criticality-weighted analog cost.
 fn score(
     routes: &Routes,
@@ -740,6 +807,7 @@ fn score(
     cap_total: f32,
     joins: &[Join],
     sacrificed: &[usize],
+    em_shortfall: &[f64],
 ) -> Report {
     let (mut hard, mut budget) = gr::analog_tiers(routes, reqs);
     for (net, shapes) in routes.wires.iter().enumerate() {
@@ -755,6 +823,9 @@ fn score(
     }
     for (a, b) in cross_net_shorts(&routes.wires, joins) {
         hard.push(Violation { rule: format!("drawn short nets {a}/{b}"), margin: 1 });
+    }
+    for (net, &r) in em_shortfall.iter().enumerate().filter(|(_, &r)| r > 0.0) {
+        budget.push(Violation::from_residual(format!("em underwidth net {net}"), r));
     }
     if overuse > 0.0 && cap_total > 0.0 {
         budget.push(Violation::from_residual("routing overuse", f64::from(overuse / cap_total)));
@@ -1124,7 +1195,7 @@ mod tests {
             max_len_nm: 1_000,
             margin_pct: 10,
         }]));
-        let report = score(&routes, &reqs, 0.0, 0.0, &[], &[]);
+        let report = score(&routes, &reqs, 0.0, 0.0, &[], &[], &[]);
         assert_eq!(report.budget_violations[0].margin, 500);
     }
 
@@ -1148,12 +1219,25 @@ mod tests {
             r.wires.iter().flatten().map(|s| (s.layer.0, s.rect.x, s.rect.y, s.rect.w, s.rect.h)).collect()
         };
         let mut neg = gr::Negotiation::new();
-        let first = route(cfg, &global, &pins, &[], &[], &mut neg).0;
+        let first = route(cfg.clone(), &global, &pins, &[], &[], &mut neg).0;
         let p1 = neg.pressure();
         assert!(p1 > 0.0, "contested tracks must accumulate history");
         let second = route(cfg, &global, &pins, &[], &[], &mut neg).0;
         assert!(neg.pressure() > p1, "history must keep climbing");
         assert_ne!(flat(&first), flat(&second), "second call was not seeded");
+    }
+
+    /// A net carrying 1 mA gets 1 µm trunks; the default net keeps `wire_width`.
+    #[test]
+    fn high_current_net_is_widened() {
+        let global = Routes { wires: vec![Vec::new(); 2] };
+        let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 1_000), pin(1, 1_000, 9_000), pin(1, 12_000, 9_000)];
+        let cfg = DetailedCfg { net_current_ua: vec![1_000, 10], ..DetailedCfg::default() };
+        let (routes, report) = route(cfg, &global, &pins, &[], &[], &mut gr::Negotiation::new());
+        let widest = |n: usize| routes.wires[n].iter().filter(|s| s.rect.w != s.rect.h).map(|s| s.rect.w.min(s.rect.h)).max();
+        assert_eq!(widest(0), Some(1_000));
+        assert_eq!(widest(1), Some(290));
+        assert!(report.budget_violations.is_empty(), "{:?}", report.budget_violations.iter().map(|v| &v.rule).collect::<Vec<_>>());
     }
 
     /// No two nets may overlap on a layer.

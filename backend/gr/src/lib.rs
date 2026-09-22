@@ -153,6 +153,7 @@ fn group_bbox(macros: &[Macro]) -> (i32, i32, i32, i32) {
 /// both obstacle and net target). Deterministic over `(inputs, neg)`; `seed` is
 /// unused by PathFinder.
 pub trait GlobalRouter {
+    #[allow(clippy::too_many_arguments)]
     fn route(
         &self,
         placement: &Layout,
