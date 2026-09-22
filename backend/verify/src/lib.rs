@@ -39,7 +39,7 @@ pub fn shortfall_nm(limit: Measurement, measured: Measurement) -> i64 {
 /// `{domain}/{rule}:{layer}` with its nm shortfall as margin. A stage the
 /// engine skipped or refused, or an engine failure, is a hard `engine/…`
 /// violation: a check that could not run never reads as clean. Rules skipped
-/// inside a stage that ran are logged by name.
+/// inside a stage that ran are logged by name, once per process.
 #[must_use]
 pub fn signoff(
     shapes: &[Shape],
@@ -113,9 +113,11 @@ fn harvest(checker: &Checker, summary: &Summary, report: &mut Report) {
                 .push(Violation { rule: format!("engine/{stage}: {why}"), margin: 0 });
         }
     }
+    // The skipped set is a property of the deck, so say it once per process.
+    static SKIPPED: std::sync::Once = std::sync::Once::new();
     let skipped = checker.skipped_rules();
     if !skipped.is_empty() {
-        eprintln!("verify::signoff: rules not run: {skipped:?}");
+        SKIPPED.call_once(|| eprintln!("verify::signoff: rules not run: {skipped:?}"));
     }
     report.cost = checker.total_cap_ff();
 }
