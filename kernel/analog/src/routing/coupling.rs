@@ -47,8 +47,9 @@ pub struct CouplingBudget {
 impl CouplingBudget {
     /// Summed coupling onto the victim from every other net, aF.
     ///
-    /// ponytail: O(victim_shapes × all_shapes); bucket by layer/grid if it
-    /// ever shows up in a profile.
+    /// ponytail: O(victim_shapes × all_shapes), scalar. Measured ~25 ms over
+    /// the whole local bench (~230 s), so no SIMD; bucket by layer/grid first
+    /// if routes ever grow large enough to matter.
     fn total_af(self, r: &Routes) -> f32 {
         let victim = r.shapes(self.net);
         if victim.is_empty() {
