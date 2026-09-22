@@ -1,13 +1,5 @@
-//! Net-role classification + recognition config.
-//!
-//! Ported from `frontend/annotator/src/lib.rs`. A net's role (supply / ground /
-//! clock / signal) gates recognition: the DSL's `gate_is_signal` slot flag keys
-//! off it, and it is the basis for MAGICAL's virtual-ground disambiguation
-//! (a shared-source pair is a differential pair only when the shared source is a
-//! signal node, not a power/ground rail — research §4.2.1).
-//!
-//! The frontend pulled the rail/clock name lists from `pnr_constraints`; here they
-//! are inlined so the annotator carries its own heuristic and needs no PDK handle.
+//! Net role by name (supply / ground / clock / signal) + user recognition
+//! overrides. Gates recognition: a diff pair's gates must be signals.
 
 use std::collections::HashSet;
 
@@ -25,7 +17,11 @@ pub enum NetRole {
 
 const SUPPLY_NAMES: &[&str] = &["vdd", "vcc", "vpwr", "vddio", "avdd", "dvdd", "vdda", "vddd"];
 const GROUND_NAMES: &[&str] = &["vss", "gnd", "vgnd", "vssio", "avss", "dvss", "vssa", "vssd"];
-const CLK_PATTERNS: &[&str] = &["clk", "clock", "phi", "ck"];
+/// Substrings that mark a clock anywhere in the name.
+const CLK_SUBSTR: &[&str] = &["clk", "clock"];
+/// Clock prefixes that must be followed by digits/`_`/`b`/end (`phi1`, `ck_b`),
+/// so `back`/`stack`/`phase` stay signals.
+const CLK_PREFIX: &[&str] = &["phi", "ck"];
 
 /// Classify every net by name. Config-supplied names win over the built-in lists.
 #[must_use]
@@ -42,7 +38,7 @@ pub fn classify_nets(hg: &BipartiteHypergraph, cfg: &AnnotationConfig) -> Vec<Ne
                 NetRole::Supply
             } else if named(&cfg.ground_nets) || matches_rail(GROUND_NAMES) {
                 NetRole::Ground
-            } else if named(&cfg.clock_nets) || CLK_PATTERNS.iter().any(|p| lower.contains(p)) {
+            } else if named(&cfg.clock_nets) || is_clock(&lower) {
                 NetRole::Clock
             } else {
                 NetRole::Signal
@@ -51,11 +47,11 @@ pub fn classify_nets(hg: &BipartiteHypergraph, cfg: &AnnotationConfig) -> Vec<Ne
         .collect()
 }
 
-/// Whether a net is a power/ground rail (not a signal node). The virtual-ground
-/// gate: a differential pair's shared source must **not** be a rail.
-#[must_use]
-pub fn is_rail(role: NetRole) -> bool {
-    matches!(role, NetRole::Supply | NetRole::Ground)
+fn is_clock(lower: &str) -> bool {
+    CLK_SUBSTR.iter().any(|p| lower.contains(p))
+        || CLK_PREFIX.iter().any(|p| {
+            lower.strip_prefix(p).is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit() || c == '_' || c == 'b'))
+        })
 }
 
 /// User overrides on recognition — the library's channel to override our
@@ -71,4 +67,17 @@ pub struct AnnotationConfig {
     pub supply_nets: Vec<String>,
     pub ground_nets: Vec<String>,
     pub clock_nets: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn clock_names() {
+        for n in ["clk", "clk_in", "phi1", "phi_2b", "ck", "ckb", "sysclock"] {
+            assert!(super::is_clock(n), "{n}");
+        }
+        for n in ["back", "stack", "phase", "lock", "vbias"] {
+            assert!(!super::is_clock(n), "{n}");
+        }
+    }
 }
