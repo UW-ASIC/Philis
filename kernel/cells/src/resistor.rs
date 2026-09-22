@@ -1,23 +1,18 @@
-//! Resistor generator. Ported from `backend/cells/src/generators/resistor.rs`.
+//! Resistor generator: each device a series chain of `segments` sky130
+//! precision poly resistors — a continuous poly strip whose body is marked by
+//! `rpoly`, with long contacted heads, all under rpm + npc + psdm.
 
 use analog::Constraints;
-use pnr_core::{DeviceGroup, LayerId, Macro, NetId, Pin, Process, Rect};
+use pnr_core::{DeviceGroup, Macro, Process, Rect};
 
-use crate::Pattern;
+use crate::builder::{cut_lattice, greedy_centroid, pin, req, sizing, snap_cut, Builder, Sizing};
+use crate::{Cell, Pattern};
 
-use crate::builder::{layer, req, rule, sizing, Builder, Sizing};
-use crate::Cell;
-
-/// One point in the **resistor variant space**: a serpentine of `segments` unit
-/// bars in the PDK resistor material, flanked by dummies so end bars match
-/// interior ones. `R = ρ·L/W`; the generator folds to hit target `R` while
-/// keeping segments unit-matched. Theory: AOAL ch08 (unit matching);
-/// `docs/cells/resistor.md`.
+/// One resistor variant: body split into `segments` series segments, devices
+/// laid out `Single` (each device's segments adjacent) or `Interdig`.
 #[derive(Clone)]
 pub struct Resistor {
     pub segments: u16,
-    pub dummies_per_edge: u8,
-    /// Single vs interdigitated (multi-device matched banks).
     pub pattern: Pattern,
 }
 
@@ -35,46 +30,11 @@ impl Cell for Resistor {
         feasible_segments(&s, process)
             .into_iter()
             .flat_map(|segments| {
-                patterns.iter().map(move |&pattern| Resistor {
-                    segments,
-                    dummies_per_edge: 1,
-                    pattern,
-                })
+                patterns.iter().map(move |&pattern| Resistor { segments, pattern })
             })
-            // Interdig interleaves devices' segments across columns, but a
-            // multi-segment device chains its segments with li jumpers drawn
-            // straight across the neighbouring column — a short on any
-            // interleaved layout. ponytail: allow again with routed jumpers.
+            // Interleaved multi-segment devices would chain their segments
+            // with li jumpers across a neighbour's column: a short.
             .filter(|r| !(matches!(r.pattern, Pattern::Interdig) && r.segments > 1))
-            .collect()
-    }
-
-    fn estimate(&self, group: &DeviceGroup, process: &dyn Process) -> (i32, i32) {
-        let s = group_sizing(group, &Constraints::default(), process);
-        let seg_l = s.unit_l / i32::from(self.segments.max(1));
-        let seg_gap = rule(process, "res_seg_gap", 400);
-        let head = rule(process, "res_head", 300);
-        let seg_pitch = s.unit_w + seg_gap;
-        let n = group.devices.len() as i32;
-        let device_gap = rule(process, "device_gap", 600);
-        let total_w = match self.pattern {
-            Pattern::Interdig => i32::from(self.segments) * n * seg_pitch,
-            _ => {
-                let per_dev = i32::from(self.segments) * seg_pitch;
-                per_dev * n + device_gap * (n - 1).max(0)
-            }
-        };
-        (total_w, head + seg_l + head)
-    }
-
-    fn ports(&self, group: &DeviceGroup) -> Vec<Pin> {
-        (0..group.devices.len())
-            .flat_map(|i| {
-                [
-                    port(i, "P"),
-                    port(i, "N"),
-                ]
-            })
             .collect()
     }
 
@@ -82,243 +42,127 @@ impl Cell for Resistor {
         let mut b = Builder::new(process.grid());
         let s = group_sizing(group, constraints, process);
         let n_dev = group.devices.len();
+        let r = |name: &str, default: i32| process.rule(name, default);
 
-        // The body is a GAP between two poly end pads under an `rpm` marker —
-        // the extractor's resistor abstraction (recogniser: rpm over [poly,
-        // poly]). Drawing the body as a continuous conductor bar (the old rpoly
-        // rect) extracts P≡N as one net: rpoly is in the deck's conductor list,
-        // so the "resistor" was a wire and both labels landed on one component.
         let poly = req(process, "poly");
+        let rpoly = req(process, "rpoly");
         let li = req(process, "li");
-        let licon = layer(process, "licon").unwrap_or(poly);
-        let rpm = layer(process, "rpm");
+        let licon = req(process, "licon");
+        let lat = cut_lattice(process);
 
-        let ct = rule(process, "contact", 170);
-        // li must enclose the cut on every side (sky130 licon.5-class rule); a
-        // cut-sized li pad reads as zero enclosure.
-        let li_enc = rule(process, "li_encloses_licon", 80);
-        // Head pad long enough that the centred cut gets the deck's one-side
-        // poly enclosure (80) above AND below — 65/65 failed
-        // `poly_encloses_licon_one_side`.
-        let head_l = rule(process, "res_head", 300)
-            .max(ct + 2 * rule(process, "poly_encloses_licon_one_side", 80));
-        let seg_gap = rule(process, "res_seg_gap", 400);
+        let ct = r("contact", 170);
+        let cut_space = r("licon_min_spacing", 170);
+        // Poly past a cut, and li past a cut, on every side.
+        let border = r("poly_encloses_licon_one_side", 80).max(r("li_encloses_licon", 80));
+        // Contacted head: magic's `xpc` must extend the body by >= 2.16 um.
+        let head = r("res_head", 2160);
+        // rpoly reaches this far into each head (magic's POLYRES convention),
+        // so the body proper is exactly `seg_l`.
+        let lap = 60;
+        let seg_gap = r("res_seg_gap", 400);
         let n_segments = i32::from(self.segments.max(1));
-        let body_w = s.unit_w;
-        let body_l = s.unit_l;
-        // The drawn gap is the electrical length; it floors at poly spacing so
-        // the two pads never violate poly_min_spacing (nothing measures L).
-        let seg_l = (body_l / n_segments).max(rule(process, "poly_min_spacing", 210));
+        let body_w = s.unit_w.max(r("res_min_width", 350));
+        let seg_l = (s.unit_l / n_segments).max(r("rpoly_min_width", 150));
         let seg_pitch = body_w + seg_gap;
-        let total_h = head_l + seg_l + head_l;
-        let cut_enc = 40;
+        let total_h = head + seg_l + head;
+        let head_li_h = head - lap;
+
+        // Contact column of a head, outer end first (the top head mirrors it).
+        let cut_x = snap_cut(body_w / 2 - ct / 2, lat);
+        let cut_ys: Vec<i32> = (0..)
+            .map(|k| border + k * (ct + cut_space))
+            .take_while(|&y| y + ct + border <= head_li_h)
+            .collect();
+        // The outermost cut of a head: where the pins land.
+        let end_cut = |sx: i32, top: bool| Rect {
+            x: sx + cut_x,
+            y: if top { total_h - border - ct } else { border },
+            w: ct,
+            h: ct,
+        };
 
         let sequence = res_segment_sequence(n_dev, self.pattern, n_segments);
-        let mut dev_seg_placed = vec![0i32; n_dev];
-        // Per (device, segment): the P-side and N-side contact positions, for
-        // the inter-segment jumpers and the end pins.
-        let mut p_at = vec![vec![(0i32, 0i32); n_segments as usize]; n_dev];
-        let mut n_at = vec![vec![(0i32, 0i32); n_segments as usize]; n_dev];
+        let mut seg_of = vec![0i32; n_dev];
+        // Per device, the column x of its previous segment.
+        let mut prev: Vec<Option<i32>> = vec![None; n_dev];
+        for (slot, &di) in sequence.iter().enumerate() {
+            let seg = seg_of[di];
+            seg_of[di] += 1;
+            let sx = slot as i32 * seg_pitch;
+            // Even segments run bottom -> top, odd ones top -> bottom.
+            let enters_top = seg % 2 == 1;
 
-        for &(di, _) in &sequence {
-            let slot = dev_seg_placed.iter().sum::<i32>();
-            let seg_idx = dev_seg_placed[di];
-            dev_seg_placed[di] += 1;
-
-            let flip = seg_idx % 2 == 1; // Orientation::MY on odd segments
-            let sx = slot * seg_pitch;
-
-            // Two poly end pads; the gap between them is the resistive body.
-            b.rect(poly, Rect { x: sx, y: 0, w: body_w, h: head_l });
-            b.rect(poly, Rect { x: sx, y: head_l + seg_l, w: body_w, h: head_l });
-            // Marker over the gap, lapping `cut_enc` into each pad: exactly two
-            // poly polygons under one marker, the recogniser's arity.
-            //
-            // Width: rpm carries a real min_width (1270 on sky130), wider than
-            // any body, so a single-segment marker widens symmetrically — pure
-            // marker, no conductor, so the overhang costs nothing. Multi-segment
-            // markers must NOT widen past the column: at seg_gap pitch they
-            // would overlap, merge into one marker polygon spanning columns,
-            // and the recogniser would refuse it (>2 poly pads under one
-            // marker). ponytail: multi-segment bodies narrower than
-            // rpm_min_width keep the violation; interleave-safe widening needs
-            // per-column staggered markers.
-            if let Some(rpm) = rpm {
-                let rpm_min = rule(process, "rpm_min_width", 1270);
-                let w = if n_segments == 1 { body_w.max(rpm_min) } else { body_w };
-                b.rect(rpm, Rect {
-                    x: sx - (w - body_w) / 2,
-                    y: head_l - cut_enc,
-                    w,
-                    h: seg_l + 2 * cut_enc,
-                });
+            b.rect(poly, Rect { x: sx, y: 0, w: body_w, h: total_h });
+            b.rect(rpoly, Rect { x: sx, y: head - lap, w: body_w, h: seg_l + 2 * lap });
+            for top in [false, true] {
+                let y0 = if top { total_h - head_li_h } else { 0 };
+                b.rect(li, Rect { x: sx, y: y0, w: body_w, h: head_li_h });
+                for &cy in &cut_ys {
+                    let y = if top { total_h - cy - ct } else { cy };
+                    b.rect(licon, Rect { x: sx + cut_x, y, w: ct, h: ct });
+                }
             }
-
-            let cy_top = head_l / 2 - ct / 2;
-            let cy_bot = head_l + seg_l + head_l / 2 - ct / 2;
-            let cx = body_w / 2 - ct / 2;
-
-            let (tx, ty) = my(cx, cy_top, ct, ct, total_h, flip);
-            b.rect(licon, Rect { x: sx + tx, y: ty, w: ct, h: ct });
-            b.rect(li, Rect { x: sx + tx - li_enc, y: ty - li_enc, w: ct + 2 * li_enc, h: ct + 2 * li_enc });
-
-            let (bx2, by2) = my(cx, cy_bot, ct, ct, total_h, flip);
-            b.rect(licon, Rect { x: sx + bx2, y: by2, w: ct, h: ct });
-            b.rect(li, Rect { x: sx + bx2 - li_enc, y: by2 - li_enc, w: ct + 2 * li_enc, h: ct + 2 * li_enc });
-
-            // Under MY the pad that was drawn at the top is still the P side of
-            // an even segment; odd segments enter at the bottom, exit at the top.
-            p_at[di][seg_idx as usize] = (sx + tx, ty);
-            n_at[di][seg_idx as usize] = (sx + bx2, by2);
-
-            // Pin sits `ext` off the head contact; the flow drops its own licon at
-            // the pin center, so the two cuts must clear licon min-spacing.
-            let ext = 340 + process.grid();
-            if seg_idx == 0 {
-                b.rect(li, Rect { x: sx + tx, y: ty - ext, w: ct, h: ext + ct });
-                b.pin(pin_at(di, "P", sx + tx, ty - ext, ct, li));
+            match prev[di] {
+                None => b.pin(pin(di, "P", end_cut(sx, enters_top), li)),
+                // li jumper from the previous segment's exit head, which is
+                // at this segment's entry end.
+                Some(px) => {
+                    let h = border + ct + border;
+                    let y = if enters_top { total_h - h } else { 0 };
+                    b.rect(li, Rect { x: px, y, w: sx + body_w - px, h });
+                }
             }
-            if seg_idx == n_segments - 1 {
-                b.rect(li, Rect { x: sx + bx2, y: by2, w: ct, h: ext + ct });
-                b.pin(pin_at(di, "N", sx + bx2, by2 + ext, ct, li));
+            prev[di] = Some(sx);
+            if seg == n_segments - 1 {
+                b.pin(pin(di, "N", end_cut(sx, !enters_top), li));
             }
         }
 
-        // li jumpers chaining each device's segments in series: exit (N side) of
-        // segment k to entry (P side) of k+1. The MY flip puts both on one row,
-        // and `Single` keeps a device's segments in adjacent columns, so the
-        // jumper is one horizontal li bar merging with both contact pads.
-        for di in 0..n_dev {
-            for k in 0..(n_segments as usize).saturating_sub(1) {
-                let (x0, y0) = n_at[di][k];
-                let (x1, y1) = p_at[di][k + 1];
-                debug_assert_eq!(y0, y1, "the MY flip must land chained contacts on one row");
-                let (xl, xr) = (x0.min(x1), x0.max(x1));
-                b.rect(li, Rect { x: xl, y: y0, w: xr - xl + ct, h: ct });
+        // One precision-resistor region over the array: rpm, npc and psdm
+        // (magic's xhrpoly needs all three). psdm reaches `res_keepout` past
+        // the poly so a neighbour's poly/N+ keeps its distance from the body.
+        let array_w = sequence.len() as i32 * seg_pitch - seg_gap;
+        let rpm_enc = r("rpm_encloses_poly", 200);
+        let rpm_w = (array_w + 2 * rpm_enc).max(r("rpm_min_width", 1270));
+        let rpm_rect = Rect { x: array_w / 2 - rpm_w / 2, y: -rpm_enc, w: rpm_w, h: total_h + 2 * rpm_enc };
+        for role in ["rpm", "npc"] {
+            if let Some(l) = process.layer(role) {
+                b.rect(l, rpm_rect);
             }
         }
+        let keep = r("res_keepout", 420);
+        let x0 = rpm_rect.x.min(-keep);
+        let x1 = (rpm_rect.x + rpm_w).max(array_w + keep);
+        b.rect(req(process, "psdm"), Rect { x: x0, y: -keep, w: x1 - x0, h: total_h + 2 * keep });
 
         b.finish()
     }
 }
 
-/// Mirror-Y transform of a `(x,y,ct,ct)` contact within a cell of height `h`.
-/// `R0` when `!flip`. Only the y flips (the resistor never mirrors left-right).
-fn my(x: i32, y: i32, w: i32, h_box: i32, cell_h: i32, flip: bool) -> (i32, i32) {
-    let _ = w;
-    if flip {
-        (x, cell_h - y - h_box)
-    } else {
-        (x, y)
-    }
-}
-
-fn port(i: usize, term: &str) -> Pin {
-    Pin {
-        name: format!("d{i}:{term}"),
-        net: net_of(i, term),
-        at: Rect { x: 0, y: 0, w: 0, h: 0 },
-        // Enumeration placeholder: a 0x0 rect is never routed to, so the layer
-        // is not a claim about geometry. `ports()` has no `Process` to ask.
-        layer: LayerId(0),
-    }
-}
-
-fn pin_at(i: usize, term: &str, x: i32, y: i32, ct: i32, layer: LayerId) -> Pin {
-    Pin {
-        name: format!("d{i}:{term}"),
-        net: net_of(i, term),
-        at: Rect { x, y, w: ct, h: ct },
-        layer,
-    }
-}
-
-fn net_of(i: usize, term: &str) -> NetId {
-    let t = if term == "P" { 0 } else { 1 };
-    NetId((i as u16).wrapping_mul(4).wrapping_add(t))
-}
-
-
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
     // Default body: min segment width and a nominal 10µm body (`res_min_segment`).
-    let def_w = rule(process, "res_min_width", 500);
-    let def_l = rule(process, "res_min_segment", 10_000);
+    let def_w = process.rule("res_min_width", 500);
+    let def_l = process.rule("res_min_segment", 10_000);
     sizing(group, c, def_w, def_l)
 }
 
-/// Segment placement sequence. `Single` lays each device's segments in order;
-/// `Interdig` interleaves centroid-symmetrically (greedy) across devices.
-/// Returns `(device_index, _)`; the per-device segment index is assigned by the
-/// caller's `dev_seg_placed` counter.
-fn res_segment_sequence(n_dev: usize, pattern: Pattern, n_segments: i32) -> Vec<(usize, i32)> {
-    if n_dev == 0 {
-        return vec![];
+/// Device index per segment column: `Interdig` interleaves devices (greedy
+/// centroid), anything else keeps each device's segments adjacent.
+fn res_segment_sequence(n_dev: usize, pattern: Pattern, n_segments: i32) -> Vec<usize> {
+    let per_dev = n_segments as usize;
+    if pattern == Pattern::Interdig && n_dev >= 2 {
+        return greedy_centroid(&vec![per_dev; n_dev]);
     }
-    match pattern {
-        Pattern::Interdig if n_dev >= 2 => {
-            let counts: Vec<usize> = (0..n_dev).map(|_| n_segments as usize).collect();
-            greedy_centroid(&counts).into_iter().map(|di| (di, 0)).collect()
-        }
-        _ => (0..n_dev)
-            .flat_map(|di| (0..n_segments).map(move |seg| (di, seg)))
-            .collect(),
-    }
+    (0..n_dev).flat_map(|di| std::iter::repeat_n(di, per_dev)).collect()
 }
 
-/// Greedy centroid-symmetric interleave over N devices, verbatim from the old
-/// `greedy_centroid_sequence`.
-fn greedy_centroid(counts: &[usize]) -> Vec<usize> {
-    let total: usize = counts.iter().sum();
-    if total == 0 {
-        return vec![];
-    }
-    let mut remaining = counts.to_vec();
-    let mut seq = vec![0usize; total];
-    let mut lo = 0usize;
-    let mut hi = total - 1;
-    while lo <= hi {
-        let pick = remaining
-            .iter()
-            .enumerate()
-            .filter(|(_, &r)| r > 0)
-            .max_by_key(|(_, &r)| r)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        seq[lo] = pick;
-        remaining[pick] -= 1;
-        if lo < hi {
-            if remaining[pick] > 0 {
-                seq[hi] = pick;
-                remaining[pick] -= 1;
-            } else {
-                let pick2 = remaining
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, &r)| r > 0)
-                    .max_by_key(|(_, &r)| r)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                seq[hi] = pick2;
-                remaining[pick2] = remaining[pick2].saturating_sub(1);
-            }
-            if hi == 0 {
-                break;
-            }
-            hi -= 1;
-        }
-        lo += 1;
-    }
-    seq
-}
-
-/// Electrically equivalent fold-count domain, ranked by geometric diversity
-/// (squarest aspect first), capped at 8 — ported from `feasible_segments`.
+/// Segment counts that divide the body evenly (1 or even), the 8 squarest.
 fn feasible_segments(s: &Sizing, process: &dyn Process) -> Vec<u16> {
     let body_l = s.unit_l;
     let body_w = s.unit_w;
-    let seg_gap = rule(process, "res_seg_gap", 400);
-    let head = rule(process, "res_head", 300);
-    let min_seg = rule(process, "res_min_segment", 10_000).max(1);
+    let seg_gap = process.rule("res_seg_gap", 400);
+    let head = process.rule("res_head", 300);
+    let min_seg = process.rule("res_min_segment", 10_000).max(1);
     let max_segments = (body_l / min_seg).clamp(1, 64);
     let mut opts: Vec<i32> = (1..=max_segments)
         .filter(|&n| body_l % n == 0 && (n == 1 || n % 2 == 0))

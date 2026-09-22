@@ -99,6 +99,10 @@
     "diom": [
       81,
       20
+    ],
+    "npc": [
+      95,
+      20
     ]
   },
   "derived": [
@@ -190,6 +194,22 @@
       "layers": [
         "poly",
         "diff"
+      ]
+    },
+    {
+      "name": "polyc",
+      "op": "not",
+      "layers": [
+        "poly",
+        "rpoly"
+      ]
+    },
+    {
+      "name": "rbody",
+      "op": "and",
+      "layers": [
+        "poly",
+        "rpoly"
       ]
     }
   ],
@@ -1411,7 +1431,7 @@
     "floating_interconnect": {
       "kind": "unconnected_pin",
       "layers": [
-        "poly",
+        "polyc",
         "li",
         "met1",
         "met2",
@@ -1640,14 +1660,13 @@
     "conductors": [
       "sd",
       "tap",
-      "poly",
+      "polyc",
       "li",
       "met1",
       "met2",
       "met3",
       "met4",
-      "met5",
-      "rpoly"
+      "met5"
     ],
     "intra_layer_touch": true,
     "vias": [
@@ -1668,7 +1687,7 @@
       {
         "layer": "licon",
         "connects": [
-          "poly",
+          "polyc",
           "li"
         ]
       },
@@ -1706,13 +1725,6 @@
           "met4",
           "met5"
         ]
-      },
-      {
-        "layer": "licon",
-        "connects": [
-          "rpoly",
-          "li"
-        ]
       }
     ],
     "labels": [
@@ -1748,7 +1760,7 @@
       "marker": "ngate",
       "model": "sky130_fd_pr__nfet_01v8",
       "terminals": [
-        "poly",
+        "polyc",
         "sd",
         "sd"
       ]
@@ -1758,18 +1770,18 @@
       "marker": "pgate",
       "model": "sky130_fd_pr__pfet_01v8",
       "terminals": [
-        "poly",
+        "polyc",
         "sd",
         "sd"
       ]
     },
     {
       "kind": "resistor",
-      "marker": "rpm",
+      "marker": "rbody",
       "model": "sky130_fd_pr__res_high_po",
       "terminals": [
-        "poly",
-        "poly"
+        "polyc",
+        "polyc"
       ]
     },
     {
@@ -1777,7 +1789,7 @@
       "marker": "pnp",
       "model": "pnp",
       "terminals": [
-        "poly",
+        "polyc",
         "sd",
         "sd"
       ]
@@ -1787,7 +1799,7 @@
       "marker": "npn",
       "model": "npn",
       "terminals": [
-        "poly",
+        "polyc",
         "sd",
         "sd"
       ]
@@ -1911,14 +1923,6 @@
       "fringe_cap_af_um": 38.85,
       "dielectric_k": 3.9
     },
-    "rpoly": {
-      "thickness_nm": 180.0,
-      "height_nm": 326.2,
-      "sheet_res_ohm_sq": 48.2,
-      "area_cap_af_um2": 106.13,
-      "fringe_cap_af_um": 55.27,
-      "dielectric_k": 3.9
-    },
     "sd": {
       "thickness_nm": 120.0,
       "height_nm": 206.2,
@@ -1926,6 +1930,22 @@
       "dielectric_k": 3.9,
       "area_cap_af_um2": 0.0,
       "fringe_cap_af_um": 0.0
+    },
+    "polyc": {
+      "thickness_nm": 180.0,
+      "height_nm": 326.2,
+      "sheet_res_ohm_sq": 48.2,
+      "area_cap_af_um2": 106.13,
+      "fringe_cap_af_um": 55.27,
+      "dielectric_k": 3.9
+    },
+    "rbody": {
+      "thickness_nm": 180.0,
+      "height_nm": 326.2,
+      "sheet_res_ohm_sq": 48.2,
+      "area_cap_af_um2": 106.13,
+      "fringe_cap_af_um": 55.27,
+      "dielectric_k": 3.9
     }
   },
   "cell": {
@@ -1964,7 +1984,7 @@
     "poly_ext": 130,
     "via_enclosure": 300,
     "plate_spacing": 200,
-    "res_head": 300,
+    "res_head": 2160,
     "well_enclosure": 300,
     "via_spacing": 170,
     "mcon_size": 170,
@@ -2017,6 +2037,9 @@
     "res_min_width": 500,
     "tie_max_dist_nm": 3000,
     "wpe_clearance_moderate": 3000,
-    "licon_poly_enc": 50
+    "licon_poly_enc": 50,
+    "polycon_to_pdiff_spacing": 235,
+    "tap_encloses_licon_one_side": 120,
+    "licon_to_gate_spacing": 55
   }
 }

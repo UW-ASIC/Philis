@@ -30,7 +30,8 @@ use pnr_core::{DeviceGroup, DeviceId, DeviceKind, Macro, Rect, Shape};
 fn pdk() -> Option<verify::Pdk> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let json = std::fs::read_to_string(root.join("pdks/sky130.json")).ok()?;
-    verify::Pdk::from_json(&json).ok()
+    // A present-but-broken deck is a failure, not a skip.
+    Some(verify::Pdk::from_json(&json).expect("pdks/sky130.json loads"))
 }
 
 /// The group + constraints for `n` matched devices of `kind`, sized so the
@@ -314,4 +315,44 @@ fn only_the_pnp_bipolar_draws_a_well() {
             }
         }
     }
+}
+
+/// Every variant of every other family, drawn at a representative size, is
+/// DRC-clean on its own (density rules waived: they are chip-level).
+#[test]
+fn every_family_variant_is_drc_clean() {
+    use cells::{bjt::Bjt, capacitor::Capacitor, diode::Diode, inductor::Inductor, resistor::Resistor};
+    fn sweep<G: Cell>(label: &str, kind: DeviceKind, n: usize, nf: u16, w: i32, l: i32, pdk: &verify::Pdk) -> Vec<String> {
+        let (group, mut c) = group_of(kind, n, nf);
+        c.unitization[0].unit_w = w;
+        c.unitization[0].unit_l = l;
+        let mut dirty = Vec::new();
+        for (i, v) in G::enumerate(&group, &c, pdk).iter().enumerate() {
+            let m = v.draw(&group, &c, pdk);
+            let rules: Vec<String> = verify::drc(&m.shapes, &[], pdk)
+                .into_iter()
+                .filter(|f| !f.rule.ends_with("_density"))
+                .map(|f| format!("{}:{}", f.rule, f.layer))
+                .collect();
+            if !rules.is_empty() {
+                dirty.push(format!("{label} n={n} #{i}: {rules:?}"));
+            }
+        }
+        dirty
+    }
+    let Some(pdk) = pdk() else {
+        eprintln!("sky130 PDK unavailable — skipping");
+        return;
+    };
+    let mut dirty = Vec::new();
+    dirty.extend(sweep::<Mosfet>("lone pmos", DeviceKind::Pmos, 1, 1, 420, 150, &pdk));
+    for n in [1, 2] {
+        dirty.extend(sweep::<Resistor>("resistor", DeviceKind::Resistor, n, 1, 500, 10_000, &pdk));
+        dirty.extend(sweep::<Capacitor>("capacitor", DeviceKind::Capacitor, n, 4, 2000, 2000, &pdk));
+        dirty.extend(sweep::<Bjt>("npn", DeviceKind::Npn, n, 1, 1000, 1000, &pdk));
+        dirty.extend(sweep::<Bjt>("pnp", DeviceKind::Pnp, n, 1, 1000, 1000, &pdk));
+        dirty.extend(sweep::<Diode>("diode", DeviceKind::Diode, n, 1, 500, 1000, &pdk));
+    }
+    dirty.extend(sweep::<Inductor>("inductor", DeviceKind::Inductor, 1, 1, 2000, 20_000, &pdk));
+    assert!(dirty.is_empty(), "DRC-dirty variants:\n{}", dirty.join("\n"));
 }

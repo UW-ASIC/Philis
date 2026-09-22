@@ -1013,11 +1013,8 @@ version = "0.1.0"
 dependencies = [
  "analog",
  "cells",
- "gpurify",
  "pnr_core",
- "serde_json",
  "verify",
- "visualizer",
 ]
 
 [[package]]
