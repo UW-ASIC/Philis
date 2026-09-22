@@ -1,19 +1,13 @@
 target/
-# Benchmark clones external suites as subdirs beside the tracked *.spice.
-tools/benchmark/fixtures/*/
-# Bench exports generated SVGs here (CARGO_MANIFEST_DIR/../assets).
-tools/assets/
 .pdk/
 .venv/
 result/
 .claude/
 temporary/
-
-# new_skeleton mirrors the paths above.
 __pycache__/
 # bench exports SVGs here
-new_skeleton/assets/
+assets/
 # bench run log
-new_skeleton/suite_result.txt
+suite_result.txt
 # externally cloned suites, beside the tracked *.spice
-new_skeleton/benchmarks/fixtures/*/
+benchmarks/fixtures/*/

@@ -1,41 +1,23 @@
-[package]
-name = "philis"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-pnr-core = { path = "frontend/core" }
-pnr-visualizer = { path = "tools/visualizer" }
-clap = { version = "4", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-[features]
-# GPU-accelerated signoff (DRC spacing prefilter). Needs the nix devshell
-# (CUDA/Vulkan) at build and a GPU at runtime. Builds against a local GPurify
-# that exposes run_drc_no_density_backend — see [patch] below.
-gpu = ["pnr-core/gpu"]
-
 [workspace]
 resolver = "2"
 members = [
-    # Frontend
-    "frontend/annotator",
-    "frontend/substrate3",
-    "frontend/core",
-
-    # Backend
-    "backend",
-    "backend/engine",
-    "backend/cells",
-    "backend/constraints",
-    "backend/placement",
-    "backend/routing",
-
-    # Tools
-    "tools/visualizer",
-    "tools/benchmark",
+  "kernel/core", "kernel/analog", "kernel/cells", "kernel/macroMaster", "kernel/visualizer",
+  "backend/gp", "backend/dp", "backend/gr", "backend/dr", "backend/annotator", "backend/verify",
+  "frontend/library", "frontend/cli",
+  "benchmarks",
+  "examples/three_stage_opamp",
+  "examples/op_demo",
 ]
 
+# GPurify, consumed from git at its default branch. No `rev`: `Cargo.lock`
+# still pins the exact commit, so builds stay reproducible — `cargo update -p
+# gpurify` is how you move to latest. Both entries share the URL, so the facade
+# and the geometry crate always resolve to the same commit.
+#
+# Two entries rather than one: `gdsverify` is the whole verifier (engine,
+# export, the check tiers), which `verify` and `macroMaster` want. The viewer
+# only probes a `GeometryStore`, so it takes `gdsverify-geom` alone and keeps
+# the engine out of a GPU build.
 [workspace.dependencies]
-gdsverify = { git = "https://github.com/UW-ASIC/GPurify", branch = "main" }
+gdsverify = { package = "gpurify", git = "https://github.com/UW-ASIC/GPurify" }
+gdsverify-geom = { package = "gpurify-geom", git = "https://github.com/UW-ASIC/GPurify" }
