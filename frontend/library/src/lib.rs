@@ -135,19 +135,8 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         pdk,
         netlist: &netlist,
         net_names: netlist.nets.iter().map(|n| n.name.clone()).collect(),
-        placer: gp::Analytical {
-            cfg: gp::GlobalCfg {
-                grid: pdk.grid,
-                ..Default::default()
-            },
-        },
-        refiner: dp::Annealer {
-            cfg: dp::DetailedCfg {
-                grid: pdk.grid,
-                clearance_nm: device_clearance(pdk),
-                ..Default::default()
-            },
-        },
+        placer: gp::Analytical,
+        refiner: dp::Annealer,
         d_router: elaborate::detailed_router(pdk, &layers, &cuts, pin_access),
         layers,
         cuts,
@@ -402,14 +391,6 @@ fn lex_key(
 /// Edge-to-edge gap `dp` keeps between cells: the deck's widest same-layer
 /// spacing, so no two cells' layers can merge. (`dp`'s default is a sky130
 /// guess; measured: chain4 ERC 93 → 74 with the deck value.)
-fn device_clearance(pdk: &Pdk) -> i32 {
-    pdk.layers
-        .iter()
-        .filter_map(|(_, l)| pdk.min_spacing(l.0))
-        .max()
-        .unwrap_or(0)
-}
-
 fn round_up(v: i32, grid: i32) -> i32 {
     (v + grid - 1) / grid * grid
 }
