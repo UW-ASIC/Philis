@@ -1,50 +1,23 @@
-//! The LVS reference netlist, built from verify-owned input structs (D7).
+//! The LVS reference netlist, compiled from plain [`RefInput`] (verify cannot
+//! depend on `frontend/library`) into gdsverify's SoA [`Netlist`].
 //!
-//! `verify` cannot depend on `frontend/library`, so the schematic arrives as
-//! the plain [`RefInput`]/[`RefDeviceIn`] surface below — a mirror of the old
-//! `RefNetlist` input shape — and is compiled here into gdsverify's SoA
-//! [`Netlist`] against the checker's own deck and string table.
-//!
-//! **Terminal order is SPICE card order**, because gdsverify assigns reference
-//! terminal roles by card position (`lvs::graph::card_role`):
-//!
-//! | kind | terminals, in order |
-//! |---|---|
-//! | MOS | drain, gate, source, (bulk — only if the deck's recogniser declares 4) |
-//! | BJT | collector, base, emitter |
-//! | R/C/D | pin a, pin b (symmetric) |
-//!
-//! **Device params** are stated per card in SI base units (metres), the units
-//! gdsverify's `parse_spice` uses. The engine's layout side
-//! (`lvs::graph::from_layout_into`) measures a MOS channel's `w`/`l` and emits
-//! a layout param only for names the shared string table already carries — so
-//! interning a name here is what switches that name's comparison on, and a
-//! name stated on one side only is reported as `lvs.undeclared_param`
-//! (fail-closed). gdsverify's `reduce_into` refuses to merge any device with a
-//! declared param, so a sized card must arrive **one card per drawn finger**
-//! (the caller expands m/nf); sized fingers then pair one to one.
-//!
-//! **Kinds the deck cannot recognise are skipped**, exactly like inductors
-//! were before: a deck with no marker for the kind extracts none from the
-//! layout, so keeping them in the reference would make LVS mismatch
-//! unconditionally. The skip count comes back so callers can log the ceiling.
-//! Both Philis decks now carry a `diom` diode recogniser (the generator draws
-//! the marker over the junction, terminals are the two `li` pads).
-//! **Capacitors remain unrecognisable**: the MOM comb draws both electrodes as
-//! many interdigitated polygons on one metal, and `DeviceRecognition` binds
-//! exactly one polygon per terminal position (surplus polygons refuse the
-//! marker), so comb recognition needs a schema extension — per-terminal
-//! *merged-region* binding (all same-net polygons of a layer under the marker
-//! count as one electrode). Recognising only the plate kinds would be worse
-//! than the skip, because the placer is free to pick the comb variant and the
-//! verdict would then depend on variant choice.
+//! - **Terminals are in SPICE card order** — gdsverify assigns roles by
+//!   position: MOS `d g s [b]` (bulk only if the recogniser declares 4),
+//!   BJT `c b e`, R/C/D `a b`.
+//! - **Params are SI** (metres). Interning a param name is what makes the
+//!   layout side emit its measured value, so a name on one side only is an
+//!   `lvs.undeclared_param`. A device with params never parallel-merges, so the
+//!   caller must expand m/nf to one card per drawn finger.
+//! - **Kinds the deck cannot recognise are skipped** (returned as a count):
+//!   the layout extracts none, so keeping them would mismatch unconditionally.
+//!   Capacitors are the case today — a MOM comb draws each electrode as many
+//!   polygons and `DeviceRecognition` binds one polygon per terminal.
 
 use gdsverify::ingest::deck::{Deck, DeviceKind};
 use gdsverify::ingest::netlist::{Netlist, RefNetId, SubcktId};
 use gdsverify::ingest::{StrId, StrTable};
 
-/// A schematic device kind, polarity included (the deck's recognisers are
-/// per-polarity: `ngate` vs `pgate`, `npn` vs `pnp`).
+/// A schematic device kind, polarity included (recognisers are per-polarity).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefKind {
     Nmos,
@@ -56,42 +29,32 @@ pub enum RefKind {
     Diode,
 }
 
-/// One schematic device, as `frontend/library` states it.
+/// One schematic device.
 #[derive(Clone, Debug)]
 pub struct RefDeviceIn {
     pub kind: RefKind,
-    /// Optional deck model name (e.g. `"sky130_fd_pr__nfet_01v8"`). When given
-    /// it selects the recogniser row whose model matches; when absent the
-    /// first recogniser of the matching kind/polarity is used.
+    /// Deck model name; selects the matching recogniser row. `None` takes the
+    /// first recogniser of the kind/polarity.
     pub model: Option<String>,
-    /// Terminal **net names**, in SPICE card order (see module doc). Must be at
-    /// least as many as the selected recogniser's terminal arity; extras are
-    /// ignored (an NMOS card may carry a bulk net the 3-terminal recogniser
-    /// does not extract).
+    /// Terminal net names in card order; at least the recogniser's arity,
+    /// extras (e.g. a bulk the recogniser does not extract) ignored.
     pub terminals: Vec<String>,
-    /// Declared parameters, `(spice name, value)` in SI base units — `"w"`
-    /// and `"l"` in metres for a MOS. Interned into the checker's table, which
-    /// is what arms the layout side's measured-param emission for that name
-    /// (see the module doc). One card = one drawn finger: the caller expands
-    /// m/nf, because a device with params never parallel-merges.
+    /// `(spice name, value)` in SI units, one card per drawn finger.
     pub params: Vec<(String, f64)>,
 }
 
-/// The whole reference: devices plus the top cell's port (pin) net names.
+/// The whole reference: devices plus the cell's port net names (which must
+/// match the [`crate::geom::LabeledPin`] names on the geometry).
 #[derive(Clone, Debug, Default)]
 pub struct RefInput {
     pub devices: Vec<RefDeviceIn>,
-    /// Net names that are pins of the cell — must match the names the
-    /// [`crate::geom::LabeledPin`]s put on the drawn geometry.
     pub ports: Vec<String>,
 }
 
-/// Compile `input` into a one-subckt (`"top"`) gdsverify [`Netlist`], interning
-/// into `strings` (which must be the **checker's** table, so reference net
-/// names and layout label names share one id space).
-///
-/// Returns the netlist and how many devices were skipped for want of a deck
-/// recogniser (the documented LVS ceiling).
+/// Compile `input` into a one-subckt (`"top"`) [`Netlist`], interning into the
+/// **checker's** `strings` so reference and layout names share one id space.
+/// Returns the netlist and the count of devices skipped for want of a
+/// recogniser.
 ///
 /// # Errors
 /// A device whose terminals are fewer than its recogniser's arity.
@@ -170,13 +133,9 @@ pub fn build(
     Ok((n, skipped))
 }
 
-/// The deck recogniser row for one schematic device, or `None` when the deck
-/// has no marker for its kind/polarity.
-///
-/// Polarity is read off the **marker layer name**: both Philis decks name
-/// their MOS markers `ngate`/`pgate` and their BJT markers `npn`/`pnp`, so a
-/// leading `p` is P-type. A model hint, when given, overrides and must match
-/// exactly.
+/// The deck recogniser row for one schematic device, `None` when the deck has
+/// no marker for its kind/polarity. Polarity is read off the marker layer name
+/// (`ngate`/`pgate`, `npn`/`pnp`: a leading `p` is P-type).
 fn recogniser_for(dev: &RefDeviceIn, deck: &Deck, strings: &StrTable) -> Option<usize> {
     let (kind, polarity) = match dev.kind {
         RefKind::Nmos => (DeviceKind::Mos, Some(false)),
@@ -199,15 +158,10 @@ fn recogniser_for(dev: &RefDeviceIn, deck: &Deck, strings: &StrTable) -> Option<
                 continue;
             }
         }
-        if hinted.is_some() {
-            if Some(deck.devices.model[row]) == hinted {
-                return Some(row);
-            }
-            // Keep scanning for the hinted model; remember the first
-            // kind/polarity match in case the hint names no deck model.
-        } else {
+        if hinted.is_none() || hinted == Some(deck.devices.model[row]) {
             return Some(row);
         }
+        // The hint names no deck model (yet): fall back to the first match.
         fallback.get_or_insert(row);
     }
     fallback

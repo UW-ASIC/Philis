@@ -1,9 +1,5 @@
-//! Union-find over device indices — how a rule's `extract` coalesces a set of
-//! devices that constrain a set of devices into one addressable group.
-//!
-//! When a rule relates group↔group (e.g. two multi-finger halves of a diff
-//! pair), it `union`s each side's devices; the annotator later reads the
-//! resulting sets as `Target::Group`s and as the [`crate::Layout`] group table.
+//! Union-find over device indices: rules' `extract` unions matched devices, and
+//! the annotator reads the sets back as the group table.
 
 /// Disjoint-set forest with path compression + union by rank.
 pub struct UnionFind {

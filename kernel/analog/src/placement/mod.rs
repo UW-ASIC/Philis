@@ -1,9 +1,4 @@
-//! # Placement-tier rules — **Device↔Device**, scored against [`crate::Layout`].
-//!
-//! Consumed by `backend/gp` and `backend/dp`. Each rule is a small `Copy`
-//! [`crate::Rule`] with `On = Layout`. Registered in [`crate::apply_placement`].
-//! One rule per file; the file's rustdoc carries the analog theory and its
-//! textbook provenance (`AOAL`/`FOLD`/`ALS`/`PNR_ANALOG`).
+//! Placement-tier rules, scored against [`pnr_core::Layout`] (gp, dp).
 
 pub mod cc;
 pub mod dti;

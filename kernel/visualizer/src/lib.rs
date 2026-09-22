@@ -1,9 +1,6 @@
-//! GPU-accelerated GDS / GeometryStore visualizer.
-//!
-//! Two modes:
-//! - **Standalone binary**: `pnr-visualizer <file.gds>` — watches file, auto-reloads.
-//! - **In-process probe**: `Probe::open()` — spawns a window thread, accepts SoA
-//!   snapshots from the P&R iteration loop via a channel.
+//! GDS viewer: a wgpu window over a GDS file (reloads on change), an
+//! in-process [`Probe`] window fed polygons over a channel, and headless
+//! [`export_svg`].
 
 use std::{
     collections::HashMap,
@@ -22,23 +19,19 @@ use winit::{
     window::{Window, WindowId},
 };
 
-// ═══════════════════════════════════════════════════════════════════════
-//  Public types
-// ═══════════════════════════════════════════════════════════════════════
-
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-pub struct Vertex {
-    pub pos: [f32; 2],
-    pub color: [f32; 4],
+struct Vertex {
+    pos: [f32; 2],
+    color: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-pub struct CamUni {
-    pub offset: [f32; 2],
-    pub scale: f32,
-    pub aspect: f32,
+struct CamUni {
+    offset: [f32; 2],
+    scale: f32,
+    aspect: f32,
 }
 
 #[derive(Clone)]
@@ -54,87 +47,42 @@ pub struct TextEntry {
     pub text: String,
 }
 
-/// GDS (layer, datatype) → human-readable name.
+/// GDS (layer, datatype) → layer name.
 pub type LayerMap = HashMap<(i32, i32), String>;
 
-/// Parse layer names from PDK JSON. Expects `{"layers": {"met1": [68, 20], ...}}`.
+/// Layer names from a deck JSON: `{"layers": {"met1": [68, 20], ...}}`.
+#[must_use]
 pub fn parse_layer_names(json: &str) -> LayerMap {
-    let v: serde_json::Value = match serde_json::from_str(json) {
-        Ok(v) => v,
-        Err(_) => return LayerMap::new(),
-    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return LayerMap::new() };
     let mut map = LayerMap::new();
-    if let Some(layers) = v.get("layers").and_then(|l| l.as_object()) {
-        for (name, val) in layers {
-            if let Some(arr) = val.as_array() {
-                if arr.len() >= 2 {
-                    if let (Some(l), Some(d)) = (arr[0].as_i64(), arr[1].as_i64()) {
-                        map.insert((l as i32, d as i32), name.clone());
-                    }
-                }
+    for (name, val) in v.get("layers").and_then(|l| l.as_object()).into_iter().flatten() {
+        if let Some([l, d, ..]) = val.as_array().map(Vec::as_slice) {
+            if let (Some(l), Some(d)) = (l.as_i64(), d.as_i64()) {
+                map.insert((l as i32, d as i32), name.clone());
             }
         }
     }
     map
 }
 
-/// Parsed signoff sidecar data for visualization.
-#[derive(Default, Clone)]
-pub struct SignoffData {
-    pub drc: Vec<DrcMarker>,
-    pub lvs_matched: bool,
-    pub lvs_reason: String,
-    pub lvs_nmos: usize,
-    pub lvs_pmos: usize,
-    pub pex_r_ohm: f64,
-    pub pex_c_af: f64,
+/// The name for GDS layer `layer` (any datatype), else `L{layer}`.
+fn layer_label(names: &LayerMap, layer: u16) -> String {
+    names
+        .iter()
+        .find(|(&(l, _), _)| l == i32::from(layer))
+        .map_or_else(|| format!("L{layer}"), |(_, n)| n.clone())
 }
 
-#[derive(Clone)]
-pub struct DrcMarker {
-    pub x: i32,
-    pub y: i32,
-    pub rule: String,
-    pub kind: String,
-    pub measured: i64,
-    pub limit: i64,
+/// `(x0, y0, x1, y1)` over every vertex; `None` when there are none.
+fn bounds(polys: &[Poly]) -> Option<(i32, i32, i32, i32)> {
+    let mut pts = polys.iter().flat_map(|p| p.pts.iter());
+    let &[x, y] = pts.next()?;
+    Some(pts.fold((x, y, x, y), |(x0, y0, x1, y1), &[x, y]| {
+        (x0.min(x), y0.min(y), x1.max(x), y1.max(y))
+    }))
 }
 
-/// Parse signoff.json sidecar.
-pub fn parse_signoff(json: &str) -> SignoffData {
-    let v: serde_json::Value = match serde_json::from_str(json) {
-        Ok(v) => v,
-        Err(_) => return SignoffData::default(),
-    };
-    let mut sd = SignoffData::default();
-    if let Some(arr) = v.get("drc_violations").and_then(|a| a.as_array()) {
-        for item in arr {
-            sd.drc.push(DrcMarker {
-                x: item.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                y: item.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                rule: item.get("rule").and_then(|v| v.as_str()).unwrap_or("").into(),
-                kind: item.get("kind").and_then(|v| v.as_str()).unwrap_or("").into(),
-                measured: item.get("measured").and_then(|v| v.as_i64()).unwrap_or(0),
-                limit: item.get("limit").and_then(|v| v.as_i64()).unwrap_or(0),
-            });
-        }
-    }
-    if let Some(lvs) = v.get("lvs") {
-        sd.lvs_matched = lvs.get("matched").and_then(|v| v.as_bool()).unwrap_or(false);
-        sd.lvs_reason = lvs.get("reason").and_then(|v| v.as_str()).unwrap_or("").into();
-        sd.lvs_nmos = lvs.get("nmos").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-        sd.lvs_pmos = lvs.get("pmos").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    }
-    if let Some(pex) = v.get("pex") {
-        sd.pex_r_ohm = pex.get("r_met1_ohm").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        sd.pex_c_af = pex.get("total_cap_af").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    }
-    sd
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-//  GDS parser — full: BOUNDARY, BOX, PATH, SREF, AREF
-// ═══════════════════════════════════════════════════════════════════════
+// ── GDS parser: BOUNDARY, BOX, PATH, SREF, AREF, TEXT ──
 
 struct GdsCell {
     polys: Vec<Poly>,
@@ -464,103 +412,9 @@ pub fn parse_gds(data: &[u8]) -> (Vec<Poly>, Vec<TextEntry>) {
     (out, texts)
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  Dump file parser (SoA text format, multiple frames)
-// ═══════════════════════════════════════════════════════════════════════
+// ── Colours, triangulation, stroke text ──
 
-/// One frame from a dump file.
-pub struct DumpFrame {
-    pub label: String,
-    pub polys: Vec<Poly>,
-    pub texts: Vec<TextEntry>,
-}
-
-/// Parse a dump file with one or more frames.
-///
-/// Format:
-/// ```text
-/// # frame 0 wl=36.9 overuse=0
-/// 68 100,200 300,200 300,400 100,400
-/// 69 500,100 700,100 700,300
-/// # frame 1 wl=35.2 overuse=0
-/// 68 110,210 310,210 310,410 110,410
-/// ```
-pub fn parse_dump(text: &str) -> Vec<DumpFrame> {
-    let mut frames = Vec::new();
-    let mut label = String::new();
-    let mut polys = Vec::new();
-    let mut texts = Vec::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with("# frame") {
-            if !polys.is_empty() || !texts.is_empty() {
-                frames.push(DumpFrame { label: std::mem::take(&mut label), polys: std::mem::take(&mut polys), texts: std::mem::take(&mut texts) });
-            }
-            label = line.strip_prefix("# ").unwrap_or(line).to_string();
-        } else if line.is_empty() || line.starts_with('#') {
-            continue;
-        } else if line.starts_with("T ") {
-            // Text label: T x,y label text
-            let rest = &line[2..];
-            if let Some((coord, text)) = rest.split_once(' ') {
-                if let Some((xs, ys)) = coord.split_once(',') {
-                    if let (Ok(x), Ok(y)) = (xs.parse(), ys.parse()) {
-                        texts.push(TextEntry { x, y, text: text.to_string() });
-                    }
-                }
-            }
-        } else {
-            let mut parts = line.split_whitespace();
-            let layer: u16 = match parts.next().and_then(|s| s.parse().ok()) {
-                Some(l) => l,
-                None => continue,
-            };
-            let pts: Vec<[i32; 2]> = parts.filter_map(|s| {
-                let (x, y) = s.split_once(',')?;
-                Some([x.parse().ok()?, y.parse().ok()?])
-            }).collect();
-            if pts.len() >= 3 {
-                polys.push(Poly { layer, pts });
-            }
-        }
-    }
-    if !polys.is_empty() || !texts.is_empty() {
-        frames.push(DumpFrame { label, polys, texts });
-    }
-    frames
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-//  GeometryStore → Poly (behind "probe" feature)
-// ═══════════════════════════════════════════════════════════════════════
-
-#[cfg(feature = "probe")]
-pub fn store_to_polys(store: &gdsverify_geom::GeometryStore) -> Vec<Poly> {
-    let n = store.poly_count();
-    let mut polys = Vec::with_capacity(n);
-    for i in 0..n as u32 {
-        let id = gdsverify_geom::PolyId(i);
-        let (xs, ys) = store.poly_verts(id);
-        if xs.len() < 3 {
-            continue;
-        }
-        // The flow pins 1 dbu = 1 nm, so Dbu::raw() (i64) fits Philis's i32 nm.
-        let pts: Vec<[i32; 2]> = xs
-            .iter()
-            .zip(ys)
-            .map(|(x, y)| [x.raw() as i32, y.raw() as i32])
-            .collect();
-        polys.push(Poly { layer: store.poly_layer(id).0, pts });
-    }
-    polys
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-//  Colors & triangulation
-// ═══════════════════════════════════════════════════════════════════════
-
-pub fn layer_color(l: u16) -> [f32; 4] {
+fn layer_color(l: u16) -> [f32; 4] {
     const P: [[f32; 4]; 10] = [
         [0.22, 0.60, 1.00, 0.60],
         [1.00, 0.33, 0.33, 0.60],
@@ -577,49 +431,35 @@ pub fn layer_color(l: u16) -> [f32; 4] {
 }
 
 fn outline_color(fill: [f32; 4]) -> [f32; 4] {
-    [
-        (fill[0] * 1.5).min(1.0),
-        (fill[1] * 1.5).min(1.0),
-        (fill[2] * 1.5).min(1.0),
-        1.0,
-    ]
+    [(fill[0] * 1.5).min(1.0), (fill[1] * 1.5).min(1.0), (fill[2] * 1.5).min(1.0), 1.0]
 }
 
-pub fn triangulate(polys: &[Poly]) -> Vec<Vertex> {
+fn triangulate(polys: &[Poly]) -> Vec<Vertex> {
     let mut verts = Vec::new();
     for p in polys {
-        let c = layer_color(p.layer);
-        let coords: Vec<f64> = p.pts.iter().flat_map(|v| [v[0] as f64, v[1] as f64]).collect();
-        let idx = earcutr::earcut(&coords, &[], 2).unwrap_or_default();
-        for i in idx {
-            if i < p.pts.len() {
-                verts.push(Vertex { pos: [p.pts[i][0] as f32, p.pts[i][1] as f32], color: c });
-            }
+        let color = layer_color(p.layer);
+        let coords: Vec<f64> = p.pts.iter().flat_map(|v| [f64::from(v[0]), f64::from(v[1])]).collect();
+        for i in earcutr::earcut(&coords, &[], 2).unwrap_or_default() {
+            verts.push(Vertex { pos: [p.pts[i][0] as f32, p.pts[i][1] as f32], color });
         }
     }
     verts
 }
 
-pub fn outline_vertices(polys: &[Poly]) -> Vec<Vertex> {
+fn outline_vertices(polys: &[Poly]) -> Vec<Vertex> {
     let mut verts = Vec::new();
     for p in polys {
-        let c = outline_color(layer_color(p.layer));
-        let n = p.pts.len();
-        for i in 0..n {
-            let j = (i + 1) % n;
-            verts.push(Vertex { pos: [p.pts[i][0] as f32, p.pts[i][1] as f32], color: c });
-            verts.push(Vertex { pos: [p.pts[j][0] as f32, p.pts[j][1] as f32], color: c });
+        let color = outline_color(layer_color(p.layer));
+        for (i, a) in p.pts.iter().enumerate() {
+            let b = p.pts[(i + 1) % p.pts.len()];
+            verts.push(Vertex { pos: [a[0] as f32, a[1] as f32], color });
+            verts.push(Vertex { pos: [b[0] as f32, b[1] as f32], color });
         }
     }
     verts
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  Stroke font — minimal line-segment glyphs for annotation labels
-// ═══════════════════════════════════════════════════════════════════════
-
-// Each glyph is defined on a 5-wide, 7-tall grid as pairs of (x,y) line endpoints.
-// A (255,255) pair marks a pen-up (move without drawing).
+/// Glyphs on a 5×7 grid as line-segment endpoint pairs; a `PEN_UP` pair skips.
 const PEN_UP: (u8, u8) = (255, 255);
 
 fn glyph(ch: char) -> &'static [(u8, u8)] {
@@ -664,294 +504,129 @@ fn glyph(ch: char) -> &'static [(u8, u8)] {
         '-' => &[(1,3),(3,3)],
         '(' => &[(3,0),(1,1),(1,1),(1,6),(1,6),(3,7)],
         ')' => &[(1,0),(3,1),(3,1),(3,6),(3,6),(1,7)],
-        ',' => &[(2,0),(1,255)], // short descender
+        ',' => &[(2,1),(1,0)],
         '.' => &[(2,0),(2,1),(2,1),(2,0)],
         ' ' => &[],
         _ => &[(0,0),(4,7), PEN_UP,PEN_UP, (0,7),(4,0)], // fallback: X
     }
 }
 
-/// Emit a thick line as two triangles (a quad). Appends 6 vertices.
-fn stroke_quad(verts: &mut Vec<Vertex>, ax: f32, ay: f32, bx: f32, by: f32, half_w: f32, color: [f32; 4]) {
-    let dx = bx - ax;
-    let dy = by - ay;
+/// A thick line as two triangles.
+fn stroke_quad(verts: &mut Vec<Vertex>, a: [f32; 2], b: [f32; 2], half_w: f32, color: [f32; 4]) {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let len = (dx * dx + dy * dy).sqrt().max(1e-6);
-    let nx = -dy / len * half_w;
-    let ny = dx / len * half_w;
-    verts.push(Vertex { pos: [ax - nx, ay - ny], color });
-    verts.push(Vertex { pos: [bx - nx, by - ny], color });
-    verts.push(Vertex { pos: [bx + nx, by + ny], color });
-    verts.push(Vertex { pos: [ax - nx, ay - ny], color });
-    verts.push(Vertex { pos: [bx + nx, by + ny], color });
-    verts.push(Vertex { pos: [ax + nx, ay + ny], color });
+    let (nx, ny) = (-dy / len * half_w, dx / len * half_w);
+    for pos in [
+        [a[0] - nx, a[1] - ny],
+        [b[0] - nx, b[1] - ny],
+        [b[0] + nx, b[1] + ny],
+        [a[0] - nx, a[1] - ny],
+        [b[0] + nx, b[1] + ny],
+        [a[0] + nx, a[1] + ny],
+    ] {
+        verts.push(Vertex { pos, color });
+    }
 }
 
-/// Render text labels as filled quads (triangle list). Thick strokes visible at any zoom.
-pub fn text_vertices(texts: &[TextEntry], polys: &[Poly]) -> Vec<Vertex> {
-    if texts.is_empty() { return Vec::new(); }
-    let scale = if polys.is_empty() {
-        100.0_f32
-    } else {
-        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-        for p in polys {
-            for &[x, y] in &p.pts {
-                x0 = x0.min(x); y0 = y0.min(y);
-                x1 = x1.max(x); y1 = y1.max(y);
+/// `text` as stroked glyphs from `(x, y)`, one glyph unit = `s`.
+fn push_text(verts: &mut Vec<Vertex>, text: &str, x: f32, y: f32, s: f32, color: [f32; 4]) {
+    for (ci, ch) in text.chars().enumerate() {
+        let cx = x + ci as f32 * 6.0 * s;
+        for seg in glyph(ch).chunks_exact(2) {
+            if seg.contains(&PEN_UP) {
+                continue;
             }
+            let at = |(gx, gy): (u8, u8)| [cx + f32::from(gx) * s, y + f32::from(gy) * s];
+            stroke_quad(verts, at(seg[0]), at(seg[1]), s * 0.25, color);
         }
-        let span = ((x1 - x0) as f32).max((y1 - y0) as f32).max(1.0);
-        span * 0.025 / 7.0
-    };
-    let color: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
-    let char_w = 6.0 * scale;
-    let lw = scale * 0.22; // stroke half-width — thick enough to read
-    let mut verts = Vec::new();
+    }
+}
 
+/// A solid axis-aligned rectangle as two triangles.
+fn push_rect(verts: &mut Vec<Vertex>, x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 4]) {
+    for pos in [[x0, y0], [x1, y0], [x1, y1], [x0, y0], [x1, y1], [x0, y1]] {
+        verts.push(Vertex { pos, color });
+    }
+}
+
+/// World-space text labels, sized to the layout's span.
+fn text_vertices(texts: &[TextEntry], polys: &[Poly]) -> Vec<Vertex> {
+    let span = bounds(polys).map_or(7000.0, |(x0, y0, x1, y1)| (x1 - x0).max(y1 - y0).max(1) as f32);
+    let mut verts = Vec::new();
     for t in texts {
-        let ox = t.x as f32;
-        let oy = t.y as f32;
-        for (ci, ch) in t.text.chars().enumerate() {
-            let g = glyph(ch);
-            let cx = ox + ci as f32 * char_w;
-            let mut i = 0;
-            while i + 1 < g.len() {
-                let (gx0, gy0) = g[i];
-                let (gx1, gy1) = g[i + 1];
-                i += 2;
-                if (gx0, gy0) == PEN_UP || (gx1, gy1) == PEN_UP { continue; }
-                stroke_quad(&mut verts,
-                    cx + gx0 as f32 * scale, oy + gy0 as f32 * scale,
-                    cx + gx1 as f32 * scale, oy + gy1 as f32 * scale,
-                    lw, color);
-            }
-        }
+        push_text(&mut verts, &t.text, t.x as f32, t.y as f32, span * 0.025 / 7.0, [1.0, 1.0, 1.0, 0.95]);
     }
     verts
 }
 
-/// Build legend overlay vertices in NDC space (top-right corner).
-/// Returns triangle-list vertices for colored squares + line-list vertices for text.
-/// Render DRC violations as red X markers in world space (triangle list).
-pub fn drc_marker_vertices(markers: &[DrcMarker], polys: &[Poly]) -> Vec<Vertex> {
-    if markers.is_empty() { return Vec::new(); }
-    let span = if polys.is_empty() { 1000.0 } else {
-        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-        for p in polys { for &[x, y] in &p.pts { x0 = x0.min(x); y0 = y0.min(y); x1 = x1.max(x); y1 = y1.max(y); } }
-        ((x1 - x0) as f32).max((y1 - y0) as f32).max(1.0)
-    };
-    let arm = span * 0.015; // X arm length
-    let lw = arm * 0.25;    // stroke width
-    let color: [f32; 4] = [1.0, 0.15, 0.15, 0.95];
-    let mut verts = Vec::new();
-    for m in markers {
-        let cx = m.x as f32;
-        let cy = m.y as f32;
-        stroke_quad(&mut verts, cx - arm, cy - arm, cx + arm, cy + arm, lw, color);
-        stroke_quad(&mut verts, cx - arm, cy + arm, cx + arm, cy - arm, lw, color);
-    }
-    verts
-}
-
-/// Build signoff summary overlay in NDC (top-left corner). Returns triangle-list vertices.
-pub fn signoff_overlay(sd: &SignoffData) -> Vec<Vertex> {
-    if sd.lvs_reason.is_empty() && sd.drc.is_empty() && sd.pex_r_ohm == 0.0 { return Vec::new(); }
-
-    let ch = 0.035_f32;
-    let margin = 0.02_f32;
-    let glyph_scale = ch * 0.11;
-    let char_w = glyph_scale * 6.0;
-    let lw = glyph_scale * 0.3;
-
-    let mut lines: Vec<(String, [f32; 4])> = Vec::new();
-    // LVS
-    let lvs_color = if sd.lvs_matched { [0.3, 0.9, 0.4, 1.0] } else { [1.0, 0.3, 0.3, 1.0] };
-    lines.push((format!("LVS {} {}N {}P", if sd.lvs_matched { "OK" } else { "FAIL" }, sd.lvs_nmos, sd.lvs_pmos), lvs_color));
-    // DRC
-    let drc_color = if sd.drc.is_empty() { [0.3, 0.9, 0.4, 1.0] } else { [1.0, 0.3, 0.3, 1.0] };
-    lines.push((format!("DRC {} VIOLATIONS", sd.drc.len()), drc_color));
-    // PEX
-    let pex_color: [f32; 4] = [0.7, 0.8, 1.0, 1.0];
-    lines.push((format!("PEX R {:.1} C {:.1}FF", sd.pex_r_ohm, sd.pex_c_af / 1000.0), pex_color));
-
-    let n = lines.len();
-    let total_h = n as f32 * ch + margin;
-    let x0 = -1.0 + margin;
-    let y_top = 1.0 - margin;
-
-    let mut verts = Vec::new();
-    let bg: [f32; 4] = [0.08, 0.08, 0.10, 0.8];
-
-    // background
-    let bx1 = x0 + 0.42;
-    let by0 = y_top - total_h;
-    for &[px, py] in &[[x0 - margin / 2.0, by0], [bx1, by0], [bx1, y_top + margin / 2.0],
-                        [x0 - margin / 2.0, by0], [bx1, y_top + margin / 2.0], [x0 - margin / 2.0, y_top + margin / 2.0]] {
-        verts.push(Vertex { pos: [px, py], color: bg });
-    }
-
-    for (i, (text, color)) in lines.iter().enumerate() {
-        let y = y_top - (i as f32 + 0.5) * ch;
-        for (ci, c) in text.chars().enumerate() {
-            let g = glyph(c);
-            let cx = x0 + ci as f32 * char_w;
-            let mut gi = 0;
-            while gi + 1 < g.len() {
-                let (gx0, gy0) = g[gi];
-                let (gx1, gy1) = g[gi + 1];
-                gi += 2;
-                if (gx0, gy0) == PEN_UP || (gx1, gy1) == PEN_UP { continue; }
-                stroke_quad(&mut verts,
-                    cx + gx0 as f32 * glyph_scale, y - ch * 0.35 + gy0 as f32 * glyph_scale,
-                    cx + gx1 as f32 * glyph_scale, y - ch * 0.35 + gy1 as f32 * glyph_scale,
-                    lw, *color);
-            }
-        }
-    }
-    verts
-}
-
-pub fn build_legend(polys: &[Poly], layer_names: &LayerMap, _aspect: f32) -> Vec<Vertex> {
+/// Screen-space (NDC) legend in the top-right corner: a swatch and name per layer.
+fn build_legend(polys: &[Poly], layer_names: &LayerMap) -> Vec<Vertex> {
     let mut layers: Vec<u16> = polys.iter().map(|p| p.layer).collect();
     layers.sort_unstable();
     layers.dedup();
-    if layers.is_empty() { return Vec::new(); }
-
-    let n = layers.len();
-    let ch = 0.04_f32; // row height in NDC
-    let sw = 0.03_f32; // color swatch width
-    let margin = 0.02_f32;
-    let total_h = n as f32 * ch + margin;
-    // top-right anchor
-    let x0 = 1.0 - margin - 0.3; // left edge of legend box
-    let y_top = 1.0 - margin;
-
-    let mut verts = Vec::new();
-    let bg_color: [f32; 4] = [0.08, 0.08, 0.10, 0.75];
-
-    // background quad (two triangles)
-    let bx0 = x0 - margin;
-    let bx1 = 1.0 - margin / 2.0;
-    let by0 = y_top - total_h;
-    let by1 = y_top + margin / 2.0;
-    for &[px, py] in &[[bx0,by0],[bx1,by0],[bx1,by1],[bx0,by0],[bx1,by1],[bx0,by1]] {
-        verts.push(Vertex { pos: [px, py], color: bg_color });
+    if layers.is_empty() {
+        return Vec::new();
     }
-
-    let glyph_scale = ch * 0.11;
-    let char_w = glyph_scale * 6.0;
-
+    let (row, margin) = (0.04_f32, 0.02_f32);
+    let (x0, y_top) = (1.0 - margin - 0.3, 1.0 - margin);
+    let mut verts = Vec::new();
+    let bottom = y_top - layers.len() as f32 * row - margin;
+    push_rect(&mut verts, x0 - margin, bottom, 1.0 - margin / 2.0, y_top + margin / 2.0, [0.08, 0.08, 0.10, 0.75]);
     for (i, &layer) in layers.iter().enumerate() {
-        let y = y_top - (i as f32 + 0.5) * ch;
+        let y = y_top - (i as f32 + 0.5) * row;
         let c = layer_color(layer);
-        let sc = [c[0], c[1], c[2], 1.0]; // full alpha for swatch
-
-        // color swatch (two triangles)
-        let sx0 = x0;
-        let sx1 = x0 + sw;
-        let sy0 = y - ch * 0.35;
-        let sy1 = y + ch * 0.35;
-        for &[px, py] in &[[sx0,sy0],[sx1,sy0],[sx1,sy1],[sx0,sy0],[sx1,sy1],[sx0,sy1]] {
-            verts.push(Vertex { pos: [px, py], color: sc });
-        }
-
-        let name = layer_names.iter()
-            .find(|(&(l, _d), _)| l == layer as i32)
-            .map(|(_, n)| n.as_str())
-            .unwrap_or("");
-        let label = if name.is_empty() { format!("L{layer}") } else { name.to_string() };
-        let tx = x0 + sw + margin;
-        let text_color: [f32; 4] = [0.9, 0.9, 0.9, 1.0];
-        let lw = glyph_scale * 0.3;
-
-        for (ci, ch_c) in label.chars().enumerate() {
-            let g = glyph(ch_c);
-            let cx = tx + ci as f32 * char_w;
-            let mut gi = 0;
-            while gi + 1 < g.len() {
-                let (gx0, gy0) = g[gi];
-                let (gx1, gy1) = g[gi + 1];
-                gi += 2;
-                if (gx0, gy0) == PEN_UP || (gx1, gy1) == PEN_UP { continue; }
-                stroke_quad(&mut verts,
-                    cx + gx0 as f32 * glyph_scale, y - ch * 0.35 + gy0 as f32 * glyph_scale,
-                    cx + gx1 as f32 * glyph_scale, y - ch * 0.35 + gy1 as f32 * glyph_scale,
-                    lw, text_color);
-            }
-        }
+        push_rect(&mut verts, x0, y - row * 0.35, x0 + 0.03, y + row * 0.35, [c[0], c[1], c[2], 1.0]);
+        let label = layer_label(layer_names, layer);
+        push_text(&mut verts, &label, x0 + 0.05, y - row * 0.35, row * 0.11, [0.9, 0.9, 0.9, 1.0]);
     }
     verts
 }
 
-pub fn fit_view(polys: &[Poly]) -> CamUni {
-    if polys.is_empty() {
-        return CamUni { offset: [0.0; 2], scale: 1.0, aspect: 1.0 };
-    }
-    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-    for p in polys {
-        for &[x, y] in &p.pts {
-            x0 = x0.min(x); y0 = y0.min(y);
-            x1 = x1.max(x); y1 = y1.max(y);
-        }
-    }
-    let cx = (x0 + x1) as f32 / 2.0;
-    let cy = (y0 + y1) as f32 / 2.0;
-    let span = ((x1 - x0) as f32).max((y1 - y0) as f32).max(1.0);
-    CamUni { offset: [-cx, -cy], scale: 1.8 / span, aspect: 1.0 }
+fn fit_view(polys: &[Poly], aspect: f32) -> CamUni {
+    let Some((x0, y0, x1, y1)) = bounds(polys) else {
+        return CamUni { offset: [0.0; 2], scale: 1.0, aspect };
+    };
+    let span = (x1 - x0).max(y1 - y0).max(1) as f32;
+    CamUni { offset: [-(x0 + x1) as f32 / 2.0, -(y0 + y1) as f32 / 2.0], scale: 1.8 / span, aspect }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  SVG export (headless, no GPU)
-// ═══════════════════════════════════════════════════════════════════════
+// ── SVG export (headless) ──
 
+#[must_use]
 pub fn export_svg(gds_bytes: &[u8], layer_names: &LayerMap) -> String {
     let (polys, _texts) = parse_gds(gds_bytes);
-    if polys.is_empty() {
+    let Some((x0, y0, x1, y1)) = bounds(&polys) else {
         return String::from(r#"<svg xmlns="http://www.w3.org/2000/svg"/>"#);
-    }
-    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-    for p in &polys {
-        for &[x, y] in &p.pts {
-            x0 = x0.min(x); y0 = y0.min(y);
-            x1 = x1.max(x); y1 = y1.max(y);
-        }
-    }
-    let pad = ((x1 - x0).max(y1 - y0)) / 40;
+    };
+    let pad = (x1 - x0).max(y1 - y0) / 40;
     let (vx, vy, vw, vh) = (x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad);
-
     let mut layers: Vec<u16> = polys.iter().map(|p| p.layer).collect();
     layers.sort_unstable();
     layers.dedup();
 
+    let byte = |v: f32| (v * 255.0) as u8;
     let mut svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{vx} {vy} {vw} {vh}" width="800" height="800" style="background:#14141a">"#
     );
-    // flip y: GDS has y-up, SVG has y-down
+    // GDS is y-up, SVG y-down.
     svg.push_str(&format!(r#"<g transform="translate(0,{}) scale(1,-1)">"#, vy * 2 + vh));
-
     for &layer in &layers {
-        let c = layer_color(layer);
-        let r = (c[0] * 255.0) as u8;
-        let g = (c[1] * 255.0) as u8;
-        let b = (c[2] * 255.0) as u8;
-        let a = c[3];
-        let name = layer_names.iter()
-            .find(|(&(l, _), _)| l == layer as i32)
-            .map(|(_, n)| n.as_str())
-            .unwrap_or("");
-        let group_id = if name.is_empty() { format!("L{layer}") } else { name.to_string() };
-        svg.push_str(&format!(r#"<g id="{group_id}" fill="rgba({r},{g},{b},{a})" stroke="rgba({},{},{},1)" stroke-width="{}">"#,
-            ((c[0] * 1.5).min(1.0) * 255.0) as u8,
-            ((c[1] * 1.5).min(1.0) * 255.0) as u8,
-            ((c[2] * 1.5).min(1.0) * 255.0) as u8,
+        let (c, o) = (layer_color(layer), outline_color(layer_color(layer)));
+        svg.push_str(&format!(
+            r#"<g id="{}" fill="rgba({},{},{},{})" stroke="rgba({},{},{},1)" stroke-width="{}">"#,
+            layer_label(layer_names, layer),
+            byte(c[0]),
+            byte(c[1]),
+            byte(c[2]),
+            c[3],
+            byte(o[0]),
+            byte(o[1]),
+            byte(o[2]),
             (vw.max(vh) as f32 * 0.001) as i32,
         ));
         for p in polys.iter().filter(|p| p.layer == layer) {
-            svg.push_str(r#"<polygon points=""#);
-            for (i, &[x, y]) in p.pts.iter().enumerate() {
-                if i > 0 { svg.push(' '); }
-                svg.push_str(&format!("{x},{y}"));
-            }
-            svg.push_str(r#""/>"#);
+            let pts: Vec<String> = p.pts.iter().map(|[x, y]| format!("{x},{y}")).collect();
+            svg.push_str(&format!(r#"<polygon points="{}"/>"#, pts.join(" ")));
         }
         svg.push_str("</g>");
     }
@@ -959,16 +634,12 @@ pub fn export_svg(gds_bytes: &[u8], layer_names: &LayerMap) -> String {
     svg
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  WGSL shader
-// ═══════════════════════════════════════════════════════════════════════
+// ── GPU ──
 
 const SHADER: &str = "
 struct Camera { offset: vec2<f32>, scale: f32, aspect: f32 }
 @group(0) @binding(0) var<uniform> cam: Camera;
-
 struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) color: vec4<f32> }
-
 @vertex fn vs(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>) -> VsOut {
     var out: VsOut;
     let p = (pos + cam.offset) * cam.scale;
@@ -976,26 +647,26 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) color: vec4<f32> 
     out.color = color;
     return out;
 }
-
 @fragment fn fs(in: VsOut) -> @location(0) vec4<f32> { return in.color; }
 ";
 
+/// Screen-space: positions are already NDC.
 const OVERLAY_SHADER: &str = "
 struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) color: vec4<f32> }
-
 @vertex fn vs(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>) -> VsOut {
     var out: VsOut;
     out.pos = vec4<f32>(pos.x, pos.y, 0.0, 1.0);
     out.color = color;
     return out;
 }
-
 @fragment fn fs(in: VsOut) -> @location(0) vec4<f32> { return in.color; }
 ";
 
-// ═══════════════════════════════════════════════════════════════════════
-//  GPU state
-// ═══════════════════════════════════════════════════════════════════════
+/// A vertex buffer and its vertex count.
+struct Mesh {
+    buf: Option<wgpu::Buffer>,
+    n: u32,
+}
 
 struct Gpu {
     device: wgpu::Device,
@@ -1004,17 +675,12 @@ struct Gpu {
     config: wgpu::SurfaceConfiguration,
     fill_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
-    overlay_fill_pipeline: wgpu::RenderPipeline,
-    #[allow(dead_code)]
-    overlay_line_pipeline: wgpu::RenderPipeline,
-    fill_buf: wgpu::Buffer,
-    line_buf: wgpu::Buffer,
-    overlay_buf: wgpu::Buffer,
+    overlay_pipeline: wgpu::RenderPipeline,
     cam_buf: wgpu::Buffer,
     cam_bg: wgpu::BindGroup,
-    n_fill: u32,
-    n_line: u32,
-    n_overlay: u32,
+    fill: Mesh,
+    line: Mesh,
+    overlay: Mesh,
 }
 
 fn make_pipeline(
@@ -1033,10 +699,7 @@ fn make_pipeline(
             buffers: &[wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
-                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 8, shader_location: 1 },
-                ],
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
             }],
             compilation_options: Default::default(),
         },
@@ -1058,82 +721,87 @@ fn make_pipeline(
     })
 }
 
-fn dummy_buf(device: &wgpu::Device) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: None, size: 64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
-}
-
 impl Gpu {
     fn new(win: std::sync::Arc<Window>) -> Self {
         let sz = win.inner_size();
         let inst = wgpu::Instance::default();
         let surface = inst.create_surface(win).unwrap();
         let adapter = pollster::block_on(inst.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface), ..Default::default()
-        })).expect("no GPU adapter found");
-        let (device, queue) = pollster::block_on(
-            adapter.request_device(&wgpu::DeviceDescriptor::default(), None)
-        ).unwrap();
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
+        .expect("no GPU adapter found");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
+                .unwrap();
 
         let caps = surface.get_capabilities(&adapter);
         let fmt = caps.formats[0];
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: fmt, width: sz.width.max(1), height: sz.height.max(1),
+            format: fmt,
+            width: sz.width.max(1),
+            height: sz.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![], desired_maximum_frame_latency: 2,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: None, source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
+        let module = |src: &str| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: wgpu::ShaderSource::Wgsl(src.into()),
+            })
+        };
+        let (shader, overlay_shader) = (module(SHADER), module(OVERLAY_SHADER));
         let cam_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None, size: std::mem::size_of::<CamUni>() as u64,
+            label: None,
+            size: std::mem::size_of::<CamUni>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0, visibility: wgpu::ShaderStages::VERTEX,
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false, min_binding_size: None,
-                }, count: None,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
             }],
         });
         let cam_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None, layout: &bgl,
+            label: None,
+            layout: &bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: cam_buf.as_entire_binding() }],
         });
-        let pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None, bind_group_layouts: &[&bgl], push_constant_ranges: &[],
-        });
-
-        let fill_pipeline = make_pipeline(&device, &shader, &pll, fmt, wgpu::PrimitiveTopology::TriangleList);
-        let line_pipeline = make_pipeline(&device, &shader, &pll, fmt, wgpu::PrimitiveTopology::LineList);
-
-        let overlay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: None, source: wgpu::ShaderSource::Wgsl(OVERLAY_SHADER.into()),
-        });
-        let overlay_pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None, bind_group_layouts: &[], push_constant_ranges: &[],
-        });
-        let overlay_fill_pipeline = make_pipeline(&device, &overlay_shader, &overlay_pll, fmt, wgpu::PrimitiveTopology::TriangleList);
-        let overlay_line_pipeline = make_pipeline(&device, &overlay_shader, &overlay_pll, fmt, wgpu::PrimitiveTopology::LineList);
-
+        let layout = |bgls: &[&wgpu::BindGroupLayout]| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: bgls,
+                push_constant_ranges: &[],
+            })
+        };
+        let (pll, overlay_pll) = (layout(&[&bgl]), layout(&[]));
+        use wgpu::PrimitiveTopology::{LineList, TriangleList};
         Self {
-            fill_buf: dummy_buf(&device), line_buf: dummy_buf(&device),
-            overlay_buf: dummy_buf(&device),
-            device, queue, surface, config,
-            fill_pipeline, line_pipeline,
-            overlay_fill_pipeline, overlay_line_pipeline,
-            cam_buf, cam_bg, n_fill: 0, n_line: 0, n_overlay: 0,
+            fill_pipeline: make_pipeline(&device, &shader, &pll, fmt, TriangleList),
+            line_pipeline: make_pipeline(&device, &shader, &pll, fmt, LineList),
+            overlay_pipeline: make_pipeline(&device, &overlay_shader, &overlay_pll, fmt, TriangleList),
+            device,
+            queue,
+            surface,
+            config,
+            cam_buf,
+            cam_bg,
+            fill: Mesh { buf: None, n: 0 },
+            line: Mesh { buf: None, n: 0 },
+            overlay: Mesh { buf: None, n: 0 },
         }
     }
 
@@ -1145,44 +813,25 @@ impl Gpu {
         }
     }
 
-    fn upload(&mut self, fill: &[Vertex], outline: &[Vertex]) {
-        self.n_fill = fill.len() as u32;
-        self.n_line = outline.len() as u32;
-        if !fill.is_empty() {
-            self.fill_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: None, size: (fill.len() * std::mem::size_of::<Vertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.queue.write_buffer(&self.fill_buf, 0, bytemuck::cast_slice(fill));
+    fn mesh(&self, verts: &[Vertex]) -> Mesh {
+        if verts.is_empty() {
+            return Mesh { buf: None, n: 0 };
         }
-        if !outline.is_empty() {
-            self.line_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: None, size: (outline.len() * std::mem::size_of::<Vertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.queue.write_buffer(&self.line_buf, 0, bytemuck::cast_slice(outline));
-        }
-    }
-
-    fn upload_overlay(&mut self, verts: &[Vertex]) {
-        self.n_overlay = verts.len() as u32;
-        if !verts.is_empty() {
-            self.overlay_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: None, size: (verts.len() * std::mem::size_of::<Vertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.queue.write_buffer(&self.overlay_buf, 0, bytemuck::cast_slice(verts));
-        }
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: std::mem::size_of_val(verts) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&buf, 0, bytemuck::cast_slice(verts));
+        Mesh { buf: Some(buf), n: verts.len() as u32 }
     }
 
     fn draw(&mut self, cam: &CamUni) {
         self.queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(cam));
-        let frame = match self.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(_) => { self.surface.configure(&self.device, &self.config); return; }
+        let Ok(frame) = self.surface.get_current_texture() else {
+            self.surface.configure(&self.device, &self.config);
+            return;
         };
         let view = frame.texture.create_view(&Default::default());
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -1190,7 +839,8 @@ impl Gpu {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view, resolve_target: None,
+                    view: &view,
+                    resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.08, g: 0.08, b: 0.10, a: 1.0 }),
                         store: wgpu::StoreOp::Store,
@@ -1200,23 +850,18 @@ impl Gpu {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if self.n_fill > 0 {
-                rp.set_pipeline(&self.fill_pipeline);
-                rp.set_bind_group(0, &self.cam_bg, &[]);
-                rp.set_vertex_buffer(0, self.fill_buf.slice(..));
-                rp.draw(0..self.n_fill, 0..1);
-            }
-            if self.n_line > 0 {
-                rp.set_pipeline(&self.line_pipeline);
-                rp.set_bind_group(0, &self.cam_bg, &[]);
-                rp.set_vertex_buffer(0, self.line_buf.slice(..));
-                rp.draw(0..self.n_line, 0..1);
-            }
-            // overlay: screen-space legend (no camera transform)
-            if self.n_overlay > 0 {
-                rp.set_pipeline(&self.overlay_fill_pipeline);
-                rp.set_vertex_buffer(0, self.overlay_buf.slice(..));
-                rp.draw(0..self.n_overlay, 0..1);
+            for (mesh, pipeline, world) in [
+                (&self.fill, &self.fill_pipeline, true),
+                (&self.line, &self.line_pipeline, true),
+                (&self.overlay, &self.overlay_pipeline, false),
+            ] {
+                let Some(buf) = &mesh.buf else { continue };
+                rp.set_pipeline(pipeline);
+                if world {
+                    rp.set_bind_group(0, &self.cam_bg, &[]);
+                }
+                rp.set_vertex_buffer(0, buf.slice(..));
+                rp.draw(0..mesh.n, 0..1);
             }
         }
         self.queue.submit([enc.finish()]);
@@ -1224,34 +869,16 @@ impl Gpu {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  Unified App (file-watcher mode OR probe-channel mode)
-// ═══════════════════════════════════════════════════════════════════════
+// ── App: a watched GDS file, or a probe channel ──
 
 enum Source {
-    File {
-        path: PathBuf,
-        mtime: Option<SystemTime>,
-        last_poll: Instant,
-    },
-    Channel {
-        rx: mpsc::Receiver<ProbeMsg>,
-    },
-    Dump {
-        path: PathBuf,
-        mtime: Option<SystemTime>,
-        last_poll: Instant,
-        frames: Vec<DumpFrame>,
-        current: usize,
-        playing: bool,
-        last_advance: Instant,
-    },
+    File { path: PathBuf, mtime: Option<SystemTime>, last_poll: Instant },
+    Channel(mpsc::Receiver<ProbeMsg>),
 }
 
-pub(crate) struct ProbeMsg {
-    pub fill: Vec<Vertex>,
-    pub outline: Vec<Vertex>,
-    pub title: Option<String>,
+struct ProbeMsg {
+    polys: Vec<Poly>,
+    title: Option<String>,
 }
 
 struct App {
@@ -1260,357 +887,173 @@ struct App {
     cam: CamUni,
     cursor: [f64; 2],
     drag: bool,
-    first_fit: bool,
-    frame_count: u32,
+    fit: bool,
     title: String,
     source: Source,
     layer_names: LayerMap,
-    signoff: SignoffData,
+    /// The last geometry shown, re-uploaded once the window exists.
+    shown: (Vec<Poly>, Vec<TextEntry>),
 }
 
 impl App {
-    fn for_file(path: PathBuf, layer_names: LayerMap) -> Self {
-        let title = format!("GDS \u{2014} {}", path.display());
+    fn new(title: String, source: Source, layer_names: LayerMap) -> Self {
         Self {
-            win: None, gpu: None,
+            win: None,
+            gpu: None,
             cam: CamUni { offset: [0.0; 2], scale: 1.0, aspect: 1.0 },
-            cursor: [0.0; 2], drag: false, first_fit: true, frame_count: 0,
-            title, layer_names, signoff: SignoffData::default(),
-            source: Source::File { path, mtime: None, last_poll: Instant::now() },
+            cursor: [0.0; 2],
+            drag: false,
+            fit: true,
+            title,
+            source,
+            layer_names,
+            shown: (Vec::new(), Vec::new()),
         }
     }
 
-    fn for_dump(path: PathBuf, layer_names: LayerMap) -> Self {
-        let title = format!("Dump \u{2014} {}", path.display());
-        Self {
-            win: None, gpu: None,
-            cam: CamUni { offset: [0.0; 2], scale: 1.0, aspect: 1.0 },
-            cursor: [0.0; 2], drag: false, first_fit: true, frame_count: 0,
-            title, layer_names, signoff: SignoffData::default(),
-            source: Source::Dump { path, mtime: None, last_poll: Instant::now(), frames: Vec::new(), current: 0, playing: true, last_advance: Instant::now() },
-        }
-    }
-
-    fn for_probe(title: String, rx: mpsc::Receiver<ProbeMsg>) -> Self {
-        Self {
-            win: None, gpu: None,
-            cam: CamUni { offset: [0.0; 2], scale: 1.0, aspect: 1.0 },
-            cursor: [0.0; 2], drag: false, first_fit: true, frame_count: 0,
-            title, layer_names: LayerMap::new(), signoff: SignoffData::default(),
-            source: Source::Channel { rx },
-        }
-    }
-
-    fn apply_polys(&mut self, polys: &[Poly], texts: &[TextEntry]) {
-        let mut sorted: Vec<&Poly> = polys.iter().collect();
-        sorted.sort_by_key(|p| p.layer);
-        let sorted_polys: Vec<Poly> = sorted.into_iter()
-            .map(|p| Poly { layer: p.layer, pts: p.pts.clone() })
-            .collect();
-
-        if self.first_fit {
-            let mut c = fit_view(&sorted_polys);
-            c.aspect = self.cam.aspect;
-            self.cam = c;
-            self.first_fit = false;
-        }
-
-        let mut fill = triangulate(&sorted_polys);
-        fill.extend(text_vertices(texts, &sorted_polys));
-        fill.extend(drc_marker_vertices(&self.signoff.drc, &sorted_polys));
-        let outline = outline_vertices(&sorted_polys);
-        let mut overlay = build_legend(&sorted_polys, &self.layer_names, self.cam.aspect);
-        overlay.extend(signoff_overlay(&self.signoff));
-        if let Some(gpu) = &mut self.gpu {
-            gpu.upload(&fill, &outline);
-            gpu.upload_overlay(&overlay);
-        }
-    }
-
-    fn apply_msg(&mut self, msg: ProbeMsg) {
-        if let Some(title) = &msg.title {
-            if let Some(win) = &self.win {
-                win.set_title(&format!("{} \u{2014} {title}", self.title));
-            }
-        }
-        if self.first_fit && !msg.fill.is_empty() {
-            let mut cam = CamUni { offset: [0.0; 2], scale: 1.0, aspect: self.cam.aspect };
-            let (mut x0, mut y0) = (f32::MAX, f32::MAX);
-            let (mut x1, mut y1) = (f32::MIN, f32::MIN);
-            for v in &msg.fill {
-                x0 = x0.min(v.pos[0]); y0 = y0.min(v.pos[1]);
-                x1 = x1.max(v.pos[0]); y1 = y1.max(v.pos[1]);
-            }
-            let cx = (x0 + x1) / 2.0;
-            let cy = (y0 + y1) / 2.0;
-            let span = (x1 - x0).max(y1 - y0).max(1.0);
-            cam.offset = [-cx, -cy];
-            cam.scale = 1.8 / span;
-            self.cam = cam;
-            self.first_fit = false;
+    fn show(&mut self, mut polys: Vec<Poly>, texts: Vec<TextEntry>) {
+        polys.sort_by_key(|p| p.layer);
+        if self.fit && !polys.is_empty() {
+            self.cam = fit_view(&polys, self.cam.aspect);
+            self.fit = false;
         }
         if let Some(gpu) = &mut self.gpu {
-            gpu.upload(&msg.fill, &msg.outline);
+            let mut fill = triangulate(&polys);
+            fill.extend(text_vertices(&texts, &polys));
+            gpu.fill = gpu.mesh(&fill);
+            gpu.line = gpu.mesh(&outline_vertices(&polys));
+            gpu.overlay = gpu.mesh(&build_legend(&polys, &self.layer_names));
         }
-    }
-
-    fn load_dump(&mut self) {
-        if let Source::Dump { ref path, ref mut mtime, ref mut last_poll, ref mut frames, ref mut current, ref mut playing, ref mut last_advance } = self.source {
-            let text = match std::fs::read_to_string(path) {
-                Ok(t) => t,
-                Err(e) => { eprintln!("read: {e}"); return; }
-            };
-            *mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-            let first_load = frames.is_empty();
-            *frames = parse_dump(&text);
-            if first_load {
-                *current = 0;
-                *playing = true;
-                *last_advance = Instant::now();
-                *last_poll = Instant::now();
-            } else if *current >= frames.len() {
-                *current = frames.len().saturating_sub(1);
-            }
-            eprintln!("{} frames loaded", frames.len());
-        }
-        self.show_frame();
-    }
-
-    fn show_frame(&mut self) {
-        let info = if let Source::Dump { ref frames, current, .. } = self.source {
-            frames.get(current).map(|f| (f.polys.clone(), f.texts.clone(), current + 1, frames.len(), f.label.clone()))
-        } else { None };
-        if let Some((polys, texts, idx, total, label)) = info {
-            self.apply_polys(&polys, &texts);
-            if let Some(win) = &self.win {
-                win.set_title(&format!("{} \u{2014} [{idx}/{total}] {label}", self.title));
-            }
-        }
+        self.shown = (polys, texts);
     }
 
     fn load_gds(&mut self) {
-        if let Source::File { ref path, ref mut mtime, .. } = self.source {
-            let data = match std::fs::read(path) {
-                Ok(d) => d,
-                Err(e) => { eprintln!("read: {e}"); return; }
-            };
-            *mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-            // load signoff sidecar if present
-            let signoff_path = path.with_extension("").with_file_name("signoff.json");
-            self.signoff = std::fs::read_to_string(&signoff_path)
-                .map(|j| parse_signoff(&j))
-                .unwrap_or_default();
-            if !self.signoff.drc.is_empty() || !self.signoff.lvs_reason.is_empty() {
-                eprintln!("signoff: LVS {} | {} DRC violations | R {:.1}Ω C {:.1}fF",
-                    if self.signoff.lvs_matched { "MATCH" } else { "MISMATCH" },
-                    self.signoff.drc.len(), self.signoff.pex_r_ohm, self.signoff.pex_c_af / 1000.0);
+        let Source::File { path, mtime, .. } = &mut self.source else { return };
+        let data = match std::fs::read(&*path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("read {}: {e}", path.display());
+                return;
             }
-            let (polys, texts) = parse_gds(&data);
-            let mut layers: Vec<u16> = polys.iter().map(|p| p.layer).collect();
-            layers.sort_unstable(); layers.dedup();
-            eprintln!("{} polygons, {} layers, {} labels", polys.len(), layers.len(), texts.len());
-            self.apply_polys(&polys, &texts);
-        }
+        };
+        *mtime = std::fs::metadata(&*path).and_then(|m| m.modified()).ok();
+        let (polys, texts) = parse_gds(&data);
+        self.show(polys, texts);
     }
 
     fn cursor_ndc(&self) -> [f32; 2] {
-        self.win.as_ref().map(|w| {
+        self.win.as_ref().map_or([0.0; 2], |w| {
             let s = w.inner_size();
-            [2.0 * self.cursor[0] as f32 / s.width as f32 - 1.0,
-             -(2.0 * self.cursor[1] as f32 / s.height as f32 - 1.0)]
-        }).unwrap_or([0.0; 2])
+            [
+                2.0 * self.cursor[0] as f32 / s.width as f32 - 1.0,
+                -(2.0 * self.cursor[1] as f32 / s.height as f32 - 1.0),
+            ]
+        })
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.win.is_some() { return; }
-        let w = std::sync::Arc::new(el.create_window(
-            Window::default_attributes()
-                .with_title(&self.title)
-                .with_inner_size(LogicalSize::new(1280u32, 720u32)),
-        ).unwrap());
+        if self.win.is_some() {
+            return;
+        }
+        let attrs = Window::default_attributes()
+            .with_title(&self.title)
+            .with_inner_size(LogicalSize::new(1280u32, 720u32));
+        let w = std::sync::Arc::new(el.create_window(attrs).unwrap());
         let s = w.inner_size();
         self.cam.aspect = s.width as f32 / s.height.max(1) as f32;
         self.gpu = Some(Gpu::new(w.clone()));
         self.win = Some(w);
         if matches!(self.source, Source::File { .. }) {
             self.load_gds();
-        }
-        if matches!(self.source, Source::Dump { .. }) {
-            self.load_dump();
+        } else {
+            let (polys, texts) = std::mem::take(&mut self.shown);
+            self.show(polys, texts);
         }
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, ev: WindowEvent) {
         match ev {
             WindowEvent::CloseRequested => el.exit(),
-
             WindowEvent::Resized(s) => {
                 self.cam.aspect = s.width as f32 / s.height.max(1) as f32;
-                if let Some(g) = &mut self.gpu { g.resize(s.width, s.height); }
+                if let Some(g) = &mut self.gpu {
+                    g.resize(s.width, s.height);
+                }
             }
-
             WindowEvent::RedrawRequested => {
                 if let Some(g) = &mut self.gpu {
                     g.draw(&self.cam);
-                    self.frame_count = self.frame_count.saturating_add(1);
-                    // ponytail: second RedrawRequested = compositor's frame callback,
-                    // meaning the first frame was actually displayed on screen
-                    if self.frame_count == 60 {
-                        if let Source::Dump { ref mut last_advance, .. } = self.source {
-                            *last_advance = Instant::now();
-                        }
-                    }
                 }
             }
-
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 self.drag = state == ElementState::Pressed;
             }
-
             WindowEvent::CursorMoved { position, .. } => {
                 let (dx, dy) = (position.x - self.cursor[0], position.y - self.cursor[1]);
                 self.cursor = [position.x, position.y];
-                if self.drag {
-                    if let Some(w) = &self.win {
-                        let s = w.inner_size();
-                        self.cam.offset[0] +=
-                            (2.0 * dx as f32 / s.width as f32) * self.cam.aspect / self.cam.scale;
-                        self.cam.offset[1] -=
-                            (2.0 * dy as f32 / s.height as f32) / self.cam.scale;
-                    }
+                if let (true, Some(w)) = (self.drag, &self.win) {
+                    let s = w.inner_size();
+                    self.cam.offset[0] +=
+                        (2.0 * dx as f32 / s.width as f32) * self.cam.aspect / self.cam.scale;
+                    self.cam.offset[1] -= (2.0 * dy as f32 / s.height as f32) / self.cam.scale;
                 }
             }
-
             WindowEvent::MouseWheel { delta, .. } => {
                 let d = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 100.0,
                 };
-                let factor = if d > 0.0 { 1.1 } else { 1.0 / 1.1 };
+                // Zoom about the cursor.
                 let ndc = self.cursor_ndc();
                 let inv_old = 1.0 / self.cam.scale;
-                self.cam.scale *= factor;
+                self.cam.scale *= if d > 0.0 { 1.1 } else { 1.0 / 1.1 };
                 let diff = 1.0 / self.cam.scale - inv_old;
                 self.cam.offset[0] += ndc[0] * self.cam.aspect * diff;
                 self.cam.offset[1] += ndc[1] * diff;
             }
-
             WindowEvent::KeyboardInput { event: ev, .. } if ev.state == ElementState::Pressed => {
                 let step = 0.1 / self.cam.scale;
                 match ev.logical_key {
                     Key::Named(NamedKey::Escape) => el.exit(),
+                    Key::Named(NamedKey::ArrowUp) => self.cam.offset[1] += step,
+                    Key::Named(NamedKey::ArrowDown) => self.cam.offset[1] -= step,
+                    Key::Named(NamedKey::ArrowLeft) => self.cam.offset[0] -= step,
+                    Key::Named(NamedKey::ArrowRight) => self.cam.offset[0] += step,
                     Key::Character(ref c) => match c.as_str() {
                         "r" => {
-                            self.first_fit = true;
+                            self.fit = true;
                             self.load_gds();
-                            self.load_dump();
                         }
                         "=" | "+" => self.cam.scale *= 1.2,
                         "-" => self.cam.scale /= 1.2,
-                        "[" => {
-                            if let Source::Dump { ref mut current, ref mut playing, .. } = self.source {
-                                *playing = false;
-                                if *current > 0 { *current -= 1; }
-                            }
-                            self.first_fit = true;
-                            self.show_frame();
-                        }
-                        "]" => {
-                            if let Source::Dump { ref mut current, ref frames, ref mut playing, .. } = self.source {
-                                *playing = false;
-                                if *current + 1 < frames.len() { *current += 1; }
-                            }
-                            self.first_fit = true;
-                            self.show_frame();
-                        }
-                        " " => {
-                            if let Source::Dump { ref mut playing, ref mut last_advance, ref mut current, ref frames, .. } = self.source {
-                                *playing = !*playing;
-                                if *playing {
-                                    *last_advance = Instant::now();
-                                    if *current + 1 >= frames.len() { *current = 0; }
-                                }
-                            }
-                        }
                         _ => {}
                     },
-                    Key::Named(NamedKey::ArrowUp) => self.cam.offset[1] += step,
-                    Key::Named(NamedKey::ArrowDown) => self.cam.offset[1] -= step,
-                    Key::Named(NamedKey::ArrowLeft) => {
-                        if let Source::Dump { ref mut current, ref mut playing, .. } = self.source {
-                            *playing = false;
-                            if *current > 0 { *current -= 1; }
-                            self.first_fit = true;
-                            self.show_frame();
-                        } else {
-                            self.cam.offset[0] -= step;
-                        }
-                    }
-                    Key::Named(NamedKey::ArrowRight) => {
-                        if let Source::Dump { ref mut current, ref frames, ref mut playing, .. } = self.source {
-                            *playing = false;
-                            if *current + 1 < frames.len() { *current += 1; }
-                            self.first_fit = true;
-                            self.show_frame();
-                        } else {
-                            self.cam.offset[0] += step;
-                        }
-                    }
                     _ => {}
                 }
             }
-
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, _el: &ActiveEventLoop) {
         match &mut self.source {
-            Source::File { ref path, ref mut mtime, ref mut last_poll } => {
+            Source::File { path, mtime, last_poll } => {
                 if last_poll.elapsed() >= Duration::from_millis(500) {
                     *last_poll = Instant::now();
-                    let mt = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+                    let mt = std::fs::metadata(&*path).and_then(|m| m.modified()).ok();
                     if mt.is_some() && mt != *mtime {
                         self.load_gds();
                     }
                 }
             }
-            Source::Dump { ref path, ref mut mtime, ref mut last_poll, ref mut current, ref frames, ref mut playing, ref mut last_advance } => {
-                if last_poll.elapsed() >= Duration::from_millis(500) {
-                    *last_poll = Instant::now();
-                    let mt = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-                    if mt.is_some() && mt != *mtime {
-                        drop((current, frames, playing, last_advance));
-                        self.load_dump();
-                        return; // re-enter on next tick
+            Source::Channel(rx) => {
+                if let Some(msg) = rx.try_iter().last() {
+                    if let (Some(t), Some(win)) = (&msg.title, &self.win) {
+                        win.set_title(&format!("{} \u{2014} {t}", self.title));
                     }
-                }
-                if *playing && self.frame_count >= 60 && last_advance.elapsed() >= Duration::from_millis(75) {
-                    *last_advance = Instant::now();
-                    if *current + 1 < frames.len() {
-                        *current += 1;
-                        drop((current, frames, playing, last_advance));
-                        self.first_fit = true;
-                        self.show_frame();
-                        return;
-                    } else {
-                        *playing = false;
-                    }
-                }
-            }
-            Source::Channel { rx } => {
-                let mut latest = None;
-                loop {
-                    match rx.try_recv() {
-                        Ok(msg) => latest = Some(msg),
-                        Err(mpsc::TryRecvError::Empty) => break,
-                        Err(mpsc::TryRecvError::Disconnected) => break,
-                    }
-                }
-                if let Some(msg) = latest {
-                    self.apply_msg(msg);
+                    self.show(msg.polys, Vec::new());
                 }
             }
         }
@@ -1620,29 +1063,21 @@ impl ApplicationHandler for App {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  Public: standalone viewer
-// ═══════════════════════════════════════════════════════════════════════
-
+/// Open a window on a GDS file, reloading it whenever it changes on disk.
 pub fn run_viewer(path: PathBuf, layer_names: LayerMap) {
     let el = EventLoop::new().unwrap_or_else(|e| {
         eprintln!("cannot create window (no display server?): {e}");
         std::process::exit(1);
     });
-    let is_dump = path.extension().map_or(false, |e| e == "txt" || e == "dump");
-    let mut app = if is_dump { App::for_dump(path, layer_names) } else { App::for_file(path, layer_names) };
-    el.run_app(&mut app).unwrap();
+    let title = format!("GDS \u{2014} {}", path.display());
+    let source = Source::File { path, mtime: None, last_poll: Instant::now() };
+    el.run_app(&mut App::new(title, source, layer_names)).unwrap();
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  Event loop helpers
-// ═══════════════════════════════════════════════════════════════════════
-
-/// Build an event loop that works on any thread (needed for the probe's spawned thread).
+/// An event loop that runs off the main thread (the probe's window thread).
 #[cfg(target_os = "linux")]
 fn make_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
     let mut builder = EventLoop::builder();
-    // Set any_thread on both backends — only the active one takes effect.
     winit::platform::x11::EventLoopBuilderExtX11::with_any_thread(&mut builder, true);
     winit::platform::wayland::EventLoopBuilderExtWayland::with_any_thread(&mut builder, true);
     builder.build()
@@ -1653,76 +1088,47 @@ fn make_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
     EventLoop::new()
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  Public: in-process probe
-// ═══════════════════════════════════════════════════════════════════════
-
-/// Live probe window — spawns a GPU window on a background thread.
-/// Accepts geometry snapshots from the P&R iteration loop.
-/// Stays open after the sender is dropped so you can inspect the final state.
+/// A window on a background thread showing the latest polygons sent to it.
+/// Stays open after the sender is dropped; a no-op without a display.
 pub struct Probe {
     tx: Option<mpsc::Sender<ProbeMsg>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Probe {
+    #[must_use]
     pub fn open(title: &str) -> Self {
         let (tx, rx) = mpsc::channel();
         let title = title.to_string();
         let handle = std::thread::spawn(move || {
             let el = match make_event_loop() {
                 Ok(el) => el,
-                Err(e) => { eprintln!("probe: no display: {e}"); return; }
+                Err(e) => {
+                    eprintln!("probe: no display: {e}");
+                    return;
+                }
             };
-            el.run_app(&mut App::for_probe(title, rx)).unwrap();
+            el.run_app(&mut App::new(title, Source::Channel(rx), LayerMap::new())).unwrap();
         });
         Probe { tx: Some(tx), handle: Some(handle) }
     }
 
-    /// Block until the user closes the probe window.
-    /// Drops the sender (no more updates), then joins the window thread.
+    /// Stop sending and block until the user closes the window.
     pub fn wait(&mut self) {
-        self.tx.take(); // drop sender — window stays open, no more updates
+        self.tx.take();
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
     }
 
-    /// Send pre-built polygon list.
     pub fn send(&self, polys: &[Poly], title: Option<&str>) {
-        let mut sorted: Vec<&Poly> = polys.iter().collect();
-        sorted.sort_by_key(|p| p.layer);
-        let sorted_owned: Vec<Poly> = sorted.into_iter()
-            .map(|p| Poly { layer: p.layer, pts: p.pts.clone() })
-            .collect();
-        let fill = triangulate(&sorted_owned);
-        let outline = outline_vertices(&sorted_owned);
-        if let Some(ref tx) = self.tx {
-            let _ = tx.send(ProbeMsg { fill, outline, title: title.map(String::from) });
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(ProbeMsg { polys: polys.to_vec(), title: title.map(String::from) });
         }
-    }
-
-    /// Send raw pre-triangulated vertices (skip retriangulation).
-    pub fn send_raw(&self, fill: Vec<Vertex>, outline: Vec<Vertex>, title: Option<&str>) {
-        if let Some(ref tx) = self.tx {
-            let _ = tx.send(ProbeMsg { fill, outline, title: title.map(String::from) });
-        }
-    }
-
-    /// Send a GeometryStore snapshot directly (via its accessor API).
-    #[cfg(feature = "probe")]
-    pub fn send_store(&self, store: &gdsverify_geom::GeometryStore, title: Option<&str>) {
-        self.send(&store_to_polys(store), title);
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  pnr_core interop — display a placed macro's geometry directly
-// ═══════════════════════════════════════════════════════════════════════
-
-/// Turn `pnr_core` shapes (layer + rect) into the viewer's [`Poly`] list. Each
-/// rect becomes a 4-point CCW polygon; the `LayerId` maps straight to the GDS
-/// layer number the palette/legend already key on.
+/// `pnr_core` shapes as 4-point polygons, layer id unchanged.
 #[must_use]
 pub fn polys_from_shapes(shapes: &[pnr_core::Shape]) -> Vec<Poly> {
     shapes
@@ -1737,36 +1143,29 @@ pub fn polys_from_shapes(shapes: &[pnr_core::Shape]) -> Vec<Poly> {
         .collect()
 }
 
-/// Open a window showing a macro's geometry and block until the user closes it.
-/// The one call `macroMaster` needs to eyeball a generated/injected macro.
+/// Show a macro's geometry and block until the window closes.
 pub fn show_macro(mac: &pnr_core::Macro, title: &str) {
-    let polys = polys_from_shapes(&mac.shapes);
     let mut probe = Probe::open(title);
-    probe.send(&polys, Some(title));
+    probe.send(&polys_from_shapes(&mac.shapes), Some(title));
     probe.wait();
 }
 
-#[cfg(all(test, feature = "probe"))]
-mod probe_tests {
+#[cfg(test)]
+mod tests {
     use super::*;
-    use gdsverify_geom::{GeometryStoreBuilder, LayerId};
-    use gdsverify_geom::Dbu;
 
     #[test]
-    fn store_to_polys_roundtrip() {
-        let d = |v: i64| Dbu::new(v).unwrap();
-        let mut b = GeometryStoreBuilder::with_capacity(2, 7);
-        // Triangle on layer 1, pushed first so the layer sort must reorder.
-        b.push(LayerId(1), &[d(0), d(10), d(0)], &[d(0), d(0), d(10)]);
-        // Square on layer 0.
-        b.push(LayerId(0), &[d(1), d(5), d(5), d(1)], &[d(2), d(2), d(6), d(6)]);
-        let (store, _) = b.finish(2);
+    fn layer_names_and_bounds() {
+        let names = parse_layer_names(r#"{"layers": {"met1": [68, 20], "via": [68, 44]}}"#);
+        assert_eq!(names[&(68, 20)], "met1");
+        assert_eq!(layer_label(&names, 7), "L7");
+        let p = |pts: Vec<[i32; 2]>| Poly { layer: 0, pts };
+        assert_eq!(bounds(&[]), None);
+        assert_eq!(bounds(&[p(vec![[1, 5], [3, -2]]), p(vec![[0, 0]])]), Some((0, -2, 3, 5)));
+    }
 
-        let polys = store_to_polys(&store);
-        assert_eq!(polys.len(), 2);
-        assert_eq!(polys[0].layer, 0);
-        assert_eq!(polys[0].pts, vec![[1, 2], [5, 2], [5, 6], [1, 6]]);
-        assert_eq!(polys[1].layer, 1);
-        assert_eq!(polys[1].pts, vec![[0, 0], [10, 0], [0, 10]]);
+    #[test]
+    fn empty_gds_is_an_empty_svg() {
+        assert_eq!(export_svg(&[], &LayerMap::new()), r#"<svg xmlns="http://www.w3.org/2000/svg"/>"#);
     }
 }

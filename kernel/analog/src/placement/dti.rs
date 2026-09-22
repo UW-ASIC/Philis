@@ -1,131 +1,44 @@
 //! Deep-trench isolation banding (placement tier).
-//!
-//! Ported from `backend/constraints/src/placement_level/dti.rs`.
-//!
-//! ## What the annotator owes this rule (and now pays — `annotator::emit`)
-//!
-//! [`DtiBand::branch`] is an index into [`Layout::branch`]. The producer is
-//! `annotator::emit::placement`, which emits one `DtiBand` per recognised pair and
-//! honours the three-point contract below; `dp`'s `try_branch` is the mover that
-//! flips the commitment. The contract stays here because it binds every future
-//! producer, not just the first one:
-//!
-//! 1. **Allocate one [`BranchId`] per emitted pair**, densely from `0`, and size
-//!    `Layout::branch` to that count (`gp` writes the table — see
-//!    `gp::mechanics`'s "a valid starting commitment per `DtiBand`"). Two pairs must never
-//!    share an id: the commitment is per pair, and sharing would couple two independent
-//!    disjunctions into one flip.
-//! 2. **Seed the commitment from the recognised structure, not from geometry.** `false`
-//!    (share) for pairs the recogniser says belong in one trench — same well, same
-//!    matched group, diffusion-shareable. `true` (isolate) for a noisy/sensitive pair or
-//!    an injector on a `<1 kΩ` path from a pad, which is forced into a private ring. A
-//!    seed taken from the *current* gap would just re-derive the accident the branch
-//!    exists to eliminate (PLAN §4b), since coarse placement has not run yet.
-//! 3. **Keep the id stable across epochs.** `Requirements` order is already a contract
-//!    for `gp::Prices`; `BranchId` is the same kind of contract for the search state, and
-//!    a renumbering between epochs silently transfers one pair's commitment to another.
-//!
-//! Injector-exclusion and the implant-merge/LVS guard are the same disjunctive shape and
-//! want the same treatment; `DtiBand` is the one that exists today.
 
 use pnr_core::ids::{BranchId, Target};
 use pnr_core::layout::Layout;
 use crate::rule::Rule;
 
-/// **Deep-trench isolation.** Two devices may either **abut** (gap `< s_max`,
-/// sharing one trench) or be **fully separated** (gap `> d_dti`); the band between
-/// is forbidden, because a partial trench neither isolates nor shares cleanly.
-/// This makes DTI a discrete two-state distance rule, not a monotone spacing.
+/// Two devices either abut (gap `< s_max`, one shared trench) or fully
+/// separate (gap `> d_dti`); the band between is illegal.
 ///
-/// - **Enforcement:** [`crate::Mode::Hard`] (legality, priority 75).
-/// - **Arity:** Device↔Device.
-/// - **Books:** AOAL ch02/2.5.1 (#45); ALS 3.1/3.1.2 (#6); PNR_ANALOG 04/4.A (#65).
+/// The feasible set is two disconnected intervals, so a penalty cannot pick a
+/// side. `branch` indexes [`Layout::branch`], the committed side (`false` =
+/// share, `true` = isolate) that `dp` flips as a discrete move; `cost` pulls
+/// toward the committed side only.
+///
+/// Producer contract (`annotator::emit`): one dense [`BranchId`] per pair, seed
+/// from recognised structure (not current geometry), ids stable across epochs.
 #[derive(Clone, Copy)]
 pub struct DtiBand {
     pub a: Target,
     pub b: Target,
-    /// Max gap to count as abutting (share one trench), `nm`.
+    /// Max gap that counts as abutting, nm.
     pub s_max_nm: i32,
-    /// Min gap to count as fully separated, `nm`.
+    /// Min gap that counts as separated, nm.
     pub d_dti_nm: i32,
-    /// Which side of the disjunction this pair is **currently committed to** — an index
-    /// into [`Layout::branch`], where `false` = share and `true` = isolate.
-    ///
-    /// This is PLAN §4b's `b ∈ {share, isolate}` search variable, and it is the whole
-    /// reason the rule can be enforced at all. The feasible set is
-    /// `{d ≤ s_max} ∪ {d ≥ d_dti}` — two disconnected components with an illegal
-    /// interval between. A penalty on band penetration (which is exactly what `cost`
-    /// below computes) is **maximal in the middle of the illegal gap** and descends away
-    /// from it in *both* directions, so it tells the optimiser to leave the band but
-    /// never which way. Which component a pair ends up in becomes an accident of the
-    /// initial placement rather than a decision.
-    ///
-    /// With the branch explicit, each component is an ordinary convex interval the
-    /// optimiser can satisfy cleanly, and the choice between them becomes a discrete
-    /// move `dp` can flip and price. Same shape for injector-exclusion (a device on a
-    /// <1 kΩ path from a pad forced into a private ring) and for the implant-merge/LVS
-    /// guard — all three are "either share by design, or keep the keepout", and none is
-    /// expressible as a penalty.
-    ///
-    /// It lives in `Layout` rather than in the rule because a rule is `Copy` and scored
-    /// immutably, while the search must be able to *change* the commitment — and
-    /// `Layout` is the search state. The rule holds an index rather than the bool
-    /// because `RuleBatch` is type-erased: `dp` cannot reach inside a batch to find a
-    /// branch, but it can flip `layout.branch[i]` and re-score.
     pub branch: BranchId,
-    /// The recognised-structure **starting commitment** for [`branch`](DtiBand::branch):
-    /// `true` = isolate. Carried on the rule (not in `Layout`) because the annotator
-    /// runs once per run while `gp` hands `dp` a fresh all-`false` table every epoch —
-    /// the seed has to survive on the one object that does, so the mover can re-write
-    /// it at entry. Seeded from what the pair *is* (matched → share, noisy reference →
-    /// isolate), never from the current gap, which would re-derive the accident the
-    /// branch exists to eliminate.
+    /// Starting commitment (`true` = isolate); `dp` re-seeds `Layout::branch`
+    /// from it each epoch.
     pub seed_isolate: bool,
 }
 
 impl DtiBand {
-    /// Which component this pair is committed to: `true` = isolate, `false` = share.
-    ///
-    /// An out-of-range [`BranchId`] reads as `share`, matching `Layout::branch`'s
-    /// documented "an all-`false` table is a valid starting commitment". That is not
-    /// defensive padding — a caller scoring against a `Layout` whose table was never
-    /// sized (a hand-built test bench, a stage upstream of `dp`'s seeding) reads the
-    /// `share` branch and `cost` is the abut-or-nothing pull. A panic here would make
-    /// the not-yet-seeded state a crash instead of a conservative default.
+    /// Committed side; an unsized `Layout::branch` reads as share.
     #[inline]
     fn isolating(self, l: &Layout) -> bool {
         l.branch.get(self.branch.0 as usize).copied().unwrap_or(false)
-    }
-
-    /// Width of the forbidden interval, `nm` — this rule's budget.
-    ///
-    /// The natural denominator for [`Rule::residual`]: a pair sitting inside the band is
-    /// at most one band-width from the branch it is committed to, so the residual lands in
-    /// `(0, 1]` and is directly comparable with every other rule's "fraction of my own
-    /// spec". Normalising by `s_max` or `d_dti` instead would make a process with a wide
-    /// isolation rule look worse at identical geometry.
-    #[inline]
-    fn band_nm(self) -> f32 {
-        (self.d_dti_nm - self.s_max_nm) as f32
     }
 }
 
 impl Rule for DtiBand {
     type On = Layout;
-    /// Distance from the **committed** branch's feasible interval, `nm`.
-    ///
-    /// One branch, not the band. `false` (share) pulls the pair together toward
-    /// `gap ≤ s_max`; `true` (isolate) pushes it apart toward `gap ≥ d_dti`. Each is an
-    /// ordinary convex interval, so the gradient has exactly one direction to point and
-    /// the optimiser can close it.
-    ///
-    /// What this replaces is worth keeping in view, because it is PLAN §4b's failure in
-    /// one expression: the old branch-free metric
-    /// `(gap − s_max).min(d_dti − gap).max(0)` **peaks dead centre in the forbidden
-    /// interval** and descends away from it in *both* directions. It tells the optimiser
-    /// to leave the band but never which side to leave by, so which component a pair ends
-    /// up in is an accident of where it happened to start — and a pair can also be pushed
-    /// out the "wrong" side, undoing a trench the router was counting on.
+    /// Distance, nm, to the committed side's interval.
     fn cost(self, l: &Layout) -> f32 {
         let gap = l.edge_gap(self.a, self.b);
         if self.isolating(l) {
@@ -134,47 +47,24 @@ impl Rule for DtiBand {
             (gap - self.s_max_nm as f32).max(0.0)
         }
     }
-    /// Gap is `< s_max` or `> d_dti` — never in the forbidden band.
-    ///
-    /// The **full disjunction**, deliberately, even though `cost` above is branch-aware.
-    /// Legality is "in one of the two components", full stop; which one the search is
-    /// currently committed to is a search detail, and a pair that has drifted into the
-    /// *other* component is legal — not violating.
-    ///
-    /// Making this branch-aware is the trap. A branch flip and the geometry that realises
-    /// it cannot be simultaneous: `dp` flips `layout.branch[i]`, then moves devices. In
-    /// the interval between, a branch-aware `satisfied` reports a violation for a layout
-    /// that is perfectly legal, `analog_phi` sees Φ rise, and Φ-monotone acceptance
-    /// rejects the very move that was resolving the flip. The disjunction is also the
-    /// honest statement of the physics: the trench either exists or it does not, and the
-    /// commitment is bookkeeping about which one the search intends.
+    /// The full disjunction, **not** branch-aware: a pair in the uncommitted
+    /// component is legal. A branch-aware check would flag the legal layout
+    /// between a flip and the move realising it, and Φ-monotone acceptance in
+    /// `dp` would reject exactly that move.
     fn satisfied(self, l: &Layout) -> bool {
         let gap = l.edge_gap(self.a, self.b);
         gap < self.s_max_nm as f32 || gap > self.d_dti_nm as f32
     }
-
-    /// How far into the forbidden band the pair sits, as a fraction of the band width.
-    ///
-    /// `0.0` whenever [`satisfied`](Rule::satisfied) holds — the disjunction, not the
-    /// branch, so a pair that legally drifted to the other component reports nothing. Only
-    /// *inside* the band does the commitment matter, and there the residual is the distance
-    /// left to travel on the committed branch. That keeps Φ (which sums hard residuals)
-    /// consistent with `cost`: both point the same way, and both go to zero together.
+    /// `0` when satisfied; else `cost` over the band width.
     fn residual(self, l: &Layout) -> f32 {
         if self.satisfied(l) {
             return 0.0;
         }
-        crate::rule::over(self.cost(l), self.band_nm())
+        crate::rule::over(self.cost(l), (self.d_dti_nm - self.s_max_nm) as f32)
     }
-
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
     }
-
-    /// `(id, seed)` — seed is the recognised-structure starting commitment,
-    /// `true` = isolate. This is what lets `dp` learn which branch bits exist at
-    /// all: the batch seam is type-erased, so without this override a flip move
-    /// would be a guess at an index that prices nothing.
     fn branch(self) -> Option<(BranchId, bool)> {
         Some((self.branch, self.seed_isolate))
     }
