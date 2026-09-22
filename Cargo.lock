@@ -189,6 +189,7 @@ name = "benchmark"
 version = "0.1.0"
 dependencies = [
  "annotator",
+ "gpurify",
  "library",
  "pnr_core",
  "serde_json",
