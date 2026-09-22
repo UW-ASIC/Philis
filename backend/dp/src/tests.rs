@@ -2,7 +2,6 @@ use super::*;
 use analog::placement::symmetry::{Symmetry, SymmetryGroup};
 use analog::placement::DtiBand;
 use analog::Rule;
-use gp::mechanics::total_overlap;
 use gp::VariantSpace;
 use pnr_core::geom::Rect;
 use pnr_core::ids::{AxisId, Target};
@@ -239,7 +238,7 @@ fn phi_rejects_a_cost_lowering_move_that_stacks_geometry() {
     assert!(dpex(&sa, &mut l, 4_000) < 0.0);
     assert!(!try_move(&mut sa, &mut l, &mut rng, 1e12, 0, 4_000, 0));
     assert_eq!(l.x[0], 0);
-    assert_eq!(total_overlap(&l), 0.0);
+    assert_eq!(encroachment(&l, 0), 0.0);
 }
 
 #[test]
@@ -367,6 +366,27 @@ fn a_stacked_symmetric_pair_separates_and_stays_mirrored() {
     assert_eq!(encroachment(&l, CLEARANCE_NM), 0.0, "x = {:?}, y = {:?}", l.x, l.y);
 }
 
+/// A diff stage: input pair and load pair mirrored about ONE shared axis, plus
+/// a self-symmetric tail cell, all starting piled on top of each other.
+#[test]
+fn two_pairs_and_a_tail_share_one_axis_legally() {
+    let sym = |a: u16, b: u16| Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0) };
+    let group = || SymmetryGroup(vec![sym(0, 1), sym(2, 3), sym(4, 4)]);
+    let reqs = Requirements { hard: vec![Box::new(group())], budget: Vec::new(), cost: vec![Box::new(group())] };
+    for seed in 0..4 {
+        let coarse = layout(&[
+            (0, 0, 3_000, 2_000),
+            (100, 50, 3_000, 2_000),
+            (0, 0, 4_000, 1_500),
+            (-50, 20, 4_000, 1_500),
+            (30, 30, 2_500, 2_500),
+        ]);
+        let l = run(&coarse, &[], &[], &reqs, &[false; 5], seed);
+        assert_eq!(analog_violations(&reqs, &l), 0, "seed {seed}: x = {:?}, y = {:?}", l.x, l.y);
+        assert_eq!(encroachment(&l, CLEARANCE_NM), 0.0, "seed {seed}: x = {:?}, y = {:?}", l.x, l.y);
+    }
+}
+
 #[test]
 fn projection_is_deterministic_for_a_seed() {
     let go = || {
@@ -375,4 +395,28 @@ fn projection_is_deterministic_for_a_seed() {
         (l.x, l.y, l.axis)
     };
     assert_eq!(go(), go());
+}
+
+/// `encroach_moved`'s before/after difference must equal the full scan's for
+/// every one- and two-cell move, or the gate compares the wrong numbers.
+#[test]
+fn incident_encroachment_difference_matches_full_scan() {
+    let cells = [(0, 0, 100, 100), (150, 0, 100, 100), (60, 60, 100, 100), (900, 900, 50, 50), (120, 30, 80, 40)];
+    let reqs = Requirements::default();
+    let prices = gp::Prices::new();
+    for c in 0..cells.len() {
+        for o in 0..cells.len() {
+            let mut sa = Sa::new(Nets::from_macros(&[]), cells.len(), &reqs, &prices, &[], 300);
+            sa.moved = if c == o { vec![c] } else { vec![c, o] };
+            let mut l = layout(&cells);
+            let (full0, inc0) = (encroachment(&l, 300), sa.encroach_moved(&l));
+            for &m in &sa.moved {
+                l.x[m] += 37;
+                l.y[m] -= 11;
+            }
+            let full = encroachment(&l, 300) - full0;
+            let inc = sa.encroach_moved(&l) - inc0;
+            assert!((full - inc).abs() < 1e-6, "moved {:?}: {full} vs {inc}", sa.moved);
+        }
+    }
 }

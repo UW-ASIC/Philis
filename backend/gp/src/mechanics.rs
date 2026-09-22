@@ -122,17 +122,10 @@ impl Nets {
         &self.items[self.span(i)]
     }
 
-    /// Flat item indices of net `i`, for [`Nets::pin`] / [`Nets::dev`].
+    /// Flat item indices of net `i`, for [`Nets::pin`].
     #[inline]
-    #[must_use]
-    pub fn span(&self, i: usize) -> std::ops::Range<usize> {
+    fn span(&self, i: usize) -> std::ops::Range<usize> {
         self.start[i] as usize..self.start[i + 1] as usize
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn dev(&self, k: usize) -> usize {
-        self.items[k] as usize
     }
 
     /// Absolute pin position of item `k`: centre + offset turned by `orient`
@@ -205,12 +198,13 @@ pub fn hpwl(nets: &Nets, l: &Layout) -> f64 {
     total
 }
 
-/// Overlap area of devices `a` and `b`, nm².
+/// Clearance-inflated overlap of `a` and `b`, nm²: nonzero iff their edge gap
+/// is under `clearance` on both axes (`clearance = 0` is plain overlap).
 #[inline]
 #[must_use]
-pub fn overlap_area(l: &Layout, a: usize, b: usize) -> f64 {
-    let ox = (l.hw[a] + l.hw[b]) - (l.x[a] - l.x[b]).abs();
-    let oy = (l.hh[a] + l.hh[b]) - (l.y[a] - l.y[b]).abs();
+pub fn encroach(l: &Layout, a: usize, b: usize, clearance: i32) -> f64 {
+    let ox = (l.hw[a] + l.hw[b] + clearance) - (l.x[a] - l.x[b]).abs();
+    let oy = (l.hh[a] + l.hh[b] + clearance) - (l.y[a] - l.y[b]).abs();
     if ox > 0 && oy > 0 {
         f64::from(ox) * f64::from(oy)
     } else {
@@ -218,37 +212,11 @@ pub fn overlap_area(l: &Layout, a: usize, b: usize) -> f64 {
     }
 }
 
-/// Total pairwise overlap, nm².
+/// [`encroach`] summed over all pairs.
 #[must_use]
-pub fn total_overlap(l: &Layout) -> f64 {
+pub fn encroachment(l: &Layout, clearance: i32) -> f64 {
     let n = l.x.len();
-    (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).map(|(a, b)| overlap_area(l, a, b)).sum()
-}
-
-/// Overlap of every pair with a member in `cells` (small, duplicate-free),
-/// each pair once: the part of [`total_overlap`] a move of `cells` can change.
-#[must_use]
-pub fn overlap_incident(l: &Layout, cells: &[usize]) -> f64 {
-    let mut t = 0.0;
-    for (i, &c) in cells.iter().enumerate() {
-        for b in 0..l.x.len() {
-            if b != c && !cells[..i].contains(&b) {
-                t += overlap_area(l, c, b);
-            }
-        }
-    }
-    t
-}
-
-/// Total overlap / total device area.
-#[must_use]
-pub fn overlap_density(l: &Layout) -> f64 {
-    let area: f64 = (0..l.x.len()).map(|i| 4.0 * f64::from(l.hw[i]) * f64::from(l.hh[i])).sum();
-    if area <= 0.0 {
-        0.0
-    } else {
-        total_overlap(l) / area
-    }
+    (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).map(|(a, b)| encroach(l, a, b, clearance)).sum()
 }
 
 /// PEX-tier objective: `Σ criticality·cost` over `reqs.cost` plus the priced
@@ -318,7 +286,7 @@ pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Pri
                 .then(|| Violation::from_residual(format!("analog budget batch {bi}"), residual))
         })
         .collect();
-    let ov = total_overlap(l);
+    let ov = encroachment(l, 0);
     if ov > 0.5 {
         hard_violations.push(Violation { rule: "device overlap".into(), margin: ov as i64 });
     }
@@ -408,55 +376,4 @@ pub fn clamp_to_die(c: i32, half: i32, side: i32) -> i32 {
 pub fn snap(v: i32, grid: i32) -> i32 {
     let g = grid.max(1);
     ((v as f32 / g as f32).round() as i32) * g
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn layout(cells: &[(i32, i32, i32, i32)]) -> Layout {
-        let n = cells.len();
-        Layout {
-            x: cells.iter().map(|c| c.0).collect(),
-            y: cells.iter().map(|c| c.1).collect(),
-            hw: cells.iter().map(|c| c.2).collect(),
-            hh: cells.iter().map(|c| c.3).collect(),
-            variant: vec![0; n],
-            axis: vec![],
-            branch: vec![false; n],
-            groups: vec![],
-            orient: vec![pnr_core::Orient::default(); n],
-            power_uw: vec![0; n],
-            temp_mc: vec![0; n],
-        }
-    }
-
-    /// `overlap_incident`'s before/after difference must equal the full scan's.
-    #[test]
-    fn incident_difference_matches_full_scan_difference() {
-        let cells =
-            [(0, 0, 100, 100), (150, 0, 100, 100), (60, 60, 100, 100), (900, 900, 50, 50), (120, 30, 80, 40)];
-        for c in 0..cells.len() {
-            for o in 0..cells.len() {
-                let moved: Vec<usize> = if c == o { vec![c] } else { vec![c, o] };
-                let mut l = layout(&cells);
-                let full_before = total_overlap(&l);
-                let inc_before = overlap_incident(&l, &moved);
-                for &m in &moved {
-                    l.x[m] += 37;
-                    l.y[m] -= 11;
-                }
-                let full_delta = total_overlap(&l) - full_before;
-                let inc_delta = overlap_incident(&l, &moved) - inc_before;
-                assert!((full_delta - inc_delta).abs() < 1e-6, "moved={moved:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn pair_inside_moved_is_not_double_counted() {
-        let l = layout(&[(0, 0, 100, 100), (100, 0, 100, 100)]);
-        assert_eq!(overlap_incident(&l, &[0, 1]), total_overlap(&l));
-        assert!(overlap_incident(&l, &[0, 1]) > 0.0);
-    }
 }

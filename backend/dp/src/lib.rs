@@ -15,11 +15,10 @@ use pnr_core::ids::BranchId;
 use pnr_core::{Layout, Macro, Orient, Report};
 
 use gp::mechanics::{
-    analog_cost, analog_phi, analog_theta, analog_violations, choose_variants, hpwl, report,
-    snap, variant_extents, Nets, SplitMix64,
+    analog_cost, analog_phi, analog_theta, analog_violations, choose_variants, encroach,
+    encroachment, hpwl, report, snap, variant_extents, Nets, SplitMix64,
 };
 use gp::CLEARANCE_NM;
-use legalize::{encroach, encroachment};
 
 pub trait DetailedPlacer {
     /// Refine `coarse` into a legal placement, seed-deterministic.

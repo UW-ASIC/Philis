@@ -3,7 +3,7 @@
 //! one self-contained macro per cell, so nothing shares diffusion.
 
 use analog::Requirements;
-use gp::mechanics::{analog_violations, snap};
+use gp::mechanics::{analog_violations, encroachment, snap};
 use pnr_core::Layout;
 
 /// Relax encroaching pairs apart along their cheaper axis, then re-project
@@ -89,29 +89,9 @@ pub fn separate_overlaps(
     encroachment(l, clearance)
 }
 
-/// Clearance-inflated overlap of `a` and `b`, nm²: nonzero iff their edge gap
-/// is under `clearance` on both axes.
-#[inline]
-pub(crate) fn encroach(l: &Layout, a: usize, b: usize, clearance: i32) -> f64 {
-    let ox = (l.hw[a] + l.hw[b] + clearance) - (l.x[a] - l.x[b]).abs();
-    let oy = (l.hh[a] + l.hh[b] + clearance) - (l.y[a] - l.y[b]).abs();
-    if ox > 0 && oy > 0 {
-        f64::from(ox) * f64::from(oy)
-    } else {
-        0.0
-    }
-}
-
-/// Total encroachment over all pairs.
-pub(crate) fn encroachment(l: &Layout, clearance: i32) -> f64 {
-    let n = l.x.len();
-    (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).map(|(a, b)| encroach(l, a, b, clearance)).sum()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gp::mechanics::total_overlap;
     use pnr_core::ids::DeviceId;
 
     fn layout(centres: &[(i32, i32)], half: i32) -> Layout {
@@ -136,10 +116,10 @@ mod tests {
         // Two devices stacked exactly on top of each other.
         let mut l = layout(&[(0, 0), (0, 0)], 500);
         let reqs = Requirements::<Layout>::default();
-        assert!(total_overlap(&l) > 0.0);
+        assert!(encroachment(&l, 0) > 0.0);
         let residual = separate_overlaps(&mut l, &reqs, &[false, false], 5, 0, 64);
         assert_eq!(residual, 0.0, "legalizer must clear the overlap");
-        assert_eq!(total_overlap(&l), 0.0);
+        assert_eq!(encroachment(&l, 0), 0.0);
     }
 
     #[test]
@@ -148,7 +128,7 @@ mod tests {
         let reqs = Requirements::<Layout>::default();
         separate_overlaps(&mut l, &reqs, &[true, false], 5, 0, 64);
         assert_eq!((l.x[0], l.y[0]), (0, 0), "pinned device must stay put");
-        assert_eq!(total_overlap(&l), 0.0);
+        assert_eq!(encroachment(&l, 0), 0.0);
     }
 
     #[test]
@@ -172,7 +152,7 @@ mod tests {
         let reqs = Requirements::<Layout>::default();
         let residual = separate_overlaps(&mut l, &reqs, &[false, false], 5, 0, 64);
         assert_eq!(residual, 0.0, "a stacked group is overlap like any other");
-        assert_eq!(total_overlap(&l), 0.0, "and it must actually be pulled apart");
+        assert_eq!(encroachment(&l, 0), 0.0, "and it must actually be pulled apart");
     }
 
     #[test]
@@ -186,7 +166,7 @@ mod tests {
         let reqs = Requirements::<Layout>::default();
         let residual = separate_overlaps(&mut l, &reqs, &[false; 4], 5, 0, 64);
         assert_eq!(residual, 0.0);
-        assert_eq!(total_overlap(&l), 0.0);
+        assert_eq!(encroachment(&l, 0), 0.0);
         l.debug_check_placed("separate_overlaps");
     }
 
@@ -197,7 +177,7 @@ mod tests {
         // spacing, and at a grid step apart they merge into one polygon.
         let mut l = layout(&[(0, 0), (1_000, 0)], 500); // edges exactly touching
         let reqs = Requirements::<Layout>::default();
-        assert_eq!(total_overlap(&l), 0.0, "precondition: no raw overlap");
+        assert_eq!(encroachment(&l, 0), 0.0, "precondition: no raw overlap");
 
         separate_overlaps(&mut l, &reqs, &[false, false], 5, 1_300, 64);
         let gap = (l.x[1] - l.x[0]) - (l.hw[0] + l.hw[1]);
@@ -222,7 +202,7 @@ mod tests {
         };
         let reqs = Requirements::<Layout>::default();
         separate_overlaps(&mut l, &reqs, &[false, false], 5, 0, 64);
-        assert_eq!(total_overlap(&l), 0.0);
+        assert_eq!(encroachment(&l, 0), 0.0);
         assert_eq!(l.x, vec![0, 0], "x was the expensive axis; it must not move");
     }
 }
