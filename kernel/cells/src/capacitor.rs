@@ -1,15 +1,13 @@
-//! Capacitor generator. Ported from `backend/cells/src/generators/capacitor.rs`.
+//! Capacitor generator: one merged plate (or comb) per device, sized by its
+//! unit count; the variant axes are array aspect and metal-stack kind.
 
 use analog::Constraints;
-use pnr_core::{DeviceGroup, LayerId, Macro, NetId, Pin, Process, Rect};
+use pnr_core::{DeviceGroup, LayerId, Macro, Process, Rect};
 
-use crate::Pattern;
-
-use crate::builder::{layer, rule, sizing, Builder, Sizing};
+use crate::builder::{pin, sizing, Builder, Sizing};
 use crate::Cell;
 
-/// How a unit cell builds its capacitance — **the metal stack it occupies**, not
-/// a cosmetic tag. Each kind draws genuinely different geometry:
+/// The metal stack a capacitor occupies:
 ///
 /// - [`Kind::VerticalInOneLayer`] — lateral MOM comb on **one** metal.
 ///   Interdigitated A/B fingers; the flux is sidewall-to-sidewall, so the two
@@ -21,25 +19,10 @@ use crate::Cell;
 ///   top plate couple (≈2× the two-metal C for the same plan area). The two BOT
 ///   levels are strapped in the bus column, never through the plate stack.
 ///
-/// **No LVS recognition marker.** The comb draws both electrodes as many
-/// interdigitated polygons on one metal, and gdsverify's `DeviceRecognition`
-/// binds exactly one polygon per terminal position (a surplus refuses the
-/// marker), so the comb is not expressible in the current schema; a
-/// plate-kinds-only recogniser would make the verdict depend on which variant
-/// the placer picked. Capacitors therefore stay a reference-builder skip —
-/// the precise gap and the schema extension it needs (per-terminal
-/// merged-region binding) are documented in `backend/verify/src/reference.rs`.
-///
-/// **Inter-plate keepout.** For the two stacked kinds the dielectric between the
-/// plates is load-bearing: a via cut or an intervening-metal shape inside the
-/// plate footprint shorts the device. This generator honours that for its own
-/// geometry (the `met_n+1` bus jumper of the sandwich runs in the bus column,
-/// outside the plates). It cannot *enforce* it against the router — `Macro` is
-/// shapes + pins + bbox with no blockage concept, and `dr` is not handed the
-/// macros at all (see `backend/dr/src/lib.rs` § Contract note). Routing keepout
-/// over cell interiors is router-obstacle plumbing, tracked in `TODO.md`.
-///
-/// Theory: AOAL ch7 (construction ranking), ch8 §8.3.2; `docs/cells/capacitor.md` §1.
+/// No LVS marker is drawn: the comb's many same-layer polygons cannot bind to
+/// one terminal slot, so capacitors are an LVS reference skip. Nothing may be
+/// drawn between stacked plates (a cut there shorts the device); the router is
+/// not told this.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     VerticalAcrossLayers,
@@ -47,28 +30,17 @@ pub enum Kind {
     VerticalInOneLayer,
 }
 
-/// One point in the **capacitor variant space** (MOM/MIM array). Theory: AOAL
-/// ch08; `docs/cells/capacitor.md`.
+/// One capacitor variant. `units_x` is the column count of the unit grid and
+/// only picks the aspect ratio: a device's units are drawn as one plate.
 ///
-/// `units_x`/`units_y` tile the device's unit count into a grid and so pick its
-/// **aspect ratio** — the axis the placer reshapes over. They do *not* draw as
-/// separate unit cells: for a single device, N unit caps in parallel are
-/// electrically one plate of N× the area, and drawing them separately would need
-/// a bus network to reconnect what the array just split. Units become distinct
-/// drawn cells only once they carry *different owners* — the common-centroid
-/// assignment for ratioed arrays, which is open research (`TODO.md` § Capacitor).
+/// Pins: `P` is the top plate, `N` the bottom plate.
 #[derive(Clone)]
 pub struct Capacitor {
-    /// Columns of the unit-plate array (`self.columns` in the old spec).
     pub units_x: u16,
-    /// Rows, derived from total units / columns.
-    pub units_y: u16,
-    pub guard_ring: bool,
     pub kind: Kind,
-    pub pattern: Pattern,
 }
 
-/// Same budget the MOSFET uses — the reshape search must stay bounded.
+/// Bound on the reshape search.
 const MAX_VARIANTS: usize = 16;
 
 impl Cell for Capacitor {
@@ -77,7 +49,7 @@ impl Cell for Capacitor {
             return vec![];
         }
         let s = group_sizing(group, constraints, process);
-        let units = s.total_nf().max(1);
+        let units = s.dev_nf.iter().sum::<u16>().max(1);
         let columns: Vec<u16> = (1..=units).filter(|c| units % c == 0).collect();
         let kinds = feasible_kinds(process);
 
@@ -86,53 +58,12 @@ impl Cell for Capacitor {
         let mut specs: Vec<Self> = Vec::new();
         for &cols in &columns {
             for &kind in &kinds {
-                specs.push(Capacitor {
-                    units_x: cols,
-                    units_y: units.div_ceil(cols),
-                    guard_ring: false,
-                    kind,
-                    // ponytail: `draw` lays units out row-major and does not yet
-                    // honour a common-centroid assignment, so enumerating `Cc1d`
-                    // would offer the placer a variant that draws identically to
-                    // `Single`. Unit-owner assignment is open research —
-                    // `TODO.md` § Capacitor.
-                    pattern: Pattern::Single,
-                });
+                specs.push(Capacitor { units_x: cols, kind });
             }
         }
 
-        // Dedup by (estimated footprint, kind) — the same key discipline as
-        // `mosfet::enumerate`, so the placer never anneals over two variants it
-        // cannot tell apart.
-        let mut seen: Vec<((i32, i32), Kind)> = Vec::new();
-        specs.retain(|spec| {
-            let key = (spec.estimate(group, process), spec.kind);
-            if seen.contains(&key) {
-                false
-            } else {
-                seen.push(key);
-                true
-            }
-        });
         specs.truncate(MAX_VARIANTS);
         specs
-    }
-
-    fn estimate(&self, group: &DeviceGroup, process: &dyn Process) -> (i32, i32) {
-        // ponytail: the `Cell` trait hands `estimate` no `Constraints`, so this
-        // sees the *default* sizing, not the group's unitization — the same hole
-        // `mosfet::est_dims` has. Planning area is therefore the un-sized
-        // footprint. Fixing it is a trait-signature change across all six
-        // families; see the note in `TODO.md`.
-        let s = group_sizing(group, &Constraints::default(), process);
-        let g = Geom::new(self, &s, process);
-        g.footprint(group.devices.len() as i32, &per_device_units(&s))
-    }
-
-    fn ports(&self, group: &DeviceGroup) -> Vec<Pin> {
-        (0..group.devices.len())
-            .flat_map(|i| [port(i, "TOP"), port(i, "BOT")])
-            .collect()
     }
 
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro {
@@ -148,8 +79,8 @@ impl Cell for Capacitor {
                 Kind::HorizontalAcrossLayers => g.plates(&mut b, plate, None),
                 Kind::VerticalAcrossLayers => g.plates(&mut b, plate, g.third_metal),
             };
-            b.pin(pin_at(di, "BOT", bot_pin, g.bot_metal));
-            b.pin(pin_at(di, "TOP", top_pin, g.top_metal));
+            b.pin(pin(di, "N", bot_pin, g.bot_metal));
+            b.pin(pin(di, "P", top_pin, g.top_metal));
             x0 += g.tile_w(n_units) + g.device_gap;
         }
 
@@ -157,8 +88,7 @@ impl Cell for Capacitor {
     }
 }
 
-/// Every dimension and layer the three kinds draw from, resolved once per call so
-/// `draw` and `estimate` cannot drift apart.
+/// Every dimension and layer the three kinds draw from.
 struct Geom {
     bot_metal: LayerId,
     top_metal: LayerId,
@@ -177,7 +107,6 @@ struct Geom {
     inset: i32,
     finger_w: i32,
     finger_space: i32,
-    ct: i32,
     via_enc: i32,
     /// Vertical step between cut rows: the worst `size + spacing` over both cut
     /// layers, so neither layer's min-spacing is violated by the shared pitch.
@@ -194,22 +123,22 @@ impl Geom {
         let m = metals(process);
         let v = vias(process);
         let met = |i: usize| m.get(i).copied().unwrap_or(LayerId(0));
-        let ct = rule(process, "contact", 170);
-        let via_enc = rule(process, "via_enclosure", 300);
+        let ct = process.rule("contact", 170);
+        let via_enc = process.rule("via_enclosure", 300);
         let sandwich = spec.kind == Kind::VerticalAcrossLayers;
-        let unit_gap = rule(process, "plate_spacing", 200);
+        let unit_gap = process.rule("plate_spacing", 200);
         // Per-layer cut dimensions: via1/via2 carry exact widths and their own
         // spacings in the deck (`via{n}_min_width` / `via{n}_min_spacing`); a
         // shared `contact`-sized cut violated `via1_max_width`/`via2_min_width`.
-        let via_spacing = rule(process, "via_spacing", 170);
-        let cut_w = [rule(process, "via1_min_width", ct), rule(process, "via2_min_width", ct)];
-        let via_pitch = (cut_w[0] + rule(process, "via1_min_spacing", via_spacing))
-            .max(cut_w[1] + rule(process, "via2_min_spacing", via_spacing));
-        // The strap column carries rails on every sandwich metal, so its gap to
-        // the plates must satisfy the *tallest* metal's spacing, not met1's.
-        let m_space = rule(process, "met1_space", 140)
-            .max(rule(process, "met2_min_spacing", 0))
-            .max(rule(process, "met3_min_spacing", 0));
+        let via_spacing = process.rule("via_spacing", 170);
+        let cut_w = [process.rule("via1_min_width", ct), process.rule("via2_min_width", ct)];
+        let via_pitch = (cut_w[0] + process.rule("via1_min_spacing", via_spacing))
+            .max(cut_w[1] + process.rule("via2_min_spacing", via_spacing));
+        // The strap column carries rails on every sandwich metal beside a plate
+        // that is usually wide: clear the worst (wide-)spacing of all three.
+        let m_space = (1..=3)
+            .flat_map(|n| [format!("met{n}_min_spacing"), format!("met{n}_wide_metal_spacing")])
+            .fold(process.rule("met1_space", 140), |m, r| m.max(process.rule(&r, 0)));
         Self {
             bot_metal: met(0),
             // The comb keeps both electrodes on one metal — that *is* the kind.
@@ -221,11 +150,10 @@ impl Geom {
             unit_h: s.unit_l,
             unit_gap,
             m_space,
-            device_gap: rule(process, "device_gap", 600),
+            device_gap: process.rule("device_gap", 600),
             inset: unit_gap,
-            finger_w: rule(process, "mom_finger_width", 200),
-            finger_space: rule(process, "mom_finger_space", 200),
-            ct,
+            finger_w: process.rule("mom_finger_width", 200),
+            finger_space: process.rule("mom_finger_space", 200),
             via_enc,
             via_pitch,
             max_cols: i32::from(spec.units_x.max(1)),
@@ -256,14 +184,6 @@ impl Geom {
     /// column.
     fn tile_w(&self, n_units: i32) -> i32 {
         self.grid_w(n_units) + if self.strap_w > 0 { self.m_space + self.strap_w } else { 0 }
-    }
-
-    /// Footprint of the whole group — must agree with what [`Capacitor::draw`]
-    /// lays down, or the placer reserves the wrong area.
-    fn footprint(&self, n_devices: i32, per_dev: &[i32]) -> (i32, i32) {
-        let w: i32 = per_dev.iter().map(|&u| self.tile_w(u)).sum();
-        let h = per_dev.iter().map(|&u| self.grid_h(u)).max().unwrap_or(0);
-        (w + self.device_gap * (n_devices - 1).max(0), h)
     }
 
     /// Stacked plates: BOT fills `plate`, TOP is inset so the plate edges never
@@ -356,12 +276,12 @@ impl Geom {
 /// The PDK's metal stack bottom-up, as far as it is populated. `map_while` stops
 /// at the first absent level, so a deck with only `met1` yields one entry.
 fn metals(process: &dyn Process) -> Vec<LayerId> {
-    (1..=5).map_while(|n| layer(process, &format!("met{n}"))).collect()
+    (1..=5).map_while(|n| process.layer(&format!("met{n}"))).collect()
 }
 
 /// Cut layers between consecutive metals (`via1` joins met1↔met2, …).
 fn vias(process: &dyn Process) -> Vec<LayerId> {
-    (1..=4).map_while(|n| layer(process, &format!("via{n}"))).collect()
+    (1..=4).map_while(|n| process.layer(&format!("via{n}"))).collect()
 }
 
 /// Kinds this process can actually build — a deck without `met2` cannot stack a
@@ -381,29 +301,9 @@ fn feasible_kinds(process: &dyn Process) -> Vec<Kind> {
     kinds
 }
 
-fn port(i: usize, term: &str) -> Pin {
-    Pin {
-        name: format!("d{i}:{term}"),
-        net: net_of(i, term),
-        at: Rect { x: 0, y: 0, w: 0, h: 0 },
-        // Enumeration placeholder: a 0x0 rect is never routed to, so the layer
-        // is not a claim about geometry. `ports()` has no `Process` to ask.
-        layer: LayerId(0),
-    }
-}
-
-fn pin_at(i: usize, term: &str, at: Rect, layer: LayerId) -> Pin {
-    Pin { name: format!("d{i}:{term}"), net: net_of(i, term), at, layer }
-}
-
-fn net_of(i: usize, term: &str) -> NetId {
-    let t = if term == "TOP" { 0 } else { 1 };
-    NetId((i as u16).wrapping_mul(4).wrapping_add(t))
-}
-
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
     // Default plate: a nominal 2µm square unit cell.
-    let def = rule(process, "cap_unit_side", 2000);
+    let def = process.rule("cap_unit_side", 2000);
     sizing(group, c, def, def)
 }
 
@@ -481,18 +381,12 @@ mod tests {
     fn comb_electrodes_never_short() {
         let pdk = TestPdk::full();
         let (group, c) = one_cap(4, 2000);
-        let spec = Capacitor {
-            units_x: 2,
-            units_y: 2,
-            guard_ring: false,
-            kind: Kind::VerticalInOneLayer,
-            pattern: Pattern::Single,
-        };
+        let spec = Capacitor { units_x: 2, kind: Kind::VerticalInOneLayer };
         let m = spec.draw(&group, &c, &pdk);
         // Every rect is on one metal, so BOT and TOP are distinguished purely by
         // geometry: any contact at all merges the two electrodes.
-        let bot_spine = m.pins.iter().find(|p| p.name.ends_with("BOT")).unwrap().at;
-        let top_spine = m.pins.iter().find(|p| p.name.ends_with("TOP")).unwrap().at;
+        let bot_spine = m.pins.iter().find(|p| p.name.ends_with(":N")).unwrap().at;
+        let top_spine = m.pins.iter().find(|p| p.name.ends_with(":P")).unwrap().at;
         assert_ne!(bot_spine, top_spine);
 
         // Flood-fill from the BOT spine; the TOP spine must stay unreached.
@@ -527,13 +421,7 @@ mod tests {
         let pdk = TestPdk::full();
         let (group, c) = one_cap(1, 2000);
         let stack = |kind| {
-            let spec = Capacitor {
-                units_x: 1,
-                units_y: 1,
-                guard_ring: false,
-                kind,
-                pattern: Pattern::Single,
-            };
+            let spec = Capacitor { units_x: 1, kind };
             let mut ls: Vec<u16> =
                 spec.draw(&group, &c, &pdk).shapes.iter().map(|s| s.layer.0).collect();
             ls.sort_unstable();
@@ -568,28 +456,5 @@ mod tests {
         let specs = Capacitor::enumerate(&group, &c, &pdk);
         assert!(!specs.is_empty());
         assert!(specs.iter().all(|s| s.kind == Kind::VerticalInOneLayer));
-    }
-
-    /// `estimate` feeds planning-area sizing before anything is drawn; if it
-    /// disagrees with `draw` the placer reserves the wrong footprint. Compared
-    /// against the *default* sizing because the trait denies `estimate` the
-    /// `Constraints` — see the ponytail note on `Capacitor::estimate`.
-    #[test]
-    fn estimate_matches_drawn_bbox() {
-        let pdk = TestPdk::full();
-        let group = DeviceGroup { devices: vec![DeviceId(0)] };
-        let c = Constraints::default();
-        for kind in feasible_kinds(&pdk) {
-            let spec = Capacitor {
-                units_x: 2,
-                units_y: 2,
-                guard_ring: false,
-                kind,
-                pattern: Pattern::Single,
-            };
-            let (w, h) = spec.estimate(&group, &pdk);
-            let bbox = spec.draw(&group, &c, &pdk).bbox;
-            assert_eq!((w, h), (bbox.w, bbox.h), "{kind:?} estimate vs drawn bbox");
-        }
     }
 }

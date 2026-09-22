@@ -1,23 +1,16 @@
-//! Diode generator. Ported from `backend/cells/src/generators/diode.rs`.
+//! Diode generator: one `diom`-marked diff body per device with anode (`P`)
+//! and cathode (`N`) li pads, arrayed in `columns`.
 
 use analog::Constraints;
-use pnr_core::{DeviceGroup, LayerId, Macro, NetId, Pin, Process, Rect};
+use pnr_core::{DeviceGroup, Macro, Process, Rect};
 
-use crate::Pattern;
+use crate::builder::{pin, req, sizing, Builder, Sizing};
+use crate::{Cell, Pattern};
 
-use crate::builder::{layer, req, rule, sizing, Builder, Sizing};
-use crate::Cell;
-
-/// One point in the **diode variant space** (junction / ESD clamp). Area set by
-/// finger count; guard-ringed for ESD current handling. Theory: AOAL ch05
-/// (ESD/reliability); `docs/cells/diode.md`.
-///
-/// `fingers` is the array unit count; `columns` (the old `DiodeSpec` axis) sets
-/// the array aspect and `pattern` toggles interdigitation for matched banks.
+/// One diode variant: array aspect `columns`; `Interdig` flips every other
+/// device's pads for matched banks.
 #[derive(Clone)]
 pub struct Diode {
-    pub fingers: u16,
-    pub guard_ring: bool,
     pub pattern: Pattern,
     pub columns: u16,
 }
@@ -27,40 +20,15 @@ impl Cell for Diode {
         if group.devices.is_empty() {
             return vec![];
         }
-        let patterns = if group.devices.len() > 1 {
-            vec![Pattern::Single, Pattern::Interdig]
-        } else {
-            vec![Pattern::Single]
-        };
-        let n = group.devices.len().max(1) as u16;
+        let n = group.devices.len() as u16;
+        let patterns: &[Pattern] =
+            if n > 1 { &[Pattern::Single, Pattern::Interdig] } else { &[Pattern::Single] };
         let mut cols = vec![1, n, (f64::from(n).sqrt().ceil() as u16).max(1)];
         cols.sort_unstable();
         cols.dedup();
-        let mut specs = Vec::new();
-        for pattern in patterns {
-            for &columns in &cols {
-                specs.push(Diode { fingers: n, guard_ring: false, pattern, columns });
-            }
-        }
-        specs
-    }
-
-    fn estimate(&self, group: &DeviceGroup, process: &dyn Process) -> (i32, i32) {
-        let s = group_sizing(group, &Constraints::default(), process);
-        let w = s.unit_w;
-        let l = s.unit_l;
-        let n = group.devices.len().max(1) as i32;
-        let cols = i32::from(self.columns.max(1)).min(n);
-        let rows = (n + cols - 1) / cols;
-        let gap = rule(process, "diode_gap", 200);
-        (cols * w + (cols - 1) * gap, rows * l + (rows - 1) * gap)
-    }
-
-    fn ports(&self, group: &DeviceGroup) -> Vec<Pin> {
-        // The old generator declared a single shared A/K pair. Keep the per-device
-        // A/K pins the geometry actually lands.
-        (0..group.devices.len())
-            .flat_map(|i| [port(i, "A"), port(i, "K")])
+        patterns
+            .iter()
+            .flat_map(|&pattern| cols.iter().map(move |&columns| Diode { pattern, columns }))
             .collect()
     }
 
@@ -69,29 +37,20 @@ impl Cell for Diode {
         let s = group_sizing(group, constraints, process);
         let n_dev = group.devices.len();
 
-        let w = s.unit_w;
-        let l = s.unit_l;
+        let (w, l) = (s.unit_w, s.unit_l);
         let diff = req(process, "diff");
         let li = req(process, "li");
-        let ct = rule(process, "contact", 170);
-        let gap = rule(process, "diode_gap", 200);
-        // A contact-sized li pad falls under the deck's li min-area (the rule
-        // carries the square's side); round the pad side up to the grid.
+        let ct = process.rule("contact", 170);
+        let gap = process.rule("diode_gap", 200);
+        // li pad side: at least the li min-area square, on grid.
         let grid = process.grid().max(1);
-        let pad = {
-            let side = rule(process, "li_min_area", 236).max(ct);
-            (side + grid - 1) / grid * grid
-        };
+        let pad = (process.rule("li_min_area", 236).max(ct) + grid - 1) / grid * grid;
 
         let ay = l / 4 - pad / 2;
         let ky = 3 * l / 4 - pad / 2;
         let cols = i32::from(self.columns.max(1)).min(n_dev.max(1) as i32);
-        // The LVS recognition marker: one `diom` polygon per device, over the
-        // device's whole diff body, mirroring how a MOS channel's derived
-        // marker names a transistor. The deck's diode recogniser binds the two
-        // `li` pads under it as the device's terminals. Optional so a deck
-        // without the marker still draws the junction.
-        let diom = layer(process, "diom");
+        // LVS marker: the deck's diode recogniser binds the two li pads under it.
+        let diom = process.layer("diom");
         for di in 0..n_dev {
             let ox = (di as i32 % cols) * (w + gap);
             let oy = (di as i32 / cols) * (l + gap);
@@ -100,10 +59,11 @@ impl Cell for Diode {
             if let Some(diom) = diom {
                 b.rect(diom, Rect { x: ox, y: oy, w, h: l });
             }
-            for (name, py) in [("A", ay), ("K", ky)] {
-                let (px, py2) = my(w / 2 - pad / 2, py, pad, l, flip);
-                b.rect(li, Rect { x: ox + px, y: oy + py2, w: pad, h: pad });
-                b.pin(pin_at(di, name, ox + px, oy + py2, pad, li));
+            for (term, py) in [("P", ay), ("N", ky)] {
+                let py = if flip { l - py - pad } else { py };
+                let at = Rect { x: ox + w / 2 - pad / 2, y: oy + py, w: pad, h: pad };
+                b.rect(li, at);
+                b.pin(pin(di, term, at, li));
             }
         }
 
@@ -111,44 +71,6 @@ impl Cell for Diode {
     }
 }
 
-/// Mirror-Y of a `(x,y,ct,ct)` contact within a cell of height `l` (`R0` when
-/// `!flip`; only y flips, matching the old diode's `Orientation::MY`).
-fn my(x: i32, y: i32, ct: i32, l: i32, flip: bool) -> (i32, i32) {
-    if flip {
-        (x, l - y - ct)
-    } else {
-        (x, y)
-    }
-}
-
-fn port(i: usize, term: &str) -> Pin {
-    Pin {
-        name: format!("d{i}:{term}"),
-        net: net_of(i, term),
-        at: Rect { x: 0, y: 0, w: 0, h: 0 },
-        // Enumeration placeholder: a 0x0 rect is never routed to, so the layer
-        // is not a claim about geometry. `ports()` has no `Process` to ask.
-        layer: LayerId(0),
-    }
-}
-
-fn pin_at(i: usize, term: &str, x: i32, y: i32, ct: i32, layer: LayerId) -> Pin {
-    Pin {
-        name: format!("d{i}:{term}"),
-        net: net_of(i, term),
-        at: Rect { x, y, w: ct, h: ct },
-        layer,
-    }
-}
-
-fn net_of(i: usize, term: &str) -> NetId {
-    let t = if term == "A" { 0 } else { 1 };
-    NetId((i as u16).wrapping_mul(4).wrapping_add(t))
-}
-
-
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
-    let def_w = rule(process, "diode_w", 500);
-    let def_l = rule(process, "diode_l", 1000);
-    sizing(group, c, def_w, def_l)
+    sizing(group, c, process.rule("diode_w", 500), process.rule("diode_l", 1000))
 }
