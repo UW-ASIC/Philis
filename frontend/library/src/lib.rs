@@ -135,7 +135,12 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         pdk,
         netlist: &netlist,
         net_names: netlist.nets.iter().map(|n| n.name.clone()).collect(),
-        placer: gp::Analytical { cfg: gp::GlobalCfg { grid: pdk.grid, ..Default::default() } },
+        placer: gp::Analytical {
+            cfg: gp::GlobalCfg {
+                grid: pdk.grid,
+                ..Default::default()
+            },
+        },
         refiner: dp::Annealer {
             cfg: dp::DetailedCfg {
                 grid: pdk.grid,
@@ -170,7 +175,10 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             let seed = cfg.seed ^ u64::from(iter) ^ (u64::from(outer) << 32);
             let epoch = flow.epoch(&assignment, &mut prices, &mut neg, seed);
             if best.as_ref().is_none_or(|b| epoch.key < b.key) {
-                best = Some(Epoch { iteration: iter, ..epoch });
+                best = Some(Epoch {
+                    iteration: iter,
+                    ..epoch
+                });
                 stall = 0;
             } else {
                 stall += 1;
@@ -181,7 +189,9 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         }
 
         // Feasible with settled prices: done.
-        let feasible = best.as_ref().is_some_and(|b| b.key.0 == 0 && b.key.1 <= 0.0);
+        let feasible = best
+            .as_ref()
+            .is_some_and(|b| b.key.0 == 0 && b.key.1 <= 0.0);
         if feasible && prices.drift() < PRICE_STATIONARY {
             stats.converged = true;
             break;
@@ -191,14 +201,19 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         if outer + 1 == n_outer {
             break;
         }
-        let Some(next) = cellgen::escalate(&flow.cells.variants, &assignment) else { break };
+        let Some(next) = cellgen::escalate(&flow.cells.variants, &assignment) else {
+            break;
+        };
         stats.variant_escalations += 1;
         assignment = next;
     }
 
     // 7. The winner, redrawn from its own variant choice, with its guard rings.
     let best = best.expect("at least one epoch ran");
-    stats = RunStats { best_iteration: best.iteration, ..best.stats.merge(stats) };
+    stats = RunStats {
+        best_iteration: best.iteration,
+        ..best.stats.merge(stats)
+    };
     let mut macros = cellgen::realize(&flow.cells.variants, &best.layout.variant);
     // Only a winner claiming zero hard violations must be fully connected; an
     // infeasible winner's opens are already counted and reported at signoff.
@@ -215,7 +230,14 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         bias,
         &flow.problem.net_classes,
     );
-    Ok(Solution { layout: best.layout, routes: best.routes, macros, netlist, stats, metadata })
+    Ok(Solution {
+        layout: best.layout,
+        routes: best.routes,
+        macros,
+        netlist,
+        stats,
+        metadata,
+    })
 }
 
 /// Everything an epoch reads that is fixed for the run.
@@ -261,7 +283,8 @@ impl Flow<'_> {
         // Place: coarse analytical, then legalising anneal (which may reshape).
         let macros = cellgen::realize(&cells.variants, assignment);
         let (mut coarse, _) =
-            self.placer.place(&macros, &cells.variants, placement, layers, prices, seed);
+            self.placer
+                .place(&macros, &cells.variants, placement, layers, prices, seed);
         coarse.debug_check("gp::place");
         // dp reads groups as abutment permission, so it gets the diffusion-sharing
         // table; after dp, groups are the recognition table for `Target::Group`.
@@ -300,8 +323,10 @@ impl Flow<'_> {
             gr::GlobalRoute::default().route(&layout, &macros, &rings, routing, layers, neg, seed);
         global.debug_check("gr::route");
         let placed = gr::place_macros(&macros, &layout);
-        let pins: Vec<_> =
-            placed.iter().flat_map(|m| m.pins.iter().map(|p| (p.net, p.at, p.layer))).collect();
+        let pins: Vec<_> = placed
+            .iter()
+            .flat_map(|m| m.pins.iter().map(|p| (p.net, p.at, p.layer)))
+            .collect();
         let (routes, route_report) = self.d_router.route(
             &global, &pins, &placed, &rings, routing, layers, &self.cuts, neg, seed,
         );
@@ -312,8 +337,7 @@ impl Flow<'_> {
         // The epoch is scored by the same DRC/ERC/LVS gate as the final result.
         let mut labelled = placed;
         labelled.extend(rings.iter().cloned());
-        let signoff =
-            signoff_shapes(&shapes, &labelled, &self.net_names, self.netlist, self.pdk);
+        let signoff = signoff_shapes(&shapes, &labelled, &self.net_names, self.netlist, self.pdk);
         let budgets = metadata::build(
             placement,
             &layout,
@@ -329,17 +353,34 @@ impl Flow<'_> {
             place_hard: place_report.hard_violations.len(),
             route_hard: route_report.hard_violations.len(),
             drc_hard,
-            route_overuse: route_report.budget_violations.iter().map(|v| v.margin).sum(),
+            route_overuse: route_report
+                .budget_violations
+                .iter()
+                .map(|v| v.margin)
+                .sum(),
             ..RunStats::default()
         };
-        Epoch { key, iteration: 0, layout, routes, rings, stats }
+        Epoch {
+            key,
+            iteration: 0,
+            layout,
+            routes,
+            rings,
+            stats,
+        }
     }
 }
 
 impl RunStats {
     /// The winner's per-stage legality with the run-wide counters of `run`.
     fn merge(self, run: RunStats) -> RunStats {
-        RunStats { place_hard: self.place_hard, route_hard: self.route_hard, drc_hard: self.drc_hard, route_overuse: self.route_overuse, ..run }
+        RunStats {
+            place_hard: self.place_hard,
+            route_hard: self.route_hard,
+            drc_hard: self.drc_hard,
+            route_overuse: self.route_overuse,
+            ..run
+        }
     }
 }
 
@@ -347,7 +388,12 @@ impl RunStats {
 /// buys past a budget residual, no budget slack buys past a hard violation.
 type LexKey = (usize, f64, f32);
 
-fn lex_key(place: &Report, route: &Report, signoff: usize, budgets: &metadata::MetadataReport) -> LexKey {
+fn lex_key(
+    place: &Report,
+    route: &Report,
+    signoff: usize,
+    budgets: &metadata::MetadataReport,
+) -> LexKey {
     let (pv, pt, pc) = place.lex();
     let (rv, rt, rc) = route.lex();
     (pv + rv + signoff, pt + rt + budgets.theta(), pc + rc)
@@ -357,7 +403,11 @@ fn lex_key(place: &Report, route: &Report, signoff: usize, budgets: &metadata::M
 /// spacing, so no two cells' layers can merge. (`dp`'s default is a sky130
 /// guess; measured: chain4 ERC 93 → 74 with the deck value.)
 fn device_clearance(pdk: &Pdk) -> i32 {
-    pdk.layers().iter().filter_map(|l| pdk.min_spacing(l.0)).max().unwrap_or(0)
+    pdk.layers
+        .iter()
+        .filter_map(|(_, l)| pdk.min_spacing(l.0))
+        .max()
+        .unwrap_or(0)
 }
 
 fn round_up(v: i32, grid: i32) -> i32 {
@@ -366,18 +416,20 @@ fn round_up(v: i32, grid: i32) -> i32 {
 
 /// Per-device power (µW) and its provenance for the report: the ngspice
 /// operating point when configured and solvable, else `cfg.device_power_uw`.
-fn bias(
-    netlist: &pnr_core::Netlist,
-    cfg: &Config,
-) -> (Vec<i32>, Option<metadata::BiasSummary>) {
-    let op = cfg.op.as_ref().and_then(|oc| match oppoint::extract(netlist, oc) {
-        Ok(o) => Some(o),
-        Err(e) => {
-            eprintln!("[op] operating point unavailable ({e}); continuing with zero power");
-            None
-        }
-    });
-    let Some(o) = op else { return (cfg.device_power_uw.clone(), None) };
+fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> (Vec<i32>, Option<metadata::BiasSummary>) {
+    let op = cfg
+        .op
+        .as_ref()
+        .and_then(|oc| match oppoint::extract(netlist, oc) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                eprintln!("[op] operating point unavailable ({e}); continuing with zero power");
+                None
+            }
+        });
+    let Some(o) = op else {
+        return (cfg.device_power_uw.clone(), None);
+    };
     let hottest = o
         .power_uw
         .iter()
@@ -420,10 +472,18 @@ impl CellSpace {
         pdk: &Pdk,
         power: &[i32],
     ) -> Self {
-        let cellgen::Cells { spaces, cell_of, devices_of } =
-            cellgen::enumerate(netlist, injected, &problem.constraints, pdk);
+        let cellgen::Cells {
+            spaces,
+            cell_of,
+            devices_of,
+        } = cellgen::enumerate(netlist, injected, &problem.constraints, pdk);
         let p = &mut problem.placement;
-        for b in p.hard.iter_mut().chain(p.budget.iter_mut()).chain(p.cost.iter_mut()) {
+        for b in p
+            .hard
+            .iter_mut()
+            .chain(p.budget.iter_mut())
+            .chain(p.cost.iter_mut())
+        {
             b.retarget(&cell_of);
         }
         let to_cells = |g: &Vec<DeviceId>| remap_members(g, &cell_of);
@@ -446,7 +506,10 @@ impl CellSpace {
         let mut cells = CellSpace {
             fixed: devices_of
                 .iter()
-                .map(|m| m.iter().any(|d| injected.get(&netlist.devices[d.0 as usize].name).is_some()))
+                .map(|m| {
+                    m.iter()
+                        .any(|d| injected.get(&netlist.devices[d.0 as usize].name).is_some())
+                })
                 .collect(),
             power: devices_of
                 .iter()
@@ -465,7 +528,9 @@ impl CellSpace {
         // neighbours out of it; the ring is drawn back inside the reservation.
         for r in &cells.guard_rings.guard_rings {
             let ext = round_up(cells::post_cell::ring_halo(r, pdk), pdk.grid.max(1));
-            let Some(space) = cells.variants.get_mut(r.device.0 as usize) else { continue };
+            let Some(space) = cells.variants.get_mut(r.device.0 as usize) else {
+                continue;
+            };
             for m in &mut space.alternatives {
                 m.bbox.x -= ext;
                 m.bbox.y -= ext;
@@ -540,14 +605,29 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
 /// Full DRC/ERC/LVS/PEX signoff of a solution against its own schematic.
 #[must_use]
 pub fn signoff(sol: &Solution, pdk: &Pdk) -> Report {
+    let (shapes, pins, reference) = signoff_inputs(sol, pdk);
+    verify::signoff(&shapes, &pins, &reference, pdk).0
+}
+
+/// Exactly what [`signoff`] hands `verify`: the drawn shapes, the net labels
+/// placed on them, and the LVS reference whose ports are those labels.
+#[must_use]
+pub fn signoff_inputs(
+    sol: &Solution,
+    pdk: &Pdk,
+) -> (
+    Vec<pnr_core::Shape>,
+    Vec<verify::LabeledPin>,
+    verify::RefInput,
+) {
     let shapes = sol.geometry();
     let placed = pnr_core::place_macros(&sol.macros, &sol.layout);
     let names: Vec<String> = sol.netlist.nets.iter().map(|n| n.name.clone()).collect();
-    signoff_shapes(&shapes, &placed, &names, &sol.netlist, pdk)
+    let (pins, reference) = labels_and_reference(&shapes, &placed, &names, &sol.netlist, pdk);
+    (shapes, pins, reference)
 }
 
-/// Signoff over drawn `shapes`: labels every provable net (see
-/// [`labeled_pins`]) and builds the LVS reference with exactly those ports.
+/// Signoff over drawn `shapes`.
 pub(crate) fn signoff_shapes(
     shapes: &[pnr_core::Shape],
     placed: &[Macro],
@@ -555,10 +635,23 @@ pub(crate) fn signoff_shapes(
     schematic: &pnr_core::Netlist,
     pdk: &Pdk,
 ) -> Report {
+    let (pins, reference) = labels_and_reference(shapes, placed, nets, schematic, pdk);
+    verify::signoff(shapes, &pins, &reference, pdk).0
+}
+
+/// Labels every provable net (see [`labeled_pins`]) and builds the LVS
+/// reference with exactly those names as ports — `verify` requires they match.
+fn labels_and_reference(
+    shapes: &[pnr_core::Shape],
+    placed: &[Macro],
+    nets: &[String],
+    schematic: &pnr_core::Netlist,
+    pdk: &Pdk,
+) -> (Vec<verify::LabeledPin>, verify::RefInput) {
     let pins = labeled_pins(placed, nets, pdk, shapes);
     let mut reference = cellgen::reference(schematic);
     reference.ports = pins.iter().map(|p| p.name.clone()).collect();
-    verify::signoff(shapes, &pins, &reference, pdk).0
+    (pins, reference)
 }
 
 /// One label per net: the first placed pin on a label layer whose centre lies
@@ -573,7 +666,10 @@ pub(crate) fn labeled_pins(
 ) -> Vec<verify::LabeledPin> {
     let conn = &pdk.deck.connectivity;
     let conductor_of = |layer: u16| {
-        conn.label_layer.iter().position(|l| l.0 == layer).map(|row| conn.label_names[row].0)
+        conn.label_layer
+            .iter()
+            .position(|l| l.0 == layer)
+            .map(|row| conn.label_names[row].0)
     };
     let mut out: Vec<verify::LabeledPin> = Vec::new();
     let mut labelled: Vec<u16> = Vec::new();
@@ -582,16 +678,25 @@ pub(crate) fn labeled_pins(
         if labelled.contains(&p.net.0) {
             continue;
         }
-        let Some(conductor) = conductor_of(p.layer.0) else { continue };
+        let Some(conductor) = conductor_of(p.layer.0) else {
+            continue;
+        };
         let (x, y) = (p.at.x + p.at.w / 2, p.at.y + p.at.h / 2);
         let on_drawn = shapes.iter().any(|s| {
             s.layer.0 == conductor
                 && (s.rect.x..=s.rect.x + s.rect.w).contains(&x)
                 && (s.rect.y..=s.rect.y + s.rect.h).contains(&y)
         });
-        let Some(name) = nets.get(p.net.0 as usize).filter(|_| on_drawn) else { continue };
+        let Some(name) = nets.get(p.net.0 as usize).filter(|_| on_drawn) else {
+            continue;
+        };
         labelled.push(p.net.0);
-        out.push(verify::LabeledPin { name: name.clone(), layer: p.layer.0, x, y });
+        out.push(verify::LabeledPin {
+            name: name.clone(),
+            layer: p.layer.0,
+            x,
+            y,
+        });
     }
     out
 }

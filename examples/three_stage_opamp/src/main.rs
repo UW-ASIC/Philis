@@ -62,7 +62,10 @@ fn main() {
     if report.hard_violations.is_empty() {
         println!("signoff CLEAN — cost {:.3}", report.cost);
     } else {
-        println!("signoff — {} hard violation(s)", report.hard_violations.len());
+        println!(
+            "signoff — {} hard violation(s)",
+            report.hard_violations.len()
+        );
     }
 
     // Show the placed-and-routed layout (blocks until the window closes; a no-op
@@ -79,20 +82,94 @@ fn main() {
 ///
 /// Pin nets are placeholders: the library rebinds `G`/`S`/`D` to M8's nets.
 fn user_output_pmos(pdk: &Pdk) -> Macro {
-    let met1 = pdk.layer("met1").or_else(|| pdk.layer("li")).unwrap_or(LayerId(0));
+    let met1 = pdk
+        .layer("met1")
+        .or_else(|| pdk.layer("li"))
+        .unwrap_or(LayerId(0));
     let poly = pdk.layer("poly").unwrap_or(LayerId(0));
     let diff = pdk.layer("diff").unwrap_or(LayerId(0));
 
     let shapes = vec![
-        Shape { layer: diff, rect: Rect { x: 0, y: 0, w: 4000, h: 1000 } },
-        Shape { layer: poly, rect: Rect { x: 1800, y: -200, w: 400, h: 1400 } },
-        Shape { layer: met1, rect: Rect { x: 0, y: 0, w: 600, h: 600 } },
-        Shape { layer: met1, rect: Rect { x: 3400, y: 0, w: 600, h: 600 } },
+        Shape {
+            layer: diff,
+            rect: Rect {
+                x: 0,
+                y: 0,
+                w: 4000,
+                h: 1000,
+            },
+        },
+        Shape {
+            layer: poly,
+            rect: Rect {
+                x: 1800,
+                y: -200,
+                w: 400,
+                h: 1400,
+            },
+        },
+        Shape {
+            layer: met1,
+            rect: Rect {
+                x: 0,
+                y: 0,
+                w: 600,
+                h: 600,
+            },
+        },
+        Shape {
+            layer: met1,
+            rect: Rect {
+                x: 3400,
+                y: 0,
+                w: 600,
+                h: 600,
+            },
+        },
     ];
     let pins = vec![
-        Pin { name: "G".into(), net: NetId(0), at: Rect { x: 1800, y: 0, w: 400, h: 400 }, layer: poly },
-        Pin { name: "S".into(), net: NetId(0), at: Rect { x: 0, y: 0, w: 600, h: 600 }, layer: met1 },
-        Pin { name: "D".into(), net: NetId(0), at: Rect { x: 3400, y: 0, w: 600, h: 600 }, layer: met1 },
+        Pin {
+            name: "G".into(),
+            net: NetId(0),
+            at: Rect {
+                x: 1800,
+                y: 0,
+                w: 400,
+                h: 400,
+            },
+            layer: poly,
+        },
+        Pin {
+            name: "S".into(),
+            net: NetId(0),
+            at: Rect {
+                x: 0,
+                y: 0,
+                w: 600,
+                h: 600,
+            },
+            layer: met1,
+        },
+        Pin {
+            name: "D".into(),
+            net: NetId(0),
+            at: Rect {
+                x: 3400,
+                y: 0,
+                w: 600,
+                h: 600,
+            },
+            layer: met1,
+        },
     ];
-    Macro { shapes, pins, bbox: Rect { x: -200, y: -200, w: 4400, h: 1400 } }
+    Macro {
+        shapes,
+        pins,
+        bbox: Rect {
+            x: -200,
+            y: -200,
+            w: 4400,
+            h: 1400,
+        },
+    }
 }

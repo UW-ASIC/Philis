@@ -12,7 +12,9 @@ fn main() {
     // PDK_ROOT/PDK come from the dev shell; fall back to the in-repo .pdk.
     let pdk_root = std::env::var("PDK_ROOT").map_or_else(|_| root.join("../.pdk"), PathBuf::from);
     let pdk_name = std::env::var("PDK").unwrap_or_else(|_| "sky130A".into());
-    let models = pdk_root.join(&pdk_name).join("libs.tech/ngspice/sky130.lib.spice");
+    let models = pdk_root
+        .join(&pdk_name)
+        .join("libs.tech/ngspice/sky130.lib.spice");
 
     let cfg = library::Config {
         feedback_iters: 3,
@@ -28,7 +30,9 @@ fn main() {
     let rep = library::signoff(&sol, &pdk);
     let mut by_rule: BTreeMap<&str, usize> = BTreeMap::new();
     for v in &rep.hard_violations {
-        *by_rule.entry(v.rule.split(':').next().unwrap_or(&v.rule)).or_default() += 1;
+        *by_rule
+            .entry(v.rule.split(':').next().unwrap_or(&v.rule))
+            .or_default() += 1;
     }
     println!("\n  signoff: {} violations", rep.hard_violations.len());
     for (rule, n) in &by_rule {

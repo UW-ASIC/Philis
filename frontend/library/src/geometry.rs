@@ -28,7 +28,12 @@ pub fn debug_check_connected(macros: &[Macro], layout: &Layout, routes: &Routes)
     }
     let placed = gr::place_macros(macros, layout);
     let n_nets = routes.wires.len().max(
-        placed.iter().flat_map(|m| &m.pins).map(|p| p.net.0 as usize + 1).max().unwrap_or(0),
+        placed
+            .iter()
+            .flat_map(|m| &m.pins)
+            .map(|p| p.net.0 as usize + 1)
+            .max()
+            .unwrap_or(0),
     );
     for net in 0..n_nets {
         let pins: Vec<pnr_core::Rect> = placed
@@ -116,10 +121,35 @@ mod tests {
     /// same under R180).
     fn ell() -> Macro {
         let shapes = vec![
-            Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 100, h: 400 } },
-            Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 300, h: 100 } },
+            Shape {
+                layer: LayerId(1),
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 100,
+                    h: 400,
+                },
+            },
+            Shape {
+                layer: LayerId(1),
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 300,
+                    h: 100,
+                },
+            },
         ];
-        Macro { shapes, pins: vec![], bbox: Rect { x: 0, y: 0, w: 300, h: 400 } }
+        Macro {
+            shapes,
+            pins: vec![],
+            bbox: Rect {
+                x: 0,
+                y: 0,
+                w: 300,
+                h: 400,
+            },
+        }
     }
 
     fn layout_of(o: Orient, x: i32, y: i32) -> Layout {
@@ -147,7 +177,12 @@ mod tests {
             x1 = x1.max(s.rect.x + s.rect.w);
             y1 = y1.max(s.rect.y + s.rect.h);
         }
-        Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+        Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
     }
 
     /// The invariant the whole flow depends on: drawn geometry must land where
@@ -181,11 +216,20 @@ mod tests {
                 .iter()
                 .map(|s| Shape {
                     layer: s.layer,
-                    rect: Rect { x: s.rect.x - 2_000, y: s.rect.y - 500, ..s.rect },
+                    rect: Rect {
+                        x: s.rect.x - 2_000,
+                        y: s.rect.y - 500,
+                        ..s.rect
+                    },
                 })
                 .collect(),
             pins: vec![],
-            bbox: Rect { x: -2_000, y: -500, w: 300, h: 400 },
+            bbox: Rect {
+                x: -2_000,
+                y: -500,
+                w: 300,
+                h: 400,
+            },
         };
         let (hw, hh) = (150, 200);
         let mut l = layout_of(Orient::R0, 40_000, 60_000);
@@ -200,10 +244,22 @@ mod tests {
     #[test]
     fn r90_transposes_and_keeps_the_anchor() {
         let routes = Routes { wires: vec![] };
-        let flat = bbox_of(&collect(&[ell()], &layout_of(Orient::R0, 500, 900), &routes));
-        let turned = bbox_of(&collect(&[ell()], &layout_of(Orient::R90, 500, 900), &routes));
+        let flat = bbox_of(&collect(
+            &[ell()],
+            &layout_of(Orient::R0, 500, 900),
+            &routes,
+        ));
+        let turned = bbox_of(&collect(
+            &[ell()],
+            &layout_of(Orient::R90, 500, 900),
+            &routes,
+        ));
         assert_eq!((turned.x, turned.y), (flat.x, flat.y), "anchor moved");
-        assert_eq!((turned.w, turned.h), (flat.h, flat.w), "extents not transposed");
+        assert_eq!(
+            (turned.w, turned.h),
+            (flat.h, flat.w),
+            "extents not transposed"
+        );
     }
 
     /// Four quarter-turns return the exact original geometry — no drift creeps in
@@ -214,7 +270,11 @@ mod tests {
         let mut m = ell();
         for _ in 0..4 {
             let shapes = collect(&[m.clone()], &layout_of(Orient::R90, 0, 0), &routes);
-            m = Macro { bbox: bbox_of(&shapes), shapes, pins: vec![] };
+            m = Macro {
+                bbox: bbox_of(&shapes),
+                shapes,
+                pins: vec![],
+            };
         }
         let orig = ell();
         assert_eq!(m.bbox, orig.bbox);

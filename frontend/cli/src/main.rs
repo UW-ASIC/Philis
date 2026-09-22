@@ -24,7 +24,11 @@ fn cli() -> Result<bool, String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let emit_to = if args.first().is_some_and(|a| a == "emit") {
         args.remove(0);
-        Some(args.get(2).cloned().ok_or("usage: philis emit <netlist.sp> <deck.json> <out.rs>")?)
+        Some(
+            args.get(2)
+                .cloned()
+                .ok_or("usage: philis emit <netlist.sp> <deck.json> <out.rs>")?,
+        )
     } else {
         None
     };
@@ -36,12 +40,14 @@ fn cli() -> Result<bool, String> {
     let pdk = verify::Pdk::from_json(&read(deck)?).map_err(|e| format!("pdk: {e}"))?;
 
     let cfg = Config::default();
-    let sol = library::run(&spice, &pdk, &Macros::default(), &cfg).map_err(|e| format!("flow: {e:?}"))?;
+    let sol =
+        library::run(&spice, &pdk, &Macros::default(), &cfg).map_err(|e| format!("flow: {e:?}"))?;
 
     if let Some(out) = emit_to {
         let ir = library::emit::emit(&sol.netlist, &sol.layout, &pdk, &cfg)
             .map_err(|e| format!("emit: {e:?}"))?;
-        std::fs::write(&out, library::emit::to_rust(&ir)).map_err(|e| format!("write {out}: {e}"))?;
+        std::fs::write(&out, library::emit::to_rust(&ir))
+            .map_err(|e| format!("write {out}: {e}"))?;
         println!("emitted generator → {out}");
     }
 
@@ -49,7 +55,10 @@ fn cli() -> Result<bool, String> {
     if report.hard_violations.is_empty() {
         println!("signoff CLEAN — cost {:.3}", report.cost);
     } else {
-        println!("signoff: {} hard violation(s)", report.hard_violations.len());
+        println!(
+            "signoff: {} hard violation(s)",
+            report.hard_violations.len()
+        );
     }
     Ok(report.hard_violations.is_empty())
 }

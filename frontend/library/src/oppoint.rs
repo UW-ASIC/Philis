@@ -88,17 +88,26 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
 
     let table = parse_show(&String::from_utf8_lossy(&out.stdout));
     if table.is_empty() {
-        let tail: String = String::from_utf8_lossy(&out.stderr).chars().take(400).collect();
+        let tail: String = String::from_utf8_lossy(&out.stderr)
+            .chars()
+            .take(400)
+            .collect();
         return Err(format!("no device operating points: {tail}"));
     }
     let mut power_uw = vec![0i32; netlist.devices.len()];
     let mut resolved = 0usize;
     for (i, dev) in netlist.devices.iter().enumerate() {
-        let Some(op) = table.get(instance_name(dev).to_ascii_lowercase().as_str()) else { continue };
+        let Some(op) = table.get(instance_name(dev).to_ascii_lowercase().as_str()) else {
+            continue;
+        };
         power_uw[i] = ((op.id * op.vds).abs() * 1e6).round() as i32;
         resolved += 1;
     }
-    Ok(OpPoint { power_uw, provenance, resolved })
+    Ok(OpPoint {
+        power_uw,
+        provenance,
+        resolved,
+    })
 }
 
 /// One device's operating point as `show` reports it.
@@ -159,7 +168,12 @@ fn flat_circuit(netlist: &Netlist, cfg: &OpConfig) -> String {
         };
         // sky130 primitives are subcircuits: D G S B, then W/L in microns.
         let (w_um, l_um) = (param_um(dev, "w"), param_um(dev, "l"));
-        let nf = dev.params.iter().find(|(k, _)| k == "nf").map_or(1, |(_, v)| *v).max(1);
+        let nf = dev
+            .params
+            .iter()
+            .find(|(k, _)| k == "nf")
+            .map_or(1, |(_, v)| *v)
+            .max(1);
         s.push_str(&format!(
             "{} {} {} {} {} {} W={w_um} L={l_um} nf={nf}\n",
             instance_name(dev),
@@ -202,7 +216,11 @@ fn node_name(netlist: &Netlist, id: pnr_core::NetId) -> String {
 
 /// A `w`/`l` parameter in microns (the netlist stores nm).
 fn param_um(dev: &pnr_core::Device, key: &str) -> f64 {
-    let nm = dev.params.iter().find(|(k, _)| k == key).map_or(0, |(_, v)| *v);
+    let nm = dev
+        .params
+        .iter()
+        .find(|(k, _)| k == key)
+        .map_or(0, |(_, v)| *v);
     if nm <= 0 {
         // A missing dimension would make the device degenerate; fall back to a
         // minimum-ish geometry so the solve still yields a usable bias.
@@ -376,14 +394,21 @@ mod tests {
             let o = t[d];
             (o.id * o.vds).abs() * 1e6
         };
-        assert!(p("xm3") > 7.0 && p("xm3") < 8.0, "load ≈7.35µW, got {}", p("xm3"));
+        assert!(
+            p("xm3") > 7.0 && p("xm3") < 8.0,
+            "load ≈7.35µW, got {}",
+            p("xm3")
+        );
         assert!(p("xm5") < 0.1, "tail in triode ≈0.05µW, got {}", p("xm5"));
         assert!(p("xm3") > 100.0 * p("xm5"), "hot device must dominate");
     }
 
     #[test]
     fn instance_names_survive_truncation() {
-        assert_eq!(instance_device("m.xm5.msky130_fd_pr__").as_deref(), Some("xm5"));
+        assert_eq!(
+            instance_device("m.xm5.msky130_fd_pr__").as_deref(),
+            Some("xm5")
+        );
         assert_eq!(instance_device("m.xdut.xm1.mnfet").as_deref(), Some("xdut"));
         assert_eq!(instance_device("notadevice"), None);
     }
@@ -394,7 +419,9 @@ mod tests {
         use pnr_core::{Device, DeviceKind, Net, NetId, Netlist};
         let nets = ["vdd", "vss", "vbias", "vout"]
             .iter()
-            .map(|n| Net { name: (*n).to_string() })
+            .map(|n| Net {
+                name: (*n).to_string(),
+            })
             .collect();
         let dev = |name: &str, d: u16, g: u16, s: u16, b: u16| Device {
             name: name.to_string(),
@@ -407,19 +434,34 @@ mod tests {
             ],
             params: vec![("w".into(), 10_000), ("l".into(), 1_000)],
         };
-        Netlist { devices: vec![dev("XM1", 3, 2, 1, 1)], nets }
+        Netlist {
+            devices: vec![dev("XM1", 3, 2, 1, 1)],
+            nets,
+        }
     }
 
     #[test]
     fn probe_bench_drives_rails_and_gate_only_nets_only() {
         let (bench, note) = probe_bench(&stub_netlist(), &OpConfig::default());
-        assert!(note.contains("NOT a sign-off bias"), "provenance must flag the guess: {note}");
-        assert!(bench.contains("Vvdd vdd 0 1.8"), "supply at the rail: {bench}");
+        assert!(
+            note.contains("NOT a sign-off bias"),
+            "provenance must flag the guess: {note}"
+        );
+        assert!(
+            bench.contains("Vvdd vdd 0 1.8"),
+            "supply at the rail: {bench}"
+        );
         // `vbias` reaches only a gate — no DC path — so the solve is singular
         // unless it is driven. This is the case a subckt wrapper cannot reach.
-        assert!(bench.contains("Vvbias vbias 0 0.9"), "gate-only bias must be driven: {bench}");
+        assert!(
+            bench.contains("Vvbias vbias 0 0.9"),
+            "gate-only bias must be driven: {bench}"
+        );
         // `vout` is held by a drain; forcing it would destroy the operating point.
-        assert!(!bench.contains("Vvout"), "circuit-driven node must float: {bench}");
+        assert!(
+            !bench.contains("Vvout"),
+            "circuit-driven node must float: {bench}"
+        );
         assert!(!bench.contains("Vvss"), "ground is node 0: {bench}");
     }
 
@@ -427,9 +469,18 @@ mod tests {
     fn flat_circuit_emits_devices_against_library_models() {
         let cfg = OpConfig::default();
         let deck = flat_circuit(&stub_netlist(), &cfg);
-        assert!(deck.contains("sky130_fd_pr__nfet_01v8"), "library model name: {deck}");
+        assert!(
+            deck.contains("sky130_fd_pr__nfet_01v8"),
+            "library model name: {deck}"
+        );
         assert!(deck.contains("W=10 L=1"), "nm converted to microns: {deck}");
-        assert!(deck.starts_with("XM1 vout vbias 0 0"), "D G S B order, vss→0: {deck}");
-        assert!(!deck.starts_with("XXM1"), "must not double-prefix an X-name: {deck}");
+        assert!(
+            deck.starts_with("XM1 vout vbias 0 0"),
+            "D G S B order, vss→0: {deck}"
+        );
+        assert!(
+            !deck.starts_with("XXM1"),
+            "must not double-prefix an X-name: {deck}"
+        );
     }
 }

@@ -6,8 +6,8 @@
 
 use library::{elaborate, ElabConfig};
 use macro_master::{
-    variants::Mos, AlignMode, Block, CompBuilder, Composition, GenError, InOut, Input, Io,
-    Output, PortInfo, Process, Signal,
+    variants::Mos, AlignMode, Block, CompBuilder, Composition, GenError, InOut, Input, Io, Output,
+    PortInfo, Process, Signal,
 };
 use pnr_core::DeviceKind;
 
@@ -138,11 +138,7 @@ fn check_netlist(
     // cell from the one the generator declared, and it simulates, so nothing
     // downstream would catch it.
     let pins: Vec<&str> = subckt.split_whitespace().skip(2).collect();
-    assert_eq!(
-        pins.len(),
-        6,
-        "{label}: expected six pins, got {pins:?}"
-    );
+    assert_eq!(pins.len(), 6, "{label}: expected six pins, got {pins:?}");
 
     let mos = spice.lines().filter(|l| l.starts_with('M')).count();
     assert_eq!(mos, 5, "{label}: expected five transistors, got:\n{spice}");
@@ -161,7 +157,10 @@ fn check_netlist(
 
     let caps = spice.lines().filter(|l| l.starts_with('C')).count();
     let res = spice.lines().filter(|l| l.starts_with('R')).count();
-    eprintln!("{label}: netlist {mos} devices, {res} R, {caps} C, {} lines", spice.lines().count());
+    eprintln!(
+        "{label}: netlist {mos} devices, {res} R, {caps} C, {} lines",
+        spice.lines().count()
+    );
     if std::env::var_os("PHILIS_DUMP_NETLIST").is_some() {
         let path = std::env::temp_dir().join(format!("{label}_ota5t.spice"));
         std::fs::write(&path, &spice).expect("dump netlist");
@@ -190,13 +189,18 @@ fn elaborate_on(deck: &str, label: &str, expect_model: Option<&str>) {
     // search flow shows the same class: suite chain4 DRC 44, all routing), and
     // met1 density needs fill, a signoff post-pass. Tighten to
     // `drc.is_empty()` when the dr pin-access/notch fixes land.
-    const OWNED: &[&str] = &[":diff", ":poly", ":nwell", ":nsdm", ":psdm", ":tap", ":licon"];
+    const OWNED: &[&str] = &[
+        ":diff", ":poly", ":nwell", ":nsdm", ":psdm", ":tap", ":licon",
+    ];
     let own: Vec<(String, i64)> = drc
         .iter()
         .filter(|v| OWNED.iter().any(|l| v.rule.ends_with(l)))
         .map(|v| (v.rule.clone(), v.margin))
         .collect();
-    assert!(own.is_empty(), "{label}: device-layer DRC violations: {own:?}");
+    assert!(
+        own.is_empty(),
+        "{label}: device-layer DRC violations: {own:?}"
+    );
     // The pin-access conductor is gated too: dr draws its li pads per-layer and
     // only at pin ends now, so a li violation is a regression, not debt. met1
     // notch/spacing/density stay excluded above (separate debt).
@@ -205,8 +209,14 @@ fn elaborate_on(deck: &str, label: &str, expect_model: Option<&str>) {
         .filter(|v| v.rule.ends_with(":li"))
         .map(|v| (v.rule.clone(), v.margin))
         .collect();
-    assert!(li.is_empty(), "{label}: pin-access-layer DRC violations: {li:?}");
-    eprintln!("{label}: device layers clean; {} routing-layer violations (dr debt)", drc.len());
+    assert!(
+        li.is_empty(),
+        "{label}: pin-access-layer DRC violations: {li:?}"
+    );
+    eprintln!(
+        "{label}: device layers clean; {} routing-layer violations (dr debt)",
+        drc.len()
+    );
     check_netlist(&sol, &pdk, label, expect_model);
 }
 
@@ -233,12 +243,23 @@ fn ota5t_schematic_is_the_circuit_on_the_routes_numbering() {
     let pdk = verify::Pdk::from_json(&deck).expect("deck parses");
     let sol = elaborate(&Ota5T, &pdk, &ElabConfig::default()).expect("elaboration");
 
-    let schem = sol.schematic.as_ref().expect("every instance is a variants::Mos, so not opaque");
-    assert_eq!(schem.devices.len(), 5, "five transistors: {:?}", dev_names(schem));
+    let schem = sol
+        .schematic
+        .as_ref()
+        .expect("every instance is a variants::Mos, so not opaque");
+    assert_eq!(
+        schem.devices.len(),
+        5,
+        "five transistors: {:?}",
+        dev_names(schem)
+    );
 
     // The invariant everything else rests on: one NetId space.
     let names: Vec<&str> = schem.nets.iter().map(|n| n.name.as_str()).collect();
-    assert_eq!(names, sol.nets, "schematic and routes must share one NetId space");
+    assert_eq!(
+        names, sol.nets,
+        "schematic and routes must share one NetId space"
+    );
 
     let net = |dev: &str, term: &str| {
         let d = schem
@@ -253,12 +274,21 @@ fn ota5t_schematic_is_the_circuit_on_the_routes_numbering() {
             .1
     };
     let port = |name: &str| {
-        pnr_core::NetId(sol.nets.iter().position(|n| n == name).expect("declared port") as u16)
+        pnr_core::NetId(
+            sol.nets
+                .iter()
+                .position(|n| n == name)
+                .expect("declared port") as u16,
+        )
     };
     assert_eq!(net("m1", "G"), port("inp"), "m1 gate is the inp port");
     assert_eq!(net("m5", "S"), port("vss"), "m5 source is the vss rail");
     // The anonymous internal node, resolved through the connect binding.
-    assert_eq!(net("m1", "S"), net("m5", "D"), "tail node joins m1.s and m5.d");
+    assert_eq!(
+        net("m1", "S"),
+        net("m5", "D"),
+        "tail node joins m1.s and m5.d"
+    );
     assert_eq!(net("m2", "S"), net("m1", "S"), "…and m2.s with them");
     assert!(
         !sol.ports.contains(&sol.nets[net("m1", "S").0 as usize]),
@@ -274,11 +304,20 @@ fn ota5t_schematic_is_the_circuit_on_the_routes_numbering() {
     )
     .routing;
     let batches = reqs.hard.len() + reqs.budget.len() + reqs.cost.len();
-    assert!(batches > 0, "annotator extracted no routing rules from the elaborated netlist");
+    assert!(
+        batches > 0,
+        "annotator extracted no routing rules from the elaborated netlist"
+    );
 
     // …and signoff runs against it rather than falling back to bare DRC.
-    let report = sol.signoff(&pdk).expect("schematic present, so signoff runs");
-    let lvs = report.hard_violations.iter().filter(|v| v.rule.contains("lvs")).count();
+    let report = sol
+        .signoff(&pdk)
+        .expect("schematic present, so signoff runs");
+    let lvs = report
+        .hard_violations
+        .iter()
+        .filter(|v| v.rule.contains("lvs"))
+        .count();
     eprintln!(
         "ota5t signoff: {} hard ({lvs} lvs), {} budget, cost {:.3}; {batches} routing rule batches",
         report.hard_violations.len(),
@@ -309,4 +348,3 @@ fn ota5t_clean_on_generic_finfet() {
     // gated here; sky130 is where the model-name claim is checkable.
     elaborate_on(&deck, "generic_finfet", None);
 }
-

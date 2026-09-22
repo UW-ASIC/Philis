@@ -127,16 +127,27 @@ pub fn emit(
         let (w, l, nf) = match u {
             Some(u) => {
                 let slot = u.devices.iter().position(|x| x == &members[0]);
-                let nf = slot.and_then(|s| u.dev_nf.get(s)).copied().unwrap_or(1).max(1);
+                let nf = slot
+                    .and_then(|s| u.dev_nf.get(s))
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1);
                 (u.unit_w.max(1), u.unit_l.max(1), nf)
             }
             // No covering unitization (unmatched device): schematic params
             // verbatim. The parser stores lowercase keys, nm units.
             None => {
                 let p = |k: &str, d_: i64| {
-                    d.params.iter().find(|(n, _)| n == k).map_or(d_, |(_, v)| *v)
+                    d.params
+                        .iter()
+                        .find(|(n, _)| n == k)
+                        .map_or(d_, |(_, v)| *v)
                 };
-                (p("w", 420) as i32, p("l", 150) as i32, p("nf", 1).max(1) as u16)
+                (
+                    p("w", 420) as i32,
+                    p("l", 150) as i32,
+                    p("nf", 1).max(1) as u16,
+                )
             }
         };
         let legs = members.len() as u8;
@@ -162,7 +173,14 @@ pub fn emit(
         } else {
             d.name.clone()
         };
-        instances.push(IrInst { name, kind: d.kind, w, l, nf, legs });
+        instances.push(IrInst {
+            name,
+            kind: d.kind,
+            w,
+            l,
+            nf,
+            legs,
+        });
     }
 
     // Placement lift: order by solved bottom-left corner, then express each
@@ -188,7 +206,10 @@ pub fn emit(
     let mut place: Vec<IrPlace> = Vec::with_capacity(n);
     for (k, &i) in order.iter().enumerate() {
         if k == 0 {
-            place.push(IrPlace { inst: i, aligns: Vec::new() });
+            place.push(IrPlace {
+                inst: i,
+                aligns: Vec::new(),
+            });
             continue;
         }
         // Same row: a placed cell whose y-range overlaps and that sits left.
@@ -204,10 +225,16 @@ pub fn emit(
         let aligns = if let Some(j) = row_mate {
             let gap = (l_.x[i] - l_.hw[i]) - (l_.x[j] + l_.hw[j]);
             vec![
-                IrAlign { mode: AlignMode::Bottom, reference: j, gap: IrGap::Nm(
-                    (l_.y[i] - l_.hh[i]) - (l_.y[j] - l_.hh[j]),
-                ) },
-                IrAlign { mode: AlignMode::ToTheRight, reference: j, gap: attribute(gap) },
+                IrAlign {
+                    mode: AlignMode::Bottom,
+                    reference: j,
+                    gap: IrGap::Nm((l_.y[i] - l_.hh[i]) - (l_.y[j] - l_.hh[j])),
+                },
+                IrAlign {
+                    mode: AlignMode::ToTheRight,
+                    reference: j,
+                    gap: attribute(gap),
+                },
             ]
         } else {
             // New row: nearest below with x-overlap, else the previous anchor.
@@ -220,10 +247,16 @@ pub fn emit(
             let j = below;
             let gap = (l_.y[i] - l_.hh[i]) - (l_.y[j] + l_.hh[j]);
             vec![
-                IrAlign { mode: AlignMode::Left, reference: j, gap: IrGap::Nm(
-                    (l_.x[i] - l_.hw[i]) - (l_.x[j] - l_.hw[j]),
-                ) },
-                IrAlign { mode: AlignMode::Above, reference: j, gap: attribute(gap) },
+                IrAlign {
+                    mode: AlignMode::Left,
+                    reference: j,
+                    gap: IrGap::Nm((l_.x[i] - l_.hw[i]) - (l_.x[j] - l_.hw[j])),
+                },
+                IrAlign {
+                    mode: AlignMode::Above,
+                    reference: j,
+                    gap: attribute(gap),
+                },
             ]
         };
         place.push(IrPlace { inst: i, aligns });
@@ -248,7 +281,13 @@ pub fn emit(
     }
     let ports: Vec<String> = netlist.nets.iter().map(|nt| nt.name.clone()).collect();
 
-    Ok(GenIr { name: "emitted".into(), ports, instances, place, edges })
+    Ok(GenIr {
+        name: "emitted".into(),
+        ports,
+        instances,
+        place,
+        edges,
+    })
 }
 
 /// Map a schematic terminal to the macroMaster variant's port name.
@@ -256,7 +295,13 @@ fn terminal_port(kind: DeviceKind, t: &str, position: usize) -> String {
     match kind {
         DeviceKind::Nmos | DeviceKind::Pmos => t.to_ascii_lowercase(),
         // Two-terminal devices: variant io is a/b, schematic order decides.
-        _ => if position == 0 { "a".into() } else { "b".into() },
+        _ => {
+            if position == 0 {
+                "a".into()
+            } else {
+                "b".into()
+            }
+        }
     }
 }
 
@@ -267,15 +312,17 @@ fn terminal_port(kind: DeviceKind, t: &str, position: usize) -> String {
 /// The generator failing against this process.
 pub fn elaborate_ir(ir: &GenIr, pdk: &Pdk, cfg: &ElabConfig) -> Result<Elaborated, GenError> {
     let built = build_with(pdk, ir.ports.clone(), |c| {
-        let mut placed: Vec<Option<macro_master::Instance>> = (0..ir.instances.len())
-            .map(|_| None)
-            .collect();
+        let mut placed: Vec<Option<macro_master::Instance>> =
+            (0..ir.instances.len()).map(|_| None).collect();
         for p in &ir.place {
             let spec = &ir.instances[p.inst];
             let mut inst = match (spec.kind, spec.legs) {
                 (DeviceKind::Resistor, _) => c.instantiate(
                     &spec.name,
-                    &variants::Res { w: spec.w, len: spec.l },
+                    &variants::Res {
+                        w: spec.w,
+                        len: spec.l,
+                    },
                 )?,
                 (kind, 2) => c.instantiate(
                     &spec.name,
@@ -318,9 +365,18 @@ pub fn elaborate_ir(ir: &GenIr, pdk: &Pdk, cfg: &ElabConfig) -> Result<Elaborate
 pub fn to_rust(ir: &GenIr) -> String {
     use std::fmt::Write;
     let mut s = String::new();
-    let _ = writeln!(s, "//! Generated by `philis emit` — PDK-agnostic; edit freely.");
-    let _ = writeln!(s, "use macro_master::{{variants::{{MatchedPair, Mos, Res}}, AlignMode, Block, CompBuilder,");
-    let _ = writeln!(s, "    Composition, GenError, InOut, Io, PortInfo, Process, Signal}};");
+    let _ = writeln!(
+        s,
+        "//! Generated by `philis emit` — PDK-agnostic; edit freely."
+    );
+    let _ = writeln!(
+        s,
+        "use macro_master::{{variants::{{MatchedPair, Mos, Res}}, AlignMode, Block, CompBuilder,"
+    );
+    let _ = writeln!(
+        s,
+        "    Composition, GenError, InOut, Io, PortInfo, Process, Signal}};"
+    );
     let _ = writeln!(s, "use pnr_core::DeviceKind;\n");
     let _ = writeln!(s, "#[derive(Default)]\npub struct EmittedIo {{");
     for p in &ir.ports {
@@ -334,7 +390,11 @@ pub fn to_rust(ir: &GenIr) -> String {
     let _ = writeln!(s, "        ]\n    }}\n}}\n");
     let _ = writeln!(s, "pub struct {};\nimpl Block for {} {{", ir.name, ir.name);
     let _ = writeln!(s, "    type Io = EmittedIo;");
-    let _ = writeln!(s, "    fn name(&self) -> String {{ \"{}\".into() }}\n}}\n", ir.name);
+    let _ = writeln!(
+        s,
+        "    fn name(&self) -> String {{ \"{}\".into() }}\n}}\n",
+        ir.name
+    );
     let _ = writeln!(s, "impl Composition for {} {{", ir.name);
     let _ = writeln!(
         s,
@@ -354,7 +414,12 @@ pub fn to_rust(ir: &GenIr) -> String {
                 inst.w, inst.l, inst.nf
             ),
         };
-        let _ = writeln!(s, "        let mut {} = c.instantiate(\"{}\", &{ctor})?;", var(p.inst), inst.name);
+        let _ = writeln!(
+            s,
+            "        let mut {} = c.instantiate(\"{}\", &{ctor})?;",
+            var(p.inst),
+            inst.name
+        );
         for a in &p.aligns {
             let gap = match &a.gap {
                 IrGap::Rule(name, d) => format!("c.process().rule(\"{name}\", {d})"),
@@ -368,7 +433,12 @@ pub fn to_rust(ir: &GenIr) -> String {
                 var(a.reference)
             );
         }
-        let _ = writeln!(s, "        let {} = c.place({})?;", var(p.inst), var(p.inst));
+        let _ = writeln!(
+            s,
+            "        let {} = c.place({})?;",
+            var(p.inst),
+            var(p.inst)
+        );
         let _ = writeln!(s, "        let _ = &{};", var(p.inst));
     }
     for (a, b) in &ir.edges {

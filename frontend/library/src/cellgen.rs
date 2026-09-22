@@ -36,7 +36,12 @@ pub struct Cells {
 /// not share a source net, or every merged pattern draws a short. Declined
 /// merges fall back to one cell per device.
 #[must_use]
-pub fn enumerate(netlist: &Netlist, macros: &Macros, constraints: &Constraints, pdk: &Pdk) -> Cells {
+pub fn enumerate(
+    netlist: &Netlist,
+    macros: &Macros,
+    constraints: &Constraints,
+    pdk: &Pdk,
+) -> Cells {
     let sized = with_per_device_sizing(netlist, constraints);
     let n = netlist.devices.len();
     let dev = |d: &DeviceId| &netlist.devices[d.0 as usize];
@@ -45,8 +50,12 @@ pub fn enumerate(netlist: &Netlist, macros: &Macros, constraints: &Constraints, 
     let mut unit_of: Vec<Option<usize>> = vec![None; n];
     let mut merged: Vec<Option<(Vec<DeviceId>, Vec<Macro>)>> = Vec::new();
     for u in &sized.unitization {
-        let members: Vec<DeviceId> =
-            u.devices.iter().copied().filter(|d| (d.0 as usize) < n).collect();
+        let members: Vec<DeviceId> = u
+            .devices
+            .iter()
+            .copied()
+            .filter(|d| (d.0 as usize) < n)
+            .collect();
         if members.len() < 2 {
             continue;
         }
@@ -69,13 +78,16 @@ pub fn enumerate(netlist: &Netlist, macros: &Macros, constraints: &Constraints, 
                 continue;
             }
         }
-        let group = DeviceGroup { devices: members.clone() };
+        let group = DeviceGroup {
+            devices: members.clone(),
+        };
         let mut alternatives = draw_variants(kind, &group, &sized, pdk);
         for m in &mut alternatives {
             bind_pins(m, netlist, &members);
         }
-        alternatives
-            .retain(|m| shared_pads_carry_one_net(m) && gate_straps_stay_private(m, netlist, &members));
+        alternatives.retain(|m| {
+            shared_pads_carry_one_net(m) && gate_straps_stay_private(m, netlist, &members)
+        });
         if alternatives.is_empty() {
             continue;
         }
@@ -105,7 +117,9 @@ pub fn enumerate(netlist: &Netlist, macros: &Macros, constraints: &Constraints, 
             }
             (vec![DeviceId(i as u16)], vec![m])
         } else {
-            let group = DeviceGroup { devices: vec![DeviceId(i as u16)] };
+            let group = DeviceGroup {
+                devices: vec![DeviceId(i as u16)],
+            };
             let mut alternatives = draw_variants(d.kind, &group, &sized, pdk);
             for m in &mut alternatives {
                 bind_pins(m, netlist, &group.devices);
@@ -116,9 +130,16 @@ pub fn enumerate(netlist: &Netlist, macros: &Macros, constraints: &Constraints, 
             cell_of[d.0 as usize] = ci;
         }
         devices_of.push(members);
-        spaces.push(gp::VariantSpace { alternatives, lock: None });
+        spaces.push(gp::VariantSpace {
+            alternatives,
+            lock: None,
+        });
     }
-    Cells { spaces, cell_of, devices_of }
+    Cells {
+        spaces,
+        cell_of,
+        devices_of,
+    }
 }
 
 fn terminal(d: &Device, name: &str) -> Option<NetId> {
@@ -128,10 +149,11 @@ fn terminal(d: &Device, name: &str) -> Option<NetId> {
 /// Pins drawn on one pad carry one net — otherwise a shared diffusion region
 /// shorts two nets (invisible to DRC, fatal to LVS).
 fn shared_pads_carry_one_net(m: &Macro) -> bool {
-    m.pins
-        .iter()
-        .enumerate()
-        .all(|(i, a)| m.pins[i + 1..].iter().all(|b| a.at != b.at || a.net == b.net))
+    m.pins.iter().enumerate().all(|(i, a)| {
+        m.pins[i + 1..]
+            .iter()
+            .all(|b| a.at != b.at || a.net == b.net)
+    })
 }
 
 /// No member's gate strap crosses another member's stubs on a different gate
@@ -165,7 +187,9 @@ fn region_spans(m: &Macro, members: usize) -> Vec<Option<(i32, i32)>> {
         if t != "S" && t != "D" {
             continue;
         }
-        let Some(slot) = n.parse::<usize>().ok().and_then(|i| span.get_mut(i)) else { continue };
+        let Some(slot) = n.parse::<usize>().ok().and_then(|i| span.get_mut(i)) else {
+            continue;
+        };
         let e = slot.get_or_insert((pin.at.x, pin.at.x));
         e.0 = e.0.min(pin.at.x);
         e.1 = e.1.max(pin.at.x);
@@ -176,7 +200,11 @@ fn region_spans(m: &Macro, members: usize) -> Vec<Option<(i32, i32)>> {
 /// Starting variant per cell, chosen by measuring each alternative in
 /// isolation (see [`price`]). Ties break on index, so the seed is deterministic.
 #[must_use]
-pub fn seed_assignment(variants: &[gp::VariantSpace], layers: &[pnr_core::LayerId], pdk: &Pdk) -> Vec<u16> {
+pub fn seed_assignment(
+    variants: &[gp::VariantSpace],
+    layers: &[pnr_core::LayerId],
+    pdk: &Pdk,
+) -> Vec<u16> {
     let cfg = gr::GlobalCfg::default();
     let mut checker = Checker::new(pdk, true).expect("a loaded Pdk re-parses its own deck");
     variants
@@ -199,9 +227,23 @@ pub fn seed_assignment(variants: &[gp::VariantSpace], layers: &[pnr_core::LayerI
 /// cannot load prices as maximally illegal.
 ///
 /// ponytail: one DRC+ERC pass per alternative per run (~13 ms each on sky130).
-fn price(m: &Macro, layers: &[pnr_core::LayerId], cfg: &gr::GlobalCfg, checker: &mut Checker) -> (bool, usize, i64, i64) {
+fn price(
+    m: &Macro,
+    layers: &[pnr_core::LayerId],
+    cfg: &gr::GlobalCfg,
+    checker: &mut Checker,
+) -> (bool, usize, i64, i64) {
     let p = gr::price_group(std::slice::from_ref(m), layers, cfg);
-    let geom = match checker.run(&m.shapes, &[], Checks { drc: true, erc: true, lvs: false, pex: false }) {
+    let geom = match checker.run(
+        &m.shapes,
+        &[],
+        Checks {
+            drc: true,
+            erc: true,
+            lvs: false,
+            pex: false,
+        },
+    ) {
         Ok(_) => checker.outputs().violations.len(),
         Err(_) => usize::MAX,
     };
@@ -216,7 +258,11 @@ pub fn realize(variants: &[gp::VariantSpace], assignment: &[u16]) -> Vec<Macro> 
         .enumerate()
         .map(|(i, space)| {
             let v = usize::from(assignment.get(i).copied().unwrap_or(0));
-            assert!(v < space.alternatives.len(), "cell {i} names variant {v} of {}", space.alternatives.len());
+            assert!(
+                v < space.alternatives.len(),
+                "cell {i} names variant {v} of {}",
+                space.alternatives.len()
+            );
             space.alternatives[v].clone()
         })
         .collect()
@@ -232,8 +278,9 @@ pub fn escalate(variants: &[gp::VariantSpace], current: &[u16]) -> Option<Vec<u1
     let spread: Vec<usize> = variants.iter().map(pin_spread).collect();
     let mut order: Vec<usize> = (0..variants.len()).collect();
     order.sort_by_key(|&i| (std::cmp::Reverse(spread[i]), i));
-    let mut next: Vec<u16> =
-        (0..variants.len()).map(|i| current.get(i).copied().unwrap_or(0)).collect();
+    let mut next: Vec<u16> = (0..variants.len())
+        .map(|i| current.get(i).copied().unwrap_or(0))
+        .collect();
     for &i in &order {
         if usize::from(next[i]) + 1 < variants[i].alternatives.len() {
             next[i] += 1;
@@ -251,8 +298,11 @@ fn pin_spread(space: &gp::VariantSpace) -> usize {
         .alternatives
         .iter()
         .map(|m| {
-            let mut p: Vec<_> =
-                m.pins.iter().map(|p| (p.at.x - m.bbox.x, p.at.y - m.bbox.y, p.at.w, p.at.h)).collect();
+            let mut p: Vec<_> = m
+                .pins
+                .iter()
+                .map(|p| (p.at.x - m.bbox.x, p.at.y - m.bbox.y, p.at.w, p.at.h))
+                .collect();
             p.sort_unstable();
             p
         })
@@ -285,13 +335,20 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints) -> Constraints
             continue;
         }
         for k in kinds {
-            let keep: Vec<usize> =
-                (0..u.devices.len()).filter(|&i| kind_of(&u.devices[i]) == Some(k)).collect();
+            let keep: Vec<usize> = (0..u.devices.len())
+                .filter(|&i| kind_of(&u.devices[i]) == Some(k))
+                .collect();
             unitization.push(Unitization {
                 devices: keep.iter().map(|&i| u.devices[i]).collect(),
                 device_type: k,
-                dev_nf: keep.iter().filter_map(|&i| u.dev_nf.get(i).copied()).collect(),
-                target_ratio: keep.iter().filter_map(|&i| u.target_ratio.get(i).copied()).collect(),
+                dev_nf: keep
+                    .iter()
+                    .filter_map(|&i| u.dev_nf.get(i).copied())
+                    .collect(),
+                target_ratio: keep
+                    .iter()
+                    .filter_map(|&i| u.target_ratio.get(i).copied())
+                    .collect(),
                 ..u.clone()
             });
         }
@@ -302,8 +359,18 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints) -> Constraints
             *c = true;
         }
     }
-    for (i, dev) in netlist.devices.iter().enumerate().filter(|(i, _)| !covered[*i]) {
-        let param = |k: &str| dev.params.iter().find(|(n, _)| n == k).map_or(0, |(_, v)| *v);
+    for (i, dev) in netlist
+        .devices
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !covered[*i])
+    {
+        let param = |k: &str| {
+            dev.params
+                .iter()
+                .find(|(n, _)| n == k)
+                .map_or(0, |(_, v)| *v)
+        };
         unitization.push(Unitization {
             devices: vec![DeviceId(i as u16)],
             device_type: dev.kind,
@@ -320,7 +387,10 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints) -> Constraints
             route_matching_required: false,
         });
     }
-    Constraints { unitization, ..Default::default() }
+    Constraints {
+        unitization,
+        ..Default::default()
+    }
 }
 
 /// Every enumerated variant of one group, by device kind.
@@ -338,9 +408,21 @@ fn draw_variants(kind: DeviceKind, group: &DeviceGroup, c: &Constraints, pdk: &P
 /// `Cell::enumerate` order. Never empty: an empty enumeration yields one empty
 /// macro so `variant == 0` always names something.
 fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &Pdk) -> Vec<Macro> {
-    let drawn: Vec<Macro> = G::enumerate(group, c, pdk).iter().map(|v| v.draw(group, c, pdk)).collect();
+    let drawn: Vec<Macro> = G::enumerate(group, c, pdk)
+        .iter()
+        .map(|v| v.draw(group, c, pdk))
+        .collect();
     if drawn.is_empty() {
-        return vec![Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w: 0, h: 0 } }];
+        return vec![Macro {
+            shapes: Vec::new(),
+            pins: Vec::new(),
+            bbox: Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
+        }];
     }
     drawn
 }
@@ -370,12 +452,16 @@ pub fn reference(netlist: &Netlist) -> RefInput {
         };
         let terminals: Vec<String> = pins
             .iter()
-            .map(|p| terminal(dev, p).map_or(String::new(), |n| netlist.nets[n.0 as usize].name.clone()))
+            .map(|p| {
+                terminal(dev, p).map_or(String::new(), |n| netlist.nets[n.0 as usize].name.clone())
+            })
             .collect();
         let param = |k: &str| dev.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
         let (fingers, params) = if matches!(dev.kind, DeviceKind::Nmos | DeviceKind::Pmos) {
-            let fingers =
-                param("nf").unwrap_or(1).max(param("m").unwrap_or(1)).clamp(1, i64::from(u16::MAX));
+            let fingers = param("nf")
+                .unwrap_or(1)
+                .max(param("m").unwrap_or(1))
+                .clamp(1, i64::from(u16::MAX));
             let params = ["w", "l"]
                 .into_iter()
                 .filter_map(|k| param(k).map(|nm| (k.to_string(), nm as f64 * 1e-9)))
@@ -385,10 +471,18 @@ pub fn reference(netlist: &Netlist) -> RefInput {
             (1, Vec::new())
         };
         for _ in 0..fingers {
-            devices.push(RefDeviceIn { kind, model: None, terminals: terminals.clone(), params: params.clone() });
+            devices.push(RefDeviceIn {
+                kind,
+                model: None,
+                terminals: terminals.clone(),
+                params: params.clone(),
+            });
         }
     }
-    RefInput { devices, ports: Vec::new() }
+    RefInput {
+        devices,
+        ports: Vec::new(),
+    }
 }
 
 /// Rebind a drawn macro's synthetic pin nets to the schematic's. A pin named
@@ -396,11 +490,23 @@ pub fn reference(netlist: &Netlist) -> RefInput {
 fn bind_pins(m: &mut Macro, netlist: &Netlist, members: &[DeviceId]) {
     for pin in &mut m.pins {
         let (ordinal, term) = match pin.name.split_once(':') {
-            Some((d, t)) => (d.strip_prefix('d').and_then(|s| s.parse::<usize>().ok()).unwrap_or(0), t),
+            Some((d, t)) => (
+                d.strip_prefix('d')
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0),
+                t,
+            ),
             None => (0, pin.name.as_str()),
         };
-        let dev = members.get(ordinal).and_then(|d| netlist.devices.get(d.0 as usize));
-        debug_assert!(dev.is_some(), "pin {:?} names member {ordinal} of {}", pin.name, members.len());
+        let dev = members
+            .get(ordinal)
+            .and_then(|d| netlist.devices.get(d.0 as usize));
+        debug_assert!(
+            dev.is_some(),
+            "pin {:?} names member {ordinal} of {}",
+            pin.name,
+            members.len()
+        );
         if let Some(net) = dev.and_then(|d| terminal(d, term)) {
             pin.net = net;
         }
@@ -425,7 +531,9 @@ mod tests {
     fn two_devices() -> Netlist {
         let nets = ["vdd", "vss", "g", "out"]
             .iter()
-            .map(|n| Net { name: (*n).to_string() })
+            .map(|n| Net {
+                name: (*n).to_string(),
+            })
             .collect();
         let dev = |name: &str, kind, d, g, s| Device {
             name: name.to_string(),
@@ -436,7 +544,11 @@ mod tests {
                 ("S".to_string(), NetId(s)),
                 ("B".to_string(), NetId(s)),
             ],
-            params: vec![("w".to_string(), 1000), ("l".to_string(), 210), ("nf".to_string(), 2)],
+            params: vec![
+                ("w".to_string(), 1000),
+                ("l".to_string(), 210),
+                ("nf".to_string(), 2),
+            ],
         };
         Netlist {
             devices: vec![
@@ -456,17 +568,32 @@ mod tests {
                     Macro {
                         shapes: vec![Shape {
                             layer: LayerId(1),
-                            rect: Rect { x: 0, y: 0, w, h: 100 },
+                            rect: Rect {
+                                x: 0,
+                                y: 0,
+                                w,
+                                h: 100,
+                            },
                         }],
                         // Distinct pin geometry per alternative, so `pin_spread`
                         // reports the real count rather than collapsing them.
                         pins: vec![Pin {
                             name: "G".to_string(),
                             net: NetId(0),
-                            at: Rect { x: w - 10, y: 0, w: 10, h: 10 },
+                            at: Rect {
+                                x: w - 10,
+                                y: 0,
+                                w: 10,
+                                h: 10,
+                            },
                             layer: LayerId(1),
                         }],
-                        bbox: Rect { x: 0, y: 0, w, h: 100 },
+                        bbox: Rect {
+                            x: 0,
+                            y: 0,
+                            w,
+                            h: 100,
+                        },
                     }
                 })
                 .collect(),
@@ -488,7 +615,10 @@ mod tests {
         }
         // A short table reads as variant 0 — `Layout::variant`'s own rule, and what
         // a placer that has not written it yet leaves behind.
-        assert_eq!(realize(&spaces, &[])[0].bbox, spaces[0].alternatives[0].bbox);
+        assert_eq!(
+            realize(&spaces, &[])[0].bbox,
+            spaces[0].alternatives[0].bbox
+        );
     }
 
     /// Every cell must offer at least one alternative or `realize` shifts cell
@@ -500,9 +630,16 @@ mod tests {
         let netlist = two_devices();
 
         let auto = enumerate(&netlist, &Macros::default(), &Constraints::default(), &pdk);
-        assert_eq!(auto.spaces.len(), netlist.devices.len(), "one cell per device");
+        assert_eq!(
+            auto.spaces.len(),
+            netlist.devices.len(),
+            "one cell per device"
+        );
         for (i, s) in auto.spaces.iter().enumerate() {
-            assert!(!s.alternatives.is_empty(), "cell {i} has an empty variant space");
+            assert!(
+                !s.alternatives.is_empty(),
+                "cell {i} has an empty variant space"
+            );
             // Pins bound to the netlist's nets, not the generator's synthetic ids:
             // unbound, routing shorts every gate together.
             let nets: Vec<u16> = s.alternatives[0].pins.iter().map(|p| p.net.0).collect();
@@ -516,19 +653,44 @@ mod tests {
         injected.register(
             "M1",
             Macro {
-                shapes: vec![Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 9, h: 9 } }],
+                shapes: vec![Shape {
+                    layer: LayerId(1),
+                    rect: Rect {
+                        x: 0,
+                        y: 0,
+                        w: 9,
+                        h: 9,
+                    },
+                }],
                 pins: vec![Pin {
                     name: "G".to_string(),
                     net: NetId(0),
-                    at: Rect { x: 0, y: 0, w: 9, h: 9 },
+                    at: Rect {
+                        x: 0,
+                        y: 0,
+                        w: 9,
+                        h: 9,
+                    },
                     layer: LayerId(1),
                 }],
-                bbox: Rect { x: 0, y: 0, w: 9, h: 9 },
+                bbox: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 9,
+                    h: 9,
+                },
             },
         );
         let mixed = enumerate(&netlist, &injected, &Constraints::default(), &pdk);
-        assert_eq!(mixed.spaces[0].alternatives.len(), 1, "injected macro must be a single-alternative space");
-        assert_eq!(mixed.spaces[0].alternatives[0].bbox.w, 9, "injected geometry was redrawn");
+        assert_eq!(
+            mixed.spaces[0].alternatives.len(),
+            1,
+            "injected macro must be a single-alternative space"
+        );
+        assert_eq!(
+            mixed.spaces[0].alternatives[0].bbox.w, 9,
+            "injected geometry was redrawn"
+        );
         // Its port was remapped onto M1's own `G` net (2), not left at the registry's 0.
         assert_eq!(mixed.spaces[0].alternatives[0].pins[0].net, NetId(2));
         assert_eq!(
@@ -558,12 +720,17 @@ mod tests {
         // machinery (no pad filter, no re-ordering) in the way.
         let sized = with_per_device_sizing(&netlist, &Constraints::default());
         for (i, dev) in netlist.devices.iter().enumerate() {
-            let group = DeviceGroup { devices: vec![DeviceId(i as u16)] };
+            let group = DeviceGroup {
+                devices: vec![DeviceId(i as u16)],
+            };
             let mut expect = draw_variants(dev.kind, &group, &sized, &pdk);
             for m in &mut expect {
                 bind_pins(m, &netlist, &group.devices);
             }
-            assert_eq!(cells.spaces[i].alternatives, expect, "cell {i} drifted from the per-device path");
+            assert_eq!(
+                cells.spaces[i].alternatives, expect,
+                "cell {i} drifted from the per-device path"
+            );
         }
     }
 
@@ -583,7 +750,10 @@ mod tests {
             assert!(seen.len() <= 6, "escalate exceeded the space size");
         }
         assert_eq!(seen.len(), 6, "escalate stopped before covering the space");
-        assert!(escalate(&spaces, &cur).is_none(), "exhaustion must stay exhausted");
+        assert!(
+            escalate(&spaces, &cur).is_none(),
+            "exhaustion must stay exhausted"
+        );
         // Nothing to escalate is exhaustion, not a panic.
         assert!(escalate(&[], &[]).is_none());
     }
@@ -593,7 +763,9 @@ mod tests {
     fn matched_pair() -> Netlist {
         let nets = ["tail", "g1", "g2", "d1", "d2"]
             .iter()
-            .map(|n| Net { name: (*n).to_string() })
+            .map(|n| Net {
+                name: (*n).to_string(),
+            })
             .collect();
         let dev = |name: &str, d: u16, g: u16| Device {
             name: name.to_string(),
@@ -604,9 +776,16 @@ mod tests {
                 ("S".to_string(), NetId(0)),
                 ("B".to_string(), NetId(0)),
             ],
-            params: vec![("w".to_string(), 1000), ("l".to_string(), 210), ("nf".to_string(), 1)],
+            params: vec![
+                ("w".to_string(), 1000),
+                ("l".to_string(), 210),
+                ("nf".to_string(), 1),
+            ],
         };
-        Netlist { devices: vec![dev("M1", 3, 1), dev("M2", 4, 2)], nets }
+        Netlist {
+            devices: vec![dev("M1", 3, 1), dev("M2", 4, 2)],
+            nets,
+        }
     }
 
     /// A matched unitization over `devices`, the shape the annotator emits for a
@@ -659,8 +838,12 @@ mod tests {
     fn a_matched_unitization_collapses_to_one_cell() {
         let Some(pdk) = pdk() else { return };
         let netlist = matched_mirror();
-        let cells =
-            enumerate(&netlist, &Macros::default(), &matched_unit_nf(&[0, 1], DeviceKind::Nmos, 2), &pdk);
+        let cells = enumerate(
+            &netlist,
+            &Macros::default(),
+            &matched_unit_nf(&[0, 1], DeviceKind::Nmos, 2),
+            &pdk,
+        );
 
         assert_eq!(cells.spaces.len(), 1, "the pair is one placeable cell");
         assert_eq!(cells.cell_of, vec![0, 0]);
@@ -692,19 +875,24 @@ mod tests {
                 "alternative {v} shorts two nets on one boundary pad"
             );
         }
-        assert!(seen.contains(&"d0") && seen.contains(&"d1"), "both members present");
+        assert!(
+            seen.contains(&"d0") && seen.contains(&"d1"),
+            "both members present"
+        );
 
         // At least one alternative interleaves the two devices (ABBA): one
         // member's diffusion regions then sit *inside* the other's span. A
         // `Single` block layout (AABB) only ever abuts, sharing one region.
         // (Read from S/D pins, not gate pins: a device's fingers are strapped
         // into one node and so surface exactly one gate pin each.)
-        let interleaved = cells.spaces[0].alternatives.iter().any(|m| {
-            match region_spans(m, 2)[..] {
-                [Some((a0, a1)), Some((b0, b1))] => a1.min(b1) > a0.max(b0),
-                _ => false,
-            }
-        });
+        let interleaved =
+            cells.spaces[0]
+                .alternatives
+                .iter()
+                .any(|m| match region_spans(m, 2)[..] {
+                    [Some((a0, a1)), Some((b0, b1))] => a1.min(b1) > a0.max(b0),
+                    _ => false,
+                });
         assert!(interleaved, "no ABBA alternative in the merged space");
     }
 
@@ -713,7 +901,9 @@ mod tests {
     fn matched_quad() -> Netlist {
         let nets = ["tail", "g", "d1", "d2", "d3", "d4"]
             .iter()
-            .map(|n| Net { name: (*n).to_string() })
+            .map(|n| Net {
+                name: (*n).to_string(),
+            })
             .collect();
         let dev = |name: &str, d: u16| Device {
             name: name.to_string(),
@@ -724,7 +914,11 @@ mod tests {
                 ("S".to_string(), NetId(0)),
                 ("B".to_string(), NetId(0)),
             ],
-            params: vec![("w".to_string(), 1000), ("l".to_string(), 210), ("nf".to_string(), 4)],
+            params: vec![
+                ("w".to_string(), 1000),
+                ("l".to_string(), 210),
+                ("nf".to_string(), 4),
+            ],
         };
         Netlist {
             devices: vec![dev("M1", 2), dev("M2", 3), dev("M3", 4), dev("M4", 5)],
@@ -772,10 +966,15 @@ mod tests {
             let span = region_spans(m, 4);
             span.iter().all(Option::is_some)
                 && span.iter().flatten().all(|&(a0, a1)| {
-                    span.iter().flatten().all(|&(b0, b1)| a1.min(b1) > a0.max(b0))
+                    span.iter()
+                        .flatten()
+                        .all(|&(b0, b1)| a1.min(b1) > a0.max(b0))
                 })
         });
-        assert!(interleaved, "no common-centroid alternative in the merged quad space");
+        assert!(
+            interleaved,
+            "no common-centroid alternative in the merged quad space"
+        );
     }
 
     /// A distinct-gate pair still merges, but only into patterns that do not draw
@@ -786,8 +985,12 @@ mod tests {
     fn a_distinct_gate_pair_merges_without_gate_shorting_patterns() {
         let Some(pdk) = pdk() else { return };
         let netlist = matched_pair(); // G nets 1 and 2 — distinct
-        let cells =
-            enumerate(&netlist, &Macros::default(), &matched_unit(&[0, 1], DeviceKind::Nmos), &pdk);
+        let cells = enumerate(
+            &netlist,
+            &Macros::default(),
+            &matched_unit(&[0, 1], DeviceKind::Nmos),
+            &pdk,
+        );
 
         assert_eq!(cells.spaces.len(), 1, "the pair still merges");
         assert!(!cells.spaces[0].alternatives.is_empty());
@@ -808,7 +1011,10 @@ mod tests {
                     })
                     .count();
                 assert!(s.is_some(), "alternative {v}: member d{d} has no S/D pin");
-                assert_eq!(n, 2, "alternative {v}: a strapped multi-finger pattern survived");
+                assert_eq!(
+                    n, 2,
+                    "alternative {v}: a strapped multi-finger pattern survived"
+                );
             }
         }
     }
@@ -823,20 +1029,51 @@ mod tests {
         injected.register(
             "M1",
             Macro {
-                shapes: vec![Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 9, h: 9 } }],
+                shapes: vec![Shape {
+                    layer: LayerId(1),
+                    rect: Rect {
+                        x: 0,
+                        y: 0,
+                        w: 9,
+                        h: 9,
+                    },
+                }],
                 pins: vec![Pin {
                     name: "G".to_string(),
                     net: NetId(0),
-                    at: Rect { x: 0, y: 0, w: 9, h: 9 },
+                    at: Rect {
+                        x: 0,
+                        y: 0,
+                        w: 9,
+                        h: 9,
+                    },
                     layer: LayerId(1),
                 }],
-                bbox: Rect { x: 0, y: 0, w: 9, h: 9 },
+                bbox: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 9,
+                    h: 9,
+                },
             },
         );
-        let cells = enumerate(&netlist, &injected, &matched_unit(&[0, 1], DeviceKind::Nmos), &pdk);
-        assert_eq!(cells.spaces.len(), 2, "injected member must keep the pair per-device");
+        let cells = enumerate(
+            &netlist,
+            &injected,
+            &matched_unit(&[0, 1], DeviceKind::Nmos),
+            &pdk,
+        );
+        assert_eq!(
+            cells.spaces.len(),
+            2,
+            "injected member must keep the pair per-device"
+        );
         assert_eq!(cells.cell_of, vec![0, 1]);
-        assert_eq!(cells.spaces[0].alternatives.len(), 1, "M1 is still the user's macro");
+        assert_eq!(
+            cells.spaces[0].alternatives.len(),
+            1,
+            "M1 is still the user's macro"
+        );
     }
 
     /// The drawn-short guard: the merged `finger_sequence` puts inter-device
@@ -852,9 +1089,17 @@ mod tests {
                 t.1 = NetId(4);
             }
         }
-        let cells =
-            enumerate(&netlist, &Macros::default(), &matched_unit(&[0, 1], DeviceKind::Nmos), &pdk);
-        assert_eq!(cells.spaces.len(), 2, "different source nets must not share diffusion");
+        let cells = enumerate(
+            &netlist,
+            &Macros::default(),
+            &matched_unit(&[0, 1], DeviceKind::Nmos),
+            &pdk,
+        );
+        assert_eq!(
+            cells.spaces.len(),
+            2,
+            "different source nets must not share diffusion"
+        );
         assert_eq!(cells.cell_of, vec![0, 1]);
     }
 
@@ -865,12 +1110,19 @@ mod tests {
     fn realize_and_escalate_round_trip_over_a_merged_space() {
         let Some(pdk) = pdk() else { return };
         let netlist = matched_pair();
-        let cells =
-            enumerate(&netlist, &Macros::default(), &matched_unit(&[0, 1], DeviceKind::Nmos), &pdk);
+        let cells = enumerate(
+            &netlist,
+            &Macros::default(),
+            &matched_unit(&[0, 1], DeviceKind::Nmos),
+            &pdk,
+        );
         let spaces = &cells.spaces;
         assert_eq!(spaces.len(), 1);
         let depth = spaces[0].alternatives.len();
-        assert!(depth >= 2, "a merged pair should still have a real variant space");
+        assert!(
+            depth >= 2,
+            "a merged pair should still have a real variant space"
+        );
 
         for v in 0..depth as u16 {
             let got = realize(spaces, &[v]);
@@ -885,7 +1137,11 @@ mod tests {
             seen.push(next.clone());
             cur = next;
         }
-        assert_eq!(seen.len(), depth, "escalate must cover exactly the merged space");
+        assert_eq!(
+            seen.len(),
+            depth,
+            "escalate must cover exactly the merged space"
+        );
     }
 
     /// This seeds the whole run, so it must be a function of its inputs alone — a
@@ -909,4 +1165,3 @@ mod tests {
         }
     }
 }
-

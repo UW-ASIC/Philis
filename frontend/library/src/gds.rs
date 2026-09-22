@@ -59,7 +59,11 @@ pub fn emit(shapes: &[Shape], layer_gds: &[(u16, u16)]) -> Vec<u8> {
         rec_i16(&mut out, LAYER, &[gl as i16]);
         rec_i16(&mut out, DATATYPE, &[gd as i16]);
         // Closed rectangle: first vertex repeated as the last (GDS requirement).
-        rec_i32(&mut out, XY, &[x, y, x + w, y, x + w, y + h, x, y + h, x, y]);
+        rec_i32(
+            &mut out,
+            XY,
+            &[x, y, x + w, y, x + w, y + h, x, y + h, x, y],
+        );
         rec_empty(&mut out, ENDEL);
     }
 
@@ -72,7 +76,10 @@ pub fn emit(shapes: &[Shape], layer_gds: &[(u16, u16)]) -> Vec<u8> {
 // Every record is [u16 total-len][u8 rec-type][u8 data-type][payload], BE.
 
 fn header(out: &mut Vec<u8>, rec_datatype: u16, payload_len: usize) {
-    debug_assert!(payload_len <= MAX_PAYLOAD, "GDS record payload exceeds 65534-byte cap");
+    debug_assert!(
+        payload_len <= MAX_PAYLOAD,
+        "GDS record payload exceeds 65534-byte cap"
+    );
     let len = 4 + payload_len;
     out.extend_from_slice(&(len as u16).to_be_bytes());
     out.extend_from_slice(&rec_datatype.to_be_bytes());
@@ -152,8 +159,24 @@ mod tests {
     #[test]
     fn emit_round_trips_through_parser() {
         let shapes = vec![
-            Shape { layer: LayerId(0), rect: Rect { x: 0, y: 0, w: 100, h: 200 } },
-            Shape { layer: LayerId(1), rect: Rect { x: 50, y: 50, w: 30, h: 30 } },
+            Shape {
+                layer: LayerId(0),
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 100,
+                    h: 200,
+                },
+            },
+            Shape {
+                layer: LayerId(1),
+                rect: Rect {
+                    x: 50,
+                    y: 50,
+                    w: 30,
+                    h: 30,
+                },
+            },
         ];
         let bytes = emit(&shapes, &[(68, 20), (69, 20)]);
         let (polys, _) = visualizer::parse_gds(&bytes);
@@ -161,7 +184,10 @@ mod tests {
         let mut layers: Vec<u16> = polys.iter().map(|p| p.layer).collect();
         layers.sort_unstable();
         assert_eq!(layers, vec![68, 69]);
-        assert!(polys.iter().all(|p| p.pts.len() == 4), "closing point dropped by parser");
+        assert!(
+            polys.iter().all(|p| p.pts.len() == 4),
+            "closing point dropped by parser"
+        );
     }
 
     // Every record must be even-length and the byte length must exactly cover the
@@ -169,14 +195,25 @@ mod tests {
     #[test]
     fn record_lengths_are_even_and_cover_the_stream() {
         let bytes = emit(
-            &[Shape { layer: LayerId(0), rect: Rect { x: -5, y: -5, w: 10, h: 10 } }],
+            &[Shape {
+                layer: LayerId(0),
+                rect: Rect {
+                    x: -5,
+                    y: -5,
+                    w: 10,
+                    h: 10,
+                },
+            }],
             &[(66, 20)],
         );
         let mut i = 0;
         let mut saw_endlib = false;
         while i + 4 <= bytes.len() {
             let len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
-            assert!(len >= 4 && len % 2 == 0, "record at {i} has bad length {len}");
+            assert!(
+                len >= 4 && len % 2 == 0,
+                "record at {i} has bad length {len}"
+            );
             assert!(i + len <= bytes.len(), "record at {i} overruns stream");
             if u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) == ENDLIB {
                 saw_endlib = true;
@@ -202,7 +239,10 @@ mod tests {
         }
         for &v in &[1e-3, 1e-9, 1.0, 42.5, -7.25] {
             let got = read(gds_real(v));
-            assert!((got - v).abs() <= v.abs() * 1e-9 + 1e-18, "roundtrip {v} != {got}");
+            assert!(
+                (got - v).abs() <= v.abs() * 1e-9 + 1e-18,
+                "roundtrip {v} != {got}"
+            );
         }
         assert_eq!(gds_real(0.0), [0; 8]);
     }

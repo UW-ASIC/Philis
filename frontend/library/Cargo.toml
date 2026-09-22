@@ -3,11 +3,6 @@ name = "library"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-default = []
-# Forwarded to `verify` → `gdsverify/gpu`. Devshell-only (needs CUDA/Vulkan).
-gpu = ["verify/gpu"]
-
 # The orchestrator: depends on every stage and wires the flow in `run`.
 [dependencies]
 pnr_core = { path = "../../kernel/core" }

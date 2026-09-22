@@ -126,7 +126,14 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
             e.criticality = e.criticality.max(criticality);
             e.residual += residual;
         } else {
-            out.push(BudgetStatus { kind, arm, total, satisfied, criticality, residual });
+            out.push(BudgetStatus {
+                kind,
+                arm,
+                total,
+                satisfied,
+                criticality,
+                residual,
+            });
         }
     }
     out.sort_by(|a, b| a.kind.cmp(&b.kind));
@@ -184,8 +191,11 @@ impl std::fmt::Display for MetadataReport {
             )?,
         }
         if !self.net_classes.is_empty() {
-            let census: Vec<String> =
-                self.net_classes.iter().map(|(c, n)| format!("{n} {c}")).collect();
+            let census: Vec<String> = self
+                .net_classes
+                .iter()
+                .map(|(c, n)| format!("{n} {c}"))
+                .collect();
             writeln!(f, "  nets: {}", census.join(", "))?;
         }
         writeln!(f)?;
@@ -249,7 +259,11 @@ mod tests {
 
     fn reqs(used: &[f32]) -> Requirements<Routes> {
         let mut r = Requirements::<Routes>::default();
-        r.hard.push(Box::new(used.iter().map(|&u| Budgeted { used: u }).collect::<Vec<_>>()));
+        r.hard.push(Box::new(
+            used.iter()
+                .map(|&u| Budgeted { used: u })
+                .collect::<Vec<_>>(),
+        ));
         r
     }
 
@@ -260,7 +274,10 @@ mod tests {
     #[test]
     fn distinguishes_comfortable_from_barely_legal() {
         let s = &statuses(&reqs(&[0.3]).hard, &empty_routes(), Arm::Hard)[0];
-        assert!(s.met() && s.met_with_margin(), "slack-rich budget is fully met");
+        assert!(
+            s.met() && s.met_with_margin(),
+            "slack-rich budget is fully met"
+        );
         assert_eq!(s.verdict(), "met");
 
         // Legal, but inside the 20% margin — the distinction a violation count
@@ -280,7 +297,10 @@ mod tests {
         let s = &statuses(&reqs(&[0.1, 0.1, 0.95]).hard, &empty_routes(), Arm::Hard)[0];
         assert_eq!(s.total, 3);
         assert_eq!(s.satisfied, 3, "all legal");
-        assert!(!s.met_with_margin(), "one member in the margin taints the family");
+        assert!(
+            !s.met_with_margin(),
+            "one member in the margin taints the family"
+        );
     }
 
     /// Θ is a measured milli-budget sum over the **budget** arm, not a count of
@@ -308,14 +328,21 @@ mod tests {
             routing: statuses(&reqs(&[3.0]).hard, &empty_routes(), Arm::Hard),
             ..MetadataReport::default()
         };
-        assert_eq!(hard_only.theta(), 0.0, "hard residuals are Φ's business, not Θ's");
+        assert_eq!(
+            hard_only.theta(),
+            0.0,
+            "hard residuals are Φ's business, not Θ's"
+        );
     }
 
     #[test]
     fn unsimulated_bias_is_stated_not_implied() {
         let r = MetadataReport::default();
         let text = format!("{r}");
-        assert!(text.contains("NOT SIMULATED"), "must not imply a thermal pass: {text}");
+        assert!(
+            text.contains("NOT SIMULATED"),
+            "must not imply a thermal pass: {text}"
+        );
         assert!(text.contains("vacuous"));
     }
 }

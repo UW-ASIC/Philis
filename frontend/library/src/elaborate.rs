@@ -20,7 +20,10 @@ pub struct ElabConfig {
 
 impl Default for ElabConfig {
     fn default() -> Self {
-        Self { seed: 42, epochs: 4 }
+        Self {
+            seed: 42,
+            epochs: 4,
+        }
     }
 }
 
@@ -47,8 +50,11 @@ impl Elaborated {
     /// Flat placed geometry — device shapes plus routed wires.
     #[must_use]
     pub fn geometry(&self) -> Vec<Shape> {
-        let mut shapes: Vec<Shape> =
-            self.macros.iter().flat_map(|m| m.shapes.iter().copied()).collect();
+        let mut shapes: Vec<Shape> = self
+            .macros
+            .iter()
+            .flat_map(|m| m.shapes.iter().copied())
+            .collect();
         shapes.extend(self.routes.wires.iter().flatten().copied());
         shapes
     }
@@ -66,10 +72,17 @@ impl Elaborated {
         let mut labels = Vec::new();
         for p in self.macros.iter().flat_map(|m| &m.pins) {
             let i = p.net.0 as usize;
-            let Some(name) = self.nets.get(i).filter(|n| self.ports.contains(n)) else { continue };
+            let Some(name) = self.nets.get(i).filter(|n| self.ports.contains(n)) else {
+                continue;
+            };
             if !std::mem::replace(&mut seen[i], true) {
                 let (x, y) = (p.at.x + p.at.w / 2, p.at.y + p.at.h / 2);
-                labels.push(verify::LabeledPin { name: name.clone(), layer: p.layer.0, x, y });
+                labels.push(verify::LabeledPin {
+                    name: name.clone(),
+                    layer: p.layer.0,
+                    x,
+                    y,
+                });
             }
         }
         verify::extract_spice(&self.geometry(), &labels, pdk, detail)
@@ -80,7 +93,13 @@ impl Elaborated {
     #[must_use]
     pub fn signoff(&self, pdk: &Pdk) -> Option<Report> {
         let schematic = self.schematic.as_ref()?;
-        Some(crate::signoff_shapes(&self.geometry(), &self.macros, &self.nets, schematic, pdk))
+        Some(crate::signoff_shapes(
+            &self.geometry(),
+            &self.macros,
+            &self.nets,
+            schematic,
+            pdk,
+        ))
     }
 
     /// The net labels [`Elaborated::signoff`] puts on the geometry, so an
@@ -117,7 +136,11 @@ pub fn elaborate<C: Composition>(
 }
 
 /// Route an already-built composition (shared with `emit::elaborate_ir`).
-pub(crate) fn route_built(built: macro_master::BuiltComp, pdk: &Pdk, cfg: &ElabConfig) -> Elaborated {
+pub(crate) fn route_built(
+    built: macro_master::BuiltComp,
+    pdk: &Pdk,
+    cfg: &ElabConfig,
+) -> Elaborated {
     // `centre = bbox.x + hw` makes the placement stamp the identity.
     let n = built.instances.len();
     let macros: Vec<Macro> = built.instances.iter().map(|(_, m)| m.clone()).collect();
@@ -139,21 +162,35 @@ pub(crate) fn route_built(built: macro_master::BuiltComp, pdk: &Pdk, cfg: &ElabC
     let d_router = detailed_router(pdk, &layers, &cuts, pin_access);
     // The netlist shares the pins' NetId numbering, so its routing rules key
     // the right nets with no remap.
-    let reqs = built.netlist.as_ref().map_or_else(Requirements::<Routes>::default, |nl| {
-        annotate(nl, &NoInference, &AnnotationConfig::default()).routing
-    });
+    let reqs = built
+        .netlist
+        .as_ref()
+        .map_or_else(Requirements::<Routes>::default, |nl| {
+            annotate(nl, &NoInference, &AnnotationConfig::default()).routing
+        });
     let mut neg = gr::Negotiation::new();
     let placed = gr::place_macros(&macros, &layout);
-    let pins: Vec<_> =
-        placed.iter().flat_map(|m| m.pins.iter().map(|p| (p.net, p.at, p.layer))).collect();
+    let pins: Vec<_> = placed
+        .iter()
+        .flat_map(|m| m.pins.iter().map(|p| (p.net, p.at, p.layer)))
+        .collect();
 
     let mut best: Option<(Routes, Report)> = None;
     for epoch in 0..cfg.epochs.max(1) {
         let seed = cfg.seed ^ u64::from(epoch);
         let (global, _) =
             gr::GlobalRoute::default().route(&layout, &macros, &[], &reqs, &layers, &mut neg, seed);
-        let (routes, report) =
-            d_router.route(&global, &pins, &placed, &[], &reqs, &layers, &cuts, &mut neg, seed);
+        let (routes, report) = d_router.route(
+            &global,
+            &pins,
+            &placed,
+            &[],
+            &reqs,
+            &layers,
+            &cuts,
+            &mut neg,
+            seed,
+        );
         if best.as_ref().is_none_or(|(_, b)| report.lex() < b.lex()) {
             best = Some((routes, report));
         }
@@ -189,9 +226,16 @@ pub(crate) fn routing_stack(pdk: &Pdk) -> (Vec<LayerId>, Vec<Cut>, Option<(Layer
     let pin_access = (layers.len() > 1).then(|| (layers.remove(0), cuts.remove(0)));
 
     assert!(!layers.is_empty(), "no routable layer in the deck");
-    assert_eq!(cuts.len(), layers.len() - 1, "every adjacent routing-layer pair needs its cut");
+    assert_eq!(
+        cuts.len(),
+        layers.len() - 1,
+        "every adjacent routing-layer pair needs its cut"
+    );
     for (i, &(cut, size, below, above)) in cuts.iter().enumerate() {
-        assert!(size <= below && size <= above, "cut {cut:?} is wider than its pads {below}/{above}");
+        assert!(
+            size <= below && size <= above,
+            "cut {cut:?} is wider than its pads {below}/{above}"
+        );
         assert!(
             !layers.contains(&cut),
             "cut {cut:?} (joining {:?} and {:?}) is also a routing layer",
@@ -216,14 +260,19 @@ pub(crate) fn detailed_router(
     cfg.pitch = cfg.pitch.max(pdk.routing_pitch(cfg.wire_width, &stack));
     for l in layers {
         let need = pdk.min_spacing(l.0).unwrap_or(0);
-        assert!(cfg.pitch - cfg.wire_width >= need, "track pitch leaves < {need} nm on {l:?}");
+        assert!(
+            cfg.pitch - cfg.wire_width >= need,
+            "track pitch leaves < {need} nm on {l:?}"
+        );
         assert!(
             pdk.min_width(l.0).is_none_or(|w| cfg.wire_width >= w),
             "wire under {l:?} min_width"
         );
     }
     let pad_extent = cuts.iter().map(|&(.., b, a)| b.max(a)).max().unwrap_or(0);
-    cfg.pitch = cfg.pitch.max(pdk.routing_pitch(cfg.wire_width.max(pad_extent), &stack));
+    cfg.pitch = cfg
+        .pitch
+        .max(pdk.routing_pitch(cfg.wire_width.max(pad_extent), &stack));
     cfg.wire_width = cfg.wire_width.max(pad_extent);
     cfg.pin_access = pin_access;
     let (pad_layer, pad_cut) = match pin_access {

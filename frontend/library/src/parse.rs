@@ -23,7 +23,9 @@ pub fn spice(text: &str) -> Result<Netlist, String> {
             return *id;
         }
         let id = NetId(nets.len() as u16);
-        nets.push(Net { name: name.to_string() });
+        nets.push(Net {
+            name: name.to_string(),
+        });
         net_index.insert(name.to_string(), id);
         id
     };
@@ -101,7 +103,12 @@ pub fn spice(text: &str) -> Result<Netlist, String> {
             out_params.push((k.clone(), val));
         }
 
-        devices.push(Device { name, kind, terminals, params: out_params });
+        devices.push(Device {
+            name,
+            kind,
+            terminals,
+            params: out_params,
+        });
     }
 
     if devices.is_empty() {
@@ -151,13 +158,21 @@ fn device_kind(name: &str, model: &str) -> Option<DeviceKind> {
         } else {
             DeviceKind::Nmos
         })),
-        'm' => Some(if is_p { DeviceKind::Pmos } else { DeviceKind::Nmos }),
+        'm' => Some(if is_p {
+            DeviceKind::Pmos
+        } else {
+            DeviceKind::Nmos
+        }),
         'r' => Some(DeviceKind::Resistor),
         'c' => Some(DeviceKind::Capacitor),
         'd' => Some(DeviceKind::Diode),
         // `is_p` already tests `pnp`; a bare `Q` card with an unrecognised model
         // keeps the historical NPN default.
-        'q' => Some(if is_p { DeviceKind::Pnp } else { DeviceKind::Npn }),
+        'q' => Some(if is_p {
+            DeviceKind::Pnp
+        } else {
+            DeviceKind::Npn
+        }),
         'l' => Some(DeviceKind::Inductor),
         _ => None,
     }
@@ -274,7 +289,7 @@ M2 vout net8 vdd vdd pfet_01v8 L=150e-9 w=10.5e-7 nf=20
         assert_eq!(name_of(m5.terminals[1].1), "id"); // D
         assert_eq!(name_of(m5.terminals[2].1), "vss"); // S
         assert_eq!(name_of(m5.terminals[3].1), "vss"); // B
-        // W: 10.5e-7 m = 1050 nm; L: 150e-9 m = 150 nm; nf plain.
+                                                       // W: 10.5e-7 m = 1050 nm; L: 150e-9 m = 150 nm; nf plain.
         let p = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|(_, v)| *v);
         assert_eq!(p(m5, "w"), Some(1050));
         assert_eq!(p(m5, "l"), Some(150));
@@ -298,9 +313,18 @@ mod x_instance_tests {
         // Polarity, not just family: collapsing these two onto one `Bjt` variant
         // drew, extracted and referenced the PNP as an NPN.
         assert_eq!(device_kind("XQ1", "npn_05v5_1x1"), Some(DeviceKind::Npn));
-        assert_eq!(device_kind("XQ2", "pnp_05v5_W3p40L3p40"), Some(DeviceKind::Pnp));
-        assert_eq!(device_kind("XR1", "res_generic_po"), Some(DeviceKind::Resistor));
-        assert_eq!(device_kind("XC1", "cap_mim_m3_1"), Some(DeviceKind::Capacitor));
+        assert_eq!(
+            device_kind("XQ2", "pnp_05v5_W3p40L3p40"),
+            Some(DeviceKind::Pnp)
+        );
+        assert_eq!(
+            device_kind("XR1", "res_generic_po"),
+            Some(DeviceKind::Resistor)
+        );
+        assert_eq!(
+            device_kind("XC1", "cap_mim_m3_1"),
+            Some(DeviceKind::Capacitor)
+        );
     }
 
     #[test]
