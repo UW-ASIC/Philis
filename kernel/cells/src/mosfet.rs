@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use analog::Constraints;
 use pnr_core::{DeviceGroup, DeviceKind, Macro, Process, Rect};
 
-use crate::builder::{greedy_centroid, pin, req, sizing, unitization, Builder, Sizing};
+use crate::builder::{cut_lattice, greedy_centroid, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
 use crate::{Cell, Pattern};
 
 /// One MOSFET variant: `nf` fingers per device arranged by `style`, with
@@ -72,12 +72,16 @@ impl Cell for Mosfet {
         let poly_ext = r("poly_ext", 130);
         let licon_poly_enc = r("licon_poly_enc", 50);
         let licon_poly_side = r("poly_encloses_licon_one_side", licon_poly_enc).max(licon_poly_enc);
-        let polycon_gap = r("polycon_to_diff_spacing", 0);
+        // Poly cut to any diff/tap: `polycon_to_diff_spacing` (n), 235 to p+.
+        let polycon_gap =
+            r("polycon_to_diff_spacing", 190).max(r("polycon_to_pdiff_spacing", 235));
         // li over a cut: `li_enc` all round, `li_side` on one side per axis.
         let li_enc = r("li_encloses_licon", 0);
         let li_side = r("li_encloses_licon_one_side", 0).max(li_enc);
         let li_space = r("li_min_spacing", 170);
         let diff_enc = r("diff_encloses_licon", 40);
+        let gate_space = r("licon_to_gate_spacing", 55);
+        let tap_enc = r("tap_encloses_licon_one_side", 120);
         let gate_l = s.unit_l;
         let finger_w = s.unit_w;
         let m1_pitch = r("mcon_size", 170) + 2 * r("m1_enc", 60) + r("met1_space", 140);
@@ -88,38 +92,47 @@ impl Cell for Mosfet {
             .max(ct + li_enc + li_side + li_space - gate_l)
             .max(ct + 2 * diff_enc);
         let pitch = (sd_w + gate_l + sd_w).max(m1_pitch);
+        // End regions hold one cut between the diff edge and a gate: it needs
+        // `gate_space` to the gate, plus a lattice step of snap slack.
+        let lat = cut_lattice(process);
+        let sd_end = sd_w.max(ct + 2 * (gate_space + lat / 2));
 
         let sequence = finger_sequence(n_dev, self.style, self.nf.max(1), &s.dev_nf);
+        let n_fingers = sequence.len() as i32;
 
         // LOD moat: extend diff past the outer gates on matched groups.
         let moat_ext = if matched { r("lod_moat_ext_moderate", 3000) } else { 0 };
         let diff_x_start = -moat_ext;
-        let diff_x_end = sequence.len() as i32 * pitch + moat_ext;
+        let gates_end = sd_end + (n_fingers - 1) * pitch + gate_l;
+        let diff_x_end = gates_end + sd_end + moat_ext;
         // One continuous diff row; extraction splits S from D at each gate
         // (`sd = diff NOT poly`).
         b.rect(diff, Rect { x: diff_x_start, y: 0, w: diff_x_end - diff_x_start, h: finger_w });
 
         // Gate stub length: the gate pad's met1/li must clear the S/D pad row,
         // and the gate cut must keep `polycon_gap` from the diff.
-        let li_floor =
-            licon_poly_side - poly_ext + ct + 2 * li_enc + li_space - (finger_w / 2 - ct / 2);
+        let cy = snap_cut(finger_w / 2 - ct / 2, lat);
+        let li_floor = licon_poly_side - poly_ext + ct + 2 * li_enc + li_space - cy;
         let stub = 200
             .max(2 * (m1_pitch - finger_w / 2 - poly_ext))
             .max(li_floor)
             .max(polycon_gap + licon_poly_side + ct - poly_ext);
-        let pad_y = -(poly_ext + stub);
+        // Snapped down (away from the diff) so the cut sits on the lattice.
+        let pad_y = snap_cut(-(poly_ext + stub), lat);
+        let stub = -pad_y - poly_ext;
         // Gate x-extent per device, for the strap below.
         let mut gate_span: BTreeMap<usize, (i32, i32)> = BTreeMap::new();
         for (idx, &di) in sequence.iter().enumerate() {
-            let gx = idx as i32 * pitch + sd_w;
+            let gx = idx as i32 * pitch + sd_end;
             b.rect(poly, Rect { x: gx, y: -poly_ext, w: gate_l, h: finger_w + 2 * poly_ext });
             b.rect(poly, Rect { x: gx, y: pad_y, w: gate_l, h: stub + 30 });
-            // Contacted gate pad (the deck requires a cut to reach poly).
-            let pad_w = gate_l.max(ct + 2 * licon_poly_side);
-            let pad_h = ct + licon_poly_enc + licon_poly_side;
-            b.rect(poly, Rect { x: gx + gate_l / 2 - pad_w / 2, y: pad_y, w: pad_w, h: pad_h });
-            let cut_x = gx + gate_l / 2 - ct / 2;
+            // Contacted gate pad (the deck requires a cut to reach poly),
+            // centred on the lattice-snapped cut.
+            let cut_x = snap_cut(gx + gate_l / 2 - ct / 2, lat);
             let cut_y = pad_y + licon_poly_side;
+            let pad_w = gate_l.max(ct + 2 * licon_poly_side + lat);
+            let pad_h = ct + licon_poly_enc + licon_poly_side;
+            b.rect(poly, Rect { x: cut_x + ct / 2 - pad_w / 2, y: pad_y, w: pad_w, h: pad_h });
             b.rect(licon, Rect { x: cut_x, y: cut_y, w: ct, h: ct });
             // li skirt: `li_side` rightward and downward (free space).
             let li_w = ct + li_enc + li_side;
@@ -146,17 +159,15 @@ impl Cell for Mosfet {
         // D, so every inter-device boundary (odd region) is a shared source.
         let multi = n_dev > 1;
         let is_s = |region: i32| (region % 2 == 0) != multi;
-        let n_fingers = sequence.len() as i32;
-        let cy = finger_w / 2 - ct / 2;
         for region in 0..=n_fingers {
             let cx = if region == 0 {
-                sd_w / 2
+                sd_end / 2
             } else if region == n_fingers {
-                (n_fingers - 1) * pitch + sd_w + gate_l + sd_w / 2
+                gates_end + sd_end / 2
             } else {
-                (2 * region - 1) * pitch / 2 + sd_w + gate_l / 2
+                (2 * region - 1) * pitch / 2 + sd_end + gate_l / 2
             };
-            let px = cx - ct / 2;
+            let px = snap_cut(cx - ct / 2, lat);
             let li_w = ct + li_enc + li_side;
             b.rect(li, Rect { x: px - li_enc, y: cy - li_enc, w: li_w, h: li_w });
             b.rect(licon, Rect { x: px, y: cy, w: ct, h: ct });
@@ -176,9 +187,10 @@ impl Cell for Mosfet {
         // unreferenced transistor), tied up to the bulk rail.
         let rise_l = 30.max(li_enc);
         let rise_r = rise_l.max(li_side);
-        let tap_y0 = finger_w + 580;
         let tap_h = ct + 2 * diff_enc;
-        let licon_y = finger_w + 240.max(poly_ext - 10 + licon_poly_side);
+        let licon_y = snap_cut(finger_w + 240.max(poly_ext - 10 + licon_poly_side) + lat - 1, lat);
+        // The tap row clears the dummy cuts by the poly-cut-to-diff spacing.
+        let tap_y0 = snap_cut((finger_w + 580).max(licon_y + ct + polycon_gap) + lat - 1, lat);
         // Riser-cut x extents per edge: each edge's dummies share one poly
         // skirt and one li strip (separate ones violate poly/li spacing).
         let mut edge_cuts: [Option<(i32, i32)>; 2] = [None, None];
@@ -189,7 +201,7 @@ impl Cell for Mosfet {
                 .enumerate()
             {
                 b.rect(poly, Rect { x: dx, y: -poly_ext, w: gate_l, h: finger_w + 2 * poly_ext });
-                let cx = dx + gate_l / 2 - ct / 2;
+                let cx = snap_cut(dx + gate_l / 2 - ct / 2, lat);
                 b.rect(licon, Rect { x: cx, y: licon_y, w: ct, h: ct });
                 let e = edge_cuts[edge].get_or_insert((cx, cx));
                 e.0 = e.0.min(cx);
@@ -242,13 +254,14 @@ impl Cell for Mosfet {
             });
         }
         // Tap cuts, skipping columns under a riser strip.
-        let guard_pitch = r("guard_licon_pitch", 340);
+        let guard_pitch = snap_cut(r("guard_licon_pitch", 340) + lat - 1, lat);
         let under_riser = |lx: i32| {
             edge_cuts.iter().flatten().any(|&(x0, x1)| lx <= x1 + ct + rise_r && x0 - rise_l <= lx + ct)
         };
         let mut kept: Option<(i32, i32)> = None;
-        let mut lx = tap_x0 + diff_enc;
-        while lx + ct + diff_enc <= tap_x1 {
+        // End cuts keep `tap_enc` of tap along the strip (licon.7).
+        let mut lx = snap_cut(tap_x0 + tap_enc + lat - 1, lat);
+        while lx + ct + tap_enc <= tap_x1 {
             if !under_riser(lx) {
                 b.rect(licon, Rect { x: lx, y: tap_y0 + diff_enc, w: ct, h: ct });
                 kept.get_or_insert((lx, lx)).1 = lx;
@@ -257,7 +270,7 @@ impl Cell for Mosfet {
         }
         // One solid li rail over the cut row, spanning the strip so it merges
         // with the risers.
-        let (first_lx, last_lx) = kept.unwrap_or((tap_x0 + diff_enc, tap_x0 + diff_enc));
+        let (first_lx, last_lx) = kept.unwrap_or((tap_x0 + tap_enc, tap_x0 + tap_enc));
         let rail_x0 = (first_lx - li_enc).min(tap_x0);
         b.rect(li, Rect {
             x: rail_x0,

@@ -8,7 +8,7 @@ use analog::cell::{GuardRingRequirement, GuardRingType};
 use analog::Constraints;
 use pnr_core::{DeviceId, Layout, Macro, Pin, Process, Rect, Target};
 
-use crate::builder::req;
+use crate::builder::{cut_lattice, req, snap_cut};
 use crate::Builder;
 
 /// Draw every guard ring the placed `layout` calls for. One [`Macro`] per ring
@@ -171,7 +171,8 @@ const GUARD_RING_GAP: i32 = 380;
 /// route crossing it. The `ring` pins sit on li; the router stitches down.
 fn draw_ring(b: &mut Builder, process: &dyn Process, r: &GuardRingRequirement, inner: Rect) {
     let ct = process.rule("contact", 170);
-    let pitch = if r.tap_pitch_nm > 0 { r.tap_pitch_nm } else { process.rule("guard_licon_pitch", 340) }.max(1);
+    let lat = cut_lattice(process);
+    let pitch = snap_cut(if r.tap_pitch_nm > 0 { r.tap_pitch_nm } else { process.rule("guard_licon_pitch", 340) } + lat - 1, lat).max(lat);
     let ring_width = width_from_depth(process, r.ring_type).max(r.min_width_nm);
     let gap = GUARD_RING_GAP;
 
@@ -207,15 +208,15 @@ fn draw_ring(b: &mut Builder, process: &dyn Process, r: &GuardRingRequirement, i
 
         let margin = (ring_width - ct) / 2;
         if bw >= bh {
-            let cy = by + bh / 2 - ct / 2;
-            let mut cx = bx + margin;
+            let cy = snap_cut(by + bh / 2 - ct / 2, lat);
+            let mut cx = snap_cut(bx + margin + lat - 1, lat);
             while cx + ct <= bx + bw - margin {
                 b.rect(licon, Rect { x: cx, y: cy, w: ct, h: ct });
                 cx += pitch;
             }
         } else {
-            let cx = bx + bw / 2 - ct / 2;
-            let mut cy = by + margin;
+            let cx = snap_cut(bx + bw / 2 - ct / 2, lat);
+            let mut cy = snap_cut(by + margin + lat - 1, lat);
             while cy + ct <= by + bh - margin {
                 b.rect(licon, Rect { x: cx, y: cy, w: ct, h: ct });
                 cy += pitch;
@@ -257,17 +258,17 @@ pub fn ring_halo(r: &GuardRingRequirement, process: &dyn Process) -> i32 {
 /// and tap spacing (270) against a flush neighbour.
 const RING_OUTER_CLEAR: i32 = 380;
 
-/// The ring band's implant: N+ for the electron ring, P+ for the hole ring.
+/// The ring band's implant. A ring is tied to its device's bulk, so it is
+/// drawn as that bulk's tap: `Hcgr`/`Hbgr` ring a PMOS and are an n+ tap in
+/// the n-well, `Ecgr`/`Ebgr` ring an NMOS and are a p+ substrate tap. (The
+/// other way round is a p+ "tap" in a well and an n+ "tap" in bare
+/// substrate, which magic rejects as diff/tap.10 and diff/tap.11.)
 fn implant_name(ring_type: GuardRingType) -> &'static str {
-    match ring_type {
-        GuardRingType::Ecgr | GuardRingType::Ebgr => "nsdm",
-        GuardRingType::Hcgr | GuardRingType::Hbgr => "psdm",
-    }
+    if in_nwell(ring_type) { "nsdm" } else { "psdm" }
 }
 
-/// `Hcgr`/`Hbgr` are p+ rings and sit in an n-well; `Ecgr`/`Ebgr` are n+ in
-/// the substrate with no well. (The deck has no polarity rule, so getting
-/// this backwards signs off clean while extracting the wrong devices.)
+/// `Hcgr`/`Hbgr` (PMOS rings) sit in an n-well; `Ecgr`/`Ebgr` (NMOS rings)
+/// in the substrate. A well over an NMOS ring would bury the NMOS.
 fn in_nwell(ring_type: GuardRingType) -> bool {
     matches!(ring_type, GuardRingType::Hcgr | GuardRingType::Hbgr)
 }
@@ -335,17 +336,15 @@ mod tests {
         }
     }
 
-    /// The well must follow the implant: p+ only exists in an n-well, n+
-    /// collecting in the p-substrate never carries one. These two were
-    /// inverted — every NMOS's Ecgr drew an n-well over it and magic extracted
-    /// 1 nfet from chain4's four, with signoff clean (no polarity rule in the
-    /// deck). Cross-checks the two independent sites, not one against itself.
+    /// A tap ring is n+ exactly when it sits in a well, and only PMOS rings
+    /// do (the annotator gives a PMOS `Hcgr`, an NMOS `Ecgr`).
     #[test]
     fn well_follows_implant_polarity() {
         use GuardRingType::{Ebgr, Ecgr, Hbgr, Hcgr};
         for t in [Ecgr, Ebgr, Hcgr, Hbgr] {
-            assert_eq!(in_nwell(t), implant_name(t) == "psdm", "{t:?}");
+            assert_eq!(in_nwell(t), implant_name(t) == "nsdm", "{t:?}");
         }
+        assert!(in_nwell(Hcgr) && !in_nwell(Ecgr));
     }
 
     #[test]

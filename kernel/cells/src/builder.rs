@@ -41,17 +41,37 @@ impl Builder {
         }
     }
 
-    /// The finished macro. Its bbox extents round up to an **even** number of
-    /// grid steps: the placer stamps a cell at `centre - bbox.w / 2`, which is
-    /// on-grid only if the half-extent is.
+    /// The finished macro. The bbox corner and extents are whole multiples of
+    /// two grid steps: the placer stamps a cell at `centre - bbox.w / 2`
+    /// (on-grid only if the half-extent is), and a placement that keeps the
+    /// corner on the cut lattice keeps every cut on it.
     #[must_use]
     pub fn finish(self) -> Macro {
-        let mut bbox = bbox_of(&self.shapes);
+        let tight = bbox_of(&self.shapes);
         let step = 2 * self.grid.max(1);
-        bbox.w = (bbox.w + step - 1) / step * step;
-        bbox.h = (bbox.h + step - 1) / step * step;
+        let x = tight.x.div_euclid(step) * step;
+        let y = tight.y.div_euclid(step) * step;
+        let bbox = Rect {
+            x,
+            y,
+            w: (tight.x + tight.w - x + step - 1) / step * step,
+            h: (tight.y + tight.h - y + step - 1) / step * step,
+        };
         Macro { shapes: self.shapes, pins: self.pins, bbox }
     }
+}
+
+/// The lattice cut positions snap to: two grid steps. magic grows a cut that
+/// is off this lattice by a grid step, which then reads as missing enclosure.
+#[must_use]
+pub fn cut_lattice(process: &dyn Process) -> i32 {
+    2 * process.grid().max(1)
+}
+
+/// Round `v` down onto the cut lattice `lat`.
+#[must_use]
+pub fn snap_cut(v: i32, lat: i32) -> i32 {
+    v.div_euclid(lat) * lat
 }
 
 fn bbox_of(shapes: &[Shape]) -> Rect {

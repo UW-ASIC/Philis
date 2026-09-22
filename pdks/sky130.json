@@ -1942,6 +1942,9 @@
     "res_min_width": 500,
     "tie_max_dist_nm": 3000,
     "wpe_clearance_moderate": 3000,
-    "licon_poly_enc": 50
+    "licon_poly_enc": 50,
+    "polycon_to_pdiff_spacing": 235,
+    "tap_encloses_licon_one_side": 120,
+    "licon_to_gate_spacing": 55
   }
 }
