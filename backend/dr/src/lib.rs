@@ -364,7 +364,6 @@ impl DetailedRouter for DetailedRoute {
             order: (0..n_compact as u32).collect(),
             corridors,
             reserved,
-            penalty: Vec::new(),
         };
         let mut hot = RouteHot::new(cold.graph.nodes(), n_compact);
         // History is keyed by absolute position: add the frame shift back.
@@ -382,29 +381,13 @@ impl DetailedRouter for DetailedRoute {
         }
         run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS);
 
-        // Hard analog rules (crosstalk, differential, antenna) never make a net
-        // congestion-dirty: rip up exactly the nets they name, at rising pressure.
-        let mut p_fac = P_FAC;
-        for _ in 0..HARD_ROUNDS {
-            let probe = build_routes(&hot, &cold.graph, cfg.wire_width, &compact, n_nets, layers, cuts);
-            let mut ids: Vec<u32> = Vec::new();
-            for batch in &reqs.hard {
-                batch.violating_ids(&probe, &mut ids);
-            }
-            ids.sort_unstable();
-            ids.dedup();
-            let affected: Vec<u32> = ids
-                .iter()
-                .filter_map(|&n| ci_of.get(n as usize).filter(|&&c| c != usize::MAX).map(|&c| c as u32))
-                .collect();
-            if affected.is_empty() {
-                break;
-            }
-            p_fac *= 2.0;
-            reroute_affected(&mut hot, &cold, &affected, p_fac);
-        }
+        // Constraint repair: the analog rules never make a net congestion-dirty, so
+        // PathFinder alone ignores them. Rip up what they name, reroute steered by
+        // the rule's own data, keep only what improves the rules.
+        let probe = |hot: &RouteHot| build_routes(hot, &cold.graph, cfg.wire_width, &compact, n_nets, layers, cuts);
+        repair_constraints(&mut hot, &cold, reqs, &ci_of, probe);
         neg.accumulate(gr::Tier::Detailed, &hot.hist, abs);
-        let overuse: f32 = hot.usage.iter().map(|&u| f32::from(u.saturating_sub(1))).sum();
+        let overuse = overuse(&hot);
 
         let mut routes = build_routes(&hot, &cold.graph, cfg.wire_width, &compact, n_nets, layers, cuts);
         // Shapes at or past this index per net are access geometry — the only
@@ -776,24 +759,171 @@ fn assert_on_stack(out: &[Vec<Shape>], layers: &[LayerId], cuts: &[Cut]) {
     }
 }
 
-/// Rip up `affected` nets and reroute them (corridor, then unrestricted) at
-/// `p_fac`; a net that cannot reroute gets its old tree back.
-fn reroute_affected(hot: &mut RouteHot, cold: &RouteCtx<TrackGrid>, affected: &[u32], p_fac: f32) {
-    let old: Vec<Vec<Vec<u32>>> = affected.iter().map(|&n| std::mem::take(&mut hot.trees[n as usize])).collect();
-    for tree in &old {
-        let mut nodes: Vec<u32> = tree.iter().flatten().copied().collect();
-        nodes.sort_unstable();
-        nodes.dedup();
-        for n in nodes {
-            hot.usage[n as usize] = hot.usage[n as usize].saturating_sub(1);
+/// Residual track overuse `Σ max(0, usage − 1)`.
+fn overuse(hot: &RouteHot) -> f32 {
+    hot.usage.iter().map(|&u| f32::from(u.saturating_sub(1))).sum()
+}
+
+/// Extra cost per node for a mirrored net off its partner's mirror image.
+const GUIDE_COST: f32 = 1.0;
+/// Extra cost per node adjacent (same layer, one track) to an aggressor.
+const COUPLE_COST: f32 = 2.0;
+
+/// Rip-up/reroute trials driven by violated routing rules, up to `HARD_ROUNDS`
+/// rounds while a trial is accepted. Per rule kind:
+///
+/// * `Differential`: reroute one side along the mirror image of the other
+///   (matched length and layers);
+/// * `CrosstalkExclusion`: reroute the victim, else the aggressor, priced away
+///   from the other's tracks;
+/// * `CouplingBudget`: reroute each victim priced away from all foreign tracks;
+/// * anything else: reroute the nets it names at doubled `p_fac`.
+///
+/// A trial is kept only if `(hard violations, Σ residual)` improves
+/// lexicographically without raising overuse. `probe` draws the current state.
+fn repair_constraints(
+    hot: &mut RouteHot,
+    cold: &RouteCtx<TrackGrid>,
+    reqs: &Requirements<Routes>,
+    ci_of: &[usize],
+    probe: impl Fn(&RouteHot) -> Routes,
+) {
+    let key = |hot: &RouteHot| {
+        let r = probe(hot);
+        let hard: u32 = reqs.hard.iter().map(|b| b.violations(&r)).sum();
+        let residual: f64 = reqs.hard.iter().chain(&reqs.budget).map(|b| b.residual(&r)).sum();
+        (hard, residual, overuse(hot))
+    };
+    let ci = |n: u32| ci_of.get(n as usize).copied().filter(|&c| c != usize::MAX);
+    let mut p_fac = P_FAC;
+    for _ in 0..HARD_ROUNDS {
+        p_fac *= 2.0;
+        let routes = probe(hot);
+        let violated: Vec<_> = reqs
+            .hard
+            .iter()
+            .filter(|b| b.violations(&routes) > 0)
+            .chain(reqs.budget.iter().filter(|b| b.residual(&routes) > 0.0))
+            .collect();
+        let mut accepted = false;
+        for batch in violated {
+            let mut ids = Vec::new();
+            batch.touched(&mut ids);
+            let pairs: Vec<(usize, usize)> =
+                ids.chunks_exact(2).filter_map(|p| Some((ci(p[0])?, ci(p[1])?))).collect();
+            let mut trials: Vec<Vec<(usize, Vec<f32>)>> = Vec::new();
+            match batch.kind().rsplit("::").next().unwrap_or("") {
+                "Differential" => {
+                    for &(a, b) in &pairs {
+                        trials.extend(mirror_guide(hot, &cold.graph, &cold.terms, a, b).map(|g| vec![(b, g)]));
+                        trials.extend(mirror_guide(hot, &cold.graph, &cold.terms, b, a).map(|g| vec![(a, g)]));
+                    }
+                }
+                "CrosstalkExclusion" => {
+                    for &(a, b) in &pairs {
+                        trials.push(vec![(a, keep_away(hot, &cold.graph, &[b]))]);
+                        trials.push(vec![(b, keep_away(hot, &cold.graph, &[a]))]);
+                    }
+                }
+                "CouplingBudget" => {
+                    for v in ids.iter().filter_map(|&n| ci(n)) {
+                        let others: Vec<usize> = (0..hot.trees.len()).filter(|&o| o != v).collect();
+                        trials.push(vec![(v, keep_away(hot, &cold.graph, &others))]);
+                    }
+                }
+                _ => {
+                    ids.clear();
+                    batch.violating_ids(&routes, &mut ids);
+                    ids.sort_unstable();
+                    ids.dedup();
+                    trials.push(ids.iter().filter_map(|&n| ci(n)).map(|n| (n, Vec::new())).collect());
+                }
+            }
+            for t in trials {
+                accepted |= trial(hot, cold, t, p_fac, &key);
+            }
+        }
+        if !accepted {
+            return;
         }
     }
-    let mut dij = Dij::new(cold.graph.nodes());
-    for (&net, old) in affected.iter().zip(old) {
-        let ni = net as usize;
-        let tree = cold.reroute(hot, ni, true, p_fac, &mut dij).unwrap_or(old);
-        hot.commit(ni, tree);
+}
+
+/// Rip up every net in `reroutes`, reroute each with its penalty field (corridor
+/// first), and keep the result only if `key` improves on (hard, budget) without
+/// raising overuse; otherwise restore the old trees. Returns whether it was kept.
+fn trial(
+    hot: &mut RouteHot,
+    cold: &RouteCtx<TrackGrid>,
+    reroutes: Vec<(usize, Vec<f32>)>,
+    p_fac: f32,
+    key: &impl Fn(&RouteHot) -> (u32, f64, f32),
+) -> bool {
+    if reroutes.is_empty() {
+        return false;
     }
+    let before = key(hot);
+    let old: Vec<(usize, Vec<Vec<u32>>)> = reroutes.iter().map(|(n, _)| (*n, hot.trees[*n].clone())).collect();
+    for &(n, _) in &old {
+        hot.commit(n, Vec::new());
+    }
+    let mut dij = Dij::new(cold.graph.nodes());
+    for ((n, field), (_, prev)) in reroutes.into_iter().zip(&old) {
+        let tree = cold.reroute(hot, n, true, p_fac, &field, &mut dij).unwrap_or_else(|| prev.clone());
+        hot.commit(n, tree);
+    }
+    let after = key(hot);
+    let better = after.2 <= before.2 && (after.0, after.1) < (before.0, before.1);
+    if !better {
+        for (n, tree) in old {
+            hot.commit(n, tree);
+        }
+    }
+    better
+}
+
+/// Guide field for net `b`: zero on the mirror image of `a`'s tree about the
+/// vertical axis between the two nets' terminal centroids, `GUIDE_COST`
+/// elsewhere. `None` when `b`'s terminals are not (within a track) the mirror
+/// of `a`'s — the pair is not placed symmetrically, so no mirror route exists.
+fn mirror_guide(hot: &RouteHot, grid: &TrackGrid, terms: &[Vec<u32>], a: usize, b: usize) -> Option<Vec<f32>> {
+    let xs = |n: usize| terms[n].iter().map(|&t| grid.pos(t)).collect::<Vec<_>>();
+    let (ta, tb) = (xs(a), xs(b));
+    if ta.is_empty() || ta.len() != tb.len() || hot.trees[a].is_empty() {
+        return None;
+    }
+    let mean = |v: &[(i32, i32, u32)]| v.iter().map(|p| i64::from(p.0)).sum::<i64>() / v.len() as i64;
+    let axis2 = (mean(&ta) + mean(&tb)) as i32; // twice the axis x
+    let tol = grid.pitch;
+    let mirrored = ta.iter().all(|&(x, y, _)| {
+        tb.iter().any(|&(bx, by, _)| ((axis2 - x) - bx).abs() <= tol && (y - by).abs() <= tol)
+    });
+    if !mirrored {
+        return None;
+    }
+    let mut field = vec![GUIDE_COST; grid.nodes()];
+    for n in hot.tree_nodes(a) {
+        let (x, y, l) = grid.pos(n);
+        field[grid.node(grid.bin_x(axis2 - x), grid.bin_y(y), l) as usize] = 0.0;
+    }
+    Some(field)
+}
+
+/// `COUPLE_COST` on every node within one track (same layer) of `nets`' trees.
+fn keep_away(hot: &RouteHot, grid: &TrackGrid, nets: &[usize]) -> Vec<f32> {
+    let mut field = vec![0.0; grid.nodes()];
+    for &net in nets {
+        for n in hot.tree_nodes(net) {
+            let (ix, iy, l) = grid.ixy(n);
+            for (dx, dy) in [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)] {
+                let (jx, jy) = (ix as i32 + dx, iy as i32 + dy);
+                if jx >= 0 && jy >= 0 && jx < grid.nx as i32 && jy < grid.ny as i32 {
+                    field[grid.node(jx as u32, jy as u32, l) as usize] = COUPLE_COST;
+                }
+            }
+        }
+    }
+    field
 }
 
 /// Report: analog tiers; open nets, sacrificed/unlanded pins and drawn shorts in
@@ -1238,6 +1368,24 @@ mod tests {
         assert_eq!(widest(0), Some(1_000));
         assert_eq!(widest(1), Some(290));
         assert!(report.budget_violations.is_empty(), "{:?}", report.budget_violations.iter().map(|v| &v.rule).collect::<Vec<_>>());
+    }
+
+    /// The guide for `b` is free exactly on the mirror image of `a`'s tree, and
+    /// absent when the terminals are not mirror images.
+    #[test]
+    fn mirror_guide_follows_the_partner() {
+        let grid = TrackGrid::with_layers((10_000, 10_000), 1_000, VIA_COST, 2);
+        let n = |ix, iy| grid.node(ix, iy, 0);
+        let terms = vec![vec![n(1, 2), n(3, 2)], vec![n(8, 2), n(6, 2)], vec![n(8, 5), n(6, 2)]];
+        let mut hot = RouteHot::new(grid.nodes(), 3);
+        hot.commit(0, vec![vec![n(1, 2), n(2, 2), n(3, 2)]]);
+        let g = mirror_guide(&hot, &grid, &terms, 0, 1).expect("mirror-placed pair");
+        let free: Vec<u32> = (0..grid.nodes() as u32).filter(|&i| g[i as usize] == 0.0).collect();
+        assert_eq!(free, vec![n(6, 2), n(7, 2), n(8, 2)]);
+        assert!(mirror_guide(&hot, &grid, &terms, 0, 2).is_none());
+        let away = keep_away(&hot, &grid, &[0]);
+        assert_eq!(away[n(2, 3) as usize], COUPLE_COST);
+        assert_eq!(away[n(2, 4) as usize], 0.0);
     }
 
     /// No two nets may overlap on a layer.

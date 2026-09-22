@@ -584,31 +584,38 @@ impl RouteHot {
 }
 
 /// Immutable per-run context. `corridors[net]` (sorted region ids) restricts the
-/// first [`CORRIDOR_EPOCHS`]; `reserved[node]` is a hard owner (`NONE` = free);
-/// `penalty[net][node]` is an extra cost for that net (missing = none).
+/// first [`CORRIDOR_EPOCHS`]; `reserved[node]` is a hard owner (`NONE` = free).
 pub struct RouteCtx<G> {
     pub graph: G,
     pub terms: Vec<Vec<u32>>,
     pub order: Vec<u32>,
     pub corridors: Vec<Vec<u32>>,
     pub reserved: Vec<u32>,
-    pub penalty: Vec<Vec<f32>>,
 }
 
 impl<G: RGraph> RouteCtx<G> {
-    /// No corridors, reservations or penalties.
+    /// No corridors or reservations.
     pub fn new(graph: G, terms: Vec<Vec<u32>>, order: Vec<u32>) -> Self {
-        Self { graph, terms, order, corridors: Vec::new(), reserved: Vec::new(), penalty: Vec::new() }
+        Self { graph, terms, order, corridors: Vec::new(), reserved: Vec::new() }
     }
 
-    /// Route `net` against the current state: inside its corridor when `corridor`,
-    /// falling back to unrestricted.
-    pub fn reroute(&self, hot: &RouteHot, net: usize, corridor: bool, p_fac: f32, dij: &mut Dij) -> Option<Vec<Vec<u32>>> {
+    /// Route `net` against the current state with an extra per-node `penalty`
+    /// (empty = none): inside its corridor when `corridor`, falling back to
+    /// unrestricted.
+    pub fn reroute(
+        &self,
+        hot: &RouteHot,
+        net: usize,
+        corridor: bool,
+        p_fac: f32,
+        penalty: &[f32],
+        dij: &mut Dij,
+    ) -> Option<Vec<Vec<u32>>> {
         let old = hot.tree_nodes(net);
         let corr = if corridor { self.corridors.get(net).map_or(&[][..], Vec::as_slice) } else { &[] };
-        let pen = self.penalty.get(net).map_or(&[][..], Vec::as_slice);
         let search = |c: &[u32], dij: &mut Dij| {
-            route_net(&self.graph, &hot.usage, &hot.hist, &old, &self.terms[net], c, net as u32, &self.reserved, pen, p_fac, dij)
+            let (g, t, r) = (&self.graph, &self.terms[net], &self.reserved);
+            route_net(g, &hot.usage, &hot.hist, &old, t, c, net as u32, r, penalty, p_fac, dij)
         };
         search(corr, dij).or_else(|| if corr.is_empty() { None } else { search(&[], dij) })
     }
@@ -764,7 +771,7 @@ pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: 
             if !dirty || cold.terms[net].is_empty() {
                 continue;
             }
-            if let Some(branches) = cold.reroute(hot, net, epoch < CORRIDOR_EPOCHS, p_fac, &mut dij) {
+            if let Some(branches) = cold.reroute(hot, net, epoch < CORRIDOR_EPOCHS, p_fac, &[], &mut dij) {
                 hot.commit(net, branches);
                 moved = true;
             }
