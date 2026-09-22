@@ -85,30 +85,6 @@ impl DetailedCfg {
     }
 }
 
-/// A detailed-routing algorithm.
-pub trait DetailedRouter {
-    /// Realise `global` over the metal stack `layers` (even index = horizontal),
-    /// joined by `cuts[i]` between `layers[i]` and `layers[i + 1]`.
-    ///
-    /// `pins` are placed pin rects; pins of `placed` (device macros) and `rings`
-    /// are folded in, deduplicated. Ring metal is charged as track usage (routed
-    /// around); device cells are not (routed to). Both are consulted for landing-pad
-    /// spacing. `neg` carries PathFinder history across calls; `seed` is unused.
-    #[allow(clippy::too_many_arguments)]
-    fn route(
-        &self,
-        global: &Routes,
-        pins: &[(NetId, Rect, LayerId)],
-        placed: &[Macro],
-        rings: &[Macro],
-        reqs: &Requirements<Routes>,
-        layers: &[LayerId],
-        cuts: &[Cut],
-        neg: &mut gr::Negotiation,
-        seed: u64,
-    ) -> (Routes, Report);
-}
-
 /// The detailed router.
 #[derive(Default)]
 pub struct DetailedRoute {
@@ -127,8 +103,16 @@ struct Access {
     choice: Option<(i32, bool)>,
 }
 
-impl DetailedRouter for DetailedRoute {
-    fn route(
+impl DetailedRoute {
+    /// Realise `global` over the metal stack `layers` (even index = horizontal),
+    /// joined by `cuts[i]` between `layers[i]` and `layers[i + 1]`.
+    ///
+    /// `pins` are placed pin rects; pins of `placed` (device macros) and `rings`
+    /// are folded in, deduplicated. Ring metal is charged as track usage (routed
+    /// around); device cells are not (routed to). Both are consulted for landing-pad
+    /// spacing. `neg` carries PathFinder history across calls.
+    #[allow(clippy::too_many_arguments)]
+    pub fn route(
         &self,
         global: &Routes,
         pins: &[(NetId, Rect, LayerId)],
@@ -138,7 +122,6 @@ impl DetailedRouter for DetailedRoute {
         layers: &[LayerId],
         cuts: &[Cut],
         neg: &mut gr::Negotiation,
-        _seed: u64,
     ) -> (Routes, Report) {
         let cfg = &self.cfg;
 
@@ -1222,7 +1205,7 @@ mod tests {
         neg: &mut gr::Negotiation,
     ) -> (Routes, Report) {
         let reqs = Requirements::<Routes>::default();
-        DetailedRoute { cfg }.route(global, pins, placed, rings, &reqs, &LAYERS, &CUTS, neg, 0)
+        DetailedRoute { cfg }.route(global, pins, placed, rings, &reqs, &LAYERS, &CUTS, neg)
     }
 
     fn rules(r: &Report) -> Vec<&String> {

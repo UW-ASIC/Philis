@@ -1,9 +1,7 @@
 //! `verify` — physical verification through GPurify (`gdsverify`).
 //!
 //! [`signoff`] runs DRC/ERC/LVS/PEX in one engine pass and folds the result
-//! into a [`pnr_core::Report`]. [`LiveOracle`] is the in-loop
-//! [`pnr_core::Oracle`] over the same engine; [`drc`]/[`erc`] are standalone
-//! probes. [`Pdk`] (the process schema every crate reads) lives here too.
+//! into a [`pnr_core::Report`]; [`drc`]/[`erc`] are standalone probes. [`Pdk`] (the process schema every crate reads) lives here too.
 
 pub mod checker;
 pub mod geom;
@@ -11,13 +9,11 @@ pub mod netlist;
 pub mod pdk;
 pub mod reference;
 
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use analog::{Requirements, Rule};
 use gdsverify::check::report::Measurement;
 use gdsverify::engine::{StageStatus, Summary};
-use pnr_core::{Layout, Report, Shape, Violation};
+use pnr_core::{Report, Shape, Violation};
 
 pub use checker::Checker;
 pub use gdsverify::engine::Checks;
@@ -133,55 +129,6 @@ fn denied(status: &StageStatus) -> Option<String> {
     }
 }
 
-/// The live [`pnr_core::Oracle`]: one reusable density-stripped [`Checker`].
-/// Deterministic: the engine runs single-threaded and sorts its output.
-pub struct LiveOracle {
-    // ponytail: Mutex serializes; thread_local sessions if a parallel batch
-    // lane appears.
-    session: Mutex<Checker>,
-}
-
-impl LiveOracle {
-    /// # Errors
-    /// The deck failing to re-parse (cannot happen for a loaded `Pdk`).
-    pub fn new(pdk: &Pdk) -> Result<Self, String> {
-        Ok(Self { session: Mutex::new(Checker::new(pdk, true)?) })
-    }
-
-    const DRC_ONLY: Checks = Checks { drc: true, erc: false, lvs: false, pex: false };
-    const PEX_ONLY: Checks = Checks { drc: false, erc: false, lvs: false, pex: true };
-}
-
-impl pnr_core::Oracle for LiveOracle {
-    fn drc(&self, shapes: &[Shape]) -> pnr_core::DrcSummary {
-        let mut session = self.session.lock().expect("a panicked oracle call");
-        if session.run(shapes, &[], Self::DRC_ONLY).is_err() {
-            // Fail closed: geometry the engine cannot load is not clean.
-            return pnr_core::DrcSummary { violations: 1, shortfall_nm: 1 };
-        }
-        let v = &session.outputs().violations;
-        pnr_core::DrcSummary {
-            violations: v.len() as u32,
-            shortfall_nm: (0..v.len()).map(|i| shortfall_nm(v.limit[i], v.measured[i])).sum(),
-        }
-    }
-
-    fn pex_cap_ff(&self, shapes: &[Shape]) -> f32 {
-        let mut session = self.session.lock().expect("a panicked oracle call");
-        match session.run(shapes, &[], Self::PEX_ONLY) {
-            Err(_) => 0.0,
-            Ok(_) => session.total_cap_ff(),
-        }
-    }
-
-    /// Ambiguous when extraction aborts (the implant-merge signal) or finds
-    /// the wrong device count (two devices fused, or one split).
-    fn merge_ambiguous(&self, shapes: &[Shape], expected_devices: usize) -> bool {
-        let mut session = self.session.lock().expect("a panicked oracle call");
-        session.device_count(shapes) != Some(expected_devices)
-    }
-}
-
 /// One located finding, for callers that want rows rather than a Report.
 #[derive(Clone, Debug)]
 pub struct Finding {
@@ -240,68 +187,11 @@ fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks) 
     findings
 }
 
-/// A captured DRC total, frozen into a Hard rule until the next re-measure.
-/// Never satisfied; costs its nm shortfall (clamped ≥ 1).
-#[derive(Clone, Copy)]
-struct DrcSpacing {
-    margin: i32,
-}
-
-impl DrcSpacing {
-    fn from_margin(m: i64) -> Self {
-        Self { margin: m.clamp(1, i64::from(i32::MAX)) as i32 }
-    }
-}
-
-impl Rule for DrcSpacing {
-    type On = Layout;
-    fn cost(self, _state: &Layout) -> f32 {
-        self.margin as f32
-    }
-    fn satisfied(self, _state: &Layout) -> bool {
-        false
-    }
-}
-
-/// In-loop placement feedback: measure `shapes` through the oracle and freeze
-/// any DRC shortfall into a Hard [`Requirements<Layout>`] batch. Also returns
-/// the raw summary, whose `violations` count is the honest severity term (the
-/// batch is one rule however many findings stand).
-#[must_use]
-pub fn drc_feedback(
-    oracle: &LiveOracle,
-    shapes: &[Shape],
-) -> (Requirements<Layout>, pnr_core::DrcSummary) {
-    use pnr_core::Oracle as _;
-    let summary = oracle.drc(shapes);
-    let mut req = Requirements::default();
-    if summary.violations > 0 {
-        req.hard.push(Box::new(vec![DrcSpacing::from_margin(summary.shortfall_nm)]));
-    }
-    (req, summary)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use gdsverify::geom::Dbu;
-    use pnr_core::{Layout, Process, Rect};
-
-    fn empty_layout() -> Layout {
-        Layout {
-            x: vec![],
-            y: vec![],
-            hw: vec![],
-            hh: vec![],
-            axis: vec![],
-            groups: vec![],
-            orient: vec![],
-            variant: vec![],
-            branch: vec![],
-            power_uw: vec![],
-            temp_mc: vec![],
-        }
-    }
+    use pnr_core::{Process, Rect};
 
     fn sky130() -> Pdk {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/sky130.json");
@@ -311,19 +201,6 @@ mod tests {
     fn rect(pdk: &Pdk, layer: &str, x: i32, y: i32, w: i32, h: i32) -> Shape {
         let layer = pdk.layer(layer).unwrap_or_else(|| panic!("no layer {layer}"));
         Shape { layer, rect: Rect { x, y, w, h } }
-    }
-
-    // A captured violation must read as unsatisfied (Hard) and cost its margin.
-    #[test]
-    fn drc_spacing_rule_is_hard_and_costs_margin() {
-        let r = DrcSpacing::from_margin(140);
-        let s = empty_layout();
-        assert!(!r.satisfied(&s), "a real DRC finding is never satisfied");
-        assert_eq!(r.cost(&s), 140.0);
-        // A zero/negative margin still costs ≥ 1 and stays unsatisfied.
-        let r0 = DrcSpacing::from_margin(0);
-        assert!(!r0.satisfied(&s));
-        assert_eq!(r0.cost(&s), 1.0);
     }
 
     // Metal reaching no device is floating — unless a label makes it a port,

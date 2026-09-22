@@ -5,25 +5,19 @@
 
 use analog::Requirements;
 use annotator::{annotate, AnnotationConfig, NoInference};
-use dr::DetailedRouter;
-use gr::GlobalRouter;
 use macro_master::{build_composition, Composition};
 use pnr_core::{LayerId, Layout, Macro, Netlist, Orient, Report, Routes, Shape};
 use verify::Pdk;
 
 /// Elaboration configuration.
 pub struct ElabConfig {
-    pub seed: u64,
     /// Routing negotiation epochs; the lexicographically best result is kept.
     pub epochs: u32,
 }
 
 impl Default for ElabConfig {
     fn default() -> Self {
-        Self {
-            seed: 42,
-            epochs: 4,
-        }
+        Self { epochs: 4 }
     }
 }
 
@@ -122,8 +116,7 @@ impl Elaborated {
     }
 }
 
-/// Build `comp` against `pdk` and route its declared nets. Deterministic for
-/// `cfg.seed`; call again with another `pdk` to retarget.
+/// Build `comp` against `pdk` and route its declared nets. Deterministic; call again with another `pdk` to retarget.
 ///
 /// # Errors
 /// The generator failing against this process.
@@ -176,10 +169,9 @@ pub(crate) fn route_built(
         .collect();
 
     let mut best: Option<(Routes, Report)> = None;
-    for epoch in 0..cfg.epochs.max(1) {
-        let seed = cfg.seed ^ u64::from(epoch);
+    for _ in 0..cfg.epochs.max(1) {
         let (global, _) =
-            gr::GlobalRoute::default().route(&layout, &macros, &[], &reqs, &layers, &mut neg, seed);
+            gr::GlobalRoute::default().route(&layout, &macros, &[], &reqs, &layers, &mut neg);
         let (routes, report) = d_router.route(
             &global,
             &pins,
@@ -189,7 +181,6 @@ pub(crate) fn route_built(
             &layers,
             &cuts,
             &mut neg,
-            seed,
         );
         if best.as_ref().is_none_or(|(_, b)| report.lex() < b.lex()) {
             best = Some((routes, report));

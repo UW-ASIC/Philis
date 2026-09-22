@@ -33,9 +33,7 @@ fn run(
     fixed: &[bool],
     seed: u64,
 ) -> Layout {
-    Annealer
-        .place(coarse, macros, variants, reqs, &[], fixed, &mut gp::Prices::new(), &pnr_core::NullOracle, seed)
-        .0
+    place(coarse, macros, variants, reqs, fixed, &mut gp::Prices::new(), seed).0
 }
 
 // ---- rotation ----
@@ -89,10 +87,9 @@ fn alt(w: i32, h: i32) -> Macro {
 }
 
 /// Three alternatives per cell, not ordered by similarity.
-fn spaces(lock: Option<u16>) -> Vec<VariantSpace> {
+fn spaces() -> Vec<VariantSpace> {
     let s = || VariantSpace {
         alternatives: vec![alt(2_000, 16_000), alt(16_000, 2_000), alt(6_000, 6_000)],
-        lock,
     };
     vec![s(), s()]
 }
@@ -116,7 +113,7 @@ fn assert_extents(l: &Layout, variants: &[VariantSpace], seed: u64) {
 #[test]
 fn reshape_changes_the_variant_and_keeps_the_extent_invariant() {
     let coarse = variant_bench();
-    let variants = spaces(None);
+    let variants = spaces();
     let mut fired = false;
     for seed in 0..8u64 {
         let l = run(&coarse, &drawn(&variants), &variants, &Requirements::default(), &[false; 2], seed);
@@ -129,7 +126,7 @@ fn reshape_changes_the_variant_and_keeps_the_extent_invariant() {
 #[test]
 fn a_fixed_cell_never_reshapes() {
     let coarse = variant_bench();
-    let variants = spaces(None);
+    let variants = spaces();
     for seed in 0..8u64 {
         let l = run(&coarse, &drawn(&variants), &variants, &Requirements::default(), &[true, false], seed);
         assert_eq!(l.variant[0], 0, "seed {seed}");
@@ -138,23 +135,9 @@ fn a_fixed_cell_never_reshapes() {
 }
 
 #[test]
-fn a_locked_pair_reshapes_together() {
+fn cells_reshape_independently() {
     let coarse = variant_bench();
-    let variants = spaces(Some(0));
-    let mut fired = false;
-    for seed in 0..8u64 {
-        let l = run(&coarse, &drawn(&variants), &variants, &Requirements::default(), &[false; 2], seed);
-        assert_eq!(l.variant[0], l.variant[1], "seed {seed}: lock broke");
-        fired |= l.variant[0] != coarse.variant[0];
-        assert_extents(&l, &variants, seed);
-    }
-    assert!(fired, "the joint reshape never fired");
-}
-
-#[test]
-fn an_unlocked_cell_still_reshapes_alone() {
-    let coarse = variant_bench();
-    let variants = spaces(None);
+    let variants = spaces();
     assert!((0..16u64).any(|seed| {
         let l = run(&coarse, &drawn(&variants), &variants, &Requirements::default(), &[false; 2], seed);
         l.variant[0] != l.variant[1]
@@ -179,7 +162,7 @@ fn pin_alt(x: i32) -> Macro {
 /// `temp = 0` makes the refusal of the lengthening move unfakeable.
 #[test]
 fn reshape_is_priced_on_where_the_pins_land() {
-    let space = || VariantSpace { alternatives: vec![pin_alt(0), pin_alt(9_900)], lock: None };
+    let space = || VariantSpace { alternatives: vec![pin_alt(0), pin_alt(9_900)] };
     let variants = vec![space(), space()];
     let mut l = layout(&[(0, 0, 5_000, 5_000), (100_000, 0, 5_000, 5_000)]);
     let reqs = Requirements::default();
@@ -191,12 +174,12 @@ fn reshape_is_priced_on_where_the_pins_land() {
     let free = |c: i32, _half: i32| c;
 
     let before = hpwl(&sa.nets, &l);
-    assert!(try_reshape(&mut sa, &mut l, &mut rng, 0.0, 0, &[0], &variants, &free, &free));
+    assert!(try_reshape(&mut sa, &mut l, &mut rng, 0.0, 0, &variants, &free, &free));
     assert_eq!(l.variant[0], 1);
     let after = hpwl(&sa.nets, &l);
     assert!(after < before, "{before} -> {after}");
 
-    assert!(!try_reshape(&mut sa, &mut l, &mut rng, 0.0, 0, &[0], &variants, &free, &free));
+    assert!(!try_reshape(&mut sa, &mut l, &mut rng, 0.0, 0, &variants, &free, &free));
     assert_eq!(l.variant[0], 1);
     assert_eq!(hpwl(&sa.nets, &l), after, "refusal must revert the pin geometry too");
 }

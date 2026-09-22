@@ -149,31 +149,16 @@ fn group_bbox(macros: &[Macro]) -> (i32, i32, i32, i32) {
     }
 }
 
-/// A global-routing algorithm. `rings` are this epoch's guard rings (absolute;
-/// both obstacle and net target). Deterministic over `(inputs, neg)`; `seed` is
-/// unused by PathFinder.
-pub trait GlobalRouter {
-    #[allow(clippy::too_many_arguments)]
-    fn route(
-        &self,
-        placement: &Layout,
-        macros: &[Macro],
-        rings: &[Macro],
-        reqs: &Requirements<Routes>,
-        layers: &[LayerId],
-        neg: &mut Negotiation,
-        seed: u64,
-    ) -> (Routes, Report);
-}
-
 /// The coarse router.
 #[derive(Default)]
 pub struct GlobalRoute {
     pub cfg: GlobalCfg,
 }
 
-impl GlobalRouter for GlobalRoute {
-    fn route(
+impl GlobalRoute {
+    /// `rings` are this epoch's guard rings (absolute; both obstacle and net
+    /// target). Deterministic over `(inputs, neg)`.
+    pub fn route(
         &self,
         placement: &Layout,
         macros: &[Macro],
@@ -181,7 +166,6 @@ impl GlobalRouter for GlobalRoute {
         reqs: &Requirements<Routes>,
         layers: &[LayerId],
         neg: &mut Negotiation,
-        _seed: u64,
     ) -> (Routes, Report) {
         let cfg = self.cfg;
         let mut placed = place_macros(macros, placement);
@@ -927,7 +911,7 @@ mod tests {
         let macros = vec![m(vec![(0, 1_000, 1_000)]), m(vec![(0, 18_000, 18_000)])];
         let reqs = Requirements::<Routes>::default();
         let (routes, report) =
-            GlobalRoute::default().route(&lay(), &macros, &[], &reqs, &LAYERS, &mut Negotiation::new(), 7);
+            GlobalRoute::default().route(&lay(), &macros, &[], &reqs, &LAYERS, &mut Negotiation::new());
         assert_eq!(routes.wires.len(), 1);
         assert!(!routes.wires[0].is_empty());
         assert!(report.hard_violations.is_empty());
@@ -945,7 +929,7 @@ mod tests {
             })
             .collect();
         let reqs = Requirements::<Routes>::default();
-        let run = |neg: &mut Negotiation| router.route(&lay(), &macros, &[], &reqs, &LAYERS, neg, 3).0;
+        let run = |neg: &mut Negotiation| router.route(&lay(), &macros, &[], &reqs, &LAYERS, neg).0;
         let flat = |r: &Routes| -> Vec<(u16, i32, i32, i32, i32)> {
             r.wires.iter().flatten().map(|s| (s.layer.0, s.rect.x, s.rect.y, s.rect.w, s.rect.h)).collect()
         };

@@ -10,7 +10,6 @@
 pub mod legalize;
 
 use analog::Requirements;
-use pnr_core::geom::LayerId;
 use pnr_core::ids::BranchId;
 use pnr_core::{Layout, Macro, Orient, Report};
 
@@ -19,27 +18,6 @@ use gp::mechanics::{
     encroachment, hpwl, report, snap, variant_extents, Nets, SplitMix64,
 };
 use gp::CLEARANCE_NM;
-
-pub trait DetailedPlacer {
-    /// Refine `coarse` into a legal placement, seed-deterministic.
-    ///
-    /// `macros[i]` supplies cell `i`'s pins when `variants[i]` has no alternative
-    /// for `coarse.variant[i]`. `fixed[i]` pins cell `i` (position and variant).
-    /// `layers` and `oracle` are unused.
-    #[allow(clippy::too_many_arguments)]
-    fn place(
-        &self,
-        coarse: &Layout,
-        macros: &[Macro],
-        variants: &[gp::VariantSpace],
-        reqs: &Requirements<Layout>,
-        layers: &[LayerId],
-        fixed: &[bool],
-        prices: &mut gp::Prices,
-        oracle: &dyn pnr_core::Oracle,
-        seed: u64,
-    ) -> (Layout, Report);
-}
 
 const MAX_ITERS: u32 = 220;
 const MIN_ITERS: u32 = 20;
@@ -56,9 +34,6 @@ const GRID: i32 = 5;
 const REGION_FILL: f64 = 0.5;
 /// Runaway guard for the terminal legalizer (it exits early when clean/stalled).
 const LEGALIZE_SWEEPS: u32 = 64;
-
-#[derive(Default)]
-pub struct Annealer;
 
 /// The mutable columns a move can touch, for rollback.
 #[derive(Default)]
@@ -211,177 +186,169 @@ impl<'a> Sa<'a> {
     }
 }
 
-impl DetailedPlacer for Annealer {
-    fn place(
-        &self,
-        coarse: &Layout,
-        macros: &[Macro],
-        variants: &[gp::VariantSpace],
-        reqs: &Requirements<Layout>,
-        _layers: &[LayerId],
-        fixed: &[bool],
-        prices: &mut gp::Prices,
-        _oracle: &dyn pnr_core::Oracle,
-        seed: u64,
-    ) -> (Layout, Report) {
-        let n = coarse.x.len();
-        let mut rng = SplitMix64::new(seed);
-        let mut l = Layout {
-            x: coarse.x.clone(),
-            y: coarse.y.clone(),
-            hw: coarse.hw.clone(),
-            hh: coarse.hh.clone(),
-            variant: coarse.variant.clone(),
-            axis: coarse.axis.clone(),
-            branch: coarse.branch.clone(),
-            groups: coarse.groups.clone(),
-            orient: coarse.orient.clone(),
-            power_uw: coarse.power_uw.clone(),
-            temp_mc: coarse.temp_mc.clone(),
-        };
-        l.refresh_temps();
+/// Refine `coarse` into a legal placement, seed-deterministic.
+///
+/// `macros[i]` supplies cell `i`'s pins when `variants[i]` has no alternative
+/// for `coarse.variant[i]`. `fixed[i]` pins cell `i` (position and variant).
+pub fn place(
+    coarse: &Layout,
+    macros: &[Macro],
+    variants: &[gp::VariantSpace],
+    reqs: &Requirements<Layout>,
+    fixed: &[bool],
+    prices: &mut gp::Prices,
+    seed: u64,
+) -> (Layout, Report) {
+    let n = coarse.x.len();
+    let mut rng = SplitMix64::new(seed);
+    let mut l = Layout {
+        x: coarse.x.clone(),
+        y: coarse.y.clone(),
+        hw: coarse.hw.clone(),
+        hh: coarse.hh.clone(),
+        variant: coarse.variant.clone(),
+        axis: coarse.axis.clone(),
+        branch: coarse.branch.clone(),
+        groups: coarse.groups.clone(),
+        orient: coarse.orient.clone(),
+        power_uw: coarse.power_uw.clone(),
+        temp_mc: coarse.temp_mc.clone(),
+    };
+    l.refresh_temps();
 
-        // Disjunctive branches (DtiBand share/isolate): size the table to the
-        // highest id and seed each from its recognised structure.
-        let mut branch_seeds: Vec<(BranchId, bool)> = Vec::new();
-        for b in &reqs.hard {
-            b.branches(&mut branch_seeds);
-        }
-        branch_seeds.sort_unstable_by_key(|&(id, _)| id.0);
-        branch_seeds.dedup();
-        if let Some(&(hi, _)) = branch_seeds.last() {
-            if l.branch.len() <= usize::from(hi.0) {
-                l.branch.resize(usize::from(hi.0) + 1, false);
-            }
-        }
-        for &(id, s) in &branch_seeds {
-            l.branch[usize::from(id.0)] = s;
-        }
-        let branch_ids: Vec<BranchId> = branch_seeds.iter().map(|&(id, _)| id).collect();
-
-        prices.bind(reqs);
-        // Nets from the geometry `l.variant` names, so HPWL scores real pins.
-        let nets = Nets::from_macros(&choose_variants(macros, variants, &l.variant));
-        if n == 0 {
-            let rep = report(&nets, reqs, &l, prices);
-            return (l, rep);
-        }
-
-        // Move region: the coarse footprint bbox, grown about its centre until the
-        // clearance-inflated cells fit at `REGION_FILL`.
-        let (mut xmin, mut ymin, mut xmax, mut ymax) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-        let mut need = 0.0f64;
-        for i in 0..n {
-            xmin = xmin.min(l.x[i] - l.hw[i]);
-            ymin = ymin.min(l.y[i] - l.hh[i]);
-            xmax = xmax.max(l.x[i] + l.hw[i]);
-            ymax = ymax.max(l.y[i] + l.hh[i]);
-            need += f64::from(2 * l.hw[i] + CLEARANCE_NM) * f64::from(2 * l.hh[i] + CLEARANCE_NM);
-        }
-        let side = (need / REGION_FILL).sqrt() as i32;
-        let grow = |lo: &mut i32, hi: &mut i32| {
-            let short = side - (*hi - *lo);
-            if short > 0 {
-                *lo -= short / 2;
-                *hi += short - short / 2;
-            }
-        };
-        grow(&mut xmin, &mut xmax);
-        grow(&mut ymin, &mut ymax);
-        let span = (xmax - xmin).max(ymax - ymin).max(1) as f32;
-        let clamp_x = |c: i32, half: i32| c.clamp(xmin + half, (xmax - half).max(xmin + half));
-        let clamp_y = |c: i32, half: i32| c.clamp(ymin + half, (ymax - half).max(ymin + half));
-
-        let mut sa = Sa::new(nets, n, reqs, prices, fixed, CLEARANCE_NM);
-
-        // t0 = 0.02 · mean |ΔPEX| over probe moves: refine gp, don't randomise it.
-        let mut range = RANGE0;
-        let probe_r = (range * span) as i32 as f32;
-        let pex0 = sa.pex(&l);
-        let mut sum = 0.0f64;
-        for _ in 0..128 {
-            let c = rng.below(n);
-            let (ox, oy) = (l.x[c], l.y[c]);
-            l.x[c] = clamp_x(ox + rng.centered(probe_r) as i32, l.hw[c]);
-            l.y[c] = clamp_y(oy + rng.centered(probe_r) as i32, l.hh[c]);
-            sum += (sa.pex(&l) - pex0).abs();
-            (l.x[c], l.y[c]) = (ox, oy);
-        }
-        let mut temp = (sum / 128.0).max(1.0) * 0.02;
-
-        let can_rotate = l.orient.len() == n;
-        let can_reshape = variants.len() == n && l.variant.len() == n;
-        // Cells sharing a variant lock reshape together.
-        let mates: Vec<Vec<usize>> = (0..n)
-            .map(|c| match variants.get(c).and_then(|v| v.lock) {
-                Some(id) => (0..n).filter(|&o| variants[o].lock == Some(id)).collect(),
-                None => vec![c],
-            })
-            .collect();
-        let moves_per_epoch = MOVES_PER_CELL * n;
-        let range_min = GRID as f32 / span;
-
-        for iter in 0..MAX_ITERS {
-            let r = (range * span) as i32 as f32;
-            let mut accepted = 0u32;
-            for _ in 0..moves_per_epoch {
-                // 70% displace, 20% swap, 2.5% branch flip, 5% reshape, else rotate.
-                let roll = rng.f32();
-                let c = rng.below(n);
-                if sa.is_fixed(c) {
-                    continue;
-                }
-                let ok = if roll < 0.70 {
-                    let nx = clamp_x(l.x[c] + rng.centered(r) as i32, l.hw[c]);
-                    let ny = clamp_y(l.y[c] + rng.centered(r) as i32, l.hh[c]);
-                    try_move(&mut sa, &mut l, &mut rng, temp, c, nx, ny)
-                } else if roll < 0.90 {
-                    let o = rng.below(n);
-                    o != c && !sa.is_fixed(o) && try_swap(&mut sa, &mut l, &mut rng, temp, c, o, &clamp_x, &clamp_y)
-                } else if !branch_ids.is_empty() && roll < 0.925 {
-                    let bid = usize::from(branch_ids[rng.below(branch_ids.len())].0);
-                    try_branch(&mut sa, &mut l, &mut rng, temp, bid)
-                } else if can_reshape && roll >= 0.95 {
-                    try_reshape(&mut sa, &mut l, &mut rng, temp, c, &mates[c], variants, &clamp_x, &clamp_y)
-                } else {
-                    can_rotate && rotatable(&l, c) && try_rotate(&mut sa, &mut l, &mut rng, temp, c, &clamp_x, &clamp_y)
-                };
-                accepted += u32::from(ok);
-            }
-
-            // One exact projection per epoch for batches violated before any move.
-            project_hard(reqs, &mut l, fixed, GRID);
-            // Thermal field is global: refresh per epoch, never per move.
-            l.refresh_temps();
-
-            temp *= ALPHA;
-            range = (range * RANGE_DECAY).max(range_min);
-            let accept_rate = accepted as f32 / moves_per_epoch as f32;
-            if iter + 1 >= MIN_ITERS
-                && accept_rate < MIN_ACCEPT_RATE
-                && encroachment(&l, CLEARANCE_NM) <= 0.0
-                && analog_violations(reqs, &l) == 0
-            {
-                break;
-            }
-        }
-
-        for a in &mut l.axis {
-            *a = snap(*a, GRID);
-        }
-        for i in 0..n {
-            l.x[i] = snap(l.x[i], GRID);
-            l.y[i] = snap(l.y[i], GRID);
-        }
-        // Grid snap can shave a clearance by a few nm; the legalizer restores it.
-        legalize::separate_overlaps(&mut l, reqs, fixed, GRID, CLEARANCE_NM, LEGALIZE_SWEEPS);
-        l.refresh_temps();
-
-        let Sa { nets, .. } = sa;
-        prices.settle(reqs, &l);
-        let rep = report(&nets, reqs, &l, prices);
-        (l, rep)
+    // Disjunctive branches (DtiBand share/isolate): size the table to the
+    // highest id and seed each from its recognised structure.
+    let mut branch_seeds: Vec<(BranchId, bool)> = Vec::new();
+    for b in &reqs.hard {
+        b.branches(&mut branch_seeds);
     }
+    branch_seeds.sort_unstable_by_key(|&(id, _)| id.0);
+    branch_seeds.dedup();
+    if let Some(&(hi, _)) = branch_seeds.last() {
+        if l.branch.len() <= usize::from(hi.0) {
+            l.branch.resize(usize::from(hi.0) + 1, false);
+        }
+    }
+    for &(id, s) in &branch_seeds {
+        l.branch[usize::from(id.0)] = s;
+    }
+    let branch_ids: Vec<BranchId> = branch_seeds.iter().map(|&(id, _)| id).collect();
+
+    prices.bind(reqs);
+    // Nets from the geometry `l.variant` names, so HPWL scores real pins.
+    let nets = Nets::from_macros(&choose_variants(macros, variants, &l.variant));
+    if n == 0 {
+        let rep = report(&nets, reqs, &l, prices);
+        return (l, rep);
+    }
+
+    // Move region: the coarse footprint bbox, grown about its centre until the
+    // clearance-inflated cells fit at `REGION_FILL`.
+    let (mut xmin, mut ymin, mut xmax, mut ymax) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    let mut need = 0.0f64;
+    for i in 0..n {
+        xmin = xmin.min(l.x[i] - l.hw[i]);
+        ymin = ymin.min(l.y[i] - l.hh[i]);
+        xmax = xmax.max(l.x[i] + l.hw[i]);
+        ymax = ymax.max(l.y[i] + l.hh[i]);
+        need += f64::from(2 * l.hw[i] + CLEARANCE_NM) * f64::from(2 * l.hh[i] + CLEARANCE_NM);
+    }
+    let side = (need / REGION_FILL).sqrt() as i32;
+    let grow = |lo: &mut i32, hi: &mut i32| {
+        let short = side - (*hi - *lo);
+        if short > 0 {
+            *lo -= short / 2;
+            *hi += short - short / 2;
+        }
+    };
+    grow(&mut xmin, &mut xmax);
+    grow(&mut ymin, &mut ymax);
+    let span = (xmax - xmin).max(ymax - ymin).max(1) as f32;
+    let clamp_x = |c: i32, half: i32| c.clamp(xmin + half, (xmax - half).max(xmin + half));
+    let clamp_y = |c: i32, half: i32| c.clamp(ymin + half, (ymax - half).max(ymin + half));
+
+    let mut sa = Sa::new(nets, n, reqs, prices, fixed, CLEARANCE_NM);
+
+    // t0 = 0.02 · mean |ΔPEX| over probe moves: refine gp, don't randomise it.
+    let mut range = RANGE0;
+    let probe_r = (range * span) as i32 as f32;
+    let pex0 = sa.pex(&l);
+    let mut sum = 0.0f64;
+    for _ in 0..128 {
+        let c = rng.below(n);
+        let (ox, oy) = (l.x[c], l.y[c]);
+        l.x[c] = clamp_x(ox + rng.centered(probe_r) as i32, l.hw[c]);
+        l.y[c] = clamp_y(oy + rng.centered(probe_r) as i32, l.hh[c]);
+        sum += (sa.pex(&l) - pex0).abs();
+        (l.x[c], l.y[c]) = (ox, oy);
+    }
+    let mut temp = (sum / 128.0).max(1.0) * 0.02;
+
+    let can_rotate = l.orient.len() == n;
+    let can_reshape = variants.len() == n && l.variant.len() == n;
+    let moves_per_epoch = MOVES_PER_CELL * n;
+    let range_min = GRID as f32 / span;
+
+    for iter in 0..MAX_ITERS {
+        let r = (range * span) as i32 as f32;
+        let mut accepted = 0u32;
+        for _ in 0..moves_per_epoch {
+            // 70% displace, 20% swap, 2.5% branch flip, 5% reshape, else rotate.
+            let roll = rng.f32();
+            let c = rng.below(n);
+            if sa.is_fixed(c) {
+                continue;
+            }
+            let ok = if roll < 0.70 {
+                let nx = clamp_x(l.x[c] + rng.centered(r) as i32, l.hw[c]);
+                let ny = clamp_y(l.y[c] + rng.centered(r) as i32, l.hh[c]);
+                try_move(&mut sa, &mut l, &mut rng, temp, c, nx, ny)
+            } else if roll < 0.90 {
+                let o = rng.below(n);
+                o != c && !sa.is_fixed(o) && try_swap(&mut sa, &mut l, &mut rng, temp, c, o, &clamp_x, &clamp_y)
+            } else if !branch_ids.is_empty() && roll < 0.925 {
+                let bid = usize::from(branch_ids[rng.below(branch_ids.len())].0);
+                try_branch(&mut sa, &mut l, &mut rng, temp, bid)
+            } else if can_reshape && roll >= 0.95 {
+                try_reshape(&mut sa, &mut l, &mut rng, temp, c, variants, &clamp_x, &clamp_y)
+            } else {
+                can_rotate && rotatable(&l, c) && try_rotate(&mut sa, &mut l, &mut rng, temp, c, &clamp_x, &clamp_y)
+            };
+            accepted += u32::from(ok);
+        }
+
+        // One exact projection per epoch for batches violated before any move.
+        project_hard(reqs, &mut l, fixed, GRID);
+        // Thermal field is global: refresh per epoch, never per move.
+        l.refresh_temps();
+
+        temp *= ALPHA;
+        range = (range * RANGE_DECAY).max(range_min);
+        let accept_rate = accepted as f32 / moves_per_epoch as f32;
+        if iter + 1 >= MIN_ITERS
+            && accept_rate < MIN_ACCEPT_RATE
+            && encroachment(&l, CLEARANCE_NM) <= 0.0
+            && analog_violations(reqs, &l) == 0
+        {
+            break;
+        }
+    }
+
+    for a in &mut l.axis {
+        *a = snap(*a, GRID);
+    }
+    for i in 0..n {
+        l.x[i] = snap(l.x[i], GRID);
+        l.y[i] = snap(l.y[i], GRID);
+    }
+    // Grid snap can shave a clearance by a few nm; the legalizer restores it.
+    legalize::separate_overlaps(&mut l, reqs, fixed, GRID, CLEARANCE_NM, LEGALIZE_SWEEPS);
+    l.refresh_temps();
+
+    let Sa { nets, .. } = sa;
+    prices.settle(reqs, &l);
+    let rep = report(&nets, reqs, &l, prices);
+    (l, rep)
 }
 
 /// Project every violated hard batch onto its feasible set, restore pinned
@@ -495,10 +462,9 @@ fn try_rotate(
     })
 }
 
-/// Swap `c` (and its lock mates in `group`) to one uniformly drawn other variant.
-/// Extents follow the new bbox (transposed under a turned orient) and the pin
-/// offsets are patched before pricing, so the move is scored on where pins land.
-/// A pinned mate refuses the whole move.
+/// Swap `c` to one uniformly drawn other variant. Extents follow the new bbox
+/// (transposed under a turned orient) and the pin offsets are patched before
+/// pricing, so the move is scored on where pins land.
 #[allow(clippy::too_many_arguments)]
 fn try_reshape(
     sa: &mut Sa,
@@ -506,13 +472,12 @@ fn try_reshape(
     rng: &mut SplitMix64,
     temp: f64,
     c: usize,
-    group: &[usize],
     variants: &[gp::VariantSpace],
     clamp_x: &impl Fn(i32, i32) -> i32,
     clamp_y: &impl Fn(i32, i32) -> i32,
 ) -> bool {
-    let depth = group.iter().map(|&m| variants[m].alternatives.len()).min().unwrap_or(0);
-    if depth < 2 || group.iter().any(|&m| sa.is_fixed(m)) {
+    let depth = variants[c].alternatives.len();
+    if depth < 2 || sa.is_fixed(c) {
         return false;
     }
     let cur = l.variant[c] as usize;
@@ -520,24 +485,20 @@ fn try_reshape(
     let next = if cur < depth && draw >= cur { draw + 1 } else { draw };
 
     let ok = sa.trial(l, rng, temp, |l, nets, cell_nets| {
-        for &m in group {
-            let alt = &variants[m].alternatives[next];
-            let (w, h) = variant_extents(alt);
-            l.variant[m] = next as u16;
-            (l.hw[m], l.hh[m]) = match l.orient.get(m) {
-                Some(o) if o.swaps_axes() => (h, w),
-                _ => (w, h),
-            };
-            l.x[m] = clamp_x(l.x[m], l.hw[m]);
-            l.y[m] = clamp_y(l.y[m], l.hh[m]);
-            nets.reshape_cell(m, &cell_nets[m], alt);
-        }
+        let alt = &variants[c].alternatives[next];
+        let (w, h) = variant_extents(alt);
+        l.variant[c] = next as u16;
+        (l.hw[c], l.hh[c]) = match l.orient.get(c) {
+            Some(o) if o.swaps_axes() => (h, w),
+            _ => (w, h),
+        };
+        l.x[c] = clamp_x(l.x[c], l.hw[c]);
+        l.y[c] = clamp_y(l.y[c], l.hh[c]);
+        nets.reshape_cell(c, &cell_nets[c], alt);
     });
     if !ok {
-        for &m in group {
-            if let Some(alt) = variants[m].alternatives.get(l.variant[m] as usize) {
-                sa.nets.reshape_cell(m, &sa.cell_nets[m], alt);
-            }
+        if let Some(alt) = variants[c].alternatives.get(l.variant[c] as usize) {
+            sa.nets.reshape_cell(c, &sa.cell_nets[c], alt);
         }
     }
     ok

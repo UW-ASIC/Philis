@@ -132,7 +132,6 @@ pub fn enumerate(
         devices_of.push(members);
         spaces.push(gp::VariantSpace {
             alternatives,
-            lock: None,
         });
     }
     Cells {
@@ -597,7 +596,6 @@ mod tests {
                     }
                 })
                 .collect(),
-            lock: None,
         }
     }
 

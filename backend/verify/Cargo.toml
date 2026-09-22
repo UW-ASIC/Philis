@@ -3,14 +3,8 @@ name = "verify"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-# Inert: GPurify has no GPU feature to forward to. Kept only because
-# `library/gpu` still names `verify/gpu`.
-gpu = []
-
 [dependencies]
 pnr_core = { path = "../../kernel/core" }
-analog = { path = "../../kernel/analog" }
 gdsverify = { workspace = true }
 # Re-reads the deck's Philis-only `cell` section, which gdsverify ignores.
 serde_json = "1"

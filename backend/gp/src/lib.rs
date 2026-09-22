@@ -8,7 +8,6 @@ pub mod mechanics;
 use std::collections::BTreeMap;
 
 use analog::Requirements;
-use pnr_core::geom::LayerId;
 use pnr_core::{Layout, Macro, Report};
 
 use mechanics::{
@@ -17,11 +16,9 @@ use mechanics::{
 };
 
 /// One placeable cell's pre-drawn alternatives; `layout.variant[i]` indexes
-/// `alternatives`. Cells sharing a `lock` id must hold the same variant index
-/// (and so need index-compatible spaces).
+/// `alternatives`.
 pub struct VariantSpace {
     pub alternatives: Vec<Macro>,
-    pub lock: Option<u16>,
 }
 
 /// Augmented-Lagrangian state per budget batch, carried across epochs by the
@@ -121,20 +118,6 @@ fn keys(reqs: &Requirements<Layout>) -> Vec<(&'static str, u32)> {
         .collect()
 }
 
-pub trait GlobalPlacer {
-    /// Coarse placement of `macros` (variant 0 of each `variants[i]`),
-    /// seed-deterministic. `layers` is unused: placement is layer-agnostic.
-    fn place(
-        &self,
-        macros: &[Macro],
-        variants: &[VariantSpace],
-        reqs: &Requirements<Layout>,
-        layers: &[LayerId],
-        prices: &mut Prices,
-        seed: u64,
-    ) -> (Layout, Report);
-}
-
 /// Edge-to-edge clearance between cells, nm (shared with `dp`). sky130's nwell
 /// spacing is the binding inter-device rule; below it wells/implants merge and
 /// LVS aborts.
@@ -154,158 +137,153 @@ const TARGET_UTIL: f32 = 0.7;
 /// Finite-difference probe (nm) for the analog-cost gradient.
 const ANALOG_PROBE: i32 = 64;
 
-#[derive(Default)]
-pub struct Analytical;
+/// Coarse placement of `macros` (variant 0 of each `variants[i]`),
+/// seed-deterministic.
+pub fn place(
+    macros: &[Macro],
+    variants: &[VariantSpace],
+    reqs: &Requirements<Layout>,
+    prices: &mut Prices,
+    seed: u64,
+) -> (Layout, Report) {
+    let n = macros.len();
+    let mut rng = SplitMix64::new(seed);
+    // gp does not search variants: index 0 everywhere, dp reshapes.
+    let variant = vec![0u16; n];
+    let drawn = choose_variants(macros, variants, &variant);
+    prices.bind(reqs);
 
-impl GlobalPlacer for Analytical {
-    fn place(
-        &self,
-        macros: &[Macro],
-        variants: &[VariantSpace],
-        reqs: &Requirements<Layout>,
-        _layers: &[LayerId],
-        prices: &mut Prices,
-        seed: u64,
-    ) -> (Layout, Report) {
-        let n = macros.len();
-        let mut rng = SplitMix64::new(seed);
-        // gp does not search variants: index 0 everywhere, dp reshapes.
-        let variant = vec![0u16; n];
-        let drawn = choose_variants(macros, variants, &variant);
-        prices.bind(reqs);
+    let (hw, hh) = half_extents(&drawn);
+    let side = canvas_side(&hw, &hh, UTILIZATION, GRID);
+    let mut l = initial_layout(&drawn, variant, side, &mut rng);
+    let nets = Nets::from_macros(&drawn);
+    if n == 0 {
+        let rep = report(&nets, reqs, &l, prices);
+        return (l, rep);
+    }
 
-        let (hw, hh) = half_extents(&drawn);
-        let side = canvas_side(&hw, &hh, UTILIZATION, GRID);
-        let mut l = initial_layout(&drawn, variant, side, &mut rng);
-        let nets = Nets::from_macros(&drawn);
-        if n == 0 {
-            let rep = report(&nets, reqs, &l, prices);
-            return (l, rep);
+    let mut gx = vec![0.0f32; n];
+    let mut gy = vec![0.0f32; n];
+    let mut vx = vec![0.0f32; n];
+    let mut vy = vec![0.0f32; n];
+    let nb = ((n as f32).sqrt().ceil() as usize).clamp(4, 24);
+    let bw = (side as f32 / nb as f32).max(1.0);
+    let mut util = vec![0.0f32; nb * nb];
+    let mut step = STEP0;
+    let mut lambda = LAMBDA0;
+    let span = side as f32;
+    let mut save_x = vec![0i32; n];
+    let mut save_y = vec![0i32; n];
+
+    for iter in 0..MAX_ITERS {
+        gx.fill(0.0);
+        gy.fill(0.0);
+
+        // (a) HPWL subgradient: a net's bbox-extreme cells are pulled inward.
+        for ni in 0..nets.count() {
+            let cells = nets.row(ni);
+            let (mut x0, mut x1, mut y0, mut y1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+            for &c in cells {
+                let i = c as usize;
+                x0 = x0.min(l.x[i]);
+                x1 = x1.max(l.x[i]);
+                y0 = y0.min(l.y[i]);
+                y1 = y1.max(l.y[i]);
+            }
+            for &c in cells {
+                let i = c as usize;
+                gx[i] += f32::from(l.x[i] >= x1) - f32::from(l.x[i] <= x0);
+                gy[i] += f32::from(l.y[i] >= y1) - f32::from(l.y[i] <= y0);
+            }
         }
 
-        let mut gx = vec![0.0f32; n];
-        let mut gy = vec![0.0f32; n];
-        let mut vx = vec![0.0f32; n];
-        let mut vy = vec![0.0f32; n];
-        let nb = ((n as f32).sqrt().ceil() as usize).clamp(4, 24);
-        let bw = (side as f32 / nb as f32).max(1.0);
-        let mut util = vec![0.0f32; nb * nb];
-        let mut step = STEP0;
-        let mut lambda = LAMBDA0;
-        let span = side as f32;
-        let mut save_x = vec![0i32; n];
-        let mut save_y = vec![0i32; n];
+        // (b) analog-cost gradient (priced budgets included) by central difference.
+        let inv = 1.0f32 / (2.0 * ANALOG_PROBE as f32);
+        for i in 0..n {
+            let ox = l.x[i];
+            l.x[i] = ox + ANALOG_PROBE;
+            let cp = analog_cost(reqs, &l, prices);
+            l.x[i] = ox - ANALOG_PROBE;
+            let cm = analog_cost(reqs, &l, prices);
+            l.x[i] = ox;
+            gx[i] += (cp - cm) * inv;
 
-        for iter in 0..MAX_ITERS {
-            gx.fill(0.0);
-            gy.fill(0.0);
+            let oy = l.y[i];
+            l.y[i] = oy + ANALOG_PROBE;
+            let cp = analog_cost(reqs, &l, prices);
+            l.y[i] = oy - ANALOG_PROBE;
+            let cm = analog_cost(reqs, &l, prices);
+            l.y[i] = oy;
+            gy[i] += (cp - cm) * inv;
+        }
 
-            // (a) HPWL subgradient: a net's bbox-extreme cells are pulled inward.
-            for ni in 0..nets.count() {
-                let cells = nets.row(ni);
-                let (mut x0, mut x1, mut y0, mut y1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
-                for &c in cells {
-                    let i = c as usize;
-                    x0 = x0.min(l.x[i]);
-                    x1 = x1.max(l.x[i]);
-                    y0 = y0.min(l.y[i]);
-                    y1 = y1.max(l.y[i]);
-                }
-                for &c in cells {
-                    let i = c as usize;
-                    gx[i] += f32::from(l.x[i] >= x1) - f32::from(l.x[i] <= x0);
-                    gy[i] += f32::from(l.y[i] >= y1) - f32::from(l.y[i] <= y0);
-                }
+        // (c) density push: overfull bins push toward the emptiest neighbour.
+        util.fill(0.0);
+        let bin_of = |x: i32, y: i32| -> usize {
+            let bx = ((x as f32 / bw) as usize).min(nb - 1);
+            let by = ((y as f32 / bw) as usize).min(nb - 1);
+            by * nb + bx
+        };
+        for i in 0..n {
+            util[bin_of(l.x[i], l.y[i])] += 4.0 * l.hw[i] as f32 * l.hh[i] as f32 / (bw * bw);
+        }
+        for i in 0..n {
+            let b = bin_of(l.x[i], l.y[i]);
+            let over = util[b] - TARGET_UTIL;
+            if over <= 0.0 {
+                continue;
             }
-
-            // (b) analog-cost gradient (priced budgets included) by central difference.
-            let inv = 1.0f32 / (2.0 * ANALOG_PROBE as f32);
-            for i in 0..n {
-                let ox = l.x[i];
-                l.x[i] = ox + ANALOG_PROBE;
-                let cp = analog_cost(reqs, &l, prices);
-                l.x[i] = ox - ANALOG_PROBE;
-                let cm = analog_cost(reqs, &l, prices);
-                l.x[i] = ox;
-                gx[i] += (cp - cm) * inv;
-
-                let oy = l.y[i];
-                l.y[i] = oy + ANALOG_PROBE;
-                let cp = analog_cost(reqs, &l, prices);
-                l.y[i] = oy - ANALOG_PROBE;
-                let cm = analog_cost(reqs, &l, prices);
-                l.y[i] = oy;
-                gy[i] += (cp - cm) * inv;
-            }
-
-            // (c) density push: overfull bins push toward the emptiest neighbour.
-            util.fill(0.0);
-            let bin_of = |x: i32, y: i32| -> usize {
-                let bx = ((x as f32 / bw) as usize).min(nb - 1);
-                let by = ((y as f32 / bw) as usize).min(nb - 1);
-                by * nb + bx
-            };
-            for i in 0..n {
-                util[bin_of(l.x[i], l.y[i])] += 4.0 * l.hw[i] as f32 * l.hh[i] as f32 / (bw * bw);
-            }
-            for i in 0..n {
-                let b = bin_of(l.x[i], l.y[i]);
-                let over = util[b] - TARGET_UTIL;
-                if over <= 0.0 {
-                    continue;
-                }
-                let (bx, by) = (b % nb, b / nb);
-                let mut best = (util[b], 0i32, 0i32);
-                for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                    let (tx, ty) = (bx as i32 + dx, by as i32 + dy);
-                    if tx >= 0 && ty >= 0 && (tx as usize) < nb && (ty as usize) < nb {
-                        let u = util[ty as usize * nb + tx as usize];
-                        if u < best.0 {
-                            best = (u, dx, dy);
-                        }
+            let (bx, by) = (b % nb, b / nb);
+            let mut best = (util[b], 0i32, 0i32);
+            for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                let (tx, ty) = (bx as i32 + dx, by as i32 + dy);
+                if tx >= 0 && ty >= 0 && (tx as usize) < nb && (ty as usize) < nb {
+                    let u = util[ty as usize * nb + tx as usize];
+                    if u < best.0 {
+                        best = (u, dx, dy);
                     }
                 }
-                gx[i] -= lambda * over * best.1 as f32;
-                gy[i] -= lambda * over * best.2 as f32;
             }
-
-            // (d) momentum step, largest gradient moves ~step·span. A step that
-            // raises hard-rule Φ is undone, momentum killed, step halved. Overlap
-            // is deliberately not in this gate: the start is a pile at the centre.
-            let gmax = gx.iter().chain(&gy).fold(0.0f32, |m, g| m.max(g.abs())).max(1e-6);
-            let scale = step * span / gmax;
-            let before_phi = analog_phi(reqs, &l);
-            save_x.copy_from_slice(&l.x);
-            save_y.copy_from_slice(&l.y);
-            for i in 0..n {
-                vx[i] = MOMENTUM * vx[i] - scale * gx[i];
-                vy[i] = MOMENTUM * vy[i] - scale * gy[i];
-                l.x[i] = clamp_to_die(l.x[i] + vx[i] as i32, l.hw[i], side);
-                l.y[i] = clamp_to_die(l.y[i] + vy[i] as i32, l.hh[i], side);
-            }
-            if analog_phi(reqs, &l) > before_phi {
-                std::mem::swap(&mut l.x, &mut save_x);
-                std::mem::swap(&mut l.y, &mut save_y);
-                vx.fill(0.0);
-                vy.fill(0.0);
-                step = (step * 0.5).max(STEP_MIN);
-            }
-
-            // (e) cooling + density-weight ramp.
-            step = (step * STEP_DECAY).max(STEP_MIN);
-            let overflow = bin_overflow(&util, &l, bw);
-            if overflow > 0.05 {
-                lambda = (lambda * 1.05).min(1e3);
-            }
-            if iter + 1 >= MIN_ITERS && overflow <= OVERFLOW_TARGET {
-                break;
-            }
+            gx[i] -= lambda * over * best.1 as f32;
+            gy[i] -= lambda * over * best.2 as f32;
         }
 
-        prices.settle(reqs, &l);
-        let rep = report(&nets, reqs, &l, prices);
-        (l, rep)
+        // (d) momentum step, largest gradient moves ~step·span. A step that
+        // raises hard-rule Φ is undone, momentum killed, step halved. Overlap
+        // is deliberately not in this gate: the start is a pile at the centre.
+        let gmax = gx.iter().chain(&gy).fold(0.0f32, |m, g| m.max(g.abs())).max(1e-6);
+        let scale = step * span / gmax;
+        let before_phi = analog_phi(reqs, &l);
+        save_x.copy_from_slice(&l.x);
+        save_y.copy_from_slice(&l.y);
+        for i in 0..n {
+            vx[i] = MOMENTUM * vx[i] - scale * gx[i];
+            vy[i] = MOMENTUM * vy[i] - scale * gy[i];
+            l.x[i] = clamp_to_die(l.x[i] + vx[i] as i32, l.hw[i], side);
+            l.y[i] = clamp_to_die(l.y[i] + vy[i] as i32, l.hh[i], side);
+        }
+        if analog_phi(reqs, &l) > before_phi {
+            std::mem::swap(&mut l.x, &mut save_x);
+            std::mem::swap(&mut l.y, &mut save_y);
+            vx.fill(0.0);
+            vy.fill(0.0);
+            step = (step * 0.5).max(STEP_MIN);
+        }
+
+        // (e) cooling + density-weight ramp.
+        step = (step * STEP_DECAY).max(STEP_MIN);
+        let overflow = bin_overflow(&util, &l, bw);
+        if overflow > 0.05 {
+            lambda = (lambda * 1.05).min(1e3);
+        }
+        if iter + 1 >= MIN_ITERS && overflow <= OVERFLOW_TARGET {
+            break;
+        }
     }
+
+    prices.settle(reqs, &l);
+    let rep = report(&nets, reqs, &l, prices);
+    (l, rep)
 }
 
 /// Σ bin overflow area over total device area.

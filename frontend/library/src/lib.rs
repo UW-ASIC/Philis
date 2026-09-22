@@ -23,10 +23,6 @@ pub mod metadata;
 pub mod oppoint;
 
 use annotator::{annotate, AnnotationConfig, NoInference, Problem};
-use dp::DetailedPlacer;
-use dr::DetailedRouter;
-use gp::GlobalPlacer;
-use gr::GlobalRouter;
 pub use macro_master::Macros;
 use pnr_core::{DeviceId, LayerId, Layout, Macro, Report, Routes};
 use verify::Pdk;
@@ -135,12 +131,9 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         pdk,
         netlist: &netlist,
         net_names: netlist.nets.iter().map(|n| n.name.clone()).collect(),
-        placer: gp::Analytical,
-        refiner: dp::Annealer,
         d_router: elaborate::detailed_router(pdk, &layers, &cuts, pin_access),
         layers,
         cuts,
-        oracle: verify::LiveOracle::new(pdk).expect("a loaded Pdk re-parses its own deck"),
         problem,
         cells,
     };
@@ -240,10 +233,7 @@ struct Flow<'a> {
     cells: CellSpace,
     layers: Vec<LayerId>,
     cuts: Vec<elaborate::Cut>,
-    placer: gp::Analytical,
-    refiner: dp::Annealer,
     d_router: dr::DetailedRoute,
-    oracle: verify::LiveOracle,
 }
 
 /// One scored epoch.
@@ -271,9 +261,7 @@ impl Flow<'_> {
 
         // Place: coarse analytical, then legalising anneal (which may reshape).
         let macros = cellgen::realize(&cells.variants, assignment);
-        let (mut coarse, _) =
-            self.placer
-                .place(&macros, &cells.variants, placement, layers, prices, seed);
+        let (mut coarse, _) = gp::place(&macros, &cells.variants, placement, prices, seed);
         coarse.debug_check("gp::place");
         // dp reads groups as abutment permission, so it gets the diffusion-sharing
         // table; after dp, groups are the recognition table for `Target::Group`.
@@ -284,15 +272,13 @@ impl Flow<'_> {
         }
         coarse.power_uw = cells.power.clone();
         coarse.refresh_temps();
-        let (mut layout, place_report) = self.refiner.place(
+        let (mut layout, place_report) = dp::place(
             &coarse,
             &macros,
             &cells.variants,
             placement,
-            layers,
             &cells.fixed,
             prices,
-            &self.oracle,
             seed,
         );
         layout.debug_check_placed("dp::place");
@@ -309,7 +295,7 @@ impl Flow<'_> {
         // Route: global gcell plan, then track realisation onto the real pins.
         let routing = &self.problem.routing;
         let (global, _) =
-            gr::GlobalRoute::default().route(&layout, &macros, &rings, routing, layers, neg, seed);
+            gr::GlobalRoute::default().route(&layout, &macros, &rings, routing, layers, neg);
         global.debug_check("gr::route");
         let placed = gr::place_macros(&macros, &layout);
         let pins: Vec<_> = placed
@@ -317,7 +303,7 @@ impl Flow<'_> {
             .flat_map(|m| m.pins.iter().map(|p| (p.net, p.at, p.layer)))
             .collect();
         let (routes, route_report) = self.d_router.route(
-            &global, &pins, &placed, &rings, routing, layers, &self.cuts, neg, seed,
+            &global, &pins, &placed, &rings, routing, layers, &self.cuts, neg,
         );
 
         // Measure: signoff over the drawn geometry, budget residuals over the result.
