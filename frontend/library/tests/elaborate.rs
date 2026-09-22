@@ -30,7 +30,10 @@ impl Block for Pair {
 }
 impl Composition for Pair {
     fn build<P: Process>(&self, c: &mut CompBuilder<P>) -> Result<(), GenError> {
-        let sep = c.process().rule("min_spacing", 80).max(c.process().rule("diff_spacing", 270));
+        let sep = c
+            .process()
+            .rule("min_spacing", 80)
+            .max(c.process().rule("diff_spacing", 270));
         let mos = || Mos::new(DeviceKind::Nmos, 420, 150, 2);
         let i1 = c.instantiate("m1", &mos())?;
         let m1 = c.place(i1)?;
@@ -58,7 +61,11 @@ fn pair_elaborates_and_routes_on_sky130() {
     assert_eq!(sol.macros.len(), 2, "two placed instances");
     // The tail net joins m1.s and m2.s across the two instances — it must have
     // drawn wires.
-    let tail = sol.nets.iter().position(|n| n == "tail").expect("tail net exists");
+    let tail = sol
+        .nets
+        .iter()
+        .position(|n| n == "tail")
+        .expect("tail net exists");
     assert!(
         !sol.routes.shapes(pnr_core::NetId(tail as u16)).is_empty(),
         "tail net is routed (report: {} hard violations)",
@@ -67,4 +74,3 @@ fn pair_elaborates_and_routes_on_sky130() {
     // Geometry is non-degenerate and includes both device shapes and wires.
     assert!(sol.geometry().len() > sol.macros.iter().map(|m| m.shapes.len()).sum::<usize>());
 }
-

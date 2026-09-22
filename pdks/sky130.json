@@ -149,7 +149,7 @@
       "op": "and",
       "layers": [
         "tap",
-        "nwell"
+        "nsdm"
       ]
     },
     {
@@ -166,6 +166,30 @@
       "layers": [
         "licon",
         "poly"
+      ]
+    },
+    {
+      "name": "ptap",
+      "op": "and",
+      "layers": [
+        "tap",
+        "psdm"
+      ]
+    },
+    {
+      "name": "licon_tap",
+      "op": "and",
+      "layers": [
+        "licon",
+        "tap"
+      ]
+    },
+    {
+      "name": "gate",
+      "op": "and",
+      "layers": [
+        "poly",
+        "diff"
       ]
     }
   ],
@@ -1409,15 +1433,6 @@
       "layers": [],
       "params": {}
     },
-    "driver_contention": {
-      "kind": "multiple_drivers",
-      "layers": [],
-      "params": {
-        "max_drivers": {
-          "count": 1
-        }
-      }
-    },
     "rpoly_min_width": {
       "kind": "min_width",
       "layers": [
@@ -1557,6 +1572,66 @@
       "params": {
         "limit": {
           "nm": 190
+        }
+      }
+    },
+    "tap_encloses_licon_one_side": {
+      "kind": "asymmetric_enclosure",
+      "layers": [
+        "tap",
+        "licon_tap"
+      ],
+      "params": {
+        "min_one_side": {
+          "nm": 120
+        }
+      }
+    },
+    "licon_diff_to_gate_spacing": {
+      "kind": "min_spacing_diff",
+      "layers": [
+        "licon_diff",
+        "gate"
+      ],
+      "params": {
+        "limit": {
+          "nm": 55
+        }
+      }
+    },
+    "polycon_to_tap_spacing": {
+      "kind": "min_spacing_diff",
+      "layers": [
+        "licon_poly",
+        "tap"
+      ],
+      "params": {
+        "limit": {
+          "nm": 190
+        }
+      }
+    },
+    "polycon_to_pdiff_spacing": {
+      "kind": "min_spacing_diff",
+      "layers": [
+        "licon_poly",
+        "pdiff"
+      ],
+      "params": {
+        "limit": {
+          "nm": 235
+        }
+      }
+    },
+    "ptap_to_nwell_spacing": {
+      "kind": "min_spacing_diff",
+      "layers": [
+        "ptap",
+        "nwell"
+      ],
+      "params": {
+        "limit": {
+          "nm": 130
         }
       }
     }

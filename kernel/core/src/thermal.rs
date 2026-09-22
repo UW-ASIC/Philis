@@ -1,61 +1,29 @@
-//! Steady-state die temperature by **superposition of per-device point sources**.
-//!
-//! This is the model that makes [`crate::Layout::temp_mc`] real, and with it the
-//! analog `ThermalGradient` rule: without it the rule's estimated gradient stays
-//! at zero and the check is a tautology.
-//!
-//! ## Why superposition and not a solve
-//!
-//! The thermal-driven analog placers (NTU DAC'09; Lampaert; Liu) pre-simulate a
-//! thermal profile per power device and combine them by superposition through a
-//! lookup table, precisely because a full solve is far too slow to sit inside a
-//! placement loop. Steady-state heat conduction is linear in the source powers,
-//! so the sum of per-source profiles *is* the exact profile for that power set —
-//! the approximation is in the per-source profile, not in the superposition.
-//!
-//! The per-source profile used here is the classic semi-infinite-substrate
-//! spreading solution, `ΔT(r) = P / (2π·k·r)`, floored at the device's own
-//! half-extent so a device's self-heating stays finite.
-//!
-//! ## Cadence
-//!
-//! Temperature is a **global** property of the whole power distribution: moving
-//! one device changes every device's temperature. Per `backend/TODO.md` §1 it is
-//! therefore refreshed at epoch/iteration boundaries, never per trial move.
+//! Steady-state die temperature by superposition of per-device point sources,
+//! `ΔT(r) = P / (2π·k·r)` (semi-infinite substrate), with `r` floored at the
+//! source's own half-extent. Linear in power, so the sum is exact for the
+//! per-source model. Global in the power map: refresh per epoch, never per move.
 
+use crate::ids::Target;
 use crate::layout::Layout;
 
-/// Thermal conductivity of bulk silicon, W/(m·K), at ~300 K.
+/// Bulk Si thermal conductivity, W/(m·K), ~300 K.
 ///
-/// ponytail: one bulk constant for the whole die — no per-layer stack, no BEOL,
-/// no package θ_JA. Real dies are anisotropic and package-dominated; when a PDK
-/// grows a thermal section, read `k` (and an ambient offset) from it instead.
-/// Calibrate against silicon before trusting absolute temperatures — the
-/// *gradient between nearby matched devices*, which is what the rule scores, is
-/// far more robust than the absolute rise.
+/// ponytail: one bulk constant, no BEOL/package θ_JA. Gradients between nearby
+/// matched devices (what the rule scores) are far more robust than absolute
+/// rises; read `k` from the PDK when it grows a thermal section.
 const K_SI_W_PER_M_K: f32 = 148.0;
 
-/// Convert `P/(2π·k·r)` from (µW, nm) into milli-Kelvin.
-///
-/// `ΔT[K] = P[W] / (2π·k·r[m])`. With `P` in µW (`1e-6 W`) and `r` in nm
-/// (`1e-9 m`) the unit factor is `1e-6/1e-9 = 1e3`, and milli-K adds `1e3`:
 /// `ΔT[mK] = P[µW]·1e6 / (2π·k·r[nm])`.
 const SCALE_UW_NM_TO_MK: f32 = 1.0e6;
 
-/// Steady-state temperature rise above ambient for every device, milli-°C.
-///
-/// `power_uw[i]` is device `i`'s dissipation in µW; devices with zero (or
-/// missing) power are pure sensors — they still *receive* heat, they just do not
-/// emit any. Returns one rise per device, so `temp[a] − temp[b]` is the ΔT a
-/// matched pair sees.
-///
-/// `O(n²)` over devices, called once per epoch rather than per move.
+/// Temperature rise per device, milli-°C. `power_uw[j]` (missing = 0) is
+/// device `j`'s dissipation. O(n²).
 #[must_use]
 pub fn rises_mc(l: &Layout, power_uw: &[i32]) -> Vec<i32> {
     let n = l.x.len();
     let mut out = vec![0i32; n];
     if power_uw.iter().all(|&p| p == 0) {
-        return out; // no sources → uniform die, honest zero
+        return out;
     }
     let denom = 2.0 * std::f32::consts::PI * K_SI_W_PER_M_K;
     for (i, o) in out.iter_mut().enumerate() {
@@ -65,8 +33,6 @@ pub fn rises_mc(l: &Layout, power_uw: &[i32]) -> Vec<i32> {
             if p == 0 {
                 continue;
             }
-            // Distance from source j to victim i, floored at the source's own
-            // half-extent so self-heating (r → 0) stays finite.
             let r_floor = (l.hw[j].max(l.hh[j])).max(1) as f32;
             let r = if i == j {
                 r_floor
@@ -83,36 +49,20 @@ pub fn rises_mc(l: &Layout, power_uw: &[i32]) -> Vec<i32> {
 }
 
 impl Layout {
-    /// Recompute [`Layout::temp_mc`] from [`Layout::power_uw`] and the current
-    /// device positions. Call at epoch/iteration boundaries — see the module
-    /// docs on cadence.
+    /// Recompute [`Layout::temp_mc`] from `power_uw` and current positions.
     pub fn refresh_temps(&mut self) {
-        self.temp_mc = rises_mc(self, &self.power_uw.clone());
+        self.temp_mc = rises_mc(self, &self.power_uw);
     }
 
-    /// Temperature difference between two devices, milli-°C — what a matched
-    /// pair's thermal budget is scored against. `0` when temperatures have never
-    /// been refreshed (all-zero `temp_mc`).
+    /// |ΔT| between two targets, milli-°C. A group reads as its hottest member.
     #[inline]
     #[must_use]
-    pub fn delta_temp_mc(&self, a: crate::ids::Target, b: crate::ids::Target) -> i32 {
-        let t = |x: crate::ids::Target| -> i32 {
-            match x {
-                crate::ids::Target::Device(d) => {
-                    self.temp_mc.get(d.0 as usize).copied().unwrap_or(0)
-                }
-                // A group's temperature is its hottest member: a matched *group*
-                // is limited by its worst-placed device, not its average.
-                crate::ids::Target::Group(g) => self
-                    .groups
-                    .get(g.0 as usize)
-                    .map(|ms| {
-                        ms.iter()
-                            .map(|d| self.temp_mc.get(d.0 as usize).copied().unwrap_or(0))
-                            .max()
-                            .unwrap_or(0)
-                    })
-                    .unwrap_or(0),
+    pub fn delta_temp_mc(&self, a: Target, b: Target) -> i32 {
+        let temp = |d: crate::DeviceId| self.temp_mc.get(d.0 as usize).copied().unwrap_or(0);
+        let t = |x: Target| match x {
+            Target::Device(d) => temp(d),
+            Target::Group(g) => {
+                self.groups.get(g.0 as usize).and_then(|ms| ms.iter().map(|&d| temp(d)).max()).unwrap_or(0)
             }
         };
         (t(a) - t(b)).abs()

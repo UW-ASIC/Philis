@@ -6,4 +6,3 @@ edition = "2021"
 [dependencies]
 library = { path = "../../frontend/library" }
 verify = { path = "../../backend/verify" }
-pnr_core = { path = "../../kernel/core" }

@@ -1,20 +1,6 @@
-//! Net classification — the front of the routing-constraint chain.
-//!
-//! [`netrole`](crate::netrole) answers "is this a rail or a clock" from the net's
-//! *name*, which is what recognition needs. Routing needs more: a budget is only
-//! as good as the class it is keyed to, and the two classes that matter most for
-//! analog are invisible to a name.
-//!
-//! * **Sensitive** — a small-signal reference: a bias rail, a bandgap output, a
-//!   differential input. These are the *victims* coupling budgets and shielding
-//!   exist to protect. Structurally they are gate-facing nets, often with no DC
-//!   path at all, feeding matched devices.
-//! * **Substrate** — a net that only ever reaches bulk terminals.
-//!
-//! Neither can be recovered from `vbias` vs `vfoo`, so both are recognised from
-//! the hypergraph. The result carries the per-net budgets the routing tier scores
-//! against, which is what finally dissolves the `metadata` staging tier into real
-//! rules (`backend/TODO.md` §5).
+//! Per-net class + budgets. Name gives rails/clocks ([`crate::netrole`]);
+//! structure gives the two classes a name can't: **Sensitive** (feeds a matched
+//! device's gate, or gates-only = a bias rail) and **Substrate** (bulk-only).
 
 use analog::metadata::{NetClass, NetClassification, VoltDomain};
 use pnr_core::ids::NetId;
@@ -22,8 +8,7 @@ use pnr_core::BipartiteHypergraph;
 
 use crate::netrole::NetRole;
 
-/// Terminal index of a FET gate / drain / source in the hypergraph's per-device
-/// net list (mirrors `analog::placement::matching_pair`).
+/// FET terminal order in `hg.device_nets`: G, D, S, B.
 const G: usize = 0;
 const D: usize = 1;
 const S: usize = 2;
@@ -72,36 +57,24 @@ pub fn classify(
     let mut gate_of_sensitive = vec![false; n_nets];
 
     for (d, nets) in hg.device_nets.iter().enumerate() {
-        let sensitive = sensitive_devices.get(d).copied().unwrap_or(false);
-        if let Some(&g) = nets.get(G) {
-            if let Some(slot) = touches_gate.get_mut(g.0 as usize) {
-                *slot = true;
+        let mark = |slot: usize, v: &mut [bool]| {
+            if let Some(n) = nets.get(slot) {
+                v[n.0 as usize] = true;
             }
-            if sensitive {
-                if let Some(slot) = gate_of_sensitive.get_mut(g.0 as usize) {
-                    *slot = true;
-                }
-            }
+        };
+        mark(G, &mut touches_gate);
+        if sensitive_devices[d] {
+            mark(G, &mut gate_of_sensitive);
         }
-        for idx in [D, S] {
-            if let Some(&c) = nets.get(idx) {
-                if let Some(slot) = touches_channel.get_mut(c.0 as usize) {
-                    *slot = true;
-                }
-            }
-        }
-        if let Some(&b) = nets.get(B) {
-            if let Some(slot) = touches_bulk.get_mut(b.0 as usize) {
-                *slot = true;
-            }
-        }
+        mark(D, &mut touches_channel);
+        mark(S, &mut touches_channel);
+        mark(B, &mut touches_bulk);
     }
 
     (0..n_nets)
         .map(|i| {
-            let role = roles.get(i).copied().unwrap_or(NetRole::Signal);
             let class = classify_one(
-                role,
+                roles[i],
                 gate_of_sensitive[i],
                 touches_gate[i],
                 touches_channel[i],

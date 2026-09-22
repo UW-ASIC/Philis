@@ -4,23 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
-# Route DRC/ERC through the GPU backend (CUDA/Vulkan).
-#
-# Inert since the GPurify rewrite: that tree declares no `gpu` feature on any
-# crate, so there is nothing to forward to and the flag selects the CPU path
-# either way. Kept as an empty feature so `--features gpu` still resolves for
-# callers that pass it; restore the forward if the rewrite reintroduces one.
+# Inert: GPurify has no GPU feature to forward to. Kept only because
+# `library/gpu` still names `verify/gpu`.
 gpu = []
 
 [dependencies]
 pnr_core = { path = "../../kernel/core" }
 analog = { path = "../../kernel/analog" }
-# gdsverify (GPurify rewrite) — the facade crate re-exporting the whole
-# verification pipeline (core/engine/ingest/lvs/drc/erc/pex/report/…). This
-# crate is written against the rewrite's API; the old pinned worktree is
-# no longer referenced.
 gdsverify = { workspace = true }
-# The deck's `cell` section is Philis's own (layer roles + routing stack);
-# gdsverify's reader has no field for it and drops it, so we re-read it here.
+# Re-reads the deck's Philis-only `cell` section, which gdsverify ignores.
 serde_json = "1"

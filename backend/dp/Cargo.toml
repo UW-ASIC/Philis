@@ -6,5 +6,5 @@ edition = "2021"
 [dependencies]
 pnr_core = { path = "../../kernel/core" }
 analog = { path = "../../kernel/analog" }
-# dp reuses gp's shared SA mechanics (RNG, objective/legality wiring, canvas).
+# Shared placement primitives (`gp::mechanics`), `Prices`, `VariantSpace`.
 gp = { path = "../gp" }

@@ -15,19 +15,9 @@ pub struct Rect {
     pub h: i32,
 }
 
-/// How a placed cell is turned before it is stamped — the D4 dihedral group, the
-/// same eight transforms GDSII `SREF` encodes as `(angle, mirror_x)`.
-///
-/// Orientation is a **placement** property, not a generator one: a generator
-/// draws a device once in its natural orientation and the placer turns it, so
-/// every family gains transforms at once and none of them enumerate a transposed
-/// copy of their own variant space.
-///
-/// Legality is a *constraint* concern, not a property of this type. Not every
-/// transform is legal for every device: matched channels must run parallel, a
-/// directional pocket implant forbids the four 90° members outright, and a
-/// non-self-aligned (drain-extended) device admits translation only. See
-/// `docs/cells/mosfet.md` §4.1 for the table.
+/// How a placed cell is turned before stamping: the D4 group, the same eight
+/// transforms GDSII `SREF` encodes as `(angle, mirror_x)`. Which members are
+/// legal for a device is a constraint concern, not this type's.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Orient {
     #[default]
@@ -43,9 +33,7 @@ pub enum Orient {
 }
 
 impl Orient {
-    /// The four transforms that put the channel on the other crystal axis. These
-    /// are the ones a directional implant forbids, and the ones that swap a
-    /// device's `hw`/`hh`.
+    /// The four 90° members: they swap a device's `hw`/`hh`.
     #[must_use]
     pub fn swaps_axes(self) -> bool {
         matches!(self, Orient::R90 | Orient::R270 | Orient::Mx90 | Orient::Mx270)
@@ -67,8 +55,7 @@ impl Orient {
     }
 
     /// Map a rectangle about the origin, renormalised to lower-left `(x, y)`.
-    /// Every member of D4 maps grid multiples to grid multiples, so a snapped
-    /// rect stays snapped.
+    /// Grid-preserving.
     #[must_use]
     pub fn apply_rect(self, r: Rect) -> Rect {
         let (x0, y0) = self.apply(r.x, r.y);
@@ -90,27 +77,11 @@ pub struct Pin {
     pub name: String,
     pub net: NetId,
     pub at: Rect,
-    /// The layer the pin is actually drawn on.
-    ///
-    /// Without it `dr` had to *guess*, and the only guess available was
-    /// `layers[0]` — the bottom of the routing stack. That forced li to stay in
-    /// the stack purely so pin access could reach a pin, which in turn let the
-    /// PathFinder lay horizontal tracks on li: the same layer every cell fills
-    /// with S/D pads and tap chains. 26 of `chain4`'s 44 DRC violations were
-    /// `LI.3 min_spacing` from exactly that. One missing field, all the way down.
+    /// The layer the pin is drawn on (pin access must not guess it).
     pub layer: LayerId,
 }
 
-/// A logical terminal a generator declares. Connectivity between `Port`s is what
-/// ERC/LVS check; keeping ports typed is how `macroMaster` catches mis-wiring at
-/// compile time.
-#[derive(Clone, Debug)]
-pub struct Port {
-    pub name: String,
-    pub dir: Dir,
-}
-
-/// Signal direction of a [`Port`].
+/// Signal direction of a port.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dir {
     In,

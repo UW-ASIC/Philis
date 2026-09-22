@@ -1,18 +1,10 @@
-//! Flatten a placed/routed solution into the shape list `verify` and the GDS
-//! writer consume: every macro's geometry translated to its placed position, plus
-//! every routed wire.
+//! Flatten a placed and routed solution into the shape list signoff and the
+//! GDS writer consume.
 
 use pnr_core::{Layout, Macro, Routes, Shape};
 
-/// Collect all drawn geometry: macro `i` turned by its layout orientation and
-/// translated by the layout's device-`i` centre, then all route wires. This is
-/// the flat picture DRC/LVS/PEX run over.
-///
-/// This is the **only** site where [`Orient`] reaches drawn geometry: everywhere
-/// upstream a rotated device is just an `(orient, hw, hh)` triple.
-/// The placement transform itself lives in [`gr::place_macros`] — this used to
-/// carry a second, independent copy of it, and the two drifted: only one of them
-/// was ever corrected, so DRC/LVS saw different geometry than the router did.
+/// Every macro stamped at its placement (the one transform, shared with the
+/// router via `gr::place_macros`), then every routed wire.
 #[must_use]
 pub fn collect(macros: &[Macro], layout: &Layout, routes: &Routes) -> Vec<Shape> {
     let mut out = Vec::new();
@@ -25,33 +17,23 @@ pub fn collect(macros: &[Macro], layout: &Layout, routes: &Routes) -> Vec<Shape>
     out
 }
 
-/// Stage-boundary check: **every pin of a net is physically reached by that net's
-/// routed geometry**.
+/// Debug-only: every pin of a net touches that net's routed geometry (xy
+/// overlap, touching counts). `Routes::debug_check` only proves the wires are
+/// self-connected, which a net can satisfy while missing its pins entirely.
 ///
-/// This is the precondition LVS depends on, checked where it is created rather
-/// than five stages later. `Routes::debug_check` already proves each net's wires
-/// are self-connected; that is not the same claim, and `pair` satisfies it while
-/// still extracting as two disjoint islands (`g=0 s=1 d=2` against `g=4 s=5 d=6`,
-/// 9 extracted nets against a 3-net reference) — the wires are consistent, they
-/// just never land on the pins.
-///
-/// Reachability is tested in xy with touching counted as connected, over the pin
-/// rects and wires together. That over-approximates: two shapes coincident in xy
-/// on non-adjacent layers read as connected here but are open in silicon. It is
-/// the cheap half of the invariant, and it is the half that is currently broken.
-///
-/// ponytail: xy-only. Tighten to "the touch is layer-adjacent, or there is a cut
-/// on a layer joining them" once a via/cut table is reachable from this crate —
-/// that upgrade catches a wire floating over a pin with no via stack down to it.
-///
-/// Compiled out without `debug_assertions`; O(k²) per net.
+/// ponytail: xy-only — ignores whether the touch has a via stack; O(k²) per net.
 pub fn debug_check_connected(macros: &[Macro], layout: &Layout, routes: &Routes) {
     if !cfg!(debug_assertions) {
         return;
     }
     let placed = gr::place_macros(macros, layout);
     let n_nets = routes.wires.len().max(
-        placed.iter().flat_map(|m| &m.pins).map(|p| p.net.0 as usize + 1).max().unwrap_or(0),
+        placed
+            .iter()
+            .flat_map(|m| &m.pins)
+            .map(|p| p.net.0 as usize + 1)
+            .max()
+            .unwrap_or(0),
     );
     for net in 0..n_nets {
         let pins: Vec<pnr_core::Rect> = placed
@@ -139,10 +121,35 @@ mod tests {
     /// same under R180).
     fn ell() -> Macro {
         let shapes = vec![
-            Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 100, h: 400 } },
-            Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 300, h: 100 } },
+            Shape {
+                layer: LayerId(1),
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 100,
+                    h: 400,
+                },
+            },
+            Shape {
+                layer: LayerId(1),
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 300,
+                    h: 100,
+                },
+            },
         ];
-        Macro { shapes, pins: vec![], bbox: Rect { x: 0, y: 0, w: 300, h: 400 } }
+        Macro {
+            shapes,
+            pins: vec![],
+            bbox: Rect {
+                x: 0,
+                y: 0,
+                w: 300,
+                h: 400,
+            },
+        }
     }
 
     fn layout_of(o: Orient, x: i32, y: i32) -> Layout {
@@ -170,7 +177,12 @@ mod tests {
             x1 = x1.max(s.rect.x + s.rect.w);
             y1 = y1.max(s.rect.y + s.rect.h);
         }
-        Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+        Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
     }
 
     /// The invariant the whole flow depends on: drawn geometry must land where
@@ -204,11 +216,20 @@ mod tests {
                 .iter()
                 .map(|s| Shape {
                     layer: s.layer,
-                    rect: Rect { x: s.rect.x - 2_000, y: s.rect.y - 500, ..s.rect },
+                    rect: Rect {
+                        x: s.rect.x - 2_000,
+                        y: s.rect.y - 500,
+                        ..s.rect
+                    },
                 })
                 .collect(),
             pins: vec![],
-            bbox: Rect { x: -2_000, y: -500, w: 300, h: 400 },
+            bbox: Rect {
+                x: -2_000,
+                y: -500,
+                w: 300,
+                h: 400,
+            },
         };
         let (hw, hh) = (150, 200);
         let mut l = layout_of(Orient::R0, 40_000, 60_000);
@@ -223,10 +244,22 @@ mod tests {
     #[test]
     fn r90_transposes_and_keeps_the_anchor() {
         let routes = Routes { wires: vec![] };
-        let flat = bbox_of(&collect(&[ell()], &layout_of(Orient::R0, 500, 900), &routes));
-        let turned = bbox_of(&collect(&[ell()], &layout_of(Orient::R90, 500, 900), &routes));
+        let flat = bbox_of(&collect(
+            &[ell()],
+            &layout_of(Orient::R0, 500, 900),
+            &routes,
+        ));
+        let turned = bbox_of(&collect(
+            &[ell()],
+            &layout_of(Orient::R90, 500, 900),
+            &routes,
+        ));
         assert_eq!((turned.x, turned.y), (flat.x, flat.y), "anchor moved");
-        assert_eq!((turned.w, turned.h), (flat.h, flat.w), "extents not transposed");
+        assert_eq!(
+            (turned.w, turned.h),
+            (flat.h, flat.w),
+            "extents not transposed"
+        );
     }
 
     /// Four quarter-turns return the exact original geometry — no drift creeps in
@@ -237,7 +270,11 @@ mod tests {
         let mut m = ell();
         for _ in 0..4 {
             let shapes = collect(&[m.clone()], &layout_of(Orient::R90, 0, 0), &routes);
-            m = Macro { bbox: bbox_of(&shapes), shapes, pins: vec![] };
+            m = Macro {
+                bbox: bbox_of(&shapes),
+                shapes,
+                pins: vec![],
+            };
         }
         let orig = ell();
         assert_eq!(m.bbox, orig.bbox);

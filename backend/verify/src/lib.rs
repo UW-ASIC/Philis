@@ -1,18 +1,9 @@
-//! # `verify` — physical verification via GPurify (`gdsverify`), in-loop *and*
-//! at signoff.
+//! `verify` — physical verification through GPurify (`gdsverify`).
 //!
-//! One engine, two roles. As a final gate [`signoff`] runs full DRC/ERC/LVS/PEX
-//! through one [`Checker`] session and merges the outcome into one
-//! [`pnr_core::Report`] (hard violations from every stage, `cost` = total
-//! extracted capacitance in fF). **In the loop** the same engine feeds the
-//! optimiser through [`LiveOracle`] — the [`pnr_core::Oracle`] implementation —
-//! plus the [`drc_feedback`]/[`route_feedback`] adapters that freeze its
-//! measurements into **Hard**/**Cost** [`analog::Rule`]s.
-//!
-//! [`Pdk`] (Philis's process schema) lives here; the frontend reads it via
-//! [`Pdk::from_json`] and hands it to cells/stages/verify.
-
-#![allow(dead_code)]
+//! [`signoff`] runs DRC/ERC/LVS/PEX in one engine pass and folds the result
+//! into a [`pnr_core::Report`]. [`LiveOracle`] is the in-loop
+//! [`pnr_core::Oracle`] over the same engine; [`drc`]/[`erc`] are standalone
+//! probes. [`Pdk`] (the process schema every crate reads) lives here too.
 
 pub mod checker;
 pub mod geom;
@@ -24,28 +15,19 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use analog::{Requirements, Rule};
-use gdsverify::engine::{StageStatus, Summary};
 use gdsverify::check::report::Measurement;
-use pnr_core::{Layout, Report, Routes, Shape, Violation};
+use gdsverify::engine::{StageStatus, Summary};
+use pnr_core::{Layout, Report, Shape, Violation};
 
 pub use checker::Checker;
-// Re-exported so callers driving a `Checker` session directly (the variant
-// pricing pass in `frontend/library`) can select stages without their own
-// gdsverify dependency.
 pub use gdsverify::engine::Checks;
 pub use geom::LabeledPin;
-pub use netlist::{extract_parasitics, extract_spice, Detail, ParasiticFormat};
+pub use netlist::{extract_spice, Detail};
 pub use pdk::Pdk;
 pub use reference::{RefDeviceIn, RefInput, RefKind};
 
-// ═══════════════════════════════════════════════════════════════════════
-//  Margins — one arithmetic for every consumer
-// ═══════════════════════════════════════════════════════════════════════
-
-/// The nm shortfall of one violation row: `limit − measured` when both are
-/// lengths (with grid 1000 a `Dbu::raw()` *is* nm), floored at 0 so a graze
-/// cannot subtract severity from a real finding; `1` for every non-length pair
-/// (a boolean fail — an LVS discrepancy, an area/ratio/count rule).
+/// nm shortfall of one violation row: `limit − measured` for a length pair
+/// (1 dbu = 1 nm), floored at 0; `1` for any non-length (boolean) fail.
 #[must_use]
 pub fn shortfall_nm(limit: Measurement, measured: Measurement) -> i64 {
     match (limit, measured) {
@@ -54,22 +36,14 @@ pub fn shortfall_nm(limit: Measurement, measured: Measurement) -> i64 {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  Signoff — one full run, merged into one Report
-// ═══════════════════════════════════════════════════════════════════════
-
-/// Full signoff over drawn geometry, its pin labels, and its schematic
-/// reference. Runs all four checks in one engine pass and merges the outcome
-/// into one [`pnr_core::Report`]; the [`Duration`] is total wall time.
+/// Full signoff over drawn geometry, its pin labels and its schematic
+/// reference; the [`Duration`] is wall time.
 ///
-/// Pass criterion (D6): every violation row — `Error` and `Warning` alike —
-/// becomes a hard [`Violation`] named `{domain}/{rule}:{layer}` with its nm
-/// shortfall as margin; every **stage** the engine skipped or refused becomes a
-/// hard `engine/<stage>: <reason>` violation (fail closed: a check that could
-/// not run must not read as clean). Skipped *rules* are logged, not blocking —
-/// the engine's own `Summary::passed` treats them as blockers, but signoff's
-/// gate is the violation tier and the count is surfaced for the caller's log.
-/// An engine failure anywhere is itself a hard violation, never a panic.
+/// Every violation row (error or warning) becomes a hard [`Violation`] named
+/// `{domain}/{rule}:{layer}` with its nm shortfall as margin. A stage the
+/// engine skipped or refused, or an engine failure, is a hard `engine/…`
+/// violation: a check that could not run never reads as clean. Rules skipped
+/// inside a stage that ran are logged by name.
 #[must_use]
 pub fn signoff(
     shapes: &[Shape],
@@ -79,48 +53,44 @@ pub fn signoff(
 ) -> (Report, Duration) {
     let t0 = Instant::now();
     let mut report = Report::default();
-
-    let fail = |report: &mut Report, what: String| {
-        report.hard_violations.push(Violation { rule: what, margin: 0 });
+    let fail = |report: &mut Report, rule: String| {
+        report.hard_violations.push(Violation { rule, margin: 0 });
     };
 
-    match Checker::new(pdk, false) {
-        Err(e) => fail(&mut report, format!("engine/load: {e}")),
-        Ok(mut checker) => {
-            match checker.set_reference(reference) {
-                Err(e) => fail(&mut report, format!("engine/reference: {e}")),
-                Ok(skipped_devices) => {
-                    if skipped_devices > 0 {
-                        eprintln!(
-                            "verify::signoff: {skipped_devices} schematic device(s) have no \
-                             recogniser in this deck and were left out of the LVS reference"
-                        );
-                    }
-                    match checker.run(shapes, pins, Checks::ALL) {
-                        // Two labels on one connected component: the engine
-                        // refuses to extract (its short detection). Report the
-                        // short as a hard violation, then re-measure label-free
-                        // so DRC/ERC/PEX still count honestly — an abort here
-                        // would read as 0 violations and 0 fF, i.e. clean.
-                        Err(e) if e.starts_with(checker::LABEL_SHORT) => {
-                            fail(&mut report, format!("lvs/{e}"));
-                            match checker.run(shapes, &[], Checks::ALL) {
-                                Err(e) => fail(&mut report, format!("engine/run: {e}")),
-                                Ok(summary) => harvest(&checker, &summary, &mut report),
-                            }
-                        }
+    let mut checker = match Checker::new(pdk, false) {
+        Ok(c) => c,
+        Err(e) => {
+            fail(&mut report, format!("engine/load: {e}"));
+            return (report, t0.elapsed());
+        }
+    };
+    match checker.set_reference(reference) {
+        Err(e) => fail(&mut report, format!("engine/reference: {e}")),
+        Ok(skipped) => {
+            if skipped > 0 {
+                eprintln!(
+                    "verify::signoff: {skipped} schematic device(s) have no deck recogniser; \
+                     left out of LVS"
+                );
+            }
+            match checker.run(shapes, pins, Checks::ALL) {
+                // A label short aborts extraction. Report it, then re-run
+                // label-free so DRC/ERC/PEX still count honestly.
+                Err(e) if e.starts_with(checker::LABEL_SHORT) => {
+                    fail(&mut report, format!("lvs/{e}"));
+                    match checker.run(shapes, &[], Checks::ALL) {
                         Err(e) => fail(&mut report, format!("engine/run: {e}")),
                         Ok(summary) => harvest(&checker, &summary, &mut report),
                     }
                 }
+                Err(e) => fail(&mut report, format!("engine/run: {e}")),
+                Ok(summary) => harvest(&checker, &summary, &mut report),
             }
         }
     }
-
     (report, t0.elapsed())
 }
 
-/// Fold one finished run into the report: violation rows, stage denials, cost.
 fn harvest(checker: &Checker, summary: &Summary, report: &mut Report) {
     let out = checker.outputs();
     for i in 0..out.violations.len() {
@@ -141,45 +111,30 @@ fn harvest(checker: &Checker, summary: &Summary, report: &mut Report) {
         ("lvs", &summary.lvs),
         ("pex", &summary.pex),
     ] {
-        match status {
-            StageStatus::Ran | StageStatus::NotSelected => {}
-            StageStatus::Skipped(why) => report.hard_violations.push(Violation {
-                rule: format!("engine/{stage}: skipped: {why}"),
-                margin: 0,
-            }),
-            StageStatus::Refused(why) => report.hard_violations.push(Violation {
-                rule: format!("engine/{stage}: refused: {why}"),
-                margin: 0,
-            }),
+        if let Some(why) = denied(status) {
+            report
+                .hard_violations
+                .push(Violation { rule: format!("engine/{stage}: {why}"), margin: 0 });
         }
     }
-    if summary.rules_skipped > 0 {
-        // Logged, not blocking: a rule the engine records as skipped inside a
-        // stage that Ran (e.g. an intent-gated ERC rule with no intent file)
-        // is a coverage note, not a legality failure of the layout.
-        eprintln!(
-            "verify::signoff: {} rule(s) recorded as skipped ({} ran clean)",
-            summary.rules_skipped, summary.rules_clean
-        );
+    let skipped = checker.skipped_rules();
+    if !skipped.is_empty() {
+        eprintln!("verify::signoff: rules not run: {skipped:?}");
     }
-    // Signoff has no Θ tier: every finding above is strict legality, none is a
-    // budget with a live residual to price. Budgets belong to the stages.
     report.cost = checker.total_cap_ff();
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  LiveOracle — the pnr_core::Oracle over one reusable Checker (D5)
-// ═══════════════════════════════════════════════════════════════════════
+/// `Some(reason)` for a stage that was requested but did not run.
+fn denied(status: &StageStatus) -> Option<String> {
+    match status {
+        StageStatus::Ran | StageStatus::NotSelected => None,
+        StageStatus::Skipped(why) => Some(format!("skipped: {why}")),
+        StageStatus::Refused(why) => Some(format!("refused: {why}")),
+    }
+}
 
-/// The live [`pnr_core::Oracle`]: gdsverify measurements at stage-call
-/// granularity, over one reusable [`Checker`] session with density stripped
-/// (in-loop mode). `dp` consumes the trait, `frontend/library` constructs this
-/// over the run's PDK, and `pnr_core::NullOracle` stands in wherever
-/// pre-oracle behaviour must be reproduced byte-for-byte.
-///
-/// Determinism (the trait's contract): every path below is a pure function of
-/// `shapes` — the engine is single-threaded per call (`threads: None`) and its
-/// output is canonically sorted.
+/// The live [`pnr_core::Oracle`]: one reusable density-stripped [`Checker`].
+/// Deterministic: the engine runs single-threaded and sorts its output.
 pub struct LiveOracle {
     // ponytail: Mutex serializes; thread_local sessions if a parallel batch
     // lane appears.
@@ -187,11 +142,8 @@ pub struct LiveOracle {
 }
 
 impl LiveOracle {
-    /// A session over `pdk` with density rules stripped (meaningless
-    /// mid-iteration).
-    ///
     /// # Errors
-    /// The deck source failing to re-parse (cannot happen for a loaded `Pdk`).
+    /// The deck failing to re-parse (cannot happen for a loaded `Pdk`).
     pub fn new(pdk: &Pdk) -> Result<Self, String> {
         Ok(Self { session: Mutex::new(Checker::new(pdk, true)?) })
     }
@@ -203,21 +155,14 @@ impl LiveOracle {
 impl pnr_core::Oracle for LiveOracle {
     fn drc(&self, shapes: &[Shape]) -> pnr_core::DrcSummary {
         let mut session = self.session.lock().expect("a panicked oracle call");
-        match session.run(shapes, &[], Self::DRC_ONLY) {
-            // Fail closed: geometry the engine cannot even load is not clean.
-            Err(_) => pnr_core::DrcSummary { violations: 1, shortfall_nm: 1 },
-            Ok(_) => {
-                let out = session.outputs();
-                let mut shortfall = 0_i64;
-                for i in 0..out.violations.len() {
-                    let v = out.violations.get(i);
-                    shortfall += shortfall_nm(v.limit, v.measured);
-                }
-                pnr_core::DrcSummary {
-                    violations: out.violations.len() as u32,
-                    shortfall_nm: shortfall,
-                }
-            }
+        if session.run(shapes, &[], Self::DRC_ONLY).is_err() {
+            // Fail closed: geometry the engine cannot load is not clean.
+            return pnr_core::DrcSummary { violations: 1, shortfall_nm: 1 };
+        }
+        let v = &session.outputs().violations;
+        pnr_core::DrcSummary {
+            violations: v.len() as u32,
+            shortfall_nm: (0..v.len()).map(|i| shortfall_nm(v.limit[i], v.measured[i])).sum(),
         }
     }
 
@@ -229,53 +174,43 @@ impl pnr_core::Oracle for LiveOracle {
         }
     }
 
+    /// Ambiguous when extraction aborts (the implant-merge signal) or finds
+    /// the wrong device count (two devices fused, or one split).
     fn merge_ambiguous(&self, shapes: &[Shape], expected_devices: usize) -> bool {
-        // None-or-mismatch ⇒ ambiguous: an extraction abort is the
-        // implant-merge signal itself, and a clean extraction of the wrong
-        // count means two devices fused into one (or one split) without
-        // tripping any DRC rule.
         let mut session = self.session.lock().expect("a panicked oracle call");
-        match session.device_count(shapes) {
-            Some(n) => n != expected_devices,
-            None => true,
-        }
+        session.device_count(shapes) != Some(expected_devices)
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-//  Standalone probes — the macroMaster seam
-// ═══════════════════════════════════════════════════════════════════════
 
 /// One located finding, for callers that want rows rather than a Report.
 #[derive(Clone, Debug)]
 pub struct Finding {
-    /// The deck's rule id (or `engine/…` for a run that could not conclude).
+    /// The deck's rule id, or `engine/…` for a run that could not conclude.
     pub rule: String,
     /// Layer name, `"-"` for findings with no layer.
     pub layer: String,
-    /// nm shortfall (`limit − measured`), `1` for a boolean fail.
+    /// nm shortfall, `1` for a boolean fail.
     pub margin_nm: i64,
     pub x: i64,
     pub y: i64,
 }
 
-/// Standalone DRC over drawn geometry: a fresh full [`Checker`] per call.
-/// An engine failure comes back as a single fail-closed `engine/…` finding.
+/// Standalone DRC: a fresh full [`Checker`] per call; an engine failure is a
+/// single fail-closed `engine/…` finding.
 #[must_use]
 pub fn drc(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk) -> Vec<Finding> {
     standalone(shapes, pins, pdk, Checks { drc: true, erc: false, lvs: false, pex: false })
 }
 
-/// Standalone ERC over drawn geometry: a fresh full [`Checker`] per call.
+/// Standalone ERC, as [`drc`].
 #[must_use]
 pub fn erc(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk) -> Vec<Finding> {
     standalone(shapes, pins, pdk, Checks { drc: false, erc: true, lvs: false, pex: false })
 }
 
 fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks) -> Vec<Finding> {
-    let engine_fail = |what: String| {
-        vec![Finding { rule: what, layer: "-".into(), margin_nm: 1, x: 0, y: 0 }]
-    };
+    let engine_fail =
+        |rule: String| vec![Finding { rule, layer: "-".into(), margin_nm: 1, x: 0, y: 0 }];
     let mut checker = match Checker::new(pdk, false) {
         Ok(c) => c,
         Err(e) => return engine_fail(format!("engine/load: {e}")),
@@ -285,69 +220,34 @@ fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks) 
         Err(e) => return engine_fail(format!("engine/run: {e}")),
     };
     let out = checker.outputs();
-    let mut findings = Vec::with_capacity(out.violations.len());
-    for i in 0..out.violations.len() {
-        let v = out.violations.get(i);
-        findings.push(Finding {
-            rule: checker.rule_name(v.rule).to_string(),
-            layer: checker.layer_name(v.layer).to_string(),
-            margin_nm: shortfall_nm(v.limit, v.measured),
-            x: v.at.x.raw(),
-            y: v.at.y.raw(),
-        });
-    }
-    // A requested stage that could not run is a finding, not silence.
-    for (stage, status, requested) in [
-        ("drc", &summary.drc, checks.drc),
-        ("erc", &summary.erc, checks.erc),
-    ] {
-        if !requested {
-            continue;
-        }
-        if let StageStatus::Skipped(why) = status {
-            findings.push(Finding {
-                rule: format!("engine/{stage}: skipped: {why}"),
-                layer: "-".into(),
-                margin_nm: 1,
-                x: 0,
-                y: 0,
-            });
-        } else if let StageStatus::Refused(why) = status {
-            findings.push(Finding {
-                rule: format!("engine/{stage}: refused: {why}"),
-                layer: "-".into(),
-                margin_nm: 1,
-                x: 0,
-                y: 0,
-            });
+    let mut findings: Vec<Finding> = (0..out.violations.len())
+        .map(|i| {
+            let v = out.violations.get(i);
+            Finding {
+                rule: checker.rule_name(v.rule).to_string(),
+                layer: checker.layer_name(v.layer).to_string(),
+                margin_nm: shortfall_nm(v.limit, v.measured),
+                x: v.at.x.raw(),
+                y: v.at.y.raw(),
+            }
+        })
+        .collect();
+    for (stage, status) in [("drc", &summary.drc), ("erc", &summary.erc)] {
+        if let Some(why) = denied(status) {
+            findings.extend(engine_fail(format!("engine/{stage}: {why}")));
         }
     }
     findings
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  In-loop feedback — oracle measurements as analog Rules
-// ═══════════════════════════════════════════════════════════════════════
-//
-// A live DRC/PEX pass yields findings tied to *drawn geometry*, not to the
-// device-centre `Layout` / route `Routes` the optimiser mutates. So these
-// rules are **captured snapshots**: each carries the finding's severity and
-// reports it as a fixed penalty against whatever state is scored, until the
-// next iteration redraws geometry and re-measures. That is the standard
-// "freeze the finding into a cost the optimiser pays" feedback pattern.
-
-/// A captured DRC violation total. Hard when applied as legality
-/// (`satisfied() == false` while the finding stands), and its `margin`
-/// (nm shortfall, or 1 for a boolean fail) is the cost it contributes.
+/// A captured DRC total, frozen into a Hard rule until the next re-measure.
+/// Never satisfied; costs its nm shortfall (clamped ≥ 1).
 #[derive(Clone, Copy)]
-pub struct DrcSpacing {
-    /// nm shortfall, clamped ≥ 1 so a real finding always costs something and
-    /// always reads as unsatisfied.
-    pub margin: i32,
+struct DrcSpacing {
+    margin: i32,
 }
 
 impl DrcSpacing {
-    #[must_use]
     fn from_margin(m: i64) -> Self {
         Self { margin: m.clamp(1, i64::from(i32::MAX)) as i32 }
     }
@@ -355,67 +255,18 @@ impl DrcSpacing {
 
 impl Rule for DrcSpacing {
     type On = Layout;
-    #[inline]
     fn cost(self, _state: &Layout) -> f32 {
         self.margin as f32
     }
-    #[inline]
     fn satisfied(self, _state: &Layout) -> bool {
         false
     }
 }
 
-/// A captured routing-tier violation total — the [`Routes`] analogue of
-/// [`DrcSpacing`].
-#[derive(Clone, Copy)]
-pub struct AntennaViol {
-    pub margin: i32,
-}
-
-impl AntennaViol {
-    #[must_use]
-    fn from_margin(m: i64) -> Self {
-        Self { margin: m.clamp(1, i64::from(i32::MAX)) as i32 }
-    }
-}
-
-impl Rule for AntennaViol {
-    type On = Routes;
-    #[inline]
-    fn cost(self, _state: &Routes) -> f32 {
-        self.margin as f32
-    }
-    #[inline]
-    fn satisfied(self, _state: &Routes) -> bool {
-        false
-    }
-}
-
-/// A captured PEX parasitic total — a pure **Cost** rule (never a legality
-/// gate): the optimiser trades it off against everything else.
-#[derive(Clone, Copy)]
-pub struct PexCost {
-    /// Total extracted capacitance in fF.
-    pub cap_ff: f32,
-}
-
-impl Rule for PexCost {
-    type On = Routes;
-    #[inline]
-    fn cost(self, _state: &Routes) -> f32 {
-        self.cap_ff
-    }
-    // satisfied() defaults to true — Cost only, never rejects a candidate.
-}
-
-/// **In-loop placement feedback.** Measure the current drawn geometry through
-/// the oracle and freeze any DRC shortfall into a **Hard** [`DrcSpacing`] rule
-/// for the placement stage's [`Requirements<Layout>`].
-///
-/// Also returns the fresh [`pnr_core::DrcSummary`] itself: the requirements
-/// fold is one batch regardless of severity, so a caller scoring V off batch
-/// presence sees 0/1 where the layout really went 24 → 3 — the summary's
-/// `violations` count is the honest term.
+/// In-loop placement feedback: measure `shapes` through the oracle and freeze
+/// any DRC shortfall into a Hard [`Requirements<Layout>`] batch. Also returns
+/// the raw summary, whose `violations` count is the honest severity term (the
+/// batch is one rule however many findings stand).
 #[must_use]
 pub fn drc_feedback(
     oracle: &LiveOracle,
@@ -425,44 +276,9 @@ pub fn drc_feedback(
     let summary = oracle.drc(shapes);
     let mut req = Requirements::default();
     if summary.violations > 0 {
-        // Hard by default; `PNR_DRC_FEEDBACK_COST=1` moves the fold to the cost
-        // arm. The cost arm is the theoretically right home (the finding is a
-        // frozen snapshot of the PREVIOUS epoch — as Hard it taxes every later
-        // epoch's V even after the geometry was fixed, and the fresh
-        // measurement is already its own V term), and short-budget probes
-        // confirmed the V floor drops. But at full budget the softer fold
-        // measurably regressed rc_filter/chain4 DRC (0 → 11/24): the stall
-        // patience and epoch keys re-tuned themselves around the missing
-        // pressure. Flipping the default needs a dynamics-tuning pass of its
-        // own, so the correct-but-destabilising form ships opt-in.
-        let batch = Box::new(vec![DrcSpacing::from_margin(summary.shortfall_nm)]);
-        if std::env::var("PNR_DRC_FEEDBACK_COST").is_ok() {
-            req.cost.push(batch);
-        } else {
-            req.hard.push(batch);
-        }
+        req.hard.push(Box::new(vec![DrcSpacing::from_margin(summary.shortfall_nm)]));
     }
     (req, summary)
-}
-
-/// **In-loop routing feedback.** Measure the drawn routing through the oracle:
-/// DRC shortfall becomes a **Hard** [`AntennaViol`], the PEX capacitance total
-/// a **Cost** [`PexCost`], merged into the routing stage's
-/// [`Requirements<Routes>`] each iteration.
-#[must_use]
-pub fn route_feedback(oracle: &LiveOracle, routes: &Routes) -> Requirements<Routes> {
-    use pnr_core::Oracle as _;
-    let shapes: Vec<Shape> = routes.wires.iter().flatten().copied().collect();
-
-    let mut req = Requirements::default();
-    let summary = oracle.drc(&shapes);
-    if summary.violations > 0 {
-        req.hard
-            .push(Box::new(vec![AntennaViol::from_margin(summary.shortfall_nm)]));
-    }
-    req.cost
-        .push(Box::new(vec![PexCost { cap_ff: oracle.pex_cap_ff(&shapes) }]));
-    req
 }
 
 #[cfg(test)]
@@ -510,13 +326,19 @@ mod tests {
         assert_eq!(r0.cost(&s), 1.0);
     }
 
-    // PexCost is Cost-only: satisfied regardless, contributes its cap.
+    // Metal reaching no device is floating — unless a label makes it a port,
+    // which leaves the cell (the bulk-only VSS rail case).
     #[test]
-    fn pex_cost_is_objective_only() {
-        let routes = Routes { wires: vec![] };
-        let c = PexCost { cap_ff: 12.5 };
-        assert!(c.satisfied(&routes));
-        assert_eq!(c.cost(&routes), 12.5);
+    fn unconnected_metal_is_floating_unless_it_is_a_port() {
+        let pdk = sky130();
+        let shapes = [rect(&pdk, "met1", 0, 0, 1000, 1000)];
+        let floating = |pins: &[LabeledPin]| {
+            erc(&shapes, pins, &pdk).iter().filter(|f| f.rule == "floating_interconnect").count()
+        };
+        assert_eq!(floating(&[]), 1);
+        let met1 = pdk.layer("met1").unwrap().0;
+        let pin = LabeledPin { name: "VSS".into(), layer: met1, x: 500, y: 500 };
+        assert_eq!(floating(&[pin]), 0);
     }
 
     // The one margin arithmetic every consumer shares: nm for a length pair,
@@ -562,17 +384,6 @@ mod tests {
         let summary = checker
             .run(&shapes, &[], Checks { drc: true, erc: false, lvs: false, pex: false })
             .unwrap();
-        if summary.violations != 0 {
-            let out = checker.outputs();
-            for i in 0..out.violations.len() {
-                let v = out.violations.get(i);
-                eprintln!(
-                    "VIOL {} on {}",
-                    checker.rule_name(v.rule),
-                    checker.layer_name(v.layer)
-                );
-            }
-        }
         assert_eq!(summary.violations, 0, "a 500×500 li plate is legal");
         assert!(summary.rules_clean > 0, "zero findings must come from rules that ran");
         assert_eq!(summary.drc, StageStatus::Ran);
@@ -730,10 +541,6 @@ mod tests {
             rect(&pdk, "nsdm", 0, 0, 500, 400),
         ];
         let mut checker = Checker::new(&pdk, true).unwrap();
-        // Through debug_devices first: unlike device_count it surfaces the
-        // extract error text when the stack fails to load at all.
-        let described = checker.debug_devices(&shapes, &[]).expect("extraction");
-        eprintln!("{described:?}");
         assert_eq!(checker.device_count(&shapes), Some(1));
         // And no geometry at all is zero devices, not an abort.
         assert_eq!(checker.device_count(&[]), Some(0));

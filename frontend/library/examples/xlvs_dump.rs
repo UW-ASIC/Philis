@@ -10,8 +10,8 @@
 
 use library::{elaborate, ElabConfig};
 use macro_master::{
-    variants::Mos, AlignMode, Block, CompBuilder, Composition, GenError, InOut, Input, Io,
-    Output, PortInfo, Process, Signal,
+    variants::Mos, AlignMode, Block, CompBuilder, Composition, GenError, InOut, Input, Io, Output,
+    PortInfo, Process, Signal,
 };
 use pnr_core::DeviceKind;
 
@@ -95,20 +95,37 @@ fn main() {
 
     let deck = std::fs::read_to_string(&deck_path).expect("read deck");
     let pdk = verify::Pdk::from_json(&deck).expect("parse deck");
-    let epochs: u32 = std::env::var("XLVS_EPOCHS").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
-    let sol = elaborate(&Ota5T, &pdk, &ElabConfig { epochs, ..ElabConfig::default() }).expect("elaborate");
+    let epochs: u32 = std::env::var("XLVS_EPOCHS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4);
+    let sol = elaborate(
+        &Ota5T,
+        &pdk,
+        &ElabConfig {
+            epochs,
+            ..ElabConfig::default()
+        },
+    )
+    .expect("elaborate");
 
     // GDS on the deck's own layer/datatype numbers, so magic reads it with the
     // stock sky130A techfile and no mapping table in between.
     let layer_gds = pdk.layer_gds();
     let shapes = sol.geometry();
-    std::fs::write(out.join("ota5t.gds"), library::gds::emit(&shapes, &layer_gds))
-        .expect("write gds");
+    std::fs::write(
+        out.join("ota5t.gds"),
+        library::gds::emit(&shapes, &layer_gds),
+    )
+    .expect("write gds");
 
     // The reference, as SPICE, straight from the declared schematic — one card
     // per device (netgen does its own parallel reduction, so no finger
     // expansion here, unlike gdsverify's RefInput).
-    let schem = sol.schematic.as_ref().expect("Mos variants declare their devices");
+    let schem = sol
+        .schematic
+        .as_ref()
+        .expect("Mos variants declare their devices");
     let mut sp = String::from("* reference: Ota5T as declared by the composition\n");
     sp.push_str(".subckt ota5t ");
     for p in &sol.ports {
@@ -118,7 +135,12 @@ fn main() {
     sp.push('\n');
     for d in &schem.devices {
         let t = |name: &str| {
-            let id = d.terminals.iter().find(|(k, _)| k == name).expect("terminal").1;
+            let id = d
+                .terminals
+                .iter()
+                .find(|(k, _)| k == name)
+                .expect("terminal")
+                .1;
             sol.nets[id.0 as usize].clone()
         };
         let model = match d.kind {
@@ -145,11 +167,13 @@ fn main() {
     std::fs::write(out.join("ota5t_ref.spice"), &sp).expect("write ref spice");
 
     // gdsverify's own verdict on the very same geometry, for the comparison.
-    eprintln!("ROUTE REPORT: {} hard", sol.report.hard_violations.len());
-    for v in &sol.report.hard_violations { eprintln!("  RV {} margin={}", v.rule, v.margin); }
     let report = sol.signoff(&pdk).expect("schematic present");
-    let lvs: Vec<&str> =
-        report.hard_violations.iter().map(|v| v.rule.as_str()).filter(|r| r.contains("lvs")).collect();
+    let lvs: Vec<&str> = report
+        .hard_violations
+        .iter()
+        .map(|v| v.rule.as_str())
+        .filter(|r| r.contains("lvs"))
+        .collect();
     std::fs::write(
         out.join("gdsverify.txt"),
         format!("lvs findings: {}\n{}\n", lvs.len(), lvs.join("\n")),
@@ -159,9 +183,18 @@ fn main() {
     // labels signoff uses — not raw pin centres, which land in space wherever
     // the drawn pad is not under the pin rect.
     let magic_of = |l: u16| -> &'static str {
-        for (deck, magic) in [("li", "li"), ("met1", "m1"), ("met2", "m2"), ("met3", "m3"),
-                              ("met4", "m4"), ("met5", "m5"), ("poly", "poly")] {
-            if pdk.layer(deck).map(|i| i.0) == Some(l) { return magic; }
+        for (deck, magic) in [
+            ("li", "li"),
+            ("met1", "m1"),
+            ("met2", "m2"),
+            ("met3", "m3"),
+            ("met4", "m4"),
+            ("met5", "m5"),
+            ("poly", "poly"),
+        ] {
+            if pdk.layer(deck).map(|i| i.0) == Some(l) {
+                return magic;
+            }
         }
         "?"
     };
@@ -169,26 +202,19 @@ fn main() {
     for lp in sol.net_labels(&pdk) {
         tcl.push_str(&format!(
             "box {}um {}um {}um {}um\nlabel {} 0 {}\n",
-            lp.x as f64 / 1000.0, lp.y as f64 / 1000.0,
-            lp.x as f64 / 1000.0, lp.y as f64 / 1000.0,
-            lp.name, magic_of(lp.layer)));
-        println!("label {} on {} at {},{}", lp.name, magic_of(lp.layer), lp.x, lp.y);
+            lp.x as f64 / 1000.0,
+            lp.y as f64 / 1000.0,
+            lp.x as f64 / 1000.0,
+            lp.y as f64 / 1000.0,
+            lp.name,
+            magic_of(lp.layer)
+        ));
     }
     std::fs::write(out.join("labels.tcl"), &tcl).expect("write labels");
-    // Which pins does a routed wire actually land on?
-    let names = ["m1","m2","m3","m4","m5"];
-    for (i, m) in sol.macros.iter().enumerate() {
-        for p in &m.pins {
-            // Layer-agnostic: the router lands on met1+ and drops a via stack,
-            // so a wire never shares the li pin's own layer.
-            let hit = sol.routes.shapes(p.net).iter().any(|w|
-                   w.rect.x <= p.at.x + p.at.w && p.at.x <= w.rect.x + w.rect.w
-                && w.rect.y <= p.at.y + p.at.h && p.at.y <= w.rect.y + w.rect.h);
-            println!("PIN {} {} net={} at=({},{}) routed={}",
-                names.get(i).copied().unwrap_or("?"), p.name,
-                sol.nets[p.net.0 as usize], p.at.x, p.at.y, hit);
-        }
-    }
-    println!("wrote {} shapes, {} ref devices, gdsverify lvs findings {}",
-        shapes.len(), schem.devices.len(), lvs.len());
+    println!(
+        "wrote {} shapes, {} ref devices, gdsverify lvs findings {}",
+        shapes.len(),
+        schem.devices.len(),
+        lvs.len()
+    );
 }

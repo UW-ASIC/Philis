@@ -9,11 +9,7 @@ pub enum DeviceKind {
     Pmos,
     Resistor,
     Capacitor,
-    /// BJTs are split by polarity for the same reason MOS are: the cell generator
-    /// draws a different marker (and well/implant) per polarity, and LVS seeds a
-    /// different device class. A single `Bjt` variant forced both consumers to
-    /// guess, and both guessed NPN — so a PNP was drawn, extracted, *and*
-    /// referenced as an NPN, which matched only because it was wrong twice.
+    /// BJTs split by polarity: marker, well and LVS device class all differ.
     Npn,
     Pnp,
     Diode,
