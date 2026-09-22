@@ -7,16 +7,9 @@
 //! Env: `PNR_BENCH_SEED` (default 1), `PNR_BENCH_PDK` (deck override, see
 //! `pdk_path`).
 //!
-//! Debug artifacts (`<name>.gds`, `signoff.txt`) land in
-//! `target/bench_debug/<name>/`; SVGs in `assets/`.
-//!
-//! Migrated from `tools/benchmark`: fixture discovery + SPICE preprocessing are
-//! unchanged; the per-circuit run now drives `library` (the CLI's flow) and the
-//! metrics table is rebuilt from the public `Solution` + `RunStats` + `signoff`
-//! report. Two capabilities the old harness had are gone with the new API and
-//! noted where they mattered: constrained-interface sidecars (`library::run`
-//! takes no `InterfaceSpec`) and the plan-utilisation column (`Layout` no longer
-//! carries a die / cell-margin).
+//! Debug artifacts (`<name>.gds`, `signoff.txt`, `violations.txt`,
+//! `drc_located.txt`) land in `target/bench_debug/<name>/`; SVGs in `assets/`.
+//! `<stem>.interface.json` sidecars are ignored (`library::run` takes none).
 
 mod fixtures;
 
@@ -64,47 +57,6 @@ fn pdk_path(suite: Suite) -> PathBuf {
     }
 }
 
-/// Per-PDK render tables: `layer_gds[LayerId.0] = (gds_layer, gds_datatype)` for
-/// the GDS writer, and `layer_names[(gds_layer, gds_datatype)] = name` for SVG
-/// legends. Both are derived by joining the deck's `layers` block (name →
-/// gds numbers) with the `Pdk`'s name → `LayerId` table.
-fn layer_tables(pdk_json: &str, pdk: &Pdk) -> (Vec<(u16, u16)>, visualizer::LayerMap) {
-    let mut by_name: HashMap<String, (u16, u16)> = HashMap::new();
-    let mut names = visualizer::LayerMap::new();
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(pdk_json) {
-        if let Some(layers) = v.get("layers").and_then(|l| l.as_object()) {
-            for (name, val) in layers {
-                // Deck spells a layer as `[gds_layer, datatype]`; the older
-                // `{"layer": .., "datatype": ..}` object form is kept readable
-                // so foreign decks don't silently emit everything on (0, 0) —
-                // which is exactly what happened when the schema moved: every
-                // GDS artifact went out on one layer and external tools
-                // (KLayout, magic) saw a blank design while in-memory signoff
-                // stayed correct.
-                let pair = match (val.as_array(), val.get("layer"), val.get("datatype")) {
-                    (Some(a), ..) if a.len() >= 2 => {
-                        a[0].as_i64().zip(a[1].as_i64())
-                    }
-                    (_, Some(l), Some(d)) => l.as_i64().zip(d.as_i64()),
-                    _ => None,
-                };
-                if let Some((l, d)) = pair {
-                    by_name.insert(name.clone(), (l as u16, d as u16));
-                    names.insert((l as i32, d as i32), name.clone());
-                }
-            }
-        }
-    }
-    let max_id = pdk.layers.iter().map(|(_, id)| id.0 as usize).max().unwrap_or(0);
-    let mut layer_gds = vec![(0u16, 0u16); max_id + 1];
-    for (name, id) in &pdk.layers {
-        if let Some(&(l, d)) = by_name.get(name) {
-            layer_gds[id.0 as usize] = (l, d);
-        }
-    }
-    (layer_gds, names)
-}
-
 struct Row {
     name: String,
     suite: String,
@@ -123,48 +75,19 @@ struct ContractStat {
     worst: f32,
 }
 
-#[derive(Debug)]
-struct Compactness {
-    area_um2: f64,
-    drawn_util_pct: f64,
-    bbox_fill_pct: f64,
-}
-
-impl Compactness {
-    /// Footprint metrics from device half-extents. Without a die/cell-margin on
-    /// the new `Layout`, the envelope is the device bounding box; `drawn_util`
-    /// and `bbox_fill` therefore coincide (both drawn-area / bbox-area) — kept as
-    /// two columns for table-shape parity with the old harness.
-    fn measure(l: &Layout) -> Self {
-        let n = l.x.len();
-        let drawn_area: f64 = (0..n)
-            .map(|i| f64::from(2 * l.hw[i]) * f64::from(2 * l.hh[i]))
-            .sum();
-        let bbox_area = (0..n)
-            .fold(None::<(i64, i64, i64, i64)>, |b, i| {
-                let cell = (
-                    i64::from(l.x[i] - l.hw[i]),
-                    i64::from(l.y[i] - l.hh[i]),
-                    i64::from(l.x[i] + l.hw[i]),
-                    i64::from(l.y[i] + l.hh[i]),
-                );
-                Some(match b {
-                    None => cell,
-                    Some((x0, y0, x1, y1)) => {
-                        (x0.min(cell.0), y0.min(cell.1), x1.max(cell.2), y1.max(cell.3))
-                    }
-                })
-            })
-            .map_or(0.0, |(x0, y0, x1, y1)| {
-                (x1 - x0).max(0) as f64 * (y1 - y0).max(0) as f64
-            });
-        let pct = |a: f64, env: f64| if env > 0.0 { 100.0 * a / env } else { 0.0 };
-        Self {
-            area_um2: bbox_area / 1_000_000.0,
-            drawn_util_pct: pct(drawn_area, bbox_area),
-            bbox_fill_pct: pct(drawn_area, bbox_area),
-        }
+/// `(bbox area µm², device area / bbox area %)` from device half-extents.
+fn footprint(l: &Layout) -> (f64, f64) {
+    let n = l.x.len();
+    let drawn: f64 = (0..n).map(|i| f64::from(2 * l.hw[i]) * f64::from(2 * l.hh[i])).sum();
+    if n == 0 {
+        return (0.0, 0.0);
     }
+    let x0 = (0..n).map(|i| l.x[i] - l.hw[i]).min().unwrap();
+    let y0 = (0..n).map(|i| l.y[i] - l.hh[i]).min().unwrap();
+    let x1 = (0..n).map(|i| l.x[i] + l.hw[i]).max().unwrap();
+    let y1 = (0..n).map(|i| l.y[i] + l.hh[i]).max().unwrap();
+    let bbox = f64::from(x1 - x0) * f64::from(y1 - y0);
+    (bbox / 1e6, if bbox > 0.0 { 100.0 * drawn / bbox } else { 0.0 })
 }
 
 /// Trim a rule's fully-qualified type name to its final path segment.
@@ -199,10 +122,6 @@ fn run_circuit(
     if g.devices.len() > MAX_CELLS {
         return (format!("skipped ({} cells > {MAX_CELLS})", g.devices.len()), Vec::new());
     }
-    // NOTE: constrained-interface sidecars (`<stem>.interface.json`) are not
-    // applied — `library::run` exposes no `InterfaceSpec` hook. Present sidecars
-    // are ignored; the circuit still runs fully auto-generated.
-
     let cfg = Config { seed, feedback_iters: FEEDBACK_ITERS, ..Config::default() };
     let sol = match library::run(&text, pdk, &Macros::default(), &cfg) {
         Ok(s) => s,
@@ -239,17 +158,14 @@ fn run_circuit(
         .filter(|&i| sol.routes.wires.get(i).map_or(true, |w| w.is_empty()))
         .count();
 
-    let comp = Compactness::measure(&sol.layout);
+    let (area_um2, util_pct) = footprint(&sol.layout);
     let s = &sol.stats;
 
-    // `overuse` is `RunStats::route_overuse`: milli-budget normalised residual margins
-    // since the Θ-realness step, not a raw track count — compare runs, not absolutes.
-    // `esc` is D12's diagnostic and the reason `variant_escalations` exists: a nonzero
-    // count means the run hit a **variant-space binding** (no arrangement of the chosen
-    // variants was feasible), which is a different failure from a placement local
-    // minimum and indistinguishable from it without this number.
+    // `overuse` is milli-budget normalised residual margin, not a track count.
+    // `esc` > 0 means a variant-space binding (no arrangement of the chosen
+    // variants was feasible), not a placement local minimum.
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {} | overuse {} | DRC {} | LVS {} | ERC {}{} | C {:.1} fF | area {:.1} um2 | util drawn {:.1}%, bbox {:.1}% | best {}/{}{} | outer {}, esc {} | seed {}",
+        "{} cells, {} nets | WL {} nm, unrouted {} | overuse {} | DRC {} | LVS {} | ERC {}{} | C {:.1} fF | area {:.1} um2 | util {:.1}% | best {}/{}{} | outer {}, esc {} | seed {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
@@ -260,9 +176,8 @@ fn run_circuit(
         erc,
         if engine > 0 { format!(" | engine fails {engine}") } else { String::new() },
         report.cost,
-        comp.area_um2,
-        comp.drawn_util_pct,
-        comp.bbox_fill_pct,
+        area_um2,
+        util_pct,
         s.best_iteration + 1,
         s.iterations,
         if s.converged { " converged" } else { " budget" },
@@ -426,7 +341,7 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            let (lg, ln) = layer_tables(&deck, &p);
+            let (lg, ln) = (p.layer_gds(), visualizer::parse_layer_names(&deck));
             pdk_cache.insert(pdk_json_path.clone(), (p, lg, ln));
         }
         let (pdk, layer_gds, layer_names) = &pdk_cache[&pdk_json_path];
@@ -447,18 +362,16 @@ fn main() {
     }
 
     let ok = rows.iter().filter(|r| r.outcome.contains("cells,")).count();
-    println!("{ok}/{} circuits placed+routed; debug in target/bench_debug/", rows.len());
+    println!(
+        "{ok}/{} circuits placed+routed; debug in target/bench_debug/, SVGs in assets/",
+        rows.len()
+    );
 
     let all_contracts: Vec<&ContractStat> =
         rows.iter().flat_map(|r| r.contracts.iter()).collect();
     if !all_contracts.is_empty() {
         println!("\n── Constraint satisfaction ──");
         print_constraint_summary(&all_contracts);
-    }
-
-    let exported = rows.iter().filter(|r| r.outcome.contains("cells,")).count();
-    if exported > 0 {
-        println!("{exported} SVGs exported to assets/");
     }
 
     if suite != Suite::Local {
@@ -476,9 +389,9 @@ mod tests {
         assert_eq!(short_kind("Foo"), "Foo");
     }
 
-    // Compactness of a single 1×1 µm device at origin: 1 µm² bbox, 100% fill.
+    // A single 1×1 µm device: 1 µm² bbox, 100% fill.
     #[test]
-    fn compactness_single_device() {
+    fn footprint_single_device() {
         let l = Layout {
             x: vec![0],
             y: vec![0],
@@ -492,9 +405,8 @@ mod tests {
             power_uw: vec![0],
             temp_mc: vec![0],
         };
-        let c = Compactness::measure(&l);
-        assert!((c.area_um2 - 1.0).abs() < 1e-9);
-        assert!((c.drawn_util_pct - 100.0).abs() < 1e-9);
-        assert!((c.bbox_fill_pct - 100.0).abs() < 1e-9);
+        let (area, util) = footprint(&l);
+        assert!((area - 1.0).abs() < 1e-9);
+        assert!((util - 100.0).abs() < 1e-9);
     }
 }
