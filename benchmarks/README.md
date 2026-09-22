@@ -5,7 +5,7 @@ points the `philis` CLI uses) over analog fixtures and prints a metrics table.
 
 Built to benchmark against **MAGICAL** and **ALIGN** — and, where those suites
 publish them, against known-optimal placements. That reference comparison is not
-wired up yet; see [TODO.md](TODO.md).
+wired up yet.
 
 ## Run
 
@@ -69,7 +69,7 @@ per-constraint-type satisfaction summary across all circuits.
 
 Artifacts:
 
-- `target/bench_debug/<name>/<name>.gds` + `signoff.txt`
+- `target/bench_debug/<name>/`: `<name>.gds`, `signoff.txt`, `violations.txt`, `drc_located.txt`
 - `assets/<name>.svg`
 
 `gds2svg` is the standalone renderer for the same GDS files.
@@ -95,8 +95,15 @@ never silently passed. Counting conventions differ per engine (a square under
 min-width is one finding to GPurify, two to KLayout), so the selftest asserts
 *presence* agreement; the DRC diff reports raw counts.
 
-Against the real PDK (optional, heavyweight): magic + sky130A via
-`pip install volare && volare enable --pdk sky130 <version>`, then
-`magic -dnull -noconsole -T sky130A` over the same GDS. That audits the
-*deck's completeness* against real silicon rules, not the engine — expect
-findings for rules the Philis deck deliberately simplifies.
+Against the real PDK (optional): magic + sky130A (`volare enable --pdk
+sky130 <version>`), passing the tech file directly —
+`magic -dnull -noconsole -T ~/.volare/sky130A/libs.tech/magic/sky130A.tech script.tcl`
+with `gds read`, `load`, `drc style drc(full)`, `drc check`, `drc listall why`
+(the volare `.magicrc` hardcodes its build path and silently loads nothing).
+That audits the *deck's completeness* against real silicon rules, not the
+engine: it flags licon.7/9/11/14, diff/tap.10/11, LU.3 on the fixtures, rules
+`pdks/sky130.json` does not carry.
+
+`cargo run --release -p benchmark --example net_dump <fixture>` prints the
+extraction net by net and which extracted net each routed net lands on — a
+routed net split across two extracted nets is an open.

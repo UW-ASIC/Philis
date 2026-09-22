@@ -1,83 +1,33 @@
-//! The HOT seam: theory → algorithm, as static-dispatch data.
-//!
-//! See `docs/adr/0002-requirement-seam-static-trait-open-batches.md` for why
-//! this is a static trait over per-kind arrays and not `Box<dyn Rule>` or a
-//! `Kind` enum.
+//! The hot seam: theory → algorithm as static-dispatch data.
 
 use pnr_core::ids::BranchId;
 use pnr_core::{BipartiteHypergraph, UnionFind};
 
-/// One piece of analog theory: a self-scoring value that also knows **where it
-/// applies**.
-///
-/// A `Rule` is a small `Copy` struct carrying the targets it relates (e.g.
-/// `ThermalGradient { a, b }`). The engine stores rules in **homogeneous per-kind
-/// arrays** and evaluates each array through a generic, monomorphised loop, so
-/// `cost`/`satisfied` **inline** — there is no `dyn` on the per-rule path.
-///
-/// [`On`](Rule::On) is the state a rule scores against — [`crate::Layout`] for
-/// placement rules (Device↔Device / group↔group), [`crate::Routes`] for routing
-/// rules (Net arity). This is why the tiers under `placement/` and `routing/`
-/// are distinct: they read different geometry.
-///
-/// A rule is also **self-extracting** ([`Rule::extract`]): the theory — not the
-/// annotator — decides where in a netlist the rule instantiates. The annotator
-/// only *calls* these extracts and schedules the results.
+/// One piece of analog theory: a small `Copy` value that scores itself against
+/// [`Rule::On`] (`Layout` for placement, `Routes` for routing) and knows where
+/// it applies ([`Rule::extract`]). Every method is pure except `project`.
 pub trait Rule: Copy {
-    /// The state this rule reads: device positions for placement, route geometry
-    /// for routing.
     type On;
 
-    /// Objective contribution at `state`, in abstract cost units (lower is
-    /// better). Used when applied as [`crate::Mode::Cost`]. **Pure.**
+    /// Objective contribution (lower is better).
     fn cost(self, state: &Self::On) -> f32;
 
-    /// Whether the rule is satisfied at `state`. Used when applied as
-    /// [`crate::Mode::Hard`]; `false` makes the candidate illegal. Defaults to
-    /// `true` for pure-objective rules.
+    /// Legality. Default: always satisfied (pure objective).
     #[inline]
     fn satisfied(self, _state: &Self::On) -> bool {
         true
     }
 
-    /// Fraction of this rule's budget still unspent at `state`, clamped to
-    /// `[0, 1]`: `1.0` = untouched, `0.0` = at (or past) the raw spec.
-    ///
-    /// Only **budget** rules — a per-net R/C cap, a spacing floor, an antenna
-    /// ratio — can answer this, and they override it. The default `0.0` means
-    /// "no declared slack", which makes [`RuleBatch::criticality`] report the
-    /// rule as fully critical so it carries full weight in the objective. That
-    /// is the conservative default: a rule that cannot describe its own headroom
-    /// is never quietly discounted.
+    /// Unspent fraction of the budget in `[0, 1]`. Default `0.0` = fully
+    /// critical, so a rule that cannot describe its slack keeps full weight.
     #[inline]
     fn headroom(self, _state: &Self::On) -> f32 {
         0.0
     }
 
-    /// How far **past** its budget this rule is at `state`, as a fraction of that
-    /// budget. `0.0` = satisfied; `0.5` = 50% over; `2.0` = three times the allowance.
-    ///
-    /// This is the Θ tier's unit, and it is deliberately *not* [`headroom`](Rule::headroom)
-    /// inverted. `headroom` is clamped to `[0, 1]` and saturates at `0.0` the moment a
-    /// rule reaches its spec, so it cannot distinguish "just over" from "5× over" —
-    /// which is exactly why every consumer fell back to counting violations, and why a
-    /// count then let the search sit on a huge violation forever as long as it added no
-    /// new one. `residual` is the unclamped other half.
-    ///
-    /// **Normalised by the rule's own budget**, which is what makes it summable. Raw
-    /// magnitudes are not: routing overflow is a dimensionless node count and a spacing
-    /// shortfall is nm, so adding them weighs a 1-node overflow the same as a 1 nm
-    /// miss. `CouplingBudget::cost` already carries a hand-tuned `× 1e-3` "so it is
-    /// commensurate with the other routing costs" — a fudge factor that exists only
-    /// because the quantity was never normalised. Dividing by the budget removes the
-    /// need for it.
-    ///
-    /// The default is `0.0` when satisfied and `1.0` when not — i.e. "past spec by one
-    /// full budget's worth", which degrades exactly to the violation-count behaviour
-    /// consumers have today. That is the honest default: it never *understates* a
-    /// violation, and a rule that can quantify its own overshoot overrides it. Every
-    /// [`crate::Mode::Budget`] rule should override it; a rule that cannot is arguably
-    /// not a budget.
+    /// Overshoot past the spec as a fraction of the spec (`0.5` = 50% over),
+    /// unclamped. Normalising by the rule's own spec is what makes Θ summable
+    /// across units. Default: `0.0` satisfied, `1.0` violated.
     #[inline]
     fn residual(self, state: &Self::On) -> f32 {
         if self.satisfied(state) {
@@ -87,60 +37,23 @@ pub trait Rule: Copy {
         }
     }
 
-    /// Move `state` onto this rule's feasible set, exactly.
-    ///
-    /// Some constraints are **equalities on integers** — a mirror equation, an
-    /// exact alignment — and a penalty can approach those but never land on
-    /// them: annealing gets `xa + xb − 2·axis` close to zero and stops, and
-    /// `satisfied` stays false forever. The only way to satisfy such a rule is to
-    /// *project*, which is why every silicon-proven flow pairs its optimiser with
-    /// an exact step (`backend/TODO.md` §2, §6).
-    ///
-    /// A rule that can restore its own feasibility overrides this; one whose
-    /// feasible set is an inequality (a spacing floor, a budget) leaves it alone —
-    /// for those the optimiser's gradient is already the right tool.
-    ///
-    /// `grid` is a quantisation hint: the projection should leave coordinates on
-    /// that lattice so a later snap cannot undo it. `1` means "unconstrained".
-    ///
-    /// Projection is **best-effort and local**: it fixes this rule, and may break
-    /// another. The caller is expected to re-check legality and roll back if the
-    /// trade was bad.
+    /// Move `state` exactly onto this rule's feasible set, on the `grid`
+    /// lattice. For integer equalities a penalty can never close. Best-effort
+    /// and local; the caller re-checks legality.
     #[inline]
     fn project(self, state: &mut Self::On, grid: i32) {
         let _ = (state, grid);
     }
 
-    /// Push the ids of the state elements this rule constrains — net ids for a
-    /// routing rule, device ids for a placement rule.
-    ///
-    /// This is what makes **targeted repair** possible: a router that knows only
-    /// *how many* rules are violated can do nothing but re-run and hope, because
-    /// its negotiation loop reroutes a net only when that net sits on an
-    /// over-capacity resource — which a crosstalk or antenna violation does not
-    /// imply. Naming the offending nets lets the router rip up exactly those.
-    ///
-    /// Ids are bare `u32` so the seam stays generic over [`Rule::On`]; each tier
-    /// interprets them against its own table. The default pushes nothing, which
-    /// simply means "no targeted repair for this rule".
+    /// Push the ids this rule constrains (device ids for placement, net ids
+    /// for routing) — the targets for repair and FD-PEX probing.
     #[inline]
     fn touches(self, out: &mut Vec<u32>) {
         let _ = out;
     }
 
-    /// Re-express this rule's device targets in a **collapsed cell space**:
-    /// `cell_of[device] = cell index` (n_cells ≤ n_devices).
-    ///
-    /// Group collapse (PLAN §2) merges a matched group into one placeable cell, so
-    /// a rule extracted against *device* ids must be re-pointed at the cells that
-    /// now carry them. A rule whose two targets land in the same cell degenerates
-    /// honestly: a `Symmetry` self-pair means "centre the merged macro on the
-    /// axis", a separation term reads 0 — the constraint is drawn, not deleted.
-    ///
-    /// Default is identity: rules that target nets (routing tier) or carry no
-    /// targets never change. Every placement rule carrying a
-    /// [`pnr_core::Target::Device`] must override this — the caller is expected to
-    /// assert `touches() < n_cells` after retargeting to catch a missing override.
+    /// Re-point device targets through `cell_of[device] = cell` (group
+    /// collapse). Every placement rule with a `Target::Device` must override.
     #[inline]
     #[must_use]
     fn retarget(self, cell_of: &[u16]) -> Self {
@@ -148,50 +61,21 @@ pub trait Rule: Copy {
         self
     }
 
-    /// The disjunctive commitment this rule owns, if it owns one: `(id, seed)` —
-    /// `seed` is the recognised-structure starting commitment, `true` = isolate.
-    ///
-    /// This is the seam the branch *move* was missing (PLAN §4b): `Layout::branch`
-    /// carries the per-pair Boolean and `dp` can flip a bit, but `RuleBatch` is
-    /// type-erased and [`touches`](Rule::touches) names device ids, not branch ids —
-    /// so without this, a flip is a guess at an index and prices nothing. A rule
-    /// whose feasible set is an either-or (`DtiBand`, and eventually
-    /// injector-exclusion and the implant-merge guard) overrides it; everything
-    /// else is a single component and has no commitment to name.
+    /// The disjunctive commitment this rule owns: `(id, seed)`, seed `true` =
+    /// isolate. Only either-or rules (`DtiBand`) override.
     #[inline]
     fn branch(self) -> Option<(BranchId, bool)> {
         None
     }
 
-    /// Safety margin held back from the raw budget, as a fraction in `[0, 1)`.
-    ///
-    /// The raw spec is the *terminal hard floor* ([`satisfied`](Rule::satisfied));
-    /// `budget·(1 − margin)` is the target the optimiser is actually pulled to. A
-    /// rule starts feeling pressure once its [`headroom`](Rule::headroom) falls
-    /// below `margin`, so a converged run lands inside the margin rather than on
-    /// the spec itself. `0.0` = no derating.
+    /// Safety margin in `[0, 1)`: pressure starts once `headroom < margin`.
     #[inline]
     fn margin(self) -> f32 {
         0.0
     }
 
-    /// Find **every instance of this rule** in the bipartite device↔net
-    /// hypergraph, and return them as `Copy` rule values ready to score.
-    ///
-    /// This is where a rule's *recognition* lives (the theory of "a differential
-    /// pair is two same-type devices sharing a tail and cross-coupled", etc.):
-    /// walk `hg`, test applicability, emit an instance per match.
-    ///
-    /// **Groups via union-find.** When a rule relates a *set* of devices to
-    /// another *set* (e.g. the two multi-finger halves of a matched pair), it
-    /// `union`s each side's device indices in `uf` and emits the instance over
-    /// [`pnr_core::Target::Group`]s; a device↔device relation emits
-    /// [`pnr_core::Target::Device`] and needn't touch `uf`. The annotator reads
-    /// the final union-find sets as the group table and as each block's members.
-    ///
-    /// **Pure** except for the `uf` mutations, which are monotone (only unions).
-    /// The default recognises nothing — a rule that isn't structurally
-    /// discoverable (or not yet migrated) simply yields no instances.
+    /// Every instance of this rule in the netlist. Group↔group rules `union`
+    /// each side in `uf` and emit `Target::Group`s. Default: none.
     fn extract(hg: &BipartiteHypergraph, uf: &mut UnionFind) -> Vec<Self>
     where
         Self: Sized,
@@ -201,94 +85,49 @@ pub trait Rule: Copy {
     }
 }
 
-/// Type-erased view over *one kind's whole array*, for a given scored state `On`.
-///
-/// The **only** `dyn` in the system, and it is cold: called once per kind per
-/// move, never once per rule. The inner loop it wraps stays monomorphised.
+/// Type-erased view of one kind's whole array. Cold: called once per kind.
 pub trait RuleBatch<On> {
     fn cost(&self, state: &On) -> f32;
     fn violations(&self, state: &On) -> u32;
-    /// Σ [`Rule::residual`] over the batch — this batch's contribution to Θ.
-    ///
-    /// Summable because each term is normalised by its own budget. The default `0.0`
-    /// suits a batch in the `hard` or `cost` arm, which has no budget to be past; the
-    /// `Vec<R>` blanket impl fills it in for real.
-    ///
-    /// Summed rather than reported per-instance because every consumer only ever sums:
-    /// Θ adds it across stages, and Φ adds hard-violation margins the same way. A
-    /// per-instance vector would be a wider API for no reader.
+    /// Σ [`Rule::residual`] — this batch's Θ contribution.
     fn residual(&self, state: &On) -> f64 {
         let _ = state;
         0.0
     }
-    /// A stable name for this batch's rule kind, for reporting (e.g. the
-    /// benchmark's per-constraint-type satisfaction summary). Defaults to `"?"`;
-    /// the `Vec<R>` blanket impl fills it with the concrete rule type name.
+    /// Stable kind name (price matching, reporting).
     fn kind(&self) -> &'static str {
         "?"
     }
-    /// Number of individual rules in the batch (total, satisfied-or-not).
+    /// Number of rules in the batch.
     fn count(&self) -> usize {
         0
     }
-    /// Worst per-rule cost among the *violating* rules — a proxy severity metric
-    /// (the `Rule` trait exposes cost, not an nm margin). `0.0` when clean.
+    /// Worst cost among violating rules; `0.0` when clean.
     fn worst_cost(&self, state: &On) -> f32 {
         let _ = state;
         0.0
     }
-
-    /// How urgently this batch needs attention at `state`, in `[0, 1]` — the
-    /// weight its cost carries in the blended objective.
-    ///
-    /// Derived from the tightest rule's [`Rule::headroom`] against its
-    /// [`Rule::margin`]: a batch with plenty of slack scores `0` and is ignored;
-    /// one at or past its raw spec scores `1` and dominates. This is the analog
-    /// of PathFinder's per-connection criticality `A_ij = D_ij/D_max`, recomputed
-    /// every iteration rather than frozen as a user-set weight — see
-    /// `backend/TODO.md` §3.
-    ///
-    /// Defaults to `1.0` (fully critical) so a batch that cannot describe its
-    /// headroom keeps full weight.
+    /// Weight of this batch's cost in `[0, 1]`, from the tightest rule's
+    /// headroom against its margin. Default fully critical.
     fn criticality(&self, state: &On) -> f32 {
         let _ = state;
         1.0
     }
-
-    /// Ids touched by the rules in this batch that are **violated** at `state`,
-    /// appended to `out` — the repair targets. See [`Rule::touches`].
+    /// Ids touched by the **violated** rules — the repair targets.
     fn violating_ids(&self, state: &On, out: &mut Vec<u32>) {
         let _ = (state, out);
     }
-
-    /// Ids touched by **every** rule in this batch, satisfied or not, appended
-    /// to `out` — contrast [`violating_ids`](RuleBatch::violating_ids), which
-    /// filters to the violated subset and therefore needs a state to score.
-    ///
-    /// This is the FD-PEX flagging seam: the oracle tier probes the cells the
-    /// budget/cost rules *care about*, not just the ones currently failing —
-    /// a satisfied coupling budget still wants its victim steered downhill.
-    /// Takes no state for the same reason: which ids a rule constrains is
-    /// static. The default pushes nothing, matching [`Rule::touches`]'s "no
-    /// targeted repair for this rule".
+    /// Ids touched by every rule, satisfied or not (see [`Rule::touches`]).
     fn touched(&self, out: &mut Vec<u32>) {
         let _ = out;
     }
-
-    /// Project `state` onto this batch's feasible set. See [`Rule::project`].
     fn project(&self, state: &mut On, grid: i32) {
         let _ = (state, grid);
     }
-
-    /// Re-point every rule in the batch at a collapsed cell space. See
-    /// [`Rule::retarget`]. Default no-op suits net-targeted (routing) batches.
     fn retarget(&mut self, cell_of: &[u16]) {
         let _ = cell_of;
     }
-
-    /// Append every `(BranchId, seed)` this batch's rules own. See [`Rule::branch`].
-    /// Default no-op: a kind with no disjunctions contributes nothing, so a
-    /// consumer summing over `reqs.hard` sees exactly the ids that exist.
+    /// Append every `(BranchId, seed)` the batch owns.
     fn branches(&self, out: &mut Vec<(BranchId, bool)>) {
         let _ = out;
     }
@@ -308,18 +147,13 @@ impl<R: Rule> RuleBatch<R::On> for Vec<R> {
         self.iter().map(|r| f64::from(r.residual(s))).sum()
     }
     fn kind(&self) -> &'static str {
-        // Concrete rule type name, e.g. `philis::…::ThermalGradient`; the caller
-        // trims the path. No per-Rule boilerplate needed.
         std::any::type_name::<R>()
     }
     fn count(&self) -> usize {
         self.len()
     }
     fn worst_cost(&self, s: &R::On) -> f32 {
-        self.iter()
-            .filter(|r| !r.satisfied(s))
-            .map(|r| r.cost(s))
-            .fold(0.0, f32::max)
+        self.iter().filter(|r| !r.satisfied(s)).map(|r| r.cost(s)).fold(0.0, f32::max)
     }
     #[inline]
     fn criticality(&self, s: &R::On) -> f32 {
@@ -331,12 +165,12 @@ impl<R: Rule> RuleBatch<R::On> for Vec<R> {
         }
     }
     fn touched(&self, out: &mut Vec<u32>) {
-        for r in self.iter() {
+        for r in self {
             r.touches(out);
         }
     }
     fn project(&self, s: &mut R::On, grid: i32) {
-        for r in self.iter() {
+        for r in self {
             r.project(s, grid);
         }
     }
@@ -346,19 +180,11 @@ impl<R: Rule> RuleBatch<R::On> for Vec<R> {
         }
     }
     fn branches(&self, out: &mut Vec<(BranchId, bool)>) {
-        for r in self.iter() {
-            if let Some(b) = r.branch() {
-                out.push(b);
-            }
-        }
+        out.extend(self.iter().filter_map(|r| r.branch()));
     }
 }
 
-/// Criticality of one rule: how far its headroom has fallen into its margin.
-///
-/// `headroom ≥ margin` ⇒ `0` (slack to spare, no pressure); `headroom = 0` ⇒ `1`
-/// (at the raw spec). With no margin declared the rule is simply `1 − headroom`,
-/// so a default rule (`headroom = 0`) stays fully weighted.
+/// `0` with headroom ≥ margin, `1` at the raw spec; `1 − headroom` with no margin.
 #[inline]
 fn rule_criticality<R: Rule>(r: R, s: &R::On) -> f32 {
     let h = r.headroom(s).clamp(0.0, 1.0);
@@ -370,33 +196,13 @@ fn rule_criticality<R: Rule>(r: R, s: &R::On) -> f32 {
     }
 }
 
-/// One overshoot, expressed as a fraction of the budget it overshot — the single
-/// arithmetic every [`Rule::residual`] override uses.
-///
-/// `excess` is the *signed* amount past the spec in the rule's own natural unit, and
-/// `budget` is the spec in that same unit. Two shapes reduce to one call:
-///
-/// - a **cap** exceeded (parasitic length, antenna ratio, ΔT, coupling sum):
-///   `over(measured − cap, cap)`
-/// - a **floor** undershot (crosstalk spacing, isolation distance):
-///   `over(floor − measured, floor)`
-///
-/// Both come out dimensionless, which is the whole point (D17): Θ sums across rules
-/// whose raw units are nm, aF, milli-°C and a bare ratio, and a 1 nm miss must not
-/// weigh the same as a 1-node overflow. Dividing by each rule's own spec is what makes
-/// the terms addable, and it is also what removes the need for a hand-tuned scale
-/// factor like `CouplingBudget::cost`'s late `× 1e-3`.
-///
-/// It lives here rather than being inlined six times so the zero-budget guard exists
-/// once. A `0` spec is a bad rule, not a runtime condition, but it must not produce a
-/// `NaN` that then poisons the whole Θ sum — one un-orderable term makes every
-/// lexicographic comparison in the run meaningless.
+/// `excess` past the spec as a fraction of `budget` (both in the rule's unit):
+/// a cap is `over(measured − cap, cap)`, a floor `over(floor − measured, floor)`.
+/// A non-positive budget yields `0`/`1` rather than a Θ-poisoning NaN.
 #[inline]
 #[must_use]
 pub(crate) fn over(excess: f32, budget: f32) -> f32 {
     if budget <= 0.0 {
-        // No declared allowance: any excess at all is a full budget's worth, which is
-        // the same conservative answer `Rule::residual`'s default gives.
         return f32::from(excess > 0.0);
     }
     (excess / budget).max(0.0)
@@ -534,8 +340,7 @@ mod tests {
         assert!(spread > 10.0, "raw costs are incommensurable: {pc} vs {ac} (×{spread})");
     }
 
-    /// `touched` is the unfiltered half of `violating_ids`: every rule's ids,
-    /// satisfied or not — the FD-PEX flagging contract.
+    /// `touched` pushes every rule's ids, satisfied or not (FD-PEX flagging).
     #[test]
     fn touched_pushes_every_rule_not_just_violating() {
         #[derive(Clone, Copy)]
@@ -561,7 +366,7 @@ mod tests {
         assert_eq!(all, vec![1, 2], "touched must not filter on satisfaction");
         let mut viol = Vec::new();
         batch.violating_ids(&(), &mut viol);
-        assert_eq!(viol, vec![2], "violating_ids still filters");
+        assert_eq!(viol, vec![2], "violating_ids filters");
     }
 
     #[test]

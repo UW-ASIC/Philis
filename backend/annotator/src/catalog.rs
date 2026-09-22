@@ -1,6 +1,6 @@
 //! Analog primitive pattern catalog.
 //!
-//! 120+ structural patterns for automatic netlist annotation.
+//! ~100 structural patterns for automatic netlist annotation.
 //! Derived from ALIGN's basic_template library, Razavi/Allen-Holberg/
 //! Gray-Meyer canonical topologies, and the GANA primitive taxonomy.
 //!
@@ -79,17 +79,6 @@ const fn same_exact(r: u8) -> Slot {
     Slot {
         kind: SlotKind::SameTypeAs(r),
         size_match: SizeMatch::ExactAs(r),
-        diode: DiodeReq::Any,
-        gate_is_signal: false,
-    }
-}
-
-/// Same type as a given slot, same L with that slot.
-#[allow(dead_code)]
-const fn same_samel(r: u8) -> Slot {
-    Slot {
-        kind: SlotKind::SameTypeAs(r),
-        size_match: SizeMatch::SameLAs(r),
         diode: DiodeReq::Any,
         gate_is_signal: false,
     }

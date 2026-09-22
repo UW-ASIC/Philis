@@ -3,17 +3,16 @@ name = "benchmark"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-default = []
-# `cargo run --release -p benchmark --features gpu` — GPU DRC/ERC, devshell only.
-gpu = ["library/gpu", "verify/gpu"]
-
 [dependencies]
 library = { path = "../frontend/library" }
 verify = { path = "../backend/verify" }
 annotator = { path = "../backend/annotator" }
 pnr_core = { path = "../kernel/core" }
 serde_json = "1"
+
+[dev-dependencies]
+# `examples/net_dump` reads the extraction tables directly.
+gdsverify = { workspace = true }
 
 [[bin]]
 name = "bench"

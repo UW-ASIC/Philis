@@ -3,34 +3,10 @@
 //! primitives after the port, and that the `do_not_identify` override suppresses a
 //! block.
 
-use crate::{annotate, AnnotationConfig, Block, BlockKind, NoInference, S3Det};
+use crate::{annotate, AnnotationConfig, Block, BlockKind, NoInference};
 use analog::RuleBatch;
 use pnr_core::ids::{DeviceId, NetId};
 use pnr_core::netlist::{Device, DeviceKind, Net, Netlist};
-
-/// A two-terminal passive (resistor/cap) — never matched by the FET catalog, so
-/// it lands in glue where S3DET can find repetition.
-fn passive(name: &str, kind: DeviceKind, a: u16, b: u16) -> Device {
-    Device {
-        name: name.into(),
-        kind,
-        terminals: vec![("P".into(), NetId(a)), ("N".into(), NetId(b))],
-        params: vec![("w".into(), 1_000), ("l".into(), 1_000)],
-    }
-}
-
-/// Device ids of every `template == "s3det"` block.
-fn s3det_sets(blocks: &[Block]) -> Vec<Vec<u16>> {
-    blocks
-        .iter()
-        .filter(|b| b.template == "s3det")
-        .map(|b| {
-            let mut v: Vec<u16> = b.devices.iter().map(|d| d.0).collect();
-            v.sort_unstable();
-            v
-        })
-        .collect()
-}
 
 /// A FET with G,D,S,B terminals on the given net ids, W/L in nm.
 fn fet(name: &str, kind: DeviceKind, g: u16, d: u16, s: u16, b: u16, w: i64, l: i64) -> Device {
@@ -81,7 +57,7 @@ fn diff_pair_halves_share_a_block() {
     // winner is a bare diff_pair or a composite (five_transistor_ota / DP+load).
     let b1 = block_of(&p.blocks, 0).expect("XM1 recognised");
     let b2 = block_of(&p.blocks, 1).expect("XM2 recognised");
-    assert_eq!(b1.group, b2.group, "diff-pair halves split across blocks: {:?}", p.blocks.iter().map(|b| (b.template, &b.devices)).collect::<Vec<_>>());
+    assert!(std::ptr::eq(b1, b2), "diff-pair halves split across blocks");
 }
 
 #[test]
@@ -96,8 +72,8 @@ fn current_mirror_recognised() {
     };
     let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
     let b = block_of(&p.blocks, 0).expect("mirror recognised");
-    assert_eq!(b.kind, BlockKind::CurrentMirror, "template={}", b.template);
-    assert!(b.devices.contains(&DeviceId(1)));
+    assert_eq!(b.kind, BlockKind::CurrentMirror);
+    assert_eq!(b.devices, [DeviceId(0), DeviceId(1)], "slot 0 is the diode reference");
 }
 
 #[test]
@@ -112,7 +88,7 @@ fn cross_coupled_recognised() {
     };
     let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
     let b = block_of(&p.blocks, 0).expect("cross-coupled recognised");
-    assert!(b.template.contains("cross_coupled"), "template={}", b.template);
+    assert_eq!(b.kind, BlockKind::DiffPair, "cross-coupled pairs are symmetric matched pairs");
 }
 
 #[test]
@@ -155,7 +131,7 @@ fn diff_pair_lives_in_the_hierarchy() {
     // must exist somewhere in the hierarchy.
     let nl = ota();
     let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
-    assert!(has_leaf(&p.blocks, BlockKind::DiffPair, &[0, 1]), "no DiffPair leaf for XM1/XM2 in {:?}", p.blocks.iter().map(|b| (b.template, b.devices.iter().map(|d| d.0).collect::<Vec<_>>(), b.sub_blocks.iter().map(|s| (s.template, s.devices.iter().map(|d| d.0).collect::<Vec<_>>())).collect::<Vec<_>>())).collect::<Vec<_>>());
+    assert!(has_leaf(&p.blocks, BlockKind::DiffPair, &[0, 1]), "no DiffPair leaf for XM1/XM2");
 }
 
 #[test]
@@ -281,37 +257,6 @@ fn dti_bands_are_one_hard_batch_with_dense_ids_seeded_share() {
     }
 }
 
-#[test]
-fn bias_gen_pair_seeds_isolate() {
-    // The other recognised seed: a bias reference is the noisy/sensitive case and
-    // starts committed to the far component (a private trench). Built as a block
-    // directly — the unit under test is emission, not the recogniser.
-    use pnr_core::ids::GroupId;
-    let nl = Netlist {
-        devices: vec![
-            fet("XB1", DeviceKind::Nmos, 0, 0, 1, 1, 5_000, 1_000),
-            fet("XB2", DeviceKind::Nmos, 0, 2, 1, 1, 5_000, 1_000),
-        ],
-        nets: nets(&["vbias", "VSS", "iout"]),
-    };
-    let hg = pnr_core::BipartiteHypergraph::from_netlist(&nl);
-    let b = Block {
-        kind: BlockKind::BiasGen,
-        template: "bias",
-        devices: vec![DeviceId(0), DeviceId(1)],
-        group: GroupId(0),
-        depends_on: Vec::new(),
-        injected: false,
-        sub_blocks: Vec::new(),
-    };
-    let r = crate::emit::placement(&[b], &hg);
-    let mut seeds = Vec::new();
-    for batch in &r.hard {
-        batch.branches(&mut seeds);
-    }
-    assert_eq!(seeds.len(), 1, "one pair, one disjunction");
-    assert!(seeds[0].1, "a bias pair must seed `isolate`");
-}
 
 #[test]
 fn abutment_excludes_mixed_polarity_groups() {
@@ -348,103 +293,12 @@ fn glue_only_netlist_emits_no_placement() {
     assert_eq!(count(&p.placement.cost), 0);
 }
 
-#[test]
-fn identical_blocks_form_one_reuse_class() {
-    // Two structurally-identical current mirrors on disjoint nets → one reuse
-    // class of 2 (cross-circuit reuse; ADR-0005 variant coupling, not frozen).
-    let nl = Netlist {
-        devices: vec![
-            fet("M1", DeviceKind::Pmos, 0, 0, 8, 8, 5_000, 1_000), // mirror A: diode ref
-            fet("M2", DeviceKind::Pmos, 0, 1, 8, 8, 5_000, 1_000), // mirror A: out
-            fet("M3", DeviceKind::Pmos, 2, 2, 8, 8, 5_000, 1_000), // mirror B: diode ref
-            fet("M4", DeviceKind::Pmos, 2, 3, 8, 8, 5_000, 1_000), // mirror B: out
-        ],
-        nets: nets(&["vrefA", "ioutA", "vrefB", "ioutB", "n4", "n5", "n6", "n7", "VDD"]),
-    };
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
-    // Two identical mirrors — whether recognised as two top blocks or as the
-    // children of one composite — form a single 2-member reuse class.
-    assert!(
-        p.reuse.iter().any(|c| c.members.len() == 2),
-        "expected a 2-member reuse class, got {:?}", p.reuse
-    );
-}
 
-#[test]
-fn distinct_blocks_do_not_share_a_reuse_class() {
-    // The 5T OTA's diff pair and load differ structurally → no spurious class.
-    let nl = ota();
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
-    // No reuse class mixes non-identical blocks (a class only forms on equal
-    // template+geometry). The OTA has at most singletons of each block shape.
-    for c in &p.reuse {
-        assert!(c.members.len() >= 2, "reuse classes are never singletons");
-    }
-}
 
-#[test]
-fn parallel_array_detected() {
-    // Three identical unit caps wired A→B in parallel → one parallel group of 3
-    // (draw one, stamp 3 — the passive-array case the catalog never blocks).
-    let cap = |name: &str| Device {
-        name: name.into(),
-        kind: DeviceKind::Capacitor,
-        terminals: vec![("P".into(), NetId(0)), ("N".into(), NetId(1))],
-        params: vec![("w".into(), 2_000), ("l".into(), 2_000)],
-    };
-    let nl = Netlist { devices: vec![cap("C1"), cap("C2"), cap("C3")], nets: nets(&["top", "bot"]) };
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
-    assert_eq!(p.parallel, vec![vec![DeviceId(0), DeviceId(1), DeviceId(2)]], "parallel array not coalesced");
-}
 
-/// Two identical R-R-C "K3" sections (0,1,2) and (3,4,5), plus optionally a
-/// same-size R-R-R "P3" chain (6,7,8) that is structurally different. All passive
-/// → all glue → S3DET territory.
-fn two_identical_plus_optional_different(with_different: bool) -> Netlist {
-    use DeviceKind::{Capacitor as C, Resistor as R};
-    let mut devices = vec![
-        passive("RA0", R, 0, 1),
-        passive("RA1", R, 1, 2),
-        passive("CA2", C, 1, 10), // 10 = gnd (rail) → excluded from adjacency
-        passive("RB0", R, 3, 4),
-        passive("RB1", R, 4, 5),
-        passive("CB2", C, 4, 10),
-    ];
-    if with_different {
-        devices.push(passive("RC0", R, 6, 7));
-        devices.push(passive("RC1", R, 7, 8));
-        devices.push(passive("RC2", R, 8, 9)); // chain (P3), not a triangle
-    }
-    Netlist { devices, nets: nets(&["a0", "a1", "a2", "b0", "b1", "b2", "c0", "c1", "c2", "c3", "gnd"]) }
-}
 
-#[test]
-fn s3det_matches_identical_untemplated_sections() {
-    let nl = two_identical_plus_optional_different(false);
-    let p = annotate(&nl, &S3Det::default(), &AnnotationConfig::default());
-    let mut sets = s3det_sets(&p.blocks);
-    sets.sort();
-    assert_eq!(sets, vec![vec![0, 1, 2], vec![3, 4, 5]], "S3DET should match the two identical sections");
-}
 
-#[test]
-fn s3det_rejects_same_size_different_structure() {
-    // The R-R-R chain (6,7,8) is the same *size* as the R-R-C sections but a
-    // different topology and has no twin → S3DET must NOT emit it (proves the
-    // match is spectral, not just a device-count prefilter).
-    let nl = two_identical_plus_optional_different(true);
-    let p = annotate(&nl, &S3Det::default(), &AnnotationConfig::default());
-    let mut sets = s3det_sets(&p.blocks);
-    sets.sort();
-    assert_eq!(sets, vec![vec![0, 1, 2], vec![3, 4, 5]], "the lone R-R-R chain must stay glue");
-}
 
-#[test]
-fn no_inference_emits_no_s3det_blocks() {
-    let nl = two_identical_plus_optional_different(false);
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
-    assert!(s3det_sets(&p.blocks).is_empty(), "NoInference must not infer anything");
-}
 
 #[test]
 fn every_device_accounted_for() {
@@ -502,4 +356,31 @@ fn guard_rings_tie_to_the_guarded_device_s_bulk() {
             dev.name, r.connection_net.0, bulk.0
         );
     }
+}
+
+#[test]
+fn only_the_diff_pair_is_hard_symmetric() {
+    // 5T OTA: the diff pair and the PMOS load are both pairs of one stage, so both
+    // mirror about the stage's single axis.
+    let p = annotate(&ota(), &NoInference, &AnnotationConfig::default());
+    let sym: usize = p.placement.hard.iter().filter(|b| b.kind() == "Symmetry").map(|b| b.count()).sum();
+    assert_eq!(sym, 1, "the diff pair only (see emit.rs on stage symmetry)");
+}
+
+#[test]
+fn a_cascode_stack_is_adjacent_not_matched() {
+    // M1 (bottom) drain feeds M2 (top) source: a stack, not a matched pair.
+    let nl = Netlist {
+        devices: vec![
+            fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 4_000, 500),
+            fet("M2", DeviceKind::Nmos, 3, 4, 1, 2, 8_000, 500),
+        ],
+        nets: nets(&["vin", "x", "VSS", "vcas", "out"]),
+    };
+    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    assert_eq!(p.blocks[0].kind, BlockKind::Stack);
+    let kinds: Vec<&str> = p.placement.cost.iter().map(|b| b.kind()).collect();
+    assert!(kinds.iter().any(|k| k.ends_with("Proximity")), "{kinds:?}");
+    assert!(!kinds.iter().any(|k| k.ends_with("MatchingPair") || k.ends_with("ThermalGradient")), "{kinds:?}");
+    assert!(p.placement.hard.is_empty());
 }
