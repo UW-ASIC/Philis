@@ -1,55 +1,30 @@
-//! Common-centroid coincidence (placement tier).
-//!
-//! Ported from `backend/constraints/src/placement_level/cc.rs` (`CcGroup`).
+//! Common-centroid (placement tier).
 
-use pnr_core::ids::Target;
+use pnr_core::ids::{DeviceId, Target};
 use pnr_core::layout::Layout;
 use crate::rule::Rule;
 
-/// **Common-centroid.** Matched groups placed symmetrically about a shared
-/// centroid cancel first-order thermal and process gradients — Hastings' five
-/// rules: coincident centroids, mirror symmetry, dispersion, compactness, uniform
-/// orientation. ~60% lower systematic mismatch than single-axis ABBA in 2D. The
-/// *pattern* (`Cc1d`/`Cc2d`) is chosen structurally in [`crate::Constraints`];
-/// this rule only enforces centroid coincidence of the two sides.
-///
-/// - **Enforcement:** [`crate::Mode::Cost`] (was soft, priority 60).
-/// - **Arity:** Device↔Device (group side A ↔ side B).
-/// - **Books:** AOAL ch08/8.2.7, ch13/13.2.6 (#42); FOLD 6.6/6.6.2 (#4);
-///   ALS 3.1/3.1.2 (#3); PNR_ANALOG 00/1.5 (#6).
+/// Pairwise centroid pull between two representatives. Objective only.
 #[derive(Clone, Copy)]
 pub struct CommonCentroid {
-    /// Representative device of side A (its side's centroid is derived in the loop).
     pub a: Target,
-    /// Representative device of side B.
     pub b: Target,
 }
 
-/// Common-centroid over the **whole matched array** — set A against set B.
+/// Common centroid of a whole matched array: side A's **area-weighted**
+/// centroid against side B's. Pairwise coincidence is a weaker condition (each
+/// pair centred while the array stays lopsided).
 ///
-/// A common centroid is a property of two *sets*, not two devices: it is the A
-/// devices' centroid coinciding with the B devices' centroid that cancels the
-/// first-order gradient across the array. Enforcing it pair-by-pair is a weaker
-/// and different condition — every pair can sit centred on its own point while
-/// the array as a whole stays lopsided, leaving exactly the gradient term the
-/// pattern exists to cancel.
-///
-/// This restores the arity the original `CcGroup { group_a, group_b }` carried
-/// and the port flattened into a device pair. The centroid is **area-weighted**,
-/// because a gradient integrates over area — the plain mean of centres is only
-/// correct when every member is the same size.
-///
-/// Books: AOAL ch08/8.2.7, ch13/13.2.6 (#42); ALS 3.1/3.1.2 (Hastings' rules).
+/// ponytail: cost-only; `violations` is always `0`. The exact equality belongs
+/// in the pattern representation (ABBA / checkerboard), not a projection.
 pub struct CentroidGroup {
-    /// Devices forming side A of the matched array.
-    pub a_side: Vec<pnr_core::ids::DeviceId>,
-    /// Devices forming side B.
-    pub b_side: Vec<pnr_core::ids::DeviceId>,
+    pub a_side: Vec<DeviceId>,
+    pub b_side: Vec<DeviceId>,
 }
 
 impl CentroidGroup {
-    /// Area-weighted centroid of a device set, `nm`.
-    fn centroid(l: &Layout, side: &[pnr_core::ids::DeviceId]) -> Option<(f64, f64)> {
+    /// Area-weighted centroid of a device set, nm; out-of-range ids skipped.
+    fn centroid(l: &Layout, side: &[DeviceId]) -> Option<(f64, f64)> {
         let (mut sx, mut sy, mut sw) = (0.0f64, 0.0f64, 0.0f64);
         for d in side {
             let i = d.0 as usize;
@@ -63,64 +38,33 @@ impl CentroidGroup {
         }
         (sw > 0.0).then(|| (sx / sw, sy / sw))
     }
+}
 
-    /// Squared separation of the two side centroids, in the engine's CC units.
-    fn separation(&self, l: &Layout) -> f32 {
-        let (Some((ax, ay)), Some((bx, by))) =
-            (Self::centroid(l, &self.a_side), Self::centroid(l, &self.b_side))
+impl crate::rule::RuleBatch<Layout> for CentroidGroup {
+    /// Squared centroid separation `· 1e-3`.
+    fn cost(&self, l: &Layout) -> f32 {
+        let (Some((ax, ay)), Some((bx, by))) = (Self::centroid(l, &self.a_side), Self::centroid(l, &self.b_side))
         else {
             return 0.0;
         };
         let (dx, dy) = ((ax - bx) as f32, (ay - by) as f32);
         (dx * dx + dy * dy) * 1e-3
     }
-}
-
-impl crate::rule::RuleBatch<Layout> for CentroidGroup {
-    fn cost(&self, l: &Layout) -> f32 {
-        self.separation(l)
-    }
     fn violations(&self, _l: &Layout) -> u32 {
-        0 // objective, not legality: the concrete pattern is chosen structurally
+        0
     }
-    // AUDIT (`Rule::project`, `docs/API-WISH.md`): this is the one constraint in the crate
-    // that is an **exact equality run as a penalty only**, and adding a `project` here is
-    // not the fix.
-    //
-    // PLAN §4c states it as a group-level linear equality —
-    // `Σ_A a_i·(x_i − c) = Σ_B a_j·(x_j − c) = 0`, area-weighted — and says pairwise
-    // enforcement is "provably weaker (it does not deliver first-order gradient
-    // cancellation)". `separation` above is the right *measure*; squaring it and handing it
-    // to the optimiser is exactly PLAN §4a's parking failure, since the gradient vanishes
-    // as the centroids converge and on an integer grid the array stops one unit lopsided.
-    // `violations` returning a constant `0` then makes that permanent — the batch is
-    // registered in `cost` only (`annotator::emit::placement`), so nothing above the
-    // feasibility frontier ever asks.
-    //
-    // A `project` would have to *choose* which devices absorb the correction, and the
-    // answer is not local: the legal choices are the interleavings (ABBA / checkerboard),
-    // a permutation of the array rather than a nudge of two coordinates. PLAN gives it the
-    // same answer it gives symmetry — put it in the representation, where the interleaving
-    // satisfies the equality by the decoding rule. Left as debt rather than
-    // half-implemented, because a projection that shifted coordinates would satisfy the
-    // equation while destroying the pattern that makes it mean anything.
     fn kind(&self) -> &'static str {
         "CommonCentroid"
     }
+    /// One condition per array.
     fn count(&self) -> usize {
-        // One condition per array, however many devices it holds.
         usize::from(!self.a_side.is_empty() && !self.b_side.is_empty())
     }
-
-    /// Element-wise through `cell_of` — the sides are bare [`pnr_core::ids::DeviceId`]
-    /// lists, not [`Target`]s, so the batch maps them itself. Members that collapse
-    /// into one cell simply repeat the id; the area-weighted centroid then counts
-    /// that macro once per member, which is the honest weight for a side that put
-    /// several units inside it.
+    /// Element-wise through `cell_of`; members sharing a cell repeat its id.
     fn retarget(&mut self, cell_of: &[u16]) {
         for d in self.a_side.iter_mut().chain(self.b_side.iter_mut()) {
             if let Some(&c) = cell_of.get(d.0 as usize) {
-                *d = pnr_core::ids::DeviceId(c);
+                *d = DeviceId(c);
             }
         }
     }
@@ -128,11 +72,7 @@ impl crate::rule::RuleBatch<Layout> for CentroidGroup {
 
 impl Rule for CommonCentroid {
     type On = Layout;
-    /// Squared distance between the two side centroids; `0.0` when coincident.
-    ///
-    /// The engine's CC term (`engine::soft_terms`): `(dx² + dy²) · 1e-3` between
-    /// side centroids. With one representative device per side, each side's
-    /// centroid is that device, so the two centres stand in for the two centroids.
+    /// Squared centre distance `· 1e-3`.
     fn cost(self, l: &Layout) -> f32 {
         let (ax, ay) = l.centre(self.a);
         let (bx, by) = l.centre(self.b);
@@ -140,7 +80,6 @@ impl Rule for CommonCentroid {
         let dy = (ay - by) as f32;
         (dx * dx + dy * dy) * 1e-3
     }
-
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of) }
     }

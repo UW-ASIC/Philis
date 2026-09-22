@@ -1,70 +1,44 @@
-//! Total coupling onto one victim net (routing tier).
+//! Total coupling onto one victim net, summed over **every** aggressor.
 //!
-//! [`crate::routing::CrosstalkExclusion`] bounds the *spacing* between one
-//! aggressor and one victim. That is a pairwise condition, and it is not the
-//! constraint the circuit actually has: injected noise is
-//! `ΔV = (Cc_total / C_total)·ΔV_aggressor`, where `Cc_total` sums over **every**
-//! neighbour. A net flanked by five aggressors, each sitting exactly at the
-//! minimum spacing, satisfies every pairwise check while receiving five times the
-//! coupling its budget allows.
-//!
-//! So the budget is per victim, over all aggressors — the same set-vs-pair
-//! distinction that separates [`crate::placement::cc::CentroidGroup`] from a
-//! pairwise common-centroid. This is what consumes the `max_coupling_af` that
-//! `NetClassification` assigns per class (`backend/TODO.md` §5).
+//! Pairwise [`crate::routing::CrosstalkExclusion`] cannot express this: a net
+//! flanked by five aggressors at the legal minimum spacing passes every
+//! pairwise check while taking five times its coupling budget.
 
 use pnr_core::geom::Rect;
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
 
-/// Lateral coupling capacitance between two parallel conductors, in aF per unit
-/// of `run/gap` ratio: `C = ε·h·L/d`, so this constant is `ε·h`.
+use crate::rule::Rule;
+
+/// `ε·h` in `C = ε·h·run/gap`, aF (εr 3.9, ~0.35 µm metal): two wires 400 nm
+/// apart couple ~30 aF/µm of parallel run.
 ///
-/// For `εr = 3.9` and a ~0.35 µm metal thickness, `ε·h ≈ 12 aF`, i.e. two
-/// min-width wires 400 nm apart couple ~30 aF per µm of parallel run.
-///
-/// ponytail: one constant for the whole stack. Real coupling is per-layer (metal
-/// thickness and spacing both change) and includes a fringe term; when the PDK
-/// carries `WireParasiticParams`, read `ε·h` per layer from it.
+/// ponytail: one constant for the whole stack; read per-layer `ε·h` (plus a
+/// fringe term) from the PDK when it carries wire parasitics.
 const EPS_H_AF: f32 = 12.0;
 
-/// Coupling between two shapes on the same layer, aF.
-///
-/// Two rectangles couple when they are *separated along one axis and overlap
-/// along the other* — that overlap is the parallel run. Shapes that overlap on
-/// both axes are shorted or on different layers, not coupled; shapes that miss on
-/// both are diagonal neighbours with no parallel run.
-#[must_use]
+/// Lateral coupling between two same-layer shapes, aF. Only shapes separated
+/// on one axis and overlapping on the other (a parallel run) couple.
 fn pair_coupling_af(p: &Rect, q: &Rect) -> f32 {
-    // Separation along each axis (>0 when disjoint on that axis).
     let gap_x = (q.x - (p.x + p.w)).max(p.x - (q.x + q.w));
     let gap_y = (q.y - (p.y + p.h)).max(p.y - (q.y + q.h));
-    // Overlap along each axis (>0 when they share that span).
     let run_x = (p.x + p.w).min(q.x + q.w) - p.x.max(q.x);
     let run_y = (p.y + p.h).min(q.y + q.h) - p.y.max(q.y);
-
     let (run, gap) = if gap_x > 0 && run_y > 0 {
-        (run_y, gap_x) // side by side, running vertically
+        (run_y, gap_x)
     } else if gap_y > 0 && run_x > 0 {
-        (run_x, gap_y) // stacked, running horizontally
+        (run_x, gap_y)
     } else {
         return 0.0;
     };
     EPS_H_AF * run as f32 / gap.max(1) as f32
 }
 
-/// **Total coupling budget** for one victim net.
-///
-/// - **Enforcement:** [`crate::Mode::Hard`] — the budget is a spec, and the
-///   optimiser is pulled to a derated target by [`CouplingBudget::margin_pct`].
-/// - **Arity:** Net ↔ *all other nets* — this is the group form.
-/// - **Books:** AOAL ch02/2.7.6, ch06/6.3, ch15/15.4; FOLD 7.3/7.3.3;
-///   ALS 4.4/4.4.3.
+/// Budget on the total coupling onto `net`, aF. Registered in the budget arm.
 #[derive(Clone, Copy)]
 pub struct CouplingBudget {
     /// The victim.
     pub net: NetId,
-    /// Total coupling capacitance allowed onto it, atto-farad.
     pub max_coupling_af: i64,
     /// Safety margin held back from the budget, percent.
     pub margin_pct: u8,
@@ -73,10 +47,9 @@ pub struct CouplingBudget {
 impl CouplingBudget {
     /// Summed coupling onto the victim from every other net, aF.
     ///
-    /// ponytail: O(victim_shapes × all_other_shapes). Analog nets are short; if a
-    /// design ever makes this hot, bucket the shapes by layer and grid cell first.
-    #[must_use]
-    pub fn total_af(self, r: &Routes) -> f32 {
+    /// ponytail: O(victim_shapes × all_shapes); bucket by layer/grid if it
+    /// ever shows up in a profile.
+    fn total_af(self, r: &Routes) -> f32 {
         let victim = r.shapes(self.net);
         if victim.is_empty() {
             return 0.0;
@@ -84,88 +57,41 @@ impl CouplingBudget {
         let mut total = 0.0f32;
         for (other, shapes) in r.wires.iter().enumerate() {
             if other == self.net.0 as usize {
-                continue; // a net does not couple to itself
+                continue;
             }
             for a in victim {
                 for b in shapes {
-                    if a.layer != b.layer {
-                        continue; // lateral coupling is same-layer
+                    if a.layer == b.layer {
+                        total += pair_coupling_af(&a.rect, &b.rect);
                     }
-                    total += pair_coupling_af(&a.rect, &b.rect);
                 }
             }
         }
         total
     }
+}
 
-    /// Summed coupling **past** the budget, as a fraction of that budget.
-    ///
-    /// Θ's unit (D17). The numerator is [`total_af`](CouplingBudget::total_af) — the sum
-    /// over the victim's *whole* aggressor set, which is the only form that expresses the
-    /// constraint at all (PLAN §4c): five aggressors each at the legal minimum spacing
-    /// pass every pairwise `CrosstalkExclusion` and land 5× over this budget.
-    ///
-    /// Measured against the **raw** `max_coupling_af`, not the `margin_pct`-derated
-    /// target — same reason as `ParasiticBudget::residual`: the margin drives
-    /// `criticality` early, Θ answers "how far past the spec".
-    #[must_use]
-    pub fn residual(self, r: &Routes) -> f32 {
+impl Rule for CouplingBudget {
+    type On = Routes;
+    /// Same as `residual`: the normalised overshoot.
+    fn cost(self, r: &Routes) -> f32 {
+        self.residual(r)
+    }
+    fn satisfied(self, r: &Routes) -> bool {
+        self.total_af(r) <= self.max_coupling_af as f32
+    }
+    fn headroom(self, r: &Routes) -> f32 {
+        1.0 - self.total_af(r) / self.max_coupling_af.max(1) as f32
+    }
+    fn margin(self) -> f32 {
+        f32::from(self.margin_pct) / 100.0
+    }
+    fn residual(self, r: &Routes) -> f32 {
         let budget = self.max_coupling_af as f32;
         crate::rule::over(self.total_af(r) - budget, budget)
     }
-}
-
-impl crate::rule::RuleBatch<Routes> for Vec<CouplingBudget> {
-    /// Summed normalised overshoot — the same quantity as [`Self::residual`].
-    ///
-    /// The `× 1e-3` that used to sit here is **gone**. Its comment said the aF overshoot
-    /// was scaled "so it is commensurate with the other routing costs rather than
-    /// dwarfing them", which is an honest description of a fudge factor and also a
-    /// diagnosis of the real defect: the quantity was never divided by the budget it
-    /// overshot, so its magnitude was set by the unit (atto-farad — a coupling of a few
-    /// hundred aF against a budget of a few hundred aF reads as `300`, not `1`), and the
-    /// only way to make it comparable to anything was to guess a constant. Dividing by
-    /// `max_coupling_af` fixes it at the source: `1.0` now means "one full budget over"
-    /// for this rule exactly as it does for every other, no constant required.
-    ///
-    /// Safe to change in place because this batch is registered in the **budget** arm
-    /// only (`annotator::extract::routing_classified`), and neither `gr::score` nor
-    /// `dr::score` reads a budget-arm `cost`. Nothing consumes the old scale.
-    fn cost(&self, r: &Routes) -> f32 {
-        self.iter().map(|c| c.residual(r)).sum()
-    }
-    fn residual(&self, r: &Routes) -> f64 {
-        self.iter().map(|c| f64::from(c.residual(r))).sum()
-    }
-    fn violations(&self, r: &Routes) -> u32 {
-        self.iter()
-            .filter(|c| c.total_af(r) > c.max_coupling_af as f32)
-            .count() as u32
-    }
-    fn kind(&self) -> &'static str {
-        "CouplingBudget"
-    }
-    fn count(&self) -> usize {
-        self.len()
-    }
-    fn criticality(&self, r: &Routes) -> f32 {
-        self.iter()
-            .map(|c| {
-                let budget = c.max_coupling_af.max(1) as f32;
-                let headroom = (1.0 - c.total_af(r) / budget).clamp(0.0, 1.0);
-                let m = (f32::from(c.margin_pct) / 100.0).clamp(0.0, 0.999);
-                if m <= 0.0 {
-                    1.0 - headroom
-                } else {
-                    ((m - headroom) / m).clamp(0.0, 1.0)
-                }
-            })
-            .fold(0.0, f32::max)
-    }
-    fn violating_ids(&self, r: &Routes, out: &mut Vec<u32>) {
-        for c in self.iter().filter(|c| c.total_af(r) > c.max_coupling_af as f32) {
-            out.push(u32::from(c.net.0));
-        }
+    fn touches(self, out: &mut Vec<u32>) {
+        out.push(u32::from(self.net.0));
     }
 }
 
