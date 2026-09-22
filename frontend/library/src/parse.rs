@@ -1,11 +1,6 @@
-//! SPICE front-end: `.sp` text → [`pnr_core::Netlist`].
-//!
-//! A real reader for the SPICE subset the fixtures use (`temporary/circuits/*.sp`):
-//! a single `.subckt`/`.ends` block of primitive instance lines (MOSFET, R, C,
-//! diode, BJT), values in engineering notation / SI suffixes. Migrated from
-//! `frontend/core/src/netlist.rs` (`parse_value`/`to_nm`/terminal ordering),
-//! trimmed to what this subset needs — no subckt flattening, no PDK device table,
-//! no `.param` expression evaluation (the fixtures carry none).
+//! SPICE front end: one flat `.subckt` of primitive instances (M, R, C, D, Q,
+//! L, and X calls classified by model name) → [`pnr_core::Netlist`]. No
+//! hierarchy flattening, no `.param` evaluation.
 
 use std::collections::HashMap;
 

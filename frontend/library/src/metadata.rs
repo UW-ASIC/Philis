@@ -1,24 +1,10 @@
-//! What the constraint system actually achieved — the **budget report**.
-//!
-//! `Report.hard_violations` answers "is it legal", which is a yes/no. It cannot
-//! say *how close to the edge* a legal solution sits, and for analog that is the
-//! interesting question: a net one nanometre inside its coupling limit and a net
-//! with 60% headroom are both "legal" and are not remotely the same layout.
-//!
-//! Every budget rule already computes its own headroom against its safety margin
-//! (`analog::Rule::headroom`/`margin`, used by the slack-blended objective). This
-//! module simply surfaces that, so a run reports **met, met-with-margin, or
-//! violated** per constraint family instead of a bare violation count. See
-//! `backend/TODO.md` §5b.
+//! The budget report: per constraint family, met, met without margin, or
+//! violated — how close to the edge a legal layout sits.
 
 use analog::{Requirements, RuleBatch};
 
-/// Which `Requirements` arm a status row was measured from.
-///
-/// Carried on the row because [`MetadataReport::theta`] must sum **budget-arm**
-/// residuals only: a hard batch's residual is Φ's business (`Report::phi`), and
-/// folding it into Θ would count legality twice and let a budget trade against a
-/// hard rule inside one tier.
+/// Which `Requirements` arm a row was measured from. Only budget rows count
+/// toward [`MetadataReport::theta`]; hard rows are legality (the V tier).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arm {
     /// `reqs.hard` — legality; a violation here is V-tier, not Θ.
@@ -41,11 +27,8 @@ pub struct BudgetStatus {
     /// Tightest rule's criticality, `0.0` (slack to spare) … `1.0` (at or past
     /// the spec). Derived from headroom against the family's safety margin.
     pub criticality: f32,
-    /// The family's **measured** overshoot: `RuleBatch::residual`, summed over
-    /// same-kind batches — each batch's residual is already normalised by its own
-    /// budget, so the sum is dimensionless and summable across families (D17).
-    /// `0.0` means every member is inside spec; `0.5` means half a budget's worth
-    /// of overshoot across the family.
+    /// Σ `RuleBatch::residual` over the family — each normalised by its own
+    /// budget, so summable across families. `0.0` = inside spec.
     pub residual: f64,
 }
 
@@ -81,39 +64,19 @@ impl BudgetStatus {
 pub struct MetadataReport {
     pub placement: Vec<BudgetStatus>,
     pub routing: Vec<BudgetStatus>,
-    /// Where the operating point came from, and what it showed. `None` when no
-    /// simulation ran — in which case any thermal result is vacuous and this
-    /// report says so rather than implying a pass.
+    /// The operating point used; `None` means no simulation, so thermal
+    /// results are vacuous and the report says so.
     pub bias: Option<BiasSummary>,
-    /// Net census by class — how many nets the classifier judged Sensitive,
-    /// Supply, Signal, … Every routing budget is keyed to one of these, so this
-    /// is the provenance of the numbers in the table above.
+    /// Net count per class (every routing budget is keyed to a class).
     pub net_classes: Vec<(String, usize)>,
 }
 
 impl MetadataReport {
-    /// **Θ** — the analog budget residual, PLAN §3b's middle lexicographic tier.
-    ///
-    /// A **measured sum**, not a count: Σ of every budget-arm family's
-    /// [`BudgetStatus::residual`], in **milli-budgets** (× 1000.0 — the
-    /// `Violation::from_residual` scale), so it is commensurate with the `pt`/`rt`
-    /// terms `library::lex_key` adds it to. A 1 nm miss and a 1 µm miss finally
-    /// weigh differently here, which is what D2 wanted and a count could not say.
-    /// Hard-arm rows are excluded: their violations are V-tier.
-    ///
-    /// Known double-weighing, deliberate: the stage reports already carry these
-    /// same budget residuals (`gp::mechanics::report` and `gr::analog_tiers` fill
-    /// `Report::budget_violations` from the identical `residual` calls), so
-    /// `lex_key`'s `pt + rt + theta()` counts each budget-arm residual ~twice.
-    /// Monotone-safe — both copies are the same measurement of the same state, so
-    /// every comparison the search makes orders identically — and the cleanup
-    /// (drop one source) is deferred until something reads Θ as an absolute
-    /// quantity rather than a ranking key.
-    ///
-    /// `criticality` is deliberately **not** folded in. It is the *promotion* signal
-    /// (how close a budget is to binding) and belongs in the ρ ratchet; adding it to Θ
-    /// would make a satisfied-but-tight budget read as violated and the run would never
-    /// terminate (D14).
+    /// Θ, the middle tier of the search key: Σ budget-arm residuals in
+    /// milli-budgets (× 1000, the stage reports' scale). The stage reports carry
+    /// the same residuals, so the key weighs them ~twice — monotone, so the
+    /// ranking is unaffected. Criticality is deliberately excluded: a satisfied
+    /// but tight budget must not read as violated.
     #[must_use]
     pub fn theta(&self) -> f64 {
         self.placement
@@ -170,15 +133,8 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
     out
 }
 
-/// Build the report from the winning iteration's state.
-///
-/// Scans the **hard and budget** arms of both tiers. The hard rows keep the old
-/// "is it legal, and how close to the edge" view; the budget rows are what
-/// [`MetadataReport::theta`] measures — and for the routing tier they make the
-/// declared budgets (`ParasiticBudget`, `CouplingBudget`, `CrosstalkExclusion`)
-/// visible in the report for the first time, where previously only the hard arm
-/// was tabulated. `cost`-arm batches are shaping terms with no spec to violate,
-/// so they have no status to report.
+/// Status of every hard and budget batch of both tiers against `layout` /
+/// `routes`. Cost-arm batches have no spec, so no status.
 #[must_use]
 pub fn build(
     placement: &Requirements<pnr_core::Layout>,

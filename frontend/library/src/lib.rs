@@ -1,28 +1,8 @@
-//! # `library` — the pipeline as one reusable, deterministic function.
+//! # `library` — the whole flow as one deterministic function.
 //!
-//! `.sp` + PDK go in, a placed-and-routed solution comes out:
-//!
-//! ```text
-//! parse ─▶ Netlist ─into_bipartite_hypergraph()─▶ (carrier)
-//!                     │
-//!            annotate(netlist)  ── the annotator attaches the applied rule-sets
-//!                     ▼          (placement/routing Requirements) + the group DAG
-//!                  Problem
-//!         ┌──────────┼─────────────────────────────┐
-//!         ▼          ▼                              ▼
-//!   cells::draw   gp → dp (placement)          gr → dr (routing)
-//!  (macros, PDK)  reqs.hard/cost + layers      reqs + layers
-//!                     │                              │
-//!                     └──────────────┬───────────────┘
-//!                          verify (in-loop DRC → Hard rules)  ──▶ signoff
-//! ```
-//!
-//! The **only** place a concrete stage algorithm is named is the hot-swap point
-//! inside [`run`] — change those four lines to swap a placer/router. Everything
-//! else is algorithm-agnostic (it talks to the `gp/dp/gr/dr` traits) and
-//! analog-agnostic (the theory rides in through `reqs`).
-
-#![allow(dead_code)]
+//! [`run`] reads top-down: parse → annotate → cells → place (`gp` → `dp`) →
+//! route (`gr` → `dr`) → in-loop DRC, repeated until the best epoch stops
+//! improving. [`signoff`] is the final DRC/ERC/LVS/PEX gate.
 
 mod cellgen;
 mod geometry;
@@ -33,77 +13,43 @@ mod parse;
 pub mod elaborate;
 pub use elaborate::{elaborate, ElabConfig, Elaborated};
 
-/// Decompile a solved [`Solution`] into a PDK-agnostic generator (IR,
-/// interpreter, and Rust source printer).
+/// Decompile a solved [`Solution`] into a PDK-agnostic generator.
 pub mod emit;
-
-/// GDSII stream writer — flat [`pnr_core::Shape`]s → conformant GDSII bytes, for
-/// tape-out artifacts and SVG rendering via [`visualizer::export_svg`].
+/// GDSII stream writer.
 pub mod gds;
-/// Constraint-budget reporting: met, met-without-margin, or violated per family.
+/// Constraint-budget report: met, met-without-margin, or violated per family.
 pub mod metadata;
-/// DC operating point via ngspice — the per-device power and bias current the
-/// thermal and electromigration rules need.
+/// DC operating point via ngspice — the per-device power the thermal rules need.
 pub mod oppoint;
 
-use analog::RuleBatch;
-use annotator::{annotate, AnnotationConfig, NoInference};
-pub use macro_master::Macros;
-/// The GPU GDS/geometry viewer, re-exported so callers get it through the one
-/// front-door crate (`show_macro`, `run_viewer`, `export_svg`, `Probe`, …).
-pub use visualizer;
+use analog::Requirements;
+use annotator::{annotate, AnnotationConfig, NoInference, Problem};
 use dp::DetailedPlacer;
 use dr::DetailedRouter;
 use gp::GlobalPlacer;
 use gr::GlobalRouter;
-use pnr_core::hypergraph::IntoBipartiteHypergraph;
-use pnr_core::{Layout, Macro, Routes};
+pub use macro_master::Macros;
+use pnr_core::{DeviceId, LayerId, Layout, Macro, Report, Routes};
 use verify::Pdk;
+/// The GDS/geometry viewer, re-exported so callers get it through this crate.
+pub use visualizer;
 
 /// Repeatable-run configuration.
 pub struct Config {
-    /// Base RNG seed. Each feedback iteration derives a fresh seed from it.
+    /// Base RNG seed; every epoch derives its own from it.
     pub seed: u64,
-    /// **Middle-tier** budget: feasibility epochs at a *fixed* variant assignment
-    /// (place → route → in-loop DRC → fold back). `1` disables feedback.
-    ///
-    /// This is the tier that drives positions to feasibility. It cannot fix a
-    /// circuit whose chosen variants make the constraints unsatisfiable at *any*
-    /// position — that is what the outer tier is for.
+    /// Epochs per variant assignment (place → route → DRC → fold back).
     pub feedback_iters: u32,
-    /// **Outer-tier** budget: variant/topology escalations (PLAN §2).
-    ///
-    /// A variant change relocates pins, so it changes routability and extracted
-    /// parasitics discontinuously — it is a jump between search spaces, not a step
-    /// within one. Each outer iteration re-runs the whole middle tier. `1` fixes the
-    /// variant assignment at whatever pricing chose and reproduces the old
-    /// single-tier behaviour exactly.
+    /// Variant assignments to try when an assignment stalls infeasible. `1`
+    /// keeps the priced seed assignment.
     pub outer_iters: u32,
-    /// Recognition overrides: force-skip devices (`do_not_identify`) or patterns
-    /// (`do_not_use`), or tag extra rail/clock nets. The user's channel to override
-    /// the annotator's automatic block decisions (ALIGN `DoNotIdentify`).
+    /// User overrides for the annotator's recognition.
     pub annotation: AnnotationConfig,
-    /// Steady-state dissipation per device, µW, indexed like `netlist.devices`.
-    ///
-    /// This is the **thermal solver's input**, and the one piece of data that
-    /// makes `ThermalGradient` bite: with it, the placer computes a real ΔT per
-    /// matched pair and moves partners onto a shared isotherm; without it the die
-    /// is uniform, every ΔT is `0`, and the rule passes trivially.
-    ///
-    /// Left empty by default because an operating point cannot be recovered from
-    /// a netlist without simulating it — a fabricated estimate would be worse
-    /// than an honest zero. Supply it directly, or set [`Config::op`] and let
-    /// ngspice solve for it.
+    /// Per-device dissipation, µW, indexed like `netlist.devices` — the thermal
+    /// rules' input. Empty means a uniform die (thermal rules pass vacuously).
     pub device_power_uw: Vec<i32>,
-    /// Solve the netlist's DC operating point with ngspice and use it as the
-    /// thermal power map.
-    ///
-    /// This is what turns `ThermalGradient` from a rule that passes trivially
-    /// into one that actually constrains placement. Takes precedence over
-    /// [`Config::device_power_uw`] for every device the simulation resolves. If
-    /// ngspice is missing or the solve fails the flow continues on zero power,
-    /// and the metadata report states the bias is unknown rather than implying a
-    /// thermal pass.
+    /// Solve the DC operating point with ngspice; overrides `device_power_uw`.
+    /// A failed solve falls back to zero power and the report says so.
     pub op: Option<oppoint::OpConfig>,
 }
 
@@ -120,66 +66,38 @@ impl Default for Config {
     }
 }
 
-/// A finished placement + routing (pre-signoff). `macros` are kept so signoff and
-/// GDS emission can rebuild the flat geometry.
+/// A finished placement + routing (pre-signoff).
 pub struct Solution {
     pub layout: Layout,
     pub routes: Routes,
+    /// Placed cells indexed like `layout`, then guard rings (absolute coords).
     pub macros: Vec<Macro>,
-    /// The parsed schematic — kept so signoff (LVS) can build its reference
-    /// (`verify::RefInput` is a pure, cheap function of it; see
-    /// `cellgen::reference`).
+    /// The parsed schematic — signoff's LVS reference.
     pub netlist: pnr_core::Netlist,
-    /// Feedback-loop telemetry for the *winning* iteration (for benchmarking).
     pub stats: RunStats,
-    /// Per-family budget status (met / met-without-margin / violated) plus the
-    /// electrical bias it was judged under.
     pub metadata: metadata::MetadataReport,
 }
 
-/// Feedback-loop telemetry: how the run converged and the winning iteration's
-/// per-stage legality. `run` hides the loop, so this is how a caller (e.g. the
-/// benchmark) sees convergence quality without re-running anything.
+/// How the search went, and the winning epoch's per-stage legality.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RunStats {
-    /// Middle-tier epochs actually executed, summed over every outer iteration.
+    /// Epochs executed, over every variant assignment.
     pub iterations: u32,
-    /// 0-based index of the iteration whose solution was kept.
+    /// Index of the winning epoch within its assignment.
     pub best_iteration: u32,
-    /// `true` if the loop stopped on the stall/patience criterion (converged),
-    /// `false` if it exhausted the iteration budget.
+    /// Stopped feasible with stationary constraint prices.
     pub converged: bool,
-    /// Outer-tier iterations executed (`1..=cfg.outer_iters`).
+    /// Variant assignments tried.
     pub outer_iterations: u32,
-    /// How many times the middle tier stalled while still infeasible and the outer
-    /// tier answered by moving the variant assignment.
-    ///
-    /// This is PLAN §5's central diagnostic made observable: a nonzero count means
-    /// the run hit a **variant-space binding**, i.e. no arrangement of the
-    /// previously-chosen variants could satisfy the constraints. That is a different
-    /// failure from a placement local minimum and the two are otherwise
-    /// indistinguishable from the outside.
+    /// Times an assignment stalled infeasible and the variants were changed.
     pub variant_escalations: u32,
-    /// Winning iteration's Θ — total budget residual. `0.0` with a clean
-    /// `hard_violations` count is the feasibility half of termination.
-    pub theta: f64,
-    /// `‖λ_{k+1} − λ_k‖` at exit. Near zero ⇒ constraint prices are stationary ⇒ no
-    /// budget is being actively traded (PLAN §5). A run that is *feasible* but whose
-    /// prices are still drifting has not converged, it is mid-negotiation.
-    pub price_drift: f64,
-    /// Σ `h_n` at exit — accumulated routing negotiation pressure. Still climbing ⇒
-    /// resources are still contested.
-    pub route_pressure: f64,
-    /// Winning iteration: detailed-placement hard-violation count.
+    /// Winner: detailed-placement hard violations.
     pub place_hard: usize,
-    /// Winning iteration: detailed-routing hard-violation count.
+    /// Winner: detailed-routing hard violations.
     pub route_hard: usize,
-    /// Winning iteration: **fresh oracle DRC violation count** over its drawn
-    /// geometry (the count `lex_key` scored, not the number of feedback rule
-    /// batches folded forward — that was always 0/1 and hid partial repair).
+    /// Winner: in-loop DRC violations over its drawn geometry.
     pub drc_hard: usize,
-    /// Winning iteration: Σ routing budget margins — milli-budget normalised
-    /// residuals via `Violation::from_residual`, **not** a raw track-overuse count.
+    /// Winner: Σ routing budget margins (milli-budgets, not tracks).
     pub route_overuse: i64,
 }
 
@@ -187,779 +105,371 @@ pub struct RunStats {
 #[derive(Debug)]
 pub enum FlowError {
     Parse(String),
-    /// Zero feedback iterations produced nothing.
-    Empty,
 }
 
-/// Run place-and-route for a SPICE netlist against a PDK. **Deterministic** for
-/// `cfg.seed`.
+/// Epochs without improvement before an assignment counts as stalled.
+const PATIENCE: u32 = 8;
+/// `‖λ_{k+1} − λ_k‖` below which constraint prices count as stationary.
+const PRICE_STATIONARY: f64 = 1e-3;
+
+/// Place and route a SPICE netlist against a PDK. Deterministic for `cfg.seed`.
 ///
-/// The bipartite hypergraph is the carrier: [`annotate`] walks it (via each
-/// rule's `extract`) and returns the applied `Requirements` + block-DAG + group
-/// table, which the stages consume. `verify` runs in the loop — its DRC findings
-/// return as **Hard** rules merged into the next iteration's placement
-/// requirements — so verification *drives* convergence.
-///
-/// `injected` is the user's `macro_master` registry: any part of the circuit with
-/// a macro registered under its instance name is used **as-is** instead of
-/// auto-drawn (and its DAG block is flagged `injected`). Pass
-/// `&Macros::default()` for a fully auto-generated run.
+/// `injected` maps instance names to user-drawn macros: those devices are used
+/// as drawn, never reshaped or moved by `dp`.
 pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<Solution, FlowError> {
+    // 1. Parse.
     let netlist = parse::spice(spice).map_err(FlowError::Parse)?;
 
-    // The bipartite hypergraph is the pipeline's carrier; `annotate` walks it (via
-    // each rule's `extract`) to attach the applied rule-sets.
-    let _hypergraph = netlist.into_bipartite_hypergraph();
-
-    // The problem is a **pure function of the netlist**, so derive it once per run.
-    //
-    // It used to be re-derived every epoch, but not for any reason of its own: the
-    // in-loop DRC feedback was appended into `problem.placement.hard`, which is a
-    // mutation, and `Requirements` cannot be cloned (boxed trait objects). The loop
-    // below instead truncates the feedback batches off the end after each epoch, so
-    // the base rule-set is reused untouched and the annotator runs once instead of
-    // once per epoch plus once more at the end.
+    // 2. Annotate: placement/routing rules + cell constraints, device-indexed.
     let mut problem = annotate(&netlist, &NoInference, &cfg.annotation);
-    for u in &problem.constraints.unitization {
-        eprintln!(
-            "[unit] devices={:?} unit_w={} unit_l={} dev_nf={:?} kind={:?}",
-            u.devices.iter().map(|d| d.0).collect::<Vec<_>>(),
-            u.unit_w, u.unit_l, u.dev_nf, u.device_type
-        );
-    }
 
-    // Offload "which parts are user-provided" onto the DAG: a block whose devices
-    // are all covered by injected macros is a pre-drawn fixed node. Loop-invariant
-    // (it depends on the netlist and the user's registry, neither of which moves),
-    // so it is decided once here rather than re-derived per epoch.
-    for b in &mut problem.blocks {
-        b.injected = !b.devices.is_empty()
-            && b.devices
-                .iter()
-                .all(|d| injected.get(&netlist.devices[d.0 as usize].name).is_some());
-    }
+    // 3. Bias: per-device power. Placement-independent, so solved once.
+    let (power, bias) = bias(&netlist, cfg);
 
-    // Pinned cells = those in injected (user-macro) blocks. `dp` keeps them at their
-    // coarse position and never reshapes them — a user's geometry is the user's.
-    // Device-indexed here; mapped to cell length after the collapse below (injected
-    // devices never merge, so any-member-injected == all-members-injected).
-    let mut fixed_dev = vec![false; netlist.devices.len()];
-    for b in &problem.blocks {
-        if b.injected {
-            for d in &b.devices {
-                if let Some(f) = fixed_dev.get_mut(d.0 as usize) {
-                    *f = true;
-                }
-            }
-        }
-    }
+    // 4. Cells: every legal variant drawn once; matched groups collapse to one
+    //    cell and every device-indexed table moves to cell space.
+    let cells = CellSpace::new(&netlist, injected, &mut problem, pdk, &power);
 
-    // ---- electrical bias -------------------------------------------------
-    // Solve the DC operating point once: it depends on the schematic, not on
-    // where anything is placed, so it is loop-invariant. This is the only source
-    // of per-device power, and therefore the only thing that makes the thermal
-    // gradient a real constraint rather than a vacuous one.
-    let op = cfg.op.as_ref().and_then(|oc| match oppoint::extract(spice, &netlist, oc) {
-        Ok(o) => {
-            eprintln!(
-                "[op] {} of {} devices solved, {} µW total ({})",
-                o.resolved, netlist.devices.len(), o.total_power_uw(), o.provenance
-            );
-            Some(o)
-        }
-        Err(e) => {
-            // Never fatal: an unknown bias means a uniform die, which the report
-            // will state plainly.
-            eprintln!("[op] operating point unavailable ({e}); continuing with zero power");
-            None
-        }
-    });
-    let power = op
-        .as_ref()
-        .map(|o| o.power_uw.clone())
-        .unwrap_or_else(|| cfg.device_power_uw.clone());
-    let bias = op.as_ref().map(|o| {
-        let hottest = o
-            .power_uw
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, &p)| p)
-            .filter(|(_, &p)| p > 0)
-            .map(|(i, &p)| (netlist.devices[i].name.clone(), p));
-        metadata::BiasSummary {
-            provenance: o.provenance.clone(),
-            resolved: o.resolved,
-            devices: netlist.devices.len(),
-            total_power_uw: o.total_power_uw(),
-            hottest,
-        }
-    });
-
-    // The layers the routers may use — the routable metal stack only. The full
-    // deck table would put wires on nwell/diff/poly (see `Pdk::routing_layers`).
-    // `cuts` is the matching via stack; without it a layer change draws no cut and
-    // the deck's `lvs_cut_required` leaves each metal layer an isolated island.
-    //
-    // The stack stops at the first layer whose `min_width` exceeds the router's
-    // single global wire width: drawing a 290 nm wire on met3 (which wants 300)
-    // is a `min_width` violation on every segment. Upper layers are unreachable
-    // rather than illegal — for these circuit sizes li/met1/met2 is ample.
-    //
-    // ponytail: one wire width for the whole stack. Lift this by giving `dr` a
-    // per-layer width/pitch, which means a per-layer track lattice in
-    // `gr::TrackGrid`; worth it only when a design actually needs the upper metals.
-    // Reserve the bottom conductor (li) for the cells and route on met1 and up.
-    //
-    // The deck is right to list li in `routing_metals` — it is a real conductor and
-    // a wire on it is legal. But it is also the layer every generator fills with S/D
-    // pads, gate pads and tap chains, and while it was `layers[0]` the detailed
-    // PathFinder laid horizontal tracks straight across that geometry: 26 of
-    // `chain4`'s 44 DRC violations were `LI.3 min_spacing`, and no amount of
-    // rerouting clears them because the track lattice itself is the source.
-    //
-    // Pins stay on li, so it does not simply disappear — it moves from "a layer to
-    // route on" to "the layer pin access descends to", handed to `dr` as
-    // `pin_access`. That split is only expressible now that `Pin` carries its layer.
-    //
-    // Derivation + validation shared with `elaborate` — one truth.
+    // 5. Stages. The metal stack and router config come from the deck.
     let (layers, cuts, pin_access) = elaborate::routing_stack(pdk);
-
-    // ── THE hot-swap point: the concrete algorithms, named directly. Change a
-    //    line here (e.g. `gp::Analytical` → your placer) to swap; nothing else in
-    //    the codebase names an algorithm. ──
-    let placer = gp::Analytical::default();
-    let refiner = dp::Annealer::default();
-    let g_router = gr::GlobalRoute::default();
-    // Track pitch comes from the deck, not the ported default: one global pitch
-    // has to clear the *worst* layer's spacing or that layer cannot be routed
-    // legally at all (see `Pdk::routing_pitch`).
-    // Deck-derived pitch + pin-access validation, shared with `elaborate`.
-    let d_router = elaborate::detailed_router(pdk, &layers, &cuts, pin_access);
-
-    // ---- the variant space, drawn once ----------------------------------
-    // Every legal joint variant of every cell, drawn up front. `(group, variant) ->
-    // Macro` is pure and byte-deterministic, so this table is built once and reused
-    // for every trial move of every epoch — see `docs/API-WISH.md` D7 for why this
-    // is data rather than a redraw callback.
-    //
-    // This is also where the group collapse lands (PLAN §2): a matched unitization
-    // is ONE cell from here on, so everything below runs in **cell space**
-    // (`n_cells ≤ n_devices`) and every device-indexed table is translated through
-    // `cell_of` / `devices_of` once, right here — loop-invariant, like the tables
-    // themselves.
-    let cellgen::Cells { spaces: mut variants, cell_of, devices_of } =
-        cellgen::enumerate(&netlist, injected, &problem.constraints, pdk);
-
-    // Re-point every placement rule at the collapsed cell space. Feedback batches
-    // are appended *after* this (inside the loop) and are already cell-indexed —
-    // they come from drawn geometry — so retargeting once here, before `base_hard`
-    // is read, is what keeps them out of the sweep.
-    for b in problem
-        .placement
-        .hard
-        .iter_mut()
-        .chain(problem.placement.budget.iter_mut())
-        .chain(problem.placement.cost.iter_mut())
-    {
-        b.retarget(&cell_of);
-    }
-    #[cfg(debug_assertions)]
-    debug_check_retargeted(&problem, variants.len(), &cell_of);
-
-    // Injected-block pins, now cell-length. Injected devices never merge, so
-    // any-member == all-members.
-    let fixed: Vec<bool> =
-        devices_of.iter().map(|m| m.iter().any(|d| fixed_dev[d.0 as usize])).collect();
-
-    // Both group tables rewritten into cell space: GroupIds stay valid (rules keep
-    // pointing at the same rows), members become cells, duplicates collapse. A
-    // matched group fully merged into one macro shrinks to one member — which
-    // grants no abutment and boxes a single cell, both correct: the abutment is
-    // now drawn inside the macro.
-    //
-    // `problem.abutment` is consumed as the annotator hands it (D16): what a group
-    // *means* — and which subset may share diffusion — is recognition semantics,
-    // and the local single-kind filter this used to recompute was exactly how the
-    // two tables came to be conflated.
-    let abutment_groups: Vec<Vec<pnr_core::DeviceId>> =
-        problem.abutment.iter().map(|g| remap_members(g, &cell_of)).collect();
-    let cell_groups: Vec<Vec<pnr_core::DeviceId>> =
-        problem.groups.iter().map(|g| remap_members(g, &cell_of)).collect();
-
-    // Guard-ring requirements land on cells too: rewrite each requester through
-    // `cell_of` and drop duplicates that collapse onto one cell (two members of a
-    // merged pair asking for the same ring is one ring around one macro).
-    let constraints_cells = {
-        let mut c = problem.constraints.clone();
-        for r in &mut c.guard_rings {
-            if let Some(&ci) = cell_of.get(r.device.0 as usize) {
-                r.device = pnr_core::DeviceId(ci);
-            }
-        }
-        let mut seen: Vec<u16> = Vec::new();
-        c.guard_rings.retain(|r| {
-            if seen.contains(&r.device.0) {
-                false
-            } else {
-                seen.push(r.device.0);
-                true
-            }
-        });
-        c
+    let mut flow = Flow {
+        pdk,
+        d_router: elaborate::detailed_router(pdk, &layers, &cuts, pin_access),
+        layers,
+        cuts,
+        oracle: verify::LiveOracle::new(pdk).expect("a loaded Pdk re-parses its own deck"),
+        base_hard: problem.placement.hard.len(),
+        base_cost: problem.placement.cost.len(),
+        problem,
+        cells,
     };
 
-    // Reserve every guard ring's ground in the variant table itself: each
-    // requester cell's alternatives inflate their bbox by the ring's halo
-    // (band + gap), so the placer keeps neighbours out of the ring's footprint
-    // by construction and `post_cell::guard_rings` draws the band back inside
-    // the reservation. Without this the rings — drawn post-placement, 3 µm wide
-    // from the epi-depth sizing — landed tap/implant/li straight across
-    // neighbouring cells: rc_filter extracted as ONE net with a ghost pgate.
-    // One site on purpose: every consumer of a bbox (gp, dp's reshape pricing,
-    // the ring pass's dev_rect) reads these macros, so inflating anywhere later
-    // re-opens the clash somewhere else.
-    for r in &constraints_cells.guard_rings {
-        let Some(space) = variants.get_mut(r.device.0 as usize) else { continue };
-        let g = pdk.grid.max(1);
-        let ext = {
-            let e = cells::post_cell::ring_halo(r, pdk);
-            ((e + g - 1) / g) * g
-        };
-        for m in &mut space.alternatives {
-            m.bbox.x -= ext;
-            m.bbox.y -= ext;
-            m.bbox.w += 2 * ext;
-            m.bbox.h += 2 * ext;
-        }
-    }
-
-    let mut variants = variants;
-    // Whitespace escalation step (PLAN §3b: Θ buys feasibility, here literally):
-    // when the middle tier stalls with ROUTING overflow as the live residual,
-    // no variant swap fixes it — the die simply lacks track capacity, because
-    // every cell blocks met1 under itself. The honest lever is whitespace:
-    // inflate every alternative's bbox by half a track pitch and let the next
-    // outer iteration place with real gutters. Bounded, and only ever taken
-    // against a measured overflow — a static always-on gutter taxed compact
-    // designs measurably (chain4 +23% WL) while this fires only when routing
-    // says it is starving.
-    let whitespace_step = {
-        let g = pdk.grid.max(1);
-        let wire = dr::DetailedCfg::default().wire_width;
-        let stack: Vec<u16> = pdk.routing_layers().iter().map(|l| l.0).collect();
-        let pitch = pdk.routing_pitch(wire, &stack).max(dr::DetailedCfg::default().pitch);
-        (((pitch / 2) + g - 1) / g) * g
-    };
-    const MAX_WHITESPACE_STEPS: u32 = 3;
-    let mut whitespace_steps = 0u32;
-    let mut latest_overuse: i64 = 0;
-
-    // The live oracle (PLAN §1's oracle service, D4-revised): `dp` consumes it
-    // per accepted move / per epoch — risk-gated, bbox-scoped, budget-capped.
-    // Handed as a flat parameter (D1); rules stay pure functions of `Layout`.
-    let oracle = verify::LiveOracle::new(pdk)
-        .expect("LiveOracle over a loaded Pdk cannot fail to re-parse its own deck");
-
-    // Seed the assignment by *pricing*: draw each hypothesis and measure it, rather
-    // than guessing from footprint area. PLAN §2 recommends the hybrid — price up
-    // front to seed, then allow variant moves once placement feedback shows the
-    // priced choice is dominated. Pricing alone is myopic (it cannot know where the
-    // device lands); moves alone waste effort on obviously dominated variants.
-    let mut assignment = cellgen::seed_assignment(&variants, &layers, pdk);
-
-    // ---- cross-epoch search state, owned here ---------------------------
-    // These three are the reason the loop converges rather than oscillating, and
-    // they all live at this level because the *terminator* has to read them
-    // (PLAN §5). A stage that owned its own copy would reset it every call, which is
-    // precisely the bug: `gr`'s PathFinder history was being discarded every epoch.
-    let mut neg = gr::Negotiation::new();
+    // 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
+    //    keeping the lexicographically best (|V|, Θ, PEX). Cross-epoch state
+    //    (prices, routing history, DRC findings) lives here so it persists.
+    let mut assignment = cellgen::seed_assignment(&flow.cells.variants, &flow.layers, pdk);
     let mut prices = gp::Prices::new();
-    // In-loop DRC feedback, carried forward as extra Hard rules.
-    let mut drc_hard: Vec<Box<dyn RuleBatch<Layout>>> = Vec::new();
+    let mut neg = gr::Negotiation::new();
+    let mut drc_feedback = Requirements::<Layout>::default();
+    let mut best: Option<Epoch> = None;
+    let mut stats = RunStats::default();
 
-    // The base rule count, so each epoch's feedback batches can be truncated back
-    // off without re-deriving the whole problem.
-    let base_hard = problem.placement.hard.len();
-    let base_cost = problem.placement.cost.len();
-
-    // Keep the lexicographically-best solution seen (PLAN §3b: V, then Θ, then PEX)
-    // and stop when it stalls — convergence, not just "first DRC-clean".
-    let mut best: Option<(LexKey, Layout, Routes, Vec<Macro>, RunStats)> = None;
-    let patience = 8u32; // epochs without improvement before the middle tier gives up
-    let mut converged = false;
-    let mut iterations = 0u32;
-    let mut outer_iterations = 0u32;
-    let mut variant_escalations = 0u32;
-
-    // ═══ OUTER TIER: discrete search over the variant assignment ═══════════
-    //
-    // Each outer iteration fixes an assignment and hands it to the middle tier. The
-    // tiers are separated by a **separation-of-timescales** argument (PLAN §1):
-    // variant choices are discrete and low-cardinality after constraint collapse, so
-    // they change rarely; position feasibility is a medium-frequency problem; and
-    // parasitic polishing is high-frequency and local, which is why the third tier
-    // lives *inside* `dp` as its move loop rather than as a loop here.
     'outer: for outer in 0..cfg.outer_iters.max(1) {
-        outer_iterations = outer + 1;
-        // Middle-tier stall counter. Reset per outer iteration: a fresh assignment
-        // is a fresh search space and inherits none of the previous one's staleness.
-        let mut stall = 0u32;
-
-        // ═══ MIDDLE TIER: drive positions to feasibility at fixed V ════════
+        stats.outer_iterations += 1;
+        let mut stall = 0;
         for iter in 0..cfg.feedback_iters.max(1) {
-            iterations += 1;
-
-            // Fold in the previous epoch's DRC findings as Hard legality the placer
-            // must now respect, then (at the end of the epoch) truncate them back off.
-            // This is D4-revised's epoch half: the oracle measures, we bake the
-            // measurement into a rule batch, and the stage consumes it as an
-            // ordinary requirement. The fold **stays** alongside dp's live oracle
-            // handle — the in-epoch veto prevents *new* findings, this is the
-            // cross-epoch repair pressure on the ones that predate the epoch.
-            problem.placement.hard.truncate(base_hard);
-            problem.placement.cost.truncate(base_cost);
-            // The feedback arrives on whichever arm `verify::drc_feedback`
-            // chose (Hard default, cost behind PNR_DRC_FEEDBACK_COST); fold
-            // into the same arm.
-            if std::env::var("PNR_DRC_FEEDBACK_COST").is_ok() {
-                problem.placement.cost.append(&mut drc_hard);
-            } else {
-                problem.placement.hard.append(&mut drc_hard);
-            }
-
-            // New seed per epoch so a stuck run doesn't replay one trajectory. Mixed
-            // with `outer` too, or every assignment would retrace the same trajectory.
+            stats.iterations += 1;
             let seed = cfg.seed ^ u64::from(iter) ^ (u64::from(outer) << 32);
-
-            // The geometry this epoch actually uses: the chosen alternative per cell.
-            let macros = cellgen::realize(&variants, &assignment);
-
-            // Placement: coarse (analytical) → detailed (legalising SA + reshape).
-            let (mut coarse, _) =
-                placer.place(&macros, &variants, &problem.placement, &layers, &mut prices, seed);
-            coarse.debug_check("gp::place");
-            // Thread the group table and thermal source data *before* detailed
-            // placement, not after. `dp` needs both while it anneals: groups tell it
-            // which overlaps are intentional abutment and let `Target::Group` rules
-            // resolve, and the power map is what turns `ThermalGradient` from a
-            // tautology into a live constraint. Assigning them to the finished layout
-            // would be too late to affect any of it.
-            // `Layout::groups` has TWO consumers with different semantics, and each
-            // side of the `dp` call gets the table it means:
-            //  - pre-dp (here): `problem.abutment` remapped — diffusion-sharing
-            //    permission. `dp`'s legalizer preserves in-group overlap as
-            //    intentional abutment and `rotatable` refuses to turn a grouped
-            //    device, so this table must never contain a mixed-polarity
-            //    composite (implants would merge; DRC-clean, LVS-fatal).
-            //  - post-dp (below): `problem.groups` remapped — the recognition
-            //    table, composites included, so `Target::Group` rules can score a
-            //    whole OTA core like a device downstream. Nothing moves geometry
-            //    after `dp`, so granting no abutment there costs nothing.
-            coarse.groups = abutment_groups.clone();
-            // Axis ids are per *block*, and a circuit can have more blocks than
-            // devices, so the axis table has to be sized by the block count rather
-            // than inherited at device length.
-            if coarse.axis.len() < problem.blocks.len() {
-                let centre = coarse.centre_x_estimate();
-                coarse.axis.resize(problem.blocks.len(), centre);
-            }
-            coarse.power_uw = cell_power(&power, &devices_of);
-            coarse.refresh_temps();
-            coarse.debug_check("gp::place + group/power threading");
-
-            // `macros` is threaded for its **pins**: `dp` builds its net table from
-            // them, so this is what gives detailed placement a wirelength signal and
-            // what makes a reshape priced on where its pins land rather than on the new
-            // footprint's area (PLAN §2). `dp` re-resolves the geometry through
-            // `layout.variant`, so handing it this epoch's assignment is safe even
-            // though the reshape move changes that assignment underneath.
-            let (mut layout, place_report) = refiner.place(
-                &coarse,
-                &macros,
-                &variants,
-                &problem.placement,
-                &layers,
-                &fixed,
-                &mut prices,
-                &oracle,
-                seed,
-            );
-            // `dp` is the last stage that may move or reshape a device, so this is
-            // where a stacked pair stops being fixable and starts being drawn geometry.
-            layout.debug_check_placed("dp::place");
-            // The other half of the two-consumer contract (see `coarse.groups`
-            // above): recognition semantics from here on — `dp` was the last stage
-            // that read groups as abutment permission.
-            layout.groups = cell_groups.clone();
-
-            // `dp` may have reshaped: adopt its assignment and redraw. Everything
-            // below this line must see the geometry the placer actually legalised, not
-            // the geometry it was handed.
-            let macros = if layout.variant == assignment {
-                macros
-            } else {
-                cellgen::realize(&variants, &layout.variant)
-            };
-
-            // Guard rings: drawn now, around the *placed* group bboxes, before routing
-            // — a ring is both an obstacle and a net target, and it cannot exist
-            // earlier because it encloses a placed bbox (PLAN §4e: a constraint
-            // generated by the decision it constrains). Recomputed every epoch.
-            let rings = cells::post_cell::guard_rings(&layout, &constraints_cells, pdk);
-
-            // Routing: global (gcell PathFinder) → detailed (track realisation). Both
-            // borrow `neg`, so this epoch's negotiation starts from the accumulated
-            // history rather than from zero — that permanence is what stops the
-            // rip-up/reroute cycle from looping (PLAN §4e).
-            let (global, _) = g_router.route(
-                &layout,
-                &macros,
-                &rings,
-                &problem.routing,
-                &layers,
-                &mut neg,
-                seed,
-            );
-            // Self-connectivity only. `debug_check_connected` is deliberately *not*
-            // run here: a gcell plan snaps to cell centres, so it lands near a pin
-            // rather than on it (measured 31 nm off on `pair`) and closing that last
-            // gap is `dr`'s pin-access job, not a defect in the plan.
-            global.debug_check("gr::route");
-            // `dr` lands its terminals on these rects. Without them it derives
-            // terminals from the coarse route's gcell-snapped corners and never
-            // touches a pin.
-            //
-            // The placed macros go through as well, not just their pin rects: `dr`
-            // has to see the li the cells already drew or it lands access pads a
-            // sliver away from it. Projecting to `(net, rect)` here was what made
-            // the router blind to cell interiors.
-            let placed_cells = gr::place_macros(&macros, &layout);
-            let pin_rects: Vec<(pnr_core::NetId, pnr_core::Rect, pnr_core::LayerId)> =
-                placed_cells
-                    .iter()
-                    .flat_map(|m| m.pins.iter().map(|p| (p.net, p.at, p.layer)))
-                    .collect();
-            let (routes, route_report) = d_router.route(
-                &global,
-                &pin_rects,
-                &placed_cells,
-                &rings,
-                &problem.routing,
-                &layers,
-                &cuts,
-                &mut neg,
-                seed,
-            );
-            // Deliberately NO connectivity assert here: a mid-search epoch is
-            // allowed to come out open. `dr` reports each open net as a hard
-            // violation ("open net N"), so the lexicographic key below already
-            // punishes it above any budget — the epoch is scored and discarded,
-            // not treated as fatal. Panicking here (`routes.debug_check`) killed
-            // debug builds on epoch 1 of a search the next negotiation round
-            // would have repaired. Only the WINNER must be connected; that is
-            // asserted once, after the loop.
-
-            // In-loop DRC over the drawn geometry (device macros + guard rings) → Hard
-            // rules for the next epoch.
-            let mut shapes = geometry::collect(&macros, &layout, &routes);
-            for r in &rings {
-                shapes.extend(r.shapes.iter().cloned());
-            }
-            // Per-epoch LVS is gone from this seam: the rewritten oracle's
-            // DRC feedback is geometry-only, and the device-structure hazard
-            // PLAN §1 wanted covered "after any move that can change device
-            // structure" now lives where the moves are — `dp`'s per-accepted
-            // `merge_ambiguous` veto through the same LiveOracle. Full LVS
-            // remains the signoff gate.
-            let (feedback, drc_summary) = verify::drc_feedback(&oracle, &shapes);
-
-            // Θ for this epoch: the budget residuals, measured on the layout we just
-            // produced. This used to run once, after the loop, on the winner only —
-            // which made it a *report* rather than a search signal. Inside the loop it
-            // becomes the middle tier of the objective.
-            let budgets = metadata::build(
-                &problem.placement,
-                &layout,
-                &problem.routing,
-                &routes,
-                None, // bias is loop-invariant; attached once to the final report
-                &problem.net_classes,
-            );
-
-            // This epoch's quality as PLAN §3b's lexicographic key, summed across
-            // stages: (|V|, Θ, PEX). Strictly ordered — no amount of parasitic
-            // improvement can buy past a violated budget, and no budget slack can buy
-            // past a hard violation. Summing the tuples (rather than scalarising with
-            // weights) is the whole point: a finite penalty is a bribe the optimizer
-            // will accept.
-            // The fresh violation COUNT, not batch presence: the requirements
-            // fold is one batch whether the layout carries 24 findings or 1,
-            // so scoring V off `feedback.{hard,cost}.len()` flattened every
-            // DRC state to 0/1 — a partial repair (24 → 3) never registered
-            // as improvement and the stall counter starved honest progress.
-            let fresh_drc = drc_summary.violations as usize;
-            let key = lex_key(&place_report, &route_report, fresh_drc, &budgets);
-            latest_overuse = route_report
-                .budget_violations
-                .iter()
-                .filter(|v| v.rule == "routing overuse")
-                .map(|v| v.margin)
-                .sum();
-            drc_hard = if std::env::var("PNR_DRC_FEEDBACK_COST").is_ok() {
-                feedback.cost
-            } else {
-                feedback.hard
-            };
-
-            if std::env::var("PNR_TRACE").is_ok() {
-                eprintln!(
-                    "PNR_TRACE outer {outer} epoch {iter}: V={} theta={:.3} pex={:.1} \
-                     (place {} route {} drc {} overuse {})",
-                    key.0,
-                    key.1,
-                    key.2,
-                    place_report.hard_violations.len(),
-                    route_report.hard_violations.len(),
-                    fresh_drc,
-                    latest_overuse
-                );
-                for v in route_report
-                    .hard_violations
-                    .iter()
-                    .chain(place_report.hard_violations.iter())
-                {
-                    eprintln!("PNR_TRACE   hard: {} (margin {})", v.rule, v.margin);
-                }
-            }
-            let improved = best.as_ref().is_none_or(|(bk, ..)| key < *bk);
-            if improved {
-                let stats = RunStats {
-                    best_iteration: iter,
-                    place_hard: place_report.hard_violations.len(),
-                    route_hard: route_report.hard_violations.len(),
-                    drc_hard: fresh_drc,
-                    route_overuse: route_report
-                        .budget_violations
-                        .iter()
-                        .map(|v| v.margin)
-                        .sum(),
-                    theta: key.1,
-                    // The rest are patched after the loop, once they are known.
-                    ..RunStats::default()
-                };
-                best = Some((key, layout, routes, rings, stats));
+            let (epoch, feedback) = flow.epoch(&assignment, drc_feedback, &mut prices, &mut neg, seed);
+            drc_feedback = feedback;
+            if best.as_ref().is_none_or(|b| epoch.key < b.key) {
+                best = Some(Epoch { iteration: iter, ..epoch });
                 stall = 0;
             } else {
                 stall += 1;
-            }
-
-            if stall >= patience {
-                break;
-            }
-        }
-
-        // ═══ The outer-tier decision (PLAN §5's central diagnostic) ════════
-        //
-        // The middle tier has stopped improving. Two very different things look
-        // identical from here, and telling them apart is the whole reason the outer
-        // tier exists:
-        //
-        //   (a) We are feasible and the prices have settled → done. Feasibility alone
-        //       is NOT termination: a run can be legal while still actively
-        //       re-negotiating, and stopping there banks a solution that was still
-        //       trading margin. Multiplier stationarity is what certifies no budget is
-        //       being traded.
-        //
-        //   (b) We are stalled but still infeasible, and no *position* move helps →
-        //       the binding constraint is the **variant space itself**. No arrangement
-        //       of the currently-chosen variants can satisfy the constraints, so more
-        //       placement effort is wasted effort. The response is an outer move: a
-        //       different aspect ratio or metal-stack construction, which relocates
-        //       pins and changes the problem rather than re-solving it.
-        //
-        // This separation is only cleanly diagnosable because the middle tier can
-        // certify "no local position move helps" — the stall *is* that certificate.
-        let feasible = best.as_ref().is_some_and(|(k, ..)| k.0 == 0 && k.1 <= 0.0);
-        if feasible && prices.drift() < PRICE_STATIONARY {
-            converged = true;
-            break 'outer;
-        }
-
-        // Case (b): escalate. Two different escalations for two different
-        // bindings, told apart by WHICH residual is alive at the stall:
-        //
-        //   * routing overflow > 0 → capacity binding. No arrangement of these
-        //     variants routes in this whitespace; a variant swap would shuffle
-        //     pins without buying a single track. Inflate every alternative's
-        //     bbox by half a pitch (bounded) and re-place with real gutters.
-        //   * otherwise → variant-space binding, the original diagnosis; swap.
-        //
-        // `None` from the variant space means it is exhausted — a real answer
-        // (the circuit as specified cannot be laid out under these
-        // constraints), not a failure to converge, so stop rather than spin.
-        if std::env::var("PNR_WHITESPACE").is_ok()
-            && latest_overuse > 0
-            && whitespace_steps < MAX_WHITESPACE_STEPS
-        {
-            whitespace_steps += 1;
-            eprintln!(
-                "[whitespace] middle tier stalled with routing overflow after \
-                 {iterations} epochs — capacity binding, inflating every cell by \
-                 {whitespace_step} nm (step {whitespace_steps}/{MAX_WHITESPACE_STEPS})"
-            );
-            for space in &mut variants {
-                for m in &mut space.alternatives {
-                    m.bbox.x -= whitespace_step;
-                    m.bbox.y -= whitespace_step;
-                    m.bbox.w += 2 * whitespace_step;
-                    m.bbox.h += 2 * whitespace_step;
+                if stall >= PATIENCE {
+                    break;
                 }
             }
-            // The inflation moves EVERY cell, so state keyed to the old
-            // coordinates is poison, not memory: PathFinder history pins
-            // pressure onto track positions that no longer correspond to
-            // anything, and captured DRC findings penalise geometry that no
-            // longer exists. Both restart; the multiplier state (`prices`)
-            // stays — budget prices are about constraints, not coordinates.
-            neg = gr::Negotiation::new();
-            drc_hard.clear();
-            continue;
         }
-        match cellgen::escalate(&variants, &assignment, cfg.seed ^ u64::from(outer)) {
+
+        // Feasible with settled prices: done.
+        let feasible = best.as_ref().is_some_and(|b| b.key.0 == 0 && b.key.1 <= 0.0);
+        if feasible && prices.drift() < PRICE_STATIONARY {
+            stats.converged = true;
+            break;
+        }
+        // Infeasible: the variants themselves bind. Try the next assignment, or
+        // stop when the variant space is exhausted.
+        match cellgen::escalate(&flow.cells.variants, &assignment) {
             Some(next) => {
-                variant_escalations += 1;
-                eprintln!(
-                    "[variant] middle tier stalled while infeasible after {iterations} epochs \
-                     — variant-space binding, escalating (outer {outer})"
-                );
+                stats.variant_escalations += 1;
                 assignment = next;
             }
             None => break 'outer,
         }
     }
 
-    let (best_key, layout, routes, rings, mut stats) = best.ok_or(FlowError::Empty)?;
-    stats.iterations = iterations;
-    stats.converged = converged;
-    stats.outer_iterations = outer_iterations;
-    stats.variant_escalations = variant_escalations;
-    stats.price_drift = prices.drift();
-    stats.route_pressure = neg.pressure();
-    // The winning epoch's geometry is the one its own `layout.variant` selects — not
-    // the last assignment the outer loop happened to try. Then the guard rings ride
-    // along as extra absolute-coord macros (indices past the device count →
-    // `collect` leaves them at absolute position), so signoff and GDS see them.
-    let mut macros = cellgen::realize(&variants, &layout.variant);
-    // The connectivity gate the epoch loop deliberately skips (an open epoch is
-    // scored and discarded): a winner that *claims feasibility* (zero hard
-    // violations) must be whole, or the lexicographic key and the report have
-    // drifted apart. A winner returned infeasible — the variant space ran out,
-    // the documented "real answer" path above — is allowed to carry opens: they
-    // are already counted in its key and reported at signoff, so panicking here
-    // would turn an honest score into a debug-only crash. Before the rings
-    // extend `macros` — ring macros index past the layout and are absolute.
-    if best_key.0 == 0 {
-        routes.debug_check("dr::route (winner)");
-        geometry::debug_check_connected(&macros, &layout, &routes);
+    // 7. The winner, redrawn from its own variant choice, with its guard rings.
+    let best = best.expect("at least one epoch ran");
+    stats = RunStats { best_iteration: best.iteration, ..best.stats.merge(stats) };
+    let mut macros = cellgen::realize(&flow.cells.variants, &best.layout.variant);
+    // Only a winner claiming zero hard violations must be fully connected; an
+    // infeasible winner's opens are already counted and reported at signoff.
+    if best.key.0 == 0 {
+        best.routes.debug_check("dr::route (winner)");
+        geometry::debug_check_connected(&macros, &best.layout, &best.routes);
     }
-    macros.extend(rings);
-
-    // Budget report for the winning solution: the "how close to the edge" view a
-    // hard-violation count cannot give. The base rule-set still carries the last
-    // epoch's DRC feedback batches, so truncate them off first — they are measured
-    // findings, not constraints the circuit declared, and leaving them in would
-    // attribute them to a rule family in the table.
-    problem.placement.hard.truncate(base_hard);
-    problem.placement.cost.truncate(base_cost);
+    macros.extend(best.rings);
     let metadata = metadata::build(
-        &problem.placement,
-        &layout,
-        &problem.routing,
-        &routes,
+        &flow.problem.placement,
+        &best.layout,
+        &flow.problem.routing,
+        &best.routes,
         bias,
-        &problem.net_classes,
+        &flow.problem.net_classes,
     );
-
-    Ok(Solution { layout, routes, macros, netlist, stats, metadata })
+    Ok(Solution { layout: best.layout, routes: best.routes, macros, netlist, stats, metadata })
 }
 
-/// PLAN §3b's lexicographic key: `(|V|, Θ, PEX)`, summed across every stage.
-///
-/// Summed, not scalarised. With finite weights the optimizer trades matching,
-/// symmetry, and thermal margin for parasitic reduction — the "silently consuming
-/// margin" failure PLAN §3b warns about — because a finite penalty is a bribe it
-/// will accept. Tuple ordering makes the trade impossible to express instead of
-/// merely expensive.
-///
-/// Note what is deliberately *not* here: a Pareto blend. Matching is a hard budget
-/// that must hold, not a competing objective, so trading it against parasitics is
-/// the wrong model. Pareto is only meaningful *within* the PEX term (R vs C vs
-/// coupling), below the feasibility frontier.
+/// Everything an epoch reads that is fixed for the run.
+struct Flow<'a> {
+    pdk: &'a Pdk,
+    /// Placement rules are cell-indexed; `placement.hard/cost` grow by the DRC
+    /// feedback during an epoch and are truncated back to `base_*` after.
+    problem: Problem,
+    base_hard: usize,
+    base_cost: usize,
+    cells: CellSpace,
+    layers: Vec<LayerId>,
+    cuts: Vec<elaborate::Cut>,
+    d_router: dr::DetailedRoute,
+    oracle: verify::LiveOracle,
+}
+
+/// One scored epoch.
+struct Epoch {
+    key: LexKey,
+    iteration: u32,
+    layout: Layout,
+    routes: Routes,
+    rings: Vec<Macro>,
+    stats: RunStats,
+}
+
+impl Flow<'_> {
+    /// Place → route → DRC at a fixed `assignment`. Returns the scored epoch and
+    /// its DRC findings, to be folded into the next epoch's placement rules.
+    fn epoch(
+        &mut self,
+        assignment: &[u16],
+        mut drc_feedback: Requirements<Layout>,
+        prices: &mut gp::Prices,
+        neg: &mut gr::Negotiation,
+        seed: u64,
+    ) -> (Epoch, Requirements<Layout>) {
+        let placement = &mut self.problem.placement;
+        placement.hard.append(&mut drc_feedback.hard);
+        placement.cost.append(&mut drc_feedback.cost);
+        let cells = &self.cells;
+        let layers = &self.layers;
+
+        // Place: coarse analytical, then legalising anneal (which may reshape).
+        let macros = cellgen::realize(&cells.variants, assignment);
+        let (mut coarse, _) =
+            gp::Analytical::default().place(&macros, &cells.variants, placement, layers, prices, seed);
+        coarse.debug_check("gp::place");
+        // dp reads groups as abutment permission, so it gets the diffusion-sharing
+        // table; after dp, groups are the recognition table for `Target::Group`.
+        coarse.groups = cells.abutment.clone();
+        if coarse.axis.len() < self.problem.blocks.len() {
+            let centre = coarse.centre_x_estimate();
+            coarse.axis.resize(self.problem.blocks.len(), centre);
+        }
+        coarse.power_uw = cells.power.clone();
+        coarse.refresh_temps();
+        let (mut layout, place_report) = dp::Annealer::default().place(
+            &coarse,
+            &macros,
+            &cells.variants,
+            placement,
+            layers,
+            &cells.fixed,
+            prices,
+            &self.oracle,
+            seed,
+        );
+        layout.debug_check_placed("dp::place");
+        layout.groups = cells.groups.clone();
+        let macros = if layout.variant == assignment {
+            macros
+        } else {
+            cellgen::realize(&cells.variants, &layout.variant)
+        };
+
+        // Guard rings enclose placed cells, so they are drawn now, before routing.
+        let rings = cells::post_cell::guard_rings(&layout, &cells.guard_rings, self.pdk);
+
+        // Route: global gcell plan, then track realisation onto the real pins.
+        let routing = &self.problem.routing;
+        let (global, _) =
+            gr::GlobalRoute::default().route(&layout, &macros, &rings, routing, layers, neg, seed);
+        global.debug_check("gr::route");
+        let placed = gr::place_macros(&macros, &layout);
+        let pins: Vec<_> =
+            placed.iter().flat_map(|m| m.pins.iter().map(|p| (p.net, p.at, p.layer))).collect();
+        let (routes, route_report) = self.d_router.route(
+            &global, &pins, &placed, &rings, routing, layers, &self.cuts, neg, seed,
+        );
+
+        // Measure: DRC over the drawn geometry, budget residuals over the result.
+        let mut shapes = geometry::collect(&macros, &layout, &routes);
+        shapes.extend(rings.iter().flat_map(|r| r.shapes.iter().copied()));
+        let (feedback, drc) = verify::drc_feedback(&self.oracle, &shapes);
+        let budgets = metadata::build(
+            &self.problem.placement,
+            &layout,
+            routing,
+            &routes,
+            None,
+            &self.problem.net_classes,
+        );
+        self.problem.placement.hard.truncate(self.base_hard);
+        self.problem.placement.cost.truncate(self.base_cost);
+
+        let drc_hard = drc.violations as usize;
+        let key = lex_key(&place_report, &route_report, drc_hard, &budgets);
+        let stats = RunStats {
+            place_hard: place_report.hard_violations.len(),
+            route_hard: route_report.hard_violations.len(),
+            drc_hard,
+            route_overuse: route_report.budget_violations.iter().map(|v| v.margin).sum(),
+            ..RunStats::default()
+        };
+        (Epoch { key, iteration: 0, layout, routes, rings, stats }, feedback)
+    }
+}
+
+impl RunStats {
+    /// The winner's per-stage legality with the run-wide counters of `run`.
+    fn merge(self, run: RunStats) -> RunStats {
+        RunStats { place_hard: self.place_hard, route_hard: self.route_hard, drc_hard: self.drc_hard, route_overuse: self.route_overuse, ..run }
+    }
+}
+
+/// `(|V|, Θ, PEX)` summed over stages and compared as a tuple: no parasitic gain
+/// buys past a budget residual, no budget slack buys past a hard violation.
 type LexKey = (usize, f64, f32);
 
-fn lex_key(
-    place: &pnr_core::Report,
-    route: &pnr_core::Report,
-    fresh_drc: usize,
-    budgets: &metadata::MetadataReport,
-) -> LexKey {
+fn lex_key(place: &Report, route: &Report, drc: usize, budgets: &metadata::MetadataReport) -> LexKey {
     let (pv, pt, pc) = place.lex();
     let (rv, rt, rc) = route.lex();
-    // The analog Θ contribution: metadata's budget-arm residual sum in milli-budgets
-    // (see `MetadataReport::theta` for the deliberate ~×2 double-weighing with the
-    // pt/rt terms — the stage reports carry the same residuals; monotone-safe,
-    // cleanup deferred).
-    (pv + rv + fresh_drc, pt + rt + budgets.theta(), pc + rc)
+    (pv + rv + drc, pt + rt + budgets.theta(), pc + rc)
 }
 
-/// `‖λ_{k+1} − λ_k‖` below which constraint prices count as stationary (PLAN §5).
-///
-/// ponytail: one global threshold rather than per-family. Lift it to per-batch if a
-/// real circuit turns out to have budgets whose natural price scales differ by orders
-/// of magnitude — which is likely eventually (a thermal gradient in milli-°C and a
-/// coupling sum in aF do not share units), but is not worth a knob before it bites.
-const PRICE_STATIONARY: f64 = 1e-3;
+fn round_up(v: i32, grid: i32) -> i32 {
+    (v + grid - 1) / grid * grid
+}
 
-impl Solution {
-    /// The flat, placed geometry — every macro translated to its device centre
-    /// plus all routed wires. This is exactly what signoff runs over and what
-    /// [`gds::emit`] serialises; exposed so callers can write GDS/SVG artifacts.
-    #[must_use]
-    pub fn geometry(&self) -> Vec<pnr_core::Shape> {
-        geometry::collect(&self.macros, &self.layout, &self.routes)
+/// Per-device power (µW) and its provenance for the report: the ngspice
+/// operating point when configured and solvable, else `cfg.device_power_uw`.
+fn bias(
+    netlist: &pnr_core::Netlist,
+    cfg: &Config,
+) -> (Vec<i32>, Option<metadata::BiasSummary>) {
+    let op = cfg.op.as_ref().and_then(|oc| match oppoint::extract(netlist, oc) {
+        Ok(o) => Some(o),
+        Err(e) => {
+            eprintln!("[op] operating point unavailable ({e}); continuing with zero power");
+            None
+        }
+    });
+    let Some(o) = op else { return (cfg.device_power_uw.clone(), None) };
+    let hottest = o
+        .power_uw
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &p)| p)
+        .filter(|(_, &p)| p > 0)
+        .map(|(i, &p)| (netlist.devices[i].name.clone(), p));
+    let summary = metadata::BiasSummary {
+        provenance: o.provenance.clone(),
+        resolved: o.resolved,
+        devices: netlist.devices.len(),
+        total_power_uw: o.total_power_uw(),
+        hottest,
+    };
+    (o.power_uw, Some(summary))
+}
+
+/// The collapsed cell table and every device-indexed input translated to it.
+struct CellSpace {
+    /// Pre-drawn alternatives per cell — what `gp`/`dp` search over.
+    variants: Vec<gp::VariantSpace>,
+    /// Injected (user-macro) cells: `dp` never moves or reshapes them.
+    fixed: Vec<bool>,
+    /// `Layout::groups` for `dp`: groups that may share diffusion.
+    abutment: Vec<Vec<DeviceId>>,
+    /// `Layout::groups` after `dp`: the recognition table.
+    groups: Vec<Vec<DeviceId>>,
+    /// Guard-ring requirements, one per requesting cell.
+    guard_rings: analog::Constraints,
+    /// Per-cell power, µW (sum of member devices).
+    power: Vec<i32>,
+}
+
+impl CellSpace {
+    /// Draw every cell's variants and retarget `problem.placement` to cell ids.
+    fn new(
+        netlist: &pnr_core::Netlist,
+        injected: &Macros,
+        problem: &mut Problem,
+        pdk: &Pdk,
+        power: &[i32],
+    ) -> Self {
+        let cellgen::Cells { spaces, cell_of, devices_of } =
+            cellgen::enumerate(netlist, injected, &problem.constraints, pdk);
+        let p = &mut problem.placement;
+        for b in p.hard.iter_mut().chain(p.budget.iter_mut()).chain(p.cost.iter_mut()) {
+            b.retarget(&cell_of);
+        }
+        let to_cells = |g: &Vec<DeviceId>| remap_members(g, &cell_of);
+        let groups: Vec<_> = problem.groups.iter().map(to_cells).collect();
+        #[cfg(debug_assertions)]
+        debug_check_retargeted(problem, spaces.len(), &groups);
+
+        // Guard rings land on cells; two members of one cell asking is one ring.
+        let mut guard_rings = analog::Constraints::default();
+        for r in &problem.constraints.guard_rings {
+            let mut r = r.clone();
+            if let Some(&c) = cell_of.get(r.device.0 as usize) {
+                r.device = DeviceId(c);
+            }
+            if !guard_rings.guard_rings.iter().any(|g| g.device == r.device) {
+                guard_rings.guard_rings.push(r);
+            }
+        }
+
+        let mut cells = CellSpace {
+            fixed: devices_of
+                .iter()
+                .map(|m| m.iter().any(|d| injected.get(&netlist.devices[d.0 as usize].name).is_some()))
+                .collect(),
+            power: devices_of
+                .iter()
+                .map(|m| {
+                    m.iter()
+                        .map(|d| power.get(d.0 as usize).copied().unwrap_or(0))
+                        .fold(0, i32::saturating_add)
+                })
+                .collect(),
+            abutment: problem.abutment.iter().map(to_cells).collect(),
+            groups,
+            variants: spaces,
+            guard_rings,
+        };
+        // Reserve each ring's halo in the requester's bbox so the placer keeps
+        // neighbours out of it; the ring is drawn back inside the reservation.
+        for r in &cells.guard_rings.guard_rings {
+            let ext = round_up(cells::post_cell::ring_halo(r, pdk), pdk.grid.max(1));
+            let Some(space) = cells.variants.get_mut(r.device.0 as usize) else { continue };
+            for m in &mut space.alternatives {
+                m.bbox.x -= ext;
+                m.bbox.y -= ext;
+                m.bbox.w += 2 * ext;
+                m.bbox.h += 2 * ext;
+            }
+        }
+        cells
     }
 }
 
-/// Per-**cell** power for the thermal solver: the saturating sum of each cell's
-/// member device powers (`power` is device-indexed — the operating point is a
-/// property of the schematic, and `oppoint`/`BiasSummary` stay device-indexed).
-///
-/// An empty `power` means "no operating point supplied": every cell becomes a
-/// pure heat sensor, the die is uniform, and thermal rules pass honestly rather
-/// than by accident. A merged pair dissipates what its members dissipate, at one
-/// centre — physically right, since the members share one footprint now.
-fn cell_power(power: &[i32], devices_of: &[Vec<pnr_core::DeviceId>]) -> Vec<i32> {
-    devices_of
-        .iter()
-        .map(|members| {
-            members
-                .iter()
-                .map(|d| power.get(d.0 as usize).copied().unwrap_or(0))
-                .fold(0i32, i32::saturating_add)
-        })
-        .collect()
-}
-
-/// Rewrite a group's members through `cell_of`, deduplicating while preserving
-/// first-seen order. Never empties a non-empty group (dedup keeps ≥ 1 member), so
-/// `Layout::bbox`'s "group has no members" invariant survives the collapse.
-fn remap_members(members: &[pnr_core::DeviceId], cell_of: &[u16]) -> Vec<pnr_core::DeviceId> {
-    let mut out: Vec<pnr_core::DeviceId> = Vec::with_capacity(members.len());
+/// Rewrite a group's members through `cell_of`, deduplicated in first-seen
+/// order. A non-empty group stays non-empty.
+fn remap_members(members: &[DeviceId], cell_of: &[u16]) -> Vec<DeviceId> {
+    let mut out: Vec<DeviceId> = Vec::with_capacity(members.len());
     for d in members {
-        let c = match cell_of.get(d.0 as usize) {
-            Some(&c) => pnr_core::DeviceId(c),
-            None => *d,
-        };
+        let c = cell_of.get(d.0 as usize).map_or(*d, |&c| DeviceId(c));
         if !out.contains(&c) {
             out.push(c);
         }
@@ -967,95 +477,81 @@ fn remap_members(members: &[pnr_core::DeviceId], cell_of: &[u16]) -> Vec<pnr_cor
     out
 }
 
-/// Debug tripwire for the collapse: after retargeting, no placement batch may
-/// still name a device id at or past `n_cells` — an id in the old device space
-/// means a rule kind is missing its `retarget` override.
-///
-/// The sweep scores every batch against a probe layout whose cells sit at
-/// pairwise-distinct positions, so exact equalities (the rules most likely to be
-/// violated at an arbitrary state) push their ids; a batch that indexes past the
-/// probe panics on the spot, which is the same tripwire with a louder bell.
+/// After retargeting, no placement batch may name an id `>= n_cells` — that
+/// would be a rule kind missing its `retarget` override.
 #[cfg(debug_assertions)]
-fn debug_check_retargeted(problem: &annotator::Problem, n_cells: usize, cell_of: &[u16]) {
-    let n = n_cells;
+fn debug_check_retargeted(problem: &Problem, n: usize, groups: &[Vec<DeviceId>]) {
     let probe = Layout {
         x: (0..n).map(|i| i as i32 * 10_007 + 13).collect(),
         y: (0..n).map(|i| i as i32 * 7_919 + 29).collect(),
         hw: vec![50; n],
         hh: vec![50; n],
         axis: vec![0; problem.blocks.len().max(1)],
-        groups: problem.groups.iter().map(|g| remap_members(g, cell_of)).collect(),
+        groups: groups.to_vec(),
         orient: vec![pnr_core::Orient::default(); n],
         variant: vec![0; n],
         branch: Vec::new(),
         power_uw: vec![0; n],
         temp_mc: vec![0; n],
     };
-    let mut ids: Vec<u32> = Vec::new();
-    for b in problem
-        .placement
-        .hard
-        .iter()
-        .chain(problem.placement.budget.iter())
-        .chain(problem.placement.cost.iter())
-    {
+    let p = &problem.placement;
+    let mut ids = Vec::new();
+    for b in p.hard.iter().chain(p.budget.iter()).chain(p.cost.iter()) {
         ids.clear();
         b.violating_ids(&probe, &mut ids);
-        debug_assert!(
+        assert!(
             ids.iter().all(|&i| (i as usize) < n),
-            "batch {:?} still touches device ids {:?} after retargeting to {n} cells — \
-             its rule kind is missing a `retarget` override",
-            b.kind(),
-            ids.iter().filter(|&&i| i as usize >= n).collect::<Vec<_>>()
+            "batch {:?} touches device ids {ids:?} after retargeting to {n} cells",
+            b.kind()
         );
     }
 }
 
-/// Parse a SPICE netlist into the internal [`pnr_core::Netlist`] — the same
-/// front-end [`run`] uses. Exposed so a caller can size-gate or inspect a
-/// circuit without committing to a full flow.
+impl Solution {
+    /// The flat placed geometry — every macro stamped at its placement plus all
+    /// routed wires. What signoff checks and [`gds::emit`] writes.
+    #[must_use]
+    pub fn geometry(&self) -> Vec<pnr_core::Shape> {
+        geometry::collect(&self.macros, &self.layout, &self.routes)
+    }
+}
+
+/// Parse a SPICE netlist — the same front end [`run`] uses.
 ///
 /// # Errors
-/// Propagates the parser's error string.
+/// The parser's message.
 pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
     parse::spice(spice)
 }
 
-/// Final signoff on a solution: full DRC/LVS/PEX/ERC via `verify`. Separate
-/// from [`run`] because it needs the schematic reference and is a gate, not
-/// part of convergence.
-///
-/// The reference is rebuilt from the solution's netlist per call (a pure, cheap
-/// function of it), its `ports` set to exactly the label names placed on the
-/// geometry — `verify` requires the two to match, and deriving both here is
-/// what makes drift impossible.
+/// Full DRC/ERC/LVS/PEX signoff of a solution against its own schematic.
 #[must_use]
-pub fn signoff(sol: &Solution, pdk: &Pdk) -> pnr_core::Report {
+pub fn signoff(sol: &Solution, pdk: &Pdk) -> Report {
     let shapes = sol.geometry();
     let placed = pnr_core::place_macros(&sol.macros, &sol.layout);
     let names: Vec<String> = sol.netlist.nets.iter().map(|n| n.name.clone()).collect();
-    let pins = labeled_pins(&placed, &names, pdk, &shapes);
-    let mut reference = cellgen::reference(&sol.netlist);
-    reference.ports = pins.iter().map(|p| p.name.clone()).collect();
-    let (report, _wall) = verify::signoff(&shapes, &pins, &reference, pdk);
-    report
+    signoff_shapes(&shapes, &placed, &names, &sol.netlist, pdk)
 }
 
-/// One [`verify::LabeledPin`] per net: the first placed pin sitting on a
-/// deck-labelled layer whose centre provably lies on drawn geometry of the
-/// conductor that layer names. `verify`'s `resolve_labels` **fails closed** on
-/// a label with no shape under its point, so only provable labels go in; a net
-/// with no such pin simply goes unlabelled (its extracted net stays anonymous,
-/// which LVS handles — structure, not names, drives the default comparison).
-///
-/// The label's name is the schematic net's, which is what binds the extracted
-/// net to the reference port of the same name.
-///
-/// Takes placed macros and net names rather than a [`Solution`] so the
-/// substrate3 path ([`elaborate::Elaborated::signoff`]) labels its geometry the
-/// same way. It has to be the same way: LVS pairs on these labels, so a caller
-/// that labels only its io ports hands the comparison a handful of named nets
-/// and a pile of anonymous ones, and the pairing collapses.
+/// Signoff over drawn `shapes`: labels every provable net (see
+/// [`labeled_pins`]) and builds the LVS reference with exactly those ports.
+pub(crate) fn signoff_shapes(
+    shapes: &[pnr_core::Shape],
+    placed: &[Macro],
+    nets: &[String],
+    schematic: &pnr_core::Netlist,
+    pdk: &Pdk,
+) -> Report {
+    let pins = labeled_pins(placed, nets, pdk, shapes);
+    let mut reference = cellgen::reference(schematic);
+    reference.ports = pins.iter().map(|p| p.name.clone()).collect();
+    verify::signoff(shapes, &pins, &reference, pdk).0
+}
+
+/// One label per net: the first placed pin on a label layer whose centre lies
+/// on drawn conductor of that layer. `verify` fails closed on a label with no
+/// shape under it, so only provable labels go in; an unlabelled net stays
+/// anonymous, which LVS handles structurally.
 pub(crate) fn labeled_pins(
     placed: &[Macro],
     nets: &[String],
@@ -1063,39 +559,26 @@ pub(crate) fn labeled_pins(
     shapes: &[pnr_core::Shape],
 ) -> Vec<verify::LabeledPin> {
     let conn = &pdk.deck.connectivity;
-    // Label layer → the conductor it names (identity on both Philis decks:
-    // li/met1..met5 label themselves).
-    let conductor_of = |layer: u16| -> Option<u16> {
-        conn.label_layer
-            .iter()
-            .position(|l| l.0 == layer)
-            .map(|row| conn.label_names[row].0)
+    let conductor_of = |layer: u16| {
+        conn.label_layer.iter().position(|l| l.0 == layer).map(|row| conn.label_names[row].0)
     };
     let mut out: Vec<verify::LabeledPin> = Vec::new();
-    let mut labelled: Vec<u16> = Vec::new(); // nets already labelled
-    // ponytail: O(pins × shapes) point-in-rect scan, run once per signoff on
-    // cell-sized designs; index the shapes per layer if it ever shows up.
-    for m in placed {
-        for p in &m.pins {
-            if labelled.contains(&p.net.0) {
-                continue;
-            }
-            let Some(conductor) = conductor_of(p.layer.0) else { continue };
-            let (x, y) = (p.at.x + p.at.w / 2, p.at.y + p.at.h / 2);
-            let on_drawn = shapes.iter().any(|s| {
-                s.layer.0 == conductor
-                    && x >= s.rect.x
-                    && x <= s.rect.x + s.rect.w
-                    && y >= s.rect.y
-                    && y <= s.rect.y + s.rect.h
-            });
-            if !on_drawn {
-                continue;
-            }
-            let Some(name) = nets.get(p.net.0 as usize) else { continue };
-            labelled.push(p.net.0);
-            out.push(verify::LabeledPin { name: name.clone(), layer: p.layer.0, x, y });
+    let mut labelled: Vec<u16> = Vec::new();
+    // ponytail: O(pins × shapes), once per signoff; index shapes per layer if it shows.
+    for p in placed.iter().flat_map(|m| &m.pins) {
+        if labelled.contains(&p.net.0) {
+            continue;
         }
+        let Some(conductor) = conductor_of(p.layer.0) else { continue };
+        let (x, y) = (p.at.x + p.at.w / 2, p.at.y + p.at.h / 2);
+        let on_drawn = shapes.iter().any(|s| {
+            s.layer.0 == conductor
+                && (s.rect.x..=s.rect.x + s.rect.w).contains(&x)
+                && (s.rect.y..=s.rect.y + s.rect.h).contains(&y)
+        });
+        let Some(name) = nets.get(p.net.0 as usize).filter(|_| on_drawn) else { continue };
+        labelled.push(p.net.0);
+        out.push(verify::LabeledPin { name: name.clone(), layer: p.layer.0, x, y });
     }
     out
 }

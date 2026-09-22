@@ -19,7 +19,7 @@ use pnr_core::{DeviceKind, Process as _};
 use verify::Pdk;
 
 use crate::elaborate::{route_built, ElabConfig, Elaborated};
-use crate::{cellgen, Config, Solution};
+use crate::{cellgen, Config};
 
 /// One emitted device instance.
 #[derive(Debug)]
@@ -82,11 +82,6 @@ pub struct GenIr {
 pub enum EmitError {
     /// The solution uses a feature the emitter cannot yet express faithfully.
     Unsupported(String),
-}
-
-/// Decompile a flow [`Solution`] — thin wrapper over [`emit`].
-pub fn emit_solution(sol: &Solution, pdk: &Pdk, cfg: &Config) -> Result<GenIr, EmitError> {
-    emit(&sol.netlist, &sol.layout, pdk, cfg)
 }
 
 /// Decompile a solved placement against the deck it was solved on. The layout
@@ -176,8 +171,8 @@ pub fn emit(
     // `device_gap` (within a grid step) are attributed to the rule.
     let l_ = layout;
     let n = instances.len();
-    let grid = pdk_grid(pdk);
-    let device_gap = process_rule(pdk, "device_gap", 600);
+    let grid = pdk.grid();
+    let device_gap = pdk.rule("device_gap", 600);
     let corner = |i: usize| (l_.y[i] - l_.hh[i], l_.x[i] - l_.hw[i]);
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&i| corner(i));
@@ -269,13 +264,8 @@ fn terminal_port(kind: DeviceKind, t: &str, position: usize) -> String {
 /// wire the edges, then route — the same path [`crate::elaborate`] takes.
 ///
 /// # Errors
-/// Generator failures surface as [`crate::elaborate::ElabError`].
-pub fn elaborate_ir(
-    ir: &GenIr,
-    pdk: &Pdk,
-    cfg: &ElabConfig,
-) -> Result<Elaborated, crate::elaborate::ElabError> {
-    use crate::elaborate::ElabError;
+/// The generator failing against this process.
+pub fn elaborate_ir(ir: &GenIr, pdk: &Pdk, cfg: &ElabConfig) -> Result<Elaborated, GenError> {
     let built = build_with(pdk, ir.ports.clone(), |c| {
         let mut placed: Vec<Option<macro_master::Instance>> = (0..ir.instances.len())
             .map(|_| None)
@@ -318,9 +308,8 @@ pub fn elaborate_ir(
             c.connect(a, b);
         }
         Ok::<(), GenError>(())
-    })
-    .map_err(ElabError::Gen)?;
-    route_built(built, pdk, cfg)
+    })?;
+    Ok(route_built(built, pdk, cfg))
 }
 
 /// Pretty-print the IR as a standalone macroMaster [`Composition`] — the
@@ -387,14 +376,4 @@ pub fn to_rust(ir: &GenIr) -> String {
     }
     let _ = writeln!(s, "        Ok(())\n    }}\n}}");
     s
-}
-
-fn pdk_grid(pdk: &Pdk) -> i32 {
-    use pnr_core::Process as _;
-    pdk.grid()
-}
-
-fn process_rule(pdk: &Pdk, name: &str, default: i32) -> i32 {
-    use pnr_core::Process as _;
-    pdk.rule(name, default)
 }

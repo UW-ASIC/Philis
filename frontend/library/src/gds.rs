@@ -1,37 +1,5 @@
-//! GDSII stream writer: a flat shape list → a spec-compliant GDSII byte stream.
-//!
-//! This is the "GDS writer" the [`crate::geometry::collect`] comment anticipates
-//! — the pipeline draws geometry as [`Shape`]s (device-centre coordinates already
-//! flattened), and this turns them into the industry GDSII format for tape-out
-//! artifacts and for feeding [`visualizer::export_svg`].
-//!
-//! ## Conformance
-//!
-//! The output follows the GDSII Stream Format (Calma/Cadence) record layout:
-//! every record is `[u16 byte-length][u8 record-type][u8 data-type][payload]`,
-//! big-endian, even byte-length. The stream is a complete, self-contained
-//! library:
-//!
-//! ```text
-//! HEADER  BGNLIB LIBNAME UNITS
-//!   BGNSTR STRNAME
-//!     ( BOUNDARY LAYER DATATYPE XY ENDEL )*
-//!   ENDSTR
-//! ENDLIB
-//! ```
-//!
-//! - **Timestamps** (BGNLIB/BGNSTR) are the real modification/access time as the
-//!   six-short GDS calendar tuple `(year, month, day, hour, minute, second)`.
-//! - **Strings** (LIBNAME/STRNAME) are ASCII, null-padded to an even length.
-//! - **UNITS** declares a 1 nm database unit (user-unit = 1e-3 µm, db-unit = 1e-9
-//!   m); shape coordinates are written as their native `nm` integers, so a reader
-//!   recovers real dimensions.
-//! - **XY** for a BOUNDARY is an explicitly closed polygon (first vertex repeated
-//!   as the last), as the spec requires.
-//! - A record's payload is length-checked against the GDS 65534-byte record cap;
-//!   rectangles are far under it, but the guard keeps the writer honest.
-
-use std::time::{SystemTime, UNIX_EPOCH};
+//! GDSII stream writer: flat shapes → one `TOP` structure of closed
+//! rectangular BOUNDARY elements, 1 nm database unit, big-endian records.
 
 use pnr_core::Shape;
 
@@ -57,6 +25,9 @@ const ENDEL: u16 = 0x1100; //  element end         (no data)
 const ENDSTR: u16 = 0x0700; //  structure end      (no data)
 const ENDLIB: u16 = 0x0400; //  library end        (no data)
 
+/// Modification + access time, fixed (2000-01-01) so output is reproducible.
+const TIMESTAMPS: [i16; 12] = [2000, 1, 1, 0, 0, 0, 2000, 1, 1, 0, 0, 0];
+
 /// GDS stream version. 600 is the widely-accepted modern release number.
 const GDS_VERSION: i16 = 600;
 
@@ -66,18 +37,16 @@ const GDS_VERSION: i16 = 600;
 /// so it still draws.
 #[must_use]
 pub fn emit(shapes: &[Shape], layer_gds: &[(u16, u16)]) -> Vec<u8> {
-    let ts = gds_timestamp();
     let mut out = Vec::new();
 
     rec_i16(&mut out, HEADER, &[GDS_VERSION]);
-    // BGNLIB — last-modified + last-accessed timestamps (identical here).
-    rec_i16(&mut out, BGNLIB, &timestamp_pair(ts));
+    rec_i16(&mut out, BGNLIB, &TIMESTAMPS);
     rec_str(&mut out, LIBNAME_R, LIBNAME);
     // UNITS — (user-units per db-unit, db-unit in metres): 1 nm database grid.
     rec_real(&mut out, UNITS, &[1e-3, 1e-9]);
 
     // One structure holding every shape.
-    rec_i16(&mut out, BGNSTR, &timestamp_pair(ts));
+    rec_i16(&mut out, BGNSTR, &TIMESTAMPS);
     rec_str(&mut out, STRNAME_R, STRNAME);
 
     for s in shapes {
@@ -171,46 +140,6 @@ fn gds_real(v: f64) -> [u8; 8] {
         m -= byte;
     }
     out
-}
-
-// ── timestamps ───────────────────────────────────────────────────────────
-
-/// The GDS six-short calendar tuple `(year, month, day, hour, minute, second)`
-/// for "now" (UTC). Falls back to the GDS epoch tuple if the clock predates
-/// `UNIX_EPOCH`.
-fn gds_timestamp() -> [i16; 6] {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    let days = secs.div_euclid(86_400);
-    let tod = secs.rem_euclid(86_400);
-    let (y, mo, d) = civil_from_days(days);
-    [y, mo, d, (tod / 3600) as i16, ((tod % 3600) / 60) as i16, (tod % 60) as i16]
-}
-
-/// Two identical timestamps (modification + access) as the 12-short payload
-/// BGNLIB and BGNSTR both take.
-fn timestamp_pair(ts: [i16; 6]) -> [i16; 12] {
-    let mut out = [0i16; 12];
-    out[..6].copy_from_slice(&ts);
-    out[6..].copy_from_slice(&ts);
-    out
-}
-
-/// Days-since-Unix-epoch → `(year, month, day)` (proleptic Gregorian, UTC).
-/// Howard Hinnant's `civil_from_days`, dependency-free.
-fn civil_from_days(z: i64) -> (i16, i16, i16) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let year = if m <= 2 { y + 1 } else { y };
-    (year as i16, m as i16, d as i16)
 }
 
 #[cfg(test)]

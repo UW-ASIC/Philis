@@ -1,18 +1,10 @@
-//! Flatten a placed/routed solution into the shape list `verify` and the GDS
-//! writer consume: every macro's geometry translated to its placed position, plus
-//! every routed wire.
+//! Flatten a placed and routed solution into the shape list signoff and the
+//! GDS writer consume.
 
 use pnr_core::{Layout, Macro, Routes, Shape};
 
-/// Collect all drawn geometry: macro `i` turned by its layout orientation and
-/// translated by the layout's device-`i` centre, then all route wires. This is
-/// the flat picture DRC/LVS/PEX run over.
-///
-/// This is the **only** site where [`Orient`] reaches drawn geometry: everywhere
-/// upstream a rotated device is just an `(orient, hw, hh)` triple.
-/// The placement transform itself lives in [`gr::place_macros`] — this used to
-/// carry a second, independent copy of it, and the two drifted: only one of them
-/// was ever corrected, so DRC/LVS saw different geometry than the router did.
+/// Every macro stamped at its placement (the one transform, shared with the
+/// router via `gr::place_macros`), then every routed wire.
 #[must_use]
 pub fn collect(macros: &[Macro], layout: &Layout, routes: &Routes) -> Vec<Shape> {
     let mut out = Vec::new();
@@ -25,26 +17,11 @@ pub fn collect(macros: &[Macro], layout: &Layout, routes: &Routes) -> Vec<Shape>
     out
 }
 
-/// Stage-boundary check: **every pin of a net is physically reached by that net's
-/// routed geometry**.
+/// Debug-only: every pin of a net touches that net's routed geometry (xy
+/// overlap, touching counts). `Routes::debug_check` only proves the wires are
+/// self-connected, which a net can satisfy while missing its pins entirely.
 ///
-/// This is the precondition LVS depends on, checked where it is created rather
-/// than five stages later. `Routes::debug_check` already proves each net's wires
-/// are self-connected; that is not the same claim, and `pair` satisfies it while
-/// still extracting as two disjoint islands (`g=0 s=1 d=2` against `g=4 s=5 d=6`,
-/// 9 extracted nets against a 3-net reference) — the wires are consistent, they
-/// just never land on the pins.
-///
-/// Reachability is tested in xy with touching counted as connected, over the pin
-/// rects and wires together. That over-approximates: two shapes coincident in xy
-/// on non-adjacent layers read as connected here but are open in silicon. It is
-/// the cheap half of the invariant, and it is the half that is currently broken.
-///
-/// ponytail: xy-only. Tighten to "the touch is layer-adjacent, or there is a cut
-/// on a layer joining them" once a via/cut table is reachable from this crate —
-/// that upgrade catches a wire floating over a pin with no via stack down to it.
-///
-/// Compiled out without `debug_assertions`; O(k²) per net.
+/// ponytail: xy-only — ignores whether the touch has a via stack; O(k²) per net.
 pub fn debug_check_connected(macros: &[Macro], layout: &Layout, routes: &Routes) {
     if !cfg!(debug_assertions) {
         return;

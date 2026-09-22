@@ -145,8 +145,6 @@ fn main() {
     std::fs::write(out.join("ota5t_ref.spice"), &sp).expect("write ref spice");
 
     // gdsverify's own verdict on the very same geometry, for the comparison.
-    eprintln!("ROUTE REPORT: {} hard", sol.report.hard_violations.len());
-    for v in &sol.report.hard_violations { eprintln!("  RV {} margin={}", v.rule, v.margin); }
     let report = sol.signoff(&pdk).expect("schematic present");
     let lvs: Vec<&str> =
         report.hard_violations.iter().map(|v| v.rule.as_str()).filter(|r| r.contains("lvs")).collect();
@@ -172,23 +170,8 @@ fn main() {
             lp.x as f64 / 1000.0, lp.y as f64 / 1000.0,
             lp.x as f64 / 1000.0, lp.y as f64 / 1000.0,
             lp.name, magic_of(lp.layer)));
-        println!("label {} on {} at {},{}", lp.name, magic_of(lp.layer), lp.x, lp.y);
     }
     std::fs::write(out.join("labels.tcl"), &tcl).expect("write labels");
-    // Which pins does a routed wire actually land on?
-    let names = ["m1","m2","m3","m4","m5"];
-    for (i, m) in sol.macros.iter().enumerate() {
-        for p in &m.pins {
-            // Layer-agnostic: the router lands on met1+ and drops a via stack,
-            // so a wire never shares the li pin's own layer.
-            let hit = sol.routes.shapes(p.net).iter().any(|w|
-                   w.rect.x <= p.at.x + p.at.w && p.at.x <= w.rect.x + w.rect.w
-                && w.rect.y <= p.at.y + p.at.h && p.at.y <= w.rect.y + w.rect.h);
-            println!("PIN {} {} net={} at=({},{}) routed={}",
-                names.get(i).copied().unwrap_or("?"), p.name,
-                sol.nets[p.net.0 as usize], p.at.x, p.at.y, hit);
-        }
-    }
     println!("wrote {} shapes, {} ref devices, gdsverify lvs findings {}",
         shapes.len(), schem.devices.len(), lvs.len());
 }

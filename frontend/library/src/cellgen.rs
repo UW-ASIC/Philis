@@ -1,7 +1,6 @@
-//! Cell generation + the LVS reference — the two places the flow touches `cells`
-//! and the schematic side.
-
-use std::collections::HashMap;
+//! Cells: draw every legal variant of every cell (collapsing matched groups
+//! into one cell), seed and escalate the variant assignment, and build the LVS
+//! reference from the schematic.
 
 use analog::cell::{SeriesParallel, Unitization};
 use analog::Constraints;
@@ -16,78 +15,33 @@ use macro_master::Macros;
 use pnr_core::{Device, DeviceGroup, DeviceId, DeviceKind, Macro, NetId, Netlist, Rect};
 use verify::{Checker, Checks, Pdk, RefDeviceIn, RefInput, RefKind};
 
-/// The collapsed cell table: the variant spaces `gp`/`dp` search, plus the two
-/// maps that relate the **cell space** they index to the netlist's **device
-/// space**.
-///
-/// After group collapse (PLAN §2) a cell is no longer one device: a matched
-/// unitization becomes ONE placeable cell whose alternatives are merged
-/// interdigitated stacks, so `n_cells ≤ n_devices` and every consumer that used
-/// to assume "cell index == device index" must translate through these maps.
+/// The cell table `gp`/`dp` search, and its map to the netlist's devices.
+/// A matched group collapses to one cell, so `n_cells <= n_devices`.
 pub struct Cells {
-    /// One variant space per **cell**, in cell order.
+    /// Variant space per cell.
     pub spaces: Vec<gp::VariantSpace>,
-    /// `cell_of[device] = cell index` — the map every device-indexed table
-    /// (`fixed`, groups, guard rings, rule targets) is pushed through.
+    /// `cell_of[device]` = its cell.
     pub cell_of: Vec<u16>,
-    /// `devices_of[cell]` = member devices in **generator draw order**, i.e.
-    /// `devices_of[c][di]` is the device the `d{di}:` pin ordinal names (see
-    /// `cells::mosfet::net_of` / `pin_at`). Single-device cells hold one entry.
+    /// Member devices per cell in draw order: `devices_of[c][k]` is the device
+    /// the generator's `d{k}:` pin prefix names.
     pub devices_of: Vec<Vec<DeviceId>>,
 }
 
-/// Enumerate and draw **every legal variant** of every cell — the search space
-/// `gp`/`dp` choose from, and the table `realize` indexes.
+/// Draw every legal variant of every cell.
 ///
-/// This replaced the old `generate`, which picked the smallest-footprint variant here
-/// and returned one `Macro` per device. That single `min_by_key(w*h)` discarded the
-/// whole variant degree of freedom before placement ever ran, and footprint area is
-/// the wrong criterion anyway: the cost of a variant is where its *pins* end up, which
-/// nothing at this point in the flow can know.
-///
-/// A **user-injected** `macro_master` macro registered under the device's instance
-/// name short-circuits enumeration: it becomes a single-alternative space, because
-/// a variant the user drew is not ours to reconsider.
-///
-/// **Group collapse (PLAN §2) happens here.** A multi-member unitization becomes
-/// ONE cell drawn through `cells`' merged path (`mosfet`'s ABBA `finger_sequence`),
-/// so same-variant, integer-ratio and common-centroid hold **by construction**:
-/// one variant index cannot disagree with itself, `dev_nf` decomposes the ratio
-/// into identical unit fingers, and the interleaving is centroid-balanced by the
-/// pattern. This is also what retires `VariantSpace::lock` — the lock only existed
-/// because a differential pair used to be two cells with two independent indices.
-///
-/// A unitization **declines** to merge (falls back to per-device cells, exactly as
-/// before) when:
-/// - it has an **injected** member — a `macro_master` macro is the user's geometry
-///   and is never redrawn, so it cannot join a merged stack;
-/// - it **overlaps** an earlier unitization (first-wins, with a stderr line) — a
-///   device can be drawn once;
-/// - its MOS members do **not share one source net**: the merged `finger_sequence`
-///   puts every inter-device diffusion boundary on S, so differing S nets would be
-///   a drawn short that DRC cannot see (the diffusion is one legal rectangle) and
-///   only LVS would catch at signoff;
-/// - **every** drawn alternative shares a boundary pad between two different nets
-///   (the same drawn-short hazard on the pattern axis: `Single`/greedy-centroid
-///   sequences can put a D|D boundary between devices whose drains differ). Unsafe
-///   alternatives are dropped per-alternative; an empty space declines the merge.
-///
-/// Everything not merged is a single-device cell **exactly as today** — a netlist
-/// with no matched groups produces the identity map and byte-identical spaces.
+/// A device with a user macro under its instance name is a one-alternative
+/// cell. A multi-device unitization merges into one cell (interleaved stack:
+/// same-variant, ratio and common-centroid hold by construction) unless a
+/// member is injected, it overlaps an earlier unitization, its MOS members do
+/// not share a source net, or every merged pattern draws a short. Declined
+/// merges fall back to one cell per device.
 #[must_use]
 pub fn enumerate(netlist: &Netlist, macros: &Macros, constraints: &Constraints, pdk: &Pdk) -> Cells {
-    // Every device draws at its real size: matched devices keep the annotator's
-    // group-scoped unit geometry (found by subset lookup), and every un-matched
-    // device gets a synthesised 1-device unitization from its own netlist w/l/nf.
-    // Without this, un-matched devices fall back to PDK-minimum geometry.
     let sized = with_per_device_sizing(netlist, constraints);
     let n = netlist.devices.len();
+    let dev = |d: &DeviceId| &netlist.devices[d.0 as usize];
 
-    // ── Phase 1: decide (and draw) the merges ──────────────────────────────
-    // Decided against the post-split unitizations, so each candidate is
-    // single-kind by construction — asserted, not trusted, because a mixed-kind
-    // merge would draw every member as whichever kind the group is labelled and
-    // nothing downstream could detect it.
+    // Phase 1: decide and draw the merges.
     let mut unit_of: Vec<Option<usize>> = vec![None; n];
     let mut merged: Vec<Option<(Vec<DeviceId>, Vec<Macro>)>> = Vec::new();
     for u in &sized.unitization {
@@ -96,74 +50,33 @@ pub fn enumerate(netlist: &Netlist, macros: &Macros, constraints: &Constraints, 
         if members.len() < 2 {
             continue;
         }
-        let kinds: Vec<DeviceKind> =
-            members.iter().map(|d| netlist.devices[d.0 as usize].kind).collect();
+        let kind = dev(&members[0]).kind;
         assert!(
-            kinds.windows(2).all(|w| w[0] == w[1]),
-            "cellgen: unitization {:?} spans device kinds {kinds:?} — \
-             with_per_device_sizing was supposed to have split this",
+            members.iter().all(|d| dev(d).kind == kind),
+            "cellgen: unitization {:?} spans device kinds",
             u.devices
         );
-        // A macro_master macro is the user's geometry; it never joins a merged stack.
-        if members.iter().any(|d| macros.get(&netlist.devices[d.0 as usize].name).is_some()) {
+        if members.iter().any(|d| macros.get(&dev(d).name).is_some())
+            || members.iter().any(|d| unit_of[d.0 as usize].is_some())
+        {
             continue;
         }
-        // First-wins on overlap: a device can be drawn once. Later claims lose loudly.
-        if members.iter().any(|d| unit_of[d.0 as usize].is_some()) {
-            eprintln!(
-                "[collapse] unitization {:?} overlaps an earlier one — first wins, \
-                 this one stays per-device",
-                u.devices.iter().map(|d| d.0).collect::<Vec<_>>()
-            );
-            continue;
-        }
-        // MOS shared-source pre-check: the ABBA sequence puts every inter-device
-        // diffusion boundary on S, so differing S nets would be a drawn short no
-        // DRC rule can see. Decline rather than draw it.
-        if matches!(kinds[0], DeviceKind::Nmos | DeviceKind::Pmos) {
-            let s_net = |d: &DeviceId| {
-                netlist.devices[d.0 as usize]
-                    .terminals
-                    .iter()
-                    .find(|(t, _)| t == "S")
-                    .map(|(_, n)| *n)
-            };
-            let first = s_net(&members[0]);
-            if first.is_none() || members.iter().any(|d| s_net(d) != first) {
-                eprintln!(
-                    "[collapse] unitization {:?} has members on different source nets \
-                     — merging would draw a short on shared diffusion, staying \
-                     per-device",
-                    u.devices.iter().map(|d| d.0).collect::<Vec<_>>()
-                );
+        // The merged sequence puts every inter-device diffusion boundary on S:
+        // differing S nets would be a short DRC cannot see.
+        if matches!(kind, DeviceKind::Nmos | DeviceKind::Pmos) {
+            let s = |d: &DeviceId| terminal(dev(d), "S");
+            if s(&members[0]).is_none() || members.iter().any(|d| s(d) != s(&members[0])) {
                 continue;
             }
         }
-        // Draw the merged stack through the same generator path as everything
-        // else — `Cell::enumerate` on a multi-device group already IS the joint
-        // enumeration — then bind pins by `d{N}:` ordinal against the member list.
         let group = DeviceGroup { devices: members.clone() };
-        let mut alternatives = draw_variants(kinds[0], &group, &sized, pdk);
+        let mut alternatives = draw_variants(kind, &group, &sized, pdk);
         for m in &mut alternatives {
             bind_pins(m, netlist, &members);
         }
-        // Drop any alternative the pattern physically shorts:
-        // - a shared boundary pad carrying two nets (Single / greedy-centroid
-        //   orders can put a D|D boundary between devices whose drains differ);
-        // - a gate strap crossing another member's stubs when their gate nets
-        //   differ (interleaved patterns; see `gate_straps_stay_private`).
-        // The S-net pre-check covers the ABBA diffusion case; these are the same
-        // invariant enforced per-alternative, where the pattern is known.
-        alternatives.retain(|m| {
-            shared_pads_carry_one_net(m) && gate_straps_stay_private(m, netlist, &members)
-        });
+        alternatives
+            .retain(|m| shared_pads_carry_one_net(m) && gate_straps_stay_private(m, netlist, &members));
         if alternatives.is_empty() {
-            eprintln!(
-                "[collapse] unitization {:?}: every merged pattern draws a short \
-                 (shared diffusion boundary or crossing gate straps) — staying \
-                 per-device",
-                u.devices.iter().map(|d| d.0).collect::<Vec<_>>()
-            );
             continue;
         }
         for d in &members {
@@ -172,95 +85,68 @@ pub fn enumerate(netlist: &Netlist, macros: &Macros, constraints: &Constraints, 
         merged.push(Some((members, alternatives)));
     }
 
-    // ── Phase 2: emit cells, ordered by first member device index ─────────
+    // Phase 2: emit cells in order of their first member device.
     let mut spaces: Vec<gp::VariantSpace> = Vec::new();
     let mut cell_of = vec![0u16; n];
     let mut devices_of: Vec<Vec<DeviceId>> = Vec::new();
-    for (i, dev) in netlist.devices.iter().enumerate() {
+    for (i, d) in netlist.devices.iter().enumerate() {
         let ci = spaces.len() as u16;
-        if let Some(ui) = unit_of[i] {
-            // `take` emits the merged cell at its lowest-indexed member and makes
-            // every later member a no-op — that is the deterministic cell order.
-            let Some((members, alternatives)) = merged[ui].take() else { continue };
-            for d in &members {
-                cell_of[d.0 as usize] = ci;
-            }
-            spaces.push(gp::VariantSpace { alternatives, lock: None });
-            devices_of.push(members);
-            continue;
-        }
-        cell_of[i] = ci;
-        devices_of.push(vec![DeviceId(i as u16)]);
-        // A user macro for this instance is a **one-element space**: a variant the
-        // user drew is not ours to reconsider. Its ports (`G`/`S`/`D`/…) are still
-        // remapped onto THIS instance's terminal nets, or the router cannot connect
-        // it into the surrounding circuit.
-        if let Some(m) = macros.get(&dev.name) {
+        let (members, alternatives) = if let Some(ui) = unit_of[i] {
+            // Emitted at its lowest member; later members are no-ops.
+            let Some(m) = merged[ui].take() else { continue };
+            m
+        } else if let Some(m) = macros.get(&d.name) {
+            // The user's geometry, with its ports bound to this instance's nets.
             let mut m = m.clone();
             for pin in &mut m.pins {
-                if let Some((_, net)) = dev.terminals.iter().find(|(t, _)| *t == pin.name) {
-                    pin.net = *net;
+                if let Some(net) = terminal(d, &pin.name) {
+                    pin.net = net;
                 }
             }
-            spaces.push(gp::VariantSpace { alternatives: vec![m], lock: None });
-            continue;
+            (vec![DeviceId(i as u16)], vec![m])
+        } else {
+            let group = DeviceGroup { devices: vec![DeviceId(i as u16)] };
+            let mut alternatives = draw_variants(d.kind, &group, &sized, pdk);
+            for m in &mut alternatives {
+                bind_pins(m, netlist, &group.devices);
+            }
+            (group.devices, alternatives)
+        };
+        for d in &members {
+            cell_of[d.0 as usize] = ci;
         }
-        let group = DeviceGroup { devices: vec![DeviceId(i as u16)] };
-        let mut alternatives = draw_variants(dev.kind, &group, &sized, pdk);
-        for m in &mut alternatives {
-            bind_pins(m, netlist, &group.devices);
-        }
+        devices_of.push(members);
         spaces.push(gp::VariantSpace { alternatives, lock: None });
     }
     Cells { spaces, cell_of, devices_of }
 }
 
-/// Every set of pins sharing one drawn pad carries one net — the invariant that
-/// makes a merged stack's shared diffusion legal rather than a drawn short.
-///
-/// Two pins land on the same `at` rect exactly when the generator put two
-/// devices' terminals on one boundary diffusion region; after [`bind_pins`] their
-/// nets are the schematic's, so a disagreement means the pattern physically
-/// connects two different nets. That is invisible to DRC (the diffusion is one
-/// legal rectangle) and only surfaces as an LVS mismatch at signoff — so it is
-/// checked here, where the alternative can simply be dropped.
-fn shared_pads_carry_one_net(m: &Macro) -> bool {
-    m.pins.iter().enumerate().all(|(i, a)| {
-        m.pins[i + 1..].iter().all(|b| a.at != b.at || a.net == b.net)
-    })
+fn terminal(d: &Device, name: &str) -> Option<NetId> {
+    d.terminals.iter().find(|(t, _)| t == name).map(|(_, n)| *n)
 }
 
-/// No device's gate strap crosses another member's gate stubs on a different net.
+/// Pins drawn on one pad carry one net — otherwise a shared diffusion region
+/// shorts two nets (invisible to DRC, fatal to LVS).
+fn shared_pads_carry_one_net(m: &Macro) -> bool {
+    m.pins
+        .iter()
+        .enumerate()
+        .all(|(i, a)| m.pins[i + 1..].iter().all(|b| a.at != b.at || a.net == b.net))
+}
+
+/// No member's gate strap crosses another member's stubs on a different gate
+/// net. A strap spans its device's fingers, so two members whose S/D region
+/// spans overlap by more than one shared region are interleaved and the strap
+/// shorts the gates.
 ///
-/// `mosfet::draw` straps a multi-finger device's gates with one continuous poly
-/// rail across that device's finger span, on the same row every finger's stub
-/// descends to. Its comment says the per-device span "keeps an interleaved ABBA
-/// pair's two gates distinct" — but an *interleaved* span contains the other
-/// device's fingers, so the rail runs straight through their stubs: one poly net,
-/// two schematic gates. DRC cannot object (poly over poly is legal) and the pad
-/// check above cannot see it (a strap is not a pin) — the merged 5T-OTA diff pair
-/// extracted as ONE device this way.
-///
-/// Read off the **S/D region x-spans** (`d{N}:S` / `d{N}:D`, still one pin per
-/// diffusion region). A device's fingers — and therefore its strap — sit strictly
-/// between its own outermost regions, so two members whose region spans overlap by
-/// more than the single shared boundary region are interleaved, and the wider
-/// member's strap runs through the narrower one's stubs. Block-ordered (AABB)
-/// members abut at exactly one region: overlap of zero width, no crossing.
-///
-/// ponytail: this mirrors the generator's drawing rule rather than extracting
-/// connectivity — brittle if `mosfet.rs` changes its strap. The real fix is a
-/// strap that jogs around foreign stubs (kernel/cells, outside this change's
-/// scope); once that lands this filter stops firing and interleaved
-/// distinct-gate merges come back on their own.
+/// ponytail: mirrors `mosfet::draw`'s strap rule rather than extracting; drop
+/// once the generator jogs straps around foreign stubs.
 fn gate_straps_stay_private(m: &Macro, netlist: &Netlist, members: &[DeviceId]) -> bool {
-    let gate_net = |d: &DeviceId| {
-        netlist.devices[d.0 as usize].terminals.iter().find(|(t, _)| t == "G").map(|(_, n)| *n)
-    };
+    let gate = |d: &DeviceId| terminal(&netlist.devices[d.0 as usize], "G");
     let span = region_spans(m, members.len());
     members.iter().enumerate().all(|(a, da)| {
         members.iter().enumerate().skip(a + 1).all(|(b, db)| {
-            gate_net(da) == gate_net(db) // same schematic gate: strap contact is harmless
+            gate(da) == gate(db)
                 || match (span[a], span[b]) {
                     (Some((a0, a1)), Some((b0, b1))) => a1.min(b1) <= a0.max(b0),
                     _ => true,
@@ -269,8 +155,7 @@ fn gate_straps_stay_private(m: &Macro, netlist: &Netlist, members: &[DeviceId]) 
     })
 }
 
-/// Per-member `(min, max)` x of the `d{N}:S`/`d{N}:D` pins — the diffusion-region
-/// extent of each device inside a (possibly merged) cell.
+/// Per-member `(min, max)` x of its `d{N}:S`/`d{N}:D` pins.
 fn region_spans(m: &Macro, members: usize) -> Vec<Option<(i32, i32)>> {
     let mut span: Vec<Option<(i32, i32)>> = vec![None; members];
     for pin in &m.pins {
@@ -288,230 +173,86 @@ fn region_spans(m: &Macro, members: usize) -> Vec<Option<(i32, i32)>> {
     span
 }
 
-/// Choose the starting variant per cell by **pricing** each hypothesis.
-///
-/// PLAN §2 recommends the hybrid, and both pure strategies lose: pricing alone is
-/// myopic (BAG-style generate-then-evaluate cannot know pin-position consequences
-/// before placement), while leaving variants purely to annealing moves wastes moves
-/// on obviously dominated hypotheses. So price to seed, then let `dp` revise.
-///
-/// The price has two halves and neither is footprint area — see [`price`].
-///
-/// Determinism: `min_by` returns the *first* minimum, so ties break on index order.
-/// This seeds the whole run, and a hash-ordered tie-break would make two runs of the
-/// same inputs diverge from epoch zero.
+/// Starting variant per cell, chosen by measuring each alternative in
+/// isolation (see [`price`]). Ties break on index, so the seed is deterministic.
 #[must_use]
-pub fn seed_assignment(
-    variants: &[gp::VariantSpace],
-    layers: &[pnr_core::geom::LayerId],
-    pdk: &Pdk,
-) -> Vec<u16> {
+pub fn seed_assignment(variants: &[gp::VariantSpace], layers: &[pnr_core::LayerId], pdk: &Pdk) -> Vec<u16> {
     let cfg = gr::GlobalCfg::default();
-    // One in-loop engine session (density stripped, as this pricing always
-    // waived it) reused across every alternative of every cell — the deck is
-    // parsed once instead of per hypothesis.
-    let mut checker = Checker::new(pdk, true)
-        .expect("Checker over a loaded Pdk cannot fail to re-parse its own deck");
+    let mut checker = Checker::new(pdk, true).expect("a loaded Pdk re-parses its own deck");
     variants
         .iter()
-        .enumerate()
-        .map(|(i, space)| {
-            let best = space
+        .map(|space| {
+            space
                 .alternatives
                 .iter()
+                .map(|m| price(m, layers, &cfg, &mut checker))
                 .enumerate()
-                .map(|(v, m)| (v, price(m, layers, &cfg, &mut checker)))
-                .min_by(|a, b| a.1.cmp(&b.1));
-            match best {
-                // Unreachable sorts last, so this only fires when *every* alternative
-                // is unreachable — a variant-space binding visible before the first
-                // epoch. Seed it anyway (the loop needs a starting assignment) but say
-                // so, because the middle tier will stall and the diagnosis is already
-                // known here.
-                Some((v, (unreachable, ..))) if unreachable => {
-                    eprintln!(
-                        "[variant] cell {i}: no alternative's pins are reachable in \
-                         isolation — seeding {v} and expecting a variant-space binding"
-                    );
-                    v as u16
-                }
-                Some((v, _)) => v as u16,
-                None => 0,
-            }
+                .min_by(|a, b| a.1.cmp(&b.1))
+                .map_or(0, |(v, _)| v as u16)
         })
         .collect()
 }
 
-/// One variant hypothesis's price, ordered **worst-last**: `(unreachable, illegal
-/// geometry, congestion, wirelength)`.
+/// `(unreachable, DRC+ERC findings, congestion, wirelength)`, worst-last and
+/// compared lexicographically: unreachable pins are infeasible, not expensive.
+/// DRC runs density-stripped (fill rules are chip-level); a macro the engine
+/// cannot load prices as maximally illegal.
 ///
-/// Lexicographic for the same reason `lib.rs::lex_key` is: `reachable == false` is
-/// *infeasibility*, not expense (D6) — no placement of such a variant helps — so no
-/// amount of wirelength saving may buy past it.
-type Price = (bool, usize, i64, i64);
-
-/// Price one drawn hypothesis by **measuring** it. Both halves are measurements;
-/// neither is a geometric surrogate, because routability and extracted parasitics are
-/// *discontinuous* in the variant index (PLAN §2) and no cheap proxy ranks them.
-///
-/// ponytail: `variant_signoff` in `kernel/macroMaster` is the same DRC/ERC sweep, but
-/// it is a `#[cfg(all(test, feature = "gpurify"))]` module and its `verify` dependency
-/// is optional precisely so the crate builds with no GPurify checkout. Calling it from
-/// here would force `verify` (and hence `gdsverify`) into `macro_master`'s default
-/// dependency set to reuse eight lines that `library` can already call directly. Lift
-/// this if the two ever need to agree on more than "count the findings".
-///
-/// ponytail: one DRC + one ERC call per alternative per cell, once per run. Measured on
-/// sky130: a MOSFET enumerates **6** alternatives, drawing all of them costs 0.66 ms for
-/// two devices, and pricing them costs **~13 ms per hypothesis** — all of it inside
-/// `gdsverify`, which is 99.86% of measured runtime. So the seed pass is roughly
-/// `13 ms × n_cells × 6`: negligible at OTA sizes (a 5T OTA is ~0.4 s), about a minute
-/// at the benchmark's 800-cell ceiling. Named because this is the one place in the flow
-/// where oracle calls were *added*; the upgrade is to price DRC/ERC only for the
-/// alternatives that survive the routability half, which needs group collapse first to
-/// make that half discriminate at all.
-fn price(
-    m: &Macro,
-    layers: &[pnr_core::geom::LayerId],
-    cfg: &gr::GlobalCfg,
-    checker: &mut Checker,
-) -> Price {
-    // Routability: actually route the cell's own nets (D6). For a single-device cell
-    // this is near-vacuous — `price_group` finds no net with two distinct terminals
-    // inside the group and reports `reachable`, `overflow: 0` — and it only starts
-    // discriminating once group collapse makes a cell contain several devices. Called
-    // regardless, so the pricing path is the one that lands rather than one written
-    // alongside collapse later.
+/// ponytail: one DRC+ERC pass per alternative per run (~13 ms each on sky130).
+fn price(m: &Macro, layers: &[pnr_core::LayerId], cfg: &gr::GlobalCfg, checker: &mut Checker) -> (bool, usize, i64, i64) {
     let p = gr::price_group(std::slice::from_ref(m), layers, cfg);
-    // Geometry legality against THIS process, one DRC+ERC engine pass. The session
-    // was built density-stripped: `min_density`/`max_density` are windowed *fill*
-    // rules, a chip-level property no single cell can satisfy, so they are
-    // signoff-only and not a per-cell yardstick. The old engine's
-    // `erc_extraction_error` pseudo-violation (stage-inapplicable for a bare cell)
-    // is now a `StageStatus`, not a violation row, so no filter is needed. A macro
-    // the engine cannot even load prices as maximally illegal — fail closed.
-    let geom = match checker
-        .run(&m.shapes, &[], Checks { drc: true, erc: true, lvs: false, pex: false })
-    {
+    let geom = match checker.run(&m.shapes, &[], Checks { drc: true, erc: true, lvs: false, pex: false }) {
         Ok(_) => checker.outputs().violations.len(),
         Err(_) => usize::MAX,
     };
     (!p.reachable, geom, p.overflow, p.hpwl)
 }
 
-/// The geometry an assignment selects: `variants[i].alternatives[assignment[i]]`.
-///
-/// Hot — called once per epoch and again whenever `dp` reshapes. Cheap by
-/// construction (the alternatives are already drawn; this only selects), which is
-/// the point of pre-drawing them.
-///
-/// ponytail: clones. `gdsverify` is 99.86% of measured runtime, so a per-epoch
-/// `Vec<Macro>` copy will not show up; hand out `&Macro` only if it does.
+/// The geometry an assignment selects. A missing entry means variant 0.
 #[must_use]
 pub fn realize(variants: &[gp::VariantSpace], assignment: &[u16]) -> Vec<Macro> {
     variants
         .iter()
         .enumerate()
         .map(|(i, space)| {
-            // A short or absent table reads as variant 0, which is `Layout::variant`'s
-            // own rule: an all-zero table *is* the no-variant-search state, so a
-            // missing entry is not an error.
             let v = usize::from(assignment.get(i).copied().unwrap_or(0));
-            assert!(
-                v < space.alternatives.len(),
-                "cell {i} names variant {v} but only {} alternatives were drawn — \
-                 whoever wrote `variant[{i}]` wrote it against a different space \
-                 (docs/API-WISH.md D7)",
-                space.alternatives.len()
-            );
+            assert!(v < space.alternatives.len(), "cell {i} names variant {v} of {}", space.alternatives.len());
             space.alternatives[v].clone()
         })
         .collect()
 }
 
-/// The **outer-tier move**: a different joint variant assignment to try, or `None`
-/// when the collapsed space is exhausted.
+/// The next joint assignment to try, or `None` when the space is exhausted.
 ///
-/// Called only when the middle tier stalled while still infeasible — PLAN §5's
-/// variant-space-binding signature. So this is not "explore a bit more", it is "the
-/// current variants cannot be made to work; change the problem".
-///
-/// Mechanism: a **mixed-radix odometer** over the joint space, with the cells whose
-/// alternatives actually relocate pins as the *fastest-moving digits*. That gives both
-/// properties the caller needs from one structure:
-///
-/// - **Never repeats, and terminates.** Each call advances the joint assignment by
-///   exactly one in a total order, so no assignment is revisited and the all-digits-max
-///   state returns `None`. This function is memoryless — the caller keeps no tried-set
-///   — so a successor relation is the only way to guarantee that at all.
-/// - **Biased toward pin geometry.** The first escalations move the cells ranked
-///   highest by [`pin_spread`], which is what a stalled placement needs: a different
-///   pin arrangement, not a marginally different footprint. PLAN §2 flags the capacitor
-///   case as the sharpest — the three metal-stack constructions are topologically
-///   different devices with different pin faces, and a via cut inside a stacked-plate
-///   footprint shorts the device, so a move there changes the LVS-legality of the
-///   surrounding routing rather than merely its cost.
+/// A mixed-radix odometer over the cells, fastest digit = the cell whose
+/// alternatives move pins the most ([`pin_spread`]): never repeats, always
+/// terminates, and changes pin geometry first.
 #[must_use]
-pub fn escalate(variants: &[gp::VariantSpace], current: &[u16], seed: u64) -> Option<Vec<u16>> {
-    // `seed` is deliberately unused, and this is the one place we do not obey D7's
-    // "sample uniformly". The two requirements are incompatible for a memoryless
-    // function: guaranteeing "never return an already-tried assignment" forces a
-    // successor on a total order, and a successor has no room for a seed. The caller
-    // also hands a *different* seed every outer iteration (`cfg.seed ^ outer`), so it
-    // could not index a stable permutation even if one existed.
-    //
-    // ponytail: uniform-without-repeats needs a seeded bijection over the joint index
-    // space (cycle-walking Feistel, since `Π n_i` is not a power of two) plus the index
-    // recovered from `current`. Worth it only if a real circuit's space is large enough
-    // that scanning from the seeded point misses the good region — with `outer_iters`
-    // defaulting to 4, only the first few successors are ever reached.
-    let _ = seed;
-
-    // Digit significance: most pin movement first, index order to break ties so the
-    // escalation sequence is reproducible. Spread is precomputed because `sort_by_key`
-    // may call its key function more than once per element and this one allocates.
+pub fn escalate(variants: &[gp::VariantSpace], current: &[u16]) -> Option<Vec<u16>> {
     let spread: Vec<usize> = variants.iter().map(pin_spread).collect();
     let mut order: Vec<usize> = (0..variants.len()).collect();
     order.sort_by_key(|&i| (std::cmp::Reverse(spread[i]), i));
-
     let mut next: Vec<u16> =
         (0..variants.len()).map(|i| current.get(i).copied().unwrap_or(0)).collect();
     for &i in &order {
-        let n = variants[i].alternatives.len();
-        if usize::from(next[i]) + 1 < n {
+        if usize::from(next[i]) + 1 < variants[i].alternatives.len() {
             next[i] += 1;
             return Some(next);
         }
-        // Digit exhausted: reset and carry into the next-fastest cell. The mixed-radix
-        // value strictly increases across calls, which is the no-repeat guarantee.
-        next[i] = 0;
+        next[i] = 0; // carry
     }
-    // Every digit rolled over: the collapsed space is exhausted. That is a real answer
-    // — this circuit cannot be laid out under these constraints — not a failure to
-    // converge, and `lib.rs` stops rather than spinning on it.
     None
 }
 
-/// How much a cell's alternatives move its **pins**: the number of distinct pin
-/// arrangements among them.
-///
-/// Footprint area is explicitly not this ranking. Routability and extracted parasitics
-/// are discontinuous in the variant index *because pins jump* (PLAN §2), so a cell
-/// whose 16 alternatives all present the same pin faces is worth escalating last
-/// however differently they are shaped.
+/// Distinct pin arrangements (bbox-relative, order-free) among a cell's
+/// alternatives.
 fn pin_spread(space: &gp::VariantSpace) -> usize {
     let mut sigs: Vec<Vec<(i32, i32, i32, i32)>> = space
         .alternatives
         .iter()
         .map(|m| {
-            // Relative to the macro's own bbox origin: a variant that merely translates
-            // its pins presents the same arrangement, and the placer positions cells by
-            // centre anyway. Sorted so pin *order* is not mistaken for pin movement.
-            let mut p: Vec<(i32, i32, i32, i32)> = m
-                .pins
-                .iter()
-                .map(|p| (p.at.x - m.bbox.x, p.at.y - m.bbox.y, p.at.w, p.at.h))
-                .collect();
+            let mut p: Vec<_> =
+                m.pins.iter().map(|p| (p.at.x - m.bbox.x, p.at.y - m.bbox.y, p.at.w, p.at.h)).collect();
             p.sort_unstable();
             p
         })
@@ -521,37 +262,21 @@ fn pin_spread(space: &gp::VariantSpace) -> usize {
     sigs.len()
 }
 
-/// Return the annotator's constraints augmented with a **1-device unitization for
-/// every un-matched device**, built from that device's own netlist `w`/`l`/`nf`
-/// (`m` as a fallback multiplier). Matched devices are left to the annotator's
-/// group-scoped unitization (found by `cells::builder::unitization`'s subset
-/// lookup), which carries the *shared* unit geometry that enforces matching.
-///
-/// Generators read only `Constraints::unitization`; the other structural fields
-/// (dummies/guard rings/…) are consumed elsewhere (`post_cell`, from the
-/// annotator's own constraints), so they are intentionally dropped from this
-/// generator-facing view.
+/// The generator-facing constraints: the annotator's unitizations split by
+/// device kind (a unitization draws every member as its one `device_type`, and
+/// opposite polarities never match anyway), plus a 1-device unitization from
+/// netlist `w`/`l`/`nf` (or `m`) for every device no unitization covers.
 fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints) -> Constraints {
-    // Split any unitization whose members are not all the same device kind.
-    //
-    // A `Unitization` carries ONE `device_type`, and `cells` reads it to decide
-    // what to draw — so a group holding both an NMOS and a PMOS silently draws
-    // every member as whichever kind the group is labelled. That is how a 5T OTA
-    // ended up with its two PMOS loads drawn as NMOS, and extraction then
-    // reported `0P` devices against a reference expecting two.
-    //
-    // Splitting is also the physically correct answer regardless of the bug: unit
-    // geometry is shared to make devices *match*, and devices of opposite
-    // polarity never match each other.
+    let kind_of = |d: &DeviceId| netlist.devices.get(d.0 as usize).map(|dev| dev.kind);
     let mut unitization: Vec<Unitization> = Vec::new();
     for u in &annot.unitization {
-        let kinds: Vec<DeviceKind> = u
-            .devices
-            .iter()
-            .filter_map(|d| netlist.devices.get(d.0 as usize).map(|dev| dev.kind))
-            .collect();
-        let mixed = kinds.windows(2).any(|w| w[0] != w[1]);
-        if !mixed {
+        let mut kinds: Vec<DeviceKind> = Vec::new();
+        for k in u.devices.iter().filter_map(kind_of) {
+            if !kinds.contains(&k) {
+                kinds.push(k);
+            }
+        }
+        if kinds.len() <= 1 {
             let mut u = u.clone();
             if let Some(&k) = kinds.first() {
                 u.device_type = k; // trust the netlist over the annotator's label
@@ -559,66 +284,37 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints) -> Constraints
             unitization.push(u);
             continue;
         }
-        let mut seen: Vec<DeviceKind> = Vec::new();
-        for &k in &kinds {
-            if seen.contains(&k) {
-                continue;
-            }
-            seen.push(k);
-            let members: Vec<DeviceId> = u
-                .devices
-                .iter()
-                .copied()
-                .filter(|d| {
-                    netlist.devices.get(d.0 as usize).map(|dev| dev.kind) == Some(k)
-                })
-                .collect();
-            let keep: Vec<usize> = u
-                .devices
-                .iter()
-                .enumerate()
-                .filter(|(_, d)| {
-                    netlist.devices.get(d.0 as usize).map(|dev| dev.kind) == Some(k)
-                })
-                .map(|(i, _)| i)
-                .collect();
+        for k in kinds {
+            let keep: Vec<usize> =
+                (0..u.devices.len()).filter(|&i| kind_of(&u.devices[i]) == Some(k)).collect();
             unitization.push(Unitization {
-                devices: members,
+                devices: keep.iter().map(|&i| u.devices[i]).collect(),
                 device_type: k,
                 dev_nf: keep.iter().filter_map(|&i| u.dev_nf.get(i).copied()).collect(),
-                target_ratio: keep
-                    .iter()
-                    .filter_map(|&i| u.target_ratio.get(i).copied())
-                    .collect(),
+                target_ratio: keep.iter().filter_map(|&i| u.target_ratio.get(i).copied()).collect(),
                 ..u.clone()
             });
         }
     }
-    let covered: HashMap<u16, ()> = annot
-        .unitization
-        .iter()
-        .flat_map(|u| u.devices.iter().map(|d| (d.0, ())))
-        .collect();
-    for (i, dev) in netlist.devices.iter().enumerate() {
-        if covered.contains_key(&(i as u16)) {
-            continue;
+    let mut covered = vec![false; netlist.devices.len()];
+    for d in annot.unitization.iter().flat_map(|u| &u.devices) {
+        if let Some(c) = covered.get_mut(d.0 as usize) {
+            *c = true;
         }
+    }
+    for (i, dev) in netlist.devices.iter().enumerate().filter(|(i, _)| !covered[*i]) {
         let param = |k: &str| dev.params.iter().find(|(n, _)| n == k).map_or(0, |(_, v)| *v);
-        let w = param("w").clamp(0, i64::from(i32::MAX)) as i32;
-        let l = param("l").clamp(0, i64::from(i32::MAX)) as i32;
-        let nf = param("nf").max(param("m")).clamp(1, i64::from(u16::MAX)) as u16;
         unitization.push(Unitization {
             devices: vec![DeviceId(i as u16)],
             device_type: dev.kind,
-            dev_nf: vec![nf],
+            dev_nf: vec![param("nf").max(param("m")).clamp(1, i64::from(u16::MAX)) as u16],
             target_ratio: vec![1],
-            unit_w: w,
-            unit_l: l,
+            unit_w: param("w").clamp(0, i64::from(i32::MAX)) as i32,
+            unit_l: param("l").clamp(0, i64::from(i32::MAX)) as i32,
             series_parallel: match dev.kind {
                 DeviceKind::Resistor | DeviceKind::Capacitor => SeriesParallel::Series,
                 _ => SeriesParallel::Parallel,
             },
-            // A lone device is not a matched group.
             same_variant_required: false,
             dummy_required: false,
             route_matching_required: false,
@@ -627,8 +323,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints) -> Constraints
     Constraints { unitization, ..Default::default() }
 }
 
-/// Draw **every** enumerated variant of one group, dispatched by kind. The old
-/// `candidates::<Spec>` dispatch, re-expressed against the pure `Cell` trait.
+/// Every enumerated variant of one group, by device kind.
 fn draw_variants(kind: DeviceKind, group: &DeviceGroup, c: &Constraints, pdk: &Pdk) -> Vec<Macro> {
     match kind {
         DeviceKind::Nmos | DeviceKind::Pmos => draw_all::<Mosfet>(group, c, pdk),
@@ -640,149 +335,74 @@ fn draw_variants(kind: DeviceKind, group: &DeviceGroup, c: &Constraints, pdk: &P
     }
 }
 
-/// Draw the family's whole variant space, in `Cell::enumerate` order — the ordering
-/// `Layout::variant` indexes into, deduped and capped (16) by the generator itself.
-///
-/// This is where the old `min_by_key(w*h)` lived, and dropping it is the point of
-/// [`enumerate`]: smallest-area is not a proxy for anything that matters, because the
-/// cost of a variant is where its *pins* land and PLAN §2 shows that is discontinuous
-/// in the variant index. Nothing at draw time can rank that; pricing measures it.
-///
-/// An empty enumeration (only reachable for an empty group) yields **one** empty macro
-/// rather than an empty space: `realize` walks cell-for-cell, so a zero-alternative
-/// space would shift every subsequent cell index, and `variant[i] == 0` must always
-/// name something.
+/// `Cell::enumerate` order. Never empty: an empty enumeration yields one empty
+/// macro so `variant == 0` always names something.
 fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &Pdk) -> Vec<Macro> {
-    let drawn: Vec<Macro> =
-        G::enumerate(group, c, pdk).iter().map(|v| v.draw(group, c, pdk)).collect();
+    let drawn: Vec<Macro> = G::enumerate(group, c, pdk).iter().map(|v| v.draw(group, c, pdk)).collect();
     if drawn.is_empty() {
-        return vec![Macro {
-            shapes: Vec::new(),
-            pins: Vec::new(),
-            bbox: Rect { x: 0, y: 0, w: 0, h: 0 },
-        }];
+        return vec![Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w: 0, h: 0 } }];
     }
     drawn
 }
 
-/// Build the LVS reference from the parsed schematic for signoff, in
-/// `verify`'s [`RefInput`] shape.
+/// The LVS reference from the schematic, terminals as net names in SPICE card
+/// order (MOS `D G S B`, BJT `C B E`, two-terminal `P N`).
 ///
-/// Terminals are **net names in SPICE card order** (see `verify::reference`):
-/// MOS `[D, G, S, B]` — bulk always stated, the deck recogniser's arity decides
-/// whether it is consumed — BJT `[C, B, E]`, R/C/D `[P, N]`.
+/// A sized MOS goes in as `max(nf, m)` cards of per-finger `w`/`l` (SI metres):
+/// the extractor measures one device per channel and a parametrised device never
+/// parallel-merges. Inductors have no recogniser and are skipped. `ports` is left
+/// empty for the caller to fill with the labels it actually places.
 ///
-/// `model` stays `None` throughout: the parsed [`Device`] carries no model
-/// string (the old path hardcoded `DeviceFlavor::Standard` for the same
-/// reason), so the deck's first recogniser of the right kind/polarity is the
-/// correct — and only expressible — choice.
-///
-/// The old `RefNetlist` path parallel-reduced MOS instances here (W×m summed,
-/// extractor-matching key) to keep device counts honest; GPurify reduces
-/// **both** LVS sides itself — but a device that declares a parameter never
-/// merges, so a sized MOS card goes in **one card per drawn finger**
-/// (`max(nf, m)`, the same count `constraints()` hands the generator) with the
-/// per-finger `w`/`l` in SI metres. The extractor measures one `w`/`l` per
-/// channel marker, so sized fingers pair one to one. Non-MOS kinds carry no
-/// params: the extractor measures none for them, and a one-sided name is an
-/// `lvs.undeclared_param` mismatch by design.
-///
-/// ponytail: an `interface.json` unitization that overrides a device's finger
-/// count desyncs this expansion from the drawn layout — those annotated
-/// fixtures are not LVS-clean today for independent reasons; revisit when one
-/// is.
-///
-/// `ports` is left empty: [`crate::signoff`] fills it with the label names it
-/// actually places on the drawn geometry, so the two cannot drift.
+/// ponytail: a unitization that overrides a device's finger count desyncs this
+/// expansion from the drawn layout.
 pub fn reference(netlist: &Netlist) -> RefInput {
-    let net_name = |id: NetId| netlist.nets[id.0 as usize].name.clone();
-    let term = |dev: &Device, pin: &str| -> String {
-        dev.terminals
-            .iter()
-            .find(|(p, _)| p == pin)
-            .map_or(String::new(), |(_, n)| net_name(*n))
-    };
-    let terms = |dev: &Device, pins: &[&str]| -> Vec<String> {
-        pins.iter().map(|p| term(dev, p)).collect()
-    };
-
     let mut devices: Vec<RefDeviceIn> = Vec::new();
     for dev in &netlist.devices {
-        let (kind, terminals) = match dev.kind {
-            DeviceKind::Nmos => (RefKind::Nmos, terms(dev, &["D", "G", "S", "B"])),
-            DeviceKind::Pmos => (RefKind::Pmos, terms(dev, &["D", "G", "S", "B"])),
-            DeviceKind::Resistor => (RefKind::Resistor, terms(dev, &["P", "N"])),
-            DeviceKind::Capacitor => (RefKind::Capacitor, terms(dev, &["P", "N"])),
-            DeviceKind::Diode => (RefKind::Diode, terms(dev, &["P", "N"])),
-            DeviceKind::Npn => (RefKind::Npn, terms(dev, &["C", "B", "E"])),
-            DeviceKind::Pnp => (RefKind::Pnp, terms(dev, &["C", "B", "E"])),
-            // Inductors have no recogniser in any deck; skip here rather than
-            // inflate verify's skipped-device log.
+        let (kind, pins): (RefKind, &[&str]) = match dev.kind {
+            DeviceKind::Nmos => (RefKind::Nmos, &["D", "G", "S", "B"]),
+            DeviceKind::Pmos => (RefKind::Pmos, &["D", "G", "S", "B"]),
+            DeviceKind::Resistor => (RefKind::Resistor, &["P", "N"]),
+            DeviceKind::Capacitor => (RefKind::Capacitor, &["P", "N"]),
+            DeviceKind::Diode => (RefKind::Diode, &["P", "N"]),
+            DeviceKind::Npn => (RefKind::Npn, &["C", "B", "E"]),
+            DeviceKind::Pnp => (RefKind::Pnp, &["C", "B", "E"]),
             DeviceKind::Inductor => continue,
         };
-        let is_mos = matches!(dev.kind, DeviceKind::Nmos | DeviceKind::Pmos);
-        let (fingers, params) = if is_mos {
-            // Parsed w/l are nanometres; the reference speaks SI metres. The
-            // finger count mirrors `constraints()`'s `nf.max(m)` exactly.
-            let param = |k: &str| dev.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
-            let fingers = param("nf")
-                .unwrap_or(1)
-                .max(param("m").unwrap_or(1))
-                .clamp(1, i64::from(u16::MAX));
-            let mut params = Vec::new();
-            for name in ["w", "l"] {
-                if let Some(nm) = param(name) {
-                    params.push((name.to_string(), nm as f64 * 1e-9));
-                }
-            }
+        let terminals: Vec<String> = pins
+            .iter()
+            .map(|p| terminal(dev, p).map_or(String::new(), |n| netlist.nets[n.0 as usize].name.clone()))
+            .collect();
+        let param = |k: &str| dev.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
+        let (fingers, params) = if matches!(dev.kind, DeviceKind::Nmos | DeviceKind::Pmos) {
+            let fingers =
+                param("nf").unwrap_or(1).max(param("m").unwrap_or(1)).clamp(1, i64::from(u16::MAX));
+            let params = ["w", "l"]
+                .into_iter()
+                .filter_map(|k| param(k).map(|nm| (k.to_string(), nm as f64 * 1e-9)))
+                .collect();
             (fingers, params)
         } else {
             (1, Vec::new())
         };
         for _ in 0..fingers {
-            devices.push(RefDeviceIn {
-                kind,
-                model: None,
-                terminals: terminals.clone(),
-                params: params.clone(),
-            });
+            devices.push(RefDeviceIn { kind, model: None, terminals: terminals.clone(), params: params.clone() });
         }
     }
     RefInput { devices, ports: Vec::new() }
 }
 
-/// Rebind a drawn macro's pins to the **netlist's** nets, group-aware.
-///
-/// A generator is a pure function of `(variant, group, constraints, process)` and
-/// deliberately has no net table, so it labels pins with synthetic ids
-/// (`mosfet::net_of` = `device_ordinal*8 + terminal_ordinal`) that only keep one
-/// macro's own terminals distinct. Left unbound, routing sees one giant net per
-/// terminal role: it shorts every gate together, every source together, and
-/// silently drops the real nets for want of terminals.
-///
-/// The `d{N}:` prefix on a pin name is the generator's **draw ordinal** — an index
-/// into `members`, which arrives in the same order the `DeviceGroup` was drawn
-/// (`Cells::devices_of` preserves it). A pin without the prefix is ordinal `0`,
-/// which is every pin of a single-device cell. The terminal after the `:` is
-/// looked up on *that member's* schematic terminals, so a merged pair's `d1:G`
-/// binds to the second device's gate net, not the first's.
+/// Rebind a drawn macro's synthetic pin nets to the schematic's. A pin named
+/// `d{k}:T` is terminal `T` of `members[k]`; a bare `T` is member 0.
 fn bind_pins(m: &mut Macro, netlist: &Netlist, members: &[DeviceId]) {
     for pin in &mut m.pins {
-        // `d1:G` → ordinal 1, term `G`; `G` alone → ordinal 0, term `G`.
         let (ordinal, term) = match pin.name.split_once(':') {
-            Some((d, t)) => {
-                (d.strip_prefix('d').and_then(|s| s.parse::<usize>().ok()).unwrap_or(0), t)
-            }
+            Some((d, t)) => (d.strip_prefix('d').and_then(|s| s.parse::<usize>().ok()).unwrap_or(0), t),
             None => (0, pin.name.as_str()),
         };
-        let Some(dev) = members.get(ordinal).and_then(|d| netlist.devices.get(d.0 as usize))
-        else {
-            debug_assert!(false, "pin {:?} names draw ordinal {ordinal} but the cell has \
-                 only {} members — generator and devices_of disagree", pin.name, members.len());
-            continue;
-        };
-        if let Some((_, net)) = dev.terminals.iter().find(|(t, _)| t == term) {
-            pin.net = *net;
+        let dev = members.get(ordinal).and_then(|d| netlist.devices.get(d.0 as usize));
+        debug_assert!(dev.is_some(), "pin {:?} names member {ordinal} of {}", pin.name, members.len());
+        if let Some(net) = dev.and_then(|d| terminal(d, term)) {
+            pin.net = net;
         }
     }
 }
@@ -956,16 +576,16 @@ mod tests {
         let spaces = vec![space(3), space(2), space(1)];
         let mut seen = vec![vec![0u16, 0, 0]];
         let mut cur = vec![0u16, 0, 0];
-        while let Some(next) = escalate(&spaces, &cur, 7) {
+        while let Some(next) = escalate(&spaces, &cur) {
             assert!(!seen.contains(&next), "escalate repeated {next:?}");
             seen.push(next.clone());
             cur = next;
             assert!(seen.len() <= 6, "escalate exceeded the space size");
         }
         assert_eq!(seen.len(), 6, "escalate stopped before covering the space");
-        assert!(escalate(&spaces, &cur, 7).is_none(), "exhaustion must stay exhausted");
+        assert!(escalate(&spaces, &cur).is_none(), "exhaustion must stay exhausted");
         // Nothing to escalate is exhaustion, not a panic.
-        assert!(escalate(&[], &[], 7).is_none());
+        assert!(escalate(&[], &[]).is_none());
     }
 
     /// Two matched NMOS on a shared source (tail), distinct gates and drains — the
@@ -1260,7 +880,7 @@ mod tests {
 
         let mut cur = vec![0u16];
         let mut seen = vec![cur.clone()];
-        while let Some(next) = escalate(spaces, &cur, 7) {
+        while let Some(next) = escalate(spaces, &cur) {
             assert!(!seen.contains(&next), "escalate repeated {next:?}");
             seen.push(next.clone());
             cur = next;
