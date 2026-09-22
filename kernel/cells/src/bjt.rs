@@ -168,7 +168,7 @@ impl Cell for Bjt {
                 // B pad (the well is the base) along the pad row, clear of the
                 // ring.
                 if let Some(tap) = process.layer("tap") {
-                    let tap_w = ct + 2 * cut_enc;
+                    let tap_w = ct + cut_enc + process.rule("tap_encloses_licon_one_side", 120);
                     let tap_x = cx - well_enc + 20;
                     let tie_y = cy - ext;
                     b.rect(tap, Rect { x: tap_x, y: tie_y, w: tap_w, h: coll_h + ext });

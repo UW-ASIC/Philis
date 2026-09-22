@@ -187,7 +187,9 @@ impl Cell for Mosfet {
         // unreferenced transistor), tied up to the bulk rail.
         let rise_l = 30.max(li_enc);
         let rise_r = rise_l.max(li_side);
-        let tap_h = ct + 2 * diff_enc;
+        // Cut `diff_enc` above the strip bottom and `tap_enc` below its top: the
+        // deck wants `tap_enc` on one side of each axis.
+        let tap_h = ct + diff_enc + tap_enc;
         let licon_y = snap_cut(finger_w + 240.max(poly_ext - 10 + licon_poly_side) + lat - 1, lat);
         // The tap row clears the dummy cuts by the poly-cut-to-diff spacing.
         let tap_y0 = snap_cut((finger_w + 580).max(licon_y + ct + polycon_gap) + lat - 1, lat);
