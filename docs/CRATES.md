@@ -91,3 +91,27 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
   ERC/C/WL/area table + constraint satisfaction. Artifacts in `target/bench_debug/`.
 - `xcheck*.py` cross-check DRC/LVS/PEX against KLayout. Real-sky130 DRC via magic:
   `magic -dnull -noconsole -T ~/.volare/.../sky130A.tech script.tcl`.
+
+## Open issues (next session)
+1. **bjt_mirror: 15 magic violations, all from the BJT cell.** The deck recogniser `[poly, sd, sd]` forces a toy BJT. A real concentric PNP/NPN was magic-clean on its own. It needs the deck `tap` split into `ntap`/`ptap` with terminals `[ntap, sd, ptap]`, but that split broke LVS everywhere. Suspects: `floating_well` and `soft_connection` still name `tap`.
+2. **Routing EM is not wired.** Fill `dr::DetailedCfg.supply_nets` from Supply/Ground net classes. Restore the drain current `id` in `oppoint.rs` and set `net_current_ua[n] = max(max|id|, Σ|id|/2)`.
+3. **Placement net weights.** Pass a per-net `&[f32]` into `gp::place`/`dp::place` HPWL, derived from net class, `c_budget_af` and `shielding_required`. Delete those fields if the weights don't help.
+4. **Placer grid.** Cell origins should snap to 10 nm. At an odd multiple of 5 nm, cut overlaps fail magic.
+5. **LU.2 latch-up.** Wide NMOS fingers may need a second tap row. The deck can't express LU.x.
+6. **xhrpoly resistor.**
+   - Needs real 0.19×2.0 µm contact slots (`licon_max_width` is 170 today).
+   - `pex.rbody` should be about 319 Ω/sq, not 48.2.
+   - Multi-segment resistors have not been magic-checked in the flow.
+7. **Diode.** The anode tap needs to be at least 410 nm wide (licon.7).
+8. **Centroid diff pairs are always discarded.** Interleaved gate straps cross each other; staggering the strap depth per device would fix it.
+9. **Deck and verify.**
+   - `verify` `REQUIRED_RULES` still demands obsolete `bjt_*` cell keys.
+   - `asymmetric_enclosure` is stricter than magic's "one direction".
+   - Settle whether LVS checks device count and params: signoff marks `lvs.device_count_*` / `lvs.parametric` NotInDeck, while verify says the reference comparison already covers them.
+   - `ir_drop` needs design intent (supply nets + currents).
+10. **Smaller items.**
+    - `dp` always runs all 220 iterations; stop it when the result stops improving.
+    - `kernel/cells/src/mosfet.rs:719` links to the removed `VariantSpace::lock`.
+    - Unused `Unitization`/`GuardRingRequirement` fields can now go.
+    - gr/dr are not rustfmt-clean.
+    - `xcheck_lvs.py` covers MOS only and was not re-run.
