@@ -30,7 +30,8 @@ use pnr_core::{DeviceGroup, DeviceId, DeviceKind, Macro, Rect, Shape};
 fn pdk() -> Option<verify::Pdk> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let json = std::fs::read_to_string(root.join("pdks/sky130.json")).ok()?;
-    verify::Pdk::from_json(&json).ok()
+    // A present-but-broken deck is a failure, not a skip.
+    Some(verify::Pdk::from_json(&json).expect("pdks/sky130.json loads"))
 }
 
 /// The group + constraints for `n` matched devices of `kind`, sized so the

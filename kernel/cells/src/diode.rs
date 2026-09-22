@@ -1,14 +1,15 @@
-//! Diode generator: one `diom`-marked diff body per device with anode (`P`)
-//! and cathode (`N`) li pads, arrayed in `columns`.
+//! Diode generator: n+ diffusion (cathode `N`) in the p-substrate, with a
+//! p+ substrate tap beside it as the anode contact (`P`), under `diom`;
+//! devices arrayed in `columns`.
 
 use analog::Constraints;
 use pnr_core::{DeviceGroup, Macro, Process, Rect};
 
-use crate::builder::{pin, req, sizing, Builder, Sizing};
+use crate::builder::{cut_lattice, pin, req, sizing, snap_cut, Builder, Sizing};
 use crate::{Cell, Pattern};
 
 /// One diode variant: array aspect `columns`; `Interdig` flips every other
-/// device's pads for matched banks.
+/// device (anode tap on the left) for matched banks.
 #[derive(Clone)]
 pub struct Diode {
     pub pattern: Pattern,
@@ -36,34 +37,57 @@ impl Cell for Diode {
         let mut b = Builder::new(process.grid());
         let s = group_sizing(group, constraints, process);
         let n_dev = group.devices.len();
+        let r = |name: &str, default: i32| process.rule(name, default);
+        let lat = cut_lattice(process);
+        let up = |v: i32| snap_cut(v + lat - 1, lat);
 
-        let (w, l) = (s.unit_w, s.unit_l);
-        let diff = req(process, "diff");
-        let li = req(process, "li");
-        let ct = process.rule("contact", 170);
-        let gap = process.rule("diode_gap", 200);
-        // li pad side: at least the li min-area square, on grid.
-        let grid = process.grid().max(1);
-        let pad = (process.rule("li_min_area", 236).max(ct) + grid - 1) / grid * grid;
-
-        let ay = l / 4 - pad / 2;
-        let ky = 3 * l / 4 - pad / 2;
+        let (diff, tap, li, licon) = (req(process, "diff"), req(process, "tap"), req(process, "li"), req(process, "licon"));
+        let (nsdm, psdm) = (req(process, "nsdm"), req(process, "psdm"));
+        let ct = r("contact", 170);
+        let diff_enc = r("diff_encloses_licon", 40);
+        let li_enc = r("li_encloses_licon", 80);
+        let imp = 125; // implant past the diffusion it dopes
+        // Cathode diff: room for a cut with the one-direction diff enclosure.
+        let (w, l) = (up(s.unit_w.max(ct + 2 * 60)), up(s.unit_l.max(ct + 2 * 60)));
+        // Anode tap: a cut with `diff_enc` on one side, the tap one-side
+        // enclosure on the other, in both axes.
+        let tap_side = ct + diff_enc + r("tap_encloses_licon_one_side", 120);
+        let tap_h = l.max(tap_side);
+        // Opposite implants may not overlap.
+        let g = up(2 * imp + 50);
+        // Between devices: same-type implants keep their spacing.
+        let gap = up(r("diode_gap", 200).max(2 * imp + r("nsdm_min_spacing", 380).max(r("psdm_min_spacing", 380))));
+        let dev_w = w + g + tap_side;
         let cols = i32::from(self.columns.max(1)).min(n_dev.max(1) as i32);
-        // LVS marker: the deck's diode recogniser binds the two li pads under it.
         let diom = process.layer("diom");
+        let contact = |b: &mut Builder, cut: Rect| {
+            b.rect(licon, cut);
+            b.rect(li, Rect { x: cut.x - li_enc, y: cut.y - li_enc, w: cut.w + 2 * li_enc, h: cut.h + 2 * li_enc });
+        };
         for di in 0..n_dev {
-            let ox = (di as i32 % cols) * (w + gap);
-            let oy = (di as i32 / cols) * (l + gap);
+            let ox = (di as i32 % cols) * (dev_w + gap);
+            let oy = (di as i32 / cols) * (tap_h + gap);
+            // Interdig mirrors every other device: anode tap on the left.
             let flip = self.pattern == Pattern::Interdig && di % 2 == 1;
-            b.rect(diff, Rect { x: ox, y: oy, w, h: l });
+            let (kx, ax) = if flip { (ox + tap_side + g, ox) } else { (ox, ox + w + g) };
+
+            let k = Rect { x: kx, y: oy, w, h: l };
+            b.rect(diff, k);
+            b.rect(nsdm, Rect { x: k.x - imp, y: k.y - imp, w: w + 2 * imp, h: l + 2 * imp });
+            let at = Rect { x: snap_cut(kx + w / 2 - ct / 2, lat), y: snap_cut(oy + l / 2 - ct / 2, lat), w: ct, h: ct };
+            contact(&mut b, at);
+            b.pin(pin(di, "N", at, li));
+
+            let a = Rect { x: ax, y: oy, w: tap_side, h: tap_h };
+            b.rect(tap, a);
+            b.rect(psdm, Rect { x: a.x - imp, y: a.y - imp, w: a.w + 2 * imp, h: a.h + 2 * imp });
+            let at = Rect { x: ax + if flip { tap_side - diff_enc - ct } else { diff_enc }, y: oy + diff_enc, w: ct, h: ct };
+            contact(&mut b, at);
+            b.pin(pin(di, "P", at, li));
+
+            // LVS marker: the recogniser binds the two li pads under it.
             if let Some(diom) = diom {
-                b.rect(diom, Rect { x: ox, y: oy, w, h: l });
-            }
-            for (term, py) in [("P", ay), ("N", ky)] {
-                let py = if flip { l - py - pad } else { py };
-                let at = Rect { x: ox + w / 2 - pad / 2, y: oy + py, w: pad, h: pad };
-                b.rect(li, at);
-                b.pin(pin(di, term, at, li));
+                b.rect(diom, Rect { x: ox, y: oy, w: dev_w, h: tap_h });
             }
         }
 
