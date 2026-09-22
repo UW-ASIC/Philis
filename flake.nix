@@ -30,6 +30,47 @@
         };
       in
       {
+        # The packaged CLI. CPU only: the `gpu` feature is opt-in and pulls CUDA/Vulkan,
+        # which belongs in the dev shell rather than in something meant to be cached and
+        # handed to people who just want to place a netlist.
+        packages.default = pkgs.rustPlatform.buildRustPackage {
+          pname = "philis";
+          version = "0.1.0";
+          src = ./.;
+
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            # GPurify is a git dependency, so its source is not content-addressed by
+            # crates.io and nix needs the hash spelled out.
+            outputHashes = {
+              "gdsverify-0.1.0" = "sha256-0Hzr+HkTTFh3piymqpNBewwSidySjYRHIk6iaovmKkk=";
+            };
+          };
+
+          # Just the CLI. Building the whole workspace would drag in tools/visualizer,
+          # which is wgpu + winit and wants a display stack this package has no use for.
+          cargoBuildFlags = [ "--bin" "philis" ];
+
+          nativeBuildInputs = [ pkgs.pkg-config pkgs.cmake ];
+          buildInputs = [ pkgs.highs ];
+
+          # The suite expects fixtures and, in places, a GPU. Signoff for this package is
+          # "the binary runs", checked downstream.
+          doCheck = false;
+
+          # The rule decks travel with the binary: `philis run` needs one, and a CLI that
+          # cannot find its own PDK deck is not much of a package.
+          postInstall = ''
+            mkdir -p $out/share/philis
+            cp -r pdks $out/share/philis/
+          '';
+
+          meta = {
+            description = "Analog place-and-route: SPICE netlist + PDK deck in, GDS out";
+            mainProgram = "philis";
+          };
+        };
+
         devShells.default = pkgs.mkShell {
           buildInputs = [
             rust
