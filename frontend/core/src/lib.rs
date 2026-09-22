@@ -5,6 +5,7 @@
 //! entirely in the backend facade.
 
 pub mod gds;
+pub mod hier;
 mod netlist;
 pub mod orchestrator;
 mod pdk;

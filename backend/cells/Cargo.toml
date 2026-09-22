@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 test-fixtures = []
+gpu = ["gdsverify/gpu"]
 
 [dependencies]
 gdsverify = { workspace = true }

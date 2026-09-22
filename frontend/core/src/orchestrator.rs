@@ -1,13 +1,15 @@
 //! Thin frontend adapter: text input in, typed backend request out.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use pnr_backend::{ConstraintRecord, NetClass};
+use pnr_backend::{ConstraintRecord, FullPdk, NetClass};
+use pnr_cells::CellOutput;
 
 pub use pnr_backend::{FlowConfig, FlowResult, SignoffReport};
 
 /// Parse frontend input and delegate all physical-design work to
-/// [`pnr_backend::Backend`].
+/// [`pnr_backend::Backend`]. Flat run: the whole design is one placement.
 #[allow(clippy::missing_errors_doc)]
 pub fn run_flow(
     spice: &str,
@@ -15,17 +17,28 @@ pub fn run_flow(
     constraints: &ConstraintRecord,
     config: &FlowConfig,
 ) -> Result<FlowResult, String> {
-    // Step 1: load and validate the process once, producing the three views
-    // consumed by netlist parsing, cell generation, and physical verification.
     let process = pnr_backend::load_pdk(deck_json)?;
+    run_on_process(spice, &process, constraints, config, HashMap::new())
+}
 
-    // Step 2: parse source text into the backend-owned dense hypergraph. This
-    // is the frontend's only transformation of circuit syntax.
-    let graph = crate::netlist::parse_spice(spice, &process.netlist, &HashSet::new())
+/// Run one (sub)design against an already-loaded process, resolving any
+/// instances whose master names a key in `macros` as pre-placed sub-blocks
+/// (kept whole by the parser, stamped as fixed cells by the backend). The
+/// hierarchical driver calls this per subckt; a flat run passes an empty map.
+#[allow(clippy::missing_errors_doc)]
+pub fn run_on_process(
+    spice: &str,
+    process: &FullPdk,
+    constraints: &ConstraintRecord,
+    config: &FlowConfig,
+    macros: HashMap<String, Arc<CellOutput>>,
+) -> Result<FlowResult, String> {
+    // Keep macro subckts whole (do not flatten to leaves) so their instances
+    // stay as single nodes the backend resolves from the registry.
+    let macro_names = macros.keys().cloned().collect();
+    let graph = crate::netlist::parse_spice(spice, &process.netlist, &macro_names)
         .map_err(|error| error.to_string())?;
 
-    // Step 3: classify source nets and immediately convert frontend labels to
-    // the backend constraint vocabulary; no annotator type crosses the API.
     let net_classes =
         pnr_annotator::classify_nets(&graph, &pnr_annotator::AnnotationConfig::default())
             .into_iter()
@@ -37,10 +50,8 @@ pub fn run_flow(
             })
             .collect();
 
-    // Step 4: validate the boundary payload and hand control to the backend's
-    // fixed template method. The frontend does no placement, routing, or signoff.
-    let input = pnr_backend::FlowInput::new(graph, net_classes)?;
-    pnr_backend::Backend::new(&process, config).run(input, constraints)
+    let input = pnr_backend::FlowInput::new(graph, net_classes)?.with_macros(macros);
+    pnr_backend::Backend::new(process, config).run(input, constraints)
 }
 
 #[cfg(test)]

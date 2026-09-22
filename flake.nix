@@ -69,11 +69,18 @@
 
           shellHook =
             let
-              volareHash = "1341f54f5ce0c4955326297f235e4ace1eb6d419";
+              # open_pdks commit the PDK build is pinned to. Both ciel and volare
+              # address releases by this hash, so the pin survives the migration.
+              pdkHash = "1341f54f5ce0c4955326297f235e4ace1eb6d419";
             in
             ''
               export PDK_ROOT="''${PDK_ROOT:-$PWD/.pdk}"
               export PDK="sky130A"
+              # ngspice resolves `nfet_01v8` & co. from here when the flow extracts
+              # a DC operating point (per-device power for the thermal solver,
+              # bias current for electromigration).
+              export SKY130_MODELS="$PDK_ROOT/$PDK/libs.tech/ngspice"
+              export SPICE_LIB_DIR="''${SPICE_LIB_DIR:-$SKY130_MODELS}"
 
               ${pkgs.lib.optionalString isLinux ''
                 # GPU DRC (CubeCL): headers for NVRTC via CUDA_PATH; libcuda comes from
@@ -88,14 +95,29 @@
               fi
               source .venv/bin/activate
 
-              if [ ! -d "$PDK_ROOT/sky130A/libs.ref" ]; then
-                echo "==> Installing sky130A PDK to $PDK_ROOT ..."
-                pip install --quiet volare
-                volare enable --pdk sky130 --pdk-root "$PDK_ROOT" "${volareHash}"
-                if [ -d "$PDK_ROOT/sky130A/libs.ref" ]; then
-                  echo "==> sky130A installed successfully"
+              # Both the layout libs (libs.ref) and the ngspice models
+              # (libs.tech/ngspice) are required — the models are what let the flow
+              # run a real `.op`, so a PDK missing them is not usable here.
+              if [ ! -d "$PDK_ROOT/$PDK/libs.ref" ] || [ ! -d "$SKY130_MODELS" ]; then
+                echo "==> Installing $PDK to $PDK_ROOT ..."
+                # ciel is the maintained successor to volare (same release hashes);
+                # fall back to volare where ciel is unavailable.
+                if pip install --quiet ciel 2>/dev/null && command -v ciel >/dev/null; then
+                  ciel enable --pdk sky130 --pdk-root "$PDK_ROOT" "${pdkHash}" \
+                    || echo "WARN: ciel enable failed"
                 else
-                  echo "ERROR: sky130A installation failed"
+                  echo "==> ciel unavailable, falling back to volare"
+                  pip install --quiet volare
+                  volare enable --pdk sky130 --pdk-root "$PDK_ROOT" "${pdkHash}" \
+                    || echo "WARN: volare enable failed"
+                fi
+
+                if [ -d "$PDK_ROOT/$PDK/libs.ref" ] && [ -d "$SKY130_MODELS" ]; then
+                  echo "==> $PDK installed (layout libs + ngspice models)"
+                else
+                  echo "ERROR: $PDK installation incomplete —"
+                  echo "       libs.ref:  $( [ -d "$PDK_ROOT/$PDK/libs.ref" ] && echo ok || echo MISSING )"
+                  echo "       ngspice:   $( [ -d "$SKY130_MODELS" ] && echo ok || echo MISSING )"
                 fi
               fi
             '';

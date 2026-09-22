@@ -836,6 +836,7 @@ fn generate_cells(
     deck: &Deck,
     cell_pdk: &pnr_cells::pdk::Pdk,
     rec: &ConstraintRecord,
+    macros: &HashMap<String, std::sync::Arc<CellOutput>>,
 ) -> Result<Vec<GenCell>, String> {
     let mut cells = Vec::with_capacity(g.cells.len());
     for (i, c) in g.cells.iter().enumerate() {
@@ -843,10 +844,20 @@ fn generate_cells(
             c.grouped_devices.iter().collect()
         } else if let Some(dev) = &c.device {
             vec![dev]
+        } else if let Some(block) = macros.get(&c.model) {
+            // Macro instance: one fixed variant = the pre-placed sub-block,
+            // copied at origin. Placement sizes it by bbox and stamps it like
+            // any cell; routing lands on its boundary pins.
+            cells.push(GenCell {
+                variants: vec![stamp_macro(block, c, i as u32)],
+                device_type: None,
+                guard_rings: Vec::new(),
+            });
+            continue;
         } else {
             return Err(format!(
-                "cell `{}` is a macro; macro geometry not wired yet",
-                c.name
+                "cell `{}` is a macro with no registered sub-block layout (model `{}`)",
+                c.name, c.model
             ));
         };
         let ref_dev = devices[0];
@@ -886,6 +897,134 @@ fn generate_cells(
         });
     }
     Ok(cells)
+}
+
+/// Duplicate a pre-placed sub-block as one macro cell variant for a single
+/// instance: geometry copied at the block's origin, boundary pins qualified
+/// to the `<instance>:<port>` names the placer/router look up.
+fn stamp_macro(
+    block: &CellOutput,
+    cell: &pnr_cells::netlist::CellNode,
+    group_id: u32,
+) -> CellOutput {
+    let mut store = GeometryStore::new();
+    translate_into(&mut store, &block.store, 0, 0, Orientation::R0, &block.bbox);
+    let pins: Vec<pnr_cells::PinAccess> = block
+        .pins
+        .iter()
+        .map(|p| pnr_cells::PinAccess {
+            name: format!("{}:{}", cell.name, p.name),
+            ..p.clone()
+        })
+        .collect();
+    let mut pin_map: HashMap<String, Vec<Bbox>> = HashMap::new();
+    for p in &pins {
+        pin_map.entry(p.name.clone()).or_default().push(Bbox {
+            xmin: p.x,
+            ymin: p.y,
+            xmax: p.x + p.w,
+            ymax: p.y + p.h,
+        });
+    }
+    CellOutput {
+        store,
+        pins,
+        ports: block.ports.clone(),
+        pin_map,
+        bbox: block.bbox,
+        meta: pnr_cells::CellMeta {
+            device_type: None,
+            ..block.meta.clone()
+        },
+        group_id,
+    }
+}
+
+/// Turn a completed sub-block flow into a reusable macro cell: geometry
+/// normalized to the origin, one boundary pin per subckt `port` (union of that
+/// net's routed metal on its top-most layer). Feed instances of the result
+/// through [`crate::FlowInput::with_macros`] so the parent routes to its pins.
+///
+/// ponytail: union-rect boundary pins; refine to per-track access only if the
+/// parent router struggles to land on wide macro pins.
+pub fn block_to_macro(
+    res: &FlowResult,
+    ports: &[String],
+    deck: &Deck,
+    cell_pdk: &pnr_cells::pdk::Pdk,
+) -> CellOutput {
+    // Raw extent of the placed block.
+    let mut raw = Bbox::empty();
+    for b in &res.store.poly_bbox {
+        raw.include(b.xmin, b.ymin);
+        raw.include(b.xmax, b.ymax);
+    }
+    let mut store = GeometryStore::new();
+    translate_into(&mut store, &res.store, -raw.xmin, -raw.ymin, Orientation::R0, &raw);
+    let bbox = Bbox {
+        xmin: 0,
+        ymin: 0,
+        xmax: raw.xmax - raw.xmin,
+        ymax: raw.ymax - raw.ymin,
+    };
+
+    let mut pins: Vec<pnr_cells::PinAccess> = Vec::new();
+    for port in ports {
+        let Some(net_idx) = res.routing.net_names.iter().position(|n| n == port) else {
+            continue;
+        };
+        let net_idx = net_idx as u32;
+        let net_wires = || res.routing.wires.iter().filter(|w| w.net == net_idx);
+        let Some(top) = net_wires().map(|w| w.layer).max() else {
+            continue;
+        };
+        let Some(lid) = cell_pdk
+            .layers
+            .routing_metals
+            .get(top as usize)
+            .and_then(|name| deck.layers.id(name))
+        else {
+            continue;
+        };
+        let mut bb = Bbox::empty();
+        for w in net_wires().filter(|w| w.layer == top) {
+            let hw = w.width / 2;
+            bb.include(w.x0.min(w.x1) - hw, w.y0.min(w.y1) - hw);
+            bb.include(w.x0.max(w.x1) + hw, w.y0.max(w.y1) + hw);
+        }
+        if bb.xmax <= bb.xmin {
+            continue;
+        }
+        pins.push(pnr_cells::PinAccess {
+            name: port.clone(),
+            layer: lid,
+            x: bb.xmin - raw.xmin,
+            y: bb.ymin - raw.ymin,
+            w: bb.xmax - bb.xmin,
+            h: bb.ymax - bb.ymin,
+        });
+    }
+    let mut pin_map: HashMap<String, Vec<Bbox>> = HashMap::new();
+    for p in &pins {
+        pin_map.entry(p.name.clone()).or_default().push(Bbox {
+            xmin: p.x,
+            ymin: p.y,
+            xmax: p.x + p.w,
+            ymax: p.y + p.h,
+        });
+    }
+    CellOutput {
+        store,
+        pins,
+        ports: ports.iter().map(|p| pnr_cells::PortDef::inout(p.clone())).collect(),
+        pin_map,
+        bbox,
+        meta: pnr_cells::CellMeta {
+            device_type: None,
+            ..Default::default()
+        },
+        group_id: 0,
+    }
 }
 
 fn pin_accesses(out: &CellOutput, cell_name: &str, pin_name: &str) -> Vec<(LayerId, Bbox)> {
@@ -2188,6 +2327,7 @@ fn build_block(
     rec: &ConstraintRecord,
     cfg: &FlowConfig,
     iface: &[IfacePin],
+    macros: &HashMap<String, std::sync::Arc<CellOutput>>,
 ) -> Result<BuiltBlock, String> {
     let lt = &deck.layers;
     let poly = lt
@@ -2321,7 +2461,7 @@ fn build_block(
         &block_cfg,
         // cells: generate cell variants, select based on routing feedback hints
         |_iter, hints| {
-            let gen = generate_cells(g, pdk, deck, cell_pdk, rec).unwrap();
+            let gen = generate_cells(g, pdk, deck, cell_pdk, rec, macros).unwrap();
 
             // Causal variant selection: penalize the variant that produced a
             // measured failure, then explore the lowest-loss alternative.
@@ -2799,13 +2939,32 @@ fn build_block(
                 iface,
             ) {
                 Ok((mut net_sample, _rings)) => {
+                    let _t_co = std::time::Instant::now();
                     let merged = coalesce_geometry(&mut vstore, deck);
+                    let _time_signoff = std::env::var("PNR_TIME_SIGNOFF").is_ok();
+                    if _time_signoff {
+                        eprintln!("[time] coalesce {:?}", _t_co.elapsed());
+                    }
                     for sample in net_sample.values_mut() {
                         *sample = merged.remap(*sample);
                     }
                     // In-loop signoff always waives density — skip those rules
                     // instead of computing window clips and discarding them.
+                    let _t_drc = std::time::Instant::now();
+                    // In-loop DRC runs every feedback iteration. On a `gpu`
+                    // build it uses the GPU spacing-scan prefilter; verdicts
+                    // stay exact (identical report to CPU).
+                    #[cfg(feature = "gpu")]
+                    let drc = gdsverify::run_drc_no_density_backend(&vstore, deck, Backend::Gpu);
+                    #[cfg(not(feature = "gpu"))]
                     let drc = gdsverify::run_drc_no_density(&vstore, deck);
+                    if _time_signoff {
+                        eprintln!(
+                            "[time] drc ({}) {:?}",
+                            if cfg!(feature = "gpu") { "gpu" } else { "cpu" },
+                            _t_drc.elapsed()
+                        );
+                    }
                     let blocking: Vec<&Violation> = drc.violations.iter().collect();
                     // Spacing-class violations on DEVICE layers → isolation
                     // pressure on the two devices nearest the violation (same
@@ -2836,7 +2995,8 @@ fn build_block(
                             ));
                         }
                     }
-                    let lvs_ok = match extract_netlist_opts(
+                    let _t_ex = std::time::Instant::now();
+                    let ext_res = extract_netlist_opts(
                         &vstore,
                         deck,
                         &ExtractOpts {
@@ -2844,7 +3004,11 @@ fn build_block(
                             ..Default::default()
                         },
                         Backend::Cpu,
-                    ) {
+                    );
+                    if _time_signoff {
+                        eprintln!("[time] lvs-extract {:?}", _t_ex.elapsed());
+                    }
+                    let lvs_ok = match ext_res {
                         Ok(ext) => {
                             if std::env::var("PNR_DEBUG_LVS").is_ok() {
                                 for d in &ext.devices {
@@ -2907,7 +3071,12 @@ fn build_block(
                                 l_tolerance: deck.l_tolerance.clone(),
                                 pin_swaps: Vec::new(),
                             };
-                            compare(&ext, &ref_netlist, &cmp_opts).matched
+                            let _t_cmp = std::time::Instant::now();
+                            let _m = compare(&ext, &ref_netlist, &cmp_opts).matched;
+                            if _time_signoff {
+                                eprintln!("[time] lvs-compare {:?}", _t_cmp.elapsed());
+                            }
+                            _m
                         }
                         Err(e) => {
                             eprintln!("[signoff] in-loop extraction failed: {e}");
@@ -5586,6 +5755,7 @@ pub(crate) fn run(
     let FlowInput {
         graph: g_pre,
         net_classes,
+        macros,
     } = input;
     let mut resolved = cfg.clone();
     if resolved.via_size <= 0 {
@@ -5661,6 +5831,7 @@ pub(crate) fn run(
         &block_constraints,
         cfg,
         &iface,
+        &macros,
     )?;
     // Fixed die is a hard contract: placement/routing must fit — never grown.
     if let Some(d) = cfg.interface.as_ref().and_then(|i| i.die) {

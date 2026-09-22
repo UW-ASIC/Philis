@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 visualizer = []
+gpu = ["gdsverify/gpu", "pnr-cells/gpu"]
 
 [dependencies]
 gdsverify = { workspace = true }

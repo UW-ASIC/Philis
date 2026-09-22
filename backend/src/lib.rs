@@ -29,9 +29,13 @@ pub mod gds;
 pub mod interface;
 pub mod pdk;
 
-use pnr_cells::netlist::BipartiteHypergraph;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-pub use flow::{FlowConfig, FlowResult, SignoffReport};
+use pnr_cells::netlist::BipartiteHypergraph;
+use pnr_cells::CellOutput;
+
+pub use flow::{block_to_macro, FlowConfig, FlowResult, SignoffReport};
 pub use interface::{BoundaryPin, DieSpec, InterfaceSpec, Side};
 pub use pdk::{load_pdk, CellBase, DeviceDef, FullPdk, Pdk};
 pub use pnr_constraints::{ConstraintContract, ConstraintRecord, ConstraintStatus, NetClass};
@@ -71,6 +75,12 @@ impl<'a> Backend<'a> {
 pub struct FlowInput {
     pub(crate) graph: BipartiteHypergraph,
     pub(crate) net_classes: Box<[NetClass]>,
+    /// Pre-placed sub-blocks, keyed by subckt/model name. A hypergraph cell
+    /// whose model matches an entry is a macro instance: cell generation
+    /// stamps this fixed layout instead of drawing a device. Empty for a flat
+    /// run; populated by the hierarchical driver (leaves first). `Arc` so one
+    /// block feeds many parents without cloning its geometry.
+    pub(crate) macros: HashMap<String, Arc<CellOutput>>,
 }
 
 impl FlowInput {
@@ -89,7 +99,15 @@ impl FlowInput {
         Ok(Self {
             graph,
             net_classes: net_classes.into_boxed_slice(),
+            macros: HashMap::new(),
         })
+    }
+
+    /// Attach pre-placed sub-blocks so their instances resolve as macros.
+    #[must_use]
+    pub fn with_macros(mut self, macros: HashMap<String, Arc<CellOutput>>) -> Self {
+        self.macros = macros;
+        self
     }
 }
 
