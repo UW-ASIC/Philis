@@ -1,92 +1,64 @@
-//! `philis` — the CLI. Thin: read the netlist + PDK, call `library`, sign off.
-//! All logic lives in `library`; this only does I/O and argument handling.
+//! `philis` — read a netlist and a PDK deck, run the flow, sign off.
 //!
 //! ```text
-//! philis <netlist.sp> <deck.json>              # solve + signoff
-//! philis emit <netlist.sp> <deck.json> <out.rs> # solve + decompile to generator source
+//! philis <netlist.sp> <deck.json>               # solve + signoff
+//! philis emit <netlist.sp> <deck.json> <out.rs> # also decompile to generator source
 //! ```
 
 use std::process::ExitCode;
 
-use library::{run, signoff, Config};
-use verify::Pdk;
+use library::{Config, Macros};
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    // `philis emit a.sp deck.json out.rs` — strip the subcommand, remember it.
-    let (emit_out, args): (Option<String>, Vec<String>) =
-        if args.len() >= 2 && args[1] == "emit" {
-            if args.len() < 5 {
-                eprintln!("usage: philis emit <netlist.sp> <deck.json> <out.rs>");
-                return ExitCode::FAILURE;
-            }
-            (Some(args[4].clone()), {
-                let mut a = args.clone();
-                a.remove(1);
-                a
-            })
-        } else {
-            (None, args)
-        };
-    if args.len() < 3 {
-        eprintln!("usage: philis [emit] <netlist.sp> <deck.json> [out.rs]");
-        return ExitCode::FAILURE;
+    match cli() {
+        Ok(clean) => ExitCode::from(u8::from(!clean)),
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
     }
+}
 
-    let spice = match std::fs::read_to_string(&args[1]) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("read {}: {e}", args[1]);
-            return ExitCode::FAILURE;
-        }
+/// `Ok(true)` when signoff is clean.
+fn cli() -> Result<bool, String> {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let emit_to = if args.first().is_some_and(|a| a == "emit") {
+        args.remove(0);
+        Some(
+            args.get(2)
+                .cloned()
+                .ok_or("usage: philis emit <netlist.sp> <deck.json> <out.rs>")?,
+        )
+    } else {
+        None
     };
-    let deck = match std::fs::read_to_string(&args[2]) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("read {}: {e}", args[2]);
-            return ExitCode::FAILURE;
-        }
+    let [netlist, deck, ..] = args.as_slice() else {
+        return Err("usage: philis [emit] <netlist.sp> <deck.json> [out.rs]".into());
     };
-    let pdk = match Pdk::from_json(&deck) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("pdk: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let read = |p: &str| std::fs::read_to_string(p).map_err(|e| format!("read {p}: {e}"));
+    let spice = read(netlist)?;
+    let pdk = verify::Pdk::from_json(&read(deck)?).map_err(|e| format!("pdk: {e}"))?;
 
     let cfg = Config::default();
-    // The CLI does a fully auto-generated run — no user-injected macros.
-    let sol = match run(&spice, &pdk, &library::Macros::default(), &cfg) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("flow: {e:?}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let sol =
+        library::run(&spice, &pdk, &Macros::default(), &cfg).map_err(|e| format!("flow: {e:?}"))?;
 
-    if let Some(out) = emit_out {
-        // Decompile the solved layout into PDK-agnostic generator source.
-        let ir = match library::emit::emit_solution(&sol, &pdk, &cfg) {
-            Ok(ir) => ir,
-            Err(e) => {
-                eprintln!("emit: {e:?}");
-                return ExitCode::FAILURE;
-            }
-        };
-        if let Err(e) = std::fs::write(&out, library::emit::to_rust(&ir)) {
-            eprintln!("write {out}: {e}");
-            return ExitCode::FAILURE;
-        }
+    if let Some(out) = emit_to {
+        let ir = library::emit::emit(&sol.netlist, &sol.layout, &pdk, &cfg)
+            .map_err(|e| format!("emit: {e:?}"))?;
+        std::fs::write(&out, library::emit::to_rust(&ir))
+            .map_err(|e| format!("write {out}: {e}"))?;
         println!("emitted generator → {out}");
     }
 
-    let report = signoff(&sol, &pdk);
+    let report = library::signoff(&sol, &pdk);
     if report.hard_violations.is_empty() {
         println!("signoff CLEAN — cost {:.3}", report.cost);
-        ExitCode::SUCCESS
     } else {
-        println!("signoff: {} hard violation(s)", report.hard_violations.len());
-        ExitCode::FAILURE
+        println!(
+            "signoff: {} hard violation(s)",
+            report.hard_violations.len()
+        );
     }
+    Ok(report.hard_violations.is_empty())
 }

@@ -14,8 +14,8 @@
 
 use library::{elaborate, ElabConfig};
 use macro_master::{
-    variants::Mos, AlignMode, Block, CompBuilder, Composition, GenError, InOut, Input, Io,
-    Output, PortInfo, Process, Signal,
+    variants::Mos, AlignMode, Block, CompBuilder, Composition, GenError, InOut, Input, Io, Output,
+    PortInfo, Process, Signal,
 };
 use pnr_core::{Device, DeviceKind, Netlist};
 
@@ -30,7 +30,12 @@ struct LegIo {
 }
 impl Io for LegIo {
     fn ports(&self) -> Vec<PortInfo> {
-        vec![self.vin.port("vin"), self.vb.port("vb"), self.vout.port("vout"), self.vss.port("vss")]
+        vec![
+            self.vin.port("vin"),
+            self.vb.port("vb"),
+            self.vout.port("vout"),
+            self.vss.port("vss"),
+        ]
     }
 }
 
@@ -122,7 +127,10 @@ fn net_of<'a>(nl: &Netlist, nets: &'a [String], dev: &str, term: &str) -> &'a st
         .iter()
         .find(|d| d.name == dev)
         .unwrap_or_else(|| {
-            panic!("no device {dev}, have {:?}", nl.devices.iter().map(|d| &d.name).collect::<Vec<_>>())
+            panic!(
+                "no device {dev}, have {:?}",
+                nl.devices.iter().map(|d| &d.name).collect::<Vec<_>>()
+            )
         });
     let id = d
         .terminals
@@ -135,15 +143,20 @@ fn net_of<'a>(nl: &Netlist, nets: &'a [String], dev: &str, term: &str) -> &'a st
 
 #[test]
 fn hierarchical_composition_elaborates_with_a_correct_schematic() {
-    let deck =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/sky130.json"))
-            .expect("sky130 deck present");
+    let deck = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../pdks/sky130.json"
+    ))
+    .expect("sky130 deck present");
     let pdk = verify::Pdk::from_json(&deck).expect("deck parses");
 
     let sol = elaborate(&Twin, &pdk, &ElabConfig::default()).expect("elaboration succeeds");
     assert_eq!(sol.macros.len(), 2, "two sub-composition instances");
 
-    let nl = sol.schematic.as_ref().expect("hierarchy must still yield a schematic");
+    let nl = sol
+        .schematic
+        .as_ref()
+        .expect("hierarchy must still yield a schematic");
 
     // 1. Device count and qualified names — two leaves x two devices each.
     let mut names: Vec<&str> = nl.devices.iter().map(|d| d.name.as_str()).collect();
@@ -152,7 +165,11 @@ fn hierarchical_composition_elaborates_with_a_correct_schematic() {
 
     // 2. The NetId invariant: one numbering for the schematic, the nets and
     //    therefore `Routes`. A skew here mis-applies every routing rule.
-    assert_eq!(nl.nets.len(), sol.nets.len(), "schematic and nets are the same numbering");
+    assert_eq!(
+        nl.nets.len(),
+        sol.nets.len(),
+        "schematic and nets are the same numbering"
+    );
     for (i, n) in nl.nets.iter().enumerate() {
         assert_eq!(n.name, sol.nets[i], "NetId {i} names two different nets");
     }
@@ -163,8 +180,16 @@ fn hierarchical_composition_elaborates_with_a_correct_schematic() {
     assert_eq!(n("x2.m1", "G"), "inn");
     assert_eq!(n("x1.m2", "D"), "outp");
     assert_eq!(n("x2.m2", "D"), "outn");
-    assert_eq!(n("x1.m2", "G"), "vb", "child io port binds to the parent's net");
-    assert_eq!(n("x2.m2", "G"), "vb", "...and is shared across both instances");
+    assert_eq!(
+        n("x1.m2", "G"),
+        "vb",
+        "child io port binds to the parent's net"
+    );
+    assert_eq!(
+        n("x2.m2", "G"),
+        "vb",
+        "...and is shared across both instances"
+    );
     assert_eq!(n("x1.m1", "S"), "vss");
     assert_eq!(n("x2.m1", "S"), "vss");
 
@@ -172,16 +197,25 @@ fn hierarchical_composition_elaborates_with_a_correct_schematic() {
     //    it. Sharing it across x1/x2 would be a short.
     assert_eq!(n("x1.m1", "D"), n("x1.m2", "S"), "x1's mid node is one net");
     assert_eq!(n("x2.m1", "D"), n("x2.m2", "S"), "x2's mid node is one net");
-    assert_ne!(n("x1.m1", "D"), n("x2.m1", "D"), "two instances must not share internals");
+    assert_ne!(
+        n("x1.m1", "D"),
+        n("x2.m1", "D"),
+        "two instances must not share internals"
+    );
 
     // 5. Signoff runs against that schematic.
-    let report = sol.signoff(&pdk).expect("signoff runs when a schematic exists");
-    let lvs: Vec<&str> =
-        report.hard_violations.iter().map(|v| v.rule.as_str()).filter(|r| r.contains("lvs")).collect();
+    let report = sol
+        .signoff(&pdk)
+        .expect("signoff runs when a schematic exists");
+    let lvs: Vec<&str> = report
+        .hard_violations
+        .iter()
+        .map(|v| v.rule.as_str())
+        .filter(|r| r.contains("lvs"))
+        .collect();
     eprintln!(
         "hier signoff: {} hard violations, {} lvs: {lvs:?}",
         report.hard_violations.len(),
         lvs.len()
     );
 }
-
