@@ -1,7 +1,7 @@
 //! # `library` — the whole flow as one deterministic function.
 //!
 //! [`run`] reads top-down: parse → annotate → cells → place (`gp` → `dp`) →
-//! route (`gr` → `dr`) → in-loop DRC, repeated until the best epoch stops
+//! route (`gr` → `dr`) → signoff, repeated until the best epoch stops
 //! improving. [`signoff`] is the final DRC/ERC/LVS/PEX gate.
 
 mod cellgen;
@@ -22,7 +22,6 @@ pub mod metadata;
 /// DC operating point via ngspice — the per-device power the thermal rules need.
 pub mod oppoint;
 
-use analog::Requirements;
 use annotator::{annotate, AnnotationConfig, NoInference, Problem};
 use dp::DetailedPlacer;
 use dr::DetailedRouter;
@@ -38,7 +37,7 @@ pub use visualizer;
 pub struct Config {
     /// Base RNG seed; every epoch derives its own from it.
     pub seed: u64,
-    /// Epochs per variant assignment (place → route → DRC → fold back).
+    /// Epochs per variant assignment (place → route → signoff).
     pub feedback_iters: u32,
     /// Variant assignments to try when an assignment stalls infeasible. `1`
     /// keeps the priced seed assignment.
@@ -95,7 +94,7 @@ pub struct RunStats {
     pub place_hard: usize,
     /// Winner: detailed-routing hard violations.
     pub route_hard: usize,
-    /// Winner: in-loop DRC violations over its drawn geometry.
+    /// Winner: signoff (DRC + ERC + LVS) violations over its drawn geometry.
     pub drc_hard: usize,
     /// Winner: Σ routing budget margins (milli-budgets, not tracks).
     pub route_overuse: i64,
@@ -132,36 +131,44 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 
     // 5. Stages. The metal stack and router config come from the deck.
     let (layers, cuts, pin_access) = elaborate::routing_stack(pdk);
-    let mut flow = Flow {
+    let flow = Flow {
         pdk,
+        netlist: &netlist,
+        net_names: netlist.nets.iter().map(|n| n.name.clone()).collect(),
+        placer: gp::Analytical { cfg: gp::GlobalCfg { grid: pdk.grid, ..Default::default() } },
+        refiner: dp::Annealer {
+            cfg: dp::DetailedCfg {
+                grid: pdk.grid,
+                clearance_nm: device_clearance(pdk),
+                ..Default::default()
+            },
+        },
         d_router: elaborate::detailed_router(pdk, &layers, &cuts, pin_access),
         layers,
         cuts,
         oracle: verify::LiveOracle::new(pdk).expect("a loaded Pdk re-parses its own deck"),
-        base_hard: problem.placement.hard.len(),
-        base_cost: problem.placement.cost.len(),
         problem,
         cells,
     };
 
     // 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
-    //    keeping the lexicographically best (|V|, Θ, PEX). Cross-epoch state
-    //    (prices, routing history, DRC findings) lives here so it persists.
+    //    keeping the lexicographically best (|V|, Θ, PEX) where V includes the
+    //    epoch's own signoff findings. Prices and routing history persist
+    //    across epochs; dp consults the live DRC oracle within one.
     let mut assignment = cellgen::seed_assignment(&flow.cells.variants, &flow.layers, pdk);
     let mut prices = gp::Prices::new();
     let mut neg = gr::Negotiation::new();
-    let mut drc_feedback = Requirements::<Layout>::default();
     let mut best: Option<Epoch> = None;
     let mut stats = RunStats::default();
 
-    'outer: for outer in 0..cfg.outer_iters.max(1) {
+    let n_outer = cfg.outer_iters.max(1);
+    for outer in 0..n_outer {
         stats.outer_iterations += 1;
         let mut stall = 0;
         for iter in 0..cfg.feedback_iters.max(1) {
             stats.iterations += 1;
             let seed = cfg.seed ^ u64::from(iter) ^ (u64::from(outer) << 32);
-            let (epoch, feedback) = flow.epoch(&assignment, drc_feedback, &mut prices, &mut neg, seed);
-            drc_feedback = feedback;
+            let epoch = flow.epoch(&assignment, &mut prices, &mut neg, seed);
             if best.as_ref().is_none_or(|b| epoch.key < b.key) {
                 best = Some(Epoch { iteration: iter, ..epoch });
                 stall = 0;
@@ -179,15 +186,14 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             stats.converged = true;
             break;
         }
-        // Infeasible: the variants themselves bind. Try the next assignment, or
-        // stop when the variant space is exhausted.
-        match cellgen::escalate(&flow.cells.variants, &assignment) {
-            Some(next) => {
-                stats.variant_escalations += 1;
-                assignment = next;
-            }
-            None => break 'outer,
+        // Infeasible: try the next variant assignment, unless the budget or the
+        // variant space is exhausted.
+        if outer + 1 == n_outer {
+            break;
         }
+        let Some(next) = cellgen::escalate(&flow.cells.variants, &assignment) else { break };
+        stats.variant_escalations += 1;
+        assignment = next;
     }
 
     // 7. The winner, redrawn from its own variant choice, with its guard rings.
@@ -215,14 +221,16 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 /// Everything an epoch reads that is fixed for the run.
 struct Flow<'a> {
     pdk: &'a Pdk,
-    /// Placement rules are cell-indexed; `placement.hard/cost` grow by the DRC
-    /// feedback during an epoch and are truncated back to `base_*` after.
+    /// The schematic (LVS reference) and its net names (label text).
+    netlist: &'a pnr_core::Netlist,
+    net_names: Vec<String>,
+    /// Rules and constraints; placement rules retargeted to cell ids.
     problem: Problem,
-    base_hard: usize,
-    base_cost: usize,
     cells: CellSpace,
     layers: Vec<LayerId>,
     cuts: Vec<elaborate::Cut>,
+    placer: gp::Analytical,
+    refiner: dp::Annealer,
     d_router: dr::DetailedRoute,
     oracle: verify::LiveOracle,
 }
@@ -238,26 +246,22 @@ struct Epoch {
 }
 
 impl Flow<'_> {
-    /// Place → route → DRC at a fixed `assignment`. Returns the scored epoch and
-    /// its DRC findings, to be folded into the next epoch's placement rules.
+    /// Place → route → signoff at a fixed `assignment`, scored.
     fn epoch(
-        &mut self,
+        &self,
         assignment: &[u16],
-        mut drc_feedback: Requirements<Layout>,
         prices: &mut gp::Prices,
         neg: &mut gr::Negotiation,
         seed: u64,
-    ) -> (Epoch, Requirements<Layout>) {
-        let placement = &mut self.problem.placement;
-        placement.hard.append(&mut drc_feedback.hard);
-        placement.cost.append(&mut drc_feedback.cost);
+    ) -> Epoch {
+        let placement = &self.problem.placement;
         let cells = &self.cells;
         let layers = &self.layers;
 
         // Place: coarse analytical, then legalising anneal (which may reshape).
         let macros = cellgen::realize(&cells.variants, assignment);
         let (mut coarse, _) =
-            gp::Analytical::default().place(&macros, &cells.variants, placement, layers, prices, seed);
+            self.placer.place(&macros, &cells.variants, placement, layers, prices, seed);
         coarse.debug_check("gp::place");
         // dp reads groups as abutment permission, so it gets the diffusion-sharing
         // table; after dp, groups are the recognition table for `Target::Group`.
@@ -268,7 +272,7 @@ impl Flow<'_> {
         }
         coarse.power_uw = cells.power.clone();
         coarse.refresh_temps();
-        let (mut layout, place_report) = dp::Annealer::default().place(
+        let (mut layout, place_report) = self.refiner.place(
             &coarse,
             &macros,
             &cells.variants,
@@ -302,22 +306,24 @@ impl Flow<'_> {
             &global, &pins, &placed, &rings, routing, layers, &self.cuts, neg, seed,
         );
 
-        // Measure: DRC over the drawn geometry, budget residuals over the result.
+        // Measure: signoff over the drawn geometry, budget residuals over the result.
         let mut shapes = geometry::collect(&macros, &layout, &routes);
         shapes.extend(rings.iter().flat_map(|r| r.shapes.iter().copied()));
-        let (feedback, drc) = verify::drc_feedback(&self.oracle, &shapes);
+        // The epoch is scored by the same DRC/ERC/LVS gate as the final result.
+        let mut labelled = placed;
+        labelled.extend(rings.iter().cloned());
+        let signoff =
+            signoff_shapes(&shapes, &labelled, &self.net_names, self.netlist, self.pdk);
         let budgets = metadata::build(
-            &self.problem.placement,
+            placement,
             &layout,
             routing,
             &routes,
             None,
             &self.problem.net_classes,
         );
-        self.problem.placement.hard.truncate(self.base_hard);
-        self.problem.placement.cost.truncate(self.base_cost);
 
-        let drc_hard = drc.violations as usize;
+        let drc_hard = signoff.hard_violations.len();
         let key = lex_key(&place_report, &route_report, drc_hard, &budgets);
         let stats = RunStats {
             place_hard: place_report.hard_violations.len(),
@@ -326,7 +332,7 @@ impl Flow<'_> {
             route_overuse: route_report.budget_violations.iter().map(|v| v.margin).sum(),
             ..RunStats::default()
         };
-        (Epoch { key, iteration: 0, layout, routes, rings, stats }, feedback)
+        Epoch { key, iteration: 0, layout, routes, rings, stats }
     }
 }
 
@@ -341,10 +347,17 @@ impl RunStats {
 /// buys past a budget residual, no budget slack buys past a hard violation.
 type LexKey = (usize, f64, f32);
 
-fn lex_key(place: &Report, route: &Report, drc: usize, budgets: &metadata::MetadataReport) -> LexKey {
+fn lex_key(place: &Report, route: &Report, signoff: usize, budgets: &metadata::MetadataReport) -> LexKey {
     let (pv, pt, pc) = place.lex();
     let (rv, rt, rc) = route.lex();
-    (pv + rv + drc, pt + rt + budgets.theta(), pc + rc)
+    (pv + rv + signoff, pt + rt + budgets.theta(), pc + rc)
+}
+
+/// Edge-to-edge gap `dp` keeps between cells: the deck's widest same-layer
+/// spacing, so no two cells' layers can merge. (`dp`'s default is a sky130
+/// guess; measured: chain4 ERC 93 → 74 with the deck value.)
+fn device_clearance(pdk: &Pdk) -> i32 {
+    pdk.layers().iter().filter_map(|l| pdk.min_spacing(l.0)).max().unwrap_or(0)
 }
 
 fn round_up(v: i32, grid: i32) -> i32 {

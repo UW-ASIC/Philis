@@ -8,8 +8,7 @@ default = []
 # Forwarded to `verify` → `gdsverify/gpu`. Devshell-only (needs CUDA/Vulkan).
 gpu = ["verify/gpu"]
 
-# The orchestrator: it depends on everything and wires the flow. The ONLY place
-# the concrete stage algorithms are named (the hot-swap point) is `algorithms`.
+# The orchestrator: depends on every stage and wires the flow in `run`.
 [dependencies]
 pnr_core = { path = "../../kernel/core" }
 analog = { path = "../../kernel/analog" }
