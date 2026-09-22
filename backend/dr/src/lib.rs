@@ -1303,8 +1303,6 @@ mod tests {
         let mut reqs = Requirements::<Routes>::default();
         reqs.budget.push(Box::new(vec![analog::routing::ParasiticBudget {
             net: NetId(0),
-            max_r_mohm: 1_000_000,
-            max_c_af: 100_000_000,
             max_len_nm: 1_000,
             margin_pct: 10,
         }]));

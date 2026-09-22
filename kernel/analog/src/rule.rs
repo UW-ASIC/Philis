@@ -286,8 +286,6 @@ mod tests {
     fn parasitic(max_len_nm: i64) -> crate::routing::ParasiticBudget {
         crate::routing::ParasiticBudget {
             net: pnr_core::NetId(0),
-            max_r_mohm: 1_000_000,
-            max_c_af: 100_000_000,
             max_len_nm,
             margin_pct: 20,
         }

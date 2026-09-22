@@ -41,13 +41,10 @@ pub fn routing(hg: &BipartiteHypergraph, classes: &[NetClassification]) -> Requi
     };
     let par: Vec<ParasiticBudget> = routed()
         .map(|(net, c)| {
-            let max_r_mohm = c.r_budget_mohm.unwrap_or(1_000_000);
             ParasiticBudget {
                 net,
-                max_r_mohm,
-                max_c_af: c.c_budget_af.unwrap_or(100_000_000),
                 // ponytail: 100 mΩ/µm sheet-resistance stand-in until the PDK carries it.
-                max_len_nm: max_r_mohm / 100 * 1_000,
+                max_len_nm: c.r_budget_mohm.unwrap_or(1_000_000) / 100 * 1_000,
                 margin_pct: margin_pct(c.class),
             }
         })

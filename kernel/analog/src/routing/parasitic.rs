@@ -5,14 +5,11 @@ use pnr_core::routes::Routes;
 use pnr_core::{BipartiteHypergraph, UnionFind};
 use crate::rule::Rule;
 
-/// Per-net R/C budget, lowered to a drawn-length cap the router can check.
+/// Per-net R budget, lowered (by the annotator) to a drawn-length cap the
+/// router can check.
 #[derive(Clone, Copy)]
 pub struct ParasiticBudget {
     pub net: NetId,
-    /// Max wire resistance, mΩ. Not scored yet (needs PDK wire params).
-    pub max_r_mohm: i64,
-    /// Max wire capacitance, aF. Not scored yet (needs PDK wire params).
-    pub max_c_af: i64,
     /// Drawn length at which the R/C budget is spent, nm — what is checked.
     pub max_len_nm: i64,
     /// Safety margin on `max_len_nm`, percent.
@@ -60,8 +57,6 @@ impl Rule for ParasiticBudget {
             .filter(|(_, devs)| devs.len() >= 2)
             .map(|(n, _)| ParasiticBudget {
                 net: NetId(n as u16),
-                max_r_mohm: 1_000_000,
-                max_c_af: 100_000_000,
                 max_len_nm: 1_000_000,
                 margin_pct: 20,
             })

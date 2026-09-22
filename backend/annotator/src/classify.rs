@@ -2,7 +2,7 @@
 //! structure gives the two classes a name can't: **Sensitive** (feeds a matched
 //! device's gate, or gates-only = a bias rail) and **Substrate** (bulk-only).
 
-use analog::metadata::{NetClass, NetClassification, VoltDomain};
+use analog::metadata::{NetClass, NetClassification};
 use pnr_core::ids::NetId;
 use pnr_core::BipartiteHypergraph;
 
@@ -84,12 +84,10 @@ pub fn classify(
             NetClassification {
                 net: NetId(i as u16),
                 class,
-                voltage_domain: Some(VoltDomain::Analog),
                 shielding_required: shield,
                 c_budget_af: Some(c),
                 r_budget_mohm: Some(r),
                 max_coupling_af: Some(coup),
-                preferred_layers: Vec::new(),
             }
         })
         .collect()

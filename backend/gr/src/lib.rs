@@ -949,8 +949,6 @@ mod tests {
     fn budget(cap: i64) -> Box<dyn analog::RuleBatch<Routes>> {
         Box::new(vec![analog::routing::ParasiticBudget {
             net: NetId(0),
-            max_r_mohm: 1_000_000,
-            max_c_af: 100_000_000,
             max_len_nm: cap,
             margin_pct: 10,
         }])

@@ -5,13 +5,10 @@
 //!   by which W/L/nf reach `cells`. One class per unitization: `unit_w`/`unit_l`
 //!   are group scalars, and a mixed group draws members at the wrong size (LVS
 //!   `parameter_mismatch`).
-//! - **Dummies** (full edge dummies).
 //! - **Guard ring** for FETs, flavour by the *device's* polarity, tied to its bulk
 //!   net. Bipolars get none: their `B` terminal is the base, not the bulk.
-//!
-//! LDE and stress bounds are not emitted: nothing downstream reads them.
 
-use analog::cell::{DummyRequirement, DummyType, GuardRingRequirement, GuardRingType, SeriesParallel, Unitization};
+use analog::cell::{GuardRingRequirement, GuardRingType, SeriesParallel, Unitization};
 use analog::Constraints;
 use pnr_core::ids::DeviceId;
 use pnr_core::netlist::DeviceKind;
@@ -61,12 +58,6 @@ pub fn assemble(netlist: &Netlist, blocks: &[Block]) -> Constraints {
         }
 
         for &d in &b.devices {
-            c.dummies.push(DummyRequirement {
-                device: d,
-                dummy_type: DummyType::Full,
-                moat_ext_nm: 200,
-                min_poly_clearance_nm: 100,
-            });
             let dev = &netlist.devices[d.0 as usize];
             let ring_type = match dev.kind {
                 DeviceKind::Pmos => GuardRingType::Hcgr,
