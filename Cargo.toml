@@ -19,5 +19,6 @@ members = [
 # only probes a `GeometryStore`, so it takes `gdsverify-geom` alone and keeps
 # the engine out of a GPU build.
 [workspace.dependencies]
+fearless_simd = "1.0.0"
 gdsverify = { package = "gpurify", git = "https://github.com/UW-ASIC/GPurify" }
 gdsverify-geom = { package = "gpurify-geom", git = "https://github.com/UW-ASIC/GPurify" }
