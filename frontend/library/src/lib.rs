@@ -71,6 +71,8 @@ pub struct Solution {
     pub netlist: pnr_core::Netlist,
     pub stats: RunStats,
     pub metadata: metadata::MetadataReport,
+    /// The placement rules the search scored, retargeted to `layout`'s cell ids.
+    pub placement: analog::Requirements<Layout>,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -212,6 +214,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         bias,
         &flow.problem.net_classes,
     );
+    let placement = flow.problem.placement;
     Ok(Solution {
         layout: best.layout,
         routes: best.routes,
@@ -219,6 +222,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         netlist,
         stats,
         metadata,
+        placement,
     })
 }
 
