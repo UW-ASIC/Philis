@@ -24,22 +24,6 @@ pub use netrole::{AnnotationConfig, NetRole};
 use pnr_core::ids::DeviceId;
 use pnr_core::Netlist;
 
-/// Hook for recognising extra blocks among the glue devices.
-// ponytail: only `NoInference` exists; kept because `annotate`'s signature takes it.
-pub trait BlockInference {
-    fn infer(&self, netlist: &Netlist, claimed: &[Block]) -> Vec<Block>;
-}
-
-/// Recognises nothing.
-#[derive(Default)]
-pub struct NoInference;
-
-impl BlockInference for NoInference {
-    fn infer(&self, _: &Netlist, _: &[Block]) -> Vec<Block> {
-        Vec::new()
-    }
-}
-
 /// Everything the annotator hands the generators, placer and router.
 pub struct Problem {
     /// Recognised blocks, then the glue block. Index = [`pnr_core::GroupId`] and
@@ -62,7 +46,7 @@ pub struct Problem {
 
 /// Assemble the [`Problem`]. Deterministic.
 #[must_use]
-pub fn annotate(netlist: &Netlist, infer: &dyn BlockInference, cfg: &AnnotationConfig) -> Problem {
+pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     let hg = pnr_core::BipartiteHypergraph::from_netlist(netlist);
     let geom: Vec<pattern::Geom> = netlist
         .devices
@@ -92,8 +76,6 @@ pub fn annotate(netlist: &Netlist, infer: &dyn BlockInference, cfg: &AnnotationC
         .collect();
     let glue = (0..netlist.devices.len() as u16).filter(|&d| !claimed[d as usize]).map(DeviceId);
     blocks.push(Block { kind: BlockKind::Glue, devices: glue.collect(), injected: false, sub_blocks: Vec::new() });
-    let inferred = infer.infer(netlist, &blocks);
-    blocks.extend(inferred);
 
     let groups: Vec<Vec<DeviceId>> = blocks.iter().map(|b| b.devices.clone()).collect();
     let abutment = groups

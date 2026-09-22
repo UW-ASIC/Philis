@@ -3,7 +3,7 @@
 //! primitives after the port, and that the `do_not_identify` override suppresses a
 //! block.
 
-use crate::{annotate, AnnotationConfig, Block, BlockKind, NoInference};
+use crate::{annotate, AnnotationConfig, Block, BlockKind};
 use analog::RuleBatch;
 use pnr_core::ids::{DeviceId, NetId};
 use pnr_core::netlist::{Device, DeviceKind, Net, Netlist};
@@ -52,7 +52,7 @@ fn ota() -> Netlist {
 #[test]
 fn diff_pair_halves_share_a_block() {
     let nl = ota();
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let p = annotate(&nl, &AnnotationConfig::default());
     // XM1 (0) and XM2 (1) must land in the same recognised block — whether the
     // winner is a bare diff_pair or a composite (five_transistor_ota / DP+load).
     let b1 = block_of(&p.blocks, 0).expect("XM1 recognised");
@@ -70,7 +70,7 @@ fn current_mirror_recognised() {
         ],
         nets: nets(&["vref", "iout", "VDD"]),
     };
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let p = annotate(&nl, &AnnotationConfig::default());
     let b = block_of(&p.blocks, 0).expect("mirror recognised");
     assert_eq!(b.kind, BlockKind::CurrentMirror);
     assert_eq!(b.devices, [DeviceId(0), DeviceId(1)], "slot 0 is the diode reference");
@@ -86,7 +86,7 @@ fn cross_coupled_recognised() {
         ],
         nets: nets(&["outp", "outn", "VDD", "VSS"]),
     };
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let p = annotate(&nl, &AnnotationConfig::default());
     let b = block_of(&p.blocks, 0).expect("cross-coupled recognised");
     assert_eq!(b.kind, BlockKind::DiffPair, "cross-coupled pairs are symmetric matched pairs");
 }
@@ -95,7 +95,7 @@ fn cross_coupled_recognised() {
 fn do_not_identify_suppresses_block() {
     let nl = ota();
     let cfg = AnnotationConfig { do_not_identify: [0u32].into_iter().collect(), ..Default::default() };
-    let p = annotate(&nl, &NoInference, &cfg);
+    let p = annotate(&nl, &cfg);
     // XM1 (device 0) is blocked → it cannot appear in any recognised block; it
     // falls through to glue.
     assert!(block_of(&p.blocks, 0).is_none(), "XM1 should be suppressed from recognition");
@@ -130,7 +130,7 @@ fn diff_pair_lives_in_the_hierarchy() {
     // sub_block) or as a standalone diff_pair, a DiffPair leaf covering {XM1,XM2}
     // must exist somewhere in the hierarchy.
     let nl = ota();
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let p = annotate(&nl, &AnnotationConfig::default());
     assert!(has_leaf(&p.blocks, BlockKind::DiffPair, &[0, 1]), "no DiffPair leaf for XM1/XM2");
 }
 
@@ -143,7 +143,7 @@ fn diff_pair_emits_its_constraints() {
     // (Pelgrom `σ²_u = A²/(W·L)`), which no placement move can change, so
     // gating SA on it is inert. See `backend/TODO.md` §2.
     let nl = ota();
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let p = annotate(&nl, &AnnotationConfig::default());
     assert!(count(&p.placement.hard) >= 1, "expected >=1 hard placement rule (sym), got {}", count(&p.placement.hard));
     assert!(count(&p.placement.budget) >= 1, "expected >=1 budget placement rule (thermal), got {}", count(&p.placement.budget));
     assert!(count(&p.placement.cost) >= 2, "expected >=2 cost placement rules (match/CC/prox), got {}", count(&p.placement.cost));
@@ -165,7 +165,7 @@ fn budget_rules_land_in_exactly_one_partition() {
     // `Report::lex`, priced twice by `gp::Prices`, and sits both above and below the
     // feasibility frontier. Double-registration is a `clone` away, so it is asserted.
     let nl = ota();
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let p = annotate(&nl, &AnnotationConfig::default());
     let arms: [(&str, &Vec<Box<dyn RuleBatch<pnr_core::Routes>>>); 3] =
         [("hard", &p.routing.hard), ("budget", &p.routing.budget), ("cost", &p.routing.cost)];
     for kind in ["CrosstalkExclusion", "ParasiticBudget", "CouplingBudget"] {
@@ -214,7 +214,7 @@ fn parasitic_and_coupling_report_an_overshoot_not_a_count() {
     // are parallel 1 nm apart, so the coupling sum is past its budget too.
     let routes = pnr_core::routes::Routes { wires: vec![vec![wire(0)], vec![wire(2)]] };
 
-    let p = annotate(&ota(), &NoInference, &AnnotationConfig::default());
+    let p = annotate(&ota(), &AnnotationConfig::default());
     for kind in ["ParasiticBudget", "CouplingBudget"] {
         let b = p
             .routing
@@ -235,7 +235,7 @@ fn dti_bands_are_one_hard_batch_with_dense_ids_seeded_share() {
     // the hard copy is legality (the full disjunction), the cost copy is what makes
     // `dp`'s branch flip priceable, and the budget arm never sees it (a disjunction
     // is not tradeable, and `Prices::bind` asserts hard ∩ budget = ∅).
-    let p = annotate(&ota(), &NoInference, &AnnotationConfig::default());
+    let p = annotate(&ota(), &AnnotationConfig::default());
     let is_dti = |b: &Box<dyn RuleBatch<pnr_core::Layout>>| b.kind().ends_with("DtiBand");
     assert_eq!(
         p.placement.hard.iter().filter(|b| is_dti(b)).count(),
@@ -265,7 +265,7 @@ fn abutment_excludes_mixed_polarity_groups() {
     // abutment on a mixed group lets an NMOS and a PMOS merge implants — DRC-clean,
     // LVS-fatal, and unrepairable downstream because nothing is illegal.
     let nl = ota(); // XM1/XM2/XM5 Nmos, XM3/XM4 Pmos
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(p.abutment.len(), p.groups.len(), "abutment is indexed by GroupId too");
     for (gi, (grp, ab)) in p.groups.iter().zip(&p.abutment).enumerate() {
         let mut kinds = grp.iter().filter_map(|d| nl.devices.get(d.0 as usize)).map(|d| d.kind);
@@ -288,7 +288,7 @@ fn glue_only_netlist_emits_no_placement() {
         ],
         nets: nets(&["a", "b", "c", "d"]),
     };
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(count(&p.placement.hard), 0);
     assert_eq!(count(&p.placement.cost), 0);
 }
@@ -304,7 +304,7 @@ fn glue_only_netlist_emits_no_placement() {
 fn every_device_accounted_for() {
     // No device is lost: recognised ∪ glue == all devices, disjoint.
     let nl = ota();
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let p = annotate(&nl, &AnnotationConfig::default());
     let mut seen = vec![false; nl.devices.len()];
     for b in &p.blocks {
         for d in &b.devices {
@@ -324,7 +324,7 @@ fn a_unitization_never_mixes_kinds_or_sizes() {
     // size and LVS reported `lvs.parameter_mismatch`. The OTA mixes N/P and
     // three widths inside its recognised blocks, so it is the case that bites.
     let nl = ota();
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let p = annotate(&nl, &AnnotationConfig::default());
     let param = |d: DeviceId, k: &str| {
         nl.devices[d.0 as usize].params.iter().find(|(n, _)| n == k).map(|&(_, v)| v)
     };
@@ -345,7 +345,7 @@ fn guard_rings_tie_to_the_guarded_device_s_bulk() {
     // routing terminals, so the router wired every guard ring in the design to
     // that signal net.
     let nl = ota();
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let p = annotate(&nl, &AnnotationConfig::default());
     assert!(!p.constraints.guard_rings.is_empty(), "matched FETs get rings");
     for r in &p.constraints.guard_rings {
         let dev = &nl.devices[r.device.0 as usize];
@@ -362,7 +362,7 @@ fn guard_rings_tie_to_the_guarded_device_s_bulk() {
 fn only_the_diff_pair_is_hard_symmetric() {
     // 5T OTA: the diff pair and the PMOS load are both pairs of one stage, so both
     // mirror about the stage's single axis.
-    let p = annotate(&ota(), &NoInference, &AnnotationConfig::default());
+    let p = annotate(&ota(), &AnnotationConfig::default());
     let sym: usize = p.placement.hard.iter().filter(|b| b.kind() == "Symmetry").map(|b| b.count()).sum();
     assert_eq!(sym, 1, "the diff pair only (see emit.rs on stage symmetry)");
 }
@@ -377,7 +377,7 @@ fn a_cascode_stack_is_adjacent_not_matched() {
         ],
         nets: nets(&["vin", "x", "VSS", "vcas", "out"]),
     };
-    let p = annotate(&nl, &NoInference, &AnnotationConfig::default());
+    let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(p.blocks[0].kind, BlockKind::Stack);
     let kinds: Vec<&str> = p.placement.cost.iter().map(|b| b.kind()).collect();
     assert!(kinds.iter().any(|k| k.ends_with("Proximity")), "{kinds:?}");

@@ -13,7 +13,7 @@
 //! are not yet lifted to `place_mirrored` (P2). Both return
 //! [`EmitError::Unsupported`] rather than emitting wrong code.
 
-use annotator::{annotate, NoInference};
+use annotator::{annotate};
 use macro_master::{build_with, variants, AlignMode, GenError, Macros};
 use pnr_core::{DeviceKind, Process as _};
 use verify::Pdk;
@@ -95,7 +95,7 @@ pub fn emit(
     pdk: &Pdk,
     cfg: &Config,
 ) -> Result<GenIr, EmitError> {
-    let problem = annotate(netlist, &NoInference, &cfg.annotation);
+    let problem = annotate(netlist, &cfg.annotation);
     let cells = cellgen::enumerate(netlist, &Macros::default(), &problem.constraints, pdk);
 
     // Instances: device family + electrical params from the covering

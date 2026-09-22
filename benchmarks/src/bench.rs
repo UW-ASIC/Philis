@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use annotator::{annotate, AnnotationConfig, NoInference};
+use annotator::{annotate, AnnotationConfig};
 use fixtures::{
     cleanup_fixtures, clone_repos_if_needed, discover_all, preprocess_spice, BenchmarkCircuit,
     Suite,
@@ -189,7 +189,7 @@ fn run_circuit(
     // Per-constraint-type satisfaction: re-annotate (pure) and evaluate each
     // placement batch against the final layout. These are the analog placement
     // constraints (the old "contracts") — DRC-feedback rules are not included.
-    let problem = annotate(&sol.netlist, &NoInference, &AnnotationConfig::default());
+    let problem = annotate(&sol.netlist, &AnnotationConfig::default());
     let mut contracts = Vec::new();
     for batch in problem.placement.hard.iter().chain(problem.placement.cost.iter()) {
         let total = batch.count();

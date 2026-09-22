@@ -22,7 +22,7 @@ pub mod metadata;
 /// DC operating point via ngspice — the per-device power the thermal rules need.
 pub mod oppoint;
 
-use annotator::{annotate, AnnotationConfig, NoInference, Problem};
+use annotator::{annotate, AnnotationConfig, Problem};
 pub use macro_master::Macros;
 use pnr_core::{DeviceId, LayerId, Layout, Macro, Report, Routes};
 use verify::Pdk;
@@ -116,7 +116,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     let netlist = parse::spice(spice).map_err(FlowError::Parse)?;
 
     // 2. Annotate: placement/routing rules + cell constraints, device-indexed.
-    let mut problem = annotate(&netlist, &NoInference, &cfg.annotation);
+    let mut problem = annotate(&netlist, &cfg.annotation);
 
     // 3. Bias: per-device power. Placement-independent, so solved once.
     let (power, bias) = bias(&netlist, cfg);

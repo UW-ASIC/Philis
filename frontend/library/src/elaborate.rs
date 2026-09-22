@@ -4,7 +4,7 @@
 //! is build → bind nets → route (the flow's `gr` + `dr`) → report. No `gp`/`dp`.
 
 use analog::Requirements;
-use annotator::{annotate, AnnotationConfig, NoInference};
+use annotator::{annotate, AnnotationConfig};
 use macro_master::{build_composition, Composition};
 use pnr_core::{LayerId, Layout, Macro, Netlist, Orient, Report, Routes, Shape};
 use verify::Pdk;
@@ -159,7 +159,7 @@ pub(crate) fn route_built(
         .netlist
         .as_ref()
         .map_or_else(Requirements::<Routes>::default, |nl| {
-            annotate(nl, &NoInference, &AnnotationConfig::default()).routing
+            annotate(nl, &AnnotationConfig::default()).routing
         });
     let mut neg = gr::Negotiation::new();
     let placed = gr::place_macros(&macros, &layout);

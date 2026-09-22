@@ -299,7 +299,6 @@ fn ota5t_schematic_is_the_circuit_on_the_routes_numbering() {
     // from it, which is the whole reason elaborate() carries one.
     let reqs = annotator::annotate(
         schem,
-        &annotator::NoInference,
         &annotator::AnnotationConfig::default(),
     )
     .routing;
