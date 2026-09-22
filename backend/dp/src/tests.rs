@@ -1,4 +1,5 @@
 use super::*;
+use gp::mechanics::{analog_violations, encroachment};
 use analog::placement::symmetry::{Symmetry, SymmetryGroup};
 use analog::placement::DtiBand;
 use analog::Rule;

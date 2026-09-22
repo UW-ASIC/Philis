@@ -14,20 +14,18 @@ use pnr_core::ids::BranchId;
 use pnr_core::{Layout, Macro, Orient, Report};
 
 use gp::mechanics::{
-    analog_cost, analog_phi, analog_theta, analog_violations, choose_variants, encroach,
-    encroachment, hpwl, report, snap, variant_extents, Nets, SplitMix64,
+    analog_cost, analog_phi, analog_theta, choose_variants, encroach,
+    hpwl, report, snap, variant_extents, Nets, SplitMix64,
 };
 use gp::CLEARANCE_NM;
 
 const MAX_ITERS: u32 = 220;
-const MIN_ITERS: u32 = 20;
 /// Inner moves per epoch = `MOVES_PER_CELL · n`.
 const MOVES_PER_CELL: usize = 60;
 const ALPHA: f64 = 0.93;
 /// Initial displacement window, fraction of the die span.
 const RANGE0: f32 = 0.4;
 const RANGE_DECAY: f32 = 0.96;
-const MIN_ACCEPT_RATE: f32 = 0.02;
 const GRID: i32 = 5;
 /// Clearance-inflated area / move-region area floor: the region the SA may use
 /// is grown until everything fits at this fill.
@@ -289,9 +287,10 @@ pub fn place(
     let moves_per_epoch = MOVES_PER_CELL * n;
     let range_min = GRID as f32 / span;
 
-    for iter in 0..MAX_ITERS {
+    // A fixed schedule: stopping at a low accept rate (the old early exit)
+    // cost ota 5% C and 24% area. ponytail: ~4x dp time; revisit if runtime binds.
+    for _ in 0..MAX_ITERS {
         let r = (range * span) as i32 as f32;
-        let mut accepted = 0u32;
         for _ in 0..moves_per_epoch {
             // 70% displace, 20% swap, 2.5% branch flip, 5% reshape, else rotate.
             let roll = rng.f32();
@@ -299,7 +298,7 @@ pub fn place(
             if sa.is_fixed(c) {
                 continue;
             }
-            let ok = if roll < 0.70 {
+            let _ = if roll < 0.70 {
                 let nx = clamp_x(l.x[c] + rng.centered(r) as i32, l.hw[c]);
                 let ny = clamp_y(l.y[c] + rng.centered(r) as i32, l.hh[c]);
                 try_move(&mut sa, &mut l, &mut rng, temp, c, nx, ny)
@@ -314,7 +313,6 @@ pub fn place(
             } else {
                 can_rotate && rotatable(&l, c) && try_rotate(&mut sa, &mut l, &mut rng, temp, c, &clamp_x, &clamp_y)
             };
-            accepted += u32::from(ok);
         }
 
         // One exact projection per epoch for batches violated before any move.
@@ -324,14 +322,6 @@ pub fn place(
 
         temp *= ALPHA;
         range = (range * RANGE_DECAY).max(range_min);
-        let accept_rate = accepted as f32 / moves_per_epoch as f32;
-        if iter + 1 >= MIN_ITERS
-            && accept_rate < MIN_ACCEPT_RATE
-            && encroachment(&l, CLEARANCE_NM) <= 0.0
-            && analog_violations(reqs, &l) == 0
-        {
-            break;
-        }
     }
 
     for a in &mut l.axis {
