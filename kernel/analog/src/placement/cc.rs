@@ -15,11 +15,17 @@ pub struct CommonCentroid {
 /// centroid against side B's. Pairwise coincidence is a weaker condition (each
 /// pair centred while the array stays lopsided).
 ///
-/// ponytail: cost-only; `violations` is always `0`. The exact equality belongs
-/// in the pattern representation (ABBA / checkerboard), not a projection.
+/// Violated when the centroid offset, read as a Pelgrom gradient distance,
+/// spends more than `gradient_share` of the random mismatch of `gate_um2` (see
+/// [`crate::placement::MatchingPair`]). The exact equality belongs in the
+/// pattern representation (ABBA / checkerboard), not a projection.
 pub struct CentroidGroup {
     pub a_side: Vec<DeviceId>,
     pub b_side: Vec<DeviceId>,
+    /// Gate area `W·L·fingers` of the largest member, µm² (tightest budget).
+    pub gate_um2: f32,
+    /// Allowed `σ_gradient / σ_random`.
+    pub gradient_share: f32,
 }
 
 impl CentroidGroup {
@@ -40,18 +46,37 @@ impl CentroidGroup {
     }
 }
 
-impl crate::rule::RuleBatch<Layout> for CentroidGroup {
-    /// Squared centroid separation `· 1e-3`.
-    fn cost(&self, l: &Layout) -> f32 {
+impl CentroidGroup {
+    /// Centroid separation, nm; `0` when a side is empty.
+    fn offset_nm(&self, l: &Layout) -> f32 {
         let (Some((ax, ay)), Some((bx, by))) = (Self::centroid(l, &self.a_side), Self::centroid(l, &self.b_side))
         else {
             return 0.0;
         };
-        let (dx, dy) = ((ax - bx) as f32, (ay - by) as f32);
-        (dx * dx + dy * dy) * 1e-3
+        (ax - bx).hypot(ay - by) as f32
     }
-    fn violations(&self, _l: &Layout) -> u32 {
-        0
+
+    /// Spent fraction of the gradient share.
+    fn used(&self, l: &Layout) -> f32 {
+        let g = crate::placement::matching_pair::gradient_over_random(self.offset_nm(l), self.gate_um2);
+        g / self.gradient_share.max(f32::EPSILON)
+    }
+}
+
+impl crate::rule::RuleBatch<Layout> for CentroidGroup {
+    /// Squared centroid separation `· 1e-3`.
+    fn cost(&self, l: &Layout) -> f32 {
+        let d = self.offset_nm(l);
+        d * d * 1e-3
+    }
+    fn violations(&self, l: &Layout) -> u32 {
+        u32::from(self.count() > 0 && self.used(l) > 1.0)
+    }
+    fn residual(&self, l: &Layout) -> f64 {
+        f64::from((self.used(l) - 1.0).max(0.0))
+    }
+    fn worst_usage(&self, l: &Layout) -> Option<f32> {
+        (self.count() > 0).then(|| self.used(l))
     }
     fn kind(&self) -> &'static str {
         "CommonCentroid"
@@ -113,6 +138,8 @@ mod tests {
         CentroidGroup {
             a_side: vec![DeviceId(0), DeviceId(2)],
             b_side: vec![DeviceId(1), DeviceId(3)],
+            gate_um2: 20.0,
+            gradient_share: 0.3,
         }
     }
 
@@ -123,6 +150,7 @@ mod tests {
         let g = CentroidGroup {
             a_side: vec![DeviceId(0), DeviceId(3)],
             b_side: vec![DeviceId(1), DeviceId(2)],
+            ..grp()
         };
         assert_eq!(g.cost(&l), 0.0, "ABBA must be centroid-balanced");
     }
@@ -135,6 +163,7 @@ mod tests {
         let seg = CentroidGroup {
             a_side: vec![DeviceId(0), DeviceId(1)],
             b_side: vec![DeviceId(2), DeviceId(3)],
+            ..grp()
         };
         assert!(seg.cost(&l) > 0.0, "segregated sides must cost");
     }
@@ -146,7 +175,7 @@ mod tests {
         // cost would be zero; it must not be.
         let mut l = layout(&[0, 100, 50], &[0, 0, 0], 100);
         l.hw[0] = 1_000; // the device at x=0 dominates by area
-        let g = CentroidGroup { a_side: vec![DeviceId(0), DeviceId(1)], b_side: vec![DeviceId(2)] };
+        let g = CentroidGroup { a_side: vec![DeviceId(0), DeviceId(1)], b_side: vec![DeviceId(2)], ..grp() };
         assert!(g.cost(&l) > 0.0, "area weighting must move the centroid off the plain mean");
 
         // Put B at the area-weighted centroid instead and it vanishes.
@@ -159,6 +188,15 @@ mod tests {
     fn one_condition_per_array_not_per_device() {
         let l = layout(&[0, 10, 20, 30], &[0, 0, 0, 0], 100);
         assert_eq!(grp().count(), 1, "the array carries one centroid condition");
-        assert_eq!(grp().violations(&l), 0, "objective, never a legality failure");
+        assert_eq!(grp().violations(&l), 0, "10 nm of offset is nothing");
+    }
+
+    #[test]
+    fn a_far_off_centroid_is_a_violation() {
+        // A A … B B a millimetre apart: the gradient term dwarfs the random one.
+        let l = layout(&[0, 10, 1_000_000, 1_000_010], &[0, 0, 0, 0], 100);
+        let seg = CentroidGroup { a_side: vec![DeviceId(0), DeviceId(1)], b_side: vec![DeviceId(2), DeviceId(3)], ..grp() };
+        assert_eq!(seg.violations(&l), 1);
+        assert!(seg.residual(&l) > 0.0 && seg.worst_usage(&l).unwrap() > 1.0);
     }
 }

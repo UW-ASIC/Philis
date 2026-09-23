@@ -103,7 +103,7 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     let net_classes = classify::classify(&hg, &roles, &sensitive);
 
     Problem {
-        placement: emit::placement(&blocks, &hg, netlist),
+        placement: emit::placement(&blocks, netlist),
         routing: extract::routing(&hg, &net_classes),
         constraints: constraints::assemble(netlist, &blocks),
         net_classes,

@@ -30,6 +30,9 @@ impl Rule for Antenna {
     fn headroom(self, r: &Routes) -> f32 {
         1.0 - net_ratio_x100(r, self.net) as f32 / self.max_ratio_x100.max(1) as f32
     }
+    fn usage(self, r: &Routes) -> Option<f32> {
+        Some(net_ratio_x100(r, self.net) as f32 / self.max_ratio_x100.max(1) as f32)
+    }
     fn margin(self) -> f32 {
         f32::from(self.margin_pct) / 100.0
     }

@@ -27,12 +27,20 @@ impl Rule for ThermalGradient {
         let dy = (ay - by) as f32;
         3.0 * (dx * dx + dy * dy) * 1e-3
     }
-    /// Trivially true with no power data (uniform die).
+    /// Vacuously true with no power data (see [`Rule::applicable`]).
     fn satisfied(self, l: &Layout) -> bool {
         l.delta_temp_mc(self.a, self.b) <= self.max_delta_mc
     }
     fn headroom(self, l: &Layout) -> f32 {
         1.0 - l.delta_temp_mc(self.a, self.b) as f32 / self.max_delta_mc.max(1) as f32
+    }
+    fn usage(self, l: &Layout) -> Option<f32> {
+        self.applicable(l)
+            .then(|| l.delta_temp_mc(self.a, self.b) as f32 / self.max_delta_mc.max(1) as f32)
+    }
+    /// An unpowered die has no gradient to match against.
+    fn applicable(self, l: &Layout) -> bool {
+        l.power_uw.iter().any(|&p| p != 0)
     }
     fn margin(self) -> f32 {
         f32::from(self.margin_pct) / 100.0
@@ -98,5 +106,7 @@ mod tests {
         l.power_uw = vec![0; 3];
         l.refresh_temps();
         assert!(pair().satisfied(&l));
+        assert!(!pair().applicable(&l), "and reports itself not applicable");
+        assert_eq!(pair().usage(&l), None);
     }
 }

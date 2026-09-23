@@ -65,13 +65,34 @@ struct Row {
     contracts: Vec<ContractStat>,
 }
 
-/// One placement-constraint batch's satisfaction at the final layout.
+/// One constraint batch's satisfaction at the final layout / routes.
 struct ContractStat {
     kind: String,
+    /// Enforcement arm: `hard`, `budget`, or `cost` (cost-only kinds).
+    arm: &'static str,
+    circuit: String,
     total: usize,
     violated: usize,
-    /// Worst per-rule cost among the violating rules (severity proxy).
-    worst: f32,
+    /// Rules with nothing to check (e.g. thermal on an unpowered die).
+    na: usize,
+    /// Largest spent fraction of a rule's budget (`1.0` = at the spec).
+    usage: Option<f32>,
+    /// Σ residual — overshoot in budgets' worth.
+    theta: f64,
+}
+
+fn stat<S>(arm: &'static str, circuit: &str, b: &dyn analog::RuleBatch<S>, s: &S) -> Option<ContractStat> {
+    let total = b.count();
+    (total > 0).then(|| ContractStat {
+        kind: short_kind(b.kind()),
+        arm,
+        circuit: circuit.to_string(),
+        total,
+        violated: b.violations(s) as usize,
+        na: b.inapplicable(s) as usize,
+        usage: b.worst_usage(s),
+        theta: b.residual(s),
+    })
 }
 
 /// `(bbox area µm², device area / bbox area %)` from device half-extents.
@@ -186,20 +207,21 @@ fn run_circuit(
     );
 
     // Per-constraint-type satisfaction: the run's own cell-space placement
-    // rules, evaluated against the final layout.
-    let mut contracts = Vec::new();
-    for batch in sol.placement.hard.iter().chain(sol.placement.cost.iter()) {
-        let total = batch.count();
-        if total == 0 {
-            continue;
-        }
-        contracts.push(ContractStat {
-            kind: short_kind(batch.kind()),
-            total,
-            violated: batch.violations(&sol.layout) as usize,
-            worst: batch.worst_cost(&sol.layout),
-        });
-    }
+    // rules against the final layout (a cost copy of a hard/budget batch is
+    // skipped), and the routing rules against the final routes.
+    let (p, l) = (&sol.placement, &sol.layout);
+    let enforced: Vec<&str> = p.hard.iter().chain(&p.budget).map(|b| b.kind()).collect();
+    let mut contracts: Vec<ContractStat> = p.hard.iter().map(|b| ("hard", b))
+        .chain(p.budget.iter().map(|b| ("budget", b)))
+        .chain(p.cost.iter().filter(|b| !enforced.contains(&b.kind())).map(|b| ("cost", b)))
+        .filter_map(|(arm, b)| stat(arm, &c.name, b.as_ref(), l))
+        .collect();
+    let routing = annotator::annotate(&sol.netlist, &annotator::AnnotationConfig::default()).routing;
+    contracts.extend(
+        routing.hard.iter().map(|b| ("hard", b))
+            .chain(routing.budget.iter().map(|b| ("budget", b)))
+            .filter_map(|(arm, b)| stat(arm, &c.name, b.as_ref(), &sol.routes)),
+    );
 
     // Emit GDS (target/bench_debug/<name>/) + SVG (assets/) for the solution.
     let shapes = sol.geometry();
@@ -232,57 +254,44 @@ fn run_circuit(
 
 // ── Per-constraint-type satisfaction summary ──
 
-struct TypeStats {
-    count: usize,
-    satisfied: usize,
-    violated: usize,
-    worst_metric: f32,
-}
-
+/// One row per (kind, arm): counts, the worst budget usage (and where), Σ Θ.
 fn print_constraint_summary(all: &[&ContractStat]) {
     if all.is_empty() {
         return;
     }
-    let mut by_kind: HashMap<&str, TypeStats> = HashMap::new();
-    for c in all {
-        let e = by_kind.entry(&c.kind).or_insert(TypeStats {
-            count: 0,
-            satisfied: 0,
-            violated: 0,
-            worst_metric: 0.0,
-        });
-        e.count += c.total;
-        e.satisfied += c.total - c.violated;
-        e.violated += c.violated;
-        if c.worst > e.worst_metric {
-            e.worst_metric = c.worst;
-        }
-    }
+    let mut rows: Vec<(&str, &str)> = all.iter().map(|c| (c.kind.as_str(), c.arm)).collect();
+    rows.sort_unstable();
+    rows.dedup();
     println!(
-        "\n  {:<24} {:>5} {:>5} {:>5} {:>6}  {:>12}",
-        "Constraint type", "total", "sat", "viol", "rate", "worst(cost)"
+        "\n  {:<20} {:<6} {:>5} {:>5} {:>5} {:>4} {:>6}  {:>9} {:<16} {:>8}",
+        "Constraint type", "arm", "total", "sat", "viol", "n/a", "rate", "max use", "(at)", "Θ"
     );
-    println!("  {}", "-".repeat(72));
-    let mut kinds: Vec<&&str> = by_kind.keys().collect();
-    kinds.sort();
-    let (mut total, mut total_sat) = (0usize, 0usize);
-    for kind in kinds {
-        let s = &by_kind[kind];
-        let rate = if s.count > 0 { s.satisfied as f64 / s.count as f64 } else { 0.0 };
-        let worst = if s.violated > 0 { format!("{:.3}", s.worst_metric) } else { "-".into() };
+    println!("  {}", "-".repeat(96));
+    let (mut total, mut sat, mut na) = (0usize, 0usize, 0usize);
+    for (kind, arm) in rows {
+        let cs: Vec<&&ContractStat> = all.iter().filter(|c| c.kind == kind && c.arm == arm).collect();
+        let n: usize = cs.iter().map(|c| c.total).sum();
+        let v: usize = cs.iter().map(|c| c.violated).sum();
+        let a: usize = cs.iter().map(|c| c.na).sum();
+        let s = n - v - a;
+        let theta: f64 = cs.iter().map(|c| c.theta).sum();
+        let worst = cs.iter().filter_map(|c| c.usage.map(|u| (u, c.circuit.as_str()))).max_by(|x, y| x.0.total_cmp(&y.0));
+        let (use_s, at) = worst.map_or(("-".into(), ""), |(u, c)| (format!("{:.3}", u), c));
+        let rate = if n > a { 100.0 * s as f64 / (n - a) as f64 } else { 100.0 };
         println!(
-            "  {:<24} {:>5} {:>5} {:>5} {:>5.0}%  {:>12}",
-            kind, s.count, s.satisfied, s.violated, rate * 100.0, worst
+            "  {kind:<20} {arm:<6} {n:>5} {s:>5} {v:>5} {a:>4} {rate:>5.0}%  {use_s:>9} {at:<16} {theta:>8.3}"
         );
-        total += s.count;
-        total_sat += s.satisfied;
+        total += n;
+        sat += s;
+        na += a;
     }
-    let overall = if total > 0 { total_sat as f64 / total as f64 } else { 0.0 };
-    println!("  {}", "-".repeat(72));
+    let overall = if total > na { 100.0 * sat as f64 / (total - na) as f64 } else { 100.0 };
+    println!("  {}", "-".repeat(96));
     println!(
-        "  {:<24} {:>5} {:>5} {:>5} {:>5.0}%",
-        "OVERALL", total, total_sat, total - total_sat, overall * 100.0
+        "  {:<20} {:<6} {:>5} {:>5} {:>5} {:>4} {:>5.0}%",
+        "OVERALL", "", total, sat, total - sat - na, na, overall
     );
+    println!("  (max use = spent fraction of the tightest rule's budget; 1.000 = at spec. n/a = nothing to check.)");
 }
 
 fn main() {

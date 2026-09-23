@@ -84,6 +84,9 @@ impl Rule for CouplingBudget {
     fn headroom(self, r: &Routes) -> f32 {
         1.0 - self.total_af(r) / self.max_coupling_af.max(1) as f32
     }
+    fn usage(self, r: &Routes) -> Option<f32> {
+        Some(self.total_af(r) / self.max_coupling_af.max(1) as f32)
+    }
     fn margin(self) -> f32 {
         f32::from(self.margin_pct) / 100.0
     }

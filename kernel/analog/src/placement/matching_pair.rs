@@ -14,20 +14,23 @@ pub(crate) fn is_fet(k: DeviceKind) -> bool {
     matches!(k, DeviceKind::Nmos | DeviceKind::Pmos)
 }
 
-/// Pelgrom matching, `σ²(ΔVth) = A²/(W·L) + S²·D²`. `cost` is the placement
-/// (gradient, `D²`) term; `satisfied`/`residual` check the area (random) term
-/// against the tier budget.
+/// Vth gradient over Pelgrom `A_Vth`, 1/µm². Both scale with oxide thickness,
+/// so the ratio carries across processes (≈1 µV/µm over ≈4 mV·µm).
+pub const GRADIENT_PER_AVT_UM2: f32 = 2.5e-4;
+
+/// Pelgrom matching, `σ²(ΔVth) = A²/(W·L) + S²·D²`. `cost` pulls the pair
+/// together (the `D²` term). The check is placement's share: the gradient term
+/// `S·D` must stay within `gradient_share` of the random term `A/√(W·L)` the
+/// sizing bought, so `A` cancels and only `S/A` ([`GRADIENT_PER_AVT_UM2`]) is
+/// needed.
 #[derive(Clone, Copy)]
 pub struct MatchingPair {
     pub a: Target,
     pub b: Target,
-    /// ΔVth budget, mV·10.
-    pub max_dvth_mv10: i32,
-    /// Width ratio `(num, den)`. Read by nothing: integer ratios are enforced
-    /// by `cell::Unitization`.
-    pub w_ratio: (u16, u16),
-    /// Pelgrom `A_Vth`, µV·µm.
-    pub avt_uv_um: i32,
+    /// Gate area `W·L·fingers` of one device, µm² (from the netlist).
+    pub gate_um2: f32,
+    /// Allowed `σ_gradient / σ_random`.
+    pub gradient_share: f32,
     pub matching: Matching,
 }
 
@@ -51,12 +54,13 @@ impl Rule for MatchingPair {
         (dx * dx + dy * dy) * 1e-3
     }
     fn satisfied(self, l: &Layout) -> bool {
-        let (sigma_uv, budget_uv) = self.mismatch_uv(l);
-        sigma_uv <= budget_uv
+        self.gradient_over_random(l) <= self.gradient_share
     }
     fn residual(self, l: &Layout) -> f32 {
-        let (sigma_uv, budget_uv) = self.mismatch_uv(l);
-        crate::rule::over(sigma_uv - budget_uv, budget_uv)
+        crate::rule::over(self.gradient_over_random(l) - self.gradient_share, self.gradient_share)
+    }
+    fn usage(self, l: &Layout) -> Option<f32> {
+        Some(self.gradient_over_random(l) / self.gradient_share.max(f32::EPSILON))
     }
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
@@ -64,14 +68,16 @@ impl Rule for MatchingPair {
 }
 
 impl MatchingPair {
-    /// `(A_Vth/√(W·L), budget)` in µV, with `W·L` from `a`'s drawn extents.
-    fn mismatch_uv(self, l: &Layout) -> (f32, f32) {
-        let (hw, hh) = l.extent(self.a);
-        let w_um = (2 * hw) as f32 / 1000.0;
-        let l_um = (2 * hh) as f32 / 1000.0;
-        let area_um2 = (w_um * l_um).max(1e-6);
-        (self.avt_uv_um as f32 / area_um2.sqrt(), self.max_dvth_mv10 as f32 * 100.0)
+    fn gradient_over_random(self, l: &Layout) -> f32 {
+        let (ax, ay) = l.centre(self.a);
+        let (bx, by) = l.centre(self.b);
+        gradient_over_random(((ax - bx) as f32).hypot((ay - by) as f32), self.gate_um2)
     }
+}
+
+/// `σ_gradient / σ_random = (S/A)·D·√(W·L)` for devices `d_nm` apart.
+pub(crate) fn gradient_over_random(d_nm: f32, gate_um2: f32) -> f32 {
+    GRADIENT_PER_AVT_UM2 * (d_nm / 1000.0) * gate_um2.max(0.0).sqrt()
 }
 
 /// `a`, `b` form a differential pair: same FET kind, shared non-rail source,
@@ -100,4 +106,43 @@ pub(crate) fn is_supply(hg: &BipartiteHypergraph, net: pnr_core::NetId) -> bool 
     let n = name.to_ascii_lowercase();
     const ROOTS: &[&str] = &["vdd", "vss", "vcc", "vee", "vpwr", "vgnd", "vpb", "vnb", "avdd", "avss", "dvdd", "dvss"];
     ROOTS.iter().any(|r| n.starts_with(r)) || n.contains("gnd")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pnr_core::ids::DeviceId;
+
+    fn at(xb: i32) -> Layout {
+        Layout {
+            x: vec![0, xb],
+            y: vec![0, 0],
+            hw: vec![500; 2],
+            hh: vec![500; 2],
+            axis: vec![0],
+            groups: vec![],
+            orient: vec![pnr_core::Orient::default(); 2],
+            variant: vec![0; 2],
+            branch: Vec::new(),
+            power_uw: vec![0; 2],
+            temp_mc: vec![0; 2],
+        }
+    }
+
+    #[test]
+    fn distance_and_device_area_both_drive_the_check() {
+        let p = |gate_um2| MatchingPair {
+            a: Target::Device(DeviceId(0)),
+            b: Target::Device(DeviceId(1)),
+            gate_um2,
+            gradient_share: 0.3,
+            matching: Matching::Cross,
+        };
+        // 20 µm² at 20 µm: ≈0.09 of σ_random — well inside.
+        assert!(p(20.0).satisfied(&at(20_000)));
+        // The same pair 1 mm apart has spent its share.
+        assert!(!p(20.0).satisfied(&at(1_000_000)));
+        // A bigger device buys less random mismatch, so the same distance costs more.
+        assert!(p(2_000.0).usage(&at(20_000)) > p(20.0).usage(&at(20_000)));
+    }
 }
