@@ -261,7 +261,9 @@ pub(crate) fn detailed_router(
     cfg.pitch = pdk.routing_pitch(cfg.wire_width, &stack);
     cfg.spacing = layers
         .iter()
-        .map(|&l| (l, pdk.min_spacing(l.0).unwrap_or(0), pdk.wide_spacing(l.0)))
+        .copied()
+        .chain(cuts.iter().map(|&(c, ..)| c))
+        .map(|l| (l, pdk.min_spacing(l.0).unwrap_or(0), pdk.wide_spacing(l.0)))
         .collect();
     // Fatten caps: the deck's `cell.route_signal_width`/`route_supply_width`,
     // else 2 wire widths for signals and supply just under the stack's widest

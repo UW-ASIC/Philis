@@ -476,6 +476,51 @@ impl DetailedRoute {
             }
         }
 
+        // Via arrays: a cut between two fattened trunks becomes as many cuts as fit
+        // in their overlap (deck cut size, cut spacing, pad enclosure).
+        for wires in routes.wires.iter_mut() {
+            // Largest same-net rect on `l` that fully covers `r`.
+            let best = |wires: &[Shape], l: LayerId, r: Rect| {
+                wires
+                    .iter()
+                    .filter(|m| m.layer == l && contains(m.rect, r))
+                    .map(|m| m.rect)
+                    .max_by_key(|m| i64::from(m.w) * i64::from(m.h))
+            };
+            let mut out = Vec::with_capacity(wires.len());
+            for c in wires.iter() {
+                let Some(i) = cuts.iter().position(|&(l, ..)| l == c.layer) else {
+                    out.push(*c);
+                    continue;
+                };
+                let (_, size, below, above) = cuts[i];
+                let enc = (below.max(above) - size) / 2;
+                let (Some(a), Some(b)) = (best(wires, layers[i], c.rect), best(wires, layers[i + 1], c.rect)) else {
+                    out.push(*c);
+                    continue;
+                };
+                let (x, y) = (a.x.max(b.x) + enc, a.y.max(b.y) + enc);
+                let w = (a.x + a.w).min(b.x + b.w) - enc - x;
+                let h = (a.y + a.h).min(b.y + b.h) - enc - y;
+                let pitch = size + cfg.space(c.layer, 0, 0, size);
+                let (nx, ny) = ((w - size) / pitch + 1, (h - size) / pitch + 1);
+                if nx * ny < 2 {
+                    out.push(*c);
+                    continue;
+                }
+                // Centred in the overlap, snapped to the manufacturing grid.
+                let snap = |v: i32| v.div_euclid(MFG_GRID) * MFG_GRID;
+                let x0 = snap(x + (w - (nx - 1) * pitch - size) / 2);
+                let y0 = snap(y + (h - (ny - 1) * pitch - size) / 2);
+                for ix in 0..nx {
+                    for iy in 0..ny {
+                        out.push(Shape { layer: c.layer, rect: Rect { x: x0 + ix * pitch, y: y0 + iy * pitch, w: size, h: size } });
+                    }
+                }
+            }
+            *wires = out;
+        }
+
         // Same-net sliver and notch filling (never within spacing of foreign metal).
         let flat: Vec<(usize, Shape)> =
             routes.wires.iter().enumerate().flat_map(|(i, w)| w.iter().map(move |s| (i, *s))).collect();
@@ -1404,6 +1449,18 @@ mod tests {
         assert_eq!(widest(0), Some(1_000));
         assert_eq!(widest(1), Some(290));
         assert!(report.budget_violations.is_empty(), "{:?}", report.budget_violations.iter().map(|v| &v.rule).collect::<Vec<_>>());
+    }
+
+    /// A fattened supply trunk that changes layer gets a via array, not one cut.
+    #[test]
+    fn fat_trunks_get_via_arrays() {
+        let global = Routes { wires: vec![Vec::new(); 1] };
+        let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 9_000)];
+        let cfg = DetailedCfg { supply_nets: vec![NetId(0)], fat_supply: 2_000, ..test_cfg() };
+        let (routes, report) = route(cfg, &global, &pins, &[], &[], &mut gr::Negotiation::new());
+        let cuts = routes.wires[0].iter().filter(|s| CUTS.iter().any(|c| c.0 == s.layer)).count();
+        assert!(cuts >= 4, "only {cuts} cuts");
+        assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
     }
 
     /// The guide for `b` is free exactly on the mirror image of `a`'s tree, and
