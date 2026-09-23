@@ -47,11 +47,8 @@ const GRADIENT_SHARE: f32 = 0.3;
 const DTI_S_MAX_NM: i32 = 200;
 const DTI_D_DTI_NM: i32 = 2_000;
 
-/// Gate area `W·L·fingers` of `d`, µm² (`0` when the netlist omits W/L).
 fn gate_um2(nl: &Netlist, d: DeviceId) -> f32 {
-    let dev = &nl.devices[d.0 as usize];
-    let (w, l) = (crate::param(dev, "w", 0) as f32, crate::param(dev, "l", 0) as f32);
-    w * l * 1e-6 * f32::from(crate::constraints::fingers(dev))
+    crate::gate_um2(&nl.devices[d.0 as usize])
 }
 
 /// Build the placement [`Requirements`] from the recognised blocks.
