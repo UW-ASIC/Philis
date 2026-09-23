@@ -103,6 +103,18 @@ impl Pdk {
                 rules.push((format!("{name}_min_spacing"), s));
             }
         }
+        // The same values under role names (`li_min_spacing` on a deck whose li
+        // role is `metal1`), so generators asking by role get this deck's number.
+        for (role, name) in pdk.roles.clone() {
+            if let Some(&(_, id)) = pdk.layers.iter().find(|(n, _)| *n == name) {
+                if let Some(w) = pdk.min_width(id.0) {
+                    rules.push((format!("{role}_min_width"), w));
+                }
+                if let Some(s) = pdk.min_spacing(id.0) {
+                    rules.push((format!("{role}_min_spacing"), s));
+                }
+            }
+        }
         rules.extend(roles.scalars);
         pdk.rules = rules;
         pdk.validate()?;
@@ -395,6 +407,26 @@ impl Pdk {
             .collect();
         steps.sort_unstable();
         steps
+    }
+
+    /// `(cut count, spacing)` of the deck's `via_array_spacing` rule on cut
+    /// `layer`: an array of at least that many cuts needs that spacing.
+    #[must_use]
+    pub fn via_array_spacing(&self, layer: u16) -> Option<(i32, i32)> {
+        let (kind, thr, lim) = (
+            self.strings.get("via_array_spacing")?,
+            self.strings.get("array_threshold")?,
+            self.strings.get("limit")?,
+        );
+        self.deck
+            .rules
+            .spec
+            .iter()
+            .filter(|s| s.kind == kind && self.deck.rules.layers_of(s).first().map(|l| l.0) == Some(layer))
+            .find_map(|s| match (self.deck.rules.param(s, thr), self.deck.rules.param(s, lim)) {
+                (Some(ParamValue::Count(n)), Some(ParamValue::Length(d))) => Some((n as i32, d.raw() as i32)),
+                _ => None,
+            })
     }
 
     /// The deck's `min_spacing` for a layer in nm, if it declares one.

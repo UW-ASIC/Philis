@@ -61,6 +61,9 @@ pub struct DetailedCfg {
     /// Per routing layer: `(min_spacing, [(width threshold, spacing)])` — the
     /// deck's width-dependent spacing, used when fattening.
     pub spacing: Vec<(LayerId, i32, Vec<(i32, i32)>)>,
+    /// Per cut layer: `(cut count, spacing)` — an array of at least that many
+    /// cuts needs the wider spacing.
+    pub array_spacing: Vec<(LayerId, i32, i32)>,
 }
 
 impl Default for DetailedCfg {
@@ -76,6 +79,7 @@ impl Default for DetailedCfg {
             fat_signal: 0,
             fat_supply: 0,
             spacing: Vec::new(),
+            array_spacing: Vec::new(),
         }
     }
 }
@@ -515,8 +519,17 @@ impl DetailedRoute {
                 let (x, y) = (a.x.max(b.x) + enc, a.y.max(b.y) + enc);
                 let w = (a.x + a.w).min(b.x + b.w) - enc - x;
                 let h = (a.y + a.h).min(b.y + b.h) - enc - y;
-                let pitch = size + cfg.space(c.layer, 0, 0, size);
-                let (nx, ny) = ((w - size) / pitch + 1, (h - size) / pitch + 1);
+                let fit = |space: i32| {
+                    let pitch = size + space;
+                    (pitch, (w - size) / pitch + 1, (h - size) / pitch + 1)
+                };
+                let (mut pitch, mut nx, mut ny) = fit(cfg.space(c.layer, 0, 0, size));
+                if let Some(&(_, count, space)) = cfg.array_spacing.iter().find(|(l, ..)| *l == c.layer) {
+                    if nx * ny >= count {
+                        (pitch, nx, ny) = fit(space);
+                    }
+                }
+                let cut_space = pitch - size;
                 if nx * ny < 2 {
                     out.push(*c);
                     continue;
@@ -525,7 +538,6 @@ impl DetailedRoute {
                 let snap = |v: i32| v.div_euclid(MFG_GRID) * MFG_GRID;
                 let x0 = snap(x + (w - (nx - 1) * pitch - size) / 2);
                 let y0 = snap(y + (h - (ny - 1) * pitch - size) / 2);
-                let cut_space = cfg.space(c.layer, 0, 0, size);
                 let before = out.len();
                 for ix in 0..nx {
                     for iy in 0..ny {
