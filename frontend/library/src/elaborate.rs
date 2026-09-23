@@ -206,7 +206,7 @@ pub(crate) type Cut = (LayerId, i32, i32, i32);
 /// conductor (li) split off as `pin_access` — cells fill li with pads, so
 /// routing on it made the track lattice itself a spacing violation.
 pub(crate) fn routing_stack(pdk: &Pdk) -> (Vec<LayerId>, Vec<Cut>, Option<(LayerId, Cut)>) {
-    let wire_w = dr::DetailedCfg::default().wire_width;
+    let wire_w = access_pad(pdk);
     let mut layers: Vec<_> = pdk
         .routing_layers()
         .into_iter()
@@ -237,6 +237,11 @@ pub(crate) fn routing_stack(pdk: &Pdk) -> (Vec<LayerId>, Vec<Cut>, Option<(Layer
     (layers, cuts, pin_access)
 }
 
+/// Pad of the first routing via: the narrowest wire every landing needs.
+fn access_pad(pdk: &Pdk) -> i32 {
+    pdk.routing_vias().first().map_or(0, |&(_, _, b, a)| b.max(a))
+}
+
 /// The detailed router configured from the deck: one track pitch that clears
 /// the worst layer's spacing *and* the widest via pad, and wires drawn at pad
 /// width (a pad wider than its wire leaves notches beside every via).
@@ -248,23 +253,26 @@ pub(crate) fn detailed_router(
 ) -> dr::DetailedRoute {
     let mut cfg = dr::DetailedCfg::default();
     let stack: Vec<_> = layers.iter().map(|l| l.0).collect();
-    cfg.pitch = cfg.pitch.max(pdk.routing_pitch(cfg.wire_width, &stack));
-    for l in layers {
-        let need = pdk.min_spacing(l.0).unwrap_or(0);
-        assert!(
-            cfg.pitch - cfg.wire_width >= need,
-            "track pitch leaves < {need} nm on {l:?}"
-        );
-        assert!(
-            pdk.min_width(l.0).is_none_or(|w| cfg.wire_width >= w),
-            "wire under {l:?} min_width"
-        );
-    }
+    // Wires are drawn at pad width (a pad wider than its wire leaves notches
+    // beside every via) and never under a layer's min_width.
     let pad_extent = cuts.iter().map(|&(.., b, a)| b.max(a)).max().unwrap_or(0);
-    cfg.pitch = cfg
-        .pitch
-        .max(pdk.routing_pitch(cfg.wire_width.max(pad_extent), &stack));
-    cfg.wire_width = cfg.wire_width.max(pad_extent);
+    let min_w = stack.iter().filter_map(|&l| pdk.min_width(l)).max().unwrap_or(0);
+    cfg.wire_width = access_pad(pdk).max(pad_extent).max(min_w);
+    cfg.pitch = pdk.routing_pitch(cfg.wire_width, &stack);
+    cfg.spacing = layers
+        .iter()
+        .map(|&l| (l, pdk.min_spacing(l.0).unwrap_or(0), pdk.wide_spacing(l.0)))
+        .collect();
+    // Fatten caps: the deck's `cell.route_signal_width`/`route_supply_width`,
+    // else 2 wire widths for signals and supply just under the stack's widest
+    // wide-metal threshold (4 wire widths when the deck has none).
+    let widest_step = layers
+        .iter()
+        .filter_map(|l| pdk.wide_spacing(l.0).last().map(|&(t, _)| t))
+        .min()
+        .map(|t| t - 2 * pdk.grid);
+    cfg.fat_signal = pnr_core::Process::rule(pdk, "route_signal_width", 2 * cfg.wire_width);
+    cfg.fat_supply = pnr_core::Process::rule(pdk, "route_supply_width", widest_step.unwrap_or(4 * cfg.wire_width));
     cfg.pin_access = pin_access;
     let (pad_layer, pad_cut) = match pin_access {
         Some((l, (c, ..))) => (Some(l), Some(c)),

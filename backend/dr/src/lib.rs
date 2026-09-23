@@ -53,31 +53,54 @@ pub struct DetailedCfg {
     /// DC current each net carries, µA, indexed by `NetId` (operating point).
     /// Trunks are widened to `current / EM_UA_PER_UM`. Empty = unknown.
     pub net_current_ua: Vec<i32>,
-    /// Supply/ground nets: sized to two wire widths when no current is known.
+    /// Supply/ground nets: fattened first, toward `fat_supply`.
     pub supply_nets: Vec<NetId>,
+    /// Widest a signal / supply trunk is fattened to when room allows, nm.
+    pub fat_signal: i32,
+    pub fat_supply: i32,
+    /// Per routing layer: `(min_spacing, [(width threshold, spacing)])` — the
+    /// deck's width-dependent spacing, used when fattening.
+    pub spacing: Vec<(LayerId, i32, Vec<(i32, i32)>)>,
 }
 
 impl Default for DetailedCfg {
     fn default() -> Self {
         Self {
-            pitch: 430,
-            wire_width: 290,
+            pitch: 0,
+            wire_width: 0,
             pin_access_spacing: 0,
             pin_access_cut_spacing: 0,
             pin_access: None,
             net_current_ua: Vec::new(),
             supply_nets: Vec::new(),
+            fat_signal: 0,
+            fat_supply: 0,
+            spacing: Vec::new(),
         }
     }
 }
 
 impl DetailedCfg {
+    /// The width `net`'s trunks are fattened toward when there is room.
+    fn fat_width(&self, net: usize) -> i32 {
+        if self.supply_nets.iter().any(|n| n.0 as usize == net) { self.fat_supply } else { self.fat_signal }
+    }
+
+    /// Spacing two same-layer shapes of widths `a`, `b` need on `layer`; `fallback`
+    /// when the layer has no entry.
+    fn space(&self, layer: LayerId, a: i32, b: i32, fallback: i32) -> i32 {
+        let Some((_, min, steps)) = self.spacing.iter().find(|(l, ..)| *l == layer) else {
+            return fallback;
+        };
+        let w = a.max(b);
+        steps.iter().filter(|&&(t, _)| w >= t).map(|&(_, s)| s).fold(*min, i32::max)
+    }
+
     /// EM-safe trunk width for `net`, nm, on the manufacturing grid (at least
     /// `wire_width`).
     fn em_width(&self, net: usize) -> i32 {
         let need = match self.net_current_ua.get(net) {
             Some(&ua) => (u64::from(ua.unsigned_abs()) * 1_000).div_ceil(EM_UA_PER_UM) as i32,
-            None if self.supply_nets.iter().any(|n| n.0 as usize == net) => 2 * self.wire_width,
             None => 0,
         };
         let step = 2 * MFG_GRID;
@@ -402,29 +425,53 @@ impl DetailedRoute {
             }
         }
 
-        // EM: widen each trunk of a high-current net where the wider rect keeps
-        // `min_space` from foreign metal; the shortfall elsewhere goes to Θ.
+        // Fatten: every trunk grows to the widest width (≤ its net's cap) that keeps
+        // `min_space` from foreign metal — other nets' wires and cell/ring metal on
+        // the same layer. EM width is the floor; a trunk that cannot reach it goes to
+        // Θ. Supply nets widen first, so they win contested room.
         let min_space = cfg.pitch - cfg.wire_width;
+        let cell_metal: Vec<Shape> = placed
+            .iter()
+            .chain(rings)
+            .flat_map(|m| &m.shapes)
+            .filter(|s| layers.contains(&s.layer))
+            .map(|s| Shape { rect: shift(s.rect), ..*s })
+            .collect();
         let mut em_shortfall = vec![0.0f64; n_nets];
-        for net in 0..n_nets {
-            let need = cfg.em_width(net);
+        let mut order: Vec<usize> = (0..n_nets).collect();
+        order.sort_by_key(|&n| std::cmp::Reverse(cfg.fat_width(n)));
+        for net in order {
+            let (need, cap) = (cfg.em_width(net), cfg.fat_width(net).max(cfg.em_width(net)));
             for i in 0..pre_access[net] {
                 let s = routes.wires[net][i];
                 let narrow = s.rect.w.min(s.rect.h);
-                if narrow >= need || s.rect.w == s.rect.h || !layers.contains(&s.layer) {
+                if narrow >= cap || s.rect.w == s.rect.h || !layers.contains(&s.layer) {
                     continue;
                 }
-                let grown = Shape { rect: widen(s.rect, need), ..s };
-                let clear = routes.wires.iter().enumerate().all(|(n, w)| {
-                    n == net
-                        || w.iter().all(|f| {
-                            !conductor_layers_meet(f, &grown, &joins) || rect_gap(f.rect, grown.rect) >= min_space
-                        })
-                });
-                if clear {
-                    routes.wires[net][i] = grown;
-                } else {
-                    em_shortfall[net] = em_shortfall[net].max(f64::from(need - narrow) / f64::from(need));
+                let narrow_of = |r: Rect| r.w.min(r.h);
+                let gap_ok = |f: &Shape, g: &Shape| {
+                    rect_gap(f.rect, g.rect) >= cfg.space(g.layer, narrow_of(f.rect), narrow_of(g.rect), min_space)
+                };
+                let clear = |g: &Shape| {
+                    routes.wires.iter().enumerate().all(|(n, w)| {
+                        n == net || w.iter().all(|f| !conductor_layers_meet(f, g, &joins) || f.layer != g.layer && rect_gap(f.rect, g.rect) >= min_space || f.layer == g.layer && gap_ok(f, g))
+                    }) && cell_metal.iter().all(|c| {
+                        // Cell metal the original trunk already touches is its own pin.
+                        c.layer != g.layer || rect_gap(c.rect, s.rect) <= 0 || gap_ok(c, g)
+                    })
+                };
+                let step = 2 * MFG_GRID;
+                let best = (0..)
+                    .map(|k| cap - k * step)
+                    .take_while(|&w| w > narrow)
+                    .map(|w| Shape { rect: widen(s.rect, w), ..s })
+                    .find(|g| clear(g));
+                if let Some(g) = best {
+                    routes.wires[net][i] = g;
+                }
+                let got = best.map_or(narrow, |g| g.rect.w.min(g.rect.h));
+                if got < need {
+                    em_shortfall[net] = em_shortfall[net].max(f64::from(need - got) / f64::from(need));
                 }
             }
         }
@@ -450,11 +497,14 @@ impl DetailedRoute {
 }
 
 /// `r` with its narrow (cross-run) dimension grown to `w` about its centre line.
+/// Ends extend by the added half-width so an L-corner of two widened trunks fills.
 fn widen(r: Rect, w: i32) -> Rect {
     if r.w > r.h {
-        Rect { y: r.y + r.h / 2 - w / 2, h: w, ..r }
+        let e = (w - r.h) / 2;
+        Rect { x: r.x - e, y: r.y + r.h / 2 - w / 2, w: r.w + 2 * e, h: w }
     } else {
-        Rect { x: r.x + r.w / 2 - w / 2, w, ..r }
+        let e = (w - r.w) / 2;
+        Rect { x: r.x + r.w / 2 - w / 2, y: r.y - e, w, h: r.h + 2 * e }
     }
 }
 
@@ -1185,6 +1235,11 @@ fn unreachable_shapes(shapes: &[Shape]) -> usize {
 mod tests {
     use super::*;
 
+    /// sky130-like lattice: the unit tests draw fixed geometry against it.
+    fn test_cfg() -> DetailedCfg {
+        DetailedCfg { pitch: 430, wire_width: 290, ..DetailedCfg::default() }
+    }
+
     const LAYERS: [LayerId; 2] = [LayerId(0), LayerId(1)];
     const CUTS: [Cut; 1] = [(LayerId(2), 100, 140, 140)];
 
@@ -1218,7 +1273,7 @@ mod tests {
             wires: vec![vec![Shape { layer: LayerId(0), rect: Rect { x: 1_000, y: 1_000, w: 17_000, h: 17_000 } }]],
         };
         let pins = [pin(0, 1_000, 1_000), pin(0, 18_000, 18_000)];
-        let (routes, report) = route(DetailedCfg::default(), &global, &pins, &[], &[], &mut gr::Negotiation::new());
+        let (routes, report) = route(test_cfg(), &global, &pins, &[], &[], &mut gr::Negotiation::new());
         assert_eq!(routes.wires.len(), 1);
         assert!(!routes.wires[0].is_empty());
         assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
@@ -1228,7 +1283,7 @@ mod tests {
     #[test]
     fn empty_coarse_gives_empty_routes() {
         let global = Routes { wires: vec![Vec::new(); 3] };
-        let (routes, report) = route(DetailedCfg::default(), &global, &[], &[], &[], &mut gr::Negotiation::new());
+        let (routes, report) = route(test_cfg(), &global, &[], &[], &[], &mut gr::Negotiation::new());
         assert_eq!(routes.wires.len(), 3);
         assert!(routes.wires.iter().all(Vec::is_empty));
         assert!(report.hard_violations.is_empty());
@@ -1242,7 +1297,7 @@ mod tests {
         let seg = |x, y, w, h| Shape { layer: LayerId(0), rect: Rect { x, y, w, h } };
         let global =
             Routes { wires: vec![vec![seg(1_100, 1_000, 16_500, 15_200)], vec![seg(2_300, 2_700, 13_700, 12_400)]] };
-        let cfg = DetailedCfg { pitch: 1_890, ..DetailedCfg::default() };
+        let cfg = DetailedCfg { pitch: 1_890, ..test_cfg() };
         let (routes, _) = route(cfg, &global, &pins, &[], &[], &mut gr::Negotiation::new());
         for &(net, r, _) in &pins {
             let hit = routes.wires[net.0 as usize].iter().any(|s| touches(s, r));
@@ -1268,7 +1323,7 @@ mod tests {
         };
         let global = Routes { wires: Vec::new() };
         let (routes, report) =
-            route(DetailedCfg::default(), &global, &[], &[], &[ring.clone()], &mut gr::Negotiation::new());
+            route(test_cfg(), &global, &[], &[], &[ring.clone()], &mut gr::Negotiation::new());
         for p in &ring.pins {
             assert!(routes.wires[0].iter().any(|s| touches(s, p.at)), "ring pin at ({}, {}) untouched", p.at.x, p.at.y);
         }
@@ -1288,7 +1343,7 @@ mod tests {
             bbox: Rect { x: 6_000, y: -5_000, w: 3_000, h: 30_000 },
         };
         let (routes, report) =
-            route(DetailedCfg::default(), &global, &pins, &[wall], &[], &mut gr::Negotiation::new());
+            route(test_cfg(), &global, &pins, &[wall], &[], &mut gr::Negotiation::new());
         assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
         for &(_, r, _) in &pins {
             assert!(routes.wires[0].iter().any(|s| touches(s, r)));
@@ -1313,7 +1368,7 @@ mod tests {
     /// History survives the call and changes the next one.
     #[test]
     fn negotiation_persists_across_calls() {
-        let cfg = DetailedCfg { pitch: 1_300, ..DetailedCfg::default() };
+        let cfg = DetailedCfg { pitch: 1_300, ..test_cfg() };
         // Five nets whose terminals all sit within one pitch of the same two rows:
         // every net wants the same horizontal track.
         let pins: Vec<(NetId, Rect, LayerId)> = (0..5u16)
@@ -1343,7 +1398,7 @@ mod tests {
     fn high_current_net_is_widened() {
         let global = Routes { wires: vec![Vec::new(); 2] };
         let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 1_000), pin(1, 1_000, 9_000), pin(1, 12_000, 9_000)];
-        let cfg = DetailedCfg { net_current_ua: vec![1_000, 10], ..DetailedCfg::default() };
+        let cfg = DetailedCfg { net_current_ua: vec![1_000, 10], ..test_cfg() };
         let (routes, report) = route(cfg, &global, &pins, &[], &[], &mut gr::Negotiation::new());
         let widest = |n: usize| routes.wires[n].iter().filter(|s| s.rect.w != s.rect.h).map(|s| s.rect.w.min(s.rect.h)).max();
         assert_eq!(widest(0), Some(1_000));
@@ -1379,7 +1434,7 @@ mod tests {
             })
             .collect();
         let global = Routes { wires: vec![Vec::new(); 4] };
-        let (routes, _) = route(DetailedCfg::default(), &global, &pins, &[], &[], &mut gr::Negotiation::new());
+        let (routes, _) = route(test_cfg(), &global, &pins, &[], &[], &mut gr::Negotiation::new());
         let hits = |a: Rect, b: Rect| a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
         for (i, na) in routes.wires.iter().enumerate() {
             for nb in routes.wires.iter().skip(i + 1) {

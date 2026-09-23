@@ -369,6 +369,34 @@ impl Pdk {
         wire_width + worst
     }
 
+    /// `(width threshold, spacing)` of every `wide_dependent_spacing` rule on
+    /// `layer`, nm, ascending by threshold: a shape at least that wide needs
+    /// that spacing (the binding one is the largest threshold it reaches).
+    #[must_use]
+    pub fn wide_spacing(&self, layer: u16) -> Vec<(i32, i32)> {
+        let (Some(kind), Some(thr), Some(lim)) = (
+            self.strings.get("wide_dependent_spacing"),
+            self.strings.get("width_threshold"),
+            self.strings.get("limit"),
+        ) else {
+            return Vec::new();
+        };
+        let len = |s, p| match self.deck.rules.param(s, p) {
+            Some(ParamValue::Length(d)) => Some(d.raw() as i32),
+            _ => None,
+        };
+        let mut steps: Vec<(i32, i32)> = self
+            .deck
+            .rules
+            .spec
+            .iter()
+            .filter(|s| s.kind == kind && self.deck.rules.layers_of(s).first().map(|l| l.0) == Some(layer))
+            .filter_map(|s| Some((len(s, thr)?, len(s, lim)?)))
+            .collect();
+        steps.sort_unstable();
+        steps
+    }
+
     /// The deck's `min_spacing` for a layer in nm, if it declares one.
     #[must_use]
     pub fn min_spacing(&self, layer: u16) -> Option<i32> {

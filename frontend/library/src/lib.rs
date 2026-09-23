@@ -133,7 +133,16 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         pdk,
         netlist: &netlist,
         net_names: netlist.nets.iter().map(|n| n.name.clone()).collect(),
-        d_router: elaborate::detailed_router(pdk, &layers, &cuts, pin_access),
+        d_router: {
+            let mut r = elaborate::detailed_router(pdk, &layers, &cuts, pin_access);
+            r.cfg.supply_nets = problem
+                .net_classes
+                .iter()
+                .filter(|c| matches!(c.class, analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground))
+                .map(|c| c.net)
+                .collect();
+            r
+        },
         layers,
         cuts,
         problem,
