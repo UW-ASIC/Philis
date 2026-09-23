@@ -499,6 +499,8 @@ impl DetailedRoute {
                     .max_by_key(|m| i64::from(m.w) * i64::from(m.h))
             };
             let mut out = Vec::with_capacity(wires.len());
+            // Array cuts placed for earlier cuts of this net.
+            let mut placed: Vec<Shape> = Vec::new();
             for c in wires.iter() {
                 let Some(i) = cuts.iter().position(|&(l, ..)| l == c.layer) else {
                     out.push(*c);
@@ -528,7 +530,11 @@ impl DetailedRoute {
                 for ix in 0..nx {
                     for iy in 0..ny {
                         let r = Rect { x: x0 + ix * pitch, y: y0 + iy * pitch, w: size, h: size };
-                        let clear = all_cuts.iter().all(|&(n, f)| n == net || f.layer != c.layer || rect_gap(f.rect, r) >= cut_space);
+                        // Cut spacing binds same-net cuts too: every other original cut,
+                        // and every array cut already placed.
+                        let ok = |f: &Shape| f.layer != c.layer || rect_gap(f.rect, r) >= cut_space;
+                        let clear = all_cuts.iter().all(|&(n, f)| (n == net && f.rect == c.rect) || ok(&f))
+                            && out[before..].iter().chain(&placed).all(ok);
                         if clear {
                             out.push(Shape { layer: c.layer, rect: r });
                         }
@@ -537,6 +543,7 @@ impl DetailedRoute {
                 if out.len() == before {
                     out.push(*c);
                 }
+                placed.extend_from_slice(&out[before..]);
             }
             *wires = out;
         }
