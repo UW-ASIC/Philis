@@ -17,7 +17,6 @@ use gp::mechanics::{
     analog_cost, analog_phi, analog_theta, choose_variants, encroach,
     hpwl, report, snap, variant_extents, Nets, SplitMix64,
 };
-use gp::CLEARANCE_NM;
 
 const MAX_ITERS: u32 = 220;
 /// Inner moves per epoch = `MOVES_PER_CELL · n`.
@@ -26,7 +25,6 @@ const ALPHA: f64 = 0.93;
 /// Initial displacement window, fraction of the die span.
 const RANGE0: f32 = 0.4;
 const RANGE_DECAY: f32 = 0.96;
-const GRID: i32 = 5;
 /// Clearance-inflated area / move-region area floor: the region the SA may use
 /// is grown until everything fits at this fill.
 const REGION_FILL: f64 = 0.5;
@@ -87,6 +85,7 @@ struct Sa<'a> {
     prices: &'a gp::Prices,
     fixed: &'a [bool],
     clearance: i32,
+    grid: i32,
     snap: Snap,
     moved: Vec<usize>,
 }
@@ -98,7 +97,7 @@ impl<'a> Sa<'a> {
         reqs: &'a Requirements<Layout>,
         prices: &'a gp::Prices,
         fixed: &'a [bool],
-        clearance: i32,
+        rules: gp::Rules,
     ) -> Self {
         Sa {
             cell_nets: nets.cell_nets(n),
@@ -106,7 +105,8 @@ impl<'a> Sa<'a> {
             reqs,
             prices,
             fixed,
-            clearance,
+            clearance: rules.clearance,
+            grid: rules.grid,
             snap: Snap::default(),
             moved: Vec::new(),
         }
@@ -154,7 +154,7 @@ impl<'a> Sa<'a> {
         if phi1.0 > phi0.0 {
             for b in &self.reqs.hard {
                 if b.violations(l) > 0 {
-                    b.project(l, GRID);
+                    b.project(l, self.grid);
                 }
             }
             for i in (0..l.x.len()).filter(|&i| self.is_fixed(i)) {
@@ -195,8 +195,10 @@ pub fn place(
     reqs: &Requirements<Layout>,
     fixed: &[bool],
     prices: &mut gp::Prices,
+    rules: gp::Rules,
     seed: u64,
 ) -> (Layout, Report) {
+    let gp::Rules { grid, clearance } = rules;
     let n = coarse.x.len();
     let mut rng = SplitMix64::new(seed);
     let mut l = Layout {
@@ -249,7 +251,7 @@ pub fn place(
         ymin = ymin.min(l.y[i] - l.hh[i]);
         xmax = xmax.max(l.x[i] + l.hw[i]);
         ymax = ymax.max(l.y[i] + l.hh[i]);
-        need += f64::from(2 * l.hw[i] + CLEARANCE_NM) * f64::from(2 * l.hh[i] + CLEARANCE_NM);
+        need += f64::from(2 * l.hw[i] + clearance) * f64::from(2 * l.hh[i] + clearance);
     }
     let side = (need / REGION_FILL).sqrt() as i32;
     let grow = |lo: &mut i32, hi: &mut i32| {
@@ -265,7 +267,7 @@ pub fn place(
     let clamp_x = |c: i32, half: i32| c.clamp(xmin + half, (xmax - half).max(xmin + half));
     let clamp_y = |c: i32, half: i32| c.clamp(ymin + half, (ymax - half).max(ymin + half));
 
-    let mut sa = Sa::new(nets, n, reqs, prices, fixed, CLEARANCE_NM);
+    let mut sa = Sa::new(nets, n, reqs, prices, fixed, rules);
 
     // t0 = 0.02 · mean |ΔPEX| over probe moves: refine gp, don't randomise it.
     let mut range = RANGE0;
@@ -285,7 +287,7 @@ pub fn place(
     let can_rotate = l.orient.len() == n;
     let can_reshape = variants.len() == n && l.variant.len() == n;
     let moves_per_epoch = MOVES_PER_CELL * n;
-    let range_min = GRID as f32 / span;
+    let range_min = grid as f32 / span;
 
     // A fixed schedule: stopping at a low accept rate (the old early exit)
     // cost ota 5% C and 24% area. ponytail: ~4x dp time; revisit if runtime binds.
@@ -316,7 +318,7 @@ pub fn place(
         }
 
         // One exact projection per epoch for batches violated before any move.
-        project_hard(reqs, &mut l, fixed, GRID);
+        project_hard(reqs, &mut l, fixed, grid);
         // Thermal field is global: refresh per epoch, never per move.
         l.refresh_temps();
 
@@ -325,14 +327,14 @@ pub fn place(
     }
 
     for a in &mut l.axis {
-        *a = snap(*a, GRID);
+        *a = snap(*a, grid);
     }
     for i in 0..n {
-        l.x[i] = snap(l.x[i], GRID);
-        l.y[i] = snap(l.y[i], GRID);
+        l.x[i] = snap(l.x[i], grid);
+        l.y[i] = snap(l.y[i], grid);
     }
     // Grid snap can shave a clearance by a few nm; the legalizer restores it.
-    legalize::separate_overlaps(&mut l, reqs, fixed, GRID, CLEARANCE_NM, LEGALIZE_SWEEPS);
+    legalize::separate_overlaps(&mut l, reqs, fixed, grid, clearance, LEGALIZE_SWEEPS);
     l.refresh_temps();
 
     let Sa { nets, .. } = sa;

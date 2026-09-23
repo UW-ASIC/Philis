@@ -1,4 +1,8 @@
 use super::*;
+
+/// sky130-like placement rules the fixed-geometry tests are written against.
+const RULES: gp::Rules = gp::Rules { grid: 5, clearance: 2000 };
+const CLEARANCE_NM: i32 = RULES.clearance;
 use gp::mechanics::{analog_violations, encroachment};
 use analog::placement::symmetry::{Symmetry, SymmetryGroup};
 use analog::placement::DtiBand;
@@ -34,7 +38,7 @@ fn run(
     fixed: &[bool],
     seed: u64,
 ) -> Layout {
-    place(coarse, macros, variants, reqs, fixed, &mut gp::Prices::new(), seed).0
+    place(coarse, macros, variants, reqs, fixed, &mut gp::Prices::new(), RULES, seed).0
 }
 
 // ---- rotation ----
@@ -170,7 +174,7 @@ fn reshape_is_priced_on_where_the_pins_land() {
     let prices = gp::Prices::new();
     let nets = Nets::from_macros(&[pin_alt(0), pin_alt(0)]);
     assert_eq!(nets.count(), 1);
-    let mut sa = Sa::new(nets, 2, &reqs, &prices, &[], 0);
+    let mut sa = Sa::new(nets, 2, &reqs, &prices, &[], gp::Rules { clearance: 0, ..RULES });
     let mut rng = SplitMix64::new(1);
     let free = |c: i32, _half: i32| c;
 
@@ -217,7 +221,7 @@ fn attract_bench() -> (Requirements<Layout>, Layout) {
 fn phi_rejects_a_cost_lowering_move_that_stacks_geometry() {
     let (reqs, mut l) = attract_bench();
     let prices = gp::Prices::new();
-    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], 0);
+    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], gp::Rules { clearance: 0, ..RULES });
     let mut rng = SplitMix64::new(1);
     assert!(dpex(&sa, &mut l, 4_000) < 0.0);
     assert!(!try_move(&mut sa, &mut l, &mut rng, 1e12, 0, 4_000, 0));
@@ -241,7 +245,7 @@ fn theta_outranks_pex_so_a_budget_is_never_traded_for_parasitics() {
     let (mut reqs, mut l) = attract_bench();
     reqs.budget = vec![Box::new(vec![Separation])];
     let prices = gp::Prices::new();
-    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], 0);
+    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], gp::Rules { clearance: 0, ..RULES });
     let mut rng = SplitMix64::new(1);
     assert_eq!(analog_theta(&reqs, &l), 0.0);
     assert!(dpex(&sa, &mut l, 3_000) < 0.0);
@@ -253,7 +257,7 @@ fn theta_outranks_pex_so_a_budget_is_never_traded_for_parasitics() {
 fn metropolis_still_accepts_an_uphill_move_inside_the_pex_tier() {
     let (reqs, mut l) = attract_bench();
     let prices = gp::Prices::new();
-    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], 0);
+    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], gp::Rules { clearance: 0, ..RULES });
     let mut rng = SplitMix64::new(1);
     assert!(dpex(&sa, &mut l, -20_000) > 0.0);
     assert!(try_move(&mut sa, &mut l, &mut rng, 1e12, 0, -20_000, 0));
@@ -289,7 +293,7 @@ fn branch_flip_fires_and_is_priced() {
     let reqs = band(0, true);
     let mut l = gap_bench(100, vec![true]);
     let prices = gp::Prices::new();
-    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], 0);
+    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], gp::Rules { clearance: 0, ..RULES });
     let mut rng = SplitMix64::new(1);
     assert!(try_branch(&mut sa, &mut l, &mut rng, 0.0, 0));
     assert!(!l.branch[0]);
@@ -390,7 +394,7 @@ fn incident_encroachment_difference_matches_full_scan() {
     let prices = gp::Prices::new();
     for c in 0..cells.len() {
         for o in 0..cells.len() {
-            let mut sa = Sa::new(Nets::from_macros(&[]), cells.len(), &reqs, &prices, &[], 300);
+            let mut sa = Sa::new(Nets::from_macros(&[]), cells.len(), &reqs, &prices, &[], gp::Rules { clearance: 300, ..RULES });
             sa.moved = if c == o { vec![c] } else { vec![c, o] };
             let mut l = layout(&cells);
             let (full0, inc0) = (encroachment(&l, 300), sa.encroach_moved(&l));

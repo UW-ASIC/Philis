@@ -249,6 +249,20 @@ struct Flow<'a> {
     d_router: dr::DetailedRoute,
 }
 
+/// Placement's process numbers. Origins snap to the cells' cut lattice so
+/// every cut stays on it; the gap between cells is the widest spacing of any
+/// device layer, so wells and implants of neighbouring cells never merge.
+fn place_rules(pdk: &Pdk) -> gp::Rules {
+    use pnr_core::Process;
+    let clearance = ["nwell", "diff", "tap", "poly", "nsdm", "psdm", "li"]
+        .iter()
+        .filter_map(|&r| pdk.layer(r))
+        .filter_map(|l| pdk.min_spacing(l.0))
+        .max()
+        .unwrap_or(0);
+    gp::Rules { grid: cells::builder::cut_lattice(pdk), clearance }
+}
+
 /// One scored epoch.
 struct Epoch {
     key: LexKey,
@@ -274,7 +288,7 @@ impl Flow<'_> {
 
         // Place: coarse analytical, then legalising anneal (which may reshape).
         let macros = cellgen::realize(&cells.variants, assignment);
-        let (mut coarse, _) = gp::place(&macros, &cells.variants, placement, prices, seed);
+        let (mut coarse, _) = gp::place(&macros, &cells.variants, placement, prices, place_rules(self.pdk), seed);
         coarse.debug_check("gp::place");
         // dp reads groups as abutment permission, so it gets the diffusion-sharing
         // table; after dp, groups are the recognition table for `Target::Group`.
@@ -292,6 +306,7 @@ impl Flow<'_> {
             placement,
             &cells.fixed,
             prices,
+            place_rules(self.pdk),
             seed,
         );
         layout.debug_check_placed("dp::place");

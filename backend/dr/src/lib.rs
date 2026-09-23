@@ -448,17 +448,22 @@ impl DetailedRoute {
                 if narrow >= cap || s.rect.w == s.rect.h || !layers.contains(&s.layer) {
                     continue;
                 }
-                let narrow_of = |r: Rect| r.w.min(r.h);
-                let gap_ok = |f: &Shape, g: &Shape| {
-                    rect_gap(f.rect, g.rect) >= cfg.space(g.layer, narrow_of(f.rect), narrow_of(g.rect), min_space)
+                // A fattened trunk can merge with same-net neighbours into a polygon
+                // past any wide-metal threshold, so it (and every same-net shape it
+                // touches) keeps the layer's widest spacing from foreign metal.
+                let far = cfg.space(s.layer, i32::MAX, 0, min_space);
+                let foreign = |r: Rect| {
+                    routes.wires.iter().enumerate().filter(|&(n, _)| n != net).flat_map(|(_, w)| w).any(|f| {
+                        conductor_layers_meet(f, &Shape { rect: r, ..s }, &joins)
+                            && rect_gap(f.rect, r) < if f.layer == s.layer { far } else { min_space }
+                    }) || cell_metal.iter().any(|c| c.layer == s.layer && rect_gap(c.rect, s.rect) > 0 && rect_gap(c.rect, r) < far)
                 };
                 let clear = |g: &Shape| {
-                    routes.wires.iter().enumerate().all(|(n, w)| {
-                        n == net || w.iter().all(|f| !conductor_layers_meet(f, g, &joins) || f.layer != g.layer && rect_gap(f.rect, g.rect) >= min_space || f.layer == g.layer && gap_ok(f, g))
-                    }) && cell_metal.iter().all(|c| {
-                        // Cell metal the original trunk already touches is its own pin.
-                        c.layer != g.layer || rect_gap(c.rect, s.rect) <= 0 || gap_ok(c, g)
-                    })
+                    !foreign(g.rect)
+                        && routes.wires[net]
+                            .iter()
+                            .filter(|t| t.layer == g.layer && rect_gap(t.rect, g.rect) <= 0)
+                            .all(|t| !foreign(t.rect))
                 };
                 let step = 2 * MFG_GRID;
                 let best = (0..)
@@ -478,7 +483,13 @@ impl DetailedRoute {
 
         // Via arrays: a cut between two fattened trunks becomes as many cuts as fit
         // in their overlap (deck cut size, cut spacing, pad enclosure).
-        for wires in routes.wires.iter_mut() {
+        let all_cuts: Vec<(usize, Shape)> = routes
+            .wires
+            .iter()
+            .enumerate()
+            .flat_map(|(n, w)| w.iter().filter(|c| cuts.iter().any(|&(l, ..)| l == c.layer)).map(move |c| (n, *c)))
+            .collect();
+        for (net, wires) in routes.wires.iter_mut().enumerate() {
             // Largest same-net rect on `l` that fully covers `r`.
             let best = |wires: &[Shape], l: LayerId, r: Rect| {
                 wires
@@ -512,10 +523,19 @@ impl DetailedRoute {
                 let snap = |v: i32| v.div_euclid(MFG_GRID) * MFG_GRID;
                 let x0 = snap(x + (w - (nx - 1) * pitch - size) / 2);
                 let y0 = snap(y + (h - (ny - 1) * pitch - size) / 2);
+                let cut_space = cfg.space(c.layer, 0, 0, size);
+                let before = out.len();
                 for ix in 0..nx {
                     for iy in 0..ny {
-                        out.push(Shape { layer: c.layer, rect: Rect { x: x0 + ix * pitch, y: y0 + iy * pitch, w: size, h: size } });
+                        let r = Rect { x: x0 + ix * pitch, y: y0 + iy * pitch, w: size, h: size };
+                        let clear = all_cuts.iter().all(|&(n, f)| n == net || f.layer != c.layer || rect_gap(f.rect, r) >= cut_space);
+                        if clear {
+                            out.push(Shape { layer: c.layer, rect: r });
+                        }
                     }
+                }
+                if out.len() == before {
+                    out.push(*c);
                 }
             }
             *wires = out;

@@ -118,16 +118,20 @@ fn keys(reqs: &Requirements<Layout>) -> Vec<(&'static str, u32)> {
         .collect()
 }
 
-/// Edge-to-edge clearance between cells, nm (shared with `dp`). sky130's nwell
-/// spacing is the binding inter-device rule; below it wells/implants merge and
-/// LVS aborts.
-pub const CLEARANCE_NM: i32 = 2000;
+/// Process numbers placement needs, from the deck (shared with `dp`).
+#[derive(Clone, Copy, Debug)]
+pub struct Rules {
+    /// Every cell origin snaps to it, nm.
+    pub grid: i32,
+    /// Edge-to-edge gap between cells, nm: below it wells/implants of
+    /// different cells merge.
+    pub clearance: i32,
+}
 
 const MAX_ITERS: u32 = 500;
 const MIN_ITERS: u32 = 60;
 const OVERFLOW_TARGET: f32 = 0.15;
 const UTILIZATION: f32 = 0.4;
-const GRID: i32 = 5;
 const STEP0: f32 = 0.04;
 const STEP_MIN: f32 = 0.002;
 const STEP_DECAY: f32 = 0.995;
@@ -144,6 +148,7 @@ pub fn place(
     variants: &[VariantSpace],
     reqs: &Requirements<Layout>,
     prices: &mut Prices,
+    rules: Rules,
     seed: u64,
 ) -> (Layout, Report) {
     let n = macros.len();
@@ -154,7 +159,7 @@ pub fn place(
     prices.bind(reqs);
 
     let (hw, hh) = half_extents(&drawn);
-    let side = canvas_side(&hw, &hh, UTILIZATION, GRID);
+    let side = canvas_side(&hw, &hh, UTILIZATION, rules.grid);
     let mut l = initial_layout(&drawn, variant, side, &mut rng);
     let nets = Nets::from_macros(&drawn);
     if n == 0 {
