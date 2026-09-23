@@ -17,6 +17,12 @@ use pnr_core::Netlist;
 use crate::block::{Block, BlockKind};
 use crate::param;
 
+/// Drawn fingers: `nf`, or the `m` multiplier when larger (cells and the LVS
+/// reference both expand `max(nf, m)` unit devices).
+pub(crate) fn fingers(dev: &pnr_core::netlist::Device) -> u16 {
+    param(dev, "nf", 1).max(param(dev, "m", 1)).clamp(1, i64::from(u16::MAX)) as u16
+}
+
 #[must_use]
 pub fn assemble(netlist: &Netlist, blocks: &[Block]) -> Constraints {
     let mut c = Constraints::default();
@@ -38,7 +44,7 @@ pub fn assemble(netlist: &Netlist, blocks: &[Block]) -> Constraints {
                 b.devices.iter().copied().filter(|&d| class_of(d) == (kind, unit_w, unit_l)).collect();
             let dev_nf: Vec<u16> = devices
                 .iter()
-                .map(|&d| param(&netlist.devices[d.0 as usize], "nf", 1).clamp(1, i64::from(u16::MAX)) as u16)
+                .map(|&d| fingers(&netlist.devices[d.0 as usize]))
                 .collect();
             c.unitization.push(Unitization {
                 devices,

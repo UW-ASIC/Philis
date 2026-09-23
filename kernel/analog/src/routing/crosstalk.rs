@@ -67,6 +67,12 @@ impl Rule for CrosstalkExclusion {
         }
         (d - floor) / floor
     }
+    /// `floor / clearance`: past `1.0` the nets sit closer than the floor.
+    /// `None` when they share no layer.
+    fn usage(self, r: &Routes) -> Option<f32> {
+        let d = self.clearance(r);
+        (d != f32::MAX).then(|| self.min_spacing_nm as f32 / d.max(1.0))
+    }
     fn margin(self) -> f32 {
         f32::from(self.margin_pct) / 100.0
     }

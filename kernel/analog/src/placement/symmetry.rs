@@ -288,9 +288,8 @@ mod tests {
         let p = crate::placement::MatchingPair {
             a: Target::Device(DeviceId(0)),
             b: Target::Device(DeviceId(1)),
-            max_dvth_mv10: 50,
-            w_ratio: (1, 1),
-            avt_uv_um: 3_000,
+            gate_um2: 1.0,
+            gradient_share: 0.3,
             matching: crate::placement::Matching::Cross,
         }
         .retarget(&identity);
@@ -314,6 +313,8 @@ mod tests {
         let mut grp = crate::placement::cc::CentroidGroup {
             a_side: vec![DeviceId(0), DeviceId(2)],
             b_side: vec![DeviceId(1)],
+            gate_um2: 1.0,
+            gradient_share: 0.3,
         };
         grp.retarget(&cell_of);
         assert_eq!(grp.a_side, vec![DeviceId(0), DeviceId(1)]);

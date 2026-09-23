@@ -7,6 +7,9 @@ edition = "2021"
 library = { path = "../frontend/library" }
 verify = { path = "../backend/verify" }
 pnr_core = { path = "../kernel/core" }
+# The constraint table re-derives the routing rules the flow scored.
+annotator = { path = "../backend/annotator" }
+analog = { path = "../kernel/analog" }
 serde_json = "1"
 
 [dev-dependencies]

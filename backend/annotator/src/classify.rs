@@ -14,28 +14,28 @@ const D: usize = 1;
 const S: usize = 2;
 const B: usize = 3;
 
-/// Budget defaults per class.
+/// Thin-oxide gate capacitance, aF/µm² — turns the netlist's gate areas into
+/// the load a net drives.
 ///
-/// A sensitive reference gets an order more spacing and a tighter coupling cap
-/// than a plain signal, because that is the whole point of classifying it; a
-/// supply gets a loose coupling budget but a tight resistance one (IR drop), which
-/// is the opposite trade.
+/// ponytail: representative across bulk nodes (≈5–15 fF/µm²); no deck carries
+/// `Cox` yet. Read it from the PDK when one does.
+pub const COX_AF_PER_UM2: f32 = 8_000.0;
+
+/// Budgets as multiples of the capacitive load `c_load_af` the net drives:
+/// `(wire C, total coupling)`, aF. A sensitive net (matched gate, bias rail)
+/// may add at most its own load as wire, and again as coupling; a plain signal
+/// twice that. Rails and substrate are low-impedance: unbudgeted.
 ///
-/// ponytail: one table, not a PDK read. Real values are process- and
-/// tier-dependent; when the PDK grows a routing section, source them from it and
-/// keep this as the fallback.
-fn budgets(class: NetClass) -> (i64, i64, i64, bool) {
-    // (max_r_mohm, max_c_af, max_coupling_af, shield)
+/// ponytail: sized so minimum-size gates (rc_filter's 0.2 um2 inverter, whose
+/// ring-to-ring wire alone is ~70% of its gate C) stay routable; precision
+/// targets (10% wire / 2% coupling) are what a matched stage would want and
+/// flag chain4/quad/rc_filter today. Rail aggressors count as coupling here.
+fn budgets(class: NetClass, c_load_af: f32) -> (Option<i64>, Option<i64>) {
+    let frac = |w: f32, k: f32| (Some((w * c_load_af) as i64), Some((k * c_load_af) as i64));
     match class {
-        // Tight on everything, and shielded: this is the net whose noise budget
-        // sets the circuit's precision.
-        NetClass::Sensitive => (200_000, 20_000_000, 2_000_000, true),
-        // Clocks are aggressors, not victims: bound what they inject.
-        NetClass::Clock => (500_000, 50_000_000, 5_000_000, true),
-        // IR drop dominates; coupling barely matters on a low-impedance rail.
-        NetClass::Supply | NetClass::Ground => (50_000, 1_000_000_000, 100_000_000, false),
-        NetClass::Substrate => (100_000, 1_000_000_000, 100_000_000, false),
-        NetClass::Signal => (1_000_000, 100_000_000, 20_000_000, false),
+        NetClass::Sensitive => frac(1.0, 1.0),
+        NetClass::Signal | NetClass::Clock => frac(2.0, 2.0),
+        NetClass::Supply | NetClass::Ground | NetClass::Substrate => (None, None),
     }
 }
 
@@ -44,17 +44,23 @@ fn budgets(class: NetClass) -> (i64, i64, i64, bool) {
 /// `sensitive_devices` are the devices whose matching the layout must protect —
 /// the annotator's matched pairs. A net feeding one of their gates is the
 /// small-signal path whose corruption shows up directly as offset.
+///
+/// `gate_um2` (per device, `0` for non-FETs) sizes the budgets: a net's load is
+/// the gate area it drives; a net driving no gate (a drain, an output) is held
+/// to the circuit's smallest gate load. No FET gates at all: unbudgeted.
 #[must_use]
 pub fn classify(
     hg: &BipartiteHypergraph,
     roles: &[NetRole],
     sensitive_devices: &[bool],
+    gate_um2: &[f32],
 ) -> Vec<NetClassification> {
     let n_nets = hg.net_names.len();
     let mut touches_gate = vec![false; n_nets];
     let mut touches_channel = vec![false; n_nets];
     let mut touches_bulk = vec![false; n_nets];
     let mut gate_of_sensitive = vec![false; n_nets];
+    let mut load_um2 = vec![0.0f32; n_nets];
 
     for (d, nets) in hg.device_nets.iter().enumerate() {
         let mark = |slot: usize, v: &mut [bool]| {
@@ -63,6 +69,9 @@ pub fn classify(
             }
         };
         mark(G, &mut touches_gate);
+        if let Some(n) = nets.get(G) {
+            load_um2[n.0 as usize] += gate_um2[d];
+        }
         if sensitive_devices[d] {
             mark(G, &mut gate_of_sensitive);
         }
@@ -71,6 +80,7 @@ pub fn classify(
         mark(B, &mut touches_bulk);
     }
 
+    let smallest = load_um2.iter().copied().filter(|&a| a > 0.0).reduce(f32::min);
     (0..n_nets)
         .map(|i| {
             let class = classify_one(
@@ -80,15 +90,9 @@ pub fn classify(
                 touches_channel[i],
                 touches_bulk[i],
             );
-            let (r, c, coup, shield) = budgets(class);
-            NetClassification {
-                net: NetId(i as u16),
-                class,
-                shielding_required: shield,
-                c_budget_af: Some(c),
-                r_budget_mohm: Some(r),
-                max_coupling_af: Some(coup),
-            }
+            let load = if load_um2[i] > 0.0 { Some(load_um2[i]) } else { smallest };
+            let (c_budget_af, max_coupling_af) = load.map_or((None, None), |a| budgets(class, a * COX_AF_PER_UM2));
+            NetClassification { net: NetId(i as u16), class, c_budget_af, max_coupling_af }
         })
         .collect()
 }
@@ -179,16 +183,13 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_nets_get_the_tightest_budgets() {
-        let (r_s, c_s, coup_s, shield_s) = budgets(NetClass::Sensitive);
-        let (r_g, c_g, coup_g, shield_g) = budgets(NetClass::Signal);
-        assert!(coup_s < coup_g, "a reference must tolerate less coupling than a signal");
-        assert!(c_s < c_g && r_s < r_g);
-        assert!(shield_s && !shield_g, "only the sensitive net is shielded");
-
-        // Supplies invert the trade: loose coupling, tight resistance (IR drop).
-        let (r_v, _, coup_v, _) = budgets(NetClass::Supply);
-        assert!(r_v < r_s, "a rail is the tightest on resistance");
-        assert!(coup_v > coup_g, "but the most tolerant of coupling");
+    fn budgets_scale_with_the_load_and_tighten_on_sensitive_nets() {
+        let (c_s, k_s) = budgets(NetClass::Sensitive, 100_000.0);
+        let (c_g, k_g) = budgets(NetClass::Signal, 100_000.0);
+        assert!(k_s < k_g && c_s < c_g, "a reference tolerates less than a signal");
+        // 100 fF of gate: a sensitive net gets 100 fF of wire and of coupling.
+        assert_eq!((c_s, k_s), (Some(100_000), Some(100_000)));
+        assert!(budgets(NetClass::Sensitive, 1_000_000.0).1 > k_s, "a bigger load tolerates more");
+        assert_eq!(budgets(NetClass::Supply, 100_000.0), (None, None), "rails are unbudgeted");
     }
 }

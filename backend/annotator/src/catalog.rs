@@ -261,7 +261,8 @@ pub const CROSS_COUPLED_SPLIT_SOURCE: Pattern = Pattern {
 // ── 1.4 Cascode structures ──
 
 /// Simple cascode: drain of bottom connects to source of top.
-/// Same type. Used for high output impedance.
+/// Same type, distinct gates (a shared gate is a series stack). Used for high
+/// output impedance.
 pub const CASCODE: Pattern = Pattern {
     name: "cascode",
     priority: 7,
@@ -271,6 +272,7 @@ pub const CASCODE: Pattern = Pattern {
     ],
     links: &[
         eq(0, "D", 1, "S"),
+        ne(0, "G", 1, "G"),
     ],
 };
 
@@ -352,6 +354,7 @@ pub const SOURCE_FOLLOWER: Pattern = Pattern {
     ],
     links: &[
         eq(0, "D", 1, "S"), // current source drain = follower source
+        ne(0, "G", 1, "G"), // bias vs input: a shared gate is a series stack
     ],
 };
 
@@ -429,9 +432,10 @@ pub const LATCH_HALF: Pattern = Pattern {
 /// Series stack: same-type, source of top = drain of bottom,
 /// SAME gate (series combination for effective L doubling or
 /// high-voltage tolerance). Different from cascode where gates differ.
+/// Outranks `mirror_pair_split_source`, which a shared-gate chain also fits.
 pub const SERIES_STACK: Pattern = Pattern {
     name: "series_stack",
-    priority: 6,
+    priority: 7,
     slots: &[
         S_ANY,
         Slot { kind: SlotKind::SameTypeAs(0), size_match: SizeMatch::ExactAs(0), ..S_ANY },
@@ -439,6 +443,23 @@ pub const SERIES_STACK: Pattern = Pattern {
     links: &[
         eq(0, "D", 1, "S"),
         eq(0, "G", 1, "G"),
+    ],
+};
+
+/// Four-high series stack (one long device split in four, or a chain of
+/// pass devices): drain→source chained, one gate, exact sizes. Held as one
+/// group so the whole chain may share diffusion.
+pub const SERIES_STACK_4: Pattern = Pattern {
+    name: "series_stack_4",
+    priority: 20,
+    slots: &[S_ANY, same0_exact(), same0_exact(), same0_exact()],
+    links: &[
+        eq(0, "D", 1, "S"),
+        eq(1, "D", 2, "S"),
+        eq(2, "D", 3, "S"),
+        eq(0, "G", 1, "G"),
+        eq(0, "G", 2, "G"),
+        eq(0, "G", 3, "G"),
     ],
 };
 
@@ -617,6 +638,8 @@ pub const CASCODE_WITH_DEGENERATION: Pattern = Pattern {
     links: &[
         eq(0, "D", 1, "S"),  // cascode stack
         eq(2, "D", 0, "S"),  // degeneration device under bottom
+        ne(0, "G", 1, "G"),  // input vs cascode bias: a shared gate is a series stack
+        ne(0, "G", 2, "G"),  // input vs degeneration bias
     ],
 };
 
@@ -1042,8 +1065,8 @@ pub const CURRENT_MIRROR_4: Pattern = Pattern {
 //  Category 4: Five-device patterns (priority 30–39)
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Five-transistor OTA: M0+M1 diff pair, M2+M3 active load (mirror load),
-/// M4 tail current source.
+/// Five-transistor OTA: M0+M1 diff pair, M2+M3 load (diode mirror, or a pair
+/// biased from outside — fully differential), M4 tail current source.
 /// Classic topology from Razavi Ch.9 / Allen-Holberg Ch.6.
 pub const FIVE_TRANSISTOR_OTA: Pattern = Pattern {
     name: "five_transistor_ota",
@@ -1056,13 +1079,8 @@ pub const FIVE_TRANSISTOR_OTA: Pattern = Pattern {
             diode: DiodeReq::Any,
             gate_is_signal: true,
         },                                         // M1: diff pair B
-        Slot {
-            kind: SlotKind::ComplementOf(0),
-            size_match: SizeMatch::Any,
-            diode: DiodeReq::Required,
-            gate_is_signal: false,
-        },                                         // M2: diode load
-        Slot { kind: SlotKind::SameTypeAs(2), size_match: SizeMatch::ExactAs(2), ..S_ANY }, // M3: mirror load
+        comp(0),                                    // M2: load (diode or biased)
+        Slot { kind: SlotKind::SameTypeAs(2), size_match: SizeMatch::ExactAs(2), ..S_ANY }, // M3: load
         same0(),                                    // M4: tail
     ],
     links: &[
@@ -2600,6 +2618,7 @@ pub const PATTERNS: &[Pattern] = &[
     MIRROR_WITH_DUAL_OUTPUT,
     LEVEL_SHIFTER,
     CURRENT_MIRROR_4,
+    SERIES_STACK_4,
     BANDGAP_MIRROR_PAIR,
     FEEDBACK_PAIR,
 

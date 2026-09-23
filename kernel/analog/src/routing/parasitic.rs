@@ -37,6 +37,9 @@ impl Rule for ParasiticBudget {
     fn headroom(self, r: &Routes) -> f32 {
         1.0 - r.length(self.net) as f32 / self.max_len_nm.max(1) as f32
     }
+    fn usage(self, r: &Routes) -> Option<f32> {
+        Some(r.length(self.net) as f32 / self.max_len_nm.max(1) as f32)
+    }
     fn margin(self) -> f32 {
         f32::from(self.margin_pct) / 100.0
     }

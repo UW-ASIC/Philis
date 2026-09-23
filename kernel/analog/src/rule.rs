@@ -37,6 +37,20 @@ pub trait Rule: Copy {
         }
     }
 
+    /// Spent fraction of the budget, unclamped (`1.0` = at the spec). `None`:
+    /// no budget to spend (an exact equality) or not applicable. Reporting only.
+    #[inline]
+    fn usage(self, _state: &Self::On) -> Option<f32> {
+        None
+    }
+
+    /// Whether the rule has anything to check on `state` (a thermal rule on an
+    /// unpowered die does not). An inapplicable rule is satisfied vacuously.
+    #[inline]
+    fn applicable(self, _state: &Self::On) -> bool {
+        true
+    }
+
     /// Move `state` exactly onto this rule's feasible set, on the `grid`
     /// lattice. For integer equalities a penalty can never close. Best-effort
     /// and local; the caller re-checks legality.
@@ -113,6 +127,16 @@ pub trait RuleBatch<On> {
         let _ = state;
         1.0
     }
+    /// Largest [`Rule::usage`] in the batch; `None` when no rule reports one.
+    fn worst_usage(&self, state: &On) -> Option<f32> {
+        let _ = state;
+        None
+    }
+    /// Rules with nothing to check on `state` (see [`Rule::applicable`]).
+    fn inapplicable(&self, state: &On) -> u32 {
+        let _ = state;
+        0
+    }
     /// Ids touched by the **violated** rules — the repair targets.
     fn violating_ids(&self, state: &On, out: &mut Vec<u32>) {
         let _ = (state, out);
@@ -158,6 +182,12 @@ impl<R: Rule> RuleBatch<R::On> for Vec<R> {
     #[inline]
     fn criticality(&self, s: &R::On) -> f32 {
         self.iter().map(|r| rule_criticality(*r, s)).fold(0.0, f32::max)
+    }
+    fn worst_usage(&self, s: &R::On) -> Option<f32> {
+        self.iter().filter_map(|r| r.usage(s)).reduce(f32::max)
+    }
+    fn inapplicable(&self, s: &R::On) -> u32 {
+        self.iter().filter(|r| !r.applicable(s)).count() as u32
     }
     fn violating_ids(&self, s: &R::On, out: &mut Vec<u32>) {
         for r in self.iter().filter(|r| !r.satisfied(s)) {

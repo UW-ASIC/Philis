@@ -351,7 +351,7 @@ impl Flow<'_> {
         );
 
         let drc_hard = signoff.hard_violations.len();
-        let key = lex_key(&place_report, &route_report, drc_hard, &budgets);
+        let key = lex_key(&place_report, &route_report, &signoff, &budgets);
         let stats = RunStats {
             place_hard: place_report.hard_violations.len(),
             route_hard: route_report.hard_violations.len(),
@@ -387,19 +387,21 @@ impl RunStats {
     }
 }
 
-/// `(|V|, Θ, PEX)` summed over stages and compared as a tuple: no parasitic gain
-/// buys past a budget residual, no budget slack buys past a hard violation.
+/// `(|V|, Θ, PEX)` compared as a tuple: no parasitic gain buys past a budget
+/// residual, no budget slack buys past a hard violation. V and Θ sum over
+/// stages; PEX is signoff's extracted total C (fF) — the stage costs mix units
+/// (thermal distance² dwarfs HPWL) and are the stages' own search objectives.
 type LexKey = (usize, f64, f32);
 
 fn lex_key(
     place: &Report,
     route: &Report,
-    signoff: usize,
+    signoff: &Report,
     budgets: &metadata::MetadataReport,
 ) -> LexKey {
-    let (pv, pt, pc) = place.lex();
-    let (rv, rt, rc) = route.lex();
-    (pv + rv + signoff, pt + rt + budgets.theta(), pc + rc)
+    let (pv, pt, _) = place.lex();
+    let (rv, rt, _) = route.lex();
+    (pv + rv + signoff.hard_violations.len(), pt + rt + budgets.theta(), signoff.cost)
 }
 
 /// Edge-to-edge gap `dp` keeps between cells: the deck's widest same-layer
