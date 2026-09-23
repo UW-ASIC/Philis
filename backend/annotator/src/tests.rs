@@ -359,12 +359,30 @@ fn guard_rings_tie_to_the_guarded_device_s_bulk() {
 }
 
 #[test]
-fn only_the_diff_pair_is_hard_symmetric() {
-    // 5T OTA: the diff pair and the PMOS load are both pairs of one stage, so both
-    // mirror about the stage's single axis.
+fn a_differential_stage_is_symmetric_about_one_axis() {
+    // 5T OTA with a biased (non-diode) load: one five_transistor_ota stage. The
+    // diff pair and the load mirror about the stage axis; the tail sits on it.
     let p = annotate(&ota(), &AnnotationConfig::default());
+    assert_eq!(p.blocks[0].devices.len(), 5, "tail and biased load belong to the OTA stage");
     let sym: usize = p.placement.hard.iter().filter(|b| b.kind() == "Symmetry").map(|b| b.count()).sum();
-    assert_eq!(sym, 1, "the diff pair only (see emit.rs on stage symmetry)");
+    assert_eq!(sym, 3, "diff pair + load pair + self-symmetric tail");
+    let tail = p.constraints.unitization.iter().find(|u| u.devices == [DeviceId(4)]);
+    assert!(tail.is_some(), "the tail gets a sizing directive");
+    assert!(p.constraints.guard_rings.iter().any(|g| g.device == DeviceId(4)), "and a ring");
+}
+
+#[test]
+fn a_shared_gate_chain_is_a_series_stack_not_a_cascode() {
+    // chain4: four same-size nfets in series on one gate net.
+    let nl = Netlist {
+        devices: (0..4u16)
+            .map(|i| fet(&format!("M{i}"), DeviceKind::Nmos, 0, i + 1, i + 2, 6, 2_000, 500))
+            .collect(),
+        nets: nets(&["g", "a", "b", "c", "d", "e", "VSS"]),
+    };
+    let p = annotate(&nl, &AnnotationConfig::default());
+    assert_eq!(p.blocks[0].devices.len(), 4, "one series_stack_4 group");
+    assert!(p.blocks[0].sub_blocks.iter().all(|b| b.kind == BlockKind::Stack), "stack pairs, not a cascode");
 }
 
 #[test]

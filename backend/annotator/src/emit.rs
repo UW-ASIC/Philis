@@ -5,13 +5,15 @@
 //!
 //! | kind          | emits                                                              |
 //! |---------------|--------------------------------------------------------------------|
-//! | DiffPair      | Symmetry, MatchingPair(Cross), ThermalGradient, centroid sides, DTI |
-//! | CurrentMirror | MatchingPair(Mirror), Proximity, ThermalGradient, sides, DTI        |
-//! | Load          | MatchingPair(Mirror), ThermalGradient, sides, DTI                   |
-//! | Stack         | Proximity                                                          |
+//! | DiffPair      | MatchingPair(Cross), ThermalGradient, centroid sides, DTI |
+//! | CurrentMirror | MatchingPair(Mirror), Proximity, ThermalGradient, sides, DTI |
+//! | Load          | MatchingPair(Mirror), ThermalGradient, sides, DTI          |
+//! | Stack         | Proximity                                                 |
 //!
-//! Load/mirror pairs of a differential stage are *not* yet mirrored about the
-//! stage axis: tried, and dp could not satisfy the second pair (OTA ERC 34→47).
+//! A stage holding a diff pair is differential: every matched pair mirrors about
+//! the stage axis (a pair merged into one cell centres on it), and each member
+//! outside a pair (the tail) is self-symmetric with a Proximity pull to the
+//! input pair.
 //!
 //! One batch per pair (per-batch criticality weights each pair by its own
 //! urgency; one merged batch regressed the OTA). Arms: `SymmetryGroup` (one per stage) and `DtiBand` are hard + cost — the cost
@@ -82,7 +84,7 @@ pub fn placement(blocks: &[Block], hg: &BipartiteHypergraph, nl: &Netlist) -> Re
             .collect();
         let (mut syms, mut a_side, mut b_side) = (Vec::new(), Vec::new(), Vec::new());
 
-        for (kind, a, b) in pairs {
+        for &(kind, a, b) in &pairs {
             let prox = vec![Proximity { a: td(a), b: td(b), max_distance_nm: PROXIMITY_NM }];
             let matching = match kind {
                 BlockKind::DiffPair => Matching::Cross,
@@ -93,9 +95,7 @@ pub fn placement(blocks: &[Block], hg: &BipartiteHypergraph, nl: &Netlist) -> Re
                 }
                 BlockKind::Group | BlockKind::Glue => continue,
             };
-            if kind == BlockKind::DiffPair {
-                syms.push(Symmetry { a: td(a), b: td(b), axis });
-            }
+            syms.push(Symmetry { a: td(a), b: td(b), axis });
             r.cost.push(Box::new(vec![MatchingPair {
                 a: td(a),
                 b: td(b),
@@ -127,6 +127,19 @@ pub fn placement(blocks: &[Block], hg: &BipartiteHypergraph, nl: &Netlist) -> Re
             });
             a_side.push(a);
             b_side.push(b);
+        }
+        // A differential stage mirrors every matched pair about its one axis; a
+        // member outside any pair (the tail) sits on the axis, near the input pair.
+        if let Some(dp) = pairs.iter().find(|p| p.0 == BlockKind::DiffPair) {
+            let paired: Vec<DeviceId> = pairs.iter().flat_map(|p| [p.1, p.2]).collect();
+            for &d in stage.devices.iter().filter(|d| !paired.contains(d)) {
+                syms.push(Symmetry { a: td(d), b: td(d), axis });
+                r.cost.push(Box::new(
+                    [dp.1, dp.2].map(|m| Proximity { a: td(d), b: td(m), max_distance_nm: PROXIMITY_NM }).to_vec(),
+                ));
+            }
+        } else {
+            syms.clear();
         }
         if !syms.is_empty() {
             r.cost.push(Box::new(SymmetryGroup(syms.clone())));
