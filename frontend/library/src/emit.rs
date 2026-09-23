@@ -95,7 +95,7 @@ pub fn emit(
     pdk: &Pdk,
     cfg: &Config,
 ) -> Result<GenIr, EmitError> {
-    let problem = annotate(netlist, &cfg.annotation);
+    let problem = annotate(netlist, &crate::annotation(pdk, &cfg.annotation));
     let cells = cellgen::enumerate(netlist, &Macros::default(), &problem.constraints, pdk);
 
     // Instances: device family + electrical params from the covering

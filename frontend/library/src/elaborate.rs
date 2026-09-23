@@ -159,7 +159,7 @@ pub(crate) fn route_built(
         .netlist
         .as_ref()
         .map_or_else(Requirements::<Routes>::default, |nl| {
-            annotate(nl, &AnnotationConfig::default()).routing
+            annotate(nl, &crate::annotation(pdk, &AnnotationConfig::default())).routing
         });
     let mut neg = gr::Negotiation::new();
     let placed = gr::place_macros(&macros, &layout);

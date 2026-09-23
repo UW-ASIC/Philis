@@ -118,7 +118,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     let netlist = parse::spice(spice).map_err(FlowError::Parse)?;
 
     // 2. Annotate: placement/routing rules + cell constraints, device-indexed.
-    let mut problem = annotate(&netlist, &cfg.annotation);
+    let mut problem = annotate(&netlist, &annotation(pdk, &cfg.annotation));
 
     // 3. Bias: per-device power. Placement-independent, so solved once.
     let (power, bias) = bias(&netlist, cfg);
@@ -247,6 +247,12 @@ struct Flow<'a> {
     layers: Vec<LayerId>,
     cuts: Vec<elaborate::Cut>,
     d_router: dr::DetailedRoute,
+}
+
+/// `base` plus what the annotator needs from the deck.
+#[must_use]
+pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
+    AnnotationConfig { antenna_max_ratio: pdk.antenna_max_ratio(), ..base.clone() }
 }
 
 /// Placement's process numbers. Origins snap to the cells' cut lattice so

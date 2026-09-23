@@ -216,7 +216,7 @@ fn run_circuit(
         .chain(p.cost.iter().filter(|b| !enforced.contains(&b.kind())).map(|b| ("cost", b)))
         .filter_map(|(arm, b)| stat(arm, &c.name, b.as_ref(), l))
         .collect();
-    let routing = annotator::annotate(&sol.netlist, &annotator::AnnotationConfig::default()).routing;
+    let routing = annotator::annotate(&sol.netlist, &library::annotation(pdk, &annotator::AnnotationConfig::default())).routing;
     contracts.extend(
         routing.hard.iter().map(|b| ("hard", b))
             .chain(routing.budget.iter().map(|b| ("budget", b)))

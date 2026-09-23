@@ -105,7 +105,7 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
 
     Problem {
         placement: emit::placement(&blocks, netlist),
-        routing: extract::routing(&hg, &net_classes),
+        routing: extract::routing(&hg, &net_classes, &gates, cfg.antenna_max_ratio),
         constraints: constraints::assemble(netlist, &blocks),
         net_classes,
         groups,

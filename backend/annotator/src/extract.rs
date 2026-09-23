@@ -22,10 +22,33 @@ use pnr_core::{BipartiteHypergraph, NetId, Routes, UnionFind};
 
 /// Assemble the routing [`Requirements`]. `classes` is indexed by net id.
 #[must_use]
-pub fn routing(hg: &BipartiteHypergraph, classes: &[NetClassification]) -> Requirements<Routes> {
+pub fn routing(
+    hg: &BipartiteHypergraph,
+    classes: &[NetClassification],
+    gate_um2: &[f32],
+    antenna_max_ratio: Option<f32>,
+) -> Requirements<Routes> {
     let mut uf = UnionFind::new(hg.device_count()); // routing rules don't group
     let mut r = Requirements::<Routes>::default();
-    r.hard.push(Box::new(Antenna::extract(hg, &mut uf)));
+    // One Antenna per gate net, over the total gate area it drives.
+    let mut gate_nm2 = vec![0i64; hg.net_names.len()];
+    for (d, nets) in hg.device_nets.iter().enumerate() {
+        if gate_um2[d] > 0.0 {
+            gate_nm2[nets[1].0 as usize] += (f64::from(gate_um2[d]) * 1e6) as i64;
+        }
+    }
+    let antenna: Vec<Antenna> = antenna_max_ratio
+        .into_iter()
+        .flat_map(|ratio| {
+            gate_nm2.iter().enumerate().filter(|&(_, &a)| a > 0).map(move |(n, &a)| Antenna {
+                net: NetId(n as u16),
+                max_ratio_x100: (ratio * 100.0) as i32,
+                gate_area_nm2: a,
+                margin_pct: 20,
+            })
+        })
+        .collect();
+    r.hard.push(Box::new(antenna));
     r.hard.push(Box::new(Differential::extract(hg, &mut uf)));
     r.cost.push(Box::new(StraightNet::extract(hg, &mut uf)));
 

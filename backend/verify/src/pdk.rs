@@ -429,6 +429,26 @@ impl Pdk {
             })
     }
 
+    /// The tightest `max_ratio` of any antenna rule on a routing metal (its
+    /// last layer); `None` when the deck checks no antenna on routed metal.
+    #[must_use]
+    pub fn antenna_max_ratio(&self) -> Option<f32> {
+        let ratio = self.strings.get("max_ratio")?;
+        self.deck
+            .rules
+            .spec
+            .iter()
+            .filter(|s| self.strings.resolve(s.kind).contains("antenna"))
+            .filter(|s| {
+                self.deck.rules.layers_of(s).last().is_some_and(|l| self.routing_metals.contains(&LayerId(l.0)))
+            })
+            .filter_map(|s| match self.deck.rules.param(s, ratio) {
+                Some(ParamValue::Ratio(r)) => Some(r as f32),
+                _ => None,
+            })
+            .reduce(f32::min)
+    }
+
     /// The deck's `min_spacing` for a layer in nm, if it declares one.
     #[must_use]
     pub fn min_spacing(&self, layer: u16) -> Option<i32> {

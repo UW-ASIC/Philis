@@ -67,6 +67,9 @@ pub struct AnnotationConfig {
     pub supply_nets: Vec<String>,
     pub ground_nets: Vec<String>,
     pub clock_nets: Vec<String>,
+    /// The process's tightest antenna ratio (metal / gate area). `None`: the
+    /// process has no antenna rule and no `Antenna` constraint is emitted.
+    pub antenna_max_ratio: Option<f32>,
 }
 
 #[cfg(test)]

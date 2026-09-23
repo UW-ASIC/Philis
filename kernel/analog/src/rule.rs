@@ -351,8 +351,8 @@ mod tests {
         // **ratio ×100**. Same wire, both rules 50% past their own spec.
         let r = one_wire(15_000, 100); // length 15_000 nm, area 1.5e6 nm²
         let p = parasitic(10_000); // 50% over a 10_000 nm cap
-        // area/NOMINAL_GATE_AREA ×100 = 1.5e6/1e4 ×100 = 15_000; cap it at 10_000.
-        let a = crate::routing::Antenna { net: pnr_core::NetId(0), max_ratio_x100: 10_000, margin_pct: 20 };
+        // area/gate ×100 = 1.5e6/1e4 ×100 = 15_000; cap it at 10_000.
+        let a = crate::routing::Antenna { net: pnr_core::NetId(0), max_ratio_x100: 10_000, gate_area_nm2: 10_000, margin_pct: 20 };
 
         let (pr, ar) = (p.residual(&r), a.residual(&r));
         assert!((pr - 0.5).abs() < 1e-6, "length residual {pr}");
