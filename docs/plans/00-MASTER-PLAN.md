@@ -619,8 +619,8 @@ should patch their text when they pick up an item. Master decisions beyond the c
    Exceptional is set only by the user or a spec, never by role.
 7. **GPurify upstream requests** (PERF Q6): per-net voltages in intent, signal-net EM, MOM recognition. Default: file
    upstream; until then each stays in `coverage` as "not checked".
-8. **Hastings eq. 8.29 vs Fig. 8.20** (MAT Q7). Default: implement eq. 8.29 as printed, use eq. 8.27 as primary;
-   GAP-20 may settle it from the figure description (hastings.txt ~L64817).
+8. **Hastings eq. 8.29 vs Fig. 8.20** (MAT Q7). Resolved by GAP-20 (`ref-hastings-99` §2.1): Fig. 8.20 is eq. 8.29 with
+   j and k exchanged; the printed form is right. Default unchanged: implement eq. 8.29 as printed, use eq. 8.27 as primary.
 
 ---
 
@@ -655,6 +655,7 @@ should patch their text when they pick up an item. Master decisions beyond the c
 | `ref-hastings-13-ch13-mos-applications-matching.md` | Hastings ch. 13: power MOS models and the MOS matching rules with MIN/MOD/EXC classes, Tables 13.4/13.5; H13-01…55 |
 | `ref-hastings-14-ch14-special-topics.md` | Hastings ch. 14: merged devices, minority-carrier guard rings, crossing coupling, ESD; H14-01…60 |
 | `ref-hastings-15-ch15-assembling-die-and-appendices.md` | Hastings ch. 15 and appendices: die area, routing pitch, star/Kelvin, shielding, EM width, stress keep-outs, rule of one-third; H15-01…61 |
+| `ref-hastings-99-figure-descriptions.md` | Hastings back matter: the 566 figure long descriptions indexed; settles MAT Q7 (Fig. 8.20 swaps j and k), Fig. 10.24, and which figure-borne values are not stated (GAP-20) |
 | `ref-lampaert-performance-driven-layout.md` | Lampaert/Gielen/Sansen (LAYLA): spec-to-margin mapping, sensitivity-priced placement and routing, shared offset budget, thermal superposition, impact factor; LAMP-01…49 |
 | `ref-graeb-design-centering-sizing.md` | Graeb, design centering: σ_f, worst-case distance β, yield estimation and optimisation, tolerance assignment; GRAEB-01…47 |
 | `ref-balasa-graeb-survey-part1-ch01-03.md` | Survey part I: symmetric-feasible sequence pairs, ASF-/HB*-trees and islands, automatic constraint generation (HSMPG), compaction; BAL1-01…64 |
