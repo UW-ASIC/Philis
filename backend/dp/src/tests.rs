@@ -89,7 +89,7 @@ fn rotation_actually_happens() {
 // ---- variant reshape ----
 
 fn alt(w: i32, h: i32) -> Macro {
-    Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w, h }, units: Vec::new(), dummies: Vec::new() }
+    Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w, h }, units: Vec::new(), dummies: Vec::new(), ..Default::default() }
 }
 
 /// Three alternatives per cell, not ordered by similarity.
@@ -163,6 +163,7 @@ fn pin_alt(x: i32) -> Macro {
         bbox: Rect { x: 0, y: 0, w: 10_000, h: 10_000 },
         units: Vec::new(),
         dummies: Vec::new(),
+        ..Default::default()
     }
 }
 

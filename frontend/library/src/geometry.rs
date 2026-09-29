@@ -185,6 +185,7 @@ mod tests {
             },
             units: Vec::new(),
             dummies: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -269,6 +270,7 @@ mod tests {
             },
             units: Vec::new(),
             dummies: Vec::new(),
+            ..Default::default()
         };
         let (hw, hh) = (150, 200);
         let mut l = layout_of(Orient::R0, 40_000, 60_000);
@@ -315,6 +317,7 @@ mod tests {
                 pins: vec![],
                 units: Vec::new(),
                 dummies: Vec::new(),
+                ..Default::default()
             };
         }
         let orig = ell();
