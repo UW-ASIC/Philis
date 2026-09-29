@@ -11,3 +11,7 @@ assets/
 suite_result.txt
 # externally cloned suites, beside the tracked *.spice
 benchmarks/fixtures/*/
+# ngspice scratch output
+bsim4v5.out
+# reference books/papers (copyrighted, large); notes stay tracked
+ref/*.pdf

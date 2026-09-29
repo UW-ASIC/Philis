@@ -4,6 +4,7 @@
 //! ring, unless the merged hull would cross a non-member cell: only each
 //! requester's own bbox (inflated by [`ring_halo`]) was reserved.
 
+use crate::builder::dim;
 use analog::cell::{GuardRingRequirement, GuardRingType};
 use analog::Constraints;
 use pnr_core::{DeviceId, Layout, Macro, Pin, Process, Rect, Target};
@@ -11,11 +12,18 @@ use pnr_core::{DeviceId, Layout, Macro, Pin, Process, Rect, Target};
 use crate::builder::{cut_lattice, req, snap_cut};
 use crate::Builder;
 
+/// Rings of same-class cells placed within this gap merge into one: a
+/// design choice (fewer rings, shared taps), overridable per process.
+const RING_MERGE_GAP_NM: i32 = 2_000;
+
 /// Draw every guard ring the placed `layout` calls for. One [`Macro`] per ring
 /// (carrying its `ring` pin), to be folded into the layout geometry before
 /// routing.
+///
+/// `cut_ohm` is one tap contact's resistance (the deck's `pex` value); it
+/// sizes each ring's contact rows against `max_ring_resistance_mohm`.
 #[must_use]
-pub fn guard_rings(layout: &Layout, c: &Constraints, process: &dyn Process) -> Vec<Macro> {
+pub fn guard_rings(layout: &Layout, c: &Constraints, process: &dyn Process, cut_ohm: f32) -> Vec<Macro> {
     let n_dev = layout.x.len();
     // Only requirements whose device is actually placed.
     let reqs: Vec<&GuardRingRequirement> = c
@@ -27,7 +35,8 @@ pub fn guard_rings(layout: &Layout, c: &Constraints, process: &dyn Process) -> V
         return Vec::new();
     }
 
-    let merge_gap = process.rule("guard_ring_merge_gap_nm", 2000) as f32;
+    // Design policy, not process data: rings of cells this close share one.
+    let merge_gap = process.rule("guard_ring_merge_gap_nm", RING_MERGE_GAP_NM) as f32;
 
     clusters(&reqs, layout, merge_gap)
         .into_iter()
@@ -46,7 +55,7 @@ pub fn guard_rings(layout: &Layout, c: &Constraints, process: &dyn Process) -> V
                 .expect("cluster is non-empty");
             // Placed bboxes carry the halo; shrink back to the device so the
             // band lands inside the reservation.
-            let ext = ring_halo(rep, process);
+            let ext = ring_halo(rep, process, cut_ohm);
             let inner = Rect {
                 x: inner.x + ext,
                 y: inner.y + ext,
@@ -54,7 +63,7 @@ pub fn guard_rings(layout: &Layout, c: &Constraints, process: &dyn Process) -> V
                 h: (inner.h - 2 * ext).max(0),
             };
             let mut b = Builder::new(process.grid());
-            draw_ring(&mut b, process, rep, inner);
+            draw_ring(&mut b, process, rep, inner, cut_ohm);
             b.finish()
         })
         .collect()
@@ -63,8 +72,9 @@ pub fn guard_rings(layout: &Layout, c: &Constraints, process: &dyn Process) -> V
 /// Partition requirements into rings: same-class (`connection_net`, `ring_type`)
 /// **shareable** requesters that are placed within `merge_gap` merge; every
 /// non-shareable requirement is its own ring. A merged cluster whose hull
-/// would contain or intersect a placed cell outside the cluster splits back
-/// to singletons — the hull covers unreserved ground, see the module doc.
+/// would contain or intersect a placed cell outside the cluster splits into
+/// the largest sub-clusters that do not — the hull covers unreserved ground,
+/// see the module doc.
 /// **Pure** (no PDK) so the grouping policy is table-testable.
 fn clusters(reqs: &[&GuardRingRequirement], layout: &Layout, merge_gap: f32) -> Vec<Vec<usize>> {
     let n = reqs.len();
@@ -94,15 +104,34 @@ fn clusters(reqs: &[&GuardRingRequirement], layout: &Layout, merge_gap: f32) -> 
             }
         }
     }
-    // A cluster whose hull hits a non-member splits to singletons (each was
-    // reserved by construction). ponytail: not maximal safe sub-merges.
+    // A cluster whose hull hits a non-member splits into sub-clusters, each
+    // grown greedily (left to right) while its hull stays clear of foreign
+    // cells and the newcomer is adjacent to a member.
+    // ponytail: greedy, not the fewest sub-clusters; exact is set partition.
     let mut safe: Vec<Vec<usize>> = Vec::with_capacity(out.len());
-    for members in out {
-        if members.len() > 1 && hull_hits_foreign(&members, reqs, layout) {
-            safe.extend(members.into_iter().map(|i| vec![i]));
-        } else {
+    for mut members in out {
+        if members.len() < 2 || !hull_hits_foreign(&members, reqs, layout) {
             safe.push(members);
+            continue;
         }
+        members.sort_by_key(|&i| (layout.x[reqs[i].device.0 as usize], layout.y[reqs[i].device.0 as usize]));
+        let mut subs: Vec<Vec<usize>> = Vec::new();
+        for i in members {
+            let near = |j: &usize| {
+                layout.edge_gap(Target::Device(reqs[i].device), Target::Device(reqs[*j].device)) <= merge_gap
+            };
+            let home = subs.iter_mut().find(|sub| {
+                sub.iter().any(near) && {
+                    let trial: Vec<usize> = sub.iter().copied().chain([i]).collect();
+                    !hull_hits_foreign(&trial, reqs, layout)
+                }
+            });
+            match home {
+                Some(sub) => sub.push(i),
+                None => subs.push(vec![i]),
+            }
+        }
+        safe.extend(subs);
     }
     safe
 }
@@ -161,31 +190,43 @@ fn union_rect(a: Rect, b: Rect) -> Rect {
 }
 
 
-/// Device-to-band gap: clears both diff spacing (270) and the ring implant
-/// against a cell's tap implant (380).
-const GUARD_RING_GAP: i32 = 380;
+/// Device-to-band gap, the deck's: the widest spacing among the implants,
+/// tap and diffusion, so the band clears a cell's diffusion and its implant
+/// of either type (sky130 380, gf180 400).
+fn ring_clear(process: &dyn Process) -> i32 {
+    ["psdm", "nsdm", "tap", "diff"].iter().filter_map(|r| process.space(r)).max().unwrap_or(0)
+}
 
 /// Draw the four contacted tap/implant/li bands of `r`'s ring around `inner`.
 ///
 /// No met1 band: routing is met1-and-up, so a met1 loop would short every
 /// route crossing it. The `ring` pins sit on li; the router stitches down.
-fn draw_ring(b: &mut Builder, process: &dyn Process, r: &GuardRingRequirement, inner: Rect) {
-    let ct = process.rule("contact", 170);
+fn draw_ring(b: &mut Builder, process: &dyn Process, r: &GuardRingRequirement, inner: Rect, cut_ohm: f32) {
+    let perimeter = 2 * i64::from(inner.w + inner.h + 4 * ring_clear(process));
+    let (width, rows) = band(process, r, perimeter, cut_ohm);
+    let gap = ring_gap(process, r, width);
+    let pin = Pin { name: "ring".into(), net: r.connection_net, layer: req(process, "li"), at: Rect { x: 0, y: 0, w: 0, h: 0 } };
+    tap_ring(b, process, implant_name(r.ring_type), in_nwell(r.ring_type), inner, gap, (width, rows), &pin);
+}
+
+/// A contacted tap ring `gap` outside `inner`: four bands of tap under
+/// `implant` and li, `rows` rows of cuts along each, a copy of `pin` on
+/// each band, and (`in_well`) an n-well `nwell_diff_enc` past it. Returns the
+/// band's outer edge.
+pub(crate) fn tap_ring(b: &mut Builder, process: &dyn Process, implant: &str, in_well: bool, inner: Rect, gap: i32, (ring_width, rows): (i32, i32), pin: &Pin) -> Rect {
+    let ct = dim(process, "contact");
     let lat = cut_lattice(process);
-    let pitch = snap_cut(if r.tap_pitch_nm > 0 { r.tap_pitch_nm } else { process.rule("guard_licon_pitch", 340) } + lat - 1, lat).max(lat);
-    let ring_width = width_from_depth(process, r.ring_type).max(r.min_width_nm);
-    let gap = GUARD_RING_GAP;
-
-    let ix0 = inner.x - gap;
-    let iy0 = inner.y - gap;
-    let ix1 = inner.x + inner.w + gap;
-    let iy1 = inner.y + inner.h + gap;
-    let ox0 = ix0 - ring_width;
-    let oy0 = iy0 - ring_width;
-    let ox1 = ix1 + ring_width;
-    let oy1 = iy1 + ring_width;
-
-    let implant = req(process, implant_name(r.ring_type));
+    let pitch = cut_pitch(process);
+    let (ix0, iy0) = (inner.x - gap, inner.y - gap);
+    let (ix1, iy1) = (inner.x + inner.w + gap, inner.y + inner.h + gap);
+    let (ox0, oy0, ox1, oy1) = (ix0 - ring_width, iy0 - ring_width, ix1 + ring_width, iy1 + ring_width);
+    // The implant passes the tap by the deck's enclosure, never under its
+    // own width.
+    let imp_enc = process
+        .enclosure(implant, "tap")
+        .unwrap_or(0)
+        .max((process.width(implant).unwrap_or(0) - ring_width + 1) / 2);
+    let implant = req(process, implant);
     let tap = req(process, "tap");
     let li = req(process, "li");
     let licon = req(process, "licon");
@@ -202,61 +243,69 @@ fn draw_ring(b: &mut Builder, process: &dyn Process, r: &GuardRingRequirement, i
             continue;
         }
         let band = Rect { x: bx, y: by, w: bw, h: bh };
-        b.rect(tap, band);
-        b.rect(implant, band);
+        b.rect(implant, Rect { x: bx - imp_enc, y: by - imp_enc, w: bw + 2 * imp_enc, h: bh + 2 * imp_enc });
         b.rect(li, band);
-
-        let margin = (ring_width - ct) / 2;
-        if bw >= bh {
-            let cy = snap_cut(by + bh / 2 - ct / 2, lat);
-            let mut cx = snap_cut(bx + margin + lat - 1, lat);
-            while cx + ct <= bx + bw - margin {
-                b.rect(licon, Rect { x: cx, y: cy, w: ct, h: ct });
-                cx += pitch;
-            }
-        } else {
-            let cx = snap_cut(bx + bw / 2 - ct / 2, lat);
-            let mut cy = snap_cut(by + margin + lat - 1, lat);
-            while cy + ct <= by + bh - margin {
-                b.rect(licon, Rect { x: cx, y: cy, w: ct, h: ct });
-                cy += pitch;
+        b.rect(tap, band);
+        // `rows` lines of cuts along the band, centred across it.
+        let margin = (ring_width - ct - (rows - 1) * pitch) / 2;
+        for row in 0..rows {
+            let off = margin + row * pitch;
+            // Along the band, cuts sit on one pitch grid from the cell
+            // origin: two rings sharing a band draw the very same cuts.
+            let on_grid = |v: i32| v.div_euclid(pitch) * pitch + if v.rem_euclid(pitch) == 0 { 0 } else { pitch };
+            if bw >= bh {
+                let cy = snap_cut(by + off, lat);
+                let mut cx = on_grid(bx + margin);
+                while cx + ct <= bx + bw - margin {
+                    b.rect(licon, Rect { x: cx, y: cy, w: ct, h: ct });
+                    cx += pitch;
+                }
+            } else {
+                // A pitch clear of the horizontal bands' cut rows at either
+                // end (the corners are theirs).
+                let cx = snap_cut(bx + off, lat);
+                let mut cy = on_grid(by - ring_width + margin + rows * pitch);
+                while cy + pitch <= by + bh + margin {
+                    b.rect(licon, Rect { x: cx, y: cy, w: ct, h: ct });
+                    cy += pitch;
+                }
             }
         }
-        b.pin(Pin {
-            name: "ring".into(),
-            net: r.connection_net,
-            layer: li,
-            at: Rect { x: bx + bw / 2 - ct / 2, y: by + bh / 2 - ct / 2, w: ct, h: ct },
-        });
+        b.pin(Pin { at: Rect { x: bx + bw / 2 - ct / 2, y: by + bh / 2 - ct / 2, w: ct, h: ct }, layer: li, ..pin.clone() });
     }
-
-    // The p+ ring lives in an n-well; the n+ ring in the substrate has none.
-    if in_nwell(r.ring_type) {
+    // An n+ ring lives in an n-well; a p+ ring in the substrate has none.
+    if in_well {
         if let Some(nwell) = process.layer("nwell") {
-            let enc = process.rule("nwell_diff_enc", 180);
-            b.rect(nwell, Rect {
-                x: ox0 - enc,
-                y: oy0 - enc,
-                w: (ox1 - ox0) + 2 * enc,
-                h: (oy1 - oy0) + 2 * enc,
-            });
+            let enc = dim(process, "nwell_diff_enc");
+            b.rect(nwell, Rect { x: ox0 - enc, y: oy0 - enc, w: (ox1 - ox0) + 2 * enc, h: (oy1 - oy0) + 2 * enc });
         }
     }
+    Rect { x: ox0, y: oy0, w: ox1 - ox0, h: oy1 - oy0 }
 }
 
 /// The placement halo: how far `r`'s ring (gap + band + outer clearance)
 /// extends past its device bbox. The caller inflates the requester's variant
 /// bboxes by this so the placer reserves the ring's ground.
+/// Sized for the smallest ring (a point device), which needs the most rows.
 #[must_use]
-pub fn ring_halo(r: &GuardRingRequirement, process: &dyn Process) -> i32 {
-    width_from_depth(process, r.ring_type).max(r.min_width_nm)
-        + GUARD_RING_GAP
-        + outer_clear(r.ring_type, process)
+pub fn ring_halo(r: &GuardRingRequirement, process: &dyn Process, cut_ohm: f32) -> i32 {
+    let width = band(process, r, 8 * i64::from(ring_clear(process)), cut_ohm).0;
+    width + ring_gap(process, r, width) + outer_clear(r.ring_type, process) + ring_implant_enc(process, r.ring_type)
 }
 
-/// Band outer edge to halo edge for a well-less ring: implant spacing (380)
-/// and tap spacing (270) against a flush neighbour.
-const RING_OUTER_CLEAR: i32 = 380;
+/// Device-to-band gap: the deck's diffusion/implant clearance past the
+/// band's own implant growth (the ring's well merges with a ringed cell's
+/// own well into one figure).
+fn ring_gap(process: &dyn Process, r: &GuardRingRequirement, width: i32) -> i32 {
+    let _ = width;
+    ring_clear(process) + ring_implant_enc(process, r.ring_type)
+}
+
+/// How far a ring's implant grows past its tap (see [`tap_ring`]).
+fn ring_implant_enc(process: &dyn Process, ring_type: GuardRingType) -> i32 {
+    process.enclosure(implant_name(ring_type), "tap").unwrap_or(0)
+}
+
 
 /// The ring band's implant. A ring is tied to its device's bulk, so it is
 /// drawn as that bulk's tap: `Hcgr`/`Hbgr` ring a PMOS and are an n+ tap in
@@ -275,32 +324,180 @@ fn in_nwell(ring_type: GuardRingType) -> bool {
 
 /// Outer clearance: an in-well ring owes a neighbour's well
 /// `nwell_min_spacing` beyond its own well enclosure; a well-less ring only
-/// [`RING_OUTER_CLEAR`] (which already beats well-to-outside-diff, 340).
+/// [`ring_clear`] (which already beats well-to-outside-diff, 340).
 fn outer_clear(ring_type: GuardRingType, process: &dyn Process) -> i32 {
     if in_nwell(ring_type) {
-        process.rule("nwell_min_spacing", 1270) + process.rule("nwell_diff_enc", 180)
+        process.rule("nwell_min_spacing", 0).max(process.space("nwell").unwrap_or(0)) + dim(process, "nwell_diff_enc").max(process.enclosure("nwell", "tap").unwrap_or(0))
     } else {
-        RING_OUTER_CLEAR
+        ring_clear(process)
     }
 }
 
-/// Ring width: at least the depth of the region it collects from (n-well,
-/// retrograde p-well, or p-epi).
-fn width_from_depth(process: &dyn Process, ring_type: GuardRingType) -> i32 {
-    let depth_width = if in_nwell(ring_type) {
-        process.rule("n_well_depth", 2000)
-    } else if process.rule("retrograde_pwell", 0) != 0 {
-        process.rule("p_well_depth", 1500)
-    } else {
-        process.rule("p_epi_thickness", 3000)
-    };
-    process.rule("min_guard_ring_width", 420).max(depth_width)
+/// The deck's densest legal tap-contact pitch: more cuts, lower ring R.
+pub(crate) fn cut_pitch(process: &dyn Process) -> i32 {
+    let lat = cut_lattice(process);
+    // At least a cut plus the deck's spacing for cuts in an array (a ring
+    // row is one).
+    let ct = dim(process, "contact");
+    let floor = ct + process.space("licon").unwrap_or(0);
+    snap_cut(process.rule("guard_licon_pitch", 0).max(floor) + lat - 1, lat).max(lat)
 }
 
+/// `(band width, cut rows)` for a ring whose inner loop is `perimeter` nm.
+/// Thin: the deck's minimum ring width, one row of cuts at the densest pitch
+/// (Charbon §8.6.2, PDF pp.146–147: minimum-width rings with a low-impedance
+/// contact beat wide ones). Rows are added only while the cuts in parallel,
+/// `cut_ohm / cuts`, exceed `max_ring_resistance_mohm`.
+///
+/// ponytail: ring R is the parallel cut resistance only; tap spreading and
+/// the li run to the tie point are left out. Extract the ring if a budget is
+/// ever tight.
+fn band(process: &dyn Process, r: &GuardRingRequirement, perimeter: i64, cut_ohm: f32) -> (i32, i32) {
+    let ct = dim(process, "contact");
+    let pitch = cut_pitch(process);
+    // Wide enough to enclose its cut row in diffusion on both sides.
+    let floor = process.rule("min_guard_ring_width", 0).max(r.min_width_nm).max(ct + 2 * process.rule("diff_encloses_licon", 0));
+    let per_row = (perimeter / i64::from(pitch)).max(1) as f32;
+    let budget = r.max_ring_resistance_mohm as f32 / 1000.0;
+    let mut rows = 1;
+    while rows < 4 && budget > 0.0 && cut_ohm / (per_row * rows as f32) > budget {
+        rows += 1;
+    }
+    (floor.max(ct) + (rows - 1) * pitch, rows)
+}
+
+/// A drawn ring's resistance to its net: its cuts in parallel, ohms.
+#[must_use]
+pub fn ring_ohm(ring: &Macro, process: &dyn Process, cut_ohm: f32) -> f32 {
+    let cuts = process.layer("licon").map_or(0, |l| ring.shapes.iter().filter(|s| s.layer == l).count());
+    cut_ohm / cuts.max(1) as f32
+}
+
+/// One well for neighbouring PMOS cells on the same bulk: where two placed
+/// cells' nwells face each other across a gap up to twice the well spacing,
+/// with the same span on the other axis, the gap is filled (the three rects
+/// union to one rectangle: no notch; the caller merges them for a checker
+/// that reads a well per rect). Fewer well edges near the devices (WPE); matched
+/// PMOS in a common well (Hastings §13.3 r8). A bridge that would come within
+/// the deck's enclosure/spacing of anything p-type or of foreign active
+/// (another cell's or a ring's diff, poly or p-implant) is not drawn.
+///
+/// `placed`: the cells, placed (absolute). `rings`: this layout's rings.
+#[must_use]
+pub fn well_bridges(placed: &[Macro], rings: &[Macro], process: &dyn Process) -> Vec<Macro> {
+    let Some(nwell) = process.layer("nwell") else { return Vec::new() };
+    // All from the deck; without a well spacing there is nothing to bridge.
+    let space = process.rule("nwell_min_spacing", 0);
+    let min_w = dim(process, "nwell_min_width");
+    let keep = dim(process, "nwell_diff_enc");
+    if space <= 0 {
+        return Vec::new();
+    }
+    let blocking: Vec<pnr_core::LayerId> = ["diff", "poly", "psdm"].iter().filter_map(|r| process.layer(r)).collect();
+    // Per cell: its well's bbox and its bulk net.
+    let wells: Vec<Option<(Rect, pnr_core::NetId)>> = placed
+        .iter()
+        .map(|m| {
+            let well = m.shapes.iter().filter(|s| s.layer == nwell).map(|s| s.rect).reduce(union_rect)?;
+            let bulk = m.pins.iter().find(|p| p.name.ends_with(":B"))?.net;
+            Some((well, bulk))
+        })
+        .collect();
+    let hits = |r: Rect, skip: [usize; 2]| {
+        let grown = Rect { x: r.x - keep, y: r.y - keep, w: r.w + 2 * keep, h: r.h + 2 * keep };
+        let meets = |a: &Rect| a.x < grown.x + grown.w && grown.x < a.x + a.w && a.y < grown.y + grown.h && grown.y < a.y + a.h;
+        placed.iter().enumerate().filter(|(k, _)| !skip.contains(k)).map(|(_, m)| m).chain(rings).flat_map(|m| &m.shapes).any(|s| blocking.contains(&s.layer) && meets(&s.rect))
+    };
+    let mut b = Builder::new(process.grid());
+    let mut any = false;
+    for i in 0..wells.len() {
+        for j in i + 1..wells.len() {
+            let (Some((a, na)), Some((c, nc))) = (wells[i], wells[j]) else { continue };
+            if na != nc {
+                continue;
+            }
+            // Facing across x with one y span, or across y with one x span.
+            let (lo, hi) = if a.x <= c.x { (a, c) } else { (c, a) };
+            let (lo_y, hi_y) = if a.y <= c.y { (a, c) } else { (c, a) };
+            let gap_x = hi.x - (lo.x + lo.w);
+            let gap_y = hi_y.y - (lo_y.y + lo_y.h);
+            let bridge = if (a.y, a.h) == (c.y, c.h) && gap_x > 0 && gap_x <= 2 * space && a.h >= min_w {
+                Some(Rect { x: lo.x + lo.w, y: a.y, w: gap_x, h: a.h })
+            } else if (a.x, a.w) == (c.x, c.w) && gap_y > 0 && gap_y <= 2 * space && a.w >= min_w {
+                Some(Rect { x: a.x, y: lo_y.y + lo_y.h, w: a.w, h: gap_y })
+            } else {
+                None
+            };
+            if let Some(r) = bridge.filter(|&r| !hits(r, [i, j])) {
+                b.rect(nwell, r);
+                any = true;
+            }
+        }
+    }
+    if any { vec![b.finish()] } else { Vec::new() }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two PMOS cells on one bulk, their wells 1.5 µm apart (under the
+    /// spacing): bridged into one well, DRC/ERC clean. On different bulks, or
+    /// with p-active in the gap, no bridge.
+    #[test]
+    fn same_bulk_pmos_cells_share_a_well() {
+        use crate::{testkit, Cell};
+        use pnr_core::{DeviceKind, NetId};
+        let Some(pdk) = testkit::pdk() else { return };
+        let nwell = pdk.layer("nwell").unwrap();
+        let (g, c) = testkit::group_of(DeviceKind::Pmos, 1, 2, 1680, 150);
+        let cell = crate::mosfet::Mosfet::enumerate(&g, &c, &pdk)[0].draw(&g, &c, &pdk);
+        let well = cell.shapes.iter().filter(|s| s.layer == nwell).map(|s| s.rect).reduce(union_rect).unwrap();
+        let shift = |m: &Macro, dx: i32, bulk: u16| {
+            let mut m = m.clone();
+            for s in &mut m.shapes {
+                s.rect.x += dx;
+            }
+            for p in &mut m.pins {
+                p.at.x += dx;
+                p.net = if p.name.ends_with(":B") { NetId(bulk) } else { NetId(10 + bulk + p.net.0) };
+            }
+            m.bbox.x += dx;
+            m
+        };
+        let dx = well.w + 1_500;
+        let pair = [shift(&cell, 0, 1), shift(&cell, dx, 1)];
+        let bridges = well_bridges(&pair, &[], &pdk);
+        assert_eq!(bridges.len(), 1);
+        // Merged as the flow's geometry does: the three rects are one well.
+        let mut shapes: Vec<pnr_core::Shape> = pair.iter().chain(&bridges).flat_map(|m| m.shapes.clone()).collect();
+        let (mut wells, rest): (Vec<pnr_core::Shape>, Vec<pnr_core::Shape>) = shapes.drain(..).partition(|s| s.layer == nwell);
+        let r = wells.iter().map(|s| s.rect).reduce(union_rect).unwrap();
+        assert_eq!(wells.iter().map(|s| i64::from(s.rect.w) * i64::from(s.rect.h)).sum::<i64>(), i64::from(r.w) * i64::from(r.h), "the rects tile one rectangle");
+        wells = vec![pnr_core::Shape { layer: nwell, rect: r }];
+        shapes = rest.into_iter().chain(wells).collect();
+        let labels: Vec<verify::LabeledPin> = pair
+            .iter()
+            .enumerate()
+            .flat_map(|(k, m)| m.pins.iter().map(move |p| (k, p)))
+            .filter(|(_, p)| !p.name.ends_with(":S") || true)
+            .map(|(k, p)| verify::LabeledPin { name: if p.name.ends_with(":B") { "B".into() } else { format!("c{k}_{}", p.name.replace(':', "_")) }, layer: p.layer.0, x: p.at.x + p.at.w / 2, y: p.at.y + p.at.h / 2 })
+            .fold(Vec::new(), |mut v: Vec<verify::LabeledPin>, l| {
+                if !v.iter().any(|o| (o.x, o.y) == (l.x, l.y)) {
+                    v.push(l);
+                }
+                v
+            });
+        let dirty = crate::testkit::findings(&shapes, &labels, &pdk);
+        assert!(dirty.is_empty(), "{dirty:?}");
+        assert!(well_bridges(&[shift(&cell, 0, 1), shift(&cell, dx, 2)], &[], &pdk).is_empty(), "different bulks");
+        let mut blocker = shift(&cell, 0, 3);
+        blocker.shapes.retain(|s| Some(s.layer) == pdk.layer("diff"));
+        for s in &mut blocker.shapes {
+            s.rect = Rect { x: well.x + well.w + 500, y: well.y + well.h / 2, w: 400, h: 400 };
+        }
+        assert!(well_bridges(&[pair[0].clone(), pair[1].clone(), blocker], &[], &pdk).is_empty(), "active in the gap");
+    }
 
     fn req(dev: u16, net: u16, ty: GuardRingType, shareable: bool) -> GuardRingRequirement {
         GuardRingRequirement {
@@ -333,6 +530,7 @@ mod tests {
             orient: vec![pnr_core::Orient::default(); centres.len()],
             power_uw: vec![0; centres.len()],
             temp_mc: vec![0; centres.len()],
+            units: Default::default(),
         }
     }
 
@@ -398,4 +596,46 @@ mod tests {
         let c2 = clusters(&refs2, &l2, 2000.0);
         assert_eq!(c2, vec![vec![0, 1]], "no foreigner in the hull: pair merges");
     }
+}
+
+/// Same-type implants of neighbouring cells (and rings) closer than the
+/// implant's spacing merge into one: the gap between two facing implant
+/// rects is filled, the usual cure for an implant spacing a cell cannot see
+/// alone. A fill narrower than the implant's width, or overlapping the
+/// opposite implant (it would re-dope a diffusion), is not drawn.
+#[must_use]
+pub fn implant_bridges(all: &[Macro], process: &dyn Process) -> Vec<Macro> {
+    let (Some(n), Some(p)) = (process.layer("nsdm"), process.layer("psdm")) else { return Vec::new() };
+    let mut b = Builder::new(process.grid());
+    let mut any = false;
+    for (role, own, other) in [("nsdm", n, p), ("psdm", p, n)] {
+        let (Some(space), wmin) = (process.space(role), process.width(role).unwrap_or(0)) else { continue };
+        let of = |l| all.iter().flat_map(|m| &m.shapes).filter(|s| s.layer == l).map(|s| s.rect).collect::<Vec<_>>();
+        let (mine, theirs) = (of(own), of(other));
+        let overlaps = |a: &Rect, c: &Rect| a.x < c.x + c.w && c.x < a.x + a.w && a.y < c.y + c.h && c.y < a.y + a.h;
+        for i in 0..mine.len() {
+            for j in i + 1..mine.len() {
+                let (a, c) = (mine[i], mine[j]);
+                let gap_x = (c.x - (a.x + a.w)).max(a.x - (c.x + c.w));
+                let gap_y = (c.y - (a.y + a.h)).max(a.y - (c.y + c.h));
+                let (y0, y1) = (a.y.max(c.y), (a.y + a.h).min(c.y + c.h));
+                let (x0, x1) = (a.x.max(c.x), (a.x + a.w).min(c.x + c.w));
+                // Only where the two share a span, so the union is one clean
+                // rectangle (a partial span leaves notches).
+                let bridge = if gap_x > 0 && gap_x < space && (a.y, a.h) == (c.y, c.h) && y1 - y0 >= wmin {
+                    Some(Rect { x: a.x.min(c.x) + if a.x < c.x { a.w } else { c.w }, y: y0, w: gap_x, h: y1 - y0 })
+                } else if gap_y > 0 && gap_y < space && (a.x, a.w) == (c.x, c.w) && x1 - x0 >= wmin {
+                    Some(Rect { x: x0, y: a.y.min(c.y) + if a.y < c.y { a.h } else { c.h }, w: x1 - x0, h: gap_y })
+                } else {
+                    None
+                };
+                let inside = |r: &Rect| mine.iter().any(|m| m.x <= r.x && m.y <= r.y && m.x + m.w >= r.x + r.w && m.y + m.h >= r.y + r.h);
+                if let Some(r) = bridge.filter(|r| !theirs.iter().any(|t| overlaps(r, t)) && !inside(r)) {
+                    b.rect(own, r);
+                    any = true;
+                }
+            }
+        }
+    }
+    if any { vec![b.finish()] } else { Vec::new() }
 }

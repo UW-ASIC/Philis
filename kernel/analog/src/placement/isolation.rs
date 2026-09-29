@@ -4,7 +4,10 @@ use pnr_core::ids::Target;
 use pnr_core::layout::Layout;
 use crate::rule::Rule;
 
-/// Keep noisy `a` at least `min_distance_nm` edge-to-edge from sensitive `b`.
+/// Keep noisy `a` at least `min_distance_nm` edge-to-edge from sensitive `b`:
+/// spacing attenuates substrate propagation (Charbon et al. 2001 ch.8, PDF
+/// p.127), up to a saturation distance past which it buys nothing. A search
+/// aid, not the electrical acceptance test.
 #[derive(Clone, Copy)]
 pub struct Isolation {
     /// Aggressor.

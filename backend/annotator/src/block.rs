@@ -74,7 +74,7 @@ impl Block {
 }
 
 /// The hierarchy's leaves: blocks without children, glue excluded.
-pub(crate) fn leaves(blocks: &[Block]) -> Vec<&Block> {
+pub fn leaves(blocks: &[Block]) -> Vec<&Block> {
     fn walk<'a>(bs: &'a [Block], out: &mut Vec<&'a Block>) {
         for b in bs {
             if !b.sub_blocks.is_empty() {

@@ -12,6 +12,7 @@ pub mod classify;
 pub mod constraints;
 pub mod emit;
 pub mod extract;
+pub mod ir;
 pub mod netrole;
 pub mod pattern;
 
@@ -19,7 +20,7 @@ pub mod pattern;
 mod tests;
 
 pub use block::{Block, BlockKind};
-pub use netrole::{AnnotationConfig, NetRole};
+pub use netrole::{AnnotationConfig, NetRole, ProcessNumbers};
 
 use pnr_core::ids::DeviceId;
 use pnr_core::Netlist;
@@ -42,6 +43,31 @@ pub struct Problem {
     /// cut to one member (NMOS/PMOS abutment merges implants — DRC-clean, LVS-fatal).
     /// One member, not zero: an empty group panics `Layout::bbox`.
     pub abutment: Vec<Vec<DeviceId>>,
+    /// `(rule kind, missing input)` for every family left unemitted because the
+    /// deck lacks a number: **unknown**, never a pass.
+    pub missing: Vec<(&'static str, &'static str)>,
+}
+
+/// Rule families [`ProcessNumbers`] cannot instantiate. DTI is absent from the
+/// list: a process without trenches makes `DtiBand` inapplicable, not unknown.
+fn missing(p: &ProcessNumbers) -> Vec<(&'static str, &'static str)> {
+    let mut out = Vec::new();
+    if p.svt_uv_per_um.is_none() {
+        out.push(("MatchingPair", "deck svt_uv_per_um"));
+    }
+    if p.avt_mv_um.iter().any(Option::is_none) {
+        out.push(("MatchingPair", "deck avt_n_mv_um/avt_p_mv_um"));
+    }
+    if p.antenna_max_ratio.is_none() {
+        out.push(("Antenna", "deck antenna ratio"));
+    }
+    if p.gate_af_per_um2.is_none() {
+        out.push(("ParasiticBudget", "deck gate_cap_af_um2"));
+        out.push(("CouplingBudget", "deck gate_cap_af_um2"));
+    } else if p.wire_af_per_um.is_none() {
+        out.push(("ParasiticBudget", "deck wire capacitance"));
+    }
+    out
 }
 
 /// Assemble the [`Problem`]. Deterministic.
@@ -101,16 +127,26 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         }
     }
     let gates: Vec<f32> = netlist.devices.iter().map(gate_um2).collect();
-    let net_classes = classify::classify(&hg, &roles, &sensitive, &gates);
+    let net_classes = classify::classify(&hg, &roles, &sensitive, &gates, cfg.process.gate_af_per_um2);
+
+    let mut placement = emit::placement(&blocks, netlist, &cfg.process, cfg.offset_sigma_mv);
+    let mut missing = missing(&cfg.process);
+    if netlist.devices.iter().any(|d| d.kind == pnr_core::DeviceKind::Capacitor) {
+        missing.push(("ParasiticBudget", "capacitor-plate nets: settling / code-error spec (ARR-03, ARR-05)"));
+    }
+    if emit::isolation(&hg, &net_classes, &sensitive, cfg.process.epi_nm, &mut placement) && cfg.process.epi_nm.is_none() {
+        missing.push(("Isolation", "deck epi_thickness_nm"));
+    }
 
     Problem {
-        placement: emit::placement(&blocks, netlist),
-        routing: extract::routing(&hg, &net_classes, &gates, cfg.antenna_max_ratio),
+        placement,
+        routing: extract::routing(&hg, &net_classes, &gates, &cfg.process),
         constraints: constraints::assemble(netlist, &blocks),
         net_classes,
         groups,
         abutment,
         blocks,
+        missing,
     }
 }
 

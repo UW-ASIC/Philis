@@ -50,7 +50,7 @@ impl Block for Leg {
 }
 impl Composition for Leg {
     fn build<P: Process>(&self, c: &mut CompBuilder<P>) -> Result<(), GenError> {
-        let vgap = c.process().rule("device_gap", 600);
+        let vgap = c.process().rule("device_gap", 0);
         let mos = || Mos::new(DeviceKind::Nmos, 420, 150, 1);
         let i1 = c.instantiate("m1", &mos())?;
         let m1 = c.place(i1)?;
@@ -100,7 +100,7 @@ impl Block for Twin {
 }
 impl Composition for Twin {
     fn build<P: Process>(&self, c: &mut CompBuilder<P>) -> Result<(), GenError> {
-        let sep = c.process().rule("device_gap", 600);
+        let sep = c.process().rule("device_gap", 0);
         let i1 = c.instantiate_comp("x1", &Leg)?;
         let x1 = c.place(i1)?;
         let i2 = c.instantiate_comp("x2", &Leg)?;

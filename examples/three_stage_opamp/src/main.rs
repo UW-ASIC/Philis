@@ -10,7 +10,7 @@
 //! (the deck is a gdsverify PDK JSON — the same one the `philis` CLI takes).
 
 use library::{run, signoff, Config, Macros};
-use pnr_core::{LayerId, Macro, NetId, Pin, Process, Rect, Shape};
+use pnr_core::Macro;
 use verify::Pdk;
 
 /// A 3-stage op-amp, MOSFETs only: input diff pair + active load (stage 1), a
@@ -76,100 +76,37 @@ fn main() {
     probe.wait();
 }
 
-/// A crude hand-drawn output PMOS: a diffusion bar, a poly gate, and G/S/D landing
-/// pads. Stand-in for what a `macro_master::Generator` would emit; the point is
-/// that the library consumes it as-is.
+/// The user's output PMOS, drawn outside the flow with the same MOSFET
+/// generator a `macro_master::Generator` would call: one 40/0.5 µm device with
+/// contacts, implant, well and bulk tap — a real transistor, so LVS pairs it.
+/// (A hand-drawn bar of diff and poly with no implant or contacts extracts to
+/// nothing and unpairs the whole circuit.)
 ///
-/// Pin nets are placeholders: the library rebinds `G`/`S`/`D` to M8's nets.
+/// Pins are renamed `d0:G` → `G`: the library binds an injected macro's pins
+/// to the instance's terminals by name.
 fn user_output_pmos(pdk: &Pdk) -> Macro {
-    let met1 = pdk
-        .layer("met1")
-        .or_else(|| pdk.layer("li"))
-        .unwrap_or(LayerId(0));
-    let poly = pdk.layer("poly").unwrap_or(LayerId(0));
-    let diff = pdk.layer("diff").unwrap_or(LayerId(0));
+    use analog::cell::{SeriesParallel, Unitization};
+    use cells::{mosfet::Mosfet, Cell};
+    use pnr_core::{DeviceGroup, DeviceId, DeviceKind};
 
-    let shapes = vec![
-        Shape {
-            layer: diff,
-            rect: Rect {
-                x: 0,
-                y: 0,
-                w: 4000,
-                h: 1000,
-            },
-        },
-        Shape {
-            layer: poly,
-            rect: Rect {
-                x: 1800,
-                y: -200,
-                w: 400,
-                h: 1400,
-            },
-        },
-        Shape {
-            layer: met1,
-            rect: Rect {
-                x: 0,
-                y: 0,
-                w: 600,
-                h: 600,
-            },
-        },
-        Shape {
-            layer: met1,
-            rect: Rect {
-                x: 3400,
-                y: 0,
-                w: 600,
-                h: 600,
-            },
-        },
-    ];
-    let pins = vec![
-        Pin {
-            name: "G".into(),
-            net: NetId(0),
-            at: Rect {
-                x: 1800,
-                y: 0,
-                w: 400,
-                h: 400,
-            },
-            layer: poly,
-        },
-        Pin {
-            name: "S".into(),
-            net: NetId(0),
-            at: Rect {
-                x: 0,
-                y: 0,
-                w: 600,
-                h: 600,
-            },
-            layer: met1,
-        },
-        Pin {
-            name: "D".into(),
-            net: NetId(0),
-            at: Rect {
-                x: 3400,
-                y: 0,
-                w: 600,
-                h: 600,
-            },
-            layer: met1,
-        },
-    ];
-    Macro {
-        shapes,
-        pins,
-        bbox: Rect {
-            x: -200,
-            y: -200,
-            w: 4400,
-            h: 1400,
-        },
+    let group = DeviceGroup { devices: vec![DeviceId(0)] };
+    let mut c = analog::Constraints::default();
+    c.unitization.push(Unitization {
+        devices: group.devices.clone(),
+        device_type: DeviceKind::Pmos,
+        dev_nf: vec![1],
+        target_ratio: vec![1],
+        unit_w: 40_000,
+        unit_l: 500,
+        series_parallel: SeriesParallel::Parallel,
+        same_variant_required: true,
+        dummy_required: false,
+        route_matching_required: false,
+    });
+    let variant = Mosfet::enumerate(&group, &c, pdk).into_iter().next().expect("a PMOS variant");
+    let mut m = variant.draw(&group, &c, pdk);
+    for pin in &mut m.pins {
+        pin.name = pin.name.trim_start_matches("d0:").to_string();
     }
+    m
 }

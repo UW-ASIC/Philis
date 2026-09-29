@@ -1,0 +1,6 @@
+* bgr_core — bandgap core PNPs, 1:8 (Q2 is eight unit devices). Known
+* optimum: one 3x3 array, Q1's unit at the centre, Q2's eight around it.
+.subckt bgr_core e1 e2 VSS
+XQ1 VSS VSS e1 pnp_05v5_W3p40L3p40 m=1
+XQ2 VSS VSS e2 pnp_05v5_W3p40L3p40 m=8
+.ends bgr_core

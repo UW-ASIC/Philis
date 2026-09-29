@@ -16,10 +16,11 @@ use gdsverify::engine::{StageStatus, Summary};
 use pnr_core::{Report, Shape, Violation};
 
 pub use checker::Checker;
+pub use gdsverify::ingest::deck::DeviceKind;
 pub use gdsverify::engine::Checks;
 pub use geom::LabeledPin;
 pub use netlist::{extract_spice, Detail};
-pub use pdk::Pdk;
+pub use pdk::{EmLimit, Pdk};
 pub use reference::{RefDeviceIn, RefInput, RefKind};
 
 /// nm shortfall of one violation row: `limit − measured` for a length pair
@@ -47,7 +48,47 @@ pub fn signoff(
     reference: &RefInput,
     pdk: &Pdk,
 ) -> (Report, Duration) {
+    let (report, t, _) = signoff_with_caps(shapes, pins, reference, pdk);
+    (report, t)
+}
+
+/// Design intent signoff hands the deck's intent-gated rules (EM, IR drop):
+/// supply nets and the current each carries. Default = none (those rules skip).
+#[derive(Clone, Debug, Default)]
+pub struct Intent {
+    /// `(net name, nominal voltage mV, is ground)`.
+    pub supplies: Vec<(String, f64, bool)>,
+    /// `(net name, DC current µA)` from the operating point.
+    pub currents: Vec<(String, f64)>,
+}
+
+/// Extracted capacitance between labelled nets, fF: `(net, None, C)` to
+/// ground, `(a, Some(b), C)` coupling (see [`Checker::cap_matrix`]).
+pub type CapMatrix = Vec<(String, Option<String>, f64)>;
+
+/// [`signoff`], plus the extracted [`CapMatrix`] (empty when PEX did not run).
+#[must_use]
+pub fn signoff_with_caps(
+    shapes: &[Shape],
+    pins: &[LabeledPin],
+    reference: &RefInput,
+    pdk: &Pdk,
+) -> (Report, Duration, CapMatrix) {
+    signoff_with_intent(shapes, pins, reference, &Intent::default(), pdk)
+}
+
+/// [`signoff_with_caps`] with design [`Intent`], so the deck's EM rules run
+/// on the operating-point currents instead of skipping.
+#[must_use]
+pub fn signoff_with_intent(
+    shapes: &[Shape],
+    pins: &[LabeledPin],
+    reference: &RefInput,
+    intent: &Intent,
+    pdk: &Pdk,
+) -> (Report, Duration, CapMatrix) {
     let t0 = Instant::now();
+    let mut caps = CapMatrix::new();
     let mut report = Report::default();
     let fail = |report: &mut Report, rule: String| {
         report.hard_violations.push(Violation { rule, margin: 0 });
@@ -57,9 +98,13 @@ pub fn signoff(
         Ok(c) => c,
         Err(e) => {
             fail(&mut report, format!("engine/load: {e}"));
-            return (report, t0.elapsed());
+            return (report, t0.elapsed(), caps);
         }
     };
+    defer_chip_level(&mut checker, shapes);
+    if let Err(e) = checker.set_intent(intent) {
+        fail(&mut report, format!("engine/intent: {e}"));
+    }
     match checker.set_reference(reference) {
         Err(e) => fail(&mut report, format!("engine/reference: {e}")),
         Ok(skipped) => {
@@ -80,11 +125,26 @@ pub fn signoff(
                     }
                 }
                 Err(e) => fail(&mut report, format!("engine/run: {e}")),
-                Ok(summary) => harvest(&checker, &summary, &mut report),
+                Ok(summary) => {
+                    harvest(&checker, &summary, &mut report);
+                    caps = checker.cap_matrix();
+                }
             }
         }
     }
-    (report, t0.elapsed())
+    (report, t0.elapsed(), caps)
+}
+
+/// A density window wider than the block (the shapes' union bbox) is chip
+/// integration's check: [`Checker::defer_density_wider_than`].
+fn defer_chip_level(checker: &mut Checker, shapes: &[Shape]) {
+    let (x0, y0, x1, y1) = shapes.iter().fold((i64::MAX, i64::MAX, i64::MIN, i64::MIN), |(a, b, c, d), s| {
+        let r = s.rect;
+        (a.min(i64::from(r.x)), b.min(i64::from(r.y)), c.max(i64::from(r.x + r.w)), d.max(i64::from(r.y + r.h)))
+    });
+    if x1 > x0 && y1 > y0 {
+        checker.defer_density_wider_than(x1 - x0, y1 - y0);
+    }
 }
 
 fn harvest(checker: &Checker, summary: &Summary, report: &mut Report) {
@@ -164,6 +224,7 @@ fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks) 
         Ok(c) => c,
         Err(e) => return engine_fail(format!("engine/load: {e}")),
     };
+    defer_chip_level(&mut checker, shapes);
     let summary = match checker.run(shapes, pins, checks) {
         Ok(s) => s,
         Err(e) => return engine_fail(format!("engine/run: {e}")),
@@ -212,7 +273,8 @@ mod tests {
         let pdk = sky130();
         let shapes = [rect(&pdk, "met1", 0, 0, 1000, 1000)];
         let floating = |pins: &[LabeledPin]| {
-            erc(&shapes, pins, &pdk).iter().filter(|f| f.rule == "floating_interconnect").count()
+            // sky130 x.22: unconnected conductor.
+            erc(&shapes, pins, &pdk).iter().filter(|f| f.rule == "x.22").count()
         };
         assert_eq!(floating(&[]), 1);
         let met1 = pdk.layer("met1").unwrap().0;
@@ -247,10 +309,51 @@ mod tests {
         let out = checker.outputs();
         let hit = (0..out.violations.len())
             .map(|i| out.violations.get(i))
-            .find(|v| checker.rule_name(v.rule) == "li_min_width")
-            .expect("the finding is attributed to li_min_width");
+            .find(|v| checker.rule_name(v.rule) == "li.1")
+            .expect("the finding is attributed to li.1 (li width)");
         assert_eq!(shortfall_nm(hit.limit, hit.measured), 70);
         assert_eq!(checker.domain_of(hit.rule), "drc");
+    }
+
+    // The deck's EM rules skip for want of design intent; with the supplies
+    // and their currents installed they no longer do (ihp: EM.Metal*).
+    #[test]
+    fn intent_arms_the_em_rules() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/ihp_sg13g2.json");
+        let pdk = Pdk::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let shapes = [rect(&pdk, "met1", 0, 0, 20_000, 1_000), rect(&pdk, "met1", 0, 5_000, 20_000, 1_000)];
+        let met1 = pdk.layer("met1").unwrap().0;
+        let pins = [
+            LabeledPin { name: "VDD".into(), layer: met1, x: 500, y: 500 },
+            LabeledPin { name: "VSS".into(), layer: met1, x: 500, y: 5_500 },
+        ];
+        let no_intent = |c: &Checker| c.skipped_rules().iter().filter(|(r, why)| r.starts_with("EM") && why.contains("NoDesignIntent")).count();
+        let mut checker = Checker::new(&pdk, true).unwrap();
+        checker.run(&shapes, &pins, Checks { drc: false, erc: true, lvs: false, pex: false }).unwrap();
+        assert!(no_intent(&checker) > 0, "the EM rules need intent: {:?}", checker.skipped_rules());
+        let intent = Intent {
+            supplies: vec![("VDD".into(), 1_800.0, false), ("VSS".into(), 1_800.0, true)],
+            currents: vec![("VDD".into(), 100.0), ("VSS".into(), 100.0)],
+        };
+        checker.set_intent(&intent).unwrap();
+        checker.run(&shapes, &pins, Checks { drc: false, erc: true, lvs: false, pex: false }).unwrap();
+        assert_eq!(no_intent(&checker), 0, "{:?}", checker.skipped_rules());
+    }
+
+    // A density window wider than the block is chip-level: taken out and
+    // reported as not run; a block wider than the window keeps the rule
+    // (ihp AFil.g2: activ density >= 25% in 800 um windows).
+    #[test]
+    fn density_wider_than_the_block_is_chip_level() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/ihp_sg13g2.json");
+        let pdk = Pdk::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert!(pdk.density_rules().iter().any(|&(_, w, lim, max)| w == 800_000 && (lim - 0.25).abs() < 1e-9 && !max), "AFil.g2 read as a minimum");
+        let mut small = Checker::new(&pdk, false).unwrap();
+        let gone = small.defer_density_wider_than(34_000, 21_000);
+        assert!(gone.iter().any(|n| n == "AFil.g2"), "{gone:?}");
+        assert!(small.skipped_rules().iter().any(|(n, why)| *n == "AFil.g2" && why.starts_with("ChipLevel(window 800000 nm")));
+        let mut chip = Checker::new(&pdk, false).unwrap();
+        assert!(!chip.defer_density_wider_than(2_000_000, 2_000_000).contains(&"AFil.g2".to_string()));
     }
 
     // A fat legal rect is clean — and provably *checked* clean: rules ran.
@@ -298,7 +401,7 @@ mod tests {
         assert_eq!(skipped, 0);
         let n = checker.loaded.reference.as_ref().unwrap();
         assert_eq!(n.subckt_count(), 1);
-        assert_eq!(n.device_name.len(), 2);
+        assert_eq!(n.device_model.len(), 2);
         assert_eq!(n.device_terminal_start, vec![0, 3, 6], "sky130 ngate arity is 3");
         assert_eq!(n.port_net.len(), 3);
         assert_eq!(n.device_param_start, vec![0, 2, 3], "one param run per device");
@@ -307,12 +410,10 @@ mod tests {
         assert_eq!(n.param, vec![(w, 2e-6), (l, 5e-7), (w, 1e-6)]);
         let model = checker.loaded.strings.resolve(n.device_model[0]);
         assert_eq!(model, "sky130_fd_pr__nfet_01v8");
-        // A capacitor has no recogniser in this deck: skipped, not mismatched
-        // (MOM comb recognition needs merged-region binding — see the module
-        // doc in `reference.rs`).
+        // A bipolar has no recogniser in this deck: skipped, not mismatched.
         let with_cap = RefInput {
             devices: vec![RefDeviceIn {
-                kind: RefKind::Capacitor,
+                kind: RefKind::Npn,
                 model: None,
                 terminals: vec!["a".into(), "b".into()],
                 params: vec![],
@@ -379,10 +480,11 @@ mod tests {
     #[test]
     fn device_count_sees_one_diode_under_a_diom_marker() {
         let pdk = sky130();
-        // The generator's shape in miniature: a diff body, the marker over it,
-        // and the two li pads (A low, K high) strictly inside.
+        // sky130's diode_pw2nd in miniature: n+ diffusion under the diode
+        // marker (the cathode; the substrate is the anode), li pads inside.
         let shapes = [
             rect(&pdk, "diff", 0, 0, 500, 1000),
+            rect(&pdk, "nsdm", -125, -125, 750, 1250),
             rect(&pdk, "diom", 0, 0, 500, 1000),
             rect(&pdk, "li", 130, 130, 240, 240),
             rect(&pdk, "li", 130, 630, 240, 240),
@@ -425,3 +527,5 @@ mod tests {
         assert_eq!(checker.device_count(&[]), Some(0));
     }
 }
+
+

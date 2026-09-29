@@ -1,15 +1,23 @@
-//! BJT generator: emitter block inside a collector diff ring, base poly bar
-//! into the emitter, footprint marker; the PNP also gets its n-well base and
-//! well tie.
+//! BJT generator: the vertical bipolar of a CMOS process, concentric per
+//! unit. PNP: a p+ emitter, an n-tap base ring whose n-well is the base, and
+//! a p-tap collector ring on the substrate (the collector), under the `pnp`
+//! marker. NPN: an n+ emitter, a p-tap base ring, both in the p-region an
+//! n-well ring and a deep n-well isolate, the collector tapped on that ring.
+//! Every gap and width is the deck's.
 
+use crate::builder::dim;
 use analog::Constraints;
-use pnr_core::{DeviceGroup, DeviceKind, LayerId, Macro, Process, Rect};
+use pnr_core::{DeviceGroup, DeviceKind, Macro, NetId, Pin, Process, Rect};
 
-use crate::builder::{pin, req, sizing, unitization, Builder, Sizing};
+use crate::builder::{cut_lattice, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
+use crate::post_cell::tap_ring;
 use crate::Cell;
 
-/// One BJT variant: the group's unit devices arrayed in `columns`. Area ratio
-/// comes from unit count, never emitter scaling.
+/// One BJT variant: the group's unit devices (each member's `dev_nf` units)
+/// arrayed in `columns`, filled centre-out with the smallest member first: a
+/// 1:8 pair lands as the classic 3×3, the one unit centred in the eight
+/// (Hastings §10.2, ratioed bipolars). Area ratio comes from unit count,
+/// never emitter scaling. Neighbouring units share their collector band.
 #[derive(Clone)]
 pub struct Bjt {
     pub columns: u16,
@@ -20,8 +28,18 @@ impl Cell for Bjt {
         if group.devices.is_empty() {
             return vec![];
         }
-        let n = group.devices.len().max(1) as u16;
-        let mut cols = vec![1, n, (f64::from(n).sqrt().ceil() as u16).max(1)];
+        // An NPN needs an isolated p-base: a deep n-well under an n-well
+        // ring. Only where the process declares that construction
+        // (`npn_isolation`), and has the deep well.
+        if !device_is_pnp(group, _constraints) && (_process.layer("dnwell").is_none() || _process.rule("npn_isolation", 0) == 0) {
+            return vec![];
+        }
+        let s = group_sizing(group, _constraints, _process);
+        let n = s.dev_nf.iter().map(|&u| u.max(1)).sum::<u16>().max(1);
+        let square = (f64::from(n).sqrt().ceil() as u16).max(1);
+        // A matched set only as the square: a line centres it in one axis
+        // only and strings its routing out.
+        let mut cols = if group.devices.len() > 1 { vec![square] } else { vec![1, n, square] };
         cols.sort_unstable();
         cols.dedup();
         cols.into_iter()
@@ -32,200 +50,233 @@ impl Cell for Bjt {
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro {
         let mut b = Builder::new(process.grid());
         let s = group_sizing(group, constraints, process);
-        let n_dev = group.devices.len();
-
-        let diff = req(process, "diff");
-        let poly = req(process, "poly");
-        let li = req(process, "li");
-        let licon = process.layer("licon").unwrap_or(diff);
-        let ct = process.rule("contact", 170);
-        let li_enc = process.rule("li_encloses_licon", 80);
-
-        let (emitter_w, emitter_h, base_w0, collector_w0) = dims(&s, process);
-        let max_stripe = process.rule("bjt_max_emitter_stripe", 25_000);
-        let stripe_gap = process.rule("bjt_stripe_gap", 200);
-        let n_stripes = ((emitter_w + max_stripe - 1) / max_stripe).max(1);
-        let stripe_w = emitter_w / n_stripes;
-
-        // Terminals must extract as three distinct nets: keep collector ring and
-        // emitter block separated by base_w, base poly overlapping both by `ct`.
-        let collector_w = collector_w0.max(2 * ct);
-        // `base_w` is the ring-to-emitter diff gap: it must clear diff spacing.
-        let diff_space = process.rule("DIFF.3", 270);
-        let base_w = base_w0.max(ct).max(diff_space);
-        let is_pnp = device_is_pnp(group, constraints);
-        let coll_w = emitter_w + 2 * base_w + 2 * collector_w;
-        let coll_h = emitter_h + 2 * base_w + 2 * collector_w;
-        let cols = i32::from(self.columns.max(1)).min(n_dev.max(1) as i32);
-        // The base pad hangs `ext` below the ring; its cut must clear the ring
-        // diff by `polycon_to_diff_spacing` or it lands on the collector.
-        let ext = ct + process.rule("polycon_to_diff_spacing", 190);
-        let well_enc = process.rule("well_enclosure", 300);
-        // A PNP's n-well reaches `well_enc + 160` left, `well_enc` right and
-        // above, `ext + well_enc` below its ring. Neighbouring wells must stay
-        // `nwell_min_spacing` apart: merged wells would short the bases.
-        let device_gap = process.rule("device_gap", 600);
-        let (gap_x, gap_y) = if is_pnp {
-            let nw_space = process.rule("nwell_min_spacing", 1270);
-            (
-                device_gap.max(2 * well_enc + 160 + nw_space),
-                device_gap.max(ext + 2 * well_enc + nw_space),
-            )
-        } else {
-            (device_gap, device_gap)
-        };
-        let cut_enc = 40; // licon.5 diff-past-cut margin
-
-        for di in 0..n_dev {
-            let dev_x = (di as i32 % cols) * (coll_w + gap_x);
-            let dev_y = (di as i32 / cols) * (coll_h + gap_y);
-            let (cx, cy) = (dev_x, dev_y);
-
-            // Emitter FIRST: the recogniser is [poly, diff, diff] = B, E, C and
-            // fills the diff slots in drawing order.
-            let emitter_x = dev_x + collector_w + base_w;
-            let emitter_y = dev_y + collector_w + base_w;
-            let stripe_pitch = stripe_w + stripe_gap.min(stripe_w / 4);
-            let emitter_span = (n_stripes - 1) * stripe_pitch + stripe_w;
-            for st in 0..n_stripes {
-                b.rect(diff, Rect {
-                    x: emitter_x + st * stripe_pitch,
-                    y: emitter_y,
-                    w: stripe_w,
-                    h: emitter_h,
-                });
-            }
-            if n_stripes > 1 {
-                b.rect(diff, Rect {
-                    x: emitter_x,
-                    y: emitter_y + emitter_h / 2 - ct / 2,
-                    w: emitter_span,
-                    h: ct,
-                });
-            }
-            let (e_x, e_y) =
-                (emitter_x + emitter_span - ct - cut_enc, emitter_y + emitter_h / 2 - ct / 2);
-            contact(&mut b, li, licon, e_x, e_y, ct, li_enc);
-            b.pin(pin(di, "E", Rect { x: e_x, y: e_y, w: ct, h: ct }, li));
-
-            // Collector: diff ring; side bands run full height so they area-overlap
-            // top/bottom (edge-touching rects don't merge into one net).
-            b.rect(diff, Rect { x: cx, y: cy, w: coll_w, h: collector_w });
-            b.rect(diff, Rect { x: cx, y: cy + coll_h - collector_w, w: coll_w, h: collector_w });
-            b.rect(diff, Rect { x: cx, y: cy, w: collector_w, h: coll_h });
-            b.rect(diff, Rect { x: cx + coll_w - collector_w, y: cy, w: collector_w, h: coll_h });
-            // Collector contacts + strap, both on the TOP band, away from the base
-            // stub at the bottom.
-            let c_y = cy + coll_h - cut_enc - ct;
-            let c_x = cx + coll_w - ct - cut_enc;
-            contact(&mut b, li, licon, c_x, c_y, ct, li_enc);
-            b.pin(pin(di, "C", Rect { x: c_x, y: c_y, w: ct, h: ct }, li));
-            // One cut only: a left-end cut would crowd the PNP well tie.
-            b.rect(li, Rect { x: cx + cut_enc, y: c_y, w: coll_w - 2 * cut_enc, h: ct });
-
-            // Base: a poly bar from the B pad below the ring up into the
-            // emitter block — the marker's one poly terminal.
-            let bar_top = emitter_y + emitter_h / 2 - ct / 2 - cut_enc;
-            b.rect(poly, Rect { x: emitter_x, y: cy - ext, w: ct, h: bar_top - (cy - ext) });
-            // Poly skirt enclosing the B cut (one-side rule on the sides and
-            // below, symmetric rule above).
-            let pol_enc = process.rule("poly_encloses_licon", 50);
-            let pol_side = process.rule("poly_encloses_licon_one_side", 80).max(pol_enc);
-            b.rect(poly, Rect {
-                x: emitter_x - pol_side,
-                y: cy - ext - pol_side,
-                w: ct + 2 * pol_side,
-                h: ct + pol_side + pol_enc,
-            });
-            contact(&mut b, li, licon, emitter_x, cy - ext, ct, li_enc);
-            b.pin(pin(di, "B", Rect { x: emitter_x, y: cy - ext, w: ct, h: ct }, li));
-
-            // Marker over the whole footprint: magic reads NPNID/PNPID as
-            // regions, and this deck's recogniser still sees exactly the base
-            // bar, emitter and collector ring under it.
-            let marker = if is_pnp { process.layer("pnp") } else { process.layer("npn") };
-            if let Some(marker) = marker {
-                b.rect(marker, Rect { x: cx, y: cy, w: coll_w, h: coll_h });
-            }
-
-            // Only the PNP gets an n-well (its base). sky130's NPN needs a deep
-            // n-well this deck lacks, so the NPN here is a lateral device in the
-            // p-substrate; a plain n-well would put it in the wrong body.
-            if is_pnp {
-                let (wy0, wy1) = (cy - ext - well_enc, cy + coll_h + well_enc);
-                if let Some(nwell) = process.layer("nwell") {
-                    // 160 extra on the left: the tap strip sits at
-                    // `cx - well_enc + 20`, and `nwell_encloses_ntap` wants the
-                    // well 180 past it.
-                    b.rect(nwell, Rect {
-                        x: cx - well_enc - 160,
-                        y: wy0,
-                        w: coll_w + 2 * well_enc + 160,
-                        h: wy1 - wy0,
-                    });
-                }
-                // Well tie: a tap strip left of the ring, bridged on li to the
-                // B pad (the well is the base) along the pad row, clear of the
-                // ring.
-                if let Some(tap) = process.layer("tap") {
-                    let tap_w = ct + cut_enc + process.rule("tap_encloses_licon_one_side", 120);
-                    let tap_x = cx - well_enc + 20;
-                    let tie_y = cy - ext;
-                    b.rect(tap, Rect { x: tap_x, y: tie_y, w: tap_w, h: coll_h + ext });
-                    b.rect(licon, Rect { x: tap_x + cut_enc, y: tie_y, w: ct, h: ct });
-                    b.rect(li, Rect {
-                        x: tap_x + cut_enc - li_enc,
-                        y: tie_y - li_enc,
-                        w: (emitter_x + ct + li_enc) - (tap_x + cut_enc - li_enc),
-                        h: ct + 2 * li_enc,
-                    });
-                }
-                // N+ implant over the tap strip only (over the ring it would
-                // slice a diff polygon and stamp a phantom gate under the base
-                // bar). 20 short of the ring, 400 wide for NSDM.1.
-                if let Some(nsdm) = process.layer("nsdm") {
-                    let e = 20;
-                    b.rect(nsdm, Rect {
-                        x: cx - e - 400,
-                        y: cy - ext - e,
-                        w: 400,
-                        h: coll_h + ext + 2 * e,
-                    });
-                }
-            }
+        let pnp = device_is_pnp(group, constraints);
+        let u = Unit::new(&s, pnp, process);
+        let owners = unit_order(&s.dev_nf, i32::from(self.columns.max(1)));
+        let total = owners.iter().flatten().count();
+        let cols = i32::from(self.columns.max(1)).min(total.max(1) as i32);
+        // PNP units abut on a shared collector band (the substrate); NPN
+        // units each keep their own isolation, the deck's spacings apart.
+        let lat = cut_lattice(process);
+        let (px, py) = (snap_cut(u.pitch.0 + lat - 1, lat), snap_cut(u.pitch.1 + lat - 1, lat));
+        for (slot, di) in owners.iter().enumerate().filter_map(|(i, d)| Some((i, (*d)?))) {
+            let (ox, oy) = ((slot as i32 % cols) * px, (slot as i32 / cols) * py);
+            u.draw(&mut b, process, di, ox, oy);
         }
-
+        b.cover_poly_cuts(process);
         b.finish()
     }
 }
 
-/// `(emitter_w, emitter_h, base_w, collector_w)` from the unit geometry.
-fn dims(s: &Sizing, process: &dyn Process) -> (i32, i32, i32, i32) {
-    let min_side = process.rule("bjt_min_emitter_side", 420);
-    let ct = process.rule("contact", 170);
-    let emitter_w = s.unit_w.max(min_side);
-    let emitter_h = s.unit_l.max(min_side);
-    // base/collector fractions were floats (0.3 / 0.5); read as per-mille rules.
-    let base_frac = process.rule("bjt_base_frac_permille", 300);
-    let coll_frac = process.rule("bjt_collector_frac_permille", 500);
-    let base_w = ((emitter_w as i64 * i64::from(base_frac) / 1000) as i32).max(ct);
-    let collector_w = ((emitter_w as i64 * i64::from(coll_frac) / 1000) as i32).max(2 * ct);
-    (emitter_w, emitter_h, base_w, collector_w)
+/// One unit's geometry at the origin: the emitter, the base band's outer
+/// edge, the collector band's outer edge.
+struct Unit {
+    pnp: bool,
+    emitter: Rect,
+    base_gap: i32,
+    base_outer: Rect,
+    coll_gap: i32,
+    ring_w: i32,
+    /// NPN isolation: the n-well ring's hole and outer edge, the deep well.
+    iso: Option<(Rect, Rect, Rect)>,
+    /// Unit-to-unit step.
+    pitch: (i32, i32),
+}
+
+impl Unit {
+    fn new(s: &Sizing, pnp: bool, process: &dyn Process) -> Self {
+        let r = |name: &str, d: i32| process.rule(name, d);
+        let enc = |o: &str, i: &str| process.enclosure(o, i).unwrap_or(0);
+        let (emit_imp, base_imp, coll_imp) = if pnp { ("psdm", "nsdm", "psdm") } else { ("nsdm", "psdm", "nsdm") };
+        let min_side = r("bjt_min_emitter_side", 0);
+        let emitter = Rect { x: 0, y: 0, w: s.unit_w.max(min_side), h: s.unit_l.max(min_side) };
+        let ct = dim(process, "contact");
+        let ring_w = r("min_guard_ring_width", 0).max(ct + 2 * enc("tap", "licon")).max(ct + 2 * r("diff_encloses_licon", 0));
+        let clear = ["psdm", "nsdm", "tap", "diff"].iter().filter_map(|x| process.space(x)).max().unwrap_or(0);
+        // Emitter to base band: diffusion clearance, and the two implants
+        // meeting at most edge to edge.
+        // An implant past its diffusion keeps the deck's implant-to-opposite
+        // diffusion and contact spacings from the next band.
+        let beyond = |imp: &str| process.space_between(imp, "tap").unwrap_or(0).max(process.space_between(imp, "licon").unwrap_or(0));
+        let base_gap = clear
+            .max(process.space_between("tap", "diff").unwrap_or(0))
+            .max(enc(emit_imp, "diff") + enc(base_imp, "tap"))
+            .max(enc(emit_imp, "diff") + beyond(emit_imp))
+            .max(enc(base_imp, "tap") + process.space_between(base_imp, "diff").unwrap_or(0));
+        let grow = |x: Rect, d: i32| Rect { x: x.x - d, y: x.y - d, w: x.w + 2 * d, h: x.h + 2 * d };
+        let base_outer = grow(emitter, base_gap + ring_w);
+        // Base band to collector band: the base implant against the
+        // collector's, and the well (PNP: the base n-well; NPN: the isolating
+        // n-well ring, drawn past the collector band) to the tap.
+        let nw = dim(process, "nwell_diff_enc");
+        // Neighbouring units' base wells keep the well spacing across the
+        // shared collector band.
+        let well_gap = nw + (r("nwell_min_spacing", 0).max(process.space("nwell").unwrap_or(0)) - ring_w + 1) / 2;
+        let coll_gap = clear
+            .max(enc(base_imp, "tap") + enc(coll_imp, "tap"))
+            .max(enc(coll_imp, "tap") + beyond(coll_imp))
+            .max(enc(base_imp, "tap") + beyond(base_imp))
+            .max(nw + process.space_between("nwell", "tap").unwrap_or(0))
+            .max(if pnp { well_gap } else { 0 });
+        // NPN: the n-well ring's hole a well-to-p-tap spacing past the base
+        // band, the deep well the deck's enclosure past the hole, the ring
+        // past the deep well and around the collector band.
+        let sp_nt = process.space_between("nwell", "tap").unwrap_or(0);
+        let coll_gap = if pnp { coll_gap } else { coll_gap.max(sp_nt + nw) };
+        let outer = grow(base_outer, coll_gap + ring_w);
+        let iso = (!pnp).then(|| {
+            let hole = grow(base_outer, sp_nt);
+            let dn = grow(hole, process.enclosure("dnwell", "nwell").unwrap_or(0));
+            let past = process.enclosure("nwell", "dnwell").unwrap_or(0);
+            let reach = (dn.x - hole.x).abs() + past;
+            let full = grow(hole, reach.max(hole.x - outer.x + nw));
+            (hole, full, dn)
+        });
+        let pitch = match iso {
+            None => (outer.w - ring_w, outer.h - ring_w),
+            Some((_, full, dn)) => {
+                let (sw, sd) = (process.space("nwell").unwrap_or(0), process.space("dnwell").unwrap_or(0));
+                ((full.w + sw).max(dn.w + sd), (full.h + sw).max(dn.h + sd))
+            }
+        };
+        Self { pnp, emitter, base_gap, base_outer, coll_gap, ring_w, iso, pitch }
+    }
+
+    fn draw(&self, b: &mut Builder, process: &dyn Process, di: usize, ox: i32, oy: i32) {
+        let at = |x: Rect| Rect { x: x.x + ox, y: x.y + oy, ..x };
+        let r = |name: &str, d: i32| process.rule(name, d);
+        let enc = |o: &str, i: &str| process.enclosure(o, i).unwrap_or(0);
+        let cap = |o: &str, i: &str| process.endcap(o, i).unwrap_or(0);
+        let (emit_imp, base_imp, coll_imp) = if self.pnp { ("psdm", "nsdm", "psdm") } else { ("nsdm", "psdm", "nsdm") };
+        let (diff, li, licon) = (req(process, "diff"), req(process, "li"), req(process, "licon"));
+        let lat = cut_lattice(process);
+        let ct = dim(process, "contact");
+        let e = at(self.emitter);
+
+        // Emitter: diffusion, its implant, a contact array under one li
+        // plate (cuts `max(enclosure, end-cap)` inside the diffusion, li the
+        // end-cap past the outer cuts on every side).
+        b.rect(diff, e);
+        let ei = enc(emit_imp, "diff");
+        b.rect(req(process, emit_imp), Rect { x: e.x - ei, y: e.y - ei, w: e.w + 2 * ei, h: e.h + 2 * ei });
+        let inset = r("diff_encloses_licon", 0).max(enc("diff", "licon")).max(cap("diff", "licon"));
+        let pitch = ct + process.space("licon").unwrap_or(ct);
+        let fit = |len: i32| ((len - 2 * inset - ct) / pitch + 1).max(1);
+        let (nx, ny) = (fit(e.w), fit(e.h));
+        let (x0, y0) = (e.x + (e.w - (nx - 1) * pitch - ct) / 2, e.y + (e.h - (ny - 1) * pitch - ct) / 2);
+        let (x0, y0) = (snap_cut(x0, lat), snap_cut(y0, lat));
+        for i in 0..nx {
+            for j in 0..ny {
+                b.rect(licon, Rect { x: x0 + i * pitch, y: y0 + j * pitch, w: ct, h: ct });
+            }
+        }
+        let ls = r("li_encloses_licon", 0).max(enc("li", "licon")).max(cap("li", "licon"));
+        let plate = Rect { x: x0 - ls, y: y0 - ls, w: (nx - 1) * pitch + ct + 2 * ls, h: (ny - 1) * pitch + ct + 2 * ls };
+        b.rect(li, plate);
+        b.pin(pin(di, "E", Rect { x: x0 + (nx / 2) * pitch, y: y0 + (ny / 2) * pitch, w: ct, h: ct }, li));
+
+        // Base band (PNP: n-tap with its n-well, the base; NPN: p-tap).
+        let net = NetId(u16::MAX);
+        let base = Pin { name: format!("d{di}:B"), net, layer: li, at: e };
+        tap_ring(b, process, base_imp, self.pnp, e, self.base_gap, (self.ring_w, 1), &base);
+        // Collector band on the substrate (PNP) or the isolating n-well ring.
+        let coll = Pin { name: format!("d{di}:C"), net, layer: li, at: e };
+        let bo = at(self.base_outer);
+        let co = tap_ring(b, process, coll_imp, false, bo, self.coll_gap, (self.ring_w, 1), &coll);
+        if let (Some((hole, full, dn)), Some(nwell), Some(dnwell)) = (self.iso, process.layer("nwell"), process.layer("dnwell")) {
+            let (hole, full) = (at(hole), at(full));
+            for band in [
+                Rect { x: full.x, y: full.y, w: full.w, h: hole.y - full.y },
+                Rect { x: full.x, y: hole.y + hole.h, w: full.w, h: full.y + full.h - hole.y - hole.h },
+                Rect { x: full.x, y: hole.y, w: hole.x - full.x, h: hole.h },
+                Rect { x: hole.x + hole.w, y: hole.y, w: full.x + full.w - hole.x - hole.w, h: hole.h },
+            ] {
+                b.rect(nwell, band);
+            }
+            b.rect(dnwell, at(dn));
+        }
+        // The device marker over the unit.
+        if let Some(m) = process.layer(if self.pnp { "pnp" } else { "npn" }) {
+            b.rect(m, co);
+        }
+    }
+}
+
+/// Owner per slot of a `cols`-wide grid holding every member's units: slots
+/// ordered by distance from the grid centre (then angle), members smallest
+/// first, so a lone unit takes the centre and a large member surrounds it.
+fn unit_order(dev_nf: &[u16], cols: i32) -> Vec<Option<usize>> {
+    let total: usize = dev_nf.iter().map(|&u| usize::from(u.max(1))).sum();
+    let cols = (cols.max(1) as usize).min(total.max(1));
+    let rows = total.div_ceil(cols);
+    let key = |i: usize| {
+        let (dr, dc) = (2 * (i / cols) as i64 - rows as i64 + 1, 2 * (i % cols) as i64 - cols as i64 + 1);
+        (dr * dr + dc * dc, (dr as f64).atan2(dc as f64))
+    };
+    let mut order: Vec<usize> = (0..rows * cols).collect();
+    order.sort_by(|&a, &b| key(a).0.cmp(&key(b).0).then(key(a).1.total_cmp(&key(b).1)));
+    let mut members: Vec<usize> = (0..dev_nf.len()).collect();
+    members.sort_by_key(|&d| (dev_nf[d], d));
+    let mut owner = vec![None; rows * cols];
+    let mut at = order.into_iter();
+    for d in members {
+        for _ in 0..dev_nf[d].max(1) {
+            if let Some(i) = at.next() {
+                owner[i] = Some(d);
+            }
+        }
+    }
+    // Row-major; a short grid leaves its outermost cells empty.
+    owner
 }
 
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
-    let def = process.rule("bjt_min_emitter_side", 420);
+    let def = process.rule("bjt_min_emitter_side", 0);
     sizing(group, c, def, def)
-}
-
-/// A cut plus its enclosing li pad: the deck joins conductors only through
-/// drawn cuts, so every terminal needs one.
-fn contact(b: &mut Builder, li: LayerId, licon: LayerId, x: i32, y: i32, ct: i32, li_enc: i32) {
-    b.rect(li, Rect { x: x - li_enc, y: y - li_enc, w: ct + 2 * li_enc, h: ct + 2 * li_enc });
-    b.rect(licon, Rect { x, y, w: ct, h: ct });
 }
 
 /// PNP vs NPN from the unitization's `device_type` (no unitization: NPN).
 fn device_is_pnp(group: &DeviceGroup, c: &Constraints) -> bool {
     unitization(group, c).is_some_and(|u| u.device_type == DeviceKind::Pnp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every variant, drawn alone, is DRC- and ERC-clean.
+    #[test]
+    fn every_variant_is_drc_and_erc_clean() {
+        use crate::testkit;
+        use pnr_core::DeviceKind;
+        let Some(pdk) = testkit::pdk() else {
+            eprintln!("sky130 PDK unavailable — skipping");
+            return;
+        };
+        let mut dirty = Vec::new();
+        for n in [1, 2] {
+            for kind in [DeviceKind::Npn, DeviceKind::Pnp] {
+                dirty.extend(testkit::dirty::<Bjt>(kind, n, 1, 1000, 1000, &pdk));
+            }
+        }
+        // A 1:8 bandgap pair: nine units.
+        for kind in [DeviceKind::Npn, DeviceKind::Pnp] {
+            let (g, mut c) = testkit::group_of(kind, 2, 1, 1000, 1000);
+            c.unitization[0].dev_nf = vec![1, 8];
+            dirty.extend(testkit::dirty_group::<Bjt>(&g, &c, &pdk).into_iter().map(|d| format!("{kind:?} 1:8 {d}")));
+        }
+        assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
+    }
+
+    /// 1:8 on a 3×3: the one unit at the centre, the eight around it, both
+    /// centroids on the middle cell.
+    #[test]
+    fn a_one_to_eight_pair_centres_the_single_unit() {
+        let o = unit_order(&[1, 8], 3);
+        assert_eq!(o.len(), 9);
+        assert_eq!(o[4], Some(0), "{o:?}");
+        assert_eq!(o.iter().filter(|&&d| d == Some(1)).count(), 8);
+        // Device 1's slots are point-symmetric about the centre.
+        assert!((0..9).all(|i| o[i] == o[8 - i]));
+    }
 }

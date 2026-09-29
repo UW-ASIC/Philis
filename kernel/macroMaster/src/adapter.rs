@@ -8,12 +8,14 @@ use cells::Cell;
 use pnr_core::{DeviceGroup, DeviceId, DeviceKind, Macro, Process, Rect};
 
 /// Draw `dev_nf.len()` devices of `kind` at unit `w`×`l`, `dev_nf[i]`
-/// fingers/units each, as one macro with `d{i}:` pins.
+/// fingers/units each, as one macro with `d{i}:` pins; `dummies` asks for the
+/// generator's end dummies.
 pub(crate) fn draw<G: Cell>(
     kind: DeviceKind,
     w: i32,
     l: i32,
     dev_nf: &[u16],
+    dummies: bool,
     process: &dyn Process,
     pick: impl Fn(&G) -> bool,
 ) -> Macro {
@@ -33,7 +35,7 @@ pub(crate) fn draw<G: Cell>(
             unit_l: l,
             series_parallel,
             same_variant_required: true,
-            dummy_required: false,
+            dummy_required: dummies,
             route_matching_required: false,
         }],
         ..Constraints::default()
@@ -44,5 +46,5 @@ pub(crate) fn draw<G: Cell>(
     pool.into_iter()
         .map(|v| v.draw(&group, &c, process))
         .min_by_key(|m| i64::from(m.bbox.w) * i64::from(m.bbox.h))
-        .unwrap_or(Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w: 0, h: 0 } })
+        .unwrap_or(Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w: 0, h: 0 }, units: Vec::new(), dummies: Vec::new() })
 }

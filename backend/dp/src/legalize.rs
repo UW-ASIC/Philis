@@ -108,6 +108,7 @@ mod tests {
             orient: vec![pnr_core::Orient::default(); n],
             power_uw: vec![0; n],
             temp_mc: vec![0; n],
+            units: Default::default(),
         }
     }
 
@@ -199,6 +200,7 @@ mod tests {
             orient: vec![pnr_core::Orient::default(); 2],
             power_uw: vec![0; 2],
             temp_mc: vec![0; 2],
+            units: Default::default(),
         };
         let reqs = Requirements::<Layout>::default();
         separate_overlaps(&mut l, &reqs, &[false, false], 5, 0, 64);

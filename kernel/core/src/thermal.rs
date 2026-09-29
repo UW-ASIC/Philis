@@ -20,32 +20,32 @@ const SCALE_UW_NM_TO_MK: f32 = 1.0e6;
 /// device `j`'s dissipation. O(n²).
 #[must_use]
 pub fn rises_mc(l: &Layout, power_uw: &[i32]) -> Vec<i32> {
-    let n = l.x.len();
-    let mut out = vec![0i32; n];
     if power_uw.iter().all(|&p| p == 0) {
-        return out;
+        return vec![0; l.x.len()];
     }
+    (0..l.x.len()).map(|i| rise_at_mc(l, power_uw, i).round() as i32).collect()
+}
+
+/// Rise at device `i` from every source at the current positions, milli-°C. O(n).
+fn rise_at_mc(l: &Layout, power_uw: &[i32], i: usize) -> f32 {
     let denom = 2.0 * std::f32::consts::PI * K_SI_W_PER_M_K;
-    for (i, o) in out.iter_mut().enumerate() {
-        let mut rise = 0.0f32;
-        for j in 0..n {
-            let p = power_uw.get(j).copied().unwrap_or(0);
-            if p == 0 {
-                continue;
-            }
-            let r_floor = (l.hw[j].max(l.hh[j])).max(1) as f32;
-            let r = if i == j {
-                r_floor
-            } else {
-                let dx = (l.x[i] - l.x[j]) as f32;
-                let dy = (l.y[i] - l.y[j]) as f32;
-                (dx * dx + dy * dy).sqrt().max(r_floor)
-            };
-            rise += (p as f32) * SCALE_UW_NM_TO_MK / (denom * r);
+    let mut rise = 0.0f32;
+    for j in 0..l.x.len() {
+        let p = power_uw.get(j).copied().unwrap_or(0);
+        if p == 0 {
+            continue;
         }
-        *o = rise.round() as i32;
+        let r_floor = (l.hw[j].max(l.hh[j])).max(1) as f32;
+        let r = if i == j {
+            r_floor
+        } else {
+            let dx = (l.x[i] - l.x[j]) as f32;
+            let dy = (l.y[i] - l.y[j]) as f32;
+            (dx * dx + dy * dy).sqrt().max(r_floor)
+        };
+        rise += (p as f32) * SCALE_UW_NM_TO_MK / (denom * r);
     }
-    out
+    rise
 }
 
 impl Layout {
@@ -63,6 +63,27 @@ impl Layout {
             Target::Device(d) => temp(d),
             Target::Group(g) => {
                 self.groups.get(g.0 as usize).and_then(|ms| ms.iter().map(|&d| temp(d)).max()).unwrap_or(0)
+            }
+        };
+        (t(a) - t(b)).abs()
+    }
+
+    /// [`Layout::delta_temp_mc`] from the field at the **current** positions,
+    /// not the epoch-frozen `temp_mc`: what a trial move can be priced on.
+    /// O(n) per member. `0` on an unpowered die.
+    #[must_use]
+    pub fn live_delta_temp_mc(&self, a: Target, b: Target) -> f32 {
+        if self.power_uw.iter().all(|&p| p == 0) {
+            return 0.0;
+        }
+        let temp = |d: crate::DeviceId| {
+            let i = d.0 as usize;
+            if i < self.x.len() { rise_at_mc(self, &self.power_uw, i) } else { 0.0 }
+        };
+        let t = |x: Target| match x {
+            Target::Device(d) => temp(d),
+            Target::Group(g) => {
+                self.groups.get(g.0 as usize).map_or(0.0, |ms| ms.iter().map(|&d| temp(d)).fold(0.0, f32::max))
             }
         };
         (t(a) - t(b)).abs()
@@ -90,6 +111,7 @@ mod tests {
             branch: Vec::new(),
             power_uw: vec![10_000, 0, 0],
             temp_mc: vec![0; 3],
+            units: Default::default(),
         };
         let p = l.power_uw.clone();
         (l, p)
@@ -134,5 +156,16 @@ mod tests {
         let iso = l.delta_temp_mc(Target::Device(DeviceId(1)), Target::Device(DeviceId(2)));
         assert_eq!(iso, 0, "mirrored pair sits on one isotherm");
         assert!(iso < split);
+    }
+
+    #[test]
+    fn the_live_field_follows_a_move_before_any_refresh() {
+        let (mut l, _) = bench();
+        l.refresh_temps();
+        let (a, b) = (Target::Device(DeviceId(1)), Target::Device(DeviceId(2)));
+        assert!((l.live_delta_temp_mc(a, b) - l.delta_temp_mc(a, b) as f32).abs() <= 1.0, "agrees when fresh");
+        l.x[2] = -10_000; // onto partner 1's isotherm; temp_mc is now stale
+        assert!(l.live_delta_temp_mc(a, b) < 1.0);
+        assert!(l.delta_temp_mc(a, b) > 0, "the frozen field has not moved");
     }
 }

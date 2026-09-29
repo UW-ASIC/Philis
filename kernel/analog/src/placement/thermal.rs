@@ -6,9 +6,11 @@ use crate::rule::Rule;
 
 /// Matched partners must see |ΔT| ≤ `max_delta_mc` (milli-°C).
 ///
-/// `cost` is a distance pull (weight 3), because [`Layout::temp_mc`] is
-/// refreshed per epoch and gives a trial move no gradient; `satisfied`,
-/// `headroom` and `residual` read the measured ΔT.
+/// `cost` prices the pair's ΔT from the live field ([`Layout::live_delta_temp_mc`]),
+/// so a move is rewarded for putting the pair on one isotherm, not merely close
+/// together (Hastings 3e eq.8.23, PDF p.388: mismatch ∝ TC·d·∂T/∂x; place the
+/// separation along the isotherm). `satisfied`, `headroom` and `residual` read
+/// the epoch-frozen [`Layout::temp_mc`], so Θ is fixed within an anneal.
 #[derive(Clone, Copy)]
 pub struct ThermalGradient {
     pub a: Target,
@@ -18,14 +20,16 @@ pub struct ThermalGradient {
     pub margin_pct: u8,
 }
 
+/// Cost at `ΔT = max_delta_mc`: the old distance pull's weight at a 10 µm
+/// pitch (`3·(10 µm)²·1e-3`), so the objective's scale is unchanged.
+const AT_SPEC_COST: f32 = 3.0e5;
+
 impl Rule for ThermalGradient {
     type On = Layout;
+    /// `AT_SPEC_COST·(ΔT/max)²` over the live field; `0` on an unpowered die.
     fn cost(self, l: &Layout) -> f32 {
-        let (ax, ay) = l.centre(self.a);
-        let (bx, by) = l.centre(self.b);
-        let dx = (ax - bx) as f32;
-        let dy = (ay - by) as f32;
-        3.0 * (dx * dx + dy * dy) * 1e-3
+        let u = l.live_delta_temp_mc(self.a, self.b) / self.max_delta_mc.max(1) as f32;
+        AT_SPEC_COST * u * u
     }
     /// Vacuously true with no power data (see [`Rule::applicable`]).
     fn satisfied(self, l: &Layout) -> bool {
@@ -41,6 +45,13 @@ impl Rule for ThermalGradient {
     /// An unpowered die has no gradient to match against.
     fn applicable(self, l: &Layout) -> bool {
         l.power_uw.iter().any(|&p| p != 0)
+    }
+    /// All-zero power is "no operating point", not "cool".
+    ///
+    /// ponytail: a genuinely unbiased block also reads unknown; add a
+    /// `power_known` flag to `Layout` if one ever needs certifying.
+    fn known(self, l: &Layout) -> bool {
+        self.applicable(l)
     }
     fn margin(self) -> f32 {
         f32::from(self.margin_pct) / 100.0
@@ -73,6 +84,7 @@ mod tests {
             branch: Vec::new(),
             power_uw: vec![10_000, 0, 0],
             temp_mc: vec![0; 3],
+            units: Default::default(),
         };
         l.refresh_temps();
         l
@@ -98,6 +110,16 @@ mod tests {
         let good = bench(20_000, -20_000);
         assert!(pair().satisfied(&good), "isothermal pair must pass");
         assert!(pair().headroom(&good) > 0.9);
+    }
+
+    #[test]
+    fn cost_rewards_the_isotherm_not_closeness() {
+        // Both 20 µm from the heater, 40 µm apart: one isotherm, no cost —
+        // cheaper than a closer pair straddling the gradient.
+        let iso = bench(20_000, -20_000);
+        let near = bench(5_000, 15_000);
+        assert!(pair().cost(&iso) < 1.0);
+        assert!(pair().cost(&near) > pair().cost(&iso));
     }
 
     #[test]

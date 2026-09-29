@@ -89,6 +89,7 @@ mod tests {
             groups: vec![],
             power_uw: vec![0; 2],
             temp_mc: vec![0; 2],
+            units: Default::default(),
         }
     }
 

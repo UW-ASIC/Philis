@@ -12,7 +12,7 @@ use pnr_core::netlist::{Device, DeviceKind, Net, Netlist};
 fn fet(name: &str, kind: DeviceKind, g: u16, d: u16, s: u16, b: u16, w: i64, l: i64) -> Device {
     Device {
         name: name.into(),
-        kind,
+        kind, model: String::new(),
         terminals: vec![
             ("G".into(), NetId(g)),
             ("D".into(), NetId(d)),
@@ -212,9 +212,13 @@ fn parasitic_and_coupling_report_an_overshoot_not_a_count() {
     let wire = |y: i32| Shape { layer: LayerId(0), rect: Rect { x: 0, y, w: 100_000_000, h: 1 } };
     // 100 mm of metal per net — past every class's length budget by ~10×; the two runs
     // are parallel 1 nm apart, so the coupling sum is past its budget too.
-    let routes = pnr_core::routes::Routes { wires: vec![vec![wire(0)], vec![wire(2)]] };
+    let routes = pnr_core::routes::Routes { wires: vec![vec![wire(0)], vec![wire(2)]], ..Default::default()  };
 
-    let p = annotate(&ota(), &AnnotationConfig::default());
+    // Budgets exist only when the deck gives Cox and wire C (sky130-like numbers).
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.gate_af_per_um2 = Some(8_325.0);
+    cfg.process.wire_af_per_um = Some(50.0);
+    let p = annotate(&ota(), &cfg);
     for kind in ["ParasiticBudget", "CouplingBudget"] {
         let b = p
             .routing
@@ -235,7 +239,10 @@ fn dti_bands_are_one_hard_batch_with_dense_ids_seeded_share() {
     // the hard copy is legality (the full disjunction), the cost copy is what makes
     // `dp`'s branch flip priceable, and the budget arm never sees it (a disjunction
     // is not tradeable, and `Prices::bind` asserts hard ∩ budget = ∅).
-    let p = annotate(&ota(), &AnnotationConfig::default());
+    // Bands exist only on a trench process: the deck supplies the rule.
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.dti = Some((2_000, 1_000));
+    let p = annotate(&ota(), &cfg);
     let is_dti = |b: &Box<dyn RuleBatch<pnr_core::Layout>>| b.kind().ends_with("DtiBand");
     assert_eq!(
         p.placement.hard.iter().filter(|b| is_dti(b)).count(),
@@ -283,8 +290,8 @@ fn glue_only_netlist_emits_no_placement() {
     // Two unrelated resistors → nothing recognised → no placement constraints.
     let nl = Netlist {
         devices: vec![
-            Device { name: "R1".into(), kind: DeviceKind::Resistor, terminals: vec![("A".into(), NetId(0)), ("B".into(), NetId(1))], params: vec![] },
-            Device { name: "R2".into(), kind: DeviceKind::Resistor, terminals: vec![("A".into(), NetId(2)), ("B".into(), NetId(3))], params: vec![] },
+            Device { name: "R1".into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("A".into(), NetId(0)), ("B".into(), NetId(1))], params: vec![] },
+            Device { name: "R2".into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("A".into(), NetId(2)), ("B".into(), NetId(3))], params: vec![] },
         ],
         nets: nets(&["a", "b", "c", "d"]),
     };
@@ -401,4 +408,150 @@ fn a_cascode_stack_is_adjacent_not_matched() {
     assert!(kinds.iter().any(|k| k.ends_with("Proximity")), "{kinds:?}");
     assert!(!kinds.iter().any(|k| k.ends_with("MatchingPair") || k.ends_with("ThermalGradient")), "{kinds:?}");
     assert!(p.placement.hard.is_empty());
+}
+
+#[test]
+fn antenna_gate_area_lands_on_the_gate_net_not_the_drain() {
+    // G ≠ D on purpose: a diode-connected device would hide an index slip.
+    let nl = Netlist {
+        devices: vec![fet("XM1", DeviceKind::Nmos, 0, 1, 2, 2, 1_000, 1_000)],
+        nets: nets(&["g", "d", "VSS"]),
+    };
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.antenna_max_ratio = Some(400.0);
+    let p = annotate(&nl, &cfg);
+    let ant = p.routing.hard.iter().find(|b| b.kind().ends_with("Antenna")).expect("antenna batch");
+    let mut nets_hit = Vec::new();
+    ant.touched(&mut nets_hit);
+    assert_eq!(nets_hit, vec![0], "gate area charged to net {nets_hit:?}, want the gate (0)");
+}
+
+#[test]
+fn shields_are_requested_only_against_a_clock() {
+    let is_shield = |b: &Box<dyn RuleBatch<pnr_core::Routes>>| b.kind().ends_with("Shield");
+    let quiet = annotate(&ota(), &AnnotationConfig::default());
+    assert!(!quiet.routing.budget.iter().any(is_shield), "no aggressor, no shield");
+
+    // The same OTA plus a clocked switch on its own nets.
+    let mut nl = ota();
+    nl.nets.push(Net { name: "clk".into() });
+    nl.nets.push(Net { name: "sw".into() });
+    let (clk, sw) = (nl.nets.len() as u16 - 2, nl.nets.len() as u16 - 1);
+    nl.devices.push(fet("XS", DeviceKind::Nmos, clk, sw, 3, 3, 1_000, 150));
+    nl.devices.push(fet("XC", DeviceKind::Nmos, clk, 0, 3, 3, 1_000, 150));
+    let clocked = annotate(&nl, &AnnotationConfig::default());
+    let b = clocked.routing.budget.iter().find(|b| is_shield(b)).expect("shield batch");
+    let mut pairs = Vec::new();
+    b.shield_pairs(&mut pairs);
+    assert!(!pairs.is_empty());
+    let vss = 3u32;
+    assert!(pairs.iter().all(|&(_, r)| r == vss), "shielded by ground: {pairs:?}");
+}
+
+#[test]
+fn a_lone_mirror_stage_is_symmetric_too() {
+    // No diff pair in the stage: the mirror pair still shares the stage axis,
+    // hard (the equality) and cost (the pull toward it).
+    let nl = Netlist {
+        devices: vec![
+            fet("XM1", DeviceKind::Pmos, 0, 0, 2, 2, 5_000, 1_000),
+            fet("XM2", DeviceKind::Pmos, 0, 1, 2, 2, 5_000, 1_000),
+        ],
+        nets: nets(&["vref", "iout", "VDD"]),
+    };
+    let p = annotate(&nl, &AnnotationConfig::default());
+    let sym = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| {
+        a.iter().filter(|b| b.kind() == "Symmetry").map(|b| b.count()).sum::<usize>()
+    };
+    assert_eq!(sym(&p.placement.hard), 1);
+    assert_eq!(sym(&p.placement.cost), 1);
+    let mut pairs = Vec::new();
+    p.placement.hard.iter().for_each(|b| b.mirror_pairs(&mut pairs));
+    assert_eq!(pairs, [(0, 1, 0)], "the reference and output mirror about stage 0's axis");
+}
+
+#[test]
+fn matching_is_budgeted_only_with_the_deck_s_mismatch_data() {
+    let is_mp = |b: &Box<dyn RuleBatch<pnr_core::Layout>>| b.kind().ends_with("MatchingPair");
+    let bare = annotate(&ota(), &AnnotationConfig::default());
+    assert!(!bare.placement.budget.iter().any(is_mp), "no S_VT: a pull, not a budget");
+    assert!(bare.missing.iter().any(|m| m.0 == "MatchingPair"), "and listed unknown");
+    assert!(
+        bare.placement.budget.iter().any(|b| b.kind() == "CommonCentroid"),
+        "coincidence needs no deck data"
+    );
+
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.avt_mv_um = [Some(5.0), Some(6.0)];
+    cfg.process.svt_uv_per_um = Some(4.0);
+    let full = annotate(&ota(), &cfg);
+    assert!(full.placement.budget.iter().any(is_mp));
+    assert!(!full.missing.iter().any(|m| m.0 == "MatchingPair"));
+}
+
+#[test]
+fn clocked_devices_are_kept_away_from_matched_ones() {
+    let is_iso = |b: &Box<dyn RuleBatch<pnr_core::Layout>>| b.kind().ends_with("Isolation");
+    let quiet = annotate(&ota(), &AnnotationConfig::default());
+    assert!(!quiet.placement.cost.iter().any(is_iso), "no aggressor, no isolation");
+
+    let mut nl = ota();
+    nl.nets.push(Net { name: "clk".into() });
+    nl.nets.push(Net { name: "sw".into() });
+    let (clk, sw) = (nl.nets.len() as u16 - 2, nl.nets.len() as u16 - 1);
+    nl.devices.push(fet("XS", DeviceKind::Nmos, clk, sw, 3, 3, 1_000, 150));
+    let p = annotate(&nl, &AnnotationConfig::default());
+    let b = p.placement.cost.iter().find(|b| is_iso(b)).expect("isolation pull");
+    assert_eq!(b.count(), 4, "XS against each of the four matched devices");
+    assert!(!p.placement.budget.iter().any(is_iso), "uncalibrated: a pull, not a budget");
+    assert!(p.missing.iter().any(|m| m.0 == "Isolation"), "and reported unknown");
+
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.epi_nm = Some(3_000);
+    let p = annotate(&nl, &cfg);
+    assert!(p.placement.budget.iter().any(is_iso));
+    assert!(!p.missing.iter().any(|m| m.0 == "Isolation"));
+}
+
+#[test]
+fn proximity_is_a_priced_budget_not_just_a_pull() {
+    // MAT-07: the tail's distance to the input pair is an allowance the search
+    // must pay for exceeding, not a report nobody enforces.
+    let p = annotate(&ota(), &AnnotationConfig::default());
+    let prox = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| {
+        a.iter().filter(|b| b.kind().ends_with("Proximity")).map(|b| b.count()).sum::<usize>()
+    };
+    assert!(prox(&p.placement.budget) > 0);
+    assert_eq!(prox(&p.placement.budget), prox(&p.placement.cost), "every budget keeps its pull");
+    assert!(!p.placement.hard.iter().any(|b| b.kind().ends_with("Proximity")));
+}
+
+#[test]
+fn capacitor_plate_nets_get_no_invented_budget() {
+    // An inverter drives a DAC bit plate; the top plate feeds a comparator
+    // gate. A gate-load budget on either would be invented: the limits are
+    // array specs (ARR-03/05), so both read unknown and say so.
+    let cap = |name: &str, p: u16, n: u16| Device {
+        name: name.into(),
+        kind: DeviceKind::Capacitor, model: String::new(),
+        terminals: vec![("P".into(), NetId(p)), ("N".into(), NetId(n))],
+        params: vec![],
+    };
+    // nets: 0 top, 1 b0, 2 d0, 3 VDD, 4 VSS, 5 cmp
+    let nl = Netlist {
+        devices: vec![
+            cap("XC1", 0, 1),
+            fet("XMP", DeviceKind::Pmos, 2, 1, 3, 3, 1_000, 150),
+            fet("XMN", DeviceKind::Nmos, 2, 1, 4, 4, 500, 150),
+            fet("XMC", DeviceKind::Nmos, 0, 5, 4, 4, 1_000, 150),
+        ],
+        nets: nets(&["top", "b0", "d0", "VDD", "VSS", "cmp"]),
+    };
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.gate_af_per_um2 = Some(8_325.0);
+    let p = annotate(&nl, &cfg);
+    assert_eq!(p.net_classes[0].c_budget_af, None, "top plate");
+    assert_eq!(p.net_classes[1].c_budget_af, None, "bit plate");
+    assert!(p.net_classes[2].c_budget_af.is_some(), "the inverter input keeps its gate-load budget");
+    assert!(p.missing.iter().any(|m| m.0 == "ParasiticBudget" && m.1.contains("ARR-05")));
 }

@@ -1,0 +1,94 @@
+{
+  "scope": "Independent source raster and algebra cross-check; HTML notes only; no engine audit.",
+  "source": "Hastings, The Art of Analog Layout, supplied third edition, Appendix E",
+  "pdf_pages": [
+    871,
+    872
+  ],
+  "printed_pages": [
+    870,
+    871
+  ],
+  "raster_files": [
+    "/tmp/philis-research/hastings-page-871.png",
+    "/tmp/philis-research/hastings-page-872.png"
+  ],
+  "equation_reviews": [
+    {
+      "equation": "E.6",
+      "status": "apparent_internal_inconsistency",
+      "printed": "i=(G/gamma)[c1 exp(-gamma x)+c2 exp(gamma x)]",
+      "consistent": "i=(G/gamma)[c1 exp(-gamma x)-c2 exp(gamma x)]",
+      "reason": "E.3 requires i=-(1/R)dv/dx; differentiate E.5 and use gamma^2=RG."
+    },
+    {
+      "equation": "E.8",
+      "status": "apparent_internal_inconsistency",
+      "printed": "I_D=(gamma/G)V_DS tanh(gamma W)",
+      "consistent": "I_D=(G/gamma)V_DS tanh(gamma W)",
+      "reason": "The boundary-value solution gives G/gamma. Units also require conductance, whereas gamma/G has resistance units."
+    },
+    {
+      "equation": "E.9",
+      "status": "supported",
+      "consistent": "R_in=(gamma/G)coth(gamma W)",
+      "reason": "Reciprocal of corrected E.8; consistent with the differential equations and boundary conditions."
+    },
+    {
+      "equation": "E.14",
+      "status": "apparent_internal_inconsistency",
+      "printed": "gamma W=R_S W/(R_Si W_M)",
+      "consistent": "gamma W=sqrt[R_S W/(R_Si W_M)]",
+      "reason": "Substitute R=R_S/W_M and G=1/(W R_Si) into gamma=sqrt(RG)."
+    },
+    {
+      "equation": "E.13 and approximation-accuracy prose",
+      "status": "qualified",
+      "reason": "For x=gamma W, exact total resistance is R_Si x coth(x), while exact added metal resistance is R_Si[x coth(x)-1]. The approximation adds R_Si x^2/3. Relative errors in the total and added metal resistance differ materially; do not reuse the source accuracy percentages as independently verified metal-only accuracy."
+    }
+  ],
+  "derivation": {
+    "boundary_conditions": "v(0)=V_DS, i(W)=0",
+    "voltage": "v(x)=V_DS cosh[gamma(W-x)]/cosh(gamma W)",
+    "current": "i(x)=(G/gamma)V_DS sinh[gamma(W-x)]/cosh(gamma W)",
+    "assumptions": "Positive uniform per-length R and G; source Appendix E linear distributed ladder and its boundary conditions."
+  },
+  "numeric_checks": [
+    {
+      "W_over_d_pen": 0.1,
+      "gamma_W": 0.31622776601683794,
+      "exact_total_over_RSi": 1.0331132065608417,
+      "exact_metal_over_RSi": 0.03311320656084171,
+      "approx_metal_over_RSi": 0.03333333333333333,
+      "relative_error_total": 0.00021307129856995566,
+      "relative_error_metal": 0.006647703298898744
+    },
+    {
+      "W_over_d_pen": 1.0,
+      "gamma_W": 1.0,
+      "exact_total_over_RSi": 1.3130352854993315,
+      "exact_metal_over_RSi": 0.31303528549933146,
+      "approx_metal_over_RSi": 0.3333333333333333,
+      "relative_error_total": 0.015458874607686246,
+      "relative_error_metal": 0.06484268315510788
+    },
+    {
+      "W_over_d_pen": 1.8,
+      "gamma_W": 1.3416407864998738,
+      "exact_total_over_RSi": 1.5384628277677816,
+      "exact_metal_over_RSi": 0.5384628277677816,
+      "approx_metal_over_RSi": 0.6,
+      "relative_error_total": 0.039999128429710096,
+      "relative_error_metal": 0.11428304621755059
+    }
+  ],
+  "status_boundary": "These are independently checked apparent internal inconsistencies in the supplied edition; no publisher-confirmed erratum was consulted.",
+  "dac_kTC_review": {
+    "file": "/tmp/philis-research/topic-dac-arrays-body.html",
+    "status": "supported_as_independent_derivation",
+    "claim": "For a single ideal linear capacitor equilibrated at T in the classical regime, Var(v)=k_B T/C follows from equipartition of fluctuating voltage energy. Ideal isolation preserves the sampled variance.",
+    "provenance": "Correctly labeled independent derivation and explicit supplied-corpus gap; not attributed to DAC paper.",
+    "assumptions": "Thermal equilibrium, classical regime, one independent capacitor degree of freedom, ideal linear capacitor, ideal isolation. Actual converter topology, finite settling, correlation, and added switch effects require a complete noise model.",
+    "optional_wording": "Thermal noise constrains effective sampling capacitance, and hence unit capacitance after topology and the noise allocation are fixed."
+  }
+}

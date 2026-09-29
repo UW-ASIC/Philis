@@ -51,6 +51,15 @@ pub trait Rule: Copy {
         true
     }
 
+    /// Whether the inputs this rule reads exist (power from an operating point,
+    /// a routed net). `false` = **unknown**: search treats it as satisfied (it
+    /// cannot act on it), but a report must not certify it. Distinct from
+    /// [`Rule::applicable`], which is a justified "nothing to check".
+    #[inline]
+    fn known(self, _state: &Self::On) -> bool {
+        true
+    }
+
     /// Move `state` exactly onto this rule's feasible set, on the `grid`
     /// lattice. For integer equalities a penalty can never close. Best-effort
     /// and local; the caller re-checks legality.
@@ -82,6 +91,27 @@ pub trait Rule: Copy {
         None
     }
 
+    /// `(a, b, axis)` when this rule mirrors two devices about a shared axis:
+    /// what a move must preserve to stay feasible without projection.
+    #[inline]
+    fn mirror_pair(self) -> Option<(u32, u32, u16)> {
+        None
+    }
+
+    /// `(victim, aggressor)` nets this rule wants routed apart: what a router
+    /// can price as a keep-away field while searching, not only after.
+    #[inline]
+    fn keepaway(self) -> Option<(u32, u32)> {
+        None
+    }
+
+    /// `(victim, reference)` when this rule asks for `victim` to be shielded by
+    /// `reference` metal — what a router must generate, not only check.
+    #[inline]
+    fn shield(self) -> Option<(u32, u32)> {
+        None
+    }
+
     /// Safety margin in `[0, 1)`: pressure starts once `headroom < margin`.
     #[inline]
     fn margin(self) -> f32 {
@@ -100,13 +130,16 @@ pub trait Rule: Copy {
 }
 
 /// Type-erased view of one kind's whole array. Cold: called once per kind.
-pub trait RuleBatch<On> {
+/// `Send + Sync`: a whole solve (its `Requirements` included) may run on a
+/// worker thread (the library's multi-start).
+pub trait RuleBatch<On>: Send + Sync {
     fn cost(&self, state: &On) -> f32;
     fn violations(&self, state: &On) -> u32;
-    /// Σ [`Rule::residual`] — this batch's Θ contribution.
+    /// Σ [`Rule::residual`] — this batch's Θ contribution. Default: one full
+    /// budget per violation, so a batch that cannot measure its overshoot still
+    /// reads as failed (Graeb ch.1: fail is never pass).
     fn residual(&self, state: &On) -> f64 {
-        let _ = state;
-        0.0
+        f64::from(self.violations(state))
     }
     /// Stable kind name (price matching, reporting).
     fn kind(&self) -> &'static str {
@@ -137,6 +170,11 @@ pub trait RuleBatch<On> {
         let _ = state;
         0
     }
+    /// Rules whose inputs are missing (see [`Rule::known`]).
+    fn unknown(&self, state: &On) -> u32 {
+        let _ = state;
+        0
+    }
     /// Ids touched by the **violated** rules — the repair targets.
     fn violating_ids(&self, state: &On, out: &mut Vec<u32>) {
         let _ = (state, out);
@@ -155,9 +193,21 @@ pub trait RuleBatch<On> {
     fn branches(&self, out: &mut Vec<(BranchId, bool)>) {
         let _ = out;
     }
+    /// Append every `(a, b, axis)` mirror pair (see [`Rule::mirror_pair`]).
+    fn mirror_pairs(&self, out: &mut Vec<(u32, u32, u16)>) {
+        let _ = out;
+    }
+    /// Append every keep-away `(victim, aggressor)` (see [`Rule::keepaway`]).
+    fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        let _ = out;
+    }
+    /// Append every shield request `(victim, reference)` (see [`Rule::shield`]).
+    fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        let _ = out;
+    }
 }
 
-impl<R: Rule> RuleBatch<R::On> for Vec<R> {
+impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {
     #[inline]
     fn cost(&self, s: &R::On) -> f32 {
         self.iter().map(|r| r.cost(s)).sum()
@@ -168,7 +218,7 @@ impl<R: Rule> RuleBatch<R::On> for Vec<R> {
     }
     #[inline]
     fn residual(&self, s: &R::On) -> f64 {
-        self.iter().map(|r| f64::from(r.residual(s))).sum()
+        self.iter().map(|r| rule_residual(*r, s)).sum()
     }
     fn kind(&self) -> &'static str {
         std::any::type_name::<R>()
@@ -188,6 +238,9 @@ impl<R: Rule> RuleBatch<R::On> for Vec<R> {
     }
     fn inapplicable(&self, s: &R::On) -> u32 {
         self.iter().filter(|r| !r.applicable(s)).count() as u32
+    }
+    fn unknown(&self, s: &R::On) -> u32 {
+        self.iter().filter(|r| !r.known(s)).count() as u32
     }
     fn violating_ids(&self, s: &R::On, out: &mut Vec<u32>) {
         for r in self.iter().filter(|r| !r.satisfied(s)) {
@@ -212,6 +265,15 @@ impl<R: Rule> RuleBatch<R::On> for Vec<R> {
     fn branches(&self, out: &mut Vec<(BranchId, bool)>) {
         out.extend(self.iter().filter_map(|r| r.branch()));
     }
+    fn mirror_pairs(&self, out: &mut Vec<(u32, u32, u16)>) {
+        out.extend(self.iter().filter_map(|r| r.mirror_pair()));
+    }
+    fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        out.extend(self.iter().filter_map(|r| r.keepaway()));
+    }
+    fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        out.extend(self.iter().filter_map(|r| r.shield()));
+    }
 }
 
 /// `0` with headroom ≥ margin, `1` at the raw spec; `1 − headroom` with no margin.
@@ -225,6 +287,23 @@ fn rule_criticality<R: Rule>(r: R, s: &R::On) -> f32 {
         ((m - h) / m).clamp(0.0, 1.0)
     }
 }
+
+/// [`Rule::residual`], floored at one milli-budget for a violated rule: a
+/// boolean fail whose measure rounds to `0` must still cost Θ, or the search
+/// reads it as a pass (Graeb 2007 ch.1, four outcomes; EVD-07).
+#[inline]
+fn rule_residual<R: Rule>(r: R, s: &R::On) -> f64 {
+    let x = f64::from(r.residual(s));
+    if x > 0.0 || r.satisfied(s) {
+        x
+    } else {
+        FAIL_FLOOR
+    }
+}
+
+/// Smallest Θ a violated rule contributes: one milli-budget, the unit
+/// `Violation::from_residual` counts in.
+const FAIL_FLOOR: f64 = 1e-3;
 
 /// `excess` past the spec as a fraction of `budget` (both in the rule's unit):
 /// a cap is `over(measured − cap, cap)`, a floor `over(floor − measured, floor)`.
@@ -310,6 +389,7 @@ mod tests {
         use pnr_core::geom::{LayerId, Rect, Shape};
         pnr_core::Routes {
             wires: vec![vec![Shape { layer: LayerId(0), rect: Rect { x: 0, y: 0, w: len, h } }]],
+            ..Default::default()
         }
     }
 
@@ -317,7 +397,9 @@ mod tests {
         crate::routing::ParasiticBudget {
             net: pnr_core::NetId(0),
             max_len_nm,
+            max_c_af: 0,
             margin_pct: 20,
+            stack: None,
         }
     }
 
@@ -352,7 +434,7 @@ mod tests {
         let r = one_wire(15_000, 100); // length 15_000 nm, area 1.5e6 nm²
         let p = parasitic(10_000); // 50% over a 10_000 nm cap
         // area/gate ×100 = 1.5e6/1e4 ×100 = 15_000; cap it at 10_000.
-        let a = crate::routing::Antenna { net: pnr_core::NetId(0), max_ratio_x100: 10_000, gate_area_nm2: 10_000, margin_pct: 20 };
+        let a = crate::routing::Antenna { net: pnr_core::NetId(0), max_ratio_x100: 10_000, gate_area_nm2: 10_000, margin_pct: 20, stack: None };
 
         let (pr, ar) = (p.residual(&r), a.residual(&r));
         assert!((pr - 0.5).abs() < 1e-6, "length residual {pr}");
@@ -406,5 +488,38 @@ mod tests {
         let plain: Vec<Plain> = vec![Plain];
         assert_eq!(plain.criticality(&s), 1.0);
         assert_eq!(plain.cost(&s), 7.0);
+    }
+
+    /// A failed check whose measure says "0 over" (at the edge, or a boolean
+    /// with no scale) must still cost Θ; so must a batch with no residual.
+    #[test]
+    fn a_failed_rule_never_reads_as_zero_theta() {
+        #[derive(Clone, Copy)]
+        struct EdgeFail;
+        impl Rule for EdgeFail {
+            type On = ();
+            fn cost(self, _: &()) -> f32 {
+                0.0
+            }
+            fn satisfied(self, _: &()) -> bool {
+                false
+            }
+            fn residual(self, _: &()) -> f32 {
+                0.0
+            }
+        }
+        assert!(vec![EdgeFail].residual(&()) > 0.0);
+        assert_eq!(vec![Plain].residual(&()), 0.0, "a pass stays free");
+
+        struct Unmeasured;
+        impl RuleBatch<()> for Unmeasured {
+            fn cost(&self, _: &()) -> f32 {
+                0.0
+            }
+            fn violations(&self, _: &()) -> u32 {
+                2
+            }
+        }
+        assert_eq!(Unmeasured.residual(&()), 2.0);
     }
 }

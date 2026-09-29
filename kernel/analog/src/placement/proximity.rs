@@ -6,7 +6,7 @@ use crate::rule::Rule;
 
 /// Soft pull keeping related devices within `max_distance_nm` of each other,
 /// edge to edge (a centre distance would make the spec depend on cell size).
-/// Attracts only; the check is reported, never enforced.
+/// Attracts only: a priced budget (Θ) and a cost pull, never a hard gate.
 #[derive(Clone, Copy)]
 pub struct Proximity {
     pub a: Target,

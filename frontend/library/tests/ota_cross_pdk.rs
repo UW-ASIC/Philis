@@ -52,9 +52,9 @@ impl Composition for Ota5T {
         // ponytail: "NWELL.2" is a deck rule id, not a role name — add a
         // role-aliased construction dim (nwell_spacing) to the cell section
         // when a deck with different rule ids shows up.
-        let sep = c.process().rule("device_gap", 600);
+        let sep = c.process().rule("device_gap", 0);
         let wellsep = sep.max(c.process().rule("NWELL.2", 1270));
-        let vgap = sep.max(2 * c.process().rule("well_enclosure", 180));
+        let vgap = sep.max(2 * c.process().rule("well_enclosure", 0));
 
         let nmos = || Mos::new(DeviceKind::Nmos, 420, 150, 1);
         let pmos = || Mos::new(DeviceKind::Pmos, 840, 150, 1);
@@ -140,13 +140,22 @@ fn check_netlist(
     let pins: Vec<&str> = subckt.split_whitespace().skip(2).collect();
     assert_eq!(pins.len(), 6, "{label}: expected six pins, got {pins:?}");
 
+    // Five transistors, where the deck recognises any (ASAP7's connects M1
+    // and up only: no device extracts, so none is expected).
+    let recognises_mos = pdk.deck.devices.kind.iter().any(|k| *k == gdsverify_kind_mos());
     let mos = spice.lines().filter(|l| l.starts_with('M')).count();
-    assert_eq!(mos, 5, "{label}: expected five transistors, got:\n{spice}");
+    assert_eq!(mos, if recognises_mos { 5 } else { 0 }, "{label}: transistor count, got:\n{spice}");
 
-    assert!(
-        spice.lines().any(|l| l.starts_with('C')),
-        "{label}: asked for parasitics but got no capacitance card:\n{spice}"
-    );
+    // Capacitance cards where the deck states any capacitance (ASAP7's
+    // PEX is wire resistance only).
+    let st = &pdk.deck.stack;
+    let has_c = st.area_cap_af_um2.iter().chain(&st.fringe_cap_af_um).chain(&st.dielectric_k).any(|&v| v > 0.0);
+    if has_c {
+        assert!(
+            spice.lines().any(|l| l.starts_with('C')),
+            "{label}: asked for parasitics but got no capacitance card:\n{spice}"
+        );
+    }
 
     if let Some(model) = expect_model {
         assert!(
@@ -346,4 +355,9 @@ fn ota5t_clean_on_generic_finfet() {
     // The synthetic deck names no real foundry models, so only the structure is
     // gated here; sky130 is where the model-name claim is checkable.
     elaborate_on(&deck, "generic_finfet", None);
+}
+
+/// The deck's MOS device kind (via `verify`'s re-export of the engine).
+fn gdsverify_kind_mos() -> verify::DeviceKind {
+    verify::DeviceKind::Mos
 }

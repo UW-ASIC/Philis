@@ -37,6 +37,7 @@ struct CamUni {
 #[derive(Clone)]
 pub struct Poly {
     pub layer: u16,
+    pub datatype: u16,
     pub pts: Vec<[i32; 2]>,
 }
 
@@ -65,12 +66,10 @@ pub fn parse_layer_names(json: &str) -> LayerMap {
     map
 }
 
-/// The name for GDS layer `layer` (any datatype), else `L{layer}`.
-fn layer_label(names: &LayerMap, layer: u16) -> String {
-    names
-        .iter()
-        .find(|(&(l, _), _)| l == i32::from(layer))
-        .map_or_else(|| format!("L{layer}"), |(_, n)| n.clone())
+/// The name for GDS `(layer, datatype)`, else `L{layer}/{datatype}`. Datatype
+/// matters: sky130 poly and licon are both layer 66.
+fn layer_label(names: &LayerMap, (l, d): (u16, u16)) -> String {
+    names.get(&(i32::from(l), i32::from(d))).cloned().unwrap_or_else(|| format!("L{l}/{d}"))
 }
 
 /// `(x0, y0, x1, y1)` over every vertex; `None` when there are none.
@@ -126,7 +125,7 @@ fn read_string(data: &[u8], off: usize, len: usize) -> String {
     String::from_utf8_lossy(&s[..end]).into_owned()
 }
 
-fn path_to_polys(layer: u16, half_w: i32, pts: &[[i32; 2]]) -> Vec<Poly> {
+fn path_to_polys(layer: u16, datatype: u16, half_w: i32, pts: &[[i32; 2]]) -> Vec<Poly> {
     let mut out = Vec::new();
     for seg in pts.windows(2) {
         let [x0, y0] = seg[0];
@@ -149,7 +148,7 @@ fn path_to_polys(layer: u16, half_w: i32, pts: &[[i32; 2]]) -> Vec<Poly> {
                 [x1 - nx, y1 - ny], [x0 - nx, y0 - ny],
             ]
         };
-        out.push(Poly { layer, pts: rect });
+        out.push(Poly { layer, datatype, pts: rect });
     }
     out
 }
@@ -170,6 +169,7 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
     let mut in_aref = false;
     let mut in_text = false;
     let mut layer: u16 = 0;
+    let mut datatype: u16 = 0;
     let mut path_width: i32 = 0;
     let mut sref_name = String::new();
     let mut sref_mirror = false;
@@ -213,10 +213,12 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
             0x08 | 0x2D => {
                 in_boundary = true;
                 layer = 0;
+                datatype = 0;
             }
             0x09 => {
                 in_path = true;
                 layer = 0;
+                datatype = 0;
                 path_width = 0;
             }
             0x0A => {
@@ -241,6 +243,11 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
             // LAYER
             0x0D if (in_boundary || in_path) && len >= 6 => {
                 layer = read_i16(data, i + 4) as u16;
+            }
+
+            // DATATYPE
+            0x0E if (in_boundary || in_path) && len >= 6 => {
+                datatype = read_i16(data, i + 4) as u16;
             }
 
             // WIDTH (path)
@@ -288,12 +295,12 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
                 if in_boundary {
                     if pts.len() > 1 && pts.first() == pts.last() { pts.pop(); }
                     if pts.len() >= 3 {
-                        cur_polys.push(Poly { layer, pts });
+                        cur_polys.push(Poly { layer, datatype, pts });
                     }
                 } else if in_path {
                     if pts.len() >= 2 {
                         let hw = (path_width / 2).max(1);
-                        cur_polys.extend(path_to_polys(layer, hw, &pts));
+                        cur_polys.extend(path_to_polys(layer, datatype, hw, &pts));
                     }
                 } else if in_sref && !pts.is_empty() {
                     cur_srefs.push(SRef {
@@ -368,7 +375,7 @@ fn flatten_cell(
             let (rx, ry) = transform_point(x, y, mirror, angle);
             [rx + tx, ry + ty]
         }).collect();
-        out.push(Poly { layer: poly.layer, pts });
+        out.push(Poly { layer: poly.layer, datatype: poly.datatype, pts });
     }
     for t in &cell.texts {
         let (rx, ry) = transform_point(t.x, t.y, mirror, angle);
@@ -414,7 +421,29 @@ pub fn parse_gds(data: &[u8]) -> (Vec<Poly>, Vec<TextEntry>) {
 
 // ── Colours, triangulation, stroke text ──
 
-fn layer_color(l: u16) -> [f32; 4] {
+/// Fill colour and whether to fill at all. Known layer names get the
+/// conventional colours; wells, implants and marker layers are outline-only so
+/// they never hide the devices under them; anything else hashes (layer, datatype).
+fn layer_style(names: &LayerMap, key: (u16, u16)) -> ([f32; 4], bool) {
+    let name = names.get(&(i32::from(key.0), i32::from(key.1))).map(String::as_str).unwrap_or("");
+    let c = |r: f32, g: f32, b: f32| [r, g, b, 0.55];
+    let known = match name {
+        "diff" | "comp" | "activ" => Some(c(0.20, 0.75, 0.25)),
+        "tap" => Some(c(0.60, 0.75, 0.20)),
+        "poly" | "poly2" | "gatpoly" => Some(c(0.90, 0.20, 0.20)),
+        "licon" | "mcon" | "via" | "via1" | "via2" | "via3" | "via4" | "cont" | "contact" => Some([0.95, 0.95, 0.95, 0.85]),
+        "li1" | "li" => Some(c(0.60, 0.45, 0.90)),
+        "met1" | "m1" | "metal1" => Some(c(0.25, 0.50, 1.00)),
+        "met2" | "m2" | "metal2" => Some(c(0.90, 0.40, 0.85)),
+        "met3" | "m3" | "metal3" => Some(c(0.20, 0.85, 0.85)),
+        "met4" | "m4" | "metal4" => Some(c(1.00, 0.65, 0.20)),
+        "met5" | "m5" | "metal5" => Some(c(0.85, 0.85, 0.30)),
+        "rpoly" | "poly_res" => Some(c(1.00, 0.55, 0.22)),
+        _ => None,
+    };
+    if let Some(col) = known {
+        return (col, true);
+    }
     const P: [[f32; 4]; 10] = [
         [0.22, 0.60, 1.00, 0.60],
         [1.00, 0.33, 0.33, 0.60],
@@ -427,17 +456,30 @@ fn layer_color(l: u16) -> [f32; 4] {
         [0.85, 0.45, 0.55, 0.60],
         [0.50, 0.50, 0.80, 0.60],
     ];
-    P[l as usize % P.len()]
+    let outline_only = name.contains("well")
+        || name.contains("sdm")
+        || name.ends_with("_mk")
+        || matches!(name, "nplus" | "pplus" | "nsd" | "psd" | "npc" | "hvtp" | "lvtn" | "rpm" | "diom" | "dualgate" | "sab" | "salblock");
+    (P[(usize::from(key.0) * 7 + usize::from(key.1)) % P.len()], !outline_only)
+}
+
+impl Poly {
+    fn key(&self) -> (u16, u16) {
+        (self.layer, self.datatype)
+    }
 }
 
 fn outline_color(fill: [f32; 4]) -> [f32; 4] {
     [(fill[0] * 1.5).min(1.0), (fill[1] * 1.5).min(1.0), (fill[2] * 1.5).min(1.0), 1.0]
 }
 
-fn triangulate(polys: &[Poly]) -> Vec<Vertex> {
+fn triangulate(polys: &[Poly], names: &LayerMap) -> Vec<Vertex> {
     let mut verts = Vec::new();
     for p in polys {
-        let color = layer_color(p.layer);
+        let (color, fill) = layer_style(names, p.key());
+        if !fill {
+            continue;
+        }
         let coords: Vec<f64> = p.pts.iter().flat_map(|v| [f64::from(v[0]), f64::from(v[1])]).collect();
         for i in earcutr::earcut(&coords, &[], 2).unwrap_or_default() {
             verts.push(Vertex { pos: [p.pts[i][0] as f32, p.pts[i][1] as f32], color });
@@ -446,10 +488,10 @@ fn triangulate(polys: &[Poly]) -> Vec<Vertex> {
     verts
 }
 
-fn outline_vertices(polys: &[Poly]) -> Vec<Vertex> {
+fn outline_vertices(polys: &[Poly], names: &LayerMap) -> Vec<Vertex> {
     let mut verts = Vec::new();
     for p in polys {
-        let color = outline_color(layer_color(p.layer));
+        let color = outline_color(layer_style(names, p.key()).0);
         for (i, a) in p.pts.iter().enumerate() {
             let b = p.pts[(i + 1) % p.pts.len()];
             verts.push(Vertex { pos: [a[0] as f32, a[1] as f32], color });
@@ -561,7 +603,7 @@ fn text_vertices(texts: &[TextEntry], polys: &[Poly]) -> Vec<Vertex> {
 
 /// Screen-space (NDC) legend in the top-right corner: a swatch and name per layer.
 fn build_legend(polys: &[Poly], layer_names: &LayerMap) -> Vec<Vertex> {
-    let mut layers: Vec<u16> = polys.iter().map(|p| p.layer).collect();
+    let mut layers: Vec<(u16, u16)> = polys.iter().map(Poly::key).collect();
     layers.sort_unstable();
     layers.dedup();
     if layers.is_empty() {
@@ -574,7 +616,7 @@ fn build_legend(polys: &[Poly], layer_names: &LayerMap) -> Vec<Vertex> {
     push_rect(&mut verts, x0 - margin, bottom, 1.0 - margin / 2.0, y_top + margin / 2.0, [0.08, 0.08, 0.10, 0.75]);
     for (i, &layer) in layers.iter().enumerate() {
         let y = y_top - (i as f32 + 0.5) * row;
-        let c = layer_color(layer);
+        let c = layer_style(layer_names, layer).0;
         push_rect(&mut verts, x0, y - row * 0.35, x0 + 0.03, y + row * 0.35, [c[0], c[1], c[2], 1.0]);
         let label = layer_label(layer_names, layer);
         push_text(&mut verts, &label, x0 + 0.05, y - row * 0.35, row * 0.11, [0.9, 0.9, 0.9, 1.0]);
@@ -594,13 +636,13 @@ fn fit_view(polys: &[Poly], aspect: f32) -> CamUni {
 
 #[must_use]
 pub fn export_svg(gds_bytes: &[u8], layer_names: &LayerMap) -> String {
-    let (polys, _texts) = parse_gds(gds_bytes);
+    let (polys, texts) = parse_gds(gds_bytes);
     let Some((x0, y0, x1, y1)) = bounds(&polys) else {
         return String::from(r#"<svg xmlns="http://www.w3.org/2000/svg"/>"#);
     };
     let pad = (x1 - x0).max(y1 - y0) / 40;
     let (vx, vy, vw, vh) = (x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad);
-    let mut layers: Vec<u16> = polys.iter().map(|p| p.layer).collect();
+    let mut layers: Vec<(u16, u16)> = polys.iter().map(Poly::key).collect();
     layers.sort_unstable();
     layers.dedup();
 
@@ -609,28 +651,42 @@ pub fn export_svg(gds_bytes: &[u8], layer_names: &LayerMap) -> String {
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{vx} {vy} {vw} {vh}" width="800" height="800" style="background:#14141a">"#
     );
     // GDS is y-up, SVG y-down.
-    svg.push_str(&format!(r#"<g transform="translate(0,{}) scale(1,-1)">"#, vy * 2 + vh));
+    let flip = vy * 2 + vh;
+    svg.push_str(&format!(r#"<g transform="translate(0,{flip}) scale(1,-1)">"#));
     for &layer in &layers {
-        let (c, o) = (layer_color(layer), outline_color(layer_color(layer)));
+        let (c, fill) = layer_style(layer_names, layer);
+        let o = outline_color(c);
+        let fill = if fill {
+            format!("rgba({},{},{},{})", byte(c[0]), byte(c[1]), byte(c[2]), c[3])
+        } else {
+            "none".into()
+        };
         svg.push_str(&format!(
-            r#"<g id="{}" fill="rgba({},{},{},{})" stroke="rgba({},{},{},1)" stroke-width="{}">"#,
+            r#"<g id="{}" fill="{fill}" stroke="rgba({},{},{},1)" stroke-width="{}">"#,
             layer_label(layer_names, layer),
-            byte(c[0]),
-            byte(c[1]),
-            byte(c[2]),
-            c[3],
             byte(o[0]),
             byte(o[1]),
             byte(o[2]),
             (vw.max(vh) as f32 * 0.001) as i32,
         ));
-        for p in polys.iter().filter(|p| p.layer == layer) {
+        for p in polys.iter().filter(|p| p.key() == layer) {
             let pts: Vec<String> = p.pts.iter().map(|[x, y]| format!("{x},{y}")).collect();
             svg.push_str(&format!(r#"<polygon points="{}"/>"#, pts.join(" ")));
         }
         svg.push_str("</g>");
     }
-    svg.push_str("</g></svg>");
+    svg.push_str("</g>");
+    // Labels outside the flip so the glyphs read upright.
+    let size = vw.max(vh) / 60;
+    for t in &texts {
+        svg.push_str(&format!(
+            r#"<text x="{}" y="{}" font-size="{size}" font-family="monospace" fill="white">{}</text>"#,
+            t.x,
+            flip - t.y,
+            t.text.replace('&', "&amp;").replace('<', "&lt;"),
+        ));
+    }
+    svg.push_str("</svg>");
     svg
 }
 
@@ -912,16 +968,16 @@ impl App {
     }
 
     fn show(&mut self, mut polys: Vec<Poly>, texts: Vec<TextEntry>) {
-        polys.sort_by_key(|p| p.layer);
+        polys.sort_by_key(Poly::key);
         if self.fit && !polys.is_empty() {
             self.cam = fit_view(&polys, self.cam.aspect);
             self.fit = false;
         }
         if let Some(gpu) = &mut self.gpu {
-            let mut fill = triangulate(&polys);
+            let mut fill = triangulate(&polys, &self.layer_names);
             fill.extend(text_vertices(&texts, &polys));
             gpu.fill = gpu.mesh(&fill);
-            gpu.line = gpu.mesh(&outline_vertices(&polys));
+            gpu.line = gpu.mesh(&outline_vertices(&polys, &self.layer_names));
             gpu.overlay = gpu.mesh(&build_legend(&polys, &self.layer_names));
         }
         self.shown = (polys, texts);
@@ -1137,6 +1193,7 @@ pub fn polys_from_shapes(shapes: &[pnr_core::Shape]) -> Vec<Poly> {
             let r = s.rect;
             Poly {
                 layer: s.layer.0,
+                datatype: 0,
                 pts: vec![[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]],
             }
         })
@@ -1158,8 +1215,10 @@ mod tests {
     fn layer_names_and_bounds() {
         let names = parse_layer_names(r#"{"layers": {"met1": [68, 20], "via": [68, 44]}}"#);
         assert_eq!(names[&(68, 20)], "met1");
-        assert_eq!(layer_label(&names, 7), "L7");
-        let p = |pts: Vec<[i32; 2]>| Poly { layer: 0, pts };
+        assert_eq!(layer_label(&names, (68, 44)), "via");
+        assert_eq!(layer_label(&names, (68, 5)), "L68/5");
+        assert!(layer_style(&names, (68, 20)) != layer_style(&names, (68, 44)));
+        let p = |pts: Vec<[i32; 2]>| Poly { layer: 0, datatype: 0, pts };
         assert_eq!(bounds(&[]), None);
         assert_eq!(bounds(&[p(vec![[1, 5], [3, -2]]), p(vec![[0, 0]])]), Some((0, -2, 3, 5)));
     }

@@ -87,13 +87,14 @@ impl Elaborated {
     #[must_use]
     pub fn signoff(&self, pdk: &Pdk) -> Option<Report> {
         let schematic = self.schematic.as_ref()?;
-        Some(crate::signoff_shapes(
+        Some(crate::signoff_shapes(&verify::Intent::default(),
             &self.geometry(),
             &self.macros,
             &self.nets,
             schematic,
+            None,
             pdk,
-        ))
+        ).0)
     }
 
     /// The net labels [`Elaborated::signoff`] puts on the geometry, so an
@@ -149,6 +150,7 @@ pub(crate) fn route_built(
         branch: Vec::new(),
         power_uw: vec![0; n],
         temp_mc: vec![0; n],
+        units: Default::default(),
     };
 
     let (layers, cuts, pin_access) = routing_stack(pdk);
@@ -237,6 +239,139 @@ pub(crate) fn routing_stack(pdk: &Pdk) -> (Vec<LayerId>, Vec<Cut>, Option<(Layer
     (layers, cuts, pin_access)
 }
 
+/// Each routing metal's and cut's deck EM limit, derated to `temp_k` (the
+/// operating-point temperature; `None` = the rating temperature). Hastings
+/// eqs. 15.24–15.25.
+///
+/// ponytail: one die temperature; local self-heating of a conductor (the
+/// electrothermal loop, Lienig ch. 3) is not fed back.
+pub(crate) fn em_limits(pdk: &Pdk, layers: &[LayerId], cuts: &[Cut], temp_k: Option<f32>) -> Vec<(LayerId, analog::routing::em::Limit)> {
+    layers
+        .iter()
+        .copied()
+        .chain(cuts.iter().map(|&(c, ..)| c))
+        .filter_map(|l| {
+            let e = pdk.em_limit(l)?;
+            let f = match (e.derating, temp_k) {
+                (Some((t_ref, ea, n)), Some(t)) => analog::routing::em::derate(t, t_ref, ea, n),
+                _ => 1.0,
+            };
+            Some((l, analog::routing::em::Limit { ua_per_um: e.ua_per_um, ua_per_cut: e.ua_per_cut, blech: e.blech }.derated(f)))
+        })
+        .collect()
+}
+
+/// The deck's routing stack, bottom-up, metals and cuts interleaved: `pex`
+/// ground and lateral C, and each etch stage's antenna rule.
+pub(crate) fn stack(pdk: &Pdk) -> analog::routing::Stack {
+    let mut order = Vec::new();
+    for (i, &m) in pdk.routing_metals.iter().enumerate() {
+        order.push(m);
+        order.extend(pdk.routing_cuts.get(i));
+    }
+    let rules: Vec<_> = order.iter().map(|&l| pdk.antenna_rule(l)).collect();
+    analog::routing::Stack {
+        layers: order
+            .iter()
+            .zip(&rules)
+            .map(|(&l, rule)| analog::routing::stack::Layer {
+                id: l.0,
+                area_af_um2: pdk.pex_f32(l, "area_cap_af_um2").unwrap_or(0.0),
+                fringe_af_um: pdk.pex_f32(l, "fringe_cap_af_um").unwrap_or(0.0),
+                lateral: pdk.lateral_af_per_um(l, 1).unwrap_or(0.0),
+                antenna_ratio: rule.map_or(0.0, |r| r.0),
+                antenna_sidewall_nm: rule.map_or(0.0, |r| r.1),
+                sheet_ohm: pdk.pex_f32(l, "sheet_res_ohm_sq").unwrap_or(0.0),
+                cut: pdk.routing_cuts.contains(&l),
+            })
+            .collect(),
+        antenna_cumulative: rules.iter().flatten().any(|r| r.2),
+        diode_layer: pdk.diode_marker().map(|l| l.0),
+    }
+}
+
+/// Design intent for signoff's EM/IR rules: every Supply/Ground-class net at
+/// the operating point's `vdd_mv`, with the DC current it carries (the larger
+/// of what its terminals draw and supply). Empty without an operating point:
+/// those rules then skip, and say so.
+pub(crate) fn intent(
+    netlist: &pnr_core::Netlist,
+    classes: &[analog::metadata::NetClassification],
+    draws: Option<&[Option<Vec<(String, f64)>>]>,
+    vdd_mv: f64,
+) -> verify::Intent {
+    use analog::metadata::NetClass;
+    let Some(draws) = draws else { return verify::Intent::default() };
+    let mut out = verify::Intent::default();
+    for c in classes.iter().filter(|c| matches!(c.class, NetClass::Supply | NetClass::Ground)) {
+        let name = netlist.nets[c.net.0 as usize].name.clone();
+        let (mut inn, mut outg) = (0.0f64, 0.0f64);
+        for (dev, d) in netlist.devices.iter().zip(draws) {
+            for (t, _) in dev.terminals.iter().filter(|(_, n)| *n == c.net) {
+                let ua = d.iter().flatten().find(|(x, _)| x == t).map_or(0.0, |&(_, ua)| ua);
+                if ua > 0.0 { inn += ua } else { outg -= ua }
+            }
+        }
+        out.supplies.push((name.clone(), vdd_mv, c.class == NetClass::Ground));
+        out.currents.push((name, inn.max(outg)));
+    }
+    out
+}
+
+/// Antenna diodes (Hastings pp. 228–229; MFG-04), for the gate nets `routing`'s
+/// antenna rules still find over their limit after dr's jumper repair: per
+/// net, the deck's diode drawn in free space beside the net's first gate pin
+/// (else its first pin) — cathode `N` on the net, anode `P` on `ground` —
+/// with the schematic device it adds. Empty when the deck's diode cannot be
+/// extracted by LVS ([`Pdk::diode_marker`]) or there is no ground net.
+///
+/// ponytail: one minimum diode per net, at the first free spot within 50 µm;
+/// `clearance` is the placer's cell-to-cell gap.
+pub(crate) fn antenna_diodes(
+    pdk: &Pdk,
+    routing: &Requirements<Routes>,
+    routes: &Routes,
+    placed: &[Macro],
+    rings: &[Macro],
+    ground: Option<pnr_core::NetId>,
+    clearance: i32,
+) -> Vec<(pnr_core::Device, Macro)> {
+    use cells::Cell;
+    let (Some(ground), Some(_)) = (ground, pdk.diode_marker()) else { return Vec::new() };
+    let mut nets = Vec::new();
+    for b in routing.hard.iter().filter(|b| b.kind().ends_with("Antenna")) {
+        b.violating_ids(routes, &mut nets);
+    }
+    nets.sort_unstable();
+    nets.dedup();
+    if nets.is_empty() {
+        return Vec::new();
+    }
+    let one = pnr_core::DeviceGroup { devices: vec![pnr_core::DeviceId(0)] };
+    let template = cells::diode::Diode { pattern: cells::Pattern::Single, columns: 1 }.draw(&one, &analog::Constraints::default(), pdk);
+    let mut obstacles: Vec<pnr_core::Rect> = placed.iter().chain(rings).map(|m| m.bbox).collect();
+    let mut out = Vec::new();
+    for net in nets.into_iter().map(|n| pnr_core::NetId(n as u16)) {
+        let pins = || placed.iter().flat_map(|m| &m.pins).filter(|p| p.net == net);
+        let Some(pin) = pins().find(|p| p.name.ends_with('G')).or_else(|| pins().next()) else { continue };
+        let near = (pin.at.x + pin.at.w / 2, pin.at.y + pin.at.h / 2);
+        let Some(mut m) = dr::place_near(&template, near, &obstacles, clearance, pdk.grid, 50_000) else { continue };
+        for p in &mut m.pins {
+            p.net = if p.name.ends_with('N') { net } else { ground };
+        }
+        obstacles.push(m.bbox);
+        let dim = |k: &str, d: i32| (k.to_string(), i64::from(pnr_core::Process::rule(pdk, k, d)));
+        let device = pnr_core::Device {
+            name: format!("XDANT{}", net.0),
+            kind: pnr_core::DeviceKind::Diode, model: String::new(),
+            terminals: vec![("P".into(), ground), ("N".into(), net)],
+            params: vec![(dim("diode_w", 0).0.replace("diode_", ""), dim("diode_w", 0).1), (dim("diode_l", 0).0.replace("diode_", ""), dim("diode_l", 0).1)],
+        };
+        out.push((device, m));
+    }
+    out
+}
+
 /// Pad of the first routing via: the narrowest wire every landing needs.
 fn access_pad(pdk: &Pdk) -> i32 {
     pdk.routing_vias().first().map_or(0, |&(_, _, b, a)| b.max(a))
@@ -251,19 +386,38 @@ pub(crate) fn detailed_router(
     cuts: &[Cut],
     pin_access: Option<(LayerId, Cut)>,
 ) -> dr::DetailedRoute {
-    let mut cfg = dr::DetailedCfg::default();
+    let mut cfg = dr::DetailedCfg { grid: pdk.grid, ..dr::DetailedCfg::default() };
     let stack: Vec<_> = layers.iter().map(|l| l.0).collect();
     // Wires are drawn at pad width (a pad wider than its wire leaves notches
     // beside every via) and never under a layer's min_width.
     let pad_extent = cuts.iter().map(|&(.., b, a)| b.max(a)).max().unwrap_or(0);
     let min_w = stack.iter().filter_map(|&l| pdk.min_width(l)).max().unwrap_or(0);
-    cfg.wire_width = access_pad(pdk).max(pad_extent).max(min_w);
-    cfg.pitch = pdk.routing_pitch(cfg.wire_width, &stack);
+    // Wires at the pin-access pad (a larger via pad up the stack is drawn
+    // at the via only); the lattice pitch clears the largest pad, so every
+    // track stays legal wherever a via lands.
+    cfg.wire_width = access_pad(pdk).max(min_w);
+    cfg.pitch = pdk.routing_pitch(cfg.wire_width.max(pad_extent), &stack);
     cfg.spacing = layers
         .iter()
         .copied()
         .chain(cuts.iter().map(|&(c, ..)| c))
-        .map(|l| (l, pdk.min_spacing(l.0).unwrap_or(0), pdk.wide_spacing(l.0)))
+        .map(|l| (l, pdk.route_spacing(l.0).unwrap_or(0), pdk.wide_spacing(l.0)))
+        .collect();
+    cfg.min_width = layers
+        .iter()
+        .copied()
+        .chain(pin_access.map(|(l, _)| l))
+        .filter_map(|l| pdk.min_width(l.0).map(|w| (l, w)))
+        .collect();
+    // Each cut's required enclosure by the metal below and above it.
+    let stack_below: Vec<LayerId> = pin_access.map(|(l, _)| l).into_iter().chain(layers.iter().copied()).collect();
+    let stack_above = &layers[usize::from(pin_access.is_none()).min(layers.len())..];
+    let all_cuts: Vec<Cut> = pin_access.map(|(_, c)| c).into_iter().chain(cuts.iter().copied()).collect();
+    cfg.cut_enclosure = all_cuts
+        .iter()
+        .zip(&stack_below)
+        .zip(stack_above)
+        .map(|((&(c, ..), &lo), &hi)| (c, pdk.cut_enclosure(lo, c), pdk.cut_enclosure(hi, c)))
         .collect();
     cfg.array_spacing = cuts
         .iter()
@@ -279,6 +433,22 @@ pub(crate) fn detailed_router(
         .map(|t| t - 2 * pdk.grid);
     cfg.fat_signal = pnr_core::Process::rule(pdk, "route_signal_width", 2 * cfg.wire_width);
     cfg.fat_supply = pnr_core::Process::rule(pdk, "route_supply_width", widest_step.unwrap_or(4 * cfg.wire_width));
+    // Electrical path cost (gr::Elec): per track step, ground C and the lateral
+    // C to an occupied neighbour track, over the cheapest layer's ground C.
+    let per_step = |af_per_um: Option<f32>| af_per_um.map(|c| c * cfg.pitch as f32 / 1_000.0);
+    let ground: Vec<Option<f32>> = layers.iter().map(|&l| per_step(pdk.wire_af_per_um(l, cfg.wire_width))).collect();
+    let side: Vec<Option<f32>> = layers.iter().map(|&l| per_step(pdk.lateral_af_per_um(l, cfg.pitch - cfg.wire_width))).collect();
+    if let Some(cheapest) = ground.iter().flatten().copied().reduce(f32::min).filter(|&c| c > 0.0) {
+        cfg.layer_c = ground.iter().map(|c| c.unwrap_or(cheapest) / cheapest).collect();
+        cfg.beside_c = side.iter().map(|c| c.unwrap_or(0.0) / cheapest).collect();
+    }
+    // Series R per track step (sheet · pitch / width) and per via cut, over the
+    // least resistive layer's step.
+    let r_step: Vec<Option<f32>> = layers.iter().map(|&l| pdk.pex_f32(l, "sheet_res_ohm_sq").map(|r| r * cfg.pitch as f32 / cfg.wire_width.max(1) as f32)).collect();
+    if let Some(least) = r_step.iter().flatten().copied().reduce(f32::min).filter(|&r| r > 0.0) {
+        cfg.layer_r = r_step.iter().map(|r| r.unwrap_or(least) / least).collect();
+        cfg.via_r = cuts.iter().map(|&(c, ..)| pdk.pex_f32(c, "sheet_res_ohm_sq").unwrap_or(0.0) / least).collect();
+    }
     cfg.pin_access = pin_access;
     let (pad_layer, pad_cut) = match pin_access {
         Some((l, (c, ..))) => (Some(l), Some(c)),

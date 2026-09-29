@@ -14,13 +14,6 @@ const D: usize = 1;
 const S: usize = 2;
 const B: usize = 3;
 
-/// Thin-oxide gate capacitance, aF/µm² — turns the netlist's gate areas into
-/// the load a net drives.
-///
-/// ponytail: representative across bulk nodes (≈5–15 fF/µm²); no deck carries
-/// `Cox` yet. Read it from the PDK when one does.
-pub const COX_AF_PER_UM2: f32 = 8_000.0;
-
 /// Budgets as multiples of the capacitive load `c_load_af` the net drives:
 /// `(wire C, total coupling)`, aF. A sensitive net (matched gate, bias rail)
 /// may add at most its own load as wire, and again as coupling; a plain signal
@@ -47,13 +40,16 @@ fn budgets(class: NetClass, c_load_af: f32) -> (Option<i64>, Option<i64>) {
 ///
 /// `gate_um2` (per device, `0` for non-FETs) sizes the budgets: a net's load is
 /// the gate area it drives; a net driving no gate (a drain, an output) is held
-/// to the circuit's smallest gate load. No FET gates at all: unbudgeted.
+/// to the circuit's smallest gate load. No FET gates at all: unbudgeted. A net
+/// on a capacitor plate is unbudgeted too: its limit is an array spec
+/// (settling, code-dependent error) the netlist does not carry.
 #[must_use]
 pub fn classify(
     hg: &BipartiteHypergraph,
     roles: &[NetRole],
     sensitive_devices: &[bool],
     gate_um2: &[f32],
+    gate_af_per_um2: Option<f32>,
 ) -> Vec<NetClassification> {
     let n_nets = hg.net_names.len();
     let mut touches_gate = vec![false; n_nets];
@@ -61,8 +57,16 @@ pub fn classify(
     let mut touches_bulk = vec![false; n_nets];
     let mut gate_of_sensitive = vec![false; n_nets];
     let mut load_um2 = vec![0.0f32; n_nets];
+    let mut on_plate = vec![false; n_nets];
 
     for (d, nets) in hg.device_nets.iter().enumerate() {
+        // A capacitor's terminals are plates, not a gate and a channel.
+        if hg.kinds[d] == pnr_core::DeviceKind::Capacitor {
+            for n in nets {
+                on_plate[n.0 as usize] = true;
+            }
+            continue;
+        }
         let mark = |slot: usize, v: &mut [bool]| {
             if let Some(n) = nets.get(slot) {
                 v[n.0 as usize] = true;
@@ -91,7 +95,13 @@ pub fn classify(
                 touches_bulk[i],
             );
             let load = if load_um2[i] > 0.0 { Some(load_um2[i]) } else { smallest };
-            let (c_budget_af, max_coupling_af) = load.map_or((None, None), |a| budgets(class, a * COX_AF_PER_UM2));
+            // A plate net's parasitics trace to array specs (ARR-03 code-
+            // dependent error, ARR-05 settling), not a gate load: without
+            // them the budget is unknown, never invented.
+            let load = load.filter(|_| !on_plate[i]);
+            let (c_budget_af, max_coupling_af) = load
+                .zip(gate_af_per_um2)
+                .map_or((None, None), |(a, cox)| budgets(class, a * cox));
             NetClassification { net: NetId(i as u16), class, c_budget_af, max_coupling_af }
         })
         .collect()

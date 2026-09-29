@@ -6,6 +6,7 @@
 pub mod geom;
 pub mod hypergraph;
 pub mod ids;
+pub mod lanes;
 pub mod layout;
 pub mod r#macro;
 pub mod netlist;
@@ -14,6 +15,7 @@ pub mod report;
 pub mod routes;
 pub mod thermal;
 pub mod unionfind;
+pub mod units;
 
 pub use geom::{Dir, LayerId, Orient, Pin, Rect, Shape};
 pub use hypergraph::BipartiteHypergraph;
@@ -21,7 +23,8 @@ pub use ids::{AxisId, DeviceId, GroupId, NetId, Target};
 pub use layout::Layout;
 pub use netlist::{Device, DeviceGroup, DeviceKind, Net, Netlist};
 pub use process::Process;
-pub use r#macro::{place_macro, place_macros, Macro};
+pub use r#macro::{place_macro, place_macros, Dummy, Macro};
 pub use report::{Report, Violation};
 pub use routes::Routes;
 pub use unionfind::UnionFind;
+pub use units::{PlacedUnit, Unit, UnitLib};

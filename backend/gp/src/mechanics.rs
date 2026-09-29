@@ -65,13 +65,15 @@ pub struct Nets {
     off: Vec<(i32, i32)>,
     /// `NetId` of each retained row.
     net: Vec<u16>,
+    /// HPWL weight of each row (see [`Nets::weigh`]); `1` unweighted.
+    weight: Vec<f32>,
 }
 
 impl Nets {
     #[must_use]
     pub fn from_macros(macros: &[Macro]) -> Self {
         let Some(max_net) = macros.iter().flat_map(|m| &m.pins).map(|p| p.net.0).max() else {
-            return Self { start: vec![0], items: Vec::new(), off: Vec::new(), net: Vec::new() };
+            return Self { start: vec![0], items: Vec::new(), off: Vec::new(), net: Vec::new(), weight: Vec::new() };
         };
         let mut per_net: Vec<Vec<(u32, i32, i32)>> = vec![Vec::new(); max_net as usize + 1];
         for (di, m) in macros.iter().enumerate() {
@@ -106,7 +108,26 @@ impl Nets {
                 off.truncate(row0);
             }
         }
-        Self { start, items, off, net }
+        let weight = vec![1.0; net.len()];
+        Self { start, items, off, net, weight }
+    }
+
+    /// Weight each net's HPWL by `by_net[NetId]` (missing = 1): a net whose
+    /// parasitic hurts the circuit more is pulled shorter (Lampaert 1999
+    /// eq.2.12–2.13, `ΔP = Σ S·Δx`). See [`crate::net_weights`].
+    #[must_use]
+    pub fn weigh(mut self, by_net: &[f32]) -> Self {
+        for (w, &n) in self.weight.iter_mut().zip(&self.net) {
+            *w = by_net.get(usize::from(n)).copied().unwrap_or(1.0);
+        }
+        self
+    }
+
+    /// HPWL weight of net row `i`.
+    #[inline]
+    #[must_use]
+    pub fn weight(&self, i: usize) -> f32 {
+        self.weight[i]
     }
 
     #[inline]
@@ -124,7 +145,7 @@ impl Nets {
 
     /// Flat item indices of net `i`, for [`Nets::pin`].
     #[inline]
-    fn span(&self, i: usize) -> std::ops::Range<usize> {
+    pub fn span(&self, i: usize) -> std::ops::Range<usize> {
         self.start[i] as usize..self.start[i + 1] as usize
     }
 
@@ -180,7 +201,7 @@ fn bbox_centre(m: &Macro) -> (i32, i32) {
     (m.bbox.x + m.bbox.w / 2, m.bbox.y + m.bbox.h / 2)
 }
 
-/// Bounding-box HPWL over pin positions, summed over nets, nm.
+/// Bounding-box HPWL over pin positions, weighted per net ([`Nets::weigh`]), nm.
 #[must_use]
 pub fn hpwl(nets: &Nets, l: &Layout) -> f64 {
     let mut total = 0.0f64;
@@ -193,7 +214,7 @@ pub fn hpwl(nets: &Nets, l: &Layout) -> f64 {
             y0 = y0.min(py);
             y1 = y1.max(py);
         }
-        total += f64::from((x1 - x0) + (y1 - y0));
+        total += f64::from(nets.weight[ni]) * f64::from((x1 - x0) + (y1 - y0));
     }
     total
 }
@@ -360,6 +381,7 @@ pub fn initial_layout(macros: &[Macro], variant: Vec<u16>, side: i32, rng: &mut 
         orient: vec![pnr_core::geom::Orient::default(); n],
         power_uw: vec![0; n],
         temp_mc: vec![0; n],
+        units: Default::default(),
     }
 }
 

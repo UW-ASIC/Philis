@@ -35,9 +35,27 @@ pub struct Layout {
     /// Temperature rise per device, milli-°C. Cache of
     /// [`crate::thermal::rises_mc`]; stale until [`Layout::refresh_temps`].
     pub temp_mc: Vec<i32>,
+    /// Every (cell, variant)'s physical units; read through `variant`/`orient`.
+    /// Empty before cells are drawn.
+    pub units: std::sync::Arc<crate::units::UnitLib>,
 }
 
 impl Layout {
+    /// Area of the box enclosing every cell, nm² (`0` with no cells).
+    #[must_use]
+    pub fn footprint_nm2(&self) -> f64 {
+        let n = self.x.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for i in 0..n {
+            (x0, y0) = (x0.min(self.x[i] - self.hw[i]), y0.min(self.y[i] - self.hh[i]));
+            (x1, y1) = (x1.max(self.x[i] + self.hw[i]), y1.max(self.y[i] + self.hh[i]));
+        }
+        f64::from(x1 - x0) * f64::from(y1 - y0)
+    }
+
     /// `(cx, cy, hw, hh)` of a target, nm; a group is its members' bounding box.
     ///
     /// # Panics

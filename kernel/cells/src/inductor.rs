@@ -1,6 +1,7 @@
 //! Inductor generator: a rectangular met1 spiral. Inductors have no LVS
 //! recogniser, so this only has to be DRC-clean and placeable.
 
+use crate::builder::dim;
 use analog::Constraints;
 use pnr_core::{DeviceGroup, Macro, Process, Rect};
 
@@ -26,14 +27,14 @@ impl Cell for Inductor {
         let mut b = Builder::new(process.grid());
         let s = group_sizing(group, constraints, process);
 
-        let trace_w = s.unit_w.max(process.rule("ind_min_trace", 1000));
-        let outer_d = s.unit_l.max(process.rule("ind_min_diameter", 10_000));
+        let trace_w = s.unit_w.max(process.rule("ind_min_trace", 0));
+        let outer_d = s.unit_l.max(process.rule("ind_min_diameter", 0));
         let n_turns = i32::from(self.turns.max(1));
         let spacing = trace_w;
 
         let met1 = req(process, "met1");
         let li = req(process, "li");
-        let ct = process.rule("contact", 170);
+        let ct = dim(process, "contact");
 
         // ponytail: rectangular turns, not an octagonal path — DRC-clean and
         // placeable; draw polygons if EM accuracy ever matters.
@@ -68,5 +69,24 @@ impl Cell for Inductor {
 }
 
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
-    sizing(group, c, process.rule("ind_min_trace", 1000), process.rule("ind_min_diameter", 10_000))
+    sizing(group, c, process.rule("ind_min_trace", 0), process.rule("ind_min_diameter", 0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every variant, drawn alone, is DRC- and ERC-clean.
+    #[test]
+    fn every_variant_is_drc_and_erc_clean() {
+        use crate::testkit;
+        use pnr_core::DeviceKind;
+        let Some(pdk) = testkit::pdk() else {
+            eprintln!("sky130 PDK unavailable — skipping");
+            return;
+        };
+        let mut dirty = Vec::new();
+        dirty.extend(testkit::dirty::<Inductor>(DeviceKind::Inductor, 1, 1, 2000, 20_000, &pdk));
+        assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
+    }
 }

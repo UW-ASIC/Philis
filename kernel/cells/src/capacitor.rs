@@ -1,6 +1,7 @@
 //! Capacitor generator: one merged plate (or comb) per device, sized by its
 //! unit count; the variant axes are array aspect and metal-stack kind.
 
+use crate::builder::dim;
 use analog::Constraints;
 use pnr_core::{DeviceGroup, LayerId, Macro, Process, Rect};
 
@@ -123,22 +124,26 @@ impl Geom {
         let m = metals(process);
         let v = vias(process);
         let met = |i: usize| m.get(i).copied().unwrap_or(LayerId(0));
-        let ct = process.rule("contact", 170);
-        let via_enc = process.rule("via_enclosure", 300);
+        let ct = dim(process, "contact");
+        let via_enc = dim(process, "via_enclosure");
         let sandwich = spec.kind == Kind::VerticalAcrossLayers;
-        let unit_gap = process.rule("plate_spacing", 200);
-        // Per-layer cut dimensions: via1/via2 carry exact widths and their own
-        // spacings in the deck (`via{n}_min_width` / `via{n}_min_spacing`); a
-        // shared `contact`-sized cut violated `via1_max_width`/`via2_min_width`.
-        let via_spacing = process.rule("via_spacing", 170);
-        let cut_w = [process.rule("via1_min_width", ct), process.rule("via2_min_width", ct)];
-        let via_pitch = (cut_w[0] + process.rule("via1_min_spacing", via_spacing))
-            .max(cut_w[1] + process.rule("via2_min_spacing", via_spacing));
+        let unit_gap = process.rule("plate_spacing", 0);
+        // Per-layer cut dimensions, the deck's: each cut layer's exact width
+        // and its own (array) spacing.
+        let via_spacing = dim(process, "via_spacing");
+        let cut_w = [process.width("via1").unwrap_or(ct), process.width("via2").unwrap_or(ct)];
+        let via_pitch = (cut_w[0] + process.space("via1").unwrap_or(via_spacing))
+            .max(cut_w[1] + process.space("via2").unwrap_or(via_spacing));
         // The strap column carries rails on every sandwich metal beside a plate
         // that is usually wide: clear the worst (wide-)spacing of all three.
         let m_space = (1..=3)
-            .flat_map(|n| [format!("met{n}_min_spacing"), format!("met{n}_wide_metal_spacing")])
-            .fold(process.rule("met1_space", 140), |m, r| m.max(process.rule(&r, 0)));
+            .filter_map(|n| process.space(&format!("met{n}")))
+            .fold(dim(process, "met1_space"), i32::max);
+        // Fingers: the deck's MOM pitch, never under the comb metal's own
+        // width and spacing (the MOM keys may be another metal's).
+        let comb = ["met1", "met2"];
+        let finger_w = comb.iter().filter_map(|m| process.width(m)).fold(process.rule("mom_finger_width", 0), i32::max);
+        let finger_space = comb.iter().filter_map(|m| process.space(m)).fold(process.rule("mom_finger_space", 0), i32::max);
         Self {
             bot_metal: met(0),
             // The comb keeps both electrodes on one metal — that *is* the kind.
@@ -150,10 +155,10 @@ impl Geom {
             unit_h: s.unit_l,
             unit_gap,
             m_space,
-            device_gap: process.rule("device_gap", 600),
+            device_gap: process.rule("device_gap", 0),
             inset: unit_gap,
-            finger_w: process.rule("mom_finger_width", 200),
-            finger_space: process.rule("mom_finger_space", 200),
+            finger_w,
+            finger_space,
             via_enc,
             via_pitch,
             max_cols: i32::from(spec.units_x.max(1)),
@@ -213,9 +218,16 @@ impl Geom {
         for l in [self.bot_metal, self.top_metal, third] {
             b.rect(l, rail);
         }
+        // Bridge the gap on the BOT levels only: without it both BOT plates float
+        // (ERC `floating_interconnect`). The met_n+1 jumper keeps its gap to TOP.
+        let bridge = Rect { x: plate.x + plate.w, y: plate.y, w: self.m_space, h: plate.h };
+        for l in [self.bot_metal, third] {
+            b.rect(l, bridge);
+        }
         let max_cut = self.cut_w[0].max(self.cut_w[1]);
         let mut vy = plate.y + self.via_enc;
-        while vy + max_cut + self.via_enc <= plate.y + plate.h {
+        // A deck stating no cut size or spacing gets no cuts, not a hang.
+        while self.via_pitch > 0 && vy + max_cut + self.via_enc <= plate.y + plate.h {
             for (cut, w) in self.cuts.into_iter().zip(self.cut_w) {
                 b.rect(cut, Rect { x: sx + self.via_enc, y: vy, w, h: w });
             }
@@ -303,7 +315,7 @@ fn feasible_kinds(process: &dyn Process) -> Vec<Kind> {
 
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
     // Default plate: a nominal 2µm square unit cell.
-    let def = process.rule("cap_unit_side", 2000);
+    let def = process.rule("cap_unit_side", 0);
     sizing(group, c, def, def)
 }
 
@@ -315,6 +327,22 @@ fn per_device_units(s: &Sizing) -> Vec<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every variant, drawn alone, is DRC- and ERC-clean.
+    #[test]
+    fn every_variant_is_drc_and_erc_clean() {
+        use crate::testkit;
+        use pnr_core::DeviceKind;
+        let Some(pdk) = testkit::pdk() else {
+            eprintln!("sky130 PDK unavailable — skipping");
+            return;
+        };
+        let mut dirty = Vec::new();
+        for n in [1, 2] {
+            dirty.extend(testkit::dirty::<Capacitor>(DeviceKind::Capacitor, n, 4, 2000, 2000, &pdk));
+        }
+        assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
+    }
     use analog::cell::{SeriesParallel, Unitization};
     use pnr_core::{DeviceId, DeviceKind, Shape};
 
@@ -344,6 +372,12 @@ mod tests {
         }
         fn grid(&self) -> i32 {
             5
+        }
+        fn width(&self, role: &str) -> Option<i32> {
+            self.layer(role).map(|_| 200)
+        }
+        fn space(&self, role: &str) -> Option<i32> {
+            self.layer(role).map(|_| 200)
         }
     }
 

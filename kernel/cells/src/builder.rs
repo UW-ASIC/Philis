@@ -10,12 +10,14 @@ pub struct Builder {
     grid: i32,
     shapes: Vec<Shape>,
     pins: Vec<Pin>,
+    units: Vec<pnr_core::Unit>,
+    dummies: Vec<pnr_core::Dummy>,
 }
 
 impl Builder {
     #[must_use]
     pub fn new(grid: i32) -> Self {
-        Self { grid, shapes: Vec::new(), pins: Vec::new() }
+        Self { grid, shapes: Vec::new(), pins: Vec::new(), units: Vec::new(), dummies: Vec::new() }
     }
 
     /// Draw `r` on `layer`, snapped to grid. Width/height clamp up to one grid
@@ -26,6 +28,16 @@ impl Builder {
     }
 
     /// Register a pin, snapped like [`Builder::rect`].
+    /// Record one active unit (local frame, unsnapped: a centre, not a shape).
+    pub fn unit(&mut self, u: pnr_core::Unit) {
+        self.units.push(u);
+    }
+
+    /// Record one dummy gate drawn on a member's diffusion.
+    pub fn dummy(&mut self, d: pnr_core::Dummy) {
+        self.dummies.push(d);
+    }
+
     pub fn pin(&mut self, mut pin: Pin) {
         pin.at = self.snap(pin.at);
         self.pins.push(pin);
@@ -41,12 +53,74 @@ impl Builder {
         }
     }
 
+    /// Cover every contact on poly with the deck's poly-contact mask (`npc`
+    /// role; sky130: a poly cut must sit inside nitride poly cut, 100 nm
+    /// clear): one strip per cut row, rows closer than the mask's spacing
+    /// joined. Nothing on a deck without the role.
+    ///
+    /// ponytail: a row's strip spans all its cuts; a row that must skip a
+    /// gap (a foreign contact between) would need splitting.
+    pub fn cover_poly_cuts(&mut self, process: &dyn Process) {
+        let (Some(npc), Some(poly), Some(licon)) = (process.layer("npc"), process.layer("poly"), process.layer("licon")) else {
+            return;
+        };
+        if npc == poly {
+            return;
+        }
+        let enc = process.enclosure("npc", "licon").unwrap_or(0);
+        let space = process.space("npc").unwrap_or(0);
+        let wmin = process.width("npc").unwrap_or(0);
+        let inside = |c: &Rect, p: &Rect| c.x >= p.x && c.y >= p.y && c.x + c.w <= p.x + p.w && c.y + c.h <= p.y + p.h;
+        let polys: Vec<Rect> = self.shapes.iter().filter(|s| s.layer == poly).map(|s| s.rect).collect();
+        let mut rows: Vec<Rect> = Vec::new();
+        for c in self.shapes.iter().filter(|s| s.layer == licon && polys.iter().any(|p| inside(&s.rect, p))) {
+            let r = Rect { x: c.rect.x - enc, y: c.rect.y - enc, w: c.rect.w + 2 * enc, h: c.rect.h + 2 * enc };
+            match rows.iter_mut().find(|q| q.y == r.y && q.h == r.h) {
+                Some(q) => *q = hull(*q, r),
+                None => rows.push(r),
+            }
+        }
+        // Join strips closer than the mask spacing (one merged figure).
+        let near = |a: &Rect, b: &Rect| {
+            let dx = (b.x - (a.x + a.w)).max(a.x - (b.x + b.w));
+            let dy = (b.y - (a.y + a.h)).max(a.y - (b.y + b.h));
+            dx.max(dy) < space
+        };
+        'again: loop {
+            for i in 0..rows.len() {
+                for j in i + 1..rows.len() {
+                    if near(&rows[i], &rows[j]) {
+                        rows[i] = hull(rows[i], rows[j]);
+                        rows.swap_remove(j);
+                        continue 'again;
+                    }
+                }
+            }
+            break;
+        }
+        for mut r in rows {
+            if r.h < wmin {
+                r.y -= (wmin - r.h) / 2;
+                r.h = wmin;
+            }
+            if r.w < wmin {
+                r.x -= (wmin - r.w) / 2;
+                r.w = wmin;
+            }
+            self.rect(npc, r);
+        }
+    }
+
     /// The finished macro. The bbox corner and extents are whole multiples of
     /// two grid steps: the placer stamps a cell at `centre - bbox.w / 2`
     /// (on-grid only if the half-extent is), and a placement that keeps the
     /// corner on the cut lattice keeps every cut on it.
     #[must_use]
-    pub fn finish(self) -> Macro {
+    pub fn finish(mut self) -> Macro {
+        // Exact duplicates (rings sharing a band draw its cuts twice) are one
+        // shape; a checker would read two coincident cuts as zero spacing.
+        let mut seen = std::collections::HashSet::new();
+        self.shapes.retain(|s| seen.insert((s.layer.0, s.rect.x, s.rect.y, s.rect.w, s.rect.h)));
         let tight = bbox_of(&self.shapes);
         let step = 2 * self.grid.max(1);
         let x = tight.x.div_euclid(step) * step;
@@ -57,7 +131,7 @@ impl Builder {
             w: (tight.x + tight.w - x + step - 1) / step * step,
             h: (tight.y + tight.h - y + step - 1) / step * step,
         };
-        Macro { shapes: self.shapes, pins: self.pins, bbox }
+        Macro { shapes: self.shapes, pins: self.pins, bbox, units: self.units, dummies: self.dummies }
     }
 }
 
@@ -112,6 +186,29 @@ pub fn req(process: &dyn Process, role: &str) -> LayerId {
     process.layer(role).unwrap_or_else(|| {
         panic!("PDK declares no layer for mandatory role {role:?}; add it to the deck's cell.layers section")
     })
+}
+
+/// A cell dimension the deck states: its value under the legacy sidecar
+/// `key`, never under what the deck's rules require (a sidecar key can only
+/// raise it). 0 when neither states it.
+#[must_use]
+pub fn dim(process: &dyn Process, key: &str) -> i32 {
+    let q = |v: Option<i32>| v.unwrap_or(0);
+    let deck = match key {
+        "contact" => q(process.width("licon")),
+        "mcon_size" => q(process.width("mcon")),
+        "m1_enc" => q(process.enclosure("met1", "mcon")).max(q(process.endcap("met1", "mcon"))),
+        "met1_space" => q(process.space("met1")),
+        "poly_ext" => q(process.extension("poly", "diff")),
+        "poly_min_width" | "min_gate_l" => q(process.width("poly")),
+        "min_finger_width" => q(process.width("diff")),
+        "nwell_diff_enc" => q(process.enclosure("nwell", "diff")),
+        "nwell_min_width" => q(process.width("nwell")),
+        "via_spacing" => q(process.space("via1")),
+        "via_enclosure" => q(process.enclosure("met1", "via1")).max(q(process.enclosure("met2", "via1"))),
+        _ => 0,
+    };
+    process.rule(key, 0).max(deck)
 }
 
 /// A pin `d{di}:{term}` over `at`. The net is a placeholder, distinct per
@@ -215,4 +312,9 @@ mod tests {
             assert_eq!(seq.iter().filter(|&&x| x == d).count(), n);
         }
     }
+}
+
+fn hull(a: Rect, b: Rect) -> Rect {
+    let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
+    Rect { x: x0, y: y0, w: (a.x + a.w).max(b.x + b.w) - x0, h: (a.y + a.h).max(b.y + b.h) - y0 }
 }

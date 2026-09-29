@@ -18,7 +18,7 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
   or `Routes` to score against; `cell_of` maps from library.
 - **Out:** rule types — placement: `MatchingPair`, `Symmetry(Group)`,
   `CommonCentroid`/`CentroidGroup`, `DtiBand`, `Isolation`, `Proximity`,
-  `ThermalGradient`; routing: `StraightNet`, `Antenna`, `CouplingBudget`,
+  `ThermalGradient`; routing: `Antenna`, `CouplingBudget`,
   `CrosstalkExclusion`, `Differential`, `ParasiticBudget`. `RuleBatch` scoring
   (cost, violations, residual, project, retarget, branches). `Requirements`
   (hard / budget / cost arms). `Constraints` + `cell::*` (unitization, guard

@@ -30,10 +30,7 @@ impl Block for Pair {
 }
 impl Composition for Pair {
     fn build<P: Process>(&self, c: &mut CompBuilder<P>) -> Result<(), GenError> {
-        let sep = c
-            .process()
-            .rule("min_spacing", 80)
-            .max(c.process().rule("diff_spacing", 270));
+        let sep = c.process().space("diff").unwrap_or(0);
         let mos = || Mos::new(DeviceKind::Nmos, 420, 150, 2);
         let i1 = c.instantiate("m1", &mos())?;
         let m1 = c.place(i1)?;

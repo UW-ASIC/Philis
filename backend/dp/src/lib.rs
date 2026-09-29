@@ -186,6 +186,7 @@ impl<'a> Sa<'a> {
 
 /// Refine `coarse` into a legal placement, seed-deterministic.
 ///
+/// `net_weight[NetId]` weights each net's HPWL (see [`gp::net_weights`]).
 /// `macros[i]` supplies cell `i`'s pins when `variants[i]` has no alternative
 /// for `coarse.variant[i]`. `fixed[i]` pins cell `i` (position and variant).
 pub fn place(
@@ -196,6 +197,7 @@ pub fn place(
     fixed: &[bool],
     prices: &mut gp::Prices,
     rules: gp::Rules,
+    net_weight: &[f32],
     seed: u64,
 ) -> (Layout, Report) {
     let gp::Rules { grid, clearance } = rules;
@@ -213,6 +215,7 @@ pub fn place(
         orient: coarse.orient.clone(),
         power_uw: coarse.power_uw.clone(),
         temp_mc: coarse.temp_mc.clone(),
+        units: coarse.units.clone(),
     };
     l.refresh_temps();
 
@@ -233,10 +236,11 @@ pub fn place(
         l.branch[usize::from(id.0)] = s;
     }
     let branch_ids: Vec<BranchId> = branch_seeds.iter().map(|&(id, _)| id).collect();
+    let sym = sym_groups(reqs, n, fixed);
 
     prices.bind(reqs);
     // Nets from the geometry `l.variant` names, so HPWL scores real pins.
-    let nets = Nets::from_macros(&choose_variants(macros, variants, &l.variant));
+    let nets = Nets::from_macros(&choose_variants(macros, variants, &l.variant)).weigh(net_weight);
     if n == 0 {
         let rep = report(&nets, reqs, &l, prices);
         return (l, rep);
@@ -290,7 +294,10 @@ pub fn place(
     let range_min = grid as f32 / span;
 
     // A fixed schedule: stopping at a low accept rate (the old early exit)
-    // cost ota 5% C and 24% area. ponytail: ~4x dp time; revisit if runtime binds.
+    // cost ota 5% C and 24% area. Lampaert 1999 pp.117–119 (T0 = −ΔC⁺/ln 0.6,
+    // stop after 10 flat chains) was measured 2026-09: ota C −12% but
+    // rc_filter C +7%, bjt_mirror area +22%; not adopted.
+    // ponytail: ~4x dp time; revisit if runtime binds.
     for _ in 0..MAX_ITERS {
         let r = (range * span) as i32 as f32;
         for _ in 0..moves_per_epoch {
@@ -300,7 +307,23 @@ pub fn place(
             if sa.is_fixed(c) {
                 continue;
             }
-            let _ = if roll < 0.70 {
+            let _ = if !sym.is_empty() && roll < 0.08 {
+                // Compound moves: every mirror equation holds before and after,
+                // so no projection drags the rest of the stage.
+                let g = &sym[rng.below(sym.len())];
+                let (a, b) = g.pairs[rng.below(g.pairs.len())];
+                match rng.below(3) {
+                    0 => {
+                        let (dx, dy) = (snap(rng.centered(r) as i32, grid), snap(rng.centered(r) as i32, grid));
+                        try_group_shift(&mut sa, &mut l, &mut rng, temp, g, dx, dy, &clamp_x, &clamp_y)
+                    }
+                    1 => {
+                        let d = snap(rng.centered(r) as i32 / 2, grid);
+                        try_pair_expand(&mut sa, &mut l, &mut rng, temp, a, b, d, &clamp_x)
+                    }
+                    _ => a != b && try_pair_swap(&mut sa, &mut l, &mut rng, temp, a, b),
+                }
+            } else if roll < 0.70 {
                 let nx = clamp_x(l.x[c] + rng.centered(r) as i32, l.hw[c]);
                 let ny = clamp_y(l.y[c] + rng.centered(r) as i32, l.hh[c]);
                 try_move(&mut sa, &mut l, &mut rng, temp, c, nx, ny)
@@ -405,6 +428,106 @@ fn try_swap(
         let (cx, cy) = (clamp_x(l.x[o], l.hw[c]), clamp_y(l.y[o], l.hh[c]));
         let (ox, oy) = (clamp_x(l.x[c], l.hw[o]), clamp_y(l.y[c], l.hh[o]));
         (l.x[c], l.y[c], l.x[o], l.y[o]) = (cx, cy, ox, oy);
+    })
+}
+
+/// One symmetry axis and the mirror pairs sharing it (self-pairs `a == b` sit
+/// on the axis). Groups with a fixed member are left to projection.
+struct SymGroup {
+    axis: usize,
+    pairs: Vec<(usize, usize)>,
+    members: Vec<usize>,
+}
+
+fn sym_groups(reqs: &Requirements<Layout>, n: usize, fixed: &[bool]) -> Vec<SymGroup> {
+    let mut raw = Vec::new();
+    for b in &reqs.hard {
+        b.mirror_pairs(&mut raw);
+    }
+    let mut out: Vec<SymGroup> = Vec::new();
+    for (a, b, axis) in raw {
+        let (a, b, axis) = (a as usize, b as usize, usize::from(axis));
+        if a >= n || b >= n {
+            continue;
+        }
+        let i = out.iter().position(|g| g.axis == axis).unwrap_or_else(|| {
+            out.push(SymGroup { axis, pairs: Vec::new(), members: Vec::new() });
+            out.len() - 1
+        });
+        let g = &mut out[i];
+        g.pairs.push((a, b));
+        for m in [a, b] {
+            if !g.members.contains(&m) {
+                g.members.push(m);
+            }
+        }
+    }
+    out.retain(|g| !g.members.iter().any(|&m| fixed.get(m).copied().unwrap_or(false)));
+    out
+}
+
+/// Translate a whole symmetric group and its axis by `(dx, dy)`. Rejected
+/// outright if the die boundary would clamp any member (that would break the
+/// mirror equations the move exists to keep).
+#[allow(clippy::too_many_arguments)]
+fn try_group_shift(
+    sa: &mut Sa,
+    l: &mut Layout,
+    rng: &mut SplitMix64,
+    temp: f64,
+    g: &SymGroup,
+    dx: i32,
+    dy: i32,
+    clamp_x: &impl Fn(i32, i32) -> i32,
+    clamp_y: &impl Fn(i32, i32) -> i32,
+) -> bool {
+    let fits = g.members.iter().all(|&m| {
+        clamp_x(l.x[m] + dx, l.hw[m]) == l.x[m] + dx && clamp_y(l.y[m] + dy, l.hh[m]) == l.y[m] + dy
+    });
+    if !fits || (dx, dy) == (0, 0) {
+        return false;
+    }
+    sa.trial(l, rng, temp, |l, _, _| {
+        for &m in &g.members {
+            l.x[m] += dx;
+            l.y[m] += dy;
+        }
+        if let Some(a) = l.axis.get_mut(g.axis) {
+            *a += dx;
+        }
+    })
+}
+
+/// Move a mirror pair `d` further apart (or closer), axis fixed: `x_a + x_b`
+/// is unchanged, so the pair stays mirrored.
+#[allow(clippy::too_many_arguments)]
+fn try_pair_expand(
+    sa: &mut Sa,
+    l: &mut Layout,
+    rng: &mut SplitMix64,
+    temp: f64,
+    a: usize,
+    b: usize,
+    d: i32,
+    clamp_x: &impl Fn(i32, i32) -> i32,
+) -> bool {
+    let (lo, hi) = if l.x[a] <= l.x[b] { (a, b) } else { (b, a) };
+    let (nlo, nhi) = (l.x[lo] - d, l.x[hi] + d);
+    if a == b || d == 0 || nlo >= nhi || clamp_x(nlo, l.hw[lo]) != nlo || clamp_x(nhi, l.hw[hi]) != nhi {
+        return false;
+    }
+    sa.trial(l, rng, temp, |l, _, _| {
+        l.x[lo] = nlo;
+        l.x[hi] = nhi;
+    })
+}
+
+/// Exchange a mirror pair's sides: still mirrored, the other half of the
+/// circuit now faces each neighbour (routing and gradient exposure change).
+fn try_pair_swap(sa: &mut Sa, l: &mut Layout, rng: &mut SplitMix64, temp: f64, a: usize, b: usize) -> bool {
+    sa.trial(l, rng, temp, |l, _, _| {
+        l.x.swap(a, b);
+        l.y.swap(a, b);
     })
 }
 

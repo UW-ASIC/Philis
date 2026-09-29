@@ -13,6 +13,24 @@ pub struct Macro {
     pub pins: Vec<Pin>,
     /// Bounding box of `shapes`, nm.
     pub bbox: Rect,
+    /// Active units (local frame), for matching. Empty for non-generated cells.
+    pub units: Vec<crate::units::Unit>,
+    /// Dummy gates drawn on a member's diffusion; each extracts as a device.
+    pub dummies: Vec<Dummy>,
+}
+
+/// A dummy gate on member `owner`'s diffusion: gate and far side tied to the
+/// member's bulk, near side its `edge` terminal (`"S"` or `"D"`), so it is an
+/// off transistor that extraction still sees. The LVS reference lists one card
+/// per dummy with those nets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Dummy {
+    pub owner: u8,
+    pub pmos: bool,
+    pub edge: &'static str,
+    /// Channel width and length, nm.
+    pub w: i32,
+    pub l: i32,
 }
 
 /// Stamp macro `m` at device `i`'s placed position: turn by `l.orient[i]`, then
@@ -36,6 +54,8 @@ pub fn place_macro(m: &Macro, l: &Layout, i: usize) -> Macro {
         bbox: shift(m.bbox),
         shapes: m.shapes.iter().map(|s| Shape { layer: s.layer, rect: shift(s.rect) }).collect(),
         pins: m.pins.iter().map(|p| Pin { at: shift(p.at), ..p.clone() }).collect(),
+        units: m.units.clone(), // ponytail: stays local; world units come from `UnitLib::placed`,
+        dummies: m.dummies.clone(),
     }
 }
 

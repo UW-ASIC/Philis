@@ -27,6 +27,7 @@ fn layout(cells: &[(i32, i32, i32, i32)]) -> Layout {
         orient: vec![Orient::default(); n],
         power_uw: vec![0; n],
         temp_mc: vec![0; n],
+        units: Default::default(),
     }
 }
 
@@ -38,7 +39,7 @@ fn run(
     fixed: &[bool],
     seed: u64,
 ) -> Layout {
-    place(coarse, macros, variants, reqs, fixed, &mut gp::Prices::new(), RULES, seed).0
+    place(coarse, macros, variants, reqs, fixed, &mut gp::Prices::new(), RULES, &[], seed).0
 }
 
 // ---- rotation ----
@@ -88,7 +89,7 @@ fn rotation_actually_happens() {
 // ---- variant reshape ----
 
 fn alt(w: i32, h: i32) -> Macro {
-    Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w, h } }
+    Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w, h }, units: Vec::new(), dummies: Vec::new() }
 }
 
 /// Three alternatives per cell, not ordered by similarity.
@@ -160,6 +161,8 @@ fn pin_alt(x: i32) -> Macro {
             layer: pnr_core::LayerId(0),
         }],
         bbox: Rect { x: 0, y: 0, w: 10_000, h: 10_000 },
+        units: Vec::new(),
+        dummies: Vec::new(),
     }
 }
 
@@ -407,4 +410,42 @@ fn incident_encroachment_difference_matches_full_scan() {
             assert!((full - inc).abs() < 1e-6, "moved {:?}: {full} vs {inc}", sa.moved);
         }
     }
+}
+
+/// Each compound move keeps every mirror equation of a stage exactly, with no
+/// projection: Φ never rises, so `trial` never reaches for `project`.
+#[test]
+fn compound_moves_keep_a_mirrored_stage_mirrored() {
+    let sym = |a: u16, b: u16| Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0) };
+    let reqs = Requirements {
+        hard: vec![Box::new(SymmetryGroup(vec![sym(0, 1), sym(2, 3), sym(4, 4)]))],
+        budget: Vec::new(),
+        cost: Vec::new(),
+    };
+    let mut l = layout(&[
+        (-6_000, 0, 1_000, 1_000),
+        (6_000, 0, 1_000, 1_000),
+        (-6_000, 8_000, 1_000, 1_000),
+        (6_000, 8_000, 1_000, 1_000),
+        (0, -8_000, 1_000, 1_000),
+    ]);
+    l.axis = vec![0];
+    assert_eq!(analog_violations(&reqs, &l), 0);
+    let groups = sym_groups(&reqs, 5, &[false; 5]);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].members.len(), 5);
+
+    let prices = gp::Prices::new();
+    let mut sa = Sa::new(Nets::from_macros(&[]), 5, &reqs, &prices, &[], RULES);
+    let mut rng = SplitMix64::new(5);
+    let free = |c: i32, _: i32| c;
+    // Metropolis at huge temperature takes every tie, so each move applies.
+    assert!(try_group_shift(&mut sa, &mut l, &mut rng, 1e12, &groups[0], 2_000, -1_000, &free, &free));
+    assert_eq!((l.axis[0], l.x[4]), (2_000, 2_000));
+    assert!(try_pair_expand(&mut sa, &mut l, &mut rng, 1e12, 0, 1, 1_000, &free));
+    assert_eq!((l.x[0], l.x[1]), (-5_000, 9_000));
+    assert!(try_pair_swap(&mut sa, &mut l, &mut rng, 1e12, 2, 3));
+    assert_eq!(analog_violations(&reqs, &l), 0, "x = {:?}, y = {:?}, axis = {:?}", l.x, l.y, l.axis);
+    // A pinned member removes its group from the compound moves.
+    assert!(sym_groups(&reqs, 5, &[false, false, false, false, true]).is_empty());
 }

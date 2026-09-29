@@ -1,0 +1,488 @@
+{
+  "prepared": "2026-09-23",
+  "code_base_commit": "dad330c42f129cb0bca51427d308745f2d168324",
+  "code_scope": "Includes pre-existing user working-tree changes; engine not modified by this task.",
+  "chapters": [
+    {
+      "number": 1,
+      "file": "topic-optimality.html",
+      "title": "What makes a layout optimal?",
+      "words": 1853
+    },
+    {
+      "number": 2,
+      "file": "topic-design-intent.html",
+      "title": "Circuit intent and physical identity",
+      "words": 1423
+    },
+    {
+      "number": 3,
+      "file": "topic-fabrication.html",
+      "title": "Fabrication mechanisms and geometry",
+      "words": 1656
+    },
+    {
+      "number": 4,
+      "file": "topic-constraint-systems.html",
+      "title": "Constraint architecture and consistency",
+      "words": 2131
+    },
+    {
+      "number": 5,
+      "file": "topic-performance-budgets.html",
+      "title": "From circuit specifications to physical budgets",
+      "words": 2198
+    },
+    {
+      "number": 6,
+      "file": "topic-random-mismatch.html",
+      "title": "Random mismatch and statistical matching",
+      "words": 2828
+    },
+    {
+      "number": 7,
+      "file": "topic-gradient-matching.html",
+      "title": "Gradients, common centroid and higher moments",
+      "words": 1947
+    },
+    {
+      "number": 8,
+      "file": "topic-mos-layout.html",
+      "title": "MOS layout, orientation and local effects",
+      "words": 1994
+    },
+    {
+      "number": 9,
+      "file": "topic-resistors.html",
+      "title": "Resistor geometry and precision ratios",
+      "words": 2136
+    },
+    {
+      "number": 10,
+      "file": "topic-capacitor-devices.html",
+      "title": "Capacitor units and parasitic environments",
+      "words": 1815
+    },
+    {
+      "number": 11,
+      "file": "topic-bipolar-diodes.html",
+      "title": "Bipolar devices, diodes and precision structures",
+      "words": 2009
+    },
+    {
+      "number": 12,
+      "file": "topic-dac-arrays.html",
+      "title": "Constructive capacitor-DAC arrays",
+      "words": 2373
+    },
+    {
+      "number": 13,
+      "file": "topic-floorplanning.html",
+      "title": "Floorplanning, hierarchy and interfaces",
+      "words": 2155
+    },
+    {
+      "number": 14,
+      "file": "topic-placement-representations.html",
+      "title": "Placement representations and symmetry",
+      "words": 2005
+    },
+    {
+      "number": 15,
+      "file": "topic-search-algorithms.html",
+      "title": "Search algorithms and constraint-aware moves",
+      "words": 1979
+    },
+    {
+      "number": 16,
+      "file": "topic-layout-sizing.html",
+      "title": "Layout-aware sizing and retargeting",
+      "words": 2271
+    },
+    {
+      "number": 17,
+      "file": "topic-parasitics.html",
+      "title": "Terminal parasitic networks",
+      "words": 1675
+    },
+    {
+      "number": 18,
+      "file": "topic-signal-routing.html",
+      "title": "Signal routing, symmetry and shielding",
+      "words": 1761
+    },
+    {
+      "number": 19,
+      "file": "topic-wire-sizing.html",
+      "title": "Performance-driven wire sizing",
+      "words": 1406
+    },
+    {
+      "number": 20,
+      "file": "topic-power-distribution.html",
+      "title": "Power, ground, IR drop and current paths",
+      "words": 2620
+    },
+    {
+      "number": 21,
+      "file": "topic-substrate-isolation.html",
+      "title": "Substrate noise and isolation",
+      "words": 2700
+    },
+    {
+      "number": 22,
+      "file": "topic-thermal.html",
+      "title": "Thermal fields, gradients and package effects",
+      "words": 2812
+    },
+    {
+      "number": 23,
+      "file": "topic-electromigration.html",
+      "title": "Electromigration and interconnect lifetime",
+      "words": 2697
+    },
+    {
+      "number": 24,
+      "file": "topic-protection.html",
+      "title": "Antenna, ESD, latch-up and operating stress",
+      "words": 2719
+    },
+    {
+      "number": 25,
+      "file": "topic-rf.html",
+      "title": "RF, power and specialty-device boundaries",
+      "words": 2496
+    },
+    {
+      "number": 26,
+      "file": "topic-manufacturability.html",
+      "title": "Manufacturability, density and final geometry",
+      "words": 1632
+    },
+    {
+      "number": 27,
+      "file": "topic-performance-loop.html",
+      "title": "The post-layout performance feedback loop",
+      "words": 1913
+    },
+    {
+      "number": 28,
+      "file": "topic-robust-design.html",
+      "title": "Robust design, variation and yield",
+      "words": 2249
+    },
+    {
+      "number": 29,
+      "file": "topic-verification.html",
+      "title": "Verification coverage and layout certificates",
+      "words": 1786
+    },
+    {
+      "number": 30,
+      "file": "topic-validation.html",
+      "title": "Experiments that demonstrate better layouts",
+      "words": 1920
+    }
+  ],
+  "source_companions": [
+    "hastings",
+    "lampaert",
+    "topological",
+    "centering",
+    "substrate",
+    "electromigration",
+    "pelgrom",
+    "drennan",
+    "cc-review",
+    "nth-order",
+    "dac",
+    "performance",
+    "todaes"
+  ],
+  "constraint_entries": 84,
+  "body_word_count": 129035,
+  "html_pages": 50,
+  "search_sections": 436,
+  "diagrams": [
+    {
+      "page": "nth-order.html",
+      "file": "diagrams/nth-order-01.svg",
+      "title": "ABBA first-order common-centroid pattern"
+    },
+    {
+      "page": "topic-bipolar-diodes.html",
+      "file": "diagrams/topic-bipolar-diodes-01.svg",
+      "title": "Bipolar matching balances emitter units and their access"
+    },
+    {
+      "page": "topic-bipolar-diodes.html",
+      "file": "diagrams/topic-bipolar-diodes-02.svg",
+      "title": "A collecting guard must intercept the carrier path"
+    },
+    {
+      "page": "topic-capacitor-devices.html",
+      "file": "diagrams/topic-capacitor-devices-01.svg",
+      "title": "A capacitor has asymmetric external plate coupling"
+    },
+    {
+      "page": "topic-capacitor-devices.html",
+      "file": "diagrams/topic-capacitor-devices-02.svg",
+      "title": "Balanced units can still have unbalanced routing"
+    },
+    {
+      "page": "topic-constraint-systems.html",
+      "file": "diagrams/topic-constraint-systems-01.svg",
+      "title": "Traceable lowering of an electrical requirement"
+    },
+    {
+      "page": "topic-constraint-systems.html",
+      "file": "diagrams/topic-constraint-systems-02.svg",
+      "title": "A small inconsistent constraint set"
+    },
+    {
+      "page": "topic-dac-arrays.html",
+      "file": "diagrams/topic-dac-arrays-01.svg",
+      "title": "Binary and split DACs have different top-plate graphs"
+    },
+    {
+      "page": "topic-dac-arrays.html",
+      "file": "diagrams/topic-dac-arrays-02.svg",
+      "title": "Dispersion trades against internal routing complexity"
+    },
+    {
+      "page": "topic-design-intent.html",
+      "file": "diagrams/topic-design-intent-01.svg",
+      "title": "Preserve identity from schematic devices to physical units"
+    },
+    {
+      "page": "topic-electromigration.html",
+      "file": "diagrams/topic-electromigration-01.svg",
+      "title": "Wide route with a narrow neck"
+    },
+    {
+      "page": "topic-electromigration.html",
+      "file": "diagrams/topic-electromigration-02.svg",
+      "title": "Via count alone does not determine current sharing"
+    },
+    {
+      "page": "topic-fabrication.html",
+      "file": "diagrams/topic-fabrication-01.svg",
+      "title": "A physical stack is more than its top-view footprint"
+    },
+    {
+      "page": "topic-fabrication.html",
+      "file": "diagrams/topic-fabrication-02.svg",
+      "title": "Identical printed shapes need comparable surroundings"
+    },
+    {
+      "page": "topic-floorplanning.html",
+      "file": "diagrams/topic-floorplanning-01.svg",
+      "title": "A die floorplan includes package, protection, power and quiet regions"
+    },
+    {
+      "page": "topic-floorplanning.html",
+      "file": "diagrams/topic-floorplanning-02.svg",
+      "title": "A routing channel is consumed by more than minimum-width wires"
+    },
+    {
+      "page": "topic-gradient-matching.html",
+      "file": "diagrams/topic-gradient-matching-01.svg",
+      "title": "Equal first moments do not imply equal higher moments"
+    },
+    {
+      "page": "topic-gradient-matching.html",
+      "file": "diagrams/topic-gradient-matching-02.svg",
+      "title": "The same centroid can hide unequal edge environments"
+    },
+    {
+      "page": "topic-layout-sizing.html",
+      "file": "diagrams/topic-layout-sizing-01.svg",
+      "title": "A larger template can produce a better routed circuit"
+    },
+    {
+      "page": "topic-layout-sizing.html",
+      "file": "diagrams/topic-layout-sizing-02.svg",
+      "title": "Nested sizing and layout loop"
+    },
+    {
+      "page": "topic-manufacturability.html",
+      "file": "diagrams/topic-manufacturability-01.svg",
+      "title": "Spacing and enclosure constrain different edges"
+    },
+    {
+      "page": "topic-manufacturability.html",
+      "file": "diagrams/topic-manufacturability-02.svg",
+      "title": "A density window can conflict with precision-device surroundings"
+    },
+    {
+      "page": "topic-mos-layout.html",
+      "file": "diagrams/topic-mos-layout-01.svg",
+      "title": "Cell reflection can preserve centroid while reversing terminal direction"
+    },
+    {
+      "page": "topic-mos-layout.html",
+      "file": "diagrams/topic-mos-layout-02.svg",
+      "title": "Dummies and active extension change the transistor environment"
+    },
+    {
+      "page": "topic-optimality.html",
+      "file": "diagrams/topic-optimality-01.svg",
+      "title": "Feasibility first; compare quality among verified candidates"
+    },
+    {
+      "page": "topic-parasitics.html",
+      "file": "diagrams/topic-parasitics-01.svg",
+      "title": "Equal total capacitance can produce unequal circuits"
+    },
+    {
+      "page": "topic-performance-budgets.html",
+      "file": "diagrams/topic-performance-budgets-01.svg",
+      "title": "From circuit specification to a coupled wire budget"
+    },
+    {
+      "page": "topic-performance-budgets.html",
+      "file": "diagrams/topic-performance-budgets-02.svg",
+      "title": "A box allocation excludes electrically feasible candidates"
+    },
+    {
+      "page": "topic-performance-loop.html",
+      "file": "diagrams/topic-performance-loop-01.svg",
+      "title": "Use circuit failures to guide the next physical proposal"
+    },
+    {
+      "page": "topic-performance-loop.html",
+      "file": "diagrams/topic-performance-loop-02.svg",
+      "title": "Different feasible candidates can remain incomparable"
+    },
+    {
+      "page": "topic-placement-representations.html",
+      "file": "diagrams/topic-placement-representations-01.svg",
+      "title": "Three blocks decoded from a sequence pair"
+    },
+    {
+      "page": "topic-placement-representations.html",
+      "file": "diagrams/topic-placement-representations-02.svg",
+      "title": "Symmetry island and hierarchical physical boundary"
+    },
+    {
+      "page": "topic-power-distribution.html",
+      "file": "diagrams/topic-power-distribution-01.svg",
+      "title": "Supply trunk current equals the sum of downstream load currents"
+    },
+    {
+      "page": "topic-power-distribution.html",
+      "file": "diagrams/topic-power-distribution-02.svg",
+      "title": "Force and sense paths at a local reference point"
+    },
+    {
+      "page": "topic-protection.html",
+      "file": "diagrams/topic-protection-01.svg",
+      "title": "A higher-layer bridge changes early antenna connectivity"
+    },
+    {
+      "page": "topic-protection.html",
+      "file": "diagrams/topic-protection-02.svg",
+      "title": "Protection is a complete current path with a local voltage reference"
+    },
+    {
+      "page": "topic-random-mismatch.html",
+      "file": "diagrams/topic-random-mismatch-01.svg",
+      "title": "Equal total area before and after splitting into four units"
+    },
+    {
+      "page": "topic-random-mismatch.html",
+      "file": "diagrams/topic-random-mismatch-02.svg",
+      "title": "Local fluctuations and a shared spatial gradient are different fields"
+    },
+    {
+      "page": "topic-resistors.html",
+      "file": "diagrams/topic-resistors-01.svg",
+      "title": "Thermoelectric voltage depends on how strips are connected"
+    },
+    {
+      "page": "topic-resistors.html",
+      "file": "diagrams/topic-resistors-02.svg",
+      "title": "A Kelvin connection separates force and sense at the intended boundary"
+    },
+    {
+      "page": "topic-rf.html",
+      "file": "diagrams/topic-rf-01.svg",
+      "title": "An integrated inductor includes its leads and electromagnetic environment"
+    },
+    {
+      "page": "topic-rf.html",
+      "file": "diagrams/topic-rf-02.svg",
+      "title": "Distributed collection changes the effective metal resistance"
+    },
+    {
+      "page": "topic-rf.html",
+      "file": "diagrams/topic-rf-03.svg",
+      "title": "High-voltage structures are defined by field shaping"
+    },
+    {
+      "page": "topic-robust-design.html",
+      "file": "diagrams/topic-robust-design-01.svg",
+      "title": "Shared process variation and local mismatch"
+    },
+    {
+      "page": "topic-robust-design.html",
+      "file": "diagrams/topic-robust-design-02.svg",
+      "title": "A tolerance ball, box and half-space have different probabilities"
+    },
+    {
+      "page": "topic-search-algorithms.html",
+      "file": "diagrams/topic-search-algorithms-01.svg",
+      "title": "A compound pair move preserves symmetry"
+    },
+    {
+      "page": "topic-search-algorithms.html",
+      "file": "diagrams/topic-search-algorithms-02.svg",
+      "title": "Sharing and isolation are disconnected legal choices"
+    },
+    {
+      "page": "topic-signal-routing.html",
+      "file": "diagrams/topic-signal-routing-01.svg",
+      "title": "Length equality is only one route-matching feature"
+    },
+    {
+      "page": "topic-signal-routing.html",
+      "file": "diagrams/topic-signal-routing-02.svg",
+      "title": "A shield needs a quiet electrical return"
+    },
+    {
+      "page": "topic-substrate-isolation.html",
+      "file": "diagrams/topic-substrate-isolation-01.svg",
+      "title": "Conceptual substrate, guard contact, and isolated well cross section"
+    },
+    {
+      "page": "topic-substrate-isolation.html",
+      "file": "diagrams/topic-substrate-isolation-02.svg",
+      "title": "Guard ring with a shared switching return versus a dedicated quiet path"
+    },
+    {
+      "page": "topic-thermal.html",
+      "file": "diagrams/topic-thermal-01.svg",
+      "title": "Nearness and equal thermal exposure are different objectives"
+    },
+    {
+      "page": "topic-thermal.html",
+      "file": "diagrams/topic-thermal-02.svg",
+      "title": "Electrical and thermal feedback loop with package boundary"
+    },
+    {
+      "page": "topic-validation.html",
+      "file": "diagrams/topic-validation-01.svg",
+      "title": "Test a mechanism, then the realized circuit and full flow"
+    },
+    {
+      "page": "topic-verification.html",
+      "file": "diagrams/topic-verification-01.svg",
+      "title": "A certificate needs every required evidence layer"
+    },
+    {
+      "page": "topic-wire-sizing.html",
+      "file": "diagrams/topic-wire-sizing-01.svg",
+      "title": "Selective width is an electrical design decision"
+    }
+  ]
+}

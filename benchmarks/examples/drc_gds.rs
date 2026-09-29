@@ -7,9 +7,9 @@
 //! KLayout-synthesised layout with known violations, so GPurify and KLayout
 //! are validated against each other on geometry neither produced.
 //!
-//! Own 60-line reader on purpose: the visualizer's `parse_gds` drops the GDS
-//! datatype, and this deck distinguishes layers by it (65/20 diff vs 65/44
-//! tap). Rect-only — both the Philis writer and the self-test emit rects.
+//! Own 60-line reader: this deck distinguishes layers by GDS datatype (65/20
+//! diff vs 65/44 tap) and needs `LayerId`s, not the visualizer's polygons.
+//! Rect-only — both the Philis writer and the self-test emit rects.
 
 use verify::Pdk;
 

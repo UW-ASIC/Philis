@@ -9,3 +9,5 @@ edition = "2021"
 library = { path = "../../frontend/library" }
 verify = { path = "../../backend/verify" }
 pnr_core = { path = "../../kernel/core" }
+cells = { path = "../../kernel/cells" }
+analog = { path = "../../kernel/analog" }

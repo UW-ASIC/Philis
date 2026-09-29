@@ -75,9 +75,9 @@ Done: M1, M2, M3, M6, B v1 (P0–P4).
   `elaborate_ir(ir, pdk, cfg)` (interpreter), `to_rust(ir)` (source printer),
   `philis emit a.sp deck.json out.rs` CLI. `emit_roundtrip.rs` proves
   round-trip + retarget to second deck; gaps attribute to `device_gap`.
-- verify→GPurify rewrite port: done. Everything builds against the local
-  `rewrite/definition-phase` checkout (`../GPurify`); the pinned worktree is
-  gone from every Cargo.toml.
+- verify→GPurify rewrite port: done. GPurify comes from git (pinned by
+  `Cargo.lock`); `verify/build.rs` finds its `pdks/` decks in that checkout
+  (`GPURIFY_DIR` overrides with a local tree).
 
 Open debt (tasks): M4 hierarchy; M5 patterned library (unlocks emitting
 merged matched groups + symmetry lift to `place_mirrored`); dr li pin-access

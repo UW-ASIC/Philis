@@ -3,9 +3,16 @@
 use crate::geom::Shape;
 use crate::ids::NetId;
 
+#[derive(Default)]
 pub struct Routes {
     /// Drawn wire/via shapes per net, by [`NetId`].
     pub wires: Vec<Vec<Shape>>,
+    /// Per net, the placed cells' metal its pins reach: drawn by the cells,
+    /// not the router, and scored with the wires where a rule reads the whole
+    /// conductor (antenna).
+    pub cell: Vec<Vec<Shape>>,
+    /// Per net, its gate pins' rects: where the conductor meets a gate.
+    pub gates: Vec<Vec<crate::geom::Rect>>,
 }
 
 impl Routes {
@@ -15,6 +22,18 @@ impl Routes {
     #[must_use]
     pub fn shapes(&self, net: NetId) -> &[Shape] {
         self.wires.get(net.0 as usize).map_or(&[], Vec::as_slice)
+    }
+
+    /// [`Routes::cell`] of `net`; empty when unknown.
+    #[must_use]
+    pub fn cell_metal(&self, net: NetId) -> &[Shape] {
+        self.cell.get(net.0 as usize).map_or(&[], Vec::as_slice)
+    }
+
+    /// [`Routes::gates`] of `net`; empty when unknown.
+    #[must_use]
+    pub fn gate_pins(&self, net: NetId) -> &[crate::geom::Rect] {
+        self.gates.get(net.0 as usize).map_or(&[], Vec::as_slice)
     }
 
     /// Debug-only stage-boundary check: no degenerate shapes, and each net is

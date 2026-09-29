@@ -1,0 +1,2778 @@
+{
+  "scope": "Audit of written HTML analog theory and citations against supplied primary PDFs, not engine implementation. Nine authored fragments reviewed; all 148 existing citation occurrences classified. New Hastings citations introduced during corrections are separately recorded in P24–P25.",
+  "citation_status_counts": {
+    "corrected": 12,
+    "not_claim": 24,
+    "qualified": 34,
+    "supported": 78
+  },
+  "citation_reviews": [
+    {
+      "citation_id": "CIT-0037",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0038",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0039",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0040",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0058",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0059",
+      "status": "supported",
+      "supported_claim": "Geometry, bias, underlying physical-parameter statistics, multi-unit behavior, and identifiability of mismatch models.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "detail": "Read the supplied Drennan paper rather than relying on notes. Equations (1)–(3), (7)–(11), Figs. 3–8 and Table III match the claims; specific Table III values 3.86%, 1.52%, 3.05%, 1.41% visually checked at PDF6. These are the studied technologies and operating conditions, not process constants."
+    },
+    {
+      "citation_id": "CIT-0060",
+      "status": "supported",
+      "supported_claim": "Geometry, bias, underlying physical-parameter statistics, multi-unit behavior, and identifiability of mismatch models.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "detail": "Read the supplied Drennan paper rather than relying on notes. Equations (1)–(3), (7)–(11), Figs. 3–8 and Table III match the claims; specific Table III values 3.86%, 1.52%, 3.05%, 1.41% visually checked at PDF6. These are the studied technologies and operating conditions, not process constants."
+    },
+    {
+      "citation_id": "CIT-0061",
+      "status": "qualified",
+      "supported_claim": "Independent-parameter first-order propagation of variance, evaluated with compact-model sensitivities.",
+      "evidence_pdf_pages": [
+        3
+      ],
+      "detail": "Eq. (8) supplies the independent case. J C J^T is the handbook covariance derivation, now explicitly labeled as such instead of calling it a proposed paper expression."
+    },
+    {
+      "citation_id": "CIT-0062",
+      "status": "qualified",
+      "supported_claim": "Threshold/current-factor parameter dependencies can double count oxide-thickness variation; current mismatch maps locally to input-referred voltage through transconductance.",
+      "evidence_pdf_pages": [
+        2
+      ],
+      "detail": "Visually checked Table I and Eq. (6). Notes now explicitly require absolute current standard deviation in amperes before division by gm; relative current variation needs multiplication by nominal current."
+    },
+    {
+      "citation_id": "CIT-0063",
+      "status": "supported",
+      "supported_claim": "Geometry, bias, underlying physical-parameter statistics, multi-unit behavior, and identifiability of mismatch models.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "detail": "Read the supplied Drennan paper rather than relying on notes. Equations (1)–(3), (7)–(11), Figs. 3–8 and Table III match the claims; specific Table III values 3.86%, 1.52%, 3.05%, 1.41% visually checked at PDF6. These are the studied technologies and operating conditions, not process constants."
+    },
+    {
+      "citation_id": "CIT-0064",
+      "status": "supported",
+      "supported_claim": "Geometry, bias, underlying physical-parameter statistics, multi-unit behavior, and identifiability of mismatch models.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "detail": "Read the supplied Drennan paper rather than relying on notes. Equations (1)–(3), (7)–(11), Figs. 3–8 and Table III match the claims; specific Table III values 3.86%, 1.52%, 3.05%, 1.41% visually checked at PDF6. These are the studied technologies and operating conditions, not process constants."
+    },
+    {
+      "citation_id": "CIT-0065",
+      "status": "supported",
+      "supported_claim": "Geometry, bias, underlying physical-parameter statistics, multi-unit behavior, and identifiability of mismatch models.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "detail": "Read the supplied Drennan paper rather than relying on notes. Equations (1)–(3), (7)–(11), Figs. 3–8 and Table III match the claims; specific Table III values 3.86%, 1.52%, 3.05%, 1.41% visually checked at PDF6. These are the studied technologies and operating conditions, not process constants."
+    },
+    {
+      "citation_id": "CIT-0066",
+      "status": "supported",
+      "supported_claim": "Geometry, bias, underlying physical-parameter statistics, multi-unit behavior, and identifiability of mismatch models.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "detail": "Read the supplied Drennan paper rather than relying on notes. Equations (1)–(3), (7)–(11), Figs. 3–8 and Table III match the claims; specific Table III values 3.86%, 1.52%, 3.05%, 1.41% visually checked at PDF6. These are the studied technologies and operating conditions, not process constants."
+    },
+    {
+      "citation_id": "CIT-0067",
+      "status": "supported",
+      "supported_claim": "Geometry, bias, underlying physical-parameter statistics, multi-unit behavior, and identifiability of mismatch models.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "detail": "Read the supplied Drennan paper rather than relying on notes. Equations (1)–(3), (7)–(11), Figs. 3–8 and Table III match the claims; specific Table III values 3.86%, 1.52%, 3.05%, 1.41% visually checked at PDF6. These are the studied technologies and operating conditions, not process constants."
+    },
+    {
+      "citation_id": "CIT-0068",
+      "status": "supported",
+      "supported_claim": "Geometry, bias, underlying physical-parameter statistics, multi-unit behavior, and identifiability of mismatch models.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "detail": "Read the supplied Drennan paper rather than relying on notes. Equations (1)–(3), (7)–(11), Figs. 3–8 and Table III match the claims; specific Table III values 3.86%, 1.52%, 3.05%, 1.41% visually checked at PDF6. These are the studied technologies and operating conditions, not process constants."
+    },
+    {
+      "citation_id": "CIT-0069",
+      "status": "supported",
+      "supported_claim": "Reliability-aware physical construction needs current constraints and may use a library of preverified routing elements.",
+      "evidence_pdf_pages": [
+        73,
+        165,
+        166,
+        167
+      ],
+      "detail": "Chapter 3 introduction and §§5.3,5.5 support the physical-design direction. The particular Philis architecture is a proposal, not an implementation reported by these authors."
+    },
+    {
+      "citation_id": "CIT-0070",
+      "status": "supported",
+      "supported_claim": "Reliability-aware physical construction needs current constraints and may use a library of preverified routing elements.",
+      "evidence_pdf_pages": [
+        73,
+        165,
+        166,
+        167
+      ],
+      "detail": "Chapter 3 introduction and §§5.3,5.5 support the physical-design direction. The particular Philis architecture is a proposal, not an implementation reported by these authors."
+    },
+    {
+      "citation_id": "CIT-0071",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0072",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0073",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0074",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0075",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0076",
+      "status": "supported",
+      "supported_claim": "Nonuniform atomic flux causes depletion/accumulation and electrical degradation, with current-density and heating feedback.",
+      "evidence_pdf_pages": [
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+      ],
+      "detail": "Source explains voids, hillocks, resistance change, flux divergence and feedback. Analog gain/offset examples in notes are explicit circuit consequences, not measured source benchmarks."
+    },
+    {
+      "citation_id": "CIT-0077",
+      "status": "supported",
+      "supported_claim": "Diffusion depends on material interfaces; thermal and mechanical migration interact with electrical migration.",
+      "evidence_pdf_pages": [
+        32,
+        36,
+        40,
+        41,
+        45,
+        46,
+        47,
+        48,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        142,
+        143,
+        144,
+        145
+      ],
+      "detail": "Checked §§2.3.1,2.4.2,2.4.4,2.5 and 4.8. Separate back stress from external stress, and process-specific material behavior from universal constants. Relevant coupled fluxes are Eqs. (2.15)–(2.18), PDF54–55. Thermal chapter adds derived circuit implications."
+    },
+    {
+      "citation_id": "CIT-0078",
+      "status": "supported",
+      "supported_claim": "Diffusion depends on material interfaces; thermal and mechanical migration interact with electrical migration.",
+      "evidence_pdf_pages": [
+        32,
+        36,
+        40,
+        41,
+        45,
+        46,
+        47,
+        48,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        142,
+        143,
+        144,
+        145
+      ],
+      "detail": "Checked §§2.3.1,2.4.2,2.4.4,2.5 and 4.8. Separate back stress from external stress, and process-specific material behavior from universal constants. Relevant coupled fluxes are Eqs. (2.15)–(2.18), PDF54–55. Thermal chapter adds derived circuit implications."
+    },
+    {
+      "citation_id": "CIT-0079",
+      "status": "supported",
+      "supported_claim": "Diffusion depends on material interfaces; thermal and mechanical migration interact with electrical migration.",
+      "evidence_pdf_pages": [
+        32,
+        36,
+        40,
+        41,
+        45,
+        46,
+        47,
+        48,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        142,
+        143,
+        144,
+        145
+      ],
+      "detail": "Checked §§2.3.1,2.4.2,2.4.4,2.5 and 4.8. Separate back stress from external stress, and process-specific material behavior from universal constants. Relevant coupled fluxes are Eqs. (2.15)–(2.18), PDF54–55. Thermal chapter adds derived circuit implications."
+    },
+    {
+      "citation_id": "CIT-0080",
+      "status": "supported",
+      "supported_claim": "Generalized Black equation models calibrated median time to failure and has process/geometry/failure-mechanism limitations.",
+      "evidence_pdf_pages": [
+        30,
+        31,
+        93
+      ],
+      "detail": "Verified Eq. (2.1), its exponent generalization, and Eq. (3.8). Notes correctly use median, not a guarantee or a mean lifetime. Fixed-lifetime temperature scaling is derived separately."
+    },
+    {
+      "citation_id": "CIT-0081",
+      "status": "supported",
+      "supported_claim": "Mission profile, characterization confidence, target lifetime, and failure quantile are needed in addition to a single wire median lifetime.",
+      "evidence_pdf_pages": [
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97,
+        98
+      ],
+      "detail": "Checked §§3.4.1–3.4.2. Notes avoid reproducing the more questionable scaling expressions in the book and do not assert independent wire failures or unqualified linear damage accumulation."
+    },
+    {
+      "citation_id": "CIT-0082",
+      "status": "supported",
+      "supported_claim": "RMS, directional/equivalent average, peak, and waveform/frequency classes serve different reliability mechanisms; reversal does not guarantee immortality.",
+      "evidence_pdf_pages": [
+        41,
+        42,
+        43,
+        44,
+        82,
+        83,
+        140,
+        141,
+        142,
+        154
+      ],
+      "detail": "Checked §§2.4.3,3.3.1,4.7 and summary. Notes deliberately do not universalize the book’s differing numerical frequency thresholds. RMS is a heating metric for fixed resistance, with recovery needing characterization."
+    },
+    {
+      "citation_id": "CIT-0083",
+      "status": "supported",
+      "supported_claim": "RMS, directional/equivalent average, peak, and waveform/frequency classes serve different reliability mechanisms; reversal does not guarantee immortality.",
+      "evidence_pdf_pages": [
+        41,
+        42,
+        43,
+        44,
+        82,
+        83,
+        140,
+        141,
+        142,
+        154
+      ],
+      "detail": "Checked §§2.4.3,3.3.1,4.7 and summary. Notes deliberately do not universalize the book’s differing numerical frequency thresholds. RMS is a heating metric for fixed resistance, with recovery needing characterization."
+    },
+    {
+      "citation_id": "CIT-0084",
+      "status": "supported",
+      "supported_claim": "RMS, directional/equivalent average, peak, and waveform/frequency classes serve different reliability mechanisms; reversal does not guarantee immortality.",
+      "evidence_pdf_pages": [
+        41,
+        42,
+        43,
+        44,
+        82,
+        83,
+        140,
+        141,
+        142,
+        154
+      ],
+      "detail": "Checked §§2.4.3,3.3.1,4.7 and summary. Notes deliberately do not universalize the book’s differing numerical frequency thresholds. RMS is a heating metric for fixed resistance, with recovery needing characterization."
+    },
+    {
+      "citation_id": "CIT-0085",
+      "status": "qualified",
+      "supported_claim": "Segment demand depends on signed terminal currents, modes, waveform relations, and tree topology.",
+      "evidence_pdf_pages": [
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90
+      ],
+      "detail": "Checked Eqs. (3.1)–(3.7), Figs. 3.4–3.10. Notes preserve temporal correlation rather than assert independent maxima occur together. Added omitted condition: include interconnect shunt/displacement currents as loads, or state that they are neglected, before using a cut-sum identity."
+    },
+    {
+      "citation_id": "CIT-0086",
+      "status": "corrected",
+      "supported_claim": "Current-aware wire planning minimizes required metal area rather than only geometric wire length.",
+      "evidence_pdf_pages": [
+        89,
+        90
+      ],
+      "detail": "Old PDF87 anchor was the segment-current derivation. Changed to PDF90, §3.3.3 and Fig. 3.10, where the area objective and topology/current circular dependency are explicitly discussed."
+    },
+    {
+      "citation_id": "CIT-0087",
+      "status": "qualified",
+      "supported_claim": "Dimensioning must combine current types, manufacturing cross-section corrections, and pin-access ampacity.",
+      "evidence_pdf_pages": [
+        99,
+        100,
+        101,
+        102,
+        103,
+        104,
+        105
+      ],
+      "detail": "Verified Eqs. (3.21)–(3.24), Fig.3.15, §§3.5.2–3.5.5. Corrected the term volumetric current density to cross-sectional current density for A/cm². Illustrative density and width arithmetic checked independently."
+    },
+    {
+      "citation_id": "CIT-0088",
+      "status": "supported",
+      "supported_claim": "Via redundancy does not guarantee equal current sharing; access geometry, current direction and reservoirs matter.",
+      "evidence_pdf_pages": [
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140
+      ],
+      "detail": "Checked §§4.6.1–4.6.5 and Figs.4.25–4.29; source figures support the conceptual SVG. The warm-colored drawing is clearly not a field simulation. Four-cut worked example checked as conditional on its assumed crowding factor."
+    },
+    {
+      "citation_id": "CIT-0089",
+      "status": "qualified",
+      "supported_claim": "Printed Eqs.3.25–3.26 produce a required-via-count factor with the opposite temperature monotonicity to fixed-lifetime Black current scaling.",
+      "evidence_pdf_pages": [
+        93,
+        101
+      ],
+      "detail": "Independently inspected the rendered PDF101, printed p89. Eq3.25 multiplies count by f and Eq3.26 gives f<1 when Teff>Tref. Re-derived allowable current ratio from Eq3.8. Retain as apparent internal inconsistency, not a verified publisher erratum or a foundry-qualified replacement rule."
+    },
+    {
+      "citation_id": "CIT-0090",
+      "status": "supported",
+      "supported_claim": "The Blech product is a conditional one-dimensional stress-balance criterion, with distinct void-nucleation and growth-saturation limits.",
+      "evidence_pdf_pages": [
+        116,
+        117,
+        118,
+        119,
+        120,
+        121,
+        122,
+        123,
+        124,
+        126,
+        127,
+        130,
+        131
+      ],
+      "detail": "Verified Eq.(4.1), Eq.(4.2) discussion, simple-segment limitation PDF123, transient caveat PDF127, and neighboring-segment/reservoir interaction PDF130. Notes correctly refuse to make a software vertex into a diffusion barrier. Added e and dimensionless Z* definitions."
+    },
+    {
+      "citation_id": "CIT-0091",
+      "status": "supported",
+      "supported_claim": "Bamboo structures suppress suitable grain-boundary diffusion but require process/material conditions and may lose benefit to self-heating or interface diffusion.",
+      "evidence_pdf_pages": [
+        113,
+        114,
+        115,
+        116
+      ],
+      "detail": "Verified §4.2 and Fig.4.1. The notes correctly avoid claiming the aluminum result transfers directly to ordinary copper."
+    },
+    {
+      "citation_id": "CIT-0092",
+      "status": "supported",
+      "supported_claim": "Via-above/below damage volumes and reservoir effects depend on geometry, material boundaries, current direction and mechanical confinement.",
+      "evidence_pdf_pages": [
+        127,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133
+      ],
+      "detail": "Checked §§4.4–4.5; source/sink reservoir effects may oppose, especially with reversing current and low-k surroundings. No published factor is turned into a universal rule."
+    },
+    {
+      "citation_id": "CIT-0093",
+      "status": "supported",
+      "supported_claim": "Interconnect materials, dielectrics and barriers affect EM; CNT alternatives have manufacturing/contact and thermal limitations.",
+      "evidence_pdf_pages": [
+        142,
+        143,
+        144,
+        145,
+        152,
+        153,
+        154,
+        166
+      ],
+      "detail": "Notes present the 2018 outlook as historical research scope and do not claim present-day PDK availability or use tabulated material values as foundry limits."
+    },
+    {
+      "citation_id": "CIT-0094",
+      "status": "qualified",
+      "supported_claim": "Analytical, lumped and meshed approaches trade cost against spatial fidelity; coupled boundaries and template interfaces must be respected.",
+      "evidence_pdf_pages": [
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        103,
+        104,
+        105
+      ],
+      "detail": "Checked §2.6.1 and §§3.5.4–3.5.5. Numerical method descriptions are supported; thermal PDE/RC equations in handbook are energy-conservation/Fourier-law derivations, not equations asserted to appear in this EM passage. New precise Hastings citations support the thermal basis."
+    },
+    {
+      "citation_id": "CIT-0095",
+      "status": "qualified",
+      "supported_claim": "Analytical, lumped and meshed approaches trade cost against spatial fidelity; coupled boundaries and template interfaces must be respected.",
+      "evidence_pdf_pages": [
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        103,
+        104,
+        105
+      ],
+      "detail": "Checked §2.6.1 and §§3.5.4–3.5.5. Numerical method descriptions are supported; thermal PDE/RC equations in handbook are energy-conservation/Fourier-law derivations, not equations asserted to appear in this EM passage. New precise Hastings citations support the thermal basis."
+    },
+    {
+      "citation_id": "CIT-0096",
+      "status": "supported",
+      "supported_claim": "A technology-qualified routing-element library can reduce verification cost, but joined-element interactions still need checking.",
+      "evidence_pdf_pages": [
+        165,
+        166,
+        62,
+        63
+      ],
+      "detail": "§5.3 explicitly requires mutual-interaction examination after composition; §2.6.1 demonstrates distinct versus combined FEM patterns. Notes preserve this caveat."
+    },
+    {
+      "citation_id": "CIT-0188",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0189",
+      "status": "qualified",
+      "supported_claim": "Under the stated correlation-scale model, pair mismatch variance has an area-dependent term and a long-range distance term.",
+      "evidence_pdf_pages": [
+        1,
+        2
+      ],
+      "detail": "Independently read all four Pelgrom ESSCIRC1988 pages and visually checked Eq.(1). Pair/single-device sqrt2 convention and D<=eta A/(S sqrt(WL)) are variance/algebra derivations, not extra paper formulae. Area/distance numeric example rechecked; no universal S/A or arbitrary modern geometry validity is implied."
+    },
+    {
+      "citation_id": "CIT-0190",
+      "status": "supported",
+      "supported_claim": "Current-factor mismatch contains separate edge-length/width and area terms before an approximate area-only simplification.",
+      "evidence_pdf_pages": [
+        2
+      ],
+      "detail": "Rendered Eq.(3) checked: AW²/(W²L)+AL²/(WL²)+Aμ²/(μ²WL)+ACox²/(Cox²WL). Source explicitly warns approximation worsens as W,L decrease."
+    },
+    {
+      "citation_id": "CIT-0191",
+      "status": "supported",
+      "supported_claim": "The supplied 1988 measured process shows area/distance dependence, orientation-sensitive current-factor variation, and a long-distance correlation example.",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        4
+      ],
+      "detail": "Checked Table1, Figs.2–3, 2.5µm n-well characterization, 30/250/500µm separations, 30/35mV·µm, ~4µV/µm, 90° discussion and −0.35 reported distant correlation. Historical/process-specific limits remain attached."
+    },
+    {
+      "citation_id": "CIT-0192",
+      "status": "supported",
+      "supported_claim": "The supplied 1988 measured process shows area/distance dependence, orientation-sensitive current-factor variation, and a long-distance correlation example.",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        4
+      ],
+      "detail": "Checked Table1, Figs.2–3, 2.5µm n-well characterization, 30/250/500µm separations, 30/35mV·µm, ~4µV/µm, 90° discussion and −0.35 reported distant correlation. Historical/process-specific limits remain attached."
+    },
+    {
+      "citation_id": "CIT-0193",
+      "status": "supported",
+      "supported_claim": "The supplied 1988 measured process shows area/distance dependence, orientation-sensitive current-factor variation, and a long-distance correlation example.",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        4
+      ],
+      "detail": "Checked Table1, Figs.2–3, 2.5µm n-well characterization, 30/250/500µm separations, 30/35mV·µm, ~4µV/µm, 90° discussion and −0.35 reported distant correlation. Historical/process-specific limits remain attached."
+    },
+    {
+      "citation_id": "CIT-0194",
+      "status": "qualified",
+      "supported_claim": "Under the stated correlation-scale model, pair mismatch variance has an area-dependent term and a long-range distance term.",
+      "evidence_pdf_pages": [
+        1,
+        2
+      ],
+      "detail": "Independently read all four Pelgrom ESSCIRC1988 pages and visually checked Eq.(1). Pair/single-device sqrt2 convention and D<=eta A/(S sqrt(WL)) are variance/algebra derivations, not extra paper formulae. Area/distance numeric example rechecked; no universal S/A or arbitrary modern geometry validity is implied."
+    },
+    {
+      "citation_id": "CIT-0195",
+      "status": "qualified",
+      "supported_claim": "Long-range parameter correlation and the bandgap application are discussed on PDF3; nonzero reticle-error means are discussed on PDF2.",
+      "evidence_pdf_pages": [
+        2,
+        3
+      ],
+      "detail": "Attached workflow is handbook synthesis, not six paper-prescribed rules. Its systematic-error citation label was too broad for PDF3 alone; add PDF2 support for reticle-induced nonzero means."
+    },
+    {
+      "citation_id": "CIT-0196",
+      "status": "supported",
+      "supported_claim": "Bandgap spread is dominated by the op-amp contribution in this example, motivating propagated error budgeting.",
+      "evidence_pdf_pages": [
+        3
+      ],
+      "detail": "Verified measured 19mV spread; ~18mV opamp output contribution; 1.6mV input inferred versus 1.7mV calculated; source conditions and historical scope are retained."
+    },
+    {
+      "citation_id": "CIT-0204",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0205",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0206",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0207",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0208",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0209",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0210",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0211",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0212",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0213",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0214",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0215",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0216",
+      "status": "not_claim",
+      "supported_claim": "Source identity, navigation, or reading-coverage link; not a theory assertion.",
+      "evidence_pdf_pages": [],
+      "detail": "Excluded from the supported-theory count. This audit does not attempt to verify historical claims about how many pages were read during authoring."
+    },
+    {
+      "citation_id": "CIT-0217",
+      "status": "supported",
+      "supported_claim": "Substrate noise needs injection, propagation and reception, including other contacts and return paths.",
+      "evidence_pdf_pages": [
+        25,
+        34,
+        35,
+        36,
+        38,
+        39,
+        40,
+        41,
+        42
+      ],
+      "detail": "Checked Ch.1 global contact effects and Ch.2 junction/impact-ionization injection, well/tap bounce, capacitive reception and body effect. Conceptual n-well cross section is original; no PDK legality is implied."
+    },
+    {
+      "citation_id": "CIT-0218",
+      "status": "supported",
+      "supported_claim": "Substrate noise needs injection, propagation and reception, including other contacts and return paths.",
+      "evidence_pdf_pages": [
+        25,
+        34,
+        35,
+        36,
+        38,
+        39,
+        40,
+        41,
+        42
+      ],
+      "detail": "Checked Ch.1 global contact effects and Ch.2 junction/impact-ionization injection, well/tap bounce, capacitive reception and body effect. Conceptual n-well cross section is original; no PDK legality is implied."
+    },
+    {
+      "citation_id": "CIT-0219",
+      "status": "supported",
+      "supported_claim": "Electroquasistatic substrate extraction uses conductivity/permittivity and explicit Dirichlet/Neumann/interface conditions.",
+      "evidence_pdf_pages": [
+        45,
+        46,
+        47,
+        48,
+        49
+      ],
+      "detail": "Eq.(3.1), resistive limit, Eq.(3.2), continuity Eq.(3.3), contact equipotential assumptions and boundary element formulation checked. No universal GHz cutoff or magnetic-field model is claimed."
+    },
+    {
+      "citation_id": "CIT-0220",
+      "status": "supported",
+      "supported_claim": "Isolation is a loaded receiver-to-injector voltage ratio, influenced by junction capacitance, backside impedance, frequency and receiver loading.",
+      "evidence_pdf_pages": [
+        124,
+        125,
+        126,
+        134,
+        135,
+        140
+      ],
+      "detail": "§8.2 defines the ratio; graphs use negative-dB transfer. Matrix loaded-Z expression is a handbook circuit-network representation rather than an exact book equation."
+    },
+    {
+      "citation_id": "CIT-0221",
+      "status": "supported",
+      "supported_claim": "Electroquasistatic substrate extraction uses conductivity/permittivity and explicit Dirichlet/Neumann/interface conditions.",
+      "evidence_pdf_pages": [
+        45,
+        46,
+        47,
+        48,
+        49
+      ],
+      "detail": "Eq.(3.1), resistive limit, Eq.(3.2), continuity Eq.(3.3), contact equipotential assumptions and boundary element formulation checked. No universal GHz cutoff or magnetic-field model is claimed."
+    },
+    {
+      "citation_id": "CIT-0222",
+      "status": "supported",
+      "supported_claim": "Layered Green functions, DCT/FFT acceleration and iterative solver/preconditioner methods can accelerate substrate extraction.",
+      "evidence_pdf_pages": [
+        49,
+        50,
+        51,
+        52,
+        53,
+        54
+      ],
+      "detail": "Checked Ch.3 §§4–5. Notes distinguish algorithm descriptions from guaranteed equal error bounds and qualify reduced-model validation as engineering requirements."
+    },
+    {
+      "citation_id": "CIT-0223",
+      "status": "qualified",
+      "supported_claim": "Local noise generators and performance sensitivities allow bounds to be allocated before exact injector placement is known.",
+      "evidence_pdf_pages": [
+        70,
+        71,
+        72,
+        73
+      ],
+      "detail": "Checked Eqs.(5.1)–(5.5) and worst-case-sensitivity discussion. The original flow assumes common waveform shapes with phase differences in its example; notes present a broader proposed scenario-based contract rather than a claimed author guarantee across nonlinear regimes."
+    },
+    {
+      "citation_id": "CIT-0224",
+      "status": "supported",
+      "supported_claim": "The PLL example shows that noise phase relative to VCO transitions matters, and R/C limits compete during wire sizing.",
+      "evidence_pdf_pages": [
+        75,
+        76,
+        78,
+        79,
+        80,
+        81,
+        82
+      ],
+      "detail": "Checked §5.3: worst phase, interval-limited approximate sensitivities, actual divider delay safety margin, and width-dependent simultaneous R/C enforcement. Proposed workflow is explicitly labeled."
+    },
+    {
+      "citation_id": "CIT-0225",
+      "status": "supported",
+      "supported_claim": "Injection signatures depend on activity, slew, loading and supply conditions; iterative timing/noise refinement may fail to converge.",
+      "evidence_pdf_pages": [
+        56,
+        57,
+        58,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67
+      ],
+      "detail": "Checked §§4.1–4.4 and two failure cases discussed on PDF65–66. Convolution/signature model is supported; unknown activity is not treated as a silent zero."
+    },
+    {
+      "citation_id": "CIT-0226",
+      "status": "supported",
+      "supported_claim": "Spacing benefits depend on substrate/return structure; low-resistivity bulk with finite backside impedance can produce a separation plateau.",
+      "evidence_pdf_pages": [
+        122,
+        123,
+        124,
+        125,
+        126,
+        127,
+        128,
+        129,
+        130
+      ],
+      "detail": "§8.2.1 gives plateau and backside-inductance dependence; §8.2.2 contrasts high-resistivity surface current. Notes correctly avoid universalizing the example distances."
+    },
+    {
+      "citation_id": "CIT-0227",
+      "status": "supported",
+      "supported_claim": "Balanced differential coupling improves rejection, while receiver mismatch creates a residual floor.",
+      "evidence_pdf_pages": [
+        130,
+        131,
+        132,
+        133,
+        134
+      ],
+      "detail": "§8.3.2 explicitly models a 5% capacitor imbalance. vdiff=(H1−H2)va and −40dB/−80dB worked arithmetic are correctly identified instructional circuit derivations; complex transfer subtraction is required."
+    },
+    {
+      "citation_id": "CIT-0228",
+      "status": "supported",
+      "supported_claim": "Guard-ring performance depends on ground reference, return inductance and geometry; a larger or noisily grounded ring can worsen error.",
+      "evidence_pdf_pages": [
+        135,
+        136,
+        138,
+        139,
+        140,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147,
+        149,
+        150,
+        151
+      ],
+      "detail": "Checked §§8.5–8.8, including internal/external observation reference and ring location. Original shared-return SVG is a conceptual KCL/impedance explanation, not a copied/source-tested layout."
+    },
+    {
+      "citation_id": "CIT-0229",
+      "status": "supported",
+      "supported_claim": "Conductive, dielectric and buried-well isolation alter different paths and retain reference-impedance/frequency limitations.",
+      "evidence_pdf_pages": [
+        151,
+        152,
+        153,
+        154,
+        155,
+        156
+      ],
+      "detail": "§8.9 and Figs.8.27–8.30 checked; smaller protected region can improve capacitance-to-return-impedance balance. Availability must come from the process."
+    },
+    {
+      "citation_id": "CIT-0230",
+      "status": "supported",
+      "supported_claim": "Guard-ring performance depends on ground reference, return inductance and geometry; a larger or noisily grounded ring can worsen error.",
+      "evidence_pdf_pages": [
+        135,
+        136,
+        138,
+        139,
+        140,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147,
+        149,
+        150,
+        151
+      ],
+      "detail": "Checked §§8.5–8.8, including internal/external observation reference and ring location. Original shared-return SVG is a conceptual KCL/impedance explanation, not a copied/source-tested layout."
+    },
+    {
+      "citation_id": "CIT-0231",
+      "status": "supported",
+      "supported_claim": "Substrate paths can create feedback, alter local DC bias/capacitance, generate thermal noise and reduce passive Q.",
+      "evidence_pdf_pages": [
+        108,
+        109,
+        110,
+        111,
+        112,
+        113,
+        114,
+        115,
+        116
+      ],
+      "detail": "Checked §§7.1–7.4.2. No Johnson-Nyquist PSD constant or kT/C formula is given by this source passage, and these notes do not attribute such a formula to it."
+    },
+    {
+      "citation_id": "CIT-0232",
+      "status": "supported",
+      "supported_claim": "Capacitor terminal choice and mutual bottom-plate coupling make an isolated single-device substrate model inadequate in some assembled differential uses.",
+      "evidence_pdf_pages": [
+        113,
+        114,
+        115
+      ],
+      "detail": "§7.4.1 and Fig.7.4 directly support this context-dependent model warning. Top/bottom-plate claims remain specific to the structures under discussion."
+    },
+    {
+      "citation_id": "CIT-0233",
+      "status": "supported",
+      "supported_claim": "Spurious signals can mix, rectify, pull oscillators, or alter sampling; ESD requires nonlinear substrate behavior.",
+      "evidence_pdf_pages": [
+        117,
+        118,
+        119,
+        120
+      ],
+      "detail": "Checked §7.4.3 list and §7.4.4; detailed timing changes are proposed architecture-level actions, not layout equivalences."
+    },
+    {
+      "citation_id": "CIT-0234",
+      "status": "qualified",
+      "supported_claim": "Incremental matrix updates and local sensitivity estimates can reduce search cost, with performance-weighted approximation control.",
+      "evidence_pdf_pages": [
+        86,
+        87,
+        88,
+        89,
+        90,
+        94,
+        95,
+        96,
+        97
+      ],
+      "detail": "Checked Sherman-Morrison discussion and local move-size errors, Eqs.(6.15)–(6.19), and cumulative conductance pruning. Notes do not turn empirical local accuracy into a global bound. Stronger-model verification policy is a handbook proposal."
+    },
+    {
+      "citation_id": "CIT-0235",
+      "status": "qualified",
+      "supported_claim": "The source offers conditional asymptotic annealing convergence arguments, not a finite-run global-optimum certificate.",
+      "evidence_pdf_pages": [
+        168,
+        169
+      ],
+      "detail": "Read Appendices C.1–C.2. This audit does not independently certify the proof or its borrowed hypotheses. The notes correctly withhold finite-run optimality guarantees."
+    },
+    {
+      "citation_id": "CIT-0236",
+      "status": "supported",
+      "supported_claim": "Calibration requires suitable DC/RF structures and control of profile/contact/measurement-floor/package/direct-coupling errors.",
+      "evidence_pdf_pages": [
+        170,
+        171,
+        172,
+        173,
+        174,
+        175,
+        176,
+        177,
+        178,
+        179,
+        180,
+        181,
+        182
+      ],
+      "detail": "Appendix D supports error sources and the observed noisy guard-ring counterexample (PDF177–178,182). Reported source experiments are not claimed independently reproduced."
+    },
+    {
+      "citation_id": "CIT-0281",
+      "status": "supported",
+      "supported_claim": "Reliability-aware physical construction needs current constraints and may use a library of preverified routing elements.",
+      "evidence_pdf_pages": [
+        73,
+        165,
+        166,
+        167
+      ],
+      "detail": "Chapter 3 introduction and §§5.3,5.5 support the physical-design direction. The particular Philis architecture is a proposal, not an implementation reported by these authors."
+    },
+    {
+      "citation_id": "CIT-0282",
+      "status": "supported",
+      "supported_claim": "Nonuniform atomic flux causes depletion/accumulation and electrical degradation, with current-density and heating feedback.",
+      "evidence_pdf_pages": [
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+      ],
+      "detail": "Source explains voids, hillocks, resistance change, flux divergence and feedback. Analog gain/offset examples in notes are explicit circuit consequences, not measured source benchmarks."
+    },
+    {
+      "citation_id": "CIT-0283",
+      "status": "supported",
+      "supported_claim": "Diffusion depends on material interfaces; thermal and mechanical migration interact with electrical migration.",
+      "evidence_pdf_pages": [
+        32,
+        36,
+        40,
+        41,
+        45,
+        46,
+        47,
+        48,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        142,
+        143,
+        144,
+        145
+      ],
+      "detail": "Checked §§2.3.1,2.4.2,2.4.4,2.5 and 4.8. Separate back stress from external stress, and process-specific material behavior from universal constants. Relevant coupled fluxes are Eqs. (2.15)–(2.18), PDF54–55. Thermal chapter adds derived circuit implications."
+    },
+    {
+      "citation_id": "CIT-0284",
+      "status": "supported",
+      "supported_claim": "Diffusion depends on material interfaces; thermal and mechanical migration interact with electrical migration.",
+      "evidence_pdf_pages": [
+        32,
+        36,
+        40,
+        41,
+        45,
+        46,
+        47,
+        48,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        142,
+        143,
+        144,
+        145
+      ],
+      "detail": "Checked §§2.3.1,2.4.2,2.4.4,2.5 and 4.8. Separate back stress from external stress, and process-specific material behavior from universal constants. Relevant coupled fluxes are Eqs. (2.15)–(2.18), PDF54–55. Thermal chapter adds derived circuit implications."
+    },
+    {
+      "citation_id": "CIT-0285",
+      "status": "qualified",
+      "supported_claim": "Dimensioning must combine current types, manufacturing cross-section corrections, and pin-access ampacity.",
+      "evidence_pdf_pages": [
+        99,
+        100,
+        101,
+        102,
+        103,
+        104,
+        105
+      ],
+      "detail": "Verified Eqs. (3.21)–(3.24), Fig.3.15, §§3.5.2–3.5.5. Corrected the term volumetric current density to cross-sectional current density for A/cm². Illustrative density and width arithmetic checked independently."
+    },
+    {
+      "citation_id": "CIT-0286",
+      "status": "qualified",
+      "supported_claim": "Segment demand depends on signed terminal currents, modes, waveform relations, and tree topology.",
+      "evidence_pdf_pages": [
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90
+      ],
+      "detail": "Checked Eqs. (3.1)–(3.7), Figs. 3.4–3.10. Notes preserve temporal correlation rather than assert independent maxima occur together. Added omitted condition: include interconnect shunt/displacement currents as loads, or state that they are neglected, before using a cut-sum identity."
+    },
+    {
+      "citation_id": "CIT-0287",
+      "status": "supported",
+      "supported_claim": "RMS, directional/equivalent average, peak, and waveform/frequency classes serve different reliability mechanisms; reversal does not guarantee immortality.",
+      "evidence_pdf_pages": [
+        41,
+        42,
+        43,
+        44,
+        82,
+        83,
+        140,
+        141,
+        142,
+        154
+      ],
+      "detail": "Checked §§2.4.3,3.3.1,4.7 and summary. Notes deliberately do not universalize the book’s differing numerical frequency thresholds. RMS is a heating metric for fixed resistance, with recovery needing characterization."
+    },
+    {
+      "citation_id": "CIT-0288",
+      "status": "supported",
+      "supported_claim": "RMS, directional/equivalent average, peak, and waveform/frequency classes serve different reliability mechanisms; reversal does not guarantee immortality.",
+      "evidence_pdf_pages": [
+        41,
+        42,
+        43,
+        44,
+        82,
+        83,
+        140,
+        141,
+        142,
+        154
+      ],
+      "detail": "Checked §§2.4.3,3.3.1,4.7 and summary. Notes deliberately do not universalize the book’s differing numerical frequency thresholds. RMS is a heating metric for fixed resistance, with recovery needing characterization."
+    },
+    {
+      "citation_id": "CIT-0289",
+      "status": "supported",
+      "supported_claim": "Generalized Black equation models calibrated median time to failure and has process/geometry/failure-mechanism limitations.",
+      "evidence_pdf_pages": [
+        30,
+        31,
+        93
+      ],
+      "detail": "Verified Eq. (2.1), its exponent generalization, and Eq. (3.8). Notes correctly use median, not a guarantee or a mean lifetime. Fixed-lifetime temperature scaling is derived separately."
+    },
+    {
+      "citation_id": "CIT-0290",
+      "status": "supported",
+      "supported_claim": "Mission profile, characterization confidence, target lifetime, and failure quantile are needed in addition to a single wire median lifetime.",
+      "evidence_pdf_pages": [
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97,
+        98
+      ],
+      "detail": "Checked §§3.4.1–3.4.2. Notes avoid reproducing the more questionable scaling expressions in the book and do not assert independent wire failures or unqualified linear damage accumulation."
+    },
+    {
+      "citation_id": "CIT-0291",
+      "status": "qualified",
+      "supported_claim": "Printed Eqs.3.25–3.26 produce a required-via-count factor with the opposite temperature monotonicity to fixed-lifetime Black current scaling.",
+      "evidence_pdf_pages": [
+        93,
+        101
+      ],
+      "detail": "Independently inspected the rendered PDF101, printed p89. Eq3.25 multiplies count by f and Eq3.26 gives f<1 when Teff>Tref. Re-derived allowable current ratio from Eq3.8. Retain as apparent internal inconsistency, not a verified publisher erratum or a foundry-qualified replacement rule."
+    },
+    {
+      "citation_id": "CIT-0292",
+      "status": "supported",
+      "supported_claim": "Via redundancy does not guarantee equal current sharing; access geometry, current direction and reservoirs matter.",
+      "evidence_pdf_pages": [
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140
+      ],
+      "detail": "Checked §§4.6.1–4.6.5 and Figs.4.25–4.29; source figures support the conceptual SVG. The warm-colored drawing is clearly not a field simulation. Four-cut worked example checked as conditional on its assumed crowding factor."
+    },
+    {
+      "citation_id": "CIT-0293",
+      "status": "supported",
+      "supported_claim": "The Blech product is a conditional one-dimensional stress-balance criterion, with distinct void-nucleation and growth-saturation limits.",
+      "evidence_pdf_pages": [
+        116,
+        117,
+        118,
+        119,
+        120,
+        121,
+        122,
+        123,
+        124,
+        126,
+        127,
+        130,
+        131
+      ],
+      "detail": "Verified Eq.(4.1), Eq.(4.2) discussion, simple-segment limitation PDF123, transient caveat PDF127, and neighboring-segment/reservoir interaction PDF130. Notes correctly refuse to make a software vertex into a diffusion barrier. Added e and dimensionless Z* definitions."
+    },
+    {
+      "citation_id": "CIT-0294",
+      "status": "supported",
+      "supported_claim": "Bamboo structures suppress suitable grain-boundary diffusion but require process/material conditions and may lose benefit to self-heating or interface diffusion.",
+      "evidence_pdf_pages": [
+        113,
+        114,
+        115,
+        116
+      ],
+      "detail": "Verified §4.2 and Fig.4.1. The notes correctly avoid claiming the aluminum result transfers directly to ordinary copper."
+    },
+    {
+      "citation_id": "CIT-0295",
+      "status": "supported",
+      "supported_claim": "Via-above/below damage volumes and reservoir effects depend on geometry, material boundaries, current direction and mechanical confinement.",
+      "evidence_pdf_pages": [
+        127,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133
+      ],
+      "detail": "Checked §§4.4–4.5; source/sink reservoir effects may oppose, especially with reversing current and low-k surroundings. No published factor is turned into a universal rule."
+    },
+    {
+      "citation_id": "CIT-0296",
+      "status": "qualified",
+      "supported_claim": "Analytical, lumped and meshed approaches trade cost against spatial fidelity; coupled boundaries and template interfaces must be respected.",
+      "evidence_pdf_pages": [
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        103,
+        104,
+        105
+      ],
+      "detail": "Checked §2.6.1 and §§3.5.4–3.5.5. Numerical method descriptions are supported; thermal PDE/RC equations in handbook are energy-conservation/Fourier-law derivations, not equations asserted to appear in this EM passage. New precise Hastings citations support the thermal basis."
+    },
+    {
+      "citation_id": "CIT-0297",
+      "status": "supported",
+      "supported_claim": "A technology-qualified routing-element library can reduce verification cost, but joined-element interactions still need checking.",
+      "evidence_pdf_pages": [
+        165,
+        166,
+        62,
+        63
+      ],
+      "detail": "§5.3 explicitly requires mutual-interaction examination after composition; §2.6.1 demonstrates distinct versus combined FEM patterns. Notes preserve this caveat."
+    },
+    {
+      "citation_id": "CIT-0396",
+      "status": "qualified",
+      "supported_claim": "Segment demand depends on signed terminal currents, modes, waveform relations, and tree topology.",
+      "evidence_pdf_pages": [
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90
+      ],
+      "detail": "Checked Eqs. (3.1)–(3.7), Figs. 3.4–3.10. Notes preserve temporal correlation rather than assert independent maxima occur together. Added omitted condition: include interconnect shunt/displacement currents as loads, or state that they are neglected, before using a cut-sum identity."
+    },
+    {
+      "citation_id": "CIT-0397",
+      "status": "supported",
+      "supported_claim": "Guard-ring performance depends on ground reference, return inductance and geometry; a larger or noisily grounded ring can worsen error.",
+      "evidence_pdf_pages": [
+        135,
+        136,
+        138,
+        139,
+        140,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147,
+        149,
+        150,
+        151
+      ],
+      "detail": "Checked §§8.5–8.8, including internal/external observation reference and ring location. Original shared-return SVG is a conceptual KCL/impedance explanation, not a copied/source-tested layout."
+    },
+    {
+      "citation_id": "CIT-0398",
+      "status": "qualified",
+      "supported_claim": "Segment demand depends on signed terminal currents, modes, waveform relations, and tree topology.",
+      "evidence_pdf_pages": [
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90
+      ],
+      "detail": "Checked Eqs. (3.1)–(3.7), Figs. 3.4–3.10. Notes preserve temporal correlation rather than assert independent maxima occur together. Added omitted condition: include interconnect shunt/displacement currents as loads, or state that they are neglected, before using a cut-sum identity."
+    },
+    {
+      "citation_id": "CIT-0399",
+      "status": "qualified",
+      "supported_claim": "First-order circuit sensitivity maps local perturbations to output error, and those sensitivities depend on bias.",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        5
+      ],
+      "detail": "Drennan source supports the method. Applying it to deterministic rail drops or nonuniform thermal fields is an explicit handbook derivation/engineering synthesis; the paper does not supply the added thermal coefficients."
+    },
+    {
+      "citation_id": "CIT-0400",
+      "status": "qualified",
+      "supported_claim": "First-order circuit sensitivity maps local perturbations to output error, and those sensitivities depend on bias.",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        5
+      ],
+      "detail": "Drennan source supports the method. Applying it to deterministic rail drops or nonuniform thermal fields is an explicit handbook derivation/engineering synthesis; the paper does not supply the added thermal coefficients."
+    },
+    {
+      "citation_id": "CIT-0401",
+      "status": "corrected",
+      "supported_claim": "Capacitor substrate loading and terminal orientation affect circuit behavior.",
+      "evidence_pdf_pages": [
+        113,
+        114,
+        115
+      ],
+      "detail": "Changed chapter-introduction PDF108 link to §7.4.1 PDF113–115 for the actual capacitor claim; decoupling C>=I dt/dV, ESR and ESL are elementary network derivations, not quotations from this book."
+    },
+    {
+      "citation_id": "CIT-0402",
+      "status": "supported",
+      "supported_claim": "Guard-ring performance depends on ground reference, return inductance and geometry; a larger or noisily grounded ring can worsen error.",
+      "evidence_pdf_pages": [
+        135,
+        136,
+        138,
+        139,
+        140,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147,
+        149,
+        150,
+        151
+      ],
+      "detail": "Checked §§8.5–8.8, including internal/external observation reference and ring location. Original shared-return SVG is a conceptual KCL/impedance explanation, not a copied/source-tested layout."
+    },
+    {
+      "citation_id": "CIT-0403",
+      "status": "corrected",
+      "supported_claim": "Buried shields retain supply/ground-impedance and frequency-dependent limits.",
+      "evidence_pdf_pages": [
+        151,
+        152,
+        153,
+        154,
+        155,
+        156
+      ],
+      "detail": "Old PDF149 anchor discussed differential guard rings. Corrected to §8.9 at PDF152–156."
+    },
+    {
+      "citation_id": "CIT-0404",
+      "status": "corrected",
+      "supported_claim": "Current-aware wire planning minimizes required metal area rather than only geometric wire length.",
+      "evidence_pdf_pages": [
+        89,
+        90
+      ],
+      "detail": "Old PDF87 anchor was the segment-current derivation. Changed to PDF90, §3.3.3 and Fig. 3.10, where the area objective and topology/current circular dependency are explicitly discussed."
+    },
+    {
+      "citation_id": "CIT-0405",
+      "status": "corrected",
+      "supported_claim": "Via-array current sharing depends on lower/upper-metal geometry and relative path lengths.",
+      "evidence_pdf_pages": [
+        137,
+        138,
+        139,
+        140
+      ],
+      "detail": "Changed PDF134 manufacturing-fault introduction to §4.6.4 at PDF137 for this precise claim."
+    },
+    {
+      "citation_id": "CIT-0424",
+      "status": "qualified",
+      "supported_claim": "Under the stated correlation-scale model, pair mismatch variance has an area-dependent term and a long-range distance term.",
+      "evidence_pdf_pages": [
+        1,
+        2
+      ],
+      "detail": "Independently read all four Pelgrom ESSCIRC1988 pages and visually checked Eq.(1). Pair/single-device sqrt2 convention and D<=eta A/(S sqrt(WL)) are variance/algebra derivations, not extra paper formulae. Area/distance numeric example rechecked; no universal S/A or arbitrary modern geometry validity is implied."
+    },
+    {
+      "citation_id": "CIT-0425",
+      "status": "qualified",
+      "supported_claim": "Local geometric variation and compact-model sensitivities are distinct; shared physical dependencies must not be double counted.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "detail": "Core claims match Drennan. General covariance identity and later layout-context/temperature implications are derived extensions and not additional measured findings in the paper."
+    },
+    {
+      "citation_id": "CIT-0426",
+      "status": "qualified",
+      "supported_claim": "Under the stated correlation-scale model, pair mismatch variance has an area-dependent term and a long-range distance term.",
+      "evidence_pdf_pages": [
+        1,
+        2
+      ],
+      "detail": "Independently read all four Pelgrom ESSCIRC1988 pages and visually checked Eq.(1). Pair/single-device sqrt2 convention and D<=eta A/(S sqrt(WL)) are variance/algebra derivations, not extra paper formulae. Area/distance numeric example rechecked; no universal S/A or arbitrary modern geometry validity is implied."
+    },
+    {
+      "citation_id": "CIT-0427",
+      "status": "qualified",
+      "supported_claim": "Local geometric variation and compact-model sensitivities are distinct; shared physical dependencies must not be double counted.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "detail": "Core claims match Drennan. General covariance identity and later layout-context/temperature implications are derived extensions and not additional measured findings in the paper."
+    },
+    {
+      "citation_id": "CIT-0428",
+      "status": "qualified",
+      "supported_claim": "Under the stated correlation-scale model, pair mismatch variance has an area-dependent term and a long-range distance term.",
+      "evidence_pdf_pages": [
+        1,
+        2
+      ],
+      "detail": "Independently read all four Pelgrom ESSCIRC1988 pages and visually checked Eq.(1). Pair/single-device sqrt2 convention and D<=eta A/(S sqrt(WL)) are variance/algebra derivations, not extra paper formulae. Area/distance numeric example rechecked; no universal S/A or arbitrary modern geometry validity is implied."
+    },
+    {
+      "citation_id": "CIT-0429",
+      "status": "supported",
+      "supported_claim": "Current-factor mismatch contains separate edge-length/width and area terms before an approximate area-only simplification.",
+      "evidence_pdf_pages": [
+        2
+      ],
+      "detail": "Rendered Eq.(3) checked: AW²/(W²L)+AL²/(WL²)+Aμ²/(μ²WL)+ACox²/(Cox²WL). Source explicitly warns approximation worsens as W,L decrease."
+    },
+    {
+      "citation_id": "CIT-0430",
+      "status": "qualified",
+      "supported_claim": "Local geometric variation and compact-model sensitivities are distinct; shared physical dependencies must not be double counted.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "detail": "Core claims match Drennan. General covariance identity and later layout-context/temperature implications are derived extensions and not additional measured findings in the paper."
+    },
+    {
+      "citation_id": "CIT-0431",
+      "status": "supported",
+      "supported_claim": "Ideal partitioning at fixed total width/area does not give a free independent-random-mismatch benefit.",
+      "evidence_pdf_pages": [
+        6
+      ],
+      "detail": "§III.C supplies 80µm versus four 20µm example with width effects neglected; role-dependent TableIII conditions remain explicit. SVG active areas and 1/sqrt(n) arithmetic checked."
+    },
+    {
+      "citation_id": "CIT-0432",
+      "status": "qualified",
+      "supported_claim": "Local geometric variation and compact-model sensitivities are distinct; shared physical dependencies must not be double counted.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "detail": "Core claims match Drennan. General covariance identity and later layout-context/temperature implications are derived extensions and not additional measured findings in the paper."
+    },
+    {
+      "citation_id": "CIT-0433",
+      "status": "qualified",
+      "supported_claim": "Local geometric variation and compact-model sensitivities are distinct; shared physical dependencies must not be double counted.",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "detail": "Core claims match Drennan. General covariance identity and later layout-context/temperature implications are derived extensions and not additional measured findings in the paper."
+    },
+    {
+      "citation_id": "CIT-0434",
+      "status": "qualified",
+      "supported_claim": "At fixed current, widening need not improve mirror mismatch because sensitivity changes compensate area averaging.",
+      "evidence_pdf_pages": [
+        3,
+        5
+      ],
+      "detail": "§III.A supports the qualitative result. Handbook 1/L² toy result is explicitly derived from long-channel square-law current and threshold-only area variance; it is not a universal transistor result."
+    },
+    {
+      "citation_id": "CIT-0435",
+      "status": "corrected",
+      "supported_claim": "Switching interference can affect jitter differently depending on phase relative to oscillator transitions.",
+      "evidence_pdf_pages": [
+        75,
+        76,
+        81
+      ],
+      "detail": "Changed generic PDF70 anchor to the actual §5.3 phase example. The static-mismatch-versus-temporal-noise distinction is instructional statistical interpretation, not presented as the book deriving all thermal/flicker noise laws."
+    },
+    {
+      "citation_id": "CIT-0484",
+      "status": "supported",
+      "supported_claim": "Substrate noise needs injection, propagation and reception, including other contacts and return paths.",
+      "evidence_pdf_pages": [
+        25,
+        34,
+        35,
+        36,
+        38,
+        39,
+        40,
+        41,
+        42
+      ],
+      "detail": "Checked Ch.1 global contact effects and Ch.2 junction/impact-ionization injection, well/tap bounce, capacitive reception and body effect. Conceptual n-well cross section is original; no PDK legality is implied."
+    },
+    {
+      "citation_id": "CIT-0485",
+      "status": "supported",
+      "supported_claim": "Spacing benefits depend on substrate/return structure; low-resistivity bulk with finite backside impedance can produce a separation plateau.",
+      "evidence_pdf_pages": [
+        122,
+        123,
+        124,
+        125,
+        126,
+        127,
+        128,
+        129,
+        130
+      ],
+      "detail": "§8.2.1 gives plateau and backside-inductance dependence; §8.2.2 contrasts high-resistivity surface current. Notes correctly avoid universalizing the example distances."
+    },
+    {
+      "citation_id": "CIT-0486",
+      "status": "supported",
+      "supported_claim": "Substrate noise needs injection, propagation and reception, including other contacts and return paths.",
+      "evidence_pdf_pages": [
+        25,
+        34,
+        35,
+        36,
+        38,
+        39,
+        40,
+        41,
+        42
+      ],
+      "detail": "Checked Ch.1 global contact effects and Ch.2 junction/impact-ionization injection, well/tap bounce, capacitive reception and body effect. Conceptual n-well cross section is original; no PDK legality is implied."
+    },
+    {
+      "citation_id": "CIT-0487",
+      "status": "supported",
+      "supported_claim": "Spacing benefits depend on substrate/return structure; low-resistivity bulk with finite backside impedance can produce a separation plateau.",
+      "evidence_pdf_pages": [
+        122,
+        123,
+        124,
+        125,
+        126,
+        127,
+        128,
+        129,
+        130
+      ],
+      "detail": "§8.2.1 gives plateau and backside-inductance dependence; §8.2.2 contrasts high-resistivity surface current. Notes correctly avoid universalizing the example distances."
+    },
+    {
+      "citation_id": "CIT-0488",
+      "status": "corrected",
+      "supported_claim": "Buried shields retain supply/ground-impedance and frequency-dependent limits.",
+      "evidence_pdf_pages": [
+        151,
+        152,
+        153,
+        154,
+        155,
+        156
+      ],
+      "detail": "Old PDF149 anchor discussed differential guard rings. Corrected to §8.9 at PDF152–156."
+    },
+    {
+      "citation_id": "CIT-0489",
+      "status": "supported",
+      "supported_claim": "Guard-ring performance depends on ground reference, return inductance and geometry; a larger or noisily grounded ring can worsen error.",
+      "evidence_pdf_pages": [
+        135,
+        136,
+        138,
+        139,
+        140,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147,
+        149,
+        150,
+        151
+      ],
+      "detail": "Checked §§8.5–8.8, including internal/external observation reference and ring location. Original shared-return SVG is a conceptual KCL/impedance explanation, not a copied/source-tested layout."
+    },
+    {
+      "citation_id": "CIT-0490",
+      "status": "corrected",
+      "supported_claim": "Dual guard rings need genuinely separate returns to realize the source’s benefit.",
+      "evidence_pdf_pages": [
+        150,
+        151
+      ],
+      "detail": "Old PDF143 citation was a single-ring width calculation. Changed to §8.8, PDF150–151. Ring-around-injector location discussion remains supported by §8.6.2 PDF144–147."
+    },
+    {
+      "citation_id": "CIT-0491",
+      "status": "corrected",
+      "supported_claim": "Buried shields retain supply/ground-impedance and frequency-dependent limits.",
+      "evidence_pdf_pages": [
+        151,
+        152,
+        153,
+        154,
+        155,
+        156
+      ],
+      "detail": "Old PDF149 anchor discussed differential guard rings. Corrected to §8.9 at PDF152–156."
+    },
+    {
+      "citation_id": "CIT-0492",
+      "status": "supported",
+      "supported_claim": "Electroquasistatic substrate extraction uses conductivity/permittivity and explicit Dirichlet/Neumann/interface conditions.",
+      "evidence_pdf_pages": [
+        45,
+        46,
+        47,
+        48,
+        49
+      ],
+      "detail": "Eq.(3.1), resistive limit, Eq.(3.2), continuity Eq.(3.3), contact equipotential assumptions and boundary element formulation checked. No universal GHz cutoff or magnetic-field model is claimed."
+    },
+    {
+      "citation_id": "CIT-0493",
+      "status": "qualified",
+      "supported_claim": "Incremental matrix updates and local sensitivity estimates can reduce search cost, with performance-weighted approximation control.",
+      "evidence_pdf_pages": [
+        86,
+        87,
+        88,
+        89,
+        90,
+        94,
+        95,
+        96,
+        97
+      ],
+      "detail": "Checked Sherman-Morrison discussion and local move-size errors, Eqs.(6.15)–(6.19), and cumulative conductance pruning. Notes do not turn empirical local accuracy into a global bound. Stronger-model verification policy is a handbook proposal."
+    },
+    {
+      "citation_id": "CIT-0494",
+      "status": "supported",
+      "supported_claim": "Injection signatures depend on activity, slew, loading and supply conditions; iterative timing/noise refinement may fail to converge.",
+      "evidence_pdf_pages": [
+        56,
+        57,
+        58,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67
+      ],
+      "detail": "Checked §§4.1–4.4 and two failure cases discussed on PDF65–66. Convolution/signature model is supported; unknown activity is not treated as a silent zero."
+    },
+    {
+      "citation_id": "CIT-0495",
+      "status": "corrected",
+      "supported_claim": "Switching interference can affect jitter differently depending on phase relative to oscillator transitions.",
+      "evidence_pdf_pages": [
+        75,
+        76,
+        81
+      ],
+      "detail": "Changed generic PDF70 anchor to the actual §5.3 phase example. The static-mismatch-versus-temporal-noise distinction is instructional statistical interpretation, not presented as the book deriving all thermal/flicker noise laws."
+    },
+    {
+      "citation_id": "CIT-0496",
+      "status": "corrected",
+      "supported_claim": "Substrate modulation can create in-band products by receiver nonlinearities and affect oscillator/sample behavior.",
+      "evidence_pdf_pages": [
+        117,
+        118,
+        119
+      ],
+      "detail": "Changed generic chapter introduction PDF108 to §7.4.3 PDF117–119."
+    },
+    {
+      "citation_id": "CIT-0497",
+      "status": "supported",
+      "supported_claim": "Balanced differential coupling improves rejection, while receiver mismatch creates a residual floor.",
+      "evidence_pdf_pages": [
+        130,
+        131,
+        132,
+        133,
+        134
+      ],
+      "detail": "§8.3.2 explicitly models a 5% capacitor imbalance. vdiff=(H1−H2)va and −40dB/−80dB worked arithmetic are correctly identified instructional circuit derivations; complex transfer subtraction is required."
+    },
+    {
+      "citation_id": "CIT-0498",
+      "status": "corrected",
+      "supported_claim": "Linear small-signal substrate models cannot certify nonlinear ESD behavior.",
+      "evidence_pdf_pages": [
+        119,
+        120
+      ],
+      "detail": "Changed PDF108 to §7.4.4 PDF119–120. Latchup summary is a distinct protection-topic synthesis; it must not be cited as though this ESD passage proves the entire regenerative latchup mechanism."
+    },
+    {
+      "citation_id": "CIT-0499",
+      "status": "supported",
+      "supported_claim": "Calibration requires suitable DC/RF structures and control of profile/contact/measurement-floor/package/direct-coupling errors.",
+      "evidence_pdf_pages": [
+        170,
+        171,
+        172,
+        173,
+        174,
+        175,
+        176,
+        177,
+        178,
+        179,
+        180,
+        181,
+        182
+      ],
+      "detail": "Appendix D supports error sources and the observed noisy guard-ring counterexample (PDF177–178,182). Reported source experiments are not claimed independently reproduced."
+    },
+    {
+      "citation_id": "CIT-0500",
+      "status": "supported",
+      "supported_claim": "Diffusion depends on material interfaces; thermal and mechanical migration interact with electrical migration.",
+      "evidence_pdf_pages": [
+        32,
+        36,
+        40,
+        41,
+        45,
+        46,
+        47,
+        48,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        142,
+        143,
+        144,
+        145
+      ],
+      "detail": "Checked §§2.3.1,2.4.2,2.4.4,2.5 and 4.8. Separate back stress from external stress, and process-specific material behavior from universal constants. Relevant coupled fluxes are Eqs. (2.15)–(2.18), PDF54–55. Thermal chapter adds derived circuit implications."
+    },
+    {
+      "citation_id": "CIT-0501",
+      "status": "qualified",
+      "supported_claim": "First-order circuit sensitivity maps local perturbations to output error, and those sensitivities depend on bias.",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        5
+      ],
+      "detail": "Drennan source supports the method. Applying it to deterministic rail drops or nonuniform thermal fields is an explicit handbook derivation/engineering synthesis; the paper does not supply the added thermal coefficients."
+    },
+    {
+      "citation_id": "CIT-0502",
+      "status": "qualified",
+      "supported_claim": "Analytical, lumped and meshed approaches trade cost against spatial fidelity; coupled boundaries and template interfaces must be respected.",
+      "evidence_pdf_pages": [
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        103,
+        104,
+        105
+      ],
+      "detail": "Checked §2.6.1 and §§3.5.4–3.5.5. Numerical method descriptions are supported; thermal PDE/RC equations in handbook are energy-conservation/Fourier-law derivations, not equations asserted to appear in this EM passage. New precise Hastings citations support the thermal basis."
+    },
+    {
+      "citation_id": "CIT-0503",
+      "status": "qualified",
+      "supported_claim": "First-order circuit sensitivity maps local perturbations to output error, and those sensitivities depend on bias.",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        5
+      ],
+      "detail": "Drennan source supports the method. Applying it to deterministic rail drops or nonuniform thermal fields is an explicit handbook derivation/engineering synthesis; the paper does not supply the added thermal coefficients."
+    },
+    {
+      "citation_id": "CIT-0504",
+      "status": "supported",
+      "supported_claim": "Diffusion depends on material interfaces; thermal and mechanical migration interact with electrical migration.",
+      "evidence_pdf_pages": [
+        32,
+        36,
+        40,
+        41,
+        45,
+        46,
+        47,
+        48,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        142,
+        143,
+        144,
+        145
+      ],
+      "detail": "Checked §§2.3.1,2.4.2,2.4.4,2.5 and 4.8. Separate back stress from external stress, and process-specific material behavior from universal constants. Relevant coupled fluxes are Eqs. (2.15)–(2.18), PDF54–55. Thermal chapter adds derived circuit implications."
+    },
+    {
+      "citation_id": "CIT-0505",
+      "status": "supported",
+      "supported_claim": "Mission profile, characterization confidence, target lifetime, and failure quantile are needed in addition to a single wire median lifetime.",
+      "evidence_pdf_pages": [
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97,
+        98
+      ],
+      "detail": "Checked §§3.4.1–3.4.2. Notes avoid reproducing the more questionable scaling expressions in the book and do not assert independent wire failures or unqualified linear damage accumulation."
+    },
+    {
+      "citation_id": "CIT-0506",
+      "status": "supported",
+      "supported_claim": "Diffusion depends on material interfaces; thermal and mechanical migration interact with electrical migration.",
+      "evidence_pdf_pages": [
+        32,
+        36,
+        40,
+        41,
+        45,
+        46,
+        47,
+        48,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        142,
+        143,
+        144,
+        145
+      ],
+      "detail": "Checked §§2.3.1,2.4.2,2.4.4,2.5 and 4.8. Separate back stress from external stress, and process-specific material behavior from universal constants. Relevant coupled fluxes are Eqs. (2.15)–(2.18), PDF54–55. Thermal chapter adds derived circuit implications."
+    },
+    {
+      "citation_id": "CIT-0507",
+      "status": "supported",
+      "supported_claim": "One uniform-wafer heating experiment reported no significant mismatch-statistic change; this does not establish immunity to spatial thermal gradients.",
+      "evidence_pdf_pages": [
+        3
+      ],
+      "detail": "Pelgrom’s PDF3 scope is retained; the handbook inference refusing an overly broad conclusion is sound."
+    }
+  ],
+  "corrections": [
+    {
+      "page": "topic-substrate-isolation.html",
+      "reason": "Old anchor pointed at differential guard rings, before buried shields.",
+      "before": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=149\">Buried shields and isolation structures, PDF 149–156</a>",
+      "after": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=152\">§8.9, buried shields and isolation structures, PDF 152–156</a>",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-substrate-isolation.html",
+      "reason": "Dual-ring reference needs the dedicated section, not ring-width discussion.",
+      "before": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=143\">Location and multiple-ring tradeoffs</a>",
+      "after": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=150\">§8.8, separately grounded dual rings, PDF 150–151</a>",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-substrate-isolation.html",
+      "reason": "Buried-shield return sensitivity is discussed at PDF 152–155.",
+      "before": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=149\">Shield and connection impedance</a>",
+      "after": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=152\">§8.9, shield connection impedance, PDF 152–155</a>",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-substrate-isolation.html",
+      "reason": "Phase-specific example is later than the general chapter introduction.",
+      "before": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=70\">Sensitivity and phase-dependent jitter</a>",
+      "after": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=75\">§5.3, phase-dependent jitter, PDF 75–76 and 81</a>",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-substrate-isolation.html",
+      "reason": "Frequency translation claim now points to its actual passage.",
+      "before": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=108\">Circuit performance and RF effects</a>",
+      "after": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=117\">§7.4.3, mixing and spurious signals, PDF 117–119</a>",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-substrate-isolation.html",
+      "reason": "Small-signal versus nonlinear ESD boundary is explicit at PDF 119–120.",
+      "before": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=108\">Circuit and protection coupling discussion</a>",
+      "after": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=119\">§7.4.4, nonlinear ESD model boundary, PDF 119–120</a>",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-power-distribution.html",
+      "reason": "Capacitor terminal and multi-device model discussion starts at PDF 113.",
+      "before": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=108\">Passives, substrate loading, and circuit effects</a>",
+      "after": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=113\">§7.4.1, capacitor terminal choice and model context, PDF 113–115</a>",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-power-distribution.html",
+      "reason": "Corrected buried-shield source locator.",
+      "before": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=149\">Finite-impedance shields</a>",
+      "after": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=152\">§8.9, finite-impedance shields, PDF 152–156</a>",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-random-mismatch.html",
+      "reason": "Clarified that this source supports phase-dependent substrate interference, not all temporal-noise theory.",
+      "before": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=70\">Noise sensitivity and circuit performance</a>",
+      "after": "<a href=\"../Substrate%20Noise%20%3A%20Analysis%20and%20Optimization%20for%20IC%20Design%20--%20Edoardo%20Charbon%3B%20Ranjit%20Gharpurey%3B%20Paolo%20Miliozzi%3B%20Robert%20G_%20--%201st%20ed_%202001%2C%20New%20York%2C%20--%20isbn13%209780306481710%20--%20bb6b7e76395a141e9e9ab9f238fbdb67%20--%20Anna%E2%80%99s%20Archive.pdf#page=75\">§5.3, phase-dependent switching interference, PDF 75–76 and 81</a>",
+      "occurrences": 1
+    },
+    {
+      "page": "electromigration.html",
+      "reason": "Area-based wire-planning objective is explicit at PDF 90; PDF 87 starts segment currents.",
+      "before": "<a href=\"../Fundamentals%20of%20Electromigration-Aware%20Integrated%20Circuit%20--%20Jens%20Lienig%2CMatthias%20Thiele%20%28auth_%29%20--%201st%20ed_%202018%2C%20Cham%2C%202018%20--%20Springer%20International%20--%20isbn13%209783030088118%20--%20441cc50ea08db83725d64361b9c0688e%20--%20Anna%E2%80%99s%20Archive.pdf#page=87\">Current-driven topology construction</a>",
+      "after": "<a href=\"../Fundamentals%20of%20Electromigration-Aware%20Integrated%20Circuit%20--%20Jens%20Lienig%2CMatthias%20Thiele%20%28auth_%29%20--%201st%20ed_%202018%2C%20Cham%2C%202018%20--%20Springer%20International%20--%20isbn13%209783030088118%20--%20441cc50ea08db83725d64361b9c0688e%20--%20Anna%E2%80%99s%20Archive.pdf#page=90\">§3.3.3, current-aware wire planning, PDF 89–90</a>",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-power-distribution.html",
+      "reason": "Area-based wire-planning objective is explicit at PDF 90; PDF 87 starts segment currents.",
+      "before": "<a href=\"../Fundamentals%20of%20Electromigration-Aware%20Integrated%20Circuit%20--%20Jens%20Lienig%2CMatthias%20Thiele%20%28auth_%29%20--%201st%20ed_%202018%2C%20Cham%2C%202018%20--%20Springer%20International%20--%20isbn13%209783030088118%20--%20441cc50ea08db83725d64361b9c0688e%20--%20Anna%E2%80%99s%20Archive.pdf#page=87\">Current-aware topology</a>",
+      "after": "<a href=\"../Fundamentals%20of%20Electromigration-Aware%20Integrated%20Circuit%20--%20Jens%20Lienig%2CMatthias%20Thiele%20%28auth_%29%20--%201st%20ed_%202018%2C%20Cham%2C%202018%20--%20Springer%20International%20--%20isbn13%209783030088118%20--%20441cc50ea08db83725d64361b9c0688e%20--%20Anna%E2%80%99s%20Archive.pdf#page=90\">§3.3.3, current-aware wire planning, PDF 89–90</a>",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-power-distribution.html",
+      "reason": "Current-sharing geometry is in §4.6.4, after the manufacturing-fault introduction.",
+      "before": "<a href=\"../Fundamentals%20of%20Electromigration-Aware%20Integrated%20Circuit%20--%20Jens%20Lienig%2CMatthias%20Thiele%20%28auth_%29%20--%201st%20ed_%202018%2C%20Cham%2C%202018%20--%20Springer%20International%20--%20isbn13%209783030088118%20--%20441cc50ea08db83725d64361b9c0688e%20--%20Anna%E2%80%99s%20Archive.pdf#page=134\">Via-array current sharing</a>",
+      "after": "<a href=\"../Fundamentals%20of%20Electromigration-Aware%20Integrated%20Circuit%20--%20Jens%20Lienig%2CMatthias%20Thiele%20%28auth_%29%20--%201st%20ed_%202018%2C%20Cham%2C%202018%20--%20Springer%20International%20--%20isbn13%209783030088118%20--%20441cc50ea08db83725d64361b9c0688e%20--%20Anna%E2%80%99s%20Archive.pdf#page=137\">§4.6.4, via-array current sharing, PDF 137–140</a>",
+      "occurrences": 1
+    },
+    {
+      "page": "drennan.html",
+      "reason": "A standard covariance identity is a derived result, not an algorithm proposal or a verbatim paper equation.",
+      "before": "This matrix expression is a proposed generalization of the paper's independent-parameter equation.",
+      "after": "This covariance identity is derived by applying Cov(JΔp) = J Cov(Δp) J<sup>T</sup> to the first-order expansion; the paper itself writes the independent-parameter case in Eq. (8).",
+      "occurrences": 1
+    },
+    {
+      "page": "drennan.html",
+      "reason": "Prevent a relative-current mismatch coefficient from being divided directly by dimensional transconductance.",
+      "before": "σ<sub>Vgs</sub> = σ<sub>Id</sub>/g<sub>m</sub>, and both current mismatch and g<sub>m</sub> vary with bias.",
+      "after": "σ<sub>Vgs</sub> = σ<sub>Id</sub>/g<sub>m</sub>, with σ<sub>Id</sub> expressed in amperes and g<sub>m</sub> in A/V at the stated bias. If current mismatch is stored as a relative fraction, multiply it by the nominal current first. Both current mismatch and g<sub>m</sub> vary with bias.",
+      "occurrences": 1
+    },
+    {
+      "page": "drennan.html",
+      "reason": "Use mismatch terminology rather than wording that could imply temporal noise.",
+      "before": "each unit is noisier, and their averaging restores the large-device result.",
+      "after": "each unit has greater relative local variation, and their averaging restores the large-device result.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-electromigration.html",
+      "reason": "Current density in A/cm² is per cross-sectional area, not per volume.",
+      "before": "a volumetric current-density rule in A/cm² does not.",
+      "after": "a cross-sectional current-density rule in A/cm² does not.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-electromigration.html",
+      "reason": "Define all Blech equation symbols and distinguish charge number from elementary charge.",
+      "before": "Ω is atomic volume, Δσ the allowable stress difference, Z* effective charge, and ρ resistivity.",
+      "after": "Ω is atomic volume, Δσ the allowable stress difference, e the elementary charge, Z* the dimensionless effective charge number, and ρ resistivity.",
+      "occurrences": 1
+    },
+    {
+      "page": "electromigration.html",
+      "reason": "Define all Blech equation symbols for reuse.",
+      "before": "The symbols represent atomic volume, allowed stress difference, effective charge, and resistivity.",
+      "after": "The symbols represent atomic volume Ω, allowed stress difference Δσ, elementary charge e, dimensionless effective charge number Z*, and resistivity ρ.",
+      "occurrences": 1
+    },
+    {
+      "page": "electromigration.html",
+      "reason": "The terminal-sum formula needs shunt/displacement current treatment in dynamic routing.",
+      "before": "For a tree, cutting an edge separates the terminals into two sets; the branch current equals the signed sum on either side, with consistent orientation.",
+      "after": "For a tree, cutting an edge separates the loads into two sets; the branch current equals the signed sum on either side, with consistent orientation. This is a lumped-network KCL result: distributed wire capacitance and other shunt currents must either be negligible in the analysis or be included as loads on the corresponding side of the cut.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-electromigration.html",
+      "reason": "Make KCL cut-current scope explicit.",
+      "before": "The current through it is the algebraic sum of terminal currents on either side.",
+      "after": "The current through it is the algebraic sum of currents on either side. This includes interconnect shunt/displacement currents when they matter: represent them as loads in the extracted tree, or state the approximation that they are negligible. Summing only device-terminal currents is not exact for an arbitrarily capacitive transient interconnect.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-power-distribution.html",
+      "reason": "Do not silently omit wire charging currents in a dynamic power network.",
+      "before": "In a tree, an upstream branch carries the algebraic sum of all downstream terminal currents.",
+      "after": "In a lumped tree, an upstream branch carries the algebraic sum of all downstream currents. Include distributed interconnect shunt/displacement currents as loads when analyzing transients; the DC example has no such contribution.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-thermal.html",
+      "reason": "Ground the thermal chapter in textbook theory, not implementation.",
+      "before": "This chapter combines the EM book’s coupled thermal/electrical/mechanical mechanisms with the mismatch papers’ sensitivity framework and the actual thermal model in Philis.",
+      "after": "This chapter combines Hastings’s Fourier-law and thermal-matching discussion with the EM book’s coupled thermal/electrical/mechanical mechanisms and the mismatch papers’ sensitivity framework.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-thermal.html",
+      "reason": "Instantaneous terminal power is not always dissipated heat.",
+      "before": "Dynamic operation requires average loss over an appropriate interval or a time-resolved power waveform.",
+      "after": "Dynamic operation requires average loss over an appropriate interval or a time-resolved dissipated-power waveform. Instantaneous absorbed terminal power can also charge stored electric or magnetic energy: energy conservation gives heat generation = absorbed power − dE<sub>stored</sub>/dt for a model with no other energy outputs. In periodic steady state, stored-energy change averages to zero over a complete period.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-thermal.html",
+      "reason": "Explicitly separate the source Fourier law from the handbook heat-equation derivation.",
+      "before": "The time derivative stores heat; the divergence term transports it.",
+      "after": "The time derivative stores heat; the divergence term transports it. This equation is a derived energy-conservation statement combined with Fourier heat flux q<sub>heat</sub> = −k∇T. Hastings gives Fourier’s law in §8.2.7, Eq. (8.22), PDF page 386; the transient storage term is the conservation extension used here. {{cite:hastings:386:Fourier-law basis, Eq. (8.22), printed p. 385 / PDF p. 386}}.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-thermal.html",
+      "reason": "State the boundary condition implicit in the lumped thermal network equation.",
+      "before": "A transient reduced model takes the form C<sub>th</sub>dT/dt + G<sub>th</sub>(T − T<sub>boundary</sub>) = P(t).",
+      "after": "For one fixed isothermal reference boundary and constant linear elements, a transient reduced model takes the form C<sub>th</sub>dT/dt + G<sub>th</sub>(T − T<sub>boundary</sub>1) = P(t), where 1 is the all-ones vector. With multiple independently varying boundaries, write their driving terms explicitly instead of subtracting one scalar boundary temperature.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-thermal.html",
+      "reason": "Derive the half-space formula and specify boundary assumptions; retain implementation only as an application.",
+      "before": "Philis currently uses the semi-infinite-substrate spreading approximation ΔT(r) = P/(2πkr), with a floor on r near the source.",
+      "after": "For a point heater depositing power P at the flat surface of a homogeneous, isotropic, semi-infinite medium with constant conductivity k, assume the remaining surface is adiabatic and T approaches T<sub>∞</sub> far away. Hemispherical symmetry gives outward heat flux P/(2πr²). Fourier’s law then gives dT/dr = −P/(2πkr²), and integration from r to infinity yields ΔT(r) = T(r) − T<sub>∞</sub> = P/(2πkr). This is the handbook’s derivation under those boundary conditions; it is not asserted to be an equation printed in the supplied books. The 2π factor differs from the 4π factor for a point source in an unbounded full space. Philis uses this half-space approximation with a floor on r near the source.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-thermal.html",
+      "reason": "Add exact primary-theory provenance for isotherm alignment.",
+      "before": "Finite device extent, internal gradients, unequal self-heating, and nonlinear fields limit the point-center approximation.",
+      "after": "Finite device extent, internal gradients, unequal self-heating, and nonlinear fields limit the point-center approximation. Hastings §8.2.7, Eq. (8.23), gives the corresponding first-order resistor-mismatch dependence and the isotherm-placement reasoning. {{cite:hastings:388:Thermal-gradient mismatch, Eq. (8.23), printed p. 387 / PDF p. 388}}.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-thermal.html",
+      "reason": "Make the active-area centroid thermal equivalence assumptions directly citeable.",
+      "before": "A simple arithmetic average is valid only for the corresponding equal-weight model.",
+      "after": "A simple arithmetic average is valid only for the corresponding equal-weight model. Hastings explicitly assumes active planar regions, equal contribution per active area, linear electrical temperature dependence, and a spatially linear temperature field before identifying the centroid temperature with the device’s average. {{cite:hastings:387:Centroid-temperature assumptions, §8.2.7, PDF pp. 387–388}}.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-random-mismatch.html",
+      "before": "Two rows of rectangular devices see independent local variation",
+      "after": "A row of rectangular devices sees independent local variation",
+      "reason": "SVG description incorrectly said two rows when the diagram shows one row.",
+      "occurrences": 1
+    },
+    {
+      "page": "pelgrom.html",
+      "before": "<a href=\"../Matching_properties_of_MOS_transistors.pdf#page=3\">systematic errors, correlation and circuit application, PDF p. 3</a>",
+      "after": "<a href=\"../Matching_properties_of_MOS_transistors.pdf#page=2\">nonzero reticle-error means, PDF p. 2</a>; <a href=\"../Matching_properties_of_MOS_transistors.pdf#page=3\">correlation and circuit application, PDF p. 3</a>",
+      "reason": "Nonzero reticle-error means occur on PDF2; do not attribute them only to PDF3.",
+      "occurrences": 1
+    },
+    {
+      "page": "topic-substrate-isolation.html",
+      "before": "The source discusses protection-related injection as an additional path; detailed latchup and protection design requires the corresponding process/protection guidance.",
+      "after": "The regenerative latchup explanation above is a cross-topic synthesis: see the <a href=\"topic-protection.html\">protection chapter and its Hastings references</a> for that mechanism. The substrate-book reference below supports the separate statement that nonlinear ESD injection needs more than a linear coupling model. Detailed tap, latchup and protection limits still require process/protection guidance.",
+      "reason": "Prevent the ESD subsection citation from appearing to be the evidence for the whole latchup mechanism.",
+      "occurrences": 1
+    }
+  ],
+  "page_reviews": [
+    {
+      "html": "pelgrom.html",
+      "status": "qualified",
+      "review": "All theory sections, Eq.(1), Eq.(3), parameter units, numerical experiment table, orientation/correlation/temperature caveats, bandgap numbers, and derived budget algebra reviewed against all four supplied pages.",
+      "excluded": "No Philis source-code assertions were audited; no foundry deck or experimental results were reproduced."
+    },
+    {
+      "html": "drennan.html",
+      "status": "qualified",
+      "review": "All theory sections reviewed against seven supplied pages. Equations and Table III rendered. Qualified covariance extension and dimensional input-referral convention.",
+      "excluded": "No Philis source-code assertions were audited; no foundry deck or experimental results were reproduced."
+    },
+    {
+      "html": "substrate.html",
+      "status": "qualified",
+      "review": "All main theory sections reviewed at attached claim passages: mechanisms, extraction, sensitivity/phase, noise signatures, physical isolation, feedback/passive effects, incremental analysis, measurement. Navigation/read-history statements are excluded from theory certification.",
+      "excluded": "No Philis source-code assertions were audited; no foundry deck or experimental results were reproduced."
+    },
+    {
+      "html": "electromigration.html",
+      "status": "qualified",
+      "review": "All main theory sections reviewed: flux, Black law, current classes, topology, dimensions/pins/vias, temperature inconsistency, Blech/reservoir/material limits, numerical methods and pattern libraries.",
+      "excluded": "No Philis source-code assertions were audited; no foundry deck or experimental results were reproduced."
+    },
+    {
+      "html": "topic-random-mismatch.html",
+      "status": "qualified",
+      "review": "All eleven teaching sections and both SVG semantics reviewed. Local/global/systematic distinctions, covariance and bias derivations, fixed-current and distance examples checked; noisy terminology and phase citation improved.",
+      "excluded": "No Philis source-code assertions were audited; no foundry deck or experimental results were reproduced."
+    },
+    {
+      "html": "topic-substrate-isolation.html",
+      "status": "qualified",
+      "review": "All ten teaching sections and both SVG semantics reviewed. Corrected buried-shield, phase/RF, dual-ring and nonlinear-protection locators; latchup scope separated from the cited ESD boundary.",
+      "excluded": "No Philis source-code assertions were audited; no foundry deck or experimental results were reproduced."
+    },
+    {
+      "html": "topic-electromigration.html",
+      "status": "qualified",
+      "review": "All ten teaching sections and both SVG semantics reviewed. Checked density conversion, pulse/via arithmetic, temperature ratio, Blech symbols, and cut-current shunt-load assumption.",
+      "excluded": "No Philis source-code assertions were audited; no foundry deck or experimental results were reproduced."
+    },
+    {
+      "html": "topic-thermal.html",
+      "status": "qualified",
+      "review": "All theory sections and both SVG semantics reviewed. Added exact Hastings Fourier/centroid citations, explicit half-space derivation and boundaries, energy-storage qualification and single-reference linear RC-network scope. Thermal example recomputed.",
+      "excluded": "No Philis source-code assertions were audited; no foundry deck or experimental results were reproduced."
+    },
+    {
+      "html": "topic-power-distribution.html",
+      "status": "qualified",
+      "review": "All theory sections and both SVG semantics reviewed. DC/sensitivity/capacitor/inductor relations are elementary derived circuit identities, not claimed paper formulae. Checked forward-plus-return arithmetic and corrected references; added transient shunt-current scope.",
+      "excluded": "No Philis source-code assertions were audited; no foundry deck or experimental results were reproduced."
+    }
+  ],
+  "numerical_and_diagram_checks": [
+    {
+      "name": "Distance/area mismatch example",
+      "calculated": {
+        "sigma_100um2_mV": 0.4123105625617661,
+        "sigma_400um2_mV": 0.223606797749979,
+        "Dmax_first_um": 100.0,
+        "Dmax_quadrupled_area_um": 50.0
+      },
+      "status": "matches rounded notes"
+    },
+    {
+      "name": "Pelgrom inferred S/A example",
+      "calculated": 0.00013333333333333334,
+      "units": "um^-2",
+      "status": "matches ~1.33e-4; process-specific"
+    },
+    {
+      "name": "Pulse and via count example",
+      "calculated": {
+        "avg_mA": 1.0,
+        "rms_mA": 3.1622776601683795,
+        "peak_mA": 10,
+        "equal_cuts": 3,
+        "crowding_1_5_cuts": 4
+      },
+      "status": "matches"
+    },
+    {
+      "name": "Black temperature example",
+      "calculated": {
+        "lifetime_ratio": 0.20942651946373084,
+        "allowed_current_ratio": 0.45763142316031014
+      },
+      "status": "matches 0.209 and 0.458 rounding"
+    },
+    {
+      "name": "Point heater example",
+      "calculated": {
+        "10um_K": 1.0753712371074011,
+        "20um_K": 0.5376856185537006,
+        "40um_K": 0.2688428092768503
+      },
+      "status": "matches"
+    },
+    {
+      "name": "Forward/return voltage drop example",
+      "calculated": {
+        "forward_mV": 32.0,
+        "return_mV": 7.25,
+        "total_mV": 39.25
+      },
+      "status": "matches 39.25mV"
+    },
+    {
+      "name": "Differential transfer example",
+      "calculated": {
+        "common_V": 0.01,
+        "differential_V": 0.0001,
+        "common_dB": -40.0,
+        "differential_dB": -80.0
+      },
+      "status": "matches equal-phase assumptions"
+    },
+    {
+      "name": "SVG equal-area and centroid examples",
+      "calculated": {
+        "large_area": 34500,
+        "four_small_area": 34500,
+        "A_xcentroid": 380.0,
+        "B_xcentroid": 380.0
+      },
+      "status": "equal as labeled; corrected one-row SVG description"
+    }
+  ],
+  "theory_records": [
+    {
+      "id": "P01",
+      "title": "Area and distance contributions to MOS pair mismatch",
+      "claim": "For the characterized equal-device pair model, variance is approximated by A_P²/(WL)+S_P²D².",
+      "source": "pelgrom",
+      "pdf_pages": [
+        1,
+        2
+      ],
+      "locator": "Analysis, Eq.(1), printed pp.327–328",
+      "assumptions": "Many small additive local events with correlation distance much smaller than device dimensions, plus a fitted long-range component; process/parameter-specific coefficients. A refers to the pair-difference statistic here. A single-device coefficient requires its own convention conversion.",
+      "kind": "source"
+    },
+    {
+      "id": "P02",
+      "title": "Edge variation prevents a universal area-only beta law",
+      "claim": "Current-factor variance contains width-edge, length-edge, mobility and oxide terms before an approximate A_beta²/(WL) reduction.",
+      "source": "pelgrom",
+      "pdf_pages": [
+        2
+      ],
+      "locator": "Matching of MOS transistors, Eq.(3), printed p.328",
+      "assumptions": "Area-dependent contribution only; same defined process parameters; authors say simplification becomes less valid as W and L decrease.",
+      "kind": "source"
+    },
+    {
+      "id": "P03",
+      "title": "Orientation evidence is process-specific",
+      "claim": "The studied 90-degree rotation affected current-factor mismatch and varied by wafer/batch; this experiment did not establish arbitrary transform equivalence.",
+      "source": "pelgrom",
+      "pdf_pages": [
+        2,
+        3,
+        4
+      ],
+      "locator": "Orientation discussion, Fig.3(d), printed pp.328–330",
+      "assumptions": "2.5µm n-well CMOS experiment; no universal rotational/reflection/source-drain symmetry rule for another process.",
+      "kind": "source"
+    },
+    {
+      "id": "P04",
+      "title": "Use independent physical causes in mismatch models",
+      "claim": "Treating threshold and gain-factor mismatch as independent can double count an underlying oxide-thickness fluctuation; bias and geometry matter.",
+      "source": "drennan",
+      "pdf_pages": [
+        2
+      ],
+      "locator": "Section II, Table I and discussion surrounding Eqs.(4)–(6), printed p.451",
+      "assumptions": "Do not apply this critique as a prohibition on all calibrated local empirical fits; inspect whether the statistical basis and correlations are already handled.",
+      "kind": "source"
+    },
+    {
+      "id": "P05",
+      "title": "Propagate mismatch with covariance and circuit sensitivity",
+      "claim": "For a first-order expansion Δe≈JΔp, Var(e)≈J C Jᵀ; Drennan Eq.(8) is the independent-parameter special case.",
+      "source": "drennan",
+      "pdf_pages": [
+        3
+      ],
+      "locator": "Section II, Eqs.(7)–(11), printed p.452",
+      "assumptions": "Small perturbations around the specified bias/geometry, valid compact model, and covariance C for the same physical variables; nonlinear tails need additional treatment.",
+      "kind": "derived",
+      "derivation_if_any": "Cov(JΔp)=J Cov(Δp) Jᵀ. If C is diagonal, this reduces to Σ_i (∂e/∂p_i)² σ_i², matching Eq.(8)."
+    },
+    {
+      "id": "P06",
+      "title": "Fixed-current width can trade averaging against sensitivity",
+      "claim": "In a long-channel saturation, threshold-only toy model at fixed current, relative current variance from threshold mismatch is proportional to 1/L² and independent of W.",
+      "source": "drennan",
+      "pdf_pages": [
+        3,
+        5
+      ],
+      "locator": "Eq.(9) and §III.A Geometry and Bias Interrelationship, printed pp.452,454",
+      "assumptions": "This is an illustrative derivation, not a modern compact-model law; ignore mobility/edge/series/short-channel contributions and use the stated area coefficient. Recheck headroom.",
+      "kind": "derived",
+      "derivation_if_any": "σ²(ΔI/I)≈4A²/(WL Vov²), while Vov²=2IL/(μCox W); substitution gives 2A² μCox/(I L²). The source supports the more general observation that changing W changes both physical variation and sensitivity."
+    },
+    {
+      "id": "P07",
+      "title": "Splitting preserves ideal total-area random mismatch",
+      "claim": "Four independent 20µm-wide units can reproduce the ideal mismatch of one 80µm-wide device at the same length; there is no free fixed-total-width averaging gain.",
+      "source": "drennan",
+      "pdf_pages": [
+        6
+      ],
+      "locator": "§III.C Multiple-Unit Devices, printed p.455",
+      "assumptions": "Width effects and altered electrical/parasitic context neglected; compare equal total width, not an array with one small unit. Circuit-role differences are separately shown in Table III.",
+      "kind": "source"
+    },
+    {
+      "id": "P08",
+      "title": "Substrate coupling is a complete contact-network problem",
+      "claim": "Injected substrate current paths depend on injector, receiver, other contacts, doping profile and backplate potential; taps/wells may inject return noise.",
+      "source": "substrate",
+      "pdf_pages": [
+        25,
+        38,
+        39,
+        40
+      ],
+      "locator": "§1.1 and Chapter 2 §§2–3, printed pp.2,15–17",
+      "assumptions": "State injector mechanisms, reference connections and receiving impedance/body bias; a distance-only pair model omits third-contact loading.",
+      "kind": "source"
+    },
+    {
+      "id": "P09",
+      "title": "Electroquasistatic substrate equation and boundaries",
+      "claim": "Conductive and displacement currents obey ∇·(σ∇φ)+∂t[∇·(ε∇φ)]=0; the resistive limit and explicit contact/edge/interface boundaries determine the model.",
+      "source": "substrate",
+      "pdf_pages": [
+        45,
+        46
+      ],
+      "locator": "Chapter 3 §2 Electromagnetic Formulation, Eqs.(3.1)–(3.3), printed pp.22–23",
+      "assumptions": "Electroquasistatic continuum regime. Resistive approximation requires ε/σ small relative to times of interest; contact equipotential and insulating/grounded boundaries must match the physical setup.",
+      "kind": "source"
+    },
+    {
+      "id": "P10",
+      "title": "Isolation includes loading and sign convention",
+      "claim": "The book defines contact isolation as V_receiver/V_injector; it depends on contact capacitance, backside impedance, frequency and receiver load, not only substrate resistance.",
+      "source": "substrate",
+      "pdf_pages": [
+        124,
+        125,
+        134,
+        135
+      ],
+      "locator": "Chapter 8 §2 Characterizing Isolation and §4 Effects of Load Impedance, printed pp.101–102,111–112",
+      "assumptions": "Use a specified source/reference/loading convention. A negative-dB transfer and a positive attenuation magnitude have opposite reported signs.",
+      "kind": "source"
+    },
+    {
+      "id": "P11",
+      "title": "Separation can saturate in low-resistivity substrates",
+      "claim": "Finite backplate impedance can make isolation approximately independent of further contact separation in the book’s low-resistivity examples.",
+      "source": "substrate",
+      "pdf_pages": [
+        125,
+        126,
+        127,
+        130
+      ],
+      "locator": "§8.2.1 Low-Resistivity Substrates, Figs.8.6–8.7; contrast §8.2.2, printed pp.102–107",
+      "assumptions": "Depends on epitaxial profile, area, frequency and backplate connection. Do not use its multiple-of-epitaxial-thickness example as a universal spacing rule.",
+      "kind": "source"
+    },
+    {
+      "id": "P12",
+      "title": "Guard-ring return and observation reference matter",
+      "claim": "A ring can worsen received noise through finite/noisy grounding; internal versus external signal reference and ring width/location change the result.",
+      "source": "substrate",
+      "pdf_pages": [
+        139,
+        140,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147
+      ],
+      "locator": "§8.6.1 Grounding Schemes and §8.6.2 Optimization of Guard Ring Widths, Figs.8.16–8.23, printed pp.116–124",
+      "assumptions": "The numerical studies use specific high-resistivity substrates and lumped package models. Compare actual reference voltage and include ring-return inductance and pickup.",
+      "kind": "source"
+    },
+    {
+      "id": "P13",
+      "title": "Buried shields have distinct mechanisms and limits",
+      "claim": "Conductive shields provide an alternate current return, dielectric isolation raises impedance, and buried opposite-type wells combine junction isolation with conductive shielding.",
+      "source": "substrate",
+      "pdf_pages": [
+        151,
+        152,
+        153,
+        154,
+        155,
+        156
+      ],
+      "locator": "§8.9 Buried Substrate Shields, Figs.8.27–8.30, printed pp.128–133",
+      "assumptions": "The process must support the structure and bias. Conductive return impedance, finite shield resistivity, junction capacitance and frequency limit isolation.",
+      "kind": "source"
+    },
+    {
+      "id": "P14",
+      "title": "Differential substrate error is transfer imbalance",
+      "claim": "In a linear receiver difference, v_diff=(H1−H2)v_aggressor; equal common-mode transfer cancels only while the two complete paths and receiver responses match.",
+      "source": "substrate",
+      "pdf_pages": [
+        130,
+        131,
+        132,
+        133,
+        134
+      ],
+      "locator": "§8.3 Improving Isolation Using Differential Circuits, Figs.8.9–8.10, printed pp.107–111",
+      "assumptions": "Complex transfer functions with common reference. The source explicitly studies a 5% receiving-capacitor mismatch; phase, loading and circuit mismatch must remain included.",
+      "kind": "derived",
+      "derivation_if_any": "Subtract v1=H1 va and v2=H2 va. A 1% relative imbalance of a 0.01 transfer gives 10^-4 differential transfer only for the stated approximately equal-phase case."
+    },
+    {
+      "id": "P15",
+      "title": "Local substrate-noise budgets need phase and sensitivity",
+      "claim": "Local noise generators permit performance-to-parasitic budget generation; the PLL example shows jitter depends on the phase of injection relative to transitions.",
+      "source": "substrate",
+      "pdf_pages": [
+        70,
+        71,
+        72,
+        73,
+        75,
+        76,
+        81
+      ],
+      "locator": "Chapter 5 §§1–3, Eqs.(5.1)–(5.5), §5.3 case study, printed pp.47–53,58",
+      "assumptions": "Local linearization or explicitly maximized sensitivity over a defined interval; source waveform/phase assumptions and circuit operating state must be retained. Shared budget allocation is not unique.",
+      "kind": "source"
+    },
+    {
+      "id": "P16",
+      "title": "Migration damage is flux divergence and coupled driving forces",
+      "claim": "Electrical, thermal and stress driving forces produce atomic flux; accumulation/depletion and coupled heating/stress determine vulnerable regions.",
+      "source": "electromigration",
+      "pdf_pages": [
+        30,
+        47,
+        48,
+        52,
+        53,
+        54,
+        55
+      ],
+      "locator": "§2.2 and §2.5, especially Eqs.(2.15)–(2.18), printed pp.18,35–43",
+      "assumptions": "Material paths, interface boundary conditions, temperature and mechanical state matter; average current density alone is not a damage-location model.",
+      "kind": "source"
+    },
+    {
+      "id": "P17",
+      "title": "Black law describes a calibrated median",
+      "claim": "t50=C j^-n exp(Ea/kT) is a generalized empirical median-lifetime relation; a product reliability target also needs mission profile and failure statistics.",
+      "source": "electromigration",
+      "pdf_pages": [
+        30,
+        31,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97,
+        98
+      ],
+      "locator": "Eq.(2.1), generalized Eq.(3.8), §§3.4.1–3.4.2, printed pp.18–19,79–86",
+      "assumptions": "Same characterized process, geometry, mechanism, temperature/current range and failure criterion. Median is not low-failure-probability lifetime of every segment; do not extrapolate across mechanism changes.",
+      "kind": "source"
+    },
+    {
+      "id": "P18",
+      "title": "Current metrics are not interchangeable",
+      "claim": "RMS, effective/directional average and peak currents correspond to different mechanisms; all applicable dimensioning limits must be considered.",
+      "source": "electromigration",
+      "pdf_pages": [
+        41,
+        42,
+        43,
+        44,
+        82,
+        83
+      ],
+      "locator": "§2.4.3 and §3.3.1 Current Types, printed pp.29–32,70–71",
+      "assumptions": "RMS heating assumes resistance treated consistently; self-healing depends on characterized waveform/frequency/material behavior. Zero signed average does not imply zero damage.",
+      "kind": "source"
+    },
+    {
+      "id": "P19",
+      "title": "Topology and current-aware wire area",
+      "claim": "Signed terminal-current bounds/scenarios determine tree segment demand; current-driven planning can minimize required interconnect area rather than only length.",
+      "source": "electromigration",
+      "pdf_pages": [
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90
+      ],
+      "locator": "§§3.3.2–3.3.3, Eqs.(3.1)–(3.7), Figs.3.4–3.10, printed pp.71–78",
+      "assumptions": "For transient cut sums include relevant interconnect shunt currents; retain mode/correlation assumptions. Meshes require a network current-sharing solution. The handbook’s exact waveform sum is a KCL expression, distinct from the book’s equivalent-current bounds.",
+      "kind": "source"
+    },
+    {
+      "id": "P20",
+      "title": "The metal path includes terminals and manufactured cross-section",
+      "claim": "Width must meet the largest applicable current/manufacturing requirement; pin landing regions and internal pin geometry need ampacity verification.",
+      "source": "electromigration",
+      "pdf_pages": [
+        99,
+        100,
+        101,
+        102
+      ],
+      "locator": "§§3.5.1–3.5.3, Eqs.(3.21)–(3.24), Fig.3.15, printed pp.87–90",
+      "assumptions": "Application-robust per-layer rules, conducting thickness/width corrections and actual terminal current. mA/µm and A/cm² are distinct rule conventions. Via-temperature Eq.(3.25) requires the separate caveat in P22.",
+      "kind": "source"
+    },
+    {
+      "id": "P21",
+      "title": "Via capacity depends on current sharing",
+      "claim": "Via arrays at direction changes can overload inner cuts; equal cut count is not equal maximum-cut utilization.",
+      "source": "electromigration",
+      "pdf_pages": [
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140
+      ],
+      "locator": "§4.6 Multiple Vias, especially §4.6.4 and Figs.4.25–4.29, printed pp.122–128",
+      "assumptions": "Include both connected metal layers, contact resistances and reservoir/mechanical consequences. The source’s geometric equalization examples are conditional templates, not universal equal-sharing proofs.",
+      "kind": "source"
+    },
+    {
+      "id": "P22",
+      "title": "Correct fixed-lifetime temperature scaling",
+      "claim": "For unchanged Black parameters and target lifetime, j_allow(T)/j_allow(Tref)=exp[(Ea/(nk))(1/T−1/Tref)]. Required identical-via count grows as the inverse capacity factor.",
+      "source": "electromigration",
+      "pdf_pages": [
+        93,
+        101
+      ],
+      "locator": "Derived from Eq.(3.8); compare printed Eqs.(3.25)–(3.26), printed pp.81,89",
+      "assumptions": "Absolute Kelvin temperatures, positive Ea and n, unchanged geometry/failure mechanism. Printed via-count equations exhibit apparent inverse-factor inconsistency; no publisher erratum or foundry qualification was established.",
+      "kind": "derived",
+      "derivation_if_any": "Set C j_T^-n exp(Ea/kT)=C j_ref^-n exp(Ea/kTref), take logarithms, solve n ln(j_T/j_ref)=Ea/k(1/T−1/Tref). A smaller per-via allowable current requires more cuts, not fewer."
+    },
+    {
+      "id": "P23",
+      "title": "Blech protection requires a physical stress/diffusion domain",
+      "claim": "The one-dimensional balance gives |jL|crit=ΩΔσ/(e|Z*|ρ), subject to confinement, boundary and failure assumptions; void-growth saturation is a distinct criterion.",
+      "source": "electromigration",
+      "pdf_pages": [
+        117,
+        118,
+        119,
+        120,
+        123,
+        127,
+        130
+      ],
+      "locator": "§4.3, Eq.(4.1), discussion of Eq.(4.2); §4.5.1 neighboring segments, printed pp.105–108,111,115,118",
+      "assumptions": "Physical boundaries and material flow, not arbitrary route vertices. Simple isolated segment model; branched/reservoir structures and transients require additional analysis. A safe-looking steady state is not proof of a damage-free transition.",
+      "kind": "source"
+    },
+    {
+      "id": "P24",
+      "title": "Half-space thermal spreading is a derived ideal model",
+      "claim": "For a surface point heater in a homogeneous isotropic semi-infinite body with an otherwise adiabatic surface and fixed far-field temperature, ΔT=P/(2πkr).",
+      "source": "hastings",
+      "pdf_pages": [
+        386
+      ],
+      "locator": "Fourier-law basis: §8.2.7 Thermal Gradients, Eq.(8.22), printed p.385. The half-space result is derived in the handbook, not printed as this equation in the book.",
+      "assumptions": "Constant k, steady state, hemispherical spreading, ideal point source, no finite die/package/layer effects. Singular near-source field requires finite-source treatment or labeled regularization.",
+      "kind": "derived",
+      "derivation_if_any": "Conservation on a hemisphere gives heat flux P/(2πr²). Fourier law gives dT/dr=−P/(2πkr²); integrate from r to infinity where T=T∞. Full unbounded space instead has 4π. The transient PDE adds local energy storage to the same flux balance."
+    },
+    {
+      "id": "P25",
+      "title": "Centroid temperature needs four assumptions",
+      "claim": "A device’s average temperature equals its active-area centroid temperature only under the stated active-area, equal-contribution, linear electrical-temperature and linear spatial-temperature assumptions.",
+      "source": "hastings",
+      "pdf_pages": [
+        387,
+        388
+      ],
+      "locator": "§8.2.7 Centroids, followed by Eq.(8.23), printed pp.386–387",
+      "assumptions": "Package and power conditions determine the field. Unequal electrical weighting, finite nonlinear fields or nonlinear device temperature dependence require more detailed evaluation. The handbook’s general Σs_i ΔT_i is a first-order sensitivity extension.",
+      "kind": "source"
+    }
+  ],
+  "unresolved": [
+    {
+      "issue": "Publisher status of EM Eqs.3.25–3.26",
+      "detail": "The internal monotonicity inconsistency was independently confirmed from the supplied printed equations and Black-law algebra. No external publisher erratum was checked. Keep the wording apparent inconsistency."
+    },
+    {
+      "issue": "No universal process qualification",
+      "detail": "The sources do not supply an actual target-PDK mismatch covariance, EM deck, thermal/package network, substrate profile or activity model. Notes correctly identify these as required inputs; their numerical examples are illustrative."
+    },
+    {
+      "issue": "Exhaustiveness and formal numerical proofs",
+      "detail": "This is a claim-level audit of the teaching content and citations. It is not independent reproduction of every cited experiment, every book numerical solver, or the substrate appendix’s asymptotic convergence proofs. Coverage links are navigation, not certified theory."
+    }
+  ],
+  "material_omissions_addressed": [
+    "Dynamic tree current cut sums need shunt/displacement loads.",
+    "Instantaneous terminal electrical power includes stored energy and is not automatically heat.",
+    "Half-space thermal spreading needs adiabatic surface, far-field, homogeneity and point-source conditions.",
+    "Input-referral with gm needs absolute rather than normalized current mismatch."
+  ],
+  "remaining_coverage_boundary": "Detailed latchup/protection physics is cross-referenced to the separate protection chapter. No additional unsupported process-specific constants were introduced."
+}

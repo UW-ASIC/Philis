@@ -67,9 +67,44 @@ pub struct AnnotationConfig {
     pub supply_nets: Vec<String>,
     pub ground_nets: Vec<String>,
     pub clock_nets: Vec<String>,
-    /// The process's tightest antenna ratio (metal / gate area). `None`: the
-    /// process has no antenna rule and no `Antenna` constraint is emitted.
+    /// Process numbers from the deck; `library::annotation` fills them.
+    pub process: ProcessNumbers,
+    /// 1σ input-referred offset a matched pair may spend, mV (from the
+    /// circuit's spec). Sets how much of it placement gradients may take.
+    pub offset_sigma_mv: Option<f32>,
+}
+
+/// Every process number the annotator uses. A `None` means the deck does not
+/// carry it, and the constraints that need it are not emitted.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcessNumbers {
+    /// Tightest antenna ratio (metal / gate area) on routed metal.
     pub antenna_max_ratio: Option<f32>,
+    /// Gate capacitance per gate area, aF/µm²: the load a net drives.
+    pub gate_af_per_um2: Option<f32>,
+    /// Ground capacitance of a minimum-width lowest routing wire, aF/µm.
+    pub wire_af_per_um: Option<f32>,
+    /// Lowest routing metal's min spacing, nm; crosstalk spacings are multiples.
+    pub route_space_nm: i32,
+    /// Deep-trench isolation: (max spacing sharing one trench, trench width), nm.
+    pub dti: Option<(i32, i32)>,
+    /// Pelgrom `A_VT` (ΔVT of a pair), mV·µm, `[nmos, pmos]`.
+    pub avt_mv_um: [Option<f32>; 2],
+    /// Pelgrom distance coefficient `S_VT`, µV/µm. Process-specific and rarely
+    /// published: absent leaves the matching distance check unknown.
+    pub svt_uv_per_um: Option<f32>,
+    /// |dVT/dT|, µV/K, `[nmos, pmos]`: turns a matched pair's offset allowance
+    /// into a ΔT limit.
+    pub vt_tc_uv_per_k: [Option<f32>; 2],
+    /// BSIM4 LOD `KVTH0` (ΔVT per unit `Δ(1/SA + 1/SB)`), mV·µm, `[nmos,
+    /// pmos]`: prices LOD imbalance across a matched array.
+    pub lod_kvth0_mv_um: [Option<f32>; 2],
+    /// Epitaxial layer thickness, nm: substrate isolation saturates at a few
+    /// times it.
+    pub epi_nm: Option<i32>,
+    /// The routing stack's per-layer parasitics and antenna stages; `None`
+    /// leaves the routing budgets on drawn length and the cumulative antenna.
+    pub stack: Option<&'static analog::routing::Stack>,
 }
 
 #[cfg(test)]

@@ -1,0 +1,3961 @@
+{
+  "audit_scope": "Manual source/claim audit of Hastings-backed HTML notes only, using the supplied third-edition PDF and selected visual equation/figure inspection. Source text was read at the evidence pages listed. Broad chapter spans are surveyed via relevant passages; this is not a full independent verification of all1568 PDF pages or every textbook equation. Philis implementation was not audited.",
+  "source_identity": {
+    "title": "The Art of Analog Layout",
+    "author": "Ray Alan Hastings",
+    "edition": 3,
+    "year": 2023,
+    "physical_pdf_pages": 1568,
+    "sha256": "8f6d5e7f9844f5ec2b8367af801a57cec081cc0dc255e09a37a4f74f04b38b01",
+    "page_convention": "One-based physical PDF pages; displayed printed page is usually one less in the main text. Long alternative descriptions occupy much of physical PDF977–1568."
+  },
+  "citation_reviews": [
+    {
+      "supported_claim": "Supplied source inventory link",
+      "evidence_pdf_pages": [
+        1
+      ],
+      "detail": "Navigation and source identity, not a technical assertion.",
+      "status": "not_claim",
+      "citation_id": "CIT-0033",
+      "html": "coverage.html",
+      "section": "inventory",
+      "source": "hastings",
+      "original_pdf_start": 1,
+      "original_pdf_end_label": 1
+    },
+    {
+      "supported_claim": "Source coverage / visually inspected page navigation",
+      "evidence_pdf_pages": [
+        390
+      ],
+      "detail": "Navigation rather than a separate theory claim. Central formulas/figures were visually inspected; Fig13.52 is on698 rather than697.",
+      "status": "not_claim",
+      "citation_id": "CIT-0097",
+      "html": "hastings.html",
+      "section": "coverage",
+      "source": "hastings",
+      "original_pdf_start": 390,
+      "original_pdf_end_label": 390
+    },
+    {
+      "supported_claim": "Source coverage / visually inspected page navigation",
+      "evidence_pdf_pages": [
+        401,
+        402
+      ],
+      "detail": "Navigation rather than a separate theory claim. Central formulas/figures were visually inspected; Fig13.52 is on698 rather than697.",
+      "status": "not_claim",
+      "citation_id": "CIT-0098",
+      "html": "hastings.html",
+      "section": "coverage",
+      "source": "hastings",
+      "original_pdf_start": 401,
+      "original_pdf_end_label": 401
+    },
+    {
+      "supported_claim": "Source coverage / visually inspected page navigation",
+      "evidence_pdf_pages": [
+        650,
+        652,
+        653,
+        654,
+        655,
+        871,
+        872
+      ],
+      "detail": "Navigation rather than a separate theory claim. Central formulas/figures were visually inspected; Fig13.52 is on698 rather than697.",
+      "status": "not_claim",
+      "citation_id": "CIT-0099",
+      "html": "hastings.html",
+      "section": "coverage",
+      "source": "hastings",
+      "original_pdf_start": 650,
+      "original_pdf_end_label": 650
+    },
+    {
+      "supported_claim": "Source coverage / visually inspected page navigation",
+      "evidence_pdf_pages": [
+        697,
+        698
+      ],
+      "detail": "Navigation rather than a separate theory claim. Central formulas/figures were visually inspected; Fig13.52 is on698 rather than697.",
+      "status": "not_claim",
+      "citation_id": "CIT-0100",
+      "html": "hastings.html",
+      "section": "coverage",
+      "source": "hastings",
+      "original_pdf_start": 697,
+      "original_pdf_end_label": 697
+    },
+    {
+      "supported_claim": "Source coverage / visually inspected page navigation",
+      "evidence_pdf_pages": [
+        708,
+        709,
+        710,
+        711
+      ],
+      "detail": "Navigation rather than a separate theory claim. Central formulas/figures were visually inspected; Fig13.52 is on698 rather than697.",
+      "status": "not_claim",
+      "citation_id": "CIT-0101",
+      "html": "hastings.html",
+      "section": "coverage",
+      "source": "hastings",
+      "original_pdf_start": 709,
+      "original_pdf_end_label": 709
+    },
+    {
+      "supported_claim": "Source coverage / visually inspected page navigation",
+      "evidence_pdf_pages": [
+        821,
+        822
+      ],
+      "detail": "Navigation rather than a separate theory claim. Central formulas/figures were visually inspected; Fig13.52 is on698 rather than697.",
+      "status": "not_claim",
+      "citation_id": "CIT-0102",
+      "html": "hastings.html",
+      "section": "coverage",
+      "source": "hastings",
+      "original_pdf_start": 822,
+      "original_pdf_end_label": 822
+    },
+    {
+      "supported_claim": "Source coverage / visually inspected page navigation",
+      "evidence_pdf_pages": [
+        650,
+        652,
+        653,
+        654,
+        655,
+        871,
+        872
+      ],
+      "detail": "Navigation rather than a separate theory claim. Central formulas/figures were visually inspected; Fig13.52 is on698 rather than697.",
+      "status": "not_claim",
+      "citation_id": "CIT-0103",
+      "html": "hastings.html",
+      "section": "coverage",
+      "source": "hastings",
+      "original_pdf_start": 871,
+      "original_pdf_end_label": 872
+    },
+    {
+      "supported_claim": "Common-centroid refinement trades gradient suppression against lost active area and implementation cost",
+      "evidence_pdf_pages": [
+        392,
+        393,
+        394
+      ],
+      "detail": "Original label said pp392–394 but hyperlink opened393; changed anchor to392.",
+      "status": "corrected",
+      "citation_id": "CIT-0104",
+      "html": "hastings.html",
+      "section": "optimality",
+      "source": "hastings",
+      "original_pdf_start": 393,
+      "original_pdf_end_label": 393
+    },
+    {
+      "supported_claim": "Lithography, diffusion, implantation and etching create dimensions and surroundings that differ from drawn rectangles",
+      "evidence_pdf_pages": [
+        79,
+        81,
+        85,
+        88,
+        90,
+        94,
+        95,
+        99,
+        104,
+        105,
+        110
+      ],
+      "detail": "Original span did not cover the contact/interconnect/CMP clauses. Added §2.7 PDF99–110; original span remains appropriate for front-end process mechanisms.",
+      "status": "corrected",
+      "citation_id": "CIT-0105",
+      "html": "hastings.html",
+      "section": "process",
+      "source": "hastings",
+      "original_pdf_start": 79,
+      "original_pdf_end_label": 95
+    },
+    {
+      "supported_claim": "Manufacturing rules account for resolvability, process bias, registration, lateral diffusion/depletion and physical overlap",
+      "evidence_pdf_pages": [
+        130,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        149,
+        150
+      ],
+      "detail": "The process examples illustrate mechanisms. They are not current-node numerical rules; geometry and rule-construction discussion checked, not every example value.",
+      "status": "qualified",
+      "citation_id": "CIT-0106",
+      "html": "hastings.html",
+      "section": "process",
+      "source": "hastings",
+      "original_pdf_start": 138,
+      "original_pdf_end_label": 144
+    },
+    {
+      "supported_claim": "Representative bipolar, CMOS and BiCMOS processes are teaching archetypes; sample rule values are not a real PDK",
+      "evidence_pdf_pages": [
+        154,
+        836
+      ],
+      "detail": "Checked chapter introduction and Appendix C disclaimer. This is a survey reference, not a claim that every process detail across the entire range was audited.",
+      "status": "qualified",
+      "citation_id": "CIT-0107",
+      "html": "hastings.html",
+      "section": "process",
+      "source": "hastings",
+      "original_pdf_start": 154,
+      "original_pdf_end_label": 210
+    },
+    {
+      "supported_claim": "Representative bipolar, CMOS and BiCMOS processes are teaching archetypes; sample rule values are not a real PDK",
+      "evidence_pdf_pages": [
+        154,
+        836
+      ],
+      "detail": "Checked chapter introduction and Appendix C disclaimer. This is a survey reference, not a claim that every process detail across the entire range was audited.",
+      "status": "qualified",
+      "citation_id": "CIT-0108",
+      "html": "hastings.html",
+      "section": "process",
+      "source": "hastings",
+      "original_pdf_start": 836,
+      "original_pdf_end_label": 844
+    },
+    {
+      "supported_claim": "Random variation, systematic biases, proximity and interconnect terms must not be collapsed into a single area law",
+      "evidence_pdf_pages": [
+        368,
+        369,
+        370,
+        371,
+        372,
+        373,
+        374,
+        375,
+        380,
+        381,
+        384,
+        385
+      ],
+      "detail": "Inverse-square-root area law is an areal-dominance approximation. Source includes peripheral contributions and process-specific coefficients.",
+      "status": "supported",
+      "citation_id": "CIT-0109",
+      "html": "hastings.html",
+      "section": "matching-model",
+      "source": "hastings",
+      "original_pdf_start": 368,
+      "original_pdf_end_label": 375
+    },
+    {
+      "supported_claim": "Matching-rule grades are qualitative recommendations rather than universal numerical error guarantees",
+      "evidence_pdf_pages": [
+        418,
+        426
+      ],
+      "detail": "The book explains provisional guidance and limited quantitative data; notes appropriately demand process characterization.",
+      "status": "supported",
+      "citation_id": "CIT-0110",
+      "html": "hastings.html",
+      "section": "matching-model",
+      "source": "hastings",
+      "original_pdf_start": 418,
+      "original_pdf_end_label": 418
+    },
+    {
+      "supported_claim": "MOS matching objective depends on fixed voltage versus fixed current, operating region and active geometry",
+      "evidence_pdf_pages": [
+        686,
+        687,
+        688,
+        689,
+        690
+      ],
+      "detail": "Long-channel strong-inversion formulas are scoped approximations; minimum-size/short-channel behavior is not inferred from them.",
+      "status": "supported",
+      "citation_id": "CIT-0111",
+      "html": "hastings.html",
+      "section": "matching-model",
+      "source": "hastings",
+      "original_pdf_start": 687,
+      "original_pdf_end_label": 690
+    },
+    {
+      "supported_claim": "General resistor-network centroid uses electrical sensitivity weights, not an unweighted bounding-box center",
+      "evidence_pdf_pages": [
+        390
+      ],
+      "detail": "Visually checked Eqs8.24–8.25. Source example uses identical nominal resistor units and weights ∂Req/∂Ri. Ri∂Req/∂Ri for fractional perturbations is an explicitly derived extension.",
+      "status": "supported",
+      "citation_id": "CIT-0112",
+      "html": "hastings.html",
+      "section": "matching-model",
+      "source": "hastings",
+      "original_pdf_start": 390,
+      "original_pdf_end_label": 390
+    },
+    {
+      "supported_claim": "MOS gradient cancellation uses active gate-area centroids, not cell-outline centroids",
+      "evidence_pdf_pages": [
+        704,
+        705
+      ],
+      "detail": "Read §13.2.5 and Eq13.57 context; active-area weighting presumes local contribution and consistent operating assumptions.",
+      "status": "supported",
+      "citation_id": "CIT-0113",
+      "html": "hastings.html",
+      "section": "matching-model",
+      "source": "hastings",
+      "original_pdf_start": 704,
+      "original_pdf_end_label": 705
+    },
+    {
+      "supported_claim": "Common-centroid layouts combine coincidence, symmetry, compactness and balanced subarrays; extra segmentation has costs",
+      "evidence_pdf_pages": [
+        392,
+        393,
+        394
+      ],
+      "detail": "Source does not claim that every fine interdigitation cancels nonlinear gradients or that CC helps without a meaningful gradient.",
+      "status": "supported",
+      "citation_id": "CIT-0114",
+      "html": "hastings.html",
+      "section": "matching-model",
+      "source": "hastings",
+      "original_pdf_start": 392,
+      "original_pdf_end_label": 394
+    },
+    {
+      "supported_claim": "Matched MOS arrays require equal signed current-direction orientation as well as centroid/symmetry constraints",
+      "evidence_pdf_pages": [
+        708,
+        709,
+        710,
+        711
+      ],
+      "detail": "Visually checked Eq13.61 and Table13.2. Equal nonzero means are permitted; +1/2 and −1/2 are not equal. SVG accessible description was corrected to match its 3:1 versus1:3 example.",
+      "status": "supported",
+      "citation_id": "CIT-0115",
+      "html": "hastings.html",
+      "section": "matching-model",
+      "source": "hastings",
+      "original_pdf_start": 709,
+      "original_pdf_end_label": 711
+    },
+    {
+      "supported_claim": "Effective resistor geometry includes width/length bias, contact/end terms, corners and conductivity modulation",
+      "evidence_pdf_pages": [
+        279,
+        280,
+        281,
+        282,
+        283,
+        289,
+        290,
+        291,
+        295
+      ],
+      "detail": "Eq6.10 gives 0.5587 squares for its ideal equal-width right-angle corner; not a process-independent corner model. Notes correctly distinguish identical-head cancellation from absolute error.",
+      "status": "supported",
+      "citation_id": "CIT-0116",
+      "html": "hastings.html",
+      "section": "resistors",
+      "source": "hastings",
+      "original_pdf_start": 279,
+      "original_pdf_end_label": 295
+    },
+    {
+      "supported_claim": "Resistor matching actions must control material, geometry, surroundings, fields, stress, heat and every lead material contribution",
+      "evidence_pdf_pages": [
+        418,
+        419,
+        420,
+        421,
+        422
+      ],
+      "detail": "Checked source 25-rule catalog against the handbook mechanism table; table deliberately groups rules rather than duplicating names.",
+      "status": "supported",
+      "citation_id": "CIT-0117",
+      "html": "hastings.html",
+      "section": "resistors",
+      "source": "hastings",
+      "original_pdf_start": 418,
+      "original_pdf_end_label": 422
+    },
+    {
+      "supported_claim": "Contact-temperature differences produce signed thermoelectric voltages that common-centroid placement alone cannot cancel",
+      "evidence_pdf_pages": [
+        401,
+        402
+      ],
+      "detail": "Visually checked Eq8.34 and Fig8.22; cancellation depends on connection direction and matched temperature drops, not merely even segment count.",
+      "status": "supported",
+      "citation_id": "CIT-0118",
+      "html": "hastings.html",
+      "section": "resistors",
+      "source": "hastings",
+      "original_pdf_start": 401,
+      "original_pdf_end_label": 402
+    },
+    {
+      "supported_claim": "Resistor materials and trimming methods trade area, parasitics, power and stability",
+      "evidence_pdf_pages": [
+        295,
+        297,
+        300,
+        304,
+        312,
+        314,
+        317,
+        320,
+        322,
+        323
+      ],
+      "detail": "Checked relevant material/trim passages. A single-condition trim cannot generally remove other independent environmental errors; that limiting statement is synthesis, not a quoted universal source theorem.",
+      "status": "qualified",
+      "citation_id": "CIT-0119",
+      "html": "hastings.html",
+      "section": "resistors",
+      "source": "hastings",
+      "original_pdf_start": 295,
+      "original_pdf_end_label": 323
+    },
+    {
+      "supported_claim": "Resistor matching actions must control material, geometry, surroundings, fields, stress, heat and every lead material contribution",
+      "evidence_pdf_pages": [
+        418,
+        419,
+        420,
+        421,
+        422
+      ],
+      "detail": "Checked source 25-rule catalog against the handbook mechanism table; table deliberately groups rules rather than duplicating names.",
+      "status": "supported",
+      "citation_id": "CIT-0120",
+      "html": "hastings.html",
+      "section": "resistors",
+      "source": "hastings",
+      "original_pdf_start": 418,
+      "original_pdf_end_label": 422
+    },
+    {
+      "supported_claim": "Capacitor family, dielectric, bias and electrode construction affect nonlinearity, leakage, parasitics and loss",
+      "evidence_pdf_pages": [
+        327,
+        329,
+        332,
+        335,
+        337,
+        339,
+        340,
+        343,
+        346,
+        347,
+        350,
+        351,
+        352,
+        353,
+        354
+      ],
+      "detail": "Family survey checked against relevant passages, not every material table. Port-role and PDK-model requirements are synthesis.",
+      "status": "qualified",
+      "citation_id": "CIT-0121",
+      "html": "hastings.html",
+      "section": "capacitors",
+      "source": "hastings",
+      "original_pdf_start": 327,
+      "original_pdf_end_label": 354
+    },
+    {
+      "supported_claim": "Capacitor matching uses appropriate identical parallel units, controlled perimeter/environment, dummies, shield reference and leads",
+      "evidence_pdf_pages": [
+        423,
+        424,
+        425
+      ],
+      "detail": "Rules do not make series-connected units electrically identical to parallel units because electrode parasitics differ. X and Y pitch need not equal each other.",
+      "status": "supported",
+      "citation_id": "CIT-0122",
+      "html": "hastings.html",
+      "section": "capacitors",
+      "source": "hastings",
+      "original_pdf_start": 423,
+      "original_pdf_end_label": 425
+    },
+    {
+      "supported_claim": "Lead resistance and capacitance can defeat body matching; compare actual connection topology and environment",
+      "evidence_pdf_pages": [
+        380,
+        381,
+        382
+      ],
+      "detail": "Electrical equivalence matters more than equal drawn length. The numerical capacitor example assumes the added parasitics are parallel to the intended measured capacitances.",
+      "status": "supported",
+      "citation_id": "CIT-0123",
+      "html": "hastings.html",
+      "section": "capacitors",
+      "source": "hastings",
+      "original_pdf_start": 380,
+      "original_pdf_end_label": 382
+    },
+    {
+      "supported_claim": "MOS matching objective depends on fixed voltage versus fixed current, operating region and active geometry",
+      "evidence_pdf_pages": [
+        686,
+        687,
+        688,
+        689,
+        690
+      ],
+      "detail": "Long-channel strong-inversion formulas are scoped approximations; minimum-size/short-channel behavior is not inferred from them.",
+      "status": "supported",
+      "citation_id": "CIT-0124",
+      "html": "hastings.html",
+      "section": "mos",
+      "source": "hastings",
+      "original_pdf_start": 686,
+      "original_pdf_end_label": 690
+    },
+    {
+      "supported_claim": "MOS matching rules require same unit construction and qualified dummies/environment plus thermal/package/bias control",
+      "evidence_pdf_pages": [
+        712,
+        713,
+        714,
+        715,
+        716,
+        717
+      ],
+      "detail": "Qualitative matching grades and old numerical suggestions are not universal process requirements. Notes retain these qualifiers.",
+      "status": "qualified",
+      "citation_id": "CIT-0125",
+      "html": "hastings.html",
+      "section": "mos",
+      "source": "hastings",
+      "original_pdf_start": 712,
+      "original_pdf_end_label": 714
+    },
+    {
+      "supported_claim": "Matched MOS arrays require equal signed current-direction orientation as well as centroid/symmetry constraints",
+      "evidence_pdf_pages": [
+        708,
+        709,
+        710,
+        711
+      ],
+      "detail": "Visually checked Eq13.61 and Table13.2. Equal nonzero means are permitted; +1/2 and −1/2 are not equal. SVG accessible description was corrected to match its 3:1 versus1:3 example.",
+      "status": "supported",
+      "citation_id": "CIT-0126",
+      "html": "hastings.html",
+      "section": "mos",
+      "source": "hastings",
+      "original_pdf_start": 708,
+      "original_pdf_end_label": 711
+    },
+    {
+      "supported_claim": "Physical relative orientation and terminal-directed geometry must be preserved within a matched group",
+      "evidence_pdf_pages": [
+        691
+      ],
+      "detail": "Source explicitly recommends grouping matched devices to avoid independent rotation; mirrored asymmetric devices need qualification.",
+      "status": "supported",
+      "citation_id": "CIT-0127",
+      "html": "hastings.html",
+      "section": "mos",
+      "source": "hastings",
+      "original_pdf_start": 691,
+      "original_pdf_end_label": 691
+    },
+    {
+      "supported_claim": "Gate etch, dummies, WPE, trench/LOD stress, bias and hydrogenation make local MOS surroundings electrically relevant",
+      "evidence_pdf_pages": [
+        691,
+        692,
+        693,
+        695,
+        696,
+        697,
+        698,
+        699,
+        700,
+        702,
+        703,
+        704,
+        705,
+        706
+      ],
+      "detail": "Corrected LOD figure locator: discussion697, actual Fig13.52 is698. Example effect magnitudes and signs are not universal.",
+      "status": "corrected",
+      "citation_id": "CIT-0128",
+      "html": "hastings.html",
+      "section": "mos",
+      "source": "hastings",
+      "original_pdf_start": 692,
+      "original_pdf_end_label": 706
+    },
+    {
+      "supported_claim": "MOS matching rules require same unit construction and qualified dummies/environment plus thermal/package/bias control",
+      "evidence_pdf_pages": [
+        712,
+        713,
+        714,
+        715,
+        716,
+        717
+      ],
+      "detail": "Qualitative matching grades and old numerical suggestions are not universal process requirements. Notes retain these qualifiers.",
+      "status": "qualified",
+      "citation_id": "CIT-0129",
+      "html": "hastings.html",
+      "section": "mos",
+      "source": "hastings",
+      "original_pdf_start": 712,
+      "original_pdf_end_label": 717
+    },
+    {
+      "supported_claim": "BJT random/systematic matching depends on emitter geometry, current density, bias, thermal environment and connection effects",
+      "evidence_pdf_pages": [
+        506,
+        507,
+        508,
+        509,
+        522,
+        523,
+        525,
+        526,
+        527,
+        528,
+        529
+      ],
+      "detail": "Matched unit construction and cautions are source-backed. Numerical thermal and beta examples are explicitly hypothetical circuit derivations.",
+      "status": "qualified",
+      "citation_id": "CIT-0130",
+      "html": "hastings.html",
+      "section": "bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 506,
+      "original_pdf_end_label": 526
+    },
+    {
+      "supported_claim": "Lateral BJT perimeter, collector arrangement and field environment differ from vertical-emitter area scaling",
+      "evidence_pdf_pages": [
+        527,
+        528,
+        529
+      ],
+      "detail": "A larger emitter is not automatically a better lateral PNP; the notes preserve the device-family distinction.",
+      "status": "supported",
+      "citation_id": "CIT-0131",
+      "html": "hastings.html",
+      "section": "bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 527,
+      "original_pdf_end_label": 529
+    },
+    {
+      "supported_claim": "Thermal and terminal/beta effects can turn a nominal current ratio into a VBE error",
+      "evidence_pdf_pages": [
+        509,
+        510,
+        522,
+        523
+      ],
+      "detail": "Checked bias/temperature mechanisms and independently recomputed the 8:1, 1%, beta-ratio and 50mK examples. No example temperature coefficient is represented as universal.",
+      "status": "qualified",
+      "citation_id": "CIT-0132",
+      "html": "hastings.html",
+      "section": "bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 509,
+      "original_pdf_end_label": 523
+    },
+    {
+      "supported_claim": "BJT matching rules require controlled geometry, temperature/stress and parasitic interactions",
+      "evidence_pdf_pages": [
+        525,
+        526
+      ],
+      "detail": "Reverse emitter-base avalanche and shared-region/depletion cautions remain device/process dependent.",
+      "status": "supported",
+      "citation_id": "CIT-0133",
+      "html": "hastings.html",
+      "section": "bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 526,
+      "original_pdf_end_label": 526
+    },
+    {
+      "supported_claim": "PN, Schottky and Zener matching cannot share a single generic diode objective",
+      "evidence_pdf_pages": [
+        565,
+        566,
+        567,
+        568,
+        569,
+        570,
+        571
+      ],
+      "detail": "Source distinguishes emitter versus collector current and nonuniform avalanche conduction.",
+      "status": "supported",
+      "citation_id": "CIT-0134",
+      "html": "hastings.html",
+      "section": "bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 565,
+      "original_pdf_end_label": 571
+    },
+    {
+      "supported_claim": "Paralleled Zener segments can share avalanche current nonuniformly rather than average like ordinary passive units",
+      "evidence_pdf_pages": [
+        566,
+        567
+      ],
+      "detail": "Source mechanism checked; no Pelgrom-style universal Zener improvement is claimed.",
+      "status": "supported",
+      "citation_id": "CIT-0135",
+      "html": "hastings.html",
+      "section": "bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 566,
+      "original_pdf_end_label": 567
+    },
+    {
+      "supported_claim": "Schottky material/barrier/contact/field geometry and guard-junction bias affect leakage, voltage and minority injection",
+      "evidence_pdf_pages": [
+        563,
+        568,
+        569,
+        570,
+        571
+      ],
+      "detail": "Added §11.2 PDF563 to directly support the forward-biased field-relief guard-junction injection clause. Original matching span alone was incomplete.",
+      "status": "corrected",
+      "citation_id": "CIT-0136",
+      "html": "hastings.html",
+      "section": "bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 568,
+      "original_pdf_end_label": 571
+    },
+    {
+      "supported_claim": "Inductor performance depends on winding resistance, frequency effects, substrate/metal surroundings, shielding and parasitic capacitance",
+      "evidence_pdf_pages": [
+        358,
+        359,
+        360,
+        361,
+        362,
+        363
+      ],
+      "detail": "§7.2.1–2 supports EM-environment constraints. Q≈ωL/R and the ideal LC resonance example are stated as simplified circuit estimates, not as a universal extracted model.",
+      "status": "qualified",
+      "citation_id": "CIT-0137",
+      "html": "hastings.html",
+      "section": "rf-power",
+      "source": "hastings",
+      "original_pdf_start": 355,
+      "original_pdf_end_label": 363
+    },
+    {
+      "supported_claim": "Power bipolar devices require debiasing, ballast and electrothermal/SOA analysis appropriate to their switching regime",
+      "evidence_pdf_pages": [
+        485,
+        486,
+        487,
+        488,
+        489,
+        490
+      ],
+      "detail": "Checked central power-device mechanisms. Broad source span also covers detailed structures not reproduced in notes.",
+      "status": "qualified",
+      "citation_id": "CIT-0138",
+      "html": "hastings.html",
+      "section": "rf-power",
+      "source": "hastings",
+      "original_pdf_start": 485,
+      "original_pdf_end_label": 505
+    },
+    {
+      "supported_claim": "MOS power layouts combine silicon/metal/package R, distributed gate delay, body resistance, SOA and SenseFET environment",
+      "evidence_pdf_pages": [
+        645,
+        646,
+        650,
+        652,
+        653,
+        654,
+        655,
+        659,
+        660,
+        661,
+        662,
+        667,
+        668
+      ],
+      "detail": "Source-backed mechanism survey. The approximate distributed-finger equation is separately audited; SenseFET pattern proposals require extraction and bias/thermal equivalence.",
+      "status": "qualified",
+      "citation_id": "CIT-0139",
+      "html": "hastings.html",
+      "section": "rf-power",
+      "source": "hastings",
+      "original_pdf_start": 644,
+      "original_pdf_end_label": 668
+    },
+    {
+      "supported_claim": "A uniform distributed, singly terminated finger has small-debiasing added metal resistance about one third of end-to-end wire resistance",
+      "evidence_pdf_pages": [
+        650,
+        652,
+        653,
+        654,
+        655,
+        871,
+        872
+      ],
+      "detail": "Visually checked AppendixE. E.6 sign, E.8 conductance prefactor and E.14 missing square root are apparent source inconsistencies; corrected model derived from E.3–E.4 and agrees with E.9. Source errata are unconfirmed by publisher.",
+      "status": "corrected",
+      "citation_id": "CIT-0140",
+      "html": "hastings.html",
+      "section": "rf-power",
+      "source": "hastings",
+      "original_pdf_start": 650,
+      "original_pdf_end_label": 664
+    },
+    {
+      "supported_claim": "A uniform distributed, singly terminated finger has small-debiasing added metal resistance about one third of end-to-end wire resistance",
+      "evidence_pdf_pages": [
+        650,
+        652,
+        653,
+        654,
+        655,
+        871,
+        872
+      ],
+      "detail": "Visually checked AppendixE. E.6 sign, E.8 conductance prefactor and E.14 missing square root are apparent source inconsistencies; corrected model derived from E.3–E.4 and agrees with E.9. Source errata are unconfirmed by publisher.",
+      "status": "corrected",
+      "citation_id": "CIT-0141",
+      "html": "hastings.html",
+      "section": "rf-power",
+      "source": "hastings",
+      "original_pdf_start": 870,
+      "original_pdf_end_label": 876
+    },
+    {
+      "supported_claim": "Annular, EEPROM and JFET structures require their own process-qualified geometry and operating constraints",
+      "evidence_pdf_pages": [
+        616,
+        617,
+        624,
+        628,
+        630,
+        632,
+        633,
+        634,
+        635,
+        636
+      ],
+      "detail": "Broad specialty survey checked by relevant passages, not a full construction manual.",
+      "status": "qualified",
+      "citation_id": "CIT-0142",
+      "html": "hastings.html",
+      "section": "rf-power",
+      "source": "hastings",
+      "original_pdf_start": 616,
+      "original_pdf_end_label": 639
+    },
+    {
+      "supported_claim": "High-voltage MOS operation depends on drift regions, field distribution, body/isolation and safe operating area",
+      "evidence_pdf_pages": [
+        669,
+        670,
+        671,
+        672,
+        673,
+        684,
+        685
+      ],
+      "detail": "Checked physical argument and device construction constraints, not every high-voltage example. Automatic transformations remain PDK-qualified.",
+      "status": "qualified",
+      "citation_id": "CIT-0143",
+      "html": "hastings.html",
+      "section": "rf-power",
+      "source": "hastings",
+      "original_pdf_start": 669,
+      "original_pdf_end_label": 685
+    },
+    {
+      "supported_claim": "Heat, current density, dielectric stress, processing charge and parasitic conduction require separate reliability checks",
+      "evidence_pdf_pages": [
+        212,
+        213,
+        214,
+        217,
+        218,
+        219,
+        220,
+        221,
+        222,
+        223,
+        228,
+        229,
+        230,
+        264,
+        265,
+        266,
+        267,
+        268,
+        269,
+        270
+      ],
+      "detail": "Broad mechanism survey checked through the relevant subsections. Scenario-based verification procedure is handbook synthesis; no numerical foundry rule is inferred.",
+      "status": "qualified",
+      "citation_id": "CIT-0144",
+      "html": "hastings.html",
+      "section": "protection",
+      "source": "hastings",
+      "original_pdf_start": 212,
+      "original_pdf_end_label": 274
+    },
+    {
+      "supported_claim": "ESD protection is a coordinated primary/secondary circuit with complete discharge and return paths",
+      "evidence_pdf_pages": [
+        749,
+        750,
+        751,
+        752,
+        758,
+        759,
+        760,
+        761,
+        765,
+        766,
+        767,
+        768,
+        769
+      ],
+      "detail": "Broad survey checked at relevant source mechanisms, not every device topology. Qualified library cells and testing remain required.",
+      "status": "qualified",
+      "citation_id": "CIT-0145",
+      "html": "hastings.html",
+      "section": "protection",
+      "source": "hastings",
+      "original_pdf_start": 748,
+      "original_pdf_end_label": 776
+    },
+    {
+      "supported_claim": "Antenna damage depends on fabrication-stage connectivity and exposed conducting geometry; later-metal jumps and diodes mitigate different stages",
+      "evidence_pdf_pages": [
+        228,
+        229,
+        230
+      ],
+      "detail": "Stage graph, metrics and worked 180-to-20 example are explicit handbook proposals/illustrations, not an algorithm printed in Hastings. Area/perimeter metric must follow the process.",
+      "status": "qualified",
+      "citation_id": "CIT-0146",
+      "html": "hastings.html",
+      "section": "protection",
+      "source": "hastings",
+      "original_pdf_start": 228,
+      "original_pdf_end_label": 230
+    },
+    {
+      "supported_claim": "Clipping, snapback and rate-triggered primary protection have different allowed-operation and secondary-protection requirements",
+      "evidence_pdf_pages": [
+        749,
+        750,
+        751,
+        752
+      ],
+      "detail": "Local protected terminals/reference and intentional limiting impedance must be preserved.",
+      "status": "supported",
+      "citation_id": "CIT-0147",
+      "html": "hastings.html",
+      "section": "protection",
+      "source": "hastings",
+      "original_pdf_start": 749,
+      "original_pdf_end_label": 752
+    },
+    {
+      "supported_claim": "Secondary protection, multifinger ballasting and reverse-BE avalanche degradation matter for analog accuracy",
+      "evidence_pdf_pages": [
+        765,
+        766,
+        767,
+        768,
+        769
+      ],
+      "detail": "Read direct mechanism passages. The 7V+IR+Ldi/dt example is independently derived and explicitly illustrative.",
+      "status": "qualified",
+      "citation_id": "CIT-0148",
+      "html": "hastings.html",
+      "section": "protection",
+      "source": "hastings",
+      "original_pdf_start": 766,
+      "original_pdf_end_label": 776
+    },
+    {
+      "supported_claim": "Majority taps, minority-carrier collecting junctions and blocking barriers are distinct; depth, bias and continuity control guard effectiveness",
+      "evidence_pdf_pages": [
+        264,
+        265,
+        266,
+        267,
+        268,
+        269,
+        270
+      ],
+      "detail": "Read detailed §5.4.4, including qualified L/U collecting guards near die edges and closed blocking barriers. Does not imply every ring is interchangeable.",
+      "status": "supported",
+      "citation_id": "CIT-0149",
+      "html": "hastings.html",
+      "section": "isolation",
+      "source": "hastings",
+      "original_pdf_start": 256,
+      "original_pdf_end_label": 270
+    },
+    {
+      "supported_claim": "Guard choice and effectiveness depend on substrate doping, buried layers, depth, contact resistance and allowed bias",
+      "evidence_pdf_pages": [
+        735,
+        736,
+        737,
+        738,
+        741,
+        742
+      ],
+      "detail": "Source examples are strongly process dependent; numerical collection efficiencies are not copied as universal thresholds.",
+      "status": "supported",
+      "citation_id": "CIT-0150",
+      "html": "hastings.html",
+      "section": "isolation",
+      "source": "hastings",
+      "original_pdf_start": 735,
+      "original_pdf_end_label": 742
+    },
+    {
+      "supported_claim": "Device sharing can introduce minority-carrier injection, common-resistance debiasing and capacitively mediated errors",
+      "evidence_pdf_pages": [
+        723,
+        724,
+        725,
+        726,
+        727,
+        730,
+        731
+      ],
+      "detail": "Whitelist/re-extract transformation procedure is original synthesis. The source supports why schematic net equality alone is insufficient.",
+      "status": "qualified",
+      "citation_id": "CIT-0151",
+      "html": "hastings.html",
+      "section": "isolation",
+      "source": "hastings",
+      "original_pdf_start": 723,
+      "original_pdf_end_label": 734
+    },
+    {
+      "supported_claim": "Noisy isolated MOS transistors can inject into shared tanks and disturb sensitive circuits",
+      "evidence_pdf_pages": [
+        600
+      ],
+      "detail": "Read explicit warning about parasitic rectification and shared-tank coupling.",
+      "status": "supported",
+      "citation_id": "CIT-0152",
+      "html": "hastings.html",
+      "section": "isolation",
+      "source": "hastings",
+      "original_pdf_start": 600,
+      "original_pdf_end_label": 600
+    },
+    {
+      "supported_claim": "A Kelvin/star connection must join physically at the intended reference; sharing a net name does not remove IR drop",
+      "evidence_pdf_pages": [
+        818
+      ],
+      "detail": "Read Figures15.26–15.27 and text; finite sense current and common path matter.",
+      "status": "supported",
+      "citation_id": "CIT-0153",
+      "html": "hastings.html",
+      "section": "routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 818,
+      "original_pdf_end_label": 818
+    },
+    {
+      "supported_claim": "Capacitive coupling depends on slew and victim impedance; shielding requires a suitable low-impedance reference",
+      "evidence_pdf_pages": [
+        819,
+        820
+      ],
+      "detail": "Eq15.23 is an illustrative lumped relation. Notes do not promise that a shield removes all coupling or that a logically static net has no startup transitions.",
+      "status": "supported",
+      "citation_id": "CIT-0154",
+      "html": "hastings.html",
+      "section": "routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 819,
+      "original_pdf_end_label": 820
+    },
+    {
+      "supported_claim": "Local neck/via current density can dominate reliability although total resistance integrates along the path",
+      "evidence_pdf_pages": [
+        821,
+        822
+      ],
+      "detail": "Visually checked Fig15.29. An inside-corner via array does not share current uniformly; straight transitions reduce the illustrated nonuniformity.",
+      "status": "supported",
+      "citation_id": "CIT-0155",
+      "html": "hastings.html",
+      "section": "routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 821,
+      "original_pdf_end_label": 822
+    },
+    {
+      "supported_claim": "Real routability depends on layer direction, via enclosure, pitch, grid and channel junction capacity",
+      "evidence_pdf_pages": [
+        811,
+        812,
+        813,
+        814,
+        815,
+        816,
+        817
+      ],
+      "detail": "Not all via families stack legally. Worked 100+100 pitch versus140 landing example is explicit arithmetic under hypothetical dimensions.",
+      "status": "supported",
+      "citation_id": "CIT-0156",
+      "html": "hastings.html",
+      "section": "routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 811,
+      "original_pdf_end_label": 817
+    },
+    {
+      "supported_claim": "Heat-source placement, thermoelectrics, piezoresistive stress and package environment constrain precision placement",
+      "evidence_pdf_pages": [
+        399,
+        400,
+        401,
+        402,
+        403,
+        404,
+        405,
+        410,
+        411
+      ],
+      "detail": "Read relevant thermal/stress implications; broad survey range is not a single geometric optimization theorem.",
+      "status": "qualified",
+      "citation_id": "CIT-0157",
+      "html": "hastings.html",
+      "section": "routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 399,
+      "original_pdf_end_label": 411
+    },
+    {
+      "supported_claim": "BJT matching rules require controlled geometry, temperature/stress and parasitic interactions",
+      "evidence_pdf_pages": [
+        525,
+        526
+      ],
+      "detail": "Reverse emitter-base avalanche and shared-region/depletion cautions remain device/process dependent.",
+      "status": "supported",
+      "citation_id": "CIT-0158",
+      "html": "hastings.html",
+      "section": "routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 525,
+      "original_pdf_end_label": 525
+    },
+    {
+      "supported_claim": "MOS precision placement must consider mechanical stress and thermal gradients including package structures",
+      "evidence_pdf_pages": [
+        715
+      ],
+      "detail": "Read rules13–15; physical whole-group rotation remains process and package dependent.",
+      "status": "supported",
+      "citation_id": "CIT-0159",
+      "html": "hastings.html",
+      "section": "routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 715,
+      "original_pdf_end_label": 715
+    },
+    {
+      "supported_claim": "Die area can be core-limited or pad-limited; floorplanning must reserve pad, seal, assembly and access requirements",
+      "evidence_pdf_pages": [
+        782,
+        783,
+        787,
+        788,
+        789,
+        790,
+        792,
+        799,
+        806,
+        807
+      ],
+      "detail": "Checked relevant planning/package passages. Numerical example is a stated simplified effective-pitch model, not a copied package rule.",
+      "status": "qualified",
+      "citation_id": "CIT-0160",
+      "html": "hastings.html",
+      "section": "routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 782,
+      "original_pdf_end_label": 810
+    },
+    {
+      "supported_claim": "Final review includes geometry, connectivity, currents, protection, special features and physical grounding",
+      "evidence_pdf_pages": [
+        823,
+        824,
+        825
+      ],
+      "detail": "Checked §15.5 checklist. Versioned evidence/checksum/dependency invalidation workflow is handbook synthesis, not a verbatim source process.",
+      "status": "qualified",
+      "citation_id": "CIT-0161",
+      "html": "hastings.html",
+      "section": "routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 823,
+      "original_pdf_end_label": 825
+    },
+    {
+      "supported_claim": "Appendices contain supplementary mechanisms and derivations",
+      "evidence_pdf_pages": [
+        834,
+        836,
+        871,
+        872
+      ],
+      "detail": "Navigation/survey reference, not a certification of all appendix equations. Apparent AppendixE errors are recorded explicitly.",
+      "status": "not_claim",
+      "citation_id": "CIT-0162",
+      "html": "hastings.html",
+      "section": "validation",
+      "source": "hastings",
+      "original_pdf_start": 834,
+      "original_pdf_end_label": 876
+    },
+    {
+      "supported_claim": "BJT terminal definitions, device family and operating region matter for matching",
+      "evidence_pdf_pages": [
+        431,
+        506,
+        522,
+        527
+      ],
+      "detail": "Broad device-physics reference sampled for the specific terminal/operating-region claims; no full audit of Chapter9 is claimed.",
+      "status": "qualified",
+      "citation_id": "CIT-0247",
+      "html": "topic-bipolar-diodes.html",
+      "section": "bjt-objective",
+      "source": "hastings",
+      "original_pdf_start": 429,
+      "original_pdf_end_label": 483
+    },
+    {
+      "supported_claim": "BJT random/systematic matching depends on emitter geometry, current density, bias, thermal environment and connection effects",
+      "evidence_pdf_pages": [
+        506,
+        507,
+        508,
+        509,
+        522,
+        523,
+        525,
+        526,
+        527,
+        528,
+        529
+      ],
+      "detail": "Matched unit construction and cautions are source-backed. Numerical thermal and beta examples are explicitly hypothetical circuit derivations.",
+      "status": "qualified",
+      "citation_id": "CIT-0248",
+      "html": "topic-bipolar-diodes.html",
+      "section": "bjt-objective",
+      "source": "hastings",
+      "original_pdf_start": 506,
+      "original_pdf_end_label": 529
+    },
+    {
+      "supported_claim": "BJT random/systematic matching depends on emitter geometry, current density, bias, thermal environment and connection effects",
+      "evidence_pdf_pages": [
+        506,
+        507,
+        508,
+        509,
+        522,
+        523,
+        525,
+        526,
+        527,
+        528,
+        529
+      ],
+      "detail": "Matched unit construction and cautions are source-backed. Numerical thermal and beta examples are explicitly hypothetical circuit derivations.",
+      "status": "qualified",
+      "citation_id": "CIT-0249",
+      "html": "topic-bipolar-diodes.html",
+      "section": "source-bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 506,
+      "original_pdf_end_label": 526
+    },
+    {
+      "supported_claim": "Lateral BJT perimeter, collector arrangement and field environment differ from vertical-emitter area scaling",
+      "evidence_pdf_pages": [
+        527,
+        528,
+        529
+      ],
+      "detail": "A larger emitter is not automatically a better lateral PNP; the notes preserve the device-family distinction.",
+      "status": "supported",
+      "citation_id": "CIT-0250",
+      "html": "topic-bipolar-diodes.html",
+      "section": "source-bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 527,
+      "original_pdf_end_label": 529
+    },
+    {
+      "supported_claim": "Thermal and terminal/beta effects can turn a nominal current ratio into a VBE error",
+      "evidence_pdf_pages": [
+        509,
+        510,
+        522,
+        523
+      ],
+      "detail": "Checked bias/temperature mechanisms and independently recomputed the 8:1, 1%, beta-ratio and 50mK examples. No example temperature coefficient is represented as universal.",
+      "status": "qualified",
+      "citation_id": "CIT-0251",
+      "html": "topic-bipolar-diodes.html",
+      "section": "source-bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 509,
+      "original_pdf_end_label": 523
+    },
+    {
+      "supported_claim": "BJT matching rules require controlled geometry, temperature/stress and parasitic interactions",
+      "evidence_pdf_pages": [
+        525,
+        526
+      ],
+      "detail": "Reverse emitter-base avalanche and shared-region/depletion cautions remain device/process dependent.",
+      "status": "supported",
+      "citation_id": "CIT-0252",
+      "html": "topic-bipolar-diodes.html",
+      "section": "source-bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 526,
+      "original_pdf_end_label": 526
+    },
+    {
+      "supported_claim": "PN, Schottky and Zener matching cannot share a single generic diode objective",
+      "evidence_pdf_pages": [
+        565,
+        566,
+        567,
+        568,
+        569,
+        570,
+        571
+      ],
+      "detail": "Source distinguishes emitter versus collector current and nonuniform avalanche conduction.",
+      "status": "supported",
+      "citation_id": "CIT-0253",
+      "html": "topic-bipolar-diodes.html",
+      "section": "source-bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 565,
+      "original_pdf_end_label": 571
+    },
+    {
+      "supported_claim": "Paralleled Zener segments can share avalanche current nonuniformly rather than average like ordinary passive units",
+      "evidence_pdf_pages": [
+        566,
+        567
+      ],
+      "detail": "Source mechanism checked; no Pelgrom-style universal Zener improvement is claimed.",
+      "status": "supported",
+      "citation_id": "CIT-0254",
+      "html": "topic-bipolar-diodes.html",
+      "section": "source-bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 566,
+      "original_pdf_end_label": 567
+    },
+    {
+      "supported_claim": "Schottky material/barrier/contact/field geometry and guard-junction bias affect leakage, voltage and minority injection",
+      "evidence_pdf_pages": [
+        563,
+        568,
+        569,
+        570,
+        571
+      ],
+      "detail": "Added §11.2 PDF563 to directly support the forward-biased field-relief guard-junction injection clause. Original matching span alone was incomplete.",
+      "status": "corrected",
+      "citation_id": "CIT-0255",
+      "html": "topic-bipolar-diodes.html",
+      "section": "source-bipolar-diodes",
+      "source": "hastings",
+      "original_pdf_start": 568,
+      "original_pdf_end_label": 571
+    },
+    {
+      "supported_claim": "Thermal and terminal/beta effects can turn a nominal current ratio into a VBE error",
+      "evidence_pdf_pages": [
+        509,
+        510,
+        522,
+        523
+      ],
+      "detail": "Checked bias/temperature mechanisms and independently recomputed the 8:1, 1%, beta-ratio and 50mK examples. No example temperature coefficient is represented as universal.",
+      "status": "qualified",
+      "citation_id": "CIT-0256",
+      "html": "topic-bipolar-diodes.html",
+      "section": "bjt-example",
+      "source": "hastings",
+      "original_pdf_start": 509,
+      "original_pdf_end_label": 523
+    },
+    {
+      "supported_claim": "Diode junction type and terminal choice determine conduction, injection and matching behavior",
+      "evidence_pdf_pages": [
+        563,
+        565,
+        566,
+        567,
+        568,
+        569,
+        570
+      ],
+      "detail": "Survey checked using the relevant Schottky/PN/Zener passages; no blanket validity for all diode structures.",
+      "status": "qualified",
+      "citation_id": "CIT-0257",
+      "html": "topic-bipolar-diodes.html",
+      "section": "bjt-guards",
+      "source": "hastings",
+      "original_pdf_start": 534,
+      "original_pdf_end_label": 573
+    },
+    {
+      "supported_claim": "Majority taps, minority-carrier collecting junctions and blocking barriers are distinct; depth, bias and continuity control guard effectiveness",
+      "evidence_pdf_pages": [
+        264,
+        265,
+        266,
+        267,
+        268,
+        269,
+        270
+      ],
+      "detail": "Read detailed §5.4.4, including qualified L/U collecting guards near die edges and closed blocking barriers. Does not imply every ring is interchangeable.",
+      "status": "supported",
+      "citation_id": "CIT-0258",
+      "html": "topic-bipolar-diodes.html",
+      "section": "bjt-guards",
+      "source": "hastings",
+      "original_pdf_start": 256,
+      "original_pdf_end_label": 270
+    },
+    {
+      "supported_claim": "Capacitor family, dielectric, bias and electrode construction affect nonlinearity, leakage, parasitics and loss",
+      "evidence_pdf_pages": [
+        327,
+        329,
+        332,
+        335,
+        337,
+        339,
+        340,
+        343,
+        346,
+        347,
+        350,
+        351,
+        352,
+        353,
+        354
+      ],
+      "detail": "Family survey checked against relevant passages, not every material table. Port-role and PDK-model requirements are synthesis.",
+      "status": "qualified",
+      "citation_id": "CIT-0259",
+      "html": "topic-capacitor-devices.html",
+      "section": "cap-function",
+      "source": "hastings",
+      "original_pdf_start": 327,
+      "original_pdf_end_label": 354
+    },
+    {
+      "supported_claim": "Capacitor family, dielectric, bias and electrode construction affect nonlinearity, leakage, parasitics and loss",
+      "evidence_pdf_pages": [
+        327,
+        329,
+        332,
+        335,
+        337,
+        339,
+        340,
+        343,
+        346,
+        347,
+        350,
+        351,
+        352,
+        353,
+        354
+      ],
+      "detail": "Family survey checked against relevant passages, not every material table. Port-role and PDK-model requirements are synthesis.",
+      "status": "qualified",
+      "citation_id": "CIT-0260",
+      "html": "topic-capacitor-devices.html",
+      "section": "source-capacitors",
+      "source": "hastings",
+      "original_pdf_start": 327,
+      "original_pdf_end_label": 354
+    },
+    {
+      "supported_claim": "Capacitor matching uses appropriate identical parallel units, controlled perimeter/environment, dummies, shield reference and leads",
+      "evidence_pdf_pages": [
+        423,
+        424,
+        425
+      ],
+      "detail": "Rules do not make series-connected units electrically identical to parallel units because electrode parasitics differ. X and Y pitch need not equal each other.",
+      "status": "supported",
+      "citation_id": "CIT-0261",
+      "html": "topic-capacitor-devices.html",
+      "section": "source-capacitors",
+      "source": "hastings",
+      "original_pdf_start": 423,
+      "original_pdf_end_label": 425
+    },
+    {
+      "supported_claim": "Lead resistance and capacitance can defeat body matching; compare actual connection topology and environment",
+      "evidence_pdf_pages": [
+        380,
+        381,
+        382
+      ],
+      "detail": "Electrical equivalence matters more than equal drawn length. The numerical capacitor example assumes the added parasitics are parallel to the intended measured capacitances.",
+      "status": "supported",
+      "citation_id": "CIT-0262",
+      "html": "topic-capacitor-devices.html",
+      "section": "source-capacitors",
+      "source": "hastings",
+      "original_pdf_start": 380,
+      "original_pdf_end_label": 382
+    },
+    {
+      "supported_claim": "Lead resistance and capacitance can defeat body matching; compare actual connection topology and environment",
+      "evidence_pdf_pages": [
+        380,
+        381,
+        382
+      ],
+      "detail": "Electrical equivalence matters more than equal drawn length. The numerical capacitor example assumes the added parasitics are parallel to the intended measured capacitances.",
+      "status": "supported",
+      "citation_id": "CIT-0263",
+      "html": "topic-capacitor-devices.html",
+      "section": "cap-worked",
+      "source": "hastings",
+      "original_pdf_start": 380,
+      "original_pdf_end_label": 382
+    },
+    {
+      "supported_claim": "Matched capacitors need matched lead parasitics and qualified dielectric/thermal/stress context",
+      "evidence_pdf_pages": [
+        425
+      ],
+      "detail": "Notes correctly make dielectric and environmental recommendations family-dependent.",
+      "status": "supported",
+      "citation_id": "CIT-0264",
+      "html": "topic-capacitor-devices.html",
+      "section": "cap-worked",
+      "source": "hastings",
+      "original_pdf_start": 425,
+      "original_pdf_end_label": 425
+    },
+    {
+      "supported_claim": "Identical units and matched area/perimeter responses reduce process-bias error; array edges need controlled dummies",
+      "evidence_pdf_pages": [
+        374,
+        375,
+        376,
+        377,
+        378
+      ],
+      "detail": "Noninteger-ratio geometry needs sensitivity analysis; dummy dimensions and ties depend on process/terminal use.",
+      "status": "supported",
+      "citation_id": "CIT-0265",
+      "html": "topic-capacitor-devices.html",
+      "section": "cap-size",
+      "source": "hastings",
+      "original_pdf_start": 374,
+      "original_pdf_end_label": 378
+    },
+    {
+      "supported_claim": "Capacitor matching uses appropriate identical parallel units, controlled perimeter/environment, dummies, shield reference and leads",
+      "evidence_pdf_pages": [
+        423,
+        424,
+        425
+      ],
+      "detail": "Rules do not make series-connected units electrically identical to parallel units because electrode parasitics differ. X and Y pitch need not equal each other.",
+      "status": "supported",
+      "citation_id": "CIT-0266",
+      "html": "topic-capacitor-devices.html",
+      "section": "cap-size",
+      "source": "hastings",
+      "original_pdf_start": 423,
+      "original_pdf_end_label": 425
+    },
+    {
+      "supported_claim": "PN junctions and carrier transport distinguish physical device roles",
+      "evidence_pdf_pages": [
+        63
+      ],
+      "detail": "Removed unsupported attribution of author intent; archetypal process discussion is PDF154 and historical numerical-rule disclaimer is PDF836.",
+      "status": "corrected",
+      "citation_id": "CIT-0298",
+      "html": "topic-fabrication.html",
+      "section": "fab-purpose",
+      "source": "hastings",
+      "original_pdf_start": 63,
+      "original_pdf_end_label": 64
+    },
+    {
+      "supported_claim": "Representative bipolar, CMOS and BiCMOS processes are teaching archetypes; sample rule values are not a real PDK",
+      "evidence_pdf_pages": [
+        154,
+        836
+      ],
+      "detail": "Checked chapter introduction and Appendix C disclaimer. This is a survey reference, not a claim that every process detail across the entire range was audited.",
+      "status": "qualified",
+      "citation_id": "CIT-0299",
+      "html": "topic-fabrication.html",
+      "section": "fab-purpose",
+      "source": "hastings",
+      "original_pdf_start": 154,
+      "original_pdf_end_label": 210
+    },
+    {
+      "supported_claim": "Lithography, diffusion, implantation and etching create dimensions and surroundings that differ from drawn rectangles",
+      "evidence_pdf_pages": [
+        79,
+        81,
+        85,
+        88,
+        90,
+        94,
+        95,
+        99,
+        104,
+        105,
+        110
+      ],
+      "detail": "Original span did not cover the contact/interconnect/CMP clauses. Added §2.7 PDF99–110; original span remains appropriate for front-end process mechanisms.",
+      "status": "corrected",
+      "citation_id": "CIT-0300",
+      "html": "topic-fabrication.html",
+      "section": "source-process",
+      "source": "hastings",
+      "original_pdf_start": 79,
+      "original_pdf_end_label": 95
+    },
+    {
+      "supported_claim": "Manufacturing rules account for resolvability, process bias, registration, lateral diffusion/depletion and physical overlap",
+      "evidence_pdf_pages": [
+        130,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        149,
+        150
+      ],
+      "detail": "The process examples illustrate mechanisms. They are not current-node numerical rules; geometry and rule-construction discussion checked, not every example value.",
+      "status": "qualified",
+      "citation_id": "CIT-0301",
+      "html": "topic-fabrication.html",
+      "section": "source-process",
+      "source": "hastings",
+      "original_pdf_start": 138,
+      "original_pdf_end_label": 144
+    },
+    {
+      "supported_claim": "Representative bipolar, CMOS and BiCMOS processes are teaching archetypes; sample rule values are not a real PDK",
+      "evidence_pdf_pages": [
+        154,
+        836
+      ],
+      "detail": "Checked chapter introduction and Appendix C disclaimer. This is a survey reference, not a claim that every process detail across the entire range was audited.",
+      "status": "qualified",
+      "citation_id": "CIT-0302",
+      "html": "topic-fabrication.html",
+      "section": "source-process",
+      "source": "hastings",
+      "original_pdf_start": 154,
+      "original_pdf_end_label": 210
+    },
+    {
+      "supported_claim": "Representative bipolar, CMOS and BiCMOS processes are teaching archetypes; sample rule values are not a real PDK",
+      "evidence_pdf_pages": [
+        154,
+        836
+      ],
+      "detail": "Checked chapter introduction and Appendix C disclaimer. This is a survey reference, not a claim that every process detail across the entire range was audited.",
+      "status": "qualified",
+      "citation_id": "CIT-0303",
+      "html": "topic-fabrication.html",
+      "section": "source-process",
+      "source": "hastings",
+      "original_pdf_start": 836,
+      "original_pdf_end_label": 844
+    },
+    {
+      "supported_claim": "Manufacturing rules account for resolvability, process bias, registration, lateral diffusion/depletion and physical overlap",
+      "evidence_pdf_pages": [
+        130,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        149,
+        150
+      ],
+      "detail": "The process examples illustrate mechanisms. They are not current-node numerical rules; geometry and rule-construction discussion checked, not every example value.",
+      "status": "qualified",
+      "citation_id": "CIT-0304",
+      "html": "topic-fabrication.html",
+      "section": "fab-effective",
+      "source": "hastings",
+      "original_pdf_start": 139,
+      "original_pdf_end_label": 150
+    },
+    {
+      "supported_claim": "Drawn dimensions and electrical response differ through process bias, proximity, leads, topography and passivation",
+      "evidence_pdf_pages": [
+        374,
+        375,
+        376,
+        377,
+        378,
+        380,
+        381,
+        383,
+        384,
+        385
+      ],
+      "detail": "Source supports mechanisms; proposed multi-view cell representation is a handbook design proposal.",
+      "status": "qualified",
+      "citation_id": "CIT-0305",
+      "html": "topic-fabrication.html",
+      "section": "fab-effective",
+      "source": "hastings",
+      "original_pdf_start": 374,
+      "original_pdf_end_label": 385
+    },
+    {
+      "supported_claim": "Gate etch, dummies, WPE, trench/LOD stress, bias and hydrogenation make local MOS surroundings electrically relevant",
+      "evidence_pdf_pages": [
+        691,
+        692,
+        693,
+        695,
+        696,
+        697,
+        698,
+        699,
+        700,
+        702,
+        703,
+        704,
+        705,
+        706
+      ],
+      "detail": "Corrected LOD figure locator: discussion697, actual Fig13.52 is698. Example effect magnitudes and signs are not universal.",
+      "status": "corrected",
+      "citation_id": "CIT-0306",
+      "html": "topic-fabrication.html",
+      "section": "fab-effective",
+      "source": "hastings",
+      "original_pdf_start": 692,
+      "original_pdf_end_label": 704
+    },
+    {
+      "supported_claim": "Floorplanning combines hierarchy, package/pads, routing, noise/thermal separation and final verification",
+      "evidence_pdf_pages": [
+        782,
+        783,
+        787,
+        788,
+        789,
+        790,
+        792,
+        811,
+        812,
+        813,
+        817,
+        818,
+        819,
+        820,
+        823,
+        824,
+        825
+      ],
+      "detail": "Survey reference sampled for the actual paragraph claims; not a page-by-page audit of all Chapter15.",
+      "status": "qualified",
+      "citation_id": "CIT-0307",
+      "html": "topic-floorplanning.html",
+      "section": "floor-purpose",
+      "source": "hastings",
+      "original_pdf_start": 781,
+      "original_pdf_end_label": 828
+    },
+    {
+      "supported_claim": "Matched-cell hierarchy must preserve relative geometry and transformations must respect process/package physics",
+      "evidence_pdf_pages": [
+        783,
+        691,
+        715
+      ],
+      "detail": "Replaced hierarchy-only citation with precise §15.1.1 p783, §13.2.1 p691 and §13.3 p715 sources for rotation/environment claims.",
+      "status": "corrected",
+      "citation_id": "CIT-0308",
+      "html": "topic-floorplanning.html",
+      "section": "floor-hierarchy",
+      "source": "hastings",
+      "original_pdf_start": 782,
+      "original_pdf_end_label": 784
+    },
+    {
+      "supported_claim": "Die area can be core-limited or pad-limited; floorplanning must reserve pad, seal, assembly and access requirements",
+      "evidence_pdf_pages": [
+        782,
+        783,
+        787,
+        788,
+        789,
+        790,
+        792,
+        799,
+        806,
+        807
+      ],
+      "detail": "Checked relevant planning/package passages. Numerical example is a stated simplified effective-pitch model, not a copied package rule.",
+      "status": "qualified",
+      "citation_id": "CIT-0309",
+      "html": "topic-floorplanning.html",
+      "section": "floor-die",
+      "source": "hastings",
+      "original_pdf_start": 785,
+      "original_pdf_end_label": 810
+    },
+    {
+      "supported_claim": "Real routability depends on layer direction, via enclosure, pitch, grid and channel junction capacity",
+      "evidence_pdf_pages": [
+        811,
+        812,
+        813,
+        814,
+        815,
+        816,
+        817
+      ],
+      "detail": "Not all via families stack legally. Worked 100+100 pitch versus140 landing example is explicit arithmetic under hypothetical dimensions.",
+      "status": "supported",
+      "citation_id": "CIT-0310",
+      "html": "topic-floorplanning.html",
+      "section": "floor-corridors",
+      "source": "hastings",
+      "original_pdf_start": 811,
+      "original_pdf_end_label": 817
+    },
+    {
+      "supported_claim": "A Kelvin/star connection must join physically at the intended reference; sharing a net name does not remove IR drop",
+      "evidence_pdf_pages": [
+        818
+      ],
+      "detail": "Read Figures15.26–15.27 and text; finite sense current and common path matter.",
+      "status": "supported",
+      "citation_id": "CIT-0311",
+      "html": "topic-floorplanning.html",
+      "section": "source-routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 818,
+      "original_pdf_end_label": 818
+    },
+    {
+      "supported_claim": "Capacitive coupling depends on slew and victim impedance; shielding requires a suitable low-impedance reference",
+      "evidence_pdf_pages": [
+        819,
+        820
+      ],
+      "detail": "Eq15.23 is an illustrative lumped relation. Notes do not promise that a shield removes all coupling or that a logically static net has no startup transitions.",
+      "status": "supported",
+      "citation_id": "CIT-0312",
+      "html": "topic-floorplanning.html",
+      "section": "source-routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 819,
+      "original_pdf_end_label": 820
+    },
+    {
+      "supported_claim": "Local neck/via current density can dominate reliability although total resistance integrates along the path",
+      "evidence_pdf_pages": [
+        821,
+        822
+      ],
+      "detail": "Visually checked Fig15.29. An inside-corner via array does not share current uniformly; straight transitions reduce the illustrated nonuniformity.",
+      "status": "supported",
+      "citation_id": "CIT-0313",
+      "html": "topic-floorplanning.html",
+      "section": "source-routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 821,
+      "original_pdf_end_label": 822
+    },
+    {
+      "supported_claim": "Real routability depends on layer direction, via enclosure, pitch, grid and channel junction capacity",
+      "evidence_pdf_pages": [
+        811,
+        812,
+        813,
+        814,
+        815,
+        816,
+        817
+      ],
+      "detail": "Not all via families stack legally. Worked 100+100 pitch versus140 landing example is explicit arithmetic under hypothetical dimensions.",
+      "status": "supported",
+      "citation_id": "CIT-0314",
+      "html": "topic-floorplanning.html",
+      "section": "source-routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 811,
+      "original_pdf_end_label": 817
+    },
+    {
+      "supported_claim": "Heat-source placement, thermoelectrics, piezoresistive stress and package environment constrain precision placement",
+      "evidence_pdf_pages": [
+        399,
+        400,
+        401,
+        402,
+        403,
+        404,
+        405,
+        410,
+        411
+      ],
+      "detail": "Read relevant thermal/stress implications; broad survey range is not a single geometric optimization theorem.",
+      "status": "qualified",
+      "citation_id": "CIT-0315",
+      "html": "topic-floorplanning.html",
+      "section": "source-routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 399,
+      "original_pdf_end_label": 411
+    },
+    {
+      "supported_claim": "BJT matching rules require controlled geometry, temperature/stress and parasitic interactions",
+      "evidence_pdf_pages": [
+        525,
+        526
+      ],
+      "detail": "Reverse emitter-base avalanche and shared-region/depletion cautions remain device/process dependent.",
+      "status": "supported",
+      "citation_id": "CIT-0316",
+      "html": "topic-floorplanning.html",
+      "section": "source-routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 525,
+      "original_pdf_end_label": 525
+    },
+    {
+      "supported_claim": "MOS precision placement must consider mechanical stress and thermal gradients including package structures",
+      "evidence_pdf_pages": [
+        715
+      ],
+      "detail": "Read rules13–15; physical whole-group rotation remains process and package dependent.",
+      "status": "supported",
+      "citation_id": "CIT-0317",
+      "html": "topic-floorplanning.html",
+      "section": "source-routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 715,
+      "original_pdf_end_label": 715
+    },
+    {
+      "supported_claim": "Die area can be core-limited or pad-limited; floorplanning must reserve pad, seal, assembly and access requirements",
+      "evidence_pdf_pages": [
+        782,
+        783,
+        787,
+        788,
+        789,
+        790,
+        792,
+        799,
+        806,
+        807
+      ],
+      "detail": "Checked relevant planning/package passages. Numerical example is a stated simplified effective-pitch model, not a copied package rule.",
+      "status": "qualified",
+      "citation_id": "CIT-0318",
+      "html": "topic-floorplanning.html",
+      "section": "source-routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 782,
+      "original_pdf_end_label": 810
+    },
+    {
+      "supported_claim": "Final review includes geometry, connectivity, currents, protection, special features and physical grounding",
+      "evidence_pdf_pages": [
+        823,
+        824,
+        825
+      ],
+      "detail": "Checked §15.5 checklist. Versioned evidence/checksum/dependency invalidation workflow is handbook synthesis, not a verbatim source process.",
+      "status": "qualified",
+      "citation_id": "CIT-0319",
+      "html": "topic-floorplanning.html",
+      "section": "source-routing-floorplan",
+      "source": "hastings",
+      "original_pdf_start": 823,
+      "original_pdf_end_label": 825
+    },
+    {
+      "supported_claim": "Final review includes geometry, connectivity, currents, protection, special features and physical grounding",
+      "evidence_pdf_pages": [
+        823,
+        824,
+        825
+      ],
+      "detail": "Checked §15.5 checklist. Versioned evidence/checksum/dependency invalidation workflow is handbook synthesis, not a verbatim source process.",
+      "status": "qualified",
+      "citation_id": "CIT-0320",
+      "html": "topic-floorplanning.html",
+      "section": "floor-qualification",
+      "source": "hastings",
+      "original_pdf_start": 823,
+      "original_pdf_end_label": 825
+    },
+    {
+      "supported_claim": "Manufacturing rules account for resolvability, process bias, registration, lateral diffusion/depletion and physical overlap",
+      "evidence_pdf_pages": [
+        130,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        149,
+        150
+      ],
+      "detail": "The process examples illustrate mechanisms. They are not current-node numerical rules; geometry and rule-construction discussion checked, not every example value.",
+      "status": "qualified",
+      "citation_id": "CIT-0343",
+      "html": "topic-manufacturability.html",
+      "section": "mfg-feasible",
+      "source": "hastings",
+      "original_pdf_start": 130,
+      "original_pdf_end_label": 150
+    },
+    {
+      "supported_claim": "Real routability depends on layer direction, via enclosure, pitch, grid and channel junction capacity",
+      "evidence_pdf_pages": [
+        811,
+        812,
+        813,
+        814,
+        815,
+        816,
+        817
+      ],
+      "detail": "Not all via families stack legally. Worked 100+100 pitch versus140 landing example is explicit arithmetic under hypothetical dimensions.",
+      "status": "supported",
+      "citation_id": "CIT-0344",
+      "html": "topic-manufacturability.html",
+      "section": "mfg-route",
+      "source": "hastings",
+      "original_pdf_start": 812,
+      "original_pdf_end_label": 815
+    },
+    {
+      "supported_claim": "Dummy metal and unequal over-device coverage can affect hydrogenation and matching",
+      "evidence_pdf_pages": [
+        703,
+        704
+      ],
+      "detail": "Original label pp703–704 linked to704. Corrected link to703.",
+      "status": "corrected",
+      "citation_id": "CIT-0345",
+      "html": "topic-manufacturability.html",
+      "section": "mfg-final",
+      "source": "hastings",
+      "original_pdf_start": 704,
+      "original_pdf_end_label": 704
+    },
+    {
+      "supported_claim": "Over-gate metal and fill need controlled treatment because of passivation/electric-field/environment effects",
+      "evidence_pdf_pages": [
+        716
+      ],
+      "detail": "Read matching rules17–18; blanket metal prohibition is not a universal rule for every process.",
+      "status": "supported",
+      "citation_id": "CIT-0346",
+      "html": "topic-manufacturability.html",
+      "section": "mfg-final",
+      "source": "hastings",
+      "original_pdf_start": 716,
+      "original_pdf_end_label": 716
+    },
+    {
+      "supported_claim": "Inductor dummy fill and adjacent metal must be excluded or designed to limit induced currents",
+      "evidence_pdf_pages": [
+        363
+      ],
+      "detail": "Read source exclusion/dummy-material discussion; final EM extraction requirement is a derived verification action.",
+      "status": "supported",
+      "citation_id": "CIT-0347",
+      "html": "topic-manufacturability.html",
+      "section": "mfg-final",
+      "source": "hastings",
+      "original_pdf_start": 363,
+      "original_pdf_end_label": 363
+    },
+    {
+      "supported_claim": "Final review includes geometry, connectivity, currents, protection, special features and physical grounding",
+      "evidence_pdf_pages": [
+        823,
+        824,
+        825
+      ],
+      "detail": "Checked §15.5 checklist. Versioned evidence/checksum/dependency invalidation workflow is handbook synthesis, not a verbatim source process.",
+      "status": "qualified",
+      "citation_id": "CIT-0348",
+      "html": "topic-manufacturability.html",
+      "section": "mfg-evidence",
+      "source": "hastings",
+      "original_pdf_start": 823,
+      "original_pdf_end_label": 825
+    },
+    {
+      "supported_claim": "Spacing and current capacity must reflect operating voltages, temperatures and qualified lifetime rules",
+      "evidence_pdf_pages": [
+        820,
+        821
+      ],
+      "detail": "Scenario ledger is derived verification structure; source supplies voltage-difference and EM mechanisms.",
+      "status": "qualified",
+      "citation_id": "CIT-0349",
+      "html": "topic-manufacturability.html",
+      "section": "manuf-scenarios",
+      "source": "hastings",
+      "original_pdf_start": 821,
+      "original_pdf_end_label": 821
+    },
+    {
+      "supported_claim": "MOS matching objective depends on fixed voltage versus fixed current, operating region and active geometry",
+      "evidence_pdf_pages": [
+        686,
+        687,
+        688,
+        689,
+        690
+      ],
+      "detail": "Long-channel strong-inversion formulas are scoped approximations; minimum-size/short-channel behavior is not inferred from them.",
+      "status": "supported",
+      "citation_id": "CIT-0350",
+      "html": "topic-mos-layout.html",
+      "section": "mos-objective",
+      "source": "hastings",
+      "original_pdf_start": 686,
+      "original_pdf_end_label": 690
+    },
+    {
+      "supported_claim": "MOS matching objective depends on fixed voltage versus fixed current, operating region and active geometry",
+      "evidence_pdf_pages": [
+        686,
+        687,
+        688,
+        689,
+        690
+      ],
+      "detail": "Long-channel strong-inversion formulas are scoped approximations; minimum-size/short-channel behavior is not inferred from them.",
+      "status": "supported",
+      "citation_id": "CIT-0351",
+      "html": "topic-mos-layout.html",
+      "section": "source-mos",
+      "source": "hastings",
+      "original_pdf_start": 686,
+      "original_pdf_end_label": 690
+    },
+    {
+      "supported_claim": "MOS matching rules require same unit construction and qualified dummies/environment plus thermal/package/bias control",
+      "evidence_pdf_pages": [
+        712,
+        713,
+        714,
+        715,
+        716,
+        717
+      ],
+      "detail": "Qualitative matching grades and old numerical suggestions are not universal process requirements. Notes retain these qualifiers.",
+      "status": "qualified",
+      "citation_id": "CIT-0352",
+      "html": "topic-mos-layout.html",
+      "section": "source-mos",
+      "source": "hastings",
+      "original_pdf_start": 712,
+      "original_pdf_end_label": 714
+    },
+    {
+      "supported_claim": "Matched MOS arrays require equal signed current-direction orientation as well as centroid/symmetry constraints",
+      "evidence_pdf_pages": [
+        708,
+        709,
+        710,
+        711
+      ],
+      "detail": "Visually checked Eq13.61 and Table13.2. Equal nonzero means are permitted; +1/2 and −1/2 are not equal. SVG accessible description was corrected to match its 3:1 versus1:3 example.",
+      "status": "supported",
+      "citation_id": "CIT-0353",
+      "html": "topic-mos-layout.html",
+      "section": "source-mos",
+      "source": "hastings",
+      "original_pdf_start": 708,
+      "original_pdf_end_label": 711
+    },
+    {
+      "supported_claim": "Physical relative orientation and terminal-directed geometry must be preserved within a matched group",
+      "evidence_pdf_pages": [
+        691
+      ],
+      "detail": "Source explicitly recommends grouping matched devices to avoid independent rotation; mirrored asymmetric devices need qualification.",
+      "status": "supported",
+      "citation_id": "CIT-0354",
+      "html": "topic-mos-layout.html",
+      "section": "source-mos",
+      "source": "hastings",
+      "original_pdf_start": 691,
+      "original_pdf_end_label": 691
+    },
+    {
+      "supported_claim": "Gate etch, dummies, WPE, trench/LOD stress, bias and hydrogenation make local MOS surroundings electrically relevant",
+      "evidence_pdf_pages": [
+        691,
+        692,
+        693,
+        695,
+        696,
+        697,
+        698,
+        699,
+        700,
+        702,
+        703,
+        704,
+        705,
+        706
+      ],
+      "detail": "Corrected LOD figure locator: discussion697, actual Fig13.52 is698. Example effect magnitudes and signs are not universal.",
+      "status": "corrected",
+      "citation_id": "CIT-0355",
+      "html": "topic-mos-layout.html",
+      "section": "source-mos",
+      "source": "hastings",
+      "original_pdf_start": 692,
+      "original_pdf_end_label": 706
+    },
+    {
+      "supported_claim": "MOS matching rules require same unit construction and qualified dummies/environment plus thermal/package/bias control",
+      "evidence_pdf_pages": [
+        712,
+        713,
+        714,
+        715,
+        716,
+        717
+      ],
+      "detail": "Qualitative matching grades and old numerical suggestions are not universal process requirements. Notes retain these qualifiers.",
+      "status": "qualified",
+      "citation_id": "CIT-0356",
+      "html": "topic-mos-layout.html",
+      "section": "source-mos",
+      "source": "hastings",
+      "original_pdf_start": 712,
+      "original_pdf_end_label": 717
+    },
+    {
+      "supported_claim": "Common-centroid layouts combine coincidence, symmetry, compactness and balanced subarrays; extra segmentation has costs",
+      "evidence_pdf_pages": [
+        392,
+        393,
+        394
+      ],
+      "detail": "Source does not claim that every fine interdigitation cancels nonlinear gradients or that CC helps without a meaningful gradient.",
+      "status": "supported",
+      "citation_id": "CIT-0357",
+      "html": "topic-mos-layout.html",
+      "section": "mos-gradient",
+      "source": "hastings",
+      "original_pdf_start": 393,
+      "original_pdf_end_label": 394
+    },
+    {
+      "supported_claim": "Compact balanced arrays limit nonlinear-gradient exposure but CC is not a universal benefit",
+      "evidence_pdf_pages": [
+        710,
+        711
+      ],
+      "detail": "No quantitative bound is promised without an environmental model.",
+      "status": "supported",
+      "citation_id": "CIT-0358",
+      "html": "topic-mos-layout.html",
+      "section": "mos-gradient",
+      "source": "hastings",
+      "original_pdf_start": 710,
+      "original_pdf_end_label": 711
+    },
+    {
+      "supported_claim": "Gate etch, dummies, WPE, trench/LOD stress, bias and hydrogenation make local MOS surroundings electrically relevant",
+      "evidence_pdf_pages": [
+        691,
+        692,
+        693,
+        695,
+        696,
+        697,
+        698,
+        699,
+        700,
+        702,
+        703,
+        704,
+        705,
+        706
+      ],
+      "detail": "Corrected LOD figure locator: discussion697, actual Fig13.52 is698. Example effect magnitudes and signs are not universal.",
+      "status": "corrected",
+      "citation_id": "CIT-0359",
+      "html": "topic-mos-layout.html",
+      "section": "mos-validate",
+      "source": "hastings",
+      "original_pdf_start": 691,
+      "original_pdf_end_label": 706
+    },
+    {
+      "supported_claim": "Heat, current density, dielectric stress, processing charge and parasitic conduction require separate reliability checks",
+      "evidence_pdf_pages": [
+        212,
+        213,
+        214,
+        217,
+        218,
+        219,
+        220,
+        221,
+        222,
+        223,
+        228,
+        229,
+        230,
+        264,
+        265,
+        266,
+        267,
+        268,
+        269,
+        270
+      ],
+      "detail": "Broad mechanism survey checked through the relevant subsections. Scenario-based verification procedure is handbook synthesis; no numerical foundry rule is inferred.",
+      "status": "qualified",
+      "citation_id": "CIT-0406",
+      "html": "topic-protection.html",
+      "section": "pro-purpose",
+      "source": "hastings",
+      "original_pdf_start": 211,
+      "original_pdf_end_label": 274
+    },
+    {
+      "supported_claim": "ESD protection is a coordinated primary/secondary circuit with complete discharge and return paths",
+      "evidence_pdf_pages": [
+        749,
+        750,
+        751,
+        752,
+        758,
+        759,
+        760,
+        761,
+        765,
+        766,
+        767,
+        768,
+        769
+      ],
+      "detail": "Broad survey checked at relevant source mechanisms, not every device topology. Qualified library cells and testing remain required.",
+      "status": "qualified",
+      "citation_id": "CIT-0407",
+      "html": "topic-protection.html",
+      "section": "pro-purpose",
+      "source": "hastings",
+      "original_pdf_start": 748,
+      "original_pdf_end_label": 776
+    },
+    {
+      "supported_claim": "Heat, current density, dielectric stress, processing charge and parasitic conduction require separate reliability checks",
+      "evidence_pdf_pages": [
+        212,
+        213,
+        214,
+        217,
+        218,
+        219,
+        220,
+        221,
+        222,
+        223,
+        228,
+        229,
+        230,
+        264,
+        265,
+        266,
+        267,
+        268,
+        269,
+        270
+      ],
+      "detail": "Broad mechanism survey checked through the relevant subsections. Scenario-based verification procedure is handbook synthesis; no numerical foundry rule is inferred.",
+      "status": "qualified",
+      "citation_id": "CIT-0408",
+      "html": "topic-protection.html",
+      "section": "source-protection",
+      "source": "hastings",
+      "original_pdf_start": 212,
+      "original_pdf_end_label": 274
+    },
+    {
+      "supported_claim": "ESD protection is a coordinated primary/secondary circuit with complete discharge and return paths",
+      "evidence_pdf_pages": [
+        749,
+        750,
+        751,
+        752,
+        758,
+        759,
+        760,
+        761,
+        765,
+        766,
+        767,
+        768,
+        769
+      ],
+      "detail": "Broad survey checked at relevant source mechanisms, not every device topology. Qualified library cells and testing remain required.",
+      "status": "qualified",
+      "citation_id": "CIT-0409",
+      "html": "topic-protection.html",
+      "section": "source-protection",
+      "source": "hastings",
+      "original_pdf_start": 748,
+      "original_pdf_end_label": 776
+    },
+    {
+      "supported_claim": "Antenna damage depends on fabrication-stage connectivity and exposed conducting geometry; later-metal jumps and diodes mitigate different stages",
+      "evidence_pdf_pages": [
+        228,
+        229,
+        230
+      ],
+      "detail": "Stage graph, metrics and worked 180-to-20 example are explicit handbook proposals/illustrations, not an algorithm printed in Hastings. Area/perimeter metric must follow the process.",
+      "status": "qualified",
+      "citation_id": "CIT-0410",
+      "html": "topic-protection.html",
+      "section": "source-protection",
+      "source": "hastings",
+      "original_pdf_start": 228,
+      "original_pdf_end_label": 230
+    },
+    {
+      "supported_claim": "Clipping, snapback and rate-triggered primary protection have different allowed-operation and secondary-protection requirements",
+      "evidence_pdf_pages": [
+        749,
+        750,
+        751,
+        752
+      ],
+      "detail": "Local protected terminals/reference and intentional limiting impedance must be preserved.",
+      "status": "supported",
+      "citation_id": "CIT-0411",
+      "html": "topic-protection.html",
+      "section": "source-protection",
+      "source": "hastings",
+      "original_pdf_start": 749,
+      "original_pdf_end_label": 752
+    },
+    {
+      "supported_claim": "Secondary protection, multifinger ballasting and reverse-BE avalanche degradation matter for analog accuracy",
+      "evidence_pdf_pages": [
+        765,
+        766,
+        767,
+        768,
+        769
+      ],
+      "detail": "Read direct mechanism passages. The 7V+IR+Ldi/dt example is independently derived and explicitly illustrative.",
+      "status": "qualified",
+      "citation_id": "CIT-0412",
+      "html": "topic-protection.html",
+      "section": "source-protection",
+      "source": "hastings",
+      "original_pdf_start": 766,
+      "original_pdf_end_label": 776
+    },
+    {
+      "supported_claim": "Antenna damage depends on fabrication-stage connectivity and exposed conducting geometry; later-metal jumps and diodes mitigate different stages",
+      "evidence_pdf_pages": [
+        228,
+        229,
+        230
+      ],
+      "detail": "Stage graph, metrics and worked 180-to-20 example are explicit handbook proposals/illustrations, not an algorithm printed in Hastings. Area/perimeter metric must follow the process.",
+      "status": "qualified",
+      "citation_id": "CIT-0413",
+      "html": "topic-protection.html",
+      "section": "pro-antenna",
+      "source": "hastings",
+      "original_pdf_start": 228,
+      "original_pdf_end_label": 230
+    },
+    {
+      "supported_claim": "ESD devices must protect stressed terminals while remaining compatible with normal slew, supply and failsafe operation",
+      "evidence_pdf_pages": [
+        750,
+        751,
+        752,
+        769
+      ],
+      "detail": "Added §14.4.2 PDF769 for failsafe CDM; original span supports architectures but not that failsafe clause.",
+      "status": "corrected",
+      "citation_id": "CIT-0414",
+      "html": "topic-protection.html",
+      "section": "pro-esd",
+      "source": "hastings",
+      "original_pdf_start": 750,
+      "original_pdf_end_label": 752
+    },
+    {
+      "supported_claim": "Multifinger ESD conduction, ballasting and silicide/contact geometry require process qualification",
+      "evidence_pdf_pages": [
+        758,
+        759,
+        760,
+        761
+      ],
+      "detail": "Source cautions that simple ballast-only explanations are incomplete. Notes use structure-dependent language rather than universal width/current scaling.",
+      "status": "supported",
+      "citation_id": "CIT-0415",
+      "html": "topic-protection.html",
+      "section": "pro-esd",
+      "source": "hastings",
+      "original_pdf_start": 757,
+      "original_pdf_end_label": 761
+    },
+    {
+      "supported_claim": "Secondary protection, multifinger ballasting and reverse-BE avalanche degradation matter for analog accuracy",
+      "evidence_pdf_pages": [
+        765,
+        766,
+        767,
+        768,
+        769
+      ],
+      "detail": "Read direct mechanism passages. The 7V+IR+Ldi/dt example is independently derived and explicitly illustrative.",
+      "status": "qualified",
+      "citation_id": "CIT-0416",
+      "html": "topic-protection.html",
+      "section": "pro-esd",
+      "source": "hastings",
+      "original_pdf_start": 766,
+      "original_pdf_end_label": 769
+    },
+    {
+      "supported_claim": "Electromigration depends on local current, temperature, material, interfaces and waveform",
+      "evidence_pdf_pages": [
+        217,
+        218,
+        219,
+        220
+      ],
+      "detail": "Historical aluminum/tungsten waveform examples are not universal modern via-current limits. Notes retain this qualification.",
+      "status": "supported",
+      "citation_id": "CIT-0417",
+      "html": "topic-protection.html",
+      "section": "pro-lifetime",
+      "source": "hastings",
+      "original_pdf_start": 217,
+      "original_pdf_end_label": 220
+    },
+    {
+      "supported_claim": "Local neck/via current density can dominate reliability although total resistance integrates along the path",
+      "evidence_pdf_pages": [
+        821,
+        822
+      ],
+      "detail": "Visually checked Fig15.29. An inside-corner via array does not share current uniformly; straight transitions reduce the illustrated nonuniformity.",
+      "status": "supported",
+      "citation_id": "CIT-0418",
+      "html": "topic-protection.html",
+      "section": "pro-lifetime",
+      "source": "hastings",
+      "original_pdf_start": 821,
+      "original_pdf_end_label": 822
+    },
+    {
+      "supported_claim": "Dielectric breakdown has field, time, temperature and process dependence",
+      "evidence_pdf_pages": [
+        220,
+        221,
+        222,
+        223,
+        224,
+        820,
+        821
+      ],
+      "detail": "Added §15.4.4 PDF820–821 for maximum net-to-net voltage/spacing; TDDB pages alone did not justify that clause.",
+      "status": "corrected",
+      "citation_id": "CIT-0419",
+      "html": "topic-protection.html",
+      "section": "pro-lifetime",
+      "source": "hastings",
+      "original_pdf_start": 220,
+      "original_pdf_end_label": 224
+    },
+    {
+      "supported_claim": "Majority taps, minority-carrier collecting junctions and blocking barriers are distinct; depth, bias and continuity control guard effectiveness",
+      "evidence_pdf_pages": [
+        264,
+        265,
+        266,
+        267,
+        268,
+        269,
+        270
+      ],
+      "detail": "Read detailed §5.4.4, including qualified L/U collecting guards near die edges and closed blocking barriers. Does not imply every ring is interchangeable.",
+      "status": "supported",
+      "citation_id": "CIT-0420",
+      "html": "topic-protection.html",
+      "section": "source-isolation",
+      "source": "hastings",
+      "original_pdf_start": 256,
+      "original_pdf_end_label": 270
+    },
+    {
+      "supported_claim": "Guard choice and effectiveness depend on substrate doping, buried layers, depth, contact resistance and allowed bias",
+      "evidence_pdf_pages": [
+        735,
+        736,
+        737,
+        738,
+        741,
+        742
+      ],
+      "detail": "Source examples are strongly process dependent; numerical collection efficiencies are not copied as universal thresholds.",
+      "status": "supported",
+      "citation_id": "CIT-0421",
+      "html": "topic-protection.html",
+      "section": "source-isolation",
+      "source": "hastings",
+      "original_pdf_start": 735,
+      "original_pdf_end_label": 742
+    },
+    {
+      "supported_claim": "Device sharing can introduce minority-carrier injection, common-resistance debiasing and capacitively mediated errors",
+      "evidence_pdf_pages": [
+        723,
+        724,
+        725,
+        726,
+        727,
+        730,
+        731
+      ],
+      "detail": "Whitelist/re-extract transformation procedure is original synthesis. The source supports why schematic net equality alone is insufficient.",
+      "status": "qualified",
+      "citation_id": "CIT-0422",
+      "html": "topic-protection.html",
+      "section": "source-isolation",
+      "source": "hastings",
+      "original_pdf_start": 723,
+      "original_pdf_end_label": 734
+    },
+    {
+      "supported_claim": "Noisy isolated MOS transistors can inject into shared tanks and disturb sensitive circuits",
+      "evidence_pdf_pages": [
+        600
+      ],
+      "detail": "Read explicit warning about parasitic rectification and shared-tank coupling.",
+      "status": "supported",
+      "citation_id": "CIT-0423",
+      "html": "topic-protection.html",
+      "section": "source-isolation",
+      "source": "hastings",
+      "original_pdf_start": 600,
+      "original_pdf_end_label": 600
+    },
+    {
+      "supported_claim": "Resistor terminal behavior depends on temperature, voltage/body fields, self-heating, contact properties and process material",
+      "evidence_pdf_pages": [
+        289,
+        290,
+        291,
+        295
+      ],
+      "detail": "Checked passages supporting the mechanism summary; model-fitting and operating-scenario requirements are original synthesis.",
+      "status": "qualified",
+      "citation_id": "CIT-0436",
+      "html": "topic-resistors.html",
+      "section": "res-target",
+      "source": "hastings",
+      "original_pdf_start": 284,
+      "original_pdf_end_label": 295
+    },
+    {
+      "supported_claim": "Random variation, systematic biases, proximity and interconnect terms must not be collapsed into a single area law",
+      "evidence_pdf_pages": [
+        368,
+        369,
+        370,
+        371,
+        372,
+        373,
+        374,
+        375,
+        380,
+        381,
+        384,
+        385
+      ],
+      "detail": "Inverse-square-root area law is an areal-dominance approximation. Source includes peripheral contributions and process-specific coefficients.",
+      "status": "supported",
+      "citation_id": "CIT-0437",
+      "html": "topic-resistors.html",
+      "section": "res-target",
+      "source": "hastings",
+      "original_pdf_start": 368,
+      "original_pdf_end_label": 385
+    },
+    {
+      "supported_claim": "Effective resistor geometry includes width/length bias, contact/end terms, corners and conductivity modulation",
+      "evidence_pdf_pages": [
+        279,
+        280,
+        281,
+        282,
+        283,
+        289,
+        290,
+        291,
+        295
+      ],
+      "detail": "Eq6.10 gives 0.5587 squares for its ideal equal-width right-angle corner; not a process-independent corner model. Notes correctly distinguish identical-head cancellation from absolute error.",
+      "status": "supported",
+      "citation_id": "CIT-0438",
+      "html": "topic-resistors.html",
+      "section": "source-resistors",
+      "source": "hastings",
+      "original_pdf_start": 279,
+      "original_pdf_end_label": 295
+    },
+    {
+      "supported_claim": "Resistor matching actions must control material, geometry, surroundings, fields, stress, heat and every lead material contribution",
+      "evidence_pdf_pages": [
+        418,
+        419,
+        420,
+        421,
+        422
+      ],
+      "detail": "Checked source 25-rule catalog against the handbook mechanism table; table deliberately groups rules rather than duplicating names.",
+      "status": "supported",
+      "citation_id": "CIT-0439",
+      "html": "topic-resistors.html",
+      "section": "source-resistors",
+      "source": "hastings",
+      "original_pdf_start": 418,
+      "original_pdf_end_label": 422
+    },
+    {
+      "supported_claim": "Contact-temperature differences produce signed thermoelectric voltages that common-centroid placement alone cannot cancel",
+      "evidence_pdf_pages": [
+        401,
+        402
+      ],
+      "detail": "Visually checked Eq8.34 and Fig8.22; cancellation depends on connection direction and matched temperature drops, not merely even segment count.",
+      "status": "supported",
+      "citation_id": "CIT-0440",
+      "html": "topic-resistors.html",
+      "section": "source-resistors",
+      "source": "hastings",
+      "original_pdf_start": 401,
+      "original_pdf_end_label": 402
+    },
+    {
+      "supported_claim": "Resistor materials and trimming methods trade area, parasitics, power and stability",
+      "evidence_pdf_pages": [
+        295,
+        297,
+        300,
+        304,
+        312,
+        314,
+        317,
+        320,
+        322,
+        323
+      ],
+      "detail": "Checked relevant material/trim passages. A single-condition trim cannot generally remove other independent environmental errors; that limiting statement is synthesis, not a quoted universal source theorem.",
+      "status": "qualified",
+      "citation_id": "CIT-0441",
+      "html": "topic-resistors.html",
+      "section": "source-resistors",
+      "source": "hastings",
+      "original_pdf_start": 295,
+      "original_pdf_end_label": 323
+    },
+    {
+      "supported_claim": "Resistor matching actions must control material, geometry, surroundings, fields, stress, heat and every lead material contribution",
+      "evidence_pdf_pages": [
+        418,
+        419,
+        420,
+        421,
+        422
+      ],
+      "detail": "Checked source 25-rule catalog against the handbook mechanism table; table deliberately groups rules rather than duplicating names.",
+      "status": "supported",
+      "citation_id": "CIT-0442",
+      "html": "topic-resistors.html",
+      "section": "source-resistors",
+      "source": "hastings",
+      "original_pdf_start": 418,
+      "original_pdf_end_label": 422
+    },
+    {
+      "supported_claim": "General resistor-network centroid uses electrical sensitivity weights, not an unweighted bounding-box center",
+      "evidence_pdf_pages": [
+        390
+      ],
+      "detail": "Visually checked Eqs8.24–8.25. Source example uses identical nominal resistor units and weights ∂Req/∂Ri. Ri∂Req/∂Ri for fractional perturbations is an explicitly derived extension.",
+      "status": "supported",
+      "citation_id": "CIT-0443",
+      "html": "topic-resistors.html",
+      "section": "res-weighting",
+      "source": "hastings",
+      "original_pdf_start": 390,
+      "original_pdf_end_label": 390
+    },
+    {
+      "supported_claim": "Segment size and segment-count sensitivity matter, especially for arbitrary ratios and partial segments",
+      "evidence_pdf_pages": [
+        394,
+        395,
+        396,
+        397,
+        398,
+        399
+      ],
+      "detail": "Worked 10k:15k example is a simple 2:3 ratio. Renamed heading to segment-count sensitivity rather than presenting it as hard noninteger-ratio synthesis.",
+      "status": "corrected",
+      "citation_id": "CIT-0444",
+      "html": "topic-resistors.html",
+      "section": "res-segmentation",
+      "source": "hastings",
+      "original_pdf_start": 394,
+      "original_pdf_end_label": 399
+    },
+    {
+      "supported_claim": "Qualitative matching recommendations cannot establish a calibrated ppm prediction without measurement",
+      "evidence_pdf_pages": [
+        426
+      ],
+      "detail": "Read §8.4 directly; algorithm proposal is explicitly distinguished from source implementation.",
+      "status": "supported",
+      "citation_id": "CIT-0445",
+      "html": "topic-resistors.html",
+      "section": "res-algorithm",
+      "source": "hastings",
+      "original_pdf_start": 426,
+      "original_pdf_end_label": 426
+    },
+    {
+      "supported_claim": "Inductor performance depends on winding resistance, frequency effects, substrate/metal surroundings, shielding and parasitic capacitance",
+      "evidence_pdf_pages": [
+        358,
+        359,
+        360,
+        361,
+        362,
+        363
+      ],
+      "detail": "§7.2.1–2 supports EM-environment constraints. Q≈ωL/R and the ideal LC resonance example are stated as simplified circuit estimates, not as a universal extracted model.",
+      "status": "qualified",
+      "citation_id": "CIT-0446",
+      "html": "topic-rf.html",
+      "section": "rf-inductor",
+      "source": "hastings",
+      "original_pdf_start": 355,
+      "original_pdf_end_label": 363
+    },
+    {
+      "supported_claim": "Inductor performance depends on winding resistance, frequency effects, substrate/metal surroundings, shielding and parasitic capacitance",
+      "evidence_pdf_pages": [
+        358,
+        359,
+        360,
+        361,
+        362,
+        363
+      ],
+      "detail": "§7.2.1–2 supports EM-environment constraints. Q≈ωL/R and the ideal LC resonance example are stated as simplified circuit estimates, not as a universal extracted model.",
+      "status": "qualified",
+      "citation_id": "CIT-0447",
+      "html": "topic-rf.html",
+      "section": "source-rf-power",
+      "source": "hastings",
+      "original_pdf_start": 355,
+      "original_pdf_end_label": 363
+    },
+    {
+      "supported_claim": "Power bipolar devices require debiasing, ballast and electrothermal/SOA analysis appropriate to their switching regime",
+      "evidence_pdf_pages": [
+        485,
+        486,
+        487,
+        488,
+        489,
+        490
+      ],
+      "detail": "Checked central power-device mechanisms. Broad source span also covers detailed structures not reproduced in notes.",
+      "status": "qualified",
+      "citation_id": "CIT-0448",
+      "html": "topic-rf.html",
+      "section": "source-rf-power",
+      "source": "hastings",
+      "original_pdf_start": 485,
+      "original_pdf_end_label": 505
+    },
+    {
+      "supported_claim": "MOS power layouts combine silicon/metal/package R, distributed gate delay, body resistance, SOA and SenseFET environment",
+      "evidence_pdf_pages": [
+        645,
+        646,
+        650,
+        652,
+        653,
+        654,
+        655,
+        659,
+        660,
+        661,
+        662,
+        667,
+        668
+      ],
+      "detail": "Source-backed mechanism survey. The approximate distributed-finger equation is separately audited; SenseFET pattern proposals require extraction and bias/thermal equivalence.",
+      "status": "qualified",
+      "citation_id": "CIT-0449",
+      "html": "topic-rf.html",
+      "section": "source-rf-power",
+      "source": "hastings",
+      "original_pdf_start": 644,
+      "original_pdf_end_label": 668
+    },
+    {
+      "supported_claim": "A uniform distributed, singly terminated finger has small-debiasing added metal resistance about one third of end-to-end wire resistance",
+      "evidence_pdf_pages": [
+        650,
+        652,
+        653,
+        654,
+        655,
+        871,
+        872
+      ],
+      "detail": "Visually checked AppendixE. E.6 sign, E.8 conductance prefactor and E.14 missing square root are apparent source inconsistencies; corrected model derived from E.3–E.4 and agrees with E.9. Source errata are unconfirmed by publisher.",
+      "status": "corrected",
+      "citation_id": "CIT-0450",
+      "html": "topic-rf.html",
+      "section": "source-rf-power",
+      "source": "hastings",
+      "original_pdf_start": 650,
+      "original_pdf_end_label": 664
+    },
+    {
+      "supported_claim": "A uniform distributed, singly terminated finger has small-debiasing added metal resistance about one third of end-to-end wire resistance",
+      "evidence_pdf_pages": [
+        650,
+        652,
+        653,
+        654,
+        655,
+        871,
+        872
+      ],
+      "detail": "Visually checked AppendixE. E.6 sign, E.8 conductance prefactor and E.14 missing square root are apparent source inconsistencies; corrected model derived from E.3–E.4 and agrees with E.9. Source errata are unconfirmed by publisher.",
+      "status": "corrected",
+      "citation_id": "CIT-0451",
+      "html": "topic-rf.html",
+      "section": "source-rf-power",
+      "source": "hastings",
+      "original_pdf_start": 870,
+      "original_pdf_end_label": 876
+    },
+    {
+      "supported_claim": "Annular, EEPROM and JFET structures require their own process-qualified geometry and operating constraints",
+      "evidence_pdf_pages": [
+        616,
+        617,
+        624,
+        628,
+        630,
+        632,
+        633,
+        634,
+        635,
+        636
+      ],
+      "detail": "Broad specialty survey checked by relevant passages, not a full construction manual.",
+      "status": "qualified",
+      "citation_id": "CIT-0452",
+      "html": "topic-rf.html",
+      "section": "source-rf-power",
+      "source": "hastings",
+      "original_pdf_start": 616,
+      "original_pdf_end_label": 639
+    },
+    {
+      "supported_claim": "High-voltage MOS operation depends on drift regions, field distribution, body/isolation and safe operating area",
+      "evidence_pdf_pages": [
+        669,
+        670,
+        671,
+        672,
+        673,
+        684,
+        685
+      ],
+      "detail": "Checked physical argument and device construction constraints, not every high-voltage example. Automatic transformations remain PDK-qualified.",
+      "status": "qualified",
+      "citation_id": "CIT-0453",
+      "html": "topic-rf.html",
+      "section": "source-rf-power",
+      "source": "hastings",
+      "original_pdf_start": 669,
+      "original_pdf_end_label": 685
+    },
+    {
+      "supported_claim": "Power bipolar devices require debiasing, ballast and electrothermal/SOA analysis appropriate to their switching regime",
+      "evidence_pdf_pages": [
+        485,
+        486,
+        487,
+        488,
+        489,
+        490
+      ],
+      "detail": "Checked central power-device mechanisms. Broad source span also covers detailed structures not reproduced in notes.",
+      "status": "qualified",
+      "citation_id": "CIT-0454",
+      "html": "topic-rf.html",
+      "section": "rf-specialty",
+      "source": "hastings",
+      "original_pdf_start": 485,
+      "original_pdf_end_label": 505
+    },
+    {
+      "supported_claim": "High-voltage MOS operation depends on drift regions, field distribution, body/isolation and safe operating area",
+      "evidence_pdf_pages": [
+        669,
+        670,
+        671,
+        672,
+        673,
+        684,
+        685
+      ],
+      "detail": "Checked physical argument and device construction constraints, not every high-voltage example. Automatic transformations remain PDK-qualified.",
+      "status": "qualified",
+      "citation_id": "CIT-0455",
+      "html": "topic-rf.html",
+      "section": "rf-specialty",
+      "source": "hastings",
+      "original_pdf_start": 669,
+      "original_pdf_end_label": 685
+    },
+    {
+      "supported_claim": "Annular geometry changes source/drain capacitance balance and effective geometry",
+      "evidence_pdf_pages": [
+        616,
+        617
+      ],
+      "detail": "Checked annular-device subsection. Notes do not transpose rectangular W/L or freely swap terminal roles.",
+      "status": "qualified",
+      "citation_id": "CIT-0456",
+      "html": "topic-rf.html",
+      "section": "rf-specialty",
+      "source": "hastings",
+      "original_pdf_start": 616,
+      "original_pdf_end_label": 622
+    },
+    {
+      "supported_claim": "JFET electrical geometry and pinchoff depend on the actual process/doping construction",
+      "evidence_pdf_pages": [
+        633,
+        634,
+        635,
+        636
+      ],
+      "detail": "The notes treat model and body-junction constraints as process-specific, not as MOS rectangle substitutions.",
+      "status": "qualified",
+      "citation_id": "CIT-0457",
+      "html": "topic-rf.html",
+      "section": "rf-specialty",
+      "source": "hastings",
+      "original_pdf_start": 633,
+      "original_pdf_end_label": 639
+    },
+    {
+      "supported_claim": "EEPROM core layouts and programming conditions are tied to tested retention/endurance",
+      "evidence_pdf_pages": [
+        632
+      ],
+      "detail": "PDF632 explicitly requires core devices to match reliability-tested reference layouts; earlier NVM mechanisms sampled.",
+      "status": "qualified",
+      "citation_id": "CIT-0458",
+      "html": "topic-rf.html",
+      "section": "rf-specialty",
+      "source": "hastings",
+      "original_pdf_start": 623,
+      "original_pdf_end_label": 632
+    }
+  ],
+  "corrections": [
+    {
+      "files": [
+        "hastings",
+        "topic-mos-layout"
+      ],
+      "issue": "LOD figure mislocated at physical PDF697",
+      "change": "Preserved discussion697; added exact Figure13.52 locator698.",
+      "evidence_pdf_pages": [
+        697,
+        698
+      ]
+    },
+    {
+      "files": [
+        "topic-mos-layout"
+      ],
+      "issue": "Accessible SVG description contradicted arrow counts",
+      "change": "Description now says A has3 right/1 left and B1 right/3 left, matching drawing and signed means±1/2.",
+      "evidence_pdf_pages": [
+        709
+      ]
+    },
+    {
+      "files": [
+        "topic-bipolar-diodes"
+      ],
+      "issue": "SVG description called ABBA assignment alternating",
+      "change": "Corrected description to ABBA.",
+      "evidence_pdf_pages": []
+    },
+    {
+      "files": [
+        "hastings",
+        "topic-fabrication"
+      ],
+      "issue": "Process paragraph cited front-end pages for contacts and CMP",
+      "change": "Added §2.7 physical PDF99–110.",
+      "evidence_pdf_pages": [
+        99,
+        104,
+        105,
+        110
+      ]
+    },
+    {
+      "files": [
+        "topic-floorplanning"
+      ],
+      "issue": "Hierarchy-only citation used to support rotation/physics constraints",
+      "change": "Added precise grouping783, relative orientation691 and package/thermal715 locators.",
+      "evidence_pdf_pages": [
+        783,
+        691,
+        715
+      ]
+    },
+    {
+      "files": [
+        "hastings",
+        "topic-rf"
+      ],
+      "issue": "Apparent AppendixE source errors extended beyond known E.14 sqrt omission",
+      "change": "Added E.6 second-term sign and E.8 G/γ prefactor issues; retained exact RSi u coth(u) derived from governing ODEs and agreeing with E.9. Clearly labeled audit algebra, not publisher erratum.",
+      "evidence_pdf_pages": [
+        871,
+        872
+      ]
+    },
+    {
+      "files": [
+        "hastings",
+        "topic-bipolar-diodes"
+      ],
+      "issue": "Schottky forward-injection claim lacked direct locator and ring type precision",
+      "change": "Named field-relief guard junction and added §11.2 physical PDF563.",
+      "evidence_pdf_pages": [
+        563
+      ]
+    },
+    {
+      "files": [
+        "topic-protection"
+      ],
+      "issue": "Failsafe discussion not supported by architecture-only pp750–752",
+      "change": "Added §14.4.2 PDF769.",
+      "evidence_pdf_pages": [
+        769
+      ]
+    },
+    {
+      "files": [
+        "topic-protection"
+      ],
+      "issue": "Maximum differential-voltage spacing not supported by TDDB-only pp220–224",
+      "change": "Added §15.4.4 PDF820–821.",
+      "evidence_pdf_pages": [
+        820,
+        821
+      ]
+    },
+    {
+      "files": [
+        "topic-resistors"
+      ],
+      "issue": "Simple2:3 numerical example labeled noninteger-ratio synthesis",
+      "change": "Renamed heading to segment-count sensitivity in a ratioed pair.",
+      "evidence_pdf_pages": [
+        394,
+        395,
+        396,
+        397,
+        398,
+        399
+      ]
+    },
+    {
+      "files": [
+        "topic-fabrication"
+      ],
+      "issue": "Unsupported statement about author reason for retaining old processes",
+      "change": "Replaced intent attribution with stated archetypes and AppendixC historical-example disclaimer.",
+      "evidence_pdf_pages": [
+        154,
+        836
+      ]
+    },
+    {
+      "files": [
+        "topic-manufacturability",
+        "hastings"
+      ],
+      "issue": "Two range labels opened at a later page than the displayed first page",
+      "change": "703–704 now anchors703;392–394 now anchors392.",
+      "evidence_pdf_pages": [
+        703,
+        704,
+        392,
+        393,
+        394
+      ]
+    },
+    {
+      "files": [
+        "topic-protection"
+      ],
+      "issue": "Unequal operating-history aging paragraph lacked direct local reference",
+      "change": "Added HCI §5.3.1 PDF236–238 and NBTI/PBTI §5.3.4 PDF243–244; implications for differential mismatch are synthesis.",
+      "evidence_pdf_pages": [
+        236,
+        238,
+        243,
+        244
+      ]
+    }
+  ],
+  "page_reviews": [
+    {
+      "html": "hastings.html",
+      "sections_reviewed": [
+        "coverage",
+        "optimality",
+        "process",
+        "matching-model",
+        "resistors",
+        "capacitors",
+        "mos",
+        "bipolar-diodes",
+        "rf-power",
+        "protection",
+        "isolation",
+        "routing-floorplan",
+        "validation"
+      ],
+      "excluded_sections": [
+        "engine-map"
+      ],
+      "scope": "Theory, causal qualifiers, worked arithmetic, original schematic SVG meaning and attached Hastings citations. Existing-code observations were outside this task; no Philis code was audited.",
+      "outcome": "Corrections applied to owned body fragment; source-supported physics distinguished from derived engine proposals. Not an exhaustive proof of the textbook or handbook."
+    },
+    {
+      "html": "topic-fabrication.html",
+      "sections_reviewed": [
+        "fab-purpose",
+        "source-process",
+        "fab-effective",
+        "fab-translation",
+        "fab-boundaries"
+      ],
+      "excluded_sections": [],
+      "scope": "Theory, causal qualifiers, worked arithmetic, original schematic SVG meaning and attached Hastings citations. Existing-code observations were outside this task; no Philis code was audited.",
+      "outcome": "Corrections applied to owned body fragment; source-supported physics distinguished from derived engine proposals. Not an exhaustive proof of the textbook or handbook."
+    },
+    {
+      "html": "topic-mos-layout.html",
+      "sections_reviewed": [
+        "mos-objective",
+        "source-mos",
+        "mos-worked",
+        "mos-gradient",
+        "mos-validate"
+      ],
+      "excluded_sections": [],
+      "scope": "Theory, causal qualifiers, worked arithmetic, original schematic SVG meaning and attached Hastings citations. Existing-code observations were outside this task; no Philis code was audited.",
+      "outcome": "Corrections applied to owned body fragment; source-supported physics distinguished from derived engine proposals. Not an exhaustive proof of the textbook or handbook."
+    },
+    {
+      "html": "topic-resistors.html",
+      "sections_reviewed": [
+        "res-target",
+        "source-resistors",
+        "res-weighting",
+        "res-segmentation",
+        "res-algorithm"
+      ],
+      "excluded_sections": [],
+      "scope": "Theory, causal qualifiers, worked arithmetic, original schematic SVG meaning and attached Hastings citations. Existing-code observations were outside this task; no Philis code was audited.",
+      "outcome": "Corrections applied to owned body fragment; source-supported physics distinguished from derived engine proposals. Not an exhaustive proof of the textbook or handbook."
+    },
+    {
+      "html": "topic-bipolar-diodes.html",
+      "sections_reviewed": [
+        "bjt-objective",
+        "source-bipolar-diodes",
+        "bjt-example",
+        "bjt-guards",
+        "bjt-procedure"
+      ],
+      "excluded_sections": [],
+      "scope": "Theory, causal qualifiers, worked arithmetic, original schematic SVG meaning and attached Hastings citations. Existing-code observations were outside this task; no Philis code was audited.",
+      "outcome": "Corrections applied to owned body fragment; source-supported physics distinguished from derived engine proposals. Not an exhaustive proof of the textbook or handbook."
+    },
+    {
+      "html": "topic-capacitor-devices.html",
+      "sections_reviewed": [
+        "cap-function",
+        "source-capacitors",
+        "cap-worked",
+        "cap-size",
+        "cap-shield",
+        "cap-evidence"
+      ],
+      "excluded_sections": [],
+      "scope": "Theory, causal qualifiers, worked arithmetic, original schematic SVG meaning and attached Hastings citations. Existing-code observations were outside this task; no Philis code was audited.",
+      "outcome": "Corrections applied to owned body fragment; source-supported physics distinguished from derived engine proposals. Not an exhaustive proof of the textbook or handbook."
+    },
+    {
+      "html": "topic-manufacturability.html",
+      "sections_reviewed": [
+        "mfg-feasible",
+        "mfg-primitives",
+        "mfg-route",
+        "mfg-final",
+        "mfg-evidence",
+        "manuf-scenarios"
+      ],
+      "excluded_sections": [],
+      "scope": "Theory, causal qualifiers, worked arithmetic, original schematic SVG meaning and attached Hastings citations. Existing-code observations were outside this task; no Philis code was audited.",
+      "outcome": "Corrections applied to owned body fragment; source-supported physics distinguished from derived engine proposals. Not an exhaustive proof of the textbook or handbook."
+    },
+    {
+      "html": "topic-protection.html",
+      "sections_reviewed": [
+        "pro-purpose",
+        "source-protection",
+        "pro-antenna",
+        "pro-esd",
+        "pro-lifetime",
+        "source-isolation",
+        "pro-evidence"
+      ],
+      "excluded_sections": [],
+      "scope": "Theory, causal qualifiers, worked arithmetic, original schematic SVG meaning and attached Hastings citations. Existing-code observations were outside this task; no Philis code was audited.",
+      "outcome": "Corrections applied to owned body fragment; source-supported physics distinguished from derived engine proposals. Not an exhaustive proof of the textbook or handbook."
+    },
+    {
+      "html": "topic-floorplanning.html",
+      "sections_reviewed": [
+        "floor-purpose",
+        "floor-hierarchy",
+        "floor-die",
+        "floor-corridors",
+        "source-routing-floorplan",
+        "floor-workflow",
+        "floor-qualification"
+      ],
+      "excluded_sections": [],
+      "scope": "Theory, causal qualifiers, worked arithmetic, original schematic SVG meaning and attached Hastings citations. Existing-code observations were outside this task; no Philis code was audited.",
+      "outcome": "Corrections applied to owned body fragment; source-supported physics distinguished from derived engine proposals. Not an exhaustive proof of the textbook or handbook."
+    },
+    {
+      "html": "topic-rf.html",
+      "sections_reviewed": [
+        "rf-contract",
+        "rf-inductor",
+        "source-rf-power",
+        "rf-one-third",
+        "rf-specialty",
+        "rf-proof"
+      ],
+      "excluded_sections": [],
+      "scope": "Theory, causal qualifiers, worked arithmetic, original schematic SVG meaning and attached Hastings citations. Existing-code observations were outside this task; no Philis code was audited.",
+      "outcome": "Corrections applied to owned body fragment; source-supported physics distinguished from derived engine proposals. Not an exhaustive proof of the textbook or handbook."
+    }
+  ],
+  "unresolved": [
+    "No claim of full accuracy or complete exhaustive textbook coverage is justified. The audit covers the stated handbook claims and selected source passages, with broad survey references marked qualified.",
+    "Apparent AppendixE E.6/E.8/E.14 errors were found by equation/dimensional checks; publisher confirmation or an errata sheet was not obtained. Use the explicitly derived consistent model.",
+    "PDK/device/package-specific magnitudes, signs, limits and coefficient fits remain external evidence requirements. Textbook examples cannot serve as foundry qualification.",
+    "Many handbook structures—scenario ledgers, dependency invalidation, optimization schemas and suggested algorithms—are original synthesis from physical mechanisms. They must not be cited as an algorithm implemented or proven in Hastings.",
+    "The specialty RF/HV/JFET/EEPROM and historical-process material is a survey of layout implications, not an exhaustive construction manual. Do not infer qualified generators or full coverage of every device variant.",
+    "No direct Hastings source for sampled kT/C noise or 4kTR was found in searchable text. Do not attribute those equations to this source without another verified locator.",
+    "No direct Hastings formula P/(2πκr) was found. Fourier Eq8.22 provides governing context, but half-space point-source assumptions and integration must be stated as a derivation."
+  ],
+  "material_omissions": "No omitted Hastings matching-rule category was found in the audited resistor/capacitor/MOS catalogs. This does not establish that every relevant source topic is fully taught. Detailed RF electromagnetic construction, every process recipe, all specialized HV/ESD structures and PDK qualification remain intentionally survey-level.",
+  "theory_records": [
+    {
+      "id": "H01",
+      "title": "Random matching is not one universal area law",
+      "claim": "Separate statistical variation from systematic offsets; areal and peripheral variation contribute differently, with inverse-square-root area only in the areal-dominant regime.",
+      "source": "hastings",
+      "pdf_pages": [
+        368,
+        371,
+        372,
+        373,
+        374
+      ],
+      "locator": "§8.1; §8.2.1 Random Variation, Eqs8.6–8.10",
+      "assumptions": "Process/material/model coefficients and valid device dimensions must be characterized; differently sized units can be dominated by the smaller unit.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H02",
+      "title": "Electrical sensitivity defines the relevant centroid",
+      "claim": "A resistor-network centroid is weighted by its sensitivity to unit resistance, rather than by cell outline or instance count.",
+      "source": "hastings",
+      "pdf_pages": [
+        390
+      ],
+      "locator": "§8.2.7 Temperature, Eqs8.24–8.25",
+      "assumptions": "Source example uses identical nominal resistors subject to equal absolute perturbation. A fractional perturbation generalization weights Ri·∂Req/∂Ri and is a chain-rule extension, not Eq8.24 verbatim.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H03",
+      "title": "Common centroid has conditions and implementation costs",
+      "claim": "Coincidence, symmetry, compactness and balanced subarrays reduce specified gradient errors; excessive segmentation can reduce active area and worsen random matching.",
+      "source": "hastings",
+      "pdf_pages": [
+        392,
+        393,
+        394
+      ],
+      "locator": "§8.2.7, Table8.4 and discussion following Table8.4",
+      "assumptions": "Linear-field cancellation is first order. Curved fields, routing/end terms and fixed footprint require a separate error budget; no-gradient cases gain no gradient benefit.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H04",
+      "title": "MOS signed orientation must match",
+      "claim": "For identical MOS sections with horizontal channel current, orientation is the mean of ±1 current directions. Matched arrays require equal signed means; equal nonzero means are allowed.",
+      "source": "hastings",
+      "pdf_pages": [
+        708,
+        709
+      ],
+      "locator": "§13.2.5 Gradients, Eq13.61 and Table13.2",
+      "assumptions": "Identical unit sections and electrical terminal directions; in two dimensions compare both components. Relative geometric rotation alone is insufficient.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H05",
+      "title": "MOS current matching depends on bias and geometry",
+      "claim": "Long-channel saturation has ID=kVov²/2, gm=√(2kID), k=k′We/Le; the mismatch observable differs between fixed gate voltage and fixed drain current.",
+      "source": "hastings",
+      "pdf_pages": [
+        576,
+        577,
+        584,
+        585,
+        686,
+        687,
+        688,
+        689,
+        690
+      ],
+      "locator": "§12.1 Eqs12.3–12.4; §12.1.1 Eqs12.6–12.9; §12.1.3 limits; §13.2 and §13.2.1",
+      "assumptions": "Strong inversion, long-channel model; ignore CLM/velocity saturation only when justified. Use effective rather than blindly drawn geometry. Current/gate bias assumptions must accompany derived sensitivities.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H06",
+      "title": "WPE and LOD encode different local environments",
+      "claim": "Well implant scattering, trench stress and length-of-diffusion/end geometry can change otherwise nominally identical MOS devices.",
+      "source": "hastings",
+      "pdf_pages": [
+        695,
+        696,
+        697,
+        698
+      ],
+      "locator": "§13.2.2 Diffusion, Implantation, Etch, and Trench Effects; Figs13.49–13.52",
+      "assumptions": "PDK-specific mechanism magnitude/sign and device polarity; preserve actual edge distances or qualified dummies. Fig13.52 is physical PDF698.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H07",
+      "title": "Dummies need process and electrical meaning",
+      "claim": "Matched MOS edges require suitable gate/dummy neighborhood and overhang; half/full dummies and inactive terminal ties are not interchangeable.",
+      "source": "hastings",
+      "pdf_pages": [
+        692,
+        693,
+        713,
+        714
+      ],
+      "locator": "§13.2.2, Figs13.45–13.46; §13.3 dummy recommendations",
+      "assumptions": "Use qualified dummy extent/pitch and safe terminal bias. Added rectangles do not automatically reproduce the active device environment.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H08",
+      "title": "Metal fill can perturb passivation and matching",
+      "claim": "Metal above or near matched MOS regions can change hydrogenation/passivation and environmental symmetry.",
+      "source": "hastings",
+      "pdf_pages": [
+        702,
+        703,
+        704,
+        716
+      ],
+      "locator": "§13.2.4 Hydrogenation; §13.3 rules17–18",
+      "assumptions": "Process-dependent hydrogen transport/material stack; source numerical distances and preferences are not generic modern-node mandates. Fill also has extraction-dependent electrical effects. Handbook workflow implication: final fill must be included when rechecking affected geometry and electrical behavior; that lifecycle policy is our derivation from the physical mechanism.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H09",
+      "title": "Resistor physical geometry includes end and corner terms",
+      "claim": "Unequal widths turn common process bias into ratio error; contacts/heads/corners must be matched or modeled. An ideal equal-width right-angle corner is 0.5587 squares.",
+      "source": "hastings",
+      "pdf_pages": [
+        279,
+        280,
+        281,
+        282,
+        374
+      ],
+      "locator": "§6.2 Resistor Layout, Eqs6.5–6.10; §8.2.2 Eq8.18",
+      "assumptions": "The corner result assumes the source ideal sheet/current-boundary geometry. Real contact and process-biased corners require calibrated models; identical systematic heads can cancel.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H10",
+      "title": "Thermoelectric cancellation is a connection problem",
+      "claim": "ET=SΔTC describes the net contact-temperature EMF; series sections can add or cancel it depending on electrical traversal. Common-centroid placement alone cannot cancel it.",
+      "source": "hastings",
+      "pdf_pages": [
+        401,
+        402
+      ],
+      "locator": "§8.2.7, Eq8.34 and Figs8.22–8.23",
+      "assumptions": "Matched material Seebeck behavior and temperature drops; opposite path directions must be paired. An even segment count alone does not guarantee cancellation in an arbitrary field.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H11",
+      "title": "Precision resistor leads must scale by material",
+      "claim": "Metal, contact and via contributions can change an intended resistor ratio; for ratioed devices each material contribution should preserve the ratio or be budgeted separately.",
+      "source": "hastings",
+      "pdf_pages": [
+        380,
+        381,
+        422
+      ],
+      "locator": "§8.2.4 Interconnection Parasitics; §8.3.1 rule23",
+      "assumptions": "Different lead materials have different temperature coefficients. Equal body R ratios or equal route lengths alone do not establish terminal ratios.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H12",
+      "title": "Capacitor ratios need perimeter and topology control",
+      "claim": "Identical parallel units control ratio errors from area and periphery; series interconnection introduces different electrode-parasitic behavior.",
+      "source": "hastings",
+      "pdf_pages": [
+        374,
+        375,
+        423
+      ],
+      "locator": "§8.2.2 Process Biases; §8.3.2 rules1–3",
+      "assumptions": "Fixed capacitor family and actual plate connections; nonunit geometries must match sensitivity rather than merely nominal C.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H13",
+      "title": "Capacitor plate roles and surroundings matter",
+      "claim": "Capacitor electrodes can have asymmetric substrate/interconnect parasitics; edge dummies and shields need intentional quiet connections and balanced surroundings.",
+      "source": "hastings",
+      "pdf_pages": [
+        339,
+        340,
+        378,
+        424,
+        425
+      ],
+      "locator": "§7.1 MOS capacitor construction; §8.2.3 Fig8.5; §8.3.2 rules5–10",
+      "assumptions": "Real terminal roles, finite shield impedance, bias and surrounding noise matter. Dummies cannot be assigned arbitrary floating or noisy potentials.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H14",
+      "title": "BJT matching is device-family specific",
+      "claim": "Vertical emitters, lateral emitter perimeters, beta/base-current errors, collector bias and thermal gradients demand different matching checks.",
+      "source": "hastings",
+      "pdf_pages": [
+        506,
+        507,
+        508,
+        509,
+        522,
+        523,
+        526,
+        527,
+        528,
+        529
+      ],
+      "locator": "§10.2.1–3; §10.2.6; §10.3.1–2",
+      "assumptions": "Identify matched observable and operating region; same total area does not make a lateral device equivalent, and reverse-BE stress can degrade accuracy.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H15",
+      "title": "Do not merge diode matching models",
+      "claim": "PN current definition, Schottky field/barrier construction and nonuniform Zener avalanche produce different matching/injection behavior.",
+      "source": "hastings",
+      "pdf_pages": [
+        563,
+        565,
+        566,
+        567,
+        568,
+        569,
+        570
+      ],
+      "locator": "§11.2 Schottky field-relief discussion; §11.3.1–3 diode matching",
+      "assumptions": "Schottky guard-junction forward bias can inject minority carriers; Zener segments may current-hog. Do not assume ordinary unit-area averaging applies to avalanche.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H16",
+      "title": "Antenna checking follows fabrication stages",
+      "claim": "Plasma damage depends on the conductive geometry connected to a gate during each process stage; later-layer jumpers and protective diodes address different exposed-node situations.",
+      "source": "hastings",
+      "pdf_pages": [
+        228,
+        229,
+        230
+      ],
+      "locator": "§5.1.6 The Antenna Effect",
+      "assumptions": "Foundry defines gate denominator, exposed area/perimeter, layer accumulation and diode credit. Final net connectivity is insufficient; stage-graph implementation is handbook synthesis.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H17",
+      "title": "Guard rings require carrier, depth and return-path context",
+      "claim": "Collecting PN junctions, high-low blocking regions and majority taps have different functions; minority carriers can bypass shallow guards or debias weak returns.",
+      "source": "hastings",
+      "pdf_pages": [
+        264,
+        265,
+        266,
+        267,
+        268,
+        269,
+        270,
+        736,
+        737,
+        738,
+        741
+      ],
+      "locator": "§5.4.4 Guard Rings; §14.2.1–5 process examples",
+      "assumptions": "Qualified geometry/bias/substrate stack required. Blocking guards need appropriate complete 3D barriers; special collecting L/U guards near die edges are not generalized to blockers.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H18",
+      "title": "ESD protection must coordinate actual terminal voltages",
+      "claim": "Clipping, snapback and rate-triggered protectors require different operating constraints; secondary protection must use the vulnerable device local reference and qualified limiting paths.",
+      "source": "hastings",
+      "pdf_pages": [
+        750,
+        751,
+        752,
+        765,
+        766,
+        767,
+        768,
+        769
+      ],
+      "locator": "§14.4.1 Primary Protection; §14.4.2 Secondary Protection, Fig14.36",
+      "assumptions": "Normal supply/slew/failsafe conditions, stress polarity and tested cell topology matter. Multifinger width does not imply uniform current; local ballast may be intentional.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H19",
+      "title": "Local current density sets reliability bottlenecks",
+      "claim": "Via arrays and bent leads need current-distribution analysis: inner-corner vias can carry far more current than outer ones.",
+      "source": "hastings",
+      "pdf_pages": [
+        217,
+        218,
+        219,
+        220,
+        821,
+        822
+      ],
+      "locator": "§5.1.3 Electromigration; §15.4.4, Eqs15.24–15.25 and Fig15.29",
+      "assumptions": "Foundry lifetime model, material/interface, local temperature and waveform determine limits. Total via count and average wire width are insufficient.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H20",
+      "title": "Physical Kelvin junctions and victim impedance matter",
+      "claim": "Shared-path voltage drops persist on one named net; capacitive disturbance depends on aggressor slew and victim impedance, while shields need an effective reference.",
+      "source": "hastings",
+      "pdf_pages": [
+        818,
+        819,
+        820
+      ],
+      "locator": "§15.4.4 Special Routing Techniques, Figs15.26–15.28 and Eq15.23",
+      "assumptions": "Use actual branch topology and local references. Eq15.23 is a simplified lumped relation; frequency-dependent impedances and return paths may require extraction.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H21",
+      "title": "Manufacturable pitch includes enclosure and registration",
+      "claim": "Design-rule margins account for fabrication deviations; routing pitch must allow legal via/contact landing geometry, not only drawn line width plus nominal line spacing.",
+      "source": "hastings",
+      "pdf_pages": [
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        812,
+        813,
+        814,
+        836
+      ],
+      "locator": "§3.2.3 Design Rule Construction; §15.4.2 Eqs15.18–15.20; AppendixC disclaimer",
+      "assumptions": "Numeric textbook rules are teaching examples. Use actual PDK shape/grid/stacking rules and qualified waivers; geometry needs to be checked after generation.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H22",
+      "title": "Exact distributed-finger model before the one-third limit",
+      "claim": "For constant r,g and a singly terminated finger of length L, Rtotal=RSi·u·coth(u), u=L√(rg); small u gives added metal R≈rL/3.",
+      "source": "hastings",
+      "pdf_pages": [
+        650,
+        871,
+        872
+      ],
+      "locator": "§13.1.1 Eq13.11; AppendixE EqsE.1–E.4, E.7, E.9–E.13",
+      "assumptions": "Uniform geometry and distributed silicon conductance; v(0)=V, i(L)=0. Not a generic bound for tapered/strongly nonuniform devices. Supplied E.6 sign, E.8 prefactor and E.14 sqrt appear inconsistent.",
+      "kind": "derived",
+      "derivation_if_any": "Solve v′=−ri and i′=−gv with open far-end boundary: i(0)=√(g/r)V tanh(L√(rg)); invert and use g=1/(LRSi). Expand ucothu=1+u²/3−u⁴/45+…. This agrees with source E.9; correction is audit algebra, not publisher-confirmed erratum."
+    },
+    {
+      "id": "H23",
+      "title": "RF passive surroundings are part of the device",
+      "claim": "Skin/proximity loss, eddy currents, capacitance and surrounding metal determine frequency-dependent inductor quality; patterned shields must interrupt induced loops.",
+      "source": "hastings",
+      "pdf_pages": [
+        358,
+        359,
+        360,
+        361,
+        362,
+        363
+      ],
+      "locator": "§7.2.1 Inductor Parasitics and §7.2.2 Inductor Construction",
+      "assumptions": "Use frequency-dependent port/EM models and qualified fill exclusions. Parallel metal stacking differs from series winding layers; more turns/width is not universally better.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H24",
+      "title": "Power MOS layout needs dynamic and thermal checks",
+      "claim": "Distributed gate resistance/capacitance causes nonuniform switching; body resistance and electrothermal feedback can localize current even when on-resistance has a positive temperature coefficient in another regime.",
+      "source": "hastings",
+      "pdf_pages": [
+        652,
+        653,
+        654,
+        655,
+        659,
+        660,
+        667,
+        668
+      ],
+      "locator": "§13.1.2 Switching Losses, Eqs13.21–13.23/Figs13.8–13.10; §13.1.3 SOA; §13.1.4 SenseFET discussion",
+      "assumptions": "Waveform, bias, package heat path and process determine SOA. SenseFET layout must sample representative terminal voltages/temperature; repeated small-signal units alone do not establish power capability.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "H25",
+      "title": "Thermal-gradient theory needs boundary conditions",
+      "claim": "Heat flux follows Fourier’s law q=−κ∇T; package-dependent 3D heat flow and active-region weighting determine how temperature gradients affect matching.",
+      "source": "hastings",
+      "pdf_pages": [
+        213,
+        214,
+        386,
+        387,
+        388
+      ],
+      "locator": "§5.1.1 Self-Heating, Eq5.6 finite source and Eqs5.7–5.9; §8.2.7 Temperature Eq8.22 and Eq8.23 context",
+      "assumptions": "Active-centroid model assumes local/planar contribution, suitable linear temperature response and a linear field. P/(2πκr) is not found verbatim in this book; a half-space point-source use must be labeled an independent Fourier-law derivation with its own boundaries.",
+      "kind": "source",
+      "derivation_if_any": null
+    }
+  ],
+  "counts": {
+    "not_claim": 9,
+    "corrected": 19,
+    "qualified": 69,
+    "supported": 71
+  },
+  "citation_occurrences": 168,
+  "distinct_original_spans": 99,
+  "theory_record_count": 25,
+  "independent_confirmation": "Physics auditor independently rendered AppendixE871–872 and confirmed all three algebraic inconsistencies. At u=1, metal-only one-third error is6.48% although total-R error is1.546%; notes intentionally do not reuse the source threshold as a metal-only guarantee.",
+  "new_direct_citations_checked": [
+    {
+      "html": "topic-protection.html",
+      "section": "pro-lifetime",
+      "pdf_pages": [
+        236,
+        237,
+        238
+      ],
+      "claim": "HCI degradation depends on operating bias/time; source236 and238 directly checked.",
+      "kind": "source"
+    },
+    {
+      "html": "topic-protection.html",
+      "section": "pro-lifetime",
+      "pdf_pages": [
+        243,
+        244
+      ],
+      "claim": "NBTI/PBTI threshold/transconductance degradation and bias/temperature/recovery dependence.",
+      "kind": "source"
+    },
+    {
+      "html": "topic-fabrication.html",
+      "section": "fab-purpose",
+      "pdf_pages": [
+        836
+      ],
+      "claim": "Illustrative historical rule tables are not a real process.",
+      "kind": "source"
+    }
+  ]
+}

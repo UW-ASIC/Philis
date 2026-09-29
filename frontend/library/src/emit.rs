@@ -96,7 +96,7 @@ pub fn emit(
     cfg: &Config,
 ) -> Result<GenIr, EmitError> {
     let problem = annotate(netlist, &crate::annotation(pdk, &cfg.annotation));
-    let cells = cellgen::enumerate(netlist, &Macros::default(), &problem.constraints, pdk);
+    let cells = cellgen::enumerate(netlist, &Macros::default(), &problem.constraints, pdk, true);
 
     // Instances: device family + electrical params from the covering
     // unitization (cellgen synthesizes one per un-matched device). A 2-member
@@ -190,7 +190,7 @@ pub fn emit(
     let l_ = layout;
     let n = instances.len();
     let grid = pdk.grid();
-    let device_gap = pdk.rule("device_gap", 600);
+    let device_gap = pdk.rule("device_gap", 0);
     let corner = |i: usize| (l_.y[i] - l_.hh[i], l_.x[i] - l_.hw[i]);
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&i| corner(i));

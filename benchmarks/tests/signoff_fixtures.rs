@@ -2,11 +2,15 @@
 //! DRC findings attributed by layer: a routing layer carries only what `dr`
 //! drew, a device layer only what a cell generator drew (lone cells are pinned
 //! clean by `cells/tests/cell_selfcheck.rs`, so a device-layer finding here is
-//! assembly). Characterisation: ceilings, not zero — lower them as numbers
-//! improve.
+//! assembly). Every fixture must sign off clean: DRC 0 is a hard ceiling,
+//! never raised to admit a regression.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+#[path = "../src/fixtures.rs"]
+#[allow(dead_code)]
+mod fixtures;
 
 /// `(name, max DRC, max ERC, LVS clean?)`, counted from `library::signoff`
 /// (labelled, so a bulk-only port rail like chain4's VSS is not floating).
@@ -15,16 +19,24 @@ const BASELINE: &[(&str, usize, usize, bool)] = &[
     ("pair",              0,   0, true),
     ("quad",              0,   0, true),
     ("rc_filter",         0,   0, true),
-    ("bjt_mirror",        0,   0, true),
+    // One ERC each, the circuit's own: sky130 `supply_short(ntap, ptap)` flags
+    // a net carrying both tap types, which is what a PNP whose base shares a
+    // net with an NPN's base (bjt_mirror `in`), or a diode-connected
+    // substrate PNP (bgr_core: base = collector = VSS), is. Back to 0 once
+    // GPurify's rule counts only n-taps in a PMOS well (`supply_short(ntap,
+    // ptap, pmos_well)`, not yet in the pinned commit).
+    ("bjt_mirror",        0,   1, true),
+    ("bgr_core",          0,   1, true),
     ("chain4",            0,   0, true),
+    ("dac4",              0,   0, true),
 ];
 
 /// Fixtures big enough that a full flow dominates the suite runtime. Same
 /// checks, run with `cargo test --release -- --ignored`.
 const SLOW: &[(&str, usize, usize, bool)] = &[
-    ("ota",               0,  39, false),
-    ("ota_constrained",   0,  39, false),
-    ("tt_ota",            0,  39, false),
+    ("ota",               0,   0, true),
+    ("ota_constrained",   0,   0, true),
+    ("tt_ota",            0,   0, true),
 ];
 
 fn root() -> PathBuf {
@@ -110,9 +122,10 @@ fn check(name: &str, max_drc: usize, max_erc: usize, lvs_must_match: bool) {
     let detail = || {
         let rules: Vec<String> = by_rule.iter().map(|(k, n)| format!("{k}={n}")).collect();
         format!(
-            "\n  origin: {by_origin:?}\n  rules: {}\n  erc: {}\n  lvs: {}",
+            "\n  origin: {by_origin:?}\n  rules: {}\n  at: {}\n  erc: {}\n  lvs: {}",
             rules.join(", "),
-            erc.len(),
+            raw.iter().map(|f| format!("{}@({}, {})", f.rule, f.x, f.y)).collect::<Vec<_>>().join(", "),
+            erc.join(", "),
             lvs.map_or("clean".into(), |v| v.rule.clone())
         )
     };
@@ -161,5 +174,22 @@ fn fixtures_parse_to_a_non_empty_circuit() {
             .unwrap_or_else(|e| panic!("{name}: fixture does not parse: {e}"));
         assert!(!netlist.devices.is_empty(), "{name}: parsed to zero devices");
         assert!(!netlist.nets.is_empty(), "{name}: parsed to zero nets");
+    }
+}
+
+/// A device the deck has no construction for (ASAP7 has no bipolar and no
+/// resistor) is one `cell/undrawable` finding, not a silent gap.
+#[test]
+fn an_undrawable_device_is_one_finding() {
+    let deck = root().join("pdks/generic_finfet.json");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(&deck).expect("read deck")).expect("deck loads");
+    for name in ["bjt_mirror", "rc_filter"] {
+        let raw = std::fs::read_to_string(root().join(format!("benchmarks/fixtures/{name}.spice"))).expect("read fixture");
+        let spice = fixtures::preprocess_spice(&raw, &deck).expect("retarget");
+        let cfg = library::Config { feedback_iters: 1, ..Default::default() };
+        let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let report = library::signoff(&sol, &pdk);
+        let undrawable: Vec<&str> = report.hard_violations.iter().map(|v| v.rule.as_str()).filter(|r| r.starts_with("cell/undrawable")).collect();
+        assert_eq!(undrawable.len(), 1, "{name}: {undrawable:?}");
     }
 }

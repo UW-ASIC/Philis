@@ -38,6 +38,13 @@ impl Rule for Symmetry {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
     }
 
+    fn mirror_pair(self) -> Option<(u32, u32, u16)> {
+        match (self.a, self.b) {
+            (Target::Device(a), Target::Device(b)) => Some((u32::from(a.0), u32::from(b.0), self.axis.0)),
+            _ => None,
+        }
+    }
+
     /// Mirror a **lone** pair about its own midpoint, on-grid (no device has
     /// to travel far). Pairs sharing a stage axis go through [`SymmetryGroup`].
     /// Group targets are skipped: a group centre is not assignable.
@@ -119,6 +126,9 @@ impl RuleBatch<Layout> for SymmetryGroup {
     fn retarget(&mut self, cell_of: &[u16]) {
         self.0.retarget(cell_of);
     }
+    fn mirror_pairs(&self, out: &mut Vec<(u32, u32, u16)>) {
+        self.0.mirror_pairs(out);
+    }
 
     /// Put every pair on one axis at the mean of their midpoints (minimum total
     /// displacement).
@@ -169,6 +179,7 @@ mod tests {
             branch: Vec::new(),
             power_uw: vec![0; 2],
             temp_mc: vec![0; 2],
+            units: Default::default(),
         }
     }
 
@@ -231,6 +242,7 @@ mod tests {
             branch: Vec::new(),
             power_uw: vec![0; 4],
             temp_mc: vec![0; 4],
+            units: Default::default(),
         };
         let shared = AxisId(0);
         let g = SymmetryGroup(vec![
@@ -264,6 +276,7 @@ mod tests {
             branch: Vec::new(),
             power_uw: vec![0; 4],
             temp_mc: vec![0; 4],
+            units: Default::default(),
         };
         let shared = AxisId(0);
         let grp = SymmetryGroup(vec![
@@ -290,7 +303,7 @@ mod tests {
             b: Target::Device(DeviceId(1)),
             gate_um2: 1.0,
             gradient_share: 0.3,
-            matching: crate::placement::Matching::Cross,
+            gradient_per_avt_um2: 2.5e-4,
         }
         .retarget(&identity);
         assert_eq!((p.a, p.b), (Target::Device(DeviceId(0)), Target::Device(DeviceId(1))));
@@ -315,10 +328,15 @@ mod tests {
             b_side: vec![DeviceId(1)],
             gate_um2: 1.0,
             gradient_share: 0.3,
+            gradient_per_avt_um2: 2.5e-4,
+            lod_per_sigma_um: 0.0,
+            cell_of: Vec::new(),
         };
         grp.retarget(&cell_of);
-        assert_eq!(grp.a_side, vec![DeviceId(0), DeviceId(1)]);
-        assert_eq!(grp.b_side, vec![DeviceId(0)]);
+        // Sides stay schematic devices (units are owned by those); the map is
+        // kept for the bbox fallback.
+        assert_eq!(grp.a_side, vec![DeviceId(0), DeviceId(2)]);
+        assert_eq!(grp.cell_of, cell_of.to_vec());
     }
 
     #[test]

@@ -24,12 +24,18 @@ pub struct BudgetStatus {
     pub total: usize,
     /// How many are satisfied against the **raw** spec.
     pub satisfied: usize,
+    /// How many lack their inputs ([`analog::Rule::known`]); counted in
+    /// `satisfied` too, since search cannot act on them.
+    pub unknown: usize,
     /// Tightest rule's criticality, `0.0` (slack to spare) … `1.0` (at or past
     /// the spec). Derived from headroom against the family's safety margin.
     pub criticality: f32,
     /// Σ `RuleBatch::residual` over the family — each normalised by its own
     /// budget, so summable across families. `0.0` = inside spec.
     pub residual: f64,
+    /// Largest spent fraction of a rule's budget (`1.0` = at the spec);
+    /// `None` when no rule reports one.
+    pub usage: Option<f32>,
 }
 
 impl BudgetStatus {
@@ -51,6 +57,8 @@ impl BudgetStatus {
     pub fn verdict(&self) -> &'static str {
         if !self.met() {
             "VIOLATED"
+        } else if self.unknown > 0 {
+            "UNKNOWN"
         } else if self.met_with_margin() {
             "met"
         } else {
@@ -69,6 +77,11 @@ pub struct MetadataReport {
     pub bias: Option<BiasSummary>,
     /// Net count per class (every routing budget is keyed to a class).
     pub net_classes: Vec<(String, usize)>,
+    /// `(rule kind, missing input)`: families never instantiated.
+    pub missing: Vec<(&'static str, &'static str)>,
+    /// Post-layout specs: `(metric, measured, min, max, normalised miss)`.
+    /// Empty when performance scoring is off.
+    pub performance: Vec<(String, Option<f64>, Option<f64>, Option<f64>, f64)>,
 }
 
 impl MetadataReport {
@@ -85,6 +98,15 @@ impl MetadataReport {
             .filter(|b| b.arm == Arm::Budget)
             .map(|b| b.residual * 1000.0)
             .sum()
+    }
+
+    /// Every family met with all its inputs present, and none left
+    /// uninstantiated. A feasible search result is not a certificate without it.
+    #[must_use]
+    pub fn certified(&self) -> bool {
+        self.missing.is_empty()
+            && self.placement.iter().chain(&self.routing).all(|b| b.met() && b.unknown == 0)
+            && self.performance.iter().all(|p| p.4 <= 0.0)
     }
 }
 
@@ -113,8 +135,10 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         let kind = b.kind().rsplit("::").next().unwrap_or(b.kind()).to_string();
         let total = b.count();
         let satisfied = total - b.violations(state) as usize;
+        let unknown = b.unknown(state) as usize;
         let criticality = b.criticality(state);
         let residual = b.residual(state);
+        let usage = b.worst_usage(state);
         // One row per family: batches of the same kind merge, since the annotator
         // emits one batch per recognised structure. Residuals *sum* — each is
         // normalised by its own budget, so the family total stays a real measure
@@ -123,16 +147,23 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         if let Some(e) = out.iter_mut().find(|e| e.kind == kind) {
             e.total += total;
             e.satisfied += satisfied;
+            e.unknown += unknown;
             e.criticality = e.criticality.max(criticality);
             e.residual += residual;
+            e.usage = match (e.usage, usage) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
         } else {
             out.push(BudgetStatus {
                 kind,
                 arm,
                 total,
                 satisfied,
+                unknown,
                 criticality,
                 residual,
+                usage,
             });
         }
     }
@@ -150,6 +181,7 @@ pub fn build(
     routes: &pnr_core::Routes,
     bias: Option<BiasSummary>,
     net_classes: &[analog::metadata::NetClassification],
+    missing: &[(&'static str, &'static str)],
 ) -> MetadataReport {
     let census = annotator::classify::census(net_classes)
         .into_iter()
@@ -164,6 +196,15 @@ pub fn build(
         routing: r,
         bias,
         net_classes: census,
+        missing: missing.to_vec(),
+        performance: Vec::new(),
+    }
+}
+
+impl MetadataReport {
+    /// Fold in routing batches built after the fact (on placed pins).
+    pub fn add_routing(&mut self, reqs: &[Box<dyn RuleBatch<pnr_core::Routes>>], routes: &pnr_core::Routes) {
+        self.routing.extend(statuses(reqs, routes, Arm::Budget));
     }
 }
 
@@ -221,6 +262,24 @@ impl std::fmt::Display for MetadataReport {
                 s.verdict()
             )?;
         }
+        if !self.performance.is_empty() {
+            writeln!(f, "\n  {:<22} {:>12} {:>12} {:>12}  verdict", "spec (post-layout)", "measured", "min", "max")?;
+            writeln!(f, "  {}", "-".repeat(75))?;
+            let num = |v: Option<f64>| v.map_or_else(|| "-".to_string(), |v| format!("{v:.4e}"));
+            for (m, v, lo, hi, miss) in &self.performance {
+                let verdict = match (v, *miss > 0.0) {
+                    (None, _) => "UNKNOWN (not measured)".to_string(),
+                    (Some(_), true) => format!("VIOLATED ({:.1}% short)", miss * 100.0),
+                    (Some(_), false) => "met".to_string(),
+                };
+                writeln!(f, "  {m:<22} {:>12} {:>12} {:>12}  {verdict}", num(*v), num(*lo), num(*hi))?;
+            }
+            writeln!(f)?;
+        }
+        for (kind, input) in &self.missing {
+            writeln!(f, "  {kind:<22} {:>6} {:>5} {:>5}  {:>9}  {:>9}  UNKNOWN (no {input})", "-", "-", "-", "-", "-")?;
+        }
+        writeln!(f, "\n  certificate: {}", if self.certified() { "all families met, all inputs present" } else { "NOT CERTIFIED" })?;
         Ok(())
     }
 }
@@ -268,7 +327,7 @@ mod tests {
     }
 
     fn empty_routes() -> Routes {
-        Routes { wires: Vec::new() }
+        Routes { wires: Vec::new(), ..Default::default()  }
     }
 
     #[test]
@@ -344,5 +403,60 @@ mod tests {
             "must not imply a thermal pass: {text}"
         );
         assert!(text.contains("vacuous"));
+    }
+
+    /// A failed boolean budget (no measurable overshoot) still moves Θ and
+    /// blocks the certificate: fail is never read as pass (EVD-07).
+    #[test]
+    fn a_boolean_fail_costs_theta() {
+        #[derive(Clone, Copy)]
+        struct Fails;
+        impl Rule for Fails {
+            type On = Routes;
+            fn cost(self, _: &Routes) -> f32 {
+                0.0
+            }
+            fn satisfied(self, _: &Routes) -> bool {
+                false
+            }
+            fn residual(self, _: &Routes) -> f32 {
+                0.0
+            }
+        }
+        let mut rq = Requirements::<Routes>::default();
+        rq.budget.push(Box::new(vec![Fails]));
+        let r = MetadataReport { routing: statuses(&rq.budget, &empty_routes(), Arm::Budget), ..MetadataReport::default() };
+        assert!(r.theta() > 0.0);
+        assert!(!r.certified());
+    }
+
+    /// Unknown is neither pass nor fail: a met family with missing inputs, or a
+    /// family the deck could not instantiate, blocks the certificate.
+    #[test]
+    fn unknown_inputs_block_the_certificate() {
+        #[derive(Clone, Copy)]
+        struct Unrouted;
+        impl Rule for Unrouted {
+            type On = Routes;
+            fn cost(self, _: &Routes) -> f32 {
+                0.0
+            }
+            fn known(self, _: &Routes) -> bool {
+                false
+            }
+        }
+        let mut rq = Requirements::<Routes>::default();
+        rq.budget.push(Box::new(vec![Unrouted]));
+        let r = MetadataReport {
+            routing: statuses(&rq.budget, &empty_routes(), Arm::Budget),
+            ..MetadataReport::default()
+        };
+        assert!(r.routing[0].met(), "search sees it as satisfied");
+        assert_eq!(r.routing[0].verdict(), "UNKNOWN");
+        assert!(!r.certified());
+
+        let clean = MetadataReport { missing: vec![("Antenna", "deck antenna ratio")], ..MetadataReport::default() };
+        assert!(!clean.certified(), "an uninstantiated family is not a pass");
+        assert!(MetadataReport::default().certified());
     }
 }

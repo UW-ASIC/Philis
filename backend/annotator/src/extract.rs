@@ -5,7 +5,6 @@
 //! |----------------------|--------|------------------------------------------------|
 //! | `Antenna`            | hard   | self-extracted                                 |
 //! | `Differential`       | hard   | self-extracted diff-pair net pairs             |
-//! | `StraightNet`        | cost   | self-extracted                                 |
 //! | `CrosstalkExclusion` | budget | self-extracted, spacing raised to victim class |
 //! | `ParasiticBudget`    | budget | every budgeted net, C budget as drawn length   |
 //! | `CouplingBudget`     | budget | every budgeted net, from its class and load    |
@@ -14,7 +13,7 @@
 
 use analog::metadata::{NetClass, NetClassification};
 use analog::routing::{
-    Antenna, CouplingBudget, CrosstalkExclusion, Differential, ParasiticBudget, StraightNet,
+    Antenna, CouplingBudget, CrosstalkExclusion, Differential, ParasiticBudget, Shield,
 };
 use analog::rule::Rule;
 use analog::Requirements;
@@ -26,7 +25,7 @@ pub fn routing(
     hg: &BipartiteHypergraph,
     classes: &[NetClassification],
     gate_um2: &[f32],
-    antenna_max_ratio: Option<f32>,
+    process: &crate::ProcessNumbers,
 ) -> Requirements<Routes> {
     let mut uf = UnionFind::new(hg.device_count()); // routing rules don't group
     let mut r = Requirements::<Routes>::default();
@@ -34,10 +33,11 @@ pub fn routing(
     let mut gate_nm2 = vec![0i64; hg.net_names.len()];
     for (d, nets) in hg.device_nets.iter().enumerate() {
         if gate_um2[d] > 0.0 {
-            gate_nm2[nets[1].0 as usize] += (f64::from(gate_um2[d]) * 1e6) as i64;
+            // Terminal 0 is G (G,D,S,B). A diode-connected FET hides a wrong index.
+            gate_nm2[nets[0].0 as usize] += (f64::from(gate_um2[d]) * 1e6) as i64;
         }
     }
-    let antenna: Vec<Antenna> = antenna_max_ratio
+    let antenna: Vec<Antenna> = process.antenna_max_ratio
         .into_iter()
         .flat_map(|ratio| {
             gate_nm2.iter().enumerate().filter(|&(_, &a)| a > 0).map(move |(n, &a)| Antenna {
@@ -45,17 +45,18 @@ pub fn routing(
                 max_ratio_x100: (ratio * 100.0) as i32,
                 gate_area_nm2: a,
                 margin_pct: 20,
+                stack: process.stack,
             })
         })
         .collect();
     r.hard.push(Box::new(antenna));
-    r.hard.push(Box::new(Differential::extract(hg, &mut uf)));
-    r.cost.push(Box::new(StraightNet::extract(hg, &mut uf)));
+    let diff: Vec<Differential> = Differential::extract(hg, &mut uf).into_iter().map(|d| Differential { stack: process.stack, ..d }).collect();
+    r.hard.push(Box::new(diff));
 
     let class = |n: NetId| classes[n.0 as usize].class;
     let mut xtalk = CrosstalkExclusion::extract(hg, &mut uf);
     for x in &mut xtalk {
-        x.min_spacing_nm = x.min_spacing_nm.max(min_spacing_nm(class(x.a)).max(min_spacing_nm(class(x.b))));
+        x.min_spacing_nm = process.route_space_nm * spacing_multiple(class(x.a)).max(spacing_multiple(class(x.b)));
     }
     r.budget.push(Box::new(xtalk));
 
@@ -65,8 +66,10 @@ pub fn routing(
         .filter_map(|c| {
             Some(ParasiticBudget {
                 net: c.net,
-                max_len_nm: c.c_budget_af? * 1_000 / WIRE_AF_PER_UM,
+                max_len_nm: (c.c_budget_af? as f32 * 1_000.0 / process.wire_af_per_um?) as i64,
+                max_c_af: c.c_budget_af?,
                 margin_pct: margin_pct(c.class),
+                stack: process.stack,
             })
         })
         .collect();
@@ -76,19 +79,32 @@ pub fn routing(
     // crosstalk rule and still blow this.
     let coup: Vec<CouplingBudget> = routed()
         .filter_map(|c| {
-            Some(CouplingBudget { net: c.net, max_coupling_af: c.max_coupling_af?, margin_pct: margin_pct(c.class) })
+            Some(CouplingBudget { net: c.net, max_coupling_af: c.max_coupling_af?, margin_pct: margin_pct(c.class), stack: process.stack })
         })
         .collect();
     r.budget.push(Box::new(coup));
+
+    // Shields only against a real aggressor: with a clock in the design, every
+    // routed sensitive net is shielded by the ground net (quiet and low
+    // impedance). No clock, no shields — blanket shielding only adds load.
+    let has_clock = routed().any(|c| c.class == NetClass::Clock);
+    let ground = routed().find(|c| c.class == NetClass::Ground).map(|c| c.net);
+    if let (true, Some(reference)) = (has_clock, ground) {
+        let shields: Vec<Shield> = routed()
+            .filter(|c| c.class == NetClass::Sensitive)
+            .map(|c| Shield {
+                victim: c.net,
+                reference,
+                min_coverage_pct: 80,
+                // The adjacent track: one routing space, with a spacing of slack.
+                max_gap_nm: 2 * process.route_space_nm,
+            })
+            .collect();
+        r.budget.push(Box::new(shields));
+    }
     r
 }
 
-/// Ground capacitance of a minimum-width lower-metal wire, aF/µm — lowers a
-/// net's C budget to the drawn-length cap the router checks.
-///
-/// ponytail: ≈0.1 fF/µm holds within ~2× across nodes (sky130 met1 ≈ 85); read
-/// the per-layer area/fringe from the PDK's `pex` section when routing gets it.
-const WIRE_AF_PER_UM: i64 = 100;
 
 /// Safety margin held back from a class's budgets, percent.
 fn margin_pct(class: NetClass) -> u8 {
@@ -101,11 +117,11 @@ fn margin_pct(class: NetClass) -> u8 {
 }
 
 /// Minimum run-adjacent spacing a class demands, nm.
-fn min_spacing_nm(class: NetClass) -> i32 {
+fn spacing_multiple(class: NetClass) -> i32 {
     match class {
-        NetClass::Sensitive => 1_200,
-        NetClass::Clock => 1_000,
-        NetClass::Signal => 400,
-        _ => 200,
+        NetClass::Sensitive => 8,
+        NetClass::Clock => 7,
+        NetClass::Signal => 3,
+        _ => 1,
     }
 }

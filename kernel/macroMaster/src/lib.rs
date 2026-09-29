@@ -458,7 +458,7 @@ pub fn build_with<P: Process>(
         ds.iter()
             .map(|(name, d)| Device {
                 name: name.clone(),
-                kind: d.kind,
+                kind: d.kind, model: String::new(),
                 terminals: d.terminals.iter().map(|(t, port)| (t.clone(), net_of(port))).collect(),
                 params: d.params.clone(),
             })
@@ -519,8 +519,9 @@ pub mod variants {
         pub nf: u16,
         /// Finger pattern; `None` = smallest.
         pub pattern: Option<cells::Pattern>,
-        /// Dummies per edge; `None` = any non-zero count (dropping the LOD/WPE
-        /// dummies has to be asked for with `Some(0)`).
+        /// Dummies per edge. They sit on the diffusion, so each is a real
+        /// (off) transistor in the schematic too; opt-in: `Some(n > 0)` draws
+        /// the generator's one per end, `None`/`Some(0)` none.
         pub dummies_per_edge: Option<u8>,
     }
 
@@ -539,17 +540,35 @@ pub mod variants {
     }
     impl DeviceGen for Mos {
         fn layout<P: Process>(&self, cell: &mut DeviceBuilder<P>) -> Result<(), GenError> {
-            let (pat, dum, nf) = (self.pattern, self.dummies_per_edge, self.nf.max(1));
-            let mac = crate::adapter::draw::<cells::mosfet::Mosfet>(self.kind, self.w, self.l, &[nf], cell.process(), |m| {
-                m.nf == nf
-                    && pat.is_none_or(|p| m.style == p)
-                    && dum.map_or(m.dummies_per_edge > 0, |d| m.dummies_per_edge == d)
+            let (pat, nf) = (self.pattern, self.nf.max(1));
+            let mac = crate::adapter::draw::<cells::mosfet::Mosfet>(self.kind, self.w, self.l, &[nf], self.dummies(), cell.process(), |m| {
+                m.nf == nf && pat.is_none_or(|p| m.style == p)
             });
             replay(cell, &mac, |_, t| t.to_ascii_lowercase())
         }
 
+        /// The device, then each end dummy (an off transistor extraction sees):
+        /// drain on the end S/D region (source at the left end; the right end is
+        /// source for even `nf`, drain for odd), gate/source/body on `b`.
         fn devices(&self) -> Option<Vec<GenDevice>> {
-            Some(vec![mos_device(self.kind, self.w, self.l, self.nf, "")])
+            let mut out = vec![mos_device(self.kind, self.w, self.l, self.nf, "")];
+            if self.dummies() {
+                let right = if self.nf.max(1) % 2 == 0 { "s" } else { "d" };
+                for edge in ["s", right] {
+                    out.push(GenDevice {
+                        kind: self.kind,
+                        terminals: ["D", "G", "S", "B"].iter().zip([edge, "b", "b", "b"]).map(|(t, n)| ((*t).into(), n.into())).collect(),
+                        params: vec![("w".into(), i64::from(self.w)), ("l".into(), i64::from(self.l)), ("nf".into(), 1)],
+                    });
+                }
+            }
+            Some(out)
+        }
+    }
+
+    impl Mos {
+        fn dummies(&self) -> bool {
+            self.dummies_per_edge.is_some_and(|n| n > 0)
         }
     }
 
@@ -615,7 +634,7 @@ pub mod variants {
     impl DeviceGen for MatchedPair {
         fn layout<P: Process>(&self, cell: &mut DeviceBuilder<P>) -> Result<(), GenError> {
             let (pat, nf) = (self.pattern, self.nf_each.max(1));
-            let mac = crate::adapter::draw::<cells::mosfet::Mosfet>(self.kind, self.w, self.l, &[nf, nf], cell.process(), |m| {
+            let mac = crate::adapter::draw::<cells::mosfet::Mosfet>(self.kind, self.w, self.l, &[nf, nf], false, cell.process(), |m| {
                 m.nf == nf && pat.is_none_or(|p| m.style == p)
             });
             replay(cell, &mac, |di, t| match t {
@@ -665,6 +684,7 @@ pub mod variants {
                 self.w,
                 self.len,
                 &[1],
+                false,
                 cell.process(),
                 |_| true,
             );

@@ -1,0 +1,162 @@
+{
+  "prepared": "2026-09-23",
+  "review_scope": "HTML analog theory, derivations, diagrams and source references. Philis implementation observations and source-code correctness excluded.",
+  "original_citation_occurrences": 553,
+  "citation_status_counts": {
+    "not_claim": 41,
+    "corrected": 44,
+    "qualified": 262,
+    "supported": 206
+  },
+  "theory_records": 115,
+  "constraint_rows_mapped": 84,
+  "source_count": 13,
+  "guarantee": "Semantic review with corrected errors and explicit limits; not a proof of universal or complete accuracy.",
+  "foundational_reference_gaps": [
+    "Johnson–Nyquist 4kBTR: no exact supplied-PDF locator found.",
+    "Sampled kT/C: derivation shown from a stated equilibrium premise; no exact supplied-PDF locator found."
+  ],
+  "source_counts": {
+    "nth-order": {
+      "not_claim": 1,
+      "supported": 3,
+      "qualified": 4
+    },
+    "centering": {
+      "supported": 7,
+      "qualified": 32,
+      "not_claim": 1,
+      "corrected": 2
+    },
+    "lampaert": {
+      "not_claim": 1,
+      "supported": 3,
+      "qualified": 32,
+      "corrected": 3
+    },
+    "topological": {
+      "not_claim": 1,
+      "qualified": 56,
+      "supported": 1,
+      "corrected": 3
+    },
+    "cc-review": {
+      "supported": 11,
+      "qualified": 7,
+      "corrected": 2,
+      "not_claim": 1
+    },
+    "dac": {
+      "not_claim": 1,
+      "corrected": 1,
+      "qualified": 14,
+      "supported": 11
+    },
+    "electromigration": {
+      "not_claim": 6,
+      "supported": 34,
+      "qualified": 12,
+      "corrected": 3
+    },
+    "pelgrom": {
+      "not_claim": 2,
+      "qualified": 6,
+      "supported": 7
+    },
+    "performance": {
+      "not_claim": 1,
+      "qualified": 8,
+      "supported": 6
+    },
+    "substrate": {
+      "not_claim": 14,
+      "supported": 28,
+      "qualified": 4,
+      "corrected": 9
+    },
+    "hastings": {
+      "not_claim": 9,
+      "corrected": 19,
+      "qualified": 69,
+      "supported": 71
+    },
+    "drennan": {
+      "not_claim": 2,
+      "supported": 9,
+      "qualified": 12
+    },
+    "todaes": {
+      "not_claim": 1,
+      "supported": 15,
+      "qualified": 6,
+      "corrected": 2
+    }
+  },
+  "domain_reports": [
+    "audit-hastings.json",
+    "audit-optimization.json",
+    "audit-physics.json",
+    "audit-papers.json"
+  ],
+  "independent_equation_crosscheck": "audit-appendix-e-crosscheck.json",
+  "record_index": "theory-provenance.json",
+  "citation_ledger": "citation-audit.json",
+  "source_experiments_reproduced": false,
+  "engine_audited": false,
+  "full_books_read_line_by_line_in_audit": false,
+  "structural_validation_is_separate": "validation-report.json",
+  "audited_article_sha256": {
+    "audit.html": "30e814ef55b8b9f2d766e5b11a6fb32b75cbb14015e52e9e08302f1d8a25fde6",
+    "cc-review.html": "4c28d98c01efd2c2fc69a793f44b7a083220684a5438aabce6ed264ef65b8324",
+    "centering.html": "792d7331b2aaa52834dbbdad581e07ae95a3bade21723552c09c9c7b8e11c178",
+    "constraints.html": "dc196a31ec18651ee639b0fb630563cbd98925894d5a5006134795377cce2386",
+    "coverage.html": "1c400b46a4d0f6ee8f9f1aa5cc692a80ffaa8d92468aa0103a1f56f488161f50",
+    "dac.html": "961583b5845e75ea3bccf4025c9f237fa217ebf5c7a0a61372c9502658d0b530",
+    "drennan.html": "a9bf211ec376d2cfce7f3720b7d317cda8bdcef81088603f48d69c646d2450e6",
+    "electromigration.html": "38849099f66fc35ba37f74063e304234fafe765c75d9a9b0919128e31d5cd4c8",
+    "glossary.html": "3f9bed2bd7d3de7fe6763d62d7122ed48b7596772d137eb63fc37f65c8eb4bbe",
+    "hastings.html": "7aa0c2c571eb1bf7e760696ffa59a866082cf8cdca0d8717e8cd716210826121",
+    "index.html": "46e9daf7fc22cb9b2f67790f6f6178bedcc9f3570e3e86f203143444577b6317",
+    "lampaert.html": "836c08792c09f41c80ac69603ea8749836bf34a60183642518ab75c595ab5a14",
+    "nth-order.html": "12ebb7af185fe4742eec8ea1fdb65521653f93f9b8ea67cd6b440932d45090b1",
+    "pelgrom.html": "792ac17b7677f917a3752adbf5f74e2480f64a02181b8f38e77978a3a505f7aa",
+    "performance.html": "f77c73b4b54d337448e939af4e8685cfd3f951adbd3fc214a9ac09f5c4774a09",
+    "roadmap.html": "410f2b34a8dd46953252d57c9434a8dbcdb1f48d9aa9d507324bd215a0dc7aac",
+    "substrate.html": "a4c111660e049896f9ecba12f6bde0c9ae64d3f9e97d0e9a235f9a6cd41e4d22",
+    "theory-provenance.html": "409eaf3f200efe9147b6914cce1c40e90f1e106b3f7cba3574c52293e5fce4e7",
+    "todaes.html": "9b1036ff12c94ebfb7dc156711e227ad80ee013843ccc5372eed5200c6073775",
+    "topic-bipolar-diodes.html": "6d4eeae105bee6d105804981f64191738ad6afdb1faf698a85107b94b5bfe15f",
+    "topic-capacitor-devices.html": "540427e0b53218830c168ff0d8be0977335ee69113ae858f7a7fc3371b8cdac4",
+    "topic-constraint-systems.html": "262cc20e891e50dc913b815129c0f2d8af6ebbb2175ffa50edbee415c9953768",
+    "topic-dac-arrays.html": "7f8797e7730b633a0ac16e7f186e0b30dd660471e3de61351ecfd6d1c62e970f",
+    "topic-design-intent.html": "febd30ae2539f34a09689bc167641eda9d8fba90a2d9d3faa0f70492e7106798",
+    "topic-electromigration.html": "653e016fffe098f9c6d02f6c01d1c712aba95aff4ae20df88d12d1d1178974f8",
+    "topic-fabrication.html": "b1d6a2576cad2c0df657e614699bd7885a657bce1055718f0106a290c0eb3f29",
+    "topic-floorplanning.html": "9eb4e65228edaaeaa503648c661be969323dcee9cec34fdbe0992b74d4fe2880",
+    "topic-gradient-matching.html": "3a6a80a95edb4e9f1af8588f8e550beecb48badbcf7fcff6765e91e2c58fc297",
+    "topic-layout-sizing.html": "57da0f9de9fd819982e16838ef75309769fbf4fac2d34bd7ce3bde2d5c8f8fe2",
+    "topic-manufacturability.html": "d5e2a74ec0b6edfcfb6cd864f217952649aab80bff366f96efdc370a2b41eae3",
+    "topic-mos-layout.html": "1d26283e9831f795c15f89c57efe730ead8ea4463f3c62c76ba38951dc04ff13",
+    "topic-optimality.html": "f9f0e02a018854b9c64a62efcba3f616a6056b2c98949b760269b5850dd80b3b",
+    "topic-parasitics.html": "91b1437d340fcc11ca74dca4f79fb80ce179dbec1ad0aadab30851124d8ce29e",
+    "topic-performance-budgets.html": "b4ee657280a79db4ac2f54c8c3a1c5bb9d134323252de96f4ddf653480f574b4",
+    "topic-performance-loop.html": "cb70ecf7db71e07f1b9753c2e584a02350c570d3152e5cef2b669add28f47343",
+    "topic-placement-representations.html": "0ee72834d4960a40fc1fd6e9884573e012307c68f4d5d5515b3574c83532fc4e",
+    "topic-power-distribution.html": "2c43741f01ddfce956f555e291bc8fb1e84b4e193321adee940a63301e8b2a03",
+    "topic-protection.html": "614320ba7888c547c0d6f0551c9e11ef1f4ac59b8cad6e1e6f440f555d82d072",
+    "topic-random-mismatch.html": "4577a05a202e62205ab0975637556618c1fb77cf2eca534e71b9bf839f7a1415",
+    "topic-resistors.html": "0c0f6fa80c690ed5e318c97e1ebd1ab0882578043dd19d10d33bde69d4fa4a36",
+    "topic-rf.html": "8565995f7ba8e62925b632e8fe13145a8f0fae61974de608814e26cced3d18cd",
+    "topic-robust-design.html": "7364057fc2546eab4da90cc42ac694b77d2c9d3c1c7281e97cc88b7a28754aca",
+    "topic-search-algorithms.html": "51d71d73598cd6265c68675ab6fc7c0c858492d40e4f47a781087fb4c740b209",
+    "topic-signal-routing.html": "6524cbecbe37678acbd61297bee498f50ed955b2654e4a8cf4ca2d19e389a69b",
+    "topic-substrate-isolation.html": "3c0e441afe6c29a08efc9a91e18a18b5afe1e7f4d2db57c1e5943ff146783f09",
+    "topic-thermal.html": "cb9fca206f770b29428fedc021558aadf6a63688628f0ab4018f5d3080c25e35",
+    "topic-validation.html": "3cc9d3336920cc3b9085cf94e8c839dfdc2026f397b6640ee36c51a5db80f6ce",
+    "topic-verification.html": "4307bf160fb75831fe1f9bcb10341ebf5cab744e29f8cd0ca7bbbcba0eddadab",
+    "topic-wire-sizing.html": "3c2ba6865aa619f9f2dee2dc3c20815619a7257667d9c23c5383bb0fa223915d",
+    "topological.html": "58f8450889bc00fb380f9eef3bcff6196a5c3c2881c53c28c68369973808df8e"
+  },
+  "fingerprint_scope": "Identifies the exact delivered article text. Hash equality protects review freshness; it does not extend semantic coverage to excluded code observations or establish a proof of correctness.",
+  "integration_review": "Independent final review of H, O and P records and associated rule mappings completed; identified H08 attribution and O24 pointwise Hessian qualifications corrected."
+}

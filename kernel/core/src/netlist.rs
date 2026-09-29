@@ -17,9 +17,13 @@ pub enum DeviceKind {
 }
 
 /// One device instance from the netlist.
+#[derive(Clone)]
 pub struct Device {
     pub name: String,
     pub kind: DeviceKind,
+    /// The SPICE model name as written (`sky130_fd_pr__res_high_po`, …):
+    /// selects the drawn construction and the LVS recogniser. Empty = none.
+    pub model: String,
     /// Terminal name → net it connects to (e.g. `"G" -> NetId`).
     pub terminals: Vec<(String, NetId)>,
     /// Parameters (W, L, multiplier…), name → value in `nm`/PDK units.
@@ -27,6 +31,7 @@ pub struct Device {
 }
 
 /// One net (a wire connecting terminals).
+#[derive(Clone)]
 pub struct Net {
     pub name: String,
 }
@@ -38,6 +43,7 @@ pub struct DeviceGroup {
 }
 
 /// The whole circuit as flat SoA tables. IDs index these vectors.
+#[derive(Clone)]
 pub struct Netlist {
     pub devices: Vec<Device>,
     pub nets: Vec<Net>,

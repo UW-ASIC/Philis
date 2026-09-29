@@ -47,9 +47,9 @@ impl Block for Ota5T {
 }
 impl Composition for Ota5T {
     fn build<P: Process>(&self, c: &mut CompBuilder<P>) -> Result<(), GenError> {
-        let sep = c.process().rule("device_gap", 600);
+        let sep = c.process().rule("device_gap", 0);
         let wellsep = sep.max(c.process().rule("NWELL.2", 1270));
-        let vgap = sep.max(2 * c.process().rule("well_enclosure", 180));
+        let vgap = sep.max(2 * c.process().rule("well_enclosure", 0));
         let nmos = || Mos::new(DeviceKind::Nmos, 420, 150, 1);
         let pmos = || Mos::new(DeviceKind::Pmos, 840, 150, 1);
 

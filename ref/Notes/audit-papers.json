@@ -1,0 +1,2198 @@
+{
+  "scope": "HTML theory audit only; no Philis implementation audit. Five source papers reread with their cited text, targeted table/equation raster checks, all root-owned teaching theory read, mathematical examples checked.",
+  "citation_reviews": [
+    {
+      "citation_id": "CIT-0001",
+      "status": "supported",
+      "supported_claim": "Common-centroid layouts can lose to other patterns when routing and layout-dependent shifts dominate; selection depends on circuit and process.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        1,
+        6,
+        7
+      ],
+      "detail": "§I and §V give the motivation, source-current/LOD mechanisms, and OTA/comparator case studies. These are conditional examples, not a universal size threshold. Engine candidate-selection policies are handbook synthesis.",
+      "html": "cc-review.html",
+      "section": "result",
+      "original_label": "Introduction, PDF p. 1",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0002",
+      "status": "supported",
+      "supported_claim": "Common-centroid layouts can lose to other patterns when routing and layout-dependent shifts dominate; selection depends on circuit and process.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        1,
+        6,
+        7
+      ],
+      "detail": "§I and §V give the motivation, source-current/LOD mechanisms, and OTA/comparator case studies. These are conditional examples, not a universal size threshold. Engine candidate-selection policies are handbook synthesis.",
+      "html": "cc-review.html",
+      "section": "result",
+      "original_label": "§V, PDF pp. 6–7",
+      "original_pdf_start": 6
+    },
+    {
+      "citation_id": "CIT-0010",
+      "status": "supported",
+      "supported_claim": "Common-centroid layouts can lose to other patterns when routing and layout-dependent shifts dominate; selection depends on circuit and process.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        1,
+        6,
+        7
+      ],
+      "detail": "§I and §V give the motivation, source-current/LOD mechanisms, and OTA/comparator case studies. These are conditional examples, not a universal size threshold. Engine candidate-selection policies are handbook synthesis.",
+      "html": "cc-review.html",
+      "section": "decision",
+      "original_label": "§V-B, PDF p. 7",
+      "original_pdf_start": 7
+    },
+    {
+      "citation_id": "CIT-0280",
+      "status": "supported",
+      "supported_claim": "Common-centroid layouts can lose to other patterns when routing and layout-dependent shifts dominate; selection depends on circuit and process.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        1,
+        6,
+        7
+      ],
+      "detail": "§I and §V give the motivation, source-current/LOD mechanisms, and OTA/comparator case studies. These are conditional examples, not a universal size threshold. Engine candidate-selection policies are handbook synthesis.",
+      "html": "topic-design-intent.html",
+      "section": "symmetry",
+      "original_label": "§V, PDF pp. 6–7",
+      "original_pdf_start": 6
+    },
+    {
+      "citation_id": "CIT-0324",
+      "status": "supported",
+      "supported_claim": "Common-centroid layouts can lose to other patterns when routing and layout-dependent shifts dominate; selection depends on circuit and process.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        1,
+        6,
+        7
+      ],
+      "detail": "§I and §V give the motivation, source-current/LOD mechanisms, and OTA/comparator case studies. These are conditional examples, not a universal size threshold. Engine candidate-selection policies are handbook synthesis.",
+      "html": "topic-gradient-matching.html",
+      "section": "styles",
+      "original_label": "§V-A–B, PDF pp. 6–7",
+      "original_pdf_start": 6
+    },
+    {
+      "citation_id": "CIT-0361",
+      "status": "supported",
+      "supported_claim": "Common-centroid layouts can lose to other patterns when routing and layout-dependent shifts dominate; selection depends on circuit and process.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        1,
+        6,
+        7
+      ],
+      "detail": "§I and §V give the motivation, source-current/LOD mechanisms, and OTA/comparator case studies. These are conditional examples, not a universal size threshold. Engine candidate-selection policies are handbook synthesis.",
+      "html": "topic-optimality.html",
+      "section": "learning",
+      "original_label": "Common-centroid limitations, PDF pp. 6–7",
+      "original_pdf_start": 6
+    },
+    {
+      "citation_id": "CIT-0509",
+      "status": "supported",
+      "supported_claim": "Common-centroid layouts can lose to other patterns when routing and layout-dependent shifts dominate; selection depends on circuit and process.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        1,
+        6,
+        7
+      ],
+      "detail": "§I and §V give the motivation, source-current/LOD mechanisms, and OTA/comparator case studies. These are conditional examples, not a universal size threshold. Engine candidate-selection policies are handbook synthesis.",
+      "html": "topic-validation.html",
+      "section": "hypothesis",
+      "original_label": "Limits and tradeoffs, PDF pp. 6–7",
+      "original_pdf_start": 6
+    },
+    {
+      "citation_id": "CIT-0003",
+      "status": "qualified",
+      "supported_claim": "Coincident normalized first moments cancel a linear parameter field; circuit response is separately linearized.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        1
+      ],
+      "detail": "Eqs.(1)–(5) support equal-unit centroid and sensitivity statements. Arbitrary unequal electrical weights and software certificates are explicitly handbook extensions under an additive model.",
+      "html": "cc-review.html",
+      "section": "centroid",
+      "original_label": "Equations (1)–(5), PDF p. 1",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0321",
+      "status": "qualified",
+      "supported_claim": "Coincident normalized first moments cancel a linear parameter field; circuit response is separately linearized.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        1
+      ],
+      "detail": "Eqs.(1)–(5) support equal-unit centroid and sensitivity statements. Arbitrary unequal electrical weights and software certificates are explicitly handbook extensions under an additive model.",
+      "html": "topic-gradient-matching.html",
+      "section": "purpose",
+      "original_label": "Parameter-to-performance sensitivity, PDF p. 1",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0322",
+      "status": "qualified",
+      "supported_claim": "Coincident normalized first moments cancel a linear parameter field; circuit response is separately linearized.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        1
+      ],
+      "detail": "Eqs.(1)–(5) support equal-unit centroid and sensitivity statements. Arbitrary unequal electrical weights and software certificates are explicitly handbook extensions under an additive model.",
+      "html": "topic-gradient-matching.html",
+      "section": "moments",
+      "original_label": "Centroid equations, PDF p. 1",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0004",
+      "status": "qualified",
+      "supported_claim": "Variation has global, local uncorrelated and local correlated components; differential variance depends on correlation.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        2,
+        3
+      ],
+      "detail": "§II supplies variation/covariance models. The compact dᵀΣd identity is derived covariance algebra; its matrix-validity and common-sample validation policy are handbook guidance.",
+      "html": "cc-review.html",
+      "section": "variation",
+      "original_label": "§II, PDF pp. 2–3",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0329",
+      "status": "qualified",
+      "supported_claim": "Variation has global, local uncorrelated and local correlated components; differential variance depends on correlation.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        2,
+        3
+      ],
+      "detail": "§II supplies variation/covariance models. The compact dᵀΣd identity is derived covariance algebra; its matrix-validity and common-sample validation policy are handbook guidance.",
+      "html": "topic-gradient-matching.html",
+      "section": "covariance",
+      "original_label": "Variation classification and covariance, PDF pp. 2–3",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0005",
+      "status": "corrected",
+      "supported_claim": "WPE, LOD, OD spacing and pitch depend on actual surrounding geometry; the review’s uniform-row claims have construction premises.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        2
+      ],
+      "detail": "§II-A2 and Fig.2 checked. Removed a blanket assertion that floating active dummies are invalid; their accepted bias depends on the qualified construction.",
+      "html": "cc-review.html",
+      "section": "lde",
+      "original_label": "§II-A2 and Fig. 2, PDF p. 2",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0006",
+      "status": "supported",
+      "supported_claim": "Transistor array construction uses half-diffusion graphs/Euler connectivity and current-aware routing.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        5,
+        6
+      ],
+      "detail": "§IV supports this transistor-specific construction; it is not a capacitor-placement algorithm.",
+      "html": "cc-review.html",
+      "section": "routing",
+      "original_label": "§IV, PDF pp. 5–6",
+      "original_pdf_start": 5
+    },
+    {
+      "citation_id": "CIT-0007",
+      "status": "qualified",
+      "supported_claim": "Local source impedance changes effective transconductance according to unit currents and connection topology.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        6,
+        7
+      ],
+      "detail": "Eq.(25)/Fig.9 support the mechanism. gm/(1+gmRs) is explicitly derived here for a single branch neglecting body effect/output conductance; it is not copied as Eq.(25).",
+      "html": "cc-review.html",
+      "section": "routing",
+      "original_label": "Equation (25) and Fig. 9, PDF pp. 6–7",
+      "original_pdf_start": 6
+    },
+    {
+      "citation_id": "CIT-0008",
+      "status": "corrected",
+      "supported_claim": "MOM unit structures differ in capacitance density and unwanted top-plate coupling.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        4
+      ],
+      "detail": "Corrected Fig.4/PDF3 reference to §III-B Fig.5/PDF4. The previous span contained the figure but mislabeled it.",
+      "html": "cc-review.html",
+      "section": "passives",
+      "original_label": "§III and Fig. 4, PDF pp. 3–5",
+      "original_pdf_start": 3
+    },
+    {
+      "citation_id": "CIT-0009",
+      "status": "supported",
+      "supported_claim": "Capacitor-layout methods impose ratios/exclusivity and address dispersion/routing jointly.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        4,
+        5
+      ],
+      "detail": "§III-C surveys ILP, pair-sequence, chessboard and routing-aware methods. Proposed Philis invariants remain adaptations.",
+      "html": "cc-review.html",
+      "section": "passives",
+      "original_label": "§III-C, PDF pp. 4–5",
+      "original_pdf_start": 4
+    },
+    {
+      "citation_id": "CIT-0041",
+      "status": "not_claim",
+      "supported_claim": "Source inventory link.",
+      "source": "inventory",
+      "evidence_pdf_pages": [],
+      "detail": "Navigation to the first page; not evidence for a technical claim.",
+      "html": "coverage.html",
+      "section": "inventory",
+      "original_label": "Supplied PDF",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0042",
+      "status": "not_claim",
+      "supported_claim": "Source inventory link.",
+      "source": "inventory",
+      "evidence_pdf_pages": [],
+      "detail": "Navigation to the first page; not evidence for a technical claim.",
+      "html": "coverage.html",
+      "section": "inventory",
+      "original_label": "Supplied PDF",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0043",
+      "status": "not_claim",
+      "supported_claim": "Source inventory link.",
+      "source": "inventory",
+      "evidence_pdf_pages": [],
+      "detail": "Navigation to the first page; not evidence for a technical claim.",
+      "html": "coverage.html",
+      "section": "inventory",
+      "original_label": "Supplied PDF",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0044",
+      "status": "not_claim",
+      "supported_claim": "Source inventory link.",
+      "source": "inventory",
+      "evidence_pdf_pages": [],
+      "detail": "Navigation to the first page; not evidence for a technical claim.",
+      "html": "coverage.html",
+      "section": "inventory",
+      "original_label": "Supplied PDF",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0045",
+      "status": "not_claim",
+      "supported_claim": "Source inventory link.",
+      "source": "inventory",
+      "evidence_pdf_pages": [],
+      "detail": "Navigation to the first page; not evidence for a technical claim.",
+      "html": "coverage.html",
+      "section": "inventory",
+      "original_label": "Supplied PDF",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0046",
+      "status": "corrected",
+      "supported_claim": "The DAC paper targets binary/split charge-scaling arrays and evaluates models in a commercial 12 nm process.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3,
+        10
+      ],
+      "detail": "Retained architecture discussion at pp1–3; added §V/PDF10 for the commercial-process setup omitted by the old citation.",
+      "html": "dac.html",
+      "section": "scope",
+      "original_label": "§I–II, PDF pp. 1–3",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0047",
+      "status": "qualified",
+      "supported_claim": "Binary and split DACs have distinct top-plate graphs and several parasitic classes with different static/dynamic effects.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        4
+      ],
+      "detail": "§II, especially §II-B, supports terminal distinctions under the paper’s switch/output assumptions. Full reference/switch/amplifier acceptance tests are proposed extensions.",
+      "html": "dac.html",
+      "section": "scope",
+      "original_label": "§II, PDF pp. 2–3",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0272",
+      "status": "qualified",
+      "supported_claim": "Binary and split DACs have distinct top-plate graphs and several parasitic classes with different static/dynamic effects.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        4
+      ],
+      "detail": "§II, especially §II-B, supports terminal distinctions under the paper’s switch/output assumptions. Full reference/switch/amplifier acceptance tests are proposed extensions.",
+      "html": "topic-dac-arrays.html",
+      "section": "contract",
+      "original_label": "Binary and split circuit models, PDF pp. 2–4",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0366",
+      "status": "qualified",
+      "supported_claim": "Binary and split DACs have distinct top-plate graphs and several parasitic classes with different static/dynamic effects.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        4
+      ],
+      "detail": "§II, especially §II-B, supports terminal distinctions under the paper’s switch/output assumptions. Full reference/switch/amplifier acceptance tests are proposed extensions.",
+      "html": "topic-parasitics.html",
+      "section": "capacitance",
+      "original_label": "Parasitic classes and their roles, PDF pp. 2–4",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0483",
+      "status": "qualified",
+      "supported_claim": "Binary and split DACs have distinct top-plate graphs and several parasitic classes with different static/dynamic effects.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        4
+      ],
+      "detail": "§II, especially §II-B, supports terminal distinctions under the paper’s switch/output assumptions. Full reference/switch/amplifier acceptance tests are proposed extensions.",
+      "html": "topic-signal-routing.html",
+      "section": "sensitive",
+      "original_label": "Capacitor terminal parasitics, PDF pp. 2–4",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0048",
+      "status": "supported",
+      "supported_claim": "Spiral, chessboard and block chessboard constructions trade connected same-bit clusters against dispersion.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        7,
+        8
+      ],
+      "detail": "§IV-A and placement figures checked. No universal pattern ranking is inferred.",
+      "html": "dac.html",
+      "section": "methods",
+      "original_label": "§IV-A, PDF pp. 7–8",
+      "original_pdf_start": 7
+    },
+    {
+      "citation_id": "CIT-0275",
+      "status": "supported",
+      "supported_claim": "Spiral, chessboard and block chessboard constructions trade connected same-bit clusters against dispersion.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        7,
+        8
+      ],
+      "detail": "§IV-A and placement figures checked. No universal pattern ranking is inferred.",
+      "html": "topic-dac-arrays.html",
+      "section": "families",
+      "original_label": "Spiral, chessboard and block variants, PDF pp. 7–8",
+      "original_pdf_start": 7
+    },
+    {
+      "citation_id": "CIT-0049",
+      "status": "qualified",
+      "supported_claim": "The two one-unit members are placed near the center as a stated exception to exact common-centroid placement.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        7
+      ],
+      "detail": "§IV-A states the exception. The impossibility proof is conditional on identical nonoverlapping single-site units, not arbitrary nested device geometry.",
+      "html": "dac.html",
+      "section": "methods",
+      "original_label": "Odd-count exception, PDF p. 7",
+      "original_pdf_start": 7
+    },
+    {
+      "citation_id": "CIT-0274",
+      "status": "qualified",
+      "supported_claim": "The two one-unit members are placed near the center as a stated exception to exact common-centroid placement.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        7
+      ],
+      "detail": "§IV-A states the exception. The impossibility proof is conditional on identical nonoverlapping single-site units, not arbitrary nested device geometry.",
+      "html": "topic-dac-arrays.html",
+      "section": "unitization",
+      "original_label": "Construction and one-unit exception, PDF p. 7",
+      "original_pdf_start": 7
+    },
+    {
+      "citation_id": "CIT-0331",
+      "status": "qualified",
+      "supported_claim": "The two one-unit members are placed near the center as a stated exception to exact common-centroid placement.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        7
+      ],
+      "detail": "§IV-A states the exception. The impossibility proof is conditional on identical nonoverlapping single-site units, not arbitrary nested device geometry.",
+      "html": "topic-gradient-matching.html",
+      "section": "ratio",
+      "original_label": "Odd-count placement, PDF p. 7",
+      "original_pdf_start": 7
+    },
+    {
+      "citation_id": "CIT-0050",
+      "status": "supported",
+      "supported_claim": "Split placement has odd-count/attenuation-capacitor exceptions and separate LSB/MSB nodes.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        9,
+        10
+      ],
+      "detail": "§IV-C specifies placement exceptions and separate top-plate routing.",
+      "html": "dac.html",
+      "section": "methods",
+      "original_label": "Split placement, PDF p. 9",
+      "original_pdf_start": 9
+    },
+    {
+      "citation_id": "CIT-0051",
+      "status": "supported",
+      "supported_claim": "Same-bit connected components use branches/trunks/bridges; common top plates use graph/MST routing, separately for split banks.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        8,
+        9,
+        10
+      ],
+      "detail": "§IV-B and §IV-C checked. MST is a construction heuristic under its graph cost, not an optimal electrical-delay proof.",
+      "html": "dac.html",
+      "section": "routing",
+      "original_label": "§IV-B–C, PDF pp. 8–10",
+      "original_pdf_start": 8
+    },
+    {
+      "citation_id": "CIT-0277",
+      "status": "supported",
+      "supported_claim": "Same-bit connected components use branches/trunks/bridges; common top plates use graph/MST routing, separately for split banks.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        8,
+        9,
+        10
+      ],
+      "detail": "§IV-B and §IV-C checked. MST is a construction heuristic under its graph cost, not an optimal electrical-delay proof.",
+      "html": "topic-dac-arrays.html",
+      "section": "routing",
+      "original_label": "Bottom- and top-plate routing, PDF pp. 8–10",
+      "original_pdf_start": 8
+    },
+    {
+      "citation_id": "CIT-0052",
+      "status": "supported",
+      "supported_claim": "Parallel wiring can reduce delay, change the critical bit and reach diminishing returns.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        11,
+        12
+      ],
+      "detail": "Tables I–II and Fig.15/discussion checked. Benefits are limited to the paper’s RC/via/route model.",
+      "html": "dac.html",
+      "section": "routing",
+      "original_label": "Results and Fig. 15, PDF pp. 11–12",
+      "original_pdf_start": 11
+    },
+    {
+      "citation_id": "CIT-0518",
+      "status": "supported",
+      "supported_claim": "Parallel wiring can reduce delay, change the critical bit and reach diminishing returns.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        11,
+        12
+      ],
+      "detail": "Tables I–II and Fig.15/discussion checked. Benefits are limited to the paper’s RC/via/route model.",
+      "html": "topic-wire-sizing.html",
+      "section": "parallel",
+      "original_label": "Parallel routing and shifting bottlenecks, PDF pp. 11–12",
+      "original_pdf_start": 11
+    },
+    {
+      "citation_id": "CIT-0053",
+      "status": "qualified",
+      "supported_claim": "DNL uses adjacent code steps and INL uses a stated ideal transfer reference in LSB units.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        4
+      ],
+      "detail": "Eqs.(17)–(18) checked. Endpoint/best-fit convention discussion is handbook clarification; the 3-bit example is derived with explicit nominal reference and no gain removal.",
+      "html": "dac.html",
+      "section": "metrics",
+      "original_label": "§III, PDF p. 4",
+      "original_pdf_start": 4
+    },
+    {
+      "citation_id": "CIT-0273",
+      "status": "qualified",
+      "supported_claim": "DNL uses adjacent code steps and INL uses a stated ideal transfer reference in LSB units.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        4
+      ],
+      "detail": "Eqs.(17)–(18) checked. Endpoint/best-fit convention discussion is handbook clarification; the 3-bit example is derived with explicit nominal reference and no gain removal.",
+      "html": "topic-dac-arrays.html",
+      "section": "accuracy",
+      "original_label": "Linearity definitions, PDF p. 4",
+      "original_pdf_start": 4
+    },
+    {
+      "citation_id": "CIT-0054",
+      "status": "qualified",
+      "supported_claim": "The paper defines f=1/[2(N+2)ln(2)τ], with τ from charging-path delay.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        5,
+        6
+      ],
+      "detail": "Eq.(32) was visually checked. The handbook distinguishes this N-dependent settling model from a standard single-pole −3 dB frequency; this is a dimensional/model interpretation, not a publisher erratum.",
+      "html": "dac.html",
+      "section": "metrics",
+      "original_label": "§III-C and Eq. (32), PDF pp. 5–6",
+      "original_pdf_start": 5
+    },
+    {
+      "citation_id": "CIT-0278",
+      "status": "qualified",
+      "supported_claim": "The paper defines f=1/[2(N+2)ln(2)τ], with τ from charging-path delay.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        5,
+        6
+      ],
+      "detail": "Eq.(32) was visually checked. The handbook distinguishes this N-dependent settling model from a standard single-pole −3 dB frequency; this is a dimensional/model interpretation, not a publisher erratum.",
+      "html": "topic-dac-arrays.html",
+      "section": "settling",
+      "original_label": "Delay and frequency model, PDF pp. 5–6",
+      "original_pdf_start": 5
+    },
+    {
+      "citation_id": "CIT-0055",
+      "status": "supported",
+      "supported_claim": "For the paper’s MOM bridge construction and common small edge shift, ΔC/C≈2δ(1/H+1/l).",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        6
+      ],
+      "detail": "§III-D Eqs.(39)–(45) checked. H is the planar finger-array height, not dielectric thickness. Continuous dimensions and small common perturbation are required.",
+      "html": "dac.html",
+      "section": "metrics",
+      "original_label": "§III-D, PDF p. 6",
+      "original_pdf_start": 6
+    },
+    {
+      "citation_id": "CIT-0279",
+      "status": "supported",
+      "supported_claim": "For the paper’s MOM bridge construction and common small edge shift, ΔC/C≈2δ(1/H+1/l).",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        6
+      ],
+      "detail": "§III-D Eqs.(39)–(45) checked. H is the planar finger-array height, not dielectric thickness. Continuous dimensions and small common perturbation are required.",
+      "html": "topic-dac-arrays.html",
+      "section": "bridge",
+      "original_label": "Nonunit attenuation capacitor, PDF p. 6",
+      "original_pdf_start": 6
+    },
+    {
+      "citation_id": "CIT-0056",
+      "status": "supported",
+      "supported_claim": "Table II lists roughly 1411 MHz spiral versus 339 MHz block chessboard for the 8-bit example.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        11
+      ],
+      "detail": "Dense table values were checked in raster. These use the paper’s frequency model and experimental assumptions; no engine benchmark is claimed.",
+      "html": "dac.html",
+      "section": "evidence",
+      "original_label": "Tables I–II, PDF p. 11",
+      "original_pdf_start": 11
+    },
+    {
+      "citation_id": "CIT-0057",
+      "status": "qualified",
+      "supported_claim": "The commonly reused gradient/correlation constants are assumed rather than measured capacitor-process characterization.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        10,
+        12
+      ],
+      "detail": "§V setup and parameter discussion explicitly disclose inherited parameters. Joint-yield objections to separate marginal 3σ substitutions are handbook statistical interpretation.",
+      "html": "dac.html",
+      "section": "evidence",
+      "original_label": "Parameter discussion, PDF p. 12",
+      "original_pdf_start": 12
+    },
+    {
+      "citation_id": "CIT-0276",
+      "status": "qualified",
+      "supported_claim": "The commonly reused gradient/correlation constants are assumed rather than measured capacitor-process characterization.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        10,
+        12
+      ],
+      "detail": "§V setup and parameter discussion explicitly disclose inherited parameters. Joint-yield objections to separate marginal 3σ substitutions are handbook statistical interpretation.",
+      "html": "topic-dac-arrays.html",
+      "section": "families",
+      "original_label": "Limits of the statistical parameters, PDF p. 12",
+      "original_pdf_start": 12
+    },
+    {
+      "citation_id": "CIT-0330",
+      "status": "qualified",
+      "supported_claim": "The commonly reused gradient/correlation constants are assumed rather than measured capacitor-process characterization.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        10,
+        12
+      ],
+      "detail": "§V setup and parameter discussion explicitly disclose inherited parameters. Joint-yield objections to separate marginal 3σ substitutions are handbook statistical interpretation.",
+      "html": "topic-gradient-matching.html",
+      "section": "covariance",
+      "original_label": "Correlation-data limitations, PDF p. 12",
+      "original_pdf_start": 12
+    },
+    {
+      "citation_id": "CIT-0184",
+      "status": "supported",
+      "supported_claim": "The stated 1:1 recursive construction cancels polynomial gradients through order n using 2^n units per device.",
+      "source": "nth-order",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3
+      ],
+      "detail": "Abstract and §III checked, including the superscript in rendered pages. Additive identical-unit assumptions remain explicit; no minimum unit-count theorem is asserted.",
+      "html": "nth-order.html",
+      "section": "claim",
+      "original_label": "Abstract and gradient model, PDF pp. 1–2",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0185",
+      "status": "qualified",
+      "supported_claim": "Mismatch of additive point-sampled units equals a sum of polynomial coefficients times corresponding moment differences.",
+      "source": "nth-order",
+      "evidence_pdf_pages": [
+        2,
+        3
+      ],
+      "detail": "§II Eqs.(4)–(6) and §III Eqs.(15)–(23) checked. Normalization, weighted ratios and finite-footprint extensions are derived, not generalized source theorems. Citation narrowed to the actual model/proof passages.",
+      "html": "nth-order.html",
+      "section": "derivation",
+      "original_label": "Equations (3)–(16), PDF pp. 2–3",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0323",
+      "status": "qualified",
+      "supported_claim": "Mismatch of additive point-sampled units equals a sum of polynomial coefficients times corresponding moment differences.",
+      "source": "nth-order",
+      "evidence_pdf_pages": [
+        2,
+        3
+      ],
+      "detail": "§II Eqs.(4)–(6) and §III Eqs.(15)–(23) checked. Normalization, weighted ratios and finite-footprint extensions are derived, not generalized source theorems. Citation narrowed to the actual model/proof passages.",
+      "html": "topic-gradient-matching.html",
+      "section": "moments",
+      "original_label": "Additive unit model, PDF pp. 2–3",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0186",
+      "status": "supported",
+      "supported_claim": "Recursive central reflection retains A/B labels for odd target order and exchanges them for even target order.",
+      "source": "nth-order",
+      "evidence_pdf_pages": [
+        2,
+        3
+      ],
+      "detail": "§III induction checked. Arbitrary centers preserve already-canceled lower-degree terms; geometry must still be disjoint/legal.",
+      "html": "nth-order.html",
+      "section": "construction",
+      "original_label": "§III recursive definition, PDF pp. 2–3",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0325",
+      "status": "supported",
+      "supported_claim": "Recursive central reflection retains A/B labels for odd target order and exchanges them for even target order.",
+      "source": "nth-order",
+      "evidence_pdf_pages": [
+        2,
+        3
+      ],
+      "detail": "§III induction checked. Arbitrary centers preserve already-canceled lower-degree terms; geometry must still be disjoint/legal.",
+      "html": "topic-gradient-matching.html",
+      "section": "higher",
+      "original_label": "Recursive construction and proof, PDF pp. 2–3",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0187",
+      "status": "qualified",
+      "supported_claim": "Table I numerically demonstrates cancellation for synthetic gradient fields.",
+      "source": "nth-order",
+      "evidence_pdf_pages": [
+        4
+      ],
+      "detail": "This is model evidence, not fabricated-silicon data or a guarantee for random mismatch/LDE/routing.",
+      "html": "nth-order.html",
+      "section": "bounds",
+      "original_label": "§IV, Table I and conclusion, PDF p. 4",
+      "original_pdf_start": 4
+    },
+    {
+      "citation_id": "CIT-0197",
+      "status": "qualified",
+      "supported_claim": "Geometric proxies and constraints do not generally guarantee post-layout circuit specifications.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3
+      ],
+      "detail": "§I–II/ Fig.1 support the performance-feedback need. Contract/result-state/candidate archive schemas are handbook proposals.",
+      "html": "performance.html",
+      "section": "main-result",
+      "original_label": "§I–II, PDF pp. 1–3",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0378",
+      "status": "qualified",
+      "supported_claim": "Geometric proxies and constraints do not generally guarantee post-layout circuit specifications.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3
+      ],
+      "detail": "§I–II/ Fig.1 support the performance-feedback need. Contract/result-state/candidate archive schemas are handbook proposals.",
+      "html": "topic-performance-loop.html",
+      "section": "specification",
+      "original_label": "Performance-driven motivation, PDF pp. 1–3",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0513",
+      "status": "qualified",
+      "supported_claim": "Geometric proxies and constraints do not generally guarantee post-layout circuit specifications.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3
+      ],
+      "detail": "§I–II/ Fig.1 support the performance-feedback need. Contract/result-state/candidate archive schemas are handbook proposals.",
+      "html": "topic-verification.html",
+      "section": "layers",
+      "original_label": "Performance gap, PDF pp. 1–3",
+      "original_pdf_start": 1
+    },
+    {
+      "citation_id": "CIT-0198",
+      "status": "supported",
+      "supported_claim": "Performance search can tune a restricted generator through black-box optimization or use learned prediction.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        2,
+        3
+      ],
+      "detail": "§II-B/C checked. A restricted net-weight search is not a search over all layouts; that proof-scope qualification is handbook reasoning.",
+      "html": "performance.html",
+      "section": "methods",
+      "original_label": "§II-A–C, PDF pp. 2–3",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0381",
+      "status": "supported",
+      "supported_claim": "Performance search can tune a restricted generator through black-box optimization or use learned prediction.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        2,
+        3
+      ],
+      "detail": "§II-B/C checked. A restricted net-weight search is not a search over all layouts; that proof-scope qualification is handbook reasoning.",
+      "html": "topic-performance-loop.html",
+      "section": "search",
+      "original_label": "Optimization and prediction approaches, PDF pp. 2–3",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0199",
+      "status": "qualified",
+      "supported_claim": "The example’s dominant modeling cost is data acquisition, but the printed percentages disagree.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        3,
+        4,
+        5
+      ],
+      "detail": "§III-A text says 92.89% acquisition and 7.11% training/inference; Fig.2 sums 22.55+75.42+7+0.11=105.08%. Figure visually checked. Retain qualitative lesson only; not a verified publisher erratum.",
+      "html": "performance.html",
+      "section": "cost",
+      "original_label": "§III-A, PDF pp. 3–4",
+      "original_pdf_start": 3
+    },
+    {
+      "citation_id": "CIT-0200",
+      "status": "qualified",
+      "supported_claim": "The example’s dominant modeling cost is data acquisition, but the printed percentages disagree.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        3,
+        4,
+        5
+      ],
+      "detail": "§III-A text says 92.89% acquisition and 7.11% training/inference; Fig.2 sums 22.55+75.42+7+0.11=105.08%. Figure visually checked. Retain qualitative lesson only; not a verified publisher erratum.",
+      "html": "performance.html",
+      "section": "cost",
+      "original_label": "Fig. 2, PDF p. 5",
+      "original_pdf_start": 5
+    },
+    {
+      "citation_id": "CIT-0385",
+      "status": "qualified",
+      "supported_claim": "The example’s dominant modeling cost is data acquisition, but the printed percentages disagree.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        3,
+        4,
+        5
+      ],
+      "detail": "§III-A text says 92.89% acquisition and 7.11% training/inference; Fig.2 sums 22.55+75.42+7+0.11=105.08%. Figure visually checked. Retain qualitative lesson only; not a verified publisher erratum.",
+      "html": "topic-performance-loop.html",
+      "section": "surrogates",
+      "original_label": "Data and transfer costs, PDF pp. 3–5",
+      "original_pdf_start": 3
+    },
+    {
+      "citation_id": "CIT-0201",
+      "status": "supported",
+      "supported_claim": "Model transfer across sizing/topology varies with the predicted circuit metric.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        4
+      ],
+      "detail": "§III-B/Table I checked. Recommendations for held-out domains and probability calibration are methodological proposals.",
+      "html": "performance.html",
+      "section": "transfer",
+      "original_label": "§III-B, Table I, PDF p. 4",
+      "original_pdf_start": 4
+    },
+    {
+      "citation_id": "CIT-0511",
+      "status": "supported",
+      "supported_claim": "Model transfer across sizing/topology varies with the predicted circuit metric.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        4
+      ],
+      "detail": "§III-B/Table I checked. Recommendations for held-out domains and probability calibration are methodological proposals.",
+      "html": "topic-validation.html",
+      "section": "controls",
+      "original_label": "Metric-dependent transfer, PDF p. 4",
+      "original_pdf_start": 4
+    },
+    {
+      "citation_id": "CIT-0202",
+      "status": "qualified",
+      "supported_claim": "The paper compares multiobjective and weighted BO and motivates preserving competing metrics.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        4,
+        5
+      ],
+      "detail": "§III-C and figures support its case study. A finite feasible Pareto archive and dominance definition are handbook methods, not a proof of a global frontier.",
+      "html": "performance.html",
+      "section": "multiobjective",
+      "original_label": "§III-C, PDF pp. 4–5",
+      "original_pdf_start": 4
+    },
+    {
+      "citation_id": "CIT-0383",
+      "status": "qualified",
+      "supported_claim": "The paper compares multiobjective and weighted BO and motivates preserving competing metrics.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        4,
+        5
+      ],
+      "detail": "§III-C and figures support its case study. A finite feasible Pareto archive and dominance definition are handbook methods, not a proof of a global frontier.",
+      "html": "topic-performance-loop.html",
+      "section": "archive",
+      "original_label": "Multiobjective discussion, PDF pp. 4–5",
+      "original_pdf_start": 4
+    },
+    {
+      "citation_id": "CIT-0203",
+      "status": "supported",
+      "supported_claim": "Future directions include active learning, faster simulation, transfer and schematic/layout features.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        5,
+        6
+      ],
+      "detail": "§IV–V checked. The proposed adoption order is handbook judgment, not a quoted author requirement.",
+      "html": "performance.html",
+      "section": "research",
+      "original_label": "§IV–V, PDF pp. 5–6",
+      "original_pdf_start": 5
+    },
+    {
+      "citation_id": "CIT-0237",
+      "status": "supported",
+      "supported_claim": "Wire size changes competing RC effects and can materially change circuit performance.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        4
+      ],
+      "detail": "§1 motivation/figures checked. PDK-dependent legal choices and a toy optimum are distinguished from source results.",
+      "html": "todaes.html",
+      "section": "physical",
+      "original_label": "Motivation and examples, PDF pp. 2–4",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0365",
+      "status": "supported",
+      "supported_claim": "Wire size changes competing RC effects and can materially change circuit performance.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        4
+      ],
+      "detail": "§1 motivation/figures checked. PDK-dependent legal choices and a toy optimum are distinguished from source results.",
+      "html": "topic-parasitics.html",
+      "section": "physical",
+      "original_label": "Width sensitivity example, PDF p. 2",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0515",
+      "status": "supported",
+      "supported_claim": "Wire size changes competing RC effects and can materially change circuit performance.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        2,
+        3,
+        4
+      ],
+      "detail": "§1 motivation/figures checked. PDK-dependent legal choices and a toy optimum are distinguished from source results.",
+      "html": "topic-wire-sizing.html",
+      "section": "derivation",
+      "original_label": "Physical motivation, PDF pp. 2–4",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0238",
+      "status": "supported",
+      "supported_claim": "Uniform 1×→3× width in Table7 increases CM-OTA UGF 451.0→511.4 MHz while gain 33.1→31.1 dB and FOM 0.92→0.90 decline.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        19
+      ],
+      "detail": "Table7 checked visually. The example supports conflicting sensitivities; root worked models are labeled illustrative and are not extracted source results.",
+      "html": "todaes.html",
+      "section": "physical",
+      "original_label": "Table 7, PDF p. 19",
+      "original_pdf_start": 19
+    },
+    {
+      "citation_id": "CIT-0362",
+      "status": "supported",
+      "supported_claim": "Uniform 1×→3× width in Table7 increases CM-OTA UGF 451.0→511.4 MHz while gain 33.1→31.1 dB and FOM 0.92→0.90 decline.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        19
+      ],
+      "detail": "Table7 checked visually. The example supports conflicting sensitivities; root worked models are labeled illustrative and are not extracted source results.",
+      "html": "topic-optimality.html",
+      "section": "learning",
+      "original_label": "Competing width effects, PDF p. 19",
+      "original_pdf_start": 19
+    },
+    {
+      "citation_id": "CIT-0363",
+      "status": "supported",
+      "supported_claim": "Uniform 1×→3× width in Table7 increases CM-OTA UGF 451.0→511.4 MHz while gain 33.1→31.1 dB and FOM 0.92→0.90 decline.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        19
+      ],
+      "detail": "Table7 checked visually. The example supports conflicting sensitivities; root worked models are labeled illustrative and are not extracted source results.",
+      "html": "topic-optimality.html",
+      "section": "worked",
+      "original_label": "Table 7, PDF p. 19",
+      "original_pdf_start": 19
+    },
+    {
+      "citation_id": "CIT-0367",
+      "status": "supported",
+      "supported_claim": "Uniform 1×→3× width in Table7 increases CM-OTA UGF 451.0→511.4 MHz while gain 33.1→31.1 dB and FOM 0.92→0.90 decline.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        19
+      ],
+      "detail": "Table7 checked visually. The example supports conflicting sensitivities; root worked models are labeled illustrative and are not extracted source results.",
+      "html": "topic-parasitics.html",
+      "section": "worked",
+      "original_label": "Table 7, PDF p. 19",
+      "original_pdf_start": 19
+    },
+    {
+      "citation_id": "CIT-0510",
+      "status": "supported",
+      "supported_claim": "Uniform 1×→3× width in Table7 increases CM-OTA UGF 451.0→511.4 MHz while gain 33.1→31.1 dB and FOM 0.92→0.90 decline.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        19
+      ],
+      "detail": "Table7 checked visually. The example supports conflicting sensitivities; root worked models are labeled illustrative and are not extracted source results.",
+      "html": "topic-validation.html",
+      "section": "hypothesis",
+      "original_label": "Uniform-width comparison, PDF p. 19",
+      "original_pdf_start": 19
+    },
+    {
+      "citation_id": "CIT-0239",
+      "status": "qualified",
+      "supported_claim": "Per-net discrete widths are chosen after global routing; symmetric nets share choices; positive normalized metric scores are averaged.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        5,
+        6
+      ],
+      "detail": "§§2–3 Eqs.(1)–(3) checked. The notes explicitly restrict ratio formulas to appropriate positive quantities and do not treat rounded FOM as a pass certificate.",
+      "html": "todaes.html",
+      "section": "formulation",
+      "original_label": "§2–3, PDF pp. 5–6",
+      "original_pdf_start": 5
+    },
+    {
+      "citation_id": "CIT-0516",
+      "status": "qualified",
+      "supported_claim": "Per-net discrete widths are chosen after global routing; symmetric nets share choices; positive normalized metric scores are averaged.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        5,
+        6
+      ],
+      "detail": "§§2–3 Eqs.(1)–(3) checked. The notes explicitly restrict ratio formulas to appropriate positive quantities and do not treat rounded FOM as a pass certificate.",
+      "html": "topic-wire-sizing.html",
+      "section": "where",
+      "original_label": "Problem formulation and flow, PDF pp. 5–6",
+      "original_pdf_start": 5
+    },
+    {
+      "citation_id": "CIT-0240",
+      "status": "supported",
+      "supported_claim": "Graph nodes include device/I/O pins and Steiner nodes, with device and route-dependent node/edge features.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        8
+      ],
+      "detail": "§4.2 checked, including vias, widths, pin lengths and terminal types.",
+      "html": "todaes.html",
+      "section": "model",
+      "original_label": "§4.2, PDF p. 8",
+      "original_pdf_start": 8
+    },
+    {
+      "citation_id": "CIT-0519",
+      "status": "supported",
+      "supported_claim": "Graph nodes include device/I/O pins and Steiner nodes, with device and route-dependent node/edge features.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        8
+      ],
+      "detail": "§4.2 checked, including vias, widths, pin lengths and terminal types.",
+      "html": "topic-wire-sizing.html",
+      "section": "surrogate",
+      "original_label": "Graph features, PDF p. 8",
+      "original_pdf_start": 8
+    },
+    {
+      "citation_id": "CIT-0241",
+      "status": "corrected",
+      "supported_claim": "WAGN is a soft classifier for FOM below one user-selected threshold.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        9,
+        10,
+        11
+      ],
+      "detail": "§4.3–4.5 Eqs.(17)–(19) checked. Replaced full-distribution/CDF wording and disclaimed unestablished probability calibration or manufacturing-yield meaning.",
+      "html": "todaes.html",
+      "section": "model",
+      "original_label": "§4.3–4.5, PDF pp. 9–11",
+      "original_pdf_start": 9
+    },
+    {
+      "citation_id": "CIT-0384",
+      "status": "corrected",
+      "supported_claim": "WAGN is a soft classifier for FOM below one user-selected threshold.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        9,
+        10,
+        11
+      ],
+      "detail": "§4.3–4.5 Eqs.(17)–(19) checked. Replaced full-distribution/CDF wording and disclaimed unestablished probability calibration or manufacturing-yield meaning.",
+      "html": "topic-performance-loop.html",
+      "section": "surrogates",
+      "original_label": "Graph and learning model, PDF pp. 6–12",
+      "original_pdf_start": 6
+    },
+    {
+      "citation_id": "CIT-0242",
+      "status": "qualified",
+      "supported_claim": "Optimization relaxes widths, discretizes candidates, then simulates a shortlist; methods use a fixed classifier with multistart TensorFlow or WAGN-guided BO.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        12,
+        13,
+        14
+      ],
+      "detail": "§5 and Algorithm1 checked. Notes add explicit legalization/resource bounds and cannot claim simulated shortlist certifies all omitted requirements.",
+      "html": "todaes.html",
+      "section": "algorithm",
+      "original_label": "§5 and Algorithm 1, PDF pp. 12–14",
+      "original_pdf_start": 12
+    },
+    {
+      "citation_id": "CIT-0520",
+      "status": "qualified",
+      "supported_claim": "Optimization relaxes widths, discretizes candidates, then simulates a shortlist; methods use a fixed classifier with multistart TensorFlow or WAGN-guided BO.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        12,
+        13,
+        14
+      ],
+      "detail": "§5 and Algorithm1 checked. Notes add explicit legalization/resource bounds and cannot claim simulated shortlist certifies all omitted requirements.",
+      "html": "topic-wire-sizing.html",
+      "section": "surrogate",
+      "original_label": "Two-stage optimization, PDF pp. 12–13",
+      "original_pdf_start": 12
+    },
+    {
+      "citation_id": "CIT-0243",
+      "status": "supported",
+      "supported_claim": "Tested 1×/2×/3× width choices are realized using parallel physical routes.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        15,
+        16
+      ],
+      "detail": "§6/Fig.8 checked. The notes correctly distinguish this topology from a single wide rectangle and from ideal equal-current branches.",
+      "html": "todaes.html",
+      "section": "algorithm",
+      "original_label": "Width realization, PDF pp. 15–16",
+      "original_pdf_start": 15
+    },
+    {
+      "citation_id": "CIT-0517",
+      "status": "supported",
+      "supported_claim": "Tested 1×/2×/3× width choices are realized using parallel physical routes.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        15,
+        16
+      ],
+      "detail": "§6/Fig.8 checked. The notes correctly distinguish this topology from a single wide rectangle and from ideal equal-current branches.",
+      "html": "topic-wire-sizing.html",
+      "section": "parallel",
+      "original_label": "Physical realization, PDF pp. 15–16",
+      "original_pdf_start": 15
+    },
+    {
+      "citation_id": "CIT-0244",
+      "status": "supported",
+      "supported_claim": "Experiments use 12 circuits, ASAP7/GF12, 2000 layouts per schematic, 80/20 sample splits and within-family transfer.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        14,
+        15,
+        16,
+        17
+      ],
+      "detail": "§6/§6.1 checked. No independent reproduction or unrestricted cross-family transfer is implied.",
+      "html": "todaes.html",
+      "section": "experiments",
+      "original_label": "§6 setup, PDF pp. 14–17",
+      "original_pdf_start": 14
+    },
+    {
+      "citation_id": "CIT-0245",
+      "status": "supported",
+      "supported_claim": "The manuscript identifies classification-only output, cross-family transfer, scale, process variation and joint sizing as limitations/future work.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        23
+      ],
+      "detail": "§7 explicitly states these limitations.",
+      "html": "todaes.html",
+      "section": "experiments",
+      "original_label": "Limitations, PDF p. 23",
+      "original_pdf_start": 23
+    },
+    {
+      "citation_id": "CIT-0522",
+      "status": "supported",
+      "supported_claim": "The manuscript identifies classification-only output, cross-family transfer, scale, process variation and joint sizing as limitations/future work.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        23
+      ],
+      "detail": "§7 explicitly states these limitations.",
+      "html": "topic-wire-sizing.html",
+      "section": "surrogate",
+      "original_label": "Declared limitations, PDF p. 23",
+      "original_pdf_start": 23
+    },
+    {
+      "citation_id": "CIT-0246",
+      "status": "qualified",
+      "supported_claim": "11% FOM gain or 8.7× speedup is relative to specified BO baselines and runtime accounting.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        17,
+        18,
+        19
+      ],
+      "detail": "§6.2/Table6 checked. Training-cost columns, hardware parallelism and evaluation budgets are kept attached to the result.",
+      "html": "todaes.html",
+      "section": "experiments",
+      "original_label": "Runtime discussion and Table 6, PDF pp. 18–19",
+      "original_pdf_start": 18
+    },
+    {
+      "citation_id": "CIT-0521",
+      "status": "qualified",
+      "supported_claim": "11% FOM gain or 8.7× speedup is relative to specified BO baselines and runtime accounting.",
+      "source": "todaes",
+      "evidence_pdf_pages": [
+        17,
+        18,
+        19
+      ],
+      "detail": "§6.2/Table6 checked. Training-cost columns, hardware parallelism and evaluation budgets are kept attached to the result.",
+      "html": "topic-wire-sizing.html",
+      "section": "surrogate",
+      "original_label": "Runtime accounting, PDF pp. 18–19",
+      "original_pdf_start": 18
+    },
+    {
+      "citation_id": "CIT-0326",
+      "status": "supported",
+      "supported_claim": "A linear oxide-thickness field yields a nonlinear capacitance response through reciprocal thickness.",
+      "source": "dac",
+      "evidence_pdf_pages": [
+        12
+      ],
+      "detail": "§V parameter discussion supports residual error from this nonlinearity; no claim that thickness moments alone exactly match capacitance.",
+      "html": "topic-gradient-matching.html",
+      "section": "finite",
+      "original_label": "Thickness-to-capacitance nonlinearity, PDF p. 12",
+      "original_pdf_start": 12
+    },
+    {
+      "citation_id": "CIT-0327",
+      "status": "supported",
+      "supported_claim": "Well, diffusion, pitch and oxide-definition surroundings can cause LDE independent of centroid.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        2
+      ],
+      "detail": "§II-A2/Fig.2 checked. Manufacturing descriptors require actual device/environment models.",
+      "html": "topic-gradient-matching.html",
+      "section": "environment",
+      "original_label": "LDE mechanisms, PDF p. 2",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0328",
+      "status": "supported",
+      "supported_claim": "An ABBA array can put inner B and outer A devices in different LOD environments.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        6
+      ],
+      "detail": "§V-A/Fig.9 checked; row role balancing still needs terminal/orientation/routing checks.",
+      "html": "topic-gradient-matching.html",
+      "section": "environment",
+      "original_label": "ABBA counterexample, PDF p. 6",
+      "original_pdf_start": 6
+    },
+    {
+      "citation_id": "CIT-0481",
+      "status": "supported",
+      "supported_claim": "Routing techniques include per-layer route matching, critical-net shielding and current-flow constraints.",
+      "source": "performance",
+      "evidence_pdf_pages": [
+        2
+      ],
+      "detail": "§II-A lists these techniques while retaining the distinction from electrical-performance guarantees.",
+      "html": "topic-signal-routing.html",
+      "section": "contract",
+      "original_label": "Routing survey, PDF p. 2",
+      "original_pdf_start": 2
+    },
+    {
+      "citation_id": "CIT-0482",
+      "status": "qualified",
+      "supported_claim": "Array source resistance acts through actual small-signal current distribution and the AC-ground location.",
+      "source": "cc-review",
+      "evidence_pdf_pages": [
+        6,
+        7
+      ],
+      "detail": "Eq.(25)/Fig.9 checked. Star/tree/mesh recipe and detailed extracted-network acceptance are handbook extensions.",
+      "html": "topic-signal-routing.html",
+      "section": "topology",
+      "original_label": "Source-resistance analysis, PDF pp. 6–7",
+      "original_pdf_start": 6
+    },
+    {
+      "citation_id": "CIT-0508",
+      "status": "qualified",
+      "supported_claim": "Polynomial-basis tests distinguish first-order centroid cancellation from higher-order residuals.",
+      "source": "nth-order",
+      "evidence_pdf_pages": [
+        1,
+        2,
+        3
+      ],
+      "detail": "The proof motivates basis testing; the validation ladder and unit-mapping adversarial cases are original methodology.",
+      "html": "topic-validation.html",
+      "section": "hypothesis",
+      "original_label": "Gradient-cancellation motivation, PDF pp. 1–3",
+      "original_pdf_start": 1
+    }
+  ],
+  "corrections": [
+    {
+      "html": "cc-review.html",
+      "before": "A dummy of the wrong layer or an electrically floating active dummy is not equivalent to the characterized boundary environment.",
+      "after": "A dummy whose geometry, layer or bias differs from the qualified construction does not establish the required boundary environment. Some qualified dummy structures are intentionally floating.",
+      "reason": "A floating dummy is not universally invalid; qualification is structure-specific."
+    },
+    {
+      "html": "cc-review.html",
+      "before": "For a simple single-branch model, <code>gₘ,eff≈gₘ/(1+gₘRₛ)</code>; the review analyzes actual unit-current distribution through the array.",
+      "after": "For a simple single-branch model, <code>gₘ,eff≈gₘ/(1+gₘRₛ)</code>. This closed form is our derivation from <code>i=gₘ(vin−iRₛ)</code>, neglecting output conductance and body effect and assuming the branch current is the source-resistor current. The review’s Eq. (25) relates effective transconductance to local source voltage; its array analysis uses the actual unit-current distribution.",
+      "reason": "Separate the source equation from our simplified closed-form derivation and state its electrical assumptions."
+    },
+    {
+      "html": "cc-review.html",
+      "before": "{{cite:cc-review:3:§III and Fig. 4, PDF pp. 3–5}}",
+      "after": "{{cite:cc-review:4:§III-B and Fig. 5, PDF p. 4}}",
+      "reason": "The MOM structure comparison is Fig. 5 on PDF4; Fig. 4 is a DAC parasitic model."
+    },
+    {
+      "html": "cc-review.html",
+      "before": "This reformulation of the review's sums makes the reason for dispersion measurable.",
+      "after": "This is our covariance-algebra reformulation of the review's sums: for zero-mean perturbations, E[(dᵀδp)²]=dᵀE[δpδpᵀ]d=dᵀΣd. It makes the reason for dispersion measurable.",
+      "reason": "Identify the generalized matrix formula as derived algebra, not a verbatim source equation."
+    },
+    {
+      "html": "dac.html",
+      "before": "{{cite:dac:1:§I–II, PDF pp. 1–3}}",
+      "after": "{{cite:dac:1:§I–II, PDF pp. 1–3}} {{cite:dac:10:§V, commercial 12 nm evaluation setup, PDF p. 10}}",
+      "reason": "The commercial technology/extraction setup is specified in §V rather than the introductory citation alone."
+    },
+    {
+      "html": "nth-order.html",
+      "before": "{{cite:nth-order:2:Equations (3)–(16), PDF pp. 2–3}}",
+      "after": "{{cite:nth-order:2:§II, Eqs. (4)–(6), additive unit model, PDF p. 2}} {{cite:nth-order:3:§III, Eqs. (15)–(23), cancellation proof, PDF p. 3}}",
+      "reason": "Pinpoint the model and induction separately; equation-range shorthand obscured which passage supports the result."
+    },
+    {
+      "html": "topic-gradient-matching.html",
+      "before": "For unequal contributing units, replace the ordinary mean with an explicitly justified electrical weighting. For ratio matching, normalize each member by its nominal value.",
+      "after": "Our extension to unequal contributing units replaces the ordinary mean with an explicitly justified electrical weighting. For ratio matching, normalize each member by its nominal value; this presumes an additive response to the specified field. The nth-order paper itself proves its recursive construction for two identically designed devices, not arbitrary weighted ratios.",
+      "reason": "Distinguish the general weighted derivation from the supplied paper’s 1:1 construction."
+    },
+    {
+      "html": "topic-parasitics.html",
+      "before": "The formula assumes a reasonably uniform strip and material model.",
+      "after": "The formula assumes a reasonably uniform strip and material model. {{cite:lampaert:51:§2.5.3.2, Eq. (2.33), sheet-resistance law, PDF p. 51 / printed p. 38}}",
+      "reason": "Provide the exact source for the strip-resistance law."
+    },
+    {
+      "html": "topic-parasitics.html",
+      "before": "For a positive physical capacitor c between nodes i and j,",
+      "after": "The following matrix stamp is our circuit-law derivation: a two-terminal linear capacitor obeys <code>qᵢ=c(vᵢ−vⱼ)</code>, <code>qⱼ=−qᵢ</code>, and terminal current is the time derivative of charge. For a positive physical capacitor c between nodes i and j,",
+      "reason": "Show why the signs arise and label the nodal stamp as an independent derivation."
+    },
+    {
+      "html": "topic-parasitics.html",
+      "before": "The circuit devices and their operating-point models connect to these terminals.",
+      "after": "These equations follow by summing the resistor and capacitor branch currents with Kirchhoff’s current law. They describe a linear RC network with defined reference/boundary nodes; ideal voltage sources or inductors require additional variables or boundary treatment. The circuit devices and their operating-point models connect to these terminals.",
+      "reason": "Clarify the applicability of the nodal network equation and avoid presenting it as the general MNA formulation."
+    },
+    {
+      "html": "topic-parasitics.html",
+      "before": "a simple local degeneration model gives <code>gₘ,eff≈gₘ/(1+gₘRₛ)</code>.",
+      "after": "our single-branch derivation <code>i=gₘ(vin−iRₛ)</code> gives <code>gₘ,eff≈gₘ/(1+gₘRₛ)</code>, neglecting body effect/output conductance and equating source-resistor current with the modeled branch current.",
+      "reason": "Expose the assumptions behind the source-degeneration teaching example."
+    },
+    {
+      "html": "topic-signal-routing.html",
+      "before": "For a simple coupling capacitor Cc, injected current is",
+      "after": "The following estimates are derived here from the linear capacitor law and charge conservation. For a simple coupling capacitor Cc, injected current is",
+      "reason": "Distinguish original charge-sharing derivation from a sourced empirical noise model."
+    },
+    {
+      "html": "topic-signal-routing.html",
+      "before": "This is an illustrative limit, not a universal noise formula:",
+      "after": "For the instantaneous step, conservation of victim charge gives <code>Cv·ΔVvictim+Cc(ΔVvictim−ΔVaggressor)=0</code>, which yields the stated ratio. This is an illustrative limit, not a universal noise formula:",
+      "reason": "Give the algebra supporting the action instead of leaving an uncited closed-form result."
+    },
+    {
+      "html": "topic-performance-loop.html",
+      "before": "{{cite:topological:17:Topological layout search, Chapter 1}}",
+      "after": "{{cite:topological:137:Chapter 3, §§3.4–3.5, hierarchical alternatives, PDF pp. 137–147}} {{cite:topological:191:Chapter 4, §4.5.4, placement/global-route integration, PDF pp. 191–193}}",
+      "reason": "Replace a chapter abstract with the actual algorithm sections supporting hierarchical alternatives and route integration."
+    },
+    {
+      "html": "topic-performance-loop.html",
+      "before": "learn a graph-based distribution related to performance, cheaply propose width assignments, then route/extract/simulate finalists.",
+      "after": "learn a graph-based classifier at a chosen performance threshold, cheaply propose width assignments, then route/extract/simulate finalists.",
+      "reason": "WAGN is a threshold classifier, not a learned full performance distribution."
+    },
+    {
+      "html": "topic-performance-loop.html",
+      "before": "The learned cumulative probability P(FOM&lt;T) is a different output from a deterministic FOM regression; preserve that distinction in the evaluator interface. {{cite:todaes:6:Graph and learning model, PDF pp. 6–12}}",
+      "after": "The manuscript denotes its soft classification output <code>P(FOM&lt;T)</code> for a user-specified threshold. A single-threshold score supplies neither a full cumulative distribution nor a calibrated manufacturing-failure probability. It also differs from FOM regression. Preserve these distinctions in the evaluator interface. {{cite:todaes:8:§4.2, graph features, PDF p. 8}} {{cite:todaes:10:§4.3–4.5, Eqs. (17)–(19), classification output/training, PDF pp. 10–11}}",
+      "reason": "Correct the implication that the model predicts a full CDF or statistical yield, and pinpoint its definition."
+    },
+    {
+      "html": "todaes.html",
+      "before": "The final output is <code>P(FOM&lt;T)</code>: a probability of belonging to the unsatisfactory class, not a prediction of gain in dB or delay in seconds.",
+      "after": "The manuscript denotes the final soft classification output <code>P(FOM&lt;T)</code> for one user-specified threshold. It estimates class membership; the reported classification experiments do not establish probability calibration, a full performance distribution or manufacturing yield. It is not a prediction of gain in dB or delay in seconds.",
+      "reason": "Separate the author’s probabilistic notation from evidence of calibration or process yield."
+    },
+    {
+      "html": "topic-wire-sizing.html",
+      "before": "It predicts the probability that a normalized FOM is below a threshold.",
+      "after": "It produces a soft classification score denoted as the probability that a normalized FOM is below one chosen threshold. Calibration and manufacturing yield are not established by that notation.",
+      "reason": "Qualify WAGN probability language consistently."
+    },
+    {
+      "html": "topic-verification.html",
+      "before": "{{cite:topological:279:Constraint verification discussion, Chapter 7}}",
+      "after": "{{cite:topological:291:Chapter 7, §7.4.5, metaverification, PDF pp. 291–293}} {{cite:topological:296:§7.5.2, conflict checking, PDF pp. 296–298}} The distinction between a failed search and a proof of infeasibility is our methodological qualification.",
+      "reason": "Use actual metaverification and conflict-checking sections and distinguish our proof-scope guidance."
+    },
+    {
+      "html": "glossary.html",
+      "before": "Current per drawn width is a process-specific surrogate, not volumetric current density.",
+      "after": "Current per drawn width is a process-specific surrogate rather than cross-sectional current density in A/m².",
+      "reason": "Current density J in A/m² is current per cross-sectional area, not per volume."
+    },
+    {
+      "html": "constraints.html",
+      "before": "Shared trunks carry the sum of downstream currents for each relevant scenario; terminal current is not automatically the current of every segment.",
+      "after": "For a tree, shared trunks carry the signed sum of downstream load currents, including interconnect shunt/displacement currents where relevant. Meshed nets require a network solution; one terminal current is not automatically every segment’s current.",
+      "reason": "KCL subtree sum needs tree topology and all branch loads; transient interconnect currents cannot be silently omitted."
+    },
+    {
+      "html": "topic-dac-arrays.html",
+      "before": "Thermal noise sets another lower bound on unit size. The familiar kT/C variance is a useful equilibrium estimate for a sampled node under a simple switch-capacitor model. A real charge-redistribution network has several noise sources and transfer factors.",
+      "after": "Thermal noise sets another conditional lower bound on unit size. <strong>Independent derivation, with a source gap:</strong> for one ideal linear capacitor fully equilibrated through resistance at temperature T, classical equipartition assigns its fluctuating voltage energy <code>½C·Var(v)=½kBT</code>, giving <code>Var(v)=kBT/C</code>. The assumptions are thermal equilibrium, a classical frequency range and an ideal isolated sample after equilibration; finite settling, correlated sampling and complete converter topology change the result. No exact kT/C passage was located in the supplied PDFs, so do not attribute this equation to the DAC paper. A real charge-redistribution network has several noise sources and transfer factors.",
+      "reason": "Show the kT/C derivation and disclose that its foundational equilibrium premise has no pinpoint citation in the supplied corpus."
+    },
+    {
+      "html": "glossary.html",
+      "before": "An ideal resistor's classical one-sided open-circuit voltage-noise density is 4k<sub>B</sub>TR V²/Hz within that model's frequency range.",
+      "after": "An ideal resistor's classical one-sided open-circuit voltage-noise density is 4k<sub>B</sub>TR V²/Hz within that model's frequency range. This is a foundational Johnson–Nyquist law; no exact derivation or equation locator was found in the supplied corpus. See the <a href=\"theory-provenance.html#D07\">provenance gap and conditional derivation</a> before citing it.",
+      "reason": "Avoid treating the uncited Johnson–Nyquist foundation as a checked source claim."
+    }
+  ],
+  "page_reviews": [
+    {
+      "html": "cc-review.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "nth-order.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "dac.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "performance.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "todaes.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "topic-optimality.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "topic-design-intent.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "topic-gradient-matching.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "topic-parasitics.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "topic-signal-routing.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "topic-wire-sizing.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "topic-dac-arrays.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "topic-performance-loop.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "topic-verification.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "topic-validation.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "constraints.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    },
+    {
+      "html": "glossary.html",
+      "status": "reviewed",
+      "detail": "Reviewed theory, assumptions and source attribution; pre-existing code-observation passages excluded."
+    }
+  ],
+  "theory_records": [
+    {
+      "id": "Q01",
+      "title": "First moments and first-order performance",
+      "claim": "Coincident normalized x/y centroids remove linear spatial parameter mismatch; translating parameter mismatch into performance uses a separate sensitivity approximation.",
+      "source": "cc-review",
+      "pdf_pages": [
+        1
+      ],
+      "locator": "Eqs.(1)–(5), printed p.114",
+      "assumptions": "Equal-unit or explicitly normalized additive responses; shared parameter field; circuit linearization valid locally.",
+      "kind": "source"
+    },
+    {
+      "id": "Q02",
+      "title": "Centroid does not equal device environment",
+      "claim": "WPE, LOD, OD dimensions and gate pitch can shift device parameters even when centroids coincide.",
+      "source": "cc-review",
+      "pdf_pages": [
+        2,
+        6
+      ],
+      "locator": "§II-A2/Fig.2 and §V-A/Fig.9, printed pp.115,119",
+      "assumptions": "Relevant process/LDE model; review’s identical-unit simplifications presume its row, pitch and diffusion-sharing construction.",
+      "kind": "source"
+    },
+    {
+      "id": "Q03",
+      "title": "Pattern choice is conditional",
+      "claim": "The OTA/comparator cases show circumstances in which clustered/interdigitated patterns outperform some CC structures.",
+      "source": "cc-review",
+      "pdf_pages": [
+        6,
+        7
+      ],
+      "locator": "§V, Figs.9–10, printed pp.119–120",
+      "assumptions": "Reported device/circuit/process assumptions; not a universal CC prohibition or a portable size threshold.",
+      "kind": "source"
+    },
+    {
+      "id": "Q04",
+      "title": "MOS internal topology and source paths",
+      "claim": "Half-diffusion graphs/Euler paths express compatible sharing; source-current distribution and route resistance affect array transconductance.",
+      "source": "cc-review",
+      "pdf_pages": [
+        5,
+        6,
+        7
+      ],
+      "locator": "§IV; §V-A Eq.(25)/Fig.9, printed pp.118–120",
+      "assumptions": "Keep actual net labels and unit paths; generalized routing acceptance is a handbook adaptation.",
+      "kind": "source"
+    },
+    {
+      "id": "Q05",
+      "title": "MOM unit construction exposes different parasitics",
+      "claim": "MOM finger/sandwich/pillar/mortise-tenon constructions trade density and terminal coupling.",
+      "source": "cc-review",
+      "pdf_pages": [
+        4
+      ],
+      "locator": "§III-B, Fig.5, printed p.117",
+      "assumptions": "A source-specific advanced-node comparison; selecting a qualified PDK primitive still requires its own model.",
+      "kind": "source"
+    },
+    {
+      "id": "Q06",
+      "title": "Polynomial additive-unit model",
+      "claim": "Under an additive identical-unit parameter model, equal spatial moments through n cancel every polynomial component of degree at most n.",
+      "source": "nth-order",
+      "pdf_pages": [
+        2,
+        3
+      ],
+      "locator": "§II Eqs.(4)–(6); §III Eqs.(15)–(23), printed pp.4836–4837",
+      "assumptions": "Two identically designed devices; parameter additivity; unit center approximates area average, or finite-footprint equivalence is independently justified.",
+      "kind": "source"
+    },
+    {
+      "id": "Q07",
+      "title": "Recursive central-symmetry parity",
+      "claim": "Reflect the prior pattern, retaining labels for odd target order and exchanging labels for even target order; the specified base leads to 2^n units per device.",
+      "source": "nth-order",
+      "pdf_pages": [
+        2,
+        3
+      ],
+      "locator": "§III recursive construction and induction, printed pp.4836–4837",
+      "assumptions": "First-order base has two units per device; legal disjoint placement; not a minimal-count or circuit-performance theorem.",
+      "kind": "source"
+    },
+    {
+      "id": "Q08",
+      "title": "DAC plate identities and parasitic classes",
+      "claim": "Binary and split DAC networks respond differently to top/substrate, top/bottom and bottom/substrate parasitics; split banks retain two top-plate nodes.",
+      "source": "dac",
+      "pdf_pages": [
+        2,
+        3
+      ],
+      "locator": "§II-A–B, Figs.1–2, printed pp.2783–2784",
+      "assumptions": "Specified charge-scaling architecture and ideal static excitation conditions; dynamic reference/switch effects require extensions.",
+      "kind": "source"
+    },
+    {
+      "id": "Q09",
+      "title": "Constructive DAC families and odd counts",
+      "claim": "Spiral/chessboard/block choices trade connected components against dispersion; the two one-unit members are deliberately only near the common center.",
+      "source": "dac",
+      "pdf_pages": [
+        7,
+        8,
+        9
+      ],
+      "locator": "§IV-A and §IV-C1, printed pp.2788–2790",
+      "assumptions": "Identical nonoverlapping grid units; preserve exact electrical counts and quantify CC exceptions.",
+      "kind": "source"
+    },
+    {
+      "id": "Q10",
+      "title": "DAC routing construction",
+      "claim": "Same-bit components are joined by branch/trunk/bridge routes; top plates use graph/MST routing, separately for split-bank nodes.",
+      "source": "dac",
+      "pdf_pages": [
+        8,
+        9,
+        10
+      ],
+      "locator": "§IV-B–C, printed pp.2789–2791",
+      "assumptions": "Specified layer/pin/array model; MST wire cost does not prove minimum electrical delay.",
+      "kind": "source"
+    },
+    {
+      "id": "Q11",
+      "title": "DAC INL and DNL definitions",
+      "claim": "DNL evaluates adjacent output steps relative to one ideal LSB; INL evaluates deviation from the declared ideal transfer.",
+      "source": "dac",
+      "pdf_pages": [
+        4
+      ],
+      "locator": "§III, Eqs.(17)–(18), printed p.2785",
+      "assumptions": "Record reference convention, code endpoints and normalization; endpoint or best-fit corrections change the metric.",
+      "kind": "source"
+    },
+    {
+      "id": "Q12",
+      "title": "Paper-specific DAC frequency",
+      "claim": "The paper’s Eq.(32) defines f=1/[2(N+2)ln(2)τ] from its charging/discharging model.",
+      "source": "dac",
+      "pdf_pages": [
+        5
+      ],
+      "locator": "§III-C, Eq.(32), printed p.2786",
+      "assumptions": "τ is the worst modeled charging-path delay. This N-dependent settling measure must not be equated to 1/(2πτ).",
+      "kind": "source"
+    },
+    {
+      "id": "Q13",
+      "title": "MOM bridge edge sensitivity",
+      "claim": "For a common small edge displacement δ, the specified MOM geometry gives ΔC/C≈2δ(1/H+1/l), enabling joint nominal-C and fractional-sensitivity matching.",
+      "source": "dac",
+      "pdf_pages": [
+        6
+      ],
+      "locator": "§III-D, Eqs.(39)–(45), printed p.2787",
+      "assumptions": "H and l are in-plane dimensions; common small perturbation, continuous geometry, and simplified coupling model. Quantization/fringing require extraction.",
+      "kind": "source"
+    },
+    {
+      "id": "Q14",
+      "title": "Do not promote illustrative correlation to process data",
+      "claim": "The DAC evaluation’s gradient/correlation constants are inherited assumptions, not a measured capacitor statistical characterization.",
+      "source": "dac",
+      "pdf_pages": [
+        10,
+        12
+      ],
+      "locator": "§V setup and parameter discussion, printed pp.2791,2793",
+      "assumptions": "Yield/correlation claims require qualified process data; parameter sweeps study conditional behavior only.",
+      "kind": "source"
+    },
+    {
+      "id": "Q15",
+      "title": "Widening shifts the critical bit",
+      "claim": "Parallel critical-bit routes can improve delay but change the bottleneck and eventually have diminishing returns.",
+      "source": "dac",
+      "pdf_pages": [
+        11,
+        12
+      ],
+      "locator": "Tables I–II; Fig.15/discussion, printed pp.2792–2793",
+      "assumptions": "Re-evaluate all bits with changed capacitance, vias and routing capacity; numerical gains belong to that setup.",
+      "kind": "source"
+    },
+    {
+      "id": "Q16",
+      "title": "Electrical feedback closes a proxy gap",
+      "claim": "Geometric constraints and scalar physical objectives do not generally guarantee post-layout circuit performance.",
+      "source": "performance",
+      "pdf_pages": [
+        1,
+        2,
+        3
+      ],
+      "locator": "§I–II, Fig.1, printed pp.679–681",
+      "assumptions": "Contract and testbench determine required metrics. An extracted/simulated result is conditional on model coverage.",
+      "kind": "source"
+    },
+    {
+      "id": "Q17",
+      "title": "Model cost needs consistent denominators",
+      "claim": "The survey’s text and Fig.2 have inconsistent runtime fractions; only the qualitative data-acquisition-dominance lesson is safely reused.",
+      "source": "performance",
+      "pdf_pages": [
+        3,
+        5
+      ],
+      "locator": "§III-A; Fig.2, printed pp.681,683",
+      "assumptions": "Apparent internal inconsistency, visually checked; not a publisher-verified erratum or an engine runtime budget.",
+      "kind": "source"
+    },
+    {
+      "id": "Q18",
+      "title": "Transfer accuracy is metric/domain dependent",
+      "claim": "The transfer example behaves differently for bandwidth, CMRR and noise across sizing/topology changes.",
+      "source": "performance",
+      "pdf_pages": [
+        4
+      ],
+      "locator": "§III-B, Table I, printed p.682",
+      "assumptions": "Reported circuits and train/test domains; no generalization guarantee beyond them.",
+      "kind": "source"
+    },
+    {
+      "id": "Q19",
+      "title": "Retain competing objectives",
+      "claim": "The MOBO/weighted-BO comparison motivates considering tradeoffs among circuit metrics.",
+      "source": "performance",
+      "pdf_pages": [
+        4,
+        5
+      ],
+      "locator": "§III-C and related figures, printed pp.682–683",
+      "assumptions": "Reported case study. A feasible Pareto archive is our software policy and is not a global-frontier proof.",
+      "kind": "source"
+    },
+    {
+      "id": "Q20",
+      "title": "Discrete per-net wire sizing",
+      "claim": "The manuscript assigns integer width choices per net after global routing; symmetric nets receive equal width choices.",
+      "source": "todaes",
+      "pdf_pages": [
+        5,
+        6
+      ],
+      "locator": "§§2–3, Eqs.(1)–(3), supplied manuscript pp.5–6",
+      "assumptions": "Metrics in normalized ratio scores must have meaningful positive values; final feasibility remains separate from weighted FOM.",
+      "kind": "source"
+    },
+    {
+      "id": "Q21",
+      "title": "WAGN physical graph features",
+      "claim": "Pins and route Steiner nodes carry device/role/geometry features; edges include distance, via count, widths, pin dimensions and terminal types.",
+      "source": "todaes",
+      "pdf_pages": [
+        8
+      ],
+      "locator": "§4.2, supplied manuscript p.8",
+      "assumptions": "These are the reported model inputs, not proof that any particular graph network is needed for this engine.",
+      "kind": "source"
+    },
+    {
+      "id": "Q22",
+      "title": "WAGN output is a threshold classifier",
+      "claim": "The model output is denoted P(FOM<T) at one specified threshold and trained with binary labels/cross entropy.",
+      "source": "todaes",
+      "pdf_pages": [
+        10,
+        11
+      ],
+      "locator": "§4.3–4.5, Eqs.(17)–(19), supplied manuscript pp.10–11",
+      "assumptions": "Not a full CDF, metric regression or established calibration/yield model; observed classification accuracy does not supply those guarantees.",
+      "kind": "source"
+    },
+    {
+      "id": "Q23",
+      "title": "Simulated shortlist after surrogate search",
+      "claim": "Relax/search widths through fixed WAGN, discretize, and simulate the top shortlist before final selection.",
+      "source": "todaes",
+      "pdf_pages": [
+        12,
+        13,
+        14
+      ],
+      "locator": "§5, Eqs.(20)–(21), Algorithm1, supplied manuscript pp.12–14",
+      "assumptions": "Multistart/local/BO methods are heuristic; finite penalty, rounding and route fallback require actual feasibility checks.",
+      "kind": "source"
+    },
+    {
+      "id": "Q24",
+      "title": "Parallel routes implement width options",
+      "claim": "The experiments implement 1×, 2× and 3× width choices using parallel routes.",
+      "source": "todaes",
+      "pdf_pages": [
+        15,
+        16
+      ],
+      "locator": "§6, Fig.8, supplied manuscript pp.15–16",
+      "assumptions": "The realized route graph may differ from a single wide conductor; routability and access remain conditional.",
+      "kind": "source"
+    },
+    {
+      "id": "Q25",
+      "title": "Wider can improve one metric and hurt another",
+      "claim": "Table7’s CM-OTA 1×→3× change raises UGF 451.0→511.4 MHz while reducing gain 33.1→31.1 dB and FOM 0.92→0.90.",
+      "source": "todaes",
+      "pdf_pages": [
+        19
+      ],
+      "locator": "Table7, supplied manuscript p.19",
+      "assumptions": "One reported circuit/setup; do not reuse the numbers as a target-process forecast.",
+      "kind": "source"
+    },
+    {
+      "id": "Q26",
+      "title": "WAGN evidence and stated limits",
+      "claim": "Runtime/gain claims compare specified BO budgets; the paper limits cross-family transfer, large circuits, process variation and classification-only prediction.",
+      "source": "todaes",
+      "pdf_pages": [
+        17,
+        18,
+        19,
+        23
+      ],
+      "locator": "§6.2/Table6; §7, supplied manuscript pp.17–19,23",
+      "assumptions": "Training-data cost, parallel hardware and circuit family must accompany comparisons; no experiments reproduced here.",
+      "kind": "source"
+    },
+    {
+      "id": "D01",
+      "title": "Weighted and ratio centroid extension",
+      "claim": "For additive nominal contributions wi sharing the same fractional spatial field, normalized device response uses Σwi p(ri)/Σwi; matched normalized first moments cancel a linear field.",
+      "source": "cc-review",
+      "pdf_pages": [
+        1
+      ],
+      "locator": "Derived extension of Eqs.(1)–(5), not a quoted weighted-ratio theorem",
+      "assumptions": "Additive electrical composition; weights defined for the actual absolute/fractional perturbation; sensitivities and bias compatible.",
+      "kind": "derived",
+      "derivation_if_any": "Expand p=p0+gx x+gy y in each normalized sum and subtract. Unequal counts are valid after normalization; arbitrary model sensitivities may not be simple positive area weights."
+    },
+    {
+      "id": "D02",
+      "title": "Finite-footprint polynomial certificate",
+      "claim": "Identical translated unit footprints preserve moment cancellation through n when their center moments match through n.",
+      "source": "nth-order",
+      "pdf_pages": [
+        2,
+        3
+      ],
+      "locator": "Derived finite-footprint extension of §II/§III",
+      "assumptions": "Identical footprint weighting kernels; linear/additive field response; same internal moments for all units.",
+      "kind": "derived",
+      "derivation_if_any": "Integrate (xi+u)^a(yi+v)^b over a common normalized footprint. Binomial expansion yields products of center moments of degree ≤a+b and common internal moments; all differential terms vanish when the corresponding center moments match."
+    },
+    {
+      "id": "D03",
+      "title": "Single-branch source degeneration",
+      "claim": "gm,eff=gm/(1+gmRs) under a restricted one-branch small-signal model.",
+      "source": "cc-review",
+      "pdf_pages": [
+        6
+      ],
+      "locator": "Derived from the mechanism in §V-A Eq.(25); the closed form is not printed there",
+      "assumptions": "Neglect gds/body effect; source-resistor current equals modeled branch current; gm is local and constant.",
+      "kind": "derived",
+      "derivation_if_any": "i=gm(vin−iRs) gives i(1+gmRs)=gm vin; divide by vin. A multi-unit array requires its actual current distribution."
+    },
+    {
+      "id": "D04",
+      "title": "Linear RC nodal stamp",
+      "claim": "A physical capacitor c between i and j stamps +c diagonals and −c off-diagonals; KCL yields Gv+C dv/dt=i for the linear RC network.",
+      "source": "lampaert",
+      "pdf_pages": [
+        46,
+        47,
+        48,
+        49,
+        50,
+        51
+      ],
+      "locator": "Circuit-law derivation; §2.5.3 provides RC modeling background, not this matrix formula",
+      "assumptions": "Linear passive elements; identified reference/boundary nodes; capacitance convention fixed. Ideal voltage sources/inductors need additional treatment.",
+      "kind": "derived",
+      "derivation_if_any": "q_i=c(v_i−v_j), q_j=−q_i; differentiate and sum terminal currents. Resistor currents are (v_i−v_j)/R. This derivation supplies the stamp rather than a purported source quotation."
+    },
+    {
+      "id": "D05",
+      "title": "Fast capacitive charge sharing",
+      "claim": "For a floating victim with quiet-node Cv and aggressor coupling Cc, ΔVv=Cc/(Cv+Cc)ΔVa.",
+      "source": "substrate",
+      "pdf_pages": [
+        45,
+        46
+      ],
+      "locator": "Independent charge-conservation derivation; substrate electroquasistatics is background only",
+      "assumptions": "Ideal fast imposed aggressor step; fixed quiet reference; no charge escape or other changing coupled nodes; linear C.",
+      "kind": "derived",
+      "derivation_if_any": "Conserve victim charge: CvΔVv+Cc(ΔVv−ΔVa)=0. Finite driver impedance or nonlinear clamps require transient analysis."
+    },
+    {
+      "id": "D06",
+      "title": "Toy finite optimal wire width",
+      "claim": "For τ(w)=(Rd+a/w)(CL+bw) with positive parameters, the continuous optimum is sqrt(aCL/(Rd b)), before legal bounds/discretization.",
+      "source": "todaes",
+      "pdf_pages": [
+        2,
+        3
+      ],
+      "locator": "Original illustrative model motivated by RC tradeoffs, not the manuscript objective",
+      "assumptions": "Rd,b,a,CL>0; fixed topology; C varies linearly and R inversely with width; single time-constant objective.",
+      "kind": "derived",
+      "derivation_if_any": "dτ/dw=Rd b−aCL/w²; d²τ/dw²=2aCL/w³>0. With Rd=0 or b=0 and other terms positive there is no finite stationary optimum of this form."
+    },
+    {
+      "id": "D07",
+      "title": "Johnson–Nyquist foundational citation gap",
+      "claim": "The glossary states classical one-sided resistor voltage PSD 4kBTR; no exact supporting equation was located in the supplied corpus.",
+      "source": null,
+      "pdf_pages": [],
+      "locator": "Foundational law with no verified corpus locator",
+      "assumptions": "Equilibrium passive resistor, classical frequency regime, one-sided PSD in V²/Hz. The formula itself is a background assumption in this handbook.",
+      "kind": "foundation",
+      "derivation_if_any": "Conditional consistency check: filtering 4kBTR by 1/[1+(2πfRC)²] and integrating f≥0 gives kBT/C. This integration does not independently prove the underlying thermal-noise law."
+    },
+    {
+      "id": "D08",
+      "title": "Equilibrium sampled-capacitor noise",
+      "claim": "One ideal equilibrated linear capacitor has voltage variance kBT/C.",
+      "source": null,
+      "pdf_pages": [],
+      "locator": "Independent equipartition derivation; no exact supplied-PDF kT/C passage located",
+      "assumptions": "One thermalized degree of freedom, classical equilibrium, no incomplete settling or correlated-sampling modification; a full DAC has other transfer factors.",
+      "kind": "derived",
+      "derivation_if_any": "Equipartition gives ½C Var(v)=½kBT, so Var(v)=kBT/C. Foundational equipartition premise is assumed; do not cite the DAC paper as the source of this formula."
+    },
+    {
+      "id": "D09",
+      "title": "Zero failures do not prove zero failure rate",
+      "claim": "For n independent representative Bernoulli trials with zero failures, a one-sided 1−α upper bound is 1−α^(1/n), approximately −ln(α)/n.",
+      "source": null,
+      "pdf_pages": [],
+      "locator": "Original binomial inversion in topic-validation#statistics",
+      "assumptions": "Independent identically distributed outcomes and a fixed acceptance event; not weighted importance samples or adaptive/censored failures.",
+      "kind": "derived",
+      "derivation_if_any": "P(no failures|p)=(1−p)^n. Invert at α. At 95% confidence and n=1000 the upper bound is about 0.00299125 (0.2991%)."
+    },
+    {
+      "id": "D10",
+      "title": "Half-LSB single-pole settling",
+      "claim": "For a full-scale single-pole step and half an N-bit LSB residual, t≥(N+1)ln(2)τ.",
+      "source": "dac",
+      "pdf_pages": [
+        5
+      ],
+      "locator": "Original exponential-settling derivation; distinct from source Eq.(32)",
+      "assumptions": "Single pole; unit full-scale initial error; half-LSB allocation; no slew/ringing or other error consuming the allocation.",
+      "kind": "derived",
+      "derivation_if_any": "Require exp(−t/τ)≤2^(−N−1), take logs. This is not a sample-rate certificate for an arbitrary switched array."
+    },
+    {
+      "id": "S01",
+      "title": "Constraint instance and provenance contract",
+      "claim": "Store the physical mechanism, targets, units, scope, parent requirement, model provenance, enforcement and evidence for each proposed rule.",
+      "source": null,
+      "pdf_pages": [],
+      "locator": "Original handbook engineering policy, constraints.html#catalog-semantics",
+      "assumptions": "The 84 rule families are proposals to instantiate, not author-numbered textbook rules or universal foundry limits.",
+      "kind": "proposal"
+    },
+    {
+      "id": "S02",
+      "title": "Coverage and evidence freshness",
+      "claim": "Distinguish pass/fail/unknown/not-applicable and invalidate checks when their geometry/model/scenario inputs change.",
+      "source": null,
+      "pdf_pages": [],
+      "locator": "Original handbook verification policy, topic-verification.html#coverage",
+      "assumptions": "Acceptance requires every selected mandatory evaluator to run successfully within its domain; no claim that a cited book prescribes this exact software schema.",
+      "kind": "proposal"
+    },
+    {
+      "id": "S03",
+      "title": "Search guarantee and selection policy",
+      "claim": "Distinguish best observed, nondominated among evaluated, and proven optimum within a restricted representation.",
+      "source": null,
+      "pdf_pages": [],
+      "locator": "Original methodological contract, topic-optimality.html#claims",
+      "assumptions": "Proof scope is limited by the represented feasible set, objective, model and solver evidence; a failed heuristic is not infeasibility proof.",
+      "kind": "proposal"
+    },
+    {
+      "id": "O26",
+      "title": "Fault detectability differs from fault incidence",
+      "claim": "Layouts with equal expected defect faults can differ in detectability; the source weights routing exposure using good/faulty response separation.",
+      "source": "lampaert",
+      "pdf_pages": [
+        157,
+        158,
+        159
+      ],
+      "locator": "§5.9.2, Fig.5.18 and Eqs.(5.32)–(5.34), printed pp.145–147",
+      "assumptions": "A specified fault model, stimulus and response distribution are required. Inverse statistical distance is a cost proxy, not a calibrated escape probability; accepting a hypothesis does not establish posterior probability that an individual circuit is good.",
+      "kind": "source"
+    }
+  ],
+  "numerical_and_diagram_checks": {
+    "route_R_ohm": [
+      20.0,
+      10.0
+    ],
+    "source_gm_mS": [
+      4.545454545454545,
+      4.761904761904762
+    ],
+    "node_pole_MHz": [
+      159.15494309189538,
+      99.47183943243458
+    ],
+    "coupling_step_mV": 50.0,
+    "DAC_3bit_DNL_LSB": 0.034825870646766344,
+    "zero_failure_95percent_bound_n1000": 0.0029912495450953314,
+    "runtime_chart_percent_sum": 105.08,
+    "toy_width_stationary_test": {
+      "Rd": 2,
+      "a": 8,
+      "CL": 3,
+      "b": 1,
+      "w_star": 3.4641016151377544,
+      "derivative_at_optimum": 0.0
+    }
+  },
+  "unresolved": [
+    {
+      "issue": "Foundational noise-law citation gap",
+      "detail": "No exact Johnson–Nyquist 4kBTR or kT/C equation locator found in the supplied PDFs. Labeled foundation and derived respectively; do not attribute to these DAC/layout papers."
+    },
+    {
+      "issue": "No universal accuracy certificate",
+      "detail": "Semantic source review is not proof of every proposition in every book, reproduction of source experiments or qualification for a target PDK. Algorithm contracts and validation procedures remain handbook proposals."
+    }
+  ]
+}

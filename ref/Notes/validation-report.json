@@ -1,0 +1,42 @@
+{
+  "artifact_checks_passed": true,
+  "html_pages": 50,
+  "teaching_chapters": 30,
+  "source_pdfs": 13,
+  "source_physical_pages": 2710,
+  "source_hashes_checked": true,
+  "local_references_checked": 4423,
+  "pdf_page_links_checked": 753,
+  "standalone_svg_files": 56,
+  "search_sections": 436,
+  "constraint_entries": 84,
+  "theory_records_checked": 115,
+  "constraint_theory_mappings_checked": 84,
+  "original_citation_audit_entries_checked": 553,
+  "errors": [],
+  "scope": "Structural documentation validation only. Does not certify engine behavior, foundry rules, source mathematics or browser layout.",
+  "javascript_checks": {
+    "passed": true,
+    "syntax_files": [
+      "notes.js",
+      "moments.js",
+      "search-data.js"
+    ],
+    "exact_moment_certificates": 32,
+    "one_unit_perturbation_detected": true,
+    "interactive_pattern_switch": true,
+    "slider_recomputation": true,
+    "offline_search_positive_empty_and_no_match": true,
+    "reproduce": "node ref/Notes/verify_examples.js",
+    "scope": "Node.js DOM harness; browser layout was not exercised."
+  },
+  "visual_checks": {
+    "svg_rendered": 56,
+    "render_failures": 0,
+    "svg_visually_reviewed": 56,
+    "method": "ImageMagick rasterization and visual inspection by the authoring/review agents; root figures inspected during final integration.",
+    "browser_layout_rendered": false,
+    "browser_layout_limit": "No browser renderer was available locally; responsive and print styles were checked as source, not in a browser."
+  },
+  "engine_changes": "None made by this handbook task; pre-existing user working-tree edits were preserved."
+}

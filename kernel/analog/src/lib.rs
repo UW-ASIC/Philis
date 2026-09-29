@@ -19,6 +19,5 @@ pub mod routing;
 pub mod rule;
 
 pub use constraints::Constraints;
-pub use placement::matching_pair::Matching;
 pub use requirements::Requirements;
 pub use rule::{Rule, RuleBatch};

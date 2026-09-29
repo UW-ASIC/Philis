@@ -20,6 +20,20 @@ pub fn nm_grid() -> Grid {
 /// gdsverify's layer id type (`u16` newtype).
 pub use gdsverify::geom::LayerId as GvLayerId;
 
+/// One layer's DC electromigration limits at the deck's rating temperature.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EmLimit {
+    /// Current per µm of width, µA/µm (`max_density`); `0` = none.
+    pub ua_per_um: f32,
+    /// Current per cut, µA (`max_current_per_cut`); `0` = none.
+    pub ua_per_cut: f32,
+    /// Blech product, (µA/µm)·µm (`blech_limit`); `0` = none.
+    pub blech: f32,
+    /// `(T_ref K, Ea eV, n)` when the deck gives the rating temperature and
+    /// Black's-law parameters.
+    pub derating: Option<(f32, f32, f32)>,
+}
+
 /// Process design kit: layers, design-rule values, grid, and the gdsverify deck.
 pub struct Pdk {
     /// Layer name → [`LayerId`]; row `i` is `LayerId(i)` is deck layer `i`
@@ -32,8 +46,12 @@ pub struct Pdk {
     pub deck: Deck,
     /// The table `deck`'s `StrId`s resolve against.
     pub strings: StrTable,
-    /// The deck JSON; each [`crate::Checker`] re-parses it into its own table.
+    /// The deck text (GPurify's deck language); each [`crate::Checker`]
+    /// re-parses it into its own table.
     pub source: String,
+    /// The Philis sidecar's `cell` section (roles, generator dimensions,
+    /// process coefficients): what the checker's deck does not carry.
+    pub cell: serde_json::Value,
     /// Layer role → deck layer name, from `cell.layers` (gdsverify ignores
     /// the `cell` section).
     pub roles: Vec<(String, String)>,
@@ -44,16 +62,47 @@ pub struct Pdk {
 }
 
 impl Pdk {
-    /// Read a deck JSON and validate that it is complete, so downstream code
-    /// may assume every value it reads is real process data.
+    /// Load a Philis PDK sidecar: `{"deck": <path>, "cell": {…}}`. The deck is
+    /// GPurify's (its deck language, one source of truth for every rule,
+    /// layer, device and PEX value); a relative path resolves against the
+    /// Philis repository root. The sidecar adds only what the checker does
+    /// not read: layer roles, generator dimensions, process coefficients.
+    ///
+    /// # Errors
+    /// An unreadable sidecar or deck, or anything [`Pdk::load`] rejects.
+    pub fn from_json(sidecar: &str) -> Result<Self, String> {
+        Self::load(&Self::deck_text(sidecar)?, sidecar)
+    }
+
+    /// The deck text a sidecar names.
+    ///
+    /// # Errors
+    /// An unreadable sidecar or deck file.
+    pub fn deck_text(sidecar: &str) -> Result<String, String> {
+        let v: serde_json::Value =
+            serde_json::from_str(sidecar).map_err(|e| format!("sidecar is not valid JSON: {e}"))?;
+        let path = v.get("deck").and_then(serde_json::Value::as_str).ok_or("sidecar names no `deck` file")?;
+        // Relative to GPurify's `pdks/` (see build.rs); an absolute path as is.
+        let pdks = option_env!("GPURIFY_PDKS").ok_or("GPurify's pdks/ not found at build time; set GPURIFY_DIR")?;
+        let path = std::path::Path::new(pdks).join(path);
+        std::fs::read_to_string(&path).map_err(|e| format!("deck {}: {e}", path.display()))
+    }
+
+    /// Parse `deck` (GPurify deck text) with the sidecar JSON `sidecar`, and
+    /// validate that the pair is complete, so downstream code may assume every
+    /// value it reads is real process data.
     ///
     /// # Errors
     /// gdsverify's parse error, or a list of every way the deck is incomplete.
-    pub fn from_json(text: &str) -> Result<Self, String> {
+    pub fn load(text: &str, sidecar: &str) -> Result<Self, String> {
         let mut strings = StrTable::default();
         let deck = gdsverify::ingest::deck::parse_deck(text, nm_grid(), &mut strings)
             .map_err(|e| format!("deck rejected: {e}"))?;
-        let roles = parse_roles(text)?;
+        let roles = parse_roles(sidecar)?;
+        let cell = serde_json::from_str::<serde_json::Value>(sidecar)
+            .ok()
+            .and_then(|v| v.get("cell").cloned())
+            .unwrap_or_default();
 
         let layers: Vec<(String, LayerId)> = (0..deck.layers.len())
             .map(|id| {
@@ -91,6 +140,7 @@ impl Pdk {
             deck,
             strings,
             source: text.to_string(),
+            cell,
             roles: roles.map,
             routing_metals,
             routing_cuts,
@@ -112,6 +162,10 @@ impl Pdk {
                 }
                 if let Some(s) = pdk.min_spacing(id.0) {
                     rules.push((format!("{role}_min_spacing"), s));
+                }
+                // The side of the minimum-area square.
+                if let Some(a) = pdk.min_area(id.0) {
+                    rules.push((format!("{role}_min_area"), (a as f64).sqrt().ceil() as i32));
                 }
             }
         }
@@ -201,9 +255,12 @@ impl Pdk {
             else {
                 continue;
             };
-            let joins = conn.via_cut.iter().zip(&conn.via_connects).any(|(c, &(x, y))| {
-                c.0 == cut.0
-                    && ((x.0 == a.0 && y.0 == b.0) || (x.0 == b.0 && y.0 == a.0))
+            // A deck joins extracted conductors through extracted cuts, each
+            // the drawn layer or computed from it (`li_c = li not li_rs`,
+            // `via3_m3 = via3 not capm`).
+            let is = |x: GvLayerId, drawn: &LayerId| self.reaches(x, drawn.0);
+            let joins = conn.via_cut.iter().zip(&conn.via_connects).any(|(&c, &(x, y))| {
+                is(c, cut) && ((is(x, a) && is(y, b)) || (is(x, b) && is(y, a)))
             });
             if !joins {
                 bad.push(format!(
@@ -259,30 +316,16 @@ impl Pdk {
     }
 
     /// `table[LayerId.0] = (gds_layer, gds_datatype)` for the GDS writer;
-    /// `(0, 0)` for a layer the deck does not number. Reads both
-    /// `[layer, datatype]` and `{"layer", "datatype"}` spellings — knowing only
-    /// one once emitted every shape on `(0, 0)`.
+    /// `(0, 0)` for a layer the deck computes rather than draws.
     #[must_use]
     pub fn layer_gds(&self) -> Vec<(u16, u16)> {
         let max_id = self.layers.iter().map(|(_, id)| id.0 as usize).max().unwrap_or(0);
         let mut table = vec![(0u16, 0u16); max_id + 1];
 
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&self.source) else {
-            return table;
-        };
-        let Some(layers) = v.get("layers").and_then(|l| l.as_object()) else {
-            return table;
-        };
-
-        for (name, id) in &self.layers {
-            let Some(val) = layers.get(name) else { continue };
-            let pair = match (val.as_array(), val.get("layer"), val.get("datatype")) {
-                (Some(a), ..) if a.len() >= 2 => a[0].as_i64().zip(a[1].as_i64()),
-                (_, Some(l), Some(d)) => l.as_i64().zip(d.as_i64()),
-                _ => None,
-            };
-            if let Some((l, d)) = pair {
-                table[id.0 as usize] = (l as u16, d as u16);
+        for (_, id) in &self.layers {
+            let gv = GvLayerId(id.0);
+            if !self.deck.layers.is_derived(gv) {
+                table[id.0 as usize] = self.deck.layers.stream_of(gv);
             }
         }
         table
@@ -362,11 +405,19 @@ impl Pdk {
         side.div_euclid(g) * g + if side.rem_euclid(g) == 0 { 0 } else { g }
     }
 
-    /// The deck's `min_area` for a layer in nm² (the deck states the side of
-    /// the square; squared here).
+    /// The deck's `min_area` for a layer in nm².
     #[must_use]
     pub fn min_area(&self, layer: u16) -> Option<i64> {
-        self.rule_limit_nm("min_area", layer).map(|side| side * side).map(|a| a as i64)
+        let (kind, limit) = (self.strings.get("min_area")?, self.strings.get("limit")?);
+        self.deck.rules.spec.iter().find_map(|s| {
+            (s.kind == kind && self.deck.rules.layers_of(s).first().map(|l| l.0) == Some(layer)).then_some(())?;
+            match self.deck.rules.param(s, limit) {
+                Some(ParamValue::Area(a)) => Some(a.raw() as i64),
+                // A side length (an older deck's spelling).
+                Some(ParamValue::Length(d)) => Some(d.raw() * d.raw()),
+                _ => None,
+            }
+        })
     }
 
     /// `wire_width + max(min_spacing)` over `stack`: the one lattice pitch
@@ -377,8 +428,17 @@ impl Pdk {
     /// lattice in `gr::TrackGrid`; do that if upper-layer density ever matters.
     #[must_use]
     pub fn routing_pitch(&self, wire_width: i32, stack: &[u16]) -> i32 {
-        let worst = stack.iter().filter_map(|&l| self.min_spacing(l)).max().unwrap_or(0);
+        let worst = stack.iter().filter_map(|&l| self.route_spacing(l)).max().unwrap_or(0);
         wire_width + worst
+    }
+
+    /// Spacing a routed wire keeps on `layer`, nm: its `min_spacing`, and its
+    /// end-of-line spacing (a wire end is a line end; the lattice cannot
+    /// tell ends from sides, so every track keeps the larger).
+    #[must_use]
+    pub fn route_spacing(&self, layer: u16) -> Option<i32> {
+        let eol = self.widest_on("eol_spacing", "limit", &[layer]).map(|v| v as i32);
+        self.min_spacing(layer).max(eol)
     }
 
     /// `(width threshold, spacing)` of every `wide_dependent_spacing` rule on
@@ -386,25 +446,45 @@ impl Pdk {
     /// that spacing (the binding one is the largest threshold it reaches).
     #[must_use]
     pub fn wide_spacing(&self, layer: u16) -> Vec<(i32, i32)> {
-        let (Some(kind), Some(thr), Some(lim)) = (
-            self.strings.get("wide_dependent_spacing"),
-            self.strings.get("width_threshold"),
-            self.strings.get("limit"),
-        ) else {
-            return Vec::new();
-        };
         let len = |s, p| match self.deck.rules.param(s, p) {
             Some(ParamValue::Length(d)) => Some(d.raw() as i32),
             _ => None,
         };
-        let mut steps: Vec<(i32, i32)> = self
-            .deck
-            .rules
-            .spec
-            .iter()
-            .filter(|s| s.kind == kind && self.deck.rules.layers_of(s).first().map(|l| l.0) == Some(layer))
-            .filter_map(|s| Some((len(s, thr)?, len(s, lim)?)))
-            .collect();
+        let mut steps: Vec<(i32, i32)> = match (
+            self.strings.get("wide_dependent_spacing"),
+            self.strings.get("width_threshold"),
+            self.strings.get("limit"),
+        ) {
+            (Some(kind), Some(thr), Some(lim)) => self
+                .deck
+                .rules
+                .spec
+                .iter()
+                .filter(|s| s.kind == kind && self.deck.rules.layers_of(s).first().map(|l| l.0) == Some(layer))
+                .filter_map(|s| Some((len(s, thr)?, len(s, lim)?)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        // A spacing table (LEF SPACINGTABLE: a row per width threshold, a
+        // column per parallel run length): each row's widest entry, any run.
+        if let (Some(table), Some(w), Some(sp), Some(prl)) =
+            (self.strings.get("spacing_table"), self.strings.get("width"), self.strings.get("space"), self.strings.get("prl"))
+        {
+            for s in self.deck.rules.spec.iter().filter(|s| s.kind == table && self.deck.rules.layers_of(s).first().map(|l| l.0) == Some(layer)) {
+                let ps = self.deck.rules.params_of(s);
+                let of = |name| ps.iter().filter(move |(n, _)| *n == name).filter_map(|(_, v)| match v {
+                    ParamValue::Length(d) => Some(d.raw() as i32),
+                    _ => None,
+                });
+                let (widths, spaces): (Vec<i32>, Vec<i32>) = (of(w).collect(), of(sp).collect());
+                let cols = ps.iter().filter(|(n, _)| *n == prl).count().max(1);
+                for (i, &wi) in widths.iter().enumerate() {
+                    if let Some(m) = spaces.get(i * cols..(i + 1) * cols).and_then(|r| r.iter().copied().max()) {
+                        steps.push((wi, m));
+                    }
+                }
+            }
+        }
         steps.sort_unstable();
         steps
     }
@@ -429,24 +509,213 @@ impl Pdk {
             })
     }
 
-    /// The tightest `max_ratio` of any antenna rule on a routing metal (its
-    /// last layer); `None` when the deck checks no antenna on routed metal.
+    /// A non-length number from the deck's `cell` section (e.g. a mismatch
+    /// coefficient); `None` when absent or not a number.
+    #[must_use]
+    pub fn cell_f32(&self, key: &str) -> Option<f32> {
+        self.cell.get(key)?.as_f64().map(|x| x as f32)
+    }
+
+    /// DC electromigration limits of `layer` from the deck's own EM rules:
+    /// an `electromigration` rule (a deck that splits DC from peak) before an
+    /// `em_current_density` one. A cut no rule names takes the tighter
+    /// `max_current_per_cut` of the two routing metals it joins. `None` when
+    /// no rule limits the layer.
+    #[must_use]
+    pub fn em_limit(&self, layer: LayerId) -> Option<EmLimit> {
+        let ratio = |s: &RuleSpec, key: &str| match self.deck.rules.param(s, self.strings.get(key)?) {
+            Some(ParamValue::Ratio(r)) if r > 0.0 => Some(r as f32),
+            _ => None,
+        };
+        let rule_on = |l: LayerId| {
+            ["electromigration", "em_current_density"].iter().find_map(|kind| {
+                let kind = self.strings.get(kind)?;
+                // A rule on the layer, or on the conductor extracted from it
+                // (gf180 `metal1_con`).
+                self.deck.rules.spec.iter().find(|s| s.kind == kind && self.deck.rules.layers_of(s).iter().any(|&g| self.reaches(g, l.0)))
+            })
+        };
+        let of = |s: &RuleSpec| EmLimit {
+            ua_per_um: ratio(s, "max_density").unwrap_or(0.0),
+            ua_per_cut: ratio(s, "max_current_per_cut").unwrap_or(0.0),
+            blech: ratio(s, "blech_limit").unwrap_or(0.0),
+            derating: (|| Some((ratio(s, "reference_temperature")?, ratio(s, "activation_energy_ev")?, ratio(s, "current_exponent")?)))(),
+        };
+        // A cut has a per-cut limit only: a rule pairing it with metals states
+        // their per-µm density too, which is not the cut's.
+        let is_cut = self.routing_cuts.contains(&layer);
+        if let Some(s) = rule_on(layer) {
+            let e = of(s);
+            return Some(if is_cut { EmLimit { ua_per_um: 0.0, blech: 0.0, ..e } } else { e });
+        }
+        // A cut: the tighter per-cut limit of the metals it joins.
+        let i = self.routing_cuts.iter().position(|&c| c == layer)?;
+        [self.routing_metals.get(i)?, self.routing_metals.get(i + 1)?]
+            .into_iter()
+            .filter_map(|&m| rule_on(m).map(of))
+            .filter(|e| e.ua_per_cut > 0.0)
+            .reduce(|a, b| if a.ua_per_cut <= b.ua_per_cut { a } else { b })
+            .map(|e| EmLimit { ua_per_um: 0.0, blech: 0.0, ..e })
+    }
+
+    /// The deck's point-to-point resistance limit, Ω (`p2p_resistance`):
+    /// the most any conductor path may drop end to end. `None` = unchecked.
+    #[must_use]
+    pub fn p2p_max_ohm(&self) -> Option<f32> {
+        let (kind, key) = (self.strings.get("p2p_resistance")?, self.strings.get("max_resistance")?);
+        self.deck.rules.spec.iter().filter(|s| s.kind == kind).find_map(|s| match self.deck.rules.param(s, key) {
+            Some(ParamValue::Ratio(r)) if r > 0.0 => Some(r as f32),
+            _ => None,
+        })
+    }
+
+    /// The tightest antenna ratio of any routing metal's etch stage
+    /// ([`Pdk::antenna_rule`]); `None` when no routed metal has one.
     #[must_use]
     pub fn antenna_max_ratio(&self) -> Option<f32> {
-        let ratio = self.strings.get("max_ratio")?;
+        self.routing_metals.iter().filter_map(|&l| self.antenna_rule(l)).map(|r| r.0).reduce(f32::min)
+    }
+
+    /// The antenna rule of `layer`'s etch stage (the rule's last layer):
+    /// `(max ratio, sidewall thickness nm or 0 for areal, cumulative)`. An areal
+    /// rule wins over a sidewall one on the same layer; `cumulative` when the
+    /// rule is named so (`antenna_cumulative_*`: layers summed up to the stage).
+    /// Without a deck rule, `cell.antenna_sidewall.<layer> = [ratio,
+    /// thickness_nm]` (a sidewall rule the checker cannot run, kept for routing).
+    #[must_use]
+    pub fn antenna_rule(&self, layer: LayerId) -> Option<(f32, f32, bool)> {
+        self.antenna_deck_rule(layer).or_else(|| {
+            let name = &self.layers.iter().find(|(_, l)| *l == layer)?.0;
+            let pair = self.cell.get("antenna_sidewall")?.get(name)?;
+            Some((pair.get(0)?.as_f64()? as f32, pair.get(1)?.as_f64()? as f32, false))
+        })
+    }
+
+    fn antenna_deck_rule(&self, layer: LayerId) -> Option<(f32, f32, bool)> {
+        let (kind, ratio) = (self.strings.get("antenna")?, self.strings.get("max_ratio")?);
+        let side = self.strings.get("sidewall_thickness");
         self.deck
             .rules
             .spec
             .iter()
-            .filter(|s| self.strings.resolve(s.kind).contains("antenna"))
-            .filter(|s| {
-                self.deck.rules.layers_of(s).last().is_some_and(|l| self.routing_metals.contains(&LayerId(l.0)))
+            .filter(|s| s.kind == kind && self.deck.rules.layers_of(s).last().is_some_and(|&l| self.reaches(l, layer.0)))
+            .filter_map(|s| {
+                let Some(ParamValue::Ratio(r)) = self.deck.rules.param(s, ratio) else { return None };
+                let t = match side.and_then(|k| self.deck.rules.param(s, k)) {
+                    Some(ParamValue::Length(d)) => d.raw() as f32,
+                    _ => 0.0,
+                };
+                // Cumulative: the rule states several routing metals, summed
+                // up to this stage (ihp `antenna(gate, metal1, metal2)`).
+                let metals = self.deck.rules.layers_of(s).iter().skip(1).filter(|&&l| self.routing_metals.iter().any(|m| self.reaches(l, m.0))).count();
+                Some((r as f32, t, metals > 1))
             })
-            .filter_map(|s| match self.deck.rules.param(s, ratio) {
-                Some(ParamValue::Ratio(r)) => Some(r as f32),
-                _ => None,
+            .min_by(|a, b| (a.1 > 0.0).cmp(&(b.1 > 0.0)))
+    }
+
+    /// Every `density` rule: `(layer, window nm, limit fraction, is a
+    /// maximum)`; a rule missing its window or limit is left out.
+    #[must_use]
+    pub fn density_rules(&self) -> Vec<(LayerId, i64, f64, bool)> {
+        let (Some(kind), Some(window), Some(limit)) = (self.strings.get("density"), self.strings.get("window"), self.strings.get("limit")) else {
+            return Vec::new();
+        };
+        let maximum = self.strings.get("maximum");
+        self.deck
+            .rules
+            .spec
+            .iter()
+            .filter(|s| s.kind == kind)
+            .filter_map(|s| {
+                let layer = LayerId(self.deck.rules.layers_of(s).first()?.0);
+                let Some(ParamValue::Length(w)) = self.deck.rules.param(s, window) else { return None };
+                let Some(ParamValue::Ratio(l)) = self.deck.rules.param(s, limit) else { return None };
+                let max = matches!(maximum.and_then(|m| self.deck.rules.param(s, m)), Some(ParamValue::Flag(true)));
+                Some((layer, w.raw(), l, max))
             })
-            .reduce(f32::min)
+            .collect()
+    }
+
+    /// The marker layer of the deck's diode recogniser, when LVS can extract
+    /// a diode here — every terminal layer a conductor, so both of its nets
+    /// resolve. `None` otherwise (gf180's `pn_3p3` names `nwell`, not one).
+    #[must_use]
+    pub fn diode_marker(&self) -> Option<LayerId> {
+        use gdsverify::ingest::deck::DeviceKind;
+        // The drawn marker (`diom` role), where a diode recogniser is built
+        // from it and binds extractable terminals (conductors, or a global
+        // net such as sky130's substrate).
+        let drawn = pnr_core::Process::layer(self, "diom")?;
+        let c = &self.deck.connectivity;
+        let d = &self.deck.devices;
+        (0..d.kind.len()).filter(|&r| d.kind[r] == DeviceKind::Diode).find_map(|r| {
+            let terms = &d.terminal[d.terminal_start[r] as usize..d.terminal_start[r + 1] as usize];
+            let ok = terms.iter().all(|t| c.conductors.contains(t) || c.global.contains(t));
+            (ok && self.reaches(d.marker[r], drawn.0)).then_some(drawn)
+        })
+    }
+
+    /// The deck's `pex` row for `layer`: its own, else that of a conductor
+    /// derived from it (the deck states PEX per extracted conductor: `poly`
+    /// answers with `poly_c`'s row). `None` when neither is declared.
+    fn pex_row(&self, layer: LayerId) -> Option<usize> {
+        let st = &self.deck.stack;
+        let declared = |i: usize| st.thickness_nm.get(i).is_some_and(|&t| t > 0.0) || st.dielectric_k.get(i).is_some_and(|&k| k > 0.0);
+        if declared(layer.0 as usize) {
+            return Some(layer.0 as usize);
+        }
+        let gv = GvLayerId(layer.0);
+        let conductors = &self.deck.connectivity.conductors;
+        (0..self.deck.layers.len())
+            .map(|i| GvLayerId(i as u16))
+            .filter(|&d| self.deck.layers.operands(d).contains(&gv) && declared(d.0 as usize))
+            .max_by_key(|d| conductors.contains(d))
+            .map(|d| d.0 as usize)
+    }
+
+    /// A number from the deck's `pex` row for `layer` ([`Pdk::pex_row`]):
+    /// `thickness_nm`, `height_nm`, `sheet_res_ohm_sq`, `area_cap_af_um2`,
+    /// `fringe_cap_af_um` or `dielectric_k`; `None` when absent.
+    #[must_use]
+    pub fn pex_f32(&self, layer: LayerId, key: &str) -> Option<f32> {
+        let i = self.pex_row(layer)?;
+        let st = &self.deck.stack;
+        let col = match key {
+            "thickness_nm" => &st.thickness_nm,
+            "height_nm" => &st.height_nm,
+            "sheet_res_ohm_sq" => &st.sheet_res_ohm_sq,
+            "area_cap_af_um2" => &st.area_cap_af_um2,
+            "fringe_cap_af_um" => &st.fringe_cap_af_um,
+            "dielectric_k" => &st.dielectric_k,
+            _ => return None,
+        };
+        col.get(i).map(|&v| v as f32)
+    }
+
+    /// Ground capacitance of a `width_nm` wire on `layer`, aF/µm, from the
+    /// deck's `pex` area and fringe terms; `None` when the deck has neither.
+    #[must_use]
+    pub fn wire_af_per_um(&self, layer: LayerId, width_nm: i32) -> Option<f32> {
+        let (area, fringe) = (self.pex_f32(layer, "area_cap_af_um2")?, self.pex_f32(layer, "fringe_cap_af_um")?);
+        if area <= 0.0 && fringe <= 0.0 {
+            return None;
+        }
+        Some(area * width_nm as f32 / 1e3 + 2.0 * fringe)
+    }
+
+    /// Lateral (sidewall) capacitance between two parallel `layer` wires
+    /// `gap_nm` apart, aF per µm of run: `ε0·k·t/gap` from the deck's `pex`
+    /// thickness and dielectric (TOPO eq. 4.3, `C_2D = l·C/d`); `None` when the
+    /// deck lacks either.
+    ///
+    /// ponytail: the parallel-plate sidewall term only; the fringe share of
+    /// the coupling (it grows as the gap shrinks below the height) is not split
+    /// out of the deck's ground fringe.
+    #[must_use]
+    pub fn lateral_af_per_um(&self, layer: LayerId, gap_nm: i32) -> Option<f32> {
+        const EPS0_AF_PER_UM: f32 = 8.854;
+        let (t, k) = (self.pex_f32(layer, "thickness_nm")?, self.pex_f32(layer, "dielectric_k")?);
+        (gap_nm > 0 && t > 0.0 && k > 0.0).then(|| EPS0_AF_PER_UM * k * t / gap_nm as f32)
     }
 
     /// The deck's `min_spacing` for a layer in nm, if it declares one.
@@ -455,10 +724,183 @@ impl Pdk {
         self.rule_limit_nm("min_spacing", layer).map(|v| v as i32)
     }
 
-    /// The deck's `min_width` for a layer in nm, if it declares one.
+    /// The deck's `min_width` for a layer in nm, if it declares one; for a
+    /// cut, its exact `size` (the shorter side).
     #[must_use]
     pub fn min_width(&self, layer: u16) -> Option<i32> {
-        self.rule_limit_nm("min_width", layer).map(|v| v as i32)
+        self.rule_limit_nm("min_width", layer).or_else(|| {
+            let (kind, w, h) = (self.strings.get("cut_size")?, self.strings.get("width")?, self.strings.get("height")?);
+            // A cut sized on a part of the layer (sky130 `licon_std`: licon
+            // outside the precision resistors) sizes the plain cut; the
+            // smallest of several is the ordinary one, not a slot.
+            self.deck.rules.spec.iter().filter_map(|s| {
+                (s.kind == kind && self.deck.rules.layers_of(s).first().is_some_and(|&l| self.drawn_from(l, layer))).then_some(())?;
+                match (self.deck.rules.param(s, w), self.deck.rules.param(s, h)) {
+                    (Some(ParamValue::Length(a)), Some(ParamValue::Length(b))) => Some(a.raw().min(b.raw())),
+                    (Some(ParamValue::Length(a)), _) => Some(a.raw()),
+                    _ => None,
+                }
+            }).min()
+        }).map(|v| v as i32)
+    }
+
+    /// Whether deck layer `x` is drawing layer `drawn` or computed from it
+    /// (through any chain of derived layers) out of layers Philis draws only:
+    /// a rule on a seal-ring, high-voltage or deep-well layer never fires on
+    /// Philis geometry, so it must not set a generator dimension.
+    #[must_use]
+    pub fn drawn_from(&self, x: GvLayerId, drawn: u16) -> bool {
+        self.philis_drawn(x) && self.reaches(x, drawn)
+    }
+
+    /// `x` is `drawn` or a part of it: through the operands whose area it
+    /// keeps (all of an `and`/`or`, the first of a `not` or a selection).
+    fn reaches(&self, x: GvLayerId, drawn: u16) -> bool {
+        use gdsverify::ingest::deck::DerivedOp as Op;
+        if x.0 == drawn {
+            return true;
+        }
+        let ops = self.deck.layers.operands(x);
+        let kept: &[GvLayerId] = match self.deck.layers.op(x) {
+            None => &[],
+            Some(Op::And | Op::Or) => ops,
+            Some(_) => &ops[..ops.len().min(1)],
+        };
+        kept.iter().any(|&o| self.reaches(o, drawn))
+    }
+
+    /// `x` can hold area in Philis geometry: a drawn layer, or one computed
+    /// so that it is non-empty given only drawn layers (`X and hvi` is empty,
+    /// `X not thickgateox` is `X`).
+    fn philis_drawn(&self, x: GvLayerId) -> bool {
+        use gdsverify::ingest::deck::DerivedOp as Op;
+        let ops = self.deck.layers.operands(x);
+        let can = |i: usize| ops.get(i).is_some_and(|&o| self.philis_drawn(o));
+        match self.deck.layers.op(x) {
+            None => {
+                DRAWN_ROLES.iter().any(|r| pnr_core::Process::layer(self, r).is_some_and(|l| l.0 == x.0))
+                    || self.routing_metals.iter().chain(&self.routing_cuts).any(|l| l.0 == x.0)
+                    || self.recipe_layers().iter().any(|n| self.layers.iter().any(|(m, l)| m == n && l.0 == x.0))
+            }
+            Some(Op::And) => (0..ops.len()).all(can),
+            Some(Op::Or) => (0..ops.len()).any(can),
+            Some(Op::Interacting(true) | Op::Inside) => can(0) && can(1),
+            Some(_) => can(0),
+        }
+    }
+
+    /// The widest length `param` of any `kind` rule on `layers`, nm: each
+    /// rule layer the drawn layer or a part of it Philis geometry can produce
+    /// ([`Pdk::drawn_from`]; a deck states contact rules on `poly_licon`,
+    /// `licon_diff`…). Rules the sidecar lists in `cell.inapplicable_rules`
+    /// (structures no Philis generator draws, e.g. sky130's varactor) do not
+    /// set a dimension; the checker still runs them.
+    pub(crate) fn widest_on(&self, kind: &str, param: &str, layers: &[u16]) -> Option<i64> {
+        let (kind, param) = (self.strings.get(kind)?, self.strings.get(param)?);
+        let skip: Vec<&str> = self.cell.get("inapplicable_rules").and_then(|v| v.as_array()).map_or(Vec::new(), |a| a.iter().filter_map(|x| x.as_str()).collect());
+        self.deck
+            .rules
+            .spec
+            .iter()
+            .filter(|s| {
+                let l = self.deck.rules.layers_of(s);
+                s.kind == kind
+                    && !skip.contains(&self.strings.resolve(s.id))
+                    && l.len() == layers.len()
+                    && l.iter().zip(layers).all(|(&x, &d)| self.drawn_from(x, d))
+            })
+            .filter_map(|s| match self.deck.rules.param(s, param) {
+                Some(ParamValue::Length(d)) => Some(d.raw()),
+                _ => None,
+            })
+            .max()
+    }
+
+
+    /// The shortest legal channel `(l, w)`, nm, of a MOS of `model` (`pmos`
+    /// polarity): poly's and diffusion's min width, the sidecar's
+    /// `min_gate_l`, any width rule on the gate (a layer drawn from both,
+    /// gf180 `DF.2a`) that the recogniser LVS pairs it with is carved from,
+    /// and, for `l`, any edge-length rule on that gate's edges (gf180 `PL.2`).
+    /// ponytail: a gate-edge length rule is read as L, as the one on COMP's
+    /// edges is; one on poly's edges (W) would need the edge's side.
+    /// ponytail: carved-from is by derivation, so a rule on a sibling layer of
+    /// the same area (sky130's 350 nm `lvtn_pfet`) binds no device; an area
+    /// test would.
+    #[must_use]
+    pub fn min_channel(&self, pmos: bool, model: &str) -> (i32, i32) {
+        let (Some(poly), Some(diff)) = (Process::layer(self, "poly"), Process::layer(self, "diff")) else { return (0, 0) };
+        let d = &self.deck.devices;
+        let rows: Vec<usize> = (0..d.kind.len())
+            .filter(|&r| d.kind[r] == gdsverify::ingest::deck::DeviceKind::Mos)
+            .filter(|&r| self.strings.resolve(self.deck.layers.name(d.marker[r])).starts_with('p') == pmos)
+            .collect();
+        let named = self.deck_model(model);
+        let marker = rows.iter().find(|&&r| named.as_deref() == Some(self.strings.resolve(d.model[r]))).or(rows.first()).map(|&r| d.marker[r]);
+        // The largest `kind` limit on a layer whose `area` is the gate.
+        let bound = |kind: &str, area: &dyn Fn(GvLayerId) -> Option<GvLayerId>| {
+            self.strings.get(kind).zip(self.strings.get("limit")).zip(marker).and_then(|((kind, limit), marker)| {
+                self.deck.rules.spec.iter()
+                    .filter(|s| s.kind == kind && matches!(self.deck.rules.layers_of(s), &[x] if area(x).is_some_and(|x| self.reaches(marker, x.0) && self.drawn_from(x, poly.0) && self.drawn_from(x, diff.0))))
+                    .filter_map(|s| match self.deck.rules.param(s, limit) {
+                        Some(ParamValue::Length(d)) => Some(d.raw() as i32),
+                        _ => None,
+                    })
+                    .max()
+            }).unwrap_or(0)
+        };
+        let gate = bound("min_width", &Some);
+        let length = bound("edge_min_length", &|x| self.edge_source(x));
+        let chosen = self.rules.iter().rev().find(|(n, _)| n == "min_gate_l").map_or(0, |(_, v)| *v);
+        let w = |role| Process::width(self, role).unwrap_or(0);
+        (w("poly").max(gate).max(length).max(chosen), w("diff").max(gate))
+    }
+
+    /// The area layer an edge layer's edges were taken from (through its
+    /// first operands); `None` for an area layer.
+    fn edge_source(&self, x: GvLayerId) -> Option<GvLayerId> {
+        use gdsverify::ingest::deck::DerivedOp as Op;
+        let ops = self.deck.layers.operands(x);
+        match self.deck.layers.op(x)? {
+            Op::Edges => ops.first().copied(),
+            _ => self.edge_source(*ops.first()?),
+        }
+    }
+
+    /// Widest `min_spacing` of a layer sized from drawn layer `l`, seen on
+    /// `l`: the limit plus the growth on both sides.
+    fn sized_spacing(&self, l: u16) -> Option<i32> {
+        let (kind, limit) = (self.strings.get("min_spacing")?, self.strings.get("limit")?);
+        self.deck
+            .rules
+            .spec
+            .iter()
+            .filter(|s| s.kind == kind)
+            .filter_map(|s| {
+                let &[x] = self.deck.rules.layers_of(s) else { return None };
+                (x.0 != l && self.philis_drawn(x)).then_some(())?;
+                let g = self.growth(x, l)?;
+                match self.deck.rules.param(s, limit) {
+                    Some(ParamValue::Length(d)) => Some(d.raw() as i32 + 2 * g),
+                    _ => None,
+                }
+            })
+            .max()
+    }
+
+    /// Net growth of `x` from drawn layer `l` through sizing (and the first
+    /// operand of any other op); `None` if `x` is not built from `l`.
+    fn growth(&self, x: GvLayerId, l: u16) -> Option<i32> {
+        use gdsverify::ingest::deck::DerivedOp as Op;
+        if x.0 == l {
+            return Some(0);
+        }
+        let ops = self.deck.layers.operands(x);
+        match self.deck.layers.op(x)? {
+            Op::Sized(d) => Some(self.growth(ops[0], l)? + d.raw() as i32),
+            Op::Or => ops.iter().find_map(|&o| self.growth(o, l)),
+            _ => self.growth(*ops.first()?, l),
+        }
     }
 
     /// The `limit` (nm) of the first rule of `kind` whose first layer is `layer`.
@@ -484,30 +926,84 @@ impl Pdk {
 /// generators (`&dyn Process`) and `macroMaster` resolve every layer role and
 /// rule through it, so they stay PDK-agnostic while this maps to the real deck.
 impl Process for Pdk {
-    /// Resolve a role through the deck's `cell.layers` map first, then fall back
-    /// to a layer of that literal name.
+    /// Resolve a role through the deck's `cell.layers` map first; then a
+    /// stack position, `met{n}` / `via{n}` (the `n`-th metal above li and the
+    /// cut below it, as sky130 names them: `routing_metals[n]`,
+    /// `routing_cuts[n]`), so a deck whose layers are named otherwise (ihp's
+    /// `via1` is li's cut) still answers by position; then a layer of that
+    /// literal name.
     ///
     /// The indirection is the point: a role is what a generator wants (`"tap"`),
     /// a layer is what the process provides.
     fn layer(&self, role: &str) -> Option<LayerId> {
-        let name = self
-            .roles
-            .iter()
-            .find(|(r, _)| r == role)
-            .map_or(role, |(_, l)| l.as_str());
-        self.layers.iter().find(|(n, _)| n == name).map(|(_, id)| *id)
+        if let Some((_, l)) = self.roles.iter().find(|(r, _)| r == role) {
+            return self.layers.iter().find(|(n, _)| n == l).map(|(_, id)| *id);
+        }
+        let at = |prefix: &str, stack: &[LayerId]| {
+            role.strip_prefix(prefix)?.parse::<usize>().ok().and_then(|n| stack.get(n).copied())
+        };
+        at("met", &self.routing_metals)
+            .or_else(|| at("via", &self.routing_cuts))
+            .or_else(|| self.layers.iter().find(|(n, _)| n == role).map(|(_, id)| *id))
     }
     /// Last match wins: `rules` is built widest-source-first, so an explicit
     /// `cell.*` dimension overrides a value synthesised from a DRC rule.
+    /// No `min_gate_l` chosen: the deck's shortest legal gate, either polarity.
     fn rule(&self, name: &str, default: i32) -> i32 {
+        let deck = || (name == "min_gate_l").then(|| self.min_channel(false, "").0.max(self.min_channel(true, "").0)).filter(|&l| l > 0);
         self.rules
             .iter()
             .rev()
             .find(|(n, _)| n == name)
-            .map_or(default, |(_, v)| *v)
+            .map(|(_, v)| *v)
+            .or_else(deck)
+            .unwrap_or(default)
     }
     fn grid(&self) -> i32 {
         self.grid
+    }
+    fn sheet_ohm(&self, role: &str) -> Option<f32> {
+        self.pex_f32(pnr_core::Process::layer(self, role)?, "sheet_res_ohm_sq")
+    }
+    fn space(&self, role: &str) -> Option<i32> {
+        let l = pnr_core::Process::layer(self, role)?.0;
+        let plain = self.min_spacing(l);
+        let array = self.via_array_spacing(l).map(|(_, s)| s);
+        // Wide-metal steps a cell's features can reach; wider-only spacings
+        // bind the router's straps, which read `wide_spacing` per width.
+        let wide = self.wide_spacing(l).iter().filter(|&&(t, _)| t <= MAX_CELL_FEATURE_NM).map(|&(_, s)| s).max();
+        // A layer the deck grows from this one (ihp's buried layer: n-well
+        // opened, then grown 1 um) spaces its growth apart too.
+        let grown = self.sized_spacing(l);
+        plain.max(array).max(wide).max(grown)
+    }
+    fn eol_space(&self, role: &str) -> Option<i32> {
+        let l = pnr_core::Process::layer(self, role)?.0;
+        self.widest_on("eol_spacing", "limit", &[l]).map(|v| v as i32)
+    }
+    fn width(&self, role: &str) -> Option<i32> {
+        let l = pnr_core::Process::layer(self, role)?.0;
+        self.min_width(l).or_else(|| self.widest_on("min_width", "limit", &[l]).map(|v| v as i32))
+    }
+    fn enclosure(&self, outer: &str, inner: &str) -> Option<i32> {
+        let l = [pnr_core::Process::layer(self, outer)?.0, pnr_core::Process::layer(self, inner)?.0];
+        self.widest_on("min_enclosure", "limit", &l).map(|v| v as i32)
+    }
+    fn endcap(&self, outer: &str, inner: &str) -> Option<i32> {
+        let l = [pnr_core::Process::layer(self, outer)?.0, pnr_core::Process::layer(self, inner)?.0];
+        self.widest_on("asymmetric_enclosure", "min_one_side", &l).map(|v| v as i32)
+    }
+    fn area(&self, role: &str) -> Option<i64> {
+        self.min_area(pnr_core::Process::layer(self, role)?.0)
+    }
+    fn extension(&self, outer: &str, inner: &str) -> Option<i32> {
+        let l = [pnr_core::Process::layer(self, outer)?.0, pnr_core::Process::layer(self, inner)?.0];
+        self.widest_on("min_extension", "limit", &l).map(|v| v as i32)
+    }
+    fn space_between(&self, a: &str, b: &str) -> Option<i32> {
+        let (la, lb) = (pnr_core::Process::layer(self, a)?.0, pnr_core::Process::layer(self, b)?.0);
+        let one = |x, y| self.widest_on("min_spacing_diff", "limit", &[x, y]);
+        one(la, lb).max(one(lb, la)).map(|v| v as i32)
     }
 }
 
@@ -547,7 +1043,6 @@ const REQUIRED_RULES: &[&str] = &[
     "bjt_min_emitter_side",
     "bjt_stripe_gap",
     "cap_unit_side",
-    "contact",
     "device_gap",
     "diode_gap",
     "diode_l",
@@ -556,23 +1051,14 @@ const REQUIRED_RULES: &[&str] = &[
     "ind_min_diameter",
     "ind_min_trace",
     "lod_moat_ext_moderate",
-    "m1_enc",
     "max_finger_width",
-    "mcon_size",
-    "met1_space",
-    "min_finger_width",
-    "min_gate_l",
     "min_guard_ring_width",
     "mom_finger_space",
     "mom_finger_width",
     "n_well_depth",
-    "nwell_diff_enc",
-    "nwell_min_width",
     "p_epi_thickness",
     "p_well_depth",
     "plate_spacing",
-    "poly_ext",
-    "poly_min_width",
     "res_head",
     "res_min_segment",
     "res_min_width",
@@ -580,11 +1066,150 @@ const REQUIRED_RULES: &[&str] = &[
     "retrograde_pwell",
     "sd_width",
     "tie_max_dist_nm",
-    "via_enclosure",
-    "via_spacing",
     "well_enclosure",
     "wpe_clearance_moderate",
 ];
+
+/// A device construction from the sidecar's `cell.<kind>s` table: which
+/// layers a generator draws for one schematic model and the deck model the
+/// extractor then recognises (sky130 `res_high_po`: poly_rs + rpm + npc +
+/// psdm with slot contacts; `res_generic_po`: poly_rs alone).
+#[derive(Clone, Debug, Default)]
+pub struct Recipe {
+    /// The deck's model name for what this draws (its LVS recogniser).
+    pub model: String,
+    /// Role → layer; a controlled role absent here draws nothing.
+    pub layers: Vec<(String, String)>,
+    /// Dimension keys overriding the sidecar's.
+    pub rules: Vec<(String, i32)>,
+}
+
+/// Roles a resistor recipe controls: unset in the recipe = not drawn.
+const RESISTOR_ROLES: &[&str] = &["rpoly", "rpoly_b", "res_block", "rpm", "npc", "res_implant"];
+
+impl Pdk {
+    /// How far `outer` must pass cut `inner` on every side, nm: the deck's
+    /// all-round enclosure and its two-opposite-sides end-cap, the larger
+    /// (a centred square pad clears both). `0` when the deck sets none.
+    #[must_use]
+    pub fn cut_enclosure(&self, outer: LayerId, inner: LayerId) -> i32 {
+        let l = [outer.0, inner.0];
+        let e = self.widest_on("min_enclosure", "limit", &l).unwrap_or(0);
+        let c = self.widest_on("asymmetric_enclosure", "min_one_side", &l).unwrap_or(0);
+        e.max(c) as i32
+    }
+
+    /// Every layer some recipe draws.
+    fn recipe_layers(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for kind in ["resistors"] {
+            let Some(rs) = self.cell.get(kind).and_then(|t| t.get("recipes")).and_then(|r| r.as_object()) else { continue };
+            for r in rs.values() {
+                if let Some(l) = r.get("layers").and_then(|l| l.as_object()) {
+                    out.extend(l.values().filter_map(|v| v.as_str().map(String::from)));
+                }
+            }
+        }
+        out
+    }
+
+    /// The deck's name for schematic `model` (sky130 `nfet_01v8` →
+    /// `sky130_fd_pr__nfet_01v8`): equal, or one is the other behind a vendor
+    /// `__` prefix. `None` when the deck names no such model.
+    #[must_use]
+    pub fn deck_model(&self, model: &str) -> Option<String> {
+        let hit = |n: &str| !model.is_empty() && (n == model || n.ends_with(&format!("__{model}")) || model.ends_with(&format!("__{n}")));
+        self.deck.devices.model.iter().map(|&m| self.strings.resolve(m)).find(|n| hit(n)).map(str::to_string)
+    }
+
+    /// The recipe for a `kind` (`"resistor"`) of schematic `model`: the one
+    /// naming it (its deck model or an alias, a vendor prefix ignored), else
+    /// the table's `default`. `None` when the sidecar has no table.
+    #[must_use]
+    pub fn recipe(&self, kind: &str, model: &str) -> Option<Recipe> {
+        let table = self.cell.get(format!("{kind}s"))?;
+        let recipes = table.get("recipes")?.as_object()?;
+        let names = |r: &serde_json::Value| -> Vec<String> {
+            let mut v: Vec<String> = r.get("aliases").and_then(|a| a.as_array()).map_or(Vec::new(), |a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+            v.extend(r.get("model").and_then(|m| m.as_str()).map(String::from));
+            v
+        };
+        let hit = |r: &serde_json::Value| !model.is_empty() && names(r).iter().any(|n| n == model || n.ends_with(&format!("__{model}")) || model.ends_with(&format!("__{n}")));
+        let r = recipes.values().find(|r| hit(r)).or_else(|| recipes.get(table.get("default")?.as_str()?))?;
+        Some(Recipe {
+            model: r.get("model").and_then(|m| m.as_str()).unwrap_or_default().to_string(),
+            layers: r.get("layers").and_then(|l| l.as_object()).map_or(Vec::new(), |l| l.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()),
+            rules: r.as_object().map_or(Vec::new(), |o| o.iter().filter_map(|(k, v)| Some((k.clone(), v.as_i64()? as i32))).collect()),
+        })
+    }
+}
+
+/// `pdk` as one recipe sees it: the recipe's roles and keys first; a role it
+/// controls but leaves unset resolves to no layer.
+pub struct Overlay<'a> {
+    pub pdk: &'a Pdk,
+    pub recipe: Recipe,
+}
+
+impl Process for Overlay<'_> {
+    fn layer(&self, role: &str) -> Option<LayerId> {
+        match self.recipe.layers.iter().find(|(r, _)| r == role) {
+            Some((_, l)) => self.pdk.layers.iter().find(|(n, _)| n == l).map(|(_, id)| *id),
+            None if RESISTOR_ROLES.contains(&role) => None,
+            None => self.pdk.layer(role),
+        }
+    }
+    fn rule(&self, name: &str, default: i32) -> i32 {
+        self.recipe.rules.iter().find(|(n, _)| n == name).map_or_else(|| self.pdk.rule(name, default), |&(_, v)| v)
+    }
+    fn grid(&self) -> i32 {
+        self.pdk.grid()
+    }
+    fn sheet_ohm(&self, role: &str) -> Option<f32> {
+        self.pdk.sheet_ohm(role)
+    }
+    fn space(&self, role: &str) -> Option<i32> {
+        // By the overlay's layer, so a recipe role (`res_block`) resolves.
+        let name = &self.pdk.layers.iter().find(|(_, l)| Some(*l) == self.layer(role))?.0;
+        self.pdk.space(name)
+    }
+    fn width(&self, role: &str) -> Option<i32> {
+        self.pdk.min_width(self.layer(role)?.0)
+    }
+    // By the overlay's layers, so a recipe role (`res_implant`) resolves.
+    fn enclosure(&self, outer: &str, inner: &str) -> Option<i32> {
+        self.pdk.widest_on("min_enclosure", "limit", &[self.layer(outer)?.0, self.layer(inner)?.0]).map(|v| v as i32)
+    }
+    fn endcap(&self, outer: &str, inner: &str) -> Option<i32> {
+        self.pdk.widest_on("asymmetric_enclosure", "min_one_side", &[self.layer(outer)?.0, self.layer(inner)?.0]).map(|v| v as i32)
+    }
+    fn area(&self, role: &str) -> Option<i64> {
+        self.pdk.min_area(self.layer(role)?.0)
+    }
+    fn space_between(&self, a: &str, b: &str) -> Option<i32> {
+        let (la, lb) = (self.layer(a)?.0, self.layer(b)?.0);
+        let one = |x, y| self.pdk.widest_on("min_spacing_diff", "limit", &[x, y]);
+        one(la, lb).max(one(lb, la)).map(|v| v as i32)
+    }
+    fn extension(&self, outer: &str, inner: &str) -> Option<i32> {
+        let l = [self.layer(outer)?.0, self.layer(inner)?.0];
+        self.pdk.widest_on("min_extension", "limit", &l).map(|v| v as i32)
+    }
+    fn eol_space(&self, role: &str) -> Option<i32> {
+        self.pdk.widest_on("eol_spacing", "limit", &[self.layer(role)?.0]).map(|v| v as i32)
+    }
+}
+
+/// The widest single feature a cell generator draws, nm (a cap plate or a
+/// resistor body; li and metal runs inside cells are far narrower). A
+/// design bound, not process data: wide-metal spacings that only start past
+/// it are for the router's straps.
+const MAX_CELL_FEATURE_NM: i32 = 5_000;
+
+/// Every role a Philis generator draws on (optional ones resolve to nothing
+/// on a deck without them).
+const DRAWN_ROLES: &[&str] =
+    &["diff", "tap", "poly", "rpoly", "li", "licon", "mcon", "met1", "nwell", "dnwell", "nsdm", "psdm", "npc", "rpm", "pnp", "npn", "hvtp", "lvtn", "fin", "sdt", "lisd", "lig", "gcut"];
 
 /// The deck's `cell` section, which gdsverify's reader ignores.
 #[derive(Default)]
@@ -663,129 +1288,141 @@ fn deck_grid(deck: &Deck, strings: &StrTable) -> i32 {
 mod tests {
     use super::*;
 
+    fn load(deck: &str) -> Pdk {
+        let path = format!("{}/../../pdks/{deck}.json", env!("CARGO_MANIFEST_DIR"));
+        Pdk::from_json(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// gf180's gate width rule (`DF.2a`, 220 nm) is wider than its poly's
+    /// (`PL.1`, 180 nm): the channel minimum reads the gate, not the poly.
+    #[test]
+    fn min_channel_reads_the_gate_width_rule() {
+        let gf = load("gf180mcu");
+        let (l, w) = gf.min_channel(false, "nfet_01v8");
+        assert!(l >= 220 && w >= 220, "gf180 ({l}, {w})");
+        assert_eq!(Process::rule(&gf, "min_gate_l", 0), l, "no sidecar gate length: the deck's");
+        let sky = load("sky130");
+        assert_eq!(sky.min_channel(true, "pfet_01v8").0, 150, "a plain PMOS is not held to the LVT one's 350 nm");
+    }
+    const DECKS: [&str; 3] = ["sky130", "gf180mcu", "ihp_sg13g2"];
+    fn id(p: &Pdk, n: &str) -> LayerId {
+        p.layers.iter().find(|(l, _)| l == n).unwrap().1
+    }
+
     /// A router indexes `routing_layers()` by its internal layer index, so the
-    /// slice must contain metal only. If a device-formation or mask layer leaks
-    /// in, wires get drawn on it — that is how ~330 nwell/diff DRC violations and
-    /// a broken LVS extraction happened.
+    /// stack must hold metal only: a device-formation or mask layer in it gets
+    /// wires drawn on it (~330 nwell/diff DRC violations and a broken LVS once).
     #[test]
     fn routing_stack_is_metal_only() {
-        for pdk_file in ["sky130.json", "generic_finfet.json"] {
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/");
-            let text = std::fs::read_to_string(format!("{path}{pdk_file}")).unwrap();
-            let pdk = Pdk::from_json(&text).unwrap();
-            let names: Vec<&str> = pdk
-                .routing_layers()
-                .iter()
-                .map(|id| {
-                    pdk.layers
-                        .iter()
-                        .find(|(_, l)| l == id)
-                        .map_or("?", |(n, _)| n.as_str())
-                })
-                .collect();
-            assert!(!names.is_empty(), "{pdk_file}: empty routing stack");
-            for n in &names {
-                assert!(
-                    n.starts_with("met") || *n == "li",
-                    "{pdk_file}: {n} is not routable metal (stack {names:?})"
-                );
+        for deck in DECKS {
+            let pdk = load(deck);
+            assert!(!pdk.routing_layers().is_empty(), "{deck}: empty routing stack");
+            let device: Vec<LayerId> = ["diff", "tap", "poly", "nwell", "nsdm", "psdm", "licon"].iter().filter_map(|r| pnr_core::Process::layer(&pdk, r)).collect();
+            for l in pdk.routing_layers() {
+                assert!(!device.contains(&l), "{deck}: {l:?} is a device layer in the routing stack");
+                assert!(pdk.deck.connectivity.conductors.iter().any(|&c| pdk.reaches(c, l.0)), "{deck}: {l:?} conducts nothing");
             }
         }
     }
 
-    /// The via stack has to line up with the metal stack one-for-one, and each cut
-    /// has to be drawable: a cut no wider than the pads that must enclose it, on a
-    /// layer that is not itself routing metal, snapped to the fab grid.
-    ///
-    /// These are the same conditions `library::run` asserts before routing; having
-    /// them here means a PDK edit that breaks them fails in `cargo test` rather
-    /// than 200 iterations into a flow.
+    /// The via stack lines up with the metal stack one-for-one, and each cut
+    /// is drawable: no wider than the pads enclosing it, not itself routing
+    /// metal, pads on the fab grid. The same conditions `library::run`
+    /// asserts, caught in `cargo test` rather than deep in a flow.
     #[test]
     fn via_stack_matches_metal_stack() {
-        for pdk_file in ["sky130.json", "generic_finfet.json"] {
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/");
-            let text = std::fs::read_to_string(format!("{path}{pdk_file}")).unwrap();
-            let pdk = Pdk::from_json(&text).unwrap();
+        for deck in DECKS {
+            let pdk = load(deck);
             let layers = pdk.routing_layers();
             let cuts = pdk.routing_vias();
-            assert_eq!(
-                cuts.len(),
-                layers.len() - 1,
-                "{pdk_file}: {} metal layers need {} cuts, deck names {}",
-                layers.len(),
-                layers.len() - 1,
-                cuts.len()
-            );
+            assert_eq!(cuts.len(), layers.len() - 1, "{deck}: {} metals need {} cuts", layers.len(), layers.len() - 1);
             for &(cut, size, below, above) in &cuts {
-                assert!(size > 0, "{pdk_file}: cut {cut:?} has no size");
-                assert!(
-                    size <= below && size <= above,
-                    "{pdk_file}: cut {cut:?} {size} nm exceeds its pads {below}/{above}"
-                );
-                assert!(
-                    !layers.contains(&cut),
-                    "{pdk_file}: {cut:?} is both routing metal and a via cut"
-                );
+                assert!(size > 0, "{deck}: cut {cut:?} has no size");
+                assert!(size <= below && size <= above, "{deck}: cut {cut:?} {size} nm exceeds its pads {below}/{above}");
+                assert!(!layers.contains(&cut), "{deck}: {cut:?} is both routing metal and a via cut");
                 for pad in [below, above] {
-                    assert_eq!(
-                        pad % pdk.grid,
-                        0,
-                        "{pdk_file}: pad {pad} for cut {cut:?} is off the {} nm grid",
-                        pdk.grid
-                    );
+                    assert_eq!(pad % pdk.grid, 0, "{deck}: pad {pad} for cut {cut:?} is off the {} nm grid", pdk.grid);
                 }
             }
         }
     }
 
-    /// `routing_pitch` must leave at least `min_spacing` between adjacent tracks on
-    /// **every layer of the stack it is given** — the lattice has one global pitch,
-    /// so the worst layer *in that stack* sets it. Sized for met1 alone, every pair
-    /// of adjacent li tracks is a violation nothing downstream can fix.
+    /// `routing_pitch` leaves at least `min_spacing` between adjacent tracks
+    /// on every layer of the stack it is given: one global pitch, so the worst
+    /// layer in that stack sets it.
     #[test]
     fn routing_pitch_clears_every_layer_of_its_stack() {
-        for pdk_file in ["sky130.json", "generic_finfet.json"] {
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/");
-            let text = std::fs::read_to_string(format!("{path}{pdk_file}")).unwrap();
-            let pdk = Pdk::from_json(&text).unwrap();
+        for deck in DECKS {
+            let pdk = load(deck);
             let w = 290;
-            // The stack the flow actually builds: layers whose min_width fits `w`.
-            let stack: Vec<_> = pdk
-                .routing_layers()
-                .into_iter()
-                .take_while(|l| pdk.min_width(l.0).is_none_or(|mw| mw <= w))
-                .map(|l| l.0)
-                .collect();
+            let stack: Vec<_> = pdk.routing_layers().into_iter().take_while(|l| pdk.min_width(l.0).is_none_or(|mw| mw <= w)).map(|l| l.0).collect();
             let pitch = pdk.routing_pitch(w, &stack);
             for &l in &stack {
                 let need = pdk.min_spacing(l).unwrap_or(0);
-                assert!(
-                    pitch - w >= need,
-                    "{pdk_file}: pitch {pitch} leaves {} nm between {w} nm wires, \
-                     layer {l:?} needs {need}",
-                    pitch - w
-                );
+                assert!(pitch - w >= need, "{deck}: pitch {pitch} leaves {} nm, layer {l:?} needs {need}", pitch - w);
             }
         }
     }
 
-    /// A layer the router cannot reach must not set the pitch for the layers it
-    /// can. sky130's met5 wants 1600 nm spacing; li wants 170. Counting met5 gave
-    /// a 1890 nm lattice on a 170 nm pin, and pin access became impossible.
+    /// A layer the router cannot reach must not set the pitch for the layers
+    /// it can (sky130 met5's spacing once gave a 1890 nm lattice on a 170 nm pin).
     #[test]
     fn an_unreachable_layer_does_not_set_the_pitch() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/sky130.json");
-        let pdk = Pdk::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let pdk = load("sky130");
         let all: Vec<_> = pdk.routing_layers().into_iter().map(|l| l.0).collect();
-        let reachable: Vec<_> = pdk
-            .routing_layers()
-            .into_iter()
-            .take_while(|l| pdk.min_width(l.0).is_none_or(|mw| mw <= 290))
-            .map(|l| l.0)
-            .collect();
-        assert!(
-            pdk.routing_pitch(290, &reachable) < pdk.routing_pitch(290, &all),
-            "the reachable stack must give a tighter pitch than the whole deck"
-        );
+        let reachable: Vec<_> = pdk.routing_layers().into_iter().take_while(|l| pdk.min_width(l.0).is_none_or(|mw| mw <= 290)).map(|l| l.0).collect();
+        assert!(pdk.routing_pitch(290, &reachable) < pdk.routing_pitch(290, &all));
     }
+
+    /// No diode is inserted where LVS cannot extract one: gf180's deck has no
+    /// diode recogniser on conductors.
+    #[test]
+    fn a_diode_marker_only_where_lvs_can_extract_it() {
+        assert_eq!(load("gf180mcu").diode_marker(), None);
+    }
+
+    /// A generator asking by role gets this deck's minimum-area side: gf180's
+    /// li role is metal1, whose M1.3 area is 0.1444 um2 (a 380 nm square).
+    #[test]
+    fn role_min_area_is_the_decks_side() {
+        assert_eq!(pnr_core::Process::rule(&load("gf180mcu"), "li_min_area", 0), 380);
+    }
+
+    /// Antenna stages per layer, from the deck's own rules: sky130 metal1 a
+    /// sidewall ratio, ihp summing metals cumulatively, a cut its own ratio.
+    #[test]
+    fn antenna_rules_are_read_per_stage() {
+        let sky = load("sky130");
+        assert_eq!(sky.antenna_rule(id(&sky, "met1")), Some((400.0, 350.0, false)), "ar.met1.1");
+        assert_eq!(sky.antenna_rule(id(&sky, "mcon")), Some((3.0, 0.0, false)), "ar.mcon.1");
+        let ihp = load("ihp_sg13g2");
+        assert_eq!(ihp.antenna_rule(id(&ihp, "metal2")), Some((200.0, 0.0, true)), "Ant.b_Metal2 sums metal1+metal2");
+        assert_eq!(ihp.antenna_rule(id(&ihp, "metal1")), Some((200.0, 0.0, false)));
+    }
+
+    /// EM limits come from the deck's own rules, per layer, through the
+    /// conductor extracted from it (gf180 `metal1_con`); a cut a metal's rule
+    /// names takes its per-cut limit, never the per-um density; a deck
+    /// without EM rules is unknown.
+    #[test]
+    fn em_limits_are_read_per_layer_from_the_deck_rules() {
+        let ihp = load("ihp_sg13g2");
+        let m2 = ihp.em_limit(id(&ihp, "metal2")).expect("EM.Metal2");
+        assert_eq!((m2.ua_per_um, m2.ua_per_cut), (2_000.0, 400.0));
+        let v1 = ihp.em_limit(id(&ihp, "via1")).expect("EM.Metal2 names via1");
+        assert_eq!((v1.ua_per_um, v1.ua_per_cut), (0.0, 400.0));
+        let gf = load("gf180mcu");
+        let m1 = gf.em_limit(id(&gf, "metal1")).expect("EM.14.3_Mn on metal1_con");
+        assert_eq!((m1.ua_per_um, m1.ua_per_cut), (2_090.0, 580.0));
+        // sky130's tech-LEF limits, met1 with its mcon.
+        let sky = load("sky130");
+        let m1 = sky.em_limit(id(&sky, "met1")).expect("EM.met1_mcon");
+        assert_eq!((m1.ua_per_um, m1.ua_per_cut), (2_800.0, 360.0));
+        // A deck without EM rules is unknown.
+        let sidecar = std::fs::read_to_string(format!("{}/../../pdks/sky130.json", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let text: String = Pdk::deck_text(&sidecar).unwrap().lines().filter(|l| !l.contains("em_current_density")).collect::<Vec<_>>().join("\n");
+        let bare = Pdk::load(&text, &sidecar).unwrap();
+        assert!(bare.routing_metals.iter().all(|&l| bare.em_limit(l).is_none()), "no EM rules: unknown");
+    }
+
 }

@@ -1,0 +1,22 @@
+* dac4 — 4-bit binary-weighted charge-redistribution DAC: the electrical
+* dummy C0 (bottom plate on VSS) and C1..C4 = 1, 2, 4, 8 unit caps on one top
+* plate, each bit's bottom plate driven by an inverter. The bank is drawn by
+* cells::cap_array as a common-centroid array with a tied dummy ring. The top
+* plate drives a comparator input device, as in a SAR loop: sky130 has no
+* capacitor recogniser, so without it LVS would see `top` on no device at all.
+.subckt dac4 top cmp d0 d1 d2 d3 VDD VSS
+XC0 top VSS cap_generic_m1m2 W=2u L=2u m=1
+XC1 top b0 cap_generic_m1m2 W=2u L=2u m=1
+XC2 top b1 cap_generic_m1m2 W=2u L=2u m=2
+XC3 top b2 cap_generic_m1m2 W=2u L=2u m=4
+XC4 top b3 cap_generic_m1m2 W=2u L=2u m=8
+XMP0 b0 d0 VDD VDD pfet_01v8 W=1u L=0.15u
+XMN0 b0 d0 VSS VSS nfet_01v8 W=0.5u L=0.15u
+XMP1 b1 d1 VDD VDD pfet_01v8 W=1u L=0.15u
+XMN1 b1 d1 VSS VSS nfet_01v8 W=0.5u L=0.15u
+XMP2 b2 d2 VDD VDD pfet_01v8 W=1u L=0.15u
+XMN2 b2 d2 VSS VSS nfet_01v8 W=0.5u L=0.15u
+XMP3 b3 d3 VDD VDD pfet_01v8 W=1u L=0.15u
+XMN3 b3 d3 VSS VSS nfet_01v8 W=0.5u L=0.15u
+XMC cmp top VSS VSS nfet_01v8 W=1u L=0.15u
+.ends dac4

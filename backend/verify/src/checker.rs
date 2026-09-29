@@ -4,8 +4,7 @@
 
 use gdsverify::check::lvs::CompareOptions;
 use gdsverify::check::report::{Outcome, Severity, Violations};
-use gdsverify::check::topology::NetId;
-use gdsverify::engine::pipeline::{extract_into, intern_report_ids, ExtractError, Extracted, Loaded};
+use gdsverify::engine::pipeline::{extract, intern_report_ids, ExtractError, Extracted, Loaded};
 use gdsverify::engine::run::run_checks;
 use gdsverify::engine::{Checks, Outputs, RunOptions, Summary};
 use gdsverify::ingest::deck::parse_deck;
@@ -26,6 +25,8 @@ pub struct Checker {
     pub loaded: Loaded,
     extracted: Extracted,
     out: Outputs,
+    /// Rules taken out of the deck as chip-level, `(rule, why)`.
+    deferred: Vec<(String, String)>,
 }
 
 impl Checker {
@@ -44,11 +45,39 @@ impl Checker {
                 deck.rules.spec.retain(|s| s.kind != density);
             }
         }
+        // Whole-die fill coverage says nothing about a block: deferred to
+        // chip signoff, reported as such.
+        let mut deferred = Vec::new();
+        // The sidecar's waivers (`cell.waivers`: rule id → reason): not run,
+        // and reported with the reason.
+        if let Some(w) = pdk.cell.get("waivers").and_then(|w| w.as_object()) {
+            let ids: Vec<StrId> = w.keys().filter_map(|k| strings.get(k)).collect();
+            for (k, why) in w {
+                if strings.get(k).is_some_and(|id| deck.rules.spec.iter().any(|s| s.id == id)) {
+                    deferred.push((k.clone(), format!("Waived({})", why.as_str().unwrap_or(""))));
+                }
+            }
+            deck.rules.spec.retain(|s| !ids.contains(&s.id));
+        }
+        if let Some(global) = strings.get("global_density") {
+            for s in deck.rules.spec.iter().filter(|s| s.kind == global) {
+                deferred.push((strings.resolve(s.id).to_string(), "ChipLevel(global density: whole die)".to_string()));
+            }
+            deck.rules.spec.retain(|s| s.kind != global);
+        }
         // A hand-built `Loaded` skips the loader, so the LVS report ids must be
         // interned here or the first discrepancy panics.
         intern_report_ids(&mut strings);
-        let loaded = Loaded { strings, grid: Some(nm_grid()), deck, ..Loaded::default() };
-        Ok(Self { loaded, extracted: Extracted::default(), out: Outputs::default() })
+        let loaded = Loaded {
+            strings,
+            grid: nm_grid(),
+            deck,
+            store: Default::default(),
+            provenance: Default::default(),
+            reference: None,
+            intent: None,
+        };
+        Ok(Self { loaded, extracted: Extracted::default(), out: Outputs::default(), deferred })
     }
 
     /// Install the schematic reference LVS compares against. Returns how many
@@ -63,6 +92,46 @@ impl Checker {
         Ok(skipped)
     }
 
+    /// Install design intent (supplies, their voltage, the current each is
+    /// budgeted to carry): what the deck's EM and IR rules need to run rather
+    /// than skip. An empty [`Intent`] installs none.
+    ///
+    /// # Errors
+    /// gdsverify refusing the intent (a net in two domains, a bad limit).
+    pub fn set_intent(&mut self, intent: &crate::Intent) -> Result<(), String> {
+        self.loaded.intent = None;
+        if intent.supplies.is_empty() {
+            return Ok(());
+        }
+        let domain = |mv: f64| format!("d{}", mv.round() as i64);
+        let mut domains = serde_json::Map::new();
+        let power_mv = intent.supplies.iter().filter(|s| !s.2).map(|s| s.1).fold(0.0, f64::max);
+        for &(_, mv, ground) in &intent.supplies {
+            // A ground joins the (highest) power domain: gdsverify's domains are
+            // voltage levels with a supply pair.
+            let mv = if ground { power_mv } else { mv };
+            domains.insert(domain(mv), serde_json::json!({ "voltage_mv": mv }));
+        }
+        let supplies: Vec<_> = intent
+            .supplies
+            .iter()
+            .map(|(net, mv, ground)| {
+                let mv = if *ground { power_mv } else { *mv };
+                serde_json::json!({ "net": net, "domain": domain(mv), "role": if *ground { "ground" } else { "power" } })
+            })
+            .collect();
+        let limits: Vec<_> = intent
+            .currents
+            .iter()
+            .filter(|(_, ua)| *ua > 0.0)
+            .map(|(net, ua)| serde_json::json!({ "net": net, "budget_current_ua": ua }))
+            .collect();
+        let json = serde_json::json!({ "domains": domains, "supplies": supplies, "limits": limits }).to_string();
+        let parsed = gdsverify::ingest::intent::parse_intent(&json, &mut self.loaded.strings).map_err(|e| e.to_string())?;
+        self.loaded.intent = Some(parsed);
+        Ok(())
+    }
+
     fn load_geometry(&mut self, shapes: &[Shape], pins: &[LabeledPin]) -> Result<(), String> {
         let (store, provenance) =
             build_store(shapes, pins, &self.loaded.deck, &mut self.loaded.strings)?;
@@ -73,8 +142,9 @@ impl Checker {
 
     /// Run the selected checks. Findings land in [`Checker::outputs`].
     ///
-    /// `unconnected_pin` findings on a **labelled** net are dropped: a port
-    /// leaves the cell, so reaching no device inside it is not floating (the
+    /// `unconnected_pin` and `floating_gate` findings on a **labelled** net
+    /// are dropped: a port leaves the cell, so reaching no device inside it,
+    /// or only gates (an input driven from outside), is not floating (the
     /// engine's own LVS floating-net check applies the same exemption). This
     /// is what keeps a bulk-only rail — VSS tied through taps, invisible to a
     /// 3-terminal MOS recogniser — from reading as floating metal.
@@ -89,26 +159,24 @@ impl Checker {
         checks: Checks,
     ) -> Result<Summary, String> {
         self.load_geometry(shapes, pins)?;
-        if let Err(e) = extract_into(&self.loaded, &mut self.extracted) {
-            return Err(self.extract_error(e));
-        }
+        self.extracted = extract(&self.loaded).map_err(|e| self.extract_error(e))?;
         let options = RunOptions {
             checks,
             lvs: CompareOptions::default(),
             quasistatic_nets: Vec::new(),
             quasistatic_inductance: false,
-            threads: None,
         };
-        let mut summary = run_checks(&self.loaded, &self.extracted, &options, &mut self.out)
-            .map_err(|e| format!("engine: {e}"))?;
+        let (out, mut summary) =
+            run_checks(&self.loaded, &self.extracted, &options).map_err(|e| format!("engine: {e}"))?;
+        self.out = out;
         self.drop_port_floating(&mut summary);
         Ok(summary)
     }
 
     fn drop_port_floating(&mut self, summary: &mut Summary) {
-        let Some(kind) = self.loaded.strings.get("unconnected_pin") else { return };
+        let kinds: Vec<StrId> = ["unconnected_pin", "floating_gate"].iter().filter_map(|k| self.loaded.strings.get(k)).collect();
         let rules: Vec<StrId> =
-            self.loaded.deck.rules.spec.iter().filter(|s| s.kind == kind).map(|s| s.id).collect();
+            self.loaded.deck.rules.spec.iter().filter(|s| kinds.contains(&s.kind)).map(|s| s.id).collect();
         let v = &self.out.violations;
         let exempt = |i: usize| {
             rules.contains(&v.rule[i])
@@ -136,12 +204,16 @@ impl Checker {
     fn extract_error(&self, e: ExtractError) -> String {
         use gdsverify::check::topology::port::PortError;
         if let ExtractError::Port(PortError::ConflictingLabels(net)) = e {
+            // Extraction stopped at the ports: the nets are rebuilt to name
+            // the labels that share one.
+            let mut nets = gdsverify::check::topology::NetTable::default();
+            gdsverify::check::topology::net::extract_nets_into(&self.loaded.store, &self.loaded.deck.connectivity, &mut nets);
             let names: Vec<&str> = self
                 .loaded
                 .provenance
                 .labels()
                 .iter()
-                .filter(|&&(poly, _)| self.extracted.nets.net_of(poly) == net)
+                .filter(|&&(poly, _)| nets.net_of(poly) == net)
                 .map(|&(_, name)| self.loaded.strings.resolve(name))
                 .collect();
             return format!("{LABEL_SHORT}: labels {names:?} bind to one extracted net");
@@ -166,11 +238,12 @@ impl Checker {
     #[must_use]
     pub fn device_count(&mut self, shapes: &[Shape]) -> Option<usize> {
         self.load_geometry(shapes, &[]).ok()?;
-        extract_into(&self.loaded, &mut self.extracted).ok()?;
+        self.extracted = extract(&self.loaded).ok()?;
         Some(self.extracted.devices.len())
     }
 
-    /// Rules the last run did not execute, as `(rule, why)`.
+    /// Rules the last run did not execute, as `(rule, why)`, including the
+    /// chip-level ones [`Checker::defer_density_wider_than`] took out.
     #[must_use]
     pub fn skipped_rules(&self) -> Vec<(&str, String)> {
         self.out
@@ -178,16 +251,72 @@ impl Checker {
             .iter()
             .filter(|r| r.outcome != Outcome::Ran)
             .map(|r| (self.rule_name(r.rule), format!("{:?}", r.outcome)))
+            .chain(self.deferred.iter().map(|(n, why)| (n.as_str(), why.clone())))
             .collect()
+    }
+
+    /// Take out every `density` rule whose `window` exceeds a `w × h` nm block
+    /// in either axis: a window wider than the block measures the chip around
+    /// it, so that check is chip integration's — not run here, and reported as
+    /// not run (never as passed). Returns the rules taken out.
+    pub fn defer_density_wider_than(&mut self, w: i64, h: i64) -> Vec<String> {
+        let (Some(kind), Some(window)) = (self.loaded.strings.get("density"), self.loaded.strings.get("window")) else {
+            return Vec::new();
+        };
+        let rules = &mut self.loaded.deck.rules;
+        let wide = |s: &gdsverify::ingest::deck::RuleSpec| match rules.param(s, window) {
+            Some(gdsverify::ingest::deck::ParamValue::Length(d)) => Some(d.raw()).filter(|&win| s.kind == kind && (win > w || win > h)),
+            _ => None,
+        };
+        let out: Vec<(String, String)> = rules
+            .spec
+            .iter()
+            .filter_map(|s| wide(s).map(|win| (self.loaded.strings.resolve(s.id).to_string(), format!("ChipLevel(window {win} nm > block {w}x{h} nm)"))))
+            .collect();
+        let gone: Vec<_> = rules.spec.iter().filter(|s| wide(s).is_some()).map(|s| s.id).collect();
+        rules.spec.retain(|s| !gone.contains(&s.id));
+        let names = out.iter().map(|(n, _)| n.clone()).collect();
+        self.deferred.extend(out);
+        names
+    }
+
+    /// The last run's extracted capacitance matrix over **labelled** nets, fF:
+    /// `(net, None, C)` to ground, `(a, Some(b), C)` coupling, `a < b`, rows
+    /// summed per pair. Elements touching an unlabelled net are dropped (no
+    /// schematic node to hang them on); empty without PEX.
+    #[must_use]
+    pub fn cap_matrix(&self) -> Vec<(String, Option<String>, f64)> {
+        use gdsverify::extract::network::Parasitic;
+        let Some(p) = self.out.parasitics.as_ref() else { return Vec::new() };
+        let name = |node: u32| {
+            let net = *p.node_net.get(node as usize)?;
+            self.extracted.ports.name_of(net).map(|s| self.loaded.strings.resolve(s).to_string())
+        };
+        let mut rows: std::collections::BTreeMap<(String, Option<String>), f64> = std::collections::BTreeMap::new();
+        for i in 0..p.from.len() {
+            let key = match (p.value[i], p.to[i]) {
+                (Parasitic::GroundCap(q), _) => name(p.from[i].0).map(|a| ((a, None), q.raw())),
+                (Parasitic::CouplingCap(q), Some(to)) => match (name(p.from[i].0), name(to.0)) {
+                    (Some(x), Some(y)) if x != y => {
+                        let (x, y) = if x < y { (x, y) } else { (y, x) };
+                        Some(((x, Some(y)), q.raw()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some((k, c)) = key {
+                *rows.entry(k).or_default() += c;
+            }
+        }
+        rows.into_iter().map(|((a, b), c)| (a, b, c)).collect()
     }
 
     /// Total extracted capacitance of the last run, fF; `0.0` without PEX.
     #[must_use]
     pub fn total_cap_ff(&self) -> f32 {
         let Some(p) = self.out.parasitics.as_ref() else { return 0.0 };
-        (0..self.extracted.nets.net_count())
-            .map(|n| p.net_capacitance(NetId(n as u32)).raw())
-            .sum::<f64>() as f32
+        p.capacitance_per_net().iter().sum::<f64>() as f32
     }
 
     #[must_use]

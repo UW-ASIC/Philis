@@ -223,5 +223,5 @@ fn mos_dummies_parameter_selects_variant() {
         m.layout(&mut DeviceBuilder { builder: &mut b, process: &g }).expect("draws");
         b.finish()
     };
-    assert_ne!(draw(Some(1)).bbox, draw(Some(2)).bbox);
+    assert_ne!(draw(Some(0)).bbox, draw(Some(1)).bbox);
 }

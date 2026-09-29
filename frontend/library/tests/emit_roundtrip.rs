@@ -19,13 +19,14 @@ M2 out mid vss vss nfet w=0.84u l=0.15u
 .ends
 ";
 
-// A matched diff pair — identical W/L, shared source — which the annotator
-// collapses into ONE cell. emit v2 must express it as a `MatchedPair` with
-// per-leg connectivity, not reject it.
-const DIFFPAIR: &str = r"
-.subckt diffpair inp inn outp outn tail vss
-M1 outp inp tail vss nfet w=0.84u l=0.15u
-M2 outn inn tail vss nfet w=0.84u l=0.15u
+// A matched mirror — identical W/L, shared gate and source, two fingers each —
+// which the annotator collapses into ONE ABBA cell. emit v2 must express it as a
+// `MatchedPair` with per-leg connectivity, not reject it. (A single-finger pair
+// no longer merges: `D A S B D` runs its two currents opposite ways.)
+const MIRROR: &str = r"
+.subckt mirror bias out vss
+M1 bias bias vss vss nfet w=0.84u l=0.15u nf=2
+M2 out bias vss vss nfet w=0.84u l=0.15u nf=2
 .ends
 ";
 
@@ -38,7 +39,7 @@ fn matched_pair_emits_as_one_interdigitated_instance() {
     .expect("sky130 deck present");
     let pdk = verify::Pdk::from_json(&deck).expect("deck parses");
     let cfg = Config::default();
-    let netlist = library::parse(DIFFPAIR).expect("diffpair parses");
+    let netlist = library::parse(MIRROR).expect("mirror parses");
 
     // Hand layout sized for either outcome (1 collapsed cell or 2).
     let layout = Layout {
@@ -53,6 +54,7 @@ fn matched_pair_emits_as_one_interdigitated_instance() {
         branch: Vec::new(),
         power_uw: vec![0; 2],
         temp_mc: vec![0; 2],
+        units: Default::default(),
     };
 
     let ir = emit(&netlist, &layout, &pdk, &cfg).expect("matched pair is in emit v2 scope");
@@ -64,24 +66,24 @@ fn matched_pair_emits_as_one_interdigitated_instance() {
     let pair = &ir.instances[0];
     assert_eq!(pair.legs, 2);
     assert_eq!(pair.name, "M1_M2");
-    // Per-leg connectivity: leg 1 gate → inp, leg 2 gate → inn, sources → tail.
+    // Per-leg connectivity: both gates → bias, sources → vss, drains apart.
     let has = |t: &str, n: &str| {
         ir.edges
             .iter()
             .any(|(a, b)| a == &format!("M1_M2.{t}") && b == n)
     };
     assert!(
-        has("g1", "inp") && has("g2", "inn"),
+        has("g1", "bias") && has("g2", "bias"),
         "leg gates wired: {:?}",
         ir.edges
     );
     assert!(
-        has("s1", "tail") && has("s2", "tail"),
-        "shared tail: {:?}",
+        has("s1", "vss") && has("s2", "vss"),
+        "shared source: {:?}",
         ir.edges
     );
     assert!(
-        has("d1", "outp") && has("d2", "outn"),
+        has("d1", "bias") && has("d2", "out"),
         "leg drains wired: {:?}",
         ir.edges
     );
@@ -89,10 +91,10 @@ fn matched_pair_emits_as_one_interdigitated_instance() {
     // Interprets + routes; printed source names MatchedPair.
     let re = elaborate_ir(&ir, &pdk, &ElabConfig::default()).expect("IR elaborates");
     assert_eq!(re.macros.len(), 1, "one interdigitated macro");
-    let tail = re.nets.iter().position(|n| n == "tail").expect("tail net");
+    let out = re.nets.iter().position(|n| n == "bias").expect("bias net");
     assert!(
-        !re.routes.shapes(pnr_core::NetId(tail as u16)).is_empty(),
-        "tail routed"
+        !re.routes.shapes(pnr_core::NetId(out as u16)).is_empty(),
+        "bias routed"
     );
     assert!(
         to_rust(&ir).contains("MatchedPair { kind: DeviceKind::Nmos"),
@@ -125,6 +127,7 @@ fn chain2_roundtrips_through_ir() {
         branch: Vec::new(),
         power_uw: vec![0; 2],
         temp_mc: vec![0; 2],
+        units: Default::default(),
     };
 
     // ── decompile ──

@@ -13,6 +13,15 @@ use pnr_core::Netlist;
 pub struct OpPoint {
     /// Dissipation `|Id·Vds|` per device, µW.
     pub power_uw: Vec<i32>,
+    /// Drain current per device, µA, signed as ngspice reports it (into the
+    /// drain); `None` for a device the simulation did not resolve.
+    pub id_ua: Vec<Option<f64>>,
+    /// Saturation headroom `|V_DS| − |V_DSsat|` per device, mV: what a series
+    /// IR drop may eat before the device leaves saturation. Negative = already
+    /// in triode; `None` when unresolved.
+    pub headroom_mv: Vec<Option<f64>>,
+    /// Transconductance per device, µS; `None` when unresolved.
+    pub gm_us: Vec<Option<f64>>,
     /// How the bias was obtained, so a probe bench is never passed off as real.
     pub provenance: String,
     /// Devices the simulation reported.
@@ -20,6 +29,51 @@ pub struct OpPoint {
 }
 
 impl OpPoint {
+    /// DC current each device terminal draws from its net, µA, per device:
+    /// FET `D` draws `+Id` (ngspice's drain current flows in), `S` `−Id`, and
+    /// the gate and bulk none. `None` for a FET the simulation did not
+    /// resolve; other devices report no terminals. A net's terminal currents
+    /// sum to what its port supplies (zero without one) — the input the
+    /// router's per-branch sums (Lienig & Thiele 2018 eqs. 3.5–3.7) need.
+    #[must_use]
+    pub fn terminal_ua(&self, netlist: &Netlist) -> Vec<Option<Vec<(String, f64)>>> {
+        netlist
+            .devices
+            .iter()
+            .enumerate()
+            .map(|(i, dev)| {
+                if !matches!(dev.kind, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
+                    return Some(Vec::new());
+                }
+                let id = self.id_ua.get(i).copied().flatten()?;
+                let draw = |t: &str| match t {
+                    "D" => id,
+                    "S" => -id,
+                    _ => 0.0,
+                };
+                Some(dev.terminals.iter().map(|(t, _)| (t.clone(), draw(t))).collect())
+            })
+            .collect()
+    }
+
+    /// Per net, the smallest positive saturation headroom among devices whose
+    /// source or drain sits on it, mV: the drop that net's wiring may spend
+    /// without pushing a device out of saturation. `None` when no saturated
+    /// device touches the net.
+    #[must_use]
+    pub fn net_headroom_mv(&self, netlist: &Netlist) -> Vec<Option<f64>> {
+        let mut out: Vec<Option<f64>> = vec![None; netlist.nets.len()];
+        for (dev, h) in netlist.devices.iter().zip(&self.headroom_mv) {
+            let Some(h) = h.filter(|&h| h > 0.0) else { continue };
+            for (t, n) in &dev.terminals {
+                if let (true, Some(o)) = (t == "S" || t == "D", out.get_mut(n.0 as usize)) {
+                    *o = Some(o.map_or(h, |x: f64| x.min(h)));
+                }
+            }
+        }
+        out
+    }
+
     /// Total dissipation, µW.
     #[must_use]
     pub fn total_power_uw(&self) -> i64 {
@@ -27,7 +81,25 @@ impl OpPoint {
     }
 }
 
+/// DC current each net carries, µA, from per-device terminal draws
+/// ([`OpPoint::terminal_ua`]): the larger of what its terminals draw and what
+/// they supply (a rail's port makes up the difference). `None` when a device
+/// on the net is unresolved — unknown, never zero.
+#[must_use]
+pub fn net_current_ua(netlist: &Netlist, draws: &[Option<Vec<(String, f64)>>]) -> Vec<Option<i32>> {
+    let mut acc: Vec<Option<(f64, f64)>> = vec![Some((0.0, 0.0)); netlist.nets.len()];
+    for (dev, d) in netlist.devices.iter().zip(draws) {
+        for (t, net) in &dev.terminals {
+            let Some(slot) = acc.get_mut(net.0 as usize) else { continue };
+            let i = d.as_ref().map(|ts| ts.iter().find(|(x, _)| x == t).map_or(0.0, |&(_, i)| i));
+            *slot = slot.zip(i).map(|((draw, supply), i)| if i >= 0.0 { (draw + i, supply) } else { (draw, supply - i) });
+        }
+    }
+    acc.into_iter().map(|a| a.map(|(d, s)| d.max(s).round() as i32)).collect()
+}
+
 /// How to build and run the operating-point deck.
+#[derive(Clone, Debug)]
 pub struct OpConfig {
     /// SPICE model library, included as `.lib <path> <corner>`.
     pub model_lib: Option<PathBuf>,
@@ -37,11 +109,15 @@ pub struct OpConfig {
     pub testbench: Option<String>,
     /// Supply voltage of the synthesised bench, volts.
     pub vdd: f64,
-    /// NMOS / PMOS library model names.
+    /// NMOS / PMOS library model names overriding the schematic's own
+    /// (empty: each device simulates as the model it was drawn as).
     pub nmos_model: String,
     pub pmos_model: String,
     /// ngspice binary.
     pub ngspice: String,
+    /// Simulation temperature, °C: the bias is solved at it, and EM limits
+    /// rated at a hotter reference are derated to it (never credited cooler).
+    pub temp_c: f64,
 }
 
 impl Default for OpConfig {
@@ -51,21 +127,23 @@ impl Default for OpConfig {
             corner: "tt".into(),
             testbench: None,
             vdd: 1.8,
-            nmos_model: "sky130_fd_pr__nfet_01v8".into(),
-            pmos_model: "sky130_fd_pr__pfet_01v8".into(),
+            nmos_model: String::new(),
+            pmos_model: String::new(),
             ngspice: "ngspice".into(),
+            temp_c: 27.0,
         }
     }
 }
 
 impl OpConfig {
-    /// Library model for a device kind. Only FETs are simulated.
-    fn model_for(&self, kind: pnr_core::DeviceKind) -> Option<&str> {
-        match kind {
-            pnr_core::DeviceKind::Nmos => Some(&self.nmos_model),
-            pnr_core::DeviceKind::Pmos => Some(&self.pmos_model),
-            _ => None,
-        }
+    /// Library model for a device. Only FETs are simulated.
+    fn model_for<'a>(&'a self, dev: &'a pnr_core::Device) -> Option<&'a str> {
+        let forced = match dev.kind {
+            pnr_core::DeviceKind::Nmos => &self.nmos_model,
+            pnr_core::DeviceKind::Pmos => &self.pmos_model,
+            _ => return None,
+        };
+        [forced, &dev.model].into_iter().find(|m| !m.is_empty()).map(String::as_str)
     }
 }
 
@@ -95,16 +173,25 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
         return Err(format!("no device operating points: {tail}"));
     }
     let mut power_uw = vec![0i32; netlist.devices.len()];
+    let mut id_ua = vec![None; netlist.devices.len()];
+    let mut headroom_mv = vec![None; netlist.devices.len()];
+    let mut gm_us = vec![None; netlist.devices.len()];
     let mut resolved = 0usize;
     for (i, dev) in netlist.devices.iter().enumerate() {
         let Some(op) = table.get(instance_name(dev).to_ascii_lowercase().as_str()) else {
             continue;
         };
         power_uw[i] = ((op.id * op.vds).abs() * 1e6).round() as i32;
+        id_ua[i] = Some(op.id * 1e6);
+        headroom_mv[i] = Some((op.vds.abs() - op.vdsat.abs()) * 1e3);
+        gm_us[i] = Some(op.gm.abs() * 1e6);
         resolved += 1;
     }
     Ok(OpPoint {
         power_uw,
+        id_ua,
+        headroom_mv,
+        gm_us,
         provenance,
         resolved,
     })
@@ -115,6 +202,8 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
 struct DevOp {
     id: f64,
     vds: f64,
+    vdsat: f64,
+    gm: f64,
 }
 
 /// Assemble the deck: model library, the circuit, a bias bench, and a control
@@ -136,15 +225,17 @@ fn build_deck(netlist: &Netlist, cfg: &OpConfig) -> (String, String) {
         format!(".lib {} {}\n", p.display(), cfg.corner)
     });
 
+    let temp = cfg.temp_c;
     let deck = format!(
         "* Philis operating-point probe (generated)\n\
          {lib}{body}\n\
          {bench}\n\
+         .temp {temp}\n\
          .control\n\
          set ngbehavior=hsa\n\
          op\n\
          echo @@PHILIS_OP\n\
-         show m : id,vds\n\
+         show m : id,vds,vdsat,gm\n\
          echo @@PHILIS_END\n\
          .endc\n\
          .end\n"
@@ -153,18 +244,27 @@ fn build_deck(netlist: &Netlist, cfg: &OpConfig) -> (String, String) {
 }
 
 /// Emit every device flat, one line each, against the library's model names.
-fn flat_circuit(netlist: &Netlist, cfg: &OpConfig) -> String {
+pub(crate) fn flat_circuit(netlist: &Netlist, cfg: &OpConfig) -> String {
+    flat_circuit_with(netlist, cfg, |_, _, n| n, |_| String::new())
+}
+
+/// [`flat_circuit`] with each terminal's node renamed by `node(device index,
+/// terminal, net node)` and `extra(device index)` appended to the card (a
+/// post-layout deck's branch resistors and stress parameters).
+pub(crate) fn flat_circuit_with(
+    netlist: &Netlist,
+    cfg: &OpConfig,
+    node: impl Fn(usize, &str, String) -> String,
+    extra: impl Fn(usize) -> String,
+) -> String {
     let mut s = String::new();
-    for dev in &netlist.devices {
-        let Some(model) = cfg.model_for(dev.kind) else {
+    for (di, dev) in netlist.devices.iter().enumerate() {
+        let Some(model) = cfg.model_for(dev) else {
             continue; // not a simulatable primitive here (R/C/L handled by their own cards)
         };
         let net = |t: &str| {
-            dev.terminals
-                .iter()
-                .find(|(n, _)| n == t)
-                .map(|(_, id)| node_name(netlist, *id))
-                .unwrap_or_else(|| "0".into())
+            let n = dev.terminals.iter().find(|(n, _)| n == t).map(|(_, id)| node_name(netlist, *id)).unwrap_or_else(|| "0".into());
+            node(di, t, n)
         };
         // sky130 primitives are subcircuits: D G S B, then W/L in microns.
         let (w_um, l_um) = (param_um(dev, "w"), param_um(dev, "l"));
@@ -175,13 +275,14 @@ fn flat_circuit(netlist: &Netlist, cfg: &OpConfig) -> String {
             .map_or(1, |(_, v)| *v)
             .max(1);
         s.push_str(&format!(
-            "{} {} {} {} {} {} W={w_um} L={l_um} nf={nf}\n",
+            "{} {} {} {} {} {} W={w_um} L={l_um} nf={nf}{}\n",
             instance_name(dev),
             net("D"),
             net("G"),
             net("S"),
             net("B"),
-            model
+            model,
+            extra(di)
         ));
     }
     s
@@ -201,7 +302,7 @@ fn instance_name(dev: &pnr_core::Device) -> String {
 }
 
 /// Net name, sanitised for SPICE and mapped to node 0 for grounds.
-fn node_name(netlist: &Netlist, id: pnr_core::NetId) -> String {
+pub(crate) fn node_name(netlist: &Netlist, id: pnr_core::NetId) -> String {
     let raw = netlist
         .nets
         .get(id.0 as usize)
@@ -333,15 +434,16 @@ fn parse_show(text: &str) -> std::collections::HashMap<String, DevOp> {
             "device" => {
                 cols = rest.iter().filter_map(|c| instance_device(c)).collect();
             }
-            "id" | "vds" => {
+            "id" | "vds" | "vdsat" | "gm" => {
                 for (ci, raw) in rest.iter().enumerate() {
                     let Some(dev) = cols.get(ci) else { continue };
                     let Ok(v) = raw.parse::<f64>() else { continue };
                     let e = out.entry(dev.clone()).or_default();
-                    if head == "id" {
-                        e.id = v;
-                    } else {
-                        e.vds = v;
+                    match head {
+                        "id" => e.id = v,
+                        "vds" => e.vds = v,
+                        "gm" => e.gm = v,
+                        _ => e.vdsat = v,
                     }
                 }
             }
@@ -370,6 +472,7 @@ mod tests {
          id           8.21938e-06           4.10968e-06           4.10968e-06
         vds            0.00628286               1.78826               1.78826
         vgs                   0.8                  1.05                  1.05
+      vdsat              0.297885             0.0485318             0.0485318
 @@PHILIS_END
 ";
 
@@ -425,7 +528,7 @@ mod tests {
             .collect();
         let dev = |name: &str, d: u16, g: u16, s: u16, b: u16| Device {
             name: name.to_string(),
-            kind: DeviceKind::Nmos,
+            kind: DeviceKind::Nmos, model: "sky130_fd_pr__nfet_01v8".into(),
             terminals: vec![
                 ("D".into(), NetId(d)),
                 ("G".into(), NetId(g)),
@@ -482,5 +585,72 @@ mod tests {
             !deck.starts_with("XXM1"),
             "must not double-prefix an X-name: {deck}"
         );
+    }
+
+    /// A diff pair on one tail: each drain draws its half, the tail device's
+    /// drain the whole; the terminal currents on the tail net sum to zero
+    /// (KCL, no port), and an unresolved device is unknown, never zero.
+    #[test]
+    fn terminal_currents_balance_on_an_internal_net() {
+        use pnr_core::{Device, DeviceKind, Net, NetId};
+        let fet = |name: &str, d: u16, g: u16, s: u16| Device {
+            name: name.into(),
+            kind: DeviceKind::Nmos, model: String::new(),
+            terminals: vec![("D".into(), NetId(d)), ("G".into(), NetId(g)), ("S".into(), NetId(s)), ("B".into(), NetId(4))],
+            params: vec![],
+        };
+        // nets: 0 outp, 1 outn, 2 tail, 3 in, 4 vss
+        let nl = Netlist {
+            devices: vec![fet("M1", 0, 3, 2), fet("M2", 1, 3, 2), fet("M5", 2, 3, 4)],
+            nets: ["outp", "outn", "tail", "in", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+        };
+        let op = |ids: [Option<f64>; 3]| OpPoint { power_uw: vec![0; 3], id_ua: ids.to_vec(), headroom_mv: vec![None; 3], gm_us: vec![None; 3], provenance: String::new(), resolved: 3 };
+        let t = op([Some(10.0), Some(10.0), Some(20.0)]).terminal_ua(&nl);
+        let on = |net: u16| -> f64 {
+            nl.devices
+                .iter()
+                .zip(&t)
+                .flat_map(|(d, c)| d.terminals.iter().zip(c.as_ref().unwrap()).filter(move |((_, n), _)| n.0 == net).map(|(_, (_, i))| *i))
+                .sum()
+        };
+        assert_eq!(on(2), 0.0, "tail: two sources out, the tail drain in");
+        assert_eq!(t[2].as_ref().unwrap()[0], ("D".to_string(), 20.0));
+        assert_eq!(on(3), 0.0, "a gate net draws no DC current");
+        assert!(op([Some(10.0), None, Some(20.0)]).terminal_ua(&nl)[1].is_none(), "unknown, never zero");
+    }
+
+    /// Headroom is `|V_DS| − V_DSsat`: a triode tail has none to spend, and a
+    /// net takes the tightest saturated device on it.
+    #[test]
+    fn headroom_reads_vdsat_and_a_net_takes_its_tightest_device() {
+        let t = parse_show(SHOW);
+        assert!((t["xm3"].vdsat - 0.0485318).abs() < 1e-9);
+        let nl = stub_netlist(); // XM1: D=vout(3) S=vss(1)
+        let op = |h: Option<f64>| OpPoint { power_uw: vec![0], id_ua: vec![Some(1.0)], headroom_mv: vec![h], gm_us: vec![None], provenance: String::new(), resolved: 1 };
+        let hr = op(Some(250.0)).net_headroom_mv(&nl);
+        assert_eq!((hr[3], hr[1], hr[2]), (Some(250.0), Some(250.0), None), "drain and source nets, not the gate");
+        assert_eq!(op(Some(-3.0)).net_headroom_mv(&nl)[3], None, "a triode device has no headroom to give");
+    }
+
+    /// A tail net: two sources supply 10 µA each, the tail drain draws 20 µA —
+    /// the net carries 20; an unresolved device leaves its nets unknown.
+    #[test]
+    fn a_net_carries_the_larger_of_its_draw_and_supply() {
+        use pnr_core::{Device, DeviceKind, Net, NetId};
+        let fet = |name: &str, d: u16, s: u16| Device {
+            name: name.into(),
+            kind: DeviceKind::Nmos, model: String::new(),
+            terminals: vec![("D".into(), NetId(d)), ("G".into(), NetId(3)), ("S".into(), NetId(s)), ("B".into(), NetId(4))],
+            params: vec![],
+        };
+        let nl = Netlist {
+            devices: vec![fet("M1", 0, 2), fet("M2", 1, 2), fet("M5", 2, 4)],
+            nets: ["outp", "outn", "tail", "in", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+        };
+        let op = |ids: [Option<f64>; 3]| OpPoint { power_uw: vec![0; 3], id_ua: ids.to_vec(), headroom_mv: vec![None; 3], gm_us: vec![None; 3], provenance: String::new(), resolved: 3 };
+        let i = net_current_ua(&nl, &op([Some(10.0), Some(10.0), Some(20.0)]).terminal_ua(&nl));
+        assert_eq!((i[2], i[4], i[3]), (Some(20), Some(20), Some(0)), "tail, the ground return, a gate net");
+        let u = net_current_ua(&nl, &op([Some(10.0), None, Some(20.0)]).terminal_ua(&nl));
+        assert_eq!((u[1], u[2]), (None, None), "M2 unresolved: its nets are unknown");
     }
 }

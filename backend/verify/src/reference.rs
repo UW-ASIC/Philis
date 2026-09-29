@@ -106,7 +106,6 @@ pub fn build(
             ));
         }
 
-        n.device_name.push(strings.intern(&format!("d{index}")));
         n.device_model.push(deck.devices.model[row]);
         n.device_kind.push(deck.devices.kind[row]);
         for name in &dev.terminals[..arity] {
@@ -119,7 +118,7 @@ pub fn build(
         }
         n.device_param_start.push(n.param.len() as u32);
     }
-    n.subckt_device_start.push(n.device_name.len() as u32);
+    n.subckt_device_start.push(n.device_model.len() as u32);
 
     n.net_name = net_names;
     n.net_subckt = vec![SubcktId(0); n.net_name.len()];
@@ -158,11 +157,18 @@ fn recogniser_for(dev: &RefDeviceIn, deck: &Deck, strings: &StrTable) -> Option<
                 continue;
             }
         }
-        if hinted.is_none() || hinted == Some(deck.devices.model[row]) {
+        let named = strings.resolve(deck.devices.model[row]);
+        let vendor = dev.model.as_deref().is_some_and(|m| named.ends_with(&format!("__{m}")) || m.ends_with(&format!("__{named}")));
+        if hinted.is_none() && dev.model.is_none() || hinted == Some(deck.devices.model[row]) || vendor {
             return Some(row);
         }
-        // The hint names no deck model (yet): fall back to the first match.
-        fallback.get_or_insert(row);
+        // The hint names no deck model (yet): fall back to the first match
+        // whose marker states its polarity (IHP's `esd_vdd` bjt is an ESD
+        // diode, no NPN a schematic may mean).
+        let marker = strings.resolve(deck.layers.name(deck.devices.marker[row]));
+        if polarity.is_none() || marker.starts_with('n') || marker.starts_with('p') {
+            fallback.get_or_insert(row);
+        }
     }
     fallback
 }

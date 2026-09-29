@@ -1,0 +1,3146 @@
+{
+  "scope": "Semantic audit of HTML theory and supplied-PDF references only. No Philis engine code audit.",
+  "inventory": "audit-citations-optimization.json",
+  "original_citation_occurrences": 142,
+  "citation_status_counts": {
+    "supported": 11,
+    "qualified": 120,
+    "not_claim": 3,
+    "corrected": 8
+  },
+  "citation_reviews": [
+    {
+      "citation_id": "CIT-0011",
+      "status": "supported",
+      "supported_claim": "Design centering maximizes probability mass satisfying electrical specifications; centering performance, inscribing an ellipsoid and maximizing yield are distinct.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97,
+        98,
+        99
+      ],
+      "detail": "§4.8, Eq. (114), PDF89; §4.8.5 PDF96–99; §7.1.2–7.1.3 PDF164–166; §7.2.4 PDF179. The geometric-placement contrast is explanatory terminology, not a separate source theorem.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0012",
+      "status": "supported",
+      "supported_claim": "Design centering maximizes probability mass satisfying electrical specifications; centering performance, inscribing an ellipsoid and maximizing yield are distinct.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        164,
+        165,
+        166
+      ],
+      "detail": "§4.8, Eq. (114), PDF89; §4.8.5 PDF96–99; §7.1.2–7.1.3 PDF164–166; §7.2.4 PDF179. The geometric-placement contrast is explanatory terminology, not a separate source theorem.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0013",
+      "status": "supported",
+      "supported_claim": "Design centering maximizes probability mass satisfying electrical specifications; centering performance, inscribing an ellipsoid and maximizing yield are distinct.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        179
+      ],
+      "detail": "§4.8, Eq. (114), PDF89; §4.8.5 PDF96–99; §7.1.2–7.1.3 PDF164–166; §7.2.4 PDF179. The geometric-placement contrast is explanatory terminology, not a separate source theorem.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0014",
+      "status": "supported",
+      "supported_claim": "Design, statistical and operating-range parameters have different roles; the RC teaching example has different performance-centered and parameter-centered solutions.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        46,
+        47,
+        48,
+        49,
+        50
+      ],
+      "detail": "§§2.1–2.5 PDF38–44, Eqs. (3)–(4); §§3.1–3.5 PDF46–50. Recomputed sqrt(1.25), ((sqrt(.5)+sqrt(2))/2)^2=1.125. The normalized area R+C is explicitly an illustrative model.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0015",
+      "status": "supported",
+      "supported_claim": "Design, statistical and operating-range parameters have different roles; the RC teaching example has different performance-centered and parameter-centered solutions.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44
+      ],
+      "detail": "§§2.1–2.5 PDF38–44, Eqs. (3)–(4); §§3.1–3.5 PDF46–50. Recomputed sqrt(1.25), ((sqrt(.5)+sqrt(2))/2)^2=1.125. The normalized area R+C is explicitly an illustrative model.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0016",
+      "status": "qualified",
+      "supported_claim": "Positive-definite covariance defines Mahalanobis contours; covariance factorization preserves shared and local variation.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63
+      ],
+      "detail": "§§3.6–3.9 PDF53–64, Eqs. (24), (26), (56)–(60). PSD validation, reduced-rank sampling and the shared-term difference example are sound numerical/linear-algebra extensions; source pairwise-correlation conditions alone are not a complete PD test. Added explicit positive-definite assumption to inverse formula.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0017",
+      "status": "qualified",
+      "supported_claim": "Positive-definite covariance defines Mahalanobis contours; covariance factorization preserves shared and local variation.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        63,
+        64
+      ],
+      "detail": "§§3.6–3.9 PDF53–64, Eqs. (24), (26), (56)–(60). PSD validation, reduced-rank sampling and the shared-term difference example are sound numerical/linear-algebra extensions; source pairwise-correlation conditions alone are not a complete PD test. Added explicit positive-definite assumption to inverse formula.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0018",
+      "status": "qualified",
+      "supported_claim": "Sensitivities are local derivatives requiring consistent scaling; Pareto dominance uses every retained objective, and weighted sums can miss nonconvex-front portions.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75
+      ],
+      "detail": "§§4.1–4.3 PDF68–75, Eqs. (71)–(91); §4.5 PDF75–83, Eqs. (94)–(100). The implementation and normalization advice is a derived recommendation. No global-optimality guarantee follows from a gradient.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0019",
+      "status": "qualified",
+      "supported_claim": "Sensitivities are local derivatives requiring consistent scaling; Pareto dominance uses every retained objective, and weighted sums can miss nonconvex-front portions.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83
+      ],
+      "detail": "§§4.1–4.3 PDF68–75, Eqs. (71)–(91); §4.5 PDF75–83, Eqs. (94)–(100). The implementation and normalization advice is a derived recommendation. No global-optimality guarantee follows from a gradient.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0020",
+      "status": "qualified",
+      "supported_claim": "Linear box and ellipsoid extrema have different closed forms; nonlinear extrema can be interior or nonunique and local SQP does not certify a global worst case.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        103,
+        104,
+        105,
+        106,
+        107,
+        108
+      ],
+      "detail": "§4.7.1–4.7.2 PDF87–89; §5.1 Eqs. (158)–(160) PDF104–107; §5.2 Eqs. (171)–(179) PDF111; §5.4–5.5 PDF113–124; §6.3.2–6.3.6 PDF147–153. Conditions sigma>0, positive-definite covariance and model linearity were checked. Raster PDF115 confirms the missing objective Hessian in the prose after Eq. (191); Appendix C.6 PDF195 gives full curvature.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0021",
+      "status": "qualified",
+      "supported_claim": "Linear box and ellipsoid extrema have different closed forms; nonlinear extrema can be interior or nonunique and local SQP does not certify a global worst case.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        111
+      ],
+      "detail": "§4.7.1–4.7.2 PDF87–89; §5.1 Eqs. (158)–(160) PDF104–107; §5.2 Eqs. (171)–(179) PDF111; §5.4–5.5 PDF113–124; §6.3.2–6.3.6 PDF147–153. Conditions sigma>0, positive-definite covariance and model linearity were checked. Raster PDF115 confirms the missing objective Hessian in the prose after Eq. (191); Appendix C.6 PDF195 gives full curvature.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0022",
+      "status": "qualified",
+      "supported_claim": "Linear box and ellipsoid extrema have different closed forms; nonlinear extrema can be interior or nonunique and local SQP does not certify a global worst case.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        87,
+        88,
+        89
+      ],
+      "detail": "§4.7.1–4.7.2 PDF87–89; §5.1 Eqs. (158)–(160) PDF104–107; §5.2 Eqs. (171)–(179) PDF111; §5.4–5.5 PDF113–124; §6.3.2–6.3.6 PDF147–153. Conditions sigma>0, positive-definite covariance and model linearity were checked. Raster PDF115 confirms the missing objective Hessian in the prose after Eq. (191); Appendix C.6 PDF195 gives full curvature.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0023",
+      "status": "qualified",
+      "supported_claim": "Linear box and ellipsoid extrema have different closed forms; nonlinear extrema can be interior or nonunique and local SQP does not certify a global worst case.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        113,
+        114,
+        115,
+        116,
+        117,
+        118,
+        119,
+        120,
+        121,
+        122,
+        123,
+        124
+      ],
+      "detail": "§4.7.1–4.7.2 PDF87–89; §5.1 Eqs. (158)–(160) PDF104–107; §5.2 Eqs. (171)–(179) PDF111; §5.4–5.5 PDF113–124; §6.3.2–6.3.6 PDF147–153. Conditions sigma>0, positive-definite covariance and model linearity were checked. Raster PDF115 confirms the missing objective Hessian in the prose after Eq. (191); Appendix C.6 PDF195 gives full curvature.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0024",
+      "status": "qualified",
+      "supported_claim": "Linear box and ellipsoid extrema have different closed forms; nonlinear extrema can be interior or nonunique and local SQP does not certify a global worst case.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        147,
+        148,
+        149,
+        150,
+        151,
+        152,
+        153
+      ],
+      "detail": "§4.7.1–4.7.2 PDF87–89; §5.1 Eqs. (158)–(160) PDF104–107; §5.2 Eqs. (171)–(179) PDF111; §5.4–5.5 PDF113–124; §6.3.2–6.3.6 PDF147–153. Conditions sigma>0, positive-definite covariance and model linearity were checked. Raster PDF115 confirms the missing objective Hessian in the prose after Eq. (191); Appendix C.6 PDF195 gives full curvature.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0025",
+      "status": "qualified",
+      "supported_claim": "Yield is an intersection event; a Gaussian half-space, interval, box and ellipsoid have different probabilities; one tangent failure surface is only a local nonlinear approximation.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96
+      ],
+      "detail": "§4.8.1–4.8.4 PDF89–96; §§6.2.2–6.2.4 PDF133–145, Eqs. (240), (242)–(248), (258)–(259); §6.3 PDF146–160. Table11 PDF138 gives 46.8% for n=10,beta=3. The 1–3% claim at PDF156 is historical empirical experience, correctly not promoted to a bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0026",
+      "status": "qualified",
+      "supported_claim": "Yield is an intersection event; a Gaussian half-space, interval, box and ellipsoid have different probabilities; one tangent failure surface is only a local nonlinear approximation.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        133,
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145
+      ],
+      "detail": "§4.8.1–4.8.4 PDF89–96; §§6.2.2–6.2.4 PDF133–145, Eqs. (240), (242)–(248), (258)–(259); §6.3 PDF146–160. Table11 PDF138 gives 46.8% for n=10,beta=3. The 1–3% claim at PDF156 is historical empirical experience, correctly not promoted to a bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0027",
+      "status": "qualified",
+      "supported_claim": "Yield is an intersection event; a Gaussian half-space, interval, box and ellipsoid have different probabilities; one tangent failure surface is only a local nonlinear approximation.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        146,
+        147,
+        148,
+        149,
+        150,
+        151,
+        152,
+        153,
+        154,
+        155,
+        156,
+        157,
+        158,
+        159,
+        160
+      ],
+      "detail": "§4.8.1–4.8.4 PDF89–96; §§6.2.2–6.2.4 PDF133–145, Eqs. (240), (242)–(248), (258)–(259); §6.3 PDF146–160. Table11 PDF138 gives 46.8% for n=10,beta=3. The 1–3% claim at PDF156 is historical empirical experience, correctly not promoted to a bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0028",
+      "status": "qualified",
+      "supported_claim": "Ordinary Monte Carlo uses Bernoulli sampling; importance sampling uses density ratios and different variance accounting.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        125,
+        126,
+        127,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133
+      ],
+      "detail": "§6.1 PDF125–133, Eqs. (219), (223)–(226). No-failure confidence limits and support warnings are derived estimator safeguards; independently recomputed, not quoted as book equations.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0029",
+      "status": "qualified",
+      "supported_claim": "Ordinary Monte Carlo uses Bernoulli sampling; importance sampling uses density ratios and different variance accounting.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        127,
+        128,
+        129,
+        130,
+        131,
+        132
+      ],
+      "detail": "§6.1 PDF125–133, Eqs. (219), (223)–(226). No-failure confidence limits and support warnings are derived estimator safeguards; independently recomputed, not quoted as book equations.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0030",
+      "status": "qualified",
+      "supported_claim": "Gaussian mean-shift centering assumes fixed covariance and acceptance region; geometric optimization trades nominal metrics for failure distances; least-squares steps require J-transpose on the right.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        162,
+        163,
+        164,
+        165,
+        166,
+        167,
+        168,
+        169,
+        170
+      ],
+      "detail": "§7.1.2 PDF163–164 Eq. (324), §7.1.6 PDF167–170; Table14 PDF157 and Table15 PDF173–174; §7.2.3 PDF175–179 Eqs. (362)–(368). Raster PDF176 confirms missing transposes in printed Eqs. (365),(368); corrected step is dimensionally derived. QR/SVD advice is numerical practice, not a source quotation.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0031",
+      "status": "qualified",
+      "supported_claim": "Gaussian mean-shift centering assumes fixed covariance and acceptance region; geometric optimization trades nominal metrics for failure distances; least-squares steps require J-transpose on the right.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        173,
+        174,
+        175,
+        176,
+        177,
+        178,
+        179,
+        180
+      ],
+      "detail": "§7.1.2 PDF163–164 Eq. (324), §7.1.6 PDF167–170; Table14 PDF157 and Table15 PDF173–174; §7.2.3 PDF175–179 Eqs. (362)–(368). Raster PDF176 confirms missing transposes in printed Eqs. (365),(368); corrected step is dimensionally derived. QR/SVD advice is numerical practice, not a source quotation.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0032",
+      "status": "qualified",
+      "supported_claim": "Gaussian mean-shift centering assumes fixed covariance and acceptance region; geometric optimization trades nominal metrics for failure distances; least-squares steps require J-transpose on the right.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        175,
+        176,
+        177,
+        178,
+        179
+      ],
+      "detail": "§7.1.2 PDF163–164 Eq. (324), §7.1.6 PDF167–170; Table14 PDF157 and Table15 PDF173–174; §7.2.3 PDF175–179 Eqs. (362)–(368). Raster PDF176 confirms missing transposes in printed Eqs. (365),(368); corrected step is dimensionally derived. QR/SVD advice is numerical practice, not a source quotation.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0034",
+      "status": "not_claim",
+      "supported_claim": "Navigation to supplied PDF and reading-coverage entry.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        1
+      ],
+      "detail": "No theory assertion is attached to this citation occurrence.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0035",
+      "status": "not_claim",
+      "supported_claim": "Navigation to supplied PDF and reading-coverage entry.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        1
+      ],
+      "detail": "No theory assertion is attached to this citation occurrence.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0036",
+      "status": "not_claim",
+      "supported_claim": "Navigation to supplied PDF and reading-coverage entry.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        1
+      ],
+      "detail": "No theory assertion is attached to this citation occurrence.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0163",
+      "status": "supported",
+      "supported_claim": "Independent allocated parasitic caps can exclude acceptable combinations; direct performance evaluation preserves more allocation freedom.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        41,
+        42
+      ],
+      "detail": "§2.3.3–2.4 PDF40–42; the length-budget interpretation is a derived application.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0164",
+      "status": "qualified",
+      "supported_claim": "Allowed additive layout shift is bounded by specification limits minus pre-layout process extrema.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        34,
+        35,
+        36,
+        37
+      ],
+      "detail": "§2.2 PDF34–37, Eqs. (2.1)–(2.7). The invented phase-margin arithmetic is correct. The shift must be common across the interval; scenario-dependent extension is recommended when not.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0165",
+      "status": "qualified",
+      "supported_claim": "Linear sensitivities combine signed parasitic contributions; direct and adjoint methods have different solve costs; Eq. (4.11) correctly uses the upper bound in its upper branch.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        42,
+        43,
+        44,
+        45
+      ],
+      "detail": "§2.4.1–2.4.2 PDF42–45, Eqs. (2.12)–(2.24); §4.9 Eq. (4.11) PDF107. One adjoint covers parameter derivatives of one scalar response, not arbitrary independent responses. The alleged penalty erratum was false: raster PDF107 was inspected and the note corrected; per-metric normalization is our extension.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0166",
+      "status": "corrected",
+      "supported_claim": "Linear sensitivities combine signed parasitic contributions; direct and adjoint methods have different solve costs; Eq. (4.11) correctly uses the upper bound in its upper branch.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        107
+      ],
+      "detail": "§2.4.1–2.4.2 PDF42–45, Eqs. (2.12)–(2.24); §4.9 Eq. (4.11) PDF107. One adjoint covers parameter derivatives of one scalar response, not arbitrary independent responses. The alleged penalty erratum was false: raster PDF107 was inspected and the note corrected; per-metric normalization is our extension.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0167",
+      "status": "qualified",
+      "supported_claim": "Fixed generators, dynamic merging and alternative realizations trade flexibility for cost; interface-only generation and simulation synchronization are separate requirements.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74
+      ],
+      "detail": "§§3.1–3.6 PDF66–74; §6.3 PDF167–168. Dedicated CC/cascode structures and legal diffusion-sharing preconditions were checked. Double-count prevention and richer descriptor fields are derived proposals.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0168",
+      "status": "qualified",
+      "supported_claim": "Fixed generators, dynamic merging and alternative realizations trade flexibility for cost; interface-only generation and simulation synchronization are separate requirements.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        73,
+        74
+      ],
+      "detail": "§§3.1–3.6 PDF66–74; §6.3 PDF167–168. Dedicated CC/cascode structures and legal diffusion-sharing preconditions were checked. Double-count prevention and richer descriptor fields are derived proposals.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0169",
+      "status": "qualified",
+      "supported_claim": "Fixed generators, dynamic merging and alternative realizations trade flexibility for cost; interface-only generation and simulation synchronization are separate requirements.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        167,
+        168
+      ],
+      "detail": "§§3.1–3.6 PDF66–74; §6.3 PDF167–168. Dedicated CC/cascode structures and legal diffusion-sharing preconditions were checked. Double-count prevention and richer descriptor fields are derived proposals.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0170",
+      "status": "qualified",
+      "supported_claim": "Separate position, orientation and shape groups preserve different relations; terminal-edge geometry and routing reserve matter beyond device-center distance.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        99,
+        100,
+        101,
+        102,
+        103,
+        104,
+        105
+      ],
+      "detail": "§4.5.2–4.5.3 PDF95–99; §§4.6–4.7 PDF99–105; §§4.9.1–4.10 PDF108–116; conclusion PDF172. The source historical 10–15% area comparison is explicitly limited to that flow, not a general bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0171",
+      "status": "qualified",
+      "supported_claim": "Separate position, orientation and shape groups preserve different relations; terminal-edge geometry and routing reserve matter beyond device-center distance.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        95,
+        96,
+        97,
+        98,
+        99
+      ],
+      "detail": "§4.5.2–4.5.3 PDF95–99; §§4.6–4.7 PDF99–105; §§4.9.1–4.10 PDF108–116; conclusion PDF172. The source historical 10–15% area comparison is explicitly limited to that flow, not a general bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0172",
+      "status": "qualified",
+      "supported_claim": "Separate position, orientation and shape groups preserve different relations; terminal-edge geometry and routing reserve matter beyond device-center distance.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        108,
+        109,
+        110,
+        111,
+        112
+      ],
+      "detail": "§4.5.2–4.5.3 PDF95–99; §§4.6–4.7 PDF99–105; §§4.9.1–4.10 PDF108–116; conclusion PDF172. The source historical 10–15% area comparison is explicitly limited to that flow, not a general bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0173",
+      "status": "qualified",
+      "supported_claim": "Separate position, orientation and shape groups preserve different relations; terminal-edge geometry and routing reserve matter beyond device-center distance.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        116
+      ],
+      "detail": "§4.5.2–4.5.3 PDF95–99; §§4.6–4.7 PDF99–105; §§4.9.1–4.10 PDF108–116; conclusion PDF172. The source historical 10–15% area comparison is explicitly limited to that flow, not a general bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0174",
+      "status": "qualified",
+      "supported_claim": "Separate position, orientation and shape groups preserve different relations; terminal-edge geometry and routing reserve matter beyond device-center distance.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        172
+      ],
+      "detail": "§4.5.2–4.5.3 PDF95–99; §§4.6–4.7 PDF99–105; §§4.9.1–4.10 PDF108–116; conclusion PDF172. The source historical 10–15% area comparison is explicitly limited to that flow, not a general bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0175",
+      "status": "qualified",
+      "supported_claim": "The source uses a calibrated area-plus-distance mismatch model, first-order three-sigma aggregation, linear thermal superposition and substrate-specific isolation mechanisms.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        53,
+        54,
+        55
+      ],
+      "detail": "§2.7.1 Eq. (2.35) PDF53–54; §2.7.2 PDF54–55; §§2.8–2.9 PDF59–64; §4.9.2 Eqs. (4.23)–(4.27) PDF112–113. The note correctly distinguishes summed absolute three-sigma contributions from covariance propagation and rejects additive square-root decompositions. Thermal and substrate claims retain model boundaries.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0176",
+      "status": "qualified",
+      "supported_claim": "The source uses a calibrated area-plus-distance mismatch model, first-order three-sigma aggregation, linear thermal superposition and substrate-specific isolation mechanisms.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        112,
+        113
+      ],
+      "detail": "§2.7.1 Eq. (2.35) PDF53–54; §2.7.2 PDF54–55; §§2.8–2.9 PDF59–64; §4.9.2 Eqs. (4.23)–(4.27) PDF112–113. The note correctly distinguishes summed absolute three-sigma contributions from covariance propagation and rejects additive square-root decompositions. Thermal and substrate claims retain model boundaries.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0177",
+      "status": "qualified",
+      "supported_claim": "The source uses a calibrated area-plus-distance mismatch model, first-order three-sigma aggregation, linear thermal superposition and substrate-specific isolation mechanisms.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        59,
+        60,
+        61,
+        62,
+        63,
+        64
+      ],
+      "detail": "§2.7.1 Eq. (2.35) PDF53–54; §2.7.2 PDF54–55; §§2.8–2.9 PDF59–64; §4.9.2 Eqs. (4.23)–(4.27) PDF112–113. The note correctly distinguishes summed absolute three-sigma contributions from covariance propagation and rejects additive square-root decompositions. Thermal and substrate claims retain model boundaries.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0178",
+      "status": "qualified",
+      "supported_claim": "Widths and via counts follow branch-current capability; routing uses signed electrical costs, mirrored legality, net scheduling and rerouting.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        143
+      ],
+      "detail": "§5.6.2 Eqs. (5.1)–(5.2) PDF143; §5.7.1 Eq. (5.9) PDF147; §§5.7.2–5.8 PDF148–152. Electrical-environment checking and alternatives to strict mirroring are derived extensions. No waveform-independent reliability or unconditional A-star guarantee is inferred.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0179",
+      "status": "qualified",
+      "supported_claim": "Widths and via counts follow branch-current capability; routing uses signed electrical costs, mirrored legality, net scheduling and rerouting.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        147,
+        148
+      ],
+      "detail": "§5.6.2 Eqs. (5.1)–(5.2) PDF143; §5.7.1 Eq. (5.9) PDF147; §§5.7.2–5.8 PDF148–152. Electrical-environment checking and alternatives to strict mirroring are derived extensions. No waveform-independent reliability or unconditional A-star guarantee is inferred.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0180",
+      "status": "qualified",
+      "supported_claim": "Widths and via counts follow branch-current capability; routing uses signed electrical costs, mirrored legality, net scheduling and rerouting.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        150,
+        151,
+        152
+      ],
+      "detail": "§5.6.2 Eqs. (5.1)–(5.2) PDF143; §5.7.1 Eq. (5.9) PDF147; §§5.7.2–5.8 PDF148–152. Electrical-environment checking and alternatives to strict mirroring are derived extensions. No waveform-independent reliability or unconditional A-star guarantee is inferred.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0181",
+      "status": "qualified",
+      "supported_claim": "Widths and via counts follow branch-current capability; routing uses signed electrical costs, mirrored legality, net scheduling and rerouting.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        148,
+        149,
+        150
+      ],
+      "detail": "§5.6.2 Eqs. (5.1)–(5.2) PDF143; §5.7.1 Eq. (5.9) PDF147; §§5.7.2–5.8 PDF148–152. Electrical-environment checking and alternatives to strict mirroring are derived extensions. No waveform-independent reliability or unconditional A-star guarantee is inferred.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0182",
+      "status": "qualified",
+      "supported_claim": "Critical area combines with calibrated defect-size density to give expected faults; Poisson no-fault probability differs from parametric yield; statistical distance is a testability proxy.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        153,
+        154,
+        155,
+        156,
+        157
+      ],
+      "detail": "§5.9.1 Eqs. (5.16)–(5.18) PDF153–154 and Eq. (5.24), Fig.5.15 PDF155; §5.9.2 PDF158–160. Raster Fig.5.15 confirms chi is diameter. Long-wire/end-effect and Poisson assumptions are required; inverse distribution distance is not escape probability.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0183",
+      "status": "qualified",
+      "supported_claim": "Critical area combines with calibrated defect-size density to give expected faults; Poisson no-fault probability differs from parametric yield; statistical distance is a testability proxy.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        158,
+        159,
+        160
+      ],
+      "detail": "§5.9.1 Eqs. (5.16)–(5.18) PDF153–154 and Eq. (5.24), Fig.5.15 PDF155; §5.9.2 PDF158–160. Raster Fig.5.15 confirms chi is diameter. Long-wire/end-effect and Poisson assumptions are required; inverse distribution distance is not escape probability.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0267",
+      "status": "qualified",
+      "supported_claim": "Constraint management, derivation, transformation, sensitivity and verification are distinct services.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        281,
+        282,
+        283,
+        284,
+        285,
+        286,
+        287,
+        288,
+        289,
+        290,
+        291
+      ],
+      "detail": "Chapter7 §7.4, Fig.7.4 PDF285–286; exact relationship metadata and executable provenance are handbook proposals.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0268",
+      "status": "qualified",
+      "supported_claim": "Alternative transformations restrict degrees of freedom; meta-verification combines structural, measured and arithmetic relations.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        288,
+        289,
+        290,
+        291
+      ],
+      "detail": "§7.4.2–7.4.5 PDF288–293 and §7.5.2 PDF296–298. ABBA/CC choice examples and deterministic dependency rules are derived applications, not quoted source requirements.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0269",
+      "status": "qualified",
+      "supported_claim": "Alternative transformations restrict degrees of freedom; meta-verification combines structural, measured and arithmetic relations.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        291,
+        292,
+        293,
+        294,
+        295,
+        296,
+        297,
+        298
+      ],
+      "detail": "§7.4.2–7.4.5 PDF288–293 and §7.5.2 PDF296–298. ABBA/CC choice examples and deterministic dependency rules are derived applications, not quoted source requirements.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0270",
+      "status": "qualified",
+      "supported_claim": "Constraint conflicts and premature removal of freedom require explicit treatment.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        299,
+        300,
+        301,
+        302
+      ],
+      "detail": "§7.6.2–7.6.3 PDF299–302. The analytic mirror contradiction and distinction between solver proof and failed heuristic search are valid derived examples; no engine implementation was audited.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0271",
+      "status": "qualified",
+      "supported_claim": "Cheap verification can precede expensive checks; static final checking needs constant design/constraint data, while dynamic checking sees mutations.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        291,
+        292,
+        293,
+        294,
+        295,
+        296,
+        297,
+        298
+      ],
+      "detail": "§7.4.5 PDF291–293. Four-state outcomes, hashes and invalidation are proposed implementation semantics, not book-prescribed schema.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0332",
+      "status": "qualified",
+      "supported_claim": "Generated realizations, model synchronization, geometric constraints and statistical/multiobjective evaluation motivate an iterative sizing/layout loop.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82
+      ],
+      "detail": "Lampaert §§3.1–3.6 PDF66–74 and §6.3/Ch7 PDF167–172; Topological §§6.3–6.5 PDF259–275; Centering §4.5 PDF75–83. Combined architecture is synthesis; the Centering span supports multiobjective formulation, not the whole robustness derivation.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0333",
+      "status": "qualified",
+      "supported_claim": "Generated realizations, model synchronization, geometric constraints and statistical/multiobjective evaluation motivate an iterative sizing/layout loop.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        167,
+        168,
+        169,
+        170,
+        171,
+        172
+      ],
+      "detail": "Lampaert §§3.1–3.6 PDF66–74 and §6.3/Ch7 PDF167–172; Topological §§6.3–6.5 PDF259–275; Centering §4.5 PDF75–83. Combined architecture is synthesis; the Centering span supports multiobjective formulation, not the whole robustness derivation.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0334",
+      "status": "qualified",
+      "supported_claim": "Generated realizations, model synchronization, geometric constraints and statistical/multiobjective evaluation motivate an iterative sizing/layout loop.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        259,
+        260,
+        261,
+        262,
+        263,
+        264,
+        265,
+        266,
+        267,
+        268,
+        269,
+        270,
+        271,
+        272,
+        273,
+        274,
+        275
+      ],
+      "detail": "Lampaert §§3.1–3.6 PDF66–74 and §6.3/Ch7 PDF167–172; Topological §§6.3–6.5 PDF259–275; Centering §4.5 PDF75–83. Combined architecture is synthesis; the Centering span supports multiobjective formulation, not the whole robustness derivation.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0335",
+      "status": "qualified",
+      "supported_claim": "Generated realizations, model synchronization, geometric constraints and statistical/multiobjective evaluation motivate an iterative sizing/layout loop.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83
+      ],
+      "detail": "Lampaert §§3.1–3.6 PDF66–74 and §6.3/Ch7 PDF167–172; Topological §§6.3–6.5 PDF259–275; Centering §4.5 PDF75–83. Combined architecture is synthesis; the Centering span supports multiobjective formulation, not the whole robustness derivation.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0336",
+      "status": "qualified",
+      "supported_claim": "Variants change parasitic geometry and need consistent interface/full-layout descriptions.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        51,
+        52,
+        53,
+        54,
+        55,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74
+      ],
+      "detail": "Lampaert §§3.1–3.6 PDF66–74, especially generator modes PDF73–74; §2.6 Eq.(2.34) PDF51 supports diffusion area/perimeter effects. Broader gate-resistance and gm/C tradeoffs are explicitly derived/physical-model commentary, not formulas on the cited generator pages. The gm/C foundation now links Hastings §12.1 PDF576–577 and ideal plate capacitance §7.1 PDF327; peer agent audit_hastings rendered and verified these equations.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0337",
+      "status": "qualified",
+      "supported_claim": "Variants change parasitic geometry and need consistent interface/full-layout descriptions.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        73,
+        74
+      ],
+      "detail": "Lampaert §§3.1–3.6 PDF66–74, especially generator modes PDF73–74; §2.6 Eq.(2.34) PDF51 supports diffusion area/perimeter effects. Broader gate-resistance and gm/C tradeoffs are explicitly derived/physical-model commentary, not formulas on the cited generator pages.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0338",
+      "status": "qualified",
+      "supported_claim": "Width/height-only pruning cannot certify parent electrical quality when pin access changes.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147
+      ],
+      "detail": "Topological §§3.4–3.5 PDF137–147. The 72/84 square-micrometer and 54.9/88.4 MHz comparison is an invented, independently recomputed one-pole counterexample, not a source experiment. Source pruning applies its stated geometry criteria.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0339",
+      "status": "qualified",
+      "supported_claim": "Resizing templates requires complete separation relations; parasitic surrogates trade extraction cost against domain coverage.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        196,
+        197,
+        198,
+        199,
+        200,
+        201,
+        202,
+        203
+      ],
+      "detail": "Topological §4.5.6.1 Figs.4.23–4.24 PDF198–201; §6.5.1 PDF272–273. Cartesian table growth m^n is source-supported; held-out testing and PDK/topology invalidation are reasoned extensions.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0340",
+      "status": "qualified",
+      "supported_claim": "Resizing templates requires complete separation relations; parasitic surrogates trade extraction cost against domain coverage.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        272,
+        273,
+        274,
+        275
+      ],
+      "detail": "Topological §4.5.6.1 Figs.4.23–4.24 PDF198–201; §6.5.1 PDF272–273. Cartesian table growth m^n is source-supported; held-out testing and PDK/topology invalidation are reasoned extensions.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0341",
+      "status": "qualified",
+      "supported_claim": "Retargeting requires target rules/device dimensions; source-relative topology does not certify target electrical behavior.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        215,
+        216,
+        217,
+        218,
+        219,
+        220,
+        221
+      ],
+      "detail": "Topological §§5.3–5.4 PDF217–221; §§5.6–5.7 PDF241–247. Contact reconstruction, stale edge order, WPE/STI, hierarchy and device replacement checked directly; the proposed sequence is an engineering synthesis.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0342",
+      "status": "qualified",
+      "supported_claim": "Retargeting requires target rules/device dimensions; source-relative topology does not certify target electrical behavior.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        238,
+        239,
+        240,
+        241,
+        242,
+        243,
+        244,
+        245,
+        246,
+        247
+      ],
+      "detail": "Topological §§5.3–5.4 PDF217–221; §§5.6–5.7 PDF241–247. Contact reconstruction, stale edge order, WPE/STI, hierarchy and device replacement checked directly; the proposed sequence is an engineering synthesis.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0360",
+      "status": "qualified",
+      "supported_claim": "Circuit-level layout should be compact while respecting geometric and combined parasitic performance constraints.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        20
+      ],
+      "detail": "Lampaert §1.3.1 PDF20 directly states this goal; the handbook overall definition is explicitly a synthesis, not a consensus theorem.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0364",
+      "status": "qualified",
+      "supported_claim": "Combined parasitic performance impact, not raw geometric length alone, is the circuit-level contract.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        20
+      ],
+      "detail": "Lampaert §1.3.1 PDF20; sheet-resistance and capacitance derivations are better located at §§2.5.3.1–2.5.3.2 PDF49–51. Root informed of exact resistance locator.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0368",
+      "status": "supported",
+      "supported_claim": "Independent parasitic allocation is only a restricted subset of a coupled performance-feasible region.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        41,
+        42,
+        43,
+        44,
+        45
+      ],
+      "detail": "Lampaert §§2.3.3–2.4 PDF40–42; Topological §§4.5.2–4.5.4 PDF182–193, especially Eqs.(4.6)–(4.7) PDF186 and constraint allocation discussion. No global nonlinear guarantee is claimed.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0369",
+      "status": "supported",
+      "supported_claim": "Independent parasitic allocation is only a restricted subset of a coupled performance-feasible region.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        182,
+        183,
+        184,
+        185,
+        186,
+        187,
+        188,
+        189,
+        190,
+        191,
+        192,
+        193
+      ],
+      "detail": "Lampaert §§2.3.3–2.4 PDF40–42; Topological §§4.5.2–4.5.4 PDF182–193, especially Eqs.(4.6)–(4.7) PDF186 and constraint allocation discussion. No global nonlinear guarantee is claimed.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0370",
+      "status": "qualified",
+      "supported_claim": "Use remaining corner/process margin under the additive shift model, not nominal headroom already consumed by variation.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        34,
+        35,
+        36,
+        37
+      ],
+      "detail": "Lampaert §2.2 Eqs.(2.1)–(2.7) PDF34–37. Separate scenario models and model-error reserve are explicitly proposed safeguards.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0371",
+      "status": "qualified",
+      "supported_claim": "A local signed Jacobian maps parasitic increments to performance increments.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        42,
+        43,
+        44,
+        45
+      ],
+      "detail": "Lampaert §2.4.1 Eqs.(2.12)–(2.13) PDF42; arbitrary reference point and no-double-count logic are Taylor-model derivations. All two-capacitance examples recomputed and SVG slope/intercepts checked.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0372",
+      "status": "corrected",
+      "supported_claim": "Sheet-resistance and capacitance models support conditional geometry budgets; the Elmore expression is a derived first-moment screen.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        47,
+        48,
+        49,
+        50,
+        51
+      ],
+      "detail": "Lampaert §2.5.3.1 Eqs.(2.29)–(2.32) PDF49–50 and §2.5.3.2 Eq.(2.33) PDF51. Added missing direct resistance citation and explicitly separated our distributed-RC derivation from source equations. Grounded/effective-load assumption now stated for coupling.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0373",
+      "status": "qualified",
+      "supported_claim": "Bounds can be reallocated while preserving their electrical parent; raw routing weights and direct performance costs have different meanings.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        184,
+        185,
+        186,
+        187,
+        188,
+        189,
+        190,
+        191,
+        192,
+        193
+      ],
+      "detail": "Topological §§4.5.3–4.5.4 PDF184–193. Dual-price interpretation, frozen epochs and provenance are proposals/optimization derivations; the source is motivation, not the exact proposed policy.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0374",
+      "status": "corrected",
+      "supported_claim": "For a sensitivity column s, variance is s-transpose Sigma s; correlation and sign affect the result.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        111
+      ],
+      "detail": "Centering §5.2 Eq.(175) PDF111; AppendixA.9 Eqs.(A.13),(A.15) PDF183. Corrected row/column mismatch in prose. Computed 0.45 degree^2, sigma=.670820; uncorrelated sigma=.538516.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0375",
+      "status": "corrected",
+      "supported_claim": "For a sensitivity column s, variance is s-transpose Sigma s; correlation and sign affect the result.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        183
+      ],
+      "detail": "Centering §5.2 Eq.(175) PDF111; AppendixA.9 Eqs.(A.13),(A.15) PDF183. Corrected row/column mismatch in prose. Computed 0.45 degree^2, sigma=.670820; uncorrelated sigma=.538516.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0376",
+      "status": "qualified",
+      "supported_claim": "Finite-difference step size and one-response adjoint scope limit derivative use.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        43,
+        44,
+        45
+      ],
+      "detail": "Lampaert §§2.4.2.1–2.4.2.3 PDF43–44; Centering §§4.2.2–4.3 PDF72–75. Trust-region/caching policy is derived engineering advice, not a claim of measured engine behavior.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0377",
+      "status": "qualified",
+      "supported_claim": "Finite-difference step size and one-response adjoint scope limit derivative use.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        72,
+        73,
+        74,
+        75
+      ],
+      "detail": "Lampaert §§2.4.2.1–2.4.2.3 PDF43–44; Centering §§4.2.2–4.3 PDF72–75. Trust-region/caching policy is derived engineering advice, not a claim of measured engine behavior.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0379",
+      "status": "qualified",
+      "supported_claim": "Meeting required electrical specifications precedes optimizing compactness and preferences.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        20
+      ],
+      "detail": "Lampaert §1.3.1 PDF20. The specific lexicographic policy is an engineering interpretation, not the only mathematical formulation supported by the book.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0380",
+      "status": "qualified",
+      "supported_claim": "Sensitivity-derived performance budgets are local and coupled.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42
+      ],
+      "detail": "Lampaert §§2.2–2.4.1 PDF34–42. The specific trust-region and discontinuity examples are derived safeguards, not direct content of every cited page.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0382",
+      "status": "corrected",
+      "supported_claim": "Hierarchical alternatives and integrated placement/global routing have limited candidate-space guarantees.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147,
+        191,
+        192,
+        193
+      ],
+      "detail": "Original Topological PDF17 is a chapter abstract and too broad for these details. Root asked to use §3.4–3.5 PDF137–147 and §4.5.4 PDF191–193. Search failure versus proof is a methodological qualification.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0386",
+      "status": "qualified",
+      "supported_claim": "Electrical devices, physical modules and placement states must preserve realization identities.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        111,
+        112,
+        113,
+        114,
+        115
+      ],
+      "detail": "Topological §3.1.1 Definitions3.1–3.2 PDF111 and group center Eq.(3.12) PDF112. The many-to-many realization interface generalizes the source definitions and is correctly an engine proposal.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0387",
+      "status": "qualified",
+      "supported_claim": "Sequence-pair ordering decodes to separation constraints; symmetric-feasible order condition is sufficient but not necessary and multiple groups impose compatibility restrictions.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        48,
+        49,
+        50,
+        51
+      ],
+      "detail": "Topological §1.3 Eq.(1.1) PDF48–51; §1.3.2–1.4.1 PDF60–64; §1.1.7/1.2 PDF25–47 surveyed for contour structures. The 6 by 5 worked packing and its SVG were independently checked against all pair orders.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0388",
+      "status": "qualified",
+      "supported_claim": "Sequence-pair ordering decodes to separation constraints; symmetric-feasible order condition is sufficient but not necessary and multiple groups impose compatibility restrictions.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47
+      ],
+      "detail": "Topological §1.3 Eq.(1.1) PDF48–51; §1.3.2–1.4.1 PDF60–64; §1.1.7/1.2 PDF25–47 surveyed for contour structures. The 6 by 5 worked packing and its SVG were independently checked against all pair orders.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0389",
+      "status": "qualified",
+      "supported_claim": "Sequence-pair ordering decodes to separation constraints; symmetric-feasible order condition is sufficient but not necessary and multiple groups impose compatibility restrictions.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        49,
+        50
+      ],
+      "detail": "Topological §1.3 Eq.(1.1) PDF48–51; §1.3.2–1.4.1 PDF60–64; §1.1.7/1.2 PDF25–47 surveyed for contour structures. The 6 by 5 worked packing and its SVG were independently checked against all pair orders.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0390",
+      "status": "qualified",
+      "supported_claim": "Sequence-pair ordering decodes to separation constraints; symmetric-feasible order condition is sufficient but not necessary and multiple groups impose compatibility restrictions.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        60,
+        61,
+        62,
+        63,
+        64
+      ],
+      "detail": "Topological §1.3 Eq.(1.1) PDF48–51; §1.3.2–1.4.1 PDF60–64; §1.1.7/1.2 PDF25–47 surveyed for contour structures. The 6 by 5 worked packing and its SVG were independently checked against all pair orders.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0391",
+      "status": "qualified",
+      "supported_claim": "B-star trees need a contour and convention; connected symmetry islands search a stricter space than arbitrary symmetric geometry.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85
+      ],
+      "detail": "Topological §§2.2.2–2.3.1 PDF79–85; §2.7–2.8 PDF100–106. Island definition is PDF79, representatives PDF81–85; extension-only citation has now been supplemented conceptually in audit evidence. Envelope and access policy is a proposed application.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0392",
+      "status": "qualified",
+      "supported_claim": "B-star trees need a contour and convention; connected symmetry islands search a stricter space than arbitrary symmetric geometry.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        100,
+        101,
+        102,
+        103,
+        104,
+        105,
+        106
+      ],
+      "detail": "Topological §§2.2.2–2.3.1 PDF79–85; §2.7–2.8 PDF100–106. Island definition is PDF79, representatives PDF81–85; extension-only citation has now been supplemented conceptually in audit evidence. Envelope and access policy is a proposed application.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0393",
+      "status": "qualified",
+      "supported_claim": "Difference-constraint DAGs solve fixed order; multivariable equalities need more general algebra; hierarchy and shape dominance restrict coverage.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        215,
+        216,
+        217,
+        218,
+        219,
+        220,
+        221,
+        222,
+        223,
+        224,
+        225,
+        226,
+        227,
+        228,
+        229,
+        230,
+        231,
+        232
+      ],
+      "detail": "Topological §5.4.1 Eqs.(5.1)–(5.2) PDF220–221; §5.5.1 PDF227–232; §§3.2–3.5 PDF119–147. Contextual electrical Pareto interfaces and retained semantic graph are proposals, not guarantees of source algorithms.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0394",
+      "status": "qualified",
+      "supported_claim": "Difference-constraint DAGs solve fixed order; multivariable equalities need more general algebra; hierarchy and shape dominance restrict coverage.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        119,
+        120,
+        121,
+        122,
+        123,
+        124,
+        125,
+        126,
+        127,
+        128,
+        129
+      ],
+      "detail": "Topological §5.4.1 Eqs.(5.1)–(5.2) PDF220–221; §5.5.1 PDF227–232; §§3.2–3.5 PDF119–147. Contextual electrical Pareto interfaces and retained semantic graph are proposals, not guarantees of source algorithms.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0395",
+      "status": "qualified",
+      "supported_claim": "Difference-constraint DAGs solve fixed order; multivariable equalities need more general algebra; hierarchy and shape dominance restrict coverage.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147
+      ],
+      "detail": "Topological §5.4.1 Eqs.(5.1)–(5.2) PDF220–221; §5.5.1 PDF227–232; §§3.2–3.5 PDF119–147. Contextual electrical Pareto interfaces and retained semantic graph are proposals, not guarantees of source algorithms.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0459",
+      "status": "supported",
+      "supported_claim": "Each manufactured statistical draw must satisfy all specified operating-range conditions.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        46,
+        47,
+        48,
+        49,
+        50
+      ],
+      "detail": "Centering §§3.1–3.5 PDF46–50 and §4.8.1 Eq.(114) PDF89; yield as intersection PDF91–95. Random temperature sampling answers a different probability contract.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0460",
+      "status": "supported",
+      "supported_claim": "Each manufactured statistical draw must satisfy all specified operating-range conditions.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95
+      ],
+      "detail": "Centering §§3.1–3.5 PDF46–50 and §4.8.1 Eq.(114) PDF89; yield as intersection PDF91–95. Random temperature sampling answers a different probability contract.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0461",
+      "status": "qualified",
+      "supported_claim": "Shared and local statistical variables differ; cancellation requires correct shared sensitivities and spatial comparison weights.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        63,
+        64
+      ],
+      "detail": "Centering §3.9 PDF63–64; Lampaert §2.7 PDF53–55. Additive example independently computed. Common-centroid paragraph corrected to normalized comparison weights for ratios; raw unit counts need not match. Affine-moment algebra is explicitly derived.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0462",
+      "status": "corrected",
+      "supported_claim": "Shared and local statistical variables differ; cancellation requires correct shared sensitivities and spatial comparison weights.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        53,
+        54,
+        55
+      ],
+      "detail": "Centering §3.9 PDF63–64; Lampaert §2.7 PDF53–55. Additive example independently computed. Common-centroid paragraph corrected to normalized comparison weights for ratios; raw unit counts need not match. Affine-moment algebra is explicitly derived.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0463",
+      "status": "qualified",
+      "supported_claim": "Covariance must be PSD; Gaussian factorization must preserve the full dependence structure.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63
+      ],
+      "detail": "Centering §§3.6–3.8 PDF53–63. Three-by-three negative-correlation counterexample has eigenvalue -0.8 and quadratic form -2.4 along (1,1,1); reduced-rank and non-Gaussian caveats are valid mathematical safeguards.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0464",
+      "status": "qualified",
+      "supported_claim": "Signed normalized margin yields exact linear-Gaussian one-bound probability; nonlinear and operating extrema need problem-specific search.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        111,
+        112
+      ],
+      "detail": "Centering §5.2–5.3 PDF111–112; §6.3.2–6.3.9 PDF148–158; §§5.1–5.5 PDF103–124. Recomputed beta2 versus beta4; conditional monotonicity wording avoids claiming corner sufficiency generally.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0465",
+      "status": "qualified",
+      "supported_claim": "Signed normalized margin yields exact linear-Gaussian one-bound probability; nonlinear and operating extrema need problem-specific search.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        154,
+        155,
+        156,
+        157,
+        158
+      ],
+      "detail": "Centering §5.2–5.3 PDF111–112; §6.3.2–6.3.9 PDF148–158; §§5.1–5.5 PDF103–124. Recomputed beta2 versus beta4; conditional monotonicity wording avoids claiming corner sufficiency generally.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0466",
+      "status": "qualified",
+      "supported_claim": "Signed normalized margin yields exact linear-Gaussian one-bound probability; nonlinear and operating extrema need problem-specific search.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        103,
+        104,
+        105,
+        106,
+        107,
+        108,
+        109,
+        110,
+        111,
+        112,
+        113,
+        114,
+        115,
+        116,
+        117,
+        118,
+        119,
+        120,
+        121,
+        122,
+        123,
+        124
+      ],
+      "detail": "Centering §5.2–5.3 PDF111–112; §6.3.2–6.3.9 PDF148–158; §§5.1–5.5 PDF103–124. Recomputed beta2 versus beta4; conditional monotonicity wording avoids claiming corner sufficiency generally.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0467",
+      "status": "qualified",
+      "supported_claim": "Signed normalized margin yields exact linear-Gaussian one-bound probability; nonlinear and operating extrema need problem-specific search.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        148,
+        149,
+        150,
+        151,
+        152,
+        153
+      ],
+      "detail": "Centering §5.2–5.3 PDF111–112; §6.3.2–6.3.9 PDF148–158; §§5.1–5.5 PDF103–124. Recomputed beta2 versus beta4; conditional monotonicity wording avoids claiming corner sufficiency generally.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0468",
+      "status": "qualified",
+      "supported_claim": "Ball, box and half-space probabilities differ; maximizing min beta need not maximize joint yield.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        133,
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145
+      ],
+      "detail": "Centering §§6.2.2–6.2.4 PDF133–145 and §7.2.4 PDF179–180. Two-dimensional probabilities and (3,3) versus (2.9,8) example independently computed. Union bound and counterexample are derived, not source experiments.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0469",
+      "status": "qualified",
+      "supported_claim": "Ball, box and half-space probabilities differ; maximizing min beta need not maximize joint yield.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        179,
+        180
+      ],
+      "detail": "Centering §§6.2.2–6.2.4 PDF133–145 and §7.2.4 PDF179–180. Two-dimensional probabilities and (3,3) versus (2.9,8) example independently computed. Union bound and counterexample are derived, not source experiments.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0470",
+      "status": "qualified",
+      "supported_claim": "Ordinary MC and importance sampling have different estimators and uncertainty; zero observed failures gives only a confidence limit.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        125,
+        126,
+        127,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133
+      ],
+      "detail": "Centering §6.1 PDF125–133, Eqs.(219),(223)–(226). Exact no-failure bound is handbook derivation from (1-p)^N, not an equation asserted to occur in the source. Nonconvergence and held-out validation policy are proposals.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0471",
+      "status": "qualified",
+      "supported_claim": "Ordinary MC and importance sampling have different estimators and uncertainty; zero observed failures gives only a confidence limit.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        127,
+        128,
+        129,
+        130,
+        131,
+        132
+      ],
+      "detail": "Centering §6.1 PDF125–133, Eqs.(219),(223)–(226). Exact no-failure bound is handbook derivation from (1-p)^N, not an equation asserted to occur in the source. Nonconvergence and held-out validation policy are proposals.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0472",
+      "status": "qualified",
+      "supported_claim": "Geometric centering can exchange nominal performance for stronger weak margins within local-model trust regions.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        173,
+        174,
+        175,
+        176,
+        177,
+        178,
+        179
+      ],
+      "detail": "Centering §7.2.2–7.2.4 PDF173–179, Table15 and Eqs.(362)–(369); compare Table14 PDF157. Final probabilities still require original covariance/acceptance model.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0473",
+      "status": "qualified",
+      "supported_claim": "Feasibility-preserving encodings and numerical local optimality are distinct from global electrical optimality.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        99,
+        100,
+        101,
+        102,
+        103,
+        104,
+        105,
+        106,
+        107
+      ],
+      "detail": "Lampaert §§4.6–4.9 PDF99–107; Topological §1.1.7 PDF25; Centering AppendixC PDF188–195. The proposed reporting/gating order is synthesis, not a book theorem.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0474",
+      "status": "qualified",
+      "supported_claim": "Feasibility-preserving encodings and numerical local optimality are distinct from global electrical optimality.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        25
+      ],
+      "detail": "Lampaert §§4.6–4.9 PDF99–107; Topological §1.1.7 PDF25; Centering AppendixC PDF188–195. The proposed reporting/gating order is synthesis, not a book theorem.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0475",
+      "status": "qualified",
+      "supported_claim": "Feasibility-preserving encodings and numerical local optimality are distinct from global electrical optimality.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        188,
+        189,
+        190,
+        191,
+        192,
+        193,
+        194,
+        195
+      ],
+      "detail": "Lampaert §§4.6–4.9 PDF99–107; Topological §1.1.7 PDF25; Centering AppendixC PDF188–195. The proposed reporting/gating order is synthesis, not a book theorem.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0476",
+      "status": "qualified",
+      "supported_claim": "Metropolis uphill probability uses the fixed energy scale; initial temperature from mean uphill cost and target acceptance is a heuristic.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        117,
+        118
+      ],
+      "detail": "Lampaert §4.11 Eqs.(4.37)–(4.38), PDF117–118. Symmetric-proposal condition and finite-run/nonstationary-energy caveats were checked mathematically; Jensen inequality explains why exp of mean is not mean acceptance.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0477",
+      "status": "qualified",
+      "supported_claim": "DTI spacing may have shared and isolated branches with an illegal intermediate region and a total-stretch coupling.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        113,
+        114,
+        115
+      ],
+      "detail": "Topological §3.1.2 Fig.3.3 PDF115; §3.3.2 Eqs.(3.36)–(3.40) PDF135–137. The two-inequality binary model in the note is a derived bounded reformulation; z=0 and z=1 independently verified, with gmax>=d required.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0478",
+      "status": "qualified",
+      "supported_claim": "DTI spacing may have shared and isolated branches with an illegal intermediate region and a total-stretch coupling.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        136
+      ],
+      "detail": "Topological §3.1.2 Fig.3.3 PDF115; §3.3.2 Eqs.(3.36)–(3.40) PDF135–137. The two-inequality binary model in the note is a derived bounded reformulation; z=0 and z=1 independently verified, with gmax>=d required.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0479",
+      "status": "qualified",
+      "supported_claim": "Enumeration plus linear/MIP packing solves only the defined small subproblem; trust-region performance steps remain local models.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147
+      ],
+      "detail": "Topological §§3.3–3.5 PDF130–147; Centering §7.2.3 PDF174–179. Area bilinearity, solver gap, time-limit and no-incumbent distinctions are valid optimization qualifications; no engine results audited.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0480",
+      "status": "qualified",
+      "supported_claim": "Enumeration plus linear/MIP packing solves only the defined small subproblem; trust-region performance steps remain local models.",
+      "source": "centering",
+      "evidence_pdf_pages": [
+        174,
+        175,
+        176,
+        177,
+        178,
+        179
+      ],
+      "detail": "Topological §§3.3–3.5 PDF130–147; Centering §7.2.3 PDF174–179. Area bilinearity, solver gap, time-limit and no-incumbent distinctions are valid optimization qualifications; no engine results audited.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0512",
+      "status": "supported",
+      "supported_claim": "Hierarchical physical construction is followed by extraction and detailed simulation, with redesign when specifications fail.",
+      "source": "lampaert",
+      "evidence_pdf_pages": [
+        18,
+        19,
+        20
+      ],
+      "detail": "Lampaert §1.2 Fig.1.3 PDF18 and §1.3.1 PDF20. Explicit certificate schema is correctly labeled a handbook proposal.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0514",
+      "status": "corrected",
+      "supported_claim": "Meta-verification composes checks and detects mutual constraint conflicts; incomplete heuristic search is not an infeasibility certificate.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        291,
+        292,
+        293,
+        296,
+        297,
+        298
+      ],
+      "detail": "Original chapter-opening PDF279 is too broad; root asked to use §7.4.5 PDF291–293 and §7.5.2 PDF296–298. The proof/search distinction is a derived methodology safeguard.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0523",
+      "status": "qualified",
+      "supported_claim": "Different benchmark representations, legal choices and runtimes do not establish a universal engine ranking.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        69,
+        70,
+        71
+      ],
+      "detail": "Chapter1 §1.5 PDF69–71 and Chapter2 §2.6 PDF96–101 reviewed for experiment scope. Equal-workload comparison is methodological inference.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0524",
+      "status": "qualified",
+      "supported_claim": "Different benchmark representations, legal choices and runtimes do not establish a universal engine ranking.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        96,
+        97,
+        98,
+        99,
+        100,
+        101
+      ],
+      "detail": "Chapter1 §1.5 PDF69–71 and Chapter2 §2.6 PDF96–101 reviewed for experiment scope. Equal-workload comparison is methodological inference.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0525",
+      "status": "qualified",
+      "supported_claim": "Sequence-pair convention and sufficient symmetry condition preserve a restricted family; orientation and multiple-group compatibility matter.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        25,
+        26
+      ],
+      "detail": "§1.1.4 PDF21–22; §1.1.7 PDF25–26; §1.3 Eq.(1.1) PDF49–50; §§1.3.1–1.3.3 PDF51,60–62. Explicit common vertical axis added to formula. Raster PDF49 checked; no claim that excluded codes are physically infeasible.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0526",
+      "status": "qualified",
+      "supported_claim": "Sequence-pair convention and sufficient symmetry condition preserve a restricted family; orientation and multiple-group compatibility matter.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        48,
+        49,
+        50,
+        51
+      ],
+      "detail": "§1.1.4 PDF21–22; §1.1.7 PDF25–26; §1.3 Eq.(1.1) PDF49–50; §§1.3.1–1.3.3 PDF51,60–62. Explicit common vertical axis added to formula. Raster PDF49 checked; no claim that excluded codes are physically infeasible.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0527",
+      "status": "qualified",
+      "supported_claim": "Sequence-pair convention and sufficient symmetry condition preserve a restricted family; orientation and multiple-group compatibility matter.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        49,
+        50
+      ],
+      "detail": "§1.1.4 PDF21–22; §1.1.7 PDF25–26; §1.3 Eq.(1.1) PDF49–50; §§1.3.1–1.3.3 PDF51,60–62. Explicit common vertical axis added to formula. Raster PDF49 checked; no claim that excluded codes are physically infeasible.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0528",
+      "status": "qualified",
+      "supported_claim": "Sequence-pair convention and sufficient symmetry condition preserve a restricted family; orientation and multiple-group compatibility matter.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        60,
+        61,
+        62
+      ],
+      "detail": "§1.1.4 PDF21–22; §1.1.7 PDF25–26; §1.3 Eq.(1.1) PDF49–50; §§1.3.1–1.3.3 PDF51,60–62. Explicit common vertical axis added to formula. Raster PDF49 checked; no claim that excluded codes are physically infeasible.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0529",
+      "status": "qualified",
+      "supported_claim": "Sequence-pair convention and sufficient symmetry condition preserve a restricted family; orientation and multiple-group compatibility matter.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        21,
+        22
+      ],
+      "detail": "§1.1.4 PDF21–22; §1.1.7 PDF25–26; §1.3 Eq.(1.1) PDF49–50; §§1.3.1–1.3.3 PDF51,60–62. Explicit common vertical axis added to formula. Raster PDF49 checked; no claim that excluded codes are physically infeasible.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0530",
+      "status": "qualified",
+      "supported_claim": "ASF-B-star uses representative half-groups and connected islands; HB-star contours and hierarchy require updates as children change.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        87
+      ],
+      "detail": "§§2.2–2.5 PDF79–96; Definition2.1 PDF79, Lemma2.1/Property2.1 PDF83–85, Theorem2.4 PDF90–91; extensions §§2.7–2.8 PDF100–106. Linear packing complexity is not a complete optimizer bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0531",
+      "status": "qualified",
+      "supported_claim": "ASF-B-star uses representative half-groups and connected islands; HB-star contours and hierarchy require updates as children change.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        80,
+        81,
+        82,
+        83,
+        84,
+        85
+      ],
+      "detail": "§§2.2–2.5 PDF79–96; Definition2.1 PDF79, Lemma2.1/Property2.1 PDF83–85, Theorem2.4 PDF90–91; extensions §§2.7–2.8 PDF100–106. Linear packing complexity is not a complete optimizer bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0532",
+      "status": "qualified",
+      "supported_claim": "ASF-B-star uses representative half-groups and connected islands; HB-star contours and hierarchy require updates as children change.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        90,
+        91
+      ],
+      "detail": "§§2.2–2.5 PDF79–96; Definition2.1 PDF79, Lemma2.1/Property2.1 PDF83–85, Theorem2.4 PDF90–91; extensions §§2.7–2.8 PDF100–106. Linear packing complexity is not a complete optimizer bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0533",
+      "status": "qualified",
+      "supported_claim": "ASF-B-star uses representative half-groups and connected islands; HB-star contours and hierarchy require updates as children change.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        91,
+        92,
+        93,
+        94,
+        95,
+        96
+      ],
+      "detail": "§§2.2–2.5 PDF79–96; Definition2.1 PDF79, Lemma2.1/Property2.1 PDF83–85, Theorem2.4 PDF90–91; extensions §§2.7–2.8 PDF100–106. Linear packing complexity is not a complete optimizer bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0534",
+      "status": "qualified",
+      "supported_claim": "ASF-B-star uses representative half-groups and connected islands; HB-star contours and hierarchy require updates as children change.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        100,
+        101,
+        102,
+        103,
+        104,
+        105,
+        106
+      ],
+      "detail": "§§2.2–2.5 PDF79–96; Definition2.1 PDF79, Lemma2.1/Property2.1 PDF83–85, Theorem2.4 PDF90–91; extensions §§2.7–2.8 PDF100–106. Linear packing complexity is not a complete optimizer bound.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0535",
+      "status": "qualified",
+      "supported_claim": "SMP hierarchy, center equations, disjunctive DTI MIP and enhanced-shape composition each carry specific assumptions.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        119,
+        120,
+        121,
+        122,
+        123,
+        124,
+        125,
+        126,
+        127,
+        128,
+        129
+      ],
+      "detail": "§3.1 Eq.(3.12) PDF112 and Eqs.(3.13)–(3.15) PDF113–114; §§3.2–3.5 PDF119–146; Eq.(3.40) PDF136 limits total stretch. Raster PDF113/136/139 checked. Shape composition preserves child constraints only without new conflicting parent constraints; electrical-context Pareto extension is a proposal.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0536",
+      "status": "qualified",
+      "supported_claim": "SMP hierarchy, center equations, disjunctive DTI MIP and enhanced-shape composition each carry specific assumptions.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        112,
+        113,
+        114,
+        115
+      ],
+      "detail": "§3.1 Eq.(3.12) PDF112 and Eqs.(3.13)–(3.15) PDF113–114; §§3.2–3.5 PDF119–146; Eq.(3.40) PDF136 limits total stretch. Raster PDF113/136/139 checked. Shape composition preserves child constraints only without new conflicting parent constraints; electrical-context Pareto extension is a proposal.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0537",
+      "status": "qualified",
+      "supported_claim": "SMP hierarchy, center equations, disjunctive DTI MIP and enhanced-shape composition each carry specific assumptions.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        135,
+        136,
+        137
+      ],
+      "detail": "§3.1 Eq.(3.12) PDF112 and Eqs.(3.13)–(3.15) PDF113–114; §§3.2–3.5 PDF119–146; Eq.(3.40) PDF136 limits total stretch. Raster PDF113/136/139 checked. Shape composition preserves child constraints only without new conflicting parent constraints; electrical-context Pareto extension is a proposal.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0538",
+      "status": "qualified",
+      "supported_claim": "SMP hierarchy, center equations, disjunctive DTI MIP and enhanced-shape composition each carry specific assumptions.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146
+      ],
+      "detail": "§3.1 Eq.(3.12) PDF112 and Eqs.(3.13)–(3.15) PDF113–114; §§3.2–3.5 PDF119–146; Eq.(3.40) PDF136 limits total stretch. Raster PDF113/136/139 checked. Shape composition preserves child constraints only without new conflicting parent constraints; electrical-context Pareto extension is a proposal.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0539",
+      "status": "qualified",
+      "supported_claim": "Physical connectivity, current-class subnets, mirrored obstacles, coupling and template separation must accompany geometric path search.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        168,
+        169,
+        170,
+        171,
+        172,
+        173,
+        174
+      ],
+      "detail": "§4.3 PDF168–174; §§4.4–4.5 PDF175–193; §4.5.6.1 Figs.4.23–4.24 PDF198–201; §§4.6–4.7 PDF204–209. Hybrid state, model fidelity staging and low-impedance shield return are reasoned extensions, not universal extraction or completion guarantees.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0540",
+      "status": "qualified",
+      "supported_claim": "Physical connectivity, current-class subnets, mirrored obstacles, coupling and template separation must accompany geometric path search.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        172,
+        173,
+        174,
+        175
+      ],
+      "detail": "§4.3 PDF168–174; §§4.4–4.5 PDF175–193; §4.5.6.1 Figs.4.23–4.24 PDF198–201; §§4.6–4.7 PDF204–209. Hybrid state, model fidelity staging and low-impedance shield return are reasoned extensions, not universal extraction or completion guarantees.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0541",
+      "status": "qualified",
+      "supported_claim": "Physical connectivity, current-class subnets, mirrored obstacles, coupling and template separation must accompany geometric path search.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        175,
+        176,
+        177,
+        178
+      ],
+      "detail": "§4.3 PDF168–174; §§4.4–4.5 PDF175–193; §4.5.6.1 Figs.4.23–4.24 PDF198–201; §§4.6–4.7 PDF204–209. Hybrid state, model fidelity staging and low-impedance shield return are reasoned extensions, not universal extraction or completion guarantees.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0542",
+      "status": "qualified",
+      "supported_claim": "Physical connectivity, current-class subnets, mirrored obstacles, coupling and template separation must accompany geometric path search.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        204,
+        205,
+        206,
+        207,
+        208,
+        209
+      ],
+      "detail": "§4.3 PDF168–174; §§4.4–4.5 PDF175–193; §4.5.6.1 Figs.4.23–4.24 PDF198–201; §§4.6–4.7 PDF204–209. Hybrid state, model fidelity staging and low-impedance shield return are reasoned extensions, not universal extraction or completion guarantees.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0543",
+      "status": "qualified",
+      "supported_claim": "Physical connectivity, current-class subnets, mirrored obstacles, coupling and template separation must accompany geometric path search.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        182,
+        183,
+        184,
+        185,
+        186,
+        187,
+        188,
+        189,
+        190,
+        191,
+        192,
+        193
+      ],
+      "detail": "§4.3 PDF168–174; §§4.4–4.5 PDF175–193; §4.5.6.1 Figs.4.23–4.24 PDF198–201; §§4.6–4.7 PDF204–209. Hybrid state, model fidelity staging and low-impedance shield return are reasoned extensions, not universal extraction or completion guarantees.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0544",
+      "status": "qualified",
+      "supported_claim": "Physical connectivity, current-class subnets, mirrored obstacles, coupling and template separation must accompany geometric path search.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        198,
+        199,
+        200,
+        201,
+        202,
+        203
+      ],
+      "detail": "§4.3 PDF168–174; §§4.4–4.5 PDF175–193; §4.5.6.1 Figs.4.23–4.24 PDF198–201; §§4.6–4.7 PDF204–209. Hybrid state, model fidelity staging and low-impedance shield return are reasoned extensions, not universal extraction or completion guarantees.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0545",
+      "status": "qualified",
+      "supported_claim": "Pairwise difference compaction and general linear constraints have different expressive power; retargeting must preserve explicit intent and reverify target process.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        217,
+        218,
+        219,
+        220,
+        221
+      ],
+      "detail": "§§5.3–5.5 PDF217–238, especially Eqs.(5.1),(5.2) and Definition5.2; §§5.6–5.7 PDF241–247. Ordinary DAG longest paths require fixed acyclic ordering. Source topology closeness is not an electrical equivalence proof.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0546",
+      "status": "qualified",
+      "supported_claim": "Pairwise difference compaction and general linear constraints have different expressive power; retargeting must preserve explicit intent and reverify target process.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        227,
+        228,
+        229,
+        230,
+        231,
+        232,
+        233,
+        234,
+        235,
+        236,
+        237,
+        238
+      ],
+      "detail": "§§5.3–5.5 PDF217–238, especially Eqs.(5.1),(5.2) and Definition5.2; §§5.6–5.7 PDF241–247. Ordinary DAG longest paths require fixed acyclic ordering. Source topology closeness is not an electrical equivalence proof.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0547",
+      "status": "qualified",
+      "supported_claim": "Pairwise difference compaction and general linear constraints have different expressive power; retargeting must preserve explicit intent and reverify target process.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        241,
+        242,
+        243,
+        244,
+        245,
+        246,
+        247
+      ],
+      "detail": "§§5.3–5.5 PDF217–238, especially Eqs.(5.1),(5.2) and Definition5.2; §§5.6–5.7 PDF241–247. Ordinary DAG longest paths require fixed acyclic ordering. Source topology closeness is not an electrical equivalence proof.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0548",
+      "status": "qualified",
+      "supported_claim": "Fixed-template shape selection, actual or sampled parasitics and circuit simulation form a layout-aware sizing loop.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        259,
+        260,
+        261,
+        262,
+        263,
+        264,
+        265,
+        266,
+        267,
+        268
+      ],
+      "detail": "§§6.3–6.5 PDF259–276, especially PDF263/267/272–275. Table6.7 shows post-extraction failures without feedback. Clarified Table6.8: 43.8% total CPU increase versus 15.1% per iteration; numbers are historical and template-specific.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0549",
+      "status": "qualified",
+      "supported_claim": "Fixed-template shape selection, actual or sampled parasitics and circuit simulation form a layout-aware sizing loop.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        272,
+        273,
+        274,
+        275
+      ],
+      "detail": "§§6.3–6.5 PDF259–276, especially PDF263/267/272–275. Table6.7 shows post-extraction failures without feedback. Clarified Table6.8: 43.8% total CPU increase versus 15.1% per iteration; numbers are historical and template-specific.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0550",
+      "status": "corrected",
+      "supported_claim": "Fixed-template shape selection, actual or sampled parasitics and circuit simulation form a layout-aware sizing loop.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        274,
+        275,
+        276
+      ],
+      "detail": "§§6.3–6.5 PDF259–276, especially PDF263/267/272–275. Table6.7 shows post-extraction failures without feedback. Clarified Table6.8: 43.8% total CPU increase versus 15.1% per iteration; numbers are historical and template-specific.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0551",
+      "status": "qualified",
+      "supported_claim": "Constraint lifecycle and meta-verification formalize analog requirements beyond DRC/LVS.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        281,
+        282,
+        283,
+        284,
+        285,
+        286,
+        287
+      ],
+      "detail": "§§7.3–7.5 PDF283–298: categories PDF283–284, five services PDF285–286, transformations PDF288–289, verification PDF291–293, CES PDF296–298. Proposed persistent IDs, cache invalidation and evidence schema are handbook extensions.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0552",
+      "status": "qualified",
+      "supported_claim": "Constraint lifecycle and meta-verification formalize analog requirements beyond DRC/LVS.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        288,
+        289,
+        290,
+        291
+      ],
+      "detail": "§§7.3–7.5 PDF283–298: categories PDF283–284, five services PDF285–286, transformations PDF288–289, verification PDF291–293, CES PDF296–298. Proposed persistent IDs, cache invalidation and evidence schema are handbook extensions.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    },
+    {
+      "citation_id": "CIT-0553",
+      "status": "qualified",
+      "supported_claim": "Constraint lifecycle and meta-verification formalize analog requirements beyond DRC/LVS.",
+      "source": "topological",
+      "evidence_pdf_pages": [
+        291,
+        292,
+        293,
+        294,
+        295,
+        296,
+        297,
+        298
+      ],
+      "detail": "§§7.3–7.5 PDF283–298: categories PDF283–284, five services PDF285–286, transformations PDF288–289, verification PDF291–293, CES PDF296–298. Proposed persistent IDs, cache invalidation and evidence schema are handbook extensions.",
+      "note": "Engine-code assertions, where present in the same section, were not audited."
+    }
+  ],
+  "corrections": [
+    {
+      "id": "OPT-C01",
+      "file": "lampaert-body.html",
+      "section": "sensitivities",
+      "severity": "material",
+      "change": "Removed false allegation that source Eq.(4.11) subtracts the lower bound in the upper branch; it correctly subtracts the upper bound. Marked per-metric normalization as a handbook extension.",
+      "citation_ids": [
+        "CIT-0166"
+      ],
+      "evidence": "Actual rendered Lampaert PDF107; root notified to remove corresponding coverage-summary allegation."
+    },
+    {
+      "id": "OPT-C02",
+      "file": "topic-performance-budgets-body.html",
+      "section": "uncertain-budgets",
+      "severity": "notation",
+      "change": "Changed sensitivity row to sensitivity column so s-transpose Sigma s is dimensionally consistent.",
+      "citation_ids": [
+        "CIT-0374",
+        "CIT-0375"
+      ],
+      "evidence": "Centering PDF111 Eq.(175), PDF183 Eqs.(A.13),(A.15)."
+    },
+    {
+      "id": "OPT-C03",
+      "file": "topic-performance-budgets-body.html",
+      "section": "budget-geometry",
+      "severity": "provenance/model-domain",
+      "change": "Added direct sheet-resistance reference §2.5.3.2 Eq.(2.33) PDF51; labeled Elmore first moment as derived and specified grounded/effective coupling-load assumptions.",
+      "citation_ids": [
+        "CIT-0372"
+      ],
+      "evidence": "Lampaert PDF49–51; integration of downstream distributed capacitance."
+    },
+    {
+      "id": "OPT-C04",
+      "file": "topic-robust-design-body.html",
+      "section": "global-local",
+      "severity": "material qualification",
+      "change": "Clarified normalized comparison weights for ratio common centroids; equal raw unit counts are not required.",
+      "citation_ids": [
+        "CIT-0462"
+      ],
+      "evidence": "Affine-field moment derivation; Lampaert PDF53–55 for physical motivation."
+    },
+    {
+      "id": "OPT-C05",
+      "file": "topic-search-algorithms-body.html",
+      "section": "feasibility",
+      "severity": "mathematical qualification",
+      "change": "Qualified finite-penalty statement: a proven exact-penalty bound can make the modeled final optimum feasible, but an empirical large weight supplies no proof and does not constrain every intermediate state.",
+      "citation_ids": [],
+      "evidence": "General optimization distinction; book is cited for motivation, not asserted to contain this complete theorem."
+    },
+    {
+      "id": "OPT-C06",
+      "file": "topological-body.html",
+      "section": "sequence-pairs",
+      "severity": "assumption precision",
+      "change": "Specified common vertical axis and exact Eq.(1.1) locator for symmetric-feasible ordering formula.",
+      "citation_ids": [
+        "CIT-0527"
+      ],
+      "evidence": "Topological PDF49–50."
+    },
+    {
+      "id": "OPT-C07",
+      "file": "topological-body.html",
+      "section": "layout-aware-sizing",
+      "severity": "numerical provenance",
+      "change": "Explained Table6.8 denominator: +43.8% total runtime, +15.1% time per iteration; source approximate 15% agrees with per-iteration comparison.",
+      "citation_ids": [
+        "CIT-0550"
+      ],
+      "evidence": "Topological PDF275 Table6.8: times880.3/612.31, iterations3044/2437."
+    },
+    {
+      "id": "OPT-C08",
+      "file": "centering-body.html",
+      "section": "covariance/worstcase/optimization",
+      "severity": "assumption and locator precision",
+      "change": "Specified positive-definite C for inverse Mahalanobis contours; added direct links for Eq.(189) PDF115 and AppendixC.6 Eq.(C.24) PDF195; clarified Eq.(362)/(365)/(368) missing transpose locator.",
+      "citation_ids": [
+        "CIT-0016",
+        "CIT-0032"
+      ],
+      "evidence": "Actual source equations and raster PDF115/176."
+    },
+    {
+      "id": "OPT-C09",
+      "file": "topic-layout-sizing-body.html",
+      "section": "physical-tradeoffs",
+      "severity": "provenance/model-domain",
+      "change": "Explicitly labeled gm/C scaling as derived ideal long-channel saturation model; states fixed mobility/oxide, fixed L and dominant area capacitance assumptions.",
+      "citation_ids": [],
+      "evidence": "Derived algebra; verified Hastings foundation supplied by audit_hastings: §12.1 Eqs.(12.3)–(12.4) PDF576; §12.1.1 Eqs.(12.6),(12.9) PDF577; ideal planar capacitance §7.1 Eq.(7.2) PDF327. Explicit ideal-bias/area and neglected terminal-capacitance effects added."
+    },
+    {
+      "id": "OPT-C10",
+      "file": "topic-performance-loop.html",
+      "section": "search",
+      "severity": "citation precision",
+      "change": "Root asked to replace chapter-opening PDF17 with §§3.4–3.5 PDF137–147 and §4.5.4 PDF191–193.",
+      "citation_ids": [
+        "CIT-0382"
+      ],
+      "evidence": "Relevant source passages independently checked; root owns final fragment.",
+      "completion": "Root confirmed applied to owned fragments."
+    },
+    {
+      "id": "OPT-C11",
+      "file": "topic-verification.html",
+      "section": "coverage",
+      "severity": "citation precision",
+      "change": "Root asked to replace chapter-opening PDF279 with §7.4.5 PDF291–293 and §7.5.2 PDF296–298.",
+      "citation_ids": [
+        "CIT-0514"
+      ],
+      "evidence": "Meta-verification/conflict discussion; root owns final fragment.",
+      "completion": "Root confirmed applied to owned fragments."
+    }
+  ],
+  "page_reviews": [
+    {
+      "html": "lampaert.html",
+      "status": "reviewed_with_corrections",
+      "sections": [
+        "thesis",
+        "coverage",
+        "performance-contract",
+        "sensitivities",
+        "variants",
+        "placement",
+        "matching-thermal",
+        "routing",
+        "manufacturing",
+        "implementation-sequence"
+      ],
+      "scope": "All theory prose, displayed models and original examples in this assigned fragment; engine implementation assertions excluded.",
+      "svg_count": 0,
+      "svg_semantics": "Inspected rendered diagrams and their geometry/algebra. All 12 assigned topic SVGs are consistent with their captions and stated illustrative assumptions.",
+      "limitations": "This audit verifies the stated claims and their source passages; it does not certify exhaustive coverage of every source page, reproduce historical experiments, or certify an engine implementation."
+    },
+    {
+      "html": "topological.html",
+      "status": "reviewed_with_corrections",
+      "sections": [
+        "thesis",
+        "coverage",
+        "comparison",
+        "sequence-pairs",
+        "hierarchical-trees",
+        "enhanced-shapes",
+        "routing",
+        "retargeting",
+        "layout-aware-sizing",
+        "constraint-system",
+        "priority"
+      ],
+      "scope": "All theory prose, displayed models and original examples in this assigned fragment; engine implementation assertions excluded.",
+      "svg_count": 0,
+      "svg_semantics": "Inspected rendered diagrams and their geometry/algebra. All 12 assigned topic SVGs are consistent with their captions and stated illustrative assumptions.",
+      "limitations": "This audit verifies the stated claims and their source passages; it does not certify exhaustive coverage of every source page, reproduce historical experiments, or certify an engine implementation."
+    },
+    {
+      "html": "centering.html",
+      "status": "reviewed_with_corrections",
+      "sections": [
+        "central-lesson",
+        "coverage",
+        "parameter-model",
+        "covariance",
+        "sensitivities-objectives",
+        "worstcase",
+        "yield",
+        "sampling",
+        "optimization",
+        "engine-actions"
+      ],
+      "scope": "All theory prose, displayed models and original examples in this assigned fragment; engine implementation assertions excluded.",
+      "svg_count": 0,
+      "svg_semantics": "Inspected rendered diagrams and their geometry/algebra. All 12 assigned topic SVGs are consistent with their captions and stated illustrative assumptions.",
+      "limitations": "This audit verifies the stated claims and their source passages; it does not certify exhaustive coverage of every source page, reproduce historical experiments, or certify an engine implementation."
+    },
+    {
+      "html": "topic-placement-representations.html",
+      "status": "reviewed",
+      "sections": [
+        "placement-purpose",
+        "coordinate-model",
+        "sequence-pair",
+        "bstar-islands",
+        "graphs-hierarchy",
+        "representation-selection"
+      ],
+      "scope": "All theory prose, displayed models and original examples in this assigned fragment; engine implementation assertions excluded.",
+      "svg_count": 2,
+      "svg_semantics": "Inspected rendered diagrams and their geometry/algebra. All 12 assigned topic SVGs are consistent with their captions and stated illustrative assumptions.",
+      "limitations": "This audit verifies the stated claims and their source passages; it does not certify exhaustive coverage of every source page, reproduce historical experiments, or certify an engine implementation."
+    },
+    {
+      "html": "topic-search-algorithms.html",
+      "status": "reviewed_with_corrections",
+      "sections": [
+        "search-contract",
+        "feasible-moves",
+        "lexicographic",
+        "annealing",
+        "disjunctions",
+        "exact-subproblems",
+        "search-validation"
+      ],
+      "scope": "All theory prose, displayed models and original examples in this assigned fragment; engine implementation assertions excluded.",
+      "svg_count": 2,
+      "svg_semantics": "Inspected rendered diagrams and their geometry/algebra. All 12 assigned topic SVGs are consistent with their captions and stated illustrative assumptions.",
+      "limitations": "This audit verifies the stated claims and their source passages; it does not certify exhaustive coverage of every source page, reproduce historical experiments, or certify an engine implementation."
+    },
+    {
+      "html": "topic-performance-budgets.html",
+      "status": "reviewed_with_corrections",
+      "sections": [
+        "budget-purpose",
+        "headroom",
+        "linear-response",
+        "budget-geometry",
+        "coupled-region",
+        "uncertain-budgets",
+        "model-refresh",
+        "budget-implementation"
+      ],
+      "scope": "All theory prose, displayed models and original examples in this assigned fragment; engine implementation assertions excluded.",
+      "svg_count": 2,
+      "svg_semantics": "Inspected rendered diagrams and their geometry/algebra. All 12 assigned topic SVGs are consistent with their captions and stated illustrative assumptions.",
+      "limitations": "This audit verifies the stated claims and their source passages; it does not certify exhaustive coverage of every source page, reproduce historical experiments, or certify an engine implementation."
+    },
+    {
+      "html": "topic-robust-design.html",
+      "status": "reviewed_with_corrections",
+      "sections": [
+        "robust-contract",
+        "global-local",
+        "covariance-validation",
+        "worstcase-distance",
+        "region-probability",
+        "sampling-confidence",
+        "robust-optimization",
+        "robust-engine"
+      ],
+      "scope": "All theory prose, displayed models and original examples in this assigned fragment; engine implementation assertions excluded.",
+      "svg_count": 2,
+      "svg_semantics": "Inspected rendered diagrams and their geometry/algebra. All 12 assigned topic SVGs are consistent with their captions and stated illustrative assumptions.",
+      "limitations": "This audit verifies the stated claims and their source passages; it does not certify exhaustive coverage of every source page, reproduce historical experiments, or certify an engine implementation."
+    },
+    {
+      "html": "topic-constraint-systems.html",
+      "status": "reviewed",
+      "sections": [
+        "constraints-purpose",
+        "semantic-record",
+        "provenance",
+        "generation-transformation",
+        "identity-hierarchy",
+        "conflicts",
+        "verification-status",
+        "constraints-implementation"
+      ],
+      "scope": "All theory prose, displayed models and original examples in this assigned fragment; engine implementation assertions excluded.",
+      "svg_count": 2,
+      "svg_semantics": "Inspected rendered diagrams and their geometry/algebra. All 12 assigned topic SVGs are consistent with their captions and stated illustrative assumptions.",
+      "limitations": "This audit verifies the stated claims and their source passages; it does not certify exhaustive coverage of every source page, reproduce historical experiments, or certify an engine implementation."
+    },
+    {
+      "html": "topic-layout-sizing.html",
+      "status": "reviewed_with_corrections",
+      "sections": [
+        "sizing-loop-purpose",
+        "decision-spaces",
+        "physical-tradeoffs",
+        "worked-interface-example",
+        "nested-joint",
+        "templates-models",
+        "retargeting",
+        "sizing-engine",
+        "sizing-validation"
+      ],
+      "scope": "All theory prose, displayed models and original examples in this assigned fragment; engine implementation assertions excluded.",
+      "svg_count": 2,
+      "svg_semantics": "Inspected rendered diagrams and their geometry/algebra. All 12 assigned topic SVGs are consistent with their captions and stated illustrative assumptions.",
+      "limitations": "This audit verifies the stated claims and their source passages; it does not certify exhaustive coverage of every source page, reproduce historical experiments, or certify an engine implementation."
+    }
+  ],
+  "unresolved": [
+    {
+      "id": "OPT-U02",
+      "severity": "coverage limitation",
+      "detail": "Contour data-structure implementations, specialized simplex implementation internals, appendices not used by the claims, bibliography papers and historical circuit experiments were not independently reproduced. This is a claim-level audit, not proof that the entire ~2400-page corpus is exhaustively represented."
+    }
+  ],
+  "theory_records": [
+    {
+      "id": "O01",
+      "title": "Additive performance allowance",
+      "claim": "If pre-layout process values lie in [Pmin_proc,Pmax_proc] and every value receives the same shift dP, specification [L,U] requires L-Pmin_proc <= dP <= U-Pmax_proc.",
+      "source": "lampaert",
+      "pdf_pages": [
+        34,
+        35,
+        36,
+        37
+      ],
+      "locator": "§2.2, Eqs. (2.1)–(2.7), printed pp.21–24",
+      "assumptions": "A common additive shift; use scenario-specific response otherwise.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O02",
+      "title": "Coupled parasitic feasible region",
+      "claim": "Independent allocations of per-parasitic limits can exclude electrically acceptable combinations; direct performance constraints preserve those tradeoffs.",
+      "source": "lampaert",
+      "pdf_pages": [
+        40,
+        41,
+        42
+      ],
+      "locator": "§2.3.3 and §2.4; Fig.2.4 and direct-performance discussion",
+      "assumptions": "The response model and specifications define feasibility; a linearized region is only local.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O03",
+      "title": "Signed local sensitivities and adjoints",
+      "claim": "dPj is approximated by sum_i Sji dXi. An adjoint computes derivatives with respect to many parameters for one scalar response.",
+      "source": "lampaert",
+      "pdf_pages": [
+        42,
+        43,
+        44
+      ],
+      "locator": "§2.4.1 Eqs. (2.12)–(2.13); §2.4.2.3 Eqs. (2.18)–(2.24)",
+      "assumptions": "Differentiable local response; suitable simulator convergence; independent responses generally need independent adjoints.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O04",
+      "title": "Resistance and geometric capacitance models",
+      "claim": "A uniform rectangular segment has R=Rsheet L/W; overlap, lateral and fringing capacitance have distinct geometry-dependent contributions.",
+      "source": "lampaert",
+      "pdf_pages": [
+        49,
+        50,
+        51
+      ],
+      "locator": "§2.5.3.1 Eqs. (2.29)–(2.32); §2.5.3.2 Eq. (2.33), printed pp.36–38",
+      "assumptions": "Calibrated material/layer/environment; L and W use the same units; contacts/vias and nonuniform current need additional modeling.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O05",
+      "title": "Area and distance mismatch terms",
+      "claim": "The cited pair model is variance=Aq^2/(WL)+Sq^2 D^2, with structure/orientation/environment constraints used alongside it.",
+      "source": "lampaert",
+      "pdf_pages": [
+        53,
+        54,
+        55
+      ],
+      "locator": "§2.7.1 Eq. (2.35); §2.7.2 matching guidelines",
+      "assumptions": "Process-calibrated pair model and its geometry domain; coefficients are not universal foundry constants; common centroid does not remove the finite-area random term.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O06",
+      "title": "Separate symmetry move groups",
+      "claim": "Position, orientation and shape relationships are distinct; coordinated translations, swaps, flips and axis movement can preserve chosen relationships by construction.",
+      "source": "lampaert",
+      "pdf_pages": [
+        99,
+        100,
+        101,
+        102,
+        103,
+        104,
+        105
+      ],
+      "locator": "§§4.6–4.7: constraint groups and translation, swap, flip and symmetry-axis moves",
+      "assumptions": "Compatible group membership, fixed-object conditions and legal variants; preserving one relationship does not prove neighbor clearance or electrical matching.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O07",
+      "title": "Annealing temperature calibration",
+      "claim": "For fixed energy and symmetric proposals, uphill acceptance is exp(-dE/T); T0≈-mean(positive dE)/ln(p0) is an initial calibration heuristic.",
+      "source": "lampaert",
+      "pdf_pages": [
+        89,
+        90,
+        117,
+        118
+      ],
+      "locator": "§4.4.6 Metropolis criterion, PDF89–90; §4.11 Eqs. (4.37)–(4.38), PDF117–118",
+      "assumptions": "T>0, 0<p0<1, consistent energy units, finite search; exp of mean does not equal mean acceptance. No finite-run global optimum guarantee.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O08",
+      "title": "Segment current and via capability",
+      "claim": "Required wire width and via count depend on current carried by each route segment and on process current capability.",
+      "source": "lampaert",
+      "pdf_pages": [
+        143,
+        144,
+        145,
+        146,
+        147
+      ],
+      "locator": "§5.6.2 Eqs. (5.1)–(5.2); §5.7.1 Eq. (5.9)",
+      "assumptions": "Current scenario and branch topology must be known; waveform, temperature and current sharing require the relevant reliability model.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O09",
+      "title": "Defect critical area is a separate yield model",
+      "claim": "For long parallel wires with length L and spacing s, bridging critical area is L max(0,chi-s); expected faults integrate critical area against defect density, with Poisson no-fault probability exp(-lambda).",
+      "source": "lampaert",
+      "pdf_pages": [
+        153,
+        154,
+        155
+      ],
+      "locator": "§5.9.1 Eqs. (5.16)–(5.18), Eq. (5.24), Fig.5.15; printed pp.141–143",
+      "assumptions": "chi is defect diameter; simplified long-wire geometry omits detailed end effects; density and Poisson assumptions must be calibrated; not parametric mismatch yield.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O10",
+      "title": "Sequence-pair symmetry is a sufficient subset",
+      "claim": "For one common vertical symmetry axis, pos_alpha(x)<pos_alpha(y) iff pos_beta(sym(y))<pos_beta(sym(x)) is a sufficient symmetric-feasible sequence-pair condition, not a necessary condition for physical symmetry.",
+      "source": "topological",
+      "pdf_pages": [
+        48,
+        49,
+        50,
+        51
+      ],
+      "locator": "Balasa, Chapter1 §1.3, Eq. (1.1); sufficient-not-necessary discussion PDF50",
+      "assumptions": "Source sequence convention, distinct group members, reflected partner mapping; multiple groups need compatible embedding (§1.3.2 PDF60–61).",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O11",
+      "title": "Connected symmetry islands restrict the search",
+      "claim": "A symmetry island is an abutting connected group. ASF-B-star stores representative half-groups and reconstructs counterparts; self-symmetric representatives touch the axis.",
+      "source": "topological",
+      "pdf_pages": [
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85
+      ],
+      "locator": "Lin and Chang, §§2.2.2–2.3.1, Definition2.1, Lemma2.1 and Property2.1",
+      "assumptions": "Legal module envelopes and chapter-specific B-star convention; connectivity/abutment is stronger than geometric symmetry.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O12",
+      "title": "DTI legality is disjunctive and coupled",
+      "claim": "The DTI example permits a shared range or a sufficiently isolated range, excludes intermediate gaps, and limits a middle device total left-plus-right stretch.",
+      "source": "topological",
+      "pdf_pages": [
+        115,
+        135,
+        136,
+        137
+      ],
+      "locator": "Strasser et al., §3.1.2 Fig.3.3; §3.3.2 Eqs. (3.36)–(3.40)",
+      "assumptions": "Technology-specific DTI semantics and finite geometry bounds; not every isolation rule has these branches.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O13",
+      "title": "Shape functions preserve alternatives within a decomposition",
+      "claim": "Ordinary horizontal composition gives (w1+w2,max(h1,h2)); enhanced shapes retain B-star topology and can interlock contours. Hierarchical enumeration does not enumerate all circuit layouts.",
+      "source": "topological",
+      "pdf_pages": [
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146
+      ],
+      "locator": "Strasser et al., §§3.4–3.5, Figs.3.23–3.33, Algorithm3.4",
+      "assumptions": "Fixed hierarchy and variants; composition constraint-preservation assumes no incompatible added parent constraints; geometric dominance is not automatically electrical dominance.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O14",
+      "title": "Difference constraints versus general linear relations",
+      "claim": "An acyclic fixed-order graph solves xj-xi>=dij by longest paths; symmetry relations involving sums/differences of more variables require a richer linear representation.",
+      "source": "topological",
+      "pdf_pages": [
+        219,
+        220,
+        221,
+        222,
+        223,
+        224,
+        225,
+        226,
+        227,
+        228,
+        229
+      ],
+      "locator": "Said et al., §5.4.1 Eqs. (5.1)–(5.2); §5.4.2 Eq. (5.6); §5.5.1 Definition5.2",
+      "assumptions": "One-dimensional fixed ordering with appropriate graph feasibility; LP optimality concerns the stated model, not all topology choices or nonlinear electrical effects.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O15",
+      "title": "Layout-aware sizing and surrogate domain",
+      "claim": "Each sizing can select geometric parameters, instantiate or model layout parasitics, and evaluate the resulting circuit. A naive table with m samples in n dimensions has m^n entries.",
+      "source": "topological",
+      "pdf_pages": [
+        263,
+        267,
+        268,
+        272,
+        273,
+        274,
+        275
+      ],
+      "locator": "Castro-López et al., §6.3.3 flow; §6.4.2 shape propagation; §6.5.1 extraction approaches A/B; Table6.7",
+      "assumptions": "Fixed characterized template/technology/model domain; sensitivity screening reduces sampling but cannot certify omitted parasitics in all future contexts.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O16",
+      "title": "Constraint lifecycle and meta-verification",
+      "claim": "Management, derivation, transformation, sensitivity analysis and verification are distinct services; static final verification uses fixed design and constraint data.",
+      "source": "topological",
+      "pdf_pages": [
+        285,
+        286,
+        287,
+        288,
+        289,
+        290,
+        291,
+        292,
+        293
+      ],
+      "locator": "Jerke, Lienig and Freuer, §7.4, Fig.7.4; §§7.4.1–7.4.5",
+      "assumptions": "Applicable rules and model coverage must be defined; DRC/LVS alone do not express all analog intent; transformations can restrict the remaining design space.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O17",
+      "title": "Yield over all operating conditions",
+      "claim": "Yield is probability over statistical fabrication variables that every specified performance bound holds for every operating-range condition.",
+      "source": "centering",
+      "pdf_pages": [
+        46,
+        47,
+        48,
+        49,
+        50,
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95
+      ],
+      "locator": "§§3.1–3.5 parameter classes; §4.8.1 Eq. (114), §§4.8.2–4.8.4",
+      "assumptions": "Declared joint statistical distribution and complete range contract; a sampled operating point or process-corner list alone is a different analysis.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O18",
+      "title": "Covariance propagation and valid dependence",
+      "claim": "For local response f≈f0+S(x-mu), Cov(f)≈S C S-transpose; a scalar sensitivity column g gives variance g-transpose C g.",
+      "source": "centering",
+      "pdf_pages": [
+        111,
+        183
+      ],
+      "locator": "§5.2 Eq. (175); AppendixA.9 Eqs. (A.13) and (A.15)",
+      "assumptions": "Finite second moments; exact for affine response, approximate for nonlinear response. C must be PSD, inverse whitening requires positive definiteness or a reduced-rank subspace.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O19",
+      "title": "Linear ellipsoidal worst case",
+      "claim": "For delta-transpose C-inverse delta<=beta^2 and f=f0+g-transpose delta, extrema occur at delta=±beta Cg/sqrt(g-transpose Cg) and f=f0±beta sqrt(g-transpose Cg).",
+      "source": "centering",
+      "pdf_pages": [
+        111
+      ],
+      "locator": "§5.2.1–5.2.2, Eqs. (171)–(179), printed p.93",
+      "assumptions": "Positive-definite C, beta>=0 and g-transpose Cg>0; zero gradient/variance requires separate treatment; nonlinear circuits need validated approximation.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O20",
+      "title": "A sigma distance needs its probability region",
+      "claim": "A standardized n-dimensional Gaussian radius-beta ball encloses P(chi-square_n<=beta^2); a symmetric independent box encloses [2Phi(beta)-1]^n; one linear upper bound has probability Phi(beta).",
+      "source": "centering",
+      "pdf_pages": [
+        133,
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143
+      ],
+      "locator": "§§6.2.2–6.2.4, Eq. (240), Eqs. (242)–(248), Eqs. (258)–(259), Tables11–12",
+      "assumptions": "Independent standardized coordinates for box product; positive signed margin for usual passing example; joint circuit yield is an intersection, not automatically any of these regions.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O21",
+      "title": "No-failure confidence is not perfect yield",
+      "claim": "With N independent Bernoulli trials and no failures, a one-sided 95% upper failure-probability bound is 1-0.05^(1/N); ordinary Monte Carlo yield variance is Y(1-Y)/N.",
+      "source": "centering",
+      "pdf_pages": [
+        125,
+        126,
+        127,
+        128,
+        129,
+        130,
+        131,
+        132
+      ],
+      "locator": "§6.1.1 Eq. (219), §6.1.3 Eqs. (225)–(226); confidence limit is derived here",
+      "assumptions": "Independent, identically distributed complete pass/fail events; not the variance formula for weighted importance samples or unresolved simulation outcomes.",
+      "kind": "derived",
+      "derivation_if_any": "P(no failures|p)=(1-p)^N; solve (1-p)^N=.05. N=3000 gives 0.00099808; a 1 ppm upper bound requires at least 2,995,731 clean independent trials."
+    },
+    {
+      "id": "O22",
+      "title": "Mean-shift centering has a limited parameter interpretation",
+      "claim": "For Gaussian process covariance fixed and acceptance region fixed, gradient_mu Y=Y C-inverse(mu_accepted-mu). A stationary positive-yield point matches the accepted and original means.",
+      "source": "centering",
+      "pdf_pages": [
+        163,
+        164
+      ],
+      "locator": "§7.1.2, Eq. (324), printed pp.145–146",
+      "assumptions": "Unconstrained mean variation, fixed covariance and fixed region; necessary stationarity only. Width/topology changes normally alter the region and cannot be substituted without chain rules.",
+      "kind": "source",
+      "derivation_if_any": null
+    },
+    {
+      "id": "O23",
+      "title": "Correct regularized least-squares transpose",
+      "claim": "With residual e in R^m and row-gradient Jacobian J in R^(m by n), the regularized linear least-squares step satisfies (J-transpose J+lambda I)r=-J-transpose e.",
+      "source": "centering",
+      "pdf_pages": [
+        175,
+        176
+      ],
+      "locator": "§7.2.3 Eq. (362) and printed Eqs. (365),(368); printed pp.158–159",
+      "assumptions": "Local residual linearization, lambda>=0 and suitable solve/rank treatment; source RHS omits transpose, verified in actual raster. Not a global circuit-optimum certificate.",
+      "kind": "derived",
+      "derivation_if_any": "Differentiate one-half ||e+Jr||^2 + lambda/2 ||r||^2. Gradient J-transpose(e+Jr)+lambda r=0. RHS must have n components."
+    },
+    {
+      "id": "O24",
+      "title": "Full nonlinear Lagrangian curvature",
+      "claim": "For L=f-lambda(beta^2-delta-transpose C-inverse delta), Hessian_delta L=Hessian f+2lambda C-inverse; covariance curvature alone does not establish nonlinear second-order sufficiency.",
+      "source": "centering",
+      "pdf_pages": [
+        115,
+        195
+      ],
+      "locator": "§5.4 Eq. (189), prose following Eq. (191); AppendixC.6 Eq. (C.24)",
+      "assumptions": "Twice differentiable f, constant positive-definite C and fixed multiplier for Hessian; constrained sufficiency concerns appropriate feasible/critical directions. The prose omission was verified in raster.",
+      "kind": "derived",
+      "derivation_if_any": "Differentiate the displayed Lagrangian twice with respect to delta. The objective-curvature term vanishes for affine f, or at a point where its Hessian happens to be zero; it cannot generally be omitted. Also, lambda>=0 alone is not strict positive curvature."
+    },
+    {
+      "id": "O25",
+      "title": "Electrical centroid uses normalized comparison weights",
+      "claim": "For the difference of weighted responses to a shared affine spatial field, equal zeroth and first moments cancel that field. Ratio comparisons first normalize each group by its intended total; equal raw device counts are not necessary.",
+      "source": "lampaert",
+      "pdf_pages": [
+        53,
+        54,
+        55
+      ],
+      "locator": "§2.7.2 common-centroid motivation; contrasting geometric area-weighted group center in Topological §3.1.1 Eq. (3.12), PDF112",
+      "assumptions": "Same local field and proportional unit response; comparison weights encode the intended ratio. Second-order fields, unequal environments and routing bias are not canceled by first moments alone.",
+      "kind": "derived",
+      "derivation_if_any": "For q(r)=q0+g dot r, weighted difference=sum_i a_i q(r_i)-sum_j b_j q(r_j)=q0(sum a-sum b)+g dot(sum a r-sum b r). Both coefficients must vanish; normalize group weights for mean/ratio comparison."
+    }
+  ],
+  "numerical_checks": {
+    "phase_margin_box": {
+      "independent_caps": [
+        150,
+        60
+      ],
+      "candidate": [
+        200,
+        20
+      ],
+      "consumption_deg": 5.0
+    },
+    "correlated_sigma": 0.6708203932499369,
+    "two_dim_ball_beta3": 0.9888910034617577,
+    "two_dim_box_beta3": 0.9946076967722628,
+    "one_sided_beta3": 0.9986501019683699,
+    "joint_beta3_3": 0.9973020261614356,
+    "joint_beta2_9_8": 0.9981341866996153,
+    "zero_failure_3000": 0.0009980790119965555,
+    "clean_samples_for_1ppm_95pct": 2995731,
+    "pole_A_MHz": 54.88101485927426,
+    "pole_B_MHz": 88.41941282883074,
+    "table6_8_total_runtime_increase": 0.43767046104097607,
+    "table6_8_per_iteration_increase": 0.1509865024825423
+  },
+  "new_citations": [
+    {
+      "html": "topic-performance-budgets.html",
+      "source": "lampaert",
+      "pdf_page": 51,
+      "locator": "§2.5.3.2 Eq.(2.33)"
+    },
+    {
+      "html": "centering.html",
+      "source": "centering",
+      "pdf_page": 115,
+      "locator": "§5.4 Eq.(189)"
+    },
+    {
+      "html": "centering.html",
+      "source": "centering",
+      "pdf_page": 195,
+      "locator": "AppendixC.6 Eq.(C.24)"
+    },
+    {
+      "html": "topic-layout-sizing.html",
+      "source": "hastings",
+      "pdf_page": 576,
+      "locator": "§12.1 Eqs.(12.3)–(12.4)"
+    },
+    {
+      "html": "topic-layout-sizing.html",
+      "source": "hastings",
+      "pdf_page": 577,
+      "locator": "§12.1.1 Eqs.(12.6),(12.9)"
+    },
+    {
+      "html": "topic-layout-sizing.html",
+      "source": "hastings",
+      "pdf_page": 327,
+      "locator": "§7.1 Eq.(7.2)"
+    }
+  ],
+  "source_errata_checked": [
+    {
+      "source": "lampaert",
+      "pdf_page": 107,
+      "equation": "4.11",
+      "verdict": "No erratum: the notes misread the source upper-bound superscript; corrected."
+    },
+    {
+      "source": "centering",
+      "pdf_page": 115,
+      "equation": "189 / following Hessian prose",
+      "verdict": "Confirmed missing objective Hessian in prose; derived correction retained."
+    },
+    {
+      "source": "centering",
+      "pdf_page": 176,
+      "equation": "365 and368",
+      "verdict": "Confirmed missing RHS transpose relative to row-gradient Jacobian Eq.362; derived correction retained."
+    }
+  ],
+  "other_page_fixes": [
+    "Root-owned coverage summary must remove Lampaert penalty erratum allegation.",
+    "Root-owned performance-loop and verification chapter-opening citations should be narrowed as listed in OPT-C10 and OPT-C11."
+  ],
+  "peer_verification": [
+    {
+      "agent": "audit_hastings",
+      "scope": "MOS square-law and ideal planar capacitance foundation only",
+      "evidence": "Agent reported independently rendering and visually checking Hastings physical PDF576,577,327; also reported long-channel limitations PDF584–585."
+    }
+  ]
+}

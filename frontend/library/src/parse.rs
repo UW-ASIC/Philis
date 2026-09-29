@@ -106,6 +106,7 @@ pub fn spice(text: &str) -> Result<Netlist, String> {
         devices.push(Device {
             name,
             kind,
+            model: model.to_string(),
             terminals,
             params: out_params,
         });

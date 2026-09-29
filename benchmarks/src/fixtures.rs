@@ -418,13 +418,6 @@ pub fn cleanup_fixtures() {
 // SPICE preprocessing: generic netlists → PDK-compatible format
 // ---------------------------------------------------------------------------
 
-/// MIM cap density per PDK (fF/µm²), matched by PDK name prefix.
-const CAP_DENSITY: &[(&str, f64)] = &[
-    ("sky130", 2.0),
-    ("ihp", 1.5),
-    ("gf180", 1.0),
-];
-
 /// FinFET nfin → planar W mapping (µm per fin).
 const UM_PER_FIN: f64 = 0.1;
 
@@ -535,57 +528,35 @@ fn fmt_um(val_um: f64) -> String {
 
 /// PDK data extracted for SPICE preprocessing.
 struct PdkPreprocess {
-    #[allow(dead_code)]
-    name: String,
     cap_model: Option<String>,
     res_model: Option<String>,
     cap_density: f64,
     r_sheet: f64,
     res_w: f64,
+    um_per_fin: f64,
+    /// The deck, for each MOS card's legal channel.
+    pdk: verify::Pdk,
 }
 
 impl PdkPreprocess {
-    /// `name` is the deck's file stem (the rebuilt decks carry no `name` key);
-    /// it only feeds the [`CAP_DENSITY`] prefix match.
-    fn from_json(pdk: &Value, name: &str) -> Self {
-        // Rebuilt deck schema: `device_recognition` is an array of
-        // `{kind, marker, model, terminals}`.
-        let recogniser = |kind: &str| -> Option<&Value> {
-            pdk["device_recognition"]
-                .as_array()?
-                .iter()
-                .find(|d| d["kind"].as_str() == Some(kind))
-        };
-
-        let res = recogniser("resistor");
-        let res_model = res.and_then(|d| d["model"].as_str()).map(String::from);
+    /// The resistor is the sidecar's default recipe, sized by its body's
+    /// deck sheet resistance and min width; no recipe (or no sheet R), no
+    /// rewrite. Cap density is the sidecar's `cap_density_ff_um2`, else 1.
+    fn load(sidecar: &str) -> Result<Self, String> {
+        use pnr_core::Process;
+        let pdk = verify::Pdk::from_json(sidecar)?;
+        let recipe = pdk.recipe("resistor", "");
+        let body = recipe.clone().map(|recipe| verify::pdk::Overlay { pdk: &pdk, recipe });
+        let r_sheet = body.as_ref().and_then(|o| o.sheet_ohm("rpoly")).map_or(0.0, f64::from);
+        let res_w = body.as_ref().and_then(|o| o.width("rpoly")).map_or(0.0, |w| f64::from(w) / 1e3);
+        let res_model = recipe.map(|r| r.model).filter(|m| !m.is_empty() && r_sheet > 0.0 && res_w > 0.0);
         // Neither deck defines a capacitor recogniser — `library::parse`
         // classifies X-instances by model substring and `cells::capacitor`
         // draws them, so a bare "cap" model word is all a rewrite needs.
-        let cap_model = Some("cap".to_owned());
-
-        let cap_density = {
-            let low = name.to_ascii_lowercase();
-            CAP_DENSITY
-                .iter()
-                .find(|&&(prefix, _)| low.contains(prefix))
-                .map_or(1.0, |&(_, d)| d)
-        };
-
-        // Sheet resistance of the resistor's marker layer, straight from the
-        // deck's per-layer pex block (ohm/sq); poly as fallback.
-        let r_sheet = res
-            .and_then(|d| d["marker"].as_str())
-            .and_then(|body| pdk["pex"][body]["sheet_res_ohm_sq"].as_f64())
-            .or_else(|| pdk["pex"]["poly"]["sheet_res_ohm_sq"].as_f64())
-            .filter(|&v| v > 0.0)
-            .unwrap_or(48.2);
-        // ponytail: fixed 0.33 µm body width — the rebuilt decks carry no
-        // per-device default; derive from the marker layer's min_width rule if
-        // resistor sizing ever matters to a benchmark.
-        let res_w = 0.33;
-
-        Self { name: name.to_owned(), cap_model, res_model, cap_density, r_sheet, res_w }
+        let cap_density = pdk.cell.get("cap_density_ff_um2").and_then(Value::as_f64).unwrap_or(1.0);
+        // A fin's share of W is the deck's fin pitch; a planar deck has none.
+        let um_per_fin = pdk.width("fin").zip(pdk.space("fin")).map_or(UM_PER_FIN, |(w, s)| f64::from(w + s) / 1e3);
+        Ok(Self { cap_model: Some("cap".to_owned()), res_model, cap_density, r_sheet, res_w, um_per_fin, pdk })
     }
 }
 
@@ -595,13 +566,10 @@ impl PdkPreprocess {
 /// - Bare caps/resistors with real W/L from cap density / sheet-R
 /// - Bare R/C with .param value references resolved
 /// - FinFET nfin→W synthesis when W is absent on MOSFET lines
+/// - MOS L and W below the deck's shortest legal channel raised to it
 pub fn preprocess_spice(text: &str, pdk_path: &Path) -> Result<String, String> {
     let text = join_backslash(text);
-    let pdk_json: Value =
-        serde_json::from_str(&fs::read_to_string(pdk_path).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-    let deck_name = pdk_path.file_stem().unwrap_or_default().to_string_lossy();
-    let pdk = PdkPreprocess::from_json(&pdk_json, &deck_name);
+    let pdk = PdkPreprocess::load(&fs::read_to_string(pdk_path).map_err(|e| e.to_string())?)?;
     let spice_params = collect_spice_params(&text);
 
     let mut out = Vec::new();
@@ -638,7 +606,7 @@ pub fn preprocess_spice(text: &str, pdk_path: &Path) -> Result<String, String> {
                 let nfin_raw = kv.get("nfin").or_else(|| kv.get("nf")).unwrap_or(&"1");
                 let resolved = resolve_param(nfin_raw, &spice_params);
                 let nfin_val = parse_si(&resolved).max(1.0);
-                extra.push_str(&format!(" w={}", fmt_um(nfin_val * UM_PER_FIN)));
+                extra.push_str(&format!(" w={}", fmt_um(nfin_val * pdk.um_per_fin)));
             }
             if !kv.contains_key("l") {
                 extra.push_str(" l=0.15u");
@@ -797,7 +765,46 @@ pub fn preprocess_spice(text: &str, pdk_path: &Path) -> Result<String, String> {
 
     let mut result = out.join("\n");
     result.push('\n');
-    Ok(result)
+    Ok(raise_channels(result, |d| pdk.pdk.min_channel(d.kind == pnr_core::DeviceKind::Pmos, &d.model)))
+}
+
+/// A generic fixture's MOS cards retargeted to the deck's shortest legal
+/// channel: a numeric `l`/`w` below it is raised (gf180's 3.3 V gate is 280 nm,
+/// the fixtures' 150). The flow draws what a netlist asks and warns; this is
+/// the benchmark's retarget. MOS cards are the ones `library::parse` calls MOS;
+/// `legal` is a device's `(l, w)` minimum.
+fn raise_channels(text: String, legal: impl Fn(&pnr_core::Device) -> (i32, i32)) -> String {
+    let Ok(netlist) = library::parse(&text) else { return text };
+    let mos: HashMap<&str, (i32, i32)> = netlist
+        .devices
+        .iter()
+        .filter(|d| matches!(d.kind, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos))
+        .map(|d| (d.name.as_str(), legal(d)))
+        .collect();
+    let raise = |tok: &str, (l_min, w_min): (i32, i32)| {
+        let Some((k, v)) = tok.split_once('=') else { return tok.to_owned() };
+        let min = match k.to_ascii_lowercase().as_str() {
+            "l" => l_min,
+            "w" => w_min,
+            _ => 0,
+        };
+        // ponytail: a `.param` reference stays as written.
+        if is_numeric(v) && parse_si(v) * 1e9 < f64::from(min) - 0.5 {
+            format!("{k}={}", fmt_um(f64::from(min) / 1e3))
+        } else {
+            tok.to_owned()
+        }
+    };
+    let mut out: String = text
+        .lines()
+        .map(|line| match line.split_whitespace().next() {
+            Some(name) if mos.contains_key(name) => line.split_whitespace().map(|t| raise(t, mos[name])).collect::<Vec<_>>().join(" "),
+            _ => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    out.push('\n');
+    out
 }
 
 #[cfg(test)]
@@ -827,19 +834,28 @@ mod tests {
         let pdk_json = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("pdks/generic_finfet.json");
+            .join("pdks/sky130.json");
         let text = ".param rl=500 Csw=5u\n\
                     R1 vps vout resistor r=rl\n\
                     C4 a b capacitor w=Csw l=Csw\n";
         let out = preprocess_spice(text, &pdk_json).expect("preprocess");
+        // The deck states no resistor body sheet R: the card stays as written.
         let r_line = out.lines().find(|l| l.contains("vps vout")).unwrap();
-        assert!(r_line.starts_with("XR1 "), "resistor instance: {r_line}");
-        assert!(r_line.contains("W=") && r_line.contains("L="), "{r_line}");
-        assert!(!r_line.to_ascii_lowercase().contains("r=rl"), "{r_line}");
+        assert!(r_line.starts_with("R1 "), "resistor untouched: {r_line}");
         let c_line = out.lines().find(|l| l.contains("a b")).unwrap();
         assert!(c_line.starts_with("XC4 "), "cap instance: {c_line}");
         assert!(c_line.contains("w=5u") && c_line.contains("l=5u"), "{c_line}");
         assert!(!c_line.contains("capacitor"), "{c_line}");
+    }
+
+    #[test]
+    fn mos_channels_below_the_deck_minimum_are_raised() {
+        let text = "XM1 d g s b pfet_01v8 W=1u L=0.15u\nXM2 d g s b nfet_01v8 W=0.1u L=2u\nXR1 a b res_generic_po W=0.1u L=2u\n";
+        let out = raise_channels(text.to_owned(), |_| (280, 220));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "XM1 d g s b pfet_01v8 W=1u L=0.28u");
+        assert_eq!(lines[1], "XM2 d g s b nfet_01v8 W=0.22u L=2u");
+        assert_eq!(lines[2], "XR1 a b res_generic_po W=0.1u L=2u", "not a MOS");
     }
 
     #[test]

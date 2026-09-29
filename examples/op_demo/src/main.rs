@@ -16,12 +16,38 @@ fn main() {
         .join(&pdk_name)
         .join("libs.tech/ngspice/sky130.lib.spice");
 
+    let sim = library::oppoint::OpConfig {
+        model_lib: models.exists().then_some(models),
+        ..Default::default()
+    };
+    // Post-layout specs: the extracted capacitance on vout1/vout2 loads the
+    // output pole, so UGF is what a careless layout loses first. The load
+    // bias is set where the open-loop outputs balance (no CMFB in this OTA).
+    let performance = library::perf::PerfConfig {
+        sim: sim.clone(),
+        testbench: "\
+Vdd vdd 0 1.8
+Vbn vbn 0 0.5
+Vbias vbias 0 0.8515
+Vip vinp 0 0.9 ac 0.5
+Vim vinm 0 0.9 ac -0.5
+.ac dec 20 1k 10g
+.measure ac gain_db find vdb(vout2) at=1e3
+.measure ac ugf when vdb(vout2)=0
+.control
+set ngbehavior=hsa
+run
+.endc"
+            .into(),
+        specs: vec![
+            library::perf::Spec { metric: "gain_db".into(), min: Some(20.0), max: None },
+            library::perf::Spec { metric: "ugf".into(), min: Some(300e6), max: None },
+        ],
+    };
     let cfg = library::Config {
         feedback_iters: 3,
-        op: Some(library::oppoint::OpConfig {
-            model_lib: models.exists().then_some(models),
-            ..Default::default()
-        }),
+        op: Some(sim),
+        performance: Some(performance),
         ..Default::default()
     };
     let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).expect("flow");

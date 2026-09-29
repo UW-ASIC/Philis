@@ -4,7 +4,8 @@
 //!
 //!   cargo run --release -p benchmark --bin bench [local|align|magical|tinytapeout|all]
 //!
-//! Env: `PNR_BENCH_SEED` (default 1), `PNR_BENCH_PDK` (deck override, see
+//! Env: `PNR_BENCH_SEED` (default 1), `PNR_BENCH_STARTS` (search starts,
+//! default the library's), `PNR_BENCH_PDK` (deck override, see
 //! `pdk_path`).
 //!
 //! Debug artifacts (`<name>.gds`, `signoff.txt`, `violations.txt`,
@@ -73,8 +74,12 @@ struct ContractStat {
     circuit: String,
     total: usize,
     violated: usize,
-    /// Rules with nothing to check (e.g. thermal on an unpowered die).
+    /// Rules with nothing to check (e.g. DTI on a trench-less process).
     na: usize,
+    /// Rules whose inputs are missing ([`analog::Rule::known`]): neither
+    /// satisfied nor violated. Takes precedence over `na` (an unpowered die is
+    /// unknown power, not a verified-cool one).
+    unk: usize,
     /// Largest spent fraction of a rule's budget (`1.0` = at the spec).
     usage: Option<f32>,
     /// Σ residual — overshoot in budgets' worth.
@@ -89,7 +94,8 @@ fn stat<S>(arm: &'static str, circuit: &str, b: &dyn analog::RuleBatch<S>, s: &S
         circuit: circuit.to_string(),
         total,
         violated: b.violations(s) as usize,
-        na: b.inapplicable(s) as usize,
+        na: (b.inapplicable(s) as usize).saturating_sub(b.unknown(s) as usize),
+        unk: b.unknown(s) as usize,
         usage: b.worst_usage(s),
         theta: b.residual(s),
     })
@@ -110,9 +116,38 @@ fn footprint(l: &Layout) -> (f64, f64) {
     (bbox / 1e6, if bbox > 0.0 { 100.0 * drawn / bbox } else { 0.0 })
 }
 
+/// Device diffusion (the placed cells' `diff`-role shapes, rings and fill
+/// excluded) as % of the block area: what `util`, which counts ring halos
+/// as device, hides.
+fn active(sol: &library::Solution, pdk: &Pdk, area_um2: f64) -> f64 {
+    use pnr_core::Process;
+    let Some(diff) = pdk.layer("diff") else { return 0.0 };
+    let cells = pnr_core::place_macros(&sol.macros[..sol.layout.x.len()], &sol.layout);
+    let drawn: f64 = cells.iter().flat_map(|m| &m.shapes).filter(|s| s.layer == diff).map(|s| f64::from(s.rect.w) * f64::from(s.rect.h)).sum();
+    if area_um2 > 0.0 { 100.0 * drawn / (area_um2 * 1e6) } else { 0.0 }
+}
+
 /// Trim a rule's fully-qualified type name to its final path segment.
 fn short_kind(kind: &str) -> String {
     kind.rsplit("::").next().unwrap_or(kind).trim_end_matches('>').to_string()
+}
+
+/// The operating point the bench biases with (ENV-01/02, PWR-01): the
+/// synthesised mid-rail probe (`oppoint`) on the installed sky130 models, for
+/// sky130 decks only. `None` (unbiased: thermal and EM read unknown) without
+/// the models; ngspice missing is reported by the flow itself.
+///
+/// ponytail: no fixture ships a testbench, so every bias is the probe, which
+/// its provenance says is not a sign-off condition.
+fn op_config(pdk_json: &Path) -> Option<library::oppoint::OpConfig> {
+    if !pdk_json.file_name()?.to_str()?.starts_with("sky130") {
+        return None;
+    }
+    let root = std::env::var_os("PDK_ROOT")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".volare")))?;
+    let lib = root.join("sky130A/libs.tech/ngspice/sky130.lib.spice");
+    lib.is_file().then(|| library::oppoint::OpConfig { model_lib: Some(lib), ..Default::default() })
 }
 
 fn run_circuit(
@@ -142,7 +177,10 @@ fn run_circuit(
     if g.devices.len() > MAX_CELLS {
         return (format!("skipped ({} cells > {MAX_CELLS})", g.devices.len()), Vec::new());
     }
-    let cfg = Config { seed, feedback_iters: FEEDBACK_ITERS, ..Config::default() };
+    let mut cfg = Config { seed, feedback_iters: FEEDBACK_ITERS, op: op_config(pdk_json_path), ..Config::default() };
+    if let Some(k) = std::env::var("PNR_BENCH_STARTS").ok().and_then(|v| v.parse().ok()) {
+        cfg.starts = k;
+    }
     let sol = match library::run(&text, pdk, &Macros::default(), &cfg) {
         Ok(s) => s,
         Err(e) => return (format!("flow failed: {e:?}"), Vec::new()),
@@ -174,22 +212,29 @@ fn run_circuit(
     let wl: i64 = (0..sol.routes.wires.len())
         .map(|i| sol.routes.length(NetId(i as u16)))
         .sum();
+    // A net no drawn cell has a pin on (its devices are all undrawable, a
+    // `cell/undrawable` finding) has nothing to route: not unrouted.
+    let pinned: std::collections::HashSet<NetId> =
+        sol.macros.iter().filter(|m| !m.shapes.is_empty()).flat_map(|m| &m.pins).map(|p| p.net).collect();
     let unrouted = (0..n_nets)
-        .filter(|&i| sol.routes.wires.get(i).map_or(true, |w| w.is_empty()))
+        .filter(|&i| pinned.contains(&NetId(i as u16)) && sol.routes.wires.get(i).map_or(true, |w| w.is_empty()))
         .count();
+    let undrawable = report.hard_violations.iter().filter(|v| v.rule.starts_with("cell/undrawable")).count();
 
     let (area_um2, util_pct) = footprint(&sol.layout);
+    let active_pct = active(&sol, pdk, area_um2);
     let s = &sol.stats;
 
     // `overuse` is milli-budget normalised residual margin, not a track count.
     // `esc` > 0 means a variant-space binding (no arrangement of the chosen
     // variants was feasible), not a placement local minimum.
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {} | overuse {} | DRC {} | LVS {} | ERC {}{} | C {:.1} fF | area {:.1} um2 | util {:.1}% | best {}/{}{} | outer {}, esc {} | seed {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | overuse {} | DRC {} | LVS {} | ERC {}{} | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
         unrouted,
+        if undrawable > 0 { format!(" | undrawable {undrawable}") } else { String::new() },
         s.route_overuse,
         drc,
         if lvs_mismatch { "MISMATCH" } else { "MATCH" },
@@ -198,12 +243,17 @@ fn run_circuit(
         report.cost,
         area_um2,
         util_pct,
+        active_pct,
         s.best_iteration + 1,
         s.iterations,
         if s.converged { " converged" } else { " budget" },
         s.outer_iterations,
         s.variant_escalations,
         seed,
+        sol.metadata.bias.as_ref().map_or_else(
+            || "none".to_string(),
+            |b| format!("{} uW, {}", b.total_power_uw, if b.provenance.starts_with("SYNTH") { "probe" } else { "testbench" })
+        ),
     );
 
     // Per-constraint-type satisfaction: the run's own cell-space placement
@@ -222,6 +272,20 @@ fn run_circuit(
             .chain(routing.budget.iter().map(|b| ("budget", b)))
             .filter_map(|(arm, b)| stat(arm, &c.name, b.as_ref(), &sol.routes)),
     );
+    // Families the library adds from the op point (EM, IR drop) exist only in
+    // the run's own report: take those rows from its metadata.
+    let seen: Vec<String> = contracts.iter().map(|k| k.kind.clone()).collect();
+    contracts.extend(sol.metadata.routing.iter().filter(|r| !seen.contains(&r.kind)).map(|r| ContractStat {
+        kind: r.kind.clone(),
+        arm: if r.arm == library::metadata::Arm::Hard { "hard" } else { "budget" },
+        circuit: c.name.clone(),
+        total: r.total,
+        violated: r.total - r.satisfied,
+        na: 0,
+        unk: r.unknown,
+        usage: r.usage,
+        theta: r.residual,
+    }));
 
     // Emit GDS (target/bench_debug/<name>/) + SVG (assets/) for the solution.
     let shapes = sol.geometry();
@@ -263,35 +327,41 @@ fn print_constraint_summary(all: &[&ContractStat]) {
     rows.sort_unstable();
     rows.dedup();
     println!(
-        "\n  {:<20} {:<6} {:>5} {:>5} {:>5} {:>4} {:>6}  {:>9} {:<16} {:>8}",
-        "Constraint type", "arm", "total", "sat", "viol", "n/a", "rate", "max use", "(at)", "Θ"
+        "\n  {:<20} {:<6} {:>5} {:>5} {:>5} {:>4} {:>4} {:>6}  {:>9} {:<16} {:>8}",
+        "Constraint type", "arm", "total", "sat", "viol", "unk", "n/a", "rate", "max use", "(at)", "Θ"
     );
-    println!("  {}", "-".repeat(96));
-    let (mut total, mut sat, mut na) = (0usize, 0usize, 0usize);
+    println!("  {}", "-".repeat(101));
+    let (mut total, mut sat, mut na, mut unk) = (0usize, 0usize, 0usize, 0usize);
+    // Rate over the rules actually checked: unknown and n/a are neither.
+    let rate = |s: usize, checked: usize| {
+        if checked > 0 { format!("{:>5.0}%", 100.0 * s as f64 / checked as f64) } else { "     -".into() }
+    };
     for (kind, arm) in rows {
         let cs: Vec<&&ContractStat> = all.iter().filter(|c| c.kind == kind && c.arm == arm).collect();
         let n: usize = cs.iter().map(|c| c.total).sum();
         let v: usize = cs.iter().map(|c| c.violated).sum();
         let a: usize = cs.iter().map(|c| c.na).sum();
-        let s = n - v - a;
+        let u: usize = cs.iter().map(|c| c.unk).sum();
+        let s = n.saturating_sub(v + a + u);
         let theta: f64 = cs.iter().map(|c| c.theta).sum();
         let worst = cs.iter().filter_map(|c| c.usage.map(|u| (u, c.circuit.as_str()))).max_by(|x, y| x.0.total_cmp(&y.0));
         let (use_s, at) = worst.map_or(("-".into(), ""), |(u, c)| (format!("{:.3}", u), c));
-        let rate = if n > a { 100.0 * s as f64 / (n - a) as f64 } else { 100.0 };
+        let r = rate(s, s + v);
         println!(
-            "  {kind:<20} {arm:<6} {n:>5} {s:>5} {v:>5} {a:>4} {rate:>5.0}%  {use_s:>9} {at:<16} {theta:>8.3}"
+            "  {kind:<20} {arm:<6} {n:>5} {s:>5} {v:>5} {u:>4} {a:>4} {r}  {use_s:>9} {at:<16} {theta:>8.3}"
         );
         total += n;
         sat += s;
         na += a;
+        unk += u;
     }
-    let overall = if total > na { 100.0 * sat as f64 / (total - na) as f64 } else { 100.0 };
-    println!("  {}", "-".repeat(96));
+    let viol = total - sat - na - unk;
+    println!("  {}", "-".repeat(101));
     println!(
-        "  {:<20} {:<6} {:>5} {:>5} {:>5} {:>4} {:>5.0}%",
-        "OVERALL", "", total, sat, total - sat - na, na, overall
+        "  {:<20} {:<6} {:>5} {:>5} {:>5} {:>4} {:>4} {}",
+        "OVERALL", "", total, sat, viol, unk, na, rate(sat, sat + viol)
     );
-    println!("  (max use = spent fraction of the tightest rule's budget; 1.000 = at spec. n/a = nothing to check.)");
+    println!("  (max use = spent fraction of the tightest rule's budget; 1.000 = at spec. unk = inputs missing, never a pass; n/a = nothing to check. rate = sat / checked.)");
 }
 
 fn main() {
@@ -389,6 +459,24 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// A rule without its inputs is counted unknown, never satisfied.
+    #[test]
+    fn unknown_rules_are_not_counted_as_satisfied() {
+        #[derive(Clone, Copy)]
+        struct NoInput;
+        impl analog::Rule for NoInput {
+            type On = ();
+            fn cost(self, _: &()) -> f32 {
+                0.0
+            }
+            fn known(self, _: &()) -> bool {
+                false
+            }
+        }
+        let c = stat("cost", "x", &vec![NoInput; 3], &()).unwrap();
+        assert_eq!((c.total, c.violated, c.unk, c.na), (3, 0, 3, 0));
+    }
+
     #[test]
     fn short_kind_trims_path() {
         assert_eq!(short_kind("philis::placement::ThermalGradient"), "ThermalGradient");
@@ -410,6 +498,7 @@ mod tests {
             branch: vec![],
             power_uw: vec![0],
             temp_mc: vec![0],
+            units: Default::default(),
         };
         let (area, util) = footprint(&l);
         assert!((area - 1.0).abs() < 1e-9);

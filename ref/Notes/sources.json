@@ -1,0 +1,136 @@
+{
+  "prepared": "2026-09-23",
+  "total_physical_pages": 2710,
+  "sources": [
+    {
+      "id": "hastings",
+      "filename": "The Art of Analog Layout 3ed 2023 -- Ray Alan Hastings -- 3, Hoboken, NJ, 2023 -- Pearson -- isbn13 9780138038397 -- 6bbbd57a3d28d8899c01a9f3ed055000 -- Anna’s Archive.pdf",
+      "pages": 1568,
+      "sha256": "8f6d5e7f9844f5ec2b8367af801a57cec081cc0dc255e09a37a4f74f04b38b01",
+      "title": "The Art of Analog Layout",
+      "attribution": "Alan Hastings · third edition · 2023 catalog / ©2024",
+      "notes": "hastings.html",
+      "coverage_anchor": "coverage"
+    },
+    {
+      "id": "lampaert",
+      "filename": "Analog Layout Generation for Performance and -- Koen Lampaert, Georges Gielen, Willy Sansen (auth_) -- The Springer International Series in -- isbn13 9780792384793 -- 4ebd732bf3deace6ef0efade488ea6ab -- Anna’s Archive.pdf",
+      "pages": 185,
+      "sha256": "0261ef97393069806fb14ce6617a47b60b27226f92a8d06c00bff948ab3d0d4e",
+      "title": "Analog Layout Generation for Performance and Manufacturability",
+      "attribution": "Koen Lampaert, Georges Gielen and Willy Sansen · 1999",
+      "notes": "lampaert.html",
+      "coverage_anchor": "coverage"
+    },
+    {
+      "id": "topological",
+      "filename": "Analog Layout Synthesis : A Survey of Topological Approaches -- Florin Balasa (auth_), Helmut E_ Graeb (eds_) -- 1st ed_ 2011, New York, NY, 2011 -- isbn13 9781282972636 -- a373d8a6c22644f15cf2c13836981ad7 -- Anna’s Archive.pdf",
+      "pages": 311,
+      "sha256": "bcbf2f98625fe3f77974c3463ceca887d50200128b3b0afbb2f3e8f32dcadb7d",
+      "title": "Analog Layout Synthesis: A Survey of Topological Approaches",
+      "attribution": "Helmut E. Graeb, editor · 2011",
+      "notes": "topological.html",
+      "coverage_anchor": "coverage"
+    },
+    {
+      "id": "centering",
+      "filename": "Analog Design Centering and Sizing -- Helmut E_ Graeb -- 2007, 2007 -- Springer London, Limited -- isbn13 9781280943683 -- 2c21c02d0baade22d10875dc1e68fe8a -- Anna’s Archive.pdf",
+      "pages": 210,
+      "sha256": "f6786c92444dce4f6d2bdc3982ea199ae6ed126ded53ecd3a622eaaf25219756",
+      "title": "Analog Design Centering and Sizing",
+      "attribution": "Helmut E. Graeb · 2007",
+      "notes": "centering.html",
+      "coverage_anchor": "coverage"
+    },
+    {
+      "id": "substrate",
+      "filename": "Substrate Noise : Analysis and Optimization for IC Design -- Edoardo Charbon; Ranjit Gharpurey; Paolo Miliozzi; Robert G_ -- 1st ed_ 2001, New York, -- isbn13 9780306481710 -- bb6b7e76395a141e9e9ab9f238fbdb67 -- Anna’s Archive.pdf",
+      "pages": 194,
+      "sha256": "b2d11867b5cb5b0313c2d52bc7a4e1d5df6aedc035eba1bbd4875161f79721bb",
+      "title": "Substrate Noise: Analysis and Optimization for IC Design",
+      "attribution": "Edoardo Charbon, Ranjit Gharpurey, Paolo Miliozzi, Robert G. Meyer and Alberto Sangiovanni-Vincentelli · 2001 print / 2003 ebook",
+      "notes": "substrate.html",
+      "coverage_anchor": "coverage"
+    },
+    {
+      "id": "electromigration",
+      "filename": "Fundamentals of Electromigration-Aware Integrated Circuit -- Jens Lienig,Matthias Thiele (auth_) -- 1st ed_ 2018, Cham, 2018 -- Springer International -- isbn13 9783030088118 -- 441cc50ea08db83725d64361b9c0688e -- Anna’s Archive.pdf",
+      "pages": 171,
+      "sha256": "dece9109bf0d2f1f2c5589cc93bffca5363a9d6f3dc1bd4def16e7fa75b2373b",
+      "title": "Fundamentals of Electromigration-Aware Integrated Circuit Design",
+      "attribution": "Jens Lienig and Matthias Thiele · 2018",
+      "notes": "electromigration.html",
+      "coverage_anchor": "coverage"
+    },
+    {
+      "id": "pelgrom",
+      "filename": "Matching_properties_of_MOS_transistors.pdf",
+      "pages": 4,
+      "sha256": "90db554da931758a0a570ab5ebfe515b19ed2f4726093de48b980fe157ab601a",
+      "title": "Matching properties of MOS transistors",
+      "attribution": "Marcel J. M. Pelgrom and Aad C. J. Duinmaijer · ESSCIRC 1988",
+      "notes": "pelgrom.html",
+      "coverage_anchor": "coverage"
+    },
+    {
+      "id": "drennan",
+      "filename": "Understanding_MOSFET_mismatch_for_analog_design.pdf",
+      "pages": 7,
+      "sha256": "7522e7aa51c90edb18dd4e05fe548e56d09b57689b7095fac277ece9a36eed7b",
+      "title": "Understanding MOSFET mismatch for analog design",
+      "attribution": "Patrick G. Drennan and Colin C. McAndrew · JSSC 2003",
+      "notes": "drennan.html",
+      "coverage_anchor": "coverage"
+    },
+    {
+      "id": "cc-review",
+      "filename": "Common-Centroid_Layout_for_Active_and_Passive_Devices_A_Review_and_the_Road_Ahead.pdf",
+      "pages": 8,
+      "sha256": "7a2c661c60de7f7a6aa82ebcb3dcb53e0f891e8580090834ec92ca0f2dce5c07",
+      "title": "Common-Centroid Layout for Active and Passive Devices: A Review and the Road Ahead",
+      "attribution": "Nibedita Karmokar, Meghna Madhusudan, Arvind K. Sharma, Ramesh Harjani, Mark Po-Hung Lin and Sachin S. Sapatnekar · ASP-DAC 2022, pp. 114–121",
+      "notes": "cc-review.html",
+      "coverage_anchor": "coverage"
+    },
+    {
+      "id": "nth-order",
+      "filename": "An_N_sup_th__order_central_symmetrical_layout_pattern_for_nonlinear_gradients_cancellation.pdf",
+      "pages": 4,
+      "sha256": "e725d52e345aeda2b2f13593bc5070b12cfdb6b07775ff2698ef5b595c556476",
+      "title": "An Nth-order central symmetrical layout pattern for nonlinear gradients cancellation",
+      "attribution": "Xin Dai, Chengming He, Hanqing Xing, Degang Chen and Randall Geiger · ISCAS 2005",
+      "notes": "nth-order.html",
+      "coverage_anchor": "coverage"
+    },
+    {
+      "id": "dac",
+      "filename": "Constructive_Placement_and_Routing_for_Common-Centroid_Capacitor_Arrays_in_Binary-Weighted_and_Split_DACs.pdf",
+      "pages": 14,
+      "sha256": "bfa289efdd2d642f2a4993a072b30f4f8b0bf409689fe8d89824c4c7e2165b62",
+      "title": "Constructive Placement and Routing for Common-Centroid Capacitor Arrays in Binary-Weighted and Split DACs",
+      "attribution": "Nibedita Karmokar, Arvind K. Sharma, Jitesh Poojary, Meghna Madhusudan, Ramesh Harjani and Sachin S. Sapatnekar · IEEE TCAD 42(9), 2023, pp. 2782–2795",
+      "notes": "dac.html",
+      "coverage_anchor": "coverage"
+    },
+    {
+      "id": "performance",
+      "filename": "Performance-Driven_Analog_Layout_Automation_Current_Status_and_Future_Directions_Invited_Paper.pdf",
+      "pages": 7,
+      "sha256": "f720e36240f8fdf85504169588be8ec550ac9398607170d20ca56cb0e50de902",
+      "title": "Performance-Driven Analog Layout Automation: Current Status and Future Directions",
+      "attribution": "Peng Xu, Jintao Li, Tsung-Yi Ho, Bei Yu and Keren Zhu · ASP-DAC 2024",
+      "notes": "performance.html",
+      "coverage_anchor": "coverage"
+    },
+    {
+      "id": "todaes",
+      "filename": "todaes22yl.pdf",
+      "pages": 27,
+      "sha256": "9f734d42fa437e7828757c840aa63ae15f83217328ae0b0c64331ca2be507929",
+      "title": "Performance-driven Wire Sizing for Analog Integrated Circuits",
+      "attribution": "Yaguang Li, Yishuang Lin, Meghna Madhusudan, Arvind Sharma, Sachin S. Sapatnekar, Ramesh Harjani and Jiang Hu · supplied manuscript (PDF metadata dated 2022)",
+      "notes": "todaes.html",
+      "coverage_anchor": "coverage"
+    }
+  ]
+}

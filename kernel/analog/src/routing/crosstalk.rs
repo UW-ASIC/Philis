@@ -58,6 +58,9 @@ impl Rule for CrosstalkExclusion {
         out.push(u32::from(self.a.0));
         out.push(u32::from(self.b.0));
     }
+    fn keepaway(self) -> Option<(u32, u32)> {
+        Some((u32::from(self.a.0), u32::from(self.b.0)))
+    }
     /// `(d − floor) / floor`; `1.0` when the nets share no layer.
     fn headroom(self, r: &Routes) -> f32 {
         let floor = self.min_spacing_nm.max(1) as f32;
@@ -86,7 +89,7 @@ impl Rule for CrosstalkExclusion {
     }
 
     /// Per diff pair: each input gate net against each output drain net
-    /// (the feedback path), 400 nm floor.
+    /// (the feedback path); the caller sets the spacing from the process.
     ///
     /// ponytail: clock aggressors need `NetClassification`, which the
     /// hypergraph does not carry.
@@ -101,7 +104,7 @@ impl Rule for CrosstalkExclusion {
                 for g in [hg.device_nets[a][G], hg.device_nets[b][G]] {
                     for d in [hg.device_nets[a][D], hg.device_nets[b][D]] {
                         if g != d {
-                            out.push(CrosstalkExclusion { a: g, b: d, min_spacing_nm: 400, margin_pct: 25 });
+                            out.push(CrosstalkExclusion { a: g, b: d, min_spacing_nm: 0, margin_pct: 25 });
                         }
                     }
                 }

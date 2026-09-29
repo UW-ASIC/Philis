@@ -17,6 +17,40 @@ pub fn collect(macros: &[Macro], layout: &Layout, routes: &Routes) -> Vec<Shape>
     out
 }
 
+
+/// Merge `layer`'s rects wherever two overlap or abut into exactly one
+/// rectangle (same span on one axis, touching on the other), until none do.
+/// The drawn area is unchanged; the checker, which reads a well per rect,
+/// then sees a bridged well as one.
+///
+/// ponytail: O(n²) per pass over the layer's rects; wells are few.
+pub fn merge_rects(shapes: &mut Vec<Shape>, layer: pnr_core::LayerId) {
+    let (mut on, rest): (Vec<Shape>, Vec<Shape>) = shapes.drain(..).partition(|s| s.layer == layer);
+    use pnr_core::Rect;
+    let joined = |a: Rect, b: Rect| -> Option<Rect> {
+        let (x0, x1) = (a.x.min(b.x), (a.x + a.w).max(b.x + b.w));
+        let (y0, y1) = (a.y.min(b.y), (a.y + a.h).max(b.y + b.h));
+        let rows = a.y == b.y && a.h == b.h && a.x <= b.x + b.w && b.x <= a.x + a.w;
+        let cols = a.x == b.x && a.w == b.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
+        let inside = |p: Rect, q: Rect| p.x >= q.x && p.y >= q.y && p.x + p.w <= q.x + q.w && p.y + p.h <= q.y + q.h;
+        (rows || cols || inside(a, b) || inside(b, a)).then_some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+    };
+    'again: loop {
+        for i in 0..on.len() {
+            for j in i + 1..on.len() {
+                if let Some(r) = joined(on[i].rect, on[j].rect) {
+                    on[i].rect = r;
+                    on.swap_remove(j);
+                    continue 'again;
+                }
+            }
+        }
+        break;
+    }
+    shapes.extend(rest);
+    shapes.extend(on);
+}
+
 /// Debug-only: every pin of a net touches that net's routed geometry (xy
 /// overlap, touching counts). `Routes::debug_check` only proves the wires are
 /// self-connected, which a net can satisfy while missing its pins entirely.
@@ -149,6 +183,8 @@ mod tests {
                 w: 300,
                 h: 400,
             },
+            units: Vec::new(),
+            dummies: Vec::new(),
         }
     }
 
@@ -165,6 +201,7 @@ mod tests {
             branch: vec![],
             power_uw: vec![0],
             temp_mc: vec![0],
+            units: Default::default(),
         }
     }
 
@@ -193,7 +230,7 @@ mod tests {
     /// the extents here are deliberately non-zero.
     #[test]
     fn drawn_bbox_is_centred_on_the_placed_centre() {
-        let routes = Routes { wires: vec![] };
+        let routes = Routes { wires: vec![], ..Default::default()  };
         let m = ell();
         let (hw, hh) = (m.bbox.w / 2, m.bbox.h / 2);
         let mut l = layout_of(Orient::R0, 7_000, 3_000);
@@ -209,7 +246,7 @@ mod tests {
     /// origin, so `bbox.x`/`bbox.y` are negative and were silently dropped.
     #[test]
     fn offset_local_bbox_still_centres() {
-        let routes = Routes { wires: vec![] };
+        let routes = Routes { wires: vec![], ..Default::default()  };
         let shifted = Macro {
             shapes: ell()
                 .shapes
@@ -230,6 +267,8 @@ mod tests {
                 w: 300,
                 h: 400,
             },
+            units: Vec::new(),
+            dummies: Vec::new(),
         };
         let (hw, hh) = (150, 200);
         let mut l = layout_of(Orient::R0, 40_000, 60_000);
@@ -243,7 +282,7 @@ mod tests {
     /// `dp::try_rotate` assumes when it swaps `hw`/`hh`.
     #[test]
     fn r90_transposes_and_keeps_the_anchor() {
-        let routes = Routes { wires: vec![] };
+        let routes = Routes { wires: vec![], ..Default::default()  };
         let flat = bbox_of(&collect(
             &[ell()],
             &layout_of(Orient::R0, 500, 900),
@@ -266,7 +305,7 @@ mod tests {
     /// through the re-anchoring arithmetic.
     #[test]
     fn four_quarter_turns_are_the_identity() {
-        let routes = Routes { wires: vec![] };
+        let routes = Routes { wires: vec![], ..Default::default()  };
         let mut m = ell();
         for _ in 0..4 {
             let shapes = collect(&[m.clone()], &layout_of(Orient::R90, 0, 0), &routes);
@@ -274,6 +313,8 @@ mod tests {
                 bbox: bbox_of(&shapes),
                 shapes,
                 pins: vec![],
+                units: Vec::new(),
+                dummies: Vec::new(),
             };
         }
         let orig = ell();

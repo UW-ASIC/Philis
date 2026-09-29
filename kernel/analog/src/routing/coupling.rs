@@ -9,29 +9,23 @@ use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
 
 use crate::rule::Rule;
+use super::Stack;
 
 /// `ε·h` in `C = ε·h·run/gap`, aF (εr 3.9, ~0.35 µm metal): two wires 400 nm
 /// apart couple ~30 aF/µm of parallel run.
 ///
-/// ponytail: one constant for the whole stack; read per-layer `ε·h` (plus a
-/// fringe term) from the PDK when it carries wire parasitics.
+/// The fallback when the deck gives no per-layer `ε·t` ([`Stack::lateral_af`]).
 const EPS_H_AF: f32 = 12.0;
 
-/// Lateral coupling between two same-layer shapes, aF. Only shapes separated
-/// on one axis and overlapping on the other (a parallel run) couple.
-fn pair_coupling_af(p: &Rect, q: &Rect) -> f32 {
-    let gap_x = (q.x - (p.x + p.w)).max(p.x - (q.x + q.w));
-    let gap_y = (q.y - (p.y + p.h)).max(p.y - (q.y + q.h));
-    let run_x = (p.x + p.w).min(q.x + q.w) - p.x.max(q.x);
-    let run_y = (p.y + p.h).min(q.y + q.h) - p.y.max(q.y);
-    let (run, gap) = if gap_x > 0 && run_y > 0 {
-        (run_y, gap_x)
-    } else if gap_y > 0 && run_x > 0 {
-        (run_x, gap_y)
-    } else {
-        return 0.0;
-    };
-    EPS_H_AF * run as f32 / gap.max(1) as f32
+/// Lateral coupling between two same-layer shapes, aF: the layer's own
+/// `ε0·k·t·run/gap` from the deck when known (TOPO eq. 4.3), else `EPS_H_AF`.
+/// Only shapes separated on one axis and overlapping on the other (a parallel
+/// run) couple.
+fn pair_coupling_af(stack: Option<&Stack>, layer: u16, p: &Rect, q: &Rect) -> f32 {
+    if let Some(c) = stack.and_then(|s| s.lateral_af(layer, p, q)) {
+        return c;
+    }
+    super::stack::parallel(p, q).map_or(0.0, |(run, gap)| EPS_H_AF * run as f32 / gap.max(1) as f32)
 }
 
 /// Budget on the total coupling onto `net`, aF. Registered in the budget arm.
@@ -42,6 +36,8 @@ pub struct CouplingBudget {
     pub max_coupling_af: i64,
     /// Safety margin held back from the budget, percent.
     pub margin_pct: u8,
+    /// Per-layer `ε·t`; `None` = one constant for the stack.
+    pub stack: Option<&'static Stack>,
 }
 
 impl CouplingBudget {
@@ -63,7 +59,7 @@ impl CouplingBudget {
             for a in victim {
                 for b in shapes {
                     if a.layer == b.layer {
-                        total += pair_coupling_af(&a.rect, &b.rect);
+                        total += pair_coupling_af(self.stack, a.layer.0, &a.rect, &b.rect);
                     }
                 }
             }
@@ -117,11 +113,11 @@ mod tests {
             let x = if i % 2 == 0 { 100 + gap } else { -(gap + 100) };
             wires.push(vec![wire(x, 0, 100, 10_000, 0)]);
         }
-        Routes { wires }
+        Routes { wires, ..Default::default()  }
     }
 
     fn budget(max_af: i64) -> Vec<CouplingBudget> {
-        vec![CouplingBudget { net: NetId(0), max_coupling_af: max_af, margin_pct: 20 }]
+        vec![CouplingBudget { net: NetId(0), max_coupling_af: max_af, margin_pct: 20, stack: None }]
     }
 
     #[test]
@@ -130,9 +126,9 @@ mod tests {
         // spacing, so every pairwise check passes — but the total does not.
         let one = budget(400).cost(&routes(1, 400));
         let four = budget(400).cost(&routes(4, 400));
-        let t1 = CouplingBudget { net: NetId(0), max_coupling_af: 400, margin_pct: 20 }
+        let t1 = CouplingBudget { net: NetId(0), max_coupling_af: 400, margin_pct: 20, stack: None }
             .total_af(&routes(1, 400));
-        let t4 = CouplingBudget { net: NetId(0), max_coupling_af: 400, margin_pct: 20 }
+        let t4 = CouplingBudget { net: NetId(0), max_coupling_af: 400, margin_pct: 20, stack: None }
             .total_af(&routes(4, 400));
         assert!((t4 - 4.0 * t1).abs() < 1.0, "four equal neighbours ⇒ 4× coupling");
         assert_eq!(one, 0.0, "a single neighbour is inside budget");
@@ -147,7 +143,7 @@ mod tests {
         // residual has to be measured on `total_af` — not per pair. Set the budget to
         // exactly one neighbour's contribution and the four-aggressor case is 4× it,
         // i.e. 3 full budgets over.
-        let one = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0 }
+        let one = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None }
             .total_af(&routes(1, 400));
         let b = budget(one.round() as i64);
         assert_eq!(b[0].residual(&routes(1, 400)), 0.0, "at its budget ⇒ nothing past it");
@@ -161,9 +157,9 @@ mod tests {
 
     #[test]
     fn coupling_falls_off_with_spacing() {
-        let near = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0 }
+        let near = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None }
             .total_af(&routes(1, 200));
-        let far = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0 }
+        let far = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None }
             .total_af(&routes(1, 800));
         assert!((near / far - 4.0).abs() < 0.1, "1/d: 4× the gap ⇒ ¼ the coupling");
     }
@@ -172,7 +168,7 @@ mod tests {
     fn different_layers_do_not_couple_laterally() {
         let mut r = routes(1, 400);
         r.wires[1][0].layer = LayerId(1);
-        let t = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0 }.total_af(&r);
+        let t = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None }.total_af(&r);
         assert_eq!(t, 0.0, "lateral coupling is same-layer");
     }
 
@@ -189,7 +185,7 @@ mod tests {
     #[test]
     fn magnitude_is_physical() {
         // Two min-width wires 400 nm apart, 10 µm of parallel run: ~300 aF.
-        let t = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0 }
+        let t = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None }
             .total_af(&routes(1, 400));
         assert!((250.0..350.0).contains(&t), "expected ~300 aF, got {t}");
     }
