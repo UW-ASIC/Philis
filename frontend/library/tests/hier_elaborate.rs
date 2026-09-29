@@ -213,9 +213,8 @@ fn hierarchical_composition_elaborates_with_a_correct_schematic() {
         .map(|v| v.rule.as_str())
         .filter(|r| r.contains("lvs"))
         .collect();
-    eprintln!(
-        "hier signoff: {} hard violations, {} lvs: {lvs:?}",
-        report.hard_violations.len(),
-        lvs.len()
+    assert!(
+        lvs.is_empty(),
+        "hierarchical layout must be LVS-clean against its schematic: {lvs:?}"
     );
 }

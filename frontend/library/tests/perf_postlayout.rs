@@ -1,17 +1,65 @@
 //! The post-layout performance loop against real ngspice and the installed
 //! sky130 models: the OTA fixture's gain with its layout's branch resistance
-//! and stress, and a full flow scored on it. Skips without ngspice or models.
+//! and stress, and a full flow scored on it. Without ngspice or the models
+//! each test prints why and returns; `PHILIS_REQUIRE_TOOLS=1` (CI's nightly
+//! job) turns that skip into a panic, so a missing tool is never a green run.
 
 use library::oppoint::OpConfig;
 use library::perf::{evaluate, Parasitics, PerfConfig, Spec};
 
+/// Whether this test may skip: `true` when `what` is present; otherwise a
+/// panic under `PHILIS_REQUIRE_TOOLS=1`, else an `eprintln!` and `false`.
+fn present_or_skip(what: &str, present: bool) -> bool {
+    if !present {
+        assert!(
+            std::env::var_os("PHILIS_REQUIRE_TOOLS").is_none_or(|v| v != "1"),
+            "PHILIS_REQUIRE_TOOLS=1 and {what} is missing"
+        );
+        eprintln!("{what} unavailable — skipping");
+    }
+    present
+}
+
+/// `bin` counts as present when it spawns at all (`--version` exits either
+/// way); only a failed spawn, i.e. not on PATH, is absent.
+fn tool_or_skip(bin: &str) -> bool {
+    present_or_skip(
+        bin,
+        std::process::Command::new(bin)
+            .arg("--version")
+            .output()
+            .is_ok(),
+    )
+}
+
 fn models() -> Option<std::path::PathBuf> {
+    if !tool_or_skip("ngspice") {
+        return None;
+    }
     let root = std::env::var_os("PDK_ROOT")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".volare")))?;
-    let lib = root.join("sky130A/libs.tech/ngspice/sky130.lib.spice");
-    let ngspice = std::process::Command::new("ngspice").arg("--version").output().is_ok();
-    (lib.is_file() && ngspice).then_some(lib)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".volare")));
+    let lib = root.map(|r| r.join("sky130A/libs.tech/ngspice/sky130.lib.spice"));
+    let found = lib.as_ref().is_some_and(|l| l.is_file());
+    present_or_skip(&format!("sky130 models ({lib:?})"), found).then(|| lib.unwrap())
+}
+
+/// A binary that is on no PATH skips (returns `false`) in a plain run and
+/// panics when the run requires tools; either way it never reads as present.
+#[test]
+fn tool_or_skip_reports_a_missing_binary() {
+    let bin = "philis-no-such-binary-7f3a";
+    if std::env::var_os("PHILIS_REQUIRE_TOOLS").is_some_and(|v| v == "1") {
+        assert!(
+            std::panic::catch_unwind(|| tool_or_skip(bin)).is_err(),
+            "a required tool that is absent must panic"
+        );
+    } else {
+        assert!(
+            !tool_or_skip(bin),
+            "an absent binary must not read as present"
+        );
+    }
 }
 
 /// The fixture as a 5T OTA: `vbias` tied to `vout1` (M3 diode-connected),
@@ -48,10 +96,7 @@ fn ota() -> pnr_core::Netlist {
 
 #[test]
 fn branch_resistance_and_stress_reach_the_simulation() {
-    let Some(lib) = models() else {
-        eprintln!("ngspice or sky130 models unavailable — skipping");
-        return;
-    };
+    let Some(lib) = models() else { return };
     let nl = ota();
     let gain = |p: &Parasitics| evaluate(&nl, p, &cfg(lib.clone())).unwrap().metrics[0].1;
     let plain = gain(&Parasitics::default()).expect("the schematic's gain is measured");
@@ -75,10 +120,7 @@ fn branch_resistance_and_stress_reach_the_simulation() {
 /// C, routed branch R, drawn stress) simulate and the spec is met.
 #[test]
 fn a_flow_scores_its_layout_in_simulation() {
-    let Some(lib) = models() else {
-        eprintln!("ngspice or sky130 models unavailable — skipping");
-        return;
-    };
+    let Some(lib) = models() else { return };
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
     let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();

@@ -113,5 +113,5 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
     - `dp` always runs all 220 iterations; stop it when the result stops improving.
     - `kernel/cells/src/mosfet.rs:719` links to the removed `VariantSpace::lock`.
     - Unused `Unitization`/`GuardRingRequirement` fields can now go.
-    - gr/dr are not rustfmt-clean.
+    - Only `frontend/cli` is rustfmt-clean (`cargo fmt --all --check` reports diffs in the other 15 workspace crates, not only gr/dr); CI's `fmt` job stays advisory until one formatting commit.
     - `xcheck_lvs.py` covers MOS only and was not re-run.
