@@ -30,7 +30,7 @@ fn an_adopted_antenna_diode_keeps_lvs_matched() {
         .find(|&c| sol.macros[c].pins.iter().any(|p| p.name.ends_with(":N")))
         .expect("the diode's cell");
     let placed = pnr_core::place_macros(&sol.macros, &sol.layout).swap_remove(cell);
-    sol.macros[cell] = Macro { shapes: vec![], pins: vec![], bbox: Rect { w: 0, h: 0, ..placed.bbox }, units: vec![], dummies: Vec::new() };
+    sol.macros[cell] = Macro { shapes: vec![], pins: vec![], bbox: Rect { w: 0, h: 0, ..placed.bbox }, units: vec![], dummies: Vec::new(), ..Default::default() };
     let at = sol.netlist.devices.iter().position(|d| d.kind == DeviceKind::Diode).unwrap();
     let diode = sol.netlist.devices.remove(at);
 
