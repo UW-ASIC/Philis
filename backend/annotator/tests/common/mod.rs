@@ -76,8 +76,8 @@ pub fn net(src: &str) -> Netlist {
 
 /// `benchmarks/competition/ALIGN/examples/high_speed_comparator/high_speed_comparator.sp`:
 /// n→nfet, p→pfet, l=14e-9→14n, nfin/nf dropped, m kept, and `w=1u` on every device, a
-/// Philis placeholder (the .sp carries no w; once EXT-11 makes a missing w an unknown size,
-/// none would leave no `ExactAs` pattern, hence no seed pair, matching).
+/// Philis placeholder: the .sp carries no w, and leaving it off would, once EXT-11 reads a
+/// missing w as an unknown size, leave no `ExactAs` pattern, hence no seed pair and no matching.
 /// Instance names are the ALIGN gold's.
 pub const STRONGARM: &str = "mn0 vcom clk vss vss nfet w=1u l=14n m=8
     mn1 vin_d vin vcom vss nfet w=1u l=14n m=16 | mn2 vip_d vip vcom vss nfet w=1u l=14n m=16
@@ -145,7 +145,7 @@ pub struct Canon {
     pub pairs: BTreeSet<(String, String)>,
     /// Hard self-symmetric `Symmetry` entries (`a == b`).
     pub selfs: BTreeSet<String>,
-    /// Hard `Differential` routing pairs, names sorted.
+    /// `Differential` routing pairs from any arm (EXT-09 moves them hard → budget), names sorted.
     pub net_pairs: BTreeSet<(String, String)>,
     /// Distinct symmetry axes among the hard pairs.
     pub axes: usize,
@@ -156,6 +156,8 @@ pub fn sorted(a: &str, b: &str) -> (String, String) {
     if a <= b { (a.into(), b.into()) } else { (b.into(), a.into()) }
 }
 
+/// [`Canon`] of `p`, device and net ids resolved through `nl`, so two annotations of
+/// permuted netlists compare equal exactly when they decided the same things.
 pub fn canon(p: &annotator::Problem, nl: &Netlist) -> Canon {
     let dev = |i: u32| nl.devices[i as usize].name.as_str();
     let mut mirror = Vec::new();
@@ -168,7 +170,8 @@ pub fn canon(p: &annotator::Problem, nl: &Netlist) -> Canon {
             c.pairs.insert(sorted(dev(a), dev(b)));
         }
     }
-    for b in p.routing.hard.iter().filter(|b| b.kind().ends_with("::Differential")) {
+    let arms = p.routing.hard.iter().chain(&p.routing.budget).chain(&p.routing.cost);
+    for b in arms.filter(|b| b.kind().ends_with("::Differential")) {
         for (x, y) in id_pairs(b.as_ref()) {
             c.net_pairs.insert(sorted(&nl.nets[x as usize].name, &nl.nets[y as usize].name));
         }

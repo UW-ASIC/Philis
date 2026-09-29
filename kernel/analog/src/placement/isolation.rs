@@ -43,3 +43,24 @@ impl Rule for Isolation {
         crate::rule::over(floor - l.edge_gap(self.a, self.b), floor)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rule::RuleBatch;
+    use pnr_core::ids::{DeviceId, GroupId};
+
+    /// Device ids in `(a, b)` order; a `Group` side contributes nothing.
+    #[test]
+    fn touched_yields_device_ids_only() {
+        let (d, g) = (|i| Target::Device(DeviceId(i)), Target::Group(GroupId(0)));
+        let batch = vec![
+            Isolation { a: d(3), b: d(1), min_distance_nm: 10_000 },
+            Isolation { a: d(7), b: g, min_distance_nm: 10_000 },
+            Isolation { a: g, b: g, min_distance_nm: 10_000 },
+        ];
+        let mut ids = Vec::new();
+        batch.touched(&mut ids);
+        assert_eq!(ids, [3, 1, 7]);
+    }
+}

@@ -1,5 +1,5 @@
 //! Recognition corpus (EXT-01, plan-01 T2/T3/T4/T6/T7): 17 circuits plus 3
-//! negative-only ones, each with the leaves the annotator finds **today**. The
+//! negative-only ones, each with the leaves and [`Canon`] the annotator gives **today**. The
 //! expectations characterise, they do not endorse: each later EXT item edits the
 //! rows it changes in the same commit, so its diff shows exactly what moved.
 
@@ -8,7 +8,7 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 
 use annotator::{annotate, AnnotationConfig, BlockKind};
-use common::{canon, canon_leaves, id_pairs, net, permute, strongarm_cfg, STRONGARM};
+use common::{canon, canon_leaves, Canon, id_pairs, net, permute, strongarm_cfg, STRONGARM};
 
 /// `(name, netlist)`: repository fixtures transcribed without `.subckt`, then
 /// constructed circuits (exact text of plan-01 EXT-01).
@@ -80,38 +80,42 @@ fn all() -> impl Iterator<Item = (&'static str, &'static str)> {
     CIRCUITS.into_iter().chain(NEGATIVE)
 }
 
-/// Today's leaves `(kind, sorted member names)` per circuit.
-const EXPECTED: [(&str, &[(&str, &[&str])]); 17] = [
-    ("ota5t", &[("CurrentMirror", &["XM3", "XM4"]), ("DiffPair", &["XM1", "XM2"])]),
-    ("three_stage", &[("CurrentMirror", &["M4", "M5"]), ("DiffPair", &["M1", "M2"]), ("Group", &["M6", "M8", "M9"])]),
-    ("dac4", &[("Group", &["XMN0", "XMP0"]), ("Group", &["XMN1", "XMP1"]), ("Group", &["XMN2", "XMP2"]), ("Group", &["XMN3", "XMP3"])]),
-    ("bgr_core", &[]),
-    ("bjt_mirror", &[]),
-    ("chain4", &[("Stack", &["XM1", "XM2"]), ("Stack", &["XM3", "XM4"])]),
-    ("pair", &[]),
-    ("quad", &[]),
-    ("folded", &[("DiffPair", &["M1", "M2"]), ("DiffPair", &["M10", "M8"]), ("DiffPair", &["M7", "M9"]), ("Stack", &["M3", "M5"]), ("Stack", &["M4", "M6"])]),
-    ("gilbert", &[("CurrentMirror", &["M3", "M6"]), ("CurrentMirror", &["M4", "M5"]), ("DiffPair", &["M1", "M2"])]),
-    ("rail2rail", &[("Group", &["MN1", "MP1"]), ("Group", &["MN2", "MP2"])]),
-    ("latch", &[("Group", &["MN1", "MP1"]), ("Group", &["MN2", "MP2"])]),
-    ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO2", "MO3"]), ("CurrentMirror", &["MO4", "MO5"])]),
-    ("brokaw", &[("CurrentMirror", &["MP1", "MP2"])]),
-    ("rdiv", &[]),
-    ("splitdac", &[]),
-    ("strongarm", &[("CurrentMirror", &["mp10", "mp9"]), ("DiffPair", &["mn1", "mn2"]), ("Group", &["mn0", "mp7"]), ("Group", &["mn13", "mp11"]), ("Group", &["mn14", "mp12"]), ("Group", &["mn3", "mp5"]), ("Group", &["mn4", "mp6"])]),
+/// Today's decisions per circuit: leaves `(kind, sorted member names)`, then the
+/// [`Canon`] fields `pairs`, `selfs`, `net_pairs`, `axes` (`sets` is empty until EXT-12).
+type Row = (&'static str, &'static [(&'static str, &'static [&'static str])], &'static [(&'static str, &'static str)], &'static [&'static str], &'static [(&'static str, &'static str)], usize);
+const EXPECTED: [Row; 17] = [
+    ("ota5t", &[("CurrentMirror", &["XM3", "XM4"]), ("DiffPair", &["XM1", "XM2"])], &[("XM1", "XM2"), ("XM3", "XM4")], &["XM5"], &[("vout1", "vout2")], 1),
+    ("three_stage", &[("CurrentMirror", &["M4", "M5"]), ("DiffPair", &["M1", "M2"]), ("Group", &["M6", "M8", "M9"])], &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2")], 1),
+    ("dac4", &[("Group", &["XMN0", "XMP0"]), ("Group", &["XMN1", "XMP1"]), ("Group", &["XMN2", "XMP2"]), ("Group", &["XMN3", "XMP3"])], &[], &[], &[], 0),
+    ("bgr_core", &[], &[], &[], &[], 0),
+    ("bjt_mirror", &[], &[], &[], &[], 0),
+    ("chain4", &[("Stack", &["XM1", "XM2"]), ("Stack", &["XM3", "XM4"])], &[], &[], &[], 0),
+    ("pair", &[], &[], &[], &[], 0),
+    ("quad", &[], &[], &[], &[], 0),
+    ("folded", &[("DiffPair", &["M1", "M2"]), ("DiffPair", &["M10", "M8"]), ("DiffPair", &["M7", "M9"]), ("Stack", &["M3", "M5"]), ("Stack", &["M4", "M6"])], &[("M1", "M2"), ("M10", "M8"), ("M7", "M9")], &[], &[("x1", "x2")], 2),
+    ("gilbert", &[("CurrentMirror", &["M3", "M6"]), ("CurrentMirror", &["M4", "M5"]), ("DiffPair", &["M1", "M2"])], &[("M1", "M2"), ("M3", "M6"), ("M4", "M5")], &["M0"], &[("outn", "outp"), ("x1", "x2")], 2),
+    ("rail2rail", &[("Group", &["MN1", "MP1"]), ("Group", &["MN2", "MP2"])], &[], &[], &[("xn1", "xn2"), ("xp1", "xp2")], 0),
+    ("latch", &[("Group", &["MN1", "MP1"]), ("Group", &["MN2", "MP2"])], &[], &[], &[], 0),
+    ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO2", "MO3"]), ("CurrentMirror", &["MO4", "MO5"])], &[("MO1", "MR"), ("MO2", "MO3"), ("MO4", "MO5")], &[], &[], 2),
+    ("brokaw", &[("CurrentMirror", &["MP1", "MP2"])], &[("MP1", "MP2")], &[], &[], 1),
+    ("rdiv", &[], &[], &[], &[], 0),
+    ("splitdac", &[], &[], &[], &[], 0),
+    ("strongarm", &[("CurrentMirror", &["mp10", "mp9"]), ("DiffPair", &["mn1", "mn2"]), ("Group", &["mn0", "mp7"]), ("Group", &["mn13", "mp11"]), ("Group", &["mn14", "mp12"]), ("Group", &["mn3", "mp5"]), ("Group", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mp10", "mp9")], &["mp8"], &[("vin_d", "vip_d")], 2),
 ];
 
 #[test]
 fn corpus_expectations() {
-    let want: BTreeMap<&str, &[(&str, &[&str])]> = EXPECTED.into_iter().collect();
+    assert_eq!(CIRCUITS.map(|c| c.0), EXPECTED.map(|r| r.0), "one row per circuit, same order");
+    let owned = |v: &[(&str, &str)]| v.iter().map(|(a, b)| ((*a).to_string(), (*b).to_string())).collect();
     let mut bad = Vec::new();
-    for (name, src) in CIRCUITS {
+    for ((name, src), (_, leaves, pairs, selfs, net_pairs, axes)) in CIRCUITS.into_iter().zip(EXPECTED) {
         let nl = net(src);
-        let got = canon_leaves(&annotate(&nl, &cfg(name)), &nl);
-        let exp: BTreeSet<(String, Vec<String>)> = want[name]
-            .iter()
-            .map(|(k, m)| ((*k).to_string(), m.iter().map(|s| (*s).to_string()).collect()))
-            .collect();
+        let p = annotate(&nl, &cfg(name));
+        let got = (canon(&p, &nl), canon_leaves(&p, &nl));
+        let exp = (
+            Canon { pairs: owned(pairs), selfs: selfs.iter().map(|s| (*s).to_string()).collect(), net_pairs: owned(net_pairs), axes, ..Canon::default() },
+            leaves.iter().map(|(k, m)| ((*k).to_string(), m.iter().map(|s| (*s).to_string()).collect())).collect::<BTreeSet<(String, Vec<String>)>>(),
+        );
         if got != exp {
             bad.push(format!("{name}:\n  got  {got:?}\n  want {exp:?}"));
         }
@@ -134,18 +138,25 @@ fn assert_unmatched(name: &str, src: &str) {
     assert!(matched.is_empty(), "{name}: matched leaves {matched:?}");
 }
 
+/// The netlist named `name` in [`CIRCUITS`] or [`NEGATIVE`].
+fn src(name: &str) -> &'static str {
+    all().find(|c| c.0 == name).unwrap_or_else(|| panic!("no circuit {name}")).1
+}
+
 #[test]
 fn negative_corpus() {
-    assert_unmatched("bjt_mirror", CIRCUITS[4].1);
-    assert_unmatched("inv_chain", NEGATIVE[2].1);
+    for name in ["bjt_mirror", "inv_chain"] {
+        assert_unmatched(name, src(name));
+    }
 }
 
 /// Today both become DiffPairs (AA-05).
 #[test]
 #[ignore = "passes after EXT-04"]
 fn negative_corpus_sc_switches_and_equal_fets() {
-    assert_unmatched("sc_switches", NEGATIVE[0].1);
-    assert_unmatched("equal_fets", NEGATIVE[1].1);
+    for name in ["sc_switches", "equal_fets"] {
+        assert_unmatched(name, src(name));
+    }
 }
 
 #[test]
@@ -206,7 +217,7 @@ fn no_emitted_conflicts_strongarm() {
 /// T7: every device is in a requirement or reported `Unconstrained(reason)`.
 /// `Problem` has no coverage report before EXT-10, so there is nothing to check.
 #[test]
-#[ignore = "passes after EXT-10"]
+#[ignore = "body written by EXT-10 (no Problem::coverage before it)"]
 fn coverage_is_total() {
     unimplemented!("EXT-10 adds Problem::coverage; assert it covers every device of every corpus circuit");
 }
