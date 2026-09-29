@@ -1029,6 +1029,43 @@ mod tests {
         assert_eq!((phi(0), phi(1)), (0, 0));
     }
 
+    /// Every split-gate variant, labelled with a private gate per member
+    /// (only S and B common): ERC sees the two gates as two nets, so a poly
+    /// or strap joining them is a short. The shared-strap ABBA under the same
+    /// labels must short, or the labels cannot see one.
+    #[test]
+    fn split_gate_variants_keep_private_gates_under_erc() {
+        use crate::testkit;
+        use pnr_core::DeviceKind;
+        let Some(pdk) = testkit::pdk() else {
+            eprintln!("sky130 PDK unavailable — skipping");
+            return;
+        };
+        let (mut dirty, mut checked) = (Vec::new(), 0);
+        for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
+            for nf in [2u16, 4] {
+                for dummies in [false, true] {
+                    let (g, mut c) = testkit::group_of(kind, 2, nf, 1680, 150);
+                    c.unitization[0].dummy_required = dummies;
+                    for (i, v) in Mosfet::enumerate(&g, &c, &pdk).into_iter().enumerate() {
+                        let m = v.draw(&g, &c, &pdk);
+                        let rules = testkit::findings(&m.shapes, &testkit::ports_with(&m, &["S", "B"]), &pdk);
+                        if v.split_gates {
+                            checked += 1;
+                            if !rules.is_empty() {
+                                dirty.push(format!("{kind:?} nf={nf} dummies={dummies} #{i} rows={} mirror_pins={}: {rules:?}", v.rows, v.mirror_pins));
+                            }
+                        } else if v.style == Pattern::Cc1d && !v.mirror_pins && v.rows == 1 && !v.double_gate {
+                            assert!(!rules.is_empty(), "{kind:?} nf={nf} #{i}: the shared-strap ABBA joins both gates, yet private gate labels read clean");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 0, "no split-gate variant enumerated");
+        assert!(dirty.is_empty(), "{}", dirty.join("\n"));
+    }
+
     /// A mirror-pin order: drains never short, reflection swaps the devices,
     /// and the centroids coincide where the size allows (nf = 8).
     #[test]
