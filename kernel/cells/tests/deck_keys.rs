@@ -1,4 +1,5 @@
-//! The sidecar registry's `required` set is the set generators read.
+//! The sidecar registry's `required` set is the set generators read with a
+//! compiled default, both ways.
 //!
 //! A `required` key missing from a sidecar fails `Pdk::load`; a key read with
 //! a compiled default but not required would silently build to that default
@@ -13,7 +14,7 @@ use analog::cell::{SeriesParallel, Unitization};
 use analog::Constraints;
 use cells::{bjt::Bjt, cap_array::CapArray, capacitor::Capacitor, diode::Diode, finfet::FinFet, inductor::Inductor, mosfet::Mosfet, resistor::Resistor, Cell};
 use pnr_core::{DeviceGroup, DeviceId, DeviceKind, LayerId, Process};
-use verify::sidecar::{Kind, KEYS};
+use verify::sidecar::KEYS;
 
 /// `pdk`, recording every `rule()` name asked of it.
 struct Recording<'a>(&'a verify::Pdk, RefCell<BTreeSet<String>>);
@@ -122,9 +123,42 @@ fn generators_read_exactly_the_required_keys() {
     assert!(empty.is_empty(), "generators that drew nothing, so recorded nothing: {empty:?}");
 
     let recorded = rec.1.into_inner();
-    let required: BTreeSet<&str> = KEYS.iter().filter(|k| k.required && k.kind != Kind::Layers).map(|k| k.name).collect();
+    // Required keys read outside `rule()` on kernel/cells generators: `layers`
+    // by verify's parse_roles, `max_finger_width` by the library's cellgen
+    // `folds` (which takes a `&Pdk`, so this recording cannot reach it; its
+    // default 0 there means no finger-width limit).
+    let read_elsewhere = ["layers", "max_finger_width"];
+    let lax: Vec<_> = read_elsewhere.iter().filter(|n| !KEYS.iter().any(|k| k.name == **n && k.required)).collect();
+    assert!(lax.is_empty(), "keys read with a compiled default outside this recording, not required: {lax:?}");
+    let required: BTreeSet<&str> = KEYS.iter().filter(|k| k.required && !read_elsewhere.contains(&k.name)).map(|k| k.name).collect();
     let unread: Vec<_> = required.iter().filter(|k| !recorded.contains(**k)).collect();
     assert!(unread.is_empty(), "required keys no generator read (make them optional or delete them): {unread:?}");
+    // Keys read with a compiled default that may still be absent. The reader
+    // only raises a deck-derived value with them (`dim` in builder.rs takes
+    // the max with the deck's own rule, the mosfet/bjt/diode/resistor
+    // contact enclosures and spacings max them with the deck's enclosure,
+    // endcap or spacing), so an absent key leaves the deck's number, not
+    // Philis's; or they are a flag whose absence is the conservative choice
+    // (`npn_isolation` 0 = no isolated NPN offered).
+    let raise_deck = [
+        "m1_enc",
+        "min_finger_width",
+        "via_enclosure",
+        "via_spacing",
+        "li_encloses_licon",
+        "li_encloses_licon_one_side",
+        "licon_poly_enc",
+        "licon_to_gate_spacing",
+        "polycon_to_diff_spacing",
+        "polycon_to_pdiff_spacing",
+    ];
+    let flags = ["npn_isolation"];
+    let optional_read: Vec<_> = KEYS
+        .iter()
+        .filter(|k| !k.required && recorded.contains(k.name) && !raise_deck.contains(&k.name) && !flags.contains(&k.name))
+        .map(|k| k.name)
+        .collect();
+    assert!(optional_read.is_empty(), "keys generators read with a compiled default but not required (a deck omitting them builds to Philis's number): {optional_read:?}");
 
     let sidecar = pdk.cell.as_object().expect("cell section");
     let registered: BTreeSet<&str> = KEYS.iter().map(|k| k.name).collect();

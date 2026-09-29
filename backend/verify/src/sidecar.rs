@@ -2,10 +2,12 @@
 //! whether loading requires it, whether it is process data that must name its
 //! source, and who reads it.
 //!
-//! `required` is exactly the set generators read through `Process::rule` with
-//! a compiled default (kernel/cells/tests/deck_keys.rs checks it against a
-//! recording run), so a shipped deck never silently builds to a number
-//! compiled into Philis. `sourced` keys are measurements of the process
+//! `required` is the set generators read through `Process::rule` with a
+//! compiled default, less keys whose reader only raises a deck-derived value
+//! and the `npn_isolation` flag (kernel/cells/tests/deck_keys.rs checks both
+//! directions against a recording run; `max_finger_width`, read by the
+//! library's cellgen, by name), so a shipped deck never silently builds to a
+//! number compiled into Philis. `sourced` keys are measurements of the process
 //! (mismatch, temperature, capacitance, well geometry): each non-null value
 //! needs a non-empty `<key>_source`; one starting `UNVERIFIED` is accepted
 //! and listed by [`crate::Pdk::unverified`]. Generator construction
@@ -76,7 +78,7 @@ pub const KEYS: &[Key] = &[
     k("em_current_density_source", Text, false, false, "provenance of the deck's EM rules"),
     k("erc_rules_note", Text, false, false, "documentation"),
     k("finfet_note", Text, false, false, "documentation"),
-    k("gate_cap_af_um2", Real, false, true, "frontend/library/src/lib.rs annotation"),
+    k("gate_cap_af_um2", Count, false, true, "frontend/library/src/lib.rs annotation"),
     k("guard_licon_pitch", Nm, true, false, "kernel/cells/src/mosfet.rs, post_cell.rs"),
     k("inapplicable_rules", List, false, false, "backend/verify/src/pdk.rs"),
     k("inapplicable_rules_note", Text, false, false, "documentation"),
@@ -93,10 +95,7 @@ pub const KEYS: &[Key] = &[
     k("lod_moat_ext_moderate", Nm, true, false, "kernel/cells/src/mosfet.rs; frontend/library/src/lib.rs"),
     k("lod_moat_ext_nm", Tier, false, false, "unread"),
     k("m1_enc", Nm, false, false, "kernel/cells/src/builder.rs dim (raises the deck's)"),
-    // ponytail: read with a compiled default, but by the library's `folds`,
-    // which the kernel/cells recording run cannot reach; required once a test
-    // records library reads.
-    k("max_finger_width", Nm, false, false, "frontend/library/src/cellgen.rs folds"),
+    k("max_finger_width", Nm, true, false, "frontend/library/src/cellgen.rs folds (0 = no limit)"),
     k("min_finger_width", Nm, false, false, "kernel/cells/src/builder.rs dim (raises the deck's); frontend/library/src/cellgen.rs"),
     k("min_guard_ring_width", Nm, true, false, "kernel/cells/src/bjt.rs, post_cell.rs"),
     k("mom_finger_space", Nm, true, false, "kernel/cells/src/capacitor.rs"),

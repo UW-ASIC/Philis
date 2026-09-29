@@ -1314,12 +1314,14 @@ mod tests {
     }
 
     /// Line 1 of each vendored deck names the GPurify commit it was copied
-    /// from (the rev `Cargo.lock` pins), so drift from upstream is visible.
+    /// from, which must be the rev `Cargo.lock` pins (build.rs
+    /// `GPURIFY_REV`): a lockfile bump without re-vendoring the decks fails.
     #[test]
     fn vendored_decks_name_their_origin() {
+        let rev = env!("GPURIFY_REV");
         for (name, text) in crate::decks::DECKS {
             let first = text.lines().next().unwrap_or_default();
-            assert!(first.starts_with("# vendored from GPurify 4ef439d"), "{name}: line 1 is {first:?}");
+            assert!(first.starts_with(&format!("# vendored from GPurify {rev}")), "{name}: line 1 is {first:?}, Cargo.lock pins {rev}");
         }
     }
 
