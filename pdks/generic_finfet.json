@@ -56,8 +56,6 @@
     "res_seg_gap": 400,
     "bjt_max_emitter_stripe": 25000,
     "bjt_min_emitter_side": 420,
-    "bjt_base_frac": 0.3,
-    "bjt_collector_frac": 0.5,
     "bjt_stripe_gap": 200,
     "diode_gap": 270,
     "ind_min_trace": 1000,
@@ -70,17 +68,19 @@
     "min_guard_ring_width": 54,
     "guard_licon_pitch": 54,
     "p_epi_thickness": 3000,
+    "p_epi_thickness_source": "UNVERIFIED: no source was recorded with this value. Read by no code.",
     "p_well_depth": 1500,
+    "p_well_depth_source": "UNVERIFIED: no source was recorded with this value. Read by no code.",
     "n_well_depth": 2000,
+    "n_well_depth_source": "UNVERIFIED: no source was recorded with this value. Read by no code.",
     "retrograde_pwell": false,
+    "retrograde_pwell_source": "UNVERIFIED: no source was recorded with this value. Read by no code.",
     "lod_moat_ext_nm": [
       3000,
       5000
     ],
     "sheet_tolerance": {},
     "linewidth_control_nm": {},
-    "bjt_base_frac_permille": 300,
-    "bjt_collector_frac_permille": 500,
     "cap_unit_side": 2000,
     "diode_l": 1000,
     "diode_w": 500,
@@ -89,6 +89,7 @@
     "mom_finger_width": 200,
     "res_min_width": 500,
     "tie_max_dist_nm": 3000,
+    "tie_max_dist_nm_source": "UNVERIFIED: no source was recorded with this value. Read by no code. FLOW-05 replaces it with the deck's latch-up tie distance, sourced.",
     "wpe_clearance_moderate": 3000,
     "finfet_note": "ASAP7 (GPurify generic_finfet.deck, DRM 1p7): fins 7 nm at a 27 nm pitch, gates exactly 20 nm at a 54 nm pitch; S/D contacted through SDT + LISD and V0 to M1, gates through LIG and V0. Channel width is a fin count; L is the fixed gate width. The deck connects M1 and up only and recognises no devices: LVS covers routing, not devices."
   }

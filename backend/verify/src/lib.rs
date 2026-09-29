@@ -4,10 +4,12 @@
 //! into a [`pnr_core::Report`]; [`drc`]/[`erc`] are standalone probes. [`Pdk`] (the process schema every crate reads) lives here too.
 
 pub mod checker;
+mod decks;
 pub mod geom;
 pub mod netlist;
 pub mod pdk;
 pub mod reference;
+pub mod sidecar;
 
 use std::time::{Duration, Instant};
 

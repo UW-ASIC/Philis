@@ -1,9 +1,12 @@
 //! `philis` — read a netlist and a PDK deck, run the flow, sign off.
 //!
 //! ```text
-//! philis <netlist.sp> <deck.json>               # solve + signoff
-//! philis emit <netlist.sp> <deck.json> <out.rs> # also decompile to generator source
+//! philis <netlist.sp> <pdk>               # solve + signoff
+//! philis emit <netlist.sp> <pdk> <out.rs> # also decompile to generator source
 //! ```
+//!
+//! `<pdk>` is a sidecar `*.json`, or the name of one compiled in
+//! (`sky130`, `gf180mcu`, `ihp_sg13g2`, `generic_finfet`).
 
 use std::process::ExitCode;
 
@@ -27,17 +30,18 @@ fn cli() -> Result<bool, String> {
         Some(
             args.get(2)
                 .cloned()
-                .ok_or("usage: philis emit <netlist.sp> <deck.json> <out.rs>")?,
+                .ok_or("usage: philis emit <netlist.sp> <pdk> <out.rs>")?,
         )
     } else {
         None
     };
     let [netlist, deck, ..] = args.as_slice() else {
-        return Err("usage: philis [emit] <netlist.sp> <deck.json> [out.rs]".into());
+        return Err("usage: philis [emit] <netlist.sp> <pdk.json | sky130 | gf180mcu | ihp_sg13g2 | generic_finfet> [out.rs]".into());
     };
     let read = |p: &str| std::fs::read_to_string(p).map_err(|e| format!("read {p}: {e}"));
     let spice = read(netlist)?;
-    let pdk = verify::Pdk::from_json(&read(deck)?).map_err(|e| format!("pdk: {e}"))?;
+    let pdk = if deck.ends_with(".json") { verify::Pdk::from_json(&read(deck)?) } else { verify::Pdk::builtin(deck) }
+        .map_err(|e| format!("pdk: {e}"))?;
 
     let cfg = Config::default();
     let sol =

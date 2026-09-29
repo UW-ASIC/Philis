@@ -105,7 +105,7 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
 7. **Diode.** The anode tap needs to be at least 410 nm wide (licon.7).
 8. **Centroid diff pairs are always discarded.** Interleaved gate straps cross each other; staggering the strap depth per device would fix it.
 9. **Deck and verify.**
-   - `verify` `REQUIRED_RULES` still demands obsolete `bjt_*` cell keys.
+   - ~~`verify` `REQUIRED_RULES` still demands obsolete `bjt_*` cell keys.~~ Closed (FLOW-04): `verify::sidecar::KEYS` requires exactly what generators read.
    - `asymmetric_enclosure` is stricter than magic's "one direction".
    - Settle whether LVS checks device count and params: signoff marks `lvs.device_count_*` / `lvs.parametric` NotInDeck, while verify says the reference comparison already covers them.
    - `ir_drop` needs design intent (supply nets + currents).

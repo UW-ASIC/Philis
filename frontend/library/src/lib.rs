@@ -426,6 +426,7 @@ fn solve(
         bias.summary.clone(),
         &flow.problem.net_classes,
         &flow.problem.missing,
+        &pdk.unverified(),
     );
     let mut metadata = metadata;
     metadata.add_routing(&[Box::new(flow.common_nodes(&best.layout)), Box::new(flow.environment(&best.layout, &best.rings))], &best.routes);
@@ -676,6 +677,7 @@ impl Flow<'_> {
             None,
             &self.problem.net_classes,
             &self.problem.missing,
+            &self.pdk.unverified(),
         );
         budgets.add_routing(&[Box::new(self.common_nodes(&layout)), Box::new(self.environment(&layout, &rings))], &routes);
 

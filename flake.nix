@@ -57,8 +57,9 @@
           # "the binary runs", checked downstream.
           doCheck = false;
 
-          # The rule decks travel with the binary: `philis run` needs one, and a CLI that
-          # cannot find its own PDK deck is not much of a package.
+          # The decks and sidecars are compiled into the binary (`philis <net.sp> sky130`,
+          # backend/verify/src/decks.rs); the sidecars are copied as templates for a
+          # user's own `<pdk>.json`.
           postInstall = ''
             mkdir -p $out/share/philis
             cp -r pdks $out/share/philis/
