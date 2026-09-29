@@ -19,14 +19,8 @@ const BASELINE: &[(&str, usize, usize, bool)] = &[
     ("pair",              0,   0, true),
     ("quad",              0,   0, true),
     ("rc_filter",         0,   0, true),
-    // One ERC each, the circuit's own: sky130 `supply_short(ntap, ptap)` flags
-    // a net carrying both tap types, which is what a PNP whose base shares a
-    // net with an NPN's base (bjt_mirror `in`), or a diode-connected
-    // substrate PNP (bgr_core: base = collector = VSS), is. Back to 0 once
-    // GPurify's rule counts only n-taps in a PMOS well (`supply_short(ntap,
-    // ptap, pmos_well)`, not yet in the pinned commit).
-    ("bjt_mirror",        0,   1, true),
-    ("bgr_core",          0,   1, true),
+    ("bjt_mirror",        0,   0, true),
+    ("bgr_core",          0,   0, true),
     ("chain4",            0,   0, true),
     ("dac4",              0,   0, true),
 ];

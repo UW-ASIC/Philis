@@ -1299,7 +1299,7 @@ mod tests {
     fn min_channel_reads_the_gate_width_rule() {
         let gf = load("gf180mcu");
         let (l, w) = gf.min_channel(false, "nfet_01v8");
-        assert!(l >= 220 && w >= 220, "gf180 ({l}, {w})");
+        assert_eq!((l, w), (280, 220), "gf180 3.3 V: PL.2 gate length, DF.2a width");
         assert_eq!(Process::rule(&gf, "min_gate_l", 0), l, "no sidecar gate length: the deck's");
         let sky = load("sky130");
         assert_eq!(sky.min_channel(true, "pfet_01v8").0, 150, "a plain PMOS is not held to the LVT one's 350 nm");

@@ -2,8 +2,6 @@
   "deck": "gf180mcu.deck",
   "_about": "Philis sidecar: every rule, layer, device and PEX value comes from the GPurify deck named here; this file holds only what the checker does not read (layer roles, generator dimensions, process coefficients).",
   "cell": {
-    "min_gate_l": 280,
-    "min_gate_l_note": "DRM PL.2_3.3V; the pinned GPurify deck does not code it yet. Drop this key once Philis pins a GPurify with the PL.2 rule (the deck then states it).",
     "li_encloses_licon": 40,
     "li_encloses_licon_one_side": 60,
     "m1_enc": 40,
