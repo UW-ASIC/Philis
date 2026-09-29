@@ -12,12 +12,14 @@ pub struct Builder {
     pins: Vec<Pin>,
     units: Vec<pnr_core::Unit>,
     dummies: Vec<pnr_core::Dummy>,
+    drawn: Vec<pnr_core::Drawn>,
+    keepouts: Vec<pnr_core::Keepout>,
 }
 
 impl Builder {
     #[must_use]
     pub fn new(grid: i32) -> Self {
-        Self { grid, shapes: Vec::new(), pins: Vec::new(), units: Vec::new(), dummies: Vec::new() }
+        Self { grid, shapes: Vec::new(), pins: Vec::new(), units: Vec::new(), dummies: Vec::new(), drawn: Vec::new(), keepouts: Vec::new() }
     }
 
     /// Draw `r` on `layer`, snapped to grid. Width/height clamp up to one grid
@@ -36,6 +38,17 @@ impl Builder {
     /// Record one dummy gate drawn on a member's diffusion.
     pub fn dummy(&mut self, d: pnr_core::Dummy) {
         self.dummies.push(d);
+    }
+
+    /// Record one device drawn for LVS (`Macro::drawn`).
+    pub fn drawn(&mut self, d: pnr_core::Drawn) {
+        self.drawn.push(d);
+    }
+
+    /// Record a keep-out region, snapped like [`Builder::rect`].
+    pub fn keepout(&mut self, r: Rect, why: pnr_core::KeepWhy) {
+        let rect = self.snap(r);
+        self.keepouts.push(pnr_core::Keepout { rect, why });
     }
 
     pub fn pin(&mut self, mut pin: Pin) {
@@ -131,7 +144,7 @@ impl Builder {
             w: (tight.x + tight.w - x + step - 1) / step * step,
             h: (tight.y + tight.h - y + step - 1) / step * step,
         };
-        Macro { shapes: self.shapes, pins: self.pins, bbox, units: self.units, dummies: self.dummies }
+        Macro { shapes: self.shapes, pins: self.pins, bbox, units: self.units, dummies: self.dummies, drawn: self.drawn, keepouts: self.keepouts, ..Default::default() }
     }
 }
 

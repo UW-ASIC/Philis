@@ -1,6 +1,6 @@
 //! Cells: draw every legal variant of every cell (collapsing matched groups
 //! into one cell), seed and escalate the variant assignment, and build the LVS
-//! reference from the schematic.
+//! reference from the schematic and what the cells drew (`Macro::drawn`).
 
 use cells::builder::dim;
 use analog::cell::{SeriesParallel, Unitization};
@@ -829,6 +829,7 @@ fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &dyn pnr_core::P
             },
             units: Vec::new(),
             dummies: Vec::new(),
+            ..Default::default()
         }];
     }
     drawn
@@ -855,9 +856,14 @@ fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &dyn pnr_core::P
 ///
 /// `fold`: the flow's [`folds`] table, which the cards follow; `None` for
 /// geometry drawn at the schematic's own fingers (the manual path).
-pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>) -> RefInput {
+///
+/// `skip`: devices whose cards come from [`drawn_cards`] instead.
+pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceId]) -> RefInput {
     let mut devices: Vec<RefDeviceIn> = Vec::new();
     for (i, dev) in netlist.devices.iter().enumerate() {
+        if skip.contains(&DeviceId(i as u16)) {
+            continue;
+        }
         // Devices past the table (inserted later: antenna diodes) are unfolded.
         let (k, fw) = fold.and_then(|f| f.get(i)).copied().unwrap_or((1, 0));
         let (kind, pins): (RefKind, &[&str]) = match dev.kind {
@@ -865,8 +871,8 @@ pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>) -> RefInput {
             DeviceKind::Pmos => (RefKind::Pmos, &["D", "G", "S", "B"]),
             DeviceKind::Resistor => (RefKind::Resistor, &["P", "N"]),
             DeviceKind::Diode => (RefKind::Diode, &["P", "N"]),
-            DeviceKind::Npn => (RefKind::Npn, &["E", "B", "C"]),
-            DeviceKind::Pnp => (RefKind::Pnp, &["E", "B", "C"]),
+            DeviceKind::Npn => (RefKind::Npn, &BJT_PINS),
+            DeviceKind::Pnp => (RefKind::Pnp, &BJT_PINS),
             DeviceKind::Inductor | DeviceKind::Capacitor => continue,
         };
         let terminals: Vec<String> = pins
@@ -904,6 +910,52 @@ pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>) -> RefInput {
     }
 }
 
+/// BJT terminals in LVS card order: [`reference`]'s and `Macro::drawn`'s.
+pub(crate) const BJT_PINS: [&str; 3] = ["E", "B", "C"];
+
+/// LVS cards for everything the placed cells drew as `Macro::drawn`, and the
+/// schematic devices they replace (sorted, distinct), whose own cards
+/// [`reference`] must skip. `Node::Pin(t)` is the net of the macro's bound pin
+/// `d{owner}:{t}`; `Node::Internal(k)` is the non-port net `~{cell}.{owner}.{k}`,
+/// `cell` the macro's index in `placed`. A card whose pin is missing is
+/// dropped, so the drawn device shows as an extracted extra.
+///
+/// No params: GPurify measures `w`/`l` for MOS only (and `area`, which the
+/// reference never interns), and a param on one side only is a mismatch.
+pub fn drawn_cards(placed: &[Macro], nets: &[String], schematic: &Netlist, pdk: &Pdk) -> (Vec<RefDeviceIn>, Vec<DeviceId>) {
+    use pnr_core::{DrawnKind, Node};
+    let mut cards = Vec::new();
+    let mut replaced: Vec<DeviceId> = Vec::new();
+    for (cell, m) in placed.iter().enumerate() {
+        for d in &m.drawn {
+            let Some(id) = d.device else { continue };
+            replaced.push(id);
+            let (kind, recipe) = match d.kind {
+                DrawnKind::Resistor => (RefKind::Resistor, "resistor"),
+                DrawnKind::Capacitor => (RefKind::Capacitor, "capacitor"),
+                DrawnKind::Diode => (RefKind::Diode, "diode"),
+                DrawnKind::Npn => (RefKind::Npn, "bjt"),
+                DrawnKind::Pnp => (RefKind::Pnp, "bjt"),
+            };
+            let node = |n: &Node| match *n {
+                Node::Unused => None,
+                Node::Pin(t) => {
+                    let name = format!("d{}:{t}", d.owner);
+                    Some(m.pins.iter().find(|p| p.name == name).and_then(|p| nets.get(p.net.0 as usize)).cloned())
+                }
+                Node::Internal(k) => Some(Some(format!("~{cell}.{}.{k}", d.owner))),
+            };
+            let Some(terminals) = d.nodes.iter().filter_map(node).collect::<Option<Vec<String>>>() else { continue };
+            let model = schematic.devices.get(id.0 as usize).map_or("", |s| s.model.as_str());
+            let model = pdk.recipe(recipe, model).map(|r| r.model).filter(|m| !m.is_empty()).or_else(|| (!model.is_empty()).then(|| model.to_string()));
+            cards.push(RefDeviceIn { kind, model, terminals, params: Vec::new() });
+        }
+    }
+    replaced.sort_unstable_by_key(|d| d.0);
+    replaced.dedup();
+    (cards, replaced)
+}
+
 /// One LVS card per dummy gate a placed macro drew (`Macro::dummies`): nets
 /// read off the owner's own bound pins (`d{k}:S|D` near side, `d{k}:B` gate,
 /// far side and body), params mirroring the schematic's MOS cards (a param
@@ -935,6 +987,9 @@ pub fn dummy_cards(placed: &[Macro], nets: &[String], schematic_cards: &[RefDevi
 /// `GND` (a generator's dummy tie) goes to `ground` (the classified ground
 /// net), else to member 0's `N`, else `S`.
 fn bind_pins(m: &mut Macro, netlist: &Netlist, members: &[DeviceId], ground: Option<NetId>) {
+    for d in &mut m.drawn {
+        d.device = members.get(usize::from(d.owner)).copied();
+    }
     for pin in &mut m.pins {
         let (ordinal, term) = match pin.name.split_once(':') {
             Some((d, t)) => (
@@ -1048,6 +1103,7 @@ mod tests {
                         },
                         units: Vec::new(),
                         dummies: Vec::new(),
+                        ..Default::default()
                     }
                 })
                 .collect(),
@@ -1134,6 +1190,7 @@ mod tests {
                 },
                 units: Vec::new(),
                 dummies: Vec::new(),
+                ..Default::default()
             },
         );
         let mixed = enumerate(&netlist, &injected, &Constraints::default(), &pdk, true);
@@ -1538,6 +1595,7 @@ mod tests {
                 },
                 units: Vec::new(),
                 dummies: Vec::new(),
+                ..Default::default()
             },
         );
         let cells = enumerate(
@@ -1696,5 +1754,31 @@ mod tests {
         assert_eq!(bank, &[DeviceId(3), DeviceId(0), DeviceId(1), DeviceId(2)], "dummy first, then by weight");
         let alts = &cells.spaces[cells.cell_of[0] as usize].alternatives;
         assert!(!alts.is_empty() && alts.iter().all(|m| m.units.len() == 8), "every alternative is the 2^3 array");
+    }
+
+    /// A 2-segment resistor's drawn cards: one per segment, joined by the
+    /// macro-internal node, no params (GPurify extracts none for a resistor).
+    #[test]
+    fn drawn_cards_carry_no_params_for_passives() {
+        let pdk = pdk().expect("pdks/sky130.json is in the repo");
+        let netlist = crate::parse("XR1 a b sky130_fd_pr__res_high_po w=0.69u l=40u\n.end\n").expect("parses");
+        let group = DeviceGroup { devices: vec![DeviceId(0)] };
+        let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[]));
+        let mut m = draw_variants(DeviceKind::Resistor, &netlist.devices[0].model, &group, &sized, &pdk)
+            .into_iter()
+            .find(|m| m.drawn.len() == 2)
+            .expect("a 2-segment variant at L = 40 um");
+        bind_pins(&mut m, &netlist, &group.devices, None);
+        let names: Vec<String> = netlist.nets.iter().map(|n| n.name.clone()).collect();
+        let (cards, replaced) = drawn_cards(&[m], &names, &netlist, &pdk);
+        assert_eq!(replaced, vec![DeviceId(0)]);
+        assert_eq!(cards.len(), 2, "{cards:?}");
+        for c in &cards {
+            assert_eq!(c.kind, RefKind::Resistor);
+            assert!(c.params.is_empty(), "{c:?}");
+            assert!(c.terminals.iter().any(|t| t == "~0.0.1"), "{c:?}");
+        }
+        let ends: Vec<&str> = cards.iter().flat_map(|c| &c.terminals).map(String::as_str).filter(|t| !t.starts_with('~')).collect();
+        assert_eq!(ends, ["a", "b"], "the string runs a -> ~0.0.1 -> b");
     }
 }

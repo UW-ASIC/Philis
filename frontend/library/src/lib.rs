@@ -1357,7 +1357,8 @@ fn labels_and_reference(
     pdk: &Pdk,
 ) -> (Vec<verify::LabeledPin>, verify::RefInput) {
     let pins = labeled_pins(placed, nets, pdk, shapes);
-    let mut reference = cellgen::reference(schematic, fold);
+    let (drawn, replaced) = cellgen::drawn_cards(placed, nets, schematic, pdk);
+    let mut reference = cellgen::reference(schematic, fold, &replaced);
     // A resistor is drawn to its model's recipe: the deck model that names.
     for d in reference.devices.iter_mut().filter(|d| d.kind == verify::reference::RefKind::Resistor) {
         if let Some(r) = pdk.recipe("resistor", d.model.as_deref().unwrap_or("")) {
@@ -1365,6 +1366,7 @@ fn labels_and_reference(
         }
     }
     reference.devices.extend(cellgen::dummy_cards(placed, nets, &reference.devices));
+    reference.devices.extend(drawn);
     reference.ports = pins.iter().map(|p| p.name.clone()).collect();
     (pins, reference)
 }
