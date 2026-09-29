@@ -1453,6 +1453,39 @@ mod start_tests {
         assert_eq!((ua(1, "d0:D"), ua(1, "S")), (Some(Some(20)), Some(Some(-20))), "the other cell known");
     }
 
+    /// REL-01 acceptance on the real fixtures and ngspice bias: every pin on a
+    /// net that touches no resistor carries a known current, so dr sizes it
+    /// (all-or-nothing left rc_filter with no pin currents at all).
+    #[test]
+    fn fixture_nets_without_a_resistor_keep_em_sizing() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lib = std::env::var_os("PDK_ROOT")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".volare")))
+            .map(|r| r.join("sky130A/libs.tech/ngspice/sky130.lib.spice"))
+            .filter(|l| l.is_file());
+        let (Some(lib), true) = (lib, std::process::Command::new("ngspice").arg("--version").output().is_ok()) else {
+            eprintln!("SKIP fixture_nets_without_a_resistor_keep_em_sizing: needs ngspice and the sky130 ngspice models");
+            return;
+        };
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+        let cfg = crate::Config { op: Some(crate::oppoint::OpConfig { model_lib: Some(lib), ..Default::default() }), ..Default::default() };
+        for fixture in ["rc_filter", "dac4"] {
+            let mut nl = crate::parse(&std::fs::read_to_string(root.join(format!("benchmarks/fixtures/{fixture}.spice"))).unwrap()).unwrap();
+            crate::deck_models(&mut nl, &pdk);
+            let currents = crate::bias(&nl, &cfg).2.expect("operating point");
+            let one_per_cell: Vec<_> = (0..nl.devices.len()).map(|i| vec![pnr_core::DeviceId(i as u16)]).collect();
+            let pins = crate::pin_currents(&nl, &one_per_cell, &currents);
+            for (k, net) in nl.nets.iter().enumerate() {
+                let on = || nl.devices.iter().enumerate().flat_map(|(i, d)| d.terminals.iter().filter(|(_, n)| n.0 as usize == k).map(move |(t, _)| (i, d, t)));
+                let resistor = on().any(|(_, d, _)| d.kind == pnr_core::DeviceKind::Resistor);
+                let known = on().all(|(i, _, t)| pins[i].iter().any(|(p, ua)| *p == format!("d0:{t}") && ua.is_some()));
+                eprintln!("{fixture} {}: resistor={resistor} known={known}", net.name);
+                assert!(resistor || known, "{fixture} {} touches no resistor but has an unknown pin current", net.name);
+            }
+        }
+    }
+
     /// C within the tie band goes to the smaller footprint; outside it, C wins.
     #[test]
     fn close_c_is_decided_by_area_and_far_c_by_c() {

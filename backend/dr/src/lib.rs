@@ -2495,7 +2495,7 @@ mod tests {
         let lim = Limit { ua_per_um: 1_000.0, ua_per_cut: 10_000.0, blech: 0.0 };
         let run = |table: Vec<(String, Option<i32>)>| {
             let cfg = DetailedCfg { pin_ua: vec![table], em: vec![(LAYERS[0], lim), (LAYERS[1], lim), (CUTS[0].0, lim)], ..test_cfg() };
-            let routes = route(cfg, &global, &pins, &[cell.clone()], &[], &mut gr::Negotiation::new()).0;
+            let routes = route(cfg, &global, &pins, std::slice::from_ref(&cell), &[], &mut gr::Negotiation::new()).0;
             routes.wires[0].iter().map(|s| (s.layer, s.rect)).collect::<Vec<_>>()
         };
         let widest = |r: &[(LayerId, Rect)]| r.iter().filter(|(l, r)| r.w != r.h && LAYERS.contains(l)).map(|(_, r)| r.w.min(r.h)).max();

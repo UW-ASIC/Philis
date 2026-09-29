@@ -47,7 +47,7 @@ impl OpPoint {
                 let id = match dev.kind {
                     pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos => self.id_ua.get(i).copied().flatten()?,
                     pnr_core::DeviceKind::Capacitor => 0.0,
-                    _ => return None,
+                    pnr_core::DeviceKind::Resistor | pnr_core::DeviceKind::Diode | pnr_core::DeviceKind::Npn | pnr_core::DeviceKind::Pnp | pnr_core::DeviceKind::Inductor => return None,
                 };
                 let draw = |t: &str| match t {
                     "D" => id,
