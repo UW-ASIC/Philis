@@ -442,9 +442,10 @@ mod tests {
         assert!((pr - ar).abs() < 1e-6, "equal proportional overshoot ⇒ equal residual");
 
         // And the reason it has to be `residual` rather than `cost` that Θ sums: the raw
-        // costs of the same two misses differ by more than an order of magnitude (225 vs
-        // 5000 here), purely because one is scaled nm² and the other a fixed-point ratio.
-        // Adding *those* would let the choice of unit pick the priority.
+        // costs of the same two misses differ by more than an order of magnitude (2.25 vs
+        // 5000 here): `ParasiticBudget`'s cost is its unit-free `(spent/budget)²`, but
+        // `Antenna`'s is still in its fixed-point ×100 ratio. Adding *those* would let the
+        // choice of unit pick the priority.
         let (pc, ac) = (p.cost(&r), a.cost(&r));
         let spread = pc.max(ac) / pc.min(ac);
         assert!(spread > 10.0, "raw costs are incommensurable: {pc} vs {ac} (×{spread})");

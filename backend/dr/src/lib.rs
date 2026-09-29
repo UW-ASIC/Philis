@@ -2123,8 +2123,7 @@ fn unreachable_shapes(shapes: &[Shape]) -> usize {
     while let Some(a) = stack.pop() {
         let ra = shapes[a].rect;
         for (b, s) in shapes.iter().enumerate() {
-            let rb = s.rect;
-            if !seen[b] && ra.x <= rb.x + rb.w && rb.x <= ra.x + ra.w && ra.y <= rb.y + rb.h && rb.y <= ra.y + ra.h {
+            if !seen[b] && ra.touches(&s.rect) {
                 seen[b] = true;
                 stack.push(b);
             }
