@@ -1728,7 +1728,6 @@ fn cell_metal(placed: &[Macro], n_nets: usize, stack: Option<&analog::routing::S
     let Some(stack) = stack else { return (cell, gates) };
     let on_stack = |l: LayerId| stack.layers.iter().any(|x| x.id == l.0);
     let lowest = stack.layers.first().map(|l| LayerId(l.id));
-    let touch = |a: &Rect, b: &Rect| a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
     for m in placed {
         let pieces = stack.connected(&m.shapes);
         let mut taken = vec![false; pieces.len()];
@@ -1739,7 +1738,7 @@ fn cell_metal(placed: &[Macro], n_nets: usize, stack: Option<&analog::routing::S
             }
             let layer = if on_stack(p.layer) { Some(p.layer) } else { lowest };
             for (i, piece) in pieces.iter().enumerate() {
-                if !taken[i] && piece.iter().any(|&k| Some(m.shapes[k].layer) == layer && touch(&m.shapes[k].rect, &p.at)) {
+                if !taken[i] && piece.iter().any(|&k| Some(m.shapes[k].layer) == layer && m.shapes[k].rect.touches(&p.at)) {
                     taken[i] = true;
                     net.extend(piece.iter().map(|&k| m.shapes[k]));
                 }
