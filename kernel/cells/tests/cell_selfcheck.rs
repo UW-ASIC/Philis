@@ -112,6 +112,27 @@ fn any_covers(cover: &[&Shape], r: &Rect) -> bool {
     cover.iter().any(|c| covers(&c.rect, r))
 }
 
+/// Each member's S and D pins split that terminal's DC current exactly
+/// (`pnr_core::pin_shares` sums to 1): no finger counted twice, none lost to
+/// the `2/n` bound, on every drawn MOS variant (REL-01).
+#[test]
+fn every_mos_terminal_s_pin_shares_sum_to_one() {
+    let Some(pdk) = pdk() else {
+        eprintln!("sky130 PDK unavailable — skipping");
+        return;
+    };
+    for (label, m) in all_variants(&pdk) {
+        let shares = pnr_core::pin_shares(&m);
+        for u in &m.units {
+            for t in ["S", "D"] {
+                let name = format!("d{}:{t}", u.owner);
+                let sum: f32 = m.pins.iter().zip(&shares).filter(|(p, _)| p.name == name).map(|(_, s)| s).sum();
+                assert!((sum - 1.0).abs() < 1e-6, "{label}: {name} pins carry {sum} of the terminal");
+            }
+        }
+    }
+}
+
 /// The self-check is only worth its runtime if it covers the axes the placer
 /// can actually move along, so pin the axis values themselves. Without this the
 /// loops above stay green by covering nothing new: a dropped `dummies = 0`

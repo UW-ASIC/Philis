@@ -23,7 +23,7 @@ pub use ids::{AxisId, DeviceId, GroupId, NetId, Target};
 pub use layout::Layout;
 pub use netlist::{Device, DeviceGroup, DeviceKind, Net, Netlist};
 pub use process::Process;
-pub use r#macro::{place_macro, place_macros, Dummy, Macro};
+pub use r#macro::{pin_shares, place_macro, place_macros, Dummy, Macro};
 pub use report::{Report, Violation};
 pub use routes::Routes;
 pub use unionfind::UnionFind;
