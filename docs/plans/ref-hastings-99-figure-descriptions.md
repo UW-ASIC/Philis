@@ -9,7 +9,8 @@ L55433, List of Tables from L56293). Those are captions only.
 Task: `98-gap-critic.md` GAP-20. Settles the values the plans left "read from the figure", "not given" or disputed,
 and records agreement or disagreement per value with line numbers.
 
-Numbers marked *derived* are arithmetic on cited values (Python in the session scratchpad).
+Numbers marked *derived* are arithmetic on cited values (Python in the session scratchpad). Statements marked *inferred*
+are conclusions the cited evidence supports but no source states.
 
 ---
 
@@ -68,7 +69,7 @@ PDF pp. 398–399 (Figs 8.19–8.20), 514 (Fig 10.24), 240 (Fig 5.14).
 
 ## 2. The open values GAP-20 lists
 
-### 2.1 MAT open question 7: eq. 8.29 vs Fig. 8.20 — **resolved: the figure has j and k swapped**
+### 2.1 MAT open question 7: eq. 8.29 vs Fig. 8.20 — **resolved: the figure plots eq. 8.29 with j and k swapped**
 
 Plan state (plan-02 §5 Q7, MAT-17 Risks; 00-MASTER-PLAN §6.4 item 8): eq. 8.29 as printed,
 S = |(N+1)/(N+k) − (M+1)/(M+j)|, gives S = 0.028 at R0 = 10.34 kΩ and 0.0095 at 10.64 kΩ (*derived*), while
@@ -114,7 +115,8 @@ Which one is right: the printed form. The text puts the partial segment jR0 in R
 eqs. 8.32–8.33). The App. D derivation (L50812–50866, PDF p.852) applies the process bias R = αR_i + β to every
 segment, the partial one included, so R_M carries (M+1)β over (M+j)R0 and R_N carries (N+1)β over (N+k)R0: eq. 8.29
 as printed. S′ pairs R_N's segment count with R_M's fraction and has no physical reading. Fig. 8.20 and the two optima
-the text quotes come from a spreadsheet with the two fraction columns exchanged. The decomposition quoted at 10.34 kΩ
+the text quotes were most likely computed with the two fraction columns exchanged (*inferred*: every breakpoint of the
+image and both optima match S′; the book says nothing about how they were computed). The decomposition quoted at 10.34 kΩ
 (M = 19, N = 14, j = 0.342, k = 0.120) is correct arithmetic but is not an optimum of eq. 8.29.
 
 Consequence for MAT-17: the default "implement eq. 8.29 as printed" stands and needs no outside confirmation. Fig. 8.20
@@ -137,9 +139,11 @@ the axes, placed with the center of the circle contact as the origin", and Layou
 upper middle, collector bar below) in the third and fourth quadrants (L67189–67193). Part (B) places Layout 1 in all
 four quadrants, on each half-axis and at the centre: nine identical units, a 3×3 (L67194–67195).
 
-So the four 4X units sit off both axes, one per quadrant, and the lower two are mirrored so that all emitters face the
-horizontal axis. That agrees with plan-02 MAT-02 ("two 4X units in each side column, i.e. on the diagonals of the 1X")
-and with `ref-hastings-09` H09 ("rotated to bring emitters together").
+The array is five identical unit transistors (image, PDF p.514). The 1X is the centre unit, and the four unit sections of
+the 4X transistor ("two of the sections of the 4X transistor on either side", L30641–30643) sit off both axes, one per
+quadrant; the lower two are mirrored so that all emitters face the horizontal axis. That agrees with plan-02 MAT-02 (two
+sections of the 4X in each side column, on the diagonals of the 1X) and with `ref-hastings-09` H09 ("rotated to bring
+emitters together").
 
 The description gives no offsets. The image (PDF p.514, re-opened) shows the two units of a side column abutting at the
 horizontal axis: side-unit centres are one pitch out in x and half a unit height out in y, not on the 3×3 cell grid of
@@ -170,13 +174,23 @@ L71556–71569) give no angle. The only angles in the descriptions are Fig 13.43
 
 ### 2.7 Other study values marked "not given", "not legible" or "read from the figure"
 
+The list below comes from a grep of the nine `ref-hastings-0*`/`-1*` studies for "not given", "not legible",
+"illegible", "not recovered", "garbled" and "read from … figure"; lines that only describe the study's own method are
+left out. "Not stated" rests on the full read (§1) and on scans of every block for digits, number words and unit words.
+
 | Study value | Where | In a description? | Verdict |
 |---|---|---|---|
 | Required NBL/iso breakdown for an NBL tunnel | `ref-hastings-14` L214 (text L44312–44315) | Fig 14.20 (L72298–72320): layout only | not stated |
+| Substrate-isolation attenuation, NBL + deep-N+ preamp beside a ≈ 1 A switcher ("an attenuation of at least [blank]") | `ref-hastings-14` L107, L511 (text L43138–43145) | no figure is attached to the paragraph; the nearest, Fig 14.3 (marker L43124; L71747–71765), is a substrate-contact ring with contact counts only. No block contains "attenuat" or "dB" | not stated |
+| Symmetric DENMOS minimum drawn channel length ("typically [blank]") | `ref-hastings-13` L153 (text L40164–40165) | Fig 13.31 (L70687–70713) labels the poly width L_d, no value | not stated |
+| Exercise 13.7 backgate-contact distance ("no part … more than [blank] from the nearest backgate contact") | `ref-hastings-13` L299 (text L42762–42763) | exercise text, no figure; no Chapter 13 block states a length in µm | not stated |
+| Early-effect ΔV_CE for the 0.7 % example; Schottky TC; current per µm of emitter periphery | `ref-hastings-09` L299, L320, L338 | Fig 9.3 (L65229–65248) gives only I_B steps and −V_A; no Chapter 9–11 block gives a TC or a current per µm | not stated |
 | Table 8.7 gauge factors G_T (P-type), G_L (N-type), π values | `ref-hastings-15` L212, L686 | Table 8.7 has no long description (only Tables 2.2, 8.45, 10.T1 do) | not stated |
-| Eq 5.32, Eq 6.21 numerator, Eq 14.5 | `ref-hastings-15` L208, `-06` L155, `-14` L960 | equations, not figures | out of scope; not stated |
+| k′ behind Table 13.5 | `ref-hastings-13` L697 | Table 13.5 has no long description | not stated |
+| Eq 5.32, Eq 6.21 numerator, Eq 12.43, Eq 13.37, Eqs 13.38–13.39 (DWell width), App. D eq 13.38 factor 2, Eq 14.5 | `ref-hastings-15` L208, L749; `-06` L155; `-12` L633; `-13` L146, L166; `-14` L960 | equations, not figures | equation, out of scope; not stated |
 | Table 13.3 patterns "read from PDF p.710 figure" | `ref-hastings-13` L282 | Fig 13.59 (L71575–71596): left column A over B, right column B over A, gaps D, S, D | agrees for the cross-coupled 2-D pair; the 1-D strings are not in a description |
-| Thresholds the text calls "not given" (fuse keep-out radius, HCI ΔV_DS, latch-up distance, W_nce_min, drain ballast RW, die-edge distance, EM chamfer threshold, ESD ΔT) | `ref-hastings-05` L491, L509, L527, L644; `-12` L240; `-14` L913; `-15` L340, L583, L662, L725 | no figure description states any of them | not stated |
+| Thresholds and budgets the studies mark "not given" (fuse keep-out radius, HCI ΔV_DS, NBTI ΔV_GS, latch-up distance, W_nce_min, drain ballast RW, die-edge distance, bias-mirror current for "sensitive", EM chamfer threshold, resistor self-heating ΔT, ESD ΔT, finger ΔV_BE budget) | `ref-hastings-05` L491, L509, L527, L644; `-12` L240; `-14` L913; `-15` L340, L484, L583, L653, L662, L725 | no figure description states any of them | not stated |
+| Other quantities marked "not given": parasitic β for latch-up loop gain, σ inflation for V_SB ≠ 0, HBM-level scaling of the 2 Ω ESD path | `ref-hastings-14` L532; `-12` L213; `-05` L419 | Fig 5.5 (L61899–61919) gives the HBM network (150 pF, 1.5 kΩ, 2 kV), not a path-resistance scaling; no block states β or σ | not stated |
 | Built-in potential | `ref-hastings-01` L54 | Fig 1.12 labels V1, V2, V3 only (L57685–57697) | not stated |
 
 ### 2.8 Study values a description does state — cross-check
@@ -211,14 +225,28 @@ L71556–71569) give no angle. The only angles in the descriptions are Fig 13.43
 - **plan-04 (PLC)**: verification-log note — rule 19/23 distances, the WPE points and the H12-26 statement are body
   text; no figure description states them (§2.4–2.6). No value changes.
 - **00-MASTER-PLAN §6.4 item 8**: resolved; §7 index lists this document.
+- **ref-hastings-08** (study, not a plan): L126 and H08-44 now say the Fig 8.20 optima are those of the swapped form (§2.1).
 - **plan-03 (CELL)**: no change. The CELL-relevant values checked (Fig 8.5 dummy ring, rule 19) agree or are not stated.
 
 ---
 
 ## 4. Numeric values stated in the descriptions
 
-Every description with a data value (plot points, component values, sizes, ratios, counts that define a pattern).
-Pure labels (M1, Q2, Metal-1, Step 3) are omitted. Line ranges are the description blocks.
+Every description that states a numeric quantity: plot points and axis ranges, component values, dimensions, currents,
+voltages, angles and orientations, and device ratios (nX, W/L, emitter multiples, series/parallel counts that set a
+ratio). Device-to-position arrangements are listed only where §2 cross-checks them (Figs 8.5, 8.8, 8.12, 8.18, 9.22,
+13.57). Line ranges are the description blocks.
+
+Not listed: labels (M1, Q2, Metal-1, Step 3, "(1 of 2)", Miller indices), symbolic points ((0, 0) origins, (V_c, 0),
+L_d + 2L_h), drawn proportions ("half the width", "one-third of a rectangle"), and counts of drawn shapes (contacts,
+vias, rows, columns, fingers, emitters, bars, squares). A scan of the blocks not listed here for a numeral or a count
+word from three up, within five words of one of those nouns (label hits dropped; Python in the session scratchpad),
+finds such counts in 124 of them. It misses phrasings like Fig 9.30's "4 vertical black-shaded rectangular blocks", so
+the true number is somewhat higher. Examples: Fig 9.30 (4 N-moat contacts, L65977–66004), 10.7 (seven emitter fingers,
+15 ballast contacts, L66599–66630), 10.10 (five emitters, six base contacts per side, L66700–66730), 13.1 (11 rows,
+twelve contacts per row, L69785–69809), 13.4 (7 contacts, L69867–69883), 13.16–13.21 (contacts per finger,
+L70180–70367), 14.3 (ring contacts 9/6 and 15/13 per side, L71747–71765), 14.32 (ring 19 × 16 contacts, L72692–72744)
+and 15.29 (3 × 3 via arrays, L73742–73757).
 
 | Figure | Values stated |
 |---|---|
@@ -239,6 +267,8 @@ Pure labels (M1, Q2, Metal-1, Step 3) are omitted. Line ranges are the descripti
 | 5.10 (L62021–62044) | mobile-ion bias 0 V, 10 V |
 | 5.13 (L62115–62132) | V_DS 0–20 V, V_GS 0–6 V; 0.1 %, 1 %, 10 %, 100 % duty regions; vertices ≈ (19.5, 3.5), (17.5, 3.5), (15, 3.5) |
 | 5.14 (L62138–62156) | (A) 6.70–6.90 V, fast rise to 6.84, end ≈ 6.90; (B) 7.10–7.30 V, peak ≈ 7.29, end ≈ 7.13 |
+| 6.27 (L63517–63544) | fuse trims: (A) series 4R_lsb, 2R_lsb, R_lsb with R_x; (B) parallel R_msb, R_msb/2, R_msb/4 with R_x |
+| 6.28 (L63550–63565) | fuse trim: 2R_lsb between R_C and R_B, R_A across the pads |
 | 7.7 (L63850–63865) | junction C peaks at ≈ 0.7 V forward; avalanche at ≈ −7 V |
 | 8.1 (L64341–64354) | histogram 1, 3, 3, 3, 5, 8, 4, 1, 2 units, axis 0–8 |
 | 8.2 (L64360–64375) | C1 area 1, C2 area 1.3 |
@@ -251,6 +281,8 @@ Pure labels (M1, Q2, Metal-1, Step 3) are omitted. Line ranges are the descripti
 | 9.2 (L65208–65223) | β_F vs I_C, 10 nA–100 mA, β 25–125: lateral PNP (20 nA, 50) → (100 µA, 80) → (4 mA, 30); NPN before avalanche (30 nA, 127) → (8 µA, 130) → (10 mA, 120) → (300 mA, 40); after avalanche from (20 nA, 40) |
 | 9.3 (L65229–65248) | I_B = 10, 20, 30, 40 µA; Early voltage −V_A |
 | 9.4 (L65254–65269) | BV_CEO, BV_CER, BV_CES curves: V_CE 10–60 V, I_C 25–75 mA; knees at ≈ 40, 50, 59 V |
+| 9.12 (L65460–65479) | output curves for I_B, 2I_B, 3I_B, 4I_B |
+| 9.22 (L65740–65759) | §2.8 |
 | 9.27 (L65884–65911) | voltage recognition outlines V20, V40, V0 |
 | 10.1 (L66447–66473) | emitter debiasing: 100 mA per finger, drops 1, 2, 3 mV across R1–R3 |
 | 10.4 (L66519–66536) | NPN SOA: current limit 4 A to 7 V; power limit to (45 V, 700 mA); secondary breakdown to (60 V, 90 mA); voltage limit 60 V; 10 ms and 1 ms lines |
@@ -260,26 +292,25 @@ Pure labels (M1, Q2, Metal-1, Step 3) are omitted. Line ranges are the descripti
 | 10.23 (L67122–67156) | cross-coupled quad of ½Q1, ½Q2 |
 | 10.24 (L67162–67198) | §2.3 |
 | 10.26 (L67237–67297) | ½Q2, Q1, ½Q2 arrays with 2 and 4 emitters per ½Q2 |
+| 10.27 (L67303–67319) | Q1 1X, Q2 NX |
 | 10.31 (L67423–67466) | bandgap Q1 8X, Q2 1X, R1 2.7 kΩ, R2 16.25 kΩ; op-amp PNP 25, 50, 25, 50, 50, NPN 128 × 3, C1 10 pF |
 | 10.32 (L67472–67494) | emitter multiples 64, 128, 256, 64, 36, 64, 64, 36, 128, 64, 36 |
 | 12.3 (L68336–68355) | V_GS 1, 1.2, 1.45 (printed "145"), 1.5 V; −1/λ intercept |
 | 12.5 (L68402–68416) | subthreshold: V_GS 0–2.5 V; floor 2 fA to 0.3 V; V_t at (0.8 V, 1 nA); 0.1 µA at 2 V |
 | 12.48 (L69740–69779) | W/L 5/2, 3/3, 4/2, 10/2 |
+| 13.13 (L70111–70126) | I_D0 and 1.2·I_D0 at BV_D |
 | 13.41 (L71003–71027) | 4 units in series, 5 in parallel |
 | 13.43 (L71069–71092) | pairs at 0°, 45°, 90° |
+| 13.57 (L71528–71550) | §2.8 |
 | 13.60 (L71602–71686) | op-amp sizes: MP1, MP2 8/12; MP3 4(8/12); MP9, MP10 4(10/15); MP6 4/20; MP7, MP8 2(5/3); MP4, MP5 12(15/5); MN1 5/4; MN2, MN3 2(5/4); MN4, MN5 10/25; MN6, MN7 2(10/25); match groups MP1-MP2-MP3, MP4-MP5, MP6-(MP7-MP8) C/C, MP9-MP10, MN1-(MN2-MN3) C/C, MN4-MN5-(MN6-MN7 C/C) |
-| 13.13 (L70111–70126) | I_D0 and 1.2·I_D0 at BV_D |
-| 13.16–13.21 (L70180–70367) | contact/via counts per finger (25 per bar; 20 per row, 9/11 split; 12 in sets of 3) |
-| 14.3 (L71747–71765) | ring contacts 9/6 and 15/13 per side |
 | 14.9 (L71896–71958) | collector split 0.75 / 0.25 |
 | 14.21 (L72326–72343) | §2.8 |
-| 14.32 (L72692–72744) | ring 19 × 16 contacts; ½M2, M1, ½M2 |
+| 14.32 (L72692–72744) | ½M2, M1, ½M2 |
 | 14.43 (L73067–73083) | Q2 640 µm², Q3 64 µm², D1 250 µm² |
 | 15.2 (L73138–73154) | R8 200 kΩ 6 µm HSR; R1 8 µm HSR; R2 12 kΩ 8 µm HSR; C1 40 pF; R7 50 kΩ 6 µm HSR; Q8 64 µm²; Q4 1X |
-| 15.5 (L73195–73210) | AMP1 0.32 mm², BIAS 0.13 mm², AMP2 0.32 mm²; pins 1–8 |
-| 15.7 (L73241–73258) | 30 mA branches, 60 mA to the 2-mil scribe street |
+| 15.5 (L73195–73210) | AMP1 0.32 mm², BIAS 0.13 mm², AMP2 0.32 mm² |
+| 15.7 (L73241–73258) | 30 mA branches, 60 mA to the 2-mil scribe street; "the other 3 milliamperes" (sic, next to four 30 mA labels) |
 | 15.26 (L73676–73693) | 1 mA through R_m or R_m/2 |
-| 15.29 (L73742–73757) | via arrays 3 × 3 numbered 1–9 at a 90° bend and on a straight run |
 | B.2 (L73780–73797) | axes 0–3; triangle vertices given with duplicates ((1,0,0), (3,0,0), (3,0,0)) |
 | Table 8.45, Table 10.T1 | §2.8 |
 
@@ -289,7 +320,7 @@ Pure labels (M1, Q2, Metal-1, Step 3) are omitted. Line ranges are the descripti
 
 Columns: body marker line and PDF page of the figure (the `Full Alternative Text` marker follows the caption; for 29
 items, e.g. Figs 1.22 and 15.18, the marker starts the next page, one past the figure); the description block's line
-range and PDF page. `D` = the block states data values (§4).
+range and PDF page. `D` = the block is listed in §4.
 
 | Item | Body line | PDF | Description lines | Desc PDF | D |
 |---|---|---|---|---|---|
@@ -509,8 +540,8 @@ range and PDF page. `D` = the block states data values (§4).
 | Figure 6.24 | 18299 | 311 | 63451–63465 | 1200 |  |
 | Figure 6.25 | 18337 | 312 | 63471–63483 | 1201 |  |
 | Figure 6.26 | 18479 | 314 | 63489–63511 | 1202 |  |
-| Figure 6.27 | 18492 | 314 | 63517–63544 | 1203 |  |
-| Figure 6.28 | 18605 | 316 | 63550–63565 | 1204 |  |
+| Figure 6.27 | 18492 | 314 | 63517–63544 | 1203 | D |
+| Figure 6.28 | 18605 | 316 | 63550–63565 | 1204 | D |
 | Figure 6.29 | 18642 | 317 | 63571–63607 | 1205 |  |
 | Figure 6.30 | 18704 | 318 | 63613–63639 | 1206 |  |
 | Figure 6.31 | 18742 | 318 | 63645–63657 | 1207 |  |
@@ -584,7 +615,7 @@ range and PDF page. `D` = the block states data values (§4).
 | Figure 9.9 | 26387 | 439 | 65379–65394 | 1275 |  |
 | Figure 9.10 | 26420 | 440 | 65400–65427 | 1276 |  |
 | Figure 9.11 | 26498 | 442 | 65433–65454 | 1277 |  |
-| Figure 9.12 | 26613 | 444 | 65460–65479 | 1278 |  |
+| Figure 9.12 | 26613 | 444 | 65460–65479 | 1278 | D |
 | Figure 9.13 | 26772 | 446 | 65485–65511 | 1279 |  |
 | Figure 9.14 | 26865 | 447 | 65517–65553 | 1280 |  |
 | Figure 9.15 | 26915 | 448 | 65559–65585 | 1281 |  |
@@ -594,7 +625,7 @@ range and PDF page. `D` = the block states data values (§4).
 | Figure 9.19 | 27134 | 452 | 65674–65690 | 1285 |  |
 | Figure 9.20 | 27212 | 453 | 65696–65711 | 1286 |  |
 | Figure 9.21 | 27247 | 454 | 65717–65734 | 1287 |  |
-| Figure 9.22 | 27349 | 456 | 65740–65759 | 1288 |  |
+| Figure 9.22 | 27349 | 456 | 65740–65759 | 1288 | D |
 | Figure 9.23 | 27389 | 457 | 65765–65784 | 1289 |  |
 | Figure 9.24 | 27410 | 457 | 65790–65814 | 1290 |  |
 | Figure 9.25 | 27437 | 458 | 65820–65848 | 1291 |  |
@@ -641,7 +672,7 @@ range and PDF page. `D` = the block states data values (§4).
 | Figure 10.24 | 30666 | 514 | 67162–67198 | 1335 | D |
 | Figure 10.25 | 30684 | 514 | 67204–67231 | 1336 |  |
 | Figure 10.26 | 30732 | 515 | 67237–67297 | 1337 | D |
-| Figure 10.27 | 30913 | 518 | 67303–67319 | 1339 |  |
+| Figure 10.27 | 30913 | 518 | 67303–67319 | 1339 | D |
 | Figure 10.28 | 30981 | 519 | 67325–67352 | 1340 |  |
 | Figure 10.29 | 31022 | 520 | 67358–67381 | 1341 |  |
 | Figure 10.30 | 31121 | 521 | 67387–67417 | 1342 |  |
@@ -734,12 +765,12 @@ range and PDF page. `D` = the block states data values (§4).
 | Figure 13.13 | 39049 | 657 | 70111–70126 | 1434 | D |
 | Figure 13.14 | 39156 | 659 | 70132–70154 | 1435 |  |
 | Figure 13.15 | 39360 | 662 | 70160–70174 | 1436 |  |
-| Figure 13.16 | 39412 | 663 | 70180–70199 | 1437 | D |
-| Figure 13.17 | 39462 | 664 | 70205–70229 | 1438 | D |
-| Figure 13.18 | 39522 | 665 | 70235–70261 | 1439 | D |
-| Figure 13.19 | 39603 | 666 | 70267–70293 | 1440 | D |
-| Figure 13.20 | 39677 | 667 | 70299–70321 | 1441 | D |
-| Figure 13.21 | 39708 | 668 | 70327–70367 | 1442 | D |
+| Figure 13.16 | 39412 | 663 | 70180–70199 | 1437 |  |
+| Figure 13.17 | 39462 | 664 | 70205–70229 | 1438 |  |
+| Figure 13.18 | 39522 | 665 | 70235–70261 | 1439 |  |
+| Figure 13.19 | 39603 | 666 | 70267–70293 | 1440 |  |
+| Figure 13.20 | 39677 | 667 | 70299–70321 | 1441 |  |
+| Figure 13.21 | 39708 | 668 | 70327–70367 | 1442 |  |
 | Figure 13.22 | 39771 | 669 | 70373–70401 | 1443 |  |
 | Figure 13.23 | 39834 | 670 | 70407–70436 | 1444 |  |
 | Figure 13.24 | 39906 | 671 | 70442–70475 | 1445 |  |
@@ -775,13 +806,13 @@ range and PDF page. `D` = the block states data values (§4).
 | Figure 13.54 | 41633 | 701 | 71409–71431 | 1476 |  |
 | Figure 13.55 | 41891 | 704 | 71437–71460 | 1477 |  |
 | Figure 13.56 | 42049 | 706 | 71466–71522 | 1478 |  |
-| Figure 13.57 | 42117 | 708 | 71528–71550 | 1480 |  |
+| Figure 13.57 | 42117 | 708 | 71528–71550 | 1480 | D |
 | Figure 13.58 | 42161 | 709 | 71556–71569 | 1481 |  |
 | Figure 13.59 | 42286 | 711 | 71575–71596 | 1482 |  |
 | Figure 13.60 | 42850 | 721 | 71602–71686 | 1483 | D |
 | Figure 14.1 | 42937 | 723 | 71692–71712 | 1485 |  |
 | Figure 14.2 | 42956 | 723 | 71718–71741 | 1486 |  |
-| Figure 14.3 | 43124 | 726 | 71747–71765 | 1487 | D |
+| Figure 14.3 | 43124 | 726 | 71747–71765 | 1487 |  |
 | Figure 14.4 | 43180 | 727 | 71771–71793 | 1488 |  |
 | Figure 14.5 | 43240 | 728 | 71799–71813 | 1489 |  |
 | Figure 14.6 | 43282 | 729 | 71819–71833 | 1490 |  |
@@ -851,7 +882,7 @@ range and PDF page. `D` = the block states data values (§4).
 | Figure 15.26 | 48528 | 818 | 73676–73693 | 1558 | D |
 | Figure 15.27 | 48564 | 818 | 73699–73715 | 1559 |  |
 | Figure 15.28 | 48665 | 820 | 73721–73736 | 1560 |  |
-| Figure 15.29 | 48838 | 822 | 73742–73757 | 1561 | D |
+| Figure 15.29 | 48838 | 822 | 73742–73757 | 1561 |  |
 | Figure B.1 | 49581 | 834 | 73763–73774 | 1562 |  |
 | Figure B.2 | 49614 | 835 | 73780–73797 | 1563 | D |
 | Table 8.45 | 51035 | 855 | 73803–73832 | 1564 | D |
