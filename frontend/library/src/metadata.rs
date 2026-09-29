@@ -86,10 +86,10 @@ pub struct MetadataReport {
 
 impl MetadataReport {
     /// Θ, the middle tier of the search key: Σ budget-arm residuals in
-    /// milli-budgets (× 1000, the stage reports' scale). The stage reports carry
-    /// the same residuals, so the key weighs them ~twice — monotone, so the
-    /// ranking is unaffected. Criticality is deliberately excluded: a satisfied
-    /// but tight budget must not read as violated.
+    /// milli-budgets (× 1000, the stage reports' scale). The only Θ source for
+    /// rule batches: the key drops the stage reports' `batch:` rows, which
+    /// restate these residuals. Criticality is deliberately excluded: a
+    /// satisfied but tight budget must not read as violated.
     #[must_use]
     pub fn theta(&self) -> f64 {
         self.placement
@@ -97,6 +97,18 @@ impl MetadataReport {
             .chain(&self.routing)
             .filter(|b| b.arm == Arm::Budget)
             .map(|b| b.residual * 1000.0)
+            .sum()
+    }
+
+    /// |V| from rule batches: violated hard-arm rules (`total − satisfied`)
+    /// over both tiers, counted per rule, not per batch.
+    #[must_use]
+    pub fn hard_violated(&self) -> usize {
+        self.placement
+            .iter()
+            .chain(&self.routing)
+            .filter(|b| b.arm == Arm::Hard)
+            .map(|b| b.total - b.satisfied)
             .sum()
     }
 

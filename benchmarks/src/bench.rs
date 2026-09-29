@@ -190,7 +190,8 @@ fn run_circuit(
 
     // Signoff findings are structured by rule-name prefix: `{domain}/{rule}:{layer}`
     // with domains drc/erc/lvs, plus `engine/…` for a stage that could not run
-    // (see `verify::signoff`).
+    // and `warn/…` for a deck warning (see `verify::signoff`).
+    let mut warn = 0usize;
     let mut drc = 0usize;
     let mut erc = 0usize;
     let mut lvs_mismatch = false;
@@ -204,6 +205,8 @@ fn run_circuit(
             erc += 1;
         } else if v.rule.starts_with("engine/") {
             engine += 1;
+        } else if v.rule.starts_with("warn/") {
+            warn += 1;
         }
     }
 
@@ -229,7 +232,7 @@ fn run_circuit(
     // `esc` > 0 means a variant-space binding (no arrangement of the chosen
     // variants was feasible), not a placement local minimum.
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}{} | overuse {} | DRC {} | LVS {} | ERC {}{} | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | overuse {} | DRC {} | LVS {} | ERC {}{}{} | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
@@ -240,6 +243,7 @@ fn run_circuit(
         if lvs_mismatch { "MISMATCH" } else { "MATCH" },
         erc,
         if engine > 0 { format!(" | engine fails {engine}") } else { String::new() },
+        if warn > 0 { format!(" | warnings {warn}") } else { String::new() },
         report.cost,
         area_um2,
         util_pct,

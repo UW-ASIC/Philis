@@ -117,8 +117,11 @@ pub struct RunStats {
     pub place_hard: usize,
     /// Winner: detailed-routing hard violations.
     pub route_hard: usize,
-    /// Winner: signoff (DRC + ERC + LVS) violations over its drawn geometry.
+    /// Winner: signoff (DRC + ERC + LVS) violations over its drawn geometry,
+    /// deck warnings included.
     pub drc_hard: usize,
+    /// Winner: of `drc_hard`, deck warnings (`warn/` rows) — reported, not in |V|.
+    pub warnings: u32,
     /// Winner: Σ routing budget margins (milli-budgets, not tracks).
     pub route_overuse: i64,
 }
@@ -334,9 +337,8 @@ fn solve(
     };
 
     // 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
-    //    keeping the lexicographically best (|V|, Θ, PEX) where V includes the
-    //    epoch's own signoff findings. Prices and routing history persist
-    //    across epochs; dp consults the live DRC oracle within one.
+    //    keeping the best [`LexKey`], whose V includes the epoch's own signoff
+    //    errors. Prices and routing history persist across epochs.
     let mut assignment = cellgen::seed_assignment(&flow.cells.variants, &flow.layers, pdk);
     let mut prices = gp::Prices::new();
     let mut neg = gr::Negotiation::new();
@@ -688,6 +690,7 @@ impl Flow<'_> {
             place_hard: place_report.hard_violations.len(),
             route_hard: route_report.hard_violations.len(),
             drc_hard,
+            warnings: signoff.hard_violations.iter().filter(|v| v.rule.starts_with("warn/")).count() as u32,
             route_overuse: route_report
                 .budget_violations
                 .iter()
@@ -901,18 +904,21 @@ impl RunStats {
             place_hard: self.place_hard,
             route_hard: self.route_hard,
             drc_hard: self.drc_hard,
+            warnings: self.warnings,
             route_overuse: self.route_overuse,
             ..run
         }
     }
 }
 
-/// `(|V|, spec miss, Θ, PEX)` compared as a tuple: no parasitic gain buys
-/// past a budget residual, no budget slack past a missed circuit spec, nothing
-/// past a hard violation. V and Θ sum over stages; the spec miss is the
-/// post-layout simulation's Σ normalised miss (`0` without performance
-/// scoring); PEX is signoff's extracted total C (fF), now only a tie-break.
-/// `(|V|, spec miss, Θ, extracted C, footprint nm²)`; compared by [`key_lt`].
+/// `(|V|, spec miss, Θ, extracted C, footprint nm²)`, compared by [`key_lt`]:
+/// no parasitic gain buys past a budget residual, no budget slack past a missed
+/// circuit spec, nothing past a hard violation. V counts violated hard rules
+/// ([`metadata::MetadataReport::hard_violated`]), the stages' own non-batch
+/// rows, and signoff errors (not `warn/` rows). Θ is
+/// [`metadata::MetadataReport::theta`] plus dr's own non-batch budget rows, all
+/// in milli-budgets. The spec miss is the post-layout simulation's Σ normalised
+/// miss (`0` without performance scoring); C is signoff's extracted total (fF).
 type LexKey = (usize, f64, f64, f32, f64);
 
 /// Relative extracted-C difference read as a tie, which area then breaks.
@@ -925,16 +931,20 @@ const C_TIE: f32 = 0.02;
 /// except that C within [`C_TIE`] is a tie decided by footprint. A feasible
 /// optimum is a vector (area, C, …) and a scalarisation must be a declared
 /// policy (Graeb 2007 ch.1); this is ours. Not transitive inside a C band;
-/// callers only ever compare a candidate against the incumbent.
+/// callers only ever compare a candidate against the incumbent. A NaN tier
+/// reads as +∞, so it loses to any finite value and never sticks as incumbent.
 fn key_lt(a: &LexKey, b: &LexKey) -> bool {
-    let head = |k: &LexKey| (k.0, k.1, k.2);
+    let nan_last = |x: f64| if x.is_nan() { f64::INFINITY } else { x };
+    let c = |k: &LexKey| if k.3.is_nan() { f32::INFINITY } else { k.3 };
+    let (a3, b3) = (c(a), c(b));
+    let head = |k: &LexKey| (k.0, nan_last(k.1), nan_last(k.2));
     if head(a) != head(b) {
         return head(a) < head(b);
     }
-    if (a.3 - b.3).abs() <= C_TIE * a.3.abs().min(b.3.abs()) {
-        a.4 < b.4
+    if (a3 - b3).abs() <= C_TIE * a3.abs().min(b3.abs()) {
+        nan_last(a.4) < nan_last(b.4)
     } else {
-        a.3 < b.3
+        a3 < b3
     }
 }
 
@@ -946,15 +956,12 @@ fn lex_key(
     perf: Option<&perf::PerfResult>,
     footprint_nm2: f64,
 ) -> LexKey {
-    let (pv, pt, _) = place.lex();
-    let (rv, rt, _) = route.lex();
-    (
-        pv + rv + signoff.hard_violations.len(),
-        perf.map_or(0.0, |p| p.residual),
-        pt + rt + budgets.theta(),
-        signoff.cost,
-        footprint_nm2,
-    )
+    let own = |r: &Report| r.hard_violations.iter().filter(|v| !v.is_batch_row()).count();
+    let errors = signoff.hard_violations.iter().filter(|v| !v.rule.starts_with("warn/")).count();
+    let v = budgets.hard_violated() + own(place) + own(route) + errors;
+    let theta = budgets.theta()
+        + route.budget_violations.iter().filter(|x| !x.is_batch_row()).map(|x| x.margin as f64).sum::<f64>();
+    (v, perf.map_or(0.0, |p| p.residual), theta, signoff.cost, footprint_nm2)
 }
 
 /// Edge-to-edge gap `dp` keeps between cells: the deck's widest same-layer
@@ -1432,6 +1439,57 @@ mod start_tests {
         assert!(crate::key_lt(&k(30.0, 265.0), &k(29.6, 385.0)), "1.3% more C, 31% less area");
         assert!(crate::key_lt(&k(29.0, 385.0), &k(30.0, 265.0)), "3.3% less C wins outright");
         assert!(!crate::key_lt(&(1usize, 0.0, 0.0, 1.0, 1.0), &k(99.0, 999.0)), "a violation never wins on C");
+    }
+
+    use crate::metadata::{Arm, BudgetStatus, MetadataReport};
+    use pnr_core::{Report, Violation};
+
+    fn row(arm: Arm, total: usize, satisfied: usize, residual: f64) -> BudgetStatus {
+        BudgetStatus { kind: "K".into(), arm, total, satisfied, unknown: 0, criticality: 0.0, residual, usage: None }
+    }
+
+    fn rows(rules: &[&str]) -> Vec<Violation> {
+        rules.iter().map(|r| Violation { rule: (*r).into(), margin: 1 }).collect()
+    }
+
+    fn key(place: &Report, signoff: &Report, budgets: &MetadataReport) -> crate::LexKey {
+        crate::lex_key(place, &Report::default(), signoff, budgets, None, 1.0)
+    }
+
+    /// |V| counts the 40 violated rules of a hard batch, not its one stage row.
+    #[test]
+    fn v_counts_rules_not_batches() {
+        let budgets = MetadataReport { placement: vec![row(Arm::Hard, 40, 0, 3.0)], ..Default::default() };
+        let place = Report { hard_violations: rows(&["batch:analog hard 0 (Symmetry)"]), ..Default::default() };
+        assert_eq!(key(&place, &Report::default(), &budgets).0, 40);
+    }
+
+    /// A budget residual restated by the placement report is not added twice.
+    #[test]
+    fn theta_counts_each_budget_once() {
+        let budgets = MetadataReport { placement: vec![row(Arm::Budget, 1, 0, 0.5)], ..Default::default() };
+        assert_eq!(budgets.theta(), 500.0);
+        let place = Report {
+            budget_violations: vec![Violation::from_residual(format!("{}analog budget 0", Violation::BATCH), 0.5)],
+            ..Default::default()
+        };
+        assert_eq!(place.budget_violations[0].margin, 500);
+        assert_eq!(key(&place, &Report::default(), &budgets).2, 500.0);
+    }
+
+    /// A deck warning is reported, not counted as a hard violation.
+    #[test]
+    fn warnings_are_not_violations() {
+        let signoff = Report { hard_violations: rows(&["warn/erc/tie_high_low:li", "drc/m1.1:met1"]), ..Default::default() };
+        assert_eq!(key(&Report::default(), &signoff, &MetadataReport::default()).0, 1);
+    }
+
+    /// A NaN tier loses to a finite one, whichever side it is on.
+    #[test]
+    fn nan_loses() {
+        let (nan, finite) = ((0usize, f64::NAN, 0.0, 1.0, 1.0), (0usize, 5.0, 0.0, 1.0, 1.0));
+        assert!(crate::key_lt(&finite, &nan), "the finite key displaces a NaN incumbent");
+        assert!(!crate::key_lt(&nan, &finite), "a NaN candidate never wins");
     }
 }
 
