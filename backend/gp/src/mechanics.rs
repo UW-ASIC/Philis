@@ -233,11 +233,12 @@ pub fn encroach(l: &Layout, a: usize, b: usize, clearance: i32) -> f64 {
     }
 }
 
-/// [`encroach`] summed over all pairs.
+/// [`encroach`] summed over all pairs; `+0.0` with fewer than two cells (an
+/// empty f64 `sum` is `-0.0`, which reports print as "-0").
 #[must_use]
 pub fn encroachment(l: &Layout, clearance: i32) -> f64 {
     let n = l.x.len();
-    (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).map(|(a, b)| encroach(l, a, b, clearance)).sum()
+    (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).fold(0.0, |t, (a, b)| t + encroach(l, a, b, clearance))
 }
 
 /// PEX-tier objective: `Σ criticality·cost` over `reqs.cost` plus the priced
@@ -294,7 +295,7 @@ pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Pri
         .enumerate()
         .filter(|(_, b)| b.violations(l) > 0)
         .map(|(bi, b)| {
-            Violation::from_residual(format!("analog hard batch {bi} ({:?})", b.kind()), b.residual(l))
+            Violation::from_residual(format!("{}analog hard {bi} ({:?})", Violation::BATCH, b.kind()), b.residual(l))
         })
         .collect();
     let budget_violations = reqs
@@ -304,7 +305,7 @@ pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Pri
         .filter_map(|(bi, b)| {
             let residual = b.residual(l);
             (residual > 0.0)
-                .then(|| Violation::from_residual(format!("analog budget batch {bi}"), residual))
+                .then(|| Violation::from_residual(format!("{}analog budget {bi}", Violation::BATCH), residual))
         })
         .collect();
     let ov = encroachment(l, 0);

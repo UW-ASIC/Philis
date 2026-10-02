@@ -1,0 +1,80 @@
+# CI (plan-08 FLOW-14, T13). Every push: debug workspace tests, a release
+# run of cell_selfcheck (its cross-deck loops are
+# `#[cfg(not(debug_assertions))]`) and of ota_cross_pdk (which also runs in
+# debug; plan-08 FLOW-14 lists it), and an advisory rustfmt check. Nightly:
+# the tool-dependent tests with ngspice and the sky130 models installed and
+# `PHILIS_REQUIRE_TOOLS=1`, so a missing tool panics instead of skipping.
+# A red test stays red here; nothing is waived (dac4's ERC baseline in
+# benchmarks/tests/signoff_fixtures.rs is expected red until REL's fix).
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --locked
+      # --no-fail-fast: a red target (dac4, see above) must not stop the
+      # targets after it; every test runs and every failure is reported.
+      - run: cargo test --workspace --locked --no-fail-fast
+
+  release:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release --locked --no-fail-fast -p cells --test cell_selfcheck -p library --test ota_cross_pdk
+
+  fmt:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    # Advisory: `cargo fmt --all --check` finds diffs in 15 of the 16 workspace crates
+    # (not only gr/dr, docs/CRATES.md item 10), so this gates nothing until one
+    # dedicated formatting commit lands after the M0 branches merge.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  nightly:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PDK_ROOT: ${{ github.workspace }}/.pdk
+      PHILIS_REQUIRE_TOOLS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y ngspice
+      # sky130A at the version the deck sidecars' `_source` texts were read
+      # from (fa87f8f4…, e.g. pdks/sky130.json), not the flake's 1341f54f…
+      # (flake.nix shellHook), until those citations are re-verified there.
+      - run: pipx install volare && volare enable --pdk sky130 fa87f8f4bbcc7255b6f0c0fb506960f531ae2392
+      # Not `--include-ignored` workspace-wide: that also runs the annotator
+      # placeholders `#[ignore]`d until a later EXT item (coverage_is_total is
+      # `unimplemented!`, twelve_thousand_devices runs > 13 min), so the job
+      # would be red or hang whatever the tools do. The tool tests are not
+      # ignored (they read PHILIS_REQUIRE_TOOLS); the one ignored target that
+      # belongs here, the OTA-class signoff, is run by name.
+      - run: cargo test --release --workspace --locked --no-fail-fast
+      - run: cargo test --release --locked --no-fail-fast -p benchmark --test signoff_fixtures -- --ignored

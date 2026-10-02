@@ -28,7 +28,8 @@ use pnr_core::layout::Layout;
 pub struct CentroidGroup {
     pub a_side: Vec<DeviceId>,
     pub b_side: Vec<DeviceId>,
-    /// Gate area `W·L·fingers` of the largest member, µm² (tightest budget).
+    /// Gate area `W_total·L·m` of the largest member, µm² (tightest budget;
+    /// `pnr_core::MosSize::gate_area_um2`).
     pub gate_um2: f32,
     /// Allowed `σ_gradient / σ_random`.
     pub gradient_share: f32,

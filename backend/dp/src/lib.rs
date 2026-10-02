@@ -31,6 +31,23 @@ const REGION_FILL: f64 = 0.5;
 /// Runaway guard for the terminal legalizer (it exits early when clean/stalled).
 const LEGALIZE_SWEEPS: u32 = 64;
 
+/// What the anneal did, for measurement only: no counter feeds a decision, so
+/// the placement is the same with or without anyone reading them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PlaceStats {
+    /// Temperature steps (epochs) run.
+    pub temps: u32,
+    /// `Sa::trial` calls: every move that reached the gate.
+    pub proposals: u64,
+    /// Proposals kept.
+    pub accepted: u64,
+    /// Codes the decoder could not realise; `None` (not measured) until
+    /// PLC-08 adds a decoder.
+    pub decode_fail: Option<u64>,
+    /// Matched sets drawn incompatibly; `None` (not measured) until PLC-03.
+    pub matched_incompatible: Option<u32>,
+}
+
 /// The mutable columns a move can touch, for rollback.
 #[derive(Default)]
 struct Snap {
@@ -88,6 +105,7 @@ struct Sa<'a> {
     grid: i32,
     snap: Snap,
     moved: Vec<usize>,
+    stats: PlaceStats,
 }
 
 impl<'a> Sa<'a> {
@@ -109,6 +127,7 @@ impl<'a> Sa<'a> {
             grid: rules.grid,
             snap: Snap::default(),
             moved: Vec::new(),
+            stats: PlaceStats::default(),
         }
     }
 
@@ -144,6 +163,7 @@ impl<'a> Sa<'a> {
         temp: f64,
         mutate: impl FnOnce(&mut Layout, &mut Nets, &[Vec<u32>]),
     ) -> bool {
+        self.stats.proposals += 1;
         self.snap.save(l);
         let phi0 = analog_phi(self.reqs, l);
         let theta0 = analog_theta(self.reqs, l);
@@ -177,6 +197,7 @@ impl<'a> Sa<'a> {
         let before = (phi0.0, phi0.1 + ov0, theta0);
         let after = (phi1.0, phi1.1 + ov1, analog_theta(self.reqs, l));
         if accept(before, after, self.pex(l) - pex0, temp, rng) {
+            self.stats.accepted += 1;
             return true;
         }
         self.snap.restore(l);
@@ -184,7 +205,8 @@ impl<'a> Sa<'a> {
     }
 }
 
-/// Refine `coarse` into a legal placement, seed-deterministic.
+/// Refine `coarse` into a legal placement, seed-deterministic, with the
+/// anneal's [`PlaceStats`].
 ///
 /// `net_weight[NetId]` weights each net's HPWL (see [`gp::net_weights`]).
 /// `macros[i]` supplies cell `i`'s pins when `variants[i]` has no alternative
@@ -199,7 +221,7 @@ pub fn place(
     rules: gp::Rules,
     net_weight: &[f32],
     seed: u64,
-) -> (Layout, Report) {
+) -> (Layout, Report, PlaceStats) {
     let gp::Rules { grid, clearance } = rules;
     let n = coarse.x.len();
     let mut rng = SplitMix64::new(seed);
@@ -243,7 +265,7 @@ pub fn place(
     let nets = Nets::from_macros(&choose_variants(macros, variants, &l.variant)).weigh(net_weight);
     if n == 0 {
         let rep = report(&nets, reqs, &l, prices);
-        return (l, rep);
+        return (l, rep, PlaceStats::default());
     }
 
     // Move region: the coarse footprint bbox, grown about its centre until the
@@ -347,6 +369,7 @@ pub fn place(
 
         temp *= ALPHA;
         range = (range * RANGE_DECAY).max(range_min);
+        sa.stats.temps += 1;
     }
 
     for a in &mut l.axis {
@@ -360,10 +383,9 @@ pub fn place(
     legalize::separate_overlaps(&mut l, reqs, fixed, grid, clearance, LEGALIZE_SWEEPS);
     l.refresh_temps();
 
-    let Sa { nets, .. } = sa;
-    prices.settle(reqs, &l);
+    let Sa { nets, stats, .. } = sa;
     let rep = report(&nets, reqs, &l, prices);
-    (l, rep)
+    (l, rep, stats)
 }
 
 /// Project every violated hard batch onto its feasible set, restore pinned

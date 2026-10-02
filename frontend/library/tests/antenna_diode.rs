@@ -6,23 +6,30 @@ use pnr_core::{DeviceKind, Process};
 
 /// sky130 with every antenna rule of its deck made impossibly tight: no
 /// route, jumpered or not, stays under it, so only a diode can clear the
-/// gate net.
+/// gate net. Each row becomes an `antenna_electrical` crediting the deck's
+/// diode marker (`diode_credit: 0`, a bonus no ratio reaches), so the diode is
+/// one the deck credits and the flow inserts it.
 fn tight_sky130() -> Option<verify::Pdk> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sidecar = std::fs::read_to_string(root.join("pdks/sky130.json")).ok()?;
     let deck = verify::Pdk::deck_text(&sidecar).ok()?;
+    let base = verify::Pdk::load(&deck, &sidecar).ok()?;
+    let marker = base.layer("diom")?;
+    let diom = &base.layers.iter().find(|(_, l)| *l == marker)?.0;
     let tight: Vec<String> = deck
         .lines()
-        .map(|l| match (l.contains(" antenna("), l.find("max_ratio: ")) {
-            (true, Some(at)) => {
-                let rest = &l[at + "max_ratio: ".len()..];
-                let end = rest.find(|c: char| c == ',' || c == ')').unwrap_or(rest.len());
-                format!("{}max_ratio: 0.001{}", &l[..at], &rest[end..])
-            }
+        .map(|l| match (l.find(" antenna("), l.find("max_ratio: ")) {
+            (Some(k), Some(at)) => format!(
+                "{} antenna_electrical({}max_ratio: 0.001, diode: {diom}, diode_credit: 0, diode_bonus: 1000000)",
+                &l[..k],
+                &l[k + " antenna(".len()..at]
+            ),
             _ => l.to_string(),
         })
         .collect();
-    verify::Pdk::load(&tight.join("\n"), &sidecar).ok()
+    let pdk = verify::Pdk::load(&tight.join("\n"), &sidecar).ok()?;
+    assert_eq!(pdk.antenna_diode_credit(), Some((marker, 1_000_000.0)), "the rewritten deck credits its diode");
+    Some(pdk)
 }
 
 #[test]
@@ -50,7 +57,7 @@ fn an_antenna_the_jumper_cannot_fix_gets_a_diode_and_lvs_matches() {
     assert_eq!(on(":N", "nsdm"), (net("g"), true), "cathode: n+ on the gate net");
     assert_eq!(on(":P", "psdm"), (net("VSS"), true), "anode: p+ tap on ground");
 
-    let report = library::signoff(&sol, &pdk);
+    let report = library::signoff(&sol, &pdk).report;
     let lvs: Vec<&String> = report.hard_violations.iter().map(|v| &v.rule).filter(|r| r.starts_with("lvs")).collect();
     assert!(lvs.is_empty(), "the inserted diode matches: {lvs:?}");
 }

@@ -1,9 +1,12 @@
 //! `philis` — read a netlist and a PDK deck, run the flow, sign off.
 //!
 //! ```text
-//! philis <netlist.sp> <deck.json>               # solve + signoff
-//! philis emit <netlist.sp> <deck.json> <out.rs> # also decompile to generator source
+//! philis <netlist.sp> <pdk>               # solve + signoff
+//! philis emit <netlist.sp> <pdk> <out.rs> # also decompile to generator source
 //! ```
+//!
+//! `<pdk>` is a sidecar `*.json`, or the name of one compiled in
+//! (`sky130`, `gf180mcu`, `ihp_sg13g2`, `generic_finfet`).
 
 use std::process::ExitCode;
 
@@ -19,7 +22,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// `Ok(true)` when signoff is clean.
+/// `Ok(true)` when signoff is clean: no errors and every device LVS-compared.
 fn cli() -> Result<bool, String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let emit_to = if args.first().is_some_and(|a| a == "emit") {
@@ -27,17 +30,18 @@ fn cli() -> Result<bool, String> {
         Some(
             args.get(2)
                 .cloned()
-                .ok_or("usage: philis emit <netlist.sp> <deck.json> <out.rs>")?,
+                .ok_or("usage: philis emit <netlist.sp> <pdk> <out.rs>")?,
         )
     } else {
         None
     };
     let [netlist, deck, ..] = args.as_slice() else {
-        return Err("usage: philis [emit] <netlist.sp> <deck.json> [out.rs]".into());
+        return Err("usage: philis [emit] <netlist.sp> <pdk.json | sky130 | gf180mcu | ihp_sg13g2 | generic_finfet> [out.rs]".into());
     };
     let read = |p: &str| std::fs::read_to_string(p).map_err(|e| format!("read {p}: {e}"));
     let spice = read(netlist)?;
-    let pdk = verify::Pdk::from_json(&read(deck)?).map_err(|e| format!("pdk: {e}"))?;
+    let pdk = if std::path::Path::new(deck).is_file() { verify::Pdk::from_json(&read(deck)?) } else { verify::Pdk::builtin(deck) }
+        .map_err(|e| format!("pdk: {e}"))?;
 
     let cfg = Config::default();
     let sol =
@@ -51,14 +55,25 @@ fn cli() -> Result<bool, String> {
         println!("emitted generator → {out}");
     }
 
-    let report = library::signoff(&sol, &pdk);
-    if report.hard_violations.is_empty() {
+    if !sol.metadata.assumed.is_empty() {
+        println!("assumed (UNVERIFIED sidecar values): {}", sol.metadata.assumed.join(", "));
+    }
+    let signoff = library::signoff(&sol, &pdk);
+    let report = signoff.report;
+    if !signoff.warnings.is_empty() {
+        println!("signoff: {} deck warning(s), not violations", signoff.warnings.len());
+    }
+    print!("{}", signoff.coverage);
+    // Unknown never passes: an LVS-unverified device keeps it from CLEAN.
+    let unverified: usize = signoff.coverage.unverified.iter().map(|u| u.2).sum();
+    let clean = report.hard_violations.is_empty() && unverified == 0;
+    if clean {
         println!("signoff CLEAN — cost {:.3}", report.cost);
     } else {
         println!(
-            "signoff: {} hard violation(s)",
+            "signoff: {} hard violation(s), {unverified} device(s) LVS-unverified — not clean",
             report.hard_violations.len()
         );
     }
-    Ok(report.hard_violations.is_empty())
+    Ok(clean)
 }

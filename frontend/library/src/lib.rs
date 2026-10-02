@@ -8,6 +8,7 @@ mod cellgen;
 mod fill;
 mod geometry;
 mod parse;
+pub use parse::SizeConvention;
 
 /// Substrate3 elaboration: build a `macro_master::Composition` against a PDK
 /// and route its declared nets — the "PDK on the fly" entry.
@@ -24,7 +25,49 @@ pub mod metadata;
 pub mod oppoint;
 pub mod perf;
 
+/// Test gates for external tools (FLOW-14), shared by the unit and
+/// integration tests: a missing tool skips with a printed reason, and under
+/// `PHILIS_REQUIRE_TOOLS=1` (CI's nightly job) panics, so a missing tool is
+/// never a green run.
+#[doc(hidden)]
+pub mod tools {
+    /// `true` when `what` is present; otherwise a panic under
+    /// `PHILIS_REQUIRE_TOOLS=1`, else an `eprintln!` and `false`.
+    pub fn present_or_skip(what: &str, present: bool) -> bool {
+        if !present {
+            assert!(
+                std::env::var_os("PHILIS_REQUIRE_TOOLS").is_none_or(|v| v != "1"),
+                "PHILIS_REQUIRE_TOOLS=1 and {what} is missing"
+            );
+            eprintln!("{what} unavailable — skipping");
+        }
+        present
+    }
+
+    /// `bin` counts as present when it spawns at all (`--version` exits either
+    /// way); only a failed spawn, i.e. not on PATH, is absent.
+    pub fn tool_or_skip(bin: &str) -> bool {
+        present_or_skip(bin, std::process::Command::new(bin).arg("--version").output().is_ok())
+    }
+
+    /// ngspice and the sky130 ngspice library (`$PDK_ROOT`, else `~/.volare`,
+    /// `/sky130A/libs.tech/ngspice/sky130.lib.spice`), gated as [`present_or_skip`].
+    pub fn sky130_models() -> Option<std::path::PathBuf> {
+        if !tool_or_skip("ngspice") {
+            return None;
+        }
+        let root = std::env::var_os("PDK_ROOT")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".volare")));
+        let lib = root.map(|r| r.join("sky130A/libs.tech/ngspice/sky130.lib.spice"));
+        let found = lib.as_ref().is_some_and(|l| l.is_file());
+        present_or_skip(&format!("sky130 models ({lib:?})"), found).then(|| lib.unwrap())
+    }
+}
+
 use annotator::{annotate, AnnotationConfig, Problem};
+pub use dp::PlaceStats;
+pub use geometry::PlacementMetrics;
 pub use macro_master::Macros;
 use pnr_core::{DeviceId, LayerId, Layout, Macro, Report, Routes};
 use verify::Pdk;
@@ -60,6 +103,21 @@ pub struct Config {
     /// bounding box (a priced budget, so it outranks C; see
     /// `analog::placement::utilization`). `0` disables it.
     pub min_utilization: f32,
+    /// What a MOS card's `W` means; [`run`] stores it as the SPICE total.
+    /// Only [`run`] reads it: [`parse`] is always [`SizeConvention::Spice`].
+    pub size_convention: SizeConvention,
+    /// What gp does before dp; [`GpMode::Pile`] measures gp's contribution.
+    pub gp_mode: GpMode,
+}
+
+/// Coarse-placement strategy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpMode {
+    /// gp's analytic loop refines the seeded pile.
+    #[default]
+    Analytic,
+    /// dp starts from gp's seeded pile, unrefined.
+    Pile,
 }
 
 impl Default for Config {
@@ -74,6 +132,8 @@ impl Default for Config {
             performance: None,
             starts: 3,
             min_utilization: 0.6,
+            size_convention: SizeConvention::Spice,
+            gp_mode: GpMode::default(),
         }
     }
 }
@@ -107,8 +167,15 @@ pub struct RunStats {
     pub iterations: u32,
     /// Index of the winning epoch within its assignment.
     pub best_iteration: u32,
-    /// Stopped feasible with stationary constraint prices.
+    /// Stopped feasible with stationary constraint prices, none saturated.
+    /// Feasible excludes the `lvs-coverage/` rows (devices no deck extracts,
+    /// the same on every layout), so `converged` does not imply LVS-complete:
+    /// [`metadata::MetadataReport::certified`] does. An undrawable device does
+    /// count, so it never reads converged.
     pub converged: bool,
+    /// Dual steps on the constraint prices: one per epoch, so it equals
+    /// `iterations` (T6).
+    pub dual_steps: u32,
     /// Variant assignments tried.
     pub outer_iterations: u32,
     /// Times an assignment stalled infeasible and the variants were changed.
@@ -117,10 +184,25 @@ pub struct RunStats {
     pub place_hard: usize,
     /// Winner: detailed-routing hard violations.
     pub route_hard: usize,
-    /// Winner: signoff (DRC + ERC + LVS) violations over its drawn geometry.
+    /// Winner: signoff (DRC + ERC + LVS) errors over its drawn geometry.
     pub drc_hard: usize,
+    /// Winner: deck warning rows ([`verify::Signoff::warnings`]) — reported,
+    /// never in `drc_hard` or |V|.
+    pub warnings: u32,
     /// Winner: Σ routing budget margins (milli-budgets, not tracks).
     pub route_overuse: i64,
+    /// Winner: its placement measured after dp ([`PlacementMetrics`]).
+    pub place: PlacementMetrics,
+    /// Winner: dp's anneal counters.
+    pub dp: PlaceStats,
+    /// Winner: its key's C tier ([`signoff_c_tier`]) over the epoch's own
+    /// signoff, before fill: spec-headroom share with sensitivity rows, else
+    /// signal-class C, fF. `Report::cost` stays the total.
+    pub c_tier: f32,
+    /// Post-layout simulations that could not run ([`perf::evaluate`] `Err`),
+    /// over every epoch of every start and cell topology, not just the
+    /// winner's; each scored its epoch as every spec unmeasured.
+    pub sim_failures: u32,
 }
 
 /// Anything that stops the flow.
@@ -155,7 +237,7 @@ pub fn deck_models(netlist: &mut pnr_core::Netlist, pdk: &Pdk) {
 /// as drawn, never reshaped or moved by `dp`.
 pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<Solution, FlowError> {
     // 1. Parse, naming each device by the deck's model.
-    let mut netlist = parse::spice(spice).map_err(FlowError::Parse)?;
+    let mut netlist = parse::spice_with(spice, &parse::ParseOptions { size: cfg.size_convention }).map_err(FlowError::Parse)?;
     deck_models(&mut netlist, pdk);
 
     check_injected(&netlist, injected, pdk)?;
@@ -164,7 +246,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     //    so solved once.
     let (power, bias, currents, net_headroom_mv, gm_us) = bias(&netlist, cfg);
     let bias = Bias { power, summary: bias, currents, net_headroom_mv, gm_us };
-    let perf_rows = performance_rows(&netlist, pdk, cfg);
+    let (perf_rows, perf_bounds) = performance_rows(&netlist, pdk, cfg);
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
     // linear gradient but splits one drain across the row ends (asymmetric
@@ -178,7 +260,11 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             return (merged, key);
         }
         let (apart, apart_key, _) = solve(&netlist, injected, pdk, cfg, &bias, &perf_rows, false, seed);
-        if key_lt(&apart_key, &key) { (apart, apart_key) } else { (merged, key) }
+        // Failures count over both topologies, whichever wins.
+        let failed = merged.stats.sim_failures + apart.stats.sim_failures;
+        let (mut sol, key) = if key_lt(&apart_key, &key) { (apart, apart_key) } else { (merged, key) };
+        sol.stats.sim_failures = failed;
+        (sol, key)
     };
     // Multi-start: the lex-best start wins; ties go to the earliest.
     let start = &start;
@@ -186,24 +272,47 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         let handles: Vec<_> = (0..cfg.starts.max(1)).map(|j| s.spawn(move || start(j))).collect();
         handles.into_iter().map(|h| h.join().expect("a search start panicked")).collect()
     });
-    Ok(runs.into_iter().reduce(|best, r| if key_lt(&r.1, &best.1) { r } else { best }).expect("one start at least").0)
+    // Failures count over every start, not just the winner's: a failed
+    // simulation scores its epoch unmeasured, so selection would hide them.
+    let sim_failures = runs.iter().map(|r| r.0.stats.sim_failures).sum();
+    let mut sol = runs.into_iter().reduce(|best, r| if key_lt(&r.1, &best.1) { r } else { best }).expect("one start at least").0;
+    (sol.stats.sim_failures, sol.metadata.sim_failures) = (sim_failures, sim_failures);
+    sol.metadata.budget_rows = perf_bounds;
+    Ok(sol)
 }
 
-/// Each spec as a shared routing budget from schematic sensitivities (see
-/// [`perf::budget_rows`]): one baseline plus one run per signal net, in
+/// Each spec bound as a shared routing budget from schematic sensitivities
+/// (see [`perf::budget_rows`]): one baseline plus one run per signal net, in
 /// parallel, once per run. Empty without performance scoring, a simulator, or
-/// the deck's wire capacitance.
+/// the deck's wire capacitance. Also, per declared bound (`"{metric}:min"` /
+/// `":max"`), its row or why it has none ([`metadata::MetadataReport::budget_rows`]).
 fn performance_rows(
     netlist: &pnr_core::Netlist,
     pdk: &Pdk,
     cfg: &Config,
-) -> Vec<analog::routing::PerformanceBudget> {
+) -> (Vec<analog::routing::PerformanceBudget>, Vec<String>) {
     use analog::metadata::NetClass;
-    let Some(p) = &cfg.performance else { return Vec::new() };
+    let Some(p) = &cfg.performance else { return (Vec::new(), Vec::new()) };
+    let bounds = || {
+        p.specs.iter().flat_map(|s| {
+            [(s.min, "min"), (s.max, "max")].into_iter().filter(|b| b.0.is_some_and(f64::is_finite)).map(move |(_, side)| format!("{}:{side}", s.metric))
+        })
+    };
+    let notes = |rows: &[analog::routing::PerformanceBudget], why: &str| -> Vec<String> {
+        let notes: Vec<String> = bounds()
+            .map(|b| match rows.iter().find(|r| r.metric == b) {
+                Some(r) if r.nets.is_empty() => format!("{b}: row with no measured nets"),
+                Some(r) if r.limit > 0.0 => format!("{b}: row ({} nets)", r.nets.len()),
+                Some(_) => format!("{b}: do-not-worsen row (the schematic misses it)"),
+                None => format!("{b}: no row ({why})"),
+            })
+            .collect();
+        notes.iter().for_each(|n| eprintln!("[perf] {n}"));
+        notes
+    };
     let ann = annotation(pdk, &cfg.annotation);
     let Some(af_per_um) = ann.process.wire_af_per_um else {
-        eprintln!("[perf] deck has no wire capacitance: no shared parasitic budgets");
-        return Vec::new();
+        return (Vec::new(), notes(&[], "deck has no wire capacitance"));
     };
     let classes = annotate(netlist, &ann).net_classes;
     let nets: Vec<pnr_core::NetId> = classes
@@ -216,17 +325,10 @@ fn performance_rows(
     match perf::sensitivities(netlist, p, &names, 10_000.0) {
         Ok(s) => {
             let rows = perf::budget_rows(p, &s, &nets, af_per_um / 1000.0);
-            for (spec, (_, v)) in p.specs.iter().zip(&s.base.metrics) {
-                if !rows.iter().any(|r| r.metric == spec.metric) {
-                    eprintln!("[perf] {}: no headroom at the schematic ({v:?}); no budget row", spec.metric);
-                }
-            }
-            rows
+            let notes = notes(&rows, "not measured at the schematic");
+            (rows, notes)
         }
-        Err(e) => {
-            eprintln!("[perf] sensitivities unavailable ({e})");
-            Vec::new()
-        }
+        Err(e) => (Vec::new(), notes(&[], &format!("sensitivities unavailable: {e}"))),
     }
 }
 
@@ -277,8 +379,12 @@ fn solve(
 
     // 5. Stages. The metal stack and router config come from the deck.
     let (layers, cuts, pin_access) = elaborate::routing_stack(pdk);
-    let em = elaborate::em_limits(pdk, &layers, &cuts, cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15));
-    em_rules(&mut problem, &netlist, currents.as_deref(), &em);
+    // EM limits on the pin-access layer and cut too (sky130 mcon 0.36 mA/cut):
+    // the access jogs and pin cuts carry their terminal's current.
+    let em_layers: Vec<LayerId> = layers.iter().copied().chain(pin_access.map(|p| p.0)).collect();
+    let em_cuts: Vec<elaborate::Cut> = cuts.iter().copied().chain(pin_access.map(|p| p.1)).collect();
+    let em = elaborate::em_limits(pdk, &em_layers, &em_cuts, cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15));
+    em_rules(&mut problem, &netlist, &em, &em_layers, &em_cuts, ann.process.stack, pdk);
     // IR-drop budgets (PWR-02) on nets carrying op current (`annotator::ir`).
     if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
         let vdd_mv = cfg.op.as_ref().map_or(1_800.0, |o| o.vdd * 1e3);
@@ -307,7 +413,14 @@ fn solve(
                 .filter(|c| matches!(c.class, analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground))
                 .map(|c| c.net)
                 .collect();
-            r.cfg.pin_ua = currents.as_deref().map_or_else(Vec::new, |c| pin_currents(&cells.devices_of, c));
+            r.cfg.pin_ua = currents.as_deref().map_or_else(Vec::new, |c| pin_currents(&netlist, &cells.devices_of, c));
+            // Per cell, each member's gate pin, device and `W·L·m` (the
+            // annotator's antenna gate area, µm² → nm²).
+            r.cfg.gate_nm2 = cells
+                .devices_of
+                .iter()
+                .map(|members| members.iter().enumerate().map(|(k, d)| (format!("d{k}:G"), u32::from(d.0), (netlist.devices[d.0 as usize].gate_area_um2() * 1e6) as i64)).collect())
+                .collect();
             r.cfg.em = em;
             // Routing prices parasitics only on nets something budgets, on [0, 1].
             let budgeted = |n: usize| problem.net_classes.get(n).is_some_and(|c| c.c_budget_af.is_some()) || sens.iter().any(|(s, _)| usize::from(s.0) == n);
@@ -321,6 +434,7 @@ fn solve(
         problem,
         cells,
         perf: cfg.performance.as_ref(),
+        perf_rows,
         intent: intent.clone(),
         net_weight,
         fold: fold.clone(),
@@ -331,12 +445,12 @@ fn solve(
             .unwrap_or_default(),
         avt_mv_um: ann.process.avt_mv_um,
         offset_sigma_mv: ann.offset_sigma_mv,
+        gp_mode: cfg.gp_mode,
     };
 
     // 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
-    //    keeping the lexicographically best (|V|, Θ, PEX) where V includes the
-    //    epoch's own signoff findings. Prices and routing history persist
-    //    across epochs; dp consults the live DRC oracle within one.
+    //    keeping the best [`LexKey`], whose V includes the epoch's own signoff
+    //    errors. Prices and routing history persist across epochs.
     let mut assignment = cellgen::seed_assignment(&flow.cells.variants, &flow.layers, pdk);
     let mut prices = gp::Prices::new();
     let mut neg = gr::Negotiation::new();
@@ -357,7 +471,7 @@ fn solve(
             // Promotion: simulate only a candidate whose hard count can still
             // beat the incumbent; its spec miss then decides against it.
             if best.as_ref().is_none_or(|b| epoch.key.0 <= b.key.0) {
-                flow.score_perf(&mut epoch);
+                flow.score_perf(&mut epoch, &mut stats);
             }
             if best.as_ref().is_none_or(|b| key_lt(&epoch.key, &b.key)) {
                 best = Some(Epoch {
@@ -373,16 +487,22 @@ fn solve(
             }
         }
 
-        // Feasible with settled prices: done.
+        // Feasible with settled prices: done. A price held at its cap reads as
+        // settled in `drift` but is still binding, so it blocks convergence.
         let feasible = best
             .as_ref()
             .is_some_and(|b| b.key.0 == 0 && b.key.1 <= 0.0 && b.key.2 <= 0.0);
-        if feasible && prices.drift() < PRICE_STATIONARY {
+        if feasible && prices.drift() < PRICE_STATIONARY && prices.saturated().is_empty() {
             stats.converged = true;
             break;
         }
-        // Infeasible: try the next variant assignment, unless the budget or the
-        // variant space is exhausted.
+        // Not converged: infeasible, or feasible with prices still moving or
+        // saturated. Try the next variant assignment, unless the budget or the
+        // variant space is exhausted. ponytail: a feasible run that once
+        // saturated a λ relaxes it by ρ·slack per epoch, ρ ≥ RHO_FLOOR = 0.25:
+        // −64 at slack 0.5 with ρ at the floor is 512 epochs of drift above
+        // PRICE_STATIONARY, so it escalates rather than converges; FLOW-08's
+        // `RunStats.stop` will show it.
         if outer + 1 == n_outer {
             break;
         }
@@ -395,6 +515,7 @@ fn solve(
 
     // 7. The winner, redrawn from its own variant choice, with its guard rings.
     let best = best.expect("at least one epoch ran");
+    stats.dual_steps = prices.steps();
     stats = RunStats {
         best_iteration: best.iteration,
         ..best.stats.merge(stats)
@@ -402,8 +523,14 @@ fn solve(
     let mut macros = cellgen::realize(&flow.cells.variants, &best.layout.variant);
     // Only a winner claiming zero hard violations must be fully connected; an
     // infeasible winner's opens are already counted and reported at signoff.
-    if best.key.0 == 0 {
-        best.routes.debug_check("dr::route (winner)");
+    if cfg!(debug_assertions) && best.key.0 == 0 {
+        // Under dr's own joins; a diode's shape on the deck's credited layer
+        // rides in the routes as the antenna rule's credit (`Flow::epoch`),
+        // not as conductor.
+        let marker = pdk.antenna_diode_credit().map(|(l, _)| l);
+        let wires = best.routes.wires.iter().map(|w| w.iter().filter(|s| Some(s.layer) != marker).copied().collect()).collect();
+        let joins = dr::joins(&flow.layers, &flow.cuts, flow.d_router.cfg.pin_access);
+        Routes { wires, ..Routes::default() }.debug_check_joined("dr::route (winner)", &joins);
         geometry::debug_check_connected(&macros, &best.layout, &best.routes);
     }
     macros.extend(best.rings.iter().cloned());
@@ -426,8 +553,11 @@ fn solve(
         bias.summary.clone(),
         &flow.problem.net_classes,
         &flow.problem.missing,
+        &pdk.unverified(),
     );
     let mut metadata = metadata;
+    metadata.binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
+    metadata.coverage = best.coverage;
     metadata.add_routing(&[Box::new(flow.common_nodes(&best.layout)), Box::new(flow.environment(&best.layout, &best.rings))], &best.routes);
     if let (Some(cfg), Some(result)) = (flow.perf, &best.perf) {
         metadata.performance = cfg
@@ -436,6 +566,7 @@ fn solve(
             .zip(&result.metrics)
             .map(|(s, (m, v))| (m.clone(), *v, s.min, s.max, perf::miss(s, *v)))
             .collect();
+        metadata.sim_failures = stats.sim_failures;
     }
     let placement = flow.problem.placement;
     let key = best.key;
@@ -468,6 +599,8 @@ struct Flow<'a> {
     cells: CellSpace,
     /// Post-layout performance scoring, when configured.
     perf: Option<&'a perf::PerfConfig>,
+    /// Spec bounds as sensitivity rows ([`performance_rows`]); weigh [`c_tier`].
+    perf_rows: &'a [analog::routing::PerformanceBudget],
     /// Placement HPWL weight per net ([`gp::net_weights`]).
     net_weight: Vec<f32>,
     layers: Vec<LayerId>,
@@ -485,6 +618,7 @@ struct Flow<'a> {
     avt_mv_um: [Option<f32>; 2],
     /// The pair offset budget the matching rules allocate from.
     offset_sigma_mv: Option<f32>,
+    gp_mode: GpMode,
 }
 
 /// `base` plus what the annotator needs from the deck.
@@ -516,11 +650,12 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
 }
 
 /// One guard-ring tap contact's resistance, ohms: the deck's `pex` value for
-/// the `licon` role's cut (0, no budget check, when the deck has none).
+/// a `licon` cut on `tap` (the larger of n- and p-tap; 0, no budget check,
+/// when the deck has none).
 #[must_use]
 pub fn ring_cut_ohm(pdk: &Pdk) -> f32 {
     use pnr_core::Process;
-    pdk.layer("licon").and_then(|l| pdk.pex_f32(l, "sheet_res_ohm_sq")).unwrap_or(0.0)
+    pdk.cut_ohm("licon", "tap").unwrap_or(0.0)
 }
 
 /// Placement's process numbers. Origins snap to the cells' cut lattice so
@@ -545,6 +680,9 @@ struct Epoch {
     perf: Option<perf::PerfResult>,
     /// Extracted capacitance, kept for that simulation.
     caps: verify::CapMatrix,
+    /// What this epoch's signoff did not check; the winner's goes to
+    /// [`metadata::MetadataReport::coverage`].
+    coverage: verify::Coverage,
     iteration: u32,
     layout: Layout,
     routes: Routes,
@@ -572,7 +710,7 @@ impl Flow<'_> {
 
         // Place: coarse analytical, then legalising anneal (which may reshape).
         let macros = cellgen::realize(&cells.variants, assignment);
-        let (mut coarse, _) = gp::place(&macros, &cells.variants, assignment, placement, prices, place_rules(self.pdk), &self.net_weight, seed);
+        let (mut coarse, _) = gp::place(&macros, &cells.variants, assignment, placement, prices, place_rules(self.pdk), &self.net_weight, seed, self.gp_mode == GpMode::Analytic);
         coarse.debug_check("gp::place");
         // dp reads groups as abutment permission, so it gets the diffusion-sharing
         // table; after dp, groups are the recognition table for `Target::Group`.
@@ -584,7 +722,7 @@ impl Flow<'_> {
         coarse.power_uw = cells.power.clone();
         coarse.units = cells.units.clone();
         coarse.refresh_temps();
-        let (mut layout, place_report) = dp::place(
+        let (mut layout, place_report, dp_stats) = dp::place(
             &coarse,
             &macros,
             if reshape { &cells.variants } else { &[] },
@@ -597,11 +735,16 @@ impl Flow<'_> {
         );
         layout.debug_check_placed("dp::place");
         layout.groups = cells.groups.clone();
+        // The epoch's one dual step, on the layout it is scored on (T6).
+        prices.settle(placement, &layout);
         let macros = if layout.variant == assignment {
             macros
         } else {
             cellgen::realize(&cells.variants, &layout.variant)
         };
+        // Measured on the macros dp's variants draw, so `lattice_off` stamps what is drawn.
+        let lattice = cells::builder::cut_lattice(self.pdk);
+        let place = geometry::placement_metrics(&macros, &layout, lattice, place_rules(self.pdk).clearance, placement);
 
         // Guard rings enclose placed cells, so they are drawn now, before routing.
         let mut rings = cells::post_cell::guard_rings(&layout, &cells.guard_rings, self.pdk, ring_cut_ohm(self.pdk));
@@ -616,7 +759,8 @@ impl Flow<'_> {
         let routing = &self.problem.routing;
         let (global, _) =
             gr::GlobalRoute { net_weight: self.d_router.cfg.net_weight.clone(), ..Default::default() }.route(&layout, &macros, &rings, routing, layers, neg);
-        global.debug_check("gr::route");
+        // gr's coarse route draws every net on one layer: no joins.
+        global.debug_check_joined("gr::route", &[]);
         let placed = gr::place_macros(&macros, &layout);
         let pins: Vec<_> = placed
             .iter()
@@ -624,18 +768,25 @@ impl Flow<'_> {
             .collect();
         // The router repairs this placement's shared-source skew itself.
         let router = dr::DetailedRoute {
-            cfg: dr::DetailedCfg { common: self.common_nodes(&layout).nodes, stack: Some(self.stack), ..self.d_router.cfg.clone() },
+            // Pin shares from the unplaced macros: `place_macro` leaves units local.
+            cfg: dr::DetailedCfg {
+                common: self.common_nodes(&layout).nodes,
+                stack: Some(self.stack),
+                pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
+                ..self.d_router.cfg.clone()
+            },
         };
         let (mut routes, mut route_report) = router.route(
             &global, &pins, &placed, &rings, routing, layers, &self.cuts, neg,
         );
         // Antenna nets the jumper could not fix get a diode each, routed in as
-        // a fixed cell; its marker joins the net's routes (the rule's credit).
+        // a fixed cell; its shape on the deck's credited diode layer joins the
+        // net's routes (the rule's credit, `Stack::diode`).
         let ground = self.problem.net_classes.iter().find(|c| c.class == analog::metadata::NetClass::Ground).map(|c| c.net);
         let diodes = elaborate::antenna_diodes(self.pdk, routing, &routes, &placed, &rings, ground, place_rules(self.pdk).clearance);
         let mut extra = Vec::new();
         if !diodes.is_empty() {
-            let marker = self.pdk.diode_marker();
+            let marker = self.pdk.antenna_diode_credit().map(|(l, _)| l);
             let mut marks = Vec::new();
             for (device, m) in diodes {
                 let cathode = device.terminals.iter().find(|t| t.0 == "N").map(|t| t.1);
@@ -667,7 +818,8 @@ impl Flow<'_> {
         // The epoch is scored by the same DRC/ERC/LVS gate as the final result.
         let mut labelled = placed;
         labelled.extend(rings.iter().cloned());
-        let (signoff, caps) = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), self.pdk);
+        let mut signoff = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), self.pdk);
+        signoff.report.hard_violations.extend(undrawable(&macros, self.netlist));
         let mut budgets = metadata::build(
             placement,
             &layout,
@@ -676,29 +828,18 @@ impl Flow<'_> {
             None,
             &self.problem.net_classes,
             &self.problem.missing,
+            &self.pdk.unverified(),
         );
         budgets.add_routing(&[Box::new(self.common_nodes(&layout)), Box::new(self.environment(&layout, &rings))], &routes);
 
-        let drc_hard = signoff.hard_violations.len();
-        // Spec tier left at 0 here: the simulation is the expensive step, so
-        // the caller runs it (`Flow::score_perf`) only on a candidate that
-        // can still win.
-        let key = lex_key(&place_report, &route_report, &signoff, &budgets, None, layout.footprint_nm2());
-        let stats = RunStats {
-            place_hard: place_report.hard_violations.len(),
-            route_hard: route_report.hard_violations.len(),
-            drc_hard,
-            route_overuse: route_report
-                .budget_violations
-                .iter()
-                .map(|v| v.margin)
-                .sum(),
-            ..RunStats::default()
-        };
+        let c = signoff_c_tier(&signoff, &self.net_names, &self.problem.net_classes, self.perf_rows);
+        let (key, stats) = epoch_score(&place_report, &route_report, &signoff, &budgets, c, layout.footprint_nm2());
+        let stats = RunStats { place, dp: dp_stats, ..stats };
         Epoch {
             key,
             perf: None,
-            caps,
+            caps: signoff.caps,
+            coverage: signoff.coverage,
             iteration: 0,
             layout,
             routes,
@@ -785,11 +926,10 @@ impl Flow<'_> {
             let list = &on_net[net.0 as usize];
             let pins = |d: DeviceId| list.iter().filter(|p| p.0 == d && p.1 == "S").map(|p| p.2).collect::<Vec<_>>();
             let feeds = list.iter().filter(|p| p.0 != a && p.0 != b).map(|p| p.2).collect();
-            // σ_rand = A_VT/√(W·L·fingers) of member a, over its drain current.
+            // σ_rand = A_VT/√(W_total·L·m) of member a, over its drain current.
             let dev = &self.netlist.devices[a.0 as usize];
             let avt = if dev.kind == pnr_core::DeviceKind::Nmos { self.avt_mv_um[0] } else { self.avt_mv_um[1] };
-            let p = |k: &str| dev.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v as f32);
-            let gate_um2 = p("w").unwrap_or(0.0) * p("l").unwrap_or(0.0) * 1e-6 * p("nf").unwrap_or(1.0).max(p("m").unwrap_or(1.0));
+            let gate_um2 = dev.gate_area_um2() as f32;
             let i_ua = self.id_ua.get(a.0 as usize).copied().flatten().map(|i| i.abs() as f32).filter(|&i| i > 0.0);
             let max_delta_ohm = match (annotator::emit::systematic_allowance_mv(avt, gate_um2, self.offset_sigma_mv), i_ua) {
                 (Some(mv), Some(i)) => mv / i * 1e3,
@@ -875,7 +1015,9 @@ impl Flow<'_> {
         analog::placement::Environment(out)
     }
 
-    fn score_perf(&self, epoch: &mut Epoch) {
+    /// Simulate `epoch` on its parasitics; a simulator that cannot run counts
+    /// in `stats.sim_failures` and scores every spec unmeasured.
+    fn score_perf(&self, epoch: &mut Epoch, stats: &mut RunStats) {
         let Some(p) = self.perf else { return };
         let unknown = || perf::PerfResult {
             metrics: p.specs.iter().map(|s| (s.metric.clone(), None)).collect(),
@@ -886,6 +1028,7 @@ impl Flow<'_> {
         } else {
             perf::evaluate(self.netlist, &self.parasitics(epoch), p).unwrap_or_else(|e| {
                 eprintln!("[perf] {e}");
+                stats.sim_failures += 1;
                 unknown()
             })
         };
@@ -901,41 +1044,79 @@ impl RunStats {
             place_hard: self.place_hard,
             route_hard: self.route_hard,
             drc_hard: self.drc_hard,
+            warnings: self.warnings,
             route_overuse: self.route_overuse,
+            place: self.place,
+            dp: self.dp,
+            c_tier: self.c_tier,
             ..run
         }
     }
 }
 
-/// `(|V|, spec miss, Θ, PEX)` compared as a tuple: no parasitic gain buys
-/// past a budget residual, no budget slack past a missed circuit spec, nothing
-/// past a hard violation. V and Θ sum over stages; the spec miss is the
-/// post-layout simulation's Σ normalised miss (`0` without performance
-/// scoring); PEX is signoff's extracted total C (fF), now only a tie-break.
-/// `(|V|, spec miss, Θ, extracted C, footprint nm²)`; compared by [`key_lt`].
+/// `(|V|, spec miss, Θ, C tier, footprint nm²)`, compared by [`key_lt`]:
+/// no parasitic gain buys past a budget residual, no budget slack past a missed
+/// circuit spec, nothing past a hard violation. V counts violated hard rules
+/// ([`metadata::MetadataReport::hard_violated`]), the stages' own non-batch
+/// rows, and signoff errors (deck warnings are never in that report). Θ is
+/// [`metadata::MetadataReport::theta`] plus dr's own non-batch budget rows, all
+/// in milli-budgets. The spec miss is the post-layout simulation's Σ normalised
+/// miss (`0` without performance scoring); the C tier is [`c_tier`] over
+/// signoff's extracted matrix, not its total (`Report::cost`), which on ota is
+/// 79 % supply-related (AV-06).
 type LexKey = (usize, f64, f64, f32, f64);
 
-/// Relative extracted-C difference read as a tie, which area then breaks.
+/// Relative [`c_tier`] difference read as a tie, which area then breaks.
 ///
-/// ponytail: a flat 2%, about the seed-to-seed C spread; a declared spec on C
-/// or area would replace it.
+/// ponytail: a flat 2%, calibrated on the seed-to-seed spread of total
+/// extracted C and not re-measured for the tier; a declared spec on C or area
+/// would replace it.
 const C_TIE: f32 = 0.02;
 
-/// `a` beats `b`: `|V|`, spec miss, Θ lexicographically, then extracted C —
+/// `a` beats `b`: `|V|`, spec miss, Θ lexicographically, then the C tier —
 /// except that C within [`C_TIE`] is a tie decided by footprint. A feasible
 /// optimum is a vector (area, C, …) and a scalarisation must be a declared
 /// policy (Graeb 2007 ch.1); this is ours. Not transitive inside a C band;
-/// callers only ever compare a candidate against the incumbent.
+/// callers only ever compare a candidate against the incumbent. A NaN tier
+/// reads as +∞, so it loses to any finite value and never sticks as incumbent.
 fn key_lt(a: &LexKey, b: &LexKey) -> bool {
-    let head = |k: &LexKey| (k.0, k.1, k.2);
+    let nan_last = |x: f64| if x.is_nan() { f64::INFINITY } else { x };
+    let c = |k: &LexKey| if k.3.is_nan() { f32::INFINITY } else { k.3 };
+    let (a3, b3) = (c(a), c(b));
+    let head = |k: &LexKey| (k.0, nan_last(k.1), nan_last(k.2));
     if head(a) != head(b) {
         return head(a) < head(b);
     }
-    if (a.3 - b.3).abs() <= C_TIE * a.3.abs().min(b.3.abs()) {
-        a.4 < b.4
+    if (a3 - b3).abs() <= C_TIE * a3.abs().min(b3.abs()) {
+        nan_last(a.4) < nan_last(b.4)
     } else {
-        a.3 < b.3
+        a3 < b3
     }
+}
+
+/// One epoch's key and per-stage counts. Signoff errors only: `signoff.warnings`
+/// feed `RunStats::warnings` and nothing else. Spec tier left at 0: the
+/// simulation is the expensive step, so the caller runs it (`Flow::score_perf`)
+/// only on a candidate that can still win.
+fn epoch_score(
+    place: &Report,
+    route: &Report,
+    signoff: &verify::Signoff,
+    budgets: &metadata::MetadataReport,
+    c_tier: f32,
+    footprint_nm2: f64,
+) -> (LexKey, RunStats) {
+    let key = lex_key(place, route, &signoff.report, budgets, None, c_tier, footprint_nm2);
+    let stats = RunStats {
+        c_tier,
+        place_hard: place.hard_violations.len(),
+        route_hard: route.hard_violations.len(),
+        drc_hard: signoff.report.hard_violations.len(),
+        warnings: signoff.warnings.len() as u32,
+        route_overuse: route.budget_violations.iter().map(|v| v.margin).sum(),
+        ..RunStats::default()
+    };
+    (key, stats)
 }
 
 fn lex_key(
@@ -944,17 +1125,77 @@ fn lex_key(
     signoff: &Report,
     budgets: &metadata::MetadataReport,
     perf: Option<&perf::PerfResult>,
+    c_tier: f32,
     footprint_nm2: f64,
 ) -> LexKey {
-    let (pv, pt, _) = place.lex();
-    let (rv, rt, _) = route.lex();
-    (
-        pv + rv + signoff.hard_violations.len(),
-        perf.map_or(0.0, |p| p.residual),
-        pt + rt + budgets.theta(),
-        signoff.cost,
-        footprint_nm2,
-    )
+    let own = |r: &Report| r.hard_violations.iter().filter(|v| !v.is_batch_row()).count();
+    // `lvs-coverage/` rows (devices no deck recogniser extracts) are the same
+    // every epoch: no layout fixes them, so they stay out of |V| or no design
+    // with a BJT/MOM could ever read feasible, converge or debug-check its
+    // winner. They stay in the report, so signoff and bench still see them.
+    // An amendment to PERF-01 step 5 / PERF-02 step 3 (plan-07, master §6.1):
+    // `converged` does not imply LVS-complete; `MetadataReport::certified` does.
+    let checked = signoff.hard_violations.iter().filter(|v| !v.rule.starts_with("lvs-coverage/")).count();
+    let v = budgets.hard_violated() + own(place) + own(route) + checked;
+    let theta = budgets.theta()
+        + route.budget_violations.iter().filter(|x| !x.is_batch_row()).map(|x| x.margin as f64).sum::<f64>();
+    (v, perf.map_or(0.0, |p| p.residual), theta, c_tier, footprint_nm2)
+}
+
+/// The epoch key's C tier. With sensitivity rows: Σ_n w⁺_n·C_n(ground) +
+/// Σ_(a,b) (w⁺_a + w⁺_b)·C_ab, C in aF, w⁺_n = Σ_rows max(w_jn, 0) — the share
+/// of spec headroom the extracted C spends (dimensionless; Lampaert eq. 2.12,
+/// adverse side only as in BAL2-16). Without rows: signal-class (`Signal`,
+/// `Sensitive`, `Clock`, the nets [`performance_rows`] measures) ground C plus
+/// coupling counted once per signal end, fF. A net with no class row, a
+/// `Supply`/`Ground`/`Substrate` net, or a name outside `names` weighs 0.
+/// `caps` is [`verify::CapMatrix`]; `names` indexes it by `NetId`.
+///
+/// ponytail: rails are what the name classifier says (`annotator::netrole`);
+/// node `0` reads `Signal` until EXT-02's `rail_of`.
+fn c_tier(
+    caps: &verify::CapMatrix,
+    names: &[String],
+    classes: &[analog::metadata::NetClassification],
+    rows: &[analog::routing::PerformanceBudget],
+) -> f32 {
+    use analog::metadata::NetClass;
+    let w = |name: &str| -> f64 {
+        let Some(id) = names.iter().position(|n| n == name) else { return 0.0 };
+        if rows.is_empty() {
+            let signal = classes
+                .iter()
+                .any(|c| usize::from(c.net.0) == id && matches!(c.class, NetClass::Signal | NetClass::Sensitive | NetClass::Clock));
+            return f64::from(u8::from(signal));
+        }
+        let per_af: f64 = rows
+            .iter()
+            .flat_map(|r| r.nets.iter().zip(&r.weights))
+            .filter(|(n, _)| usize::from(n.0) == id)
+            .map(|(_, &w)| f64::from(w.max(0.0)))
+            .sum();
+        per_af * 1000.0
+    };
+    caps.iter().map(|(a, b, c)| c * (w(a) + b.as_deref().map_or(0.0, w))).sum::<f64>() as f32
+}
+
+/// [`c_tier`] over `signoff`'s extracted matrix, or NaN when signoff reports a
+/// label short: extraction then books the shorted nets' C on the one label it
+/// keeps (dac4: b0, b1 under VSS, weight 0), so the tier is unknown and
+/// [`key_lt`] ranks it last within its |V|. Empty `rows`: signal-class C, fF;
+/// `names` are the netlist's net names, `classes` the annotator's.
+#[must_use]
+pub fn signoff_c_tier(
+    signoff: &verify::Signoff,
+    names: &[String],
+    classes: &[analog::metadata::NetClassification],
+    rows: &[analog::routing::PerformanceBudget],
+) -> f32 {
+    let short = format!("lvs/{}", verify::checker::LABEL_SHORT);
+    if signoff.report.hard_violations.iter().any(|v| v.rule.starts_with(&short)) {
+        return f32::NAN;
+    }
+    c_tier(&signoff.caps, names, classes, rows)
 }
 
 /// Edge-to-edge gap `dp` keeps between cells: the deck's widest same-layer
@@ -983,69 +1224,72 @@ fn check_injected(netlist: &pnr_core::Netlist, injected: &Macros, pdk: &Pdk) -> 
     Ok(())
 }
 
-/// One hard [`analog::routing::Electromigration`] per routed (≥ 2-terminal) net,
-/// on the largest current any one terminal draws from it, against each routing
-/// metal's own derated deck limit. Unknown without an operating point (or with
-/// an unresolved device on the net); a deck with no EM rule on any routing
-/// metal is listed as a missing input.
+/// One hard [`analog::routing::Electromigration`] per routed (≥ 2-terminal)
+/// net: every routed segment and via against its layer's derated deck limit,
+/// on the currents `dr` records per terminal (`Routes::terms`; unknown
+/// without an operating point or with an unresolved device on the net). A
+/// routed or pin-access layer (`metals`, `cuts`) with no deck limit is listed
+/// once as a missing input naming those layers: their shapes go unchecked.
+/// So are deck limits past the rule's `MAX_LAYERS` slots, which it cannot hold.
 fn em_rules(
     problem: &mut Problem,
     netlist: &pnr_core::Netlist,
-    currents: Option<&[Option<Vec<(String, f64)>>]>,
     em: &[(pnr_core::LayerId, analog::routing::em::Limit)],
+    metals: &[LayerId],
+    cuts: &[elaborate::Cut],
+    stack: Option<&'static analog::routing::Stack>,
+    pdk: &Pdk,
 ) {
-    use analog::routing::em::{Limit, MAX_METALS};
-    let mut limits = [(u16::MAX, Limit::default()); MAX_METALS];
-    for (slot, &(l, lim)) in limits.iter_mut().zip(em.iter().filter(|(_, lim)| lim.ua_per_um > 0.0)) {
+    use analog::routing::em::{Limit, MAX_LAYERS};
+    let mut limits = [(u16::MAX, Limit::default()); MAX_LAYERS];
+    for (slot, &(l, lim)) in limits.iter_mut().zip(em) {
         *slot = (l.0, lim);
     }
-    let n = netlist.nets.len();
-    let (mut terminals, mut worst) = (vec![0usize; n], vec![Some(0.0f64); n]);
-    for (i, d) in netlist.devices.iter().enumerate() {
-        let draws = currents.and_then(|c| c.get(i)).map(Option::as_ref);
-        for (t, net) in &d.terminals {
-            let k = net.0 as usize;
-            terminals[k] += 1;
-            let ua = match draws {
-                Some(Some(ts)) => ts.iter().find(|(x, _)| x == t).map_or(Some(0.0), |&(_, ua)| Some(ua.abs())),
-                _ => None,
-            };
-            worst[k] = worst[k].zip(ua).map(|(a, b)| a.max(b));
-        }
+    if em.len() > MAX_LAYERS {
+        problem.missing.push(("Electromigration", "slot for every deck EM limit (more than MAX_LAYERS = 16; the rest unchecked)"));
     }
-    let rules: Vec<analog::routing::Electromigration> = (0..n)
-        .filter(|&k| terminals[k] >= 2)
-        .map(|k| analog::routing::Electromigration {
-            net: pnr_core::NetId(k as u16),
-            current_ua: worst[k].map_or(-1, |ua| ua.ceil() as i32),
-            limits,
-        })
+    let has = |l: LayerId, f: fn(&Limit) -> f32| em.iter().any(|(x, lim)| *x == l && f(lim) > 0.0);
+    let name = |l: LayerId| pdk.layers.iter().find(|(_, x)| *x == l).map_or_else(|| format!("layer {}", l.0), |(n, _)| n.clone());
+    let unchecked: Vec<String> = metals
+        .iter()
+        .filter(|&&l| !has(l, |e| e.ua_per_um))
+        .chain(cuts.iter().map(|(c, ..)| c).filter(|&&c| !has(c, |e| e.ua_per_cut)))
+        .map(|&l| name(l))
         .collect();
-    if limits[0].0 == u16::MAX {
-        problem.missing.push(("Electromigration", "deck EM rule on a routing metal"));
+    if !unchecked.is_empty() {
+        // ponytail: leaked once per run (`missing` holds `&'static str`), as the stack is.
+        let input = format!("deck EM limit on every routed and pin-access layer ({} unchecked)", unchecked.join(", "));
+        problem.missing.push(("Electromigration", Box::leak(input.into_boxed_str())));
     }
+    let mut terminals = vec![0usize; netlist.nets.len()];
+    for (_, net) in netlist.devices.iter().flat_map(|d| &d.terminals) {
+        terminals[net.0 as usize] += 1;
+    }
+    let rules: Vec<analog::routing::Electromigration> = (0..terminals.len())
+        .filter(|&k| terminals[k] >= 2)
+        .map(|k| analog::routing::Electromigration { net: pnr_core::NetId(k as u16), limits, stack })
+        .collect();
     problem.routing.hard.push(Box::new(rules));
 }
 
 /// Per placed cell, `(pin name, µA)` for every terminal of its members: pin
 /// `d{k}:T` is terminal `T` of member `k`, a bare `T` member 0 (see
-/// `cellgen::bind_pins`). Empty when any device is unresolved.
-///
-/// ponytail: all-or-nothing; per-net unknowns would keep sizing the rest.
-fn pin_currents(devices_of: &[Vec<DeviceId>], draws: &[Option<Vec<(String, f64)>>]) -> Vec<Vec<(String, i32)>> {
-    if draws.iter().any(Option::is_none) {
-        return Vec::new();
-    }
+/// `cellgen::bind_pins`). An unresolved device's terminals are `None` (its
+/// nets get no EM sizing); every other device keeps its currents.
+fn pin_currents(netlist: &pnr_core::Netlist, devices_of: &[Vec<DeviceId>], draws: &[Option<Vec<(String, f64)>>]) -> Vec<Vec<(String, Option<i32>)>> {
     devices_of
         .iter()
         .map(|members| {
             let mut out = Vec::new();
             for (k, d) in members.iter().enumerate() {
-                for (t, ua) in draws[d.0 as usize].iter().flatten() {
-                    let ua = ua.round() as i32;
+                let terms: Vec<(String, Option<i32>)> = match &draws[d.0 as usize] {
+                    Some(ts) => ts.iter().map(|(t, ua)| (t.clone(), Some(ua.round() as i32))).collect(),
+                    None => netlist.devices[d.0 as usize].terminals.iter().map(|(t, _)| (t.clone(), None)).collect(),
+                };
+                for (t, ua) in terms {
                     out.push((format!("d{k}:{t}"), ua));
                     if k == 0 {
-                        out.push((t.clone(), ua));
+                        out.push((t, ua));
                     }
                 }
             }
@@ -1284,21 +1528,27 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
     parse::spice(spice)
 }
 
-/// Full DRC/ERC/LVS/PEX signoff of a solution against its own schematic.
+/// Full DRC/ERC/LVS/PEX signoff of a solution against its own schematic:
+/// errors in `report`, deck warnings and coverage apart ([`verify::Signoff`]).
 #[must_use]
-pub fn signoff(sol: &Solution, pdk: &Pdk) -> Report {
+pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
     let (shapes, pins, reference) = signoff_inputs(sol, pdk);
-    let mut report = verify::signoff_with_intent(&shapes, &pins, &reference, &sol.intent, pdk).0;
-    // A device this process has no construction for (an NPN without a deep
-    // well, a poly resistor on a fin process) is drawn as nothing: a hard
-    // finding, never hidden behind an LVS that cannot see it either.
-    for (i, m) in sol.macros.iter().take(sol.layout.x.len()).enumerate() {
-        if m.shapes.is_empty() {
-            let (name, model) = sol.netlist.devices.get(i).map_or(("?", "?"), |d| (d.name.as_str(), d.model.as_str()));
-            report.hard_violations.push(pnr_core::report::Violation { rule: format!("cell/undrawable: {name} ({model}) has no construction on this process"), margin: 1 });
-        }
-    }
-    report
+    let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
+    s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.netlist));
+    s
+}
+
+/// A device this process has no construction for (an NPN without a deep
+/// well, a poly resistor on a fin process, any inductor) is drawn as nothing:
+/// one hard `cell/undrawable` row per empty cell of `cells`, never hidden
+/// behind an LVS that cannot see it either. The epoch counts them in |V| too
+/// (the same rows every epoch, so ranking is unchanged), so a run with an
+/// undrawn device never reads feasible or converged.
+fn undrawable<'a>(cells: &'a [Macro], netlist: &'a pnr_core::Netlist) -> impl Iterator<Item = pnr_core::report::Violation> + 'a {
+    cells.iter().enumerate().filter(|(_, m)| m.shapes.is_empty()).map(|(i, _)| {
+        let (name, model) = netlist.devices.get(i).map_or(("?", "?"), |d| (d.name.as_str(), d.model.as_str()));
+        pnr_core::report::Violation { rule: format!("cell/undrawable: {name} ({model}) has no construction on this process"), margin: 1 }
+    })
 }
 
 /// Adopt devices a later stage inserted (an antenna diode from `dr`): each
@@ -1340,10 +1590,9 @@ pub(crate) fn signoff_shapes(
     schematic: &pnr_core::Netlist,
     fold: Option<&[(u16, i32)]>,
     pdk: &Pdk,
-) -> (Report, verify::CapMatrix) {
+) -> verify::Signoff {
     let (pins, reference) = labels_and_reference(shapes, placed, nets, schematic, fold, pdk);
-    let (report, _, caps) = verify::signoff_with_intent(shapes, &pins, &reference, intent, pdk);
-    (report, caps)
+    verify::signoff_checked(shapes, &pins, &reference, intent, pdk)
 }
 
 /// Labels every provable net (see [`labeled_pins`]) and builds the LVS
@@ -1357,7 +1606,8 @@ fn labels_and_reference(
     pdk: &Pdk,
 ) -> (Vec<verify::LabeledPin>, verify::RefInput) {
     let pins = labeled_pins(placed, nets, pdk, shapes);
-    let mut reference = cellgen::reference(schematic, fold);
+    let (drawn, replaced) = cellgen::drawn_cards(placed, nets, schematic, pdk);
+    let mut reference = cellgen::reference(schematic, fold, &replaced);
     // A resistor is drawn to its model's recipe: the deck model that names.
     for d in reference.devices.iter_mut().filter(|d| d.kind == verify::reference::RefKind::Resistor) {
         if let Some(r) = pdk.recipe("resistor", d.model.as_deref().unwrap_or("")) {
@@ -1365,6 +1615,7 @@ fn labels_and_reference(
         }
     }
     reference.devices.extend(cellgen::dummy_cards(placed, nets, &reference.devices));
+    reference.devices.extend(drawn);
     reference.ports = pins.iter().map(|p| p.name.clone()).collect();
     (pins, reference)
 }
@@ -1415,14 +1666,145 @@ mod start_tests {
     /// the same layout, however the threads interleave.
     #[test]
     fn multi_start_is_deterministic() {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let Ok(json) = std::fs::read_to_string(root.join("pdks/sky130.json")) else { return };
-        let pdk = verify::Pdk::from_json(&json).expect("sky130 loads");
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
         let spice = ".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\nXM2 d x VSS VSS nfet_01v8 W=2u L=0.5u\n.ends p\n";
         let cfg = crate::Config { seed: 7, feedback_iters: 2, outer_iters: 1, starts: 3, ..Default::default() };
         let run = || crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow");
         let (a, b) = (run(), run());
         assert_eq!((a.layout.x, a.layout.y), (b.layout.x, b.layout.y));
+    }
+
+    /// T6: exactly one dual step per epoch, taken by the flow (gp and dp only
+    /// bind), so the price step count equals the epoch count.
+    #[test]
+    fn one_dual_step_per_epoch() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).expect("sky130 loads");
+        let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/pair.spice")).unwrap();
+        let cfg = crate::Config { feedback_iters: 3, outer_iters: 1, starts: 1, ..Default::default() };
+        let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
+        assert!(sol.stats.iterations > 0);
+        assert_eq!(sol.stats.dual_steps, sol.stats.iterations);
+    }
+
+    /// PERF-06: a simulator that cannot start is counted, not just logged,
+    /// and every declared bound is in the report with its reason for no row.
+    #[test]
+    fn a_failed_simulation_is_counted_and_every_bound_reported() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).expect("sky130 loads");
+        let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/pair.spice")).unwrap();
+        let performance = crate::perf::PerfConfig {
+            sim: crate::oppoint::OpConfig { ngspice: "philis-no-such-binary-7f3a".into(), ..Default::default() },
+            testbench: String::new(),
+            specs: vec![crate::perf::Spec { metric: "gain".into(), min: Some(20.0), max: Some(60.0) }],
+        };
+        let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts: 1, performance: Some(performance), ..Default::default() };
+        let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
+        assert!(sol.stats.sim_failures >= 1, "{:?}", sol.stats);
+        assert_eq!(sol.metadata.sim_failures, sol.stats.sim_failures);
+        let rows = &sol.metadata.budget_rows;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].starts_with("gain:min: no row (sensitivities unavailable"), "{rows:?}");
+        assert!(rows[1].starts_with("gain:max: no row (sensitivities unavailable"), "{rows:?}");
+        let text = sol.metadata.to_string();
+        assert!(text.contains(&format!("simulations failed: {}", sol.stats.sim_failures)), "{text}");
+        assert!(text.contains("budget gain:max: no row"), "{text}");
+    }
+
+    /// PERF-06: failures count over every start, not just the winner's (a
+    /// failed run scores its epoch unmeasured, so selection would hide it).
+    /// One epoch per solve, the first always scored: each start fails at
+    /// least once, the winner alone at most `iterations` times.
+    #[test]
+    fn failed_simulations_count_over_every_start() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).expect("sky130 loads");
+        let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/pair.spice")).unwrap();
+        let performance = crate::perf::PerfConfig {
+            sim: crate::oppoint::OpConfig { ngspice: "philis-no-such-binary-7f3a".into(), ..Default::default() },
+            testbench: String::new(),
+            specs: vec![crate::perf::Spec { metric: "gain".into(), min: Some(20.0), max: None }],
+        };
+        let cfg = crate::Config { feedback_iters: 1, outer_iters: 1, starts: 2, performance: Some(performance), ..Default::default() };
+        let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
+        assert_eq!(sol.stats.iterations, 1, "{:?}", sol.stats);
+        assert!(sol.stats.sim_failures >= 2, "{:?}", sol.stats);
+        assert_eq!(sol.metadata.sim_failures, sol.stats.sim_failures);
+    }
+
+    /// An unresolved device's pins are unknown; the other devices keep their
+    /// currents, in its own cell and in every other cell (not all-or-nothing).
+    #[test]
+    fn one_unresolved_device_keeps_the_others_known() {
+        use pnr_core::{Device, DeviceId, DeviceKind, Net, NetId, Netlist};
+        let fet = |name: &str| Device {
+            name: name.into(),
+            kind: DeviceKind::Nmos,
+            model: String::new(),
+            terminals: ["D", "G", "S", "B"].iter().enumerate().map(|(i, t)| ((*t).into(), NetId(i as u16))).collect(),
+            params: vec![],
+        };
+        let nl = Netlist { devices: vec![fet("M0"), fet("M1"), fet("M2")], nets: ["a", "b", "c", "d"].iter().map(|n| Net { name: (*n).into() }).collect() };
+        let known = |id: f64| Some(vec![("D".into(), id), ("G".into(), 0.0), ("S".into(), -id), ("B".into(), 0.0)]);
+        let cells = [vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2)], vec![DeviceId(1), DeviceId(0)]];
+        let pins = crate::pin_currents(&nl, &cells, &[known(10.0), None, known(20.0)]);
+        let ua = |cell: usize, pin: &str| pins[cell].iter().find(|(n, _)| n == pin).map(|p| p.1);
+        assert_eq!((ua(0, "d0:D"), ua(0, "D"), ua(0, "d0:S")), (Some(Some(10)), Some(Some(10)), Some(Some(-10))), "member 0 known");
+        assert_eq!((ua(0, "d1:D"), ua(0, "d1:S"), ua(0, "d1:G")), (Some(None), Some(None), Some(None)), "member 1 unknown, never zero");
+        assert_eq!((ua(1, "d0:D"), ua(1, "S")), (Some(Some(20)), Some(Some(-20))), "the other cell known");
+        assert_eq!((ua(2, "D"), ua(2, "d0:S"), ua(2, "d1:D")), (Some(None), Some(None), Some(Some(10))), "unresolved member 0: bare names unknown too");
+    }
+
+    /// REL-01 acceptance on the real fixtures and ngspice bias: every pin on a
+    /// net that touches no resistor carries a known current, so dr sizes it
+    /// (all-or-nothing left rc_filter with no pin currents at all).
+    #[test]
+    fn fixture_nets_without_a_resistor_keep_em_sizing() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Some(lib) = crate::tools::sky130_models() else { return };
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+        let cfg = crate::Config { op: Some(crate::oppoint::OpConfig { model_lib: Some(lib), ..Default::default() }), ..Default::default() };
+        for fixture in ["rc_filter", "dac4"] {
+            let mut nl = crate::parse(&std::fs::read_to_string(root.join(format!("benchmarks/fixtures/{fixture}.spice"))).unwrap()).unwrap();
+            crate::deck_models(&mut nl, &pdk);
+            let currents = crate::bias(&nl, &cfg).2.expect("operating point");
+            let one_per_cell: Vec<_> = (0..nl.devices.len()).map(|i| vec![pnr_core::DeviceId(i as u16)]).collect();
+            let pins = crate::pin_currents(&nl, &one_per_cell, &currents);
+            for (k, net) in nl.nets.iter().enumerate() {
+                let on = || nl.devices.iter().enumerate().flat_map(|(i, d)| d.terminals.iter().filter(|(_, n)| n.0 as usize == k).map(move |(t, _)| (i, d, t)));
+                let resistor = on().any(|(_, d, _)| d.kind == pnr_core::DeviceKind::Resistor);
+                let known = on().all(|(i, _, t)| pins[i].iter().any(|(p, ua)| *p == format!("d0:{t}") && ua.is_some()));
+                eprintln!("{fixture} {}: resistor={resistor} known={known}", net.name);
+                assert!(resistor || known, "{fixture} {} touches no resistor but has an unknown pin current", net.name);
+            }
+        }
+    }
+
+    /// A routed layer the deck does not limit is named in the missing row,
+    /// and deck limits past the rule's `MAX_LAYERS` slots are a missing row
+    /// of their own, never a silent drop.
+    #[test]
+    fn em_rules_name_what_goes_unchecked() {
+        use analog::routing::em::{Limit, MAX_LAYERS};
+        use pnr_core::LayerId;
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let nl = crate::parse(".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\n.ends p\n").unwrap();
+        let problem = || crate::annotate(&nl, &crate::annotation(&pdk, &Default::default()));
+        let (name, id) = pdk.layers[0].clone();
+        let lim = Limit { ua_per_um: 1.0, ua_per_cut: 1.0, ..Limit::default() };
+        let full: Vec<_> = (0..=MAX_LAYERS as u16).map(|l| (LayerId(l), lim)).collect();
+
+        let mut p = problem();
+        crate::em_rules(&mut p, &nl, &full, &[LayerId(MAX_LAYERS as u16)], &[], None, &pdk);
+        let rows: Vec<&str> = p.missing.iter().filter(|m| m.0 == "Electromigration").map(|m| m.1).collect();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].contains("MAX_LAYERS"), "{rows:?}");
+
+        let mut p = problem();
+        crate::em_rules(&mut p, &nl, &[], &[id], &[], None, &pdk);
+        let rows: Vec<&str> = p.missing.iter().filter(|m| m.0 == "Electromigration").map(|m| m.1).collect();
+        assert_eq!(rows, [format!("deck EM limit on every routed and pin-access layer ({name} unchecked)")]);
     }
 
     /// C within the tie band goes to the smaller footprint; outside it, C wins.
@@ -1433,7 +1815,198 @@ mod start_tests {
         assert!(crate::key_lt(&k(29.0, 385.0), &k(30.0, 265.0)), "3.3% less C wins outright");
         assert!(!crate::key_lt(&(1usize, 0.0, 0.0, 1.0, 1.0), &k(99.0, 999.0)), "a violation never wins on C");
     }
+
+    use crate::metadata::{Arm, BudgetStatus, MetadataReport};
+    use pnr_core::{Report, Violation};
+
+    fn row(arm: Arm, total: usize, satisfied: usize, residual: f64) -> BudgetStatus {
+        BudgetStatus { kind: "K".into(), arm, total, satisfied, violations: total - satisfied, unknown: 0, criticality: 0.0, residual, usage: None, violated: Vec::new() }
+    }
+
+    fn rows(rules: &[&str]) -> Vec<Violation> {
+        rules.iter().map(|r| Violation { rule: (*r).into(), margin: 1 }).collect()
+    }
+
+    fn key(place: &Report, signoff: &Report, budgets: &MetadataReport) -> crate::LexKey {
+        crate::lex_key(place, &Report::default(), signoff, budgets, None, 0.0, 1.0)
+    }
+
+    /// |V| counts the 40 violated rules of a hard batch, not its one stage row.
+    #[test]
+    fn v_counts_rules_not_batches() {
+        let budgets = MetadataReport { placement: vec![row(Arm::Hard, 40, 0, 3.0)], ..Default::default() };
+        let place = Report { hard_violations: rows(&["batch:analog hard 0 (Symmetry)"]), ..Default::default() };
+        assert_eq!(key(&place, &Report::default(), &budgets).0, 40);
+    }
+
+    /// A budget residual restated by the placement report is not added twice.
+    #[test]
+    fn theta_counts_each_budget_once() {
+        let budgets = MetadataReport { placement: vec![row(Arm::Budget, 1, 0, 0.5)], ..Default::default() };
+        assert_eq!(budgets.theta(), 500.0);
+        let place = Report {
+            budget_violations: vec![Violation::from_residual(format!("{}analog budget 0", Violation::BATCH), 0.5)],
+            ..Default::default()
+        };
+        assert_eq!(place.budget_violations[0].margin, 500);
+        assert_eq!(key(&place, &Report::default(), &budgets).2, 500.0);
+    }
+
+    /// A deck warning is reported, not counted as a hard violation: the
+    /// epoch's |V| and `drc_hard` see the one error, `warnings` the two
+    /// warnings (verify's `split_by_severity` pins the split upstream).
+    #[test]
+    fn warnings_are_not_violations() {
+        let mut signoff = verify::Signoff::default();
+        signoff.report.hard_violations = rows(&["drc/m1.1:met1"]);
+        signoff.warnings = rows(&["erc/tie_high_low:li", "erc/tie_high_low:li"]);
+        let (key, stats) =
+            crate::epoch_score(&Report::default(), &Report::default(), &signoff, &MetadataReport::default(), 0.0, 1.0);
+        assert_eq!((key.0, stats.drc_hard, stats.warnings), (1, 1, 2));
+    }
+
+    /// An uncompared device is out of |V| (it is the same every epoch, and a
+    /// design with a BJT must still converge) but stays a signoff row.
+    #[test]
+    fn coverage_rows_are_not_epoch_violations() {
+        let signoff = Report { hard_violations: rows(&["lvs-coverage/unverified:Pnp:-", "drc/m1.1:met1"]), ..Default::default() };
+        assert_eq!(key(&Report::default(), &signoff, &MetadataReport::default()).0, 1);
+    }
+
+    /// A NaN tier loses to a finite one, whichever side it is on.
+    #[test]
+    fn nan_loses() {
+        let (nan, finite) = ((0usize, f64::NAN, 0.0, 1.0, 1.0), (0usize, 5.0, 0.0, 1.0, 1.0));
+        assert!(crate::key_lt(&finite, &nan), "the finite key displaces a NaN incumbent");
+        assert!(!crate::key_lt(&nan, &finite), "a NaN candidate never wins");
+    }
+
+    fn net_names() -> Vec<String> {
+        ["vout1", "vbn", "VSS", "VDD", "x"].map(String::from).to_vec()
+    }
+
+    fn classes() -> Vec<analog::metadata::NetClassification> {
+        use analog::metadata::{NetClass, NetClassification};
+        [NetClass::Signal, NetClass::Signal, NetClass::Ground, NetClass::Supply]
+            .into_iter()
+            .enumerate()
+            .map(|(i, class)| NetClassification { net: pnr_core::NetId(i as u16), class, c_budget_af: None, max_coupling_af: None })
+            .collect()
+    }
+
+    /// AV-06: a layout that parks C on the vbn–VSS decoupling the specs do not
+    /// feel ranks better than one with less total C but more on the output.
+    #[test]
+    fn supply_decoupling_does_not_rank_layouts() {
+        let rows = [analog::routing::PerformanceBudget {
+            metric: "gain:min".into(),
+            nets: vec![pnr_core::NetId(0), pnr_core::NetId(1)],
+            weights: vec![0.01, 0.0],
+            af_per_nm: 1.0,
+            limit: 1.0,
+        }];
+        let cap = |a: &str, b: Option<&str>, c: f64| (a.to_owned(), b.map(str::to_owned), c);
+        let a = vec![cap("VSS", Some("vbn"), 89.4), cap("vout1", None, 4.6)];
+        let b = vec![cap("VSS", Some("vbn"), 10.0), cap("vout1", None, 5.0)];
+        let (ca, cb) = (crate::c_tier(&a, &net_names(), &classes(), &rows), crate::c_tier(&b, &net_names(), &classes(), &rows));
+        assert!((ca - 46.0).abs() < 1e-3 && (cb - 50.0).abs() < 1e-3, "c_tier A {ca}, B {cb}");
+        let total = |m: &verify::CapMatrix| m.iter().map(|r| r.2).sum::<f64>();
+        assert!(total(&a) > 6.0 * total(&b), "A carries 94 fF, B 15 fF");
+        assert!(crate::key_lt(&(0, 0.0, 0.0, ca, 1.0), &(0, 0.0, 0.0, cb, 1.0)), "A ranks better");
+
+        // Coupling by each end's own w⁺, summed over rows, clamped at 0:
+        // vout1 0.01 + max(-0.005, 0) → 10/fF, vbn 0 + 0.002 → 2/fF, VSS 0.
+        let mut two = rows.to_vec();
+        two.push(analog::routing::PerformanceBudget { metric: "ugf:min".into(), weights: vec![-0.005, 0.002], ..rows[0].clone() });
+        let m = vec![cap("VSS", Some("vout1"), 1.0), cap("vbn", Some("vout1"), 2.0), cap("vout1", None, 0.5)];
+        let c = crate::c_tier(&m, &net_names(), &classes(), &two);
+        assert!((c - 39.0).abs() < 1e-3, "(10 + 0)·1 + (2 + 10)·2 + 10·0.5 = 39, got {c}");
+    }
+
+    /// A label short leaves the tier unknown: NaN, which loses to a finite
+    /// tier at equal |V| even with the smaller footprint.
+    #[test]
+    fn label_short_tier_is_nan_and_loses() {
+        let mut signoff = verify::Signoff { caps: vec![("vout1".into(), None, 4.6)], ..Default::default() };
+        let clean = crate::signoff_c_tier(&signoff, &net_names(), &classes(), &[]);
+        assert!((clean - 4.6).abs() < 1e-4, "no short: signal C, got {clean}");
+        let short = format!("lvs/{}: labels [\"b0\", \"VSS\"] bind to one extracted net", verify::checker::LABEL_SHORT);
+        signoff.report.hard_violations = rows(&[&short]);
+        let tier = crate::signoff_c_tier(&signoff, &net_names(), &classes(), &[]);
+        assert!(tier.is_nan(), "shorted tier {tier}");
+        let (shorted, finite) = ((1usize, 0.0, 0.0, tier, 0.5), (1usize, 0.0, 0.0, 1000.0, 1.0));
+        assert!(crate::key_lt(&finite, &shorted) && !crate::key_lt(&shorted, &finite));
+    }
+
+    /// No rows: ground C of signal nets plus coupling once per signal end;
+    /// rails, unclassified nets and unknown names add nothing.
+    #[test]
+    fn no_rows_counts_signal_nets_only() {
+        let cap = |a: &str, b: Option<&str>, c: f64| (a.to_owned(), b.map(str::to_owned), c);
+        let m = vec![
+            cap("VDD", None, 100.0),
+            cap("VDD", Some("VSS"), 50.0),
+            cap("VSS", Some("vbn"), 10.0),
+            cap("vbn", Some("vout1"), 2.0),
+            cap("vout1", None, 3.0),
+            cap("x", None, 7.0),
+            cap("nowhere", None, 9.0),
+        ];
+        let c = crate::c_tier(&m, &net_names(), &classes(), &[]);
+        assert!((c - 17.0).abs() < 1e-4, "10 + 2·2 + 3 fF, got {c}");
+    }
 }
 
 
 
+
+#[cfg(test)]
+mod size_tests {
+    use pnr_core::Process as _;
+
+    /// One size convention end to end (FLOW-01, plan-08 T1): on every local
+    /// fixture, the channel the cells draw for a MOS (Σ unit `W·L / L` over its
+    /// units, variant 0) is the `W_total·m` the simulator card asks for, to a
+    /// grid step per drawn finger. Before, ota's `XM1` (`W=10u nf=2`) drew
+    /// 20 µm and simulated 10 µm, `XM5` (`W=40u m=4`) drew 160 µm and
+    /// simulated 40 µm.
+    #[test]
+    fn drawn_width_equals_simulated_width() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let json = std::fs::read_to_string(root.join("pdks/sky130.json")).expect("pdks/sky130.json");
+        let pdk = verify::Pdk::from_json(&json).expect("sky130 loads");
+        let fixtures = ["ota", "ota_constrained", "tt_ota", "pair", "quad", "chain4", "rc_filter", "dac4", "bjt_mirror", "bgr_core"];
+        let mut checked = 0;
+        for name in fixtures {
+            let path = root.join(format!("benchmarks/fixtures/{name}.spice"));
+            let spice = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let mut netlist = crate::parse::spice(&spice).expect("parses");
+            crate::deck_models(&mut netlist, &pdk);
+            let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
+            let fold = crate::cellgen::folds(&netlist, &pdk, &[]);
+            let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
+            for (i, dev) in netlist.devices.iter().enumerate() {
+                if !matches!(dev.kind, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
+                    continue;
+                }
+                let s = dev.mos_size().unwrap_or_else(|| panic!("{name} {}: no size", dev.name));
+                let id = pnr_core::DeviceId(i as u16);
+                let cell = cells.devices_of.iter().position(|m| m.contains(&id)).expect("device has a cell");
+                let owner = cells.devices_of[cell].iter().position(|&d| d == id).unwrap();
+                let units = &cells.variants[cell].alternatives[0].units;
+                let drawn: i64 = units.iter().filter(|u| usize::from(u.owner) == owner).map(|u| u.weight / s.l_nm).sum();
+                let want = s.w_total_nm * i64::from(s.m);
+                let tol = i64::from(s.fingers()) * i64::from(pdk.grid());
+                assert!((drawn - want).abs() <= tol, "{name} {}: drawn {drawn} nm, simulated {want} nm (±{tol})", dev.name);
+                checked += 1;
+            }
+            if name == "ota" {
+                let card = crate::oppoint::flat_circuit(&netlist, &crate::oppoint::OpConfig::default());
+                let xm5 = card.lines().find(|l| l.starts_with("XM5 ")).expect("XM5 card");
+                assert!(xm5.contains("W=40 L=2 nf=1 m=4"), "{xm5}");
+            }
+        }
+        // ota ×3: 5 each; pair 2, quad 4, chain4 4, rc_filter 2, dac4 9.
+        assert_eq!(checked, 36, "every fixture MOS checked");
+    }
+}

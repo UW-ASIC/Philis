@@ -142,6 +142,9 @@ Philis must check every net that carries current, every segment and every via, e
 ## 3. Work items
 
 ### REL-01 EM current inputs: per-pin shares, and unknown is not zero
+
+Status: done in M0 (`e7db737`); it also does PERF-09 step 2 (C17): `pin_currents` keeps resolved members (`one_unresolved_device_keeps_the_others_known`).
+
 - Priority: **P0**. Effort: **M**. Depends on: none. PERF-08 step 5 (non-FET cards and currents) later turns the unknowns created here into known values.
 - **Supersedes PERF-09 step 2.** PERF-09 step 2 makes an unresolved member "contribute no pins". With dr's lookup, a pin missing from the table reads `0.0` (`backend/dr/src/lib.rs:229-231`, `.unwrap_or(0.0)`), so that version turns unknown into a known zero on exactly the nets it touches (NOTES-02). Land this item's step 3 instead; PERF-09's test `an_unresolved_device_leaves_other_pins_sized` still holds under it.
 - **Why:** AT-07, AF-25 (second half: one unresolved device disables EM everywhere), AF-03 (non-FET currents read as known zero), NOTES-02, EM-07. Lienig §3.3.2 requires per-terminal current bounds (lower/upper), not one equivalent value per terminal, for correct segment currents (L3790–3836, PDF 83–84).
@@ -186,6 +189,9 @@ Philis must check every net that carries current, every segment and every via, e
   - Merged cells where two members share one region carry two pins at one rect (`mosfet.rs:474-481`), and each member's share is computed separately. That is correct.
 
 ### REL-02 Antenna: in-loop model agrees with signoff
+
+Status: done in M0 (`dac139f`). As built: `pnr_core::GatePin { at, dev, nm2 }` per net in `Routes::gates` (kernel/core/src/routes.rs:54, 72); diode credit is the deck's `antenna_electrical` `diode_bonus` only, on pieces touching a diode shape. Deferred to M1 (review finding 20): `antenna_in_loop_never_passes_what_signoff_fails` compares per fixture, not per net, because a signoff ERC row carries no net (`verify::Finding` is a point on the `gate` layer); the per-net form lands here once GPurify reports the net of an antenna row (00-MASTER-PLAN §6.4 Q7).
+
 - Priority: **P0**. Effort: **M**. Depends on: none for steps 1–5 and 7. T1 on met3 also needs FLOW-05 step 2 (`ar.met3.1` sidewall 2000 → 845 nm in the vendored deck); T1 on dac4 may also need RTE-06 (repair on the drawn geometry).
 - **Why:** AR-13, AR-44, AV-15, AV-17, H05-26, H05-28. Hastings defines the node ratio as metal of the node over the gate oxide of poly belonging to that node, per stage (§5.1.6, L13148–13157, PDF 228). Junction bleed is credited only as the process states it (L13215–13230, PDF 229). GPurify's `antenna_electrical` computes `ratio − credit·A_diode − bonus` and refuses `credit ≠ 0` with a diode layer (`GP/crates/check/src/erc/rules/antenna.rs:405-440`).
 - **Current:** see §1.4. The test `benchmarks/tests/signoff_fixtures.rs::fixtures_sign_off_within_baseline` fails on dac4 (`erc/ar.met2.1:gate`) at `feedback_iters=1` (AV-15).
@@ -228,6 +234,9 @@ Philis must check every net that carries current, every segment and every via, e
   - Without diode credit, sky130 relies on dr's jumper and lift repair (`dr/lib.rs:1486-1498, 1753-1788`). If dac4 still fails after this item, the remaining work is RTE's repair, and the failure is now visible as V.
 
 ### REL-03 EM: per-segment and per-via check on final geometry (hard)
+
+Status: done in M0 (`76e7232`, `ab947a2`); the via grouping is transitive (amendment at step 4.3).
+
 - Priority: **P0**. Effort: **M**. Depends on: REL-01.
 - **Why:** AR-05, AT-06 (access jogs and pin cuts unchecked), AV-09 (signal nets never EM-checked), EM-09, EM-20, EM-29, EM-30, H05-12, H15-37, NOTES-48.
   - Lienig: each segment carries the sum of one side's terminal currents (eqs. 3.5–3.7, L3975–4052, PDF 87–88); w ≥ I/(J·h) (eq. 3.21, L4587–4617); n_via = ⌈I/I_cut⌉ (eq. 3.25, L4626–4660); a segment is the conductor between vias or branches (§4.3.1, L5370–5377).
@@ -284,6 +293,13 @@ Philis must check every net that carries current, every segment and every via, e
        1. `all = [r.shapes(net), r.cell_metal(net)].concat()`; `flow = net_flow(stack, &all, r.terminals(net))?`. The cell metal is passed so that terminals joined only through a cell's own strap are reached (else `net_flow` returns `None` and the net reads unknown); this is the edit RTE-24 step 4 asks for, done here once. Only indices `0..r.shapes(net).len()` (the routed shapes) are checked below; cell-internal straps are CELL's (EM-19, RTE-24).
        2. For every metal shape `i` whose layer has `ua_per_um > 0`: `need = lim.width_nm(flow.shape_ua[i], long_side_nm)`. The Blech domain is the shape's own long side (EM-30). [UNVERIFIED: this bounds the Lienig segment only if no two same-net, same-layer shapes abut collinearly; such a pair is one segment (§4.3.1, L5370–5377: a segment ends only at vias or branches) longer than either rect, so the shape side can under-bound it. Dormant today: no shipped deck supplies `blech_limit`.] `have = short_side_nm`. If `have < need`, the residual is `(need − have)/need`.
        3. Group cut shapes on layers with `ua_per_cut > 0` by (cut layer, the set of metal shapes on rank ± 1 they overlap). Group current = max `shape_ua` of its members. `need = lim.cuts(I)`, `have = group size`. If `have < need`, the residual is `(need − have)/need`.
+          **Amended (M0, recorded by the review panel):** as built (kernel/analog/src/routing/em.rs `check`), two cuts of
+          one layer join a group when they share **any** landing shape below and any above, transitively (union-find),
+          not when their landing sets are equal: `dr`'s array cuts spread past the original cut's pads, so each lands on
+          its own pad plus the common trunk, and equal sets would split one array into single cuts. Known false pass:
+          cuts under two unjoined same-layer, same-net shapes merge into one group (`n` = all of them, `I` = the
+          largest member's), so a group that is short of cuts can pass. It needs same-net shapes closer than a cut
+          is wide, which dr does not draw today; split groups per (below, above) landing pair if it ever does.
      - `known = stack.is_some() && check().is_some()`. `satisfied = !known || residual ≤ 0`. `residual = check().unwrap_or(0)`. `headroom = 1 − max(need/have)`.
   5. `frontend/library/src/lib.rs:991-1028` (`em_rules`):
      - Fill `limits` from `em` including cuts, and set `stack: ann.process.stack`.

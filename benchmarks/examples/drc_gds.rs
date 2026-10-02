@@ -101,9 +101,9 @@ fn main() {
     eprintln!("drc_gds: {} shapes ({} on unknown layers)", shapes.len(), unknown);
 
     for f in verify::drc(&shapes, &[], &pdk) {
-        println!("{}\t{}\tmargin={} nm\t({}, {})", f.rule, f.layer, f.margin_nm, f.x, f.y);
+        println!("{}\t{}\tmargin={} {}\t({}, {})", f.rule, f.layer, f.margin, f.unit, f.x, f.y);
     }
     for f in verify::erc(&shapes, &[], &pdk) {
-        println!("{}\t{}\tmargin={} nm\t({}, {})", f.rule, f.layer, f.margin_nm, f.x, f.y);
+        println!("{}\t{}\tmargin={} {}\t({}, {})", f.rule, f.layer, f.margin, f.unit, f.x, f.y);
     }
 }

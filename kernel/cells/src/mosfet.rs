@@ -56,10 +56,10 @@ fn dummies_per_end(process: &dyn Process) -> u8 {
 }
 
 /// Whether a finger's own distributed poly resistance, `R□·W/(3·L)`, exceeds
-/// its gate contact's: then a contact at the far end too pays for itself.
-/// `false` when the deck characterises neither.
+/// its gate contact's (a licon landing on poly): then a contact at the far end
+/// too pays for itself. `false` when the deck characterises either not.
 fn two_ended_gate_pays(process: &dyn Process, w: i32, l: i32) -> bool {
-    match (process.sheet_ohm("poly"), process.sheet_ohm("licon")) {
+    match (process.sheet_ohm("poly"), process.cut_ohm("licon", "poly")) {
         (Some(poly), Some(cut)) if l > 0 => poly * w as f32 / (3.0 * l as f32) > cut,
         _ => false,
     }
@@ -799,6 +799,14 @@ fn finger_sequence(n_dev: usize, style: Pattern, nf: u16, dev_nf: &[u16]) -> Vec
 mod tests {
     use super::*;
 
+    /// sky130: 48.2·10000/(3·150) = 1071 Ω of finger poly against a 152 Ω
+    /// gate cut (`licon_po`), so a second gate contact pays.
+    #[test]
+    fn two_ended_gate_still_pays_on_sky130() {
+        let pdk = verify::Pdk::builtin("sky130").unwrap();
+        assert!(two_ended_gate_pays(&pdk, 10_000, 150));
+    }
+
     /// Every variant, drawn alone, is DRC- and ERC-clean.
     #[test]
     fn every_variant_is_drc_and_erc_clean() {
@@ -1027,6 +1035,45 @@ mod tests {
         // Balanced moments and currents survive the split.
         let phi = |d: u8| m.units.iter().filter(|u| u.owner == d).map(|u| i32::from(u.phi.0)).sum::<i32>();
         assert_eq!((phi(0), phi(1)), (0, 0));
+    }
+
+    /// Every split-gate variant, labelled with a private gate per member
+    /// (only S and B common): ERC sees the two gates as two nets, so a poly
+    /// or strap joining them is a short. The shared-strap ABBA under the same
+    /// labels must short, or the labels cannot see one.
+    #[test]
+    fn split_gate_variants_keep_private_gates_under_erc() {
+        use crate::testkit;
+        use pnr_core::DeviceKind;
+        let Some(pdk) = testkit::pdk() else {
+            eprintln!("sky130 PDK unavailable — skipping");
+            return;
+        };
+        let (mut dirty, mut checked, mut controls) = (Vec::new(), 0, 0);
+        for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
+            for nf in [2u16, 4] {
+                for dummies in [false, true] {
+                    let (g, mut c) = testkit::group_of(kind, 2, nf, 1680, 150);
+                    c.unitization[0].dummy_required = dummies;
+                    for (i, v) in Mosfet::enumerate(&g, &c, &pdk).into_iter().enumerate() {
+                        let m = v.draw(&g, &c, &pdk);
+                        let rules = testkit::findings(&m.shapes, &testkit::ports_with(&m, &["S", "B"]), &pdk);
+                        if v.split_gates {
+                            checked += 1;
+                            if !rules.is_empty() {
+                                dirty.push(format!("{kind:?} nf={nf} dummies={dummies} #{i} rows={} mirror_pins={}: {rules:?}", v.rows, v.mirror_pins));
+                            }
+                        } else if v.style == Pattern::Cc1d && !v.mirror_pins && v.rows == 1 && !v.double_gate {
+                            controls += 1;
+                            assert!(!rules.is_empty(), "{kind:?} nf={nf} #{i}: the shared-strap ABBA joins both gates, yet private gate labels read clean");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 0, "no split-gate variant enumerated");
+        assert!(controls > 0, "no shared-strap ABBA enumerated to show the labels can see a short");
+        assert!(dirty.is_empty(), "{}", dirty.join("\n"));
     }
 
     /// A mirror-pin order: drains never short, reflection swaps the devices,

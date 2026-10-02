@@ -333,7 +333,7 @@ Change, Tests, Acceptance.
   - `a_clocked_tail_is_not_isolated_from_its_own_pair` (REL C3): StrongARM-like block, tail on `clk` → 0 `Isolation` rules to mn1/mn2.
   - `epi_decks_get_a_plateau_budget` (REL C3): `EpiOnLowRes`, epi 10 µm → `min_distance_nm == 40_000`, in the budget arm.
   - `bulk_is_cost_only_and_unknown`: sky130 kind → the rule is in `cost` only and the report shows it unknown.
-  - Un-ignore EXT-01's `no_emitted_conflicts` for `strongarm`.
+  - Un-ignore EXT-01's `tests/corpus.rs::no_emitted_conflicts_strongarm` (its attribute says "passes after EXT-14 and REL-09"; REL-09 is cut and this item owns the fix, C5) and, in the same commit, delete `strongarm_conflicts_are_todays` and `STRONGARM_CONFLICTS`, which pin today's pairs. On the corpus strongarm the clocked tail is `mp8`, in the input pair's stage (`mn0` is grouped with `mp7`), so the conflicting pairs are (mn1, mp8) and (mn2, mp8), and the same-block exemption of step 2 is expected to remove them (the un-ignored test is the check).
 - Acceptance: T6 of EXT (0 device pairs with both Proximity and Isolation) on every corpus circuit; REL T10 = 0.
 - Risks / notes: the bulk distance model (SUB-32, monotone) and the two-port macromodel stay deferred with REL-18 (no ρ stack in any deck).
 
@@ -425,7 +425,7 @@ Change, Tests, Acceptance.
 ### GAP-10 Prices keyed by stable constraint ID
 - Priority: P1. Effort: S. Depends on: EXT-10 (`RuleBatch::meta`), FLOW-03. Owner plan: **FLOW (plan-08)**, as FLOW-03 step 5.
 - Why: NOTES-04 (stable semantic IDs; prices keyed by kind and position are fragile); AR-18; the contract comment itself says "Reordering silently moves prices" (`kernel/analog/src/requirements.rs:16-18`); C10; D6.
-- Current: `fn keys` (`backend/gp/src/lib.rs:112-120`) keys every budget batch by `(kind(), ordinal among same kind)`.
+- Current: `fn keys` (`backend/gp/src/lib.rs:151` on m0, after FLOW-03) keys every budget batch by `(kind(), ordinal among same kind)` into `Prices.priced: BTreeMap<(&'static str, u32), Price>` (`:27-28`).
 - Change: `enum PriceKey { Id(analog::intent::ConstraintId), Ord(&'static str, u32) }`. `keys` returns `PriceKey::Id(m.id)` when `reqs.budget[bi].meta()` is `Some`, else today's `Ord`. `Prices` stores `BTreeMap<PriceKey, Price>`. The contract comment is updated to say that order matters only for untagged batches.
 - Tests (`gp`): `reordered_tagged_batches_keep_their_prices` (two tagged batches swapped between `bind` calls → each keeps its λ); `untagged_batches_keep_todays_behaviour`.
 - Acceptance: EXT-10's `ids_survive_permutation` plus this test; bench lex keys unchanged when no batch is reordered.
@@ -521,6 +521,9 @@ Change, Tests, Acceptance.
 - Acceptance: CELL-19's `Figures.sd` shows the smaller S/D area on the higher-impedance terminal for the new variant.
 
 ### GAP-20 Study of Hastings L52119–73937 (figure long descriptions)
+
+Status: done in M0 (`6da8068`); the study is `ref-hastings-99-figure-descriptions.md`.
+
 - Priority: P2. Effort: S. Depends on: none. Owner: **study task** (a new `docs/plans/ref-hastings-99-figure-descriptions.md`), feeding MAT, PLC and CELL corrections.
 - Why: §5; the 566 "Long description" blocks (hastings.txt L57404–73937) state figure values in text, e.g. Fig. 8.19 bars at L64797.
 - Change: read L57404–73937 in full. Index each figure (number, page, line range) and extract every numeric value, then settle these open items:
@@ -532,6 +535,7 @@ Change, Tests, Acceptance.
   Record the agreement or disagreement per value with line numbers. The index (L52119–54715) and the figure/table lists (L54716–57403) need no study: they are captions.
 - Tests: none (study).
 - Acceptance: each listed open value is resolved or explicitly "not stated in the description"; the owning plans' notes are updated.
+- Scope cut (recorded at review of the study, for the plan owner to confirm): "every numeric value" was taken as every stated value (dimensions, ratios, voltages, currents, coordinates); counts of drawn shapes (contacts, vias, fingers, emitters, bars, rows) are not listed. They occur in at least 124 blocks, none bears on an open plan value, and `ref-hastings-99` §4 says so with examples and line ranges.
 
 ---
 

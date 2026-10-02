@@ -21,6 +21,14 @@ pub trait Process {
         None
     }
 
+    /// Resistance of one cut of role `cut` landing on role `onto`, Ω per cut
+    /// (a deck states contact resistance per landing: sky130 licon on poly
+    /// 152, on a p-tap 585); `None` when the process does not characterise it.
+    fn cut_ohm(&self, cut: &str, onto: &str) -> Option<f32> {
+        let _ = (cut, onto);
+        None
+    }
+
     /// Spacing a role's layer needs between its shapes, nm: the widest of its
     /// `min_spacing`, its wide-metal spacing (a strap easily passes the width
     /// threshold) and, for a cut, its array spacing (a cell's cuts easily

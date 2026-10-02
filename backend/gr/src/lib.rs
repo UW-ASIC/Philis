@@ -11,7 +11,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
-use analog::Requirements;
+use analog::{RepairKind, Requirements};
 use pnr_core::geom::{LayerId, Rect, Shape};
 use pnr_core::report::Violation;
 use pnr_core::{Layout, Macro, Report, Routes};
@@ -250,7 +250,7 @@ fn gcell_terms(grid: &GcellGrid, pins: &[Vec<(i32, i32)>], origin: (i32, i32)) -
 pub fn order_by_priority(pins: &[usize], net_ids: &[u32], reqs: &Requirements<Routes>, weight: &[f32]) -> Vec<u32> {
     let sym = symmetric_nets(reqs);
     let (mut hard, mut budget, mut shields) = (Vec::new(), Vec::new(), Vec::new());
-    for b in reqs.hard.iter().filter(|b| !b.kind().ends_with("Differential")) {
+    for b in reqs.hard.iter().filter(|b| b.repair_kind() != RepairKind::Mirror) {
         b.touched(&mut hard);
     }
     for b in &reqs.budget {
@@ -270,11 +270,11 @@ pub fn order_by_priority(pins: &[usize], net_ids: &[u32], reqs: &Requirements<Ro
     order
 }
 
-/// Nets under a hard `Differential` rule.
+/// Nets under a mirror rule (`Differential`, [`RepairKind::Mirror`]), hard or budget.
 #[must_use]
 pub fn symmetric_nets(reqs: &Requirements<Routes>) -> Vec<u32> {
     let mut out = Vec::new();
-    for b in reqs.hard.iter().filter(|b| b.kind().ends_with("Differential")) {
+    for b in reqs.hard.iter().chain(&reqs.budget).filter(|b| b.repair_kind() == RepairKind::Mirror) {
         b.touched(&mut out);
     }
     out
@@ -382,7 +382,7 @@ pub fn analog_tiers(routes: &Routes, reqs: &Requirements<Routes>) -> (Vec<Violat
         .iter()
         .enumerate()
         .filter(|(_, b)| b.violations(routes) > 0)
-        .map(|(i, b)| Violation::from_residual(format!("routing hard batch {i}"), b.residual(routes)))
+        .map(|(i, b)| Violation::from_residual(format!("{}routing hard {i}", Violation::BATCH), b.residual(routes)))
         .collect();
     let budget = reqs
         .budget
@@ -390,7 +390,7 @@ pub fn analog_tiers(routes: &Routes, reqs: &Requirements<Routes>) -> (Vec<Violat
         .enumerate()
         .filter_map(|(i, b)| {
             let r = b.residual(routes);
-            (r > 0.0).then(|| Violation::from_residual(format!("routing budget batch {i}"), r))
+            (r > 0.0).then(|| Violation::from_residual(format!("{}routing budget {i}", Violation::BATCH), r))
         })
         .collect();
     (hard, budget)
@@ -1158,7 +1158,7 @@ mod tests {
             at: Rect { x, y, w: 200, h: 200 },
             layer: LayerId(0),
         };
-        Macro { shapes: vec![Shape { layer: LayerId(0), rect: r }], pins: pins.into_iter().map(pin).collect(), bbox: r, units: Vec::new(), dummies: Vec::new() }
+        Macro { shapes: vec![Shape { layer: LayerId(0), rect: r }], pins: pins.into_iter().map(pin).collect(), bbox: r, units: Vec::new(), dummies: Vec::new(), ..Default::default() }
     }
 
     /// Empty layout: every macro keeps its own (absolute) coordinates.

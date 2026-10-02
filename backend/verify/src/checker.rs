@@ -13,7 +13,7 @@ use pnr_core::Shape;
 
 use crate::geom::{build_store, LabeledPin};
 use crate::pdk::{nm_grid, GvLayerId, Pdk};
-use crate::reference::{self, RefInput};
+use crate::reference::{self, RefInput, RefKind};
 
 /// Error prefix of the extraction failure `signoff` degrades around: two
 /// labels bound to one extracted net (a short).
@@ -27,12 +27,15 @@ pub struct Checker {
     out: Outputs,
     /// Rules taken out of the deck as chip-level, `(rule, why)`.
     deferred: Vec<(String, String)>,
+    /// [`RefInput::external_ports`], interned in `loaded.strings` (the labels'
+    /// table, so ids compare equal): the only nets `drop_port_floating` exempts.
+    external: Option<Vec<StrId>>,
 }
 
 impl Checker {
     /// Parse the deck out of `pdk.source`. `strip_density` drops every
-    /// `density` rule — the in-loop mode, where a density window over a
-    /// half-drawn layout is noise.
+    /// `density` and `density_cmp` rule — the in-loop mode, where a density
+    /// window over a half-drawn layout is noise.
     ///
     /// # Errors
     /// The deck failing gdsverify's parser (cannot happen for a loaded `Pdk`).
@@ -41,9 +44,8 @@ impl Checker {
         let mut deck = parse_deck(&pdk.source, nm_grid(), &mut strings)
             .map_err(|e| format!("deck rejected: {e}"))?;
         if strip_density {
-            if let Some(density) = strings.get("density") {
-                deck.rules.spec.retain(|s| s.kind != density);
-            }
+            let kinds = [strings.get("density"), strings.get("density_cmp")];
+            deck.rules.spec.retain(|s| !kinds.contains(&Some(s.kind)));
         }
         // Whole-die fill coverage says nothing about a block: deferred to
         // chip signoff, reported as such.
@@ -77,19 +79,22 @@ impl Checker {
             reference: None,
             intent: None,
         };
-        Ok(Self { loaded, extracted: Extracted::default(), out: Outputs::default(), deferred })
+        Ok(Self { loaded, extracted: Extracted::default(), out: Outputs::default(), deferred, external: None })
     }
 
-    /// Install the schematic reference LVS compares against. Returns how many
-    /// schematic devices were skipped for want of a deck recogniser.
+    /// Install the schematic reference LVS compares against. Returns the
+    /// `(kind, model hint)` of each schematic device skipped for want of a deck
+    /// recogniser: LVS compares nothing for those.
     ///
     /// # Errors
     /// A device stating fewer terminals than its recogniser's arity.
-    pub fn set_reference(&mut self, input: &RefInput) -> Result<usize, String> {
+    pub fn set_reference(&mut self, input: &RefInput) -> Result<Vec<(RefKind, Option<String>)>, String> {
         let (netlist, skipped) =
             reference::build(input, &self.loaded.deck, &mut self.loaded.strings)?;
         self.loaded.reference = Some(netlist);
-        Ok(skipped)
+        let strings = &mut self.loaded.strings;
+        self.external = input.external_ports.as_ref().map(|p| p.iter().map(|n| strings.intern(n)).collect());
+        Ok(skipped.into_iter().map(|i| (input.devices[i].kind, input.devices[i].model.clone())).collect())
     }
 
     /// Install design intent (supplies, their voltage, the current each is
@@ -142,12 +147,14 @@ impl Checker {
 
     /// Run the selected checks. Findings land in [`Checker::outputs`].
     ///
-    /// `unconnected_pin` and `floating_gate` findings on a **labelled** net
-    /// are dropped: a port leaves the cell, so reaching no device inside it,
-    /// or only gates (an input driven from outside), is not floating (the
+    /// `unconnected_pin` and `floating_gate` findings on a **port** net are
+    /// dropped: a port leaves the cell, so reaching no device inside it, or
+    /// only gates (an input driven from outside), is not floating (the
     /// engine's own LVS floating-net check applies the same exemption). This
     /// is what keeps a bulk-only rail — VSS tied through taps, invisible to a
-    /// 3-terminal MOS recogniser — from reading as floating metal.
+    /// 3-terminal MOS recogniser — from reading as floating metal. A port is
+    /// a labelled net named in [`RefInput::external_ports`]; with no port
+    /// list every labelled net is one, and [`Checker::skipped_rules`] says so.
     ///
     /// # Errors
     /// Geometry that cannot be loaded (a mislanded pin label, a derived-layer
@@ -180,7 +187,9 @@ impl Checker {
         let v = &self.out.violations;
         let exempt = |i: usize| {
             rules.contains(&v.rule[i])
-                && self.extracted.ports.name_of(self.extracted.nets.net_of(v.shape_a[i])).is_some()
+                && self.extracted.ports.name_of(self.extracted.nets.net_of(v.shape_a[i])).is_some_and(|name| {
+                    self.external.as_ref().is_none_or(|e| e.contains(&name))
+                })
         };
         if !(0..v.len()).any(exempt) {
             return;
@@ -206,19 +215,36 @@ impl Checker {
         if let ExtractError::Port(PortError::ConflictingLabels(net)) = e {
             // Extraction stopped at the ports: the nets are rebuilt to name
             // the labels that share one.
-            let mut nets = gdsverify::check::topology::NetTable::default();
-            gdsverify::check::topology::net::extract_nets_into(&self.loaded.store, &self.loaded.deck.connectivity, &mut nets);
-            let names: Vec<&str> = self
-                .loaded
-                .provenance
-                .labels()
-                .iter()
-                .filter(|&&(poly, _)| nets.net_of(poly) == net)
-                .map(|&(_, name)| self.loaded.strings.resolve(name))
-                .collect();
+            let names = self.label_nets().into_iter().find(|g| g.0 == net).map(|g| g.1).unwrap_or_default();
             return format!("{LABEL_SHORT}: labels {names:?} bind to one extracted net");
         }
         format!("extract: {e}")
+    }
+
+    /// The label names of each extracted net that carries more than one —
+    /// what a [`LABEL_SHORT`] is — over the last loaded geometry, first-seen
+    /// order, each name once.
+    #[must_use]
+    pub fn shorted_labels(&self) -> Vec<Vec<String>> {
+        self.label_nets().into_iter().map(|g| g.1).filter(|g| g.len() > 1).collect()
+    }
+
+    /// Every labelled net of the last loaded geometry with its label names,
+    /// first-seen order, each name once. Rebuilds the net table: extraction
+    /// may have stopped before producing one.
+    fn label_nets(&self) -> Vec<(gdsverify::check::topology::NetId, Vec<String>)> {
+        let mut nets = gdsverify::check::topology::NetTable::default();
+        gdsverify::check::topology::net::extract_nets_into(&self.loaded.store, &self.loaded.deck.connectivity, &mut nets);
+        let mut groups: Vec<(_, Vec<String>)> = Vec::new();
+        for &(poly, name) in self.loaded.provenance.labels() {
+            let (net, name) = (nets.net_of(poly), self.loaded.strings.resolve(name).to_string());
+            match groups.iter_mut().find(|g| g.0 == net) {
+                Some(g) if !g.1.contains(&name) => g.1.push(name),
+                Some(_) => {}
+                None => groups.push((net, vec![name])),
+            }
+        }
+        groups
     }
 
     /// What the last [`Checker::run`] produced.
@@ -243,40 +269,54 @@ impl Checker {
     }
 
     /// Rules the last run did not execute, as `(rule, why)`, including the
-    /// chip-level ones [`Checker::defer_density_wider_than`] took out.
+    /// chip-level ones [`Checker::defer_density_wider_than`] took out, and
+    /// `floating_gate` when no port list narrowed its exemption (it ran, but
+    /// checked no labelled net).
     #[must_use]
     pub fn skipped_rules(&self) -> Vec<(&str, String)> {
+        let no_ports = self.external.is_none().then(|| ("floating_gate", "exempt on every labelled net: no port list".to_string()));
         self.out
             .runs
             .iter()
             .filter(|r| r.outcome != Outcome::Ran)
             .map(|r| (self.rule_name(r.rule), format!("{:?}", r.outcome)))
             .chain(self.deferred.iter().map(|(n, why)| (n.as_str(), why.clone())))
+            .chain(no_ports)
             .collect()
     }
 
-    /// Take out every `density` rule whose `window` exceeds a `w × h` nm block
-    /// in either axis: a window wider than the block measures the chip around
-    /// it, so that check is chip integration's — not run here, and reported as
-    /// not run (never as passed). Returns the rules taken out.
+    /// Take out every `density` (one square `window`) and `density_cmp`
+    /// (`window_x` × `window_y`, sky130's `m*.density`) rule whose window side
+    /// exceeds the `w × h` nm block's: a window wider than the block measures
+    /// the chip around it — and with `partial_windows: false` GPurify examines
+    /// zero windows and records `Ran` — so that check is chip integration's:
+    /// not run here, and reported as not run (never as passed). Returns the
+    /// rules taken out.
     pub fn defer_density_wider_than(&mut self, w: i64, h: i64) -> Vec<String> {
-        let (Some(kind), Some(window)) = (self.loaded.strings.get("density"), self.loaded.strings.get("window")) else {
-            return Vec::new();
-        };
-        let rules = &mut self.loaded.deck.rules;
-        let wide = |s: &gdsverify::ingest::deck::RuleSpec| match rules.param(s, window) {
-            Some(gdsverify::ingest::deck::ParamValue::Length(d)) => Some(d.raw()).filter(|&win| s.kind == kind && (win > w || win > h)),
+        use gdsverify::ingest::deck::{ParamValue, RuleSpec};
+        let (st, rules) = (&self.loaded.strings, &self.loaded.deck.rules);
+        let (density, cmp) = (st.get("density"), st.get("density_cmp"));
+        let len = |s: &RuleSpec, k: &str| match st.get(k).and_then(|k| rules.param(s, k)) {
+            Some(ParamValue::Length(d)) => Some(d.raw()),
             _ => None,
         };
-        let out: Vec<(String, String)> = rules
+        let window = |s: &RuleSpec| match Some(s.kind) {
+            k if k == density => len(s, "window").map(|d| (d, d)),
+            k if k == cmp => len(s, "window_x").zip(len(s, "window_y")),
+            _ => None,
+        };
+        let out: Vec<(StrId, String, String)> = rules
             .spec
             .iter()
-            .filter_map(|s| wide(s).map(|win| (self.loaded.strings.resolve(s.id).to_string(), format!("ChipLevel(window {win} nm > block {w}x{h} nm)"))))
+            .filter_map(|s| {
+                let (wx, wy) = window(s).filter(|&(wx, wy)| wx > w || wy > h)?;
+                let win = if wx == wy { format!("{wx}") } else { format!("{wx}x{wy}") };
+                Some((s.id, st.resolve(s.id).to_string(), format!("ChipLevel(window {win} nm > block {w}x{h} nm)")))
+            })
             .collect();
-        let gone: Vec<_> = rules.spec.iter().filter(|s| wide(s).is_some()).map(|s| s.id).collect();
-        rules.spec.retain(|s| !gone.contains(&s.id));
-        let names = out.iter().map(|(n, _)| n.clone()).collect();
-        self.deferred.extend(out);
+        self.loaded.deck.rules.spec.retain(|s| !out.iter().any(|o| o.0 == s.id));
+        let names = out.iter().map(|o| o.1.clone()).collect();
+        self.deferred.extend(out.into_iter().map(|(_, n, why)| (n, why)));
         names
     }
 

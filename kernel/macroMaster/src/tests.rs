@@ -225,3 +225,12 @@ fn mos_dummies_parameter_selects_variant() {
     };
     assert_ne!(draw(Some(0)).bbox, draw(Some(1)).bbox);
 }
+
+/// `Mos::w` is one finger's width; the schematic device carries the SPICE
+/// total `w·nf` (`pnr_core::MosSize`), so LVS compares `W_total/nf` with the
+/// drawn finger, not half of it.
+#[test]
+fn mos_device_card_carries_total_width() {
+    let devs = variants::Mos::new(DeviceKind::Nmos, 420, 150, 2).devices().expect("Mos is transparent");
+    assert_eq!(devs[0].params, vec![("w".into(), 840), ("l".into(), 150), ("nf".into(), 2)]);
+}

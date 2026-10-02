@@ -36,8 +36,9 @@ impl Shield {
             let horiz = v.rect.w > v.rect.h;
             let (lo, hi) = if horiz { (v.rect.x, v.rect.x + v.rect.w) } else { (v.rect.y, v.rect.y + v.rect.h) };
             total += i64::from(hi - lo);
-            // Length of the run shadowed by reference metal on one side.
-            let side = |below: bool| -> i64 {
+            // The run's stretches shadowed by reference metal on one side:
+            // merged, clipped to [lo, hi), sorted.
+            let side = |below: bool| -> Vec<(i32, i32)> {
                 let mut spans: Vec<(i32, i32)> = refs
                     .iter()
                     .filter(|s| s.layer == v.layer && gap_on_side(v.rect, s.rect, horiz, below).is_some_and(|g| g <= self.max_gap_nm))
@@ -46,20 +47,32 @@ impl Shield {
                     .filter(|(a, b)| a < b)
                     .collect();
                 spans.sort_unstable();
-                let (mut len, mut end) = (0i64, lo);
+                let mut merged: Vec<(i32, i32)> = Vec::with_capacity(spans.len());
                 for (a, b) in spans {
-                    let a = a.max(end);
-                    if b > a {
-                        len += i64::from(b - a);
-                        end = b;
+                    match merged.last_mut() {
+                        Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                        _ => merged.push((a, b)),
                     }
                 }
-                len
+                merged
             };
-            covered += side(true).min(side(false));
+            // Shielded = reference on both sides at the same point, not the
+            // shorter of the two side lengths.
+            covered += intersection_len(&side(true), &side(false));
         }
         (total > 0).then(|| covered as f32 / total as f32)
     }
+}
+
+/// Total length common to two sorted, disjoint interval lists; O(a + b).
+fn intersection_len(p: &[(i32, i32)], q: &[(i32, i32)]) -> i64 {
+    let (mut i, mut j, mut len) = (0, 0, 0i64);
+    while i < p.len() && j < q.len() {
+        let (a, b) = (p[i].0.max(q[j].0), p[i].1.min(q[j].1));
+        len += i64::from((b - a).max(0));
+        if p[i].1 < q[j].1 { i += 1 } else { j += 1 }
+    }
+    len
 }
 
 /// Edge gap from `v` to `s` when `s` lies wholly on one side of `v` across its
@@ -75,6 +88,7 @@ fn gap_on_side(v: Rect, s: Rect, horiz: bool, below: bool) -> Option<i32> {
 
 impl Rule for Shield {
     type On = Routes;
+    const REPAIR: crate::RepairKind = crate::RepairKind::Shield;
     fn cost(self, r: &Routes) -> f32 {
         self.residual(r)
     }
@@ -130,5 +144,19 @@ mod tests {
         assert_eq!(rule().coverage(&far), Some(0.0));
         // Unrouted victim: unknown.
         assert!(!rule().known(&Routes { wires: vec![vec![], vec![]], ..Default::default()  }));
+    }
+
+    #[test]
+    fn complementary_halves_cover_nothing() {
+        // Below on [0, 5] µm, above on [5, 10] µm: no point has both sides.
+        let r = Routes { wires: vec![vec![h(1_000, 0, 10_000)], vec![h(720, 0, 5_000), h(1_280, 5_000, 5_000)]], ..Default::default() };
+        assert_eq!(rule().coverage(&r), Some(0.0));
+    }
+
+    #[test]
+    fn overlapping_halves_cover_the_overlap() {
+        // Below on [0, 7] µm, above on [3, 10] µm: both sides over [3, 7] = 40 %.
+        let r = Routes { wires: vec![vec![h(1_000, 0, 10_000)], vec![h(720, 0, 7_000), h(1_280, 3_000, 7_000)]], ..Default::default() };
+        assert!((rule().coverage(&r).unwrap() - 0.4).abs() < 1e-6);
     }
 }

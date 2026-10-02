@@ -28,7 +28,8 @@ pub(crate) fn is_fet(k: DeviceKind) -> bool {
 pub struct MatchingPair {
     pub a: Target,
     pub b: Target,
-    /// Gate area `W·L·fingers` of one device, µm² (from the netlist).
+    /// Gate area `W_total·L·m` of one device, µm² (from the netlist;
+    /// `pnr_core::MosSize::gate_area_um2`).
     pub gate_um2: f32,
     /// Allowed `σ_gradient / σ_random` (η).
     pub gradient_share: f32,

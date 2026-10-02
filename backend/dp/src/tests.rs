@@ -89,7 +89,7 @@ fn rotation_actually_happens() {
 // ---- variant reshape ----
 
 fn alt(w: i32, h: i32) -> Macro {
-    Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w, h }, units: Vec::new(), dummies: Vec::new() }
+    Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w, h }, units: Vec::new(), dummies: Vec::new(), ..Default::default() }
 }
 
 /// Three alternatives per cell, not ordered by similarity.
@@ -163,6 +163,7 @@ fn pin_alt(x: i32) -> Macro {
         bbox: Rect { x: 0, y: 0, w: 10_000, h: 10_000 },
         units: Vec::new(),
         dummies: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -190,6 +191,33 @@ fn reshape_is_priced_on_where_the_pins_land() {
     assert!(!try_reshape(&mut sa, &mut l, &mut rng, 0.0, 0, &variants, &free, &free));
     assert_eq!(l.variant[0], 1);
     assert_eq!(hpwl(&sa.nets, &l), after, "refusal must revert the pin geometry too");
+}
+
+// ---- prices ----
+
+/// T6: the dual step is the flow's, once per epoch on the scored layout; gp
+/// and dp only bind, so a violated budget leaves a fresh `Prices` unstepped.
+#[test]
+fn place_does_not_settle() {
+    #[derive(Clone, Copy)]
+    struct Over;
+    impl Rule for Over {
+        type On = Layout;
+        fn cost(self, _: &Layout) -> f32 {
+            0.0
+        }
+        fn satisfied(self, _: &Layout) -> bool {
+            false
+        }
+    }
+    let variants = spaces();
+    let macros = drawn(&variants);
+    let reqs = Requirements { hard: Vec::new(), budget: vec![Box::new(vec![Over])], cost: Vec::new() };
+    let mut prices = gp::Prices::new();
+    let (coarse, _) = gp::place(&macros, &variants, &[0, 0], &reqs, &mut prices, RULES, &[], 3, true);
+    place(&coarse, &macros, &variants, &reqs, &[false; 2], &mut prices, RULES, &[], 3);
+    assert_eq!(prices.drift(), f64::INFINITY, "no dual step inside place");
+    assert_eq!(prices.steps(), 0);
 }
 
 // ---- lexicographic acceptance ----

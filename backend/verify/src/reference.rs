@@ -8,10 +8,12 @@
 //!   layout side emit its measured value, so a name on one side only is an
 //!   `lvs.undeclared_param`. A device with params never parallel-merges, so the
 //!   caller must expand m/nf to one card per drawn finger.
-//! - **Kinds the deck cannot recognise are skipped** (returned as a count):
+//! - **Kinds the deck cannot recognise are skipped** (returned by index):
 //!   the layout extracts none, so keeping them would mismatch unconditionally.
-//!   Capacitors are the case today — a MOM comb draws each electrode as many
-//!   polygons and `DeviceRecognition` binds one polygon per terminal.
+//!   The caller counts them as LVS-unverified ([`crate::Coverage`]), never as
+//!   matched. A MOM capacitor (no deck recognises one: a comb draws each
+//!   electrode as many polygons and `DeviceRecognition` binds one polygon per
+//!   terminal), a BJT on a deck without one, and every inductor are the cases.
 
 use gdsverify::ingest::deck::{Deck, DeviceKind};
 use gdsverify::ingest::netlist::{Netlist, RefNetId, SubcktId};
@@ -27,6 +29,8 @@ pub enum RefKind {
     Resistor,
     Capacitor,
     Diode,
+    /// No deck recognises one: always skipped.
+    Inductor,
 }
 
 /// One schematic device.
@@ -34,7 +38,9 @@ pub enum RefKind {
 pub struct RefDeviceIn {
     pub kind: RefKind,
     /// Deck model name; selects the matching recogniser row. `None` takes the
-    /// first recogniser of the kind/polarity.
+    /// first recogniser of the kind/polarity (a capacitor is skipped); a name
+    /// no row matches takes it too for MOS/BJT, and is skipped for R/C/D (a
+    /// MOM is not a MIM).
     pub model: Option<String>,
     /// Terminal net names in card order; at least the recogniser's arity,
     /// extras (e.g. a bulk the recogniser does not extract) ignored.
@@ -49,12 +55,17 @@ pub struct RefDeviceIn {
 pub struct RefInput {
     pub devices: Vec<RefDeviceIn>,
     pub ports: Vec<String>,
+    /// The nets that leave the block (the `.subckt` port list), apart from
+    /// `ports` (every labelled net, for LVS naming): only these are exempt
+    /// from `floating_gate`/`unconnected_pin`. `None`: no port list, every
+    /// labelled net is exempt and reported so in the coverage (AV-04).
+    pub external_ports: Option<Vec<String>>,
 }
 
 /// Compile `input` into a one-subckt (`"top"`) [`Netlist`], interning into the
 /// **checker's** `strings` so reference and layout names share one id space.
-/// Returns the netlist and the count of devices skipped for want of a
-/// recogniser.
+/// Returns the netlist and the indices into `input.devices` of the devices
+/// skipped for want of a recogniser.
 ///
 /// # Errors
 /// A device whose terminals are fewer than its recogniser's arity.
@@ -62,7 +73,7 @@ pub fn build(
     input: &RefInput,
     deck: &Deck,
     strings: &mut StrTable,
-) -> Result<(Netlist, usize), String> {
+) -> Result<(Netlist, Vec<usize>), String> {
     let mut n = Netlist::default();
     n.subckt_name.push(strings.intern("top"));
 
@@ -84,7 +95,7 @@ pub fn build(
     }
     n.subckt_port_start.push(n.port_net.len() as u32);
 
-    let mut skipped = 0usize;
+    let mut skipped = Vec::new();
     n.subckt_device_start.push(0);
     n.device_terminal_start.push(0);
     n.device_param_start.push(0);
@@ -92,7 +103,7 @@ pub fn build(
         let Some(row) = recogniser_for(dev, deck, strings) else {
             // No marker layer in this deck extracts this device from the
             // layout, so the reference must not expect it either.
-            skipped += 1;
+            skipped.push(index);
             continue;
         };
         let arity = (deck.devices.terminal_start[row + 1] - deck.devices.terminal_start[row])
@@ -134,9 +145,16 @@ pub fn build(
 
 /// The deck recogniser row for one schematic device, `None` when the deck has
 /// no marker for its kind/polarity. Polarity is read off the marker layer name
-/// (`ngate`/`pgate`, `npn`/`pnp`: a leading `p` is P-type).
+/// (`ngate`/`pgate`, `npn`/`pnp`: a leading `p` is P-type). For R/C/D a model
+/// hint no row names (exactly or as a `__` vendor suffix) is `None`: sky130's
+/// `cap_generic_m1m2` (MOM) must not be compared as its `capm` (MIM). So is a
+/// capacitor with no model (an elaborated composition's card): every deck's
+/// capacitor row is a MIM or MOS cap, never the MOM the generators draw. A
+/// model-less R/D still takes the first row (antenna diodes carry no model).
 fn recogniser_for(dev: &RefDeviceIn, deck: &Deck, strings: &StrTable) -> Option<usize> {
     let (kind, polarity) = match dev.kind {
+        RefKind::Inductor => return None,
+        RefKind::Capacitor if dev.model.is_none() => return None,
         RefKind::Nmos => (DeviceKind::Mos, Some(false)),
         RefKind::Pmos => (DeviceKind::Mos, Some(true)),
         RefKind::Npn => (DeviceKind::Bjt, Some(false)),
@@ -162,11 +180,11 @@ fn recogniser_for(dev: &RefDeviceIn, deck: &Deck, strings: &StrTable) -> Option<
         if hinted.is_none() && dev.model.is_none() || hinted == Some(deck.devices.model[row]) || vendor {
             return Some(row);
         }
-        // The hint names no deck model (yet): fall back to the first match
-        // whose marker states its polarity (IHP's `esd_vdd` bjt is an ESD
-        // diode, no NPN a schematic may mean).
+        // The hint names no deck model (yet): a MOS/BJT falls back to the
+        // first match whose marker states its polarity (IHP's `esd_vdd` bjt
+        // is an ESD diode, no NPN a schematic may mean).
         let marker = strings.resolve(deck.layers.name(deck.devices.marker[row]));
-        if polarity.is_none() || marker.starts_with('n') || marker.starts_with('p') {
+        if polarity.is_some() && (marker.starts_with('n') || marker.starts_with('p')) {
             fallback.get_or_insert(row);
         }
     }

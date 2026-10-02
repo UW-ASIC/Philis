@@ -2,6 +2,7 @@
 //! what the budget rules measure drawn metal with.
 
 use pnr_core::geom::{Rect, Shape};
+use pnr_core::GatePin;
 
 /// One conductor of the stack (a metal or a cut), bottom-up in
 /// [`Stack::layers`].
@@ -35,9 +36,19 @@ pub struct Stack {
     /// The deck's antenna rules sum every layer up to the stage
     /// (`antenna_cumulative_*`); else each stage counts its own layer.
     pub antenna_cumulative: bool,
-    /// The deck's diode marker: a net whose routes carry a shape on it has a
-    /// protection diode (diode credit, Hastings p. 229). `None` = no credit.
-    pub diode_layer: Option<u16>,
+    /// The diode credit the deck's `antenna_electrical` rule grants (Hastings
+    /// p. 229: junction bleed credited only as the process states it); `None`
+    /// = the deck credits no diode, and a drawn one fixes nothing.
+    pub diode: Option<DiodeCredit>,
+}
+
+/// A deck-stated antenna diode credit: a piece touching a net shape on
+/// `layer` has its ratio lowered by `bonus` (GPurify `antenna_electrical`
+/// with `diode_credit: 0`, whose area term is refused as unit-less).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DiodeCredit {
+    pub layer: u16,
+    pub bonus: f32,
 }
 
 impl Stack {
@@ -45,20 +56,24 @@ impl Stack {
         self.layers.iter().enumerate().find(|(_, l)| l.id == id)
     }
 
-    /// Ground capacitance of `shapes`, aF: area + fringe on the perimeter's
-    /// long sides (Lampaert 1999 eqs. 2.29–2.32; the deck's `pex` terms). A
-    /// shape on a layer the stack does not know adds nothing.
-    ///
-    /// ponytail: shapes are summed, not unioned — a via pad on a wire counts
-    /// twice (over-estimates by a pad per via); extraction's union is signoff's.
+    /// Ground capacitance of `shapes`, aF: per layer, area × `area_af_um2` +
+    /// perimeter × `fringe_af_um` of the layer's union (Lampaert 1999 eqs.
+    /// 2.29–2.32; the deck's `pex` terms), as signoff extraction measures a
+    /// merged polygon (GPurify extract/analytical.rs) — a pad on a wire counts
+    /// once and fringe runs the full perimeter. A shape on a layer the stack
+    /// does not know, or on one with no C terms (cuts), adds nothing.
     #[must_use]
     pub fn ground_af(&self, shapes: &[Shape]) -> f32 {
-        shapes
-            .iter()
-            .filter_map(|s| {
-                let (_, l) = self.at(s.layer.0)?;
-                let (w, len) = (s.rect.w.min(s.rect.h) as f32 / 1e3, s.rect.w.max(s.rect.h) as f32 / 1e3);
-                Some(l.area_af_um2 * w * len + 2.0 * l.fringe_af_um * len)
+        let mut ids: Vec<u16> = shapes.iter().map(|s| s.layer.0).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.into_iter()
+            .filter_map(|id| self.at(id))
+            .filter(|(_, l)| l.area_af_um2 != 0.0 || l.fringe_af_um != 0.0)
+            .map(|(_, l)| {
+                let rects: Vec<Rect> = shapes.iter().filter(|s| s.layer.0 == l.id).map(|s| s.rect).collect();
+                let (area, perimeter) = union_area_perimeter(&rects);
+                l.area_af_um2 * (area / 1e6) as f32 + l.fringe_af_um * (perimeter / 1e3) as f32
             })
             .sum()
     }
@@ -103,9 +118,8 @@ impl Stack {
         if nodes.is_empty() {
             return 0.0;
         }
-        let touch = |a: &Rect, b: &Rect| a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
         let adj: Vec<Vec<usize>> = (0..nodes.len())
-            .map(|i| (0..nodes.len()).filter(|&j| j != i && nodes[i].0.abs_diff(nodes[j].0) <= 1 && touch(&nodes[i].1, &nodes[j].1)).collect())
+            .map(|i| (0..nodes.len()).filter(|&j| j != i && nodes[i].0.abs_diff(nodes[j].0) <= 1 && nodes[i].1.touches(&nodes[j].1)).collect())
             .collect();
         // BFS tree from `root`, then the heaviest root-to-node path in it.
         let farthest = |root: usize| -> (usize, f32) {
@@ -151,7 +165,7 @@ impl Stack {
     /// path between them). `None` for a terminal no shape reaches.
     #[must_use]
     pub fn terminal_resistance_ohm(&self, shapes: &[Shape], terminals: &[Rect]) -> Vec<Option<f32>> {
-        let g = self.port_graph(shapes, terminals);
+        let g = self.port_graph(shapes, terminals, false);
         let reach = |r: &[Option<f32>]| r.iter().flatten().copied().fold(0.0f32, f32::max);
         (0..g.adj.len())
             .map(|c| g.from(&[c]))
@@ -166,7 +180,7 @@ impl Stack {
     #[must_use]
     pub fn fed_resistance_ohm(&self, shapes: &[Shape], feeds: &[Rect], terminals: &[Rect]) -> Vec<Option<f32>> {
         let all: Vec<Rect> = terminals.iter().chain(feeds).copied().collect();
-        let g = self.port_graph(shapes, &all);
+        let g = self.port_graph(shapes, &all, false);
         let src: Vec<usize> = g.term[terminals.len()..].iter().flatten().copied().collect();
         if src.is_empty() {
             return vec![None; terminals.len()];
@@ -179,10 +193,15 @@ impl Stack {
     /// The routed net as a resistor graph: on each metal shape, a port where
     /// it touches another shape and where a terminal sits over it, joined
     /// along the shape by `R□·Δ/w` (distance along its long axis); a cut is
-    /// one node reached through half its R from each metal it joins.
-    fn port_graph(&self, shapes: &[Shape], terminals: &[Rect]) -> PortGraph {
-        let items: Vec<(usize, Rect, &Layer)> = shapes.iter().filter_map(|s| self.at(s.layer.0).map(|(k, l)| (k, s.rect, l))).collect();
-        let touch = |a: &Rect, b: &Rect| a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
+    /// one node reached through half its R from each metal it joins. Each
+    /// link records the index into `shapes` it runs through (`u32::MAX` for a
+    /// 0-Ω junction or terminal link). A terminal joins every shape it
+    /// overlaps in xy, or with `lowest` only those on the lowest stack rank it
+    /// overlaps: a pin is drawn on one layer, and what sits over it higher up
+    /// reaches it through the cuts, which then carry its current.
+    pub(crate) fn port_graph(&self, shapes: &[Shape], terminals: &[Rect], lowest: bool) -> PortGraph {
+        let items: Vec<(usize, Rect, &Layer, u32)> =
+            shapes.iter().enumerate().filter_map(|(i, s)| self.at(s.layer.0).map(|(k, l)| (k, s.rect, l, i as u32))).collect();
         let centre = |a: &Rect, b: &Rect| {
             let (x0, x1) = (a.x.max(b.x), (a.x + a.w).min(b.x + b.w));
             let (y0, y1) = (a.y.max(b.y), (a.y + a.h).min(b.y + b.h));
@@ -197,35 +216,36 @@ impl Stack {
             g.adj.len() - 1
         };
         // Cuts are single nodes.
-        let cut_node: Vec<Option<usize>> = items.iter().map(|(_, _, l)| l.cut.then(|| node(&mut g))).collect();
+        let cut_node: Vec<Option<usize>> = items.iter().map(|(_, _, l, _)| l.cut.then(|| node(&mut g))).collect();
         for i in 0..items.len() {
             for j in i + 1..items.len() {
-                let ((ri, a, la), (rj, b, lb)) = (items[i], items[j]);
-                if ri.abs_diff(rj) > 1 || !touch(&a, &b) {
+                let ((ri, a, la, si), (rj, b, lb, sj)) = (items[i], items[j]);
+                if ri.abs_diff(rj) > 1 || !a.touches(&b) {
                     continue;
                 }
                 let at = centre(&a, &b);
                 match (cut_node[i], cut_node[j]) {
                     (Some(_), Some(_)) => {}
                     (Some(c), None) | (None, Some(c)) => {
-                        let (m, cut) = if la.cut { (j, la) } else { (i, lb) };
+                        let (m, cut, sc) = if la.cut { (j, la, si) } else { (i, lb, sj) };
                         let p = node(&mut g);
                         ports[m].push((along(&items[m].1, at), p));
-                        g.link(p, c, cut.sheet_ohm / 2.0);
+                        g.link(p, c, cut.sheet_ohm / 2.0, sc);
                     }
                     (None, None) => {
                         let (p, q) = (node(&mut g), node(&mut g));
                         ports[i].push((along(&a, at), p));
                         ports[j].push((along(&b, at), q));
-                        g.link(p, q, 0.0);
+                        g.link(p, q, 0.0, u32::MAX);
                     }
                 }
             }
         }
         for (t, r) in terminals.iter().enumerate() {
             let c = (r.x + r.w / 2, r.y + r.h / 2);
-            for (i, (_, s, _)) in items.iter().enumerate() {
-                if !touch(r, s) {
+            let floor = if lowest { items.iter().filter(|(_, s, ..)| r.touches(s)).map(|it| it.0).min() } else { None };
+            for (i, &(k, ref s, ..)) in items.iter().enumerate() {
+                if !r.touches(s) || floor.is_some_and(|f| k != f) {
                     continue;
                 }
                 let n = cut_node[i].unwrap_or_else(|| {
@@ -234,17 +254,17 @@ impl Stack {
                     p
                 });
                 match g.term[t] {
-                    Some(prev) => g.link(prev, n, 0.0),
+                    Some(prev) => g.link(prev, n, 0.0, u32::MAX),
                     None => g.term[t] = Some(n),
                 }
             }
         }
-        for (i, (_, s, l)) in items.iter().enumerate() {
+        for (i, &(_, s, l, si)) in items.iter().enumerate() {
             let p = &mut ports[i];
             p.sort_unstable();
             let w = s.w.min(s.h).max(1) as f32;
             for k in 1..p.len() {
-                g.link(p[k - 1].1, p[k].1, l.sheet_ohm * (p[k].0 - p[k - 1].0) as f32 / w);
+                g.link(p[k - 1].1, p[k].1, l.sheet_ohm * (p[k].0 - p[k - 1].0) as f32 / w, si);
             }
         }
         g
@@ -273,22 +293,21 @@ impl Stack {
     /// conductor is each connected piece of them (Hastings pp. 228–229); its
     /// exposed area is layer `s`'s alone, or every layer's up to `s` when the
     /// deck's rules are cumulative. `cell` is the cells' metal on the net,
-    /// scored with the wires; with `gates` (the net's gate pins) only a piece
-    /// reaching one is charged — a piece a jumper cut off the gate carries no
-    /// charge to it.
+    /// scored with the wires. With `gates` (the net's gate pins) a piece is
+    /// charged only the distinct devices whose gate pin it touches — a piece a
+    /// jumper cut off every gate carries no charge — and a gate of unknown
+    /// area (`nm2 = 0`) adds none; without them, every piece is charged
+    /// `fallback_nm2`. A piece touching a net shape on the deck's credited
+    /// diode layer has its ratio lowered by the deck's `bonus` (floored at 0).
     ///
-    /// ponytail: a charged piece is charged the net's whole gate area, which
-    /// under-counts a piece that reaches only some of several gates. O(k²) per
+    /// ponytail: the sidewall area sums per-rect perimeters (signoff merges
+    /// them), and the bonus goes only to pieces touching a diode (signoff
+    /// gives it to every gate net of the row) — both pessimistic. O(k²) per
     /// stage.
     #[must_use]
-    pub fn antenna(&self, shapes: &[Shape], cell: &[Shape], gates: &[Rect], gate_nm2: i64) -> Option<(f32, f32)> {
+    pub fn antenna(&self, shapes: &[Shape], cell: &[Shape], gates: &[GatePin], fallback_nm2: i64) -> Option<(f32, f32)> {
         let all: Vec<&Shape> = shapes.iter().chain(cell).collect();
-        // A junction to the substrate bleeds the plasma charge at every stage.
-        // ponytail: credited from the first stage on; a diode reached only
-        // through an upper metal protects only from that stage.
-        if self.diode_layer.is_some_and(|d| all.iter().any(|s| s.layer.0 == d)) {
-            return self.layers.iter().find(|l| l.antenna_ratio > 0.0).map(|l| (0.0, l.antenna_ratio));
-        }
+        let diodes: Vec<Rect> = self.diode.map_or_else(Vec::new, |d| all.iter().filter(|s| s.layer.0 == d.layer).map(|s| s.rect).collect());
         let rank = |s: &Shape| self.at(s.layer.0).map(|(i, _)| i);
         let mut worst: Option<(f32, f32)> = None;
         for (stage, layer) in self.layers.iter().enumerate().filter(|(_, l)| l.antenna_ratio > 0.0) {
@@ -301,13 +320,21 @@ impl Stack {
                 _ => q.w as f32 * q.h as f32,
             };
             for piece in pieces(&built) {
+                let touches = |r: &Rect| piece.iter().any(|&k| built[k].1.touches(r));
                 // A piece reaches a gate when it lies over the gate's pin (the
                 // router's trunk ends there before its pin access is drawn).
-                if !gates.is_empty() && !piece.iter().any(|&k| gates.iter().any(|g| touches(&built[k].1, g))) {
+                let mut reached: Vec<&GatePin> = gates.iter().filter(|g| touches(&g.at)).collect();
+                reached.sort_unstable_by_key(|g| g.dev);
+                reached.dedup_by_key(|g| g.dev);
+                if !gates.is_empty() && reached.is_empty() {
                     continue;
                 }
+                let gate = if gates.is_empty() { fallback_nm2 } else { reached.iter().map(|g| g.nm2).sum() };
                 let area: f32 = piece.iter().map(|&k| built[k]).filter(|&(r, _)| counts(r)).map(|(_, q)| exposed(q)).sum();
-                let ratio = area / gate_nm2.max(1) as f32;
+                let mut ratio = area / gate.max(1) as f32;
+                if let Some(d) = self.diode.filter(|_| diodes.iter().any(touches)) {
+                    ratio = (ratio - d.bonus).max(0.0);
+                }
                 if worst.is_none_or(|(r, l)| ratio / layer.antenna_ratio > r / l) {
                     worst = Some((ratio, layer.antenna_ratio));
                 }
@@ -317,23 +344,38 @@ impl Stack {
     }
 }
 
-/// `(run, gap)` of two shapes separated on one axis and overlapping on the
-/// [`Stack::port_graph`]'s resistor network: adjacency `(node, Ω)` and each
-/// terminal's node.
-struct PortGraph {
-    adj: Vec<Vec<(usize, f32)>>,
-    term: Vec<Option<usize>>,
+/// [`Stack::port_graph`]'s resistor network: adjacency `(node, Ω, shape
+/// index)` (`u32::MAX`: a 0-Ω junction or terminal link) and each terminal's
+/// node.
+pub(crate) struct PortGraph {
+    pub(crate) adj: Vec<Vec<(usize, f32, u32)>>,
+    pub(crate) term: Vec<Option<usize>>,
 }
 
 impl PortGraph {
-    fn link(&mut self, a: usize, b: usize, r: f32) {
-        self.adj[a].push((b, r));
-        self.adj[b].push((a, r));
+    fn link(&mut self, a: usize, b: usize, r: f32, shape: u32) {
+        self.adj[a].push((b, r, shape));
+        self.adj[b].push((a, r, shape));
     }
 
     /// Least R from `src` to each terminal.
     fn from(&self, src: &[usize]) -> Vec<Option<f32>> {
+        let dist = self.dijkstra(src).0;
+        self.term.iter().map(|t| t.map(|n| dist[n]).filter(|d| d.is_finite())).collect()
+    }
+
+    /// The parent link `(parent, Ω, shape index)` of every node a least-R
+    /// tree from `root` reaches; `None` for the root and unreached nodes.
+    pub(crate) fn tree(&self, root: usize) -> Vec<Option<(usize, f32, u32)>> {
+        self.dijkstra(&[root]).1
+    }
+
+    /// Least R from the nearest of `src` to every node, and each reached
+    /// node's parent link on that path.
+    #[allow(clippy::type_complexity)]
+    fn dijkstra(&self, src: &[usize]) -> (Vec<f32>, Vec<Option<(usize, f32, u32)>>) {
         let mut dist = vec![f32::INFINITY; self.adj.len()];
+        let mut parent = vec![None; self.adj.len()];
         let mut heap = std::collections::BinaryHeap::new();
         for &s in src {
             dist[s] = 0.0;
@@ -343,18 +385,20 @@ impl PortGraph {
             if f32::from_bits(d) > dist[a] {
                 continue;
             }
-            for &(b, r) in &self.adj[a] {
+            for &(b, r, shape) in &self.adj[a] {
                 let nd = dist[a] + r;
                 if nd < dist[b] {
                     dist[b] = nd;
+                    parent[b] = Some((a, r, shape));
                     heap.push(std::cmp::Reverse((nd.to_bits(), b)));
                 }
             }
         }
-        self.term.iter().map(|t| t.map(|n| dist[n]).filter(|d| d.is_finite())).collect()
+        (dist, parent)
     }
 }
 
+/// `(run, gap)` of two shapes separated on one axis and overlapping on the
 /// other; `None` otherwise.
 #[must_use]
 pub fn parallel(p: &Rect, q: &Rect) -> Option<(i32, i32)> {
@@ -371,14 +415,64 @@ pub fn parallel(p: &Rect, q: &Rect) -> Option<(i32, i32)> {
     }
 }
 
-/// Connected pieces of `(stack rank, rect)`: touching rects on the same or
-/// adjacent ranks (a cut joins the metals either side) are one conductor.
-fn touches(a: &Rect, b: &Rect) -> bool {
-    a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h
+/// Area (nm²) and perimeter (nm) of the union of `rects`, by coordinate
+/// compression: the distinct edge coordinates cut the plane into X·Y cells, a
+/// 2-D difference array marks the covered ones, and the perimeter is every
+/// cell edge between a covered cell and an uncovered (or outside) one.
+///
+/// ponytail: O(n + X·Y) time and memory per call; a sweep line with an
+/// interval tree is O(n log n) if a net's per-layer shape count grows large.
+fn union_area_perimeter(rects: &[Rect]) -> (f64, f64) {
+    let axis = |ends: &dyn Fn(&Rect) -> [i32; 2]| {
+        let mut v: Vec<i32> = rects.iter().flat_map(ends).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let (xs, ys) = (axis(&|r| [r.x, r.x + r.w]), axis(&|r| [r.y, r.y + r.h]));
+    let (nx, ny) = (xs.len(), ys.len());
+    if nx < 2 || ny < 2 {
+        return (0.0, 0.0);
+    }
+    // `d[i·ny + j]` covers cell `[xs[i], xs[i+1]) × [ys[j], ys[j+1])`.
+    let mut d = vec![0i32; nx * ny];
+    let idx = |v: &[i32], c: i32| v.partition_point(|&x| x < c);
+    for r in rects {
+        let (i0, i1, j0, j1) = (idx(&xs, r.x), idx(&xs, r.x + r.w), idx(&ys, r.y), idx(&ys, r.y + r.h));
+        d[i0 * ny + j0] += 1;
+        d[i1 * ny + j0] -= 1;
+        d[i0 * ny + j1] -= 1;
+        d[i1 * ny + j1] += 1;
+    }
+    for i in 0..nx {
+        for j in 1..ny {
+            d[i * ny + j] += d[i * ny + j - 1];
+        }
+    }
+    for i in 1..nx {
+        for j in 0..ny {
+            d[i * ny + j] += d[(i - 1) * ny + j];
+        }
+    }
+    let cov = |i: usize, j: usize| i + 1 < nx && j + 1 < ny && d[i * ny + j] > 0;
+    let (mut area, mut perimeter) = (0.0f64, 0.0f64);
+    for i in 0..nx - 1 {
+        for j in 0..ny - 1 {
+            if !cov(i, j) {
+                continue;
+            }
+            let (w, h) = (f64::from(xs[i + 1] - xs[i]), f64::from(ys[j + 1] - ys[j]));
+            area += w * h;
+            let open = [i == 0 || !cov(i - 1, j), !cov(i + 1, j), j == 0 || !cov(i, j - 1), !cov(i, j + 1)];
+            perimeter += h * f64::from(u8::from(open[0]) + u8::from(open[1])) + w * f64::from(u8::from(open[2]) + u8::from(open[3]));
+        }
+    }
+    (area, perimeter)
 }
 
+/// Connected pieces of `(stack rank, rect)`: touching rects on the same or
+/// adjacent ranks (a cut joins the metals either side) are one conductor.
 fn pieces(built: &[(usize, Rect)]) -> Vec<Vec<usize>> {
-    let touch = touches;
     let mut seen = vec![false; built.len()];
     let mut out = Vec::new();
     for s in 0..built.len() {
@@ -390,7 +484,7 @@ fn pieces(built: &[(usize, Rect)]) -> Vec<Vec<usize>> {
         while let Some(a) = stack.pop() {
             piece.push(a);
             for b in 0..built.len() {
-                if !seen[b] && built[a].0.abs_diff(built[b].0) <= 1 && touch(&built[a].1, &built[b].1) {
+                if !seen[b] && built[a].0.abs_diff(built[b].0) <= 1 && built[a].1.touches(&built[b].1) {
                     seen[b] = true;
                     stack.push(b);
                 }
@@ -413,14 +507,27 @@ mod tests {
     /// m1 (id 1), via (2), m2 (3); the via stage has no antenna rule.
     fn stack(m1: f32, m2: f32, cumulative: bool) -> Stack {
         let metal = |id, ratio| Layer { id, area_af_um2: 25.0, fringe_af_um: 40.0, lateral: 3.9 * 8.854 * 360.0, antenna_ratio: ratio, sheet_ohm: 0.125, ..Layer::default() };
-        Stack { layers: vec![metal(1, m1), Layer { id: 2, sheet_ohm: 4.5, cut: true, ..Layer::default() }, metal(3, m2)], antenna_cumulative: cumulative, diode_layer: None }
+        Stack { layers: vec![metal(1, m1), Layer { id: 2, sheet_ohm: 4.5, cut: true, ..Layer::default() }, metal(3, m2)], antenna_cumulative: cumulative, diode: None }
     }
 
     #[test]
     fn ground_c_is_area_plus_fringe_per_layer() {
-        // 10 µm × 0.5 µm on m1: 25·5 + 2·40·10 = 925 aF; an unknown layer adds 0.
+        // 10 µm × 0.5 µm on m1: 25·5 + 40·21 = 965 aF; an unknown layer adds 0.
         let c = stack(0.0, 0.0, false).ground_af(&[shape(1, 0, 0, 10_000, 500), shape(9, 0, 0, 10_000, 500)]);
-        assert!((c - 925.0).abs() < 1e-3, "{c}");
+        assert!((c - 965.0).abs() < 1e-3, "{c}");
+    }
+
+    #[test]
+    fn overlapping_shapes_count_once() {
+        // Union 15 µm × 0.5 µm: 25·7.5 + 40·31 = 1 427.5 aF (summed: 1 930).
+        let c = stack(0.0, 0.0, false).ground_af(&[shape(1, 0, 0, 10_000, 500), shape(1, 5_000, 0, 10_000, 500)]);
+        assert!((c - 1_427.5).abs() < 1e-2, "{c}");
+    }
+
+    #[test]
+    fn a_pad_inside_a_wire_adds_nothing() {
+        let c = stack(0.0, 0.0, false).ground_af(&[shape(1, 0, 0, 10_000, 500), shape(1, 4_000, 0, 500, 500)]);
+        assert!((c - 965.0).abs() < 1e-3, "{c}");
     }
 
     #[test]
@@ -500,16 +607,39 @@ mod tests {
         // Cumulative rules count m1 (not the cuts) at the m2 stage too: 142 + 40.
         let cum = stack(100.0, 400.0, true).antenna(&bridged, &[], &[], gate).unwrap();
         assert!((cum.0 - 182.0).abs() < 1e-3 && cum.1 == 400.0, "{cum:?}");
-        // A diode on the net (its marker among the net's shapes) is credited.
-        let guarded = Stack { diode_layer: Some(9), ..stack(100.0, 400.0, false) };
-        let mut with_diode = long.to_vec();
-        with_diode.push(shape(9, 0, 0, 500, 500));
-        assert_eq!(guarded.antenna(&with_diode, &[], &[], gate), Some((0.0, 100.0)));
-        assert_eq!(guarded.antenna(&long, &[], &[], gate), Some((180.0, 100.0)), "no diode, no credit");
         // A sidewall rule counts perimeter × thickness: 2·(180+1) µm · 0.36 µm.
         let mut side = stack(100.0, 400.0, false);
         side.layers[0].antenna_sidewall_nm = 360.0;
         assert!((side.antenna(&long, &[], &[], gate).unwrap().0 - 130.32).abs() < 1e-2);
+    }
+
+    /// A piece is charged the oxide of the gates it touches, each device once,
+    /// not the net's whole gate area (Hastings §5.1.6: per node, per stage).
+    #[test]
+    fn a_piece_is_charged_only_the_gates_it_reaches() {
+        let s = stack(100.0, 400.0, false);
+        let pin = |x: i32, dev: u32, nm2: i64| GatePin { at: Rect { x, y: 0, w: 1_000, h: 1_000 }, dev, nm2 };
+        // dev 0 (1 µm², two pins under one piece) and dev 1 (9 µm²), each
+        // under its own m2 piece: 50 µm² and 9 µm².
+        let gates = [pin(0, 0, 1_000_000), pin(2_000, 0, 1_000_000), pin(100_000, 1, 9_000_000)];
+        let wires = [shape(3, 0, 0, 50_000, 1_000), shape(3, 100_000, 0, 9_000, 1_000)];
+        // A/1 µm² = 50 (charged the net's 10 µm²: 5); dev 1's piece: 1.
+        assert_eq!(s.antenna(&wires, &[], &gates, 10_000_000), Some((50.0, 400.0)));
+        // No gate pins known: every piece is charged the fallback.
+        assert_eq!(s.antenna(&wires, &[], &[], 10_000_000), Some((5.0, 400.0)));
+    }
+
+    /// The diode credit is the deck's `diode_bonus`, to a piece touching a
+    /// diode shape; with no deck credit a drawn diode lowers nothing.
+    #[test]
+    fn diode_credit_is_the_decks_bonus_only() {
+        let gate = 1_000_000;
+        let long = [shape(1, 0, 0, 120_000, 1_000), shape(9, 0, 0, 500, 500)];
+        let credited = Stack { diode: Some(DiodeCredit { layer: 9, bonus: 50.0 }), ..stack(100.0, 400.0, false) };
+        assert_eq!(credited.antenna(&long, &[], &[], gate), Some((70.0, 100.0)));
+        assert_eq!(stack(100.0, 400.0, false).antenna(&long, &[], &[], gate), Some((120.0, 100.0)), "deck credits no diode");
+        let apart = [long[0], shape(9, 200_000, 0, 500, 500)];
+        assert_eq!(credited.antenna(&apart, &[], &[], gate), Some((120.0, 100.0)), "a diode off the piece");
     }
 
     /// A cell's plate on the net counts with the wires; once a jumper cuts it
@@ -518,7 +648,7 @@ mod tests {
     fn a_cell_plate_counts_until_cut_off_the_gate() {
         let s = stack(100.0, 400.0, false);
         let gate = 1_000_000;
-        let pin = Rect { x: 0, y: 0, w: 1_000, h: 1_000 };
+        let pin = GatePin { at: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, dev: 0, nm2: gate };
         // A short m1 wire from the gate to a 150 µm² m1 plate: 151 > 100.
         let wire = [shape(1, 0, 0, 2_000, 1_000)];
         let plate = [shape(1, 2_000, 0, 150_000, 1_000)];

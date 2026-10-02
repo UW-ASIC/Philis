@@ -4,7 +4,8 @@ Reported by the TinyTapeout_Flows session after running Philis (EDA-Packaged bui
 `philis run <deck> share/philis/pdks/sky130.json --interface ... --seed N`) on ~10 sky130
 analog blocks. Repro decks and outputs: `/home/omare/Documents/Projects/Trial/ResearchBoutros/analog/<block>/`
 (`netlist/<block>.spice`, `layout/interface.json`, `output/pnr/*`). Ranked by the reporter's impact.
-Not yet mapped to plan items; the M0 close-out maps each one to an existing item or a new one.
+Mapped at the M0 close-out: 00-MASTER-PLAN.md Status, field-report table (each item re-run on m0; the
+reporter's build was Philis `e8bc59e` with GPurify `e3c8eb2`). Each owning item carries a `Field report: FR-n` line.
 
 1. **Hang with several MIM caps.** On a deck with several `cap_mim_m3_1`, the first "extracting
    feedback" never finishes (>8 h, 1 thread, ~10 MB RSS). async_ctrl tq_chain: 0–1 cap finishes in

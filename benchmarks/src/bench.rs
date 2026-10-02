@@ -186,20 +186,25 @@ fn run_circuit(
         Err(e) => return (format!("flow failed: {e:?}"), Vec::new()),
     };
 
-    let report = library::signoff(&sol, pdk);
+    let signoff = library::signoff(&sol, pdk);
+    let report = &signoff.report;
 
-    // Signoff findings are structured by rule-name prefix: `{domain}/{rule}:{layer}`
+    // Signoff errors are structured by rule-name prefix: `{domain}/{rule}:{layer}`
     // with domains drc/erc/lvs, plus `engine/…` for a stage that could not run
-    // (see `verify::signoff`).
+    // (see `verify::signoff_checked`). Deck warnings are `signoff.warnings`,
+    // never counted here.
     let mut drc = 0usize;
     let mut erc = 0usize;
     let mut lvs_mismatch = false;
+    let mut unverified = 0i64;
     let mut engine = 0usize;
     for v in &report.hard_violations {
         if v.rule.starts_with("drc/") {
             drc += 1;
         } else if v.rule.starts_with("lvs/") {
             lvs_mismatch = true;
+        } else if v.rule.starts_with("lvs-coverage/") {
+            unverified += v.margin;
         } else if v.rule.starts_with("erc/") {
             erc += 1;
         } else if v.rule.starts_with("engine/") {
@@ -224,23 +229,42 @@ fn run_circuit(
     let (area_um2, util_pct) = footprint(&sol.layout);
     let active_pct = active(&sol, pdk, area_um2);
     let s = &sol.stats;
+    let problem = annotator::annotate(&sol.netlist, &library::annotation(pdk, &annotator::AnnotationConfig::default()));
+    let names: Vec<String> = sol.netlist.nets.iter().map(|n| n.name.clone()).collect();
 
     // `overuse` is milli-budget normalised residual margin, not a track count.
     // `esc` > 0 means a variant-space binding (no arrangement of the chosen
     // variants was feasible), not a placement local minimum.
+    // A counter its owning item has not built yet prints `n/a`, never a 0.
+    let na = |v: Option<u64>| v.map_or_else(|| "n/a".to_string(), |v| v.to_string());
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}{} | overuse {} | DRC {} | LVS {} | ERC {}{} | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {} | ERC {}{} | warnings {} | skipped [{}] | C total {:.1} fF, sig {:.1} fF | key tier {:.1} | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | EM {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
         unrouted,
         if undrawable > 0 { format!(" | undrawable {undrawable}") } else { String::new() },
+        s.route_hard,
         s.route_overuse,
         drc,
-        if lvs_mismatch { "MISMATCH" } else { "MATCH" },
+        // MATCH only when every device was compared; PARTIAL(n): n devices
+        // no deck recogniser extracts, the rest matched.
+        match (lvs_mismatch, unverified) {
+            (true, _) => "MISMATCH".to_string(),
+            (false, 0) => "MATCH".to_string(),
+            (false, n) => format!("PARTIAL({n})"),
+        },
         erc,
         if engine > 0 { format!(" | engine fails {engine}") } else { String::new() },
+        signoff.warnings.len(),
+        signoff.coverage.skipped_rules.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>().join(", "),
+        // Total (every net, coupling on both ends, rails included) and
+        // signal-class C (NaN on a label short), both from this signoff of the final (filled)
+        // layout; then the search key's C tier (`RunStats::c_tier`), from
+        // the winning epoch's own signoff before fill.
         report.cost,
+        library::signoff_c_tier(&signoff, &names, &problem.net_classes, &[]),
+        s.c_tier,
         area_um2,
         util_pct,
         active_pct,
@@ -254,6 +278,29 @@ fn run_circuit(
             || "none".to_string(),
             |b| format!("{} uW, {}", b.total_power_uw, if b.provenance.starts_with("SYNTH") { "probe" } else { "testbench" })
         ),
+        // Per fixture (REL T3/T4): nets checked, of them violated, unknown, and
+        // the worst known net's need/have (T3's `min(w/need) ≥ 1` is `use ≤ 1`).
+        sol.metadata.routing.iter().find(|r| r.kind == "Electromigration").map_or_else(
+            || "none".to_string(),
+            |r| format!(
+                "known {} (viol {}), unknown {}, max use {}",
+                r.total - r.unknown,
+                r.violations,
+                r.unknown,
+                r.usage.map_or_else(|| "none".to_string(), |u| format!("{u:.3}"))
+            )
+        ),
+        s.place.area_usage,
+        s.place.lattice_off,
+        s.place.overlap_nm2,
+        s.place.clearance_residue_nm2,
+        s.place.matched_geometry_mismatch,
+        na(s.place.islands_extra.map(u64::from)),
+        s.dp.temps,
+        s.dp.proposals,
+        s.dp.accepted,
+        na(s.dp.decode_fail),
+        na(s.dp.matched_incompatible.map(u64::from)),
     );
 
     // Per-constraint-type satisfaction: the run's own cell-space placement
@@ -266,7 +313,7 @@ fn run_circuit(
         .chain(p.cost.iter().filter(|b| !enforced.contains(&b.kind())).map(|b| ("cost", b)))
         .filter_map(|(arm, b)| stat(arm, &c.name, b.as_ref(), l))
         .collect();
-    let routing = annotator::annotate(&sol.netlist, &library::annotation(pdk, &annotator::AnnotationConfig::default())).routing;
+    let routing = &problem.routing;
     contracts.extend(
         routing.hard.iter().map(|b| ("hard", b))
             .chain(routing.budget.iter().map(|b| ("budget", b)))
@@ -280,7 +327,7 @@ fn run_circuit(
         arm: if r.arm == library::metadata::Arm::Hard { "hard" } else { "budget" },
         circuit: c.name.clone(),
         total: r.total,
-        violated: r.total - r.satisfied,
+        violated: r.violations,
         na: 0,
         unk: r.unknown,
         usage: r.usage,
@@ -293,10 +340,21 @@ fn run_circuit(
     let _ = std::fs::create_dir_all(&debug_dir);
     let gds_bytes = gds::emit(&shapes, layer_gds);
     let _ = std::fs::write(debug_dir.join(format!("{}.gds", c.name)), &gds_bytes);
-    let _ = std::fs::write(debug_dir.join("signoff.txt"), &outcome);
+    let _ = std::fs::write(debug_dir.join("signoff.txt"), format!("{outcome}\n{}", signoff.coverage));
     // Every hard violation verbatim — the summary counts alone can't say which rule fired.
-    let detail: String =
-        report.hard_violations.iter().map(|v| format!("{}\t{}\n", v.rule, v.margin)).collect();
+    // Then each routing hard rule the run itself scored, per net it violates,
+    // with its own `Rule::residual` (EM: `(need − have)/need`; per net: REL-03),
+    // then every deck warning, marked as such.
+    let net_name = |n: u32| sol.netlist.nets.get(n as usize).map_or_else(|| format!("#{n}"), |x| x.name.clone());
+    let detail: String = report
+        .hard_violations
+        .iter()
+        .map(|v| format!("{}\t{}\n", v.rule, v.margin))
+        .chain(sol.metadata.routing.iter().filter(|r| r.arm == library::metadata::Arm::Hard).flat_map(|r| {
+            r.violated.iter().map(move |&(n, res)| format!("route/{}: net {}\t{res}\n", r.kind, net_name(n)))
+        }))
+        .chain(signoff.warnings.iter().map(|v| format!("warning {}\t{}\n", v.rule, v.margin)))
+        .collect();
     let _ = std::fs::write(debug_dir.join("violations.txt"), detail);
     // DRC again, unsummarised: `signoff` keeps only (rule, margin), and without the
     // representative x/y there is no way to tell a cell-internal violation from one
@@ -304,7 +362,7 @@ fn run_circuit(
     let located: String = verify::drc(&shapes, &[], pdk)
         .iter()
         .map(|f| {
-            format!("{}\t{}\tmargin={} nm\t({}, {})\n", f.rule, f.layer, f.margin_nm, f.x, f.y)
+            format!("{}{}\t{}\tmargin={} {}\t({}, {})\n", if f.warning { "warning " } else { "" }, f.rule, f.layer, f.margin, f.unit, f.x, f.y)
         })
         .collect();
     let _ = std::fs::write(debug_dir.join("drc_located.txt"), located);

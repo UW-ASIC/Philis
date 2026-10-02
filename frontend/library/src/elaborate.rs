@@ -94,7 +94,7 @@ impl Elaborated {
             schematic,
             None,
             pdk,
-        ).0)
+        ).report)
     }
 
     /// The net labels [`Elaborated::signoff`] puts on the geometry, so an
@@ -104,14 +104,17 @@ impl Elaborated {
         crate::labeled_pins(&self.macros, &self.nets, pdk, &self.geometry())
     }
 
-    /// Geometric DRC only — runs without a schematic. Margin is nm shortfall.
+    /// Geometric DRC only — runs without a schematic. Margin is [`verify::shortfall`]:
+    /// nm for a length rule, ‰ of the limit otherwise. Deck warnings are left
+    /// out, as [`verify::Signoff::warnings`] keeps them out of the report.
     #[must_use]
     pub fn signoff_drc(&self, pdk: &Pdk) -> Vec<pnr_core::Violation> {
         verify::drc(&self.geometry(), &[], pdk)
             .into_iter()
+            .filter(|f| !f.warning)
             .map(|f| pnr_core::Violation {
                 rule: format!("drc/{}:{}", f.rule, f.layer),
-                margin: f.margin_nm,
+                margin: f.margin,
             })
             .collect()
     }
@@ -286,14 +289,15 @@ pub(crate) fn stack(pdk: &Pdk) -> analog::routing::Stack {
             })
             .collect(),
         antenna_cumulative: rules.iter().flatten().any(|r| r.2),
-        diode_layer: pdk.diode_marker().map(|l| l.0),
+        diode: pdk.antenna_diode_credit().map(|(l, bonus)| analog::routing::DiodeCredit { layer: l.0, bonus }),
     }
 }
 
 /// Design intent for signoff's EM/IR rules: every Supply/Ground-class net at
 /// the operating point's `vdd_mv`, with the DC current it carries (the larger
-/// of what its terminals draw and supply). Empty without an operating point:
-/// those rules then skip, and say so.
+/// of what its terminals draw and supply). Empty without an operating point,
+/// and no current for a net with an unresolved device on it: those rules then
+/// skip, and say so, instead of checking a wrong number.
 pub(crate) fn intent(
     netlist: &pnr_core::Netlist,
     classes: &[analog::metadata::NetClassification],
@@ -305,15 +309,18 @@ pub(crate) fn intent(
     let mut out = verify::Intent::default();
     for c in classes.iter().filter(|c| matches!(c.class, NetClass::Supply | NetClass::Ground)) {
         let name = netlist.nets[c.net.0 as usize].name.clone();
-        let (mut inn, mut outg) = (0.0f64, 0.0f64);
+        let (mut inn, mut outg, mut known) = (0.0f64, 0.0f64, true);
         for (dev, d) in netlist.devices.iter().zip(draws) {
             for (t, _) in dev.terminals.iter().filter(|(_, n)| *n == c.net) {
+                known &= d.is_some();
                 let ua = d.iter().flatten().find(|(x, _)| x == t).map_or(0.0, |&(_, ua)| ua);
                 if ua > 0.0 { inn += ua } else { outg -= ua }
             }
         }
         out.supplies.push((name.clone(), vdd_mv, c.class == NetClass::Ground));
-        out.currents.push((name, inn.max(outg)));
+        if known {
+            out.currents.push((name, inn.max(outg)));
+        }
     }
     out
 }
@@ -322,8 +329,10 @@ pub(crate) fn intent(
 /// antenna rules still find over their limit after dr's jumper repair: per
 /// net, the deck's diode drawn in free space beside the net's first gate pin
 /// (else its first pin) — cathode `N` on the net, anode `P` on `ground` —
-/// with the schematic device it adds. Empty when the deck's diode cannot be
-/// extracted by LVS ([`Pdk::diode_marker`]) or there is no ground net.
+/// with the schematic device it adds. Empty when the deck credits no diode
+/// ([`Pdk::antenna_diode_credit`]: one would fix nothing at signoff and add an
+/// LVS device), when the deck's diode cannot be extracted by LVS
+/// ([`Pdk::diode_marker`]), or when there is no ground net.
 ///
 /// ponytail: one minimum diode per net, at the first free spot within 50 µm;
 /// `clearance` is the placer's cell-to-cell gap.
@@ -337,9 +346,9 @@ pub(crate) fn antenna_diodes(
     clearance: i32,
 ) -> Vec<(pnr_core::Device, Macro)> {
     use cells::Cell;
-    let (Some(ground), Some(_)) = (ground, pdk.diode_marker()) else { return Vec::new() };
+    let (Some(ground), Some(_), Some(_)) = (ground, pdk.diode_marker(), pdk.antenna_diode_credit()) else { return Vec::new() };
     let mut nets = Vec::new();
-    for b in routing.hard.iter().filter(|b| b.kind().ends_with("Antenna")) {
+    for b in routing.hard.iter().filter(|b| b.repair_kind() == analog::RepairKind::Antenna) {
         b.violating_ids(routes, &mut nets);
     }
     nets.sort_unstable();
@@ -457,4 +466,32 @@ pub(crate) fn detailed_router(
     cfg.pin_access_spacing = pad_layer.and_then(|l| pdk.min_spacing(l.0)).unwrap_or(0);
     cfg.pin_access_cut_spacing = pad_cut.and_then(|l| pdk.min_spacing(l.0)).unwrap_or(0);
     dr::DetailedRoute { cfg }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A rail with an unresolved device on it states no current (signoff's EM
+    /// rule then skips it); a rail with only known devices keeps its current.
+    #[test]
+    fn a_supply_with_an_unresolved_device_has_no_current() {
+        use analog::metadata::{NetClass, NetClassification};
+        use pnr_core::{Device, DeviceKind, Net, NetId, Netlist};
+        let dev = |name: &str, kind, terminals: &[(&str, u16)]| Device {
+            name: name.into(),
+            kind,
+            model: String::new(),
+            terminals: terminals.iter().map(|&(t, n)| (t.into(), NetId(n))).collect(),
+            params: vec![],
+        };
+        // nets: 0 vdd, 1 vss, 2 x
+        let nl = Netlist {
+            devices: vec![dev("M0", DeviceKind::Nmos, &[("D", 0), ("G", 2), ("S", 1), ("B", 1)]), dev("R1", DeviceKind::Resistor, &[("P", 0), ("N", 2)])],
+            nets: ["vdd", "vss", "x"].iter().map(|n| Net { name: (*n).into() }).collect(),
+        };
+        let class = |n: u16, class| NetClassification { net: NetId(n), class, c_budget_af: None, max_coupling_af: None };
+        let draws = [Some(vec![("D".into(), 10.0), ("G".into(), 0.0), ("S".into(), -10.0), ("B".into(), 0.0)]), None];
+        let i = super::intent(&nl, &[class(0, NetClass::Supply), class(1, NetClass::Ground)], Some(&draws), 1_800.0);
+        assert_eq!(i.supplies.len(), 2, "both rails still declared");
+        assert_eq!(i.currents, vec![("vss".to_string(), 10.0)], "vdd unknown: no current, never a partial sum");
+    }
 }

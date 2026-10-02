@@ -7,12 +7,21 @@ use crate::ids::NetId;
 pub struct LayerId(pub u16);
 
 /// Axis-aligned rectangle in `nm`. `(x, y)` is the lower-left corner.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
     pub w: i32,
     pub h: i32,
+}
+
+impl Rect {
+    /// Closed intervals on both axes: edge or corner contact counts, so two
+    /// abutting shapes on one conductor are connected.
+    #[must_use]
+    pub fn touches(&self, o: &Rect) -> bool {
+        self.x <= o.x + o.w && o.x <= self.x + self.w && self.y <= o.y + o.h && o.y <= self.y + self.h
+    }
 }
 
 /// How a placed cell is turned before stamping: the D4 group, the same eight
@@ -92,6 +101,13 @@ pub enum Dir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edge_contact_touches_and_a_gap_does_not() {
+        let a = Rect { x: 0, y: 0, w: 10, h: 10 };
+        assert!(a.touches(&Rect { x: 10, y: 0, w: 5, h: 5 }));
+        assert!(!a.touches(&Rect { x: 11, y: 0, w: 5, h: 5 }));
+    }
 
     const ALL: [Orient; 8] = [
         Orient::R0,

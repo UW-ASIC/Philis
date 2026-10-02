@@ -196,6 +196,9 @@ geometry, every input feature is honoured or refused loudly, and the search spen
 ## 3. Work items
 
 ### FLOW-01 One device-size convention (SPICE `W_total`, `nf`, `m`) across parse, cells, LVS and simulation
+
+Status: done in M0 (`f90c5e7`). As built: `parse::ParseOptions { size }` is crate-private (not re-exported), `Config.size_convention` feeds `run` only and `parse()` is always `Spice`. Measured consequence: the OTA `CommonCentroid` rows went 3/3 → 0/3 (XM1/XM2 W=10u nf=2 now fold to two 5 µm fingers each, drawn AABB; `cellgen::folds` ignores CommonCentroid), carried to M1 under FLOW-16.
+
 - Priority: **P0**. Effort: **M**. Depends on: none.
 - Why: AF-01 (critical), AR-46, AA-21 (size semantics part), PERF §0.2 row 1. The glossary of the prior handbook records
   that "W/nf/m semantics are PDK-specific" (ref-00 §2.4, notes glossary L13–29), so the parser must take the
@@ -268,6 +271,9 @@ geometry, every input feature is honoured or refused loudly, and the search spen
   (ota, ota_constrained, tt_ota) must be audited (OQ-1). `nfin` stays a separate key for FinFET decks (CELL, AC-09).
 
 ### FLOW-02 Epoch-key contract: |V| per rule, Θ from one source, warnings out of V, NaN-safe
+
+Status: done in M0 (`65f5f8c`); amended by the review panel: `lex_key` leaves the `lvs-coverage/` rows out of |V| (plan-07 PERF-02 step 3, master §6.1).
+
 - Priority: **P0**. Effort: **S**. Depends on: PERF `verify::Signoff.warnings` (optional; interim step 4).
 - Why: AF-12, AF-29, AV-10, AF-28; PLAN.md:115 (termination over V=0, Θ=0), D17 in docs/API-WISH.md
   ("normalised residual"). Hastings §15.5 checklist items 1–3 separate findings that can never be waived (LVS
@@ -321,6 +327,9 @@ geometry, every input feature is honoured or refused loudly, and the search spen
   report text only; no consumer parses those names (grep for `"analog hard batch"`/`"routing hard batch"`: emitters only).
 
 ### FLOW-03 One dual step per epoch; prices that relax on slack; saturation reported
+
+Status: done in M0 (`de04d31`); `RunStats::dual_steps` equals `iterations` (T6). GAP-10 (prices keyed by ID) is still open; on m0 the key is `fn keys` → `(&'static str, u32)` (backend/gp/src/lib.rs:151) into `Prices.priced: BTreeMap` (:27-28).
+
 - Priority: **P0**. Effort: **S**. Depends on: FLOW-02.
 - Why: AF-07, AP-06, PL-9/PL-10 (audit-07 §2.14.1). PLAN.md:92 (λ ← λ − ρ·c on true residuals) and PLAN.md:124
   ("increase ρ for constraints whose residual is not shrinking, decrease pressure on those with slack").
@@ -385,6 +394,11 @@ geometry, every input feature is honoured or refused loudly, and the search spen
 - Risks / notes: relaxing prices can slow `converged`; `RunStats.stop` (FLOW-08) makes the reason visible.
 
 ### FLOW-04 Deck ownership and loading: vendored embedded decks, a sidecar key registry, required = read
+
+Status: done in M0 (`5ebffd8`). As built: `REQUIRED_RULES` is gone; the registry is `verify::sidecar::KEYS` (backend/verify/src/sidecar.rs:62, `Key { name, kind, required, sourced, reader }`); `Pdk::builtin(name)` (backend/verify/src/pdk.rs:82) loads a compiled-in sidecar and the CLI takes a built-in name or a sidecar path; `dummy_gates_per_end` and `max_finger_width` are registered required keys.
+
+Field report: FR-8 (only sky130.json and generic_finfet.json shipped; gf180/ihp in another schema). Since this item all four sidecars and decks are compiled in (`Pdk::builtin`, backend/verify/src/decks.rs) and the CLI takes `gf180mcu`/`ihp_sg13g2` by name; the package itself is FLOW-17's `--version` plus a rebuild outside this repository.
+
 - Priority: **P0**. Effort: **M**. Depends on: none.
 - Why: AV-21, AV-22, D2, CRATES #9a, AC-27; PERF §0.2 row 4 (needs a local deck-edit mechanism for MOS bulk / wells /
   BJT recognisers, which are *non-additive* edits that D2 rules out as an overlay). NOTES-02 (unknown never passes) and
@@ -455,6 +469,9 @@ geometry, every input feature is honoured or refused loudly, and the search spen
   `# PHILIS:` edits (OQ-2). Rules without a marker are upstream text by construction.
 
 ### FLOW-05 Deck data fixes (sky130 first) — latch-up, antenna thickness, resistor body sheet, density_cmp
+
+Status: done in M0 (`bb556b4`); `tie_max_dist_nm` is sourced on all four sidecars (sky130 15 000, gf180mcu 20 000, ihp_sg13g2 20 000, generic_finfet 30 000) and still read by no code (CELL-13).
+
 - Priority: **P0**. Effort: **S**. Depends on: FLOW-04.
 - Ownership: steps 1 and 6 are the same edit as REL-06 steps 1–2 (plan-06) and step 2 is REL-02 step 6; FLOW lands
   them here (deck file owner, M0) and REL-06 keeps its CELL contract (step 3) and its `LU.` fixture tally. FLOW's LU
@@ -609,10 +626,12 @@ geometry, every input feature is honoured or refused loudly, and the search spen
   specifications" (perf_driven_survey.txt L59–60).
 - Current: §1.2 I2–I6.
 - Change: rewrite `frontend/library/src/parse.rs` (keeping `pub fn spice(text) -> Result<Netlist, String>` as
-  `spice_with(text, &ParseOptions::default())`):
-  1. Data model, `kernel/core/src/netlist.rs` (`Netlist` gains `#[derive(Default)]`; the 20 `Netlist { … }` literals —
-     backend/annotator/src/tests.rs ×9, frontend/library/src/cellgen.rs ×4, oppoint.rs ×3, perf.rs ×2, parse.rs:118,
-     kernel/macroMaster/src/lib.rs ×1 — get `..Default::default()`):
+  `spice_with(text, &ParseOptions::default())`; both exist since FLOW-01, with `ParseOptions { size: SizeConvention }`
+  crate-private and `run` the only caller passing `Config.size_convention`, lib.rs:240 on m0):
+  1. Data model, `kernel/core/src/netlist.rs` (`Netlist` gains `#[derive(Default)]`; every `Netlist { … }` literal —
+     on m0 backend/annotator/src/tests.rs ×9, backend/annotator/tests/common/mod.rs ×2 (EXT-01), frontend/library/src/cellgen.rs ×4,
+     oppoint.rs ×4, perf.rs ×2, elaborate.rs ×1, lib.rs ×1 (tests), parse.rs ×1, kernel/macroMaster/src/lib.rs ×1;
+     re-count with `grep -rn 'Netlist {'` — gets `..Default::default()`):
      ```rust
      pub struct Netlist {
          pub devices: Vec<Device>, pub nets: Vec<Net>,
@@ -628,7 +647,7 @@ geometry, every input feature is honoured or refused loudly, and the search spen
      pub struct SubcktInst { pub path: String /* "X1/X3" */, pub subckt: String, pub parent: Option<u32>, pub ports: Vec<NetId> /* actuals, formal order */ }
      pub struct SourceCard { pub name: String, pub kind: char /* V I E F G H B K */, pub nodes: Vec<NetId>, pub dc: Option<f64>, pub waveform: bool /* PULSE/PWL/SIN/EXP present */ }
      ```
-  2. `ParseOptions { size: SizeConvention, title_line: bool /* default false */, top: Option<String>, models: Vec<(String, DeviceKind)> }`.
+  2. FLOW-01's `ParseOptions { size }` gains `title_line: bool /* default false */, top: Option<String>, models: Vec<(String, DeviceKind)>` and becomes `pub` (re-exported) so `run` can pass `model_table(pdk)`.
      `library::model_table(pdk) -> Vec<(String, DeviceKind)>`: every deck device row (`pdk.deck.devices`: mos /
      bjt / resistor / capacitor / diode kinds — GPurify `DeviceKind` has `Bjt` too, GP/crates/ingest/src/deck/mod.rs:335–341,
      and gf180mcu/ihp_sg13g2 carry 2 `device bjt` rows each; BJT polarity from the model token `npn`/`pnp`) with MOS
@@ -683,6 +702,9 @@ geometry, every input feature is honoured or refused loudly, and the search spen
   remain `u16`: > 65 535 nets or devices is a parse error, not a silent wrap (AA-35).
 
 ### FLOW-08 Epoch loop: warm and cold epochs, history lifecycle, blame-driven escalation, stop reasons
+
+Field report: FR-2 (a 100-iteration run never stopped early at DRC 0 and LVS match). On m0 the loop stops once `converged` (FLOW-03; bench "conv."); this item's stop reasons make the reason visible per run.
+
 - Priority: **P1**. Effort: **M**. Depends on: FLOW-02, FLOW-03, FLOW-09 step 1 (`search` is where the loop lives), PLC-10 step 0 (`dp::Schedule`, flat path; PLC's M0); PLC-10 step 1 (`dp::Start::Warm`) only once `DpMode::Sp` is the default.
 - Why: AF-06, AF-14, AP-09, AT-10, AT-34 (history part), NOTES-08 (termination reason), PL-19/PL-21 (audit-07
   §2.14.1). PLAN.md:52 carries "the best feasible incumbent" and the representation between iterations; PLAN.md:115
@@ -750,6 +772,9 @@ geometry, every input feature is honoured or refused loudly, and the search spen
   it. Replica exchange (PL-20) is not planned (no measurement asks for it yet).
 
 ### FLOW-09 Runtime and determinism: hoist pure work, per-stage timers, seed derivation
+
+Field report: FR-2 (45–60 min per iteration in "extracting feedback", no early stop). That was the old packaged build's engine (`backend/engine/src/block.rs:322` at `e8bc59e`, absent from m0). On m0 (CLI, default `Config`: `feedback_iters` 200, `outer_iters` 4, `starts` 3) the runs stop on convergence: strongarm 2 min 32 s, ptat_bias 6 min 46 s, pwm_driver 6 min 26 s, wta 5 min 13 s, rescale 2 min 04 s. This item's per-stage timers are what turns the next runtime report into a number per stage.
+
 - Priority: **P1**. Effort: **M**. Depends on: FLOW-02.
 - Why: AF-22, AP-19, AT-12 ("no per-stage timing"), SURV-24 (simulation and PEX dominate cost; count them). D13 in
   docs/API-WISH.md (annotator once per run).
@@ -892,6 +917,9 @@ geometry, every input feature is honoured or refused loudly, and the search spen
   use met1–met2. Mirrored placement of identical blocks depends on PLC's orientation policy.
 
 ### FLOW-12 CLI and deliverables: flags, built-in PDKs, output directory, labelled GDS
+
+Field report: FR-7 (export half) and FR-8. The m0 CLI accepts the four built-in PDKs (FLOW-04) but writes no file; `fix-export` (`73087b6`) has `philis run -o`, the labelled GDS and `--version`, landed by FLOW-17. The simulatable post-layout netlist is PERF-30.
+
 - Priority: **P1**. Effort: **M**. Depends on: FLOW-04 (`Pdk::builtin`), FLOW-07 (ports); EXT-26 (`annotator::sidecar::parse`) only for `--constraints`.
 - Why: AF-11, AF-18, H01-30 (a layout pin is shape + layer + name; GDSII carries names as text, hastings.txt
   L6880–6885, PDF p.126, and L7036–7039, PDF p.129), H01-31 (GDSII limits: structure names ≤ 32 chars, L7036–7073), AV-12
@@ -943,6 +971,8 @@ geometry, every input feature is honoured or refused loudly, and the search spen
 - Risks / notes: hierarchical SREF output (H01-29) is not planned: flat labelled GDS satisfies magic/netgen/KLayout.
 
 ### FLOW-13 emit and macroMaster round trip
+
+Carried from M0 (step 0, M1): `frontend/library/tests/hier_elaborate.rs::hierarchical_composition_elaborates_with_a_correct_schematic` is red on m0 at hier_elaborate.rs:216 with 8 × `lvs/lvs.unpaired_device` and 17 × `lvs/lvs.unpaired_net` (FLOW-14 replaced its assertion-free check). It drives `CompBuilder::instantiate_comp` through `library::elaborate`, the macroMaster path this item owns, and no M0 item fixed it. Step 0: find why the elaborated hierarchical layout does not pair with `BuiltComp::netlist` and fix it with the test unchanged.
 - Priority: **P1**. Effort: **M**. Depends on: FLOW-01, FLOW-07.
 - Why: AF-08, AF-19, AF-21, SUBSTRATE3 B P2/P3 (docs/SUBSTRATE3.md). Hastings Table 13.2 rule 5: matched MOS need equal
   orientations (hastings.txt L42191–42210, PDF p.709); the signed orientation Φ is the check (§13.2.6 Eq 13.61,
@@ -986,6 +1016,9 @@ geometry, every input feature is honoured or refused loudly, and the search spen
   P2) is not planned.
 
 ### FLOW-14 Test infrastructure and CI
+
+Status: done in M0 (`89a1740`). Deviation: the tool gates live once in `library::tools::{present_or_skip, tool_or_skip, sky130_models}` (`#[doc(hidden)]`, frontend/library/src/lib.rs:33), not per test file; `hier_elaborate` now asserts and is red (8 unpaired devices, 17 unpaired nets), carried to M1 under FLOW-13 (00-MASTER-PLAN Status).
+
 - Priority: **P0** (the red test and CI gate), **P1** (the rest). Effort: **S**. Depends on: none.
 - Why: AF-26, AC-19, AV-15 (red test visibility), CRATES #10d, T13.
 - Current: §1.5 R3–R4.
@@ -1001,6 +1034,12 @@ geometry, every input feature is honoured or refused loudly, and the search spen
      - `nightly` (schedule): installs `ngspice` (apt) and sky130A via volare at the flake's hash
        `1341f54f5ce0c4955326297f235e4ace1eb6d419` (flake.nix:112, shellHook) and runs
        `PHILIS_REQUIRE_TOOLS=1 cargo test --release --workspace -- --include-ignored`.
+       **Amended (M0 review panel):** the job runs `cargo test --release --workspace` (the tool tests are not
+       `#[ignore]`d; they read `PHILIS_REQUIRE_TOOLS`) plus `-p benchmark --test signoff_fixtures -- --ignored` by
+       name, with `timeout-minutes: 90`. A workspace-wide `--include-ignored` also ran EXT-01's placeholders that are
+       `#[ignore]`d until later EXT items (`coverage_is_total` is `unimplemented!`; `twelve_thousand_devices` did not
+       finish in 13.5 min), so the job was red or hung whatever the tools did, and a missing-tool panic could not be
+       told apart from them.
   2. Loud skips: `fn tool_or_skip(bin: &str) -> bool` in each tool-dependent test file (frontend/library/tests/
      perf_postlayout.rs and any ngspice test): if `PHILIS_REQUIRE_TOOLS=1` and the binary is absent → `panic!`, else
      `eprintln!` + return.
@@ -1044,14 +1083,18 @@ geometry, every input feature is honoured or refused loudly, and the search spen
 - Acceptance: grep for `Generator`, `variant_signoff`, `EM_UA_PER_UM` in docs → 0; CRATES.md open issues each have an owner.
 
 ### FLOW-16 Fold classes per cell, not per netlist-wide size class
-- Priority: **P1**. Effort: **S**. Depends on: FLOW-01 (`w_finger_nm`), FLOW-05 step 4 (one R□ read in `folds`).
+- Priority: **P1** (moved to M1 by the M0 close-out for step 4). Effort: **S**. Depends on: FLOW-01 (`w_finger_nm`), FLOW-05 step 4 (one R□ read in `folds`), both done in M0; MAT-03 (`diffusion_cc_row`) and CELL-10 (the merged row is drawn) for step 4.
 - Why: AF-15 (audit-07; owned by no other plan: grep of plans 01–07 finds no AF-15 entry). `folds` groups every MOS of
   equal `(kind, W, L)` in the whole netlist into one fold class (cellgen.rs:647–652) and scores aspect and ABBA/chain
   parity on the class's summed row (`row = Σ fingers`, cellgen.rs:654; parity :678–682; aspect :684), so two unrelated same-size devices
   (a tail source and a bias device) are folded to suit a row that never exists. Hastings' folding and aspect rules
   (§13.3 rule 9, hastings.txt L42504–42516, per MAT-07's citation) are per matched array, i.e. per drawn cell.
-- Current: `pub fn folds(netlist, pdk, gm_us) -> Vec<(u16, i32)>` (cellgen.rs:615); callers lib.rs:274,
-  cellgen.rs:52 (`enumerate`), tests cellgen.rs:1176, 1599–1600.
+- Current: `pub fn folds(netlist, pdk, gm_us) -> Vec<(u16, i32)>` (cellgen.rs:615; cellgen.rs:630 on m0); callers lib.rs:274
+  (lib.rs:376 on m0, passing `bias.gm_us`), cellgen.rs:52 (`enumerate`), tests cellgen.rs:1176, 1599–1600 (on m0 1259,
+  1683–1684, 1789, 1802). Since FLOW-01 draws the simulated size, the OTA's XM1/XM2 (`W=10u nf=2`) fold to k = 1, two
+  5 µm fingers each, drawn AABB, and the bench `CommonCentroid` rows of ota, ota_constrained and tt_ota read 0/3
+  (max use 2.195, Θ 3.584; they were 3/3 when 4×5 µm per device interleaved); `folds` chooses k from parity and aspect
+  only (FLOW-01 merge record `5297b98`, m0-report §5).
 - Change (`frontend/library/src/cellgen.rs`):
   1. Signature `pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[Vec<DeviceId>]) -> Vec<(u16, i32)>`.
      The class of device `i` = the members of the first `cells` entry containing `i` that are MOS with equal
@@ -1062,15 +1105,79 @@ geometry, every input feature is honoured or refused loudly, and the search spen
      `enumerate` (cellgen.rs:52) passes the same from its `constraints` argument; the two tests pass `&[]`.
   3. Matched devices still fold alike: they share one unitization entry by construction (the annotator emits one
      `Unitization` per recognised non-glue block, backend/annotator/src/constraints.rs:45–54).
+  4. (M0 follow-up, measured above.) Within a class whose devices are in one `CentroidGroup`, keep only k whose
+     per-member finger counts admit a common-centroid row (`pattern::diffusion_cc_row(.., Outer::Drain).is_some()`,
+     MAT-03; for XM1/XM2 [2,2] → A BB A), before the aspect score; if no k qualifies, today's choice stands and the
+     `CommonCentroid` row stays violated (reported, not hidden).
 - Tests (`cellgen.rs` tests, sky130):
   - `unrelated_same_size_devices_fold_independently`: netlist `XA`, `XB` (`nfet_01v8 W=2u L=0.5u`, a mirror sharing
     gate and source) and `XC` (`W=2u L=0.5u nf=16`, unrelated nets); `cells = [[A, B]]` →
     `folds(..)[A] == folds(nl_ab, .., &[[A, B]])[A]` where `nl_ab` has only `XA`, `XB`, and
     `folds(..)[C] == folds(nl_c, .., &[])[0]` with `nl_c` = `XC` alone.
   - The existing fold tests (cellgen.rs:1176, 1599–1600) pass with `&[]`.
-- Acceptance: `bench local` LVS verdicts unchanged; per-fixture footprint reported before/after [measure].
+- Acceptance: `bench local` LVS verdicts unchanged; per-fixture footprint reported before/after [measure]; the
+  `CommonCentroid` rows of ota, ota_constrained and tt_ota read 3/3 satisfied again (0/3 on m0).
 - Risks / notes: `P2P_SHARE = 0.55` measured on one deck (cellgen.rs:593–597) is not revisited here (AF-15's third
   point; no second deck measurement exists).
+
+### FLOW-17 Land `fix-export` on m0: GPurify past `bde681c`, the re-vendored sky130 deck, labelled GDS and `philis run` (added at the M0 close-out)
+
+Field report: FR-3 (false LVS), FR-8 (packaging), and the export half of FR-7.
+
+- Priority: P0. Effort: M. Depends on: FLOW-04 (vendored decks), FLOW-05 (the `# PHILIS:` edits). Overlaps FLOW-12
+  (`--out`, labelled GDS, `--version`), whose remaining steps (`--interface`, `--constraints`, `report.txt`) stay
+  there.
+- Why:
+  - FR-3 and FR-02 (field report 02 on `main`, `c3a1303`) came from the packaged build: Philis `e8bc59e` with GPurify
+    `e3c8eb2`. The "device class N has a in layout vs b in reference" text exists only in GPurify `e3c8eb2`
+    (`crates/lvs/src/gpu_compare.rs:397`) and "extracting feedback" only in Philis `e8bc59e`
+    (`backend/engine/src/block.rs:322`). Neither string is in m0 or its GPurify `4ef439d`.
+  - On m0 the CLI still reports LVS parameter mismatches on FET-only field-report circuits (measured below), and
+    GPurify fixes after `4ef439d` are not on m0: the local GPurify history has `19e08b5` (capm.4/cap2m.4 judge only
+    vias on the plate), `ef2004f` (X cards calling a deck model, bare W/L in µm), `a429763` (Euclidean min width at
+    concave corners), `fd5672e` (n-wells and isolated p-wells are nets; MOS has a bulk), `bde681c` (antenna: a gate
+    joins the topmost conductor it overlaps).
+  - Branch `fix-export` (`73087b6`, based on `eba9954`, not merged into m0) already bumps GPurify to `bde681c` and adds
+    `gds::emit` with a named top cell and TEXT labels, `Pdk::label_gds`, `Pdk::reference_spice`,
+    `library::export_gds`/`reference_spice`, and `philis run <sp> <deck> -o DIR --seed --max-iters --starts` with a
+    `--version` that carries the git rev. The 2026-10-01 handoff note on `main` records for it: full suite green with
+    dac4's ERC fixed by GPurify, strongarm klayout 0 / magic 0 / netgen MATCH, and a pending bump to GPurify `6341f18`
+    ("LVS pairs symmetric devices by params"). `6341f18` is not in the local cargo checkout, so that claim is
+    unverified here.
+- Current (m0, measured with the m0 CLI patched to print each hard row, `sky130`, default `Config`; not committed):
+  - strongarm (9 FETs): 4 × `lvs/lvs.parameter_mismatch` (margins 751, 923, 3000, 11977), 2 min 32 s.
+  - pwm_driver (34 FETs): the bench (seed 1) reads LVS MISMATCH with 16 × `lvs/lvs.parameter_mismatch` and DRC 0.
+  - ptat_bias (FR-3's circuit): CLEAN (DRC 0, ERC 0, LVS clean), 6 min 46 s. FR-3 itself does not reproduce.
+  - `Cargo.lock` pins GPurify `4ef439d`; `pdks/decks/*.deck` line 1 names it and `vendored_decks_name_their_origin`
+    (backend/verify/src/pdk.rs:1387) compares it with `GPURIFY_REV` from `backend/verify/build.rs`. Between `4ef439d`
+    and `bde681c` only `pdks/sky130.deck` changes (65 diff lines); the other three decks are identical.
+  - The m0 CLI (frontend/cli/src/main.rs) writes nothing to disk and has no `run`, `-o`, `--seed`, `--max-iters` or
+    `--version`; it does accept the four built-in PDK names (FLOW-04).
+- Change:
+  1. Merge `fix-export` into m0. Expected conflicts: `frontend/cli/src/main.rs` (m0: built-in PDK names, CLEAN only
+     with no LVS-unverified device, the coverage print; keep both), `benchmarks/src/bench.rs`, `backend/verify/src/lib.rs`,
+     `backend/verify/src/pdk.rs`, `frontend/library/src/lib.rs`, `Cargo.lock`.
+  2. Bump GPurify to the newest rev that contains both `bde681c` and `6341f18` (`cargo update -p gpurify --precise
+     <rev>`), and record the rev in the merge commit.
+  3. Re-vendor `pdks/decks/sky130.deck` from that rev's `pdks/sky130.deck`, line 1 `# vendored from GPurify <full
+     hash> …`, and re-apply the five `# PHILIS:` edits of m0 (sky130.deck:461 met3 antenna thickness, :511 LU.2/LU.2.1/
+     LU.3, :615/:618/:621 the `pex rbody_*` sheets). Re-vendor the other three decks (line 1 only, unless their text
+     changed).
+  4. MOS references are already 4-terminal (`cellgen::reference` emits D G S B, frontend/library/src/cellgen.rs:888–889);
+     the `backend/verify/src/lib.rs` unit tests that build 3-terminal `RefDeviceIn` take the bulk as `fix-export` does.
+- Tests:
+  - `vendored_decks_name_their_origin` and `generators_read_exactly_the_required_keys` pass on the new rev.
+  - `signoff_fixtures`: every fixture at its M0 baseline or better, named row by row; if dac4's
+    `erc/ar.met2.1:gate` clears, M0 exit criterion 2 is met by this item and RTE-06's carried acceptance is re-read
+    against it.
+  - New `benchmarks/tests/signoff_fixtures.rs` case on a 9-FET strongarm fixture (the ALIGN StrongARM netlist EXT-01
+    already carries as `STRONGARM`, backend/annotator/tests/common/mod.rs): 0 `lvs/` rows.
+  - FLOW-12's `run_writes_a_labelled_gds_and_a_report` (its `--out` half) passes against `philis run`.
+- Acceptance: on m0 + this item, strongarm and pwm_driver show 0 `lvs/lvs.parameter_mismatch` rows, the suite is no
+  worse than M0's 439/2/7 (row by row), and `philis --version` prints the git rev.
+- Risks / notes: the deck's 4-terminal MOS recognisers and well nets change what ERC sees (`nwell.4` floating wells,
+  `well_bias`); a new ERC row on a fixture is a finding, not a baseline edit. Packaging (EDA-Packaged's nix
+  derivation, FR-8) lives outside this repository; this item gives it a `--version` to check.
 
 ---
 
@@ -1078,8 +1185,8 @@ geometry, every input feature is honoured or refused loudly, and the search spen
 
 | Milestone | Items | Exit criteria |
 |---|---|---|
-| M0 — Honest numbers | FLOW-01, FLOW-02, FLOW-03, FLOW-04, FLOW-05, FLOW-14 | CI running (only the REL-owned dac4 test red); T1 = 0; T3 = 0/0/0; T4; T5; T6; `bench local` re-baselined and verdicts unchanged except for intended size changes |
-| M1 — Real inputs, real outputs | FLOW-07, FLOW-12, FLOW-13, FLOW-06, FLOW-16 | T2; labelled GDS from the CLI; emit round trip LVS-clean on chain4 and ota; T3 still 0/0/0 after the first MAT/CELL/REL keys land; `recipe_layers_cover_capacitor_tables` and `unrelated_same_size_devices_fold_independently` green |
+| M0 — Honest numbers (done: all six merged, see each item's Status) | FLOW-01, FLOW-02, FLOW-03, FLOW-04, FLOW-05, FLOW-14 | CI running (only the REL-owned dac4 test red); T1 = 0; T3 = 0/0/0; T4; T5; T6; `bench local` re-baselined and verdicts unchanged except for intended size changes |
+| M1 — Real inputs, real outputs | FLOW-17 (M0 close-out), FLOW-07, FLOW-12, FLOW-13 (step 0 first: `hier_elaborate`), FLOW-06, FLOW-16 | T2; labelled GDS from the CLI; emit round trip LVS-clean on chain4 and ota; T3 still 0/0/0 after the first MAT/CELL/REL keys land; `recipe_layers_cover_capacitor_tables` and `unrelated_same_size_devices_fold_independently` green |
 | M2 — Loop quality and cost | FLOW-09, then FLOW-08 and FLOW-10 | T7, T8, T9; warm-start ablation table (T10) published in the bench output; `RunStats.stop` and `stage_ms` printed per circuit |
 | M3 — Scale | FLOW-11 | T12; flat vs bottom-up comparison recorded |
 | M4 — Close-out | FLOW-15 | every CRATES.md issue owned or closed; dead fields and deprecated keys removed |

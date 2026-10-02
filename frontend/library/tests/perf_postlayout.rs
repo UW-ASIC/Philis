@@ -1,17 +1,34 @@
 //! The post-layout performance loop against real ngspice and the installed
 //! sky130 models: the OTA fixture's gain with its layout's branch resistance
-//! and stress, and a full flow scored on it. Skips without ngspice or models.
+//! and stress, and a full flow scored on it. Without ngspice or the models
+//! each test prints why and returns; `PHILIS_REQUIRE_TOOLS=1` (CI's nightly
+//! job) turns that skip into a panic, so a missing tool is never a green run.
 
 use library::oppoint::OpConfig;
 use library::perf::{evaluate, Parasitics, PerfConfig, Spec};
+use library::tools::{sky130_models as models, tool_or_skip};
 
-fn models() -> Option<std::path::PathBuf> {
-    let root = std::env::var_os("PDK_ROOT")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".volare")))?;
-    let lib = root.join("sky130A/libs.tech/ngspice/sky130.lib.spice");
-    let ngspice = std::process::Command::new("ngspice").arg("--version").output().is_ok();
-    (lib.is_file() && ngspice).then_some(lib)
+/// The cargo running this build reads as present (so detection cannot
+/// silently skip every ngspice test); a binary that is on no PATH skips
+/// (returns `false`) in a plain run and panics when the run requires tools.
+#[test]
+fn tool_or_skip_tells_present_from_missing() {
+    assert!(
+        tool_or_skip(env!("CARGO")),
+        "the building cargo must read as present"
+    );
+    let bin = "philis-no-such-binary-7f3a";
+    if std::env::var_os("PHILIS_REQUIRE_TOOLS").is_some_and(|v| v == "1") {
+        assert!(
+            std::panic::catch_unwind(|| tool_or_skip(bin)).is_err(),
+            "a required tool that is absent must panic"
+        );
+    } else {
+        assert!(
+            !tool_or_skip(bin),
+            "an absent binary must not read as present"
+        );
+    }
 }
 
 /// The fixture as a 5T OTA: `vbias` tied to `vout1` (M3 diode-connected),
@@ -48,10 +65,7 @@ fn ota() -> pnr_core::Netlist {
 
 #[test]
 fn branch_resistance_and_stress_reach_the_simulation() {
-    let Some(lib) = models() else {
-        eprintln!("ngspice or sky130 models unavailable — skipping");
-        return;
-    };
+    let Some(lib) = models() else { return };
     let nl = ota();
     let gain = |p: &Parasitics| evaluate(&nl, p, &cfg(lib.clone())).unwrap().metrics[0].1;
     let plain = gain(&Parasitics::default()).expect("the schematic's gain is measured");
@@ -65,8 +79,11 @@ fn branch_resistance_and_stress_reach_the_simulation() {
     let r = gain(&degenerated).expect("measured");
     assert!(plain > 25.0, "the bench biases the OTA: {plain} dB");
     assert!(r < plain - 1.0, "source R must cost gain: {plain} dB vs {r} dB");
-    // Short diffusion ends (strong LOD stress) shift VT and mobility.
-    let stressed = Parasitics { lod_inv_um: vec![Some(2.0); n], ..Parasitics::default() };
+    // Short diffusion ends (strong LOD stress) shift VT and mobility. On one
+    // mirror half (M3): the same stress on both halves cancels in the gain
+    // (0.012 dB before XM5's m=4 reached the simulator, 0.0099 dB since),
+    // on M3 alone it moves the gain by 0.53 dB.
+    let stressed = Parasitics { lod_inv_um: (0..n).map(|d| (d == 2).then_some(2.0)).collect(), ..Parasitics::default() };
     let s = gain(&stressed).expect("measured");
     assert!((s - plain).abs() > 0.01, "stress reached the models: {plain} dB vs {s} dB");
 }
@@ -75,10 +92,7 @@ fn branch_resistance_and_stress_reach_the_simulation() {
 /// C, routed branch R, drawn stress) simulate and the spec is met.
 #[test]
 fn a_flow_scores_its_layout_in_simulation() {
-    let Some(lib) = models() else {
-        eprintln!("ngspice or sky130 models unavailable — skipping");
-        return;
-    };
+    let Some(lib) = models() else { return };
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
     let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
@@ -96,4 +110,9 @@ fn a_flow_scores_its_layout_in_simulation() {
     let (metric, value, ..) = &perf[0];
     assert_eq!(metric, "gain");
     assert!(value.is_some_and(|g| g >= 20.0), "post-layout gain misses 20 dB: {perf:?}");
+    // Real models measure the schematic, so the floor gets a row with nets
+    // (`row (N nets)`; an empty row reads `row with no measured nets`).
+    let rows = &sol.metadata.budget_rows;
+    assert!(rows.len() == 1 && rows[0].starts_with("gain:min: row ("), "{rows:?}");
+    assert_eq!(sol.stats.sim_failures, 0, "{:?}", sol.stats);
 }

@@ -64,7 +64,10 @@ sheet resistance, and `nfin` → `W` synthesis.
 ## Output
 
 Per circuit: cell/net counts, wirelength, unrouted nets, routing overuse, DRC
-count, LVS match, ERC count, PEX cost, area, utilisation, SA convergence. Then a
+count, LVS match, ERC count, PEX cost, area, utilisation, SA convergence, the
+winner's placement metrics (`RunStats::place`: area usage = footprint / Σ cell
+bbox, lattice offenders, overlap and clearance residue nm², matched-geometry
+mismatches) and dp's anneal counters (`RunStats::dp`). Then a
 per-constraint-type satisfaction summary across all circuits.
 
 Artifacts:

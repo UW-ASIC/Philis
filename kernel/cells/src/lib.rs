@@ -1,10 +1,11 @@
 //! # `cells` — automatic device geometry
 //!
 //! Turns one [`DeviceGroup`] into drawn [`Macro`] variants: a MOSFET stack, a
-//! resistor, a capacitor array, a BJT, a diode, an inductor. One generator per
-//! family, one file each. Every generator reads the group's sizing from its
-//! covering [`analog::cell::Unitization`] and every layer/rule from the
-//! [`Process`]; `draw` is pure and byte-deterministic.
+//! resistor, a capacitor array, a BJT, a diode (an inductor enumerates nothing:
+//! no deck recognises one). One generator per family, one file each. Every
+//! generator reads the group's sizing from its covering
+//! [`analog::cell::Unitization`] and every layer/rule from the [`Process`];
+//! `draw` is pure and byte-deterministic.
 //!
 //! Pins are named `d{i}:{T}`: `i` is the member's index in `group.devices`,
 //! `T` its schematic terminal (`G/D/S/B`, `P/N`, `C/B/E`). Pin nets are
@@ -115,25 +116,33 @@ pub(crate) mod testkit {
             .collect()
     }
 
-    /// [`dirty`] for a caller-built group.
+    /// [`dirty`] for a caller-built group, pins read as a current mirror's
+    /// ([`dirty_group_with`] over G, S, B).
     pub fn dirty_group<G: crate::Cell>(group: &DeviceGroup, c: &analog::Constraints, pdk: &verify::Pdk) -> Vec<String> {
+        dirty_group_with::<G>(group, c, pdk, &["G", "S", "B"])
+    }
+
+    /// [`dirty`] for a caller-built group whose `common` terminals are one net
+    /// across members and every other terminal is private to its member, so a
+    /// short between two members' private terminals is an ERC finding.
+    pub fn dirty_group_with<G: crate::Cell>(group: &DeviceGroup, c: &analog::Constraints, pdk: &verify::Pdk, common: &[&str]) -> Vec<String> {
         let variants = G::enumerate(group, c, pdk);
         assert!(!variants.is_empty(), "no variants to check");
+        // A terminal in the substrate (a vertical PNP's collector, a substrate
+        // diode's anode) is one net for every member, like the bulk.
+        use pnr_core::Process;
+        let mut common = common.to_vec();
+        common.extend(match c.unitization.first().map(|u| u.device_type) {
+            Some(DeviceKind::Pnp) => Some("C"),
+            Some(DeviceKind::Diode) if pdk.layer("diode_mk").is_none() => Some("P"),
+            _ => None,
+        });
         variants
             .iter()
             .enumerate()
             .filter_map(|(i, v)| {
                 let m = v.draw(group, c, pdk);
-                // A terminal in the substrate (a vertical PNP's collector, a
-                // substrate diode's anode) is one net for every member, like
-                // the bulk.
-                use pnr_core::Process;
-                let shared = match c.unitization.first().map(|u| u.device_type) {
-                    Some(DeviceKind::Pnp) => Some("C"),
-                    Some(DeviceKind::Diode) if pdk.layer("diode_mk").is_none() => Some("P"),
-                    _ => None,
-                };
-                let rules = findings(&m.shapes, &ports(&m, shared), pdk);
+                let rules = findings(&m.shapes, &ports_with(&m, &common), pdk);
                 (!rules.is_empty()).then(|| format!("#{i}: {rules:?}"))
             })
             .collect()
@@ -141,26 +150,21 @@ pub(crate) mod testkit {
 
     /// Each pin as a port label at its centre, so ERC reads a device's
     /// terminals as its interface rather than floating metal. One label per
-    /// pad: shared-diffusion pads carry several members' pins.
-    fn ports(m: &pnr_core::Macro, shared: Option<&str>) -> Vec<verify::LabeledPin> {
+    /// pad: shared-diffusion pads carry several members' pins. A pin whose
+    /// terminal is in `common` is named by the terminal alone (one net for
+    /// every member); any other is `d{i}_{T}`, private to member `i`.
+    pub fn ports_with(m: &pnr_core::Macro, common: &[&str]) -> Vec<verify::LabeledPin> {
         let mut out: Vec<verify::LabeledPin> = Vec::new();
         for p in &m.pins {
             let (x, y) = (p.at.x + p.at.w / 2, p.at.y + p.at.h / 2);
             if !out.iter().any(|l| (l.x, l.y, l.layer) == (x, y, p.layer.0)) {
-                out.push(verify::LabeledPin { name: port_name(&p.name, shared), layer: p.layer.0, x, y });
+                let name = match p.name.split_once(':') {
+                    Some((_, t)) if common.contains(&t) => t.to_string(),
+                    _ => p.name.replace(':', "_"),
+                };
+                out.push(verify::LabeledPin { name, layer: p.layer.0, x, y });
             }
         }
         out
-    }
-
-    /// The net a pin carries in a current-mirror group: G, S and B are common
-    /// to every member (the merge shares them by construction), everything
-    /// else is private to its member.
-    fn port_name(pin: &str, shared: Option<&str>) -> String {
-        match pin.split_once(':') {
-            Some((_, t @ ("G" | "S" | "B"))) => t.to_string(),
-            Some((_, t)) if shared == Some(t) => t.to_string(),
-            _ => pin.replace(':', "_"),
-        }
     }
 }

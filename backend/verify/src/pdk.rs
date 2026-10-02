@@ -62,11 +62,11 @@ pub struct Pdk {
 }
 
 impl Pdk {
-    /// Load a Philis PDK sidecar: `{"deck": <path>, "cell": {…}}`. The deck is
-    /// GPurify's (its deck language, one source of truth for every rule,
-    /// layer, device and PEX value); a relative path resolves against the
-    /// Philis repository root. The sidecar adds only what the checker does
-    /// not read: layer roles, generator dimensions, process coefficients.
+    /// Load a Philis PDK sidecar: `{"deck": <name>, "cell": {…}}`. The deck is
+    /// GPurify's deck language (one source of truth for every rule, layer,
+    /// device and PEX value), resolved by [`Pdk::deck_text`]. The sidecar adds
+    /// only what the checker does not read: layer roles, generator
+    /// dimensions, process coefficients (registry: [`crate::sidecar`]).
     ///
     /// # Errors
     /// An unreadable sidecar or deck, or anything [`Pdk::load`] rejects.
@@ -74,17 +74,40 @@ impl Pdk {
         Self::load(&Self::deck_text(sidecar)?, sidecar)
     }
 
-    /// The deck text a sidecar names.
+    /// A PDK compiled into the binary (`sky130`, `gf180mcu`, `ihp_sg13g2`,
+    /// `generic_finfet`): its sidecar and vendored deck, no filesystem read.
+    ///
+    /// # Errors
+    /// An unknown name, or anything [`Pdk::load`] rejects.
+    pub fn builtin(name: &str) -> Result<Self, String> {
+        let (_, sidecar) = crate::decks::SIDECARS.iter().find(|(n, _)| *n == name).ok_or_else(|| {
+            let names: Vec<_> = crate::decks::SIDECARS.iter().map(|(n, _)| *n).collect();
+            format!("no built-in PDK {name:?} (built in: {})", names.join(", "))
+        })?;
+        Self::from_json(sidecar)
+    }
+
+    /// The deck text a sidecar names: a vendored deck (`pdks/decks/`,
+    /// compiled in) by file name first, then an absolute path, then a file of
+    /// GPurify's `pdks/` found at build time (build.rs) for a deck not vendored.
     ///
     /// # Errors
     /// An unreadable sidecar or deck file.
     pub fn deck_text(sidecar: &str) -> Result<String, String> {
         let v: serde_json::Value =
             serde_json::from_str(sidecar).map_err(|e| format!("sidecar is not valid JSON: {e}"))?;
-        let path = v.get("deck").and_then(serde_json::Value::as_str).ok_or("sidecar names no `deck` file")?;
-        // Relative to GPurify's `pdks/` (see build.rs); an absolute path as is.
-        let pdks = option_env!("GPURIFY_PDKS").ok_or("GPurify's pdks/ not found at build time; set GPURIFY_DIR")?;
-        let path = std::path::Path::new(pdks).join(path);
+        let name = v.get("deck").and_then(serde_json::Value::as_str).ok_or("sidecar names no `deck` file")?;
+        if let Some((_, text)) = crate::decks::DECKS.iter().find(|(n, _)| *n == name) {
+            return Ok((*text).to_string());
+        }
+        let path = std::path::Path::new(name);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            let pdks = option_env!("GPURIFY_PDKS")
+                .ok_or_else(|| format!("deck {name:?} is not vendored and GPurify's pdks/ was not found at build time; set GPURIFY_DIR"))?;
+            std::path::Path::new(pdks).join(name)
+        };
         std::fs::read_to_string(&path).map_err(|e| format!("deck {}: {e}", path.display()))
     }
 
@@ -224,15 +247,8 @@ impl Pdk {
                 ));
             }
         }
-        for name in REQUIRED_RULES {
-            if !self.rules.iter().any(|(n, _)| n == name) {
-                bad.push(format!(
-                    "no value for construction dimension {name:?}: a generator would fall \
-                     back to a number compiled into Philis instead of this process's \
-                     (add it to the deck's cell section)"
-                ));
-            }
-        }
+        // Unknown, mistyped, missing-required and unsourced `cell.*` keys.
+        bad.extend(crate::sidecar::validate(&self.cell));
 
         if self.routing_metals.is_empty() {
             bad.push("cell.layers.routing_metals is empty: nowhere legal to route".into());
@@ -516,6 +532,25 @@ impl Pdk {
         self.cell.get(key)?.as_f64().map(|x| x as f32)
     }
 
+    /// Where a `cell.*` value comes from (`<key>_source`); `None` when the
+    /// sidecar gives no source text.
+    #[must_use]
+    pub fn provenance(&self, key: &str) -> Option<&str> {
+        crate::sidecar::source(self.cell.as_object()?, key)
+    }
+
+    /// Process-data keys this sidecar states on an `UNVERIFIED` source and
+    /// some code reads (registry `reader` not `unread`): used, and reported
+    /// as assumed rather than known. An unread key is assumed by nothing.
+    #[must_use]
+    pub fn unverified(&self) -> Vec<&str> {
+        crate::sidecar::KEYS
+            .iter()
+            .filter(|k| k.sourced && k.reader != "unread" && self.provenance(k.name).is_some_and(|s| s.starts_with("UNVERIFIED")))
+            .map(|k| k.name)
+            .collect()
+    }
+
     /// DC electromigration limits of `layer` from the deck's own EM rules:
     /// an `electromigration` rule (a deck that splits DC from peak) before an
     /// `em_current_density` one. A cut no rule names takes the tighter
@@ -580,25 +615,19 @@ impl Pdk {
     /// `(max ratio, sidewall thickness nm or 0 for areal, cumulative)`. An areal
     /// rule wins over a sidewall one on the same layer; `cumulative` when the
     /// rule is named so (`antenna_cumulative_*`: layers summed up to the stage).
-    /// Without a deck rule, `cell.antenna_sidewall.<layer> = [ratio,
-    /// thickness_nm]` (a sidewall rule the checker cannot run, kept for routing).
+    /// `None` when the deck states no antenna rule for the stage. `antenna`
+    /// and `antenna_electrical` rows alike: the latter is the same per-stage
+    /// ratio (areal) with a diode credit ([`Pdk::antenna_diode_credit`]).
     #[must_use]
     pub fn antenna_rule(&self, layer: LayerId) -> Option<(f32, f32, bool)> {
-        self.antenna_deck_rule(layer).or_else(|| {
-            let name = &self.layers.iter().find(|(_, l)| *l == layer)?.0;
-            let pair = self.cell.get("antenna_sidewall")?.get(name)?;
-            Some((pair.get(0)?.as_f64()? as f32, pair.get(1)?.as_f64()? as f32, false))
-        })
-    }
-
-    fn antenna_deck_rule(&self, layer: LayerId) -> Option<(f32, f32, bool)> {
-        let (kind, ratio) = (self.strings.get("antenna")?, self.strings.get("max_ratio")?);
+        let kinds = [self.strings.get("antenna"), self.strings.get("antenna_electrical")];
+        let ratio = self.strings.get("max_ratio")?;
         let side = self.strings.get("sidewall_thickness");
         self.deck
             .rules
             .spec
             .iter()
-            .filter(|s| s.kind == kind && self.deck.rules.layers_of(s).last().is_some_and(|&l| self.reaches(l, layer.0)))
+            .filter(|s| kinds.contains(&Some(s.kind)) && self.deck.rules.layers_of(s).last().is_some_and(|&l| self.reaches(l, layer.0)))
             .filter_map(|s| {
                 let Some(ParamValue::Ratio(r)) = self.deck.rules.param(s, ratio) else { return None };
                 let t = match side.and_then(|k| self.deck.rules.param(s, k)) {
@@ -613,27 +642,47 @@ impl Pdk {
             .min_by(|a, b| (a.1 > 0.0).cmp(&(b.1 > 0.0)))
     }
 
-    /// Every `density` rule: `(layer, window nm, limit fraction, is a
-    /// maximum)`; a rule missing its window or limit is left out.
+    /// The diode layer and `diode_bonus` of an `antenna_electrical` rule with
+    /// `diode_credit == 0`: the only diode credit signoff grants (GPurify
+    /// refuses a row whose verdict hangs on `credit · diode area`, its unit
+    /// unstated). `None` when the deck credits no diode — a drawn diode then
+    /// fixes nothing at signoff.
+    #[must_use]
+    pub fn antenna_diode_credit(&self) -> Option<(LayerId, f32)> {
+        let r = &self.deck.rules;
+        let kind = self.strings.get("antenna_electrical")?;
+        let (diode, credit, bonus) = (self.strings.get("diode_layer")?, self.strings.get("diode_credit")?, self.strings.get("diode_bonus")?);
+        r.spec.iter().filter(|s| s.kind == kind).find_map(|s| match (r.param(s, diode)?, r.param(s, credit)?, r.param(s, bonus)?) {
+            (ParamValue::Layer(l), ParamValue::Ratio(0.0), ParamValue::Ratio(b)) => Some((LayerId(l.0), b as f32)),
+            _ => None,
+        })
+    }
+
+    /// Every `density` and `density_cmp` rule: `(layer, window nm, limit
+    /// fraction, is a maximum)`, one row per bound a `density_cmp` states
+    /// (`min_density`, `max_density`; its window is `window_x`); a rule
+    /// missing its window or limit is left out.
     #[must_use]
     pub fn density_rules(&self) -> Vec<(LayerId, i64, f64, bool)> {
-        let (Some(kind), Some(window), Some(limit)) = (self.strings.get("density"), self.strings.get("window"), self.strings.get("limit")) else {
-            return Vec::new();
+        let s = |k: &str| self.strings.get(k);
+        let (r, mut out) = (&self.deck.rules, Vec::new());
+        let ratio = |spec, key: Option<_>| match key.and_then(|k| r.param(spec, k)) {
+            Some(ParamValue::Ratio(l)) => Some(l),
+            _ => None,
         };
-        let maximum = self.strings.get("maximum");
-        self.deck
-            .rules
-            .spec
-            .iter()
-            .filter(|s| s.kind == kind)
-            .filter_map(|s| {
-                let layer = LayerId(self.deck.rules.layers_of(s).first()?.0);
-                let Some(ParamValue::Length(w)) = self.deck.rules.param(s, window) else { return None };
-                let Some(ParamValue::Ratio(l)) = self.deck.rules.param(s, limit) else { return None };
-                let max = matches!(maximum.and_then(|m| self.deck.rules.param(s, m)), Some(ParamValue::Flag(true)));
-                Some((layer, w.raw(), l, max))
-            })
-            .collect()
+        for spec in &r.spec {
+            let Some(layer) = r.layers_of(spec).first().map(|l| LayerId(l.0)) else { continue };
+            if Some(spec.kind) == s("density") {
+                let Some(ParamValue::Length(w)) = s("window").and_then(|k| r.param(spec, k)) else { continue };
+                let max = matches!(s("maximum").and_then(|m| r.param(spec, m)), Some(ParamValue::Flag(true)));
+                out.extend(ratio(spec, s("limit")).map(|l| (layer, w.raw(), l, max)));
+            } else if Some(spec.kind) == s("density_cmp") {
+                let Some(ParamValue::Length(w)) = s("window_x").and_then(|k| r.param(spec, k)) else { continue };
+                out.extend(ratio(spec, s("min_density")).map(|l| (layer, w.raw(), l, false)));
+                out.extend(ratio(spec, s("max_density")).map(|l| (layer, w.raw(), l, true)));
+            }
+        }
+        out
     }
 
     /// The marker layer of the deck's diode recogniser, when LVS can extract
@@ -655,22 +704,30 @@ impl Pdk {
         })
     }
 
-    /// The deck's `pex` row for `layer`: its own, else that of a conductor
-    /// derived from it (the deck states PEX per extracted conductor: `poly`
-    /// answers with `poly_c`'s row). `None` when neither is declared.
-    fn pex_row(&self, layer: LayerId) -> Option<usize> {
+    /// Deck layer `i` has a `pex` row (a thickness or a dielectric).
+    fn pex_declared(&self, i: usize) -> bool {
         let st = &self.deck.stack;
-        let declared = |i: usize| st.thickness_nm.get(i).is_some_and(|&t| t > 0.0) || st.dielectric_k.get(i).is_some_and(|&k| k > 0.0);
-        if declared(layer.0 as usize) {
+        st.thickness_nm.get(i).is_some_and(|&t| t > 0.0) || st.dielectric_k.get(i).is_some_and(|&k| k > 0.0)
+    }
+
+    /// The deck's `pex` row for `layer`: its own, else that of the one layer
+    /// with a row that is a part of it ([`Pdk::reaches`]: the deck states PEX
+    /// per extracted conductor). A declared conductor beats a cut or device
+    /// body carved from it (sky130 `poly` answers with `poly_c`, not
+    /// `licon_po` or `rbody_po`). Several candidates left → `None`, never an
+    /// arbitrary pick: sky130 `licon` (five cut rows, 152–585 Ω) and `poly_rs`
+    /// (only resistor bodies keep its area; `poly_c` is poly *not* poly_rs).
+    fn pex_row(&self, layer: LayerId) -> Option<usize> {
+        if self.pex_declared(layer.0 as usize) {
             return Some(layer.0 as usize);
         }
-        let gv = GvLayerId(layer.0);
-        let conductors = &self.deck.connectivity.conductors;
-        (0..self.deck.layers.len())
+        let cands: Vec<GvLayerId> = (0..self.deck.layers.len())
             .map(|i| GvLayerId(i as u16))
-            .filter(|&d| self.deck.layers.operands(d).contains(&gv) && declared(d.0 as usize))
-            .max_by_key(|d| conductors.contains(d))
-            .map(|d| d.0 as usize)
+            .filter(|&d| d.0 != layer.0 && self.pex_declared(d.0 as usize) && self.reaches(d, layer.0))
+            .collect();
+        let conductors: Vec<GvLayerId> = cands.iter().copied().filter(|d| self.deck.connectivity.conductors.contains(d)).collect();
+        let pool = if conductors.is_empty() { cands } else { conductors };
+        (pool.len() == 1).then(|| pool[0].0 as usize)
     }
 
     /// A number from the deck's `pex` row for `layer` ([`Pdk::pex_row`]):
@@ -678,7 +735,29 @@ impl Pdk {
     /// `fringe_cap_af_um` or `dielectric_k`; `None` when absent.
     #[must_use]
     pub fn pex_f32(&self, layer: LayerId, key: &str) -> Option<f32> {
-        let i = self.pex_row(layer)?;
+        self.pex_col(self.pex_row(layer)?, key)
+    }
+
+    /// [`Pdk::pex_f32`] of the deck layer `name`'s own row (sky130
+    /// `licon_po`, the gate cut), never one of a layer carved from it.
+    #[must_use]
+    pub fn pex_f32_named(&self, name: &str, key: &str) -> Option<f32> {
+        let i = self.gv_layer_by_name(name)?.0 as usize;
+        self.pex_declared(i).then(|| self.pex_col(i, key))?
+    }
+
+    /// Body sheet resistance of the deck's device `model` (`deck_model`
+    /// spelling), Ω/□: its recogniser's marker layer's own `pex` row (sky130
+    /// `rbody_high_po`, 317.3885). `None` when the deck states none.
+    #[must_use]
+    pub fn device_sheet_ohm(&self, model: &str) -> Option<f32> {
+        let name = self.deck_model(model)?;
+        let d = &self.deck.devices;
+        let r = (0..d.model.len()).find(|&r| self.strings.resolve(d.model[r]) == name)?;
+        self.pex_f32_named(self.strings.resolve(self.deck.layers.name(d.marker[r])), "sheet_res_ohm_sq")
+    }
+
+    fn pex_col(&self, i: usize, key: &str) -> Option<f32> {
         let st = &self.deck.stack;
         let col = match key {
             "thickness_nm" => &st.thickness_nm,
@@ -965,6 +1044,20 @@ impl Process for Pdk {
     fn sheet_ohm(&self, role: &str) -> Option<f32> {
         self.pex_f32(pnr_core::Process::layer(self, role)?, "sheet_res_ohm_sq")
     }
+    /// The cut's own `pex` row, else the largest of the cut rows carved from
+    /// both `cut` and `onto` (conservative: sky130 licon on tap is `licon_nt`
+    /// 185 or `licon_pt` 585 → 585).
+    fn cut_ohm(&self, cut: &str, onto: &str) -> Option<f32> {
+        let (c, o) = (pnr_core::Process::layer(self, cut)?.0, pnr_core::Process::layer(self, onto)?.0);
+        if self.pex_declared(c as usize) {
+            return self.pex_col(c as usize, "sheet_res_ohm_sq");
+        }
+        (0..self.deck.layers.len())
+            .map(|i| GvLayerId(i as u16))
+            .filter(|&d| self.pex_declared(d.0 as usize) && self.reaches(d, c) && self.reaches(d, o))
+            .filter_map(|d| self.pex_col(d.0 as usize, "sheet_res_ohm_sq"))
+            .reduce(f32::max)
+    }
     fn space(&self, role: &str) -> Option<i32> {
         let l = pnr_core::Process::layer(self, role)?.0;
         let plain = self.min_spacing(l);
@@ -1031,43 +1124,6 @@ fn scalar_rules(deck: &Deck, strings: &StrTable) -> Vec<(String, i32)> {
 /// Layer roles every cell generator resolves unconditionally (`cells::req`).
 const REQUIRED_ROLES: &[&str] = &[
     "diff", "poly", "li", "licon", "mcon", "met1", "nwell", "nsdm", "psdm", "tap",
-];
-
-/// Every construction dimension a cell generator reads (`cells::rule`). Each
-/// call site takes a default, so a missing one would silently build to a
-/// number compiled into Philis. Keep in sync with those call sites.
-const REQUIRED_RULES: &[&str] = &[
-    "bjt_base_frac_permille",
-    "bjt_collector_frac_permille",
-    "bjt_max_emitter_stripe",
-    "bjt_min_emitter_side",
-    "bjt_stripe_gap",
-    "cap_unit_side",
-    "device_gap",
-    "diode_gap",
-    "diode_l",
-    "diode_w",
-    "guard_licon_pitch",
-    "ind_min_diameter",
-    "ind_min_trace",
-    "lod_moat_ext_moderate",
-    "max_finger_width",
-    "min_guard_ring_width",
-    "mom_finger_space",
-    "mom_finger_width",
-    "n_well_depth",
-    "p_epi_thickness",
-    "p_well_depth",
-    "plate_spacing",
-    "res_head",
-    "res_min_segment",
-    "res_min_width",
-    "res_seg_gap",
-    "retrograde_pwell",
-    "sd_width",
-    "tie_max_dist_nm",
-    "well_enclosure",
-    "wpe_clearance_moderate",
 ];
 
 /// A device construction from the sidecar's `cell.<kind>s` table: which
@@ -1165,8 +1221,16 @@ impl Process for Overlay<'_> {
     fn grid(&self) -> i32 {
         self.pdk.grid()
     }
+    /// A resistor role is the recipe's device body ([`Pdk::device_sheet_ohm`]),
+    /// not the layer it is drawn on.
     fn sheet_ohm(&self, role: &str) -> Option<f32> {
+        if RESISTOR_ROLES.contains(&role) {
+            return self.pdk.device_sheet_ohm(&self.recipe.model);
+        }
         self.pdk.sheet_ohm(role)
+    }
+    fn cut_ohm(&self, cut: &str, onto: &str) -> Option<f32> {
+        self.pdk.cut_ohm(cut, onto)
     }
     fn space(&self, role: &str) -> Option<i32> {
         // By the overlay's layer, so a recipe role (`res_block`) resolves.
@@ -1304,6 +1368,82 @@ mod tests {
         let sky = load("sky130");
         assert_eq!(sky.min_channel(true, "pfet_01v8").0, 150, "a plain PMOS is not held to the LVT one's 350 nm");
     }
+    /// Every shipped PDK loads from the binary alone: sidecar and deck are
+    /// the compiled-in copies, so a moved or packaged `philis` has its PDKs.
+    #[test]
+    fn every_builtin_pdk_loads() {
+        for (name, _) in crate::decks::SIDECARS {
+            let pdk = Pdk::builtin(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let (_, deck) = crate::decks::DECKS.iter().find(|(d, _)| *d == format!("{name}.deck")).unwrap();
+            assert_eq!(pdk.source, *deck, "{name}: deck text is not the vendored one");
+        }
+        assert!(Pdk::builtin("sky13").is_err());
+    }
+
+    /// Line 1 of each vendored deck names the GPurify commit it was copied
+    /// from, which must be the rev `Cargo.lock` pins (build.rs
+    /// `GPURIFY_REV`): a lockfile bump without re-vendoring the decks fails.
+    #[test]
+    fn vendored_decks_name_their_origin() {
+        let rev = env!("GPURIFY_REV");
+        for (name, text) in crate::decks::DECKS {
+            let first = text.lines().next().unwrap_or_default();
+            assert!(first.starts_with(&format!("# vendored from GPurify {rev}")), "{name}: line 1 is {first:?}, Cargo.lock pins {rev}");
+        }
+    }
+
+    fn sky130_with(edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>)) -> Result<Pdk, String> {
+        let text = crate::decks::SIDECARS[0].1;
+        let mut v: serde_json::Value = serde_json::from_str(text).unwrap();
+        edit(v["cell"].as_object_mut().unwrap());
+        Pdk::from_json(&v.to_string())
+    }
+
+    /// A misspelt key is an error, not a value silently ignored while the
+    /// generator falls back to its default.
+    #[test]
+    fn sidecar_rejects_a_misspelt_key() {
+        let err = sky130_with(|c| {
+            c.insert("wpe_clearence_nm".into(), serde_json::json!([2000, 3000, 5000]));
+        })
+        .err()
+        .expect("a misspelt key must not load");
+        assert!(err.contains("wpe_clearence_nm"), "{err}");
+    }
+
+    /// A required key that is missing, null or of the wrong kind does not
+    /// load (`sd_width` is read by every MOSFET with a compiled default).
+    #[test]
+    fn a_required_key_must_be_present_and_well_kinded() {
+        for (edit, why) in [(None, "required"), (Some(serde_json::Value::Null), "required"), (Some(serde_json::json!(280.5)), "expected Nm")] {
+            let err = sky130_with(|c| match edit {
+                None => drop(c.remove("sd_width")),
+                Some(v) => drop(c.insert("sd_width".into(), v)),
+            })
+            .err()
+            .unwrap_or_else(|| panic!("sd_width {why}: loaded"));
+            assert!(err.contains("cell.sd_width") && err.contains(why), "{err}");
+        }
+    }
+
+    /// A process number without its source does not load; one on an
+    /// `UNVERIFIED` source loads and is listed as assumed.
+    #[test]
+    fn a_process_number_needs_a_source() {
+        let err = sky130_with(|c| {
+            c.remove("avt_n_mv_um_source");
+        })
+        .err()
+        .expect("an unsourced process number must not load");
+        assert!(err.contains("avt_n_mv_um"), "{err}");
+        let sky = Pdk::builtin("sky130").unwrap();
+        assert!(sky.provenance("avt_n_mv_um").is_some_and(|s| s.starts_with("Monte Carlo")));
+        let assumed = sky.unverified();
+        assert!(assumed.contains(&"gate_cap_af_um2") && !assumed.contains(&"avt_n_mv_um"), "{assumed:?}");
+        assert!(!assumed.contains(&"n_well_depth"), "UNVERIFIED but read by no code, so not assumed: {assumed:?}");
+        assert!(!assumed.contains(&"tie_max_dist_nm"), "LU.2/LU.2.1/LU.3 source it: {assumed:?}");
+    }
+
     const DECKS: [&str; 3] = ["sky130", "gf180mcu", "ihp_sg13g2"];
     fn id(p: &Pdk, n: &str) -> LayerId {
         p.layers.iter().find(|(l, _)| l == n).unwrap().1
@@ -1425,4 +1565,81 @@ mod tests {
         assert!(bare.routing_metals.iter().all(|&l| bare.em_limit(l).is_none()), "no EM rules: unknown");
     }
 
+    /// sky130 LU.2: an NMOS diffusion (n+ diff outside any well) 20 µm from
+    /// the nearest p-tap is a finding of that rule; 10 µm away it is not.
+    #[test]
+    fn latch_up_rules_find_a_far_tap() {
+        let sky = load("sky130");
+        let lu2 = |gap: i32| {
+            let rect = |n: &str, x: i32| pnr_core::Shape { layer: id(&sky, n), rect: pnr_core::Rect { x, y: 0, w: 1_000, h: 1_000 } };
+            let far = 1_000 + gap;
+            let shapes = [rect("diff", 0), rect("nsdm", 0), rect("tap", far), rect("psdm", far)];
+            crate::drc(&shapes, &[], &sky).iter().filter(|f| f.rule == "LU.2").count()
+        };
+        assert!(lu2(20_000) > 0, "20 um from its p-tap: LU.2 (< 15 um)");
+        assert_eq!(lu2(10_000), 0, "10 um from its p-tap is within LU.2");
+    }
+
+    /// Each routing metal's antenna sidewall thickness is the metal's `pex`
+    /// thickness within 5 % [policy] (sky130 met1/met2 350 vs 360 nm;
+    /// ar.met3.1 once said 2000 against 845).
+    #[test]
+    fn antenna_sidewall_thickness_matches_pex() {
+        let sky = load("sky130");
+        let mut checked = 0;
+        for &m in &sky.routing_metals {
+            let Some((_, side, _)) = sky.antenna_rule(m).filter(|r| r.1 > 0.0) else { continue };
+            let t = sky.pex_f32(m, "thickness_nm").unwrap();
+            assert!((side - t).abs() / t <= 0.05, "{m:?}: sidewall {side} nm against pex thickness {t} nm");
+            checked += 1;
+        }
+        assert_eq!(checked, sky.routing_metals.len(), "every sky130 routing metal has a sidewall rule");
+    }
+
+    /// A resistor's sheet is its body's row, never the conductor it is cut
+    /// from; a role with several candidate rows answers `None`.
+    #[test]
+    fn resistor_body_sheet_is_the_body() {
+        let sky = load("sky130");
+        assert_eq!(sky.device_sheet_ohm("sky130_fd_pr__res_generic_po"), Some(48.2));
+        let high = sky.device_sheet_ohm("sky130_fd_pr__res_high_po").unwrap();
+        assert!((high - 317.3885).abs() <= 1e-3, "{high}");
+        assert_eq!(Process::sheet_ohm(&sky, "licon"), None, "five licon cut rows: ambiguous");
+        assert_eq!(Process::sheet_ohm(&sky, "rpoly"), None, "poly_rs: only resistor bodies keep it");
+        // The overlay answers a resistor role with its recipe's body.
+        let overlay = Overlay { pdk: &sky, recipe: sky.recipe("resistor", "res_high_po").unwrap() };
+        assert_eq!(overlay.sheet_ohm("rpoly"), Some(high));
+    }
+
+    /// sky130 `poly` answers with its declared conductor `poly_c`, not the
+    /// gate cut or resistor bodies carved from it; a cut's resistance is read
+    /// per landing.
+    #[test]
+    fn poly_answers_with_its_conductor() {
+        let sky = load("sky130");
+        assert_eq!(Process::sheet_ohm(&sky, "poly"), Some(48.2));
+        assert_eq!(sky.cut_ohm("licon", "poly"), Some(152.0), "licon_po");
+        assert_eq!(sky.cut_ohm("licon", "tap"), Some(585.0), "licon_pt, the larger of licon_nt 185 and licon_pt 585");
+        assert_eq!(sky.pex_f32_named("licon_po", "sheet_res_ohm_sq"), Some(152.0));
+    }
+
+    /// Every routing metal and cut keeps a `pex` row (its own or its one
+    /// conductor's): the router's R and C come from it.
+    #[test]
+    fn routing_layers_keep_their_pex_rows() {
+        for deck in DECKS {
+            let pdk = load(deck);
+            for &l in pdk.routing_metals.iter().chain(&pdk.routing_cuts) {
+                assert!(pdk.pex_f32(l, "thickness_nm").is_some(), "{deck}: {l:?} has no pex row");
+            }
+        }
+    }
+
+    /// sky130 states metal density as `density_cmp` (max 0.7 in 700 um
+    /// windows): read as a maximum.
+    #[test]
+    fn density_cmp_is_read() {
+        let sky = load("sky130");
+        assert!(sky.density_rules().contains(&(id(&sky, "met1"), 700_000, 0.7, true)), "{:?}", sky.density_rules());
+    }
 }

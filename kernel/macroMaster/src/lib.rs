@@ -582,7 +582,8 @@ pub mod variants {
                 ("S".into(), format!("s{leg}")),
                 ("B".into(), "b".into()),
             ],
-            params: vec![("w".into(), i64::from(w)), ("l".into(), i64::from(l)), ("nf".into(), i64::from(nf.max(1)))],
+            // `w` is the SPICE total over `nf` fingers (`pnr_core::MosSize`).
+            params: vec![("w".into(), i64::from(w) * i64::from(nf.max(1))), ("l".into(), i64::from(l)), ("nf".into(), i64::from(nf.max(1)))],
         }
     }
 

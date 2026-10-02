@@ -65,7 +65,9 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
 ## backend/verify — deps: core, analog, GPurify
 - **In:** shapes, `LabeledPin`s, `RefInput` (schematic reference), deck JSON.
 - **Out:** `Pdk` (layers, rules, grid, metals, vias, `layer_gds`) to everyone;
-  `signoff()` → `Report` rows `{drc|erc|lvs|engine}/rule:layer` + total C;
+  `signoff_checked()` → `Signoff { report, warnings, coverage, caps }`: error
+  rows `{drc|erc|lvs|engine}/rule:layer` + total C, deck warnings apart, and
+  `Coverage` (LVS-unverified devices, rules not run, with reasons);
   `drc()`/`erc()` located findings; `extract_spice`; `Checker`.
 
 ## kernel/macroMaster — deps: core, analog, cells
@@ -105,13 +107,13 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
 7. **Diode.** The anode tap needs to be at least 410 nm wide (licon.7).
 8. **Centroid diff pairs are always discarded.** Interleaved gate straps cross each other; staggering the strap depth per device would fix it.
 9. **Deck and verify.**
-   - `verify` `REQUIRED_RULES` still demands obsolete `bjt_*` cell keys.
+   - ~~`verify` `REQUIRED_RULES` still demands obsolete `bjt_*` cell keys.~~ Closed (FLOW-04): `verify::sidecar::KEYS` requires every key a generator reads with a compiled default, except keys that only raise a deck-derived value and the `npn_isolation` flag (kernel/cells/tests/deck_keys.rs checks both directions, and that every other name a generator reads resolves from the loaded PDK; `max_finger_width`, read by the library, is required by name; post_cell.rs `guard_ring_merge_gap_nm` is not reached by that run).
    - `asymmetric_enclosure` is stricter than magic's "one direction".
-   - Settle whether LVS checks device count and params: signoff marks `lvs.device_count_*` / `lvs.parametric` NotInDeck, while verify says the reference comparison already covers them.
+   - ~~Settle whether LVS checks device count and params.~~ Closed (PERF-01): `lvs.device_count_*` / `lvs.parametric` are GPurify's range-limit checks, NotInDeck because the deck has no limits; the reference parameters are compared as `lvs.parameter_mismatch` for MOS W/L only, and `Coverage`'s listing says so. R/D/C/BJT cards carry no params, so their values are not compared: signoff lists them as the `lvs.parameter_mismatch(non-MOS values)` skipped row (M0 review panel).
    - `ir_drop` needs design intent (supply nets + currents).
 10. **Smaller items.**
     - `dp` always runs all 220 iterations; stop it when the result stops improving.
     - `kernel/cells/src/mosfet.rs:719` links to the removed `VariantSpace::lock`.
     - Unused `Unitization`/`GuardRingRequirement` fields can now go.
-    - gr/dr are not rustfmt-clean.
+    - Only `frontend/cli` is rustfmt-clean (`cargo fmt --all --check` reports diffs in the other 15 workspace crates, not only gr/dr); CI's `fmt` job stays advisory until one formatting commit.
     - `xcheck_lvs.py` covers MOS only and was not re-run.

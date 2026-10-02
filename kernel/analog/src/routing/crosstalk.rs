@@ -43,6 +43,7 @@ fn rect_gap(p: &Rect, q: &Rect) -> f32 {
 
 impl Rule for CrosstalkExclusion {
     type On = Routes;
+    const REPAIR: crate::RepairKind = crate::RepairKind::KeepAway;
     /// Spacing shortfall, nm.
     fn cost(self, r: &Routes) -> f32 {
         let d = self.clearance(r);
@@ -53,6 +54,11 @@ impl Rule for CrosstalkExclusion {
     }
     fn satisfied(self, r: &Routes) -> bool {
         self.clearance(r) >= self.min_spacing_nm as f32
+    }
+    /// Both nets routed: an unrouted net has no clearance to measure, and
+    /// "no shared layer" must not certify it (unknown is never pass).
+    fn known(self, r: &Routes) -> bool {
+        !r.shapes(self.a).is_empty() && !r.shapes(self.b).is_empty()
     }
     fn touches(self, out: &mut Vec<u32>) {
         out.push(u32::from(self.a.0));
@@ -111,5 +117,38 @@ impl Rule for CrosstalkExclusion {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pnr_core::geom::{LayerId, Shape};
+
+    fn met1(x: i32) -> Shape {
+        Shape { layer: LayerId(1), rect: Rect { x, y: 0, w: 1_000, h: 260 } }
+    }
+    fn rule() -> CrosstalkExclusion {
+        CrosstalkExclusion { a: NetId(0), b: NetId(1), min_spacing_nm: 280, margin_pct: 0 }
+    }
+
+    #[test]
+    fn an_unrouted_pair_is_unknown() {
+        let r = Routes { wires: vec![vec![met1(0)], vec![]], ..Default::default() };
+        assert!(!rule().known(&r));
+        let both = Routes { wires: vec![vec![met1(0)], vec![met1(1_280)]], ..Default::default() };
+        assert!(rule().known(&both));
+    }
+
+    #[test]
+    fn the_floor_is_an_edge_gap() {
+        // Edge gap 280 nm (1 000 → 1 280): at the floor.
+        let ok = Routes { wires: vec![vec![met1(0)], vec![met1(1_280)]], ..Default::default() };
+        assert!(rule().satisfied(&ok));
+        assert_eq!(rule().residual(&ok), 0.0);
+        // Edge gap 270 nm: 10 nm short.
+        let near = Routes { wires: vec![vec![met1(0)], vec![met1(1_270)]], ..Default::default() };
+        assert!(!rule().satisfied(&near));
+        assert_eq!(rule().residual(&near), crate::rule::over(10.0, 280.0));
     }
 }

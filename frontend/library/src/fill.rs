@@ -70,7 +70,7 @@ pub fn fill(drawn: &[Shape], ground: &[Shape], sensitive: &[Shape], avoid: &[Rec
         out.extend(tiles);
     }
     let bbox = bbox(&out)?;
-    Some(Macro { shapes: out, pins: Vec::new(), bbox, units: Vec::new(), dummies: Vec::new() })
+    Some(Macro { shapes: out, pins: Vec::new(), bbox, units: Vec::new(), dummies: Vec::new(), ..Default::default() })
 }
 
 /// Tiles on `f.layer`, flooded out of the ground wires through free tiles

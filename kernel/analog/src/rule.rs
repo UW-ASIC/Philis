@@ -3,6 +3,33 @@
 use pnr_core::ids::BranchId;
 use pnr_core::{BipartiteHypergraph, UnionFind};
 
+/// What a router's repair does with a violated batch: the typed dispatch key,
+/// so no consumer matches on [`RuleBatch::kind`] strings (AT-31).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepairKind {
+    /// No repair.
+    None,
+    /// Rip up the named nets and reroute them plainly (the default).
+    Reroute,
+    /// A matched pair: one side follows the other's mirror image (`Differential`).
+    Mirror,
+    /// A shared node split into equal branches (`CommonNodes`).
+    Balance,
+    /// Victim and aggressor routed apart (`CrosstalkExclusion`, `CouplingBudget`).
+    KeepAway,
+    /// Jumpers, gate lift, diodes (`Antenna`).
+    Antenna,
+    /// Reference tracks drawn beside the victim (`Shield`).
+    Shield,
+    /// Electromigration: width is not a search resource yet, so no reroute
+    /// trial can fix it (AT-24); repair spends nothing on it.
+    Em,
+    /// Series R priced by the current a net carries (`IrDrop`).
+    Ir,
+    /// A parasitic or performance budget (`ParasiticBudget`, `PerformanceBudget`).
+    Budget,
+}
+
 /// One piece of analog theory: a small `Copy` value that scores itself against
 /// [`Rule::On`] (`Layout` for placement, `Routes` for routing) and knows where
 /// it applies ([`Rule::extract`]). Every method is pure except `project`.
@@ -118,6 +145,9 @@ pub trait Rule: Copy {
         0.0
     }
 
+    /// How a router repairs a violated instance; see [`RuleBatch::repair_kind`].
+    const REPAIR: RepairKind = RepairKind::Reroute;
+
     /// Every instance of this rule in the netlist. Group↔group rules `union`
     /// each side in `uf` and emit `Target::Group`s. Default: none.
     fn extract(hg: &BipartiteHypergraph, uf: &mut UnionFind) -> Vec<Self>
@@ -141,9 +171,14 @@ pub trait RuleBatch<On>: Send + Sync {
     fn residual(&self, state: &On) -> f64 {
         f64::from(self.violations(state))
     }
-    /// Stable kind name (price matching, reporting).
+    /// Stable kind name (price matching, reporting). Repair dispatches on
+    /// [`RuleBatch::repair_kind`], never on this.
     fn kind(&self) -> &'static str {
         "?"
+    }
+    /// How a router repairs this batch's violations. Default `Reroute`.
+    fn repair_kind(&self) -> RepairKind {
+        RepairKind::Reroute
     }
     /// Number of rules in the batch.
     fn count(&self) -> usize {
@@ -178,6 +213,15 @@ pub trait RuleBatch<On>: Send + Sync {
     /// Ids touched by the **violated** rules — the repair targets.
     fn violating_ids(&self, state: &On, out: &mut Vec<u32>) {
         let _ = (state, out);
+    }
+    /// [`RuleBatch::violating_ids`], each with the residual of the violated
+    /// rule touching it ([`Rule::residual`], floored like
+    /// [`RuleBatch::residual`]). Default `NaN`: the batch does not split its
+    /// residual per rule.
+    fn violating_residuals(&self, state: &On, out: &mut Vec<(u32, f32)>) {
+        let mut ids = Vec::new();
+        self.violating_ids(state, &mut ids);
+        out.extend(ids.into_iter().map(|i| (i, f32::NAN)));
     }
     /// Ids touched by every rule, satisfied or not (see [`Rule::touches`]).
     fn touched(&self, out: &mut Vec<u32>) {
@@ -223,6 +267,9 @@ impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {
     fn kind(&self) -> &'static str {
         std::any::type_name::<R>()
     }
+    fn repair_kind(&self) -> RepairKind {
+        R::REPAIR
+    }
     fn count(&self) -> usize {
         self.len()
     }
@@ -245,6 +292,14 @@ impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {
     fn violating_ids(&self, s: &R::On, out: &mut Vec<u32>) {
         for r in self.iter().filter(|r| !r.satisfied(s)) {
             r.touches(out);
+        }
+    }
+    fn violating_residuals(&self, s: &R::On, out: &mut Vec<(u32, f32)>) {
+        let mut ids = Vec::new();
+        for r in self.iter().filter(|r| !r.satisfied(s)) {
+            r.touches(&mut ids);
+            let x = rule_residual(*r, s) as f32;
+            out.extend(ids.drain(..).map(|i| (i, x)));
         }
     }
     fn touched(&self, out: &mut Vec<u32>) {
@@ -442,9 +497,10 @@ mod tests {
         assert!((pr - ar).abs() < 1e-6, "equal proportional overshoot ⇒ equal residual");
 
         // And the reason it has to be `residual` rather than `cost` that Θ sums: the raw
-        // costs of the same two misses differ by more than an order of magnitude (225 vs
-        // 5000 here), purely because one is scaled nm² and the other a fixed-point ratio.
-        // Adding *those* would let the choice of unit pick the priority.
+        // costs of the same two misses differ by more than an order of magnitude (2.25 vs
+        // 5000 here): `ParasiticBudget`'s cost is its unit-free `(spent/budget)²`, but
+        // `Antenna`'s is still in its fixed-point ×100 ratio. Adding *those* would let the
+        // choice of unit pick the priority.
         let (pc, ac) = (p.cost(&r), a.cost(&r));
         let spread = pc.max(ac) / pc.min(ac);
         assert!(spread > 10.0, "raw costs are incommensurable: {pc} vs {ac} (×{spread})");
@@ -477,6 +533,9 @@ mod tests {
         let mut viol = Vec::new();
         batch.violating_ids(&(), &mut viol);
         assert_eq!(viol, vec![2], "violating_ids filters");
+        let mut res = Vec::new();
+        batch.violating_residuals(&(), &mut res);
+        assert_eq!(res, vec![(2, 1.0)], "per violated rule, its own residual (default 1.0)");
     }
 
     #[test]
@@ -488,6 +547,28 @@ mod tests {
         let plain: Vec<Plain> = vec![Plain];
         assert_eq!(plain.criticality(&s), 1.0);
         assert_eq!(plain.cost(&s), 7.0);
+    }
+
+    /// Repair dispatches on this, so each routing rule's kind is pinned: a
+    /// rule that forgets its override falls back to a blind `Reroute`.
+    #[test]
+    fn every_routing_rule_declares_its_repair() {
+        use crate::routing::*;
+        use RepairKind as K;
+        assert_eq!(Vec::<Differential>::new().repair_kind(), K::Mirror);
+        let stack: &'static Stack = Box::leak(Box::default());
+        assert_eq!(CommonNodes { nodes: Vec::new(), stack }.repair_kind(), K::Balance);
+        assert_eq!(Vec::<CrosstalkExclusion>::new().repair_kind(), K::KeepAway);
+        assert_eq!(Vec::<CouplingBudget>::new().repair_kind(), K::KeepAway);
+        assert_eq!(Vec::<Antenna>::new().repair_kind(), K::Antenna);
+        assert_eq!(Vec::<Shield>::new().repair_kind(), K::Shield);
+        assert_eq!(Vec::<Electromigration>::new().repair_kind(), K::Em);
+        assert_eq!(Vec::<IrDrop>::new().repair_kind(), K::Ir);
+        assert_eq!(Vec::<ParasiticBudget>::new().repair_kind(), K::Budget);
+        let perf = PerformanceBudget { metric: String::new(), nets: Vec::new(), weights: Vec::new(), af_per_nm: 0.0, limit: 1.0 };
+        assert_eq!(perf.repair_kind(), K::Budget);
+        // A rule that declares nothing is rerouted plainly.
+        assert_eq!(vec![Plain].repair_kind(), K::Reroute);
     }
 
     /// A failed check whose measure says "0 over" (at the edge, or a boolean

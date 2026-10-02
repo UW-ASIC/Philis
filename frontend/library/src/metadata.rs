@@ -22,10 +22,14 @@ pub struct BudgetStatus {
     pub arm: Arm,
     /// Rules of this kind in the circuit.
     pub total: usize,
-    /// How many are satisfied against the **raw** spec.
+    /// How many are known and satisfied against the **raw** spec: `total −
+    /// violations − unknown` (master §6.1: unknown is never pass).
     pub satisfied: usize,
-    /// How many lack their inputs ([`analog::Rule::known`]); counted in
-    /// `satisfied` too, since search cannot act on them.
+    /// How many are violated ([`analog::RuleBatch::violations`]); a hard
+    /// row's count is |V|.
+    pub violations: usize,
+    /// How many lack their inputs ([`analog::Rule::known`]): neither
+    /// satisfied nor, unless the batch also counts them, violated.
     pub unknown: usize,
     /// Tightest rule's criticality, `0.0` (slack to spare) … `1.0` (at or past
     /// the spec). Derived from headroom against the family's safety margin.
@@ -36,13 +40,19 @@ pub struct BudgetStatus {
     /// Largest spent fraction of a rule's budget (`1.0` = at the spec);
     /// `None` when no rule reports one.
     pub usage: Option<f32>,
+    /// Ids the violated rules touch, sorted, deduplicated (net ids for
+    /// routing, cell ids for placement), each with the largest residual of a
+    /// violated rule touching it (`NaN` from a batch that has no per-rule
+    /// residual, [`analog::RuleBatch::violating_residuals`]).
+    pub violated: Vec<(u32, f32)>,
 }
 
 impl BudgetStatus {
-    /// Every rule satisfied against the raw spec.
+    /// No rule violated against the raw spec (unknowns allowed: see
+    /// [`Self::verdict`] and [`MetadataReport::certified`]).
     #[must_use]
     pub fn met(&self) -> bool {
-        self.satisfied == self.total
+        self.violations == 0
     }
 
     /// Satisfied *and* still inside the safety margin — the state a converged
@@ -52,11 +62,12 @@ impl BudgetStatus {
         self.met() && self.criticality <= 0.0
     }
 
-    /// One-word verdict for a report line.
+    /// One-word verdict for a report line; unknowns are named beside a
+    /// violation, never hidden by it.
     #[must_use]
     pub fn verdict(&self) -> &'static str {
         if !self.met() {
-            "VIOLATED"
+            if self.unknown > 0 { "VIOLATED + UNKNOWN" } else { "VIOLATED" }
         } else if self.unknown > 0 {
             "UNKNOWN"
         } else if self.met_with_margin() {
@@ -82,14 +93,33 @@ pub struct MetadataReport {
     /// Post-layout specs: `(metric, measured, min, max, normalised miss)`.
     /// Empty when performance scoring is off.
     pub performance: Vec<(String, Option<f64>, Option<f64>, Option<f64>, f64)>,
+    /// Per declared spec bound, its routing budget row or why it has none
+    /// (`"ugf:min: row (3 nets)"`, `"…: do-not-worsen row …"`, `"…: no row (reason)"`).
+    /// Empty from [`build`]; the flow fills it.
+    pub budget_rows: Vec<String>,
+    /// Post-layout simulations that could not run ([`crate::RunStats::sim_failures`]).
+    pub sim_failures: u32,
+    /// Sidecar process numbers used on an `UNVERIFIED` source
+    /// ([`verify::Pdk::unverified`]). Reported, not blocking [`Self::certified`].
+    pub assumed: Vec<String>,
+    /// Budget kinds whose price sat at its cap with the batch still violated
+    /// on the run's **last** epoch ([`gp::Prices::saturated`]): why the search
+    /// stopped, not a verdict on the drawn winner, which can be an earlier
+    /// epoch where that batch was met (its rows above say). Empty from
+    /// [`build`]; the flow fills it at the end of the run.
+    pub binding: Vec<String>,
+    /// What the winning epoch's signoff did not check (LVS-unverified
+    /// devices block [`Self::certified`]; skipped rules are listed). Empty
+    /// from [`build`]; the flow fills it from the winner.
+    pub coverage: verify::Coverage,
 }
 
 impl MetadataReport {
     /// Θ, the middle tier of the search key: Σ budget-arm residuals in
-    /// milli-budgets (× 1000, the stage reports' scale). The stage reports carry
-    /// the same residuals, so the key weighs them ~twice — monotone, so the
-    /// ranking is unaffected. Criticality is deliberately excluded: a satisfied
-    /// but tight budget must not read as violated.
+    /// milli-budgets (× 1000, the stage reports' scale). The only Θ source for
+    /// rule batches: the key drops the stage reports' `batch:` rows, which
+    /// restate these residuals. Criticality is deliberately excluded: a
+    /// satisfied but tight budget must not read as violated.
     #[must_use]
     pub fn theta(&self) -> f64 {
         self.placement
@@ -100,11 +130,25 @@ impl MetadataReport {
             .sum()
     }
 
-    /// Every family met with all its inputs present, and none left
-    /// uninstantiated. A feasible search result is not a certificate without it.
+    /// |V| from rule batches: violated hard-arm rules over both tiers,
+    /// counted per rule, not per batch.
+    #[must_use]
+    pub fn hard_violated(&self) -> usize {
+        self.placement
+            .iter()
+            .chain(&self.routing)
+            .filter(|b| b.arm == Arm::Hard)
+            .map(|b| b.violations)
+            .sum()
+    }
+
+    /// Every family met with all its inputs present, none left
+    /// uninstantiated, and every schematic device compared by LVS. A feasible
+    /// search result is not a certificate without it.
     #[must_use]
     pub fn certified(&self) -> bool {
         self.missing.is_empty()
+            && self.coverage.unverified.is_empty()
             && self.placement.iter().chain(&self.routing).all(|b| b.met() && b.unknown == 0)
             && self.performance.iter().all(|p| p.4 <= 0.0)
     }
@@ -134,11 +178,16 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         }
         let kind = b.kind().rsplit("::").next().unwrap_or(b.kind()).to_string();
         let total = b.count();
-        let satisfied = total - b.violations(state) as usize;
+        let violations = b.violations(state) as usize;
         let unknown = b.unknown(state) as usize;
+        // ponytail: a batch may count a rule both violated and unknown
+        // (`CentroidGroup` on its bbox proxy); saturating keeps it out of both.
+        let satisfied = (total - violations).saturating_sub(unknown);
         let criticality = b.criticality(state);
         let residual = b.residual(state);
         let usage = b.worst_usage(state);
+        let mut violated = Vec::new();
+        b.violating_residuals(state, &mut violated);
         // One row per family: batches of the same kind merge, since the annotator
         // emits one batch per recognised structure. Residuals *sum* — each is
         // normalised by its own budget, so the family total stays a real measure
@@ -147,6 +196,7 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         if let Some(e) = out.iter_mut().find(|e| e.kind == kind) {
             e.total += total;
             e.satisfied += satisfied;
+            e.violations += violations;
             e.unknown += unknown;
             e.criticality = e.criticality.max(criticality);
             e.residual += residual;
@@ -154,18 +204,28 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
             };
+            e.violated.extend(violated);
         } else {
             out.push(BudgetStatus {
                 kind,
                 arm,
                 total,
                 satisfied,
+                violations,
                 unknown,
                 criticality,
                 residual,
                 usage,
+                violated,
             });
         }
+    }
+    for e in &mut out {
+        e.violated.sort_unstable_by_key(|v| v.0);
+        e.violated.dedup_by(|a, b| a.0 == b.0 && {
+            b.1 = b.1.max(a.1);
+            true
+        });
     }
     out.sort_by(|a, b| a.kind.cmp(&b.kind));
     out
@@ -182,6 +242,7 @@ pub fn build(
     bias: Option<BiasSummary>,
     net_classes: &[analog::metadata::NetClassification],
     missing: &[(&'static str, &'static str)],
+    assumed: &[&str],
 ) -> MetadataReport {
     let census = annotator::classify::census(net_classes)
         .into_iter()
@@ -198,6 +259,11 @@ pub fn build(
         net_classes: census,
         missing: missing.to_vec(),
         performance: Vec::new(),
+        budget_rows: Vec::new(),
+        sim_failures: 0,
+        assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
+        binding: Vec::new(),
+        coverage: verify::Coverage::default(),
     }
 }
 
@@ -242,14 +308,14 @@ impl std::fmt::Display for MetadataReport {
         writeln!(f)?;
         writeln!(
             f,
-            "  {:<22} {:>6} {:>5} {:>5}  {:>9}  {:>9}  {}",
-            "constraint", "arm", "total", "sat", "critical", "residual", "verdict"
+            "  {:<22} {:>6} {:>5} {:>5} {:>5} {:>5}  {:>9}  {:>9}  {}",
+            "constraint", "arm", "total", "sat", "viol", "unk", "critical", "residual", "verdict"
         )?;
-        writeln!(f, "  {}", "-".repeat(75))?;
+        writeln!(f, "  {}", "-".repeat(87))?;
         for s in self.placement.iter().chain(self.routing.iter()) {
             writeln!(
                 f,
-                "  {:<22} {:>6} {:>5} {:>5}  {:>9.2}  {:>9.3}  {}",
+                "  {:<22} {:>6} {:>5} {:>5} {:>5} {:>5}  {:>9.2}  {:>9.3}  {}",
                 s.kind,
                 match s.arm {
                     Arm::Hard => "hard",
@@ -257,6 +323,8 @@ impl std::fmt::Display for MetadataReport {
                 },
                 s.total,
                 s.satisfied,
+                s.violations,
+                s.unknown,
                 s.criticality,
                 s.residual,
                 s.verdict()
@@ -274,10 +342,25 @@ impl std::fmt::Display for MetadataReport {
                 };
                 writeln!(f, "  {m:<22} {:>12} {:>12} {:>12}  {verdict}", num(*v), num(*lo), num(*hi))?;
             }
+            writeln!(f, "  simulations failed: {}", self.sim_failures)?;
+        }
+        for b in &self.budget_rows {
+            writeln!(f, "  budget {b}")?;
+        }
+        if !self.performance.is_empty() || !self.budget_rows.is_empty() {
             writeln!(f)?;
         }
         for (kind, input) in &self.missing {
-            writeln!(f, "  {kind:<22} {:>6} {:>5} {:>5}  {:>9}  {:>9}  UNKNOWN (no {input})", "-", "-", "-", "-", "-")?;
+            writeln!(f, "  {kind:<22} {:>6} {:>5} {:>5} {:>5} {:>5}  {:>9}  {:>9}  UNKNOWN (no {input})", "-", "-", "-", "-", "-", "-", "-")?;
+        }
+        if !self.assumed.is_empty() {
+            writeln!(f, "\n  assumed (UNVERIFIED sidecar values): {}", self.assumed.join(", "))?;
+        }
+        if !self.binding.is_empty() {
+            writeln!(f, "\n  price at cap on the last epoch (search stopped binding): {}", self.binding.join(", "))?;
+        }
+        if !self.coverage.unverified.is_empty() || !self.coverage.skipped_rules.is_empty() {
+            write!(f, "\n{}", self.coverage)?;
         }
         writeln!(f, "\n  certificate: {}", if self.certified() { "all families met, all inputs present" } else { "NOT CERTIFIED" })?;
         Ok(())
@@ -314,6 +397,10 @@ mod tests {
         fn residual(self, _: &Routes) -> f32 {
             (self.used - 1.0).max(0.0)
         }
+        /// A negative `used` stands for a rule missing its input.
+        fn known(self, _: &Routes) -> bool {
+            self.used >= 0.0
+        }
     }
 
     fn reqs(used: &[f32]) -> Requirements<Routes> {
@@ -349,6 +436,21 @@ mod tests {
         let s = &statuses(&reqs(&[1.4]).hard, &empty_routes(), Arm::Hard)[0];
         assert!(!s.met());
         assert_eq!(s.verdict(), "VIOLATED");
+    }
+
+    /// Unknown is never pass (master §6.1): of 5 rules, 1 violated and 1
+    /// unknown leave 3 satisfied; |V| is the 1 violation, and the verdict
+    /// names the unknown beside it.
+    #[test]
+    fn an_unknown_is_not_satisfied() {
+        let s = &statuses(&reqs(&[0.1, 0.1, 0.1, 1.4, -1.0]).hard, &empty_routes(), Arm::Hard)[0];
+        assert_eq!((s.total, s.satisfied, s.violations, s.unknown), (5, 3, 1, 1));
+        assert_eq!(s.verdict(), "VIOLATED + UNKNOWN");
+        let report = MetadataReport { routing: vec![s.clone()], ..Default::default() };
+        assert_eq!(report.hard_violated(), 1);
+        let s = &statuses(&reqs(&[0.1, -1.0]).hard, &empty_routes(), Arm::Hard)[0];
+        assert!(s.met() && s.satisfied == 1, "{s:?}");
+        assert_eq!(s.verdict(), "UNKNOWN");
     }
 
     #[test]
@@ -457,6 +559,27 @@ mod tests {
 
         let clean = MetadataReport { missing: vec![("Antenna", "deck antenna ratio")], ..MetadataReport::default() };
         assert!(!clean.certified(), "an uninstantiated family is not a pass");
+        let coverage = verify::Coverage { unverified: vec![(verify::RefKind::Npn, None, 2)], ..Default::default() };
+        let unverified = MetadataReport { coverage, ..MetadataReport::default() };
+        assert!(!unverified.certified(), "a device LVS did not compare is not a pass");
+        assert!(unverified.to_string().contains("LVS unverified: 2 × Npn"), "{unverified}");
         assert!(MetadataReport::default().certified());
+    }
+
+    /// Values on an `UNVERIFIED` source are reported, not blocking.
+    #[test]
+    fn assumed_values_are_listed_not_blocking() {
+        let r = MetadataReport { assumed: vec!["tie_max_dist_nm".into()], ..MetadataReport::default() };
+        assert!(r.certified());
+        assert!(r.to_string().contains("assumed (UNVERIFIED sidecar values): tie_max_dist_nm"), "{r}");
+    }
+
+    /// A saturated price is printed as the search's last-epoch state, never as
+    /// a claim about the drawn winner, and only when there is one.
+    #[test]
+    fn binding_kinds_are_printed_as_last_epoch_state() {
+        assert!(!MetadataReport::default().to_string().contains("price at cap"));
+        let r = MetadataReport { binding: vec!["WireLength".into()], ..MetadataReport::default() };
+        assert!(r.to_string().contains("price at cap on the last epoch (search stopped binding): WireLength"), "{r}");
     }
 }

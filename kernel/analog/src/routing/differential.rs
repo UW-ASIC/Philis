@@ -96,6 +96,7 @@ impl Differential {
 
 impl Rule for Differential {
     type On = Routes;
+    const REPAIR: crate::RepairKind = crate::RepairKind::Mirror;
     fn touches(self, out: &mut Vec<u32>) {
         out.push(u32::from(self.pos.0));
         out.push(u32::from(self.neg.0));
@@ -183,7 +184,7 @@ mod tests {
                 Layer { id: 3, area_af_um2: 36.0, fringe_af_um: 40.0, sheet_ohm: 12.8, ..Layer::default() },
             ],
             antenna_cumulative: false,
-        diode_layer: None,
+        diode: None,
         }));
         let rc = Differential { stack: Some(stack), ..pair() };
         let trunk = vec![seg(1, 0, 30_000, 290)];

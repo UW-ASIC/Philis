@@ -108,6 +108,9 @@ Why this beats a hand layout: the hand habit segments a resistor at constant L. 
 Order: correctness first (P0), then core capability (P1), then advantage (P2). Numbers marked *derived* are arithmetic on cited values.
 
 ### CELL-01 A macro records what it drew: extracted-device cards and keep-outs
+
+Status: done in M0 (`409e74b`); keep-outs are plumbing only and `Drawn` is resistor-only (see the Status note under Acceptance).
+
 - Priority: P0. Effort: M. Depends on: none. Unblocks CELL-06/07/08/09/14/19.
 - Why: AC-02, AC-15 (multi-segment LVS unverified), AC-17 (no keep-out export), AV-19 (R/D/BJT carry no params), AV-01 (caps silently dropped from LVS). H06-02: the modelled per-segment value must be "in the macro metadata, so the LVS reference and perf read the same value" (the quote is the H06-02 automation recipe, not the book; the book's basis is per-segment heads and contacts, hastings.txt L16932–17018, L17729–17744). H08-28 and H13-51: routing needs body and gate rects (L24840–24898, L42607–42617).
 - Current:
@@ -182,11 +185,18 @@ Order: correctness first (P0), then core capability (P1), then advantage (P2). N
     - `a_segmented_resistor_signs_off_lvs_clean`: netlist `XR1 a b sky130_fd_pr__res_high_po w=0.69u l=40u`, the n=2 variant forced by variant index → `signoff_with_intent` has 0 rows starting `lvs/`; the reference holds 2 resistor cards.
     - `a_missing_segment_is_an_lvs_error`: remove one `drawn` entry before signoff → ≥ 1 `lvs/` row.
 - Acceptance: every resistor variant (not only n=1) of the bench fixtures is LVS MATCH, and no signoff row names a segment.
+- Status (M0, recorded by the review panel): `Macro::keepouts` and `Builder::keepout` are plumbing only. No generator
+  calls `keepout` (the only reader, dr's `place_macro` copy, moves an empty list), so AC-17 ("no keep-out export")
+  stays open until CELL-06/RTE-15 record gate, resistor-body and cap-plate rects. `Drawn` is emitted by the resistor
+  alone; the MIM, diode and BJT units carry none yet, so their LVS cards still come from `cellgen::reference`.
 - Risks:
   - GPurify's refinement may treat named internal nets as anchors. Then `~c.o.k` names break pairing, and the fallback is the empty name.
   - The struct change touches about 20 literals, but each touch is mechanical.
 
 ### CELL-02 Generator tests that cannot pass vacuously
+
+Status: done in M0 (`85e05bb`).
+
 - Priority: P0. Effort: S. Depends on: none.
 - Why: AC-19. H01-29 ("a properly designed Pcell always passes DRC", hastings.txt L6919–6922).
 - Current:
@@ -231,6 +241,9 @@ Order: correctness first (P0), then core capability (P1), then advantage (P2). N
 - Risks: each macro grows by ≤ 10 nm per axis.
 
 ### CELL-04 Inductor: stop drawing a shorted coil
+
+Status: done in M0 (`9dba018`, `3b06b02`); `Inductor::enumerate` is empty, every `L` device is one `cell/undrawable` row, and `ind_min_trace`/`ind_min_diameter` left `sidecar::KEYS` and the four sidecars.
+
 - Priority: P0. Effort: S. Depends on: none.
 - Why: AC-03. H06-49/50/51 (Hastings §7.2.2 guidelines, hastings.txt L21510–21567). The current drawing violates guidelines 2, 3, 6, 8 and 9 and is not even a coil.
 - Current: all turns start at (0,0) and merge (inductor.rs:46-57). The li centre tap has no via (63-65). No recogniser; LVS skips inductors (cellgen.rs:870).
@@ -256,7 +269,7 @@ Order: correctness first (P0), then core capability (P1), then advantage (P2). N
   - H08-10: equal segment length (L22207–22215).
   - CRATES #6.
 - Current:
-  - `body_w = unit_w.max(res_min_width)`, `seg_l = unit_l / n_segments` (resistor.rs:81-82). Every member is drawn once (101-160, sequence 304-310), and `dev_nf` is never read.
+  - `body_w = unit_w.max(res_min_width)`, `seg_l = unit_l / n_segments` (resistor.rs:81-82). Every member is drawn once (101-160, sequence 304-310), and `dev_nf` is never read. Since CELL-01 each series segment already records one `Drawn` card (resistor.rs:163), so a multi-segment variant is LVS MATCH; the value is still not preserved and no keep-out is recorded.
   - `feasible_segments` keeps n | body_l, n ∈ {1, even}, eight squarest (313-337).
   - cellgen gives resistor singletons `dev_nf = max(nf, m)` with `Series` (cellgen.rs:563-572).
   - sky130 `res_high_po` model card (VOL/libs.ref/sky130_fd_pr/spice/sky130_fd_pr__res_high_po.model.spice:27-40; `rhead` at 39, `rbody` at 40): R(W,L) = 317.3885·(L+0.247)/weff + 345.8312/(weff+0.1558) Ω, with weff = W − 0.001 − 0.0672·max(0.69−W, 0) and W, L in µm. At W = 0.69, L = 40 µm: 18 949 Ω (*derived*).
@@ -287,7 +300,7 @@ Order: correctness first (P0), then core capability (P1), then advantage (P2). N
   3. Target value: `target = model.ohm(unit_w, unit_l)`, one schematic device of the netlist's W×L. Without a model, only n = 1 is offered, so the value never changes silently.
   4. Multiplicity: when `series_parallel == Parallel`, member d draws `dev_nf[d]` identical strings side by side, each of `segments` series segments of `seg_len(W, target, segments, res_min_segment, lat, tol)`. Each string carries its own `d{i}:P` and `d{i}:N` pins. Repeated names are joined by the router, as MOS S/D pins are. cellgen.rs:569-572: resistor singletons become `Parallel` (SPICE `m` is parallel). `Series` is CELL-14's ratio construction.
   5. `feasible_segments` keeps n with `seg_len` `Some`. At W = 0.69, L = 40 µm: n=2 gives 19.432 µm (kept); n=4 gives 9.148 µm, under `res_min_segment` 10 µm, so it is dropped (*derived*).
-  6. For each segment, `b.drawn(Drawn{owner, kind: Resistor, nodes: [a, b, Unused], w: body_w, l: seg_l, device: None})`. The string runs Pin("P") → Internal(k) … → Pin("N"). Also `b.keepout(body rect, KeepWhy::ResistorBody{owner})`.
+  6. The per-segment `b.drawn(Drawn{owner, kind: Resistor, nodes: [a, b, Unused], w: body_w, l: seg_l, device: None})` exists since CELL-01 (resistor.rs:163); it now runs once per segment of every parallel string, and records `w: body_w, l: seg_l` of the value-preserving `seg_len`. The string runs Pin("P") → Internal(k) … → Pin("N"). Add `b.keepout(body rect, KeepWhy::ResistorBody{owner})` (no generator calls `keepout` on m0).
   7. Unit weight for m parallel strings: `body_w·seg_l / m²` (∂R/∂R_i, Hastings eqs 8.24–8.25, hastings.txt L23277–23290).
 - Tests (resistor.rs; sky130 through `Overlay` of `high_po`):
   - `segments_preserve_the_model_value`: W=690, L=40 000, every variant: |Σ_drawn `ohm(w,l)` − 18 949.2| / 18 949.2 ≤ 0.005.
@@ -321,6 +334,9 @@ Order: correctness first (P0), then core capability (P1), then advantage (P2). N
 - Acceptance: T4 for diodes. The flow-inserted antenna diode stays clean (`frontend/library/tests/antenna_diode.rs`).
 
 ### CELL-08 Capacitors drawn as the deck's device (MIM on sky130), unit-exact MOM elsewhere
+
+Field report: FR-1 (several `cap_mim_m3_1` hang; LVS device-class mismatch with one). The hang and the class message are the old packaged build's (Philis `e8bc59e`, GPurify `e3c8eb2`); on m0 there is no hang (async_ctrl `tq_chain`, 8 caps of 21.87 µm: 3 min 20 s, 37 MB) but sky130 has no `cell.capacitors` recipe, so the MIM is drawn as met1/met2 MOM plates on the only two routing layers. Measured with the m0 CLI and bench (seed 1): one cap → every one of 56 dr reports carries `drawn short net <tap1|vss> to cell metal`, signoff `lvs/extract: label short: labels ["vss", "tap1"]`; eight caps → label short (`tap3`, `tap2`, `vss`), 5 × `drc/m1.2:met1`, 1 × `drc/via.2:via`; wta (one 9.83 µm MIM) → label short (`vss`, `mrail`). Added acceptance: the fixture `benchmarks/fixtures/tq_chain.spice` (async_ctrl `tq_chain`, 8 × `sky130_fd_pr__cap_mim_m3_1 W=21.87 L=21.87`) signs off with DRC 0, no `lvs/` row, and no dr report on it carries `drawn short`.
+
 - Priority: P0. Effort: L. Depends on: CELL-01. Cross: PERF (AV-01 verdict for MOM, AV-32 calibration), FLOW (fixture sizing, recipe schema), RTE (plate keep-outs).
 - Why:
   - AC-01 (critical), AC-17, AV-01, AV-32.
@@ -333,7 +349,7 @@ Order: correctness first (P0), then core capability (P1), then advantage (P2). N
   - capacitor.rs merges units with gaps (180-186).
   - sky130 recognises `capm` with terminals [met4, met3] (sky130.deck:565). Its rules: capm.1 width ≥ 1 µm, capm.2a space ≥ 840 nm, capm.3 met3 encloses capm by ≥ 140 nm, capm.4 capm encloses via3 by ≥ 140 nm, capm.11 space(met3 not on capm, capm) ≥ 500 nm (sky130.deck:407-411).
   - Model: C = camimc·wc·lc + cpmimc·2(wc+lc), with typical camimc 2.00 fF/µm² and cpmimc 0.19 fF/µm (VOL/libs.tech/ngspice/r+c/res_typical__cap_typical__lin.spice:7-8; VOL/libs.ref/sky130_fd_pr/spice/sky130_fd_pr__cap_mim_m3_1.model.spice:23-24). [corrected: the card uses wc = W + m3_dw + tol_m3 and lc = L + m3_dw + tol_m3 (same file :17-18), not the drawn W, L; m3_dw = −0.025 µm (VOL/libs.tech/ngspice/sky130_fd_pr__model__r+c.model.spice:82) and tol_m3 = 0 at typical (r+c/res_typical__cap_typical.spice:10).]
-  - LVS drops every capacitor (cellgen.rs:870).
+  - Since PERF-02, `cellgen::reference` sends every capacitor to LVS (one card per unit, `max(nf, m)`), and `recogniser_for` has no model fallback for R/C/D, so a MOM card is never compared as `capm`: each is an `lvs-coverage/unverified:Capacitor:<model>` row (dac4: 16).
 - Change:
   1. Recipe table: FLOW-06 step 4 owns `cell.capacitors` (schema, `Pdk::capacitor_recipe`, the sky130 `mim_m3_1` and `mom_m1m2` rows with roles `bottom`, `plate`, `top_contact`, `top`). CELL adds only what the generator reads, in the same change or right after it:
      - `mim_m3_1`: `"c_dw_nm": -25` (m3_dw = −0.025 µm, VOL/libs.tech/ngspice/sky130_fd_pr__model__r+c.model.spice:82; tol_m3 = 0 at typical, r+c/res_typical__cap_typical.spice:10), and `"cap"` appended to `aliases`, so the bench preprocessor's `cap` model (fixtures.rs:556-559, sized at 2.0 fF/µm²) resolves to the MIM.
@@ -765,6 +781,61 @@ Order: correctness first (P0), then core capability (P1), then advantage (P2). N
 - Tests: none new; the whole suite stays green. `sd_and_pitch(&sky130, 150)` still returns (280, 430) after `m1_enc` goes (CELL-11's `m1_land` is deck-only).
 - Acceptance: `grep -rn` for each removed key over `*.rs` and `pdks/*.json` returns nothing.
 
+### CELL-30 MOS dummy gates capped at the microloading reach; long-L and narrow devices in the generator sweeps (added at the M0 close-out)
+
+Field report: FR-5 (and the generator half of FR-4).
+
+- Priority: P0 (a matched long-L device does not fit the die it was given). Effort: S. Depends on: none. CELL-12 later
+  sets the dummy *count* by class; this item sets the dummy *length*.
+- Why:
+  - FR-5: "A 0.42/64.8 µm PFET becomes a ~196 µm cell … width looks like ~3·L" (field-report-01).
+  - H13-26 (ref-hastings-13 §3, from hastings.txt L41077–41104, PDF p.692): poly microloading reaches 3–5 µm, so a
+    dummy gate may be capped at 3–5 µm long unless the active L is shorter (then dummy L = active L); dummy width,
+    poly extension and dummy-to-active spacing equal the active ones.
+  - FR-4 (generator half): the MOS sweeps draw one size only. `cell_selfcheck`'s `group_of` uses `unit_w: 1680,
+    unit_l: 150` (kernel/cells/tests/cell_selfcheck.rs), so no test draws a long-L or a 0.42 µm-wide device.
+- Current (measured on m0 with a throwaway example: one sky130 PMOS through `Mosfet::enumerate` and `draw`, `nf = 1`,
+  `Single`, DRC by `verify::drc`; not committed):
+  - Every dummy gate is drawn at the active `gate_l`: `b.rect(poly, Rect { x: dx, .., w: gate_l, .. })`
+    (kernel/cells/src/mosfet.rs:516), listed as `Dummy { w: finger_w, l: gate_l }` (:525–531), stepped by
+    `d_step = gate_l + sd_end` (:285), left-edge positions `-(k + 1) * gate_l - k * sd_end` (:513, :547).
+  - With `dummy_required` (set by the annotator for matched sets) and `dummy_gates_per_end` = 1, bbox widths are:
+
+    | W / L (µm) | no dummies (nm) | with dummies (nm) |
+    |---|---|---|
+    | 0.42 / 64.8 | 65 740 | 196 340 |
+    | 0.42 / 16.2 | 17 140 | 50 540 |
+    | 2.16 / 9.6 | 10 540 | 30 740 |
+    | 0.42 / 1.0 | 1 940 | 4 940 |
+
+    Each dummy adds `gate_l + 500` nm. The 196 340 nm row is FR-5's cell.
+  - All of these variants are DRC-clean on sky130 (no `poly` min-extension finding, no `li.3`). FR-4's generator rows
+    came from the old packaged build and do not reproduce on m0 (rescale's four 2.16/9.6 µm PFETs and ptat_bias sign
+    off CLEAN through the m0 CLI).
+- Change:
+  1. Sidecar key `dummy_max_l_nm`: `Nm`, `required: false`, sourced, reader `kernel/cells/src/mosfet.rs`, registered in
+     `verify::sidecar::KEYS` (FLOW-04). Values: sky130, gf180mcu and ihp_sg13g2 3000, with `_source` "microloading
+     reach 3–5 µm, hastings.txt L41097–41104 (H13-26); Philis policy: the lower end"; generic_finfet null.
+  2. `mosfet.rs` draw: `let dummy_l = match process.rule("dummy_max_l_nm", 0) { cap if cap > 0 && gate_l > cap =>
+     cap, _ => gate_l };`. The dummy poly rect (:516), the dummy gate cut centre `cx` (:517), `Dummy.l` (:530),
+     `d_step` (:285) and the dummy left edges (:513, :547) use `dummy_l`. The spacing from the outer active gate stays
+     `sd_edge` (dummy-to-active = active-to-active, H13-26). `pad_over`/`skirt_over` (:274–275) are evaluated with
+     `dummy_l` for the dummy gates.
+  3. LVS needs no change: `cellgen::dummy_cards` writes each dummy card's `l` from `Dummy.l`
+     (frontend/library/src/cellgen.rs:1007).
+- Tests:
+  - `mosfet.rs` `a_long_gate_keeps_short_dummies`: sky130 PMOS, W = 420, L = 64 800, `dummy_required` →
+    `bbox.w ≤ 65 740 + 2·(3 000 + 500) = 72 740` nm (*derived* from the measured per-dummy step), every
+    `Dummy.l == 3000`, DRC and ERC clean, extracted MOS count = fingers + dummies.
+  - `mosfet.rs` `a_short_gate_keeps_full_dummies`: L = 150 → every `Dummy.l == 150`, bbox unchanged from today.
+  - `every_variant_is_drc_and_erc_clean` and `every_variant_extracts_its_fingers_and_dummies` (mosfet.rs:812, :837)
+    also sweep (W, L) ∈ {(420, 150), (420, 1 000), (420, 16 200), (420, 64 800), (2 160, 9 600)} for NMOS and PMOS,
+    with and without dummies (the FR-4 guard).
+- Acceptance: FR-5's device drawn matched is ≤ 73 µm wide; bench GDS unchanged on the 10 fixtures (every fixture
+  L ≤ 2 µm < 3 µm).
+- Risks / notes: H13-26 also allows half dummies (one S/D termination) for long L; not drawn. A deck whose poly
+  min-area or end-cap rules need a longer dummy is caught by the widened sweep.
+
 ---
 
 ## 4. Milestones
@@ -772,7 +843,7 @@ Order: correctness first (P0), then core capability (P1), then advantage (P2). N
 | Milestone | Items (external prerequisites) | Exit criteria (all measurable) |
 |---|---|---|
 | M0 Honest foundations | CELL-01, 02, 03, 04 (none) | `Macro` carries `drawn`/`keepouts`/`figures`; `every_generator_enumerates_on_every_deck` green in debug on 4 decks; `every_half_extent_is_on_the_cut_lattice` green; 0 inductor shapes in any output and one `cell/undrawable` row for an `L` device; bench GDS unchanged except bbox rounding (≤ 10 nm per axis per macro) |
-| M1 Value closure | CELL-06, 07, 08, 09, 10 (MAT-02, MAT-03, FLOW-06 step 4) | rc_filter, res_m2 (every segment count), dac4_mim (16 capacitor cards) LVS MATCH; `segments_preserve_the_model_value` (≤ 0.5 %); MIM unit 53 282 aF ± 10; diode Σ area = n·W·L; bgr_core Q1 at the 3×3 centre with 9 drawn BJT cards; mirror_ratio in one cell, CentroidGroup residual 0, LVS MATCH |
+| M1 Value closure | CELL-06, 07, 08, 09, 10, CELL-30 (M0 close-out, FR-5) (MAT-02, MAT-03, FLOW-06 step 4) | rc_filter, res_m2 (every segment count), dac4_mim (16 capacitor cards) LVS MATCH; `segments_preserve_the_model_value` (≤ 0.5 %); MIM unit 53 282 aF ± 10; diode Σ area = n·W·L; bgr_core Q1 at the 3×3 centre with 9 drawn BJT cards; mirror_ratio in one cell, CentroidGroup residual 0, LVS MATCH |
 | M2 Density, class, latch-up | CELL-11, 12, 13, 19 (MAT-07, EXT-15/16 class, REL-06, PERF-26 consumer) | `sd_and_pitch(sky130,150) == (280,430)`; class tests (moat 3000/5000/10000, WPE 2000/3000/5000, overhang +1000) green; `every_diffusion_point_reaches_its_tap` green; `gate_ohm` 305.8 Ω ± 1 %; bench area and active % before/after table published |
 | M3 Passive arrays, flavours, rings | CELL-14, 16, 17, 18 (MAT-12, FLOW-06 step 5, REL-07, REL-08) | rdiv drawn RB RB RA RB RB with MAT residual 0 and LVS MATCH; `high_po_ratios_fall_back_to_exact_blocks` green; lvt + hvt fixture LVS MATCH, DRC 0; `an_ecgr_well_never_covers_its_interior` and REL-07's ECGR test green; every single capacitor with one rail terminal has its bottom plate on the rail |
 | M4 Extensions | CELL-15, 20, 21, 22, 23, 25, 29 (MAT-15, MAT-18 + EXT-19 `splitdac`, REL-16) | each item's named tests green: `four_rows_cancel_to_third_order`; butted bbox height < strip bbox height; `splitdac` LVS MATCH; nwell figure count per bench circuit ≤ before; `a_moderate_resistor_widens_at_the_same_value`; generic_finfet pair DRC 0; removed-key grep empty |

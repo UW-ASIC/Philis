@@ -143,6 +143,9 @@ A human layout designer reads the schematic and writes a constraint list (ALIGN-
 Items are ordered: characterization first, then bug fixes on the existing code (P0), then the new data model and capabilities (P1), then advantages (P2).
 
 ### EXT-01 Recognition corpus, gold harness and canonical form (characterization first)
+
+Status: done in M0 (`574cd5e`). The placeholders are `#[ignore]`d with their owner: `negative_corpus_sc_switches_and_equal_fets` (EXT-04), `permutation_invariance` and `tests/scale.rs::twelve_thousand_devices` (EXT-06; measured > 13 min against T8's 2.0 s), `coverage_is_total` (EXT-10), `align_gold.rs::strongarm_matches_align_gold` (EXT-14), `no_emitted_conflicts_strongarm` (attribute says "EXT-14 and REL-09"; REL-09 is cut, GAP-04 owns it, C5). AA-13's clocked tail on the corpus strongarm is `mp8`, not `mn0`; `strongarm_conflicts_are_todays` pins (mn1, mp8), (mn2, mp8).
+
 - Priority: P0. Effort: M. Depends on: none.
 - Why: AA-26 (5 of 103 patterns tested; no false-positive, permutation, latch, bandgap, folded or three-stage tests); AA-07; NOTES-57 (discriminating validation catalog); legacy-code practice (characterize before changing).
 - Current: `backend/annotator/src/tests.rs` builds netlists with `fet()` (`tests.rs:12-24`) and asserts block membership for 6 structures (`tests.rs:52-104, 381-411`). No integration tests, no permutation test, no gold.
@@ -267,7 +270,7 @@ Items are ordered: characterization first, then bug fixes on the existing code (
 - Tests (`backend/annotator/src/catalog.rs` `#[cfg(test)]`):
   - `catalog_is_well_formed`: for every pattern, every `SameTypeAs(r)`/`ComplementOf(r)`/`ExactAs(r)`/`SameLAs(r)` has `r < slot index`; every link endpoint `< slots.len()`; every pin is valid for the slot's device kind; no two patterns have identical slot and link sets.
   - `every_pattern_matches_its_own_minimal_netlist`: instantiate each pattern (union-find over `Same` links, fresh nets otherwise, W/L equal where required, a diode where required, gates on fresh Signal nets) and assert `recognize_all` (EXT-06) returns a match of that template covering all slots.
-  - `tests/corpus.rs::negative_corpus` now passes for `sc_switches` and `equal_fets` (T3).
+  - `tests/corpus.rs::negative_corpus_sc_switches_and_equal_fets` (EXT-01's placeholder, `#[ignore = "passes after EXT-04"]`, corpus.rs:155 on m0) loses its `#[ignore]` and passes (T3).
 - Acceptance: T3 on the two FET negatives. The three-stage op-amp's M6/M8/M9 are claimed by `push_pull_with_bias` today (audit-01 §2.13-2) and stay there after this item (EXT-05 gives that pattern no constraint); EXT-04 only removes the `miller_comp_fets` wildcard so it can claim no devices in other netlists.
 - Risks / notes: removing split-source DPs loses a degenerated pair until EXT-19; the corpus has none, and the pair is re-found by symmetry propagation when a seed exists.
 
@@ -338,7 +341,7 @@ Items are ordered: characterization first, then bug fixes on the existing code (
   2. `seen: HashSet<Vec<u32>>` (keyed per pattern) instead of `Vec::contains`.
   3. Pin lookup from a precomputed `pins: Vec<[Option<NetId>; 8]>` indexed by terminal in the order G, D, S, B, C, E, P, N (the order of EXT-12's `Term`; a local enum until EXT-12 lands) instead of the linear `position` in `pin_net` (`pattern.rs:81-84`).
   `annotate` keeps all matches for EXT-13 and uses `select_disjoint` for `blocks`.
-- Tests: `pattern::tests::recognize_all_is_a_superset_of_select_disjoint`; `tests/corpus.rs::permutation_invariance` passes for every circuit on `canon_leaves`; `rail2rail` yields both DiffPair leaves (MN1/MN2 and MP1/MP2) in both device orders (AA-07 trace §2.13-7b); `tests/scale.rs::twelve_thousand_devices` meets T8.
+- Tests: `pattern::tests::recognize_all_is_a_superset_of_select_disjoint`; `tests/corpus.rs::permutation_invariance` (`#[ignore = "passes after EXT-06"]`, corpus.rs:163 on m0) loses its `#[ignore]` and passes for every circuit on `canon_leaves`; `rail2rail` yields both DiffPair leaves (MN1/MN2 and MP1/MP2) in both device orders (AA-07 trace §2.13-7b); `tests/scale.rs::twelve_thousand_devices` (`#[ignore]`d by EXT-01 with the measured miss, > 13 min against 2.0 s) loses its `#[ignore]` and meets T8.
 - Acceptance: T4 on the interim canonical form; T8.
 - Risks / notes: WL labels can tie for non-automorphic devices on a hash collision; the fallback is the device id, documented with a `ponytail:` comment naming the ceiling.
 
@@ -382,14 +385,14 @@ The only concrete conflict (AA-13, clocked tail with Proximity and Isolation to 
   3. `missing(p, needs)` (`lib.rs:53-71`) with `struct Needs { matched: bool, gate_nets: bool, budgeted_nets: bool }`, computed in `annotate` after emission: the matching entries (`"MatchingPair"`, renamed `"MatchedSet"` by MAT-04 step 6) only when `matched` (≥ 1 DiffPair/CurrentMirror/Load leaf), `Antenna` only with a FET gate net, `ParasiticBudget`/`CouplingBudget` only when some net got a budget. The `Isolation` entry is emitted by `emit::isolation` today (`lib.rs:137-139`) and REL-09 rewrites it; untouched here.
   4. New `backend/annotator/src/policy.rs`: `#[derive(Clone, Debug)] pub struct Policy` with `impl Default` giving today's values, one doc line per field naming its status (source or **Philis policy**). Fields (the AA-28 literals EXT still owns, plus the knobs later EXT items add): `proximity_nm: i32 = 5000` (`emit.rs`), `spacing_multiple: [i32; 4] = [8, 7, 3, 1]` (Sensitive, Clock, Signal, other) and `margin_pct: [u8; 4] = [35, 30, 25, 20]` (Sensitive, Clock, Supply|Ground, other) (`extract.rs:110-127`), `shield_coverage_pct: i32 = 80` (`extract.rs:98`), `shield_gap_spaces: i32 = 2` (`extract.rs:99-100`), `antenna_margin_pct: i32 = 20` (`extract.rs:47`), `diff_pct10: i32 = 50` (EXT-09), `ir_headroom_share: f32 = 0.1`, `ir_rail_share: f32 = 0.01`, `ir_high_current_share: f32 = 0.1` (`ir.rs:18-27`), `pn_max_degree: usize = 8` (EXT-13), `beta_target: f64 = 3.0` (EXT-21), `max_eta: f32 = 3.0` (EXT-21). Not in `Policy`, because other plans delete or own them: the thermal limit, `GRADIENT_SHARE` and the pooled-CC literals (`emit.rs:40-52`, deleted by MAT-04), the isolation multiple and nominal epi (`emit.rs:250-256`, REL-09's `Substrate`), the ring literals (`constraints.rs:79-81`, REL-07). `AnnotationConfig` gains `pub policy: Policy`; every listed literal is read from it.
   5. Library (FLOW coordinated edit): `metadata::build` (`frontend/library/src/metadata.rs:177-185`) takes the coverage and the template histogram and prints a `RECOGNITION` section (templates matched with counts) and an `UNCONSTRAINED` list.
-- Tests: `tests.rs::ids_survive_permutation` (the id of the DP's `MatchingPair` batch is equal across 5 permutations); `tests.rs::missing_is_relevant` (a glue-only netlist lists no `MatchingPair`); `tests/corpus.rs::coverage_is_total` (T7).
+- Tests: `tests.rs::ids_survive_permutation` (the id of the DP's `MatchingPair` batch is equal across 5 permutations); `tests.rs::missing_is_relevant` (a glue-only netlist lists no `MatchingPair`); `tests/corpus.rs::coverage_is_total` (T7; EXT-01 left it `#[ignore]`d with no body, corpus.rs:241 on m0, because `Problem` has no coverage before this item: write the body, drop the `#[ignore]`).
 - Acceptance: T7; every emitted batch has `meta().is_some()`.
 - Risks / notes: `Tagged` is additive; consumers that ignore `meta` are unaffected.
 
 ### EXT-11 Size, model and bulk robustness
 - Priority: P0. Effort: S. Depends on: FLOW-01 (`Device::mos_size()`, `Device::gate_area_um2()` in `kernel/core/src/netlist.rs`; FLOW-01 step 3 also rewrites `annotator::gate_um2`, `lib.rs:155-161`, and `constraints::fingers`, `constraints.rs:21-24`).
 - Why: AA-20 (model and bulk ignored: two flavours merged into one cell, LVS mismatch), AA-21 (missing W/L = 0 makes devices "identical"), AA-35 (`u16` wrap). The size convention and the gate-area copies (AA-32/AR-46) are FLOW-01's.
-- Current: `Geom { w, l }` from params with default 0 (`pattern.rs:67-71`, `lib.rs:77-81`); `ExactAs` compares W and L only (`pattern.rs:106`); `SameLAs` compares L only (`pattern.rs:107`); unitization key (kind, W, L) (`constraints.rs:30-33`).
+- Current: `Geom { w, l }` from params with default 0 (`pattern.rs:67-71`, `lib.rs:77-81`); `ExactAs` compares W and L only (`pattern.rs:106`); `SameLAs` compares L only (`pattern.rs:107`); unitization key (kind, finger W, L) (`constraints.rs:30-35`; since FLOW-01 the MOS width is `mos_size().w_finger_nm()`, and `constraints::fingers` and `annotator::gate_um2` already read `Device::mos_size()`/`gate_area_um2()`).
 - Change:
   1. New `backend/annotator/src/size.rs`:
      ```rust
