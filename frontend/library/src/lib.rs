@@ -151,11 +151,9 @@ pub struct RunStats {
     pub place: PlacementMetrics,
     /// Winner: dp's anneal counters.
     pub dp: PlaceStats,
-    /// Winner: signal-class extracted C, fF ([`c_tier`] without rows; supply
-    /// and ground nets 0; NaN on a label short). `Report::cost` stays the total.
-    pub c_sig: f32,
-    /// Winner: its key's C tier ([`c_tier`]): spec-headroom share with
-    /// sensitivity rows, else equal to `c_sig`.
+    /// Winner: its key's C tier ([`signoff_c_tier`]) over the epoch's own
+    /// signoff, before fill: spec-headroom share with sensitivity rows, else
+    /// signal-class C, fF. `Report::cost` stays the total.
     pub c_tier: f32,
     /// Post-layout simulations that could not run ([`perf::evaluate`] `Err`),
     /// over every epoch of every start and cell topology, not just the
@@ -782,16 +780,9 @@ impl Flow<'_> {
         );
         budgets.add_routing(&[Box::new(self.common_nodes(&layout)), Box::new(self.environment(&layout, &rings))], &routes);
 
-        // A label short books the shorted nets' C on the one label signoff
-        // keeps (dac4: b0, b1 under VSS, weight 0), so the tier is unknown:
-        // NaN, which `key_lt` ranks last within its |V|.
-        let short = format!("lvs/{}", verify::checker::LABEL_SHORT);
-        let shorted = signoff.report.hard_violations.iter().any(|v| v.rule.starts_with(&short));
-        let tier = |rows| if shorted { f32::NAN } else { c_tier(&signoff.caps, &self.net_names, &self.problem.net_classes, rows) };
-        let c = tier(self.perf_rows);
+        let c = signoff_c_tier(&signoff, &self.net_names, &self.problem.net_classes, self.perf_rows);
         let (key, stats) = epoch_score(&place_report, &route_report, &signoff, &budgets, c, layout.footprint_nm2());
-        let c_sig = tier(&[]);
-        let stats = RunStats { place, dp: dp_stats, c_sig, ..stats };
+        let stats = RunStats { place, dp: dp_stats, ..stats };
         Epoch {
             key,
             perf: None,
@@ -1005,7 +996,6 @@ impl RunStats {
             route_overuse: self.route_overuse,
             place: self.place,
             dp: self.dp,
-            c_sig: self.c_sig,
             c_tier: self.c_tier,
             ..run
         }
@@ -1026,8 +1016,9 @@ type LexKey = (usize, f64, f64, f32, f64);
 
 /// Relative [`c_tier`] difference read as a tie, which area then breaks.
 ///
-/// ponytail: a flat 2%, about the seed-to-seed C spread; a declared spec on C
-/// or area would replace it.
+/// ponytail: a flat 2%, calibrated on the seed-to-seed spread of total
+/// extracted C and not re-measured for the tier; a declared spec on C or area
+/// would replace it.
 const C_TIE: f32 = 0.02;
 
 /// `a` beats `b`: `|V|`, spec miss, Θ lexicographically, then the C tier —
@@ -1132,6 +1123,25 @@ fn c_tier(
         per_af * 1000.0
     };
     caps.iter().map(|(a, b, c)| c * (w(a) + b.as_deref().map_or(0.0, w))).sum::<f64>() as f32
+}
+
+/// [`c_tier`] over `signoff`'s extracted matrix, or NaN when signoff reports a
+/// label short: extraction then books the shorted nets' C on the one label it
+/// keeps (dac4: b0, b1 under VSS, weight 0), so the tier is unknown and
+/// [`key_lt`] ranks it last within its |V|. Empty `rows`: signal-class C, fF;
+/// `names` are the netlist's net names, `classes` the annotator's.
+#[must_use]
+pub fn signoff_c_tier(
+    signoff: &verify::Signoff,
+    names: &[String],
+    classes: &[analog::metadata::NetClassification],
+    rows: &[analog::routing::PerformanceBudget],
+) -> f32 {
+    let short = format!("lvs/{}", verify::checker::LABEL_SHORT);
+    if signoff.report.hard_violations.iter().any(|v| v.rule.starts_with(&short)) {
+        return f32::NAN;
+    }
+    c_tier(&signoff.caps, names, classes, rows)
 }
 
 /// Edge-to-edge gap `dp` keeps between cells: the deck's widest same-layer
@@ -1814,6 +1824,29 @@ mod start_tests {
         let total = |m: &verify::CapMatrix| m.iter().map(|r| r.2).sum::<f64>();
         assert!(total(&a) > 6.0 * total(&b), "A carries 94 fF, B 15 fF");
         assert!(crate::key_lt(&(0, 0.0, 0.0, ca, 1.0), &(0, 0.0, 0.0, cb, 1.0)), "A ranks better");
+
+        // Coupling by each end's own w⁺, summed over rows, clamped at 0:
+        // vout1 0.01 + max(-0.005, 0) → 10/fF, vbn 0 + 0.002 → 2/fF, VSS 0.
+        let mut two = rows.to_vec();
+        two.push(analog::routing::PerformanceBudget { metric: "ugf:min".into(), weights: vec![-0.005, 0.002], ..rows[0].clone() });
+        let m = vec![cap("VSS", Some("vout1"), 1.0), cap("vbn", Some("vout1"), 2.0), cap("vout1", None, 0.5)];
+        let c = crate::c_tier(&m, &net_names(), &classes(), &two);
+        assert!((c - 39.0).abs() < 1e-3, "(10 + 0)·1 + (2 + 10)·2 + 10·0.5 = 39, got {c}");
+    }
+
+    /// A label short leaves the tier unknown: NaN, which loses to a finite
+    /// tier at equal |V| even with the smaller footprint.
+    #[test]
+    fn label_short_tier_is_nan_and_loses() {
+        let mut signoff = verify::Signoff { caps: vec![("vout1".into(), None, 4.6)], ..Default::default() };
+        let clean = crate::signoff_c_tier(&signoff, &net_names(), &classes(), &[]);
+        assert!((clean - 4.6).abs() < 1e-4, "no short: signal C, got {clean}");
+        let short = format!("lvs/{}: labels [\"b0\", \"VSS\"] bind to one extracted net", verify::checker::LABEL_SHORT);
+        signoff.report.hard_violations = rows(&[&short]);
+        let tier = crate::signoff_c_tier(&signoff, &net_names(), &classes(), &[]);
+        assert!(tier.is_nan(), "shorted tier {tier}");
+        let (shorted, finite) = ((1usize, 0.0, 0.0, tier, 0.5), (1usize, 0.0, 0.0, 1000.0, 1.0));
+        assert!(crate::key_lt(&finite, &shorted) && !crate::key_lt(&shorted, &finite));
     }
 
     /// No rows: ground C of signal nets plus coupling once per signal end;

@@ -229,12 +229,14 @@ fn run_circuit(
     let (area_um2, util_pct) = footprint(&sol.layout);
     let active_pct = active(&sol, pdk, area_um2);
     let s = &sol.stats;
+    let problem = annotator::annotate(&sol.netlist, &library::annotation(pdk, &annotator::AnnotationConfig::default()));
+    let names: Vec<String> = sol.netlist.nets.iter().map(|n| n.name.clone()).collect();
 
     // `overuse` is milli-budget normalised residual margin, not a track count.
     // `esc` > 0 means a variant-space binding (no arrangement of the chosen
     // variants was feasible), not a placement local minimum.
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {} | ERC {}{} | warnings {} | skipped [{}] | C total {:.1} fF, sig {:.1} fF, tier {:.1} | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | EM {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {} | ERC {}{} | warnings {} | skipped [{}] | C total {:.1} fF, sig {:.1} fF | key tier {:.1} | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | EM {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
@@ -254,10 +256,12 @@ fn run_circuit(
         if engine > 0 { format!(" | engine fails {engine}") } else { String::new() },
         signoff.warnings.len(),
         signoff.coverage.skipped_rules.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>().join(", "),
-        // Total (every net, coupling on both ends, rails included), the
-        // winner's signal-class C and its key's C tier (`RunStats::c_tier`).
+        // Total (every net, coupling on both ends, rails included) and
+        // signal-class C (NaN on a label short), both from this signoff of the final (filled)
+        // layout; then the search key's C tier (`RunStats::c_tier`), from
+        // the winning epoch's own signoff before fill.
         report.cost,
-        s.c_sig,
+        library::signoff_c_tier(&signoff, &names, &problem.net_classes, &[]),
         s.c_tier,
         area_um2,
         util_pct,
@@ -307,7 +311,7 @@ fn run_circuit(
         .chain(p.cost.iter().filter(|b| !enforced.contains(&b.kind())).map(|b| ("cost", b)))
         .filter_map(|(arm, b)| stat(arm, &c.name, b.as_ref(), l))
         .collect();
-    let routing = annotator::annotate(&sol.netlist, &library::annotation(pdk, &annotator::AnnotationConfig::default())).routing;
+    let routing = &problem.routing;
     contracts.extend(
         routing.hard.iter().map(|b| ("hard", b))
             .chain(routing.budget.iter().map(|b| ("budget", b)))
