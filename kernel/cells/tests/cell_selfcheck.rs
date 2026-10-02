@@ -353,6 +353,7 @@ const UNDRAWABLE: &[(&str, DeviceKind, &str)] = &[
     ("ihp_sg13g2", DeviceKind::Npn, "no npn_isolation (bjt.rs:34)"),
     ("generic_finfet", DeviceKind::Npn, "no npn_isolation (bjt.rs:34)"),
     ("generic_finfet", DeviceKind::Resistor, "no rpoly role (resistor.rs:23)"),
+    ("*", DeviceKind::Inductor, "no recogniser (inductor.rs)"),
 ];
 
 fn undrawable(deck: &str, kind: DeviceKind) -> bool {

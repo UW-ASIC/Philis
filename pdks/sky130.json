@@ -54,8 +54,6 @@
     "bjt_collector_frac": 0.5,
     "bjt_stripe_gap": 200,
     "diode_gap": 270,
-    "ind_min_trace": 1000,
-    "ind_min_diameter": 10000,
     "wpe_clearance_nm": [
       2000,
       3000,

@@ -187,3 +187,25 @@ fn an_undrawable_device_is_one_finding() {
         assert_eq!(undrawable.len(), 1, "{name}: {undrawable:?}");
     }
 }
+
+/// An inductor has no recogniser on any deck, so it is drawn as nothing and
+/// signoff names it: one `L` card is exactly one `cell/undrawable` row, never
+/// a met1 drawing that only looks like a coil (CELL-04).
+#[test]
+fn an_inductor_is_one_undrawable_finding() {
+    let pdk = pdk();
+    let spice = "\
+.subckt lc vin vout VDD VSS
+XM1 vmid vin VDD VDD pfet_01v8 W=1u L=0.15u
+XM2 vmid vin VSS VSS nfet_01v8 W=0.5u L=0.15u
+L1 vmid vout 1n
+.ends lc
+";
+    let cfg = library::Config { feedback_iters: 1, ..Default::default() };
+    let sol = library::run(spice, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(sol.netlist.devices.iter().any(|d| d.kind == pnr_core::DeviceKind::Inductor), "L1 parsed away");
+    let report = library::signoff(&sol, &pdk);
+    let undrawable: Vec<&str> = report.hard_violations.iter().map(|v| v.rule.as_str()).filter(|r| r.starts_with("cell/undrawable")).collect();
+    assert_eq!(undrawable.len(), 1, "{undrawable:?}");
+    assert!(undrawable[0].contains("L1"), "{undrawable:?}");
+}

@@ -1,10 +1,11 @@
 //! # `cells` — automatic device geometry
 //!
 //! Turns one [`DeviceGroup`] into drawn [`Macro`] variants: a MOSFET stack, a
-//! resistor, a capacitor array, a BJT, a diode, an inductor. One generator per
-//! family, one file each. Every generator reads the group's sizing from its
-//! covering [`analog::cell::Unitization`] and every layer/rule from the
-//! [`Process`]; `draw` is pure and byte-deterministic.
+//! resistor, a capacitor array, a BJT, a diode (an inductor enumerates nothing:
+//! no deck recognises one). One generator per family, one file each. Every
+//! generator reads the group's sizing from its covering
+//! [`analog::cell::Unitization`] and every layer/rule from the [`Process`];
+//! `draw` is pure and byte-deterministic.
 //!
 //! Pins are named `d{i}:{T}`: `i` is the member's index in `group.devices`,
 //! `T` its schematic terminal (`G/D/S/B`, `P/N`, `C/B/E`). Pin nets are

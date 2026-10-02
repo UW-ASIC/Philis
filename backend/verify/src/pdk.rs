@@ -1048,8 +1048,6 @@ const REQUIRED_RULES: &[&str] = &[
     "diode_l",
     "diode_w",
     "guard_licon_pitch",
-    "ind_min_diameter",
-    "ind_min_trace",
     "lod_moat_ext_moderate",
     "max_finger_width",
     "min_guard_ring_width",
