@@ -55,11 +55,8 @@ impl Routes {
             let mut stack = vec![0usize];
             seen[0] = true;
             while let Some(a) = stack.pop() {
-                let ra = shapes[a].rect;
                 for b in 0..shapes.len() {
-                    let rb = shapes[b].rect;
-                    let touch = ra.x <= rb.x + rb.w && rb.x <= ra.x + ra.w && ra.y <= rb.y + rb.h && rb.y <= ra.y + ra.h;
-                    if !seen[b] && touch {
+                    if !seen[b] && shapes[a].rect.touches(&shapes[b].rect) {
                         seen[b] = true;
                         stack.push(b);
                     }

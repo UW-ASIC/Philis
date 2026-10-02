@@ -38,6 +38,16 @@ pub struct Violation {
 }
 
 impl Violation {
+    /// Prefix of a stage row that restates a whole rule batch; the epoch key
+    /// counts those per rule from `metadata`, not per row.
+    pub const BATCH: &'static str = "batch:";
+
+    /// `rule` starts with [`Violation::BATCH`].
+    #[must_use]
+    pub fn is_batch_row(&self) -> bool {
+        self.rule.starts_with(Self::BATCH)
+    }
+
     /// From a residual normalised by its own budget (`0.5` = 50% over), stored
     /// in milli-budgets. Every stage must use this so Θ sums in one unit; `ceil`
     /// so a real violation never rounds to `0`.

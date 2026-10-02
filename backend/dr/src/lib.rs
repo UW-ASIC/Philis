@@ -49,10 +49,16 @@ pub struct DetailedCfg {
     /// up to `layers[0]`. Reserving it keeps tracks off the cells' own li. `None`:
     /// pins sit on a stack layer.
     pub pin_access: Option<(LayerId, Cut)>,
-    /// DC current each pin draws from its net, µA (operating point): per placed
-    /// cell (index of `placed`), `(pin name, current)`. Segments carry the sum
+    /// DC current each member terminal draws from its net, µA (operating
+    /// point): per placed cell (index of `placed`), `(pin name, current)`;
+    /// `None` = unknown, and a net with any unknown terminal gets no EM sizing.
+    /// A pin carries this times its [`Self::pin_share`]; segments carry the sum
     /// on one side of them. Empty = unknown (no EM sizing).
-    pub pin_ua: Vec<Vec<(String, i32)>>,
+    pub pin_ua: Vec<Vec<(String, Option<i32>)>>,
+    /// Per placed cell, parallel to its `pins`: the fraction of its terminal's
+    /// current each pin carries ([`pnr_core::pin_shares`] of the unplaced
+    /// macro). Empty (outer or inner) = 1.0 for every pin.
+    pub pin_share: Vec<Vec<f32>>,
     /// Derated DC EM limits per routing metal and cut, from the deck; a layer
     /// absent here is unknown (no EM sizing — never a guessed constant).
     pub em: Vec<(LayerId, analog::routing::em::Limit)>,
@@ -103,6 +109,7 @@ impl Default for DetailedCfg {
             pin_access_cut_spacing: 0,
             pin_access: None,
             pin_ua: Vec::new(),
+            pin_share: Vec::new(),
             em: Vec::new(),
             supply_nets: Vec::new(),
             fat_signal: 0,
@@ -223,14 +230,22 @@ impl DetailedRoute {
         let cell_f: Vec<Vec<Shape>> = cell_abs.iter().map(|v| v.iter().map(|s| Shape { rect: shift(s.rect), ..*s }).collect()).collect();
         let gates_f: Vec<Vec<Rect>> = gates_abs.iter().map(|v| v.iter().map(|&r| shift(r)).collect()).collect();
 
-        // DC current each pin draws, µA, from the cell's pin names.
-        let pin_ua = |net: NetId, r: Rect| -> f32 {
-            placed.iter().zip(&cfg.pin_ua).find_map(|(m, table)| {
-                let p = m.pins.iter().find(|p| p.net == net && p.at == r)?;
-                table.iter().find(|(n, _)| *n == p.name).map(|&(_, ua)| ua as f32)
-            }).unwrap_or(0.0)
+        // DC current a terminal rect draws, µA: over the cell's pins there (two
+        // members sharing a region draw one pin each at one rect), each pin's
+        // terminal current (by pin name) times its share. No table entry
+        // (ring, diode) draws 0; any `None` is unknown.
+        let pin_ua = |net: NetId, r: Rect| -> Option<f32> {
+            placed.iter().zip(&cfg.pin_ua).enumerate().find_map(|(c, (m, table))| {
+                let mut hit = None;
+                for (p, pin) in m.pins.iter().enumerate().filter(|(_, p)| p.net == net && p.at == r) {
+                    let Some(&(_, ua)) = table.iter().find(|(n, _)| *n == pin.name) else { continue };
+                    let share = cfg.pin_share.get(c).and_then(|s| s.get(p)).copied().unwrap_or(1.0);
+                    hit = Some(hit.unwrap_or(Some(0.0)).zip(ua).map(|(sum, ua)| sum + ua as f32 * share));
+                }
+                hit
+            }).unwrap_or(Some(0.0))
         };
-        let mut term_rects: Vec<Vec<(Rect, LayerId, f32)>> = vec![Vec::new(); n_nets];
+        let mut term_rects: Vec<Vec<(Rect, LayerId, Option<f32>)>> = vec![Vec::new(); n_nets];
         for &(net, r, l) in &all_pins {
             term_rects[net.0 as usize].push((shift(r), l, pin_ua(net, r)));
         }
@@ -265,7 +280,8 @@ impl DetailedRoute {
         let mut claimed = vec![false; grid.nodes()];
         let mut reserved = vec![NONE; grid.nodes()];
         let mut c_terms: Vec<Vec<u32>> = vec![Vec::new(); n_compact];
-        // `(landed node, µA)` per pin, per compact net.
+        // `(landed node, µA)` per pin, per compact net; empty when any of the
+        // net's terminals is unknown (no EM sizing, never a guessed zero).
         let mut node_ua: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_compact];
         let mut corridors: Vec<Vec<u32>> = vec![Vec::new(); n_compact];
         let mut access: Vec<Access> = Vec::new();
@@ -358,6 +374,7 @@ impl DetailedRoute {
         }
 
         for (ci, &ni) in compact.iter().enumerate() {
+            let known = term_rects[ni].iter().all(|t| t.2.is_some());
             for &(r, r_layer, ua) in &term_rects[ni] {
                 let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
                 // Never land inside another net's stitch reservation.
@@ -418,7 +435,9 @@ impl DetailedRoute {
                 };
                 claimed[n as usize] = true;
                 reserved[n as usize] = ci as u32;
-                node_ua[ci].push((n, ua));
+                if let Some(ua) = ua.filter(|_| known) {
+                    node_ua[ci].push((n, ua));
+                }
                 if !c_terms[ci].contains(&n) {
                     c_terms[ci].push(n);
                 }
@@ -1731,7 +1750,6 @@ fn cell_metal(placed: &[Macro], n_nets: usize, stack: Option<&analog::routing::S
     let Some(stack) = stack else { return (cell, gates) };
     let on_stack = |l: LayerId| stack.layers.iter().any(|x| x.id == l.0);
     let lowest = stack.layers.first().map(|l| LayerId(l.id));
-    let touch = |a: &Rect, b: &Rect| a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
     for m in placed {
         let pieces = stack.connected(&m.shapes);
         let mut taken = vec![false; pieces.len()];
@@ -1742,7 +1760,7 @@ fn cell_metal(placed: &[Macro], n_nets: usize, stack: Option<&analog::routing::S
             }
             let layer = if on_stack(p.layer) { Some(p.layer) } else { lowest };
             for (i, piece) in pieces.iter().enumerate() {
-                if !taken[i] && piece.iter().any(|&k| Some(m.shapes[k].layer) == layer && touch(&m.shapes[k].rect, &p.at)) {
+                if !taken[i] && piece.iter().any(|&k| Some(m.shapes[k].layer) == layer && m.shapes[k].rect.touches(&p.at)) {
                     taken[i] = true;
                     net.extend(piece.iter().map(|&k| m.shapes[k]));
                 }
@@ -2127,8 +2145,7 @@ fn unreachable_shapes(shapes: &[Shape]) -> usize {
     while let Some(a) = stack.pop() {
         let ra = shapes[a].rect;
         for (b, s) in shapes.iter().enumerate() {
-            let rb = s.rect;
-            if !seen[b] && ra.x <= rb.x + rb.w && rb.x <= ra.x + ra.w && ra.y <= rb.y + rb.h && rb.y <= ra.y + ra.h {
+            if !seen[b] && ra.touches(&s.rect) {
                 seen[b] = true;
                 stack.push(b);
             }
@@ -2154,7 +2171,7 @@ mod tests {
     }
 
     fn touches(s: &Shape, r: Rect) -> bool {
-        s.rect.x <= r.x + r.w && r.x <= s.rect.x + s.rect.w && s.rect.y <= r.y + r.h && r.y <= s.rect.y + s.rect.h
+        s.rect.touches(&r)
     }
 
     fn route(
@@ -2379,7 +2396,7 @@ mod tests {
         };
         let lim = Limit { ua_per_um: 1_000.0, ua_per_cut: 10_000.0, blech: 0.0 };
         let cfg_of = || DetailedCfg {
-            pin_ua: vec![vec![("S".into(), -1_000), ("a".into(), 600), ("b".into(), 400)]],
+            pin_ua: vec![vec![("S".into(), Some(-1_000)), ("a".into(), Some(600)), ("b".into(), Some(400))]],
             em: vec![(LAYERS[0], lim), (LAYERS[1], lim), (CUTS[0].0, lim)],
             ..test_cfg()
         };
@@ -2395,6 +2412,93 @@ mod tests {
         let starved = DetailedCfg { em: vec![(LAYERS[0], lim), (LAYERS[1], lim), (CUTS[0].0, Limit { ua_per_cut: 1.0, ..lim })], ..cfg_of() };
         let (_, report) = route(starved, &global, &pins, &[cell_of()], &[], &mut gr::Negotiation::new());
         assert!(report.budget_violations.iter().any(|v| v.rule == "em cuts net 0"), "{:?}", report.budget_violations.iter().map(|v| &v.rule).collect::<Vec<_>>());
+    }
+
+    /// Four fingers S D S D S (`pnr_core::pin_shares`' fixture): the two
+    /// `d0:D` pins each carry half of the drain's 400 µA, so the trunk to the
+    /// −400 µA sink is sized for 400 µA (400 nm at 1 mA/µm), not 800.
+    #[test]
+    fn a_multi_finger_terminal_is_not_counted_per_pin() {
+        use analog::routing::em::Limit;
+        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
+        let pins = [pin(0, 2_000 - 85, -85), pin(0, 6_000 - 85, -85), pin(0, 12_000, 9_000)];
+        let cell = Macro {
+            shapes: Vec::new(),
+            pins: pins.iter().zip(["d0:D", "d0:D", "sink"]).map(|(&(net, at, layer), n)| pnr_core::Pin { name: n.into(), net, at, layer }).collect(),
+            bbox: Rect { x: 0, y: -85, w: 13_000, h: 10_000 },
+            units: [(1_000, 1), (3_000, -1), (5_000, 1), (7_000, -1)]
+                .map(|(x, phi)| pnr_core::Unit { owner: 0, x, y: 0, weight: 1, phi: (phi, 0), sa: 0, sb: 0 })
+                .to_vec(),
+            dummies: Vec::new(),
+            ..Default::default()
+        };
+        let lim = Limit { ua_per_um: 1_000.0, ua_per_cut: 10_000.0, blech: 0.0 };
+        let cfg = DetailedCfg {
+            pin_ua: vec![vec![("d0:D".into(), Some(400)), ("sink".into(), Some(-400))]],
+            pin_share: vec![pnr_core::pin_shares(&cell)],
+            em: vec![(LAYERS[0], lim), (LAYERS[1], lim), (CUTS[0].0, lim)],
+            ..test_cfg()
+        };
+        let (routes, _) = route(cfg, &global, &pins, &[cell], &[], &mut gr::Negotiation::new());
+        let trunks: Vec<i32> = routes.wires[0].iter().filter(|s| s.rect.w != s.rect.h && LAYERS.contains(&s.layer)).map(|s| s.rect.w.min(s.rect.h)).collect();
+        assert_eq!(trunks.iter().max(), Some(&400), "{trunks:?}");
+    }
+
+    /// Two members sharing a source region draw one pin each at one rect. A
+    /// row A1 — A2 — sink: each of A1, A2 carries both members' halves (300
+    /// µA), so the A1–A2 run carries 300 and A2–sink 600. Counting only the
+    /// first pin at a rect gives 150 per rect and a 450 µA A1–A2 run.
+    #[test]
+    fn a_shared_region_carries_both_members_current() {
+        use analog::routing::em::Limit;
+        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
+        let pins = [pin(0, 1_000, 1_000), pin(0, 1_000, 1_000), pin(0, 6_000, 1_000), pin(0, 6_000, 1_000), pin(0, 12_000, 1_000)];
+        let cell = Macro {
+            shapes: Vec::new(),
+            pins: pins.iter().zip(["d0:S", "d1:S", "d0:S", "d1:S", "t"]).map(|(&(net, at, layer), n)| pnr_core::Pin { name: n.into(), net, at, layer }).collect(),
+            bbox: Rect { x: 0, y: 0, w: 13_000, h: 2_000 },
+            units: Vec::new(),
+            dummies: Vec::new(),
+            ..Default::default()
+        };
+        let lim = Limit { ua_per_um: 1_000.0, ua_per_cut: 10_000.0, blech: 0.0 };
+        let cfg = DetailedCfg {
+            pin_ua: vec![vec![("d0:S".into(), Some(-300)), ("d1:S".into(), Some(-300)), ("t".into(), Some(600))]],
+            pin_share: vec![vec![0.5, 0.5, 0.5, 0.5, 1.0]],
+            em: vec![(LAYERS[0], lim), (LAYERS[1], lim), (CUTS[0].0, lim)],
+            ..test_cfg()
+        };
+        let (routes, _) = route(cfg, &global, &pins, &[cell], &[], &mut gr::Negotiation::new());
+        let mut trunks: Vec<i32> = routes.wires[0].iter().filter(|s| s.rect.w != s.rect.h && LAYERS.contains(&s.layer)).map(|s| s.rect.w.min(s.rect.h)).collect();
+        trunks.sort_unstable();
+        trunks.dedup();
+        assert!(trunks.contains(&300) && trunks.contains(&600) && !trunks.contains(&450), "{trunks:?}");
+    }
+
+    /// One unknown terminal leaves its whole net unsized: a known 1 mA on the
+    /// other pin is not a branch current when the rest of the net is unknown.
+    #[test]
+    fn a_net_with_an_unknown_terminal_gets_no_em_sizing() {
+        use analog::routing::em::Limit;
+        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
+        let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 9_000)];
+        let cell = Macro {
+            shapes: Vec::new(),
+            pins: pins.iter().zip(["S", "D"]).map(|(&(net, at, layer), n)| pnr_core::Pin { name: n.into(), net, at, layer }).collect(),
+            bbox: Rect { x: 0, y: 0, w: 13_000, h: 10_000 },
+            units: Vec::new(),
+            dummies: Vec::new(),
+            ..Default::default()
+        };
+        let lim = Limit { ua_per_um: 1_000.0, ua_per_cut: 10_000.0, blech: 0.0 };
+        let run = |table: Vec<(String, Option<i32>)>| {
+            let cfg = DetailedCfg { pin_ua: vec![table], em: vec![(LAYERS[0], lim), (LAYERS[1], lim), (CUTS[0].0, lim)], ..test_cfg() };
+            let routes = route(cfg, &global, &pins, std::slice::from_ref(&cell), &[], &mut gr::Negotiation::new()).0;
+            routes.wires[0].iter().map(|s| (s.layer, s.rect)).collect::<Vec<_>>()
+        };
+        let widest = |r: &[(LayerId, Rect)]| r.iter().filter(|(l, r)| r.w != r.h && LAYERS.contains(l)).map(|(_, r)| r.w.min(r.h)).max();
+        assert_eq!(widest(&run(vec![("S".into(), Some(-1_000)), ("D".into(), Some(1_000))])), Some(1_000), "known: sized for 1 mA");
+        assert_eq!(run(vec![("S".into(), None), ("D".into(), Some(1_000))]), run(Vec::new()), "unknown: routed as with no currents at all");
     }
 
     /// A per-stage antenna rule the lower metal fails: the repair jumps the
@@ -2468,7 +2572,7 @@ mod tests {
             dummies: Vec::new(),
             ..Default::default()
         };
-        let cfg = || DetailedCfg { pin_ua: vec![vec![("S".into(), -1_000), ("D".into(), 1_000)]], layer_r: vec![1.0, 1.0], via_r: vec![20.0], ..test_cfg() };
+        let cfg = || DetailedCfg { pin_ua: vec![vec![("S".into(), Some(-1_000)), ("D".into(), Some(1_000))]], layer_r: vec![1.0, 1.0], via_r: vec![20.0], ..test_cfg() };
         let run = |max_drop_uv: Option<i64>| {
             let mut reqs = Requirements::<Routes>::default();
             if let Some(max_drop_uv) = max_drop_uv {

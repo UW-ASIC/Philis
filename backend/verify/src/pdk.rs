@@ -62,11 +62,11 @@ pub struct Pdk {
 }
 
 impl Pdk {
-    /// Load a Philis PDK sidecar: `{"deck": <path>, "cell": {…}}`. The deck is
-    /// GPurify's (its deck language, one source of truth for every rule,
-    /// layer, device and PEX value); a relative path resolves against the
-    /// Philis repository root. The sidecar adds only what the checker does
-    /// not read: layer roles, generator dimensions, process coefficients.
+    /// Load a Philis PDK sidecar: `{"deck": <name>, "cell": {…}}`. The deck is
+    /// GPurify's deck language (one source of truth for every rule, layer,
+    /// device and PEX value), resolved by [`Pdk::deck_text`]. The sidecar adds
+    /// only what the checker does not read: layer roles, generator
+    /// dimensions, process coefficients (registry: [`crate::sidecar`]).
     ///
     /// # Errors
     /// An unreadable sidecar or deck, or anything [`Pdk::load`] rejects.
@@ -74,17 +74,40 @@ impl Pdk {
         Self::load(&Self::deck_text(sidecar)?, sidecar)
     }
 
-    /// The deck text a sidecar names.
+    /// A PDK compiled into the binary (`sky130`, `gf180mcu`, `ihp_sg13g2`,
+    /// `generic_finfet`): its sidecar and vendored deck, no filesystem read.
+    ///
+    /// # Errors
+    /// An unknown name, or anything [`Pdk::load`] rejects.
+    pub fn builtin(name: &str) -> Result<Self, String> {
+        let (_, sidecar) = crate::decks::SIDECARS.iter().find(|(n, _)| *n == name).ok_or_else(|| {
+            let names: Vec<_> = crate::decks::SIDECARS.iter().map(|(n, _)| *n).collect();
+            format!("no built-in PDK {name:?} (built in: {})", names.join(", "))
+        })?;
+        Self::from_json(sidecar)
+    }
+
+    /// The deck text a sidecar names: a vendored deck (`pdks/decks/`,
+    /// compiled in) by file name first, then an absolute path, then a file of
+    /// GPurify's `pdks/` found at build time (build.rs) for a deck not vendored.
     ///
     /// # Errors
     /// An unreadable sidecar or deck file.
     pub fn deck_text(sidecar: &str) -> Result<String, String> {
         let v: serde_json::Value =
             serde_json::from_str(sidecar).map_err(|e| format!("sidecar is not valid JSON: {e}"))?;
-        let path = v.get("deck").and_then(serde_json::Value::as_str).ok_or("sidecar names no `deck` file")?;
-        // Relative to GPurify's `pdks/` (see build.rs); an absolute path as is.
-        let pdks = option_env!("GPURIFY_PDKS").ok_or("GPurify's pdks/ not found at build time; set GPURIFY_DIR")?;
-        let path = std::path::Path::new(pdks).join(path);
+        let name = v.get("deck").and_then(serde_json::Value::as_str).ok_or("sidecar names no `deck` file")?;
+        if let Some((_, text)) = crate::decks::DECKS.iter().find(|(n, _)| *n == name) {
+            return Ok((*text).to_string());
+        }
+        let path = std::path::Path::new(name);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            let pdks = option_env!("GPURIFY_PDKS")
+                .ok_or_else(|| format!("deck {name:?} is not vendored and GPurify's pdks/ was not found at build time; set GPURIFY_DIR"))?;
+            std::path::Path::new(pdks).join(name)
+        };
         std::fs::read_to_string(&path).map_err(|e| format!("deck {}: {e}", path.display()))
     }
 
@@ -224,15 +247,8 @@ impl Pdk {
                 ));
             }
         }
-        for name in REQUIRED_RULES {
-            if !self.rules.iter().any(|(n, _)| n == name) {
-                bad.push(format!(
-                    "no value for construction dimension {name:?}: a generator would fall \
-                     back to a number compiled into Philis instead of this process's \
-                     (add it to the deck's cell section)"
-                ));
-            }
-        }
+        // Unknown, mistyped, missing-required and unsourced `cell.*` keys.
+        bad.extend(crate::sidecar::validate(&self.cell));
 
         if self.routing_metals.is_empty() {
             bad.push("cell.layers.routing_metals is empty: nowhere legal to route".into());
@@ -514,6 +530,24 @@ impl Pdk {
     #[must_use]
     pub fn cell_f32(&self, key: &str) -> Option<f32> {
         self.cell.get(key)?.as_f64().map(|x| x as f32)
+    }
+
+    /// Where a `cell.*` value comes from (`<key>_source`); `None` when the
+    /// sidecar gives no source text.
+    #[must_use]
+    pub fn provenance(&self, key: &str) -> Option<&str> {
+        crate::sidecar::source(self.cell.as_object()?, key)
+    }
+
+    /// Process-data keys this sidecar states on an `UNVERIFIED` source:
+    /// loaded and used, and reported as assumed rather than known.
+    #[must_use]
+    pub fn unverified(&self) -> Vec<&str> {
+        crate::sidecar::KEYS
+            .iter()
+            .filter(|k| k.sourced && self.provenance(k.name).is_some_and(|s| s.starts_with("UNVERIFIED")))
+            .map(|k| k.name)
+            .collect()
     }
 
     /// DC electromigration limits of `layer` from the deck's own EM rules:
@@ -1033,43 +1067,6 @@ const REQUIRED_ROLES: &[&str] = &[
     "diff", "poly", "li", "licon", "mcon", "met1", "nwell", "nsdm", "psdm", "tap",
 ];
 
-/// Every construction dimension a cell generator reads (`cells::rule`). Each
-/// call site takes a default, so a missing one would silently build to a
-/// number compiled into Philis. Keep in sync with those call sites.
-const REQUIRED_RULES: &[&str] = &[
-    "bjt_base_frac_permille",
-    "bjt_collector_frac_permille",
-    "bjt_max_emitter_stripe",
-    "bjt_min_emitter_side",
-    "bjt_stripe_gap",
-    "cap_unit_side",
-    "device_gap",
-    "diode_gap",
-    "diode_l",
-    "diode_w",
-    "guard_licon_pitch",
-    "ind_min_diameter",
-    "ind_min_trace",
-    "lod_moat_ext_moderate",
-    "max_finger_width",
-    "min_guard_ring_width",
-    "mom_finger_space",
-    "mom_finger_width",
-    "n_well_depth",
-    "p_epi_thickness",
-    "p_well_depth",
-    "plate_spacing",
-    "res_head",
-    "res_min_segment",
-    "res_min_width",
-    "res_seg_gap",
-    "retrograde_pwell",
-    "sd_width",
-    "tie_max_dist_nm",
-    "well_enclosure",
-    "wpe_clearance_moderate",
-];
-
 /// A device construction from the sidecar's `cell.<kind>s` table: which
 /// layers a generator draws for one schematic model and the deck model the
 /// extractor then recognises (sky130 `res_high_po`: poly_rs + rpm + npc +
@@ -1304,6 +1301,80 @@ mod tests {
         let sky = load("sky130");
         assert_eq!(sky.min_channel(true, "pfet_01v8").0, 150, "a plain PMOS is not held to the LVT one's 350 nm");
     }
+    /// Every shipped PDK loads from the binary alone: sidecar and deck are
+    /// the compiled-in copies, so a moved or packaged `philis` has its PDKs.
+    #[test]
+    fn every_builtin_pdk_loads() {
+        for (name, _) in crate::decks::SIDECARS {
+            let pdk = Pdk::builtin(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let (_, deck) = crate::decks::DECKS.iter().find(|(d, _)| *d == format!("{name}.deck")).unwrap();
+            assert_eq!(pdk.source, *deck, "{name}: deck text is not the vendored one");
+        }
+        assert!(Pdk::builtin("sky13").is_err());
+    }
+
+    /// Line 1 of each vendored deck names the GPurify commit it was copied
+    /// from, which must be the rev `Cargo.lock` pins (build.rs
+    /// `GPURIFY_REV`): a lockfile bump without re-vendoring the decks fails.
+    #[test]
+    fn vendored_decks_name_their_origin() {
+        let rev = env!("GPURIFY_REV");
+        for (name, text) in crate::decks::DECKS {
+            let first = text.lines().next().unwrap_or_default();
+            assert!(first.starts_with(&format!("# vendored from GPurify {rev}")), "{name}: line 1 is {first:?}, Cargo.lock pins {rev}");
+        }
+    }
+
+    fn sky130_with(edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>)) -> Result<Pdk, String> {
+        let text = crate::decks::SIDECARS[0].1;
+        let mut v: serde_json::Value = serde_json::from_str(text).unwrap();
+        edit(v["cell"].as_object_mut().unwrap());
+        Pdk::from_json(&v.to_string())
+    }
+
+    /// A misspelt key is an error, not a value silently ignored while the
+    /// generator falls back to its default.
+    #[test]
+    fn sidecar_rejects_a_misspelt_key() {
+        let err = sky130_with(|c| {
+            c.insert("wpe_clearence_nm".into(), serde_json::json!([2000, 3000, 5000]));
+        })
+        .err()
+        .expect("a misspelt key must not load");
+        assert!(err.contains("wpe_clearence_nm"), "{err}");
+    }
+
+    /// A required key that is missing, null or of the wrong kind does not
+    /// load (`sd_width` is read by every MOSFET with a compiled default).
+    #[test]
+    fn a_required_key_must_be_present_and_well_kinded() {
+        for (edit, why) in [(None, "required"), (Some(serde_json::Value::Null), "required"), (Some(serde_json::json!(280.5)), "expected Nm")] {
+            let err = sky130_with(|c| match edit {
+                None => drop(c.remove("sd_width")),
+                Some(v) => drop(c.insert("sd_width".into(), v)),
+            })
+            .err()
+            .unwrap_or_else(|| panic!("sd_width {why}: loaded"));
+            assert!(err.contains("cell.sd_width") && err.contains(why), "{err}");
+        }
+    }
+
+    /// A process number without its source does not load; one on an
+    /// `UNVERIFIED` source loads and is listed as assumed.
+    #[test]
+    fn a_process_number_needs_a_source() {
+        let err = sky130_with(|c| {
+            c.remove("avt_n_mv_um_source");
+        })
+        .err()
+        .expect("an unsourced process number must not load");
+        assert!(err.contains("avt_n_mv_um"), "{err}");
+        let sky = Pdk::builtin("sky130").unwrap();
+        assert!(sky.provenance("avt_n_mv_um").is_some_and(|s| s.starts_with("Monte Carlo")));
+        let assumed = sky.unverified();
+        assert!(assumed.contains(&"tie_max_dist_nm") && !assumed.contains(&"avt_n_mv_um"), "{assumed:?}");
+    }
+
     const DECKS: [&str; 3] = ["sky130", "gf180mcu", "ihp_sg13g2"];
     fn id(p: &Pdk, n: &str) -> LayerId {
         p.layers.iter().find(|(l, _)| l == n).unwrap().1

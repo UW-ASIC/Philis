@@ -295,7 +295,7 @@ pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Pri
         .enumerate()
         .filter(|(_, b)| b.violations(l) > 0)
         .map(|(bi, b)| {
-            Violation::from_residual(format!("analog hard batch {bi} ({:?})", b.kind()), b.residual(l))
+            Violation::from_residual(format!("{}analog hard {bi} ({:?})", Violation::BATCH, b.kind()), b.residual(l))
         })
         .collect();
     let budget_violations = reqs
@@ -305,7 +305,7 @@ pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Pri
         .filter_map(|(bi, b)| {
             let residual = b.residual(l);
             (residual > 0.0)
-                .then(|| Violation::from_residual(format!("analog budget batch {bi}"), residual))
+                .then(|| Violation::from_residual(format!("{}analog budget {bi}", Violation::BATCH), residual))
         })
         .collect();
     let ov = encroachment(l, 0);

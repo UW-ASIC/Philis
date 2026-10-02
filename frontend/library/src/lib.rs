@@ -132,8 +132,11 @@ pub struct RunStats {
     pub place_hard: usize,
     /// Winner: detailed-routing hard violations.
     pub route_hard: usize,
-    /// Winner: signoff (DRC + ERC + LVS) violations over its drawn geometry.
+    /// Winner: signoff (DRC + ERC + LVS) violations over its drawn geometry,
+    /// deck warnings included.
     pub drc_hard: usize,
+    /// Winner: of `drc_hard`, deck warnings (`warn/` rows) — reported, not in |V|.
+    pub warnings: u32,
     /// Winner: Σ routing budget margins (milli-budgets, not tracks).
     pub route_overuse: i64,
     /// Winner: its placement measured after dp ([`PlacementMetrics`]).
@@ -326,7 +329,7 @@ fn solve(
                 .filter(|c| matches!(c.class, analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground))
                 .map(|c| c.net)
                 .collect();
-            r.cfg.pin_ua = currents.as_deref().map_or_else(Vec::new, |c| pin_currents(&cells.devices_of, c));
+            r.cfg.pin_ua = currents.as_deref().map_or_else(Vec::new, |c| pin_currents(&netlist, &cells.devices_of, c));
             r.cfg.em = em;
             // Routing prices parasitics only on nets something budgets, on [0, 1].
             let budgeted = |n: usize| problem.net_classes.get(n).is_some_and(|c| c.c_budget_af.is_some()) || sens.iter().any(|(s, _)| usize::from(s.0) == n);
@@ -354,9 +357,8 @@ fn solve(
     };
 
     // 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
-    //    keeping the lexicographically best (|V|, Θ, PEX) where V includes the
-    //    epoch's own signoff findings. Prices and routing history persist
-    //    across epochs; dp consults the live DRC oracle within one.
+    //    keeping the best [`LexKey`], whose V includes the epoch's own signoff
+    //    errors. Prices and routing history persist across epochs.
     let mut assignment = cellgen::seed_assignment(&flow.cells.variants, &flow.layers, pdk);
     let mut prices = gp::Prices::new();
     let mut neg = gr::Negotiation::new();
@@ -446,6 +448,7 @@ fn solve(
         bias.summary.clone(),
         &flow.problem.net_classes,
         &flow.problem.missing,
+        &pdk.unverified(),
     );
     let mut metadata = metadata;
     metadata.add_routing(&[Box::new(flow.common_nodes(&best.layout)), Box::new(flow.environment(&best.layout, &best.rings))], &best.routes);
@@ -648,7 +651,13 @@ impl Flow<'_> {
             .collect();
         // The router repairs this placement's shared-source skew itself.
         let router = dr::DetailedRoute {
-            cfg: dr::DetailedCfg { common: self.common_nodes(&layout).nodes, stack: Some(self.stack), ..self.d_router.cfg.clone() },
+            // Pin shares from the unplaced macros: `place_macro` leaves units local.
+            cfg: dr::DetailedCfg {
+                common: self.common_nodes(&layout).nodes,
+                stack: Some(self.stack),
+                pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
+                ..self.d_router.cfg.clone()
+            },
         };
         let (mut routes, mut route_report) = router.route(
             &global, &pins, &placed, &rings, routing, layers, &self.cuts, neg,
@@ -700,6 +709,7 @@ impl Flow<'_> {
             None,
             &self.problem.net_classes,
             &self.problem.missing,
+            &self.pdk.unverified(),
         );
         budgets.add_routing(&[Box::new(self.common_nodes(&layout)), Box::new(self.environment(&layout, &rings))], &routes);
 
@@ -712,6 +722,7 @@ impl Flow<'_> {
             place_hard: place_report.hard_violations.len(),
             route_hard: route_report.hard_violations.len(),
             drc_hard,
+            warnings: signoff.hard_violations.iter().filter(|v| v.rule.starts_with("warn/")).count() as u32,
             route_overuse: route_report
                 .budget_violations
                 .iter()
@@ -927,6 +938,7 @@ impl RunStats {
             place_hard: self.place_hard,
             route_hard: self.route_hard,
             drc_hard: self.drc_hard,
+            warnings: self.warnings,
             route_overuse: self.route_overuse,
             place: self.place,
             dp: self.dp,
@@ -935,12 +947,14 @@ impl RunStats {
     }
 }
 
-/// `(|V|, spec miss, Θ, PEX)` compared as a tuple: no parasitic gain buys
-/// past a budget residual, no budget slack past a missed circuit spec, nothing
-/// past a hard violation. V and Θ sum over stages; the spec miss is the
-/// post-layout simulation's Σ normalised miss (`0` without performance
-/// scoring); PEX is signoff's extracted total C (fF), now only a tie-break.
-/// `(|V|, spec miss, Θ, extracted C, footprint nm²)`; compared by [`key_lt`].
+/// `(|V|, spec miss, Θ, extracted C, footprint nm²)`, compared by [`key_lt`]:
+/// no parasitic gain buys past a budget residual, no budget slack past a missed
+/// circuit spec, nothing past a hard violation. V counts violated hard rules
+/// ([`metadata::MetadataReport::hard_violated`]), the stages' own non-batch
+/// rows, and signoff errors (not `warn/` rows). Θ is
+/// [`metadata::MetadataReport::theta`] plus dr's own non-batch budget rows, all
+/// in milli-budgets. The spec miss is the post-layout simulation's Σ normalised
+/// miss (`0` without performance scoring); C is signoff's extracted total (fF).
 type LexKey = (usize, f64, f64, f32, f64);
 
 /// Relative extracted-C difference read as a tie, which area then breaks.
@@ -953,16 +967,20 @@ const C_TIE: f32 = 0.02;
 /// except that C within [`C_TIE`] is a tie decided by footprint. A feasible
 /// optimum is a vector (area, C, …) and a scalarisation must be a declared
 /// policy (Graeb 2007 ch.1); this is ours. Not transitive inside a C band;
-/// callers only ever compare a candidate against the incumbent.
+/// callers only ever compare a candidate against the incumbent. A NaN tier
+/// reads as +∞, so it loses to any finite value and never sticks as incumbent.
 fn key_lt(a: &LexKey, b: &LexKey) -> bool {
-    let head = |k: &LexKey| (k.0, k.1, k.2);
+    let nan_last = |x: f64| if x.is_nan() { f64::INFINITY } else { x };
+    let c = |k: &LexKey| if k.3.is_nan() { f32::INFINITY } else { k.3 };
+    let (a3, b3) = (c(a), c(b));
+    let head = |k: &LexKey| (k.0, nan_last(k.1), nan_last(k.2));
     if head(a) != head(b) {
         return head(a) < head(b);
     }
-    if (a.3 - b.3).abs() <= C_TIE * a.3.abs().min(b.3.abs()) {
-        a.4 < b.4
+    if (a3 - b3).abs() <= C_TIE * a3.abs().min(b3.abs()) {
+        nan_last(a.4) < nan_last(b.4)
     } else {
-        a.3 < b.3
+        a3 < b3
     }
 }
 
@@ -974,15 +992,12 @@ fn lex_key(
     perf: Option<&perf::PerfResult>,
     footprint_nm2: f64,
 ) -> LexKey {
-    let (pv, pt, _) = place.lex();
-    let (rv, rt, _) = route.lex();
-    (
-        pv + rv + signoff.hard_violations.len(),
-        perf.map_or(0.0, |p| p.residual),
-        pt + rt + budgets.theta(),
-        signoff.cost,
-        footprint_nm2,
-    )
+    let own = |r: &Report| r.hard_violations.iter().filter(|v| !v.is_batch_row()).count();
+    let errors = signoff.hard_violations.iter().filter(|v| !v.rule.starts_with("warn/")).count();
+    let v = budgets.hard_violated() + own(place) + own(route) + errors;
+    let theta = budgets.theta()
+        + route.budget_violations.iter().filter(|x| !x.is_batch_row()).map(|x| x.margin as f64).sum::<f64>();
+    (v, perf.map_or(0.0, |p| p.residual), theta, signoff.cost, footprint_nm2)
 }
 
 /// Edge-to-edge gap `dp` keeps between cells: the deck's widest same-layer
@@ -1057,23 +1072,22 @@ fn em_rules(
 
 /// Per placed cell, `(pin name, µA)` for every terminal of its members: pin
 /// `d{k}:T` is terminal `T` of member `k`, a bare `T` member 0 (see
-/// `cellgen::bind_pins`). Empty when any device is unresolved.
-///
-/// ponytail: all-or-nothing; per-net unknowns would keep sizing the rest.
-fn pin_currents(devices_of: &[Vec<DeviceId>], draws: &[Option<Vec<(String, f64)>>]) -> Vec<Vec<(String, i32)>> {
-    if draws.iter().any(Option::is_none) {
-        return Vec::new();
-    }
+/// `cellgen::bind_pins`). An unresolved device's terminals are `None` (its
+/// nets get no EM sizing); every other device keeps its currents.
+fn pin_currents(netlist: &pnr_core::Netlist, devices_of: &[Vec<DeviceId>], draws: &[Option<Vec<(String, f64)>>]) -> Vec<Vec<(String, Option<i32>)>> {
     devices_of
         .iter()
         .map(|members| {
             let mut out = Vec::new();
             for (k, d) in members.iter().enumerate() {
-                for (t, ua) in draws[d.0 as usize].iter().flatten() {
-                    let ua = ua.round() as i32;
+                let terms: Vec<(String, Option<i32>)> = match &draws[d.0 as usize] {
+                    Some(ts) => ts.iter().map(|(t, ua)| (t.clone(), Some(ua.round() as i32))).collect(),
+                    None => netlist.devices[d.0 as usize].terminals.iter().map(|(t, _)| (t.clone(), None)).collect(),
+                };
+                for (t, ua) in terms {
                     out.push((format!("d{k}:{t}"), ua));
                     if k == 0 {
-                        out.push((t.clone(), ua));
+                        out.push((t, ua));
                     }
                 }
             }
@@ -1455,6 +1469,62 @@ mod start_tests {
         assert_eq!((a.layout.x, a.layout.y), (b.layout.x, b.layout.y));
     }
 
+    /// An unresolved device's pins are unknown; the other devices keep their
+    /// currents, in its own cell and in every other cell (not all-or-nothing).
+    #[test]
+    fn one_unresolved_device_keeps_the_others_known() {
+        use pnr_core::{Device, DeviceId, DeviceKind, Net, NetId, Netlist};
+        let fet = |name: &str| Device {
+            name: name.into(),
+            kind: DeviceKind::Nmos,
+            model: String::new(),
+            terminals: ["D", "G", "S", "B"].iter().enumerate().map(|(i, t)| ((*t).into(), NetId(i as u16))).collect(),
+            params: vec![],
+        };
+        let nl = Netlist { devices: vec![fet("M0"), fet("M1"), fet("M2")], nets: ["a", "b", "c", "d"].iter().map(|n| Net { name: (*n).into() }).collect() };
+        let known = |id: f64| Some(vec![("D".into(), id), ("G".into(), 0.0), ("S".into(), -id), ("B".into(), 0.0)]);
+        let cells = [vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2)], vec![DeviceId(1), DeviceId(0)]];
+        let pins = crate::pin_currents(&nl, &cells, &[known(10.0), None, known(20.0)]);
+        let ua = |cell: usize, pin: &str| pins[cell].iter().find(|(n, _)| n == pin).map(|p| p.1);
+        assert_eq!((ua(0, "d0:D"), ua(0, "D"), ua(0, "d0:S")), (Some(Some(10)), Some(Some(10)), Some(Some(-10))), "member 0 known");
+        assert_eq!((ua(0, "d1:D"), ua(0, "d1:S"), ua(0, "d1:G")), (Some(None), Some(None), Some(None)), "member 1 unknown, never zero");
+        assert_eq!((ua(1, "d0:D"), ua(1, "S")), (Some(Some(20)), Some(Some(-20))), "the other cell known");
+        assert_eq!((ua(2, "D"), ua(2, "d0:S"), ua(2, "d1:D")), (Some(None), Some(None), Some(Some(10))), "unresolved member 0: bare names unknown too");
+    }
+
+    /// REL-01 acceptance on the real fixtures and ngspice bias: every pin on a
+    /// net that touches no resistor carries a known current, so dr sizes it
+    /// (all-or-nothing left rc_filter with no pin currents at all).
+    #[test]
+    fn fixture_nets_without_a_resistor_keep_em_sizing() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lib = std::env::var_os("PDK_ROOT")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".volare")))
+            .map(|r| r.join("sky130A/libs.tech/ngspice/sky130.lib.spice"))
+            .filter(|l| l.is_file());
+        let (Some(lib), true) = (lib, std::process::Command::new("ngspice").arg("--version").output().is_ok()) else {
+            eprintln!("SKIP fixture_nets_without_a_resistor_keep_em_sizing: needs ngspice and the sky130 ngspice models");
+            return;
+        };
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+        let cfg = crate::Config { op: Some(crate::oppoint::OpConfig { model_lib: Some(lib), ..Default::default() }), ..Default::default() };
+        for fixture in ["rc_filter", "dac4"] {
+            let mut nl = crate::parse(&std::fs::read_to_string(root.join(format!("benchmarks/fixtures/{fixture}.spice"))).unwrap()).unwrap();
+            crate::deck_models(&mut nl, &pdk);
+            let currents = crate::bias(&nl, &cfg).2.expect("operating point");
+            let one_per_cell: Vec<_> = (0..nl.devices.len()).map(|i| vec![pnr_core::DeviceId(i as u16)]).collect();
+            let pins = crate::pin_currents(&nl, &one_per_cell, &currents);
+            for (k, net) in nl.nets.iter().enumerate() {
+                let on = || nl.devices.iter().enumerate().flat_map(|(i, d)| d.terminals.iter().filter(|(_, n)| n.0 as usize == k).map(move |(t, _)| (i, d, t)));
+                let resistor = on().any(|(_, d, _)| d.kind == pnr_core::DeviceKind::Resistor);
+                let known = on().all(|(i, _, t)| pins[i].iter().any(|(p, ua)| *p == format!("d0:{t}") && ua.is_some()));
+                eprintln!("{fixture} {}: resistor={resistor} known={known}", net.name);
+                assert!(resistor || known, "{fixture} {} touches no resistor but has an unknown pin current", net.name);
+            }
+        }
+    }
+
     /// C within the tie band goes to the smaller footprint; outside it, C wins.
     #[test]
     fn close_c_is_decided_by_area_and_far_c_by_c() {
@@ -1462,6 +1532,57 @@ mod start_tests {
         assert!(crate::key_lt(&k(30.0, 265.0), &k(29.6, 385.0)), "1.3% more C, 31% less area");
         assert!(crate::key_lt(&k(29.0, 385.0), &k(30.0, 265.0)), "3.3% less C wins outright");
         assert!(!crate::key_lt(&(1usize, 0.0, 0.0, 1.0, 1.0), &k(99.0, 999.0)), "a violation never wins on C");
+    }
+
+    use crate::metadata::{Arm, BudgetStatus, MetadataReport};
+    use pnr_core::{Report, Violation};
+
+    fn row(arm: Arm, total: usize, satisfied: usize, residual: f64) -> BudgetStatus {
+        BudgetStatus { kind: "K".into(), arm, total, satisfied, unknown: 0, criticality: 0.0, residual, usage: None }
+    }
+
+    fn rows(rules: &[&str]) -> Vec<Violation> {
+        rules.iter().map(|r| Violation { rule: (*r).into(), margin: 1 }).collect()
+    }
+
+    fn key(place: &Report, signoff: &Report, budgets: &MetadataReport) -> crate::LexKey {
+        crate::lex_key(place, &Report::default(), signoff, budgets, None, 1.0)
+    }
+
+    /// |V| counts the 40 violated rules of a hard batch, not its one stage row.
+    #[test]
+    fn v_counts_rules_not_batches() {
+        let budgets = MetadataReport { placement: vec![row(Arm::Hard, 40, 0, 3.0)], ..Default::default() };
+        let place = Report { hard_violations: rows(&["batch:analog hard 0 (Symmetry)"]), ..Default::default() };
+        assert_eq!(key(&place, &Report::default(), &budgets).0, 40);
+    }
+
+    /// A budget residual restated by the placement report is not added twice.
+    #[test]
+    fn theta_counts_each_budget_once() {
+        let budgets = MetadataReport { placement: vec![row(Arm::Budget, 1, 0, 0.5)], ..Default::default() };
+        assert_eq!(budgets.theta(), 500.0);
+        let place = Report {
+            budget_violations: vec![Violation::from_residual(format!("{}analog budget 0", Violation::BATCH), 0.5)],
+            ..Default::default()
+        };
+        assert_eq!(place.budget_violations[0].margin, 500);
+        assert_eq!(key(&place, &Report::default(), &budgets).2, 500.0);
+    }
+
+    /// A deck warning is reported, not counted as a hard violation.
+    #[test]
+    fn warnings_are_not_violations() {
+        let signoff = Report { hard_violations: rows(&["warn/erc/tie_high_low:li", "drc/m1.1:met1"]), ..Default::default() };
+        assert_eq!(key(&Report::default(), &signoff, &MetadataReport::default()).0, 1);
+    }
+
+    /// A NaN tier loses to a finite one, whichever side it is on.
+    #[test]
+    fn nan_loses() {
+        let (nan, finite) = ((0usize, f64::NAN, 0.0, 1.0, 1.0), (0usize, 5.0, 0.0, 1.0, 1.0));
+        assert!(crate::key_lt(&finite, &nan), "the finite key displaces a NaN incumbent");
+        assert!(!crate::key_lt(&nan, &finite), "a NaN candidate never wins");
     }
 }
 

@@ -45,20 +45,24 @@ impl Stack {
         self.layers.iter().enumerate().find(|(_, l)| l.id == id)
     }
 
-    /// Ground capacitance of `shapes`, aF: area + fringe on the perimeter's
-    /// long sides (Lampaert 1999 eqs. 2.29–2.32; the deck's `pex` terms). A
-    /// shape on a layer the stack does not know adds nothing.
-    ///
-    /// ponytail: shapes are summed, not unioned — a via pad on a wire counts
-    /// twice (over-estimates by a pad per via); extraction's union is signoff's.
+    /// Ground capacitance of `shapes`, aF: per layer, area × `area_af_um2` +
+    /// perimeter × `fringe_af_um` of the layer's union (Lampaert 1999 eqs.
+    /// 2.29–2.32; the deck's `pex` terms), as signoff extraction measures a
+    /// merged polygon (GPurify extract/analytical.rs) — a pad on a wire counts
+    /// once and fringe runs the full perimeter. A shape on a layer the stack
+    /// does not know, or on one with no C terms (cuts), adds nothing.
     #[must_use]
     pub fn ground_af(&self, shapes: &[Shape]) -> f32 {
-        shapes
-            .iter()
-            .filter_map(|s| {
-                let (_, l) = self.at(s.layer.0)?;
-                let (w, len) = (s.rect.w.min(s.rect.h) as f32 / 1e3, s.rect.w.max(s.rect.h) as f32 / 1e3);
-                Some(l.area_af_um2 * w * len + 2.0 * l.fringe_af_um * len)
+        let mut ids: Vec<u16> = shapes.iter().map(|s| s.layer.0).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.into_iter()
+            .filter_map(|id| self.at(id))
+            .filter(|(_, l)| l.area_af_um2 != 0.0 || l.fringe_af_um != 0.0)
+            .map(|(_, l)| {
+                let rects: Vec<Rect> = shapes.iter().filter(|s| s.layer.0 == l.id).map(|s| s.rect).collect();
+                let (area, perimeter) = union_area_perimeter(&rects);
+                l.area_af_um2 * (area / 1e6) as f32 + l.fringe_af_um * (perimeter / 1e3) as f32
             })
             .sum()
     }
@@ -103,9 +107,8 @@ impl Stack {
         if nodes.is_empty() {
             return 0.0;
         }
-        let touch = |a: &Rect, b: &Rect| a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
         let adj: Vec<Vec<usize>> = (0..nodes.len())
-            .map(|i| (0..nodes.len()).filter(|&j| j != i && nodes[i].0.abs_diff(nodes[j].0) <= 1 && touch(&nodes[i].1, &nodes[j].1)).collect())
+            .map(|i| (0..nodes.len()).filter(|&j| j != i && nodes[i].0.abs_diff(nodes[j].0) <= 1 && nodes[i].1.touches(&nodes[j].1)).collect())
             .collect();
         // BFS tree from `root`, then the heaviest root-to-node path in it.
         let farthest = |root: usize| -> (usize, f32) {
@@ -182,7 +185,6 @@ impl Stack {
     /// one node reached through half its R from each metal it joins.
     fn port_graph(&self, shapes: &[Shape], terminals: &[Rect]) -> PortGraph {
         let items: Vec<(usize, Rect, &Layer)> = shapes.iter().filter_map(|s| self.at(s.layer.0).map(|(k, l)| (k, s.rect, l))).collect();
-        let touch = |a: &Rect, b: &Rect| a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
         let centre = |a: &Rect, b: &Rect| {
             let (x0, x1) = (a.x.max(b.x), (a.x + a.w).min(b.x + b.w));
             let (y0, y1) = (a.y.max(b.y), (a.y + a.h).min(b.y + b.h));
@@ -201,7 +203,7 @@ impl Stack {
         for i in 0..items.len() {
             for j in i + 1..items.len() {
                 let ((ri, a, la), (rj, b, lb)) = (items[i], items[j]);
-                if ri.abs_diff(rj) > 1 || !touch(&a, &b) {
+                if ri.abs_diff(rj) > 1 || !a.touches(&b) {
                     continue;
                 }
                 let at = centre(&a, &b);
@@ -225,7 +227,7 @@ impl Stack {
         for (t, r) in terminals.iter().enumerate() {
             let c = (r.x + r.w / 2, r.y + r.h / 2);
             for (i, (_, s, _)) in items.iter().enumerate() {
-                if !touch(r, s) {
+                if !r.touches(s) {
                     continue;
                 }
                 let n = cut_node[i].unwrap_or_else(|| {
@@ -303,7 +305,7 @@ impl Stack {
             for piece in pieces(&built) {
                 // A piece reaches a gate when it lies over the gate's pin (the
                 // router's trunk ends there before its pin access is drawn).
-                if !gates.is_empty() && !piece.iter().any(|&k| gates.iter().any(|g| touches(&built[k].1, g))) {
+                if !gates.is_empty() && !piece.iter().any(|&k| gates.iter().any(|g| built[k].1.touches(g))) {
                     continue;
                 }
                 let area: f32 = piece.iter().map(|&k| built[k]).filter(|&(r, _)| counts(r)).map(|(_, q)| exposed(q)).sum();
@@ -371,14 +373,64 @@ pub fn parallel(p: &Rect, q: &Rect) -> Option<(i32, i32)> {
     }
 }
 
-/// Connected pieces of `(stack rank, rect)`: touching rects on the same or
-/// adjacent ranks (a cut joins the metals either side) are one conductor.
-fn touches(a: &Rect, b: &Rect) -> bool {
-    a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h
+/// Area (nm²) and perimeter (nm) of the union of `rects`, by coordinate
+/// compression: the distinct edge coordinates cut the plane into X·Y cells, a
+/// 2-D difference array marks the covered ones, and the perimeter is every
+/// cell edge between a covered cell and an uncovered (or outside) one.
+///
+/// ponytail: O(n + X·Y) time and memory per call; a sweep line with an
+/// interval tree is O(n log n) if a net's per-layer shape count grows large.
+fn union_area_perimeter(rects: &[Rect]) -> (f64, f64) {
+    let axis = |ends: &dyn Fn(&Rect) -> [i32; 2]| {
+        let mut v: Vec<i32> = rects.iter().flat_map(ends).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let (xs, ys) = (axis(&|r| [r.x, r.x + r.w]), axis(&|r| [r.y, r.y + r.h]));
+    let (nx, ny) = (xs.len(), ys.len());
+    if nx < 2 || ny < 2 {
+        return (0.0, 0.0);
+    }
+    // `d[i·ny + j]` covers cell `[xs[i], xs[i+1]) × [ys[j], ys[j+1])`.
+    let mut d = vec![0i32; nx * ny];
+    let idx = |v: &[i32], c: i32| v.partition_point(|&x| x < c);
+    for r in rects {
+        let (i0, i1, j0, j1) = (idx(&xs, r.x), idx(&xs, r.x + r.w), idx(&ys, r.y), idx(&ys, r.y + r.h));
+        d[i0 * ny + j0] += 1;
+        d[i1 * ny + j0] -= 1;
+        d[i0 * ny + j1] -= 1;
+        d[i1 * ny + j1] += 1;
+    }
+    for i in 0..nx {
+        for j in 1..ny {
+            d[i * ny + j] += d[i * ny + j - 1];
+        }
+    }
+    for i in 1..nx {
+        for j in 0..ny {
+            d[i * ny + j] += d[(i - 1) * ny + j];
+        }
+    }
+    let cov = |i: usize, j: usize| i + 1 < nx && j + 1 < ny && d[i * ny + j] > 0;
+    let (mut area, mut perimeter) = (0.0f64, 0.0f64);
+    for i in 0..nx - 1 {
+        for j in 0..ny - 1 {
+            if !cov(i, j) {
+                continue;
+            }
+            let (w, h) = (f64::from(xs[i + 1] - xs[i]), f64::from(ys[j + 1] - ys[j]));
+            area += w * h;
+            let open = [i == 0 || !cov(i - 1, j), !cov(i + 1, j), j == 0 || !cov(i, j - 1), !cov(i, j + 1)];
+            perimeter += h * f64::from(u8::from(open[0]) + u8::from(open[1])) + w * f64::from(u8::from(open[2]) + u8::from(open[3]));
+        }
+    }
+    (area, perimeter)
 }
 
+/// Connected pieces of `(stack rank, rect)`: touching rects on the same or
+/// adjacent ranks (a cut joins the metals either side) are one conductor.
 fn pieces(built: &[(usize, Rect)]) -> Vec<Vec<usize>> {
-    let touch = touches;
     let mut seen = vec![false; built.len()];
     let mut out = Vec::new();
     for s in 0..built.len() {
@@ -390,7 +442,7 @@ fn pieces(built: &[(usize, Rect)]) -> Vec<Vec<usize>> {
         while let Some(a) = stack.pop() {
             piece.push(a);
             for b in 0..built.len() {
-                if !seen[b] && built[a].0.abs_diff(built[b].0) <= 1 && touch(&built[a].1, &built[b].1) {
+                if !seen[b] && built[a].0.abs_diff(built[b].0) <= 1 && built[a].1.touches(&built[b].1) {
                     seen[b] = true;
                     stack.push(b);
                 }
@@ -418,9 +470,22 @@ mod tests {
 
     #[test]
     fn ground_c_is_area_plus_fringe_per_layer() {
-        // 10 µm × 0.5 µm on m1: 25·5 + 2·40·10 = 925 aF; an unknown layer adds 0.
+        // 10 µm × 0.5 µm on m1: 25·5 + 40·21 = 965 aF; an unknown layer adds 0.
         let c = stack(0.0, 0.0, false).ground_af(&[shape(1, 0, 0, 10_000, 500), shape(9, 0, 0, 10_000, 500)]);
-        assert!((c - 925.0).abs() < 1e-3, "{c}");
+        assert!((c - 965.0).abs() < 1e-3, "{c}");
+    }
+
+    #[test]
+    fn overlapping_shapes_count_once() {
+        // Union 15 µm × 0.5 µm: 25·7.5 + 40·31 = 1 427.5 aF (summed: 1 930).
+        let c = stack(0.0, 0.0, false).ground_af(&[shape(1, 0, 0, 10_000, 500), shape(1, 5_000, 0, 10_000, 500)]);
+        assert!((c - 1_427.5).abs() < 1e-2, "{c}");
+    }
+
+    #[test]
+    fn a_pad_inside_a_wire_adds_nothing() {
+        let c = stack(0.0, 0.0, false).ground_af(&[shape(1, 0, 0, 10_000, 500), shape(1, 4_000, 0, 500, 500)]);
+        assert!((c - 965.0).abs() < 1e-3, "{c}");
     }
 
     #[test]

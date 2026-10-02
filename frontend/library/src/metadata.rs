@@ -82,14 +82,17 @@ pub struct MetadataReport {
     /// Post-layout specs: `(metric, measured, min, max, normalised miss)`.
     /// Empty when performance scoring is off.
     pub performance: Vec<(String, Option<f64>, Option<f64>, Option<f64>, f64)>,
+    /// Sidecar process numbers used on an `UNVERIFIED` source
+    /// ([`verify::Pdk::unverified`]). Reported, not blocking [`Self::certified`].
+    pub assumed: Vec<String>,
 }
 
 impl MetadataReport {
     /// Θ, the middle tier of the search key: Σ budget-arm residuals in
-    /// milli-budgets (× 1000, the stage reports' scale). The stage reports carry
-    /// the same residuals, so the key weighs them ~twice — monotone, so the
-    /// ranking is unaffected. Criticality is deliberately excluded: a satisfied
-    /// but tight budget must not read as violated.
+    /// milli-budgets (× 1000, the stage reports' scale). The only Θ source for
+    /// rule batches: the key drops the stage reports' `batch:` rows, which
+    /// restate these residuals. Criticality is deliberately excluded: a
+    /// satisfied but tight budget must not read as violated.
     #[must_use]
     pub fn theta(&self) -> f64 {
         self.placement
@@ -97,6 +100,18 @@ impl MetadataReport {
             .chain(&self.routing)
             .filter(|b| b.arm == Arm::Budget)
             .map(|b| b.residual * 1000.0)
+            .sum()
+    }
+
+    /// |V| from rule batches: violated hard-arm rules (`total − satisfied`)
+    /// over both tiers, counted per rule, not per batch.
+    #[must_use]
+    pub fn hard_violated(&self) -> usize {
+        self.placement
+            .iter()
+            .chain(&self.routing)
+            .filter(|b| b.arm == Arm::Hard)
+            .map(|b| b.total - b.satisfied)
             .sum()
     }
 
@@ -182,6 +197,7 @@ pub fn build(
     bias: Option<BiasSummary>,
     net_classes: &[analog::metadata::NetClassification],
     missing: &[(&'static str, &'static str)],
+    assumed: &[&str],
 ) -> MetadataReport {
     let census = annotator::classify::census(net_classes)
         .into_iter()
@@ -198,6 +214,7 @@ pub fn build(
         net_classes: census,
         missing: missing.to_vec(),
         performance: Vec::new(),
+        assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
     }
 }
 
@@ -278,6 +295,9 @@ impl std::fmt::Display for MetadataReport {
         }
         for (kind, input) in &self.missing {
             writeln!(f, "  {kind:<22} {:>6} {:>5} {:>5}  {:>9}  {:>9}  UNKNOWN (no {input})", "-", "-", "-", "-", "-")?;
+        }
+        if !self.assumed.is_empty() {
+            writeln!(f, "\n  assumed (UNVERIFIED sidecar values): {}", self.assumed.join(", "))?;
         }
         writeln!(f, "\n  certificate: {}", if self.certified() { "all families met, all inputs present" } else { "NOT CERTIFIED" })?;
         Ok(())
@@ -458,5 +478,13 @@ mod tests {
         let clean = MetadataReport { missing: vec![("Antenna", "deck antenna ratio")], ..MetadataReport::default() };
         assert!(!clean.certified(), "an uninstantiated family is not a pass");
         assert!(MetadataReport::default().certified());
+    }
+
+    /// Values on an `UNVERIFIED` source are reported, not blocking.
+    #[test]
+    fn assumed_values_are_listed_not_blocking() {
+        let r = MetadataReport { assumed: vec!["tie_max_dist_nm".into()], ..MetadataReport::default() };
+        assert!(r.certified());
+        assert!(r.to_string().contains("assumed (UNVERIFIED sidecar values): tie_max_dist_nm"), "{r}");
     }
 }

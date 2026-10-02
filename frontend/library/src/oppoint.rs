@@ -31,8 +31,10 @@ pub struct OpPoint {
 impl OpPoint {
     /// DC current each device terminal draws from its net, µA, per device:
     /// FET `D` draws `+Id` (ngspice's drain current flows in), `S` `−Id`, and
-    /// the gate and bulk none. `None` for a FET the simulation did not
-    /// resolve; other devices report no terminals. A net's terminal currents
+    /// the gate and bulk none. A capacitor draws no DC current (every
+    /// terminal 0). `None` for a FET the simulation did not resolve and for
+    /// every other device (resistor, diode, BJT, inductor: not simulated
+    /// per terminal yet — unknown, never zero). A net's terminal currents
     /// sum to what its port supplies (zero without one) — the input the
     /// router's per-branch sums (Lienig & Thiele 2018 eqs. 3.5–3.7) need.
     #[must_use]
@@ -42,10 +44,11 @@ impl OpPoint {
             .iter()
             .enumerate()
             .map(|(i, dev)| {
-                if !matches!(dev.kind, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
-                    return Some(Vec::new());
-                }
-                let id = self.id_ua.get(i).copied().flatten()?;
+                let id = match dev.kind {
+                    pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos => self.id_ua.get(i).copied().flatten()?,
+                    pnr_core::DeviceKind::Capacitor => 0.0,
+                    pnr_core::DeviceKind::Resistor | pnr_core::DeviceKind::Diode | pnr_core::DeviceKind::Npn | pnr_core::DeviceKind::Pnp | pnr_core::DeviceKind::Inductor => return None,
+                };
                 let draw = |t: &str| match t {
                     "D" => id,
                     "S" => -id,
@@ -617,6 +620,32 @@ mod tests {
         assert_eq!(t[2].as_ref().unwrap()[0], ("D".to_string(), 20.0));
         assert_eq!(on(3), 0.0, "a gate net draws no DC current");
         assert!(op([Some(10.0), None, Some(20.0)]).terminal_ua(&nl)[1].is_none(), "unknown, never zero");
+    }
+
+    /// A resistor's DC current is not simulated per terminal yet: unknown, and
+    /// its net's current with it. A capacitor carries no DC current: every
+    /// terminal a known 0, and its net stays known.
+    #[test]
+    fn a_resistor_current_is_unknown_and_a_capacitor_is_zero() {
+        use pnr_core::{Device, DeviceKind, Net, NetId};
+        let two = |name: &str, kind, a: u16, b: u16| Device {
+            name: name.into(),
+            kind,
+            model: String::new(),
+            terminals: vec![("P".into(), NetId(a)), ("N".into(), NetId(b))],
+            params: vec![],
+        };
+        // nets: 0 x, 1 y, 2 vss
+        let nl = Netlist {
+            devices: vec![two("R1", DeviceKind::Resistor, 0, 2), two("C1", DeviceKind::Capacitor, 1, 2)],
+            nets: ["x", "y", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+        };
+        let op = OpPoint { power_uw: vec![0; 2], id_ua: vec![None; 2], headroom_mv: vec![None; 2], gm_us: vec![None; 2], provenance: String::new(), resolved: 0 };
+        let t = op.terminal_ua(&nl);
+        assert!(t[0].is_none(), "resistor: unknown, never zero");
+        assert_eq!(t[1], Some(vec![("P".to_string(), 0.0), ("N".to_string(), 0.0)]));
+        let i = net_current_ua(&nl, &t);
+        assert_eq!((i[0], i[1]), (None, Some(0)), "the resistor's net unknown, the capacitor's known");
     }
 
     /// Headroom is `|V_DS| − V_DSsat`: a triode tail has none to spend, and a
