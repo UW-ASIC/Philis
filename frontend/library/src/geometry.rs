@@ -17,6 +17,54 @@ pub fn collect(macros: &[Macro], layout: &Layout, routes: &Routes) -> Vec<Shape>
     out
 }
 
+/// Placement quality of one placed layout (PLC-01), measured, never steered on.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PlacementMetrics {
+    /// Footprint / Σ cell bbox area (Plantage's area usage; ring halos are
+    /// inside each cell bbox). `1.0` = perfectly packed.
+    pub area_usage: f32,
+    /// Cells whose stamped bbox origin is off the cut lattice on either axis.
+    pub lattice_off: u32,
+    /// Clearance encroachment beyond plain overlap, nm².
+    pub clearance_residue_nm2: f64,
+    /// Plain pairwise bbox overlap, nm².
+    pub overlap_nm2: f64,
+    /// Hard mirror pairs `a ≠ b` drawn at different (variant, orient, hw, hh).
+    pub matched_geometry_mismatch: u32,
+    /// Symmetry islands beyond one per group; 0 until PLC-12.
+    pub islands_extra: u32,
+}
+
+/// [`PlacementMetrics`] of `l` with cells drawn as `macros` (indexed like `l`),
+/// against the cut `lattice` and the cell-to-cell `clearance`, nm.
+#[must_use]
+pub fn placement_metrics(macros: &[Macro], l: &Layout, lattice: i32, clearance: i32, reqs: &analog::Requirements<Layout>) -> PlacementMetrics {
+    let n = l.x.len();
+    let cells: f64 = (0..n).map(|i| 4.0 * f64::from(l.hw[i]) * f64::from(l.hh[i])).sum();
+    let lat = lattice.max(1);
+    let lattice_off = (0..n.min(macros.len()))
+        .filter(|&i| {
+            let b = pnr_core::place_macro(&macros[i], l, i).bbox;
+            b.x.rem_euclid(lat) != 0 || b.y.rem_euclid(lat) != 0
+        })
+        .count() as u32;
+    let overlap_nm2 = gp::mechanics::encroachment(l, 0);
+    let mut pairs = Vec::new();
+    for b in &reqs.hard {
+        b.mirror_pairs(&mut pairs);
+    }
+    let shape = |i: usize| (l.variant.get(i), l.orient.get(i), l.hw.get(i), l.hh.get(i));
+    let matched_geometry_mismatch =
+        pairs.iter().filter(|&&(a, b, _)| a != b && shape(a as usize) != shape(b as usize)).count() as u32;
+    PlacementMetrics {
+        area_usage: if cells > 0.0 { (l.footprint_nm2() / cells) as f32 } else { 0.0 },
+        lattice_off,
+        clearance_residue_nm2: gp::mechanics::encroachment(l, clearance) - overlap_nm2,
+        overlap_nm2,
+        matched_geometry_mismatch,
+        islands_extra: 0,
+    }
+}
 
 /// Merge `layer`'s rects wherever two overlap or abut into exactly one
 /// rectangle (same span on one axis, touching on the other), until none do.

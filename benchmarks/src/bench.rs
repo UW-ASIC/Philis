@@ -229,12 +229,13 @@ fn run_circuit(
     // `esc` > 0 means a variant-space binding (no arrangement of the chosen
     // variants was feasible), not a placement local minimum.
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}{} | overuse {} | DRC {} | LVS {} | ERC {}{} | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {} | ERC {}{} | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
         unrouted,
         if undrawable > 0 { format!(" | undrawable {undrawable}") } else { String::new() },
+        s.route_hard,
         s.route_overuse,
         drc,
         if lvs_mismatch { "MISMATCH" } else { "MATCH" },
@@ -254,6 +255,17 @@ fn run_circuit(
             || "none".to_string(),
             |b| format!("{} uW, {}", b.total_power_uw, if b.provenance.starts_with("SYNTH") { "probe" } else { "testbench" })
         ),
+        s.place.area_usage,
+        s.place.lattice_off,
+        s.place.overlap_nm2,
+        s.place.clearance_residue_nm2,
+        s.place.matched_geometry_mismatch,
+        s.place.islands_extra,
+        s.dp.temps,
+        s.dp.proposals,
+        s.dp.accepted,
+        s.dp.decode_fail,
+        s.dp.matched_incompatible,
     );
 
     // Per-constraint-type satisfaction: the run's own cell-space placement

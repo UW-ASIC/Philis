@@ -233,11 +233,12 @@ pub fn encroach(l: &Layout, a: usize, b: usize, clearance: i32) -> f64 {
     }
 }
 
-/// [`encroach`] summed over all pairs.
+/// [`encroach`] summed over all pairs; `+0.0` with fewer than two cells (an
+/// empty f64 `sum` is `-0.0`, which reports print as "-0").
 #[must_use]
 pub fn encroachment(l: &Layout, clearance: i32) -> f64 {
     let n = l.x.len();
-    (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).map(|(a, b)| encroach(l, a, b, clearance)).sum()
+    (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).fold(0.0, |t, (a, b)| t + encroach(l, a, b, clearance))
 }
 
 /// PEX-tier objective: `Σ criticality·cost` over `reqs.cost` plus the priced

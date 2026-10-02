@@ -25,6 +25,8 @@ pub mod oppoint;
 pub mod perf;
 
 use annotator::{annotate, AnnotationConfig, Problem};
+pub use dp::PlaceStats;
+pub use geometry::PlacementMetrics;
 pub use macro_master::Macros;
 use pnr_core::{DeviceId, LayerId, Layout, Macro, Report, Routes};
 use verify::Pdk;
@@ -60,6 +62,18 @@ pub struct Config {
     /// bounding box (a priced budget, so it outranks C; see
     /// `analog::placement::utilization`). `0` disables it.
     pub min_utilization: f32,
+    /// What gp does before dp; [`GpMode::Pile`] measures gp's contribution.
+    pub gp_mode: GpMode,
+}
+
+/// Coarse-placement strategy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpMode {
+    /// gp's analytic loop refines the seeded pile.
+    #[default]
+    Analytic,
+    /// dp starts from gp's seeded pile, unrefined.
+    Pile,
 }
 
 impl Default for Config {
@@ -74,6 +88,7 @@ impl Default for Config {
             performance: None,
             starts: 3,
             min_utilization: 0.6,
+            gp_mode: GpMode::default(),
         }
     }
 }
@@ -121,6 +136,10 @@ pub struct RunStats {
     pub drc_hard: usize,
     /// Winner: Σ routing budget margins (milli-budgets, not tracks).
     pub route_overuse: i64,
+    /// Winner: its placement measured after dp ([`PlacementMetrics`]).
+    pub place: PlacementMetrics,
+    /// Winner: dp's anneal counters.
+    pub dp: PlaceStats,
 }
 
 /// Anything that stops the flow.
@@ -331,6 +350,7 @@ fn solve(
             .unwrap_or_default(),
         avt_mv_um: ann.process.avt_mv_um,
         offset_sigma_mv: ann.offset_sigma_mv,
+        gp_mode: cfg.gp_mode,
     };
 
     // 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
@@ -485,6 +505,7 @@ struct Flow<'a> {
     avt_mv_um: [Option<f32>; 2],
     /// The pair offset budget the matching rules allocate from.
     offset_sigma_mv: Option<f32>,
+    gp_mode: GpMode,
 }
 
 /// `base` plus what the annotator needs from the deck.
@@ -572,7 +593,7 @@ impl Flow<'_> {
 
         // Place: coarse analytical, then legalising anneal (which may reshape).
         let macros = cellgen::realize(&cells.variants, assignment);
-        let (mut coarse, _) = gp::place(&macros, &cells.variants, assignment, placement, prices, place_rules(self.pdk), &self.net_weight, seed);
+        let (mut coarse, _) = gp::place(&macros, &cells.variants, assignment, placement, prices, place_rules(self.pdk), &self.net_weight, seed, self.gp_mode == GpMode::Analytic);
         coarse.debug_check("gp::place");
         // dp reads groups as abutment permission, so it gets the diffusion-sharing
         // table; after dp, groups are the recognition table for `Target::Group`.
@@ -584,7 +605,7 @@ impl Flow<'_> {
         coarse.power_uw = cells.power.clone();
         coarse.units = cells.units.clone();
         coarse.refresh_temps();
-        let (mut layout, place_report) = dp::place(
+        let (mut layout, place_report, dp_stats) = dp::place(
             &coarse,
             &macros,
             if reshape { &cells.variants } else { &[] },
@@ -602,6 +623,9 @@ impl Flow<'_> {
         } else {
             cellgen::realize(&cells.variants, &layout.variant)
         };
+        // Measured on the macros dp's variants draw, so `lattice_off` stamps what is drawn.
+        let lattice = cells::builder::cut_lattice(self.pdk);
+        let place = geometry::placement_metrics(&macros, &layout, lattice, place_rules(self.pdk).clearance, placement);
 
         // Guard rings enclose placed cells, so they are drawn now, before routing.
         let mut rings = cells::post_cell::guard_rings(&layout, &cells.guard_rings, self.pdk, ring_cut_ohm(self.pdk));
@@ -693,6 +717,8 @@ impl Flow<'_> {
                 .iter()
                 .map(|v| v.margin)
                 .sum(),
+            place,
+            dp: dp_stats,
             ..RunStats::default()
         };
         Epoch {
@@ -902,6 +928,8 @@ impl RunStats {
             route_hard: self.route_hard,
             drc_hard: self.drc_hard,
             route_overuse: self.route_overuse,
+            place: self.place,
+            dp: self.dp,
             ..run
         }
     }
