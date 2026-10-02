@@ -85,6 +85,10 @@ pub struct MetadataReport {
     /// Sidecar process numbers used on an `UNVERIFIED` source
     /// ([`verify::Pdk::unverified`]). Reported, not blocking [`Self::certified`].
     pub assumed: Vec<String>,
+    /// Budget kinds whose price ended the run at its cap with the budget still
+    /// violated ([`gp::Prices::saturated`]): binding, not settled. Empty from
+    /// [`build`]; the flow fills it at the end of the run.
+    pub binding: Vec<String>,
 }
 
 impl MetadataReport {
@@ -215,6 +219,7 @@ pub fn build(
         missing: missing.to_vec(),
         performance: Vec::new(),
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
+        binding: Vec::new(),
     }
 }
 
@@ -298,6 +303,9 @@ impl std::fmt::Display for MetadataReport {
         }
         if !self.assumed.is_empty() {
             writeln!(f, "\n  assumed (UNVERIFIED sidecar values): {}", self.assumed.join(", "))?;
+        }
+        if !self.binding.is_empty() {
+            writeln!(f, "\n  binding (price at cap, budget still violated): {}", self.binding.join(", "))?;
         }
         writeln!(f, "\n  certificate: {}", if self.certified() { "all families met, all inputs present" } else { "NOT CERTIFIED" })?;
         Ok(())
