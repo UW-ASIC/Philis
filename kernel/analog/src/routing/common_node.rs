@@ -104,7 +104,7 @@ mod tests {
         let stack: &'static Stack = Box::leak(Box::new(Stack {
             layers: vec![Layer { id: 1, sheet_ohm: 0.125, ..Layer::default() }],
             antenna_cumulative: false,
-            diode_layer: None,
+            diode: None,
         }));
         let wire = |x, y, w, h| Shape { layer: LayerId(1), rect: Rect { x, y, w, h } };
         let pin = |x| Rect { x, y: 0, w: 100, h: 100 };

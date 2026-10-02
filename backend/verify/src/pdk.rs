@@ -625,14 +625,17 @@ impl Pdk {
         })
     }
 
+    /// `antenna` and `antenna_electrical` rows alike: the latter is the same
+    /// per-stage ratio (areal) with a diode credit ([`Pdk::antenna_diode_credit`]).
     fn antenna_deck_rule(&self, layer: LayerId) -> Option<(f32, f32, bool)> {
-        let (kind, ratio) = (self.strings.get("antenna")?, self.strings.get("max_ratio")?);
+        let kinds = [self.strings.get("antenna"), self.strings.get("antenna_electrical")];
+        let ratio = self.strings.get("max_ratio")?;
         let side = self.strings.get("sidewall_thickness");
         self.deck
             .rules
             .spec
             .iter()
-            .filter(|s| s.kind == kind && self.deck.rules.layers_of(s).last().is_some_and(|&l| self.reaches(l, layer.0)))
+            .filter(|s| kinds.contains(&Some(s.kind)) && self.deck.rules.layers_of(s).last().is_some_and(|&l| self.reaches(l, layer.0)))
             .filter_map(|s| {
                 let Some(ParamValue::Ratio(r)) = self.deck.rules.param(s, ratio) else { return None };
                 let t = match side.and_then(|k| self.deck.rules.param(s, k)) {
@@ -645,6 +648,22 @@ impl Pdk {
                 Some((r as f32, t, metals > 1))
             })
             .min_by(|a, b| (a.1 > 0.0).cmp(&(b.1 > 0.0)))
+    }
+
+    /// The diode layer and `diode_bonus` of an `antenna_electrical` rule with
+    /// `diode_credit == 0`: the only diode credit signoff grants (GPurify
+    /// refuses a row whose verdict hangs on `credit · diode area`, its unit
+    /// unstated). `None` when the deck credits no diode — a drawn diode then
+    /// fixes nothing at signoff.
+    #[must_use]
+    pub fn antenna_diode_credit(&self) -> Option<(LayerId, f32)> {
+        let r = &self.deck.rules;
+        let kind = self.strings.get("antenna_electrical")?;
+        let (diode, credit, bonus) = (self.strings.get("diode_layer")?, self.strings.get("diode_credit")?, self.strings.get("diode_bonus")?);
+        r.spec.iter().filter(|s| s.kind == kind).find_map(|s| match (r.param(s, diode)?, r.param(s, credit)?, r.param(s, bonus)?) {
+            (ParamValue::Layer(l), ParamValue::Ratio(0.0), ParamValue::Ratio(b)) => Some((LayerId(l.0), b as f32)),
+            _ => None,
+        })
     }
 
     /// Every `density` and `density_cmp` rule: `(layer, window nm, limit

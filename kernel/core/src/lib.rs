@@ -25,6 +25,6 @@ pub use netlist::{Device, DeviceGroup, DeviceKind, MosSize, Net, Netlist};
 pub use process::Process;
 pub use r#macro::{pin_shares, place_macro, place_macros, Drawn, DrawnKind, Dummy, Figures, KeepWhy, Keepout, Macro, Node};
 pub use report::{Report, Violation};
-pub use routes::{Routes, Terminal};
+pub use routes::{GatePin, Routes, Terminal};
 pub use unionfind::UnionFind;
 pub use units::{PlacedUnit, Unit, UnitLib};

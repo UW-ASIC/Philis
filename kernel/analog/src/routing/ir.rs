@@ -78,7 +78,7 @@ mod tests {
         let stack: &'static Stack = Box::leak(Box::new(Stack {
             layers: vec![Layer { id: 1, sheet_ohm: 0.125, ..Layer::default() }, Layer { id: 2, sheet_ohm: 4.5, cut: true, ..Layer::default() }],
             antenna_cumulative: false,
-        diode_layer: None,
+        diode: None,
         }));
         let r = Routes {
             wires: vec![vec![

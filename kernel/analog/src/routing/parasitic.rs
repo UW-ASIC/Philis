@@ -111,7 +111,7 @@ mod tests {
                 Layer { id: 1, area_af_um2: 10.0, fringe_af_um: 20.0, ..Layer::default() },
             ],
             antenna_cumulative: false,
-        diode_layer: None,
+        diode: None,
         }));
         let run = |layer| Routes { wires: vec![vec![Shape { layer: LayerId(layer), rect: Rect { x: 0, y: 0, w: 10_000, h: 500 } }]], ..Default::default()  };
         // m0: 40·5 + 40·21 = 1040 aF; m1: 10·5 + 20·21 = 470 aF (full perimeter).

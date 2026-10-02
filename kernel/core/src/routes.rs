@@ -11,6 +11,16 @@ pub struct Terminal {
     pub ua: Option<f32>,
 }
 
+/// A gate pin, the device it gates and that device's gate-oxide area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GatePin {
+    pub at: Rect,
+    /// Schematic device id; `u32::MAX` = unknown.
+    pub dev: u32,
+    /// `W·L·m` of `dev`, nm²; `0` = unknown.
+    pub nm2: i64,
+}
+
 #[derive(Default)]
 pub struct Routes {
     /// Drawn wire/via shapes per net, by [`NetId`].
@@ -19,8 +29,9 @@ pub struct Routes {
     /// not the router, and scored with the wires where a rule reads the whole
     /// conductor (antenna).
     pub cell: Vec<Vec<Shape>>,
-    /// Per net, its gate pins' rects: where the conductor meets a gate.
-    pub gates: Vec<Vec<crate::geom::Rect>>,
+    /// Per net, its gate pins: where the conductor meets a gate, and the
+    /// gate oxide behind it (a piece is charged only the gates it reaches).
+    pub gates: Vec<Vec<GatePin>>,
     /// Per net, every pin `dr` routed to, absolute, with its DC current
     /// (the electromigration rule's current sources and sinks).
     pub terms: Vec<Vec<Terminal>>,
@@ -43,7 +54,7 @@ impl Routes {
 
     /// [`Routes::gates`] of `net`; empty when unknown.
     #[must_use]
-    pub fn gate_pins(&self, net: NetId) -> &[crate::geom::Rect] {
+    pub fn gate_pins(&self, net: NetId) -> &[GatePin] {
         self.gates.get(net.0 as usize).map_or(&[], Vec::as_slice)
     }
 

@@ -342,6 +342,13 @@ fn solve(
                 .map(|c| c.net)
                 .collect();
             r.cfg.pin_ua = currents.as_deref().map_or_else(Vec::new, |c| pin_currents(&netlist, &cells.devices_of, c));
+            // Per cell, each member's gate pin, device and `W·L·m` (the
+            // annotator's antenna gate area, µm² → nm²).
+            r.cfg.gate_nm2 = cells
+                .devices_of
+                .iter()
+                .map(|members| members.iter().enumerate().map(|(k, d)| (format!("d{k}:G"), u32::from(d.0), (netlist.devices[d.0 as usize].gate_area_um2() * 1e6) as i64)).collect())
+                .collect();
             r.cfg.em = em;
             // Routing prices parasitics only on nets something budgets, on [0, 1].
             let budgeted = |n: usize| problem.net_classes.get(n).is_some_and(|c| c.c_budget_af.is_some()) || sens.iter().any(|(s, _)| usize::from(s.0) == n);
@@ -690,12 +697,13 @@ impl Flow<'_> {
             &global, &pins, &placed, &rings, routing, layers, &self.cuts, neg,
         );
         // Antenna nets the jumper could not fix get a diode each, routed in as
-        // a fixed cell; its marker joins the net's routes (the rule's credit).
+        // a fixed cell; its shape on the deck's credited diode layer joins the
+        // net's routes (the rule's credit, `Stack::diode`).
         let ground = self.problem.net_classes.iter().find(|c| c.class == analog::metadata::NetClass::Ground).map(|c| c.net);
         let diodes = elaborate::antenna_diodes(self.pdk, routing, &routes, &placed, &rings, ground, place_rules(self.pdk).clearance);
         let mut extra = Vec::new();
         if !diodes.is_empty() {
-            let marker = self.pdk.diode_marker();
+            let marker = self.pdk.antenna_diode_credit().map(|(l, _)| l);
             let mut marks = Vec::new();
             for (device, m) in diodes {
                 let cathode = device.terminals.iter().find(|t| t.0 == "N").map(|t| t.1);
