@@ -4,8 +4,11 @@
 //! A `required` key missing from a sidecar fails `Pdk::load`; a key read with
 //! a compiled default but not required would silently build to that default
 //! on a deck that omits it, and a required key nobody reads is a demand with
-//! no consumer. This runs `enumerate` + `draw` of every generator on sky130
-//! through a `Process` that records each `rule()` name, and compares.
+//! no consumer; a name in no registry row that the loaded PDK does not state
+//! builds to its default on every deck. This runs `enumerate` + `draw` of
+//! every generator on sky130 through a `Process` that records each `rule()`
+//! name, and compares. Not reached: post_cell.rs `guard_ring_merge_gap_nm`
+//! (placement-time design policy, default 2000).
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -133,18 +136,28 @@ fn generators_read_exactly_the_required_keys() {
     let required: BTreeSet<&str> = KEYS.iter().filter(|k| k.required && !read_elsewhere.contains(&k.name)).map(|k| k.name).collect();
     let unread: Vec<_> = required.iter().filter(|k| !recorded.contains(**k)).collect();
     assert!(unread.is_empty(), "required keys no generator read (make them optional or delete them): {unread:?}");
-    // Keys read with a compiled default that may still be absent. The reader
+    // Names read with a compiled default that may still be absent. The reader
     // only raises a deck-derived value with them (`dim` in builder.rs takes
     // the max with the deck's own rule, the mosfet/bjt/diode/resistor
     // contact enclosures and spacings max them with the deck's enclosure,
     // endcap or spacing), so an absent key leaves the deck's number, not
     // Philis's; or they are a flag whose absence is the conservative choice
-    // (`npn_isolation` 0 = no isolated NPN offered).
+    // (`npn_isolation` 0 = no isolated NPN offered); or a resistor recipe's
+    // own slot, whose absence (0) is the deck's square `contact`.
     let raise_deck = [
+        "contact",
+        "mcon_size",
+        "met1_space",
+        "poly_ext",
+        "nwell_diff_enc",
         "m1_enc",
         "min_finger_width",
         "via_enclosure",
         "via_spacing",
+        "diff_encloses_licon",
+        "tap_encloses_licon_one_side",
+        "poly_encloses_licon_one_side",
+        "rpm_encloses_poly",
         "li_encloses_licon",
         "li_encloses_licon_one_side",
         "licon_poly_enc",
@@ -152,13 +165,22 @@ fn generators_read_exactly_the_required_keys() {
         "polycon_to_diff_spacing",
         "polycon_to_pdiff_spacing",
     ];
-    let flags = ["npn_isolation"];
+    let flags = ["npn_isolation", "res_contact_w", "res_contact_h"];
     let optional_read: Vec<_> = KEYS
         .iter()
         .filter(|k| !k.required && recorded.contains(k.name) && !raise_deck.contains(&k.name) && !flags.contains(&k.name))
         .map(|k| k.name)
         .collect();
     assert!(optional_read.is_empty(), "keys generators read with a compiled default but not required (a deck omitting them builds to Philis's number): {optional_read:?}");
+    // And a name in no registry row: it must resolve from the loaded PDK
+    // (sidecar scalar or deck-derived `<role>_min_*`; `min_gate_l` from the
+    // deck's channel rules), or every shipped deck builds to the default.
+    let resolved: BTreeSet<&str> = pdk.rules.iter().map(|(n, _)| n.as_str()).chain(["min_gate_l"]).collect();
+    let defaulted: Vec<_> = recorded
+        .iter()
+        .filter(|n| !resolved.contains(n.as_str()) && !raise_deck.contains(&n.as_str()) && !flags.contains(&n.as_str()))
+        .collect();
+    assert!(defaulted.is_empty(), "names generators read that sky130 does not state, so they build to Philis's compiled default: {defaulted:?}");
 
     let sidecar = pdk.cell.as_object().expect("cell section");
     let registered: BTreeSet<&str> = KEYS.iter().map(|k| k.name).collect();

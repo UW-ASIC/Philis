@@ -75,6 +75,7 @@ pub const KEYS: &[Key] = &[
     k("diode_l", Nm, true, false, "kernel/cells/src/diode.rs; frontend/library/src/elaborate.rs"),
     k("diode_w", Nm, true, false, "kernel/cells/src/diode.rs; frontend/library/src/elaborate.rs"),
     k("dti", Nm, false, false, "unread"),
+    k("dummy_gates_per_end", Count, true, false, "kernel/cells/src/mosfet.rs (dummy gates each end of a matched row)"),
     k("em_current_density_source", Text, false, false, "provenance of the deck's EM rules"),
     k("erc_rules_note", Text, false, false, "documentation"),
     k("finfet_note", Text, false, false, "documentation"),

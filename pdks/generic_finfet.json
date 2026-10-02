@@ -43,6 +43,7 @@
       ]
     },
     "sd_width": 34,
+    "dummy_gates_per_end": 1,
     "max_finger_width": 2700,
     "plate_spacing": 200,
     "res_head": 300,

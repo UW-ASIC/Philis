@@ -39,6 +39,7 @@
       "diom": "areaid_diode"
     },
     "sd_width": 250,
+    "dummy_gates_per_end": 1,
     "max_finger_width": 10000,
     "plate_spacing": 200,
     "res_head": 2160,

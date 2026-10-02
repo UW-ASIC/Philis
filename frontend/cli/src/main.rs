@@ -40,7 +40,7 @@ fn cli() -> Result<bool, String> {
     };
     let read = |p: &str| std::fs::read_to_string(p).map_err(|e| format!("read {p}: {e}"));
     let spice = read(netlist)?;
-    let pdk = if deck.ends_with(".json") { verify::Pdk::from_json(&read(deck)?) } else { verify::Pdk::builtin(deck) }
+    let pdk = if std::path::Path::new(deck).is_file() { verify::Pdk::from_json(&read(deck)?) } else { verify::Pdk::builtin(deck) }
         .map_err(|e| format!("pdk: {e}"))?;
 
     let cfg = Config::default();
@@ -55,6 +55,9 @@ fn cli() -> Result<bool, String> {
         println!("emitted generator → {out}");
     }
 
+    if !sol.metadata.assumed.is_empty() {
+        println!("assumed (UNVERIFIED sidecar values): {}", sol.metadata.assumed.join(", "));
+    }
     let report = library::signoff(&sol, &pdk);
     if report.hard_violations.is_empty() {
         println!("signoff CLEAN — cost {:.3}", report.cost);

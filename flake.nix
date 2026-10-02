@@ -43,7 +43,7 @@
             # GPurify is a git dependency, so its source is not content-addressed by
             # crates.io and nix needs the hash spelled out.
             outputHashes = {
-              "gpurify-0.1.0" = "sha256-fBNxlQp3VaFT7fZ8TwSOeVOu/NxodMZPDUT1ZRL5W5I=";
+              "gpurify-0.1.0" = "sha256-/Vac085qczozWZ352X2poKrHQhKP+9qASQZV6mbHFIA=";
             };
           };
 

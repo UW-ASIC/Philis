@@ -1344,6 +1344,21 @@ mod tests {
         assert!(err.contains("wpe_clearence_nm"), "{err}");
     }
 
+    /// A required key that is missing, null or of the wrong kind does not
+    /// load (`sd_width` is read by every MOSFET with a compiled default).
+    #[test]
+    fn a_required_key_must_be_present_and_well_kinded() {
+        for (edit, why) in [(None, "required"), (Some(serde_json::Value::Null), "required"), (Some(serde_json::json!(280.5)), "expected Nm")] {
+            let err = sky130_with(|c| match edit {
+                None => drop(c.remove("sd_width")),
+                Some(v) => drop(c.insert("sd_width".into(), v)),
+            })
+            .err()
+            .unwrap_or_else(|| panic!("sd_width {why}: loaded"));
+            assert!(err.contains("cell.sd_width") && err.contains(why), "{err}");
+        }
+    }
+
     /// A process number without its source does not load; one on an
     /// `UNVERIFIED` source loads and is listed as assumed.
     #[test]
