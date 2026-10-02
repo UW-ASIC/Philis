@@ -131,7 +131,7 @@ R_N = 146 kΩ gives (*derived*, ×1e-6) 1.849, 1.301, 0.548, 2.397, 0.753, 1.096
 2.192, 0.959, 0.890, 2.260. Every bar agrees within 0.11e-6. MAT-17's three smallest (N = 8, 11, 3 at 2.05e-7,
 3.42e-7, 5.48e-7) are the description's three smallest bars (0.2, 0.4, 0.5 E-6).
 
-### 2.3 MAT-02: Fig. 10.24 2:1:2 arrangement — **agree on topology; plan-02's "corner cells of a 3×3" is imprecise**
+### 2.3 MAT-02: Fig. 10.24 2:1:2 arrangement — **agree on topology; the book form is not a 3×3 cell assignment**
 
 Description (Fig 10.24, L67162–67198, figure on PDF p.514): Part (A) places Layout 1 (emitter circle in the lower
 middle, base contact near the top, collector bar above) "in the first and second quadrants and also in the middle of
@@ -145,10 +145,17 @@ quadrant; the lower two are mirrored so that all emitters face the horizontal ax
 sections of the 4X in each side column, on the diagonals of the 1X) and with `ref-hastings-09` H09 ("rotated to bring
 emitters together").
 
-The description gives no offsets. The image (PDF p.514, re-opened) shows the two units of a side column abutting at the
-horizontal axis: side-unit centres are one pitch out in x and half a unit height out in y, not on the 3×3 cell grid of
-Part (B). Plan-02's "(the corner cells of a 3×3, r² = 8)" is therefore an approximation of the book's geometry; both
-arrangements are exactly common-centroid. Part (B), the 8:1 eight-around-one, is a true 3×3 as the plans say.
+The description gives no offsets. The image (PDF p.514, pdftoppm at 100 dpi, dark-pixel runs down the unit columns,
+measured against Part (B)'s grid) shows the two units of a side column abutting at the horizontal axis. The x pitch is
+≈ 77 px and the row pitch ≈ 110 px (Part B emitters at y 178, 287, 397); the side-unit boxes start at y 184 and 295
+about the axis at y ≈ 287, so their centres sit ≈ 55 px (0.5 row) off it, and the side emitters (y 248, 328) ≈ 40 px
+(0.36 row). A 200 dpi measurement in review gave the same ratios (155, 219, 110, 80 px).
+In doubled offsets the side units are at ≈ (±2, ±1), r² ≈ 5 (≈ 4.5 for the emitters), against 4 for the "+" cross
+(4X on the edge centres) and 8 for the 3×3 corners. In 200 dpi px² the mean emitter r² of the four 4X units is ≈ 30k, the "+"
+cross ≈ 36k and the corners ≈ 72k (*derived*). The book's 2:1:2 is a half-row-offset arrangement, not a 3×3 cell
+assignment, and is close to the "+" cross in second moment. Plan-02's earlier "(the corner cells of a 3×3, r² = 8)" was
+wrong and is replaced (§3); all three are exactly common-centroid. Part (B), the 8:1 eight-around-one, is a true 3×3
+as the plans say.
 
 ### 2.4 H13-53 / H13-55: rule 19 and rule 23 distances — **not stated in any description**
 
@@ -214,14 +221,14 @@ left out. "Not stated" rests on the full read (§1) and on scans of every block 
 | 14.21 HBM / CDM pulses | HBM: (0, 1 A) → peak (20 ns, 1.3 A) → (400 ns, 0.2 A); CDM: peak (0.25 ns, 5 A), (0.6 ns, −2 A), (0.8 ns, 0), (1 ns, −0.2 A) (L72326–72343) | `ref-hastings-14` L218: HBM ≈ 1.3 A after ≈ 15 ns, τ ≈ 230 ns; CDM > 5 A at ≈ 0.25 ns | agree; the description's peak is at 20 ns against the text's ≈ 15 ns (1.3·e^(−380/230) ≈ 0.25 A at 400 ns, *derived*) |
 | 15.28A shield | metal-2 shield between noisy metal-3 and sensitive metal-1 (L73721–73736) | `audit-05` L368 | agree |
 | Table 8.45 | ⟨110⟩ on (100): E 169 GPa, ν 0.064; ⟨100⟩ on (100): 130, 0.279; any on (111): 169, 0.262; oxide: 75, 0.17 (L73803–73832) | `ref-hastings-15` L695 | agree |
-| Table 10.T1 | ζ11 PNP 8.9, NPN −28.4; ζ12 14.3, 43.4; ζ44 103.5, 13.1 (×1e-11 Pa⁻¹, L73838–73863) | `ref-hastings-15` L217, L704 | agree |
+| Table 10.T1 | ζ11 PNP 8.9, NPN −28.4; ζ12 14.3, 43.4; ζ44 103.5, 13.1 (no unit stated, L73838–73863) | `ref-hastings-15` L217, L704 (×1e-11 Pa⁻¹) | agree on values; the unit is the study's |
 
 ---
 
 ## 3. Corrections fed to the owning plans
 
 - **plan-02 (MAT)**: open question 7 resolved (§2.1); MAT-17 Risks reworded; MAT-02's [1,4] note gets the Fig 10.24A
-  geometry (§2.3).
+  geometry (§2.3): half-row offsets, r² ≈ 5, not a 3×3 assignment; the corner-variant suggestion is dropped.
 - **plan-04 (PLC)**: verification-log note — rule 19/23 distances, the WPE points and the H12-26 statement are body
   text; no figure description states them (§2.4–2.6). No value changes.
 - **00-MASTER-PLAN §6.4 item 8**: resolved; §7 index lists this document.

@@ -532,6 +532,7 @@ Change, Tests, Acceptance.
   Record the agreement or disagreement per value with line numbers. The index (L52119–54715) and the figure/table lists (L54716–57403) need no study: they are captions.
 - Tests: none (study).
 - Acceptance: each listed open value is resolved or explicitly "not stated in the description"; the owning plans' notes are updated.
+- Scope cut (recorded at review of the study, for the plan owner to confirm): "every numeric value" was taken as every stated value (dimensions, ratios, voltages, currents, coordinates); counts of drawn shapes (contacts, vias, fingers, emitters, bars, rows) are not listed. They occur in at least 124 blocks, none bears on an open plan value, and `ref-hastings-99` §4 says so with examples and line ranges.
 
 ---
 
