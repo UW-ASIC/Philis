@@ -1,9 +1,12 @@
 //! DC electromigration (routing tier, hard), plus the per-layer limit model
 //! the detailed router sizes segments and via arrays with.
 
+use pnr_core::geom::Shape;
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
 use crate::rule::Rule;
+use super::current::net_flow;
+use super::Stack;
 
 /// Boltzmann's constant, eV/K.
 const K_EV: f32 = 8.617e-5;
@@ -42,8 +45,9 @@ impl Limit {
     /// Width a segment carrying `i_ua` needs, nm: `w ≥ I/J` (Lienig & Thiele
     /// 2018 eq. 3.21; Hastings eq. 15.24) — unless it is Blech-immortal,
     /// `(I/w)·L < (jL)_B` (Lienig eq. 4.1), i.e. `w > I·L/(jL)_B`. `domain_nm`
-    /// must bound the diffusion domain (the net's whole run on the layer), not
-    /// one drawn rect. `0` when the limit is unknown.
+    /// is the diffusion domain's length (`dr` passes the net's whole run on
+    /// the layer, [`Electromigration`] the shape's long side). `0` when the
+    /// limit is unknown.
     #[must_use]
     pub fn width_nm(self, i_ua: f32, domain_nm: f32) -> f32 {
         if self.ua_per_um <= 0.0 {
@@ -70,53 +74,111 @@ impl Limit {
     }
 }
 
-/// Most routing metals a rule carries limits for.
-pub const MAX_METALS: usize = 8;
+/// Most layers (metals and cuts) a rule carries limits for.
+pub const MAX_LAYERS: usize = 16;
 
-/// The largest current a single terminal of `net` draws must fit through
-/// some drawn segment at its layer's DC limit.
+/// Every routed segment and via of `net` carries its DC current at its
+/// layer's limit: Lienig & Thiele 2018 eq. 3.21 (`w ≥ I/J`) per metal shape
+/// and eq. 3.25 (`n ≥ ⌈I/I_cut⌉`) per via group; "a lead must meet
+/// electromigration rules at every point along its length" (Hastings
+/// §15.4.4), so a narrow access jog fails even beside a wide trunk. Currents
+/// come from [`net_flow`] over the routed shapes, the cells' metal (a
+/// terminal joined only through its cell's strap stays reached) and the
+/// routed terminals ([`Routes::terminals`]); only the routed shapes are
+/// checked (cell straps are the cell's).
 ///
-/// This is the tree-independent half of the check: the rule sees only shapes,
-/// not which terminal each segment feeds, so it checks what every routed tree
-/// must satisfy (a terminal's current passes through the segments that reach
-/// it). Per-segment currents (Lienig & Thiele 2018 eqs. 3.5–3.7: each segment
-/// carries the sum of the terminal currents on one side) need the tree, and
-/// `dr` sizes and reports them (Θ `em underwidth` / `em cuts`).
+/// The Blech domain is a shape's own long side.
+/// [UNVERIFIED: this bounds the Lienig segment (§4.3.1: a segment ends only
+/// at vias or branches) only if no two same-net, same-layer shapes abut
+/// collinearly; such a pair is one longer segment. Dormant: no shipped deck
+/// supplies `blech_limit`.]
 ///
-/// Unknown (not passed) without an operating-point current, without a deck
-/// limit on any routed metal, or before the net is routed. A known **zero**
+/// Unknown (not passed) without the stack, with a terminal current unknown,
+/// an open terminal, or nothing routed on a limited layer. A known **zero**
 /// current is a real pass.
 ///
-/// ponytail: DC average only; RMS/peak need waveforms, and cuts are `dr`'s.
+/// ponytail: DC average only; RMS/peak need waveforms.
 #[derive(Clone, Copy)]
 pub struct Electromigration {
     pub net: NetId,
-    /// Largest single-terminal current, µA; negative = unknown.
-    pub current_ua: i32,
-    /// `(layer id, limit)` per routing metal the deck limits; unused slots
-    /// have layer `u16::MAX`.
-    pub limits: [(u16, Limit); MAX_METALS],
+    /// `(layer, limit)` per metal **and cut** the deck limits (pin-access
+    /// layer and cut included); unused slots `u16::MAX`.
+    pub limits: [(u16, Limit); MAX_LAYERS],
+    pub stack: Option<&'static Stack>,
 }
 
 impl Electromigration {
     fn limit(self, layer: u16) -> Option<Limit> {
-        self.limits.iter().find(|(l, lim)| *l == layer && lim.ua_per_um > 0.0).map(|&(_, lim)| lim)
+        self.limits.iter().find(|(l, _)| *l == layer).map(|&(_, lim)| lim)
     }
 
-    /// `(width, need)` of the segment with the most headroom, nm; `None` when
-    /// no drawn segment is on a limited metal. Blech domain: the net's whole
-    /// run on that layer.
-    fn best(self, r: &Routes) -> Option<(f32, f32)> {
-        let shapes = r.shapes(self.net);
-        shapes
+    /// `(worst residual, worst need/have)` over the routed metal shapes and
+    /// via groups on limited layers; a via's need/have is `I/(I_cut·n)`, so
+    /// both read `≤ 1` together exactly when every check passes. `None` when
+    /// unknown (see the type).
+    fn check(self, r: &Routes) -> Option<(f32, f32)> {
+        let stack = self.stack?;
+        let routed = r.shapes(self.net);
+        let all = [routed, r.cell_metal(self.net)].concat();
+        let flow = net_flow(stack, &all, r.terminals(self.net))?;
+        let (mut worst, mut checked) = ((0.0f32, 0.0f32), false);
+        let mut fold = |need: f32, have: f32, ratio: f32| {
+            checked = true;
+            worst = (worst.0.max(crate::rule::over(need - have, need)), worst.1.max(ratio));
+        };
+        for (s, &ua) in routed.iter().zip(&flow.shape_ua) {
+            let Some(lim) = self.limit(s.layer.0).filter(|l| l.ua_per_um > 0.0) else { continue };
+            let have = s.rect.w.min(s.rect.h).max(1) as f32;
+            let need = lim.width_nm(ua, s.rect.w.max(s.rect.h) as f32);
+            fold(need, have, need / have);
+        }
+        // Via groups: cuts of one layer in parallel between the same metals,
+        // i.e. landing on a common shape below and a common shape above (by
+        // index into `all`), share the group's current.
+        let rank = |l: u16| stack.layers.iter().position(|x| x.id == l);
+        let touch = |a: &pnr_core::geom::Rect, b: &pnr_core::geom::Rect| a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
+        let lands = |c: &Shape, side: usize| -> Vec<usize> {
+            (0..all.len()).filter(|&m| rank(all[m].layer.0) == Some(side) && touch(&all[m].rect, &c.rect)).collect()
+        };
+        let cuts: Vec<(usize, Limit, Vec<usize>, Vec<usize>)> = routed
             .iter()
-            .filter_map(|s| {
-                let lim = self.limit(s.layer.0)?;
-                let run: i64 = shapes.iter().filter(|t| t.layer == s.layer).map(|t| i64::from(t.rect.w.max(t.rect.h))).sum();
-                let need = lim.width_nm(self.current_ua.max(0) as f32, run as f32);
-                Some((s.rect.w.min(s.rect.h) as f32, need))
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let lim = self.limit(c.layer.0).filter(|l| l.ua_per_cut > 0.0)?;
+                // A metal's limit keeps its deck rule's per-cut figure (`Pdk::em_limit`
+                // zeroes only a cut's per-µm one): only a cut is a via.
+                let k = rank(c.layer.0).filter(|&k| stack.layers[k].cut)?;
+                Some((i, lim, lands(c, k.wrapping_sub(1)), lands(c, k + 1)))
             })
-            .max_by(|a, b| (a.0 - a.1).total_cmp(&(b.0 - b.1)))
+            .collect();
+        // Any shared shape, not an identical landing set: `dr`'s array cuts
+        // spread past the original cut's pads, so each cut lands on its own
+        // pad plus the common trunk.
+        // ponytail: transitive, so a cut over two unjoined same-layer shapes
+        // merges the cuts under each into one group (max I, n = all): not
+        // conservative there. Needs same-net shapes closer than a cut is wide;
+        // split groups per landing-shape pair if dr ever draws that.
+        let shares = |a: &[usize], b: &[usize]| a.iter().any(|m| b.contains(m));
+        let mut uf = pnr_core::UnionFind::new(cuts.len());
+        for i in 0..cuts.len() {
+            for j in i + 1..cuts.len() {
+                let (p, q) = (&cuts[i], &cuts[j]);
+                if routed[p.0].layer == routed[q.0].layer && shares(&p.2, &q.2) && shares(&p.3, &q.3) {
+                    uf.union(i as u32, j as u32);
+                }
+            }
+        }
+        // Per group root: (cuts, largest member current).
+        let mut group = vec![(0u32, 0.0f32); cuts.len()];
+        for (i, cut) in cuts.iter().enumerate() {
+            let g = &mut group[uf.find(i as u32) as usize];
+            *g = (g.0 + 1, g.1.max(flow.shape_ua[cut.0]));
+        }
+        for (i, &(have, ua)) in group.iter().enumerate().filter(|(_, g)| g.0 > 0) {
+            let lim = cuts[i].1;
+            fold(lim.cuts(ua) as f32, have as f32, ua / (lim.ua_per_cut * have as f32));
+        }
+        checked.then_some(worst)
     }
 }
 
@@ -126,23 +188,22 @@ impl Rule for Electromigration {
         self.residual(r)
     }
     fn satisfied(self, r: &Routes) -> bool {
-        !self.known(r) || self.best(r).is_some_and(|(w, need)| w >= need)
+        self.check(r).is_none_or(|(res, _)| res <= 0.0)
     }
     fn known(self, r: &Routes) -> bool {
-        self.current_ua >= 0 && self.best(r).is_some()
+        self.check(r).is_some()
     }
+    /// Worst `(need − have)/need` over the checked shapes and via groups.
     fn residual(self, r: &Routes) -> f32 {
-        match (self.known(r), self.best(r)) {
-            (true, Some((w, need))) => crate::rule::over(need - w, need),
-            _ => 0.0,
-        }
+        self.check(r).map_or(0.0, |(res, _)| res)
     }
-    /// Unused fraction of the best segment; an unknown puts no pressure.
+    /// `1 − max(need/have)`; an unknown puts no pressure.
     fn headroom(self, r: &Routes) -> f32 {
-        match (self.known(r), self.best(r)) {
-            (true, Some((w, need))) if w > 0.0 => 1.0 - need / w,
-            _ => 1.0,
-        }
+        self.check(r).map_or(1.0, |(_, q)| 1.0 - q)
+    }
+    /// Worst `need/have` (`1.0` = at the limit; T3's `min(w/need)` inverted).
+    fn usage(self, r: &Routes) -> Option<f32> {
+        self.check(r).map(|(_, q)| q)
     }
     fn touches(self, out: &mut Vec<u32>) {
         out.push(u32::from(self.net.0));
@@ -152,61 +213,199 @@ impl Rule for Electromigration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pnr_core::geom::{LayerId, Rect, Shape};
+    use crate::routing::current::net_flow;
+    use crate::routing::stack::Layer;
+    use pnr_core::geom::{LayerId, Rect};
+    use pnr_core::routes::Terminal;
 
-    /// Net 0: a 200 nm-wide wire on layer 1 and a 100 nm cut (layer 2).
-    fn routes() -> Routes {
-        Routes {
-            wires: vec![vec![
-                Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 10_000, h: 200 } },
-                Shape { layer: LayerId(2), rect: Rect { x: 0, y: 0, w: 100, h: 100 } },
-            ]],
-            ..Default::default()
+    /// met1 (id 1, 0.125 Ω/□), via (2, 4.5 Ω/cut), met2 (3).
+    fn stack() -> &'static Stack {
+        let metal = |id| Layer { id, sheet_ohm: 0.125, ..Layer::default() };
+        Box::leak(Box::new(Stack { layers: vec![metal(1), Layer { id: 2, sheet_ohm: 4.5, cut: true, ..Layer::default() }, metal(3)], ..Stack::default() }))
+    }
+
+    /// The sky130 values (`pdks/decks/sky130.deck:496-497`) as `em_limits`
+    /// copies them: met1 2800 µA/µm keeping `EM.met1_mcon`'s 360 µA/cut, via
+    /// 290 µA/cut, met2 2800 µA/µm keeping `EM.met2_via1`'s 290 µA/cut.
+    fn em() -> Electromigration {
+        let mut limits = [(u16::MAX, Limit::default()); MAX_LAYERS];
+        limits[0] = (1, Limit { ua_per_um: 2_800.0, ua_per_cut: 360.0, ..Limit::default() });
+        limits[1] = (2, Limit { ua_per_cut: 290.0, ..Limit::default() });
+        limits[2] = (3, Limit { ua_per_um: 2_800.0, ua_per_cut: 290.0, ..Limit::default() });
+        Electromigration { net: NetId(0), limits, stack: Some(stack()) }
+    }
+
+    fn shape(layer: u16, x: i32, y: i32, w: i32, h: i32) -> Shape {
+        Shape { layer: LayerId(layer), rect: Rect { x, y, w, h } }
+    }
+
+    fn term(x: i32, y: i32, w: i32, h: i32, ua: Option<f32>) -> Terminal {
+        Terminal { at: Rect { x, y, w, h }, ua }
+    }
+
+    fn routes(wires: Vec<Shape>, terms: Vec<Terminal>) -> Routes {
+        Routes { wires: vec![wires], terms: vec![terms], ..Default::default() }
+    }
+
+    fn need(ua: f32) -> f32 {
+        em().limit(1).unwrap().width_nm(ua, 0.0)
+    }
+
+    /// A 1 µm met1 trunk and a 140 nm × 400 nm jog up to B.
+    fn jog(b_ua: Option<f32>) -> Routes {
+        routes(
+            vec![shape(1, 0, 0, 10_000, 1_000), shape(1, 9_000, 1_000, 140, 400)],
+            vec![term(0, 400, 200, 200, Some(500.0)), term(9_000, 1_300, 140, 100, b_ua)],
+        )
+    }
+
+    #[test]
+    fn a_narrow_access_jog_fails_even_if_the_trunk_is_wide() {
+        let r = jog(Some(-500.0));
+        // need = 500·1000/2800 = 178.6 nm: the trunk has it, the jog does not.
+        assert!((need(500.0) - 178.6).abs() < 0.05 && need(500.0) <= 1_000.0, "the old best-segment rule passes on the trunk");
+        let e = em();
+        assert!(e.known(&r) && !e.satisfied(&r));
+        assert!((e.residual(&r) - (178.57 - 140.0) / 178.57).abs() < 1e-3, "{}", e.residual(&r));
+        assert!((e.residual(&r) - 0.216).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_trunk_carries_the_sum_of_its_branches() {
+        // Root sink at the trunk's left end; branches up at x = 4 µm (+300)
+        // and 8 µm (+200).
+        let wires = vec![shape(1, 0, 0, 10_000, 1_000), shape(1, 4_000, 1_000, 500, 3_000), shape(1, 8_000, 1_000, 500, 3_000)];
+        let terms = vec![term(0, 400, 200, 200, Some(-500.0)), term(4_000, 3_900, 500, 100, Some(300.0)), term(8_000, 3_900, 500, 100, Some(200.0))];
+        let flow = net_flow(stack(), &wires, &terms).unwrap();
+        let needs: Vec<f32> = flow.shape_ua.iter().map(|&i| need(i)).collect();
+        assert!((needs[0] - 178.6).abs() < 0.05, "trunk carries 300 + 200: {needs:?}");
+        assert!((needs[1] - 107.1).abs() < 0.05 && (needs[2] - 71.4).abs() < 0.05, "{needs:?}");
+        assert!(em().known(&routes(wires.clone(), terms.clone())) && em().satisfied(&routes(wires, terms)));
+    }
+
+    #[test]
+    fn a_via_group_needs_ceil_i_over_i_cut() {
+        // met1 → two via cuts → met2, 700 µA end to end.
+        let wires = vec![shape(1, 0, 0, 5_000, 1_000), shape(2, 4_200, 200, 200, 200), shape(2, 4_600, 600, 200, 200), shape(3, 4_000, 0, 6_000, 1_000)];
+        let r = routes(wires, vec![term(0, 400, 200, 200, Some(700.0)), term(9_800, 400, 200, 200, Some(-700.0))]);
+        assert_eq!(em().limit(2).unwrap().cuts(700.0), 3, "⌈700/290⌉");
+        let e = em();
+        assert!(e.known(&r) && !e.satisfied(&r));
+        assert!((e.residual(&r) - 1.0 / 3.0).abs() < 1e-4, "(3 − 2)/3: {}", e.residual(&r));
+        // A third cut in the group meets it.
+        let mut wide = r.wires[0].clone();
+        wide.push(shape(2, 4_200, 600, 200, 200));
+        let r3 = routes(wide, r.terms[0].clone());
+        assert!(e.known(&r3) && e.satisfied(&r3), "{}", e.residual(&r3));
+    }
+
+    /// A metal limit carries its deck rule's per-cut figure too ([`em`]): a
+    /// met1 wire is no via group. 500 µA (> 360 µA/cut) needs 178.6 nm of the
+    /// 1 µm drawn.
+    #[test]
+    fn a_metal_with_a_per_cut_limit_is_not_a_via() {
+        let e = em();
+        let r = routes(vec![shape(1, 0, 0, 10_000, 1_000)], vec![term(0, 0, 200, 1_000, Some(500.0)), term(9_800, 0, 200, 1_000, Some(-500.0))]);
+        assert!(e.known(&r) && e.satisfied(&r), "{}", e.residual(&r));
+        assert!((e.usage(&r).unwrap() - need(500.0) / 1_000.0).abs() < 1e-4, "{:?}", e.usage(&r));
+    }
+
+    /// `dr`'s via array: each cut lands on its own met2 pad, and every pad
+    /// overlaps the one met2 trunk the cuts also touch. The landing sets
+    /// differ ({pad k, trunk}), yet the three cuts are one group in parallel.
+    #[test]
+    fn array_cuts_on_separate_pads_over_one_trunk_are_one_group() {
+        let mut wires = vec![shape(1, 0, 0, 5_000, 1_000), shape(3, 4_000, 0, 6_000, 1_000)];
+        for x in [4_200, 4_600, 5_000] {
+            wires.push(shape(3, x - 75, 300, 350, 1_200));
+            wires.push(shape(2, x, 400, 200, 200));
         }
+        let terms = vec![term(0, 400, 200, 200, Some(700.0)), term(9_800, 400, 200, 200, Some(-700.0))];
+        let r = routes(wires.clone(), terms.clone());
+        let e = em();
+        assert!(e.known(&r) && e.satisfied(&r), "⌈700/290⌉ = 3 cuts in one group: {}", e.residual(&r));
+        // usage = I/(I_cut·n) pins n = 3 (a pad may carry all 700 µA: 250/350 nm).
+        assert!((e.usage(&r).unwrap() - 700.0 / (290.0 * 3.0)).abs() < 1e-4, "{:?}", e.usage(&r));
+        // Two cuts left: still one group, now short.
+        wires.pop();
+        assert!((e.residual(&routes(wires, terms)) - 1.0 / 3.0).abs() < 1e-4);
     }
 
-    fn lim(ua_per_um: f32) -> Limit {
-        Limit { ua_per_um, ua_per_cut: 100.0, blech: 0.0 }
+    /// A terminal joined only through its cell's strap is reached (the cell
+    /// metal is in the flow), and the strap itself is the cell's, not checked:
+    /// at 30 nm it would need 179 nm.
+    #[test]
+    fn a_cell_strap_joins_its_terminal_and_is_not_checked() {
+        let r = jog(Some(-500.0));
+        let wires = vec![r.wires[0][0]];
+        let terms = vec![r.terms[0][0], term(12_000, 400, 200, 200, Some(-500.0))];
+        let strap = vec![shape(1, 10_000, 450, 2_200, 30)];
+        let open = routes(wires.clone(), terms.clone());
+        assert!(!em().known(&open), "the strap is what joins the second terminal");
+        let r = Routes { cell: vec![strap], ..routes(wires, terms) };
+        assert!(em().known(&r) && em().satisfied(&r), "{}", em().residual(&r));
     }
 
-    fn em(current_ua: i32, ua_per_um: f32) -> Electromigration {
-        let mut limits = [(u16::MAX, Limit::default()); MAX_METALS];
-        limits[0] = (1, lim(ua_per_um));
-        Electromigration { net: NetId(0), current_ua, limits }
+    /// A pin on met1 under the met2 it is routed to: the terminal joins its
+    /// own (lowest) layer, so its current reaches met2 only through the pin
+    /// cut — never a 0-Ω shortcut to the met2 over it.
+    #[test]
+    fn a_pin_cut_carries_its_terminal_current() {
+        let mut wires = vec![shape(1, 0, 0, 400, 400), shape(3, 0, 0, 10_000, 400), shape(2, 100, 100, 200, 200)];
+        let terms = vec![term(0, 0, 400, 400, Some(700.0)), term(9_800, 0, 200, 400, Some(-700.0))];
+        let r = routes(wires.clone(), terms.clone());
+        assert!(em().known(&r) && !em().satisfied(&r));
+        assert!((em().residual(&r) - 2.0 / 3.0).abs() < 1e-4, "⌈700/290⌉ = 3 cuts, 1 drawn: {}", em().residual(&r));
+        // Without the cut the pin is open, not joined through the met2 over it.
+        wires.pop();
+        assert!(!em().known(&routes(wires, terms)));
     }
 
     #[test]
-    fn width_must_carry_the_current_and_cuts_are_not_segments() {
-        let r = routes();
-        // 150 µA at 1 mA/µm needs 150 nm: the 200 nm wire carries it (the
-        // 100 nm cut has no metal limit, so it is not a segment).
-        assert!(em(150, 1_000.0).satisfied(&r));
-        // 400 µA needs 400 nm: violated, residual = (400−200)/400.
-        let e = em(400, 1_000.0);
-        assert!(!e.satisfied(&r));
-        assert!((e.residual(&r) - 0.5).abs() < 1e-6);
-        // A known zero current is a real pass.
-        assert!(em(0, 1_000.0).known(&r) && em(0, 1_000.0).satisfied(&r));
+    fn an_unknown_terminal_current_is_unknown() {
+        let r = jog(None);
+        assert!(!em().known(&r) && em().satisfied(&r), "search cannot act on an unknown");
+        assert_eq!(em().residual(&r), 0.0);
     }
 
     #[test]
-    fn the_limit_is_per_layer() {
-        let r = routes();
-        // The same 400 µA passes at layer 1's own 2 mA/µm, and a limit listed
-        // for another layer does not apply to layer 1's segment.
-        assert!(em(400, 2_000.0).satisfied(&r));
-        let mut other = em(400, 2_000.0);
-        other.limits[0].0 = 3;
-        assert!(!other.known(&r), "no limit on a routed metal: unknown");
+    fn an_unbalanced_net_charges_the_larger_side() {
+        // +300 and +200 on one wire, no sink: the edge carries max(200, 500 − 200).
+        let wires = vec![shape(1, 0, 0, 10_000, 500)];
+        let flow = net_flow(stack(), &wires, &[term(0, 0, 200, 500, Some(300.0)), term(9_800, 0, 200, 500, Some(200.0))]).unwrap();
+        assert!((flow.shape_ua[0] - 300.0).abs() < 1e-3, "{:?}", flow.shape_ua);
+        // Drop end to end: 0.125 Ω/□ · 9.8 µm / 0.5 µm = 2.45 Ω at 300 µA.
+        assert!((flow.drop_uv - 735.0).abs() < 0.1, "{}", flow.drop_uv);
     }
 
     #[test]
-    fn missing_current_limit_or_route_is_unknown() {
-        let r = routes();
-        assert!(!em(-1, 1_000.0).known(&r), "no operating point");
-        assert!(!em(400, 0.0).known(&r), "no deck current density");
-        assert!(!em(400, 1_000.0).known(&Routes { wires: vec![vec![]], ..Default::default()  }), "unrouted");
-        assert!(em(-1, 1_000.0).satisfied(&r), "search cannot act on an unknown");
+    fn parallel_paths_are_bounded_by_the_tree_path() {
+        // Two equal met1 wires between end bars: A(+1000) left, B(−1000) right.
+        let wires = vec![
+            shape(1, 0, 0, 200, 2_200),
+            shape(1, 9_800, 0, 200, 2_200),
+            shape(1, 0, 2_000, 10_000, 200),
+            shape(1, 0, 0, 10_000, 200),
+        ];
+        let flow = net_flow(stack(), &wires, &[term(0, 1_000, 200, 200, Some(1_000.0)), term(9_800, 1_000, 200, 200, Some(-1_000.0))]).unwrap();
+        assert!((flow.shape_ua[2] - 1_000.0).abs() < 1e-3 && (flow.shape_ua[3] - 1_000.0).abs() < 1e-3, "{:?}", flow.shape_ua);
+    }
+
+    /// Unknown without the stack, without a limit on any routed layer, or
+    /// without routed terminals; a known **zero** current is a real pass.
+    #[test]
+    fn missing_stack_limit_or_terminals_is_unknown_and_zero_is_known() {
+        let r = jog(Some(-500.0));
+        assert!(!Electromigration { stack: None, ..em() }.known(&r), "no stack");
+        let mut other = em();
+        other.limits = [(u16::MAX, Limit::default()); MAX_LAYERS];
+        other.limits[0] = (3, Limit { ua_per_um: 2_800.0, ..Limit::default() });
+        assert!(!other.known(&r), "a limit listed for another layer does not apply to met1");
+        assert!(!em().known(&routes(r.wires[0].clone(), Vec::new())), "no terminals");
+        let open = routes(r.wires[0].clone(), vec![r.terms[0][0], term(50_000, 0, 10, 10, Some(-500.0))]);
+        assert!(!em().known(&open), "an unreached terminal");
+        let zero = routes(r.wires[0].clone(), vec![term(0, 400, 200, 200, Some(0.0)), term(9_000, 1_300, 140, 100, Some(0.0))]);
+        assert!(em().known(&zero) && em().satisfied(&zero));
     }
 
     /// Hastings' worked derating: 398 K on a 378 K rating with Ea 0.7 eV, n 2

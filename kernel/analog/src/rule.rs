@@ -179,6 +179,15 @@ pub trait RuleBatch<On>: Send + Sync {
     fn violating_ids(&self, state: &On, out: &mut Vec<u32>) {
         let _ = (state, out);
     }
+    /// [`RuleBatch::violating_ids`], each with the residual of the violated
+    /// rule touching it ([`Rule::residual`], floored like
+    /// [`RuleBatch::residual`]). Default `NaN`: the batch does not split its
+    /// residual per rule.
+    fn violating_residuals(&self, state: &On, out: &mut Vec<(u32, f32)>) {
+        let mut ids = Vec::new();
+        self.violating_ids(state, &mut ids);
+        out.extend(ids.into_iter().map(|i| (i, f32::NAN)));
+    }
     /// Ids touched by every rule, satisfied or not (see [`Rule::touches`]).
     fn touched(&self, out: &mut Vec<u32>) {
         let _ = out;
@@ -245,6 +254,14 @@ impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {
     fn violating_ids(&self, s: &R::On, out: &mut Vec<u32>) {
         for r in self.iter().filter(|r| !r.satisfied(s)) {
             r.touches(out);
+        }
+    }
+    fn violating_residuals(&self, s: &R::On, out: &mut Vec<(u32, f32)>) {
+        let mut ids = Vec::new();
+        for r in self.iter().filter(|r| !r.satisfied(s)) {
+            r.touches(&mut ids);
+            let x = rule_residual(*r, s) as f32;
+            out.extend(ids.drain(..).map(|i| (i, x)));
         }
     }
     fn touched(&self, out: &mut Vec<u32>) {
@@ -478,6 +495,9 @@ mod tests {
         let mut viol = Vec::new();
         batch.violating_ids(&(), &mut viol);
         assert_eq!(viol, vec![2], "violating_ids filters");
+        let mut res = Vec::new();
+        batch.violating_residuals(&(), &mut res);
+        assert_eq!(res, vec![(2, 1.0)], "per violated rule, its own residual (default 1.0)");
     }
 
     #[test]

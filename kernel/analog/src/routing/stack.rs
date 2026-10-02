@@ -154,7 +154,7 @@ impl Stack {
     /// path between them). `None` for a terminal no shape reaches.
     #[must_use]
     pub fn terminal_resistance_ohm(&self, shapes: &[Shape], terminals: &[Rect]) -> Vec<Option<f32>> {
-        let g = self.port_graph(shapes, terminals);
+        let g = self.port_graph(shapes, terminals, false);
         let reach = |r: &[Option<f32>]| r.iter().flatten().copied().fold(0.0f32, f32::max);
         (0..g.adj.len())
             .map(|c| g.from(&[c]))
@@ -169,7 +169,7 @@ impl Stack {
     #[must_use]
     pub fn fed_resistance_ohm(&self, shapes: &[Shape], feeds: &[Rect], terminals: &[Rect]) -> Vec<Option<f32>> {
         let all: Vec<Rect> = terminals.iter().chain(feeds).copied().collect();
-        let g = self.port_graph(shapes, &all);
+        let g = self.port_graph(shapes, &all, false);
         let src: Vec<usize> = g.term[terminals.len()..].iter().flatten().copied().collect();
         if src.is_empty() {
             return vec![None; terminals.len()];
@@ -182,9 +182,15 @@ impl Stack {
     /// The routed net as a resistor graph: on each metal shape, a port where
     /// it touches another shape and where a terminal sits over it, joined
     /// along the shape by `R□·Δ/w` (distance along its long axis); a cut is
-    /// one node reached through half its R from each metal it joins.
-    fn port_graph(&self, shapes: &[Shape], terminals: &[Rect]) -> PortGraph {
-        let items: Vec<(usize, Rect, &Layer)> = shapes.iter().filter_map(|s| self.at(s.layer.0).map(|(k, l)| (k, s.rect, l))).collect();
+    /// one node reached through half its R from each metal it joins. Each
+    /// link records the index into `shapes` it runs through (`u32::MAX` for a
+    /// 0-Ω junction or terminal link). A terminal joins every shape it
+    /// overlaps in xy, or with `lowest` only those on the lowest stack rank it
+    /// overlaps: a pin is drawn on one layer, and what sits over it higher up
+    /// reaches it through the cuts, which then carry its current.
+    pub(crate) fn port_graph(&self, shapes: &[Shape], terminals: &[Rect], lowest: bool) -> PortGraph {
+        let items: Vec<(usize, Rect, &Layer, u32)> =
+            shapes.iter().enumerate().filter_map(|(i, s)| self.at(s.layer.0).map(|(k, l)| (k, s.rect, l, i as u32))).collect();
         let centre = |a: &Rect, b: &Rect| {
             let (x0, x1) = (a.x.max(b.x), (a.x + a.w).min(b.x + b.w));
             let (y0, y1) = (a.y.max(b.y), (a.y + a.h).min(b.y + b.h));
@@ -199,10 +205,10 @@ impl Stack {
             g.adj.len() - 1
         };
         // Cuts are single nodes.
-        let cut_node: Vec<Option<usize>> = items.iter().map(|(_, _, l)| l.cut.then(|| node(&mut g))).collect();
+        let cut_node: Vec<Option<usize>> = items.iter().map(|(_, _, l, _)| l.cut.then(|| node(&mut g))).collect();
         for i in 0..items.len() {
             for j in i + 1..items.len() {
-                let ((ri, a, la), (rj, b, lb)) = (items[i], items[j]);
+                let ((ri, a, la, si), (rj, b, lb, sj)) = (items[i], items[j]);
                 if ri.abs_diff(rj) > 1 || !a.touches(&b) {
                     continue;
                 }
@@ -210,24 +216,25 @@ impl Stack {
                 match (cut_node[i], cut_node[j]) {
                     (Some(_), Some(_)) => {}
                     (Some(c), None) | (None, Some(c)) => {
-                        let (m, cut) = if la.cut { (j, la) } else { (i, lb) };
+                        let (m, cut, sc) = if la.cut { (j, la, si) } else { (i, lb, sj) };
                         let p = node(&mut g);
                         ports[m].push((along(&items[m].1, at), p));
-                        g.link(p, c, cut.sheet_ohm / 2.0);
+                        g.link(p, c, cut.sheet_ohm / 2.0, sc);
                     }
                     (None, None) => {
                         let (p, q) = (node(&mut g), node(&mut g));
                         ports[i].push((along(&a, at), p));
                         ports[j].push((along(&b, at), q));
-                        g.link(p, q, 0.0);
+                        g.link(p, q, 0.0, u32::MAX);
                     }
                 }
             }
         }
         for (t, r) in terminals.iter().enumerate() {
             let c = (r.x + r.w / 2, r.y + r.h / 2);
-            for (i, (_, s, _)) in items.iter().enumerate() {
-                if !r.touches(s) {
+            let floor = if lowest { items.iter().filter(|(_, s, ..)| r.touches(s)).map(|it| it.0).min() } else { None };
+            for (i, &(k, ref s, ..)) in items.iter().enumerate() {
+                if !r.touches(s) || floor.is_some_and(|f| k != f) {
                     continue;
                 }
                 let n = cut_node[i].unwrap_or_else(|| {
@@ -236,17 +243,17 @@ impl Stack {
                     p
                 });
                 match g.term[t] {
-                    Some(prev) => g.link(prev, n, 0.0),
+                    Some(prev) => g.link(prev, n, 0.0, u32::MAX),
                     None => g.term[t] = Some(n),
                 }
             }
         }
-        for (i, (_, s, l)) in items.iter().enumerate() {
+        for (i, &(_, s, l, si)) in items.iter().enumerate() {
             let p = &mut ports[i];
             p.sort_unstable();
             let w = s.w.min(s.h).max(1) as f32;
             for k in 1..p.len() {
-                g.link(p[k - 1].1, p[k].1, l.sheet_ohm * (p[k].0 - p[k - 1].0) as f32 / w);
+                g.link(p[k - 1].1, p[k].1, l.sheet_ohm * (p[k].0 - p[k - 1].0) as f32 / w, si);
             }
         }
         g
@@ -319,23 +326,38 @@ impl Stack {
     }
 }
 
-/// `(run, gap)` of two shapes separated on one axis and overlapping on the
-/// [`Stack::port_graph`]'s resistor network: adjacency `(node, Ω)` and each
-/// terminal's node.
-struct PortGraph {
-    adj: Vec<Vec<(usize, f32)>>,
-    term: Vec<Option<usize>>,
+/// [`Stack::port_graph`]'s resistor network: adjacency `(node, Ω, shape
+/// index)` (`u32::MAX`: a 0-Ω junction or terminal link) and each terminal's
+/// node.
+pub(crate) struct PortGraph {
+    pub(crate) adj: Vec<Vec<(usize, f32, u32)>>,
+    pub(crate) term: Vec<Option<usize>>,
 }
 
 impl PortGraph {
-    fn link(&mut self, a: usize, b: usize, r: f32) {
-        self.adj[a].push((b, r));
-        self.adj[b].push((a, r));
+    fn link(&mut self, a: usize, b: usize, r: f32, shape: u32) {
+        self.adj[a].push((b, r, shape));
+        self.adj[b].push((a, r, shape));
     }
 
     /// Least R from `src` to each terminal.
     fn from(&self, src: &[usize]) -> Vec<Option<f32>> {
+        let dist = self.dijkstra(src).0;
+        self.term.iter().map(|t| t.map(|n| dist[n]).filter(|d| d.is_finite())).collect()
+    }
+
+    /// The parent link `(parent, Ω, shape index)` of every node a least-R
+    /// tree from `root` reaches; `None` for the root and unreached nodes.
+    pub(crate) fn tree(&self, root: usize) -> Vec<Option<(usize, f32, u32)>> {
+        self.dijkstra(&[root]).1
+    }
+
+    /// Least R from the nearest of `src` to every node, and each reached
+    /// node's parent link on that path.
+    #[allow(clippy::type_complexity)]
+    fn dijkstra(&self, src: &[usize]) -> (Vec<f32>, Vec<Option<(usize, f32, u32)>>) {
         let mut dist = vec![f32::INFINITY; self.adj.len()];
+        let mut parent = vec![None; self.adj.len()];
         let mut heap = std::collections::BinaryHeap::new();
         for &s in src {
             dist[s] = 0.0;
@@ -345,18 +367,20 @@ impl PortGraph {
             if f32::from_bits(d) > dist[a] {
                 continue;
             }
-            for &(b, r) in &self.adj[a] {
+            for &(b, r, shape) in &self.adj[a] {
                 let nd = dist[a] + r;
                 if nd < dist[b] {
                     dist[b] = nd;
+                    parent[b] = Some((a, r, shape));
                     heap.push(std::cmp::Reverse((nd.to_bits(), b)));
                 }
             }
         }
-        self.term.iter().map(|t| t.map(|n| dist[n]).filter(|d| d.is_finite())).collect()
+        (dist, parent)
     }
 }
 
+/// `(run, gap)` of two shapes separated on one axis and overlapping on the
 /// other; `None` otherwise.
 #[must_use]
 pub fn parallel(p: &Rect, q: &Rect) -> Option<(i32, i32)> {

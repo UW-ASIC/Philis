@@ -288,8 +288,12 @@ fn solve(
 
     // 5. Stages. The metal stack and router config come from the deck.
     let (layers, cuts, pin_access) = elaborate::routing_stack(pdk);
-    let em = elaborate::em_limits(pdk, &layers, &cuts, cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15));
-    em_rules(&mut problem, &netlist, currents.as_deref(), &em);
+    // EM limits on the pin-access layer and cut too (sky130 mcon 0.36 mA/cut):
+    // the access jogs and pin cuts carry their terminal's current.
+    let em_layers: Vec<LayerId> = layers.iter().copied().chain(pin_access.map(|p| p.0)).collect();
+    let em_cuts: Vec<elaborate::Cut> = cuts.iter().copied().chain(pin_access.map(|p| p.1)).collect();
+    let em = elaborate::em_limits(pdk, &em_layers, &em_cuts, cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15));
+    em_rules(&mut problem, &netlist, &em, &em_layers, &em_cuts, ann.process.stack);
     // IR-drop budgets (PWR-02) on nets carrying op current (`annotator::ir`).
     if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
         let vdd_mv = cfg.op.as_ref().map_or(1_800.0, |o| o.vdd * 1e3);
@@ -1027,47 +1031,37 @@ fn check_injected(netlist: &pnr_core::Netlist, injected: &Macros, pdk: &Pdk) -> 
     Ok(())
 }
 
-/// One hard [`analog::routing::Electromigration`] per routed (≥ 2-terminal) net,
-/// on the largest current any one terminal draws from it, against each routing
-/// metal's own derated deck limit. Unknown without an operating point (or with
-/// an unresolved device on the net); a deck with no EM rule on any routing
-/// metal is listed as a missing input.
+/// One hard [`analog::routing::Electromigration`] per routed (≥ 2-terminal)
+/// net: every routed segment and via against its layer's derated deck limit,
+/// on the currents `dr` records per terminal (`Routes::terms`; unknown
+/// without an operating point or with an unresolved device on the net). A
+/// routed or pin-access layer (`metals`, `cuts`) with no deck limit is listed
+/// once as a missing input: its shapes go unchecked.
 fn em_rules(
     problem: &mut Problem,
     netlist: &pnr_core::Netlist,
-    currents: Option<&[Option<Vec<(String, f64)>>]>,
     em: &[(pnr_core::LayerId, analog::routing::em::Limit)],
+    metals: &[LayerId],
+    cuts: &[elaborate::Cut],
+    stack: Option<&'static analog::routing::Stack>,
 ) {
-    use analog::routing::em::{Limit, MAX_METALS};
-    let mut limits = [(u16::MAX, Limit::default()); MAX_METALS];
-    for (slot, &(l, lim)) in limits.iter_mut().zip(em.iter().filter(|(_, lim)| lim.ua_per_um > 0.0)) {
+    use analog::routing::em::{Limit, MAX_LAYERS};
+    let mut limits = [(u16::MAX, Limit::default()); MAX_LAYERS];
+    for (slot, &(l, lim)) in limits.iter_mut().zip(em) {
         *slot = (l.0, lim);
     }
-    let n = netlist.nets.len();
-    let (mut terminals, mut worst) = (vec![0usize; n], vec![Some(0.0f64); n]);
-    for (i, d) in netlist.devices.iter().enumerate() {
-        let draws = currents.and_then(|c| c.get(i)).map(Option::as_ref);
-        for (t, net) in &d.terminals {
-            let k = net.0 as usize;
-            terminals[k] += 1;
-            let ua = match draws {
-                Some(Some(ts)) => ts.iter().find(|(x, _)| x == t).map_or(Some(0.0), |&(_, ua)| Some(ua.abs())),
-                _ => None,
-            };
-            worst[k] = worst[k].zip(ua).map(|(a, b)| a.max(b));
-        }
+    let has = |l: LayerId, f: fn(&Limit) -> f32| limits.iter().any(|(x, lim)| *x == l.0 && f(lim) > 0.0);
+    if !metals.iter().all(|&l| has(l, |e| e.ua_per_um)) || !cuts.iter().all(|&(c, ..)| has(c, |e| e.ua_per_cut)) {
+        problem.missing.push(("Electromigration", "a routed or pin-access layer has no deck EM limit (unchecked)"));
     }
-    let rules: Vec<analog::routing::Electromigration> = (0..n)
+    let mut terminals = vec![0usize; netlist.nets.len()];
+    for (_, net) in netlist.devices.iter().flat_map(|d| &d.terminals) {
+        terminals[net.0 as usize] += 1;
+    }
+    let rules: Vec<analog::routing::Electromigration> = (0..terminals.len())
         .filter(|&k| terminals[k] >= 2)
-        .map(|k| analog::routing::Electromigration {
-            net: pnr_core::NetId(k as u16),
-            current_ua: worst[k].map_or(-1, |ua| ua.ceil() as i32),
-            limits,
-        })
+        .map(|k| analog::routing::Electromigration { net: pnr_core::NetId(k as u16), limits, stack })
         .collect();
-    if limits[0].0 == u16::MAX {
-        problem.missing.push(("Electromigration", "deck EM rule on a routing metal"));
-    }
     problem.routing.hard.push(Box::new(rules));
 }
 

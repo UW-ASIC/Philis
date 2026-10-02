@@ -4,6 +4,7 @@ pub mod antenna;
 pub mod common_node;
 pub mod coupling;
 pub mod crosstalk;
+pub mod current;
 pub mod differential;
 pub mod em;
 pub mod ir;

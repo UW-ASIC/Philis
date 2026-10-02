@@ -233,8 +233,12 @@ impl DetailedRoute {
         // DC current a terminal rect draws, µA: over the cell's pins there (two
         // members sharing a region draw one pin each at one rect), each pin's
         // terminal current (by pin name) times its share. No table entry
-        // (ring, diode) draws 0; any `None` is unknown.
+        // (ring, diode) draws 0; any `None`, or no table at all (no operating
+        // point), is unknown.
         let pin_ua = |net: NetId, r: Rect| -> Option<f32> {
+            if cfg.pin_ua.is_empty() {
+                return None;
+            }
             placed.iter().zip(&cfg.pin_ua).enumerate().find_map(|(c, (m, table))| {
                 let mut hit = None;
                 for (p, pin) in m.pins.iter().enumerate().filter(|(_, p)| p.net == net && p.at == r) {
@@ -738,7 +742,8 @@ impl DetailedRoute {
         // gets fewer than its EM count (Lienig eq. 3.25) goes to Θ.
         //
         // ponytail: equal sharing across an array's cuts; crowding at a turn
-        // (Lienig §4.6.4) and access-jog cuts are unchecked.
+        // (Lienig §4.6.4) is unchecked, and access-jog cuts are not sized here
+        // (the hard `Electromigration` rule checks them on the final routes).
         let mut em_cuts = vec![0.0f64; n_nets];
         let all_cuts: Vec<(usize, Shape)> = routes
             .wires
@@ -896,6 +901,13 @@ impl DetailedRoute {
         }
 
         (routes.cell, routes.gates) = (cell_abs, gates_abs);
+        // The terminals and their currents, for the EM rule. Final routes only:
+        // the repair probes carry none, so EM reads unknown there and the
+        // blind reroute arm never chases it (width is not a search resource).
+        routes.terms = vec![Vec::new(); n_nets];
+        for &(net, r, _) in &all_pins {
+            routes.terms[net.0 as usize].push(pnr_core::Terminal { at: r, ua: pin_ua(net, r) });
+        }
         let cap_total = cold.graph.nodes() as f32;
         let mut report = score(&routes, reqs, overuse, cap_total, &joins, &sacrificed, &em_shortfall);
         for (net, &r) in em_cuts.iter().enumerate().filter(|(_, &r)| r > 0.0) {
@@ -2408,6 +2420,12 @@ mod tests {
         assert!(trunks(0).contains(&400), "the 400 µA branch is not sized for 1 mA: {:?}", trunks(0));
         assert_eq!(trunks(1).iter().max(), Some(&290));
         assert!(report.budget_violations.is_empty(), "{:?}", report.budget_violations.iter().map(|v| &v.rule).collect::<Vec<_>>());
+        // The final routes carry each pin and its current for the EM rule;
+        // without an operating point every current is unknown, never 0.
+        let terms = routes.terminals(NetId(0));
+        assert_eq!(terms.iter().map(|t| (t.at, t.ua)).collect::<Vec<_>>(), [(pins[0].1, Some(-1_000.0)), (pins[1].1, Some(600.0)), (pins[2].1, Some(400.0))]);
+        let (bare, _) = route(DetailedCfg { pin_ua: Vec::new(), ..cfg_of() }, &global, &pins, &[cell_of()], &[], &mut gr::Negotiation::new());
+        assert!(bare.terminals(NetId(0)).len() == 3 && bare.terminals(NetId(0)).iter().all(|t| t.ua.is_none()));
         // A 1 µA cut limit asks ~1000 cuts of the source's via: Θ says so.
         let starved = DetailedCfg { em: vec![(LAYERS[0], lim), (LAYERS[1], lim), (CUTS[0].0, Limit { ua_per_cut: 1.0, ..lim })], ..cfg_of() };
         let (_, report) = route(starved, &global, &pins, &[cell_of()], &[], &mut gr::Negotiation::new());
