@@ -119,8 +119,9 @@ fn generators_read_exactly_the_required_keys() {
         drawn.push(("bjt", draw_all::<Bjt>(p, kind, &[1, 8], 1000, 1000, Parallel)));
     }
     drawn.push(("diode", draw_all::<Diode>(p, DeviceKind::Diode, &[1, 1], 500, 1000, Parallel)));
-    drawn.push(("inductor", draw_all::<Inductor>(p, DeviceKind::Inductor, &[1], 2000, 20_000, Parallel)));
-    // sky130 has no fin layer: FinFet offers nothing here, recorded for completeness.
+    // No deck recognises an inductor, so Inductor offers nothing (CELL-04), and
+    // sky130 has no fin layer, so neither does FinFet: recorded for completeness.
+    draw_all::<Inductor>(p, DeviceKind::Inductor, &[1], 2000, 20_000, Parallel);
     draw_all::<FinFet>(p, Nmos, &[1], 1680, 150, Parallel);
     let empty: Vec<_> = drawn.iter().filter(|(_, n)| *n == 0).collect();
     assert!(empty.is_empty(), "generators that drew nothing, so recorded nothing: {empty:?}");
