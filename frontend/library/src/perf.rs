@@ -228,7 +228,7 @@ pub fn sensitivities(netlist: &Netlist, cfg: &PerfConfig, nets: &[String], delta
 /// f0` (`sign = +1`). A bound the schematic already misses (`headroom ≤ 0`)
 /// keeps a do-not-worsen row: `limit = 0`, `w_i = sign·(∂f/∂C_i) / |bound|`
 /// (`miss`'s unit-free scale, `1` for a zero bound). A spec the schematic does
-/// measure finitely, or a non-finite bound, has no row (reported by the
+/// not measure finitely, or a non-finite bound, has no row (reported by the
 /// caller); a net whose run did not measure is left out of the row.
 #[must_use]
 pub fn budget_rows(

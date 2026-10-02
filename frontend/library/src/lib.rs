@@ -253,7 +253,7 @@ fn performance_rows(
     let notes = |rows: &[analog::routing::PerformanceBudget], why: &str| -> Vec<String> {
         let notes: Vec<String> = bounds()
             .map(|b| match rows.iter().find(|r| r.metric == b) {
-                Some(r) if r.nets.is_empty() => format!("{b}: no row (no net sensitivity measured)"),
+                Some(r) if r.nets.is_empty() => format!("{b}: row with no measured nets"),
                 Some(r) if r.limit > 0.0 => format!("{b}: row ({} nets)", r.nets.len()),
                 Some(_) => format!("{b}: do-not-worsen row (the schematic misses it)"),
                 None => format!("{b}: no row ({why})"),
