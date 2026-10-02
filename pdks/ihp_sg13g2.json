@@ -78,7 +78,7 @@
     "mom_finger_width": 160,
     "res_min_width": 500,
     "tie_max_dist_nm": 20000,
-    "tie_max_dist_nm_source": "UNVERIFIED: no source was recorded with this value. Read by no code. FLOW-05 replaces it with the deck's latch-up tie distance, sourced.",
+    "tie_max_dist_nm_source": "ihp_sg13g2.deck LU.a, LU.b missing_tie max_distance 20um. Read by no code yet (CELL-13 tap reach).",
     "wpe_clearance_moderate": 3000,
     "licon_poly_enc": 70,
     "polycon_to_diff_spacing": 140,

@@ -36,6 +36,9 @@ impl Process for Recording<'_> {
     fn sheet_ohm(&self, role: &str) -> Option<f32> {
         self.0.sheet_ohm(role)
     }
+    fn cut_ohm(&self, cut: &str, onto: &str) -> Option<f32> {
+        self.0.cut_ohm(cut, onto)
+    }
     fn space(&self, role: &str) -> Option<i32> {
         self.0.space(role)
     }

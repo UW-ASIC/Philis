@@ -517,11 +517,12 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
 }
 
 /// One guard-ring tap contact's resistance, ohms: the deck's `pex` value for
-/// the `licon` role's cut (0, no budget check, when the deck has none).
+/// a `licon` cut on `tap` (the larger of n- and p-tap; 0, no budget check,
+/// when the deck has none).
 #[must_use]
 pub fn ring_cut_ohm(pdk: &Pdk) -> f32 {
     use pnr_core::Process;
-    pdk.layer("licon").and_then(|l| pdk.pex_f32(l, "sheet_res_ohm_sq")).unwrap_or(0.0)
+    pdk.cut_ohm("licon", "tap").unwrap_or(0.0)
 }
 
 /// Placement's process numbers. Origins snap to the cells' cut lattice so

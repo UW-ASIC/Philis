@@ -458,7 +458,8 @@ rule ar.met1.1 antenna(gate, met1; max_ratio: 400, sidewall: 350nm)
 rule ar.via.1 antenna(gate, via; max_ratio: 6, sidewall: none)
 rule ar.met2.1 antenna(gate, met2; max_ratio: 400, sidewall: 350nm)
 rule ar.via2.1 antenna(gate, via2; max_ratio: 6, sidewall: none)
-rule ar.met3.1 antenna(gate, met3; max_ratio: 400, sidewall: 2000nm)
+# PHILIS: = pex met3 thickness (this deck) and VOL/magic/sky130A.tech:4890 'height allm3 2.7861 0.845'
+rule ar.met3.1 antenna(gate, met3; max_ratio: 400, sidewall: 845nm)
 rule ar.via3.1 antenna(gate, via3_m3; max_ratio: 6, sidewall: none)
 rule ar.met4.1 antenna(gate, met4; max_ratio: 400, sidewall: 845nm)
 rule ar.via4.1 antenna(gate, via4_m4; max_ratio: 6, sidewall: none)
@@ -506,6 +507,16 @@ rule m1.density warning density_cmp(met1; window: 700um x 700um, step: 70um x 70
 rule m2.density warning density_cmp(met2; window: 700um x 700um, step: 70um x 70um, min: none, max: 0.7, max_delta: none, partial_windows: false, cmp: none)
 rule m3.density warning density_cmp(met3; window: 700um x 700um, step: 70um x 70um, min: none, max: 0.7, max_delta: none, partial_windows: false, cmp: none)
 rule m4.density warning density_cmp(met4; window: 700um x 700um, step: 70um x 70um, min: none, max: 0.7, max_delta: none, partial_windows: false, cmp: none)
+
+# PHILIS: latch-up, VOL/magic/sky130A.tech:4163-4170 (LU.2, LU.2.1, LU.3: "< 15.0um"); operands as magic's
+# ptap_missing (*ndiff and-not dnwell, :1514-1516), dptap_missing (*ndiff and dnwell, :1608-1610) and
+# ntap_missing (*pdiff, :1547-1549), magic's ndiff/pdiff being the diffusions outside/inside the n-well.
+layer lu_ndiff = (nsd not nwell) not dnwell
+layer lu_ndiff_dnw = (nsd not nwell) and dnwell
+layer lu_pdiff = psd and nwell
+rule LU.2 tap_distance(lu_ndiff, ptap) <= 15um
+rule LU.2.1 tap_distance(lu_ndiff_dnw, ptap) <= 15um
+rule LU.3 tap_distance(lu_pdiff, ntap) <= 15um
 
 # --- Connectivity, bottom up ---
 connect conductors [nsd, psd, ntap, ptap, poly_c, li_c, met1, met2, met3, met4, met5]
@@ -601,6 +612,15 @@ pex via3_m3 thickness 390nm height 3631.1nm sheet 3.41ohm dielectric 4.1 area_ca
 pex met4 thickness 845nm height 4021.1nm sheet 0.047ohm dielectric 4.0 area_cap 8.42aF/um2 fringe_cap 36.68aF/um
 pex via4_m4 thickness 505nm height 4866.1nm sheet 0.38ohm dielectric 4.0 area_cap 0aF/um2 fringe_cap 0aF/um
 pex met5 thickness 1260nm height 5371.1nm sheet 0.029ohm dielectric 3.9 area_cap 6.32aF/um2 fringe_cap 38.85aF/um
+# PHILIS: sheet = rsh of sky130_fd_pr__res_generic_po (rp1 = 48.2, VOL/ngspice/r+c/res_typical__cap_typical.spice:21
+# and VOL/ngspice/sky130_fd_pr__model__r+c.model.spice:134); geometry columns = poly_c
+pex rbody_po thickness 180nm height 326.2nm sheet 48.2ohm dielectric 3.9 area_cap 106.13aF/um2 fringe_cap 55.27aF/um
+# PHILIS: sheet = rsheet of sky130_fd_pr__res_high_po (VOL/../libs.ref/sky130_fd_pr/spice/sky130_fd_pr__res_high_po.model.spice:27;
+# head rhead_ps :29 and width bias rbody_dw :28 stay in the model card); geometry columns = poly_c
+pex rbody_high_po thickness 180nm height 326.2nm sheet 317.3885ohm dielectric 3.9 area_cap 106.13aF/um2 fringe_cap 55.27aF/um
+# PHILIS: sheet = rsheet of sky130_fd_pr__res_xhigh_po (VOL/../libs.ref/sky130_fd_pr/spice/sky130_fd_pr__res_xhigh_po.model.spice:27);
+# geometry columns = poly_c
+pex rbody_xhigh_po thickness 180nm height 326.2nm sheet 2000ohm dielectric 3.9 area_cap 106.13aF/um2 fringe_cap 55.27aF/um
 
 # --- Presence rules [S1] ---
 # A straddle is the part of a shape on the other layer touching its part off it.
