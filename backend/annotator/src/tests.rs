@@ -449,6 +449,38 @@ fn shields_are_requested_only_against_a_clock() {
 }
 
 #[test]
+fn a_shielded_victim_books_no_coupling_to_its_shield() {
+    // RTE-02: the ground shield the clocked OTA asks for is not an aggressor.
+    use pnr_core::geom::{LayerId, Rect, Shape};
+    let mut nl = ota();
+    nl.nets.push(Net { name: "clk".into() });
+    nl.nets.push(Net { name: "sw".into() });
+    let (clk, sw) = (nl.nets.len() as u16 - 2, nl.nets.len() as u16 - 1);
+    nl.devices.push(fet("XS", DeviceKind::Nmos, clk, sw, 3, 3, 1_000, 150));
+    nl.devices.push(fet("XC", DeviceKind::Nmos, clk, 0, 3, 3, 1_000, 150));
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.gate_af_per_um2 = Some(8_325.0);
+    cfg.process.wire_af_per_um = Some(50.0);
+    let p = annotate(&nl, &cfg);
+    let mut pairs = Vec::new();
+    p.routing.budget.iter().find(|b| b.kind().ends_with("Shield")).expect("shield batch").shield_pairs(&mut pairs);
+    let (victim, vss) = pairs[0];
+    let coup = p.routing.budget.iter().find(|b| b.kind().ends_with("CouplingBudget")).expect("coupling batch");
+    // 100 mm of victim between its shield tracks 1 nm away: far past any budget.
+    let wire = |y: i32| Shape { layer: LayerId(0), rect: Rect { x: 0, y, w: 100_000_000, h: 1 } };
+    let mut wires = vec![Vec::new(); nl.nets.len()];
+    wires[victim as usize] = vec![wire(0)];
+    wires[vss as usize] = vec![wire(-2), wire(2)];
+    let shielded = pnr_core::routes::Routes { wires: wires.clone(), ..Default::default() };
+    assert_eq!(coup.violations(&shielded), 0, "its own shield is not an aggressor");
+    // The same track held by the clock is.
+    wires[vss as usize].clear();
+    wires[clk as usize] = vec![wire(2)];
+    let clocked = pnr_core::routes::Routes { wires, ..Default::default() };
+    assert!(coup.violations(&clocked) > 0, "a clock beside the victim still counts");
+}
+
+#[test]
 fn a_lone_mirror_stage_is_symmetric_too() {
     // No diff pair in the stage: the mirror pair still shares the stage axis,
     // hard (the equality) and cost (the pull toward it).
