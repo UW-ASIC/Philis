@@ -1546,7 +1546,7 @@ mod start_tests {
     use pnr_core::{Report, Violation};
 
     fn row(arm: Arm, total: usize, satisfied: usize, residual: f64) -> BudgetStatus {
-        BudgetStatus { kind: "K".into(), arm, total, satisfied, unknown: 0, criticality: 0.0, residual, usage: None }
+        BudgetStatus { kind: "K".into(), arm, total, satisfied, unknown: 0, criticality: 0.0, residual, usage: None, violated: Vec::new() }
     }
 
     fn rows(rules: &[&str]) -> Vec<Violation> {
