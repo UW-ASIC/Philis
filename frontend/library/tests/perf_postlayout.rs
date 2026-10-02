@@ -7,7 +7,7 @@
 use library::oppoint::OpConfig;
 use library::perf::{evaluate, Parasitics, PerfConfig, Spec};
 
-/// Whether this test may skip: `true` when `what` is present; otherwise a
+/// Whether this test may run: `true` when `what` is present; otherwise a
 /// panic under `PHILIS_REQUIRE_TOOLS=1`, else an `eprintln!` and `false`.
 fn present_or_skip(what: &str, present: bool) -> bool {
     if !present {
@@ -44,10 +44,12 @@ fn models() -> Option<std::path::PathBuf> {
     present_or_skip(&format!("sky130 models ({lib:?})"), found).then(|| lib.unwrap())
 }
 
-/// A binary that is on no PATH skips (returns `false`) in a plain run and
-/// panics when the run requires tools; either way it never reads as present.
+/// The cargo running this build reads as present (so detection cannot
+/// silently skip every ngspice test); a binary that is on no PATH skips
+/// (returns `false`) in a plain run and panics when the run requires tools.
 #[test]
-fn tool_or_skip_reports_a_missing_binary() {
+fn tool_or_skip_tells_present_from_missing() {
+    assert!(tool_or_skip(env!("CARGO")), "the building cargo must read as present");
     let bin = "philis-no-such-binary-7f3a";
     if std::env::var_os("PHILIS_REQUIRE_TOOLS").is_some_and(|v| v == "1") {
         assert!(
