@@ -49,7 +49,10 @@ fn models() -> Option<std::path::PathBuf> {
 /// (returns `false`) in a plain run and panics when the run requires tools.
 #[test]
 fn tool_or_skip_tells_present_from_missing() {
-    assert!(tool_or_skip(env!("CARGO")), "the building cargo must read as present");
+    assert!(
+        tool_or_skip(env!("CARGO")),
+        "the building cargo must read as present"
+    );
     let bin = "philis-no-such-binary-7f3a";
     if std::env::var_os("PHILIS_REQUIRE_TOOLS").is_some_and(|v| v == "1") {
         assert!(

@@ -1,6 +1,7 @@
-# CI (plan-08 FLOW-14, T13). Every push: debug workspace tests, the
-# release-only generator tests (their cross-deck loops are
-# `#[cfg(not(debug_assertions))]`), and an advisory rustfmt check. Nightly:
+# CI (plan-08 FLOW-14, T13). Every push: debug workspace tests, a release
+# run of cell_selfcheck (its cross-deck loops are
+# `#[cfg(not(debug_assertions))]`) and of ota_cross_pdk (which also runs in
+# debug; plan-08 FLOW-14 lists it), and an advisory rustfmt check. Nightly:
 # the tool-dependent tests with ngspice and the sky130 models installed and
 # `PHILIS_REQUIRE_TOOLS=1`, so a missing tool panics instead of skipping.
 # A red test stays red here; nothing is waived (dac4's ERC baseline in
