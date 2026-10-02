@@ -1017,6 +1017,9 @@ pub fn place_near(cell: &Macro, near: (i32, i32), obstacles: &[Rect], clearance:
                         bbox: mv(b),
                         units: cell.units.clone(),
                         dummies: cell.dummies.clone(),
+                        drawn: cell.drawn.clone(),
+                        keepouts: cell.keepouts.iter().map(|k| pnr_core::Keepout { rect: mv(k.rect), ..*k }).collect(),
+                        figures: cell.figures,
                     });
                 }
             }
@@ -2224,6 +2227,7 @@ mod tests {
             pins: vec![ring_pin(4_431, 4_207), ring_pin(15_113, 15_411)],
             units: Vec::new(),
             dummies: Vec::new(),
+            ..Default::default()
         };
         let global = Routes { wires: Vec::new(), ..Default::default()  };
         let (routes, report) =
@@ -2248,6 +2252,7 @@ mod tests {
             bbox: Rect { x: 6_000, y: -5_000, w: 3_000, h: 30_000 },
             units: Vec::new(),
             dummies: Vec::new(),
+            ..Default::default()
         };
         let (routes, report) =
             route(test_cfg(), &global, &pins, &[wall], &[], &mut gr::Negotiation::new());
@@ -2315,6 +2320,7 @@ mod tests {
             bbox: cell,
             units: vec![unit(0), unit(1)],
             dummies: Vec::new(),
+            ..Default::default()
         };
         let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000), pin(1, 8_000, 12_000)];
         let (routes, _) = route(test_cfg(), &global, &pins, &[matched], &[], &mut gr::Negotiation::new());
@@ -2367,6 +2373,7 @@ mod tests {
             bbox: Rect { x: 0, y: 0, w: 13_000, h: 10_000 },
             units: Vec::new(),
             dummies: Vec::new(),
+            ..Default::default()
         };
         let lim = Limit { ua_per_um: 1_000.0, ua_per_cut: 10_000.0, blech: 0.0 };
         let cfg_of = || DetailedCfg {
@@ -2457,6 +2464,7 @@ mod tests {
             bbox: Rect { x: 0, y: 0, w: 13_000, h: 10_000 },
             units: Vec::new(),
             dummies: Vec::new(),
+            ..Default::default()
         };
         let cfg = || DetailedCfg { pin_ua: vec![vec![("S".into(), -1_000), ("D".into(), 1_000)]], layer_r: vec![1.0, 1.0], via_r: vec![20.0], ..test_cfg() };
         let run = |max_drop_uv: Option<i64>| {
@@ -2525,6 +2533,7 @@ mod tests {
             bbox: Rect { x: 0, y: 0, w: 1_000, h: 1_000 },
             units: Vec::new(),
             dummies: Vec::new(),
+            ..Default::default()
         };
         let blocker = Rect { x: 4_000, y: 4_000, w: 2_000, h: 2_000 };
         let m = place_near(&cell, (5_000, 5_000), &[blocker], 500, 100, 20_000).unwrap();

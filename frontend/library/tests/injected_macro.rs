@@ -26,6 +26,7 @@ fn a_bar_of_diff_and_poly_is_not_a_transistor() {
         bbox: Rect { x: -200, y: -200, w: 4400, h: 1400 },
         units: Vec::new(),
         dummies: Vec::new(),
+        ..Default::default()
     };
     let mut macros = Macros::default();
     macros.register("M1", bar);

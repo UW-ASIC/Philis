@@ -27,6 +27,13 @@ impl Rule for Isolation {
     fn satisfied(self, l: &Layout) -> bool {
         l.edge_gap(self.a, self.b) >= self.min_distance_nm as f32
     }
+    fn touches(self, out: &mut Vec<u32>) {
+        for t in [self.a, self.b] {
+            if let Target::Device(d) = t {
+                out.push(u32::from(d.0));
+            }
+        }
+    }
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
     }
@@ -34,5 +41,26 @@ impl Rule for Isolation {
     fn residual(self, l: &Layout) -> f32 {
         let floor = self.min_distance_nm as f32;
         crate::rule::over(floor - l.edge_gap(self.a, self.b), floor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rule::RuleBatch;
+    use pnr_core::ids::{DeviceId, GroupId};
+
+    /// Device ids in `(a, b)` order; a `Group` side contributes nothing.
+    #[test]
+    fn touched_yields_device_ids_only() {
+        let (d, g) = (|i| Target::Device(DeviceId(i)), Target::Group(GroupId(0)));
+        let batch = vec![
+            Isolation { a: d(3), b: d(1), min_distance_nm: 10_000 },
+            Isolation { a: d(7), b: g, min_distance_nm: 10_000 },
+            Isolation { a: g, b: g, min_distance_nm: 10_000 },
+        ];
+        let mut ids = Vec::new();
+        batch.touched(&mut ids);
+        assert_eq!(ids, [3, 1, 7]);
     }
 }
