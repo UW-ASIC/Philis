@@ -56,10 +56,10 @@ fn dummies_per_end(process: &dyn Process) -> u8 {
 }
 
 /// Whether a finger's own distributed poly resistance, `R□·W/(3·L)`, exceeds
-/// its gate contact's: then a contact at the far end too pays for itself.
-/// `false` when the deck characterises neither.
+/// its gate contact's (a licon landing on poly): then a contact at the far end
+/// too pays for itself. `false` when the deck characterises either not.
 fn two_ended_gate_pays(process: &dyn Process, w: i32, l: i32) -> bool {
-    match (process.sheet_ohm("poly"), process.sheet_ohm("licon")) {
+    match (process.sheet_ohm("poly"), process.cut_ohm("licon", "poly")) {
         (Some(poly), Some(cut)) if l > 0 => poly * w as f32 / (3.0 * l as f32) > cut,
         _ => false,
     }
@@ -798,6 +798,14 @@ fn finger_sequence(n_dev: usize, style: Pattern, nf: u16, dev_nf: &[u16]) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sky130: 48.2·10000/(3·150) = 1071 Ω of finger poly against a 152 Ω
+    /// gate cut (`licon_po`), so a second gate contact pays.
+    #[test]
+    fn two_ended_gate_still_pays_on_sky130() {
+        let pdk = verify::Pdk::builtin("sky130").unwrap();
+        assert!(two_ended_gate_pays(&pdk, 10_000, 150));
+    }
 
     /// Every variant, drawn alone, is DRC- and ERC-clean.
     #[test]

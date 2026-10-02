@@ -635,8 +635,9 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>]) -> Vec<(u16, i
     let w_max = pdk.rule("max_finger_width", 0);
     // The deck's point-to-point R limit bounds a finger too: a finger's poly,
     // `R□·W_f/L`, within [`P2P_SHARE`] of it.
-    let p2p = pdk.p2p_max_ohm().zip(pdk.sheet_ohm("poly")).filter(|&(_, sq)| sq > 0.0);
-    let poly_sq = pdk.layer("poly").and_then(|l| pdk.pex_f32(l, "sheet_res_ohm_sq")).map_or(0.0, f64::from);
+    let poly_sq = pdk.sheet_ohm("poly").filter(|&sq| sq > 0.0);
+    let p2p = pdk.p2p_max_ohm().zip(poly_sq);
+    let poly_sq = poly_sq.map_or(0.0, f64::from);
     let mut out: Vec<(u16, i32)> = netlist.devices.iter().map(|d| (1, nm(d, "w"))).collect();
     let mut done = vec![false; netlist.devices.len()];
     for (i, d) in netlist.devices.iter().enumerate() {
