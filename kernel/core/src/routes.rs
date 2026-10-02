@@ -1,7 +1,15 @@
 //! Realised route geometry — the state routing rules score against.
 
-use crate::geom::Shape;
+use crate::geom::{Rect, Shape};
 use crate::ids::NetId;
+
+/// A routed terminal and the DC current it draws from its net, µA
+/// (+ into the device); `None` = unknown.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Terminal {
+    pub at: Rect,
+    pub ua: Option<f32>,
+}
 
 #[derive(Default)]
 pub struct Routes {
@@ -13,6 +21,9 @@ pub struct Routes {
     pub cell: Vec<Vec<Shape>>,
     /// Per net, its gate pins' rects: where the conductor meets a gate.
     pub gates: Vec<Vec<crate::geom::Rect>>,
+    /// Per net, every pin `dr` routed to, absolute, with its DC current
+    /// (the electromigration rule's current sources and sinks).
+    pub terms: Vec<Vec<Terminal>>,
 }
 
 impl Routes {
@@ -34,6 +45,12 @@ impl Routes {
     #[must_use]
     pub fn gate_pins(&self, net: NetId) -> &[crate::geom::Rect] {
         self.gates.get(net.0 as usize).map_or(&[], Vec::as_slice)
+    }
+
+    /// [`Routes::terms`] of `net`; empty when unknown.
+    #[must_use]
+    pub fn terminals(&self, net: NetId) -> &[Terminal] {
+        self.terms.get(net.0 as usize).map_or(&[], Vec::as_slice)
     }
 
     /// Debug-only stage-boundary check: no degenerate shapes, and each net is

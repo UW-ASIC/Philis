@@ -229,7 +229,7 @@ fn run_circuit(
     // `esc` > 0 means a variant-space binding (no arrangement of the chosen
     // variants was feasible), not a placement local minimum.
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}{} | overuse {} | DRC {} | LVS {} | ERC {}{} | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | overuse {} | DRC {} | LVS {} | ERC {}{} | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | EM {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
@@ -253,6 +253,11 @@ fn run_circuit(
         sol.metadata.bias.as_ref().map_or_else(
             || "none".to_string(),
             |b| format!("{} uW, {}", b.total_power_uw, if b.provenance.starts_with("SYNTH") { "probe" } else { "testbench" })
+        ),
+        // Per fixture (REL T3/T4): nets checked, of them violated, and unknown.
+        sol.metadata.routing.iter().find(|r| r.kind == "Electromigration").map_or_else(
+            || "none".to_string(),
+            |r| format!("known {} (viol {}), unknown {}", r.total - r.unknown, r.total - r.satisfied, r.unknown)
         ),
     );
 
@@ -295,8 +300,17 @@ fn run_circuit(
     let _ = std::fs::write(debug_dir.join(format!("{}.gds", c.name)), &gds_bytes);
     let _ = std::fs::write(debug_dir.join("signoff.txt"), &outcome);
     // Every hard violation verbatim — the summary counts alone can't say which rule fired.
-    let detail: String =
-        report.hard_violations.iter().map(|v| format!("{}\t{}\n", v.rule, v.margin)).collect();
+    // Then each routing hard rule the run itself scored, per net it violates
+    // (EM, per net: REL-03).
+    let net_name = |n: u32| sol.netlist.nets.get(n as usize).map_or_else(|| format!("#{n}"), |x| x.name.clone());
+    let detail: String = report
+        .hard_violations
+        .iter()
+        .map(|v| format!("{}\t{}\n", v.rule, v.margin))
+        .chain(sol.metadata.routing.iter().filter(|r| r.arm == library::metadata::Arm::Hard).flat_map(|r| {
+            r.violated.iter().map(move |&n| format!("route/{}: net {}\t1\n", r.kind, net_name(n)))
+        }))
+        .collect();
     let _ = std::fs::write(debug_dir.join("violations.txt"), detail);
     // DRC again, unsummarised: `signoff` keeps only (rule, margin), and without the
     // representative x/y there is no way to tell a cell-internal violation from one

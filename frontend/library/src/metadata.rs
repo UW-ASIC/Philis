@@ -36,6 +36,9 @@ pub struct BudgetStatus {
     /// Largest spent fraction of a rule's budget (`1.0` = at the spec);
     /// `None` when no rule reports one.
     pub usage: Option<f32>,
+    /// Ids the violated rules touch, sorted, deduplicated: net ids for
+    /// routing, cell ids for placement.
+    pub violated: Vec<u32>,
 }
 
 impl BudgetStatus {
@@ -142,6 +145,8 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         let criticality = b.criticality(state);
         let residual = b.residual(state);
         let usage = b.worst_usage(state);
+        let mut violated = Vec::new();
+        b.violating_ids(state, &mut violated);
         // One row per family: batches of the same kind merge, since the annotator
         // emits one batch per recognised structure. Residuals *sum* — each is
         // normalised by its own budget, so the family total stays a real measure
@@ -157,6 +162,7 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
             };
+            e.violated.extend(violated);
         } else {
             out.push(BudgetStatus {
                 kind,
@@ -167,8 +173,13 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
                 criticality,
                 residual,
                 usage,
+                violated,
             });
         }
+    }
+    for e in &mut out {
+        e.violated.sort_unstable();
+        e.violated.dedup();
     }
     out.sort_by(|a, b| a.kind.cmp(&b.kind));
     out
