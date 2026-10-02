@@ -67,8 +67,8 @@ fn branch_resistance_and_stress_reach_the_simulation() {
     assert!(r < plain - 1.0, "source R must cost gain: {plain} dB vs {r} dB");
     // Short diffusion ends (strong LOD stress) shift VT and mobility. On one
     // mirror half (M3): the same stress on both halves cancels in the gain
-    // (0.012 dB with W read per finger, 0.0099 dB at the SPICE sizes of
-    // FLOW-01), on M3 alone it moves the gain by 0.53 dB.
+    // (0.012 dB before XM5's m=4 reached the simulator, 0.0099 dB since),
+    // on M3 alone it moves the gain by 0.53 dB.
     let stressed = Parasitics { lod_inv_um: (0..n).map(|d| (d == 2).then_some(2.0)).collect(), ..Parasitics::default() };
     let s = gain(&stressed).expect("measured");
     assert!((s - plain).abs() > 0.01, "stress reached the models: {plain} dB vs {s} dB");

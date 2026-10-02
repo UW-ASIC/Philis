@@ -8,7 +8,7 @@ mod cellgen;
 mod fill;
 mod geometry;
 mod parse;
-pub use parse::{ParseOptions, SizeConvention};
+pub use parse::SizeConvention;
 
 /// Substrate3 elaboration: build a `macro_master::Composition` against a PDK
 /// and route its declared nets — the "PDK on the fly" entry.
@@ -62,6 +62,7 @@ pub struct Config {
     /// `analog::placement::utilization`). `0` disables it.
     pub min_utilization: f32,
     /// What a MOS card's `W` means; [`run`] stores it as the SPICE total.
+    /// Only [`run`] reads it: [`parse`] is always [`SizeConvention::Spice`].
     pub size_convention: SizeConvention,
 }
 
@@ -159,7 +160,7 @@ pub fn deck_models(netlist: &mut pnr_core::Netlist, pdk: &Pdk) {
 /// as drawn, never reshaped or moved by `dp`.
 pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<Solution, FlowError> {
     // 1. Parse, naming each device by the deck's model.
-    let mut netlist = parse::spice_with(spice, &ParseOptions { size: cfg.size_convention }).map_err(FlowError::Parse)?;
+    let mut netlist = parse::spice_with(spice, &parse::ParseOptions { size: cfg.size_convention }).map_err(FlowError::Parse)?;
     deck_models(&mut netlist, pdk);
 
     check_injected(&netlist, injected, pdk)?;
