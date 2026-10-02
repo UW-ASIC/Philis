@@ -13,7 +13,7 @@ pub mod sidecar;
 
 use std::time::{Duration, Instant};
 
-use gdsverify::check::report::Measurement;
+use gdsverify::check::report::{Measurement, Severity};
 use gdsverify::engine::{StageStatus, Summary};
 use pnr_core::{Report, Shape, Violation};
 
@@ -38,8 +38,9 @@ pub fn shortfall_nm(limit: Measurement, measured: Measurement) -> i64 {
 /// Full signoff over drawn geometry, its pin labels and its schematic
 /// reference; the [`Duration`] is wall time.
 ///
-/// Every violation row (error or warning) becomes a hard [`Violation`] named
-/// `{domain}/{rule}:{layer}` with its nm shortfall as margin. A stage the
+/// Every violation row becomes a hard [`Violation`] named
+/// `{domain}/{rule}:{layer}` with its nm shortfall as margin; a deck warning's
+/// name is prefixed `warn/` (the epoch key leaves it out of |V|). A stage the
 /// engine skipped or refused, or an engine failure, is a hard `engine/…`
 /// violation: a check that could not run never reads as clean. Rules skipped
 /// inside a stage that ran are logged by name, once per process.
@@ -153,9 +154,11 @@ fn harvest(checker: &Checker, summary: &Summary, report: &mut Report) {
     let out = checker.outputs();
     for i in 0..out.violations.len() {
         let v = out.violations.get(i);
+        // ponytail: interim until `verify::Signoff` carries warnings apart (PERF-01).
+        let warn = if v.severity == Severity::Warning { "warn/" } else { "" };
         report.hard_violations.push(Violation {
             rule: format!(
-                "{}/{}:{}",
+                "{warn}{}/{}:{}",
                 checker.domain_of(v.rule),
                 checker.rule_name(v.rule),
                 checker.layer_name(v.layer)

@@ -382,7 +382,7 @@ pub fn analog_tiers(routes: &Routes, reqs: &Requirements<Routes>) -> (Vec<Violat
         .iter()
         .enumerate()
         .filter(|(_, b)| b.violations(routes) > 0)
-        .map(|(i, b)| Violation::from_residual(format!("routing hard batch {i}"), b.residual(routes)))
+        .map(|(i, b)| Violation::from_residual(format!("{}routing hard {i}", Violation::BATCH), b.residual(routes)))
         .collect();
     let budget = reqs
         .budget
@@ -390,7 +390,7 @@ pub fn analog_tiers(routes: &Routes, reqs: &Requirements<Routes>) -> (Vec<Violat
         .enumerate()
         .filter_map(|(i, b)| {
             let r = b.residual(routes);
-            (r > 0.0).then(|| Violation::from_residual(format!("routing budget batch {i}"), r))
+            (r > 0.0).then(|| Violation::from_residual(format!("{}routing budget {i}", Violation::BATCH), r))
         })
         .collect();
     (hard, budget)
