@@ -1,9 +1,10 @@
-# M0 report: verify pass 3
+# M0 report: verify pass 4
 
 This pass checks the exit criteria of milestone M0 ("Honest measurement", 00-MASTER-PLAN.md §5) on branch `m0` at
-`4f9082f` (M0: report (verify pass 2)), 89 commits after `ddab38e`. There is no code change since pass 2:
-`git diff --stat ba49ae2 4f9082f` touches only this file. Pass 3 re-measures everything from scratch on the same
-code, checks pass 2's numbers against fresh runs, and re-counts the RTE-03 gap from the raw dr-report logs.
+`44b37f1` (M0: review-panel fixes), 91 commits after `ddab38e`. Unlike pass 3, the code changed since the last pass:
+`44b37f1` touches 26 files (verify, library, dp, em.rs, bench, signoff_fixtures, CI, gf180 sidecar), with the
+per-finding outcome in §7. The review panel ran the suite but not the bench. Pass 4 re-measures everything on the new
+code, and also re-counts the RTE-03 gap on this code with a throw-away instrumented copy (below).
 
 Every number here was measured on 2026-10-02 in the integration worktree. The profile is release unless stated.
 The commands were:
@@ -11,30 +12,27 @@ The commands were:
 - `cargo build --release --workspace`
 - `cargo test --release --workspace --no-fail-fast`
 - `cargo run --release -p benchmark --bin bench local`
-- three targeted re-runs: release `large_fixtures_sign_off_within_baseline -- --ignored --nocapture`, release
-  `antenna_in_loop_never_passes_what_signoff_fails -- --nocapture`, and debug
-  `cargo test -p cells --test cell_selfcheck every_generator_enumerates_on_every_deck`
+- targeted re-runs: release `large_fixtures_sign_off_within_baseline -- --ignored --nocapture`, release
+  `antenna_in_loop_never_passes_what_signoff_fails -- --nocapture`, debug
+  `cargo test -p cells --test cell_selfcheck every_generator_enumerates_on_every_deck`, and the loud-skip checks of
+  criterion 1 (`PHILIS_REQUIRE_TOOLS=1 PDK_ROOT=/nonexistent`).
+- RTE T2 count: `git archive 44b37f1` into the session scratchpad, one `eprintln!` of every hard row at the end of
+  `dr::score` (backend/dr/src/lib.rs:1943), then `bench local` (all 10) and `bench local dac4`. Nothing of this is in
+  the repository.
 
 ngspice and the sky130 ngspice models (`~/.volare/sky130A`) were present, so the ngspice tests ran rather than
-skipped: the test log has no `SKIP` line (`grep -c SKIP` = 0). magic, netgen and klayout were not on PATH, and no
-M0 test calls them.
+skipped: the test log has no `skipping`/`unavailable` line (`grep -ciE` = 0). magic, netgen and klayout were not on
+PATH, and no M0 test calls them.
 
-**Verdict: M0 is not done.** The result is unchanged from pass 2. 12 of the 13 criteria below are met:
+**Verdict: M0 is not done.** 12 of the 13 criteria below are met; the result is unchanged from pass 3 except that
+criterion #1's gap is closed:
 
-- Criterion #1 (CI) is met with a gap. The review panel (§7) found the nightly job could not tell the truth as built;
-  that and the gap are fixed on m0 since.
+- Criterion #2 is not met. Its item, RTE-06, was not merged (owner decision pending, §6).
 - Criterion #11 (RTE T2) is met as the master plan words it. It is not met under plan-05's stricter wording, and
-  RTE-03's own acceptance is not met (§1, §2).
-- Criterion #2 is not met. Its item, RTE-06, was not merged.
+  RTE-03's own acceptance 3 is not met (§1, §2). RTE-03's code is on m0 (`ba49ae2`) without an item review.
 
-The suite has two red tests, the same two as in passes 1 and 2:
-
-- the dac4 test (#2);
-- `hier_elaborate`, which FLOW-14 made honest and which has stayed red since, with no M0 owner.
-
-Pass 3 corrects one figure from pass 2. Base m0's Θ `routing overuse` reports carry residual overuse of **3 to 73**
-nodes, not 3 to 65 (`base_dac4.err` line 29, `overuse=73`). The commit message of `ba49ae2` already says 73. §1 has
-the details.
+The suite has two red tests, the same two as in passes 1–3: the dac4 test (#2) and `hier_elaborate`, which FLOW-14
+made honest and which has no M0 owner.
 
 ## 1. Items
 
@@ -42,154 +40,127 @@ Merged (24, through review): FLOW-14, GAP-20, FLOW-04, FLOW-05, FLOW-01, CELL-01
 RTE-32, RTE-02, FLOW-02, FLOW-03, PERF-01, PERF-02, PERF-04, PERF-06, PERF-07, PERF-03 (steps 1–2; its port step
 waits for FLOW-07, M1), REL-01, REL-03, RTE-09, REL-02.
 
-Not merged through review (2). Their state on m0 differs:
+Not merged through review (2):
 
-- **RTE-03** (foreign metal hard; shorts, opens, congestion as V). The review **rejected** the m0-routing branch for
-  three reasons:
-  1. Acceptance 3 is not met, and the deviation text understated the gap ("one non-winning epoch").
-  2. The branch did not merge cleanly with m0: `score()` with `cap_total`, `Routes::terms`, and the 3-tuple `route`
-     return.
-  3. A resolver test case was missing.
+- **RTE-03** (foreign metal hard; shorts, opens, congestion as V). The review **rejected** the m0-routing branch:
+  1. Acceptance 3 is not met, and the deviation text understated the gap ("one non-winning epoch"; the branch's own
+     logs `rte03-h.err` and `r2_dac4.err` show 8 of 180 dac4 dr reports).
+  2. The branch did not merge cleanly with m0 (`score()` with `cap_total`, `Routes::terms`, the 3-tuple `route`).
+  3. A resolver test case was missing (later net trunk-only, earlier net's access shape deleted).
 
-  **The code is nevertheless on m0.** `ba49ae2` ports `e8ef0e9`, `b36ca9f` and `93fe6fb` onto m0 outside the item
-  review:
-  - It resolves the conflicts. It keeps `foreign_metal` and the `cap_total`-free `score()`, keeps `routes.terms`, and
-    adjusts the 3-tuple tests.
-  - It adds the missing resolver case: against the later net's trunk, the earlier net's jog is the one deleted.
-  - It re-measures the gap and states in its commit message that acceptance 3 is not met.
+  **The code is nevertheless on m0.** `ba49ae2` ("M0: close RTE T2") ports `e8ef0e9`, `b36ca9f` and `93fe6fb` outside
+  the item review. It resolves the three conflicts (keeps `foreign_metal`, the `cap_total`-free `score()`,
+  `routes.terms`; adjusts the 3-tuple tests), adds the missing resolver case, and states in its commit message that
+  acceptance 3 is not met. The originals are kept on branch `m0-rte03-original` (`93fe6fb`). plan-05 RTE-03 records
+  the status. All seven RTE-03 dr tests are ok in this pass (`a_ring_band_is_a_hard_obstacle`,
+  `a_route_touching_foreign_cell_metal_is_a_short`, `resolver_sacrifices_the_later_access_shape`,
+  `an_xy_overlap_on_non_adjacent_layers_is_open`, `a_trunk_merges_with_its_own_cell_strap`, `ring_pins_are_routed`,
+  `negotiation_persists_across_calls`); the dr unit target is 34/0/0. `signoff_fixtures` on the merged tree is green
+  except dac4 (#2), including the `--ignored` OTA test, with REL-03's EM check on the same final geometry.
 
-  **Branch state:** `m0-routing` now points at `bb556b4` (FLOW-05: merge), so the three original commits are on no
-  branch. `m0-antenna` points at `dac139f` (REL-02: merge), so RTE-06's commits `b635606`, `63bc2a2` and `32efea4`
-  are on no branch either. Both are reachable only through the branch reflogs (§6).
+  **The gap, re-measured on `44b37f1`** (instrumented copy, seed 1, FEEDBACK_ITERS 5, one line per `dr::score` call):
 
-  In this pass, all seven RTE-03 dr tests are ok, and the dr unit target is 34/0/0:
-  `a_ring_band_is_a_hard_obstacle`, `a_route_touching_foreign_cell_metal_is_a_short`,
-  `resolver_sacrifices_the_later_access_shape`, `an_xy_overlap_on_non_adjacent_layers_is_open`,
-  `a_trunk_merges_with_its_own_cell_strap`, `ring_pins_are_routed` and `negotiation_persists_across_calls`.
-  `signoff_fixtures` passes on the merged tree, including the `--ignored` OTA test, and REL-03's EM check runs on the
-  same final geometry. The one exception is dac4 (#2).
+  | run | dr reports | `unresolved congestion` V | `drawn short nets` V | `open net` V | `to cell metal` V | `pin access sacrificed` V |
+  |---|---|---|---|---|---|---|
+  | all 10 circuits | 540 | 7 | 7 | 16 | 0 | 1 |
+  | dac4 alone | 90 | **7** | 7 | 16 | 0 | 1 |
+  | the other 9 | 450 | 0 | 0 | 0 | 0 | 0 |
 
-  **The gap, re-counted by this pass** from the logs the port and review sessions left. Each log has one line per dr
-  report (seed 1, FEEDBACK_ITERS 5) and lives in the session scratchpad:
+  - dac4's 7 reports carry margins 4, 4, 3, 4, 4, 4 and 16, each with `drawn short nets 3/4`, `2/3`, or `2/3` + `2/4`
+    (the 16 one also has `open net 3`). This is the same multiset as pass 3's `t2_dac4.err` on `ba49ae2`. The report
+    indices differ slightly (15, 30, 48, 52, 69, 70, 85 here; 15, 31, 48, 53, 69, 70, 85 there), consistent with the
+    stderr interleaving of concurrently scored starts; the counts are the measure.
+  - None of the 7 is a winner: the bench winner has overuse 0 and no `drawn short`/`open` row (§4).
+  - Every one of dac4's 90 reports also carries `batch:routing hard 0` (margin 1025 or 1111): the in-loop antenna
+    batch (the winner's `route/Antenna: net top 1.1108099`), not a short or congestion. The 9 non-empty reports of the
+    other circuits are `batch:routing hard 1` on the three identical OTAs (non-winners; their winners read route
+    hard 0).
+  - For the base comparison (pre-`ba49ae2` m0 had 61 of 90 dac4 reports with Θ `routing overuse`, overuse 3–73, and
+    4 with `open net` V) see pass 3's `base_dac4.err` figures, unchanged here; the base code was not re-run.
 
-  | log | code | dr reports | `routing overuse` Θ | `unresolved congestion` V | `drawn short nets` V | `open net` V | `to cell metal` V |
-  |---|---|---|---|---|---|---|---|
-  | `base_dac4.err` | base m0 `2245425` | 90 | **61** (overuse 3–73) | 0 | 0 | 4 | 0 |
-  | `t2_dac4.err` | `ba49ae2` (on m0) | 90 | 0 | **7** | 7 | 16 | 0 |
-  | `rte03-h.err` | old branch HEAD | 180 | 0 | 8 | 8 | 23 | 0 |
-  | `r2_dac4.err` | old branch, round 2 | 180 | 0 | 8 | 8 | 23 | 0 |
-
-  - **On `ba49ae2`:** the 7 reports are at lines 15, 31, 48, 53, 69, 70 and 85 of 90. Their margins are 4, 4, 3, 4,
-    4, 4 and 16, and each is paired with `drawn short nets 3/4`, `2/3`, or `2/3` + `2/4`. The review's lines 17, 55,
-    98, 104, 119, 129, 138 and 161 in `rte03-h.err` are confirmed: 8 of 180.
-  - **The base column:** the commit message of `ba49ae2` says 62 base reports; the log has 61. Pass 2 said "3 to 65"
-    nodes; the log's maximum is 73.
-  - **Same call index at base:** 6 of the 7 lines carry Θ `routing overuse`, with overuse 3, 65, 3, 3, 4 and 3. Line
-    48 has overuse 0 at base. This aligns reports by call order only: placement feedback can diverge once routing
-    differs, so it is indicative, not a paired comparison.
-  - **Base also had `open net` V** on 4 reports (lines 12, 27, 29, 52). So `open net` V predates `ba49ae2`.
-  - **The other 9 circuits:** the port session reports none of these entries in their 450 reports. This pass did not
-    re-instrument, because code changes are not allowed.
-
-  **Open decision (orchestrator/user):** either accept RTE-03 on m0 with acceptance 3 recorded as not met, or revert
-  `ba49ae2`. Acceptance 3 fails on 7 of 90 non-winning dac4 dr reports. Residual congestion is a PathFinder
-  convergence problem (RTE-08, M1). The review required this decision to be made explicitly. A commit on m0 does not
-  make it.
-- **RTE-06** (antenna repair on drawn geometry). **Rejected**, not on m0. Its own acceptance is red:
-  `fixtures_sign_off_within_baseline` fails on that branch with the same `dac4: ERC rows ["erc/ar.met2.1:gate"]`.
-  The stated cause is plausible: `routing_stack` (frontend/library/src/elaborate.rs:211–220) gives dr only
-  [met1, met2] on sky130, so a cap top plate on met2 that is over the limit before routing cannot be repaired inside
-  dr. No code defect was found. Two undisclosed, untested dr changes were also found:
-  - a `frozen` set that keeps shielded nets out of the post-shield antenna pass;
-  - a `judge` rollback gate on redraws.
-
-  **The user still has to decide:** merge RTE-06 as "acceptance not met" and move the dac4 fix to FLOW-05/FLOW-08 or
-  to the routing stack / cap pin layer, or re-scope the item. The branch's work is no longer on `m0-antenna`
-  (see above).
+  **Open decision (orchestrator/user):** accept RTE-03 on m0 with acceptance 3 recorded as not met (residual
+  congestion → RTE-08, M1), or revert `ba49ae2`. A commit on m0 does not make this decision.
+- **RTE-06** (antenna repair on drawn geometry). **Rejected**, not on m0; commits `b635606`/`63bc2a2`/`32efea4` kept
+  on branch `m0-rte06-rejected`. Its own acceptance was red on its branch with the same
+  `dac4: ERC rows ["erc/ar.met2.1:gate"]`. The stated cause is plausible: `routing_stack`
+  (frontend/library/src/elaborate.rs:211–220) gives dr only [met1, met2] on sky130, so a cap top plate on met2 that
+  is over the limit before routing cannot be repaired inside dr. Two undisclosed, untested dr changes were also found
+  (a `frozen` set keeping shielded nets out of the post-shield antenna pass; a `judge` rollback gate on redraws).
+  **The user still has to decide:** merge as "acceptance not met" and name the item that owns dac4's met2 cap-plate
+  antenna, or re-scope criterion 2.
 
 ## 2. Exit criteria (00-MASTER-PLAN.md §5, M0)
 
-Every test named below was re-checked `ok` in this pass's release log unless stated otherwise.
+Every test named below is `ok` in this pass's release log unless stated otherwise.
 
 | # | Criterion | Status | Evidence |
 |---|---|---|---|
-| 1 | CI runs `cargo test --workspace` on every push; release generator tests; nightly tool tests fail loudly when a tool is missing (FLOW T13) | **met, with a gap** | `.github/workflows/ci.yml`, three gating jobs:<br>• `test` (on push): `cargo build --workspace --locked`, then `cargo test --workspace --locked --no-fail-fast`.<br>• `release`: `cell_selfcheck` and `ota_cross_pdk` in release.<br>• `nightly`: `PHILIS_REQUIRE_TOOLS=1`, `--include-ignored`, ngspice, and sky130 at `fa87f8f4…` via volare. **Review panel (§7, findings 3/15):** workspace-wide `--include-ignored` also ran the EXT placeholders (`coverage_is_total` is `unimplemented!`, `twelve_thousand_devices` > 13 min), so this job was always red or hung and a missing-tool panic was indistinguishable; criterion 1 was therefore **not met** as measured here. Fixed: the job now runs the non-ignored workspace plus the ignored signoff target by name, with a 90-min timeout.<br>`tool_or_skip_tells_present_from_missing` ok. CI was not observed running, because nothing is pushed.<br>**Gap (fixed by the review panel, §7 findings 4/16):** the `library` unit test `fixture_nets_without_a_resistor_keep_em_sizing` (frontend/library/src/lib.rs:1706) skips with `eprintln!("SKIP …")` and returns, and it ignores `PHILIS_REQUIRE_TOOLS`. Only perf_postlayout.rs reads that variable. A nightly run without ngspice or the models would pass this test instead of failing loudly.<br>The suite is also not green (§3: two red tests), while plan-08's M0 row expects only the dac4 test to be red. |
-| 2 | `signoff_fixtures` green including dac4 at `feedback_iters = 1` (REL T1, RTE T11) | **not met** (RTE-06 not merged) | `fixtures_sign_off_within_baseline` FAILED at benchmarks/tests/signoff_fixtures.rs:173: `dac4: ERC rows ["erc/ar.met2.1:gate"], expected []`. dac4's row: DRC 0, ERC 1, PEX 282.0 fF, LVS clean with 16 unverified. The other 6 default fixtures have DRC 0, ERC 0 and clean LVS (§3). `large_fixtures_sign_off_within_baseline` (`--ignored`) ok: ota, ota_constrained and tt_ota each have DRC 0, ERC 0, PEX 585.8 fF, clean LVS and 0 unverified. |
-| 3 | `antenna_in_loop_never_passes_what_signoff_fails` green (REL T2) | **met** | ok. With `--nocapture`:<br>• dac4: signoff `["erc/ar.met2.1:gate"]`, in-loop `(5 total, 4 satisfied, 0 unknown)`, so the in-loop model flags the violation.<br>• pair, quad, rc_filter, chain4: in-loop `(1, 1, 0)`, no signoff rows.<br>• bjt_mirror, bgr_core: no rows on either side. |
+| 1 | CI runs `cargo test --workspace` on every push; release generator tests; nightly tool tests fail loudly when a tool is missing (FLOW T13) | **met** (not observed on GitHub: nothing is pushed) | `.github/workflows/ci.yml`:<br>• `test` (push/PR): `cargo build --workspace --locked`, `cargo test --workspace --locked --no-fail-fast` (Cargo.lock is tracked).<br>• `release`: `cell_selfcheck` and `ota_cross_pdk` in release.<br>• `nightly` (schedule/dispatch, `timeout-minutes: 90`): `PHILIS_REQUIRE_TOOLS=1`, ngspice, sky130 `fa87f8f4…` via volare; `cargo test --release --workspace` plus `-p benchmark --test signoff_fixtures -- --ignored` by name (pass 3's finding that workspace `--include-ignored` hung on EXT placeholders is fixed).<br>Loud skip, checked this pass: with `PHILIS_REQUIRE_TOOLS=1 PDK_ROOT=/nonexistent`, `fixture_nets_without_a_resistor_keep_em_sizing` and both model-dependent `perf_postlayout` tests panic (`PHILIS_REQUIRE_TOOLS=1 and sky130 models (…) is missing`, frontend/library/src/lib.rs:38); without the variable they print `… unavailable — skipping`. All go through `library::tools::present_or_skip` (pass 3's gap closed). `tool_or_skip_tells_present_from_missing` ok.<br>The suite itself is not green (§3), so `test` would be red on push; that is the honest state, nothing is waived. |
+| 2 | `signoff_fixtures` green including dac4 at `feedback_iters = 1` (REL T1, RTE T11) | **not met** (RTE-06 not merged) | `fixtures_sign_off_within_baseline` FAILED at benchmarks/tests/signoff_fixtures.rs:175: `dac4: ERC rows ["erc/ar.met2.1:gate"], expected []`. dac4: DRC 0, ERC 1, PEX 282.0 fF, LVS clean with 16 unverified. The other 6 default fixtures: DRC 0, ERC 0, clean LVS (§3). `large_fixtures_sign_off_within_baseline` (`--ignored`) ok: ota, ota_constrained, tt_ota each DRC 0, ERC 0, PEX 585.8 fF, clean LVS, 0 unverified. |
+| 3 | `antenna_in_loop_never_passes_what_signoff_fails` green (REL T2) | **met** | ok. `--nocapture` (now printing total, sat, viol, unk):<br>• dac4: signoff `["erc/ar.met2.1:gate"]`, in-loop `(5, 4, 1, 0)`: the in-loop model flags it.<br>• pair, quad, rc_filter, chain4: `(1, 1, 0, 0)`, no signoff rows.<br>• bjt_mirror, bgr_core: no rows on either side.<br>Per fixture, not per net (review finding 20, deferred to M1). |
 | 4 | Bench LVS reads `PARTIAL(2)` bjt_mirror, `PARTIAL(9)` bgr_core, `PARTIAL(16)` dac4, `MATCH` for the other 7 (PERF M0) | **met** | Bench table §4, LVS column, exactly as required. |
-| 5 | Warnings printed and absent from \|V\| | **met** | The bench prints `warnings N` per circuit (0 on all 10). `start_tests::warnings_are_not_violations`, `v_counts_rules_not_batches`, `theta_counts_each_budget_once` and `nan_loses` ok. |
-| 6 | FLOW T1 size fidelity: 0 devices | **met** | `size_tests::drawn_width_equals_simulated_width` ok, over all MOS on all 10 fixtures. `netlist::tests::mos_size_follows_spice_semantics` and `parse::size_tests::per_finger_convention_stores_total_width` ok. |
-| 7 | FLOW T3 deck honesty 0/0/0 | **met** | Not embedded: `pdk::tests::every_builtin_pdk_loads` and `vendored_decks_name_their_origin` ok. Without `_source`: `a_process_number_needs_a_source` ok. Required keys unread: `generators_read_exactly_the_required_keys` ok (kernel/cells/tests/deck_keys.rs). `sidecar_rejects_a_misspelt_key` ok. |
-| 8 | FLOW T4: LU rules present, no antenna sidewall off by > 5 % | **met** | `pdk::tests::latch_up_rules_find_a_far_tap` and `antenna_sidewall_thickness_matches_pex` ok. pdks/decks/sky130.deck:517–519 has LU.2, LU.2.1 and LU.3. In the bench they run, or are listed as skipped (`EmptyLayer`) where the fixture lacks the diffusion. |
-| 9 | Exactly one dual step per epoch (FLOW T6) | **met** | `start_tests::one_dual_step_per_epoch` ok. gp `price_tests::a_slack_budget_relaxes_its_price` and `a_saturated_price_is_reported` ok. dp `tests::place_does_not_settle` ok. |
-| 10 | EM known/unknown/violated counts printed per fixture (REL T3/T4) | **met** | Bench `EM known K (viol V), unknown U, max use X` on every row (§4). Violations are 0 everywhere. Unknown is 1 on bgr_core, bjt_mirror and rc_filter. Totals: Electromigration 46 rows, 43 satisfied, 3 unknown. |
-| 11 | No `drawn short` or `unresolved congestion` hidden in Θ (RTE T2) | **met as worded in the master plan; not met under plan-05's T2 / RTE-03 acceptance** | **Θ:** `grep -rn 'routing overuse' --include='*.rs'` over backend, frontend, kernel and benchmarks is empty (exit 1).<br>**V:** `dr::score` (backend/dr/src/lib.rs:1906–1942) puts residual overuse in V as `unresolved congestion` (margin = overuse). It puts shorts in V as `drawn short nets a/b` and `drawn short net n to cell metal`, and opens in V as `open net n`.<br>**Tests:** `a_route_touching_foreign_cell_metal_is_a_short`, `a_ring_band_is_a_hard_obstacle`, `an_xy_overlap_on_non_adjacent_layers_is_open` and `resolver_sacrifices_the_later_access_shape` ok.<br>**Bench winners:** overuse 0 and route hard 0 on all 10, except dac4's in-loop `route/Antenna: net top 1.1108099` (target/bench_debug/dac4/violations.txt:2).<br>**But** plan-05's M0 row (T2) reads "no `drawn short`/`unresolved congestion` V … on any bench circuit". 7 of dac4's 90 dr reports (none of them the winner) carry exactly those (§1). So that stricter target and RTE-03 Acceptance 3 are not met. RTE-03 itself awaits the decision in §1. |
-| 12 | PLC baseline table and EXT corpus expectations recorded | **met** | docs/plans/baseline-plc-01.md: 10 fixtures × seeds 1–5. annotator `corpus_expectations` and `negative_corpus` ok. The corpus tests for later items are `#[ignore]` and name their item (§3). |
-| 13 | `every_generator_enumerates_on_every_deck` green in debug on 4 decks; 0 inductor shapes in any output | **met** | The debug run (`unoptimized + debuginfo`) is ok. The test is not `cfg`-gated and loops sky130, gf180mcu, ihp_sg13g2 and generic_finfet (kernel/cells/tests/cell_selfcheck.rs:421). `Inductor::draw` returns an empty macro (kernel/cells/src/inductor.rs). `inductor::tests::an_inductor_is_undrawable_without_a_recogniser`, `an_inductor_is_one_undrawable_finding` and `verify` `tests::an_inductor_is_unverified` ok. No bench fixture has an `L` card. |
+| 5 | Warnings printed and absent from \|V\| | **met** | Bench prints `warnings N` per circuit (0 on all 10). `warnings_are_not_violations`, `v_counts_rules_not_batches`, `theta_counts_each_budget_once`, `nan_loses` ok. DRC warnings are now kept out of the DRC count too (`verify::Finding::warning`, review finding 23). |
+| 6 | FLOW T1 size fidelity: 0 devices | **met** | `size_tests::drawn_width_equals_simulated_width` ok (all MOS, all 10 fixtures); `mos_size_follows_spice_semantics`, `per_finger_convention_stores_total_width` ok. |
+| 7 | FLOW T3 deck honesty 0/0/0 | **met** | `every_builtin_pdk_loads`, `vendored_decks_name_their_origin`, `a_process_number_needs_a_source`, `generators_read_exactly_the_required_keys` (kernel/cells/tests/deck_keys.rs), `sidecar_rejects_a_misspelt_key` ok. |
+| 8 | FLOW T4: LU rules present, no antenna sidewall off by > 5 % | **met** | `latch_up_rules_find_a_far_tap`, `antenna_sidewall_thickness_matches_pex` ok. pdks/decks/sky130.deck:517–519 has LU.2, LU.2.1, LU.3. The bench runs them or lists them skipped (`EmptyLayer`) where the fixture lacks the diffusion. |
+| 9 | Exactly one dual step per epoch (FLOW T6) | **met** | `start_tests::one_dual_step_per_epoch`, gp `a_slack_budget_relaxes_its_price`, `a_saturated_price_is_reported`, dp `place_does_not_settle` ok. |
+| 10 | EM known/unknown/violated counts printed per fixture (REL T3/T4) | **met** | Bench `EM known K (viol V), unknown U, max use X` on every row (§4); violations 0 everywhere, unknown 1 on bgr_core, bjt_mirror, rc_filter. Totals: Electromigration 46 rows, 43 satisfied, 0 violated, 3 unknown. `an_unknown_is_not_satisfied`, `em_rules_name_what_goes_unchecked` ok. |
+| 11 | No `drawn short` or `unresolved congestion` hidden in Θ (RTE T2) | **met as worded in the master plan; not met under plan-05's T2 / RTE-03 acceptance 3** | **Θ:** `grep -rn 'routing overuse' --include='*.rs' backend frontend kernel benchmarks` is empty (exit 1).<br>**V:** `dr::score` (backend/dr/src/lib.rs:1910–1945) puts residual overuse in V as `unresolved congestion` (margin = overuse), shorts as `drawn short nets a/b` / `drawn short net n to cell metal`, opens as `open net n`.<br>**Tests:** `a_route_touching_foreign_cell_metal_is_a_short`, `a_ring_band_is_a_hard_obstacle`, `an_xy_overlap_on_non_adjacent_layers_is_open`, `resolver_sacrifices_the_later_access_shape` ok.<br>**Measured on this code (§1):** 7 of dac4's 90 dr reports (none a winner) carry `unresolved congestion` + `drawn short nets` V; 0 of the other 9 circuits' 450. They are visible in V, not hidden in Θ, so the master-plan criterion holds. plan-05's M0 row T2 ("no `drawn short`/`unresolved congestion` V … on any bench circuit") and RTE-03 acceptance 3 do not. Holds only while `ba49ae2` stays on m0 (§6). |
+| 12 | PLC baseline table and EXT corpus expectations recorded | **met** | docs/plans/baseline-plc-01.md (10 fixtures × seeds 1–5). annotator `corpus_expectations`, `negative_corpus`, `strongarm_conflicts_are_todays` ok; the corpus tests for later items are `#[ignore]` with their item named (§3). |
+| 13 | `every_generator_enumerates_on_every_deck` green in debug on 4 decks; 0 inductor shapes in any output | **met** | Debug run (`unoptimized + debuginfo`) ok; the test loops sky130, gf180mcu, ihp_sg13g2, generic_finfet (kernel/cells/tests/cell_selfcheck.rs:421) and is not `cfg`-gated. `Inductor::draw` returns an empty macro; `an_inductor_is_undrawable_without_a_recogniser`, `an_inductor_is_one_undrawable_finding`, verify `an_inductor_is_unverified` ok. No bench fixture has an `L` card. |
 
 ## 3. Test summary
 
 `cargo build --release --workspace`: exit 0.
 
-`cargo test --release --workspace --no-fail-fast`: exit 101. **435 passed, 2 failed, 7 ignored**, summed over every
-`test result` line. This equals pass 2. Doc-tests: 0.
+`cargo test --release --workspace --no-fail-fast`: exit 101. **439 passed, 2 failed, 7 ignored**, summed over every
+`test result` line (pass 3: 435/2/7; +4 = the review panel's new tests). Doc-tests: 0.
 
-Failing tests (the same two as passes 1 and 2, with the same messages):
+Failing tests (the same two as passes 1–3):
 
 1. **`benchmark` `tests/signoff_fixtures.rs::fixtures_sign_off_within_baseline`** panicked at
-   signoff_fixtures.rs:173:9: `dac4: ERC rows ["erc/ar.met2.1:gate"], expected []` (criterion 2; RTE-06).
+   signoff_fixtures.rs:175:9: `dac4: ERC rows ["erc/ar.met2.1:gate"], expected []` (criterion 2; RTE-06). The line
+   moved from 173 because `44b37f1` edited the file; the message is the same.
 2. **`library` `tests/hier_elaborate.rs::hierarchical_composition_elaborates_with_a_correct_schematic`** panicked at
    hier_elaborate.rs:216:5: `hierarchical layout must be LVS-clean against its schematic`, with 8 ×
-   `lvs/lvs.unpaired_device:-` and 17 × `lvs/lvs.unpaired_net:-`. This is not a regression: FLOW-14 (`0ef8506`)
-   replaced an assertion-free check, and recorded the test as red with these counts. No M0 item fixes it, so it needs
-   an owner.
+   `lvs/lvs.unpaired_device:-` and 17 × `lvs/lvs.unpaired_net:-`. Not a regression: FLOW-14 (`0ef8506`) replaced an
+   assertion-free check and recorded it red with these counts. No M0 item fixes it.
 
-Ignored (7), each with its reason in the attribute:
+Ignored (7), each with its reason in the attribute: `strongarm_matches_align_gold` (EXT-14), `coverage_is_total`
+(EXT-10), `negative_corpus_sc_switches_and_equal_fets` (EXT-04), `no_emitted_conflicts_strongarm` (EXT-14, REL-09),
+`permutation_invariance` (EXT-06), `twelve_thousand_devices` (EXT-06, T8), `large_fixtures_sign_off_within_baseline`
+(run separately in this pass: ok).
 
-- `strongarm_matches_align_gold`: EXT-14.
-- `coverage_is_total`: EXT-10.
-- `negative_corpus_sc_switches_and_equal_fets`: EXT-04.
-- `no_emitted_conflicts_strongarm`: EXT-14, REL-09.
-- `permutation_invariance`: EXT-06.
-- `twelve_thousand_devices`: EXT-06, T8.
-- `large_fixtures_sign_off_within_baseline`: run separately in this pass, ok (criterion 2).
+Per target (passed/failed/ignored; changes against pass 3 in bold):
 
-Per target (passed/failed/ignored):
-
-| Crate | Target | Passed / failed / ignored |
+| Crate | Target | P/F/I |
 |---|---|---|
-| analog | unit tests | 85/0/0 |
-| annotator | unit tests | 33/0/0 |
+| analog | unit | 85/0/0 |
+| annotator | unit | 33/0/0 |
 | annotator | `align_gold` | 0/0/1 |
-| annotator | `corpus` | 3/0/4 |
+| annotator | `corpus` | **4**/0/4 |
 | annotator | `scale` | 0/0/1 |
-| benchmark | `bench` unit tests | 13/0/0 |
-| benchmark | `signoff_fixtures` | **16/1/1** |
-| cells | unit tests | 39/0/0 |
+| benchmark | `bench` unit | 13/0/0 |
+| benchmark | `signoff_fixtures` | 16/**1**/1 |
+| cells | unit | 39/0/0 |
 | cells | `cell_selfcheck` | 10/0/0 |
 | cells | `deck_keys` | 1/0/0 |
-| dp | unit tests | 28/0/0 |
-| dr | unit tests | 34/0/0 |
-| gp | unit tests | 6/0/0 |
-| gr | unit tests | 11/0/0 |
-| library | unit tests | 73/0/0 |
-| library | `antenna_diode` | 1/0/0 |
-| library | `drawn_cards` | 2/0/0 |
-| library | `elaborate` | 1/0/0 |
-| library | `emit_roundtrip` | 2/0/0 |
-| library | `extra_devices` | 1/0/0 |
-| library | `flow_smoke` | 1/0/0 |
-| library | `hier_elaborate` | **0/1/0** |
-| library | `injected_macro` | 1/0/0 |
+| dp | unit | 28/0/0 |
+| dr | unit | 34/0/0 |
+| gp | unit | 6/0/0 |
+| gr | unit | 11/0/0 |
+| library | unit | **75**/0/0 |
+| library | `antenna_diode`, `elaborate`, `extra_devices`, `flow_smoke`, `injected_macro` | 1/0/0 each |
+| library | `drawn_cards`, `emit_roundtrip`, `placement_metrics` | 2/0/0 each |
+| library | `hier_elaborate` | 0/**1**/0 |
 | library | `ota_cross_pdk` | 3/0/0 |
-| library | `perf_postlayout` | 3/0/0 (ngspice ran, 48 s) |
-| library | `placement_metrics` | 2/0/0 |
-| macro_master | unit tests | 9/0/0 |
-| pnr_core | unit tests | 16/0/0 |
-| verify | unit tests | 39/0/0 |
-| visualizer | unit tests | 2/0/0 |
+| library | `perf_postlayout` | 3/0/0 (ngspice ran, 45.6 s) |
+| macro_master | unit | 9/0/0 |
+| pnr_core | unit | 16/0/0 |
+| verify | unit | **40**/0/0 |
+| visualizer | unit | 2/0/0 |
 
-`signoff_fixtures` per fixture:
+`signoff_fixtures` per fixture (identical to pass 3):
 
 | fixture | DRC (routing / cells) | ERC | PEX Σ C | LVS |
 |---|---|---|---|---|
@@ -204,73 +175,65 @@ Per target (passed/failed/ignored):
 
 ## 4. Bench (`bench local`, seed 1, sky130, FEEDBACK_ITERS 5)
 
-The run exited 0. 10/10 circuits were placed and routed, and the per-circuit times sum to 143.0 s. The circuits run
-in sequence, so that sum is about the wall time; it was not timed separately. Load average was 14.4 just before the
-bench and 9.9 at its end, on 32 cores, with other sessions running. That explains why every ms figure is higher than
-in pass 2.
-
-The only stderr was `[op] operating point unavailable (no device operating points: ); continuing with zero power`,
-printed for the two BJT fixtures, which have no operating point.
+Exit 0; 10/10 circuits placed and routed. Per-circuit times sum to 141.7 s (sequential, so about the wall time; not
+timed separately). Load average was 10–12 on 32 cores with other sessions running; the ms column is for orientation
+only. The only stderr was `[op] operating point unavailable (no device operating points: ); continuing with zero
+power` for the two BJT fixtures.
 
 | circuit | ms | cells / nets | WL nm | unrouted | route hard | overuse | DRC | LVS | ERC | warn | C Σ / sig fF | area µm² | util % | active % | best | outer, esc | bias | EM known (viol), unk, max use | usage | lattice off | clr residue nm² |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| bgr_core | 9 034 | 2 / 3 | 260 250 | 0 | 0 | 0 | 0 | PARTIAL(9) | 0 | 0 | 76.7 / 19.6 | 135.0 | 100.0 | 1.2 | 2/5 conv. | 1, 0 | none | 0 (0), 1, none | 1.000 | 0 | 0 |
-| bjt_mirror | 7 487 | 2 / 5 | 73 480 | 0 | 0 | 0 | 0 | PARTIAL(2) | 0 | 0 | 33.0 / 31.3 | 64.8 | 79.4 | 1.8 | 1/5 conv. | 1, 0 | none | 0 (0), 1, none | 1.260 | 0 | 0 |
-| chain4 | 6 639 | 4 / 7 | 44 675 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 22.6 / 8.4 | 62.6 | 100.0 | 19.4 | 1/5 conv. | 1, 0 | 0 µW probe | 5 (0), 0, 0.000 | 1.000 | 1 | 0 |
-| dac4 | 20 630 | 14 / 12 | 640 880 | 0 | 1 | 0 | 0 | PARTIAL(16) | 0 | 0 | 297.2 / 147.8 | 2400.6 | 61.1 | 0.8 | 2/15 budget | 3, 2 | 112 µW probe | 11 (0), 0, 0.221 | 1.636 | 8 | 291 300 |
-| ota | 27 962 | 5 / 9 | 497 540 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 588.4 / 263.8 | 1729.8 | 87.7 | 42.1 | 1/20 budget | 4, 3 | 2 µW probe | 6 (0), 0, 0.003 | 1.140 | 2 | 0 |
-| ota_constrained | 27 406 | 5 / 9 | 497 540 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 588.4 / 263.8 | 1729.8 | 87.7 | 42.1 | 1/20 budget | 4, 3 | 2 µW probe | 6 (0), 0, 0.003 | 1.140 | 2 | 0 |
-| pair | 5 858 | 2 / 3 | 19 905 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 4.8 / 3.1 | 8.6 | 100.0 | 48.4 | 1/5 conv. | 1, 0 | 0 µW probe | 3 (0), 0, 0.000 | 1.000 | 1 | 0 |
-| quad | 5 754 | 4 / 3 | 37 945 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 9.3 / 6.1 | 15.9 | 100.0 | 51.2 | 5/5 conv. | 1, 0 | 0 µW probe | 3 (0), 0, 0.000 | 1.000 | 1 | 0 |
-| rc_filter | 6 714 | 3 / 5 | 87 230 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 24.0 / 7.6 | 163.3 | 62.0 | 2.8 | 2/5 conv. | 1, 0 | 28 µW probe | 3 (0), 1, 0.055 | 1.613 | 2 | 0 |
-| tt_ota | 25 545 | 5 / 9 | 497 540 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 588.4 / 263.8 | 1729.8 | 87.7 | 42.1 | 1/20 budget | 4, 3 | 2 µW probe | 6 (0), 0, 0.003 | 1.140 | 2 | 0 |
+| bgr_core | 6 104 | 2 / 3 | 260 250 | 0 | 0 | 0 | 0 | PARTIAL(9) | 0 | 0 | 76.7 / 19.6 | 135.0 | 100.0 | 1.2 | 2/5 conv. | 1, 0 | none | 0 (0), 1, none | 1.000 | 0 | 0 |
+| bjt_mirror | 5 681 | 2 / 5 | 73 480 | 0 | 0 | 0 | 0 | PARTIAL(2) | 0 | 0 | 33.0 / 31.3 | 64.8 | 79.4 | 1.8 | 1/5 conv. | 1, 0 | none | 0 (0), 1, none | 1.260 | 0 | 0 |
+| chain4 | 5 722 | 4 / 7 | 44 675 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 22.6 / 8.4 | 62.6 | 100.0 | 19.4 | 1/5 conv. | 1, 0 | 0 µW probe | 5 (0), 0, 0.000 | 1.000 | 1 | 0 |
+| dac4 | 19 146 | 14 / 12 | 640 880 | 0 | 1 | 0 | 0 | PARTIAL(16) | 0 | 0 | 297.2 / 147.8 | 2400.6 | 61.1 | 0.8 | 2/15 budget | 3, 2 | 112 µW probe | 11 (0), 0, 0.221 | 1.636 | 8 | 291 300 |
+| ota | 28 022 | 5 / 9 | 497 540 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 588.4 / 263.8 | 1729.8 | 87.7 | 42.1 | 1/20 budget | 4, 3 | 2 µW probe | 6 (0), 0, 0.003 | 1.140 | 2 | 0 |
+| ota_constrained | 32 396 | 5 / 9 | 497 540 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 588.4 / 263.8 | 1729.8 | 87.7 | 42.1 | 1/20 budget | 4, 3 | 2 µW probe | 6 (0), 0, 0.003 | 1.140 | 2 | 0 |
+| pair | 5 526 | 2 / 3 | 19 905 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 4.8 / 3.1 | 8.6 | 100.0 | 48.4 | 1/5 conv. | 1, 0 | 0 µW probe | 3 (0), 0, 0.000 | 1.000 | 1 | 0 |
+| quad | 6 222 | 4 / 3 | 37 945 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 9.3 / 6.1 | 15.9 | 100.0 | 51.2 | 5/5 conv. | 1, 0 | 0 µW probe | 3 (0), 0, 0.000 | 1.000 | 1 | 0 |
+| rc_filter | 6 159 | 3 / 5 | 87 230 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 24.0 / 7.6 | 163.3 | 62.0 | 2.8 | 2/5 conv. | 1, 0 | 28 µW probe | 3 (0), 1, 0.055 | 1.613 | 2 | 0 |
+| tt_ota | 26 735 | 5 / 9 | 497 540 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 588.4 / 263.8 | 1729.8 | 87.7 | 42.1 | 1/20 budget | 4, 3 | 2 µW probe | 6 (0), 0, 0.003 | 1.140 | 2 | 0 |
 
-These columns are the same on every row: overlap 0 nm², matched mismatch 0, dp temps 220. The bench also printed
-islands extra, decode fail and matched incompat as 0, but nothing measures them before PLC-12, PLC-08 and PLC-03:
-they were placeholders, not measured zeros. Since the review panel they print `n/a` (§7, finding 17). The `key tier` column equals `C sig` on every row.
+Same on every row: overlap 0 nm², matched mismatch 0, dp temps 220, `key tier` = `C sig`. `islands extra`,
+`decode fail` and `matched incompat` print `n/a` (review finding 17: unmeasured before PLC-12/08/03; pass 3 printed 0).
 
-**Reproducibility:** every column except ms is identical to pass 2, on all 10 rows and in the constraint table. The
-code is unchanged, the epoch count is fixed (`budget` = 15 or 20 epochs, not a time budget), and the seed is 1, so
-the run is deterministic. dac4 still matches the port session's run (`bench_t2.out`: WL 640 880, C 297.2 / 147.8).
+**Against pass 3:** every measured column except ms is identical on all 10 rows, and the constraint table totals are
+identical. The review-panel fixes changed what is printed, not the layouts: the three `n/a` columns, and rc_filter's
+skip list now names `lvs.parameter_mismatch(non-MOS values)` (finding 18: its resistor value is compared by nobody).
+The constraint table gained an `n/a` column (0 everywhere) and `rate` is now sat / checked, so Electromigration reads
+100 % with 3 unknown, not a lower rate.
 
-**dac4's `route hard 1`** is the in-loop antenna rule on net `top` (`route/Antenna: net top 1.1108099`, max use
-2.111). Signoff passes that net at FEEDBACK_ITERS 5 (ERC 0), but fails it at 1 (criterion 2). The winner therefore
-has |V| ≥ 1.
+**dac4's `route hard 1`** is the in-loop antenna rule on net `top` (`route/Antenna: net top 1.1108099`,
+target/bench_debug/dac4/violations.txt; max use 2.111). Signoff passes that net at FEEDBACK_ITERS 5 (ERC 0) but fails
+it at 1 (criterion 2). `violations.txt` also lists `lvs-coverage/unverified:Capacitor:cap_generic_m1m2 16`.
 
-**dac4 since pass 1** (from pass 2, unchanged here): the winner is a different layout since `ba49ae2`. WL went from
-691 870 to 640 880 nm, C Σ from 310.4 to 297.2 fF, area from 2635.2 to 2400.6 µm², and lattice off from 6 to 8.
-Clearance residue went from 0 to 291 300 nm². That metric (`PlacementMetrics::clearance_residue_nm2`,
-frontend/library/src/geometry.rs:29) is measured but never steered on, and PLC-01's baseline already shows it nonzero
-on dac4 seed 5.
+**Skipped rules** (`signoff.coverage.skipped_rules`, as printed):
 
-**Skipped rules** (from `signoff.coverage.skipped_rules`, as printed):
-
-- **Every fixture:** `lvs.device_count_mos`, `lvs.device_count_bjt` and `lvs.parametric` (`NotInDeck`);
-  `multiple_drivers` (`Waived`); `m1.density`…`m4.density` (`ChipLevel`); `floating_gate` (exempt: no port list).
-- **Per fixture:** the LU rules whose layer is empty (`EmptyLayer`).
-- **bgr_core and bjt_mirror only:** `ir_drop`, `esd.pad`, the `vgs/vds` ratings and `EM.met*_via*`
-  (`NoDesignIntent`, unbiased).
+- Every fixture: `lvs.device_count_mos`, `lvs.device_count_bjt`, `lvs.parametric` (`NotInDeck`); `multiple_drivers`
+  (`Waived`); `m1.density`…`m4.density` (`ChipLevel`); `floating_gate` (exempt: no port list).
+- Per fixture: the LU rules whose layer is empty (`EmptyLayer`).
+- bgr_core and bjt_mirror: `ir_drop`, `esd.pad`, the `vgs/vds` ratings and `EM.met*_via*` (`NoDesignIntent`).
+- rc_filter: `lvs.parameter_mismatch(non-MOS values)`.
 
 Constraint satisfaction, verbatim totals:
 
-| type | arm | total | sat | viol | unk | max use (at) | Θ |
-|---|---|---|---|---|---|---|---|
-| Antenna | hard | 21 | 20 | 1 | 0 | 2.111 (dac4) | 1.111 |
-| CommonCentroid | budget | 3 | 0 | 3 | 0 | 2.195 (tt_ota) | 3.584 |
-| CommonNode | budget | 6 | 6 | 0 | 0 | 0.001 (tt_ota) | 0 |
-| CouplingBudget | budget | 39 | 39 | 0 | 0 | 0.523 (dac4) | 0 |
-| CrosstalkExclusion | budget | 12 | 12 | 0 | 0 | 0.475 (tt_ota) | 0 |
-| Differential | hard | 3 | 3 | 0 | 0 | – | 0 |
-| Electromigration | hard | 46 | 43 | 0 | 3 | 0.221 (dac4) | 0 |
-| Environment | budget | 6 | 6 | 0 | 0 | 0.320 (tt_ota) | 0 |
-| IrDrop | budget | 23 | 23 | 0 | 0 | 0.125 (dac4) | 0 |
-| MatchingPair | budget | 6 | 6 | 0 | 0 | 0.000 (tt_ota) | 0 |
-| ParasiticBudget | budget | 39 | 39 | 0 | 0 | 0.824 (dac4) | 0 |
-| Proximity | budget | 11 | 11 | 0 | 0 | 0.255 (tt_ota) | 0 |
-| Symmetry | hard | 9 | 9 | 0 | 0 | – | 0 |
-| ThermalGradient | budget | 6 | 6 | 0 | 0 | 0.000 (tt_ota) | 0 |
-| Utilization | budget | 10 | 10 | 0 | 0 | 0.982 (dac4) | 0 |
-| **OVERALL** | | 240 | 233 | 4 | 3 | | rate 98 % |
+| type | arm | total | sat | viol | unk | n/a | rate | max use (at) | Θ |
+|---|---|---|---|---|---|---|---|---|---|
+| Antenna | hard | 21 | 20 | 1 | 0 | 0 | 95 % | 2.111 (dac4) | 1.111 |
+| CommonCentroid | budget | 3 | 0 | 3 | 0 | 0 | 0 % | 2.195 (tt_ota) | 3.584 |
+| CommonNode | budget | 6 | 6 | 0 | 0 | 0 | 100 % | 0.001 (tt_ota) | 0 |
+| CouplingBudget | budget | 39 | 39 | 0 | 0 | 0 | 100 % | 0.523 (dac4) | 0 |
+| CrosstalkExclusion | budget | 12 | 12 | 0 | 0 | 0 | 100 % | 0.475 (tt_ota) | 0 |
+| Differential | hard | 3 | 3 | 0 | 0 | 0 | 100 % | – | 0 |
+| Electromigration | hard | 46 | 43 | 0 | 3 | 0 | 100 % | 0.221 (dac4) | 0 |
+| Environment | budget | 6 | 6 | 0 | 0 | 0 | 100 % | 0.320 (tt_ota) | 0 |
+| IrDrop | budget | 23 | 23 | 0 | 0 | 0 | 100 % | 0.125 (dac4) | 0 |
+| MatchingPair | budget | 6 | 6 | 0 | 0 | 0 | 100 % | 0.000 (tt_ota) | 0 |
+| ParasiticBudget | budget | 39 | 39 | 0 | 0 | 0 | 100 % | 0.824 (dac4) | 0 |
+| Proximity | budget | 11 | 11 | 0 | 0 | 0 | 100 % | 0.255 (tt_ota) | 0 |
+| Symmetry | hard | 9 | 9 | 0 | 0 | 0 | 100 % | – | 0 |
+| ThermalGradient | budget | 6 | 6 | 0 | 0 | 0 | 100 % | 0.000 (tt_ota) | 0 |
+| Utilization | budget | 10 | 10 | 0 | 0 | 0 | 100 % | 0.982 (dac4) | 0 |
+| **OVERALL** | | 240 | 233 | 4 | 3 | 0 | 98 % | | |
 
 ## 5. Against the pre-M0 ground truth (audit-06 §G)
 
@@ -278,19 +241,22 @@ Constraint satisfaction, verbatim totals:
 
 | | pre-M0 (G.2) | now |
 |---|---|---|
-| Result | 331 passed, 1 failed, 2 ignored, exit 101 | 435 passed, 2 failed, 7 ignored, exit 101 |
-| Failing | dac4 `erc/ar.met2.1:gate`, the same rule as before | dac4 (same rule) and `hier_elaborate` |
-| Ignored | 2: `large_fixtures…`, `tmp_deck_drc::dump` | 7 (EXT corpus placeholders and `large_fixtures…`; `tmp_deck_drc.rs` was deleted by FLOW-14) |
+| Result | 331 passed, 1 failed, 2 ignored, exit 101 | 439 passed, 2 failed, 7 ignored, exit 101 |
+| Failing | dac4 `erc/ar.met2.1:gate` | dac4 (same rule) and `hier_elaborate` |
+| Ignored | 2: `large_fixtures…`, `tmp_deck_drc::dump` | 7 (EXT corpus placeholders and `large_fixtures…`; `tmp_deck_drc.rs` deleted by FLOW-14) |
 | dr unit tests | 25 | 34 |
+| verify unit tests | 19 | 40 |
+| library unit tests | 48 | 75 |
 
-`hier_elaborate` was "passing" before only because it asserted nothing (FLOW-14). The OTA-class fixtures were never
-signed off by a default run before. They are still `#[ignore]` in the default run, but were run here and are clean.
+`hier_elaborate` "passed" before only because it asserted nothing (FLOW-14). The OTA-class fixtures were never
+signed off by a default run before; they are still `#[ignore]` in the default run (nightly runs them by name), and
+were run here: clean.
 
 **`signoff_fixtures` per fixture:**
 
 - DRC is 0 everywhere, before and now.
-- ERC before: bjt_mirror 1, bgr_core 1, dac4 1. Now only dac4 has 1; the `supply_short` false positive is gone.
-- PEX is unchanged on six fixtures. dac4 went from 326.0 to 282.0 fF.
+- ERC before: bjt_mirror 1, bgr_core 1 (`supply_short` false positives), dac4 1. Now only dac4 has 1.
+- PEX is unchanged on six fixtures; dac4 326.0 → 282.0 fF.
 - LVS: bjt_mirror and bgr_core no longer read "clean" with nothing compared; they report 2 and 9 unverified. dac4's
   15 silently dropped caps are now 16 unverified (Σm).
 
@@ -298,60 +264,57 @@ signed off by a default run before. They are still `#[ignore]` in the default ru
 
 | circuit | ms | WL nm | overuse | LVS | ERC | C Σ fF | area µm² | util % | best |
 |---|---|---|---|---|---|---|---|---|---|
-| bgr_core | 16 113 → 9 034 | 260 320 → 260 250 | 0 → 0 | MATCH¹ → PARTIAL(9) | 1 → 0 | 77.2 → 76.7 | 135.0 → 135.0 | 100.0 → 100.0 | 4/5 budget → 2/5 conv. |
-| bjt_mirror | 12 300 → 7 487 | 74 085 → 73 480 | 0 → 0 | MATCH¹ → PARTIAL(2) | 1 → 0 | 33.7 → 33.0 | 64.7 → 64.8 | 79.4 → 79.4 | 3/5 budget → 1/5 conv. |
-| chain4 | 11 647 → 6 639 | 44 675 → 44 675 | 0 → 0 | MATCH → MATCH | 0 → 0 | 22.6 → 22.6 | 62.6 → 62.6 | 100.0 → 100.0 | 1/5 → 1/5 |
-| dac4 | 287 520 → 20 630 | 580 410 → 640 880 | **18 → 0** | MATCH⁵ → PARTIAL(16) | 0 → 0 | 275.8 → 297.2 | 2326.9 → 2400.6 | 60.0 → 61.1 | 5/15 → 2/15 budget |
-| ota (×3, identical) | 52–59 k → 26–28 k | 444 720 → 497 540 | 0 → 0 | MATCH → MATCH | 0 → 0 | 616.0 → 588.4 | 1865.1 → 1729.8 | 85.9 → 87.7 | 1/20 conv. → 1/20 budget |
-| pair | 11 468 → 5 858 | 17 700 → 19 905 | 0 → 0 | MATCH → MATCH | 0 → 0 | 4.6 → 4.8 | 8.6 → 8.6 | 100.0 → 100.0 | 4/5 → 1/5 |
-| quad | 16 803 → 5 754 | 37 945 → 37 945 | 0 → 0 | MATCH → MATCH | 0 → 0 | 9.3 → 9.3 | 15.9 → 15.9 | 100.0 → 100.0 | 5/5 → 5/5 |
-| rc_filter | 13 445 → 6 714 | 86 835 → 87 230 | 0 → 0 | MATCH → MATCH | 0 → 0 | 24.4 → 24.0 | 131.7 → 163.3 | 76.9 → 62.0 | 5/5 → 2/5 |
+| bgr_core | 16 113 → 6 104 | 260 320 → 260 250 | 0 → 0 | MATCH¹ → PARTIAL(9) | 1 → 0 | 77.2 → 76.7 | 135.0 → 135.0 | 100.0 → 100.0 | 4/5 budget → 2/5 conv. |
+| bjt_mirror | 12 300 → 5 681 | 74 085 → 73 480 | 0 → 0 | MATCH¹ → PARTIAL(2) | 1 → 0 | 33.7 → 33.0 | 64.7 → 64.8 | 79.4 → 79.4 | 3/5 budget → 1/5 conv. |
+| chain4 | 11 647 → 5 722 | 44 675 → 44 675 | 0 → 0 | MATCH → MATCH | 0 → 0 | 22.6 → 22.6 | 62.6 → 62.6 | 100.0 → 100.0 | 1/5 → 1/5 |
+| dac4 | 287 520 → 19 146 | 580 410 → 640 880 | **18 → 0** | MATCH⁵ → PARTIAL(16) | 0 → 0 | 275.8 → 297.2 | 2326.9 → 2400.6 | 60.0 → 61.1 | 5/15 → 2/15 budget |
+| ota (×3, identical) | 52–59 k → 27–32 k | 444 720 → 497 540 | 0 → 0 | MATCH → MATCH | 0 → 0 | 616.0 → 588.4 | 1865.1 → 1729.8 | 85.9 → 87.7 | 1/20 conv. → 1/20 budget |
+| pair | 11 468 → 5 526 | 17 700 → 19 905 | 0 → 0 | MATCH → MATCH | 0 → 0 | 4.6 → 4.8 | 8.6 → 8.6 | 100.0 → 100.0 | 4/5 → 1/5 |
+| quad | 16 803 → 6 222 | 37 945 → 37 945 | 0 → 0 | MATCH → MATCH | 0 → 0 | 9.3 → 9.3 | 15.9 → 15.9 | 100.0 → 100.0 | 5/5 → 5/5 |
+| rc_filter | 13 445 → 6 159 | 86 835 → 87 230 | 0 → 0 | MATCH → MATCH | 0 → 0 | 24.4 → 24.0 | 131.7 → 163.3 | 76.9 → 62.0 | 5/5 → 2/5 |
 
-- **Wall time:** 539.5 s before, about 143 s now (99.8 s in pass 2). All three runs were under unknown or uneven
-  load, and no item claims a speed-up. Per baseline-plc-01.md, the timings are for orientation only.
-- **dac4 cell count:** 15 before, 14 now. The 15th was a flow-inserted antenna diode.
-- **The changes the table was meant to show:**
-  1. Every "MATCH" that compared nothing now reads PARTIAL(n) (PERF-02).
-  2. The ERC `supply_short` false positives are gone.
-  3. dac4's winner overuse is 0, and since `ba49ae2` residual overuse can no longer sit in Θ at all: it is V.
-- **Moves explained in the merge commits:**
-  - **Epoch selection** changed the winner and C on several fixtures. FLOW-02 (`lex_key`), FLOW-03 and PERF-07
-    (signal-C tier) change which epoch wins; for dac4, so does RTE-03's dr (§4).
-  - **Device sizes:** FLOW-01. It moved the OTA WL, area and C, and the OTA CommonCentroid rows.
+¹ G.3: nothing compared. ⁵ G.3: the 15 unit caps were not in the reference.
+
+- **Wall time:** 539.5 s before, about 142 s now. Both under uneven load; no item claims a speed-up (baseline-plc-01.md:
+  timings for orientation only).
+- **dac4 cell count:** 15 → 14. The 15th was a flow-inserted antenna diode.
+- **What the table was meant to show:** every "MATCH" that compared nothing now reads PARTIAL(n) (PERF-02); the ERC
+  `supply_short` false positives are gone; dac4's winner overuse is 0, and residual overuse can no longer sit in Θ at
+  all since `ba49ae2` (it is V, §1).
+- **Moves explained in the merge commits:** epoch selection (FLOW-02 `lex_key`, FLOW-03, PERF-07 signal-C tier; for
+  dac4 also RTE-03's dr) changed the winner and C on several fixtures; FLOW-01 (drawn size = simulated size) moved
+  the OTA WL, area, C and CommonCentroid rows.
 
 **Constraint table:**
 
-- Totals: 241/237/2 viol/2 unk before; 240/233/4 viol/3 unk now. IrDrop rows went from 24 to 23.
-- **CommonCentroid** went from 3/3 satisfied (max use 0.000) to 0/3 (max use 2.195, Θ 3.584).
-  - The FLOW-01 merge records this as the honest result of drawing the simulated size: XM1/XM2 (W=10u nf=2) fold to
-    two 5 µm fingers each, placed AABB.
-  - `cellgen::folds` ignores CommonCentroid. That is follow-up work, not done in M0.
-- **Antenna** went from 21/21 to 20/21, with dac4 `top` at 2.111.
-- **ParasiticBudget** went from 38/39 (dac4 1.016) to 39/39 (0.824). **Utilization** went from 9/10 to 10/10.
-- **Electromigration** unknown went from 2 to 3 (the new one is rc_filter). It was not traced to an item; REL-01
-  ("unknown is not zero") and REL-03 both touch these rows.
-- **Skip log:**
-  - The `m*.density` rules were "run" over zero windows before (AV-18). They are now listed `ChipLevel` (PERF-04).
-  - Whether EM ran is now printed per fixture (AV-26 closed).
-  - The LU rules now exist and run (FLOW-05).
+- Totals: 241/237/2 viol/2 unk before; 240/233/4 viol/3 unk now. IrDrop rows 24 → 23.
+- **CommonCentroid** 3/3 satisfied (max use 0.000) → 0/3 (2.195, Θ 3.584). The FLOW-01 merge records this as the
+  honest result of drawing the simulated size (XM1/XM2 W=10u nf=2 fold to two 5 µm fingers each, placed AABB);
+  `cellgen::folds` ignores CommonCentroid, follow-up work outside M0.
+- **Antenna** 21/21 → 20/21 (dac4 `top` at 2.111).
+- **ParasiticBudget** 38/39 (dac4 1.016) → 39/39 (0.824). **Utilization** 9/10 → 10/10.
+- **Electromigration** unknown 2 → 3 (the new one is rc_filter); not traced to a single item (REL-01 and REL-03 both
+  touch these rows).
+- **Skip log:** the `m*.density` rules "ran" over zero windows before (AV-18), now `ChipLevel` (PERF-04); whether EM
+  ran is printed per fixture (AV-26 closed); the LU rules exist and run (FLOW-05).
 
 ## 6. Open, for the orchestrator/user
 
-1. **RTE-03:** accept `ba49ae2` on m0 with Acceptance 3 recorded as not met (7 of 90 non-winning dac4 dr reports
-   carry `unresolved congestion` + `drawn short nets` V; convergence is RTE-08, M1), or revert it. The review asked for
-   this decision explicitly. Criterion 11 holds under the master plan's wording only while `ba49ae2` stays.
-2. **RTE-06:** merge as "acceptance not met" or re-scope (§1). Criterion 2 stays red until dac4's met2 antenna is
-   fixed.
+1. **RTE-03:** accept `ba49ae2` on m0 with acceptance 3 recorded as not met (7 of 90 non-winning dac4 dr reports carry
+   `unresolved congestion` + `drawn short nets` V, re-measured on `44b37f1`; 0 of 450 elsewhere; convergence is
+   RTE-08, M1), or revert it. Criterion 11 holds under the master plan's wording only while `ba49ae2` stays.
+2. **RTE-06:** merge from `m0-rte06-rejected` as "acceptance not met" with a named owner for dac4's met2 cap-plate
+   antenna, or re-scope criterion 2. Criterion 2 stays red until then. The dac4 ERC baseline is not relaxed.
 3. **`hier_elaborate`** (8 unpaired devices, 17 unpaired nets) is red with no owner in M0.
-4. **`fixture_nets_without_a_resistor_keep_em_sizing`** should use the `PHILIS_REQUIRE_TOOLS` skip that
-   perf_postlayout uses, so the nightly job cannot pass it when a tool is missing. No code was changed in this pass.
-6. **Lost branch work:** `m0-routing` and `m0-antenna` were reset to merge commits. RTE-03's original commits
-   (`e8ef0e9`, `b36ca9f`, `93fe6fb`, ported in `ba49ae2`) and RTE-06's (`b635606`, `63bc2a2`, `32efea4`) are on no
-   branch. They are reachable only through the reflogs (`m0-routing@{1}`, `m0-antenna@{1}`) until those expire. If
-   RTE-06 is to be merged as "acceptance not met", `32efea4` must be re-pointed by a branch first.
-5. **The OTA CommonCentroid rows** are 0/3 since FLOW-01, pending `cellgen::folds` honouring CommonCentroid.
+4. **The OTA CommonCentroid rows** are 0/3 since FLOW-01, pending `cellgen::folds` honouring CommonCentroid.
+5. **REL T2 per-net check** (review finding 20) is deferred to M1: signoff ERC rows carry no net.
+
+Closed since pass 3: the EM-sizing test's loud skip (§2 #1), the nightly job's hang, and the lost branch work (the
+RTE-03 and RTE-06 originals are on `m0-rte03-original` and `m0-rte06-rejected`).
 
 ## 7. Review panel
+
+Recorded at `44b37f1`, kept as written. Pass 4 confirms its suite figure (439/2/7) and runs the bench it did not run (§4: no layout column moved).
 
 The M0 review panel raised 26 findings. Each was checked against the code on `m0` at `0c40ce5`, and the real ones were
 fixed in "M0: review-panel fixes". After the fixes, `cargo test --release --workspace --no-fail-fast` gives **439
