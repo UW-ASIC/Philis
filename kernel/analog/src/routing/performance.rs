@@ -61,9 +61,10 @@ impl RuleBatch<Routes> for PerformanceBudget {
     fn criticality(&self, r: &Routes) -> f32 {
         (self.used(r) / self.limit.max(1e-6)).clamp(0.0, 1.0)
     }
-    /// `used / limit`, so `1.0` is at the bound for a zero-limit row too.
+    /// Spent fraction of the headroom; `None` for a zero-limit row, which has
+    /// no budget to spend ([`crate::rule::Rule::usage`]).
     fn worst_usage(&self, r: &Routes) -> Option<f32> {
-        Some(self.used(r) / self.limit.max(1e-6))
+        (self.limit > 0.0).then(|| self.used(r) / self.limit)
     }
     fn violating_ids(&self, r: &Routes, out: &mut Vec<u32>) {
         if self.used(r) > self.limit {
@@ -112,6 +113,7 @@ mod tests {
         assert_eq!(b.violations(&r), 1);
         assert!((b.residual(&r) - 0.1).abs() < 1e-7, "{}", b.residual(&r));
         assert_eq!(b.criticality(&r), 1.0);
+        assert_eq!(b.worst_usage(&r), None, "no budget, no fraction of one");
         // No wire, nothing spent: met.
         assert_eq!(b.violations(&Routes { wires: vec![Vec::new()], ..Default::default() }), 0);
     }

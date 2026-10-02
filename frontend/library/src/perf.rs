@@ -228,8 +228,8 @@ pub fn sensitivities(netlist: &Netlist, cfg: &PerfConfig, nets: &[String], delta
 /// f0` (`sign = +1`). A bound the schematic already misses (`headroom ≤ 0`)
 /// keeps a do-not-worsen row: `limit = 0`, `w_i = sign·(∂f/∂C_i) / |bound|`
 /// (`miss`'s unit-free scale, `1` for a zero bound). A spec the schematic does
-/// not measure has no row (reported by the caller); a net whose run did not
-/// measure is left out of the row.
+/// measure finitely, or a non-finite bound, has no row (reported by the
+/// caller); a net whose run did not measure is left out of the row.
 #[must_use]
 pub fn budget_rows(
     cfg: &PerfConfig,
@@ -243,7 +243,7 @@ pub fn budget_rows(
         .flat_map(|(j, spec)| {
             let f0 = s.base.metrics[j].1;
             [(spec.min, -1.0, "min"), (spec.max, 1.0, "max")].into_iter().filter_map(move |(bound, sign, side)| {
-                let (f0, bound) = (f0?, bound?);
+                let (f0, bound) = (f0.filter(|v| v.is_finite())?, bound.filter(|v| v.is_finite())?);
                 let headroom = sign * (bound - f0);
                 let (scale, limit) = if headroom > 0.0 { (headroom, 1.0) } else { (if bound == 0.0 { 1.0 } else { bound.abs() }, 0.0) };
                 let (nets, weights): (Vec<_>, Vec<_>) = nets
@@ -382,5 +382,13 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].limit, 0.0);
         assert!((rows[0].weights[0] - 0.1).abs() < 1e-7, "{:?}", rows[0].weights);
+    }
+
+    /// Only a finite bound against a finite schematic value gets a row: a NaN
+    /// weight would never violate.
+    #[test]
+    fn a_non_finite_bound_or_value_has_no_row() {
+        assert!(one_net(vec![spec(Some(f64::NAN), Some(f64::INFINITY))], 5.0, -1.0).is_empty());
+        assert!(one_net(vec![spec(Some(10.0), None)], f64::NAN, -1.0).is_empty());
     }
 }

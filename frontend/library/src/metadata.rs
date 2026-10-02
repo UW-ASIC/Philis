@@ -88,7 +88,7 @@ pub struct MetadataReport {
     /// Empty when performance scoring is off.
     pub performance: Vec<(String, Option<f64>, Option<f64>, Option<f64>, f64)>,
     /// Per declared spec bound, its routing budget row or why it has none
-    /// (`"ugf:min: row"`, `"…: do-not-worsen row …"`, `"…: no row (reason)"`).
+    /// (`"ugf:min: row (3 nets)"`, `"…: do-not-worsen row …"`, `"…: no row (reason)"`).
     /// Empty from [`build`]; the flow fills it.
     pub budget_rows: Vec<String>,
     /// Post-layout simulations that could not run ([`crate::RunStats::sim_failures`]).

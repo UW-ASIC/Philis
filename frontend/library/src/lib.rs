@@ -152,7 +152,8 @@ pub struct RunStats {
     /// Winner: dp's anneal counters.
     pub dp: PlaceStats,
     /// Post-layout simulations that could not run ([`perf::evaluate`] `Err`),
-    /// over every epoch; each scored its epoch as every spec unmeasured.
+    /// over every epoch of every start and cell topology, not just the
+    /// winner's; each scored its epoch as every spec unmeasured.
     pub sim_failures: u32,
 }
 
@@ -211,7 +212,11 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             return (merged, key);
         }
         let (apart, apart_key, _) = solve(&netlist, injected, pdk, cfg, &bias, &perf_rows, false, seed);
-        if key_lt(&apart_key, &key) { (apart, apart_key) } else { (merged, key) }
+        // Failures count over both topologies, whichever wins.
+        let failed = merged.stats.sim_failures + apart.stats.sim_failures;
+        let (mut sol, key) = if key_lt(&apart_key, &key) { (apart, apart_key) } else { (merged, key) };
+        sol.stats.sim_failures = failed;
+        (sol, key)
     };
     // Multi-start: the lex-best start wins; ties go to the earliest.
     let start = &start;
@@ -219,7 +224,11 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         let handles: Vec<_> = (0..cfg.starts.max(1)).map(|j| s.spawn(move || start(j))).collect();
         handles.into_iter().map(|h| h.join().expect("a search start panicked")).collect()
     });
+    // Failures count over every start, not just the winner's: a failed
+    // simulation scores its epoch unmeasured, so selection would hide them.
+    let sim_failures = runs.iter().map(|r| r.0.stats.sim_failures).sum();
     let mut sol = runs.into_iter().reduce(|best, r| if key_lt(&r.1, &best.1) { r } else { best }).expect("one start at least").0;
+    (sol.stats.sim_failures, sol.metadata.sim_failures) = (sim_failures, sim_failures);
     sol.metadata.budget_rows = perf_bounds;
     Ok(sol)
 }
@@ -238,13 +247,14 @@ fn performance_rows(
     let Some(p) = &cfg.performance else { return (Vec::new(), Vec::new()) };
     let bounds = || {
         p.specs.iter().flat_map(|s| {
-            [(s.min, "min"), (s.max, "max")].into_iter().filter(|b| b.0.is_some()).map(move |(_, side)| format!("{}:{side}", s.metric))
+            [(s.min, "min"), (s.max, "max")].into_iter().filter(|b| b.0.is_some_and(f64::is_finite)).map(move |(_, side)| format!("{}:{side}", s.metric))
         })
     };
     let notes = |rows: &[analog::routing::PerformanceBudget], why: &str| -> Vec<String> {
         let notes: Vec<String> = bounds()
             .map(|b| match rows.iter().find(|r| r.metric == b) {
-                Some(r) if r.limit > 0.0 => format!("{b}: row"),
+                Some(r) if r.nets.is_empty() => format!("{b}: no row (no net sensitivity measured)"),
+                Some(r) if r.limit > 0.0 => format!("{b}: row ({} nets)", r.nets.len()),
                 Some(_) => format!("{b}: do-not-worsen row (the schematic misses it)"),
                 None => format!("{b}: no row ({why})"),
             })
@@ -1558,6 +1568,27 @@ mod start_tests {
         let text = sol.metadata.to_string();
         assert!(text.contains(&format!("simulations failed: {}", sol.stats.sim_failures)), "{text}");
         assert!(text.contains("budget gain:max: no row"), "{text}");
+    }
+
+    /// PERF-06: failures count over every start, not just the winner's (a
+    /// failed run scores its epoch unmeasured, so selection would hide it).
+    /// One epoch per solve, the first always scored: each start fails at
+    /// least once, the winner alone at most `iterations` times.
+    #[test]
+    fn failed_simulations_count_over_every_start() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).expect("sky130 loads");
+        let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/pair.spice")).unwrap();
+        let performance = crate::perf::PerfConfig {
+            sim: crate::oppoint::OpConfig { ngspice: "philis-no-such-binary-7f3a".into(), ..Default::default() },
+            testbench: String::new(),
+            specs: vec![crate::perf::Spec { metric: "gain".into(), min: Some(20.0), max: None }],
+        };
+        let cfg = crate::Config { feedback_iters: 1, outer_iters: 1, starts: 2, performance: Some(performance), ..Default::default() };
+        let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
+        assert_eq!(sol.stats.iterations, 1, "{:?}", sol.stats);
+        assert!(sol.stats.sim_failures >= 2, "{:?}", sol.stats);
+        assert_eq!(sol.metadata.sim_failures, sol.stats.sim_failures);
     }
 
     /// An unresolved device's pins are unknown; the other devices keep their
