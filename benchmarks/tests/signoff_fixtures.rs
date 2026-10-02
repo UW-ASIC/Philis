@@ -87,7 +87,9 @@ fn check(name: &str, max_drc: usize, max_erc: usize, lvs_must_match: bool) {
     let erc: Vec<&str> = report
         .hard_violations
         .iter()
-        .filter(|v| v.rule.starts_with("erc/"))
+        // A deck warning (`warn/erc/…`) is out of the epoch key's |V| but not
+        // out of this ceiling: ERC 0 means no row at all.
+        .filter(|v| v.rule.trim_start_matches("warn/").starts_with("erc/"))
         .map(|v| v.rule.as_str())
         .collect();
     let lvs = report.hard_violations.iter().find(|v| v.rule.starts_with("lvs/"));
