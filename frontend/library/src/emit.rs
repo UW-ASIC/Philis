@@ -134,20 +134,20 @@ pub fn emit(
                     .max(1);
                 (u.unit_w.max(1), u.unit_l.max(1), nf)
             }
-            // No covering unitization (unmatched device): schematic params
-            // verbatim. The parser stores lowercase keys, nm units.
+            // No covering unitization (unmatched device): the schematic size,
+            // a MOS as `nf·m` fingers of `W_total/nf`. A missing size is not
+            // guessed.
             None => {
-                let p = |k: &str, d_: i64| {
-                    d.params
-                        .iter()
-                        .find(|(n, _)| n == k)
-                        .map_or(d_, |(_, v)| *v)
+                let p = |k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v).filter(|&v| v > 0);
+                let size = match d.mos_size() {
+                    Some(s) => Some((s.w_finger_nm(), s.l_nm, s.fingers())),
+                    None if d.kind == DeviceKind::Resistor => p("w").zip(p("l")).map(|(w, l)| (w, l, 1)),
+                    None => None,
                 };
-                (
-                    p("w", 420) as i32,
-                    p("l", 150) as i32,
-                    p("nf", 1).max(1) as u16,
-                )
+                let Some((w, l, nf)) = size else {
+                    return Err(EmitError::Unsupported(format!("{}: no W/L in the netlist", d.name)));
+                };
+                (w.min(i64::from(i32::MAX)) as i32, l.min(i64::from(i32::MAX)) as i32, nf.min(u32::from(u16::MAX)) as u16)
             }
         };
         let legs = members.len() as u8;

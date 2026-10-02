@@ -6,13 +6,40 @@ use std::collections::HashMap;
 
 use pnr_core::{Device, DeviceKind, Net, NetId, Netlist};
 
+/// What a MOS card's `W` means. W/nf/m semantics are PDK- and tool-specific,
+/// so the convention is an input and is normalised once, here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SizeConvention {
+    /// SPICE/BSIM4: `W` is the instance's total width over its `nf` fingers.
+    #[default]
+    Spice,
+    /// `W` is one finger's width; stored as `W·nf`.
+    PerFinger,
+}
+
+/// How [`spice_with`] reads a netlist.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ParseOptions {
+    /// How a MOS card's `w` relates to its `nf` fingers; normalised to the
+    /// SPICE total before the [`Device`] is stored.
+    pub size: SizeConvention,
+}
+
+/// Parse a SPICE netlist into the internal [`Netlist`], `W` read as
+/// [`SizeConvention::Spice`].
+pub fn spice(text: &str) -> Result<Netlist, String> {
+    spice_with(text, &ParseOptions::default())
+}
+
 /// Parse a SPICE netlist into the internal [`Netlist`].
 ///
 /// The whole pipeline's input boundary: after this, everything is the internal
 /// SoA model (parse-don't-validate). Nets are interned to [`NetId`]s in
 /// first-seen order; each [`Device`] carries its terminals in G,D,S,B order (for
 /// FETs) and its numeric params (W/L in `nm`, `nf`/`stack`/`m` as plain counts).
-pub fn spice(text: &str) -> Result<Netlist, String> {
+/// A MOS `w` is stored as the SPICE instance total (`pnr_core::MosSize`), so
+/// under [`SizeConvention::PerFinger`] it is the written `w` times `nf`.
+pub fn spice_with(text: &str, opts: &ParseOptions) -> Result<Netlist, String> {
     let mut nets: Vec<Net> = Vec::new();
     let mut net_index: HashMap<String, NetId> = HashMap::new();
     let mut devices: Vec<Device> = Vec::new();
@@ -101,6 +128,12 @@ pub fn spice(text: &str) -> Result<Netlist, String> {
                 _ => continue,
             };
             out_params.push((k.clone(), val));
+        }
+        if opts.size == SizeConvention::PerFinger && matches!(kind, DeviceKind::Nmos | DeviceKind::Pmos) {
+            let nf = out_params.iter().find(|(k, _)| k == "nf").map_or(1, |&(_, v)| v.max(1));
+            if let Some((_, w)) = out_params.iter_mut().find(|(k, _)| k == "w") {
+                *w *= nf;
+            }
         }
 
         devices.push(Device {
@@ -297,6 +330,22 @@ M2 vout net8 vdd vdd pfet_01v8 L=150e-9 w=10.5e-7 nf=20
         assert_eq!(p(m5, "nf"), Some(10));
         // Nets: id, vss, vout, net8, vdd → 5 distinct.
         assert_eq!(nl.nets.len(), 5);
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    #[test]
+    fn per_finger_convention_stores_total_width() {
+        let card = "M1 d g s b nfet_01v8 W=1u L=0.15u nf=4\n";
+        let w = |size| {
+            let nl = spice_with(card, &ParseOptions { size }).unwrap();
+            nl.devices[0].params.iter().find(|(k, _)| k == "w").map(|&(_, v)| v)
+        };
+        assert_eq!(w(SizeConvention::PerFinger), Some(4000));
+        assert_eq!(w(SizeConvention::Spice), Some(1000));
     }
 }
 

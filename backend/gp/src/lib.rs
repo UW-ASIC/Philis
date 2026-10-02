@@ -30,14 +30,19 @@ pub struct Prices {
     weight: Vec<f32>,
     /// `‖λ_{k+1} − λ_k‖` of the last [`Prices::settle`]; `INFINITY` before one.
     drift: f64,
+    /// Dual steps taken: one per epoch (the flow's), none inside `place`.
+    steps: u32,
+    /// Kinds, each once, whose λ sits at `−LAMBDA_MAX` with a batch still violated
+    /// after the last step: the cap, not the layout, is what stopped them.
+    saturated: Vec<&'static str>,
 }
 
 #[derive(Clone, Copy)]
 struct Price {
-    /// Non-positive multiplier (`λ ← λ − ρ·c`); `−λ` is the price.
+    /// Multiplier in `[−LAMBDA_MAX, 0]` (`λ ← λ − ρ·g`); `−λ` is the price.
     lambda: f32,
     rho: f32,
-    /// Residual at the previous dual step, for the did-it-shrink test.
+    /// Constraint value `g` at the previous dual step, for the did-it-shrink test.
     residual: f32,
 }
 
@@ -45,12 +50,13 @@ const RHO_FLOOR: f32 = 0.25;
 const RHO_GAIN: f32 = 2.0;
 const RHO_MAX: f32 = 64.0;
 // ponytail: flat cap so a physically unsatisfiable budget cannot swamp the
-// objective; a saturated λ then reads as settled in `drift`.
+// objective; a saturated λ reads as settled in `drift`, so it is reported in
+// [`Prices::saturated`] and blocks convergence.
 const LAMBDA_MAX: f32 = 64.0;
 
 impl Default for Prices {
     fn default() -> Self {
-        Self { priced: BTreeMap::new(), weight: Vec::new(), drift: f64::INFINITY }
+        Self { priced: BTreeMap::new(), weight: Vec::new(), drift: f64::INFINITY, steps: 0, saturated: Vec::new() }
     }
 }
 
@@ -78,27 +84,60 @@ impl Prices {
             .collect();
     }
 
-    /// Dual step `λ ← λ − ρ·c(l)`, once per `place`; ρ doubles for a residual
-    /// that did not shrink.
+    /// Projected dual step `λ ← clamp(λ − ρ·g, −LAMBDA_MAX, 0)`, once per
+    /// epoch on the layout the epoch is scored on (PLAN §5; `place` only binds).
+    /// `g` is dimensionless, a fraction of the batch's own budget: the residual
+    /// when violated, else minus the slack, so the price relaxes on slack
+    /// (PLAN.md:124). ρ doubles for a residual that did not shrink and halves
+    /// on slack, within `[RHO_FLOOR, RHO_MAX]`.
     pub fn settle(&mut self, reqs: &Requirements<Layout>, l: &Layout) {
         let mut drift_sq = 0.0f64;
+        self.saturated.clear();
         for (bi, key) in keys(reqs).into_iter().enumerate() {
-            let c = reqs.budget[bi].residual(l).max(0.0) as f32;
+            let b = &reqs.budget[bi];
+            let r = b.residual(l).max(0.0) as f32;
+            // Slack only where the batch can measure it: spent fraction
+            // (`worst_usage`) else headroom-derived criticality. A batch that
+            // reports neither has criticality 1 → g = 0 → price held.
+            let g = if r > 0.0 {
+                r
+            } else {
+                b.worst_usage(l).map_or(-(1.0 - b.criticality(l)), |u| (u - 1.0).min(0.0))
+            };
             let p = self.priced.entry(key).or_insert(Price {
                 lambda: 0.0,
                 rho: RHO_FLOOR,
                 residual: f32::INFINITY,
             });
-            if c > 0.0 && c >= p.residual {
-                p.rho = (p.rho * RHO_GAIN).min(RHO_MAX);
+            if g > 0.0 && g >= p.residual {
+                p.rho = (p.rho * RHO_GAIN).min(RHO_MAX); // stuck → harder
+            } else if g <= 0.0 {
+                p.rho = (p.rho / RHO_GAIN).max(RHO_FLOOR); // slack → softer
             }
-            p.residual = c;
-            let next = (p.lambda - p.rho * c).max(-LAMBDA_MAX);
+            p.residual = g;
+            let next = (p.lambda - p.rho * g).clamp(-LAMBDA_MAX, 0.0);
             drift_sq += f64::from(next - p.lambda).powi(2);
             p.lambda = next;
+            if next <= -LAMBDA_MAX && r > 0.0 && !self.saturated.contains(&key.0) {
+                self.saturated.push(key.0);
+            }
         }
         self.drift = drift_sq.sqrt();
+        self.steps += 1;
         self.bind(reqs);
+    }
+
+    /// Kinds with a batch still violated and λ at the cap after the last
+    /// [`Prices::settle`], each listed once however many batches share it.
+    #[must_use]
+    pub fn saturated(&self) -> &[&'static str] {
+        &self.saturated
+    }
+
+    /// Dual steps taken so far.
+    #[must_use]
+    pub fn steps(&self) -> u32 {
+        self.steps
     }
 
     /// `−λ` for budget batch `bi`; `0.0` when unbound.
@@ -325,7 +364,6 @@ pub fn place(
         }
     }
 
-    prices.settle(reqs, &l);
     let rep = report(&nets, reqs, &l, prices);
     (l, rep)
 }
@@ -356,6 +394,23 @@ mod price_tests {
         }
         fn residual(self, l: &Layout) -> f32 {
             (l.x[0] as f32 / 1000.0).clamp(0.0, 1.0)
+        }
+    }
+
+    /// [`Budget`] that also reports its spent fraction, unclamped, so a test can
+    /// read slack: `x[0] = -500` ⇒ usage 0.5 with residual 0.
+    #[derive(Clone, Copy)]
+    struct Spent;
+    impl Rule for Spent {
+        type On = Layout;
+        fn cost(self, l: &Layout) -> f32 {
+            Budget.cost(l)
+        }
+        fn residual(self, l: &Layout) -> f32 {
+            Budget.residual(l)
+        }
+        fn usage(self, l: &Layout) -> Option<f32> {
+            Some(1.0 + l.x[0] as f32 / 1000.0)
         }
     }
 
@@ -440,6 +495,57 @@ mod price_tests {
             0.0,
             "a satisfied budget trades nothing, so its price is stationary"
         );
+    }
+
+    /// PLAN.md:124: a budget gone slack loses its price instead of keeping the
+    /// one it ratcheted to while violated; λ is projected onto `≤ 0`, so it
+    /// stops at exactly zero rather than turning into a reward.
+    #[test]
+    fn a_slack_budget_relaxes_its_price() {
+        let (mut reqs, mut l) = bench();
+        reqs.budget = vec![Box::new(vec![Spent])];
+        let mut prices = Prices::new();
+        l.x[0] = 500;
+        for _ in 0..3 {
+            prices.settle(&reqs, &l);
+        }
+        let mut last = prices.weight_of(0);
+        assert!(last > 0.0, "three violated epochs priced the budget");
+
+        l.x[0] = -500; // half the budget spent, residual 0
+        let mut relaxing = 0;
+        while last > 0.0 {
+            prices.settle(&reqs, &l);
+            let w = prices.weight_of(0);
+            assert!(w < last, "the price must fall every slack epoch: {w} after {last}");
+            last = w;
+            relaxing += 1;
+            assert!(relaxing < 100, "price never reached zero: {last}");
+        }
+        assert_eq!(last, 0.0, "clamped at zero");
+        for _ in 0..3 {
+            prices.settle(&reqs, &l);
+            assert_eq!(prices.weight_of(0), 0.0, "a relaxed price stays at zero");
+        }
+    }
+
+    /// A λ held at the cap reads as stationary in `drift` while the budget is
+    /// still violated, so it must be reported as binding (ρ ramps 0.25 … 64,
+    /// Σ > 64 well inside 30 steps). Two capped batches of one kind (ordinals
+    /// 0 and 1) list that kind once.
+    #[test]
+    fn a_saturated_price_is_reported() {
+        let (mut reqs, l) = bench(); // residual 1.0 every epoch
+        reqs.budget.push(Box::new(vec![Budget]));
+        let mut prices = Prices::new();
+        prices.settle(&reqs, &l);
+        assert!(prices.saturated().is_empty(), "one step does not reach the cap");
+        for _ in 1..30 {
+            prices.settle(&reqs, &l);
+        }
+        assert_eq!((prices.weight_of(0), prices.weight_of(1)), (LAMBDA_MAX, LAMBDA_MAX));
+        assert_eq!(prices.saturated(), [reqs.budget[0].kind()], "the capped kind is reported binding, once");
+        assert_eq!(prices.steps(), 30);
     }
 
     /// Prices are keyed by rule kind, not by position, so a batch keeps its price when

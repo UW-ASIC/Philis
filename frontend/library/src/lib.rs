@@ -8,6 +8,7 @@ mod cellgen;
 mod fill;
 mod geometry;
 mod parse;
+pub use parse::SizeConvention;
 
 /// Substrate3 elaboration: build a `macro_master::Composition` against a PDK
 /// and route its declared nets — the "PDK on the fly" entry.
@@ -62,6 +63,9 @@ pub struct Config {
     /// bounding box (a priced budget, so it outranks C; see
     /// `analog::placement::utilization`). `0` disables it.
     pub min_utilization: f32,
+    /// What a MOS card's `W` means; [`run`] stores it as the SPICE total.
+    /// Only [`run`] reads it: [`parse`] is always [`SizeConvention::Spice`].
+    pub size_convention: SizeConvention,
     /// What gp does before dp; [`GpMode::Pile`] measures gp's contribution.
     pub gp_mode: GpMode,
 }
@@ -88,6 +92,7 @@ impl Default for Config {
             performance: None,
             starts: 3,
             min_utilization: 0.6,
+            size_convention: SizeConvention::Spice,
             gp_mode: GpMode::default(),
         }
     }
@@ -122,8 +127,11 @@ pub struct RunStats {
     pub iterations: u32,
     /// Index of the winning epoch within its assignment.
     pub best_iteration: u32,
-    /// Stopped feasible with stationary constraint prices.
+    /// Stopped feasible with stationary constraint prices, none saturated.
     pub converged: bool,
+    /// Dual steps on the constraint prices: one per epoch, so it equals
+    /// `iterations` (T6).
+    pub dual_steps: u32,
     /// Variant assignments tried.
     pub outer_iterations: u32,
     /// Times an assignment stalled infeasible and the variants were changed.
@@ -177,7 +185,7 @@ pub fn deck_models(netlist: &mut pnr_core::Netlist, pdk: &Pdk) {
 /// as drawn, never reshaped or moved by `dp`.
 pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<Solution, FlowError> {
     // 1. Parse, naming each device by the deck's model.
-    let mut netlist = parse::spice(spice).map_err(FlowError::Parse)?;
+    let mut netlist = parse::spice_with(spice, &parse::ParseOptions { size: cfg.size_convention }).map_err(FlowError::Parse)?;
     deck_models(&mut netlist, pdk);
 
     check_injected(&netlist, injected, pdk)?;
@@ -395,16 +403,22 @@ fn solve(
             }
         }
 
-        // Feasible with settled prices: done.
+        // Feasible with settled prices: done. A price held at its cap reads as
+        // settled in `drift` but is still binding, so it blocks convergence.
         let feasible = best
             .as_ref()
             .is_some_and(|b| b.key.0 == 0 && b.key.1 <= 0.0 && b.key.2 <= 0.0);
-        if feasible && prices.drift() < PRICE_STATIONARY {
+        if feasible && prices.drift() < PRICE_STATIONARY && prices.saturated().is_empty() {
             stats.converged = true;
             break;
         }
-        // Infeasible: try the next variant assignment, unless the budget or the
-        // variant space is exhausted.
+        // Not converged: infeasible, or feasible with prices still moving or
+        // saturated. Try the next variant assignment, unless the budget or the
+        // variant space is exhausted. ponytail: a feasible run that once
+        // saturated a λ relaxes it by ρ·slack per epoch, ρ ≥ RHO_FLOOR = 0.25:
+        // −64 at slack 0.5 with ρ at the floor is 512 epochs of drift above
+        // PRICE_STATIONARY, so it escalates rather than converges; FLOW-08's
+        // `RunStats.stop` will show it.
         if outer + 1 == n_outer {
             break;
         }
@@ -417,6 +431,7 @@ fn solve(
 
     // 7. The winner, redrawn from its own variant choice, with its guard rings.
     let best = best.expect("at least one epoch ran");
+    stats.dual_steps = prices.steps();
     stats = RunStats {
         best_iteration: best.iteration,
         ..best.stats.merge(stats)
@@ -451,6 +466,7 @@ fn solve(
         &pdk.unverified(),
     );
     let mut metadata = metadata;
+    metadata.binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
     metadata.add_routing(&[Box::new(flow.common_nodes(&best.layout)), Box::new(flow.environment(&best.layout, &best.rings))], &best.routes);
     if let (Some(cfg), Some(result)) = (flow.perf, &best.perf) {
         metadata.performance = cfg
@@ -622,6 +638,8 @@ impl Flow<'_> {
         );
         layout.debug_check_placed("dp::place");
         layout.groups = cells.groups.clone();
+        // The epoch's one dual step, on the layout it is scored on (T6).
+        prices.settle(placement, &layout);
         let macros = if layout.variant == assignment {
             macros
         } else {
@@ -823,11 +841,10 @@ impl Flow<'_> {
             let list = &on_net[net.0 as usize];
             let pins = |d: DeviceId| list.iter().filter(|p| p.0 == d && p.1 == "S").map(|p| p.2).collect::<Vec<_>>();
             let feeds = list.iter().filter(|p| p.0 != a && p.0 != b).map(|p| p.2).collect();
-            // σ_rand = A_VT/√(W·L·fingers) of member a, over its drain current.
+            // σ_rand = A_VT/√(W_total·L·m) of member a, over its drain current.
             let dev = &self.netlist.devices[a.0 as usize];
             let avt = if dev.kind == pnr_core::DeviceKind::Nmos { self.avt_mv_um[0] } else { self.avt_mv_um[1] };
-            let p = |k: &str| dev.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v as f32);
-            let gate_um2 = p("w").unwrap_or(0.0) * p("l").unwrap_or(0.0) * 1e-6 * p("nf").unwrap_or(1.0).max(p("m").unwrap_or(1.0));
+            let gate_um2 = dev.gate_area_um2() as f32;
             let i_ua = self.id_ua.get(a.0 as usize).copied().flatten().map(|i| i.abs() as f32).filter(|&i| i > 0.0);
             let max_delta_ohm = match (annotator::emit::systematic_allowance_mv(avt, gate_um2, self.offset_sigma_mv), i_ua) {
                 (Some(mv), Some(i)) => mv / i * 1e3,
@@ -1470,6 +1487,19 @@ mod start_tests {
         assert_eq!((a.layout.x, a.layout.y), (b.layout.x, b.layout.y));
     }
 
+    /// T6: exactly one dual step per epoch, taken by the flow (gp and dp only
+    /// bind), so the price step count equals the epoch count.
+    #[test]
+    fn one_dual_step_per_epoch() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).expect("sky130 loads");
+        let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/pair.spice")).unwrap();
+        let cfg = crate::Config { feedback_iters: 3, outer_iters: 1, starts: 1, ..Default::default() };
+        let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
+        assert!(sol.stats.iterations > 0);
+        assert_eq!(sol.stats.dual_steps, sol.stats.iterations);
+    }
+
     /// An unresolved device's pins are unknown; the other devices keep their
     /// currents, in its own cell and in every other cell (not all-or-nothing).
     #[test]
@@ -1589,3 +1619,54 @@ mod start_tests {
 
 
 
+
+#[cfg(test)]
+mod size_tests {
+    use pnr_core::Process as _;
+
+    /// One size convention end to end (FLOW-01, plan-08 T1): on every local
+    /// fixture, the channel the cells draw for a MOS (Σ unit `W·L / L` over its
+    /// units, variant 0) is the `W_total·m` the simulator card asks for, to a
+    /// grid step per drawn finger. Before, ota's `XM1` (`W=10u nf=2`) drew
+    /// 20 µm and simulated 10 µm, `XM5` (`W=40u m=4`) drew 160 µm and
+    /// simulated 40 µm.
+    #[test]
+    fn drawn_width_equals_simulated_width() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let json = std::fs::read_to_string(root.join("pdks/sky130.json")).expect("pdks/sky130.json");
+        let pdk = verify::Pdk::from_json(&json).expect("sky130 loads");
+        let fixtures = ["ota", "ota_constrained", "tt_ota", "pair", "quad", "chain4", "rc_filter", "dac4", "bjt_mirror", "bgr_core"];
+        let mut checked = 0;
+        for name in fixtures {
+            let path = root.join(format!("benchmarks/fixtures/{name}.spice"));
+            let spice = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let mut netlist = crate::parse::spice(&spice).expect("parses");
+            crate::deck_models(&mut netlist, &pdk);
+            let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
+            let fold = crate::cellgen::folds(&netlist, &pdk, &[]);
+            let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
+            for (i, dev) in netlist.devices.iter().enumerate() {
+                if !matches!(dev.kind, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
+                    continue;
+                }
+                let s = dev.mos_size().unwrap_or_else(|| panic!("{name} {}: no size", dev.name));
+                let id = pnr_core::DeviceId(i as u16);
+                let cell = cells.devices_of.iter().position(|m| m.contains(&id)).expect("device has a cell");
+                let owner = cells.devices_of[cell].iter().position(|&d| d == id).unwrap();
+                let units = &cells.variants[cell].alternatives[0].units;
+                let drawn: i64 = units.iter().filter(|u| usize::from(u.owner) == owner).map(|u| u.weight / s.l_nm).sum();
+                let want = s.w_total_nm * i64::from(s.m);
+                let tol = i64::from(s.fingers()) * i64::from(pdk.grid());
+                assert!((drawn - want).abs() <= tol, "{name} {}: drawn {drawn} nm, simulated {want} nm (±{tol})", dev.name);
+                checked += 1;
+            }
+            if name == "ota" {
+                let card = crate::oppoint::flat_circuit(&netlist, &crate::oppoint::OpConfig::default());
+                let xm5 = card.lines().find(|l| l.starts_with("XM5 ")).expect("XM5 card");
+                assert!(xm5.contains("W=40 L=2 nf=1 m=4"), "{xm5}");
+            }
+        }
+        // ota ×3: 5 each; pair 2, quad 4, chain4 4, rc_filter 2, dac4 9.
+        assert_eq!(checked, 36, "every fixture MOS checked");
+    }
+}
