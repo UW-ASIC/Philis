@@ -7,7 +7,7 @@ use crate::ids::NetId;
 pub struct LayerId(pub u16);
 
 /// Axis-aligned rectangle in `nm`. `(x, y)` is the lower-left corner.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,

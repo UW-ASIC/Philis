@@ -101,7 +101,7 @@ pub fn merge_rects(shapes: &mut Vec<Shape>, layer: pnr_core::LayerId) {
 }
 
 /// Debug-only: every pin of a net touches that net's routed geometry (xy
-/// overlap, touching counts). `Routes::debug_check` only proves the wires are
+/// overlap, touching counts). `Routes::debug_check_joined` only proves the wires are
 /// self-connected, which a net can satisfy while missing its pins entirely.
 ///
 /// ponytail: xy-only — ignores whether the touch has a via stack; O(k²) per net.

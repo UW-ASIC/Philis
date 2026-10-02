@@ -479,8 +479,13 @@ fn solve(
     let mut macros = cellgen::realize(&flow.cells.variants, &best.layout.variant);
     // Only a winner claiming zero hard violations must be fully connected; an
     // infeasible winner's opens are already counted and reported at signoff.
-    if best.key.0 == 0 {
-        best.routes.debug_check("dr::route (winner)");
+    if cfg!(debug_assertions) && best.key.0 == 0 {
+        // Under dr's own joins; a diode marker rides in the routes as the
+        // antenna rule's credit, not as conductor.
+        let marker = pdk.diode_marker();
+        let wires = best.routes.wires.iter().map(|w| w.iter().filter(|s| Some(s.layer) != marker).copied().collect()).collect();
+        let joins = dr::joins(&flow.layers, &flow.cuts, flow.d_router.cfg.pin_access);
+        Routes { wires, ..Routes::default() }.debug_check_joined("dr::route (winner)", &joins);
         geometry::debug_check_connected(&macros, &best.layout, &best.routes);
     }
     macros.extend(best.rings.iter().cloned());
@@ -709,7 +714,8 @@ impl Flow<'_> {
         let routing = &self.problem.routing;
         let (global, _) =
             gr::GlobalRoute { net_weight: self.d_router.cfg.net_weight.clone(), ..Default::default() }.route(&layout, &macros, &rings, routing, layers, neg);
-        global.debug_check("gr::route");
+        // gr's coarse route draws every net on one layer: no joins.
+        global.debug_check_joined("gr::route", &[]);
         let placed = gr::place_macros(&macros, &layout);
         let pins: Vec<_> = placed
             .iter()

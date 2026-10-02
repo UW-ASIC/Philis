@@ -7,15 +7,18 @@
 //! its pin (the pitch is far coarser than a pin, so nodes never sit on pins), and
 //! same-net sliver/notch fillers.
 //!
+//! Ring and cell metal on a lattice layer is a hard obstacle to other nets.
 //! What it cannot rule out structurally it measures and reports as hard
 //! violations: open nets, unlanded pins or pin access deleted to break a short,
-//! and drawn shorts.
+//! drawn shorts (between nets, and to cell or ring metal) and unresolved
+//! congestion.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use analog::{RepairKind, Requirements};
 use pnr_core::geom::{LayerId, Rect, Shape};
 use pnr_core::report::Violation;
+use pnr_core::routes::{conductor_layers_meet, open_components, Join};
 use pnr_core::{GatePin, Macro, NetId, Report, Routes};
 
 use gr::{extract_geometry, run_pathfinder, to_shapes, Dij, GcellGrid, RGraph, RouteCtx, RouteHot, TrackGrid, NONE};
@@ -33,6 +36,9 @@ const GCELLS_PER_SIDE: u32 = 16;
 const HARD_ROUNDS: u32 = 4;
 /// `reserved` owner of a node no net's trunk may use (no net has this id).
 const CONTESTED: u32 = NONE - 1;
+/// `reserved` owner of a node within spacing of foreign cell or ring metal:
+/// no net's trunk may use it, and unlike [`CONTESTED`] no pin lands there.
+const BLOCKED: u32 = NONE - 2;
 
 /// Track-lattice configuration (set from the deck by `frontend/library`).
 #[derive(Debug, Clone)]
@@ -189,8 +195,10 @@ impl DetailedRoute {
     /// joined by `cuts[i]` between `layers[i]` and `layers[i + 1]`.
     ///
     /// `pins` are placed pin rects; pins of `placed` (device macros) and `rings`
-    /// are folded in, deduplicated. Ring metal is charged as track usage (routed
-    /// around); device cells are not (routed to). Both are consulted for landing-pad
+    /// are folded in, deduplicated. Their metal on a lattice layer, grown by
+    /// spacing, is a hard obstacle to every net but its own (cell metal a pin
+    /// reaches, by [`cell_metal`]); unattributed metal, and every shape without
+    /// a `cfg.stack`, blocks all nets. Both are consulted for landing-pad
     /// spacing. `neg` carries PathFinder history across calls.
     #[allow(clippy::too_many_arguments)]
     pub fn route(
@@ -255,6 +263,19 @@ impl DetailedRoute {
         let (cell_abs, gates_abs) = cell_metal(placed, n_nets, cfg.stack, &cfg.gate_nm2);
         let cell_f: Vec<Vec<Shape>> = cell_abs.iter().map(|v| v.iter().map(|s| Shape { rect: shift(s.rect), ..*s }).collect()).collect();
         let gates_f: Vec<Vec<GatePin>> = gates_abs.iter().map(|v| v.iter().map(|&g| GatePin { at: shift(g.at), ..g }).collect()).collect();
+        // Every ring and cell shape (absolute) with the net whose pin reaches it
+        // ([`cell_metal`] over the rings too); `None` = no pin reaches it, or no
+        // stack to tell.
+        let foreign_metal: Vec<(Option<u32>, Shape)> = {
+            let rings_abs = cell_metal(rings, n_nets, cfg.stack, &[]).0;
+            let mut owner: HashMap<(LayerId, Rect), u32> = HashMap::new();
+            for per_net in [&cell_abs, &rings_abs] {
+                for (n, shapes) in per_net.iter().enumerate() {
+                    owner.extend(shapes.iter().map(|s| ((s.layer, s.rect), n as u32)));
+                }
+            }
+            placed.iter().chain(rings).flat_map(|m| &m.shapes).map(|s| (owner.get(&(s.layer, s.rect)).copied(), *s)).collect()
+        };
 
         // DC current a terminal rect draws, µA: over the cell's pins there (two
         // members sharing a region draw one pin each at one rect), each pin's
@@ -294,7 +315,7 @@ impl DetailedRoute {
         let compact: Vec<usize> = (0..n_nets).filter(|&i| !term_rects[i].is_empty()).collect();
         if compact.is_empty() {
             let routes = Routes { wires: vec![Vec::new(); n_nets], ..Default::default()  };
-            let report = score(&routes, reqs, 0.0, 0.0, &[], &[], &[]);
+            let report = score(&routes, reqs, 0.0, &[], &[], &[], &[]);
             return (routes, report, 0);
         }
         let mut ci_of = vec![usize::MAX; n_nets];
@@ -398,6 +419,29 @@ impl DetailedRoute {
                     if (px - pcx).abs() < reach && (py - pcy).abs() < reach {
                         let o = &mut reserved[node as usize];
                         *o = if *o == NONE || *o == ci { ci } else { CONTESTED };
+                    }
+                }
+            }
+        }
+        // Ring and cell metal on a lattice layer, grown by the spacing a wire
+        // needs from it plus half a wire: a node inside is a short or spacing
+        // error for any trunk but the metal's own net's (it may merge with its
+        // strap). Pin stitch nodes, reserved above, stay their pins'.
+        let min_space = cfg.pitch - cfg.wire_width;
+        let pre: Vec<bool> = reserved.iter().map(|&o| o == NONE).collect();
+        for &(owner, s) in &foreign_metal {
+            let Some(l) = layers.iter().position(|&l| l == s.layer).filter(|&l| (l as u32) < n_layers) else { continue };
+            let own = owner.map(|n| ci_of[n as usize]).filter(|&c| c != usize::MAX).map_or(BLOCKED, |c| c as u32);
+            let g = cfg.space(s.layer, s.rect.w.min(s.rect.h), cfg.wire_width, min_space) + cfg.wire_width / 2;
+            let r = shift(s.rect);
+            let (x0, y0, x1, y1) = (r.x - g, r.y - g, r.x + r.w + g, r.y + r.h + g);
+            for iy in grid.bin_y(y0)..=grid.bin_y(y1) {
+                for ix in grid.bin_x(x0)..=grid.bin_x(x1) {
+                    let n = grid.node(ix, iy, l as u32);
+                    let (px, py, _) = grid.pos(n);
+                    if pre[n as usize] && x0 < px && px < x1 && y0 < py && py < y1 {
+                        let o = &mut reserved[n as usize];
+                        *o = if *o == NONE || *o == own { own } else { BLOCKED };
                     }
                 }
             }
@@ -553,24 +597,6 @@ impl DetailedRoute {
             (x + origin.0, y + origin.1, l)
         };
         neg.seed(gr::Tier::Detailed, &mut hot.hist, abs);
-        // Ring bands are charged to capacity (full but crossable at a price), not
-        // blocked: a hard block would seal the enclosure on a two-layer stack.
-        for s in rings.iter().flat_map(|m| &m.shapes) {
-            if let Some(li) = layers.iter().position(|&l| l == s.layer).filter(|&li| (li as u32) < n_layers) {
-                charge_rect(&mut hot.usage, &cold.reserved, &cold.graph, li as u32, shift(s.rect));
-            }
-        }
-        // Cell metal on a routing layer (capacitor plates, array routing) too,
-        // grown by a wire's clearance, or a foreign trunk runs through or beside
-        // it; the pins' reserved stitch nodes stay exempt.
-        let clear = cfg.pitch - cfg.wire_width / 2;
-        for s in placed.iter().flat_map(|m| &m.shapes) {
-            if let Some(li) = layers.iter().position(|&l| l == s.layer).filter(|&li| (li as u32) < n_layers) {
-                let r = shift(s.rect);
-                let grown = Rect { x: r.x - clear, y: r.y - clear, w: r.w + 2 * clear, h: r.h + 2 * clear };
-                charge_rect(&mut hot.usage, &cold.reserved, &cold.graph, li as u32, grown);
-            }
-        }
         run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS);
 
         // A net over its IR-drop budget reroutes pricing its series R, weighted
@@ -656,38 +682,27 @@ impl DetailedRoute {
         let mut routes = build_routes(&hot, &cold.graph, cfg.wire_width, &compact, n_nets, layers, cuts);
         // Shapes at or past this index per net are access geometry — the only
         // shapes the short resolver may sacrifice.
-        let mut pre_access: Vec<usize> = routes.wires.iter().map(Vec::len).collect();
+        let pre_access: Vec<usize> = routes.wires.iter().map(Vec::len).collect();
         let joins = joins(layers, cuts, cfg.pin_access);
         add_pin_access(&mut routes, &access, &compact, cfg, layers, cuts, &joins, &zones);
 
-        // A drawn short must never ship. Break each by deleting access geometry (an
-        // open is reported; a short is silent), counted per net so `score` reports
-        // pins that may now float.
+        // A drawn short must never ship silently. Break each by deleting access
+        // geometry (an open is reported), counted per net so `score` reports pins
+        // that may now float.
         let mut sacrificed = vec![0usize; n_nets];
         for (ci, &n) in unlanded.iter().enumerate() {
             sacrificed[compact[ci]] += n;
         }
-        while let Some((a, b, i, j)) = first_short(&routes.wires, &joins) {
-            if j >= pre_access[b] {
-                routes.wires[b].remove(j);
-                sacrificed[b] += 1;
-            } else if i >= pre_access[a] {
-                routes.wires[a].remove(i);
-                sacrificed[a] += 1;
-            } else {
-                // Trunk vs trunk: unexpected on a capacity-1 lattice; drop the later
-                // net's shape and keep `pre_access` pointing at its access shapes.
-                routes.wires[b].remove(j);
-                pre_access[b] -= 1;
-                sacrificed[b] += 1;
-            }
+        let mut rank = vec![usize::MAX; n_nets];
+        for (k, &ci) in cold.order.iter().enumerate() {
+            rank[compact[ci as usize]] = k;
         }
+        break_shorts(&mut routes.wires, &pre_access, &rank, &joins, &mut sacrificed);
 
         // Fatten: every trunk grows to the widest width (≤ its net's cap) that keeps
         // `min_space` from foreign metal — other nets' wires and cell/ring metal on
         // the same layer. EM width is the floor; a trunk that cannot reach it goes to
         // Θ. Supply nets widen first, so they win contested room.
-        let min_space = cfg.pitch - cfg.wire_width;
         let cell_metal: Vec<Shape> = placed
             .iter()
             .chain(rings)
@@ -935,8 +950,7 @@ impl DetailedRoute {
         for &(net, r, _) in &all_pins {
             routes.terms[net.0 as usize].push(pnr_core::Terminal { at: r, ua: pin_ua(net, r) });
         }
-        let cap_total = cold.graph.nodes() as f32;
-        let mut report = score(&routes, reqs, overuse, cap_total, &joins, &sacrificed, &em_shortfall);
+        let mut report = score(&routes, reqs, overuse, &joins, &foreign_metal, &sacrificed, &em_shortfall);
         for (net, &r) in em_cuts.iter().enumerate().filter(|(_, &r)| r > 0.0) {
             report.budget_violations.push(Violation::from_residual(format!("em cuts net {net}"), r));
         }
@@ -1205,19 +1219,6 @@ fn claim_jog_sweep(
     if jog_l != base_l {
         for (ex, ey) in [(px, py), (cx, cy)] {
             claim(grid.node(grid.bin_x(ex), grid.bin_y(ey), base_l));
-        }
-    }
-}
-
-/// Charge every unreserved node of `layer` under `r` to capacity (soft obstacle).
-/// Reserved nodes are exempt: a ring's own pins sit on its bands.
-fn charge_rect(usage: &mut [u16], reserved: &[u32], grid: &TrackGrid, layer: u32, r: Rect) {
-    for y in grid.bin_y(r.y)..=grid.bin_y(r.y + r.h) {
-        for x in grid.bin_x(r.x)..=grid.bin_x(r.x + r.w) {
-            let n = grid.node(x, y, layer) as usize;
-            if reserved[n] == NONE {
-                usage[n] = usage[n].max(1);
-            }
         }
     }
 }
@@ -1844,8 +1845,8 @@ fn jumper(grid: &TrackGrid, layer: u32) -> Vec<f32> {
 /// net comes back down only away from it, so at every stage up to `top` the
 /// gate's conductor is its column and jog alone: the plate charges no gate
 /// there. Two pitches, so fattening and same-net fill cannot bridge the gap.
-/// A node another net (or cell metal) holds costs twice that: a lift that
-/// buys overuse is refused anyway.
+/// A node another net holds costs twice that: a lift that buys overuse is
+/// refused anyway (cell metal is reserved, never entered).
 fn lift_field(hot: &RouteHot, grid: &TrackGrid, net: usize, top: u32, sites: &[((i32, i32), Rect)]) -> Vec<f32> {
     let mine = hot.tree_nodes(net);
     let mut field: Vec<f32> = (0..grid.nodes())
@@ -1901,24 +1902,25 @@ fn keep_away(hot: &RouteHot, grid: &TrackGrid, nets: &[usize]) -> Vec<f32> {
     field
 }
 
-/// Report: analog tiers; open nets, sacrificed/unlanded pins and drawn shorts in
-/// V; EM width shortfall per net and residual overuse over total track capacity
-/// in Θ; cost = raw overuse +
-/// criticality-weighted analog cost.
+/// Report: analog tiers; open nets (margin = pieces past the first),
+/// sacrificed/unlanded pins, drawn shorts (between nets, and to `foreign` cell
+/// or ring metal, absolute, with its owning net) and unresolved congestion
+/// (margin = residual track overuse) in V; EM width shortfall per net in Θ;
+/// cost = raw overuse + criticality-weighted analog cost.
 fn score(
     routes: &Routes,
     reqs: &Requirements<Routes>,
     overuse: f32,
-    cap_total: f32,
     joins: &[Join],
+    foreign: &[(Option<u32>, Shape)],
     sacrificed: &[usize],
     em_shortfall: &[f64],
 ) -> Report {
     let (mut hard, mut budget) = gr::analog_tiers(routes, reqs);
     for (net, shapes) in routes.wires.iter().enumerate() {
-        let stranded = unreachable_shapes(shapes);
-        if stranded > 0 {
-            hard.push(Violation { rule: format!("open net {net}"), margin: stranded as i64 });
+        let open = open_components(shapes, joins);
+        if open > 0 {
+            hard.push(Violation { rule: format!("open net {net}"), margin: open as i64 });
         }
     }
     // Counted, not proven: the pin may still be tied through the cell, so this
@@ -1926,14 +1928,18 @@ fn score(
     for (net, &n) in sacrificed.iter().enumerate().filter(|(_, &n)| n > 0) {
         hard.push(Violation { rule: format!("pin access sacrificed on net {net}"), margin: n as i64 });
     }
-    for (a, b) in cross_net_shorts(&routes.wires, joins) {
+    let (nets, cell) = cross_net_shorts(&routes.wires, joins, foreign);
+    for (a, b) in nets {
         hard.push(Violation { rule: format!("drawn short nets {a}/{b}"), margin: 1 });
+    }
+    for n in cell {
+        hard.push(Violation { rule: format!("drawn short net {n} to cell metal"), margin: 1 });
     }
     for (net, &r) in em_shortfall.iter().enumerate().filter(|(_, &r)| r > 0.0) {
         budget.push(Violation::from_residual(format!("em underwidth net {net}"), r));
     }
-    if overuse > 0.0 && cap_total > 0.0 {
-        budget.push(Violation::from_residual("routing overuse", f64::from(overuse / cap_total)));
+    if overuse > 0.0 {
+        hard.push(Violation { rule: "unresolved congestion".into(), margin: overuse as i64 });
     }
     let analog_cost: f32 = reqs.cost.iter().map(|b| b.criticality(routes) * b.cost(routes)).sum();
     Report { hard_violations: hard, budget_violations: budget, cost: overuse + analog_cost }
@@ -2132,85 +2138,88 @@ fn fill_same_net_notches(shapes: &mut Vec<Shape>, layers: &[LayerId], min_space:
     }
 }
 
-/// Two shapes conduct into each other when touching: same layer, or one is a cut
-/// joining the other's layer.
-fn conductor_layers_meet(a: &Shape, b: &Shape, joins: &[Join]) -> bool {
-    let joined = |cut: LayerId, other: LayerId| joins.iter().any(|&(c, lo, hi)| c == cut && (other == lo || other == hi));
-    a.layer == b.layer || joined(a.layer, b.layer) || joined(b.layer, a.layer)
-}
-
-/// `(cut, layer below, layer above)`.
-type Join = (LayerId, LayerId, LayerId);
-
 /// Every cut this stage draws and the two conductors it joins — the routing vias
-/// and the pin-access cut down to the reserved pin layer.
-fn joins(layers: &[LayerId], cuts: &[Cut], pin_access: Option<(LayerId, Cut)>) -> Vec<Join> {
+/// and the pin-access cut down to the reserved pin layer: the relation dr's
+/// `open net` and `drawn short` entries are measured under.
+#[must_use]
+pub fn joins(layers: &[LayerId], cuts: &[Cut], pin_access: Option<(LayerId, Cut)>) -> Vec<Join> {
     let stack = cuts.iter().zip(layers.windows(2)).map(|(&(c, ..), w)| (c, w[0], w[1]));
     let access = pin_access.zip(layers.first()).map(|((pl, (c, ..)), &l0)| (c, pl, l0));
     stack.chain(access).collect()
 }
 
-/// First `(net a, net b, shape i of a, shape j of b)` in (a, b, i, j) order whose
-/// shapes touch on a shared conductor.
-fn first_short(wires: &[Vec<Shape>], joins: &[Join]) -> Option<(usize, usize, usize, usize)> {
+/// Break drawn shorts between nets by deleting access shapes (index
+/// `>= pre_access[net]`). Every touching cross-net pair `(a, b, i, j)` (a cut
+/// counts on both layers it joins) is listed once, then taken in order, skipping
+/// a pair whose shape is already gone: an access shape of the net later in
+/// `rank` (position in the routing order) goes first, else the other net's,
+/// each counted in `sacrificed`. A trunk-vs-trunk pair deletes nothing; `score`
+/// reports it.
+///
+/// ponytail: one O(S²) pass; a spatial index makes it near-linear.
+fn break_shorts(wires: &mut [Vec<Shape>], pre_access: &[usize], rank: &[usize], joins: &[Join], sacrificed: &mut [usize]) {
+    let mut pairs = Vec::new();
     for a in 0..wires.len() {
         for b in (a + 1)..wires.len() {
             for (i, sa) in wires[a].iter().enumerate() {
                 for (j, sb) in wires[b].iter().enumerate() {
                     if conductor_layers_meet(sa, sb, joins) && rect_gap(sa.rect, sb.rect) == 0 {
-                        return Some((a, b, i, j));
+                        pairs.push((a, b, i, j));
                     }
                 }
             }
         }
     }
-    None
+    let mut gone: HashSet<(usize, usize)> = HashSet::new();
+    for (a, b, i, j) in pairs {
+        if gone.contains(&(a, i)) || gone.contains(&(b, j)) {
+            continue;
+        }
+        let (first, second) = if rank[b] >= rank[a] { ((b, j), (a, i)) } else { ((a, i), (b, j)) };
+        if let Some(&(n, k)) = [first, second].iter().find(|&&(n, k)| k >= pre_access[n]) {
+            gone.insert((n, k));
+            sacrificed[n] += 1;
+        }
+    }
+    for (n, w) in wires.iter_mut().enumerate() {
+        let mut k = 0;
+        w.retain(|_| {
+            k += 1;
+            !gone.contains(&(n, k - 1))
+        });
+    }
 }
 
 /// Every net pair whose geometry touches on one conductor (a cut counts on both
-/// layers it joins).
-fn cross_net_shorts(wires: &[Vec<Shape>], joins: &[Join]) -> Vec<(usize, usize)> {
-    let footprint = |shapes: &[Shape]| -> Vec<(LayerId, Rect)> {
-        let mut out = Vec::with_capacity(shapes.len());
-        for s in shapes {
-            match joins.iter().find(|j| j.0 == s.layer) {
-                Some(&(_, lo, hi)) => out.extend([(lo, s.rect), (hi, s.rect)]),
-                None => out.push((s.layer, s.rect)),
-            }
+/// layers it joins), and every net touching, on a shared conductor, a `foreign`
+/// cell or ring shape not owned by it.
+fn cross_net_shorts(wires: &[Vec<Shape>], joins: &[Join], foreign: &[(Option<u32>, Shape)]) -> (Vec<(usize, usize)>, Vec<usize>) {
+    let footprint = |s: &Shape| -> Vec<(LayerId, Rect)> {
+        match joins.iter().find(|j| j.0 == s.layer) {
+            Some(&(_, lo, hi)) => vec![(lo, s.rect), (hi, s.rect)],
+            None => vec![(s.layer, s.rect)],
         }
-        out
     };
-    let nets: Vec<Vec<(LayerId, Rect)>> = wires.iter().map(|w| footprint(w)).collect();
-    let mut out = Vec::new();
+    let nets: Vec<Vec<(LayerId, Rect)>> = wires.iter().map(|w| w.iter().flat_map(footprint).collect()).collect();
+    let mut pairs = Vec::new();
     for a in 0..nets.len() {
         for b in (a + 1)..nets.len() {
             if nets[a].iter().any(|&(la, ra)| nets[b].iter().any(|&(lb, rb)| la == lb && rect_gap(ra, rb) == 0)) {
-                out.push((a, b));
+                pairs.push((a, b));
             }
         }
     }
-    out
-}
-
-/// Shapes not reachable from the first by layer-blind xy-touch (`0` = one
-/// component), the same relation `Routes::debug_check` asserts.
-fn unreachable_shapes(shapes: &[Shape]) -> usize {
-    if shapes.len() < 2 {
-        return 0;
-    }
-    let mut seen = vec![false; shapes.len()];
-    let mut stack = vec![0usize];
-    seen[0] = true;
-    while let Some(a) = stack.pop() {
-        let ra = shapes[a].rect;
-        for (b, s) in shapes.iter().enumerate() {
-            if !seen[b] && ra.touches(&s.rect) {
-                seen[b] = true;
-                stack.push(b);
-            }
-        }
-    }
-    seen.iter().filter(|&&v| !v).count()
+    // Only the conductors the routes draw on can be touched.
+    let drawn: HashSet<LayerId> = nets.iter().flatten().map(|f| f.0).collect();
+    let cell: Vec<(Option<u32>, LayerId, Rect)> = foreign
+        .iter()
+        .flat_map(|(o, s)| footprint(s).into_iter().map(move |(l, r)| (*o, l, r)))
+        .filter(|f| drawn.contains(&f.1))
+        .collect();
+    let to_cell = (0..nets.len())
+        .filter(|&n| nets[n].iter().any(|&(l, r)| cell.iter().any(|&(o, lc, rc)| o != Some(n as u32) && l == lc && rect_gap(r, rc) == 0)))
+        .collect();
+    (pairs, to_cell)
 }
 
 #[cfg(test)]
@@ -2220,6 +2229,17 @@ mod tests {
     /// sky130-like lattice: the unit tests draw fixed geometry against it.
     fn test_cfg() -> DetailedCfg {
         DetailedCfg { pitch: 430, grid: 5, wire_width: 290, ..DetailedCfg::default() }
+    }
+
+    /// LAYERS joined by CUTS' layer: `cell_metal` attributes cell and ring
+    /// metal only with a stack; without one, every such shape blocks.
+    fn test_stack() -> &'static analog::routing::Stack {
+        use analog::routing::{stack::Layer, Stack};
+        Box::leak(Box::new(Stack {
+            layers: [0, 2, 1].map(|id| Layer { id, cut: id == 2, ..Layer::default() }).to_vec(),
+            antenna_cumulative: false,
+            diode: None,
+        }))
     }
 
     const LAYERS: [LayerId; 2] = [LayerId(0), LayerId(1)];
@@ -2288,8 +2308,9 @@ mod tests {
         }
     }
 
-    /// A ring is an obstacle and a target: its pins get routed, and charging its
-    /// bands must not price its own landing pads into a Θ residual.
+    /// A ring is an obstacle and a target: its pins get routed through their
+    /// own stitch nodes, and with a stack `cell_metal` gives its bands to its
+    /// net, so a route over them is no short to cell metal.
     #[test]
     fn ring_pins_are_routed() {
         let band = |x, y, w, h| Shape { layer: LayerId(0), rect: Rect { x, y, w, h } };
@@ -2309,11 +2330,12 @@ mod tests {
         };
         let global = Routes { wires: Vec::new(), ..Default::default()  };
         let (routes, report) =
-            route(test_cfg(), &global, &[], &[], &[ring.clone()], &mut gr::Negotiation::new());
+            route(DetailedCfg { stack: Some(test_stack()), ..test_cfg() }, &global, &[], &[], &[ring.clone()], &mut gr::Negotiation::new());
         for p in &ring.pins {
             assert!(routes.wires[0].iter().any(|s| touches(s, p.at)), "ring pin at ({}, {}) untouched", p.at.x, p.at.y);
         }
         assert!(report.budget_violations.is_empty());
+        assert!(report.hard_violations.is_empty(), "the ring's own net on its own band: {:?}", rules(&report));
     }
 
     /// Placed cells do not block routing under their (possibly inflated) bbox.
@@ -2353,7 +2375,7 @@ mod tests {
             margin_pct: 10,
             stack: None,
         }]));
-        let report = score(&routes, &reqs, 0.0, 0.0, &[], &[], &[]);
+        let report = score(&routes, &reqs, 0.0, &[], &[], &[], &[]);
         assert_eq!(report.budget_violations[0].margin, 500);
     }
 
@@ -2427,7 +2449,9 @@ mod tests {
             r.wires.iter().flatten().map(|s| (s.layer.0, s.rect.x, s.rect.y, s.rect.w, s.rect.h)).collect()
         };
         let mut neg = gr::Negotiation::new();
-        let first = route(cfg.clone(), &global, &pins, &[], &[], &mut neg).0;
+        let (first, report) = route(cfg.clone(), &global, &pins, &[], &[], &mut neg);
+        let jam = report.hard_violations.iter().find(|v| v.rule == "unresolved congestion");
+        assert!(jam.is_some_and(|v| v.margin > 0), "residual overuse is V: {:?}", rules(&report));
         let p1 = neg.pressure();
         assert!(p1 > 0.0, "contested tracks must accumulate history");
         let second = route(cfg, &global, &pins, &[], &[], &mut neg).0;
@@ -2936,6 +2960,100 @@ mod tests {
         assert!(analog::Rule::usage(shield, &plain).unwrap() < 0.1, "no request, no shield");
         assert!(routes.wires[1].len() > plain.wires[1].len());
     }
+
+    /// A ring band on layer 0 between two pins of another net at its rows:
+    /// the net still connects, through layer 1, and none of its layer-0
+    /// metal comes within spacing of the band (no tree node inside the
+    /// grown band). Without the block the straight layer-0 run crosses it.
+    #[test]
+    fn a_ring_band_is_a_hard_obstacle() {
+        let band = Rect { x: 5_000, y: 7_000, w: 6_000, h: 800 };
+        let ring = Macro { bbox: band, shapes: vec![Shape { layer: LAYERS[0], rect: band }], ..Default::default() };
+        let pins = [pin(0, 1_000, 7_300), pin(0, 15_000, 7_300)];
+        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
+        let cfg = test_cfg();
+        let space = cfg.pitch - cfg.wire_width;
+        let (routes, report) = route(cfg, &global, &pins, &[], &[ring], &mut gr::Negotiation::new());
+        assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
+        for &(_, r, _) in &pins {
+            assert!(routes.wires[0].iter().any(|s| touches(s, r)));
+        }
+        assert!(routes.wires[0].iter().any(|s| s.layer == LAYERS[1]), "the net never left layer 0");
+        for s in routes.wires[0].iter().filter(|s| s.layer == LAYERS[0]) {
+            assert!(rect_gap(s.rect, band) >= space, "layer-0 metal {:?} within spacing of the band", s.rect);
+        }
+    }
+
+    /// A routed wire touching cell metal of another net, on its layer, is a
+    /// short; touching its own net's cell metal is not.
+    #[test]
+    fn a_route_touching_foreign_cell_metal_is_a_short() {
+        let met1 = LAYERS[0];
+        let wires = vec![vec![Shape { layer: met1, rect: Rect { x: 0, y: 0, w: 2_000, h: 260 } }]];
+        let cell = Shape { layer: met1, rect: Rect { x: 1_000, y: 0, w: 170, h: 170 } };
+        assert_eq!(cross_net_shorts(&wires, &[], &[(Some(1), cell)]), (vec![], vec![0]));
+        assert_eq!(cross_net_shorts(&wires, &[], &[(Some(0), cell)]), (vec![], vec![]));
+    }
+
+    /// Overlapping access jogs: the net later in the routing order loses its
+    /// jog; the other is intact. Against the later net's trunk, the earlier
+    /// net's jog goes. Trunks touching delete nothing (`score` reports them).
+    #[test]
+    fn resolver_sacrifices_the_later_access_shape() {
+        let m = |x, w| Shape { layer: LAYERS[0], rect: Rect { x, y: 0, w, h: 290 } };
+        let wires = || vec![vec![m(0, 2_000), m(2_000, 300)], vec![m(5_000, 2_000), m(2_200, 2_800)]];
+        let joins = joins(&LAYERS, &CUTS, None);
+        let (mut w, mut sacrificed) = (wires(), vec![0; 2]);
+        break_shorts(&mut w, &[1, 1], &[0, 1], &joins, &mut sacrificed);
+        assert_eq!(w, vec![wires()[0].clone(), vec![m(5_000, 2_000)]]);
+        assert_eq!(sacrificed, [0, 1]);
+        let (mut w, mut sacrificed) = (wires(), vec![0; 2]);
+        break_shorts(&mut w, &[1, 1], &[1, 0], &joins, &mut sacrificed);
+        assert_eq!(w, vec![vec![m(0, 2_000)], wires()[1].clone()]);
+        assert_eq!(sacrificed, [1, 0]);
+        // The later net's side is trunk: the earlier net's jog goes instead.
+        let (mut w, mut sacrificed) = (wires(), vec![0; 2]);
+        break_shorts(&mut w, &[1, 2], &[0, 1], &joins, &mut sacrificed);
+        assert_eq!(w, vec![vec![m(0, 2_000)], wires()[1].clone()]);
+        assert_eq!(sacrificed, [1, 0]);
+        let (mut w, mut sacrificed) = (vec![vec![m(0, 2_000)], vec![m(1_000, 2_000)]], vec![0; 2]);
+        break_shorts(&mut w, &[1, 1], &[0, 1], &joins, &mut sacrificed);
+        assert_eq!((w[1].len(), sacrificed), (1, vec![0, 0]));
+    }
+
+    /// Metals 0 and 2 overlapping in xy with no cut between them are two
+    /// pieces; the via stack through metal 1 joins them.
+    #[test]
+    fn an_xy_overlap_on_non_adjacent_layers_is_open() {
+        let joins = [(LayerId(10), LayerId(0), LayerId(1)), (LayerId(11), LayerId(1), LayerId(2))];
+        let at = |l| Shape { layer: LayerId(l), rect: Rect { x: 0, y: 0, w: 500, h: 500 } };
+        assert_eq!(open_components(&[at(0), at(2)], &joins), 1);
+        assert_eq!(open_components(&[at(0), at(10), at(1), at(11), at(2)], &joins), 0);
+    }
+
+    /// A cell strap on layer 0 across the straight run, attributed by
+    /// `cell_metal` (with a stack) to the net whose pin sits on it: that net's
+    /// layer-0 trunk merges with it (a wire covers the strap well away from
+    /// the pin's stitch nodes) and is no short. Blocked, it would detour.
+    #[test]
+    fn a_trunk_merges_with_its_own_cell_strap() {
+        let strap = Rect { x: 4_000, y: 7_000, w: 8_000, h: 800 };
+        let cell = Macro {
+            bbox: strap,
+            shapes: vec![Shape { layer: LAYERS[0], rect: strap }],
+            pins: vec![pnr_core::Pin { name: "c:D".into(), net: NetId(0), at: Rect { x: 7_900, y: 7_300, w: 170, h: 170 }, layer: LAYERS[0] }],
+            ..Default::default()
+        };
+        let pins = [pin(0, 1_000, 7_300), pin(0, 15_000, 7_300)];
+        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
+        let cfg = DetailedCfg { stack: Some(test_stack()), ..test_cfg() };
+        let (routes, report) = route(cfg, &global, &pins, &[cell], &[], &mut gr::Negotiation::new());
+        assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
+        let away = Rect { x: 5_000, y: strap.y, w: 1, h: strap.h };
+        assert!(
+            routes.wires[0].iter().any(|s| s.layer == LAYERS[0] && touches(s, away)),
+            "net 0 kept off its own strap: {:?}",
+            routes.wires[0]
+        );
+    }
 }
-
-

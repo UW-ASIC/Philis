@@ -1,7 +1,45 @@
 //! Realised route geometry — the state routing rules score against.
 
-use crate::geom::{Rect, Shape};
+use crate::geom::{LayerId, Rect, Shape};
 use crate::ids::NetId;
+
+/// `(cut, layer below, layer above)`: a cut and the two conductors it joins.
+pub type Join = (LayerId, LayerId, LayerId);
+
+/// Two touching shapes conduct into each other: same layer, or one is a cut
+/// joining the other's layer. Metals on non-adjacent layers that overlap in xy
+/// do not.
+#[must_use]
+pub fn conductor_layers_meet(a: &Shape, b: &Shape, joins: &[Join]) -> bool {
+    let joined = |cut: LayerId, other: LayerId| joins.iter().any(|&(c, lo, hi)| c == cut && (other == lo || other == hi));
+    a.layer == b.layer || joined(a.layer, b.layer) || joined(b.layer, a.layer)
+}
+
+/// Connected components of `shapes` past the first (`0` = one conductor, or
+/// none): two shapes connect iff they touch in xy ([`crate::Rect::touches`])
+/// and [`conductor_layers_meet`]. O(k²).
+#[must_use]
+pub fn open_components(shapes: &[Shape], joins: &[Join]) -> usize {
+    let mut seen = vec![false; shapes.len()];
+    let mut parts = 0usize;
+    for root in 0..shapes.len() {
+        if seen[root] {
+            continue;
+        }
+        parts += 1;
+        seen[root] = true;
+        let mut stack = vec![root];
+        while let Some(a) = stack.pop() {
+            for b in 0..shapes.len() {
+                if !seen[b] && shapes[a].rect.touches(&shapes[b].rect) && conductor_layers_meet(&shapes[a], &shapes[b], joins) {
+                    seen[b] = true;
+                    stack.push(b);
+                }
+            }
+        }
+    }
+    parts.saturating_sub(1)
+}
 
 /// A routed terminal and the DC current it draws from its net, µA
 /// (+ into the device); `None` = unknown.
@@ -65,10 +103,10 @@ impl Routes {
     }
 
     /// Debug-only stage-boundary check: no degenerate shapes, and each net is
-    /// one connected component in xy (touching counts). An open here is an
-    /// LVS `unconnected_pin` later. O(k²) per net.
+    /// one conductor ([`open_components`] `== 0` under `joins`). An open here is
+    /// an LVS `unconnected_pin` later. O(k²) per net.
     #[inline]
-    pub fn debug_check(&self, ctx: &str) {
+    pub fn debug_check_joined(&self, ctx: &str, joins: &[Join]) {
         if !cfg!(debug_assertions) {
             return;
         }
@@ -76,27 +114,8 @@ impl Routes {
             for (i, s) in shapes.iter().enumerate() {
                 assert!(s.rect.w > 0 && s.rect.h > 0, "{ctx}: net {net} shape {i} is degenerate: {:?}", s.rect);
             }
-            if shapes.len() < 2 {
-                continue;
-            }
-            let mut seen = vec![false; shapes.len()];
-            let mut stack = vec![0usize];
-            seen[0] = true;
-            while let Some(a) = stack.pop() {
-                for b in 0..shapes.len() {
-                    if !seen[b] && shapes[a].rect.touches(&shapes[b].rect) {
-                        seen[b] = true;
-                        stack.push(b);
-                    }
-                }
-            }
-            let reached = seen.iter().filter(|&&v| v).count();
-            assert_eq!(
-                reached,
-                shapes.len(),
-                "{ctx}: net {net} is open — {reached} of {} shapes reachable from the first",
-                shapes.len()
-            );
+            let open = open_components(shapes, joins);
+            assert_eq!(open, 0, "{ctx}: net {net} is open — {} pieces", open + 1);
         }
     }
 

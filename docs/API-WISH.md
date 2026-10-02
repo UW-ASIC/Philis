@@ -58,8 +58,9 @@ impl Report {
 1 µm are not equally bad, and a count-based Θ lets the search sit on a large
 violation indefinitely as long as it does not add a new one.
 
-This retires the string-match every consumer currently uses to recover a number
-from prose (`v.rule == "routing overuse"` in `frontend/library`).
+This retired the string-match consumers used to recover a number from prose
+(`v.rule == "routing overuse"` in `frontend/library`); residual routing overuse
+is now the V entry `unresolved congestion`, margin = overuse.
 
 ### D3 — Negotiation state is owned by the orchestrator
 
