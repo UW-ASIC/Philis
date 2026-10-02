@@ -43,7 +43,7 @@
             # GPurify is a git dependency, so its source is not content-addressed by
             # crates.io and nix needs the hash spelled out.
             outputHashes = {
-              "gpurify-0.1.0" = "sha256-fBNxlQp3VaFT7fZ8TwSOeVOu/NxodMZPDUT1ZRL5W5I=";
+              "gpurify-0.1.0" = "sha256-/Vac085qczozWZ352X2poKrHQhKP+9qASQZV6mbHFIA=";
             };
           };
 
@@ -57,8 +57,9 @@
           # "the binary runs", checked downstream.
           doCheck = false;
 
-          # The rule decks travel with the binary: `philis run` needs one, and a CLI that
-          # cannot find its own PDK deck is not much of a package.
+          # The decks and sidecars are compiled into the binary (`philis <net.sp> sky130`,
+          # backend/verify/src/decks.rs); the sidecars are copied as templates for a
+          # user's own `<pdk>.json`.
           postInstall = ''
             mkdir -p $out/share/philis
             cp -r pdks $out/share/philis/
