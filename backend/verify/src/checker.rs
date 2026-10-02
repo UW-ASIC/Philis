@@ -27,6 +27,9 @@ pub struct Checker {
     out: Outputs,
     /// Rules taken out of the deck as chip-level, `(rule, why)`.
     deferred: Vec<(String, String)>,
+    /// [`RefInput::external_ports`], interned in `loaded.strings` (the labels'
+    /// table, so ids compare equal): the only nets `drop_port_floating` exempts.
+    external: Option<Vec<StrId>>,
 }
 
 impl Checker {
@@ -76,7 +79,7 @@ impl Checker {
             reference: None,
             intent: None,
         };
-        Ok(Self { loaded, extracted: Extracted::default(), out: Outputs::default(), deferred })
+        Ok(Self { loaded, extracted: Extracted::default(), out: Outputs::default(), deferred, external: None })
     }
 
     /// Install the schematic reference LVS compares against. Returns the
@@ -89,6 +92,8 @@ impl Checker {
         let (netlist, skipped) =
             reference::build(input, &self.loaded.deck, &mut self.loaded.strings)?;
         self.loaded.reference = Some(netlist);
+        let strings = &mut self.loaded.strings;
+        self.external = input.external_ports.as_ref().map(|p| p.iter().map(|n| strings.intern(n)).collect());
         Ok(skipped.into_iter().map(|i| (input.devices[i].kind, input.devices[i].model.clone())).collect())
     }
 
@@ -142,12 +147,14 @@ impl Checker {
 
     /// Run the selected checks. Findings land in [`Checker::outputs`].
     ///
-    /// `unconnected_pin` and `floating_gate` findings on a **labelled** net
-    /// are dropped: a port leaves the cell, so reaching no device inside it,
-    /// or only gates (an input driven from outside), is not floating (the
+    /// `unconnected_pin` and `floating_gate` findings on a **port** net are
+    /// dropped: a port leaves the cell, so reaching no device inside it, or
+    /// only gates (an input driven from outside), is not floating (the
     /// engine's own LVS floating-net check applies the same exemption). This
     /// is what keeps a bulk-only rail — VSS tied through taps, invisible to a
-    /// 3-terminal MOS recogniser — from reading as floating metal.
+    /// 3-terminal MOS recogniser — from reading as floating metal. A port is
+    /// a labelled net named in [`RefInput::external_ports`]; with no port
+    /// list every labelled net is one, and [`Checker::skipped_rules`] says so.
     ///
     /// # Errors
     /// Geometry that cannot be loaded (a mislanded pin label, a derived-layer
@@ -180,7 +187,9 @@ impl Checker {
         let v = &self.out.violations;
         let exempt = |i: usize| {
             rules.contains(&v.rule[i])
-                && self.extracted.ports.name_of(self.extracted.nets.net_of(v.shape_a[i])).is_some()
+                && self.extracted.ports.name_of(self.extracted.nets.net_of(v.shape_a[i])).is_some_and(|name| {
+                    self.external.as_ref().is_none_or(|e| e.contains(&name))
+                })
         };
         if !(0..v.len()).any(exempt) {
             return;
@@ -260,15 +269,19 @@ impl Checker {
     }
 
     /// Rules the last run did not execute, as `(rule, why)`, including the
-    /// chip-level ones [`Checker::defer_density_wider_than`] took out.
+    /// chip-level ones [`Checker::defer_density_wider_than`] took out, and
+    /// `floating_gate` when no port list narrowed its exemption (it ran, but
+    /// checked no labelled net).
     #[must_use]
     pub fn skipped_rules(&self) -> Vec<(&str, String)> {
+        let no_ports = self.external.is_none().then(|| ("floating_gate", "exempt on every labelled net: no port list".to_string()));
         self.out
             .runs
             .iter()
             .filter(|r| r.outcome != Outcome::Ran)
             .map(|r| (self.rule_name(r.rule), format!("{:?}", r.outcome)))
             .chain(self.deferred.iter().map(|(n, why)| (n.as_str(), why.clone())))
+            .chain(no_ports)
             .collect()
     }
 
