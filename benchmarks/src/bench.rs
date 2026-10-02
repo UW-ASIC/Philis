@@ -196,12 +196,15 @@ fn run_circuit(
     let mut drc = 0usize;
     let mut erc = 0usize;
     let mut lvs_mismatch = false;
+    let mut unverified = 0i64;
     let mut engine = 0usize;
     for v in &report.hard_violations {
         if v.rule.starts_with("drc/") {
             drc += 1;
         } else if v.rule.starts_with("lvs/") {
             lvs_mismatch = true;
+        } else if v.rule.starts_with("lvs-coverage/") {
+            unverified += v.margin;
         } else if v.rule.starts_with("erc/") {
             erc += 1;
         } else if v.rule.starts_with("engine/") {
@@ -231,7 +234,7 @@ fn run_circuit(
     // `esc` > 0 means a variant-space binding (no arrangement of the chosen
     // variants was feasible), not a placement local minimum.
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}{} | overuse {} | DRC {} | LVS {}, unverified {} | ERC {}{} | warnings {} | skipped [{}] | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | overuse {} | DRC {} | LVS {} | ERC {}{} | warnings {} | skipped [{}] | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
@@ -239,9 +242,13 @@ fn run_circuit(
         if undrawable > 0 { format!(" | undrawable {undrawable}") } else { String::new() },
         s.route_overuse,
         drc,
-        if lvs_mismatch { "MISMATCH" } else { "MATCH" },
-        // Devices LVS did not compare: a MATCH covers only the rest.
-        signoff.coverage.unverified.iter().map(|u| u.2).sum::<usize>(),
+        // MATCH only when every device was compared; PARTIAL(n): n devices
+        // no deck recogniser extracts, the rest matched.
+        match (lvs_mismatch, unverified) {
+            (true, _) => "MISMATCH".to_string(),
+            (false, 0) => "MATCH".to_string(),
+            (false, n) => format!("PARTIAL({n})"),
+        },
         erc,
         if engine > 0 { format!(" | engine fails {engine}") } else { String::new() },
         signoff.warnings.len(),

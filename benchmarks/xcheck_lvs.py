@@ -149,7 +149,9 @@ def main() -> int:
         sig = ROOT / "target" / "bench_debug" / f / "signoff.txt"
         gp = "?"
         if sig.exists():
-            gp = "MATCH" if "LVS MATCH" in sig.read_text() else "MISMATCH"
+            # MATCH | MISMATCH | PARTIAL(n): a partial compare is not a MATCH.
+            m = re.search(r"LVS (MATCH|MISMATCH|PARTIAL)", sig.read_text())
+            gp = m.group(1) if m else "?"
         agree = "AGREE" if verdict == gp else "DISAGREE"
         if verdict == "ERROR":
             agree = "ERROR"
