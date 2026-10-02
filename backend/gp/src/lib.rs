@@ -216,7 +216,10 @@ const ANALOG_PROBE: i32 = 64;
 
 /// Coarse placement of `macros`, drawn as `assignment` picks from each
 /// `variants[i]` (missing = 0), seed-deterministic. `net_weight[NetId]` weights each net's HPWL (empty =
-/// unweighted; see [`net_weights`]).
+/// unweighted; see [`net_weights`]). `iterate = false` returns the seeded pile
+/// from `initial_layout` unrefined, still reported: the baseline that measures
+/// what the analytic loop adds (neither mode moves prices; the epoch's one dual
+/// step is the caller's, after dp).
 pub fn place(
     macros: &[Macro],
     variants: &[VariantSpace],
@@ -226,6 +229,7 @@ pub fn place(
     rules: Rules,
     net_weight: &[f32],
     seed: u64,
+    iterate: bool,
 ) -> (Layout, Report) {
     let n = macros.len();
     let mut rng = SplitMix64::new(seed);
@@ -238,7 +242,7 @@ pub fn place(
     let side = canvas_side(&hw, &hh, UTILIZATION, rules.grid);
     let mut l = initial_layout(&drawn, variant, side, &mut rng);
     let nets = Nets::from_macros(&drawn).weigh(net_weight);
-    if n == 0 {
+    if n == 0 || !iterate {
         let rep = report(&nets, reqs, &l, prices);
         return (l, rep);
     }

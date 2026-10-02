@@ -214,7 +214,7 @@ fn place_does_not_settle() {
     let macros = drawn(&variants);
     let reqs = Requirements { hard: Vec::new(), budget: vec![Box::new(vec![Over])], cost: Vec::new() };
     let mut prices = gp::Prices::new();
-    let (coarse, _) = gp::place(&macros, &variants, &[0, 0], &reqs, &mut prices, RULES, &[], 3);
+    let (coarse, _) = gp::place(&macros, &variants, &[0, 0], &reqs, &mut prices, RULES, &[], 3, true);
     place(&coarse, &macros, &variants, &reqs, &[false; 2], &mut prices, RULES, &[], 3);
     assert_eq!(prices.drift(), f64::INFINITY, "no dual step inside place");
     assert_eq!(prices.steps(), 0);

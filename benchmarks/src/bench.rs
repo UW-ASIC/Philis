@@ -231,12 +231,13 @@ fn run_circuit(
     // `esc` > 0 means a variant-space binding (no arrangement of the chosen
     // variants was feasible), not a placement local minimum.
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}{} | overuse {} | DRC {} | LVS {}, unverified {} | ERC {}{} | warnings {} | skipped [{}] | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | EM {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {}, unverified {} | ERC {}{} | warnings {} | skipped [{}] | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | EM {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
         unrouted,
         if undrawable > 0 { format!(" | undrawable {undrawable}") } else { String::new() },
+        s.route_hard,
         s.route_overuse,
         drc,
         if lvs_mismatch { "MISMATCH" } else { "MATCH" },
@@ -272,6 +273,17 @@ fn run_circuit(
                 r.usage.map_or_else(|| "none".to_string(), |u| format!("{u:.3}"))
             )
         ),
+        s.place.area_usage,
+        s.place.lattice_off,
+        s.place.overlap_nm2,
+        s.place.clearance_residue_nm2,
+        s.place.matched_geometry_mismatch,
+        s.place.islands_extra,
+        s.dp.temps,
+        s.dp.proposals,
+        s.dp.accepted,
+        s.dp.decode_fail,
+        s.dp.matched_incompatible,
     );
 
     // Per-constraint-type satisfaction: the run's own cell-space placement

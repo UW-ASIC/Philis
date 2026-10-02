@@ -17,6 +17,55 @@ pub fn collect(macros: &[Macro], layout: &Layout, routes: &Routes) -> Vec<Shape>
     out
 }
 
+/// Placement quality of one placed layout (PLC-01), measured, never steered on.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PlacementMetrics {
+    /// Footprint / Σ cell bbox area (Plantage's area usage; ring halos are
+    /// inside each cell bbox). `1.0` = perfectly packed.
+    pub area_usage: f32,
+    /// Cells whose stamped bbox origin is off the cut lattice on either axis.
+    pub lattice_off: u32,
+    /// Clearance encroachment beyond plain overlap, nm².
+    pub clearance_residue_nm2: f64,
+    /// Plain pairwise bbox overlap, nm².
+    pub overlap_nm2: f64,
+    /// Hard mirror pairs `a ≠ b` drawn at different (variant, orient, hw, hh).
+    pub matched_geometry_mismatch: u32,
+    /// Symmetry islands beyond one per group; 0 until PLC-12.
+    pub islands_extra: u32,
+}
+
+/// [`PlacementMetrics`] of `l` with cells drawn as `macros` (indexed like `l`),
+/// against the cut `lattice` and the cell-to-cell `clearance`, nm.
+#[must_use]
+pub fn placement_metrics(macros: &[Macro], l: &Layout, lattice: i32, clearance: i32, reqs: &analog::Requirements<Layout>) -> PlacementMetrics {
+    let n = l.x.len();
+    let cells: f64 = (0..n).map(|i| 4.0 * f64::from(l.hw[i]) * f64::from(l.hh[i])).sum();
+    let lat = lattice.max(1);
+    debug_assert_eq!(macros.len(), n, "macros not indexed like the layout");
+    let lattice_off = (0..n)
+        .filter(|&i| {
+            let b = pnr_core::place_macro(&macros[i], l, i).bbox;
+            b.x.rem_euclid(lat) != 0 || b.y.rem_euclid(lat) != 0
+        })
+        .count() as u32;
+    let overlap_nm2 = gp::mechanics::encroachment(l, 0);
+    let mut pairs = Vec::new();
+    for b in &reqs.hard {
+        b.mirror_pairs(&mut pairs);
+    }
+    let shape = |i: usize| (l.variant.get(i), l.orient.get(i), l.hw.get(i), l.hh.get(i));
+    let matched_geometry_mismatch =
+        pairs.iter().filter(|&&(a, b, _)| a != b && shape(a as usize) != shape(b as usize)).count() as u32;
+    PlacementMetrics {
+        area_usage: if cells > 0.0 { (l.footprint_nm2() / cells) as f32 } else { 0.0 },
+        lattice_off,
+        clearance_residue_nm2: gp::mechanics::encroachment(l, clearance) - overlap_nm2,
+        overlap_nm2,
+        matched_geometry_mismatch,
+        islands_extra: 0,
+    }
+}
 
 /// Merge `layer`'s rects wherever two overlap or abut into exactly one
 /// rectangle (same span on one axis, touching on the other), until none do.
@@ -301,6 +350,42 @@ mod tests {
             (flat.h, flat.w),
             "extents not transposed"
         );
+    }
+
+    /// Every [`PlacementMetrics`] count and area on a hand-built layout, so a
+    /// metric that silently reads 0 fails here (PLC-02/03/09 assert them 0).
+    /// Three 200×200 cells (`hw = hh = 100`), lattice 100, clearance 50:
+    /// c0 spans x 0..200, c1 100..300 (overlaps c0), c2 330..530 (30 nm from
+    /// c1: inside clearance only; origin 330 is off the lattice).
+    #[test]
+    fn placement_metrics_counts_each_defect() {
+        use analog::placement::symmetry::Symmetry;
+        use pnr_core::ids::{AxisId, DeviceId, Target};
+        let mut l = layout_of(Orient::R0, 0, 0);
+        l.x = vec![100, 200, 430];
+        l.y = vec![100; 3];
+        l.hw = vec![100; 3];
+        l.hh = vec![100; 3];
+        l.orient = vec![Orient::R0; 3];
+        l.variant = vec![0, 0, 1];
+        let sym = |a: u16, b: u16| Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0) };
+        let reqs = analog::Requirements::<Layout> {
+            // (0, 2) differs in variant; (0, 1) matches; (1, 1) is a pair collapsed into one cell.
+            hard: vec![Box::new(vec![sym(0, 2), sym(0, 1), sym(1, 1)])],
+            budget: vec![],
+            // A soft pair is not a hard mirror pair, however it differs.
+            cost: vec![Box::new(vec![sym(1, 2)])],
+        };
+        let m = placement_metrics(&vec![Macro::default(); 3], &l, 100, 50, &reqs);
+        assert_eq!(m.lattice_off, 1, "{m:?}");
+        // c0–c1: 100 × 200.
+        assert_eq!(m.overlap_nm2, 20_000.0, "{m:?}");
+        // At clearance 50: c0–c1 150 × 250, c1–c2 20 × 250; minus the plain overlap.
+        assert_eq!(m.clearance_residue_nm2, 37_500.0 + 5_000.0 - 20_000.0, "{m:?}");
+        assert_eq!(m.matched_geometry_mismatch, 1, "{m:?}");
+        // Footprint 530 × 200 over 3 × 200 × 200.
+        assert!((m.area_usage - 106_000.0 / 120_000.0).abs() < 1e-6, "{m:?}");
+        assert_eq!(m.islands_extra, 0);
     }
 
     /// Four quarter-turns return the exact original geometry — no drift creeps in
