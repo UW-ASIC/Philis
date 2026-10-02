@@ -23,7 +23,7 @@ use fixtures::{
     Suite,
 };
 use library::visualizer;
-use library::{gds, Config, Macros};
+use library::{Config, Macros};
 use pnr_core::{Layout, NetId};
 use verify::Pdk;
 
@@ -154,7 +154,6 @@ fn run_circuit(
     c: &BenchmarkCircuit,
     pdk: &Pdk,
     pdk_json_path: &Path,
-    layer_gds: &[(u16, u16)],
     layer_names: &visualizer::LayerMap,
     seed: u64,
 ) -> (String, Vec<ContractStat>) {
@@ -291,7 +290,7 @@ fn run_circuit(
     let shapes = sol.geometry();
     let debug_dir = Path::new("target/bench_debug").join(&c.name);
     let _ = std::fs::create_dir_all(&debug_dir);
-    let gds_bytes = gds::emit(&shapes, layer_gds);
+    let gds_bytes = library::export_gds(&sol, pdk, &c.name, &[]);
     let _ = std::fs::write(debug_dir.join(format!("{}.gds", c.name)), &gds_bytes);
     let _ = std::fs::write(debug_dir.join("signoff.txt"), &outcome);
     // Every hard violation verbatim — the summary counts alone can't say which rule fired.
@@ -396,7 +395,7 @@ fn main() {
     println!("Discovered {} circuits (seed {seed})", circuits.len());
 
     // Cache loaded PDKs + render tables by path (sky130 vs generic_finfet).
-    let mut pdk_cache: HashMap<PathBuf, (Pdk, Vec<(u16, u16)>, visualizer::LayerMap)> =
+    let mut pdk_cache: HashMap<PathBuf, (Pdk, visualizer::LayerMap)> =
         HashMap::new();
 
     let mut rows = Vec::new();
@@ -417,14 +416,14 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            let (lg, ln) = (p.layer_gds(), visualizer::parse_layer_names(&deck));
-            pdk_cache.insert(pdk_json_path.clone(), (p, lg, ln));
+            let ln = visualizer::parse_layer_names(&deck);
+            pdk_cache.insert(pdk_json_path.clone(), (p, ln));
         }
-        let (pdk, layer_gds, layer_names) = &pdk_cache[&pdk_json_path];
+        let (pdk, layer_names) = &pdk_cache[&pdk_json_path];
 
         let t = Instant::now();
         let (outcome, contracts) =
-            run_circuit(c, pdk, &pdk_json_path, layer_gds, layer_names, seed);
+            run_circuit(c, pdk, &pdk_json_path, layer_names, seed);
         rows.push(Row {
             name: c.name.clone(),
             suite: format!("{:?}", c.suite),

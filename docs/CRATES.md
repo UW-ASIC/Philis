@@ -83,8 +83,13 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
   (solution → PDK-agnostic generator source).
 
 ## frontend/cli (`philis`)
-- `philis [emit] <netlist.sp> <deck.json> [out.rs]` → run → optional emit →
-  signoff verdict as exit code.
+- `philis [run|emit] <netlist.sp> <deck.json> [out.rs] [-o DIR] [--seed N]
+  [--max-iters N] [--starts N]` → run → optional emit → signoff verdict as exit
+  code. `-o DIR` writes `<top>.gds` (the `.subckt` ports as labels on the deck's
+  text layers), `<top>_ref.spice` (the LVS reference, dummies included),
+  `signoff.txt`, `signoff.json`. `--version` names the commit (`PHILIS_GIT_REV`
+  when packaged without `.git`). `--interface` is accepted and ignored with a
+  warning: no fixed die or boundary pins yet.
 
 ## benchmarks
 - `cargo run --release -p benchmark --bin bench local` — per-circuit DRC/LVS/

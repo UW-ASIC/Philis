@@ -115,7 +115,7 @@ fn main() {
     let shapes = sol.geometry();
     std::fs::write(
         out.join("ota5t.gds"),
-        library::gds::emit(&shapes, &layer_gds),
+        library::gds::emit("ota5t", &shapes, &layer_gds, &[]),
     )
     .expect("write gds");
 

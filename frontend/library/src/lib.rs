@@ -1330,6 +1330,31 @@ pub fn signoff_inputs(
     (shapes, pins, reference)
 }
 
+/// The solution as a GDSII stream other tools can sign off: one structure
+/// named `top`, and each of `ports` (empty: every net signoff labels) written
+/// as TEXT on the deck's text layer for its conductor ([`Pdk::label_gds`]).
+/// magic makes every top-level label a port, so an internal net labelled
+/// here fails pin matching against the schematic's `.subckt`.
+#[must_use]
+pub fn export_gds(sol: &Solution, pdk: &Pdk, top: &str, ports: &[String]) -> Vec<u8> {
+    let (shapes, pins, _) = signoff_inputs(sol, pdk);
+    let texts: Vec<gds::Text> = pins
+        .iter()
+        .filter(|p| ports.is_empty() || ports.contains(&p.name))
+        .filter_map(|p| Some(gds::Text { name: p.name.clone(), gds: pdk.label_gds(p.layer)?, x: p.x, y: p.y }))
+        .collect();
+    gds::emit(top, &shapes, &pdk.layer_gds(), &texts)
+}
+
+/// The LVS reference [`signoff`] compares against, as SPICE `.subckt top`
+/// ([`Pdk::reference_spice`]): dummies and per-finger cards included, so an
+/// external LVS of [`export_gds`] against it checks the same claim. The
+/// user's schematic lacks the dummies, so LVS against it reports them extra.
+#[must_use]
+pub fn reference_spice(sol: &Solution, pdk: &Pdk, top: &str, ports: &[String]) -> String {
+    pdk.reference_spice(&signoff_inputs(sol, pdk).2, top, ports)
+}
+
 /// Signoff over drawn `shapes`; `fold`: the table the cells were drawn at
 /// ([`cellgen::folds`], the flow), `None` for the schematic's own fingers.
 pub(crate) fn signoff_shapes(

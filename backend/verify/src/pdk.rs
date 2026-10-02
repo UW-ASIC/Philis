@@ -315,6 +315,67 @@ impl Pdk {
         self.deck.layers.id(&self.strings, name)
     }
 
+    /// GDS `(layer, datatype)` that names the net drawn on `drawn` in a
+    /// stream other tools read: the deck's dedicated text layer for that
+    /// conductor (sky130 `met1_label` 68/5, gf180 `metal1_label`), never the
+    /// drawing layer itself, which `connect label met1 names met1` also allows
+    /// but magic and klayout ignore for text. `None` when no label names it.
+    #[must_use]
+    pub fn label_gds(&self, drawn: u16) -> Option<(u16, u16)> {
+        let c = &self.deck.connectivity;
+        let d = GvLayerId(drawn);
+        (0..c.label_layer.len())
+            .filter(|&r| c.label_names[r] == d || self.deck.layers.operands(c.label_names[r]).contains(&d))
+            .map(|r| c.label_layer[r])
+            .find(|&t| t != d)
+            .map(|t| self.deck.layers.stream_of(t))
+    }
+
+    /// `reference` as one SPICE `.subckt top <ports>`: the netlist signoff's
+    /// LVS compares the drawing against, dummies and one card per drawn
+    /// finger included, so an external LVS (netgen) can check the same claim.
+    /// `ports` is the cell's interface (empty: every port signoff labelled).
+    /// Lengths are unitless µm, the convention magic extracts and sky130
+    /// schematics use; a device with no model (a dummy) takes the deck's first
+    /// recogniser of its kind and polarity.
+    #[must_use]
+    pub fn reference_spice(&self, reference: &crate::reference::RefInput, top: &str, ports: &[String]) -> String {
+        use crate::reference::RefKind;
+        use gdsverify::ingest::deck::DeviceKind;
+        let d = &self.deck.devices;
+        let first = |kind: DeviceKind, p: Option<bool>| {
+            (0..d.kind.len())
+                .find(|&r| d.kind[r] == kind && p.is_none_or(|p| self.strings.resolve(self.deck.layers.name(d.marker[r])).starts_with('p') == p))
+                .map_or("?", |r| self.strings.resolve(d.model[r]))
+        };
+        let ports = if ports.is_empty() { &reference.ports } else { ports };
+        let mut sp = format!(".subckt {top} {}\n", ports.join(" "));
+        for (i, dev) in reference.devices.iter().enumerate() {
+            let default = match dev.kind {
+                RefKind::Nmos => first(DeviceKind::Mos, Some(false)),
+                RefKind::Pmos => first(DeviceKind::Mos, Some(true)),
+                RefKind::Npn | RefKind::Pnp => first(DeviceKind::Bjt, None),
+                RefKind::Resistor => first(DeviceKind::Resistor, None),
+                RefKind::Capacitor => first(DeviceKind::Capacitor, None),
+                RefKind::Diode => first(DeviceKind::Diode, None),
+            };
+            let model = dev.model.as_deref().map_or_else(|| default.to_string(), |m| self.deck_model(m).unwrap_or_else(|| m.to_string()));
+            sp.push_str(&format!("X{i} {} {model}", dev.terminals.join(" ")));
+            for (name, v) in &dev.params {
+                // SI metres → µm; other params (m, nf, counts) as given.
+                if matches!(name.as_str(), "w" | "l") {
+                    // Rounded to the nm the geometry is drawn on: no float noise.
+                    sp.push_str(&format!(" {name}={}", (v * 1e9).round() / 1e3));
+                } else {
+                    sp.push_str(&format!(" {name}={v}"));
+                }
+            }
+            sp.push('\n');
+        }
+        sp.push_str(".ends\n");
+        sp
+    }
+
     /// `table[LayerId.0] = (gds_layer, gds_datatype)` for the GDS writer;
     /// `(0, 0)` for a layer the deck computes rather than draws.
     #[must_use]
@@ -1295,6 +1356,41 @@ mod tests {
 
     /// gf180's gate width rule (`DF.2a`, 220 nm) is wider than its poly's
     /// (`PL.1`, 180 nm): the channel minimum reads the gate, not the poly.
+    #[test]
+    fn label_gds_is_the_text_layer_not_the_drawing_layer() {
+        let sky = load("sky130");
+        let met1 = Process::layer(&sky, "met1").expect("sky130 met1").0;
+        // sky130 also lets text on met1 drawing (68/20) name the net; other
+        // tools read only 68/5, so that is what export writes.
+        assert_eq!(sky.label_gds(met1), Some((68, 5)));
+        let gf = load("gf180mcu");
+        let m1 = Process::layer(&gf, "met1").expect("gf180 met1 role").0;
+        let label = gf.label_gds(m1).expect("gf180 labels metal1 through metal1_label");
+        assert_ne!(label, gf.layer_gds()[m1 as usize], "a text layer, not the drawing layer");
+    }
+
+    #[test]
+    fn reference_spice_writes_ports_dummy_models_and_micron_lengths() {
+        use crate::reference::{RefDeviceIn, RefInput, RefKind};
+        let sky = load("sky130");
+        let r = RefInput {
+            devices: vec![
+                RefDeviceIn { kind: RefKind::Nmos, model: Some("nfet_01v8".into()), terminals: vec!["d".into(), "g".into(), "vss".into(), "vss".into()], params: vec![("w".into(), 0.42e-6), ("l".into(), 0.15e-6)] },
+                RefDeviceIn { kind: RefKind::Pmos, model: None, terminals: vec!["vdd".into(); 4], params: vec![("w".into(), 1.15e-6), ("l".into(), 0.15e-6)] },
+            ],
+            ports: vec!["d".into(), "g".into(), "vss".into(), "vdd".into(), "internal".into()],
+        };
+        let sp = sky.reference_spice(&r, "cell", &["d".into(), "g".into(), "vss".into(), "vdd".into()]);
+        assert_eq!(
+            sp,
+            ".subckt cell d g vss vdd\n\
+             X0 d g vss vss sky130_fd_pr__nfet_01v8 w=0.42 l=0.15\n\
+             X1 vdd vdd vdd vdd sky130_fd_pr__pfet_01v8 w=1.15 l=0.15\n\
+             .ends\n",
+            "short model canonicalised, dummy gets the deck's pfet, nm-rounded µm, interface ports only"
+        );
+    }
+
     #[test]
     fn min_channel_reads_the_gate_width_rule() {
         let gf = load("gf180mcu");
