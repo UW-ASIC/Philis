@@ -707,23 +707,7 @@ impl Flow<'_> {
         );
         budgets.add_routing(&[Box::new(self.common_nodes(&layout)), Box::new(self.environment(&layout, &rings))], &routes);
 
-        let drc_hard = signoff.report.hard_violations.len();
-        // Spec tier left at 0 here: the simulation is the expensive step, so
-        // the caller runs it (`Flow::score_perf`) only on a candidate that
-        // can still win.
-        let key = lex_key(&place_report, &route_report, &signoff.report, &budgets, None, layout.footprint_nm2());
-        let stats = RunStats {
-            place_hard: place_report.hard_violations.len(),
-            route_hard: route_report.hard_violations.len(),
-            drc_hard,
-            warnings: signoff.warnings.len() as u32,
-            route_overuse: route_report
-                .budget_violations
-                .iter()
-                .map(|v| v.margin)
-                .sum(),
-            ..RunStats::default()
-        };
+        let (key, stats) = epoch_score(&place_report, &route_report, &signoff, &budgets, layout.footprint_nm2());
         Epoch {
             key,
             perf: None,
@@ -973,6 +957,29 @@ fn key_lt(a: &LexKey, b: &LexKey) -> bool {
     } else {
         a3 < b3
     }
+}
+
+/// One epoch's key and per-stage counts. Signoff errors only: `signoff.warnings`
+/// feed `RunStats::warnings` and nothing else. Spec tier left at 0: the
+/// simulation is the expensive step, so the caller runs it (`Flow::score_perf`)
+/// only on a candidate that can still win.
+fn epoch_score(
+    place: &Report,
+    route: &Report,
+    signoff: &verify::Signoff,
+    budgets: &metadata::MetadataReport,
+    footprint_nm2: f64,
+) -> (LexKey, RunStats) {
+    let key = lex_key(place, route, &signoff.report, budgets, None, footprint_nm2);
+    let stats = RunStats {
+        place_hard: place.hard_violations.len(),
+        route_hard: route.hard_violations.len(),
+        drc_hard: signoff.report.hard_violations.len(),
+        warnings: signoff.warnings.len() as u32,
+        route_overuse: route.budget_violations.iter().map(|v| v.margin).sum(),
+        ..RunStats::default()
+    };
+    (key, stats)
 }
 
 fn lex_key(
@@ -1573,15 +1580,17 @@ mod start_tests {
         assert_eq!(key(&place, &Report::default(), &budgets).2, 500.0);
     }
 
-    /// A deck warning is reported, not counted as a hard violation: the key
-    /// reads `Signoff::report`, which holds errors only (verify's
-    /// `split_by_severity` pins the split).
+    /// A deck warning is reported, not counted as a hard violation: the
+    /// epoch's |V| and `drc_hard` see the one error, `warnings` the two
+    /// warnings (verify's `split_by_severity` pins the split upstream).
     #[test]
     fn warnings_are_not_violations() {
         let mut signoff = verify::Signoff::default();
         signoff.report.hard_violations = rows(&["drc/m1.1:met1"]);
-        signoff.warnings = rows(&["erc/tie_high_low:li"]);
-        assert_eq!(key(&Report::default(), &signoff.report, &MetadataReport::default()).0, 1);
+        signoff.warnings = rows(&["erc/tie_high_low:li", "erc/tie_high_low:li"]);
+        let (key, stats) =
+            crate::epoch_score(&Report::default(), &Report::default(), &signoff, &MetadataReport::default(), 1.0);
+        assert_eq!((key.0, stats.drc_hard, stats.warnings), (1, 1, 2));
     }
 
     /// A NaN tier loses to a finite one, whichever side it is on.

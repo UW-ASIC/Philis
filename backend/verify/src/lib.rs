@@ -32,11 +32,15 @@ pub use reference::{RefDeviceIn, RefInput, RefKind};
 /// same-dimension numeric pair (area, ratio, count, voltage, current,
 /// resistance) is ‰ of the limit, `ceil(1000·|measured − limit| / |limit|)`
 /// (`|limit|` floored at 1e-12), so an antenna ratio 2× over reads 1000 and
-/// 1 % over reads 10. Mismatched dimensions read 1.
+/// 1 % over reads 10; a NaN reads `i64::MAX`. Mismatched dimensions read 1.
 #[must_use]
 pub fn shortfall(limit: Measurement, measured: Measurement) -> i64 {
     use Measurement as M;
-    let permille = |l: f64, m: f64| (1000.0 * (m - l).abs() / l.abs().max(1e-12)).ceil() as i64;
+    // A NaN reading is no graze: it ranks as the worst miss (`as` would make it 0).
+    let permille = |l: f64, m: f64| {
+        let x = (1000.0 * (m - l).abs() / l.abs().max(1e-12)).ceil();
+        if x.is_nan() { i64::MAX } else { x as i64 }
+    };
     match (limit, measured) {
         (M::Length(l), M::Length(m)) => (l.raw() - m.raw()).max(0),
         (M::Area(l), M::Area(m)) => permille(l.raw() as f64, m.raw() as f64),
@@ -58,7 +62,10 @@ pub struct Signoff {
     pub report: Report,
     /// Rows the deck states as warnings. Never in `report.hard_violations`.
     pub warnings: Vec<Violation>,
+    /// What this run did not check: LVS-unverified devices, skipped rules.
     pub coverage: Coverage,
+    /// PEX C over labelled nets, fF ([`Checker::cap_matrix`]); empty without
+    /// PEX, still filled on the label-short fallback.
     pub caps: CapMatrix,
     /// Wall time.
     pub elapsed: Duration,
@@ -289,9 +296,11 @@ pub struct Finding {
     pub rule: String,
     /// Layer name, `"-"` for findings with no layer.
     pub layer: String,
-    /// [`shortfall`]: nm for a length rule, ‰ of the limit for another
-    /// numeric one.
-    pub margin_nm: i64,
+    /// [`shortfall`], in [`Finding::unit`].
+    pub margin: i64,
+    /// `"nm"` for a length rule, `"permille"` (of the limit) for any other —
+    /// including the placeholder 1 of mismatched dimensions and `engine/…`.
+    pub unit: &'static str,
     pub x: i64,
     pub y: i64,
 }
@@ -311,7 +320,7 @@ pub fn erc(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk) -> Vec<Finding> {
 
 fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks) -> Vec<Finding> {
     let engine_fail =
-        |rule: String| vec![Finding { rule, layer: "-".into(), margin_nm: 1, x: 0, y: 0 }];
+        |rule: String| vec![Finding { rule, layer: "-".into(), margin: 1, unit: "permille", x: 0, y: 0 }];
     let mut checker = match Checker::new(pdk, false) {
         Ok(c) => c,
         Err(e) => return engine_fail(format!("engine/load: {e}")),
@@ -328,7 +337,11 @@ fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks) 
             Finding {
                 rule: checker.rule_name(v.rule).to_string(),
                 layer: checker.layer_name(v.layer).to_string(),
-                margin_nm: shortfall(v.limit, v.measured),
+                margin: shortfall(v.limit, v.measured),
+                unit: match (v.limit, v.measured) {
+                    (Measurement::Length(_), Measurement::Length(_)) => "nm",
+                    _ => "permille",
+                },
                 x: v.at.x.raw(),
                 y: v.at.y.raw(),
             }
@@ -392,6 +405,7 @@ mod tests {
         assert_eq!(shortfall(Ratio(400.0), Ratio(800.0)), 1000);
         assert_eq!(shortfall(Ratio(400.0), Ratio(404.0)), 10);
         assert_eq!(shortfall(Count(1), Count(0)), 1000);
+        assert_eq!(shortfall(Ratio(400.0), Ratio(f64::NAN)), i64::MAX, "NaN is not a graze");
     }
 
     #[test]

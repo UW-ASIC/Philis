@@ -207,16 +207,7 @@ impl Checker {
         if let ExtractError::Port(PortError::ConflictingLabels(net)) = e {
             // Extraction stopped at the ports: the nets are rebuilt to name
             // the labels that share one.
-            let mut nets = gdsverify::check::topology::NetTable::default();
-            gdsverify::check::topology::net::extract_nets_into(&self.loaded.store, &self.loaded.deck.connectivity, &mut nets);
-            let names: Vec<&str> = self
-                .loaded
-                .provenance
-                .labels()
-                .iter()
-                .filter(|&&(poly, _)| nets.net_of(poly) == net)
-                .map(|&(_, name)| self.loaded.strings.resolve(name))
-                .collect();
+            let names = self.label_nets().into_iter().find(|g| g.0 == net).map(|g| g.1).unwrap_or_default();
             return format!("{LABEL_SHORT}: labels {names:?} bind to one extracted net");
         }
         format!("extract: {e}")
@@ -227,6 +218,13 @@ impl Checker {
     /// order, each name once.
     #[must_use]
     pub fn shorted_labels(&self) -> Vec<Vec<String>> {
+        self.label_nets().into_iter().map(|g| g.1).filter(|g| g.len() > 1).collect()
+    }
+
+    /// Every labelled net of the last loaded geometry with its label names,
+    /// first-seen order, each name once. Rebuilds the net table: extraction
+    /// may have stopped before producing one.
+    fn label_nets(&self) -> Vec<(gdsverify::check::topology::NetId, Vec<String>)> {
         let mut nets = gdsverify::check::topology::NetTable::default();
         gdsverify::check::topology::net::extract_nets_into(&self.loaded.store, &self.loaded.deck.connectivity, &mut nets);
         let mut groups: Vec<(_, Vec<String>)> = Vec::new();
@@ -238,7 +236,7 @@ impl Checker {
                 None => groups.push((net, vec![name])),
             }
         }
-        groups.into_iter().map(|g| g.1).filter(|g| g.len() > 1).collect()
+        groups
     }
 
     /// What the last [`Checker::run`] produced.

@@ -231,7 +231,7 @@ fn run_circuit(
     // `esc` > 0 means a variant-space binding (no arrangement of the chosen
     // variants was feasible), not a placement local minimum.
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}{} | overuse {} | DRC {} | LVS {} | ERC {}{} | warnings {} | skipped [{}] | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | overuse {} | DRC {} | LVS {}, unverified {} | ERC {}{} | warnings {} | skipped [{}] | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
@@ -240,6 +240,8 @@ fn run_circuit(
         s.route_overuse,
         drc,
         if lvs_mismatch { "MISMATCH" } else { "MATCH" },
+        // Devices LVS did not compare: a MATCH covers only the rest.
+        signoff.coverage.unverified.iter().map(|u| u.2).sum::<usize>(),
         erc,
         if engine > 0 { format!(" | engine fails {engine}") } else { String::new() },
         signoff.warnings.len(),
@@ -310,7 +312,7 @@ fn run_circuit(
     let located: String = verify::drc(&shapes, &[], pdk)
         .iter()
         .map(|f| {
-            format!("{}\t{}\tmargin={} nm\t({}, {})\n", f.rule, f.layer, f.margin_nm, f.x, f.y)
+            format!("{}\t{}\tmargin={} {}\t({}, {})\n", f.rule, f.layer, f.margin, f.unit, f.x, f.y)
         })
         .collect();
     let _ = std::fs::write(debug_dir.join("drc_located.txt"), located);
