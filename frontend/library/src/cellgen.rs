@@ -858,13 +858,14 @@ fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &dyn pnr_core::P
 /// A sized MOS goes in as `nf·m` cards of per-finger `W_total/nf` and `l` (SI
 /// metres, [`pnr_core::MosSize`]):
 /// the extractor measures one device per channel and a parametrised device never
-/// parallel-merges. Inductors have no recogniser (and no drawing: signoff
-/// reports each as `cell/undrawable`) and are skipped, and so are
-/// capacitors: every capacitor generator here draws a MOM (metal plates or a
-/// comb, no marker), which no deck's recogniser extracts (sky130 has none,
-/// ihp's is a MIM, gf180's a MOS cap), so a card would only unpair; their
-/// plates are still checked as the nets they join. `ports` is left
-/// empty for the caller to fill with the labels it actually places.
+/// parallel-merges. Capacitors go in as one card per unit (`max(nf, m)`),
+/// inductors as one card, both `P N`: a MOM (every capacitor generator here
+/// draws one) and an inductor have no deck recogniser, and `verify` matches a
+/// capacitor card only to a deck row its model names (never a model-less one
+/// to the first MIM), so it counts them LVS-unverified (`lvs-coverage/…`)
+/// rather than this module dropping them.
+/// `ports` is left empty for the caller to fill with the labels it actually
+/// places.
 ///
 /// Each MOS is folded as [`folds`] says (the same factor the cells use).
 ///
@@ -890,7 +891,8 @@ pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceI
             DeviceKind::Diode => (RefKind::Diode, &["P", "N"]),
             DeviceKind::Npn => (RefKind::Npn, &BJT_PINS),
             DeviceKind::Pnp => (RefKind::Pnp, &BJT_PINS),
-            DeviceKind::Inductor | DeviceKind::Capacitor => continue,
+            DeviceKind::Capacitor => (RefKind::Capacitor, &["P", "N"]),
+            DeviceKind::Inductor => (RefKind::Inductor, &["P", "N"]),
         };
         let terminals: Vec<String> = pins
             .iter()
@@ -911,6 +913,10 @@ pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceI
         } else if matches!(dev.kind, DeviceKind::Npn | DeviceKind::Pnp) {
             // One card per drawn unit (ratios are unit counts: `m`).
             (i64::from(multiplier(dev)), Vec::new())
+        } else if dev.kind == DeviceKind::Capacitor {
+            // One card per drawn unit (dac4's XC4 `m=8` is 8 unit caps).
+            let nf = dev.params.iter().find(|(n, _)| n == "nf").map_or(1, |&(_, v)| v);
+            (nf.max(i64::from(multiplier(dev))).clamp(1, i64::from(u16::MAX)), Vec::new())
         } else {
             (1, Vec::new())
         };

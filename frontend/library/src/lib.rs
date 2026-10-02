@@ -1026,7 +1026,12 @@ fn lex_key(
     footprint_nm2: f64,
 ) -> LexKey {
     let own = |r: &Report| r.hard_violations.iter().filter(|v| !v.is_batch_row()).count();
-    let v = budgets.hard_violated() + own(place) + own(route) + signoff.hard_violations.len();
+    // `lvs-coverage/` rows (devices no deck recogniser extracts) are the same
+    // every epoch: no layout fixes them, so they stay out of |V| or no design
+    // with a BJT/MOM could ever read feasible, converge or debug-check its
+    // winner. They stay in the report, so signoff and bench still see them.
+    let checked = signoff.hard_violations.iter().filter(|v| !v.rule.starts_with("lvs-coverage/")).count();
+    let v = budgets.hard_violated() + own(place) + own(route) + checked;
     let theta = budgets.theta()
         + route.budget_violations.iter().filter(|x| !x.is_batch_row()).map(|x| x.margin as f64).sum::<f64>();
     (v, perf.map_or(0.0, |p| p.residual), theta, signoff.cost, footprint_nm2)
@@ -1616,6 +1621,14 @@ mod start_tests {
         let (key, stats) =
             crate::epoch_score(&Report::default(), &Report::default(), &signoff, &MetadataReport::default(), 1.0);
         assert_eq!((key.0, stats.drc_hard, stats.warnings), (1, 1, 2));
+    }
+
+    /// An uncompared device is out of |V| (it is the same every epoch, and a
+    /// design with a BJT must still converge) but stays a signoff row.
+    #[test]
+    fn coverage_rows_are_not_epoch_violations() {
+        let signoff = Report { hard_violations: rows(&["lvs-coverage/unverified:Pnp:-", "drc/m1.1:met1"]), ..Default::default() };
+        assert_eq!(key(&Report::default(), &signoff, &MetadataReport::default()).0, 1);
     }
 
     /// A NaN tier loses to a finite one, whichever side it is on.

@@ -149,14 +149,22 @@ def main() -> int:
         sig = ROOT / "target" / "bench_debug" / f / "signoff.txt"
         gp = "?"
         if sig.exists():
-            gp = "MATCH" if "LVS MATCH" in sig.read_text() else "MISMATCH"
+            # MATCH | MISMATCH | PARTIAL(n): a partial compare is not a MATCH.
+            m = re.search(r"LVS (MATCH|MISMATCH|PARTIAL)", sig.read_text())
+            gp = m.group(1) if m else "?"
         agree = "AGREE" if verdict == gp else "DISAGREE"
+        # klayout MATCH, GPurify PARTIAL: nothing GPurify compared disagrees,
+        # it compared less. A coverage gap, not a contradiction: reported,
+        # not a failure. PARTIAL against a klayout MISMATCH stays DISAGREE
+        # (the mismatch may sit in what GPurify did compare).
+        if verdict == "MATCH" and gp == "PARTIAL":
+            agree = "PARTIAL"
         if verdict == "ERROR":
             agree = "ERROR"
             print(r.stdout[-1500:])
             print(r.stderr[-1500:])
         print(f"== {f}: klayout {verdict}  gpurify {gp}  -> {agree}")
-        if agree != "AGREE":
+        if agree not in ("AGREE", "PARTIAL"):
             fail += 1
     return 1 if fail else 0
 

@@ -58,7 +58,8 @@ pub fn shortfall(limit: Measurement, measured: Measurement) -> i64 {
 #[derive(Default)]
 pub struct Signoff {
     /// Errors only: DRC/ERC/LVS rows of `Severity::Error`, `engine/…`, the
-    /// LVS `lvs/extract: label short`. Its `cost` is PEX's total C, fF.
+    /// LVS `lvs/extract: label short`, one `lvs-coverage/…` per
+    /// [`Coverage::unverified`] entry. Its `cost` is PEX's total C, fF.
     pub report: Report,
     /// Rows the deck states as warnings. Never in `report.hard_violations`.
     pub warnings: Vec<Violation>,
@@ -107,8 +108,9 @@ impl std::fmt::Display for Coverage {
 }
 
 /// Full signoff over drawn geometry, its pin labels and its schematic
-/// reference: [`signoff_checked`] without intent, warnings or coverage; the
-/// [`Duration`] is wall time.
+/// reference: [`signoff_checked`] without intent or warnings; the
+/// [`Duration`] is wall time. Coverage is kept only as the report's
+/// `lvs-coverage/…` hard rows.
 #[must_use]
 pub fn signoff(
     shapes: &[Shape],
@@ -145,8 +147,8 @@ pub fn signoff_with_caps(
     signoff_with_intent(shapes, pins, reference, &Intent::default(), pdk)
 }
 
-/// [`signoff_checked`]'s errors, wall time and caps; warnings and coverage
-/// are dropped.
+/// [`signoff_checked`]'s errors, wall time and caps; warnings are dropped,
+/// coverage is kept as the report's `lvs-coverage/…` hard rows.
 #[must_use]
 pub fn signoff_with_intent(
     shapes: &[Shape],
@@ -168,7 +170,9 @@ pub fn signoff_with_intent(
 /// engine skipped or refused, or an engine failure, is a hard `engine/…`
 /// violation: a check that could not run never reads as clean. Rules skipped
 /// inside a stage that ran, and schematic devices no deck recogniser
-/// extracts, are this run's [`Coverage`].
+/// extracts, are this run's [`Coverage`]; each `(kind, model, n)` of the
+/// latter is also a hard `lvs-coverage/unverified:{kind}:{model}` row of
+/// margin `n`.
 #[must_use]
 pub fn signoff_checked(
     shapes: &[Shape],
@@ -203,6 +207,13 @@ pub fn signoff_checked(
                     Some(u) => u.2 += 1,
                     None => s.coverage.unverified.push((kind, model, 1)),
                 }
+            }
+            // Unknown is never pass: an uncompared device is a hard row (the
+            // same count every epoch, so ranking is unchanged) that keeps the
+            // run from reading LVS-clean.
+            for (kind, model, n) in &s.coverage.unverified {
+                let rule = format!("lvs-coverage/unverified:{kind:?}:{}", model.as_deref().unwrap_or("-"));
+                s.report.hard_violations.push(Violation { rule, margin: *n as i64 });
             }
             match checker.run(shapes, pins, Checks::ALL) {
                 // A label short aborts extraction and is LVS's verdict. Report
@@ -601,6 +612,51 @@ mod tests {
             "{:?}",
             s.coverage.unverified
         );
+    }
+
+    // AV-01: sky130's `capm` recognises a MIM; a MOM card (no marker, no
+    // recogniser), named or model-less (an elaborated composition's card),
+    // must be uncompared, not compared as `capm` and unpaired.
+    #[test]
+    fn a_mom_card_is_unverified_not_compared_as_mim() {
+        let pdk = sky130();
+        for (model, rule) in [
+            (Some("cap_generic_m1m2"), "lvs-coverage/unverified:Capacitor:cap_generic_m1m2"),
+            (None, "lvs-coverage/unverified:Capacitor:-"),
+        ] {
+            let reference = RefInput {
+                devices: vec![RefDeviceIn {
+                    kind: RefKind::Capacitor,
+                    model: model.map(Into::into),
+                    terminals: vec!["top".into(), "bot".into()],
+                    params: vec![],
+                }],
+                ports: vec![],
+            };
+            // No geometry: nothing to extract, so any `lvs/` row is the card.
+            let s = signoff_checked(&[], &[], &reference, &Intent::default(), &pdk);
+            assert_eq!(s.coverage.unverified, [(RefKind::Capacitor, model.map(Into::into), 1)]);
+            let rules: Vec<&str> = s.report.hard_violations.iter().map(|v| v.rule.as_str()).collect();
+            assert!(!rules.iter().any(|r| r.starts_with("lvs/")), "{rules:?}");
+            let cov: Vec<_> = s.report.hard_violations.iter().filter(|v| v.rule.starts_with("lvs-coverage/")).map(|v| (v.rule.as_str(), v.margin)).collect();
+            assert_eq!(cov, [(rule, 1)]);
+        }
+    }
+
+    // No deck recognises an inductor: it is uncompared, and that is coverage,
+    // not an engine failure.
+    #[test]
+    fn an_inductor_is_unverified() {
+        let pdk = sky130();
+        let reference = RefInput {
+            devices: vec![RefDeviceIn { kind: RefKind::Inductor, model: None, terminals: vec!["a".into(), "b".into()], params: vec![] }],
+            ports: vec![],
+        };
+        let s = signoff_checked(&[rect(&pdk, "li", 0, 0, 500, 500)], &[], &reference, &Intent::default(), &pdk);
+        assert!(matches!(s.coverage.unverified.as_slice(), [(RefKind::Inductor, _, 1)]), "{:?}", s.coverage.unverified);
+        let rules: Vec<&str> = s.report.hard_violations.iter().map(|v| v.rule.as_str()).collect();
+        assert!(!rules.iter().any(|r| r.starts_with("engine/")), "{rules:?}");
+        assert!(rules.contains(&"lvs-coverage/unverified:Inductor:-"), "{rules:?}");
     }
 
     // Parametric LVS is live end to end: the extractor measures the channel
