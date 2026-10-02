@@ -758,7 +758,7 @@ Adversarial fact-check, 2026-09-28, against the working tree (HEAD `dad330c` plu
 **Unresolved.**
 
 - PLC-15 step 1: the statement that LAYLA reserves full widths *because it does not route over devices* is marked `[UNVERIFIED]`. The Lampaert reftext states the static term (L4012–4024) but not LAYLA's over-device routing policy.
-- H13-53/H13-55 class distances (MOD 3 µm, EXC 5 µm, rule 23 MOD 3–5 µm and EXC 5–10 µm) and the H12-26 angles are blank in the reftext. They were accepted from the H13 and H12 studies, which read the PDF; this pass re-read only PDF 696 (the WPE data).
+- H13-53/H13-55 class distances (MOD 3 µm, EXC 5 µm, rule 23 MOD 3–5 µm and EXC 5–10 µm) and the H12-26 angles are blank in the reftext. They were accepted from the H13 and H12 studies, which read the PDF; this pass re-read only PDF 696 (the WPE data). GAP-20 (`ref-hastings-99` §2.4–2.6): all of these, and the WPE 5 %/1.8 µm and 25 %/0.95 µm points, are body text; no figure long description states them, so the PDF readings stand.
 - LAMP-20 (L2792–2850, "promoted for sensitive nets") and H12-31 (no line range in its study) were checked only for existence and topic, not re-read line by line.
 
 ---
