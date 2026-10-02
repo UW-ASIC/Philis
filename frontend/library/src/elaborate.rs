@@ -94,7 +94,7 @@ impl Elaborated {
             schematic,
             None,
             pdk,
-        ).0)
+        ).report)
     }
 
     /// The net labels [`Elaborated::signoff`] puts on the geometry, so an

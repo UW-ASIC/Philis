@@ -58,7 +58,7 @@ fn main() {
         sol.routes.wires.len()
     );
 
-    let report = signoff(&sol, &pdk);
+    let report = signoff(&sol, &pdk).report;
     if report.hard_violations.is_empty() {
         println!("signoff CLEAN — cost {:.3}", report.cost);
     } else {

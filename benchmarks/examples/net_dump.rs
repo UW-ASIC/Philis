@@ -24,7 +24,7 @@ fn main() {
     let sol = library::run(&text, &pdk, &Macros::default(), &cfg).expect("flow");
 
     let mut by_rule: BTreeMap<String, usize> = BTreeMap::new();
-    for v in &library::signoff(&sol, &pdk).hard_violations {
+    for v in &library::signoff(&sol, &pdk).report.hard_violations {
         *by_rule.entry(v.rule.clone()).or_default() += 1;
     }
     println!("=== {name} signoff ===");

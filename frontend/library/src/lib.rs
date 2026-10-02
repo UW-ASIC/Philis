@@ -120,10 +120,10 @@ pub struct RunStats {
     pub place_hard: usize,
     /// Winner: detailed-routing hard violations.
     pub route_hard: usize,
-    /// Winner: signoff (DRC + ERC + LVS) violations over its drawn geometry,
-    /// deck warnings included.
+    /// Winner: signoff (DRC + ERC + LVS) errors over its drawn geometry.
     pub drc_hard: usize,
-    /// Winner: of `drc_hard`, deck warnings (`warn/` rows) — reported, not in |V|.
+    /// Winner: deck warning rows ([`verify::Signoff::warnings`]) — reported,
+    /// never in `drc_hard` or |V|.
     pub warnings: u32,
     /// Winner: Σ routing budget margins (milli-budgets, not tracks).
     pub route_overuse: i64,
@@ -442,6 +442,7 @@ fn solve(
     );
     let mut metadata = metadata;
     metadata.binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
+    metadata.coverage = best.coverage;
     metadata.add_routing(&[Box::new(flow.common_nodes(&best.layout)), Box::new(flow.environment(&best.layout, &best.rings))], &best.routes);
     if let (Some(cfg), Some(result)) = (flow.perf, &best.perf) {
         metadata.performance = cfg
@@ -560,6 +561,9 @@ struct Epoch {
     perf: Option<perf::PerfResult>,
     /// Extracted capacitance, kept for that simulation.
     caps: verify::CapMatrix,
+    /// What this epoch's signoff did not check; the winner's goes to
+    /// [`metadata::MetadataReport::coverage`].
+    coverage: verify::Coverage,
     iteration: u32,
     layout: Layout,
     routes: Routes,
@@ -690,7 +694,7 @@ impl Flow<'_> {
         // The epoch is scored by the same DRC/ERC/LVS gate as the final result.
         let mut labelled = placed;
         labelled.extend(rings.iter().cloned());
-        let (signoff, caps) = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), self.pdk);
+        let signoff = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), self.pdk);
         let mut budgets = metadata::build(
             placement,
             &layout,
@@ -703,16 +707,16 @@ impl Flow<'_> {
         );
         budgets.add_routing(&[Box::new(self.common_nodes(&layout)), Box::new(self.environment(&layout, &rings))], &routes);
 
-        let drc_hard = signoff.hard_violations.len();
+        let drc_hard = signoff.report.hard_violations.len();
         // Spec tier left at 0 here: the simulation is the expensive step, so
         // the caller runs it (`Flow::score_perf`) only on a candidate that
         // can still win.
-        let key = lex_key(&place_report, &route_report, &signoff, &budgets, None, layout.footprint_nm2());
+        let key = lex_key(&place_report, &route_report, &signoff.report, &budgets, None, layout.footprint_nm2());
         let stats = RunStats {
             place_hard: place_report.hard_violations.len(),
             route_hard: route_report.hard_violations.len(),
             drc_hard,
-            warnings: signoff.hard_violations.iter().filter(|v| v.rule.starts_with("warn/")).count() as u32,
+            warnings: signoff.warnings.len() as u32,
             route_overuse: route_report
                 .budget_violations
                 .iter()
@@ -723,7 +727,8 @@ impl Flow<'_> {
         Epoch {
             key,
             perf: None,
-            caps,
+            caps: signoff.caps,
+            coverage: signoff.coverage,
             iteration: 0,
             layout,
             routes,
@@ -937,7 +942,7 @@ impl RunStats {
 /// no parasitic gain buys past a budget residual, no budget slack past a missed
 /// circuit spec, nothing past a hard violation. V counts violated hard rules
 /// ([`metadata::MetadataReport::hard_violated`]), the stages' own non-batch
-/// rows, and signoff errors (not `warn/` rows). Θ is
+/// rows, and signoff errors (deck warnings are never in that report). Θ is
 /// [`metadata::MetadataReport::theta`] plus dr's own non-batch budget rows, all
 /// in milli-budgets. The spec miss is the post-layout simulation's Σ normalised
 /// miss (`0` without performance scoring); C is signoff's extracted total (fF).
@@ -979,8 +984,7 @@ fn lex_key(
     footprint_nm2: f64,
 ) -> LexKey {
     let own = |r: &Report| r.hard_violations.iter().filter(|v| !v.is_batch_row()).count();
-    let errors = signoff.hard_violations.iter().filter(|v| !v.rule.starts_with("warn/")).count();
-    let v = budgets.hard_violated() + own(place) + own(route) + errors;
+    let v = budgets.hard_violated() + own(place) + own(route) + signoff.hard_violations.len();
     let theta = budgets.theta()
         + route.budget_violations.iter().filter(|x| !x.is_batch_row()).map(|x| x.margin as f64).sum::<f64>();
     (v, perf.map_or(0.0, |p| p.residual), theta, signoff.cost, footprint_nm2)
@@ -1312,21 +1316,22 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
     parse::spice(spice)
 }
 
-/// Full DRC/ERC/LVS/PEX signoff of a solution against its own schematic.
+/// Full DRC/ERC/LVS/PEX signoff of a solution against its own schematic:
+/// errors in `report`, deck warnings and coverage apart ([`verify::Signoff`]).
 #[must_use]
-pub fn signoff(sol: &Solution, pdk: &Pdk) -> Report {
+pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
     let (shapes, pins, reference) = signoff_inputs(sol, pdk);
-    let mut report = verify::signoff_with_intent(&shapes, &pins, &reference, &sol.intent, pdk).0;
+    let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
     // A device this process has no construction for (an NPN without a deep
     // well, a poly resistor on a fin process) is drawn as nothing: a hard
     // finding, never hidden behind an LVS that cannot see it either.
     for (i, m) in sol.macros.iter().take(sol.layout.x.len()).enumerate() {
         if m.shapes.is_empty() {
             let (name, model) = sol.netlist.devices.get(i).map_or(("?", "?"), |d| (d.name.as_str(), d.model.as_str()));
-            report.hard_violations.push(pnr_core::report::Violation { rule: format!("cell/undrawable: {name} ({model}) has no construction on this process"), margin: 1 });
+            s.report.hard_violations.push(pnr_core::report::Violation { rule: format!("cell/undrawable: {name} ({model}) has no construction on this process"), margin: 1 });
         }
     }
-    report
+    s
 }
 
 /// Adopt devices a later stage inserted (an antenna diode from `dr`): each
@@ -1368,10 +1373,9 @@ pub(crate) fn signoff_shapes(
     schematic: &pnr_core::Netlist,
     fold: Option<&[(u16, i32)]>,
     pdk: &Pdk,
-) -> (Report, verify::CapMatrix) {
+) -> verify::Signoff {
     let (pins, reference) = labels_and_reference(shapes, placed, nets, schematic, fold, pdk);
-    let (report, _, caps) = verify::signoff_with_intent(shapes, &pins, &reference, intent, pdk);
-    (report, caps)
+    verify::signoff_checked(shapes, &pins, &reference, intent, pdk)
 }
 
 /// Labels every provable net (see [`labeled_pins`]) and builds the LVS
@@ -1569,11 +1573,15 @@ mod start_tests {
         assert_eq!(key(&place, &Report::default(), &budgets).2, 500.0);
     }
 
-    /// A deck warning is reported, not counted as a hard violation.
+    /// A deck warning is reported, not counted as a hard violation: the key
+    /// reads `Signoff::report`, which holds errors only (verify's
+    /// `split_by_severity` pins the split).
     #[test]
     fn warnings_are_not_violations() {
-        let signoff = Report { hard_violations: rows(&["warn/erc/tie_high_low:li", "drc/m1.1:met1"]), ..Default::default() };
-        assert_eq!(key(&Report::default(), &signoff, &MetadataReport::default()).0, 1);
+        let mut signoff = verify::Signoff::default();
+        signoff.report.hard_violations = rows(&["drc/m1.1:met1"]);
+        signoff.warnings = rows(&["erc/tie_high_low:li"]);
+        assert_eq!(key(&Report::default(), &signoff.report, &MetadataReport::default()).0, 1);
     }
 
     /// A NaN tier loses to a finite one, whichever side it is on.

@@ -34,7 +34,7 @@ fn chain2_open_epoch_is_scored_not_fatal() {
     // extraction (verify's fail-closed answer to a short, observed here). What
     // must never appear is a label that failed to bind or a reference the deck
     // rejected — those would be bugs in this crate's signoff plumbing.
-    let report = library::signoff(&sol, &pdk);
+    let report = library::signoff(&sol, &pdk).report;
     let plumbing_faults: Vec<&str> = report
         .hard_violations
         .iter()

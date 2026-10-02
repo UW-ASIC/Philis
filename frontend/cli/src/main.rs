@@ -58,7 +58,12 @@ fn cli() -> Result<bool, String> {
     if !sol.metadata.assumed.is_empty() {
         println!("assumed (UNVERIFIED sidecar values): {}", sol.metadata.assumed.join(", "));
     }
-    let report = library::signoff(&sol, &pdk);
+    let signoff = library::signoff(&sol, &pdk);
+    let report = signoff.report;
+    if !signoff.warnings.is_empty() {
+        println!("signoff: {} deck warning(s), not violations", signoff.warnings.len());
+    }
+    print!("{}", signoff.coverage);
     if report.hard_violations.is_empty() {
         println!("signoff CLEAN — cost {:.3}", report.cost);
     } else {
