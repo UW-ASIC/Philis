@@ -2152,7 +2152,7 @@ mod tests {
     }
 
     fn touches(s: &Shape, r: Rect) -> bool {
-        s.rect.x <= r.x + r.w && r.x <= s.rect.x + s.rect.w && s.rect.y <= r.y + r.h && r.y <= s.rect.y + s.rect.h
+        s.rect.touches(&r)
     }
 
     fn route(
