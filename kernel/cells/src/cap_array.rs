@@ -776,7 +776,7 @@ mod tests {
                 .iter()
                 .map(|p| verify::LabeledPin { name: net(p), layer: p.layer.0, x: p.at.x + p.at.w / 2, y: p.at.y + p.at.h / 2 })
                 .collect();
-            let reference = verify::RefInput { devices: vec![], ports: vec![] };
+            let reference = verify::RefInput::default();
             let (_, _, caps) = verify::signoff_with_caps(&m.shapes, &labels, &reference, &pdk);
             let to_top = |i: u8| {
                 let n = format!("c{i}");

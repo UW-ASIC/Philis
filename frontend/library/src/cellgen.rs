@@ -932,6 +932,7 @@ pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceI
     RefInput {
         devices,
         ports: Vec::new(),
+        external_ports: None,
     }
 }
 

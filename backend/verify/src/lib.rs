@@ -398,6 +398,37 @@ mod tests {
         assert_eq!(floating(&[pin]), 0);
     }
 
+    // AV-04: a label names a net for LVS, it does not make it a port. A gate
+    // labelled `g` that only the block's port list can drive is floating
+    // unless `g` is declared external; with no list the exemption is blanket
+    // and the coverage says so.
+    #[test]
+    fn an_internal_gate_only_net_is_floating_even_when_labelled() {
+        let pdk = sky130();
+        // `device_count_sees_one_mos_in_a_minimal_stack`'s MOS: the poly is
+        // its gate and reaches nothing else.
+        let shapes = [
+            rect(&pdk, "poly", 200, 0, 100, 400),
+            rect(&pdk, "diff", 0, 100, 260, 200),
+            rect(&pdk, "diff", 240, 100, 260, 200),
+            rect(&pdk, "nsdm", 0, 0, 500, 400),
+        ];
+        let pins = [LabeledPin { name: "g".into(), layer: pdk.layer("poly").unwrap().0, x: 250, y: 350 }];
+        let floating = |external_ports: Option<Vec<String>>| {
+            let reference = RefInput { devices: vec![], ports: vec!["g".into()], external_ports };
+            let mut checker = Checker::new(&pdk, true).unwrap();
+            checker.set_reference(&reference).unwrap();
+            checker.run(&shapes, &pins, Checks { drc: false, erc: true, lvs: false, pex: false }).unwrap();
+            let out = checker.outputs();
+            let rows = (0..out.violations.len()).filter(|&i| checker.rule_name(out.violations.get(i).rule) == "floating_gate").count();
+            let blanket = checker.skipped_rules().iter().any(|(r, why)| *r == "floating_gate" && why.contains("no port list"));
+            (rows, blanket)
+        };
+        assert_eq!(floating(Some(vec![])), (1, false), "an internal gate-only net is floating");
+        assert_eq!(floating(Some(vec!["g".into()])), (0, false), "a declared port is driven from outside");
+        assert_eq!(floating(None), (0, true), "no port list: exempt, and reported as such");
+    }
+
     // The one margin arithmetic every consumer shares: nm for a length pair,
     // floored at zero; 1 for a pair of different dimensions.
     #[test]
@@ -449,7 +480,7 @@ mod tests {
             LabeledPin { name: "A".into(), layer: met1, x: 500, y: 500 },
             LabeledPin { name: "B".into(), layer: met1, x: 1500, y: 500 },
         ];
-        let reference = RefInput { devices: vec![], ports: vec!["A".into(), "B".into()] };
+        let reference = RefInput { devices: vec![], ports: vec!["A".into(), "B".into()], external_ports: None };
         let s = signoff_checked(&[rect(&pdk, "met1", 0, 0, 2000, 1000)], &pins, &reference, &Intent::default(), &pdk);
         let rules: Vec<&str> = s.report.hard_violations.iter().map(|v| v.rule.as_str()).collect();
         assert!(rules.iter().any(|r| r.starts_with("lvs/extract: label short")), "{rules:?}");
@@ -583,6 +614,7 @@ mod tests {
                 },
             ],
             ports: vec!["in".into(), "out".into(), "vss".into()],
+            external_ports: None,
         };
         let skipped = checker.set_reference(&input).unwrap();
         assert!(skipped.is_empty(), "{skipped:?}");
@@ -606,6 +638,7 @@ mod tests {
                 params: vec![],
             }],
             ports: vec![],
+            external_ports: None,
         };
         assert_eq!(checker.set_reference(&with_cap).unwrap(), [(RefKind::Npn, None)]);
     }
@@ -628,6 +661,7 @@ mod tests {
                 dev(RefKind::Npn, &["a", "b", "c"]),
             ],
             ports: vec![],
+            external_ports: None,
         };
         let shapes = [rect(&pdk, "li", 0, 0, 500, 500)];
         let s = signoff_checked(&shapes, &[], &reference, &Intent::default(), &pdk);
@@ -656,6 +690,7 @@ mod tests {
                     params: vec![],
                 }],
                 ports: vec![],
+                external_ports: None,
             };
             // No geometry: nothing to extract, so any `lvs/` row is the card.
             let s = signoff_checked(&[], &[], &reference, &Intent::default(), &pdk);
@@ -675,6 +710,7 @@ mod tests {
         let reference = RefInput {
             devices: vec![RefDeviceIn { kind: RefKind::Inductor, model: None, terminals: vec!["a".into(), "b".into()], params: vec![] }],
             ports: vec![],
+            external_ports: None,
         };
         let s = signoff_checked(&[rect(&pdk, "li", 0, 0, 500, 500)], &[], &reference, &Intent::default(), &pdk);
         assert!(matches!(s.coverage.unverified.as_slice(), [(RefKind::Inductor, _, 1)]), "{:?}", s.coverage.unverified);
@@ -707,6 +743,7 @@ mod tests {
                 params: vec![("w".into(), w_m), ("l".into(), 1e-7)],
             }],
             ports: vec![],
+            external_ports: None,
         };
         let lvs_rows = |w_m: f64| -> Vec<String> {
             let mut checker = Checker::new(&pdk, true).unwrap();
@@ -760,6 +797,7 @@ mod tests {
                 params: vec![],
             }],
             ports: vec![],
+            external_ports: None,
         };
         let mut fresh = Checker::new(&pdk, false).unwrap();
         assert_eq!(

@@ -55,6 +55,11 @@ pub struct RefDeviceIn {
 pub struct RefInput {
     pub devices: Vec<RefDeviceIn>,
     pub ports: Vec<String>,
+    /// The nets that leave the block (the `.subckt` port list), apart from
+    /// `ports` (every labelled net, for LVS naming): only these are exempt
+    /// from `floating_gate`/`unconnected_pin`. `None`: no port list, every
+    /// labelled net is exempt and reported so in the coverage (AV-04).
+    pub external_ports: Option<Vec<String>>,
 }
 
 /// Compile `input` into a one-subckt (`"top"`) [`Netlist`], interning into the
