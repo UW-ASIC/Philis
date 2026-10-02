@@ -7,7 +7,8 @@
 //! | `Differential`       | hard   | self-extracted diff-pair net pairs             |
 //! | `CrosstalkExclusion` | budget | self-extracted, spacing raised to victim class |
 //! | `ParasiticBudget`    | budget | every budgeted net, C budget as drawn length   |
-//! | `CouplingBudget`     | budget | every budgeted net, from its class and load    |
+//! | `CouplingBudget`     | budget | every budgeted net, from its class and load;   |
+//! |                      |        | own shield excluded, quiet rails weigh 0       |
 //!
 //! One batch per kind per arm: `gp::Prices` keys a budget's (λ, ρ) by kind.
 
@@ -75,31 +76,44 @@ pub fn routing(
         .collect();
     r.budget.push(Box::new(par));
 
-    // Σ coupling per victim: several minimum-spaced aggressors pass every pairwise
-    // crosstalk rule and still blow this.
-    let coup: Vec<CouplingBudget> = routed()
-        .filter_map(|c| {
-            Some(CouplingBudget { net: c.net, max_coupling_af: c.max_coupling_af?, margin_pct: margin_pct(c.class), stack: process.stack })
-        })
-        .collect();
-    r.budget.push(Box::new(coup));
-
     // Shields only against a real aggressor: with a clock in the design, every
     // routed sensitive net is shielded by the ground net (quiet and low
     // impedance). No clock, no shields — blanket shielding only adds load.
     let has_clock = routed().any(|c| c.class == NetClass::Clock);
     let ground = routed().find(|c| c.class == NetClass::Ground).map(|c| c.net);
-    if let (true, Some(reference)) = (has_clock, ground) {
-        let shields: Vec<Shield> = routed()
-            .filter(|c| c.class == NetClass::Sensitive)
-            .map(|c| Shield {
+    let shield_ref = |c: &NetClassification| ground.filter(|_| has_clock && c.class == NetClass::Sensitive);
+
+    // Σ coupling per victim: several minimum-spaced aggressors pass every pairwise
+    // crosstalk rule and still blow this. The victim's own shield is the remedy,
+    // not an aggressor, and the quiet rails weigh nothing.
+    let weights: &'static [f32] =
+        Box::leak(CouplingBudget::default_weights(classes, hg.net_names.len()).into_boxed_slice());
+    let coup: Vec<CouplingBudget> = routed()
+        .filter_map(|c| {
+            Some(CouplingBudget {
+                net: c.net,
+                max_coupling_af: c.max_coupling_af?,
+                margin_pct: margin_pct(c.class),
+                stack: process.stack,
+                exclude: shield_ref(c),
+                aggressor_weight: Some(weights),
+            })
+        })
+        .collect();
+    r.budget.push(Box::new(coup));
+
+    let shields: Vec<Shield> = routed()
+        .filter_map(|c| {
+            Some(Shield {
                 victim: c.net,
-                reference,
+                reference: shield_ref(c)?,
                 min_coverage_pct: 80,
                 // The adjacent track: one routing space, with a spacing of slack.
                 max_gap_nm: 2 * process.route_space_nm,
             })
-            .collect();
+        })
+        .collect();
+    if has_clock && ground.is_some() {
         r.budget.push(Box::new(shields));
     }
     r
