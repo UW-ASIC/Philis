@@ -42,7 +42,35 @@ impl Rule for Proximity {
     fn usage(self, l: &Layout) -> Option<f32> {
         Some(self.gap(l) / self.max_distance_nm.max(1) as f32)
     }
+    fn touches(self, out: &mut Vec<u32>) {
+        for t in [self.a, self.b] {
+            if let Target::Device(d) = t {
+                out.push(u32::from(d.0));
+            }
+        }
+    }
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rule::RuleBatch;
+    use pnr_core::ids::{DeviceId, GroupId};
+
+    /// Device ids in `(a, b)` order; a `Group` side contributes nothing.
+    #[test]
+    fn touched_yields_device_ids_only() {
+        let (d, g) = (|i| Target::Device(DeviceId(i)), Target::Group(GroupId(0)));
+        let batch = vec![
+            Proximity { a: d(3), b: d(1), max_distance_nm: 5_000 },
+            Proximity { a: g, b: d(7), max_distance_nm: 5_000 },
+            Proximity { a: g, b: g, max_distance_nm: 5_000 },
+        ];
+        let mut ids = Vec::new();
+        batch.touched(&mut ids);
+        assert_eq!(ids, [3, 1, 7]);
     }
 }
