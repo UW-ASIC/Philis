@@ -1041,7 +1041,7 @@ mod tests {
             eprintln!("sky130 PDK unavailable — skipping");
             return;
         };
-        let (mut dirty, mut checked) = (Vec::new(), 0);
+        let (mut dirty, mut checked, mut controls) = (Vec::new(), 0, 0);
         for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
             for nf in [2u16, 4] {
                 for dummies in [false, true] {
@@ -1056,6 +1056,7 @@ mod tests {
                                 dirty.push(format!("{kind:?} nf={nf} dummies={dummies} #{i} rows={} mirror_pins={}: {rules:?}", v.rows, v.mirror_pins));
                             }
                         } else if v.style == Pattern::Cc1d && !v.mirror_pins && v.rows == 1 && !v.double_gate {
+                            controls += 1;
                             assert!(!rules.is_empty(), "{kind:?} nf={nf} #{i}: the shared-strap ABBA joins both gates, yet private gate labels read clean");
                         }
                     }
@@ -1063,6 +1064,7 @@ mod tests {
             }
         }
         assert!(checked > 0, "no split-gate variant enumerated");
+        assert!(controls > 0, "no shared-strap ABBA enumerated to show the labels can see a short");
         assert!(dirty.is_empty(), "{}", dirty.join("\n"));
     }
 
