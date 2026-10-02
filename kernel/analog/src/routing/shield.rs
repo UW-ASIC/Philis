@@ -88,6 +88,7 @@ fn gap_on_side(v: Rect, s: Rect, horiz: bool, below: bool) -> Option<i32> {
 
 impl Rule for Shield {
     type On = Routes;
+    const REPAIR: crate::RepairKind = crate::RepairKind::Shield;
     fn cost(self, r: &Routes) -> f32 {
         self.residual(r)
     }

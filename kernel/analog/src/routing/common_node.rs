@@ -71,6 +71,9 @@ impl RuleBatch<Routes> for CommonNodes {
     fn kind(&self) -> &'static str {
         "CommonNode"
     }
+    fn repair_kind(&self) -> crate::RepairKind {
+        crate::RepairKind::Balance
+    }
     fn count(&self) -> usize {
         self.nodes.len()
     }

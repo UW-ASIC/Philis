@@ -38,6 +38,7 @@ impl ParasiticBudget {
 
 impl Rule for ParasiticBudget {
     type On = Routes;
+    const REPAIR: crate::RepairKind = crate::RepairKind::Budget;
     /// `(spent / budget)²` in the budget's own unit (C when measured, else
     /// length), so a low-C upper layer the budget rewards also costs less.
     fn cost(self, r: &Routes) -> f32 {

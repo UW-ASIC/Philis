@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 
-use analog::Requirements;
+use analog::{RepairKind, Requirements};
 use pnr_core::geom::{LayerId, Rect, Shape};
 use pnr_core::report::Violation;
 use pnr_core::{Macro, NetId, Report, Routes};
@@ -198,6 +198,26 @@ impl DetailedRoute {
         cuts: &[Cut],
         neg: &mut gr::Negotiation,
     ) -> (Routes, Report) {
+        let (routes, report, _) = self.route_counted(global, pins, placed, rings, reqs, layers, cuts, neg);
+        (routes, report)
+    }
+
+    /// [`DetailedRoute::route`], plus the number of repair trials run.
+    ///
+    /// ponytail: the count is the only statistic so far; RTE-07's `RouteStats`
+    /// (with `trials`) replaces the `u32` and becomes `route`'s third element.
+    #[allow(clippy::too_many_arguments)]
+    fn route_counted(
+        &self,
+        global: &Routes,
+        pins: &[(NetId, Rect, LayerId)],
+        placed: &[Macro],
+        rings: &[Macro],
+        reqs: &Requirements<Routes>,
+        layers: &[LayerId],
+        cuts: &[Cut],
+        neg: &mut gr::Negotiation,
+    ) -> (Routes, Report, u32) {
         let cfg = &self.cfg;
 
         // Terminals, deduped by (net, rect) in first-seen order: landing claims nodes
@@ -269,7 +289,7 @@ impl DetailedRoute {
         if compact.is_empty() {
             let routes = Routes { wires: vec![Vec::new(); n_nets], ..Default::default()  };
             let report = score(&routes, reqs, 0.0, 0.0, &[], &[], &[]);
-            return (routes, report);
+            return (routes, report, 0);
         }
         let mut ci_of = vec![usize::MAX; n_nets];
         for (ci, &ni) in compact.iter().enumerate() {
@@ -554,7 +574,7 @@ impl DetailedRoute {
         let broken = {
             let routes = build_routes(&hot, &cold.graph, cfg.wire_width, &compact, n_nets, layers, cuts);
             let mut ids = Vec::new();
-            for b in reqs.budget.iter().filter(|b| b.kind().ends_with("IrDrop") && b.residual(&routes) > 0.0) {
+            for b in reqs.budget.iter().filter(|b| b.repair_kind() == RepairKind::Ir && b.residual(&routes) > 0.0) {
                 b.violating_ids(&routes, &mut ids);
             }
             ids
@@ -602,7 +622,7 @@ impl DetailedRoute {
                 (top + 1 < n_layers && !sites.is_empty()).then_some((top, sites))
             })
             .collect();
-        repair_constraints(&mut hot, &cold, reqs, &extra, &common, &ci_of, &lift, probe);
+        let trials = repair_constraints(&mut hot, &cold, reqs, &extra, &common, &ci_of, &lift, probe);
 
         neg.accumulate(gr::Tier::Detailed, &hot.hist, abs);
         // Shields: requested nets get reference tracks alongside, tied in by
@@ -832,7 +852,7 @@ impl DetailedRoute {
         // Differential trim: a pair whose pin sets differ (a common-centroid cell
         // gives one drain a strap the other lacks) cannot route to equal RC,
         // so the lighter side gets a same-net stub off one of its runs.
-        for b in reqs.hard.iter().filter(|b| b.kind().ends_with("Differential")) {
+        for b in reqs.hard.iter().filter(|b| b.repair_kind() == RepairKind::Mirror) {
             let mut ids = Vec::new();
             b.touched(&mut ids);
             for p in ids.chunks_exact(2) {
@@ -902,8 +922,9 @@ impl DetailedRoute {
 
         (routes.cell, routes.gates) = (cell_abs, gates_abs);
         // The terminals and their currents, for the EM rule. Final routes only:
-        // the repair probes carry none, so EM reads unknown there and the
-        // blind reroute arm never chases it (width is not a search resource).
+        // the repair probes carry none, so EM reads unknown there; repair
+        // spends no trial on `RepairKind::Em` either (width is not a search
+        // resource).
         routes.terms = vec![Vec::new(); n_nets];
         for &(net, r, _) in &all_pins {
             routes.terms[net.0 as usize].push(pnr_core::Terminal { at: r, ua: pin_ua(net, r) });
@@ -913,7 +934,7 @@ impl DetailedRoute {
         for (net, &r) in em_cuts.iter().enumerate().filter(|(_, &r)| r > 0.0) {
             report.budget_violations.push(Violation::from_residual(format!("em cuts net {net}"), r));
         }
-        (routes, report)
+        (routes, report, trials)
     }
 }
 
@@ -1424,19 +1445,25 @@ const JUMP_COST: f32 = VIA_COST / 2.0;
 const LIFT_COST: f32 = 16.0 * VIA_COST;
 
 /// Rip-up/reroute trials driven by violated routing rules, up to `HARD_ROUNDS`
-/// rounds while a trial is accepted. Per rule kind:
+/// rounds while a trial is accepted. Per [`RepairKind`] (never the kind string):
 ///
-/// * `Differential`: copy one side's whole tree onto the other when a
+/// * `Mirror` (`Differential`): copy one side's whole tree onto the other when a
 ///   translation or mirror carries its terminals exactly onto the other's
 ///   (identical route signature by construction); else reroute one side
 ///   along the mirror image of the other;
-/// * `CrosstalkExclusion`: reroute the victim, else the aggressor, priced away
-///   from the other's tracks;
-/// * `CouplingBudget`: reroute each victim priced away from all foreign tracks;
+/// * `Balance` (`CommonNodes`): reroute the skewed shared node along the
+///   members' bisector ([`balance_field`]);
+/// * `KeepAway`, pairs named (`CrosstalkExclusion`): reroute the victim, else
+///   the aggressor, priced away from the other's tracks; victim only
+///   (`CouplingBudget`): reroute each victim priced away from all foreign tracks;
 /// * `Antenna`: reroute the net with one layer priced up (a jumper), per layer,
 ///   then with its gates lifted over its cells' metal ([`lift_field`]), then
 ///   plainly;
-/// * anything else: reroute the nets it names at doubled `p_fac`.
+/// * `Em`, `None`: no trial;
+/// * `Reroute`, `Shield`, `Ir`, `Budget`: reroute the nets it names at doubled
+///   `p_fac`.
+///
+/// Returns the number of trials run (each a rip-up/reroute or a tree copy).
 ///
 /// A trial is kept only if `(hard violations, Σ residual)` improves
 /// lexicographically without raising overuse. `probe` draws the current state.
@@ -1450,7 +1477,7 @@ fn repair_constraints(
     ci_of: &[usize],
     lift: &[Option<(u32, Vec<((i32, i32), Rect)>)>],
     probe: impl Fn(&RouteHot) -> Routes,
-) {
+) -> u32 {
     let key = |hot: &RouteHot| {
         let r = probe(hot);
         let hard: u32 = reqs.hard.iter().map(|b| b.violations(&r)).sum();
@@ -1458,7 +1485,7 @@ fn repair_constraints(
         (hard, residual, overuse(hot))
     };
     let ci = |n: u32| ci_of.get(n as usize).copied().filter(|&c| c != usize::MAX);
-    let mut p_fac = P_FAC;
+    let (mut p_fac, mut n) = (P_FAC, 0);
     for _ in 0..HARD_ROUNDS {
         p_fac *= 2.0;
         let routes = probe(hot);
@@ -1475,11 +1502,12 @@ fn repair_constraints(
             let pairs: Vec<(usize, usize)> =
                 ids.chunks_exact(2).filter_map(|p| Some((ci(p[0])?, ci(p[1])?))).collect();
             let mut trials: Vec<Vec<(usize, Vec<f32>)>> = Vec::new();
-            match batch.kind().rsplit("::").next().unwrap_or("") {
-                "Differential" => {
+            match batch.repair_kind() {
+                RepairKind::Mirror => {
                     for &(a, b) in &pairs {
                         for (from, to) in [(a, b), (b, a)] {
                             if let Some(tree) = copy_tree(hot, cold, from, to) {
+                                n += 1;
                                 accepted |= commit_trial(hot, to, tree, &key);
                             }
                         }
@@ -1490,7 +1518,7 @@ fn repair_constraints(
                 // Reroute a skewed shared source along the members' bisector:
                 // nodes cost by how unequal their distances to the two sides'
                 // pins are, so the trunk splits into mirrored branches.
-                "CommonNode" => {
+                RepairKind::Balance => {
                     ids.clear();
                     batch.violating_ids(&routes, &mut ids);
                     for n in common.iter().filter(|n| ids.contains(&u32::from(n.net.0))) {
@@ -1499,16 +1527,21 @@ fn repair_constraints(
                         }
                     }
                 }
-                "CrosstalkExclusion" => {
-                    for &(a, b) in &pairs {
+                // A rule naming its pairs (`CrosstalkExclusion`): reroute the
+                // victim, else the aggressor, away from the other. A victim-only
+                // rule (`CouplingBudget`): away from all foreign tracks.
+                RepairKind::KeepAway => {
+                    let mut named = Vec::new();
+                    batch.keepaway_pairs(&mut named);
+                    if named.is_empty() {
+                        for v in ids.iter().filter_map(|&n| ci(n)) {
+                            let others: Vec<usize> = (0..hot.trees.len()).filter(|&o| o != v).collect();
+                            trials.push(vec![(v, keep_away(hot, &cold.graph, &others))]);
+                        }
+                    }
+                    for (a, b) in named.into_iter().filter_map(|(a, b)| Some((ci(a)?, ci(b)?))) {
                         trials.push(vec![(a, keep_away(hot, &cold.graph, &[b]))]);
                         trials.push(vec![(b, keep_away(hot, &cold.graph, &[a]))]);
-                    }
-                }
-                "CouplingBudget" => {
-                    for v in ids.iter().filter_map(|&n| ci(n)) {
-                        let others: Vec<usize> = (0..hot.trees.len()).filter(|&o| o != v).collect();
-                        trials.push(vec![(v, keep_away(hot, &cold.graph, &others))]);
                     }
                 }
                 // Jumpers first (Hastings pp. 228–229): price one layer so the
@@ -1517,7 +1550,7 @@ fn repair_constraints(
                 // the plain reroute. What routing cannot fix gets a diode
                 // (`library`'s `elaborate::antenna_diodes`) where the deck
                 // extracts one.
-                "Antenna" => {
+                RepairKind::Antenna => {
                     ids.clear();
                     batch.violating_ids(&routes, &mut ids);
                     for n in ids.iter().filter_map(|&n| ci(n)) {
@@ -1530,7 +1563,10 @@ fn repair_constraints(
                         trials.push(vec![(n, Vec::new())]);
                     }
                 }
-                _ => {
+                // A reroute cannot change width (AT-03, until RTE-12/14): EM
+                // spends no trial (AT-24, REL-03 step 7).
+                RepairKind::Em | RepairKind::None => {}
+                RepairKind::Reroute | RepairKind::Shield | RepairKind::Ir | RepairKind::Budget => {
                     ids.clear();
                     batch.violating_ids(&routes, &mut ids);
                     ids.sort_unstable();
@@ -1539,13 +1575,15 @@ fn repair_constraints(
                 }
             }
             for t in trials {
+                n += u32::from(!t.is_empty());
                 accepted |= trial(hot, cold, t, p_fac, &key);
             }
         }
         if !accepted {
-            return;
+            break;
         }
     }
+    n
 }
 
 /// Rip up every net in `reroutes`, reroute each with its penalty field (corridor
@@ -2526,12 +2564,13 @@ mod tests {
     fn antenna_repair_jumps_to_a_higher_metal() {
         use analog::routing::stack::{Layer, Stack};
         use analog::Rule;
-        // Named `Antenna` so repair takes the antenna arm; checks the stack's
-        // per-stage ratio (m0's limit only).
+        // Declares `RepairKind::Antenna` so repair takes the antenna arm;
+        // checks the stack's per-stage ratio (m0's limit only).
         #[derive(Clone, Copy)]
         struct Antenna(&'static Stack);
         impl Rule for Antenna {
             type On = Routes;
+            const REPAIR: RepairKind = RepairKind::Antenna;
             fn cost(self, r: &Routes) -> f32 {
                 self.residual(r)
             }
@@ -2564,6 +2603,46 @@ mod tests {
         assert!(Antenna(stack).satisfied(&fixed), "residual {}", Antenna(stack).residual(&fixed));
         assert!(fixed.wires[0].iter().any(|s| s.layer == LayerId(3)), "the run jumped to the upper metal");
         assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
+    }
+
+    /// A violated EM rule names its net, but no reroute changes width: repair
+    /// runs no trial for it. The control (the same rule declaring `Reroute`)
+    /// shows the count is live. The rule is a stand-in that always fails:
+    /// the real `Electromigration` reads unknown on repair probes (no
+    /// terminals), so it would never reach the dispatch this test checks.
+    #[test]
+    fn an_em_violation_spends_no_repair_trial() {
+        use analog::Rule;
+        #[derive(Clone, Copy)]
+        struct Stuck<const EM: bool>;
+        impl<const EM: bool> Rule for Stuck<EM> {
+            type On = Routes;
+            const REPAIR: RepairKind = if EM { RepairKind::Em } else { RepairKind::Reroute };
+            fn cost(self, _: &Routes) -> f32 {
+                1.0
+            }
+            fn satisfied(self, _: &Routes) -> bool {
+                false
+            }
+            fn touches(self, out: &mut Vec<u32>) {
+                out.push(0);
+            }
+        }
+        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
+        let pins = [pin(0, 1_000, 1_000), pin(0, 30_000, 1_000)];
+        let trials = |reqs: &Requirements<Routes>| {
+            let dr = DetailedRoute { cfg: test_cfg() };
+            let (routes, report, n) = dr.route_counted(&global, &pins, &[], &[], reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+            assert!(!routes.wires[0].is_empty(), "the net routed");
+            assert_eq!(rules(&report).len(), 1, "the stuck rule stays violated: {:?}", rules(&report));
+            n
+        };
+        let mut em = Requirements::<Routes>::default();
+        em.hard.push(Box::new(vec![Stuck::<true>]));
+        assert_eq!(trials(&em), 0);
+        let mut reroute = Requirements::<Routes>::default();
+        reroute.hard.push(Box::new(vec![Stuck::<false>]));
+        assert!(trials(&reroute) > 0, "a Reroute rule on the same net does spend trials");
     }
 
     /// Series R is priced only for a net over its IR-drop budget: a heavy

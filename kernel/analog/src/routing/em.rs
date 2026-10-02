@@ -184,6 +184,7 @@ impl Electromigration {
 
 impl Rule for Electromigration {
     type On = Routes;
+    const REPAIR: crate::RepairKind = crate::RepairKind::Em;
     fn cost(self, r: &Routes) -> f32 {
         self.residual(r)
     }

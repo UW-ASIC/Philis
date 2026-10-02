@@ -98,6 +98,7 @@ impl CouplingBudget {
 
 impl Rule for CouplingBudget {
     type On = Routes;
+    const REPAIR: crate::RepairKind = crate::RepairKind::KeepAway;
     /// Same as `residual`: the normalised overshoot.
     fn cost(self, r: &Routes) -> f32 {
         self.residual(r)
