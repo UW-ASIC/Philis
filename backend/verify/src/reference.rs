@@ -8,7 +8,7 @@
 //!   layout side emit its measured value, so a name on one side only is an
 //!   `lvs.undeclared_param`. A device with params never parallel-merges, so the
 //!   caller must expand m/nf to one card per drawn finger.
-//! - **Kinds the deck cannot recognise are skipped** (returned as a count):
+//! - **Kinds the deck cannot recognise are skipped** (returned by index):
 //!   the layout extracts none, so keeping them would mismatch unconditionally.
 //!   Capacitors are the case today — a MOM comb draws each electrode as many
 //!   polygons and `DeviceRecognition` binds one polygon per terminal.
@@ -53,8 +53,8 @@ pub struct RefInput {
 
 /// Compile `input` into a one-subckt (`"top"`) [`Netlist`], interning into the
 /// **checker's** `strings` so reference and layout names share one id space.
-/// Returns the netlist and the count of devices skipped for want of a
-/// recogniser.
+/// Returns the netlist and the indices into `input.devices` of the devices
+/// skipped for want of a recogniser.
 ///
 /// # Errors
 /// A device whose terminals are fewer than its recogniser's arity.
@@ -62,7 +62,7 @@ pub fn build(
     input: &RefInput,
     deck: &Deck,
     strings: &mut StrTable,
-) -> Result<(Netlist, usize), String> {
+) -> Result<(Netlist, Vec<usize>), String> {
     let mut n = Netlist::default();
     n.subckt_name.push(strings.intern("top"));
 
@@ -84,7 +84,7 @@ pub fn build(
     }
     n.subckt_port_start.push(n.port_net.len() as u32);
 
-    let mut skipped = 0usize;
+    let mut skipped = Vec::new();
     n.subckt_device_start.push(0);
     n.device_terminal_start.push(0);
     n.device_param_start.push(0);
@@ -92,7 +92,7 @@ pub fn build(
         let Some(row) = recogniser_for(dev, deck, strings) else {
             // No marker layer in this deck extracts this device from the
             // layout, so the reference must not expect it either.
-            skipped += 1;
+            skipped.push(index);
             continue;
         };
         let arity = (deck.devices.terminal_start[row + 1] - deck.devices.terminal_start[row])

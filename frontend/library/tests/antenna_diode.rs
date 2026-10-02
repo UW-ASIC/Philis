@@ -50,7 +50,7 @@ fn an_antenna_the_jumper_cannot_fix_gets_a_diode_and_lvs_matches() {
     assert_eq!(on(":N", "nsdm"), (net("g"), true), "cathode: n+ on the gate net");
     assert_eq!(on(":P", "psdm"), (net("VSS"), true), "anode: p+ tap on ground");
 
-    let report = library::signoff(&sol, &pdk);
+    let report = library::signoff(&sol, &pdk).report;
     let lvs: Vec<&String> = report.hard_violations.iter().map(|v| &v.rule).filter(|r| r.starts_with("lvs")).collect();
     assert!(lvs.is_empty(), "the inserted diode matches: {lvs:?}");
 }

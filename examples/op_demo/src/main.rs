@@ -53,7 +53,7 @@ run
     let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).expect("flow");
     println!("\n{}", sol.metadata);
 
-    let rep = library::signoff(&sol, &pdk);
+    let rep = library::signoff(&sol, &pdk).report;
     let mut by_rule: BTreeMap<&str, usize> = BTreeMap::new();
     for v in &rep.hard_violations {
         *by_rule

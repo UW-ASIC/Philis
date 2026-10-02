@@ -91,6 +91,10 @@ pub struct MetadataReport {
     /// epoch where that batch was met (its rows above say). Empty from
     /// [`build`]; the flow fills it at the end of the run.
     pub binding: Vec<String>,
+    /// What the winning epoch's signoff did not check (LVS-unverified
+    /// devices block [`Self::certified`]; skipped rules are listed). Empty
+    /// from [`build`]; the flow fills it from the winner.
+    pub coverage: verify::Coverage,
 }
 
 impl MetadataReport {
@@ -121,11 +125,13 @@ impl MetadataReport {
             .sum()
     }
 
-    /// Every family met with all its inputs present, and none left
-    /// uninstantiated. A feasible search result is not a certificate without it.
+    /// Every family met with all its inputs present, none left
+    /// uninstantiated, and every schematic device compared by LVS. A feasible
+    /// search result is not a certificate without it.
     #[must_use]
     pub fn certified(&self) -> bool {
         self.missing.is_empty()
+            && self.coverage.unverified.is_empty()
             && self.placement.iter().chain(&self.routing).all(|b| b.met() && b.unknown == 0)
             && self.performance.iter().all(|p| p.4 <= 0.0)
     }
@@ -222,6 +228,7 @@ pub fn build(
         performance: Vec::new(),
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
         binding: Vec::new(),
+        coverage: verify::Coverage::default(),
     }
 }
 
@@ -308,6 +315,9 @@ impl std::fmt::Display for MetadataReport {
         }
         if !self.binding.is_empty() {
             writeln!(f, "\n  price at cap on the last epoch (search stopped binding): {}", self.binding.join(", "))?;
+        }
+        if !self.coverage.unverified.is_empty() || !self.coverage.skipped_rules.is_empty() {
+            write!(f, "\n{}", self.coverage)?;
         }
         writeln!(f, "\n  certificate: {}", if self.certified() { "all families met, all inputs present" } else { "NOT CERTIFIED" })?;
         Ok(())
@@ -487,6 +497,10 @@ mod tests {
 
         let clean = MetadataReport { missing: vec![("Antenna", "deck antenna ratio")], ..MetadataReport::default() };
         assert!(!clean.certified(), "an uninstantiated family is not a pass");
+        let coverage = verify::Coverage { unverified: vec![(verify::RefKind::Npn, None, 2)], ..Default::default() };
+        let unverified = MetadataReport { coverage, ..MetadataReport::default() };
+        assert!(!unverified.certified(), "a device LVS did not compare is not a pass");
+        assert!(unverified.to_string().contains("LVS unverified: 2 × Npn"), "{unverified}");
         assert!(MetadataReport::default().certified());
     }
 

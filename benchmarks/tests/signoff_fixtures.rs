@@ -73,7 +73,8 @@ fn check(name: &str, max_drc: usize, max_erc: usize, lvs_must_match: bool) {
     let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg)
         .unwrap_or_else(|e| panic!("{name}: flow failed: {e:?}"));
 
-    let report = library::signoff(&sol, &pdk);
+    let signoff = library::signoff(&sol, &pdk);
+    let report = &signoff.report;
     let shapes = sol.geometry();
     let raw = verify::drc(&shapes, &[], &pdk);
 
@@ -87,9 +88,10 @@ fn check(name: &str, max_drc: usize, max_erc: usize, lvs_must_match: bool) {
     let erc: Vec<&str> = report
         .hard_violations
         .iter()
-        // A deck warning (`warn/erc/…`) is out of the epoch key's |V| but not
-        // out of this ceiling: ERC 0 means no row at all.
-        .filter(|v| v.rule.trim_start_matches("warn/").starts_with("erc/"))
+        // A deck warning is out of the epoch key's |V| but not out of this
+        // ceiling: ERC 0 means no row at all.
+        .chain(&signoff.warnings)
+        .filter(|v| v.rule.starts_with("erc/"))
         .map(|v| v.rule.as_str())
         .collect();
     let lvs = report.hard_violations.iter().find(|v| v.rule.starts_with("lvs/"));
@@ -184,7 +186,7 @@ fn an_undrawable_device_is_one_finding() {
         let spice = fixtures::preprocess_spice(&raw, &deck).expect("retarget");
         let cfg = library::Config { feedback_iters: 1, ..Default::default() };
         let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("{name}: {e:?}"));
-        let report = library::signoff(&sol, &pdk);
+        let report = library::signoff(&sol, &pdk).report;
         let undrawable: Vec<&str> = report.hard_violations.iter().map(|v| v.rule.as_str()).filter(|r| r.starts_with("cell/undrawable")).collect();
         assert_eq!(undrawable.len(), 1, "{name}: {undrawable:?}");
     }
@@ -206,7 +208,7 @@ L1 vmid vout 1n
     let cfg = library::Config { feedback_iters: 1, ..Default::default() };
     let sol = library::run(spice, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("{e:?}"));
     assert!(sol.netlist.devices.iter().any(|d| d.kind == pnr_core::DeviceKind::Inductor), "L1 parsed away");
-    let report = library::signoff(&sol, &pdk);
+    let report = library::signoff(&sol, &pdk).report;
     let undrawable: Vec<&str> = report.hard_violations.iter().map(|v| v.rule.as_str()).filter(|r| r.starts_with("cell/undrawable")).collect();
     assert_eq!(undrawable.len(), 1, "{undrawable:?}");
     assert!(undrawable[0].contains("L1"), "{undrawable:?}");
