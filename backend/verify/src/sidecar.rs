@@ -83,8 +83,6 @@ pub const KEYS: &[Key] = &[
     k("guard_licon_pitch", Nm, true, false, "kernel/cells/src/mosfet.rs, post_cell.rs"),
     k("inapplicable_rules", List, false, false, "backend/verify/src/pdk.rs"),
     k("inapplicable_rules_note", Text, false, false, "documentation"),
-    k("ind_min_diameter", Nm, true, false, "kernel/cells/src/inductor.rs"),
-    k("ind_min_trace", Nm, true, false, "kernel/cells/src/inductor.rs"),
     k("layers", Layers, true, false, "backend/verify/src/pdk.rs parse_roles"),
     k("li_encloses_licon", Nm, false, false, "kernel/cells/src/mosfet.rs, bjt.rs, diode.rs, resistor.rs"),
     k("li_encloses_licon_one_side", Nm, false, false, "kernel/cells/src/mosfet.rs"),

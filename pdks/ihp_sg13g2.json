@@ -58,8 +58,6 @@
     "bjt_min_emitter_side": 900,
     "bjt_stripe_gap": 210,
     "diode_gap": 210,
-    "ind_min_trace": 2000,
-    "ind_min_diameter": 20000,
     "min_guard_ring_width": 150,
     "guard_licon_pitch": 340,
     "p_epi_thickness": 3000,

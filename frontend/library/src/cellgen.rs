@@ -842,7 +842,8 @@ fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &dyn pnr_core::P
 ///
 /// A sized MOS goes in as `max(nf, m)` cards of per-finger `w`/`l` (SI metres):
 /// the extractor measures one device per channel and a parametrised device never
-/// parallel-merges. Inductors have no recogniser and are skipped, and so are
+/// parallel-merges. Inductors have no recogniser (and no drawing: signoff
+/// reports each as `cell/undrawable`) and are skipped, and so are
 /// capacitors: every capacitor generator here draws a MOM (metal plates or a
 /// comb, no marker), which no deck's recogniser extracts (sky130 has none,
 /// ihp's is a MIM, gf180's a MOS cap), so a card would only unpair; their
