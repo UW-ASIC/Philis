@@ -164,6 +164,8 @@ A hand layout of an analog block is DRC/LVS clean, routes matched nets as exact 
 
 ### RTE-02 Shield coverage by interval intersection; the victim's shield is not an aggressor; crosstalk `known`
 
+Status: done in M0 (`de602df`).
+
 - Priority: P0. Effort: S. Depends on: none.
 - Why: AR-06 (bug), AR-07, AR-44 (CrosstalkExclusion reads an unrouted pair as satisfied), AR-35 (crosstalk.rs has no test), NOTES-45; BAL2-10 ("not to worsen the effects of crosstalk, the shielding wire must be connected to a dc potential or it must be grounded", balasa_graeb_survey.txt:8971–8979; that the shield then does not count as an aggressor is this plan's inference).
 - Current:
@@ -200,6 +202,10 @@ A hand layout of an analog block is DRC/LVS clean, routes matched nets as exact 
 - Risks / notes: `aggressor_weight` is `&'static` because `Rule` values are `Copy` (rule.rs:9–130), the same pattern as `Stack`.
 
 ### RTE-03 Foreign metal is a hard obstacle; shorts, opens and congestion are measured as violations
+
+Status: not merged through review; the code is on m0 as `ba49ae2` (ported outside the item review) with acceptance 3 not met. Owner decision open (keep with the residual congestion handed to RTE-08, or revert); see the Status note under Acceptance and 00-MASTER-PLAN Status.
+
+Field report: FR-6, see RTE-08 (the residual shorts and congestion are this item's measure and RTE-08's convergence).
 
 - Priority: P0. Effort: M. Depends on: none (RTE-13's `ShapeIndex` speeds it up later).
 - Why: AT-05, AT-28, AT-29, AR-31; audit-05 §2.2 items 2–4.
@@ -241,7 +247,7 @@ A hand layout of an analog block is DRC/LVS clean, routes matched nets as exact 
 
 ### RTE-05 Differential: terminal-resolved RC, via count, coupling asymmetry, `known`; no stub trim
 
-- Priority: P0. Effort: M. Depends on: REL-03 (`Routes::terms`), RTE-02 (weights), RTE-09 (`RepairKind::Mirror`); EXT-09 moves the rule to the budget arm and deletes `Differential::extract`.
+- Priority: P0. Effort: M. Depends on: REL-03 (`Routes::terms`), RTE-02 (weights), RTE-09 (`RepairKind::Mirror`); EXT-09 moves the rule to the budget arm and deletes `Differential::extract`. REL-03, RTE-02 and RTE-09 landed in M0: `Routes::terminals(net)` (kernel/core/src/routes.rs:101), `CouplingBudget::aggressor_weight` (coupling.rs:47), `gr::symmetric_nets` already reads both arms (gr:277), while dr's trim loop still filters `reqs.hard` only (dr:876-880 on m0; `trim_pair` at dr:1016).
 - Why: AR-12, AR-39, AR-44, AA-14, AT-20; BAL2-22 (per-aggressor balance, balasa_graeb_survey.txt:8905–8909, 9745–9753); NOTES-43; SURV-14 (exact per-layer matching, perf_driven_survey L86–89); SUB-44 (by analogy only: a 5 % mismatch of a receiver pair's *substrate* capacitances costs ≈ 40 dB of differential isolation at 1 GHz and ≈ 27 dB at 100 MHz, values read from Charbon Fig 8.10b per SUB-44; the source concerns substrate coupling, not routing coupling).
 - Current: see §1.5; `trim_pair` adds a stub off the lighter net that equalises the summed metric while terminal R stays unequal (dr:944–990, "it is not on a terminal path").
 - Change:
@@ -265,6 +271,8 @@ A hand layout of an analog block is DRC/LVS clean, routes matched nets as exact 
 - Risks / notes: moving to the budget arm lowers its lexicographic weight; exact matching becomes a construction property of RTE-15 instead of a hard toleranced check (AR-12).
 
 ### RTE-06 Antenna repair on the drawn geometry
+
+Status: not merged (rejected; commits on branch `m0-rte06-rejected`); carried to M1 with M0 exit criterion 2 (dac4 `erc/ar.met2.1:gate`). See the Status note at the end of this item and 00-MASTER-PLAN Status.
 
 - Priority: P0. Effort: S. Depends on: REL-02 (the model: `GatePin { at, dev, nm2 }` per gate, gate area per piece, deck-only diode credit, `Antenna::known`); RTE-09 (`RepairKind::Antenna`). Gate-area-per-piece and stage-aware diode credit, formerly steps 1–3 of this item, are REL-02 steps 1–3 (C3).
 - Why: AV-15 (dac4 `erc/ar.met2.1:gate` red at `feedback_iters = 1`, clean at 5, signoff_fixtures.rs:139); AT-23 (repair judged on `probe` without access jogs, dr:555); REL-02 risk note ("If dac4 still fails after this item, the remaining work is RTE's repair"); H05-26 (the node ratio counts "the gate oxide area beneath the poly regions belonging to the node", hastings.txt:13148–13157).
@@ -312,12 +320,14 @@ A hand layout of an analog block is DRC/LVS clean, routes matched nets as exact 
      The library keeps the last epoch's `RouteStats` in `Epoch` next to its `Report`; FLOW-09 owns `RunStats` and copies what the bench prints.
   3. dr: delete corridor construction (dr:432–451), `ggrid` and `set_regions` (dr:261–263), `GCELLS_PER_SIDE` and its false comment (dr:30–31); fix the duplicated doc line (dr:1028).
   4. `cellgen::price` (cellgen.rs:354–375) and its caller `seed_assignment` (cellgen.rs:327–346, which builds `gr::GlobalCfg` at :332 and passes it at :340): `gr::group_hpwl(std::slice::from_ref(m))`; tuple `(usize /*DRC+ERC*/, i64 /*hpwl*/)`; the `cfg` parameter goes (a few-line edit in a CELL/FLOW file, coordinated).
-  5. `lib.rs:614–652` (the gr call at 617–618, `global.debug_check("gr::route")` at 619, and both dr calls, 629–631 and 646) and `elaborate.rs:166–190` (gr call at 176, dr call at 177): drop the gr call; pass the new signature and bind the third tuple element. The five `.route(` calls inside dr's tests take the new signature too. Fix the stale `gr::build_nets` mention in the message at geometry.rs:87.
+  5. `lib.rs:614–652` (the gr call at 617–618, `global.debug_check("gr::route")` at 619, and both dr calls, 629–631 and 646) and `elaborate.rs:166–190` (gr call at 176, dr call at 177): drop the gr call; pass the new signature and bind the third tuple element. On m0 these are `lib.rs:761` (gr) and `:797` (dr), `elaborate.rs:179-180`. `route` still returns `(Routes, Report)` on m0; RTE-09 added the private `route_counted` (dr:224) that returns the repair-trial count as a third element (its doc says this item replaces the `u32` with `RouteStats`): fold it into `route` and the count into `RouteStats::trials`. The five `.route(` calls inside dr's tests take the new signature too. Fix the stale `gr::build_nets` mention in the message at geometry.rs:87.
 - Tests: delete gr's `two_pin_net_routes_coarsely`, gr's `negotiation_persists_across_calls` (gr:1197; it drives `GlobalRoute`, the dr test of the same name at dr:2330 stays), gr's `budget_residual_reaches_theta`, `hard_batch_margin_is_measured_not_counted`, `overflow_theta_is_a_capacity_residual_not_a_count`, `price_group_measures_the_group_not_the_die`, `a_keepaway_rule_parts_two_nets_during_search` (its behaviour moves to RTE-18 in dr). Add dr `negative_coordinate_pins_route` (pins at (−20 000, −5 000) and (5 000, 3 000) nm → routed, V empty).
 - Acceptance: `bench local` 10/10 circuits DRC 0 and LVS MATCH as before; per-circuit ms reported before/after (expected lower: one router run per epoch instead of two).
 - Risks / notes: the deleted items' outside callers are exactly the ones steps 3–5 edit: `price_group` (cellgen.rs:360), `GlobalCfg` (cellgen.rs:332, 357), `GlobalRoute` (lib.rs:618, elaborate.rs:176), `GcellGrid` (dr:21, 261); `gr::Tier` is also used by dr (dr:506, 584) and goes with RTE-08's `Negotiation` change. PLC-15 names a `gr::OverflowMap` from the coarse router; after this item PLC reads `RouteStats::congestion` (RTE-25) instead (plan-04 §0.2 already lists it).
 
 ### RTE-08 Negotiation keys and PathFinder convergence
+
+Field report: FR-6 (a short between two nets of a 7-device PTAT core, "device count mismatch"). FR-6's netlist is not in the report; ptat_bias signs off CLEAN on m0. The same failure class reproduces on m0 on a FET-only circuit: the CLI run of pwm_driver (34 FETs, default `Config`, two runs, identical) ends with `lvs/extract: label short: labels ["vss", "ba_m"]`, and 4 of that run's 25 non-empty dr reports carry `drawn short nets a/b` (2/13 twice, 3/15, 2/3), with `open net` and `pin access sacrificed` rows beside them (instrumented copy, one `eprintln!` at the end of `dr::score`). Whether the winning epoch's own dr report flags the short was not measured. Added acceptance: a `benchmarks/fixtures/pwm_driver.spice` (field-report netlist) run through the CLI has no `lvs/extract: label short` row; if the winner's dr report reads 0 hard rows while signoff finds the short, the gap goes to RTE-03's short detection.
 
 - Priority: P0. Effort: S. Depends on: RTE-07 (the Global tier's only writer is gone). The history **lifecycle** — reset before every cold epoch, kept across warm epochs, one accumulation per epoch when antenna diodes force a second dr run (`let snapshot = neg.clone()` … `*neg = snapshot`) — is FLOW-08 step 4 (C4). The key change to lattice indices waits for RTE-10.
 - Why: AT-10 (keys), AT-11 (constant present-congestion factor; "Stop on stationary overflow" is the audit's fix direction, recorded there as external McMurchie–Ebeling knowledge, not in ref/), AT-34/AF-06 (lifecycle, FLOW's).
@@ -337,10 +347,12 @@ A hand layout of an analog block is DRC/LVS clean, routes matched nets as exact 
   - `pathfinder_converges_on_a_solvable_crossing`: `TrackGrid::with_layers` 12×12×2 (capacity 1, layer 0 horizontal); three two-pin nets with pins on layer 0 at (0, 4)–(11, 6), (0, 5)–(11, 5), (0, 6)–(11, 4) (their shortest routes share row 5 nodes) → overflow 0.0 and `iterations < 150`.
   - `an_unsolvable_instance_stops_on_stall`: 2 two-pin nets whose only paths share one node (1 layer, a 1-node-wide corridor built with `reserved`) → overflow 1.0 and `iterations ≤ STALL_ITERS + 1`.
   - `history_keys_ignore_the_frame`: `accumulate` with frame origin (−1 000, 0) and `seed` with origin (−1 500, 0) for the same absolute node → the seeded value equals the accumulated one.
-- Acceptance: `negotiation_persists_across_calls` (dr:2330) still passes with the tier removed; `bench local` DRC/LVS unchanged; `RouteStats::pf_iters` p50 on `ota` ≤ the M0 baseline.
+- Acceptance: `negotiation_persists_across_calls` (dr:2330) still passes with the tier removed; `bench local` DRC/LVS unchanged; `RouteStats::pf_iters` p50 on `ota` ≤ the M0 baseline. If `ba49ae2` (RTE-03) stays on m0, this item also owns RTE-03's unmet acceptance 3: 0 of dac4's dr reports carry `unresolved congestion` V (7 of 90 on m0, margins 3–16, each with `drawn short nets a/b`; m0-report §1), counted the way m0-report §1 did (one `eprintln!` of the hard rows at the end of `dr::score`, bench seed 1, FEEDBACK_ITERS 5, not committed).
 - Risks / notes: a growing factor forces convergence at the price of detours on congested spots; the cap bounds it.
 
 ### RTE-09 Typed repair dispatch
+
+Status: done in M0 (`e4915ea`). The acceptance grep must be word-bounded: `grep -rnE '\bkind\(\)' backend/gr backend/dr frontend/library/src/elaborate.rs` is empty on m0, while the plain `'kind()'` pattern matches every `repair_kind()` call. dr's repair trial count comes back through the private `route_counted` (backend/dr/src/lib.rs:224), which RTE-07 folds into `RouteStats::trials`.
 
 - Priority: P0. Effort: S. Depends on: none (lands before or after EXT-09; with EXT-09 the `Mirror` filter reads both arms).
 - Why: AT-31; AR-18 (kind strings). The stale `docs/CRATES.md` router text (AT-36: CRATES.md:58, 63, 97) is FLOW-15 step 5 (C5).
@@ -727,6 +739,8 @@ A hand layout of an analog block is DRC/LVS clean, routes matched nets as exact 
 
 ### RTE-26 DRC-clean detailed routing on every shipped deck
 
+Field report: FR-4 (routing half). On m0 the CLI run of pwm_driver (34 FETs) ends with `drc/m1.2.notch:met1` 25, `drc/m2.2.notch:met2` 115, `drc/m1.7:met1` 169, `drc/m2.7:met2` 342 (`m1.7`/`m2.7` = `hole_area` ≥ 0.14 µm², sky130.deck:378–379), all on routed layers; add notch and enclosed-hole cases to the sky130 deck cases.
+
 - Priority: P1. Effort: M. Depends on: RTE-03, RTE-10, RTE-11, RTE-12 (cases a, b, c, e: milestone M1, sky130 first); RTE-15 (case d) and the other three decks: milestone M3.
 - Why: AT-27; AV-15; audit-05 §2.2 (all dr unit tests use synthetic layers and a 430 nm pitch, dr:2141–2147).
 - Current: routing-layer DRC is gated only on 7 small sky130 fixtures (signoff_fixtures.rs:15–41); `ota_cross_pdk` excludes routing layers as "dr debt" (ota_cross_pdk.rs:196–224).
@@ -791,6 +805,8 @@ A hand layout of an analog block is DRC/LVS clean, routes matched nets as exact 
 
 ### RTE-32 Router-side capacitance on the per-layer union; `ParasiticBudget` cost in its own unit; one touch predicate (added in review)
 
+Status: done in M0 (`e5abfc8`); one `Rect::touches` in `pnr_core::geom`.
+
 - Priority: P0. Effort: S. Depends on: none. Lands before RTE-05 (ground-C term), RTE-20 (lead C) and RTE-21 step 3, which all read `Stack::ground_af`.
 - Why: AR-23 ("ground C double-counts overlapping shapes … parasitic cost is length² even when the budget is C", audit-02, parasitic.rs:30–36, 46–49, stack.rs:52–64) and AR-20 (four copies of the rect-touch predicate, stack.rs:106, 185, 374–378, routes.rs:61, plus dr:1731) had no owner in any plan. Signoff extraction computes a polygon's ground C as `area × area_coeff + perimeter × fringe_coeff` over the merged polygon (GPurify crates/extract/src/analytical.rs:55–67, 348–407 at the pinned 8df8c09); the router sums rect by rect and counts fringe on the two long sides only (stack.rs:55–64, "a via pad on a wire counts twice"). plan-07 V11 reports unmerged ground C at 1.13–1.73× the unioned value on the fixtures (audit-06 G.4(b)); PERF-16 fixes what enters GPurify, not the router's own estimate. Benefit: RTE-05's pair C, RTE-20's per-unit lead C and RTE-21's `used` measure what signoff extracts.
 - Change:
@@ -812,7 +828,7 @@ A hand layout of an analog block is DRC/LVS clean, routes matched nets as exact 
 
 | Milestone | Items | Exit criteria |
 |---|---|---|
-| M0 — Honest router (P0) | RTE-32 → 02 → 09 → 03 → 07 → 08; then 05, 06 once REL M1 (REL-01, 02, 03) has landed. RTE-01 and RTE-04 are cut (C1, C2) | `signoff_fixtures` green including dac4 at `feedback_iters = 1` (T11; needs REL-02 + RTE-06); bench 10/10 DRC 0 and LVS MATCH; no `drawn short`/`unresolved congestion` V and no `routing overuse` Θ on any bench circuit (T2); gr's coarse route gone (`GlobalRoute` absent from the workspace); `grep -rn 'kind()' backend/gr backend/dr frontend/library/src/elaborate.rs` empty; EM/IR per shape and per terminal are REL-03/04's measurements and are only reported here (T7, T8 not yet 0) |
+| M0 — Honest router (P0) (master M0 took RTE-32, 02, 09, 03, 06: 32, 02 and 09 merged; 03 is on m0 outside review; 06 was rejected and is carried to master M1) | RTE-32 → 02 → 09 → 03 → 07 → 08; then 05, 06 once REL M1 (REL-01, 02, 03) has landed. RTE-01 and RTE-04 are cut (C1, C2) | `signoff_fixtures` green including dac4 at `feedback_iters = 1` (T11; needs REL-02 + RTE-06); bench 10/10 DRC 0 and LVS MATCH; no `drawn short`/`unresolved congestion` V and no `routing overuse` Θ on any bench circuit (T2); gr's coarse route gone (`GlobalRoute` absent from the workspace); `grep -rn 'kind()' backend/gr backend/dr frontend/library/src/elaborate.rs` empty; EM/IR per shape and per terminal are REL-03/04's measurements and are only reported here (T7, T8 not yet 0) |
 | M1 — Routing substrate | RTE-10 → 11 → 12 → 13, 25, 26 (sky130 cases a, b, c, e) | sky130 routes met1–met4 at p0 = 420 with strides [1, 1, 2, 2] (T3, T4; `sky130_layer_specs_match_the_hand_derivation`, `sky130_routes_met1_to_met4`); fattening code deleted; dr p50 per call on `ota` ≤ ⅓ of the M0 baseline (T13); `dr_deck_drc` sky130 cases 0 findings; `lattice_spec` = `{420, [1, 1, 2, 2], 840}` available to PLC-28 (RTE-25 moved here from M2 in review: PLC-28 needs `LatticeSpec` before RTE-15 can be exact) |
 | M2 — Analog-quality routing | RTE-14, 16, 18 → 15 (after PLC-28), 17, 19, 20, 24 | EM V = 0 and IR Θ = 0 on circuits with an operating point (T7, T8); every contract-compliant matched pair exact (T5); 0 µm² metal over MOD/EXC gates (T6); star/Kelvin/ΔR checks pass (T9); every `CrosstalkExclusion` satisfied and the coupling estimate within 20 % of PEX on `ota` (T10); dac4 `PlateRatio` residual 0 |
 | M3 — Performance-driven routing | RTE-21 (step 3 may land any time after RTE-32), 22, 23, 26 (all decks, case d) | PERF OTA testbenches: all `PerformanceBudget` rows `used ≤ limit`, FOM ≥ max(uniform 1×, 2×) (T12); dr's V/Θ equal the metadata measurement on final routes (RTE-23); T1: 0 routing-layer DRC on 4 decks × 5 cases and `ota_cross_pdk` gated on all layers |

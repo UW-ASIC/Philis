@@ -1,5 +1,83 @@
 # 00 — Master audit and implementation roadmap (read this first)
 
+## Status (after M0)
+
+M0 ("Honest measurement", §5) ran as `eba9954..e2577a4` on branch `m0` (92 commits); the plan edits in this section
+and in the item files are the commit after `e2577a4`. The measured close-out is `m0-report.md` (verify pass 4, on
+`44b37f1`, the review-panel fixes). **12 of the 13 M0 exit criteria are met; criterion 2 (`signoff_fixtures` green
+including dac4 at `feedback_iters = 1`) is not.** The release suite reads 439 passed, 2 failed, 7 ignored: dac4
+`erc/ar.met2.1:gate` (criterion 2) and `hier_elaborate` (8 unpaired devices, 17 unpaired nets), which FLOW-14 made
+assert and no M0 item owned.
+
+**Merged through item review (24).** Each item file carries a `Status: done in M0 (<commit>)` line under its heading,
+with the deviations that later items must know.
+
+| Item | Merge commit | Item | Merge commit | Item | Merge commit |
+|---|---|---|---|---|---|
+| FLOW-14 | `89a1740` | CELL-02 | `85e05bb` | PERF-02 | `6b28fca` |
+| GAP-20 | `6da8068` | CELL-04 | `9dba018` | PERF-03 (steps 1–2) | `2f37409` |
+| FLOW-04 | `5ebffd8` | EXT-01 | `574cd5e` | PERF-04 | `0e53eb9` |
+| FLOW-05 | `bb556b4` | PLC-01 | `339d1d6` | PERF-06 | `0dabdb5` |
+| FLOW-01 | `f90c5e7` | RTE-32 | `e5abfc8` | PERF-07 | `becffeb` |
+| FLOW-02 | `65f5f8c` | RTE-02 | `de602df` | REL-01 | `e7db737` |
+| FLOW-03 | `de04d31` | RTE-09 | `e4915ea` | REL-02 | `dac139f` |
+| CELL-01 | `409e74b` | PERF-01 | `5478230` | REL-03 | `76e7232` |
+
+The review panel's 26 findings were fixed in `44b37f1` except the two owner decisions below and the per-net half of
+finding 20 (m0-report §7).
+
+**Not merged, and where each goes:**
+
+- **RTE-06** (antenna repair on drawn geometry): rejected; its own acceptance was red with the same dac4 row. Commits
+  kept on branch `m0-rte06-rejected`. Carried into M1 (step 0) together with M0 exit criterion 2. Two facts change
+  the order: `routing_stack` gives dr only met1/met2 on sky130, so a cap plate on met2 already over the limit cannot be
+  repaired inside dr; and the 2026-10-01 handoff note on `main` records dac4's ERC fixed by GPurify `bde681c` on branch
+  `fix-export` (not measured on m0). So FLOW-17 (GPurify bump) lands first and dac4 is re-measured before RTE-06 is
+  re-reviewed.
+- **RTE-03** (foreign metal hard; shorts, opens, congestion as V): not merged through review, but its code is on m0
+  as `ba49ae2` (ported outside the review; originals on `m0-rte03-original`). Acceptance 3 is not met: 7 of dac4's 90
+  dr reports carry `unresolved congestion` with `drawn short nets` V (none a winner; 0 of 450 on the other 9
+  circuits). **Owner decision open:** keep `ba49ae2` with acceptance 3 recorded as not met, or revert it. Until it is
+  taken, RTE-08 (M1) carries acceptance 3; criterion 11 holds only while `ba49ae2` stays.
+- **PERF-03 steps 3–4** (library port list, fixture headers): wait for FLOW-07's `Netlist.ports`; already M1 step 1.
+
+**Follow-ups found in M0, now owned (all M1):**
+
+- `hier_elaborate` red → FLOW-13 step 0.
+- OTA `CommonCentroid` rows 3/3 → 0/3 since FLOW-01 drew the simulated size (`cellgen::folds` ignores
+  CommonCentroid) → FLOW-16 step 4; FLOW-16 moves from M2 to M1.
+- REL T2 is checked per fixture, not per net (signoff ERC rows carry no net) → REL-02, after the GPurify request in
+  §6.4 Q7.
+- RTE-09's acceptance grep `'kind()'` also matches `repair_kind()`; the word-bounded form is empty on m0 and replaces
+  it in the M1 RTE exit criterion.
+
+**Line numbers.** Plan items quote file:line as of `dad330c`. M0 changed 96 code, CI and PDK files, most in
+`backend/dr/src/lib.rs`, `frontend/library/src/lib.rs`, `backend/verify/src/{lib,pdk}.rs` and `kernel/analog/src/
+routing/em.rs`, so later citations into those files are off by tens to hundreds of lines. The M1 items whose text M0
+changed carry m0 anchors (EXT-04/06/10/11, MAT-06, CELL-06/08, PLC-02/03/04/06, RTE-05/07/08, PERF-03/08/09, FLOW-07,
+FLOW-16, GAP-04, GAP-10); every other citation is resolved by the symbol it names.
+
+**Field report 01** (`field-report-01-tinytapeout.md`, TinyTapeout flows on ~10 sky130 blocks). The reporter ran the
+EDA-Packaged build, which is Philis `e8bc59e` with GPurify `e3c8eb2` (field report 02's root cause on `main`,
+`c3a1303`): its "extracting feedback" line exists only at `e8bc59e` `backend/engine/src/block.rs:322`, and its LVS
+"device class N has a in layout vs b in reference" only in GPurify `e3c8eb2` `crates/lvs/src/gpu_compare.rs:397`.
+Every item was therefore re-run on m0 (the m0 CLI and bench on the reporter's netlists under
+`ResearchBoutros/analog/<block>/`, sky130, a throwaway copy that prints hard rows; nothing of it is committed):
+
+| FR | Report | On m0 | Owner (milestone) |
+|---|---|---|---|
+| FR-1 | Hang with several `cap_mim_m3_1`; one cap → LVS device-class mismatch | No hang (tq_chain, 8 caps: 3 min 20 s, 37 MB). Every cap circuit shorts: no sky130 capacitor recipe, so the MIM is drawn as met1/met2 MOM plates on the only two routing layers; 1 cap → `drawn short net … to cell metal` in all 56 dr reports and signoff label short `vss`/`tap1`; 8 caps → label short plus 5 × `m1.2`, 1 × `via.2`; wta → label short `vss`/`mrail` | CELL-08 (M1, P0) |
+| FR-2 | 45–60 min per iteration, no early stop | Old engine. m0 stops on convergence: strongarm 2.5 min, ptat_bias 6.8 min, pwm_driver 6.4 min, wta 5.2 min (default `Config`) | FLOW-09 (M2), FLOW-08 (M3) |
+| FR-3 | False LVS "device class N" on ptat_bias, pwm_driver | Message is GPurify `e3c8eb2`'s. ptat_bias CLEAN. LVS parameter mismatches remain: strongarm 4 × `lvs.parameter_mismatch`, pwm_driver 16 (bench) | FLOW-17 (new, M1, P0) |
+| FR-4 | Generator DRC: poly min-extension on long-L PFETs and W = 0.42; residual `li.3` | Generators clean: rescale and ptat_bias sign off CLEAN; long-L and 0.42 µm PMOS cells DRC 0. No sweep draws those sizes. Routing-layer DRC on pwm_driver: `m1.2.notch`, `m2.2.notch`, `m1.7`, `m2.7` (hole area) | CELL-30 (new, M1) guard tests; RTE-26 (M2) routing cases |
+| FR-5 | Long-L cell ≈ 3·L wide (0.42/64.8 µm → ~196 µm) | Reproduced: with dummies the cell is 196 340 nm (65 740 without); dummy gates are drawn at the active L | CELL-30 (new, M1, P0) |
+| FR-6 | Short vb_tail–nl in a 7-device PTAT core | That netlist is not in the report; ptat_bias CLEAN. FET-only pwm_driver shorts (`label short` `vss`/`ba_m`, reproducible), with `drawn short nets` in 4 of 25 non-empty dr reports | RTE-08 with RTE-03 (M1) |
+| FR-7 | `extracted_pex.spice` not simulatable | m0 writes no post-layout netlist from `run`/CLI; `verify::extract_spice` gives `.subckt TOP` with no ports, 3-terminal MOS cards, database-unit lengths, valueless resistors | PERF-30 (new, M1, P0); export via FLOW-17 |
+| FR-8 | Only sky130/generic_finfet shipped | m0 compiles in all four PDKs (FLOW-04); packaging is outside the repo | FLOW-04 (done), FLOW-17 `--version`, FLOW-12 |
+
+---
+
+
 Scope: Philis, the Rust analog place-and-route flow at this repository. Goal stated by the owner: "the best Automated
 Analog P&R tool that is constraint aware, and is able to extract constraints from the circuit", producing layouts
 that beat hand layout.
@@ -226,9 +304,15 @@ Goal: fix every P0 defect in input, extraction, generators, matched-set scoring,
 honesty, so later work builds on correct physics.
 
 Items, in order:
+0. **Carried from M0 and field report 01 (Status above).** FLOW-17 (land `fix-export`: GPurify past `bde681c` with
+   the re-vendored sky130 deck, labelled GDS, `philis run`; FR-3, FR-8) → re-measure dac4 at `feedback_iters = 1` →
+   RTE-06 (re-review from `m0-rte06-rejected` only if dac4's `erc/ar.met2.1:gate` remains). The RTE-03 owner decision
+   (keep `ba49ae2` or revert) is taken before RTE-07. FLOW-13 step 0 (`hier_elaborate` green). REL-02 per-net T2 once
+   GPurify tags antenna rows with a net (§6.4 Q7).
 1. FLOW-07 (parser: `.subckt` hierarchy and ports, `.param`, R/C/L values, deck-classified models) → PERF-03 step 3
    (floating-gate exemption for declared ports only), PERF-08 (simulated circuit = drawn circuit), PERF-09 (aligned
-   op-point parsing, isolated decks, `rail_of` rails; needs EXT-02).
+   op-point parsing, isolated decks, `rail_of` rails; needs EXT-02), PERF-30 (simulatable post-layout netlist; FR-7;
+   after FLOW-07 and FLOW-17).
 2. EXT-02 (one rail classifier), EXT-03 (terminal roles by name) → EXT-04 (catalog corrections) → EXT-05 (declared
    slot roles), EXT-06 (overlapping recognition, canonical order) → EXT-07, EXT-09 (Differential from recognised pairs,
    to the budget arm), EXT-10 (stable IDs, provenance, coverage), EXT-11 (size/model/bulk robustness; needs FLOW-01).
@@ -238,12 +322,15 @@ Items, in order:
    (diffusion-legal ratioed MOS rows) → MAT-04 (`MatchedSet`: one ledger, one allowance per pair) → MAT-05
    (`OrientationSet`), MAT-06 (remaining allowance to `CommonNodes`).
 4. CELL-03 (extents on the cut lattice), GAP-05 (guard-ring kinds name what is drawn; reinstated CELL-05), CELL-06
-   (resistor multiplicity, exact value), CELL-07 (diodes; needs MAT-02), CELL-08 (MIM on sky130), CELL-09 (BJT
-   fixed-geometry emitters; needs MAT-02), CELL-10 (ratioed mirrors merge; needs MAT-03).
+   (resistor multiplicity, exact value), CELL-07 (diodes; needs MAT-02), CELL-08 (MIM on sky130; FR-1), CELL-09 (BJT
+   fixed-geometry emitters; needs MAT-02), CELL-10 (ratioed mirrors merge; needs MAT-03) → FLOW-16 (fold classes per
+   cell; step 4 restores the OTA CommonCentroid rows; moved from M2). CELL-30 (dummy gates capped at the microloading
+   reach; long-L sweeps; FR-5, FR-4).
 5. PLC-02 (lattice-aligned boxes) → PLC-04 (report and gate correctness) → PLC-03 (matched-set orientation and shape
    locks) → PLC-06 (gp sees axes, power, units); PLC-10 step 0 (`dp::Schedule`, unblocks FLOW-08).
 6. RTE-05 (terminal-resolved Differential, no stub trim; needs REL-03, RTE-02, RTE-09, EXT-09), RTE-07 (retire the
-   coarse `GlobalRoute`) → RTE-08 (negotiation keys, PathFinder convergence).
+   coarse `GlobalRoute`) → RTE-08 (negotiation keys, PathFinder convergence; carries RTE-03 acceptance 3 while
+   `ba49ae2` stays, and FR-6).
 
 Exit criteria:
 - EXT: `negative_corpus` passes for `sc_switches` and `equal_fets` (T3); `latch` has 2 DiffPair leaves; `bjt_mirror`
@@ -259,8 +346,16 @@ Exit criteria:
 - PLC: `lattice_off == 0` and `matched_geometry_mismatch == 0` on every fixture and seed; no placement panic in debug.
 - PERF: `BiasSummary.resolved == devices` on rc_filter and bjt_mirror; no `bsim4v5.out` in the cwd; OTA with the new
   `.subckt` header has 0 `floating_gate` rows, with the old header 2 (vbias, vbn).
-- RTE: `GlobalRoute` absent from the workspace; `grep -rn 'kind()' backend/gr backend/dr frontend/library/src/elaborate.rs`
-  empty. Bench 10/10 DRC 0 (LVS column as in M0 or better).
+- RTE: `GlobalRoute` absent from the workspace; `grep -rnE '\bkind\(\)' backend/gr backend/dr frontend/library/src/elaborate.rs`
+  empty (already true on m0 after RTE-09; the unbounded `'kind()'` pattern also matches `repair_kind()`). Bench 10/10
+  DRC 0 (LVS column as in M0 or better). If `ba49ae2` stays: 0 dac4 dr reports with `unresolved congestion` (RTE-03
+  acceptance 3, RTE-08).
+- Carried from M0: `signoff_fixtures` green including dac4 at `feedback_iters = 1` (M0 criterion 2, FLOW-17 then
+  RTE-06); `cargo test --release --workspace` 0 failed (`hier_elaborate` green, FLOW-13 step 0); the ota,
+  ota_constrained and tt_ota `CommonCentroid` rows 3/3 (FLOW-16).
+- Field report 01: `tq_chain` (8 sky130 MIM caps) DRC 0, no `lvs/` row, no `drawn short` dr row (CELL-08); strongarm
+  and pwm_driver 0 `lvs.parameter_mismatch` (FLOW-17); pwm_driver through the CLI has no `label short` (RTE-08); a
+  matched 0.42/64.8 µm PFET ≤ 73 µm wide (CELL-30); `post_layout_rc_filter_simulates` green with ngspice (PERF-30).
 
 ### M2 — Shared data model and core substrates
 
@@ -283,7 +378,7 @@ Items, in order:
 5. RTE-10 (per-layer lattice) → RTE-11 (every useful metal) → RTE-12 (width and via arrays reserved in search) →
    RTE-13 (A*, reuse, timers), RTE-25 (lattice and congestion export), RTE-26 (sky130 cases a, b, c, e).
 6. FLOW-09 (hoist pure work, per-stage timers, seed derivation), FLOW-12 (CLI flags, built-in PDKs, labelled GDS),
-   FLOW-13 (emit/macroMaster round trip), FLOW-16 (fold classes per cell). PERF-10 (scenarios, corner-aware margins),
+   FLOW-13 (emit/macroMaster round trip; its step 0 is M1). PERF-10 (scenarios, corner-aware margins),
    PERF-17 (signoff intent arms IR drop). **[master decision]** The PERF-20 steps that need only PERF-01/02/07 and
    FLOW-09 (seeds 1–5, `results.json`, `stage_ms`, GDS-bbox area) land here as the progress baseline; β and perf
    columns join in M5.
@@ -454,6 +549,10 @@ flowchart LR
     RTE05[RTE-05 differential]
     RTE07[RTE-07 retire coarse gr]
     GAP10[GAP-10 price keys]
+    FLOW17[FLOW-17 GPurify bump + export] --> PERF30[PERF-30 post-layout netlist]
+    FLOW07 --> PERF30
+    CELL30[CELL-30 dummy length]
+    CELL10 --> FLOW16[FLOW-16 folds per cell]
   end
   subgraph M2[M2 data model + substrates]
     GAP01[GAP-01 MatchClass+tiers] --> EXT12[EXT-12 intent] --> EXT14[EXT-14 compounds] --> EXT15[EXT-15 sets] --> EXT16[EXT-16 class] --> EXT20[EXT-20 emission]
@@ -586,7 +685,13 @@ should patch their text when they pick up an item. Master decisions beyond the c
 | `PriceKey { Id(ConstraintId), Ord(&str, u32) }` | `backend/gp` | GAP-10 |
 | `LatticeSpec { p0, strides, origin_multiple }`, `RouteStats::congestion` | `backend/dr` / `backend/gr` | RTE-25 |
 | `Weights { place, route }` | `frontend/library` | FLOW-08 |
-| `verify::Signoff { report, warnings, coverage, caps }` | `backend/verify` | PERF-01 |
+| `verify::Signoff { report, warnings, coverage, caps, elapsed }`, `verify::Coverage { unverified, skipped_rules }`, `verify::Finding { .., unit, warning }` | `backend/verify` | PERF-01 (M0) |
+| `verify::sidecar::{Key, KEYS}` (replaces `REQUIRED_RULES`), `Pdk::builtin(name)`, private `decks` (compiled-in `pdks/decks` and sidecars) | `backend/verify` | FLOW-04 (M0) |
+| `pnr_core::GatePin { at, dev, nm2 }`, `Routes::terminals(net)`, `Routes::gate_pins(net)` | `pnr_core::routes` | REL-01/02 (M0) |
+| `analog::RepairKind`, `RuleBatch::repair_kind` | `kernel/analog/src/rule.rs` | RTE-09 (M0) |
+| `dp::PlaceStats` (`decode_fail`, `matched_incompatible` are `Option`), `library::PlacementMetrics` (`islands_extra: Option`), `library::GpMode`, `RunStats::{place, dp, c_tier, sim_failures, warnings}` | `backend/dp`, `frontend/library` | PLC-01, PERF-06/07, FLOW-02 (M0) |
+| `library::tools::{present_or_skip, tool_or_skip, sky130_models}` (`#[doc(hidden)]`) | `frontend/library/src/lib.rs` | FLOW-14 (M0) |
+| `pnr_core::routes::{Join, conductor_layers_meet, open_components}`, `Routes::debug_check_joined` | `kernel/core/src/routes.rs` | RTE-03 (on m0 as `ba49ae2`, owner decision open) |
 | `OpPoint.vgs_v/vds_v/vbs_v`, `OpPoint.net_v` | `frontend/library/src/oppoint.rs` | PERF-09, GAP-17 |
 
 ### 6.3 Deck and sidecar keys (fixed once; every key registered in FLOW-04's `sidecar::KEYS` with a `_source`)
@@ -598,7 +703,8 @@ should patch their text when they pick up an item. Master decisions beyond the c
 | `substrate_kind`, `epi_thickness_nm` | string / integer or null | sky130 `"bulk"` [UNVERIFIED: code note only]; others null | GAP-04, FLOW-06 |
 | `p_epi_thickness` | `required: false`, unread | — | FLOW-04 |
 | `em_derating { t_ref_k, ea_ev, n }` | table | sky130 363.15 K, gf180 358.15 K, ihp 378.15 K; `ea_ev`, `n` null | GAP-06 (REL) |
-| `tie_max_dist_nm` | integer | sky130 15 000 (VOL magic `sky130A.tech:4165-4170`); gf180, ihp 20 000 | FLOW-05 |
+| `tie_max_dist_nm` | integer | sky130 15 000 (VOL magic `sky130A.tech:4163-4170`); gf180, ihp 20 000; generic_finfet 30 000 (as landed in M0) | FLOW-05 |
+| `dummy_max_l_nm` | integer or null | sky130, gf180, ihp 3000 (Hastings microloading reach 3–5 µm, L41097–41104; policy: lower end); generic_finfet null | CELL-30 |
 | `abeta_n_pct_um`, `abeta_p_pct_um`, `bjt_ka_pct_um`, `vbe_tc_uv_per_k`, `svt_a_uv2_per_um2`, `svt_b_uv2`; per R/C recipe `k_a_pct_um`, `tc_ppm_per_k`, `sd_pct_per_mm` | numbers or null | characterisation (MAT-09/10/16) | MAT |
 | `capacitors` recipe table (`mim_m3_1`, roles above), `c_dw_nm` | table | sky130 deck `capm` | CELL-08 |
 | `bjts` recipe table; resistor value-model keys; `res_value_tol_ppm`; `res_widths_nm` | tables / numbers | foundry model cards | CELL-06, CELL-09, CELL-23 |
@@ -620,8 +726,10 @@ should patch their text when they pick up an item. Master decisions beyond the c
    netlists; `PerFinger` for the competition suites after one manual check each.
 6. **EXC area cost** (CELL Q9). Default: accept ~24 minimum-L dummies per end for Exceptional sets [derived];
    Exceptional is set only by the user or a spec, never by role.
-7. **GPurify upstream requests** (PERF Q6): per-net voltages in intent, signal-net EM, MOM recognition. Default: file
-   upstream; until then each stays in `coverage` as "not checked".
+7. **GPurify upstream requests** (PERF Q6): per-net voltages in intent, signal-net EM, MOM recognition; added at the
+   M0 close-out: the net of each ERC antenna row (REL-02 per-net T2) and a simulatable SPICE writer (µm lengths,
+   4-terminal MOS, `X` cards for `.subckt` models, resistor W/L; PERF-30). Default: file upstream; until then each
+   stays in `coverage` as "not checked", and PERF-30 rewrites the cards in Philis.
 8. **Hastings eq. 8.29 vs Fig. 8.20** (MAT Q7). Resolved by GAP-20 (`ref-hastings-99` §2.1): Fig. 8.20 is eq. 8.29 with
    j and k exchanged; the printed form is right. Default unchanged: implement eq. 8.29 as printed, use eq. 8.27 as primary.
 
@@ -632,6 +740,9 @@ should patch their text when they pick up an item. Master decisions beyond the c
 | File | One-line description |
 |---|---|
 | `00-MASTER-PLAN.md` | This file: verdict, scorecard, critical findings, the beat-hand-layout thesis, unified roadmap M0–M6, cross-plan decisions, index |
+| `m0-report.md` | M0 close-out measurement (verify pass 4): exit criteria, test and bench tables, review-panel outcomes, open owner decisions |
+| `baseline-plc-01.md` | PLC-01 placement baseline, 10 fixtures × seeds 1–5 |
+| `field-report-01-tinytapeout.md` | User field report (TinyTapeout flows, old packaged build); mapped to items in the Status section |
 | `98-gap-critic.md` | Completeness check of the eight plans: orphaned findings, uncovered reference priorities, 29 conflicts, 36 broken dependencies, and new items GAP-01…GAP-20 with owners |
 | `audit-01-annotator.md` | Audit of constraint extraction (`backend/annotator`) and how the library consumes `Problem`; findings AA-01…, gap analysis vs survey ch. 3, Lampaert §4.2, Hastings §13.3 |
 | `audit-02-analog-rules-and-core.md` | Audit of every rule type in `kernel/analog` and all of `kernel/core`; per-rule physics table; findings AR-01…AR-46 |
@@ -642,12 +753,12 @@ should patch their text when they pick up an item. Master decisions beyond the c
 | `audit-07-flow-frontend-docs.md` | Audit of the orchestrator, CLI, macroMaster, examples and a reality check of PLAN.md, API-WISH.md, CRATES.md, LAYOUT-FUNDAMENTALS.md, SUBSTRATE3.md; findings AF-01…AF-35 |
 | `plan-01-constraint-extraction.md` | EXT-01…EXT-29: recognition corpus, rails, catalog fixes, overlapping recognition, intent data model, HSMPG tree, symmetry compounds, matched sets, classes, passive/BJT recognition, evidence, budgets, sidecar, hierarchy |
 | `plan-02-matching-and-common-centroid.md` | MAT-01…MAT-21: moment kernel, point-symmetric and ratioed patterns, one ledger per matched set, orientation, classes, current domain, R/C/BJT coefficients, cap-array and resistor metrics, Nth-order patterns, split DAC |
-| `plan-03-device-generators.md` | CELL-01…CELL-29: macros that record what they drew, non-vacuous tests, value closure for R/C/D/BJT, legal ratioed MOS rows, 430 nm pitch, class-scaled environment, tap reach, Vt markers, ECGR rings |
+| `plan-03-device-generators.md` | CELL-01…CELL-30: macros that record what they drew, non-vacuous tests, value closure for R/C/D/BJT, legal ratioed MOS rows, 430 nm pitch, class-scaled environment, tap reach, Vt markers, ECGR rings |
 | `plan-04-placement.md` | PLC-01…PLC-29: instrumentation, lattice alignment, matched locks, per-pair spacing, hierarchical symmetric-feasible sequence pair, annealing over codes, warm start, islands, WPE, thermal, routing halos, performance term |
 | `plan-05-routing.md` | RTE-02…RTE-32: honest router (hard obstacles, shield fix, differential without stubs), per-layer lattice, width in search, A*, current-driven topology, joint mirrored routing, metal-over-gate, star/Kelvin, crosstalk, shields, performance pricing, wire widths |
 | `plan-06-reliability-and-substrate.md` | REL-01…REL-18: EM current inputs, antenna agreement with signoff, per-shape EM, IR, junction temperature, ring policy by role, op-point voltage checks, refinements; deferred waveform EM and substrate macromodel |
-| `plan-07-performance-loop-signoff-benchmarks.md` | PERF-01…PERF-29: honest signoff, faithful simulation, scenarios, sensitivity engine, σ_f/β, β epoch key, PEX fidelity, complete LVS, foundry judge, bench v2, hand-layout comparison, Monte Carlo, ALRC, A/B |
-| `plan-08-flow-pdk-infrastructure.md` | FLOW-01…FLOW-16: size convention, epoch key, one dual step, vendored decks and key registry, deck fixes, parser, warm/cold loop, runtime, fill in the certificate, hierarchy, CLI and labelled GDS, emit round trip, CI |
+| `plan-07-performance-loop-signoff-benchmarks.md` | PERF-01…PERF-30: honest signoff, faithful simulation, scenarios, sensitivity engine, σ_f/β, β epoch key, PEX fidelity, complete LVS, foundry judge, bench v2, hand-layout comparison, Monte Carlo, ALRC, A/B |
+| `plan-08-flow-pdk-infrastructure.md` | FLOW-01…FLOW-17: size convention, epoch key, one dual step, vendored decks and key registry, deck fixes, parser, warm/cold loop, runtime, fill in the certificate, hierarchy, CLI and labelled GDS, emit round trip, CI |
 | `ref-00-prior-notes-handbook.md` | Bridge from the earlier `ref/Notes` HTML handbook: 84-family catalog, roadmap R1–R24 re-checked against the tree, stale claims, NOTES-01…60 |
 | `ref-hastings-01-ch01-04-physics-fab-layout-process.md` | Hastings ch. 1–4 (physics, fabrication, rules, processes): voltage-dependent spacing, taps, marker layers, orientation; H01-01…48 |
 | `ref-hastings-05-ch05-failure-mechanisms.md` | Hastings ch. 5 (EOS, EM, TDDB, ESD, antenna, HCI/BTI, latch-up, guard rings) with equations recovered from the PDF; H05-01…58 |

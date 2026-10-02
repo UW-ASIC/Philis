@@ -395,7 +395,7 @@ Hand layout applies Hastings' rules by eye to the pairs a designer remembers and
 
 - **Priority** P0. **Effort** S. **Depends on** MAT-04. Consumer: RTE (CommonNodes rule unchanged).
 - **Why**: B3 routing half. AR-04, MM-31, MM-33, LAMP-09.
-- **Current**: `frontend/library/src/lib.rs:788-797` computes `max_delta_ohm = systematic_allowance_mv(avt, gate_um2, offset)/I` — the **full** allowance again, gate area with max(nf,m) (`lib.rs:792`).
+- **Current**: `common_nodes` (`frontend/library/src/lib.rs:904-938` on m0) computes `max_delta_ohm = systematic_allowance_mv(avt, gate_um2, offset)/I` — the **full** allowance again; since FLOW-01 the gate area is `Device::gate_area_um2()` (W_total·L·m, `lib.rs:932`), no longer max(nf,m). The line numbers in Change step 2 are dad330c's: on m0 the `Flow` fields `avt_mv_um`/`offset_sigma_mv` are declared at `lib.rs:618-620`, initialised at `:446-447`, read at `:931-934`.
 - **Change**:
   1. `kernel/analog/src/rule.rs:135-208` (`RuleBatch`), new default hook:
      ```rust

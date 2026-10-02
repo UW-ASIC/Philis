@@ -142,6 +142,9 @@ Philis must check every net that carries current, every segment and every via, e
 ## 3. Work items
 
 ### REL-01 EM current inputs: per-pin shares, and unknown is not zero
+
+Status: done in M0 (`e7db737`); it also does PERF-09 step 2 (C17): `pin_currents` keeps resolved members (`one_unresolved_device_keeps_the_others_known`).
+
 - Priority: **P0**. Effort: **M**. Depends on: none. PERF-08 step 5 (non-FET cards and currents) later turns the unknowns created here into known values.
 - **Supersedes PERF-09 step 2.** PERF-09 step 2 makes an unresolved member "contribute no pins". With dr's lookup, a pin missing from the table reads `0.0` (`backend/dr/src/lib.rs:229-231`, `.unwrap_or(0.0)`), so that version turns unknown into a known zero on exactly the nets it touches (NOTES-02). Land this item's step 3 instead; PERF-09's test `an_unresolved_device_leaves_other_pins_sized` still holds under it.
 - **Why:** AT-07, AF-25 (second half: one unresolved device disables EM everywhere), AF-03 (non-FET currents read as known zero), NOTES-02, EM-07. Lienig §3.3.2 requires per-terminal current bounds (lower/upper), not one equivalent value per terminal, for correct segment currents (L3790–3836, PDF 83–84).
@@ -186,6 +189,9 @@ Philis must check every net that carries current, every segment and every via, e
   - Merged cells where two members share one region carry two pins at one rect (`mosfet.rs:474-481`), and each member's share is computed separately. That is correct.
 
 ### REL-02 Antenna: in-loop model agrees with signoff
+
+Status: done in M0 (`dac139f`). As built: `pnr_core::GatePin { at, dev, nm2 }` per net in `Routes::gates` (kernel/core/src/routes.rs:54, 72); diode credit is the deck's `antenna_electrical` `diode_bonus` only, on pieces touching a diode shape. Deferred to M1 (review finding 20): `antenna_in_loop_never_passes_what_signoff_fails` compares per fixture, not per net, because a signoff ERC row carries no net (`verify::Finding` is a point on the `gate` layer); the per-net form lands here once GPurify reports the net of an antenna row (00-MASTER-PLAN §6.4 Q7).
+
 - Priority: **P0**. Effort: **M**. Depends on: none for steps 1–5 and 7. T1 on met3 also needs FLOW-05 step 2 (`ar.met3.1` sidewall 2000 → 845 nm in the vendored deck); T1 on dac4 may also need RTE-06 (repair on the drawn geometry).
 - **Why:** AR-13, AR-44, AV-15, AV-17, H05-26, H05-28. Hastings defines the node ratio as metal of the node over the gate oxide of poly belonging to that node, per stage (§5.1.6, L13148–13157, PDF 228). Junction bleed is credited only as the process states it (L13215–13230, PDF 229). GPurify's `antenna_electrical` computes `ratio − credit·A_diode − bonus` and refuses `credit ≠ 0` with a diode layer (`GP/crates/check/src/erc/rules/antenna.rs:405-440`).
 - **Current:** see §1.4. The test `benchmarks/tests/signoff_fixtures.rs::fixtures_sign_off_within_baseline` fails on dac4 (`erc/ar.met2.1:gate`) at `feedback_iters=1` (AV-15).
@@ -228,6 +234,9 @@ Philis must check every net that carries current, every segment and every via, e
   - Without diode credit, sky130 relies on dr's jumper and lift repair (`dr/lib.rs:1486-1498, 1753-1788`). If dac4 still fails after this item, the remaining work is RTE's repair, and the failure is now visible as V.
 
 ### REL-03 EM: per-segment and per-via check on final geometry (hard)
+
+Status: done in M0 (`76e7232`, `ab947a2`); the via grouping is transitive (amendment at step 4.3).
+
 - Priority: **P0**. Effort: **M**. Depends on: REL-01.
 - **Why:** AR-05, AT-06 (access jogs and pin cuts unchecked), AV-09 (signal nets never EM-checked), EM-09, EM-20, EM-29, EM-30, H05-12, H15-37, NOTES-48.
   - Lienig: each segment carries the sum of one side's terminal currents (eqs. 3.5–3.7, L3975–4052, PDF 87–88); w ≥ I/(J·h) (eq. 3.21, L4587–4617); n_via = ⌈I/I_cut⌉ (eq. 3.25, L4626–4660); a segment is the conductor between vias or branches (§4.3.1, L5370–5377).

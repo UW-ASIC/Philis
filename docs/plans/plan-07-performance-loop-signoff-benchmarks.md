@@ -48,7 +48,7 @@ Numbers marked **[policy]** are Philis choices with the stated rationale, not so
 | `RunStats.stage_ms: [u64; 9]` (gp, dp, rings, gr, dr, diodes, signoff, metadata, perf); `performance_rows` reusing the first topology's classes | FLOW-09 | PERF-20, PERF-09 |
 | Post-fill signoff on the final geometry and its `CapMatrix` (`MetadataReport.post_fill`) | FLOW-10 | PERF-15, PERF-22 |
 | Labelled GDS `library::gds(sol, pdk) -> Result<Vec<u8>, String>`; `Config.interface` (AF-18) | FLOW-12 | PERF-19, PERF-20, PERF-21 |
-| CI workflow with a nightly tool job; `tool_or_skip` / `PHILIS_REQUIRE_TOOLS=1` | FLOW-14 | every ngspice/KLayout/magic test here |
+| CI workflow with a nightly tool job; `library::tools::{tool_or_skip, sky130_models}` / `PHILIS_REQUIRE_TOOLS=1` (landed in M0) | FLOW-14 | every ngspice/KLayout/magic test here |
 | One rail classifier `annotator::netrole::rail_of` (node `0`, `gnd!`, `vee`, VPB/VNB) (AA-11) | EXT-02 | PERF-07, PERF-09 |
 | `annotator::evidence::{Evidence, Sensitivities, SpecSens}` input type and `annotate_with` | EXT-17 | PERF-12 |
 | Sensitivity-driven allocation per matched set (`allocate`) and budget rows (`annotator::budget::rows`) | EXT-21, EXT-25 | PERF-12 (PERF supplies their inputs) |
@@ -191,6 +191,8 @@ validation catalog; Graeb §4.8.1 eq. 114, graeb_centering.txt L3370–3376). Me
 
 ### PERF-01 Signoff outcome: errors, warnings and coverage kept apart
 
+Status: done in M0 (`5478230`). As built: `verify::Signoff { report, warnings, coverage, caps, elapsed }` (backend/verify/src/lib.rs:61); `verify::Finding` gains `warning` and a margin unit (nm | permille); the CLI is not CLEAN while any device is LVS-unverified.
+
 - Priority: P0. Effort: M. Depends on: — (FLOW-02 may land first with its interim `warn/` prefix, FLOW-02 step 4;
   this item replaces that prefix).
 - Why: AV-10 (warnings are hard), AV-26 (skip log once per process), AV-25 (label-short fallback loses caps),
@@ -272,6 +274,8 @@ validation catalog; Graeb §4.8.1 eq. 114, graeb_centering.txt L3370–3376). Me
 
 ### PERF-02 LVS reference completeness: every device either compared or declared unverified
 
+Status: done in M0 (`6b28fca`); amended (`d682829`, step 3 below): `lvs-coverage/` rows are out of the epoch's |V| but block `certified()`.
+
 - Priority: P0. Effort: M. Depends on: PERF-01. Coordinates with CELL-01 (which replaces schematic cards by
   `Macro.drawn` cards for resistor segments, MIM units, diode and BJT units, and owns LVS parameters for them).
 - Why: AV-01 (critical: LVS silently skips BJTs, library drops caps), AV-28 (the baseline admits an ERC count, not a
@@ -326,6 +330,8 @@ validation catalog; Graeb §4.8.1 eq. 114, graeb_centering.txt L3370–3376). Me
 
 ### PERF-03 Floating-gate exemption only for declared ports
 
+Status: steps 1–2 done in M0 (`2f37409`): `RefInput.external_ports` and the `Checker` filter exist, and with `None` the blanket exemption stays and is listed in `coverage.skipped_rules`. Steps 3–4 move to M1 after FLOW-07: on m0 `cellgen::reference` builds every `RefInput` with `external_ports: None` (frontend/library/src/cellgen.rs:932), and step 3's assignment goes in `labels_and_reference` (frontend/library/src/lib.rs:1600) after `reference.ports` is set.
+
 - Priority: P0. Effort: S. Depends on: FLOW-07 (`Netlist.ports`, AF-02); PERF-01 (`coverage`).
 - Why: AV-04 (every labelled net is exempt, overriding `labels_are_ports: false`), AV-30 (flagship OTA gates on
   undriven `vbias`/`vbn`).
@@ -355,6 +361,8 @@ validation catalog; Graeb §4.8.1 eq. 114, graeb_centering.txt L3370–3376). Me
 
 ### PERF-04 `density_cmp` is deferred, never a vacuous "ran"
 
+Status: done in M0 (`0e53eb9`).
+
 - Priority: P0. Effort: S. Depends on: PERF-01.
 - Why: AV-18.
 - Current: `strip_density` and `defer_density_wider_than` match kind `density` only (checker.rs:43–47, 262–281);
@@ -379,6 +387,8 @@ together with a defect in FLOW-05's rule that its implementer must fix (`poly` w
 cross-references stay valid.
 
 ### PERF-06 Spec rows for both bounds; a missed bound keeps a do-not-worsen row; failed simulations counted
+
+Status: done in M0 (`0dabdb5`); `RunStats::sim_failures` counts failed simulations.
 
 - Priority: P0. Effort: S. Depends on: — (the NaN-safe `key_lt` is FLOW-02 step 5, not repeated here).
 - Why: LAMP-01 (two-sided margin, lampaert.txt L1305–1418), GRAEB-04 (one feature per bound, graeb_centering.txt
@@ -408,6 +418,8 @@ cross-references stay valid.
 - Acceptance: every declared bound appears in metadata with a row or an explicit reason.
 
 ### PERF-07 C tier of the epoch key: sensitivity-weighted signal capacitance
+
+Status: done in M0 (`becffeb`). As built: `RunStats::c_sig` is gone; `RunStats::c_tier` is the winner's key tier and `library::signoff_c_tier` (frontend/library/src/lib.rs:1188) is shared by the epoch key and the bench.
 
 - Priority: P0. Effort: S. Depends on: PERF-01.
 - Why: AV-06 (total C, coupling double-counted, supplies included; ota: 79 % supply-related, vbn–VSS 29 %,
@@ -442,8 +454,8 @@ cross-references stay valid.
   simulation is the judge, perf_driven_survey.txt L15–37). The AF-01 card fix and its test
   (`size_tests::drawn_width_equals_simulated_width`, asserting `W=40 L=2 nf=1 m=4` for XM5) are FLOW-01 step 3; they
   are not repeated here.
-- Current: non-FETs are skipped (`model_for` returns `None`, oppoint.rs:140–147; `continue` at oppoint.rs:262–264) and
-  draw zero current (oppoint.rs:45–47); `param_um` invents 0.15 µm / 1 µm (oppoint.rs:319–331); `perf.rs:135` repeats
+- Current: non-FETs are skipped (`model_for` returns `None`, oppoint.rs:143; `continue` at oppoint.rs:262–264); since
+  REL-01 their terminal currents read unknown, not zero (`terminal_ua`, oppoint.rs:41–60: R/D/Q/L → `None`, C → 0); `param_um` invents 0.15 µm / 1 µm (oppoint.rs:319–331); `perf.rs:135` repeats
   the 0.15 µm fallback.
 - Change (`frontend/library/src/oppoint.rs`):
   1. `pub(crate) fn flat_circuit_with(netlist, cfg, node, extra, emit_caps: bool) -> Result<String, String>`;
@@ -488,7 +500,7 @@ cross-references stay valid.
   (bjt_mirror XQ2 → `XQ2 outp in VDD sky130_fd_pr__pnp_05v5_W3p40L3p40 m=1`), `an_inductor_refuses_to_simulate`,
   `a_missing_length_is_an_error`, `parse_show_reads_bjt_columns` (a canned `show q` block with two instances →
   both `ic` values on the right devices); the existing `frontend/library/tests/perf_postlayout.rs` (two tests today,
-  :49–50 and :76–77; ngspice-dependent tests use FLOW-14's `tool_or_skip`): `rc_filter_resistor_carries_current` —
+  :49–50 and :76–77; ngspice-dependent tests gate on `library::tools::sky130_models()`, FLOW-14): `rc_filter_resistor_carries_current` —
   `terminal_ua` of `XR1` non-zero and the currents on `vmid` sum to 0 within 1 nA.
 - Acceptance: rc_filter and bjt_mirror resolve every device (`BiasSummary.resolved == devices`); a netlist with an
   inductor reports "cannot simulate" instead of a bias.
@@ -510,8 +522,8 @@ cross-references stay valid.
 - Change:
   1. `parse_show`: `cols: Vec<Option<String>> = rest.iter().map(|c| instance_device(c)).collect()`; a `None` column
      keeps its position and its values are skipped. `OpPoint` gains `pub unresolved: Vec<String>`.
-  2. `pin_currents(devices_of, draws)` (lib.rs:1035–1055): an unresolved member contributes no pins; the others keep
-     theirs (the ponytail at lib.rs:1034 asked for this).
+  2. Deleted (C17): REL-01 landed it in M0 (`pin_currents`, frontend/library/src/lib.rs:1279, emits `None` for an
+     unresolved member and keeps the others; test `one_unresolved_device_keeps_the_others_known`).
   3. `fn scratch_dir(tag: &str) -> std::io::Result<PathBuf>` = `temp_dir()/philis_{tag}_{pid}_{n}` with a
      process-wide `AtomicU64` `n`; ngspice runs with `.current_dir(&dir)` (no `bsim4v5.out` in the caller's cwd);
      `remove_dir_all(&dir)` after parsing unless `PHILIS_KEEP_DECKS` is set. Used by `oppoint::extract` and
@@ -532,7 +544,7 @@ cross-references stay valid.
   `m.x.` prefix: the third device gets its own `id`); `avdd_is_driven_when_classified_supply`;
   `node_zero_is_ground`; `concurrent_extracts_use_distinct_decks` (two threads, two netlists, both correct);
   `show_reads_vgs_and_vbs` (a canned six-column `show m` block → `vgs_v[i]`, `vbs_v[i]` equal the printed values).
-  (`lib.rs`) `an_unresolved_device_leaves_other_pins_sized`. (`metadata.rs`) `a_probe_bias_never_certifies`.
+  (`lib.rs`: REL-01's `one_unresolved_device_keeps_the_others_known` already covers step 2.) (`metadata.rs`) `a_probe_bias_never_certifies`.
 - Acceptance: tests green; `frontend/library/bsim4v5.out` no longer produced (FLOW-14 step 5 then deletes the stray
   file); REL-10's `voltage_findings` receives a populated `OpPoint` on ota with an op testbench.
 
@@ -1363,6 +1375,51 @@ A third controller on the weights PLC-17 (per-epoch extracted-C feedback, BAL2-1
 - Acceptance: ota winner prints `wc_value`, `wc_pass`, `lin_err` for every bound with known σ_f; sims added
   ≤ 2·n_specs.
 
+### PERF-30 A simulatable post-layout netlist as a deliverable (added at the M0 close-out)
+
+Field report: FR-7.
+
+- Priority: P0 (a post-layout netlist that cannot be simulated is not a deliverable). Effort: M. Depends on: FLOW-17
+  (MOS bulk recognisers, `philis run -o`), FLOW-07 (ports). Upstream: the SPICE writer is GPurify's
+  (`gdsverify::export::netlist::write_spice`); its fixes are filed upstream (§6.4 Q7 in 00-MASTER-PLAN).
+- Why: FR-7: the reporter's `extracted_pex.spice` had no `.subckt`, generic `nmos`/`pmos` models, no R/C/diodes,
+  parasitics only as comments, NMOS bulks on `vdd`, swapped D/S, merged parallel FETs, ports `n<id>` without
+  `--interface`, so they rebuilt it with their own script. That file came from the old packaged build; the m0 writer
+  differs (below) but is still not simulatable. SURV-01: the simulation is the judge (perf_driven_survey.txt L15–37).
+- Current (m0; measured with a throwaway example: `library::run` on `benchmarks/fixtures/rc_filter.spice`, sky130,
+  `starts = 1`, then `verify::extract_spice(&sol.geometry(), &[], &pdk, Detail::WithParasitics)`; not committed):
+  - `verify::extract_spice` (backend/verify/src/netlist.rs:25) is called only by `Elaborated` (frontend/library/
+    src/elaborate.rs:82) and two cell tests; `library::run`'s `Solution` and the CLI never write it.
+  - Output: `.subckt TOP` with no port list when no pins are passed; deck model names
+    (`sky130_fd_pr__nfet_01v8`); `w=500 l=150` in database units ("lengths below are in database units"); MOS cards
+    with three nodes (`M1 n0:0 n1:0 n3:0 sky130_fd_pr__nfet_01v8 …`: no bulk, so ngspice reads the model name as the
+    bulk node); the resistor as `R6 n0:0 n4:0 sky130_fd_pr__res_generic_po area=1000000` (no value, no W/L); parasitics
+    are real `Cp…`/`Rp…` elements on split nodes `n0:k`.
+  - sky130 ships its devices as `.subckt`s (PERF-08 step 3), so an `M`/`R` card cannot call them.
+- Change:
+  1. `frontend/library/src/lib.rs`: `pub fn post_layout_spice(sol: &Solution, pdk: &Pdk) -> Result<String, String>` =
+     `verify::extract_spice(&sol.geometry(), &labeled_pins(..), pdk, Detail::WithParasitics)` with the same labels
+     signoff uses (`labeled_pins`, lib.rs on m0 after `labels_and_reference`), so every labelled net keeps its name;
+     the `.subckt` header lists the FLOW-07 ports (`Netlist.ports`) in declaration order, named as in the schematic.
+  2. Card rewrite in that function, until the GPurify writer does it (each a filed upstream request): lengths in µm
+     with `u` suffix (or one `.option scale=1e-9` line, whichever the writer supports); every device whose deck model
+     is a sky130 `.subckt` becomes an `X` card with the terminal order of its model file (MOS `d g s b`, resistor
+     `r0 r1 [b]`, as PERF-08 step 3 lists); a MOS card without a bulk node is an error, never a guess (FLOW-17 brings
+     the 4-terminal recognisers); a resistor card carries `w`/`l` in µm; parallel FETs stay separate cards (`m` only
+     when the writer merges, documented in the header comment).
+  3. `philis run -o DIR` (FLOW-17/FLOW-12) writes `DIR/<top>_pex.spice` from step 1; the bench writes it to
+     `target/bench_debug/<name>/`.
+- Tests (`frontend/library/tests/perf_postlayout.rs`, gated on `library::tools::sky130_models()`):
+  - `post_layout_rc_filter_simulates`: run rc_filter, write `post_layout_spice`, wrap it with the sky130 lib and
+    supplies, ngspice `.op` → exit 0, no `Error` line on stderr, and `v(vout)` within 1 % of the schematic `.op` value
+    (both inverter outputs settle at the same DC point; R/C do not move it).
+  - `post_layout_ports_are_the_schematic_ports`: the `.subckt` line of ota's output equals the ota `.subckt` port list.
+  - `every_mos_card_has_four_nodes`: parse the output; every `X…` card calling an `nfet`/`pfet` model has 4 nodes and
+    its bulk is `VSS`/`VDD` as in the schematic (FR-7's "NMOS bulks on vdd").
+- Acceptance: the three tests green with ngspice and the models present (loud skip otherwise); FR-7's reporter can
+  drop their rebuild script.
+- Risks / notes: D/S naming is symmetric for a MOS; ngspice does not care, LVS compares it as swappable.
+
 ---
 
 ## 4. Milestones
@@ -1372,8 +1429,8 @@ milestone waits on are listed; nothing here depends on a later PERF milestone (a
 
 | Milestone | Items | Waits on | Exit criteria (all measurable) |
 |---|---|---|---|
-| M0 Honest signoff | PERF-01, 02, 03, 04, 06, 07 | FLOW-02 (optional), FLOW-07 (PERF-03 step 3), EXT-02 (PERF-07 classes) | `cargo test --workspace` green except the dac4 row of `signoff_fixtures` (REL-02 owns it); bench LVS column `PARTIAL(2)` bjt_mirror, `PARTIAL(9)` bgr_core, `PARTIAL(16)` dac4 (Σm = 1+1+2+4+8), `MATCH` for the other 7; `m1.density`…`m4.density` listed `ChipLevel` for every fixture; ota with the old `.subckt` header has 2 `floating_gate` rows (vbias, vbn), 0 with the new one; `supply_decoupling_does_not_rank_layouts` green; `warnings` printed per circuit and absent from `|V|`. |
-| M1 Faithful simulation | PERF-08, 09, 10, 17 | FLOW-01, FLOW-07, EXT-02, FLOW-09 step 2 | rc_filter and bjt_mirror: `BiasSummary.resolved == devices`; an inductor netlist reports "cannot simulate"; ota evaluated at `{tt 27, ss 125, ff −40}` with the worst scenario printed per bound; `ir_drop` absent from the skip list for fixtures with an op testbench; no `bsim4v5.out` created in the cwd by `cargo test`; `OpPoint.vgs_v/vds_v/vbs_v` populated on ota (REL-10's input). |
+| M0 Honest signoff (done in M0 except PERF-03 steps 3–4, see each Status) | PERF-01, 02, 03, 04, 06, 07 | FLOW-02 (optional), FLOW-07 (PERF-03 step 3), EXT-02 (PERF-07 classes) | `cargo test --workspace` green except the dac4 row of `signoff_fixtures` (REL-02 owns it); bench LVS column `PARTIAL(2)` bjt_mirror, `PARTIAL(9)` bgr_core, `PARTIAL(16)` dac4 (Σm = 1+1+2+4+8), `MATCH` for the other 7; `m1.density`…`m4.density` listed `ChipLevel` for every fixture; ota with the old `.subckt` header has 2 `floating_gate` rows (vbias, vbn), 0 with the new one; `supply_decoupling_does_not_rank_layouts` green; `warnings` printed per circuit and absent from `|V|`. |
+| M1 Faithful simulation | PERF-08, 09, 10, 17, PERF-30 (M0 close-out, FR-7; after FLOW-17) | FLOW-01, FLOW-07, EXT-02, FLOW-09 step 2 | rc_filter and bjt_mirror: `BiasSummary.resolved == devices`; an inductor netlist reports "cannot simulate"; ota evaluated at `{tt 27, ss 125, ff −40}` with the worst scenario printed per bound; `ir_drop` absent from the skip list for fixtures with an op testbench; no `bsim4v5.out` created in the cwd by `cargo test`; `OpPoint.vgs_v/vds_v/vbs_v` populated on ota (REL-10's input). |
 | M2 Independent judge | PERF-16, 18, 19 | FLOW-04, FLOW-12, FLOW-14 (nightly tools) | `target/xcheck/summary.json` for all local fixtures (KLayout DRC run with `feol=1 beol=1`, KLayout LVS, magic DRC); `pex_cal.json` with \|C_field − C_magic\|/C_magic ≤ 15 % for every signal net ≥ 1 fF; `partial_overlaps_extract_as_their_union` green; T3 = 0 on sky130 fixtures except dac4's MOM units; `a_bjt_reference_is_collector_first` green. |
 | M3 Sensitivity & statistics | PERF-11, 12, 13, 14, 15 | EXT-17, RTE-21 (fields), FLOW-08, FLOW-10 | ota: a `SensTable` with `GroundC`, ≤ 64 `CouplingC`, `SeriesR` and `GateOffset` rows, each `linear` or listed; σ_f, β, Φ(β) per bound; EXT-17 receives `Sensitivities` with non-empty `d_c`, `d_r`, `d_vt`; over 5 seeds the β key's winner has min β ≥ the old key's (PERF-14 acceptance); refresh count, pre- and post-fill metrics printed. |
 | M4 Proof | PERF-20, 21, 22, 23, 26, 29 | FLOW-06, CELL-01, CELL-19 (PERF-26 steps 1–3 only; steps 4–5 may land in M3) | `results.json` over seeds 1–5 with perf, β and per-stage time; hand-comparison table for ≥ 3 TinyTapeout circuits; ota winner reports σ_os, μ_os, Ŷ and `agrees` (T10); an `EnvRow` for every matched set on the local fixtures; post-layout FET cards carry `as/ad/ps/pd` once CELL-19 has landed; ota winner prints `wc_value`, `wc_pass`, `lin_err` for every bound with known σ_f, using ≤ 2·n_specs extra sims (PERF-29). |
