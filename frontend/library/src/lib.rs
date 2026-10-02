@@ -151,6 +151,9 @@ pub struct RunStats {
     pub place: PlacementMetrics,
     /// Winner: dp's anneal counters.
     pub dp: PlaceStats,
+    /// Post-layout simulations that could not run ([`perf::evaluate`] `Err`),
+    /// over every epoch; each scored its epoch as every spec unmeasured.
+    pub sim_failures: u32,
 }
 
 /// Anything that stops the flow.
@@ -194,7 +197,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     //    so solved once.
     let (power, bias, currents, net_headroom_mv, gm_us) = bias(&netlist, cfg);
     let bias = Bias { power, summary: bias, currents, net_headroom_mv, gm_us };
-    let perf_rows = performance_rows(&netlist, pdk, cfg);
+    let (perf_rows, perf_bounds) = performance_rows(&netlist, pdk, cfg);
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
     // linear gradient but splits one drain across the row ends (asymmetric
@@ -216,24 +219,42 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         let handles: Vec<_> = (0..cfg.starts.max(1)).map(|j| s.spawn(move || start(j))).collect();
         handles.into_iter().map(|h| h.join().expect("a search start panicked")).collect()
     });
-    Ok(runs.into_iter().reduce(|best, r| if key_lt(&r.1, &best.1) { r } else { best }).expect("one start at least").0)
+    let mut sol = runs.into_iter().reduce(|best, r| if key_lt(&r.1, &best.1) { r } else { best }).expect("one start at least").0;
+    sol.metadata.budget_rows = perf_bounds;
+    Ok(sol)
 }
 
-/// Each spec as a shared routing budget from schematic sensitivities (see
-/// [`perf::budget_rows`]): one baseline plus one run per signal net, in
+/// Each spec bound as a shared routing budget from schematic sensitivities
+/// (see [`perf::budget_rows`]): one baseline plus one run per signal net, in
 /// parallel, once per run. Empty without performance scoring, a simulator, or
-/// the deck's wire capacitance.
+/// the deck's wire capacitance. Also, per declared bound (`"{metric}:min"` /
+/// `":max"`), its row or why it has none ([`metadata::MetadataReport::budget_rows`]).
 fn performance_rows(
     netlist: &pnr_core::Netlist,
     pdk: &Pdk,
     cfg: &Config,
-) -> Vec<analog::routing::PerformanceBudget> {
+) -> (Vec<analog::routing::PerformanceBudget>, Vec<String>) {
     use analog::metadata::NetClass;
-    let Some(p) = &cfg.performance else { return Vec::new() };
+    let Some(p) = &cfg.performance else { return (Vec::new(), Vec::new()) };
+    let bounds = || {
+        p.specs.iter().flat_map(|s| {
+            [(s.min, "min"), (s.max, "max")].into_iter().filter(|b| b.0.is_some()).map(move |(_, side)| format!("{}:{side}", s.metric))
+        })
+    };
+    let notes = |rows: &[analog::routing::PerformanceBudget], why: &str| -> Vec<String> {
+        let notes: Vec<String> = bounds()
+            .map(|b| match rows.iter().find(|r| r.metric == b) {
+                Some(r) if r.limit > 0.0 => format!("{b}: row"),
+                Some(_) => format!("{b}: do-not-worsen row (the schematic misses it)"),
+                None => format!("{b}: no row ({why})"),
+            })
+            .collect();
+        notes.iter().for_each(|n| eprintln!("[perf] {n}"));
+        notes
+    };
     let ann = annotation(pdk, &cfg.annotation);
     let Some(af_per_um) = ann.process.wire_af_per_um else {
-        eprintln!("[perf] deck has no wire capacitance: no shared parasitic budgets");
-        return Vec::new();
+        return (Vec::new(), notes(&[], "deck has no wire capacitance"));
     };
     let classes = annotate(netlist, &ann).net_classes;
     let nets: Vec<pnr_core::NetId> = classes
@@ -246,17 +267,10 @@ fn performance_rows(
     match perf::sensitivities(netlist, p, &names, 10_000.0) {
         Ok(s) => {
             let rows = perf::budget_rows(p, &s, &nets, af_per_um / 1000.0);
-            for (spec, (_, v)) in p.specs.iter().zip(&s.base.metrics) {
-                if !rows.iter().any(|r| r.metric == spec.metric) {
-                    eprintln!("[perf] {}: no headroom at the schematic ({v:?}); no budget row", spec.metric);
-                }
-            }
-            rows
+            let notes = notes(&rows, "not measured at the schematic");
+            (rows, notes)
         }
-        Err(e) => {
-            eprintln!("[perf] sensitivities unavailable ({e})");
-            Vec::new()
-        }
+        Err(e) => (Vec::new(), notes(&[], &format!("sensitivities unavailable: {e}"))),
     }
 }
 
@@ -398,7 +412,7 @@ fn solve(
             // Promotion: simulate only a candidate whose hard count can still
             // beat the incumbent; its spec miss then decides against it.
             if best.as_ref().is_none_or(|b| epoch.key.0 <= b.key.0) {
-                flow.score_perf(&mut epoch);
+                flow.score_perf(&mut epoch, &mut stats);
             }
             if best.as_ref().is_none_or(|b| key_lt(&epoch.key, &b.key)) {
                 best = Some(Epoch {
@@ -487,6 +501,7 @@ fn solve(
             .zip(&result.metrics)
             .map(|(s, (m, v))| (m.clone(), *v, s.min, s.max, perf::miss(s, *v)))
             .collect();
+        metadata.sim_failures = stats.sim_failures;
     }
     let placement = flow.problem.placement;
     let key = best.key;
@@ -930,7 +945,9 @@ impl Flow<'_> {
         analog::placement::Environment(out)
     }
 
-    fn score_perf(&self, epoch: &mut Epoch) {
+    /// Simulate `epoch` on its parasitics; a simulator that cannot run counts
+    /// in `stats.sim_failures` and scores every spec unmeasured.
+    fn score_perf(&self, epoch: &mut Epoch, stats: &mut RunStats) {
         let Some(p) = self.perf else { return };
         let unknown = || perf::PerfResult {
             metrics: p.specs.iter().map(|s| (s.metric.clone(), None)).collect(),
@@ -941,6 +958,7 @@ impl Flow<'_> {
         } else {
             perf::evaluate(self.netlist, &self.parasitics(epoch), p).unwrap_or_else(|e| {
                 eprintln!("[perf] {e}");
+                stats.sim_failures += 1;
                 unknown()
             })
         };
@@ -1515,6 +1533,31 @@ mod start_tests {
         let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
         assert!(sol.stats.iterations > 0);
         assert_eq!(sol.stats.dual_steps, sol.stats.iterations);
+    }
+
+    /// PERF-06: a simulator that cannot start is counted, not just logged,
+    /// and every declared bound is in the report with its reason for no row.
+    #[test]
+    fn a_failed_simulation_is_counted_and_every_bound_reported() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).expect("sky130 loads");
+        let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/pair.spice")).unwrap();
+        let performance = crate::perf::PerfConfig {
+            sim: crate::oppoint::OpConfig { ngspice: "philis-no-such-binary-7f3a".into(), ..Default::default() },
+            testbench: String::new(),
+            specs: vec![crate::perf::Spec { metric: "gain".into(), min: Some(20.0), max: Some(60.0) }],
+        };
+        let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts: 1, performance: Some(performance), ..Default::default() };
+        let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
+        assert!(sol.stats.sim_failures >= 1, "{:?}", sol.stats);
+        assert_eq!(sol.metadata.sim_failures, sol.stats.sim_failures);
+        let rows = &sol.metadata.budget_rows;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].starts_with("gain:min: no row (sensitivities unavailable"), "{rows:?}");
+        assert!(rows[1].starts_with("gain:max: no row (sensitivities unavailable"), "{rows:?}");
+        let text = sol.metadata.to_string();
+        assert!(text.contains(&format!("simulations failed: {}", sol.stats.sim_failures)), "{text}");
+        assert!(text.contains("budget gain:max: no row"), "{text}");
     }
 
     /// An unresolved device's pins are unknown; the other devices keep their

@@ -222,10 +222,14 @@ pub fn sensitivities(netlist: &Netlist, cfg: &PerfConfig, nets: &[String], delta
     Ok(Sensitivity { base, d_per_af })
 }
 
-/// One [`analog::routing::PerformanceBudget`] row per spec with headroom at
-/// the schematic point: `w_i = ∓(∂f/∂C_i) / headroom` (minus for a floor,
-/// plus for a ceiling). A spec the schematic already misses, or measures
-/// nothing for, has no row (reported by the caller).
+/// One [`analog::routing::PerformanceBudget`] row per finite bound, metric
+/// `"{metric}:min"` / `"{metric}:max"`: `w_i = sign·(∂f/∂C_i) / headroom`,
+/// `limit = 1`, with floor headroom `f0 − lo` (`sign = −1`) and ceiling `hi −
+/// f0` (`sign = +1`). A bound the schematic already misses (`headroom ≤ 0`)
+/// keeps a do-not-worsen row: `limit = 0`, `w_i = sign·(∂f/∂C_i) / |bound|`
+/// (`miss`'s unit-free scale, `1` for a zero bound). A spec the schematic does
+/// not measure has no row (reported by the caller); a net whose run did not
+/// measure is left out of the row.
 #[must_use]
 pub fn budget_rows(
     cfg: &PerfConfig,
@@ -236,22 +240,19 @@ pub fn budget_rows(
     cfg.specs
         .iter()
         .enumerate()
-        .filter_map(|(j, spec)| {
-            let f0 = s.base.metrics[j].1?;
-            let (headroom, sign) = match (spec.min, spec.max) {
-                (Some(lo), _) => (f0 - lo, -1.0),
-                (None, Some(hi)) => (hi - f0, 1.0),
-                (None, None) => return None,
-            };
-            if headroom <= 0.0 {
-                return None;
-            }
-            let (nets, weights): (Vec<_>, Vec<_>) = nets
-                .iter()
-                .zip(&s.d_per_af[j])
-                .filter_map(|(&n, d)| Some((n, (sign * d.as_ref()? / headroom) as f32)))
-                .unzip();
-            Some(analog::routing::PerformanceBudget { metric: spec.metric.clone(), nets, weights, af_per_nm })
+        .flat_map(|(j, spec)| {
+            let f0 = s.base.metrics[j].1;
+            [(spec.min, -1.0, "min"), (spec.max, 1.0, "max")].into_iter().filter_map(move |(bound, sign, side)| {
+                let (f0, bound) = (f0?, bound?);
+                let headroom = sign * (bound - f0);
+                let (scale, limit) = if headroom > 0.0 { (headroom, 1.0) } else { (if bound == 0.0 { 1.0 } else { bound.abs() }, 0.0) };
+                let (nets, weights): (Vec<_>, Vec<_>) = nets
+                    .iter()
+                    .zip(&s.d_per_af[j])
+                    .filter_map(|(&n, d)| Some((n, (sign * d.as_ref()? / scale) as f32)))
+                    .unzip();
+                Some(analog::routing::PerformanceBudget { metric: format!("{}:{side}", spec.metric), nets, weights, af_per_nm, limit })
+            })
         })
         .collect()
 }
@@ -344,10 +345,42 @@ mod tests {
             d_per_af: vec![vec![Some(-1e6), Some(0.0)], vec![Some(0.01), None], vec![Some(0.0), Some(0.0)]],
         };
         let rows = budget_rows(&cfg, &s, &[pnr_core::NetId(0), pnr_core::NetId(1)], 0.1);
-        assert_eq!(rows.len(), 2, "the missed spec gets no row");
+        assert_eq!(rows.len(), 3, "one row per bound, the missed one included");
         assert!((rows[0].weights[0] - 0.01).abs() < 1e-7, "1 MHz/aF of 100 MHz = 1% per aF");
         assert_eq!(rows[0].weights[1], 0.0);
         assert_eq!(rows[1].nets, vec![pnr_core::NetId(0)], "an unmeasured net is left out");
         assert!((rows[1].weights[0] - 0.02).abs() < 1e-7);
+        assert_eq!((rows[2].metric.as_str(), rows[2].limit), ("m:min", 0.0), "the missed spec keeps a do-not-worsen row");
+    }
+
+    fn one_net(specs: Vec<Spec>, f0: f64, d: f64) -> Vec<analog::routing::PerformanceBudget> {
+        let cfg = PerfConfig { sim: OpConfig::default(), testbench: String::new(), specs };
+        let s = Sensitivity {
+            base: PerfResult { metrics: vec![("m".into(), Some(f0))], residual: 0.0 },
+            d_per_af: vec![vec![Some(d)]],
+        };
+        budget_rows(&cfg, &s, &[pnr_core::NetId(0)], 1.0)
+    }
+
+    /// A window spec is two features (GRAEB-04): the floor row and the
+    /// ceiling row, each over its own headroom, with opposite signs.
+    #[test]
+    fn rows_cover_both_bounds_of_a_window_spec() {
+        let rows = one_net(vec![spec(Some(10.0), Some(20.0))], 15.0, -1.0);
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].metric.as_str(), rows[0].limit), ("m:min", 1.0));
+        assert!((rows[0].weights[0] - 0.2).abs() < 1e-7, "{:?}", rows[0].weights);
+        assert_eq!((rows[1].metric.as_str(), rows[1].limit), ("m:max", 1.0));
+        assert!((rows[1].weights[0] + 0.2).abs() < 1e-7, "{:?}", rows[1].weights);
+    }
+
+    /// A floor the schematic already misses (GRAEB-11): a zero-limit row in
+    /// units of the bound, so any adverse C is a residual.
+    #[test]
+    fn a_missed_bound_keeps_a_do_not_worsen_row() {
+        let rows = one_net(vec![spec(Some(10.0), None)], 5.0, -1.0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].limit, 0.0);
+        assert!((rows[0].weights[0] - 0.1).abs() < 1e-7, "{:?}", rows[0].weights);
     }
 }
