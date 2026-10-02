@@ -22,10 +22,14 @@ pub struct BudgetStatus {
     pub arm: Arm,
     /// Rules of this kind in the circuit.
     pub total: usize,
-    /// How many are satisfied against the **raw** spec.
+    /// How many are known and satisfied against the **raw** spec: `total −
+    /// violations − unknown` (master §6.1: unknown is never pass).
     pub satisfied: usize,
-    /// How many lack their inputs ([`analog::Rule::known`]); counted in
-    /// `satisfied` too, since search cannot act on them.
+    /// How many are violated ([`analog::RuleBatch::violations`]); a hard
+    /// row's count is |V|.
+    pub violations: usize,
+    /// How many lack their inputs ([`analog::Rule::known`]): neither
+    /// satisfied nor, unless the batch also counts them, violated.
     pub unknown: usize,
     /// Tightest rule's criticality, `0.0` (slack to spare) … `1.0` (at or past
     /// the spec). Derived from headroom against the family's safety margin.
@@ -44,10 +48,11 @@ pub struct BudgetStatus {
 }
 
 impl BudgetStatus {
-    /// Every rule satisfied against the raw spec.
+    /// No rule violated against the raw spec (unknowns allowed: see
+    /// [`Self::verdict`] and [`MetadataReport::certified`]).
     #[must_use]
     pub fn met(&self) -> bool {
-        self.satisfied == self.total
+        self.violations == 0
     }
 
     /// Satisfied *and* still inside the safety margin — the state a converged
@@ -57,11 +62,12 @@ impl BudgetStatus {
         self.met() && self.criticality <= 0.0
     }
 
-    /// One-word verdict for a report line.
+    /// One-word verdict for a report line; unknowns are named beside a
+    /// violation, never hidden by it.
     #[must_use]
     pub fn verdict(&self) -> &'static str {
         if !self.met() {
-            "VIOLATED"
+            if self.unknown > 0 { "VIOLATED + UNKNOWN" } else { "VIOLATED" }
         } else if self.unknown > 0 {
             "UNKNOWN"
         } else if self.met_with_margin() {
@@ -124,15 +130,15 @@ impl MetadataReport {
             .sum()
     }
 
-    /// |V| from rule batches: violated hard-arm rules (`total − satisfied`)
-    /// over both tiers, counted per rule, not per batch.
+    /// |V| from rule batches: violated hard-arm rules over both tiers,
+    /// counted per rule, not per batch.
     #[must_use]
     pub fn hard_violated(&self) -> usize {
         self.placement
             .iter()
             .chain(&self.routing)
             .filter(|b| b.arm == Arm::Hard)
-            .map(|b| b.total - b.satisfied)
+            .map(|b| b.violations)
             .sum()
     }
 
@@ -172,8 +178,11 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         }
         let kind = b.kind().rsplit("::").next().unwrap_or(b.kind()).to_string();
         let total = b.count();
-        let satisfied = total - b.violations(state) as usize;
+        let violations = b.violations(state) as usize;
         let unknown = b.unknown(state) as usize;
+        // ponytail: a batch may count a rule both violated and unknown
+        // (`CentroidGroup` on its bbox proxy); saturating keeps it out of both.
+        let satisfied = (total - violations).saturating_sub(unknown);
         let criticality = b.criticality(state);
         let residual = b.residual(state);
         let usage = b.worst_usage(state);
@@ -187,6 +196,7 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         if let Some(e) = out.iter_mut().find(|e| e.kind == kind) {
             e.total += total;
             e.satisfied += satisfied;
+            e.violations += violations;
             e.unknown += unknown;
             e.criticality = e.criticality.max(criticality);
             e.residual += residual;
@@ -201,6 +211,7 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
                 arm,
                 total,
                 satisfied,
+                violations,
                 unknown,
                 criticality,
                 residual,
@@ -297,14 +308,14 @@ impl std::fmt::Display for MetadataReport {
         writeln!(f)?;
         writeln!(
             f,
-            "  {:<22} {:>6} {:>5} {:>5}  {:>9}  {:>9}  {}",
-            "constraint", "arm", "total", "sat", "critical", "residual", "verdict"
+            "  {:<22} {:>6} {:>5} {:>5} {:>5} {:>5}  {:>9}  {:>9}  {}",
+            "constraint", "arm", "total", "sat", "viol", "unk", "critical", "residual", "verdict"
         )?;
-        writeln!(f, "  {}", "-".repeat(75))?;
+        writeln!(f, "  {}", "-".repeat(87))?;
         for s in self.placement.iter().chain(self.routing.iter()) {
             writeln!(
                 f,
-                "  {:<22} {:>6} {:>5} {:>5}  {:>9.2}  {:>9.3}  {}",
+                "  {:<22} {:>6} {:>5} {:>5} {:>5} {:>5}  {:>9.2}  {:>9.3}  {}",
                 s.kind,
                 match s.arm {
                     Arm::Hard => "hard",
@@ -312,6 +323,8 @@ impl std::fmt::Display for MetadataReport {
                 },
                 s.total,
                 s.satisfied,
+                s.violations,
+                s.unknown,
                 s.criticality,
                 s.residual,
                 s.verdict()
@@ -338,7 +351,7 @@ impl std::fmt::Display for MetadataReport {
             writeln!(f)?;
         }
         for (kind, input) in &self.missing {
-            writeln!(f, "  {kind:<22} {:>6} {:>5} {:>5}  {:>9}  {:>9}  UNKNOWN (no {input})", "-", "-", "-", "-", "-")?;
+            writeln!(f, "  {kind:<22} {:>6} {:>5} {:>5} {:>5} {:>5}  {:>9}  {:>9}  UNKNOWN (no {input})", "-", "-", "-", "-", "-", "-", "-")?;
         }
         if !self.assumed.is_empty() {
             writeln!(f, "\n  assumed (UNVERIFIED sidecar values): {}", self.assumed.join(", "))?;
@@ -384,6 +397,10 @@ mod tests {
         fn residual(self, _: &Routes) -> f32 {
             (self.used - 1.0).max(0.0)
         }
+        /// A negative `used` stands for a rule missing its input.
+        fn known(self, _: &Routes) -> bool {
+            self.used >= 0.0
+        }
     }
 
     fn reqs(used: &[f32]) -> Requirements<Routes> {
@@ -419,6 +436,21 @@ mod tests {
         let s = &statuses(&reqs(&[1.4]).hard, &empty_routes(), Arm::Hard)[0];
         assert!(!s.met());
         assert_eq!(s.verdict(), "VIOLATED");
+    }
+
+    /// Unknown is never pass (master §6.1): of 5 rules, 1 violated and 1
+    /// unknown leave 3 satisfied; |V| is the 1 violation, and the verdict
+    /// names the unknown beside it.
+    #[test]
+    fn an_unknown_is_not_satisfied() {
+        let s = &statuses(&reqs(&[0.1, 0.1, 0.1, 1.4, -1.0]).hard, &empty_routes(), Arm::Hard)[0];
+        assert_eq!((s.total, s.satisfied, s.violations, s.unknown), (5, 3, 1, 1));
+        assert_eq!(s.verdict(), "VIOLATED + UNKNOWN");
+        let report = MetadataReport { routing: vec![s.clone()], ..Default::default() };
+        assert_eq!(report.hard_violated(), 1);
+        let s = &statuses(&reqs(&[0.1, -1.0]).hard, &empty_routes(), Arm::Hard)[0];
+        assert!(s.met() && s.satisfied == 1, "{s:?}");
+        assert_eq!(s.verdict(), "UNKNOWN");
     }
 
     #[test]

@@ -21,7 +21,8 @@ M0 test calls them.
 
 **Verdict: M0 is not done.** The result is unchanged from pass 2. 12 of the 13 criteria below are met:
 
-- Criterion #1 (CI) is met with a gap.
+- Criterion #1 (CI) is met with a gap. The review panel (§7) found the nightly job could not tell the truth as built;
+  that and the gap are fixed on m0 since.
 - Criterion #11 (RTE T2) is met as the master plan words it. It is not met under plan-05's stricter wording, and
   RTE-03's own acceptance is not met (§1, §2).
 - Criterion #2 is not met. Its item, RTE-06, was not merged.
@@ -112,7 +113,7 @@ Every test named below was re-checked `ok` in this pass's release log unless sta
 
 | # | Criterion | Status | Evidence |
 |---|---|---|---|
-| 1 | CI runs `cargo test --workspace` on every push; release generator tests; nightly tool tests fail loudly when a tool is missing (FLOW T13) | **met, with a gap** | `.github/workflows/ci.yml`, three gating jobs:<br>• `test` (on push): `cargo build --workspace --locked`, then `cargo test --workspace --locked --no-fail-fast`.<br>• `release`: `cell_selfcheck` and `ota_cross_pdk` in release.<br>• `nightly`: `PHILIS_REQUIRE_TOOLS=1`, `--include-ignored`, ngspice, and sky130 at `fa87f8f4…` via volare.<br>`tool_or_skip_tells_present_from_missing` ok. CI was not observed running, because nothing is pushed.<br>**Gap (unchanged):** the `library` unit test `fixture_nets_without_a_resistor_keep_em_sizing` (frontend/library/src/lib.rs:1706) skips with `eprintln!("SKIP …")` and returns, and it ignores `PHILIS_REQUIRE_TOOLS`. Only perf_postlayout.rs reads that variable. A nightly run without ngspice or the models would pass this test instead of failing loudly.<br>The suite is also not green (§3: two red tests), while plan-08's M0 row expects only the dac4 test to be red. |
+| 1 | CI runs `cargo test --workspace` on every push; release generator tests; nightly tool tests fail loudly when a tool is missing (FLOW T13) | **met, with a gap** | `.github/workflows/ci.yml`, three gating jobs:<br>• `test` (on push): `cargo build --workspace --locked`, then `cargo test --workspace --locked --no-fail-fast`.<br>• `release`: `cell_selfcheck` and `ota_cross_pdk` in release.<br>• `nightly`: `PHILIS_REQUIRE_TOOLS=1`, `--include-ignored`, ngspice, and sky130 at `fa87f8f4…` via volare. **Review panel (§7, findings 3/15):** workspace-wide `--include-ignored` also ran the EXT placeholders (`coverage_is_total` is `unimplemented!`, `twelve_thousand_devices` > 13 min), so this job was always red or hung and a missing-tool panic was indistinguishable; criterion 1 was therefore **not met** as measured here. Fixed: the job now runs the non-ignored workspace plus the ignored signoff target by name, with a 90-min timeout.<br>`tool_or_skip_tells_present_from_missing` ok. CI was not observed running, because nothing is pushed.<br>**Gap (fixed by the review panel, §7 findings 4/16):** the `library` unit test `fixture_nets_without_a_resistor_keep_em_sizing` (frontend/library/src/lib.rs:1706) skips with `eprintln!("SKIP …")` and returns, and it ignores `PHILIS_REQUIRE_TOOLS`. Only perf_postlayout.rs reads that variable. A nightly run without ngspice or the models would pass this test instead of failing loudly.<br>The suite is also not green (§3: two red tests), while plan-08's M0 row expects only the dac4 test to be red. |
 | 2 | `signoff_fixtures` green including dac4 at `feedback_iters = 1` (REL T1, RTE T11) | **not met** (RTE-06 not merged) | `fixtures_sign_off_within_baseline` FAILED at benchmarks/tests/signoff_fixtures.rs:173: `dac4: ERC rows ["erc/ar.met2.1:gate"], expected []`. dac4's row: DRC 0, ERC 1, PEX 282.0 fF, LVS clean with 16 unverified. The other 6 default fixtures have DRC 0, ERC 0 and clean LVS (§3). `large_fixtures_sign_off_within_baseline` (`--ignored`) ok: ota, ota_constrained and tt_ota each have DRC 0, ERC 0, PEX 585.8 fF, clean LVS and 0 unverified. |
 | 3 | `antenna_in_loop_never_passes_what_signoff_fails` green (REL T2) | **met** | ok. With `--nocapture`:<br>• dac4: signoff `["erc/ar.met2.1:gate"]`, in-loop `(5 total, 4 satisfied, 0 unknown)`, so the in-loop model flags the violation.<br>• pair, quad, rc_filter, chain4: in-loop `(1, 1, 0)`, no signoff rows.<br>• bjt_mirror, bgr_core: no rows on either side. |
 | 4 | Bench LVS reads `PARTIAL(2)` bjt_mirror, `PARTIAL(9)` bgr_core, `PARTIAL(16)` dac4, `MATCH` for the other 7 (PERF M0) | **met** | Bench table §4, LVS column, exactly as required. |
@@ -224,8 +225,9 @@ printed for the two BJT fixtures, which have no operating point.
 | rc_filter | 6 714 | 3 / 5 | 87 230 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 24.0 / 7.6 | 163.3 | 62.0 | 2.8 | 2/5 conv. | 1, 0 | 28 µW probe | 3 (0), 1, 0.055 | 1.613 | 2 | 0 |
 | tt_ota | 25 545 | 5 / 9 | 497 540 | 0 | 0 | 0 | 0 | MATCH | 0 | 0 | 588.4 / 263.8 | 1729.8 | 87.7 | 42.1 | 1/20 budget | 4, 3 | 2 µW probe | 6 (0), 0, 0.003 | 1.140 | 2 | 0 |
 
-These columns are the same on every row: overlap 0 nm², matched mismatch 0, islands extra 0, dp temps 220,
-decode fail 0, matched incompat 0. The `key tier` column equals `C sig` on every row.
+These columns are the same on every row: overlap 0 nm², matched mismatch 0, dp temps 220. The bench also printed
+islands extra, decode fail and matched incompat as 0, but nothing measures them before PLC-12, PLC-08 and PLC-03:
+they were placeholders, not measured zeros. Since the review panel they print `n/a` (§7, finding 17). The `key tier` column equals `C sig` on every row.
 
 **Reproducibility:** every column except ms is identical to pass 2, on all 10 rows and in the constraint table. The
 code is unchanged, the epoch count is fixed (`budget` = 15 or 20 epochs, not a time budget), and the seed is 1, so
@@ -348,3 +350,46 @@ signed off by a default run before. They are still `#[ignore]` in the default ru
    branch. They are reachable only through the reflogs (`m0-routing@{1}`, `m0-antenna@{1}`) until those expire. If
    RTE-06 is to be merged as "acceptance not met", `32efea4` must be re-pointed by a branch first.
 5. **The OTA CommonCentroid rows** are 0/3 since FLOW-01, pending `cellgen::folds` honouring CommonCentroid.
+
+## 7. Review panel
+
+The M0 review panel raised 26 findings. Each was checked against the code on `m0` at `0c40ce5`, and the real ones were
+fixed in "M0: review-panel fixes". After the fixes, `cargo test --release --workspace --no-fail-fast` gives **439
+passed, 2 failed, 7 ignored**. The four new passes are new tests. The two failures are the same two as before: dac4
+(`erc/ar.met2.1:gate`) and `hier_elaborate`. With ngspice and the models present, the log has no `SKIP` line. A
+mutation check confirms the new undrawn-device assertion fails when the epoch rows are removed. With
+`PHILIS_REQUIRE_TOOLS=1` and `PDK_ROOT=/nonexistent`, `fixture_nets_without_a_resistor_keep_em_sizing` panics as
+intended. Debug `antenna_diode`, `extra_devices` and `flow_smoke` pass. The bench was not re-run; the printed bench
+columns that changed are listed under 6 and 17.
+
+| # | Finding | Outcome |
+|---|---|---|
+| 1 | RTE-06 not on m0; dac4 exit criterion unmet | **Deferred (owner decision).** The finding is real. The commits are preserved on the new branch `m0-rte06-rejected` (`32efea4`). Status recorded in plan-05 RTE-06. Owner choice: merge with "acceptance not met" plus a named owner for dac4's met2 cap-plate antenna, or re-scope §5 criterion 2. Baseline not relaxed. |
+| 2 | RTE-03 on m0 without review; Acceptance 3 unmet | **Deferred (owner decision).** The finding is real. The originals are preserved on `m0-rte03-original` (`93fe6fb`). plan-05 RTE-03 now records "not merged through review" and "acceptance 3 not met (7/90 dac4 dr reports)". Owner choice: revert `ba49ae2`, or keep it and hand the residual congestion to RTE-08 (M1). |
+| 3 | Nightly `--include-ignored` runs EXT placeholders | **Fixed.** The nightly job runs the non-ignored workspace plus `-p benchmark --test signoff_fixtures -- --ignored`. The choice is recorded in plan-08 FLOW-14. |
+| 4 | EM-sizing test ignores `PHILIS_REQUIRE_TOOLS` | **Fixed.** `library::tools::{present_or_skip, tool_or_skip, sky130_models}` (`#[doc(hidden)]`) are shared by perf_postlayout.rs and the unit test. |
+| 5 | `lex_key` drops `lvs-coverage/` rows silently | **Fixed (option b, amendment).** Recorded in plan-07 PERF-02 step 3 and master §6.1. The `RunStats::converged` doc and `lex_key` comment now say that converged does not imply LVS-complete; `certified()` does. |
+| 6 | `satisfied` counted unknowns | **Fixed.** `BudgetStatus` gains `violations`. `satisfied = total − violations − unknown` (saturating, because `CentroidGroup` can count a rule as both violated and unknown). `met()` means no violations. `hard_violated()` sums `violations`, so V is unchanged. The verdict shows `VIOLATED + UNKNOWN`. The report table prints viol/unk columns. The bench's EM `viol` reads `violations`. New test: `an_unknown_is_not_satisfied`. |
+| 7 | `touch` closure duplicates `Rect::touches` | **Fixed.** |
+| 8 | Via grouping deviates from REL-03 step 4.3 | **Fixed (amendment).** The transitive grouping and its known false-pass case are recorded in plan-06 REL-03 step 4.3. Code unchanged: pair-wise groups would split dr's arrays into single cuts that falsely fail. |
+| 9 | CELL-01 keep-outs never filled | **Fixed (record).** plan-03 CELL-01 now states that keep-outs are plumbing only until CELL-06/RTE-15, and that `Drawn` is resistor-only. AC-17 stays open. The commit message cannot be changed (no history rewrite). |
+| 10 | Dead `cell.antenna_sidewall` fallback; stale gf180 text | **Fixed.** The fallback and the `antenna_sidewall` registry row are deleted, so a reintroduced table now fails validation. `antenna_source`'s reader text is corrected. gf180's sentence now says the checker runs its sidewall rules. |
+| 11 | `em_rules` drops entries past 16 silently | **Fixed.** `em.len() > MAX_LAYERS` pushes its own missing row. The unchecked-layer check reads the full `em` list. New test: `em_rules_name_what_goes_unchecked`. |
+| 12 | Winner debug check filters `diode_marker`, not the credit layer | **Fixed.** It filters on `antenna_diode_credit()`'s layer, the one the epoch draws on. |
+| 13 | `unverified()` lists unread keys as assumed | **Fixed.** Keys whose registry `reader` is `unread` are excluded. The test now expects `gate_cap_af_um2` in the list and `n_well_depth` out of it. |
+| 14 | Garbled EM missing-input text that names no layer | **Fixed.** The text now reads "deck EM limit on every routed and pin-access layer (li unchecked)" with the layer names, leaked once per run. |
+| 15 | Nightly always red or hanging; criterion #1 overstated | **Fixed.** Same fix as 3, plus `timeout-minutes: 90`. §2 criterion 1 records that the job, as measured before this fix, did not meet T13. |
+| 16 | Same as 4 | **Fixed** (see 4). |
+| 17 | Unmeasured counters print as 0 | **Fixed.** `PlacementMetrics::islands_extra`, `PlaceStats::decode_fail` and `matched_incompatible` are now `Option` (`None` until PLC-12/08/03), and the bench prints `n/a`. The §4 sentence is corrected. |
+| 18 | LVS says params are compared, but only MOS are | **Fixed.** The coverage note says MOS W/L only. `signoff_checked` adds a skipped row `lvs.parameter_mismatch(non-MOS values)` with the count of compared R/D/C/BJT cards, so the bench's `skipped [...]` names it. The CRATES.md note is corrected. New test: `a_compared_resistor_value_is_listed_as_not_compared`. Bench MATCH/PARTIAL semantics are unchanged (criterion 4 stays as worded). |
+| 19 | Sidecar load failures skip cellgen/extra_devices tests | **Fixed.** These tests use `Pdk::builtin("sky130").expect(..)`, and so does `multi_start_is_deterministic`, which had the same skip. |
+| 20 | REL T2 test is per fixture, not per net; counted unknowns twice | **Partly fixed, partly deferred to M1.** The assertion is now `b.violations > 0`, with no double count. The per-net check is deferred: a signoff ERC row carries no net (`verify::Finding` is a point on the `gate` layer), so per-net attribution needs net-tagged ERC findings. The limitation is stated in the test's doc. |
+| 21 | An undrawable device never enters the epoch key | **Fixed.** `undrawable()` rows are shared by `signoff` and the epoch, so they count in the epoch's \|V\| (a constant row). A run with an undrawn device never reads feasible or converged. The test asserts `!converged`; it fails without the fix (mutation-checked). |
+| 22 | `drawn_cards` drops a card with a missing pin | **Fixed.** A missing pin becomes the non-port net `~{cell}.{owner}.no-{t}`, and the card stays. The unit test covers it. |
+| 23 | DRC warnings counted inconsistently | **Fixed.** `verify::Finding` gains `warning`. `signoff_drc` and the fixture DRC count leave warnings out; the bench's `drc_located.txt` tags them. |
+| 24 | `shortfall` reports 0 for a violated maximum | **Fixed.** A length margin is `|limit − measured|`; every row is a violation, so this is the shortfall or the overshoot. The test is updated (100 vs 170 now reads 70). |
+| 25 | strongarm skipped by name in the conflict test | **Fixed.** `strongarm_conflicts_are_todays` pins today's set exactly: `(mn1, mp8)` and `(mn2, mp8)`. |
+| 26 | Vacuous overlap assertion | **Fixed.** It now asserts `overlap_nm2 == gp::mechanics::encroachment(&sol.layout, 0)`. |
+
+No finding was rejected outright. Two (1, 2) wait on the owner decisions recorded in §6, and part of 20 is deferred to
+M1.

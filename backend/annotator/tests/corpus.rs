@@ -174,36 +174,57 @@ fn permutation_invariance() {
     }
 }
 
-/// T6 over the emitted placement arms: no unordered device pair carries both
-/// a `Proximity` and an `Isolation`, and no device is in two hard `Symmetry`
-/// entries (two pairs, or two axes).
-fn assert_no_conflicts(name: &str, src: &str) {
+/// T6 over the emitted placement arms of `name`: the unordered device pairs
+/// carrying both a `Proximity` and an `Isolation`, and the devices in more
+/// than one hard `Symmetry` entry (two pairs, or two axes). Both empty is T6.
+fn conflicts(name: &str, src: &str) -> (Vec<(String, String)>, Vec<String>) {
     let nl = net(src);
     let p = annotate(&nl, &cfg(name));
     let arms = || p.placement.hard.iter().chain(&p.placement.budget).chain(&p.placement.cost);
     let pairs = |kind: &str| -> BTreeSet<(u32, u32)> {
         arms().filter(|b| b.kind().ends_with(kind)).flat_map(|b| id_pairs(b.as_ref())).map(|(a, b)| (a.min(b), a.max(b))).collect()
     };
-    let dev = |d: u32| nl.devices[d as usize].name.as_str();
-    let both: Vec<_> = pairs("::Proximity").intersection(&pairs("::Isolation")).map(|&(a, b)| (dev(a), dev(b))).collect();
-    assert!(both.is_empty(), "{name}: Proximity and Isolation on {both:?}");
+    let dev = |d: u32| nl.devices[d as usize].name.clone();
+    let both = pairs("::Proximity").intersection(&pairs("::Isolation")).map(|&(a, b)| (dev(a), dev(b))).collect();
     let mut mirror = Vec::new();
     p.placement.hard.iter().for_each(|b| b.mirror_pairs(&mut mirror));
     let mut seen = BTreeMap::new();
-    for &(a, b, axis) in &mirror {
+    for &(a, b, _) in &mirror {
         for d in if a == b { vec![a] } else { vec![a, b] } {
             *seen.entry(d).or_insert(0) += 1;
-            assert!(seen[&d] == 1, "{name}: device {} in two symmetry entries (axis {axis})", dev(d));
         }
     }
+    let twice = seen.into_iter().filter(|&(_, n)| n > 1).map(|(d, _)| dev(d)).collect();
+    (both, twice)
 }
 
+fn assert_no_conflicts(name: &str, src: &str) {
+    let (both, twice) = conflicts(name, src);
+    assert!(both.is_empty(), "{name}: Proximity and Isolation on {both:?}");
+    assert!(twice.is_empty(), "{name}: devices in two symmetry entries: {twice:?}");
+}
+
+/// Every corpus circuit but strongarm, whose known conflicts
+/// [`strongarm_conflicts_are_todays`] pins.
 #[test]
 fn no_emitted_conflicts() {
     for (name, src) in all().filter(|c| c.0 != "strongarm") {
         assert_no_conflicts(name, src);
     }
 }
+
+/// Characterises, does not endorse: strongarm's conflicts today, exactly. A
+/// regression adds a row and fails; EXT-14/REL-09's fix removes one, fails,
+/// and edits this row in the same commit.
+#[test]
+fn strongarm_conflicts_are_todays() {
+    let (both, twice) = conflicts("strongarm", STRONGARM);
+    let both: Vec<(&str, &str)> = both.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    assert_eq!((both.as_slice(), twice.as_slice()), (STRONGARM_CONFLICTS, &[] as &[String]));
+}
+
+/// The clocked tail `mp8` against the input pair (AA-13).
+const STRONGARM_CONFLICTS: &[(&str, &str)] = &[("mn1", "mp8"), ("mn2", "mp8")];
 
 /// AA-13: a clocked device on the input pair's axis gets Proximity ≤ 5 µm and
 /// Isolation ≥ 10 µm to `mn1`/`mn2`. The plan names the tail `mn0`; today it is

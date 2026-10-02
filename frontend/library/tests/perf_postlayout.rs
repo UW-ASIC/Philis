@@ -6,43 +6,7 @@
 
 use library::oppoint::OpConfig;
 use library::perf::{evaluate, Parasitics, PerfConfig, Spec};
-
-/// Whether this test may run: `true` when `what` is present; otherwise a
-/// panic under `PHILIS_REQUIRE_TOOLS=1`, else an `eprintln!` and `false`.
-fn present_or_skip(what: &str, present: bool) -> bool {
-    if !present {
-        assert!(
-            std::env::var_os("PHILIS_REQUIRE_TOOLS").is_none_or(|v| v != "1"),
-            "PHILIS_REQUIRE_TOOLS=1 and {what} is missing"
-        );
-        eprintln!("{what} unavailable — skipping");
-    }
-    present
-}
-
-/// `bin` counts as present when it spawns at all (`--version` exits either
-/// way); only a failed spawn, i.e. not on PATH, is absent.
-fn tool_or_skip(bin: &str) -> bool {
-    present_or_skip(
-        bin,
-        std::process::Command::new(bin)
-            .arg("--version")
-            .output()
-            .is_ok(),
-    )
-}
-
-fn models() -> Option<std::path::PathBuf> {
-    if !tool_or_skip("ngspice") {
-        return None;
-    }
-    let root = std::env::var_os("PDK_ROOT")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".volare")));
-    let lib = root.map(|r| r.join("sky130A/libs.tech/ngspice/sky130.lib.spice"));
-    let found = lib.as_ref().is_some_and(|l| l.is_file());
-    present_or_skip(&format!("sky130 models ({lib:?})"), found).then(|| lib.unwrap())
-}
+use library::tools::{sky130_models as models, tool_or_skip};
 
 /// The cargo running this build reads as present (so detection cannot
 /// silently skip every ngspice test); a binary that is on no PATH skips

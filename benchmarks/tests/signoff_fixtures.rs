@@ -114,7 +114,9 @@ fn check(name: &str, max_drc: usize, expected_erc: &[&str], lvs_must_match: bool
     let signoff = library::signoff(&sol, &pdk);
     let report = &signoff.report;
     let shapes = sol.geometry();
-    let raw = verify::drc(&shapes, &[], &pdk);
+    // Errors only: a deck warning is `signoff.warnings`, as in the bench's DRC
+    // column and the epoch's |V| (PERF-01).
+    let raw: Vec<verify::Finding> = verify::drc(&shapes, &[], &pdk).into_iter().filter(|f| !f.warning).collect();
 
     let mut by_origin: BTreeMap<&str, usize> = BTreeMap::new();
     let mut by_rule: BTreeMap<String, usize> = BTreeMap::new();
@@ -194,9 +196,14 @@ fn large_fixtures_sign_off_within_baseline() {
 
 /// The in-loop antenna model never passes what signoff fails (REL T2): a
 /// fixture with an `erc/ar.*` signoff row has an `Antenna` family with a
-/// violated rule not explained by unknowns. One-directional on purpose — the
-/// loop sums per-rect sidewall perimeters and credits a diode only where one
-/// is touched, so it may flag what signoff passes.
+/// violated rule. One-directional on purpose — the loop sums per-rect
+/// sidewall perimeters and credits a diode only where one is touched, so it
+/// may flag what signoff passes.
+///
+/// ponytail: per fixture, not per net as REL T2 reads: a signoff row carries
+/// no net (`verify::Finding` is a point on a layer, here the gate), so a
+/// violation on another net would pass this. Per net needs net-attributed ERC
+/// findings (M1).
 #[test]
 fn antenna_in_loop_never_passes_what_signoff_fails() {
     let pdk = pdk();
@@ -207,12 +214,13 @@ fn antenna_in_loop_never_passes_what_signoff_fails() {
         let report = library::signoff(&sol, &pdk).report;
         let ar: Vec<&str> = report.hard_violations.iter().map(|v| v.rule.as_str()).filter(|r| r.starts_with("erc/ar.")).collect();
         let fams: Vec<_> = sol.metadata.routing.iter().filter(|b| b.kind.ends_with("Antenna")).collect();
-        println!("{name:16} signoff antenna rows {ar:?}  in-loop {:?}", fams.iter().map(|b| (b.total, b.satisfied, b.unknown)).collect::<Vec<_>>());
+        let counts = || fams.iter().map(|b| (b.total, b.satisfied, b.violations, b.unknown)).collect::<Vec<_>>();
+        println!("{name:16} signoff antenna rows {ar:?}  in-loop (total, sat, viol, unk) {:?}", counts());
         if !ar.is_empty() {
             assert!(
-                fams.iter().any(|b| b.satisfied + b.unknown < b.total),
+                fams.iter().any(|b| b.violations > 0),
                 "{name}: signoff fails {ar:?}, the in-loop antenna model passes it: {:?}",
-                fams.iter().map(|b| (b.total, b.satisfied, b.unknown)).collect::<Vec<_>>()
+                counts()
             );
         }
     }
@@ -307,4 +315,6 @@ L1 vmid vout 1n
     let undrawable: Vec<&str> = report.hard_violations.iter().map(|v| v.rule.as_str()).filter(|r| r.starts_with("cell/undrawable")).collect();
     assert_eq!(undrawable.len(), 1, "{undrawable:?}");
     assert!(undrawable[0].contains("L1"), "{undrawable:?}");
+    // The epoch counts it too: an undrawn device is never a feasible stop.
+    assert!(!sol.stats.converged, "converged with L1 undrawn: {:?}", sol.stats);
 }

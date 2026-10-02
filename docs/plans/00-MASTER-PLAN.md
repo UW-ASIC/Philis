@@ -561,6 +561,9 @@ should patch their text when they pick up an item. Master decisions beyond the c
   certification and every "beats hand layout" claim.
 - **[master decision] Unknown is never pass** (NOTES-02): every rule that cannot measure reports `known = false` and
   is counted in the metadata report, never in the satisfied count. This binds MAT-04, REL-01/03, RTE-02/05, PERF-02.
+  **Amendment (M0 review panel):** the epoch key's |V| leaves out the `lvs-coverage/` rows (an uncompared device is
+  the same on every layout); they stay hard rows of signoff and block `certified()`. So `RunStats::converged` does not
+  imply LVS-complete (plan-07 PERF-02 step 3).
 
 ### 6.2 Shared type names (fixed once)
 

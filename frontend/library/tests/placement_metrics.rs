@@ -17,16 +17,14 @@ fn small(gp_mode: GpMode) -> Config {
 
 #[test]
 fn metrics_are_populated_on_ota() {
-    let stats = run_ota(&small(GpMode::Analytic)).stats;
+    let sol = run_ota(&small(GpMode::Analytic));
+    let stats = sol.stats;
     eprintln!("{:?}\n{:?}", stats.place, stats.dp);
     assert!(stats.dp.proposals > 0, "dp counted no proposals: {:?}", stats.dp);
     assert!(stats.place.area_usage >= 1.0, "footprint below Σ cell area: {:?}", stats.place);
-    // Existence, not legality: AP-14's legalizer can leave overlap today (PLC-09 asserts 0).
-    assert!(
-        stats.place.overlap_nm2.is_finite() && stats.place.overlap_nm2 >= 0.0,
-        "overlap not a measurement: {:?}",
-        stats.place
-    );
+    // Measured on the returned layout, not legality: AP-14's legalizer can
+    // leave overlap today (PLC-09 asserts 0).
+    assert_eq!(stats.place.overlap_nm2, gp::mechanics::encroachment(&sol.layout, 0), "{:?}", stats.place);
 }
 
 /// Also pins the Config -> Flow -> `gp::place` plumbing: with it broken, Pile

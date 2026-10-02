@@ -182,6 +182,10 @@ Order: correctness first (P0), then core capability (P1), then advantage (P2). N
     - `a_segmented_resistor_signs_off_lvs_clean`: netlist `XR1 a b sky130_fd_pr__res_high_po w=0.69u l=40u`, the n=2 variant forced by variant index → `signoff_with_intent` has 0 rows starting `lvs/`; the reference holds 2 resistor cards.
     - `a_missing_segment_is_an_lvs_error`: remove one `drawn` entry before signoff → ≥ 1 `lvs/` row.
 - Acceptance: every resistor variant (not only n=1) of the bench fixtures is LVS MATCH, and no signoff row names a segment.
+- Status (M0, recorded by the review panel): `Macro::keepouts` and `Builder::keepout` are plumbing only. No generator
+  calls `keepout` (the only reader, dr's `place_macro` copy, moves an empty list), so AC-17 ("no keep-out export")
+  stays open until CELL-06/RTE-15 record gate, resistor-body and cap-plate rects. `Drawn` is emitted by the resistor
+  alone; the MIM, diode and BJT units carry none yet, so their LVS cards still come from `cellgen::reference`.
 - Risks:
   - GPurify's refinement may treat named internal nets as anchors. Then `~c.o.k` names break pairing, and the fallback is the empty name.
   - The struct change touches about 20 literals, but each touch is mechanical.

@@ -943,8 +943,10 @@ pub(crate) const BJT_PINS: [&str; 3] = ["E", "B", "C"];
 /// schematic devices they replace (sorted, distinct), whose own cards
 /// [`reference`] must skip. `Node::Pin(t)` is the net of the macro's bound pin
 /// `d{owner}:{t}`; `Node::Internal(k)` is the non-port net `~{cell}.{owner}.{k}`,
-/// `cell` the macro's index in `placed`. A card whose pin is missing is
-/// dropped, so the drawn device shows as an extracted extra.
+/// `cell` the macro's index in `placed`. A pin that is missing reads as the
+/// non-port net `~{cell}.{owner}.no-{t}`, which nothing drawn reaches: the
+/// card stays, so the device is an LVS mismatch where the deck extracts its
+/// kind and an `lvs-coverage/` unit where it does not, never unaccounted.
 ///
 /// No params: GPurify measures `w`/`l` for MOS only (and `area`, which the
 /// reference never interns), and a param on one side only is a mismatch.
@@ -967,11 +969,12 @@ pub fn drawn_cards(placed: &[Macro], nets: &[String], schematic: &Netlist, pdk: 
                 Node::Unused => None,
                 Node::Pin(t) => {
                     let name = format!("d{}:{t}", d.owner);
-                    Some(m.pins.iter().find(|p| p.name == name).and_then(|p| nets.get(p.net.0 as usize)).cloned())
+                    let net = m.pins.iter().find(|p| p.name == name).and_then(|p| nets.get(p.net.0 as usize)).cloned();
+                    Some(net.unwrap_or_else(|| format!("~{cell}.{}.no-{t}", d.owner)))
                 }
-                Node::Internal(k) => Some(Some(format!("~{cell}.{}.{k}", d.owner))),
+                Node::Internal(k) => Some(format!("~{cell}.{}.{k}", d.owner)),
             };
-            let Some(terminals) = d.nodes.iter().filter_map(node).collect::<Option<Vec<String>>>() else { continue };
+            let terminals: Vec<String> = d.nodes.iter().filter_map(node).collect();
             let model = schematic.devices.get(id.0 as usize).map_or("", |s| s.model.as_str());
             let model = pdk.recipe(recipe, model).map(|r| r.model).filter(|m| !m.is_empty()).or_else(|| (!model.is_empty()).then(|| model.to_string()));
             cards.push(RefDeviceIn { kind, model, terminals, params: Vec::new() });
@@ -1051,13 +1054,10 @@ mod tests {
     use super::*;
     use pnr_core::{LayerId, Net, Pin, Shape};
 
-    /// Load the sky130 deck the benchmarks use. Skips (rather than fails) when the
-    /// PDK is absent, so the suite still runs outside the dev shell — same policy as
-    /// `cells`' own self-check.
-    fn pdk() -> Option<Pdk> {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let json = std::fs::read_to_string(root.join("pdks/sky130.json")).ok()?;
-        Pdk::from_json(&json).ok()
+    /// The sky130 deck the benchmarks use, compiled in: a sidecar that fails
+    /// validation fails the test, never skips it.
+    fn pdk() -> Pdk {
+        Pdk::builtin("sky130").expect("sky130 loads")
     }
 
     /// Two MOSFETs on three nets — the smallest circuit with a real variant space.
@@ -1161,7 +1161,7 @@ mod tests {
     /// user drew is not ours to reconsider.
     #[test]
     fn enumerate_gives_every_cell_a_space_and_pins_injected_ones() {
-        let Some(pdk) = pdk() else { return };
+        let pdk = pdk();
         let netlist = two_devices();
 
         let auto = enumerate(&netlist, &Macros::default(), &Constraints::default(), &pdk, true);
@@ -1243,7 +1243,7 @@ mod tests {
     /// spaces byte-identical to the per-device draw path.
     #[test]
     fn no_matched_groups_is_the_identity_map_with_identical_spaces() {
-        let Some(pdk) = pdk() else { return };
+        let pdk = pdk();
         let netlist = two_devices();
         let cells = enumerate(&netlist, &Macros::default(), &Constraints::default(), &pdk, true);
 
@@ -1374,7 +1374,7 @@ mod tests {
     /// pair currently does not.
     #[test]
     fn a_matched_unitization_collapses_to_one_cell() {
-        let Some(pdk) = pdk() else { return };
+        let pdk = pdk();
         let netlist = matched_mirror();
         let cells = enumerate(
             &netlist,
@@ -1476,7 +1476,7 @@ mod tests {
     /// enumerated.
     #[test]
     fn a_matched_quad_merges_into_a_common_centroid() {
-        let Some(pdk) = pdk() else { return };
+        let pdk = pdk();
         let netlist = matched_quad();
         let members = [0u16, 1, 2, 3];
         let cells = enumerate(
@@ -1523,7 +1523,7 @@ mod tests {
     /// cells, matched by placement.
     #[test]
     fn a_distinct_gate_pair_declines_every_merge() {
-        let Some(pdk) = pdk() else { return };
+        let pdk = pdk();
         let mut netlist = matched_pair(); // G nets 1 and 2 — distinct
         // Half of 800 nm is under the deck's minimum finger: no fold.
         for d in &mut netlist.devices {
@@ -1547,7 +1547,7 @@ mod tests {
     /// every one balanced in current direction and with private gates.
     #[test]
     fn a_two_finger_diff_pair_merges_as_split_gate_abba() {
-        let Some(pdk) = pdk() else { return };
+        let pdk = pdk();
         let netlist = matched_pair(); // G nets 1 and 2 — distinct
         let cells = enumerate(
             &netlist,
@@ -1587,7 +1587,7 @@ mod tests {
     /// never join a merged stack — the whole unitization stays per-device.
     #[test]
     fn an_injected_member_declines_the_merge() {
-        let Some(pdk) = pdk() else { return };
+        let pdk = pdk();
         let netlist = matched_pair();
         let mut injected = Macros::default();
         injected.register(
@@ -1649,7 +1649,7 @@ mod tests {
     /// physically shorted by geometry no DRC rule can object to. Decline, honestly.
     #[test]
     fn mismatched_source_nets_decline_the_merge() {
-        let Some(pdk) = pdk() else { return };
+        let pdk = pdk();
         let mut netlist = matched_pair();
         // Move M2's source off the shared tail.
         for t in &mut netlist.devices[1].terminals {
@@ -1676,7 +1676,7 @@ mod tests {
     /// 1/(5·gm): 20 µm / 150 nm at 10 mS needs N ≥ √(5·gm·R□·W/3L) ≈ 10.4.
     #[test]
     fn transconductance_sets_a_finger_floor() {
-        let Some(pdk) = pdk() else { return };
+        let pdk = pdk();
         let mut netlist = two_devices();
         netlist.devices.truncate(1);
         netlist.devices[0].params = vec![("w".into(), 20_000), ("l".into(), 150)];
@@ -1691,7 +1691,7 @@ mod tests {
     /// exhausts — a merged cell is one odometer digit like any other.
     #[test]
     fn realize_and_escalate_round_trip_over_a_merged_space() {
-        let Some(pdk) = pdk() else { return };
+        let pdk = pdk();
         // A mirror pair at four fingers a side: orders × one or two rows.
         let netlist = matched_mirror();
         let cells = enumerate(
@@ -1734,7 +1734,7 @@ mod tests {
     /// epoch zero.
     #[test]
     fn seed_assignment_is_deterministic() {
-        let Some(pdk) = pdk() else { return };
+        let pdk = pdk();
         let netlist = two_devices();
         let cells = enumerate(&netlist, &Macros::default(), &Constraints::default(), &pdk, true);
         let layers = pdk.routing_layers();
@@ -1754,10 +1754,7 @@ mod tests {
     /// the rail-tied one-unit cap first (slot 0) wherever the netlist lists it.
     #[test]
     fn a_binary_cap_bank_becomes_one_array_cell() {
-        let Some(pdk) = pdk() else {
-            eprintln!("sky130 PDK unavailable — skipping");
-            return;
-        };
+        let pdk = pdk();
         let nets = ["top", "vss", "b0", "b1", "b2"].iter().map(|n| Net { name: (*n).to_string() }).collect();
         let cap = |name: &str, bot: u16, m: i64| Device {
             name: name.to_string(),
@@ -1787,7 +1784,7 @@ mod tests {
     /// once drew `max(nf, m)` against `m` cards).
     #[test]
     fn lone_bjt_draws_as_many_units_as_reference_cards() {
-        let pdk = pdk().expect("pdks/sky130.json is in the repo");
+        let pdk = pdk();
         let netlist = crate::parse("XQ1 c b e sky130_fd_pr__pnp_05v5_W3p40L3p40 nf=3 m=2\n.end\n").expect("parses");
         let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[]));
         let u = sized.unitization.iter().find(|u| u.devices == [DeviceId(0)]).expect("a 1-device unitization");
@@ -1799,7 +1796,7 @@ mod tests {
     /// macro-internal node, no params (GPurify extracts none for a resistor).
     #[test]
     fn drawn_cards_carry_no_params_for_passives() {
-        let pdk = pdk().expect("pdks/sky130.json is in the repo");
+        let pdk = pdk();
         let netlist = crate::parse("XR1 a b sky130_fd_pr__res_high_po w=0.69u l=40u\n.end\n").expect("parses");
         let group = DeviceGroup { devices: vec![DeviceId(0)] };
         let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[]));
@@ -1809,7 +1806,7 @@ mod tests {
             .expect("a 2-segment variant at L = 40 um");
         bind_pins(&mut m, &netlist, &group.devices, None);
         let names: Vec<String> = netlist.nets.iter().map(|n| n.name.clone()).collect();
-        let (cards, replaced) = drawn_cards(&[m], &names, &netlist, &pdk);
+        let (cards, replaced) = drawn_cards(&[m.clone()], &names, &netlist, &pdk);
         assert_eq!(replaced, vec![DeviceId(0)]);
         assert_eq!(cards.len(), 2, "{cards:?}");
         for c in &cards {
@@ -1819,5 +1816,11 @@ mod tests {
         }
         let ends: Vec<&str> = cards.iter().flat_map(|c| &c.terminals).map(String::as_str).filter(|t| !t.starts_with('~')).collect();
         assert_eq!(ends, ["a", "b"], "the string runs a -> ~0.0.1 -> b");
+
+        // A lost pin keeps the card, on a net nothing drawn reaches.
+        m.pins.retain(|p| p.name != "d0:P");
+        let (cards, _) = drawn_cards(&[m], &names, &netlist, &pdk);
+        assert_eq!(cards.len(), 2, "{cards:?}");
+        assert!(cards.iter().any(|c| c.terminals.iter().any(|t| t == "~0.0.no-P")), "{cards:?}");
     }
 }

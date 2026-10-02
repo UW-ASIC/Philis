@@ -25,6 +25,46 @@ pub mod metadata;
 pub mod oppoint;
 pub mod perf;
 
+/// Test gates for external tools (FLOW-14), shared by the unit and
+/// integration tests: a missing tool skips with a printed reason, and under
+/// `PHILIS_REQUIRE_TOOLS=1` (CI's nightly job) panics, so a missing tool is
+/// never a green run.
+#[doc(hidden)]
+pub mod tools {
+    /// `true` when `what` is present; otherwise a panic under
+    /// `PHILIS_REQUIRE_TOOLS=1`, else an `eprintln!` and `false`.
+    pub fn present_or_skip(what: &str, present: bool) -> bool {
+        if !present {
+            assert!(
+                std::env::var_os("PHILIS_REQUIRE_TOOLS").is_none_or(|v| v != "1"),
+                "PHILIS_REQUIRE_TOOLS=1 and {what} is missing"
+            );
+            eprintln!("{what} unavailable — skipping");
+        }
+        present
+    }
+
+    /// `bin` counts as present when it spawns at all (`--version` exits either
+    /// way); only a failed spawn, i.e. not on PATH, is absent.
+    pub fn tool_or_skip(bin: &str) -> bool {
+        present_or_skip(bin, std::process::Command::new(bin).arg("--version").output().is_ok())
+    }
+
+    /// ngspice and the sky130 ngspice library (`$PDK_ROOT`, else `~/.volare`,
+    /// `/sky130A/libs.tech/ngspice/sky130.lib.spice`), gated as [`present_or_skip`].
+    pub fn sky130_models() -> Option<std::path::PathBuf> {
+        if !tool_or_skip("ngspice") {
+            return None;
+        }
+        let root = std::env::var_os("PDK_ROOT")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".volare")));
+        let lib = root.map(|r| r.join("sky130A/libs.tech/ngspice/sky130.lib.spice"));
+        let found = lib.as_ref().is_some_and(|l| l.is_file());
+        present_or_skip(&format!("sky130 models ({lib:?})"), found).then(|| lib.unwrap())
+    }
+}
+
 use annotator::{annotate, AnnotationConfig, Problem};
 pub use dp::PlaceStats;
 pub use geometry::PlacementMetrics;
@@ -128,6 +168,10 @@ pub struct RunStats {
     /// Index of the winning epoch within its assignment.
     pub best_iteration: u32,
     /// Stopped feasible with stationary constraint prices, none saturated.
+    /// Feasible excludes the `lvs-coverage/` rows (devices no deck extracts,
+    /// the same on every layout), so `converged` does not imply LVS-complete:
+    /// [`metadata::MetadataReport::certified`] does. An undrawable device does
+    /// count, so it never reads converged.
     pub converged: bool,
     /// Dual steps on the constraint prices: one per epoch, so it equals
     /// `iterations` (T6).
@@ -340,7 +384,7 @@ fn solve(
     let em_layers: Vec<LayerId> = layers.iter().copied().chain(pin_access.map(|p| p.0)).collect();
     let em_cuts: Vec<elaborate::Cut> = cuts.iter().copied().chain(pin_access.map(|p| p.1)).collect();
     let em = elaborate::em_limits(pdk, &em_layers, &em_cuts, cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15));
-    em_rules(&mut problem, &netlist, &em, &em_layers, &em_cuts, ann.process.stack);
+    em_rules(&mut problem, &netlist, &em, &em_layers, &em_cuts, ann.process.stack, pdk);
     // IR-drop budgets (PWR-02) on nets carrying op current (`annotator::ir`).
     if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
         let vdd_mv = cfg.op.as_ref().map_or(1_800.0, |o| o.vdd * 1e3);
@@ -480,9 +524,10 @@ fn solve(
     // Only a winner claiming zero hard violations must be fully connected; an
     // infeasible winner's opens are already counted and reported at signoff.
     if cfg!(debug_assertions) && best.key.0 == 0 {
-        // Under dr's own joins; a diode marker rides in the routes as the
-        // antenna rule's credit, not as conductor.
-        let marker = pdk.diode_marker();
+        // Under dr's own joins; a diode's shape on the deck's credited layer
+        // rides in the routes as the antenna rule's credit (`Flow::epoch`),
+        // not as conductor.
+        let marker = pdk.antenna_diode_credit().map(|(l, _)| l);
         let wires = best.routes.wires.iter().map(|w| w.iter().filter(|s| Some(s.layer) != marker).copied().collect()).collect();
         let joins = dr::joins(&flow.layers, &flow.cuts, flow.d_router.cfg.pin_access);
         Routes { wires, ..Routes::default() }.debug_check_joined("dr::route (winner)", &joins);
@@ -773,7 +818,8 @@ impl Flow<'_> {
         // The epoch is scored by the same DRC/ERC/LVS gate as the final result.
         let mut labelled = placed;
         labelled.extend(rings.iter().cloned());
-        let signoff = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), self.pdk);
+        let mut signoff = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), self.pdk);
+        signoff.report.hard_violations.extend(undrawable(&macros, self.netlist));
         let mut budgets = metadata::build(
             placement,
             &layout,
@@ -1087,6 +1133,8 @@ fn lex_key(
     // every epoch: no layout fixes them, so they stay out of |V| or no design
     // with a BJT/MOM could ever read feasible, converge or debug-check its
     // winner. They stay in the report, so signoff and bench still see them.
+    // An amendment to PERF-01 step 5 / PERF-02 step 3 (plan-07, master §6.1):
+    // `converged` does not imply LVS-complete; `MetadataReport::certified` does.
     let checked = signoff.hard_violations.iter().filter(|v| !v.rule.starts_with("lvs-coverage/")).count();
     let v = budgets.hard_violated() + own(place) + own(route) + checked;
     let theta = budgets.theta()
@@ -1181,7 +1229,8 @@ fn check_injected(netlist: &pnr_core::Netlist, injected: &Macros, pdk: &Pdk) -> 
 /// on the currents `dr` records per terminal (`Routes::terms`; unknown
 /// without an operating point or with an unresolved device on the net). A
 /// routed or pin-access layer (`metals`, `cuts`) with no deck limit is listed
-/// once as a missing input: its shapes go unchecked.
+/// once as a missing input naming those layers: their shapes go unchecked.
+/// So are deck limits past the rule's `MAX_LAYERS` slots, which it cannot hold.
 fn em_rules(
     problem: &mut Problem,
     netlist: &pnr_core::Netlist,
@@ -1189,15 +1238,28 @@ fn em_rules(
     metals: &[LayerId],
     cuts: &[elaborate::Cut],
     stack: Option<&'static analog::routing::Stack>,
+    pdk: &Pdk,
 ) {
     use analog::routing::em::{Limit, MAX_LAYERS};
     let mut limits = [(u16::MAX, Limit::default()); MAX_LAYERS];
     for (slot, &(l, lim)) in limits.iter_mut().zip(em) {
         *slot = (l.0, lim);
     }
-    let has = |l: LayerId, f: fn(&Limit) -> f32| limits.iter().any(|(x, lim)| *x == l.0 && f(lim) > 0.0);
-    if !metals.iter().all(|&l| has(l, |e| e.ua_per_um)) || !cuts.iter().all(|&(c, ..)| has(c, |e| e.ua_per_cut)) {
-        problem.missing.push(("Electromigration", "a routed or pin-access layer has no deck EM limit (unchecked)"));
+    if em.len() > MAX_LAYERS {
+        problem.missing.push(("Electromigration", "slot for every deck EM limit (more than MAX_LAYERS = 16; the rest unchecked)"));
+    }
+    let has = |l: LayerId, f: fn(&Limit) -> f32| em.iter().any(|(x, lim)| *x == l && f(lim) > 0.0);
+    let name = |l: LayerId| pdk.layers.iter().find(|(_, x)| *x == l).map_or_else(|| format!("layer {}", l.0), |(n, _)| n.clone());
+    let unchecked: Vec<String> = metals
+        .iter()
+        .filter(|&&l| !has(l, |e| e.ua_per_um))
+        .chain(cuts.iter().map(|(c, ..)| c).filter(|&&c| !has(c, |e| e.ua_per_cut)))
+        .map(|&l| name(l))
+        .collect();
+    if !unchecked.is_empty() {
+        // ponytail: leaked once per run (`missing` holds `&'static str`), as the stack is.
+        let input = format!("deck EM limit on every routed and pin-access layer ({} unchecked)", unchecked.join(", "));
+        problem.missing.push(("Electromigration", Box::leak(input.into_boxed_str())));
     }
     let mut terminals = vec![0usize; netlist.nets.len()];
     for (_, net) in netlist.devices.iter().flat_map(|d| &d.terminals) {
@@ -1472,16 +1534,21 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
 pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
     let (shapes, pins, reference) = signoff_inputs(sol, pdk);
     let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
-    // A device this process has no construction for (an NPN without a deep
-    // well, a poly resistor on a fin process) is drawn as nothing: a hard
-    // finding, never hidden behind an LVS that cannot see it either.
-    for (i, m) in sol.macros.iter().take(sol.layout.x.len()).enumerate() {
-        if m.shapes.is_empty() {
-            let (name, model) = sol.netlist.devices.get(i).map_or(("?", "?"), |d| (d.name.as_str(), d.model.as_str()));
-            s.report.hard_violations.push(pnr_core::report::Violation { rule: format!("cell/undrawable: {name} ({model}) has no construction on this process"), margin: 1 });
-        }
-    }
+    s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.netlist));
     s
+}
+
+/// A device this process has no construction for (an NPN without a deep
+/// well, a poly resistor on a fin process, any inductor) is drawn as nothing:
+/// one hard `cell/undrawable` row per empty cell of `cells`, never hidden
+/// behind an LVS that cannot see it either. The epoch counts them in |V| too
+/// (the same rows every epoch, so ranking is unchanged), so a run with an
+/// undrawn device never reads feasible or converged.
+fn undrawable<'a>(cells: &'a [Macro], netlist: &'a pnr_core::Netlist) -> impl Iterator<Item = pnr_core::report::Violation> + 'a {
+    cells.iter().enumerate().filter(|(_, m)| m.shapes.is_empty()).map(|(i, _)| {
+        let (name, model) = netlist.devices.get(i).map_or(("?", "?"), |d| (d.name.as_str(), d.model.as_str()));
+        pnr_core::report::Violation { rule: format!("cell/undrawable: {name} ({model}) has no construction on this process"), margin: 1 }
+    })
 }
 
 /// Adopt devices a later stage inserted (an antenna diode from `dr`): each
@@ -1599,9 +1666,7 @@ mod start_tests {
     /// the same layout, however the threads interleave.
     #[test]
     fn multi_start_is_deterministic() {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let Ok(json) = std::fs::read_to_string(root.join("pdks/sky130.json")) else { return };
-        let pdk = verify::Pdk::from_json(&json).expect("sky130 loads");
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
         let spice = ".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\nXM2 d x VSS VSS nfet_01v8 W=2u L=0.5u\n.ends p\n";
         let cfg = crate::Config { seed: 7, feedback_iters: 2, outer_iters: 1, starts: 3, ..Default::default() };
         let run = || crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow");
@@ -1697,15 +1762,7 @@ mod start_tests {
     #[test]
     fn fixture_nets_without_a_resistor_keep_em_sizing() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let lib = std::env::var_os("PDK_ROOT")
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".volare")))
-            .map(|r| r.join("sky130A/libs.tech/ngspice/sky130.lib.spice"))
-            .filter(|l| l.is_file());
-        let (Some(lib), true) = (lib, std::process::Command::new("ngspice").arg("--version").output().is_ok()) else {
-            eprintln!("SKIP fixture_nets_without_a_resistor_keep_em_sizing: needs ngspice and the sky130 ngspice models");
-            return;
-        };
+        let Some(lib) = crate::tools::sky130_models() else { return };
         let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
         let cfg = crate::Config { op: Some(crate::oppoint::OpConfig { model_lib: Some(lib), ..Default::default() }), ..Default::default() };
         for fixture in ["rc_filter", "dac4"] {
@@ -1724,6 +1781,32 @@ mod start_tests {
         }
     }
 
+    /// A routed layer the deck does not limit is named in the missing row,
+    /// and deck limits past the rule's `MAX_LAYERS` slots are a missing row
+    /// of their own, never a silent drop.
+    #[test]
+    fn em_rules_name_what_goes_unchecked() {
+        use analog::routing::em::{Limit, MAX_LAYERS};
+        use pnr_core::LayerId;
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let nl = crate::parse(".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\n.ends p\n").unwrap();
+        let problem = || crate::annotate(&nl, &crate::annotation(&pdk, &Default::default()));
+        let (name, id) = pdk.layers[0].clone();
+        let lim = Limit { ua_per_um: 1.0, ua_per_cut: 1.0, ..Limit::default() };
+        let full: Vec<_> = (0..=MAX_LAYERS as u16).map(|l| (LayerId(l), lim)).collect();
+
+        let mut p = problem();
+        crate::em_rules(&mut p, &nl, &full, &[LayerId(MAX_LAYERS as u16)], &[], None, &pdk);
+        let rows: Vec<&str> = p.missing.iter().filter(|m| m.0 == "Electromigration").map(|m| m.1).collect();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].contains("MAX_LAYERS"), "{rows:?}");
+
+        let mut p = problem();
+        crate::em_rules(&mut p, &nl, &[], &[id], &[], None, &pdk);
+        let rows: Vec<&str> = p.missing.iter().filter(|m| m.0 == "Electromigration").map(|m| m.1).collect();
+        assert_eq!(rows, [format!("deck EM limit on every routed and pin-access layer ({name} unchecked)")]);
+    }
+
     /// C within the tie band goes to the smaller footprint; outside it, C wins.
     #[test]
     fn close_c_is_decided_by_area_and_far_c_by_c() {
@@ -1737,7 +1820,7 @@ mod start_tests {
     use pnr_core::{Report, Violation};
 
     fn row(arm: Arm, total: usize, satisfied: usize, residual: f64) -> BudgetStatus {
-        BudgetStatus { kind: "K".into(), arm, total, satisfied, unknown: 0, criticality: 0.0, residual, usage: None, violated: Vec::new() }
+        BudgetStatus { kind: "K".into(), arm, total, satisfied, violations: total - satisfied, unknown: 0, criticality: 0.0, residual, usage: None, violated: Vec::new() }
     }
 
     fn rows(rules: &[&str]) -> Vec<Violation> {

@@ -109,7 +109,7 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
 9. **Deck and verify.**
    - ~~`verify` `REQUIRED_RULES` still demands obsolete `bjt_*` cell keys.~~ Closed (FLOW-04): `verify::sidecar::KEYS` requires every key a generator reads with a compiled default, except keys that only raise a deck-derived value and the `npn_isolation` flag (kernel/cells/tests/deck_keys.rs checks both directions, and that every other name a generator reads resolves from the loaded PDK; `max_finger_width`, read by the library, is required by name; post_cell.rs `guard_ring_merge_gap_nm` is not reached by that run).
    - `asymmetric_enclosure` is stricter than magic's "one direction".
-   - ~~Settle whether LVS checks device count and params.~~ Closed (PERF-01): `lvs.device_count_*` / `lvs.parametric` are GPurify's range-limit checks, NotInDeck because the deck has no limits; the reference parameters are compared as `lvs.parameter_mismatch`, and `Coverage`'s listing says so.
+   - ~~Settle whether LVS checks device count and params.~~ Closed (PERF-01): `lvs.device_count_*` / `lvs.parametric` are GPurify's range-limit checks, NotInDeck because the deck has no limits; the reference parameters are compared as `lvs.parameter_mismatch` for MOS W/L only, and `Coverage`'s listing says so. R/D/C/BJT cards carry no params, so their values are not compared: signoff lists them as the `lvs.parameter_mismatch(non-MOS values)` skipped row (M0 review panel).
    - `ir_drop` needs design intent (supply nets + currents).
 10. **Smaller items.**
     - `dp` always runs all 220 iterations; stop it when the result stops improving.

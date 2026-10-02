@@ -1001,6 +1001,12 @@ geometry, every input feature is honoured or refused loudly, and the search spen
      - `nightly` (schedule): installs `ngspice` (apt) and sky130A via volare at the flake's hash
        `1341f54f5ce0c4955326297f235e4ace1eb6d419` (flake.nix:112, shellHook) and runs
        `PHILIS_REQUIRE_TOOLS=1 cargo test --release --workspace -- --include-ignored`.
+       **Amended (M0 review panel):** the job runs `cargo test --release --workspace` (the tool tests are not
+       `#[ignore]`d; they read `PHILIS_REQUIRE_TOOLS`) plus `-p benchmark --test signoff_fixtures -- --ignored` by
+       name, with `timeout-minutes: 90`. A workspace-wide `--include-ignored` also ran EXT-01's placeholders that are
+       `#[ignore]`d until later EXT items (`coverage_is_total` is `unimplemented!`; `twelve_thousand_devices` did not
+       finish in 13.5 min), so the job was red or hung whatever the tools did, and a missing-tool panic could not be
+       told apart from them.
   2. Loud skips: `fn tool_or_skip(bin: &str) -> bool` in each tool-dependent test file (frontend/library/tests/
      perf_postlayout.rs and any ngspice test): if `PHILIS_REQUIRE_TOOLS=1` and the binary is absent → `panic!`, else
      `eprintln!` + return.

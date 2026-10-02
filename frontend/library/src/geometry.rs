@@ -31,8 +31,8 @@ pub struct PlacementMetrics {
     pub overlap_nm2: f64,
     /// Hard mirror pairs `a ≠ b` drawn at different (variant, orient, hw, hh).
     pub matched_geometry_mismatch: u32,
-    /// Symmetry islands beyond one per group; 0 until PLC-12.
-    pub islands_extra: u32,
+    /// Symmetry islands beyond one per group; `None` (not measured) until PLC-12.
+    pub islands_extra: Option<u32>,
 }
 
 /// [`PlacementMetrics`] of `l` with cells drawn as `macros` (indexed like `l`),
@@ -63,7 +63,7 @@ pub fn placement_metrics(macros: &[Macro], l: &Layout, lattice: i32, clearance: 
         clearance_residue_nm2: gp::mechanics::encroachment(l, clearance) - overlap_nm2,
         overlap_nm2,
         matched_geometry_mismatch,
-        islands_extra: 0,
+        islands_extra: None,
     }
 }
 
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(m.matched_geometry_mismatch, 1, "{m:?}");
         // Footprint 530 × 200 over 3 × 200 × 200.
         assert!((m.area_usage - 106_000.0 / 120_000.0).abs() < 1e-6, "{m:?}");
-        assert_eq!(m.islands_extra, 0);
+        assert_eq!(m.islands_extra, None, "not measured before PLC-12");
     }
 
     /// Four quarter-turns return the exact original geometry — no drift creeps in

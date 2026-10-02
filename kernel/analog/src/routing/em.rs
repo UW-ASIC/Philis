@@ -136,9 +136,8 @@ impl Electromigration {
         // i.e. landing on a common shape below and a common shape above (by
         // index into `all`), share the group's current.
         let rank = |l: u16| stack.layers.iter().position(|x| x.id == l);
-        let touch = |a: &pnr_core::geom::Rect, b: &pnr_core::geom::Rect| a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
         let lands = |c: &Shape, side: usize| -> Vec<usize> {
-            (0..all.len()).filter(|&m| rank(all[m].layer.0) == Some(side) && touch(&all[m].rect, &c.rect)).collect()
+            (0..all.len()).filter(|&m| rank(all[m].layer.0) == Some(side) && all[m].rect.touches(&c.rect)).collect()
         };
         let cuts: Vec<(usize, Limit, Vec<usize>, Vec<usize>)> = routed
             .iter()

@@ -105,11 +105,13 @@ impl Elaborated {
     }
 
     /// Geometric DRC only — runs without a schematic. Margin is [`verify::shortfall`]:
-    /// nm for a length rule, ‰ of the limit otherwise.
+    /// nm for a length rule, ‰ of the limit otherwise. Deck warnings are left
+    /// out, as [`verify::Signoff::warnings`] keeps them out of the report.
     #[must_use]
     pub fn signoff_drc(&self, pdk: &Pdk) -> Vec<pnr_core::Violation> {
         verify::drc(&self.geometry(), &[], pdk)
             .into_iter()
+            .filter(|f| !f.warning)
             .map(|f| pnr_core::Violation {
                 rule: format!("drc/{}:{}", f.rule, f.layer),
                 margin: f.margin,

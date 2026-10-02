@@ -27,8 +27,10 @@ pub use pdk::{EmLimit, Pdk};
 pub use reference::{RefDeviceIn, RefInput, RefKind};
 
 /// Shortfall of one violation row, in one of two units. A length pair is nm
-/// (1 dbu = 1 nm): `limit − measured`, floored at 0 — a row does not carry its
-/// rule's `LimitSense`, so a maximum rule's overshoot reads 0 here. Any other
+/// (1 dbu = 1 nm): `|limit − measured|` — every row is a violation, so that
+/// is a minimum's shortfall and a maximum's overshoot alike (a row does not
+/// carry its rule's `LimitSense`; LU.2's 20 µm tap distance against 15 µm
+/// reads 5000). Any other
 /// same-dimension numeric pair (area, ratio, count, voltage, current,
 /// resistance) is ‰ of the limit, `ceil(1000·|measured − limit| / |limit|)`
 /// (`|limit|` floored at 1e-12), so an antenna ratio 2× over reads 1000 and
@@ -42,7 +44,7 @@ pub fn shortfall(limit: Measurement, measured: Measurement) -> i64 {
         if x.is_nan() { i64::MAX } else { x as i64 }
     };
     match (limit, measured) {
-        (M::Length(l), M::Length(m)) => (l.raw() - m.raw()).max(0),
+        (M::Length(l), M::Length(m)) => (l.raw() - m.raw()).abs(),
         (M::Area(l), M::Area(m)) => permille(l.raw() as f64, m.raw() as f64),
         (M::Ratio(l), M::Ratio(m)) => permille(l, m),
         (M::Count(l), M::Count(m)) => permille(f64::from(l), f64::from(m)),
@@ -84,7 +86,8 @@ pub struct Coverage {
 
 /// GPurify's layout-only range checks, recorded `Skipped(NotInDeck)` because
 /// the deck carries no limits; the reference parameter comparison runs under
-/// `lvs.parameter_mismatch`, so these skips do not mean LVS ignored W/L.
+/// `lvs.parameter_mismatch` for MOS W/L only, so these skips do not mean LVS
+/// ignored W/L. Other kinds' values are the [`NON_MOS_VALUES`] row.
 const RANGE_ONLY: [&str; 3] = ["lvs.device_count_mos", "lvs.device_count_bjt", "lvs.parametric"];
 
 impl std::fmt::Display for Coverage {
@@ -97,7 +100,7 @@ impl std::fmt::Display for Coverage {
         }
         for (rule, why) in &self.skipped_rules {
             let note = if RANGE_ONLY.contains(&rule.as_str()) {
-                " (range limits; reference parameters are compared as lvs.parameter_mismatch)"
+                " (range limits; MOS W/L are compared as lvs.parameter_mismatch, other values are not)"
             } else {
                 ""
             };
@@ -237,11 +240,24 @@ pub fn signoff_checked(
                     s.caps = checker.cap_matrix();
                 }
             }
+            // Only MOS cards carry params: a compared R/D/C/BJT matches by
+            // connectivity alone, its value (rc_filter's R) unchecked. Listed,
+            // so a MATCH never reads as value-checked.
+            let valueless = |k: RefKind| !matches!(k, RefKind::Nmos | RefKind::Pmos);
+            let cards = reference.devices.iter().filter(|d| valueless(d.kind)).count();
+            let uncompared: usize = s.coverage.unverified.iter().filter(|u| valueless(u.0)).map(|u| u.2).sum();
+            if let n @ 1.. = cards.saturating_sub(uncompared) {
+                s.coverage.skipped_rules.push((NON_MOS_VALUES.to_string(), format!("NotCompared({n} R/D/C/BJT cards matched by connectivity only)")));
+            }
         }
     }
     s.elapsed = t0.elapsed();
     s
 }
+
+/// The [`Coverage::skipped_rules`] row for compared devices whose value LVS
+/// does not compare (every kind but MOS).
+pub const NON_MOS_VALUES: &str = "lvs.parameter_mismatch(non-MOS values)";
 
 /// A density window wider than the block (the shapes' union bbox) is chip
 /// integration's check: [`Checker::defer_density_wider_than`].
@@ -314,6 +330,9 @@ pub struct Finding {
     pub unit: &'static str,
     pub x: i64,
     pub y: i64,
+    /// A row the deck states as a warning: [`Signoff::warnings`] in a full
+    /// signoff, so never a DRC/ERC violation count.
+    pub warning: bool,
 }
 
 /// Standalone DRC: a fresh full [`Checker`] per call; an engine failure is a
@@ -331,7 +350,7 @@ pub fn erc(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk) -> Vec<Finding> {
 
 fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks) -> Vec<Finding> {
     let engine_fail =
-        |rule: String| vec![Finding { rule, layer: "-".into(), margin: 1, unit: "permille", x: 0, y: 0 }];
+        |rule: String| vec![Finding { rule, layer: "-".into(), margin: 1, unit: "permille", x: 0, y: 0, warning: false }];
     let mut checker = match Checker::new(pdk, false) {
         Ok(c) => c,
         Err(e) => return engine_fail(format!("engine/load: {e}")),
@@ -355,6 +374,7 @@ fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks) 
                 },
                 x: v.at.x.raw(),
                 y: v.at.y.raw(),
+                warning: v.severity != Severity::Error,
             }
         })
         .collect();
@@ -435,7 +455,7 @@ mod tests {
     fn shortfall_is_nm_for_lengths() {
         let len = |nm: i64| Measurement::Length(Dbu::new_unchecked(nm));
         assert_eq!(shortfall(len(170), len(100)), 70);
-        assert_eq!(shortfall(len(100), len(170)), 0, "a graze cannot go negative");
+        assert_eq!(shortfall(len(100), len(170)), 70, "a maximum's overshoot is no graze");
         assert_eq!(shortfall(len(170), Measurement::Ratio(0.5)), 1);
     }
 
@@ -670,6 +690,22 @@ mod tests {
             "{:?}",
             s.coverage.unverified
         );
+    }
+
+    /// A compared resistor's value is not checked (only MOS cards carry
+    /// params), and coverage says so; an uncompared MOM is not counted there.
+    #[test]
+    fn a_compared_resistor_value_is_listed_as_not_compared() {
+        let pdk = sky130();
+        let card = |kind, model: Option<&str>| RefDeviceIn { kind, model: model.map(Into::into), terminals: vec!["a".into(), "b".into()], params: vec![] };
+        let reference = RefInput {
+            devices: vec![card(RefKind::Resistor, None), card(RefKind::Capacitor, Some("cap_generic_m1m2"))],
+            ports: vec![],
+            external_ports: None,
+        };
+        let s = signoff_checked(&[], &[], &reference, &Intent::default(), &pdk);
+        let row: Vec<_> = s.coverage.skipped_rules.iter().filter(|(r, _)| r == NON_MOS_VALUES).map(|(_, why)| why.as_str()).collect();
+        assert_eq!(row, ["NotCompared(1 R/D/C/BJT cards matched by connectivity only)"], "{:?}", s.coverage.skipped_rules);
     }
 
     // AV-01: sky130's `capm` recognises a MIM; a MOM card (no marker, no

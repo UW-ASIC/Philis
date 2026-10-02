@@ -295,6 +295,12 @@ validation catalog; Graeb §4.8.1 eq. 114, graeb_centering.txt L3370–3376). Me
      `Violation { rule: format!("lvs-coverage/unverified:{kind:?}:{}", model.as_deref().unwrap_or("-")), margin: n as i64 }`
      into `report.hard_violations`. It is a constant offset across all epochs of a run, so ranking is unchanged; it
      blocks `certified()` and every "beats hand layout" claim (T3).
+     **Amended (M0, `d682829`; recorded by the M0 review panel):** `lex_key` drops the `lvs-coverage/` rows from the
+     epoch's |V| (an exception to PERF-01 step 5, "the epoch key counts `report.hard_violations` only"). Counted,
+     bjt_mirror, bgr_core and dac4 could never read feasible or converged, and the winner's debug connectivity check
+     (`key.0 == 0`) never ran on them. So `RunStats::converged` means "no layout-fixable hard row", not
+     LVS-complete; only `certified()` claims LVS-complete. `uncompared_devices_do_not_block_convergence` pins it. An
+     undrawable device (`cell/undrawable`, CELL-04) is not covered by this exception: the epoch counts it in |V|.
   4. (Resistor/diode/BJT LVS parameters are CELL-01 step 7's `Pdk::extracts_params(kind)`; not here.)
   5. Bench LVS column: `MATCH` | `MISMATCH` (any `lvs/` row) | `PARTIAL(n)` (only `lvs-coverage/` rows, n = Σ margins).
   6. AV-28: known-false ERC findings are named, not counted. `BASELINE` carries `expected_erc: &[&str]`, the exact

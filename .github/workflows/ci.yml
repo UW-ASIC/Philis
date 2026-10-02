@@ -57,6 +57,7 @@ jobs:
   nightly:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     env:
       PDK_ROOT: ${{ github.workspace }}/.pdk
       PHILIS_REQUIRE_TOOLS: "1"
@@ -69,4 +70,11 @@ jobs:
       # from (fa87f8f4…, e.g. pdks/sky130.json), not the flake's 1341f54f…
       # (flake.nix shellHook), until those citations are re-verified there.
       - run: pipx install volare && volare enable --pdk sky130 fa87f8f4bbcc7255b6f0c0fb506960f531ae2392
-      - run: cargo test --release --workspace --locked --no-fail-fast -- --include-ignored
+      # Not `--include-ignored` workspace-wide: that also runs the annotator
+      # placeholders `#[ignore]`d until a later EXT item (coverage_is_total is
+      # `unimplemented!`, twelve_thousand_devices runs > 13 min), so the job
+      # would be red or hang whatever the tools do. The tool tests are not
+      # ignored (they read PHILIS_REQUIRE_TOOLS); the one ignored target that
+      # belongs here, the OTA-class signoff, is run by name.
+      - run: cargo test --release --workspace --locked --no-fail-fast
+      - run: cargo test --release --locked --no-fail-fast -p benchmark --test signoff_fixtures -- --ignored

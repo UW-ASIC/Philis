@@ -284,6 +284,13 @@ Philis must check every net that carries current, every segment and every via, e
        1. `all = [r.shapes(net), r.cell_metal(net)].concat()`; `flow = net_flow(stack, &all, r.terminals(net))?`. The cell metal is passed so that terminals joined only through a cell's own strap are reached (else `net_flow` returns `None` and the net reads unknown); this is the edit RTE-24 step 4 asks for, done here once. Only indices `0..r.shapes(net).len()` (the routed shapes) are checked below; cell-internal straps are CELL's (EM-19, RTE-24).
        2. For every metal shape `i` whose layer has `ua_per_um > 0`: `need = lim.width_nm(flow.shape_ua[i], long_side_nm)`. The Blech domain is the shape's own long side (EM-30). [UNVERIFIED: this bounds the Lienig segment only if no two same-net, same-layer shapes abut collinearly; such a pair is one segment (§4.3.1, L5370–5377: a segment ends only at vias or branches) longer than either rect, so the shape side can under-bound it. Dormant today: no shipped deck supplies `blech_limit`.] `have = short_side_nm`. If `have < need`, the residual is `(need − have)/need`.
        3. Group cut shapes on layers with `ua_per_cut > 0` by (cut layer, the set of metal shapes on rank ± 1 they overlap). Group current = max `shape_ua` of its members. `need = lim.cuts(I)`, `have = group size`. If `have < need`, the residual is `(need − have)/need`.
+          **Amended (M0, recorded by the review panel):** as built (kernel/analog/src/routing/em.rs `check`), two cuts of
+          one layer join a group when they share **any** landing shape below and any above, transitively (union-find),
+          not when their landing sets are equal: `dr`'s array cuts spread past the original cut's pads, so each lands on
+          its own pad plus the common trunk, and equal sets would split one array into single cuts. Known false pass:
+          cuts under two unjoined same-layer, same-net shapes merge into one group (`n` = all of them, `I` = the
+          largest member's), so a group that is short of cuts can pass. It needs same-net shapes closer than a cut
+          is wide, which dr does not draw today; split groups per (below, above) landing pair if it ever does.
      - `known = stack.is_some() && check().is_some()`. `satisfied = !known || residual ≤ 0`. `residual = check().unwrap_or(0)`. `headroom = 1 − max(need/have)`.
   5. `frontend/library/src/lib.rs:991-1028` (`em_rules`):
      - Fill `limits` from `em` including cuts, and set `stack: ann.process.stack`.

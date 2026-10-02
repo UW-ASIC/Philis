@@ -539,13 +539,14 @@ impl Pdk {
         crate::sidecar::source(self.cell.as_object()?, key)
     }
 
-    /// Process-data keys this sidecar states on an `UNVERIFIED` source:
-    /// loaded and used, and reported as assumed rather than known.
+    /// Process-data keys this sidecar states on an `UNVERIFIED` source and
+    /// some code reads (registry `reader` not `unread`): used, and reported
+    /// as assumed rather than known. An unread key is assumed by nothing.
     #[must_use]
     pub fn unverified(&self) -> Vec<&str> {
         crate::sidecar::KEYS
             .iter()
-            .filter(|k| k.sourced && self.provenance(k.name).is_some_and(|s| s.starts_with("UNVERIFIED")))
+            .filter(|k| k.sourced && k.reader != "unread" && self.provenance(k.name).is_some_and(|s| s.starts_with("UNVERIFIED")))
             .map(|k| k.name)
             .collect()
     }
@@ -614,20 +615,11 @@ impl Pdk {
     /// `(max ratio, sidewall thickness nm or 0 for areal, cumulative)`. An areal
     /// rule wins over a sidewall one on the same layer; `cumulative` when the
     /// rule is named so (`antenna_cumulative_*`: layers summed up to the stage).
-    /// Without a deck rule, `cell.antenna_sidewall.<layer> = [ratio,
-    /// thickness_nm]` (a sidewall rule the checker cannot run, kept for routing).
+    /// `None` when the deck states no antenna rule for the stage. `antenna`
+    /// and `antenna_electrical` rows alike: the latter is the same per-stage
+    /// ratio (areal) with a diode credit ([`Pdk::antenna_diode_credit`]).
     #[must_use]
     pub fn antenna_rule(&self, layer: LayerId) -> Option<(f32, f32, bool)> {
-        self.antenna_deck_rule(layer).or_else(|| {
-            let name = &self.layers.iter().find(|(_, l)| *l == layer)?.0;
-            let pair = self.cell.get("antenna_sidewall")?.get(name)?;
-            Some((pair.get(0)?.as_f64()? as f32, pair.get(1)?.as_f64()? as f32, false))
-        })
-    }
-
-    /// `antenna` and `antenna_electrical` rows alike: the latter is the same
-    /// per-stage ratio (areal) with a diode credit ([`Pdk::antenna_diode_credit`]).
-    fn antenna_deck_rule(&self, layer: LayerId) -> Option<(f32, f32, bool)> {
         let kinds = [self.strings.get("antenna"), self.strings.get("antenna_electrical")];
         let ratio = self.strings.get("max_ratio")?;
         let side = self.strings.get("sidewall_thickness");
@@ -1447,7 +1439,8 @@ mod tests {
         let sky = Pdk::builtin("sky130").unwrap();
         assert!(sky.provenance("avt_n_mv_um").is_some_and(|s| s.starts_with("Monte Carlo")));
         let assumed = sky.unverified();
-        assert!(assumed.contains(&"n_well_depth") && !assumed.contains(&"avt_n_mv_um"), "{assumed:?}");
+        assert!(assumed.contains(&"gate_cap_af_um2") && !assumed.contains(&"avt_n_mv_um"), "{assumed:?}");
+        assert!(!assumed.contains(&"n_well_depth"), "UNVERIFIED but read by no code, so not assumed: {assumed:?}");
         assert!(!assumed.contains(&"tie_max_dist_nm"), "LU.2/LU.2.1/LU.3 source it: {assumed:?}");
     }
 

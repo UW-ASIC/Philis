@@ -60,8 +60,7 @@ use Kind::{Bool, Count, Layers, List, Nm, Real, Table, Text, Tier};
 
 /// Every key, alphabetical. `<name>_source` of a registered key is implied.
 pub const KEYS: &[Key] = &[
-    k("antenna_sidewall", Table, false, false, "backend/verify/src/pdk.rs antenna_rule"),
-    k("antenna_source", Text, false, false, "provenance of antenna_sidewall and the deck's ANT rules"),
+    k("antenna_source", Text, false, false, "provenance of the deck's antenna rules"),
     k("avt_n_mv_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("avt_p_mv_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("bjt_max_emitter_stripe", Nm, false, false, "unread"),

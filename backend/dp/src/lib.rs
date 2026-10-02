@@ -41,10 +41,11 @@ pub struct PlaceStats {
     pub proposals: u64,
     /// Proposals kept.
     pub accepted: u64,
-    /// Codes the decoder could not realise; 0 until PLC-08 adds a decoder.
-    pub decode_fail: u64,
-    /// Matched sets drawn incompatibly; 0 until PLC-03.
-    pub matched_incompatible: u32,
+    /// Codes the decoder could not realise; `None` (not measured) until
+    /// PLC-08 adds a decoder.
+    pub decode_fail: Option<u64>,
+    /// Matched sets drawn incompatibly; `None` (not measured) until PLC-03.
+    pub matched_incompatible: Option<u32>,
 }
 
 /// The mutable columns a move can touch, for rollback.

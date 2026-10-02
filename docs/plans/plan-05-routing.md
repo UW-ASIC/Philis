@@ -226,6 +226,12 @@ A hand layout of an analog block is DRC/LVS clean, routes matched nets as exact 
   - `an_xy_overlap_on_non_adjacent_layers_is_open`: same-net shapes on layer 0 and layer 2 overlapping in xy with no cut → 1 open.
 - Acceptance: `signoff_fixtures` DRC baseline still 0; no dr report on any bench circuit carries an `unresolved congestion` V entry, and no `routing overuse` Θ entry remains. (Note: `RunStats::route_overuse` is not an overuse-only statistic; it sums the margins of every routing Θ entry, including `em underwidth`, `em cuts` and budget batches, lib.rs:691–695, so it is not the measure for this item.)
 - Risks / notes: a crowded cell may leave few landing nodes; pins are reserved before blocking, so a pin's own stitch nodes stay usable. Sealing: sky130 rings draw no met1 band ("No met1 band: routing is met1-and-up", kernel/cells/src/post_cell.rs:202), so no sky130 ring blocks a routed layer; on gf180/ihp the ring's `li`-role band is metal1 (pdks/gf180mcu.json:28, pdks/ihp_sg13g2.json:25) and becomes a routed layer only with RTE-11, where metal2 still crosses it.
+- Status on m0 (recorded by the M0 review panel, pending the owner decision the item review required): **not merged
+  through review.** `ba49ae2` ports `e8ef0e9`/`b36ca9f`/`93fe6fb` onto m0 outside the review; the originals are kept on
+  branch `m0-rte03-original`. **Acceptance 3 is not met:** 7 of dac4's 90 dr reports (none a winner) carry
+  `unresolved congestion` plus `drawn short nets a/b` V (m0-report §1), so this plan's M0 row T2 is not met either. The
+  owner either reverts `ba49ae2`, or keeps it with acceptance 3 recorded as not met and the residual congestion handed
+  to RTE-08 (M1).
 
 ### RTE-04 (cut — duplicated by REL-03 and REL-04)
 
@@ -270,6 +276,11 @@ A hand layout of an analog block is DRC/LVS clean, routes matched nets as exact 
 - Tests (`backend/dr/src/lib.rs`, existing helpers at dr:2141–2147): `antenna_is_repaired_on_the_drawn_metal`. One placed macro with a gate pin named `d0:G` (170×170 on layer 0) and gate area 1 µm² through REL-02's table (`cfg.gate_nm2 = vec![vec![("d0:G".into(), 0, 1_000_000)]]`), `cfg.stack = Some(leaked stack)` (gate pins are collected only with a stack, dr:1728), and one driver pin 20 µm away. Run 1 without an `Antenna` rule; measure `A_tree` (the net's trunk metal on the jog layer `jog_layer(..)`, dr:1083–1091) and `A_all` (all of the net's metal on that layer, access included). Run 2 with an `Antenna` hard rule whose ratio on that layer is `(A_tree + A_all)/2 / 1 µm²` (a stack with `antenna_cumulative = false`, the stack.rs test helper at stack.rs:414). Assert: the test is set up so that `A_tree < limit < A_all` (checked), and run 2's report has 0 `Antenna` violations.
 - Acceptance: `benchmarks/tests/signoff_fixtures.rs::fixtures_sign_off_within_baseline` green at `feedback_iters = 1` (dac4 ERC 0), with REL-02's `antenna_in_loop_never_passes_what_signoff_fails` green.
 - Risks / notes: each round re-runs the geometry passes (RouteStats `us_geometry`, RTE-13). RTE-23 generalises final-geometry repair to every rule.
+- Status on m0 (recorded by the M0 review panel): **rejected, not on m0.** Its acceptance was red on its own branch with
+  the same `dac4: ERC rows ["erc/ar.met2.1:gate"]`. Its commits `b635606`/`63bc2a2`/`32efea4` are kept on branch
+  `m0-rte06-rejected`. The owner either merges it recorded as "acceptance not met" and names the item that owns dac4's
+  met2 cap-plate antenna (`routing_stack` gives dr only met1/met2 on sky130, or the cap pin layer changes), or
+  re-scopes M0 exit criterion 2 in 00-MASTER-PLAN §5. The dac4 ERC baseline is not relaxed.
 
 ### RTE-07 Retire the coarse `GlobalRoute`; frame, corridors and group pricing
 

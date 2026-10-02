@@ -4,9 +4,9 @@
 
 use pnr_core::{DeviceKind, Macro, Process, Rect};
 
-fn pdk() -> Option<verify::Pdk> {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).ok()?).ok()
+/// Compiled in: a sidecar that fails validation fails the test, never skips it.
+fn pdk() -> verify::Pdk {
+    verify::Pdk::builtin("sky130").expect("sky130 loads")
 }
 
 fn lvs(sol: &library::Solution, pdk: &verify::Pdk) -> Vec<String> {
@@ -18,7 +18,7 @@ fn lvs(sol: &library::Solution, pdk: &verify::Pdk) -> Vec<String> {
 /// LVS at MATCH, and its macro without the reference entry does not.
 #[test]
 fn an_adopted_antenna_diode_keeps_lvs_matched() {
-    let Some(pdk) = pdk() else { return };
+    let pdk = pdk();
     let spice = ".subckt pd d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\nXM2 d g VSS VSS nfet_01v8 W=2u L=0.5u\n\
                  XD1 VSS g sky130_fd_pr__diode_pw2nd_05v5 W=0.5u L=1u\n.ends pd\n";
     let cfg = library::Config { feedback_iters: 1, ..Default::default() };
