@@ -43,6 +43,7 @@ fn rect_gap(p: &Rect, q: &Rect) -> f32 {
 
 impl Rule for CrosstalkExclusion {
     type On = Routes;
+    const REPAIR: crate::RepairKind = crate::RepairKind::KeepAway;
     /// Spacing shortfall, nm.
     fn cost(self, r: &Routes) -> f32 {
         let d = self.clearance(r);

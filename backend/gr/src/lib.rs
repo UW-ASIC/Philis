@@ -11,7 +11,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
-use analog::Requirements;
+use analog::{RepairKind, Requirements};
 use pnr_core::geom::{LayerId, Rect, Shape};
 use pnr_core::report::Violation;
 use pnr_core::{Layout, Macro, Report, Routes};
@@ -250,7 +250,7 @@ fn gcell_terms(grid: &GcellGrid, pins: &[Vec<(i32, i32)>], origin: (i32, i32)) -
 pub fn order_by_priority(pins: &[usize], net_ids: &[u32], reqs: &Requirements<Routes>, weight: &[f32]) -> Vec<u32> {
     let sym = symmetric_nets(reqs);
     let (mut hard, mut budget, mut shields) = (Vec::new(), Vec::new(), Vec::new());
-    for b in reqs.hard.iter().filter(|b| !b.kind().ends_with("Differential")) {
+    for b in reqs.hard.iter().filter(|b| b.repair_kind() != RepairKind::Mirror) {
         b.touched(&mut hard);
     }
     for b in &reqs.budget {
@@ -270,11 +270,11 @@ pub fn order_by_priority(pins: &[usize], net_ids: &[u32], reqs: &Requirements<Ro
     order
 }
 
-/// Nets under a hard `Differential` rule.
+/// Nets under a mirror rule (`Differential`, [`RepairKind::Mirror`]), hard or budget.
 #[must_use]
 pub fn symmetric_nets(reqs: &Requirements<Routes>) -> Vec<u32> {
     let mut out = Vec::new();
-    for b in reqs.hard.iter().filter(|b| b.kind().ends_with("Differential")) {
+    for b in reqs.hard.iter().chain(&reqs.budget).filter(|b| b.repair_kind() == RepairKind::Mirror) {
         b.touched(&mut out);
     }
     out

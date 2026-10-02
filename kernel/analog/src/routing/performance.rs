@@ -46,6 +46,9 @@ impl RuleBatch<Routes> for PerformanceBudget {
     fn kind(&self) -> &'static str {
         "PerformanceBudget"
     }
+    fn repair_kind(&self) -> crate::RepairKind {
+        crate::RepairKind::Budget
+    }
     fn count(&self) -> usize {
         1
     }

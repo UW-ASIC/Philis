@@ -344,7 +344,7 @@ pub(crate) fn antenna_diodes(
     use cells::Cell;
     let (Some(ground), Some(_)) = (ground, pdk.diode_marker()) else { return Vec::new() };
     let mut nets = Vec::new();
-    for b in routing.hard.iter().filter(|b| b.kind().ends_with("Antenna")) {
+    for b in routing.hard.iter().filter(|b| b.repair_kind() == analog::RepairKind::Antenna) {
         b.violating_ids(routes, &mut nets);
     }
     nets.sort_unstable();

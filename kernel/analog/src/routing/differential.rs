@@ -96,6 +96,7 @@ impl Differential {
 
 impl Rule for Differential {
     type On = Routes;
+    const REPAIR: crate::RepairKind = crate::RepairKind::Mirror;
     fn touches(self, out: &mut Vec<u32>) {
         out.push(u32::from(self.pos.0));
         out.push(u32::from(self.neg.0));

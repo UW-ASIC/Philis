@@ -24,6 +24,7 @@ pub struct Antenna {
 
 impl Rule for Antenna {
     type On = Routes;
+    const REPAIR: crate::RepairKind = crate::RepairKind::Antenna;
     fn cost(self, r: &Routes) -> f32 {
         let (ratio, limit) = self.worst(r);
         (ratio - limit).max(0.0) * 100.0
