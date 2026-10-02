@@ -149,6 +149,13 @@ impl Electromigration {
                 Some((i, lim, lands(c, k.wrapping_sub(1)), lands(c, k + 1)))
             })
             .collect();
+        // Any shared shape, not an identical landing set: `dr`'s array cuts
+        // spread past the original cut's pads, so each cut lands on its own
+        // pad plus the common trunk.
+        // ponytail: transitive, so a cut over two unjoined same-layer shapes
+        // merges the cuts under each into one group (max I, n = all): not
+        // conservative there. Needs same-net shapes closer than a cut is wide;
+        // split groups per landing-shape pair if dr ever draws that.
         let shares = |a: &[usize], b: &[usize]| a.iter().any(|m| b.contains(m));
         let mut uf = pnr_core::UnionFind::new(cuts.len());
         for i in 0..cuts.len() {
@@ -287,6 +294,42 @@ mod tests {
         wide.push(shape(2, 4_200, 600, 200, 200));
         let r3 = routes(wide, r.terms[0].clone());
         assert!(e.known(&r3) && e.satisfied(&r3), "{}", e.residual(&r3));
+    }
+
+    /// `dr`'s via array: each cut lands on its own met2 pad, and every pad
+    /// overlaps the one met2 trunk the cuts also touch. The landing sets
+    /// differ ({pad k, trunk}), yet the three cuts are one group in parallel.
+    #[test]
+    fn array_cuts_on_separate_pads_over_one_trunk_are_one_group() {
+        let mut wires = vec![shape(1, 0, 0, 5_000, 1_000), shape(3, 4_000, 0, 6_000, 1_000)];
+        for x in [4_200, 4_600, 5_000] {
+            wires.push(shape(3, x - 75, 300, 350, 1_200));
+            wires.push(shape(2, x, 400, 200, 200));
+        }
+        let terms = vec![term(0, 400, 200, 200, Some(700.0)), term(9_800, 400, 200, 200, Some(-700.0))];
+        let r = routes(wires.clone(), terms.clone());
+        let e = em();
+        assert!(e.known(&r) && e.satisfied(&r), "⌈700/290⌉ = 3 cuts in one group: {}", e.residual(&r));
+        // usage = I/(I_cut·n) pins n = 3 (a pad may carry all 700 µA: 250/350 nm).
+        assert!((e.usage(&r).unwrap() - 700.0 / (290.0 * 3.0)).abs() < 1e-4, "{:?}", e.usage(&r));
+        // Two cuts left: still one group, now short.
+        wires.pop();
+        assert!((e.residual(&routes(wires, terms)) - 1.0 / 3.0).abs() < 1e-4);
+    }
+
+    /// A terminal joined only through its cell's strap is reached (the cell
+    /// metal is in the flow), and the strap itself is the cell's, not checked:
+    /// at 30 nm it would need 179 nm.
+    #[test]
+    fn a_cell_strap_joins_its_terminal_and_is_not_checked() {
+        let r = jog(Some(-500.0));
+        let wires = vec![r.wires[0][0]];
+        let terms = vec![r.terms[0][0], term(12_000, 400, 200, 200, Some(-500.0))];
+        let strap = vec![shape(1, 10_000, 450, 2_200, 30)];
+        let open = routes(wires.clone(), terms.clone());
+        assert!(!em().known(&open), "the strap is what joins the second terminal");
+        let r = Routes { cell: vec![strap], ..routes(wires, terms) };
+        assert!(em().known(&r) && em().satisfied(&r), "{}", em().residual(&r));
     }
 
     /// A pin on met1 under the met2 it is routed to: the terminal joins its

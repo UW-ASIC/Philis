@@ -36,9 +36,11 @@ pub struct BudgetStatus {
     /// Largest spent fraction of a rule's budget (`1.0` = at the spec);
     /// `None` when no rule reports one.
     pub usage: Option<f32>,
-    /// Ids the violated rules touch, sorted, deduplicated: net ids for
-    /// routing, cell ids for placement.
-    pub violated: Vec<u32>,
+    /// Ids the violated rules touch, sorted, deduplicated (net ids for
+    /// routing, cell ids for placement), each with the largest residual of a
+    /// violated rule touching it (`NaN` from a batch that has no per-rule
+    /// residual, [`analog::RuleBatch::violating_residuals`]).
+    pub violated: Vec<(u32, f32)>,
 }
 
 impl BudgetStatus {
@@ -146,7 +148,7 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         let residual = b.residual(state);
         let usage = b.worst_usage(state);
         let mut violated = Vec::new();
-        b.violating_ids(state, &mut violated);
+        b.violating_residuals(state, &mut violated);
         // One row per family: batches of the same kind merge, since the annotator
         // emits one batch per recognised structure. Residuals *sum* — each is
         // normalised by its own budget, so the family total stays a real measure
@@ -178,8 +180,11 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         }
     }
     for e in &mut out {
-        e.violated.sort_unstable();
-        e.violated.dedup();
+        e.violated.sort_unstable_by_key(|v| v.0);
+        e.violated.dedup_by(|a, b| a.0 == b.0 && {
+            b.1 = b.1.max(a.1);
+            true
+        });
     }
     out.sort_by(|a, b| a.kind.cmp(&b.kind));
     out

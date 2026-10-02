@@ -300,15 +300,15 @@ fn run_circuit(
     let _ = std::fs::write(debug_dir.join(format!("{}.gds", c.name)), &gds_bytes);
     let _ = std::fs::write(debug_dir.join("signoff.txt"), &outcome);
     // Every hard violation verbatim — the summary counts alone can't say which rule fired.
-    // Then each routing hard rule the run itself scored, per net it violates
-    // (EM, per net: REL-03).
+    // Then each routing hard rule the run itself scored, per net it violates,
+    // with its own `Rule::residual` (EM: `(need − have)/need`; per net: REL-03).
     let net_name = |n: u32| sol.netlist.nets.get(n as usize).map_or_else(|| format!("#{n}"), |x| x.name.clone());
     let detail: String = report
         .hard_violations
         .iter()
         .map(|v| format!("{}\t{}\n", v.rule, v.margin))
         .chain(sol.metadata.routing.iter().filter(|r| r.arm == library::metadata::Arm::Hard).flat_map(|r| {
-            r.violated.iter().map(move |&n| format!("route/{}: net {}\t1\n", r.kind, net_name(n)))
+            r.violated.iter().map(move |&(n, res)| format!("route/{}: net {}\t{res}\n", r.kind, net_name(n)))
         }))
         .collect();
     let _ = std::fs::write(debug_dir.join("violations.txt"), detail);
