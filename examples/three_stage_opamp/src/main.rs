@@ -57,6 +57,8 @@ fn main() {
         sol.macros.len(),
         sol.routes.wires.len()
     );
+    // PLC-01: the winner's placement metrics and dp counters (T7's second fixture).
+    println!("{:?}\n{:?}", sol.stats.place, sol.stats.dp);
 
     let report = signoff(&sol, &pdk).report;
     if report.hard_violations.is_empty() {

@@ -217,8 +217,9 @@ const ANALOG_PROBE: i32 = 64;
 /// Coarse placement of `macros`, drawn as `assignment` picks from each
 /// `variants[i]` (missing = 0), seed-deterministic. `net_weight[NetId]` weights each net's HPWL (empty =
 /// unweighted; see [`net_weights`]). `iterate = false` returns the seeded pile
-/// from `initial_layout` unrefined and skips the dual step, still reported: the
-/// baseline that measures what the analytic loop adds.
+/// from `initial_layout` unrefined, still reported: the baseline that measures
+/// what the analytic loop adds (neither mode moves prices; the epoch's one dual
+/// step is the caller's, after dp).
 pub fn place(
     macros: &[Macro],
     variants: &[VariantSpace],

@@ -29,12 +29,19 @@ fn metrics_are_populated_on_ota() {
     );
 }
 
+/// Also pins the Config -> Flow -> `gp::place` plumbing: with it broken, Pile
+/// silently runs Analytic and the two final layouts coincide.
 #[test]
 fn gp_modes_are_deterministic() {
-    for mode in [GpMode::Analytic, GpMode::Pile] {
+    let [analytic, pile] = [GpMode::Analytic, GpMode::Pile].map(|mode| {
         let (a, b) = (run_ota(&small(mode)).layout, run_ota(&small(mode)).layout);
         assert_eq!(a.x, b.x, "{mode:?}: x differs between identical runs");
         assert_eq!(a.y, b.y, "{mode:?}: y differs between identical runs");
         assert_eq!(a.variant, b.variant, "{mode:?}: variant differs between identical runs");
-    }
+        a
+    });
+    assert!(
+        (&analytic.x, &analytic.y) != (&pile.x, &pile.y),
+        "Pile placed ota exactly like Analytic: gp_mode not reaching gp::place"
+    );
 }
