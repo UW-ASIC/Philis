@@ -82,7 +82,7 @@ def main() -> int:
             um_w, um_h = w / 1000.0, h / 1000.0
             total_af += a * um_w * um_h + fr * 2 * (um_w + um_h)
         ground_ff = total_af / 1000.0
-        m = re.search(r"C ([0-9.]+) fF", sig.read_text()) if sig.exists() else None
+        m = re.search(r"C total ([0-9.]+) fF", sig.read_text()) if sig.exists() else None
         if not m:
             print(f"{f:16} {ground_ff:12.2f} {'?':>10}")
             continue

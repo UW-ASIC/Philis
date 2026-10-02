@@ -234,7 +234,7 @@ fn run_circuit(
     // `esc` > 0 means a variant-space binding (no arrangement of the chosen
     // variants was feasible), not a placement local minimum.
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {} | ERC {}{} | warnings {} | skipped [{}] | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | EM {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {} | ERC {}{} | warnings {} | skipped [{}] | C total {:.1} fF, sig {:.1} fF, tier {:.1} | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | EM {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
@@ -254,7 +254,11 @@ fn run_circuit(
         if engine > 0 { format!(" | engine fails {engine}") } else { String::new() },
         signoff.warnings.len(),
         signoff.coverage.skipped_rules.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>().join(", "),
+        // Total (every net, coupling on both ends, rails included), the
+        // winner's signal-class C and its key's C tier (`RunStats::c_tier`).
         report.cost,
+        s.c_sig,
+        s.c_tier,
         area_um2,
         util_pct,
         active_pct,

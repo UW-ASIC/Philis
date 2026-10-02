@@ -151,6 +151,12 @@ pub struct RunStats {
     pub place: PlacementMetrics,
     /// Winner: dp's anneal counters.
     pub dp: PlaceStats,
+    /// Winner: signal-class extracted C, fF ([`c_tier`] without rows; supply
+    /// and ground nets 0; NaN on a label short). `Report::cost` stays the total.
+    pub c_sig: f32,
+    /// Winner: its key's C tier ([`c_tier`]): spec-headroom share with
+    /// sensitivity rows, else equal to `c_sig`.
+    pub c_tier: f32,
     /// Post-layout simulations that could not run ([`perf::evaluate`] `Err`),
     /// over every epoch of every start and cell topology, not just the
     /// winner's; each scored its epoch as every spec unmeasured.
@@ -386,6 +392,7 @@ fn solve(
         problem,
         cells,
         perf: cfg.performance.as_ref(),
+        perf_rows,
         intent: intent.clone(),
         net_weight,
         fold: fold.clone(),
@@ -544,6 +551,8 @@ struct Flow<'a> {
     cells: CellSpace,
     /// Post-layout performance scoring, when configured.
     perf: Option<&'a perf::PerfConfig>,
+    /// Spec bounds as sensitivity rows ([`performance_rows`]); weigh [`c_tier`].
+    perf_rows: &'a [analog::routing::PerformanceBudget],
     /// Placement HPWL weight per net ([`gp::net_weights`]).
     net_weight: Vec<f32>,
     layers: Vec<LayerId>,
@@ -773,8 +782,16 @@ impl Flow<'_> {
         );
         budgets.add_routing(&[Box::new(self.common_nodes(&layout)), Box::new(self.environment(&layout, &rings))], &routes);
 
-        let (key, stats) = epoch_score(&place_report, &route_report, &signoff, &budgets, layout.footprint_nm2());
-        let stats = RunStats { place, dp: dp_stats, ..stats };
+        // A label short books the shorted nets' C on the one label signoff
+        // keeps (dac4: b0, b1 under VSS, weight 0), so the tier is unknown:
+        // NaN, which `key_lt` ranks last within its |V|.
+        let short = format!("lvs/{}", verify::checker::LABEL_SHORT);
+        let shorted = signoff.report.hard_violations.iter().any(|v| v.rule.starts_with(&short));
+        let tier = |rows| if shorted { f32::NAN } else { c_tier(&signoff.caps, &self.net_names, &self.problem.net_classes, rows) };
+        let c = tier(self.perf_rows);
+        let (key, stats) = epoch_score(&place_report, &route_report, &signoff, &budgets, c, layout.footprint_nm2());
+        let c_sig = tier(&[]);
+        let stats = RunStats { place, dp: dp_stats, c_sig, ..stats };
         Epoch {
             key,
             perf: None,
@@ -988,28 +1005,32 @@ impl RunStats {
             route_overuse: self.route_overuse,
             place: self.place,
             dp: self.dp,
+            c_sig: self.c_sig,
+            c_tier: self.c_tier,
             ..run
         }
     }
 }
 
-/// `(|V|, spec miss, Θ, extracted C, footprint nm²)`, compared by [`key_lt`]:
+/// `(|V|, spec miss, Θ, C tier, footprint nm²)`, compared by [`key_lt`]:
 /// no parasitic gain buys past a budget residual, no budget slack past a missed
 /// circuit spec, nothing past a hard violation. V counts violated hard rules
 /// ([`metadata::MetadataReport::hard_violated`]), the stages' own non-batch
 /// rows, and signoff errors (deck warnings are never in that report). Θ is
 /// [`metadata::MetadataReport::theta`] plus dr's own non-batch budget rows, all
 /// in milli-budgets. The spec miss is the post-layout simulation's Σ normalised
-/// miss (`0` without performance scoring); C is signoff's extracted total (fF).
+/// miss (`0` without performance scoring); the C tier is [`c_tier`] over
+/// signoff's extracted matrix, not its total (`Report::cost`), which on ota is
+/// 79 % supply-related (AV-06).
 type LexKey = (usize, f64, f64, f32, f64);
 
-/// Relative extracted-C difference read as a tie, which area then breaks.
+/// Relative [`c_tier`] difference read as a tie, which area then breaks.
 ///
 /// ponytail: a flat 2%, about the seed-to-seed C spread; a declared spec on C
 /// or area would replace it.
 const C_TIE: f32 = 0.02;
 
-/// `a` beats `b`: `|V|`, spec miss, Θ lexicographically, then extracted C —
+/// `a` beats `b`: `|V|`, spec miss, Θ lexicographically, then the C tier —
 /// except that C within [`C_TIE`] is a tie decided by footprint. A feasible
 /// optimum is a vector (area, C, …) and a scalarisation must be a declared
 /// policy (Graeb 2007 ch.1); this is ours. Not transitive inside a C band;
@@ -1039,10 +1060,12 @@ fn epoch_score(
     route: &Report,
     signoff: &verify::Signoff,
     budgets: &metadata::MetadataReport,
+    c_tier: f32,
     footprint_nm2: f64,
 ) -> (LexKey, RunStats) {
-    let key = lex_key(place, route, &signoff.report, budgets, None, footprint_nm2);
+    let key = lex_key(place, route, &signoff.report, budgets, None, c_tier, footprint_nm2);
     let stats = RunStats {
+        c_tier,
         place_hard: place.hard_violations.len(),
         route_hard: route.hard_violations.len(),
         drc_hard: signoff.report.hard_violations.len(),
@@ -1059,6 +1082,7 @@ fn lex_key(
     signoff: &Report,
     budgets: &metadata::MetadataReport,
     perf: Option<&perf::PerfResult>,
+    c_tier: f32,
     footprint_nm2: f64,
 ) -> LexKey {
     let own = |r: &Report| r.hard_violations.iter().filter(|v| !v.is_batch_row()).count();
@@ -1070,7 +1094,44 @@ fn lex_key(
     let v = budgets.hard_violated() + own(place) + own(route) + checked;
     let theta = budgets.theta()
         + route.budget_violations.iter().filter(|x| !x.is_batch_row()).map(|x| x.margin as f64).sum::<f64>();
-    (v, perf.map_or(0.0, |p| p.residual), theta, signoff.cost, footprint_nm2)
+    (v, perf.map_or(0.0, |p| p.residual), theta, c_tier, footprint_nm2)
+}
+
+/// The epoch key's C tier. With sensitivity rows: Σ_n w⁺_n·C_n(ground) +
+/// Σ_(a,b) (w⁺_a + w⁺_b)·C_ab, C in aF, w⁺_n = Σ_rows max(w_jn, 0) — the share
+/// of spec headroom the extracted C spends (dimensionless; Lampaert eq. 2.12,
+/// adverse side only as in BAL2-16). Without rows: signal-class (`Signal`,
+/// `Sensitive`, `Clock`, the nets [`performance_rows`] measures) ground C plus
+/// coupling counted once per signal end, fF. A net with no class row, a
+/// `Supply`/`Ground`/`Substrate` net, or a name outside `names` weighs 0.
+/// `caps` is [`verify::CapMatrix`]; `names` indexes it by `NetId`.
+///
+/// ponytail: rails are what the name classifier says (`annotator::netrole`);
+/// node `0` reads `Signal` until EXT-02's `rail_of`.
+fn c_tier(
+    caps: &verify::CapMatrix,
+    names: &[String],
+    classes: &[analog::metadata::NetClassification],
+    rows: &[analog::routing::PerformanceBudget],
+) -> f32 {
+    use analog::metadata::NetClass;
+    let w = |name: &str| -> f64 {
+        let Some(id) = names.iter().position(|n| n == name) else { return 0.0 };
+        if rows.is_empty() {
+            let signal = classes
+                .iter()
+                .any(|c| usize::from(c.net.0) == id && matches!(c.class, NetClass::Signal | NetClass::Sensitive | NetClass::Clock));
+            return f64::from(u8::from(signal));
+        }
+        let per_af: f64 = rows
+            .iter()
+            .flat_map(|r| r.nets.iter().zip(&r.weights))
+            .filter(|(n, _)| usize::from(n.0) == id)
+            .map(|(_, &w)| f64::from(w.max(0.0)))
+            .sum();
+        per_af * 1000.0
+    };
+    caps.iter().map(|(a, b, c)| c * (w(a) + b.as_deref().map_or(0.0, w))).sum::<f64>() as f32
 }
 
 /// Edge-to-edge gap `dp` keeps between cells: the deck's widest same-layer
@@ -1668,7 +1729,7 @@ mod start_tests {
     }
 
     fn key(place: &Report, signoff: &Report, budgets: &MetadataReport) -> crate::LexKey {
-        crate::lex_key(place, &Report::default(), signoff, budgets, None, 1.0)
+        crate::lex_key(place, &Report::default(), signoff, budgets, None, 0.0, 1.0)
     }
 
     /// |V| counts the 40 violated rules of a hard batch, not its one stage row.
@@ -1701,7 +1762,7 @@ mod start_tests {
         signoff.report.hard_violations = rows(&["drc/m1.1:met1"]);
         signoff.warnings = rows(&["erc/tie_high_low:li", "erc/tie_high_low:li"]);
         let (key, stats) =
-            crate::epoch_score(&Report::default(), &Report::default(), &signoff, &MetadataReport::default(), 1.0);
+            crate::epoch_score(&Report::default(), &Report::default(), &signoff, &MetadataReport::default(), 0.0, 1.0);
         assert_eq!((key.0, stats.drc_hard, stats.warnings), (1, 1, 2));
     }
 
@@ -1719,6 +1780,58 @@ mod start_tests {
         let (nan, finite) = ((0usize, f64::NAN, 0.0, 1.0, 1.0), (0usize, 5.0, 0.0, 1.0, 1.0));
         assert!(crate::key_lt(&finite, &nan), "the finite key displaces a NaN incumbent");
         assert!(!crate::key_lt(&nan, &finite), "a NaN candidate never wins");
+    }
+
+    fn net_names() -> Vec<String> {
+        ["vout1", "vbn", "VSS", "VDD", "x"].map(String::from).to_vec()
+    }
+
+    fn classes() -> Vec<analog::metadata::NetClassification> {
+        use analog::metadata::{NetClass, NetClassification};
+        [NetClass::Signal, NetClass::Signal, NetClass::Ground, NetClass::Supply]
+            .into_iter()
+            .enumerate()
+            .map(|(i, class)| NetClassification { net: pnr_core::NetId(i as u16), class, c_budget_af: None, max_coupling_af: None })
+            .collect()
+    }
+
+    /// AV-06: a layout that parks C on the vbn–VSS decoupling the specs do not
+    /// feel ranks better than one with less total C but more on the output.
+    #[test]
+    fn supply_decoupling_does_not_rank_layouts() {
+        let rows = [analog::routing::PerformanceBudget {
+            metric: "gain:min".into(),
+            nets: vec![pnr_core::NetId(0), pnr_core::NetId(1)],
+            weights: vec![0.01, 0.0],
+            af_per_nm: 1.0,
+            limit: 1.0,
+        }];
+        let cap = |a: &str, b: Option<&str>, c: f64| (a.to_owned(), b.map(str::to_owned), c);
+        let a = vec![cap("VSS", Some("vbn"), 89.4), cap("vout1", None, 4.6)];
+        let b = vec![cap("VSS", Some("vbn"), 10.0), cap("vout1", None, 5.0)];
+        let (ca, cb) = (crate::c_tier(&a, &net_names(), &classes(), &rows), crate::c_tier(&b, &net_names(), &classes(), &rows));
+        assert!((ca - 46.0).abs() < 1e-3 && (cb - 50.0).abs() < 1e-3, "c_tier A {ca}, B {cb}");
+        let total = |m: &verify::CapMatrix| m.iter().map(|r| r.2).sum::<f64>();
+        assert!(total(&a) > 6.0 * total(&b), "A carries 94 fF, B 15 fF");
+        assert!(crate::key_lt(&(0, 0.0, 0.0, ca, 1.0), &(0, 0.0, 0.0, cb, 1.0)), "A ranks better");
+    }
+
+    /// No rows: ground C of signal nets plus coupling once per signal end;
+    /// rails, unclassified nets and unknown names add nothing.
+    #[test]
+    fn no_rows_counts_signal_nets_only() {
+        let cap = |a: &str, b: Option<&str>, c: f64| (a.to_owned(), b.map(str::to_owned), c);
+        let m = vec![
+            cap("VDD", None, 100.0),
+            cap("VDD", Some("VSS"), 50.0),
+            cap("VSS", Some("vbn"), 10.0),
+            cap("vbn", Some("vout1"), 2.0),
+            cap("vout1", None, 3.0),
+            cap("x", None, 7.0),
+            cap("nowhere", None, 9.0),
+        ];
+        let c = crate::c_tier(&m, &net_names(), &classes(), &[]);
+        assert!((c - 17.0).abs() < 1e-4, "10 + 2·2 + 3 fF, got {c}");
     }
 }
 
