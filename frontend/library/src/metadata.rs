@@ -87,6 +87,12 @@ pub struct MetadataReport {
     /// Post-layout specs: `(metric, measured, min, max, normalised miss)`.
     /// Empty when performance scoring is off.
     pub performance: Vec<(String, Option<f64>, Option<f64>, Option<f64>, f64)>,
+    /// Per declared spec bound, its routing budget row or why it has none
+    /// (`"ugf:min: row (3 nets)"`, `"…: do-not-worsen row …"`, `"…: no row (reason)"`).
+    /// Empty from [`build`]; the flow fills it.
+    pub budget_rows: Vec<String>,
+    /// Post-layout simulations that could not run ([`crate::RunStats::sim_failures`]).
+    pub sim_failures: u32,
     /// Sidecar process numbers used on an `UNVERIFIED` source
     /// ([`verify::Pdk::unverified`]). Reported, not blocking [`Self::certified`].
     pub assumed: Vec<String>,
@@ -242,6 +248,8 @@ pub fn build(
         net_classes: census,
         missing: missing.to_vec(),
         performance: Vec::new(),
+        budget_rows: Vec::new(),
+        sim_failures: 0,
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
         binding: Vec::new(),
         coverage: verify::Coverage::default(),
@@ -321,6 +329,12 @@ impl std::fmt::Display for MetadataReport {
                 };
                 writeln!(f, "  {m:<22} {:>12} {:>12} {:>12}  {verdict}", num(*v), num(*lo), num(*hi))?;
             }
+            writeln!(f, "  simulations failed: {}", self.sim_failures)?;
+        }
+        for b in &self.budget_rows {
+            writeln!(f, "  budget {b}")?;
+        }
+        if !self.performance.is_empty() || !self.budget_rows.is_empty() {
             writeln!(f)?;
         }
         for (kind, input) in &self.missing {

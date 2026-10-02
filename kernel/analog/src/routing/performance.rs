@@ -5,12 +5,15 @@ use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
 use crate::rule::RuleBatch;
 
-/// `Σ_i w_i · C_i ≤ 1`: the spec's linearised miss, where `C_i` is net `i`'s
-/// routed capacitance (drawn length × `af_per_nm`) and `w_i = −(∂f/∂C_i) /
-/// headroom` from finite-difference sensitivities at the schematic operating
-/// point. One row per spec, so nets **share** the spec's margin: a node the
-/// metric barely feels may take C another cannot — what independent per-net
-/// caps cannot express (they reject feasible trades and double-spend).
+/// `Σ_i w_i · C_i ≤ limit`: one spec bound's linearised miss, where `C_i` is
+/// net `i`'s routed capacitance (drawn length × `af_per_nm`) and `w_i =
+/// sign·(∂f/∂C_i) / headroom` from finite-difference sensitivities at the
+/// schematic operating point (`sign` −1 for a floor, +1 for a ceiling). One row
+/// per bound, so nets **share** the bound's margin: a node the metric barely
+/// feels may take C another cannot — what independent per-net caps cannot
+/// express (they reject feasible trades and double-spend). A bound the
+/// schematic already misses has `limit = 0` and `w_i = sign·(∂f/∂C_i) /
+/// |bound|`: any adverse C is a residual (do not worsen, GRAEB-11).
 ///
 /// Signs are kept: a net whose C helps the metric earns credit. The model is
 /// linear around the schematic point; the post-layout simulation remains the
@@ -24,10 +27,13 @@ pub struct PerformanceBudget {
     pub weights: Vec<f32>,
     /// Routed capacitance per nm of wire, aF.
     pub af_per_nm: f32,
+    /// `1.0` for a bound with headroom; `0.0` = do-not-worsen row.
+    /// `residual = (used − limit).max(0)`.
+    pub limit: f32,
 }
 
 impl PerformanceBudget {
-    /// Spent fraction of the spec's headroom.
+    /// Spent fraction of the bound's headroom (of `|bound|` when `limit = 0`).
     fn used(&self, r: &Routes) -> f32 {
         self.nets.iter().zip(&self.weights).map(|(&n, &w)| w * r.length(n) as f32 * self.af_per_nm).sum()
     }
@@ -38,10 +44,10 @@ impl RuleBatch<Routes> for PerformanceBudget {
         self.residual(r) as f32
     }
     fn violations(&self, r: &Routes) -> u32 {
-        u32::from(self.used(r) > 1.0)
+        u32::from(self.used(r) > self.limit)
     }
     fn residual(&self, r: &Routes) -> f64 {
-        f64::from((self.used(r) - 1.0).max(0.0))
+        f64::from((self.used(r) - self.limit).max(0.0))
     }
     fn kind(&self) -> &'static str {
         "PerformanceBudget"
@@ -53,13 +59,15 @@ impl RuleBatch<Routes> for PerformanceBudget {
         1
     }
     fn criticality(&self, r: &Routes) -> f32 {
-        self.used(r).clamp(0.0, 1.0)
+        (self.used(r) / self.limit.max(1e-6)).clamp(0.0, 1.0)
     }
+    /// Spent fraction of the headroom; `None` for a zero-limit row, which has
+    /// no budget to spend ([`crate::rule::Rule::usage`]).
     fn worst_usage(&self, r: &Routes) -> Option<f32> {
-        Some(self.used(r))
+        (self.limit > 0.0).then(|| self.used(r) / self.limit)
     }
     fn violating_ids(&self, r: &Routes, out: &mut Vec<u32>) {
-        if self.used(r) > 1.0 {
+        if self.used(r) > self.limit {
             self.touched(out);
         }
     }
@@ -83,7 +91,7 @@ mod tests {
     #[test]
     fn nets_share_one_margin_by_sensitivity() {
         // 1 aF/nm. Net 0 spends 1% of the margin per aF, net 1 0.01%.
-        let b = PerformanceBudget { metric: "ugf".into(), nets: vec![NetId(0), NetId(1)], weights: vec![1e-2, 1e-4], af_per_nm: 1.0 };
+        let b = PerformanceBudget { metric: "ugf".into(), nets: vec![NetId(0), NetId(1)], weights: vec![1e-2, 1e-4], af_per_nm: 1.0, limit: 1.0 };
         // 50 aF on the sensitive net + 4000 aF on the numb one: 0.5 + 0.4.
         let ok = Routes { wires: vec![wire(50), wire(4_000)], ..Default::default()  };
         assert!(b.violations(&ok) == 0 && (b.worst_usage(&ok).unwrap() - 0.9).abs() < 1e-4);
@@ -94,5 +102,19 @@ mod tests {
         let mut ids = Vec::new();
         b.violating_ids(&bad, &mut ids);
         assert_eq!(ids, vec![0, 1]);
+    }
+
+    /// A bound the schematic already misses: any adverse C violates.
+    #[test]
+    fn a_zero_limit_row_violates_on_any_adverse_c() {
+        let b = PerformanceBudget { metric: "gain:min".into(), nets: vec![NetId(0)], weights: vec![0.1], af_per_nm: 1.0, limit: 0.0 };
+        // One net routed 1 nm (`length` is the long side).
+        let r = Routes { wires: vec![vec![Shape { layer: LayerId(0), rect: Rect { x: 0, y: 0, w: 1, h: 1 } }]], ..Default::default() };
+        assert_eq!(b.violations(&r), 1);
+        assert!((b.residual(&r) - 0.1).abs() < 1e-7, "{}", b.residual(&r));
+        assert_eq!(b.criticality(&r), 1.0);
+        assert_eq!(b.worst_usage(&r), None, "no budget, no fraction of one");
+        // No wire, nothing spent: met.
+        assert_eq!(b.violations(&Routes { wires: vec![Vec::new()], ..Default::default() }), 0);
     }
 }
