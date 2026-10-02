@@ -108,8 +108,9 @@ impl std::fmt::Display for Coverage {
 }
 
 /// Full signoff over drawn geometry, its pin labels and its schematic
-/// reference: [`signoff_checked`] without intent, warnings or coverage; the
-/// [`Duration`] is wall time.
+/// reference: [`signoff_checked`] without intent or warnings; the
+/// [`Duration`] is wall time. Coverage is kept only as the report's
+/// `lvs-coverage/…` hard rows.
 #[must_use]
 pub fn signoff(
     shapes: &[Shape],
@@ -146,8 +147,8 @@ pub fn signoff_with_caps(
     signoff_with_intent(shapes, pins, reference, &Intent::default(), pdk)
 }
 
-/// [`signoff_checked`]'s errors, wall time and caps; warnings and coverage
-/// are dropped.
+/// [`signoff_checked`]'s errors, wall time and caps; warnings are dropped,
+/// coverage is kept as the report's `lvs-coverage/…` hard rows.
 #[must_use]
 pub fn signoff_with_intent(
     shapes: &[Shape],
@@ -614,26 +615,32 @@ mod tests {
     }
 
     // AV-01: sky130's `capm` recognises a MIM; a MOM card (no marker, no
-    // recogniser) must be uncompared, not compared as `capm` and unpaired.
+    // recogniser), named or model-less (an elaborated composition's card),
+    // must be uncompared, not compared as `capm` and unpaired.
     #[test]
     fn a_mom_card_is_unverified_not_compared_as_mim() {
         let pdk = sky130();
-        let reference = RefInput {
-            devices: vec![RefDeviceIn {
-                kind: RefKind::Capacitor,
-                model: Some("cap_generic_m1m2".into()),
-                terminals: vec!["top".into(), "bot".into()],
-                params: vec![],
-            }],
-            ports: vec![],
-        };
-        // No geometry: nothing to extract, so any `lvs/` row is the card.
-        let s = signoff_checked(&[], &[], &reference, &Intent::default(), &pdk);
-        assert_eq!(s.coverage.unverified, [(RefKind::Capacitor, Some("cap_generic_m1m2".to_string()), 1)]);
-        let rules: Vec<&str> = s.report.hard_violations.iter().map(|v| v.rule.as_str()).collect();
-        assert!(!rules.iter().any(|r| r.starts_with("lvs/")), "{rules:?}");
-        let cov: Vec<_> = s.report.hard_violations.iter().filter(|v| v.rule.starts_with("lvs-coverage/")).map(|v| (v.rule.as_str(), v.margin)).collect();
-        assert_eq!(cov, [("lvs-coverage/unverified:Capacitor:cap_generic_m1m2", 1)]);
+        for (model, rule) in [
+            (Some("cap_generic_m1m2"), "lvs-coverage/unverified:Capacitor:cap_generic_m1m2"),
+            (None, "lvs-coverage/unverified:Capacitor:-"),
+        ] {
+            let reference = RefInput {
+                devices: vec![RefDeviceIn {
+                    kind: RefKind::Capacitor,
+                    model: model.map(Into::into),
+                    terminals: vec!["top".into(), "bot".into()],
+                    params: vec![],
+                }],
+                ports: vec![],
+            };
+            // No geometry: nothing to extract, so any `lvs/` row is the card.
+            let s = signoff_checked(&[], &[], &reference, &Intent::default(), &pdk);
+            assert_eq!(s.coverage.unverified, [(RefKind::Capacitor, model.map(Into::into), 1)]);
+            let rules: Vec<&str> = s.report.hard_violations.iter().map(|v| v.rule.as_str()).collect();
+            assert!(!rules.iter().any(|r| r.starts_with("lvs/")), "{rules:?}");
+            let cov: Vec<_> = s.report.hard_violations.iter().filter(|v| v.rule.starts_with("lvs-coverage/")).map(|v| (v.rule.as_str(), v.margin)).collect();
+            assert_eq!(cov, [(rule, 1)]);
+        }
     }
 
     // No deck recognises an inductor: it is uncompared, and that is coverage,

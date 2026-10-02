@@ -38,8 +38,9 @@ pub enum RefKind {
 pub struct RefDeviceIn {
     pub kind: RefKind,
     /// Deck model name; selects the matching recogniser row. `None` takes the
-    /// first recogniser of the kind/polarity; a name no row matches takes it
-    /// too for MOS/BJT, and is skipped for R/C/D (a MOM is not a MIM).
+    /// first recogniser of the kind/polarity (a capacitor is skipped); a name
+    /// no row matches takes it too for MOS/BJT, and is skipped for R/C/D (a
+    /// MOM is not a MIM).
     pub model: Option<String>,
     /// Terminal net names in card order; at least the recogniser's arity,
     /// extras (e.g. a bulk the recogniser does not extract) ignored.
@@ -141,10 +142,14 @@ pub fn build(
 /// no marker for its kind/polarity. Polarity is read off the marker layer name
 /// (`ngate`/`pgate`, `npn`/`pnp`: a leading `p` is P-type). For R/C/D a model
 /// hint no row names (exactly or as a `__` vendor suffix) is `None`: sky130's
-/// `cap_generic_m1m2` (MOM) must not be compared as its `capm` (MIM).
+/// `cap_generic_m1m2` (MOM) must not be compared as its `capm` (MIM). So is a
+/// capacitor with no model (an elaborated composition's card): every deck's
+/// capacitor row is a MIM or MOS cap, never the MOM the generators draw. A
+/// model-less R/D still takes the first row (antenna diodes carry no model).
 fn recogniser_for(dev: &RefDeviceIn, deck: &Deck, strings: &StrTable) -> Option<usize> {
     let (kind, polarity) = match dev.kind {
         RefKind::Inductor => return None,
+        RefKind::Capacitor if dev.model.is_none() => return None,
         RefKind::Nmos => (DeviceKind::Mos, Some(false)),
         RefKind::Pmos => (DeviceKind::Mos, Some(true)),
         RefKind::Npn => (DeviceKind::Bjt, Some(false)),

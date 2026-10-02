@@ -159,6 +159,10 @@ fn check(name: &str, max_drc: usize, expected_erc: &[&str], lvs_must_match: bool
         )
     };
 
+    // Every device is compared or declared: none dropped before LVS. First, so a
+    // known DRC/ERC failure (dac4's REL-02 gate row) cannot mask it.
+    let want = unverified(&sol.netlist);
+    assert_eq!(uncompared, want, "{name}: lvs-coverage units {uncompared}, the netlist has {want} uncomparable{}", detail());
     assert!(
         raw.len() <= max_drc,
         "{name}: DRC {} exceeds baseline {max_drc}{}",
@@ -171,9 +175,6 @@ fn check(name: &str, max_drc: usize, expected_erc: &[&str], lvs_must_match: bool
     if lvs_must_match {
         assert!(lvs.is_none(), "{name}: LVS must match{}", detail());
     }
-    // Every device is compared or declared: none dropped before LVS.
-    let want = unverified(&sol.netlist);
-    assert_eq!(uncompared, want, "{name}: lvs-coverage units {uncompared}, the netlist has {want} uncomparable{}", detail());
 }
 
 #[test]
@@ -189,6 +190,23 @@ fn large_fixtures_sign_off_within_baseline() {
     for &(name, drc, erc, lvs) in SLOW {
         check(name, drc, erc, lvs);
     }
+}
+
+/// A device LVS cannot compare is a signoff row, not an epoch violation: it
+/// is the same on every layout, so bjt_mirror (an NPN and a PNP, neither of
+/// which sky130 extracts) still stops converged at bench's 5 epochs, and its
+/// signoff still names both units.
+#[test]
+fn uncompared_devices_do_not_block_convergence() {
+    let spice = std::fs::read_to_string(root().join("benchmarks/fixtures/bjt_mirror.spice")).expect("read fixture");
+    let cfg = library::Config { feedback_iters: 5, ..Default::default() };
+    let pdk = pdk();
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("bjt_mirror: {e:?}"));
+    let report = library::signoff(&sol, &pdk).report;
+    let uncompared: i64 = report.hard_violations.iter().filter(|v| v.rule.starts_with("lvs-coverage/")).map(|v| v.margin).sum();
+    assert_eq!(uncompared, unverified(&sol.netlist), "{:?}", report.hard_violations.iter().map(|v| &v.rule).collect::<Vec<_>>());
+    assert!(uncompared > 0, "bjt_mirror has no uncompared device: the test checks nothing");
+    assert!(sol.stats.converged, "bjt_mirror stopped on budget: {:?}", sol.stats);
 }
 
 /// The named-ERC comparison is itself live: one extra row on a real report

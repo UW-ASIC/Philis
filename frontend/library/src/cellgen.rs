@@ -860,8 +860,10 @@ fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &dyn pnr_core::P
 /// the extractor measures one device per channel and a parametrised device never
 /// parallel-merges. Capacitors go in as one card per unit (`max(nf, m)`),
 /// inductors as one card, both `P N`: a MOM (every capacitor generator here
-/// draws one) and an inductor have no deck recogniser, so `verify` counts them
-/// LVS-unverified (`lvs-coverage/…`) rather than this module dropping them.
+/// draws one) and an inductor have no deck recogniser, and `verify` matches a
+/// capacitor card only to a deck row its model names (never a model-less one
+/// to the first MIM), so it counts them LVS-unverified (`lvs-coverage/…`)
+/// rather than this module dropping them.
 /// `ports` is left empty for the caller to fill with the labels it actually
 /// places.
 ///
