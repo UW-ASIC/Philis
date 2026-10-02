@@ -338,7 +338,8 @@ fn a_unitization_never_mixes_kinds_or_sizes() {
     for u in &p.constraints.unitization {
         for &d in &u.devices {
             assert_eq!(nl.devices[d.0 as usize].kind, u.device_type, "unitization {:?} mixes kinds", u.devices);
-            assert_eq!(param(d, "w"), Some(i64::from(u.unit_w)), "unitization {:?} mixes W", u.devices);
+            let w_finger = nl.devices[d.0 as usize].mos_size().map(|s| s.w_finger_nm());
+            assert_eq!(w_finger, Some(i64::from(u.unit_w)), "unitization {:?} mixes W", u.devices);
             assert_eq!(param(d, "l"), Some(i64::from(u.unit_l)), "unitization {:?} mixes L", u.devices);
         }
     }

@@ -506,7 +506,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
     // Uncovered bipolars of one kind and geometry on one base net are a
     // ratioed set (a bandgap's 1:N): one array cell, units centre-out.
     for group in bjt_groups(netlist, &covered) {
-        let dev_nf: Vec<u16> = group.iter().map(|d| fingers(&netlist.devices[d.0 as usize])).collect();
+        let dev_nf: Vec<u16> = group.iter().map(|d| multiplier(&netlist.devices[d.0 as usize])).collect();
         let dev = &netlist.devices[group[0].0 as usize];
         let nm = |k: &str| dev.params.iter().find(|(n, _)| n == k).map_or(0, |&(_, v)| v.clamp(0, i64::from(i32::MAX)) as i32);
         for d in &group {
@@ -530,7 +530,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
     for group in parallel_groups(netlist, &covered) {
         let dev = &netlist.devices[group[0].0 as usize];
         let nm = |k: &str| dev.params.iter().find(|(n, _)| n == k).map_or(0, |&(_, v)| v.clamp(0, i64::from(i32::MAX)) as i32);
-        let dev_nf: Vec<u16> = group.iter().map(|d| fingers(&netlist.devices[d.0 as usize])).collect();
+        let dev_nf: Vec<u16> = group.iter().map(|d| mos_fingers(&netlist.devices[d.0 as usize])).collect();
         for d in &group {
             covered[d.0 as usize] = true;
         }
@@ -539,7 +539,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             device_type: dev.kind,
             target_ratio: dev_nf.clone(),
             dev_nf,
-            unit_w: nm("w"),
+            unit_w: dev.mos_size().map_or(0, |s| s.w_finger_nm().min(i64::from(i32::MAX)) as i32),
             unit_l: nm("l"),
             series_parallel: SeriesParallel::Parallel,
             same_variant_required: true,
@@ -562,9 +562,11 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
         unitization.push(Unitization {
             devices: vec![DeviceId(i as u16)],
             device_type: dev.kind,
-            dev_nf: vec![param("nf").max(param("m")).clamp(1, i64::from(u16::MAX)) as u16],
+            // A MOS draws `nf·m` fingers of `W_total/nf`; anything else its
+            // `nf`/`m` count at the written `w`.
+            dev_nf: vec![dev.mos_size().map_or(param("nf").max(param("m")), |s| i64::from(s.fingers())).clamp(1, i64::from(u16::MAX)) as u16],
             target_ratio: vec![1],
-            unit_w: param("w").clamp(0, i64::from(i32::MAX)) as i32,
+            unit_w: dev.mos_size().map_or(param("w"), |s| s.w_finger_nm()).clamp(0, i64::from(i32::MAX)) as i32,
             unit_l: param("l").clamp(0, i64::from(i32::MAX)) as i32,
             series_parallel: match dev.kind {
                 DeviceKind::Resistor | DeviceKind::Capacitor => SeriesParallel::Series,
@@ -596,8 +598,9 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
 /// generic_finfet's 1 kΩ rule: rows fail from `R□·W_f/L` ≈ 0.63·limit).
 const P2P_SHARE: f32 = 0.55;
 
-/// Per device, `(k, W/k)`: its schematic fingers are drawn as `k`× as many at
-/// width `W/k` (grid-snapped). One `k` per (kind, W, L) class, so matched
+/// Per device, `(k, W_f/k)`: its schematic fingers (`nf·m`, each
+/// `W_f = W_total/nf` wide, [`pnr_core::MosSize`]) are drawn as `k`× as many
+/// at width `W_f/k` (grid-snapped). One `k` per (kind, W_f, L) class, so matched
 /// devices (one class by construction) fold alike. `k` brings the class's
 /// row (all its fingers side by side, at the generator's pitch) closest to
 /// square, fingers within the deck's `min_finger_width`/`max_finger_width`
@@ -609,19 +612,22 @@ const P2P_SHARE: f32 = 0.55;
 /// `gm_us` (per device, µS; empty or `None` = unknown) sets a floor on the
 /// finger count: the distributed gate resistance of `N` fingers contacted at
 /// one end, `R□·W/(3·L·N²)`, stays under a fifth of `1/gm` (Razavi Ex. 19.1:
-/// gate noise a fifth of the channel's), so `N ≥ √(5·gm·R□·W / 3L)`.
+/// gate noise a fifth of the channel's), so `N ≥ √(5·gm·R□·W / 3L)`, `W`
+/// read as the per-finger `W_f`.
 /// Non-MOS devices and devices without W/L get `(1, W)`.
 #[must_use]
 pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>]) -> Vec<(u16, i32)> {
     use pnr_core::Process;
     let param = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
     let nm = |d: &Device, k: &str| param(d, k).map_or(0, |v| v.clamp(0, i64::from(i32::MAX)) as i32);
+    // A MOS's width is its finger's, `W_total/nf`; anything else its written `w`.
+    let w_of = |d: &Device| d.mos_size().map_or(nm(d, "w"), |s| s.w_finger_nm().min(i64::from(i32::MAX)) as i32);
     let mos = |d: &Device| matches!(d.kind, DeviceKind::Nmos | DeviceKind::Pmos);
     // A channel below the deck's shortest legal one is drawn as asked (DRC
     // reports it), never resized behind the netlist's back: said here, by name.
     for d in netlist.devices.iter().filter(|d| mos(d)) {
         let (l_legal, w_legal) = pdk.min_channel(d.kind == DeviceKind::Pmos, &d.model);
-        let (w, l) = (nm(d, "w"), nm(d, "l"));
+        let (w, l) = (w_of(d), nm(d, "l"));
         if (l > 0 && l < l_legal) || (w > 0 && w < w_legal) {
             eprintln!("cellgen: {} asks W/L {w}/{l} nm, below the deck's shortest legal channel {w_legal}/{l_legal} nm; drawn as asked", d.name);
         }
@@ -637,20 +643,20 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>]) -> Vec<(u16, i
     // `R□·W_f/L`, within [`P2P_SHARE`] of it.
     let p2p = pdk.p2p_max_ohm().zip(pdk.sheet_ohm("poly")).filter(|&(_, sq)| sq > 0.0);
     let poly_sq = pdk.layer("poly").and_then(|l| pdk.pex_f32(l, "sheet_res_ohm_sq")).map_or(0.0, f64::from);
-    let mut out: Vec<(u16, i32)> = netlist.devices.iter().map(|d| (1, nm(d, "w"))).collect();
+    let mut out: Vec<(u16, i32)> = netlist.devices.iter().map(|d| (1, w_of(d))).collect();
     let mut done = vec![false; netlist.devices.len()];
     for (i, d) in netlist.devices.iter().enumerate() {
-        let (w, l) = (nm(d, "w"), nm(d, "l"));
+        let (w, l) = (w_of(d), nm(d, "l"));
         if done[i] || !mos(d) || w <= 0 || l <= 0 {
             continue;
         }
         let class: Vec<usize> = (i..netlist.devices.len())
             .filter(|&j| {
                 let e = &netlist.devices[j];
-                !done[j] && e.kind == d.kind && nm(e, "w") == w && nm(e, "l") == l
+                !done[j] && e.kind == d.kind && w_of(e) == w && nm(e, "l") == l
             })
             .collect();
-        let fingers: Vec<u32> = class.iter().map(|&j| u32::from(fingers(&netlist.devices[j]))).collect();
+        let fingers: Vec<u32> = class.iter().map(|&j| netlist.devices[j].mos_size().map_or(1, |s| s.fingers())).collect();
         let row: u32 = fingers.iter().sum();
         let parallel = class.iter().all(|&j| netlist.devices[j].terminals == d.terminals);
         // A series stack needs odd fingers per member (each starts on D and
@@ -705,11 +711,9 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>]) -> Vec<(u16, i
     out
 }
 
-/// Drawn fingers of a MOS: `nf`, or `m` when larger (the LVS reference
-/// expands the same count).
-fn fingers(d: &Device) -> u16 {
-    let p = |k: &str| d.params.iter().find(|(n, _)| n == k).map_or(1, |&(_, v)| v);
-    p("nf").max(p("m")).clamp(1, i64::from(u16::MAX)) as u16
+/// [`pnr_core::MosSize::fingers`] as a unitization count; `1` without a size.
+fn mos_fingers(d: &Device) -> u16 {
+    d.mos_size().map_or(1, |s| s.fingers().min(u32::from(u16::MAX)) as u16)
 }
 
 /// Uncovered bipolars sharing kind, W, L and base net, in netlist order;
@@ -730,11 +734,10 @@ fn bjt_groups(netlist: &Netlist, covered: &[bool]) -> Vec<Vec<DeviceId>> {
     groups.into_iter().map(|(_, v)| v).filter(|v| v.len() > 1).collect()
 }
 
-/// Uncovered MOS devices sharing kind, W, L and every terminal net, in
+/// Uncovered MOS devices sharing kind, finger W, L and every terminal net, in
 /// netlist order; singletons are left out.
 fn parallel_groups(netlist: &Netlist, covered: &[bool]) -> Vec<Vec<DeviceId>> {
-    let param = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
-    let key = |d: &Device| (d.kind, param(d, "w"), param(d, "l"), d.terminals.clone());
+    let key = |d: &Device| (d.kind, d.mos_size().map(|s| (s.w_finger_nm(), s.l_nm)), d.terminals.clone());
     let mut groups: Vec<(_, Vec<DeviceId>)> = Vec::new();
     for (i, d) in netlist.devices.iter().enumerate() {
         if covered[i] || !matches!(d.kind, DeviceKind::Nmos | DeviceKind::Pmos) {
@@ -840,7 +843,8 @@ fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &dyn pnr_core::P
 /// reports them, `E B C`: its emitter/collector symmetry does not hold for a
 /// diode-connected device (B = C), which the `C B E` order then fails.
 ///
-/// A sized MOS goes in as `max(nf, m)` cards of per-finger `w`/`l` (SI metres):
+/// A sized MOS goes in as `nf·m` cards of per-finger `W_total/nf` and `l` (SI
+/// metres, [`pnr_core::MosSize`]):
 /// the extractor measures one device per channel and a parametrised device never
 /// parallel-merges. Inductors have no recogniser and are skipped, and so are
 /// capacitors: every capacitor generator here draws a MOM (metal plates or a
@@ -881,17 +885,19 @@ pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceI
                 terminal(dev, p).map_or(String::new(), |n| netlist.nets[n.0 as usize].name.clone())
             })
             .collect();
-        let param = |k: &str| dev.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
         let (fingers, params) = if matches!(dev.kind, DeviceKind::Nmos | DeviceKind::Pmos) {
-            let fingers = i64::from(fingers(dev)) * i64::from(k);
-            let params = ["w", "l"]
-                .into_iter()
-                .filter_map(|p| param(p).map(|nm| (p.to_string(), if p == "w" && k > 1 { f64::from(fw) } else { nm as f64 } * 1e-9)))
-                .collect();
-            (fingers, params)
+            // No size (missing or non-positive w/l): one card without params,
+            // so LVS reports the device rather than a made-up size.
+            match dev.mos_size() {
+                Some(s) => {
+                    let w = if k > 1 { i64::from(fw) } else { s.w_finger_nm() };
+                    (i64::from(s.fingers()) * i64::from(k), vec![("w".to_string(), w as f64 * 1e-9), ("l".to_string(), s.l_nm as f64 * 1e-9)])
+                }
+                None => (1, Vec::new()),
+            }
         } else if matches!(dev.kind, DeviceKind::Npn | DeviceKind::Pnp) {
-            // One card per drawn unit (ratios are unit counts).
-            (i64::from(fingers(dev)), Vec::new())
+            // One card per drawn unit (ratios are unit counts: `m`).
+            (i64::from(multiplier(dev)), Vec::new())
         } else {
             (1, Vec::new())
         };

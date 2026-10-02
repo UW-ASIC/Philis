@@ -149,9 +149,10 @@ fn main() {
             k => panic!("unexpected kind {k:?}"),
         };
         let p = |k: &str| d.params.iter().find(|(n, _)| n == k).map_or(0, |&(_, v)| v);
-        // nm → µm, the unit sky130 model cards use.
+        // nm → µm, the unit sky130 model cards use; `w` is the SPICE total.
+        let m = d.mos_size().map_or(1, |s| s.m);
         sp.push_str(&format!(
-            "X{} {} {} {} {} {} w={}u l={}u nf={}\n",
+            "X{} {} {} {} {} {} w={}u l={}u nf={} m={m}\n",
             d.name,
             t("D"),
             t("G"),
