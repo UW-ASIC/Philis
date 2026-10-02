@@ -519,6 +519,30 @@ mod tests {
         assert!(!chip.defer_density_wider_than(2_000_000, 2_000_000).contains(&"AFil.g2".to_string()));
     }
 
+    // AV-18: sky130 states metal density as `density_cmp` (700 um windows,
+    // `partial_windows: false`); on a block it examined zero windows and
+    // read `Ran`. Now chip-level, and not among the rules that ran.
+    #[test]
+    fn density_cmp_wider_than_the_block_is_chip_level_on_sky130() {
+        let pdk = sky130();
+        let shapes = [rect(&pdk, "met1", 0, 0, 10_000, 10_000)];
+        let names = ["m1.density", "m2.density", "m3.density", "m4.density"];
+        let s = signoff_checked(&shapes, &[], &RefInput::default(), &Intent::default(), &pdk);
+        for n in names {
+            assert!(
+                s.coverage.skipped_rules.iter().any(|(r, why)| r == n && why.starts_with("ChipLevel(window 700000 nm > block 10000x10000 nm)")),
+                "{n} not chip-level: {:?}",
+                s.coverage.skipped_rules
+            );
+        }
+        let mut checker = Checker::new(&pdk, false).unwrap();
+        defer_chip_level(&mut checker, &shapes);
+        checker.run(&shapes, &[], Checks::ALL).unwrap();
+        let ran: Vec<&str> = checker.outputs().runs.iter().filter(|r| r.outcome == gdsverify::check::report::Outcome::Ran).map(|r| checker.rule_name(r.rule)).collect();
+        assert!(!ran.is_empty(), "no rule ran at all");
+        assert!(names.iter().all(|n| !ran.contains(n)), "{ran:?}");
+    }
+
     // A fat legal rect is clean — and provably *checked* clean: rules ran.
     // Guards the false-clean failure (an engine that silently checked nothing).
     #[test]
