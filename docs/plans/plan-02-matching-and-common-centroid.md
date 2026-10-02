@@ -690,7 +690,7 @@ Adversarial fact-check of this plan on the working tree of 2026-09-28 (read-only
 
 ### Corrections (before → after)
 
-1. MAT-02 formulas, [1,4]: "B the four edge centres → the 2:1:2 cross (… PDF p.513)" → the generated pattern is a "+" cross; Hastings' 2:1:2 (Fig. 10.24A, figure on PDF p.514) puts the four unit sections of the 4X transistor two per side column on the diagonals of the 1X; both exact; offer the corner variant if the book form is wanted.
+1. MAT-02 formulas, [1,4]: "B the four edge centres → the 2:1:2 cross (… PDF p.513)" → the generated pattern is a "+" cross; Hastings' 2:1:2 (Fig. 10.24A, figure on PDF p.514) puts the four unit sections of the 4X transistor two per side column on the diagonals of the 1X; both exact; the book form is a half-row-offset arrangement, not a 3×3 assignment (`ref-hastings-99` §2.3); no corner variant.
 2. MAT-02 step 6: "`pattern::grids(..)[0]` (same near-square grid as `cap_array.rs:142-143`)" → not always the same grid (one odd member moves to an odd×odd grid, e.g. [1,2,2] 2×3 → 3×3; [4,4,4] tie unspecified); the centroid test still passes.
 3. MAT-02 step 5: added that `bjt.rs` emits no `Unit` records today (AC-08), so the centroid test and `MatchedSet` coincidence need a `pnr_core::Unit` per emitter in `Unit::draw` (`bjt.rs:145-202`).
 4. MAT-03 step 2.4: added the S_d pre-count convention (end fingers and middle token counted before dealing); without it [6,6]/[8,8] come out B-ended.
