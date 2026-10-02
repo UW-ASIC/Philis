@@ -8,6 +8,12 @@
   GAP-20 (doc) rejected on 2 minor points: fix by hand and merge.
   m0 branches from eba9954 (before GPurify bde681c): merging fix-export first then m0 may need the 4-terminal MOS test fix again.
 
+## M0 state at cutoff (owner's screenshots + git, 2026-10-01)
+- Merged into m0 (12): CELL-01, EXT-01, GAP-20, CELL-02, FLOW-04, REL-01, RTE-32, FLOW-02, CELL-04, FLOW-14, RTE-02, FLOW-05 (FLOW-05 merge committed; its integrate agent was idle, so re-verify tests on m0).
+- In flight when cut off: review2:FLOW-03 (signoff wt, HEAD = review fixes), review3:FLOW-01 done (size wt), fix1:PLC-01 (baselines wt: 3 uncommitted files), impl:RTE-03 (routing wt: 5 uncommitted files, just merged m0), fix1:REL-03 (antenna wt).
+- Not started: PERF-01..07, PERF-03, RTE-09, REL-02, RTE-06 (+ close-out: verify, panel, plan update).
+- Before resuming: in routing wt discard RTE-03 partial work (`git reset --hard bb556b4`); baselines wt either let fix1:PLC-01 rerun (stash/reset its 3 dirty files to HEAD). Then Workflow resume (cached agents replay).
+
 ## Open
 - External vs user schematic still differs by dummy transistors (14 vs 9 in netgen). Decision for owner: keep dummies in `<top>_ref.spice` (current), or make dummies fully shorted / add them to schematic.
 - `--interface` (fixed die + boundary pins) is a new feature, not implemented.
