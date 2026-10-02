@@ -1158,7 +1158,7 @@ mod tests {
             at: Rect { x, y, w: 200, h: 200 },
             layer: LayerId(0),
         };
-        Macro { shapes: vec![Shape { layer: LayerId(0), rect: r }], pins: pins.into_iter().map(pin).collect(), bbox: r, units: Vec::new(), dummies: Vec::new() }
+        Macro { shapes: vec![Shape { layer: LayerId(0), rect: r }], pins: pins.into_iter().map(pin).collect(), bbox: r, units: Vec::new(), dummies: Vec::new(), ..Default::default() }
     }
 
     /// Empty layout: every macro keeps its own (absolute) coordinates.

@@ -46,5 +46,5 @@ pub(crate) fn draw<G: Cell>(
     pool.into_iter()
         .map(|v| v.draw(&group, &c, process))
         .min_by_key(|m| i64::from(m.bbox.w) * i64::from(m.bbox.h))
-        .unwrap_or(Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w: 0, h: 0 }, units: Vec::new(), dummies: Vec::new() })
+        .unwrap_or(Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w: 0, h: 0 }, units: Vec::new(), dummies: Vec::new(), ..Default::default() })
 }

@@ -4,7 +4,7 @@
 
 use crate::builder::dim;
 use analog::Constraints;
-use pnr_core::{DeviceGroup, Macro, Process, Rect};
+use pnr_core::{DeviceGroup, Drawn, DrawnKind, Macro, Node, Process, Rect};
 
 use crate::builder::{cut_lattice, greedy_centroid, pin, req, sizing, snap_cut, Builder, Sizing};
 use crate::{Cell, Pattern};
@@ -153,6 +153,14 @@ impl Cell for Resistor {
                     b.rect(met1, Rect { x: px + cut_x - m_enc, y: y - m_enc, w: sx - px + m_ct + 2 * m_enc, h: m_ct + 2 * m_enc });
                 }
             }
+            // Each segment extracts as its own resistor: the string runs
+            // P -> Internal(1) -> ... -> Internal(n-1) -> N.
+            let node = |k: i32| match k {
+                0 => Node::Pin("P"),
+                k if k == n_segments => Node::Pin("N"),
+                k => Node::Internal(k as u16),
+            };
+            b.drawn(Drawn { owner: di as u8, device: None, kind: DrawnKind::Resistor, nodes: [node(seg), node(seg + 1), Node::Unused], w: body_w, l: seg_l });
             prev[di] = Some(sx);
             if seg == n_segments - 1 {
                 b.pin(pin(di, "N", end_cut(sx, !enters_top), li));
