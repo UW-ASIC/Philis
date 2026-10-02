@@ -113,8 +113,12 @@ fn any_covers(cover: &[&Shape], r: &Rect) -> bool {
 }
 
 /// Each member's S and D pins split that terminal's DC current exactly
-/// (`pnr_core::pin_shares` sums to 1): no finger counted twice, none lost to
-/// the `2/n` bound, on every drawn MOS variant (REL-01).
+/// (`pnr_core::pin_shares` sums to 1, so no `2/n` fallback), and each pin's
+/// share is the fingers its region really touches: `share · F` is 1 or 2, `F`
+/// the member's fingers (a region abuts one or two of its owner's fingers,
+/// `mosfet.rs` S/D columns). A finger credited to a non-adjacent region, or
+/// a flipped `phi`, leaves some region with 0 or 3+ — on every drawn MOS
+/// variant (REL-01).
 #[test]
 fn every_mos_terminal_s_pin_shares_sum_to_one() {
     let Some(pdk) = pdk() else {
@@ -124,10 +128,16 @@ fn every_mos_terminal_s_pin_shares_sum_to_one() {
     for (label, m) in all_variants(&pdk) {
         let shares = pnr_core::pin_shares(&m);
         for u in &m.units {
+            let fingers = m.units.iter().filter(|v| v.owner == u.owner && v.phi != (0, 0)).count() as f32;
             for t in ["S", "D"] {
                 let name = format!("d{}:{t}", u.owner);
-                let sum: f32 = m.pins.iter().zip(&shares).filter(|(p, _)| p.name == name).map(|(_, s)| s).sum();
+                let mine: Vec<f32> = m.pins.iter().zip(&shares).filter(|(p, _)| p.name == name).map(|(_, &s)| s).collect();
+                let sum: f32 = mine.iter().sum();
                 assert!((sum - 1.0).abs() < 1e-6, "{label}: {name} pins carry {sum} of the terminal");
+                for s in mine {
+                    let touched = s * fingers;
+                    assert!((touched - 1.0).abs() < 1e-6 || (touched - 2.0).abs() < 1e-6, "{label}: a {name} region touches {touched} of {fingers} fingers");
+                }
             }
         }
     }
