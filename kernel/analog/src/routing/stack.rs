@@ -2,6 +2,7 @@
 //! what the budget rules measure drawn metal with.
 
 use pnr_core::geom::{Rect, Shape};
+use pnr_core::GatePin;
 
 /// One conductor of the stack (a metal or a cut), bottom-up in
 /// [`Stack::layers`].
@@ -35,9 +36,19 @@ pub struct Stack {
     /// The deck's antenna rules sum every layer up to the stage
     /// (`antenna_cumulative_*`); else each stage counts its own layer.
     pub antenna_cumulative: bool,
-    /// The deck's diode marker: a net whose routes carry a shape on it has a
-    /// protection diode (diode credit, Hastings p. 229). `None` = no credit.
-    pub diode_layer: Option<u16>,
+    /// The diode credit the deck's `antenna_electrical` rule grants (Hastings
+    /// p. 229: junction bleed credited only as the process states it); `None`
+    /// = the deck credits no diode, and a drawn one fixes nothing.
+    pub diode: Option<DiodeCredit>,
+}
+
+/// A deck-stated antenna diode credit: a piece touching a net shape on
+/// `layer` has its ratio lowered by `bonus` (GPurify `antenna_electrical`
+/// with `diode_credit: 0`, whose area term is refused as unit-less).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DiodeCredit {
+    pub layer: u16,
+    pub bonus: f32,
 }
 
 impl Stack {
@@ -282,22 +293,21 @@ impl Stack {
     /// conductor is each connected piece of them (Hastings pp. 228–229); its
     /// exposed area is layer `s`'s alone, or every layer's up to `s` when the
     /// deck's rules are cumulative. `cell` is the cells' metal on the net,
-    /// scored with the wires; with `gates` (the net's gate pins) only a piece
-    /// reaching one is charged — a piece a jumper cut off the gate carries no
-    /// charge to it.
+    /// scored with the wires. With `gates` (the net's gate pins) a piece is
+    /// charged only the distinct devices whose gate pin it touches — a piece a
+    /// jumper cut off every gate carries no charge — and a gate of unknown
+    /// area (`nm2 = 0`) adds none; without them, every piece is charged
+    /// `fallback_nm2`. A piece touching a net shape on the deck's credited
+    /// diode layer has its ratio lowered by the deck's `bonus` (floored at 0).
     ///
-    /// ponytail: a charged piece is charged the net's whole gate area, which
-    /// under-counts a piece that reaches only some of several gates. O(k²) per
+    /// ponytail: the sidewall area sums per-rect perimeters (signoff merges
+    /// them), and the bonus goes only to pieces touching a diode (signoff
+    /// gives it to every gate net of the row) — both pessimistic. O(k²) per
     /// stage.
     #[must_use]
-    pub fn antenna(&self, shapes: &[Shape], cell: &[Shape], gates: &[Rect], gate_nm2: i64) -> Option<(f32, f32)> {
+    pub fn antenna(&self, shapes: &[Shape], cell: &[Shape], gates: &[GatePin], fallback_nm2: i64) -> Option<(f32, f32)> {
         let all: Vec<&Shape> = shapes.iter().chain(cell).collect();
-        // A junction to the substrate bleeds the plasma charge at every stage.
-        // ponytail: credited from the first stage on; a diode reached only
-        // through an upper metal protects only from that stage.
-        if self.diode_layer.is_some_and(|d| all.iter().any(|s| s.layer.0 == d)) {
-            return self.layers.iter().find(|l| l.antenna_ratio > 0.0).map(|l| (0.0, l.antenna_ratio));
-        }
+        let diodes: Vec<Rect> = self.diode.map_or_else(Vec::new, |d| all.iter().filter(|s| s.layer.0 == d.layer).map(|s| s.rect).collect());
         let rank = |s: &Shape| self.at(s.layer.0).map(|(i, _)| i);
         let mut worst: Option<(f32, f32)> = None;
         for (stage, layer) in self.layers.iter().enumerate().filter(|(_, l)| l.antenna_ratio > 0.0) {
@@ -310,13 +320,21 @@ impl Stack {
                 _ => q.w as f32 * q.h as f32,
             };
             for piece in pieces(&built) {
+                let touches = |r: &Rect| piece.iter().any(|&k| built[k].1.touches(r));
                 // A piece reaches a gate when it lies over the gate's pin (the
                 // router's trunk ends there before its pin access is drawn).
-                if !gates.is_empty() && !piece.iter().any(|&k| gates.iter().any(|g| built[k].1.touches(g))) {
+                let mut reached: Vec<&GatePin> = gates.iter().filter(|g| touches(&g.at)).collect();
+                reached.sort_unstable_by_key(|g| g.dev);
+                reached.dedup_by_key(|g| g.dev);
+                if !gates.is_empty() && reached.is_empty() {
                     continue;
                 }
+                let gate = if gates.is_empty() { fallback_nm2 } else { reached.iter().map(|g| g.nm2).sum() };
                 let area: f32 = piece.iter().map(|&k| built[k]).filter(|&(r, _)| counts(r)).map(|(_, q)| exposed(q)).sum();
-                let ratio = area / gate_nm2.max(1) as f32;
+                let mut ratio = area / gate.max(1) as f32;
+                if let Some(d) = self.diode.filter(|_| diodes.iter().any(touches)) {
+                    ratio = (ratio - d.bonus).max(0.0);
+                }
                 if worst.is_none_or(|(r, l)| ratio / layer.antenna_ratio > r / l) {
                     worst = Some((ratio, layer.antenna_ratio));
                 }
@@ -489,7 +507,7 @@ mod tests {
     /// m1 (id 1), via (2), m2 (3); the via stage has no antenna rule.
     fn stack(m1: f32, m2: f32, cumulative: bool) -> Stack {
         let metal = |id, ratio| Layer { id, area_af_um2: 25.0, fringe_af_um: 40.0, lateral: 3.9 * 8.854 * 360.0, antenna_ratio: ratio, sheet_ohm: 0.125, ..Layer::default() };
-        Stack { layers: vec![metal(1, m1), Layer { id: 2, sheet_ohm: 4.5, cut: true, ..Layer::default() }, metal(3, m2)], antenna_cumulative: cumulative, diode_layer: None }
+        Stack { layers: vec![metal(1, m1), Layer { id: 2, sheet_ohm: 4.5, cut: true, ..Layer::default() }, metal(3, m2)], antenna_cumulative: cumulative, diode: None }
     }
 
     #[test]
@@ -589,16 +607,39 @@ mod tests {
         // Cumulative rules count m1 (not the cuts) at the m2 stage too: 142 + 40.
         let cum = stack(100.0, 400.0, true).antenna(&bridged, &[], &[], gate).unwrap();
         assert!((cum.0 - 182.0).abs() < 1e-3 && cum.1 == 400.0, "{cum:?}");
-        // A diode on the net (its marker among the net's shapes) is credited.
-        let guarded = Stack { diode_layer: Some(9), ..stack(100.0, 400.0, false) };
-        let mut with_diode = long.to_vec();
-        with_diode.push(shape(9, 0, 0, 500, 500));
-        assert_eq!(guarded.antenna(&with_diode, &[], &[], gate), Some((0.0, 100.0)));
-        assert_eq!(guarded.antenna(&long, &[], &[], gate), Some((180.0, 100.0)), "no diode, no credit");
         // A sidewall rule counts perimeter × thickness: 2·(180+1) µm · 0.36 µm.
         let mut side = stack(100.0, 400.0, false);
         side.layers[0].antenna_sidewall_nm = 360.0;
         assert!((side.antenna(&long, &[], &[], gate).unwrap().0 - 130.32).abs() < 1e-2);
+    }
+
+    /// A piece is charged the oxide of the gates it touches, each device once,
+    /// not the net's whole gate area (Hastings §5.1.6: per node, per stage).
+    #[test]
+    fn a_piece_is_charged_only_the_gates_it_reaches() {
+        let s = stack(100.0, 400.0, false);
+        let pin = |x: i32, dev: u32, nm2: i64| GatePin { at: Rect { x, y: 0, w: 1_000, h: 1_000 }, dev, nm2 };
+        // dev 0 (1 µm², two pins under one piece) and dev 1 (9 µm²), each
+        // under its own m2 piece: 50 µm² and 9 µm².
+        let gates = [pin(0, 0, 1_000_000), pin(2_000, 0, 1_000_000), pin(100_000, 1, 9_000_000)];
+        let wires = [shape(3, 0, 0, 50_000, 1_000), shape(3, 100_000, 0, 9_000, 1_000)];
+        // A/1 µm² = 50 (charged the net's 10 µm²: 5); dev 1's piece: 1.
+        assert_eq!(s.antenna(&wires, &[], &gates, 10_000_000), Some((50.0, 400.0)));
+        // No gate pins known: every piece is charged the fallback.
+        assert_eq!(s.antenna(&wires, &[], &[], 10_000_000), Some((5.0, 400.0)));
+    }
+
+    /// The diode credit is the deck's `diode_bonus`, to a piece touching a
+    /// diode shape; with no deck credit a drawn diode lowers nothing.
+    #[test]
+    fn diode_credit_is_the_decks_bonus_only() {
+        let gate = 1_000_000;
+        let long = [shape(1, 0, 0, 120_000, 1_000), shape(9, 0, 0, 500, 500)];
+        let credited = Stack { diode: Some(DiodeCredit { layer: 9, bonus: 50.0 }), ..stack(100.0, 400.0, false) };
+        assert_eq!(credited.antenna(&long, &[], &[], gate), Some((70.0, 100.0)));
+        assert_eq!(stack(100.0, 400.0, false).antenna(&long, &[], &[], gate), Some((120.0, 100.0)), "deck credits no diode");
+        let apart = [long[0], shape(9, 200_000, 0, 500, 500)];
+        assert_eq!(credited.antenna(&apart, &[], &[], gate), Some((120.0, 100.0)), "a diode off the piece");
     }
 
     /// A cell's plate on the net counts with the wires; once a jumper cuts it
@@ -607,7 +648,7 @@ mod tests {
     fn a_cell_plate_counts_until_cut_off_the_gate() {
         let s = stack(100.0, 400.0, false);
         let gate = 1_000_000;
-        let pin = Rect { x: 0, y: 0, w: 1_000, h: 1_000 };
+        let pin = GatePin { at: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, dev: 0, nm2: gate };
         // A short m1 wire from the gate to a 150 µm² m1 plate: 151 > 100.
         let wire = [shape(1, 0, 0, 2_000, 1_000)];
         let plate = [shape(1, 2_000, 0, 150_000, 1_000)];

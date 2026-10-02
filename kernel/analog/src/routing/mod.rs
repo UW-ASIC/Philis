@@ -23,4 +23,4 @@ pub use ir::IrDrop;
 pub use parasitic::ParasiticBudget;
 pub use performance::PerformanceBudget;
 pub use shield::Shield;
-pub use stack::Stack;
+pub use stack::{DiodeCredit, Stack};

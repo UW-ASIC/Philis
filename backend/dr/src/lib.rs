@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use analog::{RepairKind, Requirements};
 use pnr_core::geom::{LayerId, Rect, Shape};
 use pnr_core::report::Violation;
-use pnr_core::{Macro, NetId, Report, Routes};
+use pnr_core::{GatePin, Macro, NetId, Report, Routes};
 
 use gr::{extract_geometry, run_pathfinder, to_shapes, Dij, GcellGrid, RGraph, RouteCtx, RouteHot, TrackGrid, NONE};
 
@@ -59,6 +59,11 @@ pub struct DetailedCfg {
     /// current each pin carries ([`pnr_core::pin_shares`] of the unplaced
     /// macro). Empty (outer or inner) = 1.0 for every pin.
     pub pin_share: Vec<Vec<f32>>,
+    /// Per placed cell (index of `placed`): `(gate pin name "d{k}:G", schematic
+    /// device id, gate-oxide area W·L·m nm²)`, so the antenna rule charges a
+    /// piece only the gates it reaches. A gate pin missing here has unknown
+    /// device and area (`u32::MAX`, 0).
+    pub gate_nm2: Vec<Vec<(String, u32, i64)>>,
     /// Derated DC EM limits per routing metal and cut, from the deck; a layer
     /// absent here is unknown (no EM sizing — never a guessed constant).
     pub em: Vec<(LayerId, analog::routing::em::Limit)>,
@@ -110,6 +115,7 @@ impl Default for DetailedCfg {
             pin_access: None,
             pin_ua: Vec::new(),
             pin_share: Vec::new(),
+            gate_nm2: Vec::new(),
             em: Vec::new(),
             supply_nets: Vec::new(),
             fat_signal: 0,
@@ -246,9 +252,9 @@ impl DetailedRoute {
         let shift = |r: Rect| Rect { x: r.x - origin.0, y: r.y - origin.1, ..r };
         // The cells' metal and gate pins per net, for the rules that score the
         // whole conductor (antenna): absolute, and in the routing frame.
-        let (cell_abs, gates_abs) = cell_metal(placed, n_nets, cfg.stack);
+        let (cell_abs, gates_abs) = cell_metal(placed, n_nets, cfg.stack, &cfg.gate_nm2);
         let cell_f: Vec<Vec<Shape>> = cell_abs.iter().map(|v| v.iter().map(|s| Shape { rect: shift(s.rect), ..*s }).collect()).collect();
-        let gates_f: Vec<Vec<Rect>> = gates_abs.iter().map(|v| v.iter().map(|&r| shift(r)).collect()).collect();
+        let gates_f: Vec<Vec<GatePin>> = gates_abs.iter().map(|v| v.iter().map(|&g| GatePin { at: shift(g.at), ..g }).collect()).collect();
 
         // DC current a terminal rect draws, µA: over the cell's pins there (two
         // members sharing a region draw one pin each at one rect), each pin's
@@ -618,7 +624,7 @@ impl DetailedRoute {
             .enumerate()
             .map(|(ci, &ni)| {
                 let top = cell_f[ni].iter().filter_map(|s| layers.iter().position(|&l| l == s.layer)).max()? as u32;
-                let sites: Vec<_> = access.iter().filter(|a| a.ci == ci && gates_f[ni].contains(&a.pin)).map(|a| (a.node, a.pin)).collect();
+                let sites: Vec<_> = access.iter().filter(|a| a.ci == ci && gates_f[ni].iter().any(|g| g.at == a.pin)).map(|a| (a.node, a.pin)).collect();
                 (top + 1 < n_layers && !sites.is_empty()).then_some((top, sites))
             })
             .collect();
@@ -1549,7 +1555,7 @@ fn repair_constraints(
                 // stage's conductor; then the lift over its cells' metal, then
                 // the plain reroute. What routing cannot fix gets a diode
                 // (`library`'s `elaborate::antenna_diodes`) where the deck
-                // extracts one.
+                // extracts and credits one.
                 RepairKind::Antenna => {
                     ids.clear();
                     batch.violating_ids(&routes, &mut ids);
@@ -1791,22 +1797,25 @@ fn mirror_guide(hot: &RouteHot, grid: &TrackGrid, terms: &[Vec<u32>], a: usize, 
 
 /// Per net, the placed cells' metal its pins reach (each connected piece on
 /// `stack` holding a shape on the pin's layer — the stack's lowest for a pin
-/// below it — over the pin), and its gate pins (`…:G`). Empty without a stack.
+/// below it — over the pin), and its gate pins (`…:G`) with their device and
+/// gate area from `gate_nm2` ([`DetailedCfg::gate_nm2`]). Empty without a stack.
 ///
 /// ponytail: O(k²) per cell ([`analog::routing::Stack::connected`]); a cap
 /// array's thousands of cuts are the worst case.
-fn cell_metal(placed: &[Macro], n_nets: usize, stack: Option<&analog::routing::Stack>) -> (Vec<Vec<Shape>>, Vec<Vec<Rect>>) {
+fn cell_metal(placed: &[Macro], n_nets: usize, stack: Option<&analog::routing::Stack>, gate_nm2: &[Vec<(String, u32, i64)>]) -> (Vec<Vec<Shape>>, Vec<Vec<GatePin>>) {
     let (mut cell, mut gates) = (vec![Vec::new(); n_nets], vec![Vec::new(); n_nets]);
     let Some(stack) = stack else { return (cell, gates) };
     let on_stack = |l: LayerId| stack.layers.iter().any(|x| x.id == l.0);
     let lowest = stack.layers.first().map(|l| LayerId(l.id));
-    for m in placed {
+    for (c, m) in placed.iter().enumerate() {
         let pieces = stack.connected(&m.shapes);
         let mut taken = vec![false; pieces.len()];
         for p in &m.pins {
             let Some(net) = cell.get_mut(p.net.0 as usize) else { continue };
             if p.name.ends_with(":G") {
-                gates[p.net.0 as usize].push(p.at);
+                let known = gate_nm2.get(c).and_then(|t| t.iter().find(|(n, ..)| *n == p.name));
+                let (dev, nm2) = known.map_or((u32::MAX, 0), |&(_, d, a)| (d, a));
+                gates[p.net.0 as usize].push(GatePin { at: p.at, dev, nm2 });
             }
             let layer = if on_stack(p.layer) { Some(p.layer) } else { lowest };
             for (i, piece) in pieces.iter().enumerate() {
@@ -2361,7 +2370,7 @@ mod tests {
                 Layer { id: 1, sheet_ohm: 0.125, ..Layer::default() },
             ],
             antenna_cumulative: false,
-            diode_layer: None,
+            diode: None,
         }));
         let global = Routes { wires: vec![Vec::new()], ..Default::default()  };
         let (feed, a, b) = (pin(0, 1_000, 2_000), pin(0, 12_000, 2_000), pin(0, 12_000, 14_000));
@@ -2589,7 +2598,7 @@ mod tests {
         let stack: &'static Stack = Box::leak(Box::new(Stack {
             layers: [0, 2, 1, 4, 3].map(|id| Layer { id, antenna_ratio: if id == 0 { 4.0 } else { 0.0 }, ..Layer::default() }).to_vec(),
             antenna_cumulative: false,
-        diode_layer: None,
+        diode: None,
         }));
         let mut reqs = Requirements::<Routes>::default();
         reqs.hard.push(Box::new(vec![Antenna(stack)]));
@@ -2657,7 +2666,7 @@ mod tests {
                 Layer { id: 1, sheet_ohm: 0.1, ..Layer::default() },
             ],
             antenna_cumulative: false,
-        diode_layer: None,
+        diode: None,
         }));
         let global = Routes { wires: vec![Vec::new()], ..Default::default()  };
         let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 9_000)];

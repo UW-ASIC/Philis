@@ -287,7 +287,7 @@ pub(crate) fn stack(pdk: &Pdk) -> analog::routing::Stack {
             })
             .collect(),
         antenna_cumulative: rules.iter().flatten().any(|r| r.2),
-        diode_layer: pdk.diode_marker().map(|l| l.0),
+        diode: pdk.antenna_diode_credit().map(|(l, bonus)| analog::routing::DiodeCredit { layer: l.0, bonus }),
     }
 }
 
@@ -327,8 +327,10 @@ pub(crate) fn intent(
 /// antenna rules still find over their limit after dr's jumper repair: per
 /// net, the deck's diode drawn in free space beside the net's first gate pin
 /// (else its first pin) — cathode `N` on the net, anode `P` on `ground` —
-/// with the schematic device it adds. Empty when the deck's diode cannot be
-/// extracted by LVS ([`Pdk::diode_marker`]) or there is no ground net.
+/// with the schematic device it adds. Empty when the deck credits no diode
+/// ([`Pdk::antenna_diode_credit`]: one would fix nothing at signoff and add an
+/// LVS device), when the deck's diode cannot be extracted by LVS
+/// ([`Pdk::diode_marker`]), or when there is no ground net.
 ///
 /// ponytail: one minimum diode per net, at the first free spot within 50 µm;
 /// `clearance` is the placer's cell-to-cell gap.
@@ -342,7 +344,7 @@ pub(crate) fn antenna_diodes(
     clearance: i32,
 ) -> Vec<(pnr_core::Device, Macro)> {
     use cells::Cell;
-    let (Some(ground), Some(_)) = (ground, pdk.diode_marker()) else { return Vec::new() };
+    let (Some(ground), Some(_), Some(_)) = (ground, pdk.diode_marker(), pdk.antenna_diode_credit()) else { return Vec::new() };
     let mut nets = Vec::new();
     for b in routing.hard.iter().filter(|b| b.repair_kind() == analog::RepairKind::Antenna) {
         b.violating_ids(routes, &mut nets);

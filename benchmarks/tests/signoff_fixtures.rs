@@ -160,7 +160,7 @@ fn check(name: &str, max_drc: usize, expected_erc: &[&str], lvs_must_match: bool
     };
 
     // Every device is compared or declared: none dropped before LVS. First, so a
-    // known DRC/ERC failure (dac4's REL-02 gate row) cannot mask it.
+    // known DRC/ERC failure (dac4's antenna gate row, RTE-06) cannot mask it.
     let want = unverified(&sol.netlist);
     assert_eq!(uncompared, want, "{name}: lvs-coverage units {uncompared}, the netlist has {want} uncomparable{}", detail());
     assert!(
@@ -189,6 +189,32 @@ fn fixtures_sign_off_within_baseline() {
 fn large_fixtures_sign_off_within_baseline() {
     for &(name, drc, erc, lvs) in SLOW {
         check(name, drc, erc, lvs);
+    }
+}
+
+/// The in-loop antenna model never passes what signoff fails (REL T2): a
+/// fixture with an `erc/ar.*` signoff row has an `Antenna` family with a
+/// violated rule not explained by unknowns. One-directional on purpose — the
+/// loop sums per-rect sidewall perimeters and credits a diode only where one
+/// is touched, so it may flag what signoff passes.
+#[test]
+fn antenna_in_loop_never_passes_what_signoff_fails() {
+    let pdk = pdk();
+    for &(name, ..) in BASELINE {
+        let spice = std::fs::read_to_string(root().join(format!("benchmarks/fixtures/{name}.spice"))).expect("read fixture");
+        let cfg = library::Config { feedback_iters: 1, ..Default::default() };
+        let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let report = library::signoff(&sol, &pdk).report;
+        let ar: Vec<&str> = report.hard_violations.iter().map(|v| v.rule.as_str()).filter(|r| r.starts_with("erc/ar.")).collect();
+        let fams: Vec<_> = sol.metadata.routing.iter().filter(|b| b.kind.ends_with("Antenna")).collect();
+        println!("{name:16} signoff antenna rows {ar:?}  in-loop {:?}", fams.iter().map(|b| (b.total, b.satisfied, b.unknown)).collect::<Vec<_>>());
+        if !ar.is_empty() {
+            assert!(
+                fams.iter().any(|b| b.satisfied + b.unknown < b.total),
+                "{name}: signoff fails {ar:?}, the in-loop antenna model passes it: {:?}",
+                fams.iter().map(|b| (b.total, b.satisfied, b.unknown)).collect::<Vec<_>>()
+            );
+        }
     }
 }
 

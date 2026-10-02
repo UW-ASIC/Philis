@@ -14,7 +14,8 @@ pub struct Antenna {
     pub net: NetId,
     /// Max ratio ×100 (the deck's tightest antenna rule): the fallback limit.
     pub max_ratio_x100: i32,
-    /// Total gate area the net drives, nm².
+    /// Total gate area the net drives, nm²: what a piece is charged when the
+    /// routes carry no gate pins for the net ([`Stack::antenna`]).
     pub gate_area_nm2: i64,
     /// Safety margin, percent.
     pub margin_pct: u8,
@@ -32,6 +33,10 @@ impl Rule for Antenna {
     fn satisfied(self, r: &Routes) -> bool {
         let (ratio, limit) = self.worst(r);
         ratio <= limit
+    }
+    /// An unrouted net has no conductor to measure: its ratio of 0 is not a pass.
+    fn known(self, r: &Routes) -> bool {
+        !r.shapes(self.net).is_empty()
     }
     fn touches(self, out: &mut Vec<u32>) {
         out.push(u32::from(self.net.0));
