@@ -438,8 +438,10 @@ fn pin_spread(space: &gp::VariantSpace) -> usize {
 
 /// The generator-facing constraints: the annotator's unitizations split by
 /// device kind (a unitization draws every member as its one `device_type`, and
-/// opposite polarities never match anyway), plus a 1-device unitization from
-/// netlist `w`/`l`/`nf` (or `m`) for every device no unitization covers.
+/// opposite polarities never match anyway), plus a 1-device unitization for
+/// every device no unitization covers: a MOS gets `nf·m` fingers of
+/// `W_total/nf` ([`pnr_core::MosSize`]), a bipolar `m` units, anything else
+/// its written `w` and `nf`/`m` count.
 fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, i32)]) -> Constraints {
     let kind_of = |d: &DeviceId| netlist.devices.get(d.0 as usize).map(|dev| dev.kind);
     let mut unitization: Vec<Unitization> = Vec::new();
@@ -562,9 +564,15 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
         unitization.push(Unitization {
             devices: vec![DeviceId(i as u16)],
             device_type: dev.kind,
-            // A MOS draws `nf·m` fingers of `W_total/nf`; anything else its
-            // `nf`/`m` count at the written `w`.
-            dev_nf: vec![dev.mos_size().map_or(param("nf").max(param("m")), |s| i64::from(s.fingers())).clamp(1, i64::from(u16::MAX)) as u16],
+            // A MOS draws `nf·m` fingers of `W_total/nf`, a bipolar `m` units
+            // (the reference's card count), anything else its `nf`/`m` count
+            // at the written `w`.
+            dev_nf: vec![match (dev.mos_size(), dev.kind) {
+                (Some(s), _) => i64::from(s.fingers()),
+                (None, DeviceKind::Npn | DeviceKind::Pnp) => i64::from(multiplier(dev)),
+                (None, _) => param("nf").max(param("m")),
+            }
+            .clamp(1, i64::from(u16::MAX)) as u16],
             target_ratio: vec![1],
             unit_w: dev.mos_size().map_or(param("w"), |s| s.w_finger_nm()).clamp(0, i64::from(i32::MAX)) as i32,
             unit_l: param("l").clamp(0, i64::from(i32::MAX)) as i32,
@@ -613,7 +621,10 @@ const P2P_SHARE: f32 = 0.55;
 /// finger count: the distributed gate resistance of `N` fingers contacted at
 /// one end, `R□·W/(3·L·N²)`, stays under a fifth of `1/gm` (Razavi Ex. 19.1:
 /// gate noise a fifth of the channel's), so `N ≥ √(5·gm·R□·W / 3L)`, `W`
-/// read as the per-finger `W_f`.
+/// read as the per-finger `W_f`. ponytail: known inconsistency, the `N²` form
+/// holds for the total `W`; with `W_f` the `N` parallel fingers give
+/// `R□·W_f/(3·L·N)`, linear in `N`. The floor is kept as plan-08 FLOW-01
+/// specifies it; the gate-R floor's owner settles which form is meant.
 /// Non-MOS devices and devices without W/L get `(1, W)`.
 #[must_use]
 pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>]) -> Vec<(u16, i32)> {
@@ -1760,6 +1771,19 @@ mod tests {
         assert_eq!(bank, &[DeviceId(3), DeviceId(0), DeviceId(1), DeviceId(2)], "dummy first, then by weight");
         let alts = &cells.spaces[cells.cell_of[0] as usize].alternatives;
         assert!(!alts.is_empty() && alts.iter().all(|m| m.units.len() == 8), "every alternative is the 2^3 array");
+    }
+
+    /// A lone bipolar draws `m` units (`cells::bjt` draws its unitization's
+    /// `dev_nf`) and its LVS reference holds `m` cards; `nf` counts neither (it
+    /// once drew `max(nf, m)` against `m` cards).
+    #[test]
+    fn lone_bjt_draws_as_many_units_as_reference_cards() {
+        let pdk = pdk().expect("pdks/sky130.json is in the repo");
+        let netlist = crate::parse("XQ1 c b e sky130_fd_pr__pnp_05v5_W3p40L3p40 nf=3 m=2\n.end\n").expect("parses");
+        let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[]));
+        let u = sized.unitization.iter().find(|u| u.devices == [DeviceId(0)]).expect("a 1-device unitization");
+        assert_eq!(u.dev_nf, vec![2], "drawn units");
+        assert_eq!(reference(&netlist, None, &[]).devices.len(), 2, "one reference card per drawn unit");
     }
 
     /// A 2-segment resistor's drawn cards: one per segment, joined by the

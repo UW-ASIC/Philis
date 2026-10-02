@@ -20,6 +20,8 @@ pub enum SizeConvention {
 /// How [`spice_with`] reads a netlist.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ParseOptions {
+    /// How a MOS card's `w` relates to its `nf` fingers; normalised to the
+    /// SPICE total before the [`Device`] is stored.
     pub size: SizeConvention,
 }
 
