@@ -150,14 +150,10 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     }
 }
 
-/// Gate area `W·L·fingers` of a FET, µm²; `0` for anything else or when the
+/// Gate area `W_total·L·m` of a FET, µm²; `0` for anything else or when the
 /// netlist omits W/L.
 pub(crate) fn gate_um2(dev: &pnr_core::netlist::Device) -> f32 {
-    if !matches!(dev.kind, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
-        return 0.0;
-    }
-    let (w, l) = (param(dev, "w", 0) as f32, param(dev, "l", 0) as f32);
-    w * l * 1e-6 * f32::from(constraints::fingers(dev))
+    dev.gate_area_um2() as f32
 }
 
 /// SPICE param `key` of `dev`, or `default`.

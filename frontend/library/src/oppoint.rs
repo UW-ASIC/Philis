@@ -270,15 +270,12 @@ pub(crate) fn flat_circuit_with(
             node(di, t, n)
         };
         // sky130 primitives are subcircuits: D G S B, then W/L in microns.
+        // `W` is the instance total over `nf` fingers, `m` instances in
+        // parallel: the size layout draws (`pnr_core::MosSize`).
         let (w_um, l_um) = (param_um(dev, "w"), param_um(dev, "l"));
-        let nf = dev
-            .params
-            .iter()
-            .find(|(k, _)| k == "nf")
-            .map_or(1, |(_, v)| *v)
-            .max(1);
+        let (nf, m) = dev.mos_size().map_or((1, 1), |s| (s.nf, s.m));
         s.push_str(&format!(
-            "{} {} {} {} {} {} W={w_um} L={l_um} nf={nf}{}\n",
+            "{} {} {} {} {} {} W={w_um} L={l_um} nf={nf} m={m}{}\n",
             instance_name(dev),
             net("D"),
             net("G"),
