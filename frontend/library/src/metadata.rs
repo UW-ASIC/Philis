@@ -85,8 +85,10 @@ pub struct MetadataReport {
     /// Sidecar process numbers used on an `UNVERIFIED` source
     /// ([`verify::Pdk::unverified`]). Reported, not blocking [`Self::certified`].
     pub assumed: Vec<String>,
-    /// Budget kinds whose price ended the run at its cap with the budget still
-    /// violated ([`gp::Prices::saturated`]): binding, not settled. Empty from
+    /// Budget kinds whose price sat at its cap with the batch still violated
+    /// on the run's **last** epoch ([`gp::Prices::saturated`]): why the search
+    /// stopped, not a verdict on the drawn winner, which can be an earlier
+    /// epoch where that batch was met (its rows above say). Empty from
     /// [`build`]; the flow fills it at the end of the run.
     pub binding: Vec<String>,
 }
@@ -305,7 +307,7 @@ impl std::fmt::Display for MetadataReport {
             writeln!(f, "\n  assumed (UNVERIFIED sidecar values): {}", self.assumed.join(", "))?;
         }
         if !self.binding.is_empty() {
-            writeln!(f, "\n  binding (price at cap, budget still violated): {}", self.binding.join(", "))?;
+            writeln!(f, "\n  price at cap on the last epoch (search stopped binding): {}", self.binding.join(", "))?;
         }
         writeln!(f, "\n  certificate: {}", if self.certified() { "all families met, all inputs present" } else { "NOT CERTIFIED" })?;
         Ok(())
@@ -494,5 +496,14 @@ mod tests {
         let r = MetadataReport { assumed: vec!["tie_max_dist_nm".into()], ..MetadataReport::default() };
         assert!(r.certified());
         assert!(r.to_string().contains("assumed (UNVERIFIED sidecar values): tie_max_dist_nm"), "{r}");
+    }
+
+    /// A saturated price is printed as the search's last-epoch state, never as
+    /// a claim about the drawn winner, and only when there is one.
+    #[test]
+    fn binding_kinds_are_printed_as_last_epoch_state() {
+        assert!(!MetadataReport::default().to_string().contains("price at cap"));
+        let r = MetadataReport { binding: vec!["WireLength".into()], ..MetadataReport::default() };
+        assert!(r.to_string().contains("price at cap on the last epoch (search stopped binding): WireLength"), "{r}");
     }
 }

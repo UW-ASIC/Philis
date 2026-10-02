@@ -387,8 +387,13 @@ fn solve(
             stats.converged = true;
             break;
         }
-        // Infeasible: try the next variant assignment, unless the budget or the
-        // variant space is exhausted.
+        // Not converged: infeasible, or feasible with prices still moving or
+        // saturated. Try the next variant assignment, unless the budget or the
+        // variant space is exhausted. ponytail: a feasible run that once
+        // saturated a λ relaxes it by ρ·slack per epoch, ρ ≥ RHO_FLOOR = 0.25:
+        // −64 at slack 0.5 with ρ at the floor is 512 epochs of drift above
+        // PRICE_STATIONARY, so it escalates rather than converges; FLOW-08's
+        // `RunStats.stop` will show it.
         if outer + 1 == n_outer {
             break;
         }

@@ -32,7 +32,7 @@ pub struct Prices {
     drift: f64,
     /// Dual steps taken: one per epoch (the flow's), none inside `place`.
     steps: u32,
-    /// Kinds whose λ sits at `−LAMBDA_MAX` with the budget still violated
+    /// Kinds, each once, whose λ sits at `−LAMBDA_MAX` with a batch still violated
     /// after the last step: the cap, not the layout, is what stopped them.
     saturated: Vec<&'static str>,
 }
@@ -118,7 +118,7 @@ impl Prices {
             let next = (p.lambda - p.rho * g).clamp(-LAMBDA_MAX, 0.0);
             drift_sq += f64::from(next - p.lambda).powi(2);
             p.lambda = next;
-            if next <= -LAMBDA_MAX && r > 0.0 {
+            if next <= -LAMBDA_MAX && r > 0.0 && !self.saturated.contains(&key.0) {
                 self.saturated.push(key.0);
             }
         }
@@ -127,7 +127,8 @@ impl Prices {
         self.bind(reqs);
     }
 
-    /// Kinds still violated with λ at the cap after the last [`Prices::settle`].
+    /// Kinds with a batch still violated and λ at the cap after the last
+    /// [`Prices::settle`], each listed once however many batches share it.
     #[must_use]
     pub fn saturated(&self) -> &[&'static str] {
         &self.saturated
@@ -527,18 +528,20 @@ mod price_tests {
 
     /// A λ held at the cap reads as stationary in `drift` while the budget is
     /// still violated, so it must be reported as binding (ρ ramps 0.25 … 64,
-    /// Σ > 64 well inside 30 steps).
+    /// Σ > 64 well inside 30 steps). Two capped batches of one kind (ordinals
+    /// 0 and 1) list that kind once.
     #[test]
     fn a_saturated_price_is_reported() {
-        let (reqs, l) = bench(); // residual 1.0 every epoch
+        let (mut reqs, l) = bench(); // residual 1.0 every epoch
+        reqs.budget.push(Box::new(vec![Budget]));
         let mut prices = Prices::new();
         prices.settle(&reqs, &l);
         assert!(prices.saturated().is_empty(), "one step does not reach the cap");
         for _ in 1..30 {
             prices.settle(&reqs, &l);
         }
-        assert_eq!(prices.weight_of(0), LAMBDA_MAX);
-        assert_eq!(prices.saturated(), [reqs.budget[0].kind()], "the capped batch is reported binding");
+        assert_eq!((prices.weight_of(0), prices.weight_of(1)), (LAMBDA_MAX, LAMBDA_MAX));
+        assert_eq!(prices.saturated(), [reqs.budget[0].kind()], "the capped kind is reported binding, once");
         assert_eq!(prices.steps(), 30);
     }
 
