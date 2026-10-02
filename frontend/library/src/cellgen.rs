@@ -635,8 +635,9 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>]) -> Vec<(u16, i
     let w_max = pdk.rule("max_finger_width", 0);
     // The deck's point-to-point R limit bounds a finger too: a finger's poly,
     // `R□·W_f/L`, within [`P2P_SHARE`] of it.
-    let p2p = pdk.p2p_max_ohm().zip(pdk.sheet_ohm("poly")).filter(|&(_, sq)| sq > 0.0);
-    let poly_sq = pdk.layer("poly").and_then(|l| pdk.pex_f32(l, "sheet_res_ohm_sq")).map_or(0.0, f64::from);
+    let poly_sq = pdk.sheet_ohm("poly").filter(|&sq| sq > 0.0);
+    let p2p = pdk.p2p_max_ohm().zip(poly_sq);
+    let poly_sq = poly_sq.map_or(0.0, f64::from);
     let mut out: Vec<(u16, i32)> = netlist.devices.iter().map(|d| (1, nm(d, "w"))).collect();
     let mut done = vec![false; netlist.devices.len()];
     for (i, d) in netlist.devices.iter().enumerate() {
@@ -842,7 +843,8 @@ fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &dyn pnr_core::P
 ///
 /// A sized MOS goes in as `max(nf, m)` cards of per-finger `w`/`l` (SI metres):
 /// the extractor measures one device per channel and a parametrised device never
-/// parallel-merges. Inductors have no recogniser and are skipped, and so are
+/// parallel-merges. Inductors have no recogniser (and no drawing: signoff
+/// reports each as `cell/undrawable`) and are skipped, and so are
 /// capacitors: every capacitor generator here draws a MOM (metal plates or a
 /// comb, no marker), which no deck's recogniser extracts (sky130 has none,
 /// ihp's is a MIM, gf180's a MOS cap), so a card would only unpair; their

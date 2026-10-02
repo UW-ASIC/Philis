@@ -1,92 +1,43 @@
-//! Inductor generator: a rectangular met1 spiral. Inductors have no LVS
-//! recogniser, so this only has to be DRC-clean and placeable.
+//! Inductor generator: draws nothing. No deck recognises an inductor (LVS
+//! skips them, `cellgen::reference`), and the rectangular met1 spiral this
+//! used to draw anchored every turn at (0,0), so the turns merged into one
+//! conductor with an unvia'd li centre tap: a short, not a coil (AC-03). An
+//! empty enumeration makes `library::signoff` report `cell/undrawable`.
+//!
+//! ponytail: a real spiral (offset turns, crossover, keep-out) is deferred
+//! (plan-03 appendix, former CELL-28).
 
-use crate::builder::dim;
 use analog::Constraints;
-use pnr_core::{DeviceGroup, Macro, Process, Rect};
+use pnr_core::{DeviceGroup, Macro, Process};
 
-use crate::builder::{pin, req, sizing, Builder, Sizing};
+use crate::builder::Builder;
 use crate::Cell;
 
-/// The one inductor variant: `turns` rectangular turns.
+/// The inductor cell; it has no variants.
 #[derive(Clone)]
-pub struct Inductor {
-    pub turns: u16,
-}
+pub struct Inductor;
 
 impl Cell for Inductor {
-    fn enumerate(group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Vec<Self> {
-        if group.devices.is_empty() {
-            return vec![];
-        }
-        let s = group_sizing(group, constraints, process);
-        vec![Inductor { turns: s.dev_nf.iter().sum::<u16>().max(1) }]
+    fn enumerate(_group: &DeviceGroup, _constraints: &Constraints, _process: &dyn Process) -> Vec<Self> {
+        vec![]
     }
 
-    fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro {
-        let mut b = Builder::new(process.grid());
-        let s = group_sizing(group, constraints, process);
-
-        let trace_w = s.unit_w.max(process.rule("ind_min_trace", 0));
-        let outer_d = s.unit_l.max(process.rule("ind_min_diameter", 0));
-        let n_turns = i32::from(self.turns.max(1));
-        let spacing = trace_w;
-
-        let met1 = req(process, "met1");
-        let li = req(process, "li");
-        let ct = dim(process, "contact");
-
-        // ponytail: rectangular turns, not an octagonal path — DRC-clean and
-        // placeable; draw polygons if EM accuracy ever matters.
-        let mut ring_outer = outer_d;
-        for turn in 0..n_turns {
-            if ring_outer <= 2 * trace_w {
-                break;
-            }
-            b.rect(met1, Rect { x: 0, y: 0, w: ring_outer, h: trace_w });
-            b.rect(met1, Rect { x: 0, y: ring_outer - trace_w, w: ring_outer, h: trace_w });
-            b.rect(met1, Rect { x: 0, y: trace_w, w: trace_w, h: ring_outer - 2 * trace_w });
-
-            let right_h = ring_outer - 2 * trace_w;
-            if turn == 0 {
-                let gap = trace_w + spacing;
-                if right_h > gap {
-                    b.rect(met1, Rect { x: ring_outer - trace_w, y: trace_w, w: trace_w, h: right_h - gap });
-                }
-            } else {
-                b.rect(met1, Rect { x: ring_outer - trace_w, y: trace_w, w: trace_w, h: right_h });
-            }
-            ring_outer -= 2 * (trace_w + spacing);
-        }
-
-        let center = outer_d / 2;
-        b.rect(li, Rect { x: center - trace_w / 2, y: center - trace_w / 2, w: trace_w, h: outer_d / 2 });
-        b.pin(pin(0, "P", Rect { x: outer_d - trace_w, y: trace_w, w: ct, h: ct }, met1));
-        b.pin(pin(0, "N", Rect { x: center - ct / 2, y: center - ct / 2, w: ct, h: ct }, li));
-
-        b.finish()
+    fn draw(&self, _group: &DeviceGroup, _constraints: &Constraints, process: &dyn Process) -> Macro {
+        Builder::new(process.grid()).finish()
     }
-}
-
-fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
-    sizing(group, c, process.rule("ind_min_trace", 0), process.rule("ind_min_diameter", 0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every variant, drawn alone, is DRC- and ERC-clean.
+    /// With no recogniser, an inductor has no construction: it enumerates
+    /// nothing, so signoff reports it rather than checking a drawing.
     #[test]
-    fn every_variant_is_drc_and_erc_clean() {
+    fn an_inductor_is_undrawable_without_a_recogniser() {
         use crate::testkit;
-        use pnr_core::DeviceKind;
-        let Some(pdk) = testkit::pdk() else {
-            eprintln!("sky130 PDK unavailable — skipping");
-            return;
-        };
-        let mut dirty = Vec::new();
-        dirty.extend(testkit::dirty::<Inductor>(DeviceKind::Inductor, 1, 1, 2000, 20_000, &pdk));
-        assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
+        let pdk = testkit::pdk().expect("pdks/sky130.json is checked in");
+        let (group, c) = testkit::group_of(pnr_core::DeviceKind::Inductor, 1, 1, 2000, 20_000);
+        assert!(Inductor::enumerate(&group, &c, &pdk).is_empty());
     }
 }

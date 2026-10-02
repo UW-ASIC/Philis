@@ -14,20 +14,15 @@ fn chain2_open_epoch_is_scored_not_fatal() {
     ))
     .expect("sky130 deck present");
     let pdk = verify::Pdk::from_json(&deck).expect("deck parses");
-    let result = library::run(
+    let sol = library::run(
         "\n.subckt chain2 in mid out vss\nM1 mid in vss vss nfet w=0.42u l=0.15u\nM2 out mid vss vss nfet w=0.84u l=0.15u\n.ends\n",
         &pdk,
         &library::Macros::default(),
         &Config { feedback_iters: 3, outer_iters: 1, ..Default::default() },
-    );
-    // Ok or a clean FlowError both prove the point — the epoch loop survived.
-    let sol = match result {
-        Ok(sol) => sol,
-        Err(e) => {
-            eprintln!("flow returned a clean error (accepted): {e:?}");
-            return;
-        }
-    };
+    )
+    // An `Err` here would pass the old "no panic" bar while proving nothing
+    // about the signoff plumbing below, so the flow must deliver a layout.
+    .expect("the flow returns a solution");
 
     // Signoff smoke over the same solution: the pins helper must derive labels
     // the engine can bind (verify fails closed on a label with no geometry
