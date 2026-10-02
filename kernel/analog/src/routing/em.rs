@@ -145,7 +145,9 @@ impl Electromigration {
             .enumerate()
             .filter_map(|(i, c)| {
                 let lim = self.limit(c.layer.0).filter(|l| l.ua_per_cut > 0.0)?;
-                let k = rank(c.layer.0)?;
+                // A metal's limit keeps its deck rule's per-cut figure (`Pdk::em_limit`
+                // zeroes only a cut's per-µm one): only a cut is a via.
+                let k = rank(c.layer.0).filter(|&k| stack.layers[k].cut)?;
                 Some((i, lim, lands(c, k.wrapping_sub(1)), lands(c, k + 1)))
             })
             .collect();
@@ -222,13 +224,14 @@ mod tests {
         Box::leak(Box::new(Stack { layers: vec![metal(1), Layer { id: 2, sheet_ohm: 4.5, cut: true, ..Layer::default() }, metal(3)], ..Stack::default() }))
     }
 
-    /// The sky130 values (`GP/pdks/sky130.deck:491-492`): met1 and met2
-    /// 2800 µA/µm, via 290 µA/cut.
+    /// The sky130 values (`pdks/decks/sky130.deck:496-497`) as `em_limits`
+    /// copies them: met1 2800 µA/µm keeping `EM.met1_mcon`'s 360 µA/cut, via
+    /// 290 µA/cut, met2 2800 µA/µm keeping `EM.met2_via1`'s 290 µA/cut.
     fn em() -> Electromigration {
         let mut limits = [(u16::MAX, Limit::default()); MAX_LAYERS];
-        limits[0] = (1, Limit { ua_per_um: 2_800.0, ..Limit::default() });
+        limits[0] = (1, Limit { ua_per_um: 2_800.0, ua_per_cut: 360.0, ..Limit::default() });
         limits[1] = (2, Limit { ua_per_cut: 290.0, ..Limit::default() });
-        limits[2] = (3, Limit { ua_per_um: 2_800.0, ..Limit::default() });
+        limits[2] = (3, Limit { ua_per_um: 2_800.0, ua_per_cut: 290.0, ..Limit::default() });
         Electromigration { net: NetId(0), limits, stack: Some(stack()) }
     }
 
@@ -294,6 +297,17 @@ mod tests {
         wide.push(shape(2, 4_200, 600, 200, 200));
         let r3 = routes(wide, r.terms[0].clone());
         assert!(e.known(&r3) && e.satisfied(&r3), "{}", e.residual(&r3));
+    }
+
+    /// A metal limit carries its deck rule's per-cut figure too ([`em`]): a
+    /// met1 wire is no via group. 500 µA (> 360 µA/cut) needs 178.6 nm of the
+    /// 1 µm drawn.
+    #[test]
+    fn a_metal_with_a_per_cut_limit_is_not_a_via() {
+        let e = em();
+        let r = routes(vec![shape(1, 0, 0, 10_000, 1_000)], vec![term(0, 0, 200, 1_000, Some(500.0)), term(9_800, 0, 200, 1_000, Some(-500.0))]);
+        assert!(e.known(&r) && e.satisfied(&r), "{}", e.residual(&r));
+        assert!((e.usage(&r).unwrap() - need(500.0) / 1_000.0).abs() < 1e-4, "{:?}", e.usage(&r));
     }
 
     /// `dr`'s via array: each cut lands on its own met2 pad, and every pad

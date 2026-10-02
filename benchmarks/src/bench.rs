@@ -254,10 +254,17 @@ fn run_circuit(
             || "none".to_string(),
             |b| format!("{} uW, {}", b.total_power_uw, if b.provenance.starts_with("SYNTH") { "probe" } else { "testbench" })
         ),
-        // Per fixture (REL T3/T4): nets checked, of them violated, and unknown.
+        // Per fixture (REL T3/T4): nets checked, of them violated, unknown, and
+        // the worst known net's need/have (T3's `min(w/need) ≥ 1` is `use ≤ 1`).
         sol.metadata.routing.iter().find(|r| r.kind == "Electromigration").map_or_else(
             || "none".to_string(),
-            |r| format!("known {} (viol {}), unknown {}", r.total - r.unknown, r.total - r.satisfied, r.unknown)
+            |r| format!(
+                "known {} (viol {}), unknown {}, max use {}",
+                r.total - r.unknown,
+                r.total - r.satisfied,
+                r.unknown,
+                r.usage.map_or_else(|| "none".to_string(), |u| format!("{u:.3}"))
+            )
         ),
     );
 
