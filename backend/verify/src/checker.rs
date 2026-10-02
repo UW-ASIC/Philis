@@ -31,8 +31,8 @@ pub struct Checker {
 
 impl Checker {
     /// Parse the deck out of `pdk.source`. `strip_density` drops every
-    /// `density` rule — the in-loop mode, where a density window over a
-    /// half-drawn layout is noise.
+    /// `density` and `density_cmp` rule — the in-loop mode, where a density
+    /// window over a half-drawn layout is noise.
     ///
     /// # Errors
     /// The deck failing gdsverify's parser (cannot happen for a loaded `Pdk`).
@@ -41,9 +41,8 @@ impl Checker {
         let mut deck = parse_deck(&pdk.source, nm_grid(), &mut strings)
             .map_err(|e| format!("deck rejected: {e}"))?;
         if strip_density {
-            if let Some(density) = strings.get("density") {
-                deck.rules.spec.retain(|s| s.kind != density);
-            }
+            let kinds = [strings.get("density"), strings.get("density_cmp")];
+            deck.rules.spec.retain(|s| !kinds.contains(&Some(s.kind)));
         }
         // Whole-die fill coverage says nothing about a block: deferred to
         // chip signoff, reported as such.
@@ -273,28 +272,38 @@ impl Checker {
             .collect()
     }
 
-    /// Take out every `density` rule whose `window` exceeds a `w × h` nm block
-    /// in either axis: a window wider than the block measures the chip around
-    /// it, so that check is chip integration's — not run here, and reported as
-    /// not run (never as passed). Returns the rules taken out.
+    /// Take out every `density` (one square `window`) and `density_cmp`
+    /// (`window_x` × `window_y`, sky130's `m*.density`) rule whose window side
+    /// exceeds the `w × h` nm block's: a window wider than the block measures
+    /// the chip around it — and with `partial_windows: false` GPurify examines
+    /// zero windows and records `Ran` — so that check is chip integration's:
+    /// not run here, and reported as not run (never as passed). Returns the
+    /// rules taken out.
     pub fn defer_density_wider_than(&mut self, w: i64, h: i64) -> Vec<String> {
-        let (Some(kind), Some(window)) = (self.loaded.strings.get("density"), self.loaded.strings.get("window")) else {
-            return Vec::new();
-        };
-        let rules = &mut self.loaded.deck.rules;
-        let wide = |s: &gdsverify::ingest::deck::RuleSpec| match rules.param(s, window) {
-            Some(gdsverify::ingest::deck::ParamValue::Length(d)) => Some(d.raw()).filter(|&win| s.kind == kind && (win > w || win > h)),
+        use gdsverify::ingest::deck::{ParamValue, RuleSpec};
+        let (st, rules) = (&self.loaded.strings, &self.loaded.deck.rules);
+        let (density, cmp) = (st.get("density"), st.get("density_cmp"));
+        let len = |s: &RuleSpec, k: &str| match st.get(k).and_then(|k| rules.param(s, k)) {
+            Some(ParamValue::Length(d)) => Some(d.raw()),
             _ => None,
         };
-        let out: Vec<(String, String)> = rules
+        let window = |s: &RuleSpec| match Some(s.kind) {
+            k if k == density => len(s, "window").map(|d| (d, d)),
+            k if k == cmp => len(s, "window_x").zip(len(s, "window_y")),
+            _ => None,
+        };
+        let out: Vec<(StrId, String, String)> = rules
             .spec
             .iter()
-            .filter_map(|s| wide(s).map(|win| (self.loaded.strings.resolve(s.id).to_string(), format!("ChipLevel(window {win} nm > block {w}x{h} nm)"))))
+            .filter_map(|s| {
+                let (wx, wy) = window(s).filter(|&(wx, wy)| wx > w || wy > h)?;
+                let win = if wx == wy { format!("{wx}") } else { format!("{wx}x{wy}") };
+                Some((s.id, st.resolve(s.id).to_string(), format!("ChipLevel(window {win} nm > block {w}x{h} nm)")))
+            })
             .collect();
-        let gone: Vec<_> = rules.spec.iter().filter(|s| wide(s).is_some()).map(|s| s.id).collect();
-        rules.spec.retain(|s| !gone.contains(&s.id));
-        let names = out.iter().map(|(n, _)| n.clone()).collect();
-        self.deferred.extend(out);
+        self.loaded.deck.rules.spec.retain(|s| !out.iter().any(|o| o.0 == s.id));
+        let names = out.iter().map(|o| o.1.clone()).collect();
+        self.deferred.extend(out.into_iter().map(|(_, n, why)| (n, why)));
         names
     }
 
