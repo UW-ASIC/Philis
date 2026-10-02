@@ -10,7 +10,7 @@ fn pdk() -> Option<verify::Pdk> {
 }
 
 fn lvs(sol: &library::Solution, pdk: &verify::Pdk) -> Vec<String> {
-    library::signoff(sol, pdk).hard_violations.into_iter().map(|v| v.rule).filter(|r| r.starts_with("lvs")).collect()
+    library::signoff(sol, pdk).report.hard_violations.into_iter().map(|v| v.rule).filter(|r| r.starts_with("lvs")).collect()
 }
 
 /// The flow draws and routes a gate-to-ground diode; lifted out and adopted

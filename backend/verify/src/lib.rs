@@ -1,7 +1,8 @@
 //! `verify` — physical verification through GPurify (`gdsverify`).
 //!
-//! [`signoff`] runs DRC/ERC/LVS/PEX in one engine pass and folds the result
-//! into a [`pnr_core::Report`]; [`drc`]/[`erc`] are standalone probes. [`Pdk`] (the process schema every crate reads) lives here too.
+//! [`signoff_checked`] runs DRC/ERC/LVS/PEX in one engine pass and returns a
+//! [`Signoff`]: errors as a [`pnr_core::Report`], deck warnings and what was
+//! not checked ([`Coverage`]) apart from it; [`drc`]/[`erc`] are standalone probes. [`Pdk`] (the process schema every crate reads) lives here too.
 
 pub mod checker;
 mod decks;
@@ -25,25 +26,89 @@ pub use netlist::{extract_spice, Detail};
 pub use pdk::{EmLimit, Pdk};
 pub use reference::{RefDeviceIn, RefInput, RefKind};
 
-/// nm shortfall of one violation row: `limit − measured` for a length pair
-/// (1 dbu = 1 nm), floored at 0; `1` for any non-length (boolean) fail.
+/// Shortfall of one violation row, in one of two units. A length pair is nm
+/// (1 dbu = 1 nm): `limit − measured`, floored at 0 — a row does not carry its
+/// rule's `LimitSense`, so a maximum rule's overshoot reads 0 here. Any other
+/// same-dimension numeric pair (area, ratio, count, voltage, current,
+/// resistance) is ‰ of the limit, `ceil(1000·|measured − limit| / |limit|)`
+/// (`|limit|` floored at 1e-12), so an antenna ratio 2× over reads 1000 and
+/// 1 % over reads 10; a NaN reads `i64::MAX`. Mismatched dimensions read 1.
 #[must_use]
-pub fn shortfall_nm(limit: Measurement, measured: Measurement) -> i64 {
+pub fn shortfall(limit: Measurement, measured: Measurement) -> i64 {
+    use Measurement as M;
+    // A NaN reading is no graze: it ranks as the worst miss (`as` would make it 0).
+    let permille = |l: f64, m: f64| {
+        let x = (1000.0 * (m - l).abs() / l.abs().max(1e-12)).ceil();
+        if x.is_nan() { i64::MAX } else { x as i64 }
+    };
     match (limit, measured) {
-        (Measurement::Length(l), Measurement::Length(m)) => (l.raw() - m.raw()).max(0),
+        (M::Length(l), M::Length(m)) => (l.raw() - m.raw()).max(0),
+        (M::Area(l), M::Area(m)) => permille(l.raw() as f64, m.raw() as f64),
+        (M::Ratio(l), M::Ratio(m)) => permille(l, m),
+        (M::Count(l), M::Count(m)) => permille(f64::from(l), f64::from(m)),
+        (M::Voltage(l), M::Voltage(m)) => permille(l.raw(), m.raw()),
+        (M::Current(l), M::Current(m)) => permille(l.raw(), m.raw()),
+        (M::Resistance(l), M::Resistance(m)) => permille(l.raw(), m.raw()),
         _ => 1,
     }
 }
 
+/// Everything one signoff concluded: errors, warnings and what was not
+/// checked, kept apart.
+#[derive(Default)]
+pub struct Signoff {
+    /// Errors only: DRC/ERC/LVS rows of `Severity::Error`, `engine/…`, the
+    /// LVS `lvs/extract: label short`. Its `cost` is PEX's total C, fF.
+    pub report: Report,
+    /// Rows the deck states as warnings. Never in `report.hard_violations`.
+    pub warnings: Vec<Violation>,
+    /// What this run did not check: LVS-unverified devices, skipped rules.
+    pub coverage: Coverage,
+    /// PEX C over labelled nets, fF ([`Checker::cap_matrix`]); empty without
+    /// PEX, still filled on the label-short fallback.
+    pub caps: CapMatrix,
+    /// Wall time.
+    pub elapsed: Duration,
+}
+
+/// What a signoff did not check. Never a pass: a certificate requires
+/// `unverified` empty, and every skipped rule is listed with its reason.
+#[derive(Clone, Debug, Default)]
+pub struct Coverage {
+    /// Schematic devices LVS did not compare: `(kind, model hint, count)`.
+    pub unverified: Vec<(RefKind, Option<String>, usize)>,
+    /// Rules this run did not execute, `(rule, reason)`: deck skips, waivers, chip-level deferrals.
+    pub skipped_rules: Vec<(String, String)>,
+}
+
+/// GPurify's layout-only range checks, recorded `Skipped(NotInDeck)` because
+/// the deck carries no limits; the reference parameter comparison runs under
+/// `lvs.parameter_mismatch`, so these skips do not mean LVS ignored W/L.
+const RANGE_ONLY: [&str; 3] = ["lvs.device_count_mos", "lvs.device_count_bjt", "lvs.parametric"];
+
+impl std::fmt::Display for Coverage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (kind, model, n) in &self.unverified {
+            writeln!(f, "  LVS unverified: {n} × {kind:?} {}", model.as_deref().unwrap_or("(no model)"))?;
+        }
+        if !self.skipped_rules.is_empty() {
+            writeln!(f, "  rules not run ({}):", self.skipped_rules.len())?;
+        }
+        for (rule, why) in &self.skipped_rules {
+            let note = if RANGE_ONLY.contains(&rule.as_str()) {
+                " (range limits; reference parameters are compared as lvs.parameter_mismatch)"
+            } else {
+                ""
+            };
+            writeln!(f, "    {rule}: {why}{note}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Full signoff over drawn geometry, its pin labels and its schematic
-/// reference; the [`Duration`] is wall time.
-///
-/// Every violation row becomes a hard [`Violation`] named
-/// `{domain}/{rule}:{layer}` with its nm shortfall as margin; a deck warning's
-/// name is prefixed `warn/` (the epoch key leaves it out of |V|). A stage the
-/// engine skipped or refused, or an engine failure, is a hard `engine/…`
-/// violation: a check that could not run never reads as clean. Rules skipped
-/// inside a stage that ran are logged by name, once per process.
+/// reference: [`signoff_checked`] without intent, warnings or coverage; the
+/// [`Duration`] is wall time.
 #[must_use]
 pub fn signoff(
     shapes: &[Shape],
@@ -80,8 +145,8 @@ pub fn signoff_with_caps(
     signoff_with_intent(shapes, pins, reference, &Intent::default(), pdk)
 }
 
-/// [`signoff_with_caps`] with design [`Intent`], so the deck's EM rules run
-/// on the operating-point currents instead of skipping.
+/// [`signoff_checked`]'s errors, wall time and caps; warnings and coverage
+/// are dropped.
 #[must_use]
 pub fn signoff_with_intent(
     shapes: &[Shape],
@@ -90,52 +155,81 @@ pub fn signoff_with_intent(
     intent: &Intent,
     pdk: &Pdk,
 ) -> (Report, Duration, CapMatrix) {
+    let s = signoff_checked(shapes, pins, reference, intent, pdk);
+    (s.report, s.elapsed, s.caps)
+}
+
+/// Full signoff with design [`Intent`] (so the deck's EM/IR rules run on the
+/// operating-point currents instead of skipping).
+///
+/// A deck error row becomes a hard [`Violation`] named
+/// `{domain}/{rule}:{layer}` with its [`shortfall`] as margin; a deck warning
+/// row, named the same way, goes to [`Signoff::warnings`] only. A stage the
+/// engine skipped or refused, or an engine failure, is a hard `engine/…`
+/// violation: a check that could not run never reads as clean. Rules skipped
+/// inside a stage that ran, and schematic devices no deck recogniser
+/// extracts, are this run's [`Coverage`].
+#[must_use]
+pub fn signoff_checked(
+    shapes: &[Shape],
+    pins: &[LabeledPin],
+    reference: &RefInput,
+    intent: &Intent,
+    pdk: &Pdk,
+) -> Signoff {
     let t0 = Instant::now();
-    let mut caps = CapMatrix::new();
-    let mut report = Report::default();
-    let fail = |report: &mut Report, rule: String| {
-        report.hard_violations.push(Violation { rule, margin: 0 });
+    let mut s = Signoff::default();
+    let fail = |s: &mut Signoff, rule: String| {
+        s.report.hard_violations.push(Violation { rule, margin: 0 });
     };
 
     let mut checker = match Checker::new(pdk, false) {
         Ok(c) => c,
         Err(e) => {
-            fail(&mut report, format!("engine/load: {e}"));
-            return (report, t0.elapsed(), caps);
+            fail(&mut s, format!("engine/load: {e}"));
+            s.elapsed = t0.elapsed();
+            return s;
         }
     };
     defer_chip_level(&mut checker, shapes);
     if let Err(e) = checker.set_intent(intent) {
-        fail(&mut report, format!("engine/intent: {e}"));
+        fail(&mut s, format!("engine/intent: {e}"));
     }
     match checker.set_reference(reference) {
-        Err(e) => fail(&mut report, format!("engine/reference: {e}")),
+        Err(e) => fail(&mut s, format!("engine/reference: {e}")),
         Ok(skipped) => {
-            if skipped > 0 {
-                eprintln!(
-                    "verify::signoff: {skipped} schematic device(s) have no deck recogniser; \
-                     left out of LVS"
-                );
+            for (kind, model) in skipped {
+                match s.coverage.unverified.iter_mut().find(|u| u.0 == kind && u.1 == model) {
+                    Some(u) => u.2 += 1,
+                    None => s.coverage.unverified.push((kind, model, 1)),
+                }
             }
             match checker.run(shapes, pins, Checks::ALL) {
-                // A label short aborts extraction. Report it, then re-run
-                // label-free so DRC/ERC/PEX still count honestly.
+                // A label short aborts extraction and is LVS's verdict. Report
+                // it, then re-run DRC/ERC/PEX with one label per shorted net,
+                // so ERC still sees the ports and PEX still names the nets.
                 Err(e) if e.starts_with(checker::LABEL_SHORT) => {
-                    fail(&mut report, format!("lvs/{e}"));
-                    match checker.run(shapes, &[], Checks::ALL) {
-                        Err(e) => fail(&mut report, format!("engine/run: {e}")),
-                        Ok(summary) => harvest(&checker, &summary, &mut report),
+                    fail(&mut s, format!("lvs/{e}"));
+                    let gone: Vec<String> = checker.shorted_labels().into_iter().flat_map(|g| g.into_iter().skip(1)).collect();
+                    let kept: Vec<LabeledPin> = pins.iter().filter(|p| !gone.contains(&p.name)).cloned().collect();
+                    match checker.run(shapes, &kept, Checks { lvs: false, ..Checks::ALL }) {
+                        Err(e) => fail(&mut s, format!("engine/run: {e}")),
+                        Ok(summary) => {
+                            harvest(&checker, &summary, &mut s);
+                            s.caps = checker.cap_matrix();
+                        }
                     }
                 }
-                Err(e) => fail(&mut report, format!("engine/run: {e}")),
+                Err(e) => fail(&mut s, format!("engine/run: {e}")),
                 Ok(summary) => {
-                    harvest(&checker, &summary, &mut report);
-                    caps = checker.cap_matrix();
+                    harvest(&checker, &summary, &mut s);
+                    s.caps = checker.cap_matrix();
                 }
             }
         }
     }
-    (report, t0.elapsed(), caps)
+    s.elapsed = t0.elapsed();
+    s
 }
 
 /// A density window wider than the block (the shapes' union bbox) is chip
@@ -150,22 +244,26 @@ fn defer_chip_level(checker: &mut Checker, shapes: &[Shape]) {
     }
 }
 
-fn harvest(checker: &Checker, summary: &Summary, report: &mut Report) {
-    let out = checker.outputs();
-    for i in 0..out.violations.len() {
-        let v = out.violations.get(i);
-        // ponytail: interim until `verify::Signoff` carries warnings apart (PERF-01).
-        let warn = if v.severity == Severity::Warning { "warn/" } else { "" };
-        report.hard_violations.push(Violation {
-            rule: format!(
-                "{warn}{}/{}:{}",
-                checker.domain_of(v.rule),
-                checker.rule_name(v.rule),
-                checker.layer_name(v.layer)
-            ),
-            margin: shortfall_nm(v.limit, v.measured),
-        });
+/// Errors to the hard tier, everything else (GPurify's `Severity` is
+/// `Warning` | `Error`) to the warnings: the pure split [`harvest`] applies.
+fn split_by_severity(rows: impl Iterator<Item = (Violation, Severity)>) -> (Vec<Violation>, Vec<Violation>) {
+    let (mut hard, mut warn) = (Vec::new(), Vec::new());
+    for (v, sev) in rows {
+        if sev == Severity::Error { hard.push(v) } else { warn.push(v) }
     }
+    (hard, warn)
+}
+
+fn harvest(checker: &Checker, summary: &Summary, s: &mut Signoff) {
+    let out = checker.outputs();
+    let rows = (0..out.violations.len()).map(|i| {
+        let v = out.violations.get(i);
+        let rule = format!("{}/{}:{}", checker.domain_of(v.rule), checker.rule_name(v.rule), checker.layer_name(v.layer));
+        (Violation { rule, margin: shortfall(v.limit, v.measured) }, v.severity)
+    });
+    let (hard, warn) = split_by_severity(rows);
+    s.report.hard_violations.extend(hard);
+    s.warnings.extend(warn);
     for (stage, status) in [
         ("drc", &summary.drc),
         ("erc", &summary.erc),
@@ -173,18 +271,13 @@ fn harvest(checker: &Checker, summary: &Summary, report: &mut Report) {
         ("pex", &summary.pex),
     ] {
         if let Some(why) = denied(status) {
-            report
+            s.report
                 .hard_violations
                 .push(Violation { rule: format!("engine/{stage}: {why}"), margin: 0 });
         }
     }
-    // The skipped set is a property of the deck, so say it once per process.
-    static SKIPPED: std::sync::Once = std::sync::Once::new();
-    let skipped = checker.skipped_rules();
-    if !skipped.is_empty() {
-        SKIPPED.call_once(|| eprintln!("verify::signoff: rules not run: {skipped:?}"));
-    }
-    report.cost = checker.total_cap_ff();
+    s.coverage.skipped_rules = checker.skipped_rules().into_iter().map(|(r, why)| (r.to_string(), why)).collect();
+    s.report.cost = checker.total_cap_ff();
 }
 
 /// `Some(reason)` for a stage that was requested but did not run.
@@ -203,8 +296,11 @@ pub struct Finding {
     pub rule: String,
     /// Layer name, `"-"` for findings with no layer.
     pub layer: String,
-    /// nm shortfall, `1` for a boolean fail.
-    pub margin_nm: i64,
+    /// [`shortfall`], in [`Finding::unit`].
+    pub margin: i64,
+    /// `"nm"` for a length rule, `"permille"` (of the limit) for any other —
+    /// including the placeholder 1 of mismatched dimensions and `engine/…`.
+    pub unit: &'static str,
     pub x: i64,
     pub y: i64,
 }
@@ -224,7 +320,7 @@ pub fn erc(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk) -> Vec<Finding> {
 
 fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks) -> Vec<Finding> {
     let engine_fail =
-        |rule: String| vec![Finding { rule, layer: "-".into(), margin_nm: 1, x: 0, y: 0 }];
+        |rule: String| vec![Finding { rule, layer: "-".into(), margin: 1, unit: "permille", x: 0, y: 0 }];
     let mut checker = match Checker::new(pdk, false) {
         Ok(c) => c,
         Err(e) => return engine_fail(format!("engine/load: {e}")),
@@ -241,7 +337,11 @@ fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks) 
             Finding {
                 rule: checker.rule_name(v.rule).to_string(),
                 layer: checker.layer_name(v.layer).to_string(),
-                margin_nm: shortfall_nm(v.limit, v.measured),
+                margin: shortfall(v.limit, v.measured),
+                unit: match (v.limit, v.measured) {
+                    (Measurement::Length(_), Measurement::Length(_)) => "nm",
+                    _ => "permille",
+                },
                 x: v.at.x.raw(),
                 y: v.at.y.raw(),
             }
@@ -288,14 +388,61 @@ mod tests {
     }
 
     // The one margin arithmetic every consumer shares: nm for a length pair,
-    // floored at zero; a boolean 1 for anything else.
+    // floored at zero; 1 for a pair of different dimensions.
     #[test]
-    fn shortfall_is_nm_for_lengths_and_boolean_otherwise() {
+    fn shortfall_is_nm_for_lengths() {
         let len = |nm: i64| Measurement::Length(Dbu::new_unchecked(nm));
-        assert_eq!(shortfall_nm(len(170), len(100)), 70);
-        assert_eq!(shortfall_nm(len(100), len(170)), 0, "a graze cannot go negative");
-        assert_eq!(shortfall_nm(Measurement::Count(1), Measurement::Count(0)), 1);
-        assert_eq!(shortfall_nm(len(170), Measurement::Ratio(0.5)), 1);
+        assert_eq!(shortfall(len(170), len(100)), 70);
+        assert_eq!(shortfall(len(100), len(170)), 0, "a graze cannot go negative");
+        assert_eq!(shortfall(len(170), Measurement::Ratio(0.5)), 1);
+    }
+
+    // AV-31: a non-length margin is ‰ of the limit, so an antenna ratio 2×
+    // over outranks one 1 % over (both read 1 before).
+    #[test]
+    fn shortfall_reads_ratio_overshoot_in_permille() {
+        use Measurement::{Count, Ratio};
+        assert_eq!(shortfall(Ratio(400.0), Ratio(800.0)), 1000);
+        assert_eq!(shortfall(Ratio(400.0), Ratio(404.0)), 10);
+        assert_eq!(shortfall(Count(1), Count(0)), 1000);
+        assert_eq!(shortfall(Ratio(400.0), Ratio(f64::NAN)), i64::MAX, "NaN is not a graze");
+    }
+
+    #[test]
+    fn split_by_severity_keeps_warnings_out_of_the_hard_tier() {
+        let row = |r: &str, sev| (Violation { rule: r.into(), margin: 1 }, sev);
+        let rows = [row("drc/a", Severity::Error), row("erc/b", Severity::Warning), row("drc/c", Severity::Error)];
+        let (hard, warn) = split_by_severity(rows.into_iter());
+        assert_eq!(hard.iter().map(|v| v.rule.as_str()).collect::<Vec<_>>(), ["drc/a", "drc/c"]);
+        assert_eq!(warn.iter().map(|v| v.rule.as_str()).collect::<Vec<_>>(), ["erc/b"]);
+    }
+
+    // AV-26: the skip set is returned by every run, not logged once per process.
+    #[test]
+    fn skipped_rules_are_reported_on_every_run() {
+        let pdk = sky130();
+        for w in [500, 900] {
+            let s = signoff_checked(&[rect(&pdk, "met1", 0, 0, w, w)], &[], &RefInput::default(), &Intent::default(), &pdk);
+            assert!(!s.coverage.skipped_rules.is_empty(), "{w} nm plate: no skipped rules reported");
+            // sky130 ir_drop needs intent this run does not give.
+            assert!(s.coverage.skipped_rules.iter().any(|(_, why)| why.contains("NoDesignIntent")), "{:?}", s.coverage.skipped_rules);
+        }
+    }
+
+    // AV-25: a label short still extracts capacitance (on the label-free re-run).
+    #[test]
+    fn the_label_short_fallback_still_returns_caps() {
+        let pdk = sky130();
+        let met1 = pdk.layer("met1").unwrap().0;
+        let pins = [
+            LabeledPin { name: "A".into(), layer: met1, x: 500, y: 500 },
+            LabeledPin { name: "B".into(), layer: met1, x: 1500, y: 500 },
+        ];
+        let reference = RefInput { devices: vec![], ports: vec!["A".into(), "B".into()] };
+        let s = signoff_checked(&[rect(&pdk, "met1", 0, 0, 2000, 1000)], &pins, &reference, &Intent::default(), &pdk);
+        let rules: Vec<&str> = s.report.hard_violations.iter().map(|v| v.rule.as_str()).collect();
+        assert!(rules.iter().any(|r| r.starts_with("lvs/extract: label short")), "{rules:?}");
+        assert!(!s.caps.is_empty(), "the fallback returned no cap matrix");
     }
 
     // A deliberately-too-narrow li wire trips exactly li's min_width with the
@@ -316,7 +463,7 @@ mod tests {
             .map(|i| out.violations.get(i))
             .find(|v| checker.rule_name(v.rule) == "li.1")
             .expect("the finding is attributed to li.1 (li width)");
-        assert_eq!(shortfall_nm(hit.limit, hit.measured), 70);
+        assert_eq!(shortfall(hit.limit, hit.measured), 70);
         assert_eq!(checker.domain_of(hit.rule), "drc");
     }
 
@@ -403,7 +550,7 @@ mod tests {
             ports: vec!["in".into(), "out".into(), "vss".into()],
         };
         let skipped = checker.set_reference(&input).unwrap();
-        assert_eq!(skipped, 0);
+        assert!(skipped.is_empty(), "{skipped:?}");
         let n = checker.loaded.reference.as_ref().unwrap();
         assert_eq!(n.subckt_count(), 1);
         assert_eq!(n.device_model.len(), 2);
@@ -425,7 +572,35 @@ mod tests {
             }],
             ports: vec![],
         };
-        assert_eq!(checker.set_reference(&with_cap).unwrap(), 1);
+        assert_eq!(checker.set_reference(&with_cap).unwrap(), [(RefKind::Npn, None)]);
+    }
+
+    // AV-01/NOTES-02: a schematic device no recogniser extracts is named in
+    // the coverage, not left on stderr (sky130 has no NPN recogniser).
+    #[test]
+    fn a_skipped_reference_device_is_listed_in_coverage() {
+        let pdk = sky130();
+        let dev = |kind, terminals: &[&str]| RefDeviceIn {
+            kind,
+            model: None,
+            terminals: terminals.iter().map(|&t| t.into()).collect(),
+            params: vec![],
+        };
+        let reference = RefInput {
+            devices: vec![
+                dev(RefKind::Nmos, &["out", "in", "vss"]),
+                dev(RefKind::Nmos, &["vss", "bias", "out"]),
+                dev(RefKind::Npn, &["a", "b", "c"]),
+            ],
+            ports: vec![],
+        };
+        let shapes = [rect(&pdk, "li", 0, 0, 500, 500)];
+        let s = signoff_checked(&shapes, &[], &reference, &Intent::default(), &pdk);
+        assert!(
+            matches!(s.coverage.unverified.as_slice(), [(RefKind::Npn, _, 1)]),
+            "{:?}",
+            s.coverage.unverified
+        );
     }
 
     // Parametric LVS is live end to end: the extractor measures the channel
@@ -509,7 +684,7 @@ mod tests {
         let mut fresh = Checker::new(&pdk, false).unwrap();
         assert_eq!(
             fresh.set_reference(&with_diode).unwrap(),
-            0,
+            [],
             "a deck with a diom recogniser must not skip diode cards"
         );
     }

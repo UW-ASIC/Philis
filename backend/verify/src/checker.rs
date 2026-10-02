@@ -13,7 +13,7 @@ use pnr_core::Shape;
 
 use crate::geom::{build_store, LabeledPin};
 use crate::pdk::{nm_grid, GvLayerId, Pdk};
-use crate::reference::{self, RefInput};
+use crate::reference::{self, RefInput, RefKind};
 
 /// Error prefix of the extraction failure `signoff` degrades around: two
 /// labels bound to one extracted net (a short).
@@ -80,16 +80,17 @@ impl Checker {
         Ok(Self { loaded, extracted: Extracted::default(), out: Outputs::default(), deferred })
     }
 
-    /// Install the schematic reference LVS compares against. Returns how many
-    /// schematic devices were skipped for want of a deck recogniser.
+    /// Install the schematic reference LVS compares against. Returns the
+    /// `(kind, model hint)` of each schematic device skipped for want of a deck
+    /// recogniser: LVS compares nothing for those.
     ///
     /// # Errors
     /// A device stating fewer terminals than its recogniser's arity.
-    pub fn set_reference(&mut self, input: &RefInput) -> Result<usize, String> {
+    pub fn set_reference(&mut self, input: &RefInput) -> Result<Vec<(RefKind, Option<String>)>, String> {
         let (netlist, skipped) =
             reference::build(input, &self.loaded.deck, &mut self.loaded.strings)?;
         self.loaded.reference = Some(netlist);
-        Ok(skipped)
+        Ok(skipped.into_iter().map(|i| (input.devices[i].kind, input.devices[i].model.clone())).collect())
     }
 
     /// Install design intent (supplies, their voltage, the current each is
@@ -206,19 +207,36 @@ impl Checker {
         if let ExtractError::Port(PortError::ConflictingLabels(net)) = e {
             // Extraction stopped at the ports: the nets are rebuilt to name
             // the labels that share one.
-            let mut nets = gdsverify::check::topology::NetTable::default();
-            gdsverify::check::topology::net::extract_nets_into(&self.loaded.store, &self.loaded.deck.connectivity, &mut nets);
-            let names: Vec<&str> = self
-                .loaded
-                .provenance
-                .labels()
-                .iter()
-                .filter(|&&(poly, _)| nets.net_of(poly) == net)
-                .map(|&(_, name)| self.loaded.strings.resolve(name))
-                .collect();
+            let names = self.label_nets().into_iter().find(|g| g.0 == net).map(|g| g.1).unwrap_or_default();
             return format!("{LABEL_SHORT}: labels {names:?} bind to one extracted net");
         }
         format!("extract: {e}")
+    }
+
+    /// The label names of each extracted net that carries more than one —
+    /// what a [`LABEL_SHORT`] is — over the last loaded geometry, first-seen
+    /// order, each name once.
+    #[must_use]
+    pub fn shorted_labels(&self) -> Vec<Vec<String>> {
+        self.label_nets().into_iter().map(|g| g.1).filter(|g| g.len() > 1).collect()
+    }
+
+    /// Every labelled net of the last loaded geometry with its label names,
+    /// first-seen order, each name once. Rebuilds the net table: extraction
+    /// may have stopped before producing one.
+    fn label_nets(&self) -> Vec<(gdsverify::check::topology::NetId, Vec<String>)> {
+        let mut nets = gdsverify::check::topology::NetTable::default();
+        gdsverify::check::topology::net::extract_nets_into(&self.loaded.store, &self.loaded.deck.connectivity, &mut nets);
+        let mut groups: Vec<(_, Vec<String>)> = Vec::new();
+        for &(poly, name) in self.loaded.provenance.labels() {
+            let (net, name) = (nets.net_of(poly), self.loaded.strings.resolve(name).to_string());
+            match groups.iter_mut().find(|g| g.0 == net) {
+                Some(g) if !g.1.contains(&name) => g.1.push(name),
+                Some(_) => {}
+                None => groups.push((net, vec![name])),
+            }
+        }
+        groups
     }
 
     /// What the last [`Checker::run`] produced.

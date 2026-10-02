@@ -22,7 +22,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// `Ok(true)` when signoff is clean.
+/// `Ok(true)` when signoff is clean: no errors and every device LVS-compared.
 fn cli() -> Result<bool, String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let emit_to = if args.first().is_some_and(|a| a == "emit") {
@@ -58,14 +58,22 @@ fn cli() -> Result<bool, String> {
     if !sol.metadata.assumed.is_empty() {
         println!("assumed (UNVERIFIED sidecar values): {}", sol.metadata.assumed.join(", "));
     }
-    let report = library::signoff(&sol, &pdk);
-    if report.hard_violations.is_empty() {
+    let signoff = library::signoff(&sol, &pdk);
+    let report = signoff.report;
+    if !signoff.warnings.is_empty() {
+        println!("signoff: {} deck warning(s), not violations", signoff.warnings.len());
+    }
+    print!("{}", signoff.coverage);
+    // Unknown never passes: an LVS-unverified device keeps it from CLEAN.
+    let unverified: usize = signoff.coverage.unverified.iter().map(|u| u.2).sum();
+    let clean = report.hard_violations.is_empty() && unverified == 0;
+    if clean {
         println!("signoff CLEAN — cost {:.3}", report.cost);
     } else {
         println!(
-            "signoff: {} hard violation(s)",
+            "signoff: {} hard violation(s), {unverified} device(s) LVS-unverified — not clean",
             report.hard_violations.len()
         );
     }
-    Ok(report.hard_violations.is_empty())
+    Ok(clean)
 }

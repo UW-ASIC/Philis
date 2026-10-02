@@ -186,12 +186,13 @@ fn run_circuit(
         Err(e) => return (format!("flow failed: {e:?}"), Vec::new()),
     };
 
-    let report = library::signoff(&sol, pdk);
+    let signoff = library::signoff(&sol, pdk);
+    let report = &signoff.report;
 
-    // Signoff findings are structured by rule-name prefix: `{domain}/{rule}:{layer}`
+    // Signoff errors are structured by rule-name prefix: `{domain}/{rule}:{layer}`
     // with domains drc/erc/lvs, plus `engine/…` for a stage that could not run
-    // and `warn/…` for a deck warning (see `verify::signoff`).
-    let mut warn = 0usize;
+    // (see `verify::signoff_checked`). Deck warnings are `signoff.warnings`,
+    // never counted here.
     let mut drc = 0usize;
     let mut erc = 0usize;
     let mut lvs_mismatch = false;
@@ -205,8 +206,6 @@ fn run_circuit(
             erc += 1;
         } else if v.rule.starts_with("engine/") {
             engine += 1;
-        } else if v.rule.starts_with("warn/") {
-            warn += 1;
         }
     }
 
@@ -232,7 +231,7 @@ fn run_circuit(
     // `esc` > 0 means a variant-space binding (no arrangement of the chosen
     // variants was feasible), not a placement local minimum.
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {} | ERC {}{}{} | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {}, unverified {} | ERC {}{} | warnings {} | skipped [{}] | C {:.1} fF | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
@@ -242,9 +241,12 @@ fn run_circuit(
         s.route_overuse,
         drc,
         if lvs_mismatch { "MISMATCH" } else { "MATCH" },
+        // Devices LVS did not compare: a MATCH covers only the rest.
+        signoff.coverage.unverified.iter().map(|u| u.2).sum::<usize>(),
         erc,
         if engine > 0 { format!(" | engine fails {engine}") } else { String::new() },
-        if warn > 0 { format!(" | warnings {warn}") } else { String::new() },
+        signoff.warnings.len(),
+        signoff.coverage.skipped_rules.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>().join(", "),
         report.cost,
         area_um2,
         util_pct,
@@ -309,10 +311,12 @@ fn run_circuit(
     let _ = std::fs::create_dir_all(&debug_dir);
     let gds_bytes = gds::emit(&shapes, layer_gds);
     let _ = std::fs::write(debug_dir.join(format!("{}.gds", c.name)), &gds_bytes);
-    let _ = std::fs::write(debug_dir.join("signoff.txt"), &outcome);
-    // Every hard violation verbatim — the summary counts alone can't say which rule fired.
-    let detail: String =
-        report.hard_violations.iter().map(|v| format!("{}\t{}\n", v.rule, v.margin)).collect();
+    let _ = std::fs::write(debug_dir.join("signoff.txt"), format!("{outcome}\n{}", signoff.coverage));
+    // Every hard violation verbatim — the summary counts alone can't say which rule fired —
+    // then every deck warning, marked as such.
+    let detail: String = report.hard_violations.iter().map(|v| format!("{}\t{}\n", v.rule, v.margin))
+        .chain(signoff.warnings.iter().map(|v| format!("warning {}\t{}\n", v.rule, v.margin)))
+        .collect();
     let _ = std::fs::write(debug_dir.join("violations.txt"), detail);
     // DRC again, unsummarised: `signoff` keeps only (rule, margin), and without the
     // representative x/y there is no way to tell a cell-internal violation from one
@@ -320,7 +324,7 @@ fn run_circuit(
     let located: String = verify::drc(&shapes, &[], pdk)
         .iter()
         .map(|f| {
-            format!("{}\t{}\tmargin={} nm\t({}, {})\n", f.rule, f.layer, f.margin_nm, f.x, f.y)
+            format!("{}\t{}\tmargin={} {}\t({}, {})\n", f.rule, f.layer, f.margin, f.unit, f.x, f.y)
         })
         .collect();
     let _ = std::fs::write(debug_dir.join("drc_located.txt"), located);

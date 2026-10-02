@@ -94,7 +94,7 @@ impl Elaborated {
             schematic,
             None,
             pdk,
-        ).0)
+        ).report)
     }
 
     /// The net labels [`Elaborated::signoff`] puts on the geometry, so an
@@ -104,14 +104,15 @@ impl Elaborated {
         crate::labeled_pins(&self.macros, &self.nets, pdk, &self.geometry())
     }
 
-    /// Geometric DRC only — runs without a schematic. Margin is nm shortfall.
+    /// Geometric DRC only — runs without a schematic. Margin is [`verify::shortfall`]:
+    /// nm for a length rule, ‰ of the limit otherwise.
     #[must_use]
     pub fn signoff_drc(&self, pdk: &Pdk) -> Vec<pnr_core::Violation> {
         verify::drc(&self.geometry(), &[], pdk)
             .into_iter()
             .map(|f| pnr_core::Violation {
                 rule: format!("drc/{}:{}", f.rule, f.layer),
-                margin: f.margin_nm,
+                margin: f.margin,
             })
             .collect()
     }
