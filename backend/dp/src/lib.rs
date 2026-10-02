@@ -361,7 +361,6 @@ pub fn place(
     l.refresh_temps();
 
     let Sa { nets, .. } = sa;
-    prices.settle(reqs, &l);
     let rep = report(&nets, reqs, &l, prices);
     (l, rep)
 }

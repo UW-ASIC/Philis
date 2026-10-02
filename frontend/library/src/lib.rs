@@ -107,8 +107,11 @@ pub struct RunStats {
     pub iterations: u32,
     /// Index of the winning epoch within its assignment.
     pub best_iteration: u32,
-    /// Stopped feasible with stationary constraint prices.
+    /// Stopped feasible with stationary constraint prices, none saturated.
     pub converged: bool,
+    /// Dual steps on the constraint prices: one per epoch, so it equals
+    /// `iterations` (T6).
+    pub dual_steps: u32,
     /// Variant assignments tried.
     pub outer_iterations: u32,
     /// Times an assignment stalled infeasible and the variants were changed.
@@ -375,16 +378,22 @@ fn solve(
             }
         }
 
-        // Feasible with settled prices: done.
+        // Feasible with settled prices: done. A price held at its cap reads as
+        // settled in `drift` but is still binding, so it blocks convergence.
         let feasible = best
             .as_ref()
             .is_some_and(|b| b.key.0 == 0 && b.key.1 <= 0.0 && b.key.2 <= 0.0);
-        if feasible && prices.drift() < PRICE_STATIONARY {
+        if feasible && prices.drift() < PRICE_STATIONARY && prices.saturated().is_empty() {
             stats.converged = true;
             break;
         }
-        // Infeasible: try the next variant assignment, unless the budget or the
-        // variant space is exhausted.
+        // Not converged: infeasible, or feasible with prices still moving or
+        // saturated. Try the next variant assignment, unless the budget or the
+        // variant space is exhausted. ponytail: a feasible run that once
+        // saturated a λ relaxes it by ρ·slack per epoch, ρ ≥ RHO_FLOOR = 0.25:
+        // −64 at slack 0.5 with ρ at the floor is 512 epochs of drift above
+        // PRICE_STATIONARY, so it escalates rather than converges; FLOW-08's
+        // `RunStats.stop` will show it.
         if outer + 1 == n_outer {
             break;
         }
@@ -397,6 +406,7 @@ fn solve(
 
     // 7. The winner, redrawn from its own variant choice, with its guard rings.
     let best = best.expect("at least one epoch ran");
+    stats.dual_steps = prices.steps();
     stats = RunStats {
         best_iteration: best.iteration,
         ..best.stats.merge(stats)
@@ -431,6 +441,7 @@ fn solve(
         &pdk.unverified(),
     );
     let mut metadata = metadata;
+    metadata.binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
     metadata.add_routing(&[Box::new(flow.common_nodes(&best.layout)), Box::new(flow.environment(&best.layout, &best.rings))], &best.routes);
     if let (Some(cfg), Some(result)) = (flow.perf, &best.perf) {
         metadata.performance = cfg
@@ -601,6 +612,8 @@ impl Flow<'_> {
         );
         layout.debug_check_placed("dp::place");
         layout.groups = cells.groups.clone();
+        // The epoch's one dual step, on the layout it is scored on (T6).
+        prices.settle(placement, &layout);
         let macros = if layout.variant == assignment {
             macros
         } else {
@@ -1440,6 +1453,19 @@ mod start_tests {
         let run = || crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow");
         let (a, b) = (run(), run());
         assert_eq!((a.layout.x, a.layout.y), (b.layout.x, b.layout.y));
+    }
+
+    /// T6: exactly one dual step per epoch, taken by the flow (gp and dp only
+    /// bind), so the price step count equals the epoch count.
+    #[test]
+    fn one_dual_step_per_epoch() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).expect("sky130 loads");
+        let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/pair.spice")).unwrap();
+        let cfg = crate::Config { feedback_iters: 3, outer_iters: 1, starts: 1, ..Default::default() };
+        let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
+        assert!(sol.stats.iterations > 0);
+        assert_eq!(sol.stats.dual_steps, sol.stats.iterations);
     }
 
     /// An unresolved device's pins are unknown; the other devices keep their
