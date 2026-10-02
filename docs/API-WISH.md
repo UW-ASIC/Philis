@@ -664,7 +664,10 @@ entry in the step-5 debt list above.
   `max_len_nm²`. Unlike the coupling one it *is* read — `gr::score` sums `reqs.cost`
   costs and `dr::score` blends them — so rescaling silently re-weights a sibling stage's
   PEX tier. Marked `ponytail:` in place; the upgrade is `(len/max_len)²` plus a
-  re-baseline of the routing cost fixtures in one commit.
+  re-baseline of the routing cost fixtures in one commit. **Closed** (RTE-32): `cost` is
+  `(spent / budget)²` in the budget's own unit (C when measured, else length). The batch
+  is registered in the budget arm only (annotator `extract.rs`), so no score read it and
+  no fixture moved.
 - **The `1e-3` / `4e-3` family on the placement pull terms** (`Symmetry`, `MatchingPair`,
   `CommonCentroid`, `CentroidGroup`, `Proximity`, `ThermalGradient`, `Isolation`) are
   *not* in the same category and were not touched. They are relative weights **within**

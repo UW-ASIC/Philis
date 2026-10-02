@@ -1750,7 +1750,6 @@ fn cell_metal(placed: &[Macro], n_nets: usize, stack: Option<&analog::routing::S
     let Some(stack) = stack else { return (cell, gates) };
     let on_stack = |l: LayerId| stack.layers.iter().any(|x| x.id == l.0);
     let lowest = stack.layers.first().map(|l| LayerId(l.id));
-    let touch = |a: &Rect, b: &Rect| a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
     for m in placed {
         let pieces = stack.connected(&m.shapes);
         let mut taken = vec![false; pieces.len()];
@@ -1761,7 +1760,7 @@ fn cell_metal(placed: &[Macro], n_nets: usize, stack: Option<&analog::routing::S
             }
             let layer = if on_stack(p.layer) { Some(p.layer) } else { lowest };
             for (i, piece) in pieces.iter().enumerate() {
-                if !taken[i] && piece.iter().any(|&k| Some(m.shapes[k].layer) == layer && touch(&m.shapes[k].rect, &p.at)) {
+                if !taken[i] && piece.iter().any(|&k| Some(m.shapes[k].layer) == layer && m.shapes[k].rect.touches(&p.at)) {
                     taken[i] = true;
                     net.extend(piece.iter().map(|&k| m.shapes[k]));
                 }
@@ -2146,8 +2145,7 @@ fn unreachable_shapes(shapes: &[Shape]) -> usize {
     while let Some(a) = stack.pop() {
         let ra = shapes[a].rect;
         for (b, s) in shapes.iter().enumerate() {
-            let rb = s.rect;
-            if !seen[b] && ra.x <= rb.x + rb.w && rb.x <= ra.x + ra.w && ra.y <= rb.y + rb.h && rb.y <= ra.y + ra.h {
+            if !seen[b] && ra.touches(&s.rect) {
                 seen[b] = true;
                 stack.push(b);
             }
@@ -2173,7 +2171,7 @@ mod tests {
     }
 
     fn touches(s: &Shape, r: Rect) -> bool {
-        s.rect.x <= r.x + r.w && r.x <= s.rect.x + s.rect.w && s.rect.y <= r.y + r.h && r.y <= s.rect.y + s.rect.h
+        s.rect.touches(&r)
     }
 
     fn route(

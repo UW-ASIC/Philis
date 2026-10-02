@@ -38,14 +38,11 @@ impl ParasiticBudget {
 
 impl Rule for ParasiticBudget {
     type On = Routes;
-    /// `len²·1e-6`.
-    ///
-    /// ponytail: `1e-6` is a hand-tuned weight; `(len/max_len)²` is the
-    /// unit-free form, but `gr`/`dr` blend this cost, so changing it re-weights
-    /// their PEX tier — re-baseline routing fixtures in the same commit.
+    /// `(spent / budget)²` in the budget's own unit (C when measured, else
+    /// length), so a low-C upper layer the budget rewards also costs less.
     fn cost(self, r: &Routes) -> f32 {
-        let len = r.length(self.net) as f32;
-        len * len * 1e-6
+        let (spent, budget) = self.spent(r);
+        (spent / budget.max(1.0)).powi(2)
     }
     /// Unrouted (zero length) is satisfied for search — an open is LVS's to
     /// catch — but [`Rule::known`] keeps it out of any certificate.
@@ -116,11 +113,18 @@ mod tests {
         diode_layer: None,
         }));
         let run = |layer| Routes { wires: vec![vec![Shape { layer: LayerId(layer), rect: Rect { x: 0, y: 0, w: 10_000, h: 500 } }]], ..Default::default()  };
-        // m0: 40·5 + 2·40·10 = 1000 aF; m1: 10·5 + 2·20·10 = 450 aF.
+        // m0: 40·5 + 40·21 = 1040 aF; m1: 10·5 + 20·21 = 470 aF (full perimeter).
         let b = ParasiticBudget { net: NetId(0), max_len_nm: 1_000_000, max_c_af: 600, margin_pct: 20, stack: Some(stack) };
         assert!(!b.satisfied(&run(0)) && b.satisfied(&run(1)));
-        assert!((b.usage(&run(1)).unwrap() - 0.75).abs() < 1e-4);
+        assert!((b.usage(&run(1)).unwrap() - 470.0 / 600.0).abs() < 1e-4);
         let length_only = ParasiticBudget { stack: None, max_len_nm: 5_000, ..b };
         assert!(!length_only.satisfied(&run(1)), "falls back to the length cap");
+    }
+
+    #[test]
+    fn cost_is_the_squared_budget_fraction() {
+        let routes = Routes { wires: vec![vec![Shape { layer: LayerId(0), rect: Rect { x: 0, y: 0, w: 500_000, h: 500 } }]], ..Default::default() };
+        let b = ParasiticBudget { net: NetId(0), max_len_nm: 1_000_000, max_c_af: 0, margin_pct: 20, stack: None };
+        assert!((b.cost(&routes) - 0.25).abs() < 1e-6, "{}", b.cost(&routes));
     }
 }
