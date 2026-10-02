@@ -307,7 +307,7 @@ fn solve(
                 .filter(|c| matches!(c.class, analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground))
                 .map(|c| c.net)
                 .collect();
-            r.cfg.pin_ua = currents.as_deref().map_or_else(Vec::new, |c| pin_currents(&cells.devices_of, c));
+            r.cfg.pin_ua = currents.as_deref().map_or_else(Vec::new, |c| pin_currents(&netlist, &cells.devices_of, c));
             r.cfg.em = em;
             // Routing prices parasitics only on nets something budgets, on [0, 1].
             let budgeted = |n: usize| problem.net_classes.get(n).is_some_and(|c| c.c_budget_af.is_some()) || sens.iter().any(|(s, _)| usize::from(s.0) == n);
@@ -625,7 +625,13 @@ impl Flow<'_> {
             .collect();
         // The router repairs this placement's shared-source skew itself.
         let router = dr::DetailedRoute {
-            cfg: dr::DetailedCfg { common: self.common_nodes(&layout).nodes, stack: Some(self.stack), ..self.d_router.cfg.clone() },
+            // Pin shares from the unplaced macros: `place_macro` leaves units local.
+            cfg: dr::DetailedCfg {
+                common: self.common_nodes(&layout).nodes,
+                stack: Some(self.stack),
+                pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
+                ..self.d_router.cfg.clone()
+            },
         };
         let (mut routes, mut route_report) = router.route(
             &global, &pins, &placed, &rings, routing, layers, &self.cuts, neg,
@@ -1031,23 +1037,22 @@ fn em_rules(
 
 /// Per placed cell, `(pin name, µA)` for every terminal of its members: pin
 /// `d{k}:T` is terminal `T` of member `k`, a bare `T` member 0 (see
-/// `cellgen::bind_pins`). Empty when any device is unresolved.
-///
-/// ponytail: all-or-nothing; per-net unknowns would keep sizing the rest.
-fn pin_currents(devices_of: &[Vec<DeviceId>], draws: &[Option<Vec<(String, f64)>>]) -> Vec<Vec<(String, i32)>> {
-    if draws.iter().any(Option::is_none) {
-        return Vec::new();
-    }
+/// `cellgen::bind_pins`). An unresolved device's terminals are `None` (its
+/// nets get no EM sizing); every other device keeps its currents.
+fn pin_currents(netlist: &pnr_core::Netlist, devices_of: &[Vec<DeviceId>], draws: &[Option<Vec<(String, f64)>>]) -> Vec<Vec<(String, Option<i32>)>> {
     devices_of
         .iter()
         .map(|members| {
             let mut out = Vec::new();
             for (k, d) in members.iter().enumerate() {
-                for (t, ua) in draws[d.0 as usize].iter().flatten() {
-                    let ua = ua.round() as i32;
+                let terms: Vec<(String, Option<i32>)> = match &draws[d.0 as usize] {
+                    Some(ts) => ts.iter().map(|(t, ua)| (t.clone(), Some(ua.round() as i32))).collect(),
+                    None => netlist.devices[d.0 as usize].terminals.iter().map(|(t, _)| (t.clone(), None)).collect(),
+                };
+                for (t, ua) in terms {
                     out.push((format!("d{k}:{t}"), ua));
                     if k == 0 {
-                        out.push((t.clone(), ua));
+                        out.push((t, ua));
                     }
                 }
             }
@@ -1427,6 +1432,62 @@ mod start_tests {
         let run = || crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow");
         let (a, b) = (run(), run());
         assert_eq!((a.layout.x, a.layout.y), (b.layout.x, b.layout.y));
+    }
+
+    /// An unresolved device's pins are unknown; the other devices keep their
+    /// currents, in its own cell and in every other cell (not all-or-nothing).
+    #[test]
+    fn one_unresolved_device_keeps_the_others_known() {
+        use pnr_core::{Device, DeviceId, DeviceKind, Net, NetId, Netlist};
+        let fet = |name: &str| Device {
+            name: name.into(),
+            kind: DeviceKind::Nmos,
+            model: String::new(),
+            terminals: ["D", "G", "S", "B"].iter().enumerate().map(|(i, t)| ((*t).into(), NetId(i as u16))).collect(),
+            params: vec![],
+        };
+        let nl = Netlist { devices: vec![fet("M0"), fet("M1"), fet("M2")], nets: ["a", "b", "c", "d"].iter().map(|n| Net { name: (*n).into() }).collect() };
+        let known = |id: f64| Some(vec![("D".into(), id), ("G".into(), 0.0), ("S".into(), -id), ("B".into(), 0.0)]);
+        let cells = [vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2)], vec![DeviceId(1), DeviceId(0)]];
+        let pins = crate::pin_currents(&nl, &cells, &[known(10.0), None, known(20.0)]);
+        let ua = |cell: usize, pin: &str| pins[cell].iter().find(|(n, _)| n == pin).map(|p| p.1);
+        assert_eq!((ua(0, "d0:D"), ua(0, "D"), ua(0, "d0:S")), (Some(Some(10)), Some(Some(10)), Some(Some(-10))), "member 0 known");
+        assert_eq!((ua(0, "d1:D"), ua(0, "d1:S"), ua(0, "d1:G")), (Some(None), Some(None), Some(None)), "member 1 unknown, never zero");
+        assert_eq!((ua(1, "d0:D"), ua(1, "S")), (Some(Some(20)), Some(Some(-20))), "the other cell known");
+        assert_eq!((ua(2, "D"), ua(2, "d0:S"), ua(2, "d1:D")), (Some(None), Some(None), Some(Some(10))), "unresolved member 0: bare names unknown too");
+    }
+
+    /// REL-01 acceptance on the real fixtures and ngspice bias: every pin on a
+    /// net that touches no resistor carries a known current, so dr sizes it
+    /// (all-or-nothing left rc_filter with no pin currents at all).
+    #[test]
+    fn fixture_nets_without_a_resistor_keep_em_sizing() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lib = std::env::var_os("PDK_ROOT")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".volare")))
+            .map(|r| r.join("sky130A/libs.tech/ngspice/sky130.lib.spice"))
+            .filter(|l| l.is_file());
+        let (Some(lib), true) = (lib, std::process::Command::new("ngspice").arg("--version").output().is_ok()) else {
+            eprintln!("SKIP fixture_nets_without_a_resistor_keep_em_sizing: needs ngspice and the sky130 ngspice models");
+            return;
+        };
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+        let cfg = crate::Config { op: Some(crate::oppoint::OpConfig { model_lib: Some(lib), ..Default::default() }), ..Default::default() };
+        for fixture in ["rc_filter", "dac4"] {
+            let mut nl = crate::parse(&std::fs::read_to_string(root.join(format!("benchmarks/fixtures/{fixture}.spice"))).unwrap()).unwrap();
+            crate::deck_models(&mut nl, &pdk);
+            let currents = crate::bias(&nl, &cfg).2.expect("operating point");
+            let one_per_cell: Vec<_> = (0..nl.devices.len()).map(|i| vec![pnr_core::DeviceId(i as u16)]).collect();
+            let pins = crate::pin_currents(&nl, &one_per_cell, &currents);
+            for (k, net) in nl.nets.iter().enumerate() {
+                let on = || nl.devices.iter().enumerate().flat_map(|(i, d)| d.terminals.iter().filter(|(_, n)| n.0 as usize == k).map(move |(t, _)| (i, d, t)));
+                let resistor = on().any(|(_, d, _)| d.kind == pnr_core::DeviceKind::Resistor);
+                let known = on().all(|(i, _, t)| pins[i].iter().any(|(p, ua)| *p == format!("d0:{t}") && ua.is_some()));
+                eprintln!("{fixture} {}: resistor={resistor} known={known}", net.name);
+                assert!(resistor || known, "{fixture} {} touches no resistor but has an unknown pin current", net.name);
+            }
+        }
     }
 
     /// C within the tie band goes to the smaller footprint; outside it, C wins.
