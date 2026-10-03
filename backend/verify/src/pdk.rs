@@ -898,7 +898,8 @@ impl Pdk {
 
     /// `x` is `drawn` or a part of it: through the operands whose area it
     /// keeps (all of an `and`/`or`, the first of a `not` or a selection).
-    fn reaches(&self, x: GvLayerId, drawn: u16) -> bool {
+    #[must_use]
+    pub fn reaches(&self, x: GvLayerId, drawn: u16) -> bool {
         use gdsverify::ingest::deck::DerivedOp as Op;
         if x.0 == drawn {
             return true;

@@ -292,12 +292,16 @@ pub(crate) fn flat_circuit_with(
 ///
 /// A subcircuit instance must start with `X`, but netlist names usually already
 /// do (`XM1`). Blindly prefixing yields `XXM1`, whose operating point then fails
-/// to map back to the device — so prefix only when needed.
-fn instance_name(dev: &pnr_core::Device) -> String {
-    if dev.name.starts_with('X') || dev.name.starts_with('x') {
-        dev.name.clone()
+/// to map back to the device — so prefix only when needed. A flattened
+/// hierarchical name's `/` becomes `__` (`X1/XM2` → `X1__XM2`), so
+/// `parse_show`'s `m.<name>.` split still finds one token; the parser rejects
+/// two devices that collide here.
+pub(crate) fn instance_name(dev: &pnr_core::Device) -> String {
+    let name = dev.name.replace('/', "__");
+    if name.starts_with('X') || name.starts_with('x') {
+        name
     } else {
-        format!("X{}", dev.name)
+        format!("X{name}")
     }
 }
 
@@ -540,6 +544,7 @@ mod tests {
         Netlist {
             devices: vec![dev("XM1", 3, 2, 1, 1)],
             nets,
+            ..Default::default()
         }
     }
 
@@ -603,6 +608,7 @@ mod tests {
         let nl = Netlist {
             devices: vec![fet("M1", 0, 3, 2), fet("M2", 1, 3, 2), fet("M5", 2, 3, 4)],
             nets: ["outp", "outn", "tail", "in", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
         };
         let op = |ids: [Option<f64>; 3]| OpPoint { power_uw: vec![0; 3], id_ua: ids.to_vec(), headroom_mv: vec![None; 3], gm_us: vec![None; 3], provenance: String::new(), resolved: 3 };
         let t = op([Some(10.0), Some(10.0), Some(20.0)]).terminal_ua(&nl);
@@ -636,6 +642,7 @@ mod tests {
         let nl = Netlist {
             devices: vec![two("R1", DeviceKind::Resistor, 0, 2), two("C1", DeviceKind::Capacitor, 1, 2)],
             nets: ["x", "y", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
         };
         let op = OpPoint { power_uw: vec![0; 2], id_ua: vec![None; 2], headroom_mv: vec![None; 2], gm_us: vec![None; 2], provenance: String::new(), resolved: 0 };
         let t = op.terminal_ua(&nl);
@@ -672,6 +679,7 @@ mod tests {
         let nl = Netlist {
             devices: vec![fet("M1", 0, 2), fet("M2", 1, 2), fet("M5", 2, 4)],
             nets: ["outp", "outn", "tail", "in", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
         };
         let op = |ids: [Option<f64>; 3]| OpPoint { power_uw: vec![0; 3], id_ua: ids.to_vec(), headroom_mv: vec![None; 3], gm_us: vec![None; 3], provenance: String::new(), resolved: 3 };
         let i = net_current_ua(&nl, &op([Some(10.0), Some(10.0), Some(20.0)]).terminal_ua(&nl));

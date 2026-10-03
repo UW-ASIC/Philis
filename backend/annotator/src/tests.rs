@@ -46,6 +46,7 @@ fn ota() -> Netlist {
             fet("XM5", DeviceKind::Nmos, 8, 2, 3, 3, 40_000, 2_000),
         ],
         nets: nets(&["vout1", "vinp", "vtail", "VSS", "vout2", "vinm", "vbias", "VDD", "vbn"]),
+        ..Default::default()
     }
 }
 
@@ -69,6 +70,7 @@ fn current_mirror_recognised() {
             fet("XM2", DeviceKind::Pmos, 0, 1, 2, 2, 5_000, 1_000),
         ],
         nets: nets(&["vref", "iout", "VDD"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     let b = block_of(&p.blocks, 0).expect("mirror recognised");
@@ -85,6 +87,7 @@ fn cross_coupled_recognised() {
             fet("XM2", DeviceKind::Pmos, 0, 1, 2, 2, 2_000, 500),
         ],
         nets: nets(&["outp", "outn", "VDD", "VSS"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     let b = block_of(&p.blocks, 0).expect("cross-coupled recognised");
@@ -294,6 +297,7 @@ fn glue_only_netlist_emits_no_placement() {
             Device { name: "R2".into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("A".into(), NetId(2)), ("B".into(), NetId(3))], params: vec![] },
         ],
         nets: nets(&["a", "b", "c", "d"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(count(&p.placement.hard), 0);
@@ -387,6 +391,7 @@ fn a_shared_gate_chain_is_a_series_stack_not_a_cascode() {
             .map(|i| fet(&format!("M{i}"), DeviceKind::Nmos, 0, i + 1, i + 2, 6, 2_000, 500))
             .collect(),
         nets: nets(&["g", "a", "b", "c", "d", "e", "VSS"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(p.blocks[0].devices.len(), 4, "one series_stack_4 group");
@@ -402,6 +407,7 @@ fn a_cascode_stack_is_adjacent_not_matched() {
             fet("M2", DeviceKind::Nmos, 3, 4, 1, 2, 8_000, 500),
         ],
         nets: nets(&["vin", "x", "VSS", "vcas", "out"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(p.blocks[0].kind, BlockKind::Stack);
@@ -417,6 +423,7 @@ fn antenna_gate_area_lands_on_the_gate_net_not_the_drain() {
     let nl = Netlist {
         devices: vec![fet("XM1", DeviceKind::Nmos, 0, 1, 2, 2, 1_000, 1_000)],
         nets: nets(&["g", "d", "VSS"]),
+        ..Default::default()
     };
     let mut cfg = AnnotationConfig::default();
     cfg.process.antenna_max_ratio = Some(400.0);
@@ -491,6 +498,7 @@ fn a_lone_mirror_stage_is_symmetric_too() {
             fet("XM2", DeviceKind::Pmos, 0, 1, 2, 2, 5_000, 1_000),
         ],
         nets: nets(&["vref", "iout", "VDD"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     let sym = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| {
@@ -579,6 +587,7 @@ fn capacitor_plate_nets_get_no_invented_budget() {
             fet("XMC", DeviceKind::Nmos, 0, 5, 4, 4, 1_000, 150),
         ],
         nets: nets(&["top", "b0", "d0", "VDD", "VSS", "cmp"]),
+        ..Default::default()
     };
     let mut cfg = AnnotationConfig::default();
     cfg.process.gate_af_per_um2 = Some(8_325.0);

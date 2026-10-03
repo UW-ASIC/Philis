@@ -295,6 +295,7 @@ mod tests {
                 params: vec![],
             }],
             nets: ["out", "in", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
         };
         let caps = vec![("out".to_string(), None, 2.5), ("in".to_string(), Some("out".to_string()), 0.4), ("ghost".to_string(), None, 9.0)];
         let cfg = PerfConfig { sim: OpConfig::default(), testbench: ".measure tran x avg v(out)".into(), specs: vec![] };
@@ -319,6 +320,7 @@ mod tests {
                 params: vec![("w".into(), 1000), ("l".into(), 500), ("nf".into(), 2)],
             }],
             nets: ["out", "in", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
         };
         let par = Parasitics { caps: Vec::new(), series: vec![vec![("D".into(), 12.5)]], lod_inv_um: vec![Some(1.0)] };
         let cfg = PerfConfig { sim: OpConfig::default(), testbench: String::new(), specs: vec![] };

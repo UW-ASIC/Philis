@@ -551,7 +551,7 @@ impl PdkPreprocess {
         let res_w = body.as_ref().and_then(|o| o.width("rpoly")).map_or(0.0, |w| f64::from(w) / 1e3);
         let res_model = recipe.map(|r| r.model).filter(|m| !m.is_empty() && r_sheet > 0.0 && res_w > 0.0);
         // Neither deck defines a capacitor recogniser — `library::parse`
-        // classifies X-instances by model substring and `cells::capacitor`
+        // classifies X-instances by model token (`cap`) and `cells::capacitor`
         // draws them, so a bare "cap" model word is all a rewrite needs.
         let cap_density = pdk.cell.get("cap_density_ff_um2").and_then(Value::as_f64).unwrap_or(1.0);
         // A fin's share of W is the deck's fin pitch; a planar deck has none.

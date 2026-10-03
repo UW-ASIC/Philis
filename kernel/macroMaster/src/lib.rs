@@ -465,7 +465,7 @@ pub fn build_with<P: Process>(
             .collect()
     });
     let netlist = net_devices
-        .map(|devices| Netlist { nets: nets.iter().map(|n| Net { name: n.clone() }).collect(), devices });
+        .map(|devices| Netlist { nets: nets.iter().map(|n| Net { name: n.clone() }).collect(), devices, ..Default::default() });
     Ok(BuiltComp { instances, flat: flat.finish(), nets, edges, ports, netlist, devices })
 }
 

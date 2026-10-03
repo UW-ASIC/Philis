@@ -1089,6 +1089,7 @@ mod tests {
                 dev("M2", DeviceKind::Pmos, 3, 2, 0),
             ],
             nets,
+            ..Default::default()
         }
     }
 
@@ -1323,6 +1324,7 @@ mod tests {
         Netlist {
             devices: vec![dev("M1", 3, 1), dev("M2", 4, 2)],
             nets,
+            ..Default::default()
         }
     }
 
@@ -1462,6 +1464,7 @@ mod tests {
         Netlist {
             devices: vec![dev("M1", 2), dev("M2", 3), dev("M3", 4), dev("M4", 5)],
             nets,
+            ..Default::default()
         }
     }
 
@@ -1771,6 +1774,7 @@ mod tests {
         let netlist = Netlist {
             devices: vec![cap("C1", 2, 1), cap("C2", 3, 2), cap("C3", 4, 4), cap("C0", 1, 1), sw],
             nets,
+            ..Default::default()
         };
         let cells = enumerate(&netlist, &Macros::default(), &Constraints::default(), &pdk, true);
         let bank = &cells.devices_of[cells.cell_of[0] as usize];

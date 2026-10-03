@@ -28,6 +28,8 @@ pub struct Device {
     pub terminals: Vec<(String, NetId)>,
     /// Parameters (W, L, multiplier…), name → value in `nm`/PDK units. A MOS
     /// `w` is the SPICE instance total over its `nf` fingers ([`MosSize`]).
+    /// An `R`/`C`/`L` letter card's value is `r_mohm` (mΩ), `c_af` (aF) or
+    /// `ind_ph` (pH).
     pub params: Vec<(String, i64)>,
 }
 
@@ -102,10 +104,53 @@ pub struct DeviceGroup {
 }
 
 /// The whole circuit as flat SoA tables. IDs index these vectors.
-#[derive(Clone)]
+///
+/// Hierarchy is flattened by the parser: a device inside instance `X1/X3`
+/// is named `X1/X3/<name>` and its internal nets `X1/X3/<net>`. `ports`,
+/// `insts`, `device_inst` and `sources` are filled by the SPICE front end
+/// only; a netlist built elsewhere leaves them empty (every device top level).
+#[derive(Clone, Default)]
 pub struct Netlist {
     pub devices: Vec<Device>,
     pub nets: Vec<Net>,
+    /// Top sub-circuit ports in declaration order (empty: no .subckt around the top).
+    pub ports: Vec<NetId>,
+    /// Every flattened sub-circuit instance, parents before children.
+    pub insts: Vec<SubcktInst>,
+    /// Innermost instance of each device; `None` = top level. Parallel to
+    /// `devices` when the parser built it, else empty.
+    pub device_inst: Vec<Option<u32>>,
+    /// Independent/controlled sources and couplings: evidence, not devices.
+    pub sources: Vec<SourceCard>,
+}
+
+/// One flattened `.subckt` instance.
+#[derive(Clone, Debug)]
+pub struct SubcktInst {
+    /// Hierarchical instance path, `"X1/X3"`.
+    pub path: String,
+    /// The sub-circuit's name as declared.
+    pub subckt: String,
+    /// Index of the enclosing instance in [`Netlist::insts`]; `None` = top.
+    pub parent: Option<u32>,
+    /// Actual nets, in the sub-circuit's formal-port order.
+    pub ports: Vec<NetId>,
+}
+
+/// A `V I E F G H B K` card: what drives or couples the circuit, kept as
+/// evidence (rails, inputs, clocks) rather than drawn.
+#[derive(Clone, Debug)]
+pub struct SourceCard {
+    /// Hierarchical card name (`V1`, `X1/Vb`).
+    pub name: String,
+    /// Card letter, upper case: `V I E F G H B K`.
+    pub kind: char,
+    /// Nodes in card order: 2 for `V I F H B`, 4 for `E G`, none for `K`.
+    pub nodes: Vec<NetId>,
+    /// DC value of a `V`/`I` card (after `dc`, else its first value), base SI.
+    pub dc: Option<f64>,
+    /// A `PULSE`/`PWL`/`SIN`/`EXP` waveform is present.
+    pub waveform: bool,
 }
 
 #[cfg(test)]

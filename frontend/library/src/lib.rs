@@ -8,7 +8,7 @@ mod cellgen;
 mod fill;
 mod geometry;
 mod parse;
-pub use parse::SizeConvention;
+pub use parse::{spice_report, spice_with, ParseOptions, ParseReport, SizeConvention};
 
 /// Substrate3 elaboration: build a `macro_master::Composition` against a PDK
 /// and route its declared nets — the "PDK on the fly" entry.
@@ -231,13 +231,50 @@ pub fn deck_models(netlist: &mut pnr_core::Netlist, pdk: &Pdk) {
     }
 }
 
+/// Every model the deck recognises (its `device` rows) and every sidecar
+/// resistor recipe's `model`/`aliases`, with the kind the parser files an `X`
+/// card naming it under ([`ParseOptions::models`]). A MOS is P-type when its
+/// S/D terminal layer, or its marker, is computed from the `psdm` role (the
+/// marker for gf180, whose n and p devices share one `sd` layer); a BJT is a
+/// PNP when its model has a `pnp` token, else an NPN.
+#[must_use]
+pub fn model_table(pdk: &Pdk) -> Vec<(String, pnr_core::DeviceKind)> {
+    use pnr_core::{DeviceKind as K, Process as _};
+    use verify::DeviceKind as D;
+    let d = &pdk.deck.devices;
+    let psdm = pdk.layer("psdm");
+    let p_type = |x| psdm.is_some_and(|l| pdk.reaches(x, l.0));
+    let mut out: Vec<(String, K)> = (0..d.kind.len())
+        .map(|row| {
+            let model = pdk.strings.resolve(d.model[row]).to_string();
+            let kind = match d.kind[row] {
+                D::Mos if p_type(d.terminal[d.terminal_start[row] as usize + 1]) || p_type(d.marker[row]) => K::Pmos,
+                D::Mos => K::Nmos,
+                D::Bjt if model.to_ascii_lowercase().split('_').any(|t| t == "pnp") => K::Pnp,
+                D::Bjt => K::Npn,
+                D::Resistor => K::Resistor,
+                D::Capacitor => K::Capacitor,
+                D::Diode => K::Diode,
+            };
+            (model, kind)
+        })
+        .collect();
+    let recipes = pdk.cell.get("resistors").and_then(|t| t.get("recipes")).and_then(|r| r.as_object());
+    for r in recipes.into_iter().flat_map(|rs| rs.values()) {
+        let aliases = r.get("aliases").and_then(|a| a.as_array()).into_iter().flatten().filter_map(|a| a.as_str());
+        out.extend(aliases.chain(r.get("model").and_then(|m| m.as_str())).map(|m| (m.to_string(), K::Resistor)));
+    }
+    out
+}
+
 /// Place and route a SPICE netlist against a PDK. Deterministic for `cfg.seed`.
 ///
 /// `injected` maps instance names to user-drawn macros: those devices are used
 /// as drawn, never reshaped or moved by `dp`.
 pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<Solution, FlowError> {
     // 1. Parse, naming each device by the deck's model.
-    let mut netlist = parse::spice_with(spice, &parse::ParseOptions { size: cfg.size_convention }).map_err(FlowError::Parse)?;
+    let opts = ParseOptions { size: cfg.size_convention, models: model_table(pdk), ..Default::default() };
+    let mut netlist = parse::spice_with(spice, &opts).map_err(FlowError::Parse)?;
     deck_models(&mut netlist, pdk);
 
     check_injected(&netlist, injected, pdk)?;
@@ -1770,7 +1807,7 @@ mod start_tests {
             terminals: ["D", "G", "S", "B"].iter().enumerate().map(|(i, t)| ((*t).into(), NetId(i as u16))).collect(),
             params: vec![],
         };
-        let nl = Netlist { devices: vec![fet("M0"), fet("M1"), fet("M2")], nets: ["a", "b", "c", "d"].iter().map(|n| Net { name: (*n).into() }).collect() };
+        let nl = Netlist { devices: vec![fet("M0"), fet("M1"), fet("M2")], nets: ["a", "b", "c", "d"].iter().map(|n| Net { name: (*n).into() }).collect(), ..Default::default() };
         let known = |id: f64| Some(vec![("D".into(), id), ("G".into(), 0.0), ("S".into(), -id), ("B".into(), 0.0)]);
         let cells = [vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2)], vec![DeviceId(1), DeviceId(0)]];
         let pins = crate::pin_currents(&nl, &cells, &[known(10.0), None, known(20.0)]);
