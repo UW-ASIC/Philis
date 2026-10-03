@@ -845,6 +845,16 @@ impl DetailedRoute {
                     out.push(*c);
                     continue;
                 };
+                // A cell cut of this net within cut spacing whose own metal on
+                // both layers this cut's wires overlap (a cap array's tie stack
+                // under its pin lead) already joins them: this cut would only
+                // break the spacing, which binds same-net cuts too.
+                let space = cfg.space(c.layer, 0, 0, size);
+                let mine = cell_f.get(net).map_or(&[][..], Vec::as_slice);
+                let hosts = |l: LayerId, w: Rect, f: Rect| mine.iter().any(|m| m.layer == l && contains(m.rect, f) && rect_gap(m.rect, w) == 0);
+                if mine.iter().any(|f| f.layer == c.layer && (1..space).contains(&rect_gap(f.rect, c.rect)) && hosts(layers[i], a, f.rect) && hosts(layers[i + 1], b, f.rect)) {
+                    continue;
+                }
                 let (x, y) = (a.x.max(b.x) + enc, a.y.max(b.y) + enc);
                 let w = (a.x + a.w).min(b.x + b.w) - enc - x;
                 let h = (a.y + a.h).min(b.y + b.h) - enc - y;
@@ -2788,6 +2798,32 @@ mod tests {
             for b in &cuts[i + 1..] {
                 assert!(a == b || rect_gap(*a, *b) >= size, "cuts {a:?} and {b:?} closer than spacing");
             }
+        }
+    }
+
+    /// tq_chain's via.2: a cap array's tie ends in a via1 under its met1 pin
+    /// lead and met2 pad; the net's climb at the pin lands beside it. That
+    /// cell cut joins the route's two layers, so the route's own cut, within
+    /// cut spacing of it, is dropped rather than shipped.
+    #[test]
+    fn a_route_cut_beside_its_own_cell_cut_is_dropped() {
+        let (cut, size, ..) = CUTS[0];
+        let pin_at = Rect { x: 1_000, y: 1_000, w: 170, h: 170 };
+        let cell_cut = Rect { x: 1_135 + 40, y: 1_035, w: size, h: size };
+        let s = |layer, x, y, w, h| Shape { layer, rect: Rect { x, y, w, h } };
+        let cell = Macro {
+            shapes: vec![s(LAYERS[0], 1_000, 1_000, 400, 170), s(cut, cell_cut.x, cell_cut.y, size, size), s(LAYERS[1], 1_150, 1_010, 150, 150)],
+            pins: vec![pnr_core::Pin { name: "d0:N".into(), net: NetId(0), at: pin_at, layer: LAYERS[0] }],
+            bbox: Rect { x: 1_000, y: 1_000, w: 400, h: 170 },
+            ..Default::default()
+        };
+        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
+        let pins = [(NetId(0), pin_at, LAYERS[0]), (NetId(0), Rect { x: 12_000, y: 1_000, w: 170, h: 170 }, LAYERS[1])];
+        let cfg = DetailedCfg { stack: Some(test_stack()), ..test_cfg() };
+        let (routes, _) = route(cfg, &global, &pins, &[cell], &[], &mut gr::Negotiation::new());
+        for c in routes.wires[0].iter().filter(|s| s.layer == cut) {
+            let g = rect_gap(c.rect, cell_cut);
+            assert!(g == 0 || g >= size, "route cut {:?} {g} nm from the cell cut {cell_cut:?}", c.rect);
         }
     }
 
