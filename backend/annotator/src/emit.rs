@@ -5,9 +5,10 @@
 //!
 //! | kind          | emits                                                    |
 //! |---------------|----------------------------------------------------------|
-//! | DiffPair      | Symmetry, MatchedSet (Voltage), DTI                      |
-//! | CurrentMirror | Symmetry, MatchedSet (Current), Proximity, DTI           |
-//! | Load          | Symmetry, MatchedSet (Current), DTI                      |
+//! | DiffPair      | Symmetry, MatchedSet (Voltage), Orientation, DTI         |
+//! | CurrentMirror | Symmetry, MatchedSet (Current), Orientation, Proximity,  |
+//! |               | DTI                                                      |
+//! | Load          | Symmetry, MatchedSet (Current), Orientation, DTI         |
 //! | Stack         | Proximity                                                |
 //!
 //! Every matched pair mirrors about its stage axis (a pair merged into one cell
@@ -23,13 +24,16 @@
 //! `Proximity` (MAT-07, a distance allowance) are budget + cost; a
 //! `MatchedSet` pair without deck data or units reads unknown and only pulls.
 //! Placement owns the systematic terms of Pelgrom; area is the cell generator's.
+//! `Orientation` (MAT-05) is Axis hard (a quarter-turned partner is illegal)
+//! and Φ budget only: Φ changes by a discrete flip, so a cost copy has no
+//! gradient to give; Θ prices it.
 //!
 //! Matching and thermal budgets come from the netlist's gate areas and the
 //! deck's mismatch data; without them the documented fallbacks apply.
 
 use analog::matching::mismatch::{Budget, Coeffs, MatchKind};
 use analog::placement::symmetry::SymmetryGroup;
-use analog::placement::{DtiBand, Isolation, MatchedSet, Proximity, Symmetry};
+use analog::placement::{DtiBand, Isolation, MatchedSet, OrientCheck, OrientationSet, Proximity, Symmetry};
 use analog::Requirements;
 use pnr_core::ids::{AxisId, BranchId, DeviceId, Target};
 use pnr_core::layout::Layout;
@@ -127,6 +131,9 @@ pub fn placement(
             };
             r.budget.push(Box::new(set.clone()));
             r.cost.push(Box::new(set));
+            let orient = |check| OrientationSet { members: vec![a, b], check, cell_of: Vec::new() };
+            r.hard.push(Box::new(orient(OrientCheck::Axis)));
+            r.budget.push(Box::new(orient(OrientCheck::Phi)));
             if kind == BlockKind::CurrentMirror {
                 r.budget.push(Box::new(prox.clone()));
                 r.cost.push(Box::new(prox));

@@ -202,6 +202,17 @@ fn budget_rules_land_in_exactly_one_partition() {
 }
 
 #[test]
+fn matched_pairs_get_orientation_rules() {
+    // MAT-05: channel axes are a hard placement rule (a quarter-turned partner is
+    // illegal); Φ is budget only (a discrete flip, no gradient for a cost copy).
+    let p = annotate(&ota(), &AnnotationConfig::default());
+    let has = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| a.iter().any(|b| b.kind() == "Orientation");
+    assert!(has(&p.placement.hard), "Orientation axis must be Hard");
+    assert!(has(&p.placement.budget), "Orientation Φ must be a budget");
+    assert!(!has(&p.placement.cost), "Orientation has no cost copy");
+}
+
+#[test]
 fn parasitic_and_coupling_report_an_overshoot_not_a_count() {
     // D17: Θ sums residuals, and a residual is only summable normalised by its own
     // budget. These two batches carry a spec *and* a measured quantity, so a budget
