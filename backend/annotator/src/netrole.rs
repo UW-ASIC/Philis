@@ -54,9 +54,10 @@ pub fn rail_of(name: &str) -> Option<NetRole> {
 
 /// Classify every net by name: config names win, then [`rail_of`], then clock
 /// names. Bulk inference runs per rail role only when no net got that role by
-/// name or config: the Signal net that is the `B` terminal of the most PMOS
-/// (NMOS) devices and on no FET gate becomes Supply (Ground); ties go to the
-/// lowest net id. A named rail therefore always disables the inference.
+/// name or config: the net that is the `B` terminal of the most PMOS (NMOS)
+/// devices (ties to the lowest net id) becomes Supply (Ground) if it is a
+/// Signal on no FET gate; otherwise nothing is inferred. A named rail
+/// therefore always disables the inference.
 #[must_use]
 pub fn classify_nets(hg: &BipartiteHypergraph, cfg: &AnnotationConfig) -> Vec<NetRole> {
     let mut roles: Vec<NetRole> = hg
@@ -99,10 +100,10 @@ pub fn classify_nets(hg: &BipartiteHypergraph, cfg: &AnnotationConfig) -> Vec<Ne
                 }
             }
         }
-        let best = (0..roles.len())
-            .filter(|&n| bulk[n] > 0 && !on_gate[n] && roles[n] == NetRole::Signal)
-            .max_by_key(|&n| (bulk[n], std::cmp::Reverse(n)));
-        if let Some(n) = best {
+        // Max first, then the checks: a top-bulk rail that also drives a gate (a G=S=B dummy) must
+        // not hand the role to the runner-up, typically a source-tied bulk (diff-pair tail).
+        let best = (0..roles.len()).filter(|&n| bulk[n] > 0).max_by_key(|&n| (bulk[n], std::cmp::Reverse(n)));
+        if let Some(n) = best.filter(|&n| !on_gate[n] && roles[n] == NetRole::Signal) {
             roles[n] = role;
         }
     }
@@ -186,36 +187,38 @@ mod tests {
         }
     }
 
-    /// Nets `a,b,c` (+ optional `VDD`): 2 PMOS bulk on `a`, 2 NMOS bulk on `c`,
-    /// gates on `b`, drains/sources on `b`/`c`/`a`.
-    fn roles(extra_vdd: bool) -> Vec<NetRole> {
-        let fet = |name: &str, kind, g: u16, d: u16, s: u16, b: u16| Device {
-            name: name.into(),
-            kind,
-            model: String::new(),
-            terminals: vec![("G".into(), NetId(g)), ("D".into(), NetId(d)), ("S".into(), NetId(s)), ("B".into(), NetId(b))],
-            params: vec![],
-        };
-        let mut names = vec!["a", "b", "c"];
-        if extra_vdd {
-            names.push("VDD");
-        }
-        let nl = Netlist {
-            devices: vec![
-                fet("MP1", DeviceKind::Pmos, 1, 1, 0, 0),
-                fet("MP2", DeviceKind::Pmos, 1, 1, 0, 0),
-                fet("MN1", DeviceKind::Nmos, 1, 1, 2, 2),
-                fet("MN2", DeviceKind::Nmos, 1, 1, 2, 2),
-            ],
-            nets: names.iter().map(|n| Net { name: (*n).into() }).collect(),
-        };
+    /// Roles of nets `names` under FETs given as `(kind, [g, d, s, b])` net ids.
+    fn roles(names: &[&str], fets: &[(DeviceKind, [u16; 4])]) -> Vec<NetRole> {
+        let devices = fets
+            .iter()
+            .enumerate()
+            .map(|(i, &(kind, t))| Device {
+                name: format!("M{i}"),
+                kind,
+                model: String::new(),
+                terminals: ["G", "D", "S", "B"].iter().zip(t).map(|(n, id)| ((*n).into(), NetId(id))).collect(),
+                params: vec![],
+            })
+            .collect();
+        let nl = Netlist { devices, nets: names.iter().map(|n| Net { name: (*n).into() }).collect() };
         classify_nets(&BipartiteHypergraph::from_netlist(&nl), &AnnotationConfig::default())
     }
 
     #[test]
     fn bulk_inference() {
-        assert_eq!(roles(false), [NetRole::Supply, NetRole::Signal, NetRole::Ground]);
-        assert_eq!(roles(true), [NetRole::Signal, NetRole::Signal, NetRole::Ground, NetRole::Supply]);
+        use DeviceKind::{Nmos as N, Pmos as P};
+        use NetRole::{Ground as G, Signal as Sig, Supply as S};
+        // 2 PMOS bulk on `a`, 2 NMOS bulk on `c`, gates on `b`.
+        let fets = [(P, [1, 1, 0, 0]), (P, [1, 1, 0, 0]), (N, [1, 1, 2, 2]), (N, [1, 1, 2, 2])];
+        assert_eq!(roles(&["a", "b", "c"], &fets), [S, Sig, G]);
+        assert_eq!(roles(&["a", "b", "c", "VDD"], &fets), [Sig, Sig, G, S]);
+        // Top PMOS bulk `a` (2) also drives a dummy's gate (G=S=B=a): no inference,
+        // and the runner-up `d` (B=S, 1) must not be promoted.
+        let gated = [(P, [0, 1, 0, 0]), (P, [1, 2, 0, 0]), (P, [1, 2, 3, 3])];
+        assert_eq!(roles(&["a", "b", "c", "d"], &gated), [Sig; 4]);
+        // Equal bulk counts on `a` and `d`: the lowest net id wins.
+        let tie = [(P, [1, 2, 0, 0]), (P, [1, 2, 3, 3])];
+        assert_eq!(roles(&["a", "b", "c", "d"], &tie), [S, Sig, Sig, Sig]);
     }
 
     #[test]
