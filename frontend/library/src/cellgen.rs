@@ -813,7 +813,10 @@ fn draw_variants(kind: DeviceKind, model: &str, group: &DeviceGroup, c: &Constra
             v => v.iter().map(|a| a.draw(group, c, pdk)).collect(),
         },
         DeviceKind::Diode => draw_all::<Diode>(group, c, pdk),
-        DeviceKind::Npn | DeviceKind::Pnp => draw_all::<Bjt>(group, c, pdk),
+        DeviceKind::Npn | DeviceKind::Pnp => match pdk.recipe("bjt", model) {
+            Some(recipe) => draw_all::<Bjt>(group, c, &verify::pdk::Overlay { pdk, recipe }),
+            None => draw_all::<Bjt>(group, c, pdk),
+        },
         DeviceKind::Inductor => draw_all::<Inductor>(group, c, pdk),
     }
 }

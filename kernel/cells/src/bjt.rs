@@ -91,7 +91,18 @@ impl Unit {
         let enc = |o: &str, i: &str| process.enclosure(o, i).unwrap_or(0);
         let (emit_imp, base_imp, coll_imp) = if pnp { ("psdm", "nsdm", "psdm") } else { ("nsdm", "psdm", "nsdm") };
         let min_side = r("bjt_min_emitter_side", 0);
-        let emitter = Rect { x: 0, y: 0, w: s.unit_w.max(min_side), h: s.unit_l.max(min_side) };
+        // A fixed-geometry model's recipe slot overrides the netlist's size
+        // (sky130 BJTs are fixed devices: any other drawn size simulates a
+        // different one).
+        let ew = match r("bjt_emitter_w", 0) {
+            0 => s.unit_w.max(min_side),
+            v => v,
+        };
+        let el = match r("bjt_emitter_l", 0) {
+            0 => s.unit_l.max(min_side),
+            v => v,
+        };
+        let emitter = Rect { x: 0, y: 0, w: ew, h: el };
         let ct = dim(process, "contact");
         let ring_w = r("min_guard_ring_width", 0).max(ct + 2 * enc("tap", "licon")).max(ct + 2 * r("diff_encloses_licon", 0));
         let clear = ["psdm", "nsdm", "tap", "diff"].iter().filter_map(|x| process.space(x)).max().unwrap_or(0);
@@ -155,6 +166,15 @@ impl Unit {
         let ct = dim(process, "contact");
         let e = at(self.emitter);
         b.unit(pnr_core::Unit { owner: di as u8, x: e.x + e.w / 2, y: e.y + e.h / 2, weight: i64::from(e.w) * i64::from(e.h), phi: (0, 0), sa: 0, sb: 0 });
+        // Pin order matches `cellgen::BJT_PINS`.
+        b.drawn(pnr_core::Drawn {
+            owner: di as u8,
+            device: None,
+            kind: if self.pnp { pnr_core::DrawnKind::Pnp } else { pnr_core::DrawnKind::Npn },
+            nodes: [pnr_core::Node::Pin("E"), pnr_core::Node::Pin("B"), pnr_core::Node::Pin("C")],
+            w: self.emitter.w,
+            l: self.emitter.h,
+        });
 
         // Emitter: diffusion, its implant, a contact array under one li
         // plate (cuts `max(enclosure, end-cap)` inside the diffusion, li the
@@ -248,7 +268,66 @@ mod tests {
                 dirty.extend(testkit::dirty_group::<Bjt>(&g, &c, &pdk).into_iter().map(|d| format!("{kind:?} {counts:?} {d}")));
             }
         }
+        // The [1, 8] PNP block once more through the `pnp_3p40` fixed-geometry
+        // recipe overlay.
+        let overlay = verify::pdk::Overlay { pdk: &pdk, recipe: pdk.recipe("bjt", "sky130_fd_pr__pnp_05v5_W3p40L3p40").unwrap() };
+        let (g, mut c) = testkit::group_of(DeviceKind::Pnp, 2, 1, 1000, 1000);
+        c.unitization[0].dev_nf = vec![1, 8];
+        for v in Bjt::enumerate(&g, &c, &overlay) {
+            let m = v.draw(&g, &c, &overlay);
+            let rules = testkit::findings(&m.shapes, &testkit::ports_with(&m, &["G", "S", "B", "C"]), &pdk);
+            if !rules.is_empty() {
+                dirty.push(format!("overlay pnp_3p40 [1, 8] {}×{}: {rules:?}", v.rows, v.columns));
+            }
+        }
         assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
+    }
+
+    /// A fixed-geometry recipe's emitter overrides the netlist's w/l: every
+    /// drawn card and unit weight is the model's 3400×3400.
+    #[test]
+    fn a_fixed_geometry_model_sets_the_emitter() {
+        use crate::testkit;
+        let Some(pdk) = testkit::pdk() else {
+            eprintln!("sky130 PDK unavailable — skipping");
+            return;
+        };
+        let overlay = verify::pdk::Overlay { pdk: &pdk, recipe: pdk.recipe("bjt", "sky130_fd_pr__pnp_05v5_W3p40L3p40").unwrap() };
+        let (g, c) = testkit::group_of(DeviceKind::Pnp, 1, 1, 150, 150);
+        for v in Bjt::enumerate(&g, &c, &overlay) {
+            let m = v.draw(&g, &c, &overlay);
+            let at = format!("{}×{}", v.rows, v.columns);
+            assert!(!m.drawn.is_empty(), "{at}");
+            for d in &m.drawn {
+                assert_eq!((d.w, d.l), (3400, 3400), "{at}");
+            }
+            for u in &m.units {
+                assert_eq!(u.weight, 3400i64 * 3400, "{at}");
+            }
+        }
+    }
+
+    /// `dev_nf = [1, 8]` draws 9 units, each a `Pnp` drawn card at the
+    /// model's fixed emitter size.
+    #[test]
+    fn every_emitter_is_a_drawn_card() {
+        use crate::testkit;
+        let Some(pdk) = testkit::pdk() else {
+            eprintln!("sky130 PDK unavailable — skipping");
+            return;
+        };
+        let overlay = verify::pdk::Overlay { pdk: &pdk, recipe: pdk.recipe("bjt", "sky130_fd_pr__pnp_05v5_W3p40L3p40").unwrap() };
+        let (g, mut c) = testkit::group_of(DeviceKind::Pnp, 2, 1, 150, 150);
+        c.unitization[0].dev_nf = vec![1, 8];
+        for v in Bjt::enumerate(&g, &c, &overlay) {
+            let m = v.draw(&g, &c, &overlay);
+            let at = format!("{}×{}", v.rows, v.columns);
+            assert_eq!(m.drawn.len(), 9, "{at}");
+            for d in &m.drawn {
+                assert_eq!(d.kind, pnr_core::DrawnKind::Pnp, "{at}");
+                assert_eq!((d.w, d.l), (3400, 3400), "{at}");
+            }
+        }
     }
 
     /// Every PNP a:b (a ≤ 2, b ≤ 16, at most one odd) on every grid variant:

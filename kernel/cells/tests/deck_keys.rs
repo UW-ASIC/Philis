@@ -172,7 +172,7 @@ fn generators_read_exactly_the_required_keys() {
     // "dummy_max_l_nm": absent = dummies at the active L, the pre-cap drawing.
     // "res_sheet_mohm": a resistor recipe's slot; absent = no model, so only
     // unsegmented resistors (the value never changes silently).
-    let flags = ["npn_isolation", "res_contact_w", "res_contact_h", "dummy_max_l_nm", "res_sheet_mohm"];
+    let flags = ["npn_isolation", "res_contact_w", "res_contact_h", "dummy_max_l_nm", "res_sheet_mohm", "bjt_emitter_w", "bjt_emitter_l"];
     let optional_read: Vec<_> = KEYS
         .iter()
         .filter(|k| !k.required && recorded.contains(k.name) && !raise_deck.contains(&k.name) && !flags.contains(&k.name))

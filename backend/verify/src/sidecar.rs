@@ -66,6 +66,7 @@ pub const KEYS: &[Key] = &[
     k("bjt_max_emitter_stripe", Nm, false, false, "unread"),
     k("bjt_min_emitter_side", Nm, true, false, "kernel/cells/src/bjt.rs"),
     k("bjt_stripe_gap", Nm, false, false, "unread"),
+    k("bjts", Table, false, false, "backend/verify/src/pdk.rs recipe"),
     k("cap_density_ff_um2", Real, false, true, "benchmarks/src/fixtures.rs PdkPreprocess"),
     k("cap_unit_side", Nm, true, false, "kernel/cells/src/capacitor.rs, cap_array.rs"),
     k("density_source", Text, false, false, "provenance of the deck's density rules"),
