@@ -357,7 +357,7 @@ pub(crate) fn antenna_diodes(
         return Vec::new();
     }
     let one = pnr_core::DeviceGroup { devices: vec![pnr_core::DeviceId(0)] };
-    let template = cells::diode::Diode { pattern: cells::Pattern::Single, columns: 1 }.draw(&one, &analog::Constraints::default(), pdk);
+    let template = cells::diode::Diode { rows: 1, cols: 1 }.draw(&one, &analog::Constraints::default(), pdk);
     let mut obstacles: Vec<pnr_core::Rect> = placed.iter().chain(rings).map(|m| m.bbox).collect();
     let mut out = Vec::new();
     for net in nets.into_iter().map(|n| pnr_core::NetId(n as u16)) {

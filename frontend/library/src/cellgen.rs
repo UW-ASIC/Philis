@@ -950,6 +950,10 @@ pub fn drawn_cards(placed: &[Macro], nets: &[String], schematic: &Netlist, pdk: 
     for (cell, m) in placed.iter().enumerate() {
         for d in &m.drawn {
             let Some(id) = d.device else { continue };
+            // A stale id (its schematic device since removed, e.g. lifted
+            // out for re-adoption) replaces nothing: the card would self-
+            // reference the macro's own geometry and always match.
+            let Some(schem_dev) = schematic.devices.get(id.0 as usize) else { continue };
             replaced.push(id);
             let (kind, recipe) = match d.kind {
                 DrawnKind::Resistor => (RefKind::Resistor, "resistor"),
@@ -968,7 +972,7 @@ pub fn drawn_cards(placed: &[Macro], nets: &[String], schematic: &Netlist, pdk: 
                 Node::Internal(k) => Some(format!("~{cell}.{}.{k}", d.owner)),
             };
             let terminals: Vec<String> = d.nodes.iter().filter_map(node).collect();
-            let model = schematic.devices.get(id.0 as usize).map_or("", |s| s.model.as_str());
+            let model = schem_dev.model.as_str();
             let model = pdk.recipe(recipe, model).map(|r| r.model).filter(|m| !m.is_empty()).or_else(|| (!model.is_empty()).then(|| model.to_string()));
             cards.push(RefDeviceIn { kind, model, terminals, params: Vec::new() });
         }
