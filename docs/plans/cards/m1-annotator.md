@@ -1,6 +1,6 @@
 # M1 annotator batch: implementation cards
 
-Branch `m1a-annotator`, worktree `philis-m1a/ext-misc`, after `git merge m1a` (EXT-02 and EXT-11 merged; clean
+Branch `m1a-ext-misc` (the task called it `m1a-annotator`), worktree `philis-m1a/ext-misc`, after `git merge m1a` (EXT-02 and EXT-11 merged; clean
 merge). Line numbers are of this tree. Every command needs
 `export PDK_ROOT=/home/omare/Documents/Projects/Rust/Philis/.pdk`.
 
