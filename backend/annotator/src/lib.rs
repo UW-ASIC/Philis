@@ -16,6 +16,7 @@ pub mod ir;
 pub mod netrole;
 pub mod pattern;
 pub mod size;
+pub mod terms;
 
 #[cfg(test)]
 mod tests;

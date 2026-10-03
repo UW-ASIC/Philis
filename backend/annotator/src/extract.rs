@@ -34,8 +34,12 @@ pub fn routing(
     let mut gate_nm2 = vec![0i64; hg.net_names.len()];
     for (d, nets) in hg.device_nets.iter().enumerate() {
         if gate_um2[d] > 0.0 {
-            // Terminal 0 is G (G,D,S,B). A diode-connected FET hides a wrong index.
-            gate_nm2[nets[0].0 as usize] += (f64::from(gate_um2[d]) * 1e6) as i64;
+            if let Some(t) = hg.terminals[d]
+                .iter()
+                .position(|t| crate::terms::term_role(hg.kinds[d], t) == crate::terms::TermRole::FetGate)
+            {
+                gate_nm2[nets[t].0 as usize] += (f64::from(gate_um2[d]) * 1e6) as i64;
+            }
         }
     }
     let antenna: Vec<Antenna> = process.antenna_max_ratio
