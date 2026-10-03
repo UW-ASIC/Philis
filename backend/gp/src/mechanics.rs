@@ -362,9 +362,10 @@ pub fn canvas_side(hw: &[i32], hh: &[i32], utilization: f32, grid: i32) -> i32 {
 }
 
 /// Initial layout: devices jittered within `0.15·side` of the die centre,
-/// single-device groups, axes at the centre, every branch `false`, no power.
+/// single-device groups, `n_axes` (at least one) axes at the centre, every
+/// branch `false`, no power.
 #[must_use]
-pub fn initial_layout(macros: &[Macro], variant: Vec<u16>, side: i32, rng: &mut SplitMix64) -> Layout {
+pub fn initial_layout(macros: &[Macro], variant: Vec<u16>, side: i32, n_axes: usize, rng: &mut SplitMix64) -> Layout {
     let n = macros.len();
     let (hw, hh) = half_extents(macros);
     let c = side / 2;
@@ -381,7 +382,7 @@ pub fn initial_layout(macros: &[Macro], variant: Vec<u16>, side: i32, rng: &mut 
         hw,
         hh,
         variant,
-        axis: vec![c; n],
+        axis: vec![c; n_axes.max(1)],
         branch: vec![false; n],
         groups: (0..n).map(|i| vec![DeviceId(i as u16)]).collect(),
         orient: vec![pnr_core::geom::Orient::default(); n],

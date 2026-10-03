@@ -756,18 +756,20 @@ impl Flow<'_> {
 
         // Place: coarse analytical, then legalising anneal (which may reshape).
         let macros = cellgen::realize(&cells.variants, assignment);
-        let (mut coarse, _) = gp::place(&macros, &cells.variants, assignment, placement, prices, place_rules(self.pdk), &self.net_weight, seed, self.gp_mode == GpMode::Analytic);
+        let inp = gp::GpInput {
+            macros: &macros,
+            variants: &cells.variants,
+            assignment,
+            reqs: placement,
+            rules: place_rules(self.pdk),
+            net_weight: &self.net_weight,
+            n_axes: self.problem.blocks.len(),
+            power_uw: &cells.power,
+            units: cells.units.clone(),
+            iterate: self.gp_mode == GpMode::Analytic,
+        };
+        let (coarse, _) = gp::place(&inp, prices, seed);
         coarse.debug_check("gp::place");
-        // dp reads groups as abutment permission, so it gets the diffusion-sharing
-        // table; after dp, groups are the recognition table for `Target::Group`.
-        coarse.groups = cells.abutment.clone();
-        if coarse.axis.len() < self.problem.blocks.len() {
-            let centre = coarse.centre_x_estimate();
-            coarse.axis.resize(self.problem.blocks.len(), centre);
-        }
-        coarse.power_uw = cells.power.clone();
-        coarse.units = cells.units.clone();
-        coarse.refresh_temps();
         let (mut layout, place_report, dp_stats) = dp::place(
             &coarse,
             &macros,
@@ -1392,10 +1394,8 @@ fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> Bias {
 struct CellSpace {
     /// Pre-drawn alternatives per cell — what `gp`/`dp` search over.
     variants: Vec<gp::VariantSpace>,
-    /// Injected (user-macro) cells: `dp` never moves or reshapes them.
+    /// Injected (user-macro) cells, drawn as given: dp never reshapes or rotates them.
     fixed: Vec<bool>,
-    /// `Layout::groups` for `dp`: groups that may share diffusion.
-    abutment: Vec<Vec<DeviceId>>,
     /// `Layout::groups` after `dp`: the recognition table.
     groups: Vec<Vec<DeviceId>>,
     /// Guard-ring requirements, one per requesting cell.
@@ -1478,7 +1478,6 @@ impl CellSpace {
                         .fold(0, i32::saturating_add)
                 })
                 .collect(),
-            abutment: problem.abutment.iter().map(to_cells).collect(),
             groups,
             variants: spaces,
             guard_rings,

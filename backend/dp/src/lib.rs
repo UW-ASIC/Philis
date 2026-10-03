@@ -180,10 +180,6 @@ impl<'a> Sa<'a> {
                     b.project(l, self.grid);
                 }
             }
-            for i in (0..l.x.len()).filter(|&i| self.is_fixed(i)) {
-                l.x[i] = self.snap.x[i];
-                l.y[i] = self.snap.y[i];
-            }
             phi1 = analog_phi(self.reqs, l);
         }
 
@@ -213,7 +209,8 @@ impl<'a> Sa<'a> {
 ///
 /// `net_weight[NetId]` weights each net's HPWL (see [`gp::net_weights`]).
 /// `macros[i]` supplies cell `i`'s pins when `variants[i]` has no alternative
-/// for `coarse.variant[i]`. `fixed[i]` pins cell `i` (position and variant).
+/// for `coarse.variant[i]`. `fixed[i]` draws cell `i` as given (no reshape, no
+/// rotation); its position is placed like any cell's.
 /// `locks` turns and reshapes matched cells as one set (PLC-03).
 #[allow(clippy::too_many_arguments)]
 pub fn place(
@@ -247,24 +244,8 @@ pub fn place(
     };
     l.refresh_temps();
 
-    // Disjunctive branches (DtiBand share/isolate): size the table to the
-    // highest id and seed each from its recognised structure.
-    let mut branch_seeds: Vec<(BranchId, bool)> = Vec::new();
-    for b in &reqs.hard {
-        b.branches(&mut branch_seeds);
-    }
-    branch_seeds.sort_unstable_by_key(|&(id, _)| id.0);
-    branch_seeds.dedup();
-    if let Some(&(hi, _)) = branch_seeds.last() {
-        if l.branch.len() <= usize::from(hi.0) {
-            l.branch.resize(usize::from(hi.0) + 1, false);
-        }
-    }
-    for &(id, s) in &branch_seeds {
-        l.branch[usize::from(id.0)] = s;
-    }
-    let branch_ids: Vec<BranchId> = branch_seeds.iter().map(|&(id, _)| id).collect();
-    let sym = sym_groups(reqs, n, fixed);
+    let branch_ids = seed_branches(reqs, &mut l.branch);
+    let sym = sym_groups(reqs, n);
 
     prices.bind(reqs);
     // Nets from the geometry `l.variant` names, so HPWL scores real pins.
@@ -333,9 +314,6 @@ pub fn place(
             // 70% displace, 20% swap, 2.5% branch flip, 5% reshape, else rotate.
             let roll = rng.f32();
             let c = rng.below(n);
-            if sa.is_fixed(c) {
-                continue;
-            }
             let _ = if !sym.is_empty() && roll < 0.08 {
                 // Compound moves: every mirror equation holds before and after,
                 // so no projection drags the rest of the stage.
@@ -358,7 +336,7 @@ pub fn place(
                 try_move(&mut sa, &mut l, &mut rng, temp, c, nx, ny)
             } else if roll < 0.90 {
                 let o = rng.below(n);
-                o != c && !sa.is_fixed(o) && try_swap(&mut sa, &mut l, &mut rng, temp, c, o, &clamp_x, &clamp_y)
+                o != c && try_swap(&mut sa, &mut l, &mut rng, temp, c, o, &clamp_x, &clamp_y)
             } else if !branch_ids.is_empty() && roll < 0.925 {
                 let bid = usize::from(branch_ids[rng.below(branch_ids.len())].0);
                 try_branch(&mut sa, &mut l, &mut rng, temp, bid)
@@ -373,7 +351,7 @@ pub fn place(
         }
 
         // One exact projection per epoch for batches violated before any move.
-        project_hard(reqs, &mut l, fixed, grid);
+        project_hard(reqs, &mut l, grid);
         // Thermal field is global: refresh per epoch, never per move.
         l.refresh_temps();
 
@@ -390,7 +368,7 @@ pub fn place(
         l.y[i] = snap(l.y[i], grid);
     }
     // Grid snap can shave a clearance by a few nm; the legalizer restores it.
-    legalize::separate_overlaps(&mut l, reqs, fixed, grid, clearance, LEGALIZE_SWEEPS);
+    legalize::separate_overlaps(&mut l, reqs, grid, clearance, LEGALIZE_SWEEPS);
     l.refresh_temps();
 
     let Sa { nets, stats, .. } = sa;
@@ -398,9 +376,29 @@ pub fn place(
     (l, rep, stats)
 }
 
-/// Project every violated hard batch onto its feasible set, restore pinned
-/// cells, and roll the whole sweep back if Φ rose. Returns whether it kept.
-fn project_hard(reqs: &Requirements<Layout>, l: &mut Layout, fixed: &[bool], grid: i32) -> bool {
+/// Disjunctive branches (DtiBand share/isolate): grow `branch` to the highest
+/// id and seed each from its recognised structure. Returns the ids, sorted.
+fn seed_branches(reqs: &Requirements<Layout>, branch: &mut Vec<bool>) -> Vec<BranchId> {
+    let mut branch_seeds: Vec<(BranchId, bool)> = Vec::new();
+    for b in &reqs.hard {
+        b.branches(&mut branch_seeds);
+    }
+    branch_seeds.sort_unstable_by_key(|&(id, _)| id.0);
+    branch_seeds.dedup();
+    if let Some(&(hi, _)) = branch_seeds.last() {
+        if branch.len() <= usize::from(hi.0) {
+            branch.resize(usize::from(hi.0) + 1, false);
+        }
+    }
+    for &(id, s) in &branch_seeds {
+        branch[usize::from(id.0)] = s;
+    }
+    branch_seeds.iter().map(|&(id, _)| id).collect()
+}
+
+/// Project every violated hard batch onto its feasible set and roll the whole
+/// sweep back if Φ rose. Returns whether it kept.
+fn project_hard(reqs: &Requirements<Layout>, l: &mut Layout, grid: i32) -> bool {
     let before = analog_phi(reqs, l);
     if before.0 == 0 {
         return false;
@@ -410,12 +408,6 @@ fn project_hard(reqs: &Requirements<Layout>, l: &mut Layout, fixed: &[bool], gri
         // Re-checked per batch: a satisfied SymmetryGroup would still re-average its axis.
         if batch.violations(l) > 0 {
             batch.project(l, grid);
-        }
-    }
-    for i in 0..l.x.len() {
-        if fixed.get(i).copied().unwrap_or(false) {
-            l.x[i] = px[i];
-            l.y[i] = py[i];
         }
     }
     if analog_phi(reqs, l) > before {
@@ -464,14 +456,14 @@ fn try_swap(
 }
 
 /// One symmetry axis and the mirror pairs sharing it (self-pairs `a == b` sit
-/// on the axis). Groups with a fixed member are left to projection.
+/// on the axis).
 struct SymGroup {
     axis: usize,
     pairs: Vec<(usize, usize)>,
     members: Vec<usize>,
 }
 
-fn sym_groups(reqs: &Requirements<Layout>, n: usize, fixed: &[bool]) -> Vec<SymGroup> {
+fn sym_groups(reqs: &Requirements<Layout>, n: usize) -> Vec<SymGroup> {
     let mut raw = Vec::new();
     for b in &reqs.hard {
         b.mirror_pairs(&mut raw);
@@ -494,7 +486,6 @@ fn sym_groups(reqs: &Requirements<Layout>, n: usize, fixed: &[bool]) -> Vec<SymG
             }
         }
     }
-    out.retain(|g| !g.members.iter().any(|&m| fixed.get(m).copied().unwrap_or(false)));
     out
 }
 

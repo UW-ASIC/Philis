@@ -8,8 +8,8 @@ use pnr_core::Layout;
 
 /// Relax encroaching pairs apart along their cheaper axis, then re-project
 /// violated hard batches (a pushed symmetry partner is re-mirrored), until
-/// clean, stalled, or `max_sweeps`. Pinned devices never move, positions stay
-/// on `grid`, and a sweep that still raises hard violations is rolled back.
+/// clean, stalled, or `max_sweeps`. Positions stay on `grid`, and a sweep that
+/// still raises hard violations is rolled back.
 /// Returns the residual encroachment area (nonzero when the die cannot fit).
 ///
 /// ponytail: O(n²) pairwise relaxation; a constraint graph + LP compaction if
@@ -17,14 +17,12 @@ use pnr_core::Layout;
 pub fn separate_overlaps(
     l: &mut Layout,
     reqs: &Requirements<Layout>,
-    fixed: &[bool],
     grid: i32,
     clearance: i32,
     max_sweeps: u32,
 ) -> f64 {
     let n = l.x.len();
     let g = grid.max(1);
-    let movable = |i: usize| !fixed.get(i).copied().unwrap_or(false);
 
     for _ in 0..max_sweeps {
         let before = encroachment(l, clearance);
@@ -41,15 +39,7 @@ pub fn separate_overlaps(
                 if ox <= 0 || oy <= 0 {
                     continue;
                 }
-                let (ma, mb) = (movable(a), movable(b));
-                let push = |whole: i32| -> (i32, i32) {
-                    match (ma, mb) {
-                        (true, true) => (whole / 2 + whole % 2, whole / 2),
-                        (true, false) => (whole, 0),
-                        (false, true) => (0, whole),
-                        (false, false) => (0, 0),
-                    }
-                };
+                let push = |whole: i32| (whole / 2 + whole % 2, whole / 2);
                 // Clear the encroachment plus one grid step.
                 if ox <= oy {
                     let (pa, pb) = push(ox + g);
@@ -68,10 +58,6 @@ pub fn separate_overlaps(
             if batch.violations(l) > 0 {
                 batch.project(l, g);
             }
-        }
-        for i in (0..n).filter(|&i| !movable(i)) {
-            l.x[i] = save_x[i];
-            l.y[i] = save_y[i];
         }
         l.refresh_temps();
 
@@ -118,17 +104,8 @@ mod tests {
         let mut l = layout(&[(0, 0), (0, 0)], 500);
         let reqs = Requirements::<Layout>::default();
         assert!(encroachment(&l, 0) > 0.0);
-        let residual = separate_overlaps(&mut l, &reqs, &[false, false], 5, 0, 64);
+        let residual = separate_overlaps(&mut l, &reqs, 5, 0, 64);
         assert_eq!(residual, 0.0, "legalizer must clear the overlap");
-        assert_eq!(encroachment(&l, 0), 0.0);
-    }
-
-    #[test]
-    fn a_pinned_macro_never_moves() {
-        let mut l = layout(&[(0, 0), (200, 0)], 500);
-        let reqs = Requirements::<Layout>::default();
-        separate_overlaps(&mut l, &reqs, &[true, false], 5, 0, 64);
-        assert_eq!((l.x[0], l.y[0]), (0, 0), "pinned device must stay put");
         assert_eq!(encroachment(&l, 0), 0.0);
     }
 
@@ -137,7 +114,7 @@ mod tests {
         let mut l = layout(&[(0, 0), (10_000, 0)], 500);
         let reqs = Requirements::<Layout>::default();
         let before = (l.x.clone(), l.y.clone());
-        let residual = separate_overlaps(&mut l, &reqs, &[false, false], 5, 0, 64);
+        let residual = separate_overlaps(&mut l, &reqs, 5, 0, 64);
         assert_eq!(residual, 0.0);
         assert_eq!((l.x, l.y), before);
     }
@@ -151,7 +128,7 @@ mod tests {
         let mut l = layout(&[(0, 0), (0, 0)], 500);
         l.groups = vec![vec![DeviceId(0), DeviceId(1)]];
         let reqs = Requirements::<Layout>::default();
-        let residual = separate_overlaps(&mut l, &reqs, &[false, false], 5, 0, 64);
+        let residual = separate_overlaps(&mut l, &reqs, 5, 0, 64);
         assert_eq!(residual, 0.0, "a stacked group is overlap like any other");
         assert_eq!(encroachment(&l, 0), 0.0, "and it must actually be pulled apart");
     }
@@ -165,7 +142,7 @@ mod tests {
             vec![DeviceId(2), DeviceId(3)],
         ];
         let reqs = Requirements::<Layout>::default();
-        let residual = separate_overlaps(&mut l, &reqs, &[false; 4], 5, 0, 64);
+        let residual = separate_overlaps(&mut l, &reqs, 5, 0, 64);
         assert_eq!(residual, 0.0);
         assert_eq!(encroachment(&l, 0), 0.0);
         l.debug_check_placed("separate_overlaps");
@@ -180,7 +157,7 @@ mod tests {
         let reqs = Requirements::<Layout>::default();
         assert_eq!(encroachment(&l, 0), 0.0, "precondition: no raw overlap");
 
-        separate_overlaps(&mut l, &reqs, &[false, false], 5, 1_300, 64);
+        separate_overlaps(&mut l, &reqs, 5, 1_300, 64);
         let gap = (l.x[1] - l.x[0]) - (l.hw[0] + l.hw[1]);
         assert!(gap >= 1_300, "expected >=1300nm of clearance, got {gap}");
     }
@@ -203,7 +180,7 @@ mod tests {
             units: Default::default(),
         };
         let reqs = Requirements::<Layout>::default();
-        separate_overlaps(&mut l, &reqs, &[false, false], 5, 0, 64);
+        separate_overlaps(&mut l, &reqs, 5, 0, 64);
         assert_eq!(encroachment(&l, 0), 0.0);
         assert_eq!(l.x, vec![0, 0], "x was the expensive axis; it must not move");
     }

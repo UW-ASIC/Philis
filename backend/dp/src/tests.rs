@@ -182,6 +182,20 @@ fn mirror_partners_reshape_together() {
     assert!(reshaped, "the locked pair never reshaped");
 }
 
+/// Fixed means drawn as given, not pinned: two stacked fixed cells separate.
+#[test]
+fn fixed_cells_separate_but_keep_shape() {
+    let variants = spaces();
+    let coarse = layout(&[(0, 0, 1_000, 8_000), (0, 0, 1_000, 8_000)]);
+    for seed in 0..4u64 {
+        let l = run(&coarse, &drawn(&variants), &variants, &Requirements::default(), &[true, true], seed);
+        assert_eq!(encroachment(&l, 0), 0.0, "seed {seed}");
+        assert_eq!(l.variant, vec![0, 0], "seed {seed}");
+        assert_eq!(l.orient, vec![Orient::R0, Orient::R0], "seed {seed}");
+        assert_eq!((&l.hw, &l.hh), (&coarse.hw, &coarse.hh), "seed {seed}");
+    }
+}
+
 #[test]
 fn unmatched_cells_reshape_independently() {
     let coarse = variant_bench();
@@ -256,7 +270,19 @@ fn place_does_not_settle() {
     let macros = drawn(&variants);
     let reqs = Requirements { hard: Vec::new(), budget: vec![Box::new(vec![Over])], cost: Vec::new() };
     let mut prices = gp::Prices::new();
-    let (coarse, _) = gp::place(&macros, &variants, &[0, 0], &reqs, &mut prices, RULES, &[], 3, true);
+    let inp = gp::GpInput {
+        macros: &macros,
+        variants: &variants,
+        assignment: &[0, 0],
+        reqs: &reqs,
+        rules: RULES,
+        net_weight: &[],
+        n_axes: 1,
+        power_uw: &[],
+        units: Default::default(),
+        iterate: true,
+    };
+    let (coarse, _) = gp::place(&inp, &mut prices, 3);
     let locks = locks::locks(&reqs, coarse.x.len(), &variants);
     place(&coarse, &macros, &variants, &reqs, &[false; 2], &locks, &mut prices, RULES, &[], 3);
     assert_eq!(prices.drift(), f64::INFINITY, "no dual step inside place");
@@ -393,10 +419,12 @@ fn branch_flip_fires_and_is_priced() {
 #[test]
 fn seeds_are_written_and_table_resized() {
     let reqs = band(3, true);
-    let l = run(&gap_bench(200_000, Vec::new()), &[], &[], &reqs, &[true, true], 9);
-    assert_eq!(l.branch, vec![false, false, false, true]);
-    let l = run(&gap_bench(200_000, vec![false; 6]), &[], &[], &reqs, &[true, true], 9);
-    assert_eq!(l.branch, vec![false, false, false, true, false, false]);
+    let mut b = Vec::new();
+    assert_eq!(seed_branches(&reqs, &mut b), vec![BranchId(3)]);
+    assert_eq!(b, vec![false, false, false, true]);
+    let mut b = vec![false; 6];
+    seed_branches(&reqs, &mut b);
+    assert_eq!(b, vec![false, false, false, true, false, false]);
 }
 
 // ---- exact projection ----
@@ -422,11 +450,12 @@ fn symmetry_holds_at_exit_with_room_to_move() {
 }
 
 #[test]
-fn projection_never_moves_pinned_cells() {
+fn projection_moves_fixed_cells_but_not_their_shape() {
     let (reqs, coarse) = sym_bench();
     for seed in 0..4u64 {
         let l = run(&coarse, &[], &[], &reqs, &[true, false], seed);
-        assert_eq!((l.x[0], l.y[0]), (coarse.x[0], coarse.y[0]), "seed {seed}");
+        assert_eq!(analog_violations(&reqs, &l), 0, "seed {seed}");
+        assert_eq!((l.hw[0], l.hh[0], l.orient[0]), (coarse.hw[0], coarse.hh[0], Orient::R0), "seed {seed}");
     }
 }
 
@@ -516,7 +545,7 @@ fn compound_moves_keep_a_mirrored_stage_mirrored() {
     ]);
     l.axis = vec![0];
     assert_eq!(analog_violations(&reqs, &l), 0);
-    let groups = sym_groups(&reqs, 5, &[false; 5]);
+    let groups = sym_groups(&reqs, 5);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].members.len(), 5);
 
@@ -531,8 +560,6 @@ fn compound_moves_keep_a_mirrored_stage_mirrored() {
     assert_eq!((l.x[0], l.x[1]), (-5_000, 9_000));
     assert!(try_pair_swap(&mut sa, &mut l, &mut rng, 1e12, 2, 3));
     assert_eq!(analog_violations(&reqs, &l), 0, "x = {:?}, y = {:?}, axis = {:?}", l.x, l.y, l.axis);
-    // A pinned member removes its group from the compound moves.
-    assert!(sym_groups(&reqs, 5, &[false, false, false, false, true]).is_empty());
 }
 
 // ---- report ----
