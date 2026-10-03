@@ -116,3 +116,66 @@ fn a_flow_scores_its_layout_in_simulation() {
     assert!(rows.len() == 1 && rows[0].starts_with("gain:min: row ("), "{rows:?}");
     assert_eq!(sol.stats.sim_failures, 0, "{:?}", sol.stats);
 }
+
+/// A fixture parsed as the flow parses it: the deck's model table, then its
+/// model names.
+fn fixture(name: &str) -> pnr_core::Netlist {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sky130 = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let text = std::fs::read_to_string(root.join(format!("benchmarks/fixtures/{name}.spice"))).unwrap();
+    let opts = library::ParseOptions { models: library::model_table(&sky130), ..Default::default() };
+    let mut nl = library::spice_with(&text, &opts).unwrap();
+    library::deck_models(&mut nl, &sky130);
+    nl
+}
+
+fn op_cfg(lib: std::path::PathBuf) -> OpConfig {
+    OpConfig {
+        model_lib: Some(lib),
+        params: library::oppoint::SKY130_NPN_NOMINAL.iter().map(|&(k, v)| (k.to_string(), v)).collect(),
+        ..OpConfig::default()
+    }
+}
+
+/// The simulated circuit is the drawn one: every device of a resistor and a
+/// BJT fixture reaches the operating point (M1 PERF criterion).
+#[test]
+fn fixtures_resolve_every_device() {
+    let Some(lib) = models() else { return };
+    for name in ["rc_filter", "bjt_mirror"] {
+        let nl = fixture(name);
+        let op = library::oppoint::extract(&nl, &op_cfg(lib.clone())).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(op.resolved, nl.devices.len(), "{name}");
+    }
+}
+
+/// The poly resistor carries the inverter's output into a load, and its
+/// current closes KCL on `vmid` with the two FETs.
+#[test]
+fn rc_filter_resistor_carries_current() {
+    let Some(lib) = models() else { return };
+    let nl = fixture("rc_filter");
+    // The probe leaves `vout` unloaded, so the resistor would carry 0.
+    let cfg = OpConfig { testbench: Some("Vdd vdd 0 1.8\nVin vin 0 0.9\nRload vout 0 10k\n".into()), ..op_cfg(lib) };
+    let op = library::oppoint::extract(&nl, &cfg).unwrap();
+    let t = op.terminal_ua(&nl);
+    let r = nl.devices.iter().position(|d| d.name == "XR1").unwrap();
+    let p = t[r].as_ref().unwrap().iter().find(|(n, _)| n == "P").unwrap().1;
+    assert!(p.abs() > 1.0, "XR1 carries {p} µA");
+    let vmid = nl.nets.iter().position(|n| n.name == "vmid").unwrap();
+    let sum: f64 = nl
+        .devices
+        .iter()
+        .zip(&t)
+        .flat_map(|(d, c)| d.terminals.iter().zip(c.as_ref().unwrap()).filter(|((_, n), _)| n.0 as usize == vmid).map(|(_, (_, i))| *i))
+        .sum();
+    assert!(sum.abs() < 1e-3, "KCL on vmid: {sum} µA {t:?}");
+}
+
+#[test]
+fn an_inductor_netlist_cannot_simulate() {
+    let Some(lib) = models() else { return };
+    let nl = library::parse("XM1 d g 0 0 nfet_01v8 W=1u L=1u\nL1 d 0 1n\n").unwrap();
+    let e = library::oppoint::extract(&nl, &op_cfg(lib)).err().expect("an inductor is refused");
+    assert!(e.contains("cannot simulate"), "{e}");
+}

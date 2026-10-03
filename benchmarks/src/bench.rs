@@ -147,7 +147,11 @@ fn op_config(pdk_json: &Path) -> Option<library::oppoint::OpConfig> {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".volare")))?;
     let lib = root.join("sky130A/libs.tech/ngspice/sky130.lib.spice");
-    lib.is_file().then(|| library::oppoint::OpConfig { model_lib: Some(lib), ..Default::default() })
+    lib.is_file().then(|| library::oppoint::OpConfig {
+        model_lib: Some(lib),
+        params: library::oppoint::SKY130_NPN_NOMINAL.iter().map(|&(k, v)| (k.to_string(), v)).collect(),
+        ..Default::default()
+    })
 }
 
 fn run_circuit(

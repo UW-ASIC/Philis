@@ -931,7 +931,7 @@ impl Flow<'_> {
                 (k > 0).then(|| s / k as f32)
             })
             .collect();
-        perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um }
+        perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true }
     }
 
     /// Each recognised matched pair on one source net, with its members'
@@ -2066,7 +2066,7 @@ mod size_tests {
                 checked += 1;
             }
             if name == "ota" {
-                let card = crate::oppoint::flat_circuit(&netlist, &crate::oppoint::OpConfig::default());
+                let card = crate::oppoint::flat_circuit(&netlist, &crate::oppoint::OpConfig::default()).unwrap();
                 let xm5 = card.lines().find(|l| l.starts_with("XM5 ")).expect("XM5 card");
                 assert!(xm5.contains("W=40 L=2 nf=1 m=4"), "{xm5}");
             }
