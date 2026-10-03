@@ -139,24 +139,24 @@ fn diff_pair_lives_in_the_hierarchy() {
 
 #[test]
 fn diff_pair_emits_its_constraints() {
-    // A recognised diff pair emits Symmetry (hard), ThermalGradient (budget — a
-    // spec plus a margin on a derived field, PLAN §4d) and MatchingPair +
-    // CommonCentroid (cost) — the BlockKind mapping, driven by recognition.
-    // MatchingPair is Cost, not Hard: its `satisfied` bounds device AREA
-    // (Pelgrom `σ²_u = A²/(W·L)`), which no placement move can change, so
-    // gating SA on it is inert. See `backend/TODO.md` §2.
+    // A recognised diff pair emits Symmetry (hard) and MatchedSet (budget +
+    // cost: one pair's gradient, thermal and LOD ledger, PLAN §4d) — the
+    // BlockKind mapping, driven by recognition. MatchedSet is never Hard: its
+    // allowance follows device AREA (Pelgrom `σ²_u = A²/(W·L)`), which no
+    // placement move can change, so gating SA on it is inert. See
+    // `backend/TODO.md` §2.
     let nl = ota();
     let p = annotate(&nl, &AnnotationConfig::default());
     assert!(count(&p.placement.hard) >= 1, "expected >=1 hard placement rule (sym), got {}", count(&p.placement.hard));
     assert!(count(&p.placement.budget) >= 1, "expected >=1 budget placement rule (thermal), got {}", count(&p.placement.budget));
-    assert!(count(&p.placement.cost) >= 2, "expected >=2 cost placement rules (match/CC/prox), got {}", count(&p.placement.cost));
+    assert!(count(&p.placement.cost) >= 2, "expected >=2 cost placement rules (matched set/prox), got {}", count(&p.placement.cost));
 
     // The partition itself is the contract: nothing in `hard` may be a rule the
     // placer cannot act on.
     let hard_kinds: Vec<&str> = p.placement.hard.iter().map(|b| b.kind()).collect();
     assert!(
-        !hard_kinds.iter().any(|k| k.contains("MatchingPair")),
-        "MatchingPair must not gate placement moves: {hard_kinds:?}"
+        !hard_kinds.iter().any(|k| k.contains("MatchedSet")),
+        "MatchedSet must not gate placement moves: {hard_kinds:?}"
     );
 }
 
@@ -192,17 +192,27 @@ fn budget_rules_land_in_exactly_one_partition() {
     assert!(sym(&p.placement.hard), "SymmetryGroup must stay Hard");
     assert!(!sym(&p.placement.budget), "SymmetryGroup must never be priced as a budget");
 
-    // And the placement-tier budget, from the other other side: `ThermalGradient`
-    // carries a spec *and* a margin on a derived field, is tradeable while
-    // converging, and PLAN §4d calls it a budget outright. Its cost copy (the
-    // per-move isotherm pull over the epoch-frozen field — see
-    // `emit::budget_and_cost`) is a gradient, not a classification; the classified
-    // copy must be priced, never gated.
-    let therm = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| {
-        a.iter().any(|b| b.kind().ends_with("ThermalGradient"))
+    // And the placement-tier budget, from the other other side: `MatchedSet`
+    // carries an allowance on derived fields (gradient, live thermal, LOD), is
+    // tradeable while converging, and PLAN §4d calls it a budget outright. Its
+    // cost copy is a gradient, not a classification; the classified copy must
+    // be priced, never gated.
+    let set = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| {
+        a.iter().any(|b| b.kind().ends_with("MatchedSet"))
     };
-    assert!(therm(&p.placement.budget), "ThermalGradient must be a priced budget");
-    assert!(!therm(&p.placement.hard), "ThermalGradient must never gate legality as Hard");
+    assert!(set(&p.placement.budget), "MatchedSet must be a priced budget");
+    assert!(!set(&p.placement.hard), "MatchedSet must never gate legality as Hard");
+}
+
+#[test]
+fn matched_pairs_get_orientation_rules() {
+    // MAT-05: channel axes are a hard placement rule (a quarter-turned partner is
+    // illegal); Φ is budget only (a discrete flip, no gradient for a cost copy).
+    let p = annotate(&ota(), &AnnotationConfig::default());
+    let has = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| a.iter().any(|b| b.kind() == "Orientation");
+    assert!(has(&p.placement.hard), "Orientation axis must be Hard");
+    assert!(has(&p.placement.budget), "Orientation Φ must be a budget");
+    assert!(!has(&p.placement.cost), "Orientation has no cost copy");
 }
 
 #[test]
@@ -413,7 +423,7 @@ fn a_cascode_stack_is_adjacent_not_matched() {
     assert_eq!(p.blocks[0].kind, BlockKind::Stack);
     let kinds: Vec<&str> = p.placement.cost.iter().map(|b| b.kind()).collect();
     assert!(kinds.iter().any(|k| k.ends_with("Proximity")), "{kinds:?}");
-    assert!(!kinds.iter().any(|k| k.ends_with("MatchingPair") || k.ends_with("ThermalGradient")), "{kinds:?}");
+    assert!(!kinds.iter().any(|k| k.ends_with("MatchedSet")), "{kinds:?}");
     assert!(p.placement.hard.is_empty());
 }
 
@@ -512,22 +522,18 @@ fn a_lone_mirror_stage_is_symmetric_too() {
 }
 
 #[test]
-fn matching_is_budgeted_only_with_the_deck_s_mismatch_data() {
-    let is_mp = |b: &Box<dyn RuleBatch<pnr_core::Layout>>| b.kind().ends_with("MatchingPair");
+fn matched_sets_are_budgeted_and_missing_deck_terms_are_listed() {
+    let is_set = |b: &Box<dyn RuleBatch<pnr_core::Layout>>| b.kind() == "MatchedSet";
     let bare = annotate(&ota(), &AnnotationConfig::default());
-    assert!(!bare.placement.budget.iter().any(is_mp), "no S_VT: a pull, not a budget");
-    assert!(bare.missing.iter().any(|m| m.0 == "MatchingPair"), "and listed unknown");
-    assert!(
-        bare.placement.budget.iter().any(|b| b.kind() == "CommonCentroid"),
-        "coincidence needs no deck data"
-    );
+    assert!(bare.placement.budget.iter().any(is_set), "coincidence needs no deck data");
+    assert!(bare.missing.iter().any(|m| m.0 == "MatchedSet"), "the deck terms are listed unknown");
 
     let mut cfg = AnnotationConfig::default();
     cfg.process.avt_mv_um = [Some(5.0), Some(6.0)];
     cfg.process.svt_uv_per_um = Some(4.0);
     let full = annotate(&ota(), &cfg);
-    assert!(full.placement.budget.iter().any(is_mp));
-    assert!(!full.missing.iter().any(|m| m.0 == "MatchingPair"));
+    assert!(full.placement.budget.iter().any(is_set));
+    assert!(!full.missing.iter().any(|m| m.0 == "MatchedSet"));
 }
 
 #[test]

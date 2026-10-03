@@ -3,6 +3,7 @@
 //! - [`cell`]: structural directives `cells` reads cold ([`Constraints`]).
 //! - [`placement`]: [`Rule`]s scored against `pnr_core::Layout` (gp, dp).
 //! - [`routing`]: [`Rule`]s scored against `pnr_core::Routes` (gr, dr).
+//! - [`matching`]: unit moments, CC patterns and the mismatch ledger of matched sets.
 //! - [`metadata`]: net classification the annotator turns into routing rules.
 //!
 //! Rules are `Copy` values in per-kind `Vec`s scored through a monomorphised
@@ -12,6 +13,7 @@
 
 pub mod cell;
 pub mod constraints;
+pub mod matching;
 pub mod metadata;
 pub mod placement;
 pub mod requirements;

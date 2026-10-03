@@ -121,7 +121,7 @@ mod tests {
         assert_eq!(diff_pairs(&nl), 0);
         // ponytail: EXT-10's `Coverage::Unconstrained("unknown size")` is not on this branch; the
         // `missing` entry is the report until it lands.
-        let missing = |nl: &Netlist| annotate(nl, &AnnotationConfig::default()).missing.contains(&("MatchingPair", "device W/L"));
+        let missing = |nl: &Netlist| annotate(nl, &AnnotationConfig::default()).missing.contains(&("MatchedSet", "device W/L"));
         assert!(missing(&nl));
         assert!(!missing(&pair([("nfet_01v8", 5); 2], Some(10_000))));
     }

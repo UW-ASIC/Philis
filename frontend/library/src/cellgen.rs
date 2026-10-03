@@ -259,16 +259,7 @@ fn flip_members(m: &mut Macro, flips: &[bool]) {
 /// Compared exactly as `Σφ_a·n_b == Σφ_b·n_a`. A macro without units has
 /// nothing to compare and passes.
 fn currents_run_alike(m: &Macro, n_members: usize) -> bool {
-    let mut sum = vec![(0i32, 0i32, 0i32); n_members]; // (Σφx, Σφy, count)
-    for u in &m.units {
-        if let Some(e) = sum.get_mut(usize::from(u.owner)) {
-            e.0 += i32::from(u.phi.0);
-            e.1 += i32::from(u.phi.1);
-            e.2 += 1;
-        }
-    }
-    let Some(&(x0, y0, n0)) = sum.iter().find(|e| e.2 > 0) else { return true };
-    sum.iter().filter(|e| e.2 > 0).all(|&(x, y, n)| x * n0 == x0 * n && y * n0 == y0 * n)
+    analog::matching::moments::phi_equal_all(&m.units, n_members)
 }
 
 /// Pins drawn on one pad carry one net — otherwise a shared diffusion region
