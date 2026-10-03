@@ -92,8 +92,13 @@ const EXPECTED: [Row; 17] = [
     ("chain4", &[("Stack", &["XM1", "XM2"]), ("Stack", &["XM3", "XM4"])], &[], &[], &[], 0),
     ("pair", &[], &[], &[], &[], 0),
     ("quad", &[], &[], &[], &[], 0),
-    ("folded", &[("DiffPair", &["M1", "M2"]), ("DiffPair", &["M10", "M8"]), ("DiffPair", &["M7", "M9"]), ("Stack", &["M3", "M5"]), ("Stack", &["M4", "M6"])], &[("M1", "M2"), ("M10", "M8"), ("M7", "M9")], &[], &[("x1", "x2")], 2),
-    ("gilbert", &[("CurrentMirror", &["M3", "M6"]), ("CurrentMirror", &["M4", "M5"]), ("DiffPair", &["M1", "M2"])], &[("M1", "M2"), ("M3", "M6"), ("M4", "M5")], &["M0"], &[("outn", "outp"), ("x1", "x2")], 2),
+    // EXT-04: DIFF_PAIR_SPLIT_SOURCE (any-pins-differ, no shared net) was a dead
+    // pattern that falsely matched M7/M9 and M10/M8 as DiffPair; deleted, so
+    // they fall back to their real Stack structure.
+    ("folded", &[("DiffPair", &["M1", "M2"]), ("Stack", &["M10", "M8"]), ("Stack", &["M3", "M5"]), ("Stack", &["M4", "M6"]), ("Stack", &["M7", "M9"])], &[("M1", "M2")], &[], &[("x1", "x2")], 1),
+    // EXT-04: GILBERT_CELL's link fix makes it match the whole 6-device cell
+    // (today's child re-search, max_slots=2, decomposes it into 3 DiffPair legs).
+    ("gilbert", &[("DiffPair", &["M1", "M2"]), ("DiffPair", &["M3", "M4"]), ("DiffPair", &["M5", "M6"])], &[("M1", "M2"), ("M3", "M4"), ("M5", "M6")], &[], &[("outn", "outp"), ("x1", "x2")], 1),
     ("rail2rail", &[("Group", &["MN1", "MP1"]), ("Group", &["MN2", "MP2"])], &[], &[], &[("xn1", "xn2"), ("xp1", "xp2")], 0),
     ("latch", &[("Group", &["MN1", "MP1"]), ("Group", &["MN2", "MP2"])], &[], &[], &[], 0),
     ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO2", "MO3"]), ("CurrentMirror", &["MO4", "MO5"])], &[("MO1", "MR"), ("MO2", "MO3"), ("MO4", "MO5")], &[], &[], 2),
@@ -150,9 +155,7 @@ fn negative_corpus() {
     }
 }
 
-/// Today both become DiffPairs (AA-05).
 #[test]
-#[ignore = "passes after EXT-04"]
 fn negative_corpus_sc_switches_and_equal_fets() {
     for name in ["sc_switches", "equal_fets"] {
         assert_unmatched(name, src(name));

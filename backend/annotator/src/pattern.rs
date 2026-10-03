@@ -13,6 +13,8 @@ use crate::size::{self, Drawn};
 pub enum PinRel {
     Same,
     Diff,
+    /// Same net, and that net's role is `Signal`.
+    SameSignal,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -113,7 +115,7 @@ fn slot_ok(slot: &Slot, hg: &BipartiteHypergraph, drawn: &[Drawn], cell: u32, as
 }
 
 /// Links whose both ends are already assigned hold.
-fn links_ok(links: &[PinLink], hg: &BipartiteHypergraph, assigned: &[u32]) -> bool {
+fn links_ok(links: &[PinLink], hg: &BipartiteHypergraph, assigned: &[u32], roles: &[NetRole]) -> bool {
     let filled = assigned.len() as u8;
     links.iter().filter(|l| l.a < filled && l.b < filled).all(|l| {
         let na = pin_net(hg, assigned[l.a as usize], l.pin_a);
@@ -121,12 +123,13 @@ fn links_ok(links: &[PinLink], hg: &BipartiteHypergraph, assigned: &[u32]) -> bo
         match l.rel {
             PinRel::Same => na.is_some() && na == nb,
             PinRel::Diff => na != nb,
+            PinRel::SameSignal => na.is_some_and(|n| Some(n) == nb && roles[n.0 as usize] == NetRole::Signal),
         }
     })
 }
 
 struct Search<'a> {
-    pat: &'a Pattern,
+    pat: &'static Pattern,
     hg: &'a BipartiteHypergraph,
     drawn: &'a [Drawn],
     roles: &'a [NetRole],
@@ -155,12 +158,26 @@ impl Search<'_> {
                 continue;
             }
             assigned.push(cell);
-            if links_ok(self.pat.links, self.hg, assigned) {
+            if links_ok(self.pat.links, self.hg, assigned, self.roles) {
                 self.run(assigned, out, seen);
             }
             assigned.pop();
         }
     }
+}
+
+/// Every match of one pattern over the devices `allowed`.
+pub(crate) fn matches(
+    pat: &'static Pattern,
+    hg: &BipartiteHypergraph,
+    drawn: &[Drawn],
+    roles: &[NetRole],
+    allowed: &[bool],
+) -> Vec<PatternMatch> {
+    let s = Search { pat, hg, drawn, roles, allowed };
+    let mut out = Vec::new();
+    s.run(&mut Vec::with_capacity(pat.slots.len()), &mut out, &mut Vec::new());
+    out
 }
 
 /// Match every catalog pattern with at most `max_slots` slots over the devices in
@@ -183,8 +200,7 @@ pub fn recognize(
     let mut all = Vec::new();
     for pat in PATTERNS {
         if pat.slots.len() <= max_slots && !cfg.do_not_use.contains(pat.name) {
-            let s = Search { pat, hg, drawn, roles, allowed: &allowed };
-            s.run(&mut Vec::with_capacity(pat.slots.len()), &mut all, &mut Vec::new());
+            all.extend(matches(pat, hg, drawn, roles, &allowed));
         }
     }
     let sorted = |m: &PatternMatch| {
