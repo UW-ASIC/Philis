@@ -4,8 +4,8 @@
 //! | rule                 | arm    | where                                          |
 //! |----------------------|--------|------------------------------------------------|
 //! | `Antenna`            | hard   | self-extracted                                 |
-//! | `Differential`       | hard   | self-extracted diff-pair net pairs             |
-//! | `CrosstalkExclusion` | budget | self-extracted, spacing raised to victim class |
+//! | `Differential`       | budget | from the DiffPair leaves                       |
+//! | `CrosstalkExclusion` | budget | from the DiffPair leaves, spacing by class      |
 //! | `ParasiticBudget`    | budget | every budgeted net, C budget as drawn length   |
 //! | `CouplingBudget`     | budget | every budgeted net, from its class and load;   |
 //! |                      |        | own shield excluded, quiet rails weigh 0       |
@@ -16,19 +16,21 @@ use analog::metadata::{NetClass, NetClassification};
 use analog::routing::{
     Antenna, CouplingBudget, CrosstalkExclusion, Differential, ParasiticBudget, Shield,
 };
-use analog::rule::Rule;
 use analog::Requirements;
-use pnr_core::{BipartiteHypergraph, NetId, Routes, UnionFind};
+use pnr_core::ids::DeviceId;
+use pnr_core::{BipartiteHypergraph, NetId, Routes};
 
 /// Assemble the routing [`Requirements`]. `classes` is indexed by net id.
+/// `pairs` are the recognised `DiffPair` leaves (2 devices each), the source of
+/// `Differential` and `CrosstalkExclusion`.
 #[must_use]
 pub fn routing(
     hg: &BipartiteHypergraph,
     classes: &[NetClassification],
     gate_um2: &[f32],
     process: &crate::ProcessNumbers,
+    pairs: &[(DeviceId, DeviceId)],
 ) -> Requirements<Routes> {
-    let mut uf = UnionFind::new(hg.device_count()); // routing rules don't group
     let mut r = Requirements::<Routes>::default();
     // One Antenna per gate net, over the total gate area it drives.
     let mut gate_nm2 = vec![0i64; hg.net_names.len()];
@@ -55,14 +57,29 @@ pub fn routing(
         })
         .collect();
     r.hard.push(Box::new(antenna));
-    let diff: Vec<Differential> = Differential::extract(hg, &mut uf).into_iter().map(|d| Differential { stack: process.stack, ..d }).collect();
-    r.hard.push(Box::new(diff));
 
+    // Differential and crosstalk-exclusion both come from the recognised DiffPair
+    // leaves (EXT-09): no positional-pin or O(N²) device-pair scan.
     let class = |n: NetId| classes[n.0 as usize].class;
-    let mut xtalk = CrosstalkExclusion::extract(hg, &mut uf);
-    for x in &mut xtalk {
-        x.min_spacing_nm = process.route_space_nm * spacing_multiple(class(x.a)).max(spacing_multiple(class(x.b)));
+    let pin = |d: DeviceId, p: &str| crate::pattern::pin_net(hg, u32::from(d.0), p);
+    let mut diff: Vec<Differential> = Vec::new();
+    let mut xtalk: Vec<CrosstalkExclusion> = Vec::new();
+    for &(a, b) in pairs {
+        if let (Some(da), Some(db)) = (pin(a, "D"), pin(b, "D")) {
+            if da != db {
+                diff.push(Differential { pos: da, neg: db, max_len_delta_pct10: 50, same_layer_required: true, stack: process.stack });
+            }
+        }
+        for g in [pin(a, "G"), pin(b, "G")].into_iter().flatten() {
+            for d in [pin(a, "D"), pin(b, "D")].into_iter().flatten() {
+                if g != d {
+                    let min_spacing_nm = process.route_space_nm * spacing_multiple(class(g)).max(spacing_multiple(class(d)));
+                    xtalk.push(CrosstalkExclusion { a: g, b: d, min_spacing_nm, margin_pct: 25 });
+                }
+            }
+        }
     }
+    r.budget.push(Box::new(diff));
     r.budget.push(Box::new(xtalk));
 
     // Every net a device touches — a one-device net is still routed to its pin.

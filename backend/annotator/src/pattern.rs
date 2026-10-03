@@ -78,7 +78,7 @@ pub struct PatternMatch {
     pub priority: u32,
 }
 
-fn pin_net(hg: &BipartiteHypergraph, cell: u32, pin: &str) -> Option<NetId> {
+pub(crate) fn pin_net(hg: &BipartiteHypergraph, cell: u32, pin: &str) -> Option<NetId> {
     let i = cell as usize;
     hg.terminals[i].iter().position(|p| p == pin).map(|t| hg.device_nets[i][t])
 }

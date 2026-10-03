@@ -873,7 +873,7 @@ impl DetailedRoute {
         // Differential trim: a pair whose pin sets differ (a common-centroid cell
         // gives one drain a strap the other lacks) cannot route to equal RC,
         // so the lighter side gets a same-net stub off one of its runs.
-        for b in reqs.hard.iter().filter(|b| b.repair_kind() == RepairKind::Mirror) {
+        for b in reqs.hard.iter().chain(&reqs.budget).filter(|b| b.repair_kind() == RepairKind::Mirror) {
             let mut ids = Vec::new();
             b.touched(&mut ids);
             for p in ids.chunks_exact(2) {
@@ -2831,7 +2831,7 @@ mod tests {
         let global = Routes { wires: vec![Vec::new(); 3], ..Default::default()  };
         let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 1_000), pin(1, 1_000, 5_000), pin(1, 12_000, 5_000), pin(2, 1_000, 9_000), pin(2, 12_000, 9_000)];
         let mut reqs = Requirements::<Routes>::default();
-        reqs.hard.push(Box::new(vec![Differential { pos: NetId(0), neg: NetId(1), max_len_delta_pct10: 50, same_layer_required: true, stack: None }]));
+        reqs.budget.push(Box::new(vec![Differential { pos: NetId(0), neg: NetId(1), max_len_delta_pct10: 50, same_layer_required: true, stack: None }]));
         let cfg = DetailedCfg { fat_signal: 600, ..test_cfg() };
         let (routes, _) = DetailedRoute { cfg }.route(&global, &pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
         let widest = |n: usize| routes.wires[n].iter().filter(|s| s.rect.w != s.rect.h).map(|s| s.rect.w.min(s.rect.h)).max();

@@ -3,8 +3,6 @@
 use pnr_core::geom::Rect;
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
-use pnr_core::{BipartiteHypergraph, UnionFind};
-use crate::placement::matching_pair::{is_diff_pair, D, G};
 use crate::rule::Rule;
 
 /// Same-layer clearance between nets `a` and `b` ≥ `min_spacing_nm`.
@@ -92,31 +90,6 @@ impl Rule for CrosstalkExclusion {
         }
         let floor = self.min_spacing_nm as f32;
         crate::rule::over(floor - d, floor)
-    }
-
-    /// Per diff pair: each input gate net against each output drain net
-    /// (the feedback path); the caller sets the spacing from the process.
-    ///
-    /// ponytail: clock aggressors need `NetClassification`, which the
-    /// hypergraph does not carry.
-    fn extract(hg: &BipartiteHypergraph, _uf: &mut UnionFind) -> Vec<Self> {
-        let mut out = Vec::new();
-        let n = hg.device_count();
-        for a in 0..n {
-            for b in (a + 1)..n {
-                if !is_diff_pair(hg, a, b) {
-                    continue;
-                }
-                for g in [hg.device_nets[a][G], hg.device_nets[b][G]] {
-                    for d in [hg.device_nets[a][D], hg.device_nets[b][D]] {
-                        if g != d {
-                            out.push(CrosstalkExclusion { a: g, b: d, min_spacing_nm: 0, margin_pct: 25 });
-                        }
-                    }
-                }
-            }
-        }
-        out
     }
 }
 

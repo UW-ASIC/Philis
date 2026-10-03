@@ -148,7 +148,17 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
 
     Problem {
         placement,
-        routing: extract::routing(&hg, &net_classes, &gates, &cfg.process),
+        routing: extract::routing(
+            &hg,
+            &net_classes,
+            &gates,
+            &cfg.process,
+            &block::leaves(&blocks)
+                .iter()
+                .filter(|b| b.kind == BlockKind::DiffPair)
+                .map(|b| (b.devices[0], b.devices[1]))
+                .collect::<Vec<_>>(),
+        ),
         constraints: constraints::assemble(netlist, &drawn, &blocks),
         net_classes,
         groups,

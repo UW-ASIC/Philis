@@ -108,7 +108,9 @@ const EXPECTED: [Row; 17] = [
     // EXT-05: complementary_diff_pair declares both polarities' DiffPairs.
     ("rail2rail", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("xn1", "xn2"), ("xp1", "xp2")], 1),
     // EXT-05 (AA-03): cross_coupled_inverters' declared pairs and prox, not inverters.
-    ("latch", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"]), ("Stack", &["MN1", "MP1"]), ("Stack", &["MN2", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[], 1),
+    // EXT-09: `net_pairs` moves — Differential now comes from the DiffPair leaves, and
+    // the cross-coupled MN1/MN2 pair's drains (q, qb) differ, so it yields one.
+    ("latch", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"]), ("Stack", &["MN1", "MP1"]), ("Stack", &["MN2", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("q", "qb")], 1),
     // EXT-05: current_mirror_4 declares (ref, k) per output; only the first pair
     // holding the shared reference gets a Symmetry.
     ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO2", "MR"]), ("CurrentMirror", &["MO3", "MR"]), ("CurrentMirror", &["MO4", "MO5"])], &[("MO1", "MR"), ("MO4", "MO5")], &[], &[], 2),
@@ -119,7 +121,9 @@ const EXPECTED: [Row; 17] = [
     // cross_coupled_inverters' pairs; complementary_diff_pair's sources must be a
     // signal, so the output inverters no longer match it and mp9/mp10 join
     // undeclared 3-device groups (their CurrentMirror was a misrecognition).
-    ("strongarm", &[("DiffPair", &["mn1", "mn2"]), ("DiffPair", &["mn3", "mn4"]), ("DiffPair", &["mp5", "mp6"]), ("Group", &["mn13", "mp10", "mp11"]), ("Group", &["mn14", "mp12", "mp9"]), ("Load", &["mp7", "mp8"]), ("Stack", &["mn3", "mp5"]), ("Stack", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mn3", "mn4"), ("mp5", "mp6"), ("mp7", "mp8")], &["mn0"], &[("vin_d", "vip_d")], 2),
+    // EXT-09: `net_pairs` gains (vin_o, vip_o) — the second DiffPair leaf (mn3, mn4)
+    // now also yields a Differential; the old device-pair scan missed it.
+    ("strongarm", &[("DiffPair", &["mn1", "mn2"]), ("DiffPair", &["mn3", "mn4"]), ("DiffPair", &["mp5", "mp6"]), ("Group", &["mn13", "mp10", "mp11"]), ("Group", &["mn14", "mp12", "mp9"]), ("Load", &["mp7", "mp8"]), ("Stack", &["mn3", "mp5"]), ("Stack", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mn3", "mn4"), ("mp5", "mp6"), ("mp7", "mp8")], &["mn0"], &[("vin_d", "vip_d"), ("vin_o", "vip_o")], 2),
 ];
 
 #[test]
@@ -235,6 +239,27 @@ fn no_emitted_conflicts() {
 #[test]
 fn no_emitted_conflicts_strongarm() {
     assert_no_conflicts("strongarm", STRONGARM);
+}
+
+/// EXT-09: `Differential` comes only from recognised `DiffPair` leaves, never a
+/// positional/O(N²) device-pair scan, and lands in `routing.budget`, not `.hard`.
+#[test]
+fn differential_comes_from_recognized_pairs() {
+    use analog::RuleBatch;
+    let count = |arm: &[Box<dyn RuleBatch<pnr_core::Routes>>]| -> usize {
+        arm.iter().filter(|b| b.kind().ends_with("::Differential")).map(|b| b.count()).sum()
+    };
+    // dac4 has no recognised pair (it is a DAC capacitor bank): 0 Differential
+    // anywhere (today's positional scan finds 10 on its NMOS/PMOS switch pairs).
+    let nl = net(&src("dac4").replace("VSS", "0"));
+    let p = annotate(&nl, &AnnotationConfig::default());
+    assert_eq!(count(&p.routing.hard) + count(&p.routing.budget) + count(&p.routing.cost), 0, "dac4");
+
+    // ota5t has exactly one DiffPair leaf: exactly 1 Differential, in budget only.
+    let nl = net(src("ota5t"));
+    let p = annotate(&nl, &AnnotationConfig::default());
+    assert_eq!(count(&p.routing.hard), 0, "ota5t hard");
+    assert_eq!(count(&p.routing.budget), 1, "ota5t budget");
 }
 
 /// T7: every device is in a requirement or reported `Unconstrained(reason)`.

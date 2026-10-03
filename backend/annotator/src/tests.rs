@@ -168,7 +168,7 @@ fn budget_rules_land_in_exactly_one_partition() {
     let p = annotate(&nl, &AnnotationConfig::default());
     let arms: [(&str, &Vec<Box<dyn RuleBatch<pnr_core::Routes>>>); 3] =
         [("hard", &p.routing.hard), ("budget", &p.routing.budget), ("cost", &p.routing.cost)];
-    for kind in ["CrosstalkExclusion", "ParasiticBudget", "CouplingBudget"] {
+    for kind in ["Differential", "CrosstalkExclusion", "ParasiticBudget", "CouplingBudget"] {
         let hits: Vec<&str> = arms
             .iter()
             .filter(|(_, a)| a.iter().any(|b| b.kind().ends_with(kind)))
