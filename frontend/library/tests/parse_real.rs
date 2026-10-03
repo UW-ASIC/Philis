@@ -73,7 +73,7 @@ fn local_fixtures_parse_as_before() {
         assert_eq!((bare.devices.len(), bare.nets.len()), (devices, nets), "{name}");
         if name == "ota" {
             let ports: Vec<&str> = nl.ports.iter().map(|p| nl.nets[p.0 as usize].name.as_str()).collect();
-            assert_eq!(ports, ["vinp", "vinm", "vout1", "vout2", "VDD", "VSS"]);
+            assert_eq!(ports, ["vinp", "vinm", "vout1", "vout2", "VDD", "VSS", "vbias", "vbn"]);
         }
     }
 }

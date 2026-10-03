@@ -1,5 +1,5 @@
 * 5T OTA — local benchmark fixture (also exercised by backend tests)
-.subckt ota vinp vinm vout1 vout2 VDD VSS
+.subckt ota vinp vinm vout1 vout2 VDD VSS vbias vbn
 XM1 vout1 vinp vtail VSS nfet_01v8 W=10u L=1u nf=2
 XM2 vout2 vinm vtail VSS nfet_01v8 W=10u L=1u nf=2
 XM3 vout1 vbias VDD VDD pfet_01v8 W=20u L=1u

@@ -1678,6 +1678,10 @@ fn labels_and_reference(
     reference.devices.extend(cellgen::dummy_cards(placed, nets, &reference.devices));
     reference.devices.extend(drawn);
     reference.ports = pins.iter().map(|p| p.name.clone()).collect();
+    // PERF-03: only the declared `.subckt` ports leave the cell; with none
+    // (no `.subckt` around the top) every labelled net stays exempt.
+    reference.external_ports = (!schematic.ports.is_empty())
+        .then(|| schematic.ports.iter().map(|n| schematic.nets[n.0 as usize].name.clone()).collect());
     (pins, reference)
 }
 
