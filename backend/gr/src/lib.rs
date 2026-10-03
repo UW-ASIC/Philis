@@ -874,14 +874,15 @@ mod tests {
         assert!((STALL_ITERS..=STALL_ITERS + 1).contains(&iters), "{iters}");
     }
 
-    /// The same absolute node (−750 nm) seen through two frame origins hits
-    /// one history bucket.
+    /// The same absolute node (−250 nm) seen through two frame origins hits
+    /// one history bucket, and not the bucket of +250 nm: a truncating key
+    /// (`/`) folds both into bucket 0 and reads the larger 7.0.
     #[test]
     fn history_keys_ignore_the_frame() {
         let mut neg = Negotiation::new();
-        neg.accumulate(&[3.0], |_| (250 - 1_000, 250, 0));
+        neg.accumulate(&[3.0, 7.0], |n| ([250, 750][n as usize] - 500, 250, 0));
         let mut h = [0.0];
-        neg.seed(&mut h, |_| (750 - 1_500, 250, 0));
+        neg.seed(&mut h, |_| (750 - 1_000, 250, 0));
         assert_eq!(h[0], 3.0);
     }
 

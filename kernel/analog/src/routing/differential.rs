@@ -269,7 +269,9 @@ mod tests {
     }
 
     /// Terminal R compares each side's R values sorted ascending, not
-    /// terminals paired by `(y, x)`: a mirror image reads zero either way.
+    /// terminals paired in list order: neg lists its terminals in a
+    /// different order from their mirror images, so only the sorted
+    /// comparison reads zero.
     #[test]
     fn an_exact_mirror_is_zero() {
         let rc = Differential { stack: Some(rc_stack()), ..pair() };
@@ -279,12 +281,32 @@ mod tests {
             wires: vec![pos, neg],
             terms: vec![
                 vec![term(0, 60), term(8_000, 60), term(29_830, 60)],
-                vec![term(79_830, 60), term(71_830, 60), term(50_000, 60)],
+                vec![term(50_000, 60), term(71_830, 60), term(79_830, 60)],
             ],
             ..Default::default()
         };
         assert!(rc.mismatch_pct(&r) <= 1e-4);
         assert_eq!(rc.residual(&r), 0.0);
+    }
+
+    /// One extra cut on one side of an otherwise identical pair is a via
+    /// count mismatch. The cut lands on a terminal: a dead end there adds no
+    /// ground C and no terminal R, while mid-wire its port would move the
+    /// star centre and the terminal-R term would fire instead.
+    #[test]
+    fn an_unmatched_cut_breaks_the_pair() {
+        let rc = Differential { stack: Some(rc_stack()), ..pair() };
+        let cut = Shape { layer: LayerId(2), rect: Rect { x: 0, y: 60, w: 170, h: 170 } };
+        let side = |y| vec![wire(0, y, 10_000, 290)];
+        let terms = |y| vec![term(0, y + 60), term(9_830, y + 60)];
+        let mut pos = side(0);
+        pos.push(cut);
+        let r = Routes { wires: vec![pos.clone(), side(1_000)], terms: vec![terms(0), terms(1_000)], ..Default::default() };
+        assert!(rc.mismatch_pct(&r) > rc.budget_pct(), "{}", rc.mismatch_pct(&r));
+        let mut neg = side(1_000);
+        neg.push(Shape { rect: Rect { y: 1_060, ..cut.rect }, ..cut });
+        let r = Routes { wires: vec![pos, neg], terms: vec![terms(0), terms(1_000)], ..Default::default() };
+        assert_eq!(rc.mismatch_pct(&r), 0.0);
     }
 
     /// A third net coupling onto only one side of the pair breaks the match;
