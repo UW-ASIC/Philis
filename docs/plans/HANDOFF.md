@@ -1,27 +1,22 @@
-# Handoff (2026-10-01, usage limit)
+# Handoff (updated 2026-10-03)
 
-## Branches / worktrees
-- `main` (c3a1303): plans in docs/plans (00-MASTER-PLAN.md first), field reports 01/02 (02 has root cause: TinyTapeout ran an old packaged build).
-- `fix-export` (73087b6), worktree `../philis-fix-export`: labelled GDS + named top cell, `<top>_ref.spice`, CLI `run -o --seed --max-iters --starts`, `--version`, GPurify bde681c. Full suite green (dac4 ERC fixed by GPurify). Strongarm: klayout 0, magic 0, netgen vs ref.spice MATCH.
-  TODO: `cargo update -p gpurify` to **6341f18** (LVS pairs symmetric devices by params; fixes Philis's 4 false lvs.parameter_mismatch on strongarm), rerun suite, merge into main.
-- `m0` + worktrees `../philis-m0/*`: M0 workflow (run wf_a7f209ae-cfe, script in ~/.claude/.../workflows/scripts/philis-m0-wf_a7f209ae-cfe.js). Resumed once; check `git -C ../philis-m0/integrate log --oneline eba9954..m0` for merged items. Resume with Workflow(scriptPath, resumeFromRunId) — first reset any chain worktree whose impl died after committing (as done for `size`).
-  GAP-20 (doc) rejected on 2 minor points: fix by hand and merge.
-  m0 branches from eba9954 (before GPurify bde681c): merging fix-export first then m0 may need the 4-terminal MOS test fix again.
+## State of main (2a09c30)
+- M0 merged (24 items; m0-report.md). dac4 green after GPurify 6341f18, so M0 criterion 2 is met; RTE-06 not needed (kept on `m0-rte06-rejected`). RTE-03 kept (`m0-rte03-original` holds the original).
+- fix-export merged: labelled GDS, `<top>_ref.spice`, `philis run -o --seed --max-iters --starts`, `--version`.
+- GPurify 6341f18; `pdks/decks/*` re-vendored by 3-way merge (PHILIS edits kept).
+- Suite: 444 passed, 1 failed (`hier_elaborate` → M1a FLOW-13 step 0), 7 ignored.
+- strongarm: philis CLEAN, klayout 0, magic 0, netgen vs `_ref.spice` MATCH. vs user schematic: differs only by dummies (owner decision pending).
+- M0 and fix-export worktrees removed (56 GB freed).
 
-## M0 state at cutoff (owner's screenshots + git, 2026-10-01)
-- Merged into m0 (12): CELL-01, EXT-01, GAP-20, CELL-02, FLOW-04, REL-01, RTE-32, FLOW-02, CELL-04, FLOW-14, RTE-02, FLOW-05 (FLOW-05 merge committed; its integrate agent was idle, so re-verify tests on m0).
-- In flight when cut off: review2:FLOW-03 (signoff wt, HEAD = review fixes), review3:FLOW-01 done (size wt), fix1:PLC-01 (baselines wt: 3 uncommitted files), impl:RTE-03 (routing wt: 5 uncommitted files, just merged m0), fix1:REL-03 (antenna wt).
-- Not started: PERF-01..07, PERF-03, RTE-09, REL-02, RTE-06 (+ close-out: verify, panel, plan update).
-- Before resuming: in routing wt discard RTE-03 partial work (`git reset --hard bb556b4`); baselines wt either let fix1:PLC-01 rerun (stash/reset its 3 dirty files to HEAD). Then Workflow resume (cached agents replay).
-
-## Open
-- External vs user schematic still differs by dummy transistors (14 vs 9 in netgen). Decision for owner: keep dummies in `<top>_ref.spice` (current), or make dummies fully shorted / add them to schematic.
-- `--interface` (fixed die + boundary pins) is a new feature, not implemented.
-- GPurify: greedy (not Hungarian) symmetry pairing — ponytail note in refine.rs.
-
-## Cleanup owed (user asked)
-- When done: remove `../philis-m0/*/target`, `../philis-fix-export/target`, then `git worktree remove` them; scratchpad copies.
-- GPurify session already cleaned its own scratch build.
+## Running: M1a (input + extraction), workflow run `wf_b1fea248-4a9`
+- Script: ~/.claude/projects/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/workflows/scripts/philis-m1a-wf_b1fea248-4a9.js
+- Branch `m1a` at ../philis-m1a/integrate; chains input / ext-core / ext-slot / ext-misc at ../philis-m1a/<chain> (branches m1a-<chain>).
+- Soft cap: args.softCapOutputTokens = 1.5M output tokens; past it no new item starts (status `deferred-cap`); panel/plan-update skipped.
+- Resume: Workflow({scriptPath, resumeFromRunId: "wf_b1fea248-4a9"}). Before resuming, check each chain worktree: if an impl died after committing, `git reset --hard` it to the last m1a merge it contains (see M0 notes).
+- Next: M1b (MAT + CELL + FLOW-16), M1c (PLC + RTE). Commit to main between each.
 
 ## Tools
-klayout/magic/netgen in nix store; `source <scratchpad>/signoff-investigation/env.sh`; checks via ResearchBoutros/analog/common/layout/verify.py {drc|lvs} <block> <gds>.
+`source <scratchpad>/signoff-investigation/env.sh` (klayout 0.30.4, magic 8.3.573, netgen 1.5.292 from nix store; PDK_ROOT=~/.volare). Independent checks: `python3 ResearchBoutros/analog/common/layout/verify.py drc|lvs <block> <gds>`; netgen vs `<top>_ref.spice`.
+
+## Cleanup owed
+- After M1a merges: remove ../philis-m1a worktrees + target/.
