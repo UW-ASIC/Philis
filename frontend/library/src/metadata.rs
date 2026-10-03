@@ -16,7 +16,7 @@ pub enum Arm {
 /// How one constraint family came out.
 #[derive(Clone, Debug)]
 pub struct BudgetStatus {
-    /// Rule kind, path-trimmed (`ThermalGradient`, `CrosstalkExclusion`, …).
+    /// Rule kind, path-trimmed (`MatchedSet`, `CrosstalkExclusion`, …).
     pub kind: String,
     /// Which arm the family was registered in.
     pub arm: Arm,
@@ -181,7 +181,7 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         let violations = b.violations(state) as usize;
         let unknown = b.unknown(state) as usize;
         // ponytail: a batch may count a rule both violated and unknown
-        // (`CentroidGroup` on its bbox proxy); saturating keeps it out of both.
+        // (a batch that counts both); saturating keeps it out of both.
         let satisfied = (total - violations).saturating_sub(unknown);
         let criticality = b.criticality(state);
         let residual = b.residual(state);

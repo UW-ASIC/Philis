@@ -54,10 +54,10 @@ pub struct Problem {
 fn missing(p: &ProcessNumbers) -> Vec<(&'static str, &'static str)> {
     let mut out = Vec::new();
     if p.svt_uv_per_um.is_none() {
-        out.push(("MatchingPair", "deck svt_uv_per_um"));
+        out.push(("MatchedSet", "deck svt_uv_per_um — distance term unknown"));
     }
     if p.avt_mv_um.iter().any(Option::is_none) {
-        out.push(("MatchingPair", "deck avt_n_mv_um/avt_p_mv_um"));
+        out.push(("MatchedSet", "deck avt_n_mv_um/avt_p_mv_um"));
     }
     if p.antenna_max_ratio.is_none() {
         out.push(("Antenna", "deck antenna ratio"));
@@ -136,7 +136,7 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     let mut placement = emit::placement(&blocks, netlist, &cfg.process, cfg.offset_sigma_mv);
     let mut missing = missing(&cfg.process);
     if netlist.devices.iter().zip(&drawn).any(|(d, s)| size::unknown_size(d.kind, s)) {
-        missing.push(("MatchingPair", "device W/L"));
+        missing.push(("MatchedSet", "device W/L"));
     }
     if netlist.devices.iter().any(|d| d.kind == pnr_core::DeviceKind::Capacitor) {
         missing.push(("ParasiticBudget", "capacitor-plate nets: settling / code-error spec (ARR-03, ARR-05)"));

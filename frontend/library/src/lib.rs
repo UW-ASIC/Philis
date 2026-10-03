@@ -640,6 +640,7 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
         svt_uv_per_um: pos("svt_uv_per_um"),
         vt_tc_uv_per_k: [pos("vt_tc_uv_per_k"), pos("vt_tc_uv_per_k_p")],
         lod_kvth0_mv_um: [pos("lod_kvth0_n_mv_um"), pos("lod_kvth0_p_mv_um")],
+        lattice_nm: cells::builder::cut_lattice(pdk),
         epi_nm: pos("epi_thickness_nm").map(|v| v as i32),
         // Rules are `Copy`, so they borrow the stack for 'static.
         // ponytail: leaked once per `annotation` call (twice per run, a few

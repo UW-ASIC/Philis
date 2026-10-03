@@ -162,6 +162,8 @@ pub struct ProcessNumbers {
     /// BSIM4 LOD `KVTH0` (ΔVT per unit `Δ(1/SA + 1/SB)`), mV·µm, `[nmos,
     /// pmos]`: prices LOD imbalance across a matched array.
     pub lod_kvth0_mv_um: [Option<f32>; 2],
+    /// Cut lattice, nm (coincidence tolerance is half of it); 0 = unknown.
+    pub lattice_nm: i32,
     /// Epitaxial layer thickness, nm: substrate isolation saturates at a few
     /// times it.
     pub epi_nm: Option<i32>,

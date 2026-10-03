@@ -298,15 +298,10 @@ mod tests {
         let identity = [0u16, 1];
         let r = rule().retarget(&identity);
         assert_eq!((r.a, r.b, r.axis), (rule().a, rule().b, rule().axis));
-        let p = crate::placement::MatchingPair {
-            a: Target::Device(DeviceId(0)),
-            b: Target::Device(DeviceId(1)),
-            gate_um2: 1.0,
-            gradient_share: 0.3,
-            gradient_per_avt_um2: 2.5e-4,
-        }
-        .retarget(&identity);
-        assert_eq!((p.a, p.b), (Target::Device(DeviceId(0)), Target::Device(DeviceId(1))));
+        let mut p = crate::placement::matched_set::pair(0, 1);
+        crate::rule::RuleBatch::retarget(&mut p, &identity);
+        assert_eq!(p.members, vec![DeviceId(0), DeviceId(1)]);
+        assert_eq!(p.cell_of, identity.to_vec());
     }
 
     #[test]
@@ -323,20 +318,12 @@ mod tests {
         assert_eq!(r.b, Target::Device(DeviceId(1)));
 
         use crate::rule::RuleBatch;
-        let mut grp = crate::placement::cc::CentroidGroup {
-            a_side: vec![DeviceId(0), DeviceId(2)],
-            b_side: vec![DeviceId(1)],
-            gate_um2: 1.0,
-            gradient_share: 0.3,
-            gradient_per_avt_um2: 2.5e-4,
-            lod_per_sigma_um: 0.0,
-            cell_of: Vec::new(),
-        };
-        grp.retarget(&cell_of);
-        // Sides stay schematic devices (units are owned by those); the map is
-        // kept for the bbox fallback.
-        assert_eq!(grp.a_side, vec![DeviceId(0), DeviceId(2)]);
-        assert_eq!(grp.cell_of, cell_of.to_vec());
+        let mut set = crate::placement::matched_set::pair(0, 2);
+        set.retarget(&cell_of);
+        // Members stay schematic devices (units are owned by those); the map
+        // is kept for the cell-centre fallback.
+        assert_eq!(set.members, vec![DeviceId(0), DeviceId(2)]);
+        assert_eq!(set.cell_of, cell_of.to_vec());
     }
 
     #[test]

@@ -25,7 +25,7 @@ use crate::{Cell, Pattern};
 /// the matched interconnect a differential route copies (MAT-11; Karmokar et
 /// al. ASP-DAC 2022 §V-A, unequal access skews a matched pair). The centroids
 /// coincide only where such an order exists; otherwise they sit one drain
-/// pair apart, which `CentroidGroup` prices, so the search trades the two.
+/// pair apart, which `MatchedSet` prices, so the search trades the two.
 ///
 /// `double_gate`: see the field.
 ///
