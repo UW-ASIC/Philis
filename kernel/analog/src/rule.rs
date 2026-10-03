@@ -249,6 +249,11 @@ pub trait RuleBatch<On>: Send + Sync {
     fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
         let _ = out;
     }
+    /// `(device_a, device_b, mV)`: the 1σ systematic allowance each matched pair has left after
+    /// placement's own spend — what a routing rule may use. Default none.
+    fn offset_allowances(&self, state: &On, out: &mut Vec<(u32, u32, f32)>) {
+        let _ = (state, out);
+    }
 }
 
 impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {

@@ -443,8 +443,6 @@ fn solve(
             .as_ref()
             .map(|c| c.iter().map(|d| d.as_ref().and_then(|t| t.iter().find(|(n, _)| n == "D").map(|&(_, i)| i))).collect())
             .unwrap_or_default(),
-        avt_mv_um: ann.process.avt_mv_um,
-        offset_sigma_mv: ann.offset_sigma_mv,
         gp_mode: cfg.gp_mode,
     };
 
@@ -614,10 +612,6 @@ struct Flow<'a> {
     stack: &'static analog::routing::Stack,
     /// Per device drain current, µA (`None` = unresolved).
     id_ua: Vec<Option<f64>>,
-    /// Deck `A_VT`, mV·µm, `[nmos, pmos]`.
-    avt_mv_um: [Option<f32>; 2],
-    /// The pair offset budget the matching rules allocate from.
-    offset_sigma_mv: Option<f32>,
     gp_mode: GpMode,
 }
 
@@ -851,6 +845,16 @@ impl Flow<'_> {
     }
 }
 
+/// A common node's ΔR budget, Ω: the pair's remaining allowance (mV, either order) over I_D (µA); 0 = unknown.
+fn common_node_ohm(left: &[(u32, u32, f32)], a: DeviceId, b: DeviceId, i_ua: Option<f32>) -> f32 {
+    let (a, b) = (u32::from(a.0), u32::from(b.0));
+    let mv = left.iter().find(|&&(x, y, _)| (x, y) == (a, b) || (x, y) == (b, a)).map(|&(_, _, mv)| mv);
+    match (mv, i_ua) {
+        (Some(mv), Some(i)) => mv / i * 1e3,
+        _ => 0.0,
+    }
+}
+
 impl Flow<'_> {
     /// Promote `epoch` to post-layout simulation and fold the spec miss into
     /// its key. No extraction or no simulator: every spec unknown (a full
@@ -900,10 +904,13 @@ impl Flow<'_> {
 
     /// Each recognised matched pair on one source net, with its members'
     /// source pins and the net's other pins (feeds) as placed, budgeted
-    /// `ΔR ≤ η·σ_rand / I_D` with the matching rules' `η`
-    /// ([`annotator::emit::systematic_allowance_mv`]).
+    /// `ΔR ≤ (allowance − placement spend) / I_D` from the pair's `MatchedSet` ledger.
     fn common_nodes(&self, layout: &Layout) -> analog::routing::CommonNodes {
         use annotator::BlockKind::{CurrentMirror, DiffPair, Load};
+        let mut left = Vec::new();
+        for b in &self.problem.placement.budget {
+            b.offset_allowances(layout, &mut left);
+        }
         let placed = gr::place_macros(&cellgen::realize(&self.cells.variants, &layout.variant), layout);
         let term = |d: DeviceId, t: &str| self.netlist.devices[d.0 as usize].terminals.iter().find(|(n, _)| n == t).map(|&(_, n)| n);
         // (device, terminal, rect) of every placed pin, per net.
@@ -927,15 +934,8 @@ impl Flow<'_> {
             let list = &on_net[net.0 as usize];
             let pins = |d: DeviceId| list.iter().filter(|p| p.0 == d && p.1 == "S").map(|p| p.2).collect::<Vec<_>>();
             let feeds = list.iter().filter(|p| p.0 != a && p.0 != b).map(|p| p.2).collect();
-            // σ_rand = A_VT/√(W_total·L·m) of member a, over its drain current.
-            let dev = &self.netlist.devices[a.0 as usize];
-            let avt = if dev.kind == pnr_core::DeviceKind::Nmos { self.avt_mv_um[0] } else { self.avt_mv_um[1] };
-            let gate_um2 = dev.gate_area_um2() as f32;
             let i_ua = self.id_ua.get(a.0 as usize).copied().flatten().map(|i| i.abs() as f32).filter(|&i| i > 0.0);
-            let max_delta_ohm = match (annotator::emit::systematic_allowance_mv(avt, gate_um2, self.offset_sigma_mv), i_ua) {
-                (Some(mv), Some(i)) => mv / i * 1e3,
-                _ => 0.0,
-            };
+            let max_delta_ohm = common_node_ohm(&left, a, b, i_ua);
             nodes.push(analog::routing::CommonNode { net, a: pins(a), b: pins(b), feeds, max_delta_ohm });
         }
         analog::routing::CommonNodes { nodes, stack: self.stack }
@@ -2033,5 +2033,22 @@ mod size_tests {
         }
         // ota ×3: 5 each; pair 2, quad 4, chain4 4, rc_filter 2, dac4 9.
         assert_eq!(checked, 36, "every fixture MOS checked");
+    }
+}
+
+#[cfg(test)]
+mod common_node_tests {
+    use super::common_node_ohm;
+    use pnr_core::DeviceId;
+
+    /// A common node's ΔR budget is the pair's remaining allowance (either
+    /// member order) over I_D; an absent pair or an unresolved current reads 0.
+    #[test]
+    fn common_node_budget_is_the_remaining_allowance() {
+        let left = [(0u32, 1u32, 0.237f32)];
+        assert!((common_node_ohm(&left, DeviceId(0), DeviceId(1), Some(100.0)) - 2.37).abs() < 1e-4);
+        assert!((common_node_ohm(&left, DeviceId(1), DeviceId(0), Some(100.0)) - 2.37).abs() < 1e-4);
+        assert_eq!(common_node_ohm(&left, DeviceId(2), DeviceId(3), Some(100.0)), 0.0);
+        assert_eq!(common_node_ohm(&left, DeviceId(0), DeviceId(1), None), 0.0);
     }
 }

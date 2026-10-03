@@ -187,6 +187,14 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
             }
         }
     }
+    fn offset_allowances(&self, l: &Layout, out: &mut Vec<(u32, u32, f32)>) {
+        for i in 1..self.members.len() {
+            let g = self.ledger(l, i);
+            if g.known {
+                out.push((u32::from(self.members[0].0), u32::from(self.members[i].0), (g.allowance - g.spent()).max(0.0)));
+            }
+        }
+    }
 }
 
 /// A sky130 nfet current pair `(a, b)`: 2 × 20 µm², `Eta(0.3)`, tol 5 nm.
@@ -365,6 +373,36 @@ mod tests {
         s.retarget(&[3, 3]);
         assert_eq!(s.members, vec![DeviceId(0), DeviceId(1)]);
         assert_eq!(s.cell_of, vec![3, 3]);
+    }
+
+    #[test]
+    fn remaining_allowance_subtracts_placement_spend() {
+        // Two one-unit cells 400 um apart: S_VT 1.0 µV/µm·nm → σ_grad 0.4 mV.
+        let one = [unit(0, 50, 50, 20_000_000)];
+        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &one[..])];
+        let lib = UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &alts[..]].into_iter());
+        let mut l = layout(&[0, 400_000], &[0, 0], 50);
+        l.units = Arc::new(lib);
+        let s = MatchedSet {
+            members: vec![DeviceId(0), DeviceId(1)],
+            kind: MatchKind::Current,
+            mos: false,
+            coeffs: Coeffs { avt_mv_um: None, svt_uv_per_um: Some(1.0), kvth0_mv_um: None, tc_uv_per_k: None },
+            budget: Budget::Allowance(0.637),
+            gate_um2: vec![0.0, 0.0],
+            tol_nm: 5.0,
+            cell_of: Vec::new(),
+        };
+        let mut out = Vec::new();
+        s.offset_allowances(&l, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].0, out[0].1), (0, 1));
+        assert!((out[0].2 - 0.237).abs() < 1e-3, "{:?}", out[0]);
+
+        let s = MatchedSet { budget: Budget::Allowance(0.3), ..s };
+        out.clear();
+        s.offset_allowances(&l, &mut out);
+        assert_eq!(out[0].2, 0.0);
     }
 
     #[test]

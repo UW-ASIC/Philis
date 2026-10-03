@@ -51,15 +51,6 @@ fn gate_um2(nl: &Netlist, d: DeviceId) -> f32 {
     crate::gate_um2(&nl.devices[d.0 as usize])
 }
 
-/// A matched pair's allowance for systematic offset beyond its random one,
-/// mV: `η·σ_rand`, or `√(b² − σ_rand²)` with a 1σ budget `b` (equal values
-/// when `b = σ_rand·√(1+η²)`). `None` without `A_VT` or a gate area.
-#[must_use]
-pub fn systematic_allowance_mv(avt: Option<f32>, gate_um2: f32, offset_sigma_mv: Option<f32>) -> Option<f32> {
-    let s = avt.filter(|&a| a > 0.0 && gate_um2 > 0.0).map(|a| a / gate_um2.sqrt())?;
-    Some(budget(offset_sigma_mv).allowance(s))
-}
-
 /// The pair budget: the 1σ offset when given, else [`GRADIENT_SHARE`].
 fn budget(offset_sigma_mv: Option<f32>) -> Budget {
     offset_sigma_mv.map_or(Budget::Eta(GRADIENT_SHARE), Budget::Sigma1Mv)
