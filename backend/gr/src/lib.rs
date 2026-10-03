@@ -18,23 +18,17 @@ pub use pnr_core::place_macros;
 ///
 /// Keyed by absolute 500 nm buckets, not grid index: grids are rebuilt from a
 /// bounding box the placer moves every epoch. `BTreeMap` + `max` folding keep
-/// [`Negotiation::pressure`] deterministic.
-#[derive(Default)]
+/// [`Negotiation::pressure`] deterministic. Quantum `HIST_QUANTUM_NM` until
+/// RTE-10 keys on the lattice pitch.
+#[derive(Default, Clone)]
 pub struct Negotiation {
-    hist: BTreeMap<(Tier, u32, i32, i32), f32>,
-}
-
-/// Which router's resources a history entry belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Tier {
-    Global,
-    Detailed,
+    hist: BTreeMap<(u32, i32, i32), f32>,
 }
 
 const HIST_QUANTUM_NM: i32 = 500;
 
-fn hist_key(tier: Tier, (x, y, layer): (i32, i32, u32)) -> (Tier, u32, i32, i32) {
-    (tier, layer, x.div_euclid(HIST_QUANTUM_NM), y.div_euclid(HIST_QUANTUM_NM))
+fn hist_key((x, y, layer): (i32, i32, u32)) -> (u32, i32, i32) {
+    (layer, x.div_euclid(HIST_QUANTUM_NM), y.div_euclid(HIST_QUANTUM_NM))
 }
 
 impl Negotiation {
@@ -50,20 +44,20 @@ impl Negotiation {
     }
 
     /// Seed per-node history; `pos` must return **absolute** `(x, y, layer)`.
-    pub fn seed(&self, tier: Tier, hist: &mut [f32], pos: impl Fn(u32) -> (i32, i32, u32)) {
+    pub fn seed(&self, hist: &mut [f32], pos: impl Fn(u32) -> (i32, i32, u32)) {
         if self.hist.is_empty() {
             return;
         }
         for (n, h) in hist.iter_mut().enumerate() {
-            *h = self.hist.get(&hist_key(tier, pos(n as u32))).copied().unwrap_or(0.0);
+            *h = self.hist.get(&hist_key(pos(n as u32))).copied().unwrap_or(0.0);
         }
     }
 
     /// Fold per-node history back in (`max` per bucket: resolution- and order-free).
-    pub fn accumulate(&mut self, tier: Tier, hist: &[f32], pos: impl Fn(u32) -> (i32, i32, u32)) {
+    pub fn accumulate(&mut self, hist: &[f32], pos: impl Fn(u32) -> (i32, i32, u32)) {
         for (n, &h) in hist.iter().enumerate() {
             if h > 0.0 {
-                let e = self.hist.entry(hist_key(tier, pos(n as u32))).or_insert(0.0);
+                let e = self.hist.entry(hist_key(pos(n as u32))).or_insert(0.0);
                 *e = e.max(h);
             }
         }
@@ -641,15 +635,26 @@ pub fn route_net<G: RGraph>(
     Some(branches)
 }
 
-/// PathFinder: each epoch reroutes dirty nets (no tree, or a node over capacity)
-/// in `order`, then adds `hist_inc · overuse` to history on overused nodes.
-/// Stops at zero overflow, on a no-move epoch, or after `max_iters`. Returns the
-/// residual overflow `Σ max(0, usage − cap)`.
-pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: f32, hist_inc: f32, max_iters: u32) -> f32 {
+/// Present-congestion factor growth per PathFinder iteration, and its cap
+/// (tuning defaults; the cap keeps f32 costs finite).
+const P_GROWTH: f32 = 1.3;
+const P_FAC_MAX: f32 = 1000.0;
+/// Iterations without an overflow decrease before negotiation gives up
+/// (tuning default): an unsolvable instance stops here, not at `max_iters`.
+const STALL_ITERS: u32 = 10;
+
+/// PathFinder: iteration `i` reroutes the dirty nets (no tree, or a node over
+/// capacity) in `order` at present-congestion factor
+/// `min(p_fac·P_GROWTH^i, P_FAC_MAX)`, then adds `hist_inc · overuse` to
+/// history. Stops at zero overflow, on a no-move iteration, after
+/// `STALL_ITERS` iterations without an overflow decrease, or after
+/// `max_iters`. Returns `(Σ max(0, usage − cap), iterations run)`.
+pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: f32, hist_inc: f32, max_iters: u32) -> (f32, u32) {
     let cap = cold.graph.cap();
     let mut dij = Dij::new(cold.graph.nodes());
-    let mut overflow = 0.0;
+    let (mut overflow, mut best, mut stall, mut iters, mut p) = (0.0, f32::INFINITY, 0, 0, p_fac.min(P_FAC_MAX));
     for _ in 0..max_iters {
+        iters += 1;
         let mut moved = false;
         for &net in &cold.order {
             let net = net as usize;
@@ -658,17 +663,23 @@ pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: 
             if !dirty || cold.terms[net].is_empty() {
                 continue;
             }
-            if let Some(branches) = cold.reroute(hot, net, p_fac, &[], &mut dij) {
+            if let Some(branches) = cold.reroute(hot, net, p, &[], &mut dij) {
                 hot.commit(net, branches);
                 moved = true;
             }
         }
         overflow = bump_history(&hot.usage, &mut hot.hist, cap, hist_inc);
-        if !moved || overflow == 0.0 {
+        if overflow < best {
+            (best, stall) = (overflow, 0);
+        } else {
+            stall += 1;
+        }
+        if !moved || overflow == 0.0 || stall >= STALL_ITERS {
             break;
         }
+        p = (p * P_GROWTH).min(P_FAC_MAX);
     }
-    overflow
+    (overflow, iters)
 }
 
 /// `hist += inc · max(0, usage − cap)` per node; returns `Σ max(0, usage − cap)`.
@@ -833,6 +844,45 @@ mod tests {
             mac
         };
         assert_eq!(group_hpwl(&[far(100_000, 100_000), far(108_000, 106_000)]), 14_000);
+    }
+
+    /// Three nets crossing one 12×12 two-layer lattice resolve: the growing
+    /// present-congestion factor ends negotiation at zero overflow, early.
+    #[test]
+    fn pathfinder_converges_on_a_solvable_crossing() {
+        let g = TrackGrid::with_layers((12 * 200, 12 * 200), 200, 4.0, 2);
+        let n = |x, y| g.node(x, y, 0);
+        let terms = vec![vec![n(0, 4), n(11, 6)], vec![n(0, 5), n(11, 5)], vec![n(0, 6), n(11, 4)]];
+        let cold = RouteCtx::new(g, terms, vec![0, 1, 2]);
+        let mut hot = RouteHot::new(cold.graph.nodes(), 3);
+        let (over, iters) = run_pathfinder(&mut hot, &cold, 1.0, 0.5, 150);
+        assert_eq!(over, 0.0);
+        assert!(iters < 150, "{iters}");
+    }
+
+    /// Two nets sharing a terminal node overflow it whatever they route: the
+    /// stall rule ends negotiation (the lower bound rules out the no-move rule).
+    #[test]
+    fn an_unsolvable_instance_stops_on_stall() {
+        let g = TrackGrid::with_layers((5 * 200, 2 * 200), 200, 4.0, 1);
+        let n = |x, y| g.node(x, y, 0);
+        let terms = vec![vec![n(0, 0), n(2, 0)], vec![n(2, 0), n(4, 0)]];
+        let cold = RouteCtx::new(g, terms, vec![0, 1]);
+        let mut hot = RouteHot::new(cold.graph.nodes(), 2);
+        let (over, iters) = run_pathfinder(&mut hot, &cold, 1.0, 0.5, 150);
+        assert_eq!(over, 1.0);
+        assert!((STALL_ITERS..=STALL_ITERS + 1).contains(&iters), "{iters}");
+    }
+
+    /// The same absolute node (−750 nm) seen through two frame origins hits
+    /// one history bucket.
+    #[test]
+    fn history_keys_ignore_the_frame() {
+        let mut neg = Negotiation::new();
+        neg.accumulate(&[3.0], |_| (250 - 1_000, 250, 0));
+        let mut h = [0.0];
+        neg.seed(&mut h, |_| (750 - 1_500, 250, 0));
+        assert_eq!(h[0], 3.0);
     }
 
     #[test]

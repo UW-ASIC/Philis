@@ -177,7 +177,7 @@ impl DetailedCfg {
 }
 
 /// What one `route` call measured. Fields an item has not landed yet stay
-/// zero: timings and `expanded` (RTE-13), `pf_iters` (RTE-08), `coarsened`
+/// zero: timings and `expanded` (RTE-13), `coarsened`
 /// (RTE-13), `width_fallbacks` (RTE-22), `single_cut_vias` (RTE-27),
 /// `congestion` (RTE-25, absolute nm).
 #[derive(Default, Clone, Debug)]
@@ -595,9 +595,9 @@ impl DetailedRoute {
             let (x, y, l) = cold.graph.pos(n);
             (x + origin.0, y + origin.1, l)
         };
-        neg.seed(gr::Tier::Detailed, &mut hot.hist, abs);
+        neg.seed(&mut hot.hist, abs);
         jog_hist.iter().for_each(|&n| hot.hist[n as usize] += JOG_HIST);
-        run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS);
+        let (_, pf_iters) = run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS);
 
         // A net over its IR-drop budget reroutes pricing its series R, weighted
         // by the DC current it carries (the larger of what its pins draw and
@@ -658,7 +658,7 @@ impl DetailedRoute {
 
         // The jog price is this layout's, not negotiation history.
         jog_hist.iter().for_each(|&n| hot.hist[n as usize] -= JOG_HIST);
-        neg.accumulate(gr::Tier::Detailed, &hot.hist, abs);
+        neg.accumulate(&hot.hist, abs);
         // Shields: requested nets get reference tracks alongside, tied in by
         // rerouting the reference to them.
         let mut asks = Vec::new();
@@ -945,7 +945,7 @@ impl DetailedRoute {
         for (net, &r) in em_cuts.iter().enumerate().filter(|(_, &r)| r > 0.0) {
             report.budget_violations.push(Violation::from_residual(format!("em cuts net {net}"), r));
         }
-        (routes, report, RouteStats { trials, overuse, ..RouteStats::default() })
+        (routes, report, RouteStats { trials, overuse, pf_iters, ..RouteStats::default() })
     }
 }
 
