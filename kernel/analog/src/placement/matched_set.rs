@@ -11,7 +11,9 @@ use crate::matching::pattern::{cc_feasible, diffusion_cc_row, Outer};
 
 /// A set of devices that must match its reference, pair by pair `(0, i)`:
 /// each pair's systematic terms (gradient, thermal, LOD) share one allowance
-/// ([`Ledger`]), and a pair drawn interleaved in one cell must also coincide.
+/// ([`Ledger`]), and a pair whose unit counts admit a common-centroid row
+/// must also coincide, merged into one cell or not: drawing it as two cells
+/// (whose centroids never coincide) is no escape from the check.
 ///
 /// Positions are the members' unit moments when the layout carries units,
 /// else their cells' centres; a pair without units is **unknown** (an outline
@@ -66,10 +68,9 @@ impl MatchedSet {
         let (ca, cb) = (at(&sa, a), at(&sb, b));
         let delta_m_nm = (ca.0 - cb.0).hypot(ca.1 - cb.1) as f32;
 
-        let one_cell = matches!(
-            (l.units.cell_of.get(a.0 as usize), l.units.cell_of.get(b.0 as usize)),
-            (Some(x), Some(y)) if x == y
-        );
+        // Feasibility reads the counts, not the drawing: gating on one cell let
+        // the start ranking (Θ) prefer a pair split 34 µm apart over a merged
+        // AABB 3 µm apart (ota, bench seed 1).
         let counts = [sa.n as u16, sb.n as u16];
         let feasible = || {
             if self.mos {
@@ -78,7 +79,7 @@ impl MatchedSet {
                 cc_feasible(&counts)
             }
         };
-        let coincidence = (units && one_cell && feasible()).then(|| delta_m_nm / self.tol_nm);
+        let coincidence = (units && feasible()).then(|| delta_m_nm / self.tol_nm);
 
         let second_order_nm = if units {
             let c = ((sa.x + sb.x) / (sa.w + sb.w), (sa.y + sb.y) / (sa.w + sb.w));
@@ -276,7 +277,20 @@ mod tests {
         l.units = Arc::new(lib);
         let g = pair(0, 1).ledger(&l, 1);
         assert!((g.sigma_grad - 1.63).abs() < 0.01, "{}", g.sigma_grad);
-        assert_eq!(g.coincidence, None, "separate cells cannot coincide");
+        assert_eq!(g.coincidence, None, "one unit each admits no centroid row");
+    }
+
+    #[test]
+    fn splitting_a_feasible_pair_into_two_cells_is_no_escape() {
+        // ABBA-feasible counts [2, 2], drawn as two 2-unit cells 10 µm apart.
+        let two = [unit(0, 25, 50, 10), unit(0, 75, 50, 10)];
+        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &two[..])];
+        let lib = UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &alts[..]].into_iter());
+        let mut l = layout(&[0, 10_000], &[0, 0], 50);
+        l.units = Arc::new(lib);
+        let s = pair(0, 1);
+        assert_eq!(s.ledger(&l, 1).coincidence, Some(2_000.0));
+        assert_eq!(s.violations(&l), 1);
     }
 
     #[test]

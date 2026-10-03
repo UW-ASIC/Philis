@@ -19,7 +19,7 @@
 //! urgency; one merged batch regressed the OTA). Arms: `SymmetryGroup` (one per stage) and `DtiBand` are hard + cost — the cost
 //! copy is the gradient toward the hard set (and what prices dp's DTI branch
 //! flip). `MatchedSet` (one pair's gradient, thermal and LOD terms against one
-//! allowance, plus coincidence when the pair is drawn interleaved) and
+//! allowance, plus coincidence when its unit counts admit a centroid row) and
 //! `Proximity` (MAT-07, a distance allowance) are budget + cost; a
 //! `MatchedSet` pair without deck data or units reads unknown and only pulls.
 //! Placement owns the systematic terms of Pelgrom; area is the cell generator's.

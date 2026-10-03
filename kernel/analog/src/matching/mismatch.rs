@@ -66,8 +66,9 @@ pub struct Coeffs {
 /// - `sigma_grad` = `S_VT·|Δm|` (Pelgrom eq. (1) distance term, PDF p.1).
 /// - `mu_thermal` = `TC·|ΔT|` at the two centroids (Hastings eq. 8.23, PDF p.388).
 /// - `mu_lod` = `KVTH0·|⟨lod⟩_a − ⟨lod⟩_b|`, unit-weighted means (REV eq. 11).
-/// - `coincidence` = `|Δm|/tol` when both members are drawn interleaved in one
-///   cell (Hastings Table 8.4 rule 1, PDF p.392): process-free, binds at 1.
+/// - `coincidence` = `|Δm|/tol` when the members' unit counts admit a
+///   common-centroid row (Hastings Table 8.4 rule 1, PDF p.392): process-free,
+///   binds at 1.
 /// - `second_order_nm` = `‖M_a − M_b‖_F / L`: the second-moment residue as an
 ///   equivalent centroid offset (cost and report only; no deck has a coefficient).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
