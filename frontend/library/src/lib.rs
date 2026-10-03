@@ -158,6 +158,8 @@ pub struct Solution {
     pub folds: Vec<(u16, i32)>,
     /// The deck's nwell: bridged wells merge into one rect in [`Solution::geometry`].
     pub well_layer: Option<LayerId>,
+    /// The operating point the run was biased with; `None` without one.
+    pub op: Option<oppoint::OpPoint>,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -281,8 +283,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 
     // 2. Bias: per-device power and per-net current. Placement-independent,
     //    so solved once.
-    let (power, bias, currents, net_headroom_mv, gm_us) = bias(&netlist, cfg);
-    let bias = Bias { power, summary: bias, currents, net_headroom_mv, gm_us };
+    let bias = bias(&netlist, cfg);
     let (perf_rows, perf_bounds) = performance_rows(&netlist, pdk, cfg);
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
@@ -379,6 +380,8 @@ struct Bias {
     net_headroom_mv: Option<Vec<Option<f64>>>,
     /// Per device transconductance, µS (fold floor for gate R); empty = none.
     gm_us: Vec<Option<f64>>,
+    /// The operating point the run was biased with; `None` without one.
+    op: Option<oppoint::OpPoint>,
 }
 
 /// Annotate, draw cells and search at one cell topology: `merge_distinct_gates`
@@ -621,6 +624,7 @@ fn solve(
         intent,
         folds: fold,
         well_layer: pnr_core::Process::layer(pdk, "nwell"),
+        op: bias.op.clone(),
     };
     (solution, key, distinct)
 }
@@ -1338,22 +1342,19 @@ fn pin_currents(netlist: &pnr_core::Netlist, devices_of: &[Vec<DeviceId>], draws
 /// the report: the ngspice operating point when configured and solvable, else
 /// `cfg.device_power_uw` and no currents.
 #[allow(clippy::type_complexity)]
-fn bias(
-    netlist: &pnr_core::Netlist,
-    cfg: &Config,
-) -> (Vec<i32>, Option<metadata::BiasSummary>, Option<Vec<Option<Vec<(String, f64)>>>>, Option<Vec<Option<f64>>>, Vec<Option<f64>>) {
+fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> Bias {
     let op = cfg
         .op
         .as_ref()
         .and_then(|oc| match oppoint::extract(netlist, oc) {
-            Ok(o) => Some(o),
+            Ok(o) => Some((o, oc.testbench.is_none())),
             Err(e) => {
                 eprintln!("[op] operating point unavailable ({e}); continuing with zero power");
                 None
             }
         });
-    let Some(o) = op else {
-        return (cfg.device_power_uw.clone(), None, None, None, Vec::new());
+    let Some((o, probe)) = op else {
+        return Bias { power: cfg.device_power_uw.clone(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
     };
     let hottest = o
         .power_uw
@@ -1368,10 +1369,11 @@ fn bias(
         devices: netlist.devices.len(),
         total_power_uw: o.total_power_uw(),
         hottest,
+        probe,
     };
     let currents = o.terminal_ua(netlist);
     let headroom = o.net_headroom_mv(netlist);
-    (o.power_uw, Some(summary), Some(currents), Some(headroom), o.gm_us)
+    Bias { power: o.power_uw.clone(), summary: Some(summary), currents: Some(currents), net_headroom_mv: Some(headroom), gm_us: o.gm_us.clone(), op: Some(o) }
 }
 
 /// The collapsed cell table and every device-indexed input translated to it.
@@ -1833,7 +1835,7 @@ mod start_tests {
         for fixture in ["rc_filter", "dac4"] {
             let mut nl = crate::parse(&std::fs::read_to_string(root.join(format!("benchmarks/fixtures/{fixture}.spice"))).unwrap()).unwrap();
             crate::deck_models(&mut nl, &pdk);
-            let currents = crate::bias(&nl, &cfg).2.expect("operating point");
+            let currents = crate::bias(&nl, &cfg).currents.expect("operating point");
             let one_per_cell: Vec<_> = (0..nl.devices.len()).map(|i| vec![pnr_core::DeviceId(i as u16)]).collect();
             let pins = crate::pin_currents(&nl, &one_per_cell, &currents);
             for (k, net) in nl.nets.iter().enumerate() {

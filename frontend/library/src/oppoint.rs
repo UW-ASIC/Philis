@@ -6,11 +6,13 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use annotator::NetRole;
 use pnr_core::Netlist;
 
 /// Per-device facts from a DC operating point.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct OpPoint {
     /// Dissipation `|Id·Vds|` per device, µW.
     pub power_uw: Vec<i32>,
@@ -26,10 +28,19 @@ pub struct OpPoint {
     pub headroom_mv: Vec<Option<f64>>,
     /// Transconductance per device, µS; `None` when unresolved.
     pub gm_us: Vec<Option<f64>>,
+    /// Gate-source voltage per device, V, signed as ngspice prints it; `None`
+    /// for a non-FET or unresolved.
+    pub vgs_v: Vec<Option<f64>>,
+    /// Drain-source voltage per device, V; `None` for a non-FET or unresolved.
+    pub vds_v: Vec<Option<f64>>,
+    /// Bulk-source voltage per device, V; `None` for a non-FET or unresolved.
+    pub vbs_v: Vec<Option<f64>>,
     /// How the bias was obtained, so a probe bench is never passed off as real.
     pub provenance: String,
     /// Devices the simulation reported.
     pub resolved: usize,
+    /// Devices the simulation did not report, by netlist name.
+    pub unresolved: Vec<String>,
 }
 
 impl OpPoint {
@@ -118,6 +129,9 @@ pub struct OpConfig {
     pub params: Vec<(String, f64)>,
     /// Testbench appended to the circuit; `None` synthesises a mid-rail probe.
     pub testbench: Option<String>,
+    /// Explicit DC voltage per net (case-insensitive name) for the probe bench;
+    /// wins over the supply default.
+    pub rails_v: Vec<(String, f64)>,
     /// Supply voltage of the synthesised bench, volts.
     pub vdd: f64,
     /// NMOS / PMOS library model names overriding the schematic's own
@@ -138,6 +152,7 @@ impl Default for OpConfig {
             corner: "tt".into(),
             params: Vec::new(),
             testbench: None,
+            rails_v: Vec::new(),
             vdd: 1.8,
             nmos_model: String::new(),
             pmos_model: String::new(),
@@ -168,6 +183,17 @@ fn tail(s: &[u8], n: usize) -> String {
     s.chars().skip(k).collect()
 }
 
+/// A fresh, unique scratch directory under the OS temp dir, tagged `tag`
+/// (`"op"`, `"perf"`): per-call, not per-process, so concurrent extracts in one
+/// process never share a deck or a `bsim4v5.out` and the ngspice run's cwd
+/// never leaks into the caller's.
+pub(crate) fn scratch_dir(tag: &str) -> std::io::Result<PathBuf> {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let d = std::env::temp_dir().join(format!("philis_{tag}_{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&d)?;
+    Ok(d)
+}
+
 /// `Err("cannot simulate: ngspice exit …")` when ngspice failed: an unknown
 /// subckt or a pin-count mismatch is fatal in batch mode (exit 1).
 pub(crate) fn check_exit(out: &std::process::Output) -> Result<(), String> {
@@ -185,18 +211,25 @@ pub(crate) fn check_exit(out: &std::process::Output) -> Result<(), String> {
 /// all of which the caller treats as "bias unknown".
 pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
     let (deck, provenance) = build_deck(netlist, cfg).map_err(|e| format!("cannot simulate: {e}"))?;
-    let dir = std::env::temp_dir().join(format!("philis_op_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("deck io: {e}"))?;
-    // One file per run: concurrent extracts in one process must not share a deck.
-    static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let path = dir.join(format!("op{}.spice", RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let dir = scratch_dir("op").map_err(|e| format!("deck io: {e}"))?;
+    let path = dir.join("op.spice");
     std::fs::write(&path, &deck).map_err(|e| format!("deck io: {e}"))?;
     let out = Command::new(&cfg.ngspice)
+        .current_dir(&dir)
         .arg("-b")
-        .arg(&path)
+        .arg("op.spice")
         .output()
         .map_err(|e| format!("ngspice unavailable: {e}"))?;
-    check_exit(&out)?;
+    let keep = std::env::var_os("PHILIS_KEEP_DECKS").is_some();
+    let cleanup = || {
+        if !keep {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    };
+    if let Err(e) = check_exit(&out) {
+        cleanup();
+        return Err(e);
+    }
 
     let table = parse_show(&String::from_utf8_lossy(&out.stdout));
     if table.is_empty() {
@@ -204,17 +237,32 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
             .chars()
             .take(400)
             .collect();
+        cleanup();
         return Err(format!("no device operating points: {tail}"));
     }
     let n = netlist.devices.len();
-    let mut o = OpPoint { power_uw: vec![0; n], id_ua: vec![None; n], bjt_ua: vec![None; n], headroom_mv: vec![None; n], gm_us: vec![None; n], provenance, resolved: 0 };
+    let mut o = OpPoint {
+        power_uw: vec![0; n],
+        id_ua: vec![None; n],
+        bjt_ua: vec![None; n],
+        headroom_mv: vec![None; n],
+        gm_us: vec![None; n],
+        vgs_v: vec![None; n],
+        vds_v: vec![None; n],
+        vbs_v: vec![None; n],
+        provenance,
+        resolved: 0,
+        unresolved: Vec::new(),
+    };
     for (i, dev) in netlist.devices.iter().enumerate() {
         use pnr_core::DeviceKind as K;
         // Diodes and capacitors are simulated but not looked up: unresolved.
         if !matches!(dev.kind, K::Nmos | K::Pmos | K::Resistor | K::Npn | K::Pnp) {
+            o.unresolved.push(dev.name.clone());
             continue;
         }
         let Some(op) = table.get(instance_name(dev).to_ascii_lowercase().as_str()) else {
+            o.unresolved.push(dev.name.clone());
             continue;
         };
         match dev.kind {
@@ -226,6 +274,9 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
                 o.id_ua[i] = Some(into_drain * 1e6);
                 o.headroom_mv[i] = Some((op.vds.abs() - op.vdsat.abs()) * 1e3);
                 o.gm_us[i] = Some(op.gm.abs() * 1e6);
+                o.vgs_v[i] = Some(op.vgs);
+                o.vds_v[i] = Some(op.vds);
+                o.vbs_v[i] = Some(op.vbs);
             }
             K::Resistor => {
                 o.power_uw[i] = (op.p.abs() * 1e6).round() as i32;
@@ -238,6 +289,7 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
         }
         o.resolved += 1;
     }
+    cleanup();
     Ok(o)
 }
 
@@ -248,6 +300,8 @@ struct DevOp {
     vds: f64,
     vdsat: f64,
     gm: f64,
+    vgs: f64,
+    vbs: f64,
     ic: f64,
     ib: f64,
     ie: f64,
@@ -281,7 +335,7 @@ fn build_deck(netlist: &Netlist, cfg: &OpConfig) -> Result<(String, String), Str
          set ngbehavior=hsa\n\
          op\n\
          echo @@PHILIS_OP\n\
-         show m : id,vds,vdsat,gm\n\
+         show m : id,vgs,vds,vbs,vdsat,gm\n\
          show q : ic,ib,ie,p\n\
          show r : i,p\n\
          echo @@PHILIS_END\n\
@@ -402,16 +456,19 @@ pub(crate) fn instance_name(dev: &pnr_core::Device) -> String {
 }
 
 /// Net name, sanitised for SPICE and mapped to node 0 for grounds.
+///
+/// ponytail: rails are what the name classifier says ([`annotator::rail_of`]);
+/// a bulk-inferred rail (`annotator::classify_nets`) is not grounded here —
+/// same ceiling as the name list it replaced.
 pub(crate) fn node_name(netlist: &Netlist, id: pnr_core::NetId) -> String {
     let raw = netlist
         .nets
         .get(id.0 as usize)
         .map_or_else(|| format!("n{}", id.0), |n| n.name.clone());
-    let lower = raw.to_ascii_lowercase();
-    if is_ground(&lower) {
+    if annotator::rail_of(&raw) == Some(NetRole::Ground) {
         "0".into()
     } else {
-        lower.replace(['/', '.', '<', '>'], "_")
+        raw.to_ascii_lowercase().replace(['/', '.', '<', '>'], "_")
     }
 }
 
@@ -448,12 +505,14 @@ fn probe_bench(netlist: &Netlist, cfg: &OpConfig) -> (String, String) {
     let mut lines = String::new();
     let mut driven = 0usize;
     for (i, net) in netlist.nets.iter().enumerate() {
-        let lower = net.name.to_ascii_lowercase();
-        if is_ground(&lower) {
+        let rail = annotator::rail_of(&net.name);
+        if rail == Some(NetRole::Ground) {
             continue; // node 0
         }
         let name = node_name(netlist, pnr_core::NetId(i as u16));
-        let v = if is_supply(&lower) {
+        let v = if let Some(&(_, v)) = cfg.rails_v.iter().find(|(n, _)| n.eq_ignore_ascii_case(&net.name)) {
+            v
+        } else if rail == Some(NetRole::Supply) {
             cfg.vdd
         } else if touches_gate[i] && !touches_channel[i] {
             // Input or bias rail: no DC path, must be driven.
@@ -474,14 +533,6 @@ fn probe_bench(netlist: &Netlist, cfg: &OpConfig) -> (String, String) {
     )
 }
 
-fn is_ground(n: &str) -> bool {
-    matches!(n, "vss" | "gnd" | "vgnd" | "0" | "vssd" | "vssa")
-}
-
-fn is_supply(n: &str) -> bool {
-    matches!(n, "vdd" | "vcc" | "vpwr" | "vdda" | "vddd")
-}
-
 /// Parse ngspice `show m : id,vds` column blocks into `device -> DevOp`.
 ///
 /// The output is column-oriented and one block per model type:
@@ -494,7 +545,7 @@ fn is_supply(n: &str) -> bool {
 /// name is taken from the `m.<name>.` prefix rather than the tail.
 fn parse_show(text: &str) -> std::collections::HashMap<String, DevOp> {
     let mut out: std::collections::HashMap<String, DevOp> = std::collections::HashMap::new();
-    let mut cols: Vec<String> = Vec::new();
+    let mut cols: Vec<Option<String>> = Vec::new();
     let mut inside = false;
 
     for line in text.lines() {
@@ -517,16 +568,20 @@ fn parse_show(text: &str) -> std::collections::HashMap<String, DevOp> {
 
         match head {
             "device" => {
-                cols = rest.iter().filter_map(|c| instance_device(c)).collect();
+                // `.map`, not `filter_map`: an unparseable column must still
+                // occupy its slot so later columns are not shifted left.
+                cols = rest.iter().map(|c| instance_device(c)).collect();
             }
-            "id" | "vds" | "vdsat" | "gm" | "ic" | "ib" | "ie" | "i" | "p" => {
+            "id" | "vgs" | "vds" | "vbs" | "vdsat" | "gm" | "ic" | "ib" | "ie" | "i" | "p" => {
                 for (ci, raw) in rest.iter().enumerate() {
-                    let Some(dev) = cols.get(ci) else { continue };
+                    let Some(Some(dev)) = cols.get(ci) else { continue };
                     let Ok(v) = raw.parse::<f64>() else { continue };
                     let e = out.entry(dev.clone()).or_default();
                     match head {
                         "id" => e.id = v,
+                        "vgs" => e.vgs = v,
                         "vds" => e.vds = v,
+                        "vbs" => e.vbs = v,
                         "gm" => e.gm = v,
                         "vdsat" => e.vdsat = v,
                         "ic" => e.ic = v,
@@ -850,5 +905,126 @@ mod tests {
         assert_eq!((i[2], i[4], i[3]), (Some(20), Some(20), Some(0)), "tail, the ground return, a gate net");
         let u = net_current_ua(&nl, &op([Some(10.0), None, Some(20.0)]).terminal_ua(&nl));
         assert_eq!((u[1], u[2]), (None, None), "M2 unresolved: its nets are unknown");
+    }
+
+    /// An unparseable device column (no `m.`/`q.`/`r` prefix) must still take
+    /// its slot in `cols`, so a later column is not shifted onto the wrong
+    /// device name.
+    #[test]
+    fn a_truncated_header_does_not_shift_later_devices() {
+        let truncated = SHOW.replace("m.xm4.msky130_fd_pr__", "xm4:truncated");
+        let t = parse_show(&truncated);
+        let keys: Vec<_> = t.keys().collect();
+        assert!(!t.contains_key("xm4"), "the truncated column must not parse as xm4: {keys:?}");
+        assert!((t["xm3"].id - 4.10968e-06).abs() < 1e-12, "xm3 keeps its own value, not xm4's: {}", t["xm3"].id);
+    }
+
+    #[test]
+    fn avdd_is_driven_when_classified_supply() {
+        use pnr_core::{Device, DeviceKind, Net, NetId};
+        // nets: 0 avdd (supply, by name only), 1 vss (ground), 2 vin (gate-only)
+        let nl = Netlist {
+            devices: vec![Device {
+                name: "XM1".into(),
+                kind: DeviceKind::Nmos,
+                model: "sky130_fd_pr__nfet_01v8".into(),
+                terminals: vec![("D".into(), NetId(0)), ("G".into(), NetId(2)), ("S".into(), NetId(1)), ("B".into(), NetId(1))],
+                params: vec![("w".into(), 1_000), ("l".into(), 150)],
+            }],
+            nets: ["avdd", "vss", "vin"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
+        };
+        let (bench, _) = probe_bench(&nl, &OpConfig::default());
+        assert!(bench.contains("Vavdd avdd 0 1.8"), "supply by name, not by topology: {bench}");
+        assert!(!bench.contains("Vvss"), "ground is node 0: {bench}");
+        assert!(bench.contains("Vvin vin 0 0.9"), "gate-only net driven: {bench}");
+
+        let cfg = OpConfig { rails_v: vec![("AVDD".into(), 3.3)], ..Default::default() };
+        let (bench, _) = probe_bench(&nl, &cfg);
+        assert!(bench.contains("Vavdd avdd 0 3.3"), "rails_v wins over the supply default: {bench}");
+    }
+
+    #[test]
+    fn node_zero_is_ground() {
+        let nl = Netlist {
+            nets: ["0", "VSS", "vssa", "gnd!", "vout"].iter().map(|n| pnr_core::Net { name: (*n).into() }).collect(),
+            ..Default::default()
+        };
+        for (i, want) in [(0, "0"), (1, "0"), (2, "0"), (3, "0"), (4, "vout")] {
+            assert_eq!(node_name(&nl, pnr_core::NetId(i)), want, "{}", nl.nets[i as usize].name);
+        }
+    }
+
+    #[test]
+    fn show_reads_vgs_and_vbs() {
+        let text = "\
+@@PHILIS_OP
+ BSIM4v5: Berkeley Short Channel IGFET Model-4
+     device m.xm5.msky130_fd_pr__ m.xm4.msky130_fd_pr__ m.xm3.msky130_fd_pr__
+      model xm5:sky130_fd_pr__nfe xm4:sky130_fd_pr__pfe xm3:sky130_fd_pr__pfe
+         id           8.21938e-06           4.10968e-06           4.10968e-06
+        vgs                   0.8                  1.05                  1.05
+        vds            0.00628286               1.78826               1.78826
+        vbs                     0                  -0.3                  -0.3
+      vdsat              0.297885             0.0485318             0.0485318
+@@PHILIS_END
+";
+        let t = parse_show(text);
+        assert_eq!(t["xm5"].vgs, 0.8);
+        assert_eq!(t["xm4"].vbs, -0.3);
+    }
+
+    /// A 1-NMOS netlist against the sky130 library: two threads must not
+    /// share a deck directory (the old PID-only dir did).
+    #[test]
+    fn concurrent_extracts_use_distinct_decks() {
+        use pnr_core::{Device, DeviceKind, Net, NetId};
+        let Some(lib) = crate::tools::sky130_models() else { return };
+        let nmos = |w: i64| Netlist {
+            devices: vec![Device {
+                name: "XM1".into(),
+                kind: DeviceKind::Nmos,
+                model: "sky130_fd_pr__nfet_01v8".into(),
+                terminals: vec![("D".into(), NetId(0)), ("G".into(), NetId(1)), ("S".into(), NetId(2)), ("B".into(), NetId(2))],
+                params: vec![("w".into(), w), ("l".into(), 150)],
+            }],
+            nets: ["vdd", "vg", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
+        };
+        let cfg = OpConfig { model_lib: Some(lib), ..Default::default() };
+        let (a, b) = std::thread::scope(|s| {
+            let ha = s.spawn(|| extract(&nmos(1_000), &cfg));
+            let hb = s.spawn(|| extract(&nmos(4_000), &cfg));
+            (ha.join().unwrap(), hb.join().unwrap())
+        });
+        let a = a.expect("1u extract");
+        let b = b.expect("4u extract");
+        assert_eq!(a.resolved, 1);
+        assert_eq!(b.resolved, 1);
+        assert!(b.id_ua[0].unwrap() > a.id_ua[0].unwrap(), "wider device draws more current: {:?} vs {:?}", b.id_ua, a.id_ua);
+    }
+
+    /// ngspice's `bsim4v5.out` lands in its own cwd; `extract` must run it in
+    /// a scratch dir, not the caller's, and clean that dir up afterward.
+    #[test]
+    fn extract_leaves_nothing_in_the_cwd() {
+        use pnr_core::{Device, DeviceKind, Net, NetId};
+        let Some(lib) = crate::tools::sky130_models() else { return };
+        let marker = std::env::current_dir().unwrap().join("bsim4v5.out");
+        let _ = std::fs::remove_file(&marker);
+        let nl = Netlist {
+            devices: vec![Device {
+                name: "XM1".into(),
+                kind: DeviceKind::Nmos,
+                model: "sky130_fd_pr__nfet_01v8".into(),
+                terminals: vec![("D".into(), NetId(0)), ("G".into(), NetId(1)), ("S".into(), NetId(2)), ("B".into(), NetId(2))],
+                params: vec![("w".into(), 1_000), ("l".into(), 150)],
+            }],
+            nets: ["vdd", "vg", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
+        };
+        let cfg = OpConfig { model_lib: Some(lib), ..Default::default() };
+        extract(&nl, &cfg).expect("extract");
+        assert!(!marker.exists(), "extract must not leave bsim4v5.out in the cwd");
     }
 }

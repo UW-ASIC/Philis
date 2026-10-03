@@ -151,6 +151,7 @@ impl MetadataReport {
             && self.coverage.unverified.is_empty()
             && self.placement.iter().chain(&self.routing).all(|b| b.met() && b.unknown == 0)
             && self.performance.iter().all(|p| p.4 <= 0.0)
+            && self.bias.as_ref().map_or(true, |b| !b.probe)
     }
 }
 
@@ -166,6 +167,8 @@ pub struct BiasSummary {
     pub total_power_uw: i64,
     /// Hottest device: `(name, µW)`.
     pub hottest: Option<(String, i32)>,
+    /// Synthesised mid-rail probe, not a testbench: never a sign-off bias.
+    pub probe: bool,
 }
 
 /// Collect budget status for one requirement arm. `arm` tags every row, because
@@ -572,6 +575,17 @@ mod tests {
         let r = MetadataReport { assumed: vec!["tie_max_dist_nm".into()], ..MetadataReport::default() };
         assert!(r.certified());
         assert!(r.to_string().contains("assumed (UNVERIFIED sidecar values): tie_max_dist_nm"), "{r}");
+    }
+
+    /// A probe bias (no user testbench) never certifies, whatever else is
+    /// met: the bench's rows are all probes, so none of them can be a
+    /// sign-off certificate.
+    #[test]
+    fn a_probe_bias_never_certifies() {
+        let probe = BiasSummary { provenance: String::new(), resolved: 0, devices: 0, total_power_uw: 0, hottest: None, probe: true };
+        let real = BiasSummary { probe: false, ..probe.clone() };
+        assert!(!MetadataReport { bias: Some(probe), ..MetadataReport::default() }.certified());
+        assert!(MetadataReport { bias: Some(real), ..MetadataReport::default() }.certified());
     }
 
     /// A saturated price is printed as the search's last-epoch state, never as
