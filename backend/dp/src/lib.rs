@@ -3,9 +3,10 @@
 //!
 //! Every move goes through [`Sa::trial`]: a move that breaks a hard equality is
 //! repaired by projecting the broken batch (a symmetry partner follows its
-//! mirror), then gated lexicographically on `(violating hard batches, Φ margin +
-//! clearance encroachment, Θ)`. Metropolis only votes on the PEX tier (pin HPWL
-//! + priced analog cost). [`legalize::separate_overlaps`] closes any residue.
+//! mirror), then gated lexicographically on `(violating hard batches, Σ hard
+//! residual, clearance encroachment nm², Θ)`. Metropolis only votes on the PEX
+//! tier (pin HPWL + priced analog cost). [`legalize::separate_overlaps`] closes
+//! any residue.
 
 pub mod legalize;
 
@@ -194,8 +195,8 @@ impl<'a> Sa<'a> {
         let ov0 = self.encroach_moved(l);
         self.snap.swap_geometry(l);
 
-        let before = (phi0.0, phi0.1 + ov0, theta0);
-        let after = (phi1.0, phi1.1 + ov1, analog_theta(self.reqs, l));
+        let before = (phi0.0, phi0.1, ov0, theta0);
+        let after = (phi1.0, phi1.1, ov1, analog_theta(self.reqs, l));
         if accept(before, after, self.pex(l) - pex0, temp, rng) {
             self.stats.accepted += 1;
             return true;
@@ -264,7 +265,7 @@ pub fn place(
     // Nets from the geometry `l.variant` names, so HPWL scores real pins.
     let nets = Nets::from_macros(&choose_variants(macros, variants, &l.variant)).weigh(net_weight);
     if n == 0 {
-        let rep = report(&nets, reqs, &l, prices);
+        let rep = report(&nets, reqs, &l, prices, clearance);
         return (l, rep, PlaceStats::default());
     }
 
@@ -384,7 +385,7 @@ pub fn place(
     l.refresh_temps();
 
     let Sa { nets, stats, .. } = sa;
-    let rep = report(&nets, reqs, &l, prices);
+    let rep = report(&nets, reqs, &l, prices, clearance);
     (l, rep, stats)
 }
 
@@ -421,7 +422,7 @@ fn project_hard(reqs: &Requirements<Layout>, l: &mut Layout, fixed: &[bool], gri
 /// Lexicographic acceptance: a change in the gate key decides outright (lower
 /// wins, even at a PEX cost); only a tie lets Metropolis judge `d_pex`.
 #[inline]
-fn accept(before: (usize, f64, f64), after: (usize, f64, f64), d_pex: f64, temp: f64, rng: &mut SplitMix64) -> bool {
+fn accept(before: (usize, f64, f64, f64), after: (usize, f64, f64, f64), d_pex: f64, temp: f64, rng: &mut SplitMix64) -> bool {
     if after != before {
         return after < before;
     }

@@ -769,7 +769,7 @@ impl Flow<'_> {
             &self.net_weight,
             seed,
         );
-        layout.debug_check_placed("dp::place");
+        layout.debug_check("dp::place");
         layout.groups = cells.groups.clone();
         // The epoch's one dual step, on the layout it is scored on (T6).
         prices.settle(placement, &layout);

@@ -295,6 +295,20 @@ fn metropolis_still_accepts_an_uphill_move_inside_the_pex_tier() {
     assert_eq!(l.x[0], -20_000);
 }
 
+/// At the same hard-violation count, raising clearance encroachment must never
+/// win against a cheaper PEX, even at an extreme temperature.
+#[test]
+fn gate_never_trades_a_broken_pair_for_overlap() {
+    let e = 1_000.0;
+    let mut rng = SplitMix64::new(1);
+    for draw in 0..100 {
+        assert!(
+            !accept((1, 0.002, e, 0.0), (1, 0.003, e - 2.0, 0.0), -1.0, 1e12, &mut rng),
+            "draw {draw}"
+        );
+    }
+}
+
 // ---- DTI branch flip ----
 
 fn band(id: u16, seed_isolate: bool) -> Requirements<Layout> {
@@ -476,4 +490,17 @@ fn compound_moves_keep_a_mirrored_stage_mirrored() {
     assert_eq!(analog_violations(&reqs, &l), 0, "x = {:?}, y = {:?}, axis = {:?}", l.x, l.y, l.axis);
     // A pinned member removes its group from the compound moves.
     assert!(sym_groups(&reqs, 5, &[false, false, false, false, true]).is_empty());
+}
+
+// ---- report ----
+
+#[test]
+fn report_counts_clearance_only_residue() {
+    let l = layout(&[(0, 0, 500, 500), (1_100, 0, 500, 500)]);
+    let rep = report(&Nets::from_macros(&[]), &Requirements::default(), &l, &gp::Prices::new(), 270);
+    let rules: Vec<&str> = rep.hard_violations.iter().map(|v| v.rule.as_str()).collect();
+    let clearance_rows: Vec<_> = rep.hard_violations.iter().filter(|v| v.rule == "clearance encroachment").collect();
+    assert_eq!(clearance_rows.len(), 1, "{rules:?}");
+    assert_eq!(clearance_rows[0].margin, 215_900);
+    assert!(!rules.contains(&"device overlap"), "{rules:?}");
 }

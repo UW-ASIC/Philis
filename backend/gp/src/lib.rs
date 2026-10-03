@@ -243,7 +243,7 @@ pub fn place(
     let mut l = initial_layout(&drawn, variant, side, &mut rng);
     let nets = Nets::from_macros(&drawn).weigh(net_weight);
     if n == 0 || !iterate {
-        let rep = report(&nets, reqs, &l, prices);
+        let rep = report(&nets, reqs, &l, prices, rules.clearance);
         return (l, rep);
     }
 
@@ -365,7 +365,7 @@ pub fn place(
         }
     }
 
-    let rep = report(&nets, reqs, &l, prices);
+    let rep = report(&nets, reqs, &l, prices, rules.clearance);
     (l, rep)
 }
 

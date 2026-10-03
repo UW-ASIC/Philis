@@ -6,7 +6,7 @@ use crate::rule::{Rule, RuleBatch};
 
 /// Partners mirror about `axis`: `x_a + x_b = 2·axis`, `y_a = y_b`. An exact
 /// integer equality, so it is enforced by [`Rule::project`], not by weight;
-/// `residual` stays at the default `0`/`1` (an equality has no budget).
+/// `residual` is the mirror error in µm.
 #[derive(Clone, Copy)]
 pub struct Symmetry {
     pub a: Target,
@@ -24,6 +24,12 @@ impl Rule for Symmetry {
     }
     fn satisfied(self, l: &Layout) -> bool {
         self.error(l) == (0, 0)
+    }
+
+    /// Mirror error `|ex| + |ey|` in µm: a hard margin that is a length, not a count.
+    fn residual(self, l: &Layout) -> f32 {
+        let (ex, ey) = self.error(l);
+        (ex.abs() + ey.abs()) as f32 / 1000.0
     }
 
     fn touches(self, out: &mut Vec<u32>) {
@@ -81,7 +87,9 @@ impl Symmetry {
     /// independently keeps both partners on-grid and their sum exactly `2·axis`.
     fn mirror_about(self, l: &mut Layout, axis: i32, g: i32) {
         let Some((ia, ib)) = self.indices(l) else { return };
-        let half = snap_to((snap_to(l.x[ib], g) - snap_to(l.x[ia], g)) / 2, g);
+        let d = snap_to(l.x[ib], g) - snap_to(l.x[ia], g);
+        // Ceiling of |d|/2 on the grid, sign kept: a projected pair never moves closer.
+        let half = d.signum() * ((d.abs() + 2 * g - 1) / (2 * g)) * g;
         l.x[ia] = axis - half;
         l.x[ib] = axis + half;
         let my = snap_to((l.y[ia] + l.y[ib]) / 2, g);
@@ -128,6 +136,9 @@ impl RuleBatch<Layout> for SymmetryGroup {
     }
     fn mirror_pairs(&self, out: &mut Vec<(u32, u32, u16)>) {
         self.0.mirror_pairs(out);
+    }
+    fn residual(&self, l: &Layout) -> f64 {
+        self.0.residual(l)
     }
 
     /// Put every pair on one axis at the mean of their midpoints (minimum total
@@ -189,6 +200,20 @@ mod tests {
             b: Target::Device(DeviceId(1)),
             axis: AxisId(0),
         }
+    }
+
+    #[test]
+    fn symmetry_residual_is_the_mirror_error_in_um() {
+        let l = layout(-1_000, 0, 1_500, 0);
+        assert_eq!(SymmetryGroup(vec![rule()]).residual(&l), 0.5);
+    }
+
+    #[test]
+    fn odd_parity_projection_never_shrinks_the_pair() {
+        let mut l = layout(0, 0, 25, 0);
+        rule().project(&mut l, 5);
+        assert_eq!(l.x[1] - l.x[0], 30);
+        assert!(rule().satisfied(&l));
     }
 
     #[test]
