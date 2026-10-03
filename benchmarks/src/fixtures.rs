@@ -765,16 +765,18 @@ pub fn preprocess_spice(text: &str, pdk_path: &Path) -> Result<String, String> {
 
     let mut result = out.join("\n");
     result.push('\n');
-    Ok(raise_channels(result, |d| pdk.pdk.min_channel(d.kind == pnr_core::DeviceKind::Pmos, &d.model)))
+    Ok(raise_channels(result, library::model_table(&pdk.pdk), |d| pdk.pdk.min_channel(d.kind == pnr_core::DeviceKind::Pmos, &d.model)))
 }
 
 /// A generic fixture's MOS cards retargeted to the deck's shortest legal
 /// channel: a numeric `l`/`w` below it is raised (gf180's 3.3 V gate is 280 nm,
 /// the fixtures' 150). The flow draws what a netlist asks and warns; this is
-/// the benchmark's retarget. MOS cards are the ones `library::parse` calls MOS;
+/// the benchmark's retarget. MOS cards are the ones `library::run`'s parse
+/// calls MOS under the deck's `models` table ([`library::model_table`]);
 /// `legal` is a device's `(l, w)` minimum.
-fn raise_channels(text: String, legal: impl Fn(&pnr_core::Device) -> (i32, i32)) -> String {
-    let Ok(netlist) = library::parse(&text) else { return text };
+fn raise_channels(text: String, models: Vec<(String, pnr_core::DeviceKind)>, legal: impl Fn(&pnr_core::Device) -> (i32, i32)) -> String {
+    let opts = library::ParseOptions { models, ..Default::default() };
+    let Ok(netlist) = library::spice_with(&text, &opts) else { return text };
     let mos: HashMap<&str, (i32, i32)> = netlist
         .devices
         .iter()
@@ -850,12 +852,14 @@ mod tests {
 
     #[test]
     fn mos_channels_below_the_deck_minimum_are_raised() {
-        let text = "XM1 d g s b pfet_01v8 W=1u L=0.15u\nXM2 d g s b nfet_01v8 W=0.1u L=2u\nXR1 a b res_generic_po W=0.1u L=2u\n";
-        let out = raise_channels(text.to_owned(), |_| (280, 220));
+        // `XM4`'s model names no MOS token: only the deck table makes it one.
+        let text = "XM1 d g s b pfet_01v8 W=1u L=0.15u\nXM2 d g s b nfet_01v8 W=0.1u L=2u\nXR1 a b res_generic_po W=0.1u L=2u\nXM4 d g s b fet33p W=1u L=0.15u\n";
+        let out = raise_channels(text.to_owned(), vec![("fet33p".into(), pnr_core::DeviceKind::Pmos)], |_| (280, 220));
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "XM1 d g s b pfet_01v8 W=1u L=0.28u");
         assert_eq!(lines[1], "XM2 d g s b nfet_01v8 W=0.22u L=2u");
         assert_eq!(lines[2], "XR1 a b res_generic_po W=0.1u L=2u", "not a MOS");
+        assert_eq!(lines[3], "XM4 d g s b fet33p W=1u L=0.28u");
     }
 
     #[test]

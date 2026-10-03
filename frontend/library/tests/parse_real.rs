@@ -39,6 +39,12 @@ fn recipe_aliases_classify_gf180_and_ihp_resistors() {
     assert_eq!(kind_with(&sky, "XM1 d g s b pfet_01v8_hvt W=1u L=1u"), DeviceKind::Pmos);
     assert_eq!(kind_with(&sky, "XM1 d g s b nfet_01v8_lvt W=1u L=1u"), DeviceKind::Nmos);
     assert_eq!(kind_with(&sky, "XR1 a b res_high_po W=1u L=1u"), DeviceKind::Resistor);
+    // The deck rows name only the vendor-prefixed models; the bare names come
+    // from the sidecar recipes' `aliases` alone.
+    let table = model_table(&sky);
+    for alias in ["res_high_po", "res_generic_po"] {
+        assert!(table.contains(&(alias.to_string(), DeviceKind::Resistor)), "{alias} from the recipes");
+    }
 }
 
 #[test]

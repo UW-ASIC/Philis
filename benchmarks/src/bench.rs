@@ -165,8 +165,9 @@ fn run_circuit(
     let text = preprocess_spice(&raw, pdk_json_path).unwrap_or(raw);
 
     // Pre-parse only to size-gate before committing to the full flow. Uses the
-    // exact parser `run` uses, so the count is authoritative.
-    let g = match library::parse(&text) {
+    // exact parser and deck model table `run` uses, so the count is authoritative.
+    let opts = library::ParseOptions { models: library::model_table(pdk), ..Default::default() };
+    let g = match library::spice_with(&text, &opts) {
         Ok(g) => g,
         Err(e) => return (format!("parse failed: {e}"), Vec::new()),
     };

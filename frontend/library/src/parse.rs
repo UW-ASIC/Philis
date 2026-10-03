@@ -27,8 +27,10 @@ pub struct ParseOptions {
     pub size: SizeConvention,
     /// Line 1 is a title (a simulator deck), not a card.
     pub title_line: bool,
-    /// The top sub-circuit (case-insensitive) when the file has no top-level
-    /// cards and several uninstantiated `.subckt`s.
+    /// The top sub-circuit (case-insensitive). When set it wins over the
+    /// file-level cards, which are then dropped (a simulator deck's
+    /// testbench around its DUT); needed when the file has no file-level cards
+    /// and several uninstantiated `.subckt`s.
     pub top: Option<String>,
     /// Model → kind, from the deck ([`crate::model_table`]): an `X` target
     /// naming one (exactly or behind a vendor `__` prefix) is that device.
@@ -65,8 +67,9 @@ pub fn spice_with(text: &str, opts: &ParseOptions) -> Result<Netlist, String> {
 /// SPICE instance total (`pnr_core::MosSize`), so under
 /// [`SizeConvention::PerFinger`] it is the written `w` times `nf`.
 ///
-/// The top is the file-level cards if any, else `opts.top`, else the unique
-/// uninstantiated `.subckt` (whose formals become [`Netlist::ports`]). Below
+/// The top is `opts.top` if set (file-level cards and sources dropped), else
+/// the file-level cards if any, else the unique uninstantiated `.subckt` (a
+/// `.subckt` top's formals become [`Netlist::ports`]). Below
 /// it, instance `X1`'s device `XM2` is `X1/XM2` and its internal net `n1` is
 /// `X1/n1`; `.global` nets and `0` are never prefixed; instance `m=k`
 /// multiplies every child's `m`.
@@ -74,7 +77,7 @@ pub fn spice_with(text: &str, opts: &ParseOptions) -> Result<Netlist, String> {
 /// # Errors
 /// An unresolved parameter (named), an `X` target that is neither a `.subckt`
 /// here nor a known model, a port-count mismatch, nested or unclosed
-/// `.subckt`, a MOS `w`/`l` ≤ 0, more than 65 536 nets or devices, or two
+/// `.subckt`, a MOS `w`/`l` ≤ 0, more than 65 535 nets or devices, or two
 /// devices whose simulator instance names collide.
 pub fn spice_report(text: &str, opts: &ParseOptions) -> Result<(Netlist, ParseReport), String> {
     let mut report = ParseReport::default();
@@ -163,8 +166,10 @@ pub fn spice_report(text: &str, opts: &ParseOptions) -> Result<(Netlist, ParseRe
     if nl.devices.is_empty() {
         return Err("no devices parsed".to_string());
     }
-    if nl.devices.len() > 1 << 16 {
-        return Err(format!("{} devices: more than 65 536 is not supported", nl.devices.len()));
+    // Device indices are `u16` downstream (`annotator` ranges over
+    // `0..len as u16`): 65 536 would wrap to an empty range.
+    if nl.devices.len() > usize::from(u16::MAX) {
+        return Err(format!("{} devices: more than 65 535 is not supported", nl.devices.len()));
     }
     // The op deck names each device `instance_name` (`/` → `__`); ngspice
     // matches case-insensitively, so two that agree there are one row.
@@ -217,7 +222,8 @@ impl Flat<'_> {
         if let Some(&id) = self.net_index.get(&key) {
             return Ok(id);
         }
-        let id = NetId(u16::try_from(self.nl.nets.len()).map_err(|_| "more than 65 536 nets is not supported")?);
+        let id = u16::try_from(self.nl.nets.len()).ok().filter(|&i| i < u16::MAX).ok_or("more than 65 535 nets is not supported")?;
+        let id = NetId(id);
         self.nl.nets.push(Net { name: display });
         self.net_index.insert(key, id);
         Ok(id)
@@ -242,7 +248,7 @@ impl Flat<'_> {
             let (pos, kv) = split(&card[1..]);
             let letter = card[0].chars().next().unwrap_or(' ').to_ascii_lowercase();
             match letter {
-                'v' | 'i' | 'e' | 'f' | 'g' | 'h' | 'b' | 'k' => self.source(f, name, letter, &pos)?,
+                'v' | 'i' | 'e' | 'f' | 'g' | 'h' | 'b' | 'k' => self.source(f, name, letter, &pos, &kv)?,
                 'x' | 'm' | 'q' => {
                     let Some((&target, nodes)) = pos.split_last() else { return Err(format!("device `{name}`: too few tokens")) };
                     if letter == 'x' {
@@ -266,8 +272,13 @@ impl Flat<'_> {
                     }
                     // After the two nodes: the first value (R/C/L) and the
                     // identifiers; of two identifiers the first is a bulk node.
+                    // A diode's trailing number is its SPICE3 area, dropped.
+                    let mut rest = &pos[2..];
+                    if letter == 'd' && rest.len() >= 2 && rest.last().is_some_and(|t| value(t, &f.scope).is_ok()) {
+                        rest = &rest[..rest.len() - 1];
+                    }
                     let (mut val, mut idents) = (None, Vec::new());
-                    for &t in &pos[2..] {
+                    for &t in rest {
                         if val.is_none() && letter != 'd' {
                             if let Ok(v) = value(t, &f.scope) {
                                 val = Some(v);
@@ -394,11 +405,14 @@ impl Flat<'_> {
         Ok(())
     }
 
-    fn source(&mut self, f: &Frame, name: String, letter: char, pos: &[&str]) -> Result<(), String> {
-        // `K` couples inductors by name; `E`/`G` sense a second node pair.
+    fn source(&mut self, f: &Frame, name: String, letter: char, pos: &[&str], kv: &[(String, &str)]) -> Result<(), String> {
+        // `K` couples inductors by name; `E`/`G` sense a second node pair,
+        // unless behavioural (`value=`/`vol=`/`cur=`) or `poly(n)`, whose
+        // controlling nodes are not interned.
+        let behavioural = kv.iter().any(|(k, _)| matches!(k.as_str(), "value" | "vol" | "cur")) || pos.get(2).is_some_and(|t| t.to_ascii_lowercase().starts_with("poly("));
         let n = match letter {
             'k' => 0,
-            'e' | 'g' => 4,
+            'e' | 'g' if !behavioural => 4,
             _ => 2,
         };
         if pos.len() < n {
@@ -859,6 +873,35 @@ X2 a b c cell wu={2*lu}
         assert_eq!(nl.sources[1].dc, None);
         assert_eq!(nl.sources[2].kind, 'I');
         assert_eq!(nl.sources[2].dc, Some(10e-6));
+        // Behavioural and `poly` E/G cards have one node pair; linear ones two.
+        let deck = format!("{base}E1 o1 0 value={{v(d)*2}}\nE2 o2 0 vol='v(g)'\nG1 o3 0 cur='1m'\nE3 o4 0 poly(1) d 0 0 1\nG2 o5 0 d g 1m\n");
+        let nl = spice(&deck).unwrap();
+        let nodes = |i: usize| nl.sources[i].nodes.iter().map(|n| nl.nets[n.0 as usize].name.as_str()).collect::<Vec<_>>();
+        assert_eq!([nodes(0), nodes(1), nodes(2), nodes(3)], [vec!["o1", "0"], vec!["o2", "0"], vec!["o3", "0"], vec!["o4", "0"]]);
+        assert_eq!(nodes(4), ["o5", "0", "d", "g"]);
+        assert!(!nl.nets.iter().any(|n| n.name.to_ascii_lowercase().starts_with("poly")));
+        assert!(spice(&format!("{base}E1 o1 0 d\n")).err().unwrap().contains("too few tokens"));
+    }
+
+    #[test]
+    fn diode_area_is_not_a_model() {
+        let nl = spice("D1 a b dmod 2\nD2 a b sub dmod\n").unwrap();
+        assert_eq!(nl.devices[0].model, "dmod");
+        assert_eq!(nl.devices[0].terminals.len(), 2);
+        assert_eq!(nl.devices[1].model, "dmod");
+        assert_eq!(nl.devices[1].terminals.len(), 3);
+    }
+
+    #[test]
+    fn more_than_u16_max_devices_or_nets_is_an_error() {
+        // `n` resistors sharing two nets; `n` resistors to ground, `n + 1` nets.
+        let shared = |n: usize| (0..n).map(|i| format!("R{i} a b 1\n")).collect::<String>();
+        let fanout = |n: usize| (0..n).map(|i| format!("R{i} n{i} 0 1\n")).collect::<String>();
+        let max = usize::from(u16::MAX);
+        assert_eq!(spice(&shared(max)).unwrap().devices.len(), max);
+        assert!(spice(&shared(max + 1)).err().unwrap().contains("65 535"));
+        assert_eq!(spice(&fanout(max - 1)).unwrap().nets.len(), max);
+        assert!(spice(&fanout(max)).err().unwrap().contains("65 535 nets"));
     }
 
     #[test]
@@ -901,6 +944,11 @@ X2 a b c cell wu={2*lu}
         assert!(spice(deck).err().unwrap().contains("a, b"));
         let nl = spice_with(deck, &ParseOptions { top: Some("B".into()), ..Default::default() }).unwrap();
         assert_eq!(nl.devices[0].kind, DeviceKind::Pmos);
+        // An explicit top wins over a testbench's file-level cards.
+        let bench = format!("{deck}X1 n a\nV1 n 0 1\n");
+        assert_eq!(spice(&bench).unwrap().devices[0].name, "X1/M1");
+        let nl = spice_with(&bench, &ParseOptions { top: Some("b".into()), ..Default::default() }).unwrap();
+        assert_eq!((nl.devices[0].name.as_str(), nl.sources.len()), ("M1", 0));
     }
 
     #[test]
