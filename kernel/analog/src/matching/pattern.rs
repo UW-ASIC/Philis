@@ -5,6 +5,8 @@
 
 use std::cmp::Reverse;
 
+use super::moments;
+
 /// How [`centro_assign`] deals each member's reflected pairs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fill {
@@ -260,6 +262,151 @@ impl Grid {
     }
 }
 
+/// Which end of a diffusion-legal CC row carries the shared, device-crossing
+/// region: a `Drain` row never joins two devices across a source (so every
+/// mismatched boundary is a drain, the quiet node for a ratioed mirror), a
+/// `Source` row the reverse.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Outer {
+    Drain,
+    Source,
+}
+
+/// Whether `s` never joins two different devices across the wrong region:
+/// the boundary between fingers `i, i+1` is region `i+1`, even (`D`) when
+/// `outer` is `Source`, odd (`S`) when `outer` is `Drain` (mosfet.rs
+/// `is_s`).
+#[must_use]
+pub fn diffusion_legal(s: &[usize], outer: Outer) -> bool {
+    s.windows(2).enumerate().all(|(i, w)| w[0] == w[1] || ((i + 1) % 2 == 1) == (outer == Outer::Drain))
+}
+
+/// Deals `p` reflected pairs of fingers at `seq[off..off + 2p]` in quads
+/// (token `t` with its mirror `p − 1 − t`), each quad to the member whose
+/// share of the centred weight `Σ(2i − n + 1)²` is furthest ahead of what it
+/// already holds in `seq`. `h[d]` is device `d`'s remaining quad count.
+fn deal(counts: &[u16], n: usize, seq: &mut [Option<usize>], p: usize, h: &mut [usize], off: usize) {
+    let k = |i: usize| -> i64 {
+        let v = 2 * i as i64 - n as i64 + 1;
+        v * v
+    };
+    // Q is the weight not yet committed to any device: it starts at the
+    // row's total and shrinks by every quad dealt (and by what the caller
+    // pre-placed), so each pick compares against what is still in play.
+    let mut q: i64 = (0..n).map(k).sum();
+    let mut s = vec![0i64; counts.len()];
+    for (i, slot) in seq.iter().enumerate() {
+        if let Some(d) = *slot {
+            let ki = k(i);
+            s[d] += ki;
+            q -= ki;
+        }
+    }
+    for t in 0..p / 2 {
+        let mut best_d = None;
+        let mut best_val = i64::MIN;
+        for (d, &hd) in h.iter().enumerate() {
+            if hd == 0 {
+                continue;
+            }
+            let val = i64::from(counts[d]) * q - n as i64 * s[d];
+            if val > best_val {
+                best_val = val;
+                best_d = Some(d);
+            }
+        }
+        let d = best_d.expect("a device with quads left");
+        let fingers = [off + 2 * t, off + 2 * t + 1, off + 2 * (p - 1 - t), off + 2 * (p - 1 - t) + 1];
+        let sum_k: i64 = fingers.iter().map(|&f| k(f)).sum();
+        for &f in &fingers {
+            seq[f] = Some(d);
+        }
+        s[d] += sum_k;
+        q -= sum_k;
+        h[d] -= 1;
+    }
+}
+
+/// The second-moment residual (Hastings §13.3) of `seq`'s per-member finger
+/// indices, treated as unit weights on a line: lower is a tighter centroid.
+fn row_r2(seq: &[usize], ndev: usize) -> f64 {
+    let mut by_member: Vec<Vec<moments::Pt>> = vec![Vec::new(); ndev];
+    for (i, &d) in seq.iter().enumerate() {
+        by_member[d].push(moments::Pt { x: i as f64, y: 0.0, w: 1.0, phi: (0, 0) });
+    }
+    let refs: Vec<&[moments::Pt]> = by_member.iter().map(Vec::as_slice).collect();
+    moments::cancelled_order(&refs, 2, 0.0).1[2]
+}
+
+/// A diffusion-legal common-centroid finger row for a ratioed MOS mirror
+/// (plan-02 §3 step 2–3): `counts[d]` fingers per device, mirror-symmetric,
+/// with every inter-device boundary landing on `outer`'s region so no two
+/// devices share the wrong diffusion. `None` when no legal row exists.
+#[must_use]
+pub fn diffusion_cc_row(counts: &[u16], outer: Outer) -> Option<Vec<usize>> {
+    match outer {
+        Outer::Drain => {
+            let n: usize = counts.iter().map(|&c| usize::from(c)).sum();
+            if n == 0 || n % 2 != 0 || counts.iter().any(|&c| c % 2 != 0) {
+                return None;
+            }
+            let p = (n - 2) / 2;
+            let mut best: Option<(Vec<usize>, f64)> = None;
+            for e in 0..counts.len() {
+                if counts[e] < 2 {
+                    continue;
+                }
+                let mut c = counts.to_vec();
+                c[e] -= 2;
+                let pairs: Vec<usize> = c.iter().map(|&x| usize::from(x) / 2).collect();
+                let odd: Vec<usize> = (0..pairs.len()).filter(|&d| pairs[d] % 2 == 1).collect();
+                if odd.len() != p % 2 {
+                    continue;
+                }
+                let mut seq: Vec<Option<usize>> = vec![None; n];
+                seq[0] = Some(e);
+                seq[n - 1] = Some(e);
+                let mut h: Vec<usize> = pairs.iter().map(|&x| x / 2).collect();
+                if p % 2 == 1 {
+                    let odd_member = odd[0];
+                    seq[1 + 2 * (p / 2)] = Some(odd_member);
+                    seq[2 + 2 * (p / 2)] = Some(odd_member);
+                }
+                deal(&c, n, &mut seq, p, &mut h, 1);
+                let seq: Vec<usize> = seq.into_iter().map(|s| s.expect("deal fills every finger")).collect();
+                let r2 = row_r2(&seq, counts.len());
+                match &best {
+                    None => best = Some((seq, r2)),
+                    Some((_, best_r2)) if r2 < best_r2 - 1e-9 => best = Some((seq, r2)),
+                    Some(_) => {}
+                }
+            }
+            best.map(|(seq, _)| seq)
+        }
+        Outer::Source => {
+            if counts.iter().any(|&c| c % 2 != 0) {
+                return None;
+            }
+            let n: usize = counts.iter().map(|&c| usize::from(c)).sum();
+            let p = n / 2;
+            let pairs: Vec<usize> = counts.iter().map(|&x| usize::from(x) / 2).collect();
+            let odd: Vec<usize> = (0..pairs.len()).filter(|&d| pairs[d] % 2 == 1).collect();
+            if odd.len() != p % 2 {
+                return None;
+            }
+            let mut seq: Vec<Option<usize>> = vec![None; n];
+            let mut h: Vec<usize> = pairs.iter().map(|&x| x / 2).collect();
+            if p % 2 == 1 {
+                let odd_member = odd[0];
+                seq[2 * (p / 2)] = Some(odd_member);
+                seq[2 * (p / 2) + 1] = Some(odd_member);
+            }
+            deal(counts, n, &mut seq, p, &mut h, 0);
+            Some(seq.into_iter().map(|s| s.expect("deal fills every finger")).collect())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +475,97 @@ mod tests {
         assert_eq!(grids(&[1, 2, 2], 3.0), [(3, 3), (1, 5)]);
         assert_eq!(grids(&[3, 5], 3.0), [(3, 3), (2, 4), (4, 2), (1, 8)]);
         assert!(grids(&[0, 0], 3.0).is_empty());
+    }
+
+    fn letters(seq: &[usize]) -> String {
+        seq.iter().map(|&d| (b'A' + d as u8) as char).collect()
+    }
+
+    fn devs(s: &str) -> Vec<usize> {
+        s.bytes().map(|b| usize::from(b - b'A')).collect()
+    }
+
+    /// Every admitted row keeps counts, is a palindrome (mirror symmetry),
+    /// and never joins two devices across the wrong region; an odd count
+    /// never admits one.
+    #[test]
+    fn diffusion_rows_never_join_two_devices_on_a_drain() {
+        let check = |counts: &[u16], outer: Outer| {
+            if counts.iter().any(|&c| c % 2 == 1) {
+                assert!(diffusion_cc_row(counts, outer).is_none(), "{counts:?} {outer:?}: odd count admitted a row");
+                return;
+            }
+            if let Some(s) = diffusion_cc_row(counts, outer) {
+                for (d, &cnt) in counts.iter().enumerate() {
+                    assert_eq!(s.iter().filter(|&&x| x == d).count(), usize::from(cnt), "{counts:?} {outer:?}: {s:?}");
+                }
+                let n = s.len();
+                assert!((0..n).all(|i| s[i] == s[n - 1 - i]), "{counts:?} {outer:?}: {s:?} not a palindrome");
+                assert!(diffusion_legal(&s, outer), "{counts:?} {outer:?}: {s:?} not diffusion-legal");
+            }
+        };
+        for outer in [Outer::Drain, Outer::Source] {
+            for a in 1..=16u16 {
+                for b in 1..=16u16 {
+                    check(&[a, b], outer);
+                }
+            }
+            for a in 1..=8u16 {
+                for b in 1..=8u16 {
+                    for c in 1..=8u16 {
+                        check(&[a, b, c], outer);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn equal_counts_reproduce_the_old_orders() {
+        assert_eq!(letters(&diffusion_cc_row(&[2, 2], Outer::Drain).unwrap()), "ABBA");
+        assert_eq!(letters(&diffusion_cc_row(&[4, 4], Outer::Drain).unwrap()), "ABBAABBA");
+        assert_eq!(letters(&diffusion_cc_row(&[6, 6], Outer::Drain).unwrap()), "ABBAABBAABBA");
+        assert_eq!(letters(&diffusion_cc_row(&[8, 8], Outer::Drain).unwrap()), "ABBAABBAABBAABBA");
+        assert_eq!(letters(&diffusion_cc_row(&[4, 4, 4], Outer::Drain).unwrap()), "ABBCCAACCBBA");
+        assert_eq!(letters(&diffusion_cc_row(&[4, 4, 4, 4], Outer::Drain).unwrap()), "ABBCCDDAADDCCBBA");
+        let new = diffusion_cc_row(&[8, 8, 8], Outer::Drain).unwrap();
+        assert_eq!(letters(&new), "ABBCCCCAABBAABBAACCCCBBA");
+        let old = devs("ABBCCAACCBBAABBCCAACCBBA");
+        let (r2_new, r2_old) = (row_r2(&new, 3), row_r2(&old, 3));
+        assert!(r2_new <= r2_old + 1e-9, "r2(new)={r2_new} should not exceed r2(old)={r2_old}");
+    }
+
+    #[test]
+    fn two_to_four_is_a_bbbb_a() {
+        assert_eq!(diffusion_cc_row(&[2, 4], Outer::Drain).unwrap(), vec![0, 1, 1, 1, 1, 0]);
+    }
+
+    #[test]
+    fn two_to_four_source_is_bb_aa_bb() {
+        assert_eq!(diffusion_cc_row(&[2, 4], Outer::Source).unwrap(), vec![1, 1, 0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn source_needs_even_pair_parity() {
+        assert!(diffusion_cc_row(&[2, 2], Outer::Source).is_none());
+        assert_eq!(letters(&diffusion_cc_row(&[4, 4], Outer::Source).unwrap()), "AABBBBAA");
+    }
+
+    #[test]
+    fn one_to_two_has_no_row() {
+        assert!(diffusion_cc_row(&[1, 2], Outer::Drain).is_none());
+        assert!(diffusion_cc_row(&[1, 2], Outer::Source).is_none());
+    }
+
+    #[test]
+    fn align_example_is_exact() {
+        let s = diffusion_cc_row(&[2, 2, 4, 8, 8], Outer::Drain).unwrap();
+        assert_eq!(letters(&s), "ADDEECCEEDDBBDDEECCEEDDA");
+        let n = s.len() as i64;
+        for d in 0..5usize {
+            let sum: i64 = s.iter().enumerate().filter(|&(_, &x)| x == d).map(|(i, _)| 2 * i as i64 - (n - 1)).sum();
+            assert_eq!(sum, 0, "member {d} off centre");
+        }
+        assert_eq!(letters(&diffusion_cc_row(&[4, 8], Outer::Drain).unwrap()), "ABBBBAABBBBA");
     }
 }
