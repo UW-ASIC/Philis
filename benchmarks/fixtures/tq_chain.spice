@@ -1,0 +1,29 @@
+* tq_chain — async_ctrl tapped-delay chain, verbatim from the field report FR-1
+* (analog/async_ctrl/output/pnr/tq_chain.spice): 8 sky130 MIM caps
+* (cap_mim_m3_1 W=21.87 L=21.87, bare um), each on its own top-plate net.
+.subckt tq_chain in tap1 tap2 tap3 tap4 vdd vss
+Xtq_tap1_m_n tap1_m in vss vss sky130_fd_pr__nfet_01v8 W=0.84 L=0.15
+Xtq_tap1_m_p tap1_m in vdd vdd sky130_fd_pr__pfet_01v8 W=1.4 L=0.15
+Xload_tap1_m tap1_m vss sky130_fd_pr__cap_mim_m3_1 W=21.87 L=21.87
+Xtq_tap1_n tap1 tap1_m vss vss sky130_fd_pr__nfet_01v8 W=0.84 L=0.15
+Xtq_tap1_p tap1 tap1_m vdd vdd sky130_fd_pr__pfet_01v8 W=1.4 L=0.15
+Xload_tap1 tap1 vss sky130_fd_pr__cap_mim_m3_1 W=21.87 L=21.87
+Xtq_tap2_m_n tap2_m tap1 vss vss sky130_fd_pr__nfet_01v8 W=0.84 L=0.15
+Xtq_tap2_m_p tap2_m tap1 vdd vdd sky130_fd_pr__pfet_01v8 W=1.4 L=0.15
+Xload_tap2_m tap2_m vss sky130_fd_pr__cap_mim_m3_1 W=21.87 L=21.87
+Xtq_tap2_n tap2 tap2_m vss vss sky130_fd_pr__nfet_01v8 W=0.84 L=0.15
+Xtq_tap2_p tap2 tap2_m vdd vdd sky130_fd_pr__pfet_01v8 W=1.4 L=0.15
+Xload_tap2 tap2 vss sky130_fd_pr__cap_mim_m3_1 W=21.87 L=21.87
+Xtq_tap3_m_n tap3_m tap2 vss vss sky130_fd_pr__nfet_01v8 W=0.84 L=0.15
+Xtq_tap3_m_p tap3_m tap2 vdd vdd sky130_fd_pr__pfet_01v8 W=1.4 L=0.15
+Xload_tap3_m tap3_m vss sky130_fd_pr__cap_mim_m3_1 W=21.87 L=21.87
+Xtq_tap3_n tap3 tap3_m vss vss sky130_fd_pr__nfet_01v8 W=0.84 L=0.15
+Xtq_tap3_p tap3 tap3_m vdd vdd sky130_fd_pr__pfet_01v8 W=1.4 L=0.15
+Xload_tap3 tap3 vss sky130_fd_pr__cap_mim_m3_1 W=21.87 L=21.87
+Xtq_tap4_m_n tap4_m tap3 vss vss sky130_fd_pr__nfet_01v8 W=0.84 L=0.15
+Xtq_tap4_m_p tap4_m tap3 vdd vdd sky130_fd_pr__pfet_01v8 W=1.4 L=0.15
+Xload_tap4_m tap4_m vss sky130_fd_pr__cap_mim_m3_1 W=21.87 L=21.87
+Xtq_tap4_n tap4 tap4_m vss vss sky130_fd_pr__nfet_01v8 W=0.84 L=0.15
+Xtq_tap4_p tap4 tap4_m vdd vdd sky130_fd_pr__pfet_01v8 W=1.4 L=0.15
+Xload_tap4 tap4 vss sky130_fd_pr__cap_mim_m3_1 W=21.87 L=21.87
+.ends tq_chain

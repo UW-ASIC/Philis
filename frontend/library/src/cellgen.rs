@@ -761,17 +761,17 @@ fn multiplier(d: &Device) -> u16 {
     d.params.iter().find(|(n, _)| n == "m").map_or(1, |&(_, v)| v.clamp(1, i64::from(u16::MAX)) as u16)
 }
 
-/// Uncovered capacitors on one top plate (`P`) and one `w`×`l` whose `m` are
+/// Uncovered capacitors on one top plate (`P`), one model and one `w`×`l` whose `m` are
 /// `[1, 1, 2, …, 2^(N-1)]`: a binary-weighted DAC bank (DACP §II), members in
 /// slot order. The electrical dummy (slot 0) is the one-unit cap whose bottom
 /// plate is a MOS bulk, i.e. a rail; else the first one-unit cap listed.
 fn dac_banks(netlist: &Netlist, covered: &[bool]) -> Vec<Vec<DeviceId>> {
     let bulks: Vec<NetId> = netlist.devices.iter().filter_map(|d| terminal(d, "B")).collect();
     let param = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
-    let mut by_plate: Vec<((NetId, Option<i64>, Option<i64>), Vec<DeviceId>)> = Vec::new();
+    let mut by_plate: Vec<((NetId, String, Option<i64>, Option<i64>), Vec<DeviceId>)> = Vec::new();
     for (i, d) in netlist.devices.iter().enumerate() {
         let Some(p) = terminal(d, "P").filter(|_| d.kind == DeviceKind::Capacitor && !covered[i]) else { continue };
-        let key = (p, param(d, "w"), param(d, "l"));
+        let key = (p, d.model.clone(), param(d, "w"), param(d, "l"));
         match by_plate.iter_mut().find(|(k, _)| *k == key) {
             Some((_, v)) => v.push(DeviceId(i as u16)),
             None => by_plate.push((key, vec![DeviceId(i as u16)])),
@@ -807,11 +807,16 @@ fn draw_variants(kind: DeviceKind, model: &str, group: &DeviceGroup, c: &Constra
             None => draw_all::<Resistor>(group, c, pdk),
         },
         // A binary bank is drawn only as a common-centroid array: a merged
-        // plate per bit implements no pattern (ARR-01/02).
-        DeviceKind::Capacitor => match CapArray::enumerate(group, c, pdk) {
-            v if v.is_empty() => draw_all::<Capacitor>(group, c, pdk),
-            v => v.iter().map(|a| a.draw(group, c, pdk)).collect(),
-        },
+        // plate per bit implements no pattern (ARR-01/02). The model's
+        // capacitor recipe picks the stack (sky130 MIM, else MOM; CELL-08).
+        DeviceKind::Capacitor => {
+            let ov = pdk.recipe("capacitor", model).map(|recipe| verify::pdk::Overlay { pdk, recipe });
+            let p: &dyn pnr_core::Process = ov.as_ref().map_or(pdk as &dyn pnr_core::Process, |o| o);
+            match CapArray::enumerate(group, c, p) {
+                v if v.is_empty() => draw_all::<Capacitor>(group, c, p),
+                v => v.iter().map(|a| a.draw(group, c, p)).collect(),
+            }
+        }
         DeviceKind::Diode => draw_all::<Diode>(group, c, pdk),
         DeviceKind::Npn | DeviceKind::Pnp => match pdk.recipe("bjt", model) {
             Some(recipe) => draw_all::<Bjt>(group, c, &verify::pdk::Overlay { pdk, recipe }),

@@ -15,12 +15,20 @@
 //! tracks drop to per-bit `met2` buses *below* the array. TOP metal never
 //! crosses a bottom-plate route, so the bit-route-to-top coupling DACP §IV-B
 //! calls `C_TB` is structurally absent (ARR-03).
+//!
+//! A capacitor recipe with a `plate` role (sky130 `mim_m3_1`) draws the deck's
+//! MIM instead (CELL-08): per unit a `bottom` plate (met3) enclosing the
+//! `plate` (capm, the netlist's W×L) by the deck's enclosure, a `top_contact`
+//! array (via3) on it, a `top` strap (met4) per column joined in the gap
+//! under the top dummy row, and the bottom stub dropping through
+//! `bottom_contact` (via2) onto the same met2 branch. Ring dummies carry an
+//! uncontacted capm (no met4 over it, so extraction sees no device).
 
 use crate::builder::dim;
 
 use analog::matching::pattern::{self, Fill, Grid};
 use analog::Constraints;
-use pnr_core::{DeviceGroup, Macro, Process, Rect, Unit};
+use pnr_core::{DeviceGroup, Drawn, DrawnKind, KeepWhy, Macro, Node, Process, Rect, Unit};
 
 use crate::builder::{cut_lattice, pin, req, sizing, Builder, Sizing};
 use crate::Cell;
@@ -78,15 +86,14 @@ const MAX_BITS: u8 = 8;
 
 impl Cell for CapArray {
     fn enumerate(group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Vec<Self> {
-        if ["met1", "met2", "met3", "via1", "via2"].iter().any(|l| process.layer(l).is_none()) {
-            return vec![];
-        }
+        let Some(st) = plate_stack(process) else { return vec![] };
         let dev_nf = group_sizing(group, constraints, process).dev_nf;
         let Some(n) = bits(&dev_nf) else {
             // Any other matched set (≥ 2 devices, ≤ 256 units): the same array
             // with a centrosymmetric general assignment, compact or dispersed.
+            // A MIM is drawn only here, so a single one is a set of one.
             let total: u32 = dev_nf.iter().map(|&u| u32::from(u)).sum();
-            if dev_nf.len() < 2 || total > 1 << MAX_BITS {
+            if (dev_nf.len() < 2 && st.plate.is_none()) || total > 1 << MAX_BITS {
                 return vec![];
             }
             return [Pattern::Spiral, Pattern::Chessboard].into_iter().map(|pattern| CapArray { pattern, tall: false }).collect();
@@ -127,6 +134,45 @@ pub fn bits(dev_nf: &[u16]) -> Option<u8> {
     let want = |i: usize| if i == 0 { 1 } else { 1u16 << (i - 1) };
     (2..=usize::from(MAX_BITS)).contains(&n).then_some(())?;
     dev_nf.iter().enumerate().all(|(i, &u)| u == want(i)).then_some(n as u8)
+}
+
+/// The plate stack by role names `process` resolves. A capacitor recipe names
+/// `bottom`, `plate` (MIM only), `top_contact`, `top`, `strap` and
+/// `bottom_contact`; a role it leaves unset falls back to today's MOM layer
+/// (met1 BOT, met2 TOP, via2 centre cut, met3 strap, via1 off the stub), so the
+/// base deck and a MOM recipe draw the same array. `None` when a layer is missing.
+struct PlateStack {
+    bot: &'static str,
+    plate: Option<&'static str>,
+    top: &'static str,
+    top_cut: &'static str,
+    strap: &'static str,
+    bot_cut: &'static str,
+}
+
+fn plate_stack(p: &dyn Process) -> Option<PlateStack> {
+    let role = |r: &'static str, mom: &'static str| if p.layer(r).is_some() { r } else { mom };
+    let s = PlateStack {
+        bot: role("bottom", "met1"),
+        plate: p.layer("plate").map(|_| "plate"),
+        top: role("top", "met2"),
+        top_cut: role("top_contact", "via2"),
+        strap: role("strap", "met3"),
+        bot_cut: role("bottom_contact", "via1"),
+    };
+    [s.bot, s.top, s.top_cut, s.strap, s.bot_cut, "met1", "met2", "met3", "via1", "via2"].iter().all(|r| p.layer(r).is_some()).then_some(s)
+}
+
+/// One `w_nm`×`l_nm` MIM unit's capacitance, aF, from the recipe's model keys:
+/// `c_area_af_um2·(W+dw)(L+dw) + c_perim_af_um·2(W+L+2dw)`, `dw` = `c_dw_nm`
+/// (sky130 `cap_mim_m3_1`: camimc, cpmimc, m3_dw). `None` without
+/// `c_area_af_um2` (a MOM recipe: its C is unknown, AV-32).
+#[must_use]
+pub fn c_u_af(p: &dyn Process, w_nm: i32, l_nm: i32) -> Option<f64> {
+    let area = p.rule("c_area_af_um2", 0);
+    let dw = f64::from(p.rule("c_dw_nm", 0));
+    let (w, l) = ((f64::from(w_nm) + dw) * 1e-3, (f64::from(l_nm) + dw) * 1e-3);
+    (area > 0).then(|| f64::from(area) * w * l + f64::from(p.rule("c_perim_af_um", 0)) * 2.0 * (w + l))
 }
 
 /// Rows × columns holding `2^m` units, columns ≥ rows unless `tall`.
@@ -225,6 +271,40 @@ impl CapArray {
         out
     }
 
+    /// One MIM unit at `cell` (its bottom plate): the plate inset by `encp`; on
+    /// a member's unit a centred `top_contact` array inset by the deck's plate
+    /// enclosure (capm.4) at its cut pitch, the LVS card and the plate
+    /// keep-out. A ring dummy keeps its plate, uncontacted; an interior
+    /// empty cell draws none, as the column strap would make it a device.
+    #[allow(clippy::too_many_arguments)]
+    fn mim_unit(b: &mut Builder, process: &dyn Process, st: &PlateStack, cell: Rect, encp: i32, slot: Option<u8>, ring: bool) {
+        let plate_role = st.plate.expect("MIM");
+        b.rect(req(process, st.bot), cell);
+        let plate = Rect { x: cell.x + encp, y: cell.y + encp, w: cell.w - 2 * encp, h: cell.h - 2 * encp };
+        if slot.is_none() && !ring {
+            return;
+        }
+        b.rect(req(process, plate_role), plate);
+        let Some(owner) = slot else { return };
+        let lat = cut_lattice(process);
+        let v = process.width(st.top_cut).unwrap_or(lat);
+        let pitch = v + process.space(st.top_cut).unwrap_or(v);
+        let e = process.enclosure(plate_role, st.top_cut).unwrap_or(0);
+        let n = |side: i32| ((side - 2 * e + pitch - v) / pitch).max(1);
+        let (nx, ny) = (n(plate.w), n(plate.h));
+        let x0 = plate.x + (plate.w - nx * pitch + pitch - v) / 2 / lat * lat;
+        let y0 = plate.y + (plate.h - ny * pitch + pitch - v) / 2 / lat * lat;
+        let cut = req(process, st.top_cut);
+        for i in 0..nx {
+            for j in 0..ny {
+                b.rect(cut, Rect { x: x0 + i * pitch, y: y0 + j * pitch, w: v, h: v });
+            }
+        }
+        b.unit(Unit { owner, x: cell.x + cell.w / 2, y: cell.y + cell.h / 2, weight: i64::from(cell.w) * i64::from(cell.h), phi: (0, 0), sa: 0, sb: 0 });
+        b.drawn(Drawn { owner, device: None, kind: DrawnKind::Capacitor, nodes: [Node::Pin("P"), Node::Pin("N"), Node::Unused], w: plate.w, l: plate.h });
+        b.keepout(plate, KeepWhy::CapPlate { owner });
+    }
+
     /// The macro, plus each slot's `(bottom-route length nm, via1 cuts)`.
     fn build(&self, group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> (Macro, Vec<(i64, u32)>) {
         let s = group_sizing(group, c, process);
@@ -245,6 +325,8 @@ impl CapArray {
                 ((s.dev_nf.len() - 1) as u8, rows, cols, slots)
             }
         };
+        let st = plate_stack(process).expect("enumerate offers variants only on a plate stack");
+        let mim = st.plate.is_some();
         let [m1, m2, m3, v1l, v2l] = ["met1", "met2", "met3", "via1", "via2"].map(|l| req(process, l));
         let lat = cut_lattice(process);
         let up = |v: i32| (v + lat - 1).div_euclid(lat) * lat;
@@ -271,7 +353,19 @@ impl CapArray {
         // plate holds the centre via2 and meets met2's width and area.
         let area_side = (process.area("met2").unwrap_or(0) as f64).sqrt().ceil() as i32;
         let min_unit = up(2 * inset + (v2 + 2 * e3).max(wmin("met2")).max(area_side));
-        let (uw, uh) = (up(s.unit_w).max(min_unit), up(s.unit_l).max(min_unit));
+        // MIM: the plate is the netlist's W×L, the bottom plate encloses it.
+        let encp = st.plate.map_or(0, |pl| up(enc(st.bot, pl)));
+        let (uw, uh) = if mim {
+            let side = |v: i32| up(v).max(wmin("plate")) + 2 * encp;
+            (side(s.unit_w), side(s.unit_l))
+        } else {
+            (up(s.unit_w).max(min_unit), up(s.unit_l).max(min_unit))
+        };
+        // MIM top: the via3 (`top_contact`) cut, and the met4 join's width,
+        // centred on its cut like the met3 one.
+        let vt = process.width(st.top_cut).unwrap_or(v2);
+        let e4 = up(enc(st.top, st.top_cut).max(cap(st.top, st.top_cut)));
+        let jw = ((vt + 2 * e4).max(wmin(st.top)) + 2 * lat - 1) / (2 * lat) * 2 * lat;
         // Track, branch and bus width: one via1, `e1` below/left and `e1o`
         // above/right, so the along-axis long side and this one together meet
         // the asymmetric rule (best side of *each* axis); never under either
@@ -297,7 +391,14 @@ impl CapArray {
             let h = up(i32::try_from((m2_area + i64::from(r.w) - 1) / i64::from(r.w.max(1))).unwrap_or(i32::MAX)).max(r.h);
             Rect { y: r.y - floor((h - r.h) / 2), h, ..r }
         };
-        let gap_y = inset.max(m1s).max(m2s);
+        // MIM rows also clear capm spacing between plates (capm.2a) and hold
+        // the met4 join, which then stays `encp` off the dummy capm above.
+        let gap_y = if mim {
+            let capm_gap = up(process.space("plate").unwrap_or(0) - 2 * encp);
+            inset.max(m1s).max(m2s).max(capm_gap).max(space(st.bot)).max(jw)
+        } else {
+            inset.max(m1s).max(m2s)
+        };
 
         // Channel right of each column, x from the plate's right edge: the
         // branch-start via clears TOP's met2 by `m2s`, then the tracks.
@@ -341,6 +442,28 @@ impl CapArray {
                 let (x0, y0) = (c as i32 * px, r as i32 * py);
                 let slot = owner(r, c);
                 let s = slot.unwrap_or(dummy_slot);
+                if mim {
+                    Self::mim_unit(&mut b, process, &st, Rect { x: x0, y: y0, w: uw, h: uh }, encp, slot, r == 0 || c == 0 || r == gr - 1 || c == gc - 1);
+                    let tx = track_x(c, s);
+                    let (vy, vb) = (y0 + floor((uh - v1) / 2), process.width(st.bot_cut).unwrap_or(v2));
+                    let vyb = y0 + floor((uh - vb) / 2);
+                    let eb3 = up(enc(st.bot, st.bot_cut).max(cap(st.bot, st.bot_cut)));
+                    let eb2 = up(enc("met2", st.bot_cut).max(cap("met2", st.bot_cut)));
+                    // Stub on the bottom plate's metal, its cut onto the branch.
+                    let hb = up((vb + 2 * eb3).max(wmin(st.bot)));
+                    b.rect(req(process, st.bot), Rect { x: x0 + uw - 2 * lat, y: vyb + vb / 2 - hb / 2, w: 2 * lat + vx + vb + eb3, h: hb });
+                    b.rect(req(process, st.bot_cut), Rect { x: x0 + uw + vx, y: vyb, w: vb, h: vb });
+                    let bx = x0 + uw + vx - eb2;
+                    let (by0, by1) = ((vy - e1).min(vyb - eb2), (vy - e1 + w1).max(vyb + vb + eb2));
+                    let bw = tx + e1 + v1 + e1o - bx;
+                    b.rect(m2, tall(Rect { x: bx, y: by0, w: bw, h: by1 - by0 }));
+                    b.rect(v1l, Rect { x: tx + e1, y: vy, w: v1, h: v1 });
+                    let t = tracks[c].iter().position(|&x| x == s).unwrap();
+                    top_of[c][t] = top_of[c][t].max(vy + v1 + e1o);
+                    route[usize::from(s)].0 += i64::from(bw);
+                    route[usize::from(s)].1 += 2;
+                    continue;
+                }
                 b.rect(m1, Rect { x: x0, y: y0, w: uw, h: uh });
                 b.rect(m2, Rect { x: x0 + inset, y: y0 + inset, w: uw - 2 * inset, h: uh - 2 * inset });
                 let (cx, cy) = (x0 + floor((uw - v2) / 2), y0 + floor((uh - v2) / 2));
@@ -376,12 +499,43 @@ impl CapArray {
                 route[usize::from(s)].1 += 1;
             }
         }
+        // The via2 under the met1/via1 pin stack: TOP's (MOM: off the met3
+        // strap; MIM: off the met3 island) and, MIM, the dummy tie's.
+        let (dcut, vd) = if mim { (st.bot_cut, process.width(st.bot_cut).unwrap_or(v2)) } else { ("via2", v2) };
+        let e2 = up(enc("met2", dcut).max(cap("met2", dcut)));
+        // MIM hop between met4 and met2, centred on (cx, cy): via3, a met3
+        // island grown to the deck's area (off capm, capm.11), via2 under it.
+        let ei = up(enc(st.bot, st.top_cut).max(cap(st.bot, st.top_cut)));
+        let eb3 = up(enc(st.bot, st.bot_cut).max(cap(st.bot, st.bot_cut)));
+        let side = up((vt + 2 * ei).max(vd + 2 * eb3).max(wmin(st.bot)));
+        let island = |b: &mut Builder, cx: i32, cy: i32| {
+            b.rect(req(process, st.top_cut), Rect { x: cx - vt / 2, y: cy - vt / 2, w: vt, h: vt });
+            let h = up(i32::try_from((process.area(st.bot).unwrap_or(0) + i64::from(side) - 1) / i64::from(side)).unwrap_or(i32::MAX)).max(side);
+            b.rect(req(process, st.bot), Rect { x: cx - side / 2, y: cy - side / 2 - floor((h - side) / 2), w: side, h });
+            b.rect(req(process, dcut), Rect { x: cx - vd / 2, y: cy - vd / 2, w: vd, h: vd });
+        };
         for s in 0..=dummy_slot.max(n) {
             let x0 = (0..gc).filter(|&c| tracks[c].contains(&s)).map(|c| track_x(c, s)).min().expect("every slot has a unit");
             let bus = Rect { x: x0, y: bus_y(s), w: x_right - x0, h: w1 };
             b.rect(m2, bus);
             route[usize::from(s)].0 += i64::from(bus.w);
-            let (vx, vy) = (x_right - e1o - v1, bus.y + e1);
+            let (mut vx, mut vy) = (x_right - e1o - v1, bus.y + e1);
+            if mim && s == dummy_slot {
+                // The dummy ring's tie hops over met4 to its pin, so at met3's
+                // etch its plates are no gate's antenna (ar.met3.1 counts met3
+                // alone, no diode credit): tied straight to a rail they charge
+                // the rail's MOS dummy gates past the limit.
+                let cy = bus.y + w1 / 2;
+                let xa = x_right - e2 - vd / 2;
+                let xb = xa + up(side + space(st.bot));
+                let pad = |b: &mut Builder, cx: i32| b.rect(m2, tall(Rect { x: cx - vd / 2 - e2, y: cy - vd / 2 - e2, w: vd + 2 * e2, h: vd + 2 * e2 }));
+                pad(&mut b, xa);
+                island(&mut b, xa, cy);
+                b.rect(req(process, st.top), Rect { x: xa - vt / 2 - e4, y: cy - jw / 2, w: xb - xa + vt + 2 * e4, h: jw });
+                island(&mut b, xb, cy);
+                pad(&mut b, xb);
+                (vx, vy) = (xb - vd / 2 + floor((vd - v1) / 2), cy - vd / 2 + floor((vd - v1) / 2));
+            }
             b.rect(v1l, Rect { x: vx, y: vy, w: v1, h: v1 });
             let at = lead(&mut b, vx, vy);
             if s == dummy_slot && general {
@@ -392,17 +546,34 @@ impl CapArray {
         }
         // TOP: a met3 strap down each interior column, joined above the dummy
         // row and run out to a via2/via1 stack onto a met1 pin, as the buses.
-        let join_y = gr as i32 * py + gap_y;
-        let strap_x = |c: usize| c as i32 * px + uw / 2 - m3w / 2;
-        let strap_y0 = py + floor((uh - v2) / 2) - e3;
-        for c in 1..=cols {
-            b.rect(m3, Rect { x: strap_x(c), y: strap_y0, w: m3w, h: join_y + m3w - strap_y0 });
-        }
-        let join = Rect { x: strap_x(1), y: join_y, w: x_right - strap_x(1), h: m3w };
-        b.rect(m3, join);
-        let e2 = up(enc("met2", "via2").max(cap("met2", "via2")));
-        let (vx2, vy2) = (x_right - e3 - v2, join_y + (m3w - v2) / 2);
-        b.rect(v2l, Rect { x: vx2, y: vy2, w: v2, h: v2 });
+        // MIM: a met4 strap over each interior column's plates, joined in the
+        // gap under the top dummy row, down through via3 onto a met3 island
+        // (off capm, capm.11) and its via2 to the same met2/via1 stack.
+        let (vx2, vy2) = if mim {
+            let join_y = rows as i32 * py + uh;
+            let strap = req(process, st.strap);
+            for c in 1..=cols {
+                let y = py + encp;
+                b.rect(strap, Rect { x: c as i32 * px + encp, y, w: uw - 2 * encp, h: join_y + jw - y });
+            }
+            b.rect(strap, Rect { x: px + encp, y: join_y, w: x_right - px - encp, h: jw });
+            let (cx, cy) = (x_right - e4 - vt + vt / 2, join_y + (jw - vt) / 2 + vt / 2);
+            island(&mut b, cx, cy);
+            (cx - vd / 2, cy - vd / 2)
+        } else {
+            let join_y = gr as i32 * py + gap_y;
+            let strap_x = |c: usize| c as i32 * px + uw / 2 - m3w / 2;
+            let strap_y0 = py + floor((uh - v2) / 2) - e3;
+            for c in 1..=cols {
+                b.rect(m3, Rect { x: strap_x(c), y: strap_y0, w: m3w, h: join_y + m3w - strap_y0 });
+            }
+            let join = Rect { x: strap_x(1), y: join_y, w: x_right - strap_x(1), h: m3w };
+            b.rect(m3, join);
+            let (vx2, vy2) = (x_right - e3 - v2, join_y + (m3w - v2) / 2);
+            b.rect(v2l, Rect { x: vx2, y: vy2, w: v2, h: v2 });
+            (vx2, vy2)
+        };
+        let v2 = vd;
         b.rect(m2, tall(Rect { x: vx2 - e2, y: vy2 - e2, w: v2 + 2 * e2, h: v2 + 2 * e2 }));
         let (vx1, vy1) = (vx2 + floor((v2 - v1) / 2), vy2 + floor((v2 - v1) / 2));
         b.rect(v1l, Rect { x: vx1, y: vy1, w: v1, h: v1 });
@@ -586,6 +757,91 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// sky130's `cap_mim_m3_1` recipe as the generator sees it.
+    fn mim(pdk: &verify::Pdk) -> verify::pdk::Overlay<'_> {
+        verify::pdk::Overlay { pdk, recipe: pdk.recipe("capacitor", "sky130_fd_pr__cap_mim_m3_1").expect("sky130 has the MIM recipe") }
+    }
+
+    /// `counts` (a bank when [`bits`] reads it) at `side`×`side` nm units.
+    fn mim_set(counts: &[u16], side: i32) -> (DeviceGroup, Constraints) {
+        let (g, mut c) = set(counts);
+        c.unitization[0].unit_w = side;
+        c.unitization[0].unit_l = side;
+        (g, c)
+    }
+
+    /// Every variant drawn on the MIM overlay, DRC + ERC on sky130 (`P` one net).
+    fn dirty_mim(g: &DeviceGroup, c: &Constraints, pdk: &verify::Pdk) -> Vec<String> {
+        let ov = mim(pdk);
+        let variants = CapArray::enumerate(g, c, &ov);
+        assert!(!variants.is_empty(), "no MIM variants");
+        variants
+            .iter()
+            .filter_map(|v| {
+                let m = v.draw(g, c, &ov);
+                let f = crate::testkit::findings(&m.shapes, &crate::testkit::ports_with(&m, &["P"]), pdk);
+                (!f.is_empty()).then(|| format!("{v:?}: {f:?}"))
+            })
+            .collect()
+    }
+
+    /// CELL-08: a MIM bank is DRC- and ERC-clean in every variant.
+    #[test]
+    fn a_mim_bank_is_drc_and_erc_clean() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let (g, c) = mim_set(&[1, 1, 2, 4], 5000);
+        let dirty = dirty_mim(&g, &c, &pdk);
+        assert!(dirty.is_empty(), "DRC/ERC-dirty MIM variants:\n{}", dirty.join("\n"));
+    }
+
+    /// CELL-08: the deck's capm recogniser finds one capacitor per active
+    /// unit (8 for `[1, 1, 2, 4]`): no dummy plate is contacted.
+    #[test]
+    fn a_mim_bank_extracts_one_capacitor_per_unit() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let (g, c) = mim_set(&[1, 1, 2, 4], 5000);
+        let ov = mim(&pdk);
+        for v in CapArray::enumerate(&g, &c, &ov) {
+            let m = v.draw(&g, &c, &ov);
+            let spice = verify::extract_spice(&m.shapes, &[], &pdk, verify::Detail::Schematic).expect("extracts");
+            assert_eq!(spice.lines().filter(|l| l.starts_with('C')).count(), 8, "{v:?}:\n{spice}");
+        }
+    }
+
+    /// CELL-08: each unit's capm is the netlist's W×L, worth the model's C_u
+    /// (sky130 typical: 2.00 fF/µm², 0.19 fF/µm, m3_dw −25 nm → 53 282 aF at
+    /// 5 µm), and each member draws its count of them.
+    #[test]
+    fn the_mim_unit_is_the_model_s() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let counts = [1u16, 1, 2, 4];
+        let (g, c) = mim_set(&counts, 5000);
+        let ov = mim(&pdk);
+        let cu = c_u_af(&ov, 5000, 5000).expect("the MIM recipe states its model");
+        assert!((cu - 53_282.0).abs() <= 10.0, "C_u {cu} aF");
+        let m = CapArray::enumerate(&g, &c, &ov)[0].draw(&g, &c, &ov);
+        assert!(m.drawn.iter().all(|d| d.kind == DrawnKind::Capacitor && (d.w, d.l) == (5000, 5000)), "{:?}", m.drawn);
+        for (i, &n) in counts.iter().enumerate() {
+            let sum: f64 = m.drawn.iter().filter(|d| usize::from(d.owner) == i).map(|d| c_u_af(&ov, d.w, d.l).unwrap()).sum();
+            assert!((sum - f64::from(n) * cu).abs() < 1e-6, "member {i}: {sum} aF");
+        }
+    }
+
+    /// CELL-08: a lone MIM (tq_chain's 21.87 µm) is one drawn unit, clean.
+    #[test]
+    fn a_single_mim_is_one_unit() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let (g, c) = mim_set(&[1], 21_870);
+        let ov = mim(&pdk);
+        let variants = CapArray::enumerate(&g, &c, &ov);
+        assert!(!variants.is_empty());
+        for v in &variants {
+            assert_eq!(v.draw(&g, &c, &ov).drawn.len(), 1, "{v:?}");
+        }
+        let dirty = dirty_mim(&g, &c, &pdk);
+        assert!(dirty.is_empty(), "{}", dirty.join("\n"));
     }
 
     /// ARR-01, measured: each variant extracted alone on sky130, the TOP-to-Ci

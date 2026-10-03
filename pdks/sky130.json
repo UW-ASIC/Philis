@@ -170,6 +170,40 @@
       },
       "note": "Per schematic model, the construction GPurify's sky130.deck recognises: rbody_high_po = poly_res and rpm (licon.1b slot contacts 190x2000 inside rpm+psdm), rbody_po = poly_res outside rpm/urpm."
     },
+    "capacitors": {
+      "default": "mom_m1m2",
+      "recipes": {
+        "mim_m3_1": {
+          "model": "sky130_fd_pr__cap_mim_m3_1",
+          "aliases": [
+            "cap_mim_m3_1"
+          ],
+          "layers": {
+            "bottom": "met3",
+            "plate": "capm",
+            "top_contact": "via3",
+            "top": "met4",
+            "strap": "met4",
+            "bottom_contact": "via2"
+          },
+          "c_area_af_um2": 2000,
+          "c_perim_af_um": 190,
+          "c_dw_nm": -25,
+          "c_model_source": "C = camimc*wc*lc + cpmimc*2*(wc+lc), wc = W + m3_dw + tol_m3, lc = L + m3_dw + tol_m3 (VOL/libs.ref/sky130_fd_pr/spice/sky130_fd_pr__cap_mim_m3_1.model.spice:17-18, 23-24); camimc 2.00 fF/um2, cpmimc 0.19 fF/um at typical (VOL/libs.tech/ngspice/r+c/res_typical__cap_typical__lin.spice:7-8); m3_dw = -0.025 um (VOL/libs.tech/ngspice/sky130_fd_pr__model__r+c.model.spice:82); tol_m3 = 0 at typical (r+c/res_typical__cap_typical.spice:10)."
+        },
+        "mom_m1m2": {
+          "model": "",
+          "layers": {
+            "bottom": "met1",
+            "top": "met2",
+            "top_contact": "via2",
+            "strap": "met3",
+            "bottom_contact": "via1"
+          }
+        }
+      },
+      "note": "Per schematic model, the construction GPurify's sky130.deck recognises: capm (terminals met4, met3) for cap_mim_m3_1. mom_m1m2 is the deck-unrecognised met1/met2 plate stack (no model), the default for a model no recipe names."
+    },
     "npn_isolation": 1,
     "npn_isolation_note": "sky130 vertical NPN (npn_05v5): n+ emitter and p-tap base in the p-region a deep n-well (dnwell) and an n-well ring isolate, collector tapped on the ring; nwell.5/nwell.6 set the ring against the deep well.",
     "waivers": {

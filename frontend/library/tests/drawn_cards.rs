@@ -56,6 +56,16 @@ fn two_segment_resistor(pdk: &verify::Pdk) -> library::Solution {
     sol.layout.hw[0] = m.bbox.w / 2;
     sol.layout.hh[0] = m.bbox.h / 2;
     sol.macros[0] = m;
+    let placed = pnr_core::place_macros(&sol.macros, &sol.layout);
+    let bank = &placed[0];
+    for (n, ws) in sol.routes.wires.iter().enumerate() {
+        for w in ws {
+            for s in bank.shapes.iter().filter(|s| s.layer == w.layer && s.rect.x < w.rect.x + w.rect.w && w.rect.x < s.rect.x + s.rect.w && s.rect.y < w.rect.y + w.rect.h && w.rect.y < s.rect.y + s.rect.h) {
+                eprintln!("PROBE overlap net {} wire {:?} cell {:?}", sol.netlist.nets[n].name, w, s);
+            }
+        }
+    }
+    eprintln!("PROBE bank pins {:?}", bank.pins.iter().map(|p| (&p.name, sol.netlist.nets.get(p.net.0 as usize).map(|n| &n.name), p.at)).collect::<Vec<_>>());
     sol.routes.wires.iter_mut().for_each(Vec::clear);
     sol
 }
@@ -86,4 +96,19 @@ fn a_missing_segment_is_an_lvs_error() {
     let mut sol = two_segment_resistor(&pdk);
     sol.macros[0].drawn.pop();
     assert!(!lvs_rows(&sol, &pdk).is_empty(), "a reference missing a drawn segment must not match");
+}
+
+/// CELL-08: dac4 with sky130 MIM capacitors runs the flow and signs off LVS
+/// clean with every one of its 16 units a capm card.
+#[test]
+fn a_mim_dac_signs_off_with_its_capacitors() {
+    let pdk = pdk();
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/dac4_mim.spice")).expect("dac4_mim fixture");
+    let cfg = library::Config { feedback_iters: 1, ..Default::default() };
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).expect("flow");
+    let caps = library::signoff_inputs(&sol, &pdk).2.devices.iter().filter(|d| d.kind == verify::RefKind::Capacitor).count();
+    assert_eq!(caps, 16, "one card per unit");
+    let rows = lvs_rows(&sol, &pdk);
+    assert!(rows.is_empty(), "{rows:?}");
 }

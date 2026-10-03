@@ -102,7 +102,6 @@ struct Geom {
     cut_w: [i32; 2],
     unit_w: i32,
     unit_h: i32,
-    unit_gap: i32,
     m_space: i32,
     device_gap: i32,
     inset: i32,
@@ -153,7 +152,6 @@ impl Geom {
             cut_w,
             unit_w: s.unit_w,
             unit_h: s.unit_l,
-            unit_gap,
             m_space,
             device_gap: process.rule("device_gap", 0),
             inset: unit_gap,
@@ -176,13 +174,14 @@ impl Geom {
     }
 
     /// Plate width for `n_units` — the unit grid merged into one plate, so the
-    /// `units_x × units_y` split only picks the aspect ratio.
+    /// `units_x × units_y` split only picks the aspect ratio. No gap terms: a
+    /// full grid's plate is exactly n·W·L (CELL-08).
     fn grid_w(&self, n_units: i32) -> i32 {
-        self.cols(n_units) * (self.unit_w + self.unit_gap) - self.unit_gap
+        self.cols(n_units) * self.unit_w
     }
 
     fn grid_h(&self, n_units: i32) -> i32 {
-        self.rows(n_units) * (self.unit_h + self.unit_gap) - self.unit_gap
+        self.rows(n_units) * self.unit_h
     }
 
     /// One device's full footprint: the plate plus, for the sandwich, its strap
@@ -446,6 +445,18 @@ mod tests {
             assert!(!(reached[i] && s.rect == top_spine), "TOP spine reachable from BOT — shorted");
         }
         assert!(reached.iter().filter(|r| **r).count() > 1, "BOT spine must reach its fingers");
+    }
+
+    /// CELL-08: four 2 µm units merge into one 16 µm² plate in every aspect.
+    #[test]
+    fn a_merged_plate_is_the_units_area() {
+        let pdk = TestPdk::full();
+        let (group, c) = one_cap(4, 2000);
+        for units_x in [1, 2, 4] {
+            let m = Capacitor { units_x, kind: Kind::HorizontalAcrossLayers }.draw(&group, &c, &pdk);
+            let plate = m.shapes.iter().filter(|s| s.layer.0 == 1).map(|s| i64::from(s.rect.w) * i64::from(s.rect.h)).max();
+            assert_eq!(plate, Some(16_000_000), "units_x={units_x}");
+        }
     }
 
     /// The three kinds must occupy three different metal stacks; before this they

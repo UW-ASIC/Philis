@@ -1824,6 +1824,9 @@ fn mirror_guide(hot: &RouteHot, grid: &TrackGrid, terms: &[Vec<u32>], a: usize, 
 /// `stack` holding a shape on the pin's layer — the stack's lowest for a pin
 /// below it — over the pin), and its gate pins (`…:G`) with their device and
 /// gate area from `gate_nm2` ([`DetailedCfg::gate_nm2`]). Empty without a stack.
+/// A cut inside a capacitor plate keep-out (a MIM's via3 on capm) joins no
+/// two stack layers: it contacts the plate, and the deck's metal via is the
+/// cut off it (sky130 `via3_m3 = via3 not capm`).
 ///
 /// ponytail: O(k²) per cell ([`analog::routing::Stack::connected`]); a cap
 /// array's thousands of cuts are the worst case.
@@ -1832,8 +1835,13 @@ fn cell_metal(placed: &[Macro], n_nets: usize, stack: Option<&analog::routing::S
     let Some(stack) = stack else { return (cell, gates) };
     let on_stack = |l: LayerId| stack.layers.iter().any(|x| x.id == l.0);
     let lowest = stack.layers.first().map(|l| LayerId(l.id));
+    let cut = |l: LayerId| stack.layers.iter().any(|x| x.id == l.0 && x.cut);
     for (c, m) in placed.iter().enumerate() {
-        let pieces = stack.connected(&m.shapes);
+        let plates: Vec<Rect> = m.keepouts.iter().filter(|k| matches!(k.why, pnr_core::KeepWhy::CapPlate { .. })).map(|k| k.rect).collect();
+        let inside = |r: Rect| plates.iter().any(|p| r.x >= p.x && r.y >= p.y && r.x + r.w <= p.x + p.w && r.y + r.h <= p.y + p.h);
+        let on: Vec<usize> = (0..m.shapes.len()).filter(|&k| !(cut(m.shapes[k].layer) && inside(m.shapes[k].rect))).collect();
+        let shapes: Vec<Shape> = on.iter().map(|&k| m.shapes[k]).collect();
+        let pieces: Vec<Vec<usize>> = stack.connected(&shapes).into_iter().map(|p| p.into_iter().map(|k| on[k]).collect()).collect();
         let mut taken = vec![false; pieces.len()];
         for p in &m.pins {
             let Some(net) = cell.get_mut(p.net.0 as usize) else { continue };
