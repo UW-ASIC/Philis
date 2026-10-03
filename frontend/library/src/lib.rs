@@ -1688,6 +1688,17 @@ pub(crate) fn labeled_pins(
 
 #[cfg(test)]
 mod start_tests {
+    /// GAP-04: the substrate kind comes from the deck's `substrate_kind`; a
+    /// misspelt key (here or in the sidecar) would silently read Unknown.
+    #[test]
+    fn substrate_kind_is_read_from_the_deck() {
+        use pnr_core::SubstrateKind::{Bulk, Unknown};
+        for (name, kind) in [("sky130", Bulk), ("gf180mcu", Unknown), ("ihp_sg13g2", Unknown), ("generic_finfet", Unknown)] {
+            let pdk = verify::Pdk::builtin(name).expect("deck loads");
+            assert_eq!(crate::annotation(&pdk, &Default::default()).process.substrate, kind, "{name}");
+        }
+    }
+
     /// Parallel starts stay deterministic: the same seed and start count give
     /// the same layout, however the threads interleave.
     #[test]

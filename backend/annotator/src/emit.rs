@@ -437,13 +437,14 @@ mod tests {
     #[test]
     fn bulk_is_cost_only_and_unknown() {
         let (nl, mut cfg) = strongarm_like();
+        assert_eq!(pnr_core::SubstrateKind::from_key(Some("epi_on_pplus")), pnr_core::SubstrateKind::EpiOnLowRes);
         cfg.process.substrate = pnr_core::SubstrateKind::from_key(Some("bulk"));
         cfg.process.epi_nm = Some(10_000);
         let p = crate::annotate(&nl, &cfg);
         assert!(isolated(&p.placement.budget).is_empty(), "not a budget");
         assert!(!isolated(&p.placement.cost).is_empty(), "a pull");
         assert_eq!(isolation_distance(&p.placement.cost), 4 * NOMINAL_EPI_NM);
-        assert!(p.missing.iter().any(|m| m.0 == "Isolation"), "reported unknown: {:?}", p.missing);
+        assert!(p.missing.contains(&("Isolation", "bulk substrate: no plateau distance")), "{:?}", p.missing);
 
         cfg.process.substrate = pnr_core::SubstrateKind::Unknown;
         let p = crate::annotate(&nl, &cfg);
