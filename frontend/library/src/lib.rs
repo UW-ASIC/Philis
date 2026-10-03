@@ -781,6 +781,7 @@ impl Flow<'_> {
         // Measured on the macros dp's variants draw, so `lattice_off` stamps what is drawn.
         let lattice = cells::builder::cut_lattice(self.pdk);
         let place = geometry::placement_metrics(&macros, &layout, lattice, place_rules(self.pdk).clearance, placement);
+        debug_assert_eq!(place.lattice_off, 0, "dp::place: cell origin off the cut lattice");
 
         // Guard rings enclose placed cells, so they are drawn now, before routing.
         let mut rings = cells::post_cell::guard_rings(&layout, &cells.guard_rings, self.pdk, ring_cut_ohm(self.pdk));
@@ -1476,8 +1477,9 @@ impl CellSpace {
         };
         // Reserve each ring's halo in the requester's bbox so the placer keeps
         // neighbours out of it; the ring is drawn back inside the reservation.
+        let lattice = cells::builder::cut_lattice(pdk);
         for r in &cells.guard_rings.guard_rings {
-            let ext = round_up(cells::post_cell::ring_halo(r, pdk, ring_cut_ohm(pdk)), pdk.grid.max(1));
+            let ext = round_up(cells::post_cell::ring_halo(r, pdk, ring_cut_ohm(pdk)), lattice);
             let Some(space) = cells.variants.get_mut(r.device.0 as usize) else {
                 continue;
             };
@@ -1487,6 +1489,11 @@ impl CellSpace {
                 m.bbox.w += 2 * ext;
                 m.bbox.h += 2 * ext;
             }
+        }
+        // Origins on the cut lattice need extents on twice it (PLC-02); generated
+        // and injected cells alike, before unit frames are taken from the bbox.
+        for m in cells.variants.iter_mut().flat_map(|s| s.alternatives.iter_mut()) {
+            m.align_bbox(lattice);
         }
         // After the halo: a unit's frame is the bbox `place_macro` anchors on.
         let per_cell: Vec<Vec<(pnr_core::Rect, &[pnr_core::Unit])>> = cells

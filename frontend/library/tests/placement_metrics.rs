@@ -3,12 +3,16 @@
 
 use library::{Config, GpMode, Solution};
 
-fn run_ota(cfg: &Config) -> Solution {
+fn run_fixture(name: &str, cfg: &Config) -> Solution {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
     let deck = std::fs::read_to_string(format!("{root}/pdks/sky130.json")).expect("sky130 deck present");
     let pdk = verify::Pdk::from_json(&deck).expect("deck parses");
-    let spice = std::fs::read_to_string(format!("{root}/benchmarks/fixtures/ota.spice")).expect("ota fixture present");
-    library::run(&spice, &pdk, &library::Macros::default(), cfg).expect("ota places")
+    let spice = std::fs::read_to_string(format!("{root}/benchmarks/fixtures/{name}.spice")).expect("fixture present");
+    library::run(&spice, &pdk, &library::Macros::default(), cfg).expect("fixture places")
+}
+
+fn run_ota(cfg: &Config) -> Solution {
+    run_fixture("ota", cfg)
 }
 
 fn small(gp_mode: GpMode) -> Config {
@@ -42,4 +46,17 @@ fn gp_modes_are_deterministic() {
         (&analytic.x, &analytic.y) != (&pile.x, &pile.y),
         "Pile placed ota exactly like Analytic: gp_mode not reaching gp::place"
     );
+}
+
+/// PLC-02: every cell's placed origin lands on the cut lattice, not just a
+/// multiple of the grid.
+#[test]
+fn every_origin_is_on_the_cut_lattice() {
+    for name in ["ota", "dac4", "rc_filter", "chain4", "quad"] {
+        for seed in 1..=3u64 {
+            let cfg = Config { starts: 1, feedback_iters: 2, outer_iters: 1, seed, ..Default::default() };
+            let sol = run_fixture(name, &cfg);
+            assert_eq!(sol.stats.place.lattice_off, 0, "{name} seed {seed}: {:?}", sol.stats.place);
+        }
+    }
 }
