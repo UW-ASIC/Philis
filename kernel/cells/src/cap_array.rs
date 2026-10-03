@@ -17,8 +17,8 @@
 //! calls `C_TB` is structurally absent (ARR-03).
 
 use crate::builder::dim;
-use std::cmp::Reverse;
 
+use analog::matching::pattern::{self, Fill, Grid};
 use analog::Constraints;
 use pnr_core::{DeviceGroup, Macro, Process, Rect, Unit};
 
@@ -129,181 +129,10 @@ pub fn bits(dev_nf: &[u16]) -> Option<u8> {
     dev_nf.iter().enumerate().all(|(i, &u)| u == want(i)).then_some(n as u8)
 }
 
-/// A general set's grid: `rows × cols` holding every unit, near square, one
-/// cell short at most per row; the cell per unit (`None` = an interior fill
-/// dummy), point-symmetric where counts allow (an odd count takes the centre
-/// cell, or pairs with another odd count across the centre).
-///
-/// `Spiral` fills each device's pairs outward in ring order, the largest
-/// first; `Chessboard` spreads each device's pairs farthest from its own
-/// (max dispersion), the largest first.
-fn general_assign(counts: &[u16], pattern: Pattern) -> (usize, usize, Vec<Option<u8>>) {
-    let total: usize = counts.iter().map(|&u| usize::from(u)).sum();
-    let cols = (total as f64).sqrt().ceil() as usize;
-    let rows = total.div_ceil(cols);
-    let mut g = Grid { cols, slot: vec![None; rows * cols] };
-    let key = |i: usize| {
-        let (dr, dc) = (2 * (i / cols) as i64 - rows as i64 + 1, 2 * (i % cols) as i64 - cols as i64 + 1);
-        ((dr * dr + dc * dc), (dr as f64).atan2(dc as f64))
-    };
-    let mut order: Vec<usize> = (0..rows * cols).collect();
-    order.sort_by(|&a, &b| key(a).0.cmp(&key(b).0).then(key(a).1.total_cmp(&key(b).1)));
-    // Odd counts first: the centre cell (odd grid) for one, reflected pairs
-    // split between two for the rest.
-    let mut left: Vec<usize> = counts.iter().map(|&u| usize::from(u)).collect();
-    let mut odd: Vec<usize> = (0..left.len()).filter(|&d| left[d] % 2 == 1).collect();
-    if (rows * cols) % 2 == 1 {
-        if let Some(d) = odd.pop() {
-            let c = rows * cols / 2;
-            g.slot[c] = Some(d as u8);
-            left[d] -= 1;
-        }
-    }
-    for pair in odd.chunks(2) {
-        let Some(i) = order.iter().copied().find(|&i| g.free_pair(i)) else { break };
-        let j = g.refl(i);
-        g.slot[i] = Some(pair[0] as u8);
-        left[pair[0]] -= 1;
-        if let Some(&d) = pair.get(1) {
-            g.slot[j] = Some(d as u8);
-            left[d] -= 1;
-        }
-    }
-    let mut by_size: Vec<usize> = (0..left.len()).collect();
-    by_size.sort_by_key(|&d| (Reverse(left[d]), d));
-    for d in by_size {
-        match pattern {
-            Pattern::Chessboard => {
-                let cells: Vec<usize> = (0..rows * cols).collect();
-                g.spread(&cells, d as u8, left[d]);
-            }
-            _ => {
-                for &i in &order {
-                    if left[d] >= 2 && g.free_pair(i) {
-                        g.put_pair(i, d as u8);
-                        left[d] -= 2;
-                    }
-                }
-            }
-        }
-        left[d] = 0;
-    }
-    (rows, cols, g.slot)
-}
-
 /// Rows × columns holding `2^m` units, columns ≥ rows unless `tall`.
 fn dims(m: u8, tall: bool) -> (usize, usize) {
     let (r, c) = (1usize << (m / 2), 1usize << (m - m / 2));
     if tall { (c, r) } else { (r, c) }
-}
-
-/// A row-major unit grid under construction. Point reflection through the
-/// centre is index reversal: `(R-1-r)·C + (C-1-c) = RC-1-i`.
-struct Grid {
-    cols: usize,
-    slot: Vec<Option<u8>>,
-}
-
-impl Grid {
-    fn refl(&self, i: usize) -> usize {
-        self.slot.len() - 1 - i
-    }
-
-    fn free_pair(&self, i: usize) -> bool {
-        let j = self.refl(i);
-        i != j && self.slot[i].is_none() && self.slot[j].is_none()
-    }
-
-    fn put_pair(&mut self, i: usize, s: u8) {
-        let j = self.refl(i);
-        self.slot[i] = Some(s);
-        self.slot[j] = Some(s);
-    }
-
-    /// Cells of the `rows × cols` rectangle at `(r0, c0)`.
-    fn rect(&self, (r0, c0, rows, cols): (usize, usize, usize, usize)) -> Vec<usize> {
-        (r0..r0 + rows).flat_map(|r| (c0..c0 + cols).map(move |c| (r, c))).map(|(r, c)| r * self.cols + c).collect()
-    }
-
-    fn rc(&self, i: usize) -> (i64, i64) {
-        ((i / self.cols) as i64, (i % self.cols) as i64)
-    }
-
-    /// Complete chessboard of C0..=Ctop over `rect` (`2^top` cells): Ctop on
-    /// the black squares, C0/C1 on the most central pair, each other bit by
-    /// [`Grid::spread`].
-    fn chessboard(&mut self, rect: (usize, usize, usize, usize), top: u8) {
-        let cells = self.rect(rect);
-        for &i in &cells {
-            let (r, c) = self.rc(i);
-            if (r - rect.0 as i64 + c - rect.1 as i64) % 2 == 0 {
-                self.slot[i] = Some(top);
-            }
-        }
-        // The one-unit C0/C1 cannot be common-centroid: pin them to the free
-        // pair nearest the centre before the spread claims it.
-        let rows = self.slot.len() / self.cols;
-        let off = |i: usize| {
-            let (r, c) = self.rc(i);
-            (2 * r - rows as i64 + 1).pow(2) + (2 * c - self.cols as i64 + 1).pow(2)
-        };
-        let mid = cells.iter().copied().filter(|&i| self.free_pair(i)).min_by_key(|&i| (off(i), i)).expect("C0/C1 pair");
-        self.slot[mid] = Some(0);
-        let j = self.refl(mid);
-        self.slot[j] = Some(1);
-        for b in (2..top).rev() {
-            self.spread(&cells, b, 1 << (b - 1));
-        }
-    }
-
-    /// `count` units of `s` from `cells`, in reflected pairs, each pair the
-    /// free cell farthest from the units already placed (max dispersion).
-    ///
-    /// ponytail: greedy farthest-point, O(cells²) per bit; fine to 256 units.
-    fn spread(&mut self, cells: &[usize], s: u8, count: usize) {
-        let mut mine: Vec<(i64, i64)> = Vec::new();
-        while mine.len() < count {
-            let best = cells
-                .iter()
-                .copied()
-                .filter(|&i| self.free_pair(i))
-                .max_by_key(|&i| {
-                    let (r, c) = self.rc(i);
-                    let near = mine.iter().map(|&(qr, qc)| (r - qr).pow(2) + (c - qc).pow(2)).min();
-                    (near.unwrap_or(i64::MAX), Reverse(i))
-                })
-                .expect("a free reflected pair");
-            self.put_pair(best, s);
-            mine.push(self.rc(best));
-            mine.push(self.rc(self.refl(best)));
-        }
-    }
-
-    /// Algorithm 1 step 2 for one corridor (`outer` minus `inner`): Ci pairs
-    /// block-chessboard first, Ci+1 on what is left.
-    ///
-    /// ponytail: the paper walks the upper-half blocks explicitly; this orders
-    /// the corridor by block parity and lets the reflection mirror it, so a
-    /// block whose mirror has the other parity mixes colours.
-    fn corridor(&mut self, outer: (usize, usize, usize, usize), inner: (usize, usize, usize, usize), i: u8, bs: usize) {
-        let inside = self.rect(inner);
-        let mut cells: Vec<usize> = self.rect(outer).into_iter().filter(|c| !inside.contains(c)).collect();
-        cells.sort_by_key(|&c| {
-            let (r, col) = self.rc(c);
-            let (br, bc) = ((r as usize - outer.0) / bs, (col as usize - outer.1) / bs);
-            ((br + bc) % 2, c)
-        });
-        let mut left = 1usize << (i - 1);
-        for &c in &cells {
-            if left > 0 && self.free_pair(c) {
-                self.put_pair(c, i);
-                left -= 2;
-            }
-        }
-        for &c in &cells {
-            self.slot[c].get_or_insert(i + 1);
-        }
-    }
 }
 
 impl CapArray {
@@ -410,7 +239,9 @@ impl CapArray {
                 (n, rows, cols, self.assign(n).into_iter().map(Some).collect::<Vec<_>>())
             }
             None => {
-                let (rows, cols, slots) = general_assign(&s.dev_nf, self.pattern);
+                let (rows, cols) = pattern::grids(&s.dev_nf, 3.0)[0];
+                let fill = if self.pattern == Pattern::Chessboard { Fill::Dispersed } else { Fill::Compact };
+                let slots = pattern::centro_assign(&s.dev_nf, rows, cols, fill).0;
                 ((s.dev_nf.len() - 1) as u8, rows, cols, slots)
             }
         };
@@ -742,7 +573,9 @@ mod tests {
     fn a_general_set_is_exact_and_even_counts_are_centred() {
         for counts in GENERAL {
             for pattern in [Pattern::Spiral, Pattern::Chessboard] {
-                let (rows, cols, slots) = general_assign(counts, pattern);
+                let (rows, cols) = pattern::grids(counts, 3.0)[0];
+                let fill = if pattern == Pattern::Chessboard { Fill::Dispersed } else { Fill::Compact };
+                let slots = pattern::centro_assign(counts, rows, cols, fill).0;
                 for (d, &n) in counts.iter().enumerate() {
                     let mine: Vec<usize> = (0..slots.len()).filter(|&i| slots[i] == Some(d as u8)).collect();
                     assert_eq!(mine.len(), usize::from(n), "{counts:?} {pattern:?}: device {d}");

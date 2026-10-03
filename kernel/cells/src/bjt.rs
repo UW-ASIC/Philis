@@ -6,6 +6,7 @@
 //! Every gap and width is the deck's.
 
 use crate::builder::dim;
+use analog::matching::pattern::{self, Fill};
 use analog::Constraints;
 use pnr_core::{DeviceGroup, DeviceKind, Macro, NetId, Pin, Process, Rect};
 
@@ -14,12 +15,15 @@ use crate::post_cell::tap_ring;
 use crate::Cell;
 
 /// One BJT variant: the group's unit devices (each member's `dev_nf` units)
-/// arrayed in `columns`, filled centre-out with the smallest member first: a
-/// 1:8 pair lands as the classic 3×3, the one unit centred in the eight
-/// (Hastings §10.2, ratioed bipolars). Area ratio comes from unit count,
-/// never emitter scaling. Neighbouring units share their collector band.
+/// on a `rows × columns` grid, owners from
+/// [`pattern::centro_assign`]`(Balanced)`: every member point-symmetric about
+/// the grid centre when at most one count is odd, so a 1:8 pair is the
+/// classic 3×3 with the one unit centred (Hastings §10.2, ratioed bipolars).
+/// Empty cells stay empty. Area ratio comes from unit count, never emitter
+/// scaling. Neighbouring units share their collector band.
 #[derive(Clone)]
 pub struct Bjt {
+    pub rows: u16,
     pub columns: u16,
 }
 
@@ -35,16 +39,15 @@ impl Cell for Bjt {
             return vec![];
         }
         let s = group_sizing(group, _constraints, _process);
-        let n = s.dev_nf.iter().map(|&u| u.max(1)).sum::<u16>().max(1);
-        let square = (f64::from(n).sqrt().ceil() as u16).max(1);
-        // A matched set only as the square: a line centres it in one axis
-        // only and strings its routing out.
-        let mut cols = if group.devices.len() > 1 { vec![square] } else { vec![1, n, square] };
+        let counts = unit_counts(&s);
+        let n = counts.iter().sum::<u16>();
+        if group.devices.len() > 1 {
+            return pattern::grids(&counts, 3.0).into_iter().map(|(r, c)| Bjt { rows: r as u16, columns: c as u16 }).collect();
+        }
+        let mut cols = vec![1, n, (f64::from(n).sqrt().ceil() as u16).max(1)];
         cols.sort_unstable();
         cols.dedup();
-        cols.into_iter()
-            .map(|columns| Bjt { columns })
-            .collect()
+        cols.into_iter().map(|columns| Bjt { rows: n.div_ceil(columns), columns }).collect()
     }
 
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro {
@@ -52,16 +55,15 @@ impl Cell for Bjt {
         let s = group_sizing(group, constraints, process);
         let pnp = device_is_pnp(group, constraints);
         let u = Unit::new(&s, pnp, process);
-        let owners = unit_order(&s.dev_nf, i32::from(self.columns.max(1)));
-        let total = owners.iter().flatten().count();
-        let cols = i32::from(self.columns.max(1)).min(total.max(1) as i32);
+        let cols = i32::from(self.columns);
+        let (owners, _) = pattern::centro_assign(&unit_counts(&s), usize::from(self.rows), usize::from(self.columns), Fill::Balanced);
         // PNP units abut on a shared collector band (the substrate); NPN
         // units each keep their own isolation, the deck's spacings apart.
         let lat = cut_lattice(process);
         let (px, py) = (snap_cut(u.pitch.0 + lat - 1, lat), snap_cut(u.pitch.1 + lat - 1, lat));
         for (slot, di) in owners.iter().enumerate().filter_map(|(i, d)| Some((i, (*d)?))) {
             let (ox, oy) = ((slot as i32 % cols) * px, (slot as i32 / cols) * py);
-            u.draw(&mut b, process, di, ox, oy);
+            u.draw(&mut b, process, usize::from(di), ox, oy);
         }
         b.cover_poly_cuts(process);
         b.finish()
@@ -152,6 +154,7 @@ impl Unit {
         let lat = cut_lattice(process);
         let ct = dim(process, "contact");
         let e = at(self.emitter);
+        b.unit(pnr_core::Unit { owner: di as u8, x: e.x + e.w / 2, y: e.y + e.h / 2, weight: i64::from(e.w) * i64::from(e.h), phi: (0, 0), sa: 0, sb: 0 });
 
         // Emitter: diffusion, its implant, a contact array under one li
         // plate (cuts `max(enclosure, end-cap)` inside the diffusion, li the
@@ -202,32 +205,9 @@ impl Unit {
     }
 }
 
-/// Owner per slot of a `cols`-wide grid holding every member's units: slots
-/// ordered by distance from the grid centre (then angle), members smallest
-/// first, so a lone unit takes the centre and a large member surrounds it.
-fn unit_order(dev_nf: &[u16], cols: i32) -> Vec<Option<usize>> {
-    let total: usize = dev_nf.iter().map(|&u| usize::from(u.max(1))).sum();
-    let cols = (cols.max(1) as usize).min(total.max(1));
-    let rows = total.div_ceil(cols);
-    let key = |i: usize| {
-        let (dr, dc) = (2 * (i / cols) as i64 - rows as i64 + 1, 2 * (i % cols) as i64 - cols as i64 + 1);
-        (dr * dr + dc * dc, (dr as f64).atan2(dc as f64))
-    };
-    let mut order: Vec<usize> = (0..rows * cols).collect();
-    order.sort_by(|&a, &b| key(a).0.cmp(&key(b).0).then(key(a).1.total_cmp(&key(b).1)));
-    let mut members: Vec<usize> = (0..dev_nf.len()).collect();
-    members.sort_by_key(|&d| (dev_nf[d], d));
-    let mut owner = vec![None; rows * cols];
-    let mut at = order.into_iter();
-    for d in members {
-        for _ in 0..dev_nf[d].max(1) {
-            if let Some(i) = at.next() {
-                owner[i] = Some(d);
-            }
-        }
-    }
-    // Row-major; a short grid leaves its outermost cells empty.
-    owner
+/// Units per member: a member without units draws one.
+fn unit_counts(s: &Sizing) -> Vec<u16> {
+    s.dev_nf.iter().map(|&u| u.max(1)).collect()
 }
 
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
@@ -259,24 +239,51 @@ mod tests {
                 dirty.extend(testkit::dirty::<Bjt>(kind, n, 1, 1000, 1000, &pdk));
             }
         }
-        // A 1:8 bandgap pair: nine units.
-        for kind in [DeviceKind::Npn, DeviceKind::Pnp] {
-            let (g, mut c) = testkit::group_of(kind, 2, 1, 1000, 1000);
-            c.unitization[0].dev_nf = vec![1, 8];
-            dirty.extend(testkit::dirty_group::<Bjt>(&g, &c, &pdk).into_iter().map(|d| format!("{kind:?} 1:8 {d}")));
+        // A 1:8 bandgap pair (nine units), an equal pair, and 1:4, whose 3×3
+        // "+" cross leaves the four corners empty.
+        for counts in [[1, 8], [2, 2], [1, 4]] {
+            for kind in [DeviceKind::Npn, DeviceKind::Pnp] {
+                let (g, mut c) = testkit::group_of(kind, 2, 1, 1000, 1000);
+                c.unitization[0].dev_nf = counts.to_vec();
+                dirty.extend(testkit::dirty_group::<Bjt>(&g, &c, &pdk).into_iter().map(|d| format!("{kind:?} {counts:?} {d}")));
+            }
         }
         assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
     }
 
-    /// 1:8 on a 3×3: the one unit at the centre, the eight around it, both
-    /// centroids on the middle cell.
+    /// Every PNP a:b (a ≤ 2, b ≤ 16, at most one odd) on every grid variant:
+    /// each member's area-weighted emitter centroid on the others' within
+    /// 1 nm, one recorded unit per emitter.
     #[test]
-    fn a_one_to_eight_pair_centres_the_single_unit() {
-        let o = unit_order(&[1, 8], 3);
-        assert_eq!(o.len(), 9);
-        assert_eq!(o[4], Some(0), "{o:?}");
-        assert_eq!(o.iter().filter(|&&d| d == Some(1)).count(), 8);
-        // Device 1's slots are point-symmetric about the centre.
-        assert!((0..9).all(|i| o[i] == o[8 - i]));
+    fn every_bjt_ratio_is_common_centroid() {
+        use crate::testkit;
+        let Some(pdk) = testkit::pdk() else {
+            eprintln!("sky130 PDK unavailable — skipping");
+            return;
+        };
+        for a in 1..=2u16 {
+            for b in 1..=16u16 {
+                if (a % 2 + b % 2) > 1 {
+                    continue;
+                }
+                let (g, mut c) = testkit::group_of(DeviceKind::Pnp, 2, 1, 1000, 1000);
+                c.unitization[0].dev_nf = vec![a, b];
+                let variants = Bjt::enumerate(&g, &c, &pdk);
+                assert!(!variants.is_empty(), "{a}:{b}");
+                for v in variants {
+                    let m = v.draw(&g, &c, &pdk);
+                    let at = format!("{a}:{b} on {}×{}", v.rows, v.columns);
+                    assert_eq!(m.units.len(), usize::from(a + b), "{at}");
+                    let centre = |d: u8| {
+                        let (w, x, y) = m.units.iter().filter(|u| u.owner == d).fold((0i64, 0i64, 0i64), |(w, x, y), u| {
+                            (w + u.weight, x + u.weight * i64::from(u.x), y + u.weight * i64::from(u.y))
+                        });
+                        (x as f64 / w as f64, y as f64 / w as f64)
+                    };
+                    let ((x0, y0), (x1, y1)) = (centre(0), centre(1));
+                    assert!((x0 - x1).abs() <= 1.0 && (y0 - y1).abs() <= 1.0, "{at}: ({x0}, {y0}) vs ({x1}, {y1})");
+                }
+            }
+        }
     }
 }

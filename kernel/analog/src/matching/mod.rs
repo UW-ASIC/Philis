@@ -2,3 +2,4 @@
 //! ledger shared by every matched-set rule.
 
 pub mod moments;
+pub mod pattern;
