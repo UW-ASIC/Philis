@@ -79,17 +79,21 @@ pub fn routing(
     // leaves (EXT-09): no positional-pin or O(N²) device-pair scan.
     let class = |n: NetId| classes[n.0 as usize].class;
     let pin = |d: DeviceId, p: &str| crate::pattern::pin_net(hg, u32::from(d.0), p);
+    // Leaves can share nets (latch: two pairs on q/qb; gilbert: a leaf whose devices
+    // share a gate): one rule per unordered net pair, first orientation kept.
+    let mut seen = std::collections::HashSet::new();
+    let mut fresh = |x: NetId, y: NetId, kind: u8| seen.insert((kind, x.0.min(y.0), x.0.max(y.0)));
     let mut diff: Vec<Differential> = Vec::new();
     let mut xtalk: Vec<CrosstalkExclusion> = Vec::new();
     for &(a, b) in pairs {
         if let (Some(da), Some(db)) = (pin(a, "D"), pin(b, "D")) {
-            if da != db {
+            if da != db && fresh(da, db, 0) {
                 diff.push(Differential { pos: da, neg: db, max_len_delta_pct10: policy.diff_pct10, same_layer_required: true, stack: process.stack });
             }
         }
         for g in [pin(a, "G"), pin(b, "G")].into_iter().flatten() {
             for d in [pin(a, "D"), pin(b, "D")].into_iter().flatten() {
-                if g != d {
+                if g != d && fresh(g, d, 1) {
                     let min_spacing_nm = process.route_space_nm * spacing_multiple(class(g)).max(spacing_multiple(class(d)));
                     xtalk.push(CrosstalkExclusion { a: g, b: d, min_spacing_nm, margin_pct: 25 });
                 }

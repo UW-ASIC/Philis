@@ -348,7 +348,7 @@ mod tests {
     }
 
     /// StrongARM-like stage: input pair `mn1`/`mn2` on a tail node, `mn0` the
-    /// tail on `clk`, cross-coupled PMOS loads; plus `XS`, a lone clocked
+    /// tail on `clk`, PMOS loads on `clk` (the StrongARM's precharge pair); plus `XS`, a lone clocked
     /// switch outside every block. Nets: 0=outp 1=inp 2=tail 3=VSS 4=outn
     /// 5=inn 6=clk 7=VDD 8=sw 9=sw2.
     fn strongarm_like() -> (Netlist, crate::AnnotationConfig) {
@@ -357,8 +357,8 @@ mod tests {
             devices: vec![
                 fet("mn1", DeviceKind::Nmos, 1, 0, 2, 3, 10_000, 1_000),
                 fet("mn2", DeviceKind::Nmos, 5, 4, 2, 3, 10_000, 1_000),
-                fet("mp3", DeviceKind::Pmos, 4, 0, 7, 7, 20_000, 1_000),
-                fet("mp4", DeviceKind::Pmos, 0, 4, 7, 7, 20_000, 1_000),
+                fet("mp3", DeviceKind::Pmos, 6, 0, 7, 7, 20_000, 1_000),
+                fet("mp4", DeviceKind::Pmos, 6, 4, 7, 7, 20_000, 1_000),
                 fet("mn0", DeviceKind::Nmos, 6, 2, 3, 3, 40_000, 1_000),
                 fet("XS", DeviceKind::Nmos, 6, 8, 9, 3, 1_000, 150),
             ],

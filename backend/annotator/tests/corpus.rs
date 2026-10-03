@@ -88,7 +88,8 @@ const EXPECTED: [Row; 17] = [
     ("ota5t", &[("Load", &["XM3", "XM4"]), ("DiffPair", &["XM1", "XM2"])], &[("XM1", "XM2"), ("XM3", "XM4")], &["XM5"], &[("vout1", "vout2")], 1),
     // EXT-05: declared roles: diff_pair_with_mirror_load's slots 2,3 are a Load.
     ("three_stage", &[("DiffPair", &["M1", "M2"]), ("Group", &["M6", "M8", "M9"]), ("Load", &["M4", "M5"])], &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2")], 1),
-    ("dac4", &[("Group", &["XMN0", "XMP0"]), ("Group", &["XMN1", "XMP1"]), ("Group", &["XMN2", "XMP2"]), ("Group", &["XMN3", "XMP3"])], &[], &[], &[], 0),
+    // EXT-05 review: `cmos_inverter`'s declared prox makes each switch inverter a Stack leaf.
+    ("dac4", &[("Stack", &["XMN0", "XMP0"]), ("Stack", &["XMN1", "XMP1"]), ("Stack", &["XMN2", "XMP2"]), ("Stack", &["XMN3", "XMP3"])], &[], &[], &[], 0),
     ("bgr_core", &[], &[], &[], &[], 0),
     ("bjt_mirror", &[], &[], &[], &[], 0),
     // EXT-05: series_stack_4 declares no roles, so no re-searched Stack children.
@@ -123,6 +124,8 @@ const EXPECTED: [Row; 17] = [
     // cross_coupled_inverters' pairs; complementary_diff_pair's sources must be a
     // signal, so the output inverters no longer match it and mp9/mp10 join
     // undeclared 3-device groups (their CurrentMirror was a misrecognition).
+    // EXT-05 review: the out-of-plan `diff_pair_cross_coupled_load` entry is gone; the
+    // row is unchanged, as `five_transistor_ota` (EXT-06 selection) claims mn1/mn2/mp7/mp8/mn0.
     // EXT-09: `net_pairs` gains (vin_o, vip_o) — the second DiffPair leaf (mn3, mn4)
     // now also yields a Differential; the old device-pair scan missed it.
     ("strongarm", &[("DiffPair", &["mn1", "mn2"]), ("DiffPair", &["mn3", "mn4"]), ("DiffPair", &["mp5", "mp6"]), ("Group", &["mn13", "mp10", "mp11"]), ("Group", &["mn14", "mp12", "mp9"]), ("Load", &["mp7", "mp8"]), ("Stack", &["mn3", "mp5"]), ("Stack", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mn3", "mn4"), ("mp5", "mp6"), ("mp7", "mp8")], &["mn0"], &[("vin_d", "vip_d"), ("vin_o", "vip_o")], 2),
@@ -255,18 +258,43 @@ fn differential_comes_from_recognized_pairs() {
     let nl = net(&src("dac4").replace("VSS", "0"));
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(count(&p.routing.hard) + count(&p.routing.budget) + count(&p.routing.cost), 0, "dac4");
+    assert!(xtalk(&nl, &p).is_empty(), "dac4 crosstalk");
 
-    // ota5t has exactly one DiffPair leaf: exactly 1 Differential, in budget only.
+    // ota5t has exactly one DiffPair leaf: exactly 1 Differential, in budget only,
+    // and a CrosstalkExclusion from each input gate to each output drain.
     let nl = net(src("ota5t"));
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(count(&p.routing.hard), 0, "ota5t hard");
     assert_eq!(count(&p.routing.budget), 1, "ota5t budget");
+    let want: BTreeSet<_> = [("vinm", "vout1"), ("vinm", "vout2"), ("vinp", "vout1"), ("vinp", "vout2")].map(|(a, b)| (a.to_string(), b.to_string())).into();
+    let got = xtalk(&nl, &p);
+    assert_eq!((got.len(), got.into_iter().collect::<BTreeSet<_>>()), (4, want), "ota5t crosstalk");
+
+    // latch: its two DiffPair leaves share drains (q, qb); one rule per net pair.
+    let nl = net(src("latch"));
+    let p = annotate(&nl, &AnnotationConfig::default());
+    assert_eq!(count(&p.routing.budget), 1, "latch Differential");
+    assert_eq!(xtalk(&nl, &p), [("q".to_string(), "qb".to_string())], "latch crosstalk");
+}
+
+/// `CrosstalkExclusion` net-name pairs (each sorted), in emission order.
+fn xtalk(nl: &pnr_core::Netlist, p: &annotator::Problem) -> Vec<(String, String)> {
+    let mut v = Vec::new();
+    for b in p.routing.budget.iter().filter(|b| b.kind().ends_with("::CrosstalkExclusion")) {
+        let mut nets = Vec::new();
+        b.touched(&mut nets);
+        for c in nets.chunks(2) {
+            let (a, z) = (nl.nets[c[0] as usize].name.clone(), nl.nets[c[1] as usize].name.clone());
+            v.push(if a < z { (a, z) } else { (z, a) });
+        }
+    }
+    v
 }
 
 /// T7: every device is in a requirement or reported `Unconstrained(reason)`.
 #[test]
 fn coverage_is_total() {
-    use annotator::Coverage::{Constrained, Unconstrained};
+    use annotator::Coverage::{Constrained, Grouped, Unconstrained};
     for (name, src) in all() {
         let nl = net(src);
         let p = annotate(&nl, &cfg(name));
@@ -279,6 +307,8 @@ fn coverage_is_total() {
         }
         match name {
             "ota5t" => assert!(p.coverage.iter().all(|c| c.1 == Constrained), "{name}: {:?}", p.coverage),
+            // A role-less composite: recognised, nothing emitted on it.
+            "chain4" => assert!(p.coverage.iter().all(|c| c.1 == Grouped("series_stack_4")), "{name}: {:?}", p.coverage),
             "rdiv" => assert!(p.coverage.iter().all(|c| c.1 == Unconstrained("no pattern")), "{name}: {:?}", p.coverage),
             _ => {}
         }

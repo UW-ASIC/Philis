@@ -476,4 +476,43 @@ mod tests {
         }
         assert!(all.len() > sel.len(), "{} matches, {} selected", all.len(), sel.len());
     }
+
+    /// [`select_disjoint`] over `devs` (name, label) and equal-priority `ms`, device
+    /// ids and input order optionally reversed: the selected members' sorted names.
+    fn pick(devs: &[(&'static str, u64)], ms: &[(&'static Pattern, [&str; 2])], rev_ids: bool, rev_in: bool) -> Vec<Vec<&'static str>> {
+        let mut order: Vec<usize> = (0..devs.len()).collect();
+        if rev_ids {
+            order.reverse();
+        }
+        let names: Vec<&'static str> = order.iter().map(|&i| devs[i].0).collect();
+        let canon: Vec<u64> = order.iter().map(|&i| devs[i].1).collect();
+        let id = |n: &str| names.iter().position(|&x| x == n).unwrap() as u32;
+        let mut all: Vec<PatternMatch> =
+            ms.iter().map(|&(p, [a, b])| PatternMatch { template: p.name, pattern: p, instances: vec![id(a), id(b)], priority: 10 }).collect();
+        if rev_in {
+            all.reverse();
+        }
+        let sorted = |m: &PatternMatch| {
+            let mut v: Vec<&'static str> = m.instances.iter().map(|&i| names[i as usize]).collect();
+            v.sort_unstable();
+            v
+        };
+        select_disjoint(&all, &canon, &names).iter().map(sorted).collect()
+    }
+
+    /// EXT-06's key below priority: a match declaring pairs beats an overlapping one
+    /// declaring none, even with larger labels; label-identical (automorphic) matches
+    /// fall to sorted names. Neither depends on device ids or input order.
+    #[test]
+    fn select_disjoint_prefers_declared_pairs_then_names() {
+        use crate::catalog::{DIFF_PAIR, PUSH_PULL_PAIR};
+        let roles = [("A", 5), ("B", 5), ("C", 1)];
+        let twins = [("E", 7), ("F", 7), ("G", 7)];
+        for (rev_ids, rev_in) in [(false, false), (false, true), (true, false), (true, true)] {
+            let got = pick(&roles, &[(&DIFF_PAIR, ["A", "B"]), (&PUSH_PULL_PAIR, ["B", "C"])], rev_ids, rev_in);
+            assert_eq!(got, [["A", "B"]], "declared pairs first ({rev_ids}, {rev_in})");
+            let got = pick(&twins, &[(&DIFF_PAIR, ["E", "F"]), (&DIFF_PAIR, ["F", "G"])], rev_ids, rev_in);
+            assert_eq!(got, [["E", "F"]], "names break label ties ({rev_ids}, {rev_in})");
+        }
+    }
 }

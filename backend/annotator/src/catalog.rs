@@ -2421,8 +2421,6 @@ const fn roles(pairs: &'static [(u8, u8, BlockKind)], selfs: &'static [u8], prox
 pub const ROLES: &[(&str, Roles)] = &[
     ("cmos_inverter", roles(&[], &[], &[(0, 1)])),
     ("five_transistor_ota", roles(&[(0, 1, DiffPair), (2, 3, Load)], &[4], &[])),
-    // Same slots as `five_transistor_ota`, the load cross-coupled.
-    ("diff_pair_cross_coupled_load", roles(&[(0, 1, DiffPair), (2, 3, Load)], &[4], &[])),
     ("diff_pair_with_active_load", roles(&[(0, 1, DiffPair), (2, 3, Load)], &[], &[])),
     ("diff_pair_with_mirror_load", roles(&[(0, 1, DiffPair), (2, 3, Load)], &[], &[])),
     ("diff_pair_with_tail", roles(&[(0, 1, DiffPair)], &[2], &[])),
@@ -2475,13 +2473,17 @@ mod tests {
     use pnr_core::netlist::{Device, DeviceKind, Net, Netlist};
     use std::collections::{HashMap, HashSet};
 
-    /// A reference, if any, that `kind`/`size_match` points at.
-    fn back_ref(slot: &Slot) -> Option<u8> {
-        match (slot.kind, slot.size_match) {
-            (SlotKind::SameTypeAs(r) | SlotKind::ComplementOf(r), _) => Some(r),
-            (_, SizeMatch::ExactAs(r) | SizeMatch::SameLAs(r)) => Some(r),
+    /// The slots `kind` and `size_match` refer to (0, 1 or 2 of them).
+    fn back_refs(slot: &Slot) -> impl Iterator<Item = u8> {
+        let kr = match slot.kind {
+            SlotKind::SameTypeAs(r) | SlotKind::ComplementOf(r) => Some(r),
+            SlotKind::AnyFet => None,
+        };
+        let sr = match slot.size_match {
+            SizeMatch::ExactAs(r) | SizeMatch::SameLAs(r) => Some(r),
             _ => None,
-        }
+        };
+        [kr, sr].into_iter().flatten()
     }
 
     #[test]
@@ -2491,7 +2493,7 @@ mod tests {
         for p in PATTERNS {
             assert!(names.insert(p.name), "duplicate pattern name {}", p.name);
             for (k, slot) in p.slots.iter().enumerate() {
-                if let Some(r) = back_ref(slot) {
+                for r in back_refs(slot) {
                     assert!((r as usize) < k, "{}: slot {k} refers forward to slot {r}", p.name);
                 }
             }

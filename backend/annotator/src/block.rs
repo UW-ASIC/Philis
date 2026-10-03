@@ -72,8 +72,10 @@ impl BlockKind {
 }
 
 impl Block {
-    /// A 2-device match is its own leaf; a larger one is a `Group` whose children
-    /// and selfs are its pattern's declared roles, devices in slot order.
+    /// A 2-device match is its own leaf, its kind from its roles (the declared
+    /// pair's kind, else `Stack` for a declared prox, else `Group`); a larger one is
+    /// a `Group` whose children and selfs are its pattern's declared roles, devices
+    /// in slot order.
     pub(crate) fn from_match(m: &PatternMatch) -> Self {
         let dev = |s: u8| DeviceId(m.instances[s as usize] as u16);
         let n = m.instances.len();
@@ -92,8 +94,13 @@ impl Block {
             let pairs = roles.pairs.iter().map(|&(a, b, k)| leaf(k, a, b));
             pairs.chain(roles.prox.iter().map(|&(a, b)| leaf(BlockKind::Stack, a, b))).collect()
         };
+        let kind = match (n, roles.pairs.first(), roles.prox.is_empty()) {
+            (2, Some(&(_, _, k)), _) => k,
+            (2, None, false) => BlockKind::Stack,
+            _ => BlockKind::Group,
+        };
         Block {
-            kind: BlockKind::from_template(m.template, n),
+            kind,
             template: m.template,
             devices: m.instances.iter().map(|&d| DeviceId(d as u16)).collect(),
             injected: false,

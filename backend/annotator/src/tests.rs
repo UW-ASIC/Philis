@@ -318,7 +318,8 @@ fn missing_is_relevant() {
         nets: nets(&["a", "b", "c", "d"]),
     };
     let p = annotate(&nl, &AnnotationConfig::default());
-    assert!(!p.missing.iter().any(|m| ["MatchingPair", "Antenna"].contains(&m.0)), "{:?}", p.missing);
+    // ... and no gate area, so no net budget either.
+    assert!(!p.missing.iter().any(|m| ["MatchingPair", "Antenna", "ParasiticBudget", "CouplingBudget"].contains(&m.0)), "{:?}", p.missing);
     let p = annotate(&ota(), &AnnotationConfig::default());
     assert!(p.missing.contains(&("MatchingPair", "deck svt_uv_per_um")), "{:?}", p.missing);
     assert!(p.missing.contains(&("ParasiticBudget", "deck gate_cap_af_um2")), "{:?}", p.missing);
@@ -343,6 +344,20 @@ fn every_batch_is_tagged() {
         assert_eq!(ids, (0..total).collect::<Vec<_>>(), "dense, in arm order");
         ids.dedup();
         assert_eq!(ids.len() as u32, total);
+
+        // Origin: the XM1/XM2 pair came from its pattern; Isolation and routing from net classes.
+        let net_class = Some(analog::intent::Origin::NetClass);
+        let origin = |b: &dyn analog::RuleBatch<pnr_core::Layout>| b.meta().map(|m| m.origin);
+        let pair = (pl.cost.iter()).find(|b| {
+            let mut t = Vec::new();
+            b.touched(&mut t);
+            t.sort_unstable();
+            b.kind().ends_with("::MatchingPair") && t == [0, 1]
+        });
+        assert_eq!(origin(pair.expect("XM1/XM2 MatchingPair").as_ref()), Some(analog::intent::Origin::Pattern { template: "five_transistor_ota" }));
+        let iso = (pl.hard.iter().chain(&pl.budget).chain(&pl.cost)).filter(|b| b.kind().ends_with("::Isolation"));
+        assert!(iso.map(|b| origin(b.as_ref())).all(|o| o == net_class));
+        assert!(ro.hard.iter().chain(&ro.budget).chain(&ro.cost).all(|b| b.meta().map(|m| m.origin) == net_class));
     }
 }
 

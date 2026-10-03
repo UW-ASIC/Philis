@@ -208,7 +208,8 @@ Edits:
    ```
    For the 2-slot fallback return `&'static` slices via `match kind { DiffPair => &[(0,1,DiffPair)], … }`. Keep
    `from_template` (now only the 2-slot fallback).
-4. `Block::from_match(m)`: `kind` = for 2 devices `from_template`, else `Group`; `template = m.template`;
+4. `Block::from_match(m)`: `kind` = for 2 devices the roles' kind (`pairs[0].2`, else `Stack` for a prox-only entry
+   such as `cmos_inverter`, else `Group`; review fix: `from_template` left the inverter a `Group`), else `Group`; `template = m.template`;
    `sub_blocks` = one 2-device `Block` per `roles.pairs` (its kind) then per `roles.prox` (`Stack`), devices in slot
    order, `template = m.template`, empty `selfs`; but a 2-device match gets no children (it is the leaf);
    `selfs = roles.selfs` mapped to devices.
