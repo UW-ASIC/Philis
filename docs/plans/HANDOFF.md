@@ -8,12 +8,13 @@
 - strongarm: philis CLEAN, klayout 0, magic 0, netgen vs `_ref.spice` MATCH. vs user schematic: differs only by dummies (owner decision pending).
 - M0 and fix-export worktrees removed (56 GB freed).
 
-## Running: M1a (input + extraction), workflow run `wf_7dc71ab5-4f7` (first launch wf_b1fea248-4a9 deferred everything: cap measured session-wide; fixed)
-- Script: ~/.claude/projects/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/workflows/scripts/philis-m1a-wf_b1fea248-4a9.js
-- Branch `m1a` at ../philis-m1a/integrate; chains input / ext-core / ext-slot / ext-misc at ../philis-m1a/<chain> (branches m1a-<chain>).
-- Soft cap: args.softCapOutputTokens = 1.5M output tokens; past it no new item starts (status `deferred-cap`); panel/plan-update skipped.
-- Resume: Workflow({scriptPath, resumeFromRunId: "wf_7dc71ab5-4f7"}). Before resuming, check each chain worktree: if an impl died after committing, `git reset --hard` it to the last m1a merge it contains (see M0 notes).
-- Next: M1b (MAT + CELL + FLOW-16), M1c (PLC + RTE). Commit to main between each.
+## Running: M1 by module batch, workflow run `wf_2ab8e777-05e`
+- Script: ~/.claude/projects/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/workflows/scripts/philis-m1-modules-wf_2ab8e777-05e.js (args {"cap": 2500000} output tokens, measured on the run only).
+- Pipeline per module: harden (cards in docs/plans/cards/m1-<batch>.md) → execute (sonnet for mechanical, strong for judgment; escalation) → one review + one fix → serial merge into `m1a` (../philis-m1a/integrate).
+- Batches/worktrees (../philis-m1a/<wt>, branch m1a-<name>): annotator (wt ext-misc), input, matching | then cells, placement (after matching), routing (after annotator).
+- Already on m1a before this run: EXT-02, EXT-11. FLOW-07 (input) and GAP-04 (ext-misc) implemented, review findings embedded in the script.
+- Resume: Workflow({scriptPath, resumeFromRunId: "wf_2ab8e777-05e", args: {"cap": 2500000}}).
+- Then: gate, merge m1a → main, render the 5 bench layouts vs the 45/100 baseline, remove ../philis-m1a.
 
 ## Tools
 `source <scratchpad>/signoff-investigation/env.sh` (klayout 0.30.4, magic 8.3.573, netgen 1.5.292 from nix store; PDK_ROOT=Philis/.pdk (~/.volare no longer exists)). Independent checks: `python3 ResearchBoutros/analog/common/layout/verify.py drc|lvs <block> <gds>`; netgen vs `<top>_ref.spice`.
