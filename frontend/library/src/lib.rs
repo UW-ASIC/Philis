@@ -489,7 +489,7 @@ fn solve(
     // 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
     //    keeping the best [`LexKey`], whose V includes the epoch's own signoff
     //    errors. Prices and routing history persist across epochs.
-    let mut assignment = cellgen::seed_assignment(&flow.cells.variants, &flow.layers, pdk);
+    let mut assignment = cellgen::seed_assignment(&flow.cells.variants, pdk);
     let mut prices = gp::Prices::new();
     let mut neg = gr::Negotiation::new();
     let mut best: Option<Epoch> = None;
@@ -803,12 +803,8 @@ impl Flow<'_> {
         let placed_now: Vec<Macro> = gr::place_macros(&macros, &layout).into_iter().chain(rings.iter().cloned()).collect();
         rings.extend(cells::post_cell::implant_bridges(&placed_now, self.pdk));
 
-        // Route: global gcell plan, then track realisation onto the real pins.
+        // Route: track realisation onto the real pins.
         let routing = &self.problem.routing;
-        let (global, _) =
-            gr::GlobalRoute { net_weight: self.d_router.cfg.net_weight.clone(), ..Default::default() }.route(&layout, &macros, &rings, routing, layers, neg);
-        // gr's coarse route draws every net on one layer: no joins.
-        global.debug_check_joined("gr::route", &[]);
         let placed = gr::place_macros(&macros, &layout);
         let pins: Vec<_> = placed
             .iter()
@@ -821,12 +817,12 @@ impl Flow<'_> {
                 common: self.common_nodes(&layout).nodes,
                 stack: Some(self.stack),
                 pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
+                n_nets: self.netlist.nets.len(),
                 ..self.d_router.cfg.clone()
             },
         };
-        let (mut routes, mut route_report) = router.route(
-            &global, &pins, &placed, &rings, routing, layers, &self.cuts, neg,
-        );
+        let (mut routes, mut route_report, _route_stats) =
+            router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
         // Antenna nets the jumper could not fix get a diode each, routed in as
         // a fixed cell; its shape on the deck's credited diode layer joins the
         // net's routes (the rule's credit, `Stack::diode`).
@@ -842,7 +838,7 @@ impl Flow<'_> {
                 extra.push(device);
                 rings.push(m);
             }
-            (routes, route_report) = router.route(&global, &pins, &placed, &rings, routing, layers, &self.cuts, neg);
+            (routes, route_report, _) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
             for (net, shape) in marks {
                 if let Some(w) = routes.wires.get_mut(net.0 as usize) {
                     w.push(shape);
