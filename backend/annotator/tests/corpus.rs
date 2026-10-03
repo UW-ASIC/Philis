@@ -264,9 +264,44 @@ fn differential_comes_from_recognized_pairs() {
 }
 
 /// T7: every device is in a requirement or reported `Unconstrained(reason)`.
-/// `Problem` has no coverage report before EXT-10, so there is nothing to check.
 #[test]
-#[ignore = "body written by EXT-10 (no Problem::coverage before it)"]
 fn coverage_is_total() {
-    unimplemented!("EXT-10 adds Problem::coverage; assert it covers every device of every corpus circuit");
+    use annotator::Coverage::{Constrained, Unconstrained};
+    for (name, src) in all() {
+        let nl = net(src);
+        let p = annotate(&nl, &cfg(name));
+        let ids: Vec<u16> = p.coverage.iter().map(|(d, _)| d.0).collect();
+        assert_eq!(ids, (0..nl.devices.len() as u16).collect::<Vec<_>>(), "{name}: one entry per device, in id order");
+        for (d, c) in &p.coverage {
+            if let Unconstrained(why) = c {
+                assert!(["do_not_identify", "unknown size", "no pattern"].contains(why), "{name} {d:?}: {why}");
+            }
+        }
+        match name {
+            "ota5t" => assert!(p.coverage.iter().all(|c| c.1 == Constrained), "{name}: {:?}", p.coverage),
+            "rdiv" => assert!(p.coverage.iter().all(|c| c.1 == Unconstrained("no pattern")), "{name}: {:?}", p.coverage),
+            _ => {}
+        }
+    }
+}
+
+/// EXT-10: a batch's id survives a netlist permutation (ids follow emission
+/// order, which follows EXT-06's canonical block order).
+#[test]
+fn ids_survive_permutation() {
+    let id_of = |nl: &pnr_core::Netlist| {
+        let p = annotate(nl, &AnnotationConfig::default());
+        let want: BTreeSet<&str> = ["XM1", "XM2"].into();
+        let b = p.placement.cost.iter().find(|b| {
+            let mut ids = Vec::new();
+            b.touched(&mut ids);
+            b.kind().ends_with("::MatchingPair") && ids.iter().map(|&d| nl.devices[d as usize].name.as_str()).collect::<BTreeSet<_>>() == want
+        });
+        b.expect("XM1/XM2 MatchingPair cost batch").meta().expect("tagged").id
+    };
+    let nl = net(src("ota5t"));
+    let base = id_of(&nl);
+    for s in 1..=5 {
+        assert_eq!(id_of(&permute(&nl, s)), base, "seed {s}");
+    }
 }

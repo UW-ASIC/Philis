@@ -389,7 +389,7 @@ fn solve(
     if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
         let vdd_mv = cfg.op.as_ref().map_or(1_800.0, |o| o.vdd * 1e3);
         let i = oppoint::net_current_ua(&netlist, c);
-        let rules: Vec<analog::routing::IrDrop> = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv)
+        let rules: Vec<analog::routing::IrDrop> = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv, &ann.policy)
             .into_iter()
             .map(|(net, current_ua, max_drop_uv)| analog::routing::IrDrop { net, current_ua, max_drop_uv, margin_pct: 20, stack: ann.process.stack })
             .collect();
@@ -557,6 +557,17 @@ fn solve(
     );
     let mut metadata = metadata;
     metadata.binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
+    let mut recognition = std::collections::BTreeMap::new();
+    for b in flow.problem.blocks.iter().filter(|b| b.kind != annotator::BlockKind::Glue) {
+        *recognition.entry(b.template).or_insert(0) += 1;
+    }
+    metadata.recognition = recognition.into_iter().collect();
+    metadata.unconstrained = flow.problem.coverage.iter()
+        .filter_map(|&(d, c)| match c {
+            annotator::Coverage::Unconstrained(why) => Some((netlist.devices[d.0 as usize].name.clone(), why)),
+            _ => None,
+        })
+        .collect();
     metadata.coverage = best.coverage;
     metadata.add_routing(&[Box::new(flow.common_nodes(&best.layout)), Box::new(flow.environment(&best.layout, &best.rings))], &best.routes);
     if let (Some(cfg), Some(result)) = (flow.perf, &best.perf) {

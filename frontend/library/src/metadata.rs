@@ -112,6 +112,12 @@ pub struct MetadataReport {
     /// devices block [`Self::certified`]; skipped rules are listed). Empty
     /// from [`build`]; the flow fills it from the winner.
     pub coverage: verify::Coverage,
+    /// `(template, recognised non-glue blocks)`, by template name. Empty from
+    /// [`build`]; the flow fills it from `annotator::Problem::blocks`.
+    pub recognition: Vec<(&'static str, usize)>,
+    /// `(device, reason)` for every `annotator::Coverage::Unconstrained` device.
+    /// Empty from [`build`]; the flow fills it.
+    pub unconstrained: Vec<(String, &'static str)>,
 }
 
 impl MetadataReport {
@@ -264,6 +270,8 @@ pub fn build(
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
         binding: Vec::new(),
         coverage: verify::Coverage::default(),
+        recognition: Vec::new(),
+        unconstrained: Vec::new(),
     }
 }
 
@@ -352,6 +360,14 @@ impl std::fmt::Display for MetadataReport {
         }
         for (kind, input) in &self.missing {
             writeln!(f, "  {kind:<22} {:>6} {:>5} {:>5} {:>5} {:>5}  {:>9}  {:>9}  UNKNOWN (no {input})", "-", "-", "-", "-", "-", "-", "-")?;
+        }
+        if !self.recognition.is_empty() {
+            let r: Vec<String> = self.recognition.iter().map(|(t, n)| format!("{t} ×{n}")).collect();
+            writeln!(f, "  RECOGNITION: {}", r.join(", "))?;
+        }
+        if !self.unconstrained.is_empty() {
+            let u: Vec<String> = self.unconstrained.iter().map(|(d, why)| format!("{d} ({why})")).collect();
+            writeln!(f, "  UNCONSTRAINED: {}", u.join(", "))?;
         }
         if !self.assumed.is_empty() {
             writeln!(f, "\n  assumed (UNVERIFIED sidecar values): {}", self.assumed.join(", "))?;
@@ -451,6 +467,18 @@ mod tests {
         let s = &statuses(&reqs(&[0.1, -1.0]).hard, &empty_routes(), Arm::Hard)[0];
         assert!(s.met() && s.satisfied == 1, "{s:?}");
         assert_eq!(s.verdict(), "UNKNOWN");
+    }
+
+    #[test]
+    fn recognition_is_printed() {
+        let report = MetadataReport {
+            recognition: vec![("five_transistor_ota", 1)],
+            unconstrained: vec![("R1".into(), "no pattern")],
+            ..Default::default()
+        };
+        let out = report.to_string();
+        assert!(out.contains("  RECOGNITION: five_transistor_ota ×1\n"), "{out}");
+        assert!(out.contains("  UNCONSTRAINED: R1 (no pattern)\n"), "{out}");
     }
 
     #[test]

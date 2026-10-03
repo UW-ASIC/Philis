@@ -45,7 +45,6 @@ use crate::ProcessNumbers;
 const THERMAL_MAX_DELTA_MC: i32 = 500;
 /// Held back from the thermal spec so a converged run lands inside it.
 const THERMAL_MARGIN_PCT: u8 = 20;
-const PROXIMITY_NM: i32 = 5_000;
 /// Placement's share η of a matched pair's mismatch when no offset budget is
 /// given: the gradient term may reach this fraction of the random term the
 /// sizing bought (σ grows ≤ 4.4%).
@@ -132,6 +131,7 @@ pub fn placement(
     nl: &Netlist,
     p: &ProcessNumbers,
     offset_sigma_mv: Option<f32>,
+    policy: &crate::policy::Policy,
 ) -> Requirements<Layout> {
     let dti_rule = p.dti;
     let mut r = Requirements::<Layout>::default();
@@ -149,7 +149,7 @@ pub fn placement(
         let mut in_sym: Vec<DeviceId> = Vec::new();
 
         for &(kind, a, b) in &pairs {
-            let prox = vec![Proximity { a: td(a), b: td(b), max_distance_nm: PROXIMITY_NM }];
+            let prox = vec![Proximity { a: td(a), b: td(b), max_distance_nm: policy.proximity_nm }];
             match kind {
                 BlockKind::DiffPair | BlockKind::CurrentMirror | BlockKind::Load | BlockKind::CascodePair => {}
                 BlockKind::Stack => {
@@ -214,7 +214,7 @@ pub fn placement(
         if let Some(dp) = pairs.iter().find(|p| p.0 == BlockKind::DiffPair) {
             for &d in &stage.selfs {
                 syms.push(Symmetry { a: td(d), b: td(d), axis });
-                let tail = [dp.1, dp.2].map(|m| Proximity { a: td(d), b: td(m), max_distance_nm: PROXIMITY_NM }).to_vec();
+                let tail = [dp.1, dp.2].map(|m| Proximity { a: td(d), b: td(m), max_distance_nm: policy.proximity_nm }).to_vec();
                 r.budget.push(Box::new(tail.clone()));
                 r.cost.push(Box::new(tail));
             }

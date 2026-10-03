@@ -30,7 +30,24 @@ pub fn routing(
     gate_um2: &[f32],
     process: &crate::ProcessNumbers,
     pairs: &[(DeviceId, DeviceId)],
+    policy: &crate::policy::Policy,
 ) -> Requirements<Routes> {
+    let margin_pct = |c: NetClass| {
+        policy.margin_pct[match c {
+            NetClass::Sensitive => 0,
+            NetClass::Clock => 1,
+            NetClass::Supply | NetClass::Ground => 2,
+            _ => 3,
+        }]
+    };
+    let spacing_multiple = |c: NetClass| {
+        policy.spacing_multiple[match c {
+            NetClass::Sensitive => 0,
+            NetClass::Clock => 1,
+            NetClass::Signal => 2,
+            _ => 3,
+        }]
+    };
     let mut r = Requirements::<Routes>::default();
     // One Antenna per gate net, over the total gate area it drives.
     let mut gate_nm2 = vec![0i64; hg.net_names.len()];
@@ -51,7 +68,7 @@ pub fn routing(
                 net: NetId(n as u16),
                 max_ratio_x100: (ratio * 100.0) as i32,
                 gate_area_nm2: a,
-                margin_pct: 20,
+                margin_pct: policy.antenna_margin_pct,
                 stack: process.stack,
             })
         })
@@ -67,7 +84,7 @@ pub fn routing(
     for &(a, b) in pairs {
         if let (Some(da), Some(db)) = (pin(a, "D"), pin(b, "D")) {
             if da != db {
-                diff.push(Differential { pos: da, neg: db, max_len_delta_pct10: 50, same_layer_required: true, stack: process.stack });
+                diff.push(Differential { pos: da, neg: db, max_len_delta_pct10: policy.diff_pct10, same_layer_required: true, stack: process.stack });
             }
         }
         for g in [pin(a, "G"), pin(b, "G")].into_iter().flatten() {
@@ -128,9 +145,8 @@ pub fn routing(
             Some(Shield {
                 victim: c.net,
                 reference: shield_ref(c)?,
-                min_coverage_pct: 80,
-                // The adjacent track: one routing space, with a spacing of slack.
-                max_gap_nm: 2 * process.route_space_nm,
+                min_coverage_pct: policy.shield_coverage_pct,
+                max_gap_nm: policy.shield_gap_spaces * process.route_space_nm,
             })
         })
         .collect();
@@ -140,23 +156,3 @@ pub fn routing(
     r
 }
 
-
-/// Safety margin held back from a class's budgets, percent.
-fn margin_pct(class: NetClass) -> u8 {
-    match class {
-        NetClass::Sensitive => 35,
-        NetClass::Clock => 30,
-        NetClass::Supply | NetClass::Ground => 25,
-        _ => 20,
-    }
-}
-
-/// Minimum run-adjacent spacing a class demands, nm.
-fn spacing_multiple(class: NetClass) -> i32 {
-    match class {
-        NetClass::Sensitive => 8,
-        NetClass::Clock => 7,
-        NetClass::Signal => 3,
-        _ => 1,
-    }
-}

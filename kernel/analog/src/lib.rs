@@ -12,6 +12,7 @@
 
 pub mod cell;
 pub mod constraints;
+pub mod intent;
 pub mod metadata;
 pub mod placement;
 pub mod requirements;

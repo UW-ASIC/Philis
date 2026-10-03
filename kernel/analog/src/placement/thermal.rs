@@ -60,6 +60,13 @@ impl Rule for ThermalGradient {
         let budget = self.max_delta_mc as f32;
         crate::rule::over(l.delta_temp_mc(self.a, self.b) as f32 - budget, budget)
     }
+    fn touches(self, out: &mut Vec<u32>) {
+        for t in [self.a, self.b] {
+            if let Target::Device(d) = t {
+                out.push(u32::from(d.0));
+            }
+        }
+    }
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
     }

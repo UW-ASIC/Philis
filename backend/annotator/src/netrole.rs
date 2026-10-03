@@ -135,6 +135,8 @@ pub struct AnnotationConfig {
     /// 1σ input-referred offset a matched pair may spend, mV (from the
     /// circuit's spec). Sets how much of it placement gradients may take.
     pub offset_sigma_mv: Option<f32>,
+    /// Emission tuning numbers ([`crate::policy::Policy`]).
+    pub policy: crate::policy::Policy,
 }
 
 /// Every process number the annotator uses. A `None` means the deck does not

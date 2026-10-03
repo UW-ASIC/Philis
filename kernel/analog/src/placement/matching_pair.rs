@@ -49,6 +49,13 @@ impl Rule for MatchingPair {
     fn usage(self, l: &Layout) -> Option<f32> {
         Some(self.gradient_over_random(l) / self.gradient_share.max(f32::EPSILON))
     }
+    fn touches(self, out: &mut Vec<u32>) {
+        for t in [self.a, self.b] {
+            if let Target::Device(d) = t {
+                out.push(u32::from(d.0));
+            }
+        }
+    }
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
     }

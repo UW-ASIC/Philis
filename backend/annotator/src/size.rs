@@ -119,8 +119,8 @@ mod tests {
     fn unknown_size_never_matches() {
         let nl = pair([("nfet_01v8", 5); 2], None);
         assert_eq!(diff_pairs(&nl), 0);
-        // ponytail: EXT-10's `Coverage::Unconstrained("unknown size")` is not on this branch; the
-        // `missing` entry is the report until it lands.
+        let p = annotate(&nl, &AnnotationConfig::default());
+        assert!(p.coverage.iter().all(|&(_, c)| c == crate::Coverage::Unconstrained("unknown size")), "{:?}", p.coverage);
         let missing = |nl: &Netlist| annotate(nl, &AnnotationConfig::default()).missing.contains(&("MatchingPair", "device W/L"));
         assert!(missing(&nl));
         assert!(!missing(&pair([("nfet_01v8", 5); 2], Some(10_000))));

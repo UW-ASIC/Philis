@@ -308,6 +308,45 @@ fn glue_only_netlist_emits_no_placement() {
 
 
 #[test]
+fn missing_is_relevant() {
+    // Two resistors: no matched leaf and no gate, so no MatchingPair or Antenna entry.
+    let nl = Netlist {
+        devices: vec![
+            Device { name: "R1".into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("A".into(), NetId(0)), ("B".into(), NetId(1))], params: vec![] },
+            Device { name: "R2".into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("A".into(), NetId(2)), ("B".into(), NetId(3))], params: vec![] },
+        ],
+        nets: nets(&["a", "b", "c", "d"]),
+    };
+    let p = annotate(&nl, &AnnotationConfig::default());
+    assert!(!p.missing.iter().any(|m| ["MatchingPair", "Antenna"].contains(&m.0)), "{:?}", p.missing);
+    let p = annotate(&ota(), &AnnotationConfig::default());
+    assert!(p.missing.contains(&("MatchingPair", "deck svt_uv_per_um")), "{:?}", p.missing);
+    assert!(p.missing.contains(&("ParasiticBudget", "deck gate_cap_af_um2")), "{:?}", p.missing);
+}
+
+#[test]
+fn every_batch_is_tagged() {
+    let mut clocked = ota();
+    clocked.nets.push(Net { name: "clk".into() });
+    clocked.nets.push(Net { name: "sw".into() });
+    let (clk, sw) = (clocked.nets.len() as u16 - 2, clocked.nets.len() as u16 - 1);
+    clocked.devices.push(fet("XS", DeviceKind::Nmos, clk, sw, 3, 3, 1_000, 150));
+    for nl in [ota(), clocked] {
+        let p = annotate(&nl, &AnnotationConfig::default());
+        let (pl, ro) = (&p.placement, &p.routing);
+        let mut ids: Vec<u32> = (pl.hard.iter().chain(&pl.budget).chain(&pl.cost))
+            .map(|b| b.meta().expect("placement batch tagged").id.0)
+            .chain(ro.hard.iter().chain(&ro.budget).chain(&ro.cost).map(|b| b.meta().expect("routing batch tagged").id.0))
+            .collect();
+        let total = ids.len() as u32;
+        assert!(total > 0);
+        assert_eq!(ids, (0..total).collect::<Vec<_>>(), "dense, in arm order");
+        ids.dedup();
+        assert_eq!(ids.len() as u32, total);
+    }
+}
+
+#[test]
 fn every_device_accounted_for() {
     // No device is lost: recognised ∪ glue == all devices, disjoint.
     let nl = ota();
