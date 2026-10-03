@@ -1454,31 +1454,6 @@ pub const SOOCH_MIRROR: Pattern = Pattern {
     ],
 };
 
-/// Diff pair with source degeneration devices: M0+M1 diff pair,
-/// M2+M3 degeneration FETs in triode (gate tied to supply) between
-/// each diff pair source and the tail node.
-/// But as a 3-device pattern: diff pair + single tail/degeneration.
-pub const DIFF_PAIR_WITH_DEGEN: Pattern = Pattern {
-    name: "diff_pair_with_degen",
-    priority: 14,
-    slots: &[
-        Slot { gate_is_signal: true, ..S_ANY },
-        Slot {
-            kind: SlotKind::SameTypeAs(0),
-            size_match: SizeMatch::ExactAs(0),
-            diode: DiodeReq::Any,
-            gate_is_signal: true,
-        },
-        same0(),  // degeneration/tail
-    ],
-    links: &[
-        ne(0, "G", 1, "G"),
-        ne(0, "D", 1, "D"),
-        ne(0, "S", 1, "S"),  // split sources (through degen devices)
-        eq(0, "S", 2, "D"),  // one degen device
-    ],
-};
-
 /// CMOS inverter with tail current source: M0(N) + M1(P) inverter,
 /// M2 tail current source below M0.
 pub const INVERTER_WITH_TAIL: Pattern = Pattern {
@@ -2171,7 +2146,7 @@ pub const DIFF_PAIR_WITH_SPLIT_CASCODES: Pattern = Pattern {
         same_exact(2),
     ],
     links: &[
-        eq(0, "S", 1, "S"),
+        eq_sig(0, "S", 1, "S"),  // a rail-sourced pair is not differential (EXT-04)
         ne(0, "G", 1, "G"),
         eq(0, "D", 2, "S"),
         eq(1, "D", 3, "S"),
@@ -2301,7 +2276,7 @@ pub const DIFF_PAIR_WITH_REFERENCE: Pattern = Pattern {
         },
     ],
     links: &[
-        eq(0, "S", 1, "S"),
+        eq_sig(0, "S", 1, "S"),  // a rail-sourced pair is not differential (EXT-04)
         ne(0, "G", 1, "G"),
         ne(0, "D", 1, "D"),
         eq(1, "G", 2, "D"),  // M2 diode drives M1 gate
@@ -2390,7 +2365,6 @@ pub const PATTERNS: &[Pattern] = &[
     CURRENT_MIRROR_3,
     CURRENT_MIRROR_1_TO_2,
     ACTIVE_LOAD_3,
-    DIFF_PAIR_WITH_DEGEN,
     PUSH_PULL_WITH_BIAS,
     BIAS_CHAIN_3,
 
@@ -2659,7 +2633,8 @@ mod tests {
             let drawn: Vec<_> = nl.devices.iter().map(|d| crate::size::drawn(d, &mut models)).collect();
             let allowed = vec![true; p.slots.len()];
             let rank: Vec<u32> = (0..p.slots.len() as u32).collect();
-            let ms = crate::pattern::matches(p, &hg, &crate::pattern::pins(&hg), &drawn, &roles, &allowed, &rank);
+            let pins = crate::pattern::pins(&hg);
+            let ms = crate::pattern::matches(p, &hg, &pins, &crate::pattern::on_pin(&hg, &pins), &drawn, &roles, &allowed, &rank);
             let want: Vec<u32> = (0..p.slots.len() as u32).collect();
             assert!(
                 ms.iter().any(|m| {

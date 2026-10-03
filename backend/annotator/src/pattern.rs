@@ -111,6 +111,31 @@ pub(crate) fn pins(hg: &BipartiteHypergraph) -> Vec<[Option<NetId>; 8]> {
         .collect()
 }
 
+/// [`on_pin`] column half: 0 NMOS, 1 PMOS.
+fn pol(k: DeviceKind) -> usize {
+    usize::from(k == DeviceKind::Pmos)
+}
+
+/// Per net, the FETs with [`pin_index`] pin `i` on that net and polarity [`pol`]
+/// `p` at column `2i + p` (ascending id), so a candidate list holds only devices
+/// that can satisfy the link and the slot's polarity: a rail's thousands of
+/// sources never stand in for its few drains, nor NMOS for PMOS. Other kinds
+/// are left out ([`slot_ok`] rejects them).
+pub(crate) fn on_pin(hg: &BipartiteHypergraph, pins: &[[Option<NetId>; 8]]) -> Vec<[Vec<u32>; 16]> {
+    let mut on = vec![<[Vec<u32>; 16]>::default(); hg.net_devices.len()];
+    for (d, row) in pins.iter().enumerate() {
+        if !matches!(hg.kinds[d], DeviceKind::Nmos | DeviceKind::Pmos) {
+            continue;
+        }
+        for (i, n) in row.iter().enumerate() {
+            if let Some(n) = n {
+                on[n.0 as usize][2 * i + pol(hg.kinds[d])].push(d as u32);
+            }
+        }
+    }
+    on
+}
+
 fn pin_of(pins: &[[Option<NetId>; 8]], cell: u32, pin: &str) -> Option<NetId> {
     pin_index(pin).and_then(|i| pins[cell as usize][i])
 }
@@ -120,13 +145,25 @@ fn is_diode(pins: &[[Option<NetId>; 8]], cell: u32) -> bool {
     d.is_some() && d == pin_of(pins, cell, "G")
 }
 
+/// The part of [`slot_ok`] that reads no other slot: a FET, diode and gate rules.
+fn unary_ok(slot: &Slot, s: &Search, cell: u32) -> bool {
+    let diode_ok = match slot.diode {
+        DiodeReq::Required => is_diode(s.pins, cell),
+        DiodeReq::Forbidden => !is_diode(s.pins, cell),
+        DiodeReq::Any => true,
+    };
+    let gate_ok = !slot.gate_is_signal
+        || pin_of(s.pins, cell, "G").map_or(true, |n| s.roles[n.0 as usize] == NetRole::Signal);
+    matches!(s.hg.kinds[cell as usize], DeviceKind::Nmos | DeviceKind::Pmos) && diode_ok && gate_ok
+}
+
 /// `assigned` is indexed by slot; every slot `slot` refers to is assigned ([`slot_order`]).
 fn slot_ok(slot: &Slot, s: &Search, cell: u32, assigned: &[u32]) -> bool {
-    let kind = |i: u32| s.hg.kinds[i as usize];
-    let dt = kind(cell);
-    if !matches!(dt, DeviceKind::Nmos | DeviceKind::Pmos) {
+    if !unary_ok(slot, s, cell) {
         return false;
     }
+    let kind = |i: u32| s.hg.kinds[i as usize];
+    let dt = kind(cell);
     let other = |r: u8| assigned[r as usize];
     let kind_ok = match slot.kind {
         SlotKind::AnyFet => true,
@@ -139,14 +176,7 @@ fn slot_ok(slot: &Slot, s: &Search, cell: u32, assigned: &[u32]) -> bool {
         SizeMatch::ExactAs(r) => size::exact_as(dt, g, gr(r), s.roles),
         SizeMatch::SameLAs(r) => size::same_l_as(g, gr(r)),
     };
-    let diode_ok = match slot.diode {
-        DiodeReq::Required => is_diode(s.pins, cell),
-        DiodeReq::Forbidden => !is_diode(s.pins, cell),
-        DiodeReq::Any => true,
-    };
-    let gate_ok = !slot.gate_is_signal
-        || pin_of(s.pins, cell, "G").map_or(true, |n| s.roles[n.0 as usize] == NetRole::Signal);
-    kind_ok && size_ok && diode_ok && gate_ok
+    kind_ok && size_ok
 }
 
 /// Links touching slot `k` whose both ends are assigned hold (the others were
@@ -217,26 +247,36 @@ struct Search<'a> {
     order: Vec<usize>,
     hg: &'a BipartiteHypergraph,
     pins: &'a [[Option<NetId>; 8]],
+    on: &'a [[Vec<u32>; 16]],
     drawn: &'a [Drawn],
     roles: &'a [NetRole],
     allowed: &'a [bool],
     rank: &'a [u32],
+    /// Per slot, the devices [`Candidates::All`] tries; filled on first use.
+    free: Vec<std::cell::OnceCell<Vec<u32>>>,
 }
 
 /// Where the next slot's devices come from.
 enum Candidates {
-    /// Devices on net `.0` at pin column `.1`.
-    Net(NetId, usize),
+    /// Devices with pin column `.1` on net `.0` and a polarity in `.2` ([`on_pin`]).
+    Net(NetId, usize, std::ops::Range<usize>),
     /// A linking net is absent or not a signal where one must be: nothing fits.
     None,
-    /// No link to an assigned slot: every device.
+    /// No link to an assigned slot: every allowed device passing [`unary_ok`]
+    /// (listed once per slot, not rescanned per partial assignment).
     All,
 }
 
 impl Search<'_> {
     /// Over links joining slot `k`'s pin to an assigned slot's pin by `Same` or
-    /// `SameSignal`, the net with the fewest devices.
+    /// `SameSignal`, the (net, pin) with the fewest devices of the slot's polarity.
     fn candidates(&self, k: u8, assigned: &[u32]) -> Candidates {
+        let at = |r: u8| pol(self.hg.kinds[assigned[r as usize] as usize]);
+        let pols = match self.pat.slots[k as usize].kind {
+            SlotKind::AnyFet => 0..2,
+            SlotKind::SameTypeAs(r) => at(r)..at(r) + 1,
+            SlotKind::ComplementOf(r) => 1 - at(r)..2 - at(r),
+        };
         let mut best: Option<(NetId, usize)> = None;
         for l in self.pat.links.iter().filter(|l| matches!(l.rel, PinRel::Same | PinRel::SameSignal)) {
             let (pk, o, po) = if l.a == k { (l.pin_a, l.b, l.pin_b) } else if l.b == k { (l.pin_b, l.a, l.pin_a) } else { continue };
@@ -247,11 +287,12 @@ impl Search<'_> {
             if matches!(l.rel, PinRel::SameSignal) && self.roles[n.0 as usize] != NetRole::Signal {
                 return Candidates::None;
             }
-            if best.map_or(true, |(b, _)| self.hg.net_devices[n.0 as usize].len() < self.hg.net_devices[b.0 as usize].len()) {
+            let len = |n: NetId, pk: usize| pols.clone().map(|p| self.on[n.0 as usize][2 * pk + p].len()).sum::<usize>();
+            if best.map_or(true, |(b, bk)| len(n, pk) < len(b, bk)) {
                 best = Some((n, pk));
             }
         }
-        best.map_or(Candidates::All, |(n, pk)| Candidates::Net(n, pk))
+        best.map_or(Candidates::All, |(n, pk)| Candidates::Net(n, pk, pols))
     }
 
     /// Every assignment of devices to slots, filled in `order`; one match per
@@ -285,34 +326,33 @@ impl Search<'_> {
             assigned[k] = EMPTY;
         };
         match self.candidates(k as u8, assigned) {
-            Candidates::Net(n, pk) => {
-                let mut prev = None;
-                for d in &self.hg.net_devices[n.0 as usize] {
-                    let c = u32::from(d.0);
-                    if prev != Some(c) && self.pins[c as usize][pk] == Some(n) {
-                        try_cell(c, assigned);
-                    }
-                    prev = Some(c);
-                }
-            }
+            Candidates::Net(n, pk, pols) => pols.for_each(|p| self.on[n.0 as usize][2 * pk + p].iter().for_each(|&c| try_cell(c, assigned))),
             Candidates::None => {}
-            Candidates::All => (0..self.allowed.len() as u32).for_each(|c| try_cell(c, assigned)),
+            Candidates::All => {
+                let free = self.free[k].get_or_init(|| {
+                    (0..self.allowed.len() as u32).filter(|&c| self.allowed[c as usize] && unary_ok(&self.pat.slots[k], self, c)).collect()
+                });
+                free.iter().for_each(|&c| try_cell(c, assigned));
+            }
         }
     }
 }
 
-/// Every match of one pattern over the devices `allowed`; `pins` from [`pins`],
+/// Every match of one pattern over the devices `allowed`; `pins` from [`pins`], `on` from [`on_pin`],
 /// `rank` (by device) picks a device set's slot assignment ([`Search::run`]).
+#[allow(clippy::too_many_arguments)] // the per-netlist tables are built once by the caller
 pub(crate) fn matches(
     pat: &'static Pattern,
     hg: &BipartiteHypergraph,
     pins: &[[Option<NetId>; 8]],
+    on: &[[Vec<u32>; 16]],
     drawn: &[Drawn],
     roles: &[NetRole],
     allowed: &[bool],
     rank: &[u32],
 ) -> Vec<PatternMatch> {
-    let s = Search { pat, order: slot_order(pat), hg, pins, drawn, roles, allowed, rank };
+    let free = vec![std::cell::OnceCell::new(); pat.slots.len()];
+    let s = Search { pat, order: slot_order(pat), hg, pins, on, drawn, roles, allowed, rank, free };
     let mut out = Vec::new();
     s.run(0, &mut vec![EMPTY; pat.slots.len()], &mut out, &mut HashMap::new());
     out
@@ -326,6 +366,7 @@ pub(crate) fn matches(
 pub fn recognize_all(hg: &BipartiteHypergraph, drawn: &[Drawn], roles: &[NetRole], cfg: &AnnotationConfig, canon: &[u64], names: &[&str]) -> Vec<PatternMatch> {
     let allowed: Vec<bool> = (0..hg.device_count() as u32).map(|d| !cfg.do_not_identify.contains(&d)).collect();
     let pins = pins(hg);
+    let on = on_pin(hg, &pins);
     let mut by: Vec<usize> = (0..canon.len()).collect();
     by.sort_by_key(|&d| (canon[d], names[d]));
     let mut rank = vec![0u32; by.len()];
@@ -333,7 +374,7 @@ pub fn recognize_all(hg: &BipartiteHypergraph, drawn: &[Drawn], roles: &[NetRole
     PATTERNS
         .iter()
         .filter(|p| !cfg.do_not_use.contains(p.name))
-        .flat_map(|p| matches(p, hg, &pins, drawn, roles, &allowed, &rank))
+        .flat_map(|p| matches(p, hg, &pins, &on, drawn, roles, &allowed, &rank))
         .collect()
 }
 
