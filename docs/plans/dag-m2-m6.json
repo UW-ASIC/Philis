@@ -1,0 +1,2146 @@
+{
+ "items": {
+  "GAP-01": {
+   "module": "analog-matching",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "PLC-29",
+     "steps": "step 5 (LiveEnvironment reads mos_env)",
+     "note": "C20: PLC-29 carries step 5 in its own commit; GAP-01 lands steps 1-4 first"
+    }
+   ],
+   "note": "Owner MAT (as MAT-07 step set). Kind::Tier already in FLOW-04 (M0); Family is created here if MAT-04 did not."
+  },
+  "FLOW-06": {
+   "module": "flow",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": "Schema/loader/recipe_layers only; per C23 each owner registers its own keys, so no consumer waits on FLOW-06 (D12/D15/D16/D27 repoint its old consumers)."
+  },
+  "GAP-06": {
+   "module": "reliability",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": "Owner REL, = REL-05 step 0."
+  },
+  "GAP-07": {
+   "module": "flow",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": "Owner FLOW, = FLOW-06 step 5."
+  },
+  "EXT-12": {
+   "module": "annotator",
+   "milestone": "M2",
+   "hard": [
+    "GAP-01"
+   ],
+   "step_level": [],
+   "note": "Needs pnr_core::MatchClass (C1). MAT-07 dep dropped: EXT-12 creates Family/MatchKind itself if absent (its own fallback text)."
+  },
+  "EXT-13": {
+   "module": "annotator",
+   "milestone": "M2",
+   "hard": [
+    "EXT-12"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-14",
+     "steps": "M_S/S edges",
+     "note": "tree builds from M_B/P_B/P_N until EXT-14 adds its edges"
+    },
+    {
+     "item": "EXT-15",
+     "steps": "shared-bias MatchBlock stars",
+     "note": "EXT-15 adds them when it lands (EXT-15 depends on EXT-13)"
+    },
+    {
+     "item": "EXT-19",
+     "steps": "passive-set MatchBlock stars",
+     "note": "EXT-19 adds them"
+    }
+   ],
+   "note": ""
+  },
+  "EXT-14": {
+   "module": "annotator",
+   "milestone": "M2",
+   "hard": [
+    "EXT-12"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-15",
+     "steps": "step 8 (set_pairs)",
+     "note": "land steps 1-7, 9 first; step 8 lands in EXT-15's commit or right after"
+    }
+   ],
+   "note": "EXT-05, EXT-11 done in M1."
+  },
+  "EXT-15": {
+   "module": "annotator",
+   "milestone": "M2",
+   "hard": [
+    "EXT-12",
+    "EXT-13",
+    "EXT-14"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "EXT-16": {
+   "module": "annotator",
+   "milestone": "M2",
+   "hard": [
+    "EXT-15",
+    "GAP-01"
+   ],
+   "step_level": [],
+   "note": "D1: MAT-07 dep replaced by GAP-01 (class::limit, Process::tier); lib.rs:871-872 edit moved to PLC-29 (C20)."
+  },
+  "MAT-07": {
+   "module": "analog-matching",
+   "milestone": "M2",
+   "hard": [
+    "GAP-01"
+   ],
+   "step_level": [],
+   "note": "D12: FLOW-06 replaced by GAP-01. EXT-16 is not a blocker (every set Moderate until then). MAT-04/05 done."
+  },
+  "MAT-08": {
+   "module": "analog-matching",
+   "milestone": "M2",
+   "hard": [
+    "MAT-07",
+    "GAP-01"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-20",
+     "steps": "step 2 (budget choice at emission)",
+     "note": "applied inside EXT-20, which depends on MAT-08"
+    }
+   ],
+   "note": "D13: limit values come from GAP-01 class::limit, not EXT-16. EXT-20 is the consumer (cycle broken in its favour)."
+  },
+  "EXT-19": {
+   "module": "annotator",
+   "milestone": "M2",
+   "hard": [
+    "EXT-15"
+   ],
+   "step_level": [],
+   "note": "EXT-03/EXT-11 done. Step 4 cellgen deletion is a coordinated edit with FLOW/CELL, not a dependency."
+  },
+  "EXT-20": {
+   "module": "annotator",
+   "milestone": "M2",
+   "hard": [
+    "EXT-14",
+    "EXT-15",
+    "EXT-16",
+    "MAT-07",
+    "MAT-08"
+   ],
+   "step_level": [],
+   "note": "MAT-04/05 done. Resistor PhiZero emission is MAT-12 step 3 (later), not a blocker."
+  },
+  "MAT-13": {
+   "module": "analog-matching",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": "MAT-04 done in M1."
+  },
+  "CELL-11": {
+   "module": "cells",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": "CELL-02, CELL-10, MAT-03 done."
+  },
+  "CELL-12": {
+   "module": "cells",
+   "milestone": "M2",
+   "hard": [
+    "CELL-11",
+    "GAP-01",
+    "EXT-12"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-16",
+     "steps": "class values on real circuits",
+     "note": "Unitization.class (EXT-12 field) is None/Moderate until EXT-15/16 fill it; class tests are synthetic"
+    }
+   ],
+   "note": "D17: mos_env from GAP-01, not MAT-07."
+  },
+  "CELL-13": {
+   "module": "cells",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": "D19: REL-06 (cut) replaced by FLOW-05 steps 1, 6 (M0)."
+  },
+  "CELL-19": {
+   "module": "cells",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": "CELL-01 done."
+  },
+  "PLC-07": {
+   "module": "placement",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": "PLC-02, PLC-04 done."
+  },
+  "PLC-13": {
+   "module": "placement",
+   "milestone": "M2",
+   "hard": [
+    "PLC-07",
+    "GAP-01",
+    "MAT-07"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-16",
+     "steps": "real classes",
+     "note": "default Moderate until then"
+    }
+   ],
+   "note": "D23: mos_env from GAP-01; MatchedSet.class is MAT-07 step 2."
+  },
+  "PLC-24": {
+   "module": "placement",
+   "milestone": "M2",
+   "hard": [
+    "PLC-07"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "PLC-29": {
+   "module": "placement",
+   "milestone": "M2",
+   "hard": [
+    "GAP-01"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-16",
+     "steps": "class per pair",
+     "note": "default Moderate"
+    }
+   ],
+   "note": "Carries GAP-01 step 5 (C20). PLC-06/PLC-01 done."
+  },
+  "RTE-10": {
+   "module": "routing",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": "RTE-07 done."
+  },
+  "RTE-11": {
+   "module": "routing",
+   "milestone": "M2",
+   "hard": [
+    "RTE-10"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "RTE-12": {
+   "module": "routing",
+   "milestone": "M2",
+   "hard": [
+    "RTE-10"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "RTE-13": {
+   "module": "routing",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": ""
+  },
+  "RTE-25": {
+   "module": "routing",
+   "milestone": "M2",
+   "hard": [
+    "RTE-10",
+    "RTE-13"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "RTE-26": {
+   "module": "routing",
+   "milestone": "M4",
+   "hard": [
+    "RTE-10",
+    "RTE-11",
+    "RTE-12",
+    "RTE-15"
+   ],
+   "step_level": [],
+   "note": "Split by the master: M2 slice = cases a, b, c, e on sky130; M4 = all four decks + case d (needs RTE-15).",
+   "slices": [
+    {
+     "milestone": "M2",
+     "steps": "cases a, b, c, e on sky130",
+     "hard": [
+      "RTE-10",
+      "RTE-11",
+      "RTE-12"
+     ]
+    }
+   ]
+  },
+  "FLOW-09": {
+   "module": "flow",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": "FLOW-02 done."
+  },
+  "FLOW-12": {
+   "module": "flow",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "EXT-26",
+     "steps": "--constraints flag",
+     "note": "exits 2 \"needs EXT-26\" until EXT-26 (M3) lands"
+    }
+   ],
+   "note": "FLOW-04, FLOW-07 done."
+  },
+  "FLOW-13": {
+   "module": "flow",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": "Step 0 done in M1; FLOW-01, FLOW-07 done."
+  },
+  "PERF-10": {
+   "module": "perf",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "PERF-15",
+     "steps": "step 3 (winner re-evaluated after fill)",
+     "note": "forward to M4: lands with PERF-15"
+    }
+   ],
+   "note": "PERF-06, PERF-08 done."
+  },
+  "PERF-17": {
+   "module": "perf",
+   "milestone": "M2",
+   "hard": [],
+   "step_level": [],
+   "note": "PERF-01 done."
+  },
+  "PERF-20": {
+   "module": "perf",
+   "milestone": "M5",
+   "hard": [
+    "PERF-10",
+    "PERF-13",
+    "FLOW-09",
+    "FLOW-12"
+   ],
+   "step_level": [
+    {
+     "item": "MAT-13",
+     "steps": "\"Matched sets\" table",
+     "note": "printed when present"
+    },
+    {
+     "item": "PERF-22",
+     "steps": "sigma_os/mu_os columns",
+     "note": "column appears when PERF-22 lands (M5)"
+    },
+    {
+     "item": "PERF-23",
+     "steps": "ALRC columns",
+     "note": "column appears when PERF-23 lands (M5)"
+    }
+   ],
+   "note": "Split by the master (6.1 master decision): M2 slice = seeds 1-5, results.json, stage_ms, GDS-bbox area; M5 = testbenches, beta and perf columns. PERF-14 edge of the master DAG dropped: PERF-20 reads beta from PERF-13.",
+   "slices": [
+    {
+     "milestone": "M2",
+     "steps": "steps 2, 4, 5, 7 (seeds, results.json, stage_ms, area_gds)",
+     "hard": [
+      "FLOW-09"
+     ]
+    }
+   ]
+  },
+  "PLC-18": {
+   "module": "placement",
+   "milestone": "M3",
+   "hard": [],
+   "step_level": [],
+   "note": ""
+  },
+  "PLC-08": {
+   "module": "placement",
+   "milestone": "M3",
+   "hard": [
+    "PLC-07"
+   ],
+   "step_level": [
+    {
+     "item": "PLC-15",
+     "steps": "routing halo",
+     "note": "zero until PLC-15 (M4)"
+    },
+    {
+     "item": "EXT-13",
+     "steps": "Intent.tree replaces cells.groups",
+     "note": "when present"
+    }
+   ],
+   "note": "PLC-02/03 done; dp::Schedule from PLC-10 step 0 (M1)."
+  },
+  "PLC-09": {
+   "module": "placement",
+   "milestone": "M3",
+   "hard": [
+    "PLC-08",
+    "PLC-18"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "PLC-10": {
+   "module": "placement",
+   "milestone": "M3",
+   "hard": [
+    "PLC-08",
+    "PLC-09"
+   ],
+   "step_level": [
+    {
+     "item": "FLOW-08",
+     "steps": "step 1 Warm/Cold mapping",
+     "note": "whichever lands second wires FLOW-08 Warm to dp::Start::Warm"
+    },
+    {
+     "item": "PLC-11",
+     "steps": "Cold start choice",
+     "note": "Constructive vs gp per PLC-11"
+    }
+   ],
+   "note": "Steps 1-4; step 0 done in M1."
+  },
+  "PLC-11": {
+   "module": "placement",
+   "milestone": "M3",
+   "hard": [
+    "PLC-09"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "PLC-12": {
+   "module": "placement",
+   "milestone": "M3",
+   "hard": [
+    "PLC-08"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "PLC-28": {
+   "module": "placement",
+   "milestone": "M3",
+   "hard": [
+    "PLC-08",
+    "RTE-25"
+   ],
+   "step_level": [],
+   "note": "RTE-10 via RTE-25."
+  },
+  "PLC-21": {
+   "module": "placement",
+   "milestone": "M3",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "EXT-14",
+     "steps": "step 3 mode decision",
+     "note": "every pair Perfect until EXT-14 (merged in M2)"
+    }
+   ],
+   "note": "PLC-03, MAT-01 done."
+  },
+  "PLC-14": {
+   "module": "placement",
+   "milestone": "M3",
+   "hard": [
+    "MAT-07"
+   ],
+   "step_level": [],
+   "note": "D23: class from MAT-07 MatchedSet.class (GAP-01 underneath)."
+  },
+  "EXT-17": {
+   "module": "annotator",
+   "milestone": "M3",
+   "hard": [
+    "EXT-12"
+   ],
+   "step_level": [],
+   "note": "PERF-09, FLOW-07 done; PERF-12 is a non-blocking producer (fields optional)."
+  },
+  "EXT-18": {
+   "module": "annotator",
+   "milestone": "M3",
+   "hard": [
+    "EXT-17"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "EXT-23": {
+   "module": "annotator",
+   "milestone": "M3",
+   "hard": [
+    "EXT-17",
+    "EXT-18",
+    "EXT-20"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "GAP-03": {
+   "module": "annotator",
+   "milestone": "M3",
+   "hard": [
+    "EXT-12",
+    "EXT-18",
+    "EXT-23"
+   ],
+   "step_level": [],
+   "note": "Owner EXT, = EXT-23 step 5."
+  },
+  "EXT-24": {
+   "module": "annotator",
+   "milestone": "M3",
+   "hard": [
+    "EXT-14",
+    "EXT-18",
+    "EXT-20",
+    "EXT-23"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "EXT-26": {
+   "module": "annotator",
+   "milestone": "M3",
+   "hard": [
+    "EXT-14",
+    "EXT-16",
+    "EXT-18"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "GAP-09": {
+   "module": "annotator",
+   "milestone": "M3",
+   "hard": [
+    "EXT-14",
+    "EXT-26"
+   ],
+   "step_level": [
+    {
+     "item": "FLOW-08",
+     "steps": "step 3 (C_floor check in the epoch loop)",
+     "note": "coordinated edit in FLOW-08's loop, same milestone"
+    }
+   ],
+   "note": "Owner EXT (reinstated EXT-08). EXT-10, FLOW-03 done."
+  },
+  "GAP-17": {
+   "module": "perf",
+   "milestone": "M3",
+   "hard": [],
+   "step_level": [],
+   "note": "Owner PERF for step 1 (= PERF-09 step 7); steps 2-3 are executed by REL-10 steps 4-5 (reliability). PERF-09 done."
+  },
+  "GAP-02": {
+   "module": "analog-matching",
+   "milestone": "M3",
+   "hard": [
+    "GAP-01"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-17",
+     "steps": "gm/Id input",
+     "note": "Option; budget_area lever only"
+    },
+    {
+     "item": "MAT-16",
+     "steps": "dstar S(L)",
+     "note": "uses worst-case svt until MAT-16 (M6) lands"
+    }
+   ],
+   "note": "Owner MAT (= MAT-22). MAT-04 done. Forward MAT-16 dep reclassified non-hard (\"when present\")."
+  },
+  "MAT-09": {
+   "module": "analog-matching",
+   "milestone": "M3",
+   "hard": [
+    "MAT-07"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-17",
+     "steps": "step 3 (G = gm/Id from the op point)",
+     "note": "steps 1-2 and tests run first; without op Current pairs stay in mV"
+    }
+   ],
+   "note": "D15: abeta keys registered by MAT itself (C23); FLOW-01 done."
+  },
+  "MAT-11": {
+   "module": "analog-matching",
+   "milestone": "M3",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "MAT-13",
+     "steps": "step 4 LedgerRow fields",
+     "note": "MAT-13 is M2, same module"
+    }
+   ],
+   "note": "MAT-01 done."
+  },
+  "MAT-12": {
+   "module": "analog-matching",
+   "milestone": "M3",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "EXT-19",
+     "steps": "step 3 (PhiZero for resistor sets)",
+     "note": "emitted beside EXT-20's MatchedSet"
+    },
+    {
+     "item": "CELL-14",
+     "steps": "acceptance on drawn arrays",
+     "note": "CELL-14 consumes MAT-12; cycle broken: MAT-12 first"
+    }
+   ],
+   "note": "MAT-02/05, CELL-06 done."
+  },
+  "MAT-10": {
+   "module": "analog-matching",
+   "milestone": "M3",
+   "hard": [
+    "MAT-07"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-19",
+     "steps": "acceptance on recognised R/C/BJT sets",
+     "note": "EXT-19 merged in M2"
+    }
+   ],
+   "note": "D16: keys registered by MAT (C23), capacitors table is CELL-08 (M1)."
+  },
+  "CELL-14": {
+   "module": "cells",
+   "milestone": "M3",
+   "hard": [
+    "CELL-12",
+    "MAT-12",
+    "GAP-01",
+    "EXT-15"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-19",
+     "steps": "rdiv acceptance (recognised resistor sets)",
+     "note": "EXT-19 merged in M2"
+    }
+   ],
+   "note": "D17: resistor_env from GAP-01. Deletes greedy_centroid (C27). CELL-06 done."
+  },
+  "CELL-16": {
+   "module": "cells",
+   "milestone": "M3",
+   "hard": [
+    "GAP-07"
+   ],
+   "step_level": [],
+   "note": "D22."
+  },
+  "CELL-17": {
+   "module": "cells",
+   "milestone": "M3",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "GAP-03",
+     "steps": "which NMOS get an Ecgr",
+     "note": "decided by REL-07 from GAP-03 tags; drawing does not need it"
+    }
+   ],
+   "note": "D20: REL-07 taxonomy/ring_gap now GAP-05 (M1); REL-08 cut."
+  },
+  "CELL-18": {
+   "module": "cells",
+   "milestone": "M3",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "EXT-18",
+     "steps": "impedance rank",
+     "note": "uses Problem.net_classes until EXT-18"
+    }
+   ],
+   "note": "CELL-01, CELL-08 done."
+  },
+  "REL-04": {
+   "module": "reliability",
+   "milestone": "M3",
+   "hard": [],
+   "step_level": [],
+   "note": "REL-03 done."
+  },
+  "REL-05": {
+   "module": "reliability",
+   "milestone": "M3",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "GAP-06",
+     "steps": "steps 4-5 (em_derating reader, sidecar values)",
+     "note": "steps 1-3, 6 have no dependency; GAP-06 is M2, same module"
+    }
+   ],
+   "note": "D27."
+  },
+  "REL-14": {
+   "module": "reliability",
+   "milestone": "M3",
+   "hard": [
+    "REL-05"
+   ],
+   "step_level": [],
+   "note": "Shares self_rise_mc: REL-05 first."
+  },
+  "REL-07": {
+   "module": "reliability",
+   "milestone": "M3",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "EXT-23",
+     "steps": "aggressor/victim tags",
+     "note": "fallback aggressor = Clock-class net, no victims; removes blanket rings already (T8)"
+    },
+    {
+     "item": "GAP-03",
+     "steps": "injector input (T7)",
+     "note": "None until then"
+    },
+    {
+     "item": "CELL-17",
+     "steps": "Ecgr arms",
+     "note": "gated by RingInputs.ecgr_drawable"
+    }
+   ],
+   "note": "D30: CELL-05 -> GAP-05 (M1). SubstrateKind from GAP-04 (M1)."
+  },
+  "REL-10": {
+   "module": "reliability",
+   "milestone": "M3",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "GAP-17",
+     "steps": "steps 4-5 (= GAP-17 steps 2-3)",
+     "note": "need OpPoint.net_v from GAP-17 step 1"
+    }
+   ],
+   "note": "PERF-09 step 5 done (M1). Step 1 has no dependency."
+  },
+  "RTE-14": {
+   "module": "routing",
+   "milestone": "M3",
+   "hard": [
+    "RTE-12"
+   ],
+   "step_level": [
+    {
+     "item": "RTE-21",
+     "steps": "step 7 F_k ordering",
+     "note": "net_weight order until RTE-21 step 4 (M4)"
+    }
+   ],
+   "note": "REL-01/03 done. Optional REL-12, REL-17 (M6) not blockers; EXT-24 em_critical reference deleted (D8)."
+  },
+  "RTE-16": {
+   "module": "routing",
+   "milestone": "M3",
+   "hard": [
+    "GAP-01",
+    "EXT-12"
+   ],
+   "step_level": [],
+   "note": "D11: MatchClass from GAP-01, Unitization.class field from EXT-12. RTE-03, CELL-01 done."
+  },
+  "RTE-18": {
+   "module": "routing",
+   "milestone": "M3",
+   "hard": [
+    "RTE-10"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-24",
+     "steps": "CrosstalkExclusion by class",
+     "note": "existing CrosstalkExclusion rules feed Separation until then"
+    },
+    {
+     "item": "EXT-18",
+     "steps": "aggressor weights",
+     "note": ""
+    }
+   ],
+   "note": "RTE-02 done."
+  },
+  "RTE-15": {
+   "module": "routing",
+   "milestone": "M3",
+   "hard": [
+    "RTE-10",
+    "RTE-12"
+   ],
+   "step_level": [
+    {
+     "item": "PLC-28",
+     "steps": "bench acceptance T5 (axes on the lattice)",
+     "note": "contract defined via RTE-25; unit tests use compliant synthetic axes; non-compliant pairs fall back"
+    },
+    {
+     "item": "PLC-21",
+     "steps": "Shift map for Perfect pairs",
+     "note": "fallback without it"
+    },
+    {
+     "item": "EXT-24",
+     "steps": "extra Differential pairs",
+     "note": "EXT-09 (M1) already emits them"
+    }
+   ],
+   "note": "RTE-05 done (M1)."
+  },
+  "RTE-17": {
+   "module": "routing",
+   "milestone": "M3",
+   "hard": [
+    "RTE-12",
+    "RTE-15"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-24",
+     "steps": "step 4 CommonNodeReq/StarReq/KelvinReq",
+     "note": "2-device leaves map to two groups until EXT-24"
+    }
+   ],
+   "note": "MAT-06, REL-03 done; D7 removes EXT-24 max_delta_mv."
+  },
+  "RTE-19": {
+   "module": "routing",
+   "milestone": "M3",
+   "hard": [
+    "RTE-12",
+    "RTE-18"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-24",
+     "steps": "step 3 shield_ref",
+     "note": "fallback ground"
+    }
+   ],
+   "note": ""
+  },
+  "RTE-20": {
+   "module": "routing",
+   "milestone": "M3",
+   "hard": [
+    "RTE-18"
+   ],
+   "step_level": [],
+   "note": "FLOW-07 done. EXT-19 step 4 switches its PlateSet source when both exist."
+  },
+  "RTE-24": {
+   "module": "routing",
+   "milestone": "M3",
+   "hard": [
+    "RTE-14",
+    "RTE-15"
+   ],
+   "step_level": [],
+   "note": "REL-01/03 done."
+  },
+  "FLOW-08": {
+   "module": "flow",
+   "milestone": "M3",
+   "hard": [
+    "FLOW-09"
+   ],
+   "step_level": [
+    {
+     "item": "PLC-10",
+     "steps": "step 1 Warm start",
+     "note": "only once DpMode::Sp is the default"
+    }
+   ],
+   "note": "FLOW-02/03 done; PLC-10 step 0 done."
+  },
+  "FLOW-10": {
+   "module": "flow",
+   "milestone": "M3",
+   "hard": [
+    "FLOW-09"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "PERF-18": {
+   "module": "perf",
+   "milestone": "M3",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "PERF-16",
+     "steps": "nwell merge-list step",
+     "note": "deck steps first; this step after PERF-16 step 1 (same module)"
+    }
+   ],
+   "note": "FLOW-04, PERF-02, PERF-08 done."
+  },
+  "PERF-19": {
+   "module": "perf",
+   "milestone": "M3",
+   "hard": [
+    "FLOW-12"
+   ],
+   "step_level": [],
+   "note": "LVS needs labelled GDS; DRC harness part could land before. FLOW-14 done."
+  },
+  "PERF-16": {
+   "module": "perf",
+   "milestone": "M3",
+   "hard": [
+    "PERF-19"
+   ],
+   "step_level": [
+    {
+     "item": "PERF-11",
+     "steps": "net ranking",
+     "note": "ranks by ground-C rows until PERF-11 (M4); forward dep reclassified"
+    }
+   ],
+   "note": "PERF-01 done."
+  },
+  "PERF-11": {
+   "module": "perf",
+   "milestone": "M4",
+   "hard": [
+    "PERF-10"
+   ],
+   "step_level": [],
+   "note": "PERF-08 done."
+  },
+  "PERF-13": {
+   "module": "perf",
+   "milestone": "M4",
+   "hard": [
+    "PERF-11"
+   ],
+   "step_level": [],
+   "note": "MAT-04 optional, FLOW-01 done."
+  },
+  "PERF-12": {
+   "module": "perf",
+   "milestone": "M4",
+   "hard": [
+    "PERF-11",
+    "PERF-13",
+    "EXT-17"
+   ],
+   "step_level": [
+    {
+     "item": "RTE-21",
+     "steps": "step 2 (writes DetailedCfg.r_weight/pair_weight)",
+     "note": "fields defined by RTE-21 step 1; whichever lands second wires them"
+    },
+    {
+     "item": "EXT-25",
+     "steps": "step 3 (d_cc / coupling fields)",
+     "note": "change request carried by EXT-25"
+    }
+   ],
+   "note": ""
+  },
+  "PERF-14": {
+   "module": "perf",
+   "milestone": "M4",
+   "hard": [
+    "PERF-13"
+   ],
+   "step_level": [],
+   "note": "FLOW-02, PERF-07 done."
+  },
+  "PERF-15": {
+   "module": "perf",
+   "milestone": "M4",
+   "hard": [
+    "PERF-10",
+    "PERF-11",
+    "PERF-12",
+    "FLOW-08"
+   ],
+   "step_level": [
+    {
+     "item": "FLOW-10",
+     "steps": "step 2 post-fill caps",
+     "note": "signoff_shapes fallback before FLOW-10 (merged M3)"
+    }
+   ],
+   "note": ""
+  },
+  "PERF-26": {
+   "module": "perf",
+   "milestone": "M4",
+   "hard": [
+    "CELL-19"
+   ],
+   "step_level": [],
+   "note": "PERF-08 done."
+  },
+  "PERF-29": {
+   "module": "perf",
+   "milestone": "M4",
+   "hard": [
+    "PERF-11",
+    "PERF-13",
+    "PERF-15"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "EXT-21": {
+   "module": "annotator",
+   "milestone": "M4",
+   "hard": [
+    "EXT-17",
+    "EXT-20"
+   ],
+   "step_level": [
+    {
+     "item": "PERF-12",
+     "steps": "d_vt data",
+     "note": "codes against EXT-17 SpecSens; acceptance needs PERF-12"
+    },
+    {
+     "item": "PERF-13",
+     "steps": "sigma_f data",
+     "note": "same"
+    }
+   ],
+   "note": "Annotator cannot import library perf code; PERF-12/13 are runtime producers, not code blockers."
+  },
+  "EXT-25": {
+   "module": "annotator",
+   "milestone": "M4",
+   "hard": [
+    "EXT-17",
+    "EXT-18",
+    "EXT-24"
+   ],
+   "step_level": [
+    {
+     "item": "PERF-12",
+     "steps": "d_c/d_r/d_cc data, acceptance",
+     "note": "synthetic SpecSens in tests; adds d_cc itself"
+    },
+    {
+     "item": "PERF-13",
+     "steps": "sigma_f",
+     "note": "same"
+    }
+   ],
+   "note": "PERF-06 done. Master DAG edge PERF-12 -> EXT-25 reclassified as runtime data."
+  },
+  "RTE-21": {
+   "module": "routing",
+   "milestone": "M4",
+   "hard": [
+    "RTE-18"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-25",
+     "steps": "row fields r_nets/diff_pairs",
+     "note": "consumed; empty until EXT-25"
+    },
+    {
+     "item": "PERF-12",
+     "steps": "router_weights",
+     "note": "consumed"
+    },
+    {
+     "item": "EXT-24",
+     "steps": "step 6 RcClass fallback",
+     "note": ""
+    }
+   ],
+   "note": "RTE-09, RTE-32 done; step 3 lands first."
+  },
+  "RTE-22": {
+   "module": "routing",
+   "milestone": "M4",
+   "hard": [
+    "RTE-12",
+    "RTE-21"
+   ],
+   "step_level": [
+    {
+     "item": "PERF-12",
+     "steps": "sensitivity-weighted rows",
+     "note": "ground-C rows until then"
+    }
+   ],
+   "note": ""
+  },
+  "RTE-23": {
+   "module": "routing",
+   "milestone": "M4",
+   "hard": [
+    "RTE-12"
+   ],
+   "step_level": [],
+   "note": "RTE-06 handled in M1."
+  },
+  "PLC-16": {
+   "module": "placement",
+   "milestone": "M4",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "PERF-12",
+     "steps": "R and coupling rows",
+     "note": "today's perf_rows until then"
+    }
+   ],
+   "note": ""
+  },
+  "PLC-15": {
+   "module": "placement",
+   "milestone": "M4",
+   "hard": [
+    "PLC-08",
+    "RTE-25"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "PLC-17": {
+   "module": "placement",
+   "milestone": "M4",
+   "hard": [],
+   "step_level": [],
+   "note": ""
+  },
+  "GAP-08": {
+   "module": "perf",
+   "milestone": "M4",
+   "hard": [
+    "FLOW-08",
+    "RTE-21"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-25",
+     "steps": "richer budget rows",
+     "note": "PERF-06 rows (M0) suffice"
+    }
+   ],
+   "note": "Owner PERF (reinstated PERF-25). Needs RTE-21 step 3 only."
+  },
+  "PERF-22": {
+   "module": "perf",
+   "milestone": "M5",
+   "hard": [
+    "PERF-10",
+    "PERF-11",
+    "PERF-13",
+    "PERF-15"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "PERF-23": {
+   "module": "perf",
+   "milestone": "M5",
+   "hard": [
+    "PERF-16",
+    "GAP-01",
+    "MAT-07",
+    "MAT-13"
+   ],
+   "step_level": [
+    {
+     "item": "EXT-16",
+     "steps": "class per set",
+     "note": "default Moderate"
+    }
+   ],
+   "note": "D32: tier via GAP-01 Process::tier. CELL-01 done."
+  },
+  "PERF-21": {
+   "module": "perf",
+   "milestone": "M5",
+   "hard": [
+    "PERF-19",
+    "PERF-20",
+    "PERF-22",
+    "FLOW-12"
+   ],
+   "step_level": [],
+   "note": "FLOW-07 done."
+  },
+  "PERF-24": {
+   "module": "perf",
+   "milestone": "M5",
+   "hard": [
+    "PERF-13",
+    "PERF-20"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "MAT-14": {
+   "module": "analog-matching",
+   "milestone": "M6",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "MAT-09",
+     "steps": "step 2 (% ledger)",
+     "note": "MAT-09 is M3, same module"
+    }
+   ],
+   "note": "MAT-04 done."
+  },
+  "MAT-15": {
+   "module": "analog-matching",
+   "milestone": "M6",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "CELL-15",
+     "steps": "acceptance (4-row variants drawn)",
+     "note": "CELL-15 consumes MAT-15; cycle broken: MAT-15 first"
+    }
+   ],
+   "note": "MAT-01/03 done."
+  },
+  "CELL-15": {
+   "module": "cells",
+   "milestone": "M6",
+   "hard": [
+    "MAT-15"
+   ],
+   "step_level": [],
+   "note": "CELL-10, MAT-03 done."
+  },
+  "MAT-16": {
+   "module": "analog-matching",
+   "milestone": "M6",
+   "hard": [],
+   "step_level": [],
+   "note": ""
+  },
+  "MAT-17": {
+   "module": "analog-matching",
+   "milestone": "M6",
+   "hard": [],
+   "step_level": [],
+   "note": ""
+  },
+  "MAT-18": {
+   "module": "analog-matching",
+   "milestone": "M6",
+   "hard": [
+    "MAT-11"
+   ],
+   "step_level": [
+    {
+     "item": "CELL-21",
+     "steps": "drawing",
+     "note": "CELL-21 consumes MAT-18; cycle broken: MAT-18 first"
+    }
+   ],
+   "note": "Gate: splitdac fixture (EXT-19, M2). MAT-02 done."
+  },
+  "CELL-21": {
+   "module": "cells",
+   "milestone": "M6",
+   "hard": [
+    "MAT-18",
+    "EXT-19"
+   ],
+   "step_level": [],
+   "note": "EXT-19 is its gate (splitdac set). CELL-08 done."
+  },
+  "MAT-21": {
+   "module": "analog-matching",
+   "milestone": "M6",
+   "hard": [
+    "MAT-09"
+   ],
+   "step_level": [
+    {
+     "item": "PERF-27",
+     "steps": "MC values (acceptance)",
+     "note": "field + ledger first; PERF-27 fills it"
+    }
+   ],
+   "note": "Cycle with PERF-27 broken: MAT-21 adds sigma_rand_override."
+  },
+  "PERF-27": {
+   "module": "perf",
+   "milestone": "M6",
+   "hard": [
+    "PERF-11",
+    "PERF-22"
+   ],
+   "step_level": [
+    {
+     "item": "MAT-21",
+     "steps": "handoff to sigma_rand_override",
+     "note": "wiring after MAT-21"
+    }
+   ],
+   "note": "PERF-09 done."
+  },
+  "PERF-28": {
+   "module": "perf",
+   "milestone": "M6",
+   "hard": [
+    "RTE-22"
+   ],
+   "step_level": [],
+   "note": "PERF-10, PERF-11 earlier."
+  },
+  "CELL-20": {
+   "module": "cells",
+   "milestone": "M6",
+   "hard": [
+    "CELL-13",
+    "CELL-19"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "REL-16": {
+   "module": "reliability",
+   "milestone": "M6",
+   "hard": [
+    "EXT-23",
+    "GAP-03"
+   ],
+   "step_level": [
+    {
+     "item": "CELL-22",
+     "steps": "library call-site wiring",
+     "note": "well_bridges signature is CELL-22's; predicate first"
+    }
+   ],
+   "note": ""
+  },
+  "CELL-22": {
+   "module": "cells",
+   "milestone": "M6",
+   "hard": [
+    "REL-16"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "REL-13": {
+   "module": "reliability",
+   "milestone": "M6",
+   "hard": [],
+   "step_level": [],
+   "note": "PERF-08, FLOW-05 done. Owns the formula and the res_tox_nm key (6.3); no wait on CELL-23."
+  },
+  "CELL-23": {
+   "module": "cells",
+   "milestone": "M6",
+   "hard": [
+    "CELL-12",
+    "GAP-01"
+   ],
+   "step_level": [
+    {
+     "item": "REL-13",
+     "steps": "W_heat term",
+     "note": "class floor first; REL-13 owns the formula"
+    }
+   ],
+   "note": "D17: resistor_env from GAP-01. CELL-06 done."
+  },
+  "CELL-25": {
+   "module": "cells",
+   "milestone": "M6",
+   "hard": [],
+   "step_level": [],
+   "note": "CELL-10, MAT-03 done."
+  },
+  "CELL-29": {
+   "module": "cells",
+   "milestone": "M6",
+   "hard": [
+    "CELL-12"
+   ],
+   "step_level": [
+    {
+     "item": "CELL-14",
+     "steps": "resistor Pattern cleanup",
+     "note": "CELL-14 is M3, same module"
+    }
+   ],
+   "note": "CELL-04, FLOW-04 done."
+  },
+  "PLC-20": {
+   "module": "placement",
+   "milestone": "M6",
+   "hard": [
+    "PLC-08"
+   ],
+   "step_level": [],
+   "note": "EXT-14 merged in M2."
+  },
+  "PLC-22": {
+   "module": "placement",
+   "milestone": "M6",
+   "hard": [
+    "PLC-08",
+    "REL-07"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "PLC-25": {
+   "module": "placement",
+   "milestone": "M6",
+   "hard": [
+    "EXT-28",
+    "PLC-20"
+   ],
+   "step_level": [],
+   "note": "FLOW-07 done."
+  },
+  "PLC-27": {
+   "module": "placement",
+   "milestone": "M6",
+   "hard": [
+    "PLC-08",
+    "PLC-10"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "RTE-27": {
+   "module": "routing",
+   "milestone": "M6",
+   "hard": [
+    "RTE-12",
+    "RTE-13",
+    "REL-12"
+   ],
+   "step_level": [],
+   "note": "REL-03 done."
+  },
+  "RTE-28": {
+   "module": "routing",
+   "milestone": "M6",
+   "hard": [
+    "RTE-10"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "RTE-29": {
+   "module": "routing",
+   "milestone": "M6",
+   "hard": [
+    "RTE-15"
+   ],
+   "step_level": [
+    {
+     "item": "PLC-20",
+     "steps": "horizontal axes",
+     "note": "only if emitted"
+    }
+   ],
+   "note": ""
+  },
+  "RTE-30": {
+   "module": "routing",
+   "milestone": "M6",
+   "hard": [
+    "RTE-21",
+    "RTE-23"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "RTE-31": {
+   "module": "routing",
+   "milestone": "M6",
+   "hard": [
+    "RTE-21"
+   ],
+   "step_level": [],
+   "note": "Conditional on residuals after M3."
+  },
+  "REL-12": {
+   "module": "reliability",
+   "milestone": "M6",
+   "hard": [],
+   "step_level": [],
+   "note": "REL-03 done."
+  },
+  "REL-15": {
+   "module": "reliability",
+   "milestone": "M6",
+   "hard": [],
+   "step_level": [
+    {
+     "item": "EXT-23",
+     "steps": "aggressor tags",
+     "note": "Clock-class fallback; EXT-23 merged in M3"
+    }
+   ],
+   "note": ""
+  },
+  "REL-17": {
+   "module": "reliability",
+   "milestone": "M6",
+   "hard": [],
+   "step_level": [],
+   "note": "REL-03 done."
+  },
+  "EXT-27": {
+   "module": "annotator",
+   "milestone": "M6",
+   "hard": [
+    "EXT-13",
+    "EXT-14"
+   ],
+   "step_level": [],
+   "note": "FLOW-07 (instances) done."
+  },
+  "EXT-28": {
+   "module": "annotator",
+   "milestone": "M6",
+   "hard": [
+    "EXT-13",
+    "EXT-17"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "EXT-29": {
+   "module": "annotator",
+   "milestone": "M6",
+   "hard": [
+    "EXT-16",
+    "EXT-17"
+   ],
+   "step_level": [],
+   "note": ""
+  },
+  "FLOW-11": {
+   "module": "flow",
+   "milestone": "M6",
+   "hard": [
+    "FLOW-09"
+   ],
+   "step_level": [],
+   "note": "FLOW-02, FLOW-07 done; RTE/EXT optional."
+  },
+  "FLOW-15": {
+   "module": "flow",
+   "milestone": "M6",
+   "hard": [],
+   "step_level": [],
+   "note": "Docs follow whatever has merged; run last."
+  },
+  "GAP-11": {
+   "module": "cells",
+   "milestone": "M6",
+   "hard": [
+    "GAP-01",
+    "EXT-16"
+   ],
+   "step_level": [],
+   "note": "Owner CELL."
+  },
+  "GAP-12": {
+   "module": "routing",
+   "milestone": "M6",
+   "hard": [
+    "RTE-14",
+    "REL-12"
+   ],
+   "step_level": [],
+   "note": "Owner RTE."
+  },
+  "GAP-13": {
+   "module": "reliability",
+   "milestone": "M6",
+   "hard": [],
+   "step_level": [],
+   "note": "Owner REL. REL-02 done."
+  },
+  "GAP-14": {
+   "module": "cells",
+   "milestone": "M6",
+   "hard": [
+    "EXT-26",
+    "CELL-17"
+   ],
+   "step_level": [
+    {
+     "item": "PERF-18",
+     "steps": "LVS binding of the p-well net",
+     "note": "marked unverified until then; PERF-18 merged M3"
+    }
+   ],
+   "note": "Owner CELL. GAP-05 done."
+  },
+  "GAP-15": {
+   "module": "cells",
+   "milestone": "M6",
+   "hard": [
+    "CELL-19"
+   ],
+   "step_level": [],
+   "note": "Owner CELL."
+  },
+  "GAP-16": {
+   "module": "flow",
+   "milestone": "M6",
+   "hard": [],
+   "step_level": [],
+   "note": "Owner FLOW."
+  },
+  "GAP-18": {
+   "module": "analog-matching",
+   "milestone": "M6",
+   "hard": [
+    "MAT-11"
+   ],
+   "step_level": [],
+   "note": "Owner MAT."
+  },
+  "GAP-19": {
+   "module": "cells",
+   "milestone": "M6",
+   "hard": [
+    "EXT-18"
+   ],
+   "step_level": [],
+   "note": "Owner CELL."
+  }
+ },
+ "moved": [],
+ "dropped_deps": [
+  {
+   "item": "EXT-12",
+   "dep": "MAT-07",
+   "why": "cycle MAT-07/EXT-16/EXT-15/EXT-12: EXT-12 creates the enums itself; MatchClass is GAP-01 (C1)"
+  },
+  {
+   "item": "EXT-16",
+   "dep": "MAT-07",
+   "why": "D1: depends on GAP-01 instead"
+  },
+  {
+   "item": "MAT-07",
+   "dep": "EXT-16",
+   "why": "inferred classes only; every set Moderate until then"
+  },
+  {
+   "item": "MAT-07",
+   "dep": "FLOW-06",
+   "why": "D12: MatchClass/tier are GAP-01"
+  },
+  {
+   "item": "MAT-08",
+   "dep": "EXT-16",
+   "why": "D13: limit table is GAP-01; class read from MatchedSet.class"
+  },
+  {
+   "item": "MAT-08",
+   "dep": "EXT-20",
+   "why": "EXT-20 consumes MAT-08 (class_explicit); emission is downstream"
+  },
+  {
+   "item": "CELL-12",
+   "dep": "MAT-07",
+   "why": "D17: mos_env is GAP-01"
+  },
+  {
+   "item": "CELL-14",
+   "dep": "MAT-07",
+   "why": "D17: resistor_env is GAP-01"
+  },
+  {
+   "item": "CELL-23",
+   "dep": "MAT-07",
+   "why": "D17: resistor_env is GAP-01"
+  },
+  {
+   "item": "PLC-13",
+   "dep": "EXT-16",
+   "why": "classes default Moderate"
+  },
+  {
+   "item": "CELL-13",
+   "dep": "REL-06",
+   "why": "REL-06 cut; D19 -> FLOW-05 (M0)"
+  },
+  {
+   "item": "CELL-17",
+   "dep": "REL-07",
+   "why": "D20: taxonomy test and ring_gap are GAP-05 (M1); REL-07 consumes CELL-17"
+  },
+  {
+   "item": "CELL-17",
+   "dep": "REL-08",
+   "why": "REL-08 cut; injector input is GAP-03 via REL-07, not needed to draw"
+  },
+  {
+   "item": "CELL-16",
+   "dep": "FLOW-06",
+   "why": "D22: model_markers is GAP-07"
+  },
+  {
+   "item": "REL-05",
+   "dep": "FLOW-06",
+   "why": "D27: em_derating is GAP-06 (step-level)"
+  },
+  {
+   "item": "REL-07",
+   "dep": "CELL-05",
+   "why": "D30: GAP-05 (M1)"
+  },
+  {
+   "item": "REL-07",
+   "dep": "EXT-23",
+   "why": "plan text: policy runs without EXT-23 (Clock-class fallback); step-level"
+  },
+  {
+   "item": "RTE-16",
+   "dep": "MAT-07/FLOW-06",
+   "why": "D11: GAP-01"
+  },
+  {
+   "item": "PERF-23",
+   "dep": "FLOW-06",
+   "why": "D32: Process::tier from GAP-01"
+  },
+  {
+   "item": "MAT-09",
+   "dep": "FLOW-06",
+   "why": "D15: MAT registers abeta keys (C23)"
+  },
+  {
+   "item": "MAT-10",
+   "dep": "FLOW-06",
+   "why": "D16: keys C23, capacitors table CELL-08 (M1)"
+  },
+  {
+   "item": "RTE-14",
+   "dep": "EXT-24",
+   "why": "D8: em_critical cut; own current filter"
+  },
+  {
+   "item": "RTE-14",
+   "dep": "REL-12, REL-17",
+   "why": "optional per its text; forward to M6"
+  },
+  {
+   "item": "RTE-17",
+   "dep": "EXT-24",
+   "why": "fallback to 2-device leaves (step-level); D7 removes max_delta_mv"
+  },
+  {
+   "item": "RTE-15",
+   "dep": "PLC-28, PLC-21, EXT-24",
+   "why": "fallback routing; only bench exactness (T5) needs them (step-level)"
+  },
+  {
+   "item": "RTE-18",
+   "dep": "EXT-24, EXT-18",
+   "why": "inputs; existing CrosstalkExclusion rules feed the search (step-level)"
+  },
+  {
+   "item": "RTE-19",
+   "dep": "EXT-24",
+   "why": "shield_ref falls back to ground (step-level)"
+  },
+  {
+   "item": "EXT-17",
+   "dep": "PERF-12",
+   "why": "producer, not blocker (its text); forward M4"
+  },
+  {
+   "item": "EXT-17",
+   "dep": "PERF-09, FLOW-07",
+   "why": "done in M1"
+  },
+  {
+   "item": "EXT-21",
+   "dep": "PERF-12, PERF-13",
+   "why": "runtime producers into EXT-17 SpecSens; annotator cannot import library perf (step-level)"
+  },
+  {
+   "item": "EXT-25",
+   "dep": "PERF-12, PERF-13",
+   "why": "same as EXT-21 (step-level)"
+  },
+  {
+   "item": "RTE-21",
+   "dep": "EXT-25, PERF-12",
+   "why": "\"Consumes\"; empty until filled"
+  },
+  {
+   "item": "PERF-12",
+   "dep": "RTE-21",
+   "why": "cycle PERF-12/RTE-21: only step 2 writes RTE-21 fields (step-level)"
+  },
+  {
+   "item": "PERF-16",
+   "dep": "PERF-11",
+   "why": "refines the ranking only; forward M4"
+  },
+  {
+   "item": "PERF-10",
+   "dep": "PERF-15",
+   "why": "step 3 only; forward M4 (step-level)"
+  },
+  {
+   "item": "PERF-20",
+   "dep": "PERF-14",
+   "why": "master DAG edge; PERF-20 reads beta from PERF-13, not the beta key"
+  },
+  {
+   "item": "GAP-02",
+   "dep": "MAT-16",
+   "why": "forward M6; S(L) \"when present\" (step-level)"
+  },
+  {
+   "item": "GAP-02",
+   "dep": "EXT-17",
+   "why": "gm/Id is an Option input (step-level)"
+  },
+  {
+   "item": "MAT-12",
+   "dep": "CELL-14",
+   "why": "cycle CELL-14/MAT-12: CELL-14 wires MAT-12 functions; MAT-12 first"
+  },
+  {
+   "item": "MAT-15",
+   "dep": "CELL-15",
+   "why": "cycle: CELL-15 draws MAT-15 grids; MAT-15 first"
+  },
+  {
+   "item": "MAT-18",
+   "dep": "CELL-21",
+   "why": "cycle: CELL-21 draws MAT-18 functions; MAT-18 first"
+  },
+  {
+   "item": "MAT-21",
+   "dep": "PERF-27",
+   "why": "cycle: PERF-27 fills MAT-21 field; MAT-21 first"
+  },
+  {
+   "item": "CELL-23",
+   "dep": "REL-13",
+   "why": "\"Cross:\" only; REL-13 owns formula (step-level W_heat)"
+  },
+  {
+   "item": "REL-14",
+   "dep": "(none dropped)",
+   "why": "REL-05 kept hard: shared formula, REL-05 first"
+  },
+  {
+   "item": "REL-16",
+   "dep": "CELL-22",
+   "why": "cycle: predicate first; CELL-22 owns signature and depends on REL-16"
+  },
+  {
+   "item": "EXT-13",
+   "dep": "EXT-14, EXT-15, EXT-19",
+   "why": "later items add their edges to the tree (step-level)"
+  },
+  {
+   "item": "EXT-14",
+   "dep": "EXT-15",
+   "why": "step 8 set_pairs only (step-level)"
+  },
+  {
+   "item": "FLOW-12",
+   "dep": "EXT-26",
+   "why": "only --constraints (step-level)"
+  },
+  {
+   "item": "FLOW-08",
+   "dep": "PLC-10 step 1",
+   "why": "only once DpMode::Sp is the default (step-level)"
+  },
+  {
+   "item": "PLC-08",
+   "dep": "PLC-15, EXT-13",
+   "why": "halo zero until PLC-15; groups until Intent.tree"
+  },
+  {
+   "item": "PLC-21",
+   "dep": "EXT-14",
+   "why": "all pairs Perfect until EXT-14 (step-level)"
+  },
+  {
+   "item": "PLC-16",
+   "dep": "PERF-12",
+   "why": "today's perf_rows suffice"
+  },
+  {
+   "item": "REL-15",
+   "dep": "EXT-23",
+   "why": "Clock-class fallback (step-level)"
+  },
+  {
+   "item": "REL-15",
+   "dep": "PLC-19",
+   "why": "PLC-19 cut in favour of REL-15; not a dependency"
+  },
+  {
+   "item": "CELL-18",
+   "dep": "EXT-18",
+   "why": "\"Uses\" net classes; today's Problem.net_classes suffice"
+  },
+  {
+   "item": "PERF-18",
+   "dep": "PERF-16",
+   "why": "one step only (step-level)"
+  },
+  {
+   "item": "GAP-08",
+   "dep": "EXT-25",
+   "why": "PERF-06 rows (M0) suffice; EXT-25 or PERF-06"
+  },
+  {
+   "item": "all",
+   "dep": "REL-08, REL-09",
+   "why": "cut; every consumer repointed to GAP-03/GAP-04/EXT-23 (D3-D5, D25, D28, D29); GAP-04 done in M1"
+  },
+  {
+   "item": "all",
+   "dep": "items done in M0/M1",
+   "why": "already merged (MAT-01..06, EXT-02..11, CELL-01..10/30, PLC-01..06, PLC-10 step 0, RTE-02..09/32, REL-01..03, PERF-01..09/30, FLOW-01..05/07/14/16/17, GAP-04/05/10/20)"
+  }
+ ],
+ "modules": {
+  "analog-matching": [
+   "GAP-01",
+   "MAT-07",
+   "MAT-08",
+   "MAT-13",
+   "GAP-02",
+   "MAT-09",
+   "MAT-11",
+   "MAT-12",
+   "MAT-10",
+   "MAT-14",
+   "MAT-15",
+   "MAT-16",
+   "MAT-17",
+   "MAT-18",
+   "MAT-21",
+   "GAP-18"
+  ],
+  "annotator": [
+   "EXT-12",
+   "EXT-13",
+   "EXT-14",
+   "EXT-15",
+   "EXT-16",
+   "EXT-19",
+   "EXT-20",
+   "EXT-17",
+   "EXT-18",
+   "EXT-23",
+   "GAP-03",
+   "EXT-24",
+   "EXT-26",
+   "GAP-09",
+   "EXT-21",
+   "EXT-25",
+   "EXT-27",
+   "EXT-28",
+   "EXT-29"
+  ],
+  "cells": [
+   "CELL-11",
+   "CELL-12",
+   "CELL-13",
+   "CELL-19",
+   "CELL-14",
+   "CELL-16",
+   "CELL-17",
+   "CELL-18",
+   "CELL-15",
+   "CELL-21",
+   "CELL-20",
+   "CELL-22",
+   "CELL-23",
+   "CELL-25",
+   "CELL-29",
+   "GAP-11",
+   "GAP-14",
+   "GAP-15",
+   "GAP-19"
+  ],
+  "placement": [
+   "PLC-07",
+   "PLC-13",
+   "PLC-24",
+   "PLC-29",
+   "PLC-18",
+   "PLC-08",
+   "PLC-09",
+   "PLC-10",
+   "PLC-11",
+   "PLC-12",
+   "PLC-28",
+   "PLC-21",
+   "PLC-14",
+   "PLC-16",
+   "PLC-15",
+   "PLC-17",
+   "PLC-20",
+   "PLC-22",
+   "PLC-27",
+   "PLC-25"
+  ],
+  "routing": [
+   "RTE-10",
+   "RTE-11",
+   "RTE-12",
+   "RTE-13",
+   "RTE-25",
+   "RTE-26@M2",
+   "RTE-14",
+   "RTE-16",
+   "RTE-18",
+   "RTE-15",
+   "RTE-17",
+   "RTE-19",
+   "RTE-20",
+   "RTE-24",
+   "RTE-26",
+   "RTE-21",
+   "RTE-22",
+   "RTE-23",
+   "RTE-28",
+   "RTE-29",
+   "RTE-30",
+   "RTE-31",
+   "RTE-27",
+   "GAP-12"
+  ],
+  "reliability": [
+   "GAP-06",
+   "REL-10",
+   "REL-04",
+   "REL-05",
+   "REL-14",
+   "REL-07",
+   "REL-16",
+   "REL-12",
+   "REL-13",
+   "REL-15",
+   "REL-17",
+   "GAP-13"
+  ],
+  "perf": [
+   "PERF-10",
+   "PERF-17",
+   "PERF-20@M2",
+   "GAP-17",
+   "PERF-18",
+   "PERF-19",
+   "PERF-16",
+   "PERF-11",
+   "PERF-13",
+   "PERF-12",
+   "PERF-14",
+   "PERF-15",
+   "PERF-26",
+   "PERF-29",
+   "GAP-08",
+   "PERF-20",
+   "PERF-22",
+   "PERF-23",
+   "PERF-21",
+   "PERF-24",
+   "PERF-27",
+   "PERF-28"
+  ],
+  "flow": [
+   "FLOW-06",
+   "GAP-07",
+   "FLOW-09",
+   "FLOW-12",
+   "FLOW-13",
+   "FLOW-08",
+   "FLOW-10",
+   "FLOW-11",
+   "FLOW-15",
+   "GAP-16"
+  ]
+ }
+}
