@@ -205,8 +205,10 @@ fn vout(dir: &std::path::Path, file: &str, deck: &str) -> f64 {
 }
 
 /// The extracted layout simulates and its DC output matches the schematic's
-/// within 1 % (M1 PERF criterion). `vin = 0` puts `vout` at VDD through the
-/// PMOS in triode, so the comparison does not ride the inverter's gain.
+/// within 1 % (M1 PERF criterion). `vin = 0` keeps the PMOS in triode, so the
+/// comparison does not ride the inverter's gain; `Rload` draws ~170 µA through
+/// the PMOS, the resistor and the routing, so their extracted sizes and
+/// parasitics move `v(vout)` (unloaded it sits at VDD for any deck).
 #[test]
 fn post_layout_rc_filter_simulates() {
     let Some(lib) = models() else { return };
@@ -215,7 +217,7 @@ fn post_layout_rc_filter_simulates() {
     std::fs::create_dir_all(&dir).unwrap();
     let bench = |body: &str| {
         format!(
-            "* pex\n.lib {} tt\n{body}\nXdut vin vout VDD VSS rc_filter\nVdd VDD 0 1.8\nVss VSS 0 0\nVin vin 0 0\n.control\nop\nprint v(vout)\n.endc\n.end\n",
+            "* pex\n.lib {} tt\n{body}\nXdut vin vout VDD VSS rc_filter\nVdd VDD 0 1.8\nVss VSS 0 0\nVin vin 0 0\nRload vout 0 10k\n.control\nop\nprint v(vout)\n.endc\n.end\n",
             lib.display()
         )
     };
@@ -247,11 +249,14 @@ fn every_mos_card_has_four_nodes() {
         return;
     }
     let (_, pex) = rc_filter_pex();
+    // The model is the positional token naming a FET, wherever it sits: a
+    // 3-node card puts it at t[4].
+    let model = |s: &&str| !s.contains('=') && s.contains("fet_");
     let mos: Vec<Vec<&str>> =
-        pex.lines().map(|l| l.split_whitespace().collect::<Vec<_>>()).filter(|t| t[0].starts_with('X') && t.get(5).is_some_and(|m| m.contains("fet_"))).collect();
+        pex.lines().map(|l| l.split_whitespace().collect::<Vec<_>>()).filter(|t| t[0].starts_with('X') && t.iter().any(model)).collect();
     assert!(!mos.is_empty(), "{pex}");
     for t in mos {
-        assert_eq!(t.iter().skip(1).take_while(|s| !s.contains("fet_")).count(), 4, "{t:?}");
+        assert_eq!(t.iter().position(|s| model(&s)), Some(5), "four nodes, then the model: {t:?}");
         let bulk = t[4].rsplit_once(':').map_or(t[4], |(n, _)| n);
         let rail = if t[5].contains("nfet") { "VSS" } else { "VDD" };
         assert!(bulk.eq_ignore_ascii_case(rail), "{t:?}");

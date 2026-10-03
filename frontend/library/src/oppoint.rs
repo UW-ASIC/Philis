@@ -194,6 +194,26 @@ pub(crate) fn scratch_dir(tag: &str) -> std::io::Result<PathBuf> {
     Ok(d)
 }
 
+/// `deck` under `ngspice -b` in its own [`scratch_dir`], removed on every path
+/// once it exists unless `PHILIS_KEEP_DECKS` is set.
+///
+/// # Errors
+/// The deck unwritable ("deck io"), ngspice not started ("ngspice unavailable"),
+/// or [`check_exit`].
+pub(crate) fn run_deck(ngspice: &str, tag: &str, deck: &str) -> Result<std::process::Output, String> {
+    let dir = scratch_dir(tag).map_err(|e| format!("deck io: {e}"))?;
+    let file = format!("{tag}.spice");
+    let out = std::fs::write(dir.join(&file), deck)
+        .map_err(|e| format!("deck io: {e}"))
+        .and_then(|()| Command::new(ngspice).current_dir(&dir).arg("-b").arg(&file).output().map_err(|e| format!("ngspice unavailable: {e}")));
+    if std::env::var_os("PHILIS_KEEP_DECKS").is_none() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let out = out?;
+    check_exit(&out)?;
+    Ok(out)
+}
+
 /// `Err("cannot simulate: ngspice exit …")` when ngspice failed: an unknown
 /// subckt or a pin-count mismatch is fatal in batch mode (exit 1).
 pub(crate) fn check_exit(out: &std::process::Output) -> Result<(), String> {
@@ -211,25 +231,7 @@ pub(crate) fn check_exit(out: &std::process::Output) -> Result<(), String> {
 /// all of which the caller treats as "bias unknown".
 pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
     let (deck, provenance) = build_deck(netlist, cfg).map_err(|e| format!("cannot simulate: {e}"))?;
-    let dir = scratch_dir("op").map_err(|e| format!("deck io: {e}"))?;
-    let path = dir.join("op.spice");
-    std::fs::write(&path, &deck).map_err(|e| format!("deck io: {e}"))?;
-    let out = Command::new(&cfg.ngspice)
-        .current_dir(&dir)
-        .arg("-b")
-        .arg("op.spice")
-        .output()
-        .map_err(|e| format!("ngspice unavailable: {e}"))?;
-    let keep = std::env::var_os("PHILIS_KEEP_DECKS").is_some();
-    let cleanup = || {
-        if !keep {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-    };
-    if let Err(e) = check_exit(&out) {
-        cleanup();
-        return Err(e);
-    }
+    let out = run_deck(&cfg.ngspice, "op", &deck)?;
 
     let table = parse_show(&String::from_utf8_lossy(&out.stdout));
     if table.is_empty() {
@@ -237,7 +239,6 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
             .chars()
             .take(400)
             .collect();
-        cleanup();
         return Err(format!("no device operating points: {tail}"));
     }
     let n = netlist.devices.len();
@@ -289,7 +290,6 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
         }
         o.resolved += 1;
     }
-    cleanup();
     Ok(o)
 }
 
@@ -912,11 +912,23 @@ mod tests {
     /// device name.
     #[test]
     fn a_truncated_header_does_not_shift_later_devices() {
-        let truncated = SHOW.replace("m.xm4.msky130_fd_pr__", "xm4:truncated");
+        // The first column: a shift would hand xm4 xm5's distinct values.
+        let truncated = SHOW.replace("m.xm5.msky130_fd_pr__", "xm5:truncated");
         let t = parse_show(&truncated);
         let keys: Vec<_> = t.keys().collect();
-        assert!(!t.contains_key("xm4"), "the truncated column must not parse as xm4: {keys:?}");
-        assert!((t["xm3"].id - 4.10968e-06).abs() < 1e-12, "xm3 keeps its own value, not xm4's: {}", t["xm3"].id);
+        assert!(!t.contains_key("xm5"), "the truncated column must not parse as xm5: {keys:?}");
+        assert!((t["xm4"].id - 4.10968e-06).abs() < 1e-12, "xm4 keeps its own id, not xm5's: {}", t["xm4"].id);
+        assert!((t["xm4"].vds - 1.78826).abs() < 1e-9, "xm4 keeps its own vds, not xm5's: {}", t["xm4"].vds);
+    }
+
+    /// A failed run leaves no scratch dir behind.
+    #[test]
+    fn a_missing_ngspice_leaks_no_scratch_dir() {
+        let e = run_deck("/nonexistent/ngspice", "leakcheck", "* empty\n.end\n").unwrap_err();
+        assert!(e.starts_with("ngspice unavailable"), "{e}");
+        let prefix = format!("philis_leakcheck_{}_", std::process::id());
+        let left = std::fs::read_dir(std::env::temp_dir()).unwrap().flatten().any(|d| d.file_name().to_string_lossy().starts_with(&prefix));
+        assert!(!left, "{prefix}* left in the temp dir");
     }
 
     #[test]

@@ -1341,7 +1341,6 @@ fn pin_currents(netlist: &pnr_core::Netlist, devices_of: &[Vec<DeviceId>], draws
 /// Per-device power (µW), per-terminal current (µA) and the bias provenance for
 /// the report: the ngspice operating point when configured and solvable, else
 /// `cfg.device_power_uw` and no currents.
-#[allow(clippy::type_complexity)]
 fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> Bias {
     let op = cfg
         .op

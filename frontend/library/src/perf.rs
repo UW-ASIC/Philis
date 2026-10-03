@@ -7,11 +7,9 @@
 //! capacitance matrix (ground and coupling, per net), and a failed spec makes
 //! the layout infeasible, whatever it saves elsewhere.
 
-use std::process::Command;
-
 use pnr_core::Netlist;
 
-use crate::oppoint::{check_exit, flat_circuit_with, node_name, scratch_dir, OpConfig};
+use crate::oppoint::{flat_circuit_with, node_name, run_deck, OpConfig};
 
 /// What a layout adds to the schematic for simulation.
 #[derive(Clone, Debug, Default)]
@@ -171,19 +169,10 @@ fn parse_measures(text: &str) -> Vec<(String, f64)> {
 /// The deck cannot be built ("cannot simulate: …") or written, ngspice cannot
 /// be started, or it exits with an error ("cannot simulate: ngspice exit …").
 pub fn evaluate(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig) -> Result<PerfResult, String> {
+    let text = deck(netlist, par, cfg).map_err(|e| format!("cannot simulate: {e}"))?;
     // One dir per run: sensitivity runs go in parallel and must not share a
     // deck or the ngspice cwd (`bsim4v5.out`).
-    let dir = scratch_dir("perf").map_err(|e| format!("deck io: {e}"))?;
-    let path = dir.join("perf.spice");
-    let text = deck(netlist, par, cfg).map_err(|e| format!("cannot simulate: {e}"))?;
-    std::fs::write(&path, text).map_err(|e| format!("deck io: {e}"))?;
-    let out = Command::new(&cfg.sim.ngspice).current_dir(&dir).arg("-b").arg("perf.spice").output().map_err(|e| format!("ngspice unavailable: {e}"))?;
-    let keep = std::env::var_os("PHILIS_KEEP_DECKS").is_some();
-    let result = check_exit(&out);
-    if !keep {
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    result?;
+    let out = run_deck(&cfg.sim.ngspice, "perf", &text)?;
     let measured = parse_measures(&String::from_utf8_lossy(&out.stdout));
     let metrics: Vec<(String, Option<f64>)> = cfg
         .specs

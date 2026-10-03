@@ -34,6 +34,9 @@ const MAX_ITERS: u32 = 150;
 const GCELLS_PER_SIDE: u32 = 16;
 /// Rip-up rounds for nets named by violated hard rules, each at doubled `p_fac`.
 const HARD_ROUNDS: u32 = 4;
+/// History on a node another net owns under a laid access jog: that net's trunk
+/// detours rather than short the jog (soft, unlike `reserved`: it may still pass).
+const JOG_HIST: f32 = 64.0;
 /// `reserved` owner of a node no net's trunk may use (no net has this id).
 const CONTESTED: u32 = NONE - 1;
 /// `reserved` owner of a node within spacing of foreign cell or ring metal:
@@ -345,6 +348,8 @@ impl DetailedRoute {
             .map(|&(n, r, _)| (ci_of[n.0 as usize] as u32, r.x + r.w / 2 - origin.0, r.y + r.h / 2 - origin.1))
             .collect();
         let mut laid_legs: Vec<(usize, Rect)> = Vec::new();
+        // Nodes another net owns under a laid jog: history [`JOG_HIST`] for this run.
+        let mut jog_hist: Vec<u32> = Vec::new();
 
         // Landing-pad legality: a pad (or its cut) that stops closer than
         // min_spacing to cell li — or to the cut at the pin end — without merging
@@ -478,21 +483,14 @@ impl DetailedRoute {
                 let point = r.w <= 1 && r.h <= 1;
                 let cands = if point { Vec::new() } else { grid.candidates(cx, cy, &claimed, clean, 8, 12) };
                 // Spaced from every foreign pin's future pad first, then merely
-                // not touching it; each first over no node another net owns (its
-                // stitch reach, landing or jog: where its trunk may run, a short
-                // `break_shorts` settles only by deleting this access), then over any.
+                // not touching it.
                 let spaced = (stitch, (cfg.pitch - cfg.wire_width).max(1));
-                let own = |n: u32| reserved[n as usize] == ci as u32 || reserved[n as usize] >= BLOCKED;
-                let tiers = [(spaced, true), ((full, 1), true), (spaced, false), ((full, 1), false)];
-                let joint = tiers.into_iter().find_map(|((zone, gap), owned)| {
+                let joint = [spaced, (full, 1)].into_iter().find_map(|(zone, gap)| {
                     cands.iter().copied().find_map(|n| {
                         let (px, py, _) = grid.pos(n);
                         [full, narrow].into_iter().find_map(|w| {
                             let both = jog_legs(px, py, cx, cy, w);
-                            let f = (0..2).find(|&f| {
-                                jog_clean(&both[f], ci, zone, gap, &zones, &laid_legs)
-                                    && (!owned || jog_nodes(&grid, cfg, &both[f], jog_l).all(own))
-                            })?;
+                            let f = (0..2).find(|&f| jog_clean(&both[f], ci, zone, gap, &zones, &laid_legs))?;
                             Some((n, (w, f == 1), both[f]))
                         })
                     })
@@ -502,6 +500,18 @@ impl DetailedRoute {
                 let landed = match joint {
                     Some((n, choice, legs)) => {
                         laid_legs.extend(legs.iter().map(|&l| (ci, l)));
+                        // A jog over a node another net owns (its stitch reach,
+                        // landing or jog) is where that net's trunk may run: a
+                        // short `break_shorts` settles only by deleting this access.
+                        // Only a node whose wire would touch a leg: the swept bins
+                        // reach up to a pitch past it.
+                        let infl = cfg.wire_width / 2;
+                        let touches = |n: &u32| {
+                            let (px, py, _) = grid.pos(*n);
+                            legs.iter().any(|l| (l.x - infl..=l.x + l.w + infl).contains(&px) && (l.y - infl..=l.y + l.h + infl).contains(&py))
+                        };
+                        let foreign = |n: &u32| reserved[*n as usize] != ci as u32 && reserved[*n as usize] < BLOCKED;
+                        jog_hist.extend(jog_nodes(&grid, cfg, &legs, jog_l).filter(foreign).filter(touches));
                         Some((n, Some(choice)))
                     }
                     None => grid
@@ -605,6 +615,7 @@ impl DetailedRoute {
             (x + origin.0, y + origin.1, l)
         };
         neg.seed(gr::Tier::Detailed, &mut hot.hist, abs);
+        jog_hist.iter().for_each(|&n| hot.hist[n as usize] += JOG_HIST);
         run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS);
 
         // A net over its IR-drop budget reroutes pricing its series R, weighted
@@ -664,6 +675,8 @@ impl DetailedRoute {
             .collect();
         let trials = repair_constraints(&mut hot, &cold, reqs, &extra, &common, &ci_of, &lift, probe);
 
+        // The jog price is this layout's, not negotiation history.
+        jog_hist.iter().for_each(|&n| hot.hist[n as usize] -= JOG_HIST);
         neg.accumulate(gr::Tier::Detailed, &hot.hist, abs);
         // Shields: requested nets get reference tracks alongside, tied in by
         // rerouting the reference to them.
