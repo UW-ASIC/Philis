@@ -30,6 +30,7 @@ const BASELINE: &[(&str, usize, &[&str], bool)] = &[
     ("bgr_core",          0,  &[], true),
     ("chain4",            0,  &[], true),
     ("dac4",              0,  &[], true),
+    ("mirror_ratio",      0,  &[], true),
 ];
 
 /// Fixtures big enough that a full flow dominates the suite runtime. Same

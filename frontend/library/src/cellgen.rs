@@ -126,7 +126,12 @@ pub fn enumerate_folded(
                 }
                 alts
             }
-            None => draw_variants(kind, &dev(&members[0]).model, &group, &sized, pdk),
+            // No legal merged row (`draw_all`'s empty placeholder): declined.
+            None => {
+                let mut alts = draw_variants(kind, &dev(&members[0]).model, &group, &sized, pdk);
+                alts.retain(|m| !m.shapes.is_empty());
+                alts
+            }
         };
         for m in &mut alternatives {
             bind_pins(m, netlist, &members, ground);
