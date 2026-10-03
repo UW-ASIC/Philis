@@ -87,6 +87,7 @@ mod tests {
                 fet("XM2", DeviceKind::Nmos, 1, 3, 4, devs[1].1, 10_000, 1_000),
             ],
             nets: nets(&["inp", "inm", "outp", "outm", "tail", "VSS", "VDD", "nb1", "nb2"]),
+            ..Default::default()
         };
         for (d, (model, _)) in nl.devices.iter_mut().zip(devs) {
             d.model = model.into();

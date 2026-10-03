@@ -234,6 +234,7 @@ mod tests {
                 },
             ],
             nets: crate::tests::nets(&["outn", "in", "VSS", "outp", "VDD"]),
+            ..Default::default()
         };
         let classes = classify_netlist(&nl);
         assert_eq!(class_of(&nl, &classes, "outn"), NetClass::Signal);
@@ -257,12 +258,13 @@ mod tests {
         let nl = Netlist {
             devices: vec![r1, m1],
             nets: crate::tests::nets(&["a", "b", "dn", "VSS"]),
+            ..Default::default()
         };
         let classes = classify_netlist(&nl);
         assert_eq!(class_of(&nl, &classes, "a"), NetClass::Signal);
 
         // Control: without R1, `a` has no DC path off the gate and is Sensitive.
-        let nl_no_r = Netlist { devices: vec![nl.devices[1].clone()], nets: nl.nets.clone() };
+        let nl_no_r = Netlist { devices: vec![nl.devices[1].clone()], nets: nl.nets.clone(), ..Default::default() };
         let classes_no_r = classify_netlist(&nl_no_r);
         assert_eq!(class_of(&nl_no_r, &classes_no_r, "a"), NetClass::Sensitive);
     }

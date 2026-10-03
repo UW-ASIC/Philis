@@ -2602,7 +2602,7 @@ mod tests {
                 }
             })
             .collect();
-        Netlist { devices, nets }
+        Netlist { devices, nets, ..Default::default() }
     }
 
     #[test]

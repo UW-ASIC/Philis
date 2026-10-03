@@ -330,6 +330,7 @@ fn missing_is_relevant() {
             Device { name: "R2".into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("A".into(), NetId(2)), ("B".into(), NetId(3))], params: vec![] },
         ],
         nets: nets(&["a", "b", "c", "d"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     // ... and no gate area, so no net budget either.
@@ -466,6 +467,7 @@ fn telescopic_slot7_is_not_self_symmetric() {
             fet("M7", p, 9, 9, 10, 10, 5_000, 1_000),
         ],
         nets: nets(&["inp", "x1", "tail", "VSS", "inn", "x2", "vbn2", "o1", "o2", "vbp", "VDD", "vbn"]),
+        ..Default::default()
     };
     let pr = annotate(&nl, &AnnotationConfig::default());
     assert_eq!((pr.blocks[0].template, pr.blocks[0].devices.len()), ("telescopic_ota_full", 8));
@@ -525,6 +527,7 @@ fn a_cascode_stack_is_not_an_isolation_victim() {
             fet("XS", DeviceKind::Nmos, 5, 6, 2, 2, 1_000, 150),
         ],
         nets: nets(&["vin", "x", "VSS", "vcas", "out", "clk", "sw"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     let mut touched = Vec::new();
@@ -551,6 +554,7 @@ fn a_cascode_gate_net_with_a_channel_use_is_signal() {
             fet("MD", DeviceKind::Nmos, 0, 3, 2, 2, 4_000, 500),
         ],
         nets: nets(&["vin", "x", "VSS", "vcas", "out"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(p.net_classes[3].class, analog::metadata::NetClass::Signal);
@@ -738,6 +742,6 @@ fn capacitor_plate_nets_get_no_invented_budget() {
 #[should_panic(expected = "annotator: 65536 devices/nets exceed the u16 id space (65535)")]
 fn more_nets_than_u16_ids_is_refused_not_wrapped() {
     // `NetId(n as u16)` would alias net 65536 onto net 0 (AA-35).
-    let nl = Netlist { devices: Vec::new(), nets: vec![Net { name: "n".into() }; 65_536] };
+    let nl = Netlist { devices: Vec::new(), nets: vec![Net { name: "n".into() }; 65_536], ..Default::default() };
     let _ = annotate(&nl, &AnnotationConfig::default());
 }

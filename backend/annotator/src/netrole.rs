@@ -207,7 +207,7 @@ mod tests {
                 params: vec![],
             })
             .collect();
-        let nl = Netlist { devices, nets: names.iter().map(|n| Net { name: (*n).into() }).collect() };
+        let nl = Netlist { devices, nets: names.iter().map(|n| Net { name: (*n).into() }).collect(), ..Default::default() };
         classify_nets(&BipartiteHypergraph::from_netlist(&nl), &AnnotationConfig::default())
     }
 

@@ -263,6 +263,7 @@ mod tests {
                 fet("XS", DeviceKind::Nmos, 6, 8, 9, 3, 1_000, 150),
             ],
             nets: nets(&["outp", "inp", "tail", "VSS", "outn", "inn", "clk", "VDD", "sw", "sw2"]),
+            ..Default::default()
         };
         let cfg = crate::AnnotationConfig {
             supply_nets: vec!["VDD".into()],
