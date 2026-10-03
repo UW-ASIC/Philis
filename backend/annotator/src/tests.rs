@@ -379,6 +379,34 @@ fn a_differential_stage_is_symmetric_about_one_axis() {
     assert!(p.constraints.guard_rings.iter().any(|g| g.device == DeviceId(4)), "and a ring");
 }
 
+/// AA-23: only declared selfs go on the axis. `telescopic_ota_full` declares
+/// the tail (slot 6) and no role for the load bias (slot 7, a diode PMOS on the
+/// loads' source). Nets: 0=inp 1=x1 2=tail 3=VSS 4=inn 5=x2 6=vbn2 7=o1 8=o2
+/// 9=vbp 10=VDD 11=vbn.
+#[test]
+fn telescopic_slot7_is_not_self_symmetric() {
+    let (n, p) = (DeviceKind::Nmos, DeviceKind::Pmos);
+    let nl = Netlist {
+        devices: vec![
+            fet("M0", n, 0, 1, 2, 3, 10_000, 1_000),
+            fet("M1", n, 4, 5, 2, 3, 10_000, 1_000),
+            fet("M2", n, 6, 7, 1, 3, 10_000, 1_000),
+            fet("M3", n, 6, 8, 5, 3, 10_000, 1_000),
+            fet("M4", p, 9, 7, 10, 10, 20_000, 1_000),
+            fet("M5", p, 9, 8, 10, 10, 20_000, 1_000),
+            fet("M6", n, 11, 2, 3, 3, 40_000, 1_000),
+            fet("M7", p, 9, 9, 10, 10, 5_000, 1_000),
+        ],
+        nets: nets(&["inp", "x1", "tail", "VSS", "inn", "x2", "vbn2", "o1", "o2", "vbp", "VDD", "vbn"]),
+    };
+    let pr = annotate(&nl, &AnnotationConfig::default());
+    assert_eq!((pr.blocks[0].template, pr.blocks[0].devices.len()), ("telescopic_ota_full", 8));
+    let mut m = Vec::new();
+    pr.placement.hard.iter().for_each(|b| b.mirror_pairs(&mut m));
+    let selfs: Vec<u32> = m.iter().filter(|p| p.0 == p.1).map(|p| p.0).collect();
+    assert_eq!(selfs, [6], "the tail only, not slot 7: {m:?}");
+}
+
 #[test]
 fn a_shared_gate_chain_is_a_series_stack_not_a_cascode() {
     // chain4: four same-size nfets in series on one gate net.

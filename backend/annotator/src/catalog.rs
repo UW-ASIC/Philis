@@ -23,6 +23,7 @@
 //! Within a size tier, more-constrained patterns (exact sizing, diode
 //! requirements) get higher priority than loosely-constrained ones.
 
+use crate::block::BlockKind::{self, CascodePair, CurrentMirror, DiffPair, Load};
 use crate::pattern::{DiodeReq, Pattern, PinLink, PinRel, SizeMatch, Slot, SlotKind};
 
 // ── Shorthand constructors ──
@@ -1819,10 +1820,10 @@ pub const COMPLEMENTARY_DIFF_PAIR: Pattern = Pattern {
         },
     ],
     links: &[
-        eq(0, "S", 1, "S"),
+        eq_sig(0, "S", 1, "S"),  // a tail node, not a rail (as `diff_pair`)
         ne(0, "G", 1, "G"),
         ne(0, "D", 1, "D"),
-        eq(2, "S", 3, "S"),
+        eq_sig(2, "S", 3, "S"),
         eq(0, "G", 2, "G"),  // same signal inputs
         eq(1, "G", 3, "G"),
         ne(2, "D", 3, "D"),
@@ -2420,6 +2421,78 @@ pub const PATTERNS: &[Pattern] = &[
     SWITCH_PAIR,
 ];
 
+// ═══════════════════════════════════════════════════════════════════════
+//  Declared slot roles (plan-01 EXT-05; survey Fig. 3.11 block → requirement)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// What a pattern's slots mean for placement: the composite's children and
+/// on-axis members, built by [`crate::Block::from_match`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Roles {
+    /// Constraint-bearing couples: (slot a, slot b, leaf kind).
+    pub pairs: &'static [(u8, u8, BlockKind)],
+    /// Slots on the structure's symmetry axis (tail, shared bias device).
+    pub selfs: &'static [u8],
+    /// Adjacent-but-not-matched couples (cascode over its source): a `Stack` leaf.
+    pub prox: &'static [(u8, u8)],
+}
+
+const fn roles(pairs: &'static [(u8, u8, BlockKind)], selfs: &'static [u8], prox: &'static [(u8, u8)]) -> Roles {
+    Roles { pairs, selfs, prox }
+}
+
+/// Composite declarations keyed by `Pattern::name`. A composite absent here is
+/// recognised and reported but yields no constraint until a source-backed
+/// declaration is added.
+pub const ROLES: &[(&str, Roles)] = &[
+    ("cmos_inverter", roles(&[], &[], &[(0, 1)])),
+    ("five_transistor_ota", roles(&[(0, 1, DiffPair), (2, 3, Load)], &[4], &[])),
+    // Same slots as `five_transistor_ota`, the load cross-coupled.
+    ("diff_pair_cross_coupled_load", roles(&[(0, 1, DiffPair), (2, 3, Load)], &[4], &[])),
+    ("diff_pair_with_active_load", roles(&[(0, 1, DiffPair), (2, 3, Load)], &[], &[])),
+    ("diff_pair_with_mirror_load", roles(&[(0, 1, DiffPair), (2, 3, Load)], &[], &[])),
+    ("diff_pair_with_tail", roles(&[(0, 1, DiffPair)], &[2], &[])),
+    ("cascoded_diff_pair_with_tail", roles(&[(0, 1, DiffPair), (2, 3, CascodePair)], &[4], &[(0, 2), (1, 3)])),
+    ("diff_pair_cascode_load", roles(&[(0, 1, DiffPair), (2, 3, CascodePair)], &[4], &[(0, 2), (1, 3)])),
+    ("telescopic_ota_core", roles(&[(0, 1, DiffPair), (2, 3, CascodePair), (4, 5, Load)], &[], &[(0, 2), (1, 3), (2, 4), (3, 5)])),
+    // Slot 7 (load cascode bias) gets no role: it is not on the axis.
+    ("telescopic_ota_full", roles(&[(0, 1, DiffPair), (2, 3, CascodePair), (4, 5, Load)], &[6], &[(0, 2), (1, 3), (2, 4), (3, 5)])),
+    ("folded_cascode_core", roles(&[(0, 1, DiffPair), (2, 3, CascodePair), (4, 5, Load)], &[], &[(4, 2), (5, 3)])),
+    ("cross_coupled_inverters", roles(&[(0, 1, DiffPair), (2, 3, DiffPair)], &[], &[(0, 2), (1, 3)])),
+    ("vco_core_with_tails", roles(&[(0, 1, DiffPair), (2, 3, DiffPair)], &[4, 5], &[])),
+    // The mirror images (M3,M6), (M4,M5); the switching quad is two 2-member sets
+    // until a quad-set rule exists (plan-01 "Cut or deferred items").
+    ("gilbert_cell", roles(&[(0, 1, DiffPair), (2, 5, DiffPair), (3, 4, DiffPair)], &[], &[])),
+    ("cascode_mirror", roles(&[(0, 1, CurrentMirror), (2, 3, CascodePair)], &[], &[(0, 2), (1, 3)])),
+    ("wide_swing_cascode_mirror", roles(&[(0, 1, CurrentMirror), (2, 3, CascodePair)], &[], &[(0, 2), (1, 3)])),
+    ("low_voltage_cascode_mirror", roles(&[(0, 1, CurrentMirror), (2, 3, CascodePair)], &[], &[(0, 2), (1, 3)])),
+    ("current_mirror_3", roles(&[(0, 1, CurrentMirror), (0, 2, CurrentMirror)], &[], &[])),
+    ("current_mirror_4", roles(&[(0, 1, CurrentMirror), (0, 2, CurrentMirror), (0, 3, CurrentMirror)], &[], &[])),
+    ("current_mirror_1_to_2", roles(&[(0, 1, CurrentMirror), (0, 2, CurrentMirror)], &[], &[])),
+    // Slots 0,1 = one polarity's pair, 2,3 = the complement's (rail-to-rail input).
+    ("complementary_diff_pair", roles(&[(0, 1, DiffPair), (2, 3, DiffPair)], &[], &[])),
+];
+
+/// `ROLES` entry; else for a 2-slot pattern today's [`BlockKind::from_template`]
+/// mapping (DiffPair/CurrentMirror/Load → pairs (0,1,k); Stack → prox (0,1));
+/// else none.
+#[must_use]
+pub fn roles_of(p: &Pattern) -> Roles {
+    if let Some(&(_, r)) = ROLES.iter().find(|(n, _)| *n == p.name) {
+        return r;
+    }
+    if p.slots.len() != 2 {
+        return Roles::default();
+    }
+    match BlockKind::from_template(p.name, 2) {
+        DiffPair => roles(&[(0, 1, DiffPair)], &[], &[]),
+        CurrentMirror => roles(&[(0, 1, CurrentMirror)], &[], &[]),
+        Load => roles(&[(0, 1, Load)], &[], &[]),
+        BlockKind::Stack => roles(&[], &[], &[(0, 1)]),
+        _ => Roles::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2554,6 +2627,25 @@ mod tests {
             })
             .collect();
         Netlist { devices, nets }
+    }
+
+    #[test]
+    fn roles_are_well_formed() {
+        let mut names = HashSet::new();
+        for &(name, r) in ROLES {
+            assert!(names.insert(name), "duplicate ROLES entry {name}");
+            let p = PATTERNS.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("ROLES {name} not in PATTERNS"));
+            let n = p.slots.len() as u8;
+            let paired: Vec<u8> = r.pairs.iter().flat_map(|&(a, b, _)| [a, b]).collect();
+            let slots = paired.iter().chain(r.selfs).chain(r.prox.iter().flat_map(|(a, b)| [a, b]));
+            assert!(slots.clone().all(|&s| s < n), "{name}: slot index out of range");
+            // A mirror's reference (slot 0) is in every output's pair; nothing else repeats.
+            let shared_ref = r.pairs.iter().all(|p| p.0 == 0);
+            for (i, s) in paired.iter().enumerate() {
+                assert!(shared_ref || !paired[..i].contains(s), "{name}: slot {s} in two pairs");
+            }
+            assert!(r.selfs.iter().all(|s| !paired.contains(s)), "{name}: a self is also paired");
+        }
     }
 
     #[test]

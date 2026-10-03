@@ -8,12 +8,15 @@
 //! | DiffPair      | Symmetry, MatchingPair, ThermalGradient, centroid sides, DTI |
 //! | CurrentMirror | Symmetry, MatchingPair, Proximity, ThermalGradient, sides, DTI |
 //! | Load          | Symmetry, MatchingPair, ThermalGradient, sides, DTI      |
+//! | CascodePair   | Symmetry, MatchingPair, ThermalGradient, sides, DTI      |
 //! | Stack         | Proximity                                                |
 //!
 //! Every matched pair mirrors about its stage axis (a pair merged into one cell
-//! centres on it). A stage holding a diff pair is differential: each member
-//! outside a pair (the tail) is also self-symmetric with a Proximity pull to
-//! the input pair.
+//! centres on it), except one sharing a device with an earlier pair's Symmetry
+//! (a multi-output mirror's reference): it keeps MatchingPair, ThermalGradient,
+//! Proximity and DTI but no Symmetry or centroid side. A stage holding a diff
+//! pair is differential: each declared self (tail, shared bias) is also
+//! self-symmetric with a Proximity pull to the input pair.
 //!
 //! One batch per pair (per-batch criticality weights each pair by its own
 //! urgency; one merged batch regressed the OTA). Arms: `SymmetryGroup` (one per stage) and `DtiBand` are hard + cost — the cost
@@ -143,11 +146,12 @@ pub fn placement(
             .map(|l| (l.kind, l.devices[0], l.devices[1]))
             .collect();
         let (mut syms, mut a_side, mut b_side) = (Vec::new(), Vec::new(), Vec::new());
+        let mut in_sym: Vec<DeviceId> = Vec::new();
 
         for &(kind, a, b) in &pairs {
             let prox = vec![Proximity { a: td(a), b: td(b), max_distance_nm: PROXIMITY_NM }];
             match kind {
-                BlockKind::DiffPair | BlockKind::CurrentMirror | BlockKind::Load => {}
+                BlockKind::DiffPair | BlockKind::CurrentMirror | BlockKind::Load | BlockKind::CascodePair => {}
                 BlockKind::Stack => {
                     r.budget.push(Box::new(prox.clone()));
                     r.cost.push(Box::new(prox));
@@ -155,7 +159,12 @@ pub fn placement(
                 }
                 BlockKind::Group | BlockKind::Glue => continue,
             }
-            syms.push(Symmetry { a: td(a), b: td(b), axis });
+            // ponytail: pairwise emission; MAT-04's MatchedSet replaces it for multi-output mirrors.
+            let shared = in_sym.contains(&a) || in_sym.contains(&b);
+            if !shared {
+                syms.push(Symmetry { a: td(a), b: td(b), axis });
+                in_sym.extend([a, b]);
+            }
             let gate = gate_um2(nl, a).min(gate_um2(nl, b));
             let pel = Pelgrom::new(avt(nl, p, a), gate, p, offset_sigma_mv);
             let pair = vec![MatchingPair {
@@ -193,16 +202,17 @@ pub fn placement(
                     seed_isolate: false,
                 });
             }
-            a_side.push(a);
-            b_side.push(b);
+            if !shared {
+                a_side.push(a);
+                b_side.push(b);
+            }
         }
         // Every stage mirrors its matched pairs (diff pair, mirror, load) about
         // its one axis (MAT-06; Lampaert 1999 §4.6–4.7 symmetry groups). A
-        // differential stage also puts each member outside any pair (the
-        // tail) on the axis, near the input pair.
+        // differential stage also puts each declared self (tail, shared bias)
+        // on the axis, near the input pair.
         if let Some(dp) = pairs.iter().find(|p| p.0 == BlockKind::DiffPair) {
-            let paired: Vec<DeviceId> = pairs.iter().flat_map(|p| [p.1, p.2]).collect();
-            for &d in stage.devices.iter().filter(|d| !paired.contains(d)) {
+            for &d in &stage.selfs {
                 syms.push(Symmetry { a: td(d), b: td(d), axis });
                 let tail = [dp.1, dp.2].map(|m| Proximity { a: td(d), b: td(m), max_distance_nm: PROXIMITY_NM }).to_vec();
                 r.budget.push(Box::new(tail.clone()));

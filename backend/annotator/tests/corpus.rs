@@ -84,28 +84,42 @@ fn all() -> impl Iterator<Item = (&'static str, &'static str)> {
 /// [`Canon`] fields `pairs`, `selfs`, `net_pairs`, `axes` (`sets` is empty until EXT-12).
 type Row = (&'static str, &'static [(&'static str, &'static [&'static str])], &'static [(&'static str, &'static str)], &'static [&'static str], &'static [(&'static str, &'static str)], usize);
 const EXPECTED: [Row; 17] = [
-    ("ota5t", &[("CurrentMirror", &["XM3", "XM4"]), ("DiffPair", &["XM1", "XM2"])], &[("XM1", "XM2"), ("XM3", "XM4")], &["XM5"], &[("vout1", "vout2")], 1),
-    ("three_stage", &[("CurrentMirror", &["M4", "M5"]), ("DiffPair", &["M1", "M2"]), ("Group", &["M6", "M8", "M9"])], &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2")], 1),
+    // EXT-05: declared roles: five_transistor_ota's slots 2,3 are a Load.
+    ("ota5t", &[("Load", &["XM3", "XM4"]), ("DiffPair", &["XM1", "XM2"])], &[("XM1", "XM2"), ("XM3", "XM4")], &["XM5"], &[("vout1", "vout2")], 1),
+    // EXT-05: declared roles: diff_pair_with_mirror_load's slots 2,3 are a Load.
+    ("three_stage", &[("DiffPair", &["M1", "M2"]), ("Group", &["M6", "M8", "M9"]), ("Load", &["M4", "M5"])], &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2")], 1),
     ("dac4", &[("Group", &["XMN0", "XMP0"]), ("Group", &["XMN1", "XMP1"]), ("Group", &["XMN2", "XMP2"]), ("Group", &["XMN3", "XMP3"])], &[], &[], &[], 0),
     ("bgr_core", &[], &[], &[], &[], 0),
     ("bjt_mirror", &[], &[], &[], &[], 0),
-    ("chain4", &[("Stack", &["XM1", "XM2"]), ("Stack", &["XM3", "XM4"])], &[], &[], &[], 0),
+    // EXT-05: series_stack_4 declares no roles, so no re-searched Stack children.
+    ("chain4", &[("Group", &["XM1", "XM2", "XM3", "XM4"])], &[], &[], &[], 0),
     ("pair", &[], &[], &[], &[], 0),
     ("quad", &[], &[], &[], &[], 0),
     // EXT-04: DIFF_PAIR_SPLIT_SOURCE (any-pins-differ, no shared net) was a dead
     // pattern that falsely matched M7/M9 and M10/M8 as DiffPair; deleted, so
     // they fall back to their real Stack structure.
-    ("folded", &[("DiffPair", &["M1", "M2"]), ("Stack", &["M10", "M8"]), ("Stack", &["M3", "M5"]), ("Stack", &["M4", "M6"]), ("Stack", &["M7", "M9"])], &[("M1", "M2")], &[], &[("x1", "x2")], 1),
+    // EXT-05: folded_cascode_core's declared pairs and prox; the M7-M10 composite
+    // declares no roles.
+    ("folded", &[("CascodePair", &["M5", "M6"]), ("DiffPair", &["M1", "M2"]), ("Group", &["M10", "M7", "M8", "M9"]), ("Load", &["M3", "M4"]), ("Stack", &["M3", "M5"]), ("Stack", &["M4", "M6"])], &[("M1", "M2"), ("M3", "M4"), ("M5", "M6")], &[], &[("x1", "x2")], 1),
     // EXT-04: GILBERT_CELL's link fix makes it match the whole 6-device cell
     // (today's child re-search, max_slots=2, decomposes it into 3 DiffPair legs).
-    ("gilbert", &[("DiffPair", &["M1", "M2"]), ("DiffPair", &["M3", "M4"]), ("DiffPair", &["M5", "M6"])], &[("M1", "M2"), ("M3", "M4"), ("M5", "M6")], &[], &[("outn", "outp"), ("x1", "x2")], 1),
-    ("rail2rail", &[("Group", &["MN1", "MP1"]), ("Group", &["MN2", "MP2"])], &[], &[], &[("xn1", "xn2"), ("xp1", "xp2")], 0),
-    ("latch", &[("Group", &["MN1", "MP1"]), ("Group", &["MN2", "MP2"])], &[], &[], &[], 0),
-    ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO2", "MO3"]), ("CurrentMirror", &["MO4", "MO5"])], &[("MO1", "MR"), ("MO2", "MO3"), ("MO4", "MO5")], &[], &[], 2),
+    // EXT-05: declared pairs are the mirror images (M3,M6), (M4,M5).
+    ("gilbert", &[("DiffPair", &["M1", "M2"]), ("DiffPair", &["M3", "M6"]), ("DiffPair", &["M4", "M5"])], &[("M1", "M2"), ("M3", "M6"), ("M4", "M5")], &[], &[("outn", "outp"), ("x1", "x2")], 1),
+    // EXT-05: complementary_diff_pair declares both polarities' DiffPairs.
+    ("rail2rail", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("xn1", "xn2"), ("xp1", "xp2")], 1),
+    // EXT-05 (AA-03): cross_coupled_inverters' declared pairs and prox, not inverters.
+    ("latch", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"]), ("Stack", &["MN1", "MP1"]), ("Stack", &["MN2", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[], 1),
+    // EXT-05: current_mirror_4 declares (ref, k) per output; only the first pair
+    // holding the shared reference gets a Symmetry.
+    ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO2", "MR"]), ("CurrentMirror", &["MO3", "MR"]), ("CurrentMirror", &["MO4", "MO5"])], &[("MO1", "MR"), ("MO4", "MO5")], &[], &[], 2),
     ("brokaw", &[("CurrentMirror", &["MP1", "MP2"])], &[("MP1", "MP2")], &[], &[], 1),
     ("rdiv", &[], &[], &[], &[], 0),
     ("splitdac", &[], &[], &[], &[], 0),
-    ("strongarm", &[("CurrentMirror", &["mp10", "mp9"]), ("DiffPair", &["mn1", "mn2"]), ("Group", &["mn0", "mp7"]), ("Group", &["mn13", "mp11"]), ("Group", &["mn14", "mp12"]), ("Group", &["mn3", "mp5"]), ("Group", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mp10", "mp9")], &["mp8"], &[("vin_d", "vip_d")], 2),
+    // EXT-05: diff_pair_cross_coupled_load's declared tail mn0 (not mp8) and Load;
+    // cross_coupled_inverters' pairs; complementary_diff_pair's sources must be a
+    // signal, so the output inverters no longer match it and mp9/mp10 join
+    // undeclared 3-device groups (their CurrentMirror was a misrecognition).
+    ("strongarm", &[("DiffPair", &["mn1", "mn2"]), ("DiffPair", &["mn3", "mn4"]), ("DiffPair", &["mp5", "mp6"]), ("Group", &["mn13", "mp10", "mp11"]), ("Group", &["mn14", "mp12", "mp9"]), ("Load", &["mp7", "mp8"]), ("Stack", &["mn3", "mp5"]), ("Stack", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mn3", "mn4"), ("mp5", "mp6"), ("mp7", "mp8")], &["mn0"], &[("vin_d", "vip_d")], 2),
 ];
 
 #[test]
@@ -215,8 +229,8 @@ fn no_emitted_conflicts() {
     }
 }
 
-/// AA-13: the clocked tail `mp8` sits in the input pair's stage (`mn0` is
-/// grouped with `mp7`), so it gets Proximity ≤ 5 µm to `mn1`/`mn2`; Isolation
+/// AA-13: the clocked tail `mn0` sits in the input pair's stage, so it gets
+/// Proximity ≤ 5 µm to `mn1`/`mn2`; Isolation
 /// from them would contradict it. GAP-04 exempts same-block pairs.
 #[test]
 fn no_emitted_conflicts_strongarm() {

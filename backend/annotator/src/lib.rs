@@ -2,8 +2,8 @@
 //!
 //! [`annotate`] runs the [`pattern`] catalog over the netlist, turns the
 //! non-overlapping matches into blocks (one group each, plus a trailing glue
-//! block for the unclaimed devices), recovers each composite's primitive
-//! children, and emits placement ([`emit`]), routing ([`extract`]), net-class
+//! block for the unclaimed devices), gives each composite its declared children
+//! ([`catalog::roles_of`]), and emits placement ([`emit`]), routing ([`extract`]), net-class
 //! ([`classify`]) and cell-tier ([`constraints`]) constraints from them.
 
 pub mod block;
@@ -95,18 +95,11 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
             for &d in &m.instances {
                 claimed[d as usize] = true;
             }
-            let mut b = Block::from_match(&m);
-            if b.devices.len() > 2 {
-                b.sub_blocks = pattern::recognize(&hg, &drawn, &roles, cfg, &m.instances, 2)
-                    .iter()
-                    .map(Block::from_match)
-                    .collect();
-            }
-            b
+            Block::from_match(&m)
         })
         .collect();
     let glue = (0..netlist.devices.len() as u16).filter(|&d| !claimed[d as usize]).map(DeviceId);
-    blocks.push(Block { kind: BlockKind::Glue, devices: glue.collect(), injected: false, sub_blocks: Vec::new() });
+    blocks.push(Block { kind: BlockKind::Glue, template: "glue", devices: glue.collect(), injected: false, sub_blocks: Vec::new(), selfs: Vec::new() });
 
     let groups: Vec<Vec<DeviceId>> = blocks.iter().map(|b| b.devices.clone()).collect();
     let abutment = groups

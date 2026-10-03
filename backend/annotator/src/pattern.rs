@@ -71,6 +71,8 @@ pub struct Pattern {
 #[derive(Debug, Clone)]
 pub struct PatternMatch {
     pub template: &'static str,
+    /// The matched pattern (its roles: [`crate::catalog::roles_of`]).
+    pub pattern: &'static Pattern,
     /// Device ids in slot order.
     pub instances: Vec<u32>,
     pub priority: u32,
@@ -145,7 +147,7 @@ impl Search<'_> {
             key.sort_unstable();
             if !seen.contains(&key) {
                 seen.push(key);
-                out.push(PatternMatch { template: self.pat.name, instances: assigned.clone(), priority: self.pat.priority });
+                out.push(PatternMatch { template: self.pat.name, pattern: self.pat, instances: assigned.clone(), priority: self.pat.priority });
             }
             return;
         }
