@@ -891,17 +891,6 @@ impl DetailedRoute {
             *wires = out;
         }
 
-        // Differential trim: a pair whose pin sets differ (a common-centroid cell
-        // gives one drain a strap the other lacks) cannot route to equal RC,
-        // so the lighter side gets a same-net stub off one of its runs.
-        for b in reqs.hard.iter().chain(&reqs.budget).filter(|b| b.repair_kind() == RepairKind::Mirror) {
-            let mut ids = Vec::new();
-            b.touched(&mut ids);
-            for p in ids.chunks_exact(2) {
-                trim_pair(&mut routes, (p[0] as usize, p[1] as usize), &**b, layers, &cell_metal, cfg.grid, |l, w| cfg.space(l, w, w, min_space));
-            }
-        }
-
         // Same-net sliver and notch filling (never within spacing of foreign metal).
         let flat: Vec<(usize, Shape)> =
             routes.wires.iter().enumerate().flat_map(|(i, w)| w.iter().map(move |s| (i, *s))).collect();
@@ -1024,62 +1013,6 @@ fn branch_currents(tree: &[Vec<u32>], node_ua: &[(u32, f32)]) -> Vec<(u32, u32, 
         out.push((p, n, s.abs().max((total - s).abs())));
     }
     out
-}
-
-/// Lengthen the lighter net of a matched pair by a stub continuing one of its
-/// straight runs into free space (Lampaert's matching by equal parasitics;
-/// balanced topology is preferred, and this is the fallback when the pin sets
-/// forbid one). The stub is kept only if `rule`'s residual drops. Tries each
-/// run end at the full length deficit, then half of it.
-///
-/// ponytail: one stub, same layer, no serpentine; a stub adds C and summed R
-/// together, which is what the rule compares, but it is not on a terminal path.
-fn trim_pair(
-    routes: &mut Routes,
-    (a, b): (usize, usize),
-    rule: &dyn analog::RuleBatch<Routes>,
-    layers: &[LayerId],
-    cell_metal: &[Shape],
-    grid: i32,
-    space: impl Fn(LayerId, i32) -> i32,
-) {
-    let len = |r: &Routes, n: usize| r.length(NetId(n as u16));
-    if a >= routes.wires.len() || b >= routes.wires.len() || rule.residual(routes) <= 0.0 {
-        return;
-    }
-    let (light, deficit) = if len(routes, a) < len(routes, b) { (a, len(routes, b) - len(routes, a)) } else { (b, len(routes, a) - len(routes, b)) };
-    let before = rule.residual(routes);
-    let runs: Vec<Shape> = routes.wires[light].iter().copied().filter(|s| s.rect.w != s.rect.h && layers.contains(&s.layer)).collect();
-    for want in [deficit, deficit / 2] {
-        let want = (want as i32 / grid) * grid;
-        if want <= 0 {
-            continue;
-        }
-        for s in &runs {
-            let r = s.rect;
-            let stubs = if r.w > r.h {
-                [Rect { x: r.x + r.w, w: want, ..r }, Rect { x: r.x - want, w: want, ..r }]
-            } else {
-                [Rect { y: r.y + r.h, h: want, ..r }, Rect { y: r.y - want, h: want, ..r }]
-            };
-            for stub in stubs {
-                let gap = space(s.layer, r.w.min(r.h));
-                // Foreign metal on the layer keeps its spacing; a foreign cut
-                // (any layer that is not a routing metal) must not be touched.
-                let clear = routes.wires.iter().enumerate().filter(|&(n, _)| n != light).flat_map(|(_, w)| w).chain(cell_metal).all(|f| {
-                    if f.layer == s.layer { rect_gap(f.rect, stub) >= gap } else { layers.contains(&f.layer) || rect_gap(f.rect, stub) > 0 }
-                });
-                if !clear {
-                    continue;
-                }
-                routes.wires[light].push(Shape { layer: s.layer, rect: stub });
-                if rule.residual(routes) < before {
-                    return;
-                }
-                routes.wires[light].pop();
-            }
-        }
-    }
 }
 
 /// `cell` (drawn at its own origin) moved into free space as close as it fits
@@ -2832,21 +2765,6 @@ mod tests {
         assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
     }
 
-    /// A pair whose sides cannot route to equal length gets a stub on the
-    /// lighter side until the rule holds; a foreign wire in the way is avoided.
-    #[test]
-    fn trim_lengthens_the_lighter_side_of_a_pair() {
-        use analog::routing::Differential;
-        let rule: Vec<Differential> = vec![Differential { pos: NetId(0), neg: NetId(1), max_len_delta_pct10: 50, same_layer_required: true, stack: None }];
-        let wire = |x: i32, y: i32, w: i32| Shape { layer: LAYERS[0], rect: Rect { x, y, w, h: 290 } };
-        let mut routes = Routes { wires: vec![vec![wire(0, 0, 10_000)], vec![wire(0, 2_000, 8_000)], vec![wire(8_300, 2_000, 1_000)]], ..Default::default()  };
-        assert!(analog::RuleBatch::residual(&rule, &routes) > 0.0);
-        trim_pair(&mut routes, (0, 1), &rule, &LAYERS, &[], 5, |_, _| 140);
-        assert_eq!(analog::RuleBatch::residual(&rule, &routes), 0.0, "{:?}", routes.wires[1]);
-        let stub = routes.wires[1][1].rect;
-        assert_eq!((stub.x, stub.w), (-2_000, 2_000), "the right end is blocked by net 2, so the stub grows left");
-    }
-
     /// A differential pair is not fattened into whatever room its neighbours
     /// leave (that breaks its matched signature): only the other nets widen.
     #[test]
@@ -2855,7 +2773,7 @@ mod tests {
         let global = Routes { wires: vec![Vec::new(); 3], ..Default::default()  };
         let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 1_000), pin(1, 1_000, 5_000), pin(1, 12_000, 5_000), pin(2, 1_000, 9_000), pin(2, 12_000, 9_000)];
         let mut reqs = Requirements::<Routes>::default();
-        reqs.budget.push(Box::new(vec![Differential { pos: NetId(0), neg: NetId(1), max_len_delta_pct10: 50, same_layer_required: true, stack: None }]));
+        reqs.budget.push(Box::new(vec![Differential { pos: NetId(0), neg: NetId(1), max_len_delta_pct10: 50, same_layer_required: true, stack: None, aggressor_weight: None }]));
         let cfg = DetailedCfg { fat_signal: 600, ..test_cfg() };
         let (routes, _) = DetailedRoute { cfg }.route(&global, &pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
         let widest = |n: usize| routes.wires[n].iter().filter(|s| s.rect.w != s.rect.h).map(|s| s.rect.w.min(s.rect.h)).max();

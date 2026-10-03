@@ -4,7 +4,7 @@
 //! flanked by five aggressors at the legal minimum spacing passes every
 //! pairwise check while taking five times its coupling budget.
 
-use pnr_core::geom::Rect;
+use pnr_core::geom::{Rect, Shape};
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
 
@@ -27,6 +27,20 @@ fn pair_coupling_af(stack: Option<&Stack>, layer: u16, p: &Rect, q: &Rect) -> f3
         return c;
     }
     super::stack::parallel(p, q).map_or(0.0, |(run, gap)| EPS_H_AF * run as f32 / gap.max(1) as f32)
+}
+
+/// Lateral coupling between two nets, aF: Σ [`pair_coupling_af`] over every
+/// same-layer shape pair. The one net-to-net coupling measure: `Differential`
+/// and `CouplingBudget` read it (RTE-18 adds screening and crossings here).
+#[must_use]
+pub fn net_pair_af(stack: Option<&Stack>, a: &[Shape], b: &[Shape]) -> f32 {
+    let mut c = 0.0;
+    for p in a {
+        for q in b.iter().filter(|q| q.layer == p.layer) {
+            c += pair_coupling_af(stack, p.layer.0, &p.rect, &q.rect);
+        }
+    }
+    c
 }
 
 /// Budget on the total coupling onto `net`, aF. Registered in the budget arm.
@@ -84,13 +98,7 @@ impl CouplingBudget {
             if w == 0.0 {
                 continue;
             }
-            for a in victim {
-                for b in shapes {
-                    if a.layer == b.layer {
-                        total += w * pair_coupling_af(self.stack, a.layer.0, &a.rect, &b.rect);
-                    }
-                }
-            }
+            total += w * net_pair_af(self.stack, victim, shapes);
         }
         total
     }

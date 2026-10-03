@@ -1384,7 +1384,7 @@ mod tests {
     fn symmetric_nets_first_then_impact_shields_last() {
         use analog::routing::{Differential, Shield};
         let mut reqs = Requirements::<Routes>::default();
-        reqs.budget.push(Box::new(vec![Differential { pos: NetId(3), neg: NetId(4), max_len_delta_pct10: 50, same_layer_required: true, stack: None }]));
+        reqs.budget.push(Box::new(vec![Differential { pos: NetId(3), neg: NetId(4), max_len_delta_pct10: 50, same_layer_required: true, stack: None, aggressor_weight: None }]));
         reqs.budget.push(Box::new(vec![Shield { victim: NetId(5), reference: NetId(2), min_coverage_pct: 80, max_gap_nm: 400 }]));
         // Compact i is net i; nets 0 and 1 are free, 1 the more sensitive.
         let order = order_by_priority(&[2; 6], &[0, 1, 2, 3, 4, 5], &reqs, &[0.2, 0.9, 0.0, 0.0, 0.0, 0.0]);
