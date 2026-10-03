@@ -21,6 +21,14 @@ Batch-wide decisions (deviations from plan-02, each for a stated reason):
   only**: Φ is discrete (a flip), so a cost copy has no gradient to give; Θ prices it.
 - D6. MAT-06's `flow_smoke` test is replaced by a library unit test of the lookup: `Solution` does not expose
   `CommonNode.max_delta_ohm`, and the budget identity holds by construction.
+- D7. MAT-03 `deal`: `Q` is the key weight still in play, not the fixed `Σ_i k(i)`: it starts at the row total,
+  drops by every finger pre-placed in `seq` and by every quad dealt (Drain deals with the reduced counts `c`). With a
+  fixed `Q` the card's own vectors are not reproduced (`equal_counts_reproduce_the_old_orders` fails).
+- D8. MAT-04 step 3: coincidence no longer requires both members in one cell (c41f71b). Gated on one cell, a
+  CC-feasible pair split into two cells escaped the check and Θ ranked the split candidate first (ota 1729.8 →
+  2057.0 µm²). Consequence: a CC-feasible pair drawn as two cells is a permanent `MatchedSet` violation (two cells'
+  centroids never coincide) that placement cannot fix; with merged pairs drawn AABB the bench reads `MatchedSet`
+  0/6 satisfied. FLOW-16 step 4 and the M1 exit criterion are written against this rule.
 
 Out of scope, reported: `CentroidGroup::kind()` is `"CommonCentroid"` (cc.rs:176-178). MAT-04 deletes it, but
 FLOW-16 step 4 (plan-08 ~L1108) and the M1 exit criterion "ota, ota_constrained, tt_ota `CommonCentroid` rows 3/3"
@@ -198,7 +206,8 @@ pub fn diffusion_legal(s: &[usize], outer: Outer) -> bool;
 - Shared deal `fn deal(counts, n, seq: &mut [Option<usize>], p: usize, h: &mut [usize], off: usize)`: token t
   occupies fingers `off+2t, off+2t+1`; key `k(i) = (2i − n + 1)²` (i64), `Q = Σ_i k(i)`, `S[d] = Σ k(i)` over fingers
   already in `seq`; for t in 0..p/2: fingers of t and of `p−1−t`; `d = argmax over {h[d] > 0} of
-  (counts[d]·Q − n·S[d])`, ties → lower d; write d into the 4 fingers, `S[d] += Σk`, `h[d] −= 1`.
+  (counts[d]·Q − n·S[d])`, ties → lower d; write d into the 4 fingers, `S[d] += Σk`, `h[d] −= 1` (`Q` shrinks as weight
+  is committed, D7).
 - `Drain`: n = Σcounts; n == 0, n odd or any count odd → `None`. `P = (n−2)/2`. For e ascending with `counts[e] >= 2`:
   `c = counts, c[e] −= 2`; `pairs = c/2`; `odd = members with pairs odd`; require `odd.len() == P % 2`; `seq[0] =
   seq[n−1] = e`; if P odd: the odd member at fingers `1 + 2(P/2)`, `2 + 2(P/2)`; `deal(.., P, h = pairs/2, off = 1)`.
@@ -292,8 +301,8 @@ Edits:
    1. `sa, sb = sums(l.units.of_device(l, d).map(Pt::from))`; `units = sa.w > 0 && sb.w > 0`.
    2. `cell(d) = cell_of.get(d).copied().unwrap_or(d.0) as usize`; centroid = `s.centroid()` else `(l.x[c], l.y[c])`
       of `cell(d)` (if `c < l.x.len()`, else (0,0)). `delta_m_nm = hypot(ca − cb)`.
-   3. coincidence = `Some(delta_m_nm / tol_nm)` iff `units`, `l.units.cell_of.get(a) == l.units.cell_of.get(b)`
-      (both `Some`) and feasible: `mos` → `diffusion_cc_row(&[na, nb], Drain).is_some() || (.., Source).is_some()`,
+   3. coincidence = `Some(delta_m_nm / tol_nm)` iff `units` and feasible (one-cell condition dropped, D8): `mos` →
+      `diffusion_cc_row(&[na, nb], Drain).is_some() || (.., Source).is_some()`,
       else `cc_feasible(&[na, nb])` (n = `Sums.n` as u16).
    4. second_order_nm (only with units): c = combined centroid `((sa.x+sb.x)/(sa.w+sb.w), …)`; `d = sa.second(c) −
       sb.second(c)`; `F = √(d0² + 2·d1² + d2²)`; L = max unit distance from c over both members; `F / L` (0 if L == 0).

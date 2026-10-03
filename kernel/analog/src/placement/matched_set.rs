@@ -56,6 +56,12 @@ impl MatchedSet {
     /// Ledger of pair `(members[0], members[i])` on `l` (see [`Ledger`]).
     #[must_use]
     pub fn ledger(&self, l: &Layout, i: usize) -> Ledger {
+        self.ledger_with(l, i, true)
+    }
+
+    /// `coincide == false` leaves `coincidence` `None` (and `known` without
+    /// it): `cost` never reads it, and the MOS row search allocates per call.
+    fn ledger_with(&self, l: &Layout, i: usize, coincide: bool) -> Ledger {
         let (a, b) = (self.members[0], self.members[i]);
         let ((sa, lwa, wa), (sb, lwb, wb)) = (member(l, a), member(l, b));
         let units = sa.w > 0.0 && sb.w > 0.0;
@@ -79,7 +85,7 @@ impl MatchedSet {
                 cc_feasible(&counts)
             }
         };
-        let coincidence = (units && feasible()).then(|| delta_m_nm / self.tol_nm);
+        let coincidence = (coincide && units && feasible()).then(|| delta_m_nm / self.tol_nm);
 
         let second_order_nm = if units {
             let c = ((sa.x + sb.x) / (sa.w + sb.w), (sa.y + sb.y) / (sa.w + sb.w));
@@ -139,7 +145,8 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
     /// ponytail: the scales of the rules this replaced (distance pull, thermal
     /// at-spec cost), kept until PLC-18 normalises costs.
     fn cost(&self, l: &Layout) -> f32 {
-        self.ledgers(l)
+        (1..self.members.len())
+            .map(|i| self.ledger_with(l, i, false))
             .map(|g| {
                 let thermal = if g.allowance > 0.0 { 3e5 * (g.mu_thermal / g.allowance).powi(2) } else { 0.0 };
                 1e-3 * (g.delta_m_nm * g.delta_m_nm + g.second_order_nm * g.second_order_nm) + thermal
@@ -299,6 +306,18 @@ mod tests {
         let s = pair(0, 1);
         assert_eq!(s.ledger(&l, 1).coincidence, Some(2_000.0));
         assert_eq!(s.violations(&l), 1);
+    }
+
+    #[test]
+    fn ratioed_mos_pair_has_no_coincidence_check() {
+        // [1, 2] passes `cc_feasible` but has no diffusion-legal row (MAT-03).
+        let units = [unit(0, 300, 50, 10), unit(1, 100, 50, 10), unit(1, 500, 50, 10)];
+        let mut l = layout(&[5_000], &[5_000], 400);
+        l.units = Arc::new(merged(&units, Rect { x: 0, y: 0, w: 800, h: 100 }));
+        let mut s = pair(0, 1);
+        assert_eq!(s.ledger(&l, 1).coincidence, None);
+        s.mos = false;
+        assert!(s.ledger(&l, 1).coincidence.is_some());
     }
 
     #[test]
