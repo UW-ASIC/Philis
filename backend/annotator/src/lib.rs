@@ -85,11 +85,13 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     let mut models = Vec::new();
     let drawn: Vec<size::Drawn> = netlist.devices.iter().map(|d| size::drawn(d, &mut models)).collect();
     let roles = netrole::classify_nets(&hg, cfg);
-    let all: Vec<u32> = (0..netlist.devices.len() as u32).collect();
 
-    // Recognised blocks, each composite with its primitive children.
+    // Recognised blocks in selection order, each composite with its primitive children.
+    let canon = pattern::canonical_labels(&hg, &drawn, &models, &roles);
+    let names: Vec<&str> = netlist.devices.iter().map(|d| d.name.as_str()).collect();
+    let all = pattern::recognize_all(&hg, &drawn, &roles, cfg, &canon, &names);
     let mut claimed = vec![false; netlist.devices.len()];
-    let mut blocks: Vec<Block> = pattern::recognize(&hg, &drawn, &roles, cfg, &all, usize::MAX)
+    let mut blocks: Vec<Block> = pattern::select_disjoint(&all, &canon, &names)
         .into_iter()
         .map(|m| {
             for &d in &m.instances {

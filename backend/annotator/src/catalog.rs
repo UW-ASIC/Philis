@@ -2658,7 +2658,8 @@ mod tests {
             let mut models = Vec::new();
             let drawn: Vec<_> = nl.devices.iter().map(|d| crate::size::drawn(d, &mut models)).collect();
             let allowed = vec![true; p.slots.len()];
-            let ms = crate::pattern::matches(p, &hg, &drawn, &roles, &allowed);
+            let rank: Vec<u32> = (0..p.slots.len() as u32).collect();
+            let ms = crate::pattern::matches(p, &hg, &crate::pattern::pins(&hg), &drawn, &roles, &allowed, &rank);
             let want: Vec<u32> = (0..p.slots.len() as u32).collect();
             assert!(
                 ms.iter().any(|m| {

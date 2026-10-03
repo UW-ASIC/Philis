@@ -36,7 +36,7 @@ fn block_of(blocks: &[Block], d: u16) -> Option<&Block> {
 
 /// 5-transistor OTA. Nets: 0=vout1 1=vinp 2=vtail 3=VSS 4=vout2 5=vinm 6=vbias
 /// 7=VDD 8=vbn.
-fn ota() -> Netlist {
+pub(crate) fn ota() -> Netlist {
     Netlist {
         devices: vec![
             fet("XM1", DeviceKind::Nmos, 1, 0, 2, 3, 10_000, 1_000),

@@ -113,7 +113,9 @@ const EXPECTED: [Row; 17] = [
     ("latch", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"]), ("Stack", &["MN1", "MP1"]), ("Stack", &["MN2", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("q", "qb")], 1),
     // EXT-05: current_mirror_4 declares (ref, k) per output; only the first pair
     // holding the shared reference gets a Symmetry.
-    ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO2", "MR"]), ("CurrentMirror", &["MO3", "MR"]), ("CurrentMirror", &["MO4", "MO5"])], &[("MO1", "MR"), ("MO4", "MO5")], &[], &[], 2),
+    // EXT-06: equal-priority current_mirror_4 matches tie on canonical labels, not
+    // device ids: MR takes the three identical 2 µm outputs, MO2/MO4 pair up.
+    ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO3", "MR"]), ("CurrentMirror", &["MO5", "MR"]), ("CurrentMirror", &["MO2", "MO4"])], &[("MO1", "MR"), ("MO2", "MO4")], &[], &[], 2),
     ("brokaw", &[("CurrentMirror", &["MP1", "MP2"])], &[("MP1", "MP2")], &[], &[], 1),
     ("rdiv", &[], &[], &[], &[], 0),
     ("splitdac", &[], &[], &[], &[], 0),
@@ -181,7 +183,6 @@ fn negative_corpus_sc_switches_and_equal_fets() {
 }
 
 #[test]
-#[ignore = "passes after EXT-06"]
 fn permutation_invariance() {
     for (name, src) in all() {
         let nl = net(src);
