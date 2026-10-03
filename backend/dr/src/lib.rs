@@ -470,21 +470,29 @@ impl DetailedRoute {
                 // (full or narrow width, either orientation) clears every foreign
                 // zone and every jog already laid.
                 let full = cfg.wire_width.max(1);
-                let metal = layers.get(jog_layer(cfg, layers, cuts, grid.n_layers, r_layer) as usize);
+                let jog_l = jog_layer(cfg, layers, cuts, grid.n_layers, r_layer);
+                let metal = layers.get(jog_l as usize);
                 let floor = cfg.min_width.iter().find(|&&(l, _)| Some(&l) == metal).map_or(1, |&(_, w)| w);
                 let narrow = full.min(r.w).min(r.h).max(floor);
                 // A point terminal (1×1 rect) is its own node: nothing to jog to.
                 let point = r.w <= 1 && r.h <= 1;
                 let cands = if point { Vec::new() } else { grid.candidates(cx, cy, &claimed, clean, 8, 12) };
                 // Spaced from every foreign pin's future pad first, then merely
-                // not touching it.
+                // not touching it; each first over no node another net owns (its
+                // stitch reach, landing or jog: where its trunk may run, a short
+                // `break_shorts` settles only by deleting this access), then over any.
                 let spaced = (stitch, (cfg.pitch - cfg.wire_width).max(1));
-                let joint = [spaced, (full, 1)].into_iter().find_map(|(zone, gap)| {
+                let own = |n: u32| reserved[n as usize] == ci as u32 || reserved[n as usize] >= BLOCKED;
+                let tiers = [(spaced, true), ((full, 1), true), (spaced, false), ((full, 1), false)];
+                let joint = tiers.into_iter().find_map(|((zone, gap), owned)| {
                     cands.iter().copied().find_map(|n| {
                         let (px, py, _) = grid.pos(n);
                         [full, narrow].into_iter().find_map(|w| {
                             let both = jog_legs(px, py, cx, cy, w);
-                            let f = (0..2).find(|&f| jog_clean(&both[f], ci, zone, gap, &zones, &laid_legs))?;
+                            let f = (0..2).find(|&f| {
+                                jog_clean(&both[f], ci, zone, gap, &zones, &laid_legs)
+                                    && (!owned || jog_nodes(&grid, cfg, &both[f], jog_l).all(own))
+                            })?;
                             Some((n, (w, f == 1), both[f]))
                         })
                     })
@@ -1208,19 +1216,22 @@ fn claim_jog_sweep(
             reserved[n as usize] = a.ci as u32;
         }
     };
-    let infl = cfg.wire_width / 2;
-    for r in &legs {
-        for gy in grid.bin_y(r.y - infl)..=grid.bin_y(r.y + r.h + infl) {
-            for gx in grid.bin_x(r.x - infl)..=grid.bin_x(r.x + r.w + infl) {
-                claim(grid.node(gx, gy, jog_l));
-            }
-        }
-    }
+    jog_nodes(grid, cfg, &legs, jog_l).for_each(&mut claim);
     if jog_l != base_l {
         for (ex, ey) in [(px, py), (cx, cy)] {
             claim(grid.node(grid.bin_x(ex), grid.bin_y(ey), base_l));
         }
     }
+}
+
+/// The lattice nodes on layer `jog_l` that jog `legs` cover, legs inflated by
+/// half a wire.
+fn jog_nodes<'a>(grid: &'a TrackGrid, cfg: &DetailedCfg, legs: &'a [Rect], jog_l: u32) -> impl Iterator<Item = u32> + 'a {
+    let infl = cfg.wire_width / 2;
+    legs.iter().flat_map(move |r| {
+        (grid.bin_y(r.y - infl)..=grid.bin_y(r.y + r.h + infl))
+            .flat_map(move |gy| (grid.bin_x(r.x - infl)..=grid.bin_x(r.x + r.w + infl)).map(move |gx| grid.node(gx, gy, jog_l)))
+    })
 }
 
 /// Draw each access jog: an L on the jog metal from the landed node to the pin,
