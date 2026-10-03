@@ -63,10 +63,11 @@ impl BlockKind {
         }
     }
 
-    /// Devices whose gate nets are classified Sensitive.
+    /// Devices whose gate nets are Sensitive and which are isolation victims; Stack and
+    /// CascodePair are adjacent/symmetric, not a gate reference.
     #[must_use]
     pub fn is_sensitive(self) -> bool {
-        matches!(self, BlockKind::DiffPair | BlockKind::CurrentMirror | BlockKind::Load | BlockKind::CascodePair | BlockKind::Stack)
+        matches!(self, BlockKind::DiffPair | BlockKind::CurrentMirror | BlockKind::Load)
     }
 }
 

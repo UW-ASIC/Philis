@@ -419,6 +419,8 @@ fn a_shared_gate_chain_is_a_series_stack_not_a_cascode() {
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(p.blocks[0].devices.len(), 4, "one series_stack_4 group");
     assert!(p.blocks[0].sub_blocks.iter().all(|b| b.kind == BlockKind::Stack), "stack pairs, not a cascode");
+    // The shared gate net is still a Sensitive bias reference (EXT-18 changes this).
+    assert_eq!(p.net_classes[0].class, analog::metadata::NetClass::Sensitive);
 }
 
 #[test]
@@ -437,6 +439,51 @@ fn a_cascode_stack_is_adjacent_not_matched() {
     assert!(kinds.iter().any(|k| k.ends_with("Proximity")), "{kinds:?}");
     assert!(!kinds.iter().any(|k| k.ends_with("MatchingPair") || k.ends_with("ThermalGradient")), "{kinds:?}");
     assert!(p.placement.hard.is_empty());
+    // `vcas` (gates M2 only, no DC path) is still a Sensitive bias reference.
+    assert_eq!(p.net_classes[3].class, analog::metadata::NetClass::Sensitive);
+}
+
+/// EXT-07: a `Stack` is adjacent/symmetric, not a gate reference, so it is no
+/// longer an isolation victim. A clocked switch elsewhere used to be an
+/// aggressor that forced isolation onto the stack's two devices.
+#[test]
+fn a_cascode_stack_is_not_an_isolation_victim() {
+    let nl = Netlist {
+        devices: vec![
+            fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 4_000, 500),
+            fet("M2", DeviceKind::Nmos, 3, 4, 1, 2, 8_000, 500),
+            fet("XS", DeviceKind::Nmos, 5, 6, 2, 2, 1_000, 150),
+        ],
+        nets: nets(&["vin", "x", "VSS", "vcas", "out", "clk", "sw"]),
+    };
+    let p = annotate(&nl, &AnnotationConfig::default());
+    let mut touched = Vec::new();
+    for b in &p.placement.cost {
+        if b.kind().ends_with("Isolation") {
+            b.touched(&mut touched);
+        }
+    }
+    assert!(
+        !touched.contains(&0) && !touched.contains(&1),
+        "stack devices are no longer isolation victims: {touched:?}"
+    );
+}
+
+/// EXT-07 variant: once `vcas` also touches a channel (not gates only), its
+/// class is ordinary `Signal`, not `Sensitive` — classification is about the
+/// net's own DC path, independent of this item's `is_sensitive` change.
+#[test]
+fn a_cascode_gate_net_with_a_channel_use_is_signal() {
+    let nl = Netlist {
+        devices: vec![
+            fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 4_000, 500),
+            fet("M2", DeviceKind::Nmos, 3, 4, 1, 2, 8_000, 500),
+            fet("MD", DeviceKind::Nmos, 0, 3, 2, 2, 4_000, 500),
+        ],
+        nets: nets(&["vin", "x", "VSS", "vcas", "out"]),
+    };
+    let p = annotate(&nl, &AnnotationConfig::default());
+    assert_eq!(p.net_classes[3].class, analog::metadata::NetClass::Signal);
 }
 
 #[test]
