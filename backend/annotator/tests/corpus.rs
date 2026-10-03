@@ -204,8 +204,7 @@ fn assert_no_conflicts(name: &str, src: &str) {
     assert!(twice.is_empty(), "{name}: devices in two symmetry entries: {twice:?}");
 }
 
-/// Every corpus circuit but strongarm, whose known conflicts
-/// [`strongarm_conflicts_are_todays`] pins.
+/// T6 on every corpus circuit but strongarm, which has its own test below.
 #[test]
 fn no_emitted_conflicts() {
     for (name, src) in all().filter(|c| c.0 != "strongarm") {
@@ -213,24 +212,10 @@ fn no_emitted_conflicts() {
     }
 }
 
-/// Characterises, does not endorse: strongarm's conflicts today, exactly. A
-/// regression adds a row and fails; EXT-14/REL-09's fix removes one, fails,
-/// and edits this row in the same commit.
+/// AA-13: the clocked tail `mp8` sits in the input pair's stage (`mn0` is
+/// grouped with `mp7`), so it gets Proximity ≤ 5 µm to `mn1`/`mn2`; Isolation
+/// from them would contradict it. GAP-04 exempts same-block pairs.
 #[test]
-fn strongarm_conflicts_are_todays() {
-    let (both, twice) = conflicts("strongarm", STRONGARM);
-    let both: Vec<(&str, &str)> = both.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-    assert_eq!((both.as_slice(), twice.as_slice()), (STRONGARM_CONFLICTS, &[] as &[String]));
-}
-
-/// The clocked tail `mp8` against the input pair (AA-13).
-const STRONGARM_CONFLICTS: &[(&str, &str)] = &[("mn1", "mp8"), ("mn2", "mp8")];
-
-/// AA-13: a clocked device on the input pair's axis gets Proximity ≤ 5 µm and
-/// Isolation ≥ 10 µm to `mn1`/`mn2`. The plan names the tail `mn0`; today it is
-/// `mp8` (`mn0` is grouped with `mp7`, `mp8` left alone in the pair's stage).
-#[test]
-#[ignore = "passes after EXT-14 and REL-09"]
 fn no_emitted_conflicts_strongarm() {
     assert_no_conflicts("strongarm", STRONGARM);
 }

@@ -540,6 +540,7 @@ fn clocked_devices_are_kept_away_from_matched_ones() {
     assert!(p.missing.iter().any(|m| m.0 == "Isolation"), "and reported unknown");
 
     let mut cfg = AnnotationConfig::default();
+    cfg.process.substrate = pnr_core::SubstrateKind::EpiOnLowRes;
     cfg.process.epi_nm = Some(3_000);
     let p = annotate(&nl, &cfg);
     assert!(p.placement.budget.iter().any(is_iso));

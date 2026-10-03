@@ -141,8 +141,15 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     if netlist.devices.iter().any(|d| d.kind == pnr_core::DeviceKind::Capacitor) {
         missing.push(("ParasiticBudget", "capacitor-plate nets: settling / code-error spec (ARR-03, ARR-05)"));
     }
-    if emit::isolation(&hg, &net_classes, &sensitive, cfg.process.epi_nm, &mut placement) && cfg.process.epi_nm.is_none() {
-        missing.push(("Isolation", "deck epi_thickness_nm"));
+    // Same entry of `blocks`, glue excluded: glue is no stage.
+    let mut block_of = vec![usize::MAX; netlist.devices.len()];
+    for (bi, b) in blocks.iter().enumerate().filter(|(_, b)| b.kind != BlockKind::Glue) {
+        b.devices.iter().for_each(|d| block_of[d.0 as usize] = bi);
+    }
+    let same_block = |a: usize, v: usize| block_of[a] != usize::MAX && block_of[a] == block_of[v];
+    let p = &cfg.process;
+    if let Some(why) = emit::isolation(&hg, &net_classes, &sensitive, &same_block, p.substrate, p.epi_nm, &mut placement) {
+        missing.push(("Isolation", why));
     }
 
     Problem {

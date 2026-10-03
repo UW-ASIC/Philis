@@ -99,8 +99,11 @@ pub struct ProcessNumbers {
     /// BSIM4 LOD `KVTH0` (ΔVT per unit `Δ(1/SA + 1/SB)`), mV·µm, `[nmos,
     /// pmos]`: prices LOD imbalance across a matched array.
     pub lod_kvth0_mv_um: [Option<f32>; 2],
-    /// Epitaxial layer thickness, nm: substrate isolation saturates at a few
-    /// times it.
+    /// What the active area sits on; only `EpiOnLowRes` gives isolation a
+    /// calibrated distance.
+    pub substrate: pnr_core::SubstrateKind,
+    /// Epitaxial layer thickness, nm: on `EpiOnLowRes` substrate isolation
+    /// saturates at a few times it. Unread on any other kind.
     pub epi_nm: Option<i32>,
     /// The routing stack's per-layer parasitics and antenna stages; `None`
     /// leaves the routing budgets on drawn length and the cumulative antenna.

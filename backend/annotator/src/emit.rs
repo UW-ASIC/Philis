@@ -248,43 +248,59 @@ pub fn placement(
 /// Isolation saturates beyond this multiple of the epi thickness (Charbon et
 /// al. 2001 ch.8, PDF p.127: 2.5–5×; Su et al. 4×): farther buys nothing.
 const ISOLATION_EPI_MULTIPLE: i32 = 4;
-/// ponytail: nominal epi when the deck has none, so the pull still acts;
-/// the check then reads unknown. The decks' `p_epi_thickness` is not it: a
-/// guard-ring depth default (3000 nm in all four decks, finfet included), and
-/// sky130 is bulk p-substrate, not epi on p+, where Charbon's plateau does not
-/// hold (isolation keeps improving with distance). Read `cell.epi_thickness_nm`.
+/// ponytail: nominal epi when the distance is uncalibrated, so the pull still
+/// acts; the check then reads unknown. The decks' `p_epi_thickness` is not it:
+/// a guard-ring depth default (3000 nm in all four decks, finfet included),
+/// and sky130 is bulk p-substrate, not epi on p+, where Charbon's plateau does
+/// not hold (isolation keeps improving with distance; SUB-32).
 const NOMINAL_EPI_NM: i32 = 2_500;
 
 /// Substrate isolation (ENV-04; Charbon 2001 ch.2 injection → propagation →
 /// reception): every device on a Clock-class net (an injector) is kept
 /// `ISOLATION_EPI_MULTIPLE·t_epi` edge-to-edge from every `sensitive`
-/// (matched) device. Budget + cost with the deck's epi thickness; without it a
-/// cost-only pull at [`NOMINAL_EPI_NM`]. Returns whether any rule was emitted.
+/// (matched) device, except where `same_group(aggressor, victim)`: a stage's
+/// own clocked tail sits by its pair by design (AA-13), so isolating them
+/// contradicts the stage's Proximity.
+///
+/// Budget + cost only on `EpiOnLowRes` with `epi_nm` known (the plateau
+/// distance). Otherwise a cost-only pull at [`NOMINAL_EPI_NM`], and the
+/// returned `Some(why)` is the `missing` input that leaves it unknown: bulk has
+/// no plateau distance. `None` when calibrated or nothing was emitted.
 pub fn isolation(
     hg: &pnr_core::BipartiteHypergraph,
     classes: &[analog::metadata::NetClassification],
     sensitive: &[bool],
+    same_group: &dyn Fn(usize, usize) -> bool,
+    kind: pnr_core::SubstrateKind,
     epi_nm: Option<i32>,
     r: &mut Requirements<Layout>,
-) -> bool {
+) -> Option<&'static str> {
     use analog::metadata::NetClass;
+    use pnr_core::SubstrateKind;
     let clocked = |d: usize| hg.device_nets[d].iter().any(|n| classes[n.0 as usize].class == NetClass::Clock);
     let n = hg.device_nets.len();
-    let aggressors: Vec<usize> = (0..n).filter(|&d| clocked(d) && !sensitive[d]).collect();
-    let min_distance_nm = ISOLATION_EPI_MULTIPLE * epi_nm.unwrap_or(NOMINAL_EPI_NM);
+    let calibrated = match (kind, epi_nm) {
+        (SubstrateKind::EpiOnLowRes, Some(epi)) => Ok(epi),
+        (SubstrateKind::EpiOnLowRes, None) => Err("deck epi_thickness_nm"),
+        (SubstrateKind::Bulk, _) => Err("bulk substrate: no plateau distance"),
+        (SubstrateKind::Unknown, _) => Err("substrate kind unknown"),
+    };
+    let min_distance_nm = ISOLATION_EPI_MULTIPLE * calibrated.unwrap_or(NOMINAL_EPI_NM);
     let dev = |d: usize| Target::Device(DeviceId(d as u16));
-    let rules: Vec<Isolation> = aggressors
-        .iter()
-        .flat_map(|&a| (0..n).filter(|&v| sensitive[v]).map(move |v| Isolation { a: dev(a), b: dev(v), min_distance_nm }))
+    let rules: Vec<Isolation> = (0..n)
+        .filter(|&a| clocked(a) && !sensitive[a])
+        .flat_map(|a| {
+            (0..n).filter(move |&v| sensitive[v] && !same_group(a, v)).map(move |v| Isolation { a: dev(a), b: dev(v), min_distance_nm })
+        })
         .collect();
     if rules.is_empty() {
-        return false;
+        return None;
     }
-    if epi_nm.is_some() {
+    if calibrated.is_ok() {
         r.budget.push(Box::new(rules.clone()));
     }
     r.cost.push(Box::new(rules));
-    true
+    calibrated.err()
 }
 
 #[cfg(test)]
@@ -319,5 +335,119 @@ mod tests {
         let q = Pelgrom::new(None, 100.0, &bare, None);
         assert_eq!((q.s_over_a, q.thermal_limit_mc(None)), (0.0, THERMAL_MAX_DELTA_MC), "fallbacks");
         assert_eq!(p.thermal_limit_mc(None), THERMAL_MAX_DELTA_MC, "A without TC: fallback");
+    }
+
+    /// StrongARM-like stage: input pair `mn1`/`mn2` on a tail node, `mn0` the
+    /// tail on `clk`, cross-coupled PMOS loads; plus `XS`, a lone clocked
+    /// switch outside every block. Nets: 0=outp 1=inp 2=tail 3=VSS 4=outn
+    /// 5=inn 6=clk 7=VDD 8=sw 9=sw2.
+    fn strongarm_like() -> (Netlist, crate::AnnotationConfig) {
+        use crate::tests::{fet, nets};
+        let nl = Netlist {
+            devices: vec![
+                fet("mn1", DeviceKind::Nmos, 1, 0, 2, 3, 10_000, 1_000),
+                fet("mn2", DeviceKind::Nmos, 5, 4, 2, 3, 10_000, 1_000),
+                fet("mp3", DeviceKind::Pmos, 4, 0, 7, 7, 20_000, 1_000),
+                fet("mp4", DeviceKind::Pmos, 0, 4, 7, 7, 20_000, 1_000),
+                fet("mn0", DeviceKind::Nmos, 6, 2, 3, 3, 40_000, 1_000),
+                fet("XS", DeviceKind::Nmos, 6, 8, 9, 3, 1_000, 150),
+            ],
+            nets: nets(&["outp", "inp", "tail", "VSS", "outn", "inn", "clk", "VDD", "sw", "sw2"]),
+        };
+        let cfg = crate::AnnotationConfig {
+            supply_nets: vec!["VDD".into()],
+            ground_nets: vec!["VSS".into()],
+            clock_nets: vec!["clk".into()],
+            ..crate::AnnotationConfig::default()
+        };
+        (nl, cfg)
+    }
+
+    type Arm = Vec<Box<dyn analog::RuleBatch<Layout>>>;
+
+    /// Device id pairs of every `Isolation` batch in `arm`.
+    fn isolated(arm: &Arm) -> Vec<(u32, u32)> {
+        let mut ids = Vec::new();
+        arm.iter().filter(|b| b.kind().ends_with("::Isolation")).for_each(|b| b.touched(&mut ids));
+        ids.chunks(2).map(|p| (p[0], p[1])).collect()
+    }
+
+    /// Point devices all at the origin except `XS` (id 5) at `x`: every edge
+    /// gap from `XS` is `x`.
+    fn xs_at(x: i32) -> Layout {
+        let n = 6;
+        Layout {
+            x: (0..n).map(|d| if d == 5 { x } else { 0 }).collect(),
+            y: vec![0; n],
+            hw: vec![0; n],
+            hh: vec![0; n],
+            axis: vec![0; 8],
+            groups: vec![],
+            orient: vec![pnr_core::Orient::default(); n],
+            variant: vec![0; n],
+            branch: Vec::new(),
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        }
+    }
+
+    /// The smallest `XS` distance (nm, 1 nm resolution) at which `arm`'s
+    /// Isolation batches are all satisfied.
+    fn isolation_distance(arm: &Arm) -> i32 {
+        let ok = |x| arm.iter().filter(|b| b.kind().ends_with("::Isolation")).all(|b| b.violations(&xs_at(x)) == 0);
+        let (mut lo, mut hi) = (0, 1_000_000);
+        assert!(ok(hi) && !ok(lo));
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if ok(mid) { hi = mid } else { lo = mid }
+        }
+        hi
+    }
+
+    /// REL C3 / AA-13: the stage's clocked tail sits by its pair (Proximity);
+    /// isolating it from the pair would contradict that. A clocked device
+    /// outside the stage is still isolated from the pair.
+    #[test]
+    fn a_clocked_tail_is_not_isolated_from_its_own_pair() {
+        let (nl, cfg) = strongarm_like();
+        let p = crate::annotate(&nl, &cfg);
+        let (mn1, mn2, mn0, xs) = (0u32, 1, 4, 5);
+        let block = |d: u32| p.blocks.iter().position(|b| b.kind != BlockKind::Glue && b.devices.contains(&DeviceId(d as u16)));
+        assert!(block(mn0).is_some() && block(mn0) == block(mn1), "the tail is in the pair's stage");
+        let iso = isolated(&p.placement.cost);
+        assert!(!iso.iter().any(|&(a, v)| a == mn0 && (v == mn1 || v == mn2)), "tail isolated from its pair: {iso:?}");
+        assert!(iso.contains(&(xs, mn1)) && iso.contains(&(xs, mn2)), "an outside aggressor still is: {iso:?}");
+    }
+
+    /// REL C3: epi on p+ saturates at 4·t_epi (Su), a budget the search pays.
+    #[test]
+    fn epi_decks_get_a_plateau_budget() {
+        let (nl, mut cfg) = strongarm_like();
+        cfg.process.substrate = pnr_core::SubstrateKind::EpiOnLowRes;
+        cfg.process.epi_nm = Some(10_000);
+        let p = crate::annotate(&nl, &cfg);
+        assert!(!isolated(&p.placement.budget).is_empty(), "in the budget arm");
+        assert_eq!(isolation_distance(&p.placement.budget), 40_000, "min_distance_nm");
+        assert!(!p.missing.iter().any(|m| m.0 == "Isolation"), "{:?}", p.missing);
+    }
+
+    /// Bulk (sky130's `substrate_kind`) has no plateau distance: a cost-only
+    /// pull at 4·2500 nm, reported unknown, whatever epi the deck states.
+    #[test]
+    fn bulk_is_cost_only_and_unknown() {
+        let (nl, mut cfg) = strongarm_like();
+        cfg.process.substrate = pnr_core::SubstrateKind::from_key(Some("bulk"));
+        cfg.process.epi_nm = Some(10_000);
+        let p = crate::annotate(&nl, &cfg);
+        assert!(isolated(&p.placement.budget).is_empty(), "not a budget");
+        assert!(!isolated(&p.placement.cost).is_empty(), "a pull");
+        assert_eq!(isolation_distance(&p.placement.cost), 4 * NOMINAL_EPI_NM);
+        assert!(p.missing.iter().any(|m| m.0 == "Isolation"), "reported unknown: {:?}", p.missing);
+
+        cfg.process.substrate = pnr_core::SubstrateKind::Unknown;
+        let p = crate::annotate(&nl, &cfg);
+        assert!(p.missing.contains(&("Isolation", "substrate kind unknown")));
+        assert!(isolated(&p.placement.budget).is_empty());
     }
 }
