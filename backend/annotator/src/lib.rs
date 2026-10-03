@@ -20,7 +20,7 @@ pub mod pattern;
 mod tests;
 
 pub use block::{Block, BlockKind};
-pub use netrole::{AnnotationConfig, NetRole, ProcessNumbers};
+pub use netrole::{rail_of, AnnotationConfig, NetRole, ProcessNumbers};
 
 use pnr_core::ids::DeviceId;
 use pnr_core::Netlist;
