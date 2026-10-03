@@ -413,7 +413,8 @@ fn solve(
     // Cells: every legal variant drawn once; matched groups collapse to one
     // cell and every device-indexed table moves to cell space.
     // One fold table for the cells and every LVS reference of this run.
-    let fold = cellgen::folds(&netlist, pdk, &bias.gm_us);
+    let unit_cells: Vec<(Vec<DeviceId>, bool)> = problem.constraints.unitization.iter().map(|u| (u.devices.clone(), u.route_matching_required)).collect();
+    let fold = cellgen::folds(&netlist, pdk, &bias.gm_us, &unit_cells);
     let cells = CellSpace::new(&netlist, injected, &mut problem, pdk, &bias.power, merge_distinct_gates, &fold);
     let distinct = cells.distinct_gate_merges > 0;
 
@@ -2130,7 +2131,7 @@ mod size_tests {
             let mut netlist = crate::parse::spice(&spice).expect("parses");
             crate::deck_models(&mut netlist, &pdk);
             let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
-            let fold = crate::cellgen::folds(&netlist, &pdk, &[]);
+            let fold = crate::cellgen::folds(&netlist, &pdk, &[], &[]);
             let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
             for (i, dev) in netlist.devices.iter().enumerate() {
                 if !matches!(dev.kind, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
