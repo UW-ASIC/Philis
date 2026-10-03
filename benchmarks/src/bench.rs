@@ -344,6 +344,10 @@ fn run_circuit(
     let _ = std::fs::create_dir_all(&debug_dir);
     let gds_bytes = library::export_gds(&sol, pdk, &c.name, &[]);
     let _ = std::fs::write(debug_dir.join(format!("{}.gds", c.name)), &gds_bytes);
+    match library::post_layout_spice(&sol, pdk, &c.name) {
+        Ok(s) => drop(std::fs::write(debug_dir.join(format!("{}_pex.spice", c.name)), s)),
+        Err(e) => eprintln!("{}_pex.spice not written: {e}", c.name),
+    }
     let _ = std::fs::write(debug_dir.join("signoff.txt"), format!("{outcome}\n{}", signoff.coverage));
     // Every hard violation verbatim — the summary counts alone can't say which rule fired.
     // Then each routing hard rule the run itself scored, per net it violates,

@@ -1643,6 +1643,86 @@ pub fn reference_spice(sol: &Solution, pdk: &Pdk, top: &str, ports: &[String]) -
     pdk.reference_spice(&signoff_inputs(sol, pdk).2, top, ports)
 }
 
+/// The routed layout extracted with parasitics as `.subckt {top}` over the schematic's ports
+/// ([`pnr_core::Netlist::ports`], declaration order), simulatable against the PDK's ngspice library (FR-7):
+/// MOS cards become `X` cards in µm (the library's `.option scale=1.0u`, as [`oppoint`] assumes), a
+/// modelled resistor an `R` element with the schematic's `w`/`l`, parasitic `Cp`/`Rp` kept. A port is
+/// the extractor's `{port}:0` piece; its other `:k` pieces hang off it through the parasitics.
+///
+/// # Errors
+/// No ports, a port with no label, a MOS card without a bulk node, a resistor matching no single schematic
+/// resistor, any other device card (not rewritten yet), or the extractor's own error.
+pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String, String> {
+    let (shapes, pins, _) = signoff_inputs(sol, pdk);
+    let raw = verify::extract_spice(&shapes, &pins, pdk, verify::Detail::WithParasitics)?;
+    let nl = &sol.netlist;
+    let ports: Vec<&str> = nl.ports.iter().map(|n| nl.nets[n.0 as usize].name.as_str()).collect();
+    if ports.is_empty() {
+        return Err("no .subckt ports".into());
+    }
+    if let Some(p) = ports.iter().find(|p| !pins.iter().any(|q| q.name.eq_ignore_ascii_case(p))) {
+        return Err(format!("port {p} has no label"));
+    }
+    let base = |node: &str| node.rsplit_once(':').map_or(node, |(n, _)| n).to_string();
+    let um = |nm: f64| nm / 1000.0;
+    let mut out = String::new();
+    for line in raw.lines() {
+        let t: Vec<&str> = line
+            .split_whitespace()
+            .map(|tok| ports.iter().find(|p| tok.eq_ignore_ascii_case(&format!("{p}:0"))).copied().unwrap_or(tok))
+            .collect();
+        let name = t.first().copied().unwrap_or("");
+        // Positional tokens (nodes, model) end at the first `k=v`.
+        let pos = t.iter().take_while(|s| !s.contains('=')).count();
+        let kv = |k: &str| t[pos..].iter().find_map(|s| s.split_once('=').filter(|(n, _)| n.eq_ignore_ascii_case(k))?.1.parse::<f64>().ok());
+        let card = match name.chars().next().map(|c| c.to_ascii_uppercase()) {
+            None => String::new(),
+            Some('.') if name.eq_ignore_ascii_case(".subckt") => format!(".subckt {top} {}", ports.join(" ")),
+            Some('.') if name.eq_ignore_ascii_case(".ends") => format!(".ends {top}"),
+            Some('*') if line.contains("database units") => "* lengths in um (the model library's .option scale=1.0u)".into(),
+            Some('*' | '.') => line.to_string(),
+            Some('M') => {
+                if pos < 6 {
+                    return Err(format!("{name}: MOS card without a bulk node"));
+                }
+                let (w, l) = kv("w").zip(kv("l")).ok_or_else(|| format!("{name}: MOS card without w/l"))?;
+                format!("X{name} {} w={} l={}", t[1..6].join(" "), um(w), um(l))
+            }
+            Some('R' | 'C') if t.get(3).is_some_and(|v| v.trim_end_matches(char::is_alphabetic).parse::<f64>().is_ok()) => {
+                line.to_string()
+            }
+            Some('R') if pos == 4 => {
+                let model = t[3];
+                let ends = |a: &str, b: &str| {
+                    let (a, b) = (base(a), base(b));
+                    let (x, y) = (base(t[1]), base(t[2]));
+                    (a.eq_ignore_ascii_case(&x) && b.eq_ignore_ascii_case(&y)) || (a.eq_ignore_ascii_case(&y) && b.eq_ignore_ascii_case(&x))
+                };
+                let net = |d: &pnr_core::Device, k: &str| d.terminals.iter().find(|(n, _)| n == k).map(|(_, n)| nl.nets[n.0 as usize].name.as_str());
+                // The deck model the LVS reference names (as in [`labels_and_reference`]).
+                let deck = |m: &str| pdk.recipe("resistor", m).map_or_else(|| m.to_string(), |r| r.model);
+                let hits: Vec<&pnr_core::Device> = nl
+                    .devices
+                    .iter()
+                    .filter(|d| d.kind == pnr_core::DeviceKind::Resistor && deck(&d.model).eq_ignore_ascii_case(model))
+                    .filter(|d| net(d, "P").zip(net(d, "N")).is_some_and(|(p, n)| ends(p, n)))
+                    .collect();
+                // ponytail: a resistor drawn as several segments (CELL-06) extracts several cards and errs here
+                let [d] = hits[..] else {
+                    return Err(format!("{name}: {} schematic resistors match", hits.len()));
+                };
+                let p = |k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| um(v as f64));
+                let (w, l) = p("w").zip(p("l")).ok_or_else(|| format!("{name}: schematic {} has no w/l", d.name))?;
+                format!("R{name} {} {} {model} w={w} l={l}", t[1], t[2])
+            }
+            _ => return Err(format!("{name}: card not rewritten (PERF-30)")),
+        };
+        out.push_str(&card);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// Signoff over drawn `shapes`; `fold`: the table the cells were drawn at
 /// ([`cellgen::folds`], the flow), `None` for the schematic's own fingers.
 pub(crate) fn signoff_shapes(

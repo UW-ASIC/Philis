@@ -179,3 +179,81 @@ fn an_inductor_netlist_cannot_simulate() {
     let e = library::oppoint::extract(&nl, &op_cfg(lib)).err().expect("an inductor is refused");
     assert!(e.contains("cannot simulate"), "{e}");
 }
+
+/// rc_filter routed once and extracted as a post-layout `.subckt rc_filter`.
+fn rc_filter_pex() -> (library::Solution, String) {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/rc_filter.spice")).unwrap();
+    let c = library::Config { feedback_iters: 1, starts: 1, ..library::Config::default() };
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &c).expect("flow");
+    let pex = library::post_layout_spice(&sol, &pdk, "rc_filter").unwrap();
+    (sol, pex)
+}
+
+/// `v(vout)` of `deck` under `ngspice -b` in `dir`; panics on a failed run or
+/// an `Error` line.
+fn vout(dir: &std::path::Path, file: &str, deck: &str) -> f64 {
+    std::fs::write(dir.join(file), deck).unwrap();
+    let o = std::process::Command::new("ngspice").arg("-b").arg(file).current_dir(dir).output().expect("ngspice runs");
+    let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert!(o.status.success(), "{file}: ngspice failed\n{text}");
+    assert!(!text.lines().any(|l| l.trim_start().starts_with("Error") || l.trim_start().starts_with("ERROR")), "{file}:\n{text}");
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("v(vout) = ")?.trim().parse().ok())
+        .unwrap_or_else(|| panic!("{file}: no v(vout)\n{text}"))
+}
+
+/// The extracted layout simulates and its DC output matches the schematic's
+/// within 1 % (M1 PERF criterion). `vin = 0` puts `vout` at VDD through the
+/// PMOS in triode, so the comparison does not ride the inverter's gain.
+#[test]
+fn post_layout_rc_filter_simulates() {
+    let Some(lib) = models() else { return };
+    let (_, pex) = rc_filter_pex();
+    let dir = std::env::temp_dir().join(format!("philis_pex_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bench = |body: &str| {
+        format!(
+            "* pex\n.lib {} tt\n{body}\nXdut vin vout VDD VSS rc_filter\nVdd VDD 0 1.8\nVss VSS 0 0\nVin vin 0 0\n.control\nop\nprint v(vout)\n.endc\n.end\n",
+            lib.display()
+        )
+    };
+    let sch = ".subckt rc_filter vin vout VDD VSS
+XM1 vmid vin VDD VDD sky130_fd_pr__pfet_01v8 W=1 L=0.15 nf=1 m=1
+XM2 vmid vin VSS VSS sky130_fd_pr__nfet_01v8 W=0.5 L=0.15 nf=1 m=1
+RXR1 vmid vout sky130_fd_pr__res_generic_po w=0.5 l=2
+.ends";
+    let v_pex = vout(&dir, "pex.spice", &bench(&pex));
+    let v_sch = vout(&dir, "sch.spice", &bench(sch));
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!((v_pex - v_sch).abs() <= 0.01 * v_sch.abs(), "post-layout {v_pex} V vs schematic {v_sch} V\n{pex}");
+}
+
+#[test]
+fn post_layout_ports_are_the_schematic_ports() {
+    if models().is_none() {
+        return;
+    }
+    let (_, pex) = rc_filter_pex();
+    let subckt = pex.lines().find(|l| l.starts_with(".subckt")).unwrap();
+    assert_eq!(subckt, ".subckt rc_filter vin vout VDD VSS");
+}
+
+/// FR-7: every MOS keeps its bulk, on the rail of its type.
+#[test]
+fn every_mos_card_has_four_nodes() {
+    if models().is_none() {
+        return;
+    }
+    let (_, pex) = rc_filter_pex();
+    let mos: Vec<Vec<&str>> =
+        pex.lines().map(|l| l.split_whitespace().collect::<Vec<_>>()).filter(|t| t[0].starts_with('X') && t.get(5).is_some_and(|m| m.contains("fet_"))).collect();
+    assert!(!mos.is_empty(), "{pex}");
+    for t in mos {
+        assert_eq!(t.iter().skip(1).take_while(|s| !s.contains("fet_")).count(), 4, "{t:?}");
+        let bulk = t[4].rsplit_once(':').map_or(t[4], |(n, _)| n);
+        let rail = if t[5].contains("nfet") { "VSS" } else { "VDD" };
+        assert!(bulk.eq_ignore_ascii_case(rail), "{t:?}");
+    }
+}

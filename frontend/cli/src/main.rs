@@ -116,7 +116,7 @@ fn cli() -> Result<bool, String> {
     if let Some(dir) = out {
         let (top, ports) = interface(&spice, Path::new(netlist));
         write_outputs(&dir, &top, &ports, &sol, &pdk, &report, &summary, clean)?;
-        println!("wrote {}/{{{top}.gds, {top}_ref.spice, signoff.txt, signoff.json}}", dir.display());
+        println!("wrote {}/{{{top}.gds, {top}_ref.spice, {top}_pex.spice, signoff.txt, signoff.json}}", dir.display());
     }
     Ok(clean)
 }
@@ -157,6 +157,10 @@ fn write_outputs(
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     write(format!("{top}.gds"), &library::export_gds(sol, pdk, top, ports))?;
     write(format!("{top}_ref.spice"), library::reference_spice(sol, pdk, top, ports).as_bytes())?;
+    match library::post_layout_spice(sol, pdk, top) {
+        Ok(s) => write(format!("{top}_pex.spice"), s.as_bytes())?,
+        Err(e) => eprintln!("{top}_pex.spice not written: {e}"),
+    }
 
     let lines = |vs: &[pnr_core::report::Violation]| -> String {
         vs.iter().map(|v| format!("{}\t{}\n", v.rule, v.margin)).collect()
