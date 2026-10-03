@@ -39,12 +39,17 @@ fn run(
     fixed: &[bool],
     seed: u64,
 ) -> Layout {
-    place(coarse, macros, variants, reqs, fixed, &mut gp::Prices::new(), RULES, &[], seed).0
+    let locks = locks::locks(reqs, coarse.x.len(), variants);
+    place(coarse, macros, variants, reqs, fixed, &locks, &mut gp::Prices::new(), RULES, &[], seed).0
+}
+
+fn sym(a: u16, b: u16) -> Symmetry {
+    Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0) }
 }
 
 // ---- rotation ----
 
-/// Four tall devices; 0 and 1 form one matched group.
+/// Four tall devices; 0 and 1 form one matched group (`groups`, which dp ignores).
 fn rotate_bench() -> Layout {
     let mut l = layout(&[(0, 0, 1_000, 8_000), (20_000, 0, 1_000, 8_000), (40_000, 0, 1_000, 8_000), (60_000, 0, 1_000, 8_000)]);
     l.groups = vec![vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2)], vec![DeviceId(3)]];
@@ -52,22 +57,44 @@ fn rotate_bench() -> Layout {
 }
 
 #[test]
-fn matched_devices_never_turn() {
-    let l = rotate_bench();
-    assert!(!rotatable(&l, 0) && !rotatable(&l, 1));
-    assert!(rotatable(&l, 2) && rotatable(&l, 3));
+fn matched_cells_share_one_orient_set() {
+    let reqs = Requirements { hard: vec![Box::new(SymmetryGroup(vec![sym(0, 1)]))], ..Default::default() };
+    let k = locks::locks(&reqs, 3, &[]);
+    assert_eq!(k.orient_of[0], k.orient_of[1]);
+    assert!(k.orient_of[0].is_some());
+    assert_eq!(k.orient_of[2], None);
+}
+
+/// A matched set that is no hard rule and has no units: the lock can only come
+/// from `matched_pairs`, and it must actually turn.
+#[test]
+fn mixed_polarity_composite_halves_turn_together() {
+    use analog::placement::{OrientCheck, OrientationSet};
+    let coarse = rotate_bench();
+    let reqs = Requirements {
+        budget: vec![Box::new(OrientationSet { members: vec![DeviceId(0), DeviceId(1)], check: OrientCheck::Phi, cell_of: vec![] })],
+        ..Default::default()
+    };
+    let mut turned = false;
+    for seed in 1..=20u64 {
+        let l = run(&coarse, &[], &[], &reqs, &[false; 4], seed);
+        assert_eq!(l.orient[0], l.orient[1], "seed {seed}");
+        turned |= l.orient[0] != Orient::R0;
+    }
+    assert!(turned, "the locked set never turned");
 }
 
 #[test]
 fn extents_stay_in_lockstep_with_orientation() {
     let coarse = rotate_bench();
-    let l = run(&coarse, &[], &[], &Requirements::default(), &[false; 4], 42);
+    let reqs = Requirements { hard: vec![Box::new(SymmetryGroup(vec![sym(0, 1)]))], ..Default::default() };
+    let l = run(&coarse, &[], &[], &reqs, &[false; 4], 42);
     for i in 0..4 {
         let (w, h) = (coarse.hw[i], coarse.hh[i]);
         let want = if l.orient[i].swaps_axes() { (h, w) } else { (w, h) };
         assert_eq!((l.hw[i], l.hh[i]), want, "device {i}");
     }
-    assert_eq!((l.orient[0], l.orient[1]), (Orient::R0, Orient::R0));
+    assert_eq!(l.orient[0], l.orient[1]);
 }
 
 #[test]
@@ -141,7 +168,22 @@ fn a_fixed_cell_never_reshapes() {
 }
 
 #[test]
-fn cells_reshape_independently() {
+fn mirror_partners_reshape_together() {
+    let s = || VariantSpace { alternatives: vec![alt(1_000, 4_000), alt(2_000, 2_000), alt(4_000, 1_000)] };
+    let variants = vec![s(), s()];
+    let coarse = layout(&[(-20_000, 0, 500, 2_000), (20_000, 0, 500, 2_000)]);
+    let reqs = Requirements { hard: vec![Box::new(SymmetryGroup(vec![sym(0, 1)]))], ..Default::default() };
+    let mut reshaped = false;
+    for seed in 1..=20u64 {
+        let l = run(&coarse, &drawn(&variants), &variants, &reqs, &[false; 2], seed);
+        assert_eq!(l.variant[0], l.variant[1], "seed {seed}");
+        reshaped |= l.variant[0] != 0;
+    }
+    assert!(reshaped, "the locked pair never reshaped");
+}
+
+#[test]
+fn unmatched_cells_reshape_independently() {
     let coarse = variant_bench();
     let variants = spaces();
     assert!((0..16u64).any(|seed| {
@@ -183,12 +225,12 @@ fn reshape_is_priced_on_where_the_pins_land() {
     let free = |c: i32, _half: i32| c;
 
     let before = hpwl(&sa.nets, &l);
-    assert!(try_reshape(&mut sa, &mut l, &mut rng, 0.0, 0, &variants, &free, &free));
+    assert!(try_reshape(&mut sa, &mut l, &mut rng, 0.0, &[0], &variants, &free, &free));
     assert_eq!(l.variant[0], 1);
     let after = hpwl(&sa.nets, &l);
     assert!(after < before, "{before} -> {after}");
 
-    assert!(!try_reshape(&mut sa, &mut l, &mut rng, 0.0, 0, &variants, &free, &free));
+    assert!(!try_reshape(&mut sa, &mut l, &mut rng, 0.0, &[0], &variants, &free, &free));
     assert_eq!(l.variant[0], 1);
     assert_eq!(hpwl(&sa.nets, &l), after, "refusal must revert the pin geometry too");
 }
@@ -215,7 +257,8 @@ fn place_does_not_settle() {
     let reqs = Requirements { hard: Vec::new(), budget: vec![Box::new(vec![Over])], cost: Vec::new() };
     let mut prices = gp::Prices::new();
     let (coarse, _) = gp::place(&macros, &variants, &[0, 0], &reqs, &mut prices, RULES, &[], 3, true);
-    place(&coarse, &macros, &variants, &reqs, &[false; 2], &mut prices, RULES, &[], 3);
+    let locks = locks::locks(&reqs, coarse.x.len(), &variants);
+    place(&coarse, &macros, &variants, &reqs, &[false; 2], &locks, &mut prices, RULES, &[], 3);
     assert_eq!(prices.drift(), f64::INFINITY, "no dual step inside place");
     assert_eq!(prices.steps(), 0);
 }

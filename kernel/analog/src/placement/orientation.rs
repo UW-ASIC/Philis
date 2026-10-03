@@ -89,6 +89,11 @@ impl crate::rule::RuleBatch<Layout> for OrientationSet {
     fn touched(&self, out: &mut Vec<u32>) {
         out.extend(self.members.iter().map(|&d| self.cell(d)));
     }
+    fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        let Some((&m0, rest)) = self.members.split_first() else { return };
+        let c0 = self.cell(m0);
+        out.extend(rest.iter().map(|&m| (c0, self.cell(m))));
+    }
     fn violating_ids(&self, l: &Layout, out: &mut Vec<u32>) {
         if self.violations(l) > 0 {
             self.touched(out);

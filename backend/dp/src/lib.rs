@@ -9,6 +9,7 @@
 //! any residue.
 
 pub mod legalize;
+pub mod locks;
 
 use analog::Requirements;
 use pnr_core::ids::BranchId;
@@ -45,7 +46,8 @@ pub struct PlaceStats {
     /// Codes the decoder could not realise; `None` (not measured) until
     /// PLC-08 adds a decoder.
     pub decode_fail: Option<u64>,
-    /// Matched sets drawn incompatibly; `None` (not measured) until PLC-03.
+    /// Distinct matched pairs whose variant spaces differ, so they cannot be
+    /// shape-locked ([`locks::Locks::incompatible`]).
     pub matched_incompatible: Option<u32>,
 }
 
@@ -212,12 +214,15 @@ impl<'a> Sa<'a> {
 /// `net_weight[NetId]` weights each net's HPWL (see [`gp::net_weights`]).
 /// `macros[i]` supplies cell `i`'s pins when `variants[i]` has no alternative
 /// for `coarse.variant[i]`. `fixed[i]` pins cell `i` (position and variant).
+/// `locks` turns and reshapes matched cells as one set (PLC-03).
+#[allow(clippy::too_many_arguments)]
 pub fn place(
     coarse: &Layout,
     macros: &[Macro],
     variants: &[gp::VariantSpace],
     reqs: &Requirements<Layout>,
     fixed: &[bool],
+    locks: &locks::Locks,
     prices: &mut gp::Prices,
     rules: gp::Rules,
     net_weight: &[f32],
@@ -266,7 +271,7 @@ pub fn place(
     let nets = Nets::from_macros(&choose_variants(macros, variants, &l.variant)).weigh(net_weight);
     if n == 0 {
         let rep = report(&nets, reqs, &l, prices, clearance);
-        return (l, rep, PlaceStats::default());
+        return (l, rep, PlaceStats { matched_incompatible: Some(locks.incompatible), ..Default::default() });
     }
 
     // Move region: the coarse footprint bbox, grown about its centre until the
@@ -295,6 +300,7 @@ pub fn place(
     let clamp_y = |c: i32, half: i32| c.clamp(ymin + half, (ymax - half).max(ymin + half));
 
     let mut sa = Sa::new(nets, n, reqs, prices, fixed, rules);
+    sa.stats.matched_incompatible = Some(locks.incompatible);
 
     // t0 = 0.02 · mean |ΔPEX| over probe moves: refine gp, don't randomise it.
     let mut range = RANGE0;
@@ -357,9 +363,12 @@ pub fn place(
                 let bid = usize::from(branch_ids[rng.below(branch_ids.len())].0);
                 try_branch(&mut sa, &mut l, &mut rng, temp, bid)
             } else if can_reshape && roll >= 0.95 {
-                try_reshape(&mut sa, &mut l, &mut rng, temp, c, variants, &clamp_x, &clamp_y)
+                try_reshape(&mut sa, &mut l, &mut rng, temp, &locks.members(c, true), variants, &clamp_x, &clamp_y)
             } else {
-                can_rotate && rotatable(&l, c) && try_rotate(&mut sa, &mut l, &mut rng, temp, c, &clamp_x, &clamp_y)
+                let set = locks.members(c, false);
+                can_rotate
+                    && !set.iter().any(|&m| sa.is_fixed(m))
+                    && try_rotate(&mut sa, &mut l, &mut rng, temp, &set, &clamp_x, &clamp_y)
             };
         }
 
@@ -575,47 +584,48 @@ fn quarter_turn(o: Orient) -> Orient {
     }
 }
 
-/// Grouped (matched) devices never turn, and no move introduces a mirror, so
-/// every matched device keeps its seeded orientation: channels stay parallel
-/// and S→D current runs the same way across the set, by construction.
-fn rotatable(l: &Layout, c: usize) -> bool {
-    !l.groups.iter().any(|g| g.len() > 1 && g.iter().any(|d| d.0 as usize == c))
-}
-
-/// Turn `c` a quarter; `hw`/`hh` swap with the orientation (`Layout::orient`).
+/// Turn a whole orient set a quarter, in one trial; `hw`/`hh` swap with the
+/// orientation (`Layout::orient`). No move introduces a mirror, so a matched
+/// set keeps one orientation: channels stay parallel and S→D current runs the
+/// same way across it.
 fn try_rotate(
     sa: &mut Sa,
     l: &mut Layout,
     rng: &mut SplitMix64,
     temp: f64,
-    c: usize,
+    set: &[usize],
     clamp_x: &impl Fn(i32, i32) -> i32,
     clamp_y: &impl Fn(i32, i32) -> i32,
 ) -> bool {
     sa.trial(l, rng, temp, |l, _, _| {
-        l.orient[c] = quarter_turn(l.orient[c]);
-        (l.hw[c], l.hh[c]) = (l.hh[c], l.hw[c]);
-        l.x[c] = clamp_x(l.x[c], l.hw[c]);
-        l.y[c] = clamp_y(l.y[c], l.hh[c]);
+        for &c in set {
+            l.orient[c] = quarter_turn(l.orient[c]);
+            (l.hw[c], l.hh[c]) = (l.hh[c], l.hw[c]);
+            l.x[c] = clamp_x(l.x[c], l.hw[c]);
+            l.y[c] = clamp_y(l.y[c], l.hh[c]);
+        }
     })
 }
 
-/// Swap `c` to one uniformly drawn other variant. Extents follow the new bbox
-/// (transposed under a turned orient) and the pin offsets are patched before
-/// pricing, so the move is scored on where pins land.
+/// Swap a whole shape set (first member `set[0]`) to one uniformly drawn other
+/// variant, in one trial. Extents follow the new bbox (transposed under a
+/// turned orient) and the pin offsets are patched before pricing, so the move
+/// is scored on where pins land. Refused when any member is fixed or has a
+/// different variant count.
 #[allow(clippy::too_many_arguments)]
 fn try_reshape(
     sa: &mut Sa,
     l: &mut Layout,
     rng: &mut SplitMix64,
     temp: f64,
-    c: usize,
+    set: &[usize],
     variants: &[gp::VariantSpace],
     clamp_x: &impl Fn(i32, i32) -> i32,
     clamp_y: &impl Fn(i32, i32) -> i32,
 ) -> bool {
+    let c = set[0];
     let depth = variants[c].alternatives.len();
-    if depth < 2 || sa.is_fixed(c) {
+    if depth < 2 || set.iter().any(|&m| sa.is_fixed(m) || variants[m].alternatives.len() != depth) {
         return false;
     }
     let cur = l.variant[c] as usize;
@@ -623,20 +633,24 @@ fn try_reshape(
     let next = if cur < depth && draw >= cur { draw + 1 } else { draw };
 
     let ok = sa.trial(l, rng, temp, |l, nets, cell_nets| {
-        let alt = &variants[c].alternatives[next];
-        let (w, h) = variant_extents(alt);
-        l.variant[c] = next as u16;
-        (l.hw[c], l.hh[c]) = match l.orient.get(c) {
-            Some(o) if o.swaps_axes() => (h, w),
-            _ => (w, h),
-        };
-        l.x[c] = clamp_x(l.x[c], l.hw[c]);
-        l.y[c] = clamp_y(l.y[c], l.hh[c]);
-        nets.reshape_cell(c, &cell_nets[c], alt);
+        for &m in set {
+            let alt = &variants[m].alternatives[next];
+            let (w, h) = variant_extents(alt);
+            l.variant[m] = next as u16;
+            (l.hw[m], l.hh[m]) = match l.orient.get(m) {
+                Some(o) if o.swaps_axes() => (h, w),
+                _ => (w, h),
+            };
+            l.x[m] = clamp_x(l.x[m], l.hw[m]);
+            l.y[m] = clamp_y(l.y[m], l.hh[m]);
+            nets.reshape_cell(m, &cell_nets[m], alt);
+        }
     });
     if !ok {
-        if let Some(alt) = variants[c].alternatives.get(l.variant[c] as usize) {
-            sa.nets.reshape_cell(c, &sa.cell_nets[c], alt);
+        for &m in set {
+            if let Some(alt) = variants[m].alternatives.get(l.variant[m] as usize) {
+                sa.nets.reshape_cell(m, &sa.cell_nets[m], alt);
+            }
         }
     }
     ok

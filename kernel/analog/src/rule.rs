@@ -125,6 +125,13 @@ pub trait Rule: Copy {
         None
     }
 
+    /// `(a, b)` cells that must be drawn alike (same orientation, same variant
+    /// when their variant spaces agree): what dp's locks preserve. Default none.
+    #[inline]
+    fn matched_pair(self) -> Option<(u32, u32)> {
+        None
+    }
+
     /// `(victim, aggressor)` nets this rule wants routed apart: what a router
     /// can price as a keep-away field while searching, not only after.
     #[inline]
@@ -241,6 +248,10 @@ pub trait RuleBatch<On>: Send + Sync {
     fn mirror_pairs(&self, out: &mut Vec<(u32, u32, u16)>) {
         let _ = out;
     }
+    /// Append every matched pair (see [`Rule::matched_pair`]).
+    fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        let _ = out;
+    }
     /// Append every keep-away `(victim, aggressor)` (see [`Rule::keepaway`]).
     fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
         let _ = out;
@@ -327,6 +338,9 @@ impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {
     }
     fn mirror_pairs(&self, out: &mut Vec<(u32, u32, u16)>) {
         out.extend(self.iter().filter_map(|r| r.mirror_pair()));
+    }
+    fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        out.extend(self.iter().filter_map(|r| r.matched_pair()));
     }
     fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
         out.extend(self.iter().filter_map(|r| r.keepaway()));

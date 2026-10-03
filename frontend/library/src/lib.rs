@@ -415,6 +415,7 @@ fn solve(
     // One fold table for the cells and every LVS reference of this run.
     let fold = cellgen::folds(&netlist, pdk, &bias.gm_us);
     let cells = CellSpace::new(&netlist, injected, &mut problem, pdk, &bias.power, merge_distinct_gates, &fold);
+    let locks = dp::locks::locks(&problem.placement, cells.variants.len(), &cells.variants);
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
@@ -473,6 +474,7 @@ fn solve(
         cuts,
         problem,
         cells,
+        locks,
         perf: cfg.performance.as_ref(),
         perf_rows,
         intent: intent.clone(),
@@ -636,6 +638,8 @@ struct Flow<'a> {
     /// Rules and constraints; placement rules retargeted to cell ids.
     problem: Problem,
     cells: CellSpace,
+    /// Matched-cell orient/shape locks (PLC-03), over all variants.
+    locks: dp::locks::Locks,
     /// Post-layout performance scoring, when configured.
     perf: Option<&'a perf::PerfConfig>,
     /// Spec bounds as sensitivity rows ([`performance_rows`]); weigh [`c_tier`].
@@ -740,6 +744,12 @@ impl Flow<'_> {
         neg: &mut gr::Negotiation,
         seed: u64,
     ) -> Epoch {
+        let unified = {
+            let mut a = assignment.to_vec();
+            self.locks.unify(&mut a);
+            a
+        };
+        let assignment = &unified[..];
         let placement = &self.problem.placement;
         let cells = &self.cells;
         let layers = &self.layers;
@@ -764,6 +774,7 @@ impl Flow<'_> {
             if reshape { &cells.variants } else { &[] },
             placement,
             &cells.fixed,
+            &self.locks,
             prices,
             place_rules(self.pdk),
             &self.net_weight,
@@ -780,7 +791,7 @@ impl Flow<'_> {
         };
         // Measured on the macros dp's variants draw, so `lattice_off` stamps what is drawn.
         let lattice = cells::builder::cut_lattice(self.pdk);
-        let place = geometry::placement_metrics(&macros, &layout, lattice, place_rules(self.pdk).clearance, placement);
+        let place = geometry::placement_metrics(&macros, &layout, lattice, place_rules(self.pdk).clearance, placement, &self.locks);
         debug_assert_eq!(place.lattice_off, 0, "dp::place: cell origin off the cut lattice");
 
         // Guard rings enclose placed cells, so they are drawn now, before routing.
