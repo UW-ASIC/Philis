@@ -3,14 +3,98 @@
 //! `rpoly`, with long contacted heads, all under rpm + npc + psdm.
 
 use crate::builder::dim;
+use analog::cell::SeriesParallel;
 use analog::Constraints;
 use pnr_core::{DeviceGroup, Drawn, DrawnKind, Macro, Node, Process, Rect};
 
-use crate::builder::{cut_lattice, greedy_centroid, pin, req, sizing, snap_cut, Builder, Sizing};
+use crate::builder::{cut_lattice, greedy_centroid, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
 use crate::{Cell, Pattern};
 
-/// One resistor variant: body split into `segments` series segments, devices
-/// laid out `Single` (each device's segments adjacent) or `Interdig`.
+/// A recipe's per-device resistance, integers from the sidecar:
+/// R = sheet·(L + dl)/weff + head/(weff + head_dw),  weff = W + dw − narrow·max(knee − W, 0),
+/// W and L in µm (Hastings eq 6.22: a body's value plus its two heads, so
+/// splitting a body into n devices adds n − 1 head terms).
+#[derive(Clone, Copy, Debug)]
+pub struct ResModel {
+    pub sheet_mohm: i64,
+    pub head_mohm_um: i64,
+    pub dl_nm: i32,
+    pub dw_nm: i32,
+    pub head_dw_nm: i32,
+    pub narrow_permille: i32,
+    pub knee_nm: i32,
+}
+
+impl ResModel {
+    /// `None` when the recipe states no `res_sheet_mohm`.
+    #[must_use]
+    pub fn of(p: &dyn Process) -> Option<Self> {
+        let sheet = p.rule("res_sheet_mohm", 0);
+        if sheet <= 0 {
+            return None;
+        }
+        let r = |name: &str| p.rule(name, 0);
+        Some(Self {
+            sheet_mohm: i64::from(sheet),
+            head_mohm_um: i64::from(r("res_head_mohm_um")),
+            dl_nm: r("res_dl_nm"),
+            dw_nm: r("res_dw_nm"),
+            head_dw_nm: r("res_head_dw_nm"),
+            narrow_permille: r("res_narrow_permille"),
+            knee_nm: r("res_knee_nm"),
+        })
+    }
+
+    /// Effective width, µm.
+    fn weff(&self, w_nm: i32) -> f64 {
+        let w = f64::from(w_nm) / 1e3;
+        w + f64::from(self.dw_nm) / 1e3 - f64::from(self.narrow_permille) / 1e3 * (f64::from(self.knee_nm) / 1e3 - w).max(0.0)
+    }
+
+    /// Both heads of one device, Ω.
+    fn head_ohm(&self, weff: f64) -> f64 {
+        self.head_mohm_um as f64 / 1e3 / (weff + f64::from(self.head_dw_nm) / 1e3)
+    }
+
+    /// One device of drawn W×L, Ω.
+    #[must_use]
+    pub fn ohm(&self, w_nm: i32, l_nm: i32) -> f64 {
+        let weff = self.weff(w_nm);
+        self.sheet_mohm as f64 / 1e3 * (f64::from(l_nm) + f64::from(self.dl_nm)) / 1e3 / weff + self.head_ohm(weff)
+    }
+
+    /// Body length so `n` series devices of width `w` total `target`:
+    /// L = (target/n − head/(weff+head_dw))·weff/sheet − dl, snapped to `lat`;
+    /// `None` below `min_nm` or when the snapped residual exceeds `tol_ppm`.
+    #[must_use]
+    pub fn seg_len(&self, w_nm: i32, target_ohm: f64, n: u32, min_nm: i32, lat: i32, tol_ppm: i32) -> Option<i32> {
+        let weff = self.weff(w_nm);
+        let l_um = (target_ohm / f64::from(n.max(1)) - self.head_ohm(weff)) * weff / (self.sheet_mohm as f64 / 1e3) - f64::from(self.dl_nm) / 1e3;
+        let lat = lat.max(1);
+        let l = ((l_um * 1e3 / f64::from(lat)).round() as i32).saturating_mul(lat);
+        let err = (f64::from(n) * self.ohm(w_nm, l) - target_ohm).abs() / target_ohm * 1e6;
+        (l >= min_nm && err <= f64::from(tol_ppm)).then_some(l)
+    }
+}
+
+/// How far a segmented resistor may drift from its schematic value, ppm
+/// (`res_value_tol_ppm`): lengths snap to the cut lattice.
+#[must_use]
+pub fn value_tol_ppm(p: &dyn Process) -> i32 {
+    p.rule("res_value_tol_ppm", 0)
+}
+
+/// Parallel strings per member: `dev_nf[d]` when the unitization composes
+/// units in parallel (SPICE `m`), else one.
+fn strings(group: &DeviceGroup, c: &Constraints, s: &Sizing) -> Vec<usize> {
+    let parallel = unitization(group, c).is_some_and(|u| u.series_parallel == SeriesParallel::Parallel);
+    s.dev_nf.iter().map(|&nf| if parallel { usize::from(nf.max(1)) } else { 1 }).collect()
+}
+
+/// One resistor variant: each string split into `segments` series segments
+/// whose lengths keep the string's model value; member d draws `dev_nf[d]`
+/// parallel strings when its unitization is `Parallel`. Strings laid out
+/// `Single` (each string's segments adjacent) or `Interdig`.
 #[derive(Clone)]
 pub struct Resistor {
     pub segments: u16,
@@ -33,12 +117,13 @@ impl Cell for Resistor {
         // met1, one track per device inside the heads: as many devices as
         // tracks fit.
         let tracks = jumper_tracks(process).len();
+        let n_strings: usize = strings(group, constraints, &s).iter().sum();
         feasible_segments(&s, process)
             .into_iter()
             .flat_map(|segments| {
                 patterns.iter().map(move |&pattern| Resistor { segments, pattern })
             })
-            .filter(|r| !(matches!(r.pattern, Pattern::Interdig) && r.segments > 1 && group.devices.len() > tracks))
+            .filter(|r| !(matches!(r.pattern, Pattern::Interdig) && r.segments > 1 && n_strings > tracks))
             .collect()
     }
 
@@ -79,7 +164,13 @@ impl Cell for Resistor {
         let seg_gap = seg_gap(process);
         let n_segments = i32::from(self.segments.max(1));
         let body_w = s.unit_w.max(r("res_min_width", 0));
-        let seg_l = (s.unit_l / n_segments).max(process.width("rpoly").unwrap_or(0));
+        // Each segment's length keeps the string at the schematic device's
+        // model value (heads included); without a model only n = 1 is
+        // offered, which draws the written L.
+        let seg_l = ResModel::of(process)
+            .and_then(|m| m.seg_len(body_w, m.ohm(s.unit_w, s.unit_l), n_segments as u32, 0, lat, i32::MAX))
+            .unwrap_or(s.unit_l / n_segments)
+            .max(process.width("rpoly").unwrap_or(0));
         let seg_pitch = body_w + seg_gap;
         let total_h = head + seg_l + head;
         let head_li_h = head - lap;
@@ -98,13 +189,17 @@ impl Cell for Resistor {
             h: ch,
         };
 
-        let sequence = res_segment_sequence(n_dev, self.pattern, n_segments);
-        let mut seg_of = vec![0i32; n_dev];
-        // Per device, the column x of its previous segment.
-        let mut prev: Vec<Option<i32>> = vec![None; n_dev];
-        for (slot, &di) in sequence.iter().enumerate() {
-            let seg = seg_of[di];
-            seg_of[di] += 1;
+        // String g is string j of member di: one pseudo-device for sequencing.
+        let per = strings(group, constraints, &s);
+        let owner: Vec<(usize, usize)> = per.iter().enumerate().flat_map(|(d, &k)| (0..k).map(move |j| (d, j))).collect();
+        let sequence = res_segment_sequence(owner.len(), self.pattern, n_segments);
+        let mut seg_of = vec![0i32; owner.len()];
+        // Per string, the column x of its previous segment.
+        let mut prev: Vec<Option<i32>> = vec![None; owner.len()];
+        for (slot, &g) in sequence.iter().enumerate() {
+            let (di, j) = owner[g];
+            let seg = seg_of[g];
+            seg_of[g] += 1;
             let sx = slot as i32 * seg_pitch;
             // Even segments run bottom -> top, odd ones top -> bottom.
             let enters_top = seg % 2 == 1;
@@ -116,12 +211,15 @@ impl Cell for Resistor {
             if let Some(l) = process.layer("rpoly_b") {
                 b.rect(l, body);
             }
-            // The body: current runs up an even segment, down an odd one.
+            b.keepout(Rect { x: sx, y: head, w: body_w, h: seg_l }, pnr_core::KeepWhy::ResistorBody { owner: di as u8 });
+            // The body: current runs up an even segment, down an odd one. With
+            // m parallel strings a segment carries 1/m² of the member's
+            // value (∂R/∂R_i, Hastings eqs 8.24-8.25).
             b.unit(pnr_core::Unit {
                 owner: di as u8,
                 x: sx + body_w / 2,
                 y: total_h / 2,
-                weight: i64::from(body_w) * i64::from(seg_l),
+                weight: i64::from(body_w) * i64::from(seg_l) / (per[di] * per[di]) as i64,
                 phi: (0, if enters_top { -1 } else { 1 }),
                 sa: 0,
                 sb: 0,
@@ -134,18 +232,19 @@ impl Cell for Resistor {
                     b.rect(licon, Rect { x: sx + cut_x, y, w: cw, h: ch });
                 }
             }
-            match prev[di] {
+            match prev[g] {
+                // One pin pair per string; the router joins repeated names.
                 None => b.pin(pin(di, "P", end_cut(sx, enters_top), li)),
                 // Jumper from the previous segment's exit head, which is at
                 // this segment's entry end: li to an adjacent column, else
-                // met1 on the device's own track (over others' heads).
+                // met1 on the string's own track (over others' heads).
                 Some(px) if sx - px == seg_pitch => {
                     let h = border + ch + border;
                     let y = if enters_top { total_h - h } else { 0 };
                     b.rect(li, Rect { x: px, y, w: sx + body_w - px, h });
                 }
                 Some(px) => {
-                    let t = tracks[di % tracks.len().max(1)];
+                    let t = tracks[g % tracks.len().max(1)];
                     let y = if enters_top { total_h - t - m_ct } else { t };
                     for cx in [px, sx] {
                         b.rect(mcon, Rect { x: cx + cut_x, y, w: m_ct, h: m_ct });
@@ -153,15 +252,15 @@ impl Cell for Resistor {
                     b.rect(met1, Rect { x: px + cut_x - m_enc, y: y - m_enc, w: sx - px + m_ct + 2 * m_enc, h: m_ct + 2 * m_enc });
                 }
             }
-            // Each segment extracts as its own resistor: the string runs
-            // P -> Internal(1) -> ... -> Internal(n-1) -> N.
+            // Each segment extracts as its own resistor: string j runs
+            // P -> Internal(j·n + 1) -> ... -> Internal(j·n + n-1) -> N.
             let node = |k: i32| match k {
                 0 => Node::Pin("P"),
                 k if k == n_segments => Node::Pin("N"),
-                k => Node::Internal(k as u16),
+                k => Node::Internal((j as i32 * n_segments + k) as u16),
             };
             b.drawn(Drawn { owner: di as u8, device: None, kind: DrawnKind::Resistor, nodes: [node(seg), node(seg + 1), Node::Unused], w: body_w, l: seg_l });
-            prev[di] = Some(sx);
+            prev[g] = Some(sx);
             if seg == n_segments - 1 {
                 b.pin(pin(di, "N", end_cut(sx, !enters_top), li));
             }
@@ -307,8 +406,8 @@ fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> 
     sizing(group, c, def_w, def_l)
 }
 
-/// Device index per segment column: `Interdig` interleaves devices (greedy
-/// centroid), anything else keeps each device's segments adjacent.
+/// String index per segment column: `Interdig` interleaves strings (greedy
+/// centroid), anything else keeps each string's segments adjacent.
 fn res_segment_sequence(n_dev: usize, pattern: Pattern, n_segments: i32) -> Vec<usize> {
     let per_dev = n_segments as usize;
     if pattern == Pattern::Interdig && n_dev >= 2 {
@@ -317,31 +416,32 @@ fn res_segment_sequence(n_dev: usize, pattern: Pattern, n_segments: i32) -> Vec<
     (0..n_dev).flat_map(|di| std::iter::repeat_n(di, per_dev)).collect()
 }
 
-/// Segment counts that divide the body evenly (1 or even), the 8 squarest.
+/// Segment counts (1 or even) whose value-preserving length
+/// ([`ResModel::seg_len`]) is at least `res_min_segment` and within
+/// `res_value_tol_ppm` once snapped, the 8 squarest. Without a model only 1:
+/// splitting adds head terms the generator cannot account for.
 fn feasible_segments(s: &Sizing, process: &dyn Process) -> Vec<u16> {
-    let body_l = s.unit_l;
-    let body_w = s.unit_w;
+    let tol = value_tol_ppm(process);
+    let min_seg = process.rule("res_min_segment", 0).max(1);
+    let Some(model) = ResModel::of(process) else { return vec![1] };
+    let lat = cut_lattice(process);
+    let target = model.ohm(s.unit_w, s.unit_l);
+    let body_w = s.unit_w.max(process.rule("res_min_width", 0));
     let seg_gap = seg_gap(process);
     let head = head_len(process);
-    let min_seg = process.rule("res_min_segment", 0).max(1);
-    let max_segments = (body_l / min_seg).clamp(1, 64);
-    let mut opts: Vec<i32> = (1..=max_segments)
-        .filter(|&n| body_l % n == 0 && (n == 1 || n % 2 == 0))
+    // n = 1 never changes the value: kept even below the minimum segment.
+    let mut opts: Vec<(i32, i32)> = (1..=64u32)
+        .filter(|&n| n == 1 || n % 2 == 0)
+        .filter_map(|n| Some((n as i32, model.seg_len(body_w, target, n, min_seg, lat, tol).or((n == 1).then_some(s.unit_l))?)))
         .collect();
-    opts.sort_by(|&a, &b| {
-        let quality = |n: i32| {
-            let w = f64::from(n * (body_w + seg_gap));
-            let h = f64::from(2 * head + body_l / n);
-            (w / h).ln().abs()
-        };
-        quality(a).total_cmp(&quality(b))
+    opts.sort_by(|&(a, la), &(b, lb)| {
+        let quality = |n: i32, l: i32| (f64::from(n * (body_w + seg_gap)) / f64::from(2 * head + l)).ln().abs();
+        quality(a, la).total_cmp(&quality(b, lb))
     });
     opts.truncate(8);
-    opts.sort_unstable();
-    if opts.is_empty() {
-        opts.push(1);
-    }
-    opts.into_iter().map(|n| n as u16).collect()
+    let mut out: Vec<u16> = opts.into_iter().map(|(n, _)| n as u16).collect();
+    out.sort_unstable();
+    out
 }
 
 #[cfg(test)]
@@ -364,6 +464,103 @@ mod tests {
             dirty.extend(testkit::dirty::<Resistor>(DeviceKind::Resistor, n, 1, 500, 40_000, &pdk));
         }
         dirty.extend(testkit::dirty::<Resistor>(DeviceKind::Resistor, 3, 1, 500, 40_000, &pdk));
+        // Through the high_po recipe (a model: segmented variants), one and
+        // two members, one and two parallel strings each.
+        let op = high_po(&pdk);
+        for (n, nf) in [(1, 1), (1, 2), (2, 1), (2, 2)] {
+            for (i, m) in variants(n, nf, &op) {
+                let rules = testkit::findings(&m.shapes, &testkit::ports_with(&m, &[]), &pdk);
+                if !rules.is_empty() {
+                    dirty.push(format!("high_po n={n} nf={nf} #{i}: {rules:?}"));
+                }
+            }
+        }
         assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
+    }
+
+    /// sky130 `res_high_po` W = 0.69, L = 40 µm, from the model card (derived).
+    const R_690_40: f64 = 18_949.2;
+
+    fn high_po(pdk: &verify::Pdk) -> verify::pdk::Overlay<'_> {
+        verify::pdk::Overlay { pdk, recipe: pdk.recipe("resistor", "res_high_po").expect("high_po recipe") }
+    }
+
+    /// Every variant of `n` members of W = 690, L = 40 µm at `nf` parallel
+    /// strings each, drawn.
+    fn variants(n: usize, nf: u16, p: &dyn Process) -> Vec<(usize, Macro)> {
+        let (group, c) = crate::testkit::group_of(pnr_core::DeviceKind::Resistor, n, nf, 690, 40_000);
+        let vs = Resistor::enumerate(&group, &c, p);
+        assert!(!vs.is_empty(), "no variants");
+        vs.iter().map(|v| (usize::from(v.segments), v.draw(&group, &c, p))).collect()
+    }
+
+    /// Model value per string (owner, string), Σ over its segments: string
+    /// j's internal nodes are j·n + 1 ..= j·n + n − 1; with n = 1 every card
+    /// is its own string.
+    fn string_ohms(m: &Macro, n: usize, model: &ResModel) -> std::collections::BTreeMap<(u8, usize), f64> {
+        let mut out = std::collections::BTreeMap::new();
+        for (i, d) in m.drawn.iter().enumerate() {
+            let j = d.nodes.iter().find_map(|x| match x {
+                Node::Internal(k) => Some(usize::from(*k) / n),
+                _ => None,
+            });
+            *out.entry((d.owner, if n == 1 { i } else { j.expect("a segmented string's card has an internal node") })).or_insert(0.0) += model.ohm(d.w, d.l);
+        }
+        out
+    }
+
+    fn within(r: f64) -> bool {
+        (r - R_690_40).abs() / R_690_40 <= 0.005
+    }
+
+    #[test]
+    fn segments_preserve_the_model_value() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let op = high_po(&pdk);
+        let model = ResModel::of(&op).expect("high_po states a model");
+        assert!((model.ohm(690, 40_000) - R_690_40).abs() < 0.5, "{}", model.ohm(690, 40_000));
+        let vs = variants(1, 1, &op);
+        assert!(vs.iter().any(|(n, _)| *n == 2), "a 2-segment variant at L = 40 um");
+        for (n, m) in vs {
+            let ohms = string_ohms(&m, n, &model);
+            assert_eq!(ohms.len(), 1, "n={n}");
+            assert!(ohms.values().all(|&r| within(r)), "n={n}: {ohms:?}");
+        }
+    }
+
+    #[test]
+    fn short_segments_are_not_offered() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        // n = 4 needs 9.148 um segments, under res_min_segment 10 um.
+        assert!(variants(1, 1, &high_po(&pdk)).iter().all(|(n, _)| *n != 4));
+    }
+
+    #[test]
+    fn a_multiplied_resistor_draws_parallel_strings() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let op = high_po(&pdk);
+        let model = ResModel::of(&op).expect("model");
+        for (n, m) in variants(1, 2, &op) {
+            assert_eq!(m.drawn.len(), 2 * n, "n={n}");
+            for t in ["d0:P", "d0:N"] {
+                assert_eq!(m.pins.iter().filter(|p| p.name == t).count(), 2, "n={n} {t}");
+            }
+            let ohms = string_ohms(&m, n, &model);
+            assert_eq!(ohms.len(), 2, "n={n}: {ohms:?}");
+            assert!(ohms.values().all(|&r| within(r)), "n={n}: {ohms:?}");
+        }
+    }
+
+    #[test]
+    fn every_variant_extracts_one_resistor_per_segment() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let op = high_po(&pdk);
+        for nf in [1, 2] {
+            for (n, m) in variants(1, nf, &op) {
+                let spice = verify::extract_spice(&m.shapes, &[], &pdk, verify::Detail::Schematic).expect("extracts");
+                let rs = spice.lines().filter(|l| l.starts_with('R')).count();
+                assert_eq!(rs, m.drawn.len(), "nf={nf} n={n}:\n{spice}");
+            }
+        }
     }
 }

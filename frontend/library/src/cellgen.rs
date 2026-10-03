@@ -567,8 +567,10 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             target_ratio: vec![1],
             unit_w: dev.mos_size().map_or(param("w"), |s| s.w_finger_nm()).clamp(0, i64::from(i32::MAX)) as i32,
             unit_l: param("l").clamp(0, i64::from(i32::MAX)) as i32,
+            // SPICE `m` is parallel: a resistor draws `m` strings. A
+            // capacitor's composition has no reader yet (CELL-08).
             series_parallel: match dev.kind {
-                DeviceKind::Resistor | DeviceKind::Capacitor => SeriesParallel::Series,
+                DeviceKind::Capacitor => SeriesParallel::Series,
                 _ => SeriesParallel::Parallel,
             },
             same_variant_required: false,

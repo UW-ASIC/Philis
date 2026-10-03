@@ -25,6 +25,7 @@ const BASELINE: &[(&str, usize, &[&str], bool)] = &[
     ("pair",              0,  &[], true),
     ("quad",              0,  &[], true),
     ("rc_filter",         0,  &[], true),
+    ("res_m2",            0,  &[], true),
     ("bjt_mirror",        0,  &[], true),
     ("bgr_core",          0,  &[], true),
     ("chain4",            0,  &[], true),

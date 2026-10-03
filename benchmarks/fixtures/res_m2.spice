@@ -1,0 +1,7 @@
+* res_m2 — inverter driving a multiplied precision poly resistor.
+* m=2 draws two parallel strings, each segmented to keep the model value.
+.subckt res_m2 in b VDD VSS
+XM1 a in VDD VDD pfet_01v8 W=1u L=0.15u
+XM2 a in VSS VSS nfet_01v8 W=1u L=0.15u
+XR1 a b sky130_fd_pr__res_high_po w=0.69u l=40u m=2
+.ends res_m2

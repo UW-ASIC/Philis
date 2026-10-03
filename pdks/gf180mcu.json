@@ -80,6 +80,7 @@
     "mom_finger_space": 230,
     "mom_finger_width": 230,
     "res_min_width": 800,
+    "res_value_tol_ppm": 5000,
     "tie_max_dist_nm": 20000,
     "tie_max_dist_nm_source": "gf180mcu.deck DF.13_3.3V, DF.14_3.3V tap_distance <= 20um (3.3 V devices; DF.13_5V/DF.14_5V state 15 um for 5 V devices). Read by no code yet (CELL-13 tap reach).",
     "wpe_clearance_moderate": 3000,
