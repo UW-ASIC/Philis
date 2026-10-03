@@ -9,6 +9,8 @@
     "cap_density_ff_um2_source": "UNVERIFIED: no source was recorded with this value. 2.0 equals the sky130 MIM camimc (2.00e-15 F/um2, typical corner) while the capacitor generator draws met1/met2 MOM (plan-08 D10); FLOW-06 sources it.",
     "gate_cap_af_um2": 8325,
     "gate_cap_af_um2_source": "UNVERIFIED: no source was recorded with this value.",
+    "dummy_max_l_nm": 3000,
+    "dummy_max_l_nm_source": "microloading reach 3-5 um, hastings.txt L41097-41104 (H13-26); Philis policy: the lower end",
     "layers": {
       "diff": "diff",
       "poly": "poly",

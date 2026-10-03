@@ -169,7 +169,8 @@ fn generators_read_exactly_the_required_keys() {
         "polycon_to_diff_spacing",
         "polycon_to_pdiff_spacing",
     ];
-    let flags = ["npn_isolation", "res_contact_w", "res_contact_h"];
+    // "dummy_max_l_nm": absent = dummies at the active L, the pre-cap drawing.
+    let flags = ["npn_isolation", "res_contact_w", "res_contact_h", "dummy_max_l_nm"];
     let optional_read: Vec<_> = KEYS
         .iter()
         .filter(|k| !k.required && recorded.contains(k.name) && !raise_deck.contains(&k.name) && !flags.contains(&k.name))

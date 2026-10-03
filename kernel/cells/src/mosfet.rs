@@ -257,6 +257,14 @@ impl Mosfet {
         let gate_space = r("licon_to_gate_spacing", 0).max(process.space_between("licon", "poly").unwrap_or(0));
         let tap_enc = r("tap_encloses_licon_one_side", 0).max(cap("tap", "licon")).max(enc("tap", "licon"));
         let gate_l = s.unit_l;
+        // Dummy L = min(active L, microloading reach): H13-26, a dummy wider
+        // than the process's local-oxide-thinning reach draws no benefit, so a
+        // long active gate keeps its dummies short rather than growing them to
+        // match.
+        let dummy_l = match r("dummy_max_l_nm", 0) {
+            cap if cap > 0 && gate_l > cap => cap,
+            _ => gate_l,
+        };
         let finger_w = s.unit_w;
         let m1_pitch = dim(process, "mcon_size") + 2 * dim(process, "m1_enc") + dim(process, "met1_space");
         let (sd_w, pitch) = sd_and_pitch(process, gate_l);
@@ -282,7 +290,7 @@ impl Mosfet {
         } else {
             sd_end
         };
-        let d_step = gate_l + sd_end;
+        let d_step = dummy_l + sd_end;
         let gates_end = sd_edge + (n_fingers - 1) * pitch + gate_l;
         // LOD moat where devices share a row: their fingers sit at different
         // distances from the diffusion ends (ABBA: A owns both ends), so the
@@ -510,11 +518,11 @@ impl Mosfet {
         let ends = [(sequence[0], term(0, false)), (sequence[sequence.len() - 1], term(n_fingers - 1, true))];
         for k in 0..nd {
             // Gate `k` out from each end, and the S/D region beyond it.
-            let left = -(k + 1) * gate_l - k * sd_end;
+            let left = -(k + 1) * dummy_l - k * sd_end;
             let right = gates_end + sd_edge + k * d_step;
-            for (edge, (dx, rx)) in [(left, left - sd_end), (right, right + gate_l)].into_iter().enumerate() {
-                b.rect(poly, Rect { x: dx, y: -poly_ext, w: gate_l, h: finger_w + 2 * poly_ext });
-                let cx = snap_cut(dx + gate_l / 2 - ct / 2, lat);
+            for (edge, (dx, rx)) in [(left, left - sd_end), (right, right + dummy_l)].into_iter().enumerate() {
+                b.rect(poly, Rect { x: dx, y: -poly_ext, w: dummy_l, h: finger_w + 2 * poly_ext });
+                let cx = snap_cut(dx + dummy_l / 2 - ct / 2, lat);
                 b.rect(licon, Rect { x: cx, y: licon_y, w: ct, h: ct });
                 let px = snap_cut(rx + sd_end / 2 - ct / 2, lat);
                 b.rect(licon, Rect { x: px, y: cy, w: ct, h: ct });
@@ -528,12 +536,12 @@ impl Mosfet {
                     pmos: is_pmos,
                     edge: if k == 0 { near } else { "B" },
                     w: finger_w,
-                    l: gate_l,
+                    l: dummy_l,
                 });
             }
         }
         let stub_top = licon_y + ct + licon_poly_enc;
-        let dpad_w = gate_l.max(ct + 2 * licon_poly_side);
+        let dpad_w = dummy_l.max(ct + 2 * licon_poly_side);
         let skirt_y = finger_w + poly_ext - 10;
         // Riser strips lap the rail's li but stay above its cut row (a grazed
         // cut reads as an under-sized contact).
@@ -544,8 +552,8 @@ impl Mosfet {
             // The skirt joins this edge's dummy gates only (outer S/D cuts sit
             // on diff, not poly): its x span is the dummy cuts'.
             let gates: Vec<i32> = (0..nd)
-                .map(|k| if e == 0 { -(k + 1) * gate_l - k * sd_end } else { gates_end + sd_edge + k * d_step })
-                .map(|dx| snap_cut(dx + gate_l / 2 - ct / 2, lat))
+                .map(|k| if e == 0 { -(k + 1) * dummy_l - k * sd_end } else { gates_end + sd_edge + k * d_step })
+                .map(|dx| snap_cut(dx + dummy_l / 2 - ct / 2, lat))
                 .collect();
             let (g0, g1) = (gates.iter().copied().min().unwrap_or(cx0), gates.iter().copied().max().unwrap_or(cx1));
             let x0 = g0 + ct / 2 - dpad_w / 2;
@@ -827,6 +835,10 @@ mod tests {
             dirty.extend(testkit::dirty::<Mosfet>(kind, 2, 2, 5000, 1000, &pdk));
             // Wide and short: its poly R outweighs a contact, so two-ended.
             dirty.extend(testkit::dirty::<Mosfet>(kind, 2, 2, 10_000, 150, &pdk));
+            // CELL-30: gate L on both sides of the dummy_max_l_nm cap (3000).
+            for (w, l) in [(420, 1000), (420, 16_200), (420, 64_800), (2160, 9600)] {
+                dirty.extend(testkit::dirty::<Mosfet>(kind, 1, 1, w, l, &pdk));
+            }
         }
         assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
     }
@@ -840,7 +852,19 @@ mod tests {
         let Some(pdk) = testkit::pdk() else { return };
         let mut wrong = Vec::new();
         for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
-            for (n, nf, w, l) in [(1usize, 1u16, 1680, 150), (2, 2, 1680, 150), (2, 2, 5000, 1000), (2, 2, 10_000, 150), (4, 4, 1680, 150)] {
+            for (n, nf, w, l) in [
+                (1usize, 1u16, 1680, 150),
+                (2, 2, 1680, 150),
+                (2, 2, 5000, 1000),
+                (2, 2, 10_000, 150),
+                (4, 4, 1680, 150),
+                // CELL-30: gate L on both sides of the dummy_max_l_nm cap (3000).
+                (1, 1, 420, 150),
+                (1, 1, 420, 1000),
+                (1, 1, 420, 16_200),
+                (1, 1, 420, 64_800),
+                (1, 1, 2160, 9600),
+            ] {
                 for dummies in [false, true] {
                     let (g, mut c) = testkit::group_of(kind, n, nf, w, l);
                     c.unitization[0].dummy_required = dummies;
@@ -885,6 +909,56 @@ mod tests {
         assert!(centroid_sequence(4, 4).is_some());
         assert!(centroid_sequence(2, 2).is_some());
         assert!(centroid_sequence(2, 1).is_none());
+    }
+
+    /// A long active gate (well past the microloading reach) keeps its dummy
+    /// gates capped at `dummy_max_l_nm`, so the dummy ring's footprint stops
+    /// growing with the active L (H13-26).
+    #[test]
+    fn a_long_gate_keeps_short_dummies() {
+        use crate::testkit;
+        use pnr_core::DeviceKind::Pmos;
+        let Some(pdk) = testkit::pdk() else { return };
+        let (g, mut c) = testkit::group_of(Pmos, 1, 1, 420, 64_800);
+        c.unitization[0].dummy_required = false;
+        let without: Vec<Macro> = Mosfet::enumerate(&g, &c, &pdk).iter().map(|v| v.draw(&g, &c, &pdk)).collect();
+        c.unitization[0].dummy_required = true;
+        let with: Vec<Macro> = Mosfet::enumerate(&g, &c, &pdk).iter().map(|v| v.draw(&g, &c, &pdk)).collect();
+        assert_eq!(without.len(), with.len(), "dummy_required must not change the variant count");
+        let mut findings = Vec::new();
+        for (i, m) in with.iter().enumerate() {
+            for dm in &m.dummies {
+                assert_eq!(dm.l, 3000, "variant #{i}: dummy gate l {} not capped", dm.l);
+            }
+            let w_nd = without[i].bbox.w;
+            assert!(m.bbox.w <= w_nd + 2 * (3_000 + 500), "variant #{i}: bbox.w {} grew past the capped dummy footprint (no-dummy {w_nd})", m.bbox.w);
+            assert!(m.bbox.w <= 73_000, "variant #{i}: bbox.w {} exceeds FR-5", m.bbox.w);
+            let labels = testkit::ports_with(m, &["G", "S", "B"]);
+            findings.extend(testkit::findings(&m.shapes, &labels, &pdk));
+            let spice = verify::extract_spice(&m.shapes, &[], &pdk, verify::Detail::Schematic).unwrap_or_default();
+            let got = spice.lines().filter(|l| l.starts_with('M')).count();
+            assert_eq!(got, m.units.len() + m.dummies.len(), "variant #{i}: extracted {got} vs {} units+dummies", m.units.len() + m.dummies.len());
+        }
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// A short active gate (below `dummy_max_l_nm`) draws full-length dummies,
+    /// unchanged from before the cap existed.
+    #[test]
+    fn a_short_gate_keeps_full_dummies() {
+        use crate::testkit;
+        use pnr_core::DeviceKind::Nmos;
+        let Some(pdk) = testkit::pdk() else { return };
+        for l in [150, 1000] {
+            let (g, mut c) = testkit::group_of(Nmos, 1, 1, 420, l);
+            c.unitization[0].dummy_required = true;
+            for v in Mosfet::enumerate(&g, &c, &pdk) {
+                let m = v.draw(&g, &c, &pdk);
+                for dm in &m.dummies {
+                    assert_eq!(dm.l, l, "gate_l={l}: dummy gate l {} not left at the active L", dm.l);
+                }
+            }
+        }
     }
 
     /// Each finger is one unit on its channel, with signed S→D direction: a

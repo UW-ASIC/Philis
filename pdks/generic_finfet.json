@@ -4,6 +4,7 @@
   "cell": {
     "min_finger_width": 27,
     "via_enclosure": 5,
+    "dummy_max_l_nm": null,
     "layers": {
       "diff": "ACTIVE",
       "tap": "ACTIVE",
