@@ -109,7 +109,7 @@ mod tests {
         // Grouped by hand (no pattern groups them now): one drawn unit per flavour.
         let mut models = Vec::new();
         let drawn: Vec<_> = nl.devices.iter().map(|d| super::drawn(d, &mut models)).collect();
-        let both = Block { kind: BlockKind::Group, devices: vec![DeviceId(0), DeviceId(1)], injected: false, sub_blocks: Vec::new() };
+        let both = Block { kind: BlockKind::Group, template: "test", devices: vec![DeviceId(0), DeviceId(1)], injected: false, sub_blocks: Vec::new(), selfs: Vec::new() };
         assert_eq!(constraints::assemble(&nl, &drawn, &[both]).unitization.len(), 2, "two unitization classes");
         // Control: one flavour, written in either case, is a pair.
         assert_eq!(diff_pairs(&pair([("nfet_01v8", 5), ("NFET_01V8", 5)], Some(10_000))), 1);
@@ -119,8 +119,8 @@ mod tests {
     fn unknown_size_never_matches() {
         let nl = pair([("nfet_01v8", 5); 2], None);
         assert_eq!(diff_pairs(&nl), 0);
-        // ponytail: EXT-10's `Coverage::Unconstrained("unknown size")` is not on this branch; the
-        // `missing` entry is the report until it lands.
+        let p = annotate(&nl, &AnnotationConfig::default());
+        assert!(p.coverage.iter().all(|&(_, c)| c == crate::Coverage::Unconstrained("unknown size")), "{:?}", p.coverage);
         let missing = |nl: &Netlist| annotate(nl, &AnnotationConfig::default()).missing.contains(&("MatchedSet", "device W/L"));
         assert!(missing(&nl));
         assert!(!missing(&pair([("nfet_01v8", 5); 2], Some(10_000))));

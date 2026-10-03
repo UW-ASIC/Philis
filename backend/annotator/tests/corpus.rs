@@ -84,23 +84,51 @@ fn all() -> impl Iterator<Item = (&'static str, &'static str)> {
 /// [`Canon`] fields `pairs`, `selfs`, `net_pairs`, `axes` (`sets` is empty until EXT-12).
 type Row = (&'static str, &'static [(&'static str, &'static [&'static str])], &'static [(&'static str, &'static str)], &'static [&'static str], &'static [(&'static str, &'static str)], usize);
 const EXPECTED: [Row; 17] = [
-    ("ota5t", &[("CurrentMirror", &["XM3", "XM4"]), ("DiffPair", &["XM1", "XM2"])], &[("XM1", "XM2"), ("XM3", "XM4")], &["XM5"], &[("vout1", "vout2")], 1),
-    ("three_stage", &[("CurrentMirror", &["M4", "M5"]), ("DiffPair", &["M1", "M2"]), ("Group", &["M6", "M8", "M9"])], &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2")], 1),
-    ("dac4", &[("Group", &["XMN0", "XMP0"]), ("Group", &["XMN1", "XMP1"]), ("Group", &["XMN2", "XMP2"]), ("Group", &["XMN3", "XMP3"])], &[], &[], &[], 0),
+    // EXT-05: declared roles: five_transistor_ota's slots 2,3 are a Load.
+    ("ota5t", &[("Load", &["XM3", "XM4"]), ("DiffPair", &["XM1", "XM2"])], &[("XM1", "XM2"), ("XM3", "XM4")], &["XM5"], &[("vout1", "vout2")], 1),
+    // EXT-05: declared roles: diff_pair_with_mirror_load's slots 2,3 are a Load.
+    ("three_stage", &[("DiffPair", &["M1", "M2"]), ("Group", &["M6", "M8", "M9"]), ("Load", &["M4", "M5"])], &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2")], 1),
+    // EXT-05 review: `cmos_inverter`'s declared prox makes each switch inverter a Stack leaf.
+    ("dac4", &[("Stack", &["XMN0", "XMP0"]), ("Stack", &["XMN1", "XMP1"]), ("Stack", &["XMN2", "XMP2"]), ("Stack", &["XMN3", "XMP3"])], &[], &[], &[], 0),
     ("bgr_core", &[], &[], &[], &[], 0),
     ("bjt_mirror", &[], &[], &[], &[], 0),
-    ("chain4", &[("Stack", &["XM1", "XM2"]), ("Stack", &["XM3", "XM4"])], &[], &[], &[], 0),
+    // EXT-05: series_stack_4 declares no roles, so no re-searched Stack children.
+    ("chain4", &[("Group", &["XM1", "XM2", "XM3", "XM4"])], &[], &[], &[], 0),
     ("pair", &[], &[], &[], &[], 0),
     ("quad", &[], &[], &[], &[], 0),
-    ("folded", &[("DiffPair", &["M1", "M2"]), ("DiffPair", &["M10", "M8"]), ("DiffPair", &["M7", "M9"]), ("Stack", &["M3", "M5"]), ("Stack", &["M4", "M6"])], &[("M1", "M2"), ("M10", "M8"), ("M7", "M9")], &[], &[("x1", "x2")], 2),
-    ("gilbert", &[("CurrentMirror", &["M3", "M6"]), ("CurrentMirror", &["M4", "M5"]), ("DiffPair", &["M1", "M2"])], &[("M1", "M2"), ("M3", "M6"), ("M4", "M5")], &["M0"], &[("outn", "outp"), ("x1", "x2")], 2),
-    ("rail2rail", &[("Group", &["MN1", "MP1"]), ("Group", &["MN2", "MP2"])], &[], &[], &[("xn1", "xn2"), ("xp1", "xp2")], 0),
-    ("latch", &[("Group", &["MN1", "MP1"]), ("Group", &["MN2", "MP2"])], &[], &[], &[], 0),
-    ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO2", "MO3"]), ("CurrentMirror", &["MO4", "MO5"])], &[("MO1", "MR"), ("MO2", "MO3"), ("MO4", "MO5")], &[], &[], 2),
+    // EXT-04: DIFF_PAIR_SPLIT_SOURCE (any-pins-differ, no shared net) was a dead
+    // pattern that falsely matched M7/M9 and M10/M8 as DiffPair; deleted, so
+    // they fall back to their real Stack structure.
+    // EXT-05: folded_cascode_core's declared pairs and prox; the M7-M10 composite
+    // declares no roles.
+    ("folded", &[("CascodePair", &["M5", "M6"]), ("DiffPair", &["M1", "M2"]), ("Group", &["M10", "M7", "M8", "M9"]), ("Load", &["M3", "M4"]), ("Stack", &["M3", "M5"]), ("Stack", &["M4", "M6"])], &[("M1", "M2"), ("M3", "M4"), ("M5", "M6")], &[], &[("x1", "x2")], 1),
+    // EXT-04: GILBERT_CELL's link fix makes it match the whole 6-device cell
+    // (today's child re-search, max_slots=2, decomposes it into 3 DiffPair legs).
+    // EXT-05: declared pairs are the mirror images (M3,M6), (M4,M5).
+    ("gilbert", &[("DiffPair", &["M1", "M2"]), ("DiffPair", &["M3", "M6"]), ("DiffPair", &["M4", "M5"])], &[("M1", "M2"), ("M3", "M6"), ("M4", "M5")], &[], &[("outn", "outp"), ("x1", "x2")], 1),
+    // EXT-05: complementary_diff_pair declares both polarities' DiffPairs.
+    ("rail2rail", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("xn1", "xn2"), ("xp1", "xp2")], 1),
+    // EXT-05 (AA-03): cross_coupled_inverters' declared pairs and prox, not inverters.
+    // EXT-09: `net_pairs` moves — Differential now comes from the DiffPair leaves, and
+    // the cross-coupled MN1/MN2 pair's drains (q, qb) differ, so it yields one.
+    ("latch", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"]), ("Stack", &["MN1", "MP1"]), ("Stack", &["MN2", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("q", "qb")], 1),
+    // EXT-05: current_mirror_4 declares (ref, k) per output; only the first pair
+    // holding the shared reference gets a Symmetry.
+    // EXT-06: equal-priority current_mirror_4 matches tie on canonical labels, not
+    // device ids: MR takes the three identical 2 µm outputs, MO2/MO4 pair up.
+    ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO3", "MR"]), ("CurrentMirror", &["MO5", "MR"]), ("CurrentMirror", &["MO2", "MO4"])], &[("MO1", "MR"), ("MO2", "MO4")], &[], &[], 2),
     ("brokaw", &[("CurrentMirror", &["MP1", "MP2"])], &[("MP1", "MP2")], &[], &[], 1),
     ("rdiv", &[], &[], &[], &[], 0),
     ("splitdac", &[], &[], &[], &[], 0),
-    ("strongarm", &[("CurrentMirror", &["mp10", "mp9"]), ("DiffPair", &["mn1", "mn2"]), ("Group", &["mn0", "mp7"]), ("Group", &["mn13", "mp11"]), ("Group", &["mn14", "mp12"]), ("Group", &["mn3", "mp5"]), ("Group", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mp10", "mp9")], &["mp8"], &[("vin_d", "vip_d")], 2),
+    // EXT-05: diff_pair_cross_coupled_load's declared tail mn0 (not mp8) and Load;
+    // cross_coupled_inverters' pairs; complementary_diff_pair's sources must be a
+    // signal, so the output inverters no longer match it and mp9/mp10 join
+    // undeclared 3-device groups (their CurrentMirror was a misrecognition).
+    // EXT-05 review: the out-of-plan `diff_pair_cross_coupled_load` entry is gone; the
+    // row is unchanged, as `five_transistor_ota` (EXT-06 selection) claims mn1/mn2/mp7/mp8/mn0.
+    // EXT-09: `net_pairs` gains (vin_o, vip_o) — the second DiffPair leaf (mn3, mn4)
+    // now also yields a Differential; the old device-pair scan missed it.
+    ("strongarm", &[("DiffPair", &["mn1", "mn2"]), ("DiffPair", &["mn3", "mn4"]), ("DiffPair", &["mp5", "mp6"]), ("Group", &["mn13", "mp10", "mp11"]), ("Group", &["mn14", "mp12", "mp9"]), ("Load", &["mp7", "mp8"]), ("Stack", &["mn3", "mp5"]), ("Stack", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mn3", "mn4"), ("mp5", "mp6"), ("mp7", "mp8")], &["mn0"], &[("vin_d", "vip_d"), ("vin_o", "vip_o")], 2),
 ];
 
 #[test]
@@ -150,9 +178,7 @@ fn negative_corpus() {
     }
 }
 
-/// Today both become DiffPairs (AA-05).
 #[test]
-#[ignore = "passes after EXT-04"]
 fn negative_corpus_sc_switches_and_equal_fets() {
     for name in ["sc_switches", "equal_fets"] {
         assert_unmatched(name, src(name));
@@ -160,7 +186,6 @@ fn negative_corpus_sc_switches_and_equal_fets() {
 }
 
 #[test]
-#[ignore = "passes after EXT-06"]
 fn permutation_invariance() {
     for (name, src) in all() {
         let nl = net(src);
@@ -204,8 +229,7 @@ fn assert_no_conflicts(name: &str, src: &str) {
     assert!(twice.is_empty(), "{name}: devices in two symmetry entries: {twice:?}");
 }
 
-/// Every corpus circuit but strongarm, whose known conflicts
-/// [`strongarm_conflicts_are_todays`] pins.
+/// T6 on every corpus circuit but strongarm, which has its own test below.
 #[test]
 fn no_emitted_conflicts() {
     for (name, src) in all().filter(|c| c.0 != "strongarm") {
@@ -213,32 +237,101 @@ fn no_emitted_conflicts() {
     }
 }
 
-/// Characterises, does not endorse: strongarm's conflicts today, exactly. A
-/// regression adds a row and fails; EXT-14/REL-09's fix removes one, fails,
-/// and edits this row in the same commit.
+/// AA-13: the clocked tail `mn0` sits in the input pair's stage, so it gets
+/// Proximity ≤ 5 µm to `mn1`/`mn2`; Isolation
+/// from them would contradict it. GAP-04 exempts same-block pairs.
 #[test]
-fn strongarm_conflicts_are_todays() {
-    let (both, twice) = conflicts("strongarm", STRONGARM);
-    let both: Vec<(&str, &str)> = both.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-    assert_eq!((both.as_slice(), twice.as_slice()), (STRONGARM_CONFLICTS, &[] as &[String]));
-}
-
-/// The clocked tail `mp8` against the input pair (AA-13).
-const STRONGARM_CONFLICTS: &[(&str, &str)] = &[("mn1", "mp8"), ("mn2", "mp8")];
-
-/// AA-13: a clocked device on the input pair's axis gets Proximity ≤ 5 µm and
-/// Isolation ≥ 10 µm to `mn1`/`mn2`. The plan names the tail `mn0`; today it is
-/// `mp8` (`mn0` is grouped with `mp7`, `mp8` left alone in the pair's stage).
-#[test]
-#[ignore = "passes after EXT-14 and REL-09"]
 fn no_emitted_conflicts_strongarm() {
     assert_no_conflicts("strongarm", STRONGARM);
 }
 
-/// T7: every device is in a requirement or reported `Unconstrained(reason)`.
-/// `Problem` has no coverage report before EXT-10, so there is nothing to check.
+/// EXT-09: `Differential` comes only from recognised `DiffPair` leaves, never a
+/// positional/O(N²) device-pair scan, and lands in `routing.budget`, not `.hard`.
 #[test]
-#[ignore = "body written by EXT-10 (no Problem::coverage before it)"]
+fn differential_comes_from_recognized_pairs() {
+    use analog::RuleBatch;
+    let count = |arm: &[Box<dyn RuleBatch<pnr_core::Routes>>]| -> usize {
+        arm.iter().filter(|b| b.kind().ends_with("::Differential")).map(|b| b.count()).sum()
+    };
+    // dac4 has no recognised pair (it is a DAC capacitor bank): 0 Differential
+    // anywhere (today's positional scan finds 10 on its NMOS/PMOS switch pairs).
+    let nl = net(&src("dac4").replace("VSS", "0"));
+    let p = annotate(&nl, &AnnotationConfig::default());
+    assert_eq!(count(&p.routing.hard) + count(&p.routing.budget) + count(&p.routing.cost), 0, "dac4");
+    assert!(xtalk(&nl, &p).is_empty(), "dac4 crosstalk");
+
+    // ota5t has exactly one DiffPair leaf: exactly 1 Differential, in budget only,
+    // and a CrosstalkExclusion from each input gate to each output drain.
+    let nl = net(src("ota5t"));
+    let p = annotate(&nl, &AnnotationConfig::default());
+    assert_eq!(count(&p.routing.hard), 0, "ota5t hard");
+    assert_eq!(count(&p.routing.budget), 1, "ota5t budget");
+    let want: BTreeSet<_> = [("vinm", "vout1"), ("vinm", "vout2"), ("vinp", "vout1"), ("vinp", "vout2")].map(|(a, b)| (a.to_string(), b.to_string())).into();
+    let got = xtalk(&nl, &p);
+    assert_eq!((got.len(), got.into_iter().collect::<BTreeSet<_>>()), (4, want), "ota5t crosstalk");
+
+    // latch: its two DiffPair leaves share drains (q, qb); one rule per net pair.
+    let nl = net(src("latch"));
+    let p = annotate(&nl, &AnnotationConfig::default());
+    assert_eq!(count(&p.routing.budget), 1, "latch Differential");
+    assert_eq!(xtalk(&nl, &p), [("q".to_string(), "qb".to_string())], "latch crosstalk");
+}
+
+/// `CrosstalkExclusion` net-name pairs (each sorted), in emission order.
+fn xtalk(nl: &pnr_core::Netlist, p: &annotator::Problem) -> Vec<(String, String)> {
+    let mut v = Vec::new();
+    for b in p.routing.budget.iter().filter(|b| b.kind().ends_with("::CrosstalkExclusion")) {
+        let mut nets = Vec::new();
+        b.touched(&mut nets);
+        for c in nets.chunks(2) {
+            let (a, z) = (nl.nets[c[0] as usize].name.clone(), nl.nets[c[1] as usize].name.clone());
+            v.push(if a < z { (a, z) } else { (z, a) });
+        }
+    }
+    v
+}
+
+/// T7: every device is in a requirement or reported `Unconstrained(reason)`.
+#[test]
 fn coverage_is_total() {
-    unimplemented!("EXT-10 adds Problem::coverage; assert it covers every device of every corpus circuit");
+    use annotator::Coverage::{Constrained, Grouped, Unconstrained};
+    for (name, src) in all() {
+        let nl = net(src);
+        let p = annotate(&nl, &cfg(name));
+        let ids: Vec<u16> = p.coverage.iter().map(|(d, _)| d.0).collect();
+        assert_eq!(ids, (0..nl.devices.len() as u16).collect::<Vec<_>>(), "{name}: one entry per device, in id order");
+        for (d, c) in &p.coverage {
+            if let Unconstrained(why) = c {
+                assert!(["do_not_identify", "unknown size", "no pattern"].contains(why), "{name} {d:?}: {why}");
+            }
+        }
+        match name {
+            "ota5t" => assert!(p.coverage.iter().all(|c| c.1 == Constrained), "{name}: {:?}", p.coverage),
+            // A role-less composite: recognised, nothing emitted on it.
+            "chain4" => assert!(p.coverage.iter().all(|c| c.1 == Grouped("series_stack_4")), "{name}: {:?}", p.coverage),
+            "rdiv" => assert!(p.coverage.iter().all(|c| c.1 == Unconstrained("no pattern")), "{name}: {:?}", p.coverage),
+            _ => {}
+        }
+    }
+}
+
+/// EXT-10: a batch's id survives a netlist permutation (ids follow emission
+/// order, which follows EXT-06's canonical block order).
+#[test]
+fn ids_survive_permutation() {
+    let id_of = |nl: &pnr_core::Netlist| {
+        let p = annotate(nl, &AnnotationConfig::default());
+        let want: BTreeSet<&str> = ["XM1", "XM2"].into();
+        let b = p.placement.cost.iter().find(|b| {
+            let mut ids = Vec::new();
+            b.touched(&mut ids);
+            b.kind() == "MatchedSet" && ids.iter().map(|&d| nl.devices[d as usize].name.as_str()).collect::<BTreeSet<_>>() == want
+        });
+        b.expect("XM1/XM2 MatchedSet cost batch").meta().expect("tagged").id
+    };
+    let nl = net(src("ota5t"));
+    let base = id_of(&nl);
+    for s in 1..=5 {
+        assert_eq!(id_of(&permute(&nl, s)), base, "seed {s}");
+    }
 }

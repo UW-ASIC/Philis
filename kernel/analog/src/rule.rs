@@ -254,6 +254,86 @@ pub trait RuleBatch<On>: Send + Sync {
     fn offset_allowances(&self, state: &On, out: &mut Vec<(u32, u32, f32)>) {
         let _ = (state, out);
     }
+    /// Stable id and origin; `None` for a batch nobody tagged ([`Tagged`]).
+    fn meta(&self) -> Option<&crate::intent::BatchMeta> {
+        None
+    }
+}
+
+/// A batch with its [`crate::intent::BatchMeta`]: every method delegates to
+/// `inner`. Boxed so the annotator tags batches after emission.
+pub struct Tagged<On> {
+    pub meta: crate::intent::BatchMeta,
+    pub inner: Box<dyn RuleBatch<On>>,
+}
+
+impl<On> RuleBatch<On> for Tagged<On> {
+    fn cost(&self, s: &On) -> f32 {
+        self.inner.cost(s)
+    }
+    fn violations(&self, s: &On) -> u32 {
+        self.inner.violations(s)
+    }
+    fn residual(&self, s: &On) -> f64 {
+        self.inner.residual(s)
+    }
+    fn kind(&self) -> &'static str {
+        self.inner.kind()
+    }
+    fn repair_kind(&self) -> RepairKind {
+        self.inner.repair_kind()
+    }
+    fn count(&self) -> usize {
+        self.inner.count()
+    }
+    fn worst_cost(&self, s: &On) -> f32 {
+        self.inner.worst_cost(s)
+    }
+    fn criticality(&self, s: &On) -> f32 {
+        self.inner.criticality(s)
+    }
+    fn worst_usage(&self, s: &On) -> Option<f32> {
+        self.inner.worst_usage(s)
+    }
+    fn inapplicable(&self, s: &On) -> u32 {
+        self.inner.inapplicable(s)
+    }
+    fn unknown(&self, s: &On) -> u32 {
+        self.inner.unknown(s)
+    }
+    fn violating_ids(&self, s: &On, out: &mut Vec<u32>) {
+        self.inner.violating_ids(s, out);
+    }
+    fn violating_residuals(&self, s: &On, out: &mut Vec<(u32, f32)>) {
+        self.inner.violating_residuals(s, out);
+    }
+    fn touched(&self, out: &mut Vec<u32>) {
+        self.inner.touched(out);
+    }
+    fn project(&self, s: &mut On, grid: i32) {
+        self.inner.project(s, grid);
+    }
+    fn retarget(&mut self, cell_of: &[u16]) {
+        self.inner.retarget(cell_of);
+    }
+    fn branches(&self, out: &mut Vec<(BranchId, bool)>) {
+        self.inner.branches(out);
+    }
+    fn mirror_pairs(&self, out: &mut Vec<(u32, u32, u16)>) {
+        self.inner.mirror_pairs(out);
+    }
+    fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        self.inner.keepaway_pairs(out);
+    }
+    fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        self.inner.shield_pairs(out);
+    }
+    fn offset_allowances(&self, s: &On, out: &mut Vec<(u32, u32, f32)>) {
+        self.inner.offset_allowances(s, out);
+    }
+    fn meta(&self) -> Option<&crate::intent::BatchMeta> {
+        Some(&self.meta)
+    }
 }
 
 impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {

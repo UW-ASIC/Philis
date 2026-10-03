@@ -2,8 +2,6 @@
 
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
-use pnr_core::{BipartiteHypergraph, UnionFind};
-use crate::placement::matching_pair::{is_diff_pair, D};
 use crate::rule::Rule;
 use super::Stack;
 
@@ -111,26 +109,6 @@ impl Rule for Differential {
     fn residual(self, r: &Routes) -> f32 {
         let budget = self.budget_pct();
         crate::rule::over(self.mismatch_pct(r) - budget, budget)
-    }
-
-    /// One per diff pair: its two drain nets, 5% budget, same layers.
-    fn extract(hg: &BipartiteHypergraph, _uf: &mut UnionFind) -> Vec<Self> {
-        let mut out = Vec::new();
-        let n = hg.device_count();
-        for a in 0..n {
-            for b in (a + 1)..n {
-                if is_diff_pair(hg, a, b) {
-                    out.push(Differential {
-                        pos: hg.device_nets[a][D],
-                        neg: hg.device_nets[b][D],
-                        max_len_delta_pct10: 50,
-                        same_layer_required: true,
-                        stack: None,
-                    });
-                }
-            }
-        }
-        out
     }
 }
 

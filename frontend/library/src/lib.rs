@@ -429,7 +429,7 @@ fn solve(
     if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
         let vdd_mv = cfg.op.as_ref().map_or(1_800.0, |o| o.vdd * 1e3);
         let i = oppoint::net_current_ua(&netlist, c);
-        let rules: Vec<analog::routing::IrDrop> = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv)
+        let rules: Vec<analog::routing::IrDrop> = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv, &ann.policy)
             .into_iter()
             .map(|(net, current_ua, max_drop_uv)| analog::routing::IrDrop { net, current_ua, max_drop_uv, margin_pct: 20, stack: ann.process.stack })
             .collect();
@@ -595,6 +595,17 @@ fn solve(
     );
     let mut metadata = metadata;
     metadata.binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
+    let mut recognition = std::collections::BTreeMap::new();
+    for b in flow.problem.blocks.iter().filter(|b| b.kind != annotator::BlockKind::Glue) {
+        *recognition.entry(b.template).or_insert(0) += 1;
+    }
+    metadata.recognition = recognition.into_iter().collect();
+    metadata.unconstrained = flow.problem.coverage.iter()
+        .filter_map(|&(d, c)| match c {
+            annotator::Coverage::Unconstrained(why) => Some((netlist.devices[d.0 as usize].name.clone(), why)),
+            _ => None,
+        })
+        .collect();
     metadata.coverage = best.coverage;
     metadata.add_routing(&[Box::new(flow.common_nodes(&best.layout)), Box::new(flow.environment(&best.layout, &best.rings))], &best.routes);
     if let (Some(cfg), Some(result)) = (flow.perf, &best.perf) {
@@ -676,6 +687,7 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
         vt_tc_uv_per_k: [pos("vt_tc_uv_per_k"), pos("vt_tc_uv_per_k_p")],
         lod_kvth0_mv_um: [pos("lod_kvth0_n_mv_um"), pos("lod_kvth0_p_mv_um")],
         lattice_nm: cells::builder::cut_lattice(pdk),
+        substrate: pnr_core::SubstrateKind::from_key(pdk.cell_str("substrate_kind")),
         epi_nm: pos("epi_thickness_nm").map(|v| v as i32),
         // Rules are `Copy`, so they borrow the stack for 'static.
         // ponytail: leaked once per `annotation` call (twice per run, a few
@@ -1809,6 +1821,17 @@ pub(crate) fn labeled_pins(
 
 #[cfg(test)]
 mod start_tests {
+    /// GAP-04: the substrate kind comes from the deck's `substrate_kind`; a
+    /// misspelt key (here or in the sidecar) would silently read Unknown.
+    #[test]
+    fn substrate_kind_is_read_from_the_deck() {
+        use pnr_core::SubstrateKind::{Bulk, Unknown};
+        for (name, kind) in [("sky130", Bulk), ("gf180mcu", Unknown), ("ihp_sg13g2", Unknown), ("generic_finfet", Unknown)] {
+            let pdk = verify::Pdk::builtin(name).expect("deck loads");
+            assert_eq!(crate::annotation(&pdk, &Default::default()).process.substrate, kind, "{name}");
+        }
+    }
+
     /// Parallel starts stay deterministic: the same seed and start count give
     /// the same layout, however the threads interleave.
     #[test]
