@@ -7,6 +7,7 @@ use pnr_core::BipartiteHypergraph;
 
 use crate::catalog::PATTERNS;
 use crate::netrole::{AnnotationConfig, NetRole};
+use crate::size::{self, Drawn};
 
 #[derive(Debug, Clone, Copy)]
 pub enum PinRel {
@@ -21,6 +22,8 @@ pub enum SlotKind {
     ComplementOf(u8),
 }
 
+/// Size relation to slot `r`, over [`Drawn`]: `ExactAs` is [`size::exact_as`] (known
+/// W/L, model and bulk), `SameLAs` is [`size::same_l_as`] (known L and model).
 #[derive(Debug, Clone, Copy)]
 pub enum SizeMatch {
     Any,
@@ -63,13 +66,6 @@ pub struct Pattern {
     pub links: &'static [PinLink],
 }
 
-/// Device W/L (nm), from SPICE params; `0` when absent.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Geom {
-    pub w: i64,
-    pub l: i64,
-}
-
 #[derive(Debug, Clone)]
 pub struct PatternMatch {
     pub template: &'static str,
@@ -88,7 +84,7 @@ fn is_diode(hg: &BipartiteHypergraph, cell: u32) -> bool {
     d.is_some() && d == pin_net(hg, cell, "G")
 }
 
-fn slot_ok(slot: &Slot, hg: &BipartiteHypergraph, geom: &[Geom], cell: u32, assigned: &[u32], roles: &[NetRole]) -> bool {
+fn slot_ok(slot: &Slot, hg: &BipartiteHypergraph, drawn: &[Drawn], cell: u32, assigned: &[u32], roles: &[NetRole]) -> bool {
     let kind = |i: u32| hg.kinds[i as usize];
     let dt = kind(cell);
     if !matches!(dt, DeviceKind::Nmos | DeviceKind::Pmos) {
@@ -100,11 +96,11 @@ fn slot_ok(slot: &Slot, hg: &BipartiteHypergraph, geom: &[Geom], cell: u32, assi
         SlotKind::SameTypeAs(r) => kind(other(r)) == dt,
         SlotKind::ComplementOf(r) => kind(other(r)) != dt && matches!(kind(other(r)), DeviceKind::Nmos | DeviceKind::Pmos),
     };
-    let (g, gr) = (geom[cell as usize], |r: u8| geom[other(r) as usize]);
+    let (g, gr) = (&drawn[cell as usize], |r: u8| &drawn[other(r) as usize]);
     let size_ok = match slot.size_match {
         SizeMatch::Any => true,
-        SizeMatch::ExactAs(r) => g.w == gr(r).w && g.l == gr(r).l,
-        SizeMatch::SameLAs(r) => g.l == gr(r).l,
+        SizeMatch::ExactAs(r) => size::exact_as(dt, g, gr(r), roles),
+        SizeMatch::SameLAs(r) => size::same_l_as(g, gr(r)),
     };
     let diode_ok = match slot.diode {
         DiodeReq::Required => is_diode(hg, cell),
@@ -132,7 +128,7 @@ fn links_ok(links: &[PinLink], hg: &BipartiteHypergraph, assigned: &[u32]) -> bo
 struct Search<'a> {
     pat: &'a Pattern,
     hg: &'a BipartiteHypergraph,
-    geom: &'a [Geom],
+    drawn: &'a [Drawn],
     roles: &'a [NetRole],
     allowed: &'a [bool],
 }
@@ -154,7 +150,7 @@ impl Search<'_> {
         for cell in 0..self.allowed.len() as u32 {
             if !self.allowed[cell as usize]
                 || assigned.contains(&cell)
-                || !slot_ok(slot, self.hg, self.geom, cell, assigned, self.roles)
+                || !slot_ok(slot, self.hg, self.drawn, cell, assigned, self.roles)
             {
                 continue;
             }
@@ -174,7 +170,7 @@ impl Search<'_> {
 #[must_use]
 pub fn recognize(
     hg: &BipartiteHypergraph,
-    geom: &[Geom],
+    drawn: &[Drawn],
     roles: &[NetRole],
     cfg: &AnnotationConfig,
     subset: &[u32],
@@ -187,7 +183,7 @@ pub fn recognize(
     let mut all = Vec::new();
     for pat in PATTERNS {
         if pat.slots.len() <= max_slots && !cfg.do_not_use.contains(pat.name) {
-            let s = Search { pat, hg, geom, roles, allowed: &allowed };
+            let s = Search { pat, hg, drawn, roles, allowed: &allowed };
             s.run(&mut Vec::with_capacity(pat.slots.len()), &mut all, &mut Vec::new());
         }
     }
