@@ -15,6 +15,7 @@ pub mod extract;
 pub mod ir;
 pub mod netrole;
 pub mod pattern;
+pub mod size;
 
 #[cfg(test)]
 mod tests;
@@ -71,20 +72,23 @@ fn missing(p: &ProcessNumbers) -> Vec<(&'static str, &'static str)> {
 }
 
 /// Assemble the [`Problem`]. Deterministic.
+///
+/// # Panics
+/// When the netlist has more than 65535 devices or nets: ids are `u16` (AA-35).
 #[must_use]
 pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
+    for n in [netlist.devices.len(), netlist.nets.len()] {
+        assert!(n <= usize::from(u16::MAX), "annotator: {n} devices/nets exceed the u16 id space (65535)");
+    }
     let hg = pnr_core::BipartiteHypergraph::from_netlist(netlist);
-    let geom: Vec<pattern::Geom> = netlist
-        .devices
-        .iter()
-        .map(|d| pattern::Geom { w: param(d, "w", 0), l: param(d, "l", 0) })
-        .collect();
+    let mut models = Vec::new();
+    let drawn: Vec<size::Drawn> = netlist.devices.iter().map(|d| size::drawn(d, &mut models)).collect();
     let roles = netrole::classify_nets(&hg, cfg);
     let all: Vec<u32> = (0..netlist.devices.len() as u32).collect();
 
     // Recognised blocks, each composite with its primitive children.
     let mut claimed = vec![false; netlist.devices.len()];
-    let mut blocks: Vec<Block> = pattern::recognize(&hg, &geom, &roles, cfg, &all, usize::MAX)
+    let mut blocks: Vec<Block> = pattern::recognize(&hg, &drawn, &roles, cfg, &all, usize::MAX)
         .into_iter()
         .map(|m| {
             for &d in &m.instances {
@@ -92,7 +96,7 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
             }
             let mut b = Block::from_match(&m);
             if b.devices.len() > 2 {
-                b.sub_blocks = pattern::recognize(&hg, &geom, &roles, cfg, &m.instances, 2)
+                b.sub_blocks = pattern::recognize(&hg, &drawn, &roles, cfg, &m.instances, 2)
                     .iter()
                     .map(Block::from_match)
                     .collect();
@@ -131,6 +135,9 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
 
     let mut placement = emit::placement(&blocks, netlist, &cfg.process, cfg.offset_sigma_mv);
     let mut missing = missing(&cfg.process);
+    if netlist.devices.iter().zip(&drawn).any(|(d, s)| size::unknown_size(d.kind, s)) {
+        missing.push(("MatchingPair", "device W/L"));
+    }
     if netlist.devices.iter().any(|d| d.kind == pnr_core::DeviceKind::Capacitor) {
         missing.push(("ParasiticBudget", "capacitor-plate nets: settling / code-error spec (ARR-03, ARR-05)"));
     }
@@ -141,7 +148,7 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     Problem {
         placement,
         routing: extract::routing(&hg, &net_classes, &gates, &cfg.process),
-        constraints: constraints::assemble(netlist, &blocks),
+        constraints: constraints::assemble(netlist, &drawn, &blocks),
         net_classes,
         groups,
         abutment,

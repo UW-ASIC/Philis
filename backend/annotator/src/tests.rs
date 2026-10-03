@@ -9,7 +9,7 @@ use pnr_core::ids::{DeviceId, NetId};
 use pnr_core::netlist::{Device, DeviceKind, Net, Netlist};
 
 /// A FET with G,D,S,B terminals on the given net ids, W/L in nm.
-fn fet(name: &str, kind: DeviceKind, g: u16, d: u16, s: u16, b: u16, w: i64, l: i64) -> Device {
+pub(crate) fn fet(name: &str, kind: DeviceKind, g: u16, d: u16, s: u16, b: u16, w: i64, l: i64) -> Device {
     Device {
         name: name.into(),
         kind, model: String::new(),
@@ -23,7 +23,7 @@ fn fet(name: &str, kind: DeviceKind, g: u16, d: u16, s: u16, b: u16, w: i64, l: 
     }
 }
 
-fn nets(names: &[&str]) -> Vec<Net> {
+pub(crate) fn nets(names: &[&str]) -> Vec<Net> {
     names.iter().map(|n| Net { name: (*n).into() }).collect()
 }
 
@@ -587,4 +587,12 @@ fn capacitor_plate_nets_get_no_invented_budget() {
     assert_eq!(p.net_classes[1].c_budget_af, None, "bit plate");
     assert!(p.net_classes[2].c_budget_af.is_some(), "the inverter input keeps its gate-load budget");
     assert!(p.missing.iter().any(|m| m.0 == "ParasiticBudget" && m.1.contains("ARR-05")));
+}
+
+#[test]
+#[should_panic(expected = "annotator: 65536 devices/nets exceed the u16 id space (65535)")]
+fn more_nets_than_u16_ids_is_refused_not_wrapped() {
+    // `NetId(n as u16)` would alias net 65536 onto net 0 (AA-35).
+    let nl = Netlist { devices: Vec::new(), nets: vec![Net { name: "n".into() }; 65_536] };
+    let _ = annotate(&nl, &AnnotationConfig::default());
 }

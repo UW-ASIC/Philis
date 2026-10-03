@@ -1,10 +1,11 @@
 //! Cell-tier [`analog::Constraints`], read by `cells` when drawing devices.
 //!
 //! For every device of every recognised block:
-//! - **Unitization**, one per (kind, finger W, L) class of the block — the only channel
+//! - **Unitization**, one per (kind, model, bulk, finger W, L) class of the block — the only channel
 //!   by which W/L/nf reach `cells`. One class per unitization: `unit_w`/`unit_l`
 //!   are group scalars, and a mixed group draws members at the wrong size (LVS
-//!   `parameter_mismatch`).
+//!   `parameter_mismatch`). Model and bulk split classes too: two flavours or two
+//!   wells are never one drawn unit (AA-20).
 //! - **Guard ring** for FETs, flavour by the *device's* polarity, tied to its bulk
 //!   net. Bipolars get none: their `B` terminal is the base, not the bulk.
 
@@ -15,7 +16,7 @@ use pnr_core::netlist::DeviceKind;
 use pnr_core::Netlist;
 
 use crate::block::{Block, BlockKind};
-use crate::param;
+use crate::size::Drawn;
 
 /// Drawn fingers `nf·m` ([`pnr_core::MosSize::fingers`]; cells and the LVS
 /// reference both expand that many unit devices); `1` without a MOS size.
@@ -24,26 +25,25 @@ pub(crate) fn fingers(dev: &pnr_core::netlist::Device) -> u16 {
 }
 
 #[must_use]
-pub fn assemble(netlist: &Netlist, blocks: &[Block]) -> Constraints {
+pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block]) -> Constraints {
     let mut c = Constraints::default();
-    let clamp = |v: i64| v.clamp(0, i64::from(i32::MAX)) as i32;
+    // An unknown size draws as 0 (and is reported missing by `annotate`).
+    let clamp = |v: Option<i64>| v.unwrap_or(0).clamp(0, i64::from(i32::MAX)) as i32;
     let class_of = |d: DeviceId| {
-        let dev = &netlist.devices[d.0 as usize];
-        // A MOS class is its drawn finger width (`w` is the instance total).
-        let w = dev.mos_size().map_or(param(dev, "w", 0), |s| s.w_finger_nm());
-        (dev.kind, clamp(w), clamp(param(dev, "l", 0)))
+        let s = &drawn[d.0 as usize];
+        (netlist.devices[d.0 as usize].kind, s.model, s.bulk, clamp(s.w_finger_nm), clamp(s.l_nm))
     };
 
     for b in blocks.iter().filter(|b| b.kind != BlockKind::Glue) {
-        let mut classes: Vec<(DeviceKind, i32, i32)> = Vec::new();
+        let mut classes = Vec::new();
         for &d in &b.devices {
             if !classes.contains(&class_of(d)) {
                 classes.push(class_of(d));
             }
         }
-        for (kind, unit_w, unit_l) in classes {
-            let devices: Vec<DeviceId> =
-                b.devices.iter().copied().filter(|&d| class_of(d) == (kind, unit_w, unit_l)).collect();
+        for class in classes {
+            let (kind, _, _, unit_w, unit_l) = class;
+            let devices: Vec<DeviceId> = b.devices.iter().copied().filter(|&d| class_of(d) == class).collect();
             let dev_nf: Vec<u16> = devices
                 .iter()
                 .map(|&d| fingers(&netlist.devices[d.0 as usize]))
