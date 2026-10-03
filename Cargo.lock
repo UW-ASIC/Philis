@@ -675,7 +675,7 @@ dependencies = [
 [[package]]
 name = "gpurify"
 version = "0.1.0"
-source = "git+https://github.com/UW-ASIC/GPurify#4ef439d96faa5d7d0a780384dc23962a8ae909b1"
+source = "git+https://github.com/UW-ASIC/GPurify#6341f18269ae32930c4cb4b109e02f5ae0a37ac1"
 dependencies = [
  "gpurify-check",
  "gpurify-extract",
@@ -689,7 +689,7 @@ dependencies = [
 [[package]]
 name = "gpurify-check"
 version = "0.1.0"
-source = "git+https://github.com/UW-ASIC/GPurify#4ef439d96faa5d7d0a780384dc23962a8ae909b1"
+source = "git+https://github.com/UW-ASIC/GPurify#6341f18269ae32930c4cb4b109e02f5ae0a37ac1"
 dependencies = [
  "fearless_simd",
  "gpurify-geom",
@@ -701,7 +701,7 @@ dependencies = [
 [[package]]
 name = "gpurify-extract"
 version = "0.1.0"
-source = "git+https://github.com/UW-ASIC/GPurify#4ef439d96faa5d7d0a780384dc23962a8ae909b1"
+source = "git+https://github.com/UW-ASIC/GPurify#6341f18269ae32930c4cb4b109e02f5ae0a37ac1"
 dependencies = [
  "fearless_simd",
  "gpurify-check",
@@ -715,7 +715,7 @@ dependencies = [
 [[package]]
 name = "gpurify-geom"
 version = "0.1.0"
-source = "git+https://github.com/UW-ASIC/GPurify#4ef439d96faa5d7d0a780384dc23962a8ae909b1"
+source = "git+https://github.com/UW-ASIC/GPurify#6341f18269ae32930c4cb4b109e02f5ae0a37ac1"
 dependencies = [
  "fearless_simd",
  "serde",
@@ -725,7 +725,7 @@ dependencies = [
 [[package]]
 name = "gpurify-ingest"
 version = "0.1.0"
-source = "git+https://github.com/UW-ASIC/GPurify#4ef439d96faa5d7d0a780384dc23962a8ae909b1"
+source = "git+https://github.com/UW-ASIC/GPurify#6341f18269ae32930c4cb4b109e02f5ae0a37ac1"
 dependencies = [
  "fearless_simd",
  "flate2",
@@ -1429,6 +1429,7 @@ name = "philis"
 version = "0.1.0"
 dependencies = [
  "library",
+ "pnr_core",
  "verify",
 ]
 

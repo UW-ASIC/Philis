@@ -1,12 +1,11 @@
-//! GDSII stream writer: flat shapes → one `TOP` structure of closed
-//! rectangular BOUNDARY elements, 1 nm database unit, big-endian records.
+//! GDSII stream writer: flat shapes → one named structure of closed
+//! rectangular BOUNDARY elements plus net-name TEXT elements, 1 nm database
+//! unit, big-endian records.
 
 use pnr_core::Shape;
 
 /// Library name written into the LIBNAME record.
 const LIBNAME: &str = "PHILIS.db";
-/// The single structure (cell) name every shape is written into.
-const STRNAME: &str = "TOP";
 /// GDS records carry a `u16` byte length, so the payload cap is `65534 - 4`.
 const MAX_PAYLOAD: usize = 65534 - 4;
 
@@ -22,6 +21,9 @@ const LAYER: u16 = 0x0D02; //  layer number       (2-byte int)
 const DATATYPE: u16 = 0x0E02; //  data type        (2-byte int)
 const XY: u16 = 0x1003; //  coordinate list        (4-byte int)
 const ENDEL: u16 = 0x1100; //  element end         (no data)
+const TEXT: u16 = 0x0C00; //  text element         (no data)
+const TEXTTYPE: u16 = 0x1602; //  text type         (2-byte int)
+const STRING: u16 = 0x1906; //  text string         (ASCII string)
 const ENDSTR: u16 = 0x0700; //  structure end      (no data)
 const ENDLIB: u16 = 0x0400; //  library end        (no data)
 
@@ -31,12 +33,20 @@ const TIMESTAMPS: [i16; 12] = [2000, 1, 1, 0, 0, 0, 2000, 1, 1, 0, 0, 0];
 /// GDS stream version. 600 is the widely-accepted modern release number.
 const GDS_VERSION: i16 = 600;
 
-/// Emit `shapes` as a GDSII byte stream. `layer_gds` maps a Philis
-/// [`pnr_core::LayerId`] (index = `LayerId.0`) to its `(gds_layer, gds_datatype)`
-/// numbers; a shape whose layer id is outside the table falls back to `(id, 0)`
-/// so it still draws.
+/// A net name placed at `(x, y)`, nm, on GDS `(layer, texttype)`.
+pub struct Text {
+    pub name: String,
+    pub gds: (u16, u16),
+    pub x: i32,
+    pub y: i32,
+}
+
+/// Emit `shapes` and `texts` as a GDSII byte stream with one structure named
+/// `top`. `layer_gds` maps a Philis [`pnr_core::LayerId`] (index =
+/// `LayerId.0`) to its `(gds_layer, gds_datatype)` numbers; a shape whose
+/// layer id is outside the table falls back to `(id, 0)` so it still draws.
 #[must_use]
-pub fn emit(shapes: &[Shape], layer_gds: &[(u16, u16)]) -> Vec<u8> {
+pub fn emit(top: &str, shapes: &[Shape], layer_gds: &[(u16, u16)], texts: &[Text]) -> Vec<u8> {
     let mut out = Vec::new();
 
     rec_i16(&mut out, HEADER, &[GDS_VERSION]);
@@ -47,7 +57,7 @@ pub fn emit(shapes: &[Shape], layer_gds: &[(u16, u16)]) -> Vec<u8> {
 
     // One structure holding every shape.
     rec_i16(&mut out, BGNSTR, &TIMESTAMPS);
-    rec_str(&mut out, STRNAME_R, STRNAME);
+    rec_str(&mut out, STRNAME_R, top);
 
     for s in shapes {
         let (gl, gd) = layer_gds
@@ -64,6 +74,14 @@ pub fn emit(shapes: &[Shape], layer_gds: &[(u16, u16)]) -> Vec<u8> {
             XY,
             &[x, y, x + w, y, x + w, y + h, x, y + h, x, y],
         );
+        rec_empty(&mut out, ENDEL);
+    }
+    for t in texts {
+        rec_empty(&mut out, TEXT);
+        rec_i16(&mut out, LAYER, &[t.gds.0 as i16]);
+        rec_i16(&mut out, TEXTTYPE, &[t.gds.1 as i16]);
+        rec_i32(&mut out, XY, &[t.x, t.y]);
+        rec_str(&mut out, STRING, &t.name);
         rec_empty(&mut out, ENDEL);
     }
 
@@ -178,7 +196,7 @@ mod tests {
                 },
             },
         ];
-        let bytes = emit(&shapes, &[(68, 20), (69, 20)]);
+        let bytes = emit("TOP", &shapes, &[(68, 20), (69, 20)], &[]);
         let (polys, _) = visualizer::parse_gds(&bytes);
         assert_eq!(polys.len(), 2, "both boundaries parse back");
         let mut layers: Vec<u16> = polys.iter().map(|p| p.layer).collect();
@@ -195,6 +213,7 @@ mod tests {
     #[test]
     fn record_lengths_are_even_and_cover_the_stream() {
         let bytes = emit(
+            "TOP",
             &[Shape {
                 layer: LayerId(0),
                 rect: Rect {
@@ -205,6 +224,7 @@ mod tests {
                 },
             }],
             &[(66, 20)],
+            &[Text { name: "vdd".into(), gds: (68, 5), x: 0, y: 0 }],
         );
         let mut i = 0;
         let mut saw_endlib = false;
@@ -222,6 +242,21 @@ mod tests {
         }
         assert_eq!(i, bytes.len(), "records exactly tile the stream");
         assert!(saw_endlib, "stream terminates with ENDLIB");
+    }
+
+    // The top cell carries the given name and every text its STRING record,
+    // and texts do not disturb the boundaries a reader parses.
+    #[test]
+    fn top_name_and_texts_are_written() {
+        let shape = Shape { layer: LayerId(0), rect: Rect { x: 0, y: 0, w: 10, h: 10 } };
+        let bytes = emit("strongarm", &[shape], &[(68, 20)], &[Text { name: "vinp".into(), gds: (68, 5), x: 5, y: 5 }]);
+        let has = |s: &[u8]| bytes.windows(s.len()).any(|w| w == s);
+        assert!(has(b"strongarm"), "STRNAME is the top name");
+        assert!(!has(b"TOP"), "no fixed TOP cell");
+        assert!(has(&[0x00, 0x06, 0x16, 0x02, 0x00, 0x05]), "TEXTTYPE 5");
+        assert!(has(b"vinp"), "the label string");
+        let (polys, _) = visualizer::parse_gds(&bytes);
+        assert_eq!(polys.len(), 1, "the boundary still parses with a text present");
     }
 
     // The real encoder must invert the documented reader semantics.

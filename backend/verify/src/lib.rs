@@ -623,13 +623,13 @@ mod tests {
                 RefDeviceIn {
                     kind: RefKind::Nmos,
                     model: None,
-                    terminals: vec!["out".into(), "in".into(), "vss".into()],
+                    terminals: vec!["out".into(), "in".into(), "vss".into(), "vss".into()],
                     params: vec![("w".into(), 2e-6), ("l".into(), 5e-7)],
                 },
                 RefDeviceIn {
                     kind: RefKind::Nmos,
                     model: None,
-                    terminals: vec!["vss".into(), "bias".into(), "out".into()],
+                    terminals: vec!["vss".into(), "bias".into(), "out".into(), "vss".into()],
                     params: vec![("w".into(), 1e-6)],
                 },
             ],
@@ -641,7 +641,7 @@ mod tests {
         let n = checker.loaded.reference.as_ref().unwrap();
         assert_eq!(n.subckt_count(), 1);
         assert_eq!(n.device_model.len(), 2);
-        assert_eq!(n.device_terminal_start, vec![0, 3, 6], "sky130 ngate arity is 3");
+        assert_eq!(n.device_terminal_start, vec![0, 4, 8], "sky130 MOS arity is 4: d g s b, bulk = psub for an nfet");
         assert_eq!(n.port_net.len(), 3);
         assert_eq!(n.device_param_start, vec![0, 2, 3], "one param run per device");
         let w = checker.loaded.strings.get("w").expect("'w' is interned by the builder");
@@ -676,8 +676,8 @@ mod tests {
         };
         let reference = RefInput {
             devices: vec![
-                dev(RefKind::Nmos, &["out", "in", "vss"]),
-                dev(RefKind::Nmos, &["vss", "bias", "out"]),
+                dev(RefKind::Nmos, &["out", "in", "vss", "vss"]),
+                dev(RefKind::Nmos, &["vss", "bias", "out", "vss"]),
                 dev(RefKind::Npn, &["a", "b", "c"]),
             ],
             ports: vec![],
@@ -775,7 +775,7 @@ mod tests {
             devices: vec![RefDeviceIn {
                 kind: RefKind::Nmos,
                 model: None,
-                terminals: vec!["d".into(), "g".into(), "s".into()],
+                terminals: vec!["d".into(), "g".into(), "s".into(), "b".into()],
                 params: vec![("w".into(), w_m), ("l".into(), 1e-7)],
             }],
             ports: vec![],
