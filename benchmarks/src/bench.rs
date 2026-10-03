@@ -147,7 +147,11 @@ fn op_config(pdk_json: &Path) -> Option<library::oppoint::OpConfig> {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".volare")))?;
     let lib = root.join("sky130A/libs.tech/ngspice/sky130.lib.spice");
-    lib.is_file().then(|| library::oppoint::OpConfig { model_lib: Some(lib), ..Default::default() })
+    lib.is_file().then(|| library::oppoint::OpConfig {
+        model_lib: Some(lib),
+        params: library::oppoint::SKY130_NPN_NOMINAL.iter().map(|&(k, v)| (k.to_string(), v)).collect(),
+        ..Default::default()
+    })
 }
 
 fn run_circuit(
@@ -165,8 +169,9 @@ fn run_circuit(
     let text = preprocess_spice(&raw, pdk_json_path).unwrap_or(raw);
 
     // Pre-parse only to size-gate before committing to the full flow. Uses the
-    // exact parser `run` uses, so the count is authoritative.
-    let g = match library::parse(&text) {
+    // exact parser and deck model table `run` uses, so the count is authoritative.
+    let opts = library::ParseOptions { models: library::model_table(pdk), ..Default::default() };
+    let g = match library::spice_with(&text, &opts) {
         Ok(g) => g,
         Err(e) => return (format!("parse failed: {e}"), Vec::new()),
     };
@@ -339,6 +344,10 @@ fn run_circuit(
     let _ = std::fs::create_dir_all(&debug_dir);
     let gds_bytes = library::export_gds(&sol, pdk, &c.name, &[]);
     let _ = std::fs::write(debug_dir.join(format!("{}.gds", c.name)), &gds_bytes);
+    match library::post_layout_spice(&sol, pdk, &c.name) {
+        Ok(s) => drop(std::fs::write(debug_dir.join(format!("{}_pex.spice", c.name)), s)),
+        Err(e) => eprintln!("{}_pex.spice not written: {e}", c.name),
+    }
     let _ = std::fs::write(debug_dir.join("signoff.txt"), format!("{outcome}\n{}", signoff.coverage));
     // Every hard violation verbatim — the summary counts alone can't say which rule fired.
     // Then each routing hard rule the run itself scored, per net it violates,

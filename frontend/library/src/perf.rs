@@ -7,11 +7,9 @@
 //! capacitance matrix (ground and coupling, per net), and a failed spec makes
 //! the layout infeasible, whatever it saves elsewhere.
 
-use std::process::Command;
-
 use pnr_core::Netlist;
 
-use crate::oppoint::{flat_circuit_with, node_name, OpConfig};
+use crate::oppoint::{flat_circuit_with, node_name, run_deck, OpConfig};
 
 /// What a layout adds to the schematic for simulation.
 #[derive(Clone, Debug, Default)]
@@ -24,6 +22,9 @@ pub struct Parasitics {
     /// Per device, the layout's mean LOD stress term `1/(SA+L/2) +
     /// 1/(SB+L/2)` over its fingers, 1/µm; `None` = not drawn / unknown.
     pub lod_inv_um: Vec<Option<f32>>,
+    /// Built from a drawn layout (its capacitor plates are in `caps`): schematic
+    /// capacitor cards are left out so they are not counted twice.
+    pub extracted: bool,
 }
 
 /// `SA = SB = S` (µm) at which BSIM4's multi-finger average `(1/nf)·Σᵢ
@@ -96,7 +97,10 @@ pub fn miss(spec: &Spec, v: Option<f64>) -> f64 {
 
 /// The deck: models, flat circuit, one capacitor per extracted matrix entry,
 /// the testbench.
-fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig) -> String {
+///
+/// # Errors
+/// A device the circuit cannot express (`flat_circuit_with`).
+fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig) -> Result<String, String> {
     let caps = &par.caps;
     let node = |name: &str| {
         netlist
@@ -112,7 +116,7 @@ fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig) -> String {
             pex.push_str(&format!("Cpex{i} {a} {b} {c:.6e}f\n"));
         }
     }
-    let lib = cfg.sim.model_lib.as_ref().map_or(String::new(), |p| format!(".lib {} {}\n", p.display(), cfg.sim.corner));
+    let lib = cfg.sim.lib_lines();
     // Branch resistors: a terminal with routed R gets its own node,
     // `<net>__<device>_<terminal>`, joined to the net through it.
     let branch = |di: usize, t: &str| par.series.get(di).and_then(|v| v.iter().find(|(n, _)| n == t)).map(|&(_, r)| r).filter(|&r| r > 0.0);
@@ -130,22 +134,20 @@ fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig) -> String {
         &cfg.sim,
         |di, t, n| if branch(di, t).is_some() { format!("{n}__{di}_{t}") } else { n },
         |di| {
-            let dev = &netlist.devices[di];
-            let p = |k: &str| dev.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
-            let l_um = p("l").map_or(0.15, |v| v as f64 / 1e3);
-            let nf = p("nf").unwrap_or(1);
+            let Some(sz) = netlist.devices[di].mos_size() else { return String::new() };
             par.lod_inv_um
                 .get(di)
                 .copied()
                 .flatten()
-                .and_then(|t| equivalent_sa_um(f64::from(t), l_um, nf))
+                .and_then(|t| equivalent_sa_um(f64::from(t), sz.l_nm as f64 / 1e3, i64::from(sz.nf)))
                 .map_or(String::new(), |s| format!(" sa={:.4e} sb={:.4e}", s * 1e-6, s * 1e-6))
         },
-    );
-    format!(
+        !par.extracted,
+    )?;
+    Ok(format!(
         "* Philis post-layout performance (generated)\n{lib}{circuit}\n* extracted capacitance\n{pex}\n* routed branch resistance\n{rs}\n{}\n.end\n",
         cfg.testbench
-    )
+    ))
 }
 
 /// `name = value` lines ngspice prints for `.measure` results.
@@ -160,19 +162,17 @@ fn parse_measures(text: &str) -> Vec<(String, f64)> {
         .collect()
 }
 
-/// Simulate and score. `Err` only when ngspice cannot run at all; a failed
-/// measurement is a `None` metric (and a full miss), not an error.
+/// Simulate and score. `Err` when the circuit cannot be simulated at all; a
+/// failed measurement is a `None` metric (and a full miss), not an error.
 ///
 /// # Errors
-/// The deck cannot be written or ngspice cannot be started.
+/// The deck cannot be built ("cannot simulate: …") or written, ngspice cannot
+/// be started, or it exits with an error ("cannot simulate: ngspice exit …").
 pub fn evaluate(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig) -> Result<PerfResult, String> {
-    static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!("philis_perf_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("deck io: {e}"))?;
-    // One file per run: sensitivity runs go in parallel.
-    let path = dir.join(format!("perf{}.spice", RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-    std::fs::write(&path, deck(netlist, par, cfg)).map_err(|e| format!("deck io: {e}"))?;
-    let out = Command::new(&cfg.sim.ngspice).arg("-b").arg(&path).output().map_err(|e| format!("ngspice unavailable: {e}"))?;
+    let text = deck(netlist, par, cfg).map_err(|e| format!("cannot simulate: {e}"))?;
+    // One dir per run: sensitivity runs go in parallel and must not share a
+    // deck or the ngspice cwd (`bsim4v5.out`).
+    let out = run_deck(&cfg.sim.ngspice, "perf", &text)?;
     let measured = parse_measures(&String::from_utf8_lossy(&out.stdout));
     let metrics: Vec<(String, Option<f64>)> = cfg
         .specs
@@ -292,13 +292,14 @@ mod tests {
                 name: "M1".into(),
                 kind: DeviceKind::Nmos, model: String::new(),
                 terminals: vec![("D".into(), NetId(0)), ("G".into(), NetId(1)), ("S".into(), NetId(2)), ("B".into(), NetId(2))],
-                params: vec![],
+                params: vec![("w".into(), 1000), ("l".into(), 150)],
             }],
             nets: ["out", "in", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
         };
         let caps = vec![("out".to_string(), None, 2.5), ("in".to_string(), Some("out".to_string()), 0.4), ("ghost".to_string(), None, 9.0)];
         let cfg = PerfConfig { sim: OpConfig::default(), testbench: ".measure tran x avg v(out)".into(), specs: vec![] };
-        let d = deck(&nl, &Parasitics { caps, ..Parasitics::default() }, &cfg);
+        let d = deck(&nl, &Parasitics { caps, ..Parasitics::default() }, &cfg).unwrap();
         assert!(d.contains("out 0 2.500000e0f"), "{d}");
         assert!(d.contains("in out 4.000000e-1f"), "{d}");
         assert!(!d.contains("ghost"), "a net the schematic lacks has no node");
@@ -319,10 +320,11 @@ mod tests {
                 params: vec![("w".into(), 1000), ("l".into(), 500), ("nf".into(), 2)],
             }],
             nets: ["out", "in", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
         };
-        let par = Parasitics { caps: Vec::new(), series: vec![vec![("D".into(), 12.5)]], lod_inv_um: vec![Some(1.0)] };
+        let par = Parasitics { caps: Vec::new(), series: vec![vec![("D".into(), 12.5)]], lod_inv_um: vec![Some(1.0)], extracted: false };
         let cfg = PerfConfig { sim: OpConfig::default(), testbench: String::new(), specs: vec![] };
-        let d = deck(&nl, &par, &cfg);
+        let d = deck(&nl, &par, &cfg).unwrap();
         assert!(d.contains("Rpex_0_D out__0_D out 12.5000"), "{d}");
         assert!(d.contains("XM1 out__0_D in"), "{d}");
         // SA = SB = S with (1/2)(1/(S+0.25) + 1/(S+0.75)) = 0.5.

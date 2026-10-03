@@ -487,6 +487,7 @@ mod tests {
         let nl = Netlist {
             devices: vec![dev("M0", DeviceKind::Nmos, &[("D", 0), ("G", 2), ("S", 1), ("B", 1)]), dev("R1", DeviceKind::Resistor, &[("P", 0), ("N", 2)])],
             nets: ["vdd", "vss", "x"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
         };
         let class = |n: u16, class| NetClassification { net: NetId(n), class, c_budget_af: None, max_coupling_af: None };
         let draws = [Some(vec![("D".into(), 10.0), ("G".into(), 0.0), ("S".into(), -10.0), ("B".into(), 0.0)]), None];

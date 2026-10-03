@@ -34,6 +34,9 @@ const MAX_ITERS: u32 = 150;
 const GCELLS_PER_SIDE: u32 = 16;
 /// Rip-up rounds for nets named by violated hard rules, each at doubled `p_fac`.
 const HARD_ROUNDS: u32 = 4;
+/// History on a node another net owns under a laid access jog: that net's trunk
+/// detours rather than short the jog (soft, unlike `reserved`: it may still pass).
+const JOG_HIST: f32 = 64.0;
 /// `reserved` owner of a node no net's trunk may use (no net has this id).
 const CONTESTED: u32 = NONE - 1;
 /// `reserved` owner of a node within spacing of foreign cell or ring metal:
@@ -345,6 +348,8 @@ impl DetailedRoute {
             .map(|&(n, r, _)| (ci_of[n.0 as usize] as u32, r.x + r.w / 2 - origin.0, r.y + r.h / 2 - origin.1))
             .collect();
         let mut laid_legs: Vec<(usize, Rect)> = Vec::new();
+        // Nodes another net owns under a laid jog: history [`JOG_HIST`] for this run.
+        let mut jog_hist: Vec<u32> = Vec::new();
 
         // Landing-pad legality: a pad (or its cut) that stops closer than
         // min_spacing to cell li — or to the cut at the pin end — without merging
@@ -470,7 +475,8 @@ impl DetailedRoute {
                 // (full or narrow width, either orientation) clears every foreign
                 // zone and every jog already laid.
                 let full = cfg.wire_width.max(1);
-                let metal = layers.get(jog_layer(cfg, layers, cuts, grid.n_layers, r_layer) as usize);
+                let jog_l = jog_layer(cfg, layers, cuts, grid.n_layers, r_layer);
+                let metal = layers.get(jog_l as usize);
                 let floor = cfg.min_width.iter().find(|&&(l, _)| Some(&l) == metal).map_or(1, |&(_, w)| w);
                 let narrow = full.min(r.w).min(r.h).max(floor);
                 // A point terminal (1×1 rect) is its own node: nothing to jog to.
@@ -494,6 +500,18 @@ impl DetailedRoute {
                 let landed = match joint {
                     Some((n, choice, legs)) => {
                         laid_legs.extend(legs.iter().map(|&l| (ci, l)));
+                        // A jog over a node another net owns (its stitch reach,
+                        // landing or jog) is where that net's trunk may run: a
+                        // short `break_shorts` settles only by deleting this access.
+                        // Only a node whose wire would touch a leg: the swept bins
+                        // reach up to a pitch past it.
+                        let infl = cfg.wire_width / 2;
+                        let touches = |n: &u32| {
+                            let (px, py, _) = grid.pos(*n);
+                            legs.iter().any(|l| (l.x - infl..=l.x + l.w + infl).contains(&px) && (l.y - infl..=l.y + l.h + infl).contains(&py))
+                        };
+                        let foreign = |n: &u32| reserved[*n as usize] != ci as u32 && reserved[*n as usize] < BLOCKED;
+                        jog_hist.extend(jog_nodes(&grid, cfg, &legs, jog_l).filter(foreign).filter(touches));
                         Some((n, Some(choice)))
                     }
                     None => grid
@@ -597,6 +615,7 @@ impl DetailedRoute {
             (x + origin.0, y + origin.1, l)
         };
         neg.seed(gr::Tier::Detailed, &mut hot.hist, abs);
+        jog_hist.iter().for_each(|&n| hot.hist[n as usize] += JOG_HIST);
         run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS);
 
         // A net over its IR-drop budget reroutes pricing its series R, weighted
@@ -656,6 +675,8 @@ impl DetailedRoute {
             .collect();
         let trials = repair_constraints(&mut hot, &cold, reqs, &extra, &common, &ci_of, &lift, probe);
 
+        // The jog price is this layout's, not negotiation history.
+        jog_hist.iter().for_each(|&n| hot.hist[n as usize] -= JOG_HIST);
         neg.accumulate(gr::Tier::Detailed, &hot.hist, abs);
         // Shields: requested nets get reference tracks alongside, tied in by
         // rerouting the reference to them.
@@ -1208,19 +1229,22 @@ fn claim_jog_sweep(
             reserved[n as usize] = a.ci as u32;
         }
     };
-    let infl = cfg.wire_width / 2;
-    for r in &legs {
-        for gy in grid.bin_y(r.y - infl)..=grid.bin_y(r.y + r.h + infl) {
-            for gx in grid.bin_x(r.x - infl)..=grid.bin_x(r.x + r.w + infl) {
-                claim(grid.node(gx, gy, jog_l));
-            }
-        }
-    }
+    jog_nodes(grid, cfg, &legs, jog_l).for_each(&mut claim);
     if jog_l != base_l {
         for (ex, ey) in [(px, py), (cx, cy)] {
             claim(grid.node(grid.bin_x(ex), grid.bin_y(ey), base_l));
         }
     }
+}
+
+/// The lattice nodes on layer `jog_l` that jog `legs` cover, legs inflated by
+/// half a wire.
+fn jog_nodes<'a>(grid: &'a TrackGrid, cfg: &DetailedCfg, legs: &'a [Rect], jog_l: u32) -> impl Iterator<Item = u32> + 'a {
+    let infl = cfg.wire_width / 2;
+    legs.iter().flat_map(move |r| {
+        (grid.bin_y(r.y - infl)..=grid.bin_y(r.y + r.h + infl))
+            .flat_map(move |gy| (grid.bin_x(r.x - infl)..=grid.bin_x(r.x + r.w + infl)).map(move |gx| grid.node(gx, gy, jog_l)))
+    })
 }
 
 /// Draw each access jog: an L on the jog metal from the landed node to the pin,

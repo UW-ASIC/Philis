@@ -71,7 +71,7 @@ pub fn net(src: &str) -> Netlist {
             .collect();
         devices.push(Device { name: name.into(), kind, model: model.into(), terminals, params });
     }
-    Netlist { devices, nets }
+    Netlist { devices, nets, ..Default::default() }
 }
 
 /// `benchmarks/competition/ALIGN/examples/high_speed_comparator/high_speed_comparator.sp`:
@@ -132,7 +132,7 @@ pub fn permute(nl: &Netlist, seed: u64) -> Netlist {
             Device { terminals, ..d.clone() }
         })
         .collect();
-    Netlist { devices, nets }
+    Netlist { devices, nets, ..Default::default() }
 }
 
 /// Name-level, id-free view of what the annotator decided.

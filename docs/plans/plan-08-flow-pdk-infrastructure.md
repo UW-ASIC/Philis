@@ -619,6 +619,8 @@ Status: done in M0 (`bb556b4`); `tie_max_dist_nm` is sourced on all four sidecar
   `Process::tier(name, class as usize)` (kernel/core cannot name an `analog` type).
 
 ### FLOW-07 SPICE front end: hierarchy, ports, parameters, values, deck-classified models
+- Status: done in M1 (`40755ad`, `295bef3`). Deviation: step 8's `opts.top` wins over file-level cards (amended
+  above). Acceptance gap: `preprocess_spice` is not reduced to model mapping; carried to CELL-06/CELL-08.
 - Priority: **P0**. Effort: **L**. Depends on: FLOW-01, FLOW-04.
 - Why: AF-02 (critical), AF-10, AF-17, AF-33 (parser part), I4, AA-11/G8 (ports and sources are role evidence), AV-04
   (true ports vs labels), PERF §0.2 row 2. LAYLA's inputs are a netlist, a spec file and a technology file
@@ -675,8 +677,9 @@ Status: done in M0 (`bb556b4`); `tie_max_dist_nm` is sourced on all four sidecar
      `Err("device {name}: unknown model {model}: not a .subckt here and not a deck model")` — no NMOS default.
   8. Flattening: device name = `path + "/" + name` (e.g. `X1/XM2`); internal net = `path + "/" + net`; formal ports
      map to the actuals; `.global` nets and `0` are never prefixed; instance `m=k` multiplies every child device's `m`.
-     Top = the file-level cards if any, else the unique uninstantiated `.subckt` (several → error listing them unless
-     `opts.top`); `Netlist.ports` = the top sub-circuit's formals.
+     Top = `opts.top` when set (file-level cards and sources are then dropped: a simulator deck's testbench around
+     its DUT); else the file-level cards if any; else the unique uninstantiated `.subckt` (several → error listing
+     them, naming `ParseOptions::top`); `Netlist.ports` = the top sub-circuit's formals.
   9. MOS sizes normalised per FLOW-01; `w`/`l` ≤ 0 after evaluation is an error for a MOS.
   10. `oppoint::instance_name` (oppoint.rs:296–302, PERF-owned) maps `/` to `__` so `parse_show`'s `m.<name>.` split
       (oppoint.rs:457–461) keeps working; collisions after mapping are a parse error.

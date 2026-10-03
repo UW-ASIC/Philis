@@ -318,3 +318,23 @@ L1 vmid vout 1n
     // The epoch counts it too: an undrawn device is never a feasible stop.
     assert!(!sol.stats.converged, "converged with L1 undrawn: {:?}", sol.stats);
 }
+
+/// PERF-03: with a `.subckt` header, only its declared ports are exempt from
+/// the floating-gate check; `ota`'s old (pre-M1) header left `vbias`/`vbn`
+/// undeclared, so they were exempt too and their undriven gates went
+/// unflagged. The M1 exit criterion is exactly 2 such rows (vbias, vbn).
+#[test]
+fn ota_old_header_flags_its_undriven_bias_gates() {
+    let pdk = pdk();
+    let text = std::fs::read_to_string(root().join("benchmarks/fixtures/ota.spice")).expect("read fixture");
+    let old = text.replacen(" vbias vbn", "", 1);
+    assert_ne!(old, text, "ota.spice lost its vbias/vbn ports");
+    let cfg = library::Config { feedback_iters: 1, starts: 1, ..Default::default() };
+    let sol = library::run(&old, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("ota: {e:?}"));
+    let signoff = library::signoff(&sol, &pdk);
+    let fg = erc_rows(&signoff.report.hard_violations, &signoff.warnings)
+        .iter()
+        .filter(|r| r.starts_with("erc/floating_gate"))
+        .count();
+    assert_eq!(fg, 2, "expected 2 floating_gate rows (vbias, vbn) with the old header");
+}
