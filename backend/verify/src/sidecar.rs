@@ -113,7 +113,7 @@ pub const KEYS: &[Key] = &[
     k("res_seg_gap", Nm, true, false, "kernel/cells/src/resistor.rs"),
     k("res_serpentine_aspect", Real, false, false, "unread"),
     k("resistors", Table, false, false, "backend/verify/src/pdk.rs recipe"),
-    k("retrograde_pwell", Bool, false, true, "unread"),
+    k("retrograde_pwell", Bool, false, true, "kernel/cells/src/post_cell.rs drawable"),
     k("sd_width", Nm, true, false, "kernel/cells/src/mosfet.rs"),
     k("sheet_tolerance", Table, false, false, "unread"),
     k("svt_uv_per_um", Real, false, true, "frontend/library/src/lib.rs annotation"),

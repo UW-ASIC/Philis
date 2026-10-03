@@ -68,8 +68,8 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block]) -> Constra
         for &d in &b.devices {
             let dev = &netlist.devices[d.0 as usize];
             let ring_type = match dev.kind {
-                DeviceKind::Pmos => GuardRingType::Hcgr,
-                DeviceKind::Nmos => GuardRingType::Ecgr,
+                DeviceKind::Pmos => GuardRingType::Tap { in_well: true },
+                DeviceKind::Nmos => GuardRingType::Tap { in_well: false },
                 _ => continue,
             };
             let Some(&(_, bulk)) = dev.terminals.iter().find(|(t, _)| t == "B") else { continue };
@@ -78,10 +78,8 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block]) -> Constra
                 ring_type,
                 // Victim rings merge with same-net same-type neighbours (post_cell).
                 shareable: true,
-                tap_pitch_nm: 2_000,
                 min_width_nm: 500,
                 max_ring_resistance_mohm: 100_000,
-                enclosure_complete: true,
                 connection_net: bulk,
             });
         }
