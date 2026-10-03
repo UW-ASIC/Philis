@@ -1188,8 +1188,7 @@ fn lex_key(
 /// `Supply`/`Ground`/`Substrate` net, or a name outside `names` weighs 0.
 /// `caps` is [`verify::CapMatrix`]; `names` indexes it by `NetId`.
 ///
-/// ponytail: rails are what the name classifier says (`annotator::netrole`);
-/// node `0` reads `Signal` until EXT-02's `rail_of`.
+/// ponytail: rails are what the name classifier says (`annotator::netrole`).
 fn c_tier(
     caps: &verify::CapMatrix,
     names: &[String],
