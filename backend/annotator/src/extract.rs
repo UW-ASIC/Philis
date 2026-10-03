@@ -83,12 +83,17 @@ pub fn routing(
     // share a gate): one rule per unordered net pair, first orientation kept.
     let mut seen = std::collections::HashSet::new();
     let mut fresh = |x: NetId, y: NetId, kind: u8| seen.insert((kind, x.0.min(y.0), x.0.max(y.0)));
+    // Σ coupling per victim: several minimum-spaced aggressors pass every pairwise
+    // crosstalk rule and still blow this. The victim's own shield is the remedy,
+    // not an aggressor, and the quiet rails weigh nothing.
+    let weights: &'static [f32] =
+        Box::leak(CouplingBudget::default_weights(classes, hg.net_names.len()).into_boxed_slice());
     let mut diff: Vec<Differential> = Vec::new();
     let mut xtalk: Vec<CrosstalkExclusion> = Vec::new();
     for &(a, b) in pairs {
         if let (Some(da), Some(db)) = (pin(a, "D"), pin(b, "D")) {
             if da != db && fresh(da, db, 0) {
-                diff.push(Differential { pos: da, neg: db, max_len_delta_pct10: policy.diff_pct10, same_layer_required: true, stack: process.stack });
+                diff.push(Differential { pos: da, neg: db, max_len_delta_pct10: policy.diff_pct10, same_layer_required: true, stack: process.stack, aggressor_weight: Some(weights) });
             }
         }
         for g in [pin(a, "G"), pin(b, "G")].into_iter().flatten() {
@@ -125,11 +130,6 @@ pub fn routing(
     let ground = routed().find(|c| c.class == NetClass::Ground).map(|c| c.net);
     let shield_ref = |c: &NetClassification| ground.filter(|_| has_clock && c.class == NetClass::Sensitive);
 
-    // Σ coupling per victim: several minimum-spaced aggressors pass every pairwise
-    // crosstalk rule and still blow this. The victim's own shield is the remedy,
-    // not an aggressor, and the quiet rails weigh nothing.
-    let weights: &'static [f32] =
-        Box::leak(CouplingBudget::default_weights(classes, hg.net_names.len()).into_boxed_slice());
     let coup: Vec<CouplingBudget> = routed()
         .filter_map(|c| {
             Some(CouplingBudget {
