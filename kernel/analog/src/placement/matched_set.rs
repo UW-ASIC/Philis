@@ -7,7 +7,7 @@ use pnr_core::layout::Layout;
 
 use crate::matching::class::{Family, MatchClass};
 use crate::matching::mismatch::{
-    bjt_sigma_vbe_mv, mobility_pct, ratio_thermal_pct, sigma_current_pct, sigma_pair, sigma_voltage_mv, Budget, Coeffs, Ledger, LedgerRow, LedgerUnit,
+    bjt_sigma_vbe_mv, mobility_pct, ratio_thermal_pct, sigma_grad_mv, sigma_current_pct, sigma_pair, sigma_voltage_mv, Budget, Coeffs, Ledger, LedgerRow, LedgerUnit,
     MatchKind, GRADIENT_SHARE,
 };
 use crate::matching::moments::{cancelled_order, phi_equal, sums, Pt};
@@ -170,8 +170,8 @@ impl MatchedSet {
             };
             match self.family {
                 Family::Mos => {
-                    // µV/µm · nm → mV.
-                    sigma_grad = c.svt_uv_per_um.unwrap_or(0.0) * delta_m_nm * 1e-6;
+                    let s = c.svt_uv_per_um.unwrap_or(0.0);
+                    sigma_grad = sigma_grad_mv(c.svt_xy.unwrap_or((s, s)), (ca.0 - cb.0) as f32, (ca.1 - cb.1) as f32);
                     if units && wa > 0.0 && wb > 0.0 {
                         mu_lod = c.kvth0_mv_um.unwrap_or(0.0) * ((lwa / wa - lwb / wb).abs() as f32);
                     }

@@ -675,6 +675,53 @@ fn matched_sets_are_budgeted_and_missing_deck_terms_are_listed() {
     assert!(!full.missing.iter().any(|m| m.0 == "MatchedSet"));
 }
 
+/// MAT-16: with the deck's S(L) fit the XM1/XM2 pair's gradient term reads
+/// S at L = 0.48 µm (0.580 µV/µm), 0.356 of the worst-case 1.63.
+#[test]
+fn svt_fit_sets_s_of_l() {
+    let mut nl = ota();
+    for d in &mut nl.devices[..2] {
+        d.params.iter_mut().filter(|(k, _)| k == "l").for_each(|(_, v)| *v = 480);
+    }
+    // Two point cells 1 mm apart, no units.
+    let l = pnr_core::Layout {
+        x: vec![0, 1_000_000],
+        y: vec![0; 2],
+        hw: vec![0; 2],
+        hh: vec![0; 2],
+        axis: vec![0; 8],
+        groups: vec![],
+        orient: vec![pnr_core::Orient::default(); 2],
+        variant: vec![0; 2],
+        branch: Vec::new(),
+        power_uw: vec![0; 2],
+        temp_mc: vec![0; 2],
+        units: Default::default(),
+    };
+    let ratio = |fit| {
+        let mut cfg = AnnotationConfig::default();
+        cfg.process.avt_mv_um = [Some(5.0), Some(6.0)];
+        cfg.process.svt_fit = fit;
+        cfg.process.svt_uv_per_um = Some(1.63);
+        let p = annotate(&nl, &cfg);
+        let set = (p.placement.budget.iter())
+            .find(|b| {
+                let mut t = Vec::new();
+                b.touched(&mut t);
+                t.sort_unstable();
+                b.kind() == "MatchedSet" && t == [0, 1]
+            })
+            .expect("XM1/XM2 MatchedSet");
+        let mut rows = Vec::new();
+        set.ledger_rows(&l, &mut rows);
+        rows[0].sigma_layout / 1.63
+    };
+    let r = ratio(Some((0.1835, 0.03533)));
+    assert!((r - 0.356).abs() < 0.005, "{r}");
+    let r = ratio(None);
+    assert!((r - 1.0).abs() < 1e-4, "{r}");
+}
+
 #[test]
 fn clocked_devices_are_kept_away_from_matched_ones() {
     let is_iso = |b: &Box<dyn RuleBatch<pnr_core::Layout>>| b.kind().ends_with("Isolation");

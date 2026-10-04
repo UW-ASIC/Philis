@@ -791,6 +791,7 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
         avt_mv_um: [pos("avt_n_mv_um"), pos("avt_p_mv_um")],
         abeta_pct_um: [pos("abeta_n_pct_um"), pos("abeta_p_pct_um")],
         svt_uv_per_um: pos("svt_uv_per_um"),
+        svt_fit: pos("svt_a_uv2_per_um2").zip(pos("svt_b_uv2")),
         vt_tc_uv_per_k: [pos("vt_tc_uv_per_k"), pos("vt_tc_uv_per_k_p")],
         lod_kvth0_mv_um: [pos("lod_kvth0_n_mv_um"), pos("lod_kvth0_p_mv_um")],
         lattice_nm: cells::builder::cut_lattice(pdk),

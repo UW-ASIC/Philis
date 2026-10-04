@@ -130,6 +130,8 @@ pub const KEYS: &[Key] = &[
     k("sd_width", Nm, true, false, "kernel/cells/src/mosfet.rs"),
     k("sheet_tolerance", Table, false, false, "unread"),
     k("substrate_kind", Text, false, true, "frontend/library/src/lib.rs annotation (\"bulk\" | \"epi_on_pplus\" | null)"),
+    k("svt_a_uv2_per_um2", Real, false, true, "frontend/library/src/lib.rs annotation"),
+    k("svt_b_uv2", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("svt_uv_per_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("tie_max_dist_nm", Nm, false, true, "unread"),
     k("vbe_tc_uv_per_k", Real, false, true, "unread (EXT-20)"),
