@@ -140,6 +140,9 @@ pub struct MetadataReport {
     /// REL-10: `(a, b, ΔV_DS, ΔV_GS, ΔV_BS)` mV per recognised matched pair
     /// under the run's bias (reported, no threshold). Empty without an op.
     pub aging: Vec<(String, String, f64, f64, f64)>,
+    /// EXT-29: the annotator's structure/bias audit findings (`annotator::audit::KINDS`),
+    /// `kind: message`. Empty from [`build`]; the flow fills it.
+    pub audit: Vec<String>,
     /// REL-10: FETs whose voltage rating could not be checked (a voltage
     /// unresolved, or no deck rule names the model). `0` without an op.
     pub voltage_unknown: usize,
@@ -361,6 +364,7 @@ pub fn build(
         recognition: Vec::new(),
         unconstrained: Vec::new(),
         aging: Vec::new(),
+        audit: Vec::new(),
         voltage_unknown: 0,
         pareto: Vec::new(),
         epochs: Vec::new(),
@@ -476,6 +480,9 @@ impl std::fmt::Display for MetadataReport {
         if self.bias.is_some() {
             let a: Vec<String> = self.aging.iter().map(|(x, y, ds, gs, bs)| format!("{x}/{y} ΔVds {ds:.1} ΔVgs {gs:.1} ΔVbs {bs:.1} mV")).collect();
             writeln!(f, "  AGING: {}; voltage rating unknown on {} FET(s)", if a.is_empty() { "no matched pair".into() } else { a.join(", ") }, self.voltage_unknown)?;
+        }
+        if !self.audit.is_empty() {
+            writeln!(f, "  AUDIT: {}", self.audit.join("; "))?;
         }
         if !self.assumed.is_empty() {
             writeln!(f, "\n  assumed (UNVERIFIED sidecar values): {}", self.assumed.join(", "))?;
@@ -630,6 +637,14 @@ mod tests {
             0.0,
             "hard residuals are Φ's business, not Θ's"
         );
+    }
+
+    /// EXT-29: audit findings print as one AUDIT line, and none without findings.
+    #[test]
+    fn metadata_audit_line() {
+        assert!(!format!("{}", MetadataReport::default()).contains("AUDIT"));
+        let r = MetadataReport { audit: vec!["vgst_low: x".into(), "bjt_ratio: y".into()], ..Default::default() };
+        assert!(format!("{r}").contains("  AUDIT: vgst_low: x; bjt_ratio: y"), "{r}");
     }
 
     #[test]

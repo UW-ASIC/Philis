@@ -1029,6 +1029,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     let mut metadata = metadata;
     metadata.binding = s.binding;
     metadata.epochs = s.epochs;
+    metadata.audit = flow.problem.intent.diagnostics.iter().filter(|d| annotator::audit::KINDS.contains(&d.kind)).map(|d| format!("{}: {}", d.kind, d.message)).collect();
     let pairs = matched_pairs(&flow.problem.blocks);
     if let Some(op) = &bias.op {
         let (_, aging, unknown) = reliability::voltage_findings(flow.netlist, op, &pdk.fet_voltage_limits(), &pairs, false);

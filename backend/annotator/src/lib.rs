@@ -8,6 +8,7 @@
 //! reports conflicts ([`conflict`]).
 
 pub mod allocate;
+pub mod audit;
 pub mod block;
 pub mod budget;
 pub mod catalog;
@@ -454,6 +455,14 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         intent.order.push(analog::intent::Order { steps: stages, dir: analog::intent::AxisDir::H, reversible: true, weight: 1.0 });
     }
     intent.order.extend(array_orders);
+    // EXT-29: bias and structure audit over the final sets; cascode mirrors deduplicated.
+    let cascodes: std::collections::BTreeSet<[u16; 4]> = all
+        .iter()
+        .filter(|m| matches!(m.template, "cascode_mirror" | "wide_swing_cascode_mirror" | "low_voltage_cascode_mirror"))
+        .map(|m| std::array::from_fn(|k| m.instances[k] as u16))
+        .collect();
+    let cascodes: Vec<[DeviceId; 4]> = cascodes.into_iter().map(|c| c.map(DeviceId)).collect();
+    intent.diagnostics.extend(audit::audit(&intent, netlist, &cascodes, ev.op.as_ref()));
     // The gate of every CurrentSource is a bias line. Cascode/CurrentSource-by-class
     // gates already are, so one pass is a fixpoint. A sidecar class (User) wins (EXT-26 step 4).
     for (d, f) in intent.devices.iter().enumerate() {
