@@ -57,10 +57,11 @@ pub fn voltage_findings(
                 }
             }
         }
-        // Body→source and body→drain (V_BD = V_BS − V_DS), signed so that
-        // positive is forward for this polarity.
-        let s = if d.kind == DeviceKind::Pmos { -1.0 } else { 1.0 };
-        let fwd = (s * vbs).max(s * (vbs - vds));
+        // Body→source and body→drain (V_BD = V_BS − V_DS). ngspice prints a
+        // PMOS's voltages polarity-normalised (V_DS > 0 in saturation, see
+        // `oppoint::tests::show_reads_vgs_and_vbs`), so positive is forward
+        // for both polarities.
+        let fwd = vbs.max(vbs - vds);
         if fwd > FORWARD_TOL_V {
             rows.push(Violation { rule: format!("rel/bulk_forward:{}", d.name), margin: ((fwd * 1e3).ceil() as i64).max(1) });
         }
@@ -82,6 +83,10 @@ mod tests {
 
     fn nfet(name: &str, model: &str) -> Device {
         Device { name: name.into(), kind: DeviceKind::Nmos, model: model.into(), terminals: Vec::new(), params: Vec::new() }
+    }
+
+    fn pfet(name: &str) -> Device {
+        Device { kind: DeviceKind::Pmos, ..nfet(name, "sky130_fd_pr__pfet_01v8") }
     }
 
     fn run(devs: Vec<Device>, v: &[(f64, f64, f64)], pairs: &[(DeviceId, DeviceId)]) -> (Vec<Violation>, Vec<PairAging>, usize) {
@@ -117,6 +122,18 @@ mod tests {
         assert_eq!(unknown, 1);
         assert!(!rows.iter().any(|r| r.rule.starts_with("rel/vgs:")));
         assert!(rows.iter().any(|r| r.rule.starts_with("rel/bulk_forward:")), "the bulk check needs no limit");
+    }
+
+    /// A PMOS load with B = S = VDD, as ngspice prints it (normalised:
+    /// V_DS = +1.79 V, V_BS = 0, `oppoint::tests::show_reads_vgs_and_vbs`), is
+    /// not forward; a bulk 0.2 V below its source (normalised V_BS = +0.2) is.
+    #[test]
+    fn a_pmos_reads_polarity_normalised_voltages() {
+        assert!(run(vec![pfet("M3")], &[(1.05, 1.788, 0.0)], &[]).0.is_empty());
+        assert!(run(vec![pfet("M3")], &[(1.05, 1.788, -0.3)], &[]).0.is_empty());
+        let (rows, ..) = run(vec![pfet("M3")], &[(1.05, 1.788, 0.2)], &[]);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].rule.starts_with("rel/bulk_forward:"), "{}", rows[0].rule);
     }
 
     #[test]

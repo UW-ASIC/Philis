@@ -280,7 +280,16 @@ fn run_circuit(
         seed,
         sol.metadata.bias.as_ref().map_or_else(
             || "none".to_string(),
-            |b| format!("{} uW, {}", b.total_power_uw, if b.provenance.starts_with("SYNTH") { "probe" } else { "testbench" })
+            |b| format!(
+                "{} uW, {}, EM at {:.3} K ({}), aging pairs {} (max dVds {:.1} mV), V-rating unknown {}",
+                b.total_power_uw,
+                if b.provenance.starts_with("SYNTH") { "probe" } else { "testbench" },
+                b.em_temp_k,
+                b.em_derate,
+                sol.metadata.aging.len(),
+                sol.metadata.aging.iter().map(|a| a.2).fold(0.0, f64::max),
+                sol.metadata.voltage_unknown
+            )
         ),
         // Per fixture (REL T3/T4): nets checked, of them violated, unknown, and
         // the worst known net's need/have (T3's `min(w/need) ≥ 1` is `use ≤ 1`).
