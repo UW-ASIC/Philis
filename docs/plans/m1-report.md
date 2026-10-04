@@ -14,7 +14,7 @@ profile, with `PDK_ROOT=/home/omare/Documents/Projects/Rust/Philis/.pdk`:
 
 No code was changed in this pass.
 
-**Verdict: M1 is not done.** 5 of 9 criterion groups are met. Three are not met:
+**Verdict: M1 is not done.** 5 of 8 criterion groups are met. Three are not met:
 - MAT: HPWL and footprint are not within ±5 % of M0.
 - CELL: `mirror_ratio` is not merged into one cell.
 - Field report 01: `tq_chain` through the CLI has 1 DRC row, and strongarm was not measured.
