@@ -2717,10 +2717,9 @@ mod tests {
             bbox: Rect { x: 1_000, y: 1_000, w: 400, h: 170 },
             ..Default::default()
         };
-        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
         let pins = [(NetId(0), pin_at, LAYERS[0]), (NetId(0), Rect { x: 12_000, y: 1_000, w: 170, h: 170 }, LAYERS[1])];
         let cfg = DetailedCfg { stack: Some(test_stack()), ..test_cfg() };
-        let (routes, _) = route(cfg, &global, &pins, &[cell], &[], &mut gr::Negotiation::new());
+        let (routes, _) = route(cfg, &pins, &[cell], &[], &mut gr::Negotiation::new());
         for c in routes.wires[0].iter().filter(|s| s.layer == cut) {
             let g = rect_gap(c.rect, cell_cut);
             assert!(g == 0 || g >= size, "route cut {:?} {g} nm from the cell cut {cell_cut:?}", c.rect);
