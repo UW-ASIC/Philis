@@ -15,10 +15,15 @@ use crate::{Cell, Pattern};
 /// `dummies_per_edge` dummy gates on each end of the diffusion (Razavi Fig.
 /// 19.21b): the edge fingers then see gate, not trench, on both sides.
 ///
-/// `split_gates` (pairs only): device 1's gates leave the row **above** the
-/// diffusion with their own strap, device 0's below. An interleave whose gate
-/// spans overlap (ABBA) then keeps two private gates — the construction a
-/// common-centroid differential pair needs.
+/// Gates leave the row on a continuous poly bar per device (Hastings eqs
+/// 13.7–13.9: no per-finger pad sets the pitch, so it is the deck's minimum
+/// contacted pitch, [`sd_and_pitch`]).
+///
+/// `split_gates`: odd-indexed devices' gates leave the row **above** the
+/// diffusion on their own bar, even-indexed ones below. An interleave whose
+/// gate spans overlap (ABBA) then keeps two private gates — the construction
+/// a common-centroid differential pair needs — and blocks whose boundary
+/// fingers are too few to drop a cut ([`bar_cuts`]) still draw.
 ///
 /// `mirror_pins` (pairs): fingers pair up on shared drains and the
 /// pair order is swap-reverse symmetric (see [`mirror_sequence`]), so device
@@ -83,7 +88,10 @@ impl Cell for Mosfet {
             if s.dev_nf.iter().any(|&n| n % 2 == 0) {
                 return Vec::new();
             }
-            return vec![Mosfet { nf, style: Pattern::Chain, dummies_per_edge: dummies, split_gates: false, mirror_pins: false, rows: 1, double_gate: false }];
+            // Split when one-finger members leave no room for two bars in a
+            // row: the stack stays one merged cell.
+            let chain = |split_gates| Mosfet { nf, style: Pattern::Chain, dummies_per_edge: dummies, split_gates, mirror_pins: false, rows: 1, double_gate: false };
+            return vec![Some(chain(false)).filter(|v| v.bars_fit(&s.dev_nf, n_dev)).unwrap_or_else(|| chain(true))];
         }
         // Interdig is never offered: an ABAB boundary between devices lands on
         // a drain region and shorts two drains over shared diffusion. Blocks
@@ -110,6 +118,12 @@ impl Cell for Mosfet {
                 }
             }
         }
+        // Blocks with split gates too: the generator cannot see gate nets, so
+        // private gates (bars in alternate rows) and shared ones are both
+        // offered; cellgen's gate privacy filter and the search choose.
+        if n_dev > 1 && styles.contains(&(Pattern::Single, false, false)) {
+            styles.push((Pattern::Single, true, false));
+        }
         // Two rows when every member splits evenly and each half still has
         // its order (a centroid order at nf/2, mirror pairs at nf/2).
         let half = nf / 2;
@@ -134,32 +148,23 @@ impl Cell for Mosfet {
                     ends.iter().map(move |&double_gate| Mosfet { nf, style, dummies_per_edge: dummies, split_gates, mirror_pins, rows, double_gate })
                 })
             })
+            .filter(|v| v.bars_fit(&s.dev_nf, n_dev))
             .collect()
     }
 
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro {
         let s = group_sizing(group, constraints, process);
-        let n_dev = group.devices.len();
-        let rows = self.rows.clamp(1, 2);
-        let nf = (self.nf / rows).max(1);
-        let dev_nf: Vec<u16> = s.dev_nf.iter().map(|&n| (n / rows).max(1)).collect();
-        let first = if self.mirror_pins {
-            mirror_sequence(usize::from(nf))
-        } else if self.style == Pattern::Chain {
-            dev_nf.iter().enumerate().flat_map(|(d, &n)| std::iter::repeat_n(d, usize::from(n))).collect()
-        } else {
-            finger_sequence(self.style, &dev_nf)
-        };
-        let row0 = self.draw_row(group, constraints, process, &first);
-        if rows == 1 {
-            return row0;
+        // A row whose bars cannot drop a boundary cut (never enumerated)
+        // draws split, as `enumerate` would offer it.
+        if !self.split_gates && !self.bars_fit(&s.dev_nf, group.devices.len()) {
+            return Mosfet { split_gates: true, double_gate: false, ..self.clone() }.draw(group, constraints, process);
         }
-        let second: Vec<usize> = if n_dev == 2 {
-            first.iter().map(|&d| 1 - d).collect()
-        } else {
-            first.iter().rev().copied().collect()
-        };
-        stack_on_tap(&row0, &self.draw_row(group, constraints, process, &second), process)
+        let orders = self.row_orders(&s.dev_nf, group.devices.len());
+        let row0 = self.draw_row(group, constraints, process, &orders[0]);
+        match orders.get(1) {
+            Some(second) => stack_on_tap(&row0, &self.draw_row(group, constraints, process, second), process),
+            None => row0,
+        }
     }
 }
 
@@ -227,6 +232,33 @@ fn stack_on_tap(a: &Macro, b: &Macro, process: &dyn Process) -> Macro {
 }
 
 impl Mosfet {
+    /// The finger order (device index per finger) of each drawn row: the
+    /// first, then for two rows the first relabelled (a pair) or reversed.
+    fn row_orders(&self, dev_nf: &[u16], n_dev: usize) -> Vec<Vec<usize>> {
+        let rows = self.rows.clamp(1, 2);
+        let nf = (self.nf / rows).max(1);
+        let dev_nf: Vec<u16> = dev_nf.iter().map(|&n| (n / rows).max(1)).collect();
+        let first = if self.mirror_pins {
+            mirror_sequence(usize::from(nf))
+        } else if self.style == Pattern::Chain {
+            dev_nf.iter().enumerate().flat_map(|(d, &n)| std::iter::repeat_n(d, usize::from(n))).collect()
+        } else {
+            finger_sequence(self.style, &dev_nf)
+        };
+        if rows == 1 {
+            return vec![first];
+        }
+        let second = if n_dev == 2 { first.iter().map(|&d| 1 - d).collect() } else { first.iter().rev().copied().collect() };
+        vec![first, second]
+    }
+
+    /// Whether every row's gate bars fit ([`bar_cuts`]): split rows put
+    /// odd-indexed devices on the top bar row.
+    fn bars_fit(&self, dev_nf: &[u16], n_dev: usize) -> bool {
+        let same_row = |a: usize, b: usize| !self.split_gates || a % 2 == b % 2;
+        self.row_orders(dev_nf, n_dev).iter().all(|seq| bar_cuts(seq, same_row, self.mirror_pins && !self.split_gates).is_some())
+    }
+
     /// One row of fingers in `sequence` order (device index per finger).
     fn draw_row(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process, sequence: &[usize]) -> Macro {
         let mut b = Builder::new(process.grid());
@@ -271,7 +303,7 @@ impl Mosfet {
             _ => gate_l,
         };
         let finger_w = s.unit_w;
-        let m1_pitch = dim(process, "mcon_size") + 2 * dim(process, "m1_enc") + dim(process, "met1_space");
+        let m1_pitch = m1_land(process);
         let (sd_w, pitch) = sd_and_pitch(process, gate_l);
         // End regions hold one cut between the diff edge and a gate: it needs
         // `gate_space` to the gate, plus a lattice step of snap slack.
@@ -284,16 +316,35 @@ impl Mosfet {
         // outer gates: wide enough for the edge contact, and for the gate pads
         // beside a dummy to keep poly spacing from it and its riser skirt.
         let nd = i32::from(self.dummies_per_edge);
-        let pad_over = (gate_l.max(ct + 2 * licon_poly_side + lat) - gate_l + 1) / 2;
-        let skirt_over = (gate_l.max(ct + 2 * licon_poly_side) - gate_l + 1) / 2;
+        // A gate bar's worst-case overhang past an end gate: a lattice-snapped
+        // cut plus its poly enclosure.
+        let bar_over = ((ct + 2 * licon_poly_enc + lat - gate_l + 1) / 2).max(0);
+        // The skirt's: its cuts enclosed `licon_poly_enc` on x (the deck's
+        // opposite-sides enclosure goes on y, where the skirt is tall).
+        let skirt_over = ((ct + 2 * licon_poly_enc + lat - dummy_l + 1) / 2).max(0);
         // With dummies, at least the inner gate-to-gate gap: every finger then
         // sees gates on both sides at one pitch (poly spacing effect, PSE;
         // Hastings §13.3 r9: end dummies at the array's pitch).
+        // Gate 0 sits where the inner S/D cuts, centred between gates at the
+        // lattice pitch, land exactly on the cut lattice (gates then sit off
+        // it: the pitch has no snap slack). An end region's cut is centred to
+        // the nearest lattice step ([`edge_cut`]) and must keep `gate_space`
+        // from a dummy, so a dummied end grows by lattice steps until it does.
+        let on_lattice = |v: i32| v + (-(v + gate_l + (sd_w - ct) / 2)).rem_euclid(lat);
+        let edge_cut = |start: i32, w: i32| snap_cut(start + w / 2 - ct / 2 + lat / 2, lat);
+        let holds = |start: i32, w: i32| {
+            let p = edge_cut(start, w);
+            p - start >= gate_space && start + w - p - ct >= gate_space
+        };
         let sd_edge = if nd > 0 {
-            let clear = r("poly_min_spacing", 0).max(process.space("poly").unwrap_or(0)) + pad_over + if self.split_gates || self.double_gate { skirt_over } else { 0 };
-            snap_cut(sd_end.max(clear).max(pitch - gate_l) + lat - 1, lat)
+            let clear = r("poly_min_spacing", 0).max(process.space("poly").unwrap_or(0)) + if self.split_gates || self.double_gate { bar_over + skirt_over } else { bar_over.max(skirt_over) };
+            let mut e = on_lattice(clear.max(pitch - gate_l).max(ct + 2 * gate_space));
+            while !(holds(0, e) && holds(e + (n_fingers - 1) * pitch + gate_l, e)) {
+                e += lat;
+            }
+            e
         } else {
-            sd_end
+            on_lattice(sd_end)
         };
         let d_step = dummy_l + sd_end;
         let gates_end = sd_edge + (n_fingers - 1) * pitch + gate_l;
@@ -330,9 +381,12 @@ impl Mosfet {
             .max(polycon_gap + licon_poly_side + ct - poly_ext)
             // Split rows leave a neighbour's gate end beside each pad: the pad
             // must sit a poly spacing below it.
-            .max(if self.split_gates { ct + licon_poly_enc + licon_poly_side + r("poly_min_spacing", 0) } else { 0 });
+            .max(if self.split_gates { ct + 2 * licon_poly_side + r("poly_min_spacing", 0) } else { 0 });
         // Snapped down (away from the diff) so the cut sits on the lattice.
-        let pad_y = snap_cut(-(poly_ext + stub), lat);
+        // The bar's distance below the stub's minimum (CELL-12 sets it by
+        // matching class).
+        let bar_gap = 0;
+        let pad_y = snap_cut(-(poly_ext + stub + bar_gap), lat);
         let stub = -pad_y - poly_ext;
         // S/D regions: region 0 is S iff `s0`, chosen so every inter-device
         // boundary is a shared source ([`legal_row`]): a single device or an
@@ -355,9 +409,10 @@ impl Mosfet {
                 "D"
             }
         };
-        // Bottom gate pad row (every device, unless split).
-        let pad_w = gate_l.max(ct + 2 * licon_poly_side + lat);
-        let pad_h = ct + licon_poly_enc + licon_poly_side;
+        // Gate bar rows: a horizontal poly bar per device and row, its cuts
+        // `licon_poly_side` inside both long edges (the deck's opposite-sides
+        // enclosure, on y), `licon_poly_enc` past the end cuts on x.
+        let pad_h = ct + 2 * licon_poly_side;
         let li_w = ct + li_enc + li_side;
         // Gate pad li grows away from the diff to the deck's min area (a side
         // length; the li role may be a real metal with a sizeable one).
@@ -373,15 +428,21 @@ impl Mosfet {
         // snapped up (away from the diff). `top_pad_top` is what the tap strip
         // must clear.
         let top_cut_y = snap_cut(finger_w - bot_cut_y - ct + lat - 1, lat);
-        let top_pad_y = top_cut_y - licon_poly_enc;
+        let top_pad_y = top_cut_y - licon_poly_side;
         let top_pad_top = top_pad_y + pad_h;
         let top_li_top = top_cut_y - li_side + pad_li_h;
-        let up = |di: usize| self.split_gates && di == 1;
-        // Which ends of a device's fingers carry a pad.
+        let up = |di: usize| self.split_gates && di % 2 == 1;
+        // Which ends of a device's fingers carry a bar.
         let top_end = |di: usize| up(di) || self.double_gate;
         let bottom_end = |di: usize| !up(di);
-        // Gate x-extent per device, for the strap below.
-        let mut gate_span: BTreeMap<usize, (i32, i32)> = BTreeMap::new();
+        // Unsplit mirror pins run one bar under the whole row (a shared-gate
+        // pair).
+        let shared = self.mirror_pins && !self.split_gates;
+        let cut = bar_cuts(sequence, |a, b| up(a) == up(b), shared).expect("enumerate filters on bars_fit");
+        // Per (top row, device) bar — device 0 for a shared one: the gates'
+        // x span and the cuts' x span.
+        let mut bars: BTreeMap<(bool, usize), ((i32, i32), Option<(i32, i32)>)> = BTreeMap::new();
+        let mut pinned = vec![false; n_dev];
         for (idx, &di) in sequence.iter().enumerate() {
             let gx = idx as i32 * pitch + sd_edge;
             b.rect(poly, Rect { x: gx, y: -poly_ext, w: gate_l, h: finger_w + 2 * poly_ext });
@@ -403,57 +464,47 @@ impl Mosfet {
                 sa: gx + gate_l / 2 - diff_x_start,
                 sb: diff_x_end - (gx + gate_l / 2),
             });
-            // Contacted gate pad (the deck requires a cut to reach poly),
-            // centred on the lattice-snapped cut.
+            // Gate cut (the deck requires a cut to reach poly), centred on the
+            // finger at the lattice.
             let cut_x = snap_cut(gx + gate_l / 2 - ct / 2, lat);
-            // li `li_side` past the cut toward the diff, the rest away from it.
-            let top_pad = (top_cut_y, top_pad_y, top_cut_y - li_side);
-            let bottom_pad = (bot_cut_y, pad_y, bot_cut_y + ct + li_side - pad_li_h);
-            let pads = [top_end(di).then_some(top_pad), bottom_end(di).then_some(bottom_pad)];
-            for (cy_, py_, ly_) in pads.into_iter().flatten() {
-                b.rect(poly, Rect { x: cut_x + ct / 2 - pad_w / 2, y: py_, w: pad_w, h: pad_h });
-                b.rect(licon, Rect { x: cut_x, y: cy_, w: ct, h: ct });
-                b.rect(li, Rect { x: cut_x - li_enc, y: ly_, w: li_w, h: pad_li_h });
+            for (top, cy_) in [(true, top_cut_y), (false, bot_cut_y)] {
+                if !(if top { top_end(di) } else { bottom_end(di) }) {
+                    continue;
+                }
+                if cut[idx] {
+                    b.rect(licon, Rect { x: cut_x, y: cy_, w: ct, h: ct });
+                }
+                let e = bars.entry((top, if shared { 0 } else { di })).or_insert(((gx, gx + gate_l), None));
+                e.0 = (e.0 .0.min(gx), e.0 .1.max(gx + gate_l));
+                if cut[idx] {
+                    e.1 = Some(e.1.map_or((cut_x, cut_x), |(c0, c1)| (c0.min(cut_x), c1.max(cut_x))));
+                }
             }
-            // The pin sits on the end the device's gate leaves by.
-            let cut_y = if up(di) { top_cut_y } else { bot_cut_y };
-            // One gate pin per device: the strap joins its fingers. Mirror
-            // pins put device 1's on its last finger, device 0's image.
-            let last = sequence.iter().rposition(|&d| d == di) == Some(idx);
-            let pin_here = if self.mirror_pins && di == 1 { last } else { !gate_span.contains_key(&di) };
+            // One gate pin per device, on the end its gate leaves by: its
+            // first cut finger; mirror pins put device 1's on its last, device
+            // 0's image.
+            let last = sequence.iter().zip(&cut).rposition(|(&d, &c)| d == di && c) == Some(idx);
+            let pin_here = cut[idx] && if self.mirror_pins && di == 1 { last } else { !pinned[di] };
             if pin_here {
+                pinned[di] = true;
+                let cut_y = if up(di) { top_cut_y } else { bot_cut_y };
                 b.pin(pin(di, "G", Rect { x: cut_x, y: cut_y, w: ct, h: ct }, li));
             }
-            let e = gate_span.entry(di).or_insert((gx, gx + gate_l));
-            e.0 = e.0.min(gx);
-            e.1 = e.1.max(gx + gate_l);
         }
 
-        // Gate strap: joins one device's fingers into a single gate. Per
-        // device, so interleaved devices keep distinct gates; unsplit mirror
-        // pins run one strap under the whole row (a shared-gate pair).
-        let poly_w = dim(process, "poly_min_width");
-        if self.mirror_pins && !self.split_gates {
-            let (x0, x1) = gate_span.values().fold((i32::MAX, i32::MIN), |(a, b), &(x0, x1)| (a.min(x0), b.max(x1)));
-            gate_span = BTreeMap::from([(0, (x0, x1))]);
-        }
-        for (&di, &(x0, x1)) in &gate_span {
-            let (c0, c1) = (snap_cut(x0 + gate_l / 2 - ct / 2, lat), snap_cut(x1 - gate_l / 2 - ct / 2, lat));
-            let strap = |y: i32| Rect { x: c0 - li_enc, y, w: c1 + ct + li_side - (c0 - li_enc), h: pad_li_h };
-            if x1 - x0 > gate_l {
-                let y = if up(di) { top_pad_top - poly_w } else { pad_y };
-                b.rect(poly, Rect { x: x0, y, w: x1 - x0, h: poly_w });
-                // An li strap over the finger cuts too (Hastings rule 22,
-                // metal straps): the fingers join through metal, not only
-                // through the poly strap's resistance.
-                let ly = if up(di) { top_cut_y - li_side } else { bot_cut_y + ct + li_side - pad_li_h };
-                b.rect(li, strap(ly));
-            }
-            // The second end's strap is li (a second poly strap would close the
-            // fingers into a ring around the diffusion), with its own gate pin:
-            // the router ties both ends in metal.
-            if self.double_gate {
-                b.rect(li, strap(top_cut_y - li_side));
+        // Each bar joins its fingers into one gate in poly, and an li strap
+        // over its cuts joins them in metal too (Hastings rule 22). A
+        // two-ended gate's top strap carries a second pin: the router ties
+        // both ends in metal.
+        for (&(top, di), &((x0, x1), cuts)) in &bars {
+            let (c0, c1) = cuts.expect("bar_cuts keeps a cut per device");
+            let bx0 = x0.min(c0 - licon_poly_enc);
+            let bx1 = x1.max(c1 + ct + licon_poly_enc);
+            b.rect(poly, Rect { x: bx0, y: if top { top_pad_y } else { pad_y }, w: bx1 - bx0, h: pad_h });
+            // li `li_side` past the cuts toward the diff, the rest away from it.
+            let ly = if top { top_cut_y - li_side } else { bot_cut_y + ct + li_side - pad_li_h };
+            b.rect(li, Rect { x: c0 - li_enc, y: ly, w: c1 + ct + li_side - (c0 - li_enc), h: pad_li_h });
+            if top && self.double_gate {
                 b.pin(pin(di, "G", Rect { x: c1, y: top_cut_y, w: ct, h: ct }, li));
             }
         }
@@ -471,14 +522,13 @@ impl Mosfet {
             (lo, snap_cut(hi.max(lo + need) + lat - 1, lat))
         };
         for region in 0..=n_fingers {
-            let cx = if region == 0 {
-                sd_edge / 2
+            let px = if region == 0 {
+                edge_cut(0, sd_edge)
             } else if region == n_fingers {
-                gates_end + sd_edge / 2
+                edge_cut(gates_end, sd_edge)
             } else {
-                (2 * region - 1) * pitch / 2 + sd_edge + gate_l / 2
+                snap_cut((2 * region - 1) * pitch / 2 + sd_edge + gate_l / 2 - ct / 2, lat)
             };
-            let px = snap_cut(cx - ct / 2, lat);
             // A column of cuts encloses each one on its inner side; only a lone
             // cut needs `li_side` beyond it (then above, away from the pads).
             b.rect(li, Rect { x: px - li_enc, y: col_bot, w: ct + li_enc + li_side, h: col_top - col_bot });
@@ -547,8 +597,8 @@ impl Mosfet {
                 });
             }
         }
-        let stub_top = licon_y + ct + licon_poly_enc;
-        let dpad_w = dummy_l.max(ct + 2 * licon_poly_side);
+        let stub_top = licon_y + ct + licon_poly_side;
+        let dpad_w = dummy_l.max(ct + 2 * licon_poly_enc);
         let skirt_y = finger_w + poly_ext - 10;
         // Riser strips lap the rail's li but stay above its cut row (a grazed
         // cut reads as an under-sized contact).
@@ -666,21 +716,69 @@ impl Mosfet {
 }
 
 /// Inner S/D region width and gate-to-gate pitch of a row at gate length
-/// `gate_l`, nm. S/D floors: met1 pitch, facing li pads across one gate, and
-/// the end cut's diff enclosure.
+/// `gate_l`, nm: the contacted pitch at the deck's minimum (Hastings eqs
+/// 13.7–13.9). `sd_w = max(sd_width, ct + 2·gate_space, ct + 2·diff_enc,
+/// li_col + li_space − gate_l, m1_land − gate_l)` with `li_col = ct + li_enc
+/// + li_side`: a cut clearing both gates, the end cut's diff enclosure, facing
+/// li columns across one gate and met1 landings ([`m1_land`]) across one gate.
+/// The pitch is `sd_w + gate_l`, grown to a cut-lattice multiple; gate cuts
+/// sit off the diffusion on a bar.
 #[must_use]
 pub fn sd_and_pitch(process: &dyn Process, gate_l: i32) -> (i32, i32) {
     let r = |name: &str, default: i32| process.rule(name, default);
     let ct = dim(process, "contact");
     let li_enc = r("li_encloses_licon", 0).max(process.enclosure("li", "licon").unwrap_or(0));
     let li_side = r("li_encloses_licon_one_side", 0).max(li_enc).max(process.endcap("li", "licon").unwrap_or(0));
-    let m1_pitch = dim(process, "mcon_size") + 2 * dim(process, "m1_enc") + dim(process, "met1_space");
     let diff_enc = r("diff_encloses_licon", 0).max(process.enclosure("diff", "licon").unwrap_or(0));
+    let gate_space = r("licon_to_gate_spacing", 0).max(process.space_between("licon", "poly").unwrap_or(0));
     let sd_w = r("sd_width", 0)
-        .max(m1_pitch - gate_l)
+        .max(ct + 2 * gate_space)
+        .max(ct + 2 * diff_enc)
         .max(ct + li_enc + li_side + r("li_min_spacing", 0).max(process.space("li").unwrap_or(0)) - gate_l)
-        .max(ct + 2 * diff_enc);
-    (sd_w, (sd_w + gate_l + sd_w).max(m1_pitch))
+        .max(m1_land(process) - gate_l);
+    // A lattice-multiple pitch: every inner cut then lands on the lattice.
+    let sd_w = sd_w + (-(sd_w + gate_l)).rem_euclid(cut_lattice(process));
+    (sd_w, sd_w + gate_l)
+}
+
+/// Centre-to-centre pitch of two met1 landings on mcon, from deck values
+/// only: `mcon + 2·max(enc, endcap) + met1 space` (Hastings eq. 13.9), the
+/// plain spacing: two landings are far under any wide-metal threshold.
+fn m1_land(process: &dyn Process) -> i32 {
+    process.width("mcon").unwrap_or(0)
+        + 2 * process.enclosure("met1", "mcon").unwrap_or(0).max(process.endcap("met1", "mcon").unwrap_or(0))
+        + process.min_space("met1").unwrap_or(0)
+}
+
+/// Which fingers of `seq` (device index per finger) get a gate cut on a
+/// row's bar. All of them when one bar is `shared` by the row. Otherwise two
+/// devices abutting in one row (`same_row`) with disjoint finger spans have
+/// bars a gate gap apart, too close for poly spacing with a cut overhanging
+/// both boundary gates: the right finger drops its cut if its device keeps
+/// another, else the left one; `None` when neither does. Overlapping spans
+/// (an interleave) merge into one poly island anyway and keep every cut.
+fn bar_cuts(seq: &[usize], same_row: impl Fn(usize, usize) -> bool, shared: bool) -> Option<Vec<bool>> {
+    let mut cut = vec![true; seq.len()];
+    if shared {
+        return Some(cut);
+    }
+    let span = |d: usize| (seq.iter().position(|&x| x == d).unwrap_or(0), seq.iter().rposition(|&x| x == d).unwrap_or(0));
+    let keeps_other = |cut: &[bool], i: usize| seq.iter().zip(cut).enumerate().any(|(j, (&d, &c))| j != i && d == seq[i] && c);
+    for i in 1..seq.len() {
+        let (a, b) = (seq[i - 1], seq[i]);
+        let ((a0, a1), (b0, b1)) = (span(a), span(b));
+        if a == b || !same_row(a, b) || !cut[i - 1] || (a0 <= b1 && b0 <= a1) {
+            continue;
+        }
+        if keeps_other(&cut, i) {
+            cut[i] = false;
+        } else if keeps_other(&cut, i - 1) {
+            cut[i - 1] = false;
+        } else {
+            return None;
+        }
+    }
+    Some(cut)
 }
 
 /// Which poly island each member's gate pin (`d{i}:G`) sits on, by member
@@ -1285,6 +1383,112 @@ mod tests {
             dirty.extend(testkit::dirty::<Mosfet>(DeviceKind::Nmos, 2, nf, 1680, 150, &pdk));
             dirty.extend(testkit::dirty::<Mosfet>(DeviceKind::Pmos, 2, nf, 1680, 150, &pdk));
         }
+        assert!(dirty.is_empty(), "{}", dirty.join("\n"));
+    }
+
+    /// CELL-11 / T5: sky130 at L = 150 contacts at 280 + 150 = 430 nm (was
+    /// 730, set by a met1 pitch the row never draws).
+    #[test]
+    fn the_contacted_pitch_is_the_deck_minimum() {
+        let pdk = verify::Pdk::builtin("sky130").unwrap();
+        assert_eq!(sd_and_pitch(&pdk, 150), (280, 430));
+    }
+
+    /// Every gate-cut row's poly is whole bars: along the line through its
+    /// cuts, each poly run is one rect holding a cut, one run per device
+    /// leaving by that row (one for a shared bar) — no pads joined by a
+    /// narrower strap.
+    #[test]
+    fn a_gate_bar_has_no_notch() {
+        use crate::testkit;
+        use pnr_core::{DeviceKind, Process};
+        let Some(pdk) = testkit::pdk() else { return };
+        let (poly, licon) = (pdk.layer("poly").unwrap(), pdk.layer("licon").unwrap());
+        let ct = dim(&pdk, "contact");
+        let w = 1680;
+        let mut checked = 0;
+        for (n, nf) in [(2usize, 2u16), (2, 8), (1, 4), (3, 2)] {
+            let (g, c) = testkit::group_of(DeviceKind::Nmos, n, nf, w, 150);
+            for (i, v) in Mosfet::enumerate(&g, &c, &pdk).into_iter().enumerate() {
+                let m = v.draw(&g, &c, &pdk);
+                let polys: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == poly).map(|s| s.rect).collect();
+                let on_poly = |r: &Rect| polys.iter().any(|p| p.x <= r.x && p.x + p.w >= r.x + r.w && p.y <= r.y && p.y + p.h >= r.y + r.h);
+                let cuts: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == licon && (s.rect.y + ct <= 0 || s.rect.y >= w) && on_poly(&s.rect)).map(|s| s.rect).collect();
+                let mut ys: Vec<i32> = cuts.iter().map(|r| r.y).collect();
+                ys.sort_unstable();
+                ys.dedup();
+                for y in ys {
+                    let line = y + ct / 2;
+                    let mut spans: Vec<(i32, i32)> = polys.iter().filter(|p| p.y < line && line < p.y + p.h).map(|p| (p.x, p.x + p.w)).collect();
+                    spans.sort_unstable();
+                    let mut runs: Vec<(i32, i32)> = Vec::new();
+                    for (a, b) in spans {
+                        match runs.last_mut() {
+                            Some(r) if a <= r.1 => r.1 = r.1.max(b),
+                            _ => runs.push((a, b)),
+                        }
+                    }
+                    let tag = format!("n={n} nf={nf} #{i} y={y}");
+                    for run in &runs {
+                        assert!(polys.iter().any(|p| p.y < line && line < p.y + p.h && p.x <= run.0 && p.x + p.w >= run.1), "{tag}: run {run:?} is not one bar");
+                        assert!(cuts.iter().any(|c| c.y == y && c.x >= run.0 && c.x + ct <= run.1), "{tag}: run {run:?} holds no cut");
+                    }
+                    let mut leaving: Vec<&str> = m.pins.iter().filter(|p| p.name.ends_with(":G") && p.at.y == y).map(|p| p.name.as_str()).collect();
+                    leaving.sort_unstable();
+                    leaving.dedup();
+                    // A shared bar, or an unsplit centroid row whose bars overlap
+                    // (one poly island, as the ABBA mirror's strap was).
+                    let want = if !v.split_gates && (v.mirror_pins || v.style == Pattern::Cc1d) { 1 } else { leaving.len() };
+                    assert_eq!(runs.len(), want, "{tag}: runs {runs:?}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0);
+    }
+
+    /// At the minimum pitch, a dummy-free eight-finger centroid pair steps
+    /// its gates exactly 430 nm.
+    #[test]
+    fn a_row_is_shorter() {
+        use crate::testkit;
+        use pnr_core::{DeviceKind, Process};
+        let Some(pdk) = testkit::pdk() else { return };
+        let (g, mut c) = testkit::group_of(DeviceKind::Nmos, 2, 8, 1680, 150);
+        c.unitization[0].dummy_required = false;
+        let v = Mosfet::enumerate(&g, &c, &pdk).into_iter().find(|v| v.style == Pattern::Cc1d && v.rows == 1).expect("a one-row centroid");
+        let m = v.draw(&g, &c, &pdk);
+        let poly = pdk.layer("poly").unwrap();
+        let mut xs: Vec<i32> = m.shapes.iter().filter(|s| s.layer == poly && s.rect.h >= 1680).map(|s| s.rect.x).collect();
+        xs.sort_unstable();
+        xs.dedup();
+        assert_eq!(xs.len(), 16);
+        assert!(xs.windows(2).all(|w| w[1] - w[0] == 430), "{xs:?}");
+    }
+
+    #[test]
+    fn bar_cuts_drops_one_boundary_cut() {
+        let all = |_: usize, _: usize| true;
+        assert_eq!(bar_cuts(&[0, 0, 1, 1], all, false), Some(vec![true, true, false, true]));
+        assert_eq!(bar_cuts(&[0, 0, 1], all, false), Some(vec![true, false, true]));
+        assert_eq!(bar_cuts(&[0, 1], all, false), None);
+        assert_eq!(bar_cuts(&[0, 1, 1, 0], all, false), Some(vec![true; 4]));
+        assert_eq!(bar_cuts(&[0, 1], all, true), Some(vec![true; 2]));
+        // Different bar rows never constrain each other.
+        assert_eq!(bar_cuts(&[0, 1], |a, b| a == b, false), Some(vec![true; 2]));
+    }
+
+    /// One finger each leaves no cut to drop: only split bars draw it, and
+    /// they are clean.
+    #[test]
+    fn a_one_finger_pair_draws_split() {
+        use crate::testkit;
+        use pnr_core::DeviceKind;
+        let Some(pdk) = testkit::pdk() else { return };
+        let (g, c) = testkit::group_of(DeviceKind::Nmos, 2, 1, 1680, 150);
+        let vs = Mosfet::enumerate(&g, &c, &pdk);
+        assert!(!vs.is_empty() && vs.iter().all(|v| v.split_gates));
+        let dirty = testkit::dirty_group::<Mosfet>(&g, &c, &pdk);
         assert!(dirty.is_empty(), "{}", dirty.join("\n"));
     }
 }

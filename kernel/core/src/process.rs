@@ -38,6 +38,13 @@ pub trait Process {
         None
     }
 
+    /// Spacing between two minimum-width shapes of a role's layer, nm: the
+    /// plain `min_spacing`, without [`Process::space`]'s wide-metal and
+    /// array steps (a contact landing is far under any width threshold).
+    fn min_space(&self, role: &str) -> Option<i32> {
+        self.space(role)
+    }
+
     /// Spacing a role's line end (a narrow edge) keeps to anything, nm;
     /// `None` = not given.
     fn eol_space(&self, role: &str) -> Option<i32> {

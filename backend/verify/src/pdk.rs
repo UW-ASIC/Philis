@@ -1142,6 +1142,9 @@ impl Process for Pdk {
         let grown = self.sized_spacing(l);
         plain.max(array).max(wide).max(grown)
     }
+    fn min_space(&self, role: &str) -> Option<i32> {
+        self.min_spacing(pnr_core::Process::layer(self, role)?.0)
+    }
     fn eol_space(&self, role: &str) -> Option<i32> {
         let l = pnr_core::Process::layer(self, role)?.0;
         self.widest_on("eol_spacing", "limit", &[l]).map(|v| v as i32)
@@ -1313,6 +1316,9 @@ impl Process for Overlay<'_> {
         // By the overlay's layer, so a recipe role (`res_block`) resolves.
         let name = &self.pdk.layers.iter().find(|(_, l)| Some(*l) == self.layer(role))?.0;
         self.pdk.space(name)
+    }
+    fn min_space(&self, role: &str) -> Option<i32> {
+        self.pdk.min_spacing(self.layer(role)?.0)
     }
     fn width(&self, role: &str) -> Option<i32> {
         self.pdk.min_width(self.layer(role)?.0)
