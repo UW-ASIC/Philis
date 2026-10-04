@@ -445,21 +445,24 @@ fn solve(
     let em = elaborate::em_limits(pdk, &em_layers, &em_cuts, cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15));
     em_rules(&mut problem, &netlist, &em, &em_layers, &em_cuts, ann.process.stack, pdk);
     // IR-drop budgets (PWR-02) on nets carrying op current (`annotator::ir`).
-    if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
+    let ir = if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
         let vdd_mv = cfg.op.as_ref().map_or(1_800.0, |o| o.vdd * 1e3);
         let i = oppoint::net_current_ua(&netlist, c);
-        let rules: Vec<analog::routing::IrDrop> = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv, &ann.policy)
-            .into_iter()
-            .map(|(net, current_ua, max_drop_uv)| analog::routing::IrDrop { net, current_ua, max_drop_uv, margin_pct: 20, stack: ann.process.stack })
+        let ir = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv, &ann.policy);
+        let rules: Vec<analog::routing::IrDrop> = ir
+            .iter()
+            .map(|&(net, current_ua, max_drop_uv)| analog::routing::IrDrop { net, current_ua, max_drop_uv, margin_pct: 20, stack: ann.process.stack })
             .collect();
         problem.routing.budget.push(Box::new(rules));
+        ir
     } else {
         problem.missing.push(("IrDrop", "operating point"));
-    }
+        Vec::new()
+    };
     let sens: Vec<(pnr_core::NetId, f32)> =
         perf_rows.iter().flat_map(|r| r.nets.iter().copied().zip(r.weights.iter().copied())).collect();
     let net_weight = gp::net_weights(&problem.net_classes, &sens);
-    let intent = elaborate::intent(&netlist, &problem.net_classes, currents.as_deref(), cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0));
+    let intent = elaborate::intent(&netlist, &problem.net_classes, currents.as_deref(), cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0), &ir);
     let flow = Flow {
         pdk,
         netlist: &netlist,

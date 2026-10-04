@@ -82,6 +82,10 @@ pub struct Coverage {
     pub unverified: Vec<(RefKind, Option<String>, usize)>,
     /// Rules this run did not execute, `(rule, reason)`: deck skips, waivers, chip-level deferrals.
     pub skipped_rules: Vec<(String, String)>,
+    /// `(ran, in deck)` over the EM (`EM*`) and `ir_drop` rules; ran =
+    /// `Outcome::Ran` with `examined > 0` (a rule that ran over no node
+    /// checked nothing).
+    pub em_ir: (u32, u32),
 }
 
 /// GPurify's layout-only range checks, recorded `Skipped(NotInDeck)` because
@@ -133,6 +137,9 @@ pub struct Intent {
     pub supplies: Vec<(String, f64, bool)>,
     /// `(net name, DC current µA)` from the operating point.
     pub currents: Vec<(String, f64)>,
+    /// `(net name, allowed DC drop mV)`, from the op headroom
+    /// (`annotator::ir`): what arms `ir_drop`.
+    pub max_drop_mv: Vec<(String, f64)>,
 }
 
 /// Extracted capacitance between labelled nets, fF: `(net, None, C)` to
@@ -304,6 +311,13 @@ fn harvest(checker: &Checker, summary: &Summary, s: &mut Signoff) {
         }
     }
     s.coverage.skipped_rules = checker.skipped_rules().into_iter().map(|(r, why)| (r.to_string(), why)).collect();
+    for r in &out.runs {
+        let name = checker.rule_name(r.rule);
+        if name.starts_with("EM") || name == "ir_drop" {
+            s.coverage.em_ir.1 += 1;
+            s.coverage.em_ir.0 += u32::from(r.outcome == gdsverify::check::report::Outcome::Ran && r.examined > 0);
+        }
+    }
     s.report.cost = checker.total_cap_ff();
 }
 
@@ -548,10 +562,50 @@ mod tests {
         let intent = Intent {
             supplies: vec![("VDD".into(), 1_800.0, false), ("VSS".into(), 1_800.0, true)],
             currents: vec![("VDD".into(), 100.0), ("VSS".into(), 100.0)],
+            ..Default::default()
         };
         checker.set_intent(&intent).unwrap();
         checker.run(&shapes, &pins, Checks { drc: false, erc: true, lvs: false, pex: false }).unwrap();
         assert_eq!(no_intent(&checker), 0, "{:?}", checker.skipped_rules());
+    }
+
+    // PERF-17: supplies alone leave `ir_drop` running over no node (no net
+    // states a drop limit); a supply's `max_drop_mv` makes it examine the grid.
+    #[test]
+    fn max_drop_arms_ir_drop() {
+        use gdsverify::check::report::Outcome;
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/sky130.json");
+        let pdk = Pdk::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let shapes = [rect(&pdk, "met1", 0, 0, 20_000, 1_000)];
+        let met1 = pdk.layer("met1").unwrap().0;
+        let pins = [LabeledPin { name: "VDD".into(), layer: met1, x: 500, y: 500 }];
+        let examined_ir = |c: &Checker| c.outputs().runs.iter().find(|r| c.rule_name(r.rule) == "ir_drop").map(|r| (r.outcome, r.examined));
+        let checks = Checks { drc: false, erc: true, lvs: false, pex: false };
+        let mut checker = Checker::new(&pdk, true).unwrap();
+        checker.set_intent(&Intent { supplies: vec![("VDD".into(), 1_800.0, false)], ..Default::default() }).unwrap();
+        checker.run(&shapes, &pins, checks).unwrap();
+        assert_eq!(examined_ir(&checker).map(|r| r.1), Some(0), "supplies alone examine nothing");
+        let intent = Intent { supplies: vec![("VDD".into(), 1_800.0, false)], max_drop_mv: vec![("VDD".into(), 10.0)], ..Default::default() };
+        checker.set_intent(&intent).unwrap();
+        checker.run(&shapes, &pins, checks).unwrap();
+        let (outcome, examined) = examined_ir(&checker).expect("ir_drop in the deck");
+        assert!(outcome == Outcome::Ran && examined > 0, "{outcome:?}, examined {examined}");
+        assert!(!checker.skipped_rules().iter().any(|(r, _)| *r == "ir_drop"), "{:?}", checker.skipped_rules());
+    }
+
+    // GPurify refuses a net listed twice: a net's current budget and drop
+    // limit go in one object.
+    #[test]
+    fn set_intent_merges_a_nets_limits() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/sky130.json");
+        let pdk = Pdk::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut checker = Checker::new(&pdk, true).unwrap();
+        let intent = Intent {
+            supplies: vec![("VDD".into(), 1_800.0, false)],
+            currents: vec![("VDD".into(), 100.0)],
+            max_drop_mv: vec![("VDD".into(), 5.0)],
+        };
+        assert_eq!(checker.set_intent(&intent), Ok(()));
     }
 
     // A density window wider than the block is chip-level: taken out and

@@ -179,6 +179,25 @@ fn a_flow_reports_the_worst_scenario_per_bound() {
     assert!(k <= 2 && worst[0].contains(" active of 3 scenarios)"), "{worst:?}");
 }
 
+/// PERF-17: with an operating point, each supply's IR budget reaches
+/// signoff's intent as a drop limit, so `ir_drop` runs over the grid instead
+/// of examining nothing.
+#[test]
+fn op_runs_carry_ir_limits() {
+    let Some(lib) = models() else { return };
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
+    let c = library::Config { feedback_iters: 1, outer_iters: 1, starts: 1, op: Some(op_cfg(lib)), ..library::Config::default() };
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &c).expect("flow");
+    let drops = &sol.intent.max_drop_mv;
+    assert!(!drops.is_empty(), "{:?}", sol.intent);
+    assert!(drops.iter().all(|(n, _)| sol.intent.supplies.iter().any(|s| s.0 == *n)), "{:?}", sol.intent);
+    let s = library::signoff(&sol, &pdk);
+    assert!(s.coverage.em_ir.0 >= 1, "{:?}", s.coverage);
+    assert!(!s.coverage.skipped_rules.iter().any(|(r, _)| r == "ir_drop"), "{:?}", s.coverage.skipped_rules);
+}
+
 /// A fixture parsed as the flow parses it: the deck's model table, then its
 /// model names.
 fn fixture(name: &str) -> pnr_core::Netlist {
