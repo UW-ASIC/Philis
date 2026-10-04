@@ -344,6 +344,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     }
     // EXT-23: substrate tags; an aggressor is never a victim.
     (intent.aggressors, intent.victims) = substrate::tag(netlist, &net_classes, &intent.sets);
+    intent.aggressors.extend(substrate::injectors(netlist, &net_classes, ev.op.as_ref(), cfg.policy.inj_series_ohm, &mut missing));
     let victim = substrate::victim_mask(n, &intent.victims);
     let mut aggressor = vec![false; n];
     intent.aggressors.iter().filter(|a| matches!(a.inject, analog::intent::Inject::Switching | analog::intent::Inject::Capacitive)).for_each(|a| aggressor[a.device.0 as usize] = true);
@@ -439,6 +440,14 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     {
         use analog::metadata::NetClass;
         let of_class = |c: NetClass| net_classes.iter().filter(move |k| k.class == c).map(|k| k.net);
+        let mut injector = vec![None; netlist.devices.len()];
+        for a in &intent.aggressors {
+            match a.inject {
+                analog::intent::Inject::MinorityElectron => injector[a.device.0 as usize] = Some(rings::Carrier::Electrons),
+                analog::intent::Inject::MinorityHole => injector[a.device.0 as usize] = Some(rings::Carrier::Holes),
+                _ => {}
+            }
+        }
         let touched_by_aggressor = |n: NetId| netlist.devices.iter().zip(&aggressor).any(|(d, &a)| a && d.terminals.iter().any(|t| t.1 == n));
         let name = |n: NetId| netlist.nets[n.0 as usize].name.to_lowercase();
         let quiet_ring_net = match &cfg.quiet_ring_net {
@@ -452,7 +461,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
             netlist,
             aggressor: &aggressor,
             victim: &victim,
-            injector: &vec![None; netlist.devices.len()],
+            injector: &injector,
             substrate: p.substrate,
             quiet_ring_net,
             // The Supply net at the highest known DC level; the lowest id

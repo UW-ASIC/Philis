@@ -60,6 +60,85 @@ pub fn tag(nl: &Netlist, classes: &[NetClassification], sets: &[MatchSpec]) -> (
     (aggressors, victims)
 }
 
+/// GAP-03: devices with a diffusion within `inj_series_ohm` of a pin, plus
+/// forward-biased bulks (H14-01). Pins are `nl.ports` that are not rails or
+/// substrate; distance is a multi-source Dijkstra over resistors (`r_mohm`).
+/// A resistor without a value is an edge of weight 0, conservative: what it
+/// reaches carries the reason `"resistance unknown"`. On a reached net NMOS
+/// D/S and a diode's N inject electrons, PMOS D/S and a diode's P holes;
+/// bipolars stay unclassified (noted in `missing`). With an op point, an NMOS
+/// with `vbs > 0` (PMOS `< 0`) gets the same tag. One tag per device, in
+/// device order, the first reason winning.
+#[must_use]
+pub fn injectors(
+    nl: &Netlist,
+    classes: &[NetClassification],
+    op: Option<&crate::evidence::OpFacts>,
+    inj_series_ohm: f64,
+    missing: &mut Vec<(&'static str, &'static str)>,
+) -> Vec<Aggressor> {
+    use std::cmp::Reverse;
+    let n_nets = nl.nets.len();
+    let mut dist: Vec<Option<(u64, bool)>> = vec![None; n_nets];
+    let mut heap = std::collections::BinaryHeap::new();
+    let pins = nl.ports.iter().filter(|p| !matches!(classes[p.0 as usize].class, NetClass::Supply | NetClass::Ground | NetClass::Substrate));
+    for &p in pins {
+        heap.push(Reverse((0u64, false, p.0)));
+    }
+    if nl.ports.is_empty() {
+        missing.push(("GuardRing", "no port list: injectors unknown"));
+    }
+    let mut edges: Vec<Vec<(u16, u64, bool)>> = vec![Vec::new(); n_nets];
+    for d in nl.devices.iter().filter(|d| d.kind == DeviceKind::Resistor) {
+        let net = |t: &str| d.terminals.iter().find(|x| x.0 == t).map(|x| x.1 .0);
+        if let (Some(a), Some(b)) = (net("P"), net("N")) {
+            let r = crate::param(d, "r_mohm", -1);
+            let (w, unknown) = if r < 0 { (0, true) } else { (r as u64, false) };
+            edges[a as usize].push((b, w, unknown));
+            edges[b as usize].push((a, w, unknown));
+        }
+    }
+    let limit = (inj_series_ohm * 1000.0) as u64;
+    while let Some(Reverse((dd, unknown, n))) = heap.pop() {
+        if dd >= limit || dist[n as usize].is_some() {
+            continue;
+        }
+        dist[n as usize] = Some((dd, unknown));
+        for &(m, w, u) in &edges[n as usize] {
+            if dist[m as usize].is_none() {
+                heap.push(Reverse((dd + w, unknown || u, m)));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (i, d) in nl.devices.iter().enumerate() {
+        let device = DeviceId(i as u16);
+        let reached = |ts: &[&str]| d.terminals.iter().filter(|t| ts.contains(&t.0.as_str())).find_map(|t| dist[t.1 .0 as usize]);
+        let tag = match d.kind {
+            DeviceKind::Nmos => reached(&["D", "S"]).map(|r| (Inject::MinorityElectron, r.1)),
+            DeviceKind::Pmos => reached(&["D", "S"]).map(|r| (Inject::MinorityHole, r.1)),
+            DeviceKind::Diode => reached(&["N"]).map(|r| (Inject::MinorityElectron, r.1)).or_else(|| reached(&["P"]).map(|r| (Inject::MinorityHole, r.1))),
+            DeviceKind::Npn | DeviceKind::Pnp => {
+                if reached(&["C", "B", "E"]).is_some() && !missing.contains(&("GuardRing", "bipolar injectors unclassified")) {
+                    missing.push(("GuardRing", "bipolar injectors unclassified"));
+                }
+                None
+            }
+            _ => None,
+        };
+        let tag = tag.map(|(inject, unknown)| (inject, if unknown { "resistance unknown" } else { "pin diffusion" })).or_else(|| {
+            let vbs = op?.dev.get(i).copied().flatten()?.vbs_mv?;
+            match d.kind {
+                DeviceKind::Nmos if vbs > 0.0 => Some((Inject::MinorityElectron, "forward-biased bulk")),
+                DeviceKind::Pmos if vbs < 0.0 => Some((Inject::MinorityHole, "forward-biased bulk")),
+                _ => None,
+            }
+        });
+        out.extend(tag.map(|(inject, reason)| Aggressor { device, inject, reason }));
+    }
+    out
+}
+
 /// `victim[d]`: what REL-07's `RingInputs.victim` and REL-16's `CellFlags.sensitive` read.
 #[must_use]
 pub fn victim_mask(n_devices: usize, v: &[Victim]) -> Vec<bool> {
@@ -99,5 +178,90 @@ mod tests {
         assert_eq!(kind("C1"), Some(Inject::Switching));
         assert_eq!((kind("M1"), kind("M2")), (Some(Inject::Capacitive), Some(Inject::Capacitive)));
         assert_eq!(names(&nl, p.intent.victims.iter().map(|v| v.device)), Vec::<String>::new());
+    }
+
+    /// GAP-03 `drv`: `M1` drains on the pin `out`, `M2` through 10 kΩ, `M3`
+    /// through 100 kΩ. Nets: 0=in 1=out 2=VDD 3=VSS 4=x 5=y.
+    fn drv(r2_mohm: Option<i64>) -> Netlist {
+        use crate::tests::{fet, nets};
+        let r = |name: &str, p: u16, v: Option<i64>| pnr_core::netlist::Device {
+            name: name.into(),
+            kind: DeviceKind::Resistor,
+            model: String::new(),
+            terminals: vec![("P".into(), pnr_core::NetId(p)), ("N".into(), pnr_core::NetId(1))],
+            params: v.map(|v| ("r_mohm".to_string(), v)).into_iter().collect(),
+        };
+        Netlist {
+            devices: vec![
+                fet("M1", DeviceKind::Nmos, 0, 1, 3, 3, 1_000, 500),
+                fet("M2", DeviceKind::Nmos, 0, 4, 3, 3, 1_000, 500),
+                fet("M3", DeviceKind::Nmos, 0, 5, 3, 3, 1_000, 500),
+                r("R1", 4, Some(10_000_000)),
+                r("R2", 5, r2_mohm),
+            ],
+            nets: nets(&["in", "out", "VDD", "VSS", "x", "y"]),
+            ports: [0, 1, 2, 3].map(pnr_core::NetId).to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn minority(nl: &Netlist) -> (Vec<(String, Inject, &'static str)>, Vec<(&'static str, &'static str)>) {
+        let p = crate::annotate(nl, &crate::AnnotationConfig::default());
+        let mut missing = Vec::new();
+        let tags = injectors(nl, &p.net_classes, None, crate::Policy::default().inj_series_ohm, &mut missing);
+        (tags.iter().map(|a| (nl.devices[a.device.0 as usize].name.clone(), a.inject, a.reason)).collect(), missing)
+    }
+
+    #[test]
+    fn pin_diffusions_are_injectors() {
+        let (tags, _) = minority(&drv(Some(100_000_000)));
+        assert_eq!(tags, [("M1".into(), Inject::MinorityElectron, "pin diffusion"), ("M2".into(), Inject::MinorityElectron, "pin diffusion")]);
+    }
+
+    #[test]
+    fn a_pmos_on_a_pin_injects_holes() {
+        let mut nl = drv(Some(100_000_000));
+        nl.devices.push(crate::tests::fet("M4", DeviceKind::Pmos, 0, 1, 2, 2, 1_000, 500));
+        let (tags, _) = minority(&nl);
+        assert!(tags.contains(&("M4".into(), Inject::MinorityHole, "pin diffusion")), "{tags:?}");
+    }
+
+    #[test]
+    fn unknown_resistance_is_conservative() {
+        let (tags, _) = minority(&drv(None));
+        assert!(tags.contains(&("M3".into(), Inject::MinorityElectron, "resistance unknown")), "{tags:?}");
+    }
+
+    #[test]
+    fn no_ports_no_minority_tags() {
+        let mut nl = drv(Some(100_000_000));
+        nl.ports.clear();
+        let (tags, missing) = minority(&nl);
+        assert!(tags.is_empty(), "{tags:?}");
+        assert!(missing.contains(&("GuardRing", "no port list: injectors unknown")));
+    }
+
+    #[test]
+    fn forward_biased_bulk() {
+        let mut nl = drv(Some(100_000_000));
+        nl.ports.clear();
+        let p = crate::annotate(&nl, &crate::AnnotationConfig::default());
+        let mut dev = vec![None; nl.devices.len()];
+        dev[2] = Some(crate::evidence::DeviceOp { id_ua: 1.0, headroom_mv: 100.0, gm_us: 10.0, power_uw: 0.0, vgs_mv: None, vbs_mv: Some(200.0), vth_mv: None, gmb_us: None, gds_us: None });
+        let op = crate::OpFacts { dev, net_mv: vec![None; nl.nets.len()] };
+        let tags = injectors(&nl, &p.net_classes, Some(&op), 50_000.0, &mut Vec::new());
+        assert_eq!(tags.len(), 1);
+        assert_eq!((tags[0].device, tags[0].inject, tags[0].reason), (DeviceId(2), Inject::MinorityElectron, "forward-biased bulk"));
+    }
+
+    /// REL T7: every minority-tagged device gets an Injector ring.
+    #[test]
+    fn drv_injectors_get_rings() {
+        let nl = drv(Some(100_000_000));
+        let p = crate::annotate(&nl, &crate::AnnotationConfig::default());
+        let tagged: Vec<DeviceId> = p.intent.aggressors.iter().filter(|a| matches!(a.inject, Inject::MinorityElectron | Inject::MinorityHole)).map(|a| a.device).collect();
+        assert_eq!(tagged.len(), 2);
+        let rings: Vec<DeviceId> = p.constraints.guard_rings.iter().filter(|r| r.role == analog::cell::RingRole::Injector).map(|r| r.device).collect();
+        assert_eq!(rings, tagged);
     }
 }

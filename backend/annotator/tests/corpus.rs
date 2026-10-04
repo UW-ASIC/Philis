@@ -784,6 +784,13 @@ fn ota5t_tags() {
     let xm5 = p.intent.victims.iter().find(|v| nl.devices[v.device.0 as usize].name == "XM5").unwrap();
     assert_eq!(xm5.reason, "bias/reference gate");
     assert_eq!(p.constraints.guard_rings.len(), 0, "C19: no aggressor, no ring");
+    // GAP-03 / REL T8: with only gates and rails as pins (the corpus netlist has
+    // no port list), no diffusion reaches a pin: no minority injector, no ring.
+    let mut nl = nl;
+    nl.ports = ["vinp", "vinm", "vbias", "vbn", "VDD", "VSS"].map(|n| pnr_core::ids::NetId(nl.nets.iter().position(|x| x.name == n).unwrap() as u16)).to_vec();
+    let p = annotate(&nl, &cfg("ota5t"));
+    assert!(p.intent.aggressors.is_empty(), "{:?}", p.intent.aggressors);
+    assert_eq!(p.constraints.guard_rings.len(), 0);
 }
 
 /// EXT-23: DAC4's switch logic is digital, so no inverter device is a victim.
