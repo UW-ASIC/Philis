@@ -205,6 +205,9 @@ pub struct RunStats {
     /// over every epoch of every start and cell topology, not just the
     /// winner's; each scored its epoch as every spec unmeasured.
     pub sim_failures: u32,
+    /// ngspice decks run: sensitivities plus every scored epoch, over every
+    /// start and cell topology.
+    pub sims: u32,
 }
 
 /// Anything that stops the flow.
@@ -284,7 +287,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // 2. Bias: per-device power and per-net current. Placement-independent,
     //    so solved once.
     let bias = bias(&netlist, cfg);
-    let (perf_rows, perf_bounds, perf_active) = performance_rows(&netlist, pdk, cfg);
+    let plan = performance_rows(&netlist, pdk, cfg);
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
     // linear gradient but splits one drain across the row ends (asymmetric
@@ -293,15 +296,16 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // lexicographically better kept.
     let start = |j: u32| -> (Solution, LexKey) {
         let seed = cfg.seed.wrapping_add(u64::from(j).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let (merged, key, distinct) = solve(&netlist, injected, pdk, cfg, &bias, &perf_rows, &perf_active, true, seed);
+        let (merged, key, distinct) = solve(&netlist, injected, pdk, cfg, &bias, &plan, true, seed);
         if !distinct {
             return (merged, key);
         }
-        let (apart, apart_key, _) = solve(&netlist, injected, pdk, cfg, &bias, &perf_rows, &perf_active, false, seed);
+        let (apart, apart_key, _) = solve(&netlist, injected, pdk, cfg, &bias, &plan, false, seed);
         // Failures count over both topologies, whichever wins.
         let failed = merged.stats.sim_failures + apart.stats.sim_failures;
+        let sims = merged.stats.sims + apart.stats.sims;
         let (mut sol, key) = if key_lt(&apart_key, &key) { (apart, apart_key) } else { (merged, key) };
-        sol.stats.sim_failures = failed;
+        (sol.stats.sim_failures, sol.stats.sims) = (failed, sims);
         (sol, key)
     };
     // Multi-start: the lex-best start wins; ties go to the earliest.
@@ -313,9 +317,12 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // Failures count over every start, not just the winner's: a failed
     // simulation scores its epoch unmeasured, so selection would hide them.
     let sim_failures = runs.iter().map(|r| r.0.stats.sim_failures).sum();
+    let sims = runs.iter().map(|r| r.0.stats.sims).sum::<u32>() + plan.sims;
     let mut sol = runs.into_iter().reduce(|best, r| if key_lt(&r.1, &best.1) { r } else { best }).expect("one start at least").0;
     (sol.stats.sim_failures, sol.metadata.sim_failures) = (sim_failures, sim_failures);
-    sol.metadata.budget_rows = perf_bounds;
+    sol.stats.sims = sims;
+    sol.metadata.budget_rows = plan.notes;
+    sol.metadata.sensitivity = plan.sens;
     Ok(sol)
 }
 
@@ -328,14 +335,12 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 /// worst scenario on the schematic, in order; every scenario when the
 /// schematic cannot be evaluated. Epochs are simulated over these only.
 /// The notes open with `"scenario {name}: active"` / `": inactive"` per
-/// scenario, ahead of the per-bound notes.
-fn performance_rows(
-    netlist: &pnr_core::Netlist,
-    pdk: &Pdk,
-    cfg: &Config,
-) -> (Vec<analog::routing::PerformanceBudget>, Vec<String>, Vec<usize>) {
+/// scenario, ahead of the per-bound notes. Per active scenario a sensitivity
+/// table (PERF-11), noted in [`PerfPlan::sens`].
+fn performance_rows(netlist: &pnr_core::Netlist, pdk: &Pdk, cfg: &Config) -> PerfPlan {
     use analog::metadata::NetClass;
-    let Some(p) = &cfg.performance else { return (Vec::new(), Vec::new(), vec![0]) };
+    let plan = |rows, notes, active| PerfPlan { rows, notes, active, tables: Vec::new(), sens: Vec::new(), sims: 0 };
+    let Some(p) = &cfg.performance else { return plan(Vec::new(), Vec::new(), vec![0]) };
     let all: Vec<usize> = (0..p.scenarios().len()).collect();
     let bounds = || {
         p.specs.iter().flat_map(|s| {
@@ -368,7 +373,7 @@ fn performance_rows(
     let Some(af_per_um) = ann.process.wire_af_per_um else {
         let mut out = scenario_notes(&all);
         out.extend(notes(&[], "deck has no wire capacitance"));
-        return (Vec::new(), out, all);
+        return plan(Vec::new(), out, all);
     };
     let classes = annotate(netlist, &ann).net_classes;
     let nets: Vec<pnr_core::NetId> = classes
@@ -376,8 +381,9 @@ fn performance_rows(
         .filter(|c| matches!(c.class, NetClass::Signal | NetClass::Sensitive | NetClass::Clock))
         .map(|c| c.net)
         .collect();
-    let names: Vec<String> = nets.iter().map(|n| netlist.nets[n.0 as usize].name.clone()).collect();
-    // 10 fF: well above solver noise, small enough to stay linear.
+    let steps = perf::StepPolicy { gate_af_um2: ann.process.gate_af_per_um2.map_or(0.0, f64::from), ..Default::default() };
+    let params = perf::default_params(netlist, &nets);
+    let names = p.scenarios();
     let sens = perf::evaluate(netlist, &perf::Parasitics::default(), p, &all).and_then(|start| {
         let mut active = vec![0];
         for b in &start.bounds {
@@ -385,21 +391,52 @@ fn performance_rows(
                 active.push(b.scenario);
             }
         }
-        perf::sensitivities(netlist, p, &names, 10_000.0, &active).map(|s| (s, active))
+        let mut sens_notes = Vec::new();
+        let mut tables = Vec::new();
+        for &s in &active {
+            let t0 = std::time::Instant::now();
+            let mut t = perf::sensitivities(netlist, p, s, &params, &vec![None; netlist.devices.len()], &steps, &perf::Parasitics::default())?;
+            perf::add_coupling(&mut t, netlist, p, &nets, &steps, 64)?;
+            let name = &names[s].name;
+            sens_notes.push(format!("{name}: {} rows, {} sims, {} ms", t.rows.len(), t.sims, t0.elapsed().as_millis()));
+            sens_notes.extend(t.rows.iter().filter(|r| !r.linear).map(|r| format!("{name}: nonlinear {:?}", r.param)));
+            tables.push(t);
+        }
+        Ok((start, active, tables, sens_notes))
     });
     match sens {
-        Ok((s, active)) => {
-            let rows = perf::budget_rows(p, &s, &nets, af_per_um / 1000.0);
+        Ok((start, active, tables, sens_notes)) => {
+            let rows = perf::budget_rows(p, &start, &tables, &nets, af_per_um / 1000.0);
             let mut out = scenario_notes(&active);
             out.extend(notes(&rows, "not measured at the schematic"));
-            (rows, out, active)
+            sens_notes.iter().for_each(|n| eprintln!("[perf] sens {n}"));
+            let sims = (all.len() * p.testbenches.len()) as u32 + tables.iter().map(|t| t.sims).sum::<u32>();
+            PerfPlan { rows, notes: out, active, tables, sens: sens_notes, sims }
         }
         Err(e) => {
             let mut out = scenario_notes(&all);
             out.extend(notes(&[], &format!("sensitivities unavailable: {e}")));
-            (Vec::new(), out, all)
+            plan(Vec::new(), out, all)
         }
     }
+}
+
+/// What the run scores performance with, solved once on the schematic
+/// ([`performance_rows`]).
+struct PerfPlan {
+    /// Spec bounds as routing budget rows.
+    rows: Vec<analog::routing::PerformanceBudget>,
+    /// [`metadata::MetadataReport::budget_rows`].
+    notes: Vec<String>,
+    /// Scenarios each scored epoch is simulated at.
+    active: Vec<usize>,
+    /// One sensitivity table per active scenario, in `active` order.
+    #[allow(dead_code)] // read by PERF-13
+    tables: Vec<perf::SensTable>,
+    /// [`metadata::MetadataReport::sensitivity`].
+    sens: Vec<String>,
+    /// ngspice decks run on the schematic.
+    sims: u32,
 }
 
 /// The operating point, solved once per run.
@@ -426,8 +463,7 @@ fn solve(
     pdk: &Pdk,
     cfg: &Config,
     bias: &Bias,
-    perf_rows: &[analog::routing::PerformanceBudget],
-    perf_active: &[usize],
+    perf: &PerfPlan,
     merge_distinct_gates: bool,
     seed: u64,
 ) -> (Solution, LexKey, bool) {
@@ -439,6 +475,7 @@ fn solve(
     if cfg.min_utilization > 0.0 {
         problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min: cfg.min_utilization }));
     }
+    let (perf_rows, perf_active) = (&perf.rows[..], &perf.active[..]);
     for row in perf_rows {
         problem.routing.budget.push(Box::new(row.clone()));
     }
@@ -1023,7 +1060,7 @@ impl Flow<'_> {
                 (k > 0).then(|| s / k as f32)
             })
             .collect();
-        perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true }
+        perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true, gate_offset_v: Vec::new() }
     }
 
     /// Each recognised matched pair on one source net, with its members'
@@ -1148,6 +1185,7 @@ impl Flow<'_> {
         let result = if epoch.caps.is_empty() {
             unknown()
         } else {
+            stats.sims += (self.perf_active.len() * p.testbenches.len()) as u32;
             perf::evaluate(self.netlist, &self.parasitics(epoch), p, self.perf_active).unwrap_or_else(|e| {
                 eprintln!("[perf] {e}");
                 stats.sim_failures += 1;

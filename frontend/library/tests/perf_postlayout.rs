@@ -118,6 +118,50 @@ fn a_flow_scores_its_layout_in_simulation() {
     assert_eq!(sol.stats.sim_failures, 0, "{:?}", sol.stats);
 }
 
+/// PERF-11 acceptance: on ota at one scenario the engine produces every
+/// parameter class within the run budget, and the two input FETs' gate
+/// offsets move the gain in opposite directions.
+#[test]
+fn ota_sensitivities_cover_every_parameter_class() {
+    use library::perf::{add_coupling, default_params, sensitivities, Param, StepPolicy};
+    let Some(lib) = models() else { return };
+    let (nl, p) = (ota(), cfg(lib));
+    let nets: Vec<pnr_core::NetId> = (0..nl.nets.len() as u16)
+        .map(pnr_core::NetId)
+        .filter(|n| !matches!(nl.nets[n.0 as usize].name.to_ascii_lowercase().as_str(), "vdd" | "vss"))
+        .collect();
+    let params = default_params(&nl, &nets);
+    let steps = StepPolicy::default();
+    let t0 = std::time::Instant::now();
+    let mut t = sensitivities(&nl, &p, 0, &params, &[], &steps, &Parasitics::default()).expect("schematic simulates");
+    add_coupling(&mut t, &nl, &p, &nets, &steps, 64).expect("coupling rows");
+    let kind = |r: &Param| match r {
+        Param::GroundC { .. } => 0,
+        Param::CouplingC { .. } => 1,
+        Param::SeriesR { .. } => 2,
+        Param::GateOffset { .. } => 3,
+    };
+    let count = |k: usize, ps: &mut dyn Iterator<Item = &Param>| ps.filter(|r| kind(r) == k).count();
+    for k in 0..4 {
+        assert!(count(k, &mut t.rows.iter().map(|r| &r.param)) >= 1, "class {k}: {:?}", t.rows.iter().map(|r| r.param).collect::<Vec<_>>());
+    }
+    assert!(count(1, &mut t.rows.iter().map(|r| &r.param)) <= 64);
+    let (n_nets, n_terms, n_fets) = (count(0, &mut params.iter()), count(2, &mut params.iter()), count(3, &mut params.iter()));
+    assert!(t.sims as usize <= 1 + 2 * (n_nets + n_terms + n_fets + 64), "{} sims", t.sims);
+    let nonlinear: Vec<Param> = t.rows.iter().filter(|r| !r.linear).map(|r| r.param).collect();
+    eprintln!("{} rows, {} sims, {:?}; nonlinear {nonlinear:?}", t.rows.len(), t.sims, t0.elapsed());
+    for r in &t.rows {
+        eprintln!("  {:?} step {:.3e} d {:?} linear {}", r.param, r.step, r.d, r.linear);
+    }
+    let net = |n: &str| pnr_core::NetId(nl.nets.iter().position(|x| x.name == n).unwrap() as u16);
+    let dev = |n: &str| nl.devices.iter().position(|d| d.name == n).unwrap() as u16;
+    let d = |p: Param| t.rows.iter().find(|r| r.param == p).and_then(|r| r.d[0]);
+    assert!(d(Param::GroundC { net: net("vout2") }).is_some());
+    let (g1, g2) = (d(Param::GateOffset { device: dev("XM1") }), d(Param::GateOffset { device: dev("XM2") }));
+    let (g1, g2) = (g1.expect("XM1 measured"), g2.expect("XM2 measured"));
+    assert!(g1 * g2 < 0.0, "XM1 {g1} XM2 {g2}");
+}
+
 fn scenario(name: &str, corner: &str, temp_c: f64) -> Scenario {
     Scenario { name: name.into(), corner: corner.into(), temp_c, params: Vec::new() }
 }

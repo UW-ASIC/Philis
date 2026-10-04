@@ -100,6 +100,11 @@ pub struct MetadataReport {
     /// (`"ugf:min: row (3 nets)"`, `"…: do-not-worsen row …"`, `"…: no row (reason)"`).
     /// Empty from [`build`]; the flow fills it.
     pub budget_rows: Vec<String>,
+    /// Per active scenario's schematic sensitivity table (PERF-11): `"{scenario}:
+    /// {rows} rows, {sims} sims, {ms} ms"`, then `"{scenario}: nonlinear
+    /// {param:?}"` per row whose two difference quotients disagree. Empty from
+    /// [`build`]; the flow fills it.
+    pub sensitivity: Vec<String>,
     /// Post-layout simulations that could not run ([`crate::RunStats::sim_failures`]).
     pub sim_failures: u32,
     /// One ledger row per matched pair on the placed layout, from the
@@ -279,6 +284,7 @@ pub fn build(
         performance: Vec::new(),
         performance_worst: Vec::new(),
         budget_rows: Vec::new(),
+        sensitivity: Vec::new(),
         sim_failures: 0,
         matched,
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
@@ -371,6 +377,9 @@ impl std::fmt::Display for MetadataReport {
         }
         for b in &self.budget_rows {
             writeln!(f, "  budget {b}")?;
+        }
+        for n in &self.sensitivity {
+            writeln!(f, "  sens {n}")?;
         }
         if !self.performance.is_empty() || !self.budget_rows.is_empty() {
             writeln!(f)?;
