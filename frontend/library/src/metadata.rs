@@ -100,6 +100,16 @@ pub struct MetadataReport {
     /// (`"ugf:min: row (3 nets)"`, `"…: do-not-worsen row …"`, `"…: no row (reason)"`).
     /// Empty from [`build`]; the flow fills it.
     pub budget_rows: Vec<String>,
+    /// Per active scenario's schematic sensitivity table (PERF-11): `"{scenario}:
+    /// {rows} rows, {sims} sims, {ms} ms"`, then `"{scenario}: nonlinear
+    /// {param:?}"` per row whose two difference quotients disagree. Empty from
+    /// [`build`]; the flow fills it.
+    pub sensitivity: Vec<String>,
+    /// Per finite spec bound of the winner (PERF-13): `"{metric}:{min|max} σ_f
+    /// … β … Φ(β) … (V_T only) top {device} {pct}%, …"`, or `"{metric}:{side}
+    /// UNKNOWN ({reason})"` ([`crate::robust::unknown_reason`]), then `"joint yield (linear, 1e5) …"`. Empty without
+    /// performance scoring.
+    pub robustness: Vec<String>,
     /// Post-layout simulations that could not run ([`crate::RunStats::sim_failures`]).
     pub sim_failures: u32,
     /// One ledger row per matched pair on the placed layout, from the
@@ -296,6 +306,8 @@ pub fn build(
         performance: Vec::new(),
         performance_worst: Vec::new(),
         budget_rows: Vec::new(),
+        sensitivity: Vec::new(),
+        robustness: Vec::new(),
         sim_failures: 0,
         matched,
         sizing,
@@ -390,10 +402,16 @@ impl std::fmt::Display for MetadataReport {
             for w in &self.performance_worst {
                 writeln!(f, "  worst {w}")?;
             }
+            for r in &self.robustness {
+                writeln!(f, "  robust {r}")?;
+            }
             writeln!(f, "  simulations failed: {}", self.sim_failures)?;
         }
         for b in &self.budget_rows {
             writeln!(f, "  budget {b}")?;
+        }
+        for n in &self.sensitivity {
+            writeln!(f, "  sens {n}")?;
         }
         if !self.performance.is_empty() || !self.budget_rows.is_empty() {
             writeln!(f)?;
