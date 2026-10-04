@@ -268,6 +268,14 @@ mod tests {
     }
 
     #[test]
+    fn order_counts_leading_orders_only() {
+        // Two single points: r1 > 0 but every second moment is equal (r2 = 0).
+        let (a, b) = ([pt(0.0, 0.0)], [pt(1000.0, 0.0)]);
+        let (order, r) = cancelled_order(&[&a, &b], 2, 1e-9);
+        assert_eq!((order, r[2]), (0, 0.0), "r = {r:?}");
+    }
+
+    #[test]
     fn ratio_weights_make_one_to_two_exact() {
         let a = vec![pt(0.0, 0.0)];
         let b: Vec<Pt> = [-1000.0, 1000.0].iter().map(|&x| pt(x, 0.0)).collect();
