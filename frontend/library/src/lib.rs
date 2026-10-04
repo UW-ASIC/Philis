@@ -1486,7 +1486,7 @@ impl CellSpace {
         // Reserve each ring's halo in the requester's bbox so the placer keeps
         // neighbours out of it; the ring is drawn back inside the reservation.
         for r in &cells.guard_rings.guard_rings {
-            let ext = round_up(cells::post_cell::ring_halo(r, pdk, ring_cut_ohm(pdk)), pdk.grid.max(1));
+            let ext = round_up(cells::post_cell::ring_halo(r, pdk, ring_cut_ohm(pdk)), cells::builder::cut_lattice(pdk));
             let Some(space) = cells.variants.get_mut(r.device.0 as usize) else {
                 continue;
             };
