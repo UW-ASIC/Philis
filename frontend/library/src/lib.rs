@@ -24,6 +24,7 @@ pub mod metadata;
 /// DC operating point via ngspice — the per-device power the thermal rules need.
 pub mod oppoint;
 pub mod perf;
+pub mod reliability;
 
 /// Test gates for external tools (FLOW-14), shared by the unit and
 /// integration tests: a missing tool skips with a printed reason, and under
@@ -160,6 +161,8 @@ pub struct Solution {
     pub well_layer: Option<LayerId>,
     /// The operating point the run was biased with; `None` without one.
     pub op: Option<oppoint::OpPoint>,
+    /// Recognised matched pairs ([`matched_pairs`]): signoff's REL-10 rows.
+    pub pairs: Vec<(DeviceId, DeviceId)>,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -627,6 +630,13 @@ fn solve(
     netlist.devices.extend(best.extra);
     let solution = Solution {
         layout: best.layout,
+    let pairs = matched_pairs(&flow.problem.blocks);
+    if let Some(op) = &bias.op {
+        let (_, aging, unknown) = reliability::voltage_findings(&netlist, op, &pdk.fet_voltage_limits(), &pairs);
+        let name = |d: DeviceId| netlist.devices[d.0 as usize].name.clone();
+        metadata.aging = aging.into_iter().map(|a| (name(a.a), name(a.b), a.dvds_mv, a.dvgs_mv, a.dvbs_mv)).collect();
+        metadata.voltage_unknown = unknown;
+    }
         routes: best.routes,
         macros,
         netlist,
@@ -666,6 +676,7 @@ struct Flow<'a> {
     /// The fold table the cells were drawn at ([`cellgen::folds`]).
     fold: Vec<(u16, i32)>,
     /// The routing stack's per-layer R/C (branch resistance).
+        pairs,
     stack: &'static analog::routing::Stack,
     /// Per device drain current, µA (`None` = unresolved).
     id_ua: Vec<Option<f64>>,
@@ -1631,9 +1642,25 @@ pub fn adopt_devices(netlist: &mut pnr_core::Netlist, macros: &mut Vec<Macro>, e
 /// placed on them, and the LVS reference whose ports are those labels.
 #[must_use]
 pub fn signoff_inputs(
+    if let Some(op) = &sol.op {
+        s.report.hard_violations.extend(reliability::voltage_findings(&sol.netlist, op, &pdk.fet_voltage_limits(), &sol.pairs).0);
+    }
     sol: &Solution,
     pdk: &Pdk,
 ) -> (
+/// Every recognised 2-device `DiffPair` / `CurrentMirror` / `Load` leaf block.
+fn matched_pairs(blocks: &[annotator::Block]) -> Vec<(DeviceId, DeviceId)> {
+    use annotator::BlockKind::{CurrentMirror, DiffPair, Load};
+    annotator::block::leaves(blocks)
+        .into_iter()
+        .filter(|b| matches!(b.kind, DiffPair | CurrentMirror | Load))
+        .filter_map(|b| match *b.devices.as_slice() {
+            [a, b] => Some((a, b)),
+            _ => None,
+        })
+        .collect()
+}
+
     Vec<pnr_core::Shape>,
     Vec<verify::LabeledPin>,
     verify::RefInput,

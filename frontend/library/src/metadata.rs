@@ -118,6 +118,12 @@ pub struct MetadataReport {
     /// `(device, reason)` for every `annotator::Coverage::Unconstrained` device.
     /// Empty from [`build`]; the flow fills it.
     pub unconstrained: Vec<(String, &'static str)>,
+    /// REL-10: `(a, b, ΔV_DS, ΔV_GS, ΔV_BS)` mV per recognised matched pair
+    /// under the run's bias (reported, no threshold). Empty without an op.
+    pub aging: Vec<(String, String, f64, f64, f64)>,
+    /// REL-10: FETs whose voltage rating could not be checked (a voltage
+    /// unresolved, or no deck rule names the model). `0` without an op.
+    pub voltage_unknown: usize,
 }
 
 impl MetadataReport {
@@ -282,6 +288,8 @@ impl MetadataReport {
     /// Fold in routing batches built after the fact (on placed pins).
     pub fn add_routing(&mut self, reqs: &[Box<dyn RuleBatch<pnr_core::Routes>>], routes: &pnr_core::Routes) {
         self.routing.extend(statuses(reqs, routes, Arm::Budget));
+        aging: Vec::new(),
+        voltage_unknown: 0,
     }
 }
 
@@ -382,6 +390,10 @@ impl std::fmt::Display for MetadataReport {
             write!(f, "\n{}", self.coverage)?;
         }
         writeln!(f, "\n  certificate: {}", if self.certified() { "all families met, all inputs present" } else { "NOT CERTIFIED" })?;
+        if self.bias.is_some() {
+            let a: Vec<String> = self.aging.iter().map(|(x, y, ds, gs, bs)| format!("{x}/{y} ΔVds {ds:.1} ΔVgs {gs:.1} ΔVbs {bs:.1} mV")).collect();
+            writeln!(f, "  AGING: {}; voltage rating unknown on {} FET(s)", if a.is_empty() { "no matched pair".into() } else { a.join(", ") }, self.voltage_unknown)?;
+        }
         Ok(())
     }
 }

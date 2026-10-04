@@ -23,7 +23,7 @@ pub use gdsverify::ingest::deck::DeviceKind;
 pub use gdsverify::engine::Checks;
 pub use geom::LabeledPin;
 pub use netlist::{extract_spice, Detail};
-pub use pdk::{EmLimit, Pdk};
+pub use pdk::{EmLimit, FetLimit, Pdk};
 pub use reference::{RefDeviceIn, RefInput, RefKind};
 
 /// Shortfall of one violation row, in one of two units. A length pair is nm
