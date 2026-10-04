@@ -415,6 +415,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     });
     let base = annotator::annotate_with(&netlist, &ann, &ev);
     let plan = performance_rows(&netlist, cfg, &ann, &base.net_classes);
+    let ev = annotator::Evidence { sens: plan.evidence.clone(), ..ev };
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
     // linear gradient but splits one drain across the row ends (asymmetric
@@ -483,7 +484,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 /// table (PERF-11), noted in [`PerfPlan::sens`].
 fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationConfig, classes: &[analog::metadata::NetClassification]) -> PerfPlan {
     use analog::metadata::NetClass;
-    let plan = |rows, notes, active| PerfPlan { rows, notes, active, tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0 };
+    let plan = |rows, notes, active| PerfPlan { rows, notes, active, tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0, evidence: None, r_weight: Vec::new(), pair_weight: Vec::new() };
     let Some(p) = &cfg.performance else { return plan(Vec::new(), Vec::new(), vec![0]) };
     let all: Vec<usize> = (0..p.scenarios().len()).collect();
     let bounds = || {
@@ -548,13 +549,45 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
         Ok((start, active, tables, sens_notes))
     });
     match sens {
-        Ok((start, active, tables, sens_notes)) => {
+        Ok((start, active, tables, mut sens_notes)) => {
             let rows = perf::budget_rows(p, &start, &tables, &nets, af_per_um / 1000.0);
+            // PERF-12: EXT-17's evidence and RTE-21's router weights, each
+            // bound scaled by its statistical headroom (PERF-06's scale).
+            let stats = robust::bound_stats(&tables, &sigma_v, &start, &p.specs, &[], &[]);
+            let evidence = perf::to_evidence(p, &tables, &start, &stats, netlist);
+            let h_bounds: Vec<(usize, f64, usize)> = start
+                .bounds
+                .iter()
+                .zip(&stats)
+                .filter_map(|(b, st)| {
+                    let spec = &p.specs[b.spec];
+                    let (bound, sign) = if b.upper { (spec.max?, 1.0) } else { (spec.min?, -1.0) };
+                    let plain = sign * (bound - b.value?);
+                    let h = match st.headroom_stat {
+                        Some(h) if h > 0.0 => h,
+                        None if plain > 0.0 => plain,
+                        _ if bound == 0.0 => 1.0,
+                        _ => bound.abs(),
+                    };
+                    Some((b.spec, h, b.scenario))
+                })
+                .collect();
+            let (r_weight, pair_weight) = perf::router_weights(&tables, &h_bounds, netlist);
+            let unknown = || "unknown".to_string();
+            for e in &evidence.specs {
+                let sigma = e.sigma_f.map_or_else(unknown, |v| format!("{v:.3e}"));
+                sens_notes.push(format!("evidence {}: d_c {}, d_r {}, d_vt {}, d_cc {}, σ_f {sigma}", e.metric, e.d_c.len(), e.d_r.len(), e.d_vt.len(), e.d_cc.len()));
+            }
+            let net_name = |n: pnr_core::NetId| &netlist.nets[n.0 as usize].name;
+            for (n, w) in r_weight.iter().enumerate().filter(|(_, &w)| w != 0.0) {
+                sens_notes.push(format!("r_weight {} {w:.3}", netlist.nets[n].name));
+            }
+            sens_notes.extend(pair_weight.iter().map(|&(a, b, w)| format!("pair_weight {}-{} {w:.3e}", net_name(a), net_name(b))));
             let mut out = scenario_notes(&active);
             out.extend(notes(&rows, "not measured at the schematic"));
             sens_notes.iter().for_each(|n| eprintln!("[perf] sens {n}"));
             let sims = (all.len() * p.testbenches.len()) as u32 + tables.iter().map(|t| t.sims).sum::<u32>();
-            PerfPlan { rows, notes: out, active, tables, sigma_v, sens: sens_notes, sims }
+            PerfPlan { rows, notes: out, active, tables, sigma_v, sens: sens_notes, sims, evidence: Some(evidence), r_weight, pair_weight }
         }
         Err(e) => {
             let mut out = scenario_notes(&all);
@@ -582,6 +615,15 @@ struct PerfPlan {
     sens: Vec<String>,
     /// ngspice decks run on the schematic.
     sims: u32,
+    /// EXT-17's spec sensitivities ([`perf::to_evidence`]); `None` without tables.
+    evidence: Option<annotator::evidence::Sensitivities>,
+    /// RTE-21's per-net R weight ([`perf::router_weights`]); computed and
+    /// reported only until `DetailedCfg` takes it.
+    #[allow(dead_code)] // RTE-21 step 1 writes it into `DetailedCfg` (not landed)
+    r_weight: Vec<f32>,
+    /// RTE-21's coupling pair weight; as `r_weight`.
+    #[allow(dead_code)] // as `r_weight`
+    pair_weight: Vec<(pnr_core::NetId, pnr_core::NetId, f32)>,
 }
 
 /// The operating point, solved once per run.
@@ -2779,7 +2821,7 @@ mod common_node_tests {
         let cfg = crate::Config::default();
         let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
         let ann = crate::annotation_with(&pdk, &cfg.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
-        let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0 };
+        let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0, evidence: None, r_weight: Vec::new(), pair_weight: Vec::new() };
         let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &Default::default(), &plan, true);
         let n = t.flow.cells.variants.len();
         let layout = pnr_core::Layout {

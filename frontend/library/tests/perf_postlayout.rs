@@ -482,3 +482,50 @@ fn ota_probe_regions() {
     assert_eq!(facts("XM5").role, analog::intent::DeviceRole::CurrentSource);
     assert!(p.intent.diagnostics.iter().any(|d| d.kind == "probe_bias"));
 }
+
+/// PERF-12 acceptance: the flow reports EXT-17's evidence and RTE-21's router
+/// weights, and `to_evidence` on ota's schematic table exports R, V_T and
+/// process spread.
+#[test]
+fn ota_exports_sensitivities() {
+    use library::perf::{add_coupling, default_params, sensitivities, to_evidence, StepPolicy};
+    let Some(lib) = models() else { return };
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
+    let p = PerfConfig { scenarios: vec![scenario("tt_27", "tt", 27.0), scenario("ff_27", "ff", 27.0)], ..cfg(lib.clone()) };
+    let c = library::Config {
+        feedback_iters: 2,
+        outer_iters: 1,
+        starts: 1,
+        op: Some(OpConfig { model_lib: Some(lib), ..OpConfig::default() }),
+        performance: Some(p.clone()),
+        ..library::Config::default()
+    };
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &c).expect("flow");
+    let s = &sol.metadata.sensitivity;
+    eprintln!("{s:#?}");
+    let ev = s.iter().find(|l| l.starts_with("evidence gain: ")).unwrap_or_else(|| panic!("{s:?}"));
+    let count = |k: &str| ev.split(&format!("{k} ")).nth(1).and_then(|r| r.split(',').next()?.parse::<usize>().ok()).unwrap_or(0);
+    assert!(count("d_c") > 0 && count("d_r") > 0 && count("d_vt") > 0, "{ev}");
+    assert!(!ev.ends_with("σ_f unknown"), "{ev}");
+    assert!(s.iter().any(|l| l.starts_with("r_weight vtail ")), "{s:?}");
+    assert!(s.iter().any(|l| l.starts_with("pair_weight ")), "{s:?}");
+
+    let nl = ota();
+    let start = evaluate(&nl, &Parasitics::default(), &p, &[0, 1]).expect("schematic simulates");
+    let nets: Vec<pnr_core::NetId> = (0..nl.nets.len() as u16)
+        .map(pnr_core::NetId)
+        .filter(|n| !matches!(nl.nets[n.0 as usize].name.to_ascii_lowercase().as_str(), "vdd" | "vss"))
+        .collect();
+    let params = default_params(&nl, &nets);
+    let steps = StepPolicy::default();
+    let mut t = sensitivities(&nl, &p, start.bounds[0].scenario, &params, &[], &steps, &Parasitics::default()).expect("schematic simulates");
+    add_coupling(&mut t, &nl, &p, &nets, &steps, 64).expect("coupling rows");
+    let e = &to_evidence(&p, &[t], &start, &[], &nl).specs[0];
+    let net = |n: &str| pnr_core::NetId(nl.nets.iter().position(|x| x.name == n).unwrap() as u16);
+    let dev = |n: &str| pnr_core::ids::DeviceId(nl.devices.iter().position(|d| d.name == n).unwrap() as u16);
+    assert!(e.d_r.iter().any(|r| r.0 == net("vtail")), "{e:?}");
+    assert!(["XM1", "XM2"].iter().all(|n| e.d_vt.iter().any(|v| v.0 == dev(n))), "{e:?}");
+    assert!(e.proc.is_some(), "{e:?}");
+}
