@@ -298,6 +298,7 @@ pub(crate) fn stack(pdk: &Pdk) -> analog::routing::Stack {
                 antenna_sidewall_nm: rule.map_or(0.0, |r| r.1),
                 sheet_ohm: pdk.pex_f32(l, "sheet_res_ohm_sq").unwrap_or(0.0),
                 cut: pdk.routing_cuts.contains(&l),
+                thickness_nm: pdk.pex_f32(l, "thickness_nm").unwrap_or(0.0),
             })
             .collect(),
         antenna_cumulative: rules.iter().flatten().any(|r| r.2),

@@ -105,6 +105,7 @@ pub const KEYS: &[Key] = &[
     k("lod_moat_ext_nm", Tier, false, true, "kernel/cells/src/mosfet.rs; frontend/library/src/lib.rs; kernel/analog/src/matching/class.rs"),
     k("m1_enc", Nm, false, false, "kernel/cells/src/builder.rs dim (raises the deck's)"),
     k("max_finger_width", Nm, true, false, "frontend/library/src/cellgen.rs folds (0 = no limit)"),
+    k("metal_family", Text, false, true, "kernel/analog/src/routing/em.rs metal_family (REL-17 ESD width; \"al\" | \"cu\")"),
     k("min_finger_width", Nm, false, false, "kernel/cells/src/builder.rs dim (raises the deck's); frontend/library/src/cellgen.rs"),
     k("min_guard_ring_width", Nm, true, false, "kernel/cells/src/bjt.rs, post_cell.rs"),
     k("mom_finger_space", Nm, true, false, "kernel/cells/src/capacitor.rs"),

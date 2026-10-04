@@ -242,6 +242,75 @@ impl Electromigration {
     }
 }
 
+/// Hastings eq. 14.6 (L45870–45932): A = √(ρ·τ·I_pk²/(2·C_V·ΔT)), τ 225 ns, ΔT 50 K, I_pk = hbm_v/1500 Ω; µm².
+#[must_use]
+pub fn esd_area_um2(hbm_v: f32, rho_uohm_cm: f32, cv_j_per_k_cm3: f32) -> f32 {
+    let (rho, i) = (f64::from(rho_uohm_cm) * 1e-6, f64::from(hbm_v) / 1500.0);
+    ((rho * 225e-9 * i * i / (2.0 * f64::from(cv_j_per_k_cm3) * 50.0)).sqrt() * 1e8) as f32
+}
+
+/// Table 14.3 (ρ µΩ·cm, C_V J/K/cm³) for `metal_family`: "al" (2.7, 2.42), "cu" (1.7, 3.45); absent or other → Al,
+/// the larger area.
+#[must_use]
+pub fn metal_family(key: Option<&str>) -> (f32, f32) {
+    match key {
+        Some("cu") => (1.7, 3.45),
+        _ => (2.7, 2.42),
+    }
+}
+
+/// Every routed metal shape of an ESD pad net has a cross-section ≥ `area_um2`:
+/// short side ≥ area·1e6/thickness_nm. A layer of thickness 0 is unknown for it.
+/// Separate from [`Electromigration`]: the floor needs no DC current, which a
+/// pad net rarely has.
+#[derive(Clone, Copy)]
+pub struct EsdWidth {
+    pub net: NetId,
+    pub area_um2: f32,
+    pub stack: &'static Stack,
+}
+
+impl EsdWidth {
+    /// `(worst residual, worst need/have)` over the net's routed metal shapes
+    /// of known thickness; `None` when there is none.
+    fn check(self, r: &Routes) -> Option<(f32, f32)> {
+        let mut worst: Option<(f32, f32)> = None;
+        for s in r.shapes(self.net) {
+            let Some(l) = self.stack.layers.iter().find(|l| l.id == s.layer.0 && !l.cut && l.thickness_nm > 0.0) else { continue };
+            let need = (f64::from(self.area_um2) * 1e6 / f64::from(l.thickness_nm)) as f32;
+            let have = s.rect.w.min(s.rect.h).max(1) as f32;
+            let (res, q) = worst.unwrap_or((f32::MIN, 0.0));
+            worst = Some((res.max(crate::rule::over(need - have, need)), q.max(need / have)));
+        }
+        worst
+    }
+}
+
+impl Rule for EsdWidth {
+    type On = Routes;
+    const REPAIR: crate::RepairKind = crate::RepairKind::Em;
+    fn cost(self, r: &Routes) -> f32 {
+        self.residual(r)
+    }
+    fn satisfied(self, r: &Routes) -> bool {
+        self.residual(r) <= 0.0
+    }
+    fn known(self, r: &Routes) -> bool {
+        self.check(r).is_some()
+    }
+    /// Worst `over(need − have, need)` over the known shapes.
+    fn residual(self, r: &Routes) -> f32 {
+        self.check(r).map_or(0.0, |(res, _)| res)
+    }
+    /// Worst `need/have`.
+    fn usage(self, r: &Routes) -> Option<f32> {
+        self.check(r).map(|(_, q)| q)
+    }
+    fn touches(self, out: &mut Vec<u32>) {
+        out.push(u32::from(self.net.0));
+    }
+}
+
 impl Rule for Electromigration {
     type On = Routes;
     const REPAIR: crate::RepairKind = crate::RepairKind::Em;
@@ -431,6 +500,37 @@ mod tests {
         assert!((e.residual(&r) - 1.0 / 3.0).abs() < 1e-4, "(3 − 2)/3: {}", e.residual(&r));
         let all = Electromigration { front_row: false, ..em() };
         assert!(all.known(&r) && all.satisfied(&r), "6 ≥ 3: {}", all.residual(&r));
+    }
+
+    #[test]
+    fn hbm_2kv_on_sky130_met1_needs_18_6um() {
+        assert!((esd_area_um2(2000., 2.7, 2.42) - 6.68).abs() < 0.01, "{}", esd_area_um2(2000., 2.7, 2.42));
+        assert!((esd_area_um2(2000., 1.7, 3.45) - 4.44).abs() < 0.01, "{}", esd_area_um2(2000., 1.7, 3.45));
+        assert_eq!(metal_family(None), metal_family(Some("al")));
+        assert_eq!(metal_family(Some("cu")), (1.7, 3.45));
+        let need = esd_area_um2(2000., 2.7, 2.42) * 1e6 / 360.0;
+        assert!((need - 18_557.0).abs() < 30.0, "{need}");
+    }
+
+    #[test]
+    fn an_esd_net_narrower_than_its_floor_fails() {
+        let at = |t: f32| -> &'static Stack {
+            Box::leak(Box::new(Stack { layers: vec![Layer { id: 1, thickness_nm: t, ..Layer::default() }], ..Stack::default() }))
+        };
+        let rule = |t| EsdWidth { net: NetId(0), area_um2: esd_area_um2(2000., 2.7, 2.42), stack: at(t) };
+        let one = |w, h| routes(vec![shape(1, 0, 0, w, h)], vec![]);
+        let e = rule(360.0);
+        // Short side ≥ 18 557 nm passes; 10 000 does not, whatever the length.
+        for r in [one(20_000, 20_000), one(40_000, 18_600)] {
+            assert!(e.known(&r) && e.satisfied(&r), "{}", e.residual(&r));
+        }
+        assert!(!e.satisfied(&one(10_000, 18_000)));
+        let r = one(10_000, 9_000);
+        assert!(e.known(&r) && !e.satisfied(&r));
+        let need = esd_area_um2(2000., 2.7, 2.42) * 1e6 / 360.0;
+        assert!((e.residual(&r) - (need - 9_000.0) / need).abs() < 1e-3, "{}", e.residual(&r));
+        assert!((e.residual(&r) - (18_557.0 - 9_000.0) / 18_557.0).abs() < 1e-3);
+        assert!(!rule(0.0).known(&r), "thickness unknown");
     }
 
     /// A terminal joined only through its cell's strap is reached (the cell

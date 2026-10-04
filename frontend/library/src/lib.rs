@@ -118,6 +118,8 @@ pub struct Config {
     /// User constraint sidecar, JSON text (EXT-26, `annotator::sidecar`):
     /// [`run`] merges it over `annotation` (lists extend, scalars from the base).
     pub constraints: Option<String>,
+    /// ESD pad nets (REL-17); `None` = no ESD width floor.
+    pub esd: Option<EsdSpec>,
 }
 
 /// A die edge.
@@ -209,8 +211,17 @@ impl Default for Config {
             interface: None,
             top: None,
             constraints: None,
+            esd: None,
         }
     }
+}
+
+/// ESD pad nets and their HBM rating (REL-17): each named net gets a hard
+/// [`analog::routing::EsdWidth`] floor on its routed metal.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EsdSpec {
+    pub hbm_v: f32,
+    pub nets: Vec<String>,
 }
 
 /// A finished placement + routing (pre-signoff).
@@ -706,6 +717,19 @@ fn topology<'a>(
         _ => "none",
     };
     em_rules(&mut problem, netlist, &em, &em_layers, &em_cuts, ann.process.stack, em_front_row(pdk), pdk);
+    if let (Some(esd), Some(stack)) = (&cfg.esd, ann.process.stack) {
+        let (rho, cv) = analog::routing::em::metal_family(pdk.cell_str("metal_family"));
+        let area_um2 = analog::routing::em::esd_area_um2(esd.hbm_v, rho, cv);
+        let mut rules = Vec::new();
+        for name in &esd.nets {
+            match netlist.nets.iter().position(|n| n.name == *name) {
+                Some(k) => rules.push(analog::routing::EsdWidth { net: pnr_core::NetId(k as u16), area_um2, stack }),
+                // ponytail: leaked once per run, as `em_rules`'s names are.
+                None => problem.missing.push(("EsdWidth", Box::leak(format!("net {name} (Config::esd) not in the netlist").into_boxed_str()))),
+            }
+        }
+        problem.routing.hard.push(Box::new(rules));
+    }
     // IR-drop budgets (PWR-02) on nets carrying op current (`annotator::ir`).
     let net_ua = bias.currents.as_ref().map_or_else(Vec::new, |c| oppoint::net_current_ua(netlist, c));
     let ir = if let (Some(_), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {

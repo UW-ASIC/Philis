@@ -27,6 +27,9 @@ pub struct Layer {
     pub sheet_ohm: f32,
     /// This layer is a cut (every other stack layer, from the first metal).
     pub cut: bool,
+    /// Conductor thickness, nm (pex `thickness_nm`); `0` = unknown. The ESD
+    /// width floor ([`super::em::EsdWidth`]) reads it.
+    pub thickness_nm: f32,
 }
 
 /// The routing stack, bottom-up (metals and cuts interleaved).
