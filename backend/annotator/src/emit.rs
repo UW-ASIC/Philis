@@ -133,6 +133,7 @@ pub fn placement(
                     kvth0_mv_um: by_polarity(nl, a, p.lod_kvth0_mv_um),
                     tc_uv_per_k: by_polarity(nl, a, p.vt_tc_uv_per_k),
                     abeta_pct_um: by_polarity(nl, a, p.abeta_pct_um),
+                    ..Coeffs::default()
                 },
                 budget: budget(offset_sigma_mv, match_kind),
                 gate_um2: vec![gate_um2(nl, a), gate_um2(nl, b)],

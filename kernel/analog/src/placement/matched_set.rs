@@ -6,7 +6,10 @@ use pnr_core::ids::DeviceId;
 use pnr_core::layout::Layout;
 
 use crate::matching::class::{Family, MatchClass};
-use crate::matching::mismatch::{sigma_current_pct, sigma_pair, sigma_voltage_mv, Budget, Coeffs, Ledger, LedgerRow, LedgerUnit, MatchKind};
+use crate::matching::mismatch::{
+    bjt_sigma_vbe_mv, ratio_thermal_pct, sigma_current_pct, sigma_pair, sigma_voltage_mv, Budget, Coeffs, Ledger, LedgerRow, LedgerUnit,
+    MatchKind,
+};
 use crate::matching::moments::{cancelled_order, phi_equal, sums, Pt};
 use crate::matching::pattern::{cc_feasible, diffusion_cc_row, Outer};
 
@@ -55,6 +58,24 @@ fn member(l: &Layout, d: DeviceId) -> (crate::matching::moments::Sums, f64, f64)
 }
 
 impl MatchedSet {
+    /// A non-MOS set (MAT-10): `areas_um2` are the members' netlist areas
+    /// (EXT-20's), `cell_of` empty, no `g_m/I`. The ledger is in % for R/C,
+    /// mV of ΔV_BE for bipolar/diode.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn for_family(
+        members: Vec<DeviceId>,
+        family: Family,
+        kind: MatchKind,
+        class: MatchClass,
+        coeffs: Coeffs,
+        budget: Budget,
+        areas_um2: Vec<f32>,
+        tol_nm: f32,
+    ) -> MatchedSet {
+        MatchedSet { members, kind, family, class, coeffs, budget, gate_um2: areas_um2, tol_nm, cell_of: Vec::new(), gm_over_id: None }
+    }
+
     fn cell(&self, d: DeviceId) -> usize {
         self.cell_of.get(d.0 as usize).copied().unwrap_or(d.0) as usize
     }
@@ -109,37 +130,56 @@ impl MatchedSet {
         };
 
         let (a0, ai) = self.areas(&sa, &sb, i);
-        let sigma_vt = self.coeffs.avt_mv_um.map_or(0.0, |av| sigma_pair(av, a0, ai));
-        // MAT-09: with A_β and G a mirror's ledger is in % (eq. 13.43) and a
-        // pair's σ gains the β share (eq. 13.42); without them, mV as before.
-        let beta = match (self.family, self.coeffs.abeta_pct_um, self.gm_over_id) {
-            (Family::Mos, Some(ab), Some(g)) => Some((g, sigma_pair(ab, a0, ai))),
-            _ => None,
-        };
-        let (unit, sigma_rand) = match (beta, self.kind) {
-            (Some((g, sb)), MatchKind::Current) => (LedgerUnit::Pct, sigma_current_pct(sigma_vt, g, sb)),
-            (Some((g, sb)), _) => (LedgerUnit::Mv, sigma_voltage_mv(sigma_vt, g, sb)),
-            (None, _) => (LedgerUnit::Mv, sigma_vt),
+        let c = &self.coeffs;
+        let ka = c.ka_pct_um.map(|k| sigma_pair(k, a0, ai));
+        let (unit, sigma_rand) = match self.family {
+            Family::Mos => {
+                let sigma_vt = c.avt_mv_um.map_or(0.0, |av| sigma_pair(av, a0, ai));
+                // MAT-09: with A_β and G a mirror's ledger is in % (eq. 13.43) and a
+                // pair's σ gains the β share (eq. 13.42); without them, mV as before.
+                match (c.abeta_pct_um.zip(self.gm_over_id), self.kind) {
+                    (Some((ab, g)), MatchKind::Current) => (LedgerUnit::Pct, sigma_current_pct(sigma_vt, g, sigma_pair(ab, a0, ai))),
+                    (Some((ab, g)), _) => (LedgerUnit::Mv, sigma_voltage_mv(sigma_vt, g, sigma_pair(ab, a0, ai))),
+                    (None, _) => (LedgerUnit::Mv, sigma_vt),
+                }
+            }
+            Family::Resistor | Family::Capacitor => (LedgerUnit::Pct, ka.unwrap_or(0.0)),
+            Family::Bipolar | Family::Diode => (LedgerUnit::Mv, ka.map_or(0.0, bjt_sigma_vbe_mv)),
         };
         let budgeted = sigma_rand > 0.0 || matches!(self.budget, Budget::Allowance(_));
 
         let (mut sigma_grad, mut mu_lod, mut mu_thermal) = (0.0, 0.0, 0.0);
         if budgeted {
-            // µV/µm · nm → mV.
-            sigma_grad = self.coeffs.svt_uv_per_um.unwrap_or(0.0) * delta_m_nm * 1e-6;
-            if units && wa > 0.0 && wb > 0.0 {
-                mu_lod = self.coeffs.kvth0_mv_um.unwrap_or(0.0) * ((lwa / wa - lwb / wb).abs() as f32);
-            }
-            if l.power_uw.iter().any(|&p| p != 0) {
+            // ΔT between the centroids, mK (0 without power).
+            let dt_mk = if l.power_uw.iter().any(|&p| p != 0) {
                 let rise = |(x, y): (f64, f64)| l.rise_at_point_mc(x.round() as i32, y.round() as i32);
+                (rise(ca) - rise(cb)).abs()
+            } else {
+                0.0
+            };
+            match self.family {
+                Family::Mos => {
+                    // µV/µm · nm → mV.
+                    sigma_grad = c.svt_uv_per_um.unwrap_or(0.0) * delta_m_nm * 1e-6;
+                    if units && wa > 0.0 && wb > 0.0 {
+                        mu_lod = c.kvth0_mv_um.unwrap_or(0.0) * ((lwa / wa - lwb / wb).abs() as f32);
+                    }
+                    // µV/K · mK → mV.
+                    mu_thermal = c.tc_uv_per_k.unwrap_or(0.0) * dt_mk * 1e-6;
+                    // mV systematic terms → % of current: ΔI/I = G·ΔV (×0.1 for mV → %).
+                    if unit == LedgerUnit::Pct {
+                        let k = 0.1 * self.gm_over_id.unwrap_or(0.0);
+                        (sigma_grad, mu_thermal, mu_lod) = (k * sigma_grad, k * mu_thermal, k * mu_lod);
+                    }
+                }
+                Family::Resistor | Family::Capacitor => {
+                    // %/mm · nm → %.
+                    sigma_grad = c.sd_pct_per_mm.unwrap_or(0.0) * delta_m_nm * 1e-6;
+                    mu_thermal = ratio_thermal_pct(c.tc_ppm_per_k.unwrap_or(0.0), dt_mk);
+                }
                 // µV/K · mK → mV.
-                mu_thermal = self.coeffs.tc_uv_per_k.unwrap_or(0.0) * (rise(ca) - rise(cb)).abs() * 1e-6;
+                Family::Bipolar | Family::Diode => mu_thermal = c.vbe_tc_uv_per_k.unwrap_or(0.0) * dt_mk * 1e-6,
             }
-        }
-        // mV systematic terms → % of current: ΔI/I = G·ΔV (×0.1 for mV → %).
-        if unit == LedgerUnit::Pct {
-            let k = 0.1 * self.gm_over_id.unwrap_or(0.0);
-            (sigma_grad, mu_thermal, mu_lod) = (k * sigma_grad, k * mu_thermal, k * mu_lod);
         }
         Ledger {
             sigma_rand,
@@ -155,10 +195,11 @@ impl MatchedSet {
         }
     }
 
-    /// Areas of pair `(0, i)`, µm²: unit weights (nm²) when both members have
-    /// units, else the netlist `gate_um2`.
+    /// Areas of pair `(0, i)`, µm²: MOS unit weights (gate nm²) when both
+    /// members have units, else `gate_um2` (always for R/C/BJT: a resistor
+    /// unit's weight is not its area).
     fn areas(&self, sa: &crate::matching::moments::Sums, sb: &crate::matching::moments::Sums, i: usize) -> (f32, f32) {
-        if sa.w > 0.0 && sb.w > 0.0 {
+        if self.family == Family::Mos && sa.w > 0.0 && sb.w > 0.0 {
             ((sa.w / 1e6) as f32, (sb.w / 1e6) as f32)
         } else {
             (self.gate_um2.first().copied().unwrap_or(0.0), self.gate_um2.get(i).copied().unwrap_or(0.0))
@@ -299,7 +340,7 @@ pub(crate) fn pair(a: u16, b: u16) -> MatchedSet {
             svt_uv_per_um: Some(1.63),
             kvth0_mv_um: Some(9.8),
             tc_uv_per_k: Some(765.0),
-            abeta_pct_um: None,
+            ..Coeffs::default()
         },
         budget: Budget::Eta(0.3),
         gate_um2: vec![20.0, 20.0],
@@ -550,14 +591,14 @@ mod tests {
 
     #[test]
     fn remaining_allowance_subtracts_placement_spend() {
-        // Two one-unit cells 400 um apart: S_VT 1.0 µV/µm·nm → σ_grad 0.4 mV.
+        // Two one-unit cells 400 µm apart: S_D 1 %/mm → σ_grad 0.4 %.
         let l = singles(400_000);
         let s = MatchedSet {
             members: vec![DeviceId(0), DeviceId(1)],
             kind: MatchKind::Current,
             family: Family::Resistor,
             class: MatchClass::Moderate,
-            coeffs: Coeffs { avt_mv_um: None, svt_uv_per_um: Some(1.0), ..Coeffs::default() },
+            coeffs: Coeffs { sd_pct_per_mm: Some(1.0), ..Coeffs::default() },
             budget: Budget::Allowance(0.637),
             gate_um2: vec![0.0, 0.0],
             tol_nm: 5.0,
@@ -598,6 +639,30 @@ mod tests {
         let r = rows(&MatchedSet { kind: MatchKind::Voltage, ..s });
         assert_eq!(r.unit, "mV");
         assert!(r.sigma_rand > sigma_vt, "{r:?}");
+    }
+
+    #[test]
+    fn for_family_dispatches() {
+        let l = singles(1_000);
+        let row = |s: &MatchedSet| {
+            let mut out = Vec::new();
+            s.ledger_rows(&l, &mut out);
+            out.remove(0)
+        };
+        let set = |family, ka| {
+            let coeffs = Coeffs { ka_pct_um: ka, sd_pct_per_mm: Some(1.0), tc_ppm_per_k: Some(100.0), ..Coeffs::default() };
+            let ids = vec![DeviceId(0), DeviceId(1)];
+            MatchedSet::for_family(ids, family, MatchKind::Ratio, MatchClass::Moderate, coeffs, Budget::Eta(0.3), vec![36.0, 36.0], 5.0)
+        };
+        let r = row(&set(Family::Resistor, Some(2.0)));
+        assert_eq!((r.unit, r.known, r.mu_lod), ("%", true, 0.0), "{r:?}");
+        // B2: the netlist 36 µm², not the 20 µm² unit weight.
+        assert!((r.sigma_rand - sigma_pair(2.0, 36.0, 36.0)).abs() < 1e-6, "{r:?}");
+        assert!((r.sigma_layout - 1e-3).abs() < 1e-6, "1 %/mm over 1 µm: {r:?}");
+        assert!(!row(&set(Family::Resistor, None)).known);
+        let r = row(&set(Family::Bipolar, Some(2.0)));
+        assert_eq!((r.unit, r.sigma_layout), ("mV", 0.0));
+        assert!((r.sigma_rand - bjt_sigma_vbe_mv(sigma_pair(2.0, 36.0, 36.0))).abs() < 1e-7, "{r:?}");
     }
 
     #[test]

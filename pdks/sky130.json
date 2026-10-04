@@ -2,6 +2,10 @@
   "deck": "sky130.deck",
   "_about": "Philis sidecar: every rule, layer, device and PEX value comes from the GPurify deck named here; this file holds only what the checker does not read (layer roles, generator dimensions, process coefficients).",
   "cell": {
+    "bjt_ka_pct_um": 2.0,
+    "bjt_ka_pct_um_source": "textbook, not sky130: Hastings, The Art of Analog Layout, §10.2.1 (PDF p.507), I_S mismatch area constant of a bipolar pair; replace with the PDK's own figure when one is published.",
+    "vbe_tc_uv_per_k": 2000,
+    "vbe_tc_uv_per_k_source": "textbook, not sky130: Hastings, The Art of Analog Layout, §9.1 (PDF p.433), |dV_BE/dT| ~ 2 mV/K.",
     "m1_enc": 65,
     "min_finger_width": 420,
     "via_enclosure": 300,
@@ -157,7 +161,11 @@
           "res_head_dw_nm": 156,
           "res_narrow_permille": 67,
           "res_knee_nm": 690,
-          "res_model_source": "sky130_fd_pr__res_high_po.model.spice (volare fa87f8f4) lines 27-40: R = 317.3885*(L+0.247)/weff + 345.8312/(weff+0.1558), weff = W - 0.001 - 0.0672*max(0.69-W, 0), W, L in um; res_narrow_permille 67 and res_head_dw_nm 156 round 0.0672 and 0.1558."
+          "res_model_source": "sky130_fd_pr__res_high_po.model.spice (volare fa87f8f4) lines 27-40: R = 317.3885*(L+0.247)/weff + 345.8312/(weff+0.1558), weff = W - 0.001 - 0.0672*max(0.69-W, 0), W, L in um; res_narrow_permille 67 and res_head_dw_nm 156 round 0.0672 and 0.1558.",
+          "k_a_pct_um": 4.26,
+          "k_a_pct_um_source": "Monte Carlo of the installed model: benchmarks/characterize_mismatch.py res sky130 250 1, .lib sky130.lib.spice tt_mm, 250 1 uA-driven pairs x W/L 0.69/5, 1.41/10, 2.85/20, 5.73/40, 1.41/2 um, sigma(dR/R) of the pair fit through the origin vs 1/sqrt(WL): 4.26 %.um (points 3.88..4.68; the model's body_pelgrom 0.03552/sqrt(WL) per device plus head_pelgrom). One seed.",
+          "tc_ppm_per_k": 514,
+          "tc_ppm_per_k_source": "body tc1 of the installed model: sky130_fd_pr__res_high_po.model.spice:56 tc1 = {tc1rpolybody}, sky130_fd_pr__model__r+c.model.spice:62 tc1rpolybody = .514e-3 /K (tnom 30). The heads' tc1 -4.3e-4 (line 49) is ignored: a long body dominates."
         },
         "generic_po": {
           "model": "sky130_fd_pr__res_generic_po",
@@ -175,7 +183,11 @@
           "res_head_mohm_um": 0,
           "res_dl_nm": 0,
           "res_dw_nm": 0,
-          "res_model_source": "rp1 = 48.2 ohm/sq, VOL/libs.tech/ngspice/r+c/res_typical__cap_typical.spice:21 (volare fa87f8f4). The model's dw = -tol_poly/2 - poly_dw/2 (+0.028 um at typical, sky130_fd_pr__model__r+c.model.spice:134) is not applied: how ngspice applies it to W was not checked (plan-03 section 5)."
+          "res_model_source": "rp1 = 48.2 ohm/sq, VOL/libs.tech/ngspice/r+c/res_typical__cap_typical.spice:21 (volare fa87f8f4). The model's dw = -tol_poly/2 - poly_dw/2 (+0.028 um at typical, sky130_fd_pr__model__r+c.model.spice:134) is not applied: how ngspice applies it to W was not checked (plan-03 section 5).",
+          "k_a_pct_um": 1.70,
+          "k_a_pct_um_source": "PROXY, not sky130 data: the installed model carries no mismatch (r+c.mrp1monte.spice:16 sky130_fd_pr__res_generic_po__slope = 0.0; characterize_mismatch.py res gave sigma(dR/R) = 0 at every W/L). Value: DVP Table 1 poly resistor pair constant 1.70 %.um, as plan-02 MAT-10. Replace with measured sky130 data when available.",
+          "tc_ppm_per_k": 892,
+          "tc_ppm_per_k_source": "tc1r of the installed model: sky130_fd_pr__model__r+c.model.spice:134 tc1r=tc1rsgpu, :28 tc1rsgpu = 8.916e-4 /K."
         }
       },
       "note": "Per schematic model, the construction GPurify's sky130.deck recognises: rbody_high_po = poly_res and rpm (licon.1b slot contacts 190x2000 inside rpm+psdm), rbody_po = poly_res outside rpm/urpm."

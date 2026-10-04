@@ -2,6 +2,10 @@
   "deck": "ihp_sg13g2.deck",
   "_about": "Philis sidecar: every rule, layer, device and PEX value comes from the GPurify deck named here; this file holds only what the checker does not read (layer roles, generator dimensions, process coefficients).",
   "cell": {
+    "bjt_ka_pct_um": 2.0,
+    "bjt_ka_pct_um_source": "textbook, not ihp_sg13g2: Hastings, The Art of Analog Layout, §10.2.1 (PDF p.507), I_S mismatch area constant of a bipolar pair; replace with the PDK's own figure when one is published.",
+    "vbe_tc_uv_per_k": 2000,
+    "vbe_tc_uv_per_k_source": "textbook, not ihp_sg13g2: Hastings, The Art of Analog Layout, §9.1 (PDF p.433), |dV_BE/dT| ~ 2 mV/K.",
     "via_spacing": 420,
     "via_enclosure": 360,
     "dummy_max_l_nm": 3000,

@@ -10,11 +10,14 @@ fit through the origin against 1/sqrt(WL) (Pelgrom 1989 eq. 1).
 Usage: characterize_mismatch.py [pdk] [pairs] [seed]     pdk in PDKS, default sky130
        characterize_mismatch.py tc [pdk]
        characterize_mismatch.py bpv [pdk] [pairs] [seed]
+       characterize_mismatch.py res [pdk] [pairs] [seed]
        characterize_mismatch.py selftest
 The `tc` form instead fits dVT/dT (uV/K) at the typical corner over TEMPS.
 The `bpv` form fits A_beta (%.um) and A_VT together from the current mismatch of
 voltage-biased pairs at two overdrives (MM-17): sigma(dI/I)^2 = A_VT^2 (0.1 G)^2/WL
 + A_beta^2/WL (Hastings eq. 13.43), G = gm/I from a +-1 mV typical-corner difference.
+The `res` form fits each resistor model's pair k_A (%.um): sigma(dR/R) of 1 uA-driven
+pairs at RES_GEOMS through the origin against 1/sqrt(WL) (Hastings eq. 8.8).
 """
 import glob, math, os, re, statistics, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -182,6 +185,42 @@ def bpv(name, pairs, seed):
               f"(per-point stat. error ~{100 / math.sqrt(2 * (pairs - 1)):.1f}%)")
 
 
+# Per PDK: resistor model and its instance line (`k`, `m` model, `w`/`l` um).
+RES = {
+    "sky130": [("sky130_fd_pr__res_high_po", "X{k} r{k} 0 0 {m} w={w} l={l}"),
+               ("sky130_fd_pr__res_generic_po", "R{k} r{k} 0 {m} w={w}u l={l}u")],
+}
+RES_GEOMS = [(0.69, 5), (1.41, 10), (2.85, 20), (5.73, 40), (1.41, 2)]
+
+
+def res(name, pairs, seed):
+    pdk = PDKS[name]
+    print(f"pdk={name} {pdk['mm']} pairs={pairs} seed={seed} I=1uA")
+    for model, inst in RES[name]:
+        def one(j):
+            (w, l), c = j
+            n = 2 * min(CHUNK, pairs - c * CHUNK)
+            lines = [f"* {model} mismatch"] + pdk["mm"] + [f".option seed={seed * 1000 + c}"]
+            for k in range(n):
+                lines += [f"I{k} 0 r{k} 1u", inst.format(k=k, m=model, w=w, l=l)]
+            out = spice(pdk, lines + [".control", "op"] + [f"echo V {k} $&v(r{k})" for k in range(n)] + [".endc", ".end"])
+            v = [float(m[1]) for m in re.finditer(r"^V \d+ (\S+)", out, re.M)]
+            assert len(v) == n, f"ngspice returned {len(v)}/{n} voltages:\n{out[-2000:]}"
+            return v
+        jobs = [(g, c) for g in RES_GEOMS for c in range(math.ceil(pairs / CHUNK))]
+        with ThreadPoolExecutor(os.cpu_count()) as ex:
+            got = list(ex.map(one, jobs))
+        rows = []
+        print(f"\n{model}   W/L(um)  1/sqrt(WL)  R(kohm)  sigma_dR/R(%)")
+        for g in RES_GEOMS:
+            v = [x for (gg, _), r in zip(jobs, got) if gg == g for x in r]
+            d = [200 * (v[2 * k] - v[2 * k + 1]) / (v[2 * k] + v[2 * k + 1]) for k in range(len(v) // 2)]
+            rows.append((1 / math.sqrt(g[0] * g[1]), statistics.stdev(d)))
+            print(f"          {g[0]}/{g[1]:<5}  {rows[-1][0]:9.3f}  {statistics.mean(v) * 1e3:8.2f}  {rows[-1][1]:10.4f}")
+        k = sum(x * s for x, s in rows) / sum(x * x for x, _ in rows)
+        print(f"k_A {model} = {k:.3f} %.um")
+
+
 def selftest():
     rows = [(g, wl, math.sqrt((5 * 0.1 * g) ** 2 / wl + 1 / wl)) for g, wl in ((20, 1.0), (5, 4.0))]
     a_vt, a_b = bpv_fit(rows)
@@ -192,6 +231,9 @@ def selftest():
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "selftest":
         return selftest()
+    if len(sys.argv) > 1 and sys.argv[1] == "res":
+        a = sys.argv[2:]
+        return res(a[0] if a else "sky130", int(a[1]) if len(a) > 1 else 250, int(a[2]) if len(a) > 2 else 1)
     if len(sys.argv) > 1 and sys.argv[1] == "bpv":
         a = sys.argv[2:]
         return bpv(a[0] if a else "sky130", int(a[1]) if len(a) > 1 else 250, int(a[2]) if len(a) > 2 else 1)

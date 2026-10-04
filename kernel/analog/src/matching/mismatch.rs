@@ -144,6 +144,31 @@ pub struct Coeffs {
     pub tc_uv_per_k: Option<f32>,
     /// Current-factor mismatch `A_β`, %·µm (Hastings eq. 13.43).
     pub abeta_pct_um: Option<f32>,
+    /// Passive / bipolar area constant `k_A` of a pair, %·µm (R, C: ΔR/R,
+    /// ΔC/C, Hastings eqs 8.8/8.12; BJT/diode: ΔI_S/I_S, eq. 10.9).
+    pub ka_pct_um: Option<f32>,
+    /// Resistor/capacitor temperature coefficient, ppm/K (eq. 8.23).
+    pub tc_ppm_per_k: Option<f32>,
+    /// `|dV_BE/dT|`, µV/K (bipolar, diode).
+    pub vbe_tc_uv_per_k: Option<f32>,
+    /// Passive gradient `S_D`, %/mm (eq. 8.15).
+    pub sd_pct_per_mm: Option<f32>,
+}
+
+/// ΔV_BE σ of a bipolar/diode pair from its ΔI_S/I_S σ, mV: `V_T·ln(1 + σ/100)`
+/// (Hastings eq. 10.9).
+///
+/// ponytail: V_T fixed at 25.7 mV (25 °C); REL-05 brings the junction temperature.
+#[must_use]
+pub fn bjt_sigma_vbe_mv(sigma_i_pct: f32) -> f32 {
+    25.7 * (sigma_i_pct / 100.0).ln_1p()
+}
+
+/// Ratio error of a passive pair whose members sit `dt_mk` apart, %:
+/// `TC·ΔT` (eq. 8.23; ppm/K · mK → ×1e-7).
+#[must_use]
+pub fn ratio_thermal_pct(tc_ppm_per_k: f32, dt_mk: f32) -> f32 {
+    tc_ppm_per_k * dt_mk * 1e-7
 }
 
 /// One pair's ledger, in `unit` (mV unless a mirror's G and `A_β` are known).
@@ -255,6 +280,23 @@ mod tests {
         assert_eq!(choose(Some(1.0), Some(0.2), Some(ClassLimit::Mv(3.0)), v), Budget::Sigma1Mv(1.0));
         assert_eq!(choose(None, Some(0.2), Some(ClassLimit::Mv(3.0)), v), Budget::Allowance(0.2));
         assert_eq!(choose(None, None, Some(ClassLimit::Mv(3.0)), v), Budget::Sigma1Mv(0.5));
+    }
+
+    #[test]
+    fn hastings_eq_8_12_capacitor_pair() {
+        assert!((sigma_pair(1.0, 1.0, 4.0) - 0.791).abs() < 1e-3);
+    }
+
+    #[test]
+    fn bjt_eq_10_9() {
+        let s = sigma_pair(2.0, 36.0, 36.0);
+        assert!((s - 0.333).abs() < 1e-3, "{s}");
+        assert!((bjt_sigma_vbe_mv(s) - 0.0855).abs() < 5e-4, "{}", bjt_sigma_vbe_mv(s));
+    }
+
+    #[test]
+    fn resistor_thermal_ppm() {
+        assert!((ratio_thermal_pct(100.0, 500.0) - 0.005).abs() < 1e-7);
     }
 
     #[test]
