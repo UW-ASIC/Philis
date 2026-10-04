@@ -106,8 +106,8 @@ pub struct MetadataReport {
     /// [`build`]; the flow fills it.
     pub sensitivity: Vec<String>,
     /// Per finite spec bound of the winner (PERF-13): `"{metric}:{min|max} σ_f
-    /// … β … Φ(β) … (V_T only) top {device} {pct}%, …"`, or `"…: UNKNOWN (no
-    /// A_VT)"`, then `"joint yield (linear, 1e5) …"`. Empty without
+    /// … β … Φ(β) … (V_T only) top {device} {pct}%, …"`, or `"{metric}:{side}
+    /// UNKNOWN ({reason})"` ([`crate::robust::unknown_reason`]), then `"joint yield (linear, 1e5) …"`. Empty without
     /// performance scoring.
     pub robustness: Vec<String>,
     /// Post-layout simulations that could not run ([`crate::RunStats::sim_failures`]).

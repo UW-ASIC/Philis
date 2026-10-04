@@ -725,7 +725,7 @@ fn solve(
             .map(|st| {
                 let b = &result.bounds[st.bound];
                 let name = format!("{}:{}", cfg.specs[b.spec].metric, if b.upper { "max" } else { "min" });
-                let (Some(sf), Some(beta), Some(y)) = (st.sigma_f, st.beta, st.yield_part) else { return format!("{name} UNKNOWN (no A_VT)") };
+                let (Some(sf), Some(beta), Some(y)) = (st.sigma_f, st.beta, st.yield_part) else { return format!("{name} UNKNOWN ({})", robust::unknown_reason(&perf.tables, &perf.sigma_v, result, st.bound)) };
                 let top: Vec<String> = st.shares.iter().map(|&(d, w)| format!("{} {:.0}%", netlist.devices[d as usize].name, w * 100.0)).collect();
                 format!("{name} σ_f {sf:.4e} β {beta:.2} Φ(β) {y:.4} (V_T only) top {}", top.join(", "))
             })

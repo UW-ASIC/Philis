@@ -276,11 +276,15 @@ pub(crate) fn run_jobs<J: Sync, T: Send>(jobs: &[J], f: impl Fn(&J) -> T + Sync)
 }
 
 /// One deck's `.measure` results. One dir per run (`run_deck`): decks go in
-/// parallel and must not share a deck or the ngspice cwd (`bsim4v5.out`).
+/// parallel and must not share a deck or the ngspice cwd (`bsim4v5.out`). A
+/// panicking deck is `Err` (a sim failure), not a panic through [`run_jobs`].
 fn measure(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, tb: usize, sc: &Scenario) -> Result<Vec<(String, f64)>, String> {
-    let text = deck(netlist, par, cfg, &cfg.testbenches[tb], sc).map_err(|e| format!("cannot simulate: {e}"))?;
-    let out = run_deck(&cfg.sim.ngspice, "perf", &text)?;
-    Ok(parse_measures(&String::from_utf8_lossy(&out.stdout)))
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let text = deck(netlist, par, cfg, &cfg.testbenches[tb], sc).map_err(|e| format!("cannot simulate: {e}"))?;
+        let out = run_deck(&cfg.sim.ngspice, "perf", &text)?;
+        Ok(parse_measures(&String::from_utf8_lossy(&out.stdout)))
+    }))
+    .unwrap_or_else(|_| Err("cannot simulate: a deck panicked".into()))
 }
 
 /// Every spec's metric from one scenario's per-testbench measures.

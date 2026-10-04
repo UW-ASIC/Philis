@@ -125,6 +125,9 @@ its assertion. Order: PERF-11 then PERF-13 (PERF-13 reads `SensTable`).
      Delete the "10 fF" comment. Notes added (and `eprintln!`ed): `"sens {scenario name}: {rows} rows, {sims} sims, {ms} ms"`
      and per nonlinear row `"sens {scenario name}: nonlinear {param:?}"`. The `Err` path keeps
      `"sensitivities unavailable: {e}"` (lib.rs:1964 asserts it).
+     *As built:* these notes go to a new `MetadataReport.sensitivity` (without the `sens ` prefix; the `eprintln!`
+     keeps it), not into `notes`/`budget_rows`: `budget_rows` is one line per spec bound, and mixing per-scenario
+     table lines into it would break that shape.
 
 ### Tests
 

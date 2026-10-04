@@ -69,6 +69,23 @@ fn terms(t: &SensTable, sigma_v: &[Option<f64>], j: usize) -> Option<Vec<(u16, f
     (!v.is_empty()).then_some(v)
 }
 
+/// Why bound `b`'s σ_f is `None` ([`bound_stats`]): `"no A_VT"` when its
+/// table has a `GateOffset` row whose FET has no σ, `"unmeasured"` when the
+/// bound has no value, else `"no sensitivities"` (no table for its scenario,
+/// no `GateOffset` row, or a derivative missing).
+#[must_use]
+pub fn unknown_reason(tables: &[SensTable], sigma_v: &[Option<f64>], post: &PerfResult, b: usize) -> &'static str {
+    let bound = &post.bounds[b];
+    let Some(t) = tables.iter().find(|t| t.scenario == bound.scenario) else { return "no sensitivities" };
+    if t.rows.iter().any(|r| matches!(r.param, Param::GateOffset { device } if sigma_v.get(device as usize).copied().flatten().is_none())) {
+        "no A_VT"
+    } else if bound.value.is_none() {
+        "unmeasured"
+    } else {
+        "no sensitivities"
+    }
+}
+
 /// `(f_post + Δf_sys − lo)` for a floor, `(hi − f_post − Δf_sys)` for a
 /// ceiling; `None` without a value or bound.
 fn margin(post: &PerfResult, specs: &[Spec], b: usize, sys: &[f64]) -> Option<f64> {
@@ -206,6 +223,16 @@ mod tests {
         let (specs, post) = floor(10.0, 0.0);
         let s = &bound_stats(&[table(&[1000.0, -1000.0])], &[Some(1e-3), None], &post, &specs, &[], &[])[0];
         assert_eq!((s.sigma_f, s.beta, s.yield_part), (None, None, None), "{s:?}");
+    }
+
+    #[test]
+    fn unknown_reason_names_the_missing_input() {
+        let (_, post) = floor(10.0, 0.0);
+        assert_eq!(unknown_reason(&[], &[], &post, 0), "no sensitivities");
+        assert_eq!(unknown_reason(&[table(&[1.0, 1.0])], &[Some(1e-3), None], &post, 0), "no A_VT");
+        let mut t = table(&[1.0]);
+        t.rows[0].d[0] = None;
+        assert_eq!(unknown_reason(&[t], &[Some(1e-3)], &post, 0), "no sensitivities");
     }
 
     /// Graeb Table 12.
