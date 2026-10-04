@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="360" font-family="sans-serif" font-size="11">
+<rect width="760" height="360" fill="white"/>
+<text x="70" y="18" font-size="13" font-weight="bold">Speed: ms per iteration = one place/route/signoff epoch (lower is better)</text>
+<line x1="70" x2="610" y1="310.0" y2="310.0" stroke="#e9ecef"/>
+<text x="64" y="314.0" text-anchor="end" fill="#495057">0</text>
+<line x1="70" x2="610" y1="240.0" y2="240.0" stroke="#e9ecef"/>
+<text x="64" y="244.0" text-anchor="end" fill="#495057">3,837</text>
+<line x1="70" x2="610" y1="170.0" y2="170.0" stroke="#e9ecef"/>
+<text x="64" y="174.0" text-anchor="end" fill="#495057">7,674</text>
+<line x1="70" x2="610" y1="100.0" y2="100.0" stroke="#e9ecef"/>
+<text x="64" y="104.0" text-anchor="end" fill="#495057">11,511</text>
+<line x1="70" x2="610" y1="30.0" y2="30.0" stroke="#e9ecef"/>
+<text x="64" y="34.0" text-anchor="end" fill="#495057">15,348</text>
+<text x="70.0" y="326" text-anchor="middle" fill="#495057">04-13:56</text>
+<circle cx="70.0" cy="189.9" r="3" fill="#2a6fdb"/>
+<rect x="622" y="30" width="10" height="10" fill="#2a6fdb"/><text x="636" y="39">bgr_core</text>
+<circle cx="70.0" cy="173.3" r="3" fill="#e0542b"/>
+<rect x="622" y="44" width="10" height="10" fill="#e0542b"/><text x="636" y="53">bjt_mirror</text>
+<circle cx="70.0" cy="217.0" r="3" fill="#2f9e44"/>
+<rect x="622" y="58" width="10" height="10" fill="#2f9e44"/><text x="636" y="67">chain4</text>
+<circle cx="70.0" cy="55.5" r="3" fill="#9c36b5"/>
+<rect x="622" y="72" width="10" height="10" fill="#9c36b5"/><text x="636" y="81">dac4</text>
+<circle cx="70.0" cy="228.8" r="3" fill="#f59f00"/>
+<rect x="622" y="86" width="10" height="10" fill="#f59f00"/><text x="636" y="95">dac4_mim</text>
+<circle cx="70.0" cy="293.4" r="3" fill="#0b7285"/>
+<rect x="622" y="100" width="10" height="10" fill="#0b7285"/><text x="636" y="109">mirror_ratio</text>
+<circle cx="70.0" cy="143.4" r="3" fill="#c2255c"/>
+<rect x="622" y="114" width="10" height="10" fill="#c2255c"/><text x="636" y="123">ota</text>
+<circle cx="70.0" cy="202.6" r="3" fill="#5c940d"/>
+<rect x="622" y="128" width="10" height="10" fill="#5c940d"/><text x="636" y="137">ota_constrained</text>
+<circle cx="70.0" cy="293.9" r="3" fill="#495057"/>
+<rect x="622" y="142" width="10" height="10" fill="#495057"/><text x="636" y="151">pair</text>
+<circle cx="70.0" cy="268.5" r="3" fill="#1864ab"/>
+<rect x="622" y="156" width="10" height="10" fill="#1864ab"/><text x="636" y="165">quad</text>
+<circle cx="70.0" cy="282.1" r="3" fill="#d9480f"/>
+<rect x="622" y="170" width="10" height="10" fill="#d9480f"/><text x="636" y="179">rc_filter</text>
+<circle cx="70.0" cy="302.4" r="3" fill="#087f5b"/>
+<rect x="622" y="184" width="10" height="10" fill="#087f5b"/><text x="636" y="193">res_m2</text>
+<circle cx="70.0" cy="236.7" r="3" fill="#2a6fdb"/>
+<rect x="622" y="198" width="10" height="10" fill="#2a6fdb"/><text x="636" y="207">tq_chain</text>
+<circle cx="70.0" cy="219.6" r="3" fill="#e0542b"/>
+<rect x="622" y="212" width="10" height="10" fill="#e0542b"/><text x="636" y="221">tt_ota</text>
+</svg>
