@@ -21,6 +21,8 @@
     "svt_uv_per_um_source": "PROXY, not ihp_sg13g2 data: Schaper & Linnenbank, 'Comparison of distance mismatch and pair matching of CMOS devices' (Infineon 130 nm, IEEE), Table 1, thin-oxide nMOS S_D [mV/mm = uV/um]: L/W 0.12/1.6 1.63, 0.24/1.6 0.780, 0.24/12.8 0.941, 0.48/1.6 0.582, 0.48/3.2 0.644; S_D grows as L shrinks (Fig. 8, S_D^2 ~ 1/Leff^2). IHP lv Lmin 0.13 um >= 0.12 row: took 1.63, an upper bound at 0.13 um. Same node as the source process.",
     "antenna_source": "antenna_gatpoly (Ant.a, 200) added from SG13G2_os_layout_rules.pdf sec. 7.1 (~/pdks/IHP-Open-PDK (git 5e6d592e) libs.doc); existing Ant.b 200, Ant.c 20, Ant.d 20 rules agree with that table (areal ratios). Diode-protected Ant.e/Ant.f not encoded. Ant.a counts GatPoly over field oxide only; the rule here takes all gatpoly, which is stricter.",
     "em_current_density_source": "existing em_* rules checked against SG13G2_os_process_spec.pdf (~/pdks/IHP-Open-PDK (git 5e6d592e)) JMAX table: M1 1, M2-M5 2, TM1 15, TM2 16 mA/um; Cont 0.3, Via1-4 0.4, TopVia1 1.4, TopVia2 10 mA/cut: all agree. Narrow-line IMAX (M1 0.36 mA for w 0.16-0.36 um, M2-M5 0.6 mA for w 0.2-0.3 um) not encoded.",
+    "em_derating": {"t_ref_k": 378.15, "ea_ev": null, "n": null},
+    "em_derating_source": "pdks/decks/ihp_sg13g2.deck:601 [PS] §2.15 \"11 years at 105 C\"; Ea and n not stated",
     "layers": {
       "diff": "activ",
       "poly": "gatpoly",

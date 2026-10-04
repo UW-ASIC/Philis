@@ -79,6 +79,7 @@ pub const KEYS: &[Key] = &[
     k("dummy_gates_per_end", Count, true, false, "kernel/cells/src/mosfet.rs (dummy gates each end of a matched row)"),
     k("dummy_max_l_nm", Nm, false, true, "kernel/cells/src/mosfet.rs (dummy gate length cap)"),
     k("em_current_density_source", Text, false, false, "provenance of the deck's EM rules"),
+    k("em_derating", Table, false, true, "backend/verify/src/pdk.rs em_limit (when the deck rule states no Black parameters)"),
     k("epi_thickness_nm", Nm, false, true, "frontend/library/src/lib.rs annotation (isolation distance on epi_on_pplus)"),
     k("erc_rules_note", Text, false, false, "documentation"),
     k("finfet_note", Text, false, false, "documentation"),
