@@ -1529,6 +1529,30 @@ mod tests {
         Pdk::from_json(&v.to_string())
     }
 
+    /// A `Tier` key is exactly MIN/MOD/EXC, each non-negative or `null`.
+    #[test]
+    fn tier_arrays_are_validated() {
+        for bad in [serde_json::json!([2000, 3000]), serde_json::json!([2000, -1, 5000])] {
+            let err = sky130_with(|c| {
+                c.insert("wpe_clearance_nm".into(), bad.clone());
+            })
+            .err()
+            .unwrap_or_else(|| panic!("{bad} must not load"));
+            assert!(err.contains("cell.wpe_clearance_nm"), "{err}");
+        }
+        sky130_with(|c| {
+            c.insert("wpe_clearance_nm".into(), serde_json::json!([2000, 3000, null]));
+        })
+        .expect("an unstated tier is null");
+    }
+
+    #[test]
+    fn cap_density_is_sourced() {
+        let p = Pdk::builtin("sky130").unwrap();
+        assert!(p.provenance("cap_density_ff_um2").is_some_and(|s| s.starts_with("= camimc")));
+        assert!(!p.unverified().contains(&"cap_density_ff_um2"));
+    }
+
     /// A misspelt key is an error, not a value silently ignored while the
     /// generator falls back to its default.
     #[test]

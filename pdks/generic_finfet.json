@@ -79,7 +79,8 @@
     "retrograde_pwell_source": "UNVERIFIED: no source was recorded with this value. Read by no code.",
     "lod_moat_ext_nm": [
       3000,
-      5000
+      5000,
+      null
     ],
     "sheet_tolerance": {},
     "linewidth_control_nm": {},
