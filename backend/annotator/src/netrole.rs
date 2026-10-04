@@ -155,6 +155,9 @@ pub struct AnnotationConfig {
     pub net_classes: Vec<(pnr_core::ids::NetId, analog::metadata::NetClass)>,
     /// Sidecar `OffsetBudget`: 1σ offset, mV, of the set holding these devices.
     pub offset_budgets: Vec<(Vec<pnr_core::ids::DeviceId>, f32)>,
+    /// Sidecar `IsolatedTub` (GAP-14): NMOS members drawn in one deep-n-well tub, its ring tied to the net.
+    /// User-declared only: the sources give no automatic threshold for when a tub pays.
+    pub tubs: Vec<(Vec<pnr_core::ids::DeviceId>, pnr_core::ids::NetId)>,
     /// Sidecar `Kelvin` requests, appended to the extracted ones.
     pub kelvins: Vec<analog::intent::KelvinReq>,
     /// The sidecar parse's diagnostics, carried into `Intent.diagnostics`.
@@ -216,6 +219,8 @@ pub struct ProcessNumbers {
     /// The process can draw an `Ecgr` / `Hcgr` (`cells::post_cell::drawable`).
     pub ecgr_drawable: bool,
     pub hcgr_drawable: bool,
+    /// The process can draw a `Tub` (deep n-well; `cells::post_cell::drawable`).
+    pub tub_drawable: bool,
     /// `Config.op` temperature, K (not a deck key): a mirror's mobility term (MAT-14).
     pub die_temp_k: Option<f32>,
     /// Unitization bounds (EXT-15); 0 = deck key missing.

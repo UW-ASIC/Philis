@@ -519,6 +519,8 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
             ecgr_min_width_nm: p.ecgr_min_width_nm,
             ecgr_drawable: p.ecgr_drawable,
             hcgr_drawable: p.hcgr_drawable,
+            tubs: &cfg.tubs,
+            tub_drawable: p.tub_drawable,
         });
         constraints.guard_rings.extend(rings);
         missing.extend(notes);

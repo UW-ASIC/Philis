@@ -206,7 +206,31 @@ fn draw_ring(b: &mut Builder, process: &dyn Process, r: &GuardRingRequirement, i
     let (width, rows) = band(process, r, perimeter, cut_ohm);
     let gap = ring_gap(process, r, width);
     let pin = Pin { name: "ring".into(), net: r.connection_net, layer: req(process, "li"), at: Rect { x: 0, y: 0, w: 0, h: 0 } };
-    tap_ring(b, process, implant_name(r.ring_type), well_shape(r.ring_type), inner, gap, (width, rows), &pin);
+    let o = tap_ring(b, process, implant_name(r.ring_type), well_shape(r.ring_type), inner, gap, (width, rows), &pin);
+    // A tub: its n-well band, and the deep n-well under the band's hole and
+    // past it by nwell.6 (the band well passes the deep well by nwell.5).
+    if let (GuardRingType::Tub { .. }, Some(nwell), Some(dnwell)) = (r.ring_type, process.layer("nwell"), process.layer("dnwell")) {
+        let g = tub_well_ext(process, width);
+        let tap_in = Rect { x: o.x + width, y: o.y + width, w: o.w - 2 * width, h: o.h - 2 * width };
+        band_well(b, nwell, o, tap_in, g);
+        let e = process.enclosure("dnwell", "nwell").unwrap_or(0) - g;
+        b.rect(dnwell, Rect { x: tap_in.x - e, y: tap_in.y - e, w: tap_in.w + 2 * e, h: tap_in.h + 2 * e });
+    }
+}
+
+/// An n-well band around a tap band (outer edge `o`, inner edge `inner`),
+/// each side grown by `g`, full length: they overlap at the corners, so the
+/// union is one ring with the interior left out.
+fn band_well(b: &mut Builder, nwell: pnr_core::LayerId, o: Rect, inner: Rect, g: i32) {
+    let (fw, fh, bw) = (o.w + 2 * g, o.h + 2 * g, inner.x - o.x + 2 * g);
+    for r in [
+        Rect { x: o.x - g, y: o.y - g, w: fw, h: bw },
+        Rect { x: o.x - g, y: inner.y + inner.h - g, w: fw, h: bw },
+        Rect { x: o.x - g, y: o.y - g, w: bw, h: fh },
+        Rect { x: inner.x + inner.w - g, y: o.y - g, w: bw, h: fh },
+    ] {
+        b.rect(nwell, r);
+    }
 }
 
 /// A contacted tap ring `gap` outside `inner`: four bands of tap under
@@ -281,20 +305,13 @@ pub(crate) fn tap_ring(b: &mut Builder, process: &dyn Process, implant: &str, we
                 let enc = dim(process, "nwell_diff_enc");
                 b.rect(nwell, Rect { x: ox0 - enc, y: oy0 - enc, w: (ox1 - ox0) + 2 * enc, h: (oy1 - oy0) + 2 * enc });
             }
-            // Each tap band grown by `g`, full length: they overlap at the
-            // corners, so the union is one ring with the interior left out.
-            WellShape::Band => {
-                let g = band_well_ext(process, ring_width);
-                let (fw, fh, bw) = (ox1 - ox0 + 2 * g, oy1 - oy0 + 2 * g, ring_width + 2 * g);
-                for r in [
-                    Rect { x: ox0 - g, y: oy0 - g, w: fw, h: bw },
-                    Rect { x: ox0 - g, y: iy1 - g, w: fw, h: bw },
-                    Rect { x: ox0 - g, y: oy0 - g, w: bw, h: fh },
-                    Rect { x: ix1 - g, y: oy0 - g, w: bw, h: fh },
-                ] {
-                    b.rect(nwell, r);
-                }
-            }
+            WellShape::Band => band_well(
+                b,
+                nwell,
+                Rect { x: ox0, y: oy0, w: ox1 - ox0, h: oy1 - oy0 },
+                Rect { x: ix0, y: iy0, w: ix1 - ix0, h: iy1 - iy0 },
+                band_well_ext(process, ring_width),
+            ),
         }
     }
     Rect { x: ox0, y: oy0, w: ox1 - ox0, h: oy1 - oy0 }
@@ -318,10 +335,15 @@ pub fn ring_halo(r: &GuardRingRequirement, process: &dyn Process, cut_ohm: f32) 
 /// and leaves a hole at least the well spacing wide even around a point
 /// device (half per side).
 fn ring_gap(process: &dyn Process, r: &GuardRingRequirement, width: i32) -> i32 {
-    if r.ring_type == GuardRingType::Ecgr {
+    let ext = match r.ring_type {
+        GuardRingType::Ecgr => Some(band_well_ext(process, width)),
+        GuardRingType::Tub { .. } => Some(tub_well_ext(process, width)),
+        _ => None,
+    };
+    if let Some(ext) = ext {
         // ponytail: conservative for large devices (sky130 845 vs 550); size the
         // hole from `inner` if the area matters.
-        let g = band_well_ext(process, width) + process.space_between("nwell", "diff").unwrap_or(0).max((nwell_space(process) + 1) / 2);
+        let g = ext + process.space_between("nwell", "diff").unwrap_or(0).max((nwell_space(process) + 1) / 2);
         return on_grid_up(process, g);
     }
     ring_clear(process) + ring_implant_enc(process, r.ring_type)
@@ -340,6 +362,14 @@ fn band_well_ext(process: &dyn Process, width: i32) -> i32 {
     on_grid_up(process, e)
 }
 
+/// A tub's band well: [`band_well_ext`], and wide enough to hold the deep
+/// n-well's reach past the hole (nwell.6) plus the well's past the deep well
+/// (nwell.5): sky130 width 420 → 505.
+fn tub_well_ext(process: &dyn Process, width: i32) -> i32 {
+    let reach = process.enclosure("dnwell", "nwell").unwrap_or(0) + process.enclosure("nwell", "dnwell").unwrap_or(0);
+    band_well_ext(process, width).max(on_grid_up(process, (reach - width + 1) / 2))
+}
+
 /// `v` (≥ 0) rounded up to the manufacturing grid.
 fn on_grid_up(process: &dyn Process, v: i32) -> i32 {
     let g = process.grid().max(1);
@@ -356,9 +386,9 @@ fn ring_implant_enc(process: &dyn Process, ring_type: GuardRingType) -> i32 {
 /// n-well for a PMOS (`in_well`), p+ in the substrate for an NMOS. `Ecgr` is
 /// n+ in its own well, drawn as a band ([`WellShape::Band`]); `Hcgr` is p+.
 fn implant_name(ring_type: GuardRingType) -> &'static str {
-    use GuardRingType::{Ecgr, Hcgr, Tap};
+    use GuardRingType::{Ecgr, Hcgr, Tap, Tub};
     match ring_type {
-        Tap { in_well: true } | Ecgr => "nsdm",
+        Tap { in_well: true } | Ecgr | Tub { .. } => "nsdm",
         Tap { in_well: false } | Hcgr => "psdm",
     }
 }
@@ -383,32 +413,40 @@ pub(crate) enum WellShape {
 fn well_shape(t: GuardRingType) -> WellShape {
     match t {
         GuardRingType::Tap { in_well: true } => WellShape::Filled,
-        GuardRingType::Tap { in_well: false } | GuardRingType::Hcgr => WellShape::None,
+        // A tub's band is drawn by `draw_ring`, with its deep n-well.
+        GuardRingType::Tap { in_well: false } | GuardRingType::Hcgr | GuardRingType::Tub { .. } => WellShape::None,
         GuardRingType::Ecgr => WellShape::Band,
     }
 }
 
 /// Whether this deck can draw a `t` ring as named. `Tap`: always. `Hcgr`: only
 /// with a retrograde/isolated p-well the deck declares (`retrograde_pwell`;
-/// sky130 false).
+/// sky130 false). `Tub`: with `dnwell`, `nwell`, `nsdm` and the deck's
+/// hole-to-deep-well enclosure.
 #[must_use]
 pub fn drawable(t: GuardRingType, p: &dyn Process) -> bool {
     match t {
         GuardRingType::Tap { .. } => true,
         GuardRingType::Ecgr => p.layer("nwell").is_some() && p.layer("nsdm").is_some(),
         GuardRingType::Hcgr => p.rule("retrograde_pwell", 0) != 0,
+        GuardRingType::Tub { .. } => ["dnwell", "nwell", "nsdm"].iter().all(|l| p.layer(l).is_some()) && p.enclosure("dnwell", "nwell").is_some(),
     }
 }
 
 /// Outer clearance: an in-well ring owes a neighbour's well
 /// `nwell_min_spacing` beyond its own well enclosure; a well-less ring only
 /// [`ring_clear`] (which already beats well-to-outside-diff, 340). An
-/// `Ecgr`'s band well grows [`band_well_ext`] past a band of `width`.
+/// `Ecgr`'s band well grows [`band_well_ext`] past a band of `width`; a
+/// `Tub`'s deep n-well owes any other deep n-well the full dnwell spacing.
 fn outer_clear(ring_type: GuardRingType, process: &dyn Process, width: i32) -> i32 {
     if in_nwell(ring_type) {
         nwell_space(process) + dim(process, "nwell_diff_enc").max(process.enclosure("nwell", "tap").unwrap_or(0))
     } else if ring_type == GuardRingType::Ecgr {
         nwell_space(process) + band_well_ext(process, width)
+    } else if let GuardRingType::Tub { .. } = ring_type {
+        // ponytail: full dnwell.3 per side (sky130 ≈ 6.4 µm halo); halve when every dnwell owner reserves its half.
+        let g = tub_well_ext(process, width);
+        (nwell_space(process) + g).max(g - process.enclosure("nwell", "dnwell").unwrap_or(0) + process.space("dnwell").unwrap_or(0))
     } else {
         ring_clear(process)
     }
@@ -870,6 +908,88 @@ mod tests {
             assert!(nwell.iter().any(|&r| inside(t, r)), "{t:?} outside nwell");
         }
         assert!(rects_on(&ring, pdk.layer("psdm")).is_empty());
+    }
+
+    /// An NMOS inside a GAP-14 tub (`ecgr_around_nmos` with `Tub { id: 0 }`) or a substrate tap ring:
+    /// the cell, the ring macro, the ring's interior, and the labels (G/S/B, the ring as `VDDQ`).
+    fn ringed_nmos(pdk: &verify::Pdk, ty: GuardRingType) -> (Macro, Macro, Rect, Vec<verify::LabeledPin>) {
+        use crate::{testkit, Cell};
+        let (g, c) = testkit::group_of(pnr_core::DeviceKind::Nmos, 1, 2, 1000, 150);
+        let cell = crate::mosfet::Mosfet::enumerate(&g, &c, pdk)[0].draw(&g, &c, pdk);
+        let inner = cell.bbox;
+        let mut b = Builder::new(pdk.grid());
+        draw_ring(&mut b, pdk, &req(0, 9, ty, true), inner, 15.0);
+        let ring = b.finish();
+        let mut labels = testkit::ports_with(&cell, &["G", "S", "B"]);
+        labels.extend(ring.pins.iter().map(|p| verify::LabeledPin { name: "VDDQ".into(), layer: p.layer.0, x: p.at.x + p.at.w / 2, y: p.at.y + p.at.h / 2 }));
+        (cell, ring, inner, labels)
+    }
+
+    /// GAP-14: one deep n-well strictly around the cell, a four-rect band
+    /// well clear of the NMOS's diffusion, DRC/ERC clean.
+    #[test]
+    fn a_tub_is_drc_clean_on_sky130() {
+        use crate::testkit;
+        let Some(pdk) = testkit::pdk() else { return };
+        assert!(drawable(GuardRingType::Tub { id: 0 }, &pdk));
+        let (cell, ring, inner, labels) = ringed_nmos(&pdk, GuardRingType::Tub { id: 0 });
+        let dn = rects_on(&ring, pdk.layer("dnwell"));
+        assert_eq!(dn.len(), 1);
+        let d = dn[0];
+        assert!(d.x < inner.x && d.y < inner.y && d.x + d.w > inner.x + inner.w && d.y + d.h > inner.y + inner.h, "{d:?} vs {inner:?}");
+        let s = pdk.space_between("nwell", "diff").unwrap();
+        let keep_out = Rect { x: inner.x - s, y: inner.y - s, w: inner.w + 2 * s, h: inner.h + 2 * s };
+        let wells = rects_on(&ring, pdk.layer("nwell"));
+        assert_eq!(wells.len(), 4);
+        for w in &wells {
+            let hits = w.x < keep_out.x + keep_out.w && keep_out.x < w.x + w.w && w.y < keep_out.y + keep_out.h && keep_out.y < w.y + w.h;
+            assert!(!hits, "{w:?} reaches within {s} of {inner:?}");
+        }
+        let shapes: Vec<pnr_core::Shape> = cell.shapes.iter().chain(&ring.shapes).cloned().collect();
+        let dirty = testkit::findings(&shapes, &labels, &pdk);
+        assert!(dirty.is_empty(), "{dirty:?}");
+    }
+
+    /// GAP-14: inside a tub the nfet's bulk is the isolated p-well, its own
+    /// net: beside a plain NMOS 30 µm away whose bulk (`SUB`) is the
+    /// substrate, the two nfets extract on `B` and `SUB`. Were the tub's
+    /// p-well the substrate, `B` and `SUB` would be one net (a label short).
+    #[test]
+    fn the_tub_bulk_is_not_the_substrate() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        // Only the bulks are labelled: a 2-finger cell's S pads join only
+        // through routing, so labelling them names two nets alike.
+        let (cell, ring, _, labels) = ringed_nmos(&pdk, GuardRingType::Tub { id: 0 });
+        let plain = shift(&cell, 30_000, 0, 0);
+        let mut labels: Vec<_> = labels.into_iter().filter(|l| l.name == "B" || l.name == "VDDQ").collect();
+        let subs: Vec<_> = labels.iter().filter(|l| l.name == "B").map(|l| verify::LabeledPin { name: "SUB".into(), x: l.x + 30_000, ..l.clone() }).collect();
+        labels.extend(subs);
+        let shapes: Vec<pnr_core::Shape> = cell.shapes.iter().chain(&ring.shapes).chain(&plain.shapes).cloned().collect();
+        let spice = verify::extract_spice(&shapes, &labels, &pdk, verify::Detail::Schematic).expect("extracts");
+        let mut bulks: Vec<&str> = spice.lines().filter(|l| l.to_ascii_lowercase().contains("nfet")).filter_map(|l| l.split_whitespace().nth(4)).collect();
+        bulks.sort_unstable();
+        bulks.dedup();
+        assert_eq!(bulks, ["B", "SUB"], "{spice}");
+    }
+
+    /// GAP-14: the halo keeps a foreign deep n-well dnwell.3 off the tub's,
+    /// and two declared tubs never share a ring.
+    #[test]
+    fn a_tub_halo_clears_dnwell_spacing() {
+        use crate::testkit;
+        let Some(pdk) = testkit::pdk() else { return };
+        let r = req(0, 9, GuardRingType::Tub { id: 0 }, true);
+        let width = band(&pdk, &r, 8 * i64::from(ring_clear(&pdk)), 15.0).0;
+        let g = tub_well_ext(&pdk, width);
+        let dn_past_inner = ring_gap(&pdk, &r, width) + width + g - pdk.enclosure("nwell", "dnwell").unwrap();
+        assert!(ring_halo(&r, &pdk, 15.0) - dn_past_inner >= pdk.space("dnwell").unwrap());
+        let l = layout_at(&[(0, 0), (300, 0)]);
+        let reqs = [r, req(1, 9, GuardRingType::Tub { id: 1 }, true)];
+        let refs: Vec<&GuardRingRequirement> = reqs.iter().collect();
+        assert_eq!(clusters(&refs, &l, 2000.0).len(), 2);
+        let same = [r, req(1, 9, GuardRingType::Tub { id: 0 }, true)];
+        let refs: Vec<&GuardRingRequirement> = same.iter().collect();
+        assert_eq!(clusters(&refs, &l, 2000.0).len(), 1, "control: one tub's members merge");
     }
 
     #[test]

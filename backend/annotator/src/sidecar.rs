@@ -16,6 +16,7 @@
 //! | `NetClass`                               | `nets`, `class`                         |
 //! | `OffsetBudget`                           | `instances`, `sigma_mv`                 |
 //! | `Kelvin`                                 | `pin: "R/P"`, `sense: ["M/G"]`          |
+//! | `IsolatedTub`                            | `instances` (NMOS, one bulk net), `tie` |
 
 use std::collections::HashMap;
 
@@ -196,6 +197,29 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                     _ => unknown!(format!("pin in {at}")),
                 }
             }
+            "IsolatedTub" => {
+                let ds = match devices(&strs("instances")) {
+                    Ok(ds) => ds,
+                    Err(n) => {
+                        unknown!(n);
+                        continue;
+                    }
+                };
+                let tie_name = e.get("tie").and_then(Value::as_str).unwrap_or("");
+                let Some(tie) = net(tie_name) else {
+                    unknown!(format!("net {tie_name}"));
+                    continue;
+                };
+                let bulk = |d: &DeviceId| {
+                    let dev = &nl.devices[d.0 as usize];
+                    (dev.kind == pnr_core::DeviceKind::Nmos).then(|| dev.terminals.iter().find(|(t, _)| t == "B").map(|t| t.1)).flatten()
+                };
+                if ds.is_empty() || ds.iter().any(|d| bulk(d).is_none() || bulk(d) != bulk(&ds[0])) {
+                    diags.push(Diagnostic { kind: "sidecar_unsupported", devices: ds, message: format!("entry {i}: IsolatedTub members must be NMOS on one bulk net") });
+                    continue;
+                }
+                cfg.tubs.push((ds, tie));
+            }
             "Load" | "Order" => diags.push(Diagnostic {
                 kind: "sidecar_unconsumed",
                 devices: vec![],
@@ -236,6 +260,23 @@ mod tests {
             arm.iter().filter(|b| b.meta().map(|m| m.origin) == Some(analog::intent::Origin::User { index: 1 })).map(|b| b.kind().ends_with("Proximity")).collect::<Vec<_>>()
         };
         assert_eq!((user(&p.placement.budget), user(&p.placement.cost)), (vec![true], vec![true]));
+    }
+
+    /// GAP-14: two NMOS on one bulk, tied to a supply.
+    #[test]
+    fn an_isolated_tub_parses() {
+        let nl = crate::tests::ota();
+        let (cfg, d) = parse(r#"[{"constraint":"IsolatedTub","instances":["XM1","XM2"],"tie":"vdd"}]"#, &nl).unwrap();
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(cfg.tubs, [(vec![DeviceId(0), DeviceId(1)], NetId(7))]);
+    }
+
+    #[test]
+    fn a_tub_with_a_pmos_is_refused() {
+        let nl = crate::tests::ota();
+        let (cfg, d) = parse(r#"[{"constraint":"IsolatedTub","instances":["XM1","XM3"],"tie":"vdd"}]"#, &nl).unwrap();
+        assert_eq!(d.iter().map(|d| d.kind).collect::<Vec<_>>(), ["sidecar_unsupported"]);
+        assert!(cfg.tubs.is_empty());
     }
 
     #[test]
