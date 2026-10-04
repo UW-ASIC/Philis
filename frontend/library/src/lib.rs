@@ -2579,6 +2579,9 @@ mod environment_tests {
     /// The live batch scores in the placement arm; the routing arm keeps only
     /// the final report's ring-inclusive row (T9's judge). `ota`, not `pair`:
     /// `pair`'s two devices share their gate, so no matched pair is recognised.
+    /// Red under debug until MAT-07 stops registering `OrientationSet` in both
+    /// arms (`annotator/src/emit.rs:145-148` trips `gp::Prices::bind`'s
+    /// debug_assert on ota); see `docs/plans/m2-placement-report.md`.
     #[test]
     fn environment_is_in_the_placement_arm_once() {
         let spice = std::fs::read_to_string(root().join("benchmarks/fixtures/ota.spice")).expect("fixture");
