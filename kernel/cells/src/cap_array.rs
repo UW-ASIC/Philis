@@ -67,14 +67,19 @@ pub struct ArrayMetrics {
     /// through the one-unit C0/C1, which cannot be common-centroid; a linear
     /// gradient `g`/µm mis-sizes that slot by `g ×` this.
     pub lin_um: f64,
-    /// Worst slot's `|⟨r²⟩ − ⟨r²⟩_array|`, µm²: its error per unit coefficient
-    /// of a bowl-shaped (quadratic) gradient.
-    pub quad_um2: f64,
-    /// Worst `|INL|` / `|DNL|`, LSB (DACP Eqs. 17–18, ideal-referenced, all
-    /// codes), in the field `ε = g·(x cosθ + y sinθ) + q·r²`, worst over θ in
-    /// 45° steps.
+    /// Worst slot's second-moment residue ‖M_slot − M_array‖_F per unit, µm²
+    /// ([`analog::matching::dac::second_um2`]): unlike `⟨r²⟩` it sees an
+    /// anisotropic (xx vs yy, xy) imbalance.
+    pub second_um2: f64,
+    /// Moment orders every slot with ≥ 2 units cancels
+    /// ([`analog::matching::moments::cancelled_order`], nmax 4, tol 1e-3).
+    pub order: u8,
+    /// Worst `|INL|` / `|DNL|`, LSB, under the t0/t gradient `g`
+    /// ([`analog::matching::dac::inl_dnl`]), worst over θ in `π/(4·max(rows, cols))` steps.
     pub inl_lsb: f64,
     pub dnl_lsb: f64,
+    /// Systematic per-unit ratio mismatch of each bit to C0 ([`analog::matching::dac::msys`]).
+    pub msys: f64,
     /// Bottom-plate route length per unit, `max/min − 1` over C1..=CN: 0 when
     /// every bit carries the same wire per unit of capacitance.
     pub route_spread: f64,
@@ -227,11 +232,11 @@ impl CapArray {
         g.slot.into_iter().map(|s| s.expect("every cell assigned")).collect()
     }
 
-    /// ARR-02/03 figures for this variant under gradient `g` (1/µm) and
-    /// curvature `q` (1/µm²). No deck carries these, so they are the caller's
-    /// sweep points, not constants.
+    /// ARR-02/03 figures for this variant under the t0/t gradient `g` (1/µm).
+    /// No deck carries it, so it is the caller's sweep point, not a constant.
     #[must_use]
-    pub fn metrics(&self, group: &DeviceGroup, c: &Constraints, process: &dyn Process, g: f64, q: f64) -> ArrayMetrics {
+    pub fn metrics(&self, group: &DeviceGroup, c: &Constraints, process: &dyn Process, g: f64) -> ArrayMetrics {
+        use analog::matching::{dac, moments};
         let (m, routes) = self.build(group, c, process);
         let n = routes.len() - 1;
         let um = |v: i32| f64::from(v) * 1e-3;
@@ -239,33 +244,25 @@ impl CapArray {
             let k = m.units.len() as f64;
             (m.units.iter().map(|u| um(u.x)).sum::<f64>() / k, m.units.iter().map(|u| um(u.y)).sum::<f64>() / k)
         };
-        let pos: Vec<(usize, f64, f64)> = m.units.iter().map(|u| (usize::from(u.owner), um(u.x) - cx, um(u.y) - cy)).collect();
-        let r2 = |x: f64, y: f64| x * x + y * y;
-        let mean_r2 = pos.iter().map(|&(_, x, y)| r2(x, y)).sum::<f64>() / pos.len() as f64;
+        let units: Vec<(u8, f64, f64)> = m.units.iter().map(|u| (u.owner, um(u.x) - cx, um(u.y) - cy)).collect();
         let mut out = ArrayMetrics { vias: routes.iter().map(|r| r.1).collect(), ..Default::default() };
-        for s in 0..=n {
-            let mine: Vec<(f64, f64)> = pos.iter().filter(|p| p.0 == s).map(|p| (p.1, p.2)).collect();
-            let k = mine.len() as f64;
-            let (mx, my) = (mine.iter().map(|p| p.0).sum::<f64>() / k, mine.iter().map(|p| p.1).sum::<f64>() / k);
-            out.lin_um = out.lin_um.max(r2(mx, my).sqrt());
-            out.quad_um2 = out.quad_um2.max((mine.iter().map(|p| r2(p.0, p.1)).sum::<f64>() / k - mean_r2).abs());
+        let mut pts: Vec<Vec<moments::Pt>> = vec![Vec::new(); n + 1];
+        for &(s, x, y) in &units {
+            pts[usize::from(s)].push(moments::Pt { x, y, w: 1.0, phi: (0, 0) });
         }
-        for step in 0..4 {
-            let th = f64::from(step) * std::f64::consts::FRAC_PI_4;
-            let mut cap = vec![0.0; n + 1];
-            for &(s, x, y) in &pos {
-                cap[s] += 1.0 + g * (x * th.cos() + y * th.sin()) + q * r2(x, y);
-            }
-            let total: f64 = cap.iter().sum();
-            let codes = 1usize << n;
-            let t = |k: usize| (1..=n).filter(|b| k >> (b - 1) & 1 == 1).map(|b| cap[b]).sum::<f64>() / total * codes as f64;
-            for k in 0..codes {
-                out.inl_lsb = out.inl_lsb.max((t(k) - k as f64).abs());
-                if k + 1 < codes {
-                    out.dnl_lsb = out.dnl_lsb.max((t(k + 1) - t(k) - 1.0).abs());
-                }
-            }
+        for p in &pts {
+            let k = p.len() as f64;
+            out.lin_um = out.lin_um.max((p.iter().map(|q| q.x).sum::<f64>() / k).hypot(p.iter().map(|q| q.y).sum::<f64>() / k));
         }
+        let multi: Vec<&[moments::Pt]> = pts.iter().filter(|p| p.len() >= 2).map(Vec::as_slice).collect();
+        out.order = moments::cancelled_order(&multi, 4, 1e-3).0;
+        out.second_um2 = dac::second_um2(&units, n + 1);
+        // Rows/columns as drawn (whichever grid `build` picked): distinct unit coordinates.
+        let distinct = |f: fn(&Unit) -> i32| m.units.iter().map(f).collect::<std::collections::BTreeSet<_>>().len();
+        let steps = 4 * distinct(|u| u.x).max(distinct(|u| u.y));
+        (out.inl_lsb, out.dnl_lsb) = dac::inl_dnl(&units, n as u8, g, steps);
+        let counts: Vec<u16> = pts.iter().map(|p| p.len() as u16).collect();
+        out.msys = dac::msys(&units, &counts, g, steps);
         let per_unit: Vec<f64> = (1..=n).map(|s| routes[s].0 as f64 / f64::from(1u32 << (s - 1))).collect();
         let (lo, hi) = per_unit.iter().fold((f64::MAX, 0.0f64), |(lo, hi), &v| (lo.min(v), hi.max(v)));
         out.route_spread = hi / lo - 1.0;
@@ -689,7 +686,8 @@ mod tests {
     }
 
     /// DACP's trade (Table II): the spiral carries the least wire per unit, the
-    /// chessboard's dispersion the least INL/DNL.
+    /// chessboard the least INL (the one-unit C0/C1 dominate DNL on a drawn
+    /// 5-bit bank, so no DNL order is asserted).
     #[test]
     fn metrics_rank_the_families() {
         struct Flat;
@@ -705,10 +703,10 @@ mod tests {
             }
         }
         let (g, c) = bank(5);
-        let m = |p| CapArray { pattern: p, tall: false }.metrics(&g, &c, &Flat, 1e-5, 1e-6);
+        let m = |p| CapArray { pattern: p, tall: false }.metrics(&g, &c, &Flat, 1e-5);
         let (sp, cb) = (m(Pattern::Spiral), m(Pattern::Chessboard));
         assert!(sp.route_spread < cb.route_spread, "spiral {} vs chessboard {}", sp.route_spread, cb.route_spread);
-        assert!(cb.inl_lsb < sp.inl_lsb && cb.dnl_lsb < sp.dnl_lsb, "{cb:?} vs {sp:?}");
+        assert!(cb.inl_lsb < sp.inl_lsb, "chessboard INL {} vs spiral {}", cb.inl_lsb, sp.inl_lsb);
         assert_eq!(sp.vias.len(), 6);
     }
 
@@ -886,10 +884,10 @@ mod tests {
                 caps.iter().find(|(a, b, _)| *a == n && b.as_deref() == Some("top")).map_or(0.0, |r| r.2)
             };
             let per_unit: Vec<f64> = (1..=4).map(|i| to_top(i) / f64::from(1u32 << (i - 1))).collect();
-            let mm = v.metrics(&g, &c, &pdk, 1e-5, 1e-6);
+            let mm = v.metrics(&g, &c, &pdk, 1e-5);
             eprintln!(
-                "{v:?}: C1..C4 = {:.3}/{:.3}/{:.3}/{:.3} fF, area {:.0} um2, lin {:.2} um, quad {:.1} um2, INL {:.2e} DNL {:.2e} LSB, route spread {:.2}, vias {:?}",
-                to_top(1), to_top(2), to_top(3), to_top(4), mm.area_um2, mm.lin_um, mm.quad_um2, mm.inl_lsb, mm.dnl_lsb, mm.route_spread, mm.vias
+                "{v:?}: C1..C4 = {:.3}/{:.3}/{:.3}/{:.3} fF, area {:.0} um2, lin {:.2} um, order {}, second {:.1} um2, INL {:.2e} DNL {:.2e} LSB, msys {:.2e}, route spread {:.2}, vias {:?}",
+                to_top(1), to_top(2), to_top(3), to_top(4), mm.area_um2, mm.lin_um, mm.order, mm.second_um2, mm.inl_lsb, mm.dnl_lsb, mm.msys, mm.route_spread, mm.vias
             );
             for (i, u) in per_unit.iter().enumerate() {
                 assert!((u / per_unit[0] - 1.0).abs() < 0.06, "{v:?}: C{} per unit {u} vs C1 {}", i + 1, per_unit[0]);

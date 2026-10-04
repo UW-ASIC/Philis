@@ -153,6 +153,23 @@ pub fn centro_assign(counts: &[u16], rows: usize, cols: usize, fill: Fill) -> (V
     (g.slot, exact)
 }
 
+/// Segment order of one resistor row (`centro_assign(counts, 1, Σc, Fill::Balanced)`): point-symmetric, second
+/// moments balanced; `exact` false when ≥ 2 members have odd counts ([`scale2`] gives the exact doubled counts).
+/// Resistor segments carry no diffusion constraint: any order is legal.
+#[must_use]
+pub fn segment_row(counts: &[u16]) -> (Vec<usize>, bool) {
+    let total = counts.iter().map(|&c| usize::from(c)).sum();
+    let (slots, exact) = centro_assign(counts, 1, total, Fill::Balanced);
+    (slots.into_iter().map(|s| usize::from(s.expect("a 1×Σc row has no empty slot"))).collect(), exact)
+}
+
+/// Every count ×2 when ≥ 2 counts are odd, else unchanged.
+#[must_use]
+pub fn scale2(counts: &[u16]) -> Vec<u16> {
+    let k = if cc_feasible(counts) { 1 } else { 2 };
+    counts.iter().map(|&c| c * k).collect()
+}
+
 /// A row-major unit grid under construction. Point reflection through the
 /// centre is index reversal: `(R-1-r)·C + (C-1-c) = RC-1-i`.
 pub struct Grid {
@@ -409,6 +426,57 @@ pub fn diffusion_cc_row(counts: &[u16], outer: Outer) -> Option<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matching::moments::{cancelled_order, Pt};
+
+    /// A/B string → per-member positions (pitch units about the row centre).
+    fn members(row: &str) -> [Vec<f64>; 2] {
+        let c = (row.len() as f64 - 1.0) / 2.0;
+        let pos = |m| row.chars().enumerate().filter(|&(_, ch)| ch == m).map(|(i, _)| i as f64 - c).collect();
+        [pos('A'), pos('B')]
+    }
+
+    /// |⟨x²⟩_A − ⟨x²⟩_B| per unit.
+    fn dm(row: &str) -> f64 {
+        let m2 = |v: &Vec<f64>| v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64;
+        let [a, b] = members(row);
+        (m2(&a) - m2(&b)).abs()
+    }
+
+    #[test]
+    fn table_8_5_every_ratio_is_exact_and_no_worse() {
+        // (counts, Hastings Table 8.5 book string, generated, generated |ΔM|).
+        let table: [(&[u16], &str, &str, f64); 10] = [
+            (&[2, 2], "ABBA", "ABBA", 2.0),
+            (&[2, 1], "ABA", "ABA", 1.0),
+            (&[4, 1], "AABAA", "AABAA", 2.5),
+            (&[4, 3], "ABABABA", "ABABABA", 2.333),
+            (&[5, 2], "AABABAA", "ABAAABA", 0.0),
+            (&[10, 2], "AAABAAAABAAA", "AABAAAAAABAA", 0.4),
+            (&[10, 6], "ABAABABAABABAABA", "ABABAAABBAAABABA", 0.533),
+            (&[3, 2], "ABABA", "ABABA", 1.667),
+            (&[6, 2], "AABAABAA", "ABAAAABA", 1.333),
+            (&[5, 4], "ABABABABA", "ABBAAABBA", 0.300),
+        ];
+        for (counts, book, generated, want) in table {
+            let (row, exact) = segment_row(counts);
+            let s: String = row.iter().map(|&m| if m == 0 { 'A' } else { 'B' }).collect();
+            assert_eq!((s.as_str(), exact), (generated, true), "{counts:?}");
+            let n = |r: &str, ch| r.chars().filter(|&c| c == ch).count() as u16;
+            assert_eq!([n(book, 'A'), n(book, 'B')], [counts[0], counts[1]], "{book}");
+            let pts = members(generated).map(|v| v.iter().map(|&x| Pt { x, y: 0.0, w: 1.0, phi: (0, 0) }).collect::<Vec<_>>());
+            assert!(cancelled_order(&[&pts[0], &pts[1]], 4, 1e-3).0 >= 1, "{generated}");
+            assert!((dm(generated) - want).abs() < 1e-3, "{generated}: {}", dm(generated));
+            assert!(dm(generated) <= dm(book) + 1e-9, "{generated} vs {book}");
+        }
+    }
+
+    #[test]
+    fn scale2_makes_two_odd_members_exact() {
+        assert_eq!(scale2(&[3, 1]), vec![6, 2]);
+        assert!(segment_row(&[6, 2]).1);
+        assert!(!segment_row(&[3, 1]).1);
+        assert_eq!(scale2(&[4, 1]), vec![4, 1]);
+    }
 
     fn owners(slot: &[Option<u8>]) -> String {
         slot.iter().map(|s| s.map_or('_', |d| char::from(b'0' + d))).collect()

@@ -106,6 +106,8 @@ pub struct MetadataReport {
     /// placement budget arm (each set is also in cost; reading both would
     /// duplicate it).
     pub matched: Vec<analog::matching::mismatch::LedgerRow>,
+    /// One note per sizing-reach finding (GAP-02); report only.
+    pub sizing: Vec<analog::matching::sizing::SizingNote>,
     /// Sidecar process numbers used on an `UNVERIFIED` source
     /// ([`verify::Pdk::unverified`]). Reported, not blocking [`Self::certified`].
     pub assumed: Vec<String>,
@@ -270,6 +272,8 @@ pub fn build(
     r.extend(statuses(&routing.budget, routes, Arm::Budget));
     let mut matched = Vec::new();
     placement.budget.iter().for_each(|b| b.ledger_rows(layout, &mut matched));
+    let mut sizing = Vec::new();
+    placement.budget.iter().for_each(|b| b.sizing_notes(layout, &mut sizing));
     MetadataReport {
         placement: p,
         routing: r,
@@ -281,6 +285,7 @@ pub fn build(
         budget_rows: Vec::new(),
         sim_failures: 0,
         matched,
+        sizing,
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
         binding: Vec::new(),
         coverage: verify::Coverage::default(),

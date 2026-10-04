@@ -747,6 +747,7 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
         route_space_nm: wire.and_then(|l| pdk.min_spacing(l.0)).unwrap_or(0),
         dti: opt("dti_max_spacing").zip(opt("dti_width")),
         avt_mv_um: [pos("avt_n_mv_um"), pos("avt_p_mv_um")],
+        abeta_pct_um: [pos("abeta_n_pct_um"), pos("abeta_p_pct_um")],
         svt_uv_per_um: pos("svt_uv_per_um"),
         vt_tc_uv_per_k: [pos("vt_tc_uv_per_k"), pos("vt_tc_uv_per_k_p")],
         lod_kvth0_mv_um: [pos("lod_kvth0_n_mv_um"), pos("lod_kvth0_p_mv_um")],
