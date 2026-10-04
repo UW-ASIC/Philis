@@ -11,6 +11,7 @@ pub mod ir;
 pub mod metal_over_gate;
 pub mod parasitic;
 pub mod performance;
+pub mod plate_ratio;
 pub mod shield;
 pub mod stack;
 
@@ -24,5 +25,6 @@ pub use ir::IrDrop;
 pub use metal_over_gate::MetalOverGate;
 pub use parasitic::ParasiticBudget;
 pub use performance::PerformanceBudget;
+pub use plate_ratio::{PlateRatio, PlateRatios, PlateSet};
 pub use shield::Shield;
 pub use stack::{DiodeCredit, Stack};

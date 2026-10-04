@@ -68,3 +68,36 @@ Departures from the card:
 - gr: `term_k_targets_route_in_order_at_their_own_width` covers MST order and the per-target search width. Each of the
   two reviewed mutations makes it fail.
 - Tests: `cargo test --release -p analog -p gr -p dr` all pass; `signoff_fixtures --include-ignored`: 19 passed.
+
+## Segment 3 (RTE-16, RTE-18, RTE-15, RTE-17, RTE-19, RTE-20)
+Acceptance: `benchmarks/tests/routing_quality.rs` (`--release -- --include-ignored`); `signoff_fixtures` stays 19
+passed after every item.
+- RTE-16: `no_metal_over_gates` passes on ota and tt_ota with 0 `metal over gate` and 0 `open net` (the run with no
+  blockages also had 0 open). Departures: `Blockage` has `rect` as drawn plus a `halo` (the library sets the
+  spacing), so the V checks the real gate and not the grown rect. A pin's stitch node inside a hard blockage is
+  closed to the nets the blockage binds. Same-net fill keeps off hard blockages. A via array narrower than one
+  enclosed cut is no longer placed (`(w − size)/pitch + 1` truncated to 1 and drew via.4a on quad). Out of scope:
+  CELL has no `KeepWhy::Gate`, so gates come from poly ∩ diff.
+- RTE-18: FLOW file `verify/src/pdk.rs` gains `Pdk::overlap_af_um2` (sky130 147.6/88.5 aF/µm²). Departures: no `gr::Separation`
+  struct; `RuleBatch::separations` tuples are used directly. A separation box covers along-track nodes too, so
+  corners count. It also keeps off the other net's terminals and is waived within its own terminals' box, because
+  closer pins belong to the cell and walling them in caused opens in `emit_roundtrip`. `Solution` gains
+  `routing`, `route` and `route_stats` for the bench. **Not met:** `crosstalk_exclusions_hold` gives 2/4 violated on
+  ota, ota_constrained and tt_ota (gate–drain pairs whose access pads are 430/806 nm apart at pins the cell puts that
+  close; the floor is larger). `coupling_tracks_pex` is off PEX by 45–99 %: the model is routed+cell metal only, and
+  the PEX rows include device and terminal C (vbias 27.6 fF vs 1.3 fF). PERF-16 owns this.
+- RTE-15: `pairs_report`: ota/ota_constrained/tt_ota 0/1 exact, `(1, 5, "axis off lattice")`. This waits for PLC-28
+  axis snapping. Departures: the mirror axis is taken from both pin sets' x extents, so a set shifted as a whole is an
+  off-lattice mirror; the "no pin map" test therefore moves one pin. Via arrays snap to the nearest grid point with
+  ties broken toward the original cut, so mirrored arrays stay mirrored. Not priced for the partner: its via halos
+  and separations.
+- RTE-17: `common_nodes_meet_allowance`: ota 2 nodes, 0 violated, 2 unknown (no allowance without an op), so the
+  check is vacuous. Star/Kelvin nodes have no producer until EXT-24. Departure: a star's branch pseudo-nets keep one
+  free track between them, because same-net fill merged adjacent branches.
+- RTE-19: **not met:** `a_shielded_victim_gets_both_side_tracks` measures 0.768 against the asserted 0.95. The victim's
+  end jogs and pads count in its length and have no track beside them. The trunk alone is 0.93 covered. The test
+  stays red and the assertion was not lowered. `add_shield` now drops its shortest claim and retries instead of
+  giving up all-or-nothing (before this, the 2-node claims sank the whole set: coverage 0). Bench circuits with a
+  clock: none yet.
+- RTE-20: `dac4_plates` passes. No crossing; spread unknown because the sky130 MIM X-cards carry no `c_af`, so the
+  ratio check is vacuous. The sets come from capacitor Unitizations with ≥ 3 members (EXT-19).

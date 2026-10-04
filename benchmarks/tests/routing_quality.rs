@@ -144,3 +144,16 @@ fn common_nodes_meet_allowance() {
     println!("ota CommonNode total {} violated {} unknown {}", row.total, row.violations, row.unknown);
     assert_eq!(row.violations, 0);
 }
+
+/// RTE-20 on `dac4`: the capacitor set's bit leads never cross its top plate
+/// outside the array, and their lead C per unit is within tolerance.
+#[test]
+#[ignore = "acceptance row; run with --include-ignored"]
+fn dac4_plates() {
+    let pdk = pdk();
+    let sol = run("dac4", &pdk);
+    println!("dac4 plate sets {:?}  crossing {:?}  ratio {:?}", sol.route_stats.plate_spread_pct, rows(&sol, "plate crossing"), sol.route.budget_violations.iter().filter(|v| v.rule.starts_with("plate ratio")).map(|v| &v.rule).collect::<Vec<_>>());
+    assert!(!sol.route_stats.plate_spread_pct.is_empty(), "no capacitor set reached dr");
+    assert!(rows(&sol, "plate crossing").is_empty());
+    assert!(!sol.route.budget_violations.iter().any(|v| v.rule.starts_with("plate ratio")));
+}

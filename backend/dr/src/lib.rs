@@ -160,6 +160,9 @@ pub struct DetailedCfg {
     pub blockages: Vec<Blockage>,
     /// Per `NetId`, an aggressor-class net (`Clock` today); empty = none.
     pub aggressor: Vec<bool>,
+    /// Capacitor sets whose plate leads are routed apart and equalised
+    /// (RTE-20; absolute array rects); empty = none. Needs `stack`.
+    pub plates: Vec<analog::routing::PlateSet>,
 }
 
 impl Default for DetailedCfg {
@@ -194,6 +197,7 @@ impl Default for DetailedCfg {
             n_nets: 0,
             blockages: Vec::new(),
             aggressor: Vec::new(),
+            plates: Vec::new(),
         }
     }
 }
@@ -267,6 +271,9 @@ pub struct RouteStats {
     /// `landing failed`.
     pub pairs_exact: u32,
     pub pairs_fallback: Vec<(u32, u32, &'static str)>,
+    /// Per capacitor set (RTE-20), its lead-C spread after equalising,
+    /// percent of one unit's C; `None` = unknown (no unit C).
+    pub plate_spread_pct: Vec<Option<f32>>,
 }
 
 /// The detailed router.
@@ -345,6 +352,24 @@ impl DetailedRoute {
         // the same absolute coordinates whatever the frame.
         let origin = frame_origin((low(|r| r.x), low(|r| r.y)), halo + margin, lattice_period(cfg));
         let shift = |r: Rect| Rect { x: r.x - origin.0, y: r.y - origin.1, ..r };
+        // RTE-20: the capacitor sets' plate rules, arrays moved by `-off`
+        // (`origin` for the routing frame, `(0, 0)` for absolute routes).
+        let plate_rules = |off: (i32, i32)| {
+            let space_nm = layers.first().map_or(0, |&l| cfg.space(l, 0, 0, cfg.pitch - cfg.wire_width));
+            analog::routing::PlateRatios(match cfg.stack {
+                Some(stack) => cfg
+                    .plates
+                    .iter()
+                    .map(|p| analog::routing::PlateRatio {
+                        set: analog::routing::PlateSet { array: Rect { x: p.array.x - off.0, y: p.array.y - off.1, ..p.array }, ..p.clone() },
+                        tol_pct10: PLATE_TOL_PCT10,
+                        stack,
+                        space_nm,
+                    })
+                    .collect(),
+                None => Vec::new(),
+            })
+        };
         // The cells' metal and gate pins per net, for the rules that score the
         // whole conductor (antenna): absolute, and in the routing frame.
         let (cell_abs, gates_abs) = cell_metal(placed, n_nets, cfg.stack, &cfg.gate_nm2);
@@ -1018,6 +1043,7 @@ impl DetailedRoute {
         for b in reqs.hard.iter().chain(&reqs.budget) {
             b.separations(&mut seps);
         }
+        analog::RuleBatch::separations(&plate_rules((0, 0)), &mut seps);
         // A star's branches keep a free track between them: adjacent same-net
         // runs would be merged by the same-net fill, joining the branches.
         for sibs in &star_sibs {
@@ -1099,10 +1125,13 @@ impl DetailedRoute {
                 ..n.clone()
             })
             .collect();
-        let extra: Vec<Box<dyn analog::RuleBatch<Routes>>> = match cfg.stack {
+        let mut extra: Vec<Box<dyn analog::RuleBatch<Routes>>> = match cfg.stack {
             Some(stack) if !common.is_empty() => vec![Box::new(analog::routing::CommonNodes { nodes: common.clone(), stack, halo_nm: cfg.pitch, joins: joins(layers, cuts, cfg.pin_access) })],
             _ => Vec::new(),
         };
+        if !cfg.plates.is_empty() {
+            extra.push(Box::new(plate_rules(origin)));
+        }
         // Per net, for the antenna lift: the top lattice layer of its cells'
         // metal (a plate), and each gate's landed node and pin.
         let lift: Vec<Option<(u32, Vec<((i32, i32), Rect)>)>> = compact
@@ -1132,7 +1161,7 @@ impl DetailedRoute {
         stats.us_repair = us(t_repair);
         let joins = joins(layers, cuts, cfg.pin_access);
         let mut round = 0;
-        let (routes, sacrificed, access_v) = loop {
+        let (mut routes, sacrificed, access_v) = loop {
             let t_geometry = std::time::Instant::now();
             let mut routes = build_routes(&hot, &cold, cfg, &compact, n_nets, layers, cuts);
             // Shapes at or past this index per net are access geometry — the only
@@ -1472,6 +1501,32 @@ impl DetailedRoute {
         let overuse = overuse(&hot);
         let mut report = score(&routes, reqs, overuse, &joins, &foreign_metal, &sacrificed, side);
         report.hard_violations.extend(star_v);
+        // RTE-20: equalise the bits' lead C per unit with dead-end stubs,
+        // then report what remains and any bit crossing the top plate.
+        let metals: Vec<LayerId> = layers[..n_layers as usize].to_vec();
+        for rule in &plate_rules((0, 0)).0 {
+            equalize_leads(&mut routes, rule, &metals, &foreign_metal, &|l| cfg.space(l, 0, 0, cfg.pitch - cfg.wire_width), cfg.grid);
+            stats.plate_spread_pct.push(rule.spread_pct(&routes));
+            if let Some(spread) = rule.spread_pct(&routes) {
+                let tol = rule.tol_pct10 as f32 / 10.0;
+                if spread > tol {
+                    report.budget_violations.push(Violation::from_residual(format!("plate ratio net {}", rule.set.top.0), f64::from((spread - tol) / tol)));
+                }
+            }
+            let a = rule.set.array;
+            let top = routes.shapes(rule.set.top);
+            for &(bit, _) in &rule.set.bits {
+                let crossed = routes.shapes(bit).iter().any(|p| {
+                    top.iter().any(|q| {
+                        let (lp, lq) = (metals.iter().position(|&l| l == p.layer), metals.iter().position(|&l| l == q.layer));
+                        lp.zip(lq).is_some_and(|(x, y)| x.abs_diff(y) == 1) && overlaps(p.rect, q.rect) && !(overlaps(p.rect, a) && overlaps(q.rect, a))
+                    })
+                });
+                if crossed {
+                    report.hard_violations.push(Violation { rule: format!("plate crossing net {}", bit.0), margin: 1 });
+                }
+            }
+        }
         report.budget_violations.extend(shield_v);
         report.hard_violations.extend(access_v);
         let mut metals = [u16::MAX; analog::routing::metal_over_gate::MAX_METALS];
@@ -1635,6 +1690,66 @@ fn tie_pair(cold: &mut RouteCtx<TrackGrid>, a: usize, b: usize, map: gr::Lattice
     cold.mirror[a] = Some((b as u32, map, true));
     cold.mirror[b] = Some((a as u32, map.inverse(), false));
     true
+}
+
+/// Plate-lead spread tolerance, tenths of a percent of one unit's C
+/// (tuning default: Hastings §8.2 gives the check, not a number).
+const PLATE_TOL_PCT10: i32 = 10;
+
+/// Hastings §8.2 rule C10 (restored from M1's `trim_pair`): per bit whose
+/// lead C per unit is under the largest, a same-layer dead-end stub
+/// continuing one of its runs outside the array, `L = (target − C_i/n_i)·n_i
+/// / c_per_nm` (the layer's area and fringe C at the run's width), snapped
+/// to `grid`; kept only when the spread drops and the stub keeps `space`
+/// from every foreign shape on its layer (other nets' routes and the cell
+/// and ring metal of `foreign` not owned by the bit). Bits are visited most-deficient first, each once.
+#[allow(clippy::too_many_arguments)]
+fn equalize_leads(routes: &mut Routes, rule: &analog::routing::PlateRatio, metals: &[LayerId], foreign: &[(Option<u32>, Shape)], space: &dyn Fn(LayerId) -> i32, grid: i32) {
+    let Some(_) = rule.spread_pct(routes) else { return };
+    let mut order: Vec<usize> = (0..rule.set.bits.len()).collect();
+    let per = rule.per_unit_af(routes);
+    order.sort_by(|&a, &b| per[a].total_cmp(&per[b]));
+    let a = rule.set.array;
+    let g = grid.max(1);
+    for i in order {
+        let per = rule.per_unit_af(routes);
+        let target = per.iter().copied().fold(0.0, f32::max);
+        let (net, n) = rule.set.bits[i];
+        let need = (target - per[i]) * n as f32;
+        let Some(before) = rule.spread_pct(routes) else { return };
+        if need <= 0.0 {
+            continue;
+        }
+        let b = net.0 as usize;
+        let runs: Vec<Shape> = routes.wires[b].iter().copied().filter(|s| s.rect.w != s.rect.h && metals.contains(&s.layer) && !overlaps(s.rect, a)).collect();
+        'run: for s in runs {
+            let Some(l) = rule.stack.layers.iter().find(|l| l.id == s.layer.0) else { continue };
+            let width = s.rect.w.min(s.rect.h);
+            let per_nm = (l.area_af_um2 * width as f32 / 1_000.0 + 2.0 * l.fringe_af_um) / 1_000.0;
+            if per_nm <= 0.0 {
+                continue;
+            }
+            let len = ((need / per_nm / g as f32).round() as i32) * g;
+            if len <= 0 {
+                continue;
+            }
+            let r = s.rect;
+            let stubs = if r.w > r.h { [Rect { x: r.x + r.w, w: len, ..r }, Rect { x: r.x - len, w: len, ..r }] } else { [Rect { y: r.y + r.h, h: len, ..r }, Rect { y: r.y - len, h: len, ..r }] };
+            for stub in stubs {
+                let gap = space(s.layer);
+                let clear = !overlaps(stub, a)
+                    && routes.wires.iter().enumerate().filter(|&(k, _)| k != b).flat_map(|(_, w)| w).chain(foreign.iter().filter(|f| f.0 != Some(b as u32)).map(|f| &f.1)).all(|f| f.layer != s.layer || rect_gap(f.rect, stub) >= gap);
+                if !clear {
+                    continue;
+                }
+                routes.wires[b].push(Shape { layer: s.layer, rect: stub });
+                if rule.spread_pct(routes).is_some_and(|after| after < before) {
+                    break 'run;
+                }
+                routes.wires[b].pop();
+            }
+        }
+    }
 }
 
 /// Elementwise max of `ks` (all ones when empty).
@@ -3528,6 +3643,51 @@ mod tests {
         assert_eq!(star_v, 0);
         let (ua, star_v, _) = run(false);
         assert!(ua > 0.0 || star_v > 0, "without the star the sense lead is not separate");
+    }
+
+    /// Bits of 1/2/4/8 units with equal 10 µm leads (ground C only): the
+    /// stubs bring every bit's lead C per unit within 10 aF of the mean.
+    #[test]
+    fn equalize_leads_matches_per_unit_lead_c() {
+        use analog::routing::{stack::Layer, PlateRatio, PlateSet, Stack};
+        let stack: &'static Stack = Box::leak(Box::new(Stack { layers: vec![Layer { id: LAYERS[1].0, area_af_um2: 30.0, lateral: 1e-9, ..Layer::default() }], antenna_cumulative: false, diode: None }));
+        let set = PlateSet { top: NetId(0), bits: [1, 2, 4, 8].iter().enumerate().map(|(i, &n)| (NetId(i as u16 + 1), n)).collect(), c_unit_af: 1_000.0, array: Rect { x: 0, y: 0, w: 100_000, h: 1_000 } };
+        let rule = PlateRatio { set, tol_pct10: 10, stack, space_nm: 140 };
+        let mut wires = vec![Vec::new()];
+        for i in 0..4 {
+            wires.push(vec![Shape { layer: LAYERS[1], rect: Rect { x: i * 20_000, y: 1_000, w: 260, h: 10_000 } }]);
+        }
+        let mut r = Routes { wires, ..Default::default() };
+        assert!(rule.spread_pct(&r).unwrap() > 1.0);
+        equalize_leads(&mut r, &rule, &LAYERS, &[], &|_| 140, 5);
+        let per = rule.per_unit_af(&r);
+        let mean = per.iter().sum::<f32>() / 4.0;
+        assert!(per.iter().all(|c| (c - mean).abs() <= 10.0), "{per:?}");
+    }
+
+    /// A 4-bit bank: the top plate (net 0) leaves the array downward, the
+    /// bits (nets 1–4) upward, so they would cross; the no-cross separation
+    /// keeps every bit off the top on adjacent layers and the top a spacing
+    /// away on its own.
+    #[test]
+    fn bottom_plates_never_cross_the_top_plate() {
+        use analog::routing::PlateSet;
+        let array = Rect { x: 8_000, y: 8_000, w: 5_000, h: 4_000 };
+        let at = |net: u16, x, y| pnr_core::Pin { name: format!("c{net}"), net: NetId(net), at: Rect { x, y, w: 170, h: 170 }, layer: LAYERS[0] };
+        let cell = Macro { pins: [at(0, 10_400, 11_600)].into_iter().chain((1..5).map(|i| at(i, 8_400 + i32::from(i) * 900, 8_200))).collect(), bbox: array, ..Default::default() };
+        let mut pins = vec![pin(0, 10_400, 2_000)];
+        pins.extend((1..5).map(|i| pin(i, 8_400 + i32::from(i) * 900, 18_000)));
+        let set = PlateSet { top: NetId(0), bits: (1..5).map(|i| (NetId(i), 1)).collect(), c_unit_af: f32::NAN, array };
+        let run = |plates: Vec<PlateSet>| {
+            let cfg = DetailedCfg { plates, stack: Some(test_stack()), ..test_cfg() };
+            route(cfg, &pins, &[cell.clone()], &[], &mut gr::Negotiation::new())
+        };
+        let crossed = |r: &Routes| (1..5).any(|b| r.wires[b].iter().any(|p| r.wires[0].iter().any(|q| p.layer != q.layer && LAYERS.contains(&p.layer) && LAYERS.contains(&q.layer) && overlaps(p.rect, q.rect))));
+        let (routes, report) = run(vec![set]);
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net") || r.starts_with("plate crossing")), "{:?}", rules(&report));
+        assert!(!crossed(&routes));
+        assert!((1..5).all(|b| min_gap(&routes, 0, b) >= 140), "{:?}", (1..5).map(|b| min_gap(&routes, 0, b)).collect::<Vec<_>>());
+        assert!(crossed(&run(Vec::new()).0), "the set-up does not force a crossing");
     }
 
     /// History survives the call and changes the next one.

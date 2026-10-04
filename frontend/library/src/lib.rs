@@ -1223,6 +1223,7 @@ impl Flow<'_> {
                     }
                     a
                 },
+                plates: self.plate_sets(&placed),
                 aggressor_weight: analog::routing::CouplingBudget::default_weights(&self.problem.net_classes, self.netlist.nets.len()),
                 stack: Some(self.stack),
                 pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
@@ -1370,6 +1371,34 @@ impl Flow<'_> {
             })
             .collect();
         perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true, gate_offset_v: Vec::new() }
+    }
+
+    /// RTE-20: each capacitor `Unitization` of three or more members (EXT-19's
+    /// sets) as placed: `top` the members' `P` net, `bits` the `(N net, units)`
+    /// of every member whose `N` is no rail (the terminated unit's is),
+    /// `c_unit_af` a one-unit member's `c_af` (`NAN` without one), `array` the
+    /// bbox of the cell drawing the members.
+    fn plate_sets(&self, placed: &[Macro]) -> Vec<analog::routing::PlateSet> {
+        use analog::metadata::NetClass::{Ground, Substrate, Supply};
+        let rail = |n: pnr_core::NetId| self.problem.net_classes.iter().any(|c| c.net == n && matches!(c.class, Supply | Ground | Substrate));
+        let term = |d: DeviceId, t: &str| self.netlist.devices[d.0 as usize].terminals.iter().find(|(n, _)| n == t).map(|&(_, n)| n);
+        let mut out = Vec::new();
+        for u in self.problem.constraints.unitization.iter().filter(|u| u.device_type == pnr_core::DeviceKind::Capacitor && u.devices.len() >= 3) {
+            let Some(top) = term(u.devices[0], "P") else { continue };
+            let Some(c) = self.cells.devices_of.iter().position(|m| !m.is_empty() && m.iter().all(|d| u.devices.contains(d))) else { continue };
+            let Some(array) = placed.get(c).map(|m| m.bbox) else { continue };
+            let units = |i: usize| u32::from(u.dev_nf.get(i).copied().unwrap_or(1));
+            let bits: Vec<(pnr_core::NetId, u32)> = u.devices.iter().enumerate().filter_map(|(i, &d)| term(d, "N").filter(|&n| !rail(n)).map(|n| (n, units(i)))).collect();
+            let c_unit_af = u
+                .devices
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| units(i) == 1)
+                .find_map(|(_, &d)| self.netlist.devices[d.0 as usize].params.iter().find(|(k, _)| k == "c_af").map(|&(_, v)| v as f32))
+                .unwrap_or(f32::NAN);
+            out.push(analog::routing::PlateSet { top, bits, c_unit_af, array });
+        }
+        out
     }
 
     /// Each recognised matched pair on one source net, with its members'
