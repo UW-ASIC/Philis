@@ -346,7 +346,11 @@ fn run_circuit(
     let _ = std::fs::write(debug_dir.join(format!("{}.gds", c.name)), &gds_bytes);
     match library::post_layout_spice(&sol, pdk, &c.name) {
         Ok(s) => drop(std::fs::write(debug_dir.join(format!("{}_pex.spice", c.name)), s)),
-        Err(e) => eprintln!("{}_pex.spice not written: {e}", c.name),
+        Err(e) => {
+            eprintln!("{}_pex.spice not written: {e}", c.name);
+            // A previous run's file would read as this layout's extraction.
+            let _ = std::fs::remove_file(debug_dir.join(format!("{}_pex.spice", c.name)));
+        }
     }
     let _ = std::fs::write(debug_dir.join("signoff.txt"), format!("{outcome}\n{}", signoff.coverage));
     // Every hard violation verbatim — the summary counts alone can't say which rule fired.
