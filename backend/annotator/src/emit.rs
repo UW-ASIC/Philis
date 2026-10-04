@@ -71,6 +71,16 @@ fn avt(nl: &Netlist, p: &ProcessNumbers, d: DeviceId) -> Option<f32> {
     by_polarity(nl, d, p.avt_mv_um)
 }
 
+/// `S_VT` at `d`'s gate length: the deck's S(L) fit when it has one and `d`
+/// a length, else its single `svt_uv_per_um`.
+fn svt(nl: &Netlist, p: &ProcessNumbers, d: DeviceId) -> Option<f32> {
+    let l = crate::param(&nl.devices[d.0 as usize], "l", 0);
+    match p.svt_fit {
+        Some((a, b)) if l > 0 => Some(mismatch::svt_of_l(a, b, l as f32 / 1000.0)),
+        _ => p.svt_uv_per_um,
+    }
+}
+
 /// Build the placement [`Requirements`] from the recognised blocks.
 ///
 /// A `MatchedSet` pair is priced against its allowance when the deck carries
@@ -129,10 +139,12 @@ pub fn placement(
                 class: MatchClass::Moderate,
                 coeffs: Coeffs {
                     avt_mv_um: avt(nl, p, a),
-                    svt_uv_per_um: p.svt_uv_per_um,
+                    svt_uv_per_um: svt(nl, p, a),
                     kvth0_mv_um: by_polarity(nl, a, p.lod_kvth0_mv_um),
                     tc_uv_per_k: by_polarity(nl, a, p.vt_tc_uv_per_k),
                     abeta_pct_um: by_polarity(nl, a, p.abeta_pct_um),
+                    mobility_exp: by_polarity(nl, a, [Some(1.7), Some(1.5)]),
+                    die_temp_k: p.die_temp_k,
                     ..Coeffs::default()
                 },
                 budget: budget(offset_sigma_mv, match_kind),
@@ -141,6 +153,8 @@ pub fn placement(
                 cell_of: Vec::new(),
                 // ponytail: EXT-17 fills it from Evidence.op.
                 gm_over_id: None,
+                // PERF-27 fills it (pair_sigma_mc).
+                sigma_rand_override: None,
             };
             let phi = phi_arm(set.class);
             r.budget.push(Box::new(set.clone()));

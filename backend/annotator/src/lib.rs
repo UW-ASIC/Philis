@@ -81,7 +81,7 @@ struct Needs {
 /// `DtiBand` inapplicable, not unknown.
 fn missing(p: &ProcessNumbers, needs: &Needs) -> Vec<(&'static str, &'static str)> {
     let mut out = Vec::new();
-    if needs.matched && p.svt_uv_per_um.is_none() {
+    if needs.matched && p.svt_uv_per_um.is_none() && p.svt_fit.is_none() {
         out.push(("MatchedSet", "deck svt_uv_per_um — distance term unknown"));
     }
     if needs.matched && p.avt_mv_um.iter().any(Option::is_none) {

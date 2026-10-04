@@ -165,6 +165,9 @@ pub struct ProcessNumbers {
     /// Pelgrom distance coefficient `S_VT`, µV/µm. Process-specific and rarely
     /// published: absent leaves the matching distance check unknown.
     pub svt_uv_per_um: Option<f32>,
+    /// `S_VT² = a + b/L²` fit `(a µV²/µm², b µV²)`: with a set's gate L it
+    /// replaces `svt_uv_per_um` (MAT-16).
+    pub svt_fit: Option<(f32, f32)>,
     /// |dVT/dT|, µV/K, `[nmos, pmos]`: turns a matched pair's offset allowance
     /// into a ΔT limit.
     pub vt_tc_uv_per_k: [Option<f32>; 2],
@@ -190,6 +193,8 @@ pub struct ProcessNumbers {
     /// The process can draw an `Ecgr` / `Hcgr` (`cells::post_cell::drawable`).
     pub ecgr_drawable: bool,
     pub hcgr_drawable: bool,
+    /// `Config.op` temperature, K (not a deck key): a mirror's mobility term (MAT-14).
+    pub die_temp_k: Option<f32>,
 }
 
 #[cfg(test)]

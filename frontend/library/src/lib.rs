@@ -381,7 +381,8 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // Annotated once here for the sensitivity rows; each topology annotates
     // its own `Problem` with the same `ann` (one leaked stack per run).
     let stack: &'static analog::routing::Stack = Box::leak(Box::new(elaborate::stack(pdk)));
-    let ann = annotation_with(pdk, &cfg.annotation, stack);
+    let mut ann = annotation_with(pdk, &cfg.annotation, stack);
+    ann.process.die_temp_k = cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15);
     let base = annotate(&netlist, &ann);
 
     // 2. Bias: per-device power and per-net current. Placement-independent,
@@ -1030,6 +1031,7 @@ fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::r
         avt_mv_um: [pos("avt_n_mv_um"), pos("avt_p_mv_um")],
         abeta_pct_um: [pos("abeta_n_pct_um"), pos("abeta_p_pct_um")],
         svt_uv_per_um: pos("svt_uv_per_um"),
+        svt_fit: pos("svt_a_uv2_per_um2").zip(pos("svt_b_uv2")),
         vt_tc_uv_per_k: [pos("vt_tc_uv_per_k"), pos("vt_tc_uv_per_k_p")],
         lod_kvth0_mv_um: [pos("lod_kvth0_n_mv_um"), pos("lod_kvth0_p_mv_um")],
         lattice_nm: cells::builder::cut_lattice(pdk),
@@ -1040,6 +1042,8 @@ fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::r
         ecgr_min_width_nm: opt("ecgr_min_width_nm"),
         ecgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Ecgr, pdk),
         hcgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Hcgr, pdk),
+        // Set by the callers from `Config.op` (not a deck key).
+        die_temp_k: None,
     };
     AnnotationConfig { process, ..base.clone() }
 }

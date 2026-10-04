@@ -140,8 +140,10 @@ pub fn choose(offset_sigma_mv: Option<f32>, allowance: Option<f32>, class_limit:
 pub struct Coeffs {
     /// `A_VT`, mV·µm.
     pub avt_mv_um: Option<f32>,
-    /// `S_VT`, µV/µm.
+    /// `S_VT`, µV/µm, at this set's gate length (S(L) when the deck has the fit, MAT-16).
     pub svt_uv_per_um: Option<f32>,
+    /// Anisotropic `(S_x, S_y)`, µV/µm: no deck key sets it; isotropic `S_VT` when `None`.
+    pub svt_xy: Option<(f32, f32)>,
     /// BSIM4 `KVTH0`, mV·µm.
     pub kvth0_mv_um: Option<f32>,
     /// `|dV_T/dT|`, µV/K.
@@ -157,6 +159,32 @@ pub struct Coeffs {
     pub vbe_tc_uv_per_k: Option<f32>,
     /// Passive gradient `S_D`, %/mm (eq. 8.15).
     pub sd_pct_per_mm: Option<f32>,
+    /// Mobility exponent, β ∝ T^−exp (1.7 NMOS, 1.5 PMOS): read on a mirror's % ledger only.
+    pub mobility_exp: Option<f32>,
+    /// Die temperature, K (`Config.op`); `None` skips the mobility term.
+    pub die_temp_k: Option<f32>,
+}
+
+/// Distance coefficient at gate length `l_um`, µV/µm: `√(a + b/L²)` (S_D²
+/// grows with 1/L², Schaper & Linnenbank Fig. 8; MM-25).
+#[must_use]
+pub fn svt_of_l(a_uv2_per_um2: f32, b_uv2: f32, l_um: f32) -> f32 {
+    (a_uv2_per_um2 + b_uv2 / (l_um * l_um)).sqrt()
+}
+
+/// Gradient σ of a centroid offset `(dx, dy)` nm under `(S_x, S_y)` µV/µm, mV:
+/// `‖(S_x·dx, S_y·dy)‖·1e-6`.
+#[must_use]
+pub fn sigma_grad_mv(s_xy_uv_per_um: (f32, f32), dx_nm: f32, dy_nm: f32) -> f32 {
+    (s_xy_uv_per_um.0 * dx_nm).hypot(s_xy_uv_per_um.1 * dy_nm) * 1e-6
+}
+
+/// Current-factor change of a member `dt_k` warmer than its partner, %:
+/// `−100·exp·ΔT/T` for `k ∝ T^−exp` (Hastings §12.1.1, PDF p.578). Signed,
+/// ΔT of member a minus b.
+#[must_use]
+pub fn mobility_pct(exp: f32, dt_k: f32, t_abs_k: f32) -> f32 {
+    -100.0 * exp * dt_k / t_abs_k
 }
 
 /// ΔV_BE σ of a bipolar/diode pair from its ΔI_S/I_S σ, mV: `V_T·ln(1 + σ/100)`
@@ -178,8 +206,12 @@ pub fn ratio_thermal_pct(tc_ppm_per_k: f32, dt_mk: f32) -> f32 {
 /// One pair's ledger, in `unit` (mV unless a mirror's G and `A_β` are known).
 ///
 /// - `sigma_rand` = `A_VT·√((1/a₁+1/a₂)/2)` ([`sigma_pair`]).
-/// - `sigma_grad` = `S_VT·|Δm|` (Pelgrom eq. (1) distance term, PDF p.1).
-/// - `mu_thermal` = `TC·|ΔT|` at the two centroids (Hastings eq. 8.23, PDF p.388).
+/// - `sigma_grad` = `‖(S_x·Δx, S_y·Δy)‖` (Pelgrom eq. (1) distance term, PDF p.1;
+///   `S_x = S_y = S_VT` unless `svt_xy`).
+/// - `mu_thermal` = `TC·|ΔT̄|` (Hastings eq. 8.23, PDF p.388), `ΔT̄` the
+///   unit-weighted mean rise over each member's units (centroids without
+///   units); a mirror's % ledger adds `|`[`mobility_pct`]`|` (MAT-14), an mV
+///   ledger skips it (no G).
 /// - `mu_lod` = `KVTH0·|⟨lod⟩_a − ⟨lod⟩_b|`, unit-weighted means (REV eq. 11).
 /// - `coincidence` = `|Δm|/tol` when the members' unit counts admit a
 ///   common-centroid row (Hastings Table 8.4 rule 1, PDF p.392): process-free,
@@ -207,7 +239,9 @@ pub struct Ledger {
 /// members' units cancel ([`crate::matching::moments::cancelled_order`], 0
 /// without units); `phi_equal` whether their orientation counts agree (`None`
 /// without units); `sizing_limited` a `Sigma1Mv`/`Sigma1Pct` budget the random σ alone
-/// already meets or exceeds (allowance 0: the sizing, not the layout, must change).
+/// already meets or exceeds (allowance 0: the sizing, not the layout, must change);
+/// `sigma_source` where `sigma_rand` came from: `"Pelgrom"` (the area law, any
+/// family) or `"MC"` (`MatchedSet::sigma_rand_override`, MAT-21).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LedgerRow {
     pub members: (u32, u32),
@@ -222,6 +256,7 @@ pub struct LedgerRow {
     pub second_order_nm: f32,
     pub phi_equal: Option<bool>,
     pub known: bool,
+    pub sigma_source: &'static str,
     pub sizing_limited: bool,
 }
 
@@ -297,6 +332,24 @@ mod tests {
         let s = sigma_pair(2.0, 36.0, 36.0);
         assert!((s - 0.333).abs() < 1e-3, "{s}");
         assert!((bjt_sigma_vbe_mv(s) - 0.0855).abs() < 5e-4, "{}", bjt_sigma_vbe_mv(s));
+    }
+
+    #[test]
+    fn svt_fit_reproduces_dvp_table_1() {
+        for (l, s) in [(0.12, 1.624), (0.24, 0.893), (0.48, 0.580)] {
+            assert!((svt_of_l(0.1835, 0.03533, l) - s).abs() < 0.01, "{l}: {}", svt_of_l(0.1835, 0.03533, l));
+        }
+    }
+
+    #[test]
+    fn anisotropic_grad() {
+        assert!((sigma_grad_mv((1.0, 2.0), 1000.0, 1000.0) - 5f32.sqrt() * 1e-3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mobility_term_sign() {
+        assert!((mobility_pct(1.7, 1.0, 300.0) + 0.5667).abs() < 1e-3);
+        assert!((mobility_pct(1.5, 1.0, 300.0) + 0.5).abs() < 1e-6);
     }
 
     #[test]
