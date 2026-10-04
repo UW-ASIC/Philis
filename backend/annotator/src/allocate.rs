@@ -40,8 +40,9 @@ pub(crate) fn margins(s: &SpecSens, beta: f64) -> Vec<(f64, f64, f64)> {
 /// `max_eta·σ_k` when no spec touches the set (`None` without σ_k); a row with
 /// `M_j ≤ 0` gives its sets 0 and one `spec_infeasible_at_schematic` (LAMP-49).
 /// The weight is the set's largest share of a spec's variance,
-/// `max_j (S_jk·σ_k)²/σ_f,j²` clamped to 1 (GRAEB-06), `None` unless σ_k and
-/// some σ_f are known.
+/// `max_j (S_jk·σ_k)²/σ_f,j²` clamped to 1 (GRAEB-06) over the specs with
+/// `S_jk > 0`, `None` unless σ_k and such a spec's σ_f are known: a set no spec's
+/// `d_vt` touches has no evidence of being minor, so D5 leaves it alone.
 #[must_use]
 pub fn allocate(sets: &[SetIn], sens: &Sensitivities, beta: f64, max_eta: f32) -> (Vec<(Option<f32>, Option<f32>)>, Vec<Diagnostic>) {
     let n = sets.len();
@@ -69,8 +70,8 @@ pub fn allocate(sets: &[SetIn], sens: &Sensitivities, beta: f64, max_eta: f32) -
             }
         }
         if let Some(sf) = s.sigma_f.filter(|&v| v > 0.0) {
-            for (k, set) in sets.iter().enumerate() {
-                if let Some(sig) = set.sigma_mv {
+            for &k in &touched {
+                if let Some(sig) = sets[k].sigma_mv {
                     let w = (sk[k] * f64::from(sig) / sf).powi(2);
                     weight[k] = Some(weight[k].map_or(w, |v| v.max(w)));
                 }
@@ -141,6 +142,7 @@ mod tests {
         let d: Vec<f64> = out.iter().map(|o| f64::from(o.0.unwrap())).collect();
         for (s, m) in [(sa, 10.0), (sb, 5.0)] {
             let used: f64 = s.iter().zip(&d).map(|(s, d)| s * d).sum();
+            // 1e-5, not 1e-9: δ comes back as f32, whose rounding sets the bound.
             assert!(used <= m + 1e-5, "{used} > {m}");
         }
         assert!((d[2] - 5.0 / (3.0 * 0.2)).abs() < 1e-4, "set 3 takes B's term: {}", d[2]);
@@ -155,7 +157,7 @@ mod tests {
         let d: Vec<f64> = out.iter().map(|o| f64::from(o.0.unwrap())).collect();
         assert!(d[3] > d[1] && d[1] == d[2] && d[2] > d[0], "{d:?}");
         let used: f64 = s.iter().zip(&d).map(|(s, d)| s * d).sum();
-        assert!((used - 10.0).abs() < 1e-5, "{used}");
+        assert!((used - 10.0).abs() < 1e-6, "{used}");
     }
 
     #[test]
@@ -185,5 +187,8 @@ mod tests {
         let sens = Sensitivities { specs: vec![spec(20.0, Some(0.0), None, Some(2.0), dvt(&[1.0]))] };
         let (out, _) = allocate(&pairs(1), &sens, 3.0, 3.0);
         assert_eq!(out[0].1, Some(0.25));
+        // A set the spec does not touch gets no weight (no D5 demotion).
+        let (out, _) = allocate(&pairs(2), &sens, 3.0, 3.0);
+        assert_eq!(out[1].1, None);
     }
 }

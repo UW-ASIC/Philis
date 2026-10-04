@@ -89,3 +89,14 @@ fixes). Each column was built from `git archive`.
     - the `gp::Prices` hard/budget kind-conflict `debug_assert` (`backend/gp/src/lib.rs:87`);
     - `scale.rs`'s 2 s limit (still 5.0 s debug here; release passes).
   - So the card's per-commit rule cannot be met by this module alone. The card's `-p cli` should be `-p philis`.
+
+## EXT-21/25 (segment 5)
+
+- EXT-21's real-data acceptance and EXT-25 step L are pending: both read sensitivities from PERF-12
+  (`perf::to_evidence`), which is not in m2. Only the unit/fixture tests cover them here.
+- `perf_postlayout` (release, run in review 5): 17 pass, 1 fails, the already-documented `ota_probe_regions`.
+- Drain-only nets lose their parasitic budget until a sidecar `Load` states it (AA-25). No metric was
+  measured against the base for this change, so any moved metric is unknown.
+- Review fixes 5: a set no spec's `d_vt` touches now gets no weight (was `Some(0.0)`, which D5 then demoted
+  to Minimal); `ext21_minor_weight_and_allowance_set_class` covers D5 and the allowance-set 6σ class (DP
+  allowance 1 mV, not 2.5: a 15 mV target is itself Minimal, so it could not tell D5 apart).

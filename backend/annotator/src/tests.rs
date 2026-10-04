@@ -966,6 +966,41 @@ fn ext21_ota_dp_allowance_below_load() {
     assert!(bare.intent.sets.iter().all(|s| s.allowance.is_none()));
 }
 
+/// EXT-21 class rules: σ_f = 4 mV puts the load (σ ≈ 1.58 mV, S = 0.2) at weight
+/// ≈ 0.006 < `minor_weight` and the DP (σ ≈ 2.24 mV, S = 1) at ≈ 0.31, so D5 makes
+/// only the load (Minimal, Spec); the ceiling 2 + β·σ_f leaves a 2 mV margin, so
+/// the DP's allowance is 1 mV and its 6 mV target makes it (Moderate, Spec), apart
+/// from both the role default (Moderate, Role) and D5. (At the 2.5 mV of
+/// `ext21_ota_dp_allowance_below_load` the 15 mV target is itself Minimal.)
+#[test]
+fn ext21_minor_weight_and_allowance_set_class() {
+    use crate::evidence::{Evidence, Sensitivities, SpecSens};
+    use analog::intent::{ClassSource, MatchClass};
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.avt_mv_um = [Some(5.0), Some(5.0)];
+    let d_vt = vec![(DeviceId(0), 1.0), (DeviceId(1), -1.0), (DeviceId(2), 0.2), (DeviceId(3), -0.2)];
+    let sf = 4.0;
+    let s = SpecSens { metric: "offset".into(), f0: 0.0, lo: None, hi: Some(2.0 + cfg.policy.beta_target * sf), proc: None, sigma_f: Some(sf), d_c: vec![], d_r: vec![], d_vt, d_t: vec![], d_cc: vec![] };
+    let ev = Evidence { sens: Some(Sensitivities { specs: vec![s] }), ..Evidence::default() };
+    let p = crate::annotate_with(&ota(), &cfg, &ev);
+    let set = |d: u16| p.intent.sets.iter().find(|s| s.members.iter().any(|m| m.device == DeviceId(d))).expect("set");
+    let (dp, load) = (set(0), set(2));
+    assert!(load.weight.is_some_and(|w| w < cfg.policy.minor_weight), "{:?}", load.weight);
+    assert!(dp.weight.is_some_and(|w| w > cfg.policy.minor_weight), "{:?}", dp.weight);
+    assert_eq!((load.class, load.class_source), (MatchClass::Minimal, ClassSource::Spec));
+    assert_ne!((dp.class, dp.class_source), (MatchClass::Minimal, ClassSource::Spec));
+    assert_eq!(dp.kind, analog::intent::MatchKind::Voltage);
+    assert!((dp.allowance.expect("DP allowance") - 1.0).abs() < 1e-4, "{:?}", dp.allowance);
+    let mut diags = Vec::new();
+    let mut ctx = crate::class::ClassCtx { user: None, spec_6sigma: Some(6.0 * 1.0), role: crate::class::SetRole::InputPair, diags: &mut diags };
+    assert_eq!((dp.class, dp.class_source), crate::class::class_of(dp, &mut ctx));
+    assert_eq!((dp.class, dp.class_source), (MatchClass::Moderate, ClassSource::Spec));
+    // Without σ_f there is no weight, so the load keeps its role class.
+    let bare = annotate(&ota(), &cfg);
+    let load = bare.intent.sets.iter().find(|s| s.members.iter().any(|m| m.device == DeviceId(2))).expect("set");
+    assert_ne!(load.class, MatchClass::Minimal);
+}
+
 /// EXT-25 (AA-25): a drain-only net's load is off-netlist, so it is unbudgeted
 /// and listed missing until a sidecar `Load` states it; a gate-driving net
 /// (vbias) keeps its gate-load budget.
