@@ -118,6 +118,18 @@ pub fn missing_tiers(p: &dyn Process) -> impl Iterator<Item = &'static str> + '_
     TIERS.iter().filter(move |(k, _)| classes.iter().any(|&c| p.tier(k, c).is_none())).map(|(_, m)| *m)
 }
 
+/// Whether a matched pair's Φ (common-orientation) check is armed: hard at
+/// EXC, a budget at MOD, off at MIN (Hastings §13.3, hastings.txt
+/// L42155–42186: orientation matters at the millivolt level).
+#[must_use]
+pub fn phi_arm(c: MatchClass) -> Option<bool> {
+    match c {
+        MatchClass::Exceptional => Some(true),
+        MatchClass::Moderate => Some(false),
+        MatchClass::Minimal => None,
+    }
+}
+
 /// A class limit: an offset in mV or a mismatch in %, both 6σ.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ClassLimit {
@@ -201,6 +213,13 @@ mod tests {
             assert_eq!(limit(Family::Diode, MatchKind::Voltage, c), None);
             assert_eq!(limit(Family::Mos, MatchKind::Ratio, c), None);
         }
+    }
+
+    #[test]
+    fn phi_arm_follows_hastings() {
+        assert_eq!(phi_arm(Exc), Some(true));
+        assert_eq!(phi_arm(Mod), Some(false));
+        assert_eq!(phi_arm(Min), None);
     }
 
     #[test]

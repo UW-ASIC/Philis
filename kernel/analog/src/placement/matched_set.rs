@@ -5,6 +5,7 @@
 use pnr_core::ids::DeviceId;
 use pnr_core::layout::Layout;
 
+use crate::matching::class::{Family, MatchClass};
 use crate::matching::mismatch::{sigma_pair, Budget, Coeffs, Ledger, MatchKind};
 use crate::matching::moments::{sums, Pt};
 use crate::matching::pattern::{cc_feasible, diffusion_cc_row, Outer};
@@ -24,7 +25,10 @@ pub struct MatchedSet {
     pub members: Vec<DeviceId>,
     pub kind: MatchKind,
     /// MOS members: coincidence feasibility is a diffusion-legal row.
-    pub mos: bool,
+    pub family: Family,
+    /// What the set's environment and limits scale with (Moderate until
+    /// EXT-20 reads it from the intent).
+    pub class: MatchClass,
     pub coeffs: Coeffs,
     pub budget: Budget,
     /// Netlist gate area `W·L·m` per member, µm²; read only without units.
@@ -79,7 +83,7 @@ impl MatchedSet {
         // AABB 3 µm apart (ota, bench seed 1).
         let counts = [sa.n as u16, sb.n as u16];
         let feasible = || {
-            if self.mos {
+            if self.family == Family::Mos {
                 diffusion_cc_row(&counts, Outer::Drain).is_some() || diffusion_cc_row(&counts, Outer::Source).is_some()
             } else {
                 cc_feasible(&counts)
@@ -215,7 +219,8 @@ pub(crate) fn pair(a: u16, b: u16) -> MatchedSet {
     MatchedSet {
         members: vec![DeviceId(a), DeviceId(b)],
         kind: MatchKind::Current,
-        mos: true,
+        family: Family::Mos,
+        class: MatchClass::Moderate,
         coeffs: Coeffs {
             avt_mv_um: Some(9.5),
             svt_uv_per_um: Some(1.63),
@@ -319,6 +324,12 @@ mod tests {
     }
 
     #[test]
+    fn default_pair_is_moderate_mos() {
+        let s = pair(0, 1);
+        assert_eq!((s.family, s.class), (Family::Mos, MatchClass::Moderate));
+    }
+
+    #[test]
     fn ratioed_mos_pair_has_no_coincidence_check() {
         // [1, 2] passes `cc_feasible` but has no diffusion-legal row (MAT-03).
         let units = [unit(0, 300, 50, 10), unit(1, 100, 50, 10), unit(1, 500, 50, 10)];
@@ -326,7 +337,7 @@ mod tests {
         l.units = Arc::new(merged(&units, Rect { x: 0, y: 0, w: 800, h: 100 }));
         let mut s = pair(0, 1);
         assert_eq!(s.ledger(&l, 1).coincidence, None);
-        s.mos = false;
+        s.family = Family::Resistor;
         assert!(s.ledger(&l, 1).coincidence.is_some());
     }
 
@@ -434,7 +445,8 @@ mod tests {
         let s = MatchedSet {
             members: vec![DeviceId(0), DeviceId(1)],
             kind: MatchKind::Current,
-            mos: false,
+            family: Family::Resistor,
+            class: MatchClass::Moderate,
             coeffs: Coeffs { avt_mv_um: None, svt_uv_per_um: Some(1.0), kvth0_mv_um: None, tc_uv_per_k: None },
             budget: Budget::Allowance(0.637),
             gate_um2: vec![0.0, 0.0],

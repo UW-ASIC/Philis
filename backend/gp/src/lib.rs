@@ -777,7 +777,8 @@ mod place_tests {
             cost: vec![Box::new(MatchedSet {
                 members: vec![DeviceId(0), DeviceId(1)],
                 kind: MatchKind::Voltage,
-                mos: true,
+                family: analog::matching::class::Family::Mos,
+                class: pnr_core::MatchClass::Moderate,
                 coeffs: Coeffs { tc_uv_per_k: Some(1_000.0), ..Default::default() },
                 budget: Budget::Allowance(1.0),
                 gate_um2: vec![],
