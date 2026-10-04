@@ -146,6 +146,15 @@ pub trait Rule: Copy {
         None
     }
 
+    /// `(a, b, lateral_nm, no_cross)` when this rule wants nets `a` and `b`
+    /// kept `lateral_nm` apart on a layer (and, with `no_cross`, never
+    /// overlapping on adjacent layers): what a router enforces while
+    /// searching (RTE-18). Default none.
+    #[inline]
+    fn separation(self) -> Option<(u32, u32, i32, bool)> {
+        None
+    }
+
     /// Safety margin in `[0, 1)`: pressure starts once `headroom < margin`.
     #[inline]
     fn margin(self) -> f32 {
@@ -260,6 +269,10 @@ pub trait RuleBatch<On>: Send + Sync {
     fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
         let _ = out;
     }
+    /// Every [`Rule::separation`] of the batch. Default none.
+    fn separations(&self, out: &mut Vec<(u32, u32, i32, bool)>) {
+        let _ = out;
+    }
     /// `(device_a, device_b, mV)`: the 1σ systematic allowance each matched pair has left after
     /// placement's own spend — what a routing rule may use. Default none.
     fn offset_allowances(&self, state: &On, out: &mut Vec<(u32, u32, f32)>) {
@@ -346,6 +359,9 @@ impl<On> RuleBatch<On> for Tagged<On> {
     }
     fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
         self.inner.shield_pairs(out);
+    }
+    fn separations(&self, out: &mut Vec<(u32, u32, i32, bool)>) {
+        self.inner.separations(out);
     }
     fn offset_allowances(&self, s: &On, out: &mut Vec<(u32, u32, f32)>) {
         self.inner.offset_allowances(s, out);
@@ -441,6 +457,9 @@ impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {
     }
     fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
         out.extend(self.iter().filter_map(|r| r.shield()));
+    }
+    fn separations(&self, out: &mut Vec<(u32, u32, i32, bool)>) {
+        out.extend(self.iter().filter_map(|r| r.separation()));
     }
 }
 

@@ -278,7 +278,7 @@ pub(crate) fn em_limits(pdk: &Pdk, layers: &[LayerId], cuts: &[Cut], temp_k: Opt
 
 /// The deck's routing stack, bottom-up, metals and cuts interleaved: `pex`
 /// ground and lateral C, and each etch stage's antenna rule.
-pub(crate) fn stack(pdk: &Pdk) -> analog::routing::Stack {
+pub fn stack(pdk: &Pdk) -> analog::routing::Stack {
     let mut order = Vec::new();
     for (i, &m) in pdk.routing_metals.iter().enumerate() {
         order.push(m);
@@ -298,6 +298,7 @@ pub(crate) fn stack(pdk: &Pdk) -> analog::routing::Stack {
                 antenna_sidewall_nm: rule.map_or(0.0, |r| r.1),
                 sheet_ohm: pdk.pex_f32(l, "sheet_res_ohm_sq").unwrap_or(0.0),
                 cut: pdk.routing_cuts.contains(&l),
+                cross_af_um2: pdk.routing_metals.iter().position(|&m| m == l).and_then(|i| pdk.overlap_af_um2(l, *pdk.routing_metals.get(i + 1)?)).unwrap_or(0.0),
             })
             .collect(),
         antenna_cumulative: rules.iter().flatten().any(|r| r.2),
@@ -588,6 +589,11 @@ pub(crate) fn detailed_router(pdk: &Pdk, stack: &RoutingStack) -> dr::DetailedRo
     if let Some(cheapest) = ground.iter().flatten().copied().reduce(f32::min).filter(|&c| c > 0.0) {
         cfg.layer_c = ground.iter().map(|c| c.unwrap_or(cheapest) / cheapest).collect();
         cfg.beside_c = side.iter().map(|c| c.unwrap_or(0.0) / cheapest).collect();
+        // A crossing node's overlap with the layer above, `wire_l·wire_{l+1}` (RTE-18).
+        cfg.cross_c = specs
+            .windows(2)
+            .map(|w| pdk.overlap_af_um2(w[0].id, w[1].id).map_or(0.0, |c| c * w[0].wire as f32 * w[1].wire as f32 / 1e6) / cheapest)
+            .collect();
     }
     // Series R per track step (sheet · pitch / width) and per via cut, over the
     // least resistive layer's step.

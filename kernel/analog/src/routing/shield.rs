@@ -65,7 +65,7 @@ impl Shield {
 }
 
 /// Total length common to two sorted, disjoint interval lists; O(a + b).
-fn intersection_len(p: &[(i32, i32)], q: &[(i32, i32)]) -> i64 {
+pub(crate) fn intersection_len(p: &[(i32, i32)], q: &[(i32, i32)]) -> i64 {
     let (mut i, mut j, mut len) = (0, 0, 0i64);
     while i < p.len() && j < q.len() {
         let (a, b) = (p[i].0.max(q[j].0), p[i].1.min(q[j].1));

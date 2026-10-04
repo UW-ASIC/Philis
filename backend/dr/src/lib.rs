@@ -139,6 +139,12 @@ pub struct DetailedCfg {
     /// C (`gr::Elec`).
     pub layer_c: Vec<f32>,
     pub beside_c: Vec<f32>,
+    /// Per lower lattice layer: the crossing C of one node to the layer
+    /// above, same scale (`gr::Elec::cross_c`); empty = none.
+    pub cross_c: Vec<f32>,
+    /// Aggressor weight per net, `[0, 1]`, by `NetId`
+    /// (`CouplingBudget::default_weights`); empty = 1.0 each.
+    pub aggressor_weight: Vec<f32>,
     /// Per lattice layer: series R of one track step, and of one via up from
     /// it, over the least resistive layer's step (`gr::Elec`); empty = none.
     pub layer_r: Vec<f32>,
@@ -179,6 +185,8 @@ impl Default for DetailedCfg {
             net_weight: Vec::new(),
             layer_c: Vec::new(),
             beside_c: Vec::new(),
+            cross_c: Vec::new(),
+            aggressor_weight: Vec::new(),
             layer_r: Vec::new(),
             via_r: Vec::new(),
             common: Vec::new(),
@@ -736,6 +744,8 @@ impl DetailedRoute {
             weight,
             layer_c: cfg.layer_c.clone(),
             beside_c: cfg.beside_c.clone(),
+            cross_c: cfg.cross_c.clone(),
+            sep: Vec::new(),
             // Series R is priced only once a drop budget is broken (below).
             current: Vec::new(),
             layer_r: cfg.layer_r.clone(),
@@ -776,7 +786,28 @@ impl DetailedRoute {
                 .collect();
         }
         let mut hot = RouteHot::new(cold.graph.nodes(), n_compact);
-        hot.set_weights(cold.weight.clone());
+        let agg_w: Vec<f32> = if cfg.aggressor_weight.is_empty() { Vec::new() } else { compact.iter().map(|&n| cfg.aggressor_weight.get(n).copied().unwrap_or(1.0)).collect() };
+        hot.set_weights(cold.weight.clone(), agg_w);
+        // Hard separations (RTE-18): per net, the tracks across it keeps from
+        // the other, per layer, `⌈max(0, lateral − (s·p0 − wire)) / (s·p0)⌉`;
+        // both nets carry the entry, the later-routed one avoids.
+        let mut seps = Vec::new();
+        for b in reqs.hard.iter().chain(&reqs.budget) {
+            b.separations(&mut seps);
+        }
+        if !seps.is_empty() {
+            cold.sep = vec![Vec::new(); n_compact];
+            let p = cold.graph.pitch;
+            for (a, b, lateral, no_cross) in seps {
+                let (Some(a), Some(b)) = (ci_of.get(a as usize).copied().filter(|&c| c != usize::MAX), ci_of.get(b as usize).copied().filter(|&c| c != usize::MAX)) else { continue };
+                let tracks: [u8; gr::MAX_LAYERS] = std::array::from_fn(|l| {
+                    let step = cfg.stride(l) * p;
+                    ((lateral - (step - cfg.wire(l))).max(0) + step - 1).div_euclid(step.max(1)).min(i32::from(u8::MAX)) as u8
+                });
+                cold.sep[a].push((b as u32, tracks, no_cross));
+                cold.sep[b].push((a as u32, tracks, no_cross));
+            }
+        }
         // History is keyed by absolute position: add the frame shift back.
         let abs = |n: u32| {
             let (x, y, l) = cold.graph.pos(n);
@@ -1810,9 +1841,9 @@ const LIFT_COST: f32 = 16.0 * VIA_COST;
 ///   along the mirror image of the other;
 /// * `Balance` (`CommonNodes`): reroute the skewed shared node along the
 ///   members' bisector ([`balance_field`]);
-/// * `KeepAway`, pairs named (`CrosstalkExclusion`): reroute the victim, else
-///   the aggressor, priced away from the other's tracks; victim only
-///   (`CouplingBudget`): reroute each victim priced away from all foreign tracks;
+/// * `KeepAway`, victim only (`CouplingBudget`): reroute each victim priced
+///   away from all foreign tracks (pairs named by `CrosstalkExclusion` are
+///   kept apart in the search itself);
 /// * `Antenna`: reroute the net with one layer priced up (a jumper), per layer,
 ///   then with its gates lifted over its cells' metal ([`lift_field`]), then
 ///   plainly;
@@ -1885,9 +1916,9 @@ fn repair_constraints(
                         }
                     }
                 }
-                // A rule naming its pairs (`CrosstalkExclusion`): reroute the
-                // victim, else the aggressor, away from the other. A victim-only
-                // rule (`CouplingBudget`): away from all foreign tracks.
+                // A victim-only rule (`CouplingBudget`): reroute away from all
+                // foreign tracks. A rule naming its pairs (`CrosstalkExclusion`)
+                // is enforced in the search (`RouteCtx::sep`, RTE-18): no trial.
                 RepairKind::KeepAway => {
                     let mut named = Vec::new();
                     batch.keepaway_pairs(&mut named);
@@ -1896,10 +1927,6 @@ fn repair_constraints(
                             let others: Vec<usize> = (0..hot.trees.len()).filter(|&o| o != v).collect();
                             trials.push(vec![(v, keep_away(hot, &cold.graph, &others))]);
                         }
-                    }
-                    for (a, b) in named.into_iter().filter_map(|(a, b)| Some((ci(a)?, ci(b)?))) {
-                        trials.push(vec![(a, keep_away(hot, &cold.graph, &[b]))]);
-                        trials.push(vec![(b, keep_away(hot, &cold.graph, &[a]))]);
                     }
                 }
                 // Jumpers first (Hastings pp. 228–229): price one layer so the
@@ -2945,6 +2972,60 @@ mod tests {
         assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
         assert!(metal_over(&routes, 0, body) > 0.0, "the signal crosses the body");
         assert_eq!(metal_over(&routes, 1, body), 0.0, "the clock crosses a head");
+    }
+
+    /// Minimum same-layer edge gap between two nets' shapes, nm.
+    fn min_gap(r: &Routes, a: usize, b: usize) -> i32 {
+        r.wires[a].iter().flat_map(|p| r.wires[b].iter().filter(move |q| q.layer == p.layer).map(move |q| rect_gap(p.rect, q.rect))).min().unwrap_or(i32::MAX)
+    }
+
+    /// A hard `CrosstalkExclusion` of 900 nm is kept in the search: net 1's
+    /// pins sit two pitches above net 0's straight line, so one of them
+    /// leaves the other's tracks; the rule holds and no same-layer gap is
+    /// under 900 nm.
+    #[test]
+    fn separated_nets_never_share_adjacent_tracks() {
+        use analog::routing::CrosstalkExclusion;
+        use analog::Rule;
+        let rule = CrosstalkExclusion { a: NetId(0), b: NetId(1), min_spacing_nm: 900, margin_pct: 0 };
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.hard.push(Box::new(vec![rule]));
+        let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000), pin(1, 4_000, 5_860), pin(1, 12_000, 5_860)];
+        let (routes, report, _) = DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        assert!(rule.satisfied(&routes), "gap {}", min_gap(&routes, 0, 1));
+        assert!(min_gap(&routes, 0, 1) >= 900, "{}", min_gap(&routes, 0, 1));
+        // Without the rule the straight runs sit 570 nm apart.
+        let (plain, _, _) = DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], &Requirements::default(), &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        assert!(min_gap(&plain, 0, 1) < 900, "the set-up does not force the pair together");
+    }
+
+    /// A no-cross separation: net 1's vertical run would cross net 0's
+    /// horizontal one; it goes around net 0's end instead, and no shape of
+    /// one overlaps the other's in xy on the adjacent layer.
+    #[test]
+    fn a_no_cross_pair_never_stacks() {
+        struct NoCross;
+        impl analog::RuleBatch<Routes> for NoCross {
+            fn cost(&self, _: &Routes) -> f32 {
+                0.0
+            }
+            fn violations(&self, _: &Routes) -> u32 {
+                0
+            }
+            fn separations(&self, out: &mut Vec<(u32, u32, i32, bool)>) {
+                out.push((0, 1, 0, true));
+            }
+        }
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.hard.push(Box::new(NoCross));
+        let pins = [pin(0, 6_000, 6_000), pin(0, 10_000, 6_000), pin(1, 8_000, 1_000), pin(1, 8_000, 11_000)];
+        let route = |reqs: &Requirements<Routes>| DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        let stacked = |r: &Routes| r.wires[0].iter().filter(|p| LAYERS.contains(&p.layer)).any(|p| r.wires[1].iter().any(|q| q.layer != p.layer && LAYERS.contains(&q.layer) && overlaps(p.rect, q.rect)));
+        let (routes, report, _) = route(&reqs);
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        assert!(!stacked(&routes));
+        assert!(stacked(&route(&Requirements::default()).0), "the set-up does not force a crossing");
     }
 
     /// History survives the call and changes the next one.

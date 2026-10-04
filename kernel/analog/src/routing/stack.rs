@@ -27,6 +27,9 @@ pub struct Layer {
     pub sheet_ohm: f32,
     /// This layer is a cut (every other stack layer, from the first metal).
     pub cut: bool,
+    /// Parallel-plate C to the next metal up where they overlap in xy,
+    /// aF/µm² (`Pdk::overlap_af_um2`); `0` = none or unknown.
+    pub cross_af_um2: f32,
 }
 
 /// The routing stack, bottom-up (metals and cuts interleaved).
@@ -274,8 +277,25 @@ impl Stack {
     /// over their parallel run; `None` when the layer's `ε·t` is unknown.
     #[must_use]
     pub fn lateral_af(&self, layer: u16, p: &Rect, q: &Rect) -> Option<f32> {
+        parallel(p, q).map_or(self.lateral_run_af(layer, 0, 1), |(run, gap)| self.lateral_run_af(layer, run, gap))
+    }
+
+    /// Lateral coupling over `run` nm of parallel wire `gap` nm apart, aF;
+    /// `None` when the layer's `ε·t` is unknown.
+    #[must_use]
+    pub fn lateral_run_af(&self, layer: u16, run: i32, gap: i32) -> Option<f32> {
         let (_, l) = self.at(layer).filter(|(_, l)| l.lateral > 0.0)?;
-        Some(parallel(p, q).map_or(0.0, |(run, gap)| l.lateral * run as f32 / 1e3 / gap.max(1) as f32))
+        Some(l.lateral * run as f32 / 1e3 / gap.max(1) as f32)
+    }
+
+    /// Crossing C per µm² between metals `a` and `b` when they are adjacent
+    /// on the stack (one cut between them), either order; `None` otherwise.
+    #[must_use]
+    pub fn cross_af_um2(&self, a: u16, b: u16) -> Option<f32> {
+        let ((ia, la), (ib, lb)) = (self.at(a)?, self.at(b)?);
+        let (lo, hi) = if ia < ib { ((ia, la), ib) } else { ((ib, lb), ia) };
+        let next = self.layers[lo.0 + 1..].iter().position(|l| !l.cut).map(|k| lo.0 + 1 + k);
+        (!lo.1.cut && next == Some(hi) && lo.1.cross_af_um2 > 0.0).then_some(lo.1.cross_af_um2)
     }
 
     /// `shapes` on this stack in connected pieces (same or adjacent layer,

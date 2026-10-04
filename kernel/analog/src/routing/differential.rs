@@ -111,7 +111,8 @@ impl Differential {
                         .filter(|&(a, _)| a != self.pos.0 as usize && a != self.neg.0 as usize)
                         .map(|(a, x)| {
                             let wa = w.get(a).copied().unwrap_or(1.0);
-                            if wa == 0.0 { 0.0 } else { wa * (net_pair_af(Some(st), pa, x) - net_pair_af(Some(st), pb, x)).abs() }
+                            let screens = if wa == 0.0 { Vec::new() } else { super::coupling::screens_but(r, &[self.pos.0 as usize, self.neg.0 as usize, a]) };
+                            if wa == 0.0 { 0.0 } else { wa * (net_pair_af(Some(st), pa, x, &screens) - net_pair_af(Some(st), pb, x, &screens)).abs() }
                         })
                         .sum();
                     skew / ((ca + cb) / 2.0) * 100.0

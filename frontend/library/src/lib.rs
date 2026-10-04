@@ -13,7 +13,7 @@ pub use parse::{spice_report, spice_with, ParseOptions, ParseReport, SizeConvent
 /// Substrate3 elaboration: build a `macro_master::Composition` against a PDK
 /// and route its declared nets — the "PDK on the fly" entry.
 pub mod elaborate;
-pub use elaborate::{elaborate, ElabConfig, Elaborated};
+pub use elaborate::{elaborate, stack as parasitic_stack, ElabConfig, Elaborated};
 
 /// Decompile a solved [`Solution`] into a PDK-agnostic generator.
 pub mod emit;
@@ -221,6 +221,8 @@ pub struct Solution {
     pub metadata: metadata::MetadataReport,
     /// The placement rules the search scored, retargeted to `layout`'s cell ids.
     pub placement: analog::Requirements<Layout>,
+    /// The routing rules dr scored `routes` against.
+    pub routing: analog::Requirements<Routes>,
     /// Supplies and their currents, for signoff's EM/IR rules (empty without an
     /// operating point).
     pub intent: verify::Intent,
@@ -973,6 +975,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
         stats,
         metadata,
         placement: flow.problem.placement,
+        routing: flow.problem.routing,
         intent: flow.intent,
         folds: flow.fold,
         well_layer: pnr_core::Process::layer(pdk, "nwell"),
@@ -1220,6 +1223,7 @@ impl Flow<'_> {
                     }
                     a
                 },
+                aggressor_weight: analog::routing::CouplingBudget::default_weights(&self.problem.net_classes, self.netlist.nets.len()),
                 stack: Some(self.stack),
                 pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
                 n_nets: self.netlist.nets.len(),
