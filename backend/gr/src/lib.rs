@@ -181,6 +181,12 @@ pub trait RGraph {
         let _ = (n, out);
         0
     }
+    /// `n` carried by `m` ([`LatticeMap`]); `None` off the graph or when the
+    /// graph has no lattice. Default: none.
+    fn map(&self, m: LatticeMap, n: u32) -> Option<u32> {
+        let _ = (m, n);
+        None
+    }
     /// Appends the nodes of `n`'s layer within `t` tracks across and `t`
     /// track pitches along it (a box, `n` excluded): what a lateral clearance
     /// of `t` tracks reaches, corners included. Default: none.
@@ -220,6 +226,27 @@ pub trait RGraph {
     fn via_block(&self, a: u32, b: u32, ka: u8, kb: u8, out: &mut Vec<u32>) -> bool {
         let _ = (a, b, ka, kb, out);
         true
+    }
+}
+
+/// A track-lattice symmetry carrying one net of a matched pair onto the other
+/// (RTE-15): `MirrorX` maps `(ix, iy, l)` to `(k − ix, iy, l)` (a vertical
+/// axis at column `k/2`), `Shift` to `(ix + dx, iy + dy, l)`. Layers and
+/// directions are kept, so the image has the same per-layer lengths and vias.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LatticeMap {
+    MirrorX { k: i32 },
+    Shift { dx: i32, dy: i32 },
+}
+
+impl LatticeMap {
+    /// The map back (a mirror is its own inverse).
+    #[must_use]
+    pub fn inverse(self) -> Self {
+        match self {
+            Self::MirrorX { .. } => self,
+            Self::Shift { dx, dy } => Self::Shift { dx: -dx, dy: -dy },
+        }
     }
 }
 
@@ -296,6 +323,20 @@ impl TrackGrid {
     #[must_use]
     pub fn stride(&self, layer: u32) -> u32 {
         self.specs.get(layer as usize).map_or(1, |s| s.stride.max(1))
+    }
+
+    /// `m` carries tracks onto tracks on every layer: a mirror's `k ≥ 0` is a
+    /// multiple of every vertical layer's stride; a shift moves each layer's
+    /// across axis by a multiple of its stride.
+    #[must_use]
+    pub fn lattice_map(&self, m: LatticeMap) -> bool {
+        (0..self.n_layers).all(|l| {
+            let s = self.stride(l) as i32;
+            match m {
+                LatticeMap::MirrorX { k } => k >= 0 && (l % 2 == 0 || k % s == 0),
+                LatticeMap::Shift { dx, dy } => (if l % 2 == 0 { dy } else { dx }) % s == 0,
+            }
+        })
     }
 
     /// `n` lies on one of its layer's tracks.
@@ -438,6 +479,14 @@ impl RGraph for TrackGrid {
             k += 1;
         }
         k
+    }
+    fn map(&self, m: LatticeMap, n: u32) -> Option<u32> {
+        let (ix, iy, l) = self.ixy(n);
+        let (x, y) = match m {
+            LatticeMap::MirrorX { k } => (i64::from(k) - i64::from(ix), i64::from(iy)),
+            LatticeMap::Shift { dx, dy } => (i64::from(ix) + i64::from(dx), i64::from(iy) + i64::from(dy)),
+        };
+        (x >= 0 && y >= 0 && x < i64::from(self.nx) && y < i64::from(self.ny)).then(|| self.node(x as u32, y as u32, l))
     }
     fn within(&self, n: u32, t: u32, out: &mut Vec<u32>) {
         let (ix, iy, l) = self.ixy(n);
@@ -680,11 +729,10 @@ pub struct RouteCtx<G> {
     pub cross_c: Vec<f32>,
     /// Per net, its separations from other nets ([`NetSearch::sep`]); empty = none.
     pub sep: Vec<Vec<(u32, [u8; MAX_LAYERS], bool)>>,
-    /// Per net, route on length and congestion alone, blind to [`Elec`]: the
-    /// two halves of a differential pair must see mirrored costs, and the
-    /// parasitic field around them is not mirror-symmetric (a hard symmetry
-    /// outranks a C budget). Empty = none.
-    pub plain: Vec<bool>,
+    /// Per net of an exact matched pair (RTE-15): `(partner, the map carrying
+    /// this net onto it, leader)`. The leader routes jointly with its image
+    /// ([`Mirror`]); either net's reroute and commit move both. Empty = none.
+    pub mirror: Vec<Option<(u32, LatticeMap, bool)>>,
     /// Per net [`Elec::current`], and per layer [`Elec::layer_r`] / [`Elec::via_r`];
     /// empty = none.
     pub current: Vec<f32>,
@@ -724,7 +772,7 @@ impl<G: RGraph> RouteCtx<G> {
             beside_c: Vec::new(),
             cross_c: Vec::new(),
             sep: Vec::new(),
-            plain: Vec::new(),
+            mirror: Vec::new(),
             current: Vec::new(),
             layer_r: Vec::new(),
             via_r: Vec::new(),
@@ -755,10 +803,30 @@ impl<G: RGraph> RouteCtx<G> {
         (self.k.get(net).copied().unwrap_or([1; MAX_LAYERS]), self.guard.get(net).copied().unwrap_or([0; MAX_LAYERS]))
     }
 
+    /// `tree` carried by `m`; `None` when a node falls off the graph.
+    #[must_use]
+    pub fn map_tree(&self, tree: &[Vec<u32>], m: LatticeMap) -> Option<Vec<Vec<u32>>> {
+        tree.iter().map(|b| b.iter().map(|&n| self.graph.map(m, n)).collect()).collect()
+    }
+
+    /// `net`'s exact-pair entry ([`Self::mirror`]).
+    fn pair(&self, net: usize) -> Option<(u32, LatticeMap, bool)> {
+        self.mirror.get(net).copied().flatten()
+    }
+
     /// Commit `branches` as `net`'s tree with the footprint the graph gives
     /// each at its [`Self::branch_k`] and the halo at the net's `k` (deduped;
-    /// the halo spans every track and leaves out the net's own metal).
+    /// the halo spans every track and leaves out the net's own metal). An
+    /// exact pair's partner gets the image (empty when it leaves the graph).
     pub fn commit(&self, hot: &mut RouteHot, net: usize, branches: Vec<Vec<u32>>) {
+        if let Some((p, m, _)) = self.pair(net) {
+            let image = self.map_tree(&branches, m).unwrap_or_default();
+            self.commit_one(hot, p as usize, image);
+        }
+        self.commit_one(hot, net, branches);
+    }
+
+    fn commit_one(&self, hot: &mut RouteHot, net: usize, branches: Vec<Vec<u32>>) {
         let (k, guard) = self.k_of(net);
         let layer = |n: u32| self.graph.pos(n).2 as usize;
         let mut foot: Vec<u32> = Vec::new();
@@ -805,25 +873,45 @@ impl<G: RGraph> RouteCtx<G> {
         hot.commit(net, branches, foot, halo);
     }
 
+    /// `net`'s electrical terms ([`Elec`]).
+    fn elec<'a>(&'a self, hot: &'a RouteHot, net: usize) -> Elec<'a> {
+        Elec {
+            weight: self.weight.get(net).copied().unwrap_or(0.0),
+            layer_c: &self.layer_c,
+            beside_c: &self.beside_c,
+            cross_c: &self.cross_c,
+            sens: &hot.sens,
+            agg: &hot.agg,
+            a_self: if hot.agg.is_empty() { 1.0 } else { hot.agg_w.get(net).copied().unwrap_or(1.0) },
+            current: self.current.get(net).copied().unwrap_or(0.0),
+            layer_r: &self.layer_r,
+            via_r: &self.via_r,
+        }
+    }
+
     /// Route `net` against the current state with an extra per-node `penalty`
-    /// (empty = none).
+    /// (empty = none). An exact pair routes its leader jointly with the image
+    /// ([`Mirror`], `penalty` on the side it was asked for); the tree
+    /// returned is `net`'s.
     pub fn reroute(&self, hot: &RouteHot, net: usize, p_fac: f32, penalty: &[f32], dij: &mut Dij) -> Option<Vec<Vec<u32>>> {
-        let elec = if self.plain.get(net).copied().unwrap_or(false) {
-            Elec::default()
-        } else {
-            Elec {
-                weight: self.weight.get(net).copied().unwrap_or(0.0),
-                layer_c: &self.layer_c,
-                beside_c: &self.beside_c,
-                cross_c: &self.cross_c,
-                sens: &hot.sens,
-                agg: &hot.agg,
-                a_self: if hot.agg.is_empty() { 1.0 } else { hot.agg_w.get(net).copied().unwrap_or(1.0) },
-                current: self.current.get(net).copied().unwrap_or(0.0),
-                layer_r: &self.layer_r,
-                via_r: &self.via_r,
-            }
+        let Some((p, m, leader)) = self.pair(net) else { return self.search(hot, net, p_fac, penalty, None, dij) };
+        let (lead, part, map) = if leader { (net, p as usize, m) } else { (p as usize, net, m.inverse()) };
+        let mirror = Mirror {
+            map,
+            partner: part as u32,
+            partner_own: &hot.foot[part],
+            partner_halo: &hot.halos[part],
+            partner_blocked: self.blocked_for.get(part).map_or(&[][..], Vec::as_slice),
+            partner_penalty: if leader { &[] } else { penalty },
+            partner_cells: self.own_cells.get(part).map_or(&[][..], Vec::as_slice),
+            partner_elec: self.elec(hot, part),
         };
+        let tree = self.search(hot, lead, p_fac, if leader { penalty } else { &[] }, Some(mirror), dij)?;
+        if leader { Some(tree) } else { self.map_tree(&tree, map) }
+    }
+
+    fn search(&self, hot: &RouteHot, net: usize, p_fac: f32, penalty: &[f32], mirror: Option<Mirror>, dij: &mut Dij) -> Option<Vec<Vec<u32>>> {
+        let elec = self.elec(hot, net);
         let (k, guard) = self.k_of(net);
         let q = NetSearch {
             net: net as u32,
@@ -839,6 +927,7 @@ impl<G: RGraph> RouteCtx<G> {
             sep: self.sep.get(net).map_or(&[][..], Vec::as_slice),
             foot: &hot.foot,
             terms_of: &self.terms,
+            mirror,
             elec,
         };
         route_net(&self.graph, hot, &self.reserved, &q, p_fac, dij)
@@ -950,7 +1039,30 @@ pub struct NetSearch<'a> {
     /// the net routed first could wall in the other's pin).
     pub foot: &'a [Vec<u32>],
     pub terms_of: &'a [Vec<u32>],
+    /// Route jointly with the partner's image ([`Mirror`]); `None` = alone.
+    pub mirror: Option<Mirror<'a>>,
     pub elec: Elec<'a>,
+}
+
+/// The partner of a jointly routed exact pair (RTE-15): a node `i` is legal
+/// only when `map(i)` exists, differs from `i`, stays on the root's side of
+/// the map (a mirror's path never meets its image) and is open to the
+/// partner; its cost adds the partner's congestion, penalty, keep-out and
+/// parasitics at `map(i)`, so the joint cost is symmetric. Costs only add:
+/// A* stays admissible.
+///
+/// ponytail: the partner's via halos and separations are not priced.
+pub struct Mirror<'a> {
+    pub map: LatticeMap,
+    pub partner: u32,
+    /// The partner's sorted footprint and halo (its own metal is no usage).
+    pub partner_own: &'a [u32],
+    pub partner_halo: &'a [u32],
+    pub partner_blocked: &'a [u32],
+    pub partner_penalty: &'a [f32],
+    /// The partner's own matched cells ([`RouteCtx::own_cells`]).
+    pub partner_cells: &'a [u32],
+    pub partner_elec: Elec<'a>,
 }
 
 /// Connect `q.terms` into a branch tree by repeated multi-source Dijkstra from
@@ -980,33 +1092,7 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
     }
     in_tree[root as usize] = call;
     let cap = g.cap();
-    let parasitic = |i: usize| -> f32 {
-        if elec.weight <= 0.0 && elec.sens.is_empty() && elec.current <= 0.0 {
-            return 0.0;
-        }
-        let l = g.pos(i as u32).2 as usize;
-        // A foreign node `j`: this net's weight times their aggressor weight,
-        // plus this net's aggressor weight times their sensitivity (own share out).
-        let pair = |j: u32| -> f32 {
-            let (j, mine) = (j as usize, is_old[j as usize] == call);
-            if usage[j] <= u16::from(mine) {
-                return 0.0;
-            }
-            let own = |w: f32| if mine { w } else { 0.0 };
-            let agg = elec.agg.get(j).map_or(f32::from(usage[j]) - own(1.0), |&a| a - own(elec.a_self));
-            let sens = elec.sens.get(j).map_or(0.0, |&s| s - own(elec.weight));
-            elec.weight * agg.max(0.0) + elec.a_self * sens.max(0.0)
-        };
-        let per = |v: &[f32], l: usize| v.get(l).copied().unwrap_or(0.0);
-        let mut nb = [0u32; 2];
-        let k = g.beside(i as u32, &mut nb);
-        let mut c = per(elec.beside_c, l) * nb[..k].iter().map(|&j| pair(j)).sum::<f32>();
-        if !elec.cross_c.is_empty() {
-            let k = g.stacked(i as u32, &mut nb);
-            c += nb[..k].iter().map(|&j| per(elec.cross_c, l.min(g.pos(j).2 as usize)) * pair(j)).sum::<f32>();
-        }
-        elec.weight * per(elec.layer_c, l) + c + elec.current * per(elec.layer_r, l)
-    };
+    let parasitic = |i: usize| elec_at(g, usage, elec, i, &|j| is_old[j] == call);
     // A via's series R, and the halo it casts on foreign metal at the
     // present-congestion price, charged on the layer change.
     let mut cast = Vec::new();
@@ -1070,8 +1156,49 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
         Some(hist[i] + p_fac * f32::from((eff + 1).saturating_sub(cap)))
     };
     let wide_at = |k: &[u8; MAX_LAYERS]| k.iter().any(|&t| t > 1) || q.guard.iter().any(|&t| t > 0);
+    // RTE-15: the partner's side of a joint node ([`Mirror`]). A mirror's
+    // image lies across the axis from the root's side; a shift has no side.
+    let side = |m: &Mirror, n: u32| -> Option<i32> {
+        let j = g.map(m.map, n)?;
+        Some(match m.map {
+            LatticeMap::MirrorX { .. } => (g.pos(j).0 - g.pos(n).0).signum(),
+            LatticeMap::Shift { .. } => 1,
+        })
+    };
+    let root_side = q.mirror.as_ref().and_then(|m| side(m, root));
+    let mut fp2 = Vec::new();
+    let mut partner_cost = |i: usize, k: &[u8; MAX_LAYERS], wide: bool| -> Option<f32> {
+        let Some(m) = q.mirror.as_ref() else { return Some(0.0) };
+        let j = g.map(m.map, i as u32)?;
+        if j as usize == i || side(m, i as u32) != root_side || root_side == Some(0) {
+            return None;
+        }
+        let p_mine = |x: usize| m.partner_own.binary_search(&(x as u32)).is_ok();
+        let p_cong = |x: usize| -> Option<f32> {
+            if reserved.get(x).is_some_and(|&o| o != NONE && o != m.partner) || m.partner_blocked.binary_search(&(x as u32)).is_ok() {
+                return None;
+            }
+            let foreign_halo = halo.0.get(x).map_or(0, |&h| h.saturating_sub(u16::from(m.partner_halo.binary_search(&(x as u32)).is_ok())));
+            let eff = usage[x].saturating_sub(u16::from(p_mine(x))) + foreign_halo;
+            Some(hist[x] + p_fac * f32::from((eff + 1).saturating_sub(cap)))
+        };
+        let j = j as usize;
+        let mut c = if wide {
+            let l = g.pos(j as u32).2 as usize;
+            if !g.footprint(j as u32, k[l], q.guard[l], &mut fp2) {
+                return None;
+            }
+            fp2.iter().try_fold(0.0, |s, &x| Some(s + p_cong(x as usize)?))?
+        } else {
+            p_cong(j)?
+        };
+        let foreign = keepout.0.get(j).is_some_and(|&c| c != NONE && m.partner_cells.binary_search(&c).is_err());
+        c += m.partner_penalty.get(j).copied().unwrap_or(0.0) + elec_at(g, usage, &m.partner_elec, j, &p_mine) + if foreign { KEEPOUT_COST } else { 0.0 };
+        Some(c)
+    };
     let mut fp = Vec::new();
     let mut node_cost = |i: usize, k: &[u8; MAX_LAYERS], wide: bool| -> Option<f32> {
+        let partner = partner_cost(i, k, wide)?;
         let mut c = if wide {
             let l = g.pos(i as u32).2 as usize;
             if !g.footprint(i as u32, k[l], q.guard[l], &mut fp) {
@@ -1082,7 +1209,7 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
             congestion(i)?
         };
         let foreign = keepout.0.get(i).is_some_and(|&c| c != NONE && keepout.1.binary_search(&c).is_err());
-        c += penalty.get(i).copied().unwrap_or(0.0) + parasitic(i) + if foreign { KEEPOUT_COST } else { 0.0 };
+        c += penalty.get(i).copied().unwrap_or(0.0) + parasitic(i) + if foreign { KEEPOUT_COST } else { 0.0 } + partner;
         Some(c)
     };
     // A wide via's corner block (both layers), `None` when illegal.
@@ -1176,6 +1303,36 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
     Some(branches)
 }
 
+/// [`Elec`]'s cost of node `i` for one net; `mine(j)` = node `j` holds that
+/// net's own metal (its share of `sens`/`agg` is taken out).
+fn elec_at<G: RGraph>(g: &G, usage: &[u16], elec: &Elec, i: usize, mine: &dyn Fn(usize) -> bool) -> f32 {
+    if elec.weight <= 0.0 && elec.sens.is_empty() && elec.current <= 0.0 {
+        return 0.0;
+    }
+    let l = g.pos(i as u32).2 as usize;
+    // A foreign node `j`: this net's weight times their aggressor weight,
+    // plus this net's aggressor weight times their sensitivity (own share out).
+    let pair = |j: u32| -> f32 {
+        let (j, mine) = (j as usize, mine(j as usize));
+        if usage[j] <= u16::from(mine) {
+            return 0.0;
+        }
+        let own = |w: f32| if mine { w } else { 0.0 };
+        let agg = elec.agg.get(j).map_or(f32::from(usage[j]) - own(1.0), |&a| a - own(elec.a_self));
+        let sens = elec.sens.get(j).map_or(0.0, |&s| s - own(elec.weight));
+        elec.weight * agg.max(0.0) + elec.a_self * sens.max(0.0)
+    };
+    let per = |v: &[f32], l: usize| v.get(l).copied().unwrap_or(0.0);
+    let mut nb = [0u32; 2];
+    let k = g.beside(i as u32, &mut nb);
+    let mut c = per(elec.beside_c, l) * nb[..k].iter().map(|&j| pair(j)).sum::<f32>();
+    if !elec.cross_c.is_empty() {
+        let k = g.stacked(i as u32, &mut nb);
+        c += nb[..k].iter().map(|&j| per(elec.cross_c, l.min(g.pos(j).2 as usize)) * pair(j)).sum::<f32>();
+    }
+    elec.weight * per(elec.layer_c, l) + c + elec.current * per(elec.layer_r, l)
+}
+
 /// Present-congestion factor growth per PathFinder iteration, and its cap
 /// (tuning defaults; the cap keeps f32 costs finite).
 const P_GROWTH: f32 = 1.3;
@@ -1198,9 +1355,14 @@ pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: 
         let mut moved = false;
         for &net in &cold.order {
             let net = net as usize;
-            let tree = &hot.trees[net];
+            // An exact pair moves as one: the follower's dirt reroutes the leader.
+            let pair = cold.pair(net);
+            if pair.is_some_and(|p| !p.2) {
+                continue;
+            }
             let over = |&n: &u32| hot.over(n as usize, cap) > 0;
-            let dirty = tree.is_empty() || tree.iter().flatten().any(over) || hot.halos[net].iter().any(over);
+            let dirty_one = |x: usize| hot.trees[x].is_empty() || hot.trees[x].iter().flatten().any(over) || hot.halos[x].iter().any(over);
+            let dirty = dirty_one(net) || pair.is_some_and(|p| dirty_one(p.0 as usize));
             if !dirty || cold.terms[net].is_empty() {
                 continue;
             }
@@ -1542,16 +1704,6 @@ mod tests {
         let beside = |p: &[u32]| p.iter().filter(|&&n| g.ixy(n).1 == 4 && g.ixy(n).2 == 0).count();
         assert_eq!(beside(&path(0.0, &[])), 40, "unweighted: the straight run");
         assert!(beside(&path(1.0, &[])) < 10, "weighted: off the coupled row");
-        // A differential half routes blind to all of it (`RouteCtx::plain`).
-        let mut cold = RouteCtx::new(g, vec![terms.to_vec()], vec![0]);
-        (cold.weight, cold.layer_c, cold.beside_c, cold.plain) = (vec![1.0], vec![1.0; 2], vec![1.0; 2], vec![true]);
-        let mut hot = RouteHot::new(cold.graph.nodes(), 1);
-        (hot.usage, hot.sens) = (usage.clone(), sens.clone());
-        let tree = cold.reroute(&hot, 0, 1.0, &[], &mut Dij::new(cold.graph.nodes())).unwrap();
-        let mut nodes = tree.concat();
-        nodes.sort_unstable();
-        nodes.dedup();
-        assert_eq!(nodes.iter().filter(|&&n| cold.graph.ixy(n).1 == 4).count(), 40, "plain: the straight run");
     }
 
     /// An unweighted net keeps off a sensitive net's track by its own
@@ -1576,6 +1728,35 @@ mod tests {
         };
         assert!(path(1.0) < 10, "aggressor: off the victim's row");
         assert!(path(0.0) >= 40, "quiet rail: the straight run");
+    }
+
+    /// A mirror about column 24 (`k = 48`) on a 50-wide grid is its own
+    /// inverse wherever it lands on the grid.
+    #[test]
+    fn mirror_map_is_an_involution() {
+        let g = TrackGrid::with_layers((50 * 100, 10 * 100), 100, 4.0, 2);
+        let m = LatticeMap::MirrorX { k: 48 };
+        assert!(g.lattice_map(m));
+        let mut mapped = 0;
+        for n in 0..g.nodes() as u32 {
+            if let Some(j) = g.map(m, n) {
+                assert_eq!(g.map(m.inverse(), j), Some(n));
+                assert_eq!(g.ixy(j).2, g.ixy(n).2, "layers kept");
+                mapped += 1;
+            }
+        }
+        assert!(mapped > 0);
+        assert_eq!(g.map(m, g.node(49, 0, 0)), None, "48 − 49 is off the grid");
+    }
+
+    /// A stride-2 vertical layer maps tracks onto tracks only for even `k`.
+    #[test]
+    fn a_stride_two_layer_rejects_an_odd_k() {
+        let g = TrackGrid::new((50 * 100, 10 * 100), 100, vec![spec(1, 0), spec(2, 0)], 4.0);
+        assert!(g.lattice_map(LatticeMap::MirrorX { k: 48 }));
+        assert!(!g.lattice_map(LatticeMap::MirrorX { k: 47 }));
+        assert!(!g.lattice_map(LatticeMap::Shift { dx: 1, dy: 0 }));
+        assert!(g.lattice_map(LatticeMap::Shift { dx: 2, dy: 1 }));
     }
 
     /// A current-carrying net pays its vias' series R: where an idle net hops
@@ -1625,7 +1806,7 @@ mod tests {
     }
 
     fn search<'a>(terms: &'a [u32], elec: Elec<'a>) -> NetSearch<'a> {
-        NetSearch { net: 0, terms, k: [1; MAX_LAYERS], guard: [0; MAX_LAYERS], term_k: &[], own: &[], own_halo: &[], penalty: &[], keepout: (&[], &[]), blocked: &[], sep: &[], foot: &[], terms_of: &[], elec }
+        NetSearch { net: 0, terms, k: [1; MAX_LAYERS], guard: [0; MAX_LAYERS], term_k: &[], own: &[], own_halo: &[], penalty: &[], keepout: (&[], &[]), blocked: &[], sep: &[], foot: &[], terms_of: &[], mirror: None, elec }
     }
 
     fn spec(stride: u32, halo_via: u8) -> LayerSpec {

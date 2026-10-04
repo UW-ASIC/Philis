@@ -262,6 +262,11 @@ pub struct RouteStats {
     pub width_fallbacks: u32,
     pub single_cut_vias: u32,
     pub congestion: Vec<(Rect, f32)>,
+    /// Matched pairs routed as exact images (RTE-15), and the rest as
+    /// `(pos, neg, reason)`: `no pin map`, `axis off lattice`, `wide pair`,
+    /// `landing failed`.
+    pub pairs_exact: u32,
+    pub pairs_fallback: Vec<(u32, u32, &'static str)>,
 }
 
 /// The detailed router.
@@ -584,9 +589,126 @@ impl DetailedRoute {
         // The rects of `jog_blocks[ci]` that bind lattice layer `l`.
         let blocks_on = |ci: usize, l: u32| -> Vec<Rect> { jog_blocks[ci].iter().filter(|b| b.1 >> l & 1 == 1).map(|b| b.0).collect() };
 
+        // RTE-15: exact matched pairs land jointly, before every other pin.
+        // Per pair `(a = pos, b = neg)` from the `Mirror` batches, the lattice
+        // map carrying a's pins exactly onto b's ([`pair_map`]); each a pin
+        // (by `(y, x)`) lands on a node `n` clean for a whose image is clean
+        // for b's partner pin, on a's side, with both jogs clean; both claim.
+        // A pair whose map or landing fails routes alone (`pairs_fallback`).
+        let clean_at = |reserved: &[u32], ci: usize, r: Rect, n: u32| -> bool {
+            let (px, py, _) = grid.pos(n);
+            let pad = Rect { x: px - pad0 / 2, y: py - pad0 / 2, w: pad0, h: pad0 };
+            [NONE, CONTESTED, ci as u32].contains(&reserved[n as usize])
+                && blocked_for[ci].binary_search(&n).is_err()
+                && short_free(ci, r, px, py)
+                && good_site((r.x + r.w / 2, r.y + r.h / 2), px, py)
+                && zones.iter().all(|&(zci, zx, zy)| zci as usize == ci || rect_gap(pad, Rect { x: zx - stitch / 2, y: zy - stitch / 2, w: stitch, h: stitch }) >= pad_space)
+        };
+        let mut jointly: HashSet<(usize, i32, i32, i32, i32)> = HashSet::new();
+        let mut exact: Vec<(usize, usize, gr::LatticeMap)> = Vec::new();
+        let mut mirror_ids = Vec::new();
+        for b in reqs.hard.iter().chain(&reqs.budget).filter(|b| b.repair_kind() == RepairKind::Mirror) {
+            b.touched(&mut mirror_ids);
+        }
+        for p in mirror_ids.chunks_exact(2) {
+            let (pa, pb) = (p[0] as usize, p[1] as usize);
+            let (Some(&a), Some(&b)) = (ci_of.get(pa), ci_of.get(pb)) else { continue };
+            if a == usize::MAX || b == usize::MAX || a == b || exact.iter().any(|e| [e.0, e.1].contains(&a) || [e.0, e.1].contains(&b)) {
+                continue;
+            }
+            let map = match pair_map(&term_rects[pa], &term_rects[pb], &grid, cfg.grid) {
+                Ok(m) => m,
+                Err(why) => {
+                    stats.pairs_fallback.push((pa as u32, pb as u32, why));
+                    continue;
+                }
+            };
+            let side = |n: u32, m: u32| match map {
+                gr::LatticeMap::MirrorX { .. } => (grid.pos(m).0 - grid.pos(n).0).signum(),
+                gr::LatticeMap::Shift { .. } => 0,
+            };
+            // A mirror keeps a's metal on a's side of the axis (toward b, the image).
+            let want_side = {
+                let mean = |v: &[(Rect, LayerId, Option<f32>)]| v.iter().map(|t| i64::from(t.0.x) * 2 + i64::from(t.0.w)).sum::<i64>() / v.len().max(1) as i64;
+                match map {
+                    gr::LatticeMap::MirrorX { .. } => (mean(&term_rects[pb]) - mean(&term_rects[pa])).signum() as i32,
+                    gr::LatticeMap::Shift { .. } => 0,
+                }
+            };
+            let (known_a, known_b) = (term_rects[pa].iter().all(|t| t.2.is_some()), term_rects[pb].iter().all(|t| t.2.is_some()));
+            let mut pins_a = term_rects[pa].clone();
+            pins_a.sort_by_key(|t| (t.0.y, t.0.x));
+            let mut ok = true;
+            for (ra, la, ua_a) in pins_a {
+                let image = map_rect(ra, map, &grid);
+                let Some(&(rb, lb, ua_b)) = term_rects[pb].iter().find(|t| t.1 == la && (t.0.x - image.x).abs() <= cfg.grid && (t.0.y - image.y).abs() <= cfg.grid && t.0.w == image.w && t.0.h == image.h) else {
+                    ok = false;
+                    break;
+                };
+                let (ca, cb) = ((ra.x + ra.w / 2, ra.y + ra.h / 2), (rb.x + rb.w / 2, rb.y + rb.h / 2));
+                let jog_l = jog_layer(cfg, layers, cuts, grid.n_layers, la);
+                let (blk_a, blk_b) = (blocks_on(a, jog_l), blocks_on(b, jog_l));
+                let metal = layers.get(jog_l as usize);
+                let need = metal.map_or(0, |&m| access_need(cfg, m, ua_a.filter(|_| known_a)).max(access_need(cfg, m, ua_b.filter(|_| known_b))));
+                let full = cfg.wire_width.max(1).max(need);
+                let floor = cfg.min_width.iter().find(|&&(l, _)| Some(&l) == metal).map_or(1, |&(_, w)| w);
+                let narrow = full.min(ra.w).min(ra.h).max(floor).max(need);
+                let ok_n = |n: u32| {
+                    clean_at(&reserved, a, ra, n) && grid.map(map, n).is_some_and(|m| m != n && !claimed[m as usize] && side(n, m) == want_side && clean_at(&reserved, b, rb, m))
+                };
+                let cands = grid.candidates(ca.0, ca.1, &claimed, ok_n, 8, 12);
+                let spaced = (stitch, (cfg.pitch - cfg.wire_width).max(1));
+                let pick = [spaced, (full, 1)].into_iter().find_map(|(zone, gap)| {
+                    cands.iter().copied().find_map(|n| {
+                        let m = grid.map(map, n)?;
+                        let ((nx, ny, _), (mx, my, _)) = (grid.pos(n), grid.pos(m));
+                        [full, narrow].into_iter().find_map(|w| {
+                            let (la_, lb_) = (jog_legs(nx, ny, ca.0, ca.1, w), jog_legs(mx, my, cb.0, cb.1, w));
+                            let f = (0..2).find(|&f| {
+                                let mut laid = laid_legs.clone();
+                                laid.extend(la_[f].iter().map(|&l| (a, l)));
+                                jog_clean(&la_[f], a, zone, gap, &zones, &laid_legs, &blk_a) && jog_clean(&lb_[f], b, zone, gap, &zones, &laid, &blk_b)
+                            })?;
+                            Some((n, m, (w, f == 1), la_[f], lb_[f]))
+                        })
+                    })
+                });
+                let Some((n, m, choice, legs_a, legs_b)) = pick else {
+                    ok = false;
+                    break;
+                };
+                for (ci, r, rl, ua, node, legs, known) in [(a, ra, la, ua_a, n, legs_a, known_a), (b, rb, lb, ua_b, m, legs_b, known_b)] {
+                    let ua = ua.filter(|_| known);
+                    laid_legs.extend(legs.iter().map(|&l| (ci, l)));
+                    jog_hist.extend(jog_hist_nodes(&grid, cfg, &legs, jog_l, &reserved, ci));
+                    claimed[node as usize] = true;
+                    reserved[node as usize] = ci as u32;
+                    if let Some(ua) = ua {
+                        node_ua[ci].push((node, ua));
+                    }
+                    if !c_terms[ci].contains(&node) {
+                        c_terms[ci].push(node);
+                    }
+                    let (px, py, node_layer) = grid.pos(node);
+                    let acc = Access { ci, pin: r, pin_layer: rl, node: (px, py), node_layer, choice: Some(choice), ua, node_ua: ua };
+                    claim_jog_sweep(&grid, cfg, layers, cuts, &acc, &mut claimed, &mut reserved);
+                    access.push(acc);
+                    jointly.insert((ci, r.x, r.y, r.w, r.h));
+                }
+            }
+            if ok && term_rects[pa].len() == term_rects[pb].len() {
+                exact.push((a, b, map));
+            } else {
+                stats.pairs_fallback.push((pa as u32, pb as u32, "landing failed"));
+            }
+        }
+
         for (ci, &ni) in compact.iter().enumerate() {
             let known = term_rects[ni].iter().all(|t| t.2.is_some());
             for &(r, r_layer, ua) in &term_rects[ni] {
+                if jointly.contains(&(ci, r.x, r.y, r.w, r.h)) {
+                    continue;
+                }
                 // A net with any unknown terminal gets no EM sizing at all.
                 let ua = ua.filter(|_| known);
                 let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
@@ -642,13 +764,7 @@ impl DetailedRoute {
                         // short `break_shorts` settles only by deleting this access.
                         // Only a node whose wire would touch a leg: the swept bins
                         // reach up to a pitch past it.
-                        let infl = cfg.wire_width / 2;
-                        let touches = |n: &u32| {
-                            let (px, py, _) = grid.pos(*n);
-                            legs.iter().any(|l| (l.x - infl..=l.x + l.w + infl).contains(&px) && (l.y - infl..=l.y + l.h + infl).contains(&py))
-                        };
-                        let foreign = |n: &u32| reserved[*n as usize] != ci as u32 && reserved[*n as usize] < BLOCKED;
-                        jog_hist.extend(jog_nodes(&grid, cfg, &legs, jog_l).filter(foreign).filter(touches));
+                        jog_hist.extend(jog_hist_nodes(&grid, cfg, &legs, jog_l, &reserved, ci));
                         Some((n, Some(choice)))
                     }
                     None => grid
@@ -750,10 +866,7 @@ impl DetailedRoute {
             current: Vec::new(),
             layer_r: cfg.layer_r.clone(),
             via_r: cfg.via_r.clone(),
-            plain: {
-                let sym = gr::symmetric_nets(reqs);
-                net_ids.iter().map(|n| sym.contains(n)).collect()
-            },
+            mirror: Vec::new(),
             keepout: Vec::new(),
             own_cells: Vec::new(),
             blocked_for,
@@ -761,6 +874,16 @@ impl DetailedRoute {
             guard: guards,
             term_k,
         };
+        // Exact pairs: b's terminals are a's images, in a's order, at tracks
+        // tied to the larger of the two per terminal; a vertical-layer pair
+        // wider than one track falls back (its image would grow toward −x).
+        for (a, b, map) in exact {
+            if tie_pair(&mut cold, a, b, map) {
+                stats.pairs_exact += 1;
+            } else {
+                stats.pairs_fallback.push((compact[a] as u32, compact[b] as u32, "wide pair"));
+            }
+        }
         // Soft blockages: nets without a pin in the cell pay `KEEPOUT_COST`
         // per node inside the rect; its own nets (finger straps, drains) do not.
         let soft: Vec<&Blockage> = cfg.blockages.iter().filter(|b| !b.hard).collect();
@@ -999,10 +1122,21 @@ impl DetailedRoute {
                         out.push(*c);
                         continue;
                     }
-                    // Centred in the overlap, snapped to the manufacturing grid.
-                    let snap = |v: i32| v.div_euclid(cfg.grid) * cfg.grid;
-                    let x0 = snap(x + (w - (nx - 1) * pitch - size) / 2);
-                    let y0 = snap(y + (h - (ny - 1) * pitch - size) / 2);
+                    // Centred in the overlap, snapped to the nearest grid
+                    // point, a tie toward the original cut's centre: both
+                    // commute with a mirror or shift of the whole net, so an
+                    // exact pair's arrays stay images (RTE-15; flooring a
+                    // halved width does not).
+                    let g = cfg.grid.max(1);
+                    let snap = |lo: i32, room: i32, span: i32, orig2: i32| {
+                        let l2 = 2 * lo + room - span;
+                        let floor = l2.div_euclid(2 * g) * g;
+                        let (d_lo, d_hi) = (l2 - 2 * floor, 2 * (floor + g) - l2);
+                        let off = |v: i32| (2 * v + span - orig2).abs();
+                        if d_lo < d_hi || (d_lo == d_hi && off(floor) <= off(floor + g)) { floor } else { floor + g }
+                    };
+                    let x0 = snap(x, w, (nx - 1) * pitch + size, 2 * c.rect.x + c.rect.w);
+                    let y0 = snap(y, h, (ny - 1) * pitch + size, 2 * c.rect.y + c.rect.h);
                     let before = out.len();
                     for ix in 0..nx {
                         for iy in 0..ny {
@@ -1200,6 +1334,19 @@ impl DetailedRoute {
                     bumped.push(ci);
                 }
             }
+            // An exact pair keeps its tracks tied; one now too wide falls back.
+            for a in 0..n_compact {
+                let Some((b, map, true)) = cold.mirror.get(a).copied().flatten() else { continue };
+                let b = b as usize;
+                if bumped.contains(&a) || bumped.contains(&b) {
+                    if !tie_pair(&mut cold, a, b, map) {
+                        (cold.mirror[a], cold.mirror[b]) = (None, None);
+                        stats.pairs_exact -= 1;
+                        stats.pairs_fallback.push((compact[a] as u32, compact[b] as u32, "wide pair"));
+                    }
+                    bumped.extend([a, b]);
+                }
+            }
             if bumped.is_empty() {
                 break (routes, sacrificed, access_v);
             }
@@ -1329,6 +1476,52 @@ fn tracks(cfg: &DetailedCfg, l: usize, layer: LayerId, ua: f32) -> (u8, u8) {
         0
     };
     (k as u8, guard)
+}
+
+/// Tie exact pair `a` → `b` under `map` in `cold` (RTE-15): `b`'s terminals
+/// become `a`'s images in `a`'s order, both nets' terminal tracks, tracks and
+/// guards the elementwise max, and [`RouteCtx::mirror`] links them. `false`
+/// (and no link) when an image is missing or the tied pair is wider than one
+/// track, or has guard tracks, on a vertical layer.
+fn tie_pair(cold: &mut RouteCtx<TrackGrid>, a: usize, b: usize, map: gr::LatticeMap) -> bool {
+    let Some(terms_b) = cold.terms[a].iter().map(|&n| cold.graph.map(map, n)).collect::<Option<Vec<u32>>>() else { return false };
+    if !terms_b.iter().all(|n| cold.terms[b].contains(n)) || terms_b.len() != cold.terms[b].len() {
+        return false;
+    }
+    let one = [1u8; gr::MAX_LAYERS];
+    let get = |v: &[Vec<[u8; gr::MAX_LAYERS]>], net: usize, i: usize| v.get(net).and_then(|t| t.get(i)).copied().unwrap_or(one);
+    let tk: Vec<[u8; gr::MAX_LAYERS]> = terms_b
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let j = cold.terms[b].iter().position(|x| x == n).unwrap_or(0);
+            let (x, y) = (get(&cold.term_k, a, i), get(&cold.term_k, b, j));
+            std::array::from_fn(|l| x[l].max(y[l]))
+        })
+        .collect();
+    let at = |v: &[[u8; gr::MAX_LAYERS]], net: usize, d: u8| v.get(net).copied().unwrap_or([d; gr::MAX_LAYERS]);
+    let k: [u8; gr::MAX_LAYERS] = std::array::from_fn(|l| at(&cold.k, a, 1)[l].max(at(&cold.k, b, 1)[l]));
+    let guard: [u8; gr::MAX_LAYERS] = std::array::from_fn(|l| at(&cold.guard, a, 0)[l].max(at(&cold.guard, b, 0)[l]));
+    let vertical_wide = |t: &[u8; gr::MAX_LAYERS]| (0..cold.graph.n_layers as usize).filter(|l| l % 2 == 1).any(|l| t[l] > 1 || guard[l] > 0);
+    if matches!(map, gr::LatticeMap::MirrorX { .. }) && (vertical_wide(&k) || tk.iter().any(vertical_wide)) {
+        return false;
+    }
+    cold.terms[b] = terms_b;
+    if !cold.term_k.is_empty() {
+        (cold.term_k[a], cold.term_k[b]) = (tk.clone(), tk);
+    }
+    if !cold.k.is_empty() {
+        (cold.k[a], cold.k[b]) = (k, k);
+    }
+    if !cold.guard.is_empty() {
+        (cold.guard[a], cold.guard[b]) = (guard, guard);
+    }
+    if cold.mirror.is_empty() {
+        cold.mirror = vec![None; cold.terms.len()];
+    }
+    cold.mirror[a] = Some((b as u32, map, true));
+    cold.mirror[b] = Some((a as u32, map.inverse(), false));
+    true
 }
 
 /// Elementwise max of `ks` (all ones when empty).
@@ -1533,6 +1726,64 @@ fn claim_jog_sweep(
             claim(grid.node(grid.bin_x(ex), grid.bin_y(ey), base_l));
         }
     }
+}
+
+/// The nodes another net owns (its stitch reach, landing or jog) that a jog
+/// of `ci` crosses, where that net's trunk may run: a short `break_shorts`
+/// settles only by deleting this access, so they get [`JOG_HIST`]. Only a
+/// node whose wire would touch a leg: the swept bins reach up to a pitch past it.
+fn jog_hist_nodes(grid: &TrackGrid, cfg: &DetailedCfg, legs: &[Rect; 2], jog_l: u32, reserved: &[u32], ci: usize) -> Vec<u32> {
+    let infl = cfg.wire_width / 2;
+    let touches = |n: &u32| {
+        let (px, py, _) = grid.pos(*n);
+        legs.iter().any(|l| (l.x - infl..=l.x + l.w + infl).contains(&px) && (l.y - infl..=l.y + l.h + infl).contains(&py))
+    };
+    let foreign = |n: &u32| reserved[*n as usize] != ci as u32 && reserved[*n as usize] < BLOCKED;
+    jog_nodes(grid, cfg, legs, jog_l).filter(foreign).filter(touches).collect()
+}
+
+/// `r` carried by `m` on `grid` (frame nm): a mirror reflects it about the
+/// axis `x = (k·p + p)/2`, a shift moves it by `(dx, dy)` pitches.
+fn map_rect(r: Rect, m: gr::LatticeMap, grid: &TrackGrid) -> Rect {
+    let p = grid.pitch;
+    match m {
+        gr::LatticeMap::MirrorX { k } => Rect { x: k * p + p - r.x - r.w, ..r },
+        gr::LatticeMap::Shift { dx, dy } => Rect { x: r.x + dx * p, y: r.y + dy * p, ..r },
+    }
+}
+
+/// The lattice map carrying pin set `a` exactly (within `snap` nm) onto `b`
+/// (frame nm, RTE-15): a mirror about the axis between the two sets' x
+/// extents when it reflects every `a` pin onto a `b` pin, else the shift by
+/// the centroid difference when that does. `Err` names why there is none:
+/// `no pin map` (neither carries the pins), `axis off lattice` (the map is
+/// not track to track, or the lattice was coarsened).
+fn pair_map(a: &[(Rect, LayerId, Option<f32>)], b: &[(Rect, LayerId, Option<f32>)], grid: &TrackGrid, snap: i32) -> Result<gr::LatticeMap, &'static str> {
+    if a.is_empty() || a.len() != b.len() {
+        return Err("no pin map");
+    }
+    let hits = |f: &dyn Fn(Rect) -> Rect| {
+        a.iter().all(|&(r, l, _)| {
+            let t = f(r);
+            b.iter().any(|&(q, lq, _)| lq == l && (q.x - t.x).abs() < snap.max(1) && (q.y - t.y).abs() < snap.max(1) && q.w == t.w && q.h == t.h)
+        })
+    };
+    let ext = |v: &[(Rect, LayerId, Option<f32>)]| (v.iter().map(|t| t.0.x).min().unwrap_or(0), v.iter().map(|t| t.0.x + t.0.w).max().unwrap_or(0));
+    let ((a0, a1), (b0, b1)) = (ext(a), ext(b));
+    let sum = i64::from(a0) + i64::from(a1) + i64::from(b0) + i64::from(b1);
+    let p = grid.pitch;
+    let candidate = if sum % 2 == 0 && hits(&|r: Rect| Rect { x: (sum / 2) as i32 - r.x - r.w, ..r }) {
+        let axis2 = (sum / 2) as i32;
+        ((axis2 - p) % p == 0).then_some(gr::LatticeMap::MirrorX { k: (axis2 - p) / p })
+    } else {
+        let mean = |v: &[(Rect, LayerId, Option<f32>)], f: fn(&Rect) -> i64| v.iter().map(|t| f(&t.0)).sum::<i64>() / v.len() as i64;
+        let (dx, dy) = ((mean(b, |r| i64::from(r.x)) - mean(a, |r| i64::from(r.x))) as i32, (mean(b, |r| i64::from(r.y)) - mean(a, |r| i64::from(r.y))) as i32);
+        if !hits(&|r: Rect| Rect { x: r.x + dx, y: r.y + dy, ..r }) {
+            return Err("no pin map");
+        }
+        (dx % p == 0 && dy % p == 0).then_some(gr::LatticeMap::Shift { dx: dx / p, dy: dy / p })
+    };
+    candidate.filter(|&m| !grid.coarsened && grid.lattice_map(m)).ok_or("axis off lattice")
 }
 
 /// The lattice nodes on layer `jog_l` that jog `legs` cover, legs inflated by
@@ -1893,7 +2144,8 @@ fn repair_constraints(
             let mut trials: Vec<Vec<(usize, Vec<f32>)>> = Vec::new();
             match batch.repair_kind() {
                 RepairKind::Mirror => {
-                    for &(a, b) in &pairs {
+                    // An exact pair is mirrored by construction (RTE-15).
+                    for &(a, b) in pairs.iter().filter(|&&(a, _)| cold.mirror.get(a).is_none_or(Option::is_none)) {
                         for (from, to) in [(a, b), (b, a)] {
                             if let Some(tree) = copy_tree(hot, cold, from, to) {
                                 n += 1;
@@ -3026,6 +3278,82 @@ mod tests {
         assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
         assert!(!stacked(&routes));
         assert!(stacked(&route(&Requirements::default()).0), "the set-up does not force a crossing");
+    }
+
+    /// RTE-15 set-up: p0 = 420, axis x = 10 290 (a track centre), nets 0/1
+    /// under a `Differential` (no length tolerance); net 1's pins are net
+    /// 0's mirrored, its second pin shifted by `off` nm.
+    fn pair_run(off: i32, rings: &[Macro]) -> (Routes, Report, RouteStats, Requirements<Routes>) {
+        use analog::routing::Differential;
+        let cfg = DetailedCfg { pitch: 420, grid: 5, wire_width: 260, ..test_cfg() };
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.budget.push(Box::new(vec![Differential { pos: NetId(0), neg: NetId(1), max_len_delta_pct10: 0, same_layer_required: true, stack: Some(test_stack()), aggressor_weight: None }]));
+        let a = [(6_000, 3_000), (8_000, 9_000), (5_000, 12_000)];
+        let mut pins: Vec<(NetId, Rect, LayerId)> = a.iter().map(|&(x, y)| pin(0, x, y)).collect();
+        pins.extend(a.iter().enumerate().map(|(i, &(x, y))| pin(1, 2 * 10_290 - x - 170 + if i == 1 { off } else { 0 }, y)));
+        let (routes, report, stats) = DetailedRoute { cfg }.route(&pins, &[], rings, &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        (routes, report, stats, reqs)
+    }
+
+    /// Per layer: (Σ long side, Σ area, shape count) of `net`.
+    fn signature(r: &Routes, net: usize) -> Vec<(u16, i64, i64, usize)> {
+        let mut by: std::collections::BTreeMap<u16, (i64, i64, usize)> = std::collections::BTreeMap::new();
+        for s in &r.wires[net] {
+            let e = by.entry(s.layer.0).or_default();
+            *e = (e.0 + i64::from(s.rect.w.max(s.rect.h)), e.1 + i64::from(s.rect.w) * i64::from(s.rect.h), e.2 + 1);
+        }
+        by.into_iter().map(|(l, (a, b, c))| (l, a, b, c)).collect()
+    }
+
+    /// Mirrored pins route as exact images: an obstacle on net 0's side only
+    /// makes both detour; equal per-layer signatures, every net-1 shape a
+    /// net-0 shape mirrored about 10 290, Differential residual 0.
+    #[test]
+    fn mirrored_pins_route_as_exact_mirrors() {
+        let ring = Macro {
+            shapes: LAYERS.map(|layer| Shape { layer, rect: Rect { x: 5_500, y: 5_500, w: 3_500, h: 1_000 } }).to_vec(),
+            bbox: Rect { x: 5_500, y: 5_500, w: 3_500, h: 1_000 },
+            ..Default::default()
+        };
+        let (routes, report, stats, reqs) = pair_run(0, &[ring]);
+        assert_eq!(stats.pairs_exact, 1, "{:?}", stats.pairs_fallback);
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        assert_eq!(signature(&routes, 0), signature(&routes, 1));
+        for s in &routes.wires[1] {
+            let m = Rect { x: 2 * 10_290 - s.rect.x - s.rect.w, ..s.rect };
+            assert!(routes.wires[0].iter().any(|t| t.layer == s.layer && t.rect == m), "net 1 {s:?} has no mirror in net 0: {:?} vs {:?}", routes.wires[0].iter().filter(|t| t.layer == s.layer).collect::<Vec<_>>(), routes.wires[1].iter().filter(|t| t.layer == s.layer).collect::<Vec<_>>());
+        }
+        assert_eq!(reqs.budget[0].residual(&routes), 0.0);
+    }
+
+    /// Without the obstacle neither net uses the axis track on the vertical layer.
+    #[test]
+    fn the_axis_track_is_never_used_by_a_pair() {
+        let (routes, _, stats, _) = pair_run(0, &[]);
+        assert_eq!(stats.pairs_exact, 1, "{:?}", stats.pairs_fallback);
+        for n in 0..2 {
+            assert!(!routes.wires[n].iter().any(|s| s.layer == LAYERS[1] && s.rect.x <= 10_290 && 10_290 <= s.rect.x + s.rect.w), "net {n} covers the axis");
+        }
+    }
+
+    /// One of net 1's pins one grid step (5 nm) off the mirror (all of them
+    /// off would be an exact mirror about an off-lattice axis): no map, both nets
+    /// route alone (guide fallback), and no metal shape is a dead end: each
+    /// one off every pin touches at least two other shapes of its net.
+    #[test]
+    fn unmatched_pins_fall_back_to_the_guide() {
+        let (routes, report, stats, _) = pair_run(5, &[]);
+        assert_eq!(stats.pairs_exact, 0);
+        assert_eq!(stats.pairs_fallback, vec![(0, 1, "no pin map")]);
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        for n in 0..2 {
+            let w = &routes.wires[n];
+            for (i, s) in w.iter().enumerate().filter(|(_, s)| s.layer == LAYERS[0] || s.layer == LAYERS[1]) {
+                let touches = w.iter().enumerate().filter(|&(j, t)| j != i && rect_gap(s.rect, t.rect) == 0 && (t.layer == s.layer || t.layer == CUTS[0].0)).count();
+                let at_pin = w.iter().any(|t| t.layer != s.layer && t.layer != CUTS[0].0 && rect_gap(s.rect, t.rect) == 0) || touches >= 2;
+                assert!(at_pin, "net {n}: dead-end shape {s:?}");
+            }
+        }
     }
 
     /// History survives the call and changes the next one.
