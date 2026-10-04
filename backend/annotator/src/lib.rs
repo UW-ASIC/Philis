@@ -8,6 +8,7 @@
 
 pub mod block;
 pub mod catalog;
+pub mod class;
 pub mod classify;
 pub mod constraints;
 pub mod emit;
@@ -270,6 +271,60 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     let reqs = graph::requirements(&all, &intent.compounds, &shared, &[], &hg, &net_classes, &canon, &cfg.policy);
     intent.tree = graph::hsmpg(netlist.devices.len(), &reqs, &canon);
     intent.sets = sets::matched_sets(&reqs, &intent.compounds, &shared, &block::leaves(&blocks), &canon, &drawn, &hg, &cfg.process.unit, &mut intent.diagnostics);
+    // EXT-16: kind, class and style per set; the unit floors depend on the class.
+    let leaves = block::leaves(&blocks);
+    let mut roles = Vec::new();
+    for s in &intent.sets {
+        let has = |d: DeviceId| s.members.iter().any(|m| m.device == d);
+        let kinds: Vec<BlockKind> = leaves.iter().filter(|b| b.devices.len() == 2 && b.devices.iter().all(|&d| has(d))).map(|b| b.kind).collect();
+        roles.push(kinds);
+    }
+    for (s, kinds) in intent.sets.iter_mut().zip(&roles) {
+        s.kind = class::kind_of(s, kinds, netlist.devices[s.members[0].device.0 as usize].kind);
+    }
+    let input = |i: usize| roles[i].contains(&BlockKind::DiffPair);
+    for i in 0..intent.sets.len() {
+        let s = &intent.sets[i];
+        let role = if input(i) {
+            class::SetRole::InputPair
+        } else if roles[i].iter().any(|k| matches!(k, BlockKind::Load | BlockKind::CascodePair))
+            && s.compound.is_some_and(|c| (0..intent.sets.len()).any(|j| input(j) && intent.sets[j].compound == Some(c)))
+        {
+            class::SetRole::LoadOfPair
+        } else if roles[i].contains(&BlockKind::CurrentMirror) || s.origin == analog::intent::Origin::SharedBias {
+            class::SetRole::BiasMirror
+        } else {
+            class::SetRole::Other
+        };
+        let mut ctx = class::ClassCtx { user: None, spec_6sigma: cfg.offset_sigma_mv.map(|v| 6.0 * v), role, diags: &mut intent.diagnostics };
+        let (c, src) = class::class_of(s, &mut ctx);
+        let source = |d: DeviceId| {
+            let i = d.0 as usize;
+            hg.terminals[i].iter().position(|t| t == "S" || t == "E").map(|k| hg.device_nets[i][k])
+        };
+        let shares_source = s.members.iter().all(|m| source(m.device).is_some() && source(m.device) == source(s.members[0].device));
+        let s = &mut intent.sets[i];
+        (s.class, s.class_source, s.style) = (c, src, class::style_of(c, s.kind, shares_source));
+        let ids: Vec<DeviceId> = s.members.iter().map(|m| m.device).collect();
+        if let Ok((u, units)) = sets::unitize(&ids, &drawn, netlist.devices[ids[0].0 as usize].kind, c, &cfg.process.unit) {
+            s.unit = Some(u);
+            for (m, (p, ser)) in s.members.iter_mut().zip(units) {
+                (m.parallel, m.series) = (p, ser);
+            }
+            if c == analog::intent::MatchClass::Exceptional && s.members.iter().any(|m| m.series > 1) {
+                intent.diagnostics.push(analog::intent::Diagnostic {
+                    kind: "series_units_exceptional",
+                    devices: ids,
+                    message: "series units carry inherent mismatch (Hastings H13-22)".into(),
+                });
+            }
+        }
+    }
+    // EXT-14 step 9 (card D-d): a compound holding an Exceptional Voltage set is Perfect.
+    for (ci, c) in intent.compounds.iter_mut().enumerate() {
+        let perfect = intent.sets.iter().any(|s| s.compound == Some(ci as u16) && s.kind == analog::intent::MatchKind::Voltage && s.class == analog::intent::MatchClass::Exceptional);
+        c.kind = if perfect { analog::intent::SymKind::Perfect } else { analog::intent::SymKind::Mirror };
+    }
     sets::set_pairs(&mut intent.compounds, &intent.sets);
     let constraints = constraints::assemble(netlist, &drawn, &blocks, &intent.sets);
     Problem {

@@ -78,9 +78,9 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block], sets: &[Ma
             same_variant_required: true,
             dummy_required: dummy_required(kind, s.class),
             route_matching_required: s.kind != MatchKind::Ratio || s.class >= MatchClass::Moderate,
-            class: None,
+            class: Some(s.class),
             series: vec![1; s.members.len()],
-            style: None,
+            style: Some(s.style),
         });
     }
     let class_of = |d: DeviceId| {
