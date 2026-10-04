@@ -1,0 +1,39 @@
+# README progress snapshot: on every push to main, bench the sample circuits
+# and commit the refreshed README.md + docs/progress/ (speed history, feedback
+# chart, layouts). The commit carries [skip ci] so it does not retrigger.
+name: progress
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: progress
+  cancel-in-progress: true
+
+jobs:
+  snapshot:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bench the README sample circuits
+        run: cargo run --release -p benchmark --bin bench local ota dac4 bgr_core rc_filter pair tq_chain 2>&1 | tee bench.log
+      - name: Update README + docs/progress
+        env:
+          PROGRESS_BRANCH: main
+        run: python3 benchmarks/progress.py bench.log assets "$GITHUB_SHA" "$(date -u +%m-%d)-${GITHUB_SHA::7}"
+      - name: Commit snapshot
+        run: |
+          git config user.name "philis-progress[bot]"
+          git config user.email "philis-progress@users.noreply.github.com"
+          git add README.md docs/progress
+          git diff --cached --quiet || git commit -m "progress: snapshot ${GITHUB_SHA::7} [skip ci]"
+          git push

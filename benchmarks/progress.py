@@ -59,6 +59,54 @@ def chart(hist, path):
     open(path, "w").write("\n".join(out))
 
 
+FEEDBACK = ["ota", "dac4", "bgr_core", "rc_filter", "tq_chain", "pair"]
+
+
+def feedback_chart(assets, path):
+    """Every candidate layout each circuit's loop tried: die area vs routed
+    wirelength; solid = clean (|V| = 0), faint = rejected. Style of the old
+    tools/readme_charts.py chart_feedback (7a16245)."""
+    runs = []
+    for c in FEEDBACK:
+        p = os.path.join(assets, f"{c}.candidates.csv")
+        if os.path.exists(p):
+            rows = [(float(r["wl_um"]), float(r["area_um2"]), r["clean"] == "1") for r in csv.DictReader(open(p))]
+            if rows:
+                runs.append((c, rows))
+    if not runs:
+        return False
+    AX, GRID = "#888888", "#88888833"
+    pal = ["#3572b0", "#d1663a", "#2e9e6b", "#9b59b6", "#c9a227", "#c0392b"]
+    W, H, x0, y0, x1, y1 = 900, 345, 60, 42, 560, 265
+    wmax = max(w for _, r in runs for w, _, _ in r) * 1.05 or 1
+    amax = max(a for _, r in runs for _, a, _ in r) * 1.05 or 1
+    o = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" font-family="DejaVu Sans,Helvetica,Arial,sans-serif" font-size="10" fill="{AX}">',
+         f'<text x="0" y="14" font-size="12" font-weight="bold">Feedback loop: every candidate layout tried, die area vs. wirelength</text>']
+    for k in range(5):
+        f = k / 4
+        yy = y1 - f * (y1 - y0); xx = x0 + f * (x1 - x0)
+        o.append(f'<line x1="{x0}" x2="{x1}" y1="{yy:.1f}" y2="{yy:.1f}" stroke="{GRID}"/>')
+        o.append(f'<text x="{x0 - 6}" y="{yy + 3:.1f}" text-anchor="end">{f * amax:,.0f}</text>')
+        o.append(f'<text x="{xx:.1f}" y="{y1 + 14}" text-anchor="middle">{f * wmax:,.0f}</text>')
+    o.append(f'<line x1="{x0}" x2="{x1}" y1="{y1}" y2="{y1}" stroke="{AX}"/><line x1="{x0}" x2="{x0}" y1="{y0}" y2="{y1}" stroke="{AX}"/>')
+    o.append(f'<text x="{(x0 + x1) / 2}" y="{y1 + 30}" text-anchor="middle">routed wirelength (um)</text><text x="{x0}" y="{y0 - 10}">die area (um^2)</text>')
+    for i, (c, rows) in enumerate(runs):
+        col = pal[i % len(pal)]
+        for w, a, ok in rows:
+            o.append(f'<circle cx="{x0 + w / wmax * (x1 - x0):.1f}" cy="{y1 - a / amax * (y1 - y0):.1f}" r="2" fill="{col}" fill-opacity="{0.75 if ok else 0.25}"/>')
+    bx0, bx1 = 640, 880
+    o.append(f'<text x="{bx0}" y="{y0 - 10}">candidates passing DRC + LVS + hard constraints</text>')
+    for i, (c, rows) in enumerate(runs):
+        n = len(rows); ok = sum(1 for r in rows if r[2]); y = y0 + 8 + i * 34
+        o.append(f'<text x="{bx0}" y="{y - 3}">{html.escape(c)}</text><text x="{bx1}" y="{y - 3}" text-anchor="end">{ok}/{n}</text>')
+        o.append(f'<rect x="{bx0}" y="{y + 2}" width="{bx1 - bx0}" height="10" rx="2" fill="{GRID}"/>')
+        o.append(f'<rect x="{bx0}" y="{y + 2}" width="{(bx1 - bx0) * ok / n:.1f}" height="10" rx="2" fill="{pal[i % len(pal)]}"/>')
+    o.append('<text x="0" y="322">Solid dots clear every check; faint dots were rejected. The loop ships the best clean candidate, so the rejects never reach GDS.</text>')
+    o.append("</svg>")
+    open(path, "w").write("\n".join(o))
+    return True
+
+
 def main():
     log, assets, sha = sys.argv[1:4]
     label = sys.argv[4] if len(sys.argv) > 4 else sha[:7]
@@ -80,6 +128,7 @@ def main():
     for r in csv.DictReader(open(csvp)):
         hist.setdefault(r["label"], {})[r["circuit"]] = float(r["ns_per_iter"]) / 1e6
     chart(list(hist.items()), os.path.join(PROG, "speed.svg"))
+    fb = feedback_chart(assets, os.path.join(PROG, "feedback.svg"))
     shown = []
     for c in SAMPLES:
         src = os.path.join(assets, f"{c}.svg")
@@ -91,8 +140,9 @@ def main():
         nspi = r["ms"] * 1e6 / r["epochs"] if r["epochs"] else 0
         table.append(f"| {c} | {r['ms']:,} | {r['epochs']} | {nspi:,.0f} | {r['drc']} | {r['lvs']} | {r['erc']} |")
     gallery = "\n\n".join(f"**{c}**\n\n![{c}](docs/progress/layouts/{c}.svg)" for c in shown)
-    block = (f"<!-- progress:start -->\n_Last snapshot: {stamp}, branch `m2` at `{sha[:7]}` "
+    block = (f"<!-- progress:start -->\n_Last snapshot: {stamp}, branch `{os.environ.get('PROGRESS_BRANCH', 'main')}` at `{sha[:7]}` "
              f"(`bench local`, sky130, seed 1). Updated automatically by `benchmarks/progress.py`._\n\n"
+             (f"### Feedback loop\n\n![feedback](docs/progress/feedback.svg)\n\n" if fb else "") +
              f"### Speed\n\n![speed](docs/progress/speed.svg)\n\n" + "\n".join(table) +
              f"\n\n### Sample layouts\n\n{gallery}\n<!-- progress:end -->")
     rp = os.path.join(ROOT, "README.md")
