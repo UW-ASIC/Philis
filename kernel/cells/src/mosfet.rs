@@ -35,10 +35,13 @@ use crate::{Cell, Pattern};
 ///
 /// `double_gate`: see the field.
 ///
-/// `rows` (1 or 2): two rows share one tap strip, the second mirrored about
+/// `rows` (1, 2 or 4): two rows share one tap strip, the second mirrored about
 /// it and holding the first's order relabelled (a pair) or reversed: a
 /// blocked pair becomes the cross-coupled quad of Razavi Fig. 19.19, a
 /// centroid row a 2-D centroid, a wide device the stacked rows of Fig. 19.11.
+/// Four (an equal `Cc1d` pair, `nf % 8 == 0`): MAT-15's order-3 grid
+/// ([`pattern::nth_order_rows`]), two tap-sharing pairs stacked pad to pad
+/// ([`stack_pad_to_pad`]); every moment of order ≤ 3 cancels.
 #[derive(Clone)]
 pub struct Mosfet {
     pub nf: u16,
@@ -142,18 +145,27 @@ impl Cell for Mosfet {
                     _ => blocks_legal(&s.dev_nf.iter().map(|&n| n / 2).collect::<Vec<_>>()),
                 }
         };
+        // Four rows: P_3 needs 2³ units per member and its base row an even
+        // count per member (nf/4 even ⇔ nf % 8 == 0).
+        let four_rows = |style: Pattern, mirror: bool| n_dev == 2 && s.dev_nf[0] == s.dev_nf[1] && nf % 8 == 0 && style == Pattern::Cc1d && !mirror;
         // Two-ended gates where a finger's poly R outweighs its contact's.
         let wide = two_ended_gate_pays(process, s.unit_w, s.unit_l);
         styles
             .into_iter()
             .flat_map(|(style, split_gates, mirror_pins)| {
-                let rows: &[u16] = if two_rows(style, mirror_pins) { &[1, 2] } else { &[1] };
+                let mut rows = vec![1u16];
+                if two_rows(style, mirror_pins) {
+                    rows.push(2);
+                }
+                if four_rows(style, mirror_pins) {
+                    rows.push(4);
+                }
                 let ends: &[bool] = if wide && !split_gates { &[false, true] } else { &[false] };
-                rows.iter().flat_map(move |&rows| {
+                rows.into_iter().flat_map(move |rows| {
                     ends.iter().map(move |&double_gate| Mosfet { nf, style, dummies_per_edge: dummies, split_gates, mirror_pins, rows, double_gate })
                 })
             })
-            .filter(|v| v.bars_fit(&s.dev_nf, n_dev))
+            .filter(|v| v.bars_fit(&s.dev_nf, n_dev) && grid_legal(&v.row_orders(&s.dev_nf, n_dev)))
             .collect()
     }
 
@@ -166,9 +178,11 @@ impl Cell for Mosfet {
         }
         let orders = self.row_orders(&s.dev_nf, group.devices.len());
         let row0 = self.draw_row(group, constraints, process, &orders[0]);
-        let mut m = match orders.get(1) {
-            Some(second) => stack_on_tap(&row0, &self.draw_row(group, constraints, process, second), process),
-            None => row0,
+        let row = |i: usize| self.draw_row(group, constraints, process, &orders[i]);
+        let mut m = match orders.len() {
+            1 => row0,
+            2 => stack_on_tap(&row0, &row(1), process),
+            _ => stack_pad_to_pad(&stack_on_tap(&row0, &row(1), process), &stack_on_tap(&row(2), &row(3), process), process),
         };
         // Gate resistance per owner (CELL-19): a finger's distributed poly,
         // `R□·W/(k·L)` (k = 3 one-ended, 12 two-ended; Razavi §19.2.1), plus
@@ -192,7 +206,30 @@ fn stack_on_tap(a: &Macro, b: &Macro, process: &dyn Process) -> Macro {
     // and diffusion on one layer).
     let t = a.shapes.iter().filter(|s| s.layer == tap).max_by_key(|s| s.rect.y).map_or(Rect { x: 0, y: 0, w: 0, h: 0 }, |s| s.rect);
     let y2 = 2 * t.y + t.h;
-    let flip = |r: Rect| Rect { y: y2 - r.y - r.h, ..r };
+    merge_stacked(a, b, |r: Rect| Rect { y: y2 - r.y - r.h, ..r }, Some(t), process)
+}
+
+/// `hi` translated above `lo` by the widest same-layer space and merged: two
+/// tap-sharing pairs meet gate pad row to gate pad row. Translation keeps the
+/// pairs' row offsets equal (`y0 + y3 = y1 + y2`), which the order-3 grid's
+/// `x²y` moment needs.
+///
+/// ponytail: bbox-wide gap at the widest same-layer space; per-layer facing
+/// edges if the area matters.
+fn stack_pad_to_pad(lo: &Macro, hi: &Macro, process: &dyn Process) -> Macro {
+    let gap = ["diff", "tap", "poly", "licon", "li", "mcon", "met1", "npc", "nsdm", "psdm"].iter().filter_map(|r| process.space(r)).max().unwrap_or(0);
+    let nwell = process.layer("nwell");
+    let solid = |m: &Macro| m.shapes.iter().filter(|s| Some(s.layer) != nwell).map(|s| s.rect).collect::<Vec<_>>();
+    let top = solid(lo).iter().map(|r| r.y + r.h).max().unwrap_or(0);
+    let bottom = solid(hi).iter().map(|r| r.y).min().unwrap_or(0);
+    let dy = top + gap - bottom;
+    merge_stacked(lo, hi, |r: Rect| Rect { y: r.y + dy, ..r }, None, process)
+}
+
+/// `a` plus `b` moved by `place` (a y-only map): one nwell over both, `b`'s
+/// licons inside `skip_cuts_in` dropped, pins, units, dummies and S/D
+/// figures merged.
+fn merge_stacked(a: &Macro, b: &Macro, place: impl Fn(Rect) -> Rect, skip_cuts_in: Option<Rect>, process: &dyn Process) -> Macro {
     let mut out = Builder::new(process.grid());
     // One well over both rows: two overlapping well rects read as two wells,
     // the second untapped.
@@ -214,9 +251,9 @@ fn stack_on_tap(a: &Macro, b: &Macro, process: &dyn Process) -> Macro {
     // The strip keeps `a`'s cut row: `b`'s, mirrored, sits off it by the
     // strip's asymmetric enclosure and would merge into oversized cuts.
     let licon = process.layer("licon");
-    let inside = |r: Rect| r.x >= t.x && r.x + r.w <= t.x + t.w && r.y >= t.y && r.y + r.h <= t.y + t.h;
+    let inside = |r: Rect| skip_cuts_in.is_some_and(|t| r.x >= t.x && r.x + r.w <= t.x + t.w && r.y >= t.y && r.y + r.h <= t.y + t.h);
     for s in &b.shapes {
-        let r = flip(s.rect);
+        let r = place(s.rect);
         if Some(s.layer) == licon && inside(r) {
             continue;
         }
@@ -233,13 +270,13 @@ fn stack_on_tap(a: &Macro, b: &Macro, process: &dyn Process) -> Macro {
         out.pin(p.clone());
     }
     for p in &b.pins {
-        out.pin(pnr_core::Pin { at: flip(p.at), ..p.clone() });
+        out.pin(pnr_core::Pin { at: place(p.at), ..p.clone() });
     }
     for &u in &a.units {
         out.unit(u);
     }
     for &u in &b.units {
-        out.unit(pnr_core::Unit { y: y2 - u.y, ..u });
+        out.unit(pnr_core::Unit { y: place(Rect { x: u.x, y: u.y, w: 0, h: 0 }).y, ..u });
     }
     for &d in a.dummies.iter().chain(&b.dummies) {
         out.dummy(d);
@@ -256,9 +293,16 @@ fn stack_on_tap(a: &Macro, b: &Macro, process: &dyn Process) -> Macro {
 
 impl Mosfet {
     /// The finger order (device index per finger) of each drawn row: the
-    /// first, then for two rows the first relabelled (a pair) or reversed.
+    /// first, then for two rows the first relabelled (a pair) or reversed;
+    /// four rows: MAT-15's order-3 grid over the `Cc1d` base row of nf/4 per
+    /// member (only enumerated for an equal `Cc1d` pair, no mirror pins).
     fn row_orders(&self, dev_nf: &[u16], n_dev: usize) -> Vec<Vec<usize>> {
-        let rows = self.rows.clamp(1, 2);
+        let rows = self.rows.clamp(1, 4);
+        assert!(rows != 3, "no three-row variant: rows is 1, 2 or 4");
+        if rows == 4 {
+            let base: Vec<u8> = finger_sequence(Pattern::Cc1d, &[self.nf / 4, self.nf / 4]).into_iter().map(|d| d as u8).collect();
+            return pattern::nth_order_rows(3, &base).into_iter().map(|r| r.into_iter().map(usize::from).collect()).collect();
+        }
         let nf = (self.nf / rows).max(1);
         let dev_nf: Vec<u16> = dev_nf.iter().map(|&n| (n / rows).max(1)).collect();
         let first = if self.mirror_pins {
@@ -971,6 +1015,11 @@ fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> 
     sizing(group, c, dim(process, "min_finger_width"), dim(process, "min_gate_l"))
 }
 
+/// Every row of a drawn grid is diffusion-legal ([`legal_row`], either end).
+fn grid_legal(orders: &[Vec<usize>]) -> bool {
+    orders.iter().all(|r| legal_row(r, true) || legal_row(r, false))
+}
+
 /// Every inter-device boundary of `seq` (device index per finger) lies on a
 /// source region, with region 0 a source iff `s0`. Region i sits left of
 /// finger i; region `seq.len()` is the right end.
@@ -1069,7 +1118,8 @@ mod tests {
         let mut dirty = Vec::new();
         for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
             // Centroid styles need two fingers a side for a pair, four for a quad.
-            for (n, nf) in [(1usize, 1u16), (2, 1), (2, 2), (4, 4)] {
+            // (2, 8): the four-row order-3 grid (CELL-15).
+            for (n, nf) in [(1usize, 1u16), (2, 1), (2, 2), (4, 4), (2, 8)] {
                 dirty.extend(testkit::dirty::<Mosfet>(kind, n, nf, 1680, 150, &pdk));
             }
             dirty.extend(testkit::dirty::<Mosfet>(kind, 1, 1, 420, 150, &pdk));
@@ -1094,6 +1144,65 @@ mod tests {
         assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
     }
 
+    /// CELL-15: an equal pair at 8 fingers each offers a four-row variant,
+    /// MAT-15's order-3 grid, whose drawn units cancel every moment of order
+    /// ≤ 3 between the two members; at 4 fingers each none is offered.
+    #[test]
+    fn four_rows_cancel_to_third_order() {
+        use crate::testkit;
+        use analog::matching::moments;
+        let Some(pdk) = testkit::pdk() else { return };
+        for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
+            let (g, c) = testkit::group_of(kind, 2, 4, 1680, 150);
+            assert!(Mosfet::enumerate(&g, &c, &pdk).iter().all(|v| v.rows != 4), "{kind:?}: 4 fingers each cannot fill P_3");
+            let (g, c) = testkit::group_of(kind, 2, 8, 1680, 150);
+            let four: Vec<Mosfet> = Mosfet::enumerate(&g, &c, &pdk).into_iter().filter(|v| v.rows == 4).collect();
+            assert!(!four.is_empty(), "{kind:?}: no four-row variant");
+            for v in four {
+                assert_eq!(v.row_orders(&[8, 8], 2), [[0, 1, 1, 0], [1, 0, 0, 1], [1, 0, 0, 1], [0, 1, 1, 0]]);
+                let m = v.draw(&g, &c, &pdk);
+                let of = |d: u8| m.units.iter().filter(|u| u.owner == d).copied().collect::<Vec<_>>();
+                let (a, b) = (of(0), of(1));
+                // Each member draws its 8 schematic fingers, 2 per row.
+                assert_eq!((a.len(), b.len()), (8, 8), "{kind:?}");
+                let moment = |us: &[pnr_core::Unit], p: u32, q: u32| us.iter().map(|u| i128::from(u.x).pow(p) * i128::from(u.y).pow(q)).sum::<i128>();
+                for p in 0..=3 {
+                    for q in 0..=3 - p {
+                        assert_eq!(moment(&a, p, q), moment(&b, p, q), "{kind:?}: x^{p} y^{q}");
+                    }
+                }
+                let phi = |us: &[pnr_core::Unit]| us.iter().map(|u| i32::from(u.phi.0)).sum::<i32>();
+                assert_eq!((phi(&a), phi(&b)), (0, 0), "{kind:?}");
+                let pts = |us: &[pnr_core::Unit]| us.iter().map(|u| moments::Pt { x: f64::from(u.x), y: f64::from(u.y), w: u.weight as f64, phi: u.phi }).collect::<Vec<_>>();
+                let (pa, pb) = (pts(&a), pts(&b));
+                assert!(moments::cancelled_order(&[&pa, &pb], 4, 1e-3).0 >= 3, "{kind:?}");
+            }
+        }
+    }
+
+    /// CELL-15: a grid with an illegal row is rejected, and nothing
+    /// `enumerate` offers carries one.
+    #[test]
+    fn an_illegal_grid_is_not_drawn() {
+        use crate::testkit;
+        // Second row: boundaries on regions 1 and 2, one a drain either way.
+        assert!(!grid_legal(&[vec![0, 1, 1, 0], vec![0, 1, 0, 0]]));
+        let nth: Vec<Vec<usize>> = pattern::nth_order_rows(3, &[0, 1, 1, 0]).into_iter().map(|r| r.into_iter().map(usize::from).collect()).collect();
+        assert!(grid_legal(&nth));
+        let Some(pdk) = testkit::pdk() else { return };
+        for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
+            for n in 1..=4usize {
+                for nf in 1..=16u16 {
+                    let (g, c) = testkit::group_of(kind, n, nf, 1680, 150);
+                    let dev_nf = vec![nf; n];
+                    for v in Mosfet::enumerate(&g, &c, &pdk) {
+                        assert!(grid_legal(&v.row_orders(&dev_nf, n)), "{kind:?} n={n} nf={nf} rows={}", v.rows);
+                    }
+                }
+            }
+        }
+    }
+
     /// Every variant extracts exactly its fingers plus its dummies as MOS
     /// devices: nothing merged away (a holed gate), nothing extra.
     #[test]
@@ -1109,6 +1218,8 @@ mod tests {
                 (2, 2, 5000, 1000),
                 (2, 2, 10_000, 150),
                 (4, 4, 1680, 150),
+                // CELL-15: the four-row order-3 grid.
+                (2, 8, 1680, 150),
                 // CELL-30: gate L on both sides of the dummy_max_l_nm cap (3000).
                 (1, 1, 420, 150),
                 (1, 1, 420, 1000),
