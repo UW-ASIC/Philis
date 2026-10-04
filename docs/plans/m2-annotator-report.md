@@ -32,3 +32,26 @@ DRC 0 on every row.
 - Open (EXT-14 step 8, spec): `annotate` cannot produce a non-empty `set_pairs`. Every compound couple is a `MatchSym`
   edge (`graph.rs:54`), so both mates land in one set and each set maps onto itself. The unit test covers
   `set_pairs`, but removing its call in `lib.rs` is still not caught. Owner: plan-01 EXT-14/EXT-20.
+
+## EXT-20 (segment 2)
+`bench local`, seed 1, sky130, release. Base is `1b1d020` (built from `git archive`), against EXT-20. The table
+shows WL nm / area µm² / LVS. DRC is 0 on every row in both runs.
+
+| circuit | 1b1d020 | EXT-20 |
+|---|---|---|
+| dac4 | 242275 / 1098.3 / PARTIAL(16) | identical |
+| dac4_mim | 265465 / 3041.5 / MATCH | 263800 / 2803.9 / MATCH |
+| mirror_ratio | 138590 / 51.2 / MATCH | 137725 / 51.2 / MATCH |
+| bgr_core, pair, quad, ota, ota_constrained, tt_ota, bjt_mirror, chain4, rc_filter, res_m2, tq_chain | — | identical |
+
+- T9: DRC is 0 on every row. LVS is MATCH on bgr_core, pair, quad and ota. dac4's PARTIAL(16) was already there at
+  the base and is unchanged, so EXT-20 did not cause it, but it also means T9's "LVS MATCH" for dac4 is not met.
+- dac4_mim: its capacitor bank is now a priced `MatchedSet` (an unknown ledger, pulled only by cost), which gives
+  8 % less area. mirror_ratio: the mirror's pairwise Proximity is gone (it is one Minimal set pulled to its
+  reference), and WL drops by 0.6 %.
+- Departure from the card: a compound couple whose set has no unit (unitization failed or no unit deck) counts as
+  equal when its drawn geometry `(w_finger, l, fingers, model)` matches. It does not drop out. Without this, the
+  5T OTA under a default config lost its pair and load Symmetry (`a_differential_stage_is_symmetric_about_one_axis`).
+- Departure from the card: in `align_gold`, T1 checks pairs, selfs and axes on `canon`, which reads the emitted
+  Symmetry. Net pairs stay on `canon_intent`, because the emitted net pairs are routing's Differential, which comes
+  only from DiffPair leaves and has no `(vin, vip)`.
