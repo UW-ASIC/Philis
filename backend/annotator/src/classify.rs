@@ -17,11 +17,16 @@ use crate::netrole::NetRole;
 /// ring-to-ring wire alone is ~70% of its gate C) stay routable; precision
 /// targets (10% wire / 2% coupling) are what a matched stage would want and
 /// flag chain4/quad/rc_filter today. Rail aggressors count as coupling here.
-fn budgets(class: NetClass, c_load_af: f32) -> (Option<i64>, Option<i64>) {
+/// Aggressor classes (Clock, DigitalSwitching, Noisy, and DigitalStatic) get a
+/// wire budget but no coupling budget: an aggressor is not a victim (EXT-18).
+pub(crate) fn budgets(class: NetClass, c_load_af: f32) -> (Option<i64>, Option<i64>) {
     let frac = |w: f32, k: f32| (Some((w * c_load_af) as i64), Some((k * c_load_af) as i64));
     match class {
-        NetClass::Sensitive => frac(1.0, 1.0),
-        NetClass::Signal | NetClass::Clock => frac(2.0, 2.0),
+        NetClass::Sensitive | NetClass::Bias | NetClass::Reference => frac(1.0, 1.0),
+        NetClass::Signal => frac(2.0, 2.0),
+        NetClass::Clock | NetClass::DigitalSwitching | NetClass::Noisy | NetClass::DigitalStatic => {
+            (Some((2.0 * c_load_af) as i64), None)
+        }
         NetClass::Supply | NetClass::Ground | NetClass::Substrate => (None, None),
     }
 }

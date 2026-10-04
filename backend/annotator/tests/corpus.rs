@@ -720,3 +720,14 @@ fn bipolar_set_reads_bjt_ka() {
     let r = rows(None);
     assert!(!r.is_empty() && r.iter().all(|r| r.sigma_rand == 0.0 && !r.known), "{r:?}");
 }
+
+/// EXT-17: without evidence every device has facts, and no region is guessed.
+#[test]
+fn no_evidence_no_regions() {
+    for (name, src) in all() {
+        let nl = net(src);
+        let p = annotate(&nl, &cfg(name));
+        assert_eq!(p.intent.devices.len(), nl.devices.len(), "{name}");
+        assert!(p.intent.devices.iter().all(|f| f.region == analog::intent::Region::Unknown), "{name}");
+    }
+}

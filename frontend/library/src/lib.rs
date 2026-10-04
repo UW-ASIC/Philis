@@ -67,7 +67,7 @@ pub mod tools {
     }
 }
 
-use annotator::{annotate, AnnotationConfig, Problem};
+use annotator::{AnnotationConfig, Problem};
 pub use dp::PlaceStats;
 pub use geometry::PlacementMetrics;
 pub use macro_master::Macros;
@@ -383,11 +383,18 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     let stack: &'static analog::routing::Stack = Box::leak(Box::new(elaborate::stack(pdk)));
     let mut ann = annotation_with(pdk, &cfg.annotation, stack);
     ann.process.die_temp_k = cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15);
-    let base = annotate(&netlist, &ann);
-
     // 2. Bias: per-device power and per-net current. Placement-independent,
-    //    so solved once.
+    //    so solved once, before annotation: its op point and testbench are the
+    //    annotator's evidence (EXT-17).
     let bias = bias(&netlist, cfg);
+    let ev = bias.op.as_ref().map_or_else(Default::default, |o| {
+        let mut e = o.evidence(&netlist, bias.summary.as_ref().is_some_and(|s| s.probe));
+        if let Some(tb) = cfg.op.as_ref().and_then(|c| c.testbench.as_deref()) {
+            (e.switching_nets, e.dc_sources) = oppoint::testbench_sources(&netlist, tb);
+        }
+        e
+    });
+    let base = annotator::annotate_with(&netlist, &ann, &ev);
     let plan = performance_rows(&netlist, cfg, &ann, &base.net_classes);
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
@@ -397,8 +404,8 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // lexicographically better kept.
     // Both topologies are built once on this thread (pricing every variant
     // once); the starts only search them.
-    let merged = topology(&netlist, injected, pdk, cfg, &bias, &ann, &plan, true);
-    let apart = merged.distinct.then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &plan, false));
+    let merged = topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, true);
+    let apart = merged.distinct.then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, false));
     let tops: Vec<&Topology> = std::iter::once(&merged).chain(apart.as_ref()).collect();
     let tops = &tops;
     let runs: Vec<Vec<Searched>> = std::thread::scope(|s| {
@@ -610,6 +617,7 @@ fn topology<'a>(
     cfg: &'a Config,
     bias: &Bias,
     ann: &AnnotationConfig,
+    ev: &annotator::Evidence,
     perf: &'a PerfPlan,
     merge_distinct_gates: bool,
 ) -> Topology<'a> {
@@ -620,7 +628,7 @@ fn topology<'a>(
     let currents = &bias.currents;
     // Annotate: placement/routing rules + cell constraints, device-indexed.
     // Per topology: `CellSpace::new` mutates the problem, which is not `Clone`.
-    let mut problem = annotate(netlist, ann);
+    let mut problem = annotator::annotate_with(netlist, ann, ev);
     if cfg.min_utilization > 0.0 {
         problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min: cfg.min_utilization }));
     }
@@ -2460,7 +2468,7 @@ mod start_tests {
         use pnr_core::LayerId;
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
         let nl = crate::parse(".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\n.ends p\n").unwrap();
-        let problem = || crate::annotate(&nl, &crate::annotation(&pdk, &Default::default()));
+        let problem = || annotator::annotate(&nl, &crate::annotation(&pdk, &Default::default()));
         let (name, id) = pdk.layers[0].clone();
         let lim = Limit { ua_per_um: 1.0, ua_per_cut: 1.0, ..Limit::default() };
         let full: Vec<_> = (0..=MAX_LAYERS as u16).map(|l| (LayerId(l), lim)).collect();
@@ -2728,7 +2736,7 @@ mod common_node_tests {
         let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
         let ann = crate::annotation_with(&pdk, &cfg.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
         let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0 };
-        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &plan, true);
+        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &Default::default(), &plan, true);
         let n = t.flow.cells.variants.len();
         let layout = pnr_core::Layout {
             x: (0..n).map(|i| i as i32 * 20_000).collect(),

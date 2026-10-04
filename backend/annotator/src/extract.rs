@@ -34,17 +34,17 @@ pub fn routing(
 ) -> Requirements<Routes> {
     let margin_pct = |c: NetClass| {
         policy.margin_pct[match c {
-            NetClass::Sensitive => 0,
-            NetClass::Clock => 1,
+            NetClass::Sensitive | NetClass::Bias | NetClass::Reference => 0,
+            NetClass::Clock | NetClass::DigitalSwitching | NetClass::Noisy => 1,
             NetClass::Supply | NetClass::Ground => 2,
             _ => 3,
         }]
     };
     let spacing_multiple = |c: NetClass| {
         policy.spacing_multiple[match c {
-            NetClass::Sensitive => 0,
-            NetClass::Clock => 1,
-            NetClass::Signal => 2,
+            NetClass::Sensitive | NetClass::Bias | NetClass::Reference => 0,
+            NetClass::Clock | NetClass::DigitalSwitching | NetClass::Noisy => 1,
+            NetClass::Signal | NetClass::DigitalStatic => 2,
             _ => 3,
         }]
     };

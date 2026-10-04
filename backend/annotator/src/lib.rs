@@ -12,6 +12,7 @@ pub mod class;
 pub mod classify;
 pub mod constraints;
 pub mod emit;
+pub mod evidence;
 pub mod extract;
 pub mod graph;
 pub mod ir;
@@ -29,6 +30,7 @@ pub mod terms;
 mod tests;
 
 pub use block::{Block, BlockKind};
+pub use evidence::{Evidence, OpFacts};
 pub use netrole::{rail_of, AnnotationConfig, NetRole, ProcessNumbers};
 pub use policy::Policy;
 
@@ -108,18 +110,30 @@ fn missing(p: &ProcessNumbers, needs: &Needs) -> Vec<(&'static str, &'static str
     out
 }
 
-/// Assemble the [`Problem`]. Deterministic.
+/// Assemble the [`Problem`] from structure alone: [`annotate_with`] and no evidence.
 ///
 /// # Panics
 /// When the netlist has more than 65535 devices or nets: ids are `u16` (AA-35).
 #[must_use]
 pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
+    annotate_with(netlist, cfg, &Evidence::default())
+}
+
+/// Assemble the [`Problem`], reading simulation evidence (EXT-17): testbench
+/// rails and clocks join the name pre-pass, the op point sets device regions
+/// and roles. Deterministic.
+///
+/// # Panics
+/// When the netlist has more than 65535 devices or nets: ids are `u16` (AA-35).
+#[must_use]
+pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -> Problem {
     for n in [netlist.devices.len(), netlist.nets.len()] {
         assert!(n <= usize::from(u16::MAX), "annotator: {n} devices/nets exceed the u16 id space (65535)");
     }
     let hg = pnr_core::BipartiteHypergraph::from_netlist(netlist);
     let mut models = Vec::new();
     let drawn: Vec<size::Drawn> = netlist.devices.iter().map(|d| size::drawn(d, &mut models)).collect();
+    let cfg = &with_testbench(netlist, cfg, ev);
     let roles = netrole::classify_nets(&hg, cfg);
 
     // Recognised blocks in selection order, each composite with its primitive children.
@@ -301,6 +315,19 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         c.kind = if perfect { analog::intent::SymKind::Perfect } else { analog::intent::SymKind::Mirror };
     }
     sets::set_pairs(&mut intent.compounds, &intent.sets);
+    let load_leaf = {
+        let mut v = vec![false; n];
+        leaves.iter().filter(|b| b.kind == BlockKind::Load).flat_map(|b| &b.devices).for_each(|d| v[d.0 as usize] = true);
+        v
+    };
+    intent.devices = evidence::device_facts(netlist, ev.op.as_ref(), &net_classes, &shared, &load_leaf);
+    if ev.op.is_some() && ev.probe_bias {
+        intent.diagnostics.push(analog::intent::Diagnostic {
+            kind: "probe_bias",
+            devices: vec![],
+            message: "device regions from a synthesised probe bench".into(),
+        });
+    }
     let mut placement = emit::placement(&intent, &blocks, netlist, &drawn, &cfg.process, cfg.offset_sigma_mv, &cfg.policy);
     // Same entry of `blocks`, glue excluded: glue is no stage.
     let mut block_of = vec![usize::MAX; netlist.devices.len()];
@@ -417,6 +444,27 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         blocks,
         missing,
     }
+}
+
+/// `cfg` plus the testbench's rails and clocks (EXT-17): with ≥ 2 distinct DC
+/// source levels, the nets at the highest (lowest) level that [`rail_of`] gives
+/// no role join `supply_nets` (`ground_nets`); switching-source nets join
+/// `clock_nets`. Names, so [`netrole::classify_nets`] runs unchanged.
+fn with_testbench(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -> AnnotationConfig {
+    let mut cfg = cfg.clone();
+    let name = |n: NetId| netlist.nets[n.0 as usize].name.clone();
+    let (lo, hi) = ev.dc_sources.iter().map(|&(_, v)| v).fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| (a.min(v), b.max(v)));
+    if lo < hi {
+        for &(n, v) in ev.dc_sources.iter().filter(|(n, _)| rail_of(&netlist.nets[n.0 as usize].name).is_none()) {
+            if v == hi {
+                cfg.supply_nets.push(name(n));
+            } else if v == lo {
+                cfg.ground_nets.push(name(n));
+            }
+        }
+    }
+    cfg.clock_nets.extend(ev.switching_nets.iter().map(|&n| name(n)));
+    cfg
 }
 
 /// Gate area `W_total·L·m` of a FET, µm²; `0` for anything else or when the
