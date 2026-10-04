@@ -302,7 +302,10 @@ pub fn diffusion_legal(s: &[usize], outer: Outer) -> bool {
 /// (rows reversed, each row reversed), labels swapped when `n` is even (NTH
 /// §III, nth_order.txt L94–119, L154–222). `2^(order−1)` rows; empty for
 /// order 0. Vertical stacking only: every row stays `row` or its label
-/// swap/reversal, so a diffusion-legal `row` stays legal.
+/// swap/reversal, so a diffusion-legal `row` of even length stays legal.
+/// Odd length breaks this: reversal maps window `i` to `len−2−i`, flipping
+/// the parity `diffusion_legal` ties label changes to (`[0,1,1]` is legal,
+/// its order-2 row `[0,0,1]` is not).
 #[must_use]
 pub fn nth_order_rows(order: u8, row: &[u8]) -> Vec<Vec<u8>> {
     if order == 0 {
@@ -314,7 +317,7 @@ pub fn nth_order_rows(order: u8, row: &[u8]) -> Vec<Vec<u8>> {
         p.extend(rot);
     }
     let legal = |r: &[u8]| diffusion_legal(&r.iter().map(|&l| usize::from(l)).collect::<Vec<_>>(), Outer::Drain);
-    debug_assert!(!legal(row) || p.iter().all(|r| legal(r)));
+    debug_assert!(row.len() % 2 == 1 || !legal(row) || p.iter().all(|r| legal(r)));
     p
 }
 
@@ -722,6 +725,10 @@ mod tests {
                 assert!(diffusion_legal(&s, Outer::Drain), "{order}: {r:?}");
             }
         }
+        // Odd length: legal input, illegal order-2 row (documented limit).
+        assert!(diffusion_legal(&[0, 1, 1], Outer::Drain));
+        assert_eq!(nth_order_rows(2, &[0, 1, 1]), vec![vec![0, 1, 1], vec![0, 0, 1]]);
+        assert!(!diffusion_legal(&[0, 0, 1], Outer::Drain));
     }
 
     #[test]

@@ -506,6 +506,13 @@ mod tests {
         let g = pair(0, 1).ledger(&singles(1_000_000), 1);
         assert!((g.sigma_grad - 1.63).abs() < 0.01, "{}", g.sigma_grad);
         assert_eq!(g.coincidence, None, "one unit each admits no centroid row");
+        // The ledger reads `svt_xy`: a pure-y millimetre with S_y = 2 µV/µm.
+        let mut l = singles(0);
+        l.y[1] = 1_000_000;
+        let mut s = pair(0, 1);
+        s.coeffs.svt_xy = Some((0.0, 2.0));
+        let g = s.ledger(&l, 1);
+        assert!((g.sigma_grad - 2.0).abs() < 1e-3, "{}", g.sigma_grad);
     }
 
     #[test]
