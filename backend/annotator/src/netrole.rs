@@ -159,6 +159,8 @@ pub struct AnnotationConfig {
     pub loads: Vec<(pnr_core::ids::NetId, f32)>,
     /// Sidecar `Kelvin` requests, appended to the extracted ones.
     pub kelvins: Vec<analog::intent::KelvinReq>,
+    /// Sidecar `Order` (EXT-28): placed ahead of the extracted orders, `reversible: false`.
+    pub order: Vec<analog::intent::Order>,
     /// The sidecar parse's diagnostics, carried into `Intent.diagnostics`.
     pub sidecar_diags: Vec<analog::intent::Diagnostic>,
 }

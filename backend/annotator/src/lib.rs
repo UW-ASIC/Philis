@@ -18,6 +18,7 @@ pub mod constraints;
 pub mod emit;
 pub mod evidence;
 pub mod extract;
+pub mod flow;
 pub mod graph;
 pub mod hier;
 pub mod ir;
@@ -427,6 +428,31 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         },
     );
     intent.devices = evidence::device_facts(netlist, ev.op.as_ref(), &net_classes, &shared, &load_leaf);
+    // EXT-28: user orders, then current chains a user order does not already give (either sense),
+    // then the signal stages, then the EXT-27 arrays.
+    intent.order.extend(cfg.order.iter().cloned());
+    let norm = |steps: &[Vec<DeviceId>]| -> Vec<Vec<u16>> {
+        steps.iter().map(|s| {
+            let mut v: Vec<u16> = s.iter().map(|d| d.0).collect();
+            v.sort_unstable();
+            v
+        }).collect()
+    };
+    let user_steps: Vec<Vec<Vec<u16>>> = cfg.order.iter().map(|o| norm(&o.steps)).collect();
+    let chains = flow::current_paths(&hg, ev.op.as_ref(), &net_classes, &canon);
+    let i_max = chains.iter().map(|c| c.1).fold(0.0, f64::max);
+    for (steps, i) in chains {
+        let (fwd, mut rev) = (norm(&steps), norm(&steps));
+        rev.reverse();
+        if !user_steps.iter().any(|u| *u == fwd || *u == rev) {
+            let weight = if i_max > 0.0 { (i / i_max) as f32 } else { 1.0 };
+            intent.order.push(analog::intent::Order { steps, dir: analog::intent::AxisDir::V, reversible: true, weight });
+        }
+    }
+    let stages = flow::stage_order(&hg, &net_classes, &netlist.ports, &canon);
+    if stages.len() >= 2 {
+        intent.order.push(analog::intent::Order { steps: stages, dir: analog::intent::AxisDir::H, reversible: true, weight: 1.0 });
+    }
     intent.order.extend(array_orders);
     // The gate of every CurrentSource is a bias line. Cascode/CurrentSource-by-class
     // gates already are, so one pass is a fixpoint. A sidecar class (User) wins (EXT-26 step 4).
