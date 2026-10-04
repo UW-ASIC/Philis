@@ -861,7 +861,7 @@ Status: done in M1 (`680b08c`; input merge `5a21f2b`).
      equal span on one axis or one inside the other (geometry.rs:33–36), so partial overlaps of unequal span stay
      double-counted, while audit-06 G.4(b)'s 1.13–1.73× was measured against a full per-layer union.
      `build_store(shapes, pins, deck, strings, merge: &[u16])` (its only caller is `Checker::load_geometry`,
-     checker.rs:135–137; `Checker::new` stores `merge` = `pdk.routing_metals` ∪ `Process::layer(pdk, "li")`): for each
+     checker.rs:135–137; `Checker::new` stores `merge` = `pdk.routing_metals` ∪ `Process::layer(pdk, "li")` ∪ `Process::layer(pdk, "nwell")` (PERF-18 step 3, moved here): for each
      layer id in `merge`, push that layer's rects into a one-layer
      `GeometryStoreBuilder`, `finish(1)`, `validate_layer_into(&tmp, LayerId(0), &mut raw)`,
      `gdsverify::geom::derive::merge_into(&raw, &mut merged)` (GP/crates/geom/src/derive.rs:23–26), then push each

@@ -229,7 +229,7 @@ fn op_cfg(lib: std::path::PathBuf) -> OpConfig {
 #[test]
 fn fixtures_resolve_every_device() {
     let Some(lib) = models() else { return };
-    for name in ["rc_filter", "bjt_mirror"] {
+    for name in ["rc_filter", "bjt_mirror", "bgr_core"] {
         let nl = fixture(name);
         let op = library::oppoint::extract(&nl, &op_cfg(lib.clone())).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(op.resolved, nl.devices.len(), "{name}");

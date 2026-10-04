@@ -949,8 +949,9 @@ pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceI
     }
 }
 
-/// BJT terminals in LVS card order: [`reference`]'s and `Macro::drawn`'s.
-pub(crate) const BJT_PINS: [&str; 3] = ["E", "B", "C"];
+/// BJT terminals in LVS card order, collector first (GPurify `lvs/graph.rs`
+/// reads card position 0 as Collector): [`reference`]'s and `Macro::drawn`'s.
+pub(crate) const BJT_PINS: [&str; 3] = ["C", "B", "E"];
 
 /// LVS cards for everything the placed cells drew as `Macro::drawn`, and the
 /// schematic devices they replace (sorted, distinct), whose own cards
@@ -1837,6 +1838,30 @@ mod tests {
         let u = sized.unitization.iter().find(|u| u.devices == [DeviceId(0)]).expect("a 1-device unitization");
         assert_eq!(u.dev_nf, vec![2], "drawn units");
         assert_eq!(reference(&netlist, None, &[]).devices.len(), 2, "one reference card per drawn unit");
+    }
+
+    /// BJT cards are collector first, schematic and drawn alike (GPurify reads
+    /// card position 0 as Collector).
+    #[test]
+    fn a_bjt_reference_is_collector_first() {
+        let pdk = pdk();
+        let mut netlist = crate::parse(include_str!("../../../benchmarks/fixtures/bjt_mirror.spice")).expect("parses");
+        crate::deck_models(&mut netlist, &pdk);
+        let r = reference(&netlist, None, &[]);
+        assert_eq!(r.devices[0].terminals, ["outn", "in", "VSS"]);
+        let q2 = netlist.devices.iter().position(|d| d.name == "XQ2").unwrap();
+        assert_eq!(netlist.devices[q2].kind, DeviceKind::Pnp);
+        let group = DeviceGroup { devices: vec![DeviceId(q2 as u16)] };
+        let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[], &[]));
+        let mut m = draw_variants(DeviceKind::Pnp, &netlist.devices[q2].model, &group, &sized, &pdk)
+            .into_iter()
+            .next()
+            .expect("a PNP variant");
+        bind_pins(&mut m, &netlist, &group.devices, None);
+        let names: Vec<String> = netlist.nets.iter().map(|n| n.name.clone()).collect();
+        let (cards, _) = drawn_cards(&[m], &names, &netlist, &pdk);
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].terminals, ["outp", "in", "VDD"]);
     }
 
     /// A 2-segment resistor's drawn cards: one per segment, joined by the
