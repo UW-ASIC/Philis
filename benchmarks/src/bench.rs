@@ -242,7 +242,7 @@ fn run_circuit(
     // A counter its owning item has not built yet prints `n/a`, never a 0.
     let na = |v: Option<u64>| v.map_or_else(|| "n/a".to_string(), |v| v.to_string());
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {} | ERC {}{} | warnings {} | skipped [{}] | EM/IR ran {}/{} | C total {:.1} fF, sig {:.1} fF | key tier {:.1} | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | EM {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {} | ERC {}{} | warnings {} | skipped [{}] | EM/IR ran {}/{} | C total {:.1} fF, sig {:.1} fF | key tier {:.1} | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {}, pruned {} | seed {} | bias {} | EM {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
@@ -279,6 +279,7 @@ fn run_circuit(
         if s.converged { " converged" } else { " budget" },
         s.outer_iterations,
         s.variant_escalations,
+        s.pruned,
         seed,
         sol.metadata.bias.as_ref().map_or_else(
             || "none".to_string(),

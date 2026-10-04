@@ -320,21 +320,36 @@ fn region_spans(m: &Macro, members: usize) -> Vec<Option<(i32, i32)>> {
 
 /// Starting variant per cell, chosen by measuring each alternative in
 /// isolation (see [`price`]). Ties break on index, so the seed is deterministic.
+/// Also per cell the alternatives [`escalate`] may visit ([`keep`] over
+/// `(DRC+ERC, bbox w, bbox h)` from the same prices; `matched[i]` keeps all).
 #[must_use]
-pub fn seed_assignment(variants: &[gp::VariantSpace], pdk: &Pdk) -> Vec<u16> {
+pub fn seed_assignment(variants: &[gp::VariantSpace], matched: &[bool], pdk: &Pdk) -> (Vec<u16>, Vec<Vec<u16>>) {
     let mut checker = Checker::new(pdk, true).expect("a loaded Pdk re-parses its own deck");
     variants
         .iter()
-        .map(|space| {
-            space
-                .alternatives
-                .iter()
-                .map(|m| price(m, &mut checker))
-                .enumerate()
-                .min_by(|a, b| a.1.cmp(&b.1))
-                .map_or(0, |(v, _)| v as u16)
+        .enumerate()
+        .map(|(i, space)| {
+            let prices: Vec<(usize, i64)> = space.alternatives.iter().map(|m| price(m, &mut checker)).collect();
+            let seed = prices.iter().enumerate().min_by(|a, b| a.1.cmp(b.1)).map_or(0, |(v, _)| v);
+            let cost: Vec<(usize, i32, i32)> = prices.iter().zip(&space.alternatives).map(|(p, m)| (p.0, m.bbox.w, m.bbox.h)).collect();
+            (seed as u16, keep(&cost, seed, matched.get(i).copied().unwrap_or(true)))
         })
-        .collect()
+        .unzip()
+}
+
+/// The alternatives of one cell worth escalating to, ascending: all when
+/// `matched` (a matched cell's alternatives differ in pattern, which its own
+/// rules price, not the bbox); else every one not dominated in `(DRC+ERC,
+/// w, h)` — some other is no worse in all three and better in one (BAL2-39,
+/// dominated-variant pruning). `seed` is always kept, so the start digit is
+/// in its own set even when a smaller, higher-HPWL alternative dominates it.
+/// ponytail: O(n²) per cell, n ≤ a few dozen alternatives.
+fn keep(cost: &[(usize, i32, i32)], seed: usize, matched: bool) -> Vec<u16> {
+    let dominated = |v: usize| {
+        let c = cost[v];
+        cost.iter().any(|u| u.0 <= c.0 && u.1 <= c.1 && u.2 <= c.2 && *u != c)
+    };
+    (0..cost.len()).filter(|&v| matched || v == seed || !dominated(v)).map(|v| v as u16).collect()
 }
 
 #[cfg(test)]
@@ -388,11 +403,13 @@ pub fn realize(variants: &[gp::VariantSpace], assignment: &[u16]) -> Vec<Macro> 
 
 /// The next joint assignment to try, or `None` when the space is exhausted.
 ///
-/// A mixed-radix odometer over the cells, fastest digit = the cell whose
-/// alternatives move pins the most ([`pin_spread`]): never repeats, always
-/// terminates, and changes pin geometry first.
+/// A mixed-radix odometer over the cells, digit `i` ranging over
+/// `allowed[i]` (ascending; [`seed_assignment`]), fastest digit = the cell
+/// whose alternatives move pins the most ([`pin_spread`]): never repeats,
+/// always terminates, and changes pin geometry first. A cell with an empty
+/// or one-entry `allowed` row is a fixed digit.
 #[must_use]
-pub fn escalate(variants: &[gp::VariantSpace], current: &[u16]) -> Option<Vec<u16>> {
+pub fn escalate(variants: &[gp::VariantSpace], allowed: &[Vec<u16>], current: &[u16]) -> Option<Vec<u16>> {
     let spread: Vec<usize> = variants.iter().map(pin_spread).collect();
     let mut order: Vec<usize> = (0..variants.len()).collect();
     order.sort_by_key(|&i| (std::cmp::Reverse(spread[i]), i));
@@ -400,11 +417,14 @@ pub fn escalate(variants: &[gp::VariantSpace], current: &[u16]) -> Option<Vec<u1
         .map(|i| current.get(i).copied().unwrap_or(0))
         .collect();
     for &i in &order {
-        if usize::from(next[i]) + 1 < variants[i].alternatives.len() {
-            next[i] += 1;
+        let row = allowed.get(i).map_or(&[][..], Vec::as_slice);
+        if let Some(&v) = row.iter().find(|&&v| v > next[i]) {
+            next[i] = v;
             return Some(next);
         }
-        next[i] = 0; // carry
+        if let Some(&v) = row.first() {
+            next[i] = v; // carry
+        }
     }
     None
 }
@@ -1304,9 +1324,10 @@ mod tests {
         // 3 × 2 × 1 = 6 joint assignments; the single-alternative cell is a fixed
         // digit and must not stall the odometer.
         let spaces = vec![space(3), space(2), space(1)];
+        let all = full(&spaces);
         let mut seen = vec![vec![0u16, 0, 0]];
         let mut cur = vec![0u16, 0, 0];
-        while let Some(next) = escalate(&spaces, &cur) {
+        while let Some(next) = escalate(&spaces, &all, &cur) {
             assert!(!seen.contains(&next), "escalate repeated {next:?}");
             seen.push(next.clone());
             cur = next;
@@ -1314,11 +1335,50 @@ mod tests {
         }
         assert_eq!(seen.len(), 6, "escalate stopped before covering the space");
         assert!(
-            escalate(&spaces, &cur).is_none(),
+            escalate(&spaces, &all, &cur).is_none(),
             "exhaustion must stay exhausted"
         );
         // Nothing to escalate is exhaustion, not a panic.
-        assert!(escalate(&[], &[]).is_none());
+        assert!(escalate(&[], &[], &[]).is_none());
+    }
+
+    /// Every alternative allowed: the unpruned odometer.
+    fn full(spaces: &[gp::VariantSpace]) -> Vec<Vec<u16>> {
+        spaces.iter().map(|s| (0..s.alternatives.len() as u16).collect()).collect()
+    }
+
+    /// GAP-16: the pruned odometer visits exactly the product of the allowed
+    /// sets, never a digit outside them, and stays exhausted.
+    #[test]
+    fn escalate_still_terminates() {
+        let spaces = vec![space(3), space(2), space(1)];
+        let allowed = vec![vec![0u16, 2], vec![0, 1], vec![0]];
+        let mut seen = vec![vec![0u16, 0, 0]];
+        let mut cur = vec![0u16, 0, 0];
+        while let Some(next) = escalate(&spaces, &allowed, &cur) {
+            assert!(!seen.contains(&next), "escalate repeated {next:?}");
+            assert!(next.iter().zip(&allowed).all(|(v, a)| a.contains(v)), "{next:?} outside {allowed:?}");
+            seen.push(next.clone());
+            cur = next;
+            assert!(seen.len() <= 4, "escalate exceeded the allowed space");
+        }
+        assert_eq!(seen.len(), 4);
+        assert!(escalate(&spaces, &allowed, &cur).is_none());
+    }
+
+    /// GAP-16: an alternative no better in DRC, w and h than another, and
+    /// worse in one, is dropped; an incomparable one stays.
+    #[test]
+    fn a_dominated_alternative_is_pruned() {
+        assert_eq!(keep(&[(0, 100, 100), (0, 200, 100), (1, 100, 100), (0, 50, 300)], 0, false), [0, 3]);
+    }
+
+    /// GAP-16: matched cells keep every alternative, and the seed survives
+    /// even when dominated.
+    #[test]
+    fn matched_cells_are_never_pruned() {
+        assert_eq!(keep(&[(0, 100, 100), (0, 200, 100), (1, 100, 100), (0, 50, 300)], 0, true), [0, 1, 2, 3]);
+        assert_eq!(keep(&[(0, 50, 50), (0, 100, 100)], 1, false), [0, 1]);
     }
 
     /// Two matched NMOS on a shared source (tail), distinct gates and drains — the
@@ -1770,7 +1830,7 @@ mod tests {
 
         let mut cur = vec![0u16];
         let mut seen = vec![cur.clone()];
-        while let Some(next) = escalate(spaces, &cur) {
+        while let Some(next) = escalate(spaces, &full(spaces), &cur) {
             assert!(!seen.contains(&next), "escalate repeated {next:?}");
             seen.push(next.clone());
             cur = next;
@@ -1790,8 +1850,10 @@ mod tests {
         let pdk = pdk();
         let netlist = two_devices();
         let cells = enumerate(&netlist, &Macros::default(), &Constraints::default(), &pdk, true);
-        let a = seed_assignment(&cells.spaces, &pdk);
-        let b = seed_assignment(&cells.spaces, &pdk);
+        let matched = vec![false; cells.spaces.len()];
+        let (a, allowed) = seed_assignment(&cells.spaces, &matched, &pdk);
+        let (b, _) = seed_assignment(&cells.spaces, &matched, &pdk);
+        assert!(a.iter().zip(&allowed).all(|(v, row)| row.contains(v)), "the seed is always allowed");
         assert_eq!(a, b);
         assert_eq!(a.len(), cells.spaces.len());
         for (i, &v) in a.iter().enumerate() {

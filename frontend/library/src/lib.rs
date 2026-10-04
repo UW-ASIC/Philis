@@ -253,6 +253,9 @@ pub struct RunStats {
     pub outer_iterations: u32,
     /// Times an assignment stalled infeasible and the variants were changed.
     pub variant_escalations: u32,
+    /// Alternatives the escalation odometer skips as dominated in
+    /// `(DRC+ERC, w, h)` (GAP-16), summed over the cells of the winner's topology.
+    pub pruned: u32,
     /// Winner: detailed-placement hard violations.
     pub place_hard: usize,
     /// Winner: detailed-routing hard violations.
@@ -535,6 +538,8 @@ struct Topology<'a> {
     flow: Flow<'a>,
     /// [`cellgen::seed_assignment`]: every alternative DRC-priced once.
     assignment0: Vec<u16>,
+    /// Per cell, the alternatives [`cellgen::escalate`] may visit.
+    allowed: Vec<Vec<u16>>,
     /// A distinct-gate merge happened, so the `apart` topology is worth solving.
     distinct: bool,
 }
@@ -662,8 +667,16 @@ fn topology<'a>(
             .unwrap_or_default(),
         gp_mode: cfg.gp_mode,
     };
-    let assignment0 = cellgen::seed_assignment(&flow.cells.variants, pdk);
-    Topology { flow, assignment0, distinct }
+    // Matched cells keep every alternative: a merged group, or a member of a
+    // 2-device leaf that emits a `MatchedSet` (annotator emit.rs table).
+    let paired: Vec<DeviceId> = annotator::block::leaves(&flow.problem.blocks)
+        .into_iter()
+        .filter(|l| l.devices.len() == 2 && matches!(l.kind, annotator::BlockKind::DiffPair | annotator::BlockKind::CurrentMirror | annotator::BlockKind::Load | annotator::BlockKind::CascodePair))
+        .flat_map(|l| l.devices.iter().copied())
+        .collect();
+    let matched: Vec<bool> = flow.cells.devices_of.iter().map(|m| m.len() > 1 || m.iter().any(|d| paired.contains(d))).collect();
+    let (assignment0, allowed) = cellgen::seed_assignment(&flow.cells.variants, &matched, pdk);
+    Topology { flow, assignment0, allowed, distinct }
 }
 
 /// One start's search on a shared topology: the winning epoch, the start's
@@ -739,7 +752,7 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
         if outer + 1 == n_outer {
             break;
         }
-        let Some(next) = cellgen::escalate(&flow.cells.variants, &assignment) else {
+        let Some(next) = cellgen::escalate(&flow.cells.variants, &t.allowed, &assignment) else {
             break;
         };
         stats.variant_escalations += 1;
@@ -748,6 +761,8 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
 
     let best = best.expect("at least one epoch ran");
     stats.dual_steps = prices.steps();
+    let all: usize = flow.cells.variants.iter().map(|v| v.alternatives.len()).sum();
+    stats.pruned = (all - t.allowed.iter().map(Vec::len).sum::<usize>()) as u32;
     let stats = RunStats {
         best_iteration: best.iteration,
         ..best.stats.merge(stats)
