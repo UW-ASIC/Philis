@@ -55,3 +55,16 @@ Departures from the card:
   gains sheet resistances so `net_flow` can split current. `a_trunk_carrying_two_branches_is_wider` checks the MST
   widths (1100/680) without a stack, and with the stack it checks only that the EM rounds bring the net to REL-03
   pass: there a's access climbs onto b's met2 run, so that shape carries 2 mA.
+
+## Review fixes 2
+- Access jog EM floor: new `a_blocked_full_jog_never_falls_back_below_em` blocks the full jog so only the narrow one
+  keeps spacing; it fails if add_pin_access's `.max(need)` clamp is removed. Landing's clamp is still not reached by a
+  test. It is defensive only: add_pin_access drops a landing choice narrower than `need`.
+- `claim_jog_sweep` claims at least `access_need(node_ua)`, and is re-run once the MST junction current is known.
+  Landing's clearance check still sees only the terminal's own current, because the junction depends on every
+  landed node. The wider corridor is claimed first-come, and add_pin_access re-checks it against routed metal.
+- EM rounds: a failing shape on a branch that ends off every terminal now bumps each terminal at the net's `k` on that
+  layer (Card Decision 1), instead of being dropped.
+- gr: `term_k_targets_route_in_order_at_their_own_width` covers MST order and the per-target search width. Each of the
+  two reviewed mutations makes it fail.
+- Tests: `cargo test --release -p analog -p gr -p dr` all pass; `signoff_fixtures --include-ignored`: 19 passed.

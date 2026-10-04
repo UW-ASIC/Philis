@@ -688,9 +688,9 @@ impl<G: RGraph> RouteCtx<G> {
         (self.k.get(net).copied().unwrap_or([1; MAX_LAYERS]), self.guard.get(net).copied().unwrap_or([0; MAX_LAYERS]))
     }
 
-    /// Commit `branches` as `net`'s tree with the footprint and halo the
-    /// graph gives them at the net's `k` (deduped; the halo spans every
-    /// track and leaves out the net's own metal).
+    /// Commit `branches` as `net`'s tree with the footprint the graph gives
+    /// each at its [`Self::branch_k`] and the halo at the net's `k` (deduped;
+    /// the halo spans every track and leaves out the net's own metal).
     pub fn commit(&self, hot: &mut RouteHot, net: usize, branches: Vec<Vec<u32>>) {
         let (k, guard) = self.k_of(net);
         let layer = |n: u32| self.graph.pos(n).2 as usize;
@@ -1535,6 +1535,31 @@ mod tests {
         cold.commit(&mut hot, 0, vec![vec![a, b]]);
         assert!(!hot.foot[0].contains(&corner), "{:?}", hot.foot[0]);
         assert_eq!(hot.halo[halo as usize], 1);
+    }
+
+    /// `term_k` targets route in the given (MST) order, not by distance, each
+    /// at its own tracks: the near 1-track target sits on the top row, where
+    /// a 2-track footprint falls off the graph, so the net's `k` would leave
+    /// it unreachable; committed, its branch claims only its own nodes.
+    #[test]
+    fn term_k_targets_route_in_order_at_their_own_width() {
+        let g = TrackGrid::with_layers((20 * 100, 20 * 100), 100, 4.0, 2);
+        let (root, far, near) = (g.node(2, 10, 0), g.node(17, 10, 0), g.node(4, 19, 0));
+        let mut cold = RouteCtx::new(g, vec![vec![root, far, near]], vec![0]);
+        cold.k = vec![[2; MAX_LAYERS]];
+        cold.term_k = vec![vec![[2; MAX_LAYERS], [2; MAX_LAYERS], [1; MAX_LAYERS]]];
+        let mut hot = RouteHot::new(cold.graph.nodes(), 1);
+        let tree = cold.reroute(&hot, 0, 1.0, &[], &mut Dij::new(cold.graph.nodes())).expect("narrow target reachable");
+        assert_eq!((tree[1].last(), tree[2].last()), (Some(&far), Some(&near)), "MST order, not nearest first");
+        cold.commit(&mut hot, 0, tree.clone());
+        let mut wide = Vec::new();
+        let mut buf = Vec::new();
+        for &n in &tree[1] {
+            assert!(cold.graph.footprint(n, 2, 0, &mut buf));
+            wide.extend_from_slice(&buf);
+        }
+        let stray: Vec<u32> = hot.foot[0].iter().copied().filter(|n| !wide.contains(n) && !tree[2].contains(n)).collect();
+        assert!(stray.is_empty(), "narrow branch footprint wider than one track: {stray:?}");
     }
 
     /// `TrackGrid` without its A* bound: plain Dijkstra over the same graph.

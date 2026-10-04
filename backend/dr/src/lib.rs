@@ -633,6 +633,9 @@ impl DetailedRoute {
                     let (x, y, l) = grid.pos(n);
                     for a in access.iter_mut().filter(|a| a.ci == ci && a.node == (x, y) && a.node_layer == l) {
                         a.node_ua = a.ua.map(|u| u.abs().max(junction));
+                        // The junction can widen the jog past what landing
+                        // swept: claim the wider corridor (first come still).
+                        claim_jog_sweep(&grid, cfg, layers, cuts, a, &mut claimed, &mut reserved);
                     }
                 }
                 c_terms[ci] = visit.iter().map(|&i| c_terms[ci][i]).collect();
@@ -1027,11 +1030,14 @@ impl DetailedRoute {
                         let (x, y) = (x + origin.0, y + origin.1);
                         ls.contains(&(l as usize)) && (r.x - grow..=r.x + r.w + grow).contains(&x) && (r.y - grow..=r.y + r.h + grow).contains(&y)
                     };
-                    // The root's own branch draws nothing: the next one starts there.
-                    let ts: Vec<usize> = hot.trees[ci]
+                    // The root's own branch draws nothing: the next one starts
+                    // there. `None`: a branch ending off every terminal (a tree
+                    // edit), drawn at the net's `k`.
+                    let ts: Vec<Option<usize>> = hot.trees[ci]
                         .iter()
                         .filter(|b| b.iter().any(inside))
-                        .filter_map(|b| b.last().and_then(|n| cold.terms[ci].iter().position(|x| x == n)).filter(|&t| t > 0))
+                        .map(|b| b.last().and_then(|n| cold.terms[ci].iter().position(|x| x == n)))
+                        .filter(|&t| t != Some(0))
                         .collect();
                     // A metal shape is a branch's only at that branch's drawn
                     // width (a run, its corner block, or one wire of a
@@ -1043,7 +1049,14 @@ impl DetailedRoute {
                             let k = i32::from(cold.term_k[ci][**t][l]);
                             grow > 0 || [cfg.wire(l), cfg.wire(l) + (k - 1) * cfg.stride(l) * cfg.pitch].contains(&r.w.min(r.h))
                         };
-                        let own: Vec<usize> = ts.iter().filter(drawn).copied().collect();
+                        // An off-terminal branch bumps every terminal at the
+                        // net's `k` on this layer: those set its width.
+                        let top = cold.k[ci][l];
+                        let cands: Vec<usize> = ts
+                            .iter()
+                            .flat_map(|&t| t.map_or_else(|| (1..cold.term_k[ci].len()).filter(|&t| cold.term_k[ci][t][l] == top).collect(), |t| vec![t]))
+                            .collect();
+                        let own: Vec<usize> = cands.iter().filter(drawn).copied().collect();
                         let min = own.iter().map(|&t| cold.term_k[ci][t][l]).min();
                         hit.extend(own.iter().filter(|&&t| Some(cold.term_k[ci][t][l]) == min).map(|&t| (t, l)));
                     }
@@ -1352,7 +1365,9 @@ fn claim_jog_sweep(
     let (cx, cy) = (a.pin.x + a.pin.w / 2, a.pin.y + a.pin.h / 2);
     let base_l = layers.iter().position(|&l| l == a.pin_layer).unwrap_or(0) as u32;
     let jog_l = jog_layer(cfg, layers, cuts, grid.n_layers, a.pin_layer);
-    let width = a.choice.map_or_else(|| cfg.wire_width.min(a.pin.w).min(a.pin.h).max(1), |(w, _)| w);
+    // At least the EM width `add_pin_access` draws it at (`node_ua`).
+    let need = layers.get(jog_l as usize).map_or(0, |&m| access_need(cfg, m, a.node_ua));
+    let width = a.choice.map_or_else(|| cfg.wire_width.min(a.pin.w).min(a.pin.h).max(1), |(w, _)| w).max(need);
     let both = jog_legs(px, py, cx, cy, width);
     let legs: Vec<Rect> = match a.choice {
         Some((_, flip)) => both[usize::from(flip)].to_vec(),
@@ -3426,6 +3441,20 @@ mod tests {
         assert!(!with.is_empty() && with.iter().all(|&w| w >= 360), "{with:?}");
         let without = jogs(DetailedCfg { pin_ua: Vec::new(), ..cfg });
         assert!(without.iter().any(|&w| w < 360), "{without:?}");
+    }
+
+    /// A foreign wire 70 nm beside the full-width (360 nm) jog, 165 nm beside
+    /// a 170 nm pin-wide one: only the narrow jog keeps spacing, but at 1 mA
+    /// it would neck below its EM width, so the jog stays full width.
+    #[test]
+    fn a_blocked_full_jog_never_falls_back_below_em() {
+        let cfg = DetailedCfg { em: vec![(LAYERS[1], SKY_LIM)], ..test_cfg() };
+        let foreign = Shape { layer: LAYERS[1], rect: Rect { x: 1_250, y: 800, w: 290, h: 900 } };
+        let mut routes = Routes { wires: vec![Vec::new(), vec![foreign]], ..Default::default() };
+        let access = [Access { ci: 0, pin: Rect { x: 915, y: 915, w: 170, h: 170 }, pin_layer: LAYERS[0], node: (1_000, 1_430), node_layer: 1, choice: None, ua: None, node_ua: Some(1_000.0) }];
+        add_pin_access(&mut routes, &access, &[0], &cfg, &LAYERS, &CUTS, &joins(&LAYERS, &CUTS, None), &[], (0, 0));
+        let jogs: Vec<i32> = routes.wires[0].iter().filter(|s| s.layer == LAYERS[1] && s.rect.w != s.rect.h).map(|s| s.rect.w.min(s.rect.h)).collect();
+        assert!(!jogs.is_empty() && jogs.iter().all(|&w| w >= 360), "{jogs:?}");
     }
 
     /// An 800 µA li pin gets ⌈800/360⌉ = 3 mcon cuts in a row along its
