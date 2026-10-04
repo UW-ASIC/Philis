@@ -16,3 +16,4 @@ gp = { path = "../../backend/gp" }
 dp = { path = "../../backend/dp" }
 gr = { path = "../../backend/gr" }
 dr = { path = "../../backend/dr" }
+serde_json = "1"

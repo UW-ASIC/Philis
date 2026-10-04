@@ -7,3 +7,4 @@ edition = "2021"
 library = { path = "../library" }
 verify = { path = "../../backend/verify" }
 pnr_core = { path = "../../kernel/core" }
+serde_json = "1"

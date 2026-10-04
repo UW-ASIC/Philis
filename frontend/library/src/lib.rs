@@ -108,6 +108,73 @@ pub struct Config {
     pub size_convention: SizeConvention,
     /// What gp does before dp; [`GpMode::Pile`] measures gp's contribution.
     pub gp_mode: GpMode,
+    /// Fixed die and boundary pins. [`run`] checks each pin names a port;
+    /// nothing else reads it yet (PLC/RTE consume it).
+    pub interface: Option<Interface>,
+    /// The top sub-circuit ([`ParseOptions::top`]); `None`: the parser's choice.
+    pub top: Option<String>,
+}
+
+/// A die edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    North,
+    South,
+    East,
+    West,
+}
+
+/// One boundary pin: `frac` ∈ [0, 1] along `side` (from its low end).
+#[derive(Clone, Debug, PartialEq)]
+pub struct IoPin {
+    pub net: String,
+    pub side: Side,
+    pub frac: f32,
+    pub width_nm: i32,
+    /// Deck layer name (`met3`).
+    pub layer: String,
+}
+
+/// A block's fixed outline and boundary pins.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Interface {
+    /// `(w, h)`; `None`: the placer sizes the die.
+    pub die_nm: Option<(i32, i32)>,
+    pub pins: Vec<IoPin>,
+}
+
+impl Interface {
+    /// `{"die": {"w": nm, "h": nm}, "pins": [{"net", "side": "north"|"south"|"east"|"west",
+    /// "frac", "width": nm, "layer"}]}` (`benchmarks/fixtures/ota_constrained.interface.json`).
+    pub fn from_json(text: &str) -> Result<Interface, String> {
+        let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("interface: {e}"))?;
+        let int = |o: &serde_json::Value, k: &str| -> Result<i32, String> {
+            o.get(k).and_then(serde_json::Value::as_i64).and_then(|x| i32::try_from(x).ok()).ok_or_else(|| format!("interface: `{k}` must be an integer, nm"))
+        };
+        let die_nm = match v.get("die") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(d) => Some((int(d, "w")?, int(d, "h")?)),
+        };
+        let pins = v.get("pins").and_then(serde_json::Value::as_array).map_or(&[][..], Vec::as_slice);
+        let pins = pins
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let text = |k: &str| p.get(k).and_then(serde_json::Value::as_str).ok_or_else(|| format!("interface: pins[{i}].{k} must be a string"));
+                let side = match text("side")? {
+                    "north" => Side::North,
+                    "south" => Side::South,
+                    "east" => Side::East,
+                    "west" => Side::West,
+                    s => return Err(format!("interface: pins[{i}].side {s:?} is not north|south|east|west")),
+                };
+                let frac = p.get("frac").and_then(serde_json::Value::as_f64).filter(|f| (0.0..=1.0).contains(f));
+                let frac = frac.ok_or_else(|| format!("interface: pins[{i}].frac must be in [0, 1]"))? as f32;
+                Ok(IoPin { net: text("net")?.to_string(), side, frac, width_nm: int(p, "width")?, layer: text("layer")?.to_string() })
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(Interface { die_nm, pins })
+    }
 }
 
 /// Coarse-placement strategy.
@@ -134,6 +201,8 @@ impl Default for Config {
             min_utilization: 0.6,
             size_convention: SizeConvention::Spice,
             gp_mode: GpMode::default(),
+            interface: None,
+            top: None,
         }
     }
 }
@@ -222,6 +291,8 @@ pub enum FlowError {
     /// device: `(instance, devices extracted, None = extraction failed)`. It
     /// would unpair LVS for the whole circuit, so it is refused up front.
     InjectedNotADevice(String, Option<usize>),
+    /// [`Config::interface`] names a net that is not a port of the top cell.
+    Interface(String),
 }
 
 /// Epochs without improvement before an assignment counts as stalled.
@@ -282,9 +353,16 @@ pub fn model_table(pdk: &Pdk) -> Vec<(String, pnr_core::DeviceKind)> {
 /// as drawn, never reshaped or moved by `dp`.
 pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<Solution, FlowError> {
     // 1. Parse, naming each device by the deck's model.
-    let opts = ParseOptions { size: cfg.size_convention, models: model_table(pdk), ..Default::default() };
+    let opts = ParseOptions { size: cfg.size_convention, models: model_table(pdk), top: cfg.top.clone(), ..Default::default() };
     let mut netlist = parse::spice_with(spice, &opts).map_err(FlowError::Parse)?;
     deck_models(&mut netlist, pdk);
+    if let Some(i) = &cfg.interface {
+        let is_port = |n: &str| netlist.ports.iter().any(|p| netlist.nets[p.0 as usize].name == n);
+        let bad: Vec<&str> = i.pins.iter().map(|p| p.net.as_str()).filter(|n| !is_port(n)).collect();
+        if !bad.is_empty() {
+            return Err(FlowError::Interface(format!("interface pins on non-port nets {bad:?}")));
+        }
+    }
 
     check_injected(&netlist, injected, pdk)?;
 
@@ -1741,8 +1819,8 @@ pub fn signoff_inputs(
 /// as TEXT on the deck's text layer for its conductor ([`Pdk::label_gds`]).
 /// magic makes every top-level label a port, so an internal net labelled
 /// here fails pin matching against the schematic's `.subckt`.
-#[must_use]
-pub fn export_gds(sol: &Solution, pdk: &Pdk, top: &str, ports: &[String]) -> Vec<u8> {
+/// `Err` when a shape is on a layer with no GDS stream number ([`gds::emit`]).
+pub fn export_gds(sol: &Solution, pdk: &Pdk, top: &str, ports: &[String]) -> Result<Vec<u8>, String> {
     let (shapes, pins, _) = signoff_inputs(sol, pdk);
     let texts: Vec<gds::Text> = pins
         .iter()
@@ -1985,7 +2063,7 @@ mod start_tests {
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
         let cfg = crate::Config { seed: 1, feedback_iters: 2, outer_iters: 1, starts: 3, ..Default::default() };
         for spice in [include_str!("../../../benchmarks/fixtures/chain4.spice"), include_str!("../../../benchmarks/fixtures/ota.spice")] {
-            let gds = || crate::export_gds(&crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow"), &pdk, "top", &[]);
+            let gds = || crate::export_gds(&crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow"), &pdk, "top", &[]).unwrap();
             assert!(gds() == gds());
         }
     }
@@ -1998,6 +2076,22 @@ mod start_tests {
         let ms = crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow").stats.stage_ms;
         assert!(ms.iter().sum::<f64>() > 0.0, "{ms:?}");
         assert!(ms[6] > 0.0, "signoff runs every epoch: {ms:?}");
+    }
+
+    #[test]
+    fn interface_parses_the_fixture_and_rejects_a_non_port() {
+        let i = crate::Interface::from_json(include_str!("../../../benchmarks/fixtures/ota_constrained.interface.json")).expect("parses");
+        assert_eq!(i.die_nm, Some((30000, 70000)));
+        assert_eq!(i.pins.len(), 6);
+        assert_eq!(i.pins[0].side, crate::Side::South);
+        assert_eq!(i.pins[0].width_nm, 800);
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let pin = crate::IoPin { net: "nope".into(), side: crate::Side::North, frac: 0.5, width_nm: 800, layer: "met3".into() };
+        let cfg = crate::Config { interface: Some(crate::Interface { die_nm: None, pins: vec![pin] }), ..Default::default() };
+        match crate::run(include_str!("../../../benchmarks/fixtures/pair.spice"), &pdk, &Default::default(), &cfg) {
+            Err(crate::FlowError::Interface(m)) => assert!(m.contains("nope"), "{m}"),
+            r => panic!("expected FlowError::Interface, got {:?}", r.err()),
+        }
     }
 
     /// T6: exactly one dual step per epoch, taken by the flow (gp and dp only

@@ -342,7 +342,7 @@ fn run_circuit(
     let shapes = sol.geometry();
     let debug_dir = Path::new("target/bench_debug").join(&c.name);
     let _ = std::fs::create_dir_all(&debug_dir);
-    let gds_bytes = library::export_gds(&sol, pdk, &c.name, &[]);
+    let gds_bytes = library::export_gds(&sol, pdk, &c.name, &[]).unwrap_or_else(|e| panic!("{}: {e}", c.name));
     let _ = std::fs::write(debug_dir.join(format!("{}.gds", c.name)), &gds_bytes);
     match library::post_layout_spice(&sol, pdk, &c.name) {
         Ok(s) => drop(std::fs::write(debug_dir.join(format!("{}_pex.spice", c.name)), s)),

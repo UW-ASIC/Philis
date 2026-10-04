@@ -926,6 +926,7 @@ dependencies = [
  "gr",
  "macro_master",
  "pnr_core",
+ "serde_json",
  "verify",
  "visualizer",
 ]
@@ -1430,6 +1431,7 @@ version = "0.1.0"
 dependencies = [
  "library",
  "pnr_core",
+ "serde_json",
  "verify",
 ]
 
