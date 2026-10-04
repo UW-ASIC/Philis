@@ -205,7 +205,14 @@ pub struct RunStats {
     /// over every epoch of every start and cell topology, not just the
     /// winner's; each scored its epoch as every spec unmeasured.
     pub sim_failures: u32,
+    /// CPU ms per stage [`STAGES`], summed over every epoch of every start and
+    /// topology (threads overlap: not wall time).
+    pub stage_ms: [f64; 9],
 }
+
+/// [`RunStats::stage_ms`]'s stages: `route` is gr+dr, `reroute` dr again
+/// after antenna diodes, `perf` the post-layout simulation.
+pub const STAGES: [&str; 9] = ["gp", "dp", "rings", "route", "reroute", "diodes", "signoff", "metadata", "perf"];
 
 /// Anything that stops the flow.
 #[derive(Debug)]
@@ -281,40 +288,64 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 
     check_injected(&netlist, injected, pdk)?;
 
+    // Annotated once here for the sensitivity rows; each topology annotates
+    // its own `Problem` with the same `ann` (one leaked stack per run).
+    let stack: &'static analog::routing::Stack = Box::leak(Box::new(elaborate::stack(pdk)));
+    let ann = annotation_with(pdk, &cfg.annotation, stack);
+    let base = annotate(&netlist, &ann);
+
     // 2. Bias: per-device power and per-net current. Placement-independent,
     //    so solved once.
     let bias = bias(&netlist, cfg);
-    let (perf_rows, perf_bounds) = performance_rows(&netlist, pdk, cfg);
+    let (perf_rows, perf_bounds) = performance_rows(&netlist, cfg, &ann, &base.net_classes);
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
     // linear gradient but splits one drain across the row ends (asymmetric
     // routing); apart, it routes as translated copies. Neither dominates in
     // general, so when a merge like that exists both are solved and the
     // lexicographically better kept.
-    let start = |j: u32| -> (Solution, LexKey) {
-        let seed = cfg.seed.wrapping_add(u64::from(j).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let (merged, key, distinct) = solve(&netlist, injected, pdk, cfg, &bias, &perf_rows, true, seed);
-        if !distinct {
-            return (merged, key);
-        }
-        let (apart, apart_key, _) = solve(&netlist, injected, pdk, cfg, &bias, &perf_rows, false, seed);
-        // Failures count over both topologies, whichever wins.
-        let failed = merged.stats.sim_failures + apart.stats.sim_failures;
-        let (mut sol, key) = if key_lt(&apart_key, &key) { (apart, apart_key) } else { (merged, key) };
-        sol.stats.sim_failures = failed;
-        (sol, key)
-    };
-    // Multi-start: the lex-best start wins; ties go to the earliest.
-    let start = &start;
-    let runs: Vec<(Solution, LexKey)> = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..cfg.starts.max(1)).map(|j| s.spawn(move || start(j))).collect();
+    // Both topologies are built once on this thread (pricing every variant
+    // once); the starts only search them.
+    let merged = topology(&netlist, injected, pdk, cfg, &bias, &ann, &perf_rows, true);
+    let apart = merged.distinct.then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &perf_rows, false));
+    let tops: Vec<&Topology> = std::iter::once(&merged).chain(apart.as_ref()).collect();
+    let tops = &tops;
+    let runs: Vec<Vec<Searched>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..cfg.starts.max(1))
+            .map(|j| {
+                s.spawn(move || {
+                    let seed = cfg.seed.wrapping_add(u64::from(j).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                    tops.iter().map(|t| search(t, cfg, seed)).collect()
+                })
+            })
+            .collect();
         handles.into_iter().map(|h| h.join().expect("a search start panicked")).collect()
     });
-    // Failures count over every start, not just the winner's: a failed
-    // simulation scores its epoch unmeasured, so selection would hide them.
-    let sim_failures = runs.iter().map(|r| r.0.stats.sim_failures).sum();
-    let mut sol = runs.into_iter().reduce(|best, r| if key_lt(&r.1, &best.1) { r } else { best }).expect("one start at least").0;
+    // Failures and stage times count over every start and topology, not just
+    // the winner's: a failed simulation scores its epoch unmeasured, so
+    // selection would hide them.
+    let all = || runs.iter().flatten().map(|r| r.stats);
+    let sim_failures = all().map(|s| s.sim_failures).sum();
+    let mut stage_ms = [0.0; 9];
+    for s in all() {
+        stage_ms.iter_mut().zip(s.stage_ms).for_each(|(a, b)| *a += b);
+    }
+    // Per start, `apart` wins only when strictly better; over starts, the
+    // lex-best wins and ties go to the earliest (`key_lt` is not transitive
+    // inside a C band, so this order is the contract).
+    let pick = |r: &[Searched]| usize::from(r.len() > 1 && key_lt(&r[1].key, &r[0].key));
+    let mut win = (0, pick(&runs[0]));
+    for (j, r) in runs.iter().enumerate().skip(1) {
+        let k = pick(r);
+        if key_lt(&r[k].key, &runs[win.0][win.1].key) {
+            win = (j, k);
+        }
+    }
+    let searched = runs.into_iter().nth(win.0).expect("one start at least").swap_remove(win.1);
+    let t = if win.1 == 0 { merged } else { apart.expect("index 1 is `apart`") };
+    let mut sol = finish(t, searched, &bias, pdk);
     (sol.stats.sim_failures, sol.metadata.sim_failures) = (sim_failures, sim_failures);
+    sol.stats.stage_ms = stage_ms;
     sol.metadata.budget_rows = perf_bounds;
     Ok(sol)
 }
@@ -326,8 +357,9 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 /// `":max"`), its row or why it has none ([`metadata::MetadataReport::budget_rows`]).
 fn performance_rows(
     netlist: &pnr_core::Netlist,
-    pdk: &Pdk,
     cfg: &Config,
+    ann: &AnnotationConfig,
+    classes: &[analog::metadata::NetClassification],
 ) -> (Vec<analog::routing::PerformanceBudget>, Vec<String>) {
     use analog::metadata::NetClass;
     let Some(p) = &cfg.performance else { return (Vec::new(), Vec::new()) };
@@ -348,11 +380,9 @@ fn performance_rows(
         notes.iter().for_each(|n| eprintln!("[perf] {n}"));
         notes
     };
-    let ann = annotation(pdk, &cfg.annotation);
     let Some(af_per_um) = ann.process.wire_af_per_um else {
         return (Vec::new(), notes(&[], "deck has no wire capacitance"));
     };
-    let classes = annotate(netlist, &ann).net_classes;
     let nets: Vec<pnr_core::NetId> = classes
         .iter()
         .filter(|c| matches!(c.class, NetClass::Signal | NetClass::Sensitive | NetClass::Clock))
@@ -384,25 +414,42 @@ struct Bias {
     op: Option<oppoint::OpPoint>,
 }
 
-/// Annotate, draw cells and search at one cell topology: `merge_distinct_gates`
-/// lets a matched pair on different gate nets merge into one cell. Returns the
-/// winner, its key, and whether any such merge happened.
+/// What is fixed for the run at one cell topology (`merge_distinct_gates`
+/// lets a matched pair on different gate nets merge into one cell): the
+/// annotated problem, the cells, EM/IR rules, router config and the seed
+/// variant assignment. Built once on the calling thread and shared by every
+/// start's [`search`].
+struct Topology<'a> {
+    flow: Flow<'a>,
+    /// [`cellgen::seed_assignment`]: every alternative DRC-priced once.
+    assignment0: Vec<u16>,
+    /// A distinct-gate merge happened, so the `apart` topology is worth solving.
+    distinct: bool,
+}
+
+// Starts share one `Topology` by reference across threads.
+const _: fn() = || {
+    fn s<T: Sync>() {}
+    s::<Topology<'static>>();
+};
+
+/// Annotate (with `ann`, whose stack the run leaked once) and draw cells at one
+/// cell topology.
 #[allow(clippy::too_many_arguments)]
-fn solve(
-    netlist: &pnr_core::Netlist,
+fn topology<'a>(
+    netlist: &'a pnr_core::Netlist,
     injected: &Macros,
-    pdk: &Pdk,
-    cfg: &Config,
+    pdk: &'a Pdk,
+    cfg: &'a Config,
     bias: &Bias,
-    perf_rows: &[analog::routing::PerformanceBudget],
+    ann: &AnnotationConfig,
+    perf_rows: &'a [analog::routing::PerformanceBudget],
     merge_distinct_gates: bool,
-    seed: u64,
-) -> (Solution, LexKey, bool) {
-    let netlist = netlist.clone();
-    let currents = bias.currents.clone();
+) -> Topology<'a> {
+    let currents = &bias.currents;
     // Annotate: placement/routing rules + cell constraints, device-indexed.
-    let ann = annotation(pdk, &cfg.annotation);
-    let mut problem = annotate(&netlist, &ann);
+    // Per topology: `CellSpace::new` mutates the problem, which is not `Clone`.
+    let mut problem = annotate(netlist, ann);
     if cfg.min_utilization > 0.0 {
         problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min: cfg.min_utilization }));
     }
@@ -426,11 +473,11 @@ fn solve(
     let em_layers: Vec<LayerId> = layers.iter().copied().chain(pin_access.map(|p| p.0)).collect();
     let em_cuts: Vec<elaborate::Cut> = cuts.iter().copied().chain(pin_access.map(|p| p.1)).collect();
     let em = elaborate::em_limits(pdk, &em_layers, &em_cuts, cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15));
-    em_rules(&mut problem, &netlist, &em, &em_layers, &em_cuts, ann.process.stack, pdk);
+    em_rules(&mut problem, netlist, &em, &em_layers, &em_cuts, ann.process.stack, pdk);
     // IR-drop budgets (PWR-02) on nets carrying op current (`annotator::ir`).
     if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
         let vdd_mv = cfg.op.as_ref().map_or(1_800.0, |o| o.vdd * 1e3);
-        let i = oppoint::net_current_ua(&netlist, c);
+        let i = oppoint::net_current_ua(netlist, c);
         let rules: Vec<analog::routing::IrDrop> = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv, &ann.policy)
             .into_iter()
             .map(|(net, current_ua, max_drop_uv)| analog::routing::IrDrop { net, current_ua, max_drop_uv, margin_pct: 20, stack: ann.process.stack })
@@ -442,10 +489,10 @@ fn solve(
     let sens: Vec<(pnr_core::NetId, f32)> =
         perf_rows.iter().flat_map(|r| r.nets.iter().copied().zip(r.weights.iter().copied())).collect();
     let net_weight = gp::net_weights(&problem.net_classes, &sens);
-    let intent = elaborate::intent(&netlist, &problem.net_classes, currents.as_deref(), cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0));
+    let intent = elaborate::intent(netlist, &problem.net_classes, currents.as_deref(), cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0));
     let flow = Flow {
         pdk,
-        netlist: &netlist,
+        netlist,
         net_names: netlist.nets.iter().map(|n| n.name.clone()).collect(),
         d_router: {
             let mut r = elaborate::detailed_router(pdk, &layers, &cuts, pin_access);
@@ -455,7 +502,7 @@ fn solve(
                 .filter(|c| matches!(c.class, analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground))
                 .map(|c| c.net)
                 .collect();
-            r.cfg.pin_ua = currents.as_deref().map_or_else(Vec::new, |c| pin_currents(&netlist, &cells.devices_of, c));
+            r.cfg.pin_ua = currents.as_deref().map_or_else(Vec::new, |c| pin_currents(netlist, &cells.devices_of, c));
             // Per cell, each member's gate pin, device and `W·L·m` (the
             // annotator's antenna gate area, µm² → nm²).
             r.cfg.gate_nm2 = cells
@@ -478,9 +525,9 @@ fn solve(
         locks,
         perf: cfg.performance.as_ref(),
         perf_rows,
-        intent: intent.clone(),
+        intent,
         net_weight,
-        fold: fold.clone(),
+        fold,
         stack: ann.process.stack.expect("`annotation` always carries the stack"),
         id_ua: currents
             .as_ref()
@@ -488,11 +535,26 @@ fn solve(
             .unwrap_or_default(),
         gp_mode: cfg.gp_mode,
     };
+    let assignment0 = cellgen::seed_assignment(&flow.cells.variants, pdk);
+    Topology { flow, assignment0, distinct }
+}
 
-    // 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
-    //    keeping the best [`LexKey`], whose V includes the epoch's own signoff
-    //    errors. Prices and routing history persist across epochs.
-    let mut assignment = cellgen::seed_assignment(&flow.cells.variants, pdk);
+/// One start's search on a shared topology: the winning epoch, the start's
+/// stats, the saturated prices (`metadata.binding`) and the winner's key.
+struct Searched {
+    best: Epoch,
+    stats: RunStats,
+    binding: Vec<String>,
+    key: LexKey,
+}
+
+/// 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
+///    keeping the best [`LexKey`], whose V includes the epoch's own signoff
+///    errors. Prices and routing history persist across epochs and are this
+///    start's own.
+fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
+    let flow = &t.flow;
+    let mut assignment = t.assignment0.clone();
     let mut prices = gp::Prices::new();
     let mut neg = gr::Negotiation::new();
     let mut best: Option<Epoch> = None;
@@ -513,6 +575,9 @@ fn solve(
             // beat the incumbent; its spec miss then decides against it.
             if best.as_ref().is_none_or(|b| epoch.key.0 <= b.key.0) {
                 flow.score_perf(&mut epoch, &mut stats);
+            }
+            for (s, e) in stats.stage_ms.iter_mut().zip(epoch.stats.stage_ms) {
+                *s += e;
             }
             if best.as_ref().is_none_or(|b| key_lt(&epoch.key, &b.key)) {
                 best = Some(Epoch {
@@ -554,13 +619,21 @@ fn solve(
         assignment = next;
     }
 
-    // 7. The winner, redrawn from its own variant choice, with its guard rings.
     let best = best.expect("at least one epoch ran");
     stats.dual_steps = prices.steps();
-    stats = RunStats {
+    let stats = RunStats {
         best_iteration: best.iteration,
         ..best.stats.merge(stats)
     };
+    let binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
+    Searched { key: best.key, best, stats, binding }
+}
+
+/// 7. The winner only, redrawn from its own variant choice, with its guard
+/// rings, fill and metadata. Consumes `t`, so the placement rules move into
+/// [`Solution::placement`].
+fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
+    let (flow, best, stats) = (t.flow, s.best, s.stats);
     let mut macros = cellgen::realize(&flow.cells.variants, &best.layout.variant);
     // Only a winner claiming zero hard violations must be fully connected; an
     // infeasible winner's opens are already counted and reported at signoff.
@@ -597,7 +670,7 @@ fn solve(
         &pdk.unverified(),
     );
     let mut metadata = metadata;
-    metadata.binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
+    metadata.binding = s.binding;
     let mut recognition = std::collections::BTreeMap::new();
     for b in flow.problem.blocks.iter().filter(|b| b.kind != annotator::BlockKind::Glue) {
         *recognition.entry(b.template).or_insert(0) += 1;
@@ -605,7 +678,7 @@ fn solve(
     metadata.recognition = recognition.into_iter().collect();
     metadata.unconstrained = flow.problem.coverage.iter()
         .filter_map(|&(d, c)| match c {
-            annotator::Coverage::Unconstrained(why) => Some((netlist.devices[d.0 as usize].name.clone(), why)),
+            annotator::Coverage::Unconstrained(why) => Some((flow.netlist.devices[d.0 as usize].name.clone(), why)),
             _ => None,
         })
         .collect();
@@ -620,25 +693,22 @@ fn solve(
             .collect();
         metadata.sim_failures = stats.sim_failures;
     }
-    let placement = flow.problem.placement;
-    let key = best.key;
     // Inserted devices (antenna diodes) join the schematic LVS reads.
-    let mut netlist = netlist;
+    let mut netlist = flow.netlist.clone();
     netlist.devices.extend(best.extra);
-    let solution = Solution {
+    Solution {
         layout: best.layout,
         routes: best.routes,
         macros,
         netlist,
         stats,
         metadata,
-        placement,
-        intent,
-        folds: fold,
+        placement: flow.problem.placement,
+        intent: flow.intent,
+        folds: flow.fold,
         well_layer: pnr_core::Process::layer(pdk, "nwell"),
         op: bias.op.clone(),
-    };
-    (solution, key, distinct)
+    }
 }
 
 /// Everything an epoch reads that is fixed for the run.
@@ -675,6 +745,13 @@ struct Flow<'a> {
 /// `base` plus what the annotator needs from the deck.
 #[must_use]
 pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
+    annotation_with(pdk, base, Box::leak(Box::new(elaborate::stack(pdk))))
+}
+
+/// [`annotation`] on a stack the caller already holds. Rules are `Copy`, so
+/// they borrow the stack for 'static. ponytail: [`run`] leaks one per call (a
+/// few hundred bytes); cache by deck if runs ever loop in one process.
+fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::routing::Stack) -> AnnotationConfig {
     use pnr_core::Process;
     let (layers, ..) = elaborate::routing_stack(pdk);
     let wire = layers.first().copied();
@@ -694,10 +771,7 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
         lattice_nm: cells::builder::cut_lattice(pdk),
         substrate: pnr_core::SubstrateKind::from_key(pdk.cell_str("substrate_kind")),
         epi_nm: pos("epi_thickness_nm").map(|v| v as i32),
-        // Rules are `Copy`, so they borrow the stack for 'static.
-        // ponytail: leaked once per `annotation` call (twice per run, a few
-        // hundred bytes each); cache by deck if runs ever loop in one process.
-        stack: Some(Box::leak(Box::new(elaborate::stack(pdk)))),
+        stack: Some(stack),
     };
     AnnotationConfig { process, ..base.clone() }
 }
@@ -781,7 +855,14 @@ impl Flow<'_> {
             units: cells.units.clone(),
             iterate: self.gp_mode == GpMode::Analytic,
         };
+        let mut ms = [0.0; 9];
+        let mut clock = std::time::Instant::now();
+        let mut lap = |i: usize| {
+            ms[i] += clock.elapsed().as_secs_f64() * 1e3;
+            clock = std::time::Instant::now();
+        };
         let (coarse, _) = gp::place(&inp, prices, seed);
+        lap(0);
         coarse.debug_check("gp::place");
         let (mut layout, place_report, dp_stats) = dp::place(
             &coarse,
@@ -800,6 +881,7 @@ impl Flow<'_> {
         layout.groups = cells.groups.clone();
         // The epoch's one dual step, on the layout it is scored on (T6).
         prices.settle(placement, &layout);
+        lap(1);
         let macros = if layout.variant == assignment {
             macros
         } else {
@@ -818,6 +900,7 @@ impl Flow<'_> {
         // Same-type implants of neighbours closer than their spacing merge.
         let placed_now: Vec<Macro> = gr::place_macros(&macros, &layout).into_iter().chain(rings.iter().cloned()).collect();
         rings.extend(cells::post_cell::implant_bridges(&placed_now, self.pdk));
+        lap(2);
 
         // Route: track realisation onto the real pins.
         let routing = &self.problem.routing;
@@ -839,11 +922,13 @@ impl Flow<'_> {
         };
         let (mut routes, mut route_report, _route_stats) =
             router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
+        lap(3);
         // Antenna nets the jumper could not fix get a diode each, routed in as
         // a fixed cell; its shape on the deck's credited diode layer joins the
         // net's routes (the rule's credit, `Stack::diode`).
         let ground = self.problem.net_classes.iter().find(|c| c.class == analog::metadata::NetClass::Ground).map(|c| c.net);
         let diodes = elaborate::antenna_diodes(self.pdk, routing, &routes, &placed, &rings, ground, place_rules(self.pdk).clearance);
+        lap(5);
         let mut extra = Vec::new();
         if !diodes.is_empty() {
             let marker = self.pdk.antenna_diode_credit().map(|(l, _)| l);
@@ -855,6 +940,7 @@ impl Flow<'_> {
                 rings.push(m);
             }
             (routes, route_report, _) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
+            lap(4);
             for (net, shape) in marks {
                 if let Some(w) = routes.wires.get_mut(net.0 as usize) {
                     w.push(shape);
@@ -880,6 +966,7 @@ impl Flow<'_> {
         labelled.extend(rings.iter().cloned());
         let mut signoff = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), self.pdk);
         signoff.report.hard_violations.extend(undrawable(&macros, self.netlist));
+        lap(6);
         let mut budgets = metadata::build(
             placement,
             &layout,
@@ -894,7 +981,8 @@ impl Flow<'_> {
 
         let c = signoff_c_tier(&signoff, &self.net_names, &self.problem.net_classes, self.perf_rows);
         let (key, stats) = epoch_score(&place_report, &route_report, &signoff, &budgets, c, layout.footprint_nm2());
-        let stats = RunStats { place, dp: dp_stats, ..stats };
+        lap(7);
+        let stats = RunStats { place, dp: dp_stats, stage_ms: ms, ..stats };
         Epoch {
             key,
             perf: None,
@@ -1085,6 +1173,7 @@ impl Flow<'_> {
     /// in `stats.sim_failures` and scores every spec unmeasured.
     fn score_perf(&self, epoch: &mut Epoch, stats: &mut RunStats) {
         let Some(p) = self.perf else { return };
+        let clock = std::time::Instant::now();
         let unknown = || perf::PerfResult {
             metrics: p.specs.iter().map(|s| (s.metric.clone(), None)).collect(),
             residual: p.specs.len() as f64,
@@ -1100,6 +1189,7 @@ impl Flow<'_> {
         };
         epoch.key.1 = result.residual;
         epoch.perf = Some(result);
+        stats.stage_ms[8] += clock.elapsed().as_secs_f64() * 1e3;
     }
 }
 
@@ -1869,6 +1959,44 @@ mod start_tests {
         let run = || crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow");
         let (a, b) = (run(), run());
         assert_eq!((a.layout.x, a.layout.y), (b.layout.x, b.layout.y));
+    }
+
+    /// FLOW-09: topologies (and `seed_assignment`'s pricing) are built once on
+    /// the calling thread, not once per start.
+    #[test]
+    fn hoisting_prices_each_alternative_once() {
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let spice = ".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\nXM2 d x VSS VSS nfet_01v8 W=2u L=0.5u\n.ends p\n";
+        let calls = |starts| {
+            let before = crate::cellgen::price_calls();
+            let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts, ..Default::default() };
+            crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow");
+            crate::cellgen::price_calls() - before
+        };
+        let (n1, n3) = (calls(1), calls(3));
+        assert!(n1 > 0);
+        assert_eq!(n3, n1);
+    }
+
+    /// Same seed, same bytes: the GDS of two runs is identical with parallel starts.
+    #[test]
+    fn same_seed_same_gds_bytes() {
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let cfg = crate::Config { seed: 1, feedback_iters: 2, outer_iters: 1, starts: 3, ..Default::default() };
+        for spice in [include_str!("../../../benchmarks/fixtures/chain4.spice"), include_str!("../../../benchmarks/fixtures/ota.spice")] {
+            let gds = || crate::export_gds(&crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow"), &pdk, "top", &[]);
+            assert!(gds() == gds());
+        }
+    }
+
+    #[test]
+    fn stage_times_are_reported() {
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let spice = include_str!("../../../benchmarks/fixtures/pair.spice");
+        let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts: 1, ..Default::default() };
+        let ms = crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow").stats.stage_ms;
+        assert!(ms.iter().sum::<f64>() > 0.0, "{ms:?}");
+        assert!(ms[6] > 0.0, "signoff runs every epoch: {ms:?}");
     }
 
     /// T6: exactly one dual step per epoch, taken by the flow (gp and dp only

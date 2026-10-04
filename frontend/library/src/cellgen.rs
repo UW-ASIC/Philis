@@ -337,10 +337,21 @@ pub fn seed_assignment(variants: &[gp::VariantSpace], pdk: &Pdk) -> Vec<u16> {
         .collect()
 }
 
+#[cfg(test)]
+thread_local!(static PRICE_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
+
+/// [`price`] calls on this thread so far (tests: pricing happens once per run).
+#[cfg(test)]
+pub(crate) fn price_calls() -> u32 {
+    PRICE_CALLS.with(std::cell::Cell::get)
+}
+
 /// `(DRC+ERC findings, pin HPWL)`, compared lexicographically. DRC runs
 /// density-stripped (fill rules are chip-level); a macro the engine cannot
 /// load prices as maximally illegal.
 fn price(m: &Macro, checker: &mut Checker) -> (usize, i64) {
+    #[cfg(test)]
+    PRICE_CALLS.with(|c| c.set(c.get() + 1));
     let geom = match checker.run(
         &m.shapes,
         &[],
