@@ -4,8 +4,8 @@ use pnr_core::ids::{BranchId, Target};
 use pnr_core::layout::Layout;
 use crate::rule::Rule;
 
-/// Two devices either abut (gap `< s_max`, one shared trench) or fully
-/// separate (gap `> d_dti`); the band between is illegal.
+/// Two devices either abut (gap `≤ s_max`, one shared trench) or fully
+/// separate (gap `≥ d_dti`); the band between is illegal.
 ///
 /// The feasible set is two disconnected intervals, so a penalty cannot pick a
 /// side. `branch` indexes [`Layout::branch`], the committed side (`false` =
@@ -53,7 +53,7 @@ impl Rule for DtiBand {
     /// `dp` would reject exactly that move.
     fn satisfied(self, l: &Layout) -> bool {
         let gap = l.edge_gap(self.a, self.b);
-        gap < self.s_max_nm as f32 || gap > self.d_dti_nm as f32
+        gap <= self.s_max_nm as f32 || gap >= self.d_dti_nm as f32
     }
     /// `0` when satisfied; else `cost` over the band width.
     fn residual(self, l: &Layout) -> f32 {
@@ -100,7 +100,7 @@ mod tests {
         }
     }
 
-    /// Share below 200 nm, isolate above 2000 nm; the 1800 nm between is forbidden.
+    /// Share at or below 200 nm, isolate at or above 2000 nm; the band strictly between is forbidden.
     fn rule() -> DtiBand {
         DtiBand {
             a: Target::Device(DeviceId(0)),
@@ -135,6 +135,12 @@ mod tests {
         assert!(rule().cost(&bench(100, true)) > 0.0, "abutting does not satisfy `isolate`");
         assert_eq!(rule().cost(&bench(3_000, true)), 0.0, "far apart satisfies `isolate`");
         assert!(rule().cost(&bench(3_000, false)) > 0.0, "far apart does not satisfy `share`");
+    }
+
+    #[test]
+    fn a_pair_exactly_at_either_end_is_legal() {
+        assert!(rule().satisfied(&bench(200, false)));
+        assert!(rule().satisfied(&bench(2_000, true)));
     }
 
     #[test]

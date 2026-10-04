@@ -3,11 +3,13 @@
 //!
 //! Every move goes through [`Sa::trial`]: a move that breaks a hard equality is
 //! repaired by projecting the broken batch (a symmetry partner follows its
-//! mirror), then gated lexicographically on `(violating hard batches, Φ margin +
-//! clearance encroachment, Θ)`. Metropolis only votes on the PEX tier (pin HPWL
-//! + priced analog cost). [`legalize::separate_overlaps`] closes any residue.
+//! mirror), then gated lexicographically on `(violating hard batches, Σ hard
+//! residual, clearance encroachment nm², Θ)`. Metropolis only votes on the PEX
+//! tier (pin HPWL + priced analog cost). [`legalize::separate_overlaps`] closes
+//! any residue.
 
 pub mod legalize;
+pub mod locks;
 
 use analog::Requirements;
 use pnr_core::ids::BranchId;
@@ -18,16 +20,28 @@ use gp::mechanics::{
     hpwl, report, snap, variant_extents, Nets, SplitMix64,
 };
 
-const MAX_ITERS: u32 = 220;
 /// Inner moves per epoch = `MOVES_PER_CELL · n`.
 const MOVES_PER_CELL: usize = 60;
 const ALPHA: f64 = 0.93;
-/// Initial displacement window, fraction of the die span.
-const RANGE0: f32 = 0.4;
 const RANGE_DECAY: f32 = 0.96;
 /// Clearance-inflated area / move-region area floor: the region the SA may use
 /// is grown until everything fits at this fill.
 const REGION_FILL: f64 = 0.5;
+
+/// The flat anneal's schedule (PLC-10 step 0): initial move window `range0` (fraction of the
+/// die span), `max_temps` temperature steps, `t0 = t0_scale · mean|ΔPEX|` over 128 probe moves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Schedule {
+    pub range0: f32,
+    pub max_temps: u32,
+    pub t0_scale: f64,
+}
+impl Schedule {
+    /// Today's constants: refine gp, don't randomise it.
+    pub fn cold() -> Self { Self { range0: 0.4, max_temps: 220, t0_scale: 0.02 } }
+    /// FLOW-08 step 3's flat warm start from an incumbent [policy, measure].
+    pub fn warm() -> Self { Self { range0: 0.05, max_temps: 60, t0_scale: 0.002 } }
+}
 /// Runaway guard for the terminal legalizer (it exits early when clean/stalled).
 const LEGALIZE_SWEEPS: u32 = 64;
 
@@ -44,7 +58,8 @@ pub struct PlaceStats {
     /// Codes the decoder could not realise; `None` (not measured) until
     /// PLC-08 adds a decoder.
     pub decode_fail: Option<u64>,
-    /// Matched sets drawn incompatibly; `None` (not measured) until PLC-03.
+    /// Distinct matched pairs whose variant spaces differ, so they cannot be
+    /// shape-locked ([`locks::Locks::incompatible`]).
     pub matched_incompatible: Option<u32>,
 }
 
@@ -177,10 +192,6 @@ impl<'a> Sa<'a> {
                     b.project(l, self.grid);
                 }
             }
-            for i in (0..l.x.len()).filter(|&i| self.is_fixed(i)) {
-                l.x[i] = self.snap.x[i];
-                l.y[i] = self.snap.y[i];
-            }
             phi1 = analog_phi(self.reqs, l);
         }
 
@@ -194,8 +205,8 @@ impl<'a> Sa<'a> {
         let ov0 = self.encroach_moved(l);
         self.snap.swap_geometry(l);
 
-        let before = (phi0.0, phi0.1 + ov0, theta0);
-        let after = (phi1.0, phi1.1 + ov1, analog_theta(self.reqs, l));
+        let before = (phi0.0, phi0.1, ov0, theta0);
+        let after = (phi1.0, phi1.1, ov1, analog_theta(self.reqs, l));
         if accept(before, after, self.pex(l) - pex0, temp, rng) {
             self.stats.accepted += 1;
             return true;
@@ -210,17 +221,24 @@ impl<'a> Sa<'a> {
 ///
 /// `net_weight[NetId]` weights each net's HPWL (see [`gp::net_weights`]).
 /// `macros[i]` supplies cell `i`'s pins when `variants[i]` has no alternative
-/// for `coarse.variant[i]`. `fixed[i]` pins cell `i` (position and variant).
+/// for `coarse.variant[i]`. `fixed[i]` draws cell `i` as given (no reshape, no
+/// rotation); its position is placed like any cell's.
+/// `locks` turns and reshapes matched cells as one set (PLC-03).
+/// `schedule` sets the anneal's window, length and starting temperature
+/// ([`Schedule::cold`] is the gp-refining default).
+#[allow(clippy::too_many_arguments)]
 pub fn place(
     coarse: &Layout,
     macros: &[Macro],
     variants: &[gp::VariantSpace],
     reqs: &Requirements<Layout>,
     fixed: &[bool],
+    locks: &locks::Locks,
     prices: &mut gp::Prices,
     rules: gp::Rules,
     net_weight: &[f32],
     seed: u64,
+    schedule: Schedule,
 ) -> (Layout, Report, PlaceStats) {
     let gp::Rules { grid, clearance } = rules;
     let n = coarse.x.len();
@@ -241,31 +259,15 @@ pub fn place(
     };
     l.refresh_temps();
 
-    // Disjunctive branches (DtiBand share/isolate): size the table to the
-    // highest id and seed each from its recognised structure.
-    let mut branch_seeds: Vec<(BranchId, bool)> = Vec::new();
-    for b in &reqs.hard {
-        b.branches(&mut branch_seeds);
-    }
-    branch_seeds.sort_unstable_by_key(|&(id, _)| id.0);
-    branch_seeds.dedup();
-    if let Some(&(hi, _)) = branch_seeds.last() {
-        if l.branch.len() <= usize::from(hi.0) {
-            l.branch.resize(usize::from(hi.0) + 1, false);
-        }
-    }
-    for &(id, s) in &branch_seeds {
-        l.branch[usize::from(id.0)] = s;
-    }
-    let branch_ids: Vec<BranchId> = branch_seeds.iter().map(|&(id, _)| id).collect();
-    let sym = sym_groups(reqs, n, fixed);
+    let branch_ids = seed_branches(reqs, &mut l.branch);
+    let sym = sym_groups(reqs, n);
 
     prices.bind(reqs);
     // Nets from the geometry `l.variant` names, so HPWL scores real pins.
     let nets = Nets::from_macros(&choose_variants(macros, variants, &l.variant)).weigh(net_weight);
     if n == 0 {
-        let rep = report(&nets, reqs, &l, prices);
-        return (l, rep, PlaceStats::default());
+        let rep = report(&nets, reqs, &l, prices, clearance);
+        return (l, rep, PlaceStats { matched_incompatible: Some(locks.incompatible), ..Default::default() });
     }
 
     // Move region: the coarse footprint bbox, grown about its centre until the
@@ -294,9 +296,10 @@ pub fn place(
     let clamp_y = |c: i32, half: i32| c.clamp(ymin + half, (ymax - half).max(ymin + half));
 
     let mut sa = Sa::new(nets, n, reqs, prices, fixed, rules);
+    sa.stats.matched_incompatible = Some(locks.incompatible);
 
-    // t0 = 0.02 · mean |ΔPEX| over probe moves: refine gp, don't randomise it.
-    let mut range = RANGE0;
+    // t0 = t0_scale · mean |ΔPEX| over probe moves.
+    let mut range = schedule.range0;
     let probe_r = (range * span) as i32 as f32;
     let pex0 = sa.pex(&l);
     let mut sum = 0.0f64;
@@ -308,7 +311,7 @@ pub fn place(
         sum += (sa.pex(&l) - pex0).abs();
         (l.x[c], l.y[c]) = (ox, oy);
     }
-    let mut temp = (sum / 128.0).max(1.0) * 0.02;
+    let mut temp = (sum / 128.0).max(1.0) * schedule.t0_scale;
 
     let can_rotate = l.orient.len() == n;
     let can_reshape = variants.len() == n && l.variant.len() == n;
@@ -320,15 +323,12 @@ pub fn place(
     // stop after 10 flat chains) was measured 2026-09: ota C −12% but
     // rc_filter C +7%, bjt_mirror area +22%; not adopted.
     // ponytail: ~4x dp time; revisit if runtime binds.
-    for _ in 0..MAX_ITERS {
+    for _ in 0..schedule.max_temps {
         let r = (range * span) as i32 as f32;
         for _ in 0..moves_per_epoch {
             // 70% displace, 20% swap, 2.5% branch flip, 5% reshape, else rotate.
             let roll = rng.f32();
             let c = rng.below(n);
-            if sa.is_fixed(c) {
-                continue;
-            }
             let _ = if !sym.is_empty() && roll < 0.08 {
                 // Compound moves: every mirror equation holds before and after,
                 // so no projection drags the rest of the stage.
@@ -351,19 +351,22 @@ pub fn place(
                 try_move(&mut sa, &mut l, &mut rng, temp, c, nx, ny)
             } else if roll < 0.90 {
                 let o = rng.below(n);
-                o != c && !sa.is_fixed(o) && try_swap(&mut sa, &mut l, &mut rng, temp, c, o, &clamp_x, &clamp_y)
+                o != c && try_swap(&mut sa, &mut l, &mut rng, temp, c, o, &clamp_x, &clamp_y)
             } else if !branch_ids.is_empty() && roll < 0.925 {
                 let bid = usize::from(branch_ids[rng.below(branch_ids.len())].0);
                 try_branch(&mut sa, &mut l, &mut rng, temp, bid)
             } else if can_reshape && roll >= 0.95 {
-                try_reshape(&mut sa, &mut l, &mut rng, temp, c, variants, &clamp_x, &clamp_y)
+                try_reshape(&mut sa, &mut l, &mut rng, temp, &locks.members(c, true), variants, &clamp_x, &clamp_y)
             } else {
-                can_rotate && rotatable(&l, c) && try_rotate(&mut sa, &mut l, &mut rng, temp, c, &clamp_x, &clamp_y)
+                let set = locks.members(c, false);
+                can_rotate
+                    && !set.iter().any(|&m| sa.is_fixed(m))
+                    && try_rotate(&mut sa, &mut l, &mut rng, temp, &set, &clamp_x, &clamp_y)
             };
         }
 
         // One exact projection per epoch for batches violated before any move.
-        project_hard(reqs, &mut l, fixed, grid);
+        project_hard(reqs, &mut l, grid);
         // Thermal field is global: refresh per epoch, never per move.
         l.refresh_temps();
 
@@ -380,17 +383,37 @@ pub fn place(
         l.y[i] = snap(l.y[i], grid);
     }
     // Grid snap can shave a clearance by a few nm; the legalizer restores it.
-    legalize::separate_overlaps(&mut l, reqs, fixed, grid, clearance, LEGALIZE_SWEEPS);
+    legalize::separate_overlaps(&mut l, reqs, grid, clearance, LEGALIZE_SWEEPS);
     l.refresh_temps();
 
     let Sa { nets, stats, .. } = sa;
-    let rep = report(&nets, reqs, &l, prices);
+    let rep = report(&nets, reqs, &l, prices, clearance);
     (l, rep, stats)
 }
 
-/// Project every violated hard batch onto its feasible set, restore pinned
-/// cells, and roll the whole sweep back if Φ rose. Returns whether it kept.
-fn project_hard(reqs: &Requirements<Layout>, l: &mut Layout, fixed: &[bool], grid: i32) -> bool {
+/// Disjunctive branches (DtiBand share/isolate): grow `branch` to the highest
+/// id and seed each from its recognised structure. Returns the ids, sorted.
+fn seed_branches(reqs: &Requirements<Layout>, branch: &mut Vec<bool>) -> Vec<BranchId> {
+    let mut branch_seeds: Vec<(BranchId, bool)> = Vec::new();
+    for b in &reqs.hard {
+        b.branches(&mut branch_seeds);
+    }
+    branch_seeds.sort_unstable_by_key(|&(id, _)| id.0);
+    branch_seeds.dedup();
+    if let Some(&(hi, _)) = branch_seeds.last() {
+        if branch.len() <= usize::from(hi.0) {
+            branch.resize(usize::from(hi.0) + 1, false);
+        }
+    }
+    for &(id, s) in &branch_seeds {
+        branch[usize::from(id.0)] = s;
+    }
+    branch_seeds.iter().map(|&(id, _)| id).collect()
+}
+
+/// Project every violated hard batch onto its feasible set and roll the whole
+/// sweep back if Φ rose. Returns whether it kept.
+fn project_hard(reqs: &Requirements<Layout>, l: &mut Layout, grid: i32) -> bool {
     let before = analog_phi(reqs, l);
     if before.0 == 0 {
         return false;
@@ -400,12 +423,6 @@ fn project_hard(reqs: &Requirements<Layout>, l: &mut Layout, fixed: &[bool], gri
         // Re-checked per batch: a satisfied SymmetryGroup would still re-average its axis.
         if batch.violations(l) > 0 {
             batch.project(l, grid);
-        }
-    }
-    for i in 0..l.x.len() {
-        if fixed.get(i).copied().unwrap_or(false) {
-            l.x[i] = px[i];
-            l.y[i] = py[i];
         }
     }
     if analog_phi(reqs, l) > before {
@@ -421,7 +438,7 @@ fn project_hard(reqs: &Requirements<Layout>, l: &mut Layout, fixed: &[bool], gri
 /// Lexicographic acceptance: a change in the gate key decides outright (lower
 /// wins, even at a PEX cost); only a tie lets Metropolis judge `d_pex`.
 #[inline]
-fn accept(before: (usize, f64, f64), after: (usize, f64, f64), d_pex: f64, temp: f64, rng: &mut SplitMix64) -> bool {
+fn accept(before: (usize, f64, f64, f64), after: (usize, f64, f64, f64), d_pex: f64, temp: f64, rng: &mut SplitMix64) -> bool {
     if after != before {
         return after < before;
     }
@@ -454,14 +471,14 @@ fn try_swap(
 }
 
 /// One symmetry axis and the mirror pairs sharing it (self-pairs `a == b` sit
-/// on the axis). Groups with a fixed member are left to projection.
+/// on the axis).
 struct SymGroup {
     axis: usize,
     pairs: Vec<(usize, usize)>,
     members: Vec<usize>,
 }
 
-fn sym_groups(reqs: &Requirements<Layout>, n: usize, fixed: &[bool]) -> Vec<SymGroup> {
+fn sym_groups(reqs: &Requirements<Layout>, n: usize) -> Vec<SymGroup> {
     let mut raw = Vec::new();
     for b in &reqs.hard {
         b.mirror_pairs(&mut raw);
@@ -484,7 +501,6 @@ fn sym_groups(reqs: &Requirements<Layout>, n: usize, fixed: &[bool]) -> Vec<SymG
             }
         }
     }
-    out.retain(|g| !g.members.iter().any(|&m| fixed.get(m).copied().unwrap_or(false)));
     out
 }
 
@@ -574,47 +590,48 @@ fn quarter_turn(o: Orient) -> Orient {
     }
 }
 
-/// Grouped (matched) devices never turn, and no move introduces a mirror, so
-/// every matched device keeps its seeded orientation: channels stay parallel
-/// and S→D current runs the same way across the set, by construction.
-fn rotatable(l: &Layout, c: usize) -> bool {
-    !l.groups.iter().any(|g| g.len() > 1 && g.iter().any(|d| d.0 as usize == c))
-}
-
-/// Turn `c` a quarter; `hw`/`hh` swap with the orientation (`Layout::orient`).
+/// Turn a whole orient set a quarter, in one trial; `hw`/`hh` swap with the
+/// orientation (`Layout::orient`). No move introduces a mirror, so a matched
+/// set keeps one orientation: channels stay parallel and S→D current runs the
+/// same way across it.
 fn try_rotate(
     sa: &mut Sa,
     l: &mut Layout,
     rng: &mut SplitMix64,
     temp: f64,
-    c: usize,
+    set: &[usize],
     clamp_x: &impl Fn(i32, i32) -> i32,
     clamp_y: &impl Fn(i32, i32) -> i32,
 ) -> bool {
     sa.trial(l, rng, temp, |l, _, _| {
-        l.orient[c] = quarter_turn(l.orient[c]);
-        (l.hw[c], l.hh[c]) = (l.hh[c], l.hw[c]);
-        l.x[c] = clamp_x(l.x[c], l.hw[c]);
-        l.y[c] = clamp_y(l.y[c], l.hh[c]);
+        for &c in set {
+            l.orient[c] = quarter_turn(l.orient[c]);
+            (l.hw[c], l.hh[c]) = (l.hh[c], l.hw[c]);
+            l.x[c] = clamp_x(l.x[c], l.hw[c]);
+            l.y[c] = clamp_y(l.y[c], l.hh[c]);
+        }
     })
 }
 
-/// Swap `c` to one uniformly drawn other variant. Extents follow the new bbox
-/// (transposed under a turned orient) and the pin offsets are patched before
-/// pricing, so the move is scored on where pins land.
+/// Swap a whole shape set (first member `set[0]`) to one uniformly drawn other
+/// variant, in one trial. Extents follow the new bbox (transposed under a
+/// turned orient) and the pin offsets are patched before pricing, so the move
+/// is scored on where pins land. Refused when any member is fixed or has a
+/// different variant count.
 #[allow(clippy::too_many_arguments)]
 fn try_reshape(
     sa: &mut Sa,
     l: &mut Layout,
     rng: &mut SplitMix64,
     temp: f64,
-    c: usize,
+    set: &[usize],
     variants: &[gp::VariantSpace],
     clamp_x: &impl Fn(i32, i32) -> i32,
     clamp_y: &impl Fn(i32, i32) -> i32,
 ) -> bool {
+    let c = set[0];
     let depth = variants[c].alternatives.len();
-    if depth < 2 || sa.is_fixed(c) {
+    if depth < 2 || set.iter().any(|&m| sa.is_fixed(m) || variants[m].alternatives.len() != depth) {
         return false;
     }
     let cur = l.variant[c] as usize;
@@ -622,20 +639,24 @@ fn try_reshape(
     let next = if cur < depth && draw >= cur { draw + 1 } else { draw };
 
     let ok = sa.trial(l, rng, temp, |l, nets, cell_nets| {
-        let alt = &variants[c].alternatives[next];
-        let (w, h) = variant_extents(alt);
-        l.variant[c] = next as u16;
-        (l.hw[c], l.hh[c]) = match l.orient.get(c) {
-            Some(o) if o.swaps_axes() => (h, w),
-            _ => (w, h),
-        };
-        l.x[c] = clamp_x(l.x[c], l.hw[c]);
-        l.y[c] = clamp_y(l.y[c], l.hh[c]);
-        nets.reshape_cell(c, &cell_nets[c], alt);
+        for &m in set {
+            let alt = &variants[m].alternatives[next];
+            let (w, h) = variant_extents(alt);
+            l.variant[m] = next as u16;
+            (l.hw[m], l.hh[m]) = match l.orient.get(m) {
+                Some(o) if o.swaps_axes() => (h, w),
+                _ => (w, h),
+            };
+            l.x[m] = clamp_x(l.x[m], l.hw[m]);
+            l.y[m] = clamp_y(l.y[m], l.hh[m]);
+            nets.reshape_cell(m, &cell_nets[m], alt);
+        }
     });
     if !ok {
-        if let Some(alt) = variants[c].alternatives.get(l.variant[c] as usize) {
-            sa.nets.reshape_cell(c, &sa.cell_nets[c], alt);
+        for &m in set {
+            if let Some(alt) = variants[m].alternatives.get(l.variant[m] as usize) {
+                sa.nets.reshape_cell(m, &sa.cell_nets[m], alt);
+            }
         }
     }
     ok

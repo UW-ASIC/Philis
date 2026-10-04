@@ -416,6 +416,7 @@ fn solve(
     let unit_cells: Vec<(Vec<DeviceId>, bool)> = problem.constraints.unitization.iter().map(|u| (u.devices.clone(), u.route_matching_required)).collect();
     let fold = cellgen::folds(&netlist, pdk, &bias.gm_us, &unit_cells);
     let cells = CellSpace::new(&netlist, injected, &mut problem, pdk, &bias.power, merge_distinct_gates, &fold);
+    let locks = dp::locks::locks(&problem.placement, cells.variants.len(), &cells.variants);
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
@@ -474,6 +475,7 @@ fn solve(
         cuts,
         problem,
         cells,
+        locks,
         perf: cfg.performance.as_ref(),
         perf_rows,
         intent: intent.clone(),
@@ -648,6 +650,8 @@ struct Flow<'a> {
     /// Rules and constraints; placement rules retargeted to cell ids.
     problem: Problem,
     cells: CellSpace,
+    /// Matched-cell orient/shape locks (PLC-03), over all variants.
+    locks: dp::locks::Locks,
     /// Post-layout performance scoring, when configured.
     perf: Option<&'a perf::PerfConfig>,
     /// Spec bounds as sensitivity rows ([`performance_rows`]); weigh [`c_tier`].
@@ -753,36 +757,46 @@ impl Flow<'_> {
         neg: &mut gr::Negotiation,
         seed: u64,
     ) -> Epoch {
+        let unified = {
+            let mut a = assignment.to_vec();
+            self.locks.unify(&mut a);
+            a
+        };
+        let assignment = &unified[..];
         let placement = &self.problem.placement;
         let cells = &self.cells;
         let layers = &self.layers;
 
         // Place: coarse analytical, then legalising anneal (which may reshape).
         let macros = cellgen::realize(&cells.variants, assignment);
-        let (mut coarse, _) = gp::place(&macros, &cells.variants, assignment, placement, prices, place_rules(self.pdk), &self.net_weight, seed, self.gp_mode == GpMode::Analytic);
+        let inp = gp::GpInput {
+            macros: &macros,
+            variants: &cells.variants,
+            assignment,
+            reqs: placement,
+            rules: place_rules(self.pdk),
+            net_weight: &self.net_weight,
+            n_axes: self.problem.blocks.len(),
+            power_uw: &cells.power,
+            units: cells.units.clone(),
+            iterate: self.gp_mode == GpMode::Analytic,
+        };
+        let (coarse, _) = gp::place(&inp, prices, seed);
         coarse.debug_check("gp::place");
-        // dp reads groups as abutment permission, so it gets the diffusion-sharing
-        // table; after dp, groups are the recognition table for `Target::Group`.
-        coarse.groups = cells.abutment.clone();
-        if coarse.axis.len() < self.problem.blocks.len() {
-            let centre = coarse.centre_x_estimate();
-            coarse.axis.resize(self.problem.blocks.len(), centre);
-        }
-        coarse.power_uw = cells.power.clone();
-        coarse.units = cells.units.clone();
-        coarse.refresh_temps();
         let (mut layout, place_report, dp_stats) = dp::place(
             &coarse,
             &macros,
             if reshape { &cells.variants } else { &[] },
             placement,
             &cells.fixed,
+            &self.locks,
             prices,
             place_rules(self.pdk),
             &self.net_weight,
             seed,
+            dp::Schedule::cold(),
         );
-        layout.debug_check_placed("dp::place");
+        layout.debug_check("dp::place");
         layout.groups = cells.groups.clone();
         // The epoch's one dual step, on the layout it is scored on (T6).
         prices.settle(placement, &layout);
@@ -793,7 +807,8 @@ impl Flow<'_> {
         };
         // Measured on the macros dp's variants draw, so `lattice_off` stamps what is drawn.
         let lattice = cells::builder::cut_lattice(self.pdk);
-        let place = geometry::placement_metrics(&macros, &layout, lattice, place_rules(self.pdk).clearance, placement);
+        let place = geometry::placement_metrics(&macros, &layout, lattice, place_rules(self.pdk).clearance, placement, &self.locks);
+        debug_assert_eq!(place.lattice_off, 0, "dp::place: cell origin off the cut lattice");
 
         // Guard rings enclose placed cells, so they are drawn now, before routing.
         let mut rings = cells::post_cell::guard_rings(&layout, &cells.guard_rings, self.pdk, ring_cut_ohm(self.pdk));
@@ -1389,10 +1404,8 @@ fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> Bias {
 struct CellSpace {
     /// Pre-drawn alternatives per cell — what `gp`/`dp` search over.
     variants: Vec<gp::VariantSpace>,
-    /// Injected (user-macro) cells: `dp` never moves or reshapes them.
+    /// Injected (user-macro) cells, drawn as given: dp never reshapes or rotates them.
     fixed: Vec<bool>,
-    /// `Layout::groups` for `dp`: groups that may share diffusion.
-    abutment: Vec<Vec<DeviceId>>,
     /// `Layout::groups` after `dp`: the recognition table.
     groups: Vec<Vec<DeviceId>>,
     /// Guard-ring requirements, one per requesting cell.
@@ -1475,7 +1488,6 @@ impl CellSpace {
                         .fold(0, i32::saturating_add)
                 })
                 .collect(),
-            abutment: problem.abutment.iter().map(to_cells).collect(),
             groups,
             variants: spaces,
             guard_rings,
@@ -1485,8 +1497,9 @@ impl CellSpace {
         };
         // Reserve each ring's halo in the requester's bbox so the placer keeps
         // neighbours out of it; the ring is drawn back inside the reservation.
+        let lattice = cells::builder::cut_lattice(pdk);
         for r in &cells.guard_rings.guard_rings {
-            let ext = round_up(cells::post_cell::ring_halo(r, pdk, ring_cut_ohm(pdk)), cells::builder::cut_lattice(pdk));
+            let ext = round_up(cells::post_cell::ring_halo(r, pdk, ring_cut_ohm(pdk)), lattice);
             let Some(space) = cells.variants.get_mut(r.device.0 as usize) else {
                 continue;
             };
@@ -1496,6 +1509,11 @@ impl CellSpace {
                 m.bbox.w += 2 * ext;
                 m.bbox.h += 2 * ext;
             }
+        }
+        // Origins on the cut lattice need extents on twice it (PLC-02); generated
+        // and injected cells alike, before unit frames are taken from the bbox.
+        for m in cells.variants.iter_mut().flat_map(|s| s.alternatives.iter_mut()) {
+            m.align_bbox(lattice);
         }
         // After the halo: a unit's frame is the bbox `place_macro` anchors on.
         let per_cell: Vec<Vec<(pnr_core::Rect, &[pnr_core::Unit])>> = cells

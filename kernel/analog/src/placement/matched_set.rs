@@ -180,6 +180,11 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
     fn touched(&self, out: &mut Vec<u32>) {
         out.extend(self.members.iter().map(|&m| self.cell(m) as u32));
     }
+    fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        let Some((&m0, rest)) = self.members.split_first() else { return };
+        let c0 = self.cell(m0) as u32;
+        out.extend(rest.iter().map(|&m| (c0, self.cell(m) as u32)));
+    }
     fn violating_ids(&self, l: &Layout, out: &mut Vec<u32>) {
         let mut v = Vec::new();
         self.violating_residuals(l, &mut v);

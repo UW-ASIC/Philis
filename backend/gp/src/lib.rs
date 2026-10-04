@@ -12,7 +12,7 @@ use pnr_core::{Layout, Macro, Report};
 
 use mechanics::{
     analog_cost, analog_phi, canvas_side, choose_variants, clamp_to_die, half_extents,
-    initial_layout, report, Nets, SplitMix64,
+    initial_layout, report, snap, Nets, SplitMix64,
 };
 
 /// One placeable cell's pre-drawn alternatives; `layout.variant[i]` indexes
@@ -232,23 +232,34 @@ const TARGET_UTIL: f32 = 0.7;
 /// Finite-difference probe (nm) for the analog-cost gradient.
 const ANALOG_PROBE: i32 = 64;
 
+/// Everything [`place`] reads.
+pub struct GpInput<'a> {
+    pub macros: &'a [Macro],
+    pub variants: &'a [VariantSpace],
+    pub assignment: &'a [u16],
+    pub reqs: &'a Requirements<Layout>,
+    pub rules: Rules,
+    pub net_weight: &'a [f32],
+    /// Symmetry axes, one per block (`Problem::blocks`).
+    pub n_axes: usize,
+    /// Per cell, µW; empty = unpowered.
+    pub power_uw: &'a [i32],
+    pub units: std::sync::Arc<pnr_core::UnitLib>,
+    /// `false`: return the initial pile (`GpMode::Pile`).
+    pub iterate: bool,
+}
+
 /// Coarse placement of `macros`, drawn as `assignment` picks from each
 /// `variants[i]` (missing = 0), seed-deterministic. `net_weight[NetId]` weights each net's HPWL (empty =
-/// unweighted; see [`net_weights`]). `iterate = false` returns the seeded pile
+/// unweighted; see [`net_weights`]). Each block's axis follows the mean
+/// midpoint of its hard mirror pairs. The layout carries `power_uw` and `units`
+/// throughout, so matched-set thermal terms see the real field; temperatures
+/// are refreshed once, on return. `iterate = false` returns the seeded pile
 /// from `initial_layout` unrefined, still reported: the baseline that measures
 /// what the analytic loop adds (neither mode moves prices; the epoch's one dual
 /// step is the caller's, after dp).
-pub fn place(
-    macros: &[Macro],
-    variants: &[VariantSpace],
-    assignment: &[u16],
-    reqs: &Requirements<Layout>,
-    prices: &mut Prices,
-    rules: Rules,
-    net_weight: &[f32],
-    seed: u64,
-    iterate: bool,
-) -> (Layout, Report) {
+pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) {
+    let &GpInput { macros, variants, assignment, reqs, rules, net_weight, n_axes, power_uw, iterate, .. } = inp;
     let n = macros.len();
     let mut rng = SplitMix64::new(seed);
     // gp does not search variants: it keeps the caller's, dp reshapes.
@@ -258,11 +269,20 @@ pub fn place(
 
     let (hw, hh) = half_extents(&drawn);
     let side = canvas_side(&hw, &hh, UTILIZATION, rules.grid);
-    let mut l = initial_layout(&drawn, variant, side, &mut rng);
+    let mut l = initial_layout(&drawn, variant, side, n_axes, &mut rng);
+    if power_uw.len() == n {
+        l.power_uw.copy_from_slice(power_uw);
+    }
+    l.units = inp.units.clone();
     let nets = Nets::from_macros(&drawn).weigh(net_weight);
     if n == 0 || !iterate {
-        let rep = report(&nets, reqs, &l, prices);
+        l.refresh_temps();
+        let rep = report(&nets, reqs, &l, prices, rules.clearance);
         return (l, rep);
+    }
+    let mut pairs = Vec::new();
+    for b in &reqs.hard {
+        b.mirror_pairs(&mut pairs);
     }
 
     let mut gx = vec![0.0f32; n];
@@ -277,6 +297,7 @@ pub fn place(
     let span = side as f32;
     let mut save_x = vec![0i32; n];
     let mut save_y = vec![0i32; n];
+    let mut save_axis = Vec::new();
 
     for iter in 0..MAX_ITERS {
         gx.fill(0.0);
@@ -356,6 +377,7 @@ pub fn place(
         let gmax = gx.iter().chain(&gy).fold(0.0f32, |m, g| m.max(g.abs())).max(1e-6);
         let scale = step * span / gmax;
         let before_phi = analog_phi(reqs, &l);
+        save_axis.clone_from(&l.axis);
         save_x.copy_from_slice(&l.x);
         save_y.copy_from_slice(&l.y);
         for i in 0..n {
@@ -364,9 +386,20 @@ pub fn place(
             l.x[i] = clamp_to_die(l.x[i] + vx[i] as i32, l.hw[i], side);
             l.y[i] = clamp_to_die(l.y[i] + vy[i] as i32, l.hh[i], side);
         }
+        // Each block's axis follows its pairs (mean midpoint), so two stages are not pinned to one line.
+        for id in 0..l.axis.len() {
+            let (s, k) = pairs
+                .iter()
+                .filter(|p| usize::from(p.2) == id && (p.0 as usize) < n && (p.1 as usize) < n)
+                .fold((0i64, 0i64), |(s, k), p| (s + i64::from(l.x[p.0 as usize]) + i64::from(l.x[p.1 as usize]), k + 2));
+            if k > 0 {
+                l.axis[id] = snap((s / k) as i32, rules.grid);
+            }
+        }
         if analog_phi(reqs, &l) > before_phi {
             std::mem::swap(&mut l.x, &mut save_x);
             std::mem::swap(&mut l.y, &mut save_y);
+            std::mem::swap(&mut l.axis, &mut save_axis);
             vx.fill(0.0);
             vy.fill(0.0);
             step = (step * 0.5).max(STEP_MIN);
@@ -383,7 +416,8 @@ pub fn place(
         }
     }
 
-    let rep = report(&nets, reqs, &l, prices);
+    l.refresh_temps();
+    let rep = report(&nets, reqs, &l, prices, rules.clearance);
     (l, rep)
 }
 
@@ -681,4 +715,88 @@ mod weight_tests {
         assert!(w[1] > w[0], "{w:?}");
     }
 
+}
+
+#[cfg(test)]
+mod place_tests {
+    use super::*;
+    use analog::matching::mismatch::{Budget, Coeffs, MatchKind};
+    use analog::placement::symmetry::{Symmetry, SymmetryGroup};
+    use analog::placement::MatchedSet;
+    use pnr_core::geom::Rect;
+    use pnr_core::ids::{AxisId, DeviceId, Target};
+
+    fn input<'a>(macros: &'a [Macro], reqs: &'a Requirements<Layout>, n_axes: usize, power: &'a [i32]) -> GpInput<'a> {
+        GpInput {
+            macros,
+            variants: &[],
+            assignment: &[],
+            reqs,
+            rules: Rules { grid: 10, clearance: 270 },
+            net_weight: &[],
+            n_axes,
+            power_uw: power,
+            units: Default::default(),
+            iterate: true,
+        }
+    }
+
+    fn cells(n: usize) -> Vec<Macro> {
+        vec![Macro { bbox: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() }; n]
+    }
+
+    fn sym(a: u16, b: u16, axis: u16) -> SymmetryGroup {
+        SymmetryGroup(vec![Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(axis) }])
+    }
+
+    #[test]
+    fn gp_keeps_one_axis_per_block() {
+        let macros = cells(6);
+        let reqs = Requirements::<Layout> {
+            hard: vec![Box::new(sym(0, 1, 0)), Box::new(sym(2, 3, 1))],
+            budget: vec![],
+            cost: vec![Box::new(sym(0, 1, 0)), Box::new(sym(2, 3, 1))],
+        };
+        let mut apart = false;
+        for seed in 1..=5u64 {
+            let (l, _) = place(&input(&macros, &reqs, 2, &[]), &mut Prices::new(), seed);
+            assert_eq!(l.axis.len(), 2, "seed {seed}");
+            apart |= l.axis[0] != l.axis[1];
+        }
+        assert!(apart, "the two blocks never left one shared axis");
+    }
+
+    /// C28 rewrite of the `ThermalGradient` test: a powered cell pushes the
+    /// matched pair onto one isotherm.
+    #[test]
+    fn gp_sees_power() {
+        let macros = cells(3);
+        let reqs = Requirements::<Layout> {
+            hard: vec![],
+            budget: vec![],
+            cost: vec![Box::new(MatchedSet {
+                members: vec![DeviceId(0), DeviceId(1)],
+                kind: MatchKind::Voltage,
+                mos: true,
+                coeffs: Coeffs { tc_uv_per_k: Some(1_000.0), ..Default::default() },
+                budget: Budget::Allowance(1.0),
+                gate_um2: vec![],
+                tol_nm: 5.0,
+                cell_of: vec![],
+            })],
+        };
+        let hot = [0, 0, 10_000];
+        let spread = |power: &[i32], seed: u64| {
+            let (mut l, _) = place(&input(&macros, &reqs, 1, power), &mut Prices::new(), seed);
+            l.power_uw = hot.to_vec();
+            (l.rise_at_point_mc(l.x[0], l.y[0]) - l.rise_at_point_mc(l.x[1], l.y[1])).abs()
+        };
+        let (mut on, mut off) = (Vec::new(), Vec::new());
+        for seed in 1..=10u64 {
+            on.push(spread(&hot, seed));
+            off.push(spread(&[0, 0, 0], seed));
+        }
+        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+        assert!(mean(&on) < mean(&off), "powered {on:?} vs unpowered {off:?}");
+    }
 }

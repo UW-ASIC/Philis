@@ -4,9 +4,10 @@ use pnr_core::ids::{AxisId, Target};
 use pnr_core::layout::Layout;
 use crate::rule::{Rule, RuleBatch};
 
-/// Partners mirror about `axis`: `x_a + x_b = 2·axis`, `y_a = y_b`. An exact
-/// integer equality, so it is enforced by [`Rule::project`], not by weight;
-/// `residual` stays at the default `0`/`1` (an equality has no budget).
+/// Partners mirror about `axis`: `x_a + x_b = 2·axis`, `y_a = y_b`, and
+/// distinct partners also share `hw`, `hh`, `variant`, `orient`. The mirror
+/// equation is an exact integer equality, so it is enforced by
+/// [`Rule::project`], not by weight; `residual` is the mirror error in µm.
 #[derive(Clone, Copy)]
 pub struct Symmetry {
     pub a: Target,
@@ -23,7 +24,13 @@ impl Rule for Symmetry {
         (ex * ex + ey * ey) * 1e-3
     }
     fn satisfied(self, l: &Layout) -> bool {
-        self.error(l) == (0, 0)
+        self.error(l) == (0, 0) && self.same_shape(l)
+    }
+
+    /// Mirror error `|ex| + |ey|` in µm: a hard margin that is a length, not a count.
+    fn residual(self, l: &Layout) -> f32 {
+        let (ex, ey) = self.error(l);
+        (ex.abs() + ey.abs()) as f32 / 1000.0
     }
 
     fn touches(self, out: &mut Vec<u32>) {
@@ -41,6 +48,13 @@ impl Rule for Symmetry {
     fn mirror_pair(self) -> Option<(u32, u32, u16)> {
         match (self.a, self.b) {
             (Target::Device(a), Target::Device(b)) => Some((u32::from(a.0), u32::from(b.0), self.axis.0)),
+            _ => None,
+        }
+    }
+
+    fn matched_pair(self) -> Option<(u32, u32)> {
+        match (self.a, self.b) {
+            (Target::Device(a), Target::Device(b)) if a != b => Some((u32::from(a.0), u32::from(b.0))),
             _ => None,
         }
     }
@@ -67,6 +81,16 @@ impl Symmetry {
         (ax + bx - 2 * l.axis_x(self.axis), ay - by)
     }
 
+    /// Perfect symmetry (PLC-03; Mirror mode is PLC-21): distinct partners drawn
+    /// alike. A column too short to hold either index reads as equal.
+    fn same_shape(self, l: &Layout) -> bool {
+        let Some((ia, ib)) = self.indices(l) else { return true };
+        fn eq<T: PartialEq>(v: &[T], a: usize, b: usize) -> bool {
+            v.get(a).zip(v.get(b)).is_none_or(|(a, b)| a == b)
+        }
+        ia == ib || (l.hw[ia] == l.hw[ib] && l.hh[ia] == l.hh[ib] && eq(&l.variant, ia, ib) && eq(&l.orient, ia, ib))
+    }
+
     /// Device indices when both targets are in-range devices. `ia == ib` is
     /// allowed: a pair collapsed into one macro degenerates to "centre on axis".
     fn indices(self, l: &Layout) -> Option<(usize, usize)> {
@@ -81,7 +105,9 @@ impl Symmetry {
     /// independently keeps both partners on-grid and their sum exactly `2·axis`.
     fn mirror_about(self, l: &mut Layout, axis: i32, g: i32) {
         let Some((ia, ib)) = self.indices(l) else { return };
-        let half = snap_to((snap_to(l.x[ib], g) - snap_to(l.x[ia], g)) / 2, g);
+        let d = snap_to(l.x[ib], g) - snap_to(l.x[ia], g);
+        // Ceiling of |d|/2 on the grid, sign kept: a projected pair never moves closer.
+        let half = d.signum() * ((d.abs() + 2 * g - 1) / (2 * g)) * g;
         l.x[ia] = axis - half;
         l.x[ib] = axis + half;
         let my = snap_to((l.y[ia] + l.y[ib]) / 2, g);
@@ -131,6 +157,12 @@ impl RuleBatch<Layout> for SymmetryGroup {
     }
     fn mirror_pairs(&self, out: &mut Vec<(u32, u32, u16)>) {
         self.0.mirror_pairs(out);
+    }
+    fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        self.0.matched_pairs(out);
+    }
+    fn residual(&self, l: &Layout) -> f64 {
+        self.0.residual(l)
     }
 
     /// Put every pair on one axis at the mean of their midpoints (minimum total
@@ -192,6 +224,20 @@ mod tests {
             b: Target::Device(DeviceId(1)),
             axis: AxisId(0),
         }
+    }
+
+    #[test]
+    fn symmetry_residual_is_the_mirror_error_in_um() {
+        let l = layout(-1_000, 0, 1_500, 0);
+        assert_eq!(SymmetryGroup(vec![rule()]).residual(&l), 0.5);
+    }
+
+    #[test]
+    fn odd_parity_projection_never_shrinks_the_pair() {
+        let mut l = layout(0, 0, 25, 0);
+        rule().project(&mut l, 5);
+        assert_eq!(l.x[1] - l.x[0], 30);
+        assert!(rule().satisfied(&l));
     }
 
     #[test]
@@ -292,6 +338,14 @@ mod tests {
         assert_eq!(l.x[1] - l.x[0], 4_000);
         assert_eq!(l.x[3] - l.x[2], 10_000);
         assert_eq!(grp.violations(&l), 0);
+    }
+
+    #[test]
+    fn unequal_variants_are_not_symmetric() {
+        let mut l = layout(-500, 0, 500, 0);
+        assert!(rule().satisfied(&l));
+        l.variant = vec![0, 1];
+        assert!(!rule().satisfied(&l));
     }
 
     #[test]
