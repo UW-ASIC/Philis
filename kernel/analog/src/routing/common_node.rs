@@ -150,6 +150,10 @@ impl RuleBatch<Routes> for CommonNodes {
     fn repair_kind(&self) -> crate::RepairKind {
         crate::RepairKind::Balance
     }
+    /// Reads only each node's own net shapes.
+    fn local(&self) -> bool {
+        true
+    }
     fn count(&self) -> usize {
         self.nodes.len()
     }

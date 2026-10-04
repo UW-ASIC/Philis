@@ -59,7 +59,7 @@ pub struct GatePin {
     pub nm2: i64,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Routes {
     /// Drawn wire/via shapes per net, by [`NetId`].
     pub wires: Vec<Vec<Shape>>,

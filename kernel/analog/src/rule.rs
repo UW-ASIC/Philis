@@ -165,6 +165,11 @@ pub trait Rule: Copy {
     /// How a router repairs a violated instance; see [`RuleBatch::repair_kind`].
     const REPAIR: RepairKind = RepairKind::Reroute;
 
+    /// Reads only the routes of the nets [`Rule::touches`] pushes: repair may
+    /// keep a cached score while those nets' shapes are unchanged (RTE-23).
+    /// Default `false` (coupling-style rules read their aggressors too).
+    const LOCAL: bool = false;
+
     /// Every instance of this rule in the netlist. Group↔group rules `union`
     /// each side in `uf` and emit `Target::Group`s. Default: none.
     fn extract(hg: &BipartiteHypergraph, uf: &mut UnionFind) -> Vec<Self>
@@ -196,6 +201,11 @@ pub trait RuleBatch<On>: Send + Sync {
     /// How a router repairs this batch's violations. Default `Reroute`.
     fn repair_kind(&self) -> RepairKind {
         RepairKind::Reroute
+    }
+    /// Every rule reads only the state of the ids [`RuleBatch::touched`]
+    /// lists (see [`Rule::LOCAL`]). Default `false`.
+    fn local(&self) -> bool {
+        false
     }
     /// Number of rules in the batch.
     fn count(&self) -> usize {
@@ -316,6 +326,9 @@ impl<On> RuleBatch<On> for Tagged<On> {
     fn repair_kind(&self) -> RepairKind {
         self.inner.repair_kind()
     }
+    fn local(&self) -> bool {
+        self.inner.local()
+    }
     fn count(&self) -> usize {
         self.inner.count()
     }
@@ -396,6 +409,9 @@ impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {
     }
     fn repair_kind(&self) -> RepairKind {
         R::REPAIR
+    }
+    fn local(&self) -> bool {
+        R::LOCAL
     }
     fn count(&self) -> usize {
         self.len()

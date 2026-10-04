@@ -1343,10 +1343,20 @@ impl Flow<'_> {
             }
             (routes, route_report, route_stats) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
             lap(4);
+            let marked = !marks.is_empty();
             for (net, shape) in marks {
                 if let Some(w) = routes.wires.get_mut(net.0 as usize) {
                     w.push(shape);
                 }
+            }
+            // dr scored the routes before the markers joined them: re-derive
+            // its rule rows on the routes that ship (RTE-23).
+            if marked {
+                let (hard, budget) = gr::analog_tiers(&routes, routing);
+                route_report.hard_violations.retain(|v| !v.is_batch_row());
+                route_report.budget_violations.retain(|v| !v.is_batch_row());
+                route_report.hard_violations.extend(hard);
+                route_report.budget_violations.extend(budget);
             }
         }
         let netlist = if extra.is_empty() {
