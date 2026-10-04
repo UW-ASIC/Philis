@@ -133,6 +133,8 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     let hg = pnr_core::BipartiteHypergraph::from_netlist(netlist);
     let mut models = Vec::new();
     let drawn: Vec<size::Drawn> = netlist.devices.iter().map(|d| size::drawn(d, &mut models)).collect();
+    let named = |n: &String| [&cfg.supply_nets, &cfg.ground_nets, &cfg.clock_nets].iter().any(|l| l.iter().any(|s| s.eq_ignore_ascii_case(n)));
+    let user: Vec<bool> = hg.net_names.iter().map(named).collect();
     let cfg = &with_testbench(netlist, cfg, ev);
     let roles = netrole::classify_nets(&hg, cfg);
 
@@ -184,7 +186,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         }
     }
     let gates: Vec<f32> = netlist.devices.iter().map(gate_um2).collect();
-    let net_classes = classify::classify(&hg, &roles, &sensitive, &gates, cfg.process.gate_af_per_um2);
+    let mut net_classes = classify::classify(&hg, &roles, &sensitive, &gates, cfg.process.gate_af_per_um2);
 
     let fet = |k: pnr_core::DeviceKind| matches!(k, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos);
     let needs = Needs {
@@ -202,15 +204,6 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     if netlist.devices.iter().any(|d| d.kind == pnr_core::DeviceKind::Capacitor) {
         missing.push(("ParasiticBudget", "capacitor-plate nets: settling / code-error spec (ARR-03, ARR-05)"));
     }
-    let mut routing = extract::routing(
-        &hg,
-        &net_classes,
-        &gates,
-        &cfg.process,
-        &block::leaves(&blocks).iter().filter(|b| b.kind == BlockKind::DiffPair).map(|b| (b.devices[0], b.devices[1])).collect::<Vec<_>>(),
-        &cfg.policy,
-    );
-
     let mut intent = analog::intent::Intent::default();
     // Symmetry seeds: the disjoint DiffPair/Load/CascodePair leaves (never contradictory),
     // each couple and the list in canonical order, names breaking exact ties.
@@ -259,6 +252,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         s.kind = class::kind_of(s, kinds, netlist.devices[s.members[0].device.0 as usize].kind);
     }
     let input = |i: usize| roles[i].contains(&BlockKind::DiffPair);
+    let mut set_roles = Vec::with_capacity(intent.sets.len());
     let input_compounds: std::collections::HashSet<u16> = (0..intent.sets.len()).filter(|&j| input(j)).filter_map(|j| intent.sets[j].compound).collect();
     for i in 0..intent.sets.len() {
         let s = &intent.sets[i];
@@ -282,6 +276,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         } else {
             class::SetRole::Other
         };
+        set_roles.push(role);
         let mut ctx = class::ClassCtx { user: None, spec_6sigma: cfg.offset_sigma_mv.map(|v| 6.0 * v), role, diags: &mut intent.diagnostics };
         let (c, src) = class::class_of(s, &mut ctx);
         let source = |d: DeviceId| {
@@ -320,7 +315,40 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         leaves.iter().filter(|b| b.kind == BlockKind::Load).flat_map(|b| &b.devices).for_each(|d| v[d.0 as usize] = true);
         v
     };
+    // EXT-18: classes that need sets, then device roles, then current-source gates.
+    let load_af = classify::net_load_af(&hg, &gates, cfg.process.gate_af_per_um2);
+    intent.nets = classify::refine(
+        &mut net_classes,
+        &classify::RefineCtx {
+            hg: &hg,
+            matches: &all,
+            sets: &intent.sets,
+            set_roles: &set_roles,
+            passive: &passive_sets,
+            user: &user,
+            ev,
+            ports: &netlist.ports,
+            load_af: &load_af,
+        },
+    );
     intent.devices = evidence::device_facts(netlist, ev.op.as_ref(), &net_classes, &shared, &load_leaf);
+    // The gate of every CurrentSource is a bias line. Cascode/CurrentSource-by-class
+    // gates already are, so one pass is a fixpoint.
+    for (d, f) in intent.devices.iter().enumerate() {
+        let g = (f.role == analog::intent::DeviceRole::CurrentSource).then(|| pattern::pin_net(&hg, d as u32, "G")).flatten();
+        if let Some(g) = g.filter(|g| matches!(net_classes[g.0 as usize].class, analog::metadata::NetClass::Signal | analog::metadata::NetClass::Sensitive)) {
+            classify::set_class(&mut net_classes[g.0 as usize], analog::metadata::NetClass::Bias, load_af[g.0 as usize]);
+            intent.nets[g.0 as usize].evidence = analog::intent::EvidenceLevel::OpPoint;
+        }
+    }
+    let mut routing = extract::routing(
+        &hg,
+        &net_classes,
+        &gates,
+        &cfg.process,
+        &leaves.iter().filter(|b| b.kind == BlockKind::DiffPair).map(|b| (b.devices[0], b.devices[1])).collect::<Vec<_>>(),
+        &cfg.policy,
+    );
     if ev.op.is_some() && ev.probe_bias {
         intent.diagnostics.push(analog::intent::Diagnostic {
             kind: "probe_bias",

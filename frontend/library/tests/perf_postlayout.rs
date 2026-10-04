@@ -464,3 +464,21 @@ fn ota_reports_robustness_per_bound() {
     assert_eq!(top.split(", ").filter(|d| d.starts_with('X') || d.starts_with('M')).count(), 3, "{l}");
     assert!(r.iter().any(|l| l.starts_with("joint yield")), "{r:?}");
 }
+
+/// EXT-17 acceptance: the probe-bench op point puts the 5T OTA in saturation,
+/// and its bias-gated tail is a current source.
+#[test]
+fn ota_probe_regions() {
+    let Some(lib) = models() else { return };
+    let nl = fixture("ota");
+    let op = library::oppoint::extract(&nl, &op_cfg(lib)).unwrap();
+    let ev = op.evidence(&nl, true);
+    let p = annotator::annotate_with(&nl, &annotator::AnnotationConfig::default(), &ev);
+    let facts = |n: &str| p.intent.devices[nl.devices.iter().position(|d| d.name == n).unwrap()];
+    let headroom: Vec<(String, Option<f64>)> = nl.devices.iter().zip(&op.headroom_mv).map(|(d, h)| (d.name.clone(), *h)).collect();
+    for n in ["XM1", "XM2", "XM3", "XM4", "XM5"] {
+        assert_eq!(facts(n).region, analog::intent::Region::Saturation, "{n}: headroom mV {headroom:?}");
+    }
+    assert_eq!(facts("XM5").role, analog::intent::DeviceRole::CurrentSource);
+    assert!(p.intent.diagnostics.iter().any(|d| d.kind == "probe_bias"));
+}

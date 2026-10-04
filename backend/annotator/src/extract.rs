@@ -126,9 +126,11 @@ pub fn routing(
     // Shields only against a real aggressor: with a clock in the design, every
     // routed sensitive net is shielded by the ground net (quiet and low
     // impedance). No clock, no shields — blanket shielding only adds load.
-    let has_clock = routed().any(|c| c.class == NetClass::Clock);
+    let has_clock = routed().any(|c| matches!(c.class, NetClass::Clock | NetClass::DigitalSwitching | NetClass::Noisy));
     let ground = routed().find(|c| c.class == NetClass::Ground).map(|c| c.net);
-    let shield_ref = |c: &NetClassification| ground.filter(|_| has_clock && c.class == NetClass::Sensitive);
+    let shield_ref = |c: &NetClassification| {
+        ground.filter(|_| has_clock && matches!(c.class, NetClass::Sensitive | NetClass::Bias | NetClass::Reference))
+    };
 
     let coup: Vec<CouplingBudget> = routed()
         .filter_map(|c| {

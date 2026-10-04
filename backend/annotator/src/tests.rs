@@ -517,8 +517,8 @@ fn a_shared_gate_chain_is_a_series_stack_not_a_cascode() {
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(p.blocks[0].devices.len(), 4, "one series_stack_4 group");
     assert!(p.blocks[0].sub_blocks.iter().all(|b| b.kind == BlockKind::Stack), "stack pairs, not a cascode");
-    // The shared gate net is still a Sensitive bias reference (EXT-18 changes this).
-    assert_eq!(p.net_classes[0].class, analog::metadata::NetClass::Sensitive);
+    // The shared gate net (gates only) is a bias line (EXT-18: was `Sensitive`).
+    assert_eq!(p.net_classes[0].class, analog::metadata::NetClass::Bias);
 }
 
 #[test]
@@ -538,8 +538,8 @@ fn a_cascode_stack_is_adjacent_not_matched() {
     assert!(kinds.iter().any(|k| k.ends_with("Proximity")), "{kinds:?}");
     assert!(!kinds.iter().any(|k| k.ends_with("MatchedSet")), "{kinds:?}");
     assert!(p.placement.hard.is_empty());
-    // `vcas` (gates M2 only, no DC path) is still a Sensitive bias reference.
-    assert_eq!(p.net_classes[3].class, analog::metadata::NetClass::Sensitive);
+    // `vcas` (gates M2 only, no DC path) is a bias line (EXT-18: was `Sensitive`).
+    assert_eq!(p.net_classes[3].class, analog::metadata::NetClass::Bias);
 }
 
 /// EXT-07: a `Stack` is adjacent/symmetric, not a gate reference, so it is no

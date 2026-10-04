@@ -199,4 +199,38 @@ mod tests {
         let p = crate::annotate_with(&nl, &crate::AnnotationConfig::default(), &ev);
         assert!(p.intent.devices.iter().all(|f| f.region == Region::Triode && f.role != DeviceRole::Switch), "{:?}", p.intent.devices);
     }
+
+    /// The folded cascode of the corpus (`tests/corpus.rs`).
+    pub(crate) fn folded() -> Netlist {
+        use crate::tests::{fet, nets};
+        use DeviceKind::{Nmos, Pmos};
+        Netlist {
+            devices: vec![
+                fet("M1", Nmos, 1, 0, 2, 3, 10_000, 1_000),
+                fet("M2", Nmos, 5, 4, 2, 3, 10_000, 1_000),
+                fet("M0", Nmos, 6, 2, 3, 3, 20_000, 1_000),
+                fet("M3", Pmos, 7, 0, 8, 8, 20_000, 1_000),
+                fet("M4", Pmos, 7, 4, 8, 8, 20_000, 1_000),
+                fet("M5", Pmos, 10, 9, 0, 8, 10_000, 1_000),
+                fet("M6", Pmos, 10, 11, 4, 8, 10_000, 1_000),
+                fet("M7", Nmos, 12, 9, 13, 3, 5_000, 1_000),
+                fet("M8", Nmos, 12, 11, 14, 3, 5_000, 1_000),
+                fet("M9", Nmos, 9, 13, 3, 3, 5_000, 1_000),
+                fet("M10", Nmos, 9, 14, 3, 3, 5_000, 1_000),
+            ],
+            nets: nets(&["x1", "vinp", "tail", "VSS", "x2", "vinn", "vbn", "vbp1", "VDD", "o1", "vbp2", "out", "vbn2", "y1", "y2"]),
+            ..Default::default()
+        }
+    }
+
+    /// EXT-17/18: a Bias-gated FET with its source off the rails is a cascode,
+    /// not a current source.
+    #[test]
+    fn cascode_before_current_source() {
+        let nl = folded();
+        let p = crate::annotate_with(&nl, &crate::AnnotationConfig::default(), &all_ops(&nl, op(10.0, 50.0, 100.0)));
+        let role = |n: &str| p.intent.devices[nl.devices.iter().position(|d| d.name == n).unwrap()].role;
+        assert_eq!((role("M5"), role("M6")), (DeviceRole::Cascode, DeviceRole::Cascode));
+        assert_eq!(role("M0"), DeviceRole::CurrentSource);
+    }
 }

@@ -110,7 +110,7 @@ pub fn classify_nets(hg: &BipartiteHypergraph, cfg: &AnnotationConfig) -> Vec<Ne
     roles
 }
 
-fn is_clock(lower: &str) -> bool {
+pub(crate) fn is_clock(lower: &str) -> bool {
     CLK_SUBSTR.iter().any(|p| lower.contains(p))
         || CLK_PREFIX.iter().any(|p| {
             lower.strip_prefix(p).is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit() || c == '_' || c == 'b'))

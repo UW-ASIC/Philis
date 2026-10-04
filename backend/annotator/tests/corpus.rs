@@ -731,3 +731,28 @@ fn no_evidence_no_regions() {
         assert!(p.intent.devices.iter().all(|f| f.region == analog::intent::Region::Unknown), "{name}");
     }
 }
+
+/// EXT-18: refined net classes on the corpus.
+#[test]
+fn net_classes() {
+    use analog::metadata::NetClass::{self, *};
+    let check = |name: &str, want: &[(&[&str], NetClass)]| {
+        let nl = net(src(name));
+        let p = annotate(&nl, &cfg(name));
+        assert_eq!(p.intent.nets.len(), nl.nets.len(), "{name}");
+        for &(nets, class) in want {
+            for n in nets {
+                let i = nl.nets.iter().position(|x| x.name == *n).unwrap();
+                assert_eq!(p.net_classes[i].class, class, "{name}: {n}");
+            }
+        }
+        p
+    };
+    check("dac4", &[(&["d0", "d1", "d2", "d3", "b0", "b1", "b2", "b3"], DigitalStatic), (&["top"], Sensitive), (&["VDD"], Supply), (&["VSS"], Ground)]);
+    check("three_stage", &[(&["vbias"], Bias), (&["vin_p", "vin_n"], Sensitive), (&["n3"], Signal)]);
+    check("folded", &[(&["vbp1", "vbp2", "vbn", "vbn2"], Bias)]);
+    check("bjt_mirror", &[(&["in", "outn", "outp"], Signal)]);
+    let p = check("ota5t", &[(&["vbn", "vbias"], Bias), (&["vinp", "vinm"], Sensitive)]);
+    let vbn = net(src("ota5t")).nets.iter().position(|x| x.name == "vbn").unwrap();
+    assert_eq!(p.intent.nets[vbn].evidence, analog::intent::EvidenceLevel::Structure);
+}

@@ -501,7 +501,7 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
     };
     let nets: Vec<pnr_core::NetId> = classes
         .iter()
-        .filter(|c| matches!(c.class, NetClass::Signal | NetClass::Sensitive | NetClass::Clock))
+        .filter(|c| !matches!(c.class, NetClass::Supply | NetClass::Ground | NetClass::Substrate))
         .map(|c| c.net)
         .collect();
     let steps = perf::StepPolicy { gate_af_um2: ann.process.gate_af_per_um2.map_or(0.0, f64::from), ..Default::default() };
@@ -880,15 +880,15 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     macros.extend(best.rings.iter().cloned());
     // MFG-01: density fill, once, on the winner; the search never sees it.
     let drawn = geometry::collect(&macros, &best.layout, &best.routes);
-    let wires_of = |class: analog::metadata::NetClass| -> Vec<pnr_core::Shape> {
-        flow.problem.net_classes.iter().filter(|c| c.class == class)
+    let wires_of = |classes: &[analog::metadata::NetClass]| -> Vec<pnr_core::Shape> {
+        flow.problem.net_classes.iter().filter(|c| classes.contains(&c.class))
             .flat_map(|c| best.routes.wires.get(c.net.0 as usize).into_iter().flatten().copied()).collect()
     };
     // Matched cells: more than one member owns its units.
     let matched: Vec<pnr_core::Rect> = pnr_core::place_macros(&macros, &best.layout).iter()
         .filter(|m| m.units.iter().any(|u| u.owner != m.units[0].owner)).map(|m| m.bbox).collect();
-    use analog::metadata::NetClass::{Ground, Sensitive};
-    macros.extend(fill::fill(&drawn, &wires_of(Ground), &wires_of(Sensitive), &matched, pdk));
+    use analog::metadata::NetClass::{Bias, Ground, Reference, Sensitive};
+    macros.extend(fill::fill(&drawn, &wires_of(&[Ground]), &wires_of(&[Sensitive, Bias, Reference]), &matched, pdk));
     let metadata = metadata::build(
         &flow.problem.placement,
         &best.layout,
@@ -1619,7 +1619,7 @@ fn c_tier(
         if rows.is_empty() {
             let signal = classes
                 .iter()
-                .any(|c| usize::from(c.net.0) == id && matches!(c.class, NetClass::Signal | NetClass::Sensitive | NetClass::Clock));
+                .any(|c| usize::from(c.net.0) == id && !matches!(c.class, NetClass::Supply | NetClass::Ground | NetClass::Substrate));
             return f64::from(u8::from(signal));
         }
         let per_af: f64 = rows
