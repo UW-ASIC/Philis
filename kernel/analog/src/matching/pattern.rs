@@ -318,6 +318,31 @@ pub fn nth_order_rows(order: u8, row: &[u8]) -> Vec<Vec<u8>> {
     p
 }
 
+/// Hastings eqs 8.27/8.28 sweep (hastings.txt L23725–23859): for `N` in
+/// `1..=n_max`, `M = round(N·R_M/R_N)`, `S = |N/R_N − M/R_M|` (1/Ω).
+/// Unsorted, index `N − 1`; returns `(N, M, S)`.
+#[must_use]
+pub fn segmentation(r_n_ohm: f64, r_m_ohm: f64, n_max: u16) -> Vec<(u16, u16, f64)> {
+    (1..=n_max)
+        .map(|n| {
+            let m = (f64::from(n) * r_m_ohm / r_n_ohm).round();
+            (n, m as u16, (f64::from(n) / r_n_ohm - m / r_m_ohm).abs())
+        })
+        .collect()
+}
+
+/// Hastings eqs 8.29–8.33 at one segment value `R0`: `M = ⌊R_M/R0⌋`,
+/// `j = R_M/R0 − M`, `N = ⌊R_N/R0⌋`, `k = R_N/R0 − N`,
+/// `S = |(N+1)/(N+k) − (M+1)/(M+j)|` as printed (GAP-20: Fig. 8.20 swaps `j`
+/// and `k`). Returns `(M, N, j, k, S)`.
+#[must_use]
+pub fn partial_segments(r_n_ohm: f64, r_m_ohm: f64, r0_ohm: f64) -> (u16, u16, f64, f64, f64) {
+    let (qm, qn) = (r_m_ohm / r0_ohm, r_n_ohm / r0_ohm);
+    let (m, n) = (qm.floor(), qn.floor());
+    let (j, k) = (qm - m, qn - n);
+    (m as u16, n as u16, j, k, ((n + 1.0) / (n + k) - (m + 1.0) / (m + j)).abs())
+}
+
 /// Deals `p` reflected pairs of fingers at `seq[off..off + 2p]` in quads
 /// (token `t` with its mirror `p − 1 − t`), each quad to the member whose
 /// share of the centred weight `Σ(2i − n + 1)²` is furthest ahead of what it
@@ -697,5 +722,24 @@ mod tests {
                 assert!(diffusion_legal(&s, Outer::Drain), "{order}: {r:?}");
             }
         }
+    }
+
+    #[test]
+    fn segmentation_reproduces_fig_8_19() {
+        let mut s = segmentation(146e3, 200e3, 15);
+        assert_eq!(s.len(), 15);
+        assert_eq!(s[7].0, 8);
+        s.sort_by(|a, b| a.2.total_cmp(&b.2));
+        for (got, (n, m, v)) in s.iter().zip([(8, 11, 2.05e-7), (11, 15, 3.42e-7), (3, 4, 5.48e-7)]) {
+            assert_eq!((got.0, got.1), (n, m), "{s:?}");
+            assert!((got.2 - v).abs() < 0.01e-7, "{got:?}");
+        }
+    }
+
+    #[test]
+    fn partial_segments_reproduces_the_book_decomposition() {
+        let (m, n, j, k, _) = partial_segments(146e3, 200e3, 10.34e3);
+        assert_eq!((m, n), (19, 14));
+        assert!((j - 0.342).abs() < 2e-3 && (k - 0.120).abs() < 2e-3, "{j} {k}");
     }
 }
