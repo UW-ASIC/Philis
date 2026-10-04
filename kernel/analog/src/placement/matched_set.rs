@@ -8,7 +8,7 @@ use pnr_core::layout::Layout;
 use crate::matching::class::{Family, MatchClass};
 use crate::matching::mismatch::{
     bjt_sigma_vbe_mv, ratio_thermal_pct, sigma_current_pct, sigma_pair, sigma_voltage_mv, Budget, Coeffs, Ledger, LedgerRow, LedgerUnit,
-    MatchKind,
+    MatchKind, GRADIENT_SHARE,
 };
 use crate::matching::moments::{cancelled_order, phi_equal, sums, Pt};
 use crate::matching::pattern::{cc_feasible, diffusion_cc_row, Outer};
@@ -206,12 +206,16 @@ impl MatchedSet {
         }
     }
 
-    /// The budget in a ledger's unit ([`Budget::to_pct`] on a % ledger).
+    /// The budget in a ledger's unit: [`Budget::to_pct`] on a mirror's %
+    /// ledger. A budget of the other unit with no G to convert it (a `Sigma1Pct`
+    /// on an mV ledger, a `Sigma1Mv` on an R/C % ledger) is
+    /// `Eta(GRADIENT_SHARE)`. An `Allowance` on an R/C ledger is read as %.
     #[must_use]
     pub fn budget_in(&self, unit: LedgerUnit) -> Budget {
-        match (unit, self.gm_over_id) {
-            (LedgerUnit::Pct, Some(g)) => self.budget.to_pct(g),
-            _ => self.budget,
+        match (unit, self.gm_over_id, self.budget) {
+            (LedgerUnit::Pct, Some(g), b) => b.to_pct(g),
+            (LedgerUnit::Pct, None, Budget::Sigma1Mv(_)) | (LedgerUnit::Mv, _, Budget::Sigma1Pct(_)) => Budget::Eta(GRADIENT_SHARE),
+            (_, _, b) => b,
         }
     }
 
@@ -371,30 +375,32 @@ pub(crate) fn layout(xs: &[i32], ys: &[i32], half: i32) -> Layout {
 }
 
 #[cfg(test)]
+pub(crate) fn unit(owner: u8, x: i32, y: i32, weight: i64) -> pnr_core::Unit {
+    pnr_core::Unit { owner, x, y, weight, phi: (1, 0), sa: 0, sb: 0 }
+}
+
+/// Devices 0 and 1, one 20 µm² unit each, alone in cells 0 and 1 `dx` apart.
+#[cfg(test)]
+pub(crate) fn singles(dx: i32) -> Layout {
+    let one = [unit(0, 50, 50, 20_000_000)];
+    let alts = [(pnr_core::Rect { x: 0, y: 0, w: 100, h: 100 }, &one[..])];
+    let lib = pnr_core::UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &alts[..]].into_iter());
+    let mut l = layout(&[0, dx], &[0, 0], 50);
+    l.units = std::sync::Arc::new(lib);
+    l
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::rule::RuleBatch;
     use pnr_core::{Rect, Unit, UnitLib};
     use std::sync::Arc;
 
-    fn unit(owner: u8, x: i32, y: i32, weight: i64) -> Unit {
-        Unit { owner, x, y, weight, phi: (1, 0), sa: 0, sb: 0 }
-    }
-
     /// Devices 0 and 1 drawn in one cell (cell 0) over `bbox`.
     fn merged(units: &[Unit], bbox: Rect) -> UnitLib {
         let alts = [(bbox, units)];
         UnitLib::build(vec![0, 0], &[vec![DeviceId(0), DeviceId(1)]], std::iter::once(&alts[..]))
-    }
-
-    /// Devices 0 and 1, one 20 µm² unit each, alone in cells 0 and 1 `dx` apart.
-    fn singles(dx: i32) -> Layout {
-        let one = [unit(0, 50, 50, 20_000_000)];
-        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &one[..])];
-        let lib = UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &alts[..]].into_iter());
-        let mut l = layout(&[0, dx], &[0, 0], 50);
-        l.units = Arc::new(lib);
-        l
     }
 
     /// One 800 × 100 cell drawing `order` (owner per unit) at x 100…700.
@@ -663,6 +669,19 @@ mod tests {
         let r = row(&set(Family::Bipolar, Some(2.0)));
         assert_eq!((r.unit, r.sigma_layout), ("mV", 0.0));
         assert!((r.sigma_rand - bjt_sigma_vbe_mv(sigma_pair(2.0, 36.0, 36.0))).abs() < 1e-7, "{r:?}");
+    }
+
+    /// A budget of the other unit with no G is `Eta(GRADIENT_SHARE)`: a % class
+    /// on an mV pair, an mV offset on an R/C ratio.
+    #[test]
+    fn budget_in_never_crosses_units_without_g() {
+        let mv = MatchedSet { budget: Budget::Sigma1Pct(0.5), ..pair(0, 1) };
+        assert_eq!(mv.budget_in(LedgerUnit::Mv), Budget::Eta(GRADIENT_SHARE));
+        let mirror = MatchedSet { gm_over_id: Some(10.0), ..mv };
+        assert_eq!(mirror.budget_in(LedgerUnit::Pct), Budget::Sigma1Pct(0.5));
+        let rc = MatchedSet { family: Family::Resistor, budget: Budget::Sigma1Mv(1.0), ..pair(0, 1) };
+        assert_eq!(rc.budget_in(LedgerUnit::Pct), Budget::Eta(GRADIENT_SHARE));
+        assert_eq!(MatchedSet { budget: Budget::Sigma1Pct(0.5), ..rc }.budget_in(LedgerUnit::Pct), Budget::Sigma1Pct(0.5));
     }
 
     #[test]

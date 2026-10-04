@@ -83,11 +83,15 @@ pub enum Budget {
 impl Budget {
     /// A class limit as a budget: a voltage limit in mV is 6σ (Hastings
     /// §13.3, hastings.txt L42333–42350), so the 1σ total is a sixth of it.
-    /// A % limit has no ledger yet (MAT-09/10): `Eta(GRADIENT_SHARE)`.
+    /// A % limit (mirror, R/C ratio) is 6σ too: `Sigma1Pct(v/6)`, which only a
+    /// % ledger spends (an mV ledger reads it as `Eta(GRADIENT_SHARE)`,
+    /// `MatchedSet::budget_in`). An mV limit on a non-voltage pair:
+    /// `Eta(GRADIENT_SHARE)`.
     #[must_use]
     pub fn from_class(limit: ClassLimit, kind: MatchKind) -> Budget {
         match (limit, kind) {
             (ClassLimit::Mv(v), MatchKind::Voltage) => Budget::Sigma1Mv(v / 6.0),
+            (ClassLimit::Pct(v), _) => Budget::Sigma1Pct(v / 6.0),
             _ => Budget::Eta(GRADIENT_SHARE),
         }
     }
@@ -270,7 +274,8 @@ mod tests {
     #[test]
     fn class_budget_is_one_sixth_of_the_limit() {
         assert_eq!(Budget::from_class(ClassLimit::Mv(3.0), MatchKind::Voltage), Budget::Sigma1Mv(0.5));
-        assert_eq!(Budget::from_class(ClassLimit::Pct(3.0), MatchKind::Current), Budget::Eta(0.3));
+        assert_eq!(Budget::from_class(ClassLimit::Pct(3.0), MatchKind::Current), Budget::Sigma1Pct(0.5));
+        assert_eq!(Budget::from_class(ClassLimit::Mv(3.0), MatchKind::Current), Budget::Eta(0.3));
     }
 
     #[test]

@@ -685,9 +685,9 @@ mod tests {
         }
     }
 
-    /// DACP's trade (Table II): the spiral carries the least wire per unit. The
-    /// INL ranking is `analog::matching::dac`'s (the one-unit C0/C1 dominate
-    /// DNL on a drawn 5-bit bank, so no DNL order is asserted).
+    /// DACP's trade (Table II): the spiral carries the least wire per unit, the
+    /// chessboard the least INL (the one-unit C0/C1 dominate DNL on a drawn
+    /// 5-bit bank, so no DNL order is asserted).
     #[test]
     fn metrics_rank_the_families() {
         struct Flat;
@@ -706,6 +706,7 @@ mod tests {
         let m = |p| CapArray { pattern: p, tall: false }.metrics(&g, &c, &Flat, 1e-5);
         let (sp, cb) = (m(Pattern::Spiral), m(Pattern::Chessboard));
         assert!(sp.route_spread < cb.route_spread, "spiral {} vs chessboard {}", sp.route_spread, cb.route_spread);
+        assert!(cb.inl_lsb < sp.inl_lsb, "chessboard INL {} vs spiral {}", cb.inl_lsb, sp.inl_lsb);
         assert_eq!(sp.vias.len(), 6);
     }
 

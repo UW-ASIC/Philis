@@ -74,7 +74,7 @@ pub fn notes(set: &MatchedSet, l: &Layout, class_limit_mv: Option<f32>) -> Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::placement::matched_set::{layout, pair};
+    use crate::placement::matched_set::{layout, pair, singles};
 
     /// Voltage pair 0/1, A_VT 9.5, 20 µm² each from the netlist (no units):
     /// σ_rand 2.124 mV over a 1 mV 1σ budget.
@@ -106,6 +106,23 @@ mod tests {
         let l = layout(&[0, 5_000], &[0, 0], 100);
         let n = notes(&MatchedSet { kind: MatchKind::Current, ..voltage() }, &l, None);
         assert_eq!((n.len(), n[0].kind, n[0].lever), (1, "budget_area", "length"));
+    }
+
+    /// Units drawn, 20 µm² each: D* = 1303 µm; 1 µm apart is non-binding,
+    /// 200 µm apart is not.
+    #[test]
+    fn dstar_names_the_distance_lever() {
+        for (dx, lever) in [(1_000, "distance term non-binding"), (200_000, "distance")] {
+            let l = singles(dx);
+            let s = pair(0, 1);
+            let g = s.ledger(&l, 1);
+            let n = notes(&s, &l, None);
+            assert_eq!(n.len(), 1, "{n:?}");
+            assert_eq!((n[0].kind, n[0].lever), ("dstar", lever), "{n:?}");
+            assert_eq!(n[0].have, g.delta_m_nm / 1000.0);
+            assert!((g.delta_m_nm - dx as f32).abs() < 1.0, "{}", g.delta_m_nm);
+            assert_eq!(n[0].need, dstar_um(9.5, 1.63, 20.0));
+        }
     }
 
     #[test]
