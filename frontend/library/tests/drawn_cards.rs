@@ -34,6 +34,7 @@ fn two_segment_resistor(pdk: &verify::Pdk) -> library::Solution {
             series_parallel: SeriesParallel::Series,
             dummy_required: false,
             route_matching_required: false,
+            class: None,
         }],
         ..Default::default()
     };

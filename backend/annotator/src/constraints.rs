@@ -61,6 +61,7 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block]) -> Constra
                 },
                 dummy_required: true,
                 route_matching_required: true,
+                class: None,
             });
         }
     }
