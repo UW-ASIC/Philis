@@ -37,6 +37,18 @@ pub struct EmLimit {
     pub derating_assumed: bool,
 }
 
+/// One FET model's voltage ratings, mV (deck `gate_oxide` / `drain_source`
+/// rules); `None` = the deck states no such rule for the model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FetLimit {
+    /// Full model name as the deck spells it (`sky130_fd_pr__nfet_01v8`).
+    pub model: String,
+    /// Largest |V_GS|, mV.
+    pub vgs_max_mv: Option<f32>,
+    /// Largest |V_DS|, mV.
+    pub vds_max_mv: Option<f32>,
+}
+
 /// Process design kit: layers, design-rule values, grid, and the gdsverify deck.
 pub struct Pdk {
     /// Layer name → [`LayerId`]; row `i` is `LayerId(i)` is deck layer `i`
@@ -673,6 +685,36 @@ impl Pdk {
             .filter(|e| e.ua_per_cut > 0.0)
             .reduce(|a, b| if a.ua_per_cut <= b.ua_per_cut { a } else { b })
             .map(|e| EmLimit { ua_per_um: 0.0, blech: 0.0, ..e })
+    }
+
+    /// Every `gate_oxide` / `drain_source` rule's `max_voltage` per model it
+    /// names, merged by model: a model in both kinds gets both fields, two
+    /// rules of one kind keep the tighter. Empty when the deck rates no FET.
+    #[must_use]
+    pub fn fet_voltage_limits(&self) -> Vec<FetLimit> {
+        let mut out: Vec<FetLimit> = Vec::new();
+        let (Some(max), Some(model)) = (self.strings.get("max_voltage"), self.strings.get("model")) else { return out };
+        for (kind, gate) in [("gate_oxide", true), ("drain_source", false)] {
+            let Some(kind) = self.strings.get(kind) else { continue };
+            for s in self.deck.rules.spec.iter().filter(|s| s.kind == kind) {
+                let Some(ParamValue::Ratio(mv)) = self.deck.rules.param(s, max) else { continue };
+                let mv = mv as f32;
+                for &(name, v) in self.deck.rules.params_of(s) {
+                    let ParamValue::Model(id) = v else { continue };
+                    if name != model {
+                        continue;
+                    }
+                    let m = self.strings.resolve(id);
+                    let i = out.iter().position(|f| f.model == m).unwrap_or_else(|| {
+                        out.push(FetLimit { model: m.to_string(), vgs_max_mv: None, vds_max_mv: None });
+                        out.len() - 1
+                    });
+                    let f = if gate { &mut out[i].vgs_max_mv } else { &mut out[i].vds_max_mv };
+                    *f = Some(f.map_or(mv, |o| o.min(mv)));
+                }
+            }
+        }
+        out
     }
 
     /// `cell.em_derating` (GAP-06) as `((T_ref K, Ea eV, n), assumed)`; `None`
@@ -1720,6 +1762,18 @@ mod tests {
         let text: String = Pdk::deck_text(&sidecar).unwrap().lines().filter(|l| !l.contains("em_current_density")).collect::<Vec<_>>().join("\n");
         let bare = Pdk::load(&text, &sidecar).unwrap();
         assert!(bare.routing_metals.iter().all(|&l| bare.em_limit(l).is_none()), "no EM rules: unknown");
+    }
+
+    /// REL-10: sky130's `gate_oxide` / `drain_source` rules, merged per model
+    /// (the ESD NFET's own 5 V gate rule, both kinds on one model).
+    #[test]
+    fn sky130_fet_ratings_come_from_the_deck() {
+        let lim = load("sky130").fet_voltage_limits();
+        let of = |m: &str| lim.iter().find(|f| f.model == format!("sky130_fd_pr__{m}")).map(|f| (f.vgs_max_mv, f.vds_max_mv));
+        assert_eq!(of("nfet_01v8"), Some((Some(1950.0), Some(1950.0))));
+        assert_eq!(of("nfet_g5v0d10v5"), Some((Some(5500.0), Some(11000.0))));
+        assert_eq!(of("esd_nfet_g5v0d10v5"), Some((Some(5000.0), Some(11000.0))));
+        assert!(of("pfet_01v8_hvt").is_some());
     }
 
     /// GAP-06: no deck states Black's parameters, so each EM limit takes the

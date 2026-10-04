@@ -6,10 +6,10 @@
 //!   are group scalars, and a mixed group draws members at the wrong size (LVS
 //!   `parameter_mismatch`). Model and bulk split classes too: two flavours or two
 //!   wells are never one drawn unit (AA-20).
-//! - **Guard ring** for FETs, flavour by the *device's* polarity, tied to its bulk
-//!   net. Bipolars get none: their `B` terminal is the base, not the bulk.
+//!
+//! Guard rings are not emitted here: [`crate::rings::plan`] places them by role (REL-07).
 
-use analog::cell::{GuardRingRequirement, GuardRingType, SeriesParallel, Unitization};
+use analog::cell::{SeriesParallel, Unitization};
 use analog::Constraints;
 use pnr_core::ids::DeviceId;
 use pnr_core::netlist::DeviceKind;
@@ -62,25 +62,6 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block]) -> Constra
                 same_variant_required: true,
                 dummy_required: true,
                 route_matching_required: true,
-            });
-        }
-
-        for &d in &b.devices {
-            let dev = &netlist.devices[d.0 as usize];
-            let ring_type = match dev.kind {
-                DeviceKind::Pmos => GuardRingType::Tap { in_well: true },
-                DeviceKind::Nmos => GuardRingType::Tap { in_well: false },
-                _ => continue,
-            };
-            let Some(&(_, bulk)) = dev.terminals.iter().find(|(t, _)| t == "B") else { continue };
-            c.guard_rings.push(GuardRingRequirement {
-                device: d,
-                ring_type,
-                // Victim rings merge with same-net same-type neighbours (post_cell).
-                shareable: true,
-                min_width_nm: 500,
-                max_ring_resistance_mohm: 100_000,
-                connection_net: bulk,
             });
         }
     }

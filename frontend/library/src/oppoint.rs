@@ -147,6 +147,10 @@ pub struct OpConfig {
     /// Simulation temperature, °C: the bias is solved at it, and EM limits
     /// rated at a hotter reference are derated to it (never credited cooler).
     pub temp_c: f64,
+    /// Package junction-to-ambient resistance θ_JA, °C/W (Hastings eq. 5.1):
+    /// EM is derated at `temp_c + θ_JA·P_total` plus the on-die rise. `None`
+    /// = no package rise (no ref/ source or deck gives one).
+    pub theta_ja_c_per_w: Option<f64>,
 }
 
 impl Default for OpConfig {
@@ -162,6 +166,7 @@ impl Default for OpConfig {
             pmos_model: String::new(),
             ngspice: "ngspice".into(),
             temp_c: 27.0,
+            theta_ja_c_per_w: None,
         }
     }
 }

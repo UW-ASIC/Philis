@@ -24,6 +24,7 @@ pub mod metadata;
 /// DC operating point via ngspice — the per-device power the thermal rules need.
 pub mod oppoint;
 pub mod perf;
+pub mod reliability;
 
 /// Test gates for external tools (FLOW-14), shared by the unit and
 /// integration tests: a missing tool skips with a printed reason, and under
@@ -160,6 +161,8 @@ pub struct Solution {
     pub well_layer: Option<LayerId>,
     /// The operating point the run was biased with; `None` without one.
     pub op: Option<oppoint::OpPoint>,
+    /// Recognised matched pairs ([`matched_pairs`]): signoff's REL-10 rows.
+    pub pairs: Vec<(DeviceId, DeviceId)>,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -460,7 +463,32 @@ fn solve(
     // the access jogs and pin cuts carry their terminal's current.
     let em_layers: Vec<LayerId> = layers.iter().copied().chain(pin_access.map(|p| p.0)).collect();
     let em_cuts: Vec<elaborate::Cut> = cuts.iter().copied().chain(pin_access.map(|p| p.1)).collect();
-    let em = elaborate::em_limits(pdk, &em_layers, &em_cuts, cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15));
+    // REL-05: EM is derated at T_amb + θ_JA·P_total + the worst on-die rise
+    // any placement can give ([`pnr_core::thermal::rise_bound_mc`]). Per cell,
+    // the variant whose eq. 5.6 self term is largest: it bounds every
+    // variant's mutual term too.
+    // ponytail: a cell's bbox is wider than its heated channel, which
+    // understates the rise; read the channel area from `Macro.units` if a
+    // bias ever heats a cell enough to matter.
+    let t_em_k = cfg.op.as_ref().map(|o| {
+        use pnr_core::thermal::{rise_bound_mc, self_rise_mc, K_SI_W_PER_M_K as K};
+        let foot: Vec<(i32, i32)> = cells
+            .variants
+            .iter()
+            .zip(&cells.power)
+            .map(|(v, &p)| {
+                v.alternatives.iter().map(|m| (m.bbox.w, m.bbox.h)).max_by(|a, b| self_rise_mc(p, a.0, a.1, K).total_cmp(&self_rise_mc(p, b.0, b.1, K))).unwrap_or((1, 1))
+            })
+            .collect();
+        let package = o.theta_ja_c_per_w.unwrap_or(0.0) * bias.summary.as_ref().map_or(0, |s| s.total_power_uw) as f64 * 1e-6;
+        o.temp_c as f32 + 273.15 + package as f32 + rise_bound_mc(&cells.power, &foot, K) / 1e3
+    });
+    let em = elaborate::em_limits(pdk, &em_layers, &em_cuts, t_em_k);
+    let em_derate = match layers.first().and_then(|&l| pdk.em_limit(l)) {
+        Some(verify::EmLimit { derating: Some(_), derating_assumed: true, .. }) => "sidecar+fallback Ea/n",
+        Some(verify::EmLimit { derating: Some(_), .. }) => "deck",
+        _ => "none",
+    };
     em_rules(&mut problem, &netlist, &em, &em_layers, &em_cuts, ann.process.stack, pdk);
     // IR-drop budgets (PWR-02) on nets carrying op current (`annotator::ir`).
     let ir = if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
@@ -631,13 +659,24 @@ fn solve(
         &best.layout,
         &flow.problem.routing,
         &best.routes,
-        bias.summary.clone(),
+        bias.summary.clone().map(|mut b| {
+            b.em_temp_k = t_em_k.unwrap_or(b.em_temp_k);
+            b.em_derate = em_derate;
+            b
+        }),
         &flow.problem.net_classes,
         &flow.problem.missing,
         &pdk.unverified(),
     );
     let mut metadata = metadata;
     metadata.binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
+    let pairs = matched_pairs(&flow.problem.blocks);
+    if let Some(op) = &bias.op {
+        let (_, aging, unknown) = reliability::voltage_findings(&netlist, op, &pdk.fet_voltage_limits(), &pairs, false);
+        let name = |d: DeviceId| netlist.devices[d.0 as usize].name.clone();
+        metadata.aging = aging.into_iter().map(|a| (name(a.a), name(a.b), a.dvds_mv, a.dvgs_mv, a.dvbs_mv)).collect();
+        metadata.voltage_unknown = unknown;
+    }
     let mut recognition = std::collections::BTreeMap::new();
     for b in flow.problem.blocks.iter().filter(|b| b.kind != annotator::BlockKind::Glue) {
         *recognition.entry(b.template).or_insert(0) += 1;
@@ -694,6 +733,7 @@ fn solve(
         folds: fold,
         well_layer: pnr_core::Process::layer(pdk, "nwell"),
         op: bias.op.clone(),
+        pairs,
     };
     (solution, key, distinct)
 }
@@ -758,6 +798,10 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
         // ponytail: leaked once per `annotation` call (twice per run, a few
         // hundred bytes each); cache by deck if runs ever loop in one process.
         stack: Some(Box::leak(Box::new(elaborate::stack(pdk)))),
+        min_ring_width_nm: pdk.rule("min_guard_ring_width", 0),
+        ecgr_min_width_nm: opt("ecgr_min_width_nm"),
+        ecgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Ecgr, pdk),
+        hcgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Hcgr, pdk),
     };
     AnnotationConfig { process, ..base.clone() }
 }
@@ -1451,6 +1495,8 @@ fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> Bias {
         total_power_uw: o.total_power_uw(),
         hottest,
         probe,
+        em_temp_k: (cfg.op.as_ref().map_or(27.0, |c| c.temp_c) + 273.15) as f32,
+        em_derate: "",
     };
     let currents = o.terminal_ua(netlist);
     let headroom = o.net_headroom_mv(netlist);
@@ -1657,7 +1703,24 @@ pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
     let (shapes, pins, reference) = signoff_inputs(sol, pdk);
     let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
     s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.netlist));
+    if let Some(op) = &sol.op {
+        let probe = sol.metadata.bias.as_ref().is_some_and(|b| b.probe);
+        s.report.hard_violations.extend(reliability::voltage_findings(&sol.netlist, op, &pdk.fet_voltage_limits(), &sol.pairs, probe).0);
+    }
     s
+}
+
+/// Every recognised 2-device `DiffPair` / `CurrentMirror` / `Load` leaf block.
+fn matched_pairs(blocks: &[annotator::Block]) -> Vec<(DeviceId, DeviceId)> {
+    use annotator::BlockKind::{CurrentMirror, DiffPair, Load};
+    annotator::block::leaves(blocks)
+        .into_iter()
+        .filter(|b| matches!(b.kind, DiffPair | CurrentMirror | Load))
+        .filter_map(|b| match *b.devices.as_slice() {
+            [a, b] => Some((a, b)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A device this process has no construction for (an NPN without a deep
