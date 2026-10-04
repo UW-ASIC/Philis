@@ -8,6 +8,14 @@ Order: RTE-05 → RTE-07 → RTE-08. RTE-05 does not depend on the other two; it
 and it deletes `trim_pair`, which RTE-07's dr edits would otherwise have to work around. RTE-08 needs RTE-07: the
 `Global` tier loses its only writer there, and `RouteStats::pf_iters` is introduced there.
 
+Status (re-run after `git merge m1a`, fast-forward to `ae38f4f`): all three items are already implemented,
+reviewed and merged into `m1a` (RTE-05 `7f8d92b`, RTE-07 `f61390f`, RTE-08 `a192c02`, review fixes `0c4f798`,
+merge `f10e5fc`). The annotator merge since then touches only `backend/annotator` and docs, so no routing line
+below is stale. Acceptance as recorded in those commit messages: RTE-08 ota `pf_iters` p50 1 -> 1, dac4
+`unresolved congestion` 0/45 (already 0 on the RTE-07 baseline, so RTE-03 acceptance 3 is met but not
+attributable to RTE-08), bench local DRC 0 x10 with LVS unchanged, FR-6 pwm_driver no `label short` in two runs.
+Nothing left to implement in this batch.
+
 | Item | Class |
 |---|---|
 | RTE-05 | mechanical |
