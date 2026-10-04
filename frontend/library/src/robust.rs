@@ -320,5 +320,9 @@ mod tests {
         assert_eq!(min_beta(&[stat(0, Some(4.0)), stat(1, None)]), None);
         let (specs, post) = floor(10.0, 0.0);
         assert_eq!(key_tiers(&[], &post, &specs, false), (0, 0.0), "a met bound in miss mode");
+        let (specs, post) = floor(5.0, 10.0);
+        assert!(post.residual > 0.0);
+        assert_eq!(key_tiers(&[], &post, &specs, false), (1, post.residual), "a measured miss in miss mode");
+        assert_eq!(key_tiers(&[stat(0, Some(-0.5))], &post, &specs, true), (1, 3.5), "β < 0 fails");
     }
 }

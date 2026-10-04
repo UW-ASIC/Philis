@@ -169,8 +169,8 @@ pub struct ParetoPoint {
 /// Front size cap [policy].
 pub const PARETO_MAX: usize = 16;
 
-/// Inserts `p` unless dominated in (−min_beta [None = −∞], theta, c_tier, area_um2), removes points it dominates;
-/// over [`PARETO_MAX`] drops the largest-area point.
+/// Inserts `p` unless dominated in (−min_beta [None = −∞], theta, c_tier, area_um2) or equal there to a kept
+/// point (first kept), removes points it dominates; over [`PARETO_MAX`] drops the largest-area point.
 pub fn pareto_insert(front: &mut Vec<ParetoPoint>, p: ParetoPoint) {
     let obj = |q: &ParetoPoint| [-q.min_beta.unwrap_or(f64::NEG_INFINITY), q.theta, f64::from(q.c_tier), q.area_um2];
     // `a` dominates `b`: no worse anywhere, better somewhere.
@@ -178,7 +178,7 @@ pub fn pareto_insert(front: &mut Vec<ParetoPoint>, p: ParetoPoint) {
         let (a, b) = (obj(a), obj(b));
         a.iter().zip(&b).all(|(x, y)| x <= y) && a.iter().zip(&b).any(|(x, y)| x < y)
     };
-    if front.iter().any(|q| dom(q, &p)) {
+    if front.iter().any(|q| dom(q, &p) || obj(q) == obj(&p)) {
         return;
     }
     front.retain(|q| !dom(&p, q));
@@ -738,11 +738,23 @@ mod tests {
     fn pareto_keeps_only_nondominated() {
         let [a, b, c, d, e] = [point(3.0, 0.0, 10.0, 100.0), point(2.0, 0.0, 10.0, 100.0), point(1.0, 0.0, 5.0, 100.0), point(1.0, 0.0, 6.0, 100.0), point(0.5, 0.0, 20.0, 50.0)];
         let mut front = Vec::new();
-        for p in [a.clone(), b, c.clone(), d, e.clone()] {
+        for p in [a.clone(), b.clone(), c.clone(), d.clone(), e.clone()] {
             pareto_insert(&mut front, p);
         }
         assert_eq!(front.len(), 3, "{front:?}");
-        assert!([a, c, e].iter().all(|p| front.contains(p)), "{front:?}");
+        assert!([&a, &c, &e].iter().all(|p| front.contains(p)), "{front:?}");
+        // Reversed, B and D arrive first and are removed by A and C.
+        let mut front = Vec::new();
+        for p in [e.clone(), d, c.clone(), b, a.clone()] {
+            pareto_insert(&mut front, p);
+        }
+        assert_eq!(front.len(), 3, "{front:?}");
+        assert!([&a, &c, &e].iter().all(|p| front.contains(p)), "{front:?}");
+        // Equal objectives from another start: the first is kept, once.
+        let twin = ParetoPoint { outer: 1, iteration: 7, ..a.clone() };
+        pareto_insert(&mut front, twin);
+        assert_eq!(front.len(), 3, "{front:?}");
+        assert!(front.contains(&a), "{front:?}");
 
         // β up, area up: mutually non-dominated.
         let mut front = Vec::new();

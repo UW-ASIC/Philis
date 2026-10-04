@@ -589,7 +589,7 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
             for (n, w) in r_weight.iter().enumerate().filter(|(_, &w)| w != 0.0) {
                 sens_notes.push(format!("r_weight {} {w:.3}", netlist.nets[n].name));
             }
-            sens_notes.extend(pair_weight.iter().map(|&(a, b, w)| format!("pair_weight {}-{} {w:.3e}", net_name(a), net_name(b))));
+            sens_notes.extend(pair_weight.iter().filter(|p| p.2 != 0.0).map(|&(a, b, w)| format!("pair_weight {}-{} {w:.3e}", net_name(a), net_name(b))));
             let mut out = scenario_notes(&active);
             out.extend(notes(&rows, "not measured at the schematic"));
             sens_notes.iter().for_each(|n| eprintln!("[perf] sens {n}"));

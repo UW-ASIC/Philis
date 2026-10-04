@@ -493,7 +493,10 @@ fn ota_exports_sensitivities() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
     let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
-    let p = PerfConfig { scenarios: vec![scenario("tt_27", "tt", 27.0), scenario("ff_27", "ff", 27.0)], ..cfg(lib.clone()) };
+    // UGF moves with the load on `vout2`, so its `CouplingC` rows are nonzero (gain's are exactly 0 on ota).
+    let mut p = PerfConfig { scenarios: vec![scenario("tt_27", "tt", 27.0), scenario("ff_27", "ff", 27.0)], ..cfg(lib.clone()) };
+    p.testbenches = vec![BENCH.replace(".endc", "meas ac ugf when vdb(vout2)=0\n.endc")];
+    p.specs.push(Spec { metric: "ugf".into(), min: Some(1e3), max: None });
     let c = library::Config {
         feedback_iters: 2,
         outer_iters: 1,
@@ -510,7 +513,8 @@ fn ota_exports_sensitivities() {
     assert!(count("d_c") > 0 && count("d_r") > 0 && count("d_vt") > 0, "{ev}");
     assert!(!ev.ends_with("σ_f unknown"), "{ev}");
     assert!(s.iter().any(|l| l.starts_with("r_weight vtail ")), "{s:?}");
-    assert!(s.iter().any(|l| l.starts_with("pair_weight ")), "{s:?}");
+    let pair = |l: &&String| l.strip_prefix("pair_weight ").and_then(|r| r.rsplit(' ').next()?.parse::<f64>().ok());
+    assert!(s.iter().filter_map(|l| pair(&l)).any(|w| w > 0.0), "{s:?}");
 
     let nl = ota();
     let start = evaluate(&nl, &Parasitics::default(), &p, &[0, 1]).expect("schematic simulates");
@@ -534,6 +538,12 @@ fn ota_exports_sensitivities() {
 /// robust as the epoch the pre-PERF-14 key (|V|, spec miss, Θ, then C band,
 /// area) would pick from the same promoted epochs. Within the winning
 /// topology's search only (`epochs` is the winner's).
+///
+/// Limitation: vacuous on ota. In all 5 seeds every epoch has min β ≈ 907 (gain margin ≈ 13 dB over σ_f ≈
+/// 0.014 dB), far above [`BETA_TARGET`](library::robust::BETA_TARGET), so shortfall and failed are 0 throughout,
+/// the β key reduces to the old (|V|, Θ, C, area) order and both keys pick the same epoch. A `min` within
+/// ~3σ_f (≈ 0.04 dB) of the post-layout gain would make the tiers discriminate, but that is a per-fixture tune
+/// below epoch-to-epoch gain spread; the tier logic itself is pinned by `robust::tests`.
 #[test]
 fn beta_key_winner_is_at_least_as_robust() {
     use library::metadata::ParetoPoint;
