@@ -23,8 +23,18 @@ pub enum MatchKind {
     Ratio,
 }
 
+use crate::matching::class::ClassLimit;
+
+/// Placement's share η of a matched pair's mismatch when no offset budget is
+/// given: the gradient term may reach this fraction of the random term the
+/// sizing bought (σ grows ≤ 4.4%).
+///
+/// ponytail: Pelgrom prescribes no η; it is the circuit's to allocate. Set
+/// `AnnotationConfig::offset_sigma_mv` to derive it.
+pub const GRADIENT_SHARE: f32 = 0.3;
+
 /// How much systematic mismatch a pair may spend.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Budget {
     /// `η·σ_rand` (the default, η = 0.3).
     Eta(f32),
@@ -35,6 +45,17 @@ pub enum Budget {
 }
 
 impl Budget {
+    /// A class limit as a budget: a voltage limit in mV is 6σ (Hastings
+    /// §13.3, hastings.txt L42333–42350), so the 1σ total is a sixth of it.
+    /// A % limit has no ledger yet (MAT-09/10): `Eta(GRADIENT_SHARE)`.
+    #[must_use]
+    pub fn from_class(limit: ClassLimit, kind: MatchKind) -> Budget {
+        match (limit, kind) {
+            (ClassLimit::Mv(v), MatchKind::Voltage) => Budget::Sigma1Mv(v / 6.0),
+            _ => Budget::Eta(GRADIENT_SHARE),
+        }
+    }
+
     /// The systematic allowance, mV, given the pair's random σ.
     #[must_use]
     pub fn allowance(self, sigma_rand: f32) -> f32 {
@@ -43,6 +64,22 @@ impl Budget {
             Budget::Sigma1Mv(b) => (b * b - sigma_rand * sigma_rand).max(0.0).sqrt(),
             Budget::Allowance(a) => a,
         }
+    }
+}
+
+/// The pair budget, first source given wins: the circuit's 1σ offset
+/// (`Sigma1Mv`), an explicit allowance, the class limit, else
+/// `Eta(GRADIENT_SHARE)`. The caller passes `class_limit` only when the class
+/// came from the user or a spec: a role-default Moderate (3 mV → 0.5 mV 1σ)
+/// is under sky130's 2.124 mV σ_rand of a 20 µm² pair and would fail every
+/// Moderate pair.
+#[must_use]
+pub fn choose(offset_sigma_mv: Option<f32>, allowance: Option<f32>, class_limit: Option<ClassLimit>, kind: MatchKind) -> Budget {
+    match (offset_sigma_mv, allowance, class_limit) {
+        (Some(b), _, _) => Budget::Sigma1Mv(b),
+        (None, Some(a), _) => Budget::Allowance(a),
+        (None, None, Some(c)) => Budget::from_class(c, kind),
+        (None, None, None) => Budget::Eta(GRADIENT_SHARE),
     }
 }
 
@@ -128,6 +165,21 @@ mod tests {
     fn sigma1_budget_leaves_the_quadrature_share() {
         assert!((Budget::Sigma1Mv(3.0 * 1.09f32.sqrt()).allowance(3.0) - 0.9).abs() < 1e-3);
         assert_eq!(Budget::Sigma1Mv(2.0).allowance(3.0), 0.0);
+    }
+
+    #[test]
+    fn class_budget_is_one_sixth_of_the_limit() {
+        assert_eq!(Budget::from_class(ClassLimit::Mv(3.0), MatchKind::Voltage), Budget::Sigma1Mv(0.5));
+        assert_eq!(Budget::from_class(ClassLimit::Pct(3.0), MatchKind::Current), Budget::Eta(0.3));
+    }
+
+    #[test]
+    fn role_default_keeps_eta() {
+        let v = MatchKind::Voltage;
+        assert_eq!(choose(None, None, None, v), Budget::Eta(0.3));
+        assert_eq!(choose(Some(1.0), Some(0.2), Some(ClassLimit::Mv(3.0)), v), Budget::Sigma1Mv(1.0));
+        assert_eq!(choose(None, Some(0.2), Some(ClassLimit::Mv(3.0)), v), Budget::Allowance(0.2));
+        assert_eq!(choose(None, None, Some(ClassLimit::Mv(3.0)), v), Budget::Sigma1Mv(0.5));
     }
 
     #[test]

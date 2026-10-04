@@ -35,7 +35,7 @@
 //! deck's mismatch data; without them the documented fallbacks apply.
 
 use analog::matching::class::{phi_arm, Family, MatchClass};
-use analog::matching::mismatch::{Budget, Coeffs, MatchKind};
+use analog::matching::mismatch::{self, Budget, Coeffs, MatchKind};
 use analog::placement::symmetry::SymmetryGroup;
 use analog::placement::{DtiBand, Isolation, MatchedSet, OrientCheck, OrientationSet, Proximity, Symmetry};
 use analog::Requirements;
@@ -46,21 +46,14 @@ use pnr_core::{DeviceKind, Netlist};
 use crate::block::{leaves, Block, BlockKind};
 use crate::ProcessNumbers;
 
-/// Placement's share η of a matched pair's mismatch when no offset budget is
-/// given: the gradient term may reach this fraction of the random term the
-/// sizing bought (σ grows ≤ 4.4%).
-///
-/// ponytail: Pelgrom prescribes no η; it is the circuit's to allocate. Set
-/// `AnnotationConfig::offset_sigma_mv` to derive it.
-const GRADIENT_SHARE: f32 = 0.3;
-
 fn gate_um2(nl: &Netlist, d: DeviceId) -> f32 {
     crate::gate_um2(&nl.devices[d.0 as usize])
 }
 
-/// The pair budget: the 1σ offset when given, else [`GRADIENT_SHARE`].
-fn budget(offset_sigma_mv: Option<f32>) -> Budget {
-    offset_sigma_mv.map_or(Budget::Eta(GRADIENT_SHARE), Budget::Sigma1Mv)
+/// The pair budget: the 1σ offset when given, else
+/// [`mismatch::GRADIENT_SHARE`] (no allowance or class source yet: EXT-20).
+fn budget(offset_sigma_mv: Option<f32>, kind: MatchKind) -> Budget {
+    mismatch::choose(offset_sigma_mv, None, None, kind)
 }
 
 /// `d`'s entry of a deck `[nmos, pmos]` pair; `None` for a non-FET or a
@@ -83,7 +76,7 @@ fn avt(nl: &Netlist, p: &ProcessNumbers, d: DeviceId) -> Option<f32> {
 /// A `MatchedSet` pair is priced against its allowance when the deck carries
 /// its polarity's `A_VT`; the terms whose coefficient is missing (`S_VT`, TC,
 /// `KVTH0`) spend nothing. `offset_sigma_mv` (1σ input-referred offset a pair
-/// may spend) sets the allowance; absent, [`GRADIENT_SHARE`]`·σ_rand`.
+/// may spend) sets the allowance; absent, [`mismatch::GRADIENT_SHARE`]`·σ_rand`.
 #[must_use]
 pub fn placement(
     blocks: &[Block],
@@ -126,9 +119,10 @@ pub fn placement(
             }
             // Only an inductor has no family, and an inductor pair is never matched.
             let Some(family) = Family::of(nl.devices[a.0 as usize].kind) else { continue };
+            let match_kind = if kind == BlockKind::DiffPair { MatchKind::Voltage } else { MatchKind::Current };
             let set = MatchedSet {
                 members: vec![a, b],
-                kind: if kind == BlockKind::DiffPair { MatchKind::Voltage } else { MatchKind::Current },
+                kind: match_kind,
                 family,
                 // ponytail: every set Moderate; EXT-20 sets it from intent::MatchedSet.
                 class: MatchClass::Moderate,
@@ -138,7 +132,7 @@ pub fn placement(
                     kvth0_mv_um: by_polarity(nl, a, p.lod_kvth0_mv_um),
                     tc_uv_per_k: by_polarity(nl, a, p.vt_tc_uv_per_k),
                 },
-                budget: budget(offset_sigma_mv),
+                budget: budget(offset_sigma_mv, match_kind),
                 gate_um2: vec![gate_um2(nl, a), gate_um2(nl, b)],
                 tol_nm: p.lattice_nm.max(1) as f32 / 2.0,
                 cell_of: Vec::new(),
