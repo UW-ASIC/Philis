@@ -19,7 +19,15 @@ pub struct Builder {
 impl Builder {
     #[must_use]
     pub fn new(grid: i32) -> Self {
-        Self { grid, shapes: Vec::new(), pins: Vec::new(), units: Vec::new(), dummies: Vec::new(), drawn: Vec::new(), keepouts: Vec::new() }
+        Self {
+            grid,
+            shapes: Vec::new(),
+            pins: Vec::new(),
+            units: Vec::new(),
+            dummies: Vec::new(),
+            drawn: Vec::new(),
+            keepouts: Vec::new(),
+        }
     }
 
     /// Draw `r` on `layer`, snapped to grid. Width/height clamp up to one grid
@@ -74,7 +82,11 @@ impl Builder {
     /// ponytail: a row's strip spans all its cuts; a row that must skip a
     /// gap (a foreign contact between) would need splitting.
     pub fn cover_poly_cuts(&mut self, process: &dyn Process) {
-        let (Some(npc), Some(poly), Some(licon)) = (process.layer("npc"), process.layer("poly"), process.layer("licon")) else {
+        let (Some(npc), Some(poly), Some(licon)) = (
+            process.layer("npc"),
+            process.layer("poly"),
+            process.layer("licon"),
+        ) else {
             return;
         };
         if npc == poly {
@@ -83,11 +95,27 @@ impl Builder {
         let enc = process.enclosure("npc", "licon").unwrap_or(0);
         let space = process.space("npc").unwrap_or(0);
         let wmin = process.width("npc").unwrap_or(0);
-        let inside = |c: &Rect, p: &Rect| c.x >= p.x && c.y >= p.y && c.x + c.w <= p.x + p.w && c.y + c.h <= p.y + p.h;
-        let polys: Vec<Rect> = self.shapes.iter().filter(|s| s.layer == poly).map(|s| s.rect).collect();
+        let inside = |c: &Rect, p: &Rect| {
+            c.x >= p.x && c.y >= p.y && c.x + c.w <= p.x + p.w && c.y + c.h <= p.y + p.h
+        };
+        let polys: Vec<Rect> = self
+            .shapes
+            .iter()
+            .filter(|s| s.layer == poly)
+            .map(|s| s.rect)
+            .collect();
         let mut rows: Vec<Rect> = Vec::new();
-        for c in self.shapes.iter().filter(|s| s.layer == licon && polys.iter().any(|p| inside(&s.rect, p))) {
-            let r = Rect { x: c.rect.x - enc, y: c.rect.y - enc, w: c.rect.w + 2 * enc, h: c.rect.h + 2 * enc };
+        for c in self
+            .shapes
+            .iter()
+            .filter(|s| s.layer == licon && polys.iter().any(|p| inside(&s.rect, p)))
+        {
+            let r = Rect {
+                x: c.rect.x - enc,
+                y: c.rect.y - enc,
+                w: c.rect.w + 2 * enc,
+                h: c.rect.h + 2 * enc,
+            };
             match rows.iter_mut().find(|q| q.y == r.y && q.h == r.h) {
                 Some(q) => *q = hull(*q, r),
                 None => rows.push(r),
@@ -132,7 +160,8 @@ impl Builder {
         // Exact duplicates (rings sharing a band draw its cuts twice) are one
         // shape; a checker would read two coincident cuts as zero spacing.
         let mut seen = std::collections::HashSet::new();
-        self.shapes.retain(|s| seen.insert((s.layer.0, s.rect.x, s.rect.y, s.rect.w, s.rect.h)));
+        self.shapes
+            .retain(|s| seen.insert((s.layer.0, s.rect.x, s.rect.y, s.rect.w, s.rect.h)));
         let tight = bbox_of(&self.shapes);
         let step = 2 * self.grid.max(1);
         let ext = 2 * step;
@@ -144,7 +173,16 @@ impl Builder {
             w: (tight.x + tight.w - x + ext - 1) / ext * ext,
             h: (tight.y + tight.h - y + ext - 1) / ext * ext,
         };
-        Macro { shapes: self.shapes, pins: self.pins, bbox, units: self.units, dummies: self.dummies, drawn: self.drawn, keepouts: self.keepouts, ..Default::default() }
+        Macro {
+            shapes: self.shapes,
+            pins: self.pins,
+            bbox,
+            units: self.units,
+            dummies: self.dummies,
+            drawn: self.drawn,
+            keepouts: self.keepouts,
+            ..Default::default()
+        }
     }
 }
 
@@ -163,7 +201,12 @@ pub fn snap_cut(v: i32, lat: i32) -> i32 {
 
 fn bbox_of(shapes: &[Shape]) -> Rect {
     let Some(first) = shapes.first() else {
-        return Rect { x: 0, y: 0, w: 0, h: 0 };
+        return Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        };
     };
     let (mut x0, mut y0) = (first.rect.x, first.rect.y);
     let (mut x1, mut y1) = (x0 + first.rect.w, y0 + first.rect.h);
@@ -173,7 +216,12 @@ fn bbox_of(shapes: &[Shape]) -> Rect {
         x1 = x1.max(s.rect.x + s.rect.w);
         y1 = y1.max(s.rect.y + s.rect.h);
     }
-    Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    }
 }
 
 /// Round half away from zero to a multiple of `grid` (`grid <= 0`: identity).
@@ -218,7 +266,9 @@ pub fn dim(process: &dyn Process, key: &str) -> i32 {
         "nwell_diff_enc" => q(process.enclosure("nwell", "diff")),
         "nwell_min_width" => q(process.width("nwell")),
         "via_spacing" => q(process.space("via1")),
-        "via_enclosure" => q(process.enclosure("met1", "via1")).max(q(process.enclosure("met2", "via1"))),
+        "via_enclosure" => {
+            q(process.enclosure("met1", "via1")).max(q(process.enclosure("met2", "via1")))
+        }
         _ => 0,
     };
     process.rule(key, 0).max(deck)
@@ -230,7 +280,12 @@ pub fn dim(process: &dyn Process, key: &str) -> i32 {
 pub fn pin(di: usize, term: &str, at: Rect, layer: LayerId) -> Pin {
     const TERMS: [&str; 7] = ["G", "S", "D", "B", "P", "N", "C"];
     let t = TERMS.iter().position(|&x| x == term).unwrap_or(TERMS.len());
-    Pin { name: format!("d{di}:{term}"), net: NetId((di * 8 + t) as u16), at, layer }
+    Pin {
+        name: format!("d{di}:{term}"),
+        net: NetId((di * 8 + t) as u16),
+        at,
+        layer,
+    }
 }
 
 /// Resolved sizing for the devices in a group.
@@ -249,7 +304,9 @@ pub fn unitization<'a>(group: &DeviceGroup, c: &'a Constraints) -> Option<&'a Un
     if group.devices.is_empty() {
         return None;
     }
-    c.unitization.iter().find(|u| group.devices.iter().all(|d| u.devices.contains(d)))
+    c.unitization
+        .iter()
+        .find(|u| group.devices.iter().all(|d| u.devices.contains(d)))
 }
 
 /// Group sizing from the covering unitization, else one finger at
@@ -258,7 +315,11 @@ pub fn unitization<'a>(group: &DeviceGroup, c: &'a Constraints) -> Option<&'a Un
 pub fn sizing(group: &DeviceGroup, c: &Constraints, def_w: i32, def_l: i32) -> Sizing {
     let n = group.devices.len().max(1);
     let Some(u) = unitization(group, c) else {
-        return Sizing { unit_w: def_w, unit_l: def_l, dev_nf: vec![1; n] };
+        return Sizing {
+            unit_w: def_w,
+            unit_l: def_l,
+            dev_nf: vec![1; n],
+        };
     };
     // Each member reads its own slot of the (possibly larger) unitization.
     let mut dev_nf: Vec<u16> = group
@@ -266,7 +327,10 @@ pub fn sizing(group: &DeviceGroup, c: &Constraints, def_w: i32, def_l: i32) -> S
         .iter()
         .map(|d| {
             let slot = u.devices.iter().position(|x| x == d);
-            slot.and_then(|i| u.dev_nf.get(i)).copied().unwrap_or(1).max(1)
+            slot.and_then(|i| u.dev_nf.get(i))
+                .copied()
+                .unwrap_or(1)
+                .max(1)
         })
         .collect();
     if dev_nf.is_empty() {
@@ -286,7 +350,11 @@ pub(crate) fn greedy_centroid(counts: &[usize]) -> Vec<usize> {
     let mut remaining = counts.to_vec();
     let mut seq = vec![0usize; total];
     let most = |r: &[usize]| {
-        r.iter().enumerate().filter(|(_, &n)| n > 0).max_by_key(|(_, &n)| n).map_or(0, |(i, _)| i)
+        r.iter()
+            .enumerate()
+            .filter(|(_, &n)| n > 0)
+            .max_by_key(|(_, &n)| n)
+            .map_or(0, |(i, _)| i)
     };
     let (mut lo, mut hi) = (0, total);
     while lo < hi {
@@ -295,7 +363,11 @@ pub(crate) fn greedy_centroid(counts: &[usize]) -> Vec<usize> {
         remaining[p] -= 1;
         lo += 1;
         if lo < hi {
-            let q = if remaining[p] > 0 { p } else { most(&remaining) };
+            let q = if remaining[p] > 0 {
+                p
+            } else {
+                most(&remaining)
+            };
             hi -= 1;
             seq[hi] = q;
             remaining[q] = remaining[q].saturating_sub(1);
@@ -329,7 +401,15 @@ mod tests {
     #[test]
     fn extents_are_twice_the_cut_lattice() {
         let mut b = Builder::new(5);
-        b.rect(LayerId(0), Rect { x: 3, y: 7, w: 1235, h: 41 });
+        b.rect(
+            LayerId(0),
+            Rect {
+                x: 3,
+                y: 7,
+                w: 1235,
+                h: 41,
+            },
+        );
         let m = b.finish();
         assert_eq!(m.bbox.x % 10, 0);
         assert_eq!(m.bbox.y % 10, 0);
@@ -343,5 +423,10 @@ mod tests {
 
 fn hull(a: Rect, b: Rect) -> Rect {
     let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
-    Rect { x: x0, y: y0, w: (a.x + a.w).max(b.x + b.w) - x0, h: (a.y + a.h).max(b.y + b.h) - y0 }
+    Rect {
+        x: x0,
+        y: y0,
+        w: (a.x + a.w).max(b.x + b.w) - x0,
+        h: (a.y + a.h).max(b.y + b.h) - y0,
+    }
 }
