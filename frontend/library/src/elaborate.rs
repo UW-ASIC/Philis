@@ -156,8 +156,10 @@ pub(crate) fn route_built(
         units: Default::default(),
     };
 
-    let (layers, cuts, pin_access) = routing_stack(pdk);
-    let mut d_router = detailed_router(pdk, &layers, &cuts, pin_access);
+    // ponytail: a bad deck still panics here; FLOW-11 propagates the `Err`.
+    let stack = routing_stack(pdk, None).unwrap_or_else(|e| panic!("routing stack: {e}"));
+    let (layers, cuts) = (&stack.layers, &stack.cuts);
+    let mut d_router = detailed_router(pdk, &stack);
     d_router.cfg.n_nets = built.netlist.as_ref().map_or(0, |n| n.nets.len());
     // The netlist shares the pins' NetId numbering, so its routing rules key
     // the right nets with no remap.
@@ -176,7 +178,7 @@ pub(crate) fn route_built(
 
     let mut best: Option<(Routes, Report)> = None;
     for _ in 0..cfg.epochs.max(1) {
-        let (routes, report, _) = d_router.route(&pins, &placed, &[], &reqs, &layers, &cuts, &mut neg);
+        let (routes, report, _) = d_router.route(&pins, &placed, &[], &reqs, layers, cuts, &mut neg);
         if best.as_ref().is_none_or(|(_, b)| report.lex() < b.lex()) {
             best = Some((routes, report));
         }
@@ -196,40 +198,60 @@ pub(crate) fn route_built(
 /// A via cut and its landing pads: `(cut layer, cut size, pad below, pad above)`, nm.
 pub(crate) type Cut = (LayerId, i32, i32, i32);
 
-/// The routable metal stack from the deck: routing metals up to the first one
-/// whose `min_width` exceeds the router's wire, their via cuts, and the bottom
-/// conductor (li) split off as `pin_access` — cells fill li with pads, so
-/// routing on it made the track lattice itself a spacing violation.
-pub(crate) fn routing_stack(pdk: &Pdk) -> (Vec<LayerId>, Vec<Cut>, Option<(LayerId, Cut)>) {
-    let wire_w = access_pad(pdk);
-    let mut layers: Vec<_> = pdk
-        .routing_layers()
-        .into_iter()
-        .take_while(|l| pdk.min_width(l.0).is_none_or(|w| w <= wire_w))
-        .collect();
-    let mut cuts = pdk.routing_vias();
-    cuts.truncate(layers.len().saturating_sub(1));
-    let pin_access = (layers.len() > 1).then(|| (layers.remove(0), cuts.remove(0)));
+/// The routed stack: metals bottom-up (ids beside their specs, since `dr::route`
+/// and every caller take `&[LayerId]`), the cut joining each adjacent pair, the
+/// split-off pin-access conductor and its cut, and the lattice ([`layer_specs`]).
+pub(crate) struct RoutingStack {
+    pub layers: Vec<LayerId>,
+    pub cuts: Vec<Cut>,
+    pub pin_access: Option<(LayerId, Cut)>,
+    pub p0: i32,
+    pub specs: Vec<gr::LayerSpec>,
+}
 
-    assert!(!layers.is_empty(), "no routable layer in the deck");
-    assert_eq!(
-        cuts.len(),
-        layers.len() - 1,
-        "every adjacent routing-layer pair needs its cut"
-    );
-    for (i, &(cut, size, below, above)) in cuts.iter().enumerate() {
-        assert!(
-            size <= below && size <= above,
-            "cut {cut:?} is wider than its pads {below}/{above}"
-        );
-        assert!(
-            !layers.contains(&cut),
-            "cut {cut:?} (joining {:?} and {:?}) is also a routing layer",
-            layers[i],
-            layers[i + 1]
-        );
+/// A bottom conductor over this many times the next metal's sheet resistance
+/// is a local interconnect, not a routing metal (tuning default; sky130 li is
+/// 102× met1, every other built-in deck's metal1 under 3× its metal2).
+const PIN_ACCESS_SHEET_RATIO: f32 = 10.0;
+
+/// The routable metal stack from the deck: every routing metal, save a
+/// resistive bottom conductor (li) split off as `pin_access` — cells fill it
+/// with pads, so routing on it makes the lattice itself a spacing violation —
+/// and save top metals whose track stride would pass [`gr::MAX_STRIDE`] (each
+/// pop recomputes the lattice: the via up no longer lands below). `top` keeps
+/// at most that many of the lowest metals.
+///
+/// # Errors
+/// A deck with no routing metal, a missing cut between adjacent metals, a cut
+/// wider than its pads, or a cut that is also a routing metal.
+pub(crate) fn routing_stack(pdk: &Pdk, top: Option<usize>) -> Result<RoutingStack, String> {
+    let mut layers = pdk.routing_layers();
+    let mut cuts = pdk.routing_vias();
+    if layers.is_empty() {
+        return Err("no routable layer in the deck".into());
     }
-    (layers, cuts, pin_access)
+    if cuts.len() != layers.len() - 1 {
+        return Err(format!("every adjacent routing-layer pair needs its cut: {} metals, {} cuts", layers.len(), cuts.len()));
+    }
+    for (i, &(cut, size, below, above)) in cuts.iter().enumerate() {
+        if size > below || size > above {
+            return Err(format!("cut {cut:?} is wider than its pads {below}/{above}"));
+        }
+        if layers.contains(&cut) {
+            return Err(format!("cut {cut:?} (joining {:?} and {:?}) is also a routing layer", layers[i], layers[i + 1]));
+        }
+    }
+    let sheet = |l: LayerId| pdk.pex_f32(l, "sheet_res_ohm_sq");
+    let resistive = layers.len() > 1 && sheet(layers[0]).zip(sheet(layers[1])).is_some_and(|(a, b)| a > PIN_ACCESS_SHEET_RATIO * b);
+    let pin_access = resistive.then(|| (layers.remove(0), cuts.remove(0)));
+    let (mut p0, mut specs) = layer_specs(pdk, &layers, &cuts, pin_access);
+    let keep = top.unwrap_or(usize::MAX).max(1);
+    while layers.len() > 1 && (layers.len() > keep || specs.last().is_some_and(|s| s.stride > gr::MAX_STRIDE)) {
+        layers.pop();
+        cuts.truncate(layers.len() - 1);
+        (p0, specs) = layer_specs(pdk, &layers, &cuts, pin_access);
+    }
+    Ok(RoutingStack { layers, cuts, pin_access, p0, specs })
 }
 
 /// Each routing metal's and cut's deck EM limit, derated to `temp_k` (the
@@ -371,11 +393,6 @@ pub(crate) fn antenna_diodes(
     out
 }
 
-/// Pad of the first routing via: the narrowest wire every landing needs.
-fn access_pad(pdk: &Pdk) -> i32 {
-    pdk.routing_vias().first().map_or(0, |&(_, _, b, a)| b.max(a))
-}
-
 /// The per-layer lattice (Hastings Eq 15.19, `P = W_v + 2·E_mv + S_m`): the
 /// base pitch `p0` and one [`gr::LayerSpec`] per routed metal, bottom-up,
 /// horizontal first. Per metal, over the cuts landing on it (`cuts` below and
@@ -427,14 +444,10 @@ pub(crate) fn layer_specs(pdk: &Pdk, layers: &[LayerId], cuts: &[Cut], pin_acces
 
 /// The detailed router configured from the deck: the per-layer lattice
 /// ([`layer_specs`]); landing and pin access draw layer 0's wire.
-pub(crate) fn detailed_router(
-    pdk: &Pdk,
-    layers: &[LayerId],
-    cuts: &[Cut],
-    pin_access: Option<(LayerId, Cut)>,
-) -> dr::DetailedRoute {
+pub(crate) fn detailed_router(pdk: &Pdk, stack: &RoutingStack) -> dr::DetailedRoute {
+    let RoutingStack { layers, cuts, pin_access, p0, .. } = stack;
+    let (layers, cuts, pin_access, p0, specs) = (&layers[..], &cuts[..], *pin_access, *p0, stack.specs.clone());
     let mut cfg = dr::DetailedCfg { grid: pdk.grid, ..dr::DetailedCfg::default() };
-    let (p0, specs) = layer_specs(pdk, layers, cuts, pin_access);
     cfg.pitch = p0;
     cfg.wire_width = specs.first().map_or(0, |s| s.wire);
     cfg.spacing = layers
@@ -523,6 +536,59 @@ mod tests {
         assert_eq!(col(|s| i64::from(s.horizontal)), [1, 0, 1, 0]);
     }
 
+    fn names(pdk: &Pdk, ids: &[LayerId]) -> Vec<String> {
+        ids.iter().map(|&id| pdk.layers.iter().find(|(_, l)| *l == id).unwrap().0.clone()).collect()
+    }
+
+    /// sky130: li splits off as pin access (102× met1's sheet), met5 (stride 8)
+    /// drops, met4 recomputed without via4 matches the RTE-10 table row.
+    #[test]
+    fn sky130_routes_met1_to_met4() {
+        let pdk = Pdk::builtin("sky130").unwrap();
+        let s = routing_stack(&pdk, None).unwrap();
+        assert_eq!(names(&pdk, &s.layers), ["met1", "met2", "met3", "met4"]);
+        let (li, mcon) = s.pin_access.unwrap();
+        assert_eq!(names(&pdk, &[li, mcon.0]), ["li", "mcon"]);
+        assert_eq!(s.p0, 420);
+        assert_eq!(s.specs.iter().map(|x| x.stride).collect::<Vec<_>>(), [1, 1, 2, 2]);
+        let m4 = &s.specs[3];
+        assert_eq!((m4.pad_across, m4.pad_along, m4.wire, m4.space, m4.halo_wire, m4.halo_via, m4.horizontal), (330, 730, 330, 300, 1, 2, false));
+    }
+
+    #[test]
+    fn gf180_routes_metal1() {
+        let pdk = Pdk::builtin("gf180mcu").unwrap();
+        let s = routing_stack(&pdk, None).unwrap();
+        assert_eq!(s.layers[0], pdk.routing_layers()[0]);
+        assert!(s.pin_access.is_none());
+    }
+
+    #[test]
+    fn ihp_routes_metal1() {
+        let pdk = Pdk::builtin("ihp_sg13g2").unwrap();
+        let s = routing_stack(&pdk, None).unwrap();
+        assert_eq!(names(&pdk, &s.layers[..1]), ["metal1"]);
+        assert!(s.pin_access.is_none());
+    }
+
+    #[test]
+    fn a_top_cap_keeps_the_lowest_metals() {
+        let pdk = Pdk::builtin("sky130").unwrap();
+        let s = routing_stack(&pdk, Some(2)).unwrap();
+        assert_eq!(names(&pdk, &s.layers), ["met1", "met2"]);
+        assert_eq!(s.cuts.len(), 1);
+    }
+
+    /// A deck missing a cut between two metals is an `Err`, never a panic.
+    #[test]
+    fn a_bad_stack_is_an_error_not_a_panic() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/");
+        let deck = std::fs::read_to_string(format!("{root}decks/sky130.deck")).unwrap();
+        let sidecar = std::fs::read_to_string(format!("{root}sky130.json")).unwrap().replace(",\n        \"via4\"", "");
+        assert!(!sidecar.contains("\"via4\""), "the sidecar edit took");
+        assert!(Pdk::load(&deck, &sidecar).map_or(true, |p| routing_stack(&p, None).is_err()));
+    }
+
     /// Every built-in deck's lattice clears each layer's spacing between
     /// adjacent tracks, wire to wire and pad to pad (replaces pdk's
     /// `routing_pitch_clears_every_layer_of_its_stack`).
@@ -530,8 +596,7 @@ mod tests {
     fn every_layer_pitch_clears_its_spacing() {
         for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "generic_finfet"] {
             let pdk = Pdk::builtin(deck).unwrap();
-            let (layers, cuts, pin_access) = routing_stack(&pdk);
-            let (p0, specs) = layer_specs(&pdk, &layers, &cuts, pin_access);
+            let RoutingStack { p0, specs, .. } = routing_stack(&pdk, None).unwrap();
             for s in &specs {
                 let need = pdk.min_spacing(s.id.0).unwrap_or(0);
                 let pitch = s.stride as i32 * p0;

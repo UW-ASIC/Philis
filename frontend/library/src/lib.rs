@@ -420,7 +420,9 @@ fn solve(
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
-    let (layers, cuts, pin_access) = elaborate::routing_stack(pdk);
+    // ponytail: a bad deck still panics here; FLOW-11 propagates the `Err`.
+    let stack = elaborate::routing_stack(pdk, None).unwrap_or_else(|e| panic!("routing stack: {e}"));
+    let (layers, cuts, pin_access) = (stack.layers.clone(), stack.cuts.clone(), stack.pin_access);
     // EM limits on the pin-access layer and cut too (sky130 mcon 0.36 mA/cut):
     // the access jogs and pin cuts carry their terminal's current.
     let em_layers: Vec<LayerId> = layers.iter().copied().chain(pin_access.map(|p| p.0)).collect();
@@ -448,7 +450,7 @@ fn solve(
         netlist: &netlist,
         net_names: netlist.nets.iter().map(|n| n.name.clone()).collect(),
         d_router: {
-            let mut r = elaborate::detailed_router(pdk, &layers, &cuts, pin_access);
+            let mut r = elaborate::detailed_router(pdk, &stack);
             r.cfg.supply_nets = problem
                 .net_classes
                 .iter()
@@ -676,7 +678,7 @@ struct Flow<'a> {
 #[must_use]
 pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
     use pnr_core::Process;
-    let (layers, ..) = elaborate::routing_stack(pdk);
+    let layers = elaborate::routing_stack(pdk, None).map(|s| s.layers).unwrap_or_default();
     let wire = layers.first().copied();
     let width = wire.and_then(|l| pdk.min_width(l.0)).unwrap_or(0);
     let opt = |key: &str| Some(pdk.rule(key, 0)).filter(|&v| v > 0);
