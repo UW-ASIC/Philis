@@ -47,6 +47,15 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
 - **Out:** legal `Layout` (≥ clearance apart, hard symmetry projected, variant/
   orient/DTI branch chosen) + `Report`. Every move goes through one `Sa::trial`;
   hard equalities are re-projected so mirror partners follow.
+- **PEX is dimensionless (PLC-18):** `HPWL/L_ref + Σ criticality·cost + priced
+  budgets`, `L_ref = sqrt(Σ cell area)`; every cost is a squared ratio to its own
+  length (rule distance, DTI band, or `L_ref`). T0 = `t0_scale·mean |ΔPEX|`, no floor.
+  Term shares of Σ|Δterm| over the 128 T0 probes, `metrics_are_populated_on_ota`
+  (release, measured once): first (cold) dp call — HPWL/L_ref 75.4 %, Proximity
+  18.9 %, Symmetry 5.7 %, MatchedSet 0 %, priced budgets 0 % (pass: none > 80 %);
+  the other cold calls peak at HPWL 68 %. The run's last dp call is 100 % priced
+  budgets (mean |ΔE| 7.3e4 vs ~1 elsewhere): once T6 prices have stepped, λ·residual
+  swamps the rest — a prices/energy-weight question for PLC-09, not a unit one.
 
 ## backend/gr — deps: core, analog
 - **In:** placed `Layout` + `Macro`s, guard rings, routing `Requirements`,
