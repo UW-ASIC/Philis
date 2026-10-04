@@ -265,6 +265,10 @@ pub trait RuleBatch<On>: Send + Sync {
     fn offset_allowances(&self, state: &On, out: &mut Vec<(u32, u32, f32)>) {
         let _ = (state, out);
     }
+    /// One report row per matched pair (MAT-13). Default none.
+    fn ledger_rows(&self, state: &On, out: &mut Vec<crate::matching::mismatch::LedgerRow>) {
+        let _ = (state, out);
+    }
     /// Stable id and origin; `None` for a batch nobody tagged ([`Tagged`]).
     fn meta(&self) -> Option<&crate::intent::BatchMeta> {
         None
@@ -341,6 +345,9 @@ impl<On> RuleBatch<On> for Tagged<On> {
     }
     fn offset_allowances(&self, s: &On, out: &mut Vec<(u32, u32, f32)>) {
         self.inner.offset_allowances(s, out);
+    }
+    fn ledger_rows(&self, s: &On, out: &mut Vec<crate::matching::mismatch::LedgerRow>) {
+        self.inner.ledger_rows(s, out);
     }
     fn meta(&self) -> Option<&crate::intent::BatchMeta> {
         Some(&self.meta)

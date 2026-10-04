@@ -6,8 +6,8 @@ use pnr_core::ids::DeviceId;
 use pnr_core::layout::Layout;
 
 use crate::matching::class::{Family, MatchClass};
-use crate::matching::mismatch::{sigma_pair, Budget, Coeffs, Ledger, MatchKind};
-use crate::matching::moments::{sums, Pt};
+use crate::matching::mismatch::{sigma_pair, Budget, Coeffs, Ledger, LedgerRow, MatchKind};
+use crate::matching::moments::{cancelled_order, phi_equal, sums, Pt};
 use crate::matching::pattern::{cc_feasible, diffusion_cc_row, Outer};
 
 /// A set of devices that must match its reference, pair by pair `(0, i)`:
@@ -203,6 +203,33 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
             }
         }
     }
+    /// Report only: allocates the members' units per pair.
+    fn ledger_rows(&self, l: &Layout, out: &mut Vec<LedgerRow>) {
+        let (a, sa) = (self.members[0], member(l, self.members[0]).0);
+        let pa: Vec<Pt> = l.units.of_device(l, a).map(Pt::from).collect();
+        for i in 1..self.members.len() {
+            let b = self.members[i];
+            let g = self.ledger(l, i);
+            let sb = member(l, b).0;
+            let units = sa.w > 0.0 && sb.w > 0.0;
+            let pb: Vec<Pt> = l.units.of_device(l, b).map(Pt::from).collect();
+            out.push(LedgerRow {
+                members: (u32::from(a.0), u32::from(b.0)),
+                unit: "mV",
+                sigma_rand: g.sigma_rand,
+                sigma_layout: g.sigma_grad,
+                mu_thermal: g.mu_thermal,
+                mu_lod: g.mu_lod,
+                allowance: g.allowance,
+                usage: g.usage(),
+                order: if units { cancelled_order(&[&pa, &pb], 4, 1e-3).0 } else { 0 },
+                second_order_nm: g.second_order_nm,
+                phi_equal: units.then(|| phi_equal(&sa, &sb)),
+                known: g.known,
+                sizing_limited: matches!(self.budget, Budget::Sigma1Mv(b) if g.sigma_rand > 0.0 && g.sigma_rand >= b),
+            });
+        }
+    }
     fn offset_allowances(&self, l: &Layout, out: &mut Vec<(u32, u32, f32)>) {
         for i in 1..self.members.len() {
             let g = self.ledger(l, i);
@@ -283,6 +310,39 @@ mod tests {
     fn row(order: [u8; 4]) -> UnitLib {
         let units: Vec<Unit> = order.iter().zip([100, 300, 500, 700]).map(|(&o, x)| unit(o, x, 50, 10)).collect();
         merged(&units, Rect { x: 0, y: 0, w: 800, h: 100 })
+    }
+
+    #[test]
+    fn ledger_rows_one_per_pair() {
+        let l = singles(1_000);
+        let mut s = pair(0, 1);
+        let mut rows = Vec::new();
+        s.ledger_rows(&l, &mut rows);
+        let g = s.ledger(&l, 1);
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!((r.members, r.unit, r.known), ((0, 1), "mV", g.known));
+        assert_eq!((r.sigma_rand, r.sigma_layout, r.mu_thermal, r.mu_lod), (g.sigma_rand, g.sigma_grad, g.mu_thermal, g.mu_lod));
+        assert_eq!((r.allowance, r.usage, r.second_order_nm), (g.allowance, g.usage(), g.second_order_nm));
+        assert_eq!(r.phi_equal, Some(true));
+        assert!(!r.sizing_limited);
+        // 20 µm² each: σ_rand 2.124 mV ≥ a 1 mV total, nothing left for layout.
+        s.budget = Budget::Sigma1Mv(1.0);
+        rows.clear();
+        s.ledger_rows(&l, &mut rows);
+        assert!((rows[0].sigma_rand - 2.124).abs() < 1e-3, "{}", rows[0].sigma_rand);
+        assert_eq!(rows[0].allowance, 0.0);
+        assert!(rows[0].sizing_limited);
+        // ABBA cancels the first moment order (common centroid); AABB none.
+        let mut l = layout(&[5_000], &[5_000], 400);
+        l.units = Arc::new(row([0, 1, 1, 0]));
+        rows.clear();
+        pair(0, 1).ledger_rows(&l, &mut rows);
+        assert_eq!(rows[0].order, 1);
+        l.units = Arc::new(row([0, 0, 1, 1]));
+        rows.clear();
+        pair(0, 1).ledger_rows(&l, &mut rows);
+        assert_eq!(rows[0].order, 0);
     }
 
     #[test]

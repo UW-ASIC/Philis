@@ -121,6 +121,31 @@ pub struct Ledger {
     pub known: bool,
 }
 
+/// One matched pair's ledger as the report prints it (MAT-13), mV.
+///
+/// `members` are schematic device ids `(reference, member)`;
+/// `sigma_layout` is the gradient term; `order` the moment orders the
+/// members' units cancel ([`crate::matching::moments::cancelled_order`], 0
+/// without units); `phi_equal` whether their orientation counts agree (`None`
+/// without units); `sizing_limited` a `Sigma1Mv` budget the random σ alone
+/// already meets or exceeds (allowance 0: the sizing, not the layout, must change).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LedgerRow {
+    pub members: (u32, u32),
+    pub unit: &'static str,
+    pub sigma_rand: f32,
+    pub sigma_layout: f32,
+    pub mu_thermal: f32,
+    pub mu_lod: f32,
+    pub allowance: f32,
+    pub usage: f32,
+    pub order: u8,
+    pub second_order_nm: f32,
+    pub phi_equal: Option<bool>,
+    pub known: bool,
+    pub sizing_limited: bool,
+}
+
 impl Ledger {
     /// Systematic terms spent: deterministic ones add by magnitude (worst
     /// case, Lampaert eq. 4.25), one budget for all (DVP eq. 1).
