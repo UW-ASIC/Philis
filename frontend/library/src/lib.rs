@@ -874,7 +874,8 @@ impl Flow<'_> {
             prices,
             place_rules(self.pdk),
             &self.net_weight,
-            seed,
+            // Its own stream (AP-19): gp and dp drawing the same sequence correlate their moves.
+            seed ^ 0xD1B5_4A32_D192_ED03,
             dp::Schedule::cold(),
         );
         layout.debug_check("dp::place");
