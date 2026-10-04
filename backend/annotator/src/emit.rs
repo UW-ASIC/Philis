@@ -143,13 +143,22 @@ pub fn placement(
         let g = &drawn[d.0 as usize];
         (g.w_finger_nm, g.l_nm, g.fingers, g.model)
     };
+    // (set, member) of each device: sets are disjoint (EXT-15 components).
+    let mut set_of: Vec<Option<(usize, usize)>> = vec![None; drawn.len()];
+    for (i, s) in intent.sets.iter().enumerate() {
+        for (j, m) in s.members.iter().enumerate() {
+            set_of[m.device.0 as usize] = Some((i, j));
+        }
+    }
+    let equal = |a: DeviceId, b: DeviceId| match (set_of[a.0 as usize], set_of[b.0 as usize]) {
+        (Some((sa, ia)), Some((sb, ib))) if sa == sb => {
+            let s = &intent.sets[sa];
+            let m = |i: usize| (s.members[i].parallel, s.members[i].series);
+            if s.unit.is_some() { m(ia) == m(ib) } else { geom(a) == geom(b) }
+        }
+        _ => false,
+    };
     for c in &intent.compounds {
-        let equal = |a: DeviceId, b: DeviceId| {
-            intent.sets.iter().any(|s| {
-                let m = |d| s.members.iter().find(|m| m.device == d).map(|m| (m.parallel, m.series));
-                m(a).is_some() && m(b).is_some() && if s.unit.is_some() { m(a) == m(b) } else { geom(a) == geom(b) }
-            })
-        };
         let mut syms: Vec<Symmetry> =
             c.pairs.iter().filter(|&&(a, b)| equal(a, b)).map(|&(a, b)| Symmetry { a: td(a), b: td(b), axis: c.axis }).collect();
         syms.extend(c.selfs.iter().map(|&d| Symmetry { a: td(d), b: td(d), axis: c.axis }));

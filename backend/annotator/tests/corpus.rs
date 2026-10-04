@@ -638,3 +638,85 @@ fn ratioed_mirror_not_mirrored() {
     let r = annotator::emit::placement(&intent, &p.blocks, &nl, &drawn, &c.process, c.offset_sigma_mv, &c.policy);
     assert_eq!((count(&r.hard, "Symmetry"), count(&r.budget, "Proximity")), (0, 0));
 }
+
+/// T5/AA-24 (EXT-20): only an equal couple mirrors. Unequal units (unit
+/// `Some`) or, without a unit, unequal drawn geometry drop the couple from the
+/// hard Symmetry; its MatchedSet and DtiBand stay.
+#[test]
+fn unequal_couple_matched_not_mirrored() {
+    let nl = net(src("ota5t"));
+    let mut c = cfg("ota5t");
+    c.process.dti = Some((5_000, 300));
+    let p = annotate(&nl, &c);
+    let id = |n: &str| nl.devices.iter().position(|d| d.name == n).unwrap() as u32;
+    let (m1, m2, m3, m4) = (id("XM1"), id("XM2"), id("XM3"), id("XM4"));
+    let mut models = Vec::new();
+    let drawn: Vec<_> = nl.devices.iter().map(|d| annotator::size::drawn(d, &mut models)).collect();
+    let i = p.intent.sets.iter().position(|s| s.members.iter().any(|m| u32::from(m.device.0) == m2)).unwrap();
+    let has = |v: &[Vec<u32>], a: u32, b: u32| v.concat().chunks(2).any(|ab| ab == [a, b] || ab == [b, a]);
+    let check = |intent: &analog::intent::Intent, drawn: &[annotator::size::Drawn], mirrored: bool| {
+        let r = annotator::emit::placement(intent, &p.blocks, &nl, drawn, &c.process, c.offset_sigma_mv, &c.policy);
+        let sym = touched_of(&r.hard, "Symmetry");
+        assert_eq!(has(&sym, m1, m2), mirrored, "{sym:?}");
+        assert!(has(&sym, m3, m4), "{sym:?}");
+        assert!(touched_of(&r.budget, "MatchedSet").iter().any(|t| t.contains(&m1) && t.contains(&m2)));
+        assert!(has(&touched_of(&r.hard, "DtiBand"), m1, m2));
+    };
+    check(&p.intent, &drawn, true);
+
+    let mut intent = p.intent.clone();
+    assert!(intent.sets[i].unit.is_some());
+    let j = intent.sets[i].members.iter().position(|m| u32::from(m.device.0) == m2).unwrap();
+    intent.sets[i].members[j].parallel += 1;
+    check(&intent, &drawn, false);
+
+    let mut intent = p.intent.clone();
+    intent.sets[i].unit = None;
+    check(&intent, &drawn, true);
+    let mut wide = drawn.clone();
+    wide[m2 as usize].w_finger_nm = wide[m2 as usize].w_finger_nm.map(|w| w * 2);
+    check(&intent, &wide, false);
+}
+
+/// EXT-20: a bipolar set's MatchedSet carries the deck's `bjt_ka_pct_um`;
+/// without it the random term is unknown. `bgr_core`'s PNPs are fixed-geometry
+/// (no W/L, area 0 to `emit`), so the test writes a 3.4×3.4 µm emitter.
+#[test]
+fn bipolar_set_reads_bjt_ka() {
+    let nl = net(src("bgr_core"));
+    let mut models = Vec::new();
+    let mut drawn: Vec<_> = nl.devices.iter().map(|d| annotator::size::drawn(d, &mut models)).collect();
+    for d in &mut drawn {
+        (d.w_finger_nm, d.l_nm) = (Some(3_400), Some(3_400));
+    }
+    let rows = |ka: Option<f32>| {
+        let mut c = cfg("bgr_core");
+        c.process.bjt_ka_pct_um = ka;
+        let p = annotate(&nl, &c);
+        let i = p.intent.sets.iter().position(|s| s.family == analog::intent::Family::Bipolar).expect("the bipolar set");
+        let r = annotator::emit::placement(&p.intent, &p.blocks, &nl, &drawn, &c.process, c.offset_sigma_mv, &c.policy);
+        let set = r.budget.iter().filter(|b| b.kind() == "MatchedSet").nth(i).expect("set i's batch");
+        let n = nl.devices.len();
+        let l = pnr_core::Layout {
+            x: (0..n as i32).map(|k| k * 100_000).collect(),
+            y: vec![0; n],
+            hw: vec![0; n],
+            hh: vec![0; n],
+            axis: vec![0; 8],
+            groups: vec![],
+            orient: vec![pnr_core::Orient::default(); n],
+            variant: vec![0; n],
+            branch: Vec::new(),
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        };
+        let mut rows = Vec::new();
+        set.ledger_rows(&l, &mut rows);
+        rows
+    };
+    let r = rows(Some(1.0));
+    assert!(!r.is_empty() && r.iter().all(|r| r.sigma_rand > 0.0), "{r:?}");
+    let r = rows(None);
+    assert!(!r.is_empty() && r.iter().all(|r| r.sigma_rand == 0.0 && !r.known), "{r:?}");
+}
