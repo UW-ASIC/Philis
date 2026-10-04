@@ -596,6 +596,13 @@ impl Pdk {
         self.cell.get(key)?.as_f64().map(|x| x as f32)
     }
 
+    /// A text value from the deck's `cell` section (e.g. `substrate_kind`);
+    /// `None` when absent, null or not a string.
+    #[must_use]
+    pub fn cell_str(&self, key: &str) -> Option<&str> {
+        self.cell.get(key)?.as_str()
+    }
+
     /// Where a `cell.*` value comes from (`<key>_source`); `None` when the
     /// sidecar gives no source text.
     #[must_use]

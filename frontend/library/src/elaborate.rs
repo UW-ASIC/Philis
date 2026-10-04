@@ -157,7 +157,8 @@ pub(crate) fn route_built(
     };
 
     let (layers, cuts, pin_access) = routing_stack(pdk);
-    let d_router = detailed_router(pdk, &layers, &cuts, pin_access);
+    let mut d_router = detailed_router(pdk, &layers, &cuts, pin_access);
+    d_router.cfg.n_nets = built.netlist.as_ref().map_or(0, |n| n.nets.len());
     // The netlist shares the pins' NetId numbering, so its routing rules key
     // the right nets with no remap.
     let reqs = built
@@ -175,18 +176,7 @@ pub(crate) fn route_built(
 
     let mut best: Option<(Routes, Report)> = None;
     for _ in 0..cfg.epochs.max(1) {
-        let (global, _) =
-            gr::GlobalRoute::default().route(&layout, &macros, &[], &reqs, &layers, &mut neg);
-        let (routes, report) = d_router.route(
-            &global,
-            &pins,
-            &placed,
-            &[],
-            &reqs,
-            &layers,
-            &cuts,
-            &mut neg,
-        );
+        let (routes, report, _) = d_router.route(&pins, &placed, &[], &reqs, &layers, &cuts, &mut neg);
         if best.as_ref().is_none_or(|(_, b)| report.lex() < b.lex()) {
             best = Some((routes, report));
         }

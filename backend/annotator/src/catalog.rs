@@ -23,6 +23,7 @@
 //! Within a size tier, more-constrained patterns (exact sizing, diode
 //! requirements) get higher priority than loosely-constrained ones.
 
+use crate::block::BlockKind::{self, CascodePair, CurrentMirror, DiffPair, Load};
 use crate::pattern::{DiodeReq, Pattern, PinLink, PinRel, SizeMatch, Slot, SlotKind};
 
 // ── Shorthand constructors ──
@@ -104,6 +105,11 @@ const fn ne(a: u8, pa: &'static str, b: u8, pb: &'static str) -> PinLink {
     PinLink { a, pin_a: pa, b, pin_b: pb, rel: PinRel::Diff }
 }
 
+/// Shorthand link: two pins on the same net, and that net's role is `Signal`.
+const fn eq_sig(a: u8, pa: &'static str, b: u8, pb: &'static str) -> PinLink {
+    PinLink { a, pin_a: pa, b, pin_b: pb, rel: PinRel::SameSignal }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 //  Category 1: Two-device transistor-level primitives (priority 5–13)
 // ═══════════════════════════════════════════════════════════════════════
@@ -128,34 +134,11 @@ pub const DIFF_PAIR: Pattern = Pattern {
         },
     ],
     links: &[
-        eq(0, "S", 1, "S"),
+        eq_sig(0, "S", 1, "S"),
         ne(0, "G", 1, "G"),
         ne(0, "D", 1, "D"),
         ne(0, "G", 1, "D"),  // exclude cross-coupled
         ne(1, "G", 0, "D"),  // exclude cross-coupled
-    ],
-};
-
-/// Differential pair with separate sources (e.g. degenerated or with
-/// individual source resistors). Same gates-differ, drains-differ,
-/// but sources also differ.
-/// ALIGN: DP with split sources (CMC_S variant wiring)
-pub const DIFF_PAIR_SPLIT_SOURCE: Pattern = Pattern {
-    name: "diff_pair_split_source",
-    priority: 9,
-    slots: &[
-        Slot { gate_is_signal: true, ..S_ANY },
-        Slot {
-            kind: SlotKind::SameTypeAs(0),
-            size_match: SizeMatch::ExactAs(0),
-            diode: DiodeReq::Any,
-            gate_is_signal: true,
-        },
-    ],
-    links: &[
-        ne(0, "G", 1, "G"),
-        ne(0, "D", 1, "D"),
-        ne(0, "S", 1, "S"),
     ],
 };
 
@@ -195,29 +178,6 @@ pub const CURRENT_MIRROR_OUTPUT_PAIR: Pattern = Pattern {
     links: &[
         eq(0, "G", 1, "G"),
         eq(0, "S", 1, "S"),
-        ne(0, "D", 1, "D"),
-    ],
-};
-
-/// Current mirror output pair with split sources. Two same-type FETs,
-/// shared gate, separate sources and drains. Used in cascode mirrors
-/// where the bottom pair has distinct source routing.
-/// ALIGN: CMC_S_NMOS / CMC_S_PMOS
-pub const MIRROR_PAIR_SPLIT_SOURCE: Pattern = Pattern {
-    name: "mirror_pair_split_source",
-    priority: 6,
-    slots: &[
-        Slot { diode: DiodeReq::Forbidden, ..S_ANY },
-        Slot {
-            kind: SlotKind::SameTypeAs(0),
-            size_match: SizeMatch::SameLAs(0),
-            diode: DiodeReq::Forbidden,
-            gate_is_signal: false,
-        },
-    ],
-    links: &[
-        eq(0, "G", 1, "G"),
-        ne(0, "S", 1, "S"),
         ne(0, "D", 1, "D"),
     ],
 };
@@ -292,28 +252,6 @@ pub const CASCODE_MATCHED: Pattern = Pattern {
 };
 
 // ── 1.5 Active loads / matched pairs ──
-
-/// Active load pair: same-type, exact match, shared gate+source,
-/// different drains, neither diode-connected. Biased by external voltage.
-/// ALIGN: CMC with non-signal gate
-pub const ACTIVE_LOAD: Pattern = Pattern {
-    name: "active_load",
-    priority: 6,
-    slots: &[
-        Slot { diode: DiodeReq::Forbidden, ..S_ANY },
-        Slot {
-            kind: SlotKind::SameTypeAs(0),
-            size_match: SizeMatch::ExactAs(0),
-            diode: DiodeReq::Forbidden,
-            gate_is_signal: false,
-        },
-    ],
-    links: &[
-        eq(0, "G", 1, "G"),
-        eq(0, "S", 1, "S"),
-        ne(0, "D", 1, "D"),
-    ],
-};
 
 /// Diode-connected load pair: two diode-connected FETs sharing source,
 /// different drains. Used as matched diode loads in DAC reference ladders.
@@ -486,9 +424,9 @@ pub const DEGENERATION_PAIR: Pattern = Pattern {
 
 // ── 2.1 Mirrors with 3 devices ──
 
-/// Wilson current mirror: M0 diode ref, M1 mirror, M2 cascode with
-/// feedback from M2's gate to M0's drain.
-/// Topology: M0+M1 share gate+source; M1.D = M2.S; M0.D = M2.G.
+/// Wilson current mirror: slot 0 = diode reference, slot 1 = input, slot 2 =
+/// output. Topology: slots 0+1 share gate+source; slot 1's drain drives
+/// slot 2's gate; slot 0's drain is slot 2's source (feedback).
 pub const WILSON_MIRROR: Pattern = Pattern {
     name: "wilson_mirror",
     priority: 16,
@@ -500,8 +438,8 @@ pub const WILSON_MIRROR: Pattern = Pattern {
     links: &[
         eq(0, "G", 1, "G"),
         eq(0, "S", 1, "S"),
-        eq(1, "D", 2, "S"),
-        eq(0, "D", 2, "G"),
+        eq(1, "D", 2, "G"),
+        eq(0, "D", 2, "S"),
     ],
 };
 
@@ -923,30 +861,6 @@ pub const CROSS_COUPLED_INVERTERS: Pattern = Pattern {
     ],
 };
 
-/// Cross-coupled diff pair with shared source: M0+M1 cross-coupled
-/// (same type), M2+M3 cross-coupled (complement type). All share
-/// respective sources. Used in VCO/oscillator cores.
-pub const CROSS_COUPLED_COMPLEMENTARY: Pattern = Pattern {
-    name: "cross_coupled_complementary",
-    priority: 25,
-    slots: &[
-        S_ANY,
-        same0_exact(),
-        comp(0),
-        Slot { kind: SlotKind::SameTypeAs(2), size_match: SizeMatch::ExactAs(2), ..S_ANY },
-    ],
-    links: &[
-        eq(0, "G", 1, "D"),
-        eq(0, "D", 1, "G"),
-        eq(0, "S", 1, "S"),
-        eq(2, "G", 3, "D"),
-        eq(2, "D", 3, "G"),
-        eq(2, "S", 3, "S"),
-        eq(0, "D", 2, "D"),
-        eq(1, "D", 3, "D"),
-    ],
-};
-
 // ── 3.5 Cascode pairs ──
 
 /// Matched cascode pair: two independent cascode stacks (4 FETs total)
@@ -1260,10 +1174,10 @@ pub const GILBERT_CELL: Pattern = Pattern {
             diode: DiodeReq::Any,
             gate_is_signal: true,
         },                                         // M1: RF-
-        same0_exact(),                              // M2: LO quad A+
-        same0_exact(),                              // M3: LO quad A-
-        same0_exact(),                              // M4: LO quad B+
-        same0_exact(),                              // M5: LO quad B-
+        same0(),                                     // M2: LO quad A+
+        same_exact(2),                               // M3: LO quad A-
+        same_exact(2),                               // M4: LO quad B+
+        same_exact(2),                               // M5: LO quad B-
     ],
     links: &[
         eq(0, "S", 1, "S"),   // bottom pair source
@@ -1272,10 +1186,11 @@ pub const GILBERT_CELL: Pattern = Pattern {
         eq(0, "D", 3, "S"),
         eq(1, "D", 4, "S"),   // M1 feeds quad B
         eq(1, "D", 5, "S"),
-        eq(2, "G", 3, "G"),   // quad A shared LO (actually differ for proper Gilbert)
-        eq(4, "G", 5, "G"),   // quad B shared LO
-        eq(2, "D", 5, "D"),   // cross-connect outputs
-        eq(3, "D", 4, "D"),
+        eq(2, "G", 5, "G"),
+        eq(3, "G", 4, "G"),
+        ne(2, "G", 3, "G"),   // quad A LO inputs differ
+        eq(2, "D", 4, "D"),   // cross-connect outputs
+        eq(3, "D", 5, "D"),
     ],
 };
 
@@ -1390,48 +1305,6 @@ pub const SWITCH_PAIR: Pattern = Pattern {
         eq(0, "D", 1, "D"),
         eq(0, "S", 1, "S"),
         ne(0, "G", 1, "G"),
-    ],
-};
-
-/// Diode-connected cascode: bottom diode-connected, top also
-/// diode-connected. Used in bias chains.
-pub const DIODE_CASCODE: Pattern = Pattern {
-    name: "diode_cascode",
-    priority: 9,
-    slots: &[
-        Slot { diode: DiodeReq::Required, ..S_ANY },
-        Slot {
-            kind: SlotKind::SameTypeAs(0),
-            size_match: SizeMatch::SameLAs(0),
-            diode: DiodeReq::Required,
-            gate_is_signal: false,
-        },
-    ],
-    links: &[
-        eq(0, "D", 1, "S"),
-    ],
-};
-
-/// Current mirror with cascode output: M0 is diode-connected reference,
-/// M1 is the output with its drain connected back through a cascode.
-/// Shared gate, shared source, M0 diode.
-/// Same as simple mirror but M1 is NOT diode-connected (explicitly forbidden).
-pub const CURRENT_MIRROR_SINGLE_ENDED: Pattern = Pattern {
-    name: "current_mirror_single_ended",
-    priority: 8,
-    slots: &[
-        Slot { diode: DiodeReq::Required, ..S_ANY },
-        Slot {
-            kind: SlotKind::SameTypeAs(0),
-            size_match: SizeMatch::SameLAs(0),
-            diode: DiodeReq::Forbidden,
-            gate_is_signal: false,
-        },
-    ],
-    links: &[
-        eq(0, "G", 1, "G"),
-        eq(0, "S", 1, "S"),
-        ne(0, "D", 1, "D"),
     ],
 };
 
@@ -1578,31 +1451,6 @@ pub const SOOCH_MIRROR: Pattern = Pattern {
         eq(1, "D", 2, "S"),
         ne(0, "D", 2, "G"),  // NOT Wilson feedback
         ne(1, "D", 2, "G"),
-    ],
-};
-
-/// Diff pair with source degeneration devices: M0+M1 diff pair,
-/// M2+M3 degeneration FETs in triode (gate tied to supply) between
-/// each diff pair source and the tail node.
-/// But as a 3-device pattern: diff pair + single tail/degeneration.
-pub const DIFF_PAIR_WITH_DEGEN: Pattern = Pattern {
-    name: "diff_pair_with_degen",
-    priority: 14,
-    slots: &[
-        Slot { gate_is_signal: true, ..S_ANY },
-        Slot {
-            kind: SlotKind::SameTypeAs(0),
-            size_match: SizeMatch::ExactAs(0),
-            diode: DiodeReq::Any,
-            gate_is_signal: true,
-        },
-        same0(),  // degeneration/tail
-    ],
-    links: &[
-        ne(0, "G", 1, "G"),
-        ne(0, "D", 1, "D"),
-        ne(0, "S", 1, "S"),  // split sources (through degen devices)
-        eq(0, "S", 2, "D"),  // one degen device
     ],
 };
 
@@ -1854,29 +1702,6 @@ pub const BIAS_CHAIN_3: Pattern = Pattern {
     ],
 };
 
-/// Startup circuit element: M0 (weak device, long L or small W) with
-/// gate sensing a bias voltage, providing initial current to kick-start
-/// a self-biased circuit. M1 provides the mirror.
-/// Structurally just a mirror but with intentionally mismatched W.
-pub const STARTUP_MIRROR: Pattern = Pattern {
-    name: "startup_mirror",
-    priority: 7,
-    slots: &[
-        Slot { diode: DiodeReq::Required, ..S_ANY },
-        Slot {
-            kind: SlotKind::SameTypeAs(0),
-            size_match: SizeMatch::SameLAs(0), // same L, different W (ratio)
-            diode: DiodeReq::Forbidden,
-            gate_is_signal: false,
-        },
-    ],
-    links: &[
-        eq(0, "G", 1, "G"),
-        eq(0, "S", 1, "S"),
-        ne(0, "D", 1, "D"),
-    ],
-};
-
 /// Bandgap core (transistor part): M0+M1 form a current mirror,
 /// M2+M3 form another mirror or diff pair sensing the PTAT/CTAT voltages.
 /// The resistors are outside the FET pattern.
@@ -1907,14 +1732,6 @@ pub const BANDGAP_MIRROR_PAIR: Pattern = Pattern {
 // ═══════════════════════════════════════════════════════════════════════
 //  Category 11: Additional composite patterns
 // ═══════════════════════════════════════════════════════════════════════
-
-/// Current-mirror OTA (simple): M0+M1 NMOS diff pair, M2 diode load,
-/// M3 mirror load, M4 tail. Same as 5T OTA but without exact type
-/// constraint on load type.
-/// (Alias: this is structurally identical to FIVE_TRANSISTOR_OTA but
-/// kept for naming compatibility with ALIGN's "current_mirror_ota" template.)
-// NOTE: This is intentionally the same connectivity as FIVE_TRANSISTOR_OTA.
-// The pattern engine will only match one since devices get consumed.
 
 /// Diff pair with diode load + mirror load + tail (5T variant where
 /// loads are same type as diff pair but diode/mirror).
@@ -1950,33 +1767,6 @@ pub const OTA_SELF_BIASED_LOAD: Pattern = Pattern {
     ],
 };
 
-/// Cascode current mirror OTA: M0+M1 diff pair, M2+M3 cascode mirrors
-/// as loads, M4 tail. Diff pair drains connect to cascode sources.
-pub const CASCODE_MIRROR_OTA: Pattern = Pattern {
-    name: "cascode_mirror_ota",
-    priority: 33,
-    slots: &[
-        Slot { gate_is_signal: true, ..S_ANY },
-        Slot {
-            kind: SlotKind::SameTypeAs(0),
-            size_match: SizeMatch::ExactAs(0),
-            diode: DiodeReq::Any,
-            gate_is_signal: true,
-        },
-        comp(0),             // M2: cascode load A
-        same_exact(2),       // M3: cascode load B
-        same0(),             // M4: tail
-    ],
-    links: &[
-        eq(0, "S", 1, "S"),
-        ne(0, "G", 1, "G"),
-        eq(0, "D", 2, "S"),
-        eq(1, "D", 3, "S"),
-        eq(2, "G", 3, "G"),
-        eq(0, "S", 4, "D"),
-    ],
-};
-
 /// Complementary diff pair: NMOS diff pair + PMOS diff pair sharing
 /// the same input signals but providing rail-to-rail input range.
 /// M0+M1 NMOS DP, M2+M3 PMOS DP.
@@ -2005,10 +1795,10 @@ pub const COMPLEMENTARY_DIFF_PAIR: Pattern = Pattern {
         },
     ],
     links: &[
-        eq(0, "S", 1, "S"),
+        eq_sig(0, "S", 1, "S"),  // a tail node, not a rail (as `diff_pair`)
         ne(0, "G", 1, "G"),
         ne(0, "D", 1, "D"),
-        eq(2, "S", 3, "S"),
+        eq_sig(2, "S", 3, "S"),
         eq(0, "G", 2, "G"),  // same signal inputs
         eq(1, "G", 3, "G"),
         ne(2, "D", 3, "D"),
@@ -2032,25 +1822,6 @@ pub const CMFB_SENSE_PAIR: Pattern = Pattern {
         eq(0, "S", 1, "S"),
         eq(0, "S", 2, "S"),
         ne(0, "G", 1, "G"),
-    ],
-};
-
-/// Two-stage miller compensation core: M0 first-stage CS device,
-/// M1 second-stage CS device, M2 compensation cap device (FET as cap).
-/// M0.D = M2.S (compensation node), M1.D = M2.G (output).
-/// Note: the actual cap is typically a passive, but some PDKs use
-/// MOS caps. This pattern catches the FET-based variant.
-pub const MILLER_COMP_FETS: Pattern = Pattern {
-    name: "miller_comp_fets",
-    priority: 14,
-    slots: &[
-        S_ANY,
-        S_ANY,
-        S_ANY,
-    ],
-    links: &[
-        eq(0, "D", 2, "S"),  // comp node
-        eq(1, "D", 2, "G"),  // output drives cap gate
     ],
 };
 
@@ -2202,29 +1973,11 @@ pub const ANTI_PARALLEL_SWITCH: Pattern = Pattern {
     ],
 };
 
-/// Triode-biased load pair: two same-type FETs where gate is tied to
-/// supply (via the source rail), acting as linear resistors.
-/// Shared source, different drains, shared gate = source.
-pub const TRIODE_LOAD_PAIR: Pattern = Pattern {
-    name: "triode_load_pair",
-    priority: 6,
-    slots: &[
-        S_ANY,
-        same0_exact(),
-    ],
-    links: &[
-        eq(0, "G", 1, "G"),
-        eq(0, "S", 1, "S"),
-        eq(0, "G", 0, "S"),  // gate tied to source (triode bias)
-        ne(0, "D", 1, "D"),
-    ],
-};
-
 /// Differential switch (analog mux): two same-type FETs sharing source,
 /// different gates (select signals), different drains (outputs).
 /// Similar to diff pair but gates are digital select, not analog signal.
-/// (Structurally matches diff_pair if gates happen to be signal; this
-/// catches the non-signal-gate case.)
+/// `gate_is_signal: false` means the gate is not checked, so this also matches
+/// signal-gated pairs; `diff_pair` (priority 10) wins those.
 pub const DIFF_SWITCH: Pattern = Pattern {
     name: "diff_switch",
     priority: 8,
@@ -2238,33 +1991,11 @@ pub const DIFF_SWITCH: Pattern = Pattern {
         },
     ],
     links: &[
-        eq(0, "S", 1, "S"),
+        eq_sig(0, "S", 1, "S"),
         ne(0, "G", 1, "G"),
         ne(0, "D", 1, "D"),
         ne(0, "G", 1, "D"),  // exclude cross-coupled
         ne(1, "G", 0, "D"),  // exclude cross-coupled
-    ],
-};
-
-/// Dummy pair: two identical FETs with all terminals shorted together
-/// (or gate/source tied). Used for matching/symmetry in layout.
-/// Both are "diode-connected" equivalent (gate=drain or gate=source).
-pub const DUMMY_PAIR: Pattern = Pattern {
-    name: "dummy_pair",
-    priority: 5,
-    slots: &[
-        Slot { diode: DiodeReq::Required, ..S_ANY },
-        Slot {
-            kind: SlotKind::SameTypeAs(0),
-            size_match: SizeMatch::ExactAs(0),
-            diode: DiodeReq::Required,
-            gate_is_signal: false,
-        },
-    ],
-    links: &[
-        eq(0, "S", 1, "S"),
-        eq(0, "D", 1, "D"),
-        eq(0, "G", 1, "G"),
     ],
 };
 
@@ -2290,13 +2021,6 @@ pub const TRIPLE_CASCODE: Pattern = Pattern {
         ne(1, "G", 2, "G"),
     ],
 };
-
-/// Cascode mirror with diode bias: M0 diode ref, M1 output mirror,
-/// M2 cascode on output with gate driven by M0's drain.
-/// M0.G=M1.G, M0.S=M1.S, M1.D=M2.S, M0.D=M2.G.
-/// (This is the same as Wilson mirror but with explicit naming.)
-// Different from Wilson in that M2.D is the final output (no feedback
-// from M2.D back into the circuit).
 
 /// Current mirror with two outputs: M0 diode ref, M1+M2 two output
 /// transistors sharing gate with M0, all sharing source.
@@ -2338,9 +2062,6 @@ pub const SUPER_SOURCE_FOLLOWER: Pattern = Pattern {
     ],
 };
 
-/// Complementary self-biased inverter chain: M0(N)+M1(P) inverter,
-/// M2 feedback from output to... actually let's do a useful one:
-///
 /// Three-transistor current source: M0 diode ref, M1 mirror output,
 /// M2 cascode on M0 (diode-connected). Provides cascoded reference.
 pub const CASCODED_REFERENCE: Pattern = Pattern {
@@ -2425,7 +2146,7 @@ pub const DIFF_PAIR_WITH_SPLIT_CASCODES: Pattern = Pattern {
         same_exact(2),
     ],
     links: &[
-        eq(0, "S", 1, "S"),
+        eq_sig(0, "S", 1, "S"),  // a rail-sourced pair is not differential (EXT-04)
         ne(0, "G", 1, "G"),
         eq(0, "D", 2, "S"),
         eq(1, "D", 3, "S"),
@@ -2555,7 +2276,7 @@ pub const DIFF_PAIR_WITH_REFERENCE: Pattern = Pattern {
         },
     ],
     links: &[
-        eq(0, "S", 1, "S"),
+        eq_sig(0, "S", 1, "S"),  // a rail-sourced pair is not differential (EXT-04)
         ne(0, "G", 1, "G"),
         ne(0, "D", 1, "D"),
         eq(1, "G", 2, "D"),  // M2 diode drives M1 gate
@@ -2583,7 +2304,6 @@ pub const PATTERNS: &[Pattern] = &[
     DIFF_PAIR_CROSS_COUPLED_LOAD,
     FIVE_TRANSISTOR_OTA,
     DIFF_PAIR_CASCODE_LOAD,
-    CASCODE_MIRROR_OTA,
     OTA_SELF_BIASED_LOAD,
     CASCODED_DIFF_PAIR_WITH_TAIL,
     WIDE_SWING_CASCODE_MIRROR_5,
@@ -2591,7 +2311,6 @@ pub const PATTERNS: &[Pattern] = &[
 
     // ── 4-device composites (20–29) ──
     CROSS_COUPLED_INVERTERS,
-    CROSS_COUPLED_COMPLEMENTARY,
     WIDE_SWING_CASCODE_MIRROR,
     IMPROVED_WILSON_MIRROR_4,
     CASCODE_MIRROR,
@@ -2646,10 +2365,8 @@ pub const PATTERNS: &[Pattern] = &[
     CURRENT_MIRROR_3,
     CURRENT_MIRROR_1_TO_2,
     ACTIVE_LOAD_3,
-    DIFF_PAIR_WITH_DEGEN,
     PUSH_PULL_WITH_BIAS,
     BIAS_CHAIN_3,
-    MILLER_COMP_FETS,
 
     // ── 2-device patterns (5–13) ──
     CMOS_INVERTER,
@@ -2658,30 +2375,279 @@ pub const PATTERNS: &[Pattern] = &[
     PUSH_PULL_PAIR,
     COMPLEMENTARY_SOURCE_FOLLOWER,
     ANTI_PARALLEL_SWITCH,
-    DIODE_CASCODE,
     CASCODE_DIODE_TOP,
     CROSS_COUPLED,
     CROSS_COUPLED_SPLIT_SOURCE,
-    DIFF_PAIR_SPLIT_SOURCE,
     BETA_MULTIPLIER_CORE,
     ESD_DIODE_CLAMP,
     CASCODE_MATCHED,
     CURRENT_MIRROR,
-    CURRENT_MIRROR_SINGLE_ENDED,
     DIFF_SWITCH,
     CURRENT_MIRROR_OUTPUT_PAIR,
     SOURCE_FOLLOWER,
-    ACTIVE_LOAD,
     DIODE_LOAD_PAIR,
     LATCH_HALF,
-    STARTUP_MIRROR,
     COMMON_MODE_SENSE_PAIR,
     COMMON_GATE_PAIR,
-    TRIODE_LOAD_PAIR,
-    MIRROR_PAIR_SPLIT_SOURCE,
     SERIES_STACK,
     CASCODE,
     DEGENERATION_PAIR,
     SWITCH_PAIR,
-    DUMMY_PAIR,
 ];
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Declared slot roles (plan-01 EXT-05; survey Fig. 3.11 block → requirement)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// What a pattern's slots mean for placement: the composite's children and
+/// on-axis members, built by [`crate::Block::from_match`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Roles {
+    /// Constraint-bearing couples: (slot a, slot b, leaf kind).
+    pub pairs: &'static [(u8, u8, BlockKind)],
+    /// Slots on the structure's symmetry axis (tail, shared bias device).
+    pub selfs: &'static [u8],
+    /// Adjacent-but-not-matched couples (cascode over its source): a `Stack` leaf.
+    pub prox: &'static [(u8, u8)],
+}
+
+const fn roles(pairs: &'static [(u8, u8, BlockKind)], selfs: &'static [u8], prox: &'static [(u8, u8)]) -> Roles {
+    Roles { pairs, selfs, prox }
+}
+
+/// Composite declarations keyed by `Pattern::name`. A composite absent here is
+/// recognised and reported but yields no constraint until a source-backed
+/// declaration is added.
+pub const ROLES: &[(&str, Roles)] = &[
+    ("cmos_inverter", roles(&[], &[], &[(0, 1)])),
+    ("five_transistor_ota", roles(&[(0, 1, DiffPair), (2, 3, Load)], &[4], &[])),
+    ("diff_pair_with_active_load", roles(&[(0, 1, DiffPair), (2, 3, Load)], &[], &[])),
+    ("diff_pair_with_mirror_load", roles(&[(0, 1, DiffPair), (2, 3, Load)], &[], &[])),
+    ("diff_pair_with_tail", roles(&[(0, 1, DiffPair)], &[2], &[])),
+    ("cascoded_diff_pair_with_tail", roles(&[(0, 1, DiffPair), (2, 3, CascodePair)], &[4], &[(0, 2), (1, 3)])),
+    ("diff_pair_cascode_load", roles(&[(0, 1, DiffPair), (2, 3, CascodePair)], &[4], &[(0, 2), (1, 3)])),
+    ("telescopic_ota_core", roles(&[(0, 1, DiffPair), (2, 3, CascodePair), (4, 5, Load)], &[], &[(0, 2), (1, 3), (2, 4), (3, 5)])),
+    // Slot 7 (load cascode bias) gets no role: it is not on the axis.
+    ("telescopic_ota_full", roles(&[(0, 1, DiffPair), (2, 3, CascodePair), (4, 5, Load)], &[6], &[(0, 2), (1, 3), (2, 4), (3, 5)])),
+    ("folded_cascode_core", roles(&[(0, 1, DiffPair), (2, 3, CascodePair), (4, 5, Load)], &[], &[(4, 2), (5, 3)])),
+    ("cross_coupled_inverters", roles(&[(0, 1, DiffPair), (2, 3, DiffPair)], &[], &[(0, 2), (1, 3)])),
+    ("vco_core_with_tails", roles(&[(0, 1, DiffPair), (2, 3, DiffPair)], &[4, 5], &[])),
+    // The mirror images (M3,M6), (M4,M5); the switching quad is two 2-member sets
+    // until a quad-set rule exists (plan-01 "Cut or deferred items").
+    ("gilbert_cell", roles(&[(0, 1, DiffPair), (2, 5, DiffPair), (3, 4, DiffPair)], &[], &[])),
+    ("cascode_mirror", roles(&[(0, 1, CurrentMirror), (2, 3, CascodePair)], &[], &[(0, 2), (1, 3)])),
+    ("wide_swing_cascode_mirror", roles(&[(0, 1, CurrentMirror), (2, 3, CascodePair)], &[], &[(0, 2), (1, 3)])),
+    ("low_voltage_cascode_mirror", roles(&[(0, 1, CurrentMirror), (2, 3, CascodePair)], &[], &[(0, 2), (1, 3)])),
+    ("current_mirror_3", roles(&[(0, 1, CurrentMirror), (0, 2, CurrentMirror)], &[], &[])),
+    ("current_mirror_4", roles(&[(0, 1, CurrentMirror), (0, 2, CurrentMirror), (0, 3, CurrentMirror)], &[], &[])),
+    ("current_mirror_1_to_2", roles(&[(0, 1, CurrentMirror), (0, 2, CurrentMirror)], &[], &[])),
+    // Slots 0,1 = one polarity's pair, 2,3 = the complement's (rail-to-rail input).
+    ("complementary_diff_pair", roles(&[(0, 1, DiffPair), (2, 3, DiffPair)], &[], &[])),
+];
+
+/// `ROLES` entry; else for a 2-slot pattern today's [`BlockKind::from_template`]
+/// mapping (DiffPair/CurrentMirror/Load → pairs (0,1,k); Stack → prox (0,1));
+/// else none.
+#[must_use]
+pub fn roles_of(p: &Pattern) -> Roles {
+    if let Some(&(_, r)) = ROLES.iter().find(|(n, _)| *n == p.name) {
+        return r;
+    }
+    if p.slots.len() != 2 {
+        return Roles::default();
+    }
+    match BlockKind::from_template(p.name, 2) {
+        DiffPair => roles(&[(0, 1, DiffPair)], &[], &[]),
+        CurrentMirror => roles(&[(0, 1, CurrentMirror)], &[], &[]),
+        Load => roles(&[(0, 1, Load)], &[], &[]),
+        BlockKind::Stack => roles(&[], &[], &[(0, 1)]),
+        _ => Roles::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pattern::{DiodeReq, PinRel, SizeMatch, SlotKind};
+    use pnr_core::ids::NetId;
+    use pnr_core::netlist::{Device, DeviceKind, Net, Netlist};
+    use std::collections::{HashMap, HashSet};
+
+    /// The slots `kind` and `size_match` refer to (0, 1 or 2 of them).
+    fn back_refs(slot: &Slot) -> impl Iterator<Item = u8> {
+        let kr = match slot.kind {
+            SlotKind::SameTypeAs(r) | SlotKind::ComplementOf(r) => Some(r),
+            SlotKind::AnyFet => None,
+        };
+        let sr = match slot.size_match {
+            SizeMatch::ExactAs(r) | SizeMatch::SameLAs(r) => Some(r),
+            _ => None,
+        };
+        [kr, sr].into_iter().flatten()
+    }
+
+    #[test]
+    fn catalog_is_well_formed() {
+        let mut names = HashSet::new();
+        let mut shapes = HashSet::new();
+        for p in PATTERNS {
+            assert!(names.insert(p.name), "duplicate pattern name {}", p.name);
+            for (k, slot) in p.slots.iter().enumerate() {
+                for r in back_refs(slot) {
+                    assert!((r as usize) < k, "{}: slot {k} refers forward to slot {r}", p.name);
+                }
+            }
+            for l in p.links {
+                assert!(
+                    (l.a as usize) < p.slots.len() && (l.b as usize) < p.slots.len(),
+                    "{}: link slot out of range",
+                    p.name
+                );
+                for pin in [l.pin_a, l.pin_b] {
+                    assert!(["G", "D", "S", "B"].contains(&pin), "{}: link pin {pin} not G/D/S/B", p.name);
+                }
+            }
+            let mut link_keys: Vec<String> = p.links.iter().map(|l| format!("{l:?}")).collect();
+            link_keys.sort_unstable();
+            let shape = (format!("{:?}", p.slots), link_keys);
+            assert!(shapes.insert(shape), "{}: duplicate of another pattern's shape", p.name);
+        }
+    }
+
+    /// FET terminal index `G/D/S/B = 0..3` within a slot's 4-pin block.
+    fn pin_idx(slot: u8, pin: &str) -> u32 {
+        slot as u32 * 4 + match pin {
+            "G" => 0,
+            "D" => 1,
+            "S" => 2,
+            "B" => 3,
+            _ => unreachable!("not a FET pin"),
+        }
+    }
+
+    /// The smallest netlist a pattern can match itself against: one device per
+    /// slot, pins joined exactly as the pattern's links (and diode requirement)
+    /// demand, every other `B` tied to its device's own rail.
+    fn minimal_netlist(p: &'static Pattern) -> Netlist {
+        let n = p.slots.len();
+        let mut uf = pnr_core::UnionFind::new(n * 4);
+        for l in p.links {
+            if matches!(l.rel, PinRel::Same | PinRel::SameSignal) {
+                uf.union(pin_idx(l.a, l.pin_a), pin_idx(l.b, l.pin_b));
+            }
+        }
+        for (k, slot) in p.slots.iter().enumerate() {
+            if matches!(slot.diode, DiodeReq::Required) {
+                uf.union(pin_idx(k as u8, "G"), pin_idx(k as u8, "D"));
+            }
+        }
+        let linked_b: Vec<bool> = (0..n)
+            .map(|k| {
+                p.links.iter().any(|l| {
+                    (l.a as usize == k && l.pin_a == "B") || (l.b as usize == k && l.pin_b == "B")
+                })
+            })
+            .collect();
+
+        let mut kinds = vec![DeviceKind::Nmos; n];
+        for (k, slot) in p.slots.iter().enumerate() {
+            kinds[k] = match slot.kind {
+                SlotKind::AnyFet => DeviceKind::Nmos,
+                SlotKind::SameTypeAs(r) => kinds[r as usize],
+                SlotKind::ComplementOf(r) => {
+                    if kinds[r as usize] == DeviceKind::Nmos { DeviceKind::Pmos } else { DeviceKind::Nmos }
+                }
+            };
+        }
+
+        let mut nets: Vec<Net> = Vec::new();
+        let mut net_of_root: HashMap<u32, NetId> = HashMap::new();
+        let mut ensure = |root: u32, nets: &mut Vec<Net>| -> NetId {
+            *net_of_root.entry(root).or_insert_with(|| {
+                let id = NetId(nets.len() as u16);
+                nets.push(Net { name: format!("n{}", nets.len()) });
+                id
+            })
+        };
+        let mut rail: HashMap<&'static str, NetId> = HashMap::new();
+        let mut rail_net = |name: &'static str, nets: &mut Vec<Net>| -> NetId {
+            *rail.entry(name).or_insert_with(|| {
+                let id = NetId(nets.len() as u16);
+                nets.push(Net { name: name.to_string() });
+                id
+            })
+        };
+
+        let devices = (0..n)
+            .map(|k| {
+                let terminals = ["G", "D", "S", "B"]
+                    .into_iter()
+                    .map(|pin| {
+                        let net = if pin == "B" && !linked_b[k] {
+                            let name = if kinds[k] == DeviceKind::Nmos { "VSS" } else { "VDD" };
+                            rail_net(name, &mut nets)
+                        } else {
+                            let root = uf.find(pin_idx(k as u8, pin));
+                            ensure(root, &mut nets)
+                        };
+                        (pin.to_string(), net)
+                    })
+                    .collect();
+                Device {
+                    name: format!("D{k}"),
+                    kind: kinds[k],
+                    model: String::new(),
+                    terminals,
+                    params: vec![("w".into(), 1_000), ("l".into(), 1_000)],
+                }
+            })
+            .collect();
+        Netlist { devices, nets, ..Default::default() }
+    }
+
+    #[test]
+    fn roles_are_well_formed() {
+        let mut names = HashSet::new();
+        for &(name, r) in ROLES {
+            assert!(names.insert(name), "duplicate ROLES entry {name}");
+            let p = PATTERNS.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("ROLES {name} not in PATTERNS"));
+            let n = p.slots.len() as u8;
+            let paired: Vec<u8> = r.pairs.iter().flat_map(|&(a, b, _)| [a, b]).collect();
+            let slots = paired.iter().chain(r.selfs).chain(r.prox.iter().flat_map(|(a, b)| [a, b]));
+            assert!(slots.clone().all(|&s| s < n), "{name}: slot index out of range");
+            // A mirror's reference (slot 0) is in every output's pair; nothing else repeats.
+            let shared_ref = r.pairs.iter().all(|p| p.0 == 0);
+            for (i, s) in paired.iter().enumerate() {
+                assert!(shared_ref || !paired[..i].contains(s), "{name}: slot {s} in two pairs");
+            }
+            assert!(r.selfs.iter().all(|s| !paired.contains(s)), "{name}: a self is also paired");
+        }
+    }
+
+    #[test]
+    fn every_pattern_matches_its_own_minimal_netlist() {
+        for p in PATTERNS {
+            let nl = minimal_netlist(p);
+            let hg = pnr_core::BipartiteHypergraph::from_netlist(&nl);
+            let cfg = crate::netrole::AnnotationConfig::default();
+            let roles = crate::netrole::classify_nets(&hg, &cfg);
+            let mut models = Vec::new();
+            let drawn: Vec<_> = nl.devices.iter().map(|d| crate::size::drawn(d, &mut models)).collect();
+            let allowed = vec![true; p.slots.len()];
+            let rank: Vec<u32> = (0..p.slots.len() as u32).collect();
+            let pins = crate::pattern::pins(&hg);
+            let ms = crate::pattern::matches(p, &hg, &pins, &crate::pattern::on_pin(&hg, &pins), &drawn, &roles, &allowed, &rank);
+            let want: Vec<u32> = (0..p.slots.len() as u32).collect();
+            assert!(
+                ms.iter().any(|m| {
+                    let mut s = m.instances.clone();
+                    s.sort_unstable();
+                    s == want
+                }),
+                "{}: no match of its own minimal netlist ({:?})",
+                p.name,
+                ms
+            );
+        }
+    }
+}

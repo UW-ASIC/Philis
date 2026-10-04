@@ -321,12 +321,7 @@ fn region_spans(m: &Macro, members: usize) -> Vec<Option<(i32, i32)>> {
 /// Starting variant per cell, chosen by measuring each alternative in
 /// isolation (see [`price`]). Ties break on index, so the seed is deterministic.
 #[must_use]
-pub fn seed_assignment(
-    variants: &[gp::VariantSpace],
-    layers: &[pnr_core::LayerId],
-    pdk: &Pdk,
-) -> Vec<u16> {
-    let cfg = gr::GlobalCfg::default();
+pub fn seed_assignment(variants: &[gp::VariantSpace], pdk: &Pdk) -> Vec<u16> {
     let mut checker = Checker::new(pdk, true).expect("a loaded Pdk re-parses its own deck");
     variants
         .iter()
@@ -334,7 +329,7 @@ pub fn seed_assignment(
             space
                 .alternatives
                 .iter()
-                .map(|m| price(m, layers, &cfg, &mut checker))
+                .map(|m| price(m, &mut checker))
                 .enumerate()
                 .min_by(|a, b| a.1.cmp(&b.1))
                 .map_or(0, |(v, _)| v as u16)
@@ -342,19 +337,10 @@ pub fn seed_assignment(
         .collect()
 }
 
-/// `(unreachable, DRC+ERC findings, congestion, wirelength)`, worst-last and
-/// compared lexicographically: unreachable pins are infeasible, not expensive.
-/// DRC runs density-stripped (fill rules are chip-level); a macro the engine
-/// cannot load prices as maximally illegal.
-///
-/// ponytail: one DRC+ERC pass per alternative per run (~13 ms each on sky130).
-fn price(
-    m: &Macro,
-    layers: &[pnr_core::LayerId],
-    cfg: &gr::GlobalCfg,
-    checker: &mut Checker,
-) -> (bool, usize, i64, i64) {
-    let p = gr::price_group(std::slice::from_ref(m), layers, cfg);
+/// `(DRC+ERC findings, pin HPWL)`, compared lexicographically. DRC runs
+/// density-stripped (fill rules are chip-level); a macro the engine cannot
+/// load prices as maximally illegal.
+fn price(m: &Macro, checker: &mut Checker) -> (usize, i64) {
     let geom = match checker.run(
         &m.shapes,
         &[],
@@ -368,7 +354,7 @@ fn price(
         Ok(_) => checker.outputs().violations.len(),
         Err(_) => usize::MAX,
     };
-    (!p.reachable, geom, p.overflow, p.hpwl)
+    (geom, gr::group_hpwl(std::slice::from_ref(m)))
 }
 
 /// The geometry an assignment selects. A missing entry means variant 0.
@@ -1797,9 +1783,8 @@ mod tests {
         let pdk = pdk();
         let netlist = two_devices();
         let cells = enumerate(&netlist, &Macros::default(), &Constraints::default(), &pdk, true);
-        let layers = pdk.routing_layers();
-        let a = seed_assignment(&cells.spaces, &layers, &pdk);
-        let b = seed_assignment(&cells.spaces, &layers, &pdk);
+        let a = seed_assignment(&cells.spaces, &pdk);
+        let b = seed_assignment(&cells.spaces, &pdk);
         assert_eq!(a, b);
         assert_eq!(a.len(), cells.spaces.len());
         for (i, &v) in a.iter().enumerate() {

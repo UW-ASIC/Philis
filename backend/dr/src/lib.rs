@@ -1,11 +1,10 @@
 //! # `dr` — detailed routing.
 //!
 //! [`DetailedRoute`] rebuilds a capacity-1 track lattice over the die, lands one
-//! track node per placed pin, runs `gr`'s negotiated-congestion PathFinder (early
-//! epochs restricted to the corridor the coarse route threads), then draws the
-//! geometry: track wires and vias, an L-shaped access jog from each landed node to
-//! its pin (the pitch is far coarser than a pin, so nodes never sit on pins), and
-//! same-net sliver/notch fillers.
+//! track node per placed pin, runs `gr`'s negotiated-congestion PathFinder, then
+//! draws the geometry: track wires and vias, an L-shaped access jog from each
+//! landed node to its pin (the pitch is far coarser than a pin, so nodes never
+//! sit on pins), and same-net sliver/notch fillers.
 //!
 //! Ring and cell metal on a lattice layer is a hard obstacle to other nets.
 //! What it cannot rule out structurally it measures and reports as hard
@@ -21,7 +20,7 @@ use pnr_core::report::Violation;
 use pnr_core::routes::{conductor_layers_meet, open_components, Join};
 use pnr_core::{GatePin, Macro, NetId, Report, Routes};
 
-use gr::{extract_geometry, run_pathfinder, to_shapes, Dij, GcellGrid, RGraph, RouteCtx, RouteHot, TrackGrid, NONE};
+use gr::{extract_geometry, run_pathfinder, to_shapes, Dij, RGraph, RouteCtx, RouteHot, TrackGrid, NONE};
 
 /// A via: `(cut layer, cut size, pad below, pad above)`, nm.
 pub type Cut = (LayerId, i32, i32, i32);
@@ -30,8 +29,6 @@ const VIA_COST: f32 = 4.0;
 const P_FAC: f32 = 2.0;
 const HIST_INC: f32 = 0.5;
 const MAX_ITERS: u32 = 150;
-/// Must match `gr::GlobalCfg::gcells_per_side` so corridors line up.
-const GCELLS_PER_SIDE: u32 = 16;
 /// Rip-up rounds for nets named by violated hard rules, each at doubled `p_fac`.
 const HARD_ROUNDS: u32 = 4;
 /// History on a node another net owns under a laid access jog: that net's trunk
@@ -111,6 +108,9 @@ pub struct DetailedCfg {
     /// repaired as [`analog::routing::CommonNodes`] on `stack`; empty = none.
     pub common: Vec<analog::routing::CommonNode>,
     pub stack: Option<&'static analog::routing::Stack>,
+    /// Nets in the netlist: `Routes` is sized to at least this, so a rule on a
+    /// net with no pin reads empty shapes. `0` = the pins' highest net + 1.
+    pub n_nets: usize,
 }
 
 impl Default for DetailedCfg {
@@ -140,6 +140,7 @@ impl Default for DetailedCfg {
             via_r: Vec::new(),
             common: Vec::new(),
             stack: None,
+            n_nets: 0,
         }
     }
 }
@@ -175,6 +176,29 @@ impl DetailedCfg {
     }
 }
 
+/// What one `route` call measured. Fields an item has not landed yet stay
+/// zero: timings and `expanded` (RTE-13), `coarsened`
+/// (RTE-13), `width_fallbacks` (RTE-22), `single_cut_vias` (RTE-27),
+/// `congestion` (RTE-25, absolute nm).
+#[derive(Default, Clone, Debug)]
+pub struct RouteStats {
+    pub us_landing: u64,
+    pub us_negotiate: u64,
+    pub us_repair: u64,
+    pub us_geometry: u64,
+    pub us_fill: u64,
+    pub expanded: u64,
+    /// Constraint-repair trials run.
+    pub trials: u32,
+    pub pf_iters: u32,
+    /// Residual track overuse after negotiation, repair and shields.
+    pub overuse: f32,
+    pub coarsened: bool,
+    pub width_fallbacks: u32,
+    pub single_cut_vias: u32,
+    pub congestion: Vec<(Rect, f32)>,
+}
+
 /// The detailed router.
 #[derive(Default)]
 pub struct DetailedRoute {
@@ -194,8 +218,9 @@ struct Access {
 }
 
 impl DetailedRoute {
-    /// Realise `global` over the metal stack `layers` (even index = horizontal),
-    /// joined by `cuts[i]` between `layers[i]` and `layers[i + 1]`.
+    /// Route `pins` (plus the pins of `placed` and `rings`) over the metal stack
+    /// `layers` (even index = horizontal), joined by `cuts[i]` between
+    /// `layers[i]` and `layers[i + 1]`.
     ///
     /// `pins` are placed pin rects; pins of `placed` (device macros) and `rings`
     /// are folded in, deduplicated. Their metal on a lattice layer, grown by
@@ -206,7 +231,6 @@ impl DetailedRoute {
     #[allow(clippy::too_many_arguments)]
     pub fn route(
         &self,
-        global: &Routes,
         pins: &[(NetId, Rect, LayerId)],
         placed: &[Macro],
         rings: &[Macro],
@@ -214,27 +238,7 @@ impl DetailedRoute {
         layers: &[LayerId],
         cuts: &[Cut],
         neg: &mut gr::Negotiation,
-    ) -> (Routes, Report) {
-        let (routes, report, _) = self.route_counted(global, pins, placed, rings, reqs, layers, cuts, neg);
-        (routes, report)
-    }
-
-    /// [`DetailedRoute::route`], plus the number of repair trials run.
-    ///
-    /// ponytail: the count is the only statistic so far; RTE-07's `RouteStats`
-    /// (with `trials`) replaces the `u32` and becomes `route`'s third element.
-    #[allow(clippy::too_many_arguments)]
-    fn route_counted(
-        &self,
-        global: &Routes,
-        pins: &[(NetId, Rect, LayerId)],
-        placed: &[Macro],
-        rings: &[Macro],
-        reqs: &Requirements<Routes>,
-        layers: &[LayerId],
-        cuts: &[Cut],
-        neg: &mut gr::Negotiation,
-    ) -> (Routes, Report, u32) {
+    ) -> (Routes, Report, RouteStats) {
         let cfg = &self.cfg;
 
         // Terminals, deduped by (net, rect) in first-seen order: landing claims nodes
@@ -246,18 +250,18 @@ impl DetailedRoute {
             .chain(placed.iter().chain(rings).flat_map(|m| m.pins.iter().map(|p| (p.net, p.at, p.layer))))
             .filter(|&(n, r, _)| seen.insert((n.0, r.x, r.y, r.w, r.h)))
             .collect();
-        let n_nets = global.wires.len().max(all_pins.iter().map(|(n, ..)| n.0 as usize + 1).max().unwrap_or(0));
+        let n_nets = cfg.n_nets.max(all_pins.iter().map(|(n, ..)| n.0 as usize + 1).max().unwrap_or(0));
         // Climbing to a layer with no cut to reach it buys only an island.
         let n_layers = (layers.len() as u32).min(cuts.len() as u32 + 1);
 
-        // Routing frame: `TrackGrid` starts at (0,0) and placed geometry reaches
-        // negative coordinates, so shift. The frame keeps a claim-free halo (so jog
-        // reservations can never wall off a whole band) plus a free margin (the
-        // cheapest trunk highways).
+        // Routing frame over pins and placed/ring bboxes: `TrackGrid` starts at
+        // (0,0) and placed geometry reaches negative coordinates, so shift. The
+        // frame keeps a claim-free halo (so jog reservations can never wall off
+        // a whole band) plus a free margin (the cheapest trunk highways).
         let (halo, margin) = (2 * cfg.pitch, 3 * cfg.pitch);
         let low = |f: fn(&Rect) -> i32| {
             let pins = all_pins.iter().map(|(_, r, _)| f(r));
-            pins.chain(global.wires.iter().flatten().map(|s| f(&s.rect))).min().unwrap_or(0).min(0)
+            pins.chain(placed.iter().chain(rings).map(|m| f(&m.bbox))).min().unwrap_or(0).min(0)
         };
         let origin = (low(|r| r.x) - halo - margin, low(|r| r.y) - halo - margin);
         let shift = |r: Rect| Rect { x: r.x - origin.0, y: r.y - origin.1, ..r };
@@ -304,9 +308,9 @@ impl DetailedRoute {
             term_rects[net.0 as usize].push((shift(r), l, pin_ua(net, r)));
         }
         let (mut hi_x, mut hi_y) = (2, 2);
-        for s in global.wires.iter().flatten() {
-            hi_x = hi_x.max(s.rect.x + s.rect.w);
-            hi_y = hi_y.max(s.rect.y + s.rect.h);
+        for m in placed.iter().chain(rings) {
+            hi_x = hi_x.max(m.bbox.x + m.bbox.w);
+            hi_y = hi_y.max(m.bbox.y + m.bbox.h);
         }
         (hi_x, hi_y) = (hi_x - origin.0 + margin, hi_y - origin.1 + margin);
         for (r, ..) in term_rects.iter().flatten() {
@@ -319,7 +323,7 @@ impl DetailedRoute {
         if compact.is_empty() {
             let routes = Routes { wires: vec![Vec::new(); n_nets], ..Default::default()  };
             let report = score(&routes, reqs, 0.0, &[], &[], &[], &[]);
-            return (routes, report, 0);
+            return (routes, report, RouteStats::default());
         }
         let mut ci_of = vec![usize::MAX; n_nets];
         for (ci, &ni) in compact.iter().enumerate() {
@@ -327,9 +331,7 @@ impl DetailedRoute {
         }
         let n_compact = compact.len();
 
-        let ggrid = GcellGrid::new(die, GCELLS_PER_SIDE, 1);
-        let mut grid = TrackGrid::with_layers(die, cfg.pitch, VIA_COST, n_layers);
-        grid.set_regions(&ggrid);
+        let grid = TrackGrid::with_layers(die, cfg.pitch, VIA_COST, n_layers);
 
         let mut claimed = vec![false; grid.nodes()];
         let mut reserved = vec![NONE; grid.nodes()];
@@ -337,7 +339,6 @@ impl DetailedRoute {
         // `(landed node, µA)` per pin, per compact net; empty when any of the
         // net's terminals is unknown (no EM sizing, never a guessed zero).
         let mut node_ua: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_compact];
-        let mut corridors: Vec<Vec<u32>> = vec![Vec::new(); n_compact];
         let mut access: Vec<Access> = Vec::new();
         // Pins that got no node, per compact net: an open the geometry cannot show.
         let mut unlanded = vec![0usize; n_compact];
@@ -540,25 +541,6 @@ impl DetailedRoute {
                     access.push(a);
                 }
             }
-            // Corridor: the 3×3 gcells around every coarse-route point and every pin.
-            let coarse = global.wires.get(ni).into_iter().flatten().flat_map(|s| {
-                let r = shift(s.rect);
-                [(r.x, r.y), (r.x + r.w, r.y + r.h)]
-            });
-            let pin_c = term_rects[ni].iter().map(|(r, ..)| (r.x + r.w / 2, r.y + r.h / 2));
-            let mut corr: Vec<u32> = Vec::new();
-            for (x, y) in coarse.chain(pin_c) {
-                let g = ggrid.at(x as f32, y as f32);
-                let (gx, gy) = ((g % ggrid.nx) as i64, (g / ggrid.nx) as i64);
-                for (tx, ty) in (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (gx + dx, gy + dy))) {
-                    if tx >= 0 && ty >= 0 && tx < ggrid.nx as i64 && ty < ggrid.ny as i64 {
-                        corr.push((ty * ggrid.nx as i64 + tx) as u32);
-                    }
-                }
-            }
-            corr.sort_unstable();
-            corr.dedup();
-            corridors[ci] = corr;
         }
 
         let weight: Vec<f32> = compact.iter().map(|&n| cfg.net_weight.get(n).copied().unwrap_or(0.0)).collect();
@@ -568,7 +550,6 @@ impl DetailedRoute {
             order: gr::order_by_priority(&counts, &net_ids, reqs, &weight),
             graph: grid,
             terms: c_terms,
-            corridors,
             reserved,
             weight,
             layer_c: cfg.layer_c.clone(),
@@ -614,9 +595,9 @@ impl DetailedRoute {
             let (x, y, l) = cold.graph.pos(n);
             (x + origin.0, y + origin.1, l)
         };
-        neg.seed(gr::Tier::Detailed, &mut hot.hist, abs);
+        neg.seed(&mut hot.hist, abs);
         jog_hist.iter().for_each(|&n| hot.hist[n as usize] += JOG_HIST);
-        run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS);
+        let (_, pf_iters) = run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS);
 
         // A net over its IR-drop budget reroutes pricing its series R, weighted
         // by the DC current it carries (the larger of what its pins draw and
@@ -677,7 +658,7 @@ impl DetailedRoute {
 
         // The jog price is this layout's, not negotiation history.
         jog_hist.iter().for_each(|&n| hot.hist[n as usize] -= JOG_HIST);
-        neg.accumulate(gr::Tier::Detailed, &hot.hist, abs);
+        neg.accumulate(&hot.hist, abs);
         // Shields: requested nets get reference tracks alongside, tied in by
         // rerouting the reference to them.
         let mut asks = Vec::new();
@@ -901,17 +882,6 @@ impl DetailedRoute {
             *wires = out;
         }
 
-        // Differential trim: a pair whose pin sets differ (a common-centroid cell
-        // gives one drain a strap the other lacks) cannot route to equal RC,
-        // so the lighter side gets a same-net stub off one of its runs.
-        for b in reqs.hard.iter().filter(|b| b.repair_kind() == RepairKind::Mirror) {
-            let mut ids = Vec::new();
-            b.touched(&mut ids);
-            for p in ids.chunks_exact(2) {
-                trim_pair(&mut routes, (p[0] as usize, p[1] as usize), &**b, layers, &cell_metal, cfg.grid, |l, w| cfg.space(l, w, w, min_space));
-            }
-        }
-
         // Same-net sliver and notch filling (never within spacing of foreign metal).
         let flat: Vec<(usize, Shape)> =
             routes.wires.iter().enumerate().flat_map(|(i, w)| w.iter().map(move |s| (i, *s))).collect();
@@ -985,7 +955,7 @@ impl DetailedRoute {
         for (net, &r) in em_cuts.iter().enumerate().filter(|(_, &r)| r > 0.0) {
             report.budget_violations.push(Violation::from_residual(format!("em cuts net {net}"), r));
         }
-        (routes, report, trials)
+        (routes, report, RouteStats { trials, overuse, pf_iters, ..RouteStats::default() })
     }
 }
 
@@ -1034,62 +1004,6 @@ fn branch_currents(tree: &[Vec<u32>], node_ua: &[(u32, f32)]) -> Vec<(u32, u32, 
         out.push((p, n, s.abs().max((total - s).abs())));
     }
     out
-}
-
-/// Lengthen the lighter net of a matched pair by a stub continuing one of its
-/// straight runs into free space (Lampaert's matching by equal parasitics;
-/// balanced topology is preferred, and this is the fallback when the pin sets
-/// forbid one). The stub is kept only if `rule`'s residual drops. Tries each
-/// run end at the full length deficit, then half of it.
-///
-/// ponytail: one stub, same layer, no serpentine; a stub adds C and summed R
-/// together, which is what the rule compares, but it is not on a terminal path.
-fn trim_pair(
-    routes: &mut Routes,
-    (a, b): (usize, usize),
-    rule: &dyn analog::RuleBatch<Routes>,
-    layers: &[LayerId],
-    cell_metal: &[Shape],
-    grid: i32,
-    space: impl Fn(LayerId, i32) -> i32,
-) {
-    let len = |r: &Routes, n: usize| r.length(NetId(n as u16));
-    if a >= routes.wires.len() || b >= routes.wires.len() || rule.residual(routes) <= 0.0 {
-        return;
-    }
-    let (light, deficit) = if len(routes, a) < len(routes, b) { (a, len(routes, b) - len(routes, a)) } else { (b, len(routes, a) - len(routes, b)) };
-    let before = rule.residual(routes);
-    let runs: Vec<Shape> = routes.wires[light].iter().copied().filter(|s| s.rect.w != s.rect.h && layers.contains(&s.layer)).collect();
-    for want in [deficit, deficit / 2] {
-        let want = (want as i32 / grid) * grid;
-        if want <= 0 {
-            continue;
-        }
-        for s in &runs {
-            let r = s.rect;
-            let stubs = if r.w > r.h {
-                [Rect { x: r.x + r.w, w: want, ..r }, Rect { x: r.x - want, w: want, ..r }]
-            } else {
-                [Rect { y: r.y + r.h, h: want, ..r }, Rect { y: r.y - want, h: want, ..r }]
-            };
-            for stub in stubs {
-                let gap = space(s.layer, r.w.min(r.h));
-                // Foreign metal on the layer keeps its spacing; a foreign cut
-                // (any layer that is not a routing metal) must not be touched.
-                let clear = routes.wires.iter().enumerate().filter(|&(n, _)| n != light).flat_map(|(_, w)| w).chain(cell_metal).all(|f| {
-                    if f.layer == s.layer { rect_gap(f.rect, stub) >= gap } else { layers.contains(&f.layer) || rect_gap(f.rect, stub) > 0 }
-                });
-                if !clear {
-                    continue;
-                }
-                routes.wires[light].push(Shape { layer: s.layer, rect: stub });
-                if rule.residual(routes) < before {
-                    return;
-                }
-                routes.wires[light].pop();
-            }
-        }
-    }
 }
 
 /// `cell` (drawn at its own origin) moved into free space as close as it fits
@@ -1627,9 +1541,9 @@ fn repair_constraints(
     n
 }
 
-/// Rip up every net in `reroutes`, reroute each with its penalty field (corridor
-/// first), and keep the result only if `key` improves on (hard, budget) without
-/// raising overuse; otherwise restore the old trees. Returns whether it was kept.
+/// Rip up every net in `reroutes`, reroute each with its penalty field, and keep
+/// the result only if `key` improves on (hard, budget) without raising overuse;
+/// otherwise restore the old trees. Returns whether it was kept.
 fn trial(
     hot: &mut RouteHot,
     cold: &RouteCtx<TrackGrid>,
@@ -1647,7 +1561,7 @@ fn trial(
     }
     let mut dij = Dij::new(cold.graph.nodes());
     for ((n, field), (_, prev)) in reroutes.into_iter().zip(&old) {
-        let tree = cold.reroute(hot, n, true, p_fac, &field, &mut dij).unwrap_or_else(|| prev.clone());
+        let tree = cold.reroute(hot, n, p_fac, &field, &mut dij).unwrap_or_else(|| prev.clone());
         hot.commit(n, tree);
     }
     let after = key(hot);
@@ -1716,7 +1630,7 @@ fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize,
     }
     cold.terms[reference].extend(claims.iter().map(|c| c[0]));
     let mut dij = Dij::new(cold.graph.nodes());
-    let routed = cold.reroute(hot, reference, false, P_FAC, &[], &mut dij);
+    let routed = cold.reroute(hot, reference, P_FAC, &[], &mut dij);
     if let Some(mut tree) = routed {
         tree.extend(claims);
         hot.commit(reference, tree);
@@ -2297,14 +2211,14 @@ mod tests {
 
     fn route(
         cfg: DetailedCfg,
-        global: &Routes,
         pins: &[(NetId, Rect, LayerId)],
         placed: &[Macro],
         rings: &[Macro],
         neg: &mut gr::Negotiation,
     ) -> (Routes, Report) {
         let reqs = Requirements::<Routes>::default();
-        DetailedRoute { cfg }.route(global, pins, placed, rings, &reqs, &LAYERS, &CUTS, neg)
+        let (routes, report, _) = DetailedRoute { cfg }.route(pins, placed, rings, &reqs, &LAYERS, &CUTS, neg);
+        (routes, report)
     }
 
     fn rules(r: &Report) -> Vec<&String> {
@@ -2313,12 +2227,8 @@ mod tests {
 
     #[test]
     fn detailed_realises_a_two_pin_net() {
-        let global = Routes {
-            wires: vec![vec![Shape { layer: LayerId(0), rect: Rect { x: 1_000, y: 1_000, w: 17_000, h: 17_000 } }]],
-            ..Default::default()
-        };
         let pins = [pin(0, 1_000, 1_000), pin(0, 18_000, 18_000)];
-        let (routes, report) = route(test_cfg(), &global, &pins, &[], &[], &mut gr::Negotiation::new());
+        let (routes, report) = route(test_cfg(), &pins, &[], &[], &mut gr::Negotiation::new());
         assert_eq!(routes.wires.len(), 1);
         assert!(!routes.wires[0].is_empty());
         assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
@@ -2326,12 +2236,21 @@ mod tests {
     }
 
     #[test]
-    fn empty_coarse_gives_empty_routes() {
-        let global = Routes { wires: vec![Vec::new(); 3], ..Default::default()  };
-        let (routes, report) = route(test_cfg(), &global, &[], &[], &[], &mut gr::Negotiation::new());
+    fn no_pins_give_empty_routes() {
+        let cfg = DetailedCfg { n_nets: 3, ..test_cfg() };
+        let (routes, report) = route(cfg, &[], &[], &[], &mut gr::Negotiation::new());
         assert_eq!(routes.wires.len(), 3);
         assert!(routes.wires.iter().all(Vec::is_empty));
         assert!(report.hard_violations.is_empty());
+    }
+
+    /// The frame follows the pins wherever they are, negative coordinates included.
+    #[test]
+    fn negative_coordinate_pins_route() {
+        let pins = [pin(0, -20_000, -5_000), pin(0, 5_000, 3_000)];
+        let (routes, report) = route(test_cfg(), &pins, &[], &[], &mut gr::Negotiation::new());
+        assert!(!routes.wires[0].is_empty());
+        assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
     }
 
     /// Every pin rect is touched by its own net, with pins deliberately centred a
@@ -2339,11 +2258,8 @@ mod tests {
     #[test]
     fn every_pin_is_touched_by_its_own_net() {
         let pins = [pin(0, 1_805, 1_805), pin(0, 15_035, 13_145), pin(1, 3_695, 15_035), pin(1, 13_145, 3_695)];
-        let seg = |x, y, w, h| Shape { layer: LayerId(0), rect: Rect { x, y, w, h } };
-        let global =
-            Routes { wires: vec![vec![seg(1_100, 1_000, 16_500, 15_200)], vec![seg(2_300, 2_700, 13_700, 12_400)]], ..Default::default()  };
         let cfg = DetailedCfg { pitch: 1_890, ..test_cfg() };
-        let (routes, _) = route(cfg, &global, &pins, &[], &[], &mut gr::Negotiation::new());
+        let (routes, _) = route(cfg, &pins, &[], &[], &mut gr::Negotiation::new());
         for &(net, r, _) in &pins {
             let hit = routes.wires[net.0 as usize].iter().any(|s| touches(s, r));
             assert!(hit, "net {} pin at ({}, {}) untouched", net.0, r.x, r.y);
@@ -2370,9 +2286,8 @@ mod tests {
             dummies: Vec::new(),
             ..Default::default()
         };
-        let global = Routes { wires: Vec::new(), ..Default::default()  };
         let (routes, report) =
-            route(DetailedCfg { stack: Some(test_stack()), ..test_cfg() }, &global, &[], &[], &[ring.clone()], &mut gr::Negotiation::new());
+            route(DetailedCfg { stack: Some(test_stack()), ..test_cfg() }, &[], &[], &[ring.clone()], &mut gr::Negotiation::new());
         for p in &ring.pins {
             assert!(routes.wires[0].iter().any(|s| touches(s, p.at)), "ring pin at ({}, {}) untouched", p.at.x, p.at.y);
         }
@@ -2384,10 +2299,6 @@ mod tests {
     #[test]
     fn inflated_bbox_does_not_block_routing() {
         let pins = [pin(0, 1_000, 7_000), pin(0, 15_000, 7_000)];
-        let global = Routes {
-            wires: vec![vec![Shape { layer: LayerId(0), rect: Rect { x: 1_000, y: 6_600, w: 14_200, h: 1_000 } }]],
-            ..Default::default()
-        };
         let wall = Macro {
             shapes: vec![Shape { layer: LayerId(0), rect: Rect { x: 7_000, y: 200, w: 500, h: 500 } }],
             pins: Vec::new(),
@@ -2397,7 +2308,7 @@ mod tests {
             ..Default::default()
         };
         let (routes, report) =
-            route(test_cfg(), &global, &pins, &[wall], &[], &mut gr::Negotiation::new());
+            route(test_cfg(), &pins, &[wall], &[], &mut gr::Negotiation::new());
         assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
         for &(_, r, _) in &pins {
             assert!(routes.wires[0].iter().any(|s| touches(s, r)));
@@ -2436,11 +2347,10 @@ mod tests {
             antenna_cumulative: false,
             diode: None,
         }));
-        let global = Routes { wires: vec![Vec::new()], ..Default::default()  };
         let (feed, a, b) = (pin(0, 1_000, 2_000), pin(0, 12_000, 2_000), pin(0, 12_000, 14_000));
         let node = CommonNode { net: NetId(0), a: vec![a.1], b: vec![b.1], feeds: vec![feed.1], max_delta_ohm: 0.2 };
         let skew = |cfg: DetailedCfg| {
-            let (routes, _) = route(cfg, &global, &[feed, a, b], &[], &[], &mut gr::Negotiation::new());
+            let (routes, _) = route(cfg, &[feed, a, b], &[], &[], &mut gr::Negotiation::new());
             CommonNodes { nodes: vec![node.clone()], stack }.worst_usage(&routes).unwrap()
         };
         let plain = skew(test_cfg());
@@ -2453,7 +2363,6 @@ mod tests {
     /// a pin in the cell, still runs over it.
     #[test]
     fn foreign_nets_route_around_a_matched_cell() {
-        let global = Routes { wires: vec![Vec::new(); 2], ..Default::default()  };
         let cell = Rect { x: 6_000, y: 3_000, w: 4_000, h: 4_000 };
         let unit = |owner| pnr_core::Unit { owner, x: 0, y: 0, weight: 1, phi: (1, 0), sa: 0, sb: 0 };
         let matched = Macro {
@@ -2465,7 +2374,7 @@ mod tests {
             ..Default::default()
         };
         let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000), pin(1, 8_000, 12_000)];
-        let (routes, _) = route(test_cfg(), &global, &pins, &[matched], &[], &mut gr::Negotiation::new());
+        let (routes, _) = route(test_cfg(), &pins, &[matched], &[], &mut gr::Negotiation::new());
         let over = |n: usize| routes.wires[n].iter().any(|s| s.rect.x < cell.x + cell.w && cell.x < s.rect.x + s.rect.w && s.rect.y < cell.y + cell.h && cell.y < s.rect.y + s.rect.h);
         assert!(!over(0), "net 0 crossed the matched cell: {:?}", routes.wires[0]);
         assert!(over(1), "net 1 must reach its pin inside the cell");
@@ -2486,17 +2395,16 @@ mod tests {
                 ]
             })
             .collect();
-        let global = Routes { wires: vec![Vec::new(); 5], ..Default::default()  };
         let flat = |r: &Routes| -> Vec<(u16, i32, i32, i32, i32)> {
             r.wires.iter().flatten().map(|s| (s.layer.0, s.rect.x, s.rect.y, s.rect.w, s.rect.h)).collect()
         };
         let mut neg = gr::Negotiation::new();
-        let (first, report) = route(cfg.clone(), &global, &pins, &[], &[], &mut neg);
+        let (first, report) = route(cfg.clone(), &pins, &[], &[], &mut neg);
         let jam = report.hard_violations.iter().find(|v| v.rule == "unresolved congestion");
         assert!(jam.is_some_and(|v| v.margin > 0), "residual overuse is V: {:?}", rules(&report));
         let p1 = neg.pressure();
         assert!(p1 > 0.0, "contested tracks must accumulate history");
-        let second = route(cfg, &global, &pins, &[], &[], &mut neg).0;
+        let second = route(cfg, &pins, &[], &[], &mut neg).0;
         assert!(neg.pressure() > p1, "history must keep climbing");
         assert_ne!(flat(&first), flat(&second), "second call was not seeded");
     }
@@ -2508,7 +2416,6 @@ mod tests {
     #[test]
     fn segments_are_sized_by_their_branch_current() {
         use analog::routing::em::Limit;
-        let global = Routes { wires: vec![Vec::new(); 2], ..Default::default()  };
         let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 1_000), pin(0, 12_000, 9_000), pin(1, 1_000, 9_000), pin(1, 6_000, 9_000)];
         let names = ["S", "a", "b", "g1", "g2"];
         let cell_of = || Macro {
@@ -2525,7 +2432,7 @@ mod tests {
             em: vec![(LAYERS[0], lim), (LAYERS[1], lim), (CUTS[0].0, lim)],
             ..test_cfg()
         };
-        let (routes, report) = route(cfg_of(), &global, &pins, &[cell_of()], &[], &mut gr::Negotiation::new());
+        let (routes, report) = route(cfg_of(), &pins, &[cell_of()], &[], &mut gr::Negotiation::new());
         let trunks = |n: usize| -> Vec<i32> {
             routes.wires[n].iter().filter(|s| s.rect.w != s.rect.h && LAYERS.contains(&s.layer)).map(|s| s.rect.w.min(s.rect.h)).collect()
         };
@@ -2537,11 +2444,11 @@ mod tests {
         // without an operating point every current is unknown, never 0.
         let terms = routes.terminals(NetId(0));
         assert_eq!(terms.iter().map(|t| (t.at, t.ua)).collect::<Vec<_>>(), [(pins[0].1, Some(-1_000.0)), (pins[1].1, Some(600.0)), (pins[2].1, Some(400.0))]);
-        let (bare, _) = route(DetailedCfg { pin_ua: Vec::new(), ..cfg_of() }, &global, &pins, &[cell_of()], &[], &mut gr::Negotiation::new());
+        let (bare, _) = route(DetailedCfg { pin_ua: Vec::new(), ..cfg_of() }, &pins, &[cell_of()], &[], &mut gr::Negotiation::new());
         assert!(bare.terminals(NetId(0)).len() == 3 && bare.terminals(NetId(0)).iter().all(|t| t.ua.is_none()));
         // A 1 µA cut limit asks ~1000 cuts of the source's via: Θ says so.
         let starved = DetailedCfg { em: vec![(LAYERS[0], lim), (LAYERS[1], lim), (CUTS[0].0, Limit { ua_per_cut: 1.0, ..lim })], ..cfg_of() };
-        let (_, report) = route(starved, &global, &pins, &[cell_of()], &[], &mut gr::Negotiation::new());
+        let (_, report) = route(starved, &pins, &[cell_of()], &[], &mut gr::Negotiation::new());
         assert!(report.budget_violations.iter().any(|v| v.rule == "em cuts net 0"), "{:?}", report.budget_violations.iter().map(|v| &v.rule).collect::<Vec<_>>());
     }
 
@@ -2551,7 +2458,6 @@ mod tests {
     #[test]
     fn a_multi_finger_terminal_is_not_counted_per_pin() {
         use analog::routing::em::Limit;
-        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
         let pins = [pin(0, 2_000 - 85, -85), pin(0, 6_000 - 85, -85), pin(0, 12_000, 9_000)];
         let cell = Macro {
             shapes: Vec::new(),
@@ -2570,7 +2476,7 @@ mod tests {
             em: vec![(LAYERS[0], lim), (LAYERS[1], lim), (CUTS[0].0, lim)],
             ..test_cfg()
         };
-        let (routes, _) = route(cfg, &global, &pins, &[cell], &[], &mut gr::Negotiation::new());
+        let (routes, _) = route(cfg, &pins, &[cell], &[], &mut gr::Negotiation::new());
         let trunks: Vec<i32> = routes.wires[0].iter().filter(|s| s.rect.w != s.rect.h && LAYERS.contains(&s.layer)).map(|s| s.rect.w.min(s.rect.h)).collect();
         assert_eq!(trunks.iter().max(), Some(&400), "{trunks:?}");
     }
@@ -2582,7 +2488,6 @@ mod tests {
     #[test]
     fn a_shared_region_carries_both_members_current() {
         use analog::routing::em::Limit;
-        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
         let pins = [pin(0, 1_000, 1_000), pin(0, 1_000, 1_000), pin(0, 6_000, 1_000), pin(0, 6_000, 1_000), pin(0, 12_000, 1_000)];
         let cell = Macro {
             shapes: Vec::new(),
@@ -2599,7 +2504,7 @@ mod tests {
             em: vec![(LAYERS[0], lim), (LAYERS[1], lim), (CUTS[0].0, lim)],
             ..test_cfg()
         };
-        let (routes, _) = route(cfg, &global, &pins, &[cell], &[], &mut gr::Negotiation::new());
+        let (routes, _) = route(cfg, &pins, &[cell], &[], &mut gr::Negotiation::new());
         let mut trunks: Vec<i32> = routes.wires[0].iter().filter(|s| s.rect.w != s.rect.h && LAYERS.contains(&s.layer)).map(|s| s.rect.w.min(s.rect.h)).collect();
         trunks.sort_unstable();
         trunks.dedup();
@@ -2611,7 +2516,6 @@ mod tests {
     #[test]
     fn a_net_with_an_unknown_terminal_gets_no_em_sizing() {
         use analog::routing::em::Limit;
-        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
         let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 9_000)];
         let cell = Macro {
             shapes: Vec::new(),
@@ -2624,7 +2528,7 @@ mod tests {
         let lim = Limit { ua_per_um: 1_000.0, ua_per_cut: 10_000.0, blech: 0.0 };
         let run = |table: Vec<(String, Option<i32>)>| {
             let cfg = DetailedCfg { pin_ua: vec![table], em: vec![(LAYERS[0], lim), (LAYERS[1], lim), (CUTS[0].0, lim)], ..test_cfg() };
-            let routes = route(cfg, &global, &pins, std::slice::from_ref(&cell), &[], &mut gr::Negotiation::new()).0;
+            let routes = route(cfg, &pins, std::slice::from_ref(&cell), &[], &mut gr::Negotiation::new()).0;
             routes.wires[0].iter().map(|s| (s.layer, s.rect)).collect::<Vec<_>>()
         };
         let widest = |r: &[(LayerId, Rect)]| r.iter().filter(|(l, r)| r.w != r.h && LAYERS.contains(l)).map(|(_, r)| r.w.min(r.h)).max();
@@ -2668,13 +2572,12 @@ mod tests {
         }));
         let mut reqs = Requirements::<Routes>::default();
         reqs.hard.push(Box::new(vec![Antenna(stack)]));
-        let global = Routes { wires: vec![Vec::new()], ..Default::default()  };
         let pins = [pin(0, 1_000, 1_000), pin(0, 30_000, 1_000)];
-        let route = |reqs: &Requirements<Routes>| DetailedRoute { cfg: test_cfg() }.route(&global, &pins, &[], &[], reqs, &layers, &cuts, &mut gr::Negotiation::new());
+        let route = |reqs: &Requirements<Routes>| DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], reqs, &layers, &cuts, &mut gr::Negotiation::new());
         // Unconstrained, the straight run sits on m0: 29 µm × 0.29 µm ≫ 4 µm².
-        let (free, _) = route(&Requirements::default());
+        let (free, _, _) = route(&Requirements::default());
         assert!(!Antenna(stack).satisfied(&free));
-        let (fixed, report) = route(&reqs);
+        let (fixed, report, _) = route(&reqs);
         assert!(Antenna(stack).satisfied(&fixed), "residual {}", Antenna(stack).residual(&fixed));
         assert!(fixed.wires[0].iter().any(|s| s.layer == LayerId(3)), "the run jumped to the upper metal");
         assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
@@ -2703,14 +2606,13 @@ mod tests {
                 out.push(0);
             }
         }
-        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
         let pins = [pin(0, 1_000, 1_000), pin(0, 30_000, 1_000)];
         let trials = |reqs: &Requirements<Routes>| {
             let dr = DetailedRoute { cfg: test_cfg() };
-            let (routes, report, n) = dr.route_counted(&global, &pins, &[], &[], reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+            let (routes, report, stats) = dr.route(&pins, &[], &[], reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
             assert!(!routes.wires[0].is_empty(), "the net routed");
             assert_eq!(rules(&report).len(), 1, "the stuck rule stays violated: {:?}", rules(&report));
-            n
+            stats.trials
         };
         let mut em = Requirements::<Routes>::default();
         em.hard.push(Box::new(vec![Stuck::<true>]));
@@ -2734,7 +2636,6 @@ mod tests {
             antenna_cumulative: false,
         diode: None,
         }));
-        let global = Routes { wires: vec![Vec::new()], ..Default::default()  };
         let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 9_000)];
         let cell = Macro {
             shapes: Vec::new(),
@@ -2750,7 +2651,7 @@ mod tests {
             if let Some(max_drop_uv) = max_drop_uv {
                 reqs.budget.push(Box::new(vec![IrDrop { net: NetId(0), current_ua: 1_000, max_drop_uv, margin_pct: 20, stack: Some(stack) }]));
             }
-            DetailedRoute { cfg: cfg() }.route(&global, &pins, &[cell.clone()], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new()).0
+            DetailedRoute { cfg: cfg() }.route(&pins, &[cell.clone()], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new()).0
         };
         let rects = |r: &Routes| r.wires[0].iter().map(|s| (s.layer, s.rect)).collect::<Vec<_>>();
         assert_eq!(rects(&run(Some(1_000_000_000))), rects(&run(None)), "within budget: no R pricing");
@@ -2760,9 +2661,8 @@ mod tests {
     /// by a cut at the node: the jog on the pin's metal otherwise floats.
     #[test]
     fn a_pin_on_the_upper_metal_is_stitched_to_its_node() {
-        let global = Routes { wires: vec![Vec::new()], ..Default::default()  };
         let up = |x, y| (NetId(0), Rect { x, y, w: 170, h: 170 }, LAYERS[1]);
-        let (routes, report) = route(test_cfg(), &global, &[up(1_000, 1_000), up(12_000, 1_000)], &[], &[], &mut gr::Negotiation::new());
+        let (routes, report) = route(test_cfg(), &[up(1_000, 1_000), up(12_000, 1_000)], &[], &[], &mut gr::Negotiation::new());
         assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
         assert!(routes.wires[0].iter().any(|s| s.layer == CUTS[0].0), "a cut joins the node to the jog");
     }
@@ -2867,28 +2767,12 @@ mod tests {
     /// A fattened trunk that changes layer gets a via array, not one cut.
     #[test]
     fn fat_trunks_get_via_arrays() {
-        let global = Routes { wires: vec![Vec::new(); 1], ..Default::default()  };
         let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 9_000)];
         let cfg = DetailedCfg { fat_signal: 2_000, ..test_cfg() };
-        let (routes, report) = route(cfg, &global, &pins, &[], &[], &mut gr::Negotiation::new());
+        let (routes, report) = route(cfg, &pins, &[], &[], &mut gr::Negotiation::new());
         let cuts = routes.wires[0].iter().filter(|s| CUTS.iter().any(|c| c.0 == s.layer)).count();
         assert!(cuts >= 4, "only {cuts} cuts");
         assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
-    }
-
-    /// A pair whose sides cannot route to equal length gets a stub on the
-    /// lighter side until the rule holds; a foreign wire in the way is avoided.
-    #[test]
-    fn trim_lengthens_the_lighter_side_of_a_pair() {
-        use analog::routing::Differential;
-        let rule: Vec<Differential> = vec![Differential { pos: NetId(0), neg: NetId(1), max_len_delta_pct10: 50, same_layer_required: true, stack: None }];
-        let wire = |x: i32, y: i32, w: i32| Shape { layer: LAYERS[0], rect: Rect { x, y, w, h: 290 } };
-        let mut routes = Routes { wires: vec![vec![wire(0, 0, 10_000)], vec![wire(0, 2_000, 8_000)], vec![wire(8_300, 2_000, 1_000)]], ..Default::default()  };
-        assert!(analog::RuleBatch::residual(&rule, &routes) > 0.0);
-        trim_pair(&mut routes, (0, 1), &rule, &LAYERS, &[], 5, |_, _| 140);
-        assert_eq!(analog::RuleBatch::residual(&rule, &routes), 0.0, "{:?}", routes.wires[1]);
-        let stub = routes.wires[1][1].rect;
-        assert_eq!((stub.x, stub.w), (-2_000, 2_000), "the right end is blocked by net 2, so the stub grows left");
     }
 
     /// A differential pair is not fattened into whatever room its neighbours
@@ -2896,12 +2780,11 @@ mod tests {
     #[test]
     fn a_differential_pair_is_not_fattened() {
         use analog::routing::Differential;
-        let global = Routes { wires: vec![Vec::new(); 3], ..Default::default()  };
         let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 1_000), pin(1, 1_000, 5_000), pin(1, 12_000, 5_000), pin(2, 1_000, 9_000), pin(2, 12_000, 9_000)];
         let mut reqs = Requirements::<Routes>::default();
-        reqs.hard.push(Box::new(vec![Differential { pos: NetId(0), neg: NetId(1), max_len_delta_pct10: 50, same_layer_required: true, stack: None }]));
+        reqs.budget.push(Box::new(vec![Differential { pos: NetId(0), neg: NetId(1), max_len_delta_pct10: 50, same_layer_required: true, stack: None, aggressor_weight: None }]));
         let cfg = DetailedCfg { fat_signal: 600, ..test_cfg() };
-        let (routes, _) = DetailedRoute { cfg }.route(&global, &pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        let (routes, _, _) = DetailedRoute { cfg }.route(&pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
         let widest = |n: usize| routes.wires[n].iter().filter(|s| s.rect.w != s.rect.h).map(|s| s.rect.w.min(s.rect.h)).max();
         assert_eq!((widest(0), widest(1)), (Some(290), Some(290)), "the pair keeps wire width");
         assert_eq!(widest(2), Some(600), "a free net still fattens");
@@ -2934,8 +2817,7 @@ mod tests {
                 [pin(n, x, 2_000), pin(n, x, 9_000)]
             })
             .collect();
-        let global = Routes { wires: vec![Vec::new(); 4], ..Default::default()  };
-        let (routes, _) = route(test_cfg(), &global, &pins, &[], &[], &mut gr::Negotiation::new());
+        let (routes, _) = route(test_cfg(), &pins, &[], &[], &mut gr::Negotiation::new());
         let hits = |a: Rect, b: Rect| a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
         for (i, na) in routes.wires.iter().enumerate() {
             for nb in routes.wires.iter().skip(i + 1) {
@@ -2957,8 +2839,7 @@ mod tests {
         let pin = |n: u16, x: i32, y: i32| (NetId(n), Rect { x, y, w: 170, h: 170 }, LayerId(3));
         // Net 0's trunk east would pass the node between the two pins.
         let pins = [pin(0, 2_000, 2_000), pin(1, 2_645, 2_000), pin(0, 6_000, 2_000), pin(1, 2_645, 6_000)];
-        let global = Routes { wires: vec![Vec::new(); 2], ..Default::default() };
-        let (routes, _) = route(cfg, &global, &pins, &[], &[], &mut gr::Negotiation::new());
+        let (routes, _) = route(cfg, &pins, &[], &[], &mut gr::Negotiation::new());
         for a in routes.wires[0].iter().filter(|s| s.layer == LAYERS[0]) {
             for b in routes.wires[1].iter().filter(|s| s.layer == LAYERS[0]) {
                 assert!(rect_gap(a.rect, b.rect) >= space, "{:?} {:?}", a.rect, b.rect);
@@ -3004,13 +2885,6 @@ mod tests {
     #[test]
     fn a_shield_request_draws_tied_reference_tracks_both_sides() {
         use analog::routing::Shield;
-        let global = Routes {
-            wires: vec![
-                vec![Shape { layer: LayerId(0), rect: Rect { x: 1_000, y: 1_000, w: 17_000, h: 17_000 } }],
-                vec![Shape { layer: LayerId(0), rect: Rect { x: 1_000, y: 1_000, w: 17_000, h: 17_000 } }],
-            ],
-            ..Default::default()
-        };
         // Victim: one long horizontal run. Reference: two pins well away.
         let pins = [pin(0, 2_000, 9_000), pin(0, 16_000, 9_000), pin(1, 2_000, 2_000), pin(1, 16_000, 2_000)];
         // 75%: beside the victim's end pads (wider than a wire) the shield
@@ -3018,13 +2892,13 @@ mod tests {
         let shield = Shield { victim: NetId(0), reference: NetId(1), min_coverage_pct: 75, max_gap_nm: 430 };
         let mut reqs = Requirements::<Routes>::default();
         reqs.budget.push(Box::new(vec![shield]));
-        let (routes, report) =
-            DetailedRoute { cfg: test_cfg() }.route(&global, &pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        let (routes, report, _) =
+            DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
         assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
         let cov = analog::Rule::usage(shield, &routes).expect("victim routed");
         assert!(cov >= 0.75, "coverage {cov}");
 
-        let (plain, _) = route(test_cfg(), &global, &pins, &[], &[], &mut gr::Negotiation::new());
+        let (plain, _) = route(test_cfg(), &pins, &[], &[], &mut gr::Negotiation::new());
         assert!(analog::Rule::usage(shield, &plain).unwrap() < 0.1, "no request, no shield");
         assert!(routes.wires[1].len() > plain.wires[1].len());
     }
@@ -3038,10 +2912,9 @@ mod tests {
         let band = Rect { x: 5_000, y: 7_000, w: 6_000, h: 800 };
         let ring = Macro { bbox: band, shapes: vec![Shape { layer: LAYERS[0], rect: band }], ..Default::default() };
         let pins = [pin(0, 1_000, 7_300), pin(0, 15_000, 7_300)];
-        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
         let cfg = test_cfg();
         let space = cfg.pitch - cfg.wire_width;
-        let (routes, report) = route(cfg, &global, &pins, &[], &[ring], &mut gr::Negotiation::new());
+        let (routes, report) = route(cfg, &pins, &[], &[ring], &mut gr::Negotiation::new());
         assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
         for &(_, r, _) in &pins {
             assert!(routes.wires[0].iter().any(|s| touches(s, r)));
@@ -3113,9 +2986,8 @@ mod tests {
             ..Default::default()
         };
         let pins = [pin(0, 1_000, 7_300), pin(0, 15_000, 7_300)];
-        let global = Routes { wires: vec![Vec::new()], ..Default::default() };
         let cfg = DetailedCfg { stack: Some(test_stack()), ..test_cfg() };
-        let (routes, report) = route(cfg, &global, &pins, &[cell], &[], &mut gr::Negotiation::new());
+        let (routes, report) = route(cfg, &pins, &[cell], &[], &mut gr::Negotiation::new());
         assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
         let away = Rect { x: 5_000, y: strap.y, w: 1, h: strap.h };
         assert!(

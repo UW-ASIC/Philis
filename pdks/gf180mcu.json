@@ -67,6 +67,8 @@
     "guard_licon_pitch": 470,
     "p_epi_thickness": 3000,
     "p_epi_thickness_source": "UNVERIFIED: no source was recorded with this value. Read by no code.",
+    "substrate_kind": null,
+    "epi_thickness_nm": null,
     "p_well_depth": 1500,
     "p_well_depth_source": "UNVERIFIED: no source was recorded with this value. Read by no code.",
     "n_well_depth": 2000,
