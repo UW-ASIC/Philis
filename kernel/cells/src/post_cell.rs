@@ -648,7 +648,8 @@ mod tests {
 
     /// CELL-22: wells offset by a quarter of their height bridge over their
     /// hull when the gap is clear, over the overlap when p-active sits beside
-    /// the overlap; both DRC/ERC clean with the touching rects left unmerged.
+    /// the overlap or the hull would come within the well spacing of a third
+    /// well; both DRC/ERC clean with the touching rects left unmerged.
     #[test]
     fn offset_wells_bridge_over_their_overlap() {
         let Some(pdk) = crate::testkit::pdk() else { return };
@@ -676,6 +677,18 @@ mod tests {
         let shapes: Vec<pnr_core::Shape> = pair.iter().chain(&bridges).flat_map(|m| m.shapes.clone()).collect();
         let dirty = findings_of(&pair, shapes, &pdk);
         assert!(dirty.is_empty(), "overlap: {dirty:?}");
+
+        // A third well (another bulk) above the gap, within the well spacing of
+        // the hull's top but not of the overlap's: the fill falls back to the overlap.
+        let space = pdk.rule("nwell_min_spacing", 0);
+        let mut other = shift(&cell, 0, 0, 2);
+        other.shapes.retain(|s| s.layer == nwell);
+        other.shapes.truncate(1);
+        other.shapes[0].rect = Rect { x: well.x + well.w, y: well.y + well.h + dy + space - pdk.grid(), w: 600, h: well.w };
+        let three = [pair[0].clone(), pair[1].clone(), other];
+        let bridges = well_bridges(&three, &[], &pdk, &|_, _| true);
+        assert_eq!(bridges.len(), 1);
+        assert_eq!(rects_on(&bridges[0], Some(nwell)), vec![Rect { x: well.x + well.w, y: well.y + dy, w: 600, h: well.h - dy }], "near a third well: the overlap");
     }
 
     /// CELL-22 (REL-16's acceptance): an injector's well is never bridged to a
