@@ -881,6 +881,8 @@ struct Searched {
     pareto: Vec<metadata::ParetoPoint>,
     /// [`metadata::MetadataReport::epochs`].
     epochs: Vec<metadata::ParetoPoint>,
+    /// [`metadata::MetadataReport::candidates`].
+    candidates: Vec<metadata::Candidate>,
 }
 
 /// 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
@@ -895,6 +897,7 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
     let mut best: Option<Epoch> = None;
     let mut stats = RunStats::default();
     let (mut pareto, mut epochs) = (Vec::new(), Vec::new());
+    let mut candidates = Vec::new();
 
     let n_outer = cfg.outer_iters.max(1);
     for outer in 0..n_outer {
@@ -907,6 +910,8 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
             // the utilization floor cannot see mid-anneal (a 1-row tail cost
             // ota 40% area); the epoch key picks between the two.
             let mut epoch = flow.epoch(&assignment, iter % 2 == 1, &mut prices, &mut neg, seed);
+            let wl_nm: i64 = epoch.routes.wires.iter().flatten().map(|s| i64::from(s.rect.w.max(s.rect.h))).sum();
+            candidates.push(metadata::Candidate { outer, iteration: iter, wl_um: wl_nm as f64 / 1e3, area_um2: epoch.key.5 / 1e6, clean: epoch.key.0 == 0 });
             // Promotion: simulate only a candidate whose hard count can still
             // beat the incumbent; its spec miss then decides against it.
             if best.as_ref().is_none_or(|b| epoch.key.0 <= b.key.0) {
@@ -979,7 +984,7 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
         ..best.stats.merge(stats)
     };
     let binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
-    Searched { key: best.key, best, stats, binding, pareto, epochs }
+    Searched { key: best.key, best, stats, binding, pareto, epochs, candidates }
 }
 
 /// 7. The winner only, redrawn from its own variant choice, with its guard
@@ -1029,6 +1034,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     let mut metadata = metadata;
     metadata.binding = s.binding;
     metadata.epochs = s.epochs;
+    metadata.candidates = s.candidates;
     let pairs = matched_pairs(&flow.problem.blocks);
     if let Some(op) = &bias.op {
         let (_, aging, unknown) = reliability::voltage_findings(flow.netlist, op, &pdk.fet_voltage_limits(), &pairs, false);
