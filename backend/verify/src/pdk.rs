@@ -932,6 +932,18 @@ impl Pdk {
         (gap_nm > 0 && t > 0.0 && k > 0.0).then(|| EPS0_AF_PER_UM * k * t / gap_nm as f32)
     }
 
+    /// Parallel-plate C between `lo` and the metal `hi` above it, aF/µm²:
+    /// `ε0·k_lo / (h_hi − (h_lo + t_lo))`, the dielectric being the one above
+    /// the lower plate (GPurify's analytical extractor). `None` when a `pex`
+    /// key is absent or the gap is not positive.
+    #[must_use]
+    pub fn overlap_af_um2(&self, lo: LayerId, hi: LayerId) -> Option<f32> {
+        const EPS0_AF_PER_UM: f32 = 8.854;
+        let (k, h_lo, t_lo) = (self.pex_f32(lo, "dielectric_k")?, self.pex_f32(lo, "height_nm")?, self.pex_f32(lo, "thickness_nm")?);
+        let gap_um = (self.pex_f32(hi, "height_nm")? - (h_lo + t_lo)) / 1_000.0;
+        (gap_um > 0.0 && k > 0.0).then(|| EPS0_AF_PER_UM * k / gap_um)
+    }
+
     /// The deck's `min_spacing` for a layer in nm, if it declares one.
     #[must_use]
     pub fn min_spacing(&self, layer: u16) -> Option<i32> {
@@ -1645,6 +1657,17 @@ mod tests {
         assert_eq!(q(&with), q(&without));
         let ov = Overlay { pdk: &with, recipe: with.recipe("capacitor", "sky130_fd_pr__cap_mim_m3_1").unwrap() };
         assert_eq!(ov.enclosure("bottom", "plate"), Some(140), "capm.3");
+    }
+
+    /// RTE-18: crossing C from the deck's heights (sky130: met1–met2 gap
+    /// 270 nm, k 4.5; met2–met3 420 nm, k 4.2).
+    #[test]
+    fn sky130_overlap_c_matches_the_deck() {
+        let p = Pdk::builtin("sky130").unwrap();
+        let l = |n: &str| p.layers.iter().find(|(x, _)| x == n).unwrap().1;
+        let c12 = p.overlap_af_um2(l("met1"), l("met2")).unwrap();
+        let c23 = p.overlap_af_um2(l("met2"), l("met3")).unwrap();
+        assert!((c12 - 147.6).abs() < 0.1 && (c23 - 88.5).abs() < 0.1, "{c12} {c23}");
     }
 
     /// The sidecar's tier arrays reach `Process::tier` by class index; a

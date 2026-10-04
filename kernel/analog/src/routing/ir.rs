@@ -45,6 +45,7 @@ impl IrDrop {
 impl Rule for IrDrop {
     type On = Routes;
     const REPAIR: crate::RepairKind = crate::RepairKind::Ir;
+    const LOCAL: bool = true;
     fn cost(self, r: &Routes) -> f32 {
         self.residual(r)
     }
