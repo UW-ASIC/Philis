@@ -34,7 +34,6 @@ pub(crate) fn draw<G: Cell>(
             unit_w: w,
             unit_l: l,
             series_parallel,
-            same_variant_required: true,
             dummy_required: dummies,
             route_matching_required: false,
         }],

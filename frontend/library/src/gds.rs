@@ -43,10 +43,21 @@ pub struct Text {
 
 /// Emit `shapes` and `texts` as a GDSII byte stream with one structure named
 /// `top`. `layer_gds` maps a Philis [`pnr_core::LayerId`] (index =
-/// `LayerId.0`) to its `(gds_layer, gds_datatype)` numbers; a shape whose
-/// layer id is outside the table falls back to `(id, 0)` so it still draws.
-#[must_use]
-pub fn emit(top: &str, shapes: &[Shape], layer_gds: &[(u16, u16)], texts: &[Text]) -> Vec<u8> {
+/// `LayerId.0`) to its `(gds_layer, gds_datatype)` numbers. `Err` names
+/// every shape layer id outside the table or mapped to `(0, 0)` (a layer the
+/// deck derives rather than draws): writing it anyway would put the shape on
+/// a layer nothing reads.
+pub fn emit(top: &str, shapes: &[Shape], layer_gds: &[(u16, u16)], texts: &[Text]) -> Result<Vec<u8>, String> {
+    let mut bad: Vec<u16> = shapes
+        .iter()
+        .map(|s| s.layer.0)
+        .filter(|&l| layer_gds.get(l as usize).is_none_or(|&g| g == (0, 0)))
+        .collect();
+    bad.sort_unstable();
+    bad.dedup();
+    if !bad.is_empty() {
+        return Err(format!("no GDS stream number for layer ids {bad:?} (derived or unmapped)"));
+    }
     let mut out = Vec::new();
 
     rec_i16(&mut out, HEADER, &[GDS_VERSION]);
@@ -60,10 +71,7 @@ pub fn emit(top: &str, shapes: &[Shape], layer_gds: &[(u16, u16)], texts: &[Text
     rec_str(&mut out, STRNAME_R, top);
 
     for s in shapes {
-        let (gl, gd) = layer_gds
-            .get(s.layer.0 as usize)
-            .copied()
-            .unwrap_or((s.layer.0, 0));
+        let (gl, gd) = layer_gds[s.layer.0 as usize];
         let (x, y, w, h) = (s.rect.x, s.rect.y, s.rect.w, s.rect.h);
         rec_empty(&mut out, BOUNDARY);
         rec_i16(&mut out, LAYER, &[gl as i16]);
@@ -87,7 +95,7 @@ pub fn emit(top: &str, shapes: &[Shape], layer_gds: &[(u16, u16)], texts: &[Text
 
     rec_empty(&mut out, ENDSTR);
     rec_empty(&mut out, ENDLIB);
-    out
+    Ok(out)
 }
 
 // ── record writers ─────────────────────────────────────────────────────────
@@ -196,7 +204,7 @@ mod tests {
                 },
             },
         ];
-        let bytes = emit("TOP", &shapes, &[(68, 20), (69, 20)], &[]);
+        let bytes = emit("TOP", &shapes, &[(68, 20), (69, 20)], &[]).unwrap();
         let (polys, _) = visualizer::parse_gds(&bytes);
         assert_eq!(polys.len(), 2, "both boundaries parse back");
         let mut layers: Vec<u16> = polys.iter().map(|p| p.layer).collect();
@@ -225,7 +233,8 @@ mod tests {
             }],
             &[(66, 20)],
             &[Text { name: "vdd".into(), gds: (68, 5), x: 0, y: 0 }],
-        );
+        )
+        .unwrap();
         let mut i = 0;
         let mut saw_endlib = false;
         while i + 4 <= bytes.len() {
@@ -249,7 +258,7 @@ mod tests {
     #[test]
     fn top_name_and_texts_are_written() {
         let shape = Shape { layer: LayerId(0), rect: Rect { x: 0, y: 0, w: 10, h: 10 } };
-        let bytes = emit("strongarm", &[shape], &[(68, 20)], &[Text { name: "vinp".into(), gds: (68, 5), x: 5, y: 5 }]);
+        let bytes = emit("strongarm", &[shape], &[(68, 20)], &[Text { name: "vinp".into(), gds: (68, 5), x: 5, y: 5 }]).unwrap();
         let has = |s: &[u8]| bytes.windows(s.len()).any(|w| w == s);
         assert!(has(b"strongarm"), "STRNAME is the top name");
         assert!(!has(b"TOP"), "no fixed TOP cell");
@@ -257,6 +266,17 @@ mod tests {
         assert!(has(b"vinp"), "the label string");
         let (polys, _) = visualizer::parse_gds(&bytes);
         assert_eq!(polys.len(), 1, "the boundary still parses with a text present");
+    }
+
+    // A shape on a layer with no stream number is refused, not drawn on
+    // `(id, 0)` or `(0, 0)` where no reader looks.
+    #[test]
+    fn unmapped_layer_is_an_error() {
+        let on = |l| [Shape { layer: LayerId(l), rect: Rect { x: 0, y: 0, w: 10, h: 10 } }];
+        let err = emit("t", &on(5), &[(68, 20), (69, 20)], &[]).unwrap_err();
+        assert!(err.contains('5'), "{err}");
+        let err = emit("t", &on(1), &[(68, 20), (0, 0)], &[]).unwrap_err();
+        assert!(err.contains("[1]"), "{err}");
     }
 
     // The real encoder must invert the documented reader semantics.

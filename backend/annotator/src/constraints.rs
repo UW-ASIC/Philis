@@ -59,7 +59,6 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block]) -> Constra
                     DeviceKind::Resistor | DeviceKind::Capacitor => SeriesParallel::Series,
                     _ => SeriesParallel::Parallel,
                 },
-                same_variant_required: true,
                 dummy_required: true,
                 route_matching_required: true,
             });

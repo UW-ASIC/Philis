@@ -77,7 +77,7 @@ is now the V entry `unresolved congestion`, margin = overuse.
 Determinism is therefore over `(inputs, seed, neg)`. Same inputs with different
 incoming history route differently, by design.
 
-### D4 — The oracle handle lives on `dp`, region-scoped, veto-not-cost *(revised)*
+### D4 — The oracle handle lives on `dp`, region-scoped, veto-not-cost *(revised)* — not implemented; superseded by FLOW-08 blame escalation
 
 This section originally read "no oracle handle on any stage trait", justified by
 gdsverify being 99.86% of measured runtime with the GPU lane measured
@@ -471,12 +471,10 @@ The loop and its four `cellgen` bodies are landed. What they deliberately do not
   could not index a stable permutation even if one existed. Uniform-without-repeats
   needs either a tried-set on the caller's side or a seeded bijection over the joint
   index space (cycle-walking Feistel — `Π n_i` is not a power of two).
-- **Variant DRC/ERC pricing is duplicated in spirit with `macroMaster::variant_signoff`.**
-  That module is the same sweep, but it is `#[cfg(all(test, feature = "gpurify"))]` and
-  its `verify` dependency is optional specifically so `macro_master` builds with no
-  GPurify checkout. Calling it from `library` would force `verify` (and `gdsverify`)
-  into `macro_master`'s default dependency set to share eight lines `library` can call
-  directly. Unify them only if they ever need to agree on more than "count the findings".
+- **Variant DRC/ERC pricing lives in `cellgen::price` only** (`frontend/library/src/cellgen.rs`):
+  one `verify::Checker` sweep per alternative, `(DRC + ERC count, pin HPWL)`. The test-only
+  macroMaster sweep this bullet once compared it with is gone, so `macro_master` keeps no
+  `verify` dependency.
 - **Per-alternative pricing adds `n_cells × |Var|` oracle calls, once per run.** Measured
   on sky130: a MOSFET enumerates 6 alternatives and each hypothesis costs ~13 ms, all of
   it inside `gdsverify` (99.86% of measured runtime). ~0.4 s for a 5T OTA, ~1 min at the

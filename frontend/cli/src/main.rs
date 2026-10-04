@@ -1,20 +1,30 @@
 //! `philis` — read a netlist and a PDK deck, run the flow, sign off.
 //!
 //! ```text
-//! philis <netlist.sp> <pdk>                     # solve + signoff
-//! philis run <netlist.sp> <pdk> [-o DIR] [--seed N] [--max-iters N] [--starts N]
-//! philis emit <netlist.sp> <pdk> <out.rs>       # also decompile to generator source
+//! philis [run] <netlist.sp> [<pdk>] [flags]           # solve + signoff, write outputs
+//! philis emit <netlist.sp> [<pdk>] [<out.rs>] [flags]  # also decompile to generator source
 //! philis --version
 //! ```
 //!
-//! `<pdk>` is a sidecar `*.json`, or the name of one compiled in
+//! `<pdk>` (or `--pdk`) is a sidecar `*.json`, or the name of one compiled in
 //! (`sky130`, `gf180mcu`, `ihp_sg13g2`, `generic_finfet`).
 //!
-//! `run -o DIR` writes `<top>.gds` (the `.subckt` ports as labels on the
+//! Flags: `-o/--out DIR` (default `./philis_out/<netlist stem>/`), `--seed N`,
+//! `--iters/--max-iters N` (epochs per assignment), `--outer N` (assignments),
+//! `--starts N`, `--size spice|per-finger`, `--top NAME`, `--op-lib PATH
+//! [--corner C] [--vdd V] [--temp C] [--testbench FILE]` (operating point),
+//! `--perf SPECS.json` (`{"testbench": "tb.spice", "specs": [{"metric", "min",
+//! "max"}]}`, the testbench relative to the JSON), `--interface FILE`
+//! (die and boundary pins, checked against the ports), `--out-rs FILE` (emit).
+//! `--constraints`, `--hierarchy` other than `flat` and `--max-wall` are
+//! refused (exit 2) until EXT-26 / FLOW-11 / FLOW-08.
+//!
+//! Every run writes `<top>.gds` (the `.subckt` ports as labels on the
 //! deck's text layers), `<top>_ref.spice` (the LVS reference signoff used,
-//! dummies included), `signoff.txt` and `signoff.json`. `<top>` is the
-//! netlist's `.subckt` name, else the file stem. The exit code is 0 only
-//! when signoff is clean.
+//! dummies included), `<top>_pex.spice` when extraction allows,
+//! `signoff.txt`, `signoff.json` and `report.txt` (constraint budgets, the
+//! signoff hard rows and the run's stats). `<top>` is the netlist's `.subckt`
+//! name, else the file stem. Exit code: 0 signoff clean, 1 not clean, 2 error.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -26,13 +36,14 @@ fn main() -> ExitCode {
         Ok(clean) => ExitCode::from(u8::from(!clean)),
         Err(e) => {
             eprintln!("{e}");
-            ExitCode::FAILURE
+            ExitCode::from(2)
         }
     }
 }
 
-const USAGE: &str = "usage: philis [run|emit] <netlist.sp> <pdk.json | sky130 | gf180mcu | ihp_sg13g2 | generic_finfet> [out.rs] \
-                     [-o DIR] [--seed N] [--max-iters N] [--starts N]";
+const USAGE: &str = "usage: philis [run|emit] <netlist.sp> [<pdk.json | sky130 | gf180mcu | ihp_sg13g2 | generic_finfet>] [out.rs] \
+                     [--pdk P] [-o|--out DIR] [--seed N] [--iters N] [--outer N] [--starts N] [--size spice|per-finger] [--top NAME] \
+                     [--op-lib PATH [--corner C] [--vdd V] [--temp C] [--testbench FILE]] [--perf SPECS.json] [--interface FILE] [--out-rs FILE]";
 
 /// `Ok(true)` when signoff is clean: no errors and every device LVS-compared.
 fn cli() -> Result<bool, String> {
@@ -41,8 +52,14 @@ fn cli() -> Result<bool, String> {
         println!("philis {} ({})", env!("CARGO_PKG_VERSION"), env!("PHILIS_GIT_REV"));
         return Ok(true);
     }
+    let read = |p: &str| std::fs::read_to_string(p).map_err(|e| format!("read {p}: {e}"));
     let mut cfg = Config::default();
     let mut out: Option<PathBuf> = None;
+    let mut pdk_arg: Option<String> = None;
+    let mut out_rs: Option<String> = None;
+    let mut perf: Option<String> = None;
+    let mut op = library::oppoint::OpConfig::default();
+    let mut op_set = false;
     // Flags, anywhere after the subcommand; what is left is positional.
     let mut pos = Vec::new();
     let mut it = args.drain(..);
@@ -50,14 +67,34 @@ fn cli() -> Result<bool, String> {
         let mut val = || it.next().ok_or_else(|| format!("{a} needs a value\n{USAGE}"));
         match a.as_str() {
             "-o" | "--out" => out = Some(PathBuf::from(val()?)),
+            "--pdk" => pdk_arg = Some(val()?),
             "--seed" => cfg.seed = num(&a, &val()?)?,
-            "--max-iters" => cfg.feedback_iters = num(&a, &val()?)?,
+            "--max-iters" | "--iters" => cfg.feedback_iters = num(&a, &val()?)?,
+            "--outer" => cfg.outer_iters = num(&a, &val()?)?,
             "--starts" => cfg.starts = num(&a, &val()?)?,
-            // ponytail: no fixed die or boundary pins in this flow; the run
-            // places freely and labels nets at their drawn terminals.
-            "--interface" => {
-                let f = val()?;
-                eprintln!("warning: --interface {f} ignored: fixed die and boundary pins are not supported");
+            "--size" => {
+                cfg.size_convention = match val()?.as_str() {
+                    "spice" => library::SizeConvention::Spice,
+                    "per-finger" => library::SizeConvention::PerFinger,
+                    v => return Err(format!("--size: {v:?} is not spice|per-finger")),
+                }
+            }
+            "--top" => cfg.top = Some(val()?),
+            "--op-lib" => (op.model_lib, op_set) = (Some(PathBuf::from(val()?)), true),
+            "--corner" => (op.corner, op_set) = (val()?, true),
+            "--vdd" => (op.vdd, op_set) = (num(&a, &val()?)?, true),
+            "--temp" => (op.temp_c, op_set) = (num(&a, &val()?)?, true),
+            "--testbench" => (op.testbench, op_set) = (Some(read(&val()?)?), true),
+            "--perf" => perf = Some(val()?),
+            "--interface" => cfg.interface = Some(library::Interface::from_json(&read(&val()?)?)?),
+            "--out-rs" => out_rs = Some(val()?),
+            "--constraints" => return Err("`--constraints` needs EXT-26 (constraint file format)".into()),
+            "--max-wall" => return Err("`--max-wall` needs FLOW-08 (wall-clock stop)".into()),
+            "--hierarchy" => {
+                let h = val()?;
+                if h != "flat" {
+                    return Err(format!("`--hierarchy {h}` needs FLOW-11 (only `flat`)"));
+                }
             }
             _ if a.starts_with('-') => return Err(format!("unknown flag {a}\n{USAGE}")),
             _ => pos.push(a),
@@ -68,23 +105,32 @@ fn cli() -> Result<bool, String> {
         Some("run") | Some("emit") => Some(pos.remove(0)),
         _ => None,
     };
+    let netlist = pos.first().cloned().ok_or(USAGE)?;
+    // The PDK is `--pdk`, else the second positional.
+    let rest = &pos[1..];
+    let (deck, rest) = match pdk_arg {
+        Some(p) => (p, rest),
+        None => (rest.first().cloned().ok_or(USAGE)?, &rest[1..]),
+    };
     let emit_to = match sub.as_deref() {
-        Some("emit") => Some(pos.get(2).cloned().ok_or(USAGE)?),
+        Some("emit") => Some(out_rs.or_else(|| rest.first().cloned()).ok_or(USAGE)?),
         _ => None,
     };
-    let [netlist, deck, ..] = pos.as_slice() else {
-        return Err(USAGE.into());
-    };
-    let read = |p: &str| std::fs::read_to_string(p).map_err(|e| format!("read {p}: {e}"));
-    let spice = read(netlist)?;
-    let pdk = if Path::new(deck).is_file() { verify::Pdk::from_json(&read(deck)?) } else { verify::Pdk::builtin(deck) }
+    let spice = read(&netlist)?;
+    let pdk = if Path::new(&deck).is_file() { verify::Pdk::from_json(&read(&deck)?) } else { verify::Pdk::builtin(&deck) }
         .map_err(|e| format!("pdk: {e}"))?;
+    if op_set {
+        cfg.op = Some(op);
+    }
+    if let Some(path) = perf {
+        cfg.performance = Some(perf_config(&path, cfg.op.clone().unwrap_or_default())?);
+    }
 
     let sol =
         library::run(&spice, &pdk, &Macros::default(), &cfg).map_err(|e| format!("flow: {e:?}"))?;
 
     if let Some(out) = emit_to {
-        let ir = library::emit::emit(&sol.netlist, &sol.layout, &pdk, &cfg)
+        let ir = library::emit::emit_solution(&sol, &pdk)
             .map_err(|e| format!("emit: {e:?}"))?;
         std::fs::write(&out, library::emit::to_rust(&ir))
             .map_err(|e| format!("write {out}: {e}"))?;
@@ -113,12 +159,37 @@ fn cli() -> Result<bool, String> {
     };
     println!("{summary}");
 
-    if let Some(dir) = out {
-        let (top, ports) = interface(&spice, Path::new(netlist));
-        let pex = if write_outputs(&dir, &top, &ports, &sol, &pdk, &report, &summary, clean)? { format!(" {top}_pex.spice,") } else { String::new() };
-        println!("wrote {}/{{{top}.gds, {top}_ref.spice,{pex} signoff.txt, signoff.json}}", dir.display());
-    }
+    let path = Path::new(&netlist);
+    let dir = out.unwrap_or_else(|| Path::new("philis_out").join(path.file_stem().unwrap_or_default()));
+    let (top, ports) = interface(&spice, path);
+    let pex = if write_outputs(&dir, &top, &ports, &sol, &pdk, &report, &summary, clean)? { format!(" {top}_pex.spice,") } else { String::new() };
+    println!("wrote {}/{{{top}.gds, {top}_ref.spice,{pex} signoff.txt, signoff.json, report.txt}}", dir.display());
     Ok(clean)
+}
+
+/// `--perf SPECS.json`: `{"testbench": "tb.spice", "specs": [{"metric": "gain_db",
+/// "min": 40, "max": null}]}`, the testbench path relative to the JSON.
+fn perf_config(path: &str, sim: library::oppoint::OpConfig) -> Result<library::perf::PerfConfig, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
+    let tb = v.get("testbench").and_then(serde_json::Value::as_str).ok_or_else(|| format!("{path}: `testbench` must be a path"))?;
+    let tb = Path::new(path).parent().unwrap_or(Path::new("")).join(tb);
+    let testbench = std::fs::read_to_string(&tb).map_err(|e| format!("read {}: {e}", tb.display()))?;
+    let bound = |s: &serde_json::Value, k: &str| -> Result<Option<f64>, String> {
+        match s.get(k) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(x) => x.as_f64().map(Some).ok_or_else(|| format!("{path}: spec `{k}` must be a number or null")),
+        }
+    };
+    let specs = v.get("specs").and_then(serde_json::Value::as_array).ok_or_else(|| format!("{path}: `specs` must be an array"))?;
+    let specs = specs
+        .iter()
+        .map(|s| {
+            let metric = s.get("metric").and_then(serde_json::Value::as_str).ok_or_else(|| format!("{path}: spec `metric` must be a string"))?;
+            Ok(library::perf::Spec { metric: metric.to_string(), min: bound(s, "min")?, max: bound(s, "max")? })
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(library::perf::PerfConfig { sim, testbenches: vec![testbench], specs, scenarios: Vec::new() })
 }
 
 fn num<T: std::str::FromStr>(flag: &str, v: &str) -> Result<T, String> {
@@ -155,7 +226,7 @@ fn write_outputs(
         std::fs::write(&p, bytes).map_err(|e| format!("write {}: {e}", p.display()))
     };
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    write(format!("{top}.gds"), &library::export_gds(sol, pdk, top, ports))?;
+    write(format!("{top}.gds"), &library::export_gds(sol, pdk, top, ports)?)?;
     write(format!("{top}_ref.spice"), library::reference_spice(sol, pdk, top, ports).as_bytes())?;
     // A previous run's file in `dir` would read as this layout's extraction: removed when none is written.
     let pex = match library::post_layout_spice(sol, pdk, top) {
@@ -194,6 +265,22 @@ fn write_outputs(
         arr(&report.budget_violations),
     );
     write("signoff.json".into(), json.as_bytes())?;
+
+    let st = &sol.stats;
+    let stages: String = library::STAGES.iter().zip(st.stage_ms).map(|(n, ms)| format!(" {n}={ms:.0}")).collect();
+    let rep = format!(
+        "{}\n# signoff hard ({})\n{}\n# run\nconverged\t{}\niterations\t{}\nouter_iterations\t{}\nsim_failures\t{}\nwarnings\t{}\nstage_ms\t{}\n",
+        sol.metadata,
+        report.hard_violations.len(),
+        lines(&report.hard_violations),
+        st.converged,
+        st.iterations,
+        st.outer_iterations,
+        st.sim_failures,
+        st.warnings,
+        stages.trim_start(),
+    );
+    write("report.txt".into(), rep.as_bytes())?;
     Ok(pex)
 }
 

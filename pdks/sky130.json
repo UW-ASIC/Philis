@@ -10,7 +10,7 @@
     "min_finger_width": 420,
     "via_enclosure": 300,
     "cap_density_ff_um2": 2.0,
-    "cap_density_ff_um2_source": "UNVERIFIED: no source was recorded with this value. 2.0 equals the sky130 MIM camimc (2.00e-15 F/um2, typical corner) while the capacitor generator draws met1/met2 MOM (plan-08 D10); FLOW-06 sources it.",
+    "cap_density_ff_um2_source": "= camimc of sky130_fd_pr__cap_mim_m3_1 (MIM), 2.00e-15 F/um2: VOL/libs.tech/ngspice/r+c/res_typical__cap_typical__lin.spice:7 (volare 1341f54f); the MOM that cap_array draws is not this value (AV-32). Deleted once the benchmark preprocessor reads capacitors.mim_m3_1.c_area_af_um2.",
     "gate_cap_af_um2": 8325,
     "gate_cap_af_um2_source": "UNVERIFIED: no source was recorded with this value.",
     "dummy_max_l_nm": 3000,

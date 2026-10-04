@@ -27,7 +27,8 @@ pub enum Kind {
     Bool,
     /// Any number.
     Real,
-    /// Array of integers, one per matching tier.
+    /// Array of exactly 3 (MIN, MOD, EXC; index = `MatchClass as usize`), each a
+    /// non-negative integer or `null` (the process does not state that tier).
     Tier,
     Text,
     /// Array of strings.
@@ -172,7 +173,7 @@ pub fn validate(cell: &Value) -> Vec<String> {
             Count => v.is_u64(),
             Bool => v.is_boolean(),
             Real => v.is_number(),
-            Tier => v.as_array().is_some_and(|a| a.iter().all(Value::is_i64)),
+            Tier => v.as_array().is_some_and(|a| a.len() == 3 && a.iter().all(|e| e.is_null() || e.is_u64())),
             Text => v.is_string(),
             List => v.as_array().is_some_and(|a| a.iter().all(Value::is_string)),
             Table | Layers => v.is_object(),

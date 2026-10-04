@@ -68,6 +68,12 @@ Order: M1 → M2 → M3 → M6 → B(P0–P4); M4/M5 fill as needed.
 ## Status (2026-09-14)
 
 Done: M1, M2, M3, M6, B v1 (P0–P4).
+- M3 as merged (M2 tree): `Instance::orient` applies a `pnr_core::Orient` about
+  the bbox origin (`kernel/macroMaster/src/lib.rs:195`), `place_mirrored`
+  mirrors and refuses an odd-finger pair whose Σ current direction would differ
+  (`lib.rs:380`); there is no centroid helper.
+- M4 implemented: `Composition::instantiate_comp` (`lib.rs:364`) surfaces a
+  child's ports and imports its connect-graph; `frontend/library/tests/hier_elaborate.rs`.
 - `library::elaborate(&comp, &pdk, cfg)` — build → route → `signoff_drc`.
 - `ota_cross_pdk.rs`: one `Ota5T` source, sky130 + generic_finfet, device
   layers DRC-clean, all nets routed, zero literal nm.
@@ -80,7 +86,8 @@ Done: M1, M2, M3, M6, B v1 (P0–P4).
   `verify` (`Pdk::builtin`); `verify/build.rs` still finds GPurify's `pdks/`
   for a deck not vendored (`GPURIFY_DIR` overrides with a local tree).
 
-Open debt (tasks): M4 hierarchy; M5 patterned library (unlocks emitting
-merged matched groups + symmetry lift to `place_mirrored`); dr li pin-access
-spacing (then tighten M6 gate to `drc.is_empty()`); run() debug open-net
-panic (then flow→emit integration test via `emit_solution`).
+Open debt (tasks): M5 patterned library (equal-leg `MatchedPair` emits;
+ratioed merged groups and Cap/BJT/Diode variants do not; symmetry axes are not
+lifted to `place_mirrored`); dr li pin-access spacing (then tighten M6 gate to
+`drc.is_empty()`). The run() debug open-net panic is fixed and `emit_solution`
+round-trips a flow result (FLOW-13).

@@ -1332,6 +1332,45 @@ impl Pdk {
         self.deck.devices.model.iter().map(|&m| self.strings.resolve(m)).find(|n| hit(n)).map(str::to_string)
     }
 
+    /// Layers `model`'s recogniser requires (`and`) and forbids (`not`) beyond its
+    /// gate layer, from the marker's derived-layer expression (sky130
+    /// `nfet_01v8_lvt = (ngate and lvtn) not hvi` → `([lvtn], [hvi])`). The walk
+    /// expands the expression's own hidden sub-layers (`name#n`) only, so a named
+    /// operand (`ngate`) is a leaf, and the leftmost required leaf is the gate.
+    /// `None` when the deck has no recogniser for `model`.
+    #[must_use]
+    pub fn model_markers(&self, model: &str) -> Option<(Vec<LayerId>, Vec<LayerId>)> {
+        use gdsverify::ingest::deck::DerivedOp;
+        fn walk(p: &Pdk, x: GvLayerId, root: bool, sign: bool, out: &mut Vec<(GvLayerId, bool)>) {
+            let hidden = root || p.strings.resolve(p.deck.layers.name(x)).contains(['#', '@']);
+            let ops = p.deck.layers.operands(x);
+            match p.deck.layers.op(x) {
+                Some(DerivedOp::And) if hidden => ops.iter().for_each(|&o| walk(p, o, false, sign, out)),
+                Some(DerivedOp::Not) if hidden => {
+                    for (k, &o) in ops.iter().enumerate() {
+                        walk(p, o, false, if k == 0 { sign } else { !sign }, out);
+                    }
+                }
+                _ => out.push((x, sign)),
+            }
+        }
+        let m = self.deck_model(model)?;
+        let d = &self.deck.devices;
+        let r = (0..d.model.len()).find(|&r| self.strings.resolve(d.model[r]) == m)?;
+        let mut leaves = Vec::new();
+        walk(self, d.marker[r], true, true, &mut leaves);
+        let pick = |s: bool, skip: usize| {
+            let mut v: Vec<LayerId> = Vec::new();
+            for id in leaves.iter().filter(|l| l.1 == s).skip(skip).map(|l| LayerId(l.0 .0)) {
+                if !v.contains(&id) {
+                    v.push(id);
+                }
+            }
+            v
+        };
+        Some((pick(true, 1), pick(false, 0)))
+    }
+
     /// The recipe for a `kind` (`"resistor"`) of schematic `model`: the one
     /// naming it (its deck model or an alias, a vendor prefix ignored), else
     /// the table's `default`. `None` when the sidecar has no table.
@@ -1625,6 +1664,30 @@ mod tests {
         Pdk::from_json(&v.to_string())
     }
 
+    /// A `Tier` key is exactly MIN/MOD/EXC, each non-negative or `null`.
+    #[test]
+    fn tier_arrays_are_validated() {
+        for bad in [serde_json::json!([2000, 3000]), serde_json::json!([2000, -1, 5000])] {
+            let err = sky130_with(|c| {
+                c.insert("wpe_clearance_nm".into(), bad.clone());
+            })
+            .err()
+            .unwrap_or_else(|| panic!("{bad} must not load"));
+            assert!(err.contains("cell.wpe_clearance_nm"), "{err}");
+        }
+        sky130_with(|c| {
+            c.insert("wpe_clearance_nm".into(), serde_json::json!([2000, 3000, null]));
+        })
+        .expect("an unstated tier is null");
+    }
+
+    #[test]
+    fn cap_density_is_sourced() {
+        let p = Pdk::builtin("sky130").unwrap();
+        assert!(p.provenance("cap_density_ff_um2").is_some_and(|s| s.starts_with("= camimc")));
+        assert!(!p.unverified().contains(&"cap_density_ff_um2"));
+    }
+
     /// A misspelt key is an error, not a value silently ignored while the
     /// generator falls back to its default.
     #[test]
@@ -1673,6 +1736,31 @@ mod tests {
     const DECKS: [&str; 3] = ["sky130", "gf180mcu", "ihp_sg13g2"];
     fn id(p: &Pdk, n: &str) -> LayerId {
         p.layers.iter().find(|(l, _)| l == n).unwrap().1
+    }
+
+    #[test]
+    fn lvt_needs_lvtn_and_forbids_hvi() {
+        let p = load("sky130");
+        assert_eq!(p.model_markers("nfet_01v8_lvt"), Some((vec![id(&p, "lvtn")], vec![id(&p, "hvi")])));
+    }
+
+    #[test]
+    fn hvt_pmos_needs_hvtp() {
+        let p = load("sky130");
+        assert_eq!(p.model_markers("pfet_01v8_hvt"), Some((vec![id(&p, "hvtp")], vec![id(&p, "hvi")])));
+    }
+
+    /// `nfet_01v8 = (ngate not hvi) not lvtn`: the core device is the gate minus
+    /// both markers.
+    #[test]
+    fn core_nfet_has_no_required_marker() {
+        let p = load("sky130");
+        assert_eq!(p.model_markers("nfet_01v8"), Some((vec![], vec![id(&p, "hvi"), id(&p, "lvtn")])));
+    }
+
+    #[test]
+    fn unknown_model_has_no_markers() {
+        assert!(load("sky130").model_markers("no_such_fet").is_none());
     }
 
     /// A router indexes `routing_layers()` by its internal layer index, so the
