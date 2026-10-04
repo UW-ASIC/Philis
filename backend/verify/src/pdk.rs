@@ -8,7 +8,7 @@
 use gdsverify::ingest::deck::{Deck, ParamValue, RuleSpec};
 use gdsverify::ingest::StrTable;
 use gdsverify::geom::Grid;
-use pnr_core::{LayerId, Process};
+use pnr_core::{LayerId, MatchClass, Process};
 
 /// The database grid every length in this crate is expressed against:
 /// 1000 dbu/µm, so **1 dbu = 1 nm**.
@@ -1170,6 +1170,10 @@ impl Process for Pdk {
         let one = |x, y| self.widest_on("min_spacing_diff", "limit", &[x, y]);
         one(la, lb).max(one(lb, la)).map(|v| v as i32)
     }
+    /// The sidecar's `[MIN, MOD, EXC]` array `key`, read from `cell` as is.
+    fn tier(&self, key: &str, c: MatchClass) -> Option<i32> {
+        self.cell.get(key)?.as_array()?.get(c as usize)?.as_i64().map(|v| v as i32)
+    }
 }
 
 /// Pull every rule's scalar length parameter (nm) out of the deck into
@@ -1338,6 +1342,9 @@ impl Process for Overlay<'_> {
     }
     fn eol_space(&self, role: &str) -> Option<i32> {
         self.pdk.widest_on("eol_spacing", "limit", &[self.layer(role)?.0]).map(|v| v as i32)
+    }
+    fn tier(&self, key: &str, c: MatchClass) -> Option<i32> {
+        self.pdk.tier(key, c)
     }
 }
 
@@ -1520,6 +1527,22 @@ mod tests {
         assert_eq!(q(&with), q(&without));
         let ov = Overlay { pdk: &with, recipe: with.recipe("capacitor", "sky130_fd_pr__cap_mim_m3_1").unwrap() };
         assert_eq!(ov.enclosure("bottom", "plate"), Some(140), "capm.3");
+    }
+
+    /// The sidecar's tier arrays reach `Process::tier` by class index; a
+    /// removed key reads `None` (the class env reports it missing).
+    #[test]
+    fn sky130_tiers_are_read() {
+        let p = load("sky130");
+        assert_eq!(p.tier("wpe_clearance_nm", MatchClass::Exceptional), Some(5000));
+        assert_eq!(p.tier("lod_moat_ext_nm", MatchClass::Minimal), Some(3000));
+        assert_eq!(p.tier("lod_moat_ext_nm", MatchClass::Exceptional), Some(10000));
+        let p = sky130_with(|c| {
+            c.remove("dummy_reach_nm");
+            c.remove("dummy_reach_nm_source");
+        })
+        .unwrap();
+        assert_eq!(p.tier("dummy_reach_nm", MatchClass::Moderate), None);
     }
 
     fn sky130_with(edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>)) -> Result<Pdk, String> {

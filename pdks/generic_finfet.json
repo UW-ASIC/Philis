@@ -5,6 +5,20 @@
     "min_finger_width": 27,
     "via_enclosure": 5,
     "dummy_max_l_nm": null,
+    "wpe_clearance_nm": [2000, 3000, 5000],
+    "wpe_clearance_nm_source": "Hastings §13.3 rule 19 (hastings.txt L42625–42631, H13-53): well edge to matched gates, EXC the lower bound of 5–10 µm; [MIN, MOD, EXC], same on every deck.",
+    "lod_moat_ext_nm": [3000, 5000, 10000],
+    "lod_moat_ext_nm_source": "Hastings §13.2.2 (hastings.txt L41411–41422, H13-29) 'two or three microns will suffice' for less accurate matching (MIN); §13.3 rule 12 (L42532–42553, H13-47) MOD STI ≥ 5 µm, EXC ≥ 10 µm; [MIN, MOD, EXC], same on every deck.",
+    "dummy_reach_nm": [0, 3000, 10000],
+    "dummy_reach_nm_source": "Hastings §13.3 rule 12 (hastings.txt L42532–42553, H13-47): MIN dummies optional, MOD one full dummy for L < ~3 µm, EXC outer dummy poly edge ≥ 10 µm from the active gates; [MIN, MOD, EXC], same on every deck.",
+    "gate_ext_extra_nm": [0, 1000, 1000],
+    "gate_ext_extra_nm_source": "Hastings §13.3 rule 21 (hastings.txt L42638–42647, H13-54): extend gate poly 1–2 µm beyond the rule for MOD/EXC (lower end taken); [MIN, MOD, EXC], same on every deck.",
+    "res_dummy_span_nm": [0, 0, 10000],
+    "res_dummy_span_nm_source": "Hastings §8 resistor dummies (hastings.txt L22312–22347, L25263–25273, H08-13): MIN one minimum-width dummy, MOD one full-width dummy, EXC dummies spanning ≥ 10 µm; [MIN, MOD, EXC], same on every deck.",
+    "res_width_floor_permille": [1500, 2000, 4000],
+    "res_width_floor_permille_source": "Hastings §8 resistor width floors (hastings.txt L25205–25214, H08-41): 150/200/400 % of minimum width; [MIN, MOD, EXC], same on every deck.",
+    "res_length_floor_x": [3, 5, 10],
+    "res_length_floor_x_source": "Hastings §8 resistor length floors (hastings.txt L25274–25281, H08-41): 3×/5×/10× minimum length; [MIN, MOD, EXC], same on every deck.",
     "layers": {
       "diff": "ACTIVE",
       "tap": "ACTIVE",
@@ -60,11 +74,6 @@
     "bjt_min_emitter_side": 420,
     "bjt_stripe_gap": 200,
     "diode_gap": 270,
-    "wpe_clearance_nm": [
-      2000,
-      3000,
-      5000
-    ],
     "min_guard_ring_width": 54,
     "guard_licon_pitch": 54,
     "p_epi_thickness": 3000,
@@ -77,23 +86,17 @@
     "n_well_depth_source": "UNVERIFIED: no source was recorded with this value. Read by no code.",
     "retrograde_pwell": false,
     "retrograde_pwell_source": "UNVERIFIED: no source was recorded with this value. Read by no code.",
-    "lod_moat_ext_nm": [
-      3000,
-      5000
-    ],
     "sheet_tolerance": {},
     "linewidth_control_nm": {},
     "cap_unit_side": 2000,
     "diode_l": 1000,
     "diode_w": 500,
-    "lod_moat_ext_moderate": 3000,
     "mom_finger_space": 200,
     "mom_finger_width": 200,
     "res_min_width": 500,
     "res_value_tol_ppm": 5000,
     "tie_max_dist_nm": 30000,
     "tie_max_dist_nm_source": "generic_finfet.deck ACTIVE.LUP.1.PMOS/NMOS missing_tie max_distance 30um. Read by no code yet (CELL-13 tap reach).",
-    "wpe_clearance_moderate": 3000,
     "finfet_note": "ASAP7 (GPurify generic_finfet.deck, DRM 1p7): fins 7 nm at a 27 nm pitch, gates exactly 20 nm at a 54 nm pitch; S/D contacted through SDT + LISD and V0 to M1, gates through LIG and V0. Channel width is a fin count; L is the fixed gate width. The deck connects M1 and up only and recognises no devices: LVS covers routing, not devices."
   }
 }
