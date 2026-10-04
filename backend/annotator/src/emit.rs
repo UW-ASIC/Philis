@@ -132,11 +132,14 @@ pub fn placement(
                     svt_uv_per_um: p.svt_uv_per_um,
                     kvth0_mv_um: by_polarity(nl, a, p.lod_kvth0_mv_um),
                     tc_uv_per_k: by_polarity(nl, a, p.vt_tc_uv_per_k),
+                    abeta_pct_um: by_polarity(nl, a, p.abeta_pct_um),
                 },
                 budget: budget(offset_sigma_mv, match_kind),
                 gate_um2: vec![gate_um2(nl, a), gate_um2(nl, b)],
                 tol_nm: p.lattice_nm.max(1) as f32 / 2.0,
                 cell_of: Vec::new(),
+                // ponytail: EXT-17 fills it from Evidence.op.
+                gm_over_id: None,
             };
             let phi = phi_arm(set.class);
             r.budget.push(Box::new(set.clone()));

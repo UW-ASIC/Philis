@@ -155,6 +155,9 @@ pub struct ProcessNumbers {
     pub dti: Option<(i32, i32)>,
     /// Pelgrom `A_VT` (ΔVT of a pair), mV·µm, `[nmos, pmos]`.
     pub avt_mv_um: [Option<f32>; 2],
+    /// Current-factor mismatch `A_β` (Δβ/β of a pair), %·µm, `[nmos, pmos]`:
+    /// with a mirror's `g_m/I` it puts the ledger in % (MAT-09).
+    pub abeta_pct_um: [Option<f32>; 2],
     /// Pelgrom distance coefficient `S_VT`, µV/µm. Process-specific and rarely
     /// published: absent leaves the matching distance check unknown.
     pub svt_uv_per_um: Option<f32>,

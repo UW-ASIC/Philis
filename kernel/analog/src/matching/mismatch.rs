@@ -1,6 +1,7 @@
 //! One matched pair's mismatch ledger: the random σ the sizing bought, the
 //! systematic terms placement spends (gradient, thermal, LOD) and the single
-//! allowance they share (plan-02 MAT-04). Pure math, mV throughout.
+//! allowance they share (plan-02 MAT-04). Pure math, mV (or % of a
+//! mirror current, MAT-09).
 
 /// Pelgrom pair σ of two devices of unequal gate area, mV:
 /// `A·√((1/a1 + 1/a2)/2)`, `A` = pair constant mV·µm, `a` µm² (LDM eq. 4,
@@ -25,6 +26,38 @@ pub enum MatchKind {
 
 use crate::matching::class::ClassLimit;
 
+/// What a ledger's σ and allowance are in: input-referred mV, or a current
+/// ratio in % (a mirror whose G = g_m/I is known, MAT-09).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LedgerUnit {
+    #[default]
+    Mv,
+    Pct,
+}
+
+impl LedgerUnit {
+    /// `"mV"` | `"%"`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LedgerUnit::Mv => "mV",
+            LedgerUnit::Pct => "%",
+        }
+    }
+}
+
+/// Current-domain random σ, %: √((0.1·G·σ_VT)² + σ_β²) (Hastings eq. 13.43; 1/V·mV ×100 = 0.1).
+#[must_use]
+pub fn sigma_current_pct(sigma_vt_mv: f32, g_per_v: f32, sigma_beta_pct: f32) -> f32 {
+    (0.1 * g_per_v * sigma_vt_mv).hypot(sigma_beta_pct)
+}
+
+/// Voltage-domain random σ, mV: √(σ_VT² + (10·σ_β/G)²) (eq. 13.42).
+#[must_use]
+pub fn sigma_voltage_mv(sigma_vt_mv: f32, g_per_v: f32, sigma_beta_pct: f32) -> f32 {
+    sigma_vt_mv.hypot(10.0 * sigma_beta_pct / g_per_v)
+}
+
 /// Placement's share η of a matched pair's mismatch when no offset budget is
 /// given: the gradient term may reach this fraction of the random term the
 /// sizing bought (σ grows ≤ 4.4%).
@@ -42,6 +75,9 @@ pub enum Budget {
     Sigma1Mv(f32),
     /// The 1σ systematic allowance itself, mV.
     Allowance(f32),
+    /// Total 1σ budget `b`, % of a current ratio: [`Budget::to_pct`] of a
+    /// `Sigma1Mv` on a % ledger.
+    Sigma1Pct(f32),
 }
 
 impl Budget {
@@ -61,8 +97,19 @@ impl Budget {
     pub fn allowance(self, sigma_rand: f32) -> f32 {
         match self {
             Budget::Eta(eta) => eta * sigma_rand,
-            Budget::Sigma1Mv(b) => (b * b - sigma_rand * sigma_rand).max(0.0).sqrt(),
+            Budget::Sigma1Mv(b) | Budget::Sigma1Pct(b) => (b * b - sigma_rand * sigma_rand).max(0.0).sqrt(),
             Budget::Allowance(a) => a,
+        }
+    }
+
+    /// An mV budget on a % ledger of transconductance efficiency `g_per_v`
+    /// (1/V): ΔI/I = G·ΔV, ×0.1 for mV → %. `Eta` and `Sigma1Pct` unchanged.
+    #[must_use]
+    pub fn to_pct(self, g_per_v: f32) -> Budget {
+        match self {
+            Budget::Sigma1Mv(b) => Budget::Sigma1Pct(0.1 * g_per_v * b),
+            Budget::Allowance(a) => Budget::Allowance(0.1 * g_per_v * a),
+            other => other,
         }
     }
 }
@@ -95,9 +142,11 @@ pub struct Coeffs {
     pub kvth0_mv_um: Option<f32>,
     /// `|dV_T/dT|`, µV/K.
     pub tc_uv_per_k: Option<f32>,
+    /// Current-factor mismatch `A_β`, %·µm (Hastings eq. 13.43).
+    pub abeta_pct_um: Option<f32>,
 }
 
-/// One pair's ledger, mV unless named otherwise.
+/// One pair's ledger, in `unit` (mV unless a mirror's G and `A_β` are known).
 ///
 /// - `sigma_rand` = `A_VT·√((1/a₁+1/a₂)/2)` ([`sigma_pair`]).
 /// - `sigma_grad` = `S_VT·|Δm|` (Pelgrom eq. (1) distance term, PDF p.1).
@@ -119,15 +168,16 @@ pub struct Ledger {
     pub second_order_nm: f32,
     pub delta_m_nm: f32,
     pub known: bool,
+    pub unit: LedgerUnit,
 }
 
-/// One matched pair's ledger as the report prints it (MAT-13), mV.
+/// One matched pair's ledger as the report prints it (MAT-13), in `unit`.
 ///
 /// `members` are schematic device ids `(reference, member)`;
 /// `sigma_layout` is the gradient term; `order` the moment orders the
 /// members' units cancel ([`crate::matching::moments::cancelled_order`], 0
 /// without units); `phi_equal` whether their orientation counts agree (`None`
-/// without units); `sizing_limited` a `Sigma1Mv` budget the random σ alone
+/// without units); `sizing_limited` a `Sigma1Mv`/`Sigma1Pct` budget the random σ alone
 /// already meets or exceeds (allowance 0: the sizing, not the layout, must change).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LedgerRow {
@@ -205,6 +255,30 @@ mod tests {
         assert_eq!(choose(Some(1.0), Some(0.2), Some(ClassLimit::Mv(3.0)), v), Budget::Sigma1Mv(1.0));
         assert_eq!(choose(None, Some(0.2), Some(ClassLimit::Mv(3.0)), v), Budget::Allowance(0.2));
         assert_eq!(choose(None, None, Some(ClassLimit::Mv(3.0)), v), Budget::Sigma1Mv(0.5));
+    }
+
+    #[test]
+    fn current_domain_matches_hastings_13_43() {
+        assert!((sigma_current_pct(1.0, 10.0, 0.5) - 1.118).abs() < 1e-3);
+        assert!((sigma_voltage_mv(1.0, 10.0, 0.5) - 1.118).abs() < 1e-3);
+    }
+
+    #[test]
+    fn without_abeta_usage_is_domain_invariant() {
+        let mv = Ledger { sigma_rand: 2.0, sigma_grad: 0.3, mu_thermal: 0.2, mu_lod: 0.1, allowance: Budget::Sigma1Mv(3.0).allowance(2.0), ..Ledger::default() };
+        for g in [10.0f32, 7.0] {
+            let k = 0.1 * g;
+            let pct = Ledger {
+                sigma_rand: 2.0 * k,
+                sigma_grad: 0.3 * k,
+                mu_thermal: 0.2 * k,
+                mu_lod: 0.1 * k,
+                allowance: Budget::Sigma1Mv(3.0).to_pct(g).allowance(2.0 * k),
+                unit: LedgerUnit::Pct,
+                ..Ledger::default()
+            };
+            assert!((pct.usage() - mv.usage()).abs() < 1e-6, "G {g}: {} vs {}", pct.usage(), mv.usage());
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@ use pnr_core::ids::DeviceId;
 use pnr_core::layout::Layout;
 
 use crate::matching::class::{Family, MatchClass};
-use crate::matching::mismatch::{sigma_pair, Budget, Coeffs, Ledger, LedgerRow, MatchKind};
+use crate::matching::mismatch::{sigma_current_pct, sigma_pair, sigma_voltage_mv, Budget, Coeffs, Ledger, LedgerRow, LedgerUnit, MatchKind};
 use crate::matching::moments::{cancelled_order, phi_equal, sums, Pt};
 use crate::matching::pattern::{cc_feasible, diffusion_cc_row, Outer};
 
@@ -37,6 +37,8 @@ pub struct MatchedSet {
     pub tol_nm: f32,
     /// `device → cell`, set by `retarget`; empty = the ids name cells.
     pub cell_of: Vec<u16>,
+    /// `g_m/I_D` of `members[0]`, 1/V: EXT-17's `gm_us/id_ua`; `None` keeps the ledger in mV.
+    pub gm_over_id: Option<f32>,
 }
 
 /// Unit moments of one member plus its weighted LOD sum (`Σw·lod`, `Σw` over
@@ -107,7 +109,18 @@ impl MatchedSet {
         };
 
         let (a0, ai) = self.areas(&sa, &sb, i);
-        let sigma_rand = self.coeffs.avt_mv_um.map_or(0.0, |av| sigma_pair(av, a0, ai));
+        let sigma_vt = self.coeffs.avt_mv_um.map_or(0.0, |av| sigma_pair(av, a0, ai));
+        // MAT-09: with A_β and G a mirror's ledger is in % (eq. 13.43) and a
+        // pair's σ gains the β share (eq. 13.42); without them, mV as before.
+        let beta = match (self.family, self.coeffs.abeta_pct_um, self.gm_over_id) {
+            (Family::Mos, Some(ab), Some(g)) => Some((g, sigma_pair(ab, a0, ai))),
+            _ => None,
+        };
+        let (unit, sigma_rand) = match (beta, self.kind) {
+            (Some((g, sb)), MatchKind::Current) => (LedgerUnit::Pct, sigma_current_pct(sigma_vt, g, sb)),
+            (Some((g, sb)), _) => (LedgerUnit::Mv, sigma_voltage_mv(sigma_vt, g, sb)),
+            (None, _) => (LedgerUnit::Mv, sigma_vt),
+        };
         let budgeted = sigma_rand > 0.0 || matches!(self.budget, Budget::Allowance(_));
 
         let (mut sigma_grad, mut mu_lod, mut mu_thermal) = (0.0, 0.0, 0.0);
@@ -123,12 +136,18 @@ impl MatchedSet {
                 mu_thermal = self.coeffs.tc_uv_per_k.unwrap_or(0.0) * (rise(ca) - rise(cb)).abs() * 1e-6;
             }
         }
+        // mV systematic terms → % of current: ΔI/I = G·ΔV (×0.1 for mV → %).
+        if unit == LedgerUnit::Pct {
+            let k = 0.1 * self.gm_over_id.unwrap_or(0.0);
+            (sigma_grad, mu_thermal, mu_lod) = (k * sigma_grad, k * mu_thermal, k * mu_lod);
+        }
         Ledger {
             sigma_rand,
             sigma_grad,
             mu_thermal,
             mu_lod,
-            allowance: self.budget.allowance(sigma_rand),
+            allowance: self.budget_in(unit).allowance(sigma_rand),
+            unit,
             coincidence,
             second_order_nm,
             delta_m_nm,
@@ -143,6 +162,15 @@ impl MatchedSet {
             ((sa.w / 1e6) as f32, (sb.w / 1e6) as f32)
         } else {
             (self.gate_um2.first().copied().unwrap_or(0.0), self.gate_um2.get(i).copied().unwrap_or(0.0))
+        }
+    }
+
+    /// The budget in a ledger's unit ([`Budget::to_pct`] on a % ledger).
+    #[must_use]
+    pub fn budget_in(&self, unit: LedgerUnit) -> Budget {
+        match (unit, self.gm_over_id) {
+            (LedgerUnit::Pct, Some(g)) => self.budget.to_pct(g),
+            _ => self.budget,
         }
     }
 
@@ -229,7 +257,7 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
             let pb: Vec<Pt> = l.units.of_device(l, b).map(Pt::from).collect();
             out.push(LedgerRow {
                 members: (u32::from(a.0), u32::from(b.0)),
-                unit: "mV",
+                unit: g.unit.as_str(),
                 sigma_rand: g.sigma_rand,
                 sigma_layout: g.sigma_grad,
                 mu_thermal: g.mu_thermal,
@@ -240,7 +268,7 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
                 second_order_nm: g.second_order_nm,
                 phi_equal: units.then(|| phi_equal(&sa, &sb)),
                 known: g.known,
-                sizing_limited: matches!(self.budget, Budget::Sigma1Mv(b) if g.sigma_rand > 0.0 && g.sigma_rand >= b),
+                sizing_limited: matches!(self.budget_in(g.unit), Budget::Sigma1Mv(b) | Budget::Sigma1Pct(b) if g.sigma_rand > 0.0 && g.sigma_rand >= b),
             });
         }
     }
@@ -271,11 +299,13 @@ pub(crate) fn pair(a: u16, b: u16) -> MatchedSet {
             svt_uv_per_um: Some(1.63),
             kvth0_mv_um: Some(9.8),
             tc_uv_per_k: Some(765.0),
+            abeta_pct_um: None,
         },
         budget: Budget::Eta(0.3),
         gate_um2: vec![20.0, 20.0],
         tol_nm: 5.0,
         cell_of: Vec::new(),
+        gm_over_id: None,
     }
 }
 
@@ -527,11 +557,12 @@ mod tests {
             kind: MatchKind::Current,
             family: Family::Resistor,
             class: MatchClass::Moderate,
-            coeffs: Coeffs { avt_mv_um: None, svt_uv_per_um: Some(1.0), kvth0_mv_um: None, tc_uv_per_k: None },
+            coeffs: Coeffs { avt_mv_um: None, svt_uv_per_um: Some(1.0), ..Coeffs::default() },
             budget: Budget::Allowance(0.637),
             gate_um2: vec![0.0, 0.0],
             tol_nm: 5.0,
             cell_of: Vec::new(),
+            gm_over_id: None,
         };
         let mut out = Vec::new();
         s.offset_allowances(&l, &mut out);
@@ -543,6 +574,30 @@ mod tests {
         out.clear();
         s.offset_allowances(&l, &mut out);
         assert_eq!(out[0].2, 0.0);
+    }
+
+    #[test]
+    fn mirror_row_in_pct_with_abeta() {
+        let l = singles(1_000);
+        let rows = |s: &MatchedSet| {
+            let mut out = Vec::new();
+            s.ledger_rows(&l, &mut out);
+            out.remove(0)
+        };
+        let base = pair(0, 1);
+        let mv = rows(&base);
+        let sigma_vt = sigma_pair(9.5, 20.0, 20.0);
+        let sb = sigma_pair(1.0, 20.0, 20.0);
+        let s = MatchedSet { coeffs: Coeffs { abeta_pct_um: Some(1.0), ..base.coeffs }, gm_over_id: Some(10.0), ..pair(0, 1) };
+        let r = rows(&s);
+        assert_eq!(r.unit, "%");
+        assert_eq!(r.sigma_rand, sigma_current_pct(sigma_vt, 10.0, sb));
+        assert!(r.sigma_rand > 0.1 * 10.0 * sigma_vt + 1e-3, "{r:?}");
+        let r = rows(&MatchedSet { gm_over_id: None, ..s.clone() });
+        assert_eq!((r.unit, r.sigma_rand), ("mV", mv.sigma_rand));
+        let r = rows(&MatchedSet { kind: MatchKind::Voltage, ..s });
+        assert_eq!(r.unit, "mV");
+        assert!(r.sigma_rand > sigma_vt, "{r:?}");
     }
 
     #[test]

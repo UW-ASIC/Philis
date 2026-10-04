@@ -60,6 +60,8 @@ use Kind::{Bool, Count, Layers, List, Nm, Real, Table, Text, Tier};
 
 /// Every key, alphabetical. `<name>_source` of a registered key is implied.
 pub const KEYS: &[Key] = &[
+    k("abeta_n_pct_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
+    k("abeta_p_pct_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("antenna_source", Text, false, false, "provenance of the deck's antenna rules"),
     k("avt_n_mv_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("avt_p_mv_um", Real, false, true, "frontend/library/src/lib.rs annotation"),

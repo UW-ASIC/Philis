@@ -35,7 +35,7 @@ pub fn dstar_um(avt_mv_um: f32, svt_uv_per_um: f32, wl_um2: f32) -> f32 {
 /// Notes of every pair `(0, i)` of `set` on `l`; `class_limit_mv` = a user/spec class's 6σ mV limit (Voltage kind only).
 ///
 /// - `"area"`: the smaller area is under [`area_need_um2`] of the class limit.
-/// - `"budget_area"`: a `Sigma1Mv(b)` budget below σ_rand; `need = have·(σ_rand/b)²`
+/// - `"budget_area"`: a `Sigma1Mv(b)` budget (`Sigma1Pct` on a % ledger) below σ_rand; `need = have·(σ_rand/b)²`
 ///   (MM-14); lever `"area"` for a voltage pair, `"length"` for a mirror (MM-21).
 /// - `"dstar"`: units drawn and A_VT, S_VT known; `"distance term non-binding"`
 ///   when the placed distance is under a tenth of D*.
@@ -55,7 +55,7 @@ pub fn notes(set: &MatchedSet, l: &Layout, class_limit_mv: Option<f32>) -> Vec<S
                 note("area", have_a, need, "area");
             }
         }
-        if let Budget::Sigma1Mv(b) = set.budget {
+        if let Budget::Sigma1Mv(b) | Budget::Sigma1Pct(b) = set.budget_in(g.unit) {
             if b > 0.0 && g.sigma_rand > b {
                 let lever = if set.kind == MatchKind::Current { "length" } else { "area" };
                 note("budget_area", have_a, have_a * (g.sigma_rand / b).powi(2), lever);
