@@ -53,8 +53,13 @@ pub fn unknown_size(kind: DeviceKind, d: &Drawn) -> bool {
 }
 
 /// `SizeMatch::ExactAs`: same known W/L (or both fixed-geometry), same model,
-/// and the same bulk net or both bulks on rails.
+/// and the same bulk net or both bulks on rails. A bipolar compares its written
+/// W, L and model as they are (EXT-19): its size is the model's emitter, and a
+/// flow may write only a default `l`.
 pub(crate) fn exact_as(kind: DeviceKind, a: &Drawn, b: &Drawn, roles: &[NetRole]) -> bool {
+    if matches!(kind, DeviceKind::Npn | DeviceKind::Pnp) {
+        return (a.w_finger_nm, a.l_nm, a.model) == (b.w_finger_nm, b.l_nm, b.model);
+    }
     let rail = |n: NetId| matches!(roles[n.0 as usize], NetRole::Supply | NetRole::Ground);
     let size = if fixed_geometry(kind, a) {
         b.w_finger_nm.is_none() && b.l_nm.is_none()

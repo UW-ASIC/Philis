@@ -16,6 +16,7 @@ pub mod extract;
 pub mod graph;
 pub mod ir;
 pub mod netrole;
+pub mod passive;
 pub mod pattern;
 pub mod policy;
 pub mod sets;
@@ -134,6 +135,13 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
             Block::from_match(&m)
         })
         .collect();
+    // A source-degenerated diff pair no joined-source pattern sees (EXT-19 step 5).
+    for (a, b) in passive::degenerated_pairs(&hg, &drawn, &roles) {
+        if !claimed[a.0 as usize] && !claimed[b.0 as usize] {
+            (claimed[a.0 as usize], claimed[b.0 as usize]) = (true, true);
+            blocks.push(Block { kind: BlockKind::DiffPair, template: "diff_pair_with_degen", devices: vec![a, b], injected: false, sub_blocks: Vec::new(), selfs: Vec::new() });
+        }
+    }
     let glue = (0..netlist.devices.len() as u16).filter(|&d| !claimed[d as usize]).map(DeviceId);
     blocks.push(Block { kind: BlockKind::Glue, template: "glue", devices: glue.collect(), injected: false, sub_blocks: Vec::new(), selfs: Vec::new() });
 
@@ -268,9 +276,22 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     intent.compounds = compounds;
     intent.diagnostics.extend(diags);
     let shared = sets::shared_bias_groups(&hg, &drawn, &net_classes);
-    let reqs = graph::requirements(&all, &intent.compounds, &shared, &[], &hg, &net_classes, &canon, &cfg.policy);
+    // EXT-19: passive, bipolar-core and diode sets.
+    let pair_of = |m: &pattern::PatternMatch| (DeviceId(m.instances[0] as u16), DeviceId(m.instances[1] as u16));
+    let bjt_ratioed: Vec<(DeviceId, DeviceId)> = all.iter().filter(|m| m.template.starts_with("bjt_ratioed_pair")).map(pair_of).collect();
+    let mut pairs: Vec<(DeviceId, DeviceId)> =
+        block::leaves(&blocks).iter().filter(|b| b.kind == BlockKind::DiffPair).map(|b| (b.devices[0], b.devices[1])).collect();
+    pairs.extend(all.iter().filter(|m| m.template.starts_with("bjt_")).map(pair_of));
+    // Degeneration first: its role (the pair's) wins over a plain symmetric couple.
+    let mut passive_sets = passive::degeneration(&hg, &drawn, &pairs, &mut intent.diagnostics);
+    passive_sets.extend(passive::resistor_sets(&hg, &drawn, &net_classes, &intent.compounds));
+    passive_sets.extend(passive::bandgap_cores(&hg, &drawn, &bjt_ratioed));
+    passive_sets.extend(passive::capacitor_sets(&hg, &drawn, &net_classes, &mut intent.diagnostics));
+    passive_sets.extend(passive::diode_sets(&hg, &drawn));
+    let passive_groups: Vec<Vec<DeviceId>> = passive_sets.iter().map(|p| p.devices.clone()).collect();
+    let reqs = graph::requirements(&all, &intent.compounds, &shared, &passive_groups, &hg, &net_classes, &canon, &cfg.policy);
     intent.tree = graph::hsmpg(netlist.devices.len(), &reqs, &canon);
-    intent.sets = sets::matched_sets(&reqs, &intent.compounds, &shared, &block::leaves(&blocks), &canon, &drawn, &hg, &cfg.process.unit, &mut intent.diagnostics);
+    intent.sets = sets::matched_sets(&reqs, &intent.compounds, &shared, &passive_sets, &block::leaves(&blocks), &canon, &drawn, &hg, &cfg.process.unit, &mut intent.diagnostics);
     // EXT-16: kind, class and style per set; the unit floors depend on the class.
     let leaves = block::leaves(&blocks);
     let mut roles = Vec::new();
@@ -291,6 +312,11 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
             && s.compound.is_some_and(|c| (0..intent.sets.len()).any(|j| input(j) && intent.sets[j].compound == Some(c)))
         {
             class::SetRole::LoadOfPair
+        } else if let Some(p) = passive_sets.iter().find(|p| p.devices.iter().all(|d| s.members.iter().any(|m| m.device == *d))) {
+            p.role
+        } else if matches!(s.origin, analog::intent::Origin::Pattern { template } if template.starts_with("bjt_ratioed_pair")) {
+            // A ratioed pair's ΔV_BE is a bandgap core (H09-01).
+            class::SetRole::BandgapCore
         } else if roles[i].contains(&BlockKind::CurrentMirror) || s.origin == analog::intent::Origin::SharedBias {
             class::SetRole::BiasMirror
         } else {
@@ -306,7 +332,7 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         let s = &mut intent.sets[i];
         (s.class, s.class_source, s.style) = (c, src, class::style_of(c, s.kind, shares_source));
         let ids: Vec<DeviceId> = s.members.iter().map(|m| m.device).collect();
-        if let Ok((u, units)) = sets::unitize(&ids, &drawn, netlist.devices[ids[0].0 as usize].kind, c, &cfg.process.unit) {
+        if let Ok((u, units)) = sets::unitize_set(&ids, &passive_sets, &drawn, netlist.devices[ids[0].0 as usize].kind, c, &cfg.process.unit) {
             s.unit = Some(u);
             for (m, (p, ser)) in s.members.iter_mut().zip(units) {
                 (m.parallel, m.series) = (p, ser);

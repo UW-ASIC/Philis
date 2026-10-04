@@ -35,7 +35,7 @@ pub struct ClassCtx<'a> {
 /// kinds of the leaves whose both devices are in the set.
 #[must_use]
 pub fn kind_of(set: &MatchSpec, leaf_kinds: &[BlockKind], dk: DeviceKind) -> MatchKind {
-    let bjt_ratio = matches!(set.origin, analog::intent::Origin::Pattern { template: "bjt_ratioed_pair" | "bjt_diff_pair" });
+    let bjt_ratio = matches!(set.origin, analog::intent::Origin::Pattern { template } if template.starts_with("bjt_ratioed_pair") || template.starts_with("bjt_diff_pair"));
     if matches!(dk, DeviceKind::Resistor | DeviceKind::Capacitor) {
         MatchKind::Ratio
     } else if leaf_kinds.contains(&BlockKind::DiffPair) || bjt_ratio {

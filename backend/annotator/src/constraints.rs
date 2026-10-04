@@ -1,7 +1,7 @@
 //! Cell-tier [`analog::Constraints`], read by `cells` when drawing devices.
 //!
-//! One **Unitization** per matched set (EXT-15) that has a unit and one finger
-//! W and L over its members: members, ratio reduced by the gcd, dummies from the
+//! One **Unitization** per matched set (EXT-15) with one finger W and L over
+//! its members (deck-independent: the inferred unit is not drawn): members, ratio reduced by the gcd, dummies from the
 //! class (MOS, R and C only, card D-g). Drawn in schematic fingers (`dev_nf` =
 //! `nf·m`, `unit_w` = W_f), not the set's inferred unit (`MatchSpec::unit`,
 //! `Member::parallel`/`series`): the LVS reference expands `nf·m` fingers of
@@ -59,22 +59,32 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block], sets: &[Ma
         // Drawn in schematic fingers (see the module doc): one common finger W and L.
         let d0 = drawn[s.members[0].device.0 as usize];
         let same = s.members.iter().all(|m| (drawn[m.device.0 as usize].w_finger_nm, drawn[m.device.0 as usize].l_nm) == (d0.w_finger_nm, d0.l_nm));
-        if s.unit.is_none() || !same {
+        if !same {
             continue;
         }
         let kind = netlist.devices[s.members[0].device.0 as usize].kind;
+        let nf = |d: DeviceId| drawn[d.0 as usize].fingers.min(u32::from(u16::MAX)) as u16;
+        // A bank or bipolar array lists its members as cellgen did: by count, the
+        // reference (a terminating unit) first among equals, then by id.
+        let mut members: Vec<DeviceId> = s.members.iter().map(|m| m.device).collect();
+        if !matches!(kind, DeviceKind::Nmos | DeviceKind::Pmos) {
+            let r = s.reference.map(|i| s.members[i].device);
+            members.sort_by_key(|&d| (nf(d), Some(d) != r, d.0));
+        }
         // `nf·m` for a MOS, `m` otherwise (`Drawn::fingers`).
-        let dev_nf: Vec<u16> = s.members.iter().map(|m| drawn[m.device.0 as usize].fingers.min(u32::from(u16::MAX)) as u16).collect();
+        let dev_nf: Vec<u16> = members.iter().map(|&d| nf(d)).collect();
         let g = dev_nf.iter().fold(0, |a, &b| gcd(a, b)).max(1);
-        s.members.iter().for_each(|m| covered[m.device.0 as usize] = true);
+        members.iter().for_each(|d| covered[d.0 as usize] = true);
         c.unitization.push(Unitization {
-            devices: s.members.iter().map(|m| m.device).collect(),
+            devices: members,
             device_type: kind,
             target_ratio: dev_nf.iter().map(|&n| n / g).collect(),
             dev_nf,
             unit_w: clamp(d0.w_finger_nm),
             unit_l: clamp(d0.l_nm),
-            series_parallel: series_parallel(kind),
+            // A set's units are in parallel (`m` capacitors are `m` plates); a
+            // resistor set with series units falls back above (one finger L).
+            series_parallel: SeriesParallel::Parallel,
             same_variant_required: true,
             dummy_required: dummy_required(kind, s.class),
             route_matching_required: s.kind != MatchKind::Ratio || s.class >= MatchClass::Moderate,

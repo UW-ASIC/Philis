@@ -1,4 +1,4 @@
-//! Recognition corpus (EXT-01, plan-01 T2/T3/T4/T6/T7): 17 circuits plus 3
+//! Recognition corpus (EXT-01, plan-01 T2/T3/T4/T6/T7): 18 circuits plus 3
 //! negative-only ones, each with the leaves and [`Canon`] the annotator gives **today**. The
 //! expectations characterise, they do not endorse: each later EXT item edits the
 //! rows it changes in the same commit, so its diff shows exactly what moved.
@@ -12,7 +12,7 @@ use common::{canon, canon_leaves, Canon, id_pairs, net, permute, strongarm_cfg, 
 
 /// `(name, netlist)`: repository fixtures transcribed without `.subckt`, then
 /// constructed circuits (exact text of plan-01 EXT-01).
-pub const CIRCUITS: [(&str, &str); 17] = [
+pub const CIRCUITS: [(&str, &str); 18] = [
     // backend/annotator/src/tests.rs `ota()`.
     ("ota5t", "XM1 vout1 vinp vtail VSS nfet w=10u l=1u | XM2 vout2 vinm vtail VSS nfet w=10u l=1u
                XM3 vout1 vbias VDD VDD pfet w=20u l=1u | XM4 vout2 vbias VDD VDD pfet w=20u l=1u
@@ -62,6 +62,9 @@ pub const CIRCUITS: [(&str, &str); 17] = [
     ("splitdac", "C0 tl VSS cap w=3u l=3u m=1 | C1 tl b0 cap w=3u l=3u m=1 | C2 tl b1 cap w=3u l=3u m=2
                   C3 tm b2 cap w=3u l=3u m=1 | C4 tm b3 cap w=3u l=3u m=2 | CA tl tm cap w=3u l=4u m=1"),
     ("strongarm", STRONGARM),
+    // EXT-19 step 5: a source-degenerated diff pair (M1 regression note).
+    ("degen_pair", "M1 o1 inp s1 VSS nfet w=4u l=0.5u | M2 o2 inn s2 VSS nfet w=4u l=0.5u | R1 s1 tail rpoly w=2u l=10u
+                    R2 s2 tail rpoly w=2u l=10u | M0 tail vb VSS VSS nfet w=8u l=0.5u"),
 ];
 
 /// Negative circuits: nothing in them should be matched (T3). `bjt_mirror` is
@@ -85,7 +88,7 @@ fn all() -> impl Iterator<Item = (&'static str, &'static str)> {
 type Row = (&'static str, &'static [(&'static str, &'static [&'static str])], &'static [(&'static str, &'static str)], &'static [&'static str], &'static [(&'static str, &'static str)], usize, &'static [Set]);
 /// `(members (name, parallel, series), kind, class)`.
 type Set = (&'static [(&'static str, u16, u16)], &'static str, &'static str);
-const EXPECTED: [Row; 17] = [
+const EXPECTED: [Row; 18] = [
     // EXT-05: declared roles: five_transistor_ota's slots 2,3 are a Load.
     // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
@@ -95,8 +98,11 @@ const EXPECTED: [Row; 17] = [
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
     ("three_stage", &[("DiffPair", &["M1", "M2"]), ("Group", &["M6", "M8", "M9"]), ("Load", &["M4", "M5"])], &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Voltage", "Moderate"), (&[("M3", 4, 1), ("M7", 3, 1), ("M9", 10, 1)], "Current", "Minimal"), (&[("M4", 1, 1), ("M5", 1, 1)], "Current", "Moderate")]),
     // EXT-05 review: `cmos_inverter`'s declared prox makes each switch inverter a Stack leaf.
-    ("dac4", &[("Stack", &["XMN0", "XMP0"]), ("Stack", &["XMN1", "XMP1"]), ("Stack", &["XMN2", "XMP2"]), ("Stack", &["XMN3", "XMP3"])], &[], &[], &[], 0, &[]),
-    ("bgr_core", &[], &[], &[], &[], 0, &[]),
+    // EXT-19: the capacitor bank is one binary DacBank set, Exceptional Ratio.
+    ("dac4", &[("Stack", &["XMN0", "XMP0"]), ("Stack", &["XMN1", "XMP1"]), ("Stack", &["XMN2", "XMP2"]), ("Stack", &["XMN3", "XMP3"])], &[], &[], &[], 0, &[(&[("XC0", 1, 1), ("XC1", 1, 1), ("XC2", 2, 1), ("XC3", 4, 1), ("XC4", 8, 1)], "Ratio", "Exceptional")]),
+    // EXT-19: bjt_ratioed_pair (a CurrentMirror leaf, so its hard Symmetry too); the set is
+    // Voltage (ΔV_BE) Moderate (BandgapCore).
+    ("bgr_core", &[("CurrentMirror", &["XQ1", "XQ2"])], &[("XQ1", "XQ2")], &[], &[], 1, &[(&[("XQ1", 1, 1), ("XQ2", 8, 1)], "Voltage", "Moderate")]),
     ("bjt_mirror", &[], &[], &[], &[], 0, &[]),
     // EXT-05: series_stack_4 declares no roles, so no re-searched Stack children.
     ("chain4", &[("Group", &["XM1", "XM2", "XM3", "XM4"])], &[], &[], &[], 0, &[]),
@@ -136,9 +142,13 @@ const EXPECTED: [Row; 17] = [
     ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO3", "MR"]), ("CurrentMirror", &["MO5", "MR"]), ("CurrentMirror", &["MO2", "MO4"])], &[("MO1", "MR"), ("MO2", "MO4")], &[], &[], 2, &[(&[("MO1", 1, 1), ("MO2", 2, 1), ("MO3", 1, 1), ("MO4", 4, 1), ("MO5", 1, 1), ("MR", 1, 1)], "Current", "Minimal")]),
     // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
-    ("brokaw", &[("CurrentMirror", &["MP1", "MP2"])], &[("MP1", "MP2")], &[], &[], 1, &[(&[("MP1", 1, 1), ("MP2", 1, 1)], "Current", "Minimal")]),
-    ("rdiv", &[], &[], &[], &[], 0, &[]),
-    ("splitdac", &[], &[], &[], &[], 0, &[]),
+    // EXT-19: Q1/Q2 ratioed pair (Voltage Moderate) and the bandgap resistors R1:R2 = 4:1 in
+    // series units of 20 µm (Ratio Moderate).
+    ("brokaw", &[("CurrentMirror", &["MP1", "MP2"]), ("CurrentMirror", &["Q1", "Q2"])], &[("MP1", "MP2"), ("Q1", "Q2")], &[], &[], 2, &[(&[("MP1", 1, 1), ("MP2", 1, 1)], "Current", "Minimal"), (&[("Q1", 1, 1), ("Q2", 8, 1)], "Voltage", "Moderate"), (&[("R1", 1, 4), ("R2", 1, 1)], "Ratio", "Moderate")]),
+    // EXT-19: the divider is one FeedbackRatio set, RB four 10 µm series units.
+    ("rdiv", &[], &[], &[], &[], 0, &[(&[("RA", 1, 1), ("RB", 1, 4)], "Ratio", "Moderate")]),
+    // EXT-19: both banks and the bridge CA are one split_dac set (CA outside the unit).
+    ("splitdac", &[], &[], &[], &[], 0, &[(&[("C0", 1, 1), ("C1", 1, 1), ("C2", 2, 1), ("C3", 1, 1), ("C4", 2, 1), ("CA", 1, 1)], "Ratio", "Exceptional")]),
     // EXT-05: five_transistor_ota's roles (0,1,DiffPair), (2,3,Load), self 4 (mn0,
     // not mp8); cross_coupled_inverters' pairs; complementary_diff_pair's sources must be a
     // signal, so the output inverters no longer match it and mp9/mp10 join
@@ -150,6 +160,9 @@ const EXPECTED: [Row; 17] = [
     // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
     ("strongarm", &[("DiffPair", &["mn1", "mn2"]), ("DiffPair", &["mn3", "mn4"]), ("DiffPair", &["mp5", "mp6"]), ("Group", &["mn13", "mp10", "mp11"]), ("Group", &["mn14", "mp12", "mp9"]), ("Load", &["mp7", "mp8"]), ("Stack", &["mn3", "mp5"]), ("Stack", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mn3", "mn4"), ("mp5", "mp6"), ("mp7", "mp8")], &["mn0"], &[("vin_d", "vip_d"), ("vin_o", "vip_o")], 2, &[(&[("mn1", 2, 1), ("mn2", 2, 1)], "Voltage", "Moderate"), (&[("mn13", 1, 1), ("mn14", 1, 1)], "Current", "Minimal"), (&[("mn3", 1, 1), ("mn4", 1, 1)], "Voltage", "Moderate"), (&[("mp10", 1, 1), ("mp7", 1, 1), ("mp8", 1, 1), ("mp9", 1, 1)], "Current", "Moderate"), (&[("mp11", 1, 1), ("mp12", 1, 1), ("mp5", 4, 1), ("mp6", 4, 1)], "Voltage", "Moderate")]),
+    // EXT-19 step 5: the degenerated pair is a DiffPair (`passive::degenerated_pairs`), its
+    // resistors one degeneration Ratio set (Moderate, the pair's role).
+    ("degen_pair", &[("DiffPair", &["M1", "M2"])], &[("M1", "M2")], &[], &[("o1", "o2")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Voltage", "Moderate"), (&[("R1", 1, 1), ("R2", 1, 1)], "Ratio", "Moderate")]),
 ];
 
 #[test]
@@ -384,7 +397,7 @@ fn ids_survive_permutation() {
 /// EXT-14 compounds, exact, on [`common::canon_intent`]: `(name, pairs, selfs,
 /// net_pairs, axes)`; every circuit not listed has none.
 type CompoundRow = (&'static str, &'static [(&'static str, &'static str)], &'static [&'static str], &'static [(&'static str, &'static str)], usize);
-const COMPOUNDS: [CompoundRow; 7] = [
+const COMPOUNDS: [CompoundRow; 8] = [
     ("ota5t", &[("XM1", "XM2"), ("XM3", "XM4")], &["XM5"], &[("vinm", "vinp"), ("vout1", "vout2")], 1),
     ("folded", &[("M1", "M2"), ("M3", "M4"), ("M5", "M6"), ("M7", "M8"), ("M10", "M9")], &["M0"], &[("vinn", "vinp"), ("x1", "x2"), ("o1", "out"), ("y1", "y2")], 1),
     ("gilbert", &[("M1", "M2"), ("M3", "M6"), ("M4", "M5")], &["M0"], &[("rfn", "rfp"), ("x1", "x2"), ("outn", "outp")], 1),
@@ -392,6 +405,8 @@ const COMPOUNDS: [CompoundRow; 7] = [
     ("latch", &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("q", "qb")], 1),
     ("three_stage", &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2"), ("vin_n", "vin_p")], 1),
     // T1's circuit: align_gold checks it against the ALIGN gold.
+    // EXT-19: the degeneration resistors mirror through s1/s2; the tail M0 is on the axis.
+    ("degen_pair", &[("M1", "M2"), ("R1", "R2")], &["M0"], &[("inn", "inp"), ("o1", "o2"), ("s1", "s2")], 1),
     ("strongarm", &[("mn1", "mn2"), ("mn3", "mn4"), ("mp5", "mp6"), ("mp7", "mp8"), ("mp10", "mp9"), ("mp11", "mp12"), ("mn13", "mn14")], &["mn0"], &[("vin", "vip"), ("vin_d", "vip_d"), ("vin_o", "vip_o"), ("von", "vop")], 1),
 ];
 
@@ -474,5 +489,38 @@ fn class_sources() {
     for s in &p.intent.sets {
         let want = if s.kind == analog::intent::MatchKind::Voltage { analog::intent::ClassSource::Spec } else { analog::intent::ClassSource::Role };
         assert_eq!((s.class_source, s.class), (want, analog::intent::MatchClass::Moderate), "{s:?}");
+    }
+}
+
+/// EXT-19: the split DAC's bridge is checked against `(C_T^LSB/C_T^MSB)·C_u`
+/// (4/3 of the 9 µm² unit = 3×4 µm): exact gives no diagnostic, `l=5u` gives one.
+#[test]
+fn split_dac_bridge_value() {
+    let bridge = |p: &annotator::Problem| p.intent.diagnostics.iter().any(|d| d.kind == "bridge_cap_value");
+    let p = annotate(&net(src("splitdac")), &cfg("splitdac"));
+    assert!(!bridge(&p), "{:?}", p.intent.diagnostics);
+    assert!(matches!(p.intent.sets[0].origin, analog::intent::Origin::PassiveSet { rule: "split_dac" }));
+    let p = annotate(&net(&src("splitdac").replace("CA tl tm cap w=3u l=4u", "CA tl tm cap w=3u l=5u")), &cfg("splitdac"));
+    assert!(bridge(&p), "{:?}", p.intent.diagnostics);
+}
+
+/// EXT-19 step 4 gate: every device cellgen's deleted `dac_banks`, `bjt_groups`
+/// and `parallel_groups` grouped on the bench fixtures is in one annotator
+/// Unitization with cellgen's counts and flags.
+#[test]
+fn annotator_covers_cellgen_groups() {
+    let cases: [(&str, &[&str], &[u16], bool, bool); 4] = [
+        ("dac4", &["XC0", "XC1", "XC2", "XC3", "XC4"], &[1, 1, 2, 4, 8], true, true),
+        ("bgr_core", &["XQ1", "XQ2"], &[1, 8], false, true),
+        ("pair", &["XM1", "XM2"], &[1, 1], false, false),
+        ("quad", &["XM1", "XM2", "XM3", "XM4"], &[1, 1, 1, 1], false, false),
+    ];
+    for (name, devs, nf, dummy, route) in cases {
+        let nl = net(src(name));
+        let p = annotate(&nl, &cfg(name));
+        let id = |n: &str| nl.devices.iter().position(|d| d.name == n).unwrap() as u16;
+        let u = p.constraints.unitization.iter().find(|u| u.devices.iter().any(|d| d.0 == id(devs[0]))).unwrap_or_else(|| panic!("{name}: uncovered"));
+        let names: Vec<&str> = u.devices.iter().map(|d| nl.devices[d.0 as usize].name.as_str()).collect();
+        assert_eq!((names.as_slice(), u.dev_nf.as_slice(), u.dummy_required, u.route_matching_required), (devs, nf, dummy, route), "{name}");
     }
 }

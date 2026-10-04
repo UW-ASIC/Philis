@@ -179,17 +179,21 @@ pub fn unitize(members: &[DeviceId], drawn: &[Drawn], kind: DeviceKind, class: M
 /// passive groups arrive as `MatchBlock` stars), split by `(kind, model)` with a
 /// `mixed_kind_set` diagnostic; singletons and inductors dropped. Ordered by their
 /// members' smallest canonical label; members in canonical order. `origin` is
-/// `SharedBias` when the set holds a whole shared group, else the first of
-/// `leaves` (`block::leaves`) inside it, else its first compound's seed.
+/// `SharedBias` when the set holds a whole shared group, else `PassiveSet` of
+/// the first passive set inside it (EXT-19), else the first of `leaves`
+/// (`block::leaves`) inside it, else its first compound's seed. A split DAC's
+/// bridge is left out of the unit (it gets `(1, 1)`).
 /// `kind` is interim (Ratio for R/C, Current otherwise; EXT-16 infers it), class
 /// Moderate by Role. Card departure: `leaves` and `canon` are extra arguments
-/// (the template and the canonical order need them).
+/// (the template and the canonical order need them), and `passive` replaces
+/// nothing (its groups also arrive as `reqs` stars) but names their origin.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn matched_sets(
     reqs: &[Req],
     compounds: &[Compound],
     shared: &[Vec<DeviceId>],
+    passive: &[crate::passive::PassiveSet],
     leaves: &[&Block],
     canon: &[u64],
     drawn: &[Drawn],
@@ -259,12 +263,14 @@ pub fn matched_sets(
             let has = |d: &DeviceId| g.contains(&(d.0 as usize));
             let origin = if shared.iter().any(|s| s.iter().all(has)) {
                 Origin::SharedBias
+            } else if let Some(p) = passive.iter().find(|p| p.devices.iter().all(has)) {
+                Origin::PassiveSet { rule: p.rule }
             } else if let Some(b) = leaves.iter().find(|b| b.devices.iter().all(has)) {
                 Origin::Pattern { template: b.template }
             } else {
                 Origin::Symmetry { seed: ConstraintId(u32::from(g.iter().find_map(|&d| comp_of[d]).unwrap_or(0))) }
             };
-            let (unit, units) = match unitize(&ids, drawn, kind, MatchClass::Moderate, deck) {
+            let (unit, units) = match unitize_set(&ids, passive, drawn, kind, MatchClass::Moderate, deck) {
                 Ok((u, units)) => (Some(u), units),
                 Err(e) => {
                     diags.push(e);
@@ -272,11 +278,12 @@ pub fn matched_sets(
                 }
             };
             let diodes: Vec<usize> = (0..g.len()).filter(|&j| fet(kind) && diode(hg, g[j])).collect();
+            let bank_ref = passive.iter().filter(|p| p.devices.iter().all(has)).find_map(|p| p.reference).and_then(|r| g.iter().position(|&d| d == r.0 as usize));
             MatchSpec {
                 id: ConstraintId(i as u32),
                 origin,
                 members: g.iter().zip(&units).map(|(&d, &(parallel, series))| Member { device: DeviceId(d as u16), parallel, series, half: half[d] }).collect(),
-                reference: (diodes.len() == 1).then(|| diodes[0]),
+                reference: bank_ref.or((diodes.len() == 1).then(|| diodes[0])),
                 family: Family::of(kind).expect("inductors dropped above"),
                 kind: if matches!(kind, DeviceKind::Resistor | DeviceKind::Capacitor) { MatchKind::Ratio } else { MatchKind::Current },
                 class: MatchClass::Moderate,
@@ -289,6 +296,18 @@ pub fn matched_sets(
             }
         })
         .collect()
+}
+
+/// [`unitize`] over `members` less any split-DAC bridge, which gets `(1, 1)`.
+///
+/// # Errors
+/// As [`unitize`].
+pub fn unitize_set(members: &[DeviceId], passive: &[crate::passive::PassiveSet], drawn: &[Drawn], kind: DeviceKind, class: MatchClass, deck: &UnitDeck) -> Result<(UnitGeom, Vec<(u16, u16)>), Diagnostic> {
+    let bridge = |d: &DeviceId| passive.iter().any(|p| p.bridge == Some(*d));
+    let core: Vec<DeviceId> = members.iter().copied().filter(|d| !bridge(d)).collect();
+    let (u, units) = unitize(&core, drawn, kind, class, deck)?;
+    let mut it = units.into_iter();
+    Ok((u, members.iter().map(|d| if bridge(d) { (1, 1) } else { it.next().unwrap_or((1, 1)) }).collect()))
 }
 
 /// Nested symmetry (EXT-14 step 8): `(i, j)`, `i < j`, on the compound whose
