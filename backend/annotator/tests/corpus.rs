@@ -199,6 +199,23 @@ fn permutation_invariance() {
     }
 }
 
+/// T4 on the HSMPG tree (EXT-13): rendered by name, it is the same under permutation.
+#[test]
+fn tree_is_permutation_invariant() {
+    let tree = |nl: &pnr_core::Netlist, name: &str| {
+        let names: Vec<&str> = nl.devices.iter().map(|d| d.name.as_str()).collect();
+        annotator::graph::render(&annotate(nl, &cfg(name)).intent.tree, &names)
+    };
+    for (name, src) in CIRCUITS {
+        let nl = net(src);
+        let base = tree(&nl, name);
+        assert!(base.starts_with("Root{"), "{name}: {base}");
+        for seed in 1..=3 {
+            assert_eq!(tree(&permute(&nl, seed), name), base, "{name} seed {seed}");
+        }
+    }
+}
+
 /// T6 over the emitted placement arms of `name`: the unordered device pairs
 /// carrying both a `Proximity` and an `Isolation`, and the devices in more
 /// than one hard `Symmetry` entry (two pairs, or two axes). Both empty is T6.

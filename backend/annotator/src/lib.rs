@@ -12,6 +12,7 @@ pub mod classify;
 pub mod constraints;
 pub mod emit;
 pub mod extract;
+pub mod graph;
 pub mod ir;
 pub mod netrole;
 pub mod pattern;
@@ -248,7 +249,9 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         })
         .collect();
 
-    let intent = analog::intent::Intent::default();
+    let mut intent = analog::intent::Intent::default();
+    let reqs = graph::requirements(&all, &[], &[], &[], &hg, &net_classes, &canon, &cfg.policy);
+    intent.tree = graph::hsmpg(netlist.devices.len(), &reqs, &canon);
     Problem {
         intent,
         axis_count: blocks.len(),

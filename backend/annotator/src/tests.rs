@@ -50,6 +50,27 @@ pub(crate) fn ota() -> Netlist {
     }
 }
 
+/// The three-stage op-amp (`examples/three_stage_opamp`, corpus `three_stage`).
+pub(crate) fn three_stage() -> Netlist {
+    // Nets: 0=n1 1=vin_p 2=tail 3=vss 4=n2 5=vin_n 6=vbias 7=vdd 8=n3 9=vout.
+    let (n, p) = (DeviceKind::Nmos, DeviceKind::Pmos);
+    Netlist {
+        devices: vec![
+            fet("M1", n, 1, 0, 2, 3, 4_000, 500),
+            fet("M2", n, 5, 4, 2, 3, 4_000, 500),
+            fet("M3", n, 6, 2, 3, 3, 8_000, 500),
+            fet("M4", p, 0, 0, 7, 7, 6_000, 500),
+            fet("M5", p, 0, 4, 7, 7, 6_000, 500),
+            fet("M6", p, 4, 8, 7, 7, 12_000, 500),
+            fet("M7", n, 6, 8, 3, 3, 6_000, 500),
+            fet("M8", p, 8, 9, 7, 7, 40_000, 500),
+            fet("M9", n, 6, 9, 3, 3, 20_000, 500),
+        ],
+        nets: nets(&["n1", "vin_p", "tail", "vss", "n2", "vin_n", "vbias", "vdd", "n3", "vout"]),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn diff_pair_halves_share_a_block() {
     let nl = ota();
