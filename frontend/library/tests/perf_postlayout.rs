@@ -435,3 +435,32 @@ fn every_mos_card_has_four_nodes() {
         assert!(bulk.eq_ignore_ascii_case(rail), "{t:?}");
     }
 }
+
+/// PERF-13 acceptance: the winner's metadata carries σ_f, β, Φ(β) and the
+/// top three contributing devices per bound, and a linear joint yield.
+#[test]
+fn ota_reports_robustness_per_bound() {
+    let Some(lib) = models() else { return };
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
+    let p = PerfConfig { scenarios: vec![scenario("tt_27", "tt", 27.0)], ..cfg(lib.clone()) };
+    let c = library::Config {
+        feedback_iters: 2,
+        outer_iters: 1,
+        starts: 1,
+        op: Some(OpConfig { model_lib: Some(lib), ..OpConfig::default() }),
+        performance: Some(p),
+        ..library::Config::default()
+    };
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &c).expect("flow");
+    let r = &sol.metadata.robustness;
+    eprintln!("{r:#?}");
+    let bounds: Vec<&String> = r.iter().filter(|l| !l.starts_with("joint yield")).collect();
+    assert_eq!(bounds.len(), 1, "{r:?}");
+    let l = bounds[0];
+    assert!(l.starts_with("gain:min σ_f ") && l.contains(" β ") && l.contains(" Φ(β) "), "{l}");
+    let top = l.split(" top ").nth(1).expect("top devices");
+    assert_eq!(top.split(", ").filter(|d| d.starts_with('X') || d.starts_with('M')).count(), 3, "{l}");
+    assert!(r.iter().any(|l| l.starts_with("joint yield")), "{r:?}");
+}

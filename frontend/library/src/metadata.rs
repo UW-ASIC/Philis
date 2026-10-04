@@ -105,6 +105,11 @@ pub struct MetadataReport {
     /// {param:?}"` per row whose two difference quotients disagree. Empty from
     /// [`build`]; the flow fills it.
     pub sensitivity: Vec<String>,
+    /// Per finite spec bound of the winner (PERF-13): `"{metric}:{min|max} σ_f
+    /// … β … Φ(β) … (V_T only) top {device} {pct}%, …"`, or `"…: UNKNOWN (no
+    /// A_VT)"`, then `"joint yield (linear, 1e5) …"`. Empty without
+    /// performance scoring.
+    pub robustness: Vec<String>,
     /// Post-layout simulations that could not run ([`crate::RunStats::sim_failures`]).
     pub sim_failures: u32,
     /// One ledger row per matched pair on the placed layout, from the
@@ -285,6 +290,7 @@ pub fn build(
         performance_worst: Vec::new(),
         budget_rows: Vec::new(),
         sensitivity: Vec::new(),
+        robustness: Vec::new(),
         sim_failures: 0,
         matched,
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
@@ -372,6 +378,9 @@ impl std::fmt::Display for MetadataReport {
             }
             for w in &self.performance_worst {
                 writeln!(f, "  worst {w}")?;
+            }
+            for r in &self.robustness {
+                writeln!(f, "  robust {r}")?;
             }
             writeln!(f, "  simulations failed: {}", self.sim_failures)?;
         }

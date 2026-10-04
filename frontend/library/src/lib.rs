@@ -24,6 +24,7 @@ pub mod metadata;
 /// DC operating point via ngspice — the per-device power the thermal rules need.
 pub mod oppoint;
 pub mod perf;
+pub mod robust;
 
 /// Test gates for external tools (FLOW-14), shared by the unit and
 /// integration tests: a missing tool skips with a printed reason, and under
@@ -339,7 +340,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 /// table (PERF-11), noted in [`PerfPlan::sens`].
 fn performance_rows(netlist: &pnr_core::Netlist, pdk: &Pdk, cfg: &Config) -> PerfPlan {
     use analog::metadata::NetClass;
-    let plan = |rows, notes, active| PerfPlan { rows, notes, active, tables: Vec::new(), sens: Vec::new(), sims: 0 };
+    let plan = |rows, notes, active| PerfPlan { rows, notes, active, tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0 };
     let Some(p) = &cfg.performance else { return plan(Vec::new(), Vec::new(), vec![0]) };
     let all: Vec<usize> = (0..p.scenarios().len()).collect();
     let bounds = || {
@@ -383,6 +384,7 @@ fn performance_rows(netlist: &pnr_core::Netlist, pdk: &Pdk, cfg: &Config) -> Per
         .collect();
     let steps = perf::StepPolicy { gate_af_um2: ann.process.gate_af_per_um2.map_or(0.0, f64::from), ..Default::default() };
     let params = perf::default_params(netlist, &nets);
+    let sigma_v = robust::device_sigma_v(netlist, ann.process.avt_mv_um);
     let names = p.scenarios();
     let sens = perf::evaluate(netlist, &perf::Parasitics::default(), p, &all).and_then(|start| {
         let mut active = vec![0];
@@ -395,7 +397,7 @@ fn performance_rows(netlist: &pnr_core::Netlist, pdk: &Pdk, cfg: &Config) -> Per
         let mut tables = Vec::new();
         for &s in &active {
             let t0 = std::time::Instant::now();
-            let mut t = perf::sensitivities(netlist, p, s, &params, &vec![None; netlist.devices.len()], &steps, &perf::Parasitics::default())?;
+            let mut t = perf::sensitivities(netlist, p, s, &params, &sigma_v, &steps, &perf::Parasitics::default())?;
             perf::add_coupling(&mut t, netlist, p, &nets, &steps, 64)?;
             let name = &names[s].name;
             sens_notes.push(format!("{name}: {} rows, {} sims, {} ms", t.rows.len(), t.sims, t0.elapsed().as_millis()));
@@ -411,7 +413,7 @@ fn performance_rows(netlist: &pnr_core::Netlist, pdk: &Pdk, cfg: &Config) -> Per
             out.extend(notes(&rows, "not measured at the schematic"));
             sens_notes.iter().for_each(|n| eprintln!("[perf] sens {n}"));
             let sims = (all.len() * p.testbenches.len()) as u32 + tables.iter().map(|t| t.sims).sum::<u32>();
-            PerfPlan { rows, notes: out, active, tables, sens: sens_notes, sims }
+            PerfPlan { rows, notes: out, active, tables, sigma_v, sens: sens_notes, sims }
         }
         Err(e) => {
             let mut out = scenario_notes(&all);
@@ -431,8 +433,10 @@ struct PerfPlan {
     /// Scenarios each scored epoch is simulated at.
     active: Vec<usize>,
     /// One sensitivity table per active scenario, in `active` order.
-    #[allow(dead_code)] // read by PERF-13
     tables: Vec<perf::SensTable>,
+    /// Per device random V_T σ, V ([`robust::device_sigma_v`]); the gate
+    /// offset step of the tables.
+    sigma_v: Vec<Option<f64>>,
     /// [`metadata::MetadataReport::sensitivity`].
     sens: Vec<String>,
     /// ngspice decks run on the schematic.
@@ -713,6 +717,21 @@ fn solve(
             })
             .collect();
         metadata.sim_failures = stats.sim_failures;
+        // ponytail: no systematic/gradient terms; MAT's per-pair ledger is not
+        // exported at the winner yet.
+        let stats = robust::bound_stats(&perf.tables, &perf.sigma_v, result, &cfg.specs, &[], &[]);
+        metadata.robustness = stats
+            .iter()
+            .map(|st| {
+                let b = &result.bounds[st.bound];
+                let name = format!("{}:{}", cfg.specs[b.spec].metric, if b.upper { "max" } else { "min" });
+                let (Some(sf), Some(beta), Some(y)) = (st.sigma_f, st.beta, st.yield_part) else { return format!("{name} UNKNOWN (no A_VT)") };
+                let top: Vec<String> = st.shares.iter().map(|&(d, w)| format!("{} {:.0}%", netlist.devices[d as usize].name, w * 100.0)).collect();
+                format!("{name} σ_f {sf:.4e} β {beta:.2} Φ(β) {y:.4} (V_T only) top {}", top.join(", "))
+            })
+            .collect();
+        let y = robust::linear_joint_yield(&perf.tables, &perf.sigma_v, result, &cfg.specs, &[], 100_000, 1);
+        metadata.robustness.push(y.map_or_else(|| "joint yield (linear, 1e5) UNKNOWN".into(), |y| format!("joint yield (linear, 1e5) {y:.4}")));
     }
     let placement = flow.problem.placement;
     let key = best.key;
