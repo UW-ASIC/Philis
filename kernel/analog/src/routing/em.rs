@@ -218,6 +218,14 @@ mod tests {
     use pnr_core::geom::{LayerId, Rect};
     use pnr_core::routes::Terminal;
 
+    /// REL-05: sky130's 90 °C rating with the Cu fallback (0.9 eV, n 1.1)
+    /// allows ≈ 10 % of the current at 125 °C.
+    #[test]
+    fn fallback_derating_at_125c() {
+        let f = derate(398.15, 363.15, 0.9, 1.1);
+        assert!((f - 0.100).abs() <= 0.002, "{f}");
+    }
+
     /// met1 (id 1, 0.125 Ω/□), via (2, 4.5 Ω/cut), met2 (3).
     fn stack() -> &'static Stack {
         let metal = |id| Layer { id, sheet_ohm: 0.125, ..Layer::default() };

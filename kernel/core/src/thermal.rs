@@ -10,10 +10,27 @@ use crate::layout::Layout;
 /// ponytail: one bulk constant, no BEOL/package θ_JA. Gradients between nearby
 /// matched devices (what the rule scores) are far more robust than absolute
 /// rises; read `k` from the PDK when it grows a thermal section.
-const K_SI_W_PER_M_K: f32 = 148.0;
+pub const K_SI_W_PER_M_K: f32 = 148.0;
 
 /// `ΔT[mK] = P[µW]·1e6 / (2π·k·r[nm])`.
 const SCALE_UW_NM_TO_MK: f32 = 1.0e6;
+
+/// Hastings eq. 5.6: the rise of a uniform W×L source over its own area,
+/// `ln(4L/W)·P/(π·k·L)` (L = the longer side), mK. Sides floored at 1 nm.
+#[must_use]
+pub fn self_rise_mc(p_uw: i32, w_nm: i32, l_nm: i32, k_w_per_m_k: f32) -> f32 {
+    let (w, l) = (w_nm.min(l_nm).max(1) as f32, w_nm.max(l_nm).max(1) as f32);
+    (4.0 * l / w).ln() * p_uw as f32 * SCALE_UW_NM_TO_MK / (std::f32::consts::PI * k_w_per_m_k * l)
+}
+
+/// `Σ_j self_rise_mc(p_j, footprint_j)`, mK: no device rises more under
+/// [`rises_mc`], wherever the devices are placed. Each mutual term
+/// `P/(2πk·r)` with `r ≥ L_j/2` is `≤ P/(πk·L_j)`, below eq. 5.6's
+/// `ln(4L/W)·P/(πk·L_j) ≥ ln4·P/(πk·L_j)`.
+#[must_use]
+pub fn rise_bound_mc(p_uw: &[i32], footprint_nm: &[(i32, i32)], k_w_per_m_k: f32) -> f32 {
+    p_uw.iter().zip(footprint_nm).map(|(&p, &(w, l))| self_rise_mc(p, w, l, k_w_per_m_k)).sum()
+}
 
 /// Temperature rise per device, milli-°C. `power_uw[j]` (missing = 0) is
 /// device `j`'s dissipation. O(n²).
@@ -131,6 +148,38 @@ mod tests {
         l.x[2] = -10_000; // onto partner 1's isotherm; temp_mc is now stale
         assert!(live(&l) < 1.0);
         assert!(frozen(&l) > 0, "the frozen field has not moved");
+    }
+
+    /// Hastings §5.1 example: 100 mW over a 25 µm square on k = 130 W/(m·K)
+    /// rises ≈ 13.6 K.
+    #[test]
+    fn hastings_self_heating_example() {
+        let r = self_rise_mc(100_000, 25_000, 25_000, 130.0);
+        assert!((r - 13_600.0).abs() <= 100.0, "{r}");
+    }
+
+    /// 2 × 1 mW on 10 µm squares: bound 2·ln4·1 mW/(π·148·10 µm) ≈ 596 mK,
+    /// and no placement (overlap allowed) rises a device above it.
+    #[test]
+    fn rise_bound_holds_for_any_placement() {
+        let bound = rise_bound_mc(&[1_000, 1_000], &[(10_000, 10_000); 2], K_SI_W_PER_M_K);
+        assert!((bound - 596.0).abs() <= 2.0, "{bound}");
+        let (mut l, _) = bench();
+        l.hw = vec![5_000; 2];
+        l.hh = vec![5_000; 2];
+        l.power_uw = vec![1_000, 1_000];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 33) % 100_001) as i32 - 50_000
+        };
+        for _ in 0..50 {
+            l.x = vec![next(), next()];
+            l.y = vec![next(), next()];
+            for (i, t) in rises_mc(&l, &l.power_uw).into_iter().enumerate() {
+                assert!(t as f32 <= bound, "device {i} at {:?}/{:?}: {t} > {bound}", l.x, l.y);
+            }
+        }
     }
 
     #[test]

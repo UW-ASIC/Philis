@@ -181,6 +181,13 @@ pub struct BiasSummary {
     pub hottest: Option<(String, i32)>,
     /// Synthesised mid-rail probe, not a testbench: never a sign-off bias.
     pub probe: bool,
+    /// Conductor temperature EM limits were derated to, K (REL-05): ambient,
+    /// plus θ_JA·P when given, plus the placement-independent on-die bound.
+    pub em_temp_k: f32,
+    /// Where the derating's Black parameters came from: `"deck"` (the rule,
+    /// or a complete sidecar table), `"sidecar+fallback Ea/n"`, `"none"`
+    /// (limits used as rated); `""` before the flow fills it.
+    pub em_derate: &'static str,
 }
 
 /// Collect budget status for one requirement arm. `arm` tags every row, because
@@ -281,6 +288,8 @@ pub fn build(
         coverage: verify::Coverage::default(),
         recognition: Vec::new(),
         unconstrained: Vec::new(),
+        aging: Vec::new(),
+        voltage_unknown: 0,
     }
 }
 
@@ -288,8 +297,6 @@ impl MetadataReport {
     /// Fold in routing batches built after the fact (on placed pins).
     pub fn add_routing(&mut self, reqs: &[Box<dyn RuleBatch<pnr_core::Routes>>], routes: &pnr_core::Routes) {
         self.routing.extend(statuses(reqs, routes, Arm::Budget));
-        aging: Vec::new(),
-        voltage_unknown: 0,
     }
 }
 
@@ -310,6 +317,9 @@ impl std::fmt::Display for MetadataReport {
                         .map(|(n, p)| format!(" · hottest {n} at {p} µW"))
                         .unwrap_or_default()
                 )?;
+                if !b.em_derate.is_empty() {
+                    writeln!(f, "  EM derated at {:.3} K ({})", b.em_temp_k, b.em_derate)?;
+                }
             }
             None => writeln!(
                 f,
@@ -380,6 +390,10 @@ impl std::fmt::Display for MetadataReport {
             let u: Vec<String> = self.unconstrained.iter().map(|(d, why)| format!("{d} ({why})")).collect();
             writeln!(f, "  UNCONSTRAINED: {}", u.join(", "))?;
         }
+        if self.bias.is_some() {
+            let a: Vec<String> = self.aging.iter().map(|(x, y, ds, gs, bs)| format!("{x}/{y} ΔVds {ds:.1} ΔVgs {gs:.1} ΔVbs {bs:.1} mV")).collect();
+            writeln!(f, "  AGING: {}; voltage rating unknown on {} FET(s)", if a.is_empty() { "no matched pair".into() } else { a.join(", ") }, self.voltage_unknown)?;
+        }
         if !self.assumed.is_empty() {
             writeln!(f, "\n  assumed (UNVERIFIED sidecar values): {}", self.assumed.join(", "))?;
         }
@@ -390,10 +404,6 @@ impl std::fmt::Display for MetadataReport {
             write!(f, "\n{}", self.coverage)?;
         }
         writeln!(f, "\n  certificate: {}", if self.certified() { "all families met, all inputs present" } else { "NOT CERTIFIED" })?;
-        if self.bias.is_some() {
-            let a: Vec<String> = self.aging.iter().map(|(x, y, ds, gs, bs)| format!("{x}/{y} ΔVds {ds:.1} ΔVgs {gs:.1} ΔVbs {bs:.1} mV")).collect();
-            writeln!(f, "  AGING: {}; voltage rating unknown on {} FET(s)", if a.is_empty() { "no matched pair".into() } else { a.join(", ") }, self.voltage_unknown)?;
-        }
         Ok(())
     }
 }
@@ -622,7 +632,7 @@ mod tests {
     /// sign-off certificate.
     #[test]
     fn a_probe_bias_never_certifies() {
-        let probe = BiasSummary { provenance: String::new(), resolved: 0, devices: 0, total_power_uw: 0, hottest: None, probe: true };
+        let probe = BiasSummary { provenance: String::new(), resolved: 0, devices: 0, total_power_uw: 0, hottest: None, probe: true, em_temp_k: 300.15, em_derate: "" };
         let real = BiasSummary { probe: false, ..probe.clone() };
         assert!(!MetadataReport { bias: Some(probe), ..MetadataReport::default() }.certified());
         assert!(MetadataReport { bias: Some(real), ..MetadataReport::default() }.certified());
