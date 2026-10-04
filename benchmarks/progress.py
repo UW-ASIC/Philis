@@ -59,7 +59,7 @@ def chart(hist, path):
     open(path, "w").write("\n".join(out))
 
 
-FEEDBACK = ["ota", "dac4", "bgr_core", "rc_filter", "tq_chain", "pair"]
+FEEDBACK = ["ota", "dac4", "bgr_core", "rc_filter", "pair"]  # tq_chain is ~5x larger; it would flatten the rest
 
 
 def feedback_chart(assets, path):
@@ -141,7 +141,7 @@ def main():
         table.append(f"| {c} | {r['ms']:,} | {r['epochs']} | {nspi:,.0f} | {r['drc']} | {r['lvs']} | {r['erc']} |")
     gallery = "\n\n".join(f"**{c}**\n\n![{c}](docs/progress/layouts/{c}.svg)" for c in shown)
     block = (f"<!-- progress:start -->\n_Last snapshot: {stamp}, branch `{os.environ.get('PROGRESS_BRANCH', 'main')}` at `{sha[:7]}` "
-             f"(`bench local`, sky130, seed 1). Updated automatically by `benchmarks/progress.py`._\n\n"
+             f"(`bench local`, sky130, seed 1). Updated automatically by `benchmarks/progress.py`._\n\n" +
              (f"### Feedback loop\n\n![feedback](docs/progress/feedback.svg)\n\n" if fb else "") +
              f"### Speed\n\n![speed](docs/progress/speed.svg)\n\n" + "\n".join(table) +
              f"\n\n### Sample layouts\n\n{gallery}\n<!-- progress:end -->")

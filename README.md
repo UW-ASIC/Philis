@@ -1,11 +1,15 @@
 # Philis
 
-Constraint-aware analog place-and-route in Rust: SPICE in, placed, routed and signed-off GDS out (`philis run <netlist.sp> sky130 -o out/`). Plans and audits: [docs/plans/00-MASTER-PLAN.md](docs/plans/00-MASTER-PLAN.md).
+Constraint-aware analog place-and-route: SPICE in, placed, routed and signed-off GDS out (`philis run <netlist.sp> sky130 -o out/`).
 
 ## Progress
 
 <!-- progress:start -->
-_Last snapshot: 2026-10-04 13:56, branch `m2` at `b4054b6` (`bench local`, sky130, seed 1). Updated automatically by `benchmarks/progress.py`._
+_Last snapshot: 2026-10-04 14:28, branch `m2 + progress-charts` at `3032483` (`bench local`, sky130, seed 1). Updated automatically by `benchmarks/progress.py`._
+
+### Feedback loop
+
+![feedback](docs/progress/feedback.svg)
 
 ### Speed
 
@@ -13,20 +17,12 @@ _Last snapshot: 2026-10-04 13:56, branch `m2` at `b4054b6` (`bench local`, sky13
 
 | circuit | wall ms | iterations | ns/iter | DRC | LVS | ERC |
 |---|---|---|---|---|---|---|
-| bgr_core | 98,718 | 15 | 6,581,200,000 | 0 | MATCH | 0 |
-| bjt_mirror | 37,464 | 5 | 7,492,800,000 | 0 | MATCH | 0 |
-| chain4 | 25,477 | 5 | 5,095,400,000 | 0 | MATCH | 0 |
-| dac4 | 279,049 | 20 | 13,952,450,000 | 6 | PARTIAL(16) | 1 |
-| dac4_mim | 88,970 | 20 | 4,448,500,000 | 5 | MATCH | 1 |
-| mirror_ratio | 13,613 | 15 | 907,533,333 | 0 | MATCH | 0 |
-| ota | 182,645 | 20 | 9,132,250,000 | 0 | MATCH | 0 |
-| ota_constrained | 117,728 | 20 | 5,886,400,000 | 0 | MATCH | 0 |
-| pair | 4,422 | 5 | 884,400,000 | 0 | MATCH | 0 |
-| quad | 11,372 | 5 | 2,274,400,000 | 0 | MATCH | 0 |
-| rc_filter | 15,319 | 10 | 1,531,900,000 | 0 | MATCH | 0 |
-| res_m2 | 8,319 | 20 | 415,950,000 | 0 | MATCH | 0 |
-| tq_chain | 80,408 | 20 | 4,020,400,000 | 18 | MATCH | 5 |
-| tt_ota | 99,148 | 20 | 4,957,400,000 | 0 | MATCH | 0 |
+| bgr_core | 56,132 | 15 | 3,742,133,333 | 0 | MATCH | 0 |
+| dac4 | 113,905 | 20 | 5,695,250,000 | 7 | PARTIAL(16) | 1 |
+| ota | 344,260 | 20 | 17,213,000,000 | 0 | MATCH | 0 |
+| pair | 14,169 | 5 | 2,833,800,000 | 0 | MATCH | 0 |
+| rc_filter | 14,081 | 10 | 1,408,100,000 | 0 | MATCH | 0 |
+| tq_chain | 155,605 | 20 | 7,780,250,000 | 18 | MATCH | 5 |
 
 ### Sample layouts
 
