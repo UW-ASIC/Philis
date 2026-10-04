@@ -229,6 +229,8 @@ pub struct Solution {
     pub well_layer: Option<LayerId>,
     /// The operating point the run was biased with; `None` without one.
     pub op: Option<oppoint::OpPoint>,
+    /// Schematic devices per cell, indexed like `layout`.
+    pub devices_of: Vec<Vec<DeviceId>>,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -786,6 +788,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
         folds: flow.fold,
         well_layer: pnr_core::Process::layer(pdk, "nwell"),
         op: bias.op.clone(),
+        devices_of: flow.cells.devices_of,
     }
 }
 

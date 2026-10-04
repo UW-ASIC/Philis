@@ -130,7 +130,7 @@ fn cli() -> Result<bool, String> {
         library::run(&spice, &pdk, &Macros::default(), &cfg).map_err(|e| format!("flow: {e:?}"))?;
 
     if let Some(out) = emit_to {
-        let ir = library::emit::emit(&sol.netlist, &sol.layout, &pdk, &cfg)
+        let ir = library::emit::emit_solution(&sol, &pdk)
             .map_err(|e| format!("emit: {e:?}"))?;
         std::fs::write(&out, library::emit::to_rust(&ir))
             .map_err(|e| format!("write {out}: {e}"))?;
