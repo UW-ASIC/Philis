@@ -472,20 +472,16 @@ pub(crate) fn detailed_router(pdk: &Pdk, stack: &RoutingStack) -> dr::DetailedRo
         .zip(stack_above)
         .map(|((&(c, ..), &lo), &hi)| (c, pdk.cut_enclosure(lo, c), pdk.cut_enclosure(hi, c)))
         .collect();
+    cfg.cut_enclosure_pair = all_cuts
+        .iter()
+        .zip(&stack_below)
+        .zip(stack_above)
+        .map(|((&(c, ..), &lo), &hi)| (c, pdk.cut_enclosure_pair(lo, c), pdk.cut_enclosure_pair(hi, c)))
+        .collect();
     cfg.array_spacing = cuts
         .iter()
         .filter_map(|&(c, ..)| pdk.via_array_spacing(c.0).map(|(n, s)| (c, n, s)))
         .collect();
-    // Fatten caps: the deck's `cell.route_signal_width`/`route_supply_width`,
-    // else 2 wire widths for signals and supply just under the stack's widest
-    // wide-metal threshold (4 wire widths when the deck has none).
-    let widest_step = layers
-        .iter()
-        .filter_map(|l| pdk.wide_spacing(l.0).last().map(|&(t, _)| t))
-        .min()
-        .map(|t| t - 2 * pdk.grid);
-    cfg.fat_signal = pnr_core::Process::rule(pdk, "route_signal_width", 2 * cfg.wire_width);
-    cfg.fat_supply = pnr_core::Process::rule(pdk, "route_supply_width", widest_step.unwrap_or(4 * cfg.wire_width));
     // Electrical path cost (gr::Elec): per base-pitch step, ground C at the
     // layer's wire and the lateral C to an occupied neighbour track (one
     // stride over), over the cheapest layer's ground C.

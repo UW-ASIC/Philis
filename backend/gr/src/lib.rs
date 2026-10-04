@@ -176,6 +176,23 @@ pub trait RGraph {
     fn via_halo(&self, a: u32, b: u32, out: &mut Vec<u32>) {
         let _ = (a, b, out);
     }
+    /// Writes the footprint of a `k`-track connection anchored at `n`: its
+    /// `k` across-tracks from `n` toward +, plus `guard` metal-free tracks each
+    /// side where in bounds. `false` when a drawn track falls off the graph.
+    /// Default: `n` alone.
+    fn footprint(&self, n: u32, k: u8, guard: u8, out: &mut Vec<u32>) -> bool {
+        let _ = (k, guard);
+        out.clear();
+        out.push(n);
+        true
+    }
+    /// Appends the corner a via `a`→`b` between a `ka`-track and a `kb`-track
+    /// connection covers, on both layers. `false` when it falls off the graph.
+    /// Default: none.
+    fn via_block(&self, a: u32, b: u32, ka: u8, kb: u8, out: &mut Vec<u32>) -> bool {
+        let _ = (a, b, ka, kb, out);
+        true
+    }
 }
 
 /// Most lattice layers a [`LayerSpec`] table describes.
@@ -381,6 +398,46 @@ impl RGraph for TrackGrid {
         }
         k
     }
+    fn footprint(&self, n: u32, k: u8, guard: u8, out: &mut Vec<u32>) -> bool {
+        out.clear();
+        let (ix, iy, l) = self.ixy(n);
+        let s = i64::from(self.stride(l));
+        let horiz = l % 2 == 0;
+        let (at, lim) = if horiz { (i64::from(iy), i64::from(self.ny)) } else { (i64::from(ix), i64::from(self.nx)) };
+        let (k, guard) = (i64::from(k.max(1)), i64::from(guard));
+        for j in -guard..k + guard {
+            let t = at + j * s;
+            if !(0..lim).contains(&t) {
+                if (0..k).contains(&j) {
+                    return false;
+                }
+                continue;
+            }
+            out.push(if horiz { self.node(ix, t as u32, l) } else { self.node(t as u32, iy, l) });
+        }
+        true
+    }
+    fn via_block(&self, a: u32, b: u32, ka: u8, kb: u8, out: &mut Vec<u32>) -> bool {
+        let (ix, iy, la) = self.ixy(a);
+        let lb = self.ixy(b).2;
+        // The horizontal layer's tracks step y, the vertical one's x.
+        let ((kh, sh), (kv, sv)) = {
+            let (ta, tb) = ((ka.max(1), self.stride(la)), (kb.max(1), self.stride(lb)));
+            if la % 2 == 0 { (ta, tb) } else { (tb, ta) }
+        };
+        for l in [la, lb] {
+            for i in 0..u32::from(kh) {
+                for j in 0..u32::from(kv) {
+                    let (x, y) = (ix + j * sv, iy + i * sh);
+                    if x >= self.nx || y >= self.ny {
+                        return false;
+                    }
+                    out.push(self.node(x, y, l));
+                }
+            }
+        }
+        true
+    }
     fn via_halo(&self, a: u32, b: u32, out: &mut Vec<u32>) {
         for v in [a, b] {
             let h = self.specs.get(self.ixy(v).2 as usize).map_or(0, |s| s.halo_via);
@@ -448,6 +505,10 @@ pub struct RouteHot {
     /// another halo. `halos[net]` is the net's sorted halo set, own metal excluded.
     pub halo: Vec<u16>,
     pub halos: Vec<Vec<u32>>,
+    /// Per net, its sorted, deduped metal footprint (every track of a
+    /// `k`-track connection, its via corners and wide-metal guard tracks):
+    /// what `usage` and `sens` count.
+    pub foot: Vec<Vec<u32>>,
 }
 
 impl RouteHot {
@@ -461,6 +522,7 @@ impl RouteHot {
             sens: Vec::new(),
             halo: vec![0; nodes],
             halos: vec![Vec::new(); nets],
+            foot: vec![Vec::new(); nets],
         }
     }
 
@@ -482,18 +544,24 @@ impl RouteHot {
         self.weight = weight;
     }
 
-    /// Sorted, deduped node ids of `net`'s tree.
+    /// Sorted, deduped node ids of `net`'s footprint ([`RouteHot::foot`]).
     #[must_use]
     pub fn tree_nodes(&self, net: usize) -> Vec<u32> {
-        let mut v: Vec<u32> = self.trees[net].iter().flatten().copied().collect();
-        v.sort_unstable();
-        v.dedup();
-        v
+        self.foot[net].clone()
     }
 
-    /// Replace `net`'s tree and halo set, moving both claims with them. Use
-    /// [`RouteCtx::commit`], which derives `halo` from the graph.
-    pub fn commit(&mut self, net: usize, branches: Vec<Vec<u32>>, halo: Vec<u32>) {
+    /// Replace `net`'s tree, footprint and halo set, moving their claims with
+    /// them; an empty `foot` is the branches' own nodes (one track). Use
+    /// [`RouteCtx::commit`], which derives `foot` and `halo` from the graph.
+    pub fn commit(&mut self, net: usize, branches: Vec<Vec<u32>>, foot: Vec<u32>, halo: Vec<u32>) {
+        let foot = if foot.is_empty() {
+            let mut v: Vec<u32> = branches.iter().flatten().copied().collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        } else {
+            foot
+        };
         for &n in &self.halos[net] {
             self.halo[n as usize] -= 1;
         }
@@ -502,14 +570,15 @@ impl RouteHot {
         }
         self.halos[net] = halo;
         let w = self.weight.get(net).copied().unwrap_or(0.0);
-        for n in self.tree_nodes(net) {
+        for &n in &self.foot[net] {
             self.usage[n as usize] -= 1;
             if w > 0.0 {
                 self.sens[n as usize] -= w;
             }
         }
         self.trees[net] = branches;
-        for n in self.tree_nodes(net) {
+        self.foot[net] = foot;
+        for &n in &self.foot[net] {
             self.usage[n as usize] += 1;
             if w > 0.0 {
                 self.sens[n as usize] += w;
@@ -545,6 +614,10 @@ pub struct RouteCtx<G> {
     /// pair skews it, Razavi Fig. 19.17). Empty = none.
     pub keepout: Vec<u32>,
     pub own_cells: Vec<Vec<u32>>,
+    /// Per net, tracks per layer of its connections, and wide-metal guard
+    /// tracks each side ([`RGraph::footprint`]); empty = 1 track, no guard.
+    pub k: Vec<[u8; MAX_LAYERS]>,
+    pub guard: Vec<[u8; MAX_LAYERS]>,
 }
 
 /// Extra cost of one node over a foreign matched cell, in steps.
@@ -567,28 +640,64 @@ impl<G: RGraph> RouteCtx<G> {
             via_r: Vec::new(),
             keepout: Vec::new(),
             own_cells: Vec::new(),
+            k: Vec::new(),
+            guard: Vec::new(),
         }
     }
 
-    /// Commit `branches` as `net`'s tree with the halo the graph gives them
-    /// (deduped, own metal removed).
+    /// `net`'s tracks and guard tracks per layer.
+    fn k_of(&self, net: usize) -> ([u8; MAX_LAYERS], [u8; MAX_LAYERS]) {
+        (self.k.get(net).copied().unwrap_or([1; MAX_LAYERS]), self.guard.get(net).copied().unwrap_or([0; MAX_LAYERS]))
+    }
+
+    /// Commit `branches` as `net`'s tree with the footprint and halo the
+    /// graph gives them at the net's `k` (deduped; the halo spans every
+    /// track and leaves out the net's own metal).
     pub fn commit(&self, hot: &mut RouteHot, net: usize, branches: Vec<Vec<u32>>) {
+        let (k, guard) = self.k_of(net);
+        let layer = |n: u32| self.graph.pos(n).2 as usize;
+        let mut foot: Vec<u32> = Vec::new();
+        let mut buf = Vec::new();
+        if k.iter().any(|&t| t > 1) || guard.iter().any(|&t| t > 0) {
+            for b in &branches {
+                for (i, &n) in b.iter().enumerate() {
+                    let l = layer(n);
+                    if self.graph.footprint(n, k[l], guard[l], &mut buf) {
+                        foot.extend_from_slice(&buf);
+                    } else {
+                        foot.push(n);
+                    }
+                    if i > 0 && layer(b[i - 1]) != l {
+                        self.graph.via_block(b[i - 1], n, k[layer(b[i - 1])], k[l], &mut foot);
+                    }
+                }
+            }
+            foot.sort_unstable();
+            foot.dedup();
+        }
         let mut halo = Vec::new();
         self.graph.halo_nodes(&branches, &mut halo);
         if !halo.is_empty() {
-            let mut own: Vec<u32> = branches.iter().flatten().copied().collect();
+            if !foot.is_empty() {
+                let raw = std::mem::take(&mut halo);
+                for h in raw {
+                    if self.graph.footprint(h, k[layer(h)], 0, &mut buf) {
+                        halo.extend_from_slice(&buf);
+                    }
+                }
+            }
+            let mut own: Vec<u32> = if foot.is_empty() { branches.iter().flatten().copied().collect() } else { foot.clone() };
             own.sort_unstable();
             halo.sort_unstable();
             halo.dedup();
             halo.retain(|n| own.binary_search(n).is_err());
         }
-        hot.commit(net, branches, halo);
+        hot.commit(net, branches, foot, halo);
     }
 
     /// Route `net` against the current state with an extra per-node `penalty`
     /// (empty = none).
     pub fn reroute(&self, hot: &RouteHot, net: usize, p_fac: f32, penalty: &[f32], dij: &mut Dij) -> Option<Vec<Vec<u32>>> {
-        let old = hot.tree_nodes(net);
         let elec = if self.plain.get(net).copied().unwrap_or(false) {
             Elec::default()
         } else {
@@ -602,10 +711,19 @@ impl<G: RGraph> RouteCtx<G> {
                 via_r: &self.via_r,
             }
         };
-        let (g, t, r) = (&self.graph, &self.terms[net], &self.reserved);
-        let own = self.own_cells.get(net).map_or(&[][..], Vec::as_slice);
-        let halo = (&hot.halo[..], &hot.halos[net][..]);
-        route_net(g, &hot.usage, &hot.hist, &old, halo, t, net as u32, r, penalty, (&self.keepout, own), p_fac, &elec, dij)
+        let (k, guard) = self.k_of(net);
+        let q = NetSearch {
+            net: net as u32,
+            terms: &self.terms[net],
+            k,
+            guard,
+            own: &hot.foot[net],
+            own_halo: &hot.halos[net],
+            penalty,
+            keepout: (&self.keepout, self.own_cells.get(net).map_or(&[][..], Vec::as_slice)),
+            elec,
+        };
+        route_net(&self.graph, hot, &self.reserved, &q, p_fac, dij)
     }
 }
 
@@ -669,30 +787,37 @@ pub struct Elec<'a> {
     pub via_r: &'a [f32],
 }
 
-/// Connect `terms` into a branch tree by repeated multi-source Dijkstra from the
-/// growing tree, targets nearest-first. Node cost is `hist + p_fac·overuse +
-/// penalty + keepout + elec`, where the net's own `old_nodes` do not count as
-/// usage, `halo = (per-node halo count, the net's own halo nodes)` counts as
-/// usage less the net's own ([`RouteHot::over`]), and `keepout = (cell per node, the net's own cells)` charges
-/// [`KEEPOUT_COST`] over any other cell.
-/// `None` if a target is unreachable without entering a node `reserved` for
-/// another net.
-#[allow(clippy::too_many_arguments)]
-pub fn route_net<G: RGraph>(
-    g: &G,
-    usage: &[u16],
-    hist: &[f32],
-    old_nodes: &[u32],
-    halo: (&[u16], &[u32]),
-    terms: &[u32],
-    net: u32,
-    reserved: &[u32],
-    penalty: &[f32],
-    keepout: (&[u32], &[u32]),
-    p_fac: f32,
-    elec: &Elec,
-    dij: &mut Dij,
-) -> Option<Vec<Vec<u32>>> {
+/// One net's search query for [`route_net`].
+pub struct NetSearch<'a> {
+    pub net: u32,
+    /// Terminals; `terms[0]` is the root.
+    pub terms: &'a [u32],
+    /// Tracks per layer, and wide-metal guard tracks each side ([`RGraph::footprint`]).
+    pub k: [u8; MAX_LAYERS],
+    pub guard: [u8; MAX_LAYERS],
+    /// The net's current footprint and halo: neither counts against it.
+    pub own: &'a [u32],
+    pub own_halo: &'a [u32],
+    /// Extra cost per node (empty = none).
+    pub penalty: &'a [f32],
+    /// `(matched cell per node, the net's own cells)`: [`KEEPOUT_COST`] over any other cell.
+    pub keepout: (&'a [u32], &'a [u32]),
+    pub elec: Elec<'a>,
+}
+
+/// Connect `q.terms` into a branch tree by repeated multi-source Dijkstra from
+/// the growing tree, targets nearest-first. A node costs, summed over its
+/// footprint at the layer's `k` ([`RGraph::footprint`]), `hist + p_fac·overuse`,
+/// where the net's own footprint does not count as usage and foreign halos
+/// do ([`RouteHot::over`]); plus `penalty + keepout + elec` of the node
+/// itself. A via edge adds the same over its corner block
+/// ([`RGraph::via_block`]) and `p_fac` per foreign metal node in the halo it
+/// casts. `None` if a target is unreachable without a footprint entering a
+/// node `reserved` for another net or leaving the graph.
+pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSearch, p_fac: f32, dij: &mut Dij) -> Option<Vec<Vec<u32>>> {
+    let (usage, hist, terms, net, elec) = (&hot.usage[..], &hot.hist[..], q.terms, q.net, &q.elec);
+    let halo = (&hot.halo[..], q.own_halo);
+    let (old_nodes, penalty, keepout) = (q.own, q.penalty, q.keepout);
     let Some(&root) = terms.first() else { return Some(Vec::new()) };
     let Dij { dist, prev, seen, stamp, heap, in_tree, is_old, is_old_halo } = dij;
     // `call` marks old/tree membership for this call; each target search bumps
@@ -741,14 +866,45 @@ pub fn route_net<G: RGraph>(
         let r = if elec.current <= 0.0 { 0.0 } else { elec.current * elec.via_r.get(la.min(lb) as usize).copied().unwrap_or(0.0) };
         r + p_fac * crowd as f32
     };
-    let node_cost = |i: usize| -> f32 {
+    // Congestion of one footprint node: `None` when another net holds it.
+    let congestion = |i: usize| -> Option<f32> {
+        if reserved.get(i).is_some_and(|&o| o != NONE && o != net) {
+            return None;
+        }
         // ponytail: a via's own halo is priced (`via`), a run end's is not;
         // the dirty test reroutes whichever net it lands on.
         let foreign_halo = halo.0.get(i).map_or(0, |&h| h.saturating_sub(u16::from(is_old_halo[i] == call)));
         let eff = usage[i].saturating_sub(u16::from(is_old[i] == call)) + foreign_halo;
+        Some(hist[i] + p_fac * f32::from((eff + 1).saturating_sub(cap)))
+    };
+    let wide = q.k.iter().any(|&t| t > 1) || q.guard.iter().any(|&t| t > 0);
+    let mut fp = Vec::new();
+    let mut node_cost = |i: usize| -> Option<f32> {
+        let mut c = if wide {
+            let l = g.pos(i as u32).2 as usize;
+            if !g.footprint(i as u32, q.k[l], q.guard[l], &mut fp) {
+                return None;
+            }
+            fp.iter().try_fold(0.0, |s, &m| Some(s + congestion(m as usize)?))?
+        } else {
+            congestion(i)?
+        };
         let foreign = keepout.0.get(i).is_some_and(|&c| c != NONE && keepout.1.binary_search(&c).is_err());
-        hist[i] + p_fac * f32::from((eff + 1).saturating_sub(cap)) + penalty.get(i).copied().unwrap_or(0.0) + parasitic(i)
-            + if foreign { KEEPOUT_COST } else { 0.0 }
+        c += penalty.get(i).copied().unwrap_or(0.0) + parasitic(i) + if foreign { KEEPOUT_COST } else { 0.0 };
+        Some(c)
+    };
+    // A wide via's corner block (both layers), `None` when illegal.
+    let mut block = Vec::new();
+    let mut corner = |a: u32, b: u32| -> Option<f32> {
+        let (la, lb) = (g.pos(a).2 as usize, g.pos(b).2 as usize);
+        if !wide || la == lb || (q.k[la] <= 1 && q.k[lb] <= 1) {
+            return Some(0.0);
+        }
+        block.clear();
+        if !g.via_block(a, b, q.k[la], q.k[lb], &mut block) {
+            return None;
+        }
+        block.iter().try_fold(0.0, |s, &m| Some(s + congestion(m as usize)?))
     };
 
     let (x0, y0, _) = g.pos(root);
@@ -789,7 +945,8 @@ pub fn route_net<G: RGraph>(
                 if reserved.get(i).is_some_and(|&o| o != NONE && o != net) {
                     continue;
                 }
-                let nd = d + base + node_cost(i) + via(n, nb);
+                let (Some(c), Some(v)) = (node_cost(i), corner(n, nb)) else { continue };
+                let nd = d + base + c + v + via(n, nb);
                 if seen[i] != s || nd < dist[i] {
                     seen[i] = s;
                     dist[i] = nd;
@@ -892,6 +1049,9 @@ pub struct Wire {
     pub x1: i32,
     pub y1: i32,
     pub width: i32,
+    /// Extra width past the +across side (+y on a horizontal track layer, +x
+    /// on a vertical one), nm: a merged `k`-track run or via corner.
+    pub across: i32,
 }
 
 /// A layer transition at `(x, y)` from track layer `layer` to `layer + 1`.
@@ -907,25 +1067,53 @@ pub struct Via {
 /// Straight runs and vias of every tree, each run at its track layer's
 /// `widths` entry (the last for a layer past the end). Single-node runs emit
 /// no wire; vias are deduped by `(x, y, layer)` and sized to the lower layer's width.
+///
+/// A run of net `n` on a layer of `k[n][l] > 1` tracks (stride `s`) is drawn
+/// merged, `wire + (k−1)·s·p0` wide toward +across, below the layer's first
+/// wide-metal threshold `wide[l]` (`i32::MAX` = none); at or over it, as `k`
+/// wires joined by a `wire`-wide cap at each end (parallel routes). A via
+/// with either side over one track also gets its corner block on both
+/// layers, merged.
+///
+/// ponytail: the corner block is merged even past the threshold; the
+/// search's guard tracks keep foreign metal at the wide spacing.
 #[must_use]
-pub fn extract_geometry(hot: &RouteHot, grid: &TrackGrid, widths: &[i32]) -> (Vec<Wire>, Vec<Via>) {
+pub fn extract_geometry(hot: &RouteHot, grid: &TrackGrid, widths: &[i32], k: &[[u8; MAX_LAYERS]], wide: &[i32]) -> (Vec<Wire>, Vec<Via>) {
     let width_of = |l: u32| widths.get(l as usize).or(widths.last()).copied().unwrap_or(0);
+    let wide_of = |l: u32| wide.get(l as usize).copied().unwrap_or(i32::MAX);
+    let step = |l: u32| grid.stride(l) as i32 * grid.pitch;
     let (mut wires, mut vias) = (Vec::new(), Vec::new());
     for (net, tree) in hot.trees.iter().enumerate() {
+        let kn = k.get(net).copied().unwrap_or([1; MAX_LAYERS]);
+        let kl = |l: u32| i32::from(kn.get(l as usize).copied().unwrap_or(1).max(1));
         let net = net as u32;
+        let run = |wires: &mut Vec<Wire>, nodes: &[u32], l: u32| {
+            emit_run(wires, grid, net, nodes, width_of(l), kl(l), step(l), wide_of(l));
+        };
         for branch in tree {
             let mut start = 0;
             for i in 1..branch.len() {
                 let (px, py, pl) = grid.pos(branch[i - 1]);
                 let (cx, cy, cl) = grid.pos(branch[i]);
                 if pl != cl {
-                    emit_run(&mut wires, grid, net, &branch[start..i], width_of(pl));
-                    vias.push(Via { net, x: cx.min(px), y: cy.min(py), size: width_of(pl.min(cl)), layer: pl.min(cl) });
+                    run(&mut wires, &branch[start..i], pl);
+                    let (x, y) = (cx.min(px), cy.min(py));
+                    vias.push(Via { net, x, y, size: width_of(pl.min(cl)), layer: pl.min(cl) });
+                    if kl(pl) > 1 || kl(cl) > 1 {
+                        let (h, v) = if pl % 2 == 0 { (pl, cl) } else { (cl, pl) };
+                        let (wh, wv) = (width_of(h), width_of(v));
+                        let (sh, sv) = ((kl(h) - 1) * step(h), (kl(v) - 1) * step(v));
+                        let w = wh.min(wv);
+                        let (bx, by) = (x - wv / 2 + w / 2, y - wh / 2 + w / 2);
+                        let at = |layer, x1, y1, across| Wire { net, layer, x0: bx, y0: by, x1, y1, width: w, across };
+                        wires.push(at(h, x + sv + wv / 2 - w / 2, by, sh + wh - w));
+                        wires.push(at(v, bx, y + sh + wh / 2 - w / 2, sv + wv - w));
+                    }
                     start = i;
                 }
             }
             if let Some(&last) = branch.get(start) {
-                emit_run(&mut wires, grid, net, &branch[start..], width_of(grid.ixy(last).2));
+                run(&mut wires, &branch[start..], grid.ixy(last).2);
             }
         }
     }
@@ -934,27 +1122,47 @@ pub fn extract_geometry(hot: &RouteHot, grid: &TrackGrid, widths: &[i32]) -> (Ve
     (wires, vias)
 }
 
-/// Split a same-layer node run into straight wires.
-fn emit_run(wires: &mut Vec<Wire>, grid: &TrackGrid, net: u32, nodes: &[u32], width: i32) {
+/// Split a same-layer node run into straight wires, `k` tracks `step` apart
+/// (see [`extract_geometry`]).
+#[allow(clippy::too_many_arguments)]
+fn emit_run(wires: &mut Vec<Wire>, grid: &TrackGrid, net: u32, nodes: &[u32], width: i32, k: i32, step: i32, wide: i32) {
     let Some(&first) = nodes.first() else { return };
     let (mut sx, mut sy, layer) = grid.pos(first);
+    let horiz = layer % 2 == 0;
+    let span = (k - 1) * step;
+    let mut push = |(x0, y0): (i32, i32), (x1, y1): (i32, i32)| {
+        let wire = |dx, dy, x1, y1, across| Wire { net, layer, x0: x0 + dx, y0: y0 + dy, x1: x1 + dx, y1: y1 + dy, width, across };
+        if k <= 1 || width + span < wide {
+            wires.push(wire(0, 0, x1, y1, span));
+            return;
+        }
+        for j in 0..k {
+            let (dx, dy) = if horiz { (0, j * step) } else { (j * step, 0) };
+            wires.push(wire(dx, dy, x1, y1, 0));
+        }
+        let (cx, cy) = if horiz { (0, span) } else { (span, 0) };
+        for (ex, ey) in [(x0, y0), (x1, y1)] {
+            wires.push(Wire { net, layer, x0: ex, y0: ey, x1: ex + cx, y1: ey + cy, width, across: 0 });
+        }
+    };
     let (mut lx, mut ly) = (sx, sy);
     for &n in &nodes[1..] {
         let (x, y, _) = grid.pos(n);
-        let straight = if layer % 2 == 1 { x == lx } else { y == ly };
+        let straight = if !horiz { x == lx } else { y == ly };
         if !straight {
-            wires.push(Wire { net, layer, x0: sx, y0: sy, x1: lx, y1: ly, width });
+            push((sx, sy), (lx, ly));
             (sx, sy) = (lx, ly);
         }
         (lx, ly) = (x, y);
     }
     if (lx, ly) != (sx, sy) {
-        wires.push(Wire { net, layer, x0: sx, y0: sy, x1: lx, y1: ly, width });
+        push((sx, sy), (lx, ly));
     }
 }
 
 /// Per-net shapes (layer = track index): a wire is its centre line widened by
-/// `width/2` on every side; a via is a `size²` square centred on `(x, y)`.
+/// `width/2` on every side, plus `across` on its +across side; a via is a
+/// `size²` square centred on `(x, y)`.
 #[must_use]
 pub fn to_shapes(nets: usize, wires: &[Wire], vias: &[Via]) -> Vec<Vec<Shape>> {
     let mut out = vec![Vec::new(); nets];
@@ -962,7 +1170,12 @@ pub fn to_shapes(nets: usize, wires: &[Wire], vias: &[Via]) -> Vec<Vec<Shape>> {
         let h = w.width / 2;
         let (x0, y0) = (w.x0.min(w.x1) - h, w.y0.min(w.y1) - h);
         let (x1, y1) = (w.x0.max(w.x1) + h, w.y0.max(w.y1) + h);
-        let rect = Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+        let mut rect = Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+        if w.layer % 2 == 0 {
+            rect.h += w.across;
+        } else {
+            rect.w += w.across;
+        }
         out[w.net as usize].push(Shape { layer: LayerId(w.layer as u16), rect });
     }
     for v in vias {
@@ -1116,7 +1329,9 @@ mod tests {
         }
         let path = |w: f32, sens: &[f32]| {
             let elec = Elec { weight: w, layer_c: &[1.0, 1.0], beside_c: &[1.0, 1.0], sens, ..Elec::default() };
-            let tree = route_net(&g, &usage, &hist, &[], (&[], &[]), &terms, 0, &[], &[], (&[], &[]), 1.0, &elec, &mut Dij::new(g.nodes())).unwrap();
+            let mut hot = RouteHot::new(g.nodes(), 1);
+            (hot.usage, hot.hist) = (usage.clone(), hist.clone());
+            let tree = route_net(&g, &hot, &[], &search(&terms, elec), 1.0, &mut Dij::new(g.nodes())).unwrap();
             let mut nodes = tree.concat();
             nodes.sort_unstable();
             nodes.dedup();
@@ -1151,7 +1366,9 @@ mod tests {
         let terms = [g.node(0, 4, 0), g.node(39, 4, 0)];
         let vias = |current: f32| {
             let elec = Elec { current, layer_r: &[1.0, 1.0], via_r: &[24.0], ..Elec::default() };
-            let tree = route_net(&g, &usage, &hist, &[], (&[], &[]), &terms, 0, &[], &[], (&[], &[]), 1.0, &elec, &mut Dij::new(g.nodes())).unwrap();
+            let mut hot = RouteHot::new(g.nodes(), 1);
+            (hot.usage, hot.hist) = (usage.clone(), hist.clone());
+            let tree = route_net(&g, &hot, &[], &search(&terms, elec), 1.0, &mut Dij::new(g.nodes())).unwrap();
             tree.iter().flat_map(|b| b.windows(2)).filter(|w| g.ixy(w[0]).2 != g.ixy(w[1]).2).count()
         };
         assert!(vias(0.0) > 0, "idle: hops around the costly node");
@@ -1169,6 +1386,10 @@ mod tests {
         // Compact i is net i; nets 0 and 1 are free, 1 the more sensitive.
         let order = order_by_priority(&[2; 6], &[0, 1, 2, 3, 4, 5], &reqs, &[0.2, 0.9, 0.0, 0.0, 0.0, 0.0]);
         assert_eq!(order, vec![3, 4, 5, 1, 0, 2], "pair, budgeted victim, free by impact, shield reference");
+    }
+
+    fn search<'a>(terms: &'a [u32], elec: Elec<'a>) -> NetSearch<'a> {
+        NetSearch { net: 0, terms, k: [1; MAX_LAYERS], guard: [0; MAX_LAYERS], own: &[], own_halo: &[], penalty: &[], keepout: (&[], &[]), elec }
     }
 
     fn spec(stride: u32, halo_via: u8) -> LayerSpec {
