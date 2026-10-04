@@ -25,7 +25,7 @@ fn main() {
     // bias is set where the open-loop outputs balance (no CMFB in this OTA).
     let performance = library::perf::PerfConfig {
         sim: sim.clone(),
-        testbench: "\
+        testbenches: vec!["\
 Vdd vdd 0 1.8
 Vbn vbn 0 0.5
 Vbias vbias 0 0.8515
@@ -38,7 +38,8 @@ Vim vinm 0 0.9 ac -0.5
 set ngbehavior=hsa
 run
 .endc"
-            .into(),
+            .into()],
+        scenarios: Vec::new(),
         specs: vec![
             library::perf::Spec { metric: "gain_db".into(), min: Some(20.0), max: None },
             library::perf::Spec { metric: "ugf".into(), min: Some(300e6), max: None },

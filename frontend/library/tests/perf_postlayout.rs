@@ -5,7 +5,7 @@
 //! job) turns that skip into a panic, so a missing tool is never a green run.
 
 use library::oppoint::OpConfig;
-use library::perf::{evaluate, Parasitics, PerfConfig, Spec};
+use library::perf::{evaluate, Parasitics, PerfConfig, Scenario, Spec};
 use library::tools::{sky130_models as models, tool_or_skip};
 
 /// The cargo running this build reads as present (so detection cannot
@@ -50,8 +50,9 @@ meas ac gain find vdb(vout2) at=1e3
 fn cfg(lib: std::path::PathBuf) -> PerfConfig {
     PerfConfig {
         sim: OpConfig { model_lib: Some(lib), ..OpConfig::default() },
-        testbench: BENCH.into(),
+        testbenches: vec![BENCH.into()],
         specs: vec![Spec { metric: "gain".into(), min: Some(20.0), max: None }],
+        scenarios: Vec::new(),
     }
 }
 
@@ -67,7 +68,7 @@ fn ota() -> pnr_core::Netlist {
 fn branch_resistance_and_stress_reach_the_simulation() {
     let Some(lib) = models() else { return };
     let nl = ota();
-    let gain = |p: &Parasitics| evaluate(&nl, p, &cfg(lib.clone())).unwrap().metrics[0].1;
+    let gain = |p: &Parasitics| evaluate(&nl, p, &cfg(lib.clone()), &[0]).unwrap().metrics[0].1;
     let plain = gain(&Parasitics::default()).expect("the schematic's gain is measured");
     // Source degeneration on the input pair (the tail runs in weak
     // inversion, gm ≈ 10 µS, so 200 kΩ is gm·R ≈ 2): gain drops.
@@ -113,8 +114,94 @@ fn a_flow_scores_its_layout_in_simulation() {
     // Real models measure the schematic, so the floor gets a row with nets
     // (`row (N nets)`; an empty row reads `row with no measured nets`).
     let rows = &sol.metadata.budget_rows;
-    assert!(rows.len() == 1 && rows[0].starts_with("gain:min: row ("), "{rows:?}");
+    assert!(rows.len() == 2 && rows[0].ends_with(": active") && rows[1].starts_with("gain:min: row ("), "{rows:?}");
     assert_eq!(sol.stats.sim_failures, 0, "{:?}", sol.stats);
+}
+
+fn scenario(name: &str, corner: &str, temp_c: f64) -> Scenario {
+    Scenario { name: name.into(), corner: corner.into(), temp_c, params: Vec::new() }
+}
+
+/// PERF-10: two testbenches that both measure a spec's metric are refused,
+/// not resolved by order.
+#[test]
+fn a_metric_from_two_testbenches_is_refused() {
+    let Some(lib) = models() else { return };
+    let p = PerfConfig { testbenches: vec![BENCH.into(), BENCH.into()], ..cfg(lib) };
+    let e = evaluate(&ota(), &Parasitics::default(), &p, &[0]).unwrap_err();
+    assert!(e.contains("testbenches 0 and 1"), "{e}");
+}
+
+/// PERF-10: the perf deck sets `.temp`, so the scenario's temperature moves
+/// the schematic's gain.
+#[test]
+fn ota_gain_moves_with_temperature() {
+    let Some(lib) = models() else { return };
+    let p = PerfConfig { scenarios: vec![scenario("tt27", "tt", 27.0), scenario("tt125", "tt", 125.0)], ..cfg(lib) };
+    let nl = ota();
+    let g = |i: usize| evaluate(&nl, &Parasitics::default(), &p, &[i]).unwrap().metrics[0].1.expect("gain measured");
+    let (g27, g125) = (g(0), g(1));
+    assert!((g27 - g125).abs() > 0.1, "{g27} dB at 27 °C vs {g125} dB at 125 °C");
+}
+
+/// PERF-10 acceptance: a flow over three corners reports, per bound, the
+/// scenario the schematic is worst at, and simulates epochs only at the
+/// active ones (nominal plus each bound's worst).
+#[test]
+fn a_flow_reports_the_worst_scenario_per_bound() {
+    let Some(lib) = models() else { return };
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
+    let p = PerfConfig {
+        scenarios: vec![scenario("tt_27", "tt", 27.0), scenario("ss_125", "ss", 125.0), scenario("ff_m40", "ff", -40.0)],
+        ..cfg(lib.clone())
+    };
+    let nl = ota();
+    let gains: Vec<f64> = (0..3)
+        .map(|i| evaluate(&nl, &Parasitics::default(), &p, &[i]).unwrap().metrics[0].1.expect("gain measured"))
+        .collect();
+    let lowest = (0..3).min_by(|&a, &b| gains[a].total_cmp(&gains[b])).unwrap();
+    let c = library::Config {
+        feedback_iters: 2,
+        outer_iters: 1,
+        starts: 1,
+        op: Some(OpConfig { model_lib: Some(lib), ..OpConfig::default() }),
+        performance: Some(p.clone()),
+        ..library::Config::default()
+    };
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &c).expect("flow");
+    let worst = &sol.metadata.performance_worst;
+    assert_eq!(worst.len(), 1, "{worst:?}");
+    assert!(worst[0].starts_with("gain:min worst "), "{worst:?}");
+    assert!(worst[0].contains(&format!(" at {} (", p.scenarios[lowest].name)), "gains {gains:?}: {worst:?}");
+    let k: usize = worst[0].split("(over ").nth(1).and_then(|t| t.split(' ').next()).and_then(|k| k.parse().ok()).expect("active count");
+    assert!(k <= 2 && worst[0].contains(" active of 3 scenarios)"), "{worst:?}");
+    let rows = &sol.metadata.budget_rows;
+    let active: Vec<_> = p.scenarios.iter().filter(|sc| rows.contains(&format!("scenario {}: active", sc.name))).collect();
+    let inactive = p.scenarios.iter().filter(|sc| rows.contains(&format!("scenario {}: inactive", sc.name))).count();
+    assert!(active.len() == k && inactive == 3 - k && active[0].name == "tt_27", "{rows:?}");
+}
+
+/// PERF-17: with an operating point, each supply's IR budget reaches
+/// signoff's intent as a drop limit, so `ir_drop` runs over the grid instead
+/// of examining nothing.
+#[test]
+fn op_runs_carry_ir_limits() {
+    let Some(lib) = models() else { return };
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
+    let c = library::Config { feedback_iters: 1, outer_iters: 1, starts: 1, op: Some(op_cfg(lib)), ..library::Config::default() };
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &c).expect("flow");
+    let drops = &sol.intent.max_drop_mv;
+    assert!(!drops.is_empty(), "{:?}", sol.intent);
+    assert!(drops.iter().all(|(n, _)| sol.intent.supplies.iter().any(|s| s.0 == *n)), "{:?}", sol.intent);
+    let s = library::signoff(&sol, &pdk);
+    assert!(s.coverage.em_ir.0 >= 1, "{:?}", s.coverage);
+    // `em_ir` also counts the EM rules the op currents arm: `ir_drop` itself ran over nodes.
+    assert!(s.coverage.ir.1 >= 1 && s.coverage.ir.0 == s.coverage.ir.1, "{:?}", s.coverage);
+    assert!(!s.coverage.skipped_rules.iter().any(|(r, _)| r == "ir_drop"), "{:?}", s.coverage.skipped_rules);
 }
 
 /// A fixture parsed as the flow parses it: the deck's model table, then its

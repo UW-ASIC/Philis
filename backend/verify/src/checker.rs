@@ -125,11 +125,20 @@ impl Checker {
                 serde_json::json!({ "net": net, "domain": domain(mv), "role": if *ground { "ground" } else { "power" } })
             })
             .collect();
-        let limits: Vec<_> = intent
-            .currents
-            .iter()
-            .filter(|(_, ua)| *ua > 0.0)
-            .map(|(net, ua)| serde_json::json!({ "net": net, "budget_current_ua": ua }))
+        // One object per net: gdsverify refuses a net listed twice.
+        let mut by_net: std::collections::BTreeMap<&str, serde_json::Map<String, serde_json::Value>> = std::collections::BTreeMap::new();
+        for (net, ua) in intent.currents.iter().filter(|(_, ua)| *ua > 0.0) {
+            by_net.entry(net).or_default().insert("budget_current_ua".into(), serde_json::json!(ua));
+        }
+        for (net, mv) in intent.max_drop_mv.iter().filter(|(_, mv)| *mv > 0.0 && mv.is_finite()) {
+            by_net.entry(net).or_default().insert("max_drop_mv".into(), serde_json::json!(mv));
+        }
+        let limits: Vec<_> = by_net
+            .into_iter()
+            .map(|(net, mut m)| {
+                m.insert("net".into(), serde_json::json!(net));
+                serde_json::Value::Object(m)
+            })
             .collect();
         let json = serde_json::json!({ "domains": domains, "supplies": supplies, "limits": limits }).to_string();
         let parsed = gdsverify::ingest::intent::parse_intent(&json, &mut self.loaded.strings).map_err(|e| e.to_string())?;

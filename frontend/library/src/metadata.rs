@@ -93,12 +93,19 @@ pub struct MetadataReport {
     /// Post-layout specs: `(metric, measured, min, max, normalised miss)`.
     /// Empty when performance scoring is off.
     pub performance: Vec<(String, Option<f64>, Option<f64>, Option<f64>, f64)>,
+    /// Per finite spec bound, its worst value and scenario over the active
+    /// scenarios (PERF-10; the winner is not re-run over inactive ones).
+    pub performance_worst: Vec<String>,
     /// Per declared spec bound, its routing budget row or why it has none
     /// (`"ugf:min: row (3 nets)"`, `"…: do-not-worsen row …"`, `"…: no row (reason)"`).
     /// Empty from [`build`]; the flow fills it.
     pub budget_rows: Vec<String>,
     /// Post-layout simulations that could not run ([`crate::RunStats::sim_failures`]).
     pub sim_failures: u32,
+    /// One ledger row per matched pair on the placed layout, from the
+    /// placement budget arm (each set is also in cost; reading both would
+    /// duplicate it).
+    pub matched: Vec<analog::matching::mismatch::LedgerRow>,
     /// Sidecar process numbers used on an `UNVERIFIED` source
     /// ([`verify::Pdk::unverified`]). Reported, not blocking [`Self::certified`].
     pub assumed: Vec<String>,
@@ -261,6 +268,8 @@ pub fn build(
     p.extend(statuses(&placement.budget, layout, Arm::Budget));
     let mut r = statuses(&routing.hard, routes, Arm::Hard);
     r.extend(statuses(&routing.budget, routes, Arm::Budget));
+    let mut matched = Vec::new();
+    placement.budget.iter().for_each(|b| b.ledger_rows(layout, &mut matched));
     MetadataReport {
         placement: p,
         routing: r,
@@ -268,8 +277,10 @@ pub fn build(
         net_classes: census,
         missing: missing.to_vec(),
         performance: Vec::new(),
+        performance_worst: Vec::new(),
         budget_rows: Vec::new(),
         sim_failures: 0,
+        matched,
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
         binding: Vec::new(),
         coverage: verify::Coverage::default(),
@@ -352,6 +363,9 @@ impl std::fmt::Display for MetadataReport {
                     (Some(_), false) => "met".to_string(),
                 };
                 writeln!(f, "  {m:<22} {:>12} {:>12} {:>12}  {verdict}", num(*v), num(*lo), num(*hi))?;
+            }
+            for w in &self.performance_worst {
+                writeln!(f, "  worst {w}")?;
             }
             writeln!(f, "  simulations failed: {}", self.sim_failures)?;
         }

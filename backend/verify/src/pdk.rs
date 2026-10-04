@@ -8,7 +8,7 @@
 use gdsverify::ingest::deck::{Deck, ParamValue, RuleSpec};
 use gdsverify::ingest::StrTable;
 use gdsverify::geom::Grid;
-use pnr_core::{LayerId, Process};
+use pnr_core::{LayerId, MatchClass, Process};
 
 /// The database grid every length in this crate is expressed against:
 /// 1000 dbu/µm, so **1 dbu = 1 nm**.
@@ -29,9 +29,12 @@ pub struct EmLimit {
     pub ua_per_cut: f32,
     /// Blech product, (µA/µm)·µm (`blech_limit`); `0` = none.
     pub blech: f32,
-    /// `(T_ref K, Ea eV, n)` when the deck gives the rating temperature and
-    /// Black's-law parameters.
+    /// `(T_ref K, Ea eV, n)`: the deck rule's rating temperature and
+    /// Black's-law parameters, else `cell.em_derating`'s; `None` = neither.
     pub derating: Option<(f32, f32, f32)>,
+    /// `derating`'s Ea and n are Philis's fallback (Lienig Cu, 0.9 eV, n 1.1),
+    /// not the process's: only `T_ref` came from `cell.em_derating`.
+    pub derating_assumed: bool,
 }
 
 /// Process design kit: layers, design-rule values, grid, and the gdsverify deck.
@@ -249,6 +252,17 @@ impl Pdk {
         }
         // Unknown, mistyped, missing-required and unsourced `cell.*` keys.
         bad.extend(crate::sidecar::validate(&self.cell));
+        // `em_derating`'s shape, so a misspelt or bad field is not a silent
+        // `None` in `sidecar_derating`.
+        if let Some(t) = self.cell.get("em_derating").and_then(|t| t.as_object()) {
+            for (k, v) in t {
+                if !["t_ref_k", "ea_ev", "n"].contains(&k.as_str()) {
+                    bad.push(format!("cell.em_derating.{k}: unknown field (t_ref_k, ea_ev, n)"));
+                } else if !(v.is_null() || v.as_f64().is_some_and(|x| x > 0.0)) {
+                    bad.push(format!("cell.em_derating.{k} = {v}: must be null or a positive number"));
+                }
+            }
+        }
 
         if self.routing_metals.is_empty() {
             bad.push("cell.layers.routing_metals is empty: nowhere legal to route".into());
@@ -500,18 +514,6 @@ impl Pdk {
         })
     }
 
-    /// `wire_width + max(min_spacing)` over `stack`: the one lattice pitch
-    /// legal on every layer actually routed on.
-    ///
-    /// ponytail: one pitch for the whole stack, so the upper layers are routed
-    /// more coarsely than they need. Per-layer pitch means a per-layer track
-    /// lattice in `gr::TrackGrid`; do that if upper-layer density ever matters.
-    #[must_use]
-    pub fn routing_pitch(&self, wire_width: i32, stack: &[u16]) -> i32 {
-        let worst = stack.iter().filter_map(|&l| self.route_spacing(l)).max().unwrap_or(0);
-        wire_width + worst
-    }
-
     /// Spacing a routed wire keeps on `layer`, nm: its `min_spacing`, and its
     /// end-of-line spacing (a wire end is a line end; the lattice cannot
     /// tell ends from sides, so every track keeps the larger).
@@ -625,8 +627,9 @@ impl Pdk {
     /// DC electromigration limits of `layer` from the deck's own EM rules:
     /// an `electromigration` rule (a deck that splits DC from peak) before an
     /// `em_current_density` one. A cut no rule names takes the tighter
-    /// `max_current_per_cut` of the two routing metals it joins. `None` when
-    /// no rule limits the layer.
+    /// `max_current_per_cut` of the two routing metals it joins. Black's
+    /// parameters from the rule, else `cell.em_derating`. `None` when no rule
+    /// limits the layer.
     #[must_use]
     pub fn em_limit(&self, layer: LayerId) -> Option<EmLimit> {
         let ratio = |s: &RuleSpec, key: &str| match self.deck.rules.param(s, self.strings.get(key)?) {
@@ -641,11 +644,19 @@ impl Pdk {
                 self.deck.rules.spec.iter().find(|s| s.kind == kind && self.deck.rules.layers_of(s).iter().any(|&g| self.reaches(g, l.0)))
             })
         };
-        let of = |s: &RuleSpec| EmLimit {
-            ua_per_um: ratio(s, "max_density").unwrap_or(0.0),
-            ua_per_cut: ratio(s, "max_current_per_cut").unwrap_or(0.0),
-            blech: ratio(s, "blech_limit").unwrap_or(0.0),
-            derating: (|| Some((ratio(s, "reference_temperature")?, ratio(s, "activation_energy_ev")?, ratio(s, "current_exponent")?)))(),
+        let of = |s: &RuleSpec| {
+            let deck = (|| Some((ratio(s, "reference_temperature")?, ratio(s, "activation_energy_ev")?, ratio(s, "current_exponent")?)))();
+            let (derating, derating_assumed) = match deck {
+                Some(d) => (Some(d), false),
+                None => self.sidecar_derating().map_or((None, false), |(d, a)| (Some(d), a)),
+            };
+            EmLimit {
+                ua_per_um: ratio(s, "max_density").unwrap_or(0.0),
+                ua_per_cut: ratio(s, "max_current_per_cut").unwrap_or(0.0),
+                blech: ratio(s, "blech_limit").unwrap_or(0.0),
+                derating,
+                derating_assumed,
+            }
         };
         // A cut has a per-cut limit only: a rule pairing it with metals states
         // their per-µm density too, which is not the cut's.
@@ -662,6 +673,17 @@ impl Pdk {
             .filter(|e| e.ua_per_cut > 0.0)
             .reduce(|a, b| if a.ua_per_cut <= b.ua_per_cut { a } else { b })
             .map(|e| EmLimit { ua_per_um: 0.0, blech: 0.0, ..e })
+    }
+
+    /// `cell.em_derating` (GAP-06) as `((T_ref K, Ea eV, n), assumed)`; `None`
+    /// without a `t_ref_k`. A null Ea or n takes Lienig's Cu values at the most
+    /// conservative stated n (0.9 eV, 1.1; the largest Ea/n, so the strongest
+    /// derating above T_ref) and is `assumed`.
+    fn sidecar_derating(&self) -> Option<((f32, f32, f32), bool)> {
+        let t = self.cell.get("em_derating")?;
+        let f = |k: &str| t.get(k)?.as_f64().map(|v| v as f32);
+        let (ea, n) = (f("ea_ev"), f("n"));
+        Some(((f("t_ref_k")?, ea.unwrap_or(0.9), n.unwrap_or(1.1)), ea.is_none() || n.is_none()))
     }
 
     /// The deck's point-to-point resistance limit, Ω (`p2p_resistance`):
@@ -1170,6 +1192,10 @@ impl Process for Pdk {
         let one = |x, y| self.widest_on("min_spacing_diff", "limit", &[x, y]);
         one(la, lb).max(one(lb, la)).map(|v| v as i32)
     }
+    /// The sidecar's `[MIN, MOD, EXC]` array `key`, read from `cell` as is.
+    fn tier(&self, key: &str, c: MatchClass) -> Option<i32> {
+        self.cell.get(key)?.as_array()?.get(c as usize)?.as_i64().map(|v| v as i32)
+    }
 }
 
 /// Pull every rule's scalar length parameter (nm) out of the deck into
@@ -1226,10 +1252,19 @@ impl Pdk {
     /// (a centred square pad clears both). `0` when the deck sets none.
     #[must_use]
     pub fn cut_enclosure(&self, outer: LayerId, inner: LayerId) -> i32 {
+        self.cut_enclosure_pair(outer, inner).1
+    }
+
+    /// `(across, along)`: how far `outer` must pass cut `inner` on the two
+    /// sides of a wire's width, and on its two ends, nm — the all-round
+    /// enclosure, and the larger of that and the one-pair-of-opposite-sides
+    /// end-cap (Hastings H15-18). `0` for a rule the deck does not set.
+    #[must_use]
+    pub fn cut_enclosure_pair(&self, outer: LayerId, inner: LayerId) -> (i32, i32) {
         let l = [outer.0, inner.0];
         let e = self.widest_on("min_enclosure", "limit", &l).unwrap_or(0);
         let c = self.widest_on("asymmetric_enclosure", "min_one_side", &l).unwrap_or(0);
-        e.max(c) as i32
+        (e as i32, e.max(c) as i32)
     }
 
     /// Every layer some recipe draws.
@@ -1377,6 +1412,9 @@ impl Process for Overlay<'_> {
     }
     fn eol_space(&self, role: &str) -> Option<i32> {
         self.pdk.widest_on("eol_spacing", "limit", &[self.layer(role)?.0]).map(|v| v as i32)
+    }
+    fn tier(&self, key: &str, c: MatchClass) -> Option<i32> {
+        self.pdk.tier(key, c)
     }
 }
 
@@ -1561,6 +1599,22 @@ mod tests {
         assert_eq!(ov.enclosure("bottom", "plate"), Some(140), "capm.3");
     }
 
+    /// The sidecar's tier arrays reach `Process::tier` by class index; a
+    /// removed key reads `None` (the class env reports it missing).
+    #[test]
+    fn sky130_tiers_are_read() {
+        let p = load("sky130");
+        assert_eq!(p.tier("wpe_clearance_nm", MatchClass::Exceptional), Some(5000));
+        assert_eq!(p.tier("lod_moat_ext_nm", MatchClass::Minimal), Some(3000));
+        assert_eq!(p.tier("lod_moat_ext_nm", MatchClass::Exceptional), Some(10000));
+        let p = sky130_with(|c| {
+            c.remove("dummy_reach_nm");
+            c.remove("dummy_reach_nm_source");
+        })
+        .unwrap();
+        assert_eq!(p.tier("dummy_reach_nm", MatchClass::Moderate), None);
+    }
+
     fn sky130_with(edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>)) -> Result<Pdk, String> {
         let text = crate::decks::SIDECARS[0].1;
         let mut v: serde_json::Value = serde_json::from_str(text).unwrap();
@@ -1705,33 +1759,6 @@ mod tests {
         }
     }
 
-    /// `routing_pitch` leaves at least `min_spacing` between adjacent tracks
-    /// on every layer of the stack it is given: one global pitch, so the worst
-    /// layer in that stack sets it.
-    #[test]
-    fn routing_pitch_clears_every_layer_of_its_stack() {
-        for deck in DECKS {
-            let pdk = load(deck);
-            let w = 290;
-            let stack: Vec<_> = pdk.routing_layers().into_iter().take_while(|l| pdk.min_width(l.0).is_none_or(|mw| mw <= w)).map(|l| l.0).collect();
-            let pitch = pdk.routing_pitch(w, &stack);
-            for &l in &stack {
-                let need = pdk.min_spacing(l).unwrap_or(0);
-                assert!(pitch - w >= need, "{deck}: pitch {pitch} leaves {} nm, layer {l:?} needs {need}", pitch - w);
-            }
-        }
-    }
-
-    /// A layer the router cannot reach must not set the pitch for the layers
-    /// it can (sky130 met5's spacing once gave a 1890 nm lattice on a 170 nm pin).
-    #[test]
-    fn an_unreachable_layer_does_not_set_the_pitch() {
-        let pdk = load("sky130");
-        let all: Vec<_> = pdk.routing_layers().into_iter().map(|l| l.0).collect();
-        let reachable: Vec<_> = pdk.routing_layers().into_iter().take_while(|l| pdk.min_width(l.0).is_none_or(|mw| mw <= 290)).map(|l| l.0).collect();
-        assert!(pdk.routing_pitch(290, &reachable) < pdk.routing_pitch(290, &all));
-    }
-
     /// No diode is inserted where LVS cannot extract one: gf180's deck has no
     /// diode recogniser on conductors.
     #[test]
@@ -1781,6 +1808,58 @@ mod tests {
         let text: String = Pdk::deck_text(&sidecar).unwrap().lines().filter(|l| !l.contains("em_current_density")).collect::<Vec<_>>().join("\n");
         let bare = Pdk::load(&text, &sidecar).unwrap();
         assert!(bare.routing_metals.iter().all(|&l| bare.em_limit(l).is_none()), "no EM rules: unknown");
+    }
+
+    /// GAP-06: no deck states Black's parameters, so each EM limit takes the
+    /// rating temperature from `cell.em_derating` and the Cu fallback Ea/n,
+    /// flagged assumed; a cut inherits its metal rule's derating.
+    #[test]
+    fn sky130_em_rating_is_90c_with_fallback_parameters() {
+        let sky = load("sky130");
+        for l in ["met1", "mcon"] {
+            let e = sky.em_limit(id(&sky, l)).unwrap();
+            assert_eq!(e.derating, Some((363.15, 0.9, 1.1)), "{l}");
+            assert!(e.derating_assumed, "{l}");
+        }
+        for (pdk, l, t) in [("gf180mcu", "metal1", 358.15), ("ihp_sg13g2", "metal2", 378.15)] {
+            let p = load(pdk);
+            let e = p.em_limit(id(&p, l)).unwrap();
+            assert_eq!(e.derating.unwrap().0, t, "{pdk}");
+            assert!(e.derating_assumed, "{pdk}");
+        }
+    }
+
+    /// Black's parameters on the deck rule beat the sidecar's, for that rule only.
+    #[test]
+    fn a_deck_rule_value_beats_the_sidecar() {
+        let sidecar = std::fs::read_to_string(format!("{}/../../pdks/sky130.json", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        // gdsverify takes Black's parameters on `electromigration` only
+        // (`em_current_density` rejects them), so met1's rule becomes one.
+        let text = Pdk::deck_text(&sidecar).unwrap().replacen(
+            "em_current_density(met1, mcon; max_density: 2.8mA/um, max_current_per_cut: 0.36mA)",
+            "electromigration(met1, mcon; max_density: 2.8mA/um, max_current_per_cut: 0.36mA, blech_limit: 0uA, reference_temperature: 373.15K, activation_energy: 0.85eV, current_exponent: 2)",
+            1,
+        );
+        assert!(text.contains("reference_temperature: 373.15K"));
+        let sky = Pdk::load(&text, &sidecar).unwrap();
+        let m1 = sky.em_limit(id(&sky, "met1")).unwrap();
+        assert_eq!(m1.derating, Some((373.15, 0.85, 2.0)));
+        assert!(!m1.derating_assumed);
+        let m2 = sky.em_limit(id(&sky, "met2")).unwrap();
+        assert_eq!(m2.derating, Some((363.15, 0.9, 1.1)));
+        assert!(m2.derating_assumed);
+    }
+
+    /// A misspelt or non-positive `em_derating` field, or a missing source,
+    /// does not load.
+    #[test]
+    fn em_derating_shape_is_checked() {
+        for bad in [serde_json::json!({"t_ref": 363.15}), serde_json::json!({"t_ref_k": -1})] {
+            let err = sky130_with(|c| drop(c.insert("em_derating".into(), bad))).err().expect("bad em_derating must not load");
+            assert!(err.contains("em_derating"), "{err}");
+        }
+        let err = sky130_with(|c| drop(c.remove("em_derating_source"))).err().expect("unsourced em_derating must not load");
+        assert!(err.contains("em_derating"), "{err}");
     }
 
     /// sky130 LU.2: an NMOS diffusion (n+ diff outside any well) 20 µm from
