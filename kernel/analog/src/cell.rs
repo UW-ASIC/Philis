@@ -64,6 +64,8 @@ pub struct Unitization {
     /// `unwrap_or(Moderate)` (C16). Read by `cells::cap_array` (GAP-18): an Exceptional binary bank lists its
     /// variants best-matching first.
     pub class: Option<crate::intent::MatchClass>,
+    /// Match kind of the set (EXT-15/16 from the set); None = unknown, no aspect limit (GAP-11).
+    pub kind: Option<crate::intent::MatchKind>,
     /// Per member; empty = all 1.
     pub series: Vec<u16>,
     /// None = today's choice.

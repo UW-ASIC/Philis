@@ -27,6 +27,8 @@ pub struct Cells {
     /// Member devices per cell in draw order: `devices_of[c][k]` is the device
     /// the generator's `d{k}:` pin prefix names.
     pub devices_of: Vec<Vec<DeviceId>>,
+    /// Matched cells where no variant met the GAP-11 aspect limit (the squarest was kept).
+    pub aspect_missed: usize,
 }
 
 /// Draw every legal variant of every cell.
@@ -77,6 +79,7 @@ pub fn enumerate_folded(
     // Phase 1: decide and draw the merges.
     let mut unit_of: Vec<Option<usize>> = vec![None; n];
     let mut merged: Vec<Option<(Vec<DeviceId>, Vec<Macro>)>> = Vec::new();
+    let mut aspect_missed = 0usize;
     for u in &sized.unitization {
         let mut members: Vec<DeviceId> = u
             .devices
@@ -153,6 +156,11 @@ pub fn enumerate_folded(
         if alternatives.is_empty() {
             continue;
         }
+        if let Some(lim) = aspect_limit(u.class, u.kind) {
+            if !keep_compact(&mut alternatives, lim) {
+                aspect_missed += 1;
+            }
+        }
         for d in &members {
             unit_of[d.0 as usize] = Some(merged.len());
         }
@@ -204,6 +212,7 @@ pub fn enumerate_folded(
         spaces,
         cell_of,
         devices_of,
+        aspect_missed,
     }
 }
 
@@ -614,7 +623,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             },
             dummy_required: false,
             route_matching_required: false,
-            class: None, series: Vec::new(), style: None,
+            class: None, kind: None, series: Vec::new(), style: None,
         });
     }
     // Fold every MOS unitization by its width class's factor: `k`× the
@@ -787,6 +796,60 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
 
 fn multiplier(d: &Device) -> u16 {
     d.params.iter().find(|(n, _)| n == "m").map_or(1, |&(_, v)| v.clamp(1, i64::from(u16::MAX)) as u16)
+}
+
+/// The longest-to-shortest side a matched member's subarray may have (GAP-11, Hastings rule 9, H13-46
+/// L42504–42516, PDF 714): a current-matched set drawn long and thin sees the gradient along its long side.
+/// `class` is `unwrap_or(Moderate)` (C16). Current: Minimal 10 / Moderate 3 / Exceptional 1.5; Voltage:
+/// 3 / 1.5 / 1.5 (the 1.5 for "square or nearly square" is **[policy]**). Ratio sets and an unknown kind:
+/// `None` (the rule is for transistors; R/C ratio sets have their own pattern rules).
+fn aspect_limit(class: Option<analog::intent::MatchClass>, kind: Option<analog::intent::MatchKind>) -> Option<f64> {
+    use analog::intent::{MatchClass as C, MatchKind as K};
+    let c = class.unwrap_or(C::Moderate);
+    match kind? {
+        K::Current => Some(match c { C::Minimal => 10.0, C::Moderate => 3.0, C::Exceptional => 1.5 }),
+        K::Voltage => Some(if c == C::Minimal { 3.0 } else { 1.5 }),
+        K::Ratio => None,
+    }
+}
+
+/// The worst member's subarray aspect (≥ 1) on the macro's unit grid: pitch = bbox extent / distinct unit
+/// centres per axis, member footprint = its own units' span + one pitch (H13-46: only the subarray counts).
+/// `1.0` with no units or a zero extent.
+fn member_aspect(m: &Macro) -> f64 {
+    let pitch = |key: fn(&pnr_core::units::Unit) -> i32, extent: i32| {
+        let mut v: Vec<i32> = m.units.iter().map(key).collect();
+        v.sort_unstable();
+        v.dedup();
+        extent as f64 / v.len().max(1) as f64
+    };
+    let (px, py) = (pitch(|u| u.x, m.bbox.w), pitch(|u| u.y, m.bbox.h));
+    let mut worst = 1.0f64;
+    for o in m.units.iter().map(|u| u.owner).collect::<std::collections::BTreeSet<_>>() {
+        let us = m.units.iter().filter(|u| u.owner == o);
+        let (x0, x1) = us.clone().fold((i32::MAX, i32::MIN), |(a, b), u| (a.min(u.x), b.max(u.x)));
+        let (y0, y1) = us.fold((i32::MAX, i32::MIN), |(a, b), u| (a.min(u.y), b.max(u.y)));
+        let (w, h) = ((x1 - x0) as f64 + px, (y1 - y0) as f64 + py);
+        if w > 0.0 && h > 0.0 {
+            worst = worst.max(w.max(h) / w.min(h));
+        }
+    }
+    worst
+}
+
+/// Keep the variants within `limit` (GAP-11) and return `true`; when none is, keep only the squarest (first
+/// on ties) and return `false` (the caller reports it).
+fn keep_compact(alts: &mut Vec<Macro>, limit: f64) -> bool {
+    if alts.iter().any(|m| member_aspect(m) <= limit) {
+        alts.retain(|m| member_aspect(m) <= limit);
+        return true;
+    }
+    let best = (0..alts.len()).min_by(|&a, &b| member_aspect(&alts[a]).total_cmp(&member_aspect(&alts[b])));
+    if let Some(i) = best {
+        alts.swap(0, i);
+        alts.truncate(1);
+    }
+    false
 }
 
 /// Every enumerated variant of one group, by device kind.
@@ -1069,6 +1132,54 @@ mod tests {
     /// validation fails the test, never skips it.
     fn pdk() -> Pdk {
         Pdk::builtin("sky130").expect("sky130 loads")
+    }
+
+    /// A synthetic matched macro: `(owner, x)` units on one row at y = 500, bbox `w`×1000 (GAP-11).
+    fn row(units: &[(u8, i32)], w: i32) -> Macro {
+        let units = units
+            .iter()
+            .map(|&(owner, x)| pnr_core::Unit { owner, x, y: 500, weight: 1, phi: (1, 0), sa: 0, sb: 0 })
+            .collect();
+        Macro { bbox: Rect { x: 0, y: 0, w, h: 1000 }, units, ..Default::default() }
+    }
+
+    #[test]
+    fn current_mod_filters_4_to_1() {
+        use analog::intent::{MatchClass, MatchKind};
+        let a = row(&[(0, 500), (0, 1500), (0, 2500), (0, 3500)], 4000);
+        let b = row(&[(0, 500), (0, 1500)], 2000);
+        assert_eq!(member_aspect(&a), 4.0);
+        assert_eq!(member_aspect(&b), 2.0);
+        let lim = aspect_limit(Some(MatchClass::Moderate), Some(MatchKind::Current)).unwrap();
+        assert_eq!(lim, 3.0);
+        let mut v = vec![a, b];
+        assert!(keep_compact(&mut v, lim));
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].bbox.w, 2000);
+    }
+
+    #[test]
+    fn last_variant_is_kept_and_reported() {
+        use analog::intent::{MatchClass, MatchKind};
+        let a = row(&[(0, 500), (0, 1500), (0, 2500), (0, 3500)], 4000);
+        let b = row(&[(0, 500), (0, 1500)], 2000);
+        let mut v = vec![a.clone()];
+        assert!(!keep_compact(&mut v, aspect_limit(Some(MatchClass::Exceptional), Some(MatchKind::Voltage)).unwrap()));
+        assert_eq!(v.len(), 1);
+        // With none in reach the squarest survives, wherever it sits.
+        let mut v = vec![a, b];
+        assert!(!keep_compact(&mut v, 1.5));
+        assert_eq!((v.len(), v[0].bbox.w), (1, 2000));
+        assert_eq!(aspect_limit(Some(MatchClass::Moderate), Some(MatchKind::Ratio)), None);
+        assert_eq!(aspect_limit(None, Some(MatchKind::Current)), Some(3.0));
+        assert_eq!(aspect_limit(Some(MatchClass::Exceptional), None), None);
+    }
+
+    #[test]
+    fn an_interdigitated_member_spans_the_row() {
+        // ABAB: each member's subarray is its own span (2 pitches + 1 = 3000 × 1000), not one unit (1.0).
+        let m = row(&[(0, 500), (1, 1500), (0, 2500), (1, 3500)], 4000);
+        assert_eq!(member_aspect(&m), 3.0);
     }
 
     /// Two MOSFETs on three nets — the smallest circuit with a real variant space.
@@ -1465,7 +1576,7 @@ mod tests {
                 series_parallel: SeriesParallel::Parallel,
                 dummy_required: false,
                 route_matching_required: false,
-                class: None, series: Vec::new(), style: None,
+                class: None, kind: None, series: Vec::new(), style: None,
             }],
             ..Default::default()
         }
@@ -2027,7 +2138,7 @@ mod tests {
                 series_parallel: SeriesParallel::Parallel,
                 dummy_required: true,
                 route_matching_required: true,
-                class: Some(pnr_core::MatchClass::Exceptional), series: Vec::new(), style: None,
+                class: Some(pnr_core::MatchClass::Exceptional), kind: None, series: Vec::new(), style: None,
             }],
             ..Default::default()
         };
