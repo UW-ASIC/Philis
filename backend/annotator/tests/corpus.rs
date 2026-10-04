@@ -311,6 +311,16 @@ fn no_emitted_conflicts() {
     }
 }
 
+/// GAP-09: no rule clash on any corpus circuit (master §6 "EXT M3").
+#[test]
+fn clean_corpus_has_no_conflicts() {
+    for (name, src) in all() {
+        let p = annotate(&net(src), &cfg(name));
+        let c: Vec<_> = p.intent.diagnostics.iter().filter(|d| d.kind == "conflict").collect();
+        assert!(c.is_empty(), "{name}: {c:?}");
+    }
+}
+
 /// AA-13: the clocked tail `mn0` sits in the input pair's stage, so it gets
 /// Proximity ≤ 5 µm to `mn1`/`mn2`; Isolation
 /// from them would contradict it. GAP-04 exempts same-block pairs.

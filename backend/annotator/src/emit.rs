@@ -243,6 +243,24 @@ const ISOLATION_EPI_MULTIPLE: i32 = 4;
 /// not hold (isolation keeps improving with distance; SUB-32).
 const NOMINAL_EPI_NM: i32 = 2_500;
 
+/// The epi thickness `isolation` scales, or the `missing` input that leaves it unknown.
+fn calibration(kind: pnr_core::SubstrateKind, epi_nm: Option<i32>) -> Result<i32, &'static str> {
+    use pnr_core::SubstrateKind;
+    match (kind, epi_nm) {
+        (SubstrateKind::EpiOnLowRes, Some(epi)) => Ok(epi),
+        (SubstrateKind::EpiOnLowRes, None) => Err("deck epi_thickness_nm"),
+        (SubstrateKind::Bulk, _) => Err("bulk substrate: no plateau distance"),
+        (SubstrateKind::Unknown, _) => Err("substrate kind unknown"),
+    }
+}
+
+/// The edge-to-edge distance [`isolation`] asks: `4·t_epi`, at
+/// [`NOMINAL_EPI_NM`] when uncalibrated.
+#[must_use]
+pub fn isolation_min_nm(kind: pnr_core::SubstrateKind, epi_nm: Option<i32>) -> i32 {
+    ISOLATION_EPI_MULTIPLE * calibration(kind, epi_nm).unwrap_or(NOMINAL_EPI_NM)
+}
+
 /// Substrate isolation (ENV-04; Charbon 2001 ch.2 injection → propagation →
 /// reception): every EXT-23 `aggressor` (Switching or Capacitive) is kept
 /// `ISOLATION_EPI_MULTIPLE·t_epi` edge-to-edge from every `victim`, except
@@ -261,15 +279,9 @@ pub fn isolation(
     epi_nm: Option<i32>,
     r: &mut Requirements<Layout>,
 ) -> Option<&'static str> {
-    use pnr_core::SubstrateKind;
     let n = aggressor.len();
-    let calibrated = match (kind, epi_nm) {
-        (SubstrateKind::EpiOnLowRes, Some(epi)) => Ok(epi),
-        (SubstrateKind::EpiOnLowRes, None) => Err("deck epi_thickness_nm"),
-        (SubstrateKind::Bulk, _) => Err("bulk substrate: no plateau distance"),
-        (SubstrateKind::Unknown, _) => Err("substrate kind unknown"),
-    };
-    let min_distance_nm = ISOLATION_EPI_MULTIPLE * calibrated.unwrap_or(NOMINAL_EPI_NM);
+    let calibrated = calibration(kind, epi_nm);
+    let min_distance_nm = isolation_min_nm(kind, epi_nm);
     let dev = |d: usize| Target::Device(DeviceId(d as u16));
     let rules: Vec<Isolation> = (0..n)
         .filter(|&a| aggressor[a])
@@ -452,6 +464,31 @@ mod tests {
         let iso = isolated(&p.placement.cost);
         assert!(!iso.iter().any(|&(a, v)| a == mn0 && (v == mn1 || v == mn2)), "tail isolated from its pair: {iso:?}");
         assert!(iso.contains(&(xs, mn1)) && iso.contains(&(xs, mn2)), "an outside aggressor still is: {iso:?}");
+    }
+
+    /// GAP-09 (b): a sidecar group holding aggressor `XS` and victim `mn1`
+    /// pulls them ≤ 5 µm while Isolation pushes ≥ 10 µm: the user pull wins,
+    /// the Isolation pair is dropped and both ids are reported.
+    #[test]
+    fn proximity_below_isolation_is_a_conflict() {
+        let (nl, mut cfg) = strongarm_like();
+        let (mn1, mn2, xs) = (0u32, 1, 5);
+        cfg.groups = vec![(0, vec![DeviceId(xs as u16), DeviceId(mn1 as u16)])];
+        let p = crate::annotate(&nl, &cfg);
+        let iso = isolated(&p.placement.cost);
+        assert!(!iso.contains(&(xs, mn1)) && !iso.contains(&(mn1, xs)), "{iso:?}");
+        assert!(iso.contains(&(xs, mn2)), "{iso:?}");
+        let id = |f: &dyn Fn(&dyn analog::RuleBatch<Layout>) -> bool| {
+            p.placement.budget.iter().chain(&p.placement.cost).find(|b| f(b.as_ref())).and_then(|b| b.meta()).map(|m| m.id.0).unwrap()
+        };
+        let user_id = id(&|b| b.meta().is_some_and(|m| m.origin == analog::intent::Origin::User { index: 0 }));
+        let iso_id = id(&|b| b.kind().ends_with("::Isolation"));
+        let c: Vec<_> = p.intent.diagnostics.iter().filter(|d| d.kind == "conflict").collect();
+        assert_eq!(c.len(), 1, "{:?}", p.intent.diagnostics);
+        let mut devs: Vec<u16> = c[0].devices.iter().map(|d| d.0).collect();
+        devs.sort_unstable();
+        assert_eq!(devs, [mn1 as u16, xs as u16]);
+        assert!(c[0].message.starts_with(&format!("ids {user_id},{iso_id}:")), "{}", c[0].message);
     }
 
     /// REL C3: epi on p+ saturates at 4·t_epi (Su), a budget the search pays.
