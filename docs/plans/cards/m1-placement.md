@@ -4,6 +4,8 @@
 (`721d775`), PLC-03 (`505644c`) and PLC-06 (`c29b238`) are already committed on this branch; their cards below are
 kept as the record and their line numbers are the old base's. The merged tree passes `cargo check --workspace
 --tests` and `cargo test -p dp` (33 passed). **Only PLC-10 step 0 remains**; its card is refreshed to today's lines.
+**PLC-06 acceptance is not met** (OTA key tier 265.0 → 265.3 fF, +0.1 %, see its Measured block): the owner must
+accept it or reopen PLC-06 before M1 closes.
 
 Branch `m1a-placement`, worktree `philis-m1a/placement`, base `850560f` (`git merge m1a` fast-forwarded: no
 conflicts). Spec: `plan-04-placement.md` §3. Line numbers are this base's; where the plan's differ, the card wins.
@@ -111,6 +113,23 @@ Tests:
   `cargo test --release -p library --test placement_metrics` (dac4 in debug takes tens of minutes).
 - Acceptance: run (B). `lattice off` must be 0 on every row. DRC per fixture must be ≤ baseline-plc-01.md (or ≤ the
   pre-item bench on this base if a fixture's baseline row has changed since M0; record both).
+- Measured (B, seeds 1–5, the merged tree with PLC-02/04/03 and without `c29b238`; the same run as PLC-06's "before"
+  column), median `(hard, key tier, area)`. `lattice off` is 0 on all 50 rows (baseline-plc-01.md: nonzero on 8 of 10
+  fixtures). DRC is 0 on all 50 rows; the baseline is 0 on every fixture and seed, so DRC ≤ baseline holds. No ringed
+  fixture's DRC rose.
+
+  | fixture | lex key (median) | lattice off | DRC now / baseline |
+  |---|---|---|---|
+  | bgr_core | 0, 18.1, 135.0 | 0 | 0 / 0 |
+  | bjt_mirror | 0, 32.8, 64.7 | 0 | 0 / 0 |
+  | chain4 | 0, 8.5, 62.7 | 0 | 0 / 0 |
+  | dac4 | 1, 127.1, 1722.4 | 0 | 0 / 0 |
+  | ota, ota_constrained, tt_ota | 0, 265.0, 1723.4 | 0 | 0 / 0 |
+  | pair | 0, 3.3, 8.6 | 0 | 0 / 0 |
+  | quad | 0, 6.0, 16.0 | 0 | 0 / 0 |
+  | rc_filter | 0, 7.4, 131.8 | 0 | 0 / 0 |
+
+  No per-item run was kept between PLC-02, PLC-04 and PLC-03, so this one table is the record for all three.
 
 Risk: the guard ring is drawn inside the reservation by shrinking the placed bbox by the unrounded `ring_halo`
 (`kernel/cells/src/post_cell.rs`). Padding on the right and top therefore only widens the ring's inner clearance.
@@ -193,6 +212,10 @@ Tests:
   now also rejects steps that raise the summed mirror error in µm. Before this item, each violated `Symmetry` rule
   added 1.0, so the gate saw only the count. If a fixture's lex key regresses, stop and report it with the bench
   rows. Do not change gp's gate inside this item.
+- Measured (B, seeds 1–5, the merged tree with PLC-02/04/03 and without `c29b238`; the same run as PLC-06's "before"
+  column), median `(hard, key tier, area)`: lex keys are the PLC-02 table's column (the tree carries PLC-04). No debug
+  flow test panicked in placement. There is no post-PLC-02-only run to diff against, so a PLC-04-only regression
+  cannot be ruled out from the bench. The lex keys before PLC-02/04/03 were not recorded in baseline-plc-01.md either.
 
 ---
 
@@ -372,6 +395,11 @@ Tests (`backend/dp/src/tests.rs` unless noted). The `run` helper builds
 Risk: a matched pair that is also a `Symmetry` pair but has differing variant spaces is now a permanent hard
 `Symmetry` violation (an EXT error, AA-05). One way this can happen is a guard-ring halo on only one partner. The
 `matched incompat` column makes it visible. Do not exempt it.
+- Measured (B, seeds 1–5, the merged tree with PLC-02/04/03 and without `c29b238`; the same run as PLC-06's "before"
+  column), median `(hard, key tier, area)`: `matched mismatch` is 0 on all 50 rows, and `matched incompat` prints a
+  number on every row. That number is 0 on every fixture and seed (bgr_core, bjt_mirror, chain4, dac4, ota,
+  ota_constrained, pair, quad, rc_filter, tt_ota), so no fixture needs to be reported with its `place_hard`. An
+  earlier run on the pre-merge base (seeds 1–15) also gave 0 / 0 everywhere.
 
 ---
 

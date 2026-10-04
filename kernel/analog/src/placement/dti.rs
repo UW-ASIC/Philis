@@ -100,7 +100,7 @@ mod tests {
         }
     }
 
-    /// Share below 200 nm, isolate above 2000 nm; the 1800 nm between is forbidden.
+    /// Share at or below 200 nm, isolate at or above 2000 nm; the band strictly between is forbidden.
     fn rule() -> DtiBand {
         DtiBand {
             a: Target::Device(DeviceId(0)),

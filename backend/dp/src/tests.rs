@@ -452,11 +452,14 @@ fn symmetry_holds_at_exit_with_room_to_move() {
 #[test]
 fn projection_moves_fixed_cells_but_not_their_shape() {
     let (reqs, coarse) = sym_bench();
+    let mut moved = false;
     for seed in 0..4u64 {
         let l = run(&coarse, &[], &[], &reqs, &[true, false], seed);
         assert_eq!(analog_violations(&reqs, &l), 0, "seed {seed}");
         assert_eq!((l.hw[0], l.hh[0], l.orient[0]), (coarse.hw[0], coarse.hh[0], Orient::R0), "seed {seed}");
+        moved |= (l.x[0], l.y[0]) != (coarse.x[0], coarse.y[0]);
     }
+    assert!(moved, "fixed cell 0 never left its coarse position");
 }
 
 /// A mirror pair stacked on its own axis satisfies `Symmetry` with zero
