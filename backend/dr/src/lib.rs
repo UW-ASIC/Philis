@@ -198,10 +198,11 @@ impl DetailedCfg {
     }
 }
 
-/// What one `route` call measured. Fields an item has not landed yet stay
-/// zero: timings and `expanded` (RTE-13), `coarsened`
-/// (RTE-13), `width_fallbacks` (RTE-22), `single_cut_vias` (RTE-27),
-/// `congestion` (RTE-25, absolute nm).
+/// What one `route` call measured: wall time per stage, µs (landing,
+/// negotiation, repair + shields, geometry through via arrays, fill), search
+/// heap pops (`expanded`), and whether the lattice was coarsened. Fields an
+/// item has not landed yet stay zero: `width_fallbacks` (RTE-22),
+/// `single_cut_vias` (RTE-27), `congestion` (RTE-25, absolute nm).
 #[derive(Default, Clone, Debug)]
 pub struct RouteStats {
     pub us_landing: u64,
@@ -346,7 +347,7 @@ impl DetailedRoute {
         let compact: Vec<usize> = (0..n_nets).filter(|&i| !term_rects[i].is_empty()).collect();
         if compact.is_empty() {
             let routes = Routes { wires: vec![Vec::new(); n_nets], ..Default::default()  };
-            let report = score(&routes, reqs, 0.0, &[], &[], &[], &[]);
+            let report = score(&routes, reqs, 0.0, &[], &[], &[], &[], 1);
             return (routes, report, RouteStats::default());
         }
         let mut ci_of = vec![usize::MAX; n_nets];
@@ -371,6 +372,11 @@ impl DetailedRoute {
         // Pins that got no node, per compact net: an open the geometry cannot show.
         let mut unlanded = vec![0usize; n_compact];
 
+        // Stage timers (RouteStats::us_*), and the spatial index bucket.
+        let mut stats = RouteStats::default();
+        let us = |t: std::time::Instant| t.elapsed().as_micros() as u64;
+        let side = 4 * cfg.pitch;
+        let t_landing = std::time::Instant::now();
         // Every pin grows a stitch pad; a foreign jog through that zone is a short.
         let zones: Vec<(u32, i32, i32)> = all_pins
             .iter()
@@ -571,6 +577,7 @@ impl DetailedRoute {
             }
         }
 
+        stats.us_landing = us(t_landing);
         let weight: Vec<f32> = compact.iter().map(|&n| cfg.net_weight.get(n).copied().unwrap_or(0.0)).collect();
         let counts: Vec<usize> = c_terms.iter().map(Vec::len).collect();
         let net_ids: Vec<u32> = compact.iter().map(|&n| n as u32).collect();
@@ -658,7 +665,12 @@ impl DetailedRoute {
         };
         neg.seed(&mut hot.hist, abs);
         jog_hist.iter().for_each(|&n| hot.hist[n as usize] += JOG_HIST);
-        let (_, pf_iters) = run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS);
+        // One search scratch for the whole call: negotiation, repair, shields.
+        let mut dij = Dij::new(cold.graph.nodes());
+        let t = std::time::Instant::now();
+        (_, stats.pf_iters) = run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS, &mut dij);
+        stats.us_negotiate = us(t);
+        let t_repair = std::time::Instant::now();
 
         // A net over its IR-drop budget reroutes pricing its series R, weighted
         // by the DC current it carries (the larger of what its pins draw and
@@ -715,7 +727,7 @@ impl DetailedRoute {
                 (top + 1 < n_layers && !sites.is_empty()).then_some((top, sites))
             })
             .collect();
-        let trials = repair_constraints(&mut hot, &cold, reqs, &extra, &common, &ci_of, &lift, probe);
+        stats.trials = repair_constraints(&mut hot, &cold, reqs, &extra, &common, &ci_of, &lift, probe, &mut dij);
 
         // The jog price is this layout's, not negotiation history.
         jog_hist.iter().for_each(|&n| hot.hist[n as usize] -= JOG_HIST);
@@ -729,9 +741,10 @@ impl DetailedRoute {
         let ci = |n: u32| ci_of.get(n as usize).copied().filter(|&c| c != usize::MAX);
         for (v, rf) in asks {
             if let (Some(v), Some(rf)) = (ci(v), ci(rf)) {
-                add_shield(&mut hot, &mut cold, v, rf);
+                add_shield(&mut hot, &mut cold, v, rf, &mut dij);
             }
         }
+        stats.us_repair = us(t_repair);
         let overuse = overuse(&hot);
         let edge_ua: Vec<Vec<(u32, u32, f32)>> =
             (0..n_compact).map(|ci| branch_currents(&hot.trees[ci], &node_ua[ci])).collect();
@@ -742,6 +755,7 @@ impl DetailedRoute {
             edge_ua[ci].iter().filter(|&&(a, b, _)| at(g.pos(a)) && at(g.pos(b))).map(|e| e.2).fold(0.0, f32::max)
         };
 
+        let t_geometry = std::time::Instant::now();
         let mut routes = build_routes(&hot, &cold, cfg, &compact, n_nets, layers, cuts);
         // Shapes at or past this index per net are access geometry — the only
         // shapes the short resolver may sacrifice.
@@ -760,7 +774,7 @@ impl DetailedRoute {
         for (k, &ci) in cold.order.iter().enumerate() {
             rank[compact[ci as usize]] = k;
         }
-        break_shorts(&mut routes.wires, &pre_access, &rank, &joins, &mut sacrificed);
+        break_shorts(&mut routes.wires, &pre_access, &rank, &joins, &mut sacrificed, side);
 
         // EM: per segment, the width its current needs. A merged run of more
         // tracks than its segment needs (`k` is per net until RTE-14) is drawn
@@ -808,6 +822,7 @@ impl DetailedRoute {
             .enumerate()
             .flat_map(|(n, w)| w.iter().filter(|c| cuts.iter().any(|&(l, ..)| l == c.layer)).map(move |c| (n, *c)))
             .collect();
+        let cut_index = ShapeIndex::new(side, all_cuts.iter().map(|(_, c)| (c.layer, c.rect)));
         for (net, wires) in routes.wires.iter_mut().enumerate() {
             // The pair of same-net rects on `lo` and `hi` that both fully
             // cover `r` with the largest overlap.
@@ -893,7 +908,10 @@ impl DetailedRoute {
                         // Cut spacing binds same-net cuts too: every other original cut,
                         // and every array cut already placed.
                         let ok = |f: &Shape| f.layer != c.layer || rect_gap(f.rect, r) >= cut_space;
-                        let clear = all_cuts.iter().all(|&(n, f)| (n == net && f.rect == c.rect) || ok(&f))
+                        let clear = cut_index.near(c.layer, r, cut_space).all(|k| {
+                            let (n, f) = all_cuts[k as usize];
+                            (n == net && f.rect == c.rect) || ok(&f)
+                        })
                             && out[before..].iter().chain(&placed).all(ok);
                         if clear {
                             out.push(Shape { layer: c.layer, rect: r });
@@ -909,6 +927,8 @@ impl DetailedRoute {
             *wires = out;
         }
 
+        stats.us_geometry = us(t_geometry);
+        let t_fill = std::time::Instant::now();
         // Same-net sliver and notch filling (never within spacing of foreign metal).
         let flat: Vec<(usize, Shape)> =
             routes.wires.iter().enumerate().flat_map(|(i, w)| w.iter().map(move |s| (i, *s))).collect();
@@ -975,6 +995,7 @@ impl DetailedRoute {
             }
         }
 
+        stats.us_fill = us(t_fill);
         (routes.cell, routes.gates) = (cell_abs, gates_abs);
         // The terminals and their currents, for the EM rule. Final routes only:
         // the repair probes carry none, so EM reads unknown there; repair
@@ -984,11 +1005,12 @@ impl DetailedRoute {
         for &(net, r, _) in &all_pins {
             routes.terms[net.0 as usize].push(pnr_core::Terminal { at: r, ua: pin_ua(net, r) });
         }
-        let mut report = score(&routes, reqs, overuse, &joins, &foreign_metal, &sacrificed, &em_shortfall);
+        let mut report = score(&routes, reqs, overuse, &joins, &foreign_metal, &sacrificed, &em_shortfall, side);
         for (net, &r) in em_cuts.iter().enumerate().filter(|(_, &r)| r > 0.0) {
             report.budget_violations.push(Violation::from_residual(format!("em cuts net {net}"), r));
         }
-        (routes, report, RouteStats { trials, overuse, pf_iters, ..RouteStats::default() })
+        (stats.overuse, stats.expanded, stats.coarsened) = (overuse, dij.pops, cold.graph.coarsened);
+        (routes, report, stats)
     }
 }
 
@@ -1480,6 +1502,7 @@ fn repair_constraints(
     ci_of: &[usize],
     lift: &[Option<(u32, Vec<((i32, i32), Rect)>)>],
     probe: impl Fn(&RouteHot) -> Routes,
+    dij: &mut Dij,
 ) -> u32 {
     let key = |hot: &RouteHot| {
         let r = probe(hot);
@@ -1579,7 +1602,7 @@ fn repair_constraints(
             }
             for t in trials {
                 n += u32::from(!t.is_empty());
-                accepted |= trial(hot, cold, t, p_fac, &key);
+                accepted |= trial(hot, cold, t, p_fac, &key, dij);
             }
         }
         if !accepted {
@@ -1598,6 +1621,7 @@ fn trial(
     reroutes: Vec<(usize, Vec<f32>)>,
     p_fac: f32,
     key: &impl Fn(&RouteHot) -> (u32, f64, f32),
+    dij: &mut Dij,
 ) -> bool {
     if reroutes.is_empty() {
         return false;
@@ -1607,9 +1631,8 @@ fn trial(
     for &(n, _) in &old {
         cold.commit(hot, n, Vec::new());
     }
-    let mut dij = Dij::new(cold.graph.nodes());
     for ((n, field), (_, prev)) in reroutes.into_iter().zip(&old) {
-        let tree = cold.reroute(hot, n, p_fac, &field, &mut dij).unwrap_or_else(|| prev.clone());
+        let tree = cold.reroute(hot, n, p_fac, &field, dij).unwrap_or_else(|| prev.clone());
         cold.commit(hot, n, tree);
     }
     let after = key(hot);
@@ -1628,7 +1651,7 @@ fn trial(
 /// as an extra terminal, so each shield is tied in by real routing. The claims
 /// join the reference tree. All-or-nothing: if the reroute fails or adds
 /// overuse, nothing changes.
-fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize, reference: usize) {
+fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize, reference: usize, dij: &mut Dij) {
     let g = &cold.graph;
     let free = |n: u32| {
         let i = n as usize;
@@ -1678,8 +1701,7 @@ fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize,
         }
     }
     cold.terms[reference].extend(claims.iter().map(|c| c[0]));
-    let mut dij = Dij::new(cold.graph.nodes());
-    let routed = cold.reroute(hot, reference, P_FAC, &[], &mut dij);
+    let routed = cold.reroute(hot, reference, P_FAC, &[], dij);
     if let Some(mut tree) = routed {
         tree.extend(claims);
         cold.commit(hot, reference, tree);
@@ -1920,6 +1942,7 @@ fn score(
     foreign: &[(Option<u32>, Shape)],
     sacrificed: &[usize],
     em_shortfall: &[f64],
+    side: i32,
 ) -> Report {
     let (mut hard, mut budget) = gr::analog_tiers(routes, reqs);
     for (net, shapes) in routes.wires.iter().enumerate() {
@@ -1933,7 +1956,7 @@ fn score(
     for (net, &n) in sacrificed.iter().enumerate().filter(|(_, &n)| n > 0) {
         hard.push(Violation { rule: format!("pin access sacrificed on net {net}"), margin: n as i64 });
     }
-    let (nets, cell) = cross_net_shorts(&routes.wires, joins, foreign);
+    let (nets, cell) = cross_net_shorts(&routes.wires, joins, foreign, side);
     for (a, b) in nets {
         hard.push(Violation { rule: format!("drawn short nets {a}/{b}"), margin: 1 });
     }
@@ -2153,28 +2176,81 @@ pub fn joins(layers: &[LayerId], cuts: &[Cut], pin_access: Option<(LayerId, Cut)
     stack.chain(access).collect()
 }
 
+/// A uniform-bucket spatial index over `(layer, rect)` items, by item index
+/// (buckets of `side` nm; `4·pitch` in `route`).
+struct ShapeIndex {
+    side: i32,
+    cells: HashMap<(LayerId, i32, i32), Vec<u32>>,
+}
+
+impl ShapeIndex {
+    fn new(side: i32, items: impl IntoIterator<Item = (LayerId, Rect)>) -> Self {
+        let mut idx = Self { side: side.max(1), cells: HashMap::new() };
+        for (k, (l, r)) in items.into_iter().enumerate() {
+            let (x0, x1, y0, y1) = idx.span(r, 0);
+            for cx in x0..=x1 {
+                for cy in y0..=y1 {
+                    idx.cells.entry((l, cx, cy)).or_default().push(k as u32);
+                }
+            }
+        }
+        idx
+    }
+
+    /// Bucket range of `r` grown by `halo`, edges inclusive (touching rects share a bucket).
+    fn span(&self, r: Rect, halo: i32) -> (i32, i32, i32, i32) {
+        let b = |v: i32| v.div_euclid(self.side);
+        (b(r.x - halo), b(r.x + r.w + halo), b(r.y - halo), b(r.y + r.h + halo))
+    }
+
+    /// Items on `layer` in a bucket `r` grown by `halo` reaches: a superset of
+    /// those within `halo` of `r`, an item possibly more than once.
+    fn near(&self, layer: LayerId, r: Rect, halo: i32) -> impl Iterator<Item = u32> + '_ {
+        let (x0, x1, y0, y1) = self.span(r, halo);
+        (x0..=x1).flat_map(move |cx| (y0..=y1).filter_map(move |cy| self.cells.get(&(layer, cx, cy)))).flatten().copied()
+    }
+}
+
+/// The layers a shape on `layer` can meet ([`conductor_layers_meet`]): its
+/// own, the cuts landing on it, and a cut's two conductors.
+fn meeting(layer: LayerId, joins: &[Join]) -> Vec<LayerId> {
+    let mut out = vec![layer];
+    for &(c, lo, hi) in joins {
+        if lo == layer || hi == layer {
+            out.push(c);
+        }
+        if c == layer {
+            out.extend([lo, hi]);
+        }
+    }
+    out
+}
+
 /// Break drawn shorts between nets by deleting access shapes (index
 /// `>= pre_access[net]`). Every touching cross-net pair `(a, b, i, j)` (a cut
 /// counts on both layers it joins) is listed once, then taken in order, skipping
 /// a pair whose shape is already gone: an access shape of the net later in
 /// `rank` (position in the routing order) goes first, else the other net's,
 /// each counted in `sacrificed`. A trunk-vs-trunk pair deletes nothing; `score`
-/// reports it.
-///
-/// ponytail: one O(S²) pass; a spatial index makes it near-linear.
-fn break_shorts(wires: &mut [Vec<Shape>], pre_access: &[usize], rank: &[usize], joins: &[Join], sacrificed: &mut [usize]) {
+/// reports it. Candidates come from a [`ShapeIndex`] of `side` nm buckets.
+fn break_shorts(wires: &mut [Vec<Shape>], pre_access: &[usize], rank: &[usize], joins: &[Join], sacrificed: &mut [usize], side: i32) {
+    let flat: Vec<(usize, usize)> = wires.iter().enumerate().flat_map(|(n, w)| (0..w.len()).map(move |i| (n, i))).collect();
+    let idx = ShapeIndex::new(side, flat.iter().map(|&(n, i)| (wires[n][i].layer, wires[n][i].rect)));
     let mut pairs = Vec::new();
-    for a in 0..wires.len() {
-        for b in (a + 1)..wires.len() {
-            for (i, sa) in wires[a].iter().enumerate() {
-                for (j, sb) in wires[b].iter().enumerate() {
-                    if conductor_layers_meet(sa, sb, joins) && rect_gap(sa.rect, sb.rect) == 0 {
-                        pairs.push((a, b, i, j));
-                    }
+    for &(a, i) in &flat {
+        let sa = &wires[a][i];
+        for l in meeting(sa.layer, joins) {
+            for k in idx.near(l, sa.rect, 0) {
+                let (b, j) = flat[k as usize];
+                let sb = &wires[b][j];
+                if b > a && conductor_layers_meet(sa, sb, joins) && rect_gap(sa.rect, sb.rect) == 0 {
+                    pairs.push((a, b, i, j));
                 }
             }
         }
     }
+    pairs.sort_unstable();
+    pairs.dedup();
     let mut gone: HashSet<(usize, usize)> = HashSet::new();
     for (a, b, i, j) in pairs {
         if gone.contains(&(a, i)) || gone.contains(&(b, j)) {
@@ -2197,33 +2273,45 @@ fn break_shorts(wires: &mut [Vec<Shape>], pre_access: &[usize], rank: &[usize], 
 
 /// Every net pair whose geometry touches on one conductor (a cut counts on both
 /// layers it joins), and every net touching, on a shared conductor, a `foreign`
-/// cell or ring shape not owned by it.
-fn cross_net_shorts(wires: &[Vec<Shape>], joins: &[Join], foreign: &[(Option<u32>, Shape)]) -> (Vec<(usize, usize)>, Vec<usize>) {
+/// cell or ring shape not owned by it. Candidates come from [`ShapeIndex`]es
+/// of `side` nm buckets.
+fn cross_net_shorts(wires: &[Vec<Shape>], joins: &[Join], foreign: &[(Option<u32>, Shape)], side: i32) -> (Vec<(usize, usize)>, Vec<usize>) {
     let footprint = |s: &Shape| -> Vec<(LayerId, Rect)> {
         match joins.iter().find(|j| j.0 == s.layer) {
             Some(&(_, lo, hi)) => vec![(lo, s.rect), (hi, s.rect)],
             None => vec![(s.layer, s.rect)],
         }
     };
-    let nets: Vec<Vec<(LayerId, Rect)>> = wires.iter().map(|w| w.iter().flat_map(footprint).collect()).collect();
+    let nets: Vec<(usize, LayerId, Rect)> = wires.iter().enumerate().flat_map(|(n, w)| w.iter().flat_map(footprint).map(move |(l, r)| (n, l, r))).collect();
+    let idx = ShapeIndex::new(side, nets.iter().map(|&(_, l, r)| (l, r)));
     let mut pairs = Vec::new();
-    for a in 0..nets.len() {
-        for b in (a + 1)..nets.len() {
-            if nets[a].iter().any(|&(la, ra)| nets[b].iter().any(|&(lb, rb)| la == lb && rect_gap(ra, rb) == 0)) {
+    for &(a, l, r) in &nets {
+        for k in idx.near(l, r, 0) {
+            let (b, lb, rb) = nets[k as usize];
+            if b > a && lb == l && rect_gap(r, rb) == 0 {
                 pairs.push((a, b));
             }
         }
     }
+    pairs.sort_unstable();
+    pairs.dedup();
     // Only the conductors the routes draw on can be touched.
-    let drawn: HashSet<LayerId> = nets.iter().flatten().map(|f| f.0).collect();
+    let drawn: HashSet<LayerId> = nets.iter().map(|f| f.1).collect();
     let cell: Vec<(Option<u32>, LayerId, Rect)> = foreign
         .iter()
         .flat_map(|(o, s)| footprint(s).into_iter().map(move |(l, r)| (*o, l, r)))
         .filter(|f| drawn.contains(&f.1))
         .collect();
-    let to_cell = (0..nets.len())
-        .filter(|&n| nets[n].iter().any(|&(l, r)| cell.iter().any(|&(o, lc, rc)| o != Some(n as u32) && l == lc && rect_gap(r, rc) == 0)))
+    let cells = ShapeIndex::new(side, cell.iter().map(|&(_, l, r)| (l, r)));
+    let mut to_cell: Vec<usize> = nets
+        .iter()
+        .filter(|&&(n, l, r)| cells.near(l, r, 0).any(|k| {
+            let (o, lc, rc) = cell[k as usize];
+            o != Some(n as u32) && l == lc && rect_gap(r, rc) == 0
+        }))
+        .map(|f| f.0)
         .collect();
+    to_cell.dedup();
     (pairs, to_cell)
 }
 
@@ -2377,7 +2465,7 @@ mod tests {
             margin_pct: 10,
             stack: None,
         }]));
-        let report = score(&routes, &reqs, 0.0, &[], &[], &[], &[]);
+        let report = score(&routes, &reqs, 0.0, &[], &[], &[], &[], 1_000);
         assert_eq!(report.budget_violations[0].margin, 500);
     }
 
@@ -2954,8 +3042,8 @@ mod tests {
         let met1 = LAYERS[0];
         let wires = vec![vec![Shape { layer: met1, rect: Rect { x: 0, y: 0, w: 2_000, h: 260 } }]];
         let cell = Shape { layer: met1, rect: Rect { x: 1_000, y: 0, w: 170, h: 170 } };
-        assert_eq!(cross_net_shorts(&wires, &[], &[(Some(1), cell)]), (vec![], vec![0]));
-        assert_eq!(cross_net_shorts(&wires, &[], &[(Some(0), cell)]), (vec![], vec![]));
+        assert_eq!(cross_net_shorts(&wires, &[], &[(Some(1), cell)], 1_000), (vec![], vec![0]));
+        assert_eq!(cross_net_shorts(&wires, &[], &[(Some(0), cell)], 1_000), (vec![], vec![]));
     }
 
     /// Overlapping access jogs: the net later in the routing order loses its
@@ -2967,20 +3055,20 @@ mod tests {
         let wires = || vec![vec![m(0, 2_000), m(2_000, 300)], vec![m(5_000, 2_000), m(2_200, 2_800)]];
         let joins = joins(&LAYERS, &CUTS, None);
         let (mut w, mut sacrificed) = (wires(), vec![0; 2]);
-        break_shorts(&mut w, &[1, 1], &[0, 1], &joins, &mut sacrificed);
+        break_shorts(&mut w, &[1, 1], &[0, 1], &joins, &mut sacrificed, 1_000);
         assert_eq!(w, vec![wires()[0].clone(), vec![m(5_000, 2_000)]]);
         assert_eq!(sacrificed, [0, 1]);
         let (mut w, mut sacrificed) = (wires(), vec![0; 2]);
-        break_shorts(&mut w, &[1, 1], &[1, 0], &joins, &mut sacrificed);
+        break_shorts(&mut w, &[1, 1], &[1, 0], &joins, &mut sacrificed, 1_000);
         assert_eq!(w, vec![vec![m(0, 2_000)], wires()[1].clone()]);
         assert_eq!(sacrificed, [1, 0]);
         // The later net's side is trunk: the earlier net's jog goes instead.
         let (mut w, mut sacrificed) = (wires(), vec![0; 2]);
-        break_shorts(&mut w, &[1, 2], &[0, 1], &joins, &mut sacrificed);
+        break_shorts(&mut w, &[1, 2], &[0, 1], &joins, &mut sacrificed, 1_000);
         assert_eq!(w, vec![vec![m(0, 2_000)], wires()[1].clone()]);
         assert_eq!(sacrificed, [1, 0]);
         let (mut w, mut sacrificed) = (vec![vec![m(0, 2_000)], vec![m(1_000, 2_000)]], vec![0; 2]);
-        break_shorts(&mut w, &[1, 1], &[0, 1], &joins, &mut sacrificed);
+        break_shorts(&mut w, &[1, 1], &[0, 1], &joins, &mut sacrificed, 1_000);
         assert_eq!((w[1].len(), sacrificed), (1, vec![0, 0]));
     }
 
@@ -3177,5 +3265,15 @@ mod tests {
         assert!(!routes.wires[0].iter().any(|s| s.layer == LAYERS[0] && s.rect.w.min(s.rect.h) > 290 && s.rect.w.min(s.rect.h) >= 1_000 && s.rect.w.max(s.rect.h) > 2_000), "no merged wide run");
         let gap = routes.wires[0].iter().filter(|s| s.layer == LAYERS[0]).flat_map(|a| routes.wires[1].iter().filter(|b| b.layer == LAYERS[0]).map(move |b| rect_gap(a.rect, b.rect))).min();
         assert!(gap.is_none_or(|g| g >= 500), "{gap:?}");
+    }
+
+    /// A route fills its search count and stage timers.
+    #[test]
+    fn route_fills_stage_timers() {
+        let pins = [pin(0, 1_000, 1_000), pin(0, 18_000, 18_000)];
+        let reqs = Requirements::<Routes>::default();
+        let (_, _, stats) = DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        assert!(stats.expanded > 0);
+        assert!(stats.us_negotiate + stats.us_geometry > 0, "{stats:?}");
     }
 }

@@ -176,6 +176,13 @@ pub trait RGraph {
     fn via_halo(&self, a: u32, b: u32, out: &mut Vec<u32>) {
         let _ = (a, b, out);
     }
+    /// A lower bound on any path cost from `a` to `b` (the A* heuristic): it
+    /// must never exceed the cheapest edge sum, and must not drop by more than
+    /// an edge's base cost across it (consistent). Default: 0 (Dijkstra).
+    fn lower_bound(&self, a: u32, b: u32) -> f32 {
+        let _ = (a, b);
+        0.0
+    }
     /// Writes the footprint of a `k`-track connection anchored at `n`: its
     /// `k` across-tracks from `n` toward +, plus `guard` metal-free tracks each
     /// side where in bounds. `false` when a drawn track falls off the graph.
@@ -397,6 +404,12 @@ impl RGraph for TrackGrid {
             }
         }
         k
+    }
+    /// `|Δix| + |Δiy| + via_cost·|Δl|`: every edge costs at least its base
+    /// (1 per step, `via_cost` per via) and node costs are ≥ 0.
+    fn lower_bound(&self, a: u32, b: u32) -> f32 {
+        let ((ax, ay, al), (bx, by, bl)) = (self.ixy(a), self.ixy(b));
+        (ax.abs_diff(bx) + ay.abs_diff(by)) as f32 + self.via_cost * al.abs_diff(bl) as f32
     }
     fn footprint(&self, n: u32, k: u8, guard: u8, out: &mut Vec<u32>) -> bool {
         out.clear();
@@ -727,8 +740,11 @@ impl<G: RGraph> RouteCtx<G> {
     }
 }
 
-/// Stamp-based Dijkstra scratch, reused across searches without clearing.
+/// Stamp-based A* scratch, reused across searches without clearing: one per
+/// `dr::route` call.
 pub struct Dij {
+    /// Heap pops over every search this scratch ran (`RouteStats::expanded`).
+    pub pops: u64,
     dist: Vec<f32>,
     prev: Vec<u32>,
     seen: Vec<u32>,
@@ -743,6 +759,7 @@ impl Dij {
     #[must_use]
     pub fn new(nodes: usize) -> Self {
         Self {
+            pops: 0,
             dist: vec![0.0; nodes],
             prev: vec![NONE; nodes],
             seen: vec![0; nodes],
@@ -819,7 +836,7 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
     let halo = (&hot.halo[..], q.own_halo);
     let (old_nodes, penalty, keepout) = (q.own, q.penalty, q.keepout);
     let Some(&root) = terms.first() else { return Some(Vec::new()) };
-    let Dij { dist, prev, seen, stamp, heap, in_tree, is_old, is_old_halo } = dij;
+    let Dij { pops, dist, prev, seen, stamp, heap, in_tree, is_old, is_old_halo } = dij;
     // `call` marks old/tree membership for this call; each target search bumps
     // `stamp` again for `seen`. Stamps only grow, so stale marks never match.
     *stamp = stamp.wrapping_add(1);
@@ -923,16 +940,20 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
         *stamp = stamp.wrapping_add(1);
         let s = *stamp;
         heap.clear();
+        // A*: keyed by `g + h`; a stale entry's key no longer equals the
+        // same expression over the node's settled `g`, bit for bit.
+        let h = |n: u32| g.lower_bound(n, target);
         for &n in &tree {
             seen[n as usize] = s;
             dist[n as usize] = 0.0;
             prev[n as usize] = NONE;
-            heap.push(Reverse((0, n)));
+            heap.push(Reverse((h(n).to_bits(), n)));
         }
         let mut found = false;
-        while let Some(Reverse((db, n))) = heap.pop() {
-            let d = f32::from_bits(db);
-            if d > dist[n as usize] {
+        while let Some(Reverse((fb, n))) = heap.pop() {
+            *pops += 1;
+            let d = dist[n as usize];
+            if fb != (d + h(n)).to_bits() {
                 continue;
             }
             if n == target {
@@ -946,12 +967,13 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
                     continue;
                 }
                 let (Some(c), Some(v)) = (node_cost(i), corner(n, nb)) else { continue };
+                debug_assert!(c >= 0.0 && v >= 0.0, "negative node cost breaks A*");
                 let nd = d + base + c + v + via(n, nb);
                 if seen[i] != s || nd < dist[i] {
                     seen[i] = s;
                     dist[i] = nd;
                     prev[i] = n;
-                    heap.push(Reverse((nd.to_bits(), nb)));
+                    heap.push(Reverse(((nd + h(nb)).to_bits(), nb)));
                 }
             }
         }
@@ -988,9 +1010,8 @@ const STALL_ITERS: u32 = 10;
 /// history. Stops at zero overflow, on a no-move iteration, after
 /// `STALL_ITERS` iterations without an overflow decrease, or after
 /// `max_iters`. Returns `(Σ max(0, usage − cap), iterations run)`.
-pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: f32, hist_inc: f32, max_iters: u32) -> (f32, u32) {
+pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: f32, hist_inc: f32, max_iters: u32, dij: &mut Dij) -> (f32, u32) {
     let cap = cold.graph.cap();
-    let mut dij = Dij::new(cold.graph.nodes());
     let (mut overflow, mut best, mut stall, mut iters, mut p) = (0.0, f32::INFINITY, 0, 0, p_fac.min(P_FAC_MAX));
     for _ in 0..max_iters {
         iters += 1;
@@ -1003,7 +1024,7 @@ pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: 
             if !dirty || cold.terms[net].is_empty() {
                 continue;
             }
-            if let Some(branches) = cold.reroute(hot, net, p, &[], &mut dij) {
+            if let Some(branches) = cold.reroute(hot, net, p, &[], dij) {
                 cold.commit(hot, net, branches);
                 moved = true;
             }
@@ -1257,7 +1278,7 @@ mod tests {
         let terms = vec![vec![n(0, 4), n(11, 6)], vec![n(0, 5), n(11, 5)], vec![n(0, 6), n(11, 4)]];
         let cold = RouteCtx::new(g, terms, vec![0, 1, 2]);
         let mut hot = RouteHot::new(cold.graph.nodes(), 3);
-        let (over, iters) = run_pathfinder(&mut hot, &cold, 1.0, 0.5, 150);
+        let (over, iters) = run_pathfinder(&mut hot, &cold, 1.0, 0.5, 150, &mut Dij::new(cold.graph.nodes()));
         assert_eq!(over, 0.0);
         assert!(iters < 150, "{iters}");
     }
@@ -1271,7 +1292,7 @@ mod tests {
         let terms = vec![vec![n(0, 0), n(2, 0)], vec![n(2, 0), n(4, 0)]];
         let cold = RouteCtx::new(g, terms, vec![0, 1]);
         let mut hot = RouteHot::new(cold.graph.nodes(), 2);
-        let (over, iters) = run_pathfinder(&mut hot, &cold, 1.0, 0.5, 150);
+        let (over, iters) = run_pathfinder(&mut hot, &cold, 1.0, 0.5, 150, &mut Dij::new(cold.graph.nodes()));
         assert_eq!(over, 1.0);
         assert!((STALL_ITERS..=STALL_ITERS + 1).contains(&iters), "{iters}");
     }
@@ -1444,5 +1465,69 @@ mod tests {
         let empty = cold.graph.node(4, 5, 0);
         hot.halo[empty as usize] += 1;
         assert_eq!(hot.over(empty as usize, 1), 0, "two halos on an empty node");
+    }
+
+    /// `TrackGrid` without its A* bound: plain Dijkstra over the same graph.
+    struct NoBound(TrackGrid);
+    impl RGraph for NoBound {
+        fn nodes(&self) -> usize {
+            self.0.nodes()
+        }
+        fn cap(&self) -> u16 {
+            self.0.cap()
+        }
+        fn neighbors(&self, n: u32, out: &mut [(u32, f32); 6]) -> usize {
+            self.0.neighbors(n, out)
+        }
+        fn pos(&self, n: u32) -> (i32, i32, u32) {
+            self.0.pos(n)
+        }
+    }
+
+    /// Σ (edge base + history of the node entered) over a tree's branches.
+    fn tree_cost(g: &TrackGrid, hist: &[f32], tree: &[Vec<u32>]) -> f32 {
+        let mut buf = [(0u32, 0.0f32); 6];
+        tree.iter()
+            .flat_map(|b| b.windows(2))
+            .map(|w| {
+                let k = g.neighbors(w[0], &mut buf);
+                buf[..k].iter().find(|e| e.0 == w[1]).unwrap().1 + hist[w[1] as usize]
+            })
+            .sum()
+    }
+
+    /// A* finds paths of the same cost as Dijkstra on random history fields.
+    #[test]
+    fn astar_matches_dijkstra_cost() {
+        let mut seed = 0x2545_f491_u64;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as u32
+        };
+        for _ in 0..50 {
+            let g = TrackGrid::with_layers((30 * 100, 30 * 100), 100, 4.0, 2);
+            let mut hot = RouteHot::new(g.nodes(), 1);
+            hot.hist = (0..g.nodes()).map(|_| (rnd() % 2001) as f32 / 1000.0).collect();
+            let terms = [g.node(rnd() % 30, rnd() % 30, 0), g.node(rnd() % 30, rnd() % 30, 0)];
+            let q = search(&terms, Elec::default());
+            let a = route_net(&g, &hot, &[], &q, 1.0, &mut Dij::new(g.nodes())).unwrap();
+            let plain = NoBound(TrackGrid::with_layers((30 * 100, 30 * 100), 100, 4.0, 2));
+            let d = route_net(&plain, &hot, &[], &q, 1.0, &mut Dij::new(g.nodes())).unwrap();
+            let (ca, cd) = (tree_cost(&g, &hot.hist, &a), tree_cost(&g, &hot.hist, &d));
+            assert!((ca - cd).abs() < 1e-4 * cd.max(1.0), "A* {ca} vs Dijkstra {cd}");
+        }
+    }
+
+    /// On an open lattice A* pops at most half the nodes Dijkstra does.
+    #[test]
+    fn astar_expands_fewer_nodes() {
+        let g = TrackGrid::with_layers((200 * 100, 200 * 100), 100, 4.0, 2);
+        let hot = RouteHot::new(g.nodes(), 1);
+        let terms = [g.node(100, 100, 0), g.node(150, 100, 0)];
+        let q = search(&terms, Elec::default());
+        let (mut a, mut d) = (Dij::new(g.nodes()), Dij::new(g.nodes()));
+        route_net(&g, &hot, &[], &q, 1.0, &mut a).unwrap();
+        route_net(&NoBound(TrackGrid::with_layers((200 * 100, 200 * 100), 100, 4.0, 2)), &hot, &[], &q, 1.0, &mut d).unwrap();
+        assert!(a.pops * 2 <= d.pops, "A* {} vs Dijkstra {}", a.pops, d.pops);
     }
 }
