@@ -102,3 +102,24 @@ fn a_mim_dac_signs_off_with_its_capacitors() {
     let rows = lvs_rows(&sol, &pdk);
     assert!(rows.is_empty(), "{rows:?}");
 }
+
+/// CELL-18: a decoupling MIM written `VDD g` binds its bottom plate (`N`,
+/// the high-parasitic one) to the rail and its top plate to the gate-only
+/// net, and still signs off LVS clean.
+#[test]
+fn a_decoupling_cap_puts_its_bottom_plate_on_the_rail() {
+    let pdk = pdk();
+    let spice = ".subckt t VDD VSS g\nXM1 VSS g VSS VSS sky130_fd_pr__nfet_01v8 w=1u l=0.15u\nXC1 VDD g sky130_fd_pr__cap_mim_m3_1 W=5u L=5u m=1\n.ends t\n";
+    let cfg = library::Config { feedback_iters: 1, ..Default::default() };
+    let sol = library::run(spice, &pdk, &library::Macros::default(), &cfg).expect("flow");
+    let is = |name: &str, t: &str| name == t || name.ends_with(&format!(":{t}"));
+    let cap = sol.macros.iter().find(|m| m.pins.iter().any(|p| is(&p.name, "N"))).expect("the capacitor's cell");
+    let net = |t: &str| {
+        let p = cap.pins.iter().find(|p| is(&p.name, t)).expect("plate pin");
+        sol.netlist.nets[p.net.0 as usize].name.clone()
+    };
+    assert_eq!(net("N"), "VDD", "bottom plate on the rail");
+    assert_eq!(net("P"), "g", "top plate on the gate net");
+    let rows = lvs_rows(&sol, &pdk);
+    assert!(rows.is_empty(), "{rows:?}");
+}

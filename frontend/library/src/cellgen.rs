@@ -50,11 +50,13 @@ pub fn enumerate(
     merge_distinct_gates: bool,
 ) -> Cells {
     let cells: Vec<(Vec<DeviceId>, bool)> = constraints.unitization.iter().map(|u| (u.devices.clone(), u.route_matching_required)).collect();
-    enumerate_folded(netlist, macros, constraints, pdk, merge_distinct_gates, &folds(netlist, pdk, &[], &cells), None)
+    enumerate_folded(netlist, macros, constraints, pdk, merge_distinct_gates, &folds(netlist, pdk, &[], &cells), &[])
 }
 
 /// [`enumerate`] at a given fold table ([`folds`]); the flow computes it once
-/// so the cells and every LVS reference agree.
+/// so the cells and every LVS reference agree. `net_classes` names the rails:
+/// a dummy tie goes to Ground, and a single capacitor binds its bottom plate
+/// to the lower-impedance net (CELL-18, [`plate_rank`]).
 #[must_use]
 pub fn enumerate_folded(
     netlist: &Netlist,
@@ -63,8 +65,11 @@ pub fn enumerate_folded(
     pdk: &Pdk,
     merge_distinct_gates: bool,
     fold: &[(u16, i32)],
-    ground: Option<NetId>,
+    net_classes: &[analog::metadata::NetClassification],
 ) -> Cells {
+    use analog::metadata::NetClass;
+    let ground = net_classes.iter().find(|c| c.class == NetClass::Ground).map(|c| c.net);
+    let rails: Vec<NetId> = net_classes.iter().filter(|c| matches!(c.class, NetClass::Supply | NetClass::Ground)).map(|c| c.net).collect();
     let sized = with_per_device_sizing(netlist, constraints, fold);
     let n = netlist.devices.len();
     let dev = |d: &DeviceId| &netlist.devices[d.0 as usize];
@@ -181,6 +186,13 @@ pub fn enumerate_folded(
             for m in &mut alternatives {
                 bind_pins(m, netlist, &group.devices, ground);
             }
+            if d.kind == DeviceKind::Capacitor {
+                if let (Some(p), Some(n)) = (terminal(d, "P"), terminal(d, "N")) {
+                    if plate_rank(netlist, &rails, p) < plate_rank(netlist, &rails, n) {
+                        alternatives.iter_mut().for_each(swap_plates);
+                    }
+                }
+            }
             (group.devices, alternatives)
         };
         for d in &members {
@@ -200,6 +212,35 @@ pub fn enumerate_folded(
 
 fn terminal(d: &Device, name: &str) -> Option<NetId> {
     d.terminals.iter().find(|(t, _)| t == name).map(|(_, n)| *n)
+}
+
+/// A plate net's impedance rank (H06-40, H08-25): 0 a rail (Supply/Ground),
+/// 2 a net that only reaches MOS gates besides capacitors (high-Z), 1
+/// anything else. ponytail: class-only rank; EXT-18's net classes refine it.
+fn plate_rank(netlist: &Netlist, rails: &[NetId], net: NetId) -> u8 {
+    if rails.contains(&net) {
+        return 0;
+    }
+    let gate_only = netlist.devices.iter().all(|d| {
+        d.terminals.iter().filter(|(_, n)| *n == net).all(|(t, _)| d.kind == DeviceKind::Capacitor || matches!(d.kind, DeviceKind::Nmos | DeviceKind::Pmos) && t == "G")
+    });
+    if gate_only { 2 } else { 1 }
+}
+
+/// Put the bottom (`N`, high-parasitic) plate on the lower-impedance net:
+/// swap the bound nets of every `P` and `N` pin. The drawn card's nodes are
+/// these pins, so the LVS reference follows.
+fn swap_plates(m: &mut Macro) {
+    let term = |name: &str| name.rsplit(':').next().unwrap_or(name).to_string();
+    let net_of = |t: &str| m.pins.iter().find(|p| term(&p.name) == t).map(|p| p.net);
+    let (Some(p), Some(n)) = (net_of("P"), net_of("N")) else { return };
+    for pin in &mut m.pins {
+        match term(&pin.name).as_str() {
+            "P" => pin.net = n,
+            "N" => pin.net = p,
+            _ => {}
+        }
+    }
 }
 
 /// `members` as one series stack, in stack order, each with whether it is
@@ -1039,6 +1080,28 @@ mod tests {
             nets,
             ..Default::default()
         }
+    }
+
+    /// CELL-18: a rail ranks 0, a drain net 1, a gate-only net 2 (a
+    /// capacitor on it keeps it so); `swap_plates` swaps only `P`/`N`.
+    #[test]
+    fn plate_rank_orders_rail_signal_gate() {
+        let mut nl = two_devices();
+        let rails = [NetId(0), NetId(1)];
+        assert_eq!([0, 3, 2].map(|n| plate_rank(&nl, &rails, NetId(n))), [0, 1, 2]);
+        nl.devices.push(Device {
+            name: "C1".into(),
+            kind: DeviceKind::Capacitor, model: String::new(),
+            terminals: vec![("P".into(), NetId(2)), ("N".into(), NetId(3))],
+            params: Vec::new(),
+        });
+        assert_eq!(plate_rank(&nl, &rails, NetId(2)), 2, "a cap on a gate net keeps it high-Z");
+        let mut m = Macro::default();
+        for (name, net) in [("P", 3), ("N", 0), ("GND", 1)] {
+            m.pins.push(Pin { name: name.into(), net: NetId(net), layer: LayerId(1), at: Rect { x: 0, y: 0, w: 1, h: 1 } });
+        }
+        swap_plates(&mut m);
+        assert_eq!(m.pins.iter().map(|p| p.net.0).collect::<Vec<_>>(), [0, 3, 1]);
     }
 
     /// A hand-built space, so `realize`/`escalate` can be exercised with no PDK.
