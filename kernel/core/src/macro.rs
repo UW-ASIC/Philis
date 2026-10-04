@@ -51,7 +51,7 @@ pub struct Drawn {
     pub device: Option<crate::ids::DeviceId>,
     pub kind: DrawnKind,
     /// Terminal nodes in the LVS reference's pin order: R/C/D `[P, N]`; BJT
-    /// `cellgen::BJT_PINS` (the order `cellgen::reference` uses, one const so
+    /// `cellgen::BJT_PINS`, `[C, B, E]` (the order `cellgen::reference` uses, one const so
     /// the two cannot diverge).
     pub nodes: [Node; 3],
     /// Drawn body, nm: resistor segment W×L, MIM plate W×L, diode junction
