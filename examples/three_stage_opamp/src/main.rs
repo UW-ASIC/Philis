@@ -104,6 +104,7 @@ fn user_output_pmos(pdk: &Pdk) -> Macro {
         same_variant_required: true,
         dummy_required: false,
         route_matching_required: false,
+        class: None, series: Vec::new(), style: None,
     });
     let variant = Mosfet::enumerate(&group, &c, pdk).into_iter().next().expect("a PMOS variant");
     let mut m = variant.draw(&group, &c, pdk);

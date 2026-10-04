@@ -486,6 +486,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             same_variant_required: true,
             dummy_required: true,
             route_matching_required: true,
+            class: None, series: Vec::new(), style: None,
         });
     }
     // Uncovered bipolars of one kind and geometry on one base net are a
@@ -508,6 +509,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             same_variant_required: true,
             dummy_required: false,
             route_matching_required: true,
+            class: None, series: Vec::new(), style: None,
         });
     }
     // Uncovered MOS devices on the same four nets at the same W/L are one
@@ -530,6 +532,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             same_variant_required: true,
             dummy_required: false,
             route_matching_required: false,
+            class: None, series: Vec::new(), style: None,
         });
     }
     for (i, dev) in netlist
@@ -568,6 +571,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             same_variant_required: false,
             dummy_required: false,
             route_matching_required: false,
+            class: None, series: Vec::new(), style: None,
         });
     }
     // Fold every MOS unitization by its width class's factor: `k`× the
@@ -1367,6 +1371,7 @@ mod tests {
                 same_variant_required: true,
                 dummy_required: false,
                 route_matching_required: false,
+                class: None, series: Vec::new(), style: None,
             }],
             ..Default::default()
         }

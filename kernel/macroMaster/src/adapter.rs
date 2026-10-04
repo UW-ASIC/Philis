@@ -37,6 +37,7 @@ pub(crate) fn draw<G: Cell>(
             same_variant_required: true,
             dummy_required: dummies,
             route_matching_required: false,
+            class: None, series: Vec::new(), style: None,
         }],
         ..Constraints::default()
     };

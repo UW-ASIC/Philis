@@ -52,6 +52,10 @@ pub struct Problem {
     pub missing: Vec<(&'static str, &'static str)>,
     /// Every device, by id, with how recognition covers it (T7).
     pub coverage: Vec<(DeviceId, Coverage)>,
+    /// Extraction's contract (EXT-12); filled from EXT-13 on.
+    pub intent: analog::intent::Intent,
+    /// Symmetry axes the placement emits: one per block until EXT-20 (card D-b).
+    pub axis_count: usize,
 }
 
 /// How a device is covered: the one report that it got a constraint or why not.
@@ -244,7 +248,10 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         })
         .collect();
 
+    let intent = analog::intent::Intent::default();
     Problem {
+        intent,
+        axis_count: blocks.len(),
         placement,
         routing,
         coverage,

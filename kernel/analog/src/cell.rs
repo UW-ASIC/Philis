@@ -50,6 +50,12 @@ pub struct Unitization {
     pub same_variant_required: bool,
     pub dummy_required: bool,
     pub route_matching_required: bool,
+    /// None = not inferred; matched-cell readers use unwrap_or(Moderate) (C16).
+    pub class: Option<crate::intent::MatchClass>,
+    /// Per member; empty = all 1.
+    pub series: Vec<u16>,
+    /// None = today's choice.
+    pub style: Option<crate::intent::ArrayStyle>,
 }
 
 /// How units compose into one instance.

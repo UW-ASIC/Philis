@@ -745,3 +745,10 @@ fn more_nets_than_u16_ids_is_refused_not_wrapped() {
     let nl = Netlist { devices: Vec::new(), nets: vec![Net { name: "n".into() }; 65_536], ..Default::default() };
     let _ = annotate(&nl, &AnnotationConfig::default());
 }
+
+#[test]
+fn intent_empty_axes_per_block() {
+    let p = annotate(&ota(), &AnnotationConfig::default());
+    assert!(p.intent.sets.is_empty() && p.intent.compounds.is_empty());
+    assert_eq!(p.axis_count, p.blocks.len());
+}

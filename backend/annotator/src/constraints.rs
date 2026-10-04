@@ -62,6 +62,7 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block]) -> Constra
                 same_variant_required: true,
                 dummy_required: true,
                 route_matching_required: true,
+                class: None, series: Vec::new(), style: None,
             });
         }
 
