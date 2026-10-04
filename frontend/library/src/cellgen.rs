@@ -50,11 +50,13 @@ pub fn enumerate(
     merge_distinct_gates: bool,
 ) -> Cells {
     let cells: Vec<(Vec<DeviceId>, bool)> = constraints.unitization.iter().map(|u| (u.devices.clone(), u.route_matching_required)).collect();
-    enumerate_folded(netlist, macros, constraints, pdk, merge_distinct_gates, &folds(netlist, pdk, &[], &cells), None)
+    enumerate_folded(netlist, macros, constraints, pdk, merge_distinct_gates, &folds(netlist, pdk, &[], &cells), &[])
 }
 
 /// [`enumerate`] at a given fold table ([`folds`]); the flow computes it once
-/// so the cells and every LVS reference agree.
+/// so the cells and every LVS reference agree. `net_classes` names the rails:
+/// a dummy tie goes to Ground, and a single capacitor binds its bottom plate
+/// to the lower-impedance net (CELL-18, [`plate_rank`]).
 #[must_use]
 pub fn enumerate_folded(
     netlist: &Netlist,
@@ -63,8 +65,11 @@ pub fn enumerate_folded(
     pdk: &Pdk,
     merge_distinct_gates: bool,
     fold: &[(u16, i32)],
-    ground: Option<NetId>,
+    net_classes: &[analog::metadata::NetClassification],
 ) -> Cells {
+    use analog::metadata::NetClass;
+    let ground = net_classes.iter().find(|c| c.class == NetClass::Ground).map(|c| c.net);
+    let rails: Vec<NetId> = net_classes.iter().filter(|c| matches!(c.class, NetClass::Supply | NetClass::Ground)).map(|c| c.net).collect();
     let sized = with_per_device_sizing(netlist, constraints, fold);
     let n = netlist.devices.len();
     let dev = |d: &DeviceId| &netlist.devices[d.0 as usize];
@@ -178,7 +183,11 @@ pub fn enumerate_folded(
                 devices: vec![DeviceId(i as u16)],
             };
             let mut alternatives = draw_variants(d.kind, &d.model, &group, &sized, pdk);
+            let flip = d.kind == DeviceKind::Capacitor && bottom_on_p(netlist, &rails, d);
             for m in &mut alternatives {
+                if flip {
+                    swap_plates(m);
+                }
                 bind_pins(m, netlist, &group.devices, ground);
             }
             (group.devices, alternatives)
@@ -200,6 +209,60 @@ pub fn enumerate_folded(
 
 fn terminal(d: &Device, name: &str) -> Option<NetId> {
     d.terminals.iter().find(|(t, _)| t == name).map(|(_, n)| *n)
+}
+
+/// A plate net's impedance rank (H06-40, H08-25): 0 a rail (Supply/Ground),
+/// 2 a net that only reaches MOS gates besides capacitors (high-Z), 1
+/// anything else. ponytail: class-only rank; EXT-18's net classes refine it.
+fn plate_rank(netlist: &Netlist, rails: &[NetId], net: NetId) -> u8 {
+    if rails.contains(&net) {
+        return 0;
+    }
+    let gate_only = netlist.devices.iter().all(|d| {
+        d.terminals.iter().filter(|(_, n)| *n == net).all(|(t, _)| d.kind == DeviceKind::Capacitor || matches!(d.kind, DeviceKind::Nmos | DeviceKind::Pmos) && t == "G")
+    });
+    if gate_only { 2 } else { 1 }
+}
+
+/// Whether capacitor `d`'s bottom plate belongs on its `P` net: `P` ranks
+/// strictly lower ([`plate_rank`]) than `N`. Equal ranks keep the drawn order.
+fn bottom_on_p(netlist: &Netlist, rails: &[NetId], d: &Device) -> bool {
+    match (terminal(d, "P"), terminal(d, "N")) {
+        (Some(p), Some(n)) => plate_rank(netlist, rails, p) < plate_rank(netlist, rails, n),
+        _ => false,
+    }
+}
+
+/// Put the bottom (drawn `N`, high-parasitic) plate on terminal `P`: rename
+/// every `P` pin to `N` and back, and swap the capacitor cards' `P`/`N`
+/// nodes, before [`bind_pins`] — so a pin's name stays its terminal
+/// everywhere downstream (parasitics, currents) and the LVS card, which
+/// lists top plate then bottom, follows the geometry.
+fn swap_plates(m: &mut Macro) {
+    use pnr_core::{DrawnKind, Node};
+    let other = |t: &str| match t {
+        "P" => Some("N"),
+        "N" => Some("P"),
+        _ => None,
+    };
+    for pin in &mut m.pins {
+        let renamed = match pin.name.rsplit_once(':') {
+            Some((head, t)) => other(t).map(|o| format!("{head}:{o}")),
+            None => other(&pin.name).map(str::to_string),
+        };
+        if let Some(name) = renamed {
+            pin.name = name;
+        }
+    }
+    for d in m.drawn.iter_mut().filter(|d| d.kind == DrawnKind::Capacitor) {
+        for n in &mut d.nodes {
+            if let Node::Pin(t) = *n {
+                if let Some(o) = other(t) {
+                    *n = Node::Pin(o);
+                }
+            }
+        }
+    }
 }
 
 /// `members` as one series stack, in stack order, each with whether it is
@@ -625,6 +688,12 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
         .max(dim(pdk, "contact") + 2 * pdk.rule("diff_encloses_licon", 0).max(pdk.enclosure("diff", "licon").unwrap_or(0)))
         .max(pdk.width("diff").unwrap_or(0));
     let w_max = pdk.rule("max_finger_width", 0);
+    // A finger also keeps its far diffusion corner within the deck's
+    // latch-up tap reach of the strip above it (CELL-13), per gate length,
+    // never below the smallest finger. A fin deck draws `FinFet`, which the
+    // planar probe does not describe: no reach cap there.
+    let fin = pnr_core::Process::layer(pdk, "fin").is_some();
+    let mut tap_cap = std::collections::BTreeMap::new();
     // The deck's point-to-point R limit bounds a finger too: a finger's poly,
     // `R□·W_f/L`, within [`P2P_SHARE`] of it.
     let poly_sq = pdk.sheet_ohm("poly").filter(|&sq| sq > 0.0);
@@ -659,6 +728,10 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
         let s_of = |j: usize| terminal(&netlist.devices[j], "S");
         let stack = class.len() > 1 && class.iter().any(|&j| s_of(j) != s_of(class[0])) && series_order(netlist, &ids).is_some();
         let (_, pitch) = cells::mosfet::sd_and_pitch(pdk, l);
+        let w_max = match (w_max, *tap_cap.entry(l).or_insert_with(|| if fin { i32::MAX } else { cells::mosfet::max_finger_for_taps(pdk, l).max(w_min) })) {
+            (0, t) if t < i32::MAX => t,
+            (m, t) => m.min(t),
+        };
         // Smallest k whose finger count keeps every member's gate R below
         // 1/(5·gm).
         let k_gate = class
@@ -724,7 +797,16 @@ fn draw_variants(kind: DeviceKind, model: &str, group: &DeviceGroup, c: &Constra
     match kind {
         // A fin process draws its transistors from fins.
         DeviceKind::Nmos | DeviceKind::Pmos if pnr_core::Process::layer(pdk, "fin").is_some() => draw_all::<cells::finfet::FinFet>(group, c, pdk),
-        DeviceKind::Nmos | DeviceKind::Pmos => draw_all::<Mosfet>(group, c, pdk),
+        // A variant whose diffusion lies beyond the deck's latch-up tap reach
+        // is dropped (CELL-13); none left keeps the empty placeholder.
+        DeviceKind::Nmos | DeviceKind::Pmos => {
+            let mut v = draw_all::<Mosfet>(group, c, pdk);
+            v.retain(|m| cells::mosfet::taps_in_reach(m, pdk));
+            if v.is_empty() {
+                v.push(Macro::default());
+            }
+            v
+        }
         DeviceKind::Resistor => match pdk.recipe("resistor", model) {
             Some(recipe) => draw_all::<Resistor>(group, c, &verify::pdk::Overlay { pdk, recipe }),
             None => draw_all::<Resistor>(group, c, pdk),
@@ -1022,6 +1104,39 @@ mod tests {
         }
     }
 
+    /// CELL-18: a rail ranks 0, a drain net 1, a gate-only net 2 (a
+    /// capacitor on it keeps it so); the bottom plate moves to `P` only when
+    /// `P` ranks strictly lower; `swap_plates` renames only `P`/`N` pins and
+    /// capacitor nodes.
+    #[test]
+    fn plate_rank_orders_rail_signal_gate() {
+        use pnr_core::{Drawn, DrawnKind, Node};
+        let mut nl = two_devices();
+        let rails = [NetId(0), NetId(1)];
+        assert_eq!([0, 3, 2].map(|n| plate_rank(&nl, &rails, NetId(n))), [0, 1, 2]);
+        let cap = |p: u16, n: u16| Device {
+            name: "C1".into(),
+            kind: DeviceKind::Capacitor, model: String::new(),
+            terminals: vec![("P".into(), NetId(p)), ("N".into(), NetId(n))],
+            params: Vec::new(),
+        };
+        nl.devices.push(cap(2, 3));
+        assert_eq!(plate_rank(&nl, &rails, NetId(2)), 2, "a cap on a gate net keeps it high-Z");
+        assert!(!bottom_on_p(&nl, &rails, &cap(0, 1)), "equal rank (two rails): no swap");
+        assert!(!bottom_on_p(&nl, &rails, &cap(3, 3)), "equal rank (one signal net): no swap");
+        assert!(!bottom_on_p(&nl, &rails, &cap(2, 0)), "rail on N: no swap");
+        assert!(bottom_on_p(&nl, &rails, &cap(0, 2)), "rail on P: swap");
+        let mut m = Macro::default();
+        for name in ["d0:P", "N", "GND"] {
+            m.pins.push(Pin { name: name.into(), net: NetId(0), layer: LayerId(1), at: Rect { x: 0, y: 0, w: 1, h: 1 } });
+        }
+        let card = |kind| Drawn { owner: 0, device: None, kind, nodes: [Node::Pin("P"), Node::Pin("N"), Node::Unused], w: 1, l: 1 };
+        m.drawn = vec![card(DrawnKind::Capacitor), card(DrawnKind::Diode)];
+        swap_plates(&mut m);
+        assert_eq!(m.pins.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["d0:N", "P", "GND"]);
+        assert_eq!(m.drawn.iter().map(|d| d.nodes).collect::<Vec<_>>(), [[Node::Pin("N"), Node::Pin("P"), Node::Unused], [Node::Pin("P"), Node::Pin("N"), Node::Unused]]);
+    }
+
     /// A hand-built space, so `realize`/`escalate` can be exercised with no PDK.
     fn space(n: usize) -> gp::VariantSpace {
         gp::VariantSpace {
@@ -1200,6 +1315,38 @@ mod tests {
                 "cell {i} drifted from the per-device path"
             );
         }
+    }
+
+    /// CELL-13: a deck whose tap reach no variant meets leaves only the empty
+    /// placeholder; sky130's own reach keeps every drawn variant.
+    #[test]
+    fn a_tap_out_of_reach_drops_the_variant() {
+        let mut pdk = pdk();
+        let mut netlist = two_devices();
+        netlist.devices[0].params[0].1 = 5000;
+        let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[], &[]));
+        let group = DeviceGroup { devices: vec![DeviceId(0)] };
+        let all = draw_variants(DeviceKind::Nmos, "", &group, &sized, &pdk);
+        assert!(!all.is_empty() && all.iter().all(|m| !m.shapes.is_empty()), "sky130 keeps every variant");
+        pdk.rules.push(("tie_max_dist_nm".into(), 1000));
+        assert_eq!(draw_variants(DeviceKind::Nmos, "", &group, &sized, &pdk), vec![Macro::default()]);
+    }
+
+    /// ihp_sg13g2 allows 100 um fingers but 20 um tap reach. A 40-finger nmos
+    /// of 60 um fingers folds squarest at 2 x 30 um, under the raw cap: the
+    /// reach cap must fold it further.
+    #[test]
+    fn folds_caps_the_finger_at_the_tap_reach() {
+        use pnr_core::Process;
+        let pdk = Pdk::builtin("ihp_sg13g2").expect("ihp_sg13g2 loads");
+        let l = pdk.min_channel(false, "").0;
+        let mut netlist = two_devices();
+        netlist.devices.truncate(1);
+        netlist.devices[0].params = vec![("w".into(), 2_400_000), ("l".into(), i64::from(l)), ("nf".into(), 40)];
+        let cap = cells::mosfet::max_finger_for_taps(&pdk, l);
+        assert!(cap < pdk.rule("max_finger_width", 0), "reach {cap} does not bind on ihp_sg13g2");
+        let (k, fw) = folds(&netlist, &pdk, &[], &[])[0];
+        assert!(k > 1 && fw <= cap, "folded to {k} x {fw} nm, reach cap {cap} nm");
     }
 
     /// The property the outer loop depends on: escalation must make progress. A

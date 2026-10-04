@@ -1827,10 +1827,7 @@ impl CellSpace {
             spaces,
             cell_of,
             devices_of,
-        } = cellgen::enumerate_folded(netlist, injected, &problem.constraints, pdk, merge_distinct_gates, fold, {
-            let ground = problem.net_classes.iter().find(|c| c.class == analog::metadata::NetClass::Ground);
-            ground.map(|c| c.net)
-        });
+        } = cellgen::enumerate_folded(netlist, injected, &problem.constraints, pdk, merge_distinct_gates, fold, &problem.net_classes);
         let gate = |d: &DeviceId| {
             netlist.devices[d.0 as usize].terminals.iter().find(|(t, _)| t == "G").map(|(_, n)| *n)
         };

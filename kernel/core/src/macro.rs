@@ -91,9 +91,17 @@ pub enum KeepWhy {
     CapPlate { owner: u8 },
 }
 
-/// Per-variant figures; filled by CELL-19.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Figures {}
+/// Per-variant figures (CELL-19); empty for generators that draw none.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Figures {
+    /// (owner, "S"/"D", area nm², perimeter nm), sorted by (owner, terminal): BSIM AS/AD, PS/PD.
+    /// A region whose two sides are different (owner, terminal) counts half to each; gate-side
+    /// edges are excluded; regions beyond the outer dummy gates and the LOD moat are not counted.
+    pub sd: Vec<(u8, &'static str, i64, i64)>,
+    /// (owner, Ω): (R□_poly·W_f/(k·L) + R_cut)/N_f, k = 3 one-ended, 12 two-ended. Empty when the
+    /// deck characterises poly or its gate cut not.
+    pub gate_ohm: Vec<(u8, f32)>,
+}
 
 /// A dummy gate on member `owner`'s diffusion: gate and far side tied to the
 /// member's bulk, near side its `edge` terminal (`"S"` or `"D"`), so it is an
@@ -134,7 +142,7 @@ pub fn place_macro(m: &Macro, l: &Layout, i: usize) -> Macro {
         dummies: m.dummies.clone(),
         drawn: m.drawn.clone(),
         keepouts: m.keepouts.iter().map(|k| Keepout { rect: shift(k.rect), ..*k }).collect(),
-        figures: m.figures,
+        figures: m.figures.clone(),
     }
 }
 
