@@ -42,6 +42,8 @@ pub struct MatchedSet {
     pub cell_of: Vec<u16>,
     /// `g_m/I_D` of `members[0]`, 1/V: EXT-17's `gm_us/id_ua`; `None` keeps the ledger in mV.
     pub gm_over_id: Option<f32>,
+    /// MC 1σ of the pair, in the ledger's unit (PERF-27); replaces the area-law σ_rand.
+    pub sigma_rand_override: Option<f32>,
 }
 
 /// Unit moments of one member plus its weighted LOD sum (`Σw·lod`, `Σw` over
@@ -80,7 +82,7 @@ impl MatchedSet {
         areas_um2: Vec<f32>,
         tol_nm: f32,
     ) -> MatchedSet {
-        MatchedSet { members, kind, family, class, coeffs, budget, gate_um2: areas_um2, tol_nm, cell_of: Vec::new(), gm_over_id: None }
+        MatchedSet { members, kind, family, class, coeffs, budget, gate_um2: areas_um2, tol_nm, cell_of: Vec::new(), gm_over_id: None, sigma_rand_override: None }
     }
 
     fn cell(&self, d: DeviceId) -> usize {
@@ -154,6 +156,7 @@ impl MatchedSet {
             Family::Resistor | Family::Capacitor => (LedgerUnit::Pct, ka.unwrap_or(0.0)),
             Family::Bipolar | Family::Diode => (LedgerUnit::Mv, ka.map_or(0.0, bjt_sigma_vbe_mv)),
         };
+        let sigma_rand = self.sigma_rand_override.unwrap_or(sigma_rand);
         let budgeted = sigma_rand > 0.0 || matches!(self.budget, Budget::Allowance(_));
 
         let (mut sigma_grad, mut mu_lod, mut mu_thermal) = (0.0, 0.0, 0.0);
@@ -328,6 +331,7 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
                 second_order_nm: g.second_order_nm,
                 phi_equal: units.then(|| phi_equal(&sa, &sb)),
                 known: g.known,
+                sigma_source: if self.sigma_rand_override.is_some() { "MC" } else { "Pelgrom" },
                 sizing_limited: matches!(self.budget_in(g.unit), Budget::Sigma1Mv(b) | Budget::Sigma1Pct(b) if g.sigma_rand > 0.0 && g.sigma_rand >= b),
             });
         }
@@ -366,6 +370,7 @@ pub(crate) fn pair(a: u16, b: u16) -> MatchedSet {
         tol_nm: 5.0,
         cell_of: Vec::new(),
         gm_over_id: None,
+        sigma_rand_override: None,
     }
 }
 
@@ -438,6 +443,7 @@ mod tests {
         assert_eq!((r.allowance, r.usage, r.second_order_nm), (g.allowance, g.usage(), g.second_order_nm));
         assert_eq!(r.phi_equal, Some(true));
         assert!(!r.sizing_limited);
+        assert_eq!(r.sigma_source, "Pelgrom");
         // 20 µm² each: σ_rand 2.124 mV ≥ a 1 mV total, nothing left for layout.
         s.budget = Budget::Sigma1Mv(1.0);
         rows.clear();
@@ -455,6 +461,26 @@ mod tests {
         rows.clear();
         pair(0, 1).ledger_rows(&l, &mut rows);
         assert_eq!(rows[0].order, 0);
+    }
+
+    #[test]
+    fn override_replaces_the_area_law() {
+        let l = singles(1_000);
+        let rows = |s: &MatchedSet| {
+            let mut out = Vec::new();
+            s.ledger_rows(&l, &mut out);
+            out.remove(0)
+        };
+        let s = pair(0, 1);
+        let g = s.ledger(&l, 1);
+        assert!((g.sigma_rand - 2.124).abs() < 1e-3, "{}", g.sigma_rand);
+        assert_eq!(rows(&s).sigma_source, "Pelgrom");
+        let s = MatchedSet { sigma_rand_override: Some(1.5), ..pair(0, 1) };
+        let g = s.ledger(&l, 1);
+        assert_eq!(g.sigma_rand, 1.5);
+        assert!((g.allowance - 0.45).abs() < 1e-6, "{}", g.allowance);
+        let r = rows(&s);
+        assert_eq!((r.sigma_source, r.sigma_rand), ("MC", 1.5));
     }
 
     #[test]
@@ -700,6 +726,7 @@ mod tests {
             tol_nm: 5.0,
             cell_of: Vec::new(),
             gm_over_id: None,
+            sigma_rand_override: None,
         };
         let mut out = Vec::new();
         s.offset_allowances(&l, &mut out);

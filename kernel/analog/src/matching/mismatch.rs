@@ -239,7 +239,9 @@ pub struct Ledger {
 /// members' units cancel ([`crate::matching::moments::cancelled_order`], 0
 /// without units); `phi_equal` whether their orientation counts agree (`None`
 /// without units); `sizing_limited` a `Sigma1Mv`/`Sigma1Pct` budget the random σ alone
-/// already meets or exceeds (allowance 0: the sizing, not the layout, must change).
+/// already meets or exceeds (allowance 0: the sizing, not the layout, must change);
+/// `sigma_source` where `sigma_rand` came from: `"Pelgrom"` (the area law, any
+/// family) or `"MC"` (`MatchedSet::sigma_rand_override`, MAT-21).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LedgerRow {
     pub members: (u32, u32),
@@ -254,6 +256,7 @@ pub struct LedgerRow {
     pub second_order_nm: f32,
     pub phi_equal: Option<bool>,
     pub known: bool,
+    pub sigma_source: &'static str,
     pub sizing_limited: bool,
 }
 

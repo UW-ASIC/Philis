@@ -153,6 +153,8 @@ pub fn placement(
                 cell_of: Vec::new(),
                 // ponytail: EXT-17 fills it from Evidence.op.
                 gm_over_id: None,
+                // PERF-27 fills it (pair_sigma_mc).
+                sigma_rand_override: None,
             };
             let phi = phi_arm(set.class);
             r.budget.push(Box::new(set.clone()));

@@ -785,6 +785,7 @@ mod place_tests {
                 tol_nm: 5.0,
                 cell_of: vec![],
                 gm_over_id: None,
+                sigma_rand_override: None,
             })],
         };
         let hot = [0, 0, 10_000];
