@@ -175,6 +175,8 @@ pub struct ProcessNumbers {
     /// The routing stack's per-layer parasitics and antenna stages; `None`
     /// leaves the routing budgets on drawn length and the cumulative antenna.
     pub stack: Option<&'static analog::routing::Stack>,
+    /// Unitization bounds (EXT-15); 0 = deck key missing.
+    pub unit: crate::sets::UnitDeck,
 }
 
 #[cfg(test)]

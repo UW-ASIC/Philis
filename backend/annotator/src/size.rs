@@ -111,7 +111,7 @@ mod tests {
         let mut models = Vec::new();
         let drawn: Vec<_> = nl.devices.iter().map(|d| super::drawn(d, &mut models)).collect();
         let both = Block { kind: BlockKind::Group, template: "test", devices: vec![DeviceId(0), DeviceId(1)], injected: false, sub_blocks: Vec::new(), selfs: Vec::new() };
-        assert_eq!(constraints::assemble(&nl, &drawn, &[both]).unitization.len(), 2, "two unitization classes");
+        assert_eq!(constraints::assemble(&nl, &drawn, &[both], &[]).unitization.len(), 2, "two unitization classes");
         // Control: one flavour, written in either case, is a pair.
         assert_eq!(diff_pairs(&pair([("nfet_01v8", 5), ("NFET_01V8", 5)], Some(10_000))), 1);
     }

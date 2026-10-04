@@ -73,7 +73,7 @@ const NEGATIVE: [(&str, &str); 3] = [
 ];
 
 fn cfg(name: &str) -> AnnotationConfig {
-    if name == "strongarm" { strongarm_cfg() } else { AnnotationConfig::default() }
+    if name == "strongarm" { strongarm_cfg() } else { common::cfg() }
 }
 
 fn all() -> impl Iterator<Item = (&'static str, &'static str)> {
@@ -81,45 +81,56 @@ fn all() -> impl Iterator<Item = (&'static str, &'static str)> {
 }
 
 /// Today's decisions per circuit: leaves `(kind, sorted member names)`, then the
-/// [`Canon`] fields `pairs`, `selfs`, `net_pairs`, `axes` (`sets` is empty until EXT-12).
-type Row = (&'static str, &'static [(&'static str, &'static [&'static str])], &'static [(&'static str, &'static str)], &'static [&'static str], &'static [(&'static str, &'static str)], usize);
+/// [`Canon`] fields `pairs`, `selfs`, `net_pairs`, `axes`, then `sets` (EXT-15).
+type Row = (&'static str, &'static [(&'static str, &'static [&'static str])], &'static [(&'static str, &'static str)], &'static [&'static str], &'static [(&'static str, &'static str)], usize, &'static [Set]);
+/// `(members (name, parallel, series), kind, class)`.
+type Set = (&'static [(&'static str, u16, u16)], &'static str, &'static str);
 const EXPECTED: [Row; 17] = [
     // EXT-05: declared roles: five_transistor_ota's slots 2,3 are a Load.
-    ("ota5t", &[("Load", &["XM3", "XM4"]), ("DiffPair", &["XM1", "XM2"])], &[("XM1", "XM2"), ("XM3", "XM4")], &["XM5"], &[("vout1", "vout2")], 1),
+    // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
+    ("ota5t", &[("Load", &["XM3", "XM4"]), ("DiffPair", &["XM1", "XM2"])], &[("XM1", "XM2"), ("XM3", "XM4")], &["XM5"], &[("vout1", "vout2")], 1, &[(&[("XM1", 1, 1), ("XM2", 1, 1)], "Current", "Moderate"), (&[("XM3", 2, 1), ("XM4", 2, 1)], "Current", "Moderate")]),
     // EXT-05: declared roles: diff_pair_with_mirror_load's slots 2,3 are a Load.
-    ("three_stage", &[("DiffPair", &["M1", "M2"]), ("Group", &["M6", "M8", "M9"]), ("Load", &["M4", "M5"])], &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2")], 1),
+    // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
+    ("three_stage", &[("DiffPair", &["M1", "M2"]), ("Group", &["M6", "M8", "M9"]), ("Load", &["M4", "M5"])], &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Current", "Moderate"), (&[("M3", 4, 1), ("M7", 3, 1), ("M9", 10, 1)], "Current", "Moderate"), (&[("M4", 1, 1), ("M5", 1, 1)], "Current", "Moderate")]),
     // EXT-05 review: `cmos_inverter`'s declared prox makes each switch inverter a Stack leaf.
-    ("dac4", &[("Stack", &["XMN0", "XMP0"]), ("Stack", &["XMN1", "XMP1"]), ("Stack", &["XMN2", "XMP2"]), ("Stack", &["XMN3", "XMP3"])], &[], &[], &[], 0),
-    ("bgr_core", &[], &[], &[], &[], 0),
-    ("bjt_mirror", &[], &[], &[], &[], 0),
+    ("dac4", &[("Stack", &["XMN0", "XMP0"]), ("Stack", &["XMN1", "XMP1"]), ("Stack", &["XMN2", "XMP2"]), ("Stack", &["XMN3", "XMP3"])], &[], &[], &[], 0, &[]),
+    ("bgr_core", &[], &[], &[], &[], 0, &[]),
+    ("bjt_mirror", &[], &[], &[], &[], 0, &[]),
     // EXT-05: series_stack_4 declares no roles, so no re-searched Stack children.
-    ("chain4", &[("Group", &["XM1", "XM2", "XM3", "XM4"])], &[], &[], &[], 0),
-    ("pair", &[], &[], &[], &[], 0),
-    ("quad", &[], &[], &[], &[], 0),
+    ("chain4", &[("Group", &["XM1", "XM2", "XM3", "XM4"])], &[], &[], &[], 0, &[]),
+    ("pair", &[], &[], &[], &[], 0, &[]),
+    ("quad", &[], &[], &[], &[], 0, &[]),
     // EXT-04: DIFF_PAIR_SPLIT_SOURCE (any-pins-differ, no shared net) was a dead
     // pattern that falsely matched M7/M9 and M10/M8 as DiffPair; deleted, so
     // they fall back to their real Stack structure.
     // EXT-05: folded_cascode_core's declared pairs and prox; the M7-M10 composite
     // declares no roles.
-    ("folded", &[("CascodePair", &["M5", "M6"]), ("DiffPair", &["M1", "M2"]), ("Group", &["M10", "M7", "M8", "M9"]), ("Load", &["M3", "M4"]), ("Stack", &["M3", "M5"]), ("Stack", &["M4", "M6"])], &[("M1", "M2"), ("M3", "M4"), ("M5", "M6")], &[], &[("x1", "x2")], 1),
+    // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
+    ("folded", &[("CascodePair", &["M5", "M6"]), ("DiffPair", &["M1", "M2"]), ("Group", &["M10", "M7", "M8", "M9"]), ("Load", &["M3", "M4"]), ("Stack", &["M3", "M5"]), ("Stack", &["M4", "M6"])], &[("M1", "M2"), ("M3", "M4"), ("M5", "M6")], &[], &[("x1", "x2")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Current", "Moderate"), (&[("M10", 1, 1), ("M9", 1, 1)], "Current", "Moderate"), (&[("M3", 2, 1), ("M4", 2, 1)], "Current", "Moderate"), (&[("M5", 1, 1), ("M6", 1, 1)], "Current", "Moderate"), (&[("M7", 1, 1), ("M8", 1, 1)], "Current", "Moderate")]),
     // EXT-04: GILBERT_CELL's link fix makes it match the whole 6-device cell
     // (today's child re-search, max_slots=2, decomposes it into 3 DiffPair legs).
     // EXT-05: declared pairs are the mirror images (M3,M6), (M4,M5).
-    ("gilbert", &[("DiffPair", &["M1", "M2"]), ("DiffPair", &["M3", "M6"]), ("DiffPair", &["M4", "M5"])], &[("M1", "M2"), ("M3", "M6"), ("M4", "M5")], &[], &[("outn", "outp"), ("x1", "x2")], 1),
+    // EXT-15: matched sets; the switching quad M3-M6 is one set (the overlapping diff_pair
+    // matches (M3,M4), (M5,M6) join the declared mirror pairs, AA-01).
+    ("gilbert", &[("DiffPair", &["M1", "M2"]), ("DiffPair", &["M3", "M6"]), ("DiffPair", &["M4", "M5"])], &[("M1", "M2"), ("M3", "M6"), ("M4", "M5")], &[], &[("outn", "outp"), ("x1", "x2")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Current", "Moderate"), (&[("M3", 1, 1), ("M4", 1, 1), ("M5", 1, 1), ("M6", 1, 1)], "Current", "Moderate")]),
     // EXT-05: complementary_diff_pair declares both polarities' DiffPairs.
-    ("rail2rail", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("xn1", "xn2"), ("xp1", "xp2")], 1),
+    // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
+    ("rail2rail", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("xn1", "xn2"), ("xp1", "xp2")], 1, &[(&[("MN1", 1, 1), ("MN2", 1, 1)], "Current", "Moderate"), (&[("MP1", 1, 1), ("MP2", 1, 1)], "Current", "Moderate")]),
     // EXT-05 (AA-03): cross_coupled_inverters' declared pairs and prox, not inverters.
     // EXT-09: `net_pairs` moves — Differential now comes from the DiffPair leaves, and
     // the cross-coupled MN1/MN2 pair's drains (q, qb) differ, so it yields one.
-    ("latch", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"]), ("Stack", &["MN1", "MP1"]), ("Stack", &["MN2", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("q", "qb")], 1),
+    // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
+    ("latch", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"]), ("Stack", &["MN1", "MP1"]), ("Stack", &["MN2", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("q", "qb")], 1, &[(&[("MN1", 1, 1), ("MN2", 1, 1)], "Current", "Moderate"), (&[("MP1", 1, 1), ("MP2", 1, 1)], "Current", "Moderate")]),
     // EXT-05: current_mirror_4 declares (ref, k) per output; only the first pair
     // holding the shared reference gets a Symmetry.
     // EXT-06: equal-priority current_mirror_4 matches tie on canonical labels, not
     // device ids: MR takes the three identical 2 µm outputs, MO2/MO4 pair up.
-    ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO3", "MR"]), ("CurrentMirror", &["MO5", "MR"]), ("CurrentMirror", &["MO2", "MO4"])], &[("MO1", "MR"), ("MO2", "MO4")], &[], &[], 2),
-    ("brokaw", &[("CurrentMirror", &["MP1", "MP2"])], &[("MP1", "MP2")], &[], &[], 1),
-    ("rdiv", &[], &[], &[], &[], 0),
-    ("splitdac", &[], &[], &[], &[], 0),
+    // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
+    ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO3", "MR"]), ("CurrentMirror", &["MO5", "MR"]), ("CurrentMirror", &["MO2", "MO4"])], &[("MO1", "MR"), ("MO2", "MO4")], &[], &[], 2, &[(&[("MO1", 1, 1), ("MO2", 2, 1), ("MO3", 1, 1), ("MO4", 4, 1), ("MO5", 1, 1), ("MR", 1, 1)], "Current", "Moderate")]),
+    // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
+    ("brokaw", &[("CurrentMirror", &["MP1", "MP2"])], &[("MP1", "MP2")], &[], &[], 1, &[(&[("MP1", 1, 1), ("MP2", 1, 1)], "Current", "Moderate")]),
+    ("rdiv", &[], &[], &[], &[], 0, &[]),
+    ("splitdac", &[], &[], &[], &[], 0, &[]),
     // EXT-05: five_transistor_ota's roles (0,1,DiffPair), (2,3,Load), self 4 (mn0,
     // not mp8); cross_coupled_inverters' pairs; complementary_diff_pair's sources must be a
     // signal, so the output inverters no longer match it and mp9/mp10 join
@@ -128,7 +139,8 @@ const EXPECTED: [Row; 17] = [
     // row is unchanged, as `five_transistor_ota` (EXT-06 selection) claims mn1/mn2/mp7/mp8/mn0.
     // EXT-09: `net_pairs` gains (vin_o, vip_o) — the second DiffPair leaf (mn3, mn4)
     // now also yields a Differential; the old device-pair scan missed it.
-    ("strongarm", &[("DiffPair", &["mn1", "mn2"]), ("DiffPair", &["mn3", "mn4"]), ("DiffPair", &["mp5", "mp6"]), ("Group", &["mn13", "mp10", "mp11"]), ("Group", &["mn14", "mp12", "mp9"]), ("Load", &["mp7", "mp8"]), ("Stack", &["mn3", "mp5"]), ("Stack", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mn3", "mn4"), ("mp5", "mp6"), ("mp7", "mp8")], &["mn0"], &[("vin_d", "vip_d"), ("vin_o", "vip_o")], 2),
+    // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
+    ("strongarm", &[("DiffPair", &["mn1", "mn2"]), ("DiffPair", &["mn3", "mn4"]), ("DiffPair", &["mp5", "mp6"]), ("Group", &["mn13", "mp10", "mp11"]), ("Group", &["mn14", "mp12", "mp9"]), ("Load", &["mp7", "mp8"]), ("Stack", &["mn3", "mp5"]), ("Stack", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mn3", "mn4"), ("mp5", "mp6"), ("mp7", "mp8")], &["mn0"], &[("vin_d", "vip_d"), ("vin_o", "vip_o")], 2, &[(&[("mn1", 2, 1), ("mn2", 2, 1)], "Current", "Moderate"), (&[("mn13", 1, 1), ("mn14", 1, 1)], "Current", "Moderate"), (&[("mn3", 1, 1), ("mn4", 1, 1)], "Current", "Moderate"), (&[("mp10", 1, 1), ("mp7", 1, 1), ("mp8", 1, 1), ("mp9", 1, 1)], "Current", "Moderate"), (&[("mp11", 1, 1), ("mp12", 1, 1), ("mp5", 4, 1), ("mp6", 4, 1)], "Current", "Moderate")]),
 ];
 
 #[test]
@@ -136,12 +148,18 @@ fn corpus_expectations() {
     assert_eq!(CIRCUITS.map(|c| c.0), EXPECTED.map(|r| r.0), "one row per circuit, same order");
     let owned = |v: &[(&str, &str)]| v.iter().map(|(a, b)| ((*a).to_string(), (*b).to_string())).collect();
     let mut bad = Vec::new();
-    for ((name, src), (_, leaves, pairs, selfs, net_pairs, axes)) in CIRCUITS.into_iter().zip(EXPECTED) {
+    for ((name, src), (_, leaves, pairs, selfs, net_pairs, axes, sets)) in CIRCUITS.into_iter().zip(EXPECTED) {
         let nl = net(src);
         let p = annotate(&nl, &cfg(name));
         let got = (canon(&p, &nl), canon_leaves(&p, &nl));
         let exp = (
-            Canon { pairs: owned(pairs), selfs: selfs.iter().map(|s| (*s).to_string()).collect(), net_pairs: owned(net_pairs), axes, ..Canon::default() },
+            Canon {
+                sets: sets.iter().map(|(m, k, c)| (m.iter().map(|&(n, p, s)| (n.to_string(), p, s)).collect(), (*k).to_string(), (*c).to_string())).collect(),
+                pairs: owned(pairs),
+                selfs: selfs.iter().map(|s| (*s).to_string()).collect(),
+                net_pairs: owned(net_pairs),
+                axes,
+            },
             leaves.iter().map(|(k, m)| ((*k).to_string(), m.iter().map(|s| (*s).to_string()).collect())).collect::<BTreeSet<(String, Vec<String>)>>(),
         );
         if got != exp {
@@ -396,4 +414,39 @@ fn compound_expectations() {
     // three_stage: the second and third stages stay out of every pair.
     let c = common::canon_intent(&annotate(&net(src("three_stage")), &AnnotationConfig::default()), &net(src("three_stage")));
     assert!(c.pairs.iter().all(|(a, b)| !["M6", "M7", "M8", "M9"].contains(&a.as_str()) && !["M6", "M7", "M8", "M9"].contains(&b.as_str())));
+}
+
+/// AA-01 (EXT-13, closed by EXT-15's shared-bias groups): `mirror6` is one 6-device
+/// `Matching` node with MR the set's reference; three_stage's tail sits in the
+/// compound's Symmetry node and in the bias set with M7, M9.
+#[test]
+fn overlapping_requirements_share_one_group() {
+    let nl = net(src("mirror6"));
+    let p = annotate(&nl, &cfg("mirror6"));
+    let names: Vec<&str> = nl.devices.iter().map(|d| d.name.as_str()).collect();
+    let t = annotator::graph::render(&p.intent.tree, &names);
+    assert!(t.contains("Matching{MO1,MO2,MO3,MO4,MO5,MR}"), "{t}");
+    let s = &p.intent.sets[0];
+    assert_eq!(s.reference.map(|r| names[s.members[r].device.0 as usize]), Some("MR"));
+    let nl = net(src("three_stage"));
+    let p = annotate(&nl, &cfg("three_stage"));
+    let names: Vec<&str> = nl.devices.iter().map(|d| d.name.as_str()).collect();
+    let t = annotator::graph::render(&p.intent.tree, &names);
+    assert_eq!(t.matches("Symmetry{").count(), 1, "{t}");
+    assert!(t.contains("Matching{M3,M7,M9}"), "{t}");
+}
+
+/// `benchmarks/fixtures/mirror_ratio.spice` (M1 Status): the 1:2:4 mirror is one
+/// matched set and one Unitization, not split per size class.
+#[test]
+fn mirror_ratio_is_one_set() {
+    let nl = net("XM1 d1 d1 VSS VSS nfet_01v8 W=2u L=1u nf=2 | XM2 d2 d1 VSS VSS nfet_01v8 W=4u L=1u nf=4
+                  XM3 d3 d1 VSS VSS nfet_01v8 W=8u L=1u nf=8");
+    let p = annotate(&nl, &common::cfg());
+    assert_eq!(p.intent.sets.len(), 1);
+    assert_eq!(p.intent.sets[0].members.len(), 3);
+    let u: Vec<_> = p.constraints.unitization.iter().filter(|u| u.devices.len() > 1).collect();
+    assert_eq!(u.len(), 1);
+    assert_eq!(u[0].devices.len(), 3);
+    assert_eq!(p.constraints.unitization.len(), 1, "no device left to a second unitization");
 }

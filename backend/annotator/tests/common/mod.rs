@@ -94,8 +94,16 @@ pub fn strongarm_cfg() -> annotator::AnnotationConfig {
         supply_nets: vec!["VCC".into()],
         ground_nets: vec!["VSS".into()],
         clock_nets: vec!["clk".into()],
-        ..annotator::AnnotationConfig::default()
+        ..cfg()
     }
+}
+
+/// The default config with sky130's unitization bounds (`library::annotation`
+/// fills them from the deck; the corpus cannot depend on `library`).
+pub fn cfg() -> annotator::AnnotationConfig {
+    let mut c = annotator::AnnotationConfig::default();
+    c.process.unit = annotator::sets::UnitDeck { grid_nm: 5, min_w_nm: 420, max_w_nm: 10_000, min_l_nm: 150, res_min_segment_nm: 10_000 };
+    c
 }
 
 /// Seeded shuffle (xorshift64) of devices, nets and each device's terminal list.
@@ -138,8 +146,7 @@ pub fn permute(nl: &Netlist, seed: u64) -> Netlist {
 /// Name-level, id-free view of what the annotator decided.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Canon {
-    /// Matched sets `(members (name, parallel, series), kind, class)`: empty until
-    /// EXT-12 adds `MatchSpec`; the annotator has no matched-set output today.
+    /// Matched sets `(members (name, parallel, series) sorted, kind, class)` (EXT-15).
     pub sets: BTreeSet<(Vec<(String, u16, u16)>, String /*kind*/, String /*class*/)>,
     /// Hard `Symmetry` pairs of two distinct devices, names sorted.
     pub pairs: BTreeSet<(String, String)>,
@@ -163,6 +170,11 @@ pub fn canon(p: &annotator::Problem, nl: &Netlist) -> Canon {
     let mut mirror = Vec::new();
     p.placement.hard.iter().for_each(|b| b.mirror_pairs(&mut mirror));
     let mut c = Canon { axes: mirror.iter().map(|m| m.2).collect::<BTreeSet<_>>().len(), ..Canon::default() };
+    for s in &p.intent.sets {
+        let mut m: Vec<(String, u16, u16)> = s.members.iter().map(|m| (dev(u32::from(m.device.0)).to_string(), m.parallel, m.series)).collect();
+        m.sort();
+        c.sets.insert((m, format!("{:?}", s.kind), format!("{:?}", s.class)));
+    }
     for &(a, b, _) in &mirror {
         if a == b {
             c.selfs.insert(dev(a).into());

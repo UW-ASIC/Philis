@@ -17,6 +17,7 @@ pub mod ir;
 pub mod netrole;
 pub mod pattern;
 pub mod policy;
+pub mod sets;
 pub mod size;
 pub mod symmetry;
 pub mod terms;
@@ -265,15 +266,19 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     let (compounds, diags) = symmetry::analyze(&hg, &drawn, &net_classes, &seeds, &canon);
     intent.compounds = compounds;
     intent.diagnostics.extend(diags);
-    let reqs = graph::requirements(&all, &intent.compounds, &[], &[], &hg, &net_classes, &canon, &cfg.policy);
+    let shared = sets::shared_bias_groups(&hg, &drawn, &net_classes);
+    let reqs = graph::requirements(&all, &intent.compounds, &shared, &[], &hg, &net_classes, &canon, &cfg.policy);
     intent.tree = graph::hsmpg(netlist.devices.len(), &reqs, &canon);
+    intent.sets = sets::matched_sets(&reqs, &intent.compounds, &shared, &block::leaves(&blocks), &canon, &drawn, &hg, &cfg.process.unit, &mut intent.diagnostics);
+    sets::set_pairs(&mut intent.compounds, &intent.sets);
+    let constraints = constraints::assemble(netlist, &drawn, &blocks, &intent.sets);
     Problem {
         intent,
         axis_count: blocks.len(),
         placement,
         routing,
         coverage,
-        constraints: constraints::assemble(netlist, &drawn, &blocks),
+        constraints,
         net_classes,
         groups,
         abutment,

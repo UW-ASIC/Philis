@@ -757,6 +757,13 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
         // ponytail: leaked once per `annotation` call (twice per run, a few
         // hundred bytes each); cache by deck if runs ever loop in one process.
         stack: Some(Box::leak(Box::new(elaborate::stack(pdk)))),
+        unit: annotator::sets::UnitDeck {
+            grid_nm: i64::from(pdk.grid()),
+            min_w_nm: i64::from(pdk.rule("min_finger_width", 0)),
+            max_w_nm: i64::from(pdk.rule("max_finger_width", 0)),
+            min_l_nm: pdk.layer("poly").and_then(|l| pdk.min_width(l.0)).map_or(0, i64::from),
+            res_min_segment_nm: i64::from(pdk.rule("res_min_segment", 0)),
+        },
     };
     AnnotationConfig { process, ..base.clone() }
 }
