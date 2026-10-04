@@ -454,7 +454,7 @@ pub(crate) fn layer_specs(pdk: &Pdk, layers: &[LayerId], cuts: &[Cut], pin_acces
 pub(crate) fn detailed_router(pdk: &Pdk, stack: &RoutingStack) -> dr::DetailedRoute {
     let RoutingStack { layers, cuts, pin_access, p0, .. } = stack;
     let (layers, cuts, pin_access, p0, specs) = (&layers[..], &cuts[..], *pin_access, *p0, stack.specs.clone());
-    let mut cfg = dr::DetailedCfg { grid: pdk.grid, ..dr::DetailedCfg::default() };
+    let mut cfg = dr::DetailedCfg { grid: pdk.grid, em_front_row: crate::em_front_row(pdk), ..dr::DetailedCfg::default() };
     cfg.pitch = p0;
     cfg.wire_width = specs.first().map_or(0, |s| s.wire);
     cfg.spacing = layers

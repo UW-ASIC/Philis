@@ -1,7 +1,7 @@
 //! DC electromigration (routing tier, hard), plus the per-layer limit model
 //! the detailed router sizes segments and via arrays with.
 
-use pnr_core::geom::Shape;
+use pnr_core::geom::{Rect, Shape};
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
 use crate::rule::Rule;
@@ -105,6 +105,26 @@ pub struct Electromigration {
     /// layer and cut included); unused slots `u16::MAX`.
     pub limits: [(u16, Limit); MAX_LAYERS],
     pub stack: Option<&'static Stack>,
+    /// Count a via group by its front row (sidecar `em_front_row_cuts`, default
+    /// `true`): current crowds into the cuts first met along a landing metal, so
+    /// a deep array carries only the row across the flow (Hastings §5.1.3).
+    /// `have` = min over the metals touching every cut of the group of the most
+    /// cuts sharing one centre coordinate along that metal's long axis (a square
+    /// metal: the whole group); no such metal, the group size. `false` keeps
+    /// REL-03's whole-group count.
+    pub front_row: bool,
+}
+
+/// The most of `cuts` sharing one centre coordinate along `m`'s long axis (x
+/// when `m` is wider than tall, else y): the cuts across the current. A square
+/// `m` has no long axis: all of them.
+fn front_row(cuts: &[&Rect], m: &Rect) -> u32 {
+    if m.w == m.h {
+        return cuts.len() as u32;
+    }
+    let mut c: Vec<i64> = cuts.iter().map(|r| if m.w > m.h { 2 * r.x as i64 + r.w as i64 } else { 2 * r.y as i64 + r.h as i64 }).collect();
+    c.sort_unstable();
+    c.chunk_by(|a, b| a == b).map(|g| g.len() as u32).max().unwrap_or(0)
 }
 
 impl Electromigration {
@@ -194,6 +214,25 @@ impl Electromigration {
             let g = &mut group[uf.find(i as u32) as usize];
             *g = (g.0 + 1, g.1.max(flow.shape_ua[cut.0]));
         }
+        if self.front_row {
+            // Per root: members, then `have` = min front row over the metals
+            // touching every member (dr's per-cut pads are not common).
+            let mut members: Vec<Vec<usize>> = vec![Vec::new(); cuts.len()];
+            for i in 0..cuts.len() {
+                members[uf.find(i as u32) as usize].push(i);
+            }
+            for (root, ms) in members.iter().enumerate().filter(|(_, ms)| !ms.is_empty()) {
+                let rects: Vec<&Rect> = ms.iter().map(|&i| &routed[cuts[i].0].rect).collect();
+                let first = &cuts[ms[0]];
+                let front = first.2.iter().chain(&first.3)
+                    .filter(|m| ms.iter().all(|&i| cuts[i].2.contains(m) || cuts[i].3.contains(m)))
+                    .map(|&m| front_row(&rects, &all[m].rect))
+                    .min();
+                if let Some(n) = front {
+                    group[root].0 = n;
+                }
+            }
+        }
         for (i, cut) in cuts.iter().enumerate() {
             let (have, ua) = group[uf.find(i as u32) as usize];
             let lim = cuts[uf.find(i as u32) as usize].1;
@@ -262,7 +301,7 @@ mod tests {
         limits[0] = (1, Limit { ua_per_um: 2_800.0, ua_per_cut: 360.0, ..Limit::default() });
         limits[1] = (2, Limit { ua_per_cut: 290.0, ..Limit::default() });
         limits[2] = (3, Limit { ua_per_um: 2_800.0, ua_per_cut: 290.0, ..Limit::default() });
-        Electromigration { net: NetId(0), limits, stack: Some(stack()) }
+        Electromigration { net: NetId(0), limits, stack: Some(stack()), front_row: true }
     }
 
     fn shape(layer: u16, x: i32, y: i32, w: i32, h: i32) -> Shape {
@@ -328,7 +367,9 @@ mod tests {
         let wires = vec![shape(1, 0, 0, 5_000, 1_000), shape(2, 4_200, 200, 200, 200), shape(2, 4_600, 600, 200, 200), shape(3, 4_000, 0, 6_000, 1_000)];
         let r = routes(wires, vec![term(0, 400, 200, 200, Some(700.0)), term(9_800, 400, 200, 200, Some(-700.0))]);
         assert_eq!(em().limit(2).unwrap().cuts(700.0), 3, "⌈700/290⌉");
-        let e = em();
+        // Front row: the cuts lie along both metals' long axis x, one per column.
+        assert!((em().residual(&r) - 2.0 / 3.0).abs() < 1e-4, "(3 − 1)/3: {}", em().residual(&r));
+        let e = Electromigration { front_row: false, ..em() };
         assert!(e.known(&r) && !e.satisfied(&r));
         assert!((e.residual(&r) - 1.0 / 3.0).abs() < 1e-4, "(3 − 2)/3: {}", e.residual(&r));
         // A third cut in the group meets it.
@@ -361,13 +402,35 @@ mod tests {
         }
         let terms = vec![term(0, 400, 200, 200, Some(700.0)), term(9_800, 400, 200, 200, Some(-700.0))];
         let r = routes(wires.clone(), terms.clone());
-        let e = em();
+        // Front row: the pads touch one cut each; met1 and the trunk run along
+        // x, the cuts' row, so one cut faces the current.
+        assert!((em().residual(&r) - 2.0 / 3.0).abs() < 1e-4, "{}", em().residual(&r));
+        let e = Electromigration { front_row: false, ..em() };
         assert!(e.known(&r) && e.satisfied(&r), "⌈700/290⌉ = 3 cuts in one group: {}", e.residual(&r));
         // usage = I/(I_cut·n) pins n = 3 (a pad may carry all 700 µA: 250/350 nm).
         assert!((e.usage(&r).unwrap() - 700.0 / (290.0 * 3.0)).abs() < 1e-4, "{:?}", e.usage(&r));
         // Two cuts left: still one group, now short.
         wires.pop();
         assert!((e.residual(&routes(wires, terms)) - 1.0 / 3.0).abs() < 1e-4);
+    }
+
+    /// A 3 × 2 array on a long met1 (along x) under a square met2 pad: two
+    /// cuts per column face the current, so 700 µA (3 cuts) is short by one.
+    #[test]
+    fn a_deep_array_counts_its_front_row() {
+        let mut wires = vec![shape(1, 0, 0, 10_000, 800), shape(3, -100, -100, 1_500, 1_500)];
+        for x in [0, 500, 1_000] {
+            for y in [0, 500] {
+                wires.push(shape(2, x, y, 200, 200));
+            }
+        }
+        let r = routes(wires, vec![term(9_800, 0, 200, 800, Some(700.0)), term(500, 1_200, 200, 200, Some(-700.0))]);
+        let e = em();
+        assert!(e.known(&r) && !e.satisfied(&r));
+        assert!((e.usage(&r).unwrap() - 700.0 / (290.0 * 2.0)).abs() < 1e-4, "{:?}", e.usage(&r));
+        assert!((e.residual(&r) - 1.0 / 3.0).abs() < 1e-4, "(3 − 2)/3: {}", e.residual(&r));
+        let all = Electromigration { front_row: false, ..em() };
+        assert!(all.known(&r) && all.satisfied(&r), "6 ≥ 3: {}", all.residual(&r));
     }
 
     /// A terminal joined only through its cell's strap is reached (the cell

@@ -85,6 +85,7 @@ pub const KEYS: &[Key] = &[
     k("dummy_reach_nm", Tier, false, true, "kernel/analog/src/matching/class.rs"),
     k("em_current_density_source", Text, false, false, "provenance of the deck's EM rules"),
     k("em_derating", Table, false, true, "backend/verify/src/pdk.rs em_limit (when the deck rule states no Black parameters)"),
+    k("em_front_row_cuts", Bool, false, true, "frontend/library/src/lib.rs em_rules; backend/dr DetailedCfg (REL-12)"),
     k("epi_thickness_nm", Nm, false, true, "frontend/library/src/lib.rs annotation (isolation distance on epi_on_pplus)"),
     k("erc_rules_note", Text, false, false, "documentation"),
     k("finfet_note", Text, false, false, "documentation"),

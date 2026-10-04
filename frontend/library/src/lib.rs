@@ -705,7 +705,7 @@ fn topology<'a>(
         Some(verify::EmLimit { derating: Some(_), .. }) => "deck",
         _ => "none",
     };
-    em_rules(&mut problem, netlist, &em, &em_layers, &em_cuts, ann.process.stack, pdk);
+    em_rules(&mut problem, netlist, &em, &em_layers, &em_cuts, ann.process.stack, em_front_row(pdk), pdk);
     // IR-drop budgets (PWR-02) on nets carrying op current (`annotator::ir`).
     let net_ua = bias.currents.as_ref().map_or_else(Vec::new, |c| oppoint::net_current_ua(netlist, c));
     let ir = if let (Some(_), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
@@ -1690,6 +1690,12 @@ fn check_injected(netlist: &pnr_core::Netlist, injected: &Macros, pdk: &Pdk) -> 
     Ok(())
 }
 
+/// Sidecar `em_front_row_cuts` (default `true`): EM counts a via group by its
+/// front row (REL-12), in `em_rules` and the detailed router alike.
+fn em_front_row(pdk: &Pdk) -> bool {
+    pdk.cell.get("em_front_row_cuts").and_then(serde_json::Value::as_bool).unwrap_or(true)
+}
+
 /// One hard [`analog::routing::Electromigration`] per routed (≥ 2-terminal)
 /// net: every routed segment and via against its layer's derated deck limit,
 /// on the currents `dr` records per terminal (`Routes::terms`; unknown
@@ -1704,6 +1710,7 @@ fn em_rules(
     metals: &[LayerId],
     cuts: &[elaborate::Cut],
     stack: Option<&'static analog::routing::Stack>,
+    front_row: bool,
     pdk: &Pdk,
 ) {
     use analog::routing::em::{Limit, MAX_LAYERS};
@@ -1733,7 +1740,7 @@ fn em_rules(
     }
     let rules: Vec<analog::routing::Electromigration> = (0..terminals.len())
         .filter(|&k| terminals[k] >= 2)
-        .map(|k| analog::routing::Electromigration { net: pnr_core::NetId(k as u16), limits, stack })
+        .map(|k| analog::routing::Electromigration { net: pnr_core::NetId(k as u16), limits, stack, front_row })
         .collect();
     problem.routing.hard.push(Box::new(rules));
 }
@@ -2518,13 +2525,13 @@ mod start_tests {
         let full: Vec<_> = (0..=MAX_LAYERS as u16).map(|l| (LayerId(l), lim)).collect();
 
         let mut p = problem();
-        crate::em_rules(&mut p, &nl, &full, &[LayerId(MAX_LAYERS as u16)], &[], None, &pdk);
+        crate::em_rules(&mut p, &nl, &full, &[LayerId(MAX_LAYERS as u16)], &[], None, true, &pdk);
         let rows: Vec<&str> = p.missing.iter().filter(|m| m.0 == "Electromigration").map(|m| m.1).collect();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(rows[0].contains("MAX_LAYERS"), "{rows:?}");
 
         let mut p = problem();
-        crate::em_rules(&mut p, &nl, &[], &[id], &[], None, &pdk);
+        crate::em_rules(&mut p, &nl, &[], &[id], &[], None, true, &pdk);
         let rows: Vec<&str> = p.missing.iter().filter(|m| m.0 == "Electromigration").map(|m| m.1).collect();
         assert_eq!(rows, [format!("deck EM limit on every routed and pin-access layer ({name} unchecked)")]);
     }
