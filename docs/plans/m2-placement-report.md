@@ -49,3 +49,10 @@ fails with the same panic. Release builds pass because the check is a `debug_ass
 owner. Either give the phi check its own kind, or make the assert compare the exact (kind, check) identity.
 `environment_is_in_the_placement_arm_once` stays on `ota` (`pair.spice` has no matched pair) and stays red under debug
 until that fix lands.
+
+## PLC-17 acceptance (review fixes 6)
+
+Seeds 1-5, `ota` and `rc_filter` with op, `84e1d52` vs `964165d`: IrDrop batch (3 rules, 0 violated, 0 unknown),
+signoff `ir_drop` ran with 0 rows, and median budgeted-net C (ota 16.257-16.865 fF, rc_filter 1.645 fF) are identical
+run for run. Pass by equality; no IR or C gain is shown on these fixtures. Signoff reports no worst drop/limit for a
+passing grid, so the IR side is only pass/fail. Table in `docs/CRATES.md` `## backend/gp`. 0.1 / 0.25 unchanged.
