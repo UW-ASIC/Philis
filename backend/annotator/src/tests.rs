@@ -543,8 +543,8 @@ fn a_cascode_stack_is_not_an_isolation_victim() {
 }
 
 /// EXT-07 variant: once `vcas` also touches a channel (not gates only), its
-/// class is ordinary `Signal`, not `Sensitive` — classification is about the
-/// net's own DC path, independent of this item's `is_sensitive` change.
+/// class is ordinary `Signal`, not `Sensitive`: with `Stack` no longer a gate
+/// reference in `is_sensitive`, a `vcas` that touches a channel is `Signal`.
 #[test]
 fn a_cascode_gate_net_with_a_channel_use_is_signal() {
     let nl = Netlist {

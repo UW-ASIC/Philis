@@ -120,8 +120,8 @@ const EXPECTED: [Row; 17] = [
     ("brokaw", &[("CurrentMirror", &["MP1", "MP2"])], &[("MP1", "MP2")], &[], &[], 1),
     ("rdiv", &[], &[], &[], &[], 0),
     ("splitdac", &[], &[], &[], &[], 0),
-    // EXT-05: diff_pair_cross_coupled_load's declared tail mn0 (not mp8) and Load;
-    // cross_coupled_inverters' pairs; complementary_diff_pair's sources must be a
+    // EXT-05: five_transistor_ota's roles (0,1,DiffPair), (2,3,Load), self 4 (mn0,
+    // not mp8); cross_coupled_inverters' pairs; complementary_diff_pair's sources must be a
     // signal, so the output inverters no longer match it and mp9/mp10 join
     // undeclared 3-device groups (their CurrentMirror was a misrecognition).
     // EXT-05 review: the out-of-plan `diff_pair_cross_coupled_load` entry is gone; the

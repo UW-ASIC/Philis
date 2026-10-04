@@ -192,6 +192,10 @@ Why judgment: two plan gaps need a decision, and the emitted constraints change 
   (simulated), and with no entry it yields no DiffPair leaf, so EXT-06's "rail2rail yields both DiffPair leaves"
   cannot hold. Add `complementary_diff_pair: pairs (0,1,DiffPair),(2,3,DiffPair)` (slots 0,1 = one polarity's pair,
   2,3 = the complement's, `catalog.rs` `COMPLEMENTARY_DIFF_PAIR`).
+- **Departure (done in `edadeb3`, not in the edits below).** `COMPLEMENTARY_DIFF_PAIR`'s source links `eq(0,S,1,S)`,
+  `eq(2,S,3,S)` became `eq_sig` (EXT-04 step 2 changed only `DIFF_PAIR`, `DIFF_SWITCH`): with `eq` its declared
+  DiffPairs matched strongarm's rail-sourced output inverters. EXT-14 (seeds) and EXT-19 (a
+  rail-sourced complementary pair) must start from this rule.
 
 Edits:
 1. `block.rs`: `BlockKind::CascodePair` (doc: "symmetric pair of cascodes: matched for symmetry, not a gate
@@ -354,6 +358,11 @@ Commands: `cargo test -p annotator --test corpus`; `cargo test --release -p anno
 (record the printed wall time in the commit message). Acceptance: T4 on the interim canonical form; T8 ≤ 2.0 s.
 If T8 still misses after 1–3 and 1b, report the measured time and the profile; do not relax the bound.
 
+Departure (done in `65e344e`, catalog, for T8): `DIFF_PAIR_WITH_DEGEN` is deleted (no link joins its halves: N²
+genuine matches) and `diff_pair_with_split_cascodes` / `diff_pair_with_reference` link sources with `eq_sig`. Step 1b's
+"changes no pattern's meaning" therefore does not hold: **degenerated diff pairs are not recognised at all until
+EXT-19** (plan-01 EXT-19 notes). No corpus row moved.
+
 ---
 
 ## EXT-10 Stable IDs, provenance, coverage, relevant `missing`, one policy table — judgment
@@ -457,3 +466,10 @@ Commands: `cargo test -p gp -p dp`; bench before and after this commit:
 `cargo run --release -p benchmark --bin bench local` — every row identical (no batch reorders, so ids map one-to-one
 onto today's keys).
 Acceptance: EXT-10's `ids_survive_permutation` plus these two tests; bench rows unchanged.
+
+Bench evidence (argued, not run; the 2 × 5-seed run is ~50 min): the rows of `65e344e` and `809c844` are equal by
+construction. `placement` is built once and reused by every epoch (`library/src/lib.rs` `prices.settle(placement, ..)`);
+every annotator batch is `Tagged` with a dense id (`annotator/src/lib.rs` arm loops), so `keys` maps batch positions
+one-to-one onto ids where it mapped them one-to-one onto `(kind, ordinal)`; `bind` and `settle` iterate `keys(reqs)` in
+batch order (not map order), so every λ, ρ, drift sum and `weight` is the same float sequence; saturation records
+`b.kind()`, which equals the old `key.0`.
