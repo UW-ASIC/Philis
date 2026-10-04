@@ -298,3 +298,14 @@ Tests:
   matching `^[a-z_][a-z0-9_]*$` and not a keyword.
 - Commands: `cargo test -p macro_master`, `cargo test --release -p library --test emit_roundtrip --test ota_cross_pdk
   --test hier_elaborate`.
+
+## Review notes (for the M2 report and plan status)
+
+- FLOW-09: `RunStats.stage_ms` is `[f64; 9]`, not the card's `[u64; 9]`; sub-millisecond stages would round to 0.
+  FLOW-12 and later readers: stage times are milliseconds as `f64`.
+- FLOW-13: T11 round trip is checked for ota only. chain4, dac4*, mirror_ratio (>2-member matched group, no quad
+  variant) and tq_chain/bgr/bjt (device kind unsupported) still return `Unsupported`: **T11 open for >2-member
+  groups and non-MOS/R kinds.**
+- FLOW-13: `GenIr.edges` semantics changed. Internal nets are joined terminal-to-terminal (first terminal seen is
+  the anchor), no longer named as nets (`build_with` refuses non-port endpoints); a net with one terminal gets no
+  edge.

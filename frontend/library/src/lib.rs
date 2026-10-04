@@ -513,6 +513,9 @@ const _: fn() = || {
     s::<Topology<'static>>();
 };
 
+#[cfg(test)]
+thread_local!(static APART_BUILDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
+
 /// Annotate (with `ann`, whose stack the run leaked once) and draw cells at one
 /// cell topology.
 #[allow(clippy::too_many_arguments)]
@@ -526,6 +529,10 @@ fn topology<'a>(
     perf_rows: &'a [analog::routing::PerformanceBudget],
     merge_distinct_gates: bool,
 ) -> Topology<'a> {
+    #[cfg(test)]
+    if !merge_distinct_gates {
+        APART_BUILDS.with(|c| c.set(c.get() + 1));
+    }
     let currents = &bias.currents;
     // Annotate: placement/routing rules + cell constraints, device-indexed.
     // Per topology: `CellSpace::new` mutates the problem, which is not `Clone`.
@@ -2048,15 +2055,17 @@ mod start_tests {
     #[test]
     fn hoisting_prices_each_alternative_once() {
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
-        let spice = ".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\nXM2 d x VSS VSS nfet_01v8 W=2u L=0.5u\n.ends p\n";
+        let spice = ".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=8u L=0.5u\nXM2 d x VSS VSS nfet_01v8 W=8u L=0.5u\n.ends p\n";
         let calls = |starts| {
-            let before = crate::cellgen::price_calls();
+            let before = (crate::cellgen::price_calls(), crate::APART_BUILDS.with(std::cell::Cell::get));
             let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts, ..Default::default() };
             crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow");
-            crate::cellgen::price_calls() - before
+            (crate::cellgen::price_calls() - before.0, crate::APART_BUILDS.with(std::cell::Cell::get) - before.1)
         };
         let (n1, n3) = (calls(1), calls(3));
-        assert!(n1 > 0);
+        // The pair merges with distinct gates, so both topologies are hoisted.
+        assert_eq!(n1.1, 1, "the apart topology is built once");
+        assert!(n1.0 > 0);
         assert_eq!(n3, n1);
     }
 
