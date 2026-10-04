@@ -1372,7 +1372,9 @@ impl Flow<'_> {
         // Guard rings enclose placed cells, so they are drawn now, before routing.
         let mut rings = cells::post_cell::guard_rings(&layout, &cells.guard_rings, self.pdk, ring_cut_ohm(self.pdk));
         // Same-bulk PMOS cells facing each other share one well.
-        let bridges = cells::post_cell::well_bridges(&gr::place_macros(&macros, &layout), &rings, self.pdk);
+        // Never across REL-16's forbidden pairs (CELL-22).
+        let flags = cell_flags(&self.problem.intent, &self.cells.devices_of);
+        let bridges = cells::post_cell::well_bridges(&gr::place_macros(&macros, &layout), &rings, self.pdk, &|i, j| cells::post_cell::may_share_well(flags[i], flags[j]));
         rings.extend(bridges);
         // Same-type implants of neighbours closer than their spacing merge.
         let placed_now: Vec<Macro> = gr::place_macros(&macros, &layout).into_iter().chain(rings.iter().cloned()).collect();
@@ -1856,6 +1858,45 @@ fn pin_member(name: &str) -> Option<(usize, &str)> {
     match name.split_once(':') {
         Some((k, t)) => Some((k.strip_prefix('d')?.parse().ok()?, t)),
         None => (name != "GND").then_some((0, name)),
+    }
+}
+
+/// Per placed cell, its members' substrate tags OR-ed (EXT-23, for REL-16's
+/// [`cells::post_cell::may_share_well`]); a device in no cell is skipped.
+fn cell_flags(intent: &analog::intent::Intent, devices_of: &[Vec<DeviceId>]) -> Vec<cells::post_cell::CellFlags> {
+    use analog::intent::Inject::{MinorityElectron, MinorityHole};
+    let mut flags = vec![cells::post_cell::CellFlags::default(); devices_of.len()];
+    let cell = |d: DeviceId| devices_of.iter().position(|m| m.contains(&d));
+    for a in &intent.aggressors {
+        if let Some(k) = cell(a.device) {
+            flags[k].noisy = true;
+            flags[k].injector |= matches!(a.inject, MinorityElectron | MinorityHole);
+        }
+    }
+    for v in &intent.victims {
+        if let Some(k) = cell(v.device) {
+            flags[k].sensitive = true;
+        }
+    }
+    flags
+}
+
+#[cfg(test)]
+mod cell_flags_tests {
+    use analog::intent::{Aggressor, Inject, Intent, Victim};
+    use cells::post_cell::CellFlags;
+    use pnr_core::DeviceId;
+
+    /// CELL-22: a cell's tags are the OR over its members; a device in no cell adds nothing.
+    #[test]
+    fn cell_flags_or_over_members() {
+        let intent = Intent {
+            aggressors: vec![Aggressor { device: DeviceId(1), inject: Inject::MinorityHole, reason: "" }, Aggressor { device: DeviceId(9), inject: Inject::Switching, reason: "" }],
+            victims: vec![Victim { device: DeviceId(2), weight: 1.0, reason: "" }],
+            ..Default::default()
+        };
+        let flags = super::cell_flags(&intent, &[vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2)]]);
+        assert_eq!(flags, vec![CellFlags { injector: true, noisy: true, sensitive: false }, CellFlags { sensitive: true, ..Default::default() }]);
     }
 }
 
@@ -3010,7 +3051,7 @@ mod spacing_tests {
     fn drawn(macros: &[Macro], l: &Layout, rings: &analog::Constraints, pdk: &verify::Pdk) -> Vec<pnr_core::Shape> {
         let placed = pnr_core::place_macros(macros, l);
         let mut extra = cells::post_cell::guard_rings(l, rings, pdk, crate::ring_cut_ohm(pdk));
-        extra.extend(cells::post_cell::well_bridges(&placed, &extra, pdk));
+        extra.extend(cells::post_cell::well_bridges(&placed, &extra, pdk, &|_, _| true));
         let all: Vec<Macro> = placed.iter().chain(&extra).cloned().collect();
         extra.extend(cells::post_cell::implant_bridges(&all, pdk));
         let mut shapes: Vec<_> = placed.iter().chain(&extra).flat_map(|m| m.shapes.iter().copied()).collect();

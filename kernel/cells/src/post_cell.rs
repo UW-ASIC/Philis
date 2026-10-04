@@ -465,7 +465,7 @@ pub struct CellFlags {
 
 /// Hastings §14.1.5 (L43595–43612): two cells may share a well only if both inject or neither does,
 /// and neither is noisy beside a sensitive one. §14.1.4: output (injecting) devices get their own.
-/// The predicate only; CELL-22 applies it in `well_bridges`.
+/// The predicate only; CELL-22 applies it in [`well_bridges`].
 #[must_use]
 pub fn may_share_well(a: CellFlags, b: CellFlags) -> bool {
     a.injector == b.injector && !((a.noisy && b.sensitive) || (b.noisy && a.sensitive))
@@ -473,16 +473,23 @@ pub fn may_share_well(a: CellFlags, b: CellFlags) -> bool {
 
 /// One well for neighbouring PMOS cells on the same bulk: where two placed
 /// cells' nwells face each other across a gap up to twice the well spacing,
-/// with the same span on the other axis, the gap is filled (the three rects
-/// union to one rectangle: no notch; the caller merges them for a checker
-/// that reads a well per rect). Fewer well edges near the devices (WPE); matched
-/// PMOS in a common well (Hastings §13.3 r8). A bridge that would come within
-/// the deck's enclosure/spacing of anything p-type or of foreign active
-/// (another cell's or a ring's diff, poly or p-implant) is not drawn.
+/// with overlapping spans (at least the well width) on the other axis, the gap
+/// is filled. The fill spans both wells (their hull on that axis) when that
+/// stays clear of foreign active and of other wells by the well spacing, else
+/// only the overlap; for identical spans the two are one rectangle. The caller
+/// merges the touching rects for a checker that reads a well per rect. Fewer
+/// well edges near the devices (WPE); matched PMOS in a common well (Hastings
+/// §13.3 r8). A fill that would come within the deck's enclosure/spacing of
+/// anything p-type or of foreign active (another cell's or a ring's diff, poly
+/// or p-implant) is not drawn.
 ///
 /// `placed`: the cells, placed (absolute). `rings`: this layout's rings.
+/// `can_share(i, j)`: REL-16's legality for placed cells `i`, `j`
+/// ([`may_share_well`] over their tags). The check is applied per merged
+/// well: a pair is bridged only if every cell already in `i`'s well may share
+/// with every cell in `j`'s, so A–B and B–C bridges never join a forbidden A–C.
 #[must_use]
-pub fn well_bridges(placed: &[Macro], rings: &[Macro], process: &dyn Process) -> Vec<Macro> {
+pub fn well_bridges(placed: &[Macro], rings: &[Macro], process: &dyn Process, can_share: &dyn Fn(usize, usize) -> bool) -> Vec<Macro> {
     let Some(nwell) = process.layer("nwell") else { return Vec::new() };
     // All from the deck; without a well spacing there is nothing to bridge.
     let space = process.rule("nwell_min_spacing", 0);
@@ -501,35 +508,61 @@ pub fn well_bridges(placed: &[Macro], rings: &[Macro], process: &dyn Process) ->
             Some((well, bulk))
         })
         .collect();
-    let hits = |r: Rect, skip: [usize; 2]| {
-        let grown = Rect { x: r.x - keep, y: r.y - keep, w: r.w + 2 * keep, h: r.h + 2 * keep };
+    // Any shape on `layers` of a cell outside `skip`, or of a ring, within `margin` of `r`.
+    let near = |r: Rect, skip: [usize; 2], margin: i32, layers: &[pnr_core::LayerId]| {
+        let grown = Rect { x: r.x - margin, y: r.y - margin, w: r.w + 2 * margin, h: r.h + 2 * margin };
         let meets = |a: &Rect| a.x < grown.x + grown.w && grown.x < a.x + a.w && a.y < grown.y + grown.h && grown.y < a.y + a.h;
-        placed.iter().enumerate().filter(|(k, _)| !skip.contains(k)).map(|(_, m)| m).chain(rings).flat_map(|m| &m.shapes).any(|s| blocking.contains(&s.layer) && meets(&s.rect))
+        placed.iter().enumerate().filter(|(k, _)| !skip.contains(k)).map(|(_, m)| m).chain(rings).flat_map(|m| &m.shapes).any(|s| layers.contains(&s.layer) && meets(&s.rect))
     };
+    let n = placed.len();
+    // Merged wells so far (union-find over cells).
+    let mut comp: Vec<usize> = (0..n).collect();
     let mut b = Builder::new(process.grid());
     let mut any = false;
-    for i in 0..wells.len() {
-        for j in i + 1..wells.len() {
+    for i in 0..n {
+        for j in i + 1..n {
             let (Some((a, na)), Some((c, nc))) = (wells[i], wells[j]) else { continue };
             if na != nc {
                 continue;
             }
-            // Facing across x with one y span, or across y with one x span.
+            // Facing across x with overlapping y spans, or across y with overlapping x spans:
+            // (overlap, hull) fills.
             let (lo, hi) = if a.x <= c.x { (a, c) } else { (c, a) };
             let (lo_y, hi_y) = if a.y <= c.y { (a, c) } else { (c, a) };
             let gap_x = hi.x - (lo.x + lo.w);
             let gap_y = hi_y.y - (lo_y.y + lo_y.h);
-            let bridge = if (a.y, a.h) == (c.y, c.h) && gap_x > 0 && gap_x <= 2 * space && a.h >= min_w {
-                Some(Rect { x: lo.x + lo.w, y: a.y, w: gap_x, h: a.h })
-            } else if (a.x, a.w) == (c.x, c.w) && gap_y > 0 && gap_y <= 2 * space && a.w >= min_w {
-                Some(Rect { x: a.x, y: lo_y.y + lo_y.h, w: a.w, h: gap_y })
+            let (y0, y1) = (a.y.max(c.y), (a.y + a.h).min(c.y + c.h));
+            let (x0, x1) = (a.x.max(c.x), (a.x + a.w).min(c.x + c.w));
+            let fills = if gap_x > 0 && gap_x <= 2 * space && y1 - y0 >= min_w {
+                let (h0, h1) = (a.y.min(c.y), (a.y + a.h).max(c.y + c.h));
+                Some((Rect { x: lo.x + lo.w, y: y0, w: gap_x, h: y1 - y0 }, Rect { x: lo.x + lo.w, y: h0, w: gap_x, h: h1 - h0 }))
+            } else if gap_y > 0 && gap_y <= 2 * space && x1 - x0 >= min_w {
+                let (h0, h1) = (a.x.min(c.x), (a.x + a.w).max(c.x + c.w));
+                Some((Rect { x: x0, y: lo_y.y + lo_y.h, w: x1 - x0, h: gap_y }, Rect { x: h0, y: lo_y.y + lo_y.h, w: h1 - h0, h: gap_y }))
             } else {
                 None
             };
-            if let Some(r) = bridge.filter(|&r| !hits(r, [i, j])) {
-                b.rect(nwell, r);
-                any = true;
+            let Some((overlap, hull)) = fills else { continue };
+            // Only the hull leaves the facing wells' common span, so only it can approach a third well.
+            let bridge = if !near(hull, [i, j], keep, &blocking) && !near(hull, [i, j], space, &[nwell]) {
+                hull
+            } else if !near(overlap, [i, j], keep, &blocking) {
+                overlap
+            } else {
+                continue;
+            };
+            let (ri, rj) = (find(&mut comp, i), find(&mut comp, j));
+            if ri != rj {
+                // ponytail: O(n²) per pair; wells per layout are few.
+                let roots: Vec<usize> = (0..n).map(|p| find(&mut comp, p)).collect();
+                let legal = (0..n).filter(|&p| roots[p] == ri).all(|p| (0..n).filter(|&q| roots[q] == rj).all(|q| can_share(p, q)));
+                if !legal {
+                    continue;
+                }
+                comp[ri] = rj;
             }
+            b.rect(nwell, bridge);
+            any = true;
         }
     }
     if any { vec![b.finish()] } else { Vec::new() }
@@ -544,28 +577,12 @@ mod tests {
     /// with p-active in the gap, no bridge.
     #[test]
     fn same_bulk_pmos_cells_share_a_well() {
-        use crate::{testkit, Cell};
-        use pnr_core::{DeviceKind, NetId};
-        let Some(pdk) = testkit::pdk() else { return };
+        let Some(pdk) = crate::testkit::pdk() else { return };
         let nwell = pdk.layer("nwell").unwrap();
-        let (g, c) = testkit::group_of(DeviceKind::Pmos, 1, 2, 1680, 150);
-        let cell = crate::mosfet::Mosfet::enumerate(&g, &c, &pdk)[0].draw(&g, &c, &pdk);
-        let well = cell.shapes.iter().filter(|s| s.layer == nwell).map(|s| s.rect).reduce(union_rect).unwrap();
-        let shift = |m: &Macro, dx: i32, bulk: u16| {
-            let mut m = m.clone();
-            for s in &mut m.shapes {
-                s.rect.x += dx;
-            }
-            for p in &mut m.pins {
-                p.at.x += dx;
-                p.net = if p.name.ends_with(":B") { NetId(bulk) } else { NetId(10 + bulk + p.net.0) };
-            }
-            m.bbox.x += dx;
-            m
-        };
+        let (cell, well) = pmos(&pdk);
         let dx = well.w + 1_500;
-        let pair = [shift(&cell, 0, 1), shift(&cell, dx, 1)];
-        let bridges = well_bridges(&pair, &[], &pdk);
+        let pair = [shift(&cell, 0, 0, 1), shift(&cell, dx, 0, 1)];
+        let bridges = well_bridges(&pair, &[], &pdk, &|_, _| true);
         assert_eq!(bridges.len(), 1);
         // Merged as the flow's geometry does: the three rects are one well.
         let mut shapes: Vec<pnr_core::Shape> = pair.iter().chain(&bridges).flat_map(|m| m.shapes.clone()).collect();
@@ -574,11 +591,51 @@ mod tests {
         assert_eq!(wells.iter().map(|s| i64::from(s.rect.w) * i64::from(s.rect.h)).sum::<i64>(), i64::from(r.w) * i64::from(r.h), "the rects tile one rectangle");
         wells = vec![pnr_core::Shape { layer: nwell, rect: r }];
         shapes = rest.into_iter().chain(wells).collect();
-        let labels: Vec<verify::LabeledPin> = pair
+        let dirty = findings_of(&pair, shapes, &pdk);
+        assert!(dirty.is_empty(), "{dirty:?}");
+        assert!(well_bridges(&[shift(&cell, 0, 0, 1), shift(&cell, dx, 0, 2)], &[], &pdk, &|_, _| true).is_empty(), "different bulks");
+        let mut blocker = shift(&cell, 0, 0, 3);
+        blocker.shapes.retain(|s| Some(s.layer) == pdk.layer("diff"));
+        for s in &mut blocker.shapes {
+            s.rect = Rect { x: well.x + well.w + 500, y: well.y + well.h / 2, w: 400, h: 400 };
+        }
+        assert!(well_bridges(&[pair[0].clone(), pair[1].clone(), blocker], &[], &pdk, &|_, _| true).is_empty(), "active in the gap");
+    }
+
+    /// One drawn PMOS cell and its well's bbox.
+    fn pmos(pdk: &verify::Pdk) -> (Macro, Rect) {
+        use crate::{testkit, Cell};
+        let nwell = pdk.layer("nwell").unwrap();
+        let (g, c) = testkit::group_of(pnr_core::DeviceKind::Pmos, 1, 2, 1680, 150);
+        let cell = crate::mosfet::Mosfet::enumerate(&g, &c, pdk)[0].draw(&g, &c, pdk);
+        let well = cell.shapes.iter().filter(|s| s.layer == nwell).map(|s| s.rect).reduce(union_rect).unwrap();
+        (cell, well)
+    }
+
+    /// `m` moved by (`dx`, `dy`), its bulk on net `bulk` and its other pins on nets of their own.
+    fn shift(m: &Macro, dx: i32, dy: i32, bulk: u16) -> Macro {
+        use pnr_core::NetId;
+        let mut m = m.clone();
+        for s in &mut m.shapes {
+            s.rect.x += dx;
+            s.rect.y += dy;
+        }
+        for p in &mut m.pins {
+            p.at.x += dx;
+            p.at.y += dy;
+            p.net = if p.name.ends_with(":B") { NetId(bulk) } else { NetId(10 + bulk + p.net.0) };
+        }
+        m.bbox.x += dx;
+        m.bbox.y += dy;
+        m
+    }
+
+    /// DRC/ERC findings on `shapes`, labelled by `cells`' pins (bulks as `B`, the rest per cell).
+    fn findings_of(cells: &[Macro], shapes: Vec<pnr_core::Shape>, pdk: &verify::Pdk) -> Vec<String> {
+        let labels: Vec<verify::LabeledPin> = cells
             .iter()
             .enumerate()
             .flat_map(|(k, m)| m.pins.iter().map(move |p| (k, p)))
-            .filter(|(_, p)| !p.name.ends_with(":S") || true)
             .map(|(k, p)| verify::LabeledPin { name: if p.name.ends_with(":B") { "B".into() } else { format!("c{k}_{}", p.name.replace(':', "_")) }, layer: p.layer.0, x: p.at.x + p.at.w / 2, y: p.at.y + p.at.h / 2 })
             .fold(Vec::new(), |mut v: Vec<verify::LabeledPin>, l| {
                 if !v.iter().any(|o| (o.x, o.y) == (l.x, l.y)) {
@@ -586,15 +643,60 @@ mod tests {
                 }
                 v
             });
-        let dirty = crate::testkit::findings(&shapes, &labels, &pdk);
-        assert!(dirty.is_empty(), "{dirty:?}");
-        assert!(well_bridges(&[shift(&cell, 0, 1), shift(&cell, dx, 2)], &[], &pdk).is_empty(), "different bulks");
-        let mut blocker = shift(&cell, 0, 3);
+        crate::testkit::findings(&shapes, &labels, pdk)
+    }
+
+    /// CELL-22: wells offset by a quarter of their height bridge over their
+    /// hull when the gap is clear, over the overlap when p-active sits beside
+    /// the overlap; both DRC/ERC clean with the touching rects left unmerged.
+    #[test]
+    fn offset_wells_bridge_over_their_overlap() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let nwell = pdk.layer("nwell").unwrap();
+        let (cell, well) = pmos(&pdk);
+        // On the grid: the builder snaps what it draws.
+        let (dx, dy) = (well.w + 600, well.h / 4 / pdk.grid() * pdk.grid());
+        let pair = [shift(&cell, 0, 0, 1), shift(&cell, dx, dy, 1)];
+        let bridges = well_bridges(&pair, &[], &pdk, &|_, _| true);
+        assert_eq!(bridges.len(), 1);
+        let fill = rects_on(&bridges[0], Some(nwell));
+        assert_eq!(fill, vec![Rect { x: well.x + well.w, y: well.y, w: 600, h: well.h + dy }], "the hull");
+        let shapes: Vec<pnr_core::Shape> = pair.iter().chain(&bridges).flat_map(|m| m.shapes.clone()).collect();
+        let dirty = findings_of(&pair, shapes, &pdk);
+        assert!(dirty.is_empty(), "hull: {dirty:?}");
+
+        let mut blocker = shift(&cell, 0, 0, 3);
         blocker.shapes.retain(|s| Some(s.layer) == pdk.layer("diff"));
-        for s in &mut blocker.shapes {
-            s.rect = Rect { x: well.x + well.w + 500, y: well.y + well.h / 2, w: 400, h: 400 };
-        }
-        assert!(well_bridges(&[pair[0].clone(), pair[1].clone(), blocker], &[], &pdk).is_empty(), "active in the gap");
+        blocker.shapes.truncate(1);
+        blocker.shapes[0].rect = Rect { x: well.x + well.w + 100, y: well.y + well.h + dy - 300, w: 400, h: 300 };
+        let three = [pair[0].clone(), pair[1].clone(), blocker];
+        let bridges = well_bridges(&three, &[], &pdk, &|_, _| true);
+        assert_eq!(bridges.len(), 1);
+        assert_eq!(rects_on(&bridges[0], Some(nwell)), vec![Rect { x: well.x + well.w, y: well.y + dy, w: 600, h: well.h - dy }], "the overlap");
+        let shapes: Vec<pnr_core::Shape> = pair.iter().chain(&bridges).flat_map(|m| m.shapes.clone()).collect();
+        let dirty = findings_of(&pair, shapes, &pdk);
+        assert!(dirty.is_empty(), "overlap: {dirty:?}");
+    }
+
+    /// CELL-22 (REL-16's acceptance): an injector's well is never bridged to a
+    /// non-injector's, directly or through a third cell's well.
+    #[test]
+    fn a_forbidden_pair_is_not_bridged() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let nwell = pdk.layer("nwell").unwrap();
+        let (cell, well) = pmos(&pdk);
+        let dx = well.w + 1_500;
+        let pair = [shift(&cell, 0, 0, 1), shift(&cell, dx, 0, 1)];
+        let flags = [CellFlags { injector: true, ..Default::default() }, CellFlags::default()];
+        assert!(well_bridges(&pair, &[], &pdk, &|i, j| may_share_well(flags[i], flags[j])).is_empty());
+        let flags = [CellFlags::default(); 2];
+        assert_eq!(well_bridges(&pair, &[], &pdk, &|i, j| may_share_well(flags[i], flags[j])).len(), 1);
+        let row = [shift(&cell, 0, 0, 1), shift(&cell, dx, 0, 1), shift(&cell, 2 * dx, 0, 1)];
+        let bridges = well_bridges(&row, &[], &pdk, &|i, j| !matches!((i, j), (0, 2) | (2, 0)));
+        assert_eq!(bridges.len(), 1);
+        assert_eq!(bridges[0].shapes.iter().filter(|s| s.layer == nwell).count(), 1, "A–B bridged, B–C would join A to C");
+        let all = well_bridges(&row, &[], &pdk, &|_, _| true);
+        assert_eq!(all[0].shapes.iter().filter(|s| s.layer == nwell).count(), 2, "control: both bridged when legal");
     }
 
     fn req(dev: u16, net: u16, ty: GuardRingType, shareable: bool) -> GuardRingRequirement {
