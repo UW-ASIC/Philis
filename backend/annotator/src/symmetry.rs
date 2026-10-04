@@ -219,7 +219,7 @@ pub fn analyze(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetClassifi
                 if s.free(d.0 as u32) {
                     s.is_self[i] = true;
                     s.by[i] = Some(id);
-                } else if s.by[i] != Some(id) {
+                } else if s.pair_of[i].is_some() {
                     let ids: Vec<ConstraintId> = std::iter::once(id).chain(s.by[i]).collect();
                     diags.push(conflict::diag(&ids, vec![d], "self-symmetric device already paired; dropped"));
                 }

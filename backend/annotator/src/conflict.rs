@@ -128,4 +128,17 @@ mod tests {
         // Plain `ota()`: vout1 = XM1/XM3, vout2 = XM2/XM4 (XM4's gate is vbias), equal.
         assert!(asym(&ota()).0.is_empty());
     }
+
+    /// SelfDevice: a self-symmetric tail agreeing with propagation is no conflict; a self seed on a paired device is.
+    #[test]
+    fn self_device_conflicts_only_on_a_paired_device() {
+        let two = |second: &str| annotate(&ota(), &format!(r#"[{{"constraint":"SymmetricBlocks","direction":"V","pairs":[["XM1","XM2"]]}},{{"constraint":"SymmetricBlocks","direction":"V","pairs":[[{second}]]}}]"#)).0;
+        let p = two(r#""XM5""#);
+        assert!(conflicts(&p).is_empty(), "{:?}", p.intent.diagnostics);
+        let p = two(r#""XM1""#);
+        let c = conflicts(&p);
+        assert_eq!(c.len(), 1, "{:?}", p.intent.diagnostics);
+        assert_eq!(c[0].devices.iter().map(|d| d.0).collect::<Vec<_>>(), [0]);
+        assert!(c[0].message.starts_with("ids 4294967294,4294967295:"), "{}", c[0].message);
+    }
 }
