@@ -17,6 +17,7 @@
 - M1: merged to main (f50ef00). M2–M6: 64/140 items merged into branch `m2` (../philis-m2/integrate), 84 implemented; 247 agents done.
   Per module merged/total: reliability 12/12, analog-matching 15/16, annotator 14/19, perf 8/21, routing 7/23, cells 5/19, flow 2/10, placement 1/20. Not done so far: MAT-18 (deferred), CELL-11, PLC-07.
 - At stop: uncommitted WIP saved to docs/plans/wip-patches/m2-{flow,integrate,reliability}.patch. flow and reliability edits left in their worktrees (resumed agents finish them); the integrate (m2) partial dr fix was reset to keep m2 clean (its patch is kept).
+- History rewritten 2026-10-04 (Claude co-author trailers removed from all branches/tags; trees identical; main force-pushed to origin at a376052). Old SHAs quoted in the workflow script/journal (e.g. 2a09c30, m1a base) live on under refs/original/ and in /tmp/claude-1000/philis-before-rewrite.bundle — keep refs/original until the M2–M6 run has finished.
 - RESUME (one call, same args): Workflow({scriptPath: "~/.claude/projects/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/workflows/scripts/philis-m1-modules-wf_2ab8e777-05e.js", resumeFromRunId: "wf_2ab8e777-05e", args: {"cap": 2500000, "cap2": 15000000}}).
   Finished agents replay from the journal; agents cut off mid-step rerun (Opus 5.5, effort medium) and are told to finish any commits they left. Module worktrees ../philis-m2/<module> keep their branches m2-<module>.
 - Ends with `final-m2`: report docs/plans/m2-m6-report.md, merge m2 → main only if no new failing tests.
