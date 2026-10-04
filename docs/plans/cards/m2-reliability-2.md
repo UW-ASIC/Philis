@@ -137,7 +137,7 @@ fn drop_uv(self, r: &Routes) -> Option<f32> {
 
 ### Current code
 - Steps 4–5 are **done** (GAP-06, `f4c646b`): `EmLimit.derating_assumed` (`backend/verify/src/pdk.rs:37`),
-  `sidecar_derating` (`:687-693`), sidecar `em_derating` on 3 decks, test `sky130_em_rating_is_90c_with_fallback_parameters`
+  `sidecar_derating` (`:694`), sidecar `em_derating` on 3 decks, test `sky130_em_rating_is_90c_with_fallback_parameters`
   (`:1736`), and acceptance `sky130_met1_em_limit_derates_at_125c_not_at_27c` (`frontend/library/src/elaborate.rs:465`).
 - The EM temperature is **`lib.rs:428`** (plan: `:280`): `temp_c + 273.15`. `CellSpace` is built at `:418`. Per-cell power is
   `cells.power` (`:1414`) and the variants are `cells.variants[c].alternatives[v].bbox` (`gp::VariantSpace`, `pnr_core::Macro.bbox`).
