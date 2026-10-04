@@ -287,12 +287,16 @@ pub(crate) fn stack(pdk: &Pdk) -> analog::routing::Stack {
 /// the operating point's `vdd_mv`, with the DC current it carries (the larger
 /// of what its terminals draw and supply). Empty without an operating point,
 /// and no current for a net with an unresolved device on it: those rules then
-/// skip, and say so, instead of checking a wrong number.
+/// skip, and say so, instead of checking a wrong number. Each such net's IR
+/// budget from `ir` (`annotator::ir::budgets`: `(net, µA, max drop µV)`)
+/// becomes its `max_drop_mv`, which arms `ir_drop`; a signal net's budget is
+/// not written, as GPurify's grid examines only supply nets.
 pub(crate) fn intent(
     netlist: &pnr_core::Netlist,
     classes: &[analog::metadata::NetClassification],
     draws: Option<&[Option<Vec<(String, f64)>>]>,
     vdd_mv: f64,
+    ir: &[(pnr_core::NetId, i32, i64)],
 ) -> verify::Intent {
     use analog::metadata::NetClass;
     let Some(draws) = draws else { return verify::Intent::default() };
@@ -308,6 +312,9 @@ pub(crate) fn intent(
             }
         }
         out.supplies.push((name.clone(), vdd_mv, c.class == NetClass::Ground));
+        if let Some(&(_, _, uv)) = ir.iter().find(|b| b.0 == c.net) {
+            out.max_drop_mv.push((name.clone(), uv as f64 / 1000.0));
+        }
         if known {
             out.currents.push((name, inn.max(outg)));
         }
@@ -492,7 +499,7 @@ mod tests {
         };
         let class = |n: u16, class| NetClassification { net: NetId(n), class, c_budget_af: None, max_coupling_af: None };
         let draws = [Some(vec![("D".into(), 10.0), ("G".into(), 0.0), ("S".into(), -10.0), ("B".into(), 0.0)]), None];
-        let i = super::intent(&nl, &[class(0, NetClass::Supply), class(1, NetClass::Ground)], Some(&draws), 1_800.0);
+        let i = super::intent(&nl, &[class(0, NetClass::Supply), class(1, NetClass::Ground)], Some(&draws), 1_800.0, &[]);
         assert_eq!(i.supplies.len(), 2, "both rails still declared");
         assert_eq!(i.currents, vec![("vss".to_string(), 10.0)], "vdd unknown: no current, never a partial sum");
     }

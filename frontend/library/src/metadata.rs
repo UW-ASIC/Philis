@@ -93,6 +93,9 @@ pub struct MetadataReport {
     /// Post-layout specs: `(metric, measured, min, max, normalised miss)`.
     /// Empty when performance scoring is off.
     pub performance: Vec<(String, Option<f64>, Option<f64>, Option<f64>, f64)>,
+    /// Per finite spec bound, its worst value and scenario over the active
+    /// scenarios (PERF-10; the winner is not re-run over inactive ones).
+    pub performance_worst: Vec<String>,
     /// Per declared spec bound, its routing budget row or why it has none
     /// (`"ugf:min: row (3 nets)"`, `"…: do-not-worsen row …"`, `"…: no row (reason)"`).
     /// Empty from [`build`]; the flow fills it.
@@ -268,6 +271,7 @@ pub fn build(
         net_classes: census,
         missing: missing.to_vec(),
         performance: Vec::new(),
+        performance_worst: Vec::new(),
         budget_rows: Vec::new(),
         sim_failures: 0,
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
@@ -352,6 +356,9 @@ impl std::fmt::Display for MetadataReport {
                     (Some(_), false) => "met".to_string(),
                 };
                 writeln!(f, "  {m:<22} {:>12} {:>12} {:>12}  {verdict}", num(*v), num(*lo), num(*hi))?;
+            }
+            for w in &self.performance_worst {
+                writeln!(f, "  worst {w}")?;
             }
             writeln!(f, "  simulations failed: {}", self.sim_failures)?;
         }
