@@ -157,6 +157,18 @@ pub struct Coeffs {
     pub vbe_tc_uv_per_k: Option<f32>,
     /// Passive gradient `S_D`, %/mm (eq. 8.15).
     pub sd_pct_per_mm: Option<f32>,
+    /// Mobility exponent, β ∝ T^−exp (1.7 NMOS, 1.5 PMOS): read on a mirror's % ledger only.
+    pub mobility_exp: Option<f32>,
+    /// Die temperature, K (`Config.op`); `None` skips the mobility term.
+    pub die_temp_k: Option<f32>,
+}
+
+/// Current-factor change of a member `dt_k` warmer than its partner, %:
+/// `−100·exp·ΔT/T` for `k ∝ T^−exp` (Hastings §12.1.1, PDF p.578). Signed,
+/// ΔT of member a minus b.
+#[must_use]
+pub fn mobility_pct(exp: f32, dt_k: f32, t_abs_k: f32) -> f32 {
+    -100.0 * exp * dt_k / t_abs_k
 }
 
 /// ΔV_BE σ of a bipolar/diode pair from its ΔI_S/I_S σ, mV: `V_T·ln(1 + σ/100)`
@@ -179,7 +191,10 @@ pub fn ratio_thermal_pct(tc_ppm_per_k: f32, dt_mk: f32) -> f32 {
 ///
 /// - `sigma_rand` = `A_VT·√((1/a₁+1/a₂)/2)` ([`sigma_pair`]).
 /// - `sigma_grad` = `S_VT·|Δm|` (Pelgrom eq. (1) distance term, PDF p.1).
-/// - `mu_thermal` = `TC·|ΔT|` at the two centroids (Hastings eq. 8.23, PDF p.388).
+/// - `mu_thermal` = `TC·|ΔT̄|` (Hastings eq. 8.23, PDF p.388), `ΔT̄` the
+///   unit-weighted mean rise over each member's units (centroids without
+///   units); a mirror's % ledger adds `|`[`mobility_pct`]`|` (MAT-14), an mV
+///   ledger skips it (no G).
 /// - `mu_lod` = `KVTH0·|⟨lod⟩_a − ⟨lod⟩_b|`, unit-weighted means (REV eq. 11).
 /// - `coincidence` = `|Δm|/tol` when the members' unit counts admit a
 ///   common-centroid row (Hastings Table 8.4 rule 1, PDF p.392): process-free,
@@ -297,6 +312,12 @@ mod tests {
         let s = sigma_pair(2.0, 36.0, 36.0);
         assert!((s - 0.333).abs() < 1e-3, "{s}");
         assert!((bjt_sigma_vbe_mv(s) - 0.0855).abs() < 5e-4, "{}", bjt_sigma_vbe_mv(s));
+    }
+
+    #[test]
+    fn mobility_term_sign() {
+        assert!((mobility_pct(1.7, 1.0, 300.0) + 0.5667).abs() < 1e-3);
+        assert!((mobility_pct(1.5, 1.0, 300.0) + 0.5).abs() < 1e-6);
     }
 
     #[test]

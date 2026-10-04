@@ -7,7 +7,7 @@ use pnr_core::layout::Layout;
 
 use crate::matching::class::{Family, MatchClass};
 use crate::matching::mismatch::{
-    bjt_sigma_vbe_mv, ratio_thermal_pct, sigma_current_pct, sigma_pair, sigma_voltage_mv, Budget, Coeffs, Ledger, LedgerRow, LedgerUnit,
+    bjt_sigma_vbe_mv, mobility_pct, ratio_thermal_pct, sigma_current_pct, sigma_pair, sigma_voltage_mv, Budget, Coeffs, Ledger, LedgerRow, LedgerUnit,
     MatchKind, GRADIENT_SHARE,
 };
 use crate::matching::moments::{cancelled_order, phi_equal, sums, Pt};
@@ -45,16 +45,23 @@ pub struct MatchedSet {
 }
 
 /// Unit moments of one member plus its weighted LOD sum (`Σw·lod`, `Σw` over
-/// units with a finite `lod`).
-fn member(l: &Layout, d: DeviceId) -> (crate::matching::moments::Sums, f64, f64) {
-    let (mut lw, mut w) = (0.0f64, 0.0f64);
+/// units with a finite `lod`) and, when `hot`, its weighted rise `Σw·rise(u)`
+/// (mK·weight; 0 otherwise).
+///
+/// ponytail: O(units·cells) per pair; the plan's 7-point stencil bounds it at
+/// 7·cells but is 50 % low within ~L of a heater (card m2-analog-matching-3).
+fn member(l: &Layout, d: DeviceId, hot: bool) -> (crate::matching::moments::Sums, f64, f64, f64) {
+    let (mut lw, mut w, mut t) = (0.0f64, 0.0f64, 0.0f64);
     let s = sums(l.units.of_device(l, d).inspect(|u| {
         if u.lod.is_finite() {
             lw += u.weight as f64 * f64::from(u.lod);
             w += u.weight as f64;
         }
+        if hot {
+            t += u.weight as f64 * f64::from(l.rise_at_point_mc(u.x, u.y));
+        }
     }).map(Pt::from));
-    (s, lw, w)
+    (s, lw, w, t)
 }
 
 impl MatchedSet {
@@ -90,7 +97,8 @@ impl MatchedSet {
     /// it): `cost` never reads it, and the MOS row search allocates per call.
     fn ledger_with(&self, l: &Layout, i: usize, coincide: bool) -> Ledger {
         let (a, b) = (self.members[0], self.members[i]);
-        let ((sa, lwa, wa), (sb, lwb, wb)) = (member(l, a), member(l, b));
+        let hot = l.power_uw.iter().any(|&p| p != 0);
+        let ((sa, lwa, wa, ta), (sb, lwb, wb, tb)) = (member(l, a, hot), member(l, b, hot));
         let units = sa.w > 0.0 && sb.w > 0.0;
         let at = |s: &crate::matching::moments::Sums, d: DeviceId| {
             s.centroid().unwrap_or_else(|| {
@@ -150,12 +158,15 @@ impl MatchedSet {
 
         let (mut sigma_grad, mut mu_lod, mut mu_thermal) = (0.0, 0.0, 0.0);
         if budgeted {
-            // ΔT between the centroids, mK (0 without power).
-            let dt_mk = if l.power_uw.iter().any(|&p| p != 0) {
+            // |ΔT̄|, mK (0 without power): unit-weighted mean rise per member,
+            // the centroid samples without units.
+            let dt_mk = if !hot {
+                0.0
+            } else if units {
+                (ta / sa.w - tb / sb.w).abs() as f32
+            } else {
                 let rise = |(x, y): (f64, f64)| l.rise_at_point_mc(x.round() as i32, y.round() as i32);
                 (rise(ca) - rise(cb)).abs()
-            } else {
-                0.0
             };
             match self.family {
                 Family::Mos => {
@@ -170,6 +181,10 @@ impl MatchedSet {
                     if unit == LedgerUnit::Pct {
                         let k = 0.1 * self.gm_over_id.unwrap_or(0.0);
                         (sigma_grad, mu_thermal, mu_lod) = (k * sigma_grad, k * mu_thermal, k * mu_lod);
+                        // MAT-14: a mirror's β ∝ T^−exp adds by magnitude; an mV ledger has no G for it.
+                        if let (MatchKind::Current, Some(e), Some(t)) = (self.kind, c.mobility_exp, c.die_temp_k) {
+                            mu_thermal += mobility_pct(e, dt_mk / 1e3, t).abs();
+                        }
                     }
                 }
                 Family::Resistor | Family::Capacitor => {
@@ -222,7 +237,7 @@ impl MatchedSet {
     /// The areas [`Self::ledger`] reads for pair `(0, i)` on `l`, µm².
     #[must_use]
     pub fn pair_areas(&self, l: &Layout, i: usize) -> (f32, f32) {
-        self.areas(&member(l, self.members[0]).0, &member(l, self.members[i]).0, i)
+        self.areas(&member(l, self.members[0], false).0, &member(l, self.members[i], false).0, i)
     }
 
     fn ledgers<'a>(&'a self, l: &'a Layout) -> impl Iterator<Item = Ledger> + 'a {
@@ -292,12 +307,12 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
     }
     /// Report only: allocates the members' units per pair.
     fn ledger_rows(&self, l: &Layout, out: &mut Vec<LedgerRow>) {
-        let (a, sa) = (self.members[0], member(l, self.members[0]).0);
+        let (a, sa) = (self.members[0], member(l, self.members[0], false).0);
         let pa: Vec<Pt> = l.units.of_device(l, a).map(Pt::from).collect();
         for i in 1..self.members.len() {
             let b = self.members[i];
             let g = self.ledger(l, i);
-            let sb = member(l, b).0;
+            let sb = member(l, b, false).0;
             let units = sa.w > 0.0 && sb.w > 0.0;
             let pb: Vec<Pt> = l.units.of_device(l, b).map(Pt::from).collect();
             out.push(LedgerRow {
@@ -528,29 +543,104 @@ mod tests {
         assert_eq!((s.violations(&l), s.unknown(&l)), (0, 1));
     }
 
+    /// Unit-weighted mean rise of `owner`'s units on `l`, mK (equal weights).
+    fn brute_t(l: &Layout, xs: &[i32], y: i32) -> f32 {
+        xs.iter().map(|&x| l.rise_at_point_mc(x, y)).sum::<f32>() / xs.len() as f32
+    }
+
+    /// Units of devices 0/1 at `a`/`b` (y `uy`, weight 10) merged in cell 1
+    /// (centre `cx`, half-extents 10 µm × 500 nm); cell 0 a 10 mW heater at
+    /// `hx` with half-extent `hh`.
+    fn heated(a: &[i32], b: &[i32], uy: i32, cx: i32, hx: i32, hh: i32) -> Layout {
+        let units: Vec<Unit> = a.iter().map(|&x| unit(0, x, uy, 10)).chain(b.iter().map(|&x| unit(1, x, uy, 10))).collect();
+        let heater = [(Rect { x: 0, y: 0, w: 2 * hh, h: 2 * hh }, &[][..])];
+        let alts = [(Rect { x: 0, y: 0, w: 20_000, h: 1_000 }, &units[..])];
+        let lib = UnitLib::build(vec![1, 1], &[vec![], vec![DeviceId(0), DeviceId(1)]], [&heater[..], &alts[..]].into_iter());
+        let mut l = layout(&[hx, cx], &[0, 0], hh);
+        (l.hw[1], l.hh[1]) = (10_000, 500);
+        l.power_uw[0] = 10_000;
+        l.units = Arc::new(lib);
+        l
+    }
+
     #[test]
-    fn thermal_reads_unit_centroids_of_a_merged_pair() {
-        let lay = |a: [i32; 2], b: [i32; 2]| {
-            let units: Vec<Unit> = a.iter().map(|&x| unit(0, x, 500, 10)).chain(b.iter().map(|&x| unit(1, x, 500, 10))).collect();
-            let heater = [(Rect { x: 0, y: 0, w: 2_000, h: 2_000 }, &[][..])];
-            let alts = [(Rect { x: 0, y: 0, w: 20_000, h: 1_000 }, &units[..])];
-            let lib = UnitLib::build(vec![1, 1], &[vec![], vec![DeviceId(0), DeviceId(1)]], [&heater[..], &alts[..]].into_iter());
-            let mut l = layout(&[0, 10_000], &[0, 0], 1_000);
-            (l.hw[1], l.hh[1]) = (10_000, 500);
-            l.power_uw[0] = 10_000;
-            l.units = Arc::new(lib);
-            l
+    fn thermal_averages_the_field_over_units() {
+        // Placed unit = cell origin (centre − half) + local offset: y 0, in
+        // line with the heater (P/(2πkr): AABB 2130 mK, ABBA 1311 mK).
+        let lay = |a: [i32; 2], b: [i32; 2]| heated(&a, &b, 500, 10_000, 0, 1_000);
+        let check = |a: [i32; 2], b: [i32; 2]| {
+            let l = lay(a, b);
+            let pa: Vec<i32> = l.units.of_device(&l, DeviceId(0)).map(|u| u.x).collect();
+            let pb: Vec<i32> = l.units.of_device(&l, DeviceId(1)).map(|u| u.x).collect();
+            let y = l.units.of_device(&l, DeviceId(0)).next().unwrap().y;
+            let brute = 765e-6 * (brute_t(&l, &pa, y) - brute_t(&l, &pb, y)).abs();
+            let mu = pair(0, 1).ledger(&l, 1).mu_thermal;
+            assert!((mu - brute).abs() < 1e-3 * brute, "{mu} vs {brute}");
+            mu
         };
-        let mut aabb = lay([2_500, 7_500], [12_500, 17_500]);
-        let mu = pair(0, 1).ledger(&aabb, 1).mu_thermal;
-        assert!((mu - 1.097).abs() < 0.01, "{mu}");
-        assert!(pair(0, 1).ledger(&lay([2_500, 17_500], [7_500, 12_500]), 1).mu_thermal < 0.01);
+        let mu = check([2_500, 7_500], [12_500, 17_500]);
+        assert!((mu - 1.630).abs() < 2e-3, "{mu}");
+        let abba = check([2_500, 17_500], [7_500, 12_500]);
+        assert!(abba > 0.5 && (abba - 1.003).abs() < 2e-3, "{abba}");
         // `cost` adds 3e5·(μ/allowance)² over the geometric pull.
+        let mut aabb = lay([2_500, 7_500], [12_500, 17_500]);
         let s = MatchedSet { budget: Budget::Allowance(1.0), ..pair(0, 1) };
         let hot = s.cost(&aabb);
         aabb.power_uw[0] = 0;
         let heat = hot - s.cost(&aabb);
         assert!((heat / (3e5 * mu * mu) - 1.0).abs() < 1e-3, "{heat}");
+    }
+
+    /// Placed x of `d`'s units on `l`, and their common y.
+    fn xs(l: &Layout, d: u16) -> (Vec<i32>, i32) {
+        let u: Vec<_> = l.units.of_device(l, DeviceId(d)).collect();
+        (u.iter().map(|u| u.x).collect(), u[0].y)
+    }
+
+    /// 1-row units at x = 0…3 µm, a 10 mW heater (half-extent 1 µm) 8 µm away.
+    fn near_heater(order: [u8; 4]) -> Layout {
+        let (a, b): (Vec<i32>, Vec<i32>) = {
+            let a = order.iter().zip([0, 1_000, 2_000, 3_000]).filter(|(&o, _)| o == 0).map(|(_, x)| x).collect();
+            let b = order.iter().zip([0, 1_000, 2_000, 3_000]).filter(|(&o, _)| o == 1).map(|(_, x)| x).collect();
+            (a, b)
+        };
+        // Cell 1 centred at 10 µm: local x + 0 → placed x 0…3 µm; heater at 8 µm.
+        heated(&a, &b, 500, 10_000, 8_000, 1_000)
+    }
+
+    #[test]
+    fn thermal_matches_unit_sampling() {
+        let brute = |l: &Layout| {
+            let ((pa, y), (pb, _)) = (xs(l, 0), xs(l, 1));
+            765e-6 * (brute_t(l, &pa, y) - brute_t(l, &pb, y)).abs()
+        };
+        let l = near_heater([0, 0, 1, 1]);
+        let (mu, b) = (pair(0, 1).ledger(&l, 1).mu_thermal, brute(&l));
+        assert!((mu - b).abs() < 1e-3 * b && (b - 0.406).abs() < 0.01, "{mu} vs {b}");
+        let l = near_heater([0, 1, 1, 0]);
+        let g = pair(0, 1).ledger(&l, 1);
+        let b = brute(&l);
+        assert_eq!(g.delta_m_nm, 0.0);
+        assert!((g.mu_thermal - b).abs() < 1e-3 * b && g.mu_thermal > 0.05, "{} vs {b}", g.mu_thermal);
+        assert!((b - 0.0637).abs() < 0.005, "{b}");
+    }
+
+    #[test]
+    fn mobility_adds_on_a_pct_mirror() {
+        let l = near_heater([0, 0, 1, 1]);
+        let ((pa, y), (pb, _)) = (xs(&l, 0), xs(&l, 1));
+        let dt = (brute_t(&l, &pa, y) - brute_t(&l, &pb, y)).abs();
+        let base = pair(0, 1);
+        let pct = |exp| MatchedSet {
+            coeffs: Coeffs { abeta_pct_um: Some(2.2), mobility_exp: exp, die_temp_k: Some(300.0), ..base.coeffs },
+            gm_over_id: Some(10.0),
+            ..pair(0, 1)
+        };
+        let (with, without) = (pct(Some(1.7)).ledger(&l, 1).mu_thermal, pct(None).ledger(&l, 1).mu_thermal);
+        let want = 1.7 * (dt / 1000.0) / 300.0 * 100.0;
+        assert!((with - without - want).abs() < 1e-4, "{with} − {without} vs {want}");
+        let mv = |exp| MatchedSet { gm_over_id: None, ..pct(exp) }.ledger(&l, 1).mu_thermal;
+        assert_eq!(mv(Some(1.7)), mv(None));
     }
 
     #[test]

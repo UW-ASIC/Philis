@@ -190,6 +190,8 @@ pub struct ProcessNumbers {
     /// The process can draw an `Ecgr` / `Hcgr` (`cells::post_cell::drawable`).
     pub ecgr_drawable: bool,
     pub hcgr_drawable: bool,
+    /// `Config.op` temperature, K (not a deck key): a mirror's mobility term (MAT-14).
+    pub die_temp_k: Option<f32>,
 }
 
 #[cfg(test)]

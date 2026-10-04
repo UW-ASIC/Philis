@@ -367,7 +367,8 @@ fn performance_rows(
         notes.iter().for_each(|n| eprintln!("[perf] {n}"));
         notes
     };
-    let ann = annotation(pdk, &cfg.annotation);
+    let mut ann = annotation(pdk, &cfg.annotation);
+    ann.process.die_temp_k = cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15);
     let Some(af_per_um) = ann.process.wire_af_per_um else {
         let mut out = scenario_notes(&all);
         out.extend(notes(&[], "deck has no wire capacitance"));
@@ -437,7 +438,8 @@ fn solve(
     let netlist = netlist.clone();
     let currents = bias.currents.clone();
     // Annotate: placement/routing rules + cell constraints, device-indexed.
-    let ann = annotation(pdk, &cfg.annotation);
+    let mut ann = annotation(pdk, &cfg.annotation);
+    ann.process.die_temp_k = cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15);
     let mut problem = annotate(&netlist, &ann);
     if cfg.min_utilization > 0.0 {
         problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min: cfg.min_utilization }));
@@ -802,6 +804,8 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
         ecgr_min_width_nm: opt("ecgr_min_width_nm"),
         ecgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Ecgr, pdk),
         hcgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Hcgr, pdk),
+        // Set by the callers from `Config.op` (not a deck key).
+        die_temp_k: None,
     };
     AnnotationConfig { process, ..base.clone() }
 }
