@@ -119,6 +119,8 @@ Hand layout applies Hastings' rules by eye to the pairs a designer remembers and
 
 ### MAT-01 Moment and orientation kernel
 
+Status: done in M1 (`f447220`; matching merge `59371b5`).
+
 - **Priority** P0. **Effort** S. **Depends on** none.
 - **Why**: foundation for B1/B2/B7/B8. CC-01/02/03, NOTES-19/20/22, H08-35/36, H13-25/40, MM-26, AR-10, AR-36.
 - **Current**: first moments exist twice (`kernel/analog/src/placement/cc.rs:54-63`, `kernel/cells/src/cap_array.rs:361-374`); second moment only radial (`cap_array.rs:366-374`); Φ equality exists only as the private `currents_run_alike` in `frontend/library/src/cellgen.rs:261-272`.
@@ -174,6 +176,8 @@ Hand layout applies Hastings' rules by eye to the pairs a designer remembers and
 
 ### MAT-02 Point-symmetric grid assignment; fix the BJT array defect
 
+Status: done in M1 (`a505bb9`; matching merge `59371b5`). `cells::bjt` draws `pattern::centro_assign(Balanced)`; `unit_order` is gone.
+
 - **Priority** P0. **Effort** M. **Depends on** MAT-01.
 - **Why**: B5. H09-49, H09-06/07/14, AC-08, CC-18/22, H08-34/35, NTH corollary (odd/even cancellation).
 - **Current**: `bjt.rs:208-231` deals whole members to slots in radius/angle order, so a member's slots are not closed under 180° rotation; `cap_array.rs:140-192` already assigns reflected pairs (`Grid::put_pair`, `cap_array.rs:217-221`) but lives privately in cap_array.
@@ -223,6 +227,8 @@ Hand layout applies Hastings' rules by eye to the pairs a designer remembers and
 
 ### MAT-03 Diffusion-legal common-centroid rows for ratioed MOS
 
+Status: done in M1 (`c0dcfa9`; matching merge `59371b5`).
+
 - **Priority** P0. **Effort** M. **Depends on** MAT-01.
 - **Why**: B6. AC-05, CC-37/38, H13-22 (ratioed devices from identical units), Drennan Table III (put multiplicity in the output, drennan_mismatch.txt L286–308).
 - **Current**: region parity: multi-device rows start with D, so region i is S iff i is odd (`mosfet.rs:324-328`); a boundary between two devices is legal only on S. `greedy_centroid` (`builder.rs:271-292`) ignores this; `centroid_sequence` (`mosfet.rs:730-750`) only handles equal counts.
@@ -260,6 +266,8 @@ Hand layout applies Hastings' rules by eye to the pairs a designer remembers and
 - **Risks**: a single CC row carries inherent inner/outer LOD difference (REV §V-A, cc_review.txt L428–437); MAT-04's LOD term prices it and the "apart" topology remains available.
 
 ### MAT-04 `MatchedSet`: one ledger and one allowance per matched pair
+
+Status: done in M1 (`13b0a27`, `c41f71b`; matching merge `59371b5`). `MatchingPair`, `ThermalGradient` and `CentroidGroup` are deleted; each pair's thermal term is `MatchedSet`'s `mu_thermal` from `Layout::rise_at_point_mc` at unit centroids. **Acceptance not met:** the ±5 % HPWL/footprint band (T5, T8) failed at the item commit (OTA trio WL −13.3 %) and at the M1 close (OTA trio WL +21.8 %, area +15.7 % vs M0, mostly from FLOW-16; m1-report §4); carried to M2 item 0.
 
 - **Priority** P0. **Effort** L. **Depends on** MAT-01. (PLC's AR-42 fix improves gp but is not required.)
 - **Why**: B1–B4. AR-01, AR-02, AR-04, AR-33, AR-37, AR-40, AR-41, AR-43; MM-01/02/15/19/30/31, LAMP-09, NOTES-16/18/19/53, H08-32/35/36, H13-37/40, GRAEB-02.
@@ -370,6 +378,8 @@ Hand layout applies Hastings' rules by eye to the pairs a designer remembers and
 
 ### MAT-05 `OrientationSet`: channel axes parallel, Φ equal
 
+Status: done in M1 (`723bbf7`; matching merge `59371b5`).
+
 - **Priority** P0. **Effort** S. **Depends on** MAT-01.
 - **Why**: B7. AR-36, AP-04 (behaviourally), H13-25, H08-16, MM-10, NOTES-22, LAMP-11/12, BAL1-43.
 - **Current**: §1.1 "Orientation" row; `UnitLib::placed` already turns `phi` with the cell (`units.rs:120,132-135`).
@@ -392,6 +402,8 @@ Hand layout applies Hastings' rules by eye to the pairs a designer remembers and
 - **Risks**: macroMaster's `place_mirrored` (AF-19) makes odd-finger partners fail `Phi`; this is the intended report.
 
 ### MAT-06 Remaining allowance handed to `CommonNodes`
+
+Status: done in M1 (`d12b34b`; matching merge `59371b5`).
 
 - **Priority** P0. **Effort** S. **Depends on** MAT-04. Consumer: RTE (CommonNodes rule unchanged).
 - **Why**: B3 routing half. AR-04, MM-31, MM-33, LAMP-09.

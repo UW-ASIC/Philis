@@ -190,7 +190,7 @@ Status: done in M0 (`e7db737`); it also does PERF-09 step 2 (C17): `pin_currents
 
 ### REL-02 Antenna: in-loop model agrees with signoff
 
-Status: done in M0 (`dac139f`). As built: `pnr_core::GatePin { at, dev, nm2 }` per net in `Routes::gates` (kernel/core/src/routes.rs:54, 72); diode credit is the deck's `antenna_electrical` `diode_bonus` only, on pieces touching a diode shape. Deferred to M1 (review finding 20): `antenna_in_loop_never_passes_what_signoff_fails` compares per fixture, not per net, because a signoff ERC row carries no net (`verify::Finding` is a point on the `gate` layer); the per-net form lands here once GPurify reports the net of an antenna row (00-MASTER-PLAN §6.4 Q7).
+Status: done in M0 (`dac139f`); the per-net T2 deferred below was not done in M1 (still waits on §6.4 Q7) and carries to M2 item 0. As built: `pnr_core::GatePin { at, dev, nm2 }` per net in `Routes::gates` (kernel/core/src/routes.rs:54, 72); diode credit is the deck's `antenna_electrical` `diode_bonus` only, on pieces touching a diode shape. Deferred to M1 (review finding 20): `antenna_in_loop_never_passes_what_signoff_fails` compares per fixture, not per net, because a signoff ERC row carries no net (`verify::Finding` is a point on the `gate` layer); the per-net form lands here once GPurify reports the net of an antenna row (00-MASTER-PLAN §6.4 Q7).
 
 - Priority: **P0**. Effort: **M**. Depends on: none for steps 1–5 and 7. T1 on met3 also needs FLOW-05 step 2 (`ar.met3.1` sidewall 2000 → 845 nm in the vendored deck); T1 on dac4 may also need RTE-06 (repair on the drawn geometry).
 - **Why:** AR-13, AR-44, AV-15, AV-17, H05-26, H05-28. Hastings defines the node ratio as metal of the node over the gate oxide of poly belonging to that node, per stage (§5.1.6, L13148–13157, PDF 228). Junction bleed is credited only as the process states it (L13215–13230, PDF 229). GPurify's `antenna_electrical` computes `ratio − credit·A_diode − bonus` and refuses `credit ≠ 0` with a diode layer (`GP/crates/check/src/erc/rules/antenna.rs:405-440`).
@@ -388,7 +388,7 @@ Status: done in M0 (`76e7232`, `ab947a2`); the via grouping is transitive (amend
 - What REL still requires: T6 = 0 on every fixture after REL-07 removes rings. No extra test is needed: LU findings are DRC rows, and every sky130 fixture's DRC baseline is 0 (`benchmarks/tests/signoff_fixtures.rs:17-40`, checked at `:133-138`), so `fixtures_sign_off_within_baseline` fails on any LU hit once FLOW-05 adds the rules.
 
 ### REL-07 Guard-ring policy by role (injector, aggressor, victim)
-- Priority: **P1**. Effort: **M**. Depends on: CELL-05 (enum `Tap { in_well }`, `Ecgr`, `Hcgr`; deletes `tap_pitch_nm`, `enclosure_complete`, `Hbgr`, `Ebgr`), EXT-23 (per-device aggressor, victim and minority-injector tags; `SubstrateKind`). Without EXT-23 the policy still runs with aggressor = "touches a Clock-class net" and no injectors, which already removes today's blanket rings (T8). CELL-17 draws `Ecgr`/`Hcgr`; until it lands, those arms draw nothing (CELL-05 step "return no ring plus a `debug_assert!`"), so the annotator must not request them before CELL-17 (gate: `RingInputs.ecgr_drawable`, `hcgr_drawable`).
+- Priority: **P1**. Effort: **M**. Depends on: GAP-05 (reinstated CELL-05; done in M1, `b1510f4`: enum `Tap { in_well }`, `Ecgr`, `Hcgr`, `post_cell::drawable`; `tap_pitch_nm`, `enclosure_complete`, `Hbgr`, `Ebgr` deleted), EXT-23 (per-device aggressor, victim and minority-injector tags; `SubstrateKind`). Without EXT-23 the policy still runs with aggressor = "touches a Clock-class net" and no injectors, which already removes today's blanket rings (T8). CELL-17 draws `Ecgr`/`Hcgr`; until it lands, `drawable(Ecgr)` is false (GAP-05 as built), so the annotator must not request them before CELL-17 (gate: `RingInputs.ecgr_drawable`, `hcgr_drawable`).
 - **Why:**
   - Findings: AC-06, AA-18, AR-28, AC-23, H05-54, H14-27, H14-09, H12-39, SUB-28, SUB-30, SUB-34, SUB-39.
   - Hastings on majority vs minority rings:
@@ -542,14 +542,14 @@ Status: done in M0 (`76e7232`, `ab947a2`); the via grouping is transitive (amend
 - **Risks / notes:** `sheet_ohm` must be the body's own sheet R (FLOW-05 step 4 `device_sheet_ohm(model)`); `res_high_po`/`res_xhigh_po` have none there (FLOW-05 OQ-3), so their floor is skipped, not guessed. The 326.2 nm height is the poly level's, used as a proxy for the body's oxide.
 
 ### REL-14 Thermal field: Hastings eq. 5.6 self term
-- Priority: **P2**. Effort: **S**. Depends on: REL-05 (shared function). MAT is told the ThermalGradient numbers change.
+- Priority: **P2**. Effort: **S**. Depends on: REL-05 (shared function). MAT is told `MatchedSet`'s `mu_thermal` numbers change (`ThermalGradient` was deleted by MAT-04 in M1).
 - **Why:** H05-04, AR-24 (the self-term part only). Eq. 5.6 is the book's closed form for a device's own rise (L12021–12038).
 - **Current:** `thermal.rs:38-45` uses `r = max(hw, hh)`.
-- **Change:** in `rise_at_mc`, when `i == j`, replace the self term `P/(2πk·r_floor)` with `self_rise_mc(p, 2·min(hw,hh), 2·max(hw,hh), K_SI_W_PER_M_K)` (adding it would double-count, and the acceptance value below is eq. 5.6 alone). Mutual terms are unchanged.
+- **Change:** in `rise_at` (kernel/core/src/thermal.rs; M1 replaced the per-device `rise_at_mc` with this point form, shared by `rises_mc` and `Layout::rise_at_point_mc`), when the point is source `j`'s own centre, replace the self term `P/(2πk·r_floor)` with `self_rise_mc(p, 2·min(hw,hh), 2·max(hw,hh), K_SI_W_PER_M_K)` (adding it would double-count, and the acceptance value below is eq. 5.6 alone). Mutual terms are unchanged.
   - Finite die thickness and image sources (AR-24) are not planned: derived, not in ref/.
 - **Tests:** `thermal.rs` `the_self_term_is_eq_5_6`. The existing isotherm tests (`thermal.rs:144-170`) must still pass.
 - **Acceptance:** a powered 25 µm square device reads ≈ 11.9 K at 100 mW with k = 148 (*computed*).
-- **Risks / notes:** ThermalGradient budgets are MAT's; only the self-heating contribution of a powered matched device changes.
+- **Risks / notes:** `MatchedSet`'s thermal term is MAT's; only the self-heating contribution of a powered matched device changes.
 
 ### REL-15 Substrate balance of differential pairs
 - Priority: **P2**. Effort: **S**. Depends on: EXT-23 (aggressor tags; until it lands, aggressor = a device touching a Clock-class net, as `emit.rs:271-273` does today). PLC-19 (1) was cut in favour of this item.

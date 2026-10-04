@@ -314,7 +314,7 @@ Change, Tests, Acceptance.
 - Risks / notes: H12-42 (pinning taps between injector and victim) and the latch-up loop-gain margin (Hastings eqs 12.32–12.33) remain unplanned (§2).
 
 ### GAP-04 Kind-aware isolation, no rule inside a block, compound or set; substrate kind key
-Status: steps 1–2 done in M1a for the block exemption (`same_group` = same non-glue entry of `Problem.blocks`); the compound/`MatchSpec` part waits for EXT-14/15 (M2), step 3 for REL-15. As built: `SubstrateKind::from_key` maps the sidecar string (anything else is `Unknown`); `Pdk::cell_str` reads it; `emit::isolation` returns the `missing` input (`"bulk substrate: no plateau distance"`, `"substrate kind unknown"`, or `"deck epi_thickness_nm"` on epi without a thickness); sky130's `substrate_kind_source` starts `UNVERIFIED:` so `Pdk::unverified` lists it.
+Status: steps 1–2 done in M1a (`c3d4668`, review `69b515a`; annotator merge `ae38f4f`) for the block exemption (`same_group` = same non-glue entry of `Problem.blocks`); the compound/`MatchSpec` part waits for EXT-14/15 (M2), step 3 for REL-15. As built: `SubstrateKind::from_key` maps the sidecar string (anything else is `Unknown`); `Pdk::cell_str` reads it; `emit::isolation` returns the `missing` input (`"bulk substrate: no plateau distance"`, `"substrate kind unknown"`, or `"deck epi_thickness_nm"` on epi without a thickness); sky130's `substrate_kind_source` starts `UNVERIFIED:` so `Pdk::unverified` lists it.
 - Priority: **P0** (AA-13 is a live contradictory constraint). Effort: M. Depends on: none for steps 1–2; EXT-14/15 for the compound/set part of step 2; FLOW-04 for the key registry. Owner plan: **EXT (plan-01)**, as EXT-23 step 6 plus the `emit::isolation` rewrite. FLOW-06 registers the keys.
 - Why: AA-13; SUB-01 (substrate stack as a deck input, charbon L705–715, PDF 35, 122); SUB-31 (epi on p+: isolation saturates at 2.5–5× epi, Su 4×, L3289–3313, PDF 127); SUB-32 (bulk: isolation keeps improving with distance, L3320–3351, PDF 127–130); REL-09's handed-over tests (plan-06 C3); C5; D3–D5, D25, D28.
 - Current: `emit::isolation` (`backend/annotator/src/emit.rs:263-288`) pairs every clocked non-sensitive device with every sensitive device, with no group exemption. Distance = `4·epi_nm.unwrap_or(2500)` (`:250, :256, :274`). It pushes to the budget arm only when `epi_nm` is `Some` (`:283-285`); no deck supplies it, and the source comment at `:251-255` notes that sky130 is bulk.
@@ -339,6 +339,7 @@ Status: steps 1–2 done in M1a for the block exemption (`same_group` = same non
 - Risks / notes: the bulk distance model (SUB-32, monotone) and the two-port macromodel stay deferred with REL-18 (no ρ stack in any deck).
 
 ### GAP-05 Guard-ring kinds name what is drawn; `drawable`; ECGR spacing
+- Status: done in M1 (`b1510f4`; cells merge `726bc13`). Departure: `drawable(Ecgr, _)` returns `false` until CELL-17 draws the band well (post_cell.rs `ponytail:`); `ecgr_is_n_plus_in_its_own_well_clear_of_the_nmos` is not written and moves to CELL-17.
 - Priority: P1. Effort: S. Depends on: none. Owner plan: **CELL (plan-03)**, reinstating CELL-05. Consumed by REL-07 (policy), CELL-17 (band well).
 - Why: AC-06, AA-18, AR-28; H05-54, H14-27 (substrate, tank and well contacts are majority-carrier rings, Hastings §5.4.4 L15421–15446 PDF 264–265, §14.2.3 L43795–43799); HBGR needs a deep-N+ sinker or trench (L43849–43851); EBGR needs PBL plus a P+ sinker (L15614–15618); C6, C29; D20, D30.
 - Current: `enum GuardRingType { Ecgr, Hcgr, Hbgr, Ebgr }` documented as minority-carrier rings (`kernel/analog/src/cell.rs:25-35`). `post_cell::implant_name`/`in_nwell` draw `Ecgr`/`Ebgr` as p+ substrate taps and `Hcgr`/`Hbgr` as n+ taps in n-well (`kernel/cells/src/post_cell.rs:310-323`). The annotator maps PMOS → `Hcgr` and NMOS → `Ecgr` (`backend/annotator/src/constraints.rs:67-71`). `tap_pitch_nm` and `enclosure_complete` are never read (`cell.rs:13-20`).
@@ -424,6 +425,7 @@ Status: steps 1–2 done in M1a for the block exemption (`same_group` = same non
 - Acceptance: 0 conflicts on the 17 corpus circuits; each injected conflict is named with both rule IDs; no λ reaches `LAMBDA_MAX` on a budget reported infeasible.
 
 ### GAP-10 Prices keyed by stable constraint ID
+- Status: done in M1 (`809c844`; annotator merge `ae38f4f`). Budget prices are keyed by the stable constraint ID from `RuleBatch::meta`, not `(kind(), ordinal)`.
 - Priority: P1. Effort: S. Depends on: EXT-10 (`RuleBatch::meta`), FLOW-03. Owner plan: **FLOW (plan-08)**, as FLOW-03 step 5.
 - Why: NOTES-04 (stable semantic IDs; prices keyed by kind and position are fragile); AR-18; the contract comment itself says "Reordering silently moves prices" (`kernel/analog/src/requirements.rs:16-18`); C10; D6.
 - Current: `fn keys` (`backend/gp/src/lib.rs:151` on m0, after FLOW-03) keys every budget batch by `(kind(), ordinal among same kind)` into `Prices.priced: BTreeMap<(&'static str, u32), Price>` (`:27-28`).

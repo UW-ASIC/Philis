@@ -331,6 +331,7 @@ Status: done in M0 (`6b28fca`); amended (`d682829`, step 3 below): `lvs-coverage
 ### PERF-03 Floating-gate exemption only for declared ports
 
 Status: steps 1–2 done in M0 (`2f37409`): `RefInput.external_ports` and the `Checker` filter exist, and with `None` the blanket exemption stays and is listed in `coverage.skipped_rules`. Steps 3–4 move to M1 after FLOW-07: on m0 `cellgen::reference` builds every `RefInput` with `external_ports: None` (frontend/library/src/cellgen.rs:932), and step 3's assignment goes in `labels_and_reference` (frontend/library/src/lib.rs:1600) after `reference.ports` is set.
+Steps 3–4 done in M1 (`ae3d967`; input merge `5a21f2b`): `ota_old_header_flags_its_undriven_bias_gates` green.
 
 - Priority: P0. Effort: S. Depends on: FLOW-07 (`Netlist.ports`, AF-02); PERF-01 (`coverage`).
 - Why: AV-04 (every labelled net is exempt, overriding `labels_are_ports: false`), AV-30 (flagship OTA gates on
@@ -448,6 +449,8 @@ Status: done in M0 (`becffeb`). As built: `RunStats::c_sig` is gone; `RunStats::
 
 ### PERF-08 The simulated circuit is the drawn circuit
 
+Status: done in M1 (`8dc49a4`; input merge `5a21f2b`).
+
 - Priority: P0. Effort: M. Depends on: FLOW-01 (size convention and the FET card line itself, AF-01/AR-46), FLOW-07
   (R/C/L values `r_mohm`/`c_af`/`ind_ph`, raw params, `Q` terminal `S`, AF-02).
 - Why: AF-03 (non-FETs dropped), AF-09 (overlay model incomplete), AF-33 (invented W/L fallbacks), SURV-01 (the
@@ -508,6 +511,8 @@ Status: done in M0 (`becffeb`). As built: `RunStats::c_sig` is gone; `RunStats::
   `s`, which is right for a substrate NPN and wrong for an isolated one (then FLOW-07's 4th terminal must be given).
 
 ### PERF-09 Operating-point robustness: aligned parsing, isolated decks, classified rails, honest provenance
+
+Status: done in M1 (`680b08c`; input merge `5a21f2b`).
 
 - Priority: P0. Effort: M. Depends on: EXT-02 (`rail_of`, node `0`, AA-11). Step 5 of the previous draft (annotate
   once) is FLOW-09 step 2 and is not repeated.
@@ -1069,14 +1074,14 @@ Status: done in M0 (`becffeb`). As built: `RunStats::c_sig` is gone; `RunStats::
      `cfg.interface = Some(Interface::from_json(..)?)` (FLOW-12 step 3) — before FLOW-12 lands it is skipped with
      "interface contract unsupported" (either way the three bit-identical OTA rows disappear); ALIGN/MAGICAL rows on
      `generic_finfet` are tagged `not comparable (ASAP7, 0.1 µm/fin mapping)`; SVG layer names use FLOW-15 step 4's
-     `layer_names(pdk.layers + pdk.layer_gds())` (bench.rs:420). The `preprocess_spice` `l=` append (AV-23) is removed
-     by FLOW-07 step 11, not here.
+     `layer_names(pdk.layers + pdk.layer_gds())` (bench.rs:420). The `preprocess_spice` `l=` append (AV-23) is still there after M1
+     (benchmarks/src/fixtures.rs; FLOW-07 left it, see its Status); M2's FLOW T2 criterion removes it, not here.
   8. `benchmarks/tests/signoff_fixtures.rs` new test `known_optima_hold`: pair — the two cells' edge gap ≤ the place
      clearance (`place_rules`, lib.rs:529–538); chain4 — sorted along the row axis the cells are in chain order
      1-2-3-4 with gaps ≤ clearance (chain4.spice:2–3); quad — the 4-cell bbox is ≤ 2 cell widths × 2 cell heights
      (quad.spice:2); bgr_core — Q1's unit centroid equals Q2's within one grid step (bgr_core.spice:1–2). No
-     `#[ignore]`: H09-49 finds `unit_order` correct for 1:8 on a 3-column grid (kernel/cells/src/bjt.rs:274–283), and
-     a failure here is exactly the signal MAT-02/CELL-09 need; if the flow picks a non-3-column variant and fails, the
+     `#[ignore]`: since MAT-02/CELL-09 (M1) `cells::bjt` assigns units with `pattern::centro_assign(Balanced)` and
+     `every_bjt_ratio_is_common_centroid` is green, so a failure here is a placement or variant signal; if the flow picks a non-3-column variant and fails, the
      test stays red and names the variant.
   9. New local fixtures from sized, hand-laid-out sources (PERF-21's repos) instead of invented sizings.
 - Tests: `bench.rs` `results_json_roundtrips`, `seeds_parse_and_default_to_one`, `unknown_suite_is_an_error`;
@@ -1376,6 +1381,8 @@ A third controller on the weights PLC-17 (per-epoch extracted-C feedback, BAL2-1
   ≤ 2·n_specs.
 
 ### PERF-30 A simulatable post-layout netlist as a deliverable (added at the M0 close-out)
+
+Status: done in M1 (`533069d`; input merge `5a21f2b`).
 
 Field report: FR-7.
 

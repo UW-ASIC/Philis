@@ -217,6 +217,7 @@ Status: done in M0 (`574cd5e`). The placeholders are `#[ignore]`d with their own
 - Risks / notes: the StrongARM transcription must keep the gold's instance names; `m=` is the only size parameter the gold varies.
 
 ### EXT-02 One rail classifier, SPICE ground and global names
+- Status: done in M1a (`b8fbe74`, review `589264d`; merge `ca3e509`).
 - Priority: P0. Effort: S. Depends on: none.
 - Why: AA-11 (`0`, `gnd!`, `vee`, `VPB/VNB` missed), AA-14/AR-30 (a second rail list in `analog`), AF-04 (a third in `oppoint`); H15-06 (name conventions, hastings.txt L46495–46514, PDF 784; the source gives suffix conventions such as `b`/`z` and `1p5`/`3p3`, not rail names, so the rail roots below are **Philis policy**).
 - Current: `SUPPLY_NAMES`/`GROUND_NAMES` exact or `root_` prefix (`netrole.rs:18-19, 34-36`); `analog::placement::matching_pair::is_supply` has its own roots and `contains("gnd")` (`matching_pair.rs:99-106`); `oppoint::is_supply`/`is_ground` (`frontend/library/src/oppoint.rs:392-398`) a third list; node `0` is ground only to oppoint.
@@ -238,6 +239,7 @@ Status: done in M0 (`574cd5e`). The placeholders are `#[ignore]`d with their own
 - Risks / notes: bulk inference is skipped when a named rail exists, so it never overrides a designer's name.
 
 ### EXT-03 Terminal roles by name, not by position
+- Status: done in M1 (`9f52dc7`; annotator merge `ae38f4f`).
 - Priority: P0. Effort: S. Depends on: none.
 - Why: AA-16 (BJT collector and resistor P terminals treated as gates; `bjt_mirror` collector nets become Sensitive).
 - Current: `const G, D, S, B = 0..3` (`classify.rs:11-15`) applied to every non-capacitor device (`classify.rs:64-85`); `extract.rs:37` reads terminal 0 as the gate.
@@ -257,6 +259,7 @@ Status: done in M0 (`574cd5e`). The placeholders are `#[ignore]`d with their own
 - Risks / notes: none; pure refactor for FET netlists (test `tests.rs:413-427` still passes).
 
 ### EXT-04 Catalog corrections and catalog validation
+- Status: done in M1 (`d656313`; annotator merge `ae38f4f`).
 - Priority: P0. Effort: S. Depends on: EXT-01.
 - Why: AA-05 (false DiffPairs and mirrors), AA-06 (wildcard composite), AA-15 (wrong Wilson and Gilbert, dead patterns, `triode_load_pair` electrically wrong), AA-34 (unchecked catalog invariants), AA-30 (doc debris).
 - Current: see §1.4 rows AA-05, AA-06/AA-15.
@@ -275,6 +278,7 @@ Status: done in M0 (`574cd5e`). The placeholders are `#[ignore]`d with their own
 - Risks / notes: removing split-source DPs loses a degenerated pair until EXT-19; the corpus has none, and the pair is re-found by symmetry propagation when a seed exists.
 
 ### EXT-05 Declared slot roles in patterns
+- Status: done in M1 (`edadeb3`; annotator merge `ae38f4f`). Departure: a 2-device block's kind comes from `roles_of`.
 - Priority: P0. Effort: M. Depends on: EXT-04.
 - Why: AA-03 (latch children resolve to inverters), AA-08 (composite roles discarded), AA-23 (every unpaired stage member forced onto the axis); survey Fig. 3.11 building-block → requirement mapping (balasa_graeb_survey.txt L5208–5227, PDF 123; BAL1-50).
 - Current: children recovered by re-search (`lib.rs:93-99`); kinds by template substring (`block.rs:42-56`); tail rule for every unpaired member (`emit.rs:203-211`).
@@ -316,6 +320,7 @@ Status: done in M0 (`574cd5e`). The placeholders are `#[ignore]`d with their own
 - Risks / notes: the declaration table is data; a wrong entry is caught by `roles_are_well_formed` and `every_pattern_matches_its_own_minimal_netlist`. Gilbert: the declared couples are the mirror images (M3,M6), (M4,M5) (what EXT-14 needs as seeds); the source-coupled switching pairs (M3,M4), (M5,M6) are not declared, so until a quad-set rule exists the switching quad is two 2-member sets, not one 4-member set (recorded in "Cut or deferred items").
 
 ### EXT-06 Overlapping recognition, canonical order and a faster matcher
+- Status: done in M1 (`21b1c8f`, `65e344e`; annotator merge `ae38f4f`). Departure: catalog edits beyond the plan (card `cards/m1-annotator.md`); T8 measured 0.11 s on 12 000 devices (release).
 - Priority: P0. Effort: M. Depends on: EXT-04.
 - Why: AA-01 (one structure per device), AA-07 (netlist-order dependence), AA-22 (all-device scan, permutations, O(M²) dedupe); survey SMP multigraph where a device carries several requirements (balasa_graeb_survey.txt L5146–5157, PDF 122).
 - Current: `recognize` returns a disjoint set (`pattern.rs:175-212`); ties by device id (`pattern.rs:199`).
@@ -346,6 +351,7 @@ Status: done in M0 (`574cd5e`). The placeholders are `#[ignore]`d with their own
 - Risks / notes: WL labels can tie for non-automorphic devices on a hash collision; the fallback is the device id, documented with a `ponytail:` comment naming the ceiling.
 
 ### EXT-07 Sensitivity marked from matching only
+- Status: done in M1 (`0ff86be`; annotator merge `ae38f4f`).
 - Priority: P0. Effort: S. Depends on: EXT-05.
 - Why: AA-17 (Stack gate nets Sensitive, with 8× spacing, shields and isolation-victim status).
 - Current: `is_sensitive` includes `Stack` (`block.rs:60-62`).
@@ -358,6 +364,7 @@ Status: done in M0 (`574cd5e`). The placeholders are `#[ignore]`d with their own
 The only concrete conflict (AA-13, clocked tail with Proximity and Isolation to its own pair) is removed at its source by REL-09 step 3 (no isolation inside a block) and, after EXT-23, by skipping pairs in one compound or set; EXT-14 cannot put a device in two pairs or on two axes by construction (partial involution, compounds = components). T6 stays as an assertion (`tests/corpus.rs::no_emitted_conflicts`, EXT-01).
 
 ### EXT-09 Differential and crosstalk from recognized pairs; `Differential` to the budget arm
+- Status: done in M1 (`af40bc5`; annotator merge `ae38f4f`). `Differential` is budget-only; its one production constructor is in `backend/annotator/src/extract.rs`.
 - Priority: P0. Effort: M. Depends on: EXT-05.
 - Why: AA-14, AR-12 (a toleranced 5 % rule registered hard), AR-39 (no W/L/model check), AR-19 (dead extract paths).
 - Current: `extract.rs:53-54` pushes `Differential::extract` (built on `is_diff_pair`, `differential.rs:116-133`) into `r.hard`; `extract.rs:57-61` uses `CrosstalkExclusion::extract` (`crosstalk.rs:95-114`).
@@ -370,6 +377,7 @@ The only concrete conflict (AA-13, clocked tail with Proximity and Isolation to 
 - Risks / notes: `Differential` measurement semantics are RTE's.
 
 ### EXT-10 Stable IDs, provenance, coverage, relevant `missing`, one policy table
+- Status: done in M1 (`8610fc7`; annotator merge `ae38f4f`). Departures: `Rule::touches`, W/L checks for FETs only, coverage percentages as `u8`.
 - Priority: P0. Effort: M. Depends on: EXT-06.
 - Why: AA-27 (template dropped, no coverage report), AA-29 (`missing` not relevance-conditioned), AA-28 (scattered literals), NOTES-03/04 (coverage certificate, stable IDs), BAL2-45 (typed records with origin, balasa_graeb_survey.txt L13594–13599, L13667–13736, PDF 282–284).
 - Current: prices re-find batches by `(kind(), ordinal)` (`kernel/analog/src/requirements.rs:16-18`; `backend/gp/src/lib.rs:115-116`); `missing()` unconditional (`lib.rs:53-71`).
@@ -390,6 +398,7 @@ The only concrete conflict (AA-13, clocked tail with Proximity and Isolation to 
 - Risks / notes: `Tagged` is additive; consumers that ignore `meta` are unaffected.
 
 ### EXT-11 Size, model and bulk robustness
+- Status: done in M1a (`c7ae19c`; merge `ccf66a7`).
 - Priority: P0. Effort: S. Depends on: FLOW-01 (`Device::mos_size()`, `Device::gate_area_um2()` in `kernel/core/src/netlist.rs`; FLOW-01 step 3 also rewrites `annotator::gate_um2`, `lib.rs:155-161`, and `constraints::fingers`, `constraints.rs:21-24`).
 - Why: AA-20 (model and bulk ignored: two flavours merged into one cell, LVS mismatch), AA-21 (missing W/L = 0 makes devices "identical"), AA-35 (`u16` wrap). The size convention and the gate-area copies (AA-32/AR-46) are FLOW-01's.
 - Current: `Geom { w, l }` from params with default 0 (`pattern.rs:67-71`, `lib.rs:77-81`); `ExactAs` compares W and L only (`pattern.rs:106`); `SameLAs` compares L only (`pattern.rs:107`); unitization key (kind, finger W, L) (`constraints.rs:30-35`; since FLOW-01 the MOS width is `mos_size().w_finger_nm()`, and `constraints::fingers` and `annotator::gate_um2` already read `Device::mos_size()`/`gate_area_um2()`).
@@ -489,7 +498,7 @@ The only concrete conflict (AA-13, clocked tail with Proximity and Isolation to 
   ```
   Contract change in an existing type (`kernel/analog/src/cell.rs:40-56`): `Unitization` gains `class: Option<MatchClass>` (`None` = not inferred; readers use `unwrap_or(MatchClass::Moderate)`, MAT open question 4), `series: Vec<u16>` (per member; empty = all 1), `style: Option<ArrayStyle>` (`None` = today's choice). CELL plan §0.2 expects exactly these three fields; MAT-07 step 5's non-`Option` `class` is superseded by this field (MAT sets the same default through `unwrap_or`). Every full struct literal of `Unitization` is listed in MAT-07 step 5 (`constraints.rs:49`, `cellgen.rs:493,515,537,562,1257`, `kernel/cells/src/lib.rs:72`, `capacitor.rs:387`, `cap_array.rs:601`, `kernel/cells/tests/cell_selfcheck.rs:45,368`, `kernel/macroMaster/src/adapter.rs:29`, `examples/three_stage_opamp/src/main.rs:94`) and gets `class: None, series: Vec::new(), style: None`. `GuardRingRequirement`/`GuardRingType` are REL-07's and CELL-05's; this item does not touch them.
   `annotator::Problem` gains `intent: analog::intent::Intent` and `axis_count: usize`; `Problem::coverage` (EXT-10) stays on `Problem`. `blocks`, `groups`, `abutment` keep their D16 meaning.
-  Coordinated edit: `frontend/library/src/lib.rs:580-583` resizes `coarse.axis` to `problem.axis_count` (PLC-06 step 2 deletes these lines and passes `n_axes`; whichever lands second uses `axis_count`).
+  Coordinated edit: PLC-06 (M1) passes `GpInput.n_axes = self.problem.blocks.len()` (`frontend/library/src/lib.rs`, the `gp::place` call); this item changes it to `problem.axis_count`.
 - Tests: `kernel/analog/src/intent.rs` unit test `match_class_orders` (`Minimal < Moderate < Exceptional`); compile-level: every `Unitization` literal site above updated.
 - Acceptance: the workspace builds; no behaviour change until EXT-13+ fill `intent`.
 - Risks / notes: the only item that touches types consumed by other crates; land it alone. Name clash: `verify::Intent` exists (`backend/verify/src/lib.rs:58`) and the library's `Flow` holds one (`frontend/library/src/lib.rs:95, 477`; built by `elaborate::intent`, `elaborate.rs:297-302`), so the library refers to `analog::intent::Intent` by path. `MatchSpec` is named so because MAT-04 adds `analog::placement::matched_set::MatchedSet`.
@@ -592,7 +601,7 @@ The only concrete conflict (AA-13, clocked tail with Proximity and Isolation to 
 ### EXT-16 Precision class and match kind per matched set
 - Priority: P1. Effort: M. Depends on: EXT-15; MAT-07 (tables; the consumer edit also needs MAT-07 steps 3 and 6).
 - Why: AA-10; H13-42, H08-02, H09-01; AC-22; Hastings §13.3 classes minimal ±10 mV/±10 %, moderate ±3 mV/±3 %, exceptional ±1 mV/±1 % at six sigma (hastings.txt L42327–42350, PDF 712); §10.3 bipolar ±2 mV/±8 %, ±0.5 mV/±2 %, ±0.1 mV/±0.5 % (L31244–31275, PDF 524); §8.3 R/C ±1–5 %, ±0.1–1 %, ±0.01–0.1 % (L25121–25133, PDF 418); voltage- vs current-matched devices (L40643–40645, PDF 686).
-- Current: one η for every pair (`emit.rs:46-52`); MatchingPair in the ΔV_T domain for mirrors too (`emit.rs:158-167`); `environment` uses `_moderate` keys for all pairs (`frontend/library/src/lib.rs:871-872`).
+- Current: one η for every pair (`emit.rs:46-52`); MAT-04's per-pair `MatchedSet` (M1) already carries `kind` (`Voltage` for DiffPair, `Current` otherwise) but no class, and every pair reads the same deck coefficients and `budget(offset_sigma_mv)` (`emit.rs`); `environment` uses `_moderate` keys for all pairs (`frontend/library/src/lib.rs:871-872`).
 - Change: new `backend/annotator/src/class.rs` (inference only; the limit tables are MAT-07's `analog::matching::class::limit(f, k, c) -> ClassLimit`, `ClassLimit::{Mv(f32), Pct(f32)}`):
   ```rust
   pub fn kind_of(set: &MatchSpec, leaf_kinds: &[BlockKind], dk: DeviceKind) -> MatchKind;
@@ -712,7 +721,7 @@ The only concrete conflict (AA-13, clocked tail with Proximity and Isolation to 
   3. Per `MatchSpec` with ≥ 2 FET or BJT members: MAT-05's `OrientationSet{Axis}` (hard) and, by class, `OrientationSet{Phi}` (MAT-07 step 5 rule); resistor sets get `OrientationSet{PhiZero}` (MAT-12 step 3).
   4. Proximity (budget, `policy.proximity_nm`): Minimal sets → reference (or first member) to every other member; declared `selfs` and `prox` couples of every match (EXT-05) → P_B. Moderate/Exceptional sets get no Proximity: the `ArrayStyle` request (CELL) and the `MatchedSet` centroid term do that work.
   5. DTI bands per `compound.pairs` couple as today (`emit.rs:186-195`).
-  Delete the per-block loop (`emit.rs:138-239`) and `PROXIMITY_NM` (moved to `Policy`, EXT-10). The rotation/shape locks come from the rules' `matched_pairs` hook (PLC-03), so no orientation table is emitted.
+  Delete the per-block loop (`emit.rs:138-239`); the distance is already `Policy::proximity_nm` (EXT-10, M1). The rotation/shape locks come from the rules' `matched_pairs` hook (PLC-03), so no orientation table is emitted.
 - Tests: `emit::tests::one_rule_per_set` (T5): for every corpus circuit, the number of `MatchedSet` batches equals `intent.sets.len()` and each batch's member set equals its spec's; `ota5t` → 2 batches (DP {XM1, XM2}, load {XM3, XM4}). `emit::tests::ratioed_mirror_not_mirrored`: `mirror6` (Minimal) → 0 `Symmetry`, 1 `MatchedSet` with 6 members and MR in slot 0 (5 pairs), 5 `Proximity` (MR to each output); with a sidecar `Match` Moderate on the same devices → still 0 `Symmetry`, 0 `Proximity`, the `MatchedSet` has `class_explicit == true`. `emit::tests::allocated_allowance_round_trips`: `allowance = 0.4` mV, σ_rand 1.2 mV → the batch's ledger allowance is 0.4 ± 1e-4.
 - Acceptance: T5; AA-23 and AA-24 closed; `bench local` DRC 0 / LVS MATCH (T9).
 - Risks / notes: fewer, set-sized rules change dp's prices; the `Budget` mapping of Current/Ratio allowances waits for MAT-09/10's % ledgers (until then those sets use MAT-08's default).
