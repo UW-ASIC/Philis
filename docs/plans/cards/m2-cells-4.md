@@ -66,7 +66,7 @@ a stored copy is duplicate state and touches every struct literal (8 test sites)
 ### Tests (`kernel/cells/src/mosfet.rs` tests module)
 - `four_rows_cancel_to_third_order`: sky130 (`testkit::pdk()`, skip if absent), `testkit::group_of(Nmos, 2, 8, 1680, 150)`;
   for each enumerated variant with `rows == 4` (assert at least one exists, and none for `group_of(.., 2, 4, ..)`):
-  `row_orders` == `[[0,1,1,0],[1,0,0,1],[1,0,0,1],[0,1,1,0]]`; drawn `m.units` 16 per owner; integer moments
+  `row_orders` == `[[0,1,1,0],[1,0,0,1],[1,0,0,1],[0,1,1,0]]`; drawn `m.units` 8 per owner (2 per row x 4 rows); integer moments
   `Σ x^a y^b` (i128, a + b ≤ 3) equal between owners 0 and 1; `Σ phi.0` per owner == 0;
   `moments::cancelled_order(&[&pa, &pb], 4, 1e-3).0 >= 3` (MAT's metric). Same for Pmos.
 - `an_illegal_grid_is_not_drawn`: `!grid_legal(&[vec![0, 1, 1, 0], vec![0, 1, 0, 0]])` (second row: boundaries on

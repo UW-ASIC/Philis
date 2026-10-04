@@ -230,7 +230,6 @@ fn stack_pad_to_pad(lo: &Macro, hi: &Macro, process: &dyn Process) -> Macro {
 /// licons inside `skip_cuts_in` dropped, pins, units, dummies and S/D
 /// figures merged.
 fn merge_stacked(a: &Macro, b: &Macro, place: impl Fn(Rect) -> Rect, skip_cuts_in: Option<Rect>, process: &dyn Process) -> Macro {
-    let flip = place;
     let mut out = Builder::new(process.grid());
     // One well over both rows: two overlapping well rects read as two wells,
     // the second untapped.
@@ -254,7 +253,7 @@ fn merge_stacked(a: &Macro, b: &Macro, place: impl Fn(Rect) -> Rect, skip_cuts_i
     let licon = process.layer("licon");
     let inside = |r: Rect| skip_cuts_in.is_some_and(|t| r.x >= t.x && r.x + r.w <= t.x + t.w && r.y >= t.y && r.y + r.h <= t.y + t.h);
     for s in &b.shapes {
-        let r = flip(s.rect);
+        let r = place(s.rect);
         if Some(s.layer) == licon && inside(r) {
             continue;
         }
@@ -271,13 +270,13 @@ fn merge_stacked(a: &Macro, b: &Macro, place: impl Fn(Rect) -> Rect, skip_cuts_i
         out.pin(p.clone());
     }
     for p in &b.pins {
-        out.pin(pnr_core::Pin { at: flip(p.at), ..p.clone() });
+        out.pin(pnr_core::Pin { at: place(p.at), ..p.clone() });
     }
     for &u in &a.units {
         out.unit(u);
     }
     for &u in &b.units {
-        out.unit(pnr_core::Unit { y: flip(Rect { x: u.x, y: u.y, w: 0, h: 0 }).y, ..u });
+        out.unit(pnr_core::Unit { y: place(Rect { x: u.x, y: u.y, w: 0, h: 0 }).y, ..u });
     }
     for &d in a.dummies.iter().chain(&b.dummies) {
         out.dummy(d);
@@ -294,10 +293,13 @@ fn merge_stacked(a: &Macro, b: &Macro, place: impl Fn(Rect) -> Rect, skip_cuts_i
 
 impl Mosfet {
     /// The finger order (device index per finger) of each drawn row: the
-    /// first, then for two rows the first relabelled (a pair) or reversed.
+    /// first, then for two rows the first relabelled (a pair) or reversed;
+    /// four rows: MAT-15's order-3 grid over the `Cc1d` base row of nf/4 per
+    /// member (only enumerated for an equal `Cc1d` pair, no mirror pins).
     fn row_orders(&self, dev_nf: &[u16], n_dev: usize) -> Vec<Vec<usize>> {
         let rows = self.rows.clamp(1, 4);
-        if rows >= 3 {
+        assert!(rows != 3, "no three-row variant: rows is 1, 2 or 4");
+        if rows == 4 {
             let base: Vec<u8> = finger_sequence(Pattern::Cc1d, &[self.nf / 4, self.nf / 4]).into_iter().map(|d| d as u8).collect();
             return pattern::nth_order_rows(3, &base).into_iter().map(|r| r.into_iter().map(usize::from).collect()).collect();
         }
