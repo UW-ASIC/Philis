@@ -100,3 +100,19 @@ fixes). Each column was built from `git archive`.
 - Review fixes 5: a set no spec's `d_vt` touches now gets no weight (was `Some(0.0)`, which D5 then demoted
   to Minimal); `ext21_minor_weight_and_allowance_set_class` covers D5 and the allowance-set 6σ class (DP
   allowance 1 mV, not 2.5: a 15 mV target is itself Minimal, so it could not tell D5 apart).
+
+## EXT-27/28/29 (segment 6)
+
+- **Contract change (PLC-25 owner):** `Intent.order: Vec<analog::intent::Order { steps: Vec<Vec<DeviceId>>, dir,
+  reversible, weight }>`, not the plan's `Vec<(Vec<group id>, AxisDir)>`. Order: user (sidecar `Order`,
+  `reversible: false`), current chains (`V`), signal stages (`H`), instance arrays (`H`). `steps[0]` is bottom/left.
+- EXT-27 departure: `hier::arrays` takes `bias: &[bool]` (`classify::bias_lines`, the structural Bias rule) instead
+  of net classes: Bias is assigned only in `classify::refine`, which runs after the requirement graph the array's
+  ProxBlock star feeds. `hier::ports_pair` is `pub` (lib calls it).
+- EXT-28: `symmetric_blocks_become_seeds` `(4, 1, 5)` → `(4, 0, 4)` and its sidecar-diagnostic count 5 → 4 (Order consumed).
+- EXT-29: the metadata report has `audit: Vec<String>` and an `AUDIT:` line; library sets it in `run` after `metadata::build`.
+- `scale.rs` (release, 2 s): EXT-27+28 measured at ~13 ms inside `annotate` on the 12,500-device netlist; the test
+  ran 0.8–1.9 s, once 3.2 s, at load average 60–130 (eight module builds), so it can fail on load alone.
+- `drawn_cards::a_mim_dac_signs_off_with_its_capacitors` (release) fails `lvs.floating_net` at this branch's base
+  `18c07fe` with the annotator/analog/library sources reverted too: pre-existing, not from this segment (m2's later
+  CELL-22 merge passes it on `integrate`).
