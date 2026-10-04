@@ -123,6 +123,35 @@ pub fn bound_stats(tables: &[SensTable], sigma_v: &[Option<f64>], post: &PerfRes
         .collect()
 }
 
+/// PERF-14's spec tiers `(failed, shortfall)` of `post`. `beta_key`: failed = #bounds with β < 0 or β unknown,
+/// shortfall = max_b max(0, [`BETA_TARGET`] − β_b), +∞ when any β is unknown. Otherwise (σ unknown for the run):
+/// failed = #bounds unmeasured or missing their side ([`crate::perf::miss`] of the one-sided spec > 0), shortfall =
+/// `post.residual` (the pre-PERF-14 tier).
+#[must_use]
+pub fn key_tiers(stats: &[BoundStat], post: &PerfResult, specs: &[Spec], beta_key: bool) -> (u32, f64) {
+    if beta_key {
+        let failed = stats.iter().filter(|s| s.beta.is_none_or(|b| b < 0.0)).count() as u32;
+        let shortfall = stats.iter().map(|s| s.beta.map_or(f64::INFINITY, |b| (BETA_TARGET - b).max(0.0))).fold(0.0, f64::max);
+        return (failed, shortfall);
+    }
+    let failed = post
+        .bounds
+        .iter()
+        .filter(|b| {
+            let s = &specs[b.spec];
+            let side = if b.upper { Spec { min: None, ..s.clone() } } else { Spec { max: None, ..s.clone() } };
+            crate::perf::miss(&side, b.value) > 0.0
+        })
+        .count() as u32;
+    (failed, post.residual)
+}
+
+/// Smallest β over `stats`; `None` if empty or any is unknown.
+#[must_use]
+pub fn min_beta(stats: &[BoundStat]) -> Option<f64> {
+    stats.iter().map(|s| s.beta).collect::<Option<Vec<_>>>()?.into_iter().reduce(f64::min)
+}
+
 /// Fraction of `samples` normal draws `t_i ~ N(0, 1)` (one per device, shared
 /// by every bound) for which every bound holds under the linear model `f_b =
 /// f_post,b + Δf_sys,b + Σ_i s_bi σ_i t_i`. `None` if any bound's σ_f is
@@ -268,5 +297,28 @@ mod tests {
         let (specs, post) = floor(1.5, 0.0);
         let y = linear_joint_yield(&[table(&[1000.0])], &[Some(1e-3)], &post, &specs, &[], 100_000, 1).unwrap();
         assert!((y - phi(1.5)).abs() <= 0.005, "{y} vs {}", phi(1.5));
+    }
+
+    fn stat(b: usize, beta: Option<f64>) -> BoundStat {
+        BoundStat { bound: b, sigma_f: beta.map(|_| 1.0), beta, yield_part: None, headroom_stat: None, shares: Vec::new() }
+    }
+
+    #[test]
+    fn robust_beats_barely_passing() {
+        let (specs, post) = floor(10.0, 0.0);
+        assert_eq!(key_tiers(&[stat(0, Some(2.5))], &post, &specs, true), (0, 0.5));
+        assert_eq!(key_tiers(&[stat(0, Some(1.0))], &post, &specs, true), (0, 2.0));
+        assert!(crate::key_lt(&(0, 0, 0.5, 9.0, 9.0, 9.0), &(0, 0, 2.0, 0.0, 0.0, 0.0)), "robustness outranks Θ, C, area");
+    }
+
+    #[test]
+    fn an_unknown_bound_counts_as_failed() {
+        let specs = vec![Spec { metric: "gain".into(), min: Some(0.0), max: None }, Spec { metric: "pm".into(), min: Some(60.0), max: None }];
+        let post = score(&specs, &[vec![Some(10.0), None]], &[0]);
+        assert_eq!(key_tiers(&[stat(0, Some(4.0)), stat(1, None)], &post, &specs, true), (1, f64::INFINITY));
+        assert_eq!(key_tiers(&[], &post, &specs, false), (1, post.residual));
+        assert_eq!(min_beta(&[stat(0, Some(4.0)), stat(1, None)]), None);
+        let (specs, post) = floor(10.0, 0.0);
+        assert_eq!(key_tiers(&[], &post, &specs, false), (0, 0.0), "a met bound in miss mode");
     }
 }

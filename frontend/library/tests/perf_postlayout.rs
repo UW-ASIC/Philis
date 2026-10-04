@@ -529,3 +529,59 @@ fn ota_exports_sensitivities() {
     assert!(["XM1", "XM2"].iter().all(|n| e.d_vt.iter().any(|v| v.0 == dev(n))), "{e:?}");
     assert!(e.proc.is_some(), "{e:?}");
 }
+
+/// PERF-14 acceptance: keyed on β, the winner of ota's search is at least as
+/// robust as the epoch the pre-PERF-14 key (|V|, spec miss, Θ, then C band,
+/// area) would pick from the same promoted epochs. Within the winning
+/// topology's search only (`epochs` is the winner's).
+#[test]
+fn beta_key_winner_is_at_least_as_robust() {
+    use library::metadata::ParetoPoint;
+    let Some(lib) = models() else { return };
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
+    let p = PerfConfig { scenarios: vec![scenario("tt_27", "tt", 27.0)], ..cfg(lib.clone()) };
+    // The pre-PERF-14 `key_lt`, on the reported metrics.
+    let old_lt = |a: &ParetoPoint, b: &ParetoPoint| {
+        let head = |k: &ParetoPoint| (k.v, k.residual, k.theta);
+        if head(a) != head(b) {
+            return head(a) < head(b);
+        }
+        if (a.c_tier - b.c_tier).abs() <= 0.02 * a.c_tier.abs().min(b.c_tier.abs()) {
+            a.area_um2 < b.area_um2
+        } else {
+            a.c_tier < b.c_tier
+        }
+    };
+    let sols: Vec<library::Solution> = std::thread::scope(|s| {
+        let hs: Vec<_> = (1..=5u64)
+            .map(|seed| {
+                let c = library::Config {
+                    feedback_iters: 4,
+                    outer_iters: 1,
+                    starts: 1,
+                    seed,
+                    op: Some(OpConfig { model_lib: Some(lib.clone()), ..OpConfig::default() }),
+                    performance: Some(p.clone()),
+                    ..library::Config::default()
+                };
+                let (spice, pdk) = (&spice, &pdk);
+                s.spawn(move || library::run(spice, pdk, &library::Macros::default(), &c).expect("flow"))
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().expect("run")).collect()
+    });
+    for (seed, sol) in (1..=5).zip(&sols) {
+        let e = &sol.metadata.epochs;
+        let winner = e.iter().find(|x| x.iteration == sol.stats.best_iteration).unwrap_or_else(|| panic!("seed {seed}: {e:?}"));
+        let old = e.iter().skip(1).fold(&e[0], |b, x| if old_lt(x, b) { x } else { b });
+        eprintln!("seed {seed}: winner {winner:?}, old {old:?}");
+        let b = |x: &ParetoPoint| x.min_beta.unwrap_or(f64::NEG_INFINITY);
+        assert!(winner.min_beta.is_some(), "seed {seed}: {winner:?}");
+        assert!(b(winner) >= b(old), "seed {seed}: winner {winner:?} old {old:?}");
+        if winner.v == 0 {
+            assert!(!sol.metadata.pareto.is_empty(), "seed {seed}");
+        }
+    }
+}
