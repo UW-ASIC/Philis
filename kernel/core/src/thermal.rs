@@ -47,6 +47,12 @@ pub fn rises_mc(l: &Layout, power_uw: &[i32]) -> Vec<i32> {
 /// Inside a source's floor disc (its larger half-extent) the term is eq. 5.6
 /// for that source, so a device's own centre, or an overlapping neighbour
 /// anywhere in the disc, reads the same self term. O(n).
+///
+/// ponytail: the field steps at `r = r_floor`: inside reads
+/// `ln(4L/W)·P/(πk·L)`, just outside `P/(πk·L)`, a factor `ln(4L/W)` (ln4 ≈
+/// 1.39 for a square, more for a long source). A neighbour crossing the disc
+/// edge in gp/dp sees that step in the gradient score; blend the two terms
+/// over the edge if a move loop is seen to chatter on it.
 fn rise_at(l: &Layout, power_uw: &[i32], x: i32, y: i32) -> f32 {
     let denom = 2.0 * std::f32::consts::PI * K_SI_W_PER_M_K;
     let mut rise = 0.0f32;

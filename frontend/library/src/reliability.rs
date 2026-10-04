@@ -29,13 +29,18 @@ pub struct PairAging {
 /// the count of FETs whose rating could not be checked (a voltage unresolved,
 /// or no limit names its model). A limit's `None` field is not checked and not
 /// unknown: the deck states no such rule. The bulk check needs no limit.
+/// With `probe` (the op came from a synthesised mid-rail probe, not a
+/// testbench) every row's rule ends ` (probe)`, so a signoff report never
+/// passes probe voltages off as a testbench finding.
 #[must_use]
 pub fn voltage_findings(
     netlist: &Netlist,
     op: &OpPoint,
     limits: &[verify::FetLimit],
     pairs: &[(DeviceId, DeviceId)],
+    probe: bool,
 ) -> (Vec<Violation>, Vec<PairAging>, usize) {
+    let src = if probe { " (probe)" } else { "" };
     let v3 = |i: usize| Some((*op.vgs_v.get(i)?.as_ref()?, *op.vds_v.get(i)?.as_ref()?, *op.vbs_v.get(i)?.as_ref()?));
     let (mut rows, mut unknown) = (Vec::new(), 0);
     for (i, d) in netlist.devices.iter().enumerate() {
@@ -52,7 +57,7 @@ pub fn voltage_findings(
                 for (tag, v, max) in [("vgs", vgs, l.vgs_max_mv), ("vds", vds, l.vds_max_mv)] {
                     let over = v.abs() * 1e3 - max.map_or(f64::INFINITY, f64::from);
                     if over > 0.0 {
-                        rows.push(Violation { rule: format!("rel/{tag}:{}", d.name), margin: over.ceil() as i64 });
+                        rows.push(Violation { rule: format!("rel/{tag}:{}{src}", d.name), margin: over.ceil() as i64 });
                     }
                 }
             }
@@ -63,7 +68,7 @@ pub fn voltage_findings(
         // for both polarities.
         let fwd = vbs.max(vbs - vds);
         if fwd > FORWARD_TOL_V {
-            rows.push(Violation { rule: format!("rel/bulk_forward:{}", d.name), margin: ((fwd * 1e3).ceil() as i64).max(1) });
+            rows.push(Violation { rule: format!("rel/bulk_forward:{}{src}", d.name), margin: ((fwd * 1e3).ceil() as i64).max(1) });
         }
     }
     let aging = pairs
@@ -98,7 +103,7 @@ mod tests {
             ..Default::default()
         };
         let lim = verify::FetLimit { model: "sky130_fd_pr__nfet_01v8".into(), vgs_max_mv: Some(1950.0), vds_max_mv: Some(1950.0) };
-        voltage_findings(&netlist, &op, &[lim], pairs)
+        voltage_findings(&netlist, &op, &[lim], pairs, false)
     }
 
     #[test]
@@ -134,6 +139,17 @@ mod tests {
         let (rows, ..) = run(vec![pfet("M3")], &[(1.05, 1.788, 0.2)], &[]);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].rule.starts_with("rel/bulk_forward:"), "{}", rows[0].rule);
+    }
+
+    /// A probe op's rows carry the probe provenance; a testbench op's do not.
+    #[test]
+    fn a_probe_op_tags_its_rows() {
+        let netlist = Netlist { devices: vec![nfet("M1", "sky130_fd_pr__nfet_01v8")], ..Default::default() };
+        let op = OpPoint { vgs_v: vec![Some(2.5)], vds_v: vec![Some(2.5)], vbs_v: vec![Some(0.2)], ..Default::default() };
+        let lim = verify::FetLimit { model: "sky130_fd_pr__nfet_01v8".into(), vgs_max_mv: Some(1950.0), vds_max_mv: Some(1950.0) };
+        let rules = |probe| voltage_findings(&netlist, &op, std::slice::from_ref(&lim), &[], probe).0.into_iter().map(|r| r.rule).collect::<Vec<_>>();
+        assert_eq!(rules(true), ["rel/vgs:M1 (probe)", "rel/vds:M1 (probe)", "rel/bulk_forward:M1 (probe)"]);
+        assert_eq!(rules(false), ["rel/vgs:M1", "rel/vds:M1", "rel/bulk_forward:M1"]);
     }
 
     #[test]

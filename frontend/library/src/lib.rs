@@ -632,7 +632,7 @@ fn solve(
     metadata.binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
     let pairs = matched_pairs(&flow.problem.blocks);
     if let Some(op) = &bias.op {
-        let (_, aging, unknown) = reliability::voltage_findings(&netlist, op, &pdk.fet_voltage_limits(), &pairs);
+        let (_, aging, unknown) = reliability::voltage_findings(&netlist, op, &pdk.fet_voltage_limits(), &pairs, false);
         let name = |d: DeviceId| netlist.devices[d.0 as usize].name.clone();
         metadata.aging = aging.into_iter().map(|a| (name(a.a), name(a.b), a.dvds_mv, a.dvgs_mv, a.dvbs_mv)).collect();
         metadata.voltage_unknown = unknown;
@@ -1647,7 +1647,8 @@ pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
     let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
     s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.netlist));
     if let Some(op) = &sol.op {
-        s.report.hard_violations.extend(reliability::voltage_findings(&sol.netlist, op, &pdk.fet_voltage_limits(), &sol.pairs).0);
+        let probe = sol.metadata.bias.as_ref().is_some_and(|b| b.probe);
+        s.report.hard_violations.extend(reliability::voltage_findings(&sol.netlist, op, &pdk.fet_voltage_limits(), &sol.pairs, probe).0);
     }
     s
 }
