@@ -1,6 +1,8 @@
 //! Batch identity and provenance (EXT-10): which constraint a [`crate::RuleBatch`]
 //! is, independent of where it sits in its arm, and where it came from.
 
+pub use pnr_core::MatchClass;
+
 /// Dense id within one `annotator::Problem`, assigned in emission order:
 /// permutation-invariant because emission order is (EXT-06).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]

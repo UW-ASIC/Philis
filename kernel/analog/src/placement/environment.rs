@@ -12,7 +12,7 @@ pub const ENV_TOL: f32 = 0.2;
 /// `f32::INFINITY` = none on the die.
 ///
 /// The ranges are the deck's: `wpe_min_nm` its moderate WPE clearance (the
-/// distance a well edge must keep, Hastings §13.3 r8), `ose_range_nm` its
+/// distance a well edge must keep, Hastings §13.3 rule 19), `ose_range_nm` its
 /// moderate LOD extension (past which STI stress has faded). `0` = the deck
 /// gives none, and that half reads unknown.
 #[derive(Clone, Copy, Debug)]

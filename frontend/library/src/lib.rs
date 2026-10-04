@@ -477,6 +477,7 @@ fn solve(
         problem.missing.push(("IrDrop", "operating point"));
         Vec::new()
     };
+    problem.missing.extend(analog::matching::class::missing_tiers(pdk).map(|m| ("MatchClass", m)));
     let sens: Vec<(pnr_core::NetId, f32)> =
         perf_rows.iter().flat_map(|r| r.nets.iter().copied().zip(r.weights.iter().copied())).collect();
     let net_weight = gp::net_weights(&problem.net_classes, &sens);
@@ -1132,8 +1133,8 @@ impl Flow<'_> {
             out.push(analog::placement::Surroundings {
                 wpe_nm: [mean_wpe(a), mean_wpe(b)],
                 ose_nm: [ose(a), ose(b)],
-                wpe_min_nm: self.pdk.rule("wpe_clearance_moderate", 0) as f32,
-                ose_range_nm: self.pdk.rule("lod_moat_ext_moderate", 0) as f32,
+                wpe_min_nm: analog::matching::class::mos_env(pnr_core::MatchClass::Moderate, self.pdk).wpe_nm as f32,
+                ose_range_nm: self.pdk.tier("lod_moat_ext_nm", pnr_core::MatchClass::Minimal).unwrap_or(0) as f32,
             });
         }
         analog::placement::Environment(out)

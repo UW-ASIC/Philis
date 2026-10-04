@@ -5,8 +5,9 @@
 use pnr_core::ids::DeviceId;
 use pnr_core::layout::Layout;
 
-use crate::matching::mismatch::{sigma_pair, Budget, Coeffs, Ledger, MatchKind};
-use crate::matching::moments::{sums, Pt};
+use crate::matching::class::{Family, MatchClass};
+use crate::matching::mismatch::{sigma_pair, Budget, Coeffs, Ledger, LedgerRow, MatchKind};
+use crate::matching::moments::{cancelled_order, phi_equal, sums, Pt};
 use crate::matching::pattern::{cc_feasible, diffusion_cc_row, Outer};
 
 /// A set of devices that must match its reference, pair by pair `(0, i)`:
@@ -24,7 +25,10 @@ pub struct MatchedSet {
     pub members: Vec<DeviceId>,
     pub kind: MatchKind,
     /// MOS members: coincidence feasibility is a diffusion-legal row.
-    pub mos: bool,
+    pub family: Family,
+    /// What the set's environment and limits scale with (Moderate until
+    /// EXT-20 reads it from the intent).
+    pub class: MatchClass,
     pub coeffs: Coeffs,
     pub budget: Budget,
     /// Netlist gate area `W·L·m` per member, µm²; read only without units.
@@ -79,7 +83,7 @@ impl MatchedSet {
         // AABB 3 µm apart (ota, bench seed 1).
         let counts = [sa.n as u16, sb.n as u16];
         let feasible = || {
-            if self.mos {
+            if self.family == Family::Mos {
                 diffusion_cc_row(&counts, Outer::Drain).is_some() || diffusion_cc_row(&counts, Outer::Source).is_some()
             } else {
                 cc_feasible(&counts)
@@ -199,6 +203,33 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
             }
         }
     }
+    /// Report only: allocates the members' units per pair.
+    fn ledger_rows(&self, l: &Layout, out: &mut Vec<LedgerRow>) {
+        let (a, sa) = (self.members[0], member(l, self.members[0]).0);
+        let pa: Vec<Pt> = l.units.of_device(l, a).map(Pt::from).collect();
+        for i in 1..self.members.len() {
+            let b = self.members[i];
+            let g = self.ledger(l, i);
+            let sb = member(l, b).0;
+            let units = sa.w > 0.0 && sb.w > 0.0;
+            let pb: Vec<Pt> = l.units.of_device(l, b).map(Pt::from).collect();
+            out.push(LedgerRow {
+                members: (u32::from(a.0), u32::from(b.0)),
+                unit: "mV",
+                sigma_rand: g.sigma_rand,
+                sigma_layout: g.sigma_grad,
+                mu_thermal: g.mu_thermal,
+                mu_lod: g.mu_lod,
+                allowance: g.allowance,
+                usage: g.usage(),
+                order: if units { cancelled_order(&[&pa, &pb], 4, 1e-3).0 } else { 0 },
+                second_order_nm: g.second_order_nm,
+                phi_equal: units.then(|| phi_equal(&sa, &sb)),
+                known: g.known,
+                sizing_limited: matches!(self.budget, Budget::Sigma1Mv(b) if g.sigma_rand > 0.0 && g.sigma_rand >= b),
+            });
+        }
+    }
     fn offset_allowances(&self, l: &Layout, out: &mut Vec<(u32, u32, f32)>) {
         for i in 1..self.members.len() {
             let g = self.ledger(l, i);
@@ -215,7 +246,8 @@ pub(crate) fn pair(a: u16, b: u16) -> MatchedSet {
     MatchedSet {
         members: vec![DeviceId(a), DeviceId(b)],
         kind: MatchKind::Current,
-        mos: true,
+        family: Family::Mos,
+        class: MatchClass::Moderate,
         coeffs: Coeffs {
             avt_mv_um: Some(9.5),
             svt_uv_per_um: Some(1.63),
@@ -281,6 +313,39 @@ mod tests {
     }
 
     #[test]
+    fn ledger_rows_one_per_pair() {
+        let l = singles(1_000);
+        let mut s = pair(0, 1);
+        let mut rows = Vec::new();
+        s.ledger_rows(&l, &mut rows);
+        let g = s.ledger(&l, 1);
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!((r.members, r.unit, r.known), ((0, 1), "mV", g.known));
+        assert_eq!((r.sigma_rand, r.sigma_layout, r.mu_thermal, r.mu_lod), (g.sigma_rand, g.sigma_grad, g.mu_thermal, g.mu_lod));
+        assert_eq!((r.allowance, r.usage, r.second_order_nm), (g.allowance, g.usage(), g.second_order_nm));
+        assert_eq!(r.phi_equal, Some(true));
+        assert!(!r.sizing_limited);
+        // 20 µm² each: σ_rand 2.124 mV ≥ a 1 mV total, nothing left for layout.
+        s.budget = Budget::Sigma1Mv(1.0);
+        rows.clear();
+        s.ledger_rows(&l, &mut rows);
+        assert!((rows[0].sigma_rand - 2.124).abs() < 1e-3, "{}", rows[0].sigma_rand);
+        assert_eq!(rows[0].allowance, 0.0);
+        assert!(rows[0].sizing_limited);
+        // ABBA cancels the first moment order (common centroid); AABB none.
+        let mut l = layout(&[5_000], &[5_000], 400);
+        l.units = Arc::new(row([0, 1, 1, 0]));
+        rows.clear();
+        pair(0, 1).ledger_rows(&l, &mut rows);
+        assert_eq!(rows[0].order, 1);
+        l.units = Arc::new(row([0, 0, 1, 1]));
+        rows.clear();
+        pair(0, 1).ledger_rows(&l, &mut rows);
+        assert_eq!(rows[0].order, 0);
+    }
+
+    #[test]
     fn merged_pair_reads_its_units_not_its_cell() {
         let s = pair(0, 1);
         let mut l = layout(&[5_000], &[5_000], 400);
@@ -319,6 +384,12 @@ mod tests {
     }
 
     #[test]
+    fn default_pair_is_moderate_mos() {
+        let s = pair(0, 1);
+        assert_eq!((s.family, s.class), (Family::Mos, MatchClass::Moderate));
+    }
+
+    #[test]
     fn ratioed_mos_pair_has_no_coincidence_check() {
         // [1, 2] passes `cc_feasible` but has no diffusion-legal row (MAT-03).
         let units = [unit(0, 300, 50, 10), unit(1, 100, 50, 10), unit(1, 500, 50, 10)];
@@ -326,7 +397,7 @@ mod tests {
         l.units = Arc::new(merged(&units, Rect { x: 0, y: 0, w: 800, h: 100 }));
         let mut s = pair(0, 1);
         assert_eq!(s.ledger(&l, 1).coincidence, None);
-        s.mos = false;
+        s.family = Family::Resistor;
         assert!(s.ledger(&l, 1).coincidence.is_some());
     }
 
@@ -434,7 +505,8 @@ mod tests {
         let s = MatchedSet {
             members: vec![DeviceId(0), DeviceId(1)],
             kind: MatchKind::Current,
-            mos: false,
+            family: Family::Resistor,
+            class: MatchClass::Moderate,
             coeffs: Coeffs { avt_mv_um: None, svt_uv_per_um: Some(1.0), kvth0_mv_um: None, tc_uv_per_k: None },
             budget: Budget::Allowance(0.637),
             gate_um2: vec![0.0, 0.0],
