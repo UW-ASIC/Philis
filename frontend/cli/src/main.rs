@@ -15,9 +15,10 @@
 //! [--corner C] [--vdd V] [--temp C] [--testbench FILE]` (operating point),
 //! `--perf SPECS.json` (`{"testbench": "tb.spice", "specs": [{"metric", "min",
 //! "max"}]}`, the testbench relative to the JSON), `--interface FILE`
-//! (die and boundary pins, checked against the ports), `--out-rs FILE` (emit).
-//! `--constraints`, `--hierarchy` other than `flat` and `--max-wall` are
-//! refused (exit 2) until EXT-26 / FLOW-11 / FLOW-08.
+//! (die and boundary pins, checked against the ports), `--out-rs FILE` (emit),
+//! `--constraints FILE` (ALIGN-style JSON sidecar, `annotator::sidecar`).
+//! `--hierarchy` other than `flat` and `--max-wall` are refused (exit 2)
+//! until FLOW-11 / FLOW-08.
 //!
 //! Every run writes `<top>.gds` (the `.subckt` ports as labels on the
 //! deck's text layers), `<top>_ref.spice` (the LVS reference signoff used,
@@ -43,7 +44,7 @@ fn main() -> ExitCode {
 
 const USAGE: &str = "usage: philis [run|emit] <netlist.sp> [<pdk.json | sky130 | gf180mcu | ihp_sg13g2 | generic_finfet>] [out.rs] \
                      [--pdk P] [-o|--out DIR] [--seed N] [--iters N] [--outer N] [--starts N] [--size spice|per-finger] [--top NAME] \
-                     [--op-lib PATH [--corner C] [--vdd V] [--temp C] [--testbench FILE]] [--perf SPECS.json] [--interface FILE] [--out-rs FILE]";
+                     [--op-lib PATH [--corner C] [--vdd V] [--temp C] [--testbench FILE]] [--perf SPECS.json] [--interface FILE] [--constraints FILE] [--out-rs FILE]";
 
 /// `Ok(true)` when signoff is clean: no errors and every device LVS-compared.
 fn cli() -> Result<bool, String> {
@@ -88,7 +89,7 @@ fn cli() -> Result<bool, String> {
             "--perf" => perf = Some(val()?),
             "--interface" => cfg.interface = Some(library::Interface::from_json(&read(&val()?)?)?),
             "--out-rs" => out_rs = Some(val()?),
-            "--constraints" => return Err("`--constraints` needs EXT-26 (constraint file format)".into()),
+            "--constraints" => cfg.constraints = Some(read(&val()?).map_err(|e| format!("--constraints: {e}"))?),
             "--max-wall" => return Err("`--max-wall` needs FLOW-08 (wall-clock stop)".into()),
             "--hierarchy" => {
                 let h = val()?;

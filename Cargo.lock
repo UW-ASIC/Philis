@@ -84,6 +84,7 @@ version = "0.1.0"
 dependencies = [
  "analog",
  "pnr_core",
+ "serde_json",
 ]
 
 [[package]]

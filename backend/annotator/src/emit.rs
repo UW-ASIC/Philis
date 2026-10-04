@@ -124,6 +124,7 @@ fn area_um2(nl: &Netlist, drawn: &[Drawn], d: DeviceId) -> f32 {
 pub fn placement(
     intent: &Intent,
     blocks: &[Block],
+    user_groups: &[Vec<DeviceId>],
     nl: &Netlist,
     drawn: &[Drawn],
     p: &ProcessNumbers,
@@ -217,6 +218,12 @@ pub fn placement(
         }
     }
 
+    // Sidecar `GroupBlocks` (EXT-26): each member pulled to the first.
+    for g in user_groups.iter().filter(|g| g.len() >= 2) {
+        let pull: Vec<Proximity> = g[1..].iter().map(|&m| prox(g[0], m)).collect();
+        r.budget.push(Box::new(pull.clone()));
+        r.cost.push(Box::new(pull));
+    }
     if !dti.is_empty() {
         r.cost.push(Box::new(dti.clone()));
         r.hard.push(Box::new(dti));
@@ -408,7 +415,7 @@ mod tests {
         p.intent.sets[i].allowance = Some(0.4);
         let mut models = Vec::new();
         let drawn: Vec<Drawn> = nl.devices.iter().map(|d| crate::size::drawn(d, &mut models)).collect();
-        let r = placement(&p.intent, &p.blocks, &nl, &drawn, &cfg.process, None, &cfg.policy);
+        let r = placement(&p.intent, &p.blocks, &[], &nl, &drawn, &cfg.process, None, &cfg.policy);
         let set = r.budget.iter().filter(|b| b.kind() == "MatchedSet").nth(i).expect("set i's batch");
         let l = Layout {
             x: vec![0, 1_000_000],

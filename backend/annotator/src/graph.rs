@@ -26,7 +26,7 @@ pub struct Req {
 /// pair of every match (all of them, not only the disjoint ones: AA-01) not already
 /// `MatchSym`, and a star from `g[0]` of each shared-bias and passive group (callers
 /// put a reference first); `ProxBlock` per declared prox couple and per self to its
-/// pattern's first pair; `Sym` as a path over each compound's members; `ProxNet` a
+/// pattern's first pair, and a star from `g[0]` of each sidecar group; `Sym` as a path over each compound's members; `ProxNet` a
 /// star from the canonically first device of each net that is not Supply, Ground,
 /// Substrate or Clock (card D-j) with at most `policy.pn_max_degree` devices.
 #[allow(clippy::too_many_arguments)] // the plan's signature: one slice per evidence source
@@ -36,6 +36,7 @@ pub fn requirements(
     compounds: &[Compound],
     shared_bias: &[Vec<DeviceId>],
     passive: &[Vec<DeviceId>],
+    user_groups: &[Vec<DeviceId>],
     hg: &BipartiteHypergraph,
     classes: &[NetClassification],
     canon: &[u64],
@@ -77,6 +78,10 @@ pub fn requirements(
     for (gi, g) in shared_bias.iter().chain(passive).enumerate() {
         let src = if gi < shared_bias.len() { gi } else { gi - shared_bias.len() };
         g.iter().skip(1).for_each(|&d| push(g[0], d, ReqType::MatchBlock, src));
+    }
+    // Sidecar `GroupBlocks` (EXT-26): a star from the first member.
+    for (gi, g) in user_groups.iter().enumerate() {
+        g.iter().skip(1).for_each(|&d| push(g[0], d, ReqType::ProxBlock, gi));
     }
     for (n, devs) in hg.net_devices.iter().enumerate() {
         if matches!(classes[n].class, NetClass::Supply | NetClass::Ground | NetClass::Substrate | NetClass::Clock) {
@@ -206,7 +211,7 @@ mod tests {
         let names: Vec<&str> = nl.devices.iter().map(|d| d.name.as_str()).collect();
         let all = pattern::recognize_all(&hg, &drawn, &roles, &cfg, &canon, &names);
         let p = crate::annotate(nl, &cfg);
-        let reqs = requirements(&all, c, shared, &[], &hg, &p.net_classes, &canon, &cfg.policy);
+        let reqs = requirements(&all, c, shared, &[], &[], &hg, &p.net_classes, &canon, &cfg.policy);
         let tree = hsmpg(nl.devices.len(), &reqs, &canon);
         (reqs, render(&tree, &names))
     }

@@ -115,6 +115,9 @@ pub struct Config {
     pub interface: Option<Interface>,
     /// The top sub-circuit ([`ParseOptions::top`]); `None`: the parser's choice.
     pub top: Option<String>,
+    /// User constraint sidecar, JSON text (EXT-26, `annotator::sidecar`):
+    /// [`run`] merges it over `annotation` (lists extend, scalars from the base).
+    pub constraints: Option<String>,
 }
 
 /// A die edge.
@@ -205,6 +208,7 @@ impl Default for Config {
             gp_mode: GpMode::default(),
             interface: None,
             top: None,
+            constraints: None,
         }
     }
 }
@@ -383,6 +387,21 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     let stack: &'static analog::routing::Stack = Box::leak(Box::new(elaborate::stack(pdk)));
     let mut ann = annotation_with(pdk, &cfg.annotation, stack);
     ann.process.die_temp_k = cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15);
+    if let Some(text) = &cfg.constraints {
+        let (side, diags) = AnnotationConfig::from_json(text, &netlist).map_err(FlowError::Interface)?;
+        ann.supply_nets.extend(side.supply_nets);
+        ann.ground_nets.extend(side.ground_nets);
+        ann.clock_nets.extend(side.clock_nets);
+        ann.do_not_identify.extend(side.do_not_identify);
+        ann.seeds.extend(side.seeds);
+        ann.symmetry_dir = ann.symmetry_dir.or(side.symmetry_dir);
+        ann.groups.extend(side.groups);
+        ann.classes.extend(side.classes);
+        ann.net_classes.extend(side.net_classes);
+        ann.offset_budgets.extend(side.offset_budgets);
+        ann.kelvins.extend(side.kelvins);
+        ann.sidecar_diags.extend(diags);
+    }
     // 2. Bias: per-device power and per-net current. Placement-independent,
     //    so solved once, before annotation: its op point and testbench are the
     //    annotator's evidence (EXT-17).

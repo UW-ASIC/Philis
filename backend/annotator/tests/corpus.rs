@@ -646,7 +646,7 @@ fn ratioed_mirror_not_mirrored() {
     (intent.sets[0].class, intent.sets[0].class_source) = (analog::intent::MatchClass::Moderate, analog::intent::ClassSource::User);
     let mut models = Vec::new();
     let drawn: Vec<_> = nl.devices.iter().map(|d| annotator::size::drawn(d, &mut models)).collect();
-    let r = annotator::emit::placement(&intent, &p.blocks, &nl, &drawn, &c.process, c.offset_sigma_mv, &c.policy);
+    let r = annotator::emit::placement(&intent, &p.blocks, &[], &nl, &drawn, &c.process, c.offset_sigma_mv, &c.policy);
     assert_eq!((count(&r.hard, "Symmetry"), count(&r.budget, "Proximity")), (0, 0));
 }
 
@@ -666,7 +666,7 @@ fn unequal_couple_matched_not_mirrored() {
     let i = p.intent.sets.iter().position(|s| s.members.iter().any(|m| u32::from(m.device.0) == m2)).unwrap();
     let has = |v: &[Vec<u32>], a: u32, b: u32| v.concat().chunks(2).any(|ab| ab == [a, b] || ab == [b, a]);
     let check = |intent: &analog::intent::Intent, drawn: &[annotator::size::Drawn], mirrored: bool| {
-        let r = annotator::emit::placement(intent, &p.blocks, &nl, drawn, &c.process, c.offset_sigma_mv, &c.policy);
+        let r = annotator::emit::placement(intent, &p.blocks, &[], &nl, drawn, &c.process, c.offset_sigma_mv, &c.policy);
         let sym = touched_of(&r.hard, "Symmetry");
         assert_eq!(has(&sym, m1, m2), mirrored, "{sym:?}");
         assert!(has(&sym, m3, m4), "{sym:?}");
@@ -705,7 +705,7 @@ fn bipolar_set_reads_bjt_ka() {
         c.process.bjt_ka_pct_um = ka;
         let p = annotate(&nl, &c);
         let i = p.intent.sets.iter().position(|s| s.family == analog::intent::Family::Bipolar).expect("the bipolar set");
-        let r = annotator::emit::placement(&p.intent, &p.blocks, &nl, &drawn, &c.process, c.offset_sigma_mv, &c.policy);
+        let r = annotator::emit::placement(&p.intent, &p.blocks, &[], &nl, &drawn, &c.process, c.offset_sigma_mv, &c.policy);
         let set = r.budget.iter().filter(|b| b.kind() == "MatchedSet").nth(i).expect("set i's batch");
         let n = nl.devices.len();
         let l = pnr_core::Layout {

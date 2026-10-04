@@ -22,6 +22,7 @@ pub mod pattern;
 pub mod policy;
 pub mod rings;
 pub mod sets;
+pub mod sidecar;
 pub mod size;
 pub mod substrate;
 pub mod symmetry;
@@ -216,9 +217,14 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         .map(|(i, b)| if ck(b.devices[0]) <= ck(b.devices[1]) { (b.devices[0], b.devices[1], i) } else { (b.devices[1], b.devices[0], i) })
         .collect();
     seeds.sort_by_key(|&(a, b, _)| (ck(a), ck(b)));
-    let seeds: Vec<symmetry::Seed> = seeds.into_iter().map(|(a, b, i)| symmetry::Seed::Devices(a, b, analog::intent::ConstraintId(i as u32))).collect();
+    // User seeds first (EXT-26).
+    let seeds: Vec<symmetry::Seed> = cfg.seeds.iter().copied().chain(seeds.into_iter().map(|(a, b, i)| symmetry::Seed::Devices(a, b, analog::intent::ConstraintId(i as u32)))).collect();
     let (compounds, diags) = symmetry::analyze(&hg, &drawn, &net_classes, &seeds, &canon);
     intent.compounds = compounds;
+    if let (Some(dir), [c]) = (cfg.symmetry_dir, intent.compounds.as_mut_slice()) {
+        c.dir = dir;
+    }
+    intent.diagnostics.extend(cfg.sidecar_diags.iter().cloned());
     intent.diagnostics.extend(diags);
     let shared = sets::shared_bias_groups(&hg, &drawn, &net_classes);
     // EXT-19: passive, bipolar-core and diode sets.
@@ -234,7 +240,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     passive_sets.extend(passive::capacitor_sets(&hg, &drawn, &net_classes, &mut intent.diagnostics));
     passive_sets.extend(passive::diode_sets(&hg, &drawn));
     let passive_groups: Vec<Vec<DeviceId>> = passive_sets.iter().map(|p| p.devices.clone()).collect();
-    let reqs = graph::requirements(&all, &intent.compounds, &shared, &passive_groups, &hg, &net_classes, &canon, &cfg.policy);
+    let reqs = graph::requirements(&all, &intent.compounds, &shared, &passive_groups, &cfg.groups, &hg, &net_classes, &canon, &cfg.policy);
     intent.tree = graph::hsmpg(netlist.devices.len(), &reqs, &canon);
     intent.sets = sets::matched_sets(&reqs, &intent.compounds, &shared, &passive_sets, &block::leaves(&blocks), &canon, &drawn, &hg, &cfg.process.unit, &mut intent.diagnostics);
     // EXT-16: kind, class and style per set; the unit floors depend on the class.
@@ -249,8 +255,11 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         let kinds: Vec<BlockKind> = sets::inside(&leaf_idx, s.members.iter().map(|m| m.device.0 as usize), pair).into_iter().map(|b| leaves[b].kind).collect();
         roles.push(kinds);
     }
+    // The sidecar entry whose devices cover a set's members (EXT-26).
+    let covering = |ds: &[DeviceId], s: &analog::intent::MatchSpec| s.members.iter().all(|m| ds.contains(&m.device));
     for (s, kinds) in intent.sets.iter_mut().zip(&roles) {
-        s.kind = class::kind_of(s, kinds, netlist.devices[s.members[0].device.0 as usize].kind);
+        let user_kind = cfg.classes.iter().find(|c| covering(&c.0, s)).and_then(|c| c.2);
+        s.kind = user_kind.unwrap_or_else(|| class::kind_of(s, kinds, netlist.devices[s.members[0].device.0 as usize].kind));
     }
     let input = |i: usize| roles[i].contains(&BlockKind::DiffPair);
     let mut set_roles = Vec::with_capacity(intent.sets.len());
@@ -278,7 +287,9 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
             class::SetRole::Other
         };
         set_roles.push(role);
-        let mut ctx = class::ClassCtx { user: None, spec_6sigma: cfg.offset_sigma_mv.map(|v| 6.0 * v), role, diags: &mut intent.diagnostics };
+        let user = cfg.classes.iter().find(|c| covering(&c.0, s)).map(|c| c.1);
+        let sigma = cfg.offset_budgets.iter().find(|b| covering(&b.0, s)).map(|b| b.1).or(cfg.offset_sigma_mv);
+        let mut ctx = class::ClassCtx { user, spec_6sigma: sigma.map(|v| 6.0 * v), role, diags: &mut intent.diagnostics };
         let (c, src) = class::class_of(s, &mut ctx);
         let source = |d: DeviceId| {
             let i = d.0 as usize;
@@ -328,6 +339,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
             passive: &passive_sets,
             user: &user,
             ev,
+            user_classes: &cfg.net_classes,
             ports: &netlist.ports,
             load_af: &load_af,
         },
@@ -357,6 +369,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         &set_roles,
         &cfg.policy,
     );
+    intent.kelvins.extend(cfg.kelvins.iter().cloned());
     if ev.op.is_some() && ev.probe_bias {
         intent.diagnostics.push(analog::intent::Diagnostic {
             kind: "probe_bias",
@@ -364,7 +377,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
             message: "device regions from a synthesised probe bench".into(),
         });
     }
-    let mut placement = emit::placement(&intent, &blocks, netlist, &drawn, &cfg.process, cfg.offset_sigma_mv, &cfg.policy);
+    let mut placement = emit::placement(&intent, &blocks, &cfg.groups, netlist, &drawn, &cfg.process, cfg.offset_sigma_mv, &cfg.policy);
     // Same entry of `blocks`, glue excluded: glue is no stage.
     let mut block_of = vec![usize::MAX; netlist.devices.len()];
     for (bi, b) in blocks.iter().enumerate().filter(|(_, b)| b.kind != BlockKind::Glue) {

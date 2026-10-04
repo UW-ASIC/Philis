@@ -141,6 +141,23 @@ pub struct AnnotationConfig {
     /// Ground-class net named like `avss`/`vssa`/`agnd` that no aggressor
     /// touches, else no victim rings ([`crate::rings`]).
     pub quiet_ring_net: Option<String>,
+    /// Sidecar symmetry seeds (EXT-26), ahead of the recognised ones; ids
+    /// `u32::MAX − entry`, so they never collide with leaf-index seeds.
+    pub seeds: Vec<crate::symmetry::Seed>,
+    /// Sidecar `SymmetricBlocks` direction: the axis of a single compound.
+    pub symmetry_dir: Option<analog::intent::AxisDir>,
+    /// Sidecar `GroupBlocks`: kept together (ProxBlock, Proximity).
+    pub groups: Vec<Vec<pnr_core::ids::DeviceId>>,
+    /// Sidecar `Match`: the class (and optionally kind) of the set holding these devices.
+    pub classes: Vec<(Vec<pnr_core::ids::DeviceId>, analog::intent::MatchClass, Option<analog::intent::MatchKind>)>,
+    /// Sidecar `NetClass`: overrides with `User` evidence.
+    pub net_classes: Vec<(pnr_core::ids::NetId, analog::metadata::NetClass)>,
+    /// Sidecar `OffsetBudget`: 1σ offset, mV, of the set holding these devices.
+    pub offset_budgets: Vec<(Vec<pnr_core::ids::DeviceId>, f32)>,
+    /// Sidecar `Kelvin` requests, appended to the extracted ones.
+    pub kelvins: Vec<analog::intent::KelvinReq>,
+    /// The sidecar parse's diagnostics, carried into `Intent.diagnostics`.
+    pub sidecar_diags: Vec<analog::intent::Diagnostic>,
 }
 
 /// Every process number the annotator uses. A `None` means the deck does not

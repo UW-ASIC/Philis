@@ -132,6 +132,8 @@ pub struct RefineCtx<'a> {
     /// Net named in the caller's config (testbench-derived names excluded).
     pub user: &'a [bool],
     pub ev: &'a Evidence,
+    /// Sidecar `NetClass` overrides (EXT-26): first, over every rule, `User` evidence.
+    pub user_classes: &'a [(NetId, NetClass)],
     pub ports: &'a [NetId],
     /// [`net_load_af`].
     pub load_af: &'a [Option<f32>],
@@ -154,7 +156,7 @@ const HIGH_Z_OHM: f32 = 100_000.0;
 /// base/gate, a cascoded reference's output, a DAC reference plate); Sensitive
 /// (a DAC bank's shared plate, `_s`, or a Signal net of `z ≥ 100 kΩ`); Bias
 /// (gates and diode D=G only); else the pre-pass class, so nothing Sensitive
-/// is silently demoted.
+/// is silently demoted. Sidecar overrides (`user_classes`) precede every rule.
 pub fn refine(classes: &mut [NetClassification], cx: &RefineCtx) -> Vec<NetFacts> {
     use EvidenceLevel as E;
     use NetClass as C;
@@ -171,6 +173,9 @@ pub fn refine(classes: &mut [NetClassification], cx: &RefineCtx) -> Vec<NetFacts
             got[n.0 as usize].get_or_insert((c, e));
         }
     };
+    for &(n, c) in cx.user_classes {
+        got[n.0 as usize] = Some((c, E::User));
+    }
     let logic = |ts: &[&str]| cx.matches.iter().filter(move |m| ts.contains(&m.template)).collect::<Vec<_>>();
     let nets_of = |m: &crate::pattern::PatternMatch, t: &str| m.instances.iter().filter_map(|&d| pin(d, t)).collect::<Vec<_>>();
 

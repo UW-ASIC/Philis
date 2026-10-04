@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 pnr_core = { path = "../../kernel/core" }
 analog = { path = "../../kernel/analog" }
+serde_json = "1"
