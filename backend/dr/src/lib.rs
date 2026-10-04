@@ -1273,7 +1273,7 @@ pub fn place_near(cell: &Macro, near: (i32, i32), obstacles: &[Rect], clearance:
                         dummies: cell.dummies.clone(),
                         drawn: cell.drawn.clone(),
                         keepouts: cell.keepouts.iter().map(|k| pnr_core::Keepout { rect: mv(k.rect), ..*k }).collect(),
-                        figures: cell.figures,
+                        figures: cell.figures.clone(),
                     });
                 }
             }

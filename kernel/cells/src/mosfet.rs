@@ -161,10 +161,21 @@ impl Cell for Mosfet {
         }
         let orders = self.row_orders(&s.dev_nf, group.devices.len());
         let row0 = self.draw_row(group, constraints, process, &orders[0]);
-        match orders.get(1) {
+        let mut m = match orders.get(1) {
             Some(second) => stack_on_tap(&row0, &self.draw_row(group, constraints, process, second), process),
             None => row0,
+        };
+        // Gate resistance per owner (CELL-19): a finger's distributed poly,
+        // `R□·W/(k·L)` (k = 3 one-ended, 12 two-ended; Razavi §19.2.1), plus
+        // its gate cut, over the owner's `N_f` fingers in parallel.
+        if let (Some(sq), Some(cut)) = (process.sheet_ohm("poly"), process.cut_ohm("licon", "poly")) {
+            let k = if self.double_gate { 12.0 } else { 3.0 };
+            let finger = sq * s.unit_w as f32 / (k * s.unit_l.max(1) as f32) + cut;
+            m.figures.gate_ohm = (0..group.devices.len())
+                .map(|di| (di as u8, finger / orders.iter().flatten().filter(|&&d| d == di).count().max(1) as f32))
+                .collect();
         }
+        m
     }
 }
 
@@ -228,7 +239,14 @@ fn stack_on_tap(a: &Macro, b: &Macro, process: &dyn Process) -> Macro {
     for &d in a.dummies.iter().chain(&b.dummies) {
         out.dummy(d);
     }
-    out.finish()
+    let mut sd: BTreeMap<(u8, &'static str), (i64, i64)> = BTreeMap::new();
+    for &(o, t, ar, p) in a.figures.sd.iter().chain(&b.figures.sd) {
+        let e = sd.entry((o, t)).or_default();
+        *e = (e.0 + ar, e.1 + p);
+    }
+    let mut m = out.finish();
+    m.figures.sd = sd.into_iter().map(|((o, t), (a, p))| (o, t, a, p)).collect();
+    m
 }
 
 impl Mosfet {
@@ -522,7 +540,26 @@ impl Mosfet {
             let lo = snap_cut(lo.min((hi - need).max(0)), lat);
             (lo, snap_cut(hi.max(lo + need) + lat - 1, lat))
         };
+        // Junction figures per (owner, terminal) (CELL-19): the regions between
+        // the outer active gates only.
+        let mut sd: BTreeMap<(u8, &'static str), (i64, i64)> = BTreeMap::new();
         for region in 0..=n_fingers {
+            let end = region == 0 || region == n_fingers;
+            let rw = i64::from(if end { sd_edge } else { pitch - gate_l });
+            let (area, perim) = (rw * i64::from(finger_w), 2 * rw + if end && nd == 0 { i64::from(finger_w) } else { 0 });
+            let sides: Vec<(u8, &'static str)> = [
+                (region > 0).then(|| (sequence[region as usize - 1] as u8, term(region - 1, true))),
+                (region < n_fingers).then(|| (sequence[region as usize] as u8, term(region, false))),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            // Two different sides share the region half and half.
+            let n = if sides.first() == sides.last() { 1 } else { 2 };
+            for &k in &sides[..n] {
+                let e = sd.entry(k).or_default();
+                *e = (e.0 + area / n as i64, e.1 + perim / n as i64);
+            }
             let px = if region == 0 {
                 edge_cut(0, sd_edge)
             } else if region == n_fingers {
@@ -713,7 +750,9 @@ impl Mosfet {
         }
 
         b.cover_poly_cuts(process);
-        b.finish()
+        let mut m = b.finish();
+        m.figures.sd = sd.into_iter().map(|((o, t), (a, p))| (o, t, a, p)).collect();
+        m
     }
 }
 
@@ -1646,5 +1685,67 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    /// (`e`, `pitch`) of a drawn row: the end region's width (the first
+    /// gate's left edge) and the unit-to-unit pitch of one row.
+    fn e_and_pitch(m: &Macro, l: i32) -> (i64, i64) {
+        let mut xs: Vec<i32> = m.units.iter().map(|u| u.x).collect();
+        xs.sort_unstable();
+        xs.dedup();
+        (i64::from(xs[0] - l / 2), xs.get(1).map_or(0, |&x| i64::from(x - xs[0])))
+    }
+
+    /// CELL-19: every S/D region's area lands on some (owner, terminal).
+    #[test]
+    fn sd_figures_add_up() {
+        use crate::testkit;
+        let Some(pdk) = testkit::pdk() else { return };
+        let area = |m: &Macro| m.figures.sd.iter().map(|f| f.2).sum::<i64>();
+        let (g, c) = testkit::group_of(DeviceKind::Nmos, 1, 1, 1680, 150);
+        let m = Mosfet::enumerate(&g, &c, &pdk).into_iter().find(|v| v.style == Pattern::Single).unwrap().draw(&g, &c, &pdk);
+        let (e, _) = e_and_pitch(&m, 150);
+        assert_eq!(m.figures.sd, vec![(0, "D", e * 1680, 2 * e + 1680), (0, "S", e * 1680, 2 * e + 1680)]);
+
+        let (g, mut c) = testkit::group_of(DeviceKind::Nmos, 2, 2, 1680, 150);
+        c.unitization[0].dummy_required = true;
+        let v = Mosfet::enumerate(&g, &c, &pdk).into_iter().find(|v| v.style == Pattern::Cc1d && !v.split_gates && !v.mirror_pins && v.rows == 1).unwrap();
+        assert!(v.dummies_per_edge > 0);
+        let m = v.draw(&g, &c, &pdk);
+        let (e, pitch) = e_and_pitch(&m, 150);
+        assert_eq!(area(&m), 1680 * (2 * e + 3 * (pitch - 150)));
+
+        let (g, c) = testkit::group_of(DeviceKind::Nmos, 1, 4, 1680, 150);
+        let m = Mosfet::enumerate(&g, &c, &pdk).into_iter().find(|v| v.rows == 2).unwrap().draw(&g, &c, &pdk);
+        let (e, pitch) = e_and_pitch(&m, 150);
+        assert_eq!(area(&m), 2 * 1680 * (2 * e + (pitch - 150)));
+    }
+
+    /// S D S: the inner drain is all the device's; both end sources add up.
+    #[test]
+    fn a_shared_drain_halves_the_area() {
+        use crate::testkit;
+        let Some(pdk) = testkit::pdk() else { return };
+        let (g, c) = testkit::group_of(DeviceKind::Nmos, 1, 2, 1680, 150);
+        let m = Mosfet::enumerate(&g, &c, &pdk).into_iter().find(|v| v.style == Pattern::Single && v.rows == 1).unwrap().draw(&g, &c, &pdk);
+        let (e, pitch) = e_and_pitch(&m, 150);
+        let get = |t: &str| m.figures.sd.iter().find(|f| f.1 == t).map(|f| (f.2, f.3)).unwrap();
+        assert_eq!(get("D"), ((pitch - 150) * 1680, 2 * (pitch - 150)));
+        assert_eq!(get("S").0, 2 * e * 1680);
+    }
+
+    /// sky130 poly 48.2 Ω/□, licon_po 152 Ω: (48.2·10000/(k·150) + 152)/4.
+    #[test]
+    fn gate_ohm_matches_the_formula() {
+        let pdk = verify::Pdk::builtin("sky130").unwrap();
+        let (g, c) = crate::testkit::group_of(DeviceKind::Nmos, 1, 4, 10_000, 150);
+        let vs = Mosfet::enumerate(&g, &c, &pdk);
+        for (double, want) in [(false, 305.8f32), (true, 104.9)] {
+            let v = vs.iter().find(|v| v.double_gate == double && v.rows == 1).unwrap();
+            let got = v.draw(&g, &c, &pdk).figures.gate_ohm;
+            assert_eq!(got.len(), 1);
+            assert_eq!(got[0].0, 0);
+            assert!((got[0].1 - want).abs() / want < 0.01, "double_gate={double}: {} Ω, want {want}", got[0].1);
+        }
     }
 }
