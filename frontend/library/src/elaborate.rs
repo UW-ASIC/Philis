@@ -585,6 +585,14 @@ mod tests {
         assert!(Pdk::load(&deck, &sidecar).map_or(true, |p| routing_stack(&p, None).is_err()));
     }
 
+    /// The lattice dr builds for sky130, as the placer reads it (PLC-28).
+    #[test]
+    fn sky130_lattice_spec() {
+        let pdk = Pdk::builtin("sky130").unwrap();
+        let cfg = detailed_router(&pdk, &routing_stack(&pdk, None).unwrap()).cfg;
+        assert_eq!(dr::lattice_spec(&cfg), dr::LatticeSpec { p0: 420, strides: vec![1, 1, 2, 2], origin_multiple: 840 });
+    }
+
     /// Every built-in deck's lattice clears each layer's spacing between
     /// adjacent tracks, wire to wire and pad to pad (replaces pdk's
     /// `routing_pitch_clears_every_layer_of_its_stack`).

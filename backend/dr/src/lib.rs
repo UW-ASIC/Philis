@@ -202,7 +202,8 @@ impl DetailedCfg {
 /// negotiation, repair + shields, geometry through via arrays, fill), search
 /// heap pops (`expanded`), and whether the lattice was coarsened. Fields an
 /// item has not landed yet stay zero: `width_fallbacks` (RTE-22),
-/// `single_cut_vias` (RTE-27), `congestion` (RTE-25, absolute nm).
+/// `single_cut_vias` (RTE-27). `congestion` is per-region demand after
+/// repair (absolute nm; see `congestion`).
 #[derive(Default, Clone, Debug)]
 pub struct RouteStats {
     pub us_landing: u64,
@@ -731,6 +732,7 @@ impl DetailedRoute {
 
         // The jog price is this layout's, not negotiation history.
         jog_hist.iter().for_each(|&n| hot.hist[n as usize] -= JOG_HIST);
+        stats.congestion = congestion(&hot, &cold.graph, origin);
         neg.accumulate(&hot.hist, abs);
         // Shields: requested nets get reference tracks alongside, tied in by
         // rerouting the reference to them.
@@ -1012,6 +1014,58 @@ impl DetailedRoute {
         (stats.overuse, stats.expanded, stats.coarsened) = (overuse, dij.pops, cold.graph.coarsened);
         (routes, report, stats)
     }
+}
+
+/// The track lattice `route` builds from a config, for the placer to snap
+/// to (PLC-28): base pitch, per-layer stride, and the multiple every frame
+/// origin sits on ([`lattice_period`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatticeSpec {
+    pub p0: i32,
+    /// Per routed layer (empty = uniform, stride 1).
+    pub strides: Vec<u32>,
+    pub origin_multiple: i32,
+}
+
+/// The lattice of `cfg` ([`LatticeSpec`]).
+#[must_use]
+pub fn lattice_spec(cfg: &DetailedCfg) -> LatticeSpec {
+    LatticeSpec { p0: cfg.pitch, strides: cfg.layers.iter().map(|s| s.stride).collect(), origin_multiple: lattice_period(cfg) }
+}
+
+/// Routing demand per region over a 16×16 split of the frame (the last row
+/// and column absorb the remainder): `Σ (usage + hist/P_FAC)` over every
+/// on-track node of every layer, over their count. Rects are absolute (`+
+/// origin`). After negotiation `usage ≤ 1` almost everywhere; the history
+/// term keeps contention that was negotiated away, so `> 1` reads as
+/// pressure, not literal overflow (PLC-15). `P_FAC` is fixed, not the final
+/// present factor, so epochs compare.
+fn congestion(hot: &RouteHot, grid: &TrackGrid, origin: (i32, i32)) -> Vec<(Rect, f32)> {
+    const SPLIT: u32 = 16;
+    let (rw, rh) = ((grid.nx / SPLIT).max(1), (grid.ny / SPLIT).max(1));
+    let (nrx, nry) = ((grid.nx / rw).min(SPLIT), (grid.ny / rh).min(SPLIT));
+    let mut sum = vec![(0.0f32, 0u32); (nrx * nry) as usize];
+    for n in 0..grid.nodes() as u32 {
+        if !grid.on_track(n) {
+            continue;
+        }
+        let (ix, iy, _) = grid.ixy(n);
+        let r = &mut sum[((iy / rh).min(nry - 1) * nrx + (ix / rw).min(nrx - 1)) as usize];
+        r.0 += f32::from(hot.usage[n as usize]) + hot.hist[n as usize] / P_FAC;
+        r.1 += 1;
+    }
+    let p = grid.pitch;
+    sum.iter()
+        .enumerate()
+        .map(|(k, &(d, c))| {
+            let (rx, ry) = (k as u32 % nrx, k as u32 / nrx);
+            let x1 = if rx + 1 == nrx { grid.nx } else { (rx + 1) * rw };
+            let y1 = if ry + 1 == nry { grid.ny } else { (ry + 1) * rh };
+            let (x0, y0) = (rx * rw, ry * rh);
+            let rect = Rect { x: origin.0 + (x0 as i32) * p, y: origin.1 + (y0 as i32) * p, w: (x1 - x0) as i32 * p, h: (y1 - y0) as i32 * p };
+            (rect, if c > 0 { d / c as f32 } else { 0.0 })
+        })
+        .collect()
 }
 
 /// The lattice's repeat, nm: `p0 · lcm(strides)` (`p0` with no specs).
@@ -3275,5 +3329,41 @@ mod tests {
         let (_, _, stats) = DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
         assert!(stats.expanded > 0);
         assert!(stats.us_negotiate + stats.us_geometry > 0, "{stats:?}");
+    }
+
+    /// The region holding ten used nodes is the most congested, and its rect
+    /// is where those nodes are.
+    #[test]
+    fn congestion_marks_the_crowded_region() {
+        let g = TrackGrid::with_layers((64 * 100, 64 * 100), 100, VIA_COST, 2);
+        let mut hot = RouteHot::new(g.nodes(), 1);
+        // Regions are 4×4 nodes: (5, 5) spans nodes 20..24.
+        for k in 0..10 {
+            hot.usage[g.node(20 + k % 4, 20 + k / 4, 0) as usize] = 1;
+        }
+        hot.usage[g.node(49, 13, 1) as usize] = 1;
+        let map = congestion(&hot, &g, (1_000, -500));
+        let (top, _) = map.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+        let centre = (1_000 + 22 * 100, -500 + 22 * 100);
+        assert!(centre.0 > top.x && centre.0 < top.x + top.w && centre.1 > top.y && centre.1 < top.y + top.h, "{top:?}");
+    }
+
+    /// With no history, demand times the region's on-track node count sums
+    /// to the total usage (remainder rows and columns included).
+    #[test]
+    fn congestion_without_history_counts_usage() {
+        let g = TrackGrid::with_layers((70 * 100, 50 * 100), 100, VIA_COST, 2);
+        let mut hot = RouteHot::new(g.nodes(), 1);
+        let mut seed = 7u64;
+        for u in &mut hot.usage {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            *u = (seed >> 63) as u16;
+        }
+        let total: f32 = hot.usage.iter().map(|&u| f32::from(u)).sum();
+        let map = congestion(&hot, &g, (0, 0));
+        let nodes = |r: &Rect| (r.w / 100 * (r.h / 100) * 2) as f32;
+        let sum: f32 = map.iter().map(|(r, d)| d * nodes(r)).sum();
+        assert!((sum - total).abs() < 1e-3 * total, "{sum} vs {total}");
+        assert_eq!(map.iter().map(|(r, _)| nodes(r)).sum::<f32>(), g.nodes() as f32, "regions tile the frame");
     }
 }
