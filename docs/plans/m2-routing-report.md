@@ -126,3 +126,39 @@ passed after every item.
   PEX 45–99 % (PERF-16).
 - Debug-profile `library` tests trip gp's `bind` debug_assert (a batch kind in both hard and budget). It is outside
   routing and not reached in `--release`, where all library tests pass.
+
+## RTE-23 (edda8b6) and review fixes 4
+- Signoff baseline, release `signoff_fixtures --include-ignored`, parent c552a17 vs edda8b6 + these fixes: same
+  result on both. 17/18 passed on the parent, 18/20 after (the 2 new tests pass). The same 2 fail on both:
+  `fixtures_sign_off_within_baseline` (pair: `lvs.unpaired_device`) and `large_fixtures_sign_off_within_baseline`
+  (ota DRC 3 = m1.2.notch 1 + m1.2 2, LVS label short vout1/vout2). `bench local`, seed 1: ota route hard 39,
+  overuse 8356, DRC 8, LVS MISMATCH, ERC 0; dac4 route hard 1, DRC 7, LVS PARTIAL(16), ERC 0. Identical on both.
+- T13 protocol (uncommitted `dr_us` probe, `bench local`, seed 1, p50 over all dr calls; ota 120 calls, dac4 60).
+  The host ran the other modules' builds at load 32–150 on 32 cores, so one run is noise-dominated:
+  | build | ota p50 ms | dac4 p50 ms | load |
+  |---|---|---|---|
+  | parent, run 1 | 1215 | 108 | 80–147 |
+  | parent, run 2 | 330 | 46 | 35–51 |
+  | edda8b6 | 352 | 97 | 32–69 |
+  | edda8b6 + fixes, run 1 | 526 | 43 | (not recorded) |
+  | edda8b6 + fixes, run 2 | 447 | 56 | 39–70 |
+  | edda8b6 + fixes, run 3 | 551 | 96 | 35–83 |
+  At similar load, ota dr p50 went up (330 on the parent, 447–551 after). The card's "step 2 must not make dr
+  slower than the parent" is not shown to hold. Under this load, the numbers neither prove nor rule out a
+  regression. A quiet-host re-run is needed.
+- `pair_fillers_dropped` is reset at the start of every geometry pass and restored from the snapshot when a post
+  round is rejected. It now counts the drawing that ships. `fill_on_a_pair_is_mirrored` asserts `== 1` (it was `>= 1`).
+- A post-fill round reroutes each violating net's exact-pair partner too, the same way the EM round does.
+  `reroute` returns only its own net's tree, so a lone reroute shipped an "exact" pair unmirrored.
+- Item 2: `routing_rows_are_measured_on_the_shipped_routes` prints `dr rows []` on all 9 fixtures, so it compares
+  nothing. `antenna_diode.rs` now asserts that dr's rows equal `gr::analog_tiers` on the shipped routes and are
+  non-empty (`batch:routing hard 0`, 1225400). That test inserts a diode, so its `diom` marker joins the routes and
+  the `marked` branch runs. **Acceptance is still unexercised:** the marker touches no routed piece, so the row is
+  the same with or without the re-derive. Checked by disabling the block: the check stays green. Killing that
+  mutant needs a fixture whose marker lowers a routed ratio. The test itself still fails afterwards on LVS
+  (`unpaired_device`), as it does on the parent.
+- Card deviation: there is no `RunStats::route_rows`, because RunStats is Copy. The test reads `Solution::route`.
+- Already failing on the parent (release): library `antenna_diode`, `extra_devices`, `drawn_cards`
+  (`a_mim_dac_signs_off…`: label short b3/VDD) and `emit_roundtrip` (ota) all fail on LVS. `perf_postlayout`
+  `ota_probe_regions` also fails; it was not re-run on the parent. dr `a_shielded_victim_gets_both_side_tracks`
+  fails at 0.768 (RTE-19, open).

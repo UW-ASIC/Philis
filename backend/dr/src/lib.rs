@@ -1201,6 +1201,8 @@ impl DetailedRoute {
             let mut round = 0;
             let (mut routes, sacrificed, access_v) = loop {
                 let t_geometry = std::time::Instant::now();
+                // Counts the drawing this pass makes, not every redraw.
+                stats.pair_fillers_dropped = 0;
                 let mut routes = build_routes(&hot, &cold, cfg, &compact, n_nets, layers, cuts);
                 // Shapes at or past this index per net are access geometry — the only
                 // shapes the short resolver may sacrifice.
@@ -1587,7 +1589,7 @@ impl DetailedRoute {
                         cold.commit(&mut hot, ci, t);
                     }
                     (cold.k, cold.term_k, cold.mirror) = (k, term_k, mirror);
-                    (stats.pairs_exact, stats.pairs_fallback, stats.plate_spread_pct) = (st.pairs_exact, st.pairs_fallback, st.plate_spread_pct);
+                    (stats.pairs_exact, stats.pairs_fallback, stats.plate_spread_pct, stats.pair_fillers_dropped) = (st.pairs_exact, st.pairs_fallback, st.plate_spread_pct, st.pair_fillers_dropped);
                     break drawing;
                 }
             }
@@ -1604,7 +1606,14 @@ impl DetailedRoute {
             prev = Some((key, hot.trees.clone(), cold.k.clone(), cold.term_k.clone(), cold.mirror.clone(), stats.clone(), (routes, sacrificed, access_v)));
             stats.post_rounds += 1;
             post += 1;
-            for ci in ids.iter().filter_map(|&n| ci_of.get(n as usize).copied().filter(|&c| c != usize::MAX)) {
+            // `reroute` returns only its own net's tree: an exact pair goes
+            // both sides, as in the EM round, or it ships unmirrored.
+            let mut cis: Vec<usize> = ids.iter().filter_map(|&n| ci_of.get(n as usize).copied().filter(|&c| c != usize::MAX)).collect();
+            let partners: Vec<usize> = cis.iter().filter_map(|&ci| cold.mirror.get(ci).copied().flatten().filter(|m| m.2).map(|m| m.0 as usize)).collect();
+            cis.extend(partners);
+            cis.sort_unstable();
+            cis.dedup();
+            for ci in cis {
                 if let Some(t) = cold.reroute(&hot, ci, 2.0 * P_FAC, &[], &mut dij) {
                     cold.commit(&mut hot, ci, t);
                 }
@@ -4282,7 +4291,7 @@ mod tests {
         let ring = Macro { shapes: vec![Shape { layer: LAYERS[0], rect: Rect { x: site.x, y: site.y - 60 - 50, w: 100, h: 50 } }], bbox: Rect { x: site.x, y: site.y - 110, w: 100, h: 50 }, ..Default::default() };
         let (routes, _, stats) = run(&[ring]);
         assert_eq!(stats.pairs_exact.len(), 1, "{:?}", stats.pairs_fallback);
-        assert!(stats.pair_fillers_dropped >= 1);
+        assert_eq!(stats.pair_fillers_dropped, 1, "one filler faces the ring, counted once");
         assert!(imaged(&routes), "{:?}\n{:?}", routes.wires[0], routes.wires[1]);
     }
 
