@@ -50,9 +50,9 @@ fn group_of(kind: DeviceKind, n: usize, nf: u16, dummy_required: bool) -> (Devic
         unit_w: 1680,
         unit_l: 150,
         series_parallel: SeriesParallel::Parallel,
-        same_variant_required: true,
         dummy_required,
         route_matching_required: false,
+        class: None, series: Vec::new(), style: None,
     });
     (group, c)
 }
@@ -422,9 +422,9 @@ fn sized(kind: DeviceKind, dev_nf: Vec<u16>, w: i32, l: i32, series_parallel: Se
         unit_w: w,
         unit_l: l,
         series_parallel,
-        same_variant_required: true,
         dummy_required: true,
         route_matching_required: false,
+        class: None, series: Vec::new(), style: None,
     });
     (group, c)
 }

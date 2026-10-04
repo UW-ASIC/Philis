@@ -117,20 +117,41 @@ impl Electromigration {
     /// both read `≤ 1` together exactly when every check passes. `None` when
     /// unknown (see the type).
     fn check(self, r: &Routes) -> Option<(f32, f32)> {
+        let (mut worst, mut checked) = ((0.0f32, 0.0f32), false);
+        self.walk(r, |_, need, have, ratio| {
+            checked = true;
+            worst = (worst.0.max(crate::rule::over(need - have, need)), worst.1.max(ratio));
+        })?;
+        checked.then_some(worst)
+    }
+
+    /// Indices into `r.shapes(self.net)` of the routed shapes that fail:
+    /// metal narrower than its need, and every member cut of an under-cut via
+    /// group. `None` when unknown (as [`Rule::known`]); `Some(vec![])` passes.
+    #[must_use]
+    pub fn failing(self, r: &Routes) -> Option<Vec<usize>> {
+        let mut out = Vec::new();
+        self.walk(r, |i, need, have, _| {
+            if need > have {
+                out.push(i);
+            }
+        })?;
+        Some(out)
+    }
+
+    /// Calls `f(shape index into r.shapes(net), need, have, need/have-ratio)`
+    /// once per limited metal shape and once per member cut of each via group
+    /// (the group's figures). `None` when the flow is unknown.
+    fn walk(self, r: &Routes, mut f: impl FnMut(usize, f32, f32, f32)) -> Option<()> {
         let stack = self.stack?;
         let routed = r.shapes(self.net);
         let all = [routed, r.cell_metal(self.net)].concat();
         let flow = net_flow(stack, &all, r.terminals(self.net))?;
-        let (mut worst, mut checked) = ((0.0f32, 0.0f32), false);
-        let mut fold = |need: f32, have: f32, ratio: f32| {
-            checked = true;
-            worst = (worst.0.max(crate::rule::over(need - have, need)), worst.1.max(ratio));
-        };
-        for (s, &ua) in routed.iter().zip(&flow.shape_ua) {
+        for (i, (s, &ua)) in routed.iter().zip(&flow.shape_ua).enumerate() {
             let Some(lim) = self.limit(s.layer.0).filter(|l| l.ua_per_um > 0.0) else { continue };
             let have = s.rect.w.min(s.rect.h).max(1) as f32;
             let need = lim.width_nm(ua, s.rect.w.max(s.rect.h) as f32);
-            fold(need, have, need / have);
+            f(i, need, have, need / have);
         }
         // Via groups: cuts of one layer in parallel between the same metals,
         // i.e. landing on a common shape below and a common shape above (by
@@ -173,11 +194,12 @@ impl Electromigration {
             let g = &mut group[uf.find(i as u32) as usize];
             *g = (g.0 + 1, g.1.max(flow.shape_ua[cut.0]));
         }
-        for (i, &(have, ua)) in group.iter().enumerate().filter(|(_, g)| g.0 > 0) {
-            let lim = cuts[i].1;
-            fold(lim.cuts(ua) as f32, have as f32, ua / (lim.ua_per_cut * have as f32));
+        for (i, cut) in cuts.iter().enumerate() {
+            let (have, ua) = group[uf.find(i as u32) as usize];
+            let lim = cuts[uf.find(i as u32) as usize].1;
+            f(cut.0, lim.cuts(ua) as f32, have as f32, ua / (lim.ua_per_cut * have as f32));
         }
-        checked.then_some(worst)
+        Some(())
     }
 }
 
@@ -217,6 +239,14 @@ mod tests {
     use crate::routing::stack::Layer;
     use pnr_core::geom::{LayerId, Rect};
     use pnr_core::routes::Terminal;
+
+    /// REL-05: sky130's 90 °C rating with the Cu fallback (0.9 eV, n 1.1)
+    /// allows ≈ 10 % of the current at 125 °C.
+    #[test]
+    fn fallback_derating_at_125c() {
+        let f = derate(398.15, 363.15, 0.9, 1.1);
+        assert!((f - 0.100).abs() <= 0.002, "{f}");
+    }
 
     /// met1 (id 1, 0.125 Ω/□), via (2, 4.5 Ω/cut), met2 (3).
     fn stack() -> &'static Stack {
@@ -268,6 +298,15 @@ mod tests {
         assert!(e.known(&r) && !e.satisfied(&r));
         assert!((e.residual(&r) - (178.57 - 140.0) / 178.57).abs() < 1e-3, "{}", e.residual(&r));
         assert!((e.residual(&r) - 0.216).abs() < 1e-3);
+    }
+
+    #[test]
+    fn failing_names_the_violating_shapes() {
+        // 1 000 µA end to end needs 357.1 nm: the 200 nm shape fails, the 400 nm one passes.
+        let wires = vec![shape(1, 0, 0, 2_000, 200), shape(1, 2_000, 0, 2_000, 400)];
+        let r = |b| routes(wires.clone(), vec![term(0, 0, 200, 200, Some(1_000.0)), term(3_800, 0, 200, 400, b)]);
+        assert_eq!(em().failing(&r(Some(-1_000.0))), Some(vec![0]));
+        assert_eq!(em().failing(&r(None)), None);
     }
 
     #[test]

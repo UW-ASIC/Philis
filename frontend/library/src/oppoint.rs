@@ -35,6 +35,10 @@ pub struct OpPoint {
     pub vds_v: Vec<Option<f64>>,
     /// Bulk-source voltage per device, V; `None` for a non-FET or unresolved.
     pub vbs_v: Vec<Option<f64>>,
+    /// DC voltage per net, V, indexed by `NetId`; ground nets read 0.0. `None`
+    /// for a net the simulated circuit does not reach (only capacitors, which
+    /// the flat deck drops) or that ngspice did not print.
+    pub net_v: Vec<Option<f64>>,
     /// How the bias was obtained, so a probe bench is never passed off as real.
     pub provenance: String,
     /// Devices the simulation reported.
@@ -143,6 +147,10 @@ pub struct OpConfig {
     /// Simulation temperature, °C: the bias is solved at it, and EM limits
     /// rated at a hotter reference are derated to it (never credited cooler).
     pub temp_c: f64,
+    /// Package junction-to-ambient resistance θ_JA, °C/W (Hastings eq. 5.1):
+    /// EM is derated at `temp_c + θ_JA·P_total` plus the on-die rise. `None`
+    /// = no package rise (no ref/ source or deck gives one).
+    pub theta_ja_c_per_w: Option<f64>,
 }
 
 impl Default for OpConfig {
@@ -158,6 +166,7 @@ impl Default for OpConfig {
             pmos_model: String::new(),
             ngspice: "ngspice".into(),
             temp_c: 27.0,
+            theta_ja_c_per_w: None,
         }
     }
 }
@@ -233,7 +242,9 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
     let (deck, provenance) = build_deck(netlist, cfg).map_err(|e| format!("cannot simulate: {e}"))?;
     let out = run_deck(&cfg.ngspice, "op", &deck)?;
 
-    let table = parse_show(&String::from_utf8_lossy(&out.stdout));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let table = parse_show(&stdout);
+    let nodes = parse_nodes(&stdout);
     if table.is_empty() {
         let tail: String = String::from_utf8_lossy(&out.stderr)
             .chars()
@@ -251,6 +262,12 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
         vgs_v: vec![None; n],
         vds_v: vec![None; n],
         vbs_v: vec![None; n],
+        net_v: (0..netlist.nets.len())
+            .map(|i| {
+                let n = node_name(netlist, pnr_core::NetId(i as u16));
+                if n == "0" { Some(0.0) } else { nodes.get(&n).copied() }
+            })
+            .collect(),
         provenance,
         resolved: 0,
         unresolved: Vec::new(),
@@ -310,7 +327,7 @@ struct DevOp {
 }
 
 /// Assemble the deck: model library, the circuit, a bias bench, and a control
-/// block that dumps every MOSFET's operating point at once.
+/// block that dumps every MOSFET's operating point and every node voltage at once.
 ///
 /// The circuit is emitted **flat, from the parsed netlist**, not by reusing the
 /// input text. A `.subckt` cannot be biased from outside: its internal bias nodes
@@ -339,6 +356,9 @@ fn build_deck(netlist: &Netlist, cfg: &OpConfig) -> Result<(String, String), Str
          show q : ic,ib,ie,p\n\
          show r : i,p\n\
          echo @@PHILIS_END\n\
+         echo @@PHILIS_NV\n\
+         print all\n\
+         echo @@PHILIS_NV_END\n\
          .endc\n\
          .end\n"
     );
@@ -596,6 +616,23 @@ fn parse_show(text: &str) -> std::collections::HashMap<String, DevOp> {
         }
     }
     out
+}
+
+/// Node voltages from `print all` between `@@PHILIS_NV` and `@@PHILIS_NV_END`:
+/// one `name = value` line per node (ground is not printed), keyed lowercase.
+/// `v1#branch = …` source currents are skipped.
+fn parse_nodes(text: &str) -> std::collections::HashMap<String, f64> {
+    text.lines()
+        .skip_while(|l| !l.contains("@@PHILIS_NV"))
+        .skip(1)
+        .take_while(|l| !l.contains("@@PHILIS_NV_END"))
+        .filter_map(|l| match l.split_whitespace().collect::<Vec<_>>()[..] {
+            [name, "=", v] if !name.contains('#') => {
+                Some((name.to_ascii_lowercase(), v.parse::<f64>().ok()?))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// `m.xm5.msky130_fd_pr__` → `xm5`, `q.xq1.qsky130_fd_pr__` → `xq1`; a
@@ -965,6 +1002,23 @@ mod tests {
         for (i, want) in [(0, "0"), (1, "0"), (2, "0"), (3, "0"), (4, "vout")] {
             assert_eq!(node_name(&nl, pnr_core::NetId(i)), want, "{}", nl.nets[i as usize].name);
         }
+    }
+
+    #[test]
+    fn print_all_reads_node_voltages() {
+        let nv = "@@PHILIS_NV\nvdd = 1.800000e+00\nx1_mid = 9.000000e-01\nv1#branch = -9.00000e-04\n@@PHILIS_NV_END\n";
+        let text = format!("{SHOW}{nv}");
+        let m = parse_nodes(&text);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m["vdd"], 1.8);
+        assert_eq!(m["x1_mid"], 0.9);
+        assert!(m.keys().all(|k| !k.contains('#')));
+        let key = |t: &std::collections::HashMap<String, DevOp>| {
+            let mut v: Vec<_> = t.iter().map(|(k, d)| (k.clone(), d.id.to_bits(), d.vds.to_bits(), d.gm.to_bits())).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(key(&parse_show(&text)), key(&parse_show(SHOW)));
     }
 
     #[test]

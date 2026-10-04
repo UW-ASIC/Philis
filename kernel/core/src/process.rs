@@ -92,6 +92,23 @@ pub trait Process {
         None
     }
 
+    /// Entry `c as usize` of the 3-element sidecar tier array `key`
+    /// (`[MIN, MOD, EXC]`); `None` when absent or not an integer.
+    fn tier(&self, key: &str, c: MatchClass) -> Option<i32> {
+        let _ = (key, c);
+        None
+    }
+}
+
+/// Hastings §13.3 matching class (PDF p.712): what a matched set's
+/// environment and limits scale with. The discriminant indexes the sidecar's
+/// tier arrays.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub enum MatchClass {
+    Minimal = 0,
+    #[default]
+    Moderate = 1,
+    Exceptional = 2,
 }
 
 /// What the active area sits on, from the sidecar's `cell.substrate_kind`

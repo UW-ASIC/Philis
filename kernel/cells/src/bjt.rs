@@ -171,7 +171,7 @@ impl Unit {
             owner: di as u8,
             device: None,
             kind: if self.pnp { pnr_core::DrawnKind::Pnp } else { pnr_core::DrawnKind::Npn },
-            nodes: [pnr_core::Node::Pin("E"), pnr_core::Node::Pin("B"), pnr_core::Node::Pin("C")],
+            nodes: [pnr_core::Node::Pin("C"), pnr_core::Node::Pin("B"), pnr_core::Node::Pin("E")],
             w: self.emitter.w,
             l: self.emitter.h,
         });

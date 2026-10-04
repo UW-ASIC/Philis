@@ -24,6 +24,8 @@ pub mod metadata;
 /// DC operating point via ngspice — the per-device power the thermal rules need.
 pub mod oppoint;
 pub mod perf;
+pub mod reliability;
+pub mod robust;
 
 /// Test gates for external tools (FLOW-14), shared by the unit and
 /// integration tests: a missing tool skips with a printed reason, and under
@@ -89,7 +91,7 @@ pub struct Config {
     /// rules' input. Empty means a uniform die (thermal rules pass vacuously).
     pub device_power_uw: Vec<i32>,
     /// Solve the DC operating point with ngspice; overrides `device_power_uw`.
-    /// A failed solve falls back to zero power and the report says so.
+    /// A failed solve falls back to `device_power_uw` and the report says so.
     pub op: Option<oppoint::OpConfig>,
     /// Score every epoch by simulating the extracted circuit against these
     /// specs: a failed spec outranks every budget. `None` = geometry-only.
@@ -108,6 +110,73 @@ pub struct Config {
     pub size_convention: SizeConvention,
     /// What gp does before dp; [`GpMode::Pile`] measures gp's contribution.
     pub gp_mode: GpMode,
+    /// Fixed die and boundary pins. [`run`] checks each pin names a port;
+    /// nothing else reads it yet (PLC/RTE consume it).
+    pub interface: Option<Interface>,
+    /// The top sub-circuit ([`ParseOptions::top`]); `None`: the parser's choice.
+    pub top: Option<String>,
+}
+
+/// A die edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    North,
+    South,
+    East,
+    West,
+}
+
+/// One boundary pin: `frac` ∈ [0, 1] along `side` (from its low end).
+#[derive(Clone, Debug, PartialEq)]
+pub struct IoPin {
+    pub net: String,
+    pub side: Side,
+    pub frac: f32,
+    pub width_nm: i32,
+    /// Deck layer name (`met3`).
+    pub layer: String,
+}
+
+/// A block's fixed outline and boundary pins.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Interface {
+    /// `(w, h)`; `None`: the placer sizes the die.
+    pub die_nm: Option<(i32, i32)>,
+    pub pins: Vec<IoPin>,
+}
+
+impl Interface {
+    /// `{"die": {"w": nm, "h": nm}, "pins": [{"net", "side": "north"|"south"|"east"|"west",
+    /// "frac", "width": nm, "layer"}]}` (`benchmarks/fixtures/ota_constrained.interface.json`).
+    pub fn from_json(text: &str) -> Result<Interface, String> {
+        let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("interface: {e}"))?;
+        let int = |o: &serde_json::Value, k: &str| -> Result<i32, String> {
+            o.get(k).and_then(serde_json::Value::as_i64).and_then(|x| i32::try_from(x).ok()).ok_or_else(|| format!("interface: `{k}` must be an integer, nm"))
+        };
+        let die_nm = match v.get("die") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(d) => Some((int(d, "w")?, int(d, "h")?)),
+        };
+        let pins = v.get("pins").and_then(serde_json::Value::as_array).map_or(&[][..], Vec::as_slice);
+        let pins = pins
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let text = |k: &str| p.get(k).and_then(serde_json::Value::as_str).ok_or_else(|| format!("interface: pins[{i}].{k} must be a string"));
+                let side = match text("side")? {
+                    "north" => Side::North,
+                    "south" => Side::South,
+                    "east" => Side::East,
+                    "west" => Side::West,
+                    s => return Err(format!("interface: pins[{i}].side {s:?} is not north|south|east|west")),
+                };
+                let frac = p.get("frac").and_then(serde_json::Value::as_f64).filter(|f| (0.0..=1.0).contains(f));
+                let frac = frac.ok_or_else(|| format!("interface: pins[{i}].frac must be in [0, 1]"))? as f32;
+                Ok(IoPin { net: text("net")?.to_string(), side, frac, width_nm: int(p, "width")?, layer: text("layer")?.to_string() })
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(Interface { die_nm, pins })
+    }
 }
 
 /// Coarse-placement strategy.
@@ -134,6 +203,8 @@ impl Default for Config {
             min_utilization: 0.6,
             size_convention: SizeConvention::Spice,
             gp_mode: GpMode::default(),
+            interface: None,
+            top: None,
         }
     }
 }
@@ -160,6 +231,10 @@ pub struct Solution {
     pub well_layer: Option<LayerId>,
     /// The operating point the run was biased with; `None` without one.
     pub op: Option<oppoint::OpPoint>,
+    /// Recognised matched pairs ([`matched_pairs`]): signoff's REL-10 rows.
+    pub pairs: Vec<(DeviceId, DeviceId)>,
+    /// Schematic devices per cell, indexed like `layout`.
+    pub devices_of: Vec<Vec<DeviceId>>,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -182,6 +257,9 @@ pub struct RunStats {
     pub outer_iterations: u32,
     /// Times an assignment stalled infeasible and the variants were changed.
     pub variant_escalations: u32,
+    /// Alternatives the escalation odometer skips as dominated in
+    /// `(DRC+ERC, w, h)` (GAP-16), summed over the cells of the winner's topology.
+    pub pruned: u32,
     /// Winner: detailed-placement hard violations.
     pub place_hard: usize,
     /// Winner: detailed-routing hard violations.
@@ -205,7 +283,17 @@ pub struct RunStats {
     /// over every epoch of every start and cell topology, not just the
     /// winner's; each scored its epoch as every spec unmeasured.
     pub sim_failures: u32,
+    /// CPU ms per stage [`STAGES`], summed over every epoch of every start and
+    /// topology (threads overlap: not wall time).
+    pub stage_ms: [f64; 9],
+    /// ngspice decks run: sensitivities plus every scored epoch, over every
+    /// start and cell topology.
+    pub sims: u32,
 }
+
+/// [`RunStats::stage_ms`]'s stages: `route` is gr+dr, `reroute` dr again
+/// after antenna diodes, `perf` the post-layout simulation.
+pub const STAGES: [&str; 9] = ["gp", "dp", "rings", "route", "reroute", "diodes", "signoff", "metadata", "perf"];
 
 /// Anything that stops the flow.
 #[derive(Debug)]
@@ -215,6 +303,8 @@ pub enum FlowError {
     /// device: `(instance, devices extracted, None = extraction failed)`. It
     /// would unpair LVS for the whole circuit, so it is refused up front.
     InjectedNotADevice(String, Option<usize>),
+    /// [`Config::interface`] names a net that is not a port of the top cell.
+    Interface(String),
 }
 
 /// Epochs without improvement before an assignment counts as stalled.
@@ -275,47 +365,82 @@ pub fn model_table(pdk: &Pdk) -> Vec<(String, pnr_core::DeviceKind)> {
 /// as drawn, never reshaped or moved by `dp`.
 pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<Solution, FlowError> {
     // 1. Parse, naming each device by the deck's model.
-    let opts = ParseOptions { size: cfg.size_convention, models: model_table(pdk), ..Default::default() };
+    let opts = ParseOptions { size: cfg.size_convention, models: model_table(pdk), top: cfg.top.clone(), ..Default::default() };
     let mut netlist = parse::spice_with(spice, &opts).map_err(FlowError::Parse)?;
     deck_models(&mut netlist, pdk);
+    if let Some(i) = &cfg.interface {
+        let is_port = |n: &str| netlist.ports.iter().any(|p| netlist.nets[p.0 as usize].name == n);
+        let bad: Vec<&str> = i.pins.iter().map(|p| p.net.as_str()).filter(|n| !is_port(n)).collect();
+        if !bad.is_empty() {
+            return Err(FlowError::Interface(format!("interface pins on non-port nets {bad:?}")));
+        }
+    }
 
     check_injected(&netlist, injected, pdk)?;
+
+    // Annotated once here for the sensitivity rows; each topology annotates
+    // its own `Problem` with the same `ann` (one leaked stack per run).
+    let stack: &'static analog::routing::Stack = Box::leak(Box::new(elaborate::stack(pdk)));
+    let mut ann = annotation_with(pdk, &cfg.annotation, stack);
+    ann.process.die_temp_k = cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15);
+    let base = annotate(&netlist, &ann);
 
     // 2. Bias: per-device power and per-net current. Placement-independent,
     //    so solved once.
     let bias = bias(&netlist, cfg);
-    let (perf_rows, perf_bounds) = performance_rows(&netlist, pdk, cfg);
+    let plan = performance_rows(&netlist, cfg, &ann, &base.net_classes);
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
     // linear gradient but splits one drain across the row ends (asymmetric
     // routing); apart, it routes as translated copies. Neither dominates in
     // general, so when a merge like that exists both are solved and the
     // lexicographically better kept.
-    let start = |j: u32| -> (Solution, LexKey) {
-        let seed = cfg.seed.wrapping_add(u64::from(j).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let (merged, key, distinct) = solve(&netlist, injected, pdk, cfg, &bias, &perf_rows, true, seed);
-        if !distinct {
-            return (merged, key);
-        }
-        let (apart, apart_key, _) = solve(&netlist, injected, pdk, cfg, &bias, &perf_rows, false, seed);
-        // Failures count over both topologies, whichever wins.
-        let failed = merged.stats.sim_failures + apart.stats.sim_failures;
-        let (mut sol, key) = if key_lt(&apart_key, &key) { (apart, apart_key) } else { (merged, key) };
-        sol.stats.sim_failures = failed;
-        (sol, key)
-    };
-    // Multi-start: the lex-best start wins; ties go to the earliest.
-    let start = &start;
-    let runs: Vec<(Solution, LexKey)> = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..cfg.starts.max(1)).map(|j| s.spawn(move || start(j))).collect();
+    // Both topologies are built once on this thread (pricing every variant
+    // once); the starts only search them.
+    let merged = topology(&netlist, injected, pdk, cfg, &bias, &ann, &plan, true);
+    let apart = merged.distinct.then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &plan, false));
+    let tops: Vec<&Topology> = std::iter::once(&merged).chain(apart.as_ref()).collect();
+    let tops = &tops;
+    let runs: Vec<Vec<Searched>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..cfg.starts.max(1))
+            .map(|j| {
+                s.spawn(move || {
+                    let seed = cfg.seed.wrapping_add(u64::from(j).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                    tops.iter().map(|t| search(t, cfg, seed)).collect()
+                })
+            })
+            .collect();
         handles.into_iter().map(|h| h.join().expect("a search start panicked")).collect()
     });
-    // Failures count over every start, not just the winner's: a failed
-    // simulation scores its epoch unmeasured, so selection would hide them.
-    let sim_failures = runs.iter().map(|r| r.0.stats.sim_failures).sum();
-    let mut sol = runs.into_iter().reduce(|best, r| if key_lt(&r.1, &best.1) { r } else { best }).expect("one start at least").0;
+    // Failures and stage times count over every start and topology, not just
+    // the winner's: a failed simulation scores its epoch unmeasured, so
+    // selection would hide them.
+    let all = || runs.iter().flatten().map(|r| r.stats);
+    let sim_failures = all().map(|s| s.sim_failures).sum();
+    let sims = all().map(|s| s.sims).sum::<u32>() + plan.sims;
+    let mut stage_ms = [0.0; 9];
+    for s in all() {
+        stage_ms.iter_mut().zip(s.stage_ms).for_each(|(a, b)| *a += b);
+    }
+    // Per start, `apart` wins only when strictly better; over starts, the
+    // lex-best wins and ties go to the earliest (`key_lt` is not transitive
+    // inside a C band, so this order is the contract).
+    let pick = |r: &[Searched]| usize::from(r.len() > 1 && key_lt(&r[1].key, &r[0].key));
+    let mut win = (0, pick(&runs[0]));
+    for (j, r) in runs.iter().enumerate().skip(1) {
+        let k = pick(r);
+        if key_lt(&r[k].key, &runs[win.0][win.1].key) {
+            win = (j, k);
+        }
+    }
+    let searched = runs.into_iter().nth(win.0).expect("one start at least").swap_remove(win.1);
+    let t = if win.1 == 0 { merged } else { apart.expect("index 1 is `apart`") };
+    let mut sol = finish(t, searched, &bias, pdk);
     (sol.stats.sim_failures, sol.metadata.sim_failures) = (sim_failures, sim_failures);
-    sol.metadata.budget_rows = perf_bounds;
+    sol.stats.stage_ms = stage_ms;
+    sol.stats.sims = sims;
+    sol.metadata.budget_rows = plan.notes;
+    sol.metadata.sensitivity = plan.sens;
     Ok(sol)
 }
 
@@ -324,13 +449,17 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 /// parallel, once per run. Empty without performance scoring, a simulator, or
 /// the deck's wire capacitance. Also, per declared bound (`"{metric}:min"` /
 /// `":max"`), its row or why it has none ([`metadata::MetadataReport::budget_rows`]).
-fn performance_rows(
-    netlist: &pnr_core::Netlist,
-    pdk: &Pdk,
-    cfg: &Config,
-) -> (Vec<analog::routing::PerformanceBudget>, Vec<String>) {
+/// Also the active scenarios (PERF-10): nominal (index 0) plus each bound's
+/// worst scenario on the schematic, in order; every scenario when the
+/// schematic cannot be evaluated. Epochs are simulated over these only.
+/// The notes open with `"scenario {name}: active"` / `": inactive"` per
+/// scenario, ahead of the per-bound notes. Per active scenario a sensitivity
+/// table (PERF-11), noted in [`PerfPlan::sens`].
+fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationConfig, classes: &[analog::metadata::NetClassification]) -> PerfPlan {
     use analog::metadata::NetClass;
-    let Some(p) = &cfg.performance else { return (Vec::new(), Vec::new()) };
+    let plan = |rows, notes, active| PerfPlan { rows, notes, active, tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0 };
+    let Some(p) = &cfg.performance else { return plan(Vec::new(), Vec::new(), vec![0]) };
+    let all: Vec<usize> = (0..p.scenarios().len()).collect();
     let bounds = || {
         p.specs.iter().flat_map(|s| {
             [(s.min, "min"), (s.max, "max")].into_iter().filter(|b| b.0.is_some_and(f64::is_finite)).map(move |(_, side)| format!("{}:{side}", s.metric))
@@ -348,26 +477,85 @@ fn performance_rows(
         notes.iter().for_each(|n| eprintln!("[perf] {n}"));
         notes
     };
-    let ann = annotation(pdk, &cfg.annotation);
-    let Some(af_per_um) = ann.process.wire_af_per_um else {
-        return (Vec::new(), notes(&[], "deck has no wire capacitance"));
+    let scenario_notes = |active: &[usize]| -> Vec<String> {
+        let notes: Vec<String> = p
+            .scenarios()
+            .iter()
+            .enumerate()
+            .map(|(i, sc)| format!("scenario {}: {}", sc.name, if active.contains(&i) { "active" } else { "inactive" }))
+            .collect();
+        notes.iter().for_each(|n| eprintln!("[perf] {n}"));
+        notes
     };
-    let classes = annotate(netlist, &ann).net_classes;
+    let Some(af_per_um) = ann.process.wire_af_per_um else {
+        let mut out = scenario_notes(&all);
+        out.extend(notes(&[], "deck has no wire capacitance"));
+        return plan(Vec::new(), out, all);
+    };
     let nets: Vec<pnr_core::NetId> = classes
         .iter()
         .filter(|c| matches!(c.class, NetClass::Signal | NetClass::Sensitive | NetClass::Clock))
         .map(|c| c.net)
         .collect();
-    let names: Vec<String> = nets.iter().map(|n| netlist.nets[n.0 as usize].name.clone()).collect();
-    // 10 fF: well above solver noise, small enough to stay linear.
-    match perf::sensitivities(netlist, p, &names, 10_000.0) {
-        Ok(s) => {
-            let rows = perf::budget_rows(p, &s, &nets, af_per_um / 1000.0);
-            let notes = notes(&rows, "not measured at the schematic");
-            (rows, notes)
+    let steps = perf::StepPolicy { gate_af_um2: ann.process.gate_af_per_um2.map_or(0.0, f64::from), ..Default::default() };
+    let params = perf::default_params(netlist, &nets);
+    let sigma_v = robust::device_sigma_v(netlist, ann.process.avt_mv_um);
+    let names = p.scenarios();
+    let sens = perf::evaluate(netlist, &perf::Parasitics::default(), p, &all).and_then(|start| {
+        let mut active = vec![0];
+        for b in &start.bounds {
+            if !active.contains(&b.scenario) {
+                active.push(b.scenario);
+            }
         }
-        Err(e) => (Vec::new(), notes(&[], &format!("sensitivities unavailable: {e}"))),
+        let mut sens_notes = Vec::new();
+        let mut tables = Vec::new();
+        for &s in &active {
+            let t0 = std::time::Instant::now();
+            let mut t = perf::sensitivities(netlist, p, s, &params, &sigma_v, &steps, &perf::Parasitics::default())?;
+            perf::add_coupling(&mut t, netlist, p, &nets, &steps, 64)?;
+            let name = &names[s].name;
+            sens_notes.push(format!("{name}: {} rows, {} sims, {} ms", t.rows.len(), t.sims, t0.elapsed().as_millis()));
+            sens_notes.extend(t.rows.iter().filter(|r| !r.linear).map(|r| format!("{name}: nonlinear {:?}", r.param)));
+            tables.push(t);
+        }
+        Ok((start, active, tables, sens_notes))
+    });
+    match sens {
+        Ok((start, active, tables, sens_notes)) => {
+            let rows = perf::budget_rows(p, &start, &tables, &nets, af_per_um / 1000.0);
+            let mut out = scenario_notes(&active);
+            out.extend(notes(&rows, "not measured at the schematic"));
+            sens_notes.iter().for_each(|n| eprintln!("[perf] sens {n}"));
+            let sims = (all.len() * p.testbenches.len()) as u32 + tables.iter().map(|t| t.sims).sum::<u32>();
+            PerfPlan { rows, notes: out, active, tables, sigma_v, sens: sens_notes, sims }
+        }
+        Err(e) => {
+            let mut out = scenario_notes(&all);
+            out.extend(notes(&[], &format!("sensitivities unavailable: {e}")));
+            plan(Vec::new(), out, all)
+        }
     }
+}
+
+/// What the run scores performance with, solved once on the schematic
+/// ([`performance_rows`]).
+struct PerfPlan {
+    /// Spec bounds as routing budget rows.
+    rows: Vec<analog::routing::PerformanceBudget>,
+    /// [`metadata::MetadataReport::budget_rows`].
+    notes: Vec<String>,
+    /// Scenarios each scored epoch is simulated at.
+    active: Vec<usize>,
+    /// One sensitivity table per active scenario, in `active` order.
+    tables: Vec<perf::SensTable>,
+    /// Per device random V_T σ, V ([`robust::device_sigma_v`]); the gate
+    /// offset step of the tables.
+    sigma_v: Vec<Option<f64>>,
+    /// [`metadata::MetadataReport::sensitivity`].
+    sens: Vec<String>,
+    /// ngspice decks run on the schematic.
+    sims: u32,
 }
 
 /// The operating point, solved once per run.
@@ -384,28 +572,59 @@ struct Bias {
     op: Option<oppoint::OpPoint>,
 }
 
-/// Annotate, draw cells and search at one cell topology: `merge_distinct_gates`
-/// lets a matched pair on different gate nets merge into one cell. Returns the
-/// winner, its key, and whether any such merge happened.
+/// What is fixed for the run at one cell topology (`merge_distinct_gates`
+/// lets a matched pair on different gate nets merge into one cell): the
+/// annotated problem, the cells, EM/IR rules, router config and the seed
+/// variant assignment. Built once on the calling thread and shared by every
+/// start's [`search`].
+struct Topology<'a> {
+    flow: Flow<'a>,
+    /// [`cellgen::seed_assignment`]: every alternative DRC-priced once.
+    assignment0: Vec<u16>,
+    /// Per cell, the alternatives [`cellgen::escalate`] may visit.
+    allowed: Vec<Vec<u16>>,
+    /// A distinct-gate merge happened, so the `apart` topology is worth solving.
+    distinct: bool,
+    /// REL-05: EM temperature, K; `None` without an op.
+    t_em_k: Option<f32>,
+    /// Where the EM derating came from (`BiasSummary::em_derate`).
+    em_derate: &'static str,
+}
+
+// Starts share one `Topology` by reference across threads.
+const _: fn() = || {
+    fn s<T: Sync>() {}
+    s::<Topology<'static>>();
+};
+
+#[cfg(test)]
+thread_local!(static APART_BUILDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
+
+/// Annotate (with `ann`, whose stack the run leaked once) and draw cells at one
+/// cell topology.
 #[allow(clippy::too_many_arguments)]
-fn solve(
-    netlist: &pnr_core::Netlist,
+fn topology<'a>(
+    netlist: &'a pnr_core::Netlist,
     injected: &Macros,
-    pdk: &Pdk,
-    cfg: &Config,
+    pdk: &'a Pdk,
+    cfg: &'a Config,
     bias: &Bias,
-    perf_rows: &[analog::routing::PerformanceBudget],
+    ann: &AnnotationConfig,
+    perf: &'a PerfPlan,
     merge_distinct_gates: bool,
-    seed: u64,
-) -> (Solution, LexKey, bool) {
-    let netlist = netlist.clone();
-    let currents = bias.currents.clone();
+) -> Topology<'a> {
+    #[cfg(test)]
+    if !merge_distinct_gates {
+        APART_BUILDS.with(|c| c.set(c.get() + 1));
+    }
+    let currents = &bias.currents;
     // Annotate: placement/routing rules + cell constraints, device-indexed.
-    let ann = annotation(pdk, &cfg.annotation);
-    let mut problem = annotate(&netlist, &ann);
+    // Per topology: `CellSpace::new` mutates the problem, which is not `Clone`.
+    let mut problem = annotate(netlist, ann);
     if cfg.min_utilization > 0.0 {
         problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min: cfg.min_utilization }));
     }
+    let (perf_rows, perf_active) = (&perf.rows[..], &perf.active[..]);
     for row in perf_rows {
         problem.routing.budget.push(Box::new(row.clone()));
     }
@@ -420,42 +639,73 @@ fn solve(
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
-    let (layers, cuts, pin_access) = elaborate::routing_stack(pdk);
+    // ponytail: a bad deck still panics here; FLOW-11 propagates the `Err`.
+    let stack = elaborate::routing_stack(pdk, None).unwrap_or_else(|e| panic!("routing stack: {e}"));
+    let (layers, cuts, pin_access) = (stack.layers.clone(), stack.cuts.clone(), stack.pin_access);
     // EM limits on the pin-access layer and cut too (sky130 mcon 0.36 mA/cut):
     // the access jogs and pin cuts carry their terminal's current.
     let em_layers: Vec<LayerId> = layers.iter().copied().chain(pin_access.map(|p| p.0)).collect();
     let em_cuts: Vec<elaborate::Cut> = cuts.iter().copied().chain(pin_access.map(|p| p.1)).collect();
-    let em = elaborate::em_limits(pdk, &em_layers, &em_cuts, cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15));
-    em_rules(&mut problem, &netlist, &em, &em_layers, &em_cuts, ann.process.stack, pdk);
+    // REL-05: EM is derated at T_amb + θ_JA·P_total + the worst on-die rise
+    // any placement can give ([`pnr_core::thermal::rise_bound_mc`]). Per cell,
+    // the variant whose eq. 5.6 self term is largest: it bounds every
+    // variant's mutual term too.
+    // ponytail: a cell's bbox is wider than its heated channel, which
+    // understates the rise; read the channel area from `Macro.units` if a
+    // bias ever heats a cell enough to matter.
+    let t_em_k = cfg.op.as_ref().map(|o| {
+        use pnr_core::thermal::{rise_bound_mc, self_rise_mc, K_SI_W_PER_M_K as K};
+        let foot: Vec<(i32, i32)> = cells
+            .variants
+            .iter()
+            .zip(&cells.power)
+            .map(|(v, &p)| {
+                v.alternatives.iter().map(|m| (m.bbox.w, m.bbox.h)).max_by(|a, b| self_rise_mc(p, a.0, a.1, K).total_cmp(&self_rise_mc(p, b.0, b.1, K))).unwrap_or((1, 1))
+            })
+            .collect();
+        let package = o.theta_ja_c_per_w.unwrap_or(0.0) * bias.summary.as_ref().map_or(0, |s| s.total_power_uw) as f64 * 1e-6;
+        o.temp_c as f32 + 273.15 + package as f32 + rise_bound_mc(&cells.power, &foot, K) / 1e3
+    });
+    let em = elaborate::em_limits(pdk, &em_layers, &em_cuts, t_em_k);
+    let em_derate = match layers.first().and_then(|&l| pdk.em_limit(l)) {
+        Some(verify::EmLimit { derating: Some(_), derating_assumed: true, .. }) => "sidecar+fallback Ea/n",
+        Some(verify::EmLimit { derating: Some(_), .. }) => "deck",
+        _ => "none",
+    };
+    em_rules(&mut problem, netlist, &em, &em_layers, &em_cuts, ann.process.stack, pdk);
     // IR-drop budgets (PWR-02) on nets carrying op current (`annotator::ir`).
-    if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
+    let ir = if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
         let vdd_mv = cfg.op.as_ref().map_or(1_800.0, |o| o.vdd * 1e3);
-        let i = oppoint::net_current_ua(&netlist, c);
-        let rules: Vec<analog::routing::IrDrop> = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv, &ann.policy)
-            .into_iter()
-            .map(|(net, current_ua, max_drop_uv)| analog::routing::IrDrop { net, current_ua, max_drop_uv, margin_pct: 20, stack: ann.process.stack })
+        let i = oppoint::net_current_ua(netlist, c);
+        let ir = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv, &ann.policy);
+        let rules: Vec<analog::routing::IrDrop> = ir
+            .iter()
+            .map(|&(net, current_ua, max_drop_uv)| analog::routing::IrDrop { net, current_ua, max_drop_uv, margin_pct: 20, stack: ann.process.stack })
             .collect();
         problem.routing.budget.push(Box::new(rules));
+        ir
     } else {
         problem.missing.push(("IrDrop", "operating point"));
-    }
+        Vec::new()
+    };
+    problem.missing.extend(analog::matching::class::missing_tiers(pdk).map(|m| ("MatchClass", m)));
     let sens: Vec<(pnr_core::NetId, f32)> =
         perf_rows.iter().flat_map(|r| r.nets.iter().copied().zip(r.weights.iter().copied())).collect();
     let net_weight = gp::net_weights(&problem.net_classes, &sens);
-    let intent = elaborate::intent(&netlist, &problem.net_classes, currents.as_deref(), cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0));
+    let intent = elaborate::intent(netlist, &problem.net_classes, currents.as_deref(), cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0), &ir);
     let flow = Flow {
         pdk,
-        netlist: &netlist,
+        netlist,
         net_names: netlist.nets.iter().map(|n| n.name.clone()).collect(),
         d_router: {
-            let mut r = elaborate::detailed_router(pdk, &layers, &cuts, pin_access);
+            let mut r = elaborate::detailed_router(pdk, &stack);
             r.cfg.supply_nets = problem
                 .net_classes
                 .iter()
                 .filter(|c| matches!(c.class, analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground))
                 .map(|c| c.net)
                 .collect();
-            r.cfg.pin_ua = currents.as_deref().map_or_else(Vec::new, |c| pin_currents(&netlist, &cells.devices_of, c));
+            r.cfg.pin_ua = currents.as_deref().map_or_else(Vec::new, |c| pin_currents(netlist, &cells.devices_of, c));
             // Per cell, each member's gate pin, device and `W·L·m` (the
             // annotator's antenna gate area, µm² → nm²).
             r.cfg.gate_nm2 = cells
@@ -478,9 +728,11 @@ fn solve(
         locks,
         perf: cfg.performance.as_ref(),
         perf_rows,
-        intent: intent.clone(),
+        perf_active,
+        perf_plan: perf,
+        intent,
         net_weight,
-        fold: fold.clone(),
+        fold,
         stack: ann.process.stack.expect("`annotation` always carries the stack"),
         id_ua: currents
             .as_ref()
@@ -488,11 +740,41 @@ fn solve(
             .unwrap_or_default(),
         gp_mode: cfg.gp_mode,
     };
+    // Matched cells keep every alternative: a merged group, or a member of a
+    // 2-device leaf that emits a `MatchedSet` (annotator emit.rs table).
+    let paired: Vec<DeviceId> = annotator::block::leaves(&flow.problem.blocks)
+        .into_iter()
+        .filter(|l| l.devices.len() == 2 && matches!(l.kind, annotator::BlockKind::DiffPair | annotator::BlockKind::CurrentMirror | annotator::BlockKind::Load | annotator::BlockKind::CascodePair))
+        .flat_map(|l| l.devices.iter().copied())
+        .collect();
+    let matched: Vec<bool> = flow.cells.devices_of.iter().map(|m| m.len() > 1 || m.iter().any(|d| paired.contains(d))).collect();
+    // GAP-18: a cell inside an Exceptional unitization lists its alternatives best-matching first.
+    let ranked: Vec<bool> = flow
+        .cells
+        .devices_of
+        .iter()
+        .map(|m| flow.problem.constraints.unitization.iter().any(|u| u.class == Some(pnr_core::MatchClass::Exceptional) && m.iter().all(|d| u.devices.contains(d))))
+        .collect();
+    let (assignment0, allowed) = cellgen::seed_assignment(&flow.cells.variants, &matched, &ranked, pdk);
+    Topology { flow, assignment0, allowed, distinct, t_em_k, em_derate }
+}
 
-    // 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
-    //    keeping the best [`LexKey`], whose V includes the epoch's own signoff
-    //    errors. Prices and routing history persist across epochs.
-    let mut assignment = cellgen::seed_assignment(&flow.cells.variants, pdk);
+/// One start's search on a shared topology: the winning epoch, the start's
+/// stats, the saturated prices (`metadata.binding`) and the winner's key.
+struct Searched {
+    best: Epoch,
+    stats: RunStats,
+    binding: Vec<String>,
+    key: LexKey,
+}
+
+/// 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
+///    keeping the best [`LexKey`], whose V includes the epoch's own signoff
+///    errors. Prices and routing history persist across epochs and are this
+///    start's own.
+fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
+    let flow = &t.flow;
+    let mut assignment = t.assignment0.clone();
     let mut prices = gp::Prices::new();
     let mut neg = gr::Negotiation::new();
     let mut best: Option<Epoch> = None;
@@ -513,6 +795,9 @@ fn solve(
             // beat the incumbent; its spec miss then decides against it.
             if best.as_ref().is_none_or(|b| epoch.key.0 <= b.key.0) {
                 flow.score_perf(&mut epoch, &mut stats);
+            }
+            for (s, e) in stats.stage_ms.iter_mut().zip(epoch.stats.stage_ms) {
+                *s += e;
             }
             if best.as_ref().is_none_or(|b| key_lt(&epoch.key, &b.key)) {
                 best = Some(Epoch {
@@ -547,20 +832,30 @@ fn solve(
         if outer + 1 == n_outer {
             break;
         }
-        let Some(next) = cellgen::escalate(&flow.cells.variants, &assignment) else {
+        let Some(next) = cellgen::escalate(&flow.cells.variants, &t.allowed, &assignment) else {
             break;
         };
         stats.variant_escalations += 1;
         assignment = next;
     }
 
-    // 7. The winner, redrawn from its own variant choice, with its guard rings.
     let best = best.expect("at least one epoch ran");
     stats.dual_steps = prices.steps();
-    stats = RunStats {
+    let all: usize = flow.cells.variants.iter().map(|v| v.alternatives.len()).sum();
+    stats.pruned = (all - t.allowed.iter().map(Vec::len).sum::<usize>()) as u32;
+    let stats = RunStats {
         best_iteration: best.iteration,
         ..best.stats.merge(stats)
     };
+    let binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
+    Searched { key: best.key, best, stats, binding }
+}
+
+/// 7. The winner only, redrawn from its own variant choice, with its guard
+/// rings, fill and metadata. Consumes `t`, so the placement rules move into
+/// [`Solution::placement`].
+fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
+    let (flow, best, stats, t_em_k, em_derate) = (t.flow, s.best, s.stats, t.t_em_k, t.em_derate);
     let mut macros = cellgen::realize(&flow.cells.variants, &best.layout.variant);
     // Only a winner claiming zero hard violations must be fully connected; an
     // infeasible winner's opens are already counted and reported at signoff.
@@ -591,13 +886,24 @@ fn solve(
         &best.layout,
         &flow.problem.routing,
         &best.routes,
-        bias.summary.clone(),
+        bias.summary.clone().map(|mut b| {
+            b.em_temp_k = t_em_k.unwrap_or(b.em_temp_k);
+            b.em_derate = em_derate;
+            b
+        }),
         &flow.problem.net_classes,
         &flow.problem.missing,
         &pdk.unverified(),
     );
     let mut metadata = metadata;
-    metadata.binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
+    metadata.binding = s.binding;
+    let pairs = matched_pairs(&flow.problem.blocks);
+    if let Some(op) = &bias.op {
+        let (_, aging, unknown) = reliability::voltage_findings(flow.netlist, op, &pdk.fet_voltage_limits(), &pairs, false);
+        let name = |d: DeviceId| flow.netlist.devices[d.0 as usize].name.clone();
+        metadata.aging = aging.into_iter().map(|a| (name(a.a), name(a.b), a.dvds_mv, a.dvgs_mv, a.dvbs_mv)).collect();
+        metadata.voltage_unknown = unknown;
+    }
     let mut recognition = std::collections::BTreeMap::new();
     for b in flow.problem.blocks.iter().filter(|b| b.kind != annotator::BlockKind::Glue) {
         *recognition.entry(b.template).or_insert(0) += 1;
@@ -605,7 +911,7 @@ fn solve(
     metadata.recognition = recognition.into_iter().collect();
     metadata.unconstrained = flow.problem.coverage.iter()
         .filter_map(|&(d, c)| match c {
-            annotator::Coverage::Unconstrained(why) => Some((netlist.devices[d.0 as usize].name.clone(), why)),
+            annotator::Coverage::Unconstrained(why) => Some((flow.netlist.devices[d.0 as usize].name.clone(), why)),
             _ => None,
         })
         .collect();
@@ -616,29 +922,60 @@ fn solve(
             .specs
             .iter()
             .zip(&result.metrics)
-            .map(|(s, (m, v))| (m.clone(), *v, s.min, s.max, perf::miss(s, *v)))
+            .zip(&result.miss)
+            .map(|((s, (m, v)), miss)| (m.clone(), *v, s.min, s.max, *miss))
+            .collect();
+        let names = cfg.scenarios();
+        metadata.performance_worst = result
+            .bounds
+            .iter()
+            .map(|b| {
+                let value = b.value.map_or_else(|| "unmeasured".to_string(), |v| format!("{v:.4e}"));
+                format!(
+                    "{}:{} worst {value} at {} (over {} active of {} scenarios)",
+                    cfg.specs[b.spec].metric,
+                    if b.upper { "max" } else { "min" },
+                    names[b.scenario].name,
+                    flow.perf_active.len(),
+                    names.len()
+                )
+            })
             .collect();
         metadata.sim_failures = stats.sim_failures;
+        // ponytail: no systematic/gradient terms; MAT's per-pair ledger is not
+        // exported at the winner yet.
+        let stats = robust::bound_stats(&flow.perf_plan.tables, &flow.perf_plan.sigma_v, result, &cfg.specs, &[], &[]);
+        metadata.robustness = stats
+            .iter()
+            .map(|st| {
+                let b = &result.bounds[st.bound];
+                let name = format!("{}:{}", cfg.specs[b.spec].metric, if b.upper { "max" } else { "min" });
+                let (Some(sf), Some(beta), Some(y)) = (st.sigma_f, st.beta, st.yield_part) else { return format!("{name} UNKNOWN ({})", robust::unknown_reason(&flow.perf_plan.tables, &flow.perf_plan.sigma_v, result, st.bound)) };
+                let top: Vec<String> = st.shares.iter().map(|&(d, w)| format!("{} {:.0}%", flow.netlist.devices[d as usize].name, w * 100.0)).collect();
+                format!("{name} σ_f {sf:.4e} β {beta:.2} Φ(β) {y:.4} (V_T only) top {}", top.join(", "))
+            })
+            .collect();
+        let y = robust::linear_joint_yield(&flow.perf_plan.tables, &flow.perf_plan.sigma_v, result, &cfg.specs, &[], 100_000, 1);
+        metadata.robustness.push(y.map_or_else(|| "joint yield (linear, 1e5) UNKNOWN".into(), |y| format!("joint yield (linear, 1e5) {y:.4}")));
     }
-    let placement = flow.problem.placement;
-    let key = best.key;
     // Inserted devices (antenna diodes) join the schematic LVS reads.
-    let mut netlist = netlist;
+    let mut netlist = flow.netlist.clone();
     netlist.devices.extend(best.extra);
-    let solution = Solution {
+    Solution {
         layout: best.layout,
         routes: best.routes,
         macros,
         netlist,
         stats,
         metadata,
-        placement,
-        intent,
-        folds: fold,
+        placement: flow.problem.placement,
+        intent: flow.intent,
+        folds: flow.fold,
         well_layer: pnr_core::Process::layer(pdk, "nwell"),
         op: bias.op.clone(),
-    };
-    (solution, key, distinct)
+        pairs,
+        devices_of: flow.cells.devices_of,
+    }
 }
 
 /// Everything an epoch reads that is fixed for the run.
@@ -656,6 +993,10 @@ struct Flow<'a> {
     perf: Option<&'a perf::PerfConfig>,
     /// Spec bounds as sensitivity rows ([`performance_rows`]); weigh [`c_tier`].
     perf_rows: &'a [analog::routing::PerformanceBudget],
+    /// Scenarios each promoted epoch is simulated at ([`performance_rows`]).
+    perf_active: &'a [usize],
+    /// Sensitivity tables and V_T σ the winner's robustness reads (PERF-13).
+    perf_plan: &'a PerfPlan,
     /// Placement HPWL weight per net ([`gp::net_weights`]).
     net_weight: Vec<f32>,
     layers: Vec<LayerId>,
@@ -675,8 +1016,15 @@ struct Flow<'a> {
 /// `base` plus what the annotator needs from the deck.
 #[must_use]
 pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
+    annotation_with(pdk, base, Box::leak(Box::new(elaborate::stack(pdk))))
+}
+
+/// [`annotation`] on a stack the caller already holds. Rules are `Copy`, so
+/// they borrow the stack for 'static. ponytail: [`run`] leaks one per call (a
+/// few hundred bytes); cache by deck if runs ever loop in one process.
+fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::routing::Stack) -> AnnotationConfig {
     use pnr_core::Process;
-    let (layers, ..) = elaborate::routing_stack(pdk);
+    let layers = elaborate::routing_stack(pdk, None).map(|s| s.layers).unwrap_or_default();
     let wire = layers.first().copied();
     let width = wire.and_then(|l| pdk.min_width(l.0)).unwrap_or(0);
     let opt = |key: &str| Some(pdk.rule(key, 0)).filter(|&v| v > 0);
@@ -688,16 +1036,28 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
         route_space_nm: wire.and_then(|l| pdk.min_spacing(l.0)).unwrap_or(0),
         dti: opt("dti_max_spacing").zip(opt("dti_width")),
         avt_mv_um: [pos("avt_n_mv_um"), pos("avt_p_mv_um")],
+        abeta_pct_um: [pos("abeta_n_pct_um"), pos("abeta_p_pct_um")],
         svt_uv_per_um: pos("svt_uv_per_um"),
+        svt_fit: pos("svt_a_uv2_per_um2").zip(pos("svt_b_uv2")),
         vt_tc_uv_per_k: [pos("vt_tc_uv_per_k"), pos("vt_tc_uv_per_k_p")],
         lod_kvth0_mv_um: [pos("lod_kvth0_n_mv_um"), pos("lod_kvth0_p_mv_um")],
         lattice_nm: cells::builder::cut_lattice(pdk),
         substrate: pnr_core::SubstrateKind::from_key(pdk.cell_str("substrate_kind")),
         epi_nm: pos("epi_thickness_nm").map(|v| v as i32),
-        // Rules are `Copy`, so they borrow the stack for 'static.
-        // ponytail: leaked once per `annotation` call (twice per run, a few
-        // hundred bytes each); cache by deck if runs ever loop in one process.
-        stack: Some(Box::leak(Box::new(elaborate::stack(pdk)))),
+        stack: Some(stack),
+        min_ring_width_nm: pdk.rule("min_guard_ring_width", 0),
+        ecgr_min_width_nm: opt("ecgr_min_width_nm"),
+        ecgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Ecgr, pdk),
+        hcgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Hcgr, pdk),
+        // Set by the callers from `Config.op` (not a deck key).
+        die_temp_k: None,
+        unit: annotator::sets::UnitDeck {
+            grid_nm: i64::from(pdk.grid()),
+            min_w_nm: i64::from(pdk.rule("min_finger_width", 0)),
+            max_w_nm: i64::from(pdk.rule("max_finger_width", 0)),
+            min_l_nm: pdk.layer("poly").and_then(|l| pdk.min_width(l.0)).map_or(0, i64::from),
+            res_min_segment_nm: i64::from(pdk.rule("res_min_segment", 0)),
+        },
     };
     AnnotationConfig { process, ..base.clone() }
 }
@@ -776,12 +1136,19 @@ impl Flow<'_> {
             reqs: placement,
             rules: place_rules(self.pdk),
             net_weight: &self.net_weight,
-            n_axes: self.problem.blocks.len(),
+            n_axes: self.problem.axis_count,
             power_uw: &cells.power,
             units: cells.units.clone(),
             iterate: self.gp_mode == GpMode::Analytic,
         };
+        let mut ms = [0.0; 9];
+        let mut clock = std::time::Instant::now();
+        let mut lap = |i: usize| {
+            ms[i] += clock.elapsed().as_secs_f64() * 1e3;
+            clock = std::time::Instant::now();
+        };
         let (coarse, _) = gp::place(&inp, prices, seed);
+        lap(0);
         coarse.debug_check("gp::place");
         let (mut layout, place_report, dp_stats) = dp::place(
             &coarse,
@@ -793,13 +1160,15 @@ impl Flow<'_> {
             prices,
             place_rules(self.pdk),
             &self.net_weight,
-            seed,
+            // Its own stream (AP-19): gp and dp drawing the same sequence correlate their moves.
+            seed ^ 0xD1B5_4A32_D192_ED03,
             dp::Schedule::cold(),
         );
         layout.debug_check("dp::place");
         layout.groups = cells.groups.clone();
         // The epoch's one dual step, on the layout it is scored on (T6).
         prices.settle(placement, &layout);
+        lap(1);
         let macros = if layout.variant == assignment {
             macros
         } else {
@@ -818,6 +1187,7 @@ impl Flow<'_> {
         // Same-type implants of neighbours closer than their spacing merge.
         let placed_now: Vec<Macro> = gr::place_macros(&macros, &layout).into_iter().chain(rings.iter().cloned()).collect();
         rings.extend(cells::post_cell::implant_bridges(&placed_now, self.pdk));
+        lap(2);
 
         // Route: track realisation onto the real pins.
         let routing = &self.problem.routing;
@@ -839,11 +1209,13 @@ impl Flow<'_> {
         };
         let (mut routes, mut route_report, _route_stats) =
             router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
+        lap(3);
         // Antenna nets the jumper could not fix get a diode each, routed in as
         // a fixed cell; its shape on the deck's credited diode layer joins the
         // net's routes (the rule's credit, `Stack::diode`).
         let ground = self.problem.net_classes.iter().find(|c| c.class == analog::metadata::NetClass::Ground).map(|c| c.net);
         let diodes = elaborate::antenna_diodes(self.pdk, routing, &routes, &placed, &rings, ground, place_rules(self.pdk).clearance);
+        lap(5);
         let mut extra = Vec::new();
         if !diodes.is_empty() {
             let marker = self.pdk.antenna_diode_credit().map(|(l, _)| l);
@@ -855,6 +1227,7 @@ impl Flow<'_> {
                 rings.push(m);
             }
             (routes, route_report, _) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
+            lap(4);
             for (net, shape) in marks {
                 if let Some(w) = routes.wires.get_mut(net.0 as usize) {
                     w.push(shape);
@@ -879,7 +1252,8 @@ impl Flow<'_> {
         let mut labelled = placed;
         labelled.extend(rings.iter().cloned());
         let mut signoff = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), self.pdk);
-        signoff.report.hard_violations.extend(undrawable(&macros, self.netlist));
+        signoff.report.hard_violations.extend(undrawable(&macros, &self.cells.devices_of, self.netlist));
+        lap(6);
         let mut budgets = metadata::build(
             placement,
             &layout,
@@ -894,7 +1268,8 @@ impl Flow<'_> {
 
         let c = signoff_c_tier(&signoff, &self.net_names, &self.problem.net_classes, self.perf_rows);
         let (key, stats) = epoch_score(&place_report, &route_report, &signoff, &budgets, c, layout.footprint_nm2());
-        let stats = RunStats { place, dp: dp_stats, ..stats };
+        lap(7);
+        let stats = RunStats { place, dp: dp_stats, stage_ms: ms, ..stats };
         Epoch {
             key,
             perf: None,
@@ -921,9 +1296,15 @@ fn common_node_ohm(left: &[(u32, u32, f32)], a: DeviceId, b: DeviceId, i_ua: Opt
 }
 
 impl Flow<'_> {
-    /// Promote `epoch` to post-layout simulation and fold the spec miss into
-    /// its key. No extraction or no simulator: every spec unknown (a full
-    /// miss each), never passed.
+    /// The member device and terminal a placed cell pin names ([`pin_member`]),
+    /// only when that device has the terminal: a cell's non-terminal pins
+    /// (`ring`) name nothing.
+    fn member_pin<'n>(&self, members: &[DeviceId], name: &'n str) -> Option<(DeviceId, &'n str)> {
+        let (k, t) = pin_member(name)?;
+        let &d = members.get(k)?;
+        self.netlist.devices[usize::from(d.0)].terminals.iter().any(|(n, _)| n == t).then_some((d, t))
+    }
+
     /// What the epoch's layout adds to the schematic: its extracted C, each
     /// device terminal's routed branch R (parallel pins of one terminal
     /// combine), and each device's mean LOD stress over its drawn fingers.
@@ -934,10 +1315,9 @@ impl Flow<'_> {
         let mut pins: Vec<Vec<(usize, String, pnr_core::Rect)>> = vec![Vec::new(); self.netlist.nets.len()];
         for (m, members) in placed.iter().zip(&self.cells.devices_of) {
             for p in &m.pins {
-                let Some((k, t)) = p.name.strip_prefix('d').and_then(|r| r.split_once(':')) else { continue };
-                let Some(&d) = k.parse::<usize>().ok().and_then(|k| members.get(k)) else { continue };
+                let Some((d, t)) = self.member_pin(members, &p.name) else { continue };
                 if let Some(v) = pins.get_mut(p.net.0 as usize) {
-                    v.push((d.0 as usize, t.to_string(), p.at));
+                    v.push((usize::from(d.0), t.to_string(), p.at));
                 }
             }
         }
@@ -964,7 +1344,7 @@ impl Flow<'_> {
                 (k > 0).then(|| s / k as f32)
             })
             .collect();
-        perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true }
+        perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true, gate_offset_v: Vec::new() }
     }
 
     /// Each recognised matched pair on one source net, with its members'
@@ -982,8 +1362,7 @@ impl Flow<'_> {
         let mut on_net: Vec<Vec<(DeviceId, String, pnr_core::Rect)>> = vec![Vec::new(); self.netlist.nets.len()];
         for (m, members) in placed.iter().zip(&self.cells.devices_of) {
             for p in &m.pins {
-                let Some((k, t)) = p.name.strip_prefix('d').and_then(|r| r.split_once(':')) else { continue };
-                let Some(&d) = k.parse::<usize>().ok().and_then(|k| members.get(k)) else { continue };
+                let Some((d, t)) = self.member_pin(members, &p.name) else { continue };
                 if let Some(v) = on_net.get_mut(p.net.0 as usize) {
                     v.push((d, t.to_string(), p.at));
                 }
@@ -1074,8 +1453,8 @@ impl Flow<'_> {
             out.push(analog::placement::Surroundings {
                 wpe_nm: [mean_wpe(a), mean_wpe(b)],
                 ose_nm: [ose(a), ose(b)],
-                wpe_min_nm: self.pdk.rule("wpe_clearance_moderate", 0) as f32,
-                ose_range_nm: self.pdk.rule("lod_moat_ext_moderate", 0) as f32,
+                wpe_min_nm: analog::matching::class::mos_env(pnr_core::MatchClass::Moderate, self.pdk).wpe_nm as f32,
+                ose_range_nm: self.pdk.tier("lod_moat_ext_nm", pnr_core::MatchClass::Minimal).unwrap_or(0) as f32,
             });
         }
         analog::placement::Environment(out)
@@ -1085,14 +1464,13 @@ impl Flow<'_> {
     /// in `stats.sim_failures` and scores every spec unmeasured.
     fn score_perf(&self, epoch: &mut Epoch, stats: &mut RunStats) {
         let Some(p) = self.perf else { return };
-        let unknown = || perf::PerfResult {
-            metrics: p.specs.iter().map(|s| (s.metric.clone(), None)).collect(),
-            residual: p.specs.len() as f64,
-        };
+        let clock = std::time::Instant::now();
+        let unknown = || perf::score(&p.specs, &[vec![None; p.specs.len()]], &[0]);
         let result = if epoch.caps.is_empty() {
             unknown()
         } else {
-            perf::evaluate(self.netlist, &self.parasitics(epoch), p).unwrap_or_else(|e| {
+            stats.sims += (self.perf_active.len() * p.testbenches.len()) as u32;
+            perf::evaluate(self.netlist, &self.parasitics(epoch), p, self.perf_active).unwrap_or_else(|e| {
                 eprintln!("[perf] {e}");
                 stats.sim_failures += 1;
                 unknown()
@@ -1100,6 +1478,7 @@ impl Flow<'_> {
         };
         epoch.key.1 = result.residual;
         epoch.perf = Some(result);
+        stats.stage_ms[8] += clock.elapsed().as_secs_f64() * 1e3;
     }
 }
 
@@ -1263,9 +1642,7 @@ pub fn signoff_c_tier(
     c_tier(&signoff.caps, names, classes, rows)
 }
 
-/// Edge-to-edge gap `dp` keeps between cells: the deck's widest same-layer
-/// spacing, so no two cells' layers can merge. (`dp`'s default is a sky130
-/// guess; measured: chain4 ERC 93 → 74 with the deck value.)
+/// `v` rounded up to a multiple of `grid` (`v ≥ 0`, `grid > 0`).
 fn round_up(v: i32, grid: i32) -> i32 {
     (v + grid - 1) / grid * grid
 }
@@ -1337,6 +1714,17 @@ fn em_rules(
     problem.routing.hard.push(Box::new(rules));
 }
 
+/// Member and terminal a cell pin names: `d{k}:T` is terminal `T` of member
+/// `k`, a bare `T` (an injected macro's pin) member 0 — the
+/// `cellgen::bind_pins` rule. `GND` (a cell's substrate pin) and malformed
+/// ordinals name no member.
+fn pin_member(name: &str) -> Option<(usize, &str)> {
+    match name.split_once(':') {
+        Some((k, t)) => Some((k.strip_prefix('d')?.parse().ok()?, t)),
+        None => (name != "GND").then_some((0, name)),
+    }
+}
+
 /// Per placed cell, `(pin name, µA)` for every terminal of its members: pin
 /// `d{k}:T` is terminal `T` of member `k`, a bare `T` member 0 (see
 /// `cellgen::bind_pins`). An unresolved device's terminals are `None` (its
@@ -1373,7 +1761,7 @@ fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> Bias {
         .and_then(|oc| match oppoint::extract(netlist, oc) {
             Ok(o) => Some((o, oc.testbench.is_none())),
             Err(e) => {
-                eprintln!("[op] operating point unavailable ({e}); continuing with zero power");
+                eprintln!("[op] operating point unavailable ({e}); continuing with `device_power_uw`");
                 None
             }
         });
@@ -1394,6 +1782,8 @@ fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> Bias {
         total_power_uw: o.total_power_uw(),
         hottest,
         probe,
+        em_temp_k: (cfg.op.as_ref().map_or(27.0, |c| c.temp_c) + 273.15) as f32,
+        em_derate: "",
     };
     let currents = o.terminal_ua(netlist);
     let headroom = o.net_headroom_mv(netlist);
@@ -1550,7 +1940,7 @@ fn debug_check_retargeted(problem: &Problem, n: usize, groups: &[Vec<DeviceId>])
         y: (0..n).map(|i| i as i32 * 7_919 + 29).collect(),
         hw: vec![50; n],
         hh: vec![50; n],
-        axis: vec![0; problem.blocks.len().max(1)],
+        axis: vec![0; problem.axis_count.max(1)],
         groups: groups.to_vec(),
         orient: vec![pnr_core::Orient::default(); n],
         variant: vec![0; n],
@@ -1599,20 +1989,41 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
 pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
     let (shapes, pins, reference) = signoff_inputs(sol, pdk);
     let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
-    s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.netlist));
+    s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.devices_of, &sol.netlist));
+    if let Some(op) = &sol.op {
+        let probe = sol.metadata.bias.as_ref().is_some_and(|b| b.probe);
+        s.report.hard_violations.extend(reliability::voltage_findings(&sol.netlist, op, &pdk.fet_voltage_limits(), &sol.pairs, probe).0);
+    }
     s
+}
+
+/// Every recognised 2-device `DiffPair` / `CurrentMirror` / `Load` leaf block.
+fn matched_pairs(blocks: &[annotator::Block]) -> Vec<(DeviceId, DeviceId)> {
+    use annotator::BlockKind::{CurrentMirror, DiffPair, Load};
+    annotator::block::leaves(blocks)
+        .into_iter()
+        .filter(|b| matches!(b.kind, DiffPair | CurrentMirror | Load))
+        .filter_map(|b| match *b.devices.as_slice() {
+            [a, b] => Some((a, b)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A device this process has no construction for (an NPN without a deep
 /// well, a poly resistor on a fin process, any inductor) is drawn as nothing:
-/// one hard `cell/undrawable` row per empty cell of `cells`, never hidden
+/// one hard `cell/undrawable` row per empty cell of `cells`, naming its
+/// members (`devices_of`, indexed like `cells`), never hidden
 /// behind an LVS that cannot see it either. The epoch counts them in |V| too
 /// (the same rows every epoch, so ranking is unchanged), so a run with an
 /// undrawn device never reads feasible or converged.
-fn undrawable<'a>(cells: &'a [Macro], netlist: &'a pnr_core::Netlist) -> impl Iterator<Item = pnr_core::report::Violation> + 'a {
-    cells.iter().enumerate().filter(|(_, m)| m.shapes.is_empty()).map(|(i, _)| {
-        let (name, model) = netlist.devices.get(i).map_or(("?", "?"), |d| (d.name.as_str(), d.model.as_str()));
-        pnr_core::report::Violation { rule: format!("cell/undrawable: {name} ({model}) has no construction on this process"), margin: 1 }
+fn undrawable<'a>(cells: &'a [Macro], devices_of: &'a [Vec<DeviceId>], netlist: &'a pnr_core::Netlist) -> impl Iterator<Item = pnr_core::report::Violation> + 'a {
+    cells.iter().enumerate().filter(|(_, m)| m.shapes.is_empty()).map(move |(i, _)| {
+        let who = devices_of.get(i).map_or_else(
+            || "?".to_string(),
+            |ds| ds.iter().map(|d| netlist.devices.get(d.0 as usize).map_or("?".to_string(), |d| format!("{} ({})", d.name, d.model))).collect::<Vec<_>>().join(", "),
+        );
+        pnr_core::report::Violation { rule: format!("cell/undrawable: {who} has no construction on this process"), margin: 1 }
     })
 }
 
@@ -1650,8 +2061,8 @@ pub fn signoff_inputs(
 /// as TEXT on the deck's text layer for its conductor ([`Pdk::label_gds`]).
 /// magic makes every top-level label a port, so an internal net labelled
 /// here fails pin matching against the schematic's `.subckt`.
-#[must_use]
-pub fn export_gds(sol: &Solution, pdk: &Pdk, top: &str, ports: &[String]) -> Vec<u8> {
+/// `Err` when a shape is on a layer with no GDS stream number ([`gds::emit`]).
+pub fn export_gds(sol: &Solution, pdk: &Pdk, top: &str, ports: &[String]) -> Result<Vec<u8>, String> {
     let (shapes, pins, _) = signoff_inputs(sol, pdk);
     let texts: Vec<gds::Text> = pins
         .iter()
@@ -1871,6 +2282,62 @@ mod start_tests {
         assert_eq!((a.layout.x, a.layout.y), (b.layout.x, b.layout.y));
     }
 
+    /// FLOW-09: topologies (and `seed_assignment`'s pricing) are built once on
+    /// the calling thread, not once per start.
+    #[test]
+    fn hoisting_prices_each_alternative_once() {
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let spice = ".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=8u L=0.5u\nXM2 d x VSS VSS nfet_01v8 W=8u L=0.5u\n.ends p\n";
+        let calls = |starts| {
+            let before = (crate::cellgen::price_calls(), crate::APART_BUILDS.with(std::cell::Cell::get));
+            let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts, ..Default::default() };
+            crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow");
+            (crate::cellgen::price_calls() - before.0, crate::APART_BUILDS.with(std::cell::Cell::get) - before.1)
+        };
+        let (n1, n3) = (calls(1), calls(3));
+        // The pair merges with distinct gates, so both topologies are hoisted.
+        assert_eq!(n1.1, 1, "the apart topology is built once");
+        assert!(n1.0 > 0);
+        assert_eq!(n3, n1);
+    }
+
+    /// Same seed, same bytes: the GDS of two runs is identical with parallel starts.
+    #[test]
+    fn same_seed_same_gds_bytes() {
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let cfg = crate::Config { seed: 1, feedback_iters: 2, outer_iters: 1, starts: 3, ..Default::default() };
+        for spice in [include_str!("../../../benchmarks/fixtures/chain4.spice"), include_str!("../../../benchmarks/fixtures/ota.spice")] {
+            let gds = || crate::export_gds(&crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow"), &pdk, "top", &[]).unwrap();
+            assert!(gds() == gds());
+        }
+    }
+
+    #[test]
+    fn stage_times_are_reported() {
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let spice = include_str!("../../../benchmarks/fixtures/pair.spice");
+        let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts: 1, ..Default::default() };
+        let ms = crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow").stats.stage_ms;
+        assert!(ms.iter().sum::<f64>() > 0.0, "{ms:?}");
+        assert!(ms[6] > 0.0, "signoff runs every epoch: {ms:?}");
+    }
+
+    #[test]
+    fn interface_parses_the_fixture_and_rejects_a_non_port() {
+        let i = crate::Interface::from_json(include_str!("../../../benchmarks/fixtures/ota_constrained.interface.json")).expect("parses");
+        assert_eq!(i.die_nm, Some((30000, 70000)));
+        assert_eq!(i.pins.len(), 6);
+        assert_eq!(i.pins[0].side, crate::Side::South);
+        assert_eq!(i.pins[0].width_nm, 800);
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let pin = crate::IoPin { net: "nope".into(), side: crate::Side::North, frac: 0.5, width_nm: 800, layer: "met3".into() };
+        let cfg = crate::Config { interface: Some(crate::Interface { die_nm: None, pins: vec![pin] }), ..Default::default() };
+        match crate::run(include_str!("../../../benchmarks/fixtures/pair.spice"), &pdk, &Default::default(), &cfg) {
+            Err(crate::FlowError::Interface(m)) => assert!(m.contains("nope"), "{m}"),
+            r => panic!("expected FlowError::Interface, got {:?}", r.err()),
+        }
+    }
+
     /// T6: exactly one dual step per epoch, taken by the flow (gp and dp only
     /// bind), so the price step count equals the epoch count.
     #[test]
@@ -1893,7 +2360,8 @@ mod start_tests {
         let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/pair.spice")).unwrap();
         let performance = crate::perf::PerfConfig {
             sim: crate::oppoint::OpConfig { ngspice: "philis-no-such-binary-7f3a".into(), ..Default::default() },
-            testbench: String::new(),
+            testbenches: vec![String::new()],
+            scenarios: Vec::new(),
             specs: vec![crate::perf::Spec { metric: "gain".into(), min: Some(20.0), max: Some(60.0) }],
         };
         let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts: 1, performance: Some(performance), ..Default::default() };
@@ -1901,9 +2369,11 @@ mod start_tests {
         assert!(sol.stats.sim_failures >= 1, "{:?}", sol.stats);
         assert_eq!(sol.metadata.sim_failures, sol.stats.sim_failures);
         let rows = &sol.metadata.budget_rows;
-        assert_eq!(rows.len(), 2, "{rows:?}");
-        assert!(rows[0].starts_with("gain:min: no row (sensitivities unavailable"), "{rows:?}");
-        assert!(rows[1].starts_with("gain:max: no row (sensitivities unavailable"), "{rows:?}");
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        // Unevaluated, every scenario stays active (here the one `sim` implies).
+        assert!(rows[0].starts_with("scenario ") && rows[0].ends_with(": active"), "{rows:?}");
+        assert!(rows[1].starts_with("gain:min: no row (sensitivities unavailable"), "{rows:?}");
+        assert!(rows[2].starts_with("gain:max: no row (sensitivities unavailable"), "{rows:?}");
         let text = sol.metadata.to_string();
         assert!(text.contains(&format!("simulations failed: {}", sol.stats.sim_failures)), "{text}");
         assert!(text.contains("budget gain:max: no row"), "{text}");
@@ -1920,7 +2390,8 @@ mod start_tests {
         let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/pair.spice")).unwrap();
         let performance = crate::perf::PerfConfig {
             sim: crate::oppoint::OpConfig { ngspice: "philis-no-such-binary-7f3a".into(), ..Default::default() },
-            testbench: String::new(),
+            testbenches: vec![String::new()],
+            scenarios: Vec::new(),
             specs: vec![crate::perf::Spec { metric: "gain".into(), min: Some(20.0), max: None }],
         };
         let cfg = crate::Config { feedback_iters: 1, outer_iters: 1, starts: 2, performance: Some(performance), ..Default::default() };
@@ -2222,5 +2693,71 @@ mod common_node_tests {
         assert!((common_node_ohm(&left, DeviceId(1), DeviceId(0), Some(100.0)) - 2.37).abs() < 1e-4);
         assert_eq!(common_node_ohm(&left, DeviceId(2), DeviceId(3), Some(100.0)), 0.0);
         assert_eq!(common_node_ohm(&left, DeviceId(0), DeviceId(1), None), 0.0);
+    }
+
+    /// AF-32: cell pins `d{k}:T` and an injected macro's bare `T` both name a
+    /// member; `GND` and a malformed ordinal name none.
+    #[test]
+    fn pin_member_reads_bare_and_ordinal_pins() {
+        assert_eq!(crate::pin_member("d1:D"), Some((1, "D")));
+        assert_eq!(crate::pin_member("S"), Some((0, "S")));
+        assert_eq!(crate::pin_member("GND"), None);
+        assert_eq!(crate::pin_member("dx:S"), None);
+    }
+
+    const PAIR: &str = ".subckt pair a b g vss\nXM1 a g vss vss nfet_01v8 W=1u L=0.15u\nXM2 b g vss vss nfet_01v8 W=1u L=0.15u\n.ends pair\n";
+
+    /// A pair whose `XM1` is injected (a real transistor with bare `G/D/S/B`
+    /// pins) still has both members' source pins on its common node; before,
+    /// the injected member's pins were skipped and `a` was empty.
+    #[test]
+    fn common_node_sees_injected_macro_pins() {
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let mut nl = crate::parse(PAIR).unwrap();
+        crate::deck_models(&mut nl, &pdk);
+        // XM1 alone, drawn by the generator, its `d0:T` pins renamed `T`.
+        let one = crate::cellgen::enumerate(&nl, &Default::default(), &Default::default(), &pdk, true);
+        let cell = one.devices_of.iter().position(|m| m == &[DeviceId(0)]).expect("XM1 has its own cell");
+        let mut m = one.spaces[cell].alternatives[0].clone();
+        m.pins.iter_mut().for_each(|p| p.name = p.name.strip_prefix("d0:").expect("generated pin").to_string());
+        let mut injected = crate::Macros::default();
+        injected.register(&nl.devices[0].name, m);
+        let cfg = crate::Config::default();
+        let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
+        let ann = crate::annotation_with(&pdk, &cfg.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
+        let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0 };
+        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &plan, true);
+        let n = t.flow.cells.variants.len();
+        let layout = pnr_core::Layout {
+            x: (0..n).map(|i| i as i32 * 20_000).collect(),
+            y: vec![0; n],
+            hw: vec![50; n],
+            hh: vec![50; n],
+            axis: vec![0; t.flow.problem.blocks.len().max(1)],
+            groups: Vec::new(),
+            orient: vec![pnr_core::Orient::default(); n],
+            variant: vec![0; n],
+            branch: Vec::new(),
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        };
+        let nodes = t.flow.common_nodes(&layout).nodes;
+        assert_eq!(nodes.len(), 1, "one common source node");
+        assert!(!nodes[0].a.is_empty() && !nodes[0].b.is_empty(), "both members' source pins: a {:?} b {:?}", nodes[0].a, nodes[0].b);
+    }
+
+    /// AF-31: an empty cell is named by its members, not by its cell index
+    /// read as a device index.
+    #[test]
+    fn undrawable_names_the_cell_members() {
+        let mut nl = crate::parse(PAIR).unwrap();
+        crate::deck_models(&mut nl, &verify::Pdk::builtin("sky130").unwrap());
+        let cells = [pnr_core::Macro::default(), pnr_core::Macro::default()];
+        let rows: Vec<String> = crate::undrawable(&cells, &[vec![DeviceId(1)], vec![DeviceId(0)]], &nl).map(|v| v.rule).collect();
+        let (d0, d1) = (&nl.devices[0].name, &nl.devices[1].name);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains(d1.as_str()) && !rows[0].contains(d0.as_str()), "{rows:?}");
+        assert!(rows[1].contains(d0.as_str()) && !rows[1].contains(d1.as_str()), "{rows:?}");
     }
 }

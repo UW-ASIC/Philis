@@ -51,19 +51,12 @@ pub struct TextEntry {
 /// GDS (layer, datatype) → layer name.
 pub type LayerMap = HashMap<(i32, i32), String>;
 
-/// Layer names from a deck JSON: `{"layers": {"met1": [68, 20], ...}}`.
+/// Layer names from `(name, (gds layer, datatype))` pairs — a caller with a
+/// deck builds them from `Pdk::layers` and `Pdk::layer_gds` (this crate does
+/// not depend on `verify`). A later pair on the same GDS key wins.
 #[must_use]
-pub fn parse_layer_names(json: &str) -> LayerMap {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return LayerMap::new() };
-    let mut map = LayerMap::new();
-    for (name, val) in v.get("layers").and_then(|l| l.as_object()).into_iter().flatten() {
-        if let Some([l, d, ..]) = val.as_array().map(Vec::as_slice) {
-            if let (Some(l), Some(d)) = (l.as_i64(), d.as_i64()) {
-                map.insert((l as i32, d as i32), name.clone());
-            }
-        }
-    }
-    map
+pub fn layer_names(pairs: &[(String, (u16, u16))]) -> LayerMap {
+    pairs.iter().map(|(n, (l, d))| ((i32::from(*l), i32::from(*d)), n.clone())).collect()
 }
 
 /// The name for GDS `(layer, datatype)`, else `L{layer}/{datatype}`. Datatype
@@ -1184,26 +1177,30 @@ impl Probe {
     }
 }
 
-/// `pnr_core` shapes as 4-point polygons, layer id unchanged.
+/// `pnr_core` shapes as 4-point polygons on their GDS `(layer, datatype)`:
+/// `gds[LayerId.0]` (`Pdk::layer_gds`); a missing row keeps the layer id
+/// with datatype 0.
 #[must_use]
-pub fn polys_from_shapes(shapes: &[pnr_core::Shape]) -> Vec<Poly> {
+pub fn polys_from_shapes(shapes: &[pnr_core::Shape], gds: &[(u16, u16)]) -> Vec<Poly> {
     shapes
         .iter()
         .map(|s| {
             let r = s.rect;
+            let (layer, datatype) = gds.get(s.layer.0 as usize).copied().unwrap_or((s.layer.0, 0));
             Poly {
-                layer: s.layer.0,
-                datatype: 0,
+                layer,
+                datatype,
                 pts: vec![[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]],
             }
         })
         .collect()
 }
 
-/// Show a macro's geometry and block until the window closes.
-pub fn show_macro(mac: &pnr_core::Macro, title: &str) {
+/// Show a macro's geometry (GDS table as in [`polys_from_shapes`]) and block
+/// until the window closes.
+pub fn show_macro(mac: &pnr_core::Macro, title: &str, gds: &[(u16, u16)]) {
     let mut probe = Probe::open(title);
-    probe.send(&polys_from_shapes(&mac.shapes), Some(title));
+    probe.send(&polys_from_shapes(&mac.shapes, gds), Some(title));
     probe.wait();
 }
 
@@ -1213,7 +1210,7 @@ mod tests {
 
     #[test]
     fn layer_names_and_bounds() {
-        let names = parse_layer_names(r#"{"layers": {"met1": [68, 20], "via": [68, 44]}}"#);
+        let names = layer_names(&[("met1".into(), (68, 20)), ("via".into(), (68, 44))]);
         assert_eq!(names[&(68, 20)], "met1");
         assert_eq!(layer_label(&names, (68, 44)), "via");
         assert_eq!(layer_label(&names, (68, 5)), "L68/5");
@@ -1221,6 +1218,11 @@ mod tests {
         let p = |pts: Vec<[i32; 2]>| Poly { layer: 0, datatype: 0, pts };
         assert_eq!(bounds(&[]), None);
         assert_eq!(bounds(&[p(vec![[1, 5], [3, -2]]), p(vec![[0, 0]])]), Some((0, -2, 3, 5)));
+        let s = pnr_core::Shape { layer: pnr_core::LayerId(1), rect: pnr_core::Rect { x: 0, y: 0, w: 1, h: 1 } };
+        let q = &polys_from_shapes(&[s], &[(0, 0), (68, 20)])[0];
+        assert_eq!((q.layer, q.datatype), (68, 20));
+        let q = &polys_from_shapes(&[s], &[])[0];
+        assert_eq!((q.layer, q.datatype), (1, 0), "no table row: layer id, datatype 0");
     }
 
     #[test]

@@ -50,6 +50,27 @@ pub(crate) fn ota() -> Netlist {
     }
 }
 
+/// The three-stage op-amp (`examples/three_stage_opamp`, corpus `three_stage`).
+pub(crate) fn three_stage() -> Netlist {
+    // Nets: 0=n1 1=vin_p 2=tail 3=vss 4=n2 5=vin_n 6=vbias 7=vdd 8=n3 9=vout.
+    let (n, p) = (DeviceKind::Nmos, DeviceKind::Pmos);
+    Netlist {
+        devices: vec![
+            fet("M1", n, 1, 0, 2, 3, 4_000, 500),
+            fet("M2", n, 5, 4, 2, 3, 4_000, 500),
+            fet("M3", n, 6, 2, 3, 3, 8_000, 500),
+            fet("M4", p, 0, 0, 7, 7, 6_000, 500),
+            fet("M5", p, 0, 4, 7, 7, 6_000, 500),
+            fet("M6", p, 4, 8, 7, 7, 12_000, 500),
+            fet("M7", n, 6, 8, 3, 3, 6_000, 500),
+            fet("M8", p, 8, 9, 7, 7, 40_000, 500),
+            fet("M9", n, 6, 9, 3, 3, 20_000, 500),
+        ],
+        nets: nets(&["n1", "vin_p", "tail", "vss", "n2", "vin_n", "vbias", "vdd", "n3", "vout"]),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn diff_pair_halves_share_a_block() {
     let nl = ota();
@@ -421,9 +442,15 @@ fn guard_rings_tie_to_the_guarded_device_s_bulk() {
     // hardcoded `NetId(0)` — here `vout1` — and `dr` folds ring pins in as real
     // routing terminals, so the router wired every guard ring in the design to
     // that signal net.
-    let nl = ota();
-    let p = annotate(&nl, &AnnotationConfig::default());
-    assert!(!p.constraints.guard_rings.is_empty(), "matched FETs get rings");
+    // REL-07: only an aggressor gets a ring, so M1 is clocked; its bulk
+    // (net 3) is not net 0.
+    let nl = Netlist {
+        devices: vec![fet("M1", DeviceKind::Nmos, 1, 2, 3, 3, 1_000, 150), fet("M2", DeviceKind::Pmos, 1, 2, 4, 4, 1_000, 150)],
+        nets: nets(&["out", "clk", "x", "vss", "vdd"]),
+        ..Default::default()
+    };
+    let p = annotate(&nl, &AnnotationConfig { clock_nets: vec!["clk".into()], ..AnnotationConfig::default() });
+    assert!(!p.constraints.guard_rings.is_empty(), "clocked FETs get rings");
     for r in &p.constraints.guard_rings {
         let dev = &nl.devices[r.device.0 as usize];
         let bulk = dev.terminals.iter().find(|(t, _)| t == "B").expect("a FET states a bulk").1;
@@ -445,7 +472,7 @@ fn a_differential_stage_is_symmetric_about_one_axis() {
     assert_eq!(sym, 3, "diff pair + load pair + self-symmetric tail");
     let tail = p.constraints.unitization.iter().find(|u| u.devices == [DeviceId(4)]);
     assert!(tail.is_some(), "the tail gets a sizing directive");
-    assert!(p.constraints.guard_rings.iter().any(|g| g.device == DeviceId(4)), "and a ring");
+    assert!(p.constraints.guard_rings.is_empty(), "no aggressor: no ring (T8)");
 }
 
 /// AA-23: only declared selfs go on the axis. `telescopic_ota_full` declares
@@ -669,6 +696,53 @@ fn matched_sets_are_budgeted_and_missing_deck_terms_are_listed() {
     assert!(!full.missing.iter().any(|m| m.0 == "MatchedSet"));
 }
 
+/// MAT-16: with the deck's S(L) fit the XM1/XM2 pair's gradient term reads
+/// S at L = 0.48 µm (0.580 µV/µm), 0.356 of the worst-case 1.63.
+#[test]
+fn svt_fit_sets_s_of_l() {
+    let mut nl = ota();
+    for d in &mut nl.devices[..2] {
+        d.params.iter_mut().filter(|(k, _)| k == "l").for_each(|(_, v)| *v = 480);
+    }
+    // Two point cells 1 mm apart, no units.
+    let l = pnr_core::Layout {
+        x: vec![0, 1_000_000],
+        y: vec![0; 2],
+        hw: vec![0; 2],
+        hh: vec![0; 2],
+        axis: vec![0; 8],
+        groups: vec![],
+        orient: vec![pnr_core::Orient::default(); 2],
+        variant: vec![0; 2],
+        branch: Vec::new(),
+        power_uw: vec![0; 2],
+        temp_mc: vec![0; 2],
+        units: Default::default(),
+    };
+    let ratio = |fit| {
+        let mut cfg = AnnotationConfig::default();
+        cfg.process.avt_mv_um = [Some(5.0), Some(6.0)];
+        cfg.process.svt_fit = fit;
+        cfg.process.svt_uv_per_um = Some(1.63);
+        let p = annotate(&nl, &cfg);
+        let set = (p.placement.budget.iter())
+            .find(|b| {
+                let mut t = Vec::new();
+                b.touched(&mut t);
+                t.sort_unstable();
+                b.kind() == "MatchedSet" && t == [0, 1]
+            })
+            .expect("XM1/XM2 MatchedSet");
+        let mut rows = Vec::new();
+        set.ledger_rows(&l, &mut rows);
+        rows[0].sigma_layout / 1.63
+    };
+    let r = ratio(Some((0.1835, 0.03533)));
+    assert!((r - 0.356).abs() < 0.005, "{r}");
+    let r = ratio(None);
+    assert!((r - 1.0).abs() < 1e-4, "{r}");
+}
+
 #[test]
 fn clocked_devices_are_kept_away_from_matched_ones() {
     let is_iso = |b: &Box<dyn RuleBatch<pnr_core::Layout>>| b.kind().ends_with("Isolation");
@@ -744,4 +818,114 @@ fn more_nets_than_u16_ids_is_refused_not_wrapped() {
     // `NetId(n as u16)` would alias net 65536 onto net 0 (AA-35).
     let nl = Netlist { devices: Vec::new(), nets: vec![Net { name: "n".into() }; 65_536], ..Default::default() };
     let _ = annotate(&nl, &AnnotationConfig::default());
+}
+
+// ── REL-07: guard rings by role ──────────────────────────────────────────
+
+mod rings {
+    use super::*;
+    use crate::rings::{plan, Carrier, RingInputs};
+    use analog::cell::{GuardRingType, RingRole};
+    use pnr_core::SubstrateKind;
+
+    const SUB30: (&str, &str) = ("GuardRing", "victim rings: no quiet ring return (SUB-30)");
+
+    /// M1 (NMOS, gate `clk`), M2/M3 (NMOS victims), M4 (PMOS). Nets: 0=clk
+    /// 1=x 2=vss 3=vssq 4=vdd.
+    fn nl() -> Netlist {
+        Netlist {
+            devices: vec![
+                fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 1_000, 150),
+                fet("M2", DeviceKind::Nmos, 1, 1, 2, 2, 1_000, 150),
+                fet("M3", DeviceKind::Nmos, 1, 1, 2, 2, 1_000, 150),
+                fet("M4", DeviceKind::Pmos, 1, 1, 4, 4, 1_000, 150),
+            ],
+            nets: nets(&["clk", "x", "vss", "vssq", "vdd"]),
+            ..Default::default()
+        }
+    }
+
+    fn inputs<'a>(nl: &'a Netlist, aggressor: &'a [bool], victim: &'a [bool], injector: &'a [Option<Carrier>]) -> RingInputs<'a> {
+        RingInputs {
+            netlist: nl,
+            aggressor,
+            victim,
+            injector,
+            substrate: SubstrateKind::Bulk,
+            quiet_ring_net: None,
+            highest_supply: Some(NetId(4)),
+            ground: Some(NetId(2)),
+            min_ring_width_nm: 420,
+            ecgr_min_width_nm: None,
+            ecgr_drawable: false,
+            hcgr_drawable: false,
+        }
+    }
+
+    #[test]
+    fn an_ota_without_clocks_or_ports_gets_no_rings() {
+        assert!(annotate(&ota(), &AnnotationConfig::default()).constraints.guard_rings.is_empty());
+    }
+
+    #[test]
+    fn clocked_devices_get_aggressor_tap_rings() {
+        let nl = nl();
+        let (rings, missing) = plan(&inputs(&nl, &[true, false, false, false], &[false, true, false, false], &[None; 4]));
+        assert_eq!(rings.len(), 1);
+        let r = &rings[0];
+        assert_eq!((r.device, r.ring_type, r.role, r.connection_net), (DeviceId(0), GuardRingType::Tap { in_well: false }, RingRole::Aggressor, NetId(2)));
+        assert!(missing.contains(&SUB30), "{missing:?}");
+    }
+
+    #[test]
+    fn a_quiet_net_turns_on_victim_rings() {
+        let nl = nl();
+        let i = RingInputs { quiet_ring_net: Some(NetId(3)), ..inputs(&nl, &[true, false, false, false], &[false, true, true, false], &[None; 4]) };
+        let (rings, missing) = plan(&i);
+        let v: Vec<_> = rings.iter().filter(|r| r.role == RingRole::Victim).collect();
+        assert_eq!(v.len(), 2);
+        assert!(v.iter().all(|r| r.connection_net == NetId(3) && r.shareable));
+        assert!(!missing.contains(&SUB30));
+    }
+
+    #[test]
+    fn an_electron_injector_gets_a_supply_tied_ecgr() {
+        let nl = nl();
+        let inj = [Some(Carrier::Electrons), None, None, None];
+        let (rings, missing) = plan(&RingInputs { ecgr_drawable: true, ..inputs(&nl, &[false; 4], &[false; 4], &inj) });
+        assert_eq!(rings.len(), 1);
+        let r = &rings[0];
+        assert_eq!((r.ring_type, r.role, r.connection_net, r.min_width_nm, r.shareable), (GuardRingType::Ecgr, RingRole::Injector, NetId(4), 420, false));
+        assert!(missing.contains(&("GuardRing", "ECGR width rule not given: collection efficiency unknown")), "{missing:?}");
+    }
+
+    #[test]
+    fn a_hole_injector_falls_back_to_a_well_tap() {
+        let nl = nl();
+        let inj = [None, None, None, Some(Carrier::Holes)];
+        let (rings, _) = plan(&inputs(&nl, &[false; 4], &[false; 4], &inj));
+        assert_eq!(rings.len(), 1);
+        let r = &rings[0];
+        assert_eq!((r.device, r.ring_type, r.role, r.connection_net), (DeviceId(3), GuardRingType::Tap { in_well: true }, RingRole::Injector, NetId(4)));
+    }
+
+    #[test]
+    fn epi_substrate_draws_no_aggressor_or_victim_rings() {
+        let nl = nl();
+        let i = RingInputs {
+            substrate: SubstrateKind::EpiOnLowRes,
+            quiet_ring_net: Some(NetId(3)),
+            ..inputs(&nl, &[true, false, false, false], &[false, true, true, false], &[None; 4])
+        };
+        assert!(plan(&i).0.is_empty());
+    }
+}
+
+#[test]
+fn intent_empty_axes_per_block() {
+    let p = annotate(&ota(), &AnnotationConfig::default());
+    // EXT-14 fills compounds (one here), EXT-15 sets (DP and load; without a unit
+    // deck they have no unit); axes stay per block until EXT-20 (card D-b).
+    assert!(p.intent.sets.len() == 2 && p.intent.compounds.len() == 1);
+    assert_eq!(p.axis_count, p.blocks.len());
 }

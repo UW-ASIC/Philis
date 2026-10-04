@@ -81,6 +81,8 @@ layer areaid_sc = gds(81, 4)
 layer areaid_ed = gds(81, 19)
 layer areaid_diode = gds(81, 23)
 layer pnp = gds(82, 44)
+# PHILIS: npn marker (sky130.lvs:744)
+layer npn = gds(82, 20)
 layer tunm = gds(80, 20)
 
 # Text layers [S2]: the label purpose, the pin purpose, and text on drawing
@@ -594,6 +596,13 @@ device diode diode_pw2nd_05v5 model "sky130_fd_pr__diode_pw2nd_05v5" terminals [
 device diode diode_pw2nd_05v5_lvt model "sky130_fd_pr__diode_pw2nd_05v5_lvt" terminals [psub, nsd]
 device diode diode_pw2nd_05v5_nvt model "sky130_fd_pr__diode_pw2nd_05v5_nvt" terminals [psub, nsd]
 device diode diode_pw2nd_11v0 model "sky130_fd_pr__diode_pw2nd_11v0" terminals [psub, nsd]
+# PHILIS: vertical PNP as VOL/klayout/lvs/sky130.lvs:745 (pnpid 82/44), 1089-1091 (E = p+ diff in nwell
+#   inside pnpid, B = n-tap, C = p-tap). Position order Base, Emitter, Collector (GP device.rs:456-458).
+#   Only W3p40L3p40: two rows on one marker, the earlier wins (device.rs:275-277), no emitter-area select.
+device bjt pnp model "sky130_fd_pr__pnp_05v5_W3p40L3p40" terminals [ntap, psd, ptap]
+# PHILIS: vertical NPN as sky130.lvs:744 (npnid 82/20), 1063-1065 (E = n+ diff in dnwell, B = p-tap,
+#   C = n-tap on the n-well ring). Only W1p00L1p00, same reason.
+device bjt npn model "sky130_fd_pr__npn_05v5_W1p00L1p00" terminals [ptap, nsd, ntap]
 # MiM: top plate (the metal above, through the plate contact), then the bottom plate.
 device capacitor capm model "sky130_fd_pr__cap_mim_m3_1" terminals [met4, met3]
 device capacitor cap2m model "sky130_fd_pr__cap_mim_m3_2" terminals [met5, met4]
@@ -710,9 +719,10 @@ rule hvntm.6b forbidden((ptap.edges() and diff.edges()).inside_part(hvntm))
 #   selection; capm.5 0.14um is via3 to capm, which conflicts with capm.4 over
 #   the plate, so it waits on a clearer source).
 # Devices: the substrate (psub), each n-well and each isolated p-well are
-#   nets, and every MOS has a bulk. pd2nw, the bipolars (npn, pnp) and the
-#   20V devices have no recogniser yet, nor do the native nfets (03v3_nvt,
-#   05v0_nvt, areaid.le). VPP capacitors are fixed cells with no marker a
+#   nets, and every MOS has a bulk. pd2nw and the 20V devices have no
+#   recogniser yet, nor do the native nfets (03v3_nvt, 05v0_nvt, areaid.le).
+#   Of the bipolars only the W3p40 PNP and the W1p00L1p00 NPN are
+#   recognised. VPP capacitors are fixed cells with no marker a
 #   recogniser can use.
 # Latch-up: esd_latchup needs a guard-ring width and tap distance that [S1]
 #   does not state.

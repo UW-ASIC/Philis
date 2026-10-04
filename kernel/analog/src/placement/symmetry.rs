@@ -4,6 +4,14 @@ use pnr_core::ids::{AxisId, Target};
 use pnr_core::layout::Layout;
 use crate::rule::{Rule, RuleBatch};
 
+/// Direction of a symmetry axis (C14): `V` mirrors in x about a vertical line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AxisDir {
+    #[default]
+    V,
+    H,
+}
+
 /// Partners mirror about `axis`: `x_a + x_b = 2·axis`, `y_a = y_b`, and
 /// distinct partners also share `hw`, `hh`, `variant`, `orient`. The mirror
 /// equation is an exact integer equality, so it is enforced by

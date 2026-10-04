@@ -27,7 +27,8 @@ pub enum Kind {
     Bool,
     /// Any number.
     Real,
-    /// Array of integers, one per matching tier.
+    /// Array of exactly 3 (MIN, MOD, EXC; index = `MatchClass as usize`), each a
+    /// non-negative integer or `null` (the process does not state that tier).
     Tier,
     Text,
     /// Array of strings.
@@ -60,9 +61,12 @@ use Kind::{Bool, Count, Layers, List, Nm, Real, Table, Text, Tier};
 
 /// Every key, alphabetical. `<name>_source` of a registered key is implied.
 pub const KEYS: &[Key] = &[
+    k("abeta_n_pct_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
+    k("abeta_p_pct_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("antenna_source", Text, false, false, "provenance of the deck's antenna rules"),
     k("avt_n_mv_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("avt_p_mv_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
+    k("bjt_ka_pct_um", Real, false, true, "unread (EXT-20)"),
     k("bjt_max_emitter_stripe", Nm, false, false, "unread"),
     k("bjt_min_emitter_side", Nm, true, false, "kernel/cells/src/bjt.rs"),
     k("bjt_stripe_gap", Nm, false, false, "unread"),
@@ -78,11 +82,14 @@ pub const KEYS: &[Key] = &[
     k("dti", Nm, false, false, "unread"),
     k("dummy_gates_per_end", Count, true, false, "kernel/cells/src/mosfet.rs (dummy gates each end of a matched row)"),
     k("dummy_max_l_nm", Nm, false, true, "kernel/cells/src/mosfet.rs (dummy gate length cap)"),
+    k("dummy_reach_nm", Tier, false, true, "kernel/analog/src/matching/class.rs"),
     k("em_current_density_source", Text, false, false, "provenance of the deck's EM rules"),
+    k("em_derating", Table, false, true, "backend/verify/src/pdk.rs em_limit (when the deck rule states no Black parameters)"),
     k("epi_thickness_nm", Nm, false, true, "frontend/library/src/lib.rs annotation (isolation distance on epi_on_pplus)"),
     k("erc_rules_note", Text, false, false, "documentation"),
     k("finfet_note", Text, false, false, "documentation"),
     k("gate_cap_af_um2", Count, false, true, "frontend/library/src/lib.rs annotation"),
+    k("gate_ext_extra_nm", Tier, false, true, "kernel/analog/src/matching/class.rs"),
     k("guard_licon_pitch", Nm, true, false, "kernel/cells/src/mosfet.rs, post_cell.rs"),
     k("inapplicable_rules", List, false, false, "backend/verify/src/pdk.rs"),
     k("inapplicable_rules_note", Text, false, false, "documentation"),
@@ -94,8 +101,7 @@ pub const KEYS: &[Key] = &[
     k("linewidth_control_nm", Table, false, false, "unread"),
     k("lod_kvth0_n_mv_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("lod_kvth0_p_mv_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
-    k("lod_moat_ext_moderate", Nm, true, false, "kernel/cells/src/mosfet.rs; frontend/library/src/lib.rs"),
-    k("lod_moat_ext_nm", Tier, false, false, "unread"),
+    k("lod_moat_ext_nm", Tier, false, true, "kernel/cells/src/mosfet.rs; frontend/library/src/lib.rs; kernel/analog/src/matching/class.rs"),
     k("m1_enc", Nm, false, false, "kernel/cells/src/builder.rs dim (raises the deck's)"),
     k("max_finger_width", Nm, true, false, "frontend/library/src/cellgen.rs folds (0 = no limit)"),
     k("min_finger_width", Nm, false, false, "kernel/cells/src/builder.rs dim (raises the deck's); frontend/library/src/cellgen.rs"),
@@ -111,19 +117,25 @@ pub const KEYS: &[Key] = &[
     k("polycon_to_diff_spacing", Nm, false, false, "kernel/cells/src/mosfet.rs"),
     k("polycon_to_pdiff_spacing", Nm, false, false, "kernel/cells/src/mosfet.rs"),
     k("res_corner_squares", Real, false, false, "unread"),
+    k("res_dummy_span_nm", Tier, false, true, "kernel/analog/src/matching/class.rs"),
     k("res_head", Nm, true, false, "kernel/cells/src/resistor.rs"),
+    k("res_length_floor_x", Tier, false, true, "kernel/analog/src/matching/class.rs"),
     k("res_min_segment", Nm, true, false, "kernel/cells/src/resistor.rs"),
     k("res_min_width", Nm, true, false, "kernel/cells/src/resistor.rs"),
     k("res_seg_gap", Nm, true, false, "kernel/cells/src/resistor.rs"),
     k("res_serpentine_aspect", Real, false, false, "unread"),
     k("res_value_tol_ppm", Count, true, false, "kernel/cells/src/resistor.rs"),
+    k("res_width_floor_permille", Tier, false, true, "kernel/analog/src/matching/class.rs"),
     k("resistors", Table, false, false, "backend/verify/src/pdk.rs recipe"),
     k("retrograde_pwell", Bool, false, true, "kernel/cells/src/post_cell.rs drawable"),
     k("sd_width", Nm, true, false, "kernel/cells/src/mosfet.rs"),
     k("sheet_tolerance", Table, false, false, "unread"),
     k("substrate_kind", Text, false, true, "frontend/library/src/lib.rs annotation (\"bulk\" | \"epi_on_pplus\" | null)"),
+    k("svt_a_uv2_per_um2", Real, false, true, "frontend/library/src/lib.rs annotation"),
+    k("svt_b_uv2", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("svt_uv_per_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("tie_max_dist_nm", Nm, false, true, "unread"),
+    k("vbe_tc_uv_per_k", Real, false, true, "unread (EXT-20)"),
     k("via_enclosure", Nm, false, false, "kernel/cells/src/builder.rs dim (raises the deck's)"),
     k("via_spacing", Nm, false, false, "kernel/cells/src/builder.rs dim (raises the deck's)"),
     k("vt_tc_uv_per_k", Real, false, true, "frontend/library/src/lib.rs annotation"),
@@ -131,8 +143,7 @@ pub const KEYS: &[Key] = &[
     k("waivers", Table, false, false, "backend/verify/src/checker.rs"),
     k("well_enclosure", Nm, false, false, "tests only (frontend/library/tests/ota_cross_pdk.rs)"),
     k("well_spacing", Nm, false, false, "unread"),
-    k("wpe_clearance_moderate", Nm, true, false, "kernel/cells/src/mosfet.rs; frontend/library/src/lib.rs"),
-    k("wpe_clearance_nm", Tier, false, false, "unread"),
+    k("wpe_clearance_nm", Tier, false, true, "kernel/cells/src/mosfet.rs; frontend/library/src/lib.rs; kernel/analog/src/matching/class.rs"),
 ];
 
 /// The registry row for `name`.
@@ -164,7 +175,7 @@ pub fn validate(cell: &Value) -> Vec<String> {
             Count => v.is_u64(),
             Bool => v.is_boolean(),
             Real => v.is_number(),
-            Tier => v.as_array().is_some_and(|a| a.iter().all(Value::is_i64)),
+            Tier => v.as_array().is_some_and(|a| a.len() == 3 && a.iter().all(|e| e.is_null() || e.is_u64())),
             Text => v.is_string(),
             List => v.as_array().is_some_and(|a| a.iter().all(Value::is_string)),
             Table | Layers => v.is_object(),

@@ -56,11 +56,11 @@ impl Composition for Ota5T {
         let i1 = c.instantiate("m1", &nmos())?;
         let m1 = c.place(i1)?;
         let i2 = c.instantiate("m2", &nmos())?;
-        let m2 = c.place_mirrored(i2, &m1, sep)?;
+        let m2 = c.place_copy(i2, &m1, sep)?;
         let i3 = c.instantiate("m3", &pmos())?;
         let m3 = c.place_by(i3, AlignMode::Above, &m1, vgap)?;
         let i4 = c.instantiate("m4", &pmos())?;
-        let m4 = c.place_mirrored(i4, &m3, wellsep)?;
+        let m4 = c.place_copy(i4, &m3, wellsep)?;
         let i5 = c.instantiate("m5", &nmos())?;
         let m5 = c.place_by(i5, AlignMode::Beneath, &m1, vgap)?;
 
@@ -115,7 +115,7 @@ fn main() {
     let shapes = sol.geometry();
     std::fs::write(
         out.join("ota5t.gds"),
-        library::gds::emit("ota5t", &shapes, &layer_gds, &[]),
+        library::gds::emit("ota5t", &shapes, &layer_gds, &[]).expect("every layer maps"),
     )
     .expect("write gds");
 
