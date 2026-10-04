@@ -4,11 +4,45 @@ Branch `m1a-cells`, worktree `philis-m1a/cells`, base = `git merge m1a` at `8505
 Specs: plan-03 §3 (CELL-*), 98-gap-critic.md `### GAP-05`, plan-08 `### FLOW-16`; §6 C6, C23, C24, C29 apply. Line
 numbers are this base's; where the plan differs, the card wins.
 
+**Status (re-run 2026-10-04 after a second `git merge m1a`, clean, merge `22a1094`; it brings the input, annotator,
+routing and matching review merges).** Eight of nine items are implemented on this branch, one commit each:
+GAP-05 `b1510f4`, CELL-30 `79f1a6a`, CELL-06 `bda5935`, CELL-07 `1d03998`, CELL-09 `2a1ff0f`, CELL-08 `c72a623` +
+`47a8231` (dr drops a route cut beside a same-net cell cut, tq_chain via.2), CELL-10 `878e222`, FLOW-16 `baeda1c`.
+The cards for those items are the spec they were built from; their line numbers are the pre-implementation base and
+are stale (read the commit diff instead). **CELL-03 is not implemented** (`finish` still rounds `w`/`h` to `step`, the
+halo still to `pdk.grid`); its card is refreshed to today's lines and it is the only item left to build.
+The merge overlaps this branch's files only in `dr/src/lib.rs`, `verify/src/{pdk,sidecar}.rs`,
+`library/src/{cellgen,lib,elaborate}.rs` and the four sidecars, all textually clean; the routing merge removed
+`gr::price_group` from `cellgen::price`, unrelated to the cells edits. Post-merge, `cargo test --release -p cells -p
+verify -p annotator` and `cargo test --release -p library --lib` are green (0 failed; the one ignored is pre-existing).
+benchmark `signoff_fixtures` and `bench local` were not re-run after the merge (cost); the M1 verify pass owns that.
+
+Open acceptance recorded in the commits, not met yet (not loosened):
+- CELL-08: `dac4_mim` and `tq_chain` fixtures exist but have **no `BASELINE` row** (antenna rows remain; GPurify
+  attach, see `c72a623`/`47a8231`). tq_chain measured DRC 0, LVS MATCH. Step 7 (`"cap"` alias on `mim_m3_1`) was not
+  taken: sky130.json `mim_m3_1.aliases` is `["cap_mim_m3_1"]` only. Both stay open for the M1 verify pass.
+- FLOW-16: ota, ota_constrained, tt_ota MatchedSet 2/2 (was 0/2), LVS MATCH, DRC 0; area 1723 → 1860.7 µm² (+8 %).
+- CELL-06 `res_m2` and CELL-10 `mirror_ratio` BASELINE rows are present. CELL-10 also makes cellgen decline a merge
+  with no drawn variant (quad's alternating nf=1 block).
+
+| Item | Class | State |
+|---|---|---|
+| CELL-03 | mechanical | to build (card below, current lines) |
+| GAP-05 | mechanical | done `b1510f4` |
+| CELL-30 | mechanical | done `79f1a6a` |
+| CELL-06 | judgment | done `bda5935` |
+| CELL-07 | mechanical | done `1d03998` |
+| CELL-09 | mechanical | done `2a1ff0f` |
+| CELL-08 | judgment | done `c72a623`, `47a8231`; BASELINE rows and step 7 open |
+| CELL-10 | judgment | done `878e222` |
+| FLOW-16 | judgment | done `baeda1c` |
+
 Every command: `export PDK_ROOT=/home/omare/Documents/Projects/Rust/Philis/.pdk` first. Crates: `cells`
 (kernel/cells), `analog`, `pnr_core`, `verify`, `annotator`, `library`, `benchmark` (bin `bench`: `cargo run --release
 -p benchmark --bin bench local [filter]`).
 
-**Order** (dependencies first; each item lands as its own commit `M1 <ID>: …`):
+**Order** (dependencies first; each item lands as its own commit `M1 <ID>: …`; as built, CELL-03 was skipped and
+now lands last, which is safe: no later item depends on its geometry beyond the ≤ 10 nm growth):
 CELL-03 → GAP-05 → CELL-30 → CELL-06 → CELL-07 → CELL-09 → CELL-08 → CELL-10 → FLOW-16.
 CELL-03 first (it moves every bbox other items assert on); CELL-06/07/08/09 all touch `sidecar::KEYS`,
 `deck_keys.rs` and `signoff_fixtures.rs`, so serial; FLOW-16 needs CELL-10's predicate.
@@ -45,30 +79,37 @@ CELL-03 first (it moves every bbox other items assert on); CELL-06/07/08/09 all 
 
 ## CELL-03 Macro extents on twice the cut lattice — class: mechanical
 
-Facts: `Builder::finish` (kernel/cells/src/builder.rs:132-148) rounds corner and `w`/`h` to `step = 2·grid` (10 nm
-sky130), so `bbox.w/2` can be a 5 nm multiple. `cut_lattice` **already exists** (builder.rs:154, plan step 2 done).
-Halo: frontend/library/src/lib.rs:1480 `round_up(ring_halo(..), pdk.grid.max(1))` (plan: lib.rs:1198); `round_up`
-lib.rs:1245. post_cell `guard_rings` shrinks by the raw halo (post_cell.rs:58), which fits exactly inside the
-rounded reservation (no change needed there).
+Facts (today's tree, after every other item in this batch): `Builder::finish` (kernel/cells/src/builder.rs:132-149,
+doc :126-130) floors the corner and rounds `w`/`h` up to `step = 2·grid` (:138; 10 nm sky130), so `bbox.w/2` can be a
+5 nm multiple. `cut_lattice(process)` **already exists** (builder.rs:152-156, plan step 2 done; `pub mod builder`,
+kernel/cells/src/lib.rs:15). Halo: frontend/library/src/lib.rs:1489 `let ext = round_up(cells::post_cell::ring_halo(r,
+pdk, ring_cut_ohm(pdk)), pdk.grid.max(1));` (plan: lib.rs:1198); `round_up` lib.rs:1254. post_cell `guard_rings`
+shrinks by the raw halo (post_cell.rs:58), which fits inside the rounded reservation (no change there). PLC-02
+(`align_bbox`) has not landed (no `align_bbox` in the tree), so this item makes the lib.rs edit.
 
 Edits:
 1. builder.rs `finish`: after `let step = 2 * self.grid.max(1);` add `let ext = 2 * step;`. Keep `x`, `y` floored to
-   `step`; compute `w: (tight.x + tight.w - x + ext - 1) / ext * ext`, same for `h`. Doc (:127-130): "The bbox corner
-   is a multiple of two grid steps (the cut lattice) and its extents of four, so the half-extent the placer stamps at
-   (`centre - bbox.w / 2`) is on the cut lattice too."
-2. lib.rs:1480: `round_up(cells::post_cell::ring_halo(r, pdk, ring_cut_ohm(pdk)), cells::builder::cut_lattice(pdk))`.
+   `step`; compute `w: (tight.x + tight.w - x + ext - 1) / ext * ext`, same for `h` with `y`. Doc (:126-130): "The bbox
+   corner is a multiple of two grid steps (the cut lattice) and its extents of four, so the half-extent the placer
+   stamps at (`centre - bbox.w / 2`) is on the cut lattice too (H01-26)."
+2. lib.rs:1489: `round_up(cells::post_cell::ring_halo(r, pdk, ring_cut_ohm(pdk)), cells::builder::cut_lattice(pdk))`
+   (a halo on 10 nm keeps the corner on 10 nm and `w + 2·halo` on 20 nm).
 
 Tests:
-- builder.rs `extents_are_twice_the_cut_lattice`: `let mut b = Builder::new(5); b.rect(LayerId(0), Rect { x: 3, y: 7,
-  w: 1235, h: 41 }); let m = b.finish();` → `m.bbox.x % 10 == 0`, `m.bbox.y % 10 == 0`, `m.bbox.w % 20 == 0`,
-  `m.bbox.h % 20 == 0`, and the bbox covers `m.shapes[0].rect`.
-- kernel/cells/tests/cell_selfcheck.rs `every_half_extent_is_on_the_cut_lattice`: `for (name, m) in
-  all_variants(&pdk)` (existing helper :83; skip when `pdk()` is None like its neighbours) → `(m.bbox.w / 2) % 10 == 0
-  && (m.bbox.h / 2) % 10 == 0`, failures collected and printed with `name`.
+- builder.rs `mod tests` (:308) `extents_are_twice_the_cut_lattice`: `let mut b = Builder::new(5); b.rect(LayerId(0),
+  Rect { x: 3, y: 7, w: 1235, h: 41 }); let m = b.finish();` → `m.bbox.x % 10 == 0`, `m.bbox.y % 10 == 0`,
+  `m.bbox.w % 20 == 0`, `m.bbox.h % 20 == 0`, and the bbox covers `m.shapes[0].rect`.
+- kernel/cells/tests/cell_selfcheck.rs `every_half_extent_is_on_the_cut_lattice`: `let Some(pdk) = pdk() else {
+  return };` (as its neighbours; `pdk()` :30), `for (name, m) in all_variants(&pdk)` (:83), collect `name` where
+  `(m.bbox.w / 2) % 10 != 0 || (m.bbox.h / 2) % 10 != 0 || m.bbox.x % 10 != 0 || m.bbox.y % 10 != 0`; assert the
+  list is empty, printing it.
+- Existing bbox-bound tests stay green unedited: mosfet.rs `a_long_gate_keeps_short_dummies` (`bbox.w <= w_nd +
+  7000`, `<= 73_000`; both sides grow ≤ 10 nm), `cell_selfcheck::the_bbox_contains_every_drawn_shape` (:262). If an
+  exact-width assertion elsewhere goes red, stop and report it; do not edit it.
 
-Run: `cargo test -p cells --lib builder && cargo test -p cells --test cell_selfcheck`; then `cargo test --release -p
-benchmark --test signoff_fixtures` (DRC 0 rows unchanged). Acceptance: both tests green; each macro grows ≤ 10 nm per
-axis.
+Run: `cargo test --release -p cells`, `cargo test --release -p library`, then `cargo test --release -p benchmark
+--test signoff_fixtures` (every BASELINE row unchanged). Acceptance: both new tests green; each macro grows ≤ 10 nm per
+axis. The plan's "PLC origin assertion on every bench circuit" belongs to PLC-02 and is not measurable here.
 
 ## GAP-05 Guard-ring kinds name what is drawn; `drawable`; ECGR spacing — class: mechanical
 
