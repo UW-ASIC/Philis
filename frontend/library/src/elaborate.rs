@@ -575,14 +575,27 @@ mod tests {
         assert_eq!(s.cuts.len(), 1);
     }
 
-    /// A deck missing a cut between two metals is an `Err`, never a panic.
+    /// A sidecar missing a cut between two metals fails `Pdk::load`, so the
+    /// cut-count `Err` is unreachable from a loaded deck (`routing_vias` gives
+    /// one cut per adjacent pair); a loaded stack with no metal, or with a cut
+    /// that is also a routing metal, is an `Err` from `routing_stack`, never a panic.
     #[test]
     fn a_bad_stack_is_an_error_not_a_panic() {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/");
         let deck = std::fs::read_to_string(format!("{root}decks/sky130.deck")).unwrap();
-        let sidecar = std::fs::read_to_string(format!("{root}sky130.json")).unwrap().replace(",\n        \"via4\"", "");
+        let good = std::fs::read_to_string(format!("{root}sky130.json")).unwrap();
+        let sidecar = good.replace(",\n        \"via4\"", "");
         assert!(!sidecar.contains("\"via4\""), "the sidecar edit took");
-        assert!(Pdk::load(&deck, &sidecar).map_or(true, |p| routing_stack(&p, None).is_err()));
+        assert!(Pdk::load(&deck, &sidecar).is_err(), "load rejects a missing cut");
+        let load = || Pdk::load(&deck, &good).unwrap();
+        assert!(routing_stack(&load(), None).is_ok());
+        let mut empty = load();
+        empty.routing_metals.clear();
+        empty.routing_cuts.clear();
+        assert!(routing_stack(&empty, None).is_err());
+        let mut metal_cut = load();
+        metal_cut.routing_cuts[0] = metal_cut.routing_metals[2];
+        assert!(routing_stack(&metal_cut, None).is_err());
     }
 
     /// The lattice dr builds for sky130, as the placer reads it (PLC-28).

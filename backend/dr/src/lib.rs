@@ -360,6 +360,8 @@ impl DetailedRoute {
         let grid = if cfg.layers.is_empty() {
             TrackGrid::with_layers(die, cfg.pitch, VIA_COST, n_layers)
         } else {
+            // A short `cfg.layers` would quietly route on fewer metals than `layers`.
+            debug_assert!(cfg.layers.len() >= n_layers as usize, "cfg.layers has {} of {n_layers} layers", cfg.layers.len());
             TrackGrid::new(die, cfg.pitch, cfg.layers[..(n_layers as usize).min(cfg.layers.len())].to_vec(), VIA_COST)
         };
 
@@ -605,6 +607,7 @@ impl DetailedRoute {
         };
         // Tracks per layer from each net's EM current (interim, per net; RTE-14
         // sizes per branch): `k = 1 + ⌈max(0, I_max·1000/J − wire)/(stride·p0)⌉`,
+        // at or past the wide threshold at least `⌈EM width/wire⌉` (parallel wires),
         // `I_max` the larger of what its terminals draw and supply (KCL bounds
         // every segment by it); no limit or no current, one track. A run that
         // reaches the layer's first wide threshold keeps guard tracks each side
@@ -623,9 +626,15 @@ impl DetailedRoute {
                         continue;
                     }
                     let extra = (i_max * 1_000.0 / j - wire as f32).max(0.0);
-                    let k = (1 + (extra / pitch as f32).ceil() as i32).min(i32::from(K_MAX));
+                    let mut k = (1 + (extra / pitch as f32).ceil() as i32).min(i32::from(K_MAX));
+                    let mut w = wire + (k - 1) * pitch;
+                    if k > 1 && w >= cfg.wide(layers[l]) {
+                        // Drawn as `k` separate wires: the copper is `k·wire`, not `w`.
+                        let need = cfg.em_width(layers[l], i_max, 0.0);
+                        k = k.max((need + wire - 1) / wire).min(i32::from(K_MAX));
+                        w = wire + (k - 1) * pitch;
+                    }
                     ks[ci][l] = k as u8;
-                    let w = wire + (k - 1) * pitch;
                     if k > 1 && w >= cfg.wide(layers[l]) {
                         let need = cfg.space(layers[l], w, 0, 0) - (pitch - wire);
                         guards[ci][l] = ((need + pitch - 1) / pitch).max(0) as u8;
@@ -803,7 +812,11 @@ impl DetailedRoute {
                 if runs && *across > need {
                     *across = need;
                 }
-                let got = r.w.min(r.h).min(need);
+                // A run at or over the wide threshold is `k` parallel wires
+                // sharing the current: its width is their copper, `k·wire`.
+                let k = ci_of.get(net).filter(|&&c| c != usize::MAX).map_or(1, |&c| i32::from(cold.k.get(c).map_or(1, |k| k[li])));
+                let bundle = k > 1 && cfg.wire(li) + (k - 1) * cfg.stride(li) * cfg.pitch >= cfg.wide(s.layer);
+                let got = if bundle { k * cfg.wire(li) } else { r.w.min(r.h) }.min(need);
                 if got < need {
                     em_shortfall[net] = em_shortfall[net].max(f64::from(need - got) / f64::from(need));
                 }
@@ -3301,21 +3314,23 @@ mod tests {
         assert!(foreign_gap(&routes) >= 430 - 290, "{}", foreign_gap(&routes));
     }
 
-    /// A 4-track bundle (`W = 290 + 3·430 = 1580` past a 1000 nm threshold)
-    /// is drawn as 4 wires, and its guard track keeps a foreign wire at the
+    /// A 5-track bundle (`W = 290 + 4·430 = 2010` past a 1000 nm threshold)
+    /// is drawn as 5 wires whose copper (`5·290`) carries the current, and its guard track keeps a foreign wire at the
     /// 500 nm wide spacing, not the 140 nm a single track gets.
     #[test]
     fn a_wide_bundle_keeps_wide_spacing() {
-        // 1250 µA at 1 mA/µm: k = 1 + ⌈(1250 − 290)/430⌉ = 4.
+        // 1250 µA at 1 mA/µm: 1 + ⌈(1250 − 290)/430⌉ = 4 tracks pass the
+        // threshold, so k = ⌈1260/290⌉ = 5 parallel wires.
         let (cell, cfg) = em_cell(&[(1_075, 5_375), (15_265, 5_375)], 1_250, &LAYERS[..1]);
         let cfg = DetailedCfg { spacing: vec![(LAYERS[0], 140, vec![(1_000, 500)])], ..cfg };
-        // Net 1 on the track just past the bundle's fourth, along its span.
-        let pins = [pin(1, 4_755 - 85, 5_375 + 4 * 430 - 85), pin(1, 10_775 - 85, 5_375 + 4 * 430 - 85)];
+        // Net 1 on the track just past the bundle's fifth, along its span.
+        let pins = [pin(1, 4_755 - 85, 5_375 + 5 * 430 - 85), pin(1, 10_775 - 85, 5_375 + 5 * 430 - 85)];
         let reqs = Requirements::<Routes>::default();
         let (routes, report, _) = DetailedRoute { cfg }.route(&pins, &[cell], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
         assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
+        assert!(report.budget_violations.is_empty(), "{:?}", report.budget_violations.iter().map(|v| &v.rule).collect::<Vec<_>>());
         let long = routes.wires[0].iter().filter(|s| s.layer == LAYERS[0] && s.rect.h == 290 && s.rect.w > 2_000).count();
-        assert!(long >= 4, "parallel wires: {long}");
+        assert!(long >= 5, "parallel wires: {long}");
         assert!(!routes.wires[0].iter().any(|s| s.layer == LAYERS[0] && s.rect.w.min(s.rect.h) > 290 && s.rect.w.min(s.rect.h) >= 1_000 && s.rect.w.max(s.rect.h) > 2_000), "no merged wide run");
         let gap = routes.wires[0].iter().filter(|s| s.layer == LAYERS[0]).flat_map(|a| routes.wires[1].iter().filter(|b| b.layer == LAYERS[0]).map(move |b| rect_gap(a.rect, b.rect))).min();
         assert!(gap.is_none_or(|g| g >= 500), "{gap:?}");

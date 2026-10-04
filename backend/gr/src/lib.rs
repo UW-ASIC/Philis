@@ -680,8 +680,10 @@ impl<G: RGraph> RouteCtx<G> {
                     } else {
                         foot.push(n);
                     }
-                    if i > 0 && layer(b[i - 1]) != l {
-                        self.graph.via_block(b[i - 1], n, k[layer(b[i - 1])], k[l], &mut foot);
+                    // Off the graph: no partial corner, like `footprint`'s fallback.
+                    let len = foot.len();
+                    if i > 0 && layer(b[i - 1]) != l && !self.graph.via_block(b[i - 1], n, k[layer(b[i - 1])], k[l], &mut foot) {
+                        foot.truncate(len);
                     }
                 }
             }
@@ -696,6 +698,8 @@ impl<G: RGraph> RouteCtx<G> {
                 for h in raw {
                     if self.graph.footprint(h, k[layer(h)], 0, &mut buf) {
                         halo.extend_from_slice(&buf);
+                    } else {
+                        halo.push(h);
                     }
                 }
             }
@@ -1465,6 +1469,22 @@ mod tests {
         let empty = cold.graph.node(4, 5, 0);
         hot.halo[empty as usize] += 1;
         assert_eq!(hot.over(empty as usize, 1), 0, "two halos on an empty node");
+    }
+
+    /// A 2-track via at the top edge: its corner block falls off the graph, so
+    /// no partial corner (6, 9) joins the footprint, and a halo node whose own
+    /// footprint falls off stays as itself.
+    #[test]
+    fn an_off_graph_corner_or_halo_keeps_one_node() {
+        let g = TrackGrid::new((10 * 100, 10 * 100), 100, vec![spec(1, 1), spec(1, 1)], 4.0);
+        let (a, b) = (g.node(5, 9, 0), g.node(5, 9, 1));
+        let (corner, halo) = (g.node(6, 9, 0), g.node(4, 9, 0));
+        let mut cold = RouteCtx::new(g, vec![Vec::new(); 1], vec![0]);
+        cold.k = vec![[2; MAX_LAYERS]];
+        let mut hot = RouteHot::new(cold.graph.nodes(), 1);
+        cold.commit(&mut hot, 0, vec![vec![a, b]]);
+        assert!(!hot.foot[0].contains(&corner), "{:?}", hot.foot[0]);
+        assert_eq!(hot.halo[halo as usize], 1);
     }
 
     /// `TrackGrid` without its A* bound: plain Dijkstra over the same graph.
