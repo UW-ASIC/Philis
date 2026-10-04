@@ -48,6 +48,33 @@ pub struct OpPoint {
 }
 
 impl OpPoint {
+    /// The annotator's view (EXT-17): volts to mV; a device with `id_ua`,
+    /// `headroom_mv` and `gm_us` all resolved becomes a `DeviceOp` (PERF-09
+    /// has no `vth`/`gmb`/`gds`: `None`). `probe`: the bias is the synthesised
+    /// probe bench. Testbench sources are [`testbench_sources`]'s.
+    #[must_use]
+    pub fn evidence(&self, netlist: &Netlist, probe: bool) -> annotator::Evidence {
+        let mv = |v: &Vec<Option<f64>>, i: usize| v.get(i).copied().flatten().map(|v| v * 1000.0);
+        let dev = (0..netlist.devices.len())
+            .map(|i| {
+                let get = |v: &Vec<Option<f64>>| v.get(i).copied().flatten();
+                Some(annotator::evidence::DeviceOp {
+                    id_ua: get(&self.id_ua)?,
+                    headroom_mv: get(&self.headroom_mv)?,
+                    gm_us: get(&self.gm_us)?,
+                    power_uw: f64::from(self.power_uw.get(i).copied().unwrap_or(0)),
+                    vgs_mv: mv(&self.vgs_v, i),
+                    vbs_mv: mv(&self.vbs_v, i),
+                    vth_mv: None,
+                    gmb_us: None,
+                    gds_us: None,
+                })
+            })
+            .collect();
+        let net_mv = (0..netlist.nets.len()).map(|i| mv(&self.net_v, i)).collect();
+        annotator::Evidence { op: Some(annotator::OpFacts { dev, net_mv }), probe_bias: probe, ..Default::default() }
+    }
+
     /// DC current each device terminal draws from its net, µA, per device:
     /// FET `D` draws `+Id` (`id_ua`, into the drain), `S` `−Id`, and
     /// the gate and bulk none; a resistor `P` draws `+I`, `N` `−I`; a BJT
@@ -492,6 +519,52 @@ pub(crate) fn node_name(netlist: &Netlist, id: pnr_core::NetId) -> String {
     }
 }
 
+/// Testbench `V…` cards as `(switching nets, DC-held nets in mV)` (EXT-17).
+/// Nodes resolve case-insensitively to nets; node `0` or a ground-role net is
+/// the reference. A card with `pulse(`/`pwl(`/`sin(` marks its non-reference
+/// node switching; otherwise the first number after an optional `dc` is that
+/// node's level, V×1000. A card between two non-reference nodes is skipped:
+/// it holds a difference, not a level.
+#[must_use]
+pub fn testbench_sources(netlist: &Netlist, tb: &str) -> (Vec<pnr_core::NetId>, Vec<(pnr_core::NetId, f64)>) {
+    let (mut switching, mut dc) = (Vec::new(), Vec::new());
+    let find = |s: &str| (0..netlist.nets.len()).find(|&i| netlist.nets[i].name.eq_ignore_ascii_case(s)).map(|i| pnr_core::NetId(i as u16));
+    let reference = |s: &str| s == "0" || annotator::rail_of(s) == Some(NetRole::Ground);
+    for line in tb.lines().map(str::trim).filter(|l| l.as_bytes().first().is_some_and(|c| c.eq_ignore_ascii_case(&b'v'))) {
+        let lower = line.to_ascii_lowercase();
+        let tok: Vec<&str> = lower.split_whitespace().collect();
+        let (Some(&p), Some(&n)) = (tok.get(1), tok.get(2)) else { continue };
+        let node = match (reference(p), reference(n)) {
+            (false, true) => p,
+            (true, false) => n,
+            _ => continue,
+        };
+        let Some(net) = find(node) else { continue };
+        if ["pulse(", "pwl(", "sin("].iter().any(|k| lower.replace(' ', "").contains(k)) {
+            switching.push(net);
+        } else if let Some(v) = tok[3..].iter().filter(|t| **t != "dc").find_map(|t| spice_number(t)) {
+            dc.push((net, v * 1000.0));
+        }
+    }
+    (switching, dc)
+}
+
+/// A SPICE number with an optional scale suffix (`1.8`, `900m`, `1e-3`).
+fn spice_number(t: &str) -> Option<f64> {
+    let t = t.trim_end_matches('v');
+    let split = t.find(|c: char| c.is_ascii_alphabetic() && c != 'e').unwrap_or(t.len());
+    let (num, suf) = t.split_at(split);
+    let scale = match suf {
+        "" => 1.0,
+        "m" => 1e-3,
+        "u" => 1e-6,
+        "n" => 1e-9,
+        "k" => 1e3,
+        _ => return None,
+    };
+    num.parse::<f64>().ok().map(|v| v * scale)
+}
+
 /// Synthesise a mid-rail probe bench.
 ///
 /// Two classes of node need a source, and both are invisible from a `.subckt`
@@ -699,6 +772,20 @@ mod tests {
         );
         assert_eq!(instance_device("m.xdut.xm1.mnfet").as_deref(), Some("xdut"));
         assert_eq!(instance_device("notadevice"), None);
+    }
+
+    /// EXT-17: PULSE drives a switching net, DC cards their level in mV, a card
+    /// between two non-reference nodes holds no level.
+    #[test]
+    fn testbench_sources_split_switching_from_dc() {
+        let nl = stub_netlist();
+        let tb = "VDD VDD 0 DC 1.8\nvb vbias VSS 900m\nVclk vout 0 PULSE (0 1.8 0 1n 1n 5n 10n)\nVx vbias vout 1\n* comment";
+        let (sw, dc) = testbench_sources(&nl, tb);
+        assert_eq!(sw, [pnr_core::NetId(3)]);
+        assert_eq!(dc.len(), 2);
+        assert_eq!(dc[0].0, pnr_core::NetId(0));
+        assert!((dc[0].1 - 1800.0).abs() < 1e-9 && (dc[1].1 - 900.0).abs() < 1e-9, "{dc:?}");
+        assert_eq!(dc[1].0, pnr_core::NetId(2));
     }
 
     /// Mirror-ish stub: `vbias` reaches only gates (no DC path), `vout` is

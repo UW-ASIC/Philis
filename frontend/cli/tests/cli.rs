@@ -48,13 +48,46 @@ fn run_writes_a_labelled_gds_and_a_report() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// EXT-26 (replaces `constraints_flag_exits_2`, which pinned the refusal
+/// "until EXT-26"): an unreadable file exits 2 naming the flag; a sidecar is
+/// read and the flow runs; a malformed one exits 2 from the parser.
 #[test]
-fn constraints_flag_exits_2() {
+fn constraints_flag_reads_the_file() {
     let out = Command::new(env!("CARGO_BIN_EXE_philis"))
         .arg(fixture("pair.spice"))
-        .args(["--pdk", "sky130", "--constraints", "x.json"])
+        .args(["--pdk", "sky130", "--constraints", "no_such_constraints.json"])
         .output()
         .expect("philis runs");
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("EXT-26"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("constraints"));
+
+    let dir = std::env::temp_dir().join(format!("philis_cli_constraints_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let json = dir.join("pair.const.json");
+    std::fs::write(&json, r#"[{"constraint":"GroundPorts","ports":["VSS"]},{"constraint":"Align","instances":["XM1","XM2"]}]"#).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_philis"))
+        .arg(fixture("pair.spice"))
+        .args(["--pdk", "sky130", "--starts", "1", "--constraints"])
+        .arg(&json)
+        .args(["-o"])
+        .arg(&dir)
+        .output()
+        .expect("philis runs");
+    let code = out.status.code();
+    assert!(matches!(code, Some(0 | 1)), "exit {code:?}: {}", String::from_utf8_lossy(&out.stderr));
+    // The flow parses what it read: a readable file that is not JSON exits 2
+    // from the sidecar parser, not from the read.
+    std::fs::write(&json, "{").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_philis"))
+        .arg(fixture("pair.spice"))
+        .args(["--pdk", "sky130", "--starts", "1", "--constraints"])
+        .arg(&json)
+        .args(["-o"])
+        .arg(&dir)
+        .output()
+        .expect("philis runs");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("constraints: ") && !err.contains("--constraints"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

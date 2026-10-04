@@ -23,4 +23,14 @@ pub enum NetClass {
     /// Sensitive reference (bias, bandgap, ADC reference).
     Sensitive,
     Substrate,
+    /// Bias line: gates only (plus diode D=G), or the gate of a current source/cascode (EXT-18).
+    Bias,
+    /// Reference voltage: a bandgap core node, a cascoded reference, a DAC reference plate.
+    Reference,
+    /// Logic level that does not toggle with a clock (logic G/D nets).
+    DigitalStatic,
+    /// Logic driven by a clock or by other switching logic: an aggressor.
+    DigitalSwitching,
+    /// Noisy node (charge-pump output, `_n` suffix without a `_p` twin): an aggressor.
+    Noisy,
 }

@@ -67,7 +67,7 @@ pub mod tools {
     }
 }
 
-use annotator::{annotate, AnnotationConfig, Problem};
+use annotator::{AnnotationConfig, Problem};
 pub use dp::PlaceStats;
 pub use geometry::PlacementMetrics;
 pub use macro_master::Macros;
@@ -115,6 +115,9 @@ pub struct Config {
     pub interface: Option<Interface>,
     /// The top sub-circuit ([`ParseOptions::top`]); `None`: the parser's choice.
     pub top: Option<String>,
+    /// User constraint sidecar, JSON text (EXT-26, `annotator::sidecar`):
+    /// [`run`] merges it over `annotation` (lists extend, scalars from the base).
+    pub constraints: Option<String>,
 }
 
 /// A die edge.
@@ -205,6 +208,7 @@ impl Default for Config {
             gp_mode: GpMode::default(),
             interface: None,
             top: None,
+            constraints: None,
         }
     }
 }
@@ -383,11 +387,33 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     let stack: &'static analog::routing::Stack = Box::leak(Box::new(elaborate::stack(pdk)));
     let mut ann = annotation_with(pdk, &cfg.annotation, stack);
     ann.process.die_temp_k = cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15);
-    let base = annotate(&netlist, &ann);
-
+    if let Some(text) = &cfg.constraints {
+        let (side, diags) = AnnotationConfig::from_json(text, &netlist).map_err(FlowError::Interface)?;
+        ann.supply_nets.extend(side.supply_nets);
+        ann.ground_nets.extend(side.ground_nets);
+        ann.clock_nets.extend(side.clock_nets);
+        ann.do_not_identify.extend(side.do_not_identify);
+        ann.seeds.extend(side.seeds);
+        ann.symmetry_dir = ann.symmetry_dir.or(side.symmetry_dir);
+        ann.groups.extend(side.groups);
+        ann.classes.extend(side.classes);
+        ann.net_classes.extend(side.net_classes);
+        ann.offset_budgets.extend(side.offset_budgets);
+        ann.kelvins.extend(side.kelvins);
+        ann.sidecar_diags.extend(diags);
+    }
     // 2. Bias: per-device power and per-net current. Placement-independent,
-    //    so solved once.
+    //    so solved once, before annotation: its op point and testbench are the
+    //    annotator's evidence (EXT-17).
     let bias = bias(&netlist, cfg);
+    let ev = bias.op.as_ref().map_or_else(Default::default, |o| {
+        let mut e = o.evidence(&netlist, bias.summary.as_ref().is_some_and(|s| s.probe));
+        if let Some(tb) = cfg.op.as_ref().and_then(|c| c.testbench.as_deref()) {
+            (e.switching_nets, e.dc_sources) = oppoint::testbench_sources(&netlist, tb);
+        }
+        e
+    });
+    let base = annotator::annotate_with(&netlist, &ann, &ev);
     let plan = performance_rows(&netlist, cfg, &ann, &base.net_classes);
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
@@ -397,8 +423,8 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // lexicographically better kept.
     // Both topologies are built once on this thread (pricing every variant
     // once); the starts only search them.
-    let merged = topology(&netlist, injected, pdk, cfg, &bias, &ann, &plan, true);
-    let apart = merged.distinct.then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &plan, false));
+    let merged = topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, true);
+    let apart = merged.distinct.then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, false));
     let tops: Vec<&Topology> = std::iter::once(&merged).chain(apart.as_ref()).collect();
     let tops = &tops;
     let runs: Vec<Vec<Searched>> = std::thread::scope(|s| {
@@ -494,7 +520,7 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
     };
     let nets: Vec<pnr_core::NetId> = classes
         .iter()
-        .filter(|c| matches!(c.class, NetClass::Signal | NetClass::Sensitive | NetClass::Clock))
+        .filter(|c| !matches!(c.class, NetClass::Supply | NetClass::Ground | NetClass::Substrate))
         .map(|c| c.net)
         .collect();
     let steps = perf::StepPolicy { gate_af_um2: ann.process.gate_af_per_um2.map_or(0.0, f64::from), ..Default::default() };
@@ -610,6 +636,7 @@ fn topology<'a>(
     cfg: &'a Config,
     bias: &Bias,
     ann: &AnnotationConfig,
+    ev: &annotator::Evidence,
     perf: &'a PerfPlan,
     merge_distinct_gates: bool,
 ) -> Topology<'a> {
@@ -620,7 +647,7 @@ fn topology<'a>(
     let currents = &bias.currents;
     // Annotate: placement/routing rules + cell constraints, device-indexed.
     // Per topology: `CellSpace::new` mutates the problem, which is not `Clone`.
-    let mut problem = annotate(netlist, ann);
+    let mut problem = annotator::annotate_with(netlist, ann, ev);
     if cfg.min_utilization > 0.0 {
         problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min: cfg.min_utilization }));
     }
@@ -880,15 +907,15 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     macros.extend(best.rings.iter().cloned());
     // MFG-01: density fill, once, on the winner; the search never sees it.
     let drawn = geometry::collect(&macros, &best.layout, &best.routes);
-    let wires_of = |class: analog::metadata::NetClass| -> Vec<pnr_core::Shape> {
-        flow.problem.net_classes.iter().filter(|c| c.class == class)
+    let wires_of = |classes: &[analog::metadata::NetClass]| -> Vec<pnr_core::Shape> {
+        flow.problem.net_classes.iter().filter(|c| classes.contains(&c.class))
             .flat_map(|c| best.routes.wires.get(c.net.0 as usize).into_iter().flatten().copied()).collect()
     };
     // Matched cells: more than one member owns its units.
     let matched: Vec<pnr_core::Rect> = pnr_core::place_macros(&macros, &best.layout).iter()
         .filter(|m| m.units.iter().any(|u| u.owner != m.units[0].owner)).map(|m| m.bbox).collect();
-    use analog::metadata::NetClass::{Ground, Sensitive};
-    macros.extend(fill::fill(&drawn, &wires_of(Ground), &wires_of(Sensitive), &matched, pdk));
+    use analog::metadata::NetClass::{Bias, Ground, Reference, Sensitive};
+    macros.extend(fill::fill(&drawn, &wires_of(&[Ground]), &wires_of(&[Sensitive, Bias, Reference]), &matched, pdk));
     let metadata = metadata::build(
         &flow.problem.placement,
         &best.layout,
@@ -1411,17 +1438,16 @@ impl Flow<'_> {
         perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true, gate_offset_v: Vec::new() }
     }
 
-    /// Each recognised matched pair on one source net, with its members'
-    /// source pins and the net's other pins (feeds) as placed, budgeted
-    /// `ΔR ≤ (allowance − placement spend) / I_D` from the pair's `MatchedSet` ledger.
+    /// Each extracted common node (EXT-24 `Intent.common_nodes`), with its
+    /// halves' pins on the node and the net's other pins (feeds) as placed,
+    /// budgeted `ΔR ≤ (allowance − placement spend) / I_D` from the first
+    /// pair's `MatchedSet` ledger.
     fn common_nodes(&self, layout: &Layout) -> analog::routing::CommonNodes {
-        use annotator::BlockKind::{CurrentMirror, DiffPair, Load};
         let mut left = Vec::new();
         for b in &self.problem.placement.budget {
             b.offset_allowances(layout, &mut left);
         }
         let placed = gr::place_macros(&cellgen::realize(&self.cells.variants, &layout.variant), layout);
-        let term = |d: DeviceId, t: &str| self.netlist.devices[d.0 as usize].terminals.iter().find(|(n, _)| n == t).map(|&(_, n)| n);
         // (device, terminal, rect) of every placed pin, per net.
         let mut on_net: Vec<Vec<(DeviceId, String, pnr_core::Rect)>> = vec![Vec::new(); self.netlist.nets.len()];
         for (m, members) in placed.iter().zip(&self.cells.devices_of) {
@@ -1433,18 +1459,15 @@ impl Flow<'_> {
             }
         }
         let mut nodes = Vec::new();
-        for leaf in annotator::block::leaves(&self.problem.blocks) {
-            let &[a, b] = leaf.devices.as_slice() else { continue };
-            if !matches!(leaf.kind, DiffPair | CurrentMirror | Load) {
-                continue;
-            }
-            let Some(net) = term(a, "S").filter(|&n| term(b, "S") == Some(n)) else { continue };
-            let list = &on_net[net.0 as usize];
-            let pins = |d: DeviceId| list.iter().filter(|p| p.0 == d && p.1 == "S").map(|p| p.2).collect::<Vec<_>>();
-            let feeds = list.iter().filter(|p| p.0 != a && p.0 != b).map(|p| p.2).collect();
+        for req in &self.problem.intent.common_nodes {
+            let (Some(&a), Some(&b)) = (req.a.first(), req.b.first()) else { continue };
+            let list = &on_net[req.net.0 as usize];
+            let term = format!("{:?}", req.term);
+            let pins = |ds: &[DeviceId]| list.iter().filter(|p| ds.contains(&p.0) && p.1 == term).map(|p| p.2).collect::<Vec<_>>();
+            let feeds = list.iter().filter(|p| !req.a.contains(&p.0) && !req.b.contains(&p.0)).map(|p| p.2).collect();
             let i_ua = self.id_ua.get(a.0 as usize).copied().flatten().map(|i| i.abs() as f32).filter(|&i| i > 0.0);
             let max_delta_ohm = common_node_ohm(&left, a, b, i_ua);
-            nodes.push(analog::routing::CommonNode { net, a: pins(a), b: pins(b), feeds, max_delta_ohm });
+            nodes.push(analog::routing::CommonNode { net: req.net, a: pins(&req.a), b: pins(&req.b), feeds, max_delta_ohm });
         }
         analog::routing::CommonNodes { nodes, stack: self.stack }
     }
@@ -1610,7 +1633,7 @@ fn c_tier(
         if rows.is_empty() {
             let signal = classes
                 .iter()
-                .any(|c| usize::from(c.net.0) == id && matches!(c.class, NetClass::Signal | NetClass::Sensitive | NetClass::Clock));
+                .any(|c| usize::from(c.net.0) == id && !matches!(c.class, NetClass::Supply | NetClass::Ground | NetClass::Substrate));
             return f64::from(u8::from(signal));
         }
         let per_af: f64 = rows
@@ -2489,7 +2512,7 @@ mod start_tests {
         use pnr_core::LayerId;
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
         let nl = crate::parse(".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\n.ends p\n").unwrap();
-        let problem = || crate::annotate(&nl, &crate::annotation(&pdk, &Default::default()));
+        let problem = || annotator::annotate(&nl, &crate::annotation(&pdk, &Default::default()));
         let (name, id) = pdk.layers[0].clone();
         let lim = Limit { ua_per_um: 1.0, ua_per_cut: 1.0, ..Limit::default() };
         let full: Vec<_> = (0..=MAX_LAYERS as u16).map(|l| (LayerId(l), lim)).collect();
@@ -2757,7 +2780,7 @@ mod common_node_tests {
         let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
         let ann = crate::annotation_with(&pdk, &cfg.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
         let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0 };
-        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &plan, true);
+        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &Default::default(), &plan, true);
         let n = t.flow.cells.variants.len();
         let layout = pnr_core::Layout {
             x: (0..n).map(|i| i as i32 * 20_000).collect(),

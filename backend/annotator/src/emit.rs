@@ -124,6 +124,7 @@ fn area_um2(nl: &Netlist, drawn: &[Drawn], d: DeviceId) -> f32 {
 pub fn placement(
     intent: &Intent,
     blocks: &[Block],
+    user_groups: &[(u32, Vec<DeviceId>)],
     nl: &Netlist,
     drawn: &[Drawn],
     p: &ProcessNumbers,
@@ -217,6 +218,14 @@ pub fn placement(
         }
     }
 
+    // Sidecar `GroupBlocks` (EXT-26): each member pulled to the first, tagged
+    // with its entry (the annotator keeps a pre-set origin, renumbering the id).
+    for (index, g) in user_groups.iter().filter(|g| g.1.len() >= 2) {
+        let pull: Vec<Proximity> = g[1..].iter().map(|&m| prox(g[0], m)).collect();
+        let meta = analog::intent::BatchMeta { id: analog::intent::ConstraintId(0), origin: analog::intent::Origin::User { index: *index } };
+        r.budget.push(Box::new(analog::rule::Tagged { meta, inner: Box::new(pull.clone()) }));
+        r.cost.push(Box::new(analog::rule::Tagged { meta, inner: Box::new(pull) }));
+    }
     if !dti.is_empty() {
         r.cost.push(Box::new(dti.clone()));
         r.hard.push(Box::new(dti));
@@ -235,29 +244,25 @@ const ISOLATION_EPI_MULTIPLE: i32 = 4;
 const NOMINAL_EPI_NM: i32 = 2_500;
 
 /// Substrate isolation (ENV-04; Charbon 2001 ch.2 injection → propagation →
-/// reception): every device on a Clock-class net (an injector) is kept
-/// `ISOLATION_EPI_MULTIPLE·t_epi` edge-to-edge from every `sensitive`
-/// (matched) device, except where `same_group(aggressor, victim)`: a stage's
-/// own clocked tail sits by its pair by design (AA-13), so isolating them
-/// contradicts the stage's Proximity.
+/// reception): every EXT-23 `aggressor` (Switching or Capacitive) is kept
+/// `ISOLATION_EPI_MULTIPLE·t_epi` edge-to-edge from every `victim`, except
+/// where `related(aggressor, victim)`: a stage's own clocked tail sits by its
+/// pair by design (AA-13), so isolating them contradicts the stage's Proximity.
 ///
 /// Budget + cost only on `EpiOnLowRes` with `epi_nm` known (the plateau
 /// distance). Otherwise a cost-only pull at [`NOMINAL_EPI_NM`], and the
 /// returned `Some(why)` is the `missing` input that leaves it unknown: bulk has
 /// no plateau distance. `None` when calibrated or nothing was emitted.
 pub fn isolation(
-    hg: &pnr_core::BipartiteHypergraph,
-    classes: &[analog::metadata::NetClassification],
-    sensitive: &[bool],
-    same_group: &dyn Fn(usize, usize) -> bool,
+    aggressor: &[bool],
+    victim: &[bool],
+    related: &dyn Fn(usize, usize) -> bool,
     kind: pnr_core::SubstrateKind,
     epi_nm: Option<i32>,
     r: &mut Requirements<Layout>,
 ) -> Option<&'static str> {
-    use analog::metadata::NetClass;
     use pnr_core::SubstrateKind;
-    let clocked = |d: usize| hg.device_nets[d].iter().any(|n| classes[n.0 as usize].class == NetClass::Clock);
-    let n = hg.device_nets.len();
+    let n = aggressor.len();
     let calibrated = match (kind, epi_nm) {
         (SubstrateKind::EpiOnLowRes, Some(epi)) => Ok(epi),
         (SubstrateKind::EpiOnLowRes, None) => Err("deck epi_thickness_nm"),
@@ -267,9 +272,9 @@ pub fn isolation(
     let min_distance_nm = ISOLATION_EPI_MULTIPLE * calibrated.unwrap_or(NOMINAL_EPI_NM);
     let dev = |d: usize| Target::Device(DeviceId(d as u16));
     let rules: Vec<Isolation> = (0..n)
-        .filter(|&a| clocked(a) && !sensitive[a])
+        .filter(|&a| aggressor[a])
         .flat_map(|a| {
-            (0..n).filter(move |&v| sensitive[v] && !same_group(a, v)).map(move |v| Isolation { a: dev(a), b: dev(v), min_distance_nm })
+            (0..n).filter(move |&v| victim[v] && !related(a, v)).map(move |v| Isolation { a: dev(a), b: dev(v), min_distance_nm })
         })
         .collect();
     if rules.is_empty() {
@@ -412,7 +417,7 @@ mod tests {
         p.intent.sets[i].allowance = Some(0.4);
         let mut models = Vec::new();
         let drawn: Vec<Drawn> = nl.devices.iter().map(|d| crate::size::drawn(d, &mut models)).collect();
-        let r = placement(&p.intent, &p.blocks, &nl, &drawn, &cfg.process, None, &cfg.policy);
+        let r = placement(&p.intent, &p.blocks, &[], &nl, &drawn, &cfg.process, None, &cfg.policy);
         let set = r.budget.iter().filter(|b| b.kind() == "MatchedSet").nth(i).expect("set i's batch");
         let l = Layout {
             x: vec![0, 1_000_000],

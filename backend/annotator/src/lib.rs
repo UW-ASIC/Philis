@@ -12,6 +12,7 @@ pub mod class;
 pub mod classify;
 pub mod constraints;
 pub mod emit;
+pub mod evidence;
 pub mod extract;
 pub mod graph;
 pub mod ir;
@@ -21,7 +22,9 @@ pub mod pattern;
 pub mod policy;
 pub mod rings;
 pub mod sets;
+pub mod sidecar;
 pub mod size;
+pub mod substrate;
 pub mod symmetry;
 pub mod terms;
 
@@ -29,6 +32,7 @@ pub mod terms;
 mod tests;
 
 pub use block::{Block, BlockKind};
+pub use evidence::{Evidence, OpFacts};
 pub use netrole::{rail_of, AnnotationConfig, NetRole, ProcessNumbers};
 pub use policy::Policy;
 
@@ -108,18 +112,32 @@ fn missing(p: &ProcessNumbers, needs: &Needs) -> Vec<(&'static str, &'static str
     out
 }
 
-/// Assemble the [`Problem`]. Deterministic.
+/// Assemble the [`Problem`] from structure alone: [`annotate_with`] and no evidence.
 ///
 /// # Panics
 /// When the netlist has more than 65535 devices or nets: ids are `u16` (AA-35).
 #[must_use]
 pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
+    annotate_with(netlist, cfg, &Evidence::default())
+}
+
+/// Assemble the [`Problem`], reading simulation evidence (EXT-17): testbench
+/// rails and clocks join the name pre-pass, the op point sets device regions
+/// and roles. Deterministic.
+///
+/// # Panics
+/// When the netlist has more than 65535 devices or nets: ids are `u16` (AA-35).
+#[must_use]
+pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -> Problem {
     for n in [netlist.devices.len(), netlist.nets.len()] {
         assert!(n <= usize::from(u16::MAX), "annotator: {n} devices/nets exceed the u16 id space (65535)");
     }
     let hg = pnr_core::BipartiteHypergraph::from_netlist(netlist);
     let mut models = Vec::new();
     let drawn: Vec<size::Drawn> = netlist.devices.iter().map(|d| size::drawn(d, &mut models)).collect();
+    let named = |n: &String| [&cfg.supply_nets, &cfg.ground_nets, &cfg.clock_nets].iter().any(|l| l.iter().any(|s| s.eq_ignore_ascii_case(n)));
+    let user: Vec<bool> = hg.net_names.iter().map(named).collect();
+    let cfg = &with_testbench(netlist, cfg, ev);
     let roles = netrole::classify_nets(&hg, cfg);
 
     // Recognised blocks in selection order, each composite with its primitive children.
@@ -170,7 +188,7 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         }
     }
     let gates: Vec<f32> = netlist.devices.iter().map(gate_um2).collect();
-    let net_classes = classify::classify(&hg, &roles, &sensitive, &gates, cfg.process.gate_af_per_um2);
+    let mut net_classes = classify::classify(&hg, &roles, &sensitive, &gates, cfg.process.gate_af_per_um2);
 
     let fet = |k: pnr_core::DeviceKind| matches!(k, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos);
     let needs = Needs {
@@ -188,15 +206,6 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     if netlist.devices.iter().any(|d| d.kind == pnr_core::DeviceKind::Capacitor) {
         missing.push(("ParasiticBudget", "capacitor-plate nets: settling / code-error spec (ARR-03, ARR-05)"));
     }
-    let mut routing = extract::routing(
-        &hg,
-        &net_classes,
-        &gates,
-        &cfg.process,
-        &block::leaves(&blocks).iter().filter(|b| b.kind == BlockKind::DiffPair).map(|b| (b.devices[0], b.devices[1])).collect::<Vec<_>>(),
-        &cfg.policy,
-    );
-
     let mut intent = analog::intent::Intent::default();
     // Symmetry seeds: the disjoint DiffPair/Load/CascodePair leaves (never contradictory),
     // each couple and the list in canonical order, names breaking exact ties.
@@ -208,9 +217,14 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         .map(|(i, b)| if ck(b.devices[0]) <= ck(b.devices[1]) { (b.devices[0], b.devices[1], i) } else { (b.devices[1], b.devices[0], i) })
         .collect();
     seeds.sort_by_key(|&(a, b, _)| (ck(a), ck(b)));
-    let seeds: Vec<symmetry::Seed> = seeds.into_iter().map(|(a, b, i)| symmetry::Seed::Devices(a, b, analog::intent::ConstraintId(i as u32))).collect();
+    // User seeds first (EXT-26).
+    let seeds: Vec<symmetry::Seed> = cfg.seeds.iter().copied().chain(seeds.into_iter().map(|(a, b, i)| symmetry::Seed::Devices(a, b, analog::intent::ConstraintId(i as u32)))).collect();
     let (compounds, diags) = symmetry::analyze(&hg, &drawn, &net_classes, &seeds, &canon);
     intent.compounds = compounds;
+    if let (Some(dir), [c]) = (cfg.symmetry_dir, intent.compounds.as_mut_slice()) {
+        c.dir = dir;
+    }
+    intent.diagnostics.extend(cfg.sidecar_diags.iter().cloned());
     intent.diagnostics.extend(diags);
     let shared = sets::shared_bias_groups(&hg, &drawn, &net_classes);
     // EXT-19: passive, bipolar-core and diode sets.
@@ -226,7 +240,7 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     passive_sets.extend(passive::capacitor_sets(&hg, &drawn, &net_classes, &mut intent.diagnostics));
     passive_sets.extend(passive::diode_sets(&hg, &drawn));
     let passive_groups: Vec<Vec<DeviceId>> = passive_sets.iter().map(|p| p.devices.clone()).collect();
-    let reqs = graph::requirements(&all, &intent.compounds, &shared, &passive_groups, &hg, &net_classes, &canon, &cfg.policy);
+    let reqs = graph::requirements(&all, &intent.compounds, &shared, &passive_groups, &cfg.groups, &hg, &net_classes, &canon, &cfg.policy);
     intent.tree = graph::hsmpg(netlist.devices.len(), &reqs, &canon);
     intent.sets = sets::matched_sets(&reqs, &intent.compounds, &shared, &passive_sets, &block::leaves(&blocks), &canon, &drawn, &hg, &cfg.process.unit, &mut intent.diagnostics);
     // EXT-16: kind, class and style per set; the unit floors depend on the class.
@@ -241,10 +255,14 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         let kinds: Vec<BlockKind> = sets::inside(&leaf_idx, s.members.iter().map(|m| m.device.0 as usize), pair).into_iter().map(|b| leaves[b].kind).collect();
         roles.push(kinds);
     }
+    // The sidecar entry whose devices cover a set's members (EXT-26).
+    let covering = |ds: &[DeviceId], s: &analog::intent::MatchSpec| s.members.iter().all(|m| ds.contains(&m.device));
     for (s, kinds) in intent.sets.iter_mut().zip(&roles) {
-        s.kind = class::kind_of(s, kinds, netlist.devices[s.members[0].device.0 as usize].kind);
+        let user_kind = cfg.classes.iter().find(|c| covering(&c.0, s)).and_then(|c| c.2);
+        s.kind = user_kind.unwrap_or_else(|| class::kind_of(s, kinds, netlist.devices[s.members[0].device.0 as usize].kind));
     }
     let input = |i: usize| roles[i].contains(&BlockKind::DiffPair);
+    let mut set_roles = Vec::with_capacity(intent.sets.len());
     let input_compounds: std::collections::HashSet<u16> = (0..intent.sets.len()).filter(|&j| input(j)).filter_map(|j| intent.sets[j].compound).collect();
     for i in 0..intent.sets.len() {
         let s = &intent.sets[i];
@@ -268,7 +286,10 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         } else {
             class::SetRole::Other
         };
-        let mut ctx = class::ClassCtx { user: None, spec_6sigma: cfg.offset_sigma_mv.map(|v| 6.0 * v), role, diags: &mut intent.diagnostics };
+        set_roles.push(role);
+        let user = cfg.classes.iter().find(|c| covering(&c.0, s)).map(|c| c.1);
+        let sigma = cfg.offset_budgets.iter().find(|b| covering(&b.0, s)).map(|b| b.1).or(cfg.offset_sigma_mv);
+        let mut ctx = class::ClassCtx { user, spec_6sigma: sigma.map(|v| 6.0 * v), role, diags: &mut intent.diagnostics };
         let (c, src) = class::class_of(s, &mut ctx);
         let source = |d: DeviceId| {
             let i = d.0 as usize;
@@ -301,19 +322,86 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         c.kind = if perfect { analog::intent::SymKind::Perfect } else { analog::intent::SymKind::Mirror };
     }
     sets::set_pairs(&mut intent.compounds, &intent.sets);
-    let mut placement = emit::placement(&intent, &blocks, netlist, &drawn, &cfg.process, cfg.offset_sigma_mv, &cfg.policy);
+    let load_leaf = {
+        let mut v = vec![false; n];
+        leaves.iter().filter(|b| b.kind == BlockKind::Load).flat_map(|b| &b.devices).for_each(|d| v[d.0 as usize] = true);
+        v
+    };
+    // EXT-18: classes that need sets, then device roles, then current-source gates.
+    let load_af = classify::net_load_af(&hg, &gates, cfg.process.gate_af_per_um2);
+    intent.nets = classify::refine(
+        &mut net_classes,
+        &classify::RefineCtx {
+            hg: &hg,
+            matches: &all,
+            sets: &intent.sets,
+            set_roles: &set_roles,
+            passive: &passive_sets,
+            user: &user,
+            ev,
+            user_classes: &cfg.net_classes,
+            ports: &netlist.ports,
+            load_af: &load_af,
+        },
+    );
+    intent.devices = evidence::device_facts(netlist, ev.op.as_ref(), &net_classes, &shared, &load_leaf);
+    // The gate of every CurrentSource is a bias line. Cascode/CurrentSource-by-class
+    // gates already are, so one pass is a fixpoint. A sidecar class (User) wins (EXT-26 step 4).
+    for (d, f) in intent.devices.iter().enumerate() {
+        let g = (f.role == analog::intent::DeviceRole::CurrentSource).then(|| pattern::pin_net(&hg, d as u32, "G")).flatten();
+        let g = g.filter(|g| intent.nets[g.0 as usize].evidence != analog::intent::EvidenceLevel::User);
+        if let Some(g) = g.filter(|g| matches!(net_classes[g.0 as usize].class, analog::metadata::NetClass::Signal | analog::metadata::NetClass::Sensitive)) {
+            classify::set_class(&mut net_classes[g.0 as usize], analog::metadata::NetClass::Bias, load_af[g.0 as usize]);
+            intent.nets[g.0 as usize].evidence = analog::intent::EvidenceLevel::OpPoint;
+        }
+    }
+    // EXT-23: substrate tags; an aggressor is never a victim.
+    (intent.aggressors, intent.victims) = substrate::tag(netlist, &net_classes, &intent.sets);
+    intent.aggressors.extend(substrate::injectors(netlist, &net_classes, ev.op.as_ref(), cfg.policy.inj_series_ohm, &mut missing));
+    let victim = substrate::victim_mask(n, &intent.victims);
+    let mut aggressor = vec![false; n];
+    intent.aggressors.iter().filter(|a| matches!(a.inject, analog::intent::Inject::Switching | analog::intent::Inject::Capacitive)).for_each(|a| aggressor[a.device.0 as usize] = true);
+    let mut routing = extract::routing(
+        &hg,
+        &net_classes,
+        &gates,
+        &cfg.process,
+        &mut intent,
+        &set_roles,
+        &cfg.policy,
+        &netlist.ports,
+        ev.op.as_ref(),
+    );
+    intent.kelvins.extend(cfg.kelvins.iter().cloned());
+    if ev.op.is_some() && ev.probe_bias {
+        intent.diagnostics.push(analog::intent::Diagnostic {
+            kind: "probe_bias",
+            devices: vec![],
+            message: "device regions from a synthesised probe bench".into(),
+        });
+    }
+    let mut placement = emit::placement(&intent, &blocks, &cfg.groups, netlist, &drawn, &cfg.process, cfg.offset_sigma_mv, &cfg.policy);
     // Same entry of `blocks`, glue excluded: glue is no stage.
     let mut block_of = vec![usize::MAX; netlist.devices.len()];
     for (bi, b) in blocks.iter().enumerate().filter(|(_, b)| b.kind != BlockKind::Glue) {
         b.devices.iter().for_each(|d| block_of[d.0 as usize] = bi);
     }
-    let same_block = |a: usize, v: usize| block_of[a] != usize::MAX && block_of[a] == block_of[v];
+    // Related devices sit together by design (AA-13): same block, same matched
+    // set, or same symmetry compound (EXT-23 step 4: strongarm's `mn0` on the axis).
+    let set_devs: Vec<Vec<DeviceId>> = intent.sets.iter().map(|s| s.members.iter().map(|m| m.device).collect()).collect();
+    let compound_devs: Vec<Vec<DeviceId>> =
+        intent.compounds.iter().map(|c| c.pairs.iter().flat_map(|&(a, b)| [a, b]).chain(c.selfs.iter().copied()).collect()).collect();
+    let in_set = sets::device_index(n, set_devs.iter().map(Vec::as_slice));
+    let in_compound = sets::device_index(n, compound_devs.iter().map(Vec::as_slice));
+    let shares = |idx: &[Vec<usize>], a: usize, v: usize| idx[a].iter().any(|i| idx[v].contains(i));
+    let related = |a: usize, v: usize| (block_of[a] != usize::MAX && block_of[a] == block_of[v]) || shares(&in_set, a, v) || shares(&in_compound, a, v);
     let p = &cfg.process;
-    if let Some(why) = emit::isolation(&hg, &net_classes, &sensitive, &same_block, p.substrate, p.epi_nm, &mut placement) {
+    if let Some(why) = emit::isolation(&aggressor, &victim, &related, p.substrate, p.epi_nm, &mut placement) {
         missing.push(("Isolation", why));
     }
 
     // Stable ids in emission order (permutation-invariant since EXT-06). A
+    // pre-tagged batch (sidecar `GroupBlocks`) keeps its origin; else a
     // placement batch whose first touched device is in a recognised block came
     // from that block's pattern; Isolation is cross-block, and the rest are net-class.
     let mut next = 0u32;
@@ -330,7 +418,9 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
                 inner.touched(&mut ids);
                 ids.iter().for_each(|&d| touched[d as usize] = true);
                 let bi = ids.first().map_or(usize::MAX, |&d| block_of[d as usize]);
-                let origin = if bi == usize::MAX || inner.kind().ends_with("::Isolation") {
+                let origin = if let Some(m) = inner.meta() {
+                    m.origin
+                } else if bi == usize::MAX || inner.kind().ends_with("::Isolation") {
                     analog::intent::Origin::NetClass
                 } else {
                     analog::intent::Origin::Pattern { template: blocks[bi].template }
@@ -365,14 +455,19 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         })
         .collect();
 
-    // REL-07: guard rings by role. Without EXT-23 tags an aggressor is a
-    // device on a Clock-class net; there are no victims or injectors yet.
+    // REL-07: guard rings by role, from the EXT-23 tags.
     let mut constraints = constraints::assemble(netlist, &drawn, &blocks, &intent.sets);
     {
         use analog::metadata::NetClass;
         let of_class = |c: NetClass| net_classes.iter().filter(move |k| k.class == c).map(|k| k.net);
-        let clocks: Vec<NetId> = of_class(NetClass::Clock).collect();
-        let aggressor: Vec<bool> = netlist.devices.iter().map(|d| d.terminals.iter().any(|(_, n)| clocks.contains(n))).collect();
+        let mut injector = vec![None; netlist.devices.len()];
+        for a in &intent.aggressors {
+            match a.inject {
+                analog::intent::Inject::MinorityElectron => injector[a.device.0 as usize] = Some(rings::Carrier::Electrons),
+                analog::intent::Inject::MinorityHole => injector[a.device.0 as usize] = Some(rings::Carrier::Holes),
+                _ => {}
+            }
+        }
         let touched_by_aggressor = |n: NetId| netlist.devices.iter().zip(&aggressor).any(|(d, &a)| a && d.terminals.iter().any(|t| t.1 == n));
         let name = |n: NetId| netlist.nets[n.0 as usize].name.to_lowercase();
         let quiet_ring_net = match &cfg.quiet_ring_net {
@@ -385,14 +480,13 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         let (rings, notes) = rings::plan(&rings::RingInputs {
             netlist,
             aggressor: &aggressor,
-            victim: &vec![false; netlist.devices.len()],
-            injector: &vec![None; netlist.devices.len()],
+            victim: &victim,
+            injector: &injector,
             substrate: p.substrate,
             quiet_ring_net,
-            // ponytail: the lowest-id Supply net, not the highest rail: the
-            // annotator has no rail voltages; read them when EXT-23 brings
-            // them (row 1 needs CELL-17's drawable ECGR first anyway).
-            highest_supply: of_class(NetClass::Supply).min_by_key(|n| n.0),
+            // The Supply net at the highest known DC level; the lowest id
+            // when the op point gives none.
+            highest_supply: of_class(NetClass::Supply).max_by_key(|n| (intent.nets[n.0 as usize].dc_mv.map(|v| v.0), std::cmp::Reverse(n.0))),
             ground: of_class(NetClass::Ground).min_by_key(|n| n.0),
             min_ring_width_nm: p.min_ring_width_nm,
             ecgr_min_width_nm: p.ecgr_min_width_nm,
@@ -417,6 +511,27 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         blocks,
         missing,
     }
+}
+
+/// `cfg` plus the testbench's rails and clocks (EXT-17): with ≥ 2 distinct DC
+/// source levels, the nets at the highest (lowest) level that [`rail_of`] gives
+/// no role join `supply_nets` (`ground_nets`); switching-source nets join
+/// `clock_nets`. Names, so [`netrole::classify_nets`] runs unchanged.
+fn with_testbench(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -> AnnotationConfig {
+    let mut cfg = cfg.clone();
+    let name = |n: NetId| netlist.nets[n.0 as usize].name.clone();
+    let (lo, hi) = ev.dc_sources.iter().map(|&(_, v)| v).fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| (a.min(v), b.max(v)));
+    if lo < hi {
+        for &(n, v) in ev.dc_sources.iter().filter(|(n, _)| rail_of(&netlist.nets[n.0 as usize].name).is_none()) {
+            if v == hi {
+                cfg.supply_nets.push(name(n));
+            } else if v == lo {
+                cfg.ground_nets.push(name(n));
+            }
+        }
+    }
+    cfg.clock_nets.extend(ev.switching_nets.iter().map(|&n| name(n)));
+    cfg
 }
 
 /// Gate area `W_total·L·m` of a FET, µm²; `0` for anything else or when the
