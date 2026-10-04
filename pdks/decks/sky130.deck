@@ -721,7 +721,8 @@ rule hvntm.6b forbidden((ptap.edges() and diff.edges()).inside_part(hvntm))
 # Devices: the substrate (psub), each n-well and each isolated p-well are
 #   nets, and every MOS has a bulk. pd2nw and the 20V devices have no
 #   recogniser yet, nor do the native nfets (03v3_nvt, 05v0_nvt, areaid.le).
-#   Of the bipolars only the W3p40 PNP and the W1p00L1p00 NPN are recognised. VPP capacitors are fixed cells with no marker a
+#   Of the bipolars only the W3p40 PNP and the W1p00L1p00 NPN are
+#   recognised. VPP capacitors are fixed cells with no marker a
 #   recogniser can use.
 # Latch-up: esd_latchup needs a guard-ring width and tap distance that [S1]
 #   does not state.
