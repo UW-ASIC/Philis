@@ -393,6 +393,7 @@ mod tests {
                 series_parallel: SeriesParallel::Series,
                 dummy_required: false,
                 route_matching_required: false,
+                class: None,
             }],
             ..Default::default()
         };

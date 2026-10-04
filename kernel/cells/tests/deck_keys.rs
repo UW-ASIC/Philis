@@ -83,6 +83,7 @@ fn group_of(kind: DeviceKind, dev_nf: &[u16], w: i32, l: i32, dummy_required: bo
         series_parallel: sp,
         dummy_required,
         route_matching_required: dummy_required,
+        class: None,
     });
     (group, c)
 }

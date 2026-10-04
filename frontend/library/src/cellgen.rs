@@ -319,22 +319,34 @@ fn region_spans(m: &Macro, members: usize) -> Vec<Option<(i32, i32)>> {
 }
 
 /// Starting variant per cell, chosen by measuring each alternative in
-/// isolation (see [`price`]). Ties break on index, so the seed is deterministic.
+/// isolation (see [`price`], [`seed_of`]). Ties break on index, so the seed is deterministic.
 /// Also per cell the alternatives [`escalate`] may visit ([`keep`] over
 /// `(DRC+ERC, bbox w, bbox h)` from the same prices; `matched[i]` keeps all).
+/// `ranked[i]` (missing = false) marks a cell whose generator lists its
+/// alternatives best-matching first (GAP-18).
 #[must_use]
-pub fn seed_assignment(variants: &[gp::VariantSpace], matched: &[bool], pdk: &Pdk) -> (Vec<u16>, Vec<Vec<u16>>) {
+pub fn seed_assignment(variants: &[gp::VariantSpace], matched: &[bool], ranked: &[bool], pdk: &Pdk) -> (Vec<u16>, Vec<Vec<u16>>) {
     let mut checker = Checker::new(pdk, true).expect("a loaded Pdk re-parses its own deck");
     variants
         .iter()
         .enumerate()
         .map(|(i, space)| {
             let prices: Vec<(usize, i64)> = space.alternatives.iter().map(|m| price(m, &mut checker)).collect();
-            let seed = prices.iter().enumerate().min_by(|a, b| a.1.cmp(b.1)).map_or(0, |(v, _)| v);
+            let seed = seed_of(&prices, ranked.get(i).copied().unwrap_or(false));
             let cost: Vec<(usize, i32, i32)> = prices.iter().zip(&space.alternatives).map(|(p, m)| (p.0, m.bbox.w, m.bbox.h)).collect();
             (seed as u16, keep(&cost, seed, matched.get(i).copied().unwrap_or(true)))
         })
         .unzip()
+}
+
+/// Seed index from `(DRC+ERC, HPWL)` prices: the cheapest, ties → index; a `ranked` cell (its generator lists
+/// alternatives best-first, GAP-18) takes its lowest index among the DRC+ERC-minimal ones, HPWL ignored.
+fn seed_of(prices: &[(usize, i64)], ranked: bool) -> usize {
+    if ranked {
+        let clean = prices.iter().map(|p| p.0).min();
+        return prices.iter().position(|p| Some(p.0) == clean).unwrap_or(0);
+    }
+    prices.iter().enumerate().min_by(|a, b| a.1.cmp(b.1)).map_or(0, |(v, _)| v)
 }
 
 /// The alternatives of one cell worth escalating to, ascending: all when
@@ -404,7 +416,7 @@ pub fn realize(variants: &[gp::VariantSpace], assignment: &[u16]) -> Vec<Macro> 
 /// The next joint assignment to try, or `None` when the space is exhausted.
 ///
 /// A mixed-radix odometer over the cells, digit `i` ranging over
-/// `allowed[i]` (ascending; [`seed_assignment`]), fastest digit = the cell
+/// `allowed[i]` (ascending = best-matching first for a ranked cell; [`seed_assignment`]), fastest digit = the cell
 /// whose alternatives move pins the most ([`pin_spread`]): never repeats,
 /// always terminates, and changes pin geometry first. A cell with an empty
 /// or one-entry `allowed` row is a fixed digit.
@@ -516,6 +528,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             series_parallel: SeriesParallel::Parallel,
             dummy_required: true,
             route_matching_required: true,
+            class: None,
         });
     }
     // Uncovered bipolars of one kind and geometry on one base net are a
@@ -537,6 +550,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             series_parallel: SeriesParallel::Parallel,
             dummy_required: false,
             route_matching_required: true,
+            class: None,
         });
     }
     // Uncovered MOS devices on the same four nets at the same W/L are one
@@ -558,6 +572,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             series_parallel: SeriesParallel::Parallel,
             dummy_required: false,
             route_matching_required: false,
+            class: None,
         });
     }
     for (i, dev) in netlist
@@ -595,6 +610,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             },
             dummy_required: false,
             route_matching_required: false,
+            class: None,
         });
     }
     // Fold every MOS unitization by its width class's factor: `k`× the
@@ -1434,6 +1450,7 @@ mod tests {
                 series_parallel: SeriesParallel::Parallel,
                 dummy_required: false,
                 route_matching_required: false,
+                class: None,
             }],
             ..Default::default()
         }
@@ -1852,8 +1869,8 @@ mod tests {
         let netlist = two_devices();
         let cells = enumerate(&netlist, &Macros::default(), &Constraints::default(), &pdk, true);
         let matched = vec![false; cells.spaces.len()];
-        let (a, allowed) = seed_assignment(&cells.spaces, &matched, &pdk);
-        let (b, _) = seed_assignment(&cells.spaces, &matched, &pdk);
+        let (a, allowed) = seed_assignment(&cells.spaces, &matched, &[], &pdk);
+        let (b, _) = seed_assignment(&cells.spaces, &matched, &[], &pdk);
         assert!(a.iter().zip(&allowed).all(|(v, row)| row.contains(v)), "the seed is always allowed");
         assert_eq!(a, b);
         assert_eq!(a.len(), cells.spaces.len());
@@ -1962,5 +1979,58 @@ mod tests {
         let (cards, _) = drawn_cards(&[m], &names, &netlist, &pdk);
         assert_eq!(cards.len(), 2, "{cards:?}");
         assert!(cards.iter().any(|c| c.terminals.iter().any(|t| t == "~0.0.no-P")), "{cards:?}");
+    }
+
+    /// GAP-18: a ranked cell seeds at its first DRC+ERC-minimal alternative, HPWL ignored; unranked keeps
+    /// `(DRC+ERC, HPWL)` with index ties.
+    #[test]
+    fn ranked_cells_seed_at_their_first_clean_alternative() {
+        assert_eq!(seed_of(&[(1, 5), (0, 90), (0, 10)], false), 2);
+        assert_eq!(seed_of(&[(1, 5), (0, 90), (0, 10)], true), 1);
+        assert_eq!(seed_of(&[(0, 9), (0, 1)], true), 0);
+    }
+
+    /// GAP-18 acceptance: dac4's bank, annotated Exceptional, draws its lowest-M_sys variant as alternative 0
+    /// and the flow seeds a lowest-M_sys variant (non-vacuous: some other variant has a higher M_sys).
+    #[test]
+    fn exceptional_dac4_seeds_the_lowest_msys() {
+        let pdk = pdk();
+        let mut nl = crate::parse(include_str!("../../../benchmarks/fixtures/dac4.spice")).expect("parses");
+        crate::deck_models(&mut nl, &pdk);
+        let id = |n: &str| DeviceId(nl.devices.iter().position(|d| d.name == n).unwrap_or_else(|| panic!("{n}")) as u16);
+        let devices: Vec<DeviceId> = ["XC0", "XC1", "XC2", "XC3", "XC4"].into_iter().map(id).collect();
+        let c = Constraints {
+            unitization: vec![Unitization {
+                devices: devices.clone(),
+                device_type: DeviceKind::Capacitor,
+                dev_nf: vec![1, 1, 2, 4, 8],
+                target_ratio: vec![1, 1, 2, 4, 8],
+                unit_w: 2000,
+                unit_l: 2000,
+                series_parallel: SeriesParallel::Parallel,
+                dummy_required: true,
+                route_matching_required: true,
+                class: Some(pnr_core::MatchClass::Exceptional),
+            }],
+            ..Default::default()
+        };
+        let cells = enumerate(&nl, &Macros::default(), &c, &pdk, false);
+        let ci = usize::from(cells.cell_of[devices[0].0 as usize]);
+        assert_eq!(cells.devices_of[ci], devices, "the bank is one cell");
+        let group = DeviceGroup { devices };
+        let model = &nl.devices[group.devices[0].0 as usize].model;
+        let recipe = pdk.recipe("capacitor", model).expect("cap_generic_m1m2 has a capacitor recipe");
+        let p = verify::pdk::Overlay { pdk: &pdk, recipe };
+        let variants = CapArray::enumerate(&group, &c, &p);
+        let ms: Vec<f64> = variants.iter().map(|v| v.metrics(&group, &c, &p, cells::cap_array::RANK_G_PER_UM).msys).collect();
+        assert!(ms.iter().any(|&m| m > ms[0]), "vacuous: every variant has M_sys {ms:?}");
+        assert!(ms.iter().all(|&m| ms[0] <= m), "variant 0 is not the lowest M_sys: {ms:?}");
+        assert!(cells.spaces[ci].alternatives[0].shapes == variants[0].draw(&group, &c, &p).shapes, "alternative 0 is not the ranked first variant");
+        let mut ranked = vec![false; cells.spaces.len()];
+        ranked[ci] = true;
+        // Not `== 0`: `price` passes no ports, so every conductor is an x.22 finding and the count tracks shape
+        // count (178/176/178 here); the seed is the first ranked variant with the fewest, still at the lowest M_sys.
+        let seed = usize::from(seed_assignment(&cells.spaces, &vec![true; cells.spaces.len()], &ranked, &pdk).0[ci]);
+        assert!(ms[seed] <= ms.iter().copied().fold(f64::INFINITY, f64::min), "seed {seed} M_sys {ms:?}");
     }
 }

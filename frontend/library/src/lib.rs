@@ -748,7 +748,14 @@ fn topology<'a>(
         .flat_map(|l| l.devices.iter().copied())
         .collect();
     let matched: Vec<bool> = flow.cells.devices_of.iter().map(|m| m.len() > 1 || m.iter().any(|d| paired.contains(d))).collect();
-    let (assignment0, allowed) = cellgen::seed_assignment(&flow.cells.variants, &matched, pdk);
+    // GAP-18: a cell inside an Exceptional unitization lists its alternatives best-matching first.
+    let ranked: Vec<bool> = flow
+        .cells
+        .devices_of
+        .iter()
+        .map(|m| flow.problem.constraints.unitization.iter().any(|u| u.class == Some(pnr_core::MatchClass::Exceptional) && m.iter().all(|d| u.devices.contains(d))))
+        .collect();
+    let (assignment0, allowed) = cellgen::seed_assignment(&flow.cells.variants, &matched, &ranked, pdk);
     Topology { flow, assignment0, allowed, distinct, t_em_k, em_derate }
 }
 

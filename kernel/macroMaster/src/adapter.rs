@@ -36,6 +36,7 @@ pub(crate) fn draw<G: Cell>(
             series_parallel,
             dummy_required: dummies,
             route_matching_required: false,
+            class: None,
         }],
         ..Constraints::default()
     };
