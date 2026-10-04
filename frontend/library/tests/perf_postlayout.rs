@@ -236,6 +236,28 @@ fn fixtures_resolve_every_device() {
     }
 }
 
+/// GAP-17: the op run resolves every net's DC voltage; the probe holds the
+/// rails and drives the gate-only bias nets at mid-rail.
+#[test]
+fn ota_op_resolves_every_net_voltage() {
+    let Some(lib) = models() else { return };
+    let nl = fixture("ota");
+    let cfg = op_cfg(lib);
+    let op = library::oppoint::extract(&nl, &cfg).unwrap();
+    assert_eq!(op.net_v.len(), nl.nets.len());
+    let v = |name: &str| op.net_v[nl.nets.iter().position(|n| n.name == name).unwrap()];
+    for (n, x) in nl.nets.iter().zip(&op.net_v) {
+        assert!(x.is_some(), "{} unresolved", n.name);
+    }
+    assert_eq!(v("VSS"), Some(0.0));
+    assert!((v("VDD").unwrap() - cfg.vdd).abs() < 1e-6, "{:?}", v("VDD"));
+    for g in ["vbias", "vbn"] {
+        assert!((v(g).unwrap() - cfg.vdd / 2.0).abs() < 1e-6, "{g}: {:?}", v(g));
+    }
+    let t = v("vtail").unwrap();
+    assert!(t > 0.0 && t < cfg.vdd, "vtail {t}");
+}
+
 /// The poly resistor carries the inverter's output into a load, and its
 /// current closes KCL on `vmid` with the two FETs.
 #[test]
