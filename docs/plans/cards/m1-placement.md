@@ -1,5 +1,10 @@
 # M1 placement batch: implementation cards (PLC-02, PLC-04, PLC-03, PLC-06, PLC-10 step 0)
 
+**Status (2026-10-04, after `git merge m1a` at `1547db2`, clean, no conflicts):** PLC-02 (`1d7a243`), PLC-04
+(`721d775`), PLC-03 (`505644c`) and PLC-06 (`c29b238`) are already committed on this branch; their cards below are
+kept as the record and their line numbers are the old base's. The merged tree passes `cargo check --workspace
+--tests` and `cargo test -p dp` (33 passed). **Only PLC-10 step 0 remains**; its card is refreshed to today's lines.
+
 Branch `m1a-placement`, worktree `philis-m1a/placement`, base `850560f` (`git merge m1a` fast-forwarded: no
 conflicts). Spec: `plan-04-placement.md` §3. Line numbers are this base's; where the plan's differ, the card wins.
 Order = dependency order: **02 → 04 → 03 → 06 → 10.0**. 06 needs 03 (dp stops reading `Layout::groups` before 06
@@ -509,35 +514,61 @@ Tests:
 
 ## PLC-10 step 0 `dp::Schedule` (flat path) — class: mechanical
 
-Current facts: `MAX_ITERS = 220` (`dp/lib.rs:21`), `RANGE0 = 0.4` (`:26`), and `t0 = mean|ΔPEX| · 0.02` (literal
-at `:311`, probe `:298-311`), read at `:299` and `:323`. FLOW-08 calls `dp::place(…, dp::Schedule::cold())` with
-the schedule as the trailing argument (plan-08 L727-731). Steps 1–4 are M3 (need PLC-08/09).
+Current facts (tree `1547db2`, after PLC-03/06 and the matching merge; the plan's `:21-27`, `:276-289` are stale):
+- `const MAX_ITERS: u32 = 220;` at `backend/dp/src/lib.rs:23`; `const RANGE0: f32 = 0.4;` at `:28` (doc `:27`).
+  `ALPHA`, `MOVES_PER_CELL`, `RANGE_DECAY`, `REGION_FILL` stay constants (not in step 0's scope).
+- `pub fn place(coarse, macros, variants, reqs, fixed, locks, prices, rules, net_weight, seed)` at `:216-227`
+  (doc `:205-214`, `#[allow(clippy::too_many_arguments)]` at `:215`).
+- Probe: comment `:286`, `let mut range = RANGE0;` `:287`, 128 probe moves `:290-298`,
+  `let mut temp = (sum / 128.0).max(1.0) * 0.02;` `:299`. Loop `for _ in 0..MAX_ITERS {` `:311`.
+- Callers of `dp::place`: `frontend/library/src/lib.rs:785` (epoch), the `run` helper `backend/dp/src/tests.rs:34-44`
+  (call `:43`), and `place_does_not_settle` `tests.rs:257` (call `:287`). No other caller in the workspace.
+- `rotate_bench()` is at `tests.rs:53-57`; its `groups` are ignored since PLC-03, it is still a valid 4-cell input.
+- FLOW-08 (plan-08 L727-731) calls `dp::place(…, dp::Schedule::cold()|warm())` with the schedule trailing and names
+  only `range0`, `max_temps`, `t0_scale` (`..` for the rest). P6: the SP fields are not added.
 
 Edits:
-1. **First**, on the tree right before this item, add the characterization test `cold_schedule_reproduces_todays_layout`
-   to `dp/src/tests.rs`:
-   - Run `run(&rotate_bench(), &[], &[], &Requirements::default(), &[false; 4], 7)`.
-   - Print `l.x`, `l.y`, `l.orient` once and paste them as literals.
-   - Assert equality.
-   - Commit it green.
-2. `backend/dp/src/lib.rs`:
+1. **First**, on today's tree, add to `backend/dp/src/tests.rs`:
    ```rust
-   /// The flat anneal's schedule. `t0 = t0_scale · mean|ΔPEX|` over 128 probe moves.
-   #[derive(Clone, Copy, Debug, PartialEq)]
-   pub struct Schedule { pub range0: f32, pub max_temps: u32, pub t0_scale: f64 }
-   impl Schedule {
-       /// Today's constants: refine gp, don't randomise it.
-       pub fn cold() -> Self { Self { range0: 0.4, max_temps: 220, t0_scale: 0.02 } }
-       /// FLOW-08 step 3's flat warm start from an incumbent [policy, measure].
-       pub fn warm() -> Self { Self { range0: 0.05, max_temps: 60, t0_scale: 0.002 } }
+   /// PLC-10 step 0: `Schedule::cold()` is exactly the constants it replaced.
+   #[test]
+   fn cold_schedule_reproduces_todays_layout() {
+       let l = run(&rotate_bench(), &[], &[], &Requirements::default(), &[false; 4], 7);
+       assert_eq!(l.x, vec![/* literals */]);
+       assert_eq!(l.y, vec![/* literals */]);
+       assert_eq!(l.orient, vec![/* literals */]);
    }
    ```
-   - Delete `MAX_ITERS` and `RANGE0`.
-   - `place` gains a trailing `schedule: Schedule` parameter: `let mut range = schedule.range0;`, the temperature
-     line uses `* schedule.t0_scale`, and the loop is `for _ in 0..schedule.max_temps`. Update the "t0 = 0.02 ·"
-     comment.
-   - Callers pass `Schedule::cold()`: `lib.rs` epoch, the test `run` helper and `place_does_not_settle`.
-3. The test from step 1 now goes through `run` → `Schedule::cold()` and must stay green unchanged.
+   Fill the literals by temporarily adding `eprintln!("{:?} {:?} {:?}", l.x, l.y, l.orient);`, running
+   `cargo test -p dp cold_schedule -- --nocapture`, pasting, removing the print. Commit it green before step 2 (same
+   item commit is fine if step 2 is applied after the literals are captured and the test is re-run unchanged).
+2. `backend/dp/src/lib.rs`:
+   - Delete `MAX_ITERS` (`:23`) and `RANGE0` with its doc (`:27-28`).
+   - After the constants, add:
+     ```rust
+     /// The flat anneal's schedule (PLC-10 step 0): initial move window `range0` (fraction of the
+     /// die span), `max_temps` temperature steps, `t0 = t0_scale · mean|ΔPEX|` over 128 probe moves.
+     #[derive(Clone, Copy, Debug, PartialEq)]
+     pub struct Schedule {
+         pub range0: f32,
+         pub max_temps: u32,
+         pub t0_scale: f64,
+     }
+     impl Schedule {
+         /// Today's constants: refine gp, don't randomise it.
+         pub fn cold() -> Self { Self { range0: 0.4, max_temps: 220, t0_scale: 0.02 } }
+         /// FLOW-08 step 3's flat warm start from an incumbent [policy, measure].
+         pub fn warm() -> Self { Self { range0: 0.05, max_temps: 60, t0_scale: 0.002 } }
+     }
+     ```
+   - `place` gains a trailing `schedule: Schedule` after `seed`. Doc: add "`schedule` sets the anneal's window,
+     length and starting temperature ([`Schedule::cold`] is the gp-refining default)."
+   - `:286` comment → `// t0 = t0_scale · mean |ΔPEX| over probe moves.`; `:287` → `let mut range = schedule.range0;`;
+     `:299` → `... * schedule.t0_scale;`; `:311` → `for _ in 0..schedule.max_temps {`.
+3. Callers append `Schedule::cold()` (`dp::Schedule::cold()` in library): `lib.rs:785`, `tests.rs:43`, `tests.rs:287`.
+   No caller passes `warm()` in M1 (FLOW-08 is its first reader).
 
-Tests: `cold_schedule_reproduces_todays_layout` (above). Command: `cargo test -p dp`. Acceptance: green;
-`cargo test -p library --test placement_metrics` still deterministic (bit-identical behaviour).
+Tests: `cold_schedule_reproduces_todays_layout` (step 1) must stay green unchanged after step 2; it is the
+bit-identity proof (`temp` is `f64`, `range` `f32`, so moving the literals into fields cannot change arithmetic).
+Commands: `cargo test -p dp`; `cargo check --workspace --tests`; `cargo test --release -p library --test
+placement_metrics` (must still pass). Acceptance: all green, no bench needed (no behaviour change).
