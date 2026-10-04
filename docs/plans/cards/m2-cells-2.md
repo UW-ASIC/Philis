@@ -23,7 +23,7 @@ Spec: plan-03 `### CELL-13`, with 98-gap-critic D19 (depend on FLOW-05, not REL-
   draws every `Mosfet::enumerate` result, and every MOS macro set goes through `draw_variants` (cellgen.rs:123, 132, 180).
   So the measurement is exact on the drawn macro and is filtered there. `stack_on_tap` (mosfet.rs:173-232) shares the
   strip between both rows, and a measurement on the drawn macro covers that case for free.
-- `folds` reads `max_finger_width` as `w_max` (cellgen.rs:627).
+- `folds` reads `max_finger_width` as `w_max` (cellgen.rs:627); after CELL-13 it is also capped by the tap reach.
 
 ### Edits
 
@@ -50,11 +50,11 @@ Spec: plan-03 `### CELL-13`, with 98-gap-critic D19 (depend on FLOW-05, not REL-
 3. sidecar.rs:137: reader `"kernel/cells/src/mosfet.rs taps_in_reach, via frontend/library/src/cellgen.rs draw_variants (CELL-13)"`.
    In the `_source` strings of sky130/ihp_sg13g2/generic_finfet.json, replace "Read by no code yet (CELL-13 tap reach)"
    with "Read by cells::mosfet::taps_in_reach (CELL-13)." (sky130.json:101 and its siblings).
-4. Plan step 3 (`max_finger_for_taps` and the `folds` clamp) is **not built**. The test below shows that every planar deck
-   has `tap_reach(max_finger_width) ≤ tie_max`, so the clamp would never bind. If a future deck breaks that, the test
-   fails, and step 2 reduces the device to the placeholder, which is loud. Add
-   `// ponytail: no folds clamp; add max_finger_for_taps if a deck's tie_max < max_finger_width + pad offsets` at cellgen.rs:627.
-   Plan step 4 (no second strip) stands.
+4. Plan step 3 (`max_finger_for_taps` and the `folds` clamp) **is built** (amended; see the report below). The premise
+   that every planar deck has `tap_reach(max_finger_width) ≤ tie_max` is false: gf180mcu and ihp_sg13g2 allow 100 µm
+   fingers against a 20 µm `tie_max`. `mosfet::max_finger_for_taps(pdk, l)` is `tie_max` minus the largest pad offset
+   (reach − W) over probe draws; `folds` caps `w_max` by it, floored at `w_min`, and skips it on a fin deck (`FinFet`
+   is drawn there, not the probed `Mosfet`). Plan step 4 (no second strip) stands.
 
 ### Tests
 
@@ -63,7 +63,7 @@ Spec: plan-03 `### CELL-13`, with 98-gap-critic D19 (depend on FLOW-05, not REL-
   the diffusion is at y = 0 and the strip spans its x range. For `group_of(Nmos, 1, 4, 1680, 150)`, the `rows == 2`
   variant's reach equals the `rows == 1` variant's (the mirrored row has the same offset).
 - mosfet.rs `every_diffusion_point_reaches_its_tap` (T8): for `Pdk::builtin` of sky130, gf180mcu and ihp_sg13g2, kinds
-  N/P, W ∈ {420, 1680, 5000, `max_finger_width`}, L = the deck's `min_channel(pmos, "").0`, (n, nf) ∈ {(1,1), (2,1),
+  N/P, W ∈ {420, 1680, 5000, `min(max_finger_width, max_finger_for_taps)`} (amended: the widest finger `folds` draws), L = the deck's `min_channel(pmos, "").0`, (n, nf) ∈ {(1,1), (2,1),
   (2,2), (4,4)}, and dummies {false, true}. Assert that every enumerated variant's drawn macro satisfies `taps_in_reach`,
   and collect failures into one message: deck, kind, n, nf, W, variant index, reach, tie_max. If a non-sky130 deck cannot
   draw some point, record that in the report. Do not drop the deck silently.
@@ -142,3 +142,28 @@ Spec: plan-03 `### CELL-19`. Consumer: PERF-26 (`Figures.sd`, `Figures.gate_ohm`
   `.clone()` change).
 - Acceptance (PERF-26 carries AS/AD/PS/PD) belongs to PERF-26 (M4). CELL-19 delivers the figures under the names it
   reads.
+
+## CELL-13 / CELL-19 report (commits 2342e5f, c7dd6ef, review fixes 2)
+
+Departure from the card (CELL-13 step 4): `max_finger_for_taps` and the `folds` clamp are built. The card's premise
+(every planar deck has `tap_reach(max_finger_width) ≤ tie_max`) is false. gf180mcu and ihp_sg13g2 set
+`max_finger_width` 100000 against `tie_max_dist_nm` 20000, and reach ≥ W. With T8's W at the raw `max_finger_width`,
+T8 fails on gf180mcu (e.g. Nmos n=1 nf=1 W=100000: reach 100830 > 20000), and the same holds on ihp_sg13g2. T8 now draws at
+`min(max_finger_width, max_finger_for_taps)`, which is the widest finger `folds` emits. On sky130 the reach cap (above
+10000) never binds. Without the clamp, step 2 would drop every wide gf180/ihp device to the empty placeholder.
+
+- The clamp is floored at `w_min`, so a cap ≤ 0 cannot switch the finger cap off. It is skipped on a fin deck,
+  where `draw_variants` draws `FinFet`, not the probed `Mosfet`. The generic_finfet `tie_max_dist_nm_source` says so.
+- `folds_caps_the_finger_at_the_tap_reach` (cellgen) checks the clamp on ihp_sg13g2. It uses 40 fingers of 60 µm,
+  because a single 60 µm finger folds square (11 × 5.5 µm) under the cap anyway. Without the clamp it folds 2 × 30 µm and fails.
+- `two_owners_split_a_shared_region` (mosfet) checks CELL-19's half-and-half split per owner. Cc1d ABBA alone
+  cannot catch a "whole region to the first side" mutation, because its two A|B regions swap owners and the totals match.
+  So the test also covers an A B row, which does catch it.
+
+Tests: `cells` 75/76, `verify`, `pnr_core` and `dr` pass. `library --lib` 153/155. The failures are pre-existing (see
+below). The `library` integration tests did not link: the disk was full ("No space left on device"), which is
+environmental. Pre-existing failures (base 1b613fc): `cells a_gate_bar_has_no_notch` and `library
+size_tests::drawn_width_equals_simulated_width` hit the draw_row `legal_row` debug_assert (mosfet.rs:417, sequence
+[0,1,2]). `library start_tests::same_seed_same_gds_bytes` now panics at the gp `Prices::bind` debug_assert (gp/src/lib.rs:87,
+"a batch kind is registered in both `hard` and `budget`"), not draw_row. These belong to CELL-11 / the m2 merge and
+to gp, not to this segment.

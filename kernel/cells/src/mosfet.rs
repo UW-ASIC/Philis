@@ -1734,6 +1734,28 @@ mod tests {
         assert_eq!(get("S").0, 2 * e * 1680);
     }
 
+    /// Two owners on one region take half each, area and perimeter.
+    #[test]
+    fn two_owners_split_a_shared_region() {
+        use crate::testkit;
+        let Some(pdk) = testkit::pdk() else { return };
+        // A B: the one inner S region, half to each.
+        let (g, c) = testkit::group_of(DeviceKind::Nmos, 2, 1, 1680, 150);
+        let m = Mosfet::enumerate(&g, &c, &pdk).into_iter().find(|v| v.style == Pattern::Single && v.rows == 1).unwrap().draw(&g, &c, &pdk);
+        let (_, pitch) = e_and_pitch(&m, 150);
+        let half = ((pitch - 150) * 1680 / 2, pitch - 150);
+        let get = |m: &Macro, o: u8, t: &str| m.figures.sd.iter().find(|f| f.0 == o && f.1 == t).map(|f| (f.2, f.3));
+        assert_eq!((get(&m, 0, "S"), get(&m, 1, "S")), (Some(half), Some(half)), "{:?}", m.figures.sd);
+        // A B B A, dummies on: each A|B region is half A's, half B's.
+        let (g, mut c) = testkit::group_of(DeviceKind::Nmos, 2, 2, 1680, 150);
+        c.unitization[0].dummy_required = true;
+        let v = Mosfet::enumerate(&g, &c, &pdk).into_iter().find(|v| v.style == Pattern::Cc1d && !v.split_gates && !v.mirror_pins && v.rows == 1).unwrap();
+        let m = v.draw(&g, &c, &pdk);
+        let (_, pitch) = e_and_pitch(&m, 150);
+        let two_halves = ((pitch - 150) * 1680, 2 * (pitch - 150));
+        assert_eq!((get(&m, 0, "S"), get(&m, 1, "S")), (Some(two_halves), Some(two_halves)), "{:?}", m.figures.sd);
+    }
+
     /// sky130 poly 48.2 Ω/□, licon_po 152 Ω: (48.2·10000/(k·150) + 152)/4.
     #[test]
     fn gate_ohm_matches_the_formula() {

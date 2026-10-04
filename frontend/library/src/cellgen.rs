@@ -626,7 +626,10 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
         .max(pdk.width("diff").unwrap_or(0));
     let w_max = pdk.rule("max_finger_width", 0);
     // A finger also keeps its far diffusion corner within the deck's
-    // latch-up tap reach of the strip above it (CELL-13), per gate length.
+    // latch-up tap reach of the strip above it (CELL-13), per gate length,
+    // never below the smallest finger. A fin deck draws `FinFet`, which the
+    // planar probe does not describe: no reach cap there.
+    let fin = pnr_core::Process::layer(pdk, "fin").is_some();
     let mut tap_cap = std::collections::BTreeMap::new();
     // The deck's point-to-point R limit bounds a finger too: a finger's poly,
     // `R□·W_f/L`, within [`P2P_SHARE`] of it.
@@ -662,7 +665,7 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
         let s_of = |j: usize| terminal(&netlist.devices[j], "S");
         let stack = class.len() > 1 && class.iter().any(|&j| s_of(j) != s_of(class[0])) && series_order(netlist, &ids).is_some();
         let (_, pitch) = cells::mosfet::sd_and_pitch(pdk, l);
-        let w_max = match (w_max, *tap_cap.entry(l).or_insert_with(|| cells::mosfet::max_finger_for_taps(pdk, l))) {
+        let w_max = match (w_max, *tap_cap.entry(l).or_insert_with(|| if fin { i32::MAX } else { cells::mosfet::max_finger_for_taps(pdk, l).max(w_min) })) {
             (0, t) if t < i32::MAX => t,
             (m, t) => m.min(t),
         };
@@ -1231,6 +1234,23 @@ mod tests {
         assert!(!all.is_empty() && all.iter().all(|m| !m.shapes.is_empty()), "sky130 keeps every variant");
         pdk.rules.push(("tie_max_dist_nm".into(), 1000));
         assert_eq!(draw_variants(DeviceKind::Nmos, "", &group, &sized, &pdk), vec![Macro::default()]);
+    }
+
+    /// ihp_sg13g2 allows 100 um fingers but 20 um tap reach. A 40-finger nmos
+    /// of 60 um fingers folds squarest at 2 x 30 um, under the raw cap: the
+    /// reach cap must fold it further.
+    #[test]
+    fn folds_caps_the_finger_at_the_tap_reach() {
+        use pnr_core::Process;
+        let pdk = Pdk::builtin("ihp_sg13g2").expect("ihp_sg13g2 loads");
+        let l = pdk.min_channel(false, "").0;
+        let mut netlist = two_devices();
+        netlist.devices.truncate(1);
+        netlist.devices[0].params = vec![("w".into(), 2_400_000), ("l".into(), i64::from(l)), ("nf".into(), 40)];
+        let cap = cells::mosfet::max_finger_for_taps(&pdk, l);
+        assert!(cap < pdk.rule("max_finger_width", 0), "reach {cap} does not bind on ihp_sg13g2");
+        let (k, fw) = folds(&netlist, &pdk, &[], &[])[0];
+        assert!(k > 1 && fw <= cap, "folded to {k} x {fw} nm, reach cap {cap} nm");
     }
 
     /// The property the outer loop depends on: escalation must make progress. A
