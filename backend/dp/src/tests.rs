@@ -40,7 +40,7 @@ fn run(
     seed: u64,
 ) -> Layout {
     let locks = locks::locks(reqs, coarse.x.len(), variants);
-    place(coarse, macros, variants, reqs, fixed, &locks, &mut gp::Prices::new(), RULES, &[], seed).0
+    place(coarse, macros, variants, reqs, fixed, &locks, &mut gp::Prices::new(), RULES, &[], seed, Schedule::cold()).0
 }
 
 fn sym(a: u16, b: u16) -> Symmetry {
@@ -284,7 +284,7 @@ fn place_does_not_settle() {
     };
     let (coarse, _) = gp::place(&inp, &mut prices, 3);
     let locks = locks::locks(&reqs, coarse.x.len(), &variants);
-    place(&coarse, &macros, &variants, &reqs, &[false; 2], &locks, &mut prices, RULES, &[], 3);
+    place(&coarse, &macros, &variants, &reqs, &[false; 2], &locks, &mut prices, RULES, &[], 3, Schedule::cold());
     assert_eq!(prices.drift(), f64::INFINITY, "no dual step inside place");
     assert_eq!(prices.steps(), 0);
 }
@@ -573,4 +573,13 @@ fn report_counts_clearance_only_residue() {
     assert_eq!(clearance_rows.len(), 1, "{rules:?}");
     assert_eq!(clearance_rows[0].margin, 215_900);
     assert!(!rules.contains(&"device overlap"), "{rules:?}");
+}
+
+/// PLC-10 step 0: `Schedule::cold()` is exactly the constants it replaced.
+#[test]
+fn cold_schedule_reproduces_todays_layout() {
+    let l = run(&rotate_bench(), &[], &[], &Requirements::default(), &[false; 4], 7);
+    assert_eq!(l.x, vec![26615, 8990, 44550, 53905]);
+    assert_eq!(l.y, vec![-975, -2545, 2190, 265]);
+    assert_eq!(l.orient, vec![Orient::R270, Orient::R0, Orient::R180, Orient::R0]);
 }

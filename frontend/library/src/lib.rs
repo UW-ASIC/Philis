@@ -793,6 +793,7 @@ impl Flow<'_> {
             place_rules(self.pdk),
             &self.net_weight,
             seed,
+            dp::Schedule::cold(),
         );
         layout.debug_check("dp::place");
         layout.groups = cells.groups.clone();

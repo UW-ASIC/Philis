@@ -20,16 +20,28 @@ use gp::mechanics::{
     hpwl, report, snap, variant_extents, Nets, SplitMix64,
 };
 
-const MAX_ITERS: u32 = 220;
 /// Inner moves per epoch = `MOVES_PER_CELL · n`.
 const MOVES_PER_CELL: usize = 60;
 const ALPHA: f64 = 0.93;
-/// Initial displacement window, fraction of the die span.
-const RANGE0: f32 = 0.4;
 const RANGE_DECAY: f32 = 0.96;
 /// Clearance-inflated area / move-region area floor: the region the SA may use
 /// is grown until everything fits at this fill.
 const REGION_FILL: f64 = 0.5;
+
+/// The flat anneal's schedule (PLC-10 step 0): initial move window `range0` (fraction of the
+/// die span), `max_temps` temperature steps, `t0 = t0_scale · mean|ΔPEX|` over 128 probe moves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Schedule {
+    pub range0: f32,
+    pub max_temps: u32,
+    pub t0_scale: f64,
+}
+impl Schedule {
+    /// Today's constants: refine gp, don't randomise it.
+    pub fn cold() -> Self { Self { range0: 0.4, max_temps: 220, t0_scale: 0.02 } }
+    /// FLOW-08 step 3's flat warm start from an incumbent [policy, measure].
+    pub fn warm() -> Self { Self { range0: 0.05, max_temps: 60, t0_scale: 0.002 } }
+}
 /// Runaway guard for the terminal legalizer (it exits early when clean/stalled).
 const LEGALIZE_SWEEPS: u32 = 64;
 
@@ -212,6 +224,8 @@ impl<'a> Sa<'a> {
 /// for `coarse.variant[i]`. `fixed[i]` draws cell `i` as given (no reshape, no
 /// rotation); its position is placed like any cell's.
 /// `locks` turns and reshapes matched cells as one set (PLC-03).
+/// `schedule` sets the anneal's window, length and starting temperature
+/// ([`Schedule::cold`] is the gp-refining default).
 #[allow(clippy::too_many_arguments)]
 pub fn place(
     coarse: &Layout,
@@ -224,6 +238,7 @@ pub fn place(
     rules: gp::Rules,
     net_weight: &[f32],
     seed: u64,
+    schedule: Schedule,
 ) -> (Layout, Report, PlaceStats) {
     let gp::Rules { grid, clearance } = rules;
     let n = coarse.x.len();
@@ -283,8 +298,8 @@ pub fn place(
     let mut sa = Sa::new(nets, n, reqs, prices, fixed, rules);
     sa.stats.matched_incompatible = Some(locks.incompatible);
 
-    // t0 = 0.02 · mean |ΔPEX| over probe moves: refine gp, don't randomise it.
-    let mut range = RANGE0;
+    // t0 = t0_scale · mean |ΔPEX| over probe moves.
+    let mut range = schedule.range0;
     let probe_r = (range * span) as i32 as f32;
     let pex0 = sa.pex(&l);
     let mut sum = 0.0f64;
@@ -296,7 +311,7 @@ pub fn place(
         sum += (sa.pex(&l) - pex0).abs();
         (l.x[c], l.y[c]) = (ox, oy);
     }
-    let mut temp = (sum / 128.0).max(1.0) * 0.02;
+    let mut temp = (sum / 128.0).max(1.0) * schedule.t0_scale;
 
     let can_rotate = l.orient.len() == n;
     let can_reshape = variants.len() == n && l.variant.len() == n;
@@ -308,7 +323,7 @@ pub fn place(
     // stop after 10 flat chains) was measured 2026-09: ota C −12% but
     // rc_filter C +7%, bjt_mirror area +22%; not adopted.
     // ponytail: ~4x dp time; revisit if runtime binds.
-    for _ in 0..MAX_ITERS {
+    for _ in 0..schedule.max_temps {
         let r = (range * span) as i32 as f32;
         for _ in 0..moves_per_epoch {
             // 70% displace, 20% swap, 2.5% branch flip, 5% reshape, else rotate.
