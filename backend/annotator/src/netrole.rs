@@ -174,6 +174,11 @@ pub struct ProcessNumbers {
     /// BSIM4 LOD `KVTH0` (ΔVT per unit `Δ(1/SA + 1/SB)`), mV·µm, `[nmos,
     /// pmos]`: prices LOD imbalance across a matched array.
     pub lod_kvth0_mv_um: [Option<f32>; 2],
+    /// Deck `bjt_ka_pct_um`: bipolar/diode area constant `k_A` (ΔI_S/I_S of a
+    /// pair), %·µm (MAT-10).
+    pub bjt_ka_pct_um: Option<f32>,
+    /// Deck `vbe_tc_uv_per_k`: bipolar/diode `|dV_BE/dT|`, µV/K (MAT-10).
+    pub vbe_tc_uv_per_k: Option<f32>,
     /// Cut lattice, nm (coincidence tolerance is half of it); 0 = unknown.
     pub lattice_nm: i32,
     /// What the active area sits on; only `EpiOnLowRes` gives isolation a

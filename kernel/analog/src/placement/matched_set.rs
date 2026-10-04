@@ -29,8 +29,8 @@ pub struct MatchedSet {
     pub kind: MatchKind,
     /// MOS members: coincidence feasibility is a diffusion-legal row.
     pub family: Family,
-    /// What the set's environment and limits scale with (Moderate until
-    /// EXT-20 reads it from the intent).
+    /// What the set's environment and limits scale with: the intent set's
+    /// class (EXT-20).
     pub class: MatchClass,
     pub coeffs: Coeffs,
     pub budget: Budget,

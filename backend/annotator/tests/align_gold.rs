@@ -6,7 +6,7 @@
 mod common;
 
 use annotator::annotate;
-use common::{canon_intent, net, sorted, strongarm_cfg, STRONGARM};
+use common::{canon, canon_intent, net, sorted, strongarm_cfg, STRONGARM};
 
 /// The device pairs its `SymmetricBlocks` implies (`xdp`, `xccn`, `xccp` and
 /// `xinv_n`/`xinv_p` expanded to their instances).
@@ -26,9 +26,13 @@ const GOLD_NET_PAIRS: [(&str, &str); 3] = [("vin", "vip"), ("vin_d", "vip_d"), (
 #[test]
 fn strongarm_matches_align_gold() {
     let nl = net(STRONGARM);
-    let c = canon_intent(&annotate(&nl, &strongarm_cfg()), &nl);
+    let p = annotate(&nl, &strongarm_cfg());
+    let c = canon(&p, &nl);
     assert_eq!(c.pairs, GOLD_PAIRS.iter().map(|&(a, b)| sorted(a, b)).collect(), "device pairs");
     assert!(GOLD_SELF.iter().all(|s| c.selfs.contains(*s)), "selfs {:?}", c.selfs);
-    assert!(GOLD_NET_PAIRS.iter().all(|&(a, b)| c.net_pairs.contains(&sorted(a, b))), "net pairs {:?}", c.net_pairs);
+    // Emitted net pairs are routing's Differential (DiffPair leaves only); the
+    // compound's mirrored nets carry the gold's (vin, vip).
+    let np = canon_intent(&p, &nl).net_pairs;
+    assert!(GOLD_NET_PAIRS.iter().all(|&(a, b)| np.contains(&sorted(a, b))), "net pairs {np:?}");
     assert_eq!(c.axes, 1);
 }

@@ -1041,6 +1041,8 @@ fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::r
         svt_fit: pos("svt_a_uv2_per_um2").zip(pos("svt_b_uv2")),
         vt_tc_uv_per_k: [pos("vt_tc_uv_per_k"), pos("vt_tc_uv_per_k_p")],
         lod_kvth0_mv_um: [pos("lod_kvth0_n_mv_um"), pos("lod_kvth0_p_mv_um")],
+        bjt_ka_pct_um: pos("bjt_ka_pct_um"),
+        vbe_tc_uv_per_k: pos("vbe_tc_uv_per_k"),
         lattice_nm: cells::builder::cut_lattice(pdk),
         substrate: pnr_core::SubstrateKind::from_key(pdk.cell_str("substrate_kind")),
         epi_nm: pos("epi_thickness_nm").map(|v| v as i32),
