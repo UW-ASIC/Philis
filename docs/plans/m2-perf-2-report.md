@@ -32,11 +32,12 @@ of the GAP-17 acceptance are not this item's: "EXT-17 regions unchanged" belongs
 Three tests in `frontend/library/tests/perf_postlayout.rs` fail in debug builds: `op_runs_carry_ir_limits`,
 `a_flow_scores_its_layout_in_simulation` and `a_flow_reports_the_worst_scenario_per_bound`. Each one panics at
 `backend/gp/src/lib.rs:87`, the `debug_assert` in `Prices::bind` ("a batch kind is registered in both `hard` and
-`budget`"). The panic then surfaces at `frontend/library/src/lib.rs:311` as "a search start panicked". The same panic fails
+`budget`"). The panic then surfaces at `frontend/library/src/lib.rs:311` as "a search start panicked". The review
+found that these three fail the same way on the merge-base `c73fccf`, so this segment did not cause them. Release
+builds skip the assert. The same panic fails
 all 3 tests of `frontend/library/tests/placement_metrics.rs` in debug: `every_origin_is_on_the_cut_lattice`,
 `gp_modes_are_deterministic` and `metrics_are_populated_on_ota`. Everything else passes: debug `library`, `verify`,
-`cells`, `pnr_core`, and release `benchmark`, `signoff_fixtures` included. The review
-found that they fail the same way on the merge-base `c73fccf`, so this segment did not cause them, and release builds skip the assert.
+`cells`, `pnr_core`, and release `benchmark`, `signoff_fixtures` included.
 
 Cause: `backend/annotator/src/emit.rs:144-145` (M1 MAT-05, `723bbf7`) pushes one `OrientationSet` into `hard`
 (`OrientCheck::Axis`) and another into `budget` (`OrientCheck::Phi`). Both report `kind() == "Orientation"`
