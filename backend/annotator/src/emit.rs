@@ -111,14 +111,15 @@ pub fn placement(
                 }
                 BlockKind::Group | BlockKind::Glue => continue,
             }
+            // Only an inductor has no family, and an inductor pair is never matched; checked before
+            // the Symmetry push so a familyless pair gets no batch at all.
+            let Some(family) = Family::of(nl.devices[a.0 as usize].kind) else { continue };
             // ponytail: pairwise emission; a multi-output mirror's pairs share their reference.
             let shared = in_sym.contains(&a) || in_sym.contains(&b);
             if !shared {
                 syms.push(Symmetry { a: td(a), b: td(b), axis });
                 in_sym.extend([a, b]);
             }
-            // Only an inductor has no family, and an inductor pair is never matched.
-            let Some(family) = Family::of(nl.devices[a.0 as usize].kind) else { continue };
             let match_kind = if kind == BlockKind::DiffPair { MatchKind::Voltage } else { MatchKind::Current };
             let set = MatchedSet {
                 members: vec![a, b],

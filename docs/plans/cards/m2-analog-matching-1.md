@@ -221,3 +221,13 @@ consumes `MetadataReport.matched`.
 
 - `gp/src/lib.rs:777` is placement's crate; MAT-07 edits only the test struct literal (compile fix).
 - `dag-m2-m6.json`/`.md` are on `main` (`18568e1`) but not on `m2`; the integrator should merge them.
+
+## Review fixes 1
+
+- Bench evidence (MAT-07, GAP-01 A1): `PNR_BENCH_SEED=1 cargo run --release -p benchmark --bin bench -- local` at
+  `90585b4` (pre-change; source equals `c2940c6`) and at this commit (MAT-07, MAT-08, MAT-13, GAP-01 and the emit
+  reorder below): all 14 rows identical once wall-time `ms` is masked, including ota, ota_constrained, tt_ota
+  (WL 606120 nm, overuse 1458, usage 1.246, matched mismatch 0) and bjt_mirror (WL 94645 nm, usage 1.213).
+- `annotator/src/emit.rs`: the `Family::of` check moved above the Symmetry push, so a familyless (inductor) pair
+  gets no batch at all instead of a Symmetry batch without its MatchedSet/Orientation. Unreachable today
+  (inductor pairs are never matched blocks); the bench above includes the move.
