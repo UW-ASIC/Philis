@@ -87,3 +87,18 @@ fn a_missing_segment_is_an_lvs_error() {
     sol.macros[0].drawn.pop();
     assert!(!lvs_rows(&sol, &pdk).is_empty(), "a reference missing a drawn segment must not match");
 }
+
+/// CELL-08: dac4 with sky130 MIM capacitors runs the flow and signs off LVS
+/// clean with every one of its 16 units a capm card.
+#[test]
+fn a_mim_dac_signs_off_with_its_capacitors() {
+    let pdk = pdk();
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/dac4_mim.spice")).expect("dac4_mim fixture");
+    let cfg = library::Config { feedback_iters: 1, ..Default::default() };
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).expect("flow");
+    let caps = library::signoff_inputs(&sol, &pdk).2.devices.iter().filter(|d| d.kind == verify::RefKind::Capacitor).count();
+    assert_eq!(caps, 16, "one card per unit");
+    let rows = lvs_rows(&sol, &pdk);
+    assert!(rows.is_empty(), "{rows:?}");
+}

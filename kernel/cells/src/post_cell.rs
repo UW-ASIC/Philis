@@ -295,10 +295,12 @@ pub fn ring_halo(r: &GuardRingRequirement, process: &dyn Process, cut_ohm: f32) 
 
 /// Device-to-band gap: the deck's diffusion/implant clearance past the
 /// band's own implant growth (the ring's well merges with a ringed cell's
-/// own well into one figure).
+/// own well into one figure). An `Ecgr`'s own n-well band must also clear the
+/// ringed device's diffusion (difftap.9 on sky130).
 fn ring_gap(process: &dyn Process, r: &GuardRingRequirement, width: i32) -> i32 {
     let _ = width;
-    ring_clear(process) + ring_implant_enc(process, r.ring_type)
+    (ring_clear(process) + ring_implant_enc(process, r.ring_type))
+        .max(if r.ring_type == GuardRingType::Ecgr { process.space_between("nwell", "diff").unwrap_or(0) } else { 0 })
 }
 
 /// How far a ring's implant grows past its tap (see [`tap_ring`]).
@@ -307,19 +309,36 @@ fn ring_implant_enc(process: &dyn Process, ring_type: GuardRingType) -> i32 {
 }
 
 
-/// The ring band's implant. A ring is tied to its device's bulk, so it is
-/// drawn as that bulk's tap: `Hcgr`/`Hbgr` ring a PMOS and are an n+ tap in
-/// the n-well, `Ecgr`/`Ebgr` ring an NMOS and are a p+ substrate tap. (The
-/// other way round is a p+ "tap" in a well and an n+ "tap" in bare
-/// substrate, which magic rejects as diff/tap.10 and diff/tap.11.)
+/// The ring band's implant. A `Tap` ring is its device's bulk tap: n+ in the
+/// n-well for a PMOS (`in_well`), p+ in the substrate for an NMOS. `Ecgr` is
+/// n+ (its own well is drawn by CELL-17); `Hcgr` is p+.
 fn implant_name(ring_type: GuardRingType) -> &'static str {
-    if in_nwell(ring_type) { "nsdm" } else { "psdm" }
+    use GuardRingType::{Ecgr, Hcgr, Tap};
+    match ring_type {
+        Tap { in_well: true } | Ecgr => "nsdm",
+        Tap { in_well: false } | Hcgr => "psdm",
+    }
 }
 
-/// `Hcgr`/`Hbgr` (PMOS rings) sit in an n-well; `Ecgr`/`Ebgr` (NMOS rings)
-/// in the substrate. A well over an NMOS ring would bury the NMOS.
+/// Only a `Tap { in_well: true }` (a PMOS's bulk tap) sits in an n-well here;
+/// `Ecgr`'s n-well is its own band, drawn by CELL-17, and `Hcgr` needs a
+/// retrograde/isolated well, not a plain n-well.
 fn in_nwell(ring_type: GuardRingType) -> bool {
-    matches!(ring_type, GuardRingType::Hcgr | GuardRingType::Hbgr)
+    matches!(ring_type, GuardRingType::Tap { in_well: true })
+}
+
+/// Whether this deck can draw a `t` ring as named. `Tap`: always. `Hcgr`: only
+/// with a retrograde/isolated p-well the deck declares (`retrograde_pwell`;
+/// sky130 false).
+#[must_use]
+pub fn drawable(t: GuardRingType, p: &dyn Process) -> bool {
+    match t {
+        GuardRingType::Tap { .. } => true,
+        // ponytail: false until CELL-17 draws the Ecgr band well; it then becomes
+        // `p.layer("nwell").is_some() && p.layer("nsdm").is_some()` (GAP-05 spec).
+        GuardRingType::Ecgr => false,
+        GuardRingType::Hcgr => p.rule("retrograde_pwell", 0) != 0,
+    }
 }
 
 /// Outer clearance: an in-well ring owes a neighbour's well
@@ -504,10 +523,8 @@ mod tests {
             device: DeviceId(dev),
             ring_type: ty,
             shareable,
-            tap_pitch_nm: 0,
             min_width_nm: 420,
             max_ring_resistance_mohm: 10_000,
-            enclosure_complete: true,
             connection_net: pnr_core::NetId(net),
         }
     }
@@ -534,25 +551,79 @@ mod tests {
         }
     }
 
-    /// A tap ring is n+ exactly when it sits in a well, and only PMOS rings
-    /// do (the annotator gives a PMOS `Hcgr`, an NMOS `Ecgr`).
+    /// Every annotator ring still draws byte-identically: `draw_ring`/
+    /// `ring_halo` read the type only through these two and `ring_gap`, whose
+    /// `Ecgr` arm no annotator ring hits (the annotator only ever emits
+    /// `Tap`, the old `Hcgr`/`Ecgr` values).
     #[test]
-    fn well_follows_implant_polarity() {
-        use GuardRingType::{Ebgr, Ecgr, Hbgr, Hcgr};
-        for t in [Ecgr, Ebgr, Hcgr, Hbgr] {
-            assert_eq!(in_nwell(t), implant_name(t) == "nsdm", "{t:?}");
+    fn tap_rings_draw_as_before() {
+        use GuardRingType::{Ecgr, Hcgr, Tap};
+        assert_eq!(implant_name(Tap { in_well: true }), "nsdm");
+        assert!(in_nwell(Tap { in_well: true }));
+        assert_eq!(implant_name(Tap { in_well: false }), "psdm");
+        assert!(!in_nwell(Tap { in_well: false }));
+        assert_eq!(implant_name(Ecgr), "nsdm");
+        assert!(!in_nwell(Ecgr));
+        assert_eq!(implant_name(Hcgr), "psdm");
+    }
+
+    #[test]
+    fn hcgr_is_not_drawable_on_sky130() {
+        use crate::testkit;
+        let Some(pdk) = testkit::pdk() else { return };
+        assert!(!drawable(GuardRingType::Hcgr, &pdk));
+        assert!(!drawable(GuardRingType::Ecgr, &pdk));
+        assert!(drawable(GuardRingType::Tap { in_well: true }, &pdk));
+    }
+
+    #[test]
+    fn ecgr_ring_gap_clears_the_well() {
+        use crate::testkit;
+        let Some(pdk) = testkit::pdk() else { return };
+        let Some(space) = pdk.space_between("nwell", "diff") else {
+            panic!(
+                "pdk.space_between(\"nwell\", \"diff\") is None — the deck states difftap.9 \
+                 on derived `ndiff`, and `widest_on` may not reach it"
+            );
+        };
+        assert_eq!(space, 340);
+        assert!(ring_gap(&pdk, &req(0, 5, GuardRingType::Ecgr, true), 0) >= 340);
+        // sky130's base gap already clears 340, so the well term is checked
+        // on a deck whose clearance (100 + 50) is under the 400 well spacing.
+        struct Narrow;
+        impl Process for Narrow {
+            fn layer(&self, _: &str) -> Option<pnr_core::LayerId> {
+                None
+            }
+            fn rule(&self, _: &str, default: i32) -> i32 {
+                default
+            }
+            fn grid(&self) -> i32 {
+                5
+            }
+            fn space(&self, _: &str) -> Option<i32> {
+                Some(100)
+            }
+            fn enclosure(&self, _: &str, _: &str) -> Option<i32> {
+                Some(50)
+            }
+            fn space_between(&self, _: &str, _: &str) -> Option<i32> {
+                Some(400)
+            }
         }
-        assert!(in_nwell(Hcgr) && !in_nwell(Ecgr));
+        assert_eq!(ring_gap(&Narrow, &req(0, 5, GuardRingType::Tap { in_well: false }, true), 0), 150);
+        assert_eq!(ring_gap(&Narrow, &req(0, 5, GuardRingType::Ecgr, true), 0), 400);
     }
 
     #[test]
     fn merges_adjacent_shareable_same_class() {
-        use GuardRingType::Hcgr;
+        use GuardRingType::Tap;
+        let hcgr = Tap { in_well: true };
         let l = layout_at(&[(0, 0), (300, 0), (100_000, 0)]);
         let reqs = [
-            req(0, 5, Hcgr, true),
-            req(1, 5, Hcgr, true), // edge-gap 100nm from dev0 → merges
-            req(2, 5, Hcgr, true), // ~100µm away → own ring
+            req(0, 5, hcgr, true),
+            req(1, 5, hcgr, true), // edge-gap 100nm from dev0 → merges
+            req(2, 5, hcgr, true), // ~100µm away → own ring
         ];
         let refs: Vec<&GuardRingRequirement> = reqs.iter().collect();
         let mut c = clusters(&refs, &l, 2000.0);
@@ -563,13 +634,14 @@ mod tests {
 
     #[test]
     fn never_merges_across_class_or_private() {
-        use GuardRingType::{Ecgr, Hcgr};
+        use GuardRingType::Tap;
+        let (hcgr, ecgr) = (Tap { in_well: true }, Tap { in_well: false });
         let l = layout_at(&[(0, 0), (300, 0), (600, 0), (900, 0)]);
         let reqs = [
-            req(0, 5, Hcgr, true),
-            req(1, 6, Hcgr, true),  // different net → no merge
-            req(2, 5, Ecgr, true),  // different ring_type → no merge
-            req(3, 5, Hcgr, false), // private (injector) → own ring
+            req(0, 5, hcgr, true),
+            req(1, 6, hcgr, true),  // different net → no merge
+            req(2, 5, ecgr, true),  // different ring_type → no merge
+            req(3, 5, hcgr, false), // private (injector) → own ring
         ];
         let refs: Vec<&GuardRingRequirement> = reqs.iter().collect();
         let c = clusters(&refs, &l, 2000.0);
@@ -578,12 +650,12 @@ mod tests {
 
     #[test]
     fn never_merges_across_a_foreign_cell() {
-        use GuardRingType::Hcgr;
+        let hcgr = GuardRingType::Tap { in_well: true };
         // Three cells in a row; only the OUTER two request rings. Their edge
         // gap (1800 nm) is within merge_gap, but the merged hull would swallow
         // the non-member middle cell — bands would be drawn straight across it.
         let l = layout_at(&[(0, 0), (1000, 0), (2000, 0)]);
-        let reqs = [req(0, 5, Hcgr, true), req(2, 5, Hcgr, true)];
+        let reqs = [req(0, 5, hcgr, true), req(2, 5, hcgr, true)];
         let refs: Vec<&GuardRingRequirement> = reqs.iter().collect();
         let c = clusters(&refs, &l, 2000.0);
         assert_eq!(c.len(), 2, "hull would cross the middle cell: split to singletons");
@@ -591,7 +663,7 @@ mod tests {
 
         // Control: the same pair with no middle cell merges.
         let l2 = layout_at(&[(0, 0), (2000, 0)]);
-        let reqs2 = [req(0, 5, Hcgr, true), req(1, 5, Hcgr, true)];
+        let reqs2 = [req(0, 5, hcgr, true), req(1, 5, hcgr, true)];
         let refs2: Vec<&GuardRingRequirement> = reqs2.iter().collect();
         let c2 = clusters(&refs2, &l2, 2000.0);
         assert_eq!(c2, vec![vec![0, 1]], "no foreigner in the hull: pair merges");

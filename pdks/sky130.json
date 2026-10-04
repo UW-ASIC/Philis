@@ -9,6 +9,8 @@
     "cap_density_ff_um2_source": "UNVERIFIED: no source was recorded with this value. 2.0 equals the sky130 MIM camimc (2.00e-15 F/um2, typical corner) while the capacitor generator draws met1/met2 MOM (plan-08 D10); FLOW-06 sources it.",
     "gate_cap_af_um2": 8325,
     "gate_cap_af_um2_source": "UNVERIFIED: no source was recorded with this value.",
+    "dummy_max_l_nm": 3000,
+    "dummy_max_l_nm_source": "microloading reach 3-5 um, hastings.txt L41097-41104 (H13-26); Philis policy: the lower end",
     "layers": {
       "diff": "diff",
       "poly": "poly",
@@ -86,6 +88,7 @@
     "mom_finger_space": 200,
     "mom_finger_width": 200,
     "res_min_width": 500,
+    "res_value_tol_ppm": 5000,
     "tie_max_dist_nm": 15000,
     "tie_max_dist_nm_source": "VOL/magic/sky130A.tech:4163-4170 (volare fa87f8f4): LU.2 N-diff to P-tap, LU.2.1 the same in deep n-well, LU.3 P-diff to N-tap, each '< 15.0um'; the deck's LU.2/LU.2.1/LU.3 rules. Read by no code yet (CELL-13 tap reach).",
     "wpe_clearance_moderate": 3000,
@@ -114,6 +117,15 @@
       "varac.4"
     ],
     "inapplicable_rules_note": "Deck rules for structures no Philis generator draws (the varactor: poly over tap in nwell): they must not set generator dimensions. The checker still runs every rule.",
+    "bjts": {
+      "recipes": {
+        "pnp_3p40": { "model": "sky130_fd_pr__pnp_05v5_W3p40L3p40", "aliases": ["pnp_05v5_W3p40L3p40"], "bjt_emitter_w": 3400, "bjt_emitter_l": 3400 },
+        "pnp_0p68": { "model": "sky130_fd_pr__pnp_05v5_W0p68L0p68", "aliases": ["pnp_05v5_W0p68L0p68"], "bjt_emitter_w": 680, "bjt_emitter_l": 680 },
+        "npn_1x1":  { "model": "sky130_fd_pr__npn_05v5_W1p00L1p00", "aliases": ["npn_05v5_W1p00L1p00"], "bjt_emitter_w": 1000, "bjt_emitter_l": 1000 },
+        "npn_1x2":  { "model": "sky130_fd_pr__npn_05v5_W1p00L2p00", "aliases": ["npn_05v5_W1p00L2p00"], "bjt_emitter_w": 1000, "bjt_emitter_l": 2000 }
+      },
+      "note": "sky130 vertical BJTs are fixed-geometry models (VOL/libs.ref/sky130_fd_pr/spice): a drawn emitter of any other size is a different device than the one simulated. No `default`: a model no recipe names keeps today's sizing (the netlist's w/l)."
+    },
     "resistors": {
       "default": "high_po",
       "recipes": {
@@ -130,7 +142,15 @@
           },
           "res_contact_w": 190,
           "res_contact_h": 2000,
-          "res_head": 2160
+          "res_head": 2160,
+          "res_sheet_mohm": 317389,
+          "res_head_mohm_um": 345831,
+          "res_dl_nm": 247,
+          "res_dw_nm": -1,
+          "res_head_dw_nm": 156,
+          "res_narrow_permille": 67,
+          "res_knee_nm": 690,
+          "res_model_source": "sky130_fd_pr__res_high_po.model.spice (volare fa87f8f4) lines 27-40: R = 317.3885*(L+0.247)/weff + 345.8312/(weff+0.1558), weff = W - 0.001 - 0.0672*max(0.69-W, 0), W, L in um; res_narrow_permille 67 and res_head_dw_nm 156 round 0.0672 and 0.1558."
         },
         "generic_po": {
           "model": "sky130_fd_pr__res_generic_po",
@@ -143,10 +163,49 @@
           },
           "res_contact_w": 0,
           "res_contact_h": 0,
-          "res_head": 0
+          "res_head": 0,
+          "res_sheet_mohm": 48200,
+          "res_head_mohm_um": 0,
+          "res_dl_nm": 0,
+          "res_dw_nm": 0,
+          "res_model_source": "rp1 = 48.2 ohm/sq, VOL/libs.tech/ngspice/r+c/res_typical__cap_typical.spice:21 (volare fa87f8f4). The model's dw = -tol_poly/2 - poly_dw/2 (+0.028 um at typical, sky130_fd_pr__model__r+c.model.spice:134) is not applied: how ngspice applies it to W was not checked (plan-03 section 5)."
         }
       },
       "note": "Per schematic model, the construction GPurify's sky130.deck recognises: rbody_high_po = poly_res and rpm (licon.1b slot contacts 190x2000 inside rpm+psdm), rbody_po = poly_res outside rpm/urpm."
+    },
+    "capacitors": {
+      "default": "mom_m1m2",
+      "recipes": {
+        "mim_m3_1": {
+          "model": "sky130_fd_pr__cap_mim_m3_1",
+          "aliases": [
+            "cap_mim_m3_1"
+          ],
+          "layers": {
+            "bottom": "met3",
+            "plate": "capm",
+            "top_contact": "via3",
+            "top": "met4",
+            "strap": "met4",
+            "bottom_contact": "via2"
+          },
+          "c_area_af_um2": 2000,
+          "c_perim_af_um": 190,
+          "c_dw_nm": -25,
+          "c_model_source": "C = camimc*wc*lc + cpmimc*2*(wc+lc), wc = W + m3_dw + tol_m3, lc = L + m3_dw + tol_m3 (VOL/libs.ref/sky130_fd_pr/spice/sky130_fd_pr__cap_mim_m3_1.model.spice:17-18, 23-24); camimc 2.00 fF/um2, cpmimc 0.19 fF/um at typical (VOL/libs.tech/ngspice/r+c/res_typical__cap_typical__lin.spice:7-8); m3_dw = -0.025 um (VOL/libs.tech/ngspice/sky130_fd_pr__model__r+c.model.spice:82); tol_m3 = 0 at typical (r+c/res_typical__cap_typical.spice:10)."
+        },
+        "mom_m1m2": {
+          "model": "",
+          "layers": {
+            "bottom": "met1",
+            "top": "met2",
+            "top_contact": "via2",
+            "strap": "met3",
+            "bottom_contact": "via1"
+          }
+        }
+      },
+      "note": "Per schematic model, the construction GPurify's sky130.deck recognises: capm (terminals met4, met3) for cap_mim_m3_1. mom_m1m2 is the deck-unrecognised met1/met2 plate stack (no model), the default for a model no recipe names."
     },
     "npn_isolation": 1,
     "npn_isolation_note": "sky130 vertical NPN (npn_05v5): n+ emitter and p-tap base in the p-region a deep n-well (dnwell) and an n-well ring isolate, collector tapped on the ring; nwell.5/nwell.6 set the ring against the deep well.",

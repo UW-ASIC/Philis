@@ -1,0 +1,20 @@
+* dac4_mim — dac4 with every capacitor the sky130 MIM (cap_mim_m3_1, 5 µm
+* units, same m): the bank is drawn by cells::cap_array on the mim_m3_1
+* recipe (met3/capm/via3/met4) and each of the 16 units is an LVS capm card
+* (CELL-08). The top plate drives a comparator input device, as in a SAR loop.
+.subckt dac4_mim top cmp d0 d1 d2 d3 VDD VSS
+XC0 top VSS sky130_fd_pr__cap_mim_m3_1 W=5u L=5u m=1
+XC1 top b0 sky130_fd_pr__cap_mim_m3_1 W=5u L=5u m=1
+XC2 top b1 sky130_fd_pr__cap_mim_m3_1 W=5u L=5u m=2
+XC3 top b2 sky130_fd_pr__cap_mim_m3_1 W=5u L=5u m=4
+XC4 top b3 sky130_fd_pr__cap_mim_m3_1 W=5u L=5u m=8
+XMP0 b0 d0 VDD VDD pfet_01v8 W=1u L=0.15u
+XMN0 b0 d0 VSS VSS nfet_01v8 W=0.5u L=0.15u
+XMP1 b1 d1 VDD VDD pfet_01v8 W=1u L=0.15u
+XMN1 b1 d1 VSS VSS nfet_01v8 W=0.5u L=0.15u
+XMP2 b2 d2 VDD VDD pfet_01v8 W=1u L=0.15u
+XMN2 b2 d2 VSS VSS nfet_01v8 W=0.5u L=0.15u
+XMP3 b3 d3 VDD VDD pfet_01v8 W=1u L=0.15u
+XMN3 b3 d3 VSS VSS nfet_01v8 W=0.5u L=0.15u
+XMC cmp top VSS VSS nfet_01v8 W=1u L=0.15u
+.ends dac4_mim

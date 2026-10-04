@@ -124,10 +124,9 @@ impl Builder {
         }
     }
 
-    /// The finished macro. The bbox corner and extents are whole multiples of
-    /// two grid steps: the placer stamps a cell at `centre - bbox.w / 2`
-    /// (on-grid only if the half-extent is), and a placement that keeps the
-    /// corner on the cut lattice keeps every cut on it.
+    /// The bbox corner is a multiple of two grid steps (the cut lattice) and
+    /// its extents of four, so the half-extent the placer stamps at
+    /// (`centre - bbox.w / 2`) is on the cut lattice too (H01-26).
     #[must_use]
     pub fn finish(mut self) -> Macro {
         // Exact duplicates (rings sharing a band draw its cuts twice) are one
@@ -136,13 +135,14 @@ impl Builder {
         self.shapes.retain(|s| seen.insert((s.layer.0, s.rect.x, s.rect.y, s.rect.w, s.rect.h)));
         let tight = bbox_of(&self.shapes);
         let step = 2 * self.grid.max(1);
+        let ext = 2 * step;
         let x = tight.x.div_euclid(step) * step;
         let y = tight.y.div_euclid(step) * step;
         let bbox = Rect {
             x,
             y,
-            w: (tight.x + tight.w - x + step - 1) / step * step,
-            h: (tight.y + tight.h - y + step - 1) / step * step,
+            w: (tight.x + tight.w - x + ext - 1) / ext * ext,
+            h: (tight.y + tight.h - y + ext - 1) / ext * ext,
         };
         Macro { shapes: self.shapes, pins: self.pins, bbox, units: self.units, dummies: self.dummies, drawn: self.drawn, keepouts: self.keepouts, ..Default::default() }
     }
@@ -324,6 +324,20 @@ mod tests {
         for (d, &n) in [4, 2, 2].iter().enumerate() {
             assert_eq!(seq.iter().filter(|&&x| x == d).count(), n);
         }
+    }
+
+    #[test]
+    fn extents_are_twice_the_cut_lattice() {
+        let mut b = Builder::new(5);
+        b.rect(LayerId(0), Rect { x: 3, y: 7, w: 1235, h: 41 });
+        let m = b.finish();
+        assert_eq!(m.bbox.x % 10, 0);
+        assert_eq!(m.bbox.y % 10, 0);
+        assert_eq!(m.bbox.w % 20, 0);
+        assert_eq!(m.bbox.h % 20, 0);
+        let s = m.shapes[0].rect;
+        assert!(m.bbox.x <= s.x && m.bbox.y <= s.y);
+        assert!(m.bbox.x + m.bbox.w >= s.x + s.w && m.bbox.y + m.bbox.h >= s.y + s.h);
     }
 }
 

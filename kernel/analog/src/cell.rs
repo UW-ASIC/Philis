@@ -10,28 +10,25 @@ pub struct GuardRingRequirement {
     pub ring_type: GuardRingType,
     /// May merge with a neighbouring ring of the same class.
     pub shareable: bool,
-    /// Tap-contact pitch, nm.
-    pub tap_pitch_nm: i32,
     /// Min ring metal width, nm.
     pub min_width_nm: i32,
     /// Max ring resistance, mΩ.
     pub max_ring_resistance_mohm: i64,
-    /// Ring must fully enclose the device.
-    pub enclosure_complete: bool,
     /// Net the ring taps (substrate/well rail).
     pub connection_net: NetId,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GuardRingType {
-    /// Electron-collecting (n+ in p-sub).
+    /// Majority-carrier tap ring: p+ in substrate, or n+ in n-well when
+    /// `in_well` (the device's own bulk tap).
+    Tap { in_well: bool },
+    /// Electron-collecting: n+ ring in its own n-well band, tied to a
+    /// supply, collects electrons (the band well is drawn separately).
     Ecgr,
-    /// Hole-collecting (p+ in n-well).
+    /// Hole-collecting: p+ collecting ring, needs a retrograde/isolated well
+    /// the deck declares.
     Hcgr,
-    /// Hole-blocking.
-    Hbgr,
-    /// Electron-blocking.
-    Ebgr,
 }
 
 /// Decompose `devices` into identical unit fingers/segments so ratios are

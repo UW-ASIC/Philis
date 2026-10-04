@@ -49,7 +49,8 @@ pub fn enumerate(
     pdk: &Pdk,
     merge_distinct_gates: bool,
 ) -> Cells {
-    enumerate_folded(netlist, macros, constraints, pdk, merge_distinct_gates, &folds(netlist, pdk, &[]), None)
+    let cells: Vec<(Vec<DeviceId>, bool)> = constraints.unitization.iter().map(|u| (u.devices.clone(), u.route_matching_required)).collect();
+    enumerate_folded(netlist, macros, constraints, pdk, merge_distinct_gates, &folds(netlist, pdk, &[], &cells), None)
 }
 
 /// [`enumerate`] at a given fold table ([`folds`]); the flow computes it once
@@ -126,7 +127,12 @@ pub fn enumerate_folded(
                 }
                 alts
             }
-            None => draw_variants(kind, &dev(&members[0]).model, &group, &sized, pdk),
+            // No legal merged row (`draw_all`'s empty placeholder): declined.
+            None => {
+                let mut alts = draw_variants(kind, &dev(&members[0]).model, &group, &sized, pdk);
+                alts.retain(|m| !m.shapes.is_empty());
+                alts
+            }
         };
         for m in &mut alternatives {
             bind_pins(m, netlist, &members, ground);
@@ -553,8 +559,10 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             target_ratio: vec![1],
             unit_w: dev.mos_size().map_or(param("w"), |s| s.w_finger_nm()).clamp(0, i64::from(i32::MAX)) as i32,
             unit_l: param("l").clamp(0, i64::from(i32::MAX)) as i32,
+            // SPICE `m` is parallel: a resistor draws `m` strings. A
+            // capacitor's composition has no reader yet (CELL-08).
             series_parallel: match dev.kind {
-                DeviceKind::Resistor | DeviceKind::Capacitor => SeriesParallel::Series,
+                DeviceKind::Capacitor => SeriesParallel::Series,
                 _ => SeriesParallel::Parallel,
             },
             same_variant_required: false,
@@ -585,8 +593,14 @@ const P2P_SHARE: f32 = 0.55;
 
 /// Per device, `(k, W_f/k)`: its schematic fingers (`nf·m`, each
 /// `W_f = W_total/nf` wide, [`pnr_core::MosSize`]) are drawn as `k`× as many
-/// at width `W_f/k` (grid-snapped). One `k` per (kind, W_f, L) class, so matched
-/// devices (one class by construction) fold alike. `k` brings the class's
+/// at width `W_f/k` (grid-snapped). One `k` per class: the MOS of equal
+/// (kind, W_f, L) in the first `cells` entry (a unitization's devices, drawn as
+/// one cell) holding the device, else the device alone, so matched devices
+/// (one entry by construction) fold alike and an unrelated same-size device
+/// folds for its own row (FLOW-16). A class of several non-parallel, non-stack
+/// members keeps only the `k` whose per-member counts have a centroid-exact
+/// row ([`cells::mosfet::cc_row_exists`], route-matched as the entry's flag)
+/// when any `k` does; else the choice below stands. `k` brings the class's
 /// row (all its fingers side by side, at the generator's pitch) closest to
 /// square, fingers within the deck's `min_finger_width`/`max_finger_width`
 /// (no cap when the deck gives none) and its point-to-point resistance limit
@@ -604,7 +618,7 @@ const P2P_SHARE: f32 = 0.55;
 /// specifies it; the gate-R floor's owner settles which form is meant.
 /// Non-MOS devices and devices without W/L get `(1, W)`.
 #[must_use]
-pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>]) -> Vec<(u16, i32)> {
+pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<DeviceId>, bool)]) -> Vec<(u16, i32)> {
     use pnr_core::Process;
     let param = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
     let nm = |d: &Device, k: &str| param(d, k).map_or(0, |v| v.clamp(0, i64::from(i32::MAX)) as i32);
@@ -639,12 +653,19 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>]) -> Vec<(u16, i
         if done[i] || !mos(d) || w <= 0 || l <= 0 {
             continue;
         }
-        let class: Vec<usize> = (i..netlist.devices.len())
-            .filter(|&j| {
-                let e = &netlist.devices[j];
-                !done[j] && e.kind == d.kind && w_of(e) == w && nm(e, "l") == l
-            })
-            .collect();
+        let entry = cells.iter().find(|(c, _)| c.contains(&DeviceId(i as u16)));
+        let route = entry.is_some_and(|e| e.1);
+        let class: Vec<usize> = match entry {
+            Some((members, _)) => members
+                .iter()
+                .map(|m| m.0 as usize)
+                .filter(|&j| {
+                    let Some(e) = netlist.devices.get(j) else { return false };
+                    !done[j] && e.kind == d.kind && w_of(e) == w && nm(e, "l") == l
+                })
+                .collect(),
+            None => vec![i],
+        };
         let fingers: Vec<u32> = class.iter().map(|&j| netlist.devices[j].mos_size().map_or(1, |s| s.fingers())).collect();
         let row: u32 = fingers.iter().sum();
         let parallel = class.iter().all(|&j| netlist.devices[j].terminals == d.terminals);
@@ -679,8 +700,15 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>]) -> Vec<(u16, i
             let aspect = (f64::from(row * k) * f64::from(pitch) / f64::from(fw)).ln().abs();
             (bad_parity, aspect)
         };
-        let best = (1u32..=64)
-            .filter(|&k| k == 1 || (snap(w / k as i32) >= w_min && row * k <= u32::from(u16::MAX)))
+        let mut ks: Vec<u32> = (1u32..=64).filter(|&k| k == 1 || (snap(w / k as i32) >= w_min && row * k <= u32::from(u16::MAX))).collect();
+        if class.len() > 1 && !stack && !parallel {
+            let cc = |k: &u32| cells::mosfet::cc_row_exists(&fingers.iter().map(|&f| (f * k).min(u32::from(u16::MAX)) as u16).collect::<Vec<_>>(), route);
+            if ks.iter().any(cc) {
+                ks.retain(cc);
+            }
+        }
+        let best = ks
+            .into_iter()
             .min_by(|&a, &b| {
                 let (sa, sb) = (score(a), score(b));
                 // A finger over the cap, or too few fingers for the gate R,
@@ -745,17 +773,17 @@ fn multiplier(d: &Device) -> u16 {
     d.params.iter().find(|(n, _)| n == "m").map_or(1, |&(_, v)| v.clamp(1, i64::from(u16::MAX)) as u16)
 }
 
-/// Uncovered capacitors on one top plate (`P`) and one `w`×`l` whose `m` are
+/// Uncovered capacitors on one top plate (`P`), one model and one `w`×`l` whose `m` are
 /// `[1, 1, 2, …, 2^(N-1)]`: a binary-weighted DAC bank (DACP §II), members in
 /// slot order. The electrical dummy (slot 0) is the one-unit cap whose bottom
 /// plate is a MOS bulk, i.e. a rail; else the first one-unit cap listed.
 fn dac_banks(netlist: &Netlist, covered: &[bool]) -> Vec<Vec<DeviceId>> {
     let bulks: Vec<NetId> = netlist.devices.iter().filter_map(|d| terminal(d, "B")).collect();
     let param = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
-    let mut by_plate: Vec<((NetId, Option<i64>, Option<i64>), Vec<DeviceId>)> = Vec::new();
+    let mut by_plate: Vec<((NetId, String, Option<i64>, Option<i64>), Vec<DeviceId>)> = Vec::new();
     for (i, d) in netlist.devices.iter().enumerate() {
         let Some(p) = terminal(d, "P").filter(|_| d.kind == DeviceKind::Capacitor && !covered[i]) else { continue };
-        let key = (p, param(d, "w"), param(d, "l"));
+        let key = (p, d.model.clone(), param(d, "w"), param(d, "l"));
         match by_plate.iter_mut().find(|(k, _)| *k == key) {
             Some((_, v)) => v.push(DeviceId(i as u16)),
             None => by_plate.push((key, vec![DeviceId(i as u16)])),
@@ -791,13 +819,21 @@ fn draw_variants(kind: DeviceKind, model: &str, group: &DeviceGroup, c: &Constra
             None => draw_all::<Resistor>(group, c, pdk),
         },
         // A binary bank is drawn only as a common-centroid array: a merged
-        // plate per bit implements no pattern (ARR-01/02).
-        DeviceKind::Capacitor => match CapArray::enumerate(group, c, pdk) {
-            v if v.is_empty() => draw_all::<Capacitor>(group, c, pdk),
-            v => v.iter().map(|a| a.draw(group, c, pdk)).collect(),
-        },
+        // plate per bit implements no pattern (ARR-01/02). The model's
+        // capacitor recipe picks the stack (sky130 MIM, else MOM; CELL-08).
+        DeviceKind::Capacitor => {
+            let ov = pdk.recipe("capacitor", model).map(|recipe| verify::pdk::Overlay { pdk, recipe });
+            let p: &dyn pnr_core::Process = ov.as_ref().map_or(pdk as &dyn pnr_core::Process, |o| o);
+            match CapArray::enumerate(group, c, p) {
+                v if v.is_empty() => draw_all::<Capacitor>(group, c, p),
+                v => v.iter().map(|a| a.draw(group, c, p)).collect(),
+            }
+        }
         DeviceKind::Diode => draw_all::<Diode>(group, c, pdk),
-        DeviceKind::Npn | DeviceKind::Pnp => draw_all::<Bjt>(group, c, pdk),
+        DeviceKind::Npn | DeviceKind::Pnp => match pdk.recipe("bjt", model) {
+            Some(recipe) => draw_all::<Bjt>(group, c, &verify::pdk::Overlay { pdk, recipe }),
+            None => draw_all::<Bjt>(group, c, pdk),
+        },
         DeviceKind::Inductor => draw_all::<Inductor>(group, c, pdk),
     }
 }
@@ -934,6 +970,10 @@ pub fn drawn_cards(placed: &[Macro], nets: &[String], schematic: &Netlist, pdk: 
     for (cell, m) in placed.iter().enumerate() {
         for d in &m.drawn {
             let Some(id) = d.device else { continue };
+            // A stale id (its schematic device since removed, e.g. lifted
+            // out for re-adoption) replaces nothing: the card would self-
+            // reference the macro's own geometry and always match.
+            let Some(schem_dev) = schematic.devices.get(id.0 as usize) else { continue };
             replaced.push(id);
             let (kind, recipe) = match d.kind {
                 DrawnKind::Resistor => (RefKind::Resistor, "resistor"),
@@ -952,7 +992,7 @@ pub fn drawn_cards(placed: &[Macro], nets: &[String], schematic: &Netlist, pdk: 
                 Node::Internal(k) => Some(format!("~{cell}.{}.{k}", d.owner)),
             };
             let terminals: Vec<String> = d.nodes.iter().filter_map(node).collect();
-            let model = schematic.devices.get(id.0 as usize).map_or("", |s| s.model.as_str());
+            let model = schem_dev.model.as_str();
             let model = pdk.recipe(recipe, model).map(|r| r.model).filter(|m| !m.is_empty()).or_else(|| (!model.is_empty()).then(|| model.to_string()));
             cards.push(RefDeviceIn { kind, model, terminals, params: Vec::new() });
         }
@@ -1234,7 +1274,7 @@ mod tests {
 
         // Byte-identical to drawing each device as its own group, with no collapse
         // machinery (no pad filter, no re-ordering) in the way.
-        let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[]));
+        let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[], &[]));
         for (i, dev) in netlist.devices.iter().enumerate() {
             let group = DeviceGroup {
                 devices: vec![DeviceId(i as u16)],
@@ -1652,6 +1692,33 @@ mod tests {
         assert_eq!(cells.cell_of, vec![0, 1]);
     }
 
+    /// FLOW-16: a fold class is one cell's members, so an unrelated
+    /// same-size device folds for its own row, and the mirror as it would alone.
+    #[test]
+    fn unrelated_same_size_devices_fold_independently() {
+        let pdk = pdk();
+        let (a, b) = ("XA da g s s nfet_01v8 W=2u L=0.5u\n", "XB g g s s nfet_01v8 W=2u L=0.5u\n");
+        // XC: 2 µm fingers too, so a netlist-wide (kind, finger W, L) class would take it in.
+        let c = "XC dc gc sc sc nfet_01v8 W=32u L=0.5u nf=16\n";
+        let nl = |body: &str| crate::parse(&format!("{body}.end\n")).expect("parses");
+        let ab = [(vec![DeviceId(0), DeviceId(1)], false)];
+        let all = folds(&nl(&format!("{a}{b}{c}")), &pdk, &[], &ab);
+        assert_eq!(all[0], folds(&nl(&format!("{a}{b}")), &pdk, &[], &ab)[0]);
+        assert_eq!(all[2], folds(&nl(c), &pdk, &[], &[])[0]);
+    }
+
+    /// FLOW-16 step 4: the OTA input pair, route-matched, folds to the first
+    /// `k` with an exact mirror order (nf = 8 per device, 1.25 µm fingers).
+    #[test]
+    fn a_route_matched_pair_folds_to_a_centroid_row() {
+        let pdk = pdk();
+        let netlist = crate::parse("XM1 vout1 vinp vtail VSS nfet_01v8 W=10u L=1u nf=2\nXM2 vout2 vinm vtail VSS nfet_01v8 W=10u L=1u nf=2\n.end\n").expect("parses");
+        let f = folds(&netlist, &pdk, &[], &[(vec![DeviceId(0), DeviceId(1)], true)]);
+        assert_eq!(f[0].0, 4, "{f:?}");
+        assert_eq!(f[0], f[1]);
+        assert!(cells::mosfet::cc_row_exists(&[8, 8], true));
+    }
+
     /// A high-gm device folds into enough fingers that its gate R stays under
     /// 1/(5·gm): 20 µm / 150 nm at 10 mS needs N ≥ √(5·gm·R□·W/3L) ≈ 10.4.
     #[test]
@@ -1660,8 +1727,8 @@ mod tests {
         let mut netlist = two_devices();
         netlist.devices.truncate(1);
         netlist.devices[0].params = vec![("w".into(), 20_000), ("l".into(), 150)];
-        let (k0, _) = folds(&netlist, &pdk, &[])[0];
-        let (k, fw) = folds(&netlist, &pdk, &[Some(10_000.0)])[0];
+        let (k0, _) = folds(&netlist, &pdk, &[], &[])[0];
+        let (k, fw) = folds(&netlist, &pdk, &[Some(10_000.0)], &[])[0];
         assert!(k >= 11 && k > k0, "k = {k} (without gm {k0})");
         assert!(fw >= 420);
     }
@@ -1766,7 +1833,7 @@ mod tests {
     fn lone_bjt_draws_as_many_units_as_reference_cards() {
         let pdk = pdk();
         let netlist = crate::parse("XQ1 c b e sky130_fd_pr__pnp_05v5_W3p40L3p40 nf=3 m=2\n.end\n").expect("parses");
-        let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[]));
+        let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[], &[]));
         let u = sized.unitization.iter().find(|u| u.devices == [DeviceId(0)]).expect("a 1-device unitization");
         assert_eq!(u.dev_nf, vec![2], "drawn units");
         assert_eq!(reference(&netlist, None, &[]).devices.len(), 2, "one reference card per drawn unit");
@@ -1779,7 +1846,7 @@ mod tests {
         let pdk = pdk();
         let netlist = crate::parse("XR1 a b sky130_fd_pr__res_high_po w=0.69u l=40u\n.end\n").expect("parses");
         let group = DeviceGroup { devices: vec![DeviceId(0)] };
-        let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[]));
+        let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[], &[]));
         let mut m = draw_variants(DeviceKind::Resistor, &netlist.devices[0].model, &group, &sized, &pdk)
             .into_iter()
             .find(|m| m.drawn.len() == 2)
