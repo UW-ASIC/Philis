@@ -8,16 +8,21 @@
 //! the deck's.
 
 use crate::builder::dim;
+use analog::matching::pattern::{self, Outer};
 use analog::Constraints;
 use pnr_core::{DeviceGroup, DeviceKind, Macro, Process, Rect};
 
 use crate::builder::{pin, req, sizing, unitization, Builder, Sizing};
 use crate::Cell;
 
-/// One FinFET variant: every member's fingers in one row, members side by
-/// side on their own active.
+/// One FinFET variant: each member on its own active, side by side
+/// (variant 0), or every member interleaved on one shared common-centroid
+/// active. Every active ends in one uncontacted edge gate per side.
 #[derive(Clone)]
-pub struct FinFet;
+pub struct FinFet {
+    /// Members interleave on one active ([`pattern::diffusion_cc_row`]).
+    pub shared: bool,
+}
 
 /// The deck's front-end numbers, nm.
 struct Rules {
@@ -86,11 +91,16 @@ impl Rules {
 }
 
 impl Cell for FinFet {
-    fn enumerate(group: &DeviceGroup, _c: &Constraints, process: &dyn Process) -> Vec<Self> {
+    fn enumerate(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Vec<Self> {
         if group.devices.is_empty() || process.layer("fin").is_none() {
             return vec![];
         }
-        vec![FinFet]
+        let s = group_sizing(group, c, process);
+        let mut v = vec![FinFet { shared: false }];
+        if s.dev_nf.len() > 1 && pattern::diffusion_cc_row(&s.dev_nf, Outer::Drain).is_some() {
+            v.push(FinFet { shared: true });
+        }
+        v
     }
 
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro {
@@ -110,91 +120,129 @@ impl Cell for FinFet {
         let v1_pad = v1_w + 2 * v1_in_m1;
         let (own_sel, tap_sel) = if pmos { (req(process, "psdm"), req(process, "nsdm")) } else { (req(process, "nsdm"), req(process, "psdm")) };
 
-        // Channel width → fins; the active holds them at the fin pitch.
-        let nfin = (s.unit_w / r.fin_p.max(1)).max(1);
+        // Channel width → the nearest fin count, at least one; the drawn
+        // `nfin·fin_p` is the height `Unit.weight` carries.
+        let nfin = ((s.unit_w + r.fin_p / 2) / r.fin_p.max(1)).max(1);
         let h = nfin * r.fin_p;
-        // S/D gap between gates, and the end regions (at least the active's
-        // extension past the outer gate, and room for the trench).
+        // S/D gap between gates; `end` sizes the tap strip's first contact.
         let gap = r.gate_p - r.gate_w;
         let end = gap.max(r.act_past_gate).max(r.sdt_w + 2 * r.sdt_gate);
+        let n_dev = group.devices.len();
+        // Rows: (owner of each gate, S regions odd). Separate: one active per
+        // member, region 0 a source. Shared: one CC row, its ends drains, every
+        // member boundary on a source; member `k` takes drain and gate track `k`.
+        let rows: Vec<(Vec<usize>, bool)> = if self.shared {
+            vec![(pattern::diffusion_cc_row(&s.dev_nf, Outer::Drain).expect("enumerate offers shared only for a legal row"), true)]
+        } else {
+            (0..n_dev).map(|di| (vec![di; usize::from(s.dev_nf.get(di).copied().unwrap_or(1).max(1))], false)).collect()
+        };
+        let track = |k: usize| if self.shared { k as i32 } else { 0 };
+        let n_tracks = if self.shared { n_dev as i32 } else { 1 };
         // Rows: M1 S/D pins at the active's centre; gate pads below it, far
         // enough that the gate strap clears the S/D M1 by its spacing.
         let v0_y = (h - r.v0) / 2;
         let m1_h = (r.v0 + 2 * r.v0_in_m1).max(i32::try_from(r.m1_area / i64::from(r.m1_w.max(1)) + 1).unwrap_or(0));
         let sd_m1_y = v0_y + r.v0 / 2 - m1_h / 2;
-        // Source strap above the drain strips' landing pads.
-        let d_top = (sd_m1_y + m1_h).max(v0_y + r.v0 / 2 + v1_pad / 2);
+        // Drain track `t`: its V1 pads and M2 strap, one M2 pitch per track up
+        // (end-of-line spacing: a one-drain member's strap is all line ends).
+        let d_pitch = m2_w + process.space("met1").unwrap_or(0).max(process.eol_space("met1").unwrap_or(0));
+        let y_d = |t: i32| v0_y + r.v0 / 2 + t * d_pitch;
+        // Source strap above every drain track's landing pads.
+        let d_top = (sd_m1_y + m1_h).max(y_d(n_tracks - 1) + v1_pad / 2);
         let s_strap_y = d_top + r.m1_s.max(process.eol_space("li").unwrap_or(0));
         let strap_top = sd_m1_y.min(-r.lig_channel) - r.m1_s;
         let gv0_y = strap_top - r.m1_w + (r.m1_w - r.v0) / 2;
         let lig_h = (r.v0 + 2).max(i32::try_from(r.lig_area / i64::from(r.lig_w.max(r.gate_w).max(1)) + 1).unwrap_or(0));
         let lig_y = (gv0_y + r.v0 / 2 - lig_h / 2).min(-r.lig_channel - lig_h);
-        let gate_lo = lig_y;
+        // Gate track `t` sits `t·gpitch` below track 0: its M1 strap and its
+        // LIG pads each clear the next track's by their spacing.
+        let eol = |l: &str| process.eol_space(l).unwrap_or(0);
+        let gpitch = (r.m1_w + r.m1_s.max(eol("li"))).max(lig_h + process.space("lig").unwrap_or(0).max(eol("lig")));
+        let gate_lo_min = lig_y - (n_tracks - 1) * gpitch;
         let gate_hi = h + r.gate_past_act;
+        let lw = r.lisd_w.max(r.v0 + 2 * r.v0_in_lisd);
 
-        let n_dev = group.devices.len();
-        let (mut s_x, mut d_x): (Vec<i32>, Vec<i32>) = (Vec::new(), Vec::new());
         let mut x = 0;
         let mut acts: Vec<Rect> = Vec::new();
-        for di in 0..n_dev {
-            let nf = i32::from(s.dev_nf.get(di).copied().unwrap_or(1).max(1));
-            let a = Rect { x, y: 0, w: 2 * end + nf * r.gate_w + (nf - 1) * gap, h };
+        for (owners, s_odd) in &rows {
+            let n = owners.len() as i32;
+            let mut members: Vec<usize> = Vec::new();
+            for &k in owners {
+                if !members.contains(&k) {
+                    members.push(k);
+                }
+            }
+            // One uncontacted edge gate per diffusion end (gates -1 and n,
+            // diffusion-break style). Not a `pnr_core::Dummy`: that means a
+            // bulk-tied, extracted transistor with an LVS card, and this deck
+            // recognises no devices. A deck that does needs a tie and a record.
+            let a = Rect { x, y: 0, w: 2 * r.act_past_gate + (n + 2) * r.gate_w + (n + 1) * gap, h };
             b.rect(act, a);
             acts.push(a);
             for k in 0..nfin {
                 let y = k * r.fin_p + (r.fin_p - r.fin_w) / 2;
                 b.rect(fin, Rect { x: a.x + r.act_past_fin, y, w: a.w - 2 * r.act_past_fin, h: r.fin_w });
             }
-            let gx = |i: i32| a.x + end + i * r.gate_p;
-            // S/D regions: 0 left of gate 0, i right of gate i-1.
-            for j in 0..=nf {
-                let (lo, hi) = if j == 0 { (a.x, gx(0)) } else if j == nf { (gx(nf - 1) + r.gate_w, a.x + a.w) } else { (gx(j - 1) + r.gate_w, gx(j)) };
-                let cx = (lo + hi) / 2;
+            let gx = |i: i32| a.x + r.act_past_gate + (i + 1) * r.gate_p;
+            // S/D region j between gates j-1 and j, every one `gap` wide.
+            let (mut s_x, mut d_x): (Vec<i32>, Vec<(usize, i32)>) = (Vec::new(), Vec::new());
+            for j in 0..=n {
+                let cx = (gx(j - 1) + r.gate_w + gx(j)) / 2;
                 b.rect(sdt, Rect { x: cx - r.sdt_w / 2, y: 0, w: r.sdt_w, h });
-                let lw = r.lisd_w.max(r.v0 + 2 * r.v0_in_lisd);
                 b.rect(lisd, Rect { x: cx - lw / 2, y: 0, w: lw, h });
-                let via = Rect { x: cx - r.v0 / 2, y: v0_y, w: r.v0, h: r.v0 };
-                b.rect(v0, via);
-                if j % 2 == 0 {
+                b.rect(v0, Rect { x: cx - r.v0 / 2, y: v0_y, w: r.v0, h: r.v0 });
+                if (j % 2 == 1) == *s_odd {
                     // A source strip runs up to the source strap.
                     b.rect(m1, Rect { x: cx - r.m1_w / 2, y: sd_m1_y, w: r.m1_w, h: s_strap_y + r.m1_w - sd_m1_y });
                     s_x.push(cx);
                 } else {
-                    b.rect(m1, Rect { x: cx - r.m1_w / 2, y: sd_m1_y, w: r.m1_w, h: m1_h });
-                    let c = (cx, v0_y + r.v0 / 2);
-                    b.rect(m1, Rect { x: c.0 - v1_pad / 2, y: c.1 - v1_pad / 2, w: v1_pad, h: v1_pad });
-                    b.rect(v1, Rect { x: c.0 - v1_w / 2, y: c.1 - v1_w / 2, w: v1_w, h: v1_w });
-                    d_x.push(cx);
+                    // A drain is its right gate's (the row's last: its left).
+                    let k = owners[(j as usize).min(owners.len() - 1)];
+                    let yd = y_d(track(k));
+                    b.rect(m1, Rect { x: cx - r.m1_w / 2, y: sd_m1_y, w: r.m1_w, h: m1_h.max(yd - sd_m1_y) });
+                    b.rect(m1, Rect { x: cx - v1_pad / 2, y: yd - v1_pad / 2, w: v1_pad, h: v1_pad });
+                    b.rect(v1, Rect { x: cx - v1_w / 2, y: yd - v1_w / 2, w: v1_w, h: v1_w });
+                    d_x.push((k, cx));
                 }
             }
             let (s0, s1) = (s_x[0], *s_x.last().unwrap());
-            let strap = Rect { x: s0 - r.m1_w / 2, y: s_strap_y, w: s1 - s0 + r.m1_w, h: r.m1_w };
-            b.rect(m1, strap);
-            b.pin(pin(di, "S", Rect { x: s0 - r.m1_w / 2, y: s_strap_y, w: r.m1_w, h: r.m1_w }, m1));
-            let (d0, d1) = (d_x[0], *d_x.last().unwrap());
-            let dy = v0_y + r.v0 / 2 - m2_w / 2;
-            b.rect(m2, Rect { x: d0 - v1_w / 2 - v1_in_m2, y: dy, w: d1 - d0 + v1_w + 2 * v1_in_m2, h: m2_w });
-            b.pin(pin(di, "D", Rect { x: d0 - v1_w / 2, y: v0_y + r.v0 / 2 - v1_w / 2, w: v1_w, h: v1_w }, m2));
-            s_x.clear();
-            d_x.clear();
-            for i in 0..nf {
-                let g = gx(i);
-                b.rect(gate, Rect { x: g, y: gate_lo, w: r.gate_w, h: gate_hi - gate_lo });
-                let lw = r.lig_w.max(r.gate_w);
-                b.rect(lig, Rect { x: g + r.gate_w / 2 - lw / 2, y: lig_y, w: lw, h: lig_h });
-                b.rect(v0, Rect { x: g + r.gate_w / 2 - r.v0 / 2, y: gv0_y, w: r.v0, h: r.v0 });
-                b.unit(pnr_core::Unit { owner: di as u8, x: g + r.gate_w / 2, y: h / 2, weight: i64::from(r.gate_w) * i64::from(h), phi: (if i % 2 == 0 { 1 } else { -1 }, 0), sa: 0, sb: 0 });
+            b.rect(m1, Rect { x: s0 - r.m1_w / 2, y: s_strap_y, w: s1 - s0 + r.m1_w, h: r.m1_w });
+            for &k in &members {
+                b.pin(pin(k, "S", Rect { x: s0 - r.m1_w / 2, y: s_strap_y, w: r.m1_w, h: r.m1_w }, m1));
+                let xs: Vec<i32> = d_x.iter().filter(|d| d.0 == k).map(|d| d.1).collect();
+                let (d0, d1, yd) = (xs[0], *xs.last().unwrap(), y_d(track(k)));
+                b.rect(m2, Rect { x: d0 - v1_w / 2 - v1_in_m2, y: yd - m2_w / 2, w: d1 - d0 + v1_w + 2 * v1_in_m2, h: m2_w });
+                b.pin(pin(k, "D", Rect { x: d0 - v1_w / 2, y: yd - v1_w / 2, w: v1_w, h: v1_w }, m2));
             }
-            // One M1 strap over the device's gate contacts.
-            let (g0, g1) = (gx(0) + r.gate_w / 2 - r.v0 / 2, gx(nf - 1) + r.gate_w / 2 + r.v0 / 2);
-            let strap = Rect { x: g0 - r.v0_in_m1, y: strap_top - r.m1_w, w: g1 - g0 + 2 * r.v0_in_m1, h: r.m1_w };
-            b.rect(m1, strap);
-            b.pin(pin(di, "G", Rect { x: g0, y: gv0_y, w: r.v0, h: r.v0 }, m1));
-            x = a.x + a.w + r.act_s.max(2 * r.sel_enc - 0);
+            for i in -1..=n {
+                let g = gx(i);
+                if i < 0 || i == n {
+                    b.rect(gate, Rect { x: g, y: gate_lo_min, w: r.gate_w, h: gate_hi - gate_lo_min });
+                    continue;
+                }
+                let k = owners[i as usize];
+                let off = track(k) * gpitch;
+                b.rect(gate, Rect { x: g, y: lig_y - off, w: r.gate_w, h: gate_hi - lig_y + off });
+                let lgw = r.lig_w.max(r.gate_w);
+                b.rect(lig, Rect { x: g + r.gate_w / 2 - lgw / 2, y: lig_y - off, w: lgw, h: lig_h });
+                b.rect(v0, Rect { x: g + r.gate_w / 2 - r.v0 / 2, y: gv0_y - off, w: r.v0, h: r.v0 });
+                let c = g + r.gate_w / 2;
+                let phi = if (i % 2 == 0) != *s_odd { 1 } else { -1 };
+                b.unit(pnr_core::Unit { owner: k as u8, x: c, y: h / 2, weight: i64::from(r.gate_w) * i64::from(h), phi: (phi, 0), sa: c - a.x, sb: a.x + a.w - c });
+            }
+            // One M1 strap per member over its own gate contacts.
+            for &k in &members {
+                let gs: Vec<i32> = (0..n).filter(|&i| owners[i as usize] == k).map(gx).collect();
+                let off = track(k) * gpitch;
+                let (g0, g1) = (gs[0] + r.gate_w / 2 - r.v0 / 2, *gs.last().unwrap() + r.gate_w / 2 + r.v0 / 2);
+                b.rect(m1, Rect { x: g0 - r.v0_in_m1, y: strap_top - off - r.m1_w, w: g1 - g0 + 2 * r.v0_in_m1, h: r.m1_w });
+                b.pin(pin(k, "G", Rect { x: g0, y: gv0_y - off, w: r.v0, h: r.v0 }, m1));
+            }
+            x = a.x + a.w + r.act_s.max(2 * r.sel_enc);
         }
         let (x0, x1) = (acts[0].x, x - r.act_s.max(2 * r.sel_enc));
         // The device select over the actives and gates.
-        let sel = Rect { x: x0 - r.sel_enc, y: (-r.sel_enc).min(gate_lo - r.sel_past_gate), w: x1 - x0 + 2 * r.sel_enc, h: 0 };
+        let sel = Rect { x: x0 - r.sel_enc, y: (-r.sel_enc).min(gate_lo_min - r.sel_past_gate), w: x1 - x0 + 2 * r.sel_enc, h: 0 };
         let sel_top = (h + r.sel_enc).max(gate_hi + r.sel_past_gate);
         let sel = Rect { h: (sel_top - sel.y).max(r.sel_w), ..sel };
         b.rect(own_sel, sel);
@@ -242,4 +290,119 @@ impl Cell for FinFet {
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
     let fin_p = process.width("fin").unwrap_or(0) + process.space("fin").unwrap_or(0);
     sizing(group, c, fin_p.max(1), dim(process, "min_gate_l"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FinFet;
+    use crate::testkit::group_of;
+    use crate::Cell;
+    use pnr_core::{DeviceKind, Macro, Process, Rect};
+
+    fn deck() -> verify::Pdk {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let json = std::fs::read_to_string(root.join("pdks/generic_finfet.json")).expect("pdks/generic_finfet.json");
+        verify::Pdk::from_json(&json).expect("generic_finfet loads")
+    }
+
+    /// `kind` group with per-member finger counts `nf` (ratio = counts).
+    fn group(kind: DeviceKind, nf: &[u16], w: i32) -> (pnr_core::DeviceGroup, analog::Constraints) {
+        let (g, mut c) = group_of(kind, nf.len(), 1, w, 20);
+        c.unitization[0].dev_nf = nf.to_vec();
+        c.unitization[0].target_ratio = nf.to_vec();
+        (g, c)
+    }
+
+    fn on(m: &Macro, pdk: &verify::Pdk, role: &str) -> Vec<Rect> {
+        let l = pdk.layer(role).expect("role");
+        m.shapes.iter().filter(|s| s.layer == l).map(|s| s.rect).collect()
+    }
+
+    #[test]
+    fn nfin_rounds_to_the_nearest_fin() {
+        let pdk = deck();
+        for (w, fins) in [(10, 1i64), (40, 1), (41, 2), (1680, 62)] {
+            let (g, c) = group(DeviceKind::Nmos, &[1], w);
+            let m = FinFet { shared: false }.draw(&g, &c, &pdk);
+            assert_eq!(m.units[0].weight, 20 * 27 * fins, "w={w}");
+        }
+    }
+
+    #[test]
+    fn every_active_has_one_dummy_gate_per_end() {
+        let pdk = deck();
+        let (g, c) = group(DeviceKind::Nmos, &[2, 2], 1680);
+        let vs = FinFet::enumerate(&g, &c, &pdk);
+        assert_eq!(vs.iter().map(|v| v.shared).collect::<Vec<_>>(), [false, true]);
+        for v in vs {
+            let m = v.draw(&g, &c, &pdk);
+            let actives = on(&m, &pdk, "diff").len() - 1; // minus the tap's
+            assert_eq!(actives, if v.shared { 1 } else { 2 });
+            assert_eq!(on(&m, &pdk, "poly").len(), m.units.len() + 2 * actives, "shared={}", v.shared);
+        }
+    }
+
+    #[test]
+    fn sa_and_sb_reach_the_active_ends() {
+        let pdk = deck();
+        for nf in [&[2u16, 2][..], &[3]] {
+            let (g, c) = group(DeviceKind::Nmos, nf, 1680);
+            for v in FinFet::enumerate(&g, &c, &pdk) {
+                let m = v.draw(&g, &c, &pdk);
+                let acts = on(&m, &pdk, "diff");
+                for u in &m.units {
+                    assert!(u.sa > 0 && u.sb > 0);
+                    let a = acts.iter().find(|a| a.x <= u.x && u.x <= a.x + a.w && a.y <= u.y && u.y <= a.y + a.h).expect("unit on an active");
+                    assert_eq!(u.sa + u.sb, a.w, "nf={nf:?} shared={}", v.shared);
+                }
+                for k in 0..nf.len() {
+                    let mine = m.units.iter().filter(|u| usize::from(u.owner) == k);
+                    let (sa, sb) = mine.fold((0, 0), |(a, b), u| (a + u.sa, b + u.sb));
+                    assert_eq!(sa, sb, "nf={nf:?} shared={} member {k}", v.shared);
+                }
+            }
+        }
+    }
+
+    /// T6: the shared row's members share one centroid and cancel their
+    /// S/D orientation.
+    #[test]
+    fn the_shared_row_is_common_centroid() {
+        let pdk = deck();
+        for nf in [[2u16, 2], [2, 4], [4, 4]] {
+            let (g, c) = group(DeviceKind::Nmos, &nf, 1680);
+            let vs = FinFet::enumerate(&g, &c, &pdk);
+            let v = vs.iter().find(|v| v.shared).unwrap_or_else(|| panic!("{nf:?}: no shared variant"));
+            let m = v.draw(&g, &c, &pdk);
+            let n_all = m.units.len() as i64;
+            let x_all: i64 = m.units.iter().map(|u| i64::from(u.x)).sum();
+            for (k, &want) in nf.iter().enumerate() {
+                let mine: Vec<_> = m.units.iter().filter(|u| usize::from(u.owner) == k).collect();
+                assert_eq!(mine.len(), usize::from(want), "{nf:?} member {k}");
+                let x_k: i64 = mine.iter().map(|u| i64::from(u.x)).sum();
+                assert_eq!(x_k * n_all, x_all * mine.len() as i64, "{nf:?} member {k} centroid");
+                assert_eq!(mine.iter().map(|u| i32::from(u.phi.0)).sum::<i32>(), 0, "{nf:?} member {k} phi");
+            }
+        }
+        let (g, c) = group(DeviceKind::Nmos, &[1, 1], 1680);
+        assert!(FinFet::enumerate(&g, &c, &pdk).iter().all(|v| !v.shared));
+    }
+
+    /// T1: separate and shared rows, Nmos and Pmos, DRC and ERC clean, with
+    /// drains and gates private per member (a cross-member short is an ERC
+    /// finding). Release only: generic_finfet's ERC trips an engine debug
+    /// assertion (`tests/cell_selfcheck.rs`, `the_mosfet_is_clean_on_every_deck`).
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn every_variant_is_drc_and_erc_clean() {
+        let pdk = deck();
+        let mut dirty = Vec::new();
+        for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
+            for nf in [&[1u16][..], &[2, 2], &[2, 4], &[4, 4]] {
+                let (g, c) = group(kind, nf, 1680);
+                dirty.extend(crate::testkit::dirty_group_with::<FinFet>(&g, &c, &pdk, &["S", "B"]).into_iter().map(|d| format!("{kind:?} {nf:?} {d}")));
+            }
+        }
+        assert!(dirty.is_empty(), "{}", dirty.join("\n"));
+    }
 }
