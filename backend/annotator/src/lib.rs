@@ -18,6 +18,7 @@ pub mod netrole;
 pub mod pattern;
 pub mod policy;
 pub mod size;
+pub mod symmetry;
 pub mod terms;
 
 #[cfg(test)]
@@ -250,7 +251,21 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         .collect();
 
     let mut intent = analog::intent::Intent::default();
-    let reqs = graph::requirements(&all, &[], &[], &[], &hg, &net_classes, &canon, &cfg.policy);
+    // Symmetry seeds: the disjoint DiffPair/Load/CascodePair leaves (never contradictory),
+    // each couple and the list in canonical order, names breaking exact ties.
+    let ck = |d: DeviceId| (canon[d.0 as usize], names[d.0 as usize]);
+    let mut seeds: Vec<(DeviceId, DeviceId, usize)> = block::leaves(&blocks)
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(b.kind, BlockKind::DiffPair | BlockKind::Load | BlockKind::CascodePair))
+        .map(|(i, b)| if ck(b.devices[0]) <= ck(b.devices[1]) { (b.devices[0], b.devices[1], i) } else { (b.devices[1], b.devices[0], i) })
+        .collect();
+    seeds.sort_by_key(|&(a, b, _)| (ck(a), ck(b)));
+    let seeds: Vec<symmetry::Seed> = seeds.into_iter().map(|(a, b, i)| symmetry::Seed::Devices(a, b, analog::intent::ConstraintId(i as u32))).collect();
+    let (compounds, diags) = symmetry::analyze(&hg, &drawn, &net_classes, &seeds, &canon);
+    intent.compounds = compounds;
+    intent.diagnostics.extend(diags);
+    let reqs = graph::requirements(&all, &intent.compounds, &[], &[], &hg, &net_classes, &canon, &cfg.policy);
     intent.tree = graph::hsmpg(netlist.devices.len(), &reqs, &canon);
     Problem {
         intent,

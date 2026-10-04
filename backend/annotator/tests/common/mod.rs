@@ -179,6 +179,20 @@ pub fn canon(p: &annotator::Problem, nl: &Netlist) -> Canon {
     c
 }
 
+/// [`Canon`] of `p.intent.compounds`: `pairs` (names sorted), `selfs`, `net_pairs`
+/// and `axes = compounds.len()`. Replaced by [`canon`] once EXT-20 emits per compound.
+pub fn canon_intent(p: &annotator::Problem, nl: &Netlist) -> Canon {
+    let dev = |d: pnr_core::ids::DeviceId| nl.devices[d.0 as usize].name.as_str();
+    let net = |n: NetId| nl.nets[n.0 as usize].name.as_str();
+    let mut c = Canon { axes: p.intent.compounds.len(), ..Canon::default() };
+    for k in &p.intent.compounds {
+        c.pairs.extend(k.pairs.iter().map(|&(a, b)| sorted(dev(a), dev(b))));
+        c.selfs.extend(k.selfs.iter().map(|&d| dev(d).to_string()));
+        c.net_pairs.extend(k.net_pairs.iter().map(|&(x, y)| sorted(net(x), net(y))));
+    }
+    c
+}
+
 /// The `(a, b)` ids of a batch whose every rule touches exactly two ids.
 pub fn id_pairs<On>(b: &dyn RuleBatch<On>) -> Vec<(u32, u32)> {
     let mut ids = Vec::new();

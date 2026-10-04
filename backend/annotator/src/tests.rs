@@ -770,6 +770,7 @@ fn more_nets_than_u16_ids_is_refused_not_wrapped() {
 #[test]
 fn intent_empty_axes_per_block() {
     let p = annotate(&ota(), &AnnotationConfig::default());
-    assert!(p.intent.sets.is_empty() && p.intent.compounds.is_empty());
+    // EXT-14 fills compounds (one here); axes stay per block until EXT-20 (card D-b).
+    assert!(p.intent.sets.is_empty() && p.intent.compounds.len() == 1);
     assert_eq!(p.axis_count, p.blocks.len());
 }

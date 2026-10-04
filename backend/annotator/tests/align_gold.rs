@@ -6,7 +6,7 @@
 mod common;
 
 use annotator::annotate;
-use common::{canon, net, sorted, strongarm_cfg, STRONGARM};
+use common::{canon_intent, net, sorted, strongarm_cfg, STRONGARM};
 
 /// The device pairs its `SymmetricBlocks` implies (`xdp`, `xccn`, `xccp` and
 /// `xinv_n`/`xinv_p` expanded to their instances).
@@ -24,10 +24,9 @@ const GOLD_NET_PAIRS: [(&str, &str); 3] = [("vin", "vip"), ("vin_d", "vip_d"), (
 
 /// T1: every gold pair and no other, `mn0` and the 3 net pairs, one axis.
 #[test]
-#[ignore = "passes after EXT-14"]
 fn strongarm_matches_align_gold() {
     let nl = net(STRONGARM);
-    let c = canon(&annotate(&nl, &strongarm_cfg()), &nl);
+    let c = canon_intent(&annotate(&nl, &strongarm_cfg()), &nl);
     assert_eq!(c.pairs, GOLD_PAIRS.iter().map(|&(a, b)| sorted(a, b)).collect(), "device pairs");
     assert!(GOLD_SELF.iter().all(|s| c.selfs.contains(*s)), "selfs {:?}", c.selfs);
     assert!(GOLD_NET_PAIRS.iter().all(|&(a, b)| c.net_pairs.contains(&sorted(a, b))), "net pairs {:?}", c.net_pairs);

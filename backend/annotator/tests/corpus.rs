@@ -158,6 +158,7 @@ fn assert_unmatched(name: &str, src: &str) {
     let p = annotate(&nl, &cfg(name));
     let c = canon(&p, &nl);
     assert!(c.pairs.is_empty() && c.sets.is_empty(), "{name}: {c:?}");
+    assert!(p.intent.compounds.is_empty(), "{name}: compounds {:?}", common::canon_intent(&p, &nl));
     let matched: Vec<_> = annotator::block::leaves(&p.blocks)
         .into_iter()
         .filter(|b| matches!(b.kind, BlockKind::DiffPair | BlockKind::CurrentMirror | BlockKind::Load))
@@ -190,11 +191,11 @@ fn permutation_invariance() {
     for (name, src) in all() {
         let nl = net(src);
         let p = annotate(&nl, &cfg(name));
-        let base = (canon(&p, &nl), canon_leaves(&p, &nl));
+        let base = (canon(&p, &nl), canon_leaves(&p, &nl), common::canon_intent(&p, &nl));
         for seed in 1..=20 {
             let q = permute(&nl, seed);
             let pq = annotate(&q, &cfg(name));
-            assert_eq!((canon(&pq, &q), canon_leaves(&pq, &q)), base, "{name} seed {seed}");
+            assert_eq!((canon(&pq, &q), canon_leaves(&pq, &q), common::canon_intent(&pq, &q)), base, "{name} seed {seed}");
         }
     }
 }
@@ -351,4 +352,48 @@ fn ids_survive_permutation() {
     for s in 1..=5 {
         assert_eq!(id_of(&permute(&nl, s)), base, "seed {s}");
     }
+}
+
+/// EXT-14 compounds, exact, on [`common::canon_intent`]: `(name, pairs, selfs,
+/// net_pairs, axes)`; every circuit not listed has none.
+type CompoundRow = (&'static str, &'static [(&'static str, &'static str)], &'static [&'static str], &'static [(&'static str, &'static str)], usize);
+const COMPOUNDS: [CompoundRow; 7] = [
+    ("ota5t", &[("XM1", "XM2"), ("XM3", "XM4")], &["XM5"], &[("vinm", "vinp"), ("vout1", "vout2")], 1),
+    ("folded", &[("M1", "M2"), ("M3", "M4"), ("M5", "M6"), ("M7", "M8"), ("M10", "M9")], &["M0"], &[("vinn", "vinp"), ("x1", "x2"), ("o1", "out"), ("y1", "y2")], 1),
+    ("gilbert", &[("M1", "M2"), ("M3", "M6"), ("M4", "M5")], &["M0"], &[("rfn", "rfp"), ("x1", "x2"), ("outn", "outp")], 1),
+    ("rail2rail", &[("MN1", "MN2"), ("MP1", "MP2")], &["MN0", "MP0"], &[("vinn", "vinp"), ("xn1", "xn2"), ("xp1", "xp2")], 1),
+    ("latch", &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("q", "qb")], 1),
+    ("three_stage", &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2"), ("vin_n", "vin_p")], 1),
+    // T1's circuit: align_gold checks it against the ALIGN gold.
+    ("strongarm", &[("mn1", "mn2"), ("mn3", "mn4"), ("mp5", "mp6"), ("mp7", "mp8"), ("mp10", "mp9"), ("mp11", "mp12"), ("mn13", "mn14")], &["mn0"], &[("vin", "vip"), ("vin_d", "vip_d"), ("vin_o", "vip_o"), ("von", "vop")], 1),
+];
+
+#[test]
+fn compound_expectations() {
+    let owned = |v: &[(&str, &str)]| v.iter().map(|(a, b)| ((*a).to_string(), (*b).to_string())).collect();
+    let mut bad = Vec::new();
+    for (name, src) in all() {
+        let nl = net(src);
+        let p = annotate(&nl, &cfg(name));
+        let got = common::canon_intent(&p, &nl);
+        let exp = COMPOUNDS.iter().find(|r| r.0 == name).map_or_else(Canon::default, |&(_, pairs, selfs, np, axes)| Canon {
+            pairs: owned(pairs),
+            selfs: selfs.iter().map(|s| (*s).to_string()).collect(),
+            net_pairs: owned(np),
+            axes,
+            ..Canon::default()
+        });
+        if got != exp {
+            bad.push(format!("{name}:\n  got  {got:?}\n  want {exp:?}"));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    // Gilbert's LO nets and tail sit on the axis (AA-02 trace §2.13-7c).
+    let nl = net(src("gilbert"));
+    let p = annotate(&nl, &AnnotationConfig::default());
+    let self_nets: BTreeSet<&str> = p.intent.compounds[0].self_nets.iter().map(|n| nl.nets[n.0 as usize].name.as_str()).collect();
+    assert!(["tail", "lop", "lon"].iter().all(|n| self_nets.contains(n)), "{self_nets:?}");
+    // three_stage: the second and third stages stay out of every pair.
+    let c = common::canon_intent(&annotate(&net(src("three_stage")), &AnnotationConfig::default()), &net(src("three_stage")));
+    assert!(c.pairs.iter().all(|(a, b)| !["M6", "M7", "M8", "M9"].contains(&a.as_str()) && !["M6", "M7", "M8", "M9"].contains(&b.as_str())));
 }
