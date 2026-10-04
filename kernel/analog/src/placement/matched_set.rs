@@ -106,10 +106,8 @@ impl MatchedSet {
             0.0
         };
 
-        let area = |s: &crate::matching::moments::Sums, k: usize| {
-            if units { (s.w / 1e6) as f32 } else { self.gate_um2.get(k).copied().unwrap_or(0.0) }
-        };
-        let sigma_rand = self.coeffs.avt_mv_um.map_or(0.0, |av| sigma_pair(av, area(&sa, 0), area(&sb, i)));
+        let (a0, ai) = self.areas(&sa, &sb, i);
+        let sigma_rand = self.coeffs.avt_mv_um.map_or(0.0, |av| sigma_pair(av, a0, ai));
         let budgeted = sigma_rand > 0.0 || matches!(self.budget, Budget::Allowance(_));
 
         let (mut sigma_grad, mut mu_lod, mut mu_thermal) = (0.0, 0.0, 0.0);
@@ -136,6 +134,22 @@ impl MatchedSet {
             delta_m_nm,
             known: units && (budgeted || coincidence.is_some()),
         }
+    }
+
+    /// Areas of pair `(0, i)`, µm²: unit weights (nm²) when both members have
+    /// units, else the netlist `gate_um2`.
+    fn areas(&self, sa: &crate::matching::moments::Sums, sb: &crate::matching::moments::Sums, i: usize) -> (f32, f32) {
+        if sa.w > 0.0 && sb.w > 0.0 {
+            ((sa.w / 1e6) as f32, (sb.w / 1e6) as f32)
+        } else {
+            (self.gate_um2.first().copied().unwrap_or(0.0), self.gate_um2.get(i).copied().unwrap_or(0.0))
+        }
+    }
+
+    /// The areas [`Self::ledger`] reads for pair `(0, i)` on `l`, µm².
+    #[must_use]
+    pub fn pair_areas(&self, l: &Layout, i: usize) -> (f32, f32) {
+        self.areas(&member(l, self.members[0]).0, &member(l, self.members[i]).0, i)
     }
 
     fn ledgers<'a>(&'a self, l: &'a Layout) -> impl Iterator<Item = Ledger> + 'a {
@@ -230,6 +244,10 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
             });
         }
     }
+    fn sizing_notes(&self, l: &Layout, out: &mut Vec<crate::matching::sizing::SizingNote>) {
+        // ponytail: EXT-20 passes the intent class's limit.
+        out.extend(crate::matching::sizing::notes(self, l, None));
+    }
     fn offset_allowances(&self, l: &Layout, out: &mut Vec<(u32, u32, f32)>) {
         for i in 1..self.members.len() {
             let g = self.ledger(l, i);
@@ -261,30 +279,32 @@ pub(crate) fn pair(a: u16, b: u16) -> MatchedSet {
     }
 }
 
+/// Cells at `(xs, ys)`, each `2·half` square, no units, no power.
+#[cfg(test)]
+pub(crate) fn layout(xs: &[i32], ys: &[i32], half: i32) -> Layout {
+    let n = xs.len();
+    Layout {
+        x: xs.to_vec(),
+        y: ys.to_vec(),
+        hw: vec![half; n],
+        hh: vec![half; n],
+        axis: vec![0; n],
+        groups: vec![],
+        orient: vec![pnr_core::Orient::default(); n],
+        variant: vec![0; n],
+        branch: Vec::new(),
+        power_uw: vec![0; n],
+        temp_mc: vec![0; n],
+        units: Default::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rule::RuleBatch;
     use pnr_core::{Rect, Unit, UnitLib};
     use std::sync::Arc;
-
-    fn layout(xs: &[i32], ys: &[i32], half: i32) -> Layout {
-        let n = xs.len();
-        Layout {
-            x: xs.to_vec(),
-            y: ys.to_vec(),
-            hw: vec![half; n],
-            hh: vec![half; n],
-            axis: vec![0; n],
-            groups: vec![],
-            orient: vec![pnr_core::Orient::default(); n],
-            variant: vec![0; n],
-            branch: Vec::new(),
-            power_uw: vec![0; n],
-            temp_mc: vec![0; n],
-            units: Default::default(),
-        }
-    }
 
     fn unit(owner: u8, x: i32, y: i32, weight: i64) -> Unit {
         Unit { owner, x, y, weight, phi: (1, 0), sa: 0, sb: 0 }

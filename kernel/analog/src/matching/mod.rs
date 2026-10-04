@@ -5,3 +5,4 @@ pub mod class;
 pub mod mismatch;
 pub mod moments;
 pub mod pattern;
+pub mod sizing;

@@ -863,7 +863,7 @@ The abutment table's only reader is dp's rotation lock (`frontend/library/src/li
 - Risks / notes: none; data only.
 
 ### EXT-29 Structure and bias audit diagnostics
-- Priority: P2. Effort: S. Depends on: EXT-16, EXT-17. Area and length shortfalls (H13-43/44, MM-14, MM-21) are MAT-08's `SizingNote`; D* per set (MM-06) is MAT-16's ledger column; this item keeps the checks that need EXT's roles or the op point.
+- Priority: P2. Effort: S. Depends on: EXT-16, EXT-17. Area and length shortfalls (H13-43/44, MM-14, MM-21) and D* per pair (MM-06) are GAP-02's `SizingNote` (`analog::matching::sizing`); this item keeps the checks that need EXT's roles or the op point.
 - Why: things layout cannot fix must be reported, not chased by the annealer: H13-32 (V_gst ≥ 100 mV for current-matched moderate/exceptional devices, rule 4, hastings.txt L42464–42472), H13-33 (CLM from ΔV_DS, eq. 13.53, L41542–41583), H13-34 (cascode ratio identity eqs. 13.55–13.56 and cascode bulk to source, L41610–41647), H09-04 (BJT ratio 6:1–16:1, even; L30628–30637, PDF 513), H09-23 (equal V_CE).
 - Current: none.
 - Change: new `backend/annotator/src/audit.rs`, `pub fn audit(intent: &Intent, nl: &Netlist, drawn: &[Drawn], ev: &Evidence) -> Vec<Diagnostic>`:
