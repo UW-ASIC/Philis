@@ -126,15 +126,9 @@ pub fn capacitor_sets(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetC
     let cap = |d: usize| hg.kinds[d] == DeviceKind::Capacitor;
     // (top plate, model, W, L) → members.
     type Key = (NetId, u16, Option<i64>, Option<i64>);
-    let mut banks: Vec<(Key, Vec<usize>)> = Vec::new();
-    for d in (0..hg.device_count()).filter(|&d| cap(d)) {
-        let Some(p) = net(hg, d, "P") else { continue };
-        let key = (p, drawn[d].model, drawn[d].w_finger_nm, drawn[d].l_nm);
-        match banks.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, v)) => v.push(d),
-            None => banks.push((key, vec![d])),
-        }
-    }
+    let mut banks: Vec<(Key, Vec<usize>)> = crate::sets::group(
+        (0..hg.device_count()).filter(|&d| cap(d)).filter_map(|d| Some(((net(hg, d, "P")?, drawn[d].model, drawn[d].w_finger_nm, drawn[d].l_nm), d))),
+    );
     banks.retain(|(_, v)| v.len() > 1);
     let terminated = |d: usize| drawn[d].fingers == 1 && net(hg, d, "N").is_some_and(|n| rail(classes, n));
     for (_, v) in &mut banks {
@@ -259,17 +253,10 @@ pub fn degenerated_pairs(hg: &BipartiteHypergraph, drawn: &[Drawn], roles: &[cra
 /// (H09-43): rule `"diode_set"`, role Other.
 #[must_use]
 pub fn diode_sets(hg: &BipartiteHypergraph, drawn: &[Drawn]) -> Vec<PassiveSet> {
-    let mut groups: Vec<(_, Vec<usize>)> = Vec::new();
-    for d in (0..hg.device_count()).filter(|&d| hg.kinds[d] == DeviceKind::Diode) {
-        for t in ["P", "N"] {
-            let key = (t, net(hg, d, t), drawn[d].model, drawn[d].w_finger_nm, drawn[d].l_nm);
-            match groups.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, v)) => v.push(d),
-                None => groups.push((key, vec![d])),
-            }
-        }
-    }
-    groups.into_iter().filter(|(_, v)| v.len() > 1).map(|(_, v)| set(v, "diode_set", SetRole::Other)).collect()
+    let keyed = (0..hg.device_count())
+        .filter(|&d| hg.kinds[d] == DeviceKind::Diode)
+        .flat_map(|d| ["P", "N"].map(|t| ((t, net(hg, d, t), drawn[d].model, drawn[d].w_finger_nm, drawn[d].l_nm), d)));
+    crate::sets::group(keyed).into_iter().filter(|(_, v)| v.len() > 1).map(|(_, v)| set(v, "diode_set", SetRole::Other)).collect()
 }
 
 #[cfg(test)]

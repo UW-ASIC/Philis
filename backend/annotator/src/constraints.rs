@@ -149,24 +149,20 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block], sets: &[Ma
     for u in &c.unitization {
         u.devices.iter().for_each(|d| covered[d.0 as usize] = true);
     }
-    let mut parallel: Vec<(_, Vec<DeviceId>)> = Vec::new();
-    for (i, d) in netlist.devices.iter().enumerate() {
+    let keyed = netlist.devices.iter().enumerate().filter_map(|(i, d)| {
         if covered[i] || !matches!(d.kind, DeviceKind::Nmos | DeviceKind::Pmos) || drawn[i].w_finger_nm.is_none() {
-            continue;
+            return None;
         }
         let mut t: Vec<(&str, u16)> = d.terminals.iter().map(|(n, x)| (n.as_str(), x.0)).collect();
         t.sort_unstable();
-        let key = (d.kind, drawn[i].model, drawn[i].w_finger_nm, drawn[i].l_nm, t);
-        match parallel.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, v)) => v.push(DeviceId(i as u16)),
-            None => parallel.push((key, vec![DeviceId(i as u16)])),
-        }
-    }
-    for (key, devices) in parallel.into_iter().filter(|(_, v)| v.len() > 1) {
+        Some(((d.kind as u8, drawn[i].model, drawn[i].w_finger_nm, drawn[i].l_nm, t), DeviceId(i as u16)))
+    });
+    for (key, devices) in crate::sets::group(keyed).into_iter().filter(|(_, v)| v.len() > 1) {
+        let kind = netlist.devices[devices[0].0 as usize].kind;
         let dev_nf: Vec<u16> = devices.iter().map(|&d| fingers(&netlist.devices[d.0 as usize])).collect();
         c.unitization.push(Unitization {
             devices,
-            device_type: key.0,
+            device_type: kind,
             target_ratio: dev_nf.clone(),
             dev_nf,
             unit_w: clamp(key.2),

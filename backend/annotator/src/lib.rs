@@ -294,26 +294,35 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     intent.sets = sets::matched_sets(&reqs, &intent.compounds, &shared, &passive_sets, &block::leaves(&blocks), &canon, &drawn, &hg, &cfg.process.unit, &mut intent.diagnostics);
     // EXT-16: kind, class and style per set; the unit floors depend on the class.
     let leaves = block::leaves(&blocks);
+    let n = netlist.devices.len();
+    let leaf_idx = sets::device_index(n, leaves.iter().map(|b| b.devices.as_slice()));
+    let passive_idx = sets::device_index(n, passive_sets.iter().map(|p| p.devices.as_slice()));
     let mut roles = Vec::new();
     for s in &intent.sets {
         let has = |d: DeviceId| s.members.iter().any(|m| m.device == d);
-        let kinds: Vec<BlockKind> = leaves.iter().filter(|b| b.devices.len() == 2 && b.devices.iter().all(|&d| has(d))).map(|b| b.kind).collect();
+        let pair = |b: usize| leaves[b].devices.len() == 2 && leaves[b].devices.iter().all(|&d| has(d));
+        let kinds: Vec<BlockKind> = sets::inside(&leaf_idx, s.members.iter().map(|m| m.device.0 as usize), pair).into_iter().map(|b| leaves[b].kind).collect();
         roles.push(kinds);
     }
     for (s, kinds) in intent.sets.iter_mut().zip(&roles) {
         s.kind = class::kind_of(s, kinds, netlist.devices[s.members[0].device.0 as usize].kind);
     }
     let input = |i: usize| roles[i].contains(&BlockKind::DiffPair);
+    let input_compounds: std::collections::HashSet<u16> = (0..intent.sets.len()).filter(|&j| input(j)).filter_map(|j| intent.sets[j].compound).collect();
     for i in 0..intent.sets.len() {
         let s = &intent.sets[i];
         let role = if input(i) {
             class::SetRole::InputPair
         } else if roles[i].iter().any(|k| matches!(k, BlockKind::Load | BlockKind::CascodePair))
-            && s.compound.is_some_and(|c| (0..intent.sets.len()).any(|j| input(j) && intent.sets[j].compound == Some(c)))
+            && s.compound.is_some_and(|c| input_compounds.contains(&c))
         {
             class::SetRole::LoadOfPair
-        } else if let Some(p) = passive_sets.iter().find(|p| p.devices.iter().all(|d| s.members.iter().any(|m| m.device == *d))) {
-            p.role
+        } else if let Some(&p) = sets::inside(&passive_idx, s.members.iter().map(|m| m.device.0 as usize), |p| {
+            passive_sets[p].devices.iter().all(|d| s.members.iter().any(|m| m.device == *d))
+        })
+        .first()
+        {
+            passive_sets[p].role
         } else if matches!(s.origin, analog::intent::Origin::Pattern { template } if template.starts_with("bjt_ratioed_pair")) {
             // A ratioed pair's ΔV_BE is a bandgap core (H09-01).
             class::SetRole::BandgapCore
@@ -347,8 +356,11 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         }
     }
     // EXT-14 step 9 (card D-d): a compound holding an Exceptional Voltage set is Perfect.
-    for (ci, c) in intent.compounds.iter_mut().enumerate() {
-        let perfect = intent.sets.iter().any(|s| s.compound == Some(ci as u16) && s.kind == analog::intent::MatchKind::Voltage && s.class == analog::intent::MatchClass::Exceptional);
+    let mut perfect = vec![false; intent.compounds.len()];
+    for s in intent.sets.iter().filter(|s| s.kind == analog::intent::MatchKind::Voltage && s.class == analog::intent::MatchClass::Exceptional) {
+        s.compound.and_then(|c| perfect.get_mut(c as usize)).into_iter().for_each(|p| *p = true);
+    }
+    for (c, &perfect) in intent.compounds.iter_mut().zip(&perfect) {
         c.kind = if perfect { analog::intent::SymKind::Perfect } else { analog::intent::SymKind::Mirror };
     }
     sets::set_pairs(&mut intent.compounds, &intent.sets);

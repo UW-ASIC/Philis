@@ -53,23 +53,18 @@ pub(crate) fn diode(hg: &BipartiteHypergraph, d: usize) -> bool {
 /// diode reference first, then by id.
 #[must_use]
 pub fn shared_bias_groups(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetClassification]) -> Vec<Vec<DeviceId>> {
-    let mut groups: Vec<(_, Vec<usize>)> = Vec::new();
-    for (d, dr) in drawn.iter().enumerate() {
+    let keyed = drawn.iter().enumerate().filter_map(|(d, dr)| {
         let k = hg.kinds[d];
-        let (g, s) = if fet(k) { ("G", "S") } else if bjt(k) { ("B", "E") } else { continue };
-        let key = (k, dr.model, dr.l_nm, net(hg, d, g), net(hg, d, s));
-        match groups.iter_mut().find(|(x, _)| *x == key) {
-            Some((_, v)) => v.push(d),
-            None => groups.push((key, vec![d])),
-        }
-    }
-    groups
+        let (g, s) = if fet(k) { ("G", "S") } else if bjt(k) { ("B", "E") } else { return None };
+        Some(((k as u8, dr.model, dr.l_nm, net(hg, d, g), net(hg, d, s)), d))
+    });
+    group(keyed)
         .into_iter()
         .filter(|(key, v)| {
             let bias = key.3.is_some_and(|n| classes[n.0 as usize].class != NetClass::Signal);
             // All on one drain (collector) is one device written as several cards
             // (cellgen's parallel rule), not a ratio.
-            let (dk, d0) = (if fet(key.0) { "D" } else { "C" }, v[0]);
+            let (dk, d0) = (if fet(hg.kinds[v[0]]) { "D" } else { "C" }, v[0]);
             let one_drain = v.iter().all(|&d| net(hg, d, dk) == net(hg, d0, dk));
             v.len() > 1 && !one_drain && (bias || v.iter().any(|&d| diode(hg, d)))
         })
@@ -78,6 +73,44 @@ pub fn shared_bias_groups(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[
             v.into_iter().map(|d| DeviceId(d as u16)).collect()
         })
         .collect()
+}
+
+/// `(key, item)` pairs grouped by key, groups in first-seen order. Hashed:
+/// a linear search over thousands of keys (12 k devices) is quadratic.
+pub(crate) fn group<K: std::hash::Hash + Eq + Clone, T>(items: impl IntoIterator<Item = (K, T)>) -> Vec<(K, Vec<T>)> {
+    let mut at: std::collections::HashMap<K, usize> = std::collections::HashMap::new();
+    let mut out: Vec<(K, Vec<T>)> = Vec::new();
+    for (k, t) in items {
+        match at.get(&k) {
+            Some(&i) => out[i].1.push(t),
+            None => {
+                at.insert(k.clone(), out.len());
+                out.push((k, vec![t]));
+            }
+        }
+    }
+    out
+}
+
+/// Per device id, the positions of the `items` holding it.
+pub(crate) fn device_index<'a>(n: usize, items: impl IntoIterator<Item = &'a [DeviceId]>) -> Vec<Vec<usize>> {
+    let mut idx = vec![Vec::new(); n];
+    for (i, it) in items.into_iter().enumerate() {
+        for d in it {
+            idx[d.0 as usize].push(i);
+        }
+    }
+    idx
+}
+
+/// Ascending positions (from [`device_index`]) of the items touching `g` that
+/// `all_in` accepts: only those are tested, not every item (12 k-device scale).
+pub(crate) fn inside(idx: &[Vec<usize>], g: impl IntoIterator<Item = usize>, all_in: impl Fn(usize) -> bool) -> Vec<usize> {
+    let mut c: Vec<usize> = g.into_iter().flat_map(|d| idx[d].iter().copied()).collect();
+    c.sort_unstable();
+    c.dedup();
+    c.retain(|&i| all_in(i));
+    c
 }
 
 fn gcd(a: i64, b: i64) -> i64 {
@@ -254,6 +287,9 @@ pub fn matched_sets(
             comp_of[d.0 as usize] = Some(ci as u16);
         }
     }
+    let shared_idx = device_index(n, shared.iter().map(Vec::as_slice));
+    let passive_idx = device_index(n, passive.iter().map(|p| p.devices.as_slice()));
+    let leaf_idx = device_index(n, leaves.iter().map(|b| b.devices.as_slice()));
     groups
         .into_iter()
         .enumerate()
@@ -261,12 +297,13 @@ pub fn matched_sets(
             let kind = hg.kinds[g[0]];
             let ids: Vec<DeviceId> = g.iter().map(|&d| DeviceId(d as u16)).collect();
             let has = |d: &DeviceId| g.contains(&(d.0 as usize));
-            let origin = if shared.iter().any(|s| s.iter().all(has)) {
+            let ps = inside(&passive_idx, g.iter().copied(), |p| passive[p].devices.iter().all(has));
+            let origin = if !inside(&shared_idx, g.iter().copied(), |s| shared[s].iter().all(has)).is_empty() {
                 Origin::SharedBias
-            } else if let Some(p) = passive.iter().find(|p| p.devices.iter().all(has)) {
-                Origin::PassiveSet { rule: p.rule }
-            } else if let Some(b) = leaves.iter().find(|b| b.devices.iter().all(has)) {
-                Origin::Pattern { template: b.template }
+            } else if let Some(&p) = ps.first() {
+                Origin::PassiveSet { rule: passive[p].rule }
+            } else if let Some(&b) = inside(&leaf_idx, g.iter().copied(), |b| leaves[b].devices.iter().all(has)).first() {
+                Origin::Pattern { template: leaves[b].template }
             } else {
                 Origin::Symmetry { seed: ConstraintId(u32::from(g.iter().find_map(|&d| comp_of[d]).unwrap_or(0))) }
             };
@@ -278,7 +315,7 @@ pub fn matched_sets(
                 }
             };
             let diodes: Vec<usize> = (0..g.len()).filter(|&j| fet(kind) && diode(hg, g[j])).collect();
-            let bank_ref = passive.iter().filter(|p| p.devices.iter().all(has)).find_map(|p| p.reference).and_then(|r| g.iter().position(|&d| d == r.0 as usize));
+            let bank_ref = ps.iter().find_map(|&p| passive[p].reference).and_then(|r| g.iter().position(|&d| d == r.0 as usize));
             MatchSpec {
                 id: ConstraintId(i as u32),
                 origin,
@@ -313,19 +350,29 @@ pub fn unitize_set(members: &[DeviceId], passive: &[crate::passive::PassiveSet],
 /// Nested symmetry (EXT-14 step 8): `(i, j)`, `i < j`, on the compound whose
 /// pairs map set i's members bijectively onto set j's.
 pub fn set_pairs(compounds: &mut [Compound], sets: &[MatchSpec]) {
+    let n = sets.iter().flat_map(|s| s.members.iter().map(|m| m.device.0 as usize + 1)).max().unwrap_or(0);
+    let ids: Vec<Vec<DeviceId>> = sets.iter().map(|s| s.members.iter().map(|m| m.device).collect()).collect();
+    let idx = device_index(n, ids.iter().map(Vec::as_slice));
+    let members = |s: &MatchSpec| {
+        let mut v: Vec<u16> = s.members.iter().map(|m| m.device.0).collect();
+        v.sort_unstable();
+        v
+    };
     for c in compounds.iter_mut() {
-        let mate = |d: DeviceId| c.pairs.iter().find_map(|&(a, b)| if a == d { Some(b) } else if b == d { Some(a) } else { None });
-        let members = |s: &MatchSpec| {
-            let mut v: Vec<u16> = s.members.iter().map(|m| m.device.0).collect();
-            v.sort_unstable();
-            v
-        };
+        let mut mates = std::collections::HashMap::new();
+        for &(a, b) in &c.pairs {
+            mates.entry(a).or_insert(b);
+            mates.entry(b).or_insert(a);
+        }
+        let mate = |d: DeviceId| mates.get(&d).copied();
+        // Only sets wholly inside the pairs can map onto one another.
+        let near = inside(&idx, mates.keys().map(|d| d.0 as usize).filter(|&d| d < n), |s| sets[s].members.iter().all(|m| mates.contains_key(&m.device)));
         let mut found = Vec::new();
-        for (i, si) in sets.iter().enumerate() {
-            let Some(mut img) = si.members.iter().map(|m| mate(m.device).map(|d| d.0)).collect::<Option<Vec<u16>>>() else { continue };
+        for (k, &i) in near.iter().enumerate() {
+            let Some(mut img) = sets[i].members.iter().map(|m| mate(m.device).map(|d| d.0)).collect::<Option<Vec<u16>>>() else { continue };
             img.sort_unstable();
-            for (j, sj) in sets.iter().enumerate().skip(i + 1) {
-                if img == members(sj) {
+            for &j in &near[k + 1..] {
+                if img == members(&sets[j]) {
                     found.push((i as u16, j as u16));
                 }
             }
@@ -367,6 +414,24 @@ mod tests {
 
     fn par(u: &[(u16, u16)]) -> Vec<u16> {
         u.iter().map(|p| p.0).collect()
+    }
+
+    /// EXT-14 step 8: a compound whose couples carry one set's members onto
+    /// another's records `(i, j)`; three_stage's own compound maps each set onto
+    /// itself, so it records none.
+    #[test]
+    fn set_pairs_maps_set_onto_set() {
+        let nl = crate::tests::three_stage();
+        let p = crate::annotate(&nl, &crate::AnnotationConfig::default());
+        let id = |n: &str| DeviceId(nl.devices.iter().position(|d| d.name == n).unwrap() as u16);
+        let set = |n: &str| p.intent.sets.iter().position(|s| s.members.iter().any(|m| m.device == id(n))).unwrap() as u16;
+        let (i, j) = (set("M1"), set("M4"));
+        assert!(p.intent.compounds.iter().all(|c| c.set_pairs.is_empty()));
+        let mut c = p.intent.compounds[0].clone();
+        c.pairs = vec![(id("M1"), id("M4")), (id("M2"), id("M5"))];
+        let mut cs = vec![c];
+        set_pairs(&mut cs, &p.intent.sets);
+        assert_eq!(cs[0].set_pairs, [(i.min(j), i.max(j))]);
     }
 
     #[test]

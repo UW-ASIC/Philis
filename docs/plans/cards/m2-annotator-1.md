@@ -40,6 +40,13 @@ Order: commit each item on its own, `cargo test -p annotator -p analog` green be
   Supply, Ground, Substrate and Clock.
 - **D-k. No "largest group size" metadata field.** It can be computed from `intent.tree`; add one when a reader
   needs it.
+- **D-l. EXT-15 step 3 is not drawn as written (review fixes 1).** The per-set Unitization uses schematic fingers
+  (`dev_nf = nf·m`, `unit_w` = finger W, `series` all 1), not `Member::parallel` and `UnitGeom`, and a set whose
+  members differ in finger W/L gets none (`constraints.rs`, `if !same { continue; }`). Reason: the LVS reference
+  expands `nf·m` fingers of W_f, so drawing `W_u ≠ W_f` units gave `lvs.unpaired_device` on `mirror_ratio` and `ota`.
+  Consequence: EXT-16's three_stage result does not hold. Its bias set {M3,M7,M9} (finger W differs) gets no set
+  Unitization: M3 and M9 keep D-f per-block Unitizations with dummies, and M7 has none. Adopting the inferred unit
+  (netlist rewrite or LVS reference in units) is a **CELL/FLOW follow-up**.
 
 ---
 

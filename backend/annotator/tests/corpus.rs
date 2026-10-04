@@ -100,9 +100,9 @@ const EXPECTED: [Row; 18] = [
     // EXT-05 review: `cmos_inverter`'s declared prox makes each switch inverter a Stack leaf.
     // EXT-19: the capacitor bank is one binary DacBank set, Exceptional Ratio.
     ("dac4", &[("Stack", &["XMN0", "XMP0"]), ("Stack", &["XMN1", "XMP1"]), ("Stack", &["XMN2", "XMP2"]), ("Stack", &["XMN3", "XMP3"])], &[], &[], &[], 0, &[(&[("XC0", 1, 1), ("XC1", 1, 1), ("XC2", 2, 1), ("XC3", 4, 1), ("XC4", 8, 1)], "Ratio", "Exceptional")]),
-    // EXT-19: bjt_ratioed_pair (a CurrentMirror leaf, so its hard Symmetry too); the set is
-    // Voltage (ΔV_BE) Moderate (BandgapCore).
-    ("bgr_core", &[("CurrentMirror", &["XQ1", "XQ2"])], &[("XQ1", "XQ2")], &[], &[], 1, &[(&[("XQ1", 1, 1), ("XQ2", 8, 1)], "Voltage", "Moderate")]),
+    // EXT-19: bjt_ratioed_pair (a CurrentMirror leaf, matched but no hard Symmetry: a 1:N
+    // centroid array, `emit.rs`, review fixes 1); the set is Voltage (ΔV_BE) Moderate (BandgapCore).
+    ("bgr_core", &[("CurrentMirror", &["XQ1", "XQ2"])], &[], &[], &[], 0, &[(&[("XQ1", 1, 1), ("XQ2", 8, 1)], "Voltage", "Moderate")]),
     ("bjt_mirror", &[], &[], &[], &[], 0, &[]),
     // EXT-05: series_stack_4 declares no roles, so no re-searched Stack children.
     ("chain4", &[("Group", &["XM1", "XM2", "XM3", "XM4"])], &[], &[], &[], 0, &[]),
@@ -144,7 +144,7 @@ const EXPECTED: [Row; 18] = [
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
     // EXT-19: Q1/Q2 ratioed pair (Voltage Moderate) and the bandgap resistors R1:R2 = 4:1 in
     // series units of 20 µm (Ratio Moderate).
-    ("brokaw", &[("CurrentMirror", &["MP1", "MP2"]), ("CurrentMirror", &["Q1", "Q2"])], &[("MP1", "MP2"), ("Q1", "Q2")], &[], &[], 2, &[(&[("MP1", 1, 1), ("MP2", 1, 1)], "Current", "Minimal"), (&[("Q1", 1, 1), ("Q2", 8, 1)], "Voltage", "Moderate"), (&[("R1", 1, 4), ("R2", 1, 1)], "Ratio", "Moderate")]),
+    ("brokaw", &[("CurrentMirror", &["MP1", "MP2"]), ("CurrentMirror", &["Q1", "Q2"])], &[("MP1", "MP2")], &[], &[], 1, &[(&[("MP1", 1, 1), ("MP2", 1, 1)], "Current", "Minimal"), (&[("Q1", 1, 1), ("Q2", 8, 1)], "Voltage", "Moderate"), (&[("R1", 1, 4), ("R2", 1, 1)], "Ratio", "Moderate")]),
     // EXT-19: the divider is one FeedbackRatio set, RB four 10 µm series units.
     ("rdiv", &[], &[], &[], &[], 0, &[(&[("RA", 1, 1), ("RB", 1, 4)], "Ratio", "Moderate")]),
     // EXT-19: both banks and the bridge CA are one split_dac set (CA outside the unit).
@@ -490,6 +490,45 @@ fn class_sources() {
         let want = if s.kind == analog::intent::MatchKind::Voltage { analog::intent::ClassSource::Spec } else { analog::intent::ClassSource::Role };
         assert_eq!((s.class_source, s.class), (want, analog::intent::MatchClass::Moderate), "{s:?}");
     }
+}
+
+/// EXT-14 step 9 (card D-d): σ = 0.3 mV puts 6σ = 1.8 mV under 3 mV, so the
+/// DiffPair set is Exceptional Voltage and its compound Perfect; 0.5 mV keeps Mirror.
+#[test]
+fn exceptional_voltage_compound_is_perfect() {
+    use analog::intent::{MatchClass, MatchKind, SymKind};
+    for (sigma, kind) in [(0.3, SymKind::Perfect), (0.5, SymKind::Mirror)] {
+        let mut c = common::cfg();
+        c.offset_sigma_mv = Some(sigma);
+        let p = annotate(&net(src("ota5t")), &c);
+        let dp = p.intent.sets.iter().find(|s| s.kind == MatchKind::Voltage).unwrap();
+        let want = if sigma < 0.5 { MatchClass::Exceptional } else { MatchClass::Moderate };
+        assert_eq!((dp.class, p.intent.compounds[0].kind), (want, kind), "σ = {sigma}");
+    }
+}
+
+/// EXT-15/16 per-set Unitization flags: folded's Minimal bias set {M7, M8} (one
+/// finger W/L) needs no dummies and is Adjacent; dac4's Ratio set, downgraded
+/// below Moderate by hand, drops dummies and route matching (Ratio < Moderate).
+#[test]
+fn per_set_unitization_follows_class() {
+    use analog::intent::{ArrayStyle, MatchClass};
+    let nl = net(src("folded"));
+    let p = annotate(&nl, &cfg("folded"));
+    let id = |nl: &pnr_core::Netlist, n: &str| nl.devices.iter().position(|d| d.name == n).unwrap() as u16;
+    let u = p.constraints.unitization.iter().find(|u| u.devices.iter().any(|d| d.0 == id(&nl, "M7"))).expect("M7 covered");
+    let mut names: Vec<&str> = u.devices.iter().map(|d| nl.devices[d.0 as usize].name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!((names.as_slice(), u.dummy_required, u.route_matching_required, u.class, u.style), (&["M7", "M8"][..], false, true, Some(MatchClass::Minimal), Some(ArrayStyle::Adjacent)));
+    let nl = net(src("dac4"));
+    let p = annotate(&nl, &cfg("dac4"));
+    let mut models = Vec::new();
+    let drawn: Vec<_> = nl.devices.iter().map(|d| annotator::size::drawn(d, &mut models)).collect();
+    let mut sets = p.intent.sets.clone();
+    sets[0].class = MatchClass::Minimal;
+    let c = annotator::constraints::assemble(&nl, &drawn, &p.blocks, &sets);
+    let u = c.unitization.iter().find(|u| u.devices.iter().any(|d| d.0 == id(&nl, "XC0"))).expect("XC0 covered");
+    assert_eq!((u.dummy_required, u.route_matching_required, u.class), (false, false, Some(MatchClass::Minimal)));
 }
 
 /// EXT-19: the split DAC's bridge is checked against `(C_T^LSB/C_T^MSB)·C_u`

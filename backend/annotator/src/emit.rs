@@ -92,15 +92,15 @@ pub fn placement(
 
     for (bi, stage) in blocks.iter().enumerate() {
         let axis = AxisId(bi as u16);
-        let pairs: Vec<(BlockKind, DeviceId, DeviceId)> = leaves(std::slice::from_ref(stage))
+        let pairs: Vec<(BlockKind, DeviceId, DeviceId, &str)> = leaves(std::slice::from_ref(stage))
             .into_iter()
             .filter(|l| l.devices.len() == 2)
-            .map(|l| (l.kind, l.devices[0], l.devices[1]))
+            .map(|l| (l.kind, l.devices[0], l.devices[1], l.template))
             .collect();
         let mut syms = Vec::new();
         let mut in_sym: Vec<DeviceId> = Vec::new();
 
-        for &(kind, a, b) in &pairs {
+        for &(kind, a, b, template) in &pairs {
             let prox = vec![Proximity { a: td(a), b: td(b), max_distance_nm: policy.proximity_nm }];
             match kind {
                 BlockKind::DiffPair | BlockKind::CurrentMirror | BlockKind::Load | BlockKind::CascodePair => {}
@@ -116,7 +116,9 @@ pub fn placement(
             let Some(family) = Family::of(nl.devices[a.0 as usize].kind) else { continue };
             // ponytail: pairwise emission; a multi-output mirror's pairs share their reference.
             let shared = in_sym.contains(&a) || in_sym.contains(&b);
-            if !shared {
+            // A 1:N bipolar ratioed pair is a centroid array (its Unitization), not a mirror
+            // image: matched only, so `bgr_core` draws as before EXT-19 (T9 gate).
+            if !shared && !template.starts_with("bjt_ratioed_pair") {
                 syms.push(Symmetry { a: td(a), b: td(b), axis });
                 in_sym.extend([a, b]);
             }
