@@ -1,0 +1,402 @@
+//! Per-pair cell spacing from edge profiles (PLC-07): each cell face records how
+//! far in each layer role sits from the bbox, and a role × role table from the
+//! deck says how far two facing roles must be apart. Two cells then owe each
+//! other `max(rule − inset_a − inset_b)`, not one worst-case scalar.
+
+use pnr_core::{LayerId, Macro, NetId, Orient, Process};
+
+/// Placement spacing roles. `*_in` / `*_out`: inside / outside the cell's own n-well.
+/// `other`: a drawn layer no listed role maps to (always spaced at `fallback`).
+pub const ROLES: [&str; 28] = [
+    "nwell", "dnwell", "diff_in", "diff_out", "tap_in", "tap_out", "poly", "nsdm", "psdm", "li", "licon", "mcon",
+    "met1", "npc", "rpm", "res_implant", "diode_mk", "rpoly", "diom", "via1", "met2", "via2", "met3", "via3", "met4",
+    "pnp", "npn", "other",
+];
+/// The `Process` role each placement role reads; `""` = none. `Pdk::layer`
+/// falls back to a deck layer of the same name, so `dnwell`, `npc`, `rpm`
+/// resolve on sky130; `rpoly`/`diom` are sky130 `cell.layers` roles the
+/// generators draw; `via1`..`met4` resolve by stack position (capacitor
+/// plates and straps), `pnp`/`npn` are sky130's BJT id layers. Whether every drawn
+/// layer is covered is checked by the library test
+/// `shipped_cells_draw_no_unmapped_layer`, not by this list.
+pub const DECK_ROLE: [&str; 28] = [
+    "nwell", "dnwell", "diff", "diff", "tap", "tap", "poly", "nsdm", "psdm", "li", "licon", "mcon", "met1", "npc",
+    "rpm", "res_implant", "diode_mk", "rpoly", "diom", "via1", "met2", "via2", "met3", "via3", "met4", "pnp", "npn", "",
+];
+pub const N: usize = ROLES.len();
+const _: () = assert!(N <= 32, "Edge::present is a u32");
+const NWELL: usize = 0;
+const OTHER: usize = N - 1;
+/// Roles whose facing shapes may touch and merge into one figure: implant and
+/// mask layers (no net), and the n-well when both wells carry the same bulk net.
+const MERGEABLE: [usize; 5] = [NWELL, 7 /*nsdm*/, 8 /*psdm*/, 13 /*npc*/, 14 /*rpm*/];
+/// Marker (id) layers: no drawn material, so a same-role pair with no deck
+/// value is `NoRule` (0), not `fallback`.
+const MARKER: [usize; 4] = [16 /*diode_mk*/, 18 /*diom*/, 25 /*pnp*/, 26 /*npn*/];
+
+/// The eight orients in `Orient as usize` order.
+pub const ORIENTS: [Orient; 8] =
+    [Orient::R0, Orient::R90, Orient::R180, Orient::R270, Orient::Mx, Orient::Mx90, Orient::Mx180, Orient::Mx270];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Face {
+    L = 0,
+    B = 1,
+    R = 2,
+    T = 3,
+}
+
+impl Face {
+    const ALL: [Face; 4] = [Face::L, Face::B, Face::R, Face::T];
+    fn opposite(self) -> Face {
+        Face::ALL[(self as usize + 2) % 4]
+    }
+    /// Outward normal.
+    fn normal(self) -> (i32, i32) {
+        [(-1, 0), (0, -1), (1, 0), (0, 1)][self as usize]
+    }
+}
+
+/// Distance from the bbox face to the nearest shape of each role, nm (`N` ≤ 32);
+/// `i32::MAX` = role absent. Bit `r` of `present` is set iff `inset[r] < i32::MAX`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Edge {
+    pub inset: [i32; N],
+    pub present: u32,
+}
+
+impl Default for Edge {
+    fn default() -> Self {
+        Edge { inset: [i32::MAX; N], present: 0 }
+    }
+}
+
+impl Edge {
+    /// Record a shape of role `r` at `inset` (clamped at 0).
+    pub fn put(&mut self, r: usize, inset: i32) {
+        self.inset[r] = self.inset[r].min(inset.max(0));
+        self.present |= 1 << r;
+    }
+}
+
+/// One drawn cell's four faces, in its R0 frame unless [`oriented`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Profile {
+    pub edge: [Edge; 4],
+    /// The cell's bulk net: two n-wells merge only on the same one.
+    pub well_net: Option<NetId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Src {
+    Deck,
+    Sidecar,
+    Fallback,
+    NoRule,
+}
+
+/// Legal gaps between two facing cells: exactly `0` when `abut`, else any
+/// `g >= min` (nm, lattice-rounded).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gap {
+    pub abut: bool,
+    pub min: i32,
+}
+
+/// Role × role spacing, nm, symmetric.
+#[derive(Clone, Debug)]
+pub struct SpacingTable {
+    pub rule: [[i32; N]; N],
+    pub src: [[Src; N]; N],
+    pub lattice: i32,
+    /// Today's scalar: same-role pairs without a deck value and every pair
+    /// with `other`; also the gap when a cell has no profile.
+    pub fallback: i32,
+}
+
+/// Placement roles a sidecar role names: `diff`/`tap` cover both sides of the well.
+fn expand(role: &str) -> Vec<usize> {
+    match role {
+        "diff" => vec![2, 3],
+        "tap" => vec![4, 5],
+        _ => ROLES.iter().position(|&r| r == role).into_iter().collect(),
+    }
+}
+
+impl SpacingTable {
+    /// Deck first (`space` for one deck role, else `space_between` both
+    /// orders), then each sidecar `(role_a, role_b, nm)` where larger, then
+    /// marker same-role 0, other same-role `fallback`, cross-role 0 (the deck
+    /// states no spacing, so DRC cannot flag one); `other` pairs `fallback`.
+    ///
+    /// # Panics
+    /// On a sidecar role not in [`ROLES`] (nor `diff`/`tap`): a typo must not
+    /// silently drop a rule.
+    #[must_use]
+    pub fn new(p: &dyn Process, sidecar: &[(String, String, i32)], fallback: i32, lattice: i32) -> Self {
+        let mut rule: [[Option<(i32, Src)>; N]; N] = [[None; N]; N];
+        for i in 0..OTHER {
+            for j in 0..OTHER {
+                let (di, dj) = (DECK_ROLE[i], DECK_ROLE[j]);
+                let v = if di == dj { p.space(di) } else { p.space_between(di, dj).max(p.space_between(dj, di)) };
+                rule[i][j] = v.map(|v| (v, Src::Deck));
+            }
+        }
+        for (a, b, nm) in sidecar {
+            let (ra, rb) = (expand(a), expand(b));
+            assert!(!ra.is_empty() && !rb.is_empty(), "placement_space: unknown role in `{a},{b}`");
+            for &i in &ra {
+                for &j in &rb {
+                    if rule[i][j].is_none_or(|(v, _)| *nm > v) {
+                        rule[i][j] = Some((*nm, Src::Sidecar));
+                        rule[j][i] = rule[i][j];
+                    }
+                }
+            }
+        }
+        let mut t = SpacingTable { rule: [[0; N]; N], src: [[Src::NoRule; N]; N], lattice, fallback };
+        for i in 0..N {
+            for j in 0..N {
+                let (v, s) = match rule[i][j] {
+                    _ if i == OTHER || j == OTHER => (fallback, Src::Fallback),
+                    Some(r) => r,
+                    None if DECK_ROLE[i] == DECK_ROLE[j] && !MARKER.contains(&i) => (fallback, Src::Fallback),
+                    None => (0, Src::NoRule),
+                };
+                t.rule[i][j] = v;
+                t.src[i][j] = s;
+            }
+        }
+        t
+    }
+
+    /// Every pair at `fallback`: today's scalar clearance, for callers without profiles.
+    #[must_use]
+    pub fn uniform(fallback: i32, lattice: i32) -> Self {
+        SpacingTable { rule: [[fallback; N]; N], src: [[Src::Fallback; N]; N], lattice, fallback }
+    }
+
+    /// The largest gap any pair can owe (insets are ≥ 0), lattice-rounded.
+    #[must_use]
+    pub fn max_gap(&self) -> i32 {
+        round_up(self.rule.iter().flatten().copied().max().unwrap_or(0).max(self.fallback), self.lattice)
+    }
+
+    /// Gap `a`'s face `fa` owes `b`'s opposite face. A facing pair that merges
+    /// at contact (same `MERGEABLE` role at inset 0 on both, n-well only on one
+    /// bulk net) still sets `min` but not `abut`: any gap in `(0, min)` would
+    /// leave a notch the bridges do not fill.
+    #[must_use]
+    pub fn gap(&self, a: &Profile, fa: Face, b: &Profile) -> Gap {
+        let (ea, eb) = (&a.edge[fa as usize], &b.edge[fa.opposite() as usize]);
+        let (mut g_all, mut g_hard) = (0, 0);
+        let mut ia = ea.present;
+        while ia != 0 {
+            let i = ia.trailing_zeros() as usize;
+            ia &= ia - 1;
+            let mut jb = eb.present;
+            while jb != 0 {
+                let j = jb.trailing_zeros() as usize;
+                jb &= jb - 1;
+                let r = self.rule[i][j];
+                if r <= 0 {
+                    continue;
+                }
+                let need = r - ea.inset[i] - eb.inset[j];
+                g_all = g_all.max(need);
+                let merge = i == j
+                    && MERGEABLE.contains(&i)
+                    && ea.inset[i] == 0
+                    && eb.inset[j] == 0
+                    && (i != NWELL || (a.well_net.is_some() && a.well_net == b.well_net));
+                if !merge {
+                    g_hard = g_hard.max(need);
+                }
+            }
+        }
+        Gap { abut: g_hard <= 0, min: round_up(g_all, self.lattice) }
+    }
+
+    /// Room a cell can owe beyond its bbox: over faces and present roles `i`,
+    /// `(max_j rule[i][j] − inset_i)⁺`, `j` over every role but `other` (shipped
+    /// cells draw none; region sizing only, never legality).
+    #[must_use]
+    pub fn halo(&self, p: &Profile) -> i32 {
+        let mut h = 0;
+        for e in &p.edge {
+            for i in (0..N).filter(|&i| e.present & (1 << i) != 0) {
+                let reach = if i == OTHER { self.fallback } else { self.rule[i][..OTHER].iter().copied().max().unwrap_or(0) };
+                h = h.max(reach - e.inset[i]);
+            }
+        }
+        h
+    }
+}
+
+fn round_up(v: i32, lattice: i32) -> i32 {
+    let l = lattice.max(1);
+    (v + l - 1).div_euclid(l) * l
+}
+
+/// The role a shape on `layer` plays, by first match over [`DECK_ROLE`];
+/// [`OTHER`] when none. `layers[r]` = `p.layer(DECK_ROLE[r])`.
+fn role_of(layers: &[Option<LayerId>; N], layer: LayerId) -> usize {
+    (0..OTHER).find(|&r| layers[r] == Some(layer)).unwrap_or(OTHER)
+}
+
+/// `p.layer` of every role's deck role, once per profiled macro.
+#[must_use]
+pub fn role_layers(p: &dyn Process) -> [Option<LayerId>; N] {
+    std::array::from_fn(|r| if r == OTHER { None } else { p.layer(DECK_ROLE[r]) })
+}
+
+/// `m`'s profile in its R0 frame. diff/tap count as `_in` only when contained
+/// in one of `m`'s own n-well rects (a shape straddling two is read `_out`:
+/// the stricter rows). Inset per face from `m.bbox`, 0 when touching.
+#[must_use]
+pub fn profile(m: &Macro, p: &dyn Process, bulk: Option<NetId>) -> Profile {
+    let layers = role_layers(p);
+    let wells: Vec<_> = m.shapes.iter().filter(|s| Some(s.layer) == layers[NWELL]).map(|s| s.rect).collect();
+    let b = m.bbox;
+    let mut out = Profile { well_net: bulk, ..Profile::default() };
+    for s in &m.shapes {
+        let mut r = role_of(&layers, s.layer);
+        if r == 2 || r == 4 {
+            let s = s.rect;
+            let inside = wells.iter().any(|w| w.x <= s.x && w.y <= s.y && s.x + s.w <= w.x + w.w && s.y + s.h <= w.y + w.h);
+            r += usize::from(!inside);
+        }
+        let s = s.rect;
+        out.edge[Face::L as usize].put(r, s.x - b.x);
+        out.edge[Face::B as usize].put(r, s.y - b.y);
+        out.edge[Face::R as usize].put(r, b.x + b.w - (s.x + s.w));
+        out.edge[Face::T as usize].put(r, b.y + b.h - (s.y + s.h));
+    }
+    out
+}
+
+/// `p` as drawn under `o`: each face moves to where `o.apply` turns its outward
+/// normal (the same map `place_macro` stamps with).
+#[must_use]
+pub fn oriented(p: &Profile, o: Orient) -> Profile {
+    let mut out = Profile { well_net: p.well_net, ..Profile::default() };
+    for f in Face::ALL {
+        let n = o.apply(f.normal().0, f.normal().1);
+        let to = Face::ALL.iter().position(|g| g.normal() == n).expect("D4 maps axis normals to axis normals");
+        out.edge[to] = p.edge[f as usize];
+    }
+    out
+}
+
+/// `of[cell][variant][orient as usize]`, precomputed once (8 orients per variant).
+#[derive(Clone, Debug, Default)]
+pub struct Profiles {
+    pub of: Vec<Vec<[Profile; 8]>>,
+}
+
+impl Profiles {
+    /// All 8 orients of one R0 profile.
+    #[must_use]
+    pub fn orients(p: &Profile) -> [Profile; 8] {
+        ORIENTS.map(|o| oriented(p, o))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DIFF_IN: usize = 2;
+    const DIFF_OUT: usize = 3;
+    const NSDM: usize = 7;
+    const DIOM: usize = 18;
+
+    fn table(rules: &[(usize, usize, i32)]) -> SpacingTable {
+        let mut t = SpacingTable { rule: [[0; N]; N], src: [[Src::NoRule; N]; N], lattice: 5, fallback: 1270 };
+        for &(i, j, v) in rules {
+            t.rule[i][j] = v;
+            t.rule[j][i] = v;
+            t.src[i][j] = Src::Deck;
+            t.src[j][i] = Src::Deck;
+        }
+        for k in 0..N {
+            t.rule[k][OTHER] = 1270;
+            t.rule[OTHER][k] = 1270;
+        }
+        t
+    }
+
+    /// One face `f` carrying `(role, inset)`s.
+    fn face(f: Face, roles: &[(usize, i32)], net: Option<u32>) -> Profile {
+        let mut p = Profile { well_net: net.map(|n| NetId(n as _)), ..Profile::default() };
+        for &(r, i) in roles {
+            p.edge[f as usize].put(r, i);
+        }
+        p
+    }
+
+    #[test]
+    fn ndiff_facing_foreign_nwell_needs_rule_minus_insets() {
+        let t = table(&[(DIFF_OUT, NWELL, 340)]);
+        let a = face(Face::R, &[(DIFF_OUT, 200)], Some(1));
+        let b = face(Face::L, &[(NWELL, 0)], Some(2));
+        assert_eq!(t.gap(&a, Face::R, &b), Gap { abut: false, min: 140 });
+    }
+
+    #[test]
+    fn same_bulk_pmos_may_abut() {
+        let t = table(&[(NWELL, NWELL, 1270), (DIFF_IN, DIFF_IN, 270)]);
+        let a = face(Face::R, &[(NWELL, 0), (DIFF_IN, 180)], Some(1));
+        let b = face(Face::L, &[(NWELL, 0), (DIFF_IN, 180)], Some(1));
+        assert_eq!(t.gap(&a, Face::R, &b), Gap { abut: true, min: 1270 });
+    }
+
+    #[test]
+    fn foreign_wells_never_abut() {
+        let t = table(&[(NWELL, NWELL, 1270), (DIFF_IN, DIFF_IN, 270)]);
+        let a = face(Face::R, &[(NWELL, 0), (DIFF_IN, 180)], Some(1));
+        let b = face(Face::L, &[(NWELL, 0), (DIFF_IN, 180)], Some(2));
+        assert_eq!(t.gap(&a, Face::R, &b), Gap { abut: false, min: 1270 });
+    }
+
+    #[test]
+    fn nmos_pair_with_edge_implants() {
+        let t = table(&[(NSDM, NSDM, 380), (DIFF_OUT, DIFF_OUT, 270)]);
+        let a = face(Face::T, &[(NSDM, 0), (DIFF_OUT, 125)], None);
+        let b = face(Face::B, &[(NSDM, 0), (DIFF_OUT, 125)], None);
+        assert_eq!(t.gap(&a, Face::T, &b), Gap { abut: false, min: 380 });
+    }
+
+    #[test]
+    fn rotated_profile_permutes_faces() {
+        let mut p = Profile::default();
+        for (k, f) in Face::ALL.iter().enumerate() {
+            p.edge[*f as usize].put(k, 10 * k as i32);
+        }
+        let at = |q: &Profile, f: Face| q.edge[f as usize];
+        let r90 = oriented(&p, Orient::R90);
+        for (from, to) in [(Face::L, Face::B), (Face::B, Face::R), (Face::R, Face::T), (Face::T, Face::L)] {
+            assert_eq!(at(&r90, to), at(&p, from), "R90 {from:?} -> {to:?}");
+        }
+        let mx = oriented(&p, Orient::Mx);
+        for (from, to) in [(Face::B, Face::T), (Face::T, Face::B), (Face::L, Face::L), (Face::R, Face::R)] {
+            assert_eq!(at(&mx, to), at(&p, from), "Mx {from:?} -> {to:?}");
+        }
+    }
+
+    #[test]
+    fn unmapped_layer_uses_the_fallback() {
+        let t = table(&[]);
+        let a = face(Face::R, &[(OTHER, 0)], None);
+        let b = face(Face::L, &[(OTHER, 0)], None);
+        assert_eq!(t.gap(&a, Face::R, &b).min, 1270);
+    }
+
+    #[test]
+    fn diode_markers_do_not_force_the_fallback() {
+        let t = table(&[]);
+        let a = face(Face::R, &[(DIOM, 0)], None);
+        let b = face(Face::L, &[(DIOM, 0)], None);
+        assert_eq!(t.gap(&a, Face::R, &b), Gap { abut: true, min: 0 });
+    }
+}

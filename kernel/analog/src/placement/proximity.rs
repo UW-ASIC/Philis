@@ -27,10 +27,11 @@ impl Proximity {
 
 impl Rule for Proximity {
     type On = Layout;
-    /// `ex²·1e-3`, `ex` = gap past `max_distance_nm`.
+    /// `(excess / max_distance)²`, excess = gap past `max_distance_nm` (PLC-18: dimensionless).
     fn cost(self, l: &Layout) -> f32 {
-        let ex = (self.gap(l) - self.max_distance_nm as f32).max(0.0);
-        ex * ex * 1e-3
+        let m = self.max_distance_nm.max(1) as f32;
+        let e = (self.gap(l) - m).max(0.0) / m;
+        e * e
     }
     fn satisfied(self, l: &Layout) -> bool {
         self.gap(l) <= self.max_distance_nm as f32

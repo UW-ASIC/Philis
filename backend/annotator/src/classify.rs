@@ -2,10 +2,13 @@
 //! structure gives the two classes a name can't: **Sensitive** (feeds a matched
 //! device's gate, or gates-only = a bias rail) and **Substrate** (bulk-only).
 
+use analog::intent::{EvidenceLevel, MatchKind, MatchSpec, NetFacts, RcClass};
 use analog::metadata::{NetClass, NetClassification};
 use pnr_core::ids::NetId;
 use pnr_core::BipartiteHypergraph;
 
+use crate::class::SetRole;
+use crate::evidence::Evidence;
 use crate::netrole::NetRole;
 
 /// Budgets as multiples of the capacitive load `c_load_af` the net drives:
@@ -17,11 +20,16 @@ use crate::netrole::NetRole;
 /// ring-to-ring wire alone is ~70% of its gate C) stay routable; precision
 /// targets (10% wire / 2% coupling) are what a matched stage would want and
 /// flag chain4/quad/rc_filter today. Rail aggressors count as coupling here.
-fn budgets(class: NetClass, c_load_af: f32) -> (Option<i64>, Option<i64>) {
+/// Aggressor classes (Clock, DigitalSwitching, Noisy, and DigitalStatic) get a
+/// wire budget but no coupling budget: an aggressor is not a victim (EXT-18).
+pub(crate) fn budgets(class: NetClass, c_load_af: f32) -> (Option<i64>, Option<i64>) {
     let frac = |w: f32, k: f32| (Some((w * c_load_af) as i64), Some((k * c_load_af) as i64));
     match class {
-        NetClass::Sensitive => frac(1.0, 1.0),
-        NetClass::Signal | NetClass::Clock => frac(2.0, 2.0),
+        NetClass::Sensitive | NetClass::Bias | NetClass::Reference => frac(1.0, 1.0),
+        NetClass::Signal => frac(2.0, 2.0),
+        NetClass::Clock | NetClass::DigitalSwitching | NetClass::Noisy | NetClass::DigitalStatic => {
+            (Some((2.0 * c_load_af) as i64), None)
+        }
         NetClass::Supply | NetClass::Ground | NetClass::Substrate => (None, None),
     }
 }
@@ -50,8 +58,6 @@ pub fn classify(
     let mut touches_channel = vec![false; n_nets];
     let mut touches_bulk = vec![false; n_nets];
     let mut gate_of_sensitive = vec![false; n_nets];
-    let mut load_um2 = vec![0.0f32; n_nets];
-    let mut on_plate = vec![false; n_nets];
 
     for (d, nets) in hg.device_nets.iter().enumerate() {
         for (t, n) in hg.terminals[d].iter().zip(nets) {
@@ -59,19 +65,18 @@ pub fn classify(
             match crate::terms::term_role(hg.kinds[d], t) {
                 crate::terms::TermRole::FetGate => {
                     touches_gate[i] = true;
-                    load_um2[i] += gate_um2[d];
                     gate_of_sensitive[i] |= sensitive_devices[d];
                 }
                 crate::terms::TermRole::Channel
                 | crate::terms::TermRole::BjtBase
                 | crate::terms::TermRole::Passive => touches_channel[i] = true,
                 crate::terms::TermRole::Body => touches_bulk[i] = true,
-                crate::terms::TermRole::Plate => on_plate[i] = true,
+                crate::terms::TermRole::Plate => {}
             }
         }
     }
 
-    let smallest = load_um2.iter().copied().filter(|&a| a > 0.0).reduce(f32::min);
+    let load_af = net_load_af(hg, gate_um2, gate_af_per_um2);
     (0..n_nets)
         .map(|i| {
             let class = classify_one(
@@ -81,17 +86,245 @@ pub fn classify(
                 touches_channel[i],
                 touches_bulk[i],
             );
-            let load = if load_um2[i] > 0.0 { Some(load_um2[i]) } else { smallest };
-            // A plate net's parasitics trace to array specs (ARR-03 code-
-            // dependent error, ARR-05 settling), not a gate load: without
-            // them the budget is unknown, never invented.
-            let load = load.filter(|_| !on_plate[i]);
-            let (c_budget_af, max_coupling_af) = load
-                .zip(gate_af_per_um2)
-                .map_or((None, None), |(a, cox)| budgets(class, a * cox));
+            let (c_budget_af, max_coupling_af) = load_af[i].map_or((None, None), |c| budgets(class, c));
             NetClassification { net: NetId(i as u16), class, c_budget_af, max_coupling_af }
         })
         .collect()
+}
+
+/// Capacitive load per net, aF: the gate area it drives × `gate_af_per_um2`;
+/// a net driving no gate (a drain, an output) is held to the circuit's
+/// smallest gate load. `None` without a gate-cap number or any FET gate, and
+/// on a capacitor plate: a plate net's parasitics trace to array specs (ARR-03
+/// code-dependent error, ARR-05 settling), not a gate load: without them the
+/// budget is unknown, never invented.
+pub(crate) fn net_load_af(hg: &BipartiteHypergraph, gate_um2: &[f32], gate_af_per_um2: Option<f32>) -> Vec<Option<f32>> {
+    let n_nets = hg.net_names.len();
+    let mut load_um2 = vec![0.0f32; n_nets];
+    let mut on_plate = vec![false; n_nets];
+    for (d, nets) in hg.device_nets.iter().enumerate() {
+        for (t, n) in hg.terminals[d].iter().zip(nets) {
+            match crate::terms::term_role(hg.kinds[d], t) {
+                crate::terms::TermRole::FetGate => load_um2[n.0 as usize] += gate_um2[d],
+                crate::terms::TermRole::Plate => on_plate[n.0 as usize] = true,
+                _ => {}
+            }
+        }
+    }
+    let smallest = load_um2.iter().copied().filter(|&a| a > 0.0).reduce(f32::min);
+    (0..n_nets)
+        .map(|i| {
+            let load = if load_um2[i] > 0.0 { Some(load_um2[i]) } else { smallest };
+            load.filter(|_| !on_plate[i]).zip(gate_af_per_um2).map(|(a, cox)| a * cox)
+        })
+        .collect()
+}
+
+/// What [`refine`] reads: everything that exists only once sets are built.
+pub struct RefineCtx<'a> {
+    pub hg: &'a BipartiteHypergraph,
+    /// Every pattern match, overlapping (`recognize_all`).
+    pub matches: &'a [crate::pattern::PatternMatch],
+    pub sets: &'a [MatchSpec],
+    /// Role per `sets` entry (`MatchSpec` does not carry it).
+    pub set_roles: &'a [SetRole],
+    pub passive: &'a [crate::passive::PassiveSet],
+    /// Net named in the caller's config (testbench-derived names excluded).
+    pub user: &'a [bool],
+    pub ev: &'a Evidence,
+    /// Sidecar `NetClass` overrides (EXT-26): first, over every rule, `User` evidence.
+    pub user_classes: &'a [(NetId, NetClass)],
+    pub ports: &'a [NetId],
+    /// [`net_load_af`].
+    pub load_af: &'a [Option<f32>],
+}
+
+/// Gate-level logic templates: their nets are digital (EXT-18).
+const LOGIC: [&str; 3] = ["cmos_inverter", "nand_gate", "nor_gate"];
+
+/// A Signal net at or above this impedance is Sensitive (EXT-18; Philis policy).
+const HIGH_Z_OHM: f32 = 100_000.0;
+
+/// EXT-18 step 3: refine the pre-pass classes once sets exist, recompute the
+/// budgets, return per-net facts. Rails, Substrate and Clock keep their class.
+/// Every other net takes the first rule that applies: DigitalSwitching (a logic
+/// match's D when one of its G nets is Clock or DigitalSwitching, to a
+/// fixpoint); Sensitive (a Voltage set's gate, ahead of the digital rules so a
+/// latch's regenerative nodes stay analog); DigitalStatic (logic G/D, tgate
+/// S); Noisy (charge-pump output, `_n` with no `_p` twin: H15-06, where the
+/// name cannot be a differential half); Reference (a bandgap core's shared
+/// base/gate, a cascoded reference's output, a DAC reference plate); Sensitive
+/// (a DAC bank's shared plate, `_s`, or a Signal net of `z ≥ 100 kΩ`); Bias
+/// (gates and diode D=G only); else the pre-pass class, so nothing Sensitive
+/// is silently demoted. Sidecar overrides (`user_classes`) precede every rule.
+pub fn refine(classes: &mut [NetClassification], cx: &RefineCtx) -> Vec<NetFacts> {
+    use EvidenceLevel as E;
+    use NetClass as C;
+    let hg = cx.hg;
+    let n_nets = hg.net_names.len();
+    let pre: Vec<NetClass> = classes.iter().map(|c| c.class).collect();
+    let rail = |n: NetId| matches!(pre[n.0 as usize], C::Supply | C::Ground | C::Substrate);
+    let fixed = |n: NetId| rail(n) || pre[n.0 as usize] == C::Clock;
+    let pin = |d: u32, t: &str| crate::pattern::pin_net(hg, d, t);
+    let lower: Vec<String> = hg.net_names.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let mut got: Vec<Option<(NetClass, EvidenceLevel)>> = vec![None; n_nets];
+    let put = |got: &mut Vec<Option<(NetClass, EvidenceLevel)>>, n: Option<NetId>, c: NetClass, e: EvidenceLevel| {
+        if let Some(n) = n.filter(|&n| !fixed(n)) {
+            got[n.0 as usize].get_or_insert((c, e));
+        }
+    };
+    for &(n, c) in cx.user_classes {
+        got[n.0 as usize] = Some((c, E::User));
+    }
+    let logic = |ts: &[&str]| cx.matches.iter().filter(move |m| ts.contains(&m.template)).collect::<Vec<_>>();
+    let nets_of = |m: &crate::pattern::PatternMatch, t: &str| m.instances.iter().filter_map(|&d| pin(d, t)).collect::<Vec<_>>();
+
+    // 1. DigitalSwitching, to a fixpoint (at most #nets rounds: each adds a net).
+    let gates = logic(&LOGIC);
+    for _ in 0..=n_nets {
+        let before = got.iter().flatten().count();
+        for m in &gates {
+            let switching = |n: &NetId| pre[n.0 as usize] == C::Clock || got[n.0 as usize].is_some_and(|g| g.0 == C::DigitalSwitching);
+            if nets_of(m, "G").iter().any(switching) {
+                nets_of(m, "D").into_iter().for_each(|n| put(&mut got, Some(n), C::DigitalSwitching, E::Structure));
+            }
+        }
+        if got.iter().flatten().count() == before {
+            break;
+        }
+    }
+    // 2. Voltage-set gates.
+    for s in cx.sets.iter().filter(|s| s.kind == MatchKind::Voltage) {
+        s.members.iter().for_each(|m| put(&mut got, pin(u32::from(m.device.0), "G"), C::Sensitive, E::Structure));
+    }
+    // 3. Logic levels.
+    for m in logic(&["cmos_inverter", "nand_gate", "nor_gate", "transmission_gate"]) {
+        let mut ns = [nets_of(m, "G"), nets_of(m, "D")].concat();
+        if m.template == "transmission_gate" {
+            ns.extend(nets_of(m, "S"));
+        }
+        ns.into_iter().for_each(|n| put(&mut got, Some(n), C::DigitalStatic, E::Structure));
+    }
+    // 4. Noisy.
+    for m in cx.matches.iter().filter(|m| m.template == "charge_pump_cell") {
+        put(&mut got, pin(m.instances[0], "D"), C::Noisy, E::Structure);
+    }
+    for n in 0..n_nets {
+        if let Some(stem) = lower[n].strip_suffix("_n") {
+            if !lower.contains(&format!("{stem}_p")) {
+                put(&mut got, Some(NetId(n as u16)), C::Noisy, E::Name);
+            }
+        }
+    }
+    // 5. Reference. Philis policy: a bandgap core's reference node is its shared base (gate).
+    let shared = |devs: &mut dyn Iterator<Item = u32>, t: &str| {
+        let ns: Vec<Option<NetId>> = devs.map(|d| pin(d, t)).collect();
+        ns.first().copied().flatten().filter(|_| ns.windows(2).all(|w| w[0] == w[1]))
+    };
+    let set_devs = |s: &MatchSpec| s.members.iter().map(|m| u32::from(m.device.0)).collect::<Vec<_>>();
+    let cores = cx.sets.iter().zip(cx.set_roles).filter(|(_, &r)| r == SetRole::BandgapCore).map(|(s, _)| set_devs(s));
+    let cores: Vec<Vec<u32>> = cores
+        .chain(cx.passive.iter().filter(|p| p.role == SetRole::BandgapCore).map(|p| p.devices.iter().map(|d| u32::from(d.0)).collect()))
+        .collect();
+    for devs in &cores {
+        for t in ["G", "B"] {
+            put(&mut got, shared(&mut devs.iter().copied(), t), C::Reference, E::Structure);
+        }
+    }
+    for m in cx.matches.iter().filter(|m| m.template == "cascoded_reference") {
+        put(&mut got, pin(m.instances[1], "D"), C::Reference, E::Structure);
+    }
+    let banks: Vec<&MatchSpec> = cx.sets.iter().zip(cx.set_roles).filter(|(_, &r)| r == SetRole::DacBank).map(|(s, _)| s).collect();
+    for s in &banks {
+        put(&mut got, s.reference.and_then(|r| pin(u32::from(s.members[r].device.0), "N")), C::Reference, E::Structure);
+    }
+    // 6. Sensitive: a DAC bank's shared plate, `_s`, high impedance.
+    for s in &banks {
+        let devs = set_devs(s);
+        let plate = hg.device_nets[devs[0] as usize].iter().copied().find(|n| devs.iter().all(|&d| hg.device_nets[d as usize].contains(n)));
+        put(&mut got, plate, C::Sensitive, E::Structure);
+    }
+    let z_ohm = impedance(hg, cx.ev.op.as_ref());
+    for n in 0..n_nets {
+        if lower[n].ends_with("_s") {
+            put(&mut got, Some(NetId(n as u16)), C::Sensitive, E::Name);
+        } else if pre[n] == C::Signal && got[n].is_none() && z_ohm[n].is_some_and(|z| z >= HIGH_Z_OHM) {
+            put(&mut got, Some(NetId(n as u16)), C::Sensitive, E::OpPoint);
+        }
+    }
+    // 7. Bias: gates and diode-connected drains only.
+    let mut only_gates: Vec<Option<bool>> = vec![None; n_nets];
+    for (d, nets) in hg.device_nets.iter().enumerate() {
+        let fet = matches!(hg.kinds[d], pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos);
+        let diode = fet && pin(d as u32, "D") == pin(d as u32, "G");
+        for (t, n) in hg.terminals[d].iter().zip(nets) {
+            let ok = fet && (t == "G" || (t == "D" && diode));
+            let g = only_gates[n.0 as usize].get_or_insert(true);
+            *g &= ok;
+        }
+    }
+    for n in 0..n_nets {
+        if only_gates[n] == Some(true) {
+            put(&mut got, Some(NetId(n as u16)), C::Bias, E::Structure);
+        }
+    }
+
+    let tb = |n: NetId| cx.ev.switching_nets.contains(&n) || cx.ev.dc_sources.iter().any(|s| s.0 == n);
+    (0..n_nets)
+        .map(|i| {
+            let n = NetId(i as u16);
+            let (class, evidence) = got[i].unwrap_or_else(|| {
+                let e = if cx.user[i] {
+                    E::User
+                } else if fixed(n) && tb(n) {
+                    E::Testbench
+                } else if crate::netrole::rail_of(&hg.net_names[i]).is_some() || (pre[i] == C::Clock && crate::netrole::is_clock(&lower[i])) {
+                    E::Name
+                } else if pre[i] == C::Signal {
+                    E::Default
+                } else {
+                    E::Structure
+                };
+                (pre[i], e)
+            });
+            set_class(&mut classes[i], class, cx.load_af[i]);
+            NetFacts {
+                evidence,
+                port: cx.ports.contains(&n),
+                dc_mv: cx.ev.op.as_ref().and_then(|o| o.net_mv.get(i).copied().flatten()).map(|v| (v as i32, v as i32)),
+                rc: RcClass::Unknown,
+                z_ohm: z_ohm[i],
+                shield_ref: None,
+            }
+        })
+        .collect()
+}
+
+/// Set `c`'s class and recompute its budgets from the net's load, aF.
+pub(crate) fn set_class(c: &mut NetClassification, class: NetClass, load_af: Option<f32>) {
+    c.class = class;
+    (c.c_budget_af, c.max_coupling_af) = load_af.map_or((None, None), |l| budgets(class, l));
+}
+
+/// Small-signal impedance to AC ground per net, Ω: `1/(Σ gds of FETs with D on
+/// the net + Σ gm of diode FETs on it)`, known only when every such gds is.
+fn impedance(hg: &BipartiteHypergraph, op: Option<&crate::evidence::OpFacts>) -> Vec<Option<f32>> {
+    let mut g: Vec<Option<f64>> = vec![None; hg.net_names.len()];
+    let mut unknown = vec![false; hg.net_names.len()];
+    let Some(op) = op else { return vec![None; hg.net_names.len()] };
+    for d in 0..hg.device_nets.len() {
+        if !matches!(hg.kinds[d], pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
+            continue;
+        }
+        let Some(dn) = crate::pattern::pin_net(hg, d as u32, "D") else { continue };
+        let o = op.dev.get(d).copied().flatten();
+        let diode = crate::pattern::pin_net(hg, d as u32, "G") == Some(dn);
+        match o.and_then(|o| o.gds_us) {
+            Some(gds) => *g[dn.0 as usize].get_or_insert(0.0) += gds + if diode { o.map_or(0.0, |o| o.gm_us) } else { 0.0 },
+            None => unknown[dn.0 as usize] = true,
+        }
+    }
+    g.iter().zip(&unknown).map(|(g, &u)| g.filter(|&g| !u && g > 0.0).map(|g| (1e6 / g) as f32)).collect()
 }
 
 /// The classification rule itself, isolated so it is testable without a graph.
@@ -267,5 +500,90 @@ mod tests {
         let nl_no_r = Netlist { devices: vec![nl.devices[1].clone()], nets: nl.nets.clone(), ..Default::default() };
         let classes_no_r = classify_netlist(&nl_no_r);
         assert_eq!(class_of(&nl_no_r, &classes_no_r, "a"), NetClass::Sensitive);
+    }
+
+    fn named(nl: &pnr_core::netlist::Netlist, p: &crate::Problem, name: &str) -> (NetClass, EvidenceLevel) {
+        let i = nl.nets.iter().position(|n| n.name == name).unwrap();
+        (p.net_classes[i].class, p.intent.nets[i].evidence)
+    }
+
+    #[test]
+    fn aggressors_get_no_coupling_budget() {
+        let c = 50_000.0;
+        assert_eq!(super::budgets(NetClass::Clock, c).1, None, "an aggressor has no coupling budget");
+        assert_eq!(super::budgets(NetClass::Bias, c), super::budgets(NetClass::Sensitive, c));
+    }
+
+    /// EXT-18: configured clocks keep their class with `User` evidence, and
+    /// gate the triode switches.
+    #[test]
+    fn sc_switches_clocks_are_user_evidence() {
+        use crate::evidence::DeviceOp;
+        use pnr_core::netlist::{DeviceKind, Netlist};
+        let nl = Netlist {
+            devices: vec![
+                crate::tests::fet("MS1", DeviceKind::Nmos, 1, 0, 2, 3, 1_000, 150),
+                crate::tests::fet("MS2", DeviceKind::Nmos, 5, 4, 6, 3, 1_000, 150),
+            ],
+            nets: crate::tests::nets(&["a1", "p1", "b1", "VSS", "a2", "p2", "b2"]),
+            ..Default::default()
+        };
+        let op = DeviceOp { id_ua: 10.0, headroom_mv: -20.0, gm_us: 50.0, power_uw: 0.0, vgs_mv: None, vbs_mv: None, vth_mv: None, gmb_us: None, gds_us: None };
+        let ev = crate::Evidence {
+            op: Some(crate::OpFacts { dev: vec![Some(op); 2], net_mv: vec![None; 7] }),
+            ..Default::default()
+        };
+        let cfg = crate::AnnotationConfig { clock_nets: vec!["p1".into(), "p2".into()], ..Default::default() };
+        let p = crate::annotate_with(&nl, &cfg, &ev);
+        for n in ["p1", "p2"] {
+            assert_eq!(named(&nl, &p, n), (NetClass::Clock, EvidenceLevel::User), "{n}");
+        }
+        assert!(p.intent.devices.iter().all(|f| f.role == analog::intent::DeviceRole::Switch));
+    }
+
+    #[test]
+    fn noisy_suffix_needs_no_p_twin() {
+        use pnr_core::netlist::{DeviceKind, Netlist};
+        let alone = Netlist {
+            devices: vec![crate::tests::fet("M1", DeviceKind::Nmos, 1, 0, 2, 2, 1_000, 500)],
+            nets: crate::tests::nets(&["x_n", "g", "VSS"]),
+            ..Default::default()
+        };
+        let p = crate::annotate(&alone, &crate::AnnotationConfig::default());
+        assert_eq!(named(&alone, &p, "x_n"), (NetClass::Noisy, EvidenceLevel::Name));
+        let twin = Netlist {
+            devices: vec![
+                crate::tests::fet("M1", DeviceKind::Nmos, 1, 0, 2, 2, 1_000, 500),
+                crate::tests::fet("M2", DeviceKind::Nmos, 4, 3, 2, 2, 2_000, 500),
+            ],
+            nets: crate::tests::nets(&["x_n", "g", "VSS", "x_p", "h"]),
+            ..Default::default()
+        };
+        let p = crate::annotate(&twin, &crate::AnnotationConfig::default());
+        assert_ne!(named(&twin, &p, "x_n").0, NetClass::Noisy, "a differential half");
+    }
+
+    /// EXT-18 `z_ohm`: inert in the flow (PERF-09 has no gds), so tested on
+    /// synthetic evidence. 5 µS is 200 kΩ (Sensitive); 20 µS is 50 kΩ (Signal).
+    #[test]
+    fn z_ohm_marks_high_impedance_sensitive() {
+        use crate::evidence::DeviceOp;
+        use pnr_core::netlist::{DeviceKind, Netlist};
+        let nl = Netlist {
+            devices: vec![crate::tests::fet("M1", DeviceKind::Nmos, 1, 0, 2, 2, 1_000, 500)],
+            nets: crate::tests::nets(&["o", "g", "VSS"]),
+            ..Default::default()
+        };
+        let with_gds = |gds: f64| {
+            let op = DeviceOp { id_ua: 10.0, headroom_mv: 100.0, gm_us: 50.0, power_uw: 0.0, vgs_mv: None, vbs_mv: None, vth_mv: None, gmb_us: None, gds_us: Some(gds) };
+            let ev = crate::Evidence { op: Some(crate::OpFacts { dev: vec![Some(op)], net_mv: vec![None; 3] }), ..Default::default() };
+            crate::annotate_with(&nl, &crate::AnnotationConfig::default(), &ev)
+        };
+        let p = with_gds(5.0);
+        assert_eq!(p.intent.nets[0].z_ohm, Some(200_000.0));
+        assert_eq!(named(&nl, &p, "o"), (NetClass::Sensitive, EvidenceLevel::OpPoint));
+        let p = with_gds(20.0);
+        assert_eq!(named(&nl, &p, "o").0, NetClass::Signal);
+        assert_eq!(crate::annotate(&nl, &crate::AnnotationConfig::default()).intent.nets[0].z_ohm, None, "no op, no impedance");
     }
 }

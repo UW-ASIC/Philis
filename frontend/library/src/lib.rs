@@ -67,7 +67,7 @@ pub mod tools {
     }
 }
 
-use annotator::{annotate, AnnotationConfig, Problem};
+use annotator::{AnnotationConfig, Problem};
 pub use dp::PlaceStats;
 pub use geometry::PlacementMetrics;
 pub use macro_master::Macros;
@@ -115,6 +115,9 @@ pub struct Config {
     pub interface: Option<Interface>,
     /// The top sub-circuit ([`ParseOptions::top`]); `None`: the parser's choice.
     pub top: Option<String>,
+    /// User constraint sidecar, JSON text (EXT-26, `annotator::sidecar`):
+    /// [`run`] merges it over `annotation` (lists extend, scalars from the base).
+    pub constraints: Option<String>,
 }
 
 /// A die edge.
@@ -205,6 +208,7 @@ impl Default for Config {
             gp_mode: GpMode::default(),
             interface: None,
             top: None,
+            constraints: None,
         }
     }
 }
@@ -389,11 +393,33 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     let stack: &'static analog::routing::Stack = Box::leak(Box::new(elaborate::stack(pdk)));
     let mut ann = annotation_with(pdk, &cfg.annotation, stack);
     ann.process.die_temp_k = cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15);
-    let base = annotate(&netlist, &ann);
-
+    if let Some(text) = &cfg.constraints {
+        let (side, diags) = AnnotationConfig::from_json(text, &netlist).map_err(FlowError::Interface)?;
+        ann.supply_nets.extend(side.supply_nets);
+        ann.ground_nets.extend(side.ground_nets);
+        ann.clock_nets.extend(side.clock_nets);
+        ann.do_not_identify.extend(side.do_not_identify);
+        ann.seeds.extend(side.seeds);
+        ann.symmetry_dir = ann.symmetry_dir.or(side.symmetry_dir);
+        ann.groups.extend(side.groups);
+        ann.classes.extend(side.classes);
+        ann.net_classes.extend(side.net_classes);
+        ann.offset_budgets.extend(side.offset_budgets);
+        ann.kelvins.extend(side.kelvins);
+        ann.sidecar_diags.extend(diags);
+    }
     // 2. Bias: per-device power and per-net current. Placement-independent,
-    //    so solved once.
+    //    so solved once, before annotation: its op point and testbench are the
+    //    annotator's evidence (EXT-17).
     let bias = bias(&netlist, cfg);
+    let ev = bias.op.as_ref().map_or_else(Default::default, |o| {
+        let mut e = o.evidence(&netlist, bias.summary.as_ref().is_some_and(|s| s.probe));
+        if let Some(tb) = cfg.op.as_ref().and_then(|c| c.testbench.as_deref()) {
+            (e.switching_nets, e.dc_sources) = oppoint::testbench_sources(&netlist, tb);
+        }
+        e
+    });
+    let base = annotator::annotate_with(&netlist, &ann, &ev);
     let plan = performance_rows(&netlist, cfg, &ann, &base.net_classes);
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
@@ -403,8 +429,8 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // lexicographically better kept.
     // Both topologies are built once on this thread (pricing every variant
     // once); the starts only search them.
-    let merged = topology(&netlist, injected, pdk, cfg, &bias, &ann, &plan, true);
-    let apart = merged.distinct.then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &plan, false));
+    let merged = topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, true);
+    let apart = merged.distinct.then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, false));
     let tops: Vec<&Topology> = std::iter::once(&merged).chain(apart.as_ref()).collect();
     let tops = &tops;
     let runs: Vec<Vec<Searched>> = std::thread::scope(|s| {
@@ -500,7 +526,7 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
     };
     let nets: Vec<pnr_core::NetId> = classes
         .iter()
-        .filter(|c| matches!(c.class, NetClass::Signal | NetClass::Sensitive | NetClass::Clock))
+        .filter(|c| !matches!(c.class, NetClass::Supply | NetClass::Ground | NetClass::Substrate))
         .map(|c| c.net)
         .collect();
     let steps = perf::StepPolicy { gate_af_um2: ann.process.gate_af_per_um2.map_or(0.0, f64::from), ..Default::default() };
@@ -616,6 +642,7 @@ fn topology<'a>(
     cfg: &'a Config,
     bias: &Bias,
     ann: &AnnotationConfig,
+    ev: &annotator::Evidence,
     perf: &'a PerfPlan,
     merge_distinct_gates: bool,
 ) -> Topology<'a> {
@@ -626,7 +653,7 @@ fn topology<'a>(
     let currents = &bias.currents;
     // Annotate: placement/routing rules + cell constraints, device-indexed.
     // Per topology: `CellSpace::new` mutates the problem, which is not `Clone`.
-    let mut problem = annotate(netlist, ann);
+    let mut problem = annotator::annotate_with(netlist, ann, ev);
     if cfg.min_utilization > 0.0 {
         problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min: cfg.min_utilization }));
     }
@@ -641,7 +668,13 @@ fn topology<'a>(
     let unit_cells: Vec<(Vec<DeviceId>, bool)> = problem.constraints.unitization.iter().map(|u| (u.devices.clone(), u.route_matching_required)).collect();
     let fold = cellgen::folds(&netlist, pdk, &bias.gm_us, &unit_cells);
     let cells = CellSpace::new(&netlist, injected, &mut problem, pdk, &bias.power, merge_distinct_gates, &fold);
+    // Already cell-indexed: pushed after the retarget.
+    let env = live_environment(&problem, &cells, pdk);
+    if !env.pairs.is_empty() {
+        problem.placement.budget.push(Box::new(env.clone()));
+    }
     let locks = dp::locks::locks(&problem.placement, cells.variants.len(), &cells.variants);
+    let rules = place_rules(pdk, &cells);
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
@@ -680,10 +713,10 @@ fn topology<'a>(
     };
     em_rules(&mut problem, netlist, &em, &em_layers, &em_cuts, ann.process.stack, pdk);
     // IR-drop budgets (PWR-02) on nets carrying op current (`annotator::ir`).
-    let ir = if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
+    let net_ua = bias.currents.as_ref().map_or_else(Vec::new, |c| oppoint::net_current_ua(netlist, c));
+    let ir = if let (Some(_), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
         let vdd_mv = cfg.op.as_ref().map_or(1_800.0, |o| o.vdd * 1e3);
-        let i = oppoint::net_current_ua(netlist, c);
-        let ir = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv, &ann.policy);
+        let ir = annotator::ir::budgets(&problem.net_classes, &net_ua, h, vdd_mv, &ann.policy);
         let rules: Vec<analog::routing::IrDrop> = ir
             .iter()
             .map(|&(net, current_ua, max_drop_uv)| analog::routing::IrDrop { net, current_ua, max_drop_uv, margin_pct: 20, stack: ann.process.stack })
@@ -697,7 +730,7 @@ fn topology<'a>(
     problem.missing.extend(analog::matching::class::missing_tiers(pdk).map(|m| ("MatchClass", m)));
     let sens: Vec<(pnr_core::NetId, f32)> =
         perf_rows.iter().flat_map(|r| r.nets.iter().copied().zip(r.weights.iter().copied())).collect();
-    let net_weight = gp::net_weights(&problem.net_classes, &sens);
+    let net_weight = gp::net_weights(&problem.net_classes, &sens, &net_ua);
     let intent = elaborate::intent(netlist, &problem.net_classes, currents.as_deref(), cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0), &ir);
     let flow = Flow {
         pdk,
@@ -731,6 +764,7 @@ fn topology<'a>(
         cuts,
         problem,
         cells,
+        env,
         locks,
         perf: cfg.performance.as_ref(),
         perf_rows,
@@ -745,6 +779,7 @@ fn topology<'a>(
             .map(|c| c.iter().map(|d| d.as_ref().and_then(|t| t.iter().find(|(n, _)| n == "D").map(|&(_, i)| i))).collect())
             .unwrap_or_default(),
         gp_mode: cfg.gp_mode,
+        rules,
     };
     // Matched cells keep every alternative: a merged group, or a member of a
     // 2-device leaf that emits a `MatchedSet` (annotator emit.rs table).
@@ -878,15 +913,15 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     macros.extend(best.rings.iter().cloned());
     // MFG-01: density fill, once, on the winner; the search never sees it.
     let drawn = geometry::collect(&macros, &best.layout, &best.routes);
-    let wires_of = |class: analog::metadata::NetClass| -> Vec<pnr_core::Shape> {
-        flow.problem.net_classes.iter().filter(|c| c.class == class)
+    let wires_of = |classes: &[analog::metadata::NetClass]| -> Vec<pnr_core::Shape> {
+        flow.problem.net_classes.iter().filter(|c| classes.contains(&c.class))
             .flat_map(|c| best.routes.wires.get(c.net.0 as usize).into_iter().flatten().copied()).collect()
     };
     // Matched cells: more than one member owns its units.
     let matched: Vec<pnr_core::Rect> = pnr_core::place_macros(&macros, &best.layout).iter()
         .filter(|m| m.units.iter().any(|u| u.owner != m.units[0].owner)).map(|m| m.bbox).collect();
-    use analog::metadata::NetClass::{Ground, Sensitive};
-    macros.extend(fill::fill(&drawn, &wires_of(Ground), &wires_of(Sensitive), &matched, pdk));
+    use analog::metadata::NetClass::{Bias, Ground, Reference, Sensitive};
+    macros.extend(fill::fill(&drawn, &wires_of(&[Ground]), &wires_of(&[Sensitive, Bias, Reference]), &matched, pdk));
     let metadata = metadata::build(
         &flow.problem.placement,
         &best.layout,
@@ -996,6 +1031,10 @@ struct Flow<'a> {
     /// Rules and constraints; placement rules retargeted to cell ids.
     problem: Problem,
     cells: CellSpace,
+    /// Matched pairs' live WPE/OSE (PLC-29); also the report's, plus ring wells.
+    env: analog::placement::LiveEnvironment,
+    /// Placement spacing and grid ([`place_rules`]), fixed for the run.
+    rules: gp::PlaceRules,
     /// Matched-cell orient/shape locks (PLC-03), over all variants.
     locks: dp::locks::Locks,
     /// Post-layout performance scoring, when configured.
@@ -1050,6 +1089,8 @@ fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::r
         svt_fit: pos("svt_a_uv2_per_um2").zip(pos("svt_b_uv2")),
         vt_tc_uv_per_k: [pos("vt_tc_uv_per_k"), pos("vt_tc_uv_per_k_p")],
         lod_kvth0_mv_um: [pos("lod_kvth0_n_mv_um"), pos("lod_kvth0_p_mv_um")],
+        bjt_ka_pct_um: pos("bjt_ka_pct_um"),
+        vbe_tc_uv_per_k: pos("vbe_tc_uv_per_k"),
         lattice_nm: cells::builder::cut_lattice(pdk),
         substrate: pnr_core::SubstrateKind::from_key(pdk.cell_str("substrate_kind")),
         epi_nm: pos("epi_thickness_nm").map(|v| v as i32),
@@ -1080,18 +1121,68 @@ pub fn ring_cut_ohm(pdk: &Pdk) -> f32 {
     pdk.cut_ohm("licon", "tap").unwrap_or(0.0)
 }
 
-/// Placement's process numbers. Origins snap to the cells' cut lattice so
-/// every cut stays on it; the gap between cells is the widest spacing of any
-/// device layer, so wells and implants of neighbouring cells never merge.
-fn place_rules(pdk: &Pdk) -> gp::Rules {
+/// Placement's process numbers, built once per run after the cells are
+/// drawn. Origins snap to the cells' cut lattice so every cut stays on it.
+/// Cell pairs are spaced per facing edge (PLC-07): each (cell, variant)'s
+/// edge profile ([`gp::spacing::profile`], bulk = its first `:B` pin's net)
+/// against the deck's role × role table plus the sidecar's
+/// `cell.placement_space`. `fallback` is the old scalar, the widest spacing
+/// of any device layer: unmapped layers and same-role pairs the deck leaves
+/// open still get it.
+fn place_rules(pdk: &Pdk, cells: &CellSpace) -> gp::PlaceRules {
+    use gp::spacing::{profile, Profiles, SpacingTable, DECK_ROLE, N, ROLES};
     use pnr_core::Process;
-    let clearance = ["nwell", "diff", "tap", "poly", "nsdm", "psdm", "li"]
+    let fallback = ["nwell", "diff", "tap", "poly", "nsdm", "psdm", "li"]
         .iter()
         .filter_map(|&r| pdk.layer(r))
         .filter_map(|l| pdk.min_spacing(l.0))
         .max()
         .unwrap_or(0);
-    gp::Rules { grid: cells::builder::cut_lattice(pdk), clearance }
+    let lattice = cells::builder::cut_lattice(pdk);
+    let table = SpacingTable::new(pdk, &placement_space(pdk), fallback, lattice);
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let open: Vec<_> = (0..N - 1)
+            .flat_map(|i| (i..N - 1).map(move |j| (i, j)))
+            .filter(|&(i, j)| DECK_ROLE[i] == DECK_ROLE[j] && table.src[i][j] == gp::spacing::Src::Fallback)
+            .map(|(i, j)| format!("{}/{}", ROLES[i], ROLES[j]))
+            .collect();
+        if !open.is_empty() {
+            eprintln!("placement spacing: no deck value, fallback {fallback} nm for {}", open.join(", "));
+        }
+    });
+    let of = cells
+        .variants
+        .iter()
+        .map(|s| {
+            s.alternatives
+                .iter()
+                .map(|m| {
+                    let bulk = m.pins.iter().find(|p| p.name.ends_with(":B")).map(|p| p.net);
+                    Profiles::orients(&profile(m, pdk, bulk))
+                })
+                .collect()
+        })
+        .collect();
+    gp::PlaceRules::new(lattice, table, Profiles { of })
+}
+
+/// The sidecar's `cell.placement_space`: `{"role_a,role_b": [nm, "source"]}`.
+///
+/// # Panics
+/// On a malformed entry, naming its key: a typo must not silently drop a rule
+/// (an unknown role panics in [`gp::spacing::SpacingTable::new`]).
+fn placement_space(pdk: &Pdk) -> Vec<(String, String, i32)> {
+    let Some(obj) = pdk.cell.get("placement_space").filter(|v| !v.is_null()) else { return Vec::new() };
+    let obj = obj.as_object().expect("cell.placement_space: an object of \"role_a,role_b\": [nm, \"source\"]");
+    obj.iter()
+        .map(|(k, v)| {
+            let (a, b) = k.split_once(',').unwrap_or_else(|| panic!("cell.placement_space.{k}: key is \"role_a,role_b\""));
+            let nm = v.get(0).and_then(|n| n.as_i64()).and_then(|n| i32::try_from(n).ok());
+            let nm = nm.unwrap_or_else(|| panic!("cell.placement_space.{k}: value is [nm, \"source\"], got {v}"));
+            (a.trim().to_owned(), b.trim().to_owned(), nm)
+        })
+        .collect()
 }
 
 /// One scored epoch.
@@ -1146,7 +1237,7 @@ impl Flow<'_> {
             variants: &cells.variants,
             assignment,
             reqs: placement,
-            rules: place_rules(self.pdk),
+            rules: &self.rules,
             net_weight: &self.net_weight,
             n_axes: self.problem.axis_count,
             power_uw: &cells.power,
@@ -1170,7 +1261,7 @@ impl Flow<'_> {
             &cells.fixed,
             &self.locks,
             prices,
-            place_rules(self.pdk),
+            &self.rules,
             &self.net_weight,
             // Its own stream (AP-19): gp and dp drawing the same sequence correlate their moves.
             seed ^ 0xD1B5_4A32_D192_ED03,
@@ -1188,7 +1279,7 @@ impl Flow<'_> {
         };
         // Measured on the macros dp's variants draw, so `lattice_off` stamps what is drawn.
         let lattice = cells::builder::cut_lattice(self.pdk);
-        let place = geometry::placement_metrics(&macros, &layout, lattice, place_rules(self.pdk).clearance, placement, &self.locks);
+        let place = geometry::placement_metrics(&macros, &layout, lattice, &self.rules, placement, &self.locks);
         debug_assert_eq!(place.lattice_off, 0, "dp::place: cell origin off the cut lattice");
 
         // Guard rings enclose placed cells, so they are drawn now, before routing.
@@ -1238,7 +1329,7 @@ impl Flow<'_> {
         // a fixed cell; its shape on the deck's credited diode layer joins the
         // net's routes (the rule's credit, `Stack::diode`).
         let ground = self.problem.net_classes.iter().find(|c| c.class == analog::metadata::NetClass::Ground).map(|c| c.net);
-        let diodes = elaborate::antenna_diodes(self.pdk, routing, &routes, &placed, &rings, ground, place_rules(self.pdk).clearance);
+        let diodes = elaborate::antenna_diodes(self.pdk, routing, &routes, &placed, &rings, ground, self.rules.spacing.fallback);
         lap(5);
         let mut extra = Vec::new();
         if !diodes.is_empty() {
@@ -1288,7 +1379,7 @@ impl Flow<'_> {
             &self.problem.missing,
             &self.pdk.unverified(),
         );
-        budgets.add_routing(&[Box::new(self.common_nodes(&layout)), Box::new(self.environment(&layout, &rings))], &routes);
+        budgets.add_routing(&[Box::new(self.common_nodes(&layout))], &routes);
 
         let c = signoff_c_tier(&signoff, &self.net_names, &self.problem.net_classes, self.perf_rows);
         let (key, stats) = epoch_score(&place_report, &route_report, &signoff, &budgets, c, layout.footprint_nm2());
@@ -1401,17 +1492,16 @@ impl Flow<'_> {
         out
     }
 
-    /// Each recognised matched pair on one source net, with its members'
-    /// source pins and the net's other pins (feeds) as placed, budgeted
-    /// `ΔR ≤ (allowance − placement spend) / I_D` from the pair's `MatchedSet` ledger.
+    /// Each extracted common node (EXT-24 `Intent.common_nodes`), with its
+    /// halves' pins on the node and the net's other pins (feeds) as placed,
+    /// budgeted `ΔR ≤ (allowance − placement spend) / I_D` from the first
+    /// pair's `MatchedSet` ledger.
     fn common_nodes(&self, layout: &Layout) -> analog::routing::CommonNodes {
-        use annotator::BlockKind::{CurrentMirror, DiffPair, Load};
         let mut left = Vec::new();
         for b in &self.problem.placement.budget {
             b.offset_allowances(layout, &mut left);
         }
         let placed = gr::place_macros(&cellgen::realize(&self.cells.variants, &layout.variant), layout);
-        let term = |d: DeviceId, t: &str| self.netlist.devices[d.0 as usize].terminals.iter().find(|(n, _)| n == t).map(|&(_, n)| n);
         // (device, terminal, rect) of every placed pin, per net.
         let mut on_net: Vec<Vec<(DeviceId, String, pnr_core::Rect)>> = vec![Vec::new(); self.netlist.nets.len()];
         for (m, members) in placed.iter().zip(&self.cells.devices_of) {
@@ -1423,98 +1513,32 @@ impl Flow<'_> {
             }
         }
         let mut nodes = Vec::new();
-        for leaf in annotator::block::leaves(&self.problem.blocks) {
-            let &[a, b] = leaf.devices.as_slice() else { continue };
-            if !matches!(leaf.kind, DiffPair | CurrentMirror | Load) {
-                continue;
-            }
-            let Some(net) = term(a, "S").filter(|&n| term(b, "S") == Some(n)) else { continue };
-            let list = &on_net[net.0 as usize];
-            let pins = |d: DeviceId| list.iter().filter(|p| p.0 == d && p.1 == "S").map(|p| p.2).collect::<Vec<_>>();
-            let feeds = list.iter().filter(|p| p.0 != a && p.0 != b).map(|p| p.2).collect();
+        for req in &self.problem.intent.common_nodes {
+            let (Some(&a), Some(&b)) = (req.a.first(), req.b.first()) else { continue };
+            let list = &on_net[req.net.0 as usize];
+            let term = format!("{:?}", req.term);
+            let pins = |ds: &[DeviceId]| list.iter().filter(|p| ds.contains(&p.0) && p.1 == term).map(|p| p.2).collect::<Vec<_>>();
+            let feeds = list.iter().filter(|p| !req.a.contains(&p.0) && !req.b.contains(&p.0)).map(|p| p.2).collect();
             let i_ua = self.id_ua.get(a.0 as usize).copied().flatten().map(|i| i.abs() as f32).filter(|&i| i > 0.0);
             let max_delta_ohm = common_node_ohm(&left, a, b, i_ua);
-            // RTE-17 step 4: EXT-24's CommonNodeReq/StarReq/KelvinReq replace
-            // this leaf mapping (a StarReq supersedes the net's node, star = true).
-            nodes.push(analog::routing::CommonNode { net, groups: vec![pins(a), pins(b)], feeds, max_delta_ohm, star: false });
+            // RTE-17 step 4: EXT-24's StarReq/KelvinReq (`intent.stars`/`kelvins`)
+            // are not mapped yet (a StarReq supersedes the net's node, star = true).
+            nodes.push(analog::routing::CommonNode { net: req.net, groups: vec![pins(&req.a), pins(&req.b)], feeds, max_delta_ohm, star: false });
         }
         let joins = dr::joins(&self.layers, &self.cuts, self.d_router.cfg.pin_access);
         analog::routing::CommonNodes { nodes, stack: self.stack, halo_nm: self.d_router.cfg.pitch, joins }
     }
 
-    /// Each recognised matched pair's surroundings on the placed geometry
-    /// (`rings` included): its channels' distance to the nearest nwell-union
-    /// edge (WPE) and its cells' diffusion's gap to other cells' (OSE).
+    /// Each recognised matched pair's surroundings on the placed geometry,
+    /// `rings`' n-wells joining the cells' ([`live_environment`]).
     fn environment(&self, layout: &Layout, rings: &[Macro]) -> analog::placement::Environment {
-        use annotator::BlockKind::{CurrentMirror, DiffPair, Load};
         use pnr_core::Process;
-        let placed = gr::place_macros(&cellgen::realize(&self.cells.variants, &layout.variant), layout);
-        let (Some(nwell), Some(diff)) = (self.pdk.layer("nwell"), self.pdk.layer("diff")) else {
-            return analog::placement::Environment::default();
-        };
-        let wells: Vec<pnr_core::Rect> =
-            placed.iter().chain(rings).flat_map(|m| &m.shapes).filter(|s| s.layer == nwell).map(|s| s.rect).collect();
-        let inside = |r: &pnr_core::Rect, (x, y): (i32, i32)| r.x <= x && x <= r.x + r.w && r.y <= y && y <= r.y + r.h;
-        let covered = |p: (i32, i32)| wells.iter().any(|r| inside(r, p));
-        let gap = |r: &pnr_core::Rect, (x, y): (i32, i32)| {
-            let dx = (r.x - x).max(x - (r.x + r.w)).max(0);
-            let dy = (r.y - y).max(y - (r.y + r.h)).max(0);
-            f64::from(dx).hypot(f64::from(dy)) as f32
-        };
-        // Distance from `p` to the nwell union's boundary: to the nearest
-        // well outside it, else to the nearest uncovered point just past a
-        // well edge (projections onto every edge, and the corners).
-        let wpe = |p: (i32, i32)| -> f32 {
-            if !covered(p) {
-                return wells.iter().map(|r| gap(r, p)).fold(f32::INFINITY, f32::min);
-            }
-            let mut best = f32::INFINITY;
-            for r in &wells {
-                let (x0, x1, y0, y1) = (r.x, r.x + r.w, r.y, r.y + r.h);
-                let cx = p.0.clamp(x0, x1);
-                let cy = p.1.clamp(y0, y1);
-                for q in [(x0 - 1, cy), (x1 + 1, cy), (cx, y0 - 1), (cx, y1 + 1), (x0 - 1, y0 - 1), (x1 + 1, y0 - 1), (x0 - 1, y1 + 1), (x1 + 1, y1 + 1)] {
-                    if !covered(q) {
-                        best = best.min(f64::from(q.0 - p.0).hypot(f64::from(q.1 - p.1)) as f32);
-                    }
-                }
-            }
-            best
-        };
-        let diffs = |c: usize| placed[c].shapes.iter().filter(|s| s.layer == diff).map(|s| s.rect).collect::<Vec<_>>();
-        let rect_gap = |a: &pnr_core::Rect, b: &pnr_core::Rect| {
-            let dx = (a.x - (b.x + b.w)).max(b.x - (a.x + a.w)).max(0);
-            let dy = (a.y - (b.y + b.h)).max(b.y - (a.y + a.h)).max(0);
-            f64::from(dx).hypot(f64::from(dy)) as f32
-        };
-        let mut out = Vec::new();
-        for leaf in annotator::block::leaves(&self.problem.blocks) {
-            let &[a, b] = leaf.devices.as_slice() else { continue };
-            if !matches!(leaf.kind, DiffPair | CurrentMirror | Load) {
-                continue;
-            }
-            let mean_wpe = |d: DeviceId| {
-                let (s, n) = layout.units.of_device(layout, d).fold((0.0f32, 0u32), |(s, n), u| (s + wpe((u.x, u.y)).min(1e7), n + 1));
-                if n == 0 { f32::INFINITY } else { s / n as f32 }
-            };
-            let ose = |d: DeviceId| {
-                let Some(c) = self.cells.devices_of.iter().position(|m| m.contains(&d)) else { return f32::INFINITY };
-                let own = diffs(c);
-                (0..placed.len())
-                    .filter(|&o| o != c)
-                    .flat_map(diffs)
-                    .flat_map(|f| own.iter().map(move |m| (f, *m)))
-                    .map(|(f, m)| rect_gap(&f, &m))
-                    .fold(f32::INFINITY, f32::min)
-            };
-            out.push(analog::placement::Surroundings {
-                wpe_nm: [mean_wpe(a), mean_wpe(b)],
-                ose_nm: [ose(a), ose(b)],
-                wpe_min_nm: analog::matching::class::mos_env(pnr_core::MatchClass::Moderate, self.pdk).wpe_nm as f32,
-                ose_range_nm: self.pdk.tier("lod_moat_ext_nm", pnr_core::MatchClass::Minimal).unwrap_or(0) as f32,
-            });
-        }
-        analog::placement::Environment(out)
+        let ring_wells: Vec<pnr_core::Rect> = self
+            .pdk
+            .layer("nwell")
+            .map(|nwell| rings.iter().flat_map(|m| &m.shapes).filter(|s| s.layer == nwell).map(|s| s.rect).collect())
+            .unwrap_or_default();
+        analog::placement::Environment(self.env.surroundings_with(layout, &ring_wells))
     }
 
     /// Simulate `epoch` on its parasitics; a simulator that cannot run counts
@@ -1666,7 +1690,7 @@ fn c_tier(
         if rows.is_empty() {
             let signal = classes
                 .iter()
-                .any(|c| usize::from(c.net.0) == id && matches!(c.class, NetClass::Signal | NetClass::Sensitive | NetClass::Clock));
+                .any(|c| usize::from(c.net.0) == id && !matches!(c.class, NetClass::Supply | NetClass::Ground | NetClass::Substrate));
             return f64::from(u8::from(signal));
         }
         let per_af: f64 = rows
@@ -1847,6 +1871,39 @@ fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> Bias {
     Bias { power: o.power_uw.clone(), summary: Some(summary), currents: Some(currents), net_headroom_mv: Some(headroom), gm_us: o.gm_us.clone(), op: Some(o) }
 }
 
+/// The matched pairs (2-device `DiffPair`/`CurrentMirror`/`Load` leaves) and
+/// every cell variant's n-well and diff rects, for the live WPE/OSE batch.
+/// Ranges: the deck's moderate WPE clearance and its minimal-tier LOD moat
+/// extension. No `nwell` or `diff` layer: no pairs (nothing measurable).
+fn live_environment(problem: &Problem, cells: &CellSpace, pdk: &Pdk) -> analog::placement::LiveEnvironment {
+    use annotator::BlockKind::{CurrentMirror, DiffPair, Load};
+    use pnr_core::Process;
+    let mut env = analog::placement::LiveEnvironment {
+        pairs: Vec::new(),
+        geo: std::sync::Arc::default(),
+        wpe_min_nm: analog::matching::class::mos_env(pnr_core::MatchClass::Moderate, pdk).wpe_nm as f32,
+        ose_range_nm: pdk.tier("lod_moat_ext_nm", pnr_core::MatchClass::Minimal).unwrap_or(0) as f32,
+    };
+    let (Some(nwell), Some(diff)) = (pdk.layer("nwell"), pdk.layer("diff")) else { return env };
+    let on = |m: &Macro, layer| m.shapes.iter().filter(|s| s.layer == layer).map(|s| s.rect).collect::<Vec<_>>();
+    let alts = || cells.variants.iter().map(|v| &v.alternatives);
+    env.geo = std::sync::Arc::new(analog::placement::EnvGeo {
+        bbox: alts().map(|a| a.iter().map(|m| m.bbox).collect()).collect(),
+        wells: alts().map(|a| a.iter().map(|m| on(m, nwell)).collect()).collect(),
+        diffs: alts().map(|a| a.iter().map(|m| on(m, diff)).collect()).collect(),
+    });
+    let cell = |d: DeviceId| cells.devices_of.iter().position(|m| m.contains(&d)).map(|c| c as u16);
+    for leaf in annotator::block::leaves(&problem.blocks) {
+        let &[a, b] = leaf.devices.as_slice() else { continue };
+        if !matches!(leaf.kind, DiffPair | CurrentMirror | Load) {
+            continue;
+        }
+        // A member in no cell reads no OSE (`∞`), as before.
+        env.pairs.push((a, b, cell(a).unwrap_or(u16::MAX), cell(b).unwrap_or(u16::MAX)));
+    }
+    env
+}
+
 /// The collapsed cell table and every device-indexed input translated to it.
 struct CellSpace {
     /// Pre-drawn alternatives per cell — what `gp`/`dp` search over.
@@ -1882,10 +1939,7 @@ impl CellSpace {
             spaces,
             cell_of,
             devices_of,
-        } = cellgen::enumerate_folded(netlist, injected, &problem.constraints, pdk, merge_distinct_gates, fold, {
-            let ground = problem.net_classes.iter().find(|c| c.class == analog::metadata::NetClass::Ground);
-            ground.map(|c| c.net)
-        });
+        } = cellgen::enumerate_folded(netlist, injected, &problem.constraints, pdk, merge_distinct_gates, fold, &problem.net_classes);
         let gate = |d: &DeviceId| {
             netlist.devices[d.0 as usize].terminals.iter().find(|(t, _)| t == "G").map(|(_, n)| *n)
         };
@@ -2515,7 +2569,7 @@ mod start_tests {
         use pnr_core::LayerId;
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
         let nl = crate::parse(".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\n.ends p\n").unwrap();
-        let problem = || crate::annotate(&nl, &crate::annotation(&pdk, &Default::default()));
+        let problem = || annotator::annotate(&nl, &crate::annotation(&pdk, &Default::default()));
         let (name, id) = pdk.layers[0].clone();
         let lim = Limit { ua_per_um: 1.0, ua_per_cut: 1.0, ..Limit::default() };
         let full: Vec<_> = (0..=MAX_LAYERS as u16).map(|l| (LayerId(l), lim)).collect();
@@ -2783,7 +2837,7 @@ mod common_node_tests {
         let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
         let ann = crate::annotation_with(&pdk, &cfg.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
         let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0 };
-        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &plan, true);
+        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &Default::default(), &plan, true);
         let n = t.flow.cells.variants.len();
         let layout = pnr_core::Layout {
             x: (0..n).map(|i| i as i32 * 20_000).collect(),
@@ -2816,5 +2870,284 @@ mod common_node_tests {
         assert_eq!(rows.len(), 2);
         assert!(rows[0].contains(d1.as_str()) && !rows[0].contains(d0.as_str()), "{rows:?}");
         assert!(rows[1].contains(d0.as_str()) && !rows[1].contains(d1.as_str()), "{rows:?}");
+    }
+}
+
+/// PLC-07: per-pair placement spacing on the shipped decks and fixtures.
+#[cfg(test)]
+mod spacing_tests {
+    use gp::spacing::{profile, Face, Src, SpacingTable, N, ROLES};
+    use pnr_core::{DeviceId, Layout, Macro, Orient, Process as _};
+    use std::collections::BTreeMap;
+
+    fn root() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn pdk(deck: &str) -> verify::Pdk {
+        let json = std::fs::read_to_string(root().join(format!("pdks/{deck}.json"))).expect("sidecar");
+        verify::Pdk::from_json(&json).unwrap_or_else(|e| panic!("{deck} loads: {e}"))
+    }
+
+    /// The `CellSpace` the flow builds for fixture `name` (as `size_tests`).
+    fn cells(name: &str, pdk: &verify::Pdk) -> crate::CellSpace {
+        let spice = std::fs::read_to_string(root().join(format!("benchmarks/fixtures/{name}.spice"))).expect("fixture");
+        let mut netlist = crate::parse::spice(&spice).expect("parses");
+        crate::deck_models(&mut netlist, pdk);
+        let mut problem = annotator::annotate(&netlist, &crate::annotation(pdk, &Default::default()));
+        let fold = crate::cellgen::folds(&netlist, pdk, &[], &[]);
+        crate::CellSpace::new(&netlist, &Default::default(), &mut problem, pdk, &[], true, &fold)
+    }
+
+    const FIXTURES: [&str; 10] = ["ota", "ota_constrained", "tt_ota", "pair", "quad", "chain4", "rc_filter", "dac4", "bjt_mirror", "bgr_core"];
+
+    /// Layers `profile` reads as `other`, by name, over every cell × variant.
+    fn unmapped(deck: &str) -> BTreeMap<String, usize> {
+        let pdk = pdk(deck);
+        let mut out = BTreeMap::new();
+        for name in FIXTURES {
+            let cells = cells(name, &pdk);
+            for m in cells.variants.iter().flat_map(|s| &s.alternatives) {
+                let r0 = profile(&Macro { shapes: vec![], ..m.clone() }, &pdk, None);
+                assert_eq!(r0.edge[0].present, 0, "an empty macro has no roles");
+                for s in &m.shapes {
+                    let one = profile(&Macro { shapes: vec![*s], ..m.clone() }, &pdk, None);
+                    if one.edge[0].present & (1 << (N - 1)) != 0 {
+                        let layer = pdk.layers.iter().find(|(_, l)| *l == s.layer).map_or_else(|| format!("#{}", s.layer.0), |(n, _)| n.clone());
+                        *out.entry(layer).or_default() += 1;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn shipped_cells_draw_no_unmapped_layer() {
+        for deck in ["gf180mcu", "ihp_sg13g2", "generic_finfet"] {
+            // Print only: those decks keep `fallback` for unmapped layers.
+            match std::panic::catch_unwind(|| unmapped(deck)) {
+                Ok(m) => eprintln!("{deck}: shapes on unmapped layers {m:?}"),
+                Err(_) => eprintln!("{deck}: fixtures do not build"),
+            }
+        }
+        let sky = unmapped("sky130");
+        assert!(sky.is_empty(), "sky130 cells draw layers no placement role maps: {sky:?}");
+    }
+
+    #[test]
+    fn table_is_symmetric_and_sidecar_wins_when_larger() {
+        let pdk = pdk("sky130");
+        let t = SpacingTable::new(&pdk, &crate::placement_space(&pdk), 1270, 10);
+        for i in 0..N {
+            for j in 0..N {
+                assert_eq!(t.rule[i][j], t.rule[j][i], "{}/{}", ROLES[i], ROLES[j]);
+            }
+        }
+        let r = |a: &str| ROLES.iter().position(|&x| x == a).unwrap();
+        assert_eq!(t.rule[r("diff_out")][r("nwell")], 340);
+        // poly.9 is on derived layers (`poly_res`): only the sidecar sees it from rpm.
+        assert_eq!((t.rule[r("rpm")][r("poly")], t.src[r("rpm")][r("poly")]), (480, Src::Sidecar));
+        assert_eq!((t.rule[r("nwell")][r("nwell")], t.src[r("nwell")][r("nwell")]), (1270, Src::Deck));
+        assert_eq!(t.rule[r("diff_in")][r("diff_out")], 270);
+        assert_eq!(t.rule[r("diom")][r("diom")], 0, "a marker owes no spacing");
+    }
+
+    /// Drawn shapes of `cells` placed by `l`, plus rings and bridges as `Flow::epoch` adds them.
+    fn drawn(macros: &[Macro], l: &Layout, rings: &analog::Constraints, pdk: &verify::Pdk) -> Vec<pnr_core::Shape> {
+        let placed = pnr_core::place_macros(macros, l);
+        let mut extra = cells::post_cell::guard_rings(l, rings, pdk, crate::ring_cut_ohm(pdk));
+        extra.extend(cells::post_cell::well_bridges(&placed, &extra, pdk));
+        let all: Vec<Macro> = placed.iter().chain(&extra).cloned().collect();
+        extra.extend(cells::post_cell::implant_bridges(&all, pdk));
+        let mut shapes: Vec<_> = placed.iter().chain(&extra).flat_map(|m| m.shapes.iter().copied()).collect();
+        if let Some(nw) = pdk.layer("nwell") {
+            crate::geometry::merge_rects(&mut shapes, nw);
+        }
+        shapes
+    }
+
+    fn findings(shapes: &[pnr_core::Shape], pdk: &verify::Pdk) -> BTreeMap<String, usize> {
+        let mut out = BTreeMap::new();
+        for f in verify::drc(shapes, &[], pdk).into_iter().filter(|f| !f.warning) {
+            *out.entry(f.rule).or_default() += 1;
+        }
+        out
+    }
+
+    /// Cells at lower-left corners `at`, unturned.
+    fn layout(macros: &[Macro], at: &[(i32, i32)]) -> Layout {
+        let n = macros.len();
+        let (hw, hh): (Vec<i32>, Vec<i32>) = macros.iter().map(|m| (m.bbox.w / 2, m.bbox.h / 2)).unzip();
+        Layout {
+            x: (0..n).map(|i| at[i].0 + hw[i]).collect(),
+            y: (0..n).map(|i| at[i].1 + hh[i]).collect(),
+            hw,
+            hh,
+            variant: vec![0; n],
+            axis: vec![],
+            branch: vec![false; n],
+            groups: (0..n).map(|i| vec![DeviceId(i as u16)]).collect(),
+            orient: vec![Orient::R0; n],
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        }
+    }
+
+    /// Every ordered cell pair, x- and y-facing, stamped at the table's `min`
+    /// (and at 0 when `abut`): no DRC rule fires more often on the pair than on
+    /// the two cells alone. Cells' own findings are not this item's.
+    #[test]
+    fn table_gaps_are_drc_clean_on_sky130() {
+        let pdk = pdk("sky130");
+        let lattice = cells::builder::cut_lattice(&pdk);
+        // (macro, profile, its ring request with `device` cleared)
+        let mut uniq: Vec<(Macro, gp::spacing::Profile, Option<analog::cell::GuardRingRequirement>)> = Vec::new();
+        for name in ["ota", "dac4", "rc_filter", "chain4", "pair"] {
+            let cs = cells(name, &pdk);
+            let rules = crate::place_rules(&pdk, &cs);
+            for (c, s) in cs.variants.iter().enumerate() {
+                for (v, m) in s.alternatives.iter().enumerate().take(2) {
+                    if uniq.iter().any(|(u, ..)| u.shapes == m.shapes && u.bbox == m.bbox) {
+                        continue;
+                    }
+                    let ring = cs.guard_rings.guard_rings.iter().find(|g| usize::from(g.device.0) == c).cloned();
+                    uniq.push((m.clone(), rules.profiles.of[c][v][0], ring));
+                }
+            }
+        }
+        let rules = crate::place_rules(&pdk, &cells("pair", &pdk));
+        let t = &rules.spacing;
+        let rings_of = |ids: &[usize]| {
+            let mut c = analog::Constraints::default();
+            for (k, &i) in ids.iter().enumerate() {
+                if let Some(mut r) = uniq[i].2.clone() {
+                    r.device = DeviceId(k as u16);
+                    c.guard_rings.push(r);
+                }
+            }
+            c
+        };
+        let single: Vec<BTreeMap<String, usize>> = (0..uniq.len())
+            .map(|i| findings(&drawn(&[uniq[i].0.clone()], &layout(&[uniq[i].0.clone()], &[(0, 0)]), &rings_of(&[i]), &pdk), &pdk))
+            .collect();
+        let (mut probes, mut tight, mut tight_of, mut bad) = (0, 0, 0, Vec::new());
+        for a in 0..uniq.len() {
+            for b in 0..uniq.len() {
+                let (ma, mb) = (&uniq[a].0, &uniq[b].0);
+                for f in [Face::R, Face::T] {
+                    let g = t.gap(&uniq[a].1, f, &uniq[b].1);
+                    let mut gaps = vec![g.min];
+                    if g.abut && g.min > 0 {
+                        gaps.push(0);
+                    }
+                    let at = |gap: i32| match f {
+                        Face::R => (ma.bbox.w + gap, (ma.bbox.h - mb.bbox.h) / 2 / lattice * lattice),
+                        _ => ((ma.bbox.w - mb.bbox.w) / 2 / lattice * lattice, ma.bbox.h + gap),
+                    };
+                    let run = |gap: i32| {
+                        let pair = [ma.clone(), mb.clone()];
+                        let mut got = findings(&drawn(&pair, &layout(&pair, &[(0, 0), at(gap)]), &rings_of(&[a, b]), &pdk), &pdk);
+                        got.retain(|r, n| *n > single[a].get(r).unwrap_or(&0) + single[b].get(r).unwrap_or(&0));
+                        got
+                    };
+                    for gap in gaps {
+                        probes += 1;
+                        let extra = run(gap);
+                        if !extra.is_empty() {
+                            bad.push(format!("cells {a}->{b} {f:?} gap {gap}: {extra:?}"));
+                        }
+                    }
+                    if g.min >= 2 * lattice {
+                        tight_of += 1;
+                        tight += usize::from(!run(g.min - 2 * lattice).is_empty());
+                    }
+                }
+            }
+        }
+        eprintln!("{} cells, {probes} probes; tightness: {tight}/{tight_of} fail at min − 2·lattice", uniq.len());
+        assert!(bad.is_empty(), "{} of {probes} probes add DRC findings:\n{}", bad.len(), bad.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use pnr_core::{Layout, Orient, Process as _, Rect};
+
+    fn root() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn pdk() -> verify::Pdk {
+        verify::Pdk::from_json(&std::fs::read_to_string(root().join("pdks/sky130.json")).expect("sidecar")).expect("sky130 loads")
+    }
+
+    /// The live batch's geometry (`EnvGeo` + `place_rect`) is the placed
+    /// macros' own, cell by cell, under every orient and the last variant.
+    #[test]
+    fn env_geo_places_like_place_macros_on_ota() {
+        let pdk = pdk();
+        let spice = std::fs::read_to_string(root().join("benchmarks/fixtures/ota.spice")).expect("fixture");
+        let mut netlist = crate::parse::spice(&spice).expect("parses");
+        crate::deck_models(&mut netlist, &pdk);
+        let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
+        let fold = crate::cellgen::folds(&netlist, &pdk, &[], &[]);
+        let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
+        let env = crate::live_environment(&problem, &cells, &pdk);
+        let n = cells.variants.len();
+        assert!(!env.pairs.is_empty(), "ota has a matched pair");
+        assert!(env.pairs.iter().all(|&(_, _, a, b)| usize::from(a) < n && usize::from(b) < n));
+
+        const ALL: [Orient; 8] = [Orient::R0, Orient::R90, Orient::R180, Orient::R270, Orient::Mx, Orient::Mx90, Orient::Mx180, Orient::Mx270];
+        let variant: Vec<u16> = cells.variants.iter().map(|v| (v.alternatives.len() - 1) as u16).collect();
+        let orient: Vec<Orient> = (0..n).map(|c| ALL[c % 8]).collect();
+        let half = |c: usize| {
+            let r = orient[c].apply_rect(cells.variants[c].alternatives[usize::from(variant[c])].bbox);
+            (r.w / 2, r.h / 2)
+        };
+        let l = Layout {
+            x: (0..n).map(|c| 20_000 * c as i32 + 1_005).collect(),
+            y: (0..n).map(|c| 7_000 * (c as i32 % 3) - 3_015).collect(),
+            hw: (0..n).map(|c| half(c).0).collect(),
+            hh: (0..n).map(|c| half(c).1).collect(),
+            orient,
+            variant,
+            axis: vec![],
+            branch: vec![],
+            groups: vec![],
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: std::sync::Arc::default(),
+        };
+        let placed = pnr_core::place_macros(&crate::cellgen::realize(&cells.variants, &l.variant), &l);
+        let (nwell, diff) = (pdk.layer("nwell").expect("nwell"), pdk.layer("diff").expect("diff"));
+        for c in 0..n {
+            let v = usize::from(l.variant[c]);
+            for (layer, local) in [(nwell, &env.geo.wells[c][v]), (diff, &env.geo.diffs[c][v])] {
+                let key = |r: &Rect| (r.x, r.y, r.w, r.h);
+                let mut want: Vec<_> = placed[c].shapes.iter().filter(|s| s.layer == layer).map(|s| key(&s.rect)).collect();
+                let mut got: Vec<_> = local.iter().map(|&r| key(&pnr_core::place_rect(env.geo.bbox[c][v], r, &l, c))).collect();
+                want.sort_unstable();
+                got.sort_unstable();
+                assert_eq!(got, want, "cell {c}");
+            }
+        }
+    }
+
+    /// The live batch scores in the placement arm; the routing arm keeps only
+    /// the final report's ring-inclusive row (T9's judge). `ota`, not `pair`:
+    /// `pair`'s two devices share their gate, so no matched pair is recognised.
+    /// Red under debug until MAT-07 stops registering `OrientationSet` in both
+    /// arms (`annotator/src/emit.rs:145-148` trips `gp::Prices::bind`'s
+    /// debug_assert on ota); see `docs/plans/m2-placement-report.md`.
+    #[test]
+    fn environment_is_in_the_placement_arm_once() {
+        let spice = std::fs::read_to_string(root().join("benchmarks/fixtures/ota.spice")).expect("fixture");
+        let cfg = crate::Config { feedback_iters: 1, outer_iters: 1, starts: 1, ..Default::default() };
+        let sol = crate::run(&spice, &pdk(), &Default::default(), &cfg).expect("flow");
+        let rows = |r: &[crate::metadata::BudgetStatus]| r.iter().filter(|b| b.kind == "Environment").count();
+        assert_eq!(rows(&sol.metadata.placement), 1);
+        assert_eq!(rows(&sol.metadata.routing), 1);
     }
 }

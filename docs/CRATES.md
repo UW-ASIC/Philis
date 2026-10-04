@@ -40,6 +40,16 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
 - **In:** macros, `VariantSpace`s, placement `Requirements` (cell-indexed), `Prices`.
 - **Out:** coarse `Layout` + `Report`. Shares `Prices`, `VariantSpace`,
   `CLEARANCE_NM`, `mechanics` (nets, HPWL, encroachment, objective) with dp.
+- **Rails weighted by op current (PLC-17):** `net_weights` takes rails out of the
+  signal mean and gives each `I/I_max` clamped to `RAIL_MIN` 0.1, `RAIL_UNKNOWN`
+  0.25 without a current (policy, not tuned). Acceptance (release, `Config::default`
+  + op, seeds 1-5; `84e1d52` baseline vs `964165d`): every run is identical.
+  | fixture | IrDrop batch (total, viol, unknown) | signoff `ir_drop` | median budgeted-net C, fF (s1..s5) |
+  |---|---|---|---|
+  | ota | (3,0,0) both | ran (1/1), 0 rows both | 16.865 16.272 16.752 16.423 16.257 both |
+  | rc_filter | (3,0,0) both | ran (1/1), 0 rows both | 1.645 ×5 both |
+  Pass (no worse), but no measured gain: IR Θ is 0 before and after, and signoff
+  exposes only violating rows, not the worst drop/limit of a passing grid.
 
 ## backend/dp — deps: core, analog, gp
 - **In:** coarse `Layout` (groups, axis, power filled by library), macros,
@@ -47,6 +57,15 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
 - **Out:** legal `Layout` (≥ clearance apart, hard symmetry projected, variant/
   orient/DTI branch chosen) + `Report`. Every move goes through one `Sa::trial`;
   hard equalities are re-projected so mirror partners follow.
+- **PEX is dimensionless (PLC-18):** `HPWL/L_ref + Σ criticality·cost + priced
+  budgets`, `L_ref = sqrt(Σ cell area)`; every cost is a squared ratio to its own
+  length (rule distance, DTI band, or `L_ref`). T0 = `t0_scale·mean |ΔPEX|`, no floor.
+  Term shares of Σ|Δterm| over the 128 T0 probes, `metrics_are_populated_on_ota`
+  (release, measured once): first (cold) dp call — HPWL/L_ref 75.4 %, Proximity
+  18.9 %, Symmetry 5.7 %, MatchedSet 0 %, priced budgets 0 % (pass: none > 80 %);
+  the other cold calls peak at HPWL 68 %. The run's last dp call is 100 % priced
+  budgets (mean |ΔE| 7.3e4 vs ~1 elsewhere): once T6 prices have stepped, λ·residual
+  swamps the rest — a prices/energy-weight question for PLC-09, not a unit one.
 
 ## backend/gr — deps: core, analog
 - **In:** placed `Layout` + `Macro`s, guard rings, routing `Requirements`,

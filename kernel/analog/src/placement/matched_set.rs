@@ -29,8 +29,8 @@ pub struct MatchedSet {
     pub kind: MatchKind,
     /// MOS members: coincidence feasibility is a diffusion-legal row.
     pub family: Family,
-    /// What the set's environment and limits scale with (Moderate until
-    /// EXT-20 reads it from the intent).
+    /// What the set's environment and limits scale with: the intent set's
+    /// class (EXT-20).
     pub class: MatchClass,
     pub coeffs: Coeffs,
     pub budget: Budget,
@@ -249,16 +249,15 @@ impl MatchedSet {
 }
 
 impl crate::rule::RuleBatch<Layout> for MatchedSet {
-    /// `1e-3·(Δm² + so²)` nm², plus `3e5·(μ_thermal/allowance)²` per pair.
-    ///
-    /// ponytail: the scales of the rules this replaced (distance pull, thermal
-    /// at-spec cost), kept until PLC-18 normalises costs.
+    /// `(Δm² + so²) / L_ref²` plus `(μ_thermal/allowance)²` per pair, `L_ref` =
+    /// [`Layout::l_ref`] (PLC-18: dimensionless).
     fn cost(&self, l: &Layout) -> f32 {
+        let r2 = l.l_ref().powi(2);
         (1..self.members.len())
             .map(|i| self.ledger_with(l, i, false))
             .map(|g| {
-                let thermal = if g.allowance > 0.0 { 3e5 * (g.mu_thermal / g.allowance).powi(2) } else { 0.0 };
-                1e-3 * (g.delta_m_nm * g.delta_m_nm + g.second_order_nm * g.second_order_nm) + thermal
+                let thermal = if g.allowance > 0.0 { (g.mu_thermal / g.allowance).powi(2) } else { 0.0 };
+                (g.delta_m_nm * g.delta_m_nm + g.second_order_nm * g.second_order_nm) / r2 + thermal
             })
             .sum()
     }
@@ -493,9 +492,15 @@ mod tests {
         assert_eq!(g.coincidence, Some(0.0));
         assert!(g.known);
         assert_eq!(s.violations(&l), 0);
-        let cost = s.cost(&l);
+        // PLC-18: `cost` divides by `L_ref`, which reads `hw`, so the halo
+        // invariant is asserted on the moments `cost` is built from.
+        let moments = |l: &Layout| {
+            let g = s.ledger_with(l, 1, false);
+            (g.delta_m_nm, g.second_order_nm)
+        };
+        let before = moments(&l);
         l.hw[0] = 4_000; // a guard-ring halo: the moments do not move
-        assert_eq!(s.cost(&l), cost);
+        assert_eq!(moments(&l), before);
         l.units = Arc::new(row([0, 0, 1, 1]));
         assert!(s.ledger(&l, 1).usage() > 1.0);
         assert_eq!(s.violations(&l), 1);
@@ -615,13 +620,13 @@ mod tests {
         assert!((mu - 1.630).abs() < 2e-3, "{mu}");
         let abba = check([2_500, 17_500], [7_500, 12_500]);
         assert!(abba > 0.5 && (abba - 1.003).abs() < 2e-3, "{abba}");
-        // `cost` adds 3e5·(μ/allowance)² over the geometric pull.
+        // `cost` adds (μ/allowance)² over the geometric pull.
         let mut aabb = lay([2_500, 7_500], [12_500, 17_500]);
         let s = MatchedSet { budget: Budget::Allowance(1.0), ..pair(0, 1) };
         let hot = s.cost(&aabb);
         aabb.power_uw[0] = 0;
         let heat = hot - s.cost(&aabb);
-        assert!((heat / (3e5 * mu * mu) - 1.0).abs() < 1e-3, "{heat}");
+        assert!((heat / (mu * mu) - 1.0).abs() < 1e-3, "{heat}");
     }
 
     /// Placed x of `d`'s units on `l`, and their common y.

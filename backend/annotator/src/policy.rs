@@ -35,6 +35,10 @@ pub struct Policy {
     /// ProxNet star cap (EXT-13, Philis policy: the survey does not say whether rails are excluded;
     /// BAL1-49).
     pub pn_max_degree: usize,
+    /// Series resistance below which a diffusion on a pin net is a
+    /// minority-carrier injector, Ω (GAP-03): Hastings §14.2 L43629–43638
+    /// (below about 50 kΩ); H05-47 (10 kΩ usual, 50–100 kΩ conservative).
+    pub inj_series_ohm: f64,
 }
 
 impl Default for Policy {
@@ -51,6 +55,7 @@ impl Default for Policy {
             ir_rail_share: 0.01,
             ir_high_current_share: 0.1,
             pn_max_degree: 8,
+            inj_series_ohm: 50_000.0,
         }
     }
 }

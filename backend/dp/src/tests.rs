@@ -1,9 +1,12 @@
 use super::*;
 
 /// sky130-like placement rules the fixed-geometry tests are written against.
-const RULES: gp::Rules = gp::Rules { grid: 5, clearance: 2000 };
-const CLEARANCE_NM: i32 = RULES.clearance;
-use gp::mechanics::{analog_violations, encroachment};
+const CLEARANCE_NM: i32 = 2000;
+
+fn rules(c: i32) -> gp::PlaceRules {
+    gp::PlaceRules::uniform(5, c)
+}
+use gp::mechanics::{analog_violations, encroachment, hpwl};
 use analog::placement::symmetry::{Symmetry, SymmetryGroup};
 use analog::placement::DtiBand;
 use analog::Rule;
@@ -40,7 +43,7 @@ fn run(
     seed: u64,
 ) -> Layout {
     let locks = locks::locks(reqs, coarse.x.len(), variants);
-    place(coarse, macros, variants, reqs, fixed, &locks, &mut gp::Prices::new(), RULES, &[], seed, Schedule::cold()).0
+    place(coarse, macros, variants, reqs, fixed, &locks, &mut gp::Prices::new(), &rules(CLEARANCE_NM), &[], seed, Schedule::cold()).0
 }
 
 fn sym(a: u16, b: u16) -> Symmetry {
@@ -234,7 +237,7 @@ fn reshape_is_priced_on_where_the_pins_land() {
     let prices = gp::Prices::new();
     let nets = Nets::from_macros(&[pin_alt(0), pin_alt(0)]);
     assert_eq!(nets.count(), 1);
-    let mut sa = Sa::new(nets, 2, &reqs, &prices, &[], gp::Rules { clearance: 0, ..RULES });
+    let mut sa = Sa::new(nets, 2, &reqs, &prices, &[], &rules(0));
     let mut rng = SplitMix64::new(1);
     let free = |c: i32, _half: i32| c;
 
@@ -275,7 +278,7 @@ fn place_does_not_settle() {
         variants: &variants,
         assignment: &[0, 0],
         reqs: &reqs,
-        rules: RULES,
+        rules: &rules(CLEARANCE_NM),
         net_weight: &[],
         n_axes: 1,
         power_uw: &[],
@@ -284,7 +287,7 @@ fn place_does_not_settle() {
     };
     let (coarse, _) = gp::place(&inp, &mut prices, 3);
     let locks = locks::locks(&reqs, coarse.x.len(), &variants);
-    place(&coarse, &macros, &variants, &reqs, &[false; 2], &locks, &mut prices, RULES, &[], 3, Schedule::cold());
+    place(&coarse, &macros, &variants, &reqs, &[false; 2], &locks, &mut prices, &rules(CLEARANCE_NM), &[], 3, Schedule::cold());
     assert_eq!(prices.drift(), f64::INFINITY, "no dual step inside place");
     assert_eq!(prices.steps(), 0);
 }
@@ -321,7 +324,7 @@ fn attract_bench() -> (Requirements<Layout>, Layout) {
 fn phi_rejects_a_cost_lowering_move_that_stacks_geometry() {
     let (reqs, mut l) = attract_bench();
     let prices = gp::Prices::new();
-    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], gp::Rules { clearance: 0, ..RULES });
+    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], &rules(0));
     let mut rng = SplitMix64::new(1);
     assert!(dpex(&sa, &mut l, 4_000) < 0.0);
     assert!(!try_move(&mut sa, &mut l, &mut rng, 1e12, 0, 4_000, 0));
@@ -345,7 +348,7 @@ fn theta_outranks_pex_so_a_budget_is_never_traded_for_parasitics() {
     let (mut reqs, mut l) = attract_bench();
     reqs.budget = vec![Box::new(vec![Separation])];
     let prices = gp::Prices::new();
-    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], gp::Rules { clearance: 0, ..RULES });
+    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], &rules(0));
     let mut rng = SplitMix64::new(1);
     assert_eq!(analog_theta(&reqs, &l), 0.0);
     assert!(dpex(&sa, &mut l, 3_000) < 0.0);
@@ -357,7 +360,7 @@ fn theta_outranks_pex_so_a_budget_is_never_traded_for_parasitics() {
 fn metropolis_still_accepts_an_uphill_move_inside_the_pex_tier() {
     let (reqs, mut l) = attract_bench();
     let prices = gp::Prices::new();
-    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], gp::Rules { clearance: 0, ..RULES });
+    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], &rules(0));
     let mut rng = SplitMix64::new(1);
     assert!(dpex(&sa, &mut l, -20_000) > 0.0);
     assert!(try_move(&mut sa, &mut l, &mut rng, 1e12, 0, -20_000, 0));
@@ -407,7 +410,7 @@ fn branch_flip_fires_and_is_priced() {
     let reqs = band(0, true);
     let mut l = gap_bench(100, vec![true]);
     let prices = gp::Prices::new();
-    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], gp::Rules { clearance: 0, ..RULES });
+    let mut sa = Sa::new(Nets::from_macros(&[]), 2, &reqs, &prices, &[], &rules(0));
     let mut rng = SplitMix64::new(1);
     assert!(try_branch(&mut sa, &mut l, &mut rng, 0.0, 0));
     assert!(!l.branch[0]);
@@ -514,7 +517,7 @@ fn incident_encroachment_difference_matches_full_scan() {
     let prices = gp::Prices::new();
     for c in 0..cells.len() {
         for o in 0..cells.len() {
-            let mut sa = Sa::new(Nets::from_macros(&[]), cells.len(), &reqs, &prices, &[], gp::Rules { clearance: 300, ..RULES });
+            let mut sa = Sa::new(Nets::from_macros(&[]), cells.len(), &reqs, &prices, &[], &rules(300));
             sa.moved = if c == o { vec![c] } else { vec![c, o] };
             let mut l = layout(&cells);
             let (full0, inc0) = (encroachment(&l, 300), sa.encroach_moved(&l));
@@ -553,7 +556,7 @@ fn compound_moves_keep_a_mirrored_stage_mirrored() {
     assert_eq!(groups[0].members.len(), 5);
 
     let prices = gp::Prices::new();
-    let mut sa = Sa::new(Nets::from_macros(&[]), 5, &reqs, &prices, &[], RULES);
+    let mut sa = Sa::new(Nets::from_macros(&[]), 5, &reqs, &prices, &[], &rules(CLEARANCE_NM));
     let mut rng = SplitMix64::new(5);
     let free = |c: i32, _: i32| c;
     // Metropolis at huge temperature takes every tie, so each move applies.
@@ -570,7 +573,7 @@ fn compound_moves_keep_a_mirrored_stage_mirrored() {
 #[test]
 fn report_counts_clearance_only_residue() {
     let l = layout(&[(0, 0, 500, 500), (1_100, 0, 500, 500)]);
-    let rep = report(&Nets::from_macros(&[]), &Requirements::default(), &l, &gp::Prices::new(), 270);
+    let rep = report(&Nets::from_macros(&[]), &Requirements::default(), &l, &gp::Prices::new(), &rules(270));
     let rules: Vec<&str> = rep.hard_violations.iter().map(|v| v.rule.as_str()).collect();
     let clearance_rows: Vec<_> = rep.hard_violations.iter().filter(|v| v.rule == "clearance encroachment").collect();
     assert_eq!(clearance_rows.len(), 1, "{rules:?}");
@@ -585,4 +588,60 @@ fn cold_schedule_reproduces_todays_layout() {
     assert_eq!(l.x, vec![26615, 8990, 44550, 53905]);
     assert_eq!(l.y, vec![-975, -2545, 2190, 265]);
     assert_eq!(l.orient, vec![Orient::R270, Orient::R0, Orient::R180, Orient::R0]);
+}
+
+// ---- PLC-18: dimensionless PEX ----
+
+/// Two cells with every converted cost term live; all lengths ×`k`.
+fn scene(k: i32) -> (Nets, Layout, Requirements<Layout>) {
+    let mut l = layout(&[(0, 0, 5_000 * k, 5_000 * k), (40_000 * k, 3_000 * k, 5_000 * k, 5_000 * k)]);
+    l.axis = vec![10_000 * k; 2];
+    l.branch = vec![true];
+    let pin = |x: i32| Macro {
+        pins: vec![pnr_core::Pin {
+            name: "G".to_string(),
+            net: pnr_core::NetId(0),
+            at: Rect { x: x * k, y: 4_950 * k, w: 100 * k, h: 100 * k },
+            layer: pnr_core::LayerId(0),
+        }],
+        bbox: Rect { x: 0, y: 0, w: 10_000 * k, h: 10_000 * k },
+        ..Default::default()
+    };
+    let nets = Nets::from_macros(&[pin(0), pin(9_900)]);
+    let (d0, d1) = (Target::Device(DeviceId(0)), Target::Device(DeviceId(1)));
+    let reqs = Requirements {
+        hard: Vec::new(),
+        budget: Vec::new(),
+        cost: vec![
+            Box::new(vec![analog::placement::Proximity { a: d0, b: d1, max_distance_nm: 10_000 * k }]),
+            Box::new(vec![analog::placement::Isolation { a: d0, b: d1, min_distance_nm: 60_000 * k }]),
+            Box::new(vec![DtiBand {
+                a: d0,
+                b: d1,
+                s_max_nm: 200 * k,
+                d_dti_nm: 50_000 * k,
+                branch: BranchId(0),
+                seed_isolate: true,
+            }]),
+            Box::new(SymmetryGroup(vec![Symmetry { a: d0, b: d1, axis: AxisId(0) }])),
+        ],
+    };
+    (nets, l, reqs)
+}
+
+/// PEX reads no absolute length: scaling every length by 2 (exact in binary
+/// float) leaves it unchanged. Breaks if a cost keeps nm units or HPWL loses `/L_ref`.
+#[test]
+fn energy_is_invariant_to_scaling_all_lengths() {
+    let (nets1, l1, reqs1) = scene(1);
+    let (nets2, l2, reqs2) = scene(2);
+    for b in &reqs1.cost {
+        assert!(b.cost(&l1) > 0.0, "{:?} must be live", b.kind());
+    }
+    assert!(hpwl(&nets1, &l1) > 0.0);
+    let prices = gp::Prices::new();
+    let sa1 = Sa::new(nets1, 2, &reqs1, &prices, &[], &rules(0));
+    let sa2 = Sa::new(nets2, 2, &reqs2, &prices, &[], &rules(0));
+    let (e1, e2) = (sa1.pex(&l1), sa2.pex(&l2));
+    assert!((e2 - e1).abs() <= 1e-6 * e1.abs(), "{e1} vs {e2}");
 }

@@ -34,18 +34,30 @@ impl DtiBand {
     fn isolating(self, l: &Layout) -> bool {
         l.branch.get(self.branch.0 as usize).copied().unwrap_or(false)
     }
-}
 
-impl Rule for DtiBand {
-    type On = Layout;
     /// Distance, nm, to the committed side's interval.
-    fn cost(self, l: &Layout) -> f32 {
+    fn miss(self, l: &Layout) -> f32 {
         let gap = l.edge_gap(self.a, self.b);
         if self.isolating(l) {
             (self.d_dti_nm as f32 - gap).max(0.0)
         } else {
             (gap - self.s_max_nm as f32).max(0.0)
         }
+    }
+
+    /// Band width, nm, floored at 1.
+    fn band(self) -> f32 {
+        (self.d_dti_nm - self.s_max_nm).max(1) as f32
+    }
+}
+
+impl Rule for DtiBand {
+    type On = Layout;
+    /// `(miss / band)²`, miss = distance to the committed side's interval,
+    /// band = `d_dti_nm − s_max_nm` (PLC-18: dimensionless).
+    fn cost(self, l: &Layout) -> f32 {
+        let e = self.miss(l) / self.band();
+        e * e
     }
     /// The full disjunction, **not** branch-aware: a pair in the uncommitted
     /// component is legal. A branch-aware check would flag the legal layout
@@ -55,12 +67,12 @@ impl Rule for DtiBand {
         let gap = l.edge_gap(self.a, self.b);
         gap <= self.s_max_nm as f32 || gap >= self.d_dti_nm as f32
     }
-    /// `0` when satisfied; else `cost` over the band width.
+    /// `0` when satisfied; else the miss over the band width.
     fn residual(self, l: &Layout) -> f32 {
         if self.satisfied(l) {
             return 0.0;
         }
-        crate::rule::over(self.cost(l), (self.d_dti_nm - self.s_max_nm) as f32)
+        crate::rule::over(self.miss(l), (self.d_dti_nm - self.s_max_nm) as f32)
     }
     fn touches(self, out: &mut Vec<u32>) {
         for t in [self.a, self.b] {
@@ -119,8 +131,9 @@ mod tests {
         let isolate = rule().cost(&bench(mid, true));
         // Same geometry, opposite instructions: `share` measures the distance still to
         // close (1100 − 200), `isolate` the distance still to open (2000 − 1100).
-        assert!((share - 900.0).abs() < 1e-3, "share should pull together: {share}");
-        assert!((isolate - 900.0).abs() < 1e-3, "isolate should push apart: {isolate}");
+        // Both are 900 nm of an 1800 nm band: (900/1800)² = 0.25.
+        assert!((share - 0.25).abs() < 1e-6, "share should pull together: {share}");
+        assert!((isolate - 0.25).abs() < 1e-6, "isolate should push apart: {isolate}");
 
         // The discriminating case, and the one the old band-penetration metric could not
         // express: move the pair *closer* and the two branches disagree about whether it
@@ -195,7 +208,7 @@ mod tests {
         // all-`false` starting commitment.
         let mut l = bench(1_100, true);
         l.branch.clear();
-        assert!((rule().cost(&l) - 900.0).abs() < 1e-3);
+        assert!((rule().cost(&l) - 0.25).abs() < 1e-6);
         assert!(!rule().satisfied(&l));
     }
 }

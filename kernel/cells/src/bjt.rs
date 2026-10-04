@@ -11,7 +11,7 @@ use analog::Constraints;
 use pnr_core::{DeviceGroup, DeviceKind, Macro, NetId, Pin, Process, Rect};
 
 use crate::builder::{cut_lattice, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
-use crate::post_cell::tap_ring;
+use crate::post_cell::{tap_ring, WellShape};
 use crate::Cell;
 
 /// One BJT variant: the group's unit devices (each member's `dev_nf` units)
@@ -201,11 +201,11 @@ impl Unit {
         // Base band (PNP: n-tap with its n-well, the base; NPN: p-tap).
         let net = NetId(u16::MAX);
         let base = Pin { name: format!("d{di}:B"), net, layer: li, at: e };
-        tap_ring(b, process, base_imp, self.pnp, e, self.base_gap, (self.ring_w, 1), &base);
+        tap_ring(b, process, base_imp, if self.pnp { WellShape::Filled } else { WellShape::None }, e, self.base_gap, (self.ring_w, 1), &base);
         // Collector band on the substrate (PNP) or the isolating n-well ring.
         let coll = Pin { name: format!("d{di}:C"), net, layer: li, at: e };
         let bo = at(self.base_outer);
-        let co = tap_ring(b, process, coll_imp, false, bo, self.coll_gap, (self.ring_w, 1), &coll);
+        let co = tap_ring(b, process, coll_imp, WellShape::None, bo, self.coll_gap, (self.ring_w, 1), &coll);
         if let (Some((hole, full, dn)), Some(nwell), Some(dnwell)) = (self.iso, process.layer("nwell"), process.layer("dnwell")) {
             let (hole, full) = (at(hole), at(full));
             for band in [

@@ -517,8 +517,8 @@ fn a_shared_gate_chain_is_a_series_stack_not_a_cascode() {
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(p.blocks[0].devices.len(), 4, "one series_stack_4 group");
     assert!(p.blocks[0].sub_blocks.iter().all(|b| b.kind == BlockKind::Stack), "stack pairs, not a cascode");
-    // The shared gate net is still a Sensitive bias reference (EXT-18 changes this).
-    assert_eq!(p.net_classes[0].class, analog::metadata::NetClass::Sensitive);
+    // The shared gate net (gates only) is a bias line (EXT-18: was `Sensitive`).
+    assert_eq!(p.net_classes[0].class, analog::metadata::NetClass::Bias);
 }
 
 #[test]
@@ -538,20 +538,31 @@ fn a_cascode_stack_is_adjacent_not_matched() {
     assert!(kinds.iter().any(|k| k.ends_with("Proximity")), "{kinds:?}");
     assert!(!kinds.iter().any(|k| k.ends_with("MatchedSet")), "{kinds:?}");
     assert!(p.placement.hard.is_empty());
-    // `vcas` (gates M2 only, no DC path) is still a Sensitive bias reference.
-    assert_eq!(p.net_classes[3].class, analog::metadata::NetClass::Sensitive);
+    // `vcas` (gates M2 only, no DC path) is a bias line (EXT-18: was `Sensitive`).
+    assert_eq!(p.net_classes[3].class, analog::metadata::NetClass::Bias);
 }
 
 /// EXT-07: a `Stack` is adjacent/symmetric, not a gate reference, so it is no
 /// longer an isolation victim. A clocked switch elsewhere used to be an
-/// aggressor that forced isolation onto the stack's two devices.
+/// aggressor that forced isolation onto the stack's two devices. Since EXT-23
+/// a Bias-gated FET is a victim on its own, so `R1`/`R2` give both gates a DC
+/// path (Signal, not Bias): only the stack membership is under test.
 #[test]
 fn a_cascode_stack_is_not_an_isolation_victim() {
+    let r = |name: &str, p: u16| Device {
+        name: name.into(),
+        kind: DeviceKind::Resistor,
+        model: String::new(),
+        terminals: vec![("P".into(), pnr_core::NetId(p)), ("N".into(), pnr_core::NetId(2))],
+        params: vec![],
+    };
     let nl = Netlist {
         devices: vec![
             fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 4_000, 500),
             fet("M2", DeviceKind::Nmos, 3, 4, 1, 2, 8_000, 500),
             fet("XS", DeviceKind::Nmos, 5, 6, 2, 2, 1_000, 150),
+            r("R1", 0),
+            r("R2", 3),
         ],
         nets: nets(&["vin", "x", "VSS", "vcas", "out", "clk", "sw"]),
         ..Default::default()
@@ -658,10 +669,10 @@ fn a_shielded_victim_books_no_coupling_to_its_shield() {
     assert!(coup.violations(&clocked) > 0, "a clock beside the victim still counts");
 }
 
+/// EXT-20 (AA-23): a mirror with no compound is matched, not mirrored: one
+/// `MatchedSet` on both devices and its Axis Orientation, no Symmetry.
 #[test]
-fn a_lone_mirror_stage_is_symmetric_too() {
-    // No diff pair in the stage: the mirror pair still shares the stage axis,
-    // hard (the equality) and cost (the pull toward it).
+fn a_lone_mirror_is_matched_not_mirrored() {
     let nl = Netlist {
         devices: vec![
             fet("XM1", DeviceKind::Pmos, 0, 0, 2, 2, 5_000, 1_000),
@@ -671,14 +682,18 @@ fn a_lone_mirror_stage_is_symmetric_too() {
         ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
-    let sym = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| {
-        a.iter().filter(|b| b.kind() == "Symmetry").map(|b| b.count()).sum::<usize>()
-    };
-    assert_eq!(sym(&p.placement.hard), 1);
-    assert_eq!(sym(&p.placement.cost), 1);
-    let mut pairs = Vec::new();
-    p.placement.hard.iter().for_each(|b| b.mirror_pairs(&mut pairs));
-    assert_eq!(pairs, [(0, 1, 0)], "the reference and output mirror about stage 0's axis");
+    let count = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>, k: &str| a.iter().filter(|b| b.kind() == k).map(|b| b.count()).sum::<usize>();
+    assert_eq!(count(&p.placement.hard, "Symmetry") + count(&p.placement.cost, "Symmetry"), 0);
+    let sets: Vec<Vec<u32>> = (p.placement.budget.iter().filter(|b| b.kind() == "MatchedSet"))
+        .map(|b| {
+            let mut t = Vec::new();
+            b.touched(&mut t);
+            t.sort_unstable();
+            t
+        })
+        .collect();
+    assert_eq!(sets, [vec![0, 1]]);
+    assert_eq!(p.placement.hard.iter().filter(|b| b.kind() == "Orientation").count(), 1);
 }
 
 #[test]
@@ -756,7 +771,7 @@ fn clocked_devices_are_kept_away_from_matched_ones() {
     nl.devices.push(fet("XS", DeviceKind::Nmos, clk, sw, 3, 3, 1_000, 150));
     let p = annotate(&nl, &AnnotationConfig::default());
     let b = p.placement.cost.iter().find(|b| is_iso(b)).expect("isolation pull");
-    assert_eq!(b.count(), 4, "XS against each of the four matched devices");
+    assert_eq!(b.count(), 5, "XS against the four matched devices and the bias-gated tail (EXT-23)");
     assert!(!p.placement.budget.iter().any(is_iso), "uncalibrated: a pull, not a budget");
     assert!(p.missing.iter().any(|m| m.0 == "Isolation"), "and reported unknown");
 
@@ -922,10 +937,11 @@ mod rings {
 }
 
 #[test]
-fn intent_empty_axes_per_block() {
+fn intent_axes_per_compound() {
     let p = annotate(&ota(), &AnnotationConfig::default());
     // EXT-14 fills compounds (one here), EXT-15 sets (DP and load; without a unit
-    // deck they have no unit); axes stay per block until EXT-20 (card D-b).
+    // deck they have no unit); EXT-20: one axis per compound.
     assert!(p.intent.sets.len() == 2 && p.intent.compounds.len() == 1);
-    assert_eq!(p.axis_count, p.blocks.len());
+    assert_eq!(p.axis_count, 1);
+    assert!(p.blocks.len() > 1, "not per block");
 }

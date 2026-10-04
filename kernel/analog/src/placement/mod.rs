@@ -10,7 +10,7 @@ pub mod symmetry;
 pub mod utilization;
 
 pub use dti::DtiBand;
-pub use environment::{Environment, Surroundings};
+pub use environment::{EnvGeo, Environment, LiveEnvironment, Surroundings};
 pub use isolation::Isolation;
 pub use matched_set::MatchedSet;
 pub use orientation::{OrientCheck, OrientationSet};

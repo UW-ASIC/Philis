@@ -230,6 +230,10 @@ pub struct NetFacts {
 pub enum Inject {
     Switching,
     Capacitive,
+    /// n+ diffusion in p-sub on a pin (forward-biased below ground).
+    MinorityElectron,
+    /// p+ in n-well (above supply).
+    MinorityHole,
 }
 
 #[derive(Clone, Debug)]
