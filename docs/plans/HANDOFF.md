@@ -13,12 +13,16 @@
 - strongarm: philis CLEAN, klayout 0, magic 0, netgen vs `_ref.spice` MATCH. vs user schematic: differs only by dummies (owner decision pending).
 - M0 and fix-export worktrees removed (56 GB freed).
 
-## Running (overnight, autonomous): M1 resume + M1→main + M2–M6 by module — run `wf_2ab8e777-05e`
-- One script: ~/.claude/projects/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/workflows/scripts/philis-m1-modules-wf_2ab8e777-05e.js, args {"cap": 2500000, "cap2": 15000000} (output tokens, per phase).
-- All new/rerun agents: Opus 5.5, effort medium (no sonnet). 45 completed M1 agents replay from cache (KEEP list in the script).
-- Flow: M1 batches finish → verify → plan update → `merge-m1-main` (gate: no new failing test vs main's 1 known) → `setup-m2` (branch m2 from m1a, worktrees ../philis-m2/<module>, removes merged ../philis-m1a worktrees) → 8 module owners run M2–M6 items in dag-m2-m6.json order, waiting only on hard deps; per segment: harden card → exec → review → fix → serial merge into m2 → `final-m2` (report m2-m6-report.md; merge m2→main only if no new failing tests).
-- Resume after a cut-off: same Workflow call with resumeFromRunId "wf_2ab8e777-05e" and the same args. Interrupted agents are told to finish existing commits.
-- Backup of the pre-edit script: <scratchpad>/m1-script.bak.js.
+## Paused mid-run (2026-10-04): M2–M6 module run, workflow run `wf_2ab8e777-05e`
+- M1: merged to main (f50ef00). M2–M6: 64/140 items merged into branch `m2` (../philis-m2/integrate), 84 implemented; 247 agents done.
+  Per module merged/total: reliability 12/12, analog-matching 15/16, annotator 14/19, perf 8/21, routing 7/23, cells 5/19, flow 2/10, placement 1/20. Not done so far: MAT-18 (deferred), CELL-11, PLC-07.
+- RESUME (one call, same args): Workflow({scriptPath: "~/.claude/projects/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/workflows/scripts/philis-m1-modules-wf_2ab8e777-05e.js", resumeFromRunId: "wf_2ab8e777-05e", args: {"cap": 2500000, "cap2": 15000000}}).
+  Finished agents replay from the journal; agents cut off mid-step rerun (Opus 5.5, effort medium) and are told to finish any commits they left. Module worktrees ../philis-m2/<module> keep their branches m2-<module>.
+- Ends with `final-m2`: report docs/plans/m2-m6-report.md, merge m2 → main only if no new failing tests.
+- Side branch `progress-charts` (worktree ../philis-snap): records every epoch's candidate for the README feedback chart; merge into main after m2 lands.
+- Known regressions seen in snapshots on m2: dac4 DRC 6 / ERC 1 (0/20 clean candidates), tq_chain DRC 18; runtime up vs M0 (dac4 279 s vs 19 s). Check after landing.
+- Disk: ../philis-m2/*/target/debug can be deleted when no cargo runs there.
+- Planned follow-up: significance threshold for convergence (an improvement resets the stall counter only if > ~0.5% in C/area or any drop in |V|/spec miss), after the run (flow module edits that loop).
 
 ## Tools
 `source <scratchpad>/signoff-investigation/env.sh` (klayout 0.30.4, magic 8.3.573, netgen 1.5.292 from nix store; PDK_ROOT=Philis/.pdk (~/.volare no longer exists)). Independent checks: `python3 ResearchBoutros/analog/common/layout/verify.py drc|lvs <block> <gds>`; netgen vs `<top>_ref.spice`.
