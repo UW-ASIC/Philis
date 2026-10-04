@@ -460,6 +460,17 @@ pub(crate) fn detailed_router(
 
 #[cfg(test)]
 mod tests {
+    /// GAP-06: sky130 met1 (2.8 mA/µm at 90 °C, fallback Ea 0.9 eV, n 1.1)
+    /// derates ×0.1004 at 125 °C and is not credited at 27 °C.
+    #[test]
+    fn sky130_met1_em_limit_derates_at_125c_not_at_27c() {
+        let p = verify::Pdk::builtin("sky130").unwrap();
+        let m1 = p.layers.iter().find(|(n, _)| n == "met1").unwrap().1;
+        let hot = super::em_limits(&p, &[m1], &[], Some(398.15))[0].1.ua_per_um;
+        assert!((hot - 281.2).abs() <= 1.0, "{hot}");
+        assert_eq!(super::em_limits(&p, &[m1], &[], Some(300.15))[0].1.ua_per_um, 2800.0);
+    }
+
     /// A rail with an unresolved device on it states no current (signoff's EM
     /// rule then skips it); a rail with only known devices keeps its current.
     #[test]
