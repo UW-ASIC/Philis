@@ -1,0 +1,52 @@
+diff --git a/backend/dr/src/lib.rs b/backend/dr/src/lib.rs
+index 084916e..e06051e 100644
+--- a/backend/dr/src/lib.rs
++++ b/backend/dr/src/lib.rs
+@@ -584,32 +584,36 @@ impl DetailedRoute {
+         // (`BLOCKED`), or, when the blockage spares the cell's own nets or
+         // binds aggressors only, to the nets it applies to (`blocked_for`).
+         // Per net, the rects (with layer bits) its access jogs keep out of.
+-        let applies = |b: &Blockage, ni: usize| {
+-            let own = placed.get(b.cell as usize).is_some_and(|m| m.pins.iter().any(|p| p.net.0 as usize == ni));
+-            !(b.own_exempt && own) && (!b.only_aggressors || cfg.aggressor.get(ni).copied().unwrap_or(false))
+-        };
++        let owns = |b: &Blockage, ni: usize| placed.get(b.cell as usize).is_some_and(|m| m.pins.iter().any(|p| p.net.0 as usize == ni));
++        let applies = |b: &Blockage, ni: usize| !(b.own_exempt && owns(b, ni)) && (!b.only_aggressors || cfg.aggressor.get(ni).copied().unwrap_or(false));
+         let mut blocked_for: Vec<Vec<u32>> = vec![Vec::new(); n_compact];
+         let mut jog_blocks: Vec<Vec<(Rect, u16)>> = vec![Vec::new(); n_compact];
+         for b in cfg.blockages.iter().filter(|b| b.hard) {
+             let everyone = !b.own_exempt && !b.only_aggressors;
+             let nets: Vec<usize> = (0..n_compact).filter(|&ci| everyone || applies(b, compact[ci])).collect();
+-            let r = grown(shift(b.rect), b.halo);
++            // The halo is spacing to foreign metal: the cell's own nets keep
++            // off `rect` itself (a matched gate's own source/drain contacts
++            // sit closer to it than the halo).
++            let (r, r0) = (grown(shift(b.rect), b.halo), shift(b.rect));
++            let own: Vec<bool> = (0..n_compact).map(|ci| owns(b, compact[ci])).collect();
+             for &ci in &nets {
+-                jog_blocks[ci].push((r, b.layers));
++                jog_blocks[ci].push((if own[ci] { r0 } else { r }, b.layers));
+             }
+             for l in (0..n_layers as usize).filter(|&l| b.layers >> l & 1 == 1) {
+                 let g = cfg.wire(l) / 2;
+-                let (x0, y0, x1, y1) = (r.x - g, r.y - g, r.x + r.w + g, r.y + r.h + g);
+-                for iy in grid.bin_y(y0)..=grid.bin_y(y1) {
+-                    for ix in grid.bin_x(x0)..=grid.bin_x(x1) {
++                let inside = |r: Rect, px: i32, py: i32| r.x - g < px && px < r.x + r.w + g && r.y - g < py && py < r.y + r.h + g;
++                for iy in grid.bin_y(r.y - g)..=grid.bin_y(r.y + r.h + g) {
++                    for ix in grid.bin_x(r.x - g)..=grid.bin_x(r.x + r.w + g) {
+                         let n = grid.node(ix, iy, l as u32);
+                         let (px, py, _) = grid.pos(n);
+-                        if !(x0 < px && px < x1 && y0 < py && py < y1) {
++                        if !inside(r, px, py) {
+                             continue;
+                         }
++                        if !inside(r0, px, py) {
++                            nets.iter().filter(|&&ci| !own[ci]).for_each(|&ci| blocked_for[ci].push(n));
+                         // A pin's stitch node inside stays its pin's, but no
+                         // net it binds may land or run there.
+-                        if everyone && pre[n as usize] {
++                        } else if everyone && pre[n as usize] {
+                             reserved[n as usize] = BLOCKED;
+                         } else {
+                             nets.iter().for_each(|&ci| blocked_for[ci].push(n));

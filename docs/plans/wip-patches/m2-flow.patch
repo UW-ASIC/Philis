@@ -1,0 +1,53 @@
+diff --git a/docs/LAYOUT-FUNDAMENTALS.md b/docs/LAYOUT-FUNDAMENTALS.md
+index 8328abf..24d0651 100644
+--- a/docs/LAYOUT-FUNDAMENTALS.md
++++ b/docs/LAYOUT-FUNDAMENTALS.md
+@@ -144,7 +144,7 @@ Scope: the device-, array-, placement-, routing-, substrate- and reliability-lev
+ | 62 | DC EM per segment and per via array, temperature-derated (Black) | Void or hillock failure | LT eqs.3.5-3.11; H §5.1.3 | **S**: hard `Electromigration` per routed shape and via group on the final routes, pin-access jogs and cuts included (`routing/em.rs`; per-shape currents `routing/current.rs`, from `Routes::terms`). dr sizes widths and via arrays toward it (Θ) | Present |
+ | 63 | RMS (Joule) and peak limits; Blech exemption only where valid | AC signal nets self-heat | LT ch.3-4 | **—** (`em.rs:90` ponytail: DC only) | `I_rms ≤ J_rms·w·t` from transient; `I_peak` similarly |
+ | 64 | EM and current crowding **inside cells** (li, licon, single contacts) | li has no PDK EM limit; one cut carries the whole finger current | LT ch.4 (crowding); H §5.1.3 | **—**: one licon per S/D (`mosfet.rs:220-231`); li is not covered (deck note) | `I_finger / n_cuts ≤ I_cut,max`; li current density ≤ an assumed limit, flagged *assumed* |
+-| 65 | Antenna ratio per layer or stage, with diode or jumper repair | Plasma charging of gate oxide | H §5.1.6 pp.228-229; JM §2.2.3 | **S**: `Antenna` (`routing/antenna.rs:8-22`), using the real gate area (dad330c). **S** repair by diode insertion: `elaborate::antenna_diodes` (`frontend/library/src/elaborate.rs:358`) per epoch (`frontend/library/src/lib.rs:1078`), adopted into the schematic (`adopt_devices`, `lib.rs:1868`); `frontend/library/tests/antenna_diode.rs`. No layer-jump repair | Present. Add a layer-jump repair (route the gate-side segment on the top layer last) before diodes |
++| 65 | Antenna ratio per layer or stage, with diode or jumper repair | Plasma charging of gate oxide | H §5.1.6 pp.228-229; JM §2.2.3 | **S**: `Antenna` (`routing/antenna.rs:8-22`), using the real gate area (dad330c). **S** repair by diode insertion: `elaborate::antenna_diodes` (`frontend/library/src/elaborate.rs:358`) per epoch (`frontend/library/src/lib.rs:1093`), adopted into the schematic (`adopt_devices`, `lib.rs:1890`); `frontend/library/tests/antenna_diode.rs`. No layer-jump repair | Present. Add a layer-jump repair (route the gate-side segment on the top layer last) before diodes |
+ | 66 | Redundant vias / contacts on critical nets | Yield, EM, R variability ("via R notoriously variable", H r23) | H §8.3.1 r23; roadmap MFG-03 | **BC(partial)**: via arrays on fattened trunks only (`dr/lib.rs:606`) | ≥ 2 cuts at every layer change of a matched/critical net, same count per side |
+ | 67 | HCI/NBTI: matched devices under equal stress (V_DS, V_GS, duty) | Unequal aging gives drift in matching | H §13.2.3 (pp.698-704); H §5.3.1, §5.3.4 | **—** (circuit/op-point) | Lint: `|V_DS,a − V_DS,b|`, `|V_GS,a − V_GS,b|` for matched pairs over the testbench |
+ | 68 | Metal density or fill without disturbing sensitive or matched nodes | CMP; added C | H r18; JM §2.2.2 | **BC**: `library/fill.rs` (keep-outs, grounded fill) | Present |
+@@ -180,7 +180,7 @@ Scope: the device-, array-, placement-, routing-, substrate- and reliability-lev
+    - Interleaved multi-segment variants with met1 jumpers.
+    - Per-segment `Unit`s.
+    - No end dummies yet: they need a tie net.
+-10. BJT ratioed arrays (fixed): centre-out point-symmetric unit fill (`kernel/cells/src/bjt.rs:16-21`, `pattern::centro_assign`); ratioed groups from `cellgen::bjt_groups` (`frontend/library/src/cellgen.rs:745`).
++10. BJT ratioed arrays (fixed): centre-out point-symmetric unit fill (`kernel/cells/src/bjt.rs:16-21`, `pattern::centro_assign`); ratioed groups from `cellgen::bjt_groups` (`frontend/library/src/cellgen.rs:765`).
+ 
+ Also done:
+ - Width follows need: supply trunks go wide only when their IR budget breaks, and C-budgeted signals get their EM width only.
+diff --git a/docs/plans/cards/m2-flow-2.md b/docs/plans/cards/m2-flow-2.md
+index 7de2f08..81302d2 100644
+--- a/docs/plans/cards/m2-flow-2.md
++++ b/docs/plans/cards/m2-flow-2.md
+@@ -9,6 +9,8 @@ tier block at the top of `cell`, `[3000, 5000, 10000]`); `frontend/library/src/l
+ `topology`/`search` split and added m2's `perf_active` (threaded `run` → `topology` → `Flow`), IR budgets passed to
+ `elaborate::intent`, and `perf::score` for the unknown result (FLOW-09's `clock` kept). `cargo build -p library
+ --tests` is clean; `cargo test -p library --lib`: 124 pass, 1 fail, see "Out of scope".
++The CLI was repaired for m2's `perf::PerfConfig` shape (`frontend/cli/src/main.rs:192`: `testbenches: vec![testbench]`,
++`scenarios: Vec::new()`); the merge left it not compiling. The edit sits in the FLOW-15 commit (df9432b).
+ 
+ ## FLOW-15 Housekeeping, stale comments, docs and dead fields — class: do
+ 
+@@ -85,7 +87,7 @@ tier block at the top of `cell`, `[3000, 5000, 10000]`); `frontend/library/src/l
+   [[d1], [d0]]` names `d1` then `d0` (today it names `d0` then `d1`).
+ - Visualizer `layer_names_and_bounds`: built from `layer_names(&[("met1".into(), (68, 20)), ("via".into(), (68, 44))])`,
+   same asserts; plus `polys_from_shapes(&[shape on LayerId(1)], &[(0,0), (68, 20)])[0]` has `layer 68, datatype 20`.
+-- Command: `cargo test -p library --lib && cargo test -p visualizer && cargo build -p benchmarks --bins &&
++- Command: `cargo test -p library --lib && cargo test -p visualizer && cargo build -p benchmark --bins &&
+   cargo build --workspace --examples --tests` (step 6 touches every crate's initialisers).
+ - Acceptance: `grep -rn -e Generator -e variant_signoff -e EM_UA_PER_UM docs --exclude-dir=plans` → 0 lines; every
+   CRATES.md open issue has an owner.
+@@ -131,7 +133,7 @@ tier block at the top of `cell`, `[3000, 5000, 10000]`); `frontend/library/src/l
+   `escalate_never_repeats_and_exhausts` and the `lib.rs` callers pass full `allowed` (`(0..n).collect()`), same asserts.
+ - Acceptance: T9 unchanged by construction (`price_calls` per run as before: pruning reuses the seed's prices; the
+   existing FLOW-09 price-count test must still pass). `bench local` lex keys unchanged or better on every fixture:
+-  `PDK_ROOT=… cargo run --release -p benchmarks --bin bench -- local` (background, ~10 min) on the branch before and
++  `PDK_ROOT=… cargo run --release -p benchmark --bin bench -- local` (background, ~10 min) on the branch before and
+   after; compare per-fixture keys. If any key regresses, report it with the fixture; do not keep the change.
+ 
+ ## Out of scope (found while merging)
