@@ -678,7 +678,7 @@ mod tests {
         assert_eq!(Vec::<Electromigration>::new().repair_kind(), K::Em);
         assert_eq!(Vec::<IrDrop>::new().repair_kind(), K::Ir);
         assert_eq!(Vec::<ParasiticBudget>::new().repair_kind(), K::Budget);
-        let perf = PerformanceBudget { metric: String::new(), nets: Vec::new(), weights: Vec::new(), af_per_nm: 0.0, limit: 1.0 };
+        let perf = PerformanceBudget::ground_c(String::new(), Vec::new(), Vec::new(), 0.0);
         assert_eq!(perf.repair_kind(), K::Budget);
         // A rule that declares nothing is rerouted plainly.
         assert_eq!(vec![Plain].repair_kind(), K::Reroute);

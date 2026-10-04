@@ -965,3 +965,23 @@ fn ext21_ota_dp_allowance_below_load() {
     let bare = annotate(&ota(), &cfg);
     assert!(bare.intent.sets.iter().all(|s| s.allowance.is_none()));
 }
+
+/// EXT-25 (AA-25): a drain-only net's load is off-netlist, so it is unbudgeted
+/// and listed missing until a sidecar `Load` states it; a gate-driving net
+/// (vbias) keeps its gate-load budget.
+#[test]
+fn drain_only_net_without_load_is_unknown() {
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.gate_af_per_um2 = Some(8325.0);
+    cfg.process.wire_af_per_um = Some(50.0);
+    let budget = |p: &crate::Problem, n: u16| p.net_classes[n as usize].c_budget_af;
+    let missing = |p: &crate::Problem| p.missing.iter().any(|m| m.0 == "ParasiticBudget" && m.1.contains("AA-25"));
+    let p = annotate(&ota(), &cfg);
+    assert_eq!((budget(&p, 4), budget(&p, 2)), (None, None), "vout2, vtail");
+    assert!(missing(&p));
+    assert!(budget(&p, 6).is_some(), "vbias drives gates");
+    cfg.loads = vec![(NetId(4), 1e6)];
+    let p = annotate(&ota(), &cfg);
+    assert!(budget(&p, 4).is_some());
+    assert!(budget(&p, 6).is_some());
+}

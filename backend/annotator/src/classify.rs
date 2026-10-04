@@ -40,11 +40,11 @@ pub(crate) fn budgets(class: NetClass, c_load_af: f32) -> (Option<i64>, Option<i
 /// the annotator's matched pairs. A net feeding one of their gates is the
 /// small-signal path whose corruption shows up directly as offset.
 ///
-/// `gate_um2` (per device, `0` for non-FETs) sizes the budgets: a net's load is
-/// the gate area it drives; a net driving no gate (a drain, an output) is held
-/// to the circuit's smallest gate load. No FET gates at all: unbudgeted. A net
-/// on a capacitor plate is unbudgeted too: its limit is an array spec
-/// (settling, code-dependent error) the netlist does not carry.
+/// `gate_um2` (per device, `0` for non-FETs) and `loads` (sidecar `Load`, aF)
+/// size the budgets ([`net_load_af`]): a net driving no gate and carrying no
+/// stated load (a drain-only output) is unbudgeted, as is a net on a capacitor
+/// plate: its limit is an array spec (settling, code-dependent error) the
+/// netlist does not carry.
 #[must_use]
 pub fn classify(
     hg: &BipartiteHypergraph,
@@ -52,6 +52,7 @@ pub fn classify(
     sensitive_devices: &[bool],
     gate_um2: &[f32],
     gate_af_per_um2: Option<f32>,
+    loads: &[(NetId, f32)],
 ) -> Vec<NetClassification> {
     let n_nets = hg.net_names.len();
     let mut touches_gate = vec![false; n_nets];
@@ -76,7 +77,7 @@ pub fn classify(
         }
     }
 
-    let load_af = net_load_af(hg, gate_um2, gate_af_per_um2);
+    let load_af = net_load_af(hg, gate_um2, gate_af_per_um2, loads);
     (0..n_nets)
         .map(|i| {
             let class = classify_one(
@@ -92,13 +93,13 @@ pub fn classify(
         .collect()
 }
 
-/// Capacitive load per net, aF: the gate area it drives × `gate_af_per_um2`;
-/// a net driving no gate (a drain, an output) is held to the circuit's
-/// smallest gate load. `None` without a gate-cap number or any FET gate, and
-/// on a capacitor plate: a plate net's parasitics trace to array specs (ARR-03
-/// code-dependent error, ARR-05 settling), not a gate load: without them the
-/// budget is unknown, never invented.
-pub(crate) fn net_load_af(hg: &BipartiteHypergraph, gate_um2: &[f32], gate_af_per_um2: Option<f32>) -> Vec<Option<f32>> {
+/// Capacitive load per net, aF: the gate area it drives × `gate_af_per_um2`
+/// plus its sidecar `Load` (AA-25). `None` for a net with neither (a
+/// drain-only output: its load is off-netlist and is never invented), for a
+/// net driving gates without a gate-cap number, and on a capacitor plate: a
+/// plate net's parasitics trace to array specs (ARR-03 code-dependent error,
+/// ARR-05 settling), not a gate load.
+pub(crate) fn net_load_af(hg: &BipartiteHypergraph, gate_um2: &[f32], gate_af_per_um2: Option<f32>, loads: &[(NetId, f32)]) -> Vec<Option<f32>> {
     let n_nets = hg.net_names.len();
     let mut load_um2 = vec![0.0f32; n_nets];
     let mut on_plate = vec![false; n_nets];
@@ -111,11 +112,20 @@ pub(crate) fn net_load_af(hg: &BipartiteHypergraph, gate_um2: &[f32], gate_af_pe
             }
         }
     }
-    let smallest = load_um2.iter().copied().filter(|&a| a > 0.0).reduce(f32::min);
+    let mut ext: Vec<Option<f32>> = vec![None; n_nets];
+    for &(n, af) in loads {
+        if let Some(e) = ext.get_mut(n.0 as usize) {
+            *e = Some(e.unwrap_or(0.0) + af);
+        }
+    }
     (0..n_nets)
         .map(|i| {
-            let load = if load_um2[i] > 0.0 { Some(load_um2[i]) } else { smallest };
-            load.filter(|_| !on_plate[i]).zip(gate_af_per_um2).map(|(a, cox)| a * cox)
+            let gate = if load_um2[i] > 0.0 { Some(gate_af_per_um2? * load_um2[i]) } else { None };
+            let load = match (gate, ext[i]) {
+                (Some(g), e) => Some(g + e.unwrap_or(0.0)),
+                (None, e) => e,
+            };
+            load.filter(|_| !on_plate[i])
         })
         .collect()
 }
@@ -428,7 +438,7 @@ mod tests {
         let roles = crate::netrole::classify_nets(&hg, &crate::netrole::AnnotationConfig::default());
         let gates: Vec<f32> = nl.devices.iter().map(crate::gate_um2).collect();
         let sensitive = vec![false; nl.devices.len()];
-        classify(&hg, &roles, &sensitive, &gates, None)
+        classify(&hg, &roles, &sensitive, &gates, None, &[])
     }
 
     fn class_of(nl: &pnr_core::netlist::Netlist, classes: &[NetClassification], name: &str) -> NetClass {

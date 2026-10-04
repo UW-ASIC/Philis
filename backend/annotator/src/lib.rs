@@ -9,6 +9,7 @@
 
 pub mod allocate;
 pub mod block;
+pub mod budget;
 pub mod catalog;
 pub mod class;
 pub mod classify;
@@ -191,7 +192,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         }
     }
     let gates: Vec<f32> = netlist.devices.iter().map(gate_um2).collect();
-    let mut net_classes = classify::classify(&hg, &roles, &sensitive, &gates, cfg.process.gate_af_per_um2);
+    let mut net_classes = classify::classify(&hg, &roles, &sensitive, &gates, cfg.process.gate_af_per_um2, &cfg.loads);
 
     let fet = |k: pnr_core::DeviceKind| matches!(k, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos);
     let needs = Needs {
@@ -350,7 +351,24 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         v
     };
     // EXT-18: classes that need sets, then device roles, then current-source gates.
-    let load_af = classify::net_load_af(&hg, &gates, cfg.process.gate_af_per_um2);
+    let load_af = classify::net_load_af(&hg, &gates, cfg.process.gate_af_per_um2, &cfg.loads);
+    // AA-25: a budgeted-class net on a channel and no plate whose load is off-netlist.
+    if cfg.process.gate_af_per_um2.is_some() {
+        let (mut channel, mut plate) = (vec![false; load_af.len()], vec![false; load_af.len()]);
+        for (d, nets) in hg.device_nets.iter().enumerate() {
+            for (t, net) in hg.terminals[d].iter().zip(nets) {
+                match terms::term_role(hg.kinds[d], t) {
+                    terms::TermRole::Channel => channel[net.0 as usize] = true,
+                    terms::TermRole::Plate => plate[net.0 as usize] = true,
+                    _ => {}
+                }
+            }
+        }
+        let rail = |i: usize| matches!(net_classes[i].class, analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground | analog::metadata::NetClass::Substrate);
+        if (0..load_af.len()).any(|i| channel[i] && !plate[i] && load_af[i].is_none() && !rail(i)) {
+            missing.push(("ParasiticBudget", "external load of drain-only nets: sidecar Load (AA-25)"));
+        }
+    }
     intent.nets = classify::refine(
         &mut net_classes,
         &classify::RefineCtx {
@@ -394,6 +412,21 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         &netlist.ports,
         ev.op.as_ref(),
     );
+    // EXT-25: R/C classes from the spec sensitivities (the rows themselves are the
+    // library's, which owns the post-layout loop); evidence wins only where it is not Unknown.
+    match (&ev.sens, cfg.process.wire_af_per_um) {
+        (Some(sens), Some(af_per_um)) => {
+            let (_, rc, diags) = budget::rows(sens, af_per_um / 1000.0, cfg.process.wire_ohm_per_um, &cfg.policy);
+            for (n, c) in rc {
+                if let Some(f) = intent.nets.get_mut(n.0 as usize) {
+                    f.rc = c;
+                }
+            }
+            intent.diagnostics.extend(diags);
+        }
+        (Some(_), None) => missing.push(("PerformanceBudget", "deck wire C")),
+        _ => {}
+    }
     intent.kelvins.extend(cfg.kelvins.iter().cloned());
     if ev.op.is_some() && ev.probe_bias {
         intent.diagnostics.push(analog::intent::Diagnostic {

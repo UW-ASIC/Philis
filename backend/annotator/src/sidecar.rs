@@ -2,8 +2,8 @@
 //! `{"constraint": <kind>, ...}` entries, parsed into [`AnnotationConfig`]
 //! fields. Names resolve case-insensitively; an unknown name skips its entry
 //! with a `sidecar_unknown_name` diagnostic. Only kinds with a reader today
-//! are applied: `Load` (EXT-25) and `Order` (EXT-28) are `sidecar_unconsumed`,
-//! anything else (`Align`, `HorizontalDistance`, …) `sidecar_unsupported`.
+//! are applied: `Order` (EXT-28) is `sidecar_unconsumed`, anything else
+//! (`Align`, `HorizontalDistance`, …) `sidecar_unsupported`.
 //!
 //! | kind                                     | fields                                  |
 //! |------------------------------------------|-----------------------------------------|
@@ -16,6 +16,7 @@
 //! | `NetClass`                               | `nets`, `class`                         |
 //! | `OffsetBudget`                           | `instances`, `sigma_mv`                 |
 //! | `Kelvin`                                 | `pin: "R/P"`, `sense: ["M/G"]`          |
+//! | `Load`                                   | `net`, `ff` (external load, fF)         |
 
 use std::collections::HashMap;
 
@@ -196,11 +197,15 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                     _ => unknown!(format!("pin in {at}")),
                 }
             }
-            "Load" | "Order" => diags.push(Diagnostic {
-                kind: "sidecar_unconsumed",
-                devices: vec![],
-                message: format!("entry {i} ({kind}): read by {}", if kind == "Load" { "EXT-25" } else { "EXT-28" }),
-            }),
+            "Load" => {
+                let name = e.get("net").and_then(Value::as_str).unwrap_or("");
+                match (net(name), e.get("ff").and_then(Value::as_f64)) {
+                    (Some(n), Some(ff)) => cfg.loads.push((n, (ff * 1000.0) as f32)),
+                    (None, _) => unknown!(format!("net {name}")),
+                    (Some(_), None) => diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: Load without ff") }),
+                }
+            }
+            "Order" => diags.push(Diagnostic { kind: "sidecar_unconsumed", devices: vec![], message: format!("entry {i} ({kind}): read by EXT-28") }),
             _ => diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i} ({kind})") }),
         }
     }
@@ -217,6 +222,15 @@ impl AnnotationConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// EXT-25: a `Load` entry is an external load on its net, aF.
+    #[test]
+    fn load_entry_sets_a_net_load() {
+        let nl = crate::tests::ota();
+        let (cfg, d) = parse(r#"[{"constraint":"Load","net":"vout2","ff":1000}]"#, &nl).unwrap();
+        assert_eq!(cfg.loads, [(NetId(4), 1e6)]);
+        assert!(d.is_empty(), "{d:?}");
+    }
 
     #[test]
     fn unknown_constraint_is_diagnosed() {

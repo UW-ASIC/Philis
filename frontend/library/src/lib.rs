@@ -1072,6 +1072,7 @@ fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::r
         antenna_max_ratio: pdk.antenna_max_ratio(),
         gate_af_per_um2: opt("gate_cap_af_um2").map(|v| v as f32),
         wire_af_per_um: wire.and_then(|l| pdk.wire_af_per_um(l, width)),
+        wire_ohm_per_um: wire.and_then(|l| pdk.pex_f32(l, "sheet_res_ohm_sq")).filter(|&r| r > 0.0 && width > 0).map(|r| r * 1000.0 / width as f32),
         route_space_nm: wire.and_then(|l| pdk.min_spacing(l.0)).unwrap_or(0),
         dti: opt("dti_max_spacing").zip(opt("dti_width")),
         avt_mv_um: [pos("avt_n_mv_um"), pos("avt_p_mv_um")],
@@ -2620,13 +2621,7 @@ mod start_tests {
     /// feel ranks better than one with less total C but more on the output.
     #[test]
     fn supply_decoupling_does_not_rank_layouts() {
-        let rows = [analog::routing::PerformanceBudget {
-            metric: "gain:min".into(),
-            nets: vec![pnr_core::NetId(0), pnr_core::NetId(1)],
-            weights: vec![0.01, 0.0],
-            af_per_nm: 1.0,
-            limit: 1.0,
-        }];
+        let rows = [analog::routing::PerformanceBudget::ground_c("gain:min".into(), vec![pnr_core::NetId(0), pnr_core::NetId(1)], vec![0.01, 0.0], 1.0)];
         let cap = |a: &str, b: Option<&str>, c: f64| (a.to_owned(), b.map(str::to_owned), c);
         let a = vec![cap("VSS", Some("vbn"), 89.4), cap("vout1", None, 4.6)];
         let b = vec![cap("VSS", Some("vbn"), 10.0), cap("vout1", None, 5.0)];

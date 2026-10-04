@@ -155,6 +155,8 @@ pub struct AnnotationConfig {
     pub net_classes: Vec<(pnr_core::ids::NetId, analog::metadata::NetClass)>,
     /// Sidecar `OffsetBudget`: 1σ offset, mV, of the set holding these devices.
     pub offset_budgets: Vec<(Vec<pnr_core::ids::DeviceId>, f32)>,
+    /// Sidecar `Load`: external load per net, aF, added to its gate load (AA-25).
+    pub loads: Vec<(pnr_core::ids::NetId, f32)>,
     /// Sidecar `Kelvin` requests, appended to the extracted ones.
     pub kelvins: Vec<analog::intent::KelvinReq>,
     /// The sidecar parse's diagnostics, carried into `Intent.diagnostics`.
@@ -171,6 +173,9 @@ pub struct ProcessNumbers {
     pub gate_af_per_um2: Option<f32>,
     /// Ground capacitance of a minimum-width lowest routing wire, aF/µm.
     pub wire_af_per_um: Option<f32>,
+    /// Series resistance of a minimum-width lowest routing wire, Ω/µm (sheet
+    /// ohms / width; EXT-25's R class reference).
+    pub wire_ohm_per_um: Option<f32>,
     /// Lowest routing metal's min spacing, nm; crosstalk spacings are multiples.
     pub route_space_nm: i32,
     /// Deep-trench isolation: (max spacing sharing one trench, trench width), nm.
