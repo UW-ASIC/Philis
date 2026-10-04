@@ -1357,17 +1357,16 @@ impl Flow<'_> {
         perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true, gate_offset_v: Vec::new() }
     }
 
-    /// Each recognised matched pair on one source net, with its members'
-    /// source pins and the net's other pins (feeds) as placed, budgeted
-    /// `ΔR ≤ (allowance − placement spend) / I_D` from the pair's `MatchedSet` ledger.
+    /// Each extracted common node (EXT-24 `Intent.common_nodes`), with its
+    /// halves' pins on the node and the net's other pins (feeds) as placed,
+    /// budgeted `ΔR ≤ (allowance − placement spend) / I_D` from the first
+    /// pair's `MatchedSet` ledger.
     fn common_nodes(&self, layout: &Layout) -> analog::routing::CommonNodes {
-        use annotator::BlockKind::{CurrentMirror, DiffPair, Load};
         let mut left = Vec::new();
         for b in &self.problem.placement.budget {
             b.offset_allowances(layout, &mut left);
         }
         let placed = gr::place_macros(&cellgen::realize(&self.cells.variants, &layout.variant), layout);
-        let term = |d: DeviceId, t: &str| self.netlist.devices[d.0 as usize].terminals.iter().find(|(n, _)| n == t).map(|&(_, n)| n);
         // (device, terminal, rect) of every placed pin, per net.
         let mut on_net: Vec<Vec<(DeviceId, String, pnr_core::Rect)>> = vec![Vec::new(); self.netlist.nets.len()];
         for (m, members) in placed.iter().zip(&self.cells.devices_of) {
@@ -1379,18 +1378,15 @@ impl Flow<'_> {
             }
         }
         let mut nodes = Vec::new();
-        for leaf in annotator::block::leaves(&self.problem.blocks) {
-            let &[a, b] = leaf.devices.as_slice() else { continue };
-            if !matches!(leaf.kind, DiffPair | CurrentMirror | Load) {
-                continue;
-            }
-            let Some(net) = term(a, "S").filter(|&n| term(b, "S") == Some(n)) else { continue };
-            let list = &on_net[net.0 as usize];
-            let pins = |d: DeviceId| list.iter().filter(|p| p.0 == d && p.1 == "S").map(|p| p.2).collect::<Vec<_>>();
-            let feeds = list.iter().filter(|p| p.0 != a && p.0 != b).map(|p| p.2).collect();
+        for req in &self.problem.intent.common_nodes {
+            let (Some(&a), Some(&b)) = (req.a.first(), req.b.first()) else { continue };
+            let list = &on_net[req.net.0 as usize];
+            let term = format!("{:?}", req.term);
+            let pins = |ds: &[DeviceId]| list.iter().filter(|p| ds.contains(&p.0) && p.1 == term).map(|p| p.2).collect::<Vec<_>>();
+            let feeds = list.iter().filter(|p| !req.a.contains(&p.0) && !req.b.contains(&p.0)).map(|p| p.2).collect();
             let i_ua = self.id_ua.get(a.0 as usize).copied().flatten().map(|i| i.abs() as f32).filter(|&i| i > 0.0);
             let max_delta_ohm = common_node_ohm(&left, a, b, i_ua);
-            nodes.push(analog::routing::CommonNode { net, a: pins(a), b: pins(b), feeds, max_delta_ohm });
+            nodes.push(analog::routing::CommonNode { net: req.net, a: pins(&req.a), b: pins(&req.b), feeds, max_delta_ohm });
         }
         analog::routing::CommonNodes { nodes, stack: self.stack }
     }

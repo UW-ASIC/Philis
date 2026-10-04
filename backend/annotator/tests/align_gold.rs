@@ -30,8 +30,8 @@ fn strongarm_matches_align_gold() {
     let c = canon(&p, &nl);
     assert_eq!(c.pairs, GOLD_PAIRS.iter().map(|&(a, b)| sorted(a, b)).collect(), "device pairs");
     assert!(GOLD_SELF.iter().all(|s| c.selfs.contains(*s)), "selfs {:?}", c.selfs);
-    // Emitted net pairs are routing's Differential (DiffPair leaves only); the
-    // compound's mirrored nets carry the gold's (vin, vip).
+    // The compound's mirrored nets (routing's Differential since EXT-24) carry
+    // the gold's (vin, vip).
     let np = canon_intent(&p, &nl).net_pairs;
     assert!(GOLD_NET_PAIRS.iter().all(|&(a, b)| np.contains(&sorted(a, b))), "net pairs {np:?}");
     assert_eq!(c.axes, 1);

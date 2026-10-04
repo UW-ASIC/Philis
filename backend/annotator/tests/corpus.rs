@@ -92,11 +92,13 @@ const EXPECTED: [Row; 18] = [
     // EXT-05: declared roles: five_transistor_ota's slots 2,3 are a Load.
     // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
-    ("ota5t", &[("Load", &["XM3", "XM4"]), ("DiffPair", &["XM1", "XM2"])], &[("XM1", "XM2"), ("XM3", "XM4")], &["XM5"], &[("vout1", "vout2")], 1, &[(&[("XM1", 1, 1), ("XM2", 1, 1)], "Voltage", "Moderate"), (&[("XM3", 2, 1), ("XM4", 2, 1)], "Current", "Moderate")]),
+    // EXT-24: net pairs are every compound's mirrored non-rail nets (Differential), not DiffPair drains only.
+    ("ota5t", &[("Load", &["XM3", "XM4"]), ("DiffPair", &["XM1", "XM2"])], &[("XM1", "XM2"), ("XM3", "XM4")], &["XM5"], &[("vinm", "vinp"), ("vout1", "vout2")], 1, &[(&[("XM1", 1, 1), ("XM2", 1, 1)], "Voltage", "Moderate"), (&[("XM3", 2, 1), ("XM4", 2, 1)], "Current", "Moderate")]),
     // EXT-05: declared roles: diff_pair_with_mirror_load's slots 2,3 are a Load.
     // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
-    ("three_stage", &[("DiffPair", &["M1", "M2"]), ("Group", &["M6", "M8", "M9"]), ("Load", &["M4", "M5"])], &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Voltage", "Moderate"), (&[("M3", 4, 1), ("M7", 3, 1), ("M9", 10, 1)], "Current", "Minimal"), (&[("M4", 1, 1), ("M5", 1, 1)], "Current", "Moderate")]),
+    // EXT-24: net pairs are every compound's mirrored non-rail nets (Differential), not DiffPair drains only.
+    ("three_stage", &[("DiffPair", &["M1", "M2"]), ("Group", &["M6", "M8", "M9"]), ("Load", &["M4", "M5"])], &[("M1", "M2"), ("M4", "M5")], &["M3"], &[("n1", "n2"), ("vin_n", "vin_p")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Voltage", "Moderate"), (&[("M3", 4, 1), ("M7", 3, 1), ("M9", 10, 1)], "Current", "Minimal"), (&[("M4", 1, 1), ("M5", 1, 1)], "Current", "Moderate")]),
     // EXT-05 review: `cmos_inverter`'s declared prox makes each switch inverter a Stack leaf.
     // EXT-19: the capacitor bank is one binary DacBank set, Exceptional Ratio.
     ("dac4", &[("Stack", &["XMN0", "XMP0"]), ("Stack", &["XMN1", "XMP1"]), ("Stack", &["XMN2", "XMP2"]), ("Stack", &["XMN3", "XMP3"])], &[], &[], &[], 0, &[(&[("XC0", 1, 1), ("XC1", 1, 1), ("XC2", 2, 1), ("XC3", 4, 1), ("XC4", 8, 1)], "Ratio", "Exceptional")]),
@@ -115,26 +117,30 @@ const EXPECTED: [Row; 18] = [
     // declares no roles.
     // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
+    // EXT-24: net pairs are every compound's mirrored non-rail nets (Differential), not DiffPair drains only.
     // EXT-20: Symmetry per compound: M7/M8, M9/M10 and the self M0 join.
-    ("folded", &[("CascodePair", &["M5", "M6"]), ("DiffPair", &["M1", "M2"]), ("Group", &["M10", "M7", "M8", "M9"]), ("Load", &["M3", "M4"]), ("Stack", &["M3", "M5"]), ("Stack", &["M4", "M6"])], &[("M1", "M2"), ("M10", "M9"), ("M3", "M4"), ("M5", "M6"), ("M7", "M8")], &["M0"], &[("x1", "x2")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Voltage", "Moderate"), (&[("M10", 1, 1), ("M9", 1, 1)], "Current", "Minimal"), (&[("M3", 2, 1), ("M4", 2, 1)], "Current", "Moderate"), (&[("M5", 1, 1), ("M6", 1, 1)], "Current", "Moderate"), (&[("M7", 1, 1), ("M8", 1, 1)], "Current", "Minimal")]),
+    ("folded", &[("CascodePair", &["M5", "M6"]), ("DiffPair", &["M1", "M2"]), ("Group", &["M10", "M7", "M8", "M9"]), ("Load", &["M3", "M4"]), ("Stack", &["M3", "M5"]), ("Stack", &["M4", "M6"])], &[("M1", "M2"), ("M10", "M9"), ("M3", "M4"), ("M5", "M6"), ("M7", "M8")], &["M0"], &[("o1", "out"), ("vinn", "vinp"), ("x1", "x2"), ("y1", "y2")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Voltage", "Moderate"), (&[("M10", 1, 1), ("M9", 1, 1)], "Current", "Minimal"), (&[("M3", 2, 1), ("M4", 2, 1)], "Current", "Moderate"), (&[("M5", 1, 1), ("M6", 1, 1)], "Current", "Moderate"), (&[("M7", 1, 1), ("M8", 1, 1)], "Current", "Minimal")]),
     // EXT-04: GILBERT_CELL's link fix makes it match the whole 6-device cell
     // (today's child re-search, max_slots=2, decomposes it into 3 DiffPair legs).
     // EXT-05: declared pairs are the mirror images (M3,M6), (M4,M5).
     // EXT-15: matched sets; the switching quad M3-M6 is one set (the overlapping diff_pair
     // matches (M3,M4), (M5,M6) join the declared mirror pairs, AA-01).
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
+    // EXT-24: net pairs are every compound's mirrored non-rail nets (Differential), not DiffPair drains only.
     // EXT-20: the compound's self M0 joins the Symmetry.
-    ("gilbert", &[("DiffPair", &["M1", "M2"]), ("DiffPair", &["M3", "M6"]), ("DiffPair", &["M4", "M5"])], &[("M1", "M2"), ("M3", "M6"), ("M4", "M5")], &["M0"], &[("outn", "outp"), ("x1", "x2")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Voltage", "Moderate"), (&[("M3", 1, 1), ("M4", 1, 1), ("M5", 1, 1), ("M6", 1, 1)], "Voltage", "Moderate")]),
+    ("gilbert", &[("DiffPair", &["M1", "M2"]), ("DiffPair", &["M3", "M6"]), ("DiffPair", &["M4", "M5"])], &[("M1", "M2"), ("M3", "M6"), ("M4", "M5")], &["M0"], &[("outn", "outp"), ("rfn", "rfp"), ("x1", "x2")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Voltage", "Moderate"), (&[("M3", 1, 1), ("M4", 1, 1), ("M5", 1, 1), ("M6", 1, 1)], "Voltage", "Moderate")]),
     // EXT-05: complementary_diff_pair declares both polarities' DiffPairs.
     // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
+    // EXT-24: net pairs are every compound's mirrored non-rail nets (Differential), not DiffPair drains only.
     // EXT-20: the compound's selfs (both tails) join the Symmetry.
-    ("rail2rail", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &["MN0", "MP0"], &[("xn1", "xn2"), ("xp1", "xp2")], 1, &[(&[("MN1", 1, 1), ("MN2", 1, 1)], "Voltage", "Moderate"), (&[("MP1", 1, 1), ("MP2", 1, 1)], "Voltage", "Moderate")]),
+    ("rail2rail", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &["MN0", "MP0"], &[("vinn", "vinp"), ("xn1", "xn2"), ("xp1", "xp2")], 1, &[(&[("MN1", 1, 1), ("MN2", 1, 1)], "Voltage", "Moderate"), (&[("MP1", 1, 1), ("MP2", 1, 1)], "Voltage", "Moderate")]),
     // EXT-05 (AA-03): cross_coupled_inverters' declared pairs and prox, not inverters.
     // EXT-09: `net_pairs` moves — Differential now comes from the DiffPair leaves, and
     // the cross-coupled MN1/MN2 pair's drains (q, qb) differ, so it yields one.
     // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
+    // EXT-24: net pairs are every compound's mirrored non-rail nets (Differential), not DiffPair drains only.
     ("latch", &[("DiffPair", &["MN1", "MN2"]), ("DiffPair", &["MP1", "MP2"]), ("Stack", &["MN1", "MP1"]), ("Stack", &["MN2", "MP2"])], &[("MN1", "MN2"), ("MP1", "MP2")], &[], &[("q", "qb")], 1, &[(&[("MN1", 1, 1), ("MN2", 1, 1)], "Voltage", "Moderate"), (&[("MP1", 1, 1), ("MP2", 1, 1)], "Voltage", "Moderate")]),
     // EXT-05: current_mirror_4 declares (ref, k) per output; only the first pair
     // holding the shared reference gets a Symmetry.
@@ -142,10 +148,12 @@ const EXPECTED: [Row; 18] = [
     // device ids: MR takes the three identical 2 µm outputs, MO2/MO4 pair up.
     // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
+    // EXT-24: net pairs are every compound's mirrored non-rail nets (Differential), not DiffPair drains only.
     // EXT-20: no compound holds the mirror (one ratioed set), so no Symmetry (AA-24).
     ("mirror6", &[("CurrentMirror", &["MO1", "MR"]), ("CurrentMirror", &["MO3", "MR"]), ("CurrentMirror", &["MO5", "MR"]), ("CurrentMirror", &["MO2", "MO4"])], &[], &[], &[], 0, &[(&[("MO1", 1, 1), ("MO2", 2, 1), ("MO3", 1, 1), ("MO4", 4, 1), ("MO5", 1, 1), ("MR", 1, 1)], "Current", "Minimal")]),
     // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
+    // EXT-24: net pairs are every compound's mirrored non-rail nets (Differential), not DiffPair drains only.
     // EXT-19: Q1/Q2 ratioed pair (Voltage Moderate) and the bandgap resistors R1:R2 = 4:1 in
     // series units of 20 µm (Ratio Moderate).
     // EXT-20: MP1/MP2 is in no compound (a CurrentMirror is no seed), so no Symmetry.
@@ -164,12 +172,13 @@ const EXPECTED: [Row; 18] = [
     // now also yields a Differential; the old device-pair scan missed it.
     // EXT-15: matched sets (components of MatchSym ∪ MatchBlock over every match, shared-bias groups), unitized.
     // EXT-16: kind and class per set (DiffPair leaf → Voltage; role defaults: input/load Moderate, bias Minimal).
+    // EXT-24: net pairs are every compound's mirrored non-rail nets (Differential), not DiffPair drains only.
     // EXT-20: Symmetry per compound: every ALIGN gold pair, one axis.
-    ("strongarm", &[("DiffPair", &["mn1", "mn2"]), ("DiffPair", &["mn3", "mn4"]), ("DiffPair", &["mp5", "mp6"]), ("Group", &["mn13", "mp10", "mp11"]), ("Group", &["mn14", "mp12", "mp9"]), ("Load", &["mp7", "mp8"]), ("Stack", &["mn3", "mp5"]), ("Stack", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mn13", "mn14"), ("mn3", "mn4"), ("mp10", "mp9"), ("mp11", "mp12"), ("mp5", "mp6"), ("mp7", "mp8")], &["mn0"], &[("vin_d", "vip_d"), ("vin_o", "vip_o")], 1, &[(&[("mn1", 2, 1), ("mn2", 2, 1)], "Voltage", "Moderate"), (&[("mn13", 1, 1), ("mn14", 1, 1)], "Current", "Minimal"), (&[("mn3", 1, 1), ("mn4", 1, 1)], "Voltage", "Moderate"), (&[("mp10", 1, 1), ("mp7", 1, 1), ("mp8", 1, 1), ("mp9", 1, 1)], "Current", "Moderate"), (&[("mp11", 1, 1), ("mp12", 1, 1), ("mp5", 4, 1), ("mp6", 4, 1)], "Voltage", "Moderate")]),
+    ("strongarm", &[("DiffPair", &["mn1", "mn2"]), ("DiffPair", &["mn3", "mn4"]), ("DiffPair", &["mp5", "mp6"]), ("Group", &["mn13", "mp10", "mp11"]), ("Group", &["mn14", "mp12", "mp9"]), ("Load", &["mp7", "mp8"]), ("Stack", &["mn3", "mp5"]), ("Stack", &["mn4", "mp6"])], &[("mn1", "mn2"), ("mn13", "mn14"), ("mn3", "mn4"), ("mp10", "mp9"), ("mp11", "mp12"), ("mp5", "mp6"), ("mp7", "mp8")], &["mn0"], &[("vin", "vip"), ("vin_d", "vip_d"), ("vin_o", "vip_o"), ("von", "vop")], 1, &[(&[("mn1", 2, 1), ("mn2", 2, 1)], "Voltage", "Moderate"), (&[("mn13", 1, 1), ("mn14", 1, 1)], "Current", "Minimal"), (&[("mn3", 1, 1), ("mn4", 1, 1)], "Voltage", "Moderate"), (&[("mp10", 1, 1), ("mp7", 1, 1), ("mp8", 1, 1), ("mp9", 1, 1)], "Current", "Moderate"), (&[("mp11", 1, 1), ("mp12", 1, 1), ("mp5", 4, 1), ("mp6", 4, 1)], "Voltage", "Moderate")]),
     // EXT-19 step 5: the degenerated pair is a DiffPair (`passive::degenerated_pairs`), its
     // resistors one degeneration Ratio set (Moderate, the pair's role).
     // EXT-20: the compound's equal couples (R1/R2 too) and its self M0.
-    ("degen_pair", &[("DiffPair", &["M1", "M2"])], &[("M1", "M2"), ("R1", "R2")], &["M0"], &[("o1", "o2")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Voltage", "Moderate"), (&[("R1", 1, 1), ("R2", 1, 1)], "Ratio", "Moderate")]),
+    ("degen_pair", &[("DiffPair", &["M1", "M2"])], &[("M1", "M2"), ("R1", "R2")], &["M0"], &[("inn", "inp"), ("o1", "o2"), ("s1", "s2")], 1, &[(&[("M1", 1, 1), ("M2", 1, 1)], "Voltage", "Moderate"), (&[("R1", 1, 1), ("R2", 1, 1)], "Ratio", "Moderate")]),
 ];
 
 #[test]
@@ -310,8 +319,9 @@ fn no_emitted_conflicts_strongarm() {
     assert_no_conflicts("strongarm", STRONGARM);
 }
 
-/// EXT-09: `Differential` comes only from recognised `DiffPair` leaves, never a
-/// positional/O(N²) device-pair scan, and lands in `routing.budget`, not `.hard`.
+/// EXT-09/EXT-24: `Differential` comes only from recognised structure (a
+/// compound's mirrored nets), never a positional/O(N²) device-pair scan, and
+/// lands in `routing.budget`, not `.hard`.
 #[test]
 fn differential_comes_from_recognized_pairs() {
     use analog::RuleBatch;
@@ -325,12 +335,13 @@ fn differential_comes_from_recognized_pairs() {
     assert_eq!(count(&p.routing.hard) + count(&p.routing.budget) + count(&p.routing.cost), 0, "dac4");
     assert!(xtalk(&nl, &p).is_empty(), "dac4 crosstalk");
 
-    // ota5t has exactly one DiffPair leaf: exactly 1 Differential, in budget only,
-    // and a CrosstalkExclusion from each input gate to each output drain.
+    // ota5t's one compound mirrors (vinm, vinp) and (vout1, vout2): exactly 2
+    // Differential, in budget only, and a CrosstalkExclusion from each input
+    // gate to each output drain (the Voltage set's G×D).
     let nl = net(src("ota5t"));
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(count(&p.routing.hard), 0, "ota5t hard");
-    assert_eq!(count(&p.routing.budget), 1, "ota5t budget");
+    assert_eq!(count(&p.routing.budget), 2, "ota5t budget");
     let want: BTreeSet<_> = [("vinm", "vout1"), ("vinm", "vout2"), ("vinp", "vout1"), ("vinp", "vout2")].map(|(a, b)| (a.to_string(), b.to_string())).into();
     let got = xtalk(&nl, &p);
     assert_eq!((got.len(), got.into_iter().collect::<BTreeSet<_>>()), (4, want), "ota5t crosstalk");
@@ -800,4 +811,91 @@ fn dac4_logic_is_no_victim() {
     let p = annotate(&nl, &cfg("dac4"));
     let v = names(&nl, p.intent.victims.iter().map(|v| v.device));
     assert!(!v.iter().any(|n| n.starts_with("XMN") || n.starts_with("XMP")), "{v:?}");
+}
+
+fn net_id(nl: &pnr_core::Netlist, n: &str) -> pnr_core::ids::NetId {
+    pnr_core::ids::NetId(nl.nets.iter().position(|x| x.name == n).unwrap_or_else(|| panic!("{n}")) as u16)
+}
+
+/// EXT-24: folded's Differential pairs are its compound's mirrored nets.
+#[test]
+fn folded_differential_pairs() {
+    let nl = net(src("folded"));
+    let p = annotate(&nl, &cfg("folded"));
+    let want: BTreeSet<(String, String)> = [("vinn", "vinp"), ("x1", "x2"), ("o1", "out"), ("y1", "y2")].iter().map(|&(a, b)| common::sorted(a, b)).collect();
+    assert_eq!(canon(&p, &nl).net_pairs, want);
+}
+
+/// EXT-24: strongarm shields its four analog nets to `vss`, whose return the
+/// clocked tail shares (SUB-30 diagnostic). With no aggressor net (the clock
+/// renamed and unconfigured: `clk` is a clock by name alone), no shield.
+#[test]
+fn strongarm_shields() {
+    let nl = net(STRONGARM);
+    let p = annotate(&nl, &strongarm_cfg());
+    let shielded: Vec<(String, String)> = p.intent.nets.iter().enumerate().filter_map(|(i, f)| Some((nl.nets[i].name.clone(), nl.nets[f.shield_ref?.0 as usize].name.clone()))).collect();
+    let mut victims: Vec<&str> = shielded.iter().map(|s| s.0.as_str()).collect();
+    victims.sort_unstable();
+    assert_eq!(victims, ["vin", "vin_o", "vip", "vip_o"]);
+    assert!(shielded.iter().all(|s| s.1 == "vss"), "{shielded:?}");
+    assert!(p.intent.diagnostics.iter().any(|d| d.kind == "shared_shield_return"));
+    let quiet = net(&STRONGARM.replace("clk", "en"));
+    let c = AnnotationConfig { clock_nets: Vec::new(), ..strongarm_cfg() };
+    assert!(annotate(&quiet, &c).intent.nets.iter().all(|f| f.shield_ref.is_none()));
+}
+
+fn names_of(nl: &pnr_core::Netlist, ds: &[pnr_core::ids::DeviceId]) -> Vec<String> {
+    names(nl, ds.iter().copied())
+}
+
+/// EXT-24: ota5t's input pair shares `vtail`, its load `VDD`; the tail is the
+/// single feed, so no star.
+#[test]
+fn ota5t_common_nodes() {
+    let nl = net(src("ota5t"));
+    let p = annotate(&nl, &cfg("ota5t"));
+    let got: BTreeSet<(String, Vec<String>, Vec<String>)> =
+        p.intent.common_nodes.iter().map(|c| (nl.nets[c.net.0 as usize].name.clone(), names_of(&nl, &c.a), names_of(&nl, &c.b))).collect();
+    let want: BTreeSet<_> = [("vtail", "XM1", "XM2"), ("VDD", "XM3", "XM4")].iter().map(|&(n, a, b)| (n.to_string(), vec![a.to_string()], vec![b.to_string()])).collect();
+    assert_eq!((p.intent.common_nodes.len(), got), (2, want));
+    assert!(p.intent.stars.is_empty());
+}
+
+/// EXT-24: mirror6's reference MR against each output on `VSS`; an unrelated
+/// device returning through `VSS` makes it a star of the six members.
+#[test]
+fn mirror6_common_nodes_and_star() {
+    let nl = net(src("mirror6"));
+    let p = annotate(&nl, &cfg("mirror6"));
+    assert_eq!(p.intent.common_nodes.len(), 5);
+    assert!(p.intent.common_nodes.iter().all(|c| c.net == net_id(&nl, "VSS") && names_of(&nl, &c.a) == ["MR"]));
+    assert!(p.intent.stars.is_empty());
+    let nl = net(&format!("{} | MX z g VSS VSS nfet w=2u l=1u", src("mirror6")));
+    let p = annotate(&nl, &cfg("mirror6"));
+    assert_eq!(p.intent.stars.len(), 1);
+    assert_eq!((p.intent.stars[0].net, p.intent.stars[0].branches.len()), (net_id(&nl, "VSS"), 6));
+}
+
+/// EXT-24: a sense resistor across the input pair's gates is Kelvin-sensed at
+/// each end by the gate on that net (one request per terminal).
+#[test]
+fn kelvin_from_sense_resistor() {
+    let nl = net(&format!("{} | RS vinp vinm rpoly w=2u l=10u", src("ota5t")));
+    let p = annotate(&nl, &cfg("ota5t"));
+    let rs = pnr_core::ids::DeviceId(nl.devices.iter().position(|d| d.name == "RS").unwrap() as u16);
+    let got: Vec<(analog::intent::Term, Vec<String>)> = p.intent.kelvins.iter().filter(|k| k.device == rs).map(|k| (k.term, k.sense.iter().map(|s| nl.devices[s.0 .0 as usize].name.clone()).collect())).collect();
+    use analog::intent::Term::{N, P};
+    assert_eq!(got, [(P, vec!["XM1".to_string()]), (N, vec!["XM2".to_string()])]);
+}
+
+/// EXT-24: the DAC's shared top plate is capacitive, its driven plates resistive.
+#[test]
+fn dac4_plate_rc() {
+    let nl = net(src("dac4"));
+    let p = annotate(&nl, &cfg("dac4"));
+    let rc = |n: &str| p.intent.nets[net_id(&nl, n).0 as usize].rc;
+    assert_eq!(rc("top"), analog::intent::RcClass::C);
+    for b in ["b0", "b1", "b2", "b3"] {
+        assert_eq!(rc(b), analog::intent::RcClass::R, "{b}");
+    }
 }

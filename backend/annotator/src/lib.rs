@@ -353,7 +353,8 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         &net_classes,
         &gates,
         &cfg.process,
-        &leaves.iter().filter(|b| b.kind == BlockKind::DiffPair).map(|b| (b.devices[0], b.devices[1])).collect::<Vec<_>>(),
+        &mut intent,
+        &set_roles,
         &cfg.policy,
     );
     if ev.op.is_some() && ev.probe_bias {
