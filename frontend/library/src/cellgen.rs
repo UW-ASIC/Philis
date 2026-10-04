@@ -625,6 +625,9 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
         .max(dim(pdk, "contact") + 2 * pdk.rule("diff_encloses_licon", 0).max(pdk.enclosure("diff", "licon").unwrap_or(0)))
         .max(pdk.width("diff").unwrap_or(0));
     let w_max = pdk.rule("max_finger_width", 0);
+    // A finger also keeps its far diffusion corner within the deck's
+    // latch-up tap reach of the strip above it (CELL-13), per gate length.
+    let mut tap_cap = std::collections::BTreeMap::new();
     // The deck's point-to-point R limit bounds a finger too: a finger's poly,
     // `R□·W_f/L`, within [`P2P_SHARE`] of it.
     let poly_sq = pdk.sheet_ohm("poly").filter(|&sq| sq > 0.0);
@@ -659,6 +662,10 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
         let s_of = |j: usize| terminal(&netlist.devices[j], "S");
         let stack = class.len() > 1 && class.iter().any(|&j| s_of(j) != s_of(class[0])) && series_order(netlist, &ids).is_some();
         let (_, pitch) = cells::mosfet::sd_and_pitch(pdk, l);
+        let w_max = match (w_max, *tap_cap.entry(l).or_insert_with(|| cells::mosfet::max_finger_for_taps(pdk, l))) {
+            (0, t) if t < i32::MAX => t,
+            (m, t) => m.min(t),
+        };
         // Smallest k whose finger count keeps every member's gate R below
         // 1/(5·gm).
         let k_gate = class
@@ -724,7 +731,16 @@ fn draw_variants(kind: DeviceKind, model: &str, group: &DeviceGroup, c: &Constra
     match kind {
         // A fin process draws its transistors from fins.
         DeviceKind::Nmos | DeviceKind::Pmos if pnr_core::Process::layer(pdk, "fin").is_some() => draw_all::<cells::finfet::FinFet>(group, c, pdk),
-        DeviceKind::Nmos | DeviceKind::Pmos => draw_all::<Mosfet>(group, c, pdk),
+        // A variant whose diffusion lies beyond the deck's latch-up tap reach
+        // is dropped (CELL-13); none left keeps the empty placeholder.
+        DeviceKind::Nmos | DeviceKind::Pmos => {
+            let mut v = draw_all::<Mosfet>(group, c, pdk);
+            v.retain(|m| cells::mosfet::taps_in_reach(m, pdk));
+            if v.is_empty() {
+                v.push(Macro::default());
+            }
+            v
+        }
         DeviceKind::Resistor => match pdk.recipe("resistor", model) {
             Some(recipe) => draw_all::<Resistor>(group, c, &verify::pdk::Overlay { pdk, recipe }),
             None => draw_all::<Resistor>(group, c, pdk),
@@ -1200,6 +1216,21 @@ mod tests {
                 "cell {i} drifted from the per-device path"
             );
         }
+    }
+
+    /// CELL-13: a deck whose tap reach no variant meets leaves only the empty
+    /// placeholder; sky130's own reach keeps every drawn variant.
+    #[test]
+    fn a_tap_out_of_reach_drops_the_variant() {
+        let mut pdk = pdk();
+        let mut netlist = two_devices();
+        netlist.devices[0].params[0].1 = 5000;
+        let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[], &[]));
+        let group = DeviceGroup { devices: vec![DeviceId(0)] };
+        let all = draw_variants(DeviceKind::Nmos, "", &group, &sized, &pdk);
+        assert!(!all.is_empty() && all.iter().all(|m| !m.shapes.is_empty()), "sky130 keeps every variant");
+        pdk.rules.push(("tie_max_dist_nm".into(), 1000));
+        assert_eq!(draw_variants(DeviceKind::Nmos, "", &group, &sized, &pdk), vec![Macro::default()]);
     }
 
     /// The property the outer loop depends on: escalation must make progress. A

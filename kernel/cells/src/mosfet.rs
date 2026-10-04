@@ -743,6 +743,99 @@ pub fn sd_and_pitch(process: &dyn Process, gate_l: i32) -> (i32, i32) {
     (sd_w, sd_w + gate_l)
 }
 
+/// Worst diffusion-to-own-tap distance of a drawn MOS macro, nm: the max over
+/// every diffusion rect's corners (distance to a rect is convex, so a corner is
+/// the worst point) of the Euclidean distance to the nearest tap rect, where a
+/// tap rect is a `tap`-layer shape holding a `B` pin. `None` when no tap holds
+/// a `B` pin. LU.2/LU.3 measure the same thing on the final GDS.
+#[must_use]
+pub fn tap_reach(m: &Macro, process: &dyn Process) -> Option<i32> {
+    let (tap, diff) = (req(process, "tap"), req(process, "diff"));
+    let holds_b = |r: &Rect| m.pins.iter().any(|p| p.name.ends_with(":B") && r.x <= p.at.x && r.y <= p.at.y && p.at.x + p.at.w <= r.x + r.w && p.at.y + p.at.h <= r.y + r.h);
+    let taps: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == tap && holds_b(&s.rect)).map(|s| s.rect).collect();
+    if taps.is_empty() {
+        return None;
+    }
+    // Squared distance from a point to a rect, i64.
+    let d2 = |x: i32, y: i32, r: &Rect| {
+        let dx = i64::from((r.x - x).max(x - (r.x + r.w)).max(0));
+        let dy = i64::from((r.y - y).max(y - (r.y + r.h)).max(0));
+        dx * dx + dy * dy
+    };
+    let worst = m
+        .shapes
+        .iter()
+        .filter(|s| s.layer == diff && !taps.contains(&s.rect))
+        .flat_map(|s| {
+            let r = s.rect;
+            [(r.x, r.y), (r.x + r.w, r.y), (r.x, r.y + r.h), (r.x + r.w, r.y + r.h)]
+        })
+        .map(|(x, y)| taps.iter().map(|t| d2(x, y, t)).min().unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    Some((worst as f64).sqrt().ceil() as i32)
+}
+
+/// [`tap_reach`] ≤ `process.rule("tie_max_dist_nm", i32::MAX)`; a macro with no
+/// diffusion (the empty placeholder) passes.
+#[must_use]
+pub fn taps_in_reach(m: &Macro, process: &dyn Process) -> bool {
+    let diff = req(process, "diff");
+    if !m.shapes.iter().any(|s| s.layer == diff) {
+        return true;
+    }
+    tap_reach(m, process).is_some_and(|r| r <= process.rule("tie_max_dist_nm", i32::MAX))
+}
+
+/// Widest finger, nm (grid-snapped down), whose drawn rows keep every
+/// diffusion point within `tie_max_dist_nm` of the tap strip; `i32::MAX` when
+/// the deck states no reach. The strip sits a fixed pad stack above the
+/// finger, so the reach is `W + offset`: the offset is measured on every
+/// variant of probe groups (N/P, one device one finger and a two-device
+/// two-finger pair, dummies off and on) at `W = tie_max/2` and gate length
+/// `l`, and the worst one kept. ponytail: a probe sweep, not
+/// an analytic `tap_y0` (it is a max over ~20 `draw_row` locals); a variant the
+/// probe misses still meets [`taps_in_reach`] in cellgen's filter.
+#[must_use]
+pub fn max_finger_for_taps(process: &dyn Process, l: i32) -> i32 {
+    use analog::cell::{SeriesParallel, Unitization};
+    let tie_max = process.rule("tie_max_dist_nm", i32::MAX);
+    if tie_max == i32::MAX {
+        return i32::MAX;
+    }
+    let grid = process.grid().max(1);
+    let w = tie_max / 2 / grid * grid;
+    let mut offset = 0;
+    for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
+        for (n, nf) in [(1u16, 1u16), (2, 2)] {
+            for dummy_required in [false, true] {
+                let group = DeviceGroup { devices: (0..n).map(pnr_core::DeviceId).collect() };
+                let mut c = Constraints::default();
+                c.unitization.push(Unitization {
+                    devices: group.devices.clone(),
+                    device_type: kind,
+                    dev_nf: vec![nf; usize::from(n)],
+                    target_ratio: vec![1; usize::from(n)],
+                    unit_w: w,
+                    unit_l: l,
+                    series_parallel: SeriesParallel::Parallel,
+                    dummy_required,
+                    route_matching_required: false,
+                    class: None,
+                    series: Vec::new(),
+                    style: None,
+                });
+                for v in Mosfet::enumerate(&group, &c, process) {
+                    if let Some(r) = tap_reach(&v.draw(&group, &c, process), process) {
+                        offset = offset.max(r - w);
+                    }
+                }
+            }
+        }
+    }
+    (tie_max - offset).div_euclid(grid) * grid
+}
+
 /// Centre-to-centre pitch of two met1 landings on mcon, from deck values
 /// only: `mcon + 2·max(enc, endcap) + met1 space` (Hastings eq. 13.9), the
 /// plain spacing: two landings are far under any wide-metal threshold.
@@ -1492,5 +1585,66 @@ mod tests {
         assert!(!vs.is_empty() && vs.iter().all(|v| v.split_gates));
         let dirty = testkit::dirty_group::<Mosfet>(&g, &c, &pdk);
         assert!(dirty.is_empty(), "{}", dirty.join("\n"));
+    }
+
+    /// The tap strip spans the diffusion's x range above it, so the worst
+    /// diffusion point is a bottom corner (y = 0) and the reach is the strip's y.
+    #[test]
+    fn tap_reach_is_the_far_corner() {
+        use crate::testkit;
+        let Some(pdk) = testkit::pdk() else { return };
+        let tap = req(&pdk, "tap");
+        let strip = |m: &Macro| {
+            let b = m.pins.iter().find(|p| p.name.ends_with(":B")).expect("a B pin").at;
+            m.shapes.iter().find(|s| s.layer == tap && s.rect.x <= b.x && s.rect.y <= b.y && b.x + b.w <= s.rect.x + s.rect.w && b.y + b.h <= s.rect.y + s.rect.h).expect("a strip holds B").rect
+        };
+        let (g, c) = testkit::group_of(DeviceKind::Nmos, 1, 1, 1680, 150);
+        for v in Mosfet::enumerate(&g, &c, &pdk) {
+            let m = v.draw(&g, &c, &pdk);
+            assert_eq!(tap_reach(&m, &pdk), Some(strip(&m).y));
+        }
+        let (g, c) = testkit::group_of(DeviceKind::Nmos, 1, 4, 1680, 150);
+        let vs = Mosfet::enumerate(&g, &c, &pdk);
+        let reach = |rows: u16| vs.iter().find(|v| v.rows == rows && !v.double_gate).map(|v| tap_reach(&v.draw(&g, &c, &pdk), &pdk));
+        assert!(reach(2).is_some(), "a two-row variant exists");
+        assert_eq!(reach(2), reach(1), "the mirrored row sits as far from the shared strip");
+    }
+
+    /// T8: on every planar built-in deck, every enumerated variant keeps each
+    /// diffusion point within `tie_max_dist_nm` of its own tap, up to the
+    /// widest finger `folds` draws (gf180/ihp's 100 µm `max_finger_width` is
+    /// clamped by [`max_finger_for_taps`]).
+    #[test]
+    fn every_diffusion_point_reaches_its_tap() {
+        use crate::testkit;
+        let mut bad = Vec::new();
+        for deck in ["sky130", "gf180mcu", "ihp_sg13g2"] {
+            let pdk = verify::Pdk::builtin(deck).unwrap();
+            let tie_max = pdk.rule("tie_max_dist_nm", i32::MAX);
+            assert!(tie_max < i32::MAX, "{deck}: no tie_max_dist_nm");
+            let l = pdk.min_channel(true, "").0;
+            // The widest finger `folds` draws: the deck's cap, clamped to the reach.
+            let w_max = pdk.rule("max_finger_width", 0);
+            assert!(w_max > 0, "{deck}: no max_finger_width");
+            let w_max = w_max.min(max_finger_for_taps(&pdk, l));
+            assert!(w_max >= 5000, "{deck}: reach clamps fingers to {w_max} nm");
+            for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
+                for w in [420, 1680, 5000, w_max] {
+                    for (n, nf) in [(1usize, 1u16), (2, 1), (2, 2), (4, 4)] {
+                        for dummies in [false, true] {
+                            let (g, mut c) = testkit::group_of(kind, n, nf, w, l);
+                            c.unitization[0].dummy_required = dummies;
+                            for (i, v) in Mosfet::enumerate(&g, &c, &pdk).iter().enumerate() {
+                                let m = v.draw(&g, &c, &pdk);
+                                if !taps_in_reach(&m, &pdk) {
+                                    bad.push(format!("{deck} {kind:?} n={n} nf={nf} W={w} dummies={dummies} variant {i}: reach {:?} > {tie_max}", tap_reach(&m, &pdk)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 }

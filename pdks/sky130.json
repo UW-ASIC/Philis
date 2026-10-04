@@ -98,7 +98,7 @@
     "res_min_width": 500,
     "res_value_tol_ppm": 5000,
     "tie_max_dist_nm": 15000,
-    "tie_max_dist_nm_source": "VOL/magic/sky130A.tech:4163-4170 (volare fa87f8f4): LU.2 N-diff to P-tap, LU.2.1 the same in deep n-well, LU.3 P-diff to N-tap, each '< 15.0um'; the deck's LU.2/LU.2.1/LU.3 rules. Read by no code yet (CELL-13 tap reach).",
+    "tie_max_dist_nm_source": "VOL/magic/sky130A.tech:4163-4170 (volare fa87f8f4): LU.2 N-diff to P-tap, LU.2.1 the same in deep n-well, LU.3 P-diff to N-tap, each '< 15.0um'; the deck's LU.2/LU.2.1/LU.3 rules. Read by cells::mosfet::taps_in_reach (CELL-13).",
     "licon_poly_enc": 50,
     "polycon_to_pdiff_spacing": 235,
     "licon_to_gate_spacing": 55,

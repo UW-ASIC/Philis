@@ -134,7 +134,7 @@ pub const KEYS: &[Key] = &[
     k("svt_a_uv2_per_um2", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("svt_b_uv2", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("svt_uv_per_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
-    k("tie_max_dist_nm", Nm, false, true, "unread"),
+    k("tie_max_dist_nm", Nm, false, true, "kernel/cells/src/mosfet.rs taps_in_reach, via frontend/library/src/cellgen.rs draw_variants (CELL-13)"),
     k("vbe_tc_uv_per_k", Real, false, true, "unread (EXT-20)"),
     k("via_enclosure", Nm, false, false, "kernel/cells/src/builder.rs dim (raises the deck's)"),
     k("via_spacing", Nm, false, false, "kernel/cells/src/builder.rs dim (raises the deck's)"),
