@@ -421,9 +421,15 @@ fn guard_rings_tie_to_the_guarded_device_s_bulk() {
     // hardcoded `NetId(0)` — here `vout1` — and `dr` folds ring pins in as real
     // routing terminals, so the router wired every guard ring in the design to
     // that signal net.
-    let nl = ota();
-    let p = annotate(&nl, &AnnotationConfig::default());
-    assert!(!p.constraints.guard_rings.is_empty(), "matched FETs get rings");
+    // REL-07: only an aggressor gets a ring, so M1 is clocked; its bulk
+    // (net 3) is not net 0.
+    let nl = Netlist {
+        devices: vec![fet("M1", DeviceKind::Nmos, 1, 2, 3, 3, 1_000, 150), fet("M2", DeviceKind::Pmos, 1, 2, 4, 4, 1_000, 150)],
+        nets: nets(&["out", "clk", "x", "vss", "vdd"]),
+        ..Default::default()
+    };
+    let p = annotate(&nl, &AnnotationConfig { clock_nets: vec!["clk".into()], ..AnnotationConfig::default() });
+    assert!(!p.constraints.guard_rings.is_empty(), "clocked FETs get rings");
     for r in &p.constraints.guard_rings {
         let dev = &nl.devices[r.device.0 as usize];
         let bulk = dev.terminals.iter().find(|(t, _)| t == "B").expect("a FET states a bulk").1;
@@ -445,7 +451,7 @@ fn a_differential_stage_is_symmetric_about_one_axis() {
     assert_eq!(sym, 3, "diff pair + load pair + self-symmetric tail");
     let tail = p.constraints.unitization.iter().find(|u| u.devices == [DeviceId(4)]);
     assert!(tail.is_some(), "the tail gets a sizing directive");
-    assert!(p.constraints.guard_rings.iter().any(|g| g.device == DeviceId(4)), "and a ring");
+    assert!(p.constraints.guard_rings.is_empty(), "no aggressor: no ring (T8)");
 }
 
 /// AA-23: only declared selfs go on the axis. `telescopic_ota_full` declares
@@ -744,4 +750,105 @@ fn more_nets_than_u16_ids_is_refused_not_wrapped() {
     // `NetId(n as u16)` would alias net 65536 onto net 0 (AA-35).
     let nl = Netlist { devices: Vec::new(), nets: vec![Net { name: "n".into() }; 65_536], ..Default::default() };
     let _ = annotate(&nl, &AnnotationConfig::default());
+}
+
+// ── REL-07: guard rings by role ──────────────────────────────────────────
+
+mod rings {
+    use super::*;
+    use crate::rings::{plan, Carrier, RingInputs};
+    use analog::cell::{GuardRingType, RingRole};
+    use pnr_core::SubstrateKind;
+
+    const SUB30: (&str, &str) = ("GuardRing", "victim rings: no quiet ring return (SUB-30)");
+
+    /// M1 (NMOS, gate `clk`), M2/M3 (NMOS victims), M4 (PMOS). Nets: 0=clk
+    /// 1=x 2=vss 3=vssq 4=vdd.
+    fn nl() -> Netlist {
+        Netlist {
+            devices: vec![
+                fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 1_000, 150),
+                fet("M2", DeviceKind::Nmos, 1, 1, 2, 2, 1_000, 150),
+                fet("M3", DeviceKind::Nmos, 1, 1, 2, 2, 1_000, 150),
+                fet("M4", DeviceKind::Pmos, 1, 1, 4, 4, 1_000, 150),
+            ],
+            nets: nets(&["clk", "x", "vss", "vssq", "vdd"]),
+            ..Default::default()
+        }
+    }
+
+    fn inputs<'a>(nl: &'a Netlist, aggressor: &'a [bool], victim: &'a [bool], injector: &'a [Option<Carrier>]) -> RingInputs<'a> {
+        RingInputs {
+            netlist: nl,
+            aggressor,
+            victim,
+            injector,
+            substrate: SubstrateKind::Bulk,
+            quiet_ring_net: None,
+            highest_supply: Some(NetId(4)),
+            ground: Some(NetId(2)),
+            min_ring_width_nm: 420,
+            ecgr_min_width_nm: None,
+            ecgr_drawable: false,
+            hcgr_drawable: false,
+        }
+    }
+
+    #[test]
+    fn an_ota_without_clocks_or_ports_gets_no_rings() {
+        assert!(annotate(&ota(), &AnnotationConfig::default()).constraints.guard_rings.is_empty());
+    }
+
+    #[test]
+    fn clocked_devices_get_aggressor_tap_rings() {
+        let nl = nl();
+        let (rings, missing) = plan(&inputs(&nl, &[true, false, false, false], &[false, true, false, false], &[None; 4]));
+        assert_eq!(rings.len(), 1);
+        let r = &rings[0];
+        assert_eq!((r.device, r.ring_type, r.role, r.connection_net), (DeviceId(0), GuardRingType::Tap { in_well: false }, RingRole::Aggressor, NetId(2)));
+        assert!(missing.contains(&SUB30), "{missing:?}");
+    }
+
+    #[test]
+    fn a_quiet_net_turns_on_victim_rings() {
+        let nl = nl();
+        let i = RingInputs { quiet_ring_net: Some(NetId(3)), ..inputs(&nl, &[true, false, false, false], &[false, true, true, false], &[None; 4]) };
+        let (rings, missing) = plan(&i);
+        let v: Vec<_> = rings.iter().filter(|r| r.role == RingRole::Victim).collect();
+        assert_eq!(v.len(), 2);
+        assert!(v.iter().all(|r| r.connection_net == NetId(3) && r.shareable));
+        assert!(!missing.contains(&SUB30));
+    }
+
+    #[test]
+    fn an_electron_injector_gets_a_supply_tied_ecgr() {
+        let nl = nl();
+        let inj = [Some(Carrier::Electrons), None, None, None];
+        let (rings, missing) = plan(&RingInputs { ecgr_drawable: true, ..inputs(&nl, &[false; 4], &[false; 4], &inj) });
+        assert_eq!(rings.len(), 1);
+        let r = &rings[0];
+        assert_eq!((r.ring_type, r.role, r.connection_net, r.min_width_nm, r.shareable), (GuardRingType::Ecgr, RingRole::Injector, NetId(4), 420, false));
+        assert!(missing.contains(&("GuardRing", "ECGR width rule not given: collection efficiency unknown")), "{missing:?}");
+    }
+
+    #[test]
+    fn a_hole_injector_falls_back_to_a_well_tap() {
+        let nl = nl();
+        let inj = [None, None, None, Some(Carrier::Holes)];
+        let (rings, _) = plan(&inputs(&nl, &[false; 4], &[false; 4], &inj));
+        assert_eq!(rings.len(), 1);
+        let r = &rings[0];
+        assert_eq!((r.device, r.ring_type, r.role, r.connection_net), (DeviceId(3), GuardRingType::Tap { in_well: true }, RingRole::Injector, NetId(4)));
+    }
+
+    #[test]
+    fn epi_substrate_draws_no_aggressor_or_victim_rings() {
+        let nl = nl();
+        let i = RingInputs {
+            substrate: SubstrateKind::EpiOnLowRes,
+            quiet_ring_net: Some(NetId(3)),
+            ..inputs(&nl, &[true, false, false, false], &[false, true, true, false], &[None; 4])
+        };
+        assert!(plan(&i).0.is_empty());
+    }
 }

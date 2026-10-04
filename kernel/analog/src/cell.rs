@@ -16,6 +16,17 @@ pub struct GuardRingRequirement {
     pub max_ring_resistance_mohm: i64,
     /// Net the ring taps (substrate/well rail).
     pub connection_net: NetId,
+    /// Why the ring exists; rings of different roles never merge (post_cell).
+    pub role: RingRole,
+}
+
+/// What a guard ring protects against (REL-07): an injector's minority
+/// carriers, an aggressor's majority-carrier noise, or a victim's exposure.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RingRole {
+    Injector,
+    Aggressor,
+    Victim,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

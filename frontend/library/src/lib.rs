@@ -738,6 +738,10 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
         // ponytail: leaked once per `annotation` call (twice per run, a few
         // hundred bytes each); cache by deck if runs ever loop in one process.
         stack: Some(Box::leak(Box::new(elaborate::stack(pdk)))),
+        min_ring_width_nm: pdk.rule("min_guard_ring_width", 0),
+        ecgr_min_width_nm: opt("ecgr_min_width_nm"),
+        ecgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Ecgr, pdk),
+        hcgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Hcgr, pdk),
     };
     AnnotationConfig { process, ..base.clone() }
 }

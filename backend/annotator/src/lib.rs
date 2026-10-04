@@ -16,6 +16,7 @@ pub mod ir;
 pub mod netrole;
 pub mod pattern;
 pub mod policy;
+pub mod rings;
 pub mod size;
 pub mod terms;
 
@@ -26,7 +27,7 @@ pub use block::{Block, BlockKind};
 pub use netrole::{rail_of, AnnotationConfig, NetRole, ProcessNumbers};
 pub use policy::Policy;
 
-use pnr_core::ids::DeviceId;
+use pnr_core::ids::{DeviceId, NetId};
 use pnr_core::Netlist;
 
 /// Everything the annotator hands the generators, placer and router.
@@ -244,11 +245,49 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         })
         .collect();
 
+    // REL-07: guard rings by role. Without EXT-23 tags an aggressor is a
+    // device on a Clock-class net; there are no victims or injectors yet.
+    let mut constraints = constraints::assemble(netlist, &drawn, &blocks);
+    {
+        use analog::metadata::NetClass;
+        let of_class = |c: NetClass| net_classes.iter().filter(move |k| k.class == c).map(|k| k.net);
+        let clocks: Vec<NetId> = of_class(NetClass::Clock).collect();
+        let aggressor: Vec<bool> = netlist.devices.iter().map(|d| d.terminals.iter().any(|(_, n)| clocks.contains(n))).collect();
+        let touched_by_aggressor = |n: NetId| netlist.devices.iter().zip(&aggressor).any(|(d, &a)| a && d.terminals.iter().any(|t| t.1 == n));
+        let name = |n: NetId| netlist.nets[n.0 as usize].name.to_lowercase();
+        let quiet_ring_net = match &cfg.quiet_ring_net {
+            Some(q) => (0..netlist.nets.len()).map(|n| NetId(n as u16)).find(|&n| name(n) == q.to_lowercase()),
+            None => of_class(NetClass::Ground)
+                .filter(|&n| ["avss", "vssa", "agnd"].iter().any(|k| name(n).contains(k)))
+                .find(|&n| !touched_by_aggressor(n)),
+        };
+        let p = &cfg.process;
+        let (rings, notes) = rings::plan(&rings::RingInputs {
+            netlist,
+            aggressor: &aggressor,
+            victim: &vec![false; netlist.devices.len()],
+            injector: &vec![None; netlist.devices.len()],
+            substrate: p.substrate,
+            quiet_ring_net,
+            // ponytail: the lowest-id Supply net, not the highest rail: the
+            // annotator has no rail voltages; read them when EXT-23 brings
+            // them (row 1 needs CELL-17's drawable ECGR first anyway).
+            highest_supply: of_class(NetClass::Supply).min_by_key(|n| n.0),
+            ground: of_class(NetClass::Ground).min_by_key(|n| n.0),
+            min_ring_width_nm: p.min_ring_width_nm,
+            ecgr_min_width_nm: p.ecgr_min_width_nm,
+            ecgr_drawable: p.ecgr_drawable,
+            hcgr_drawable: p.hcgr_drawable,
+        });
+        constraints.guard_rings.extend(rings);
+        missing.extend(notes);
+    }
+
     Problem {
         placement,
         routing,
         coverage,
-        constraints: constraints::assemble(netlist, &drawn, &blocks),
+        constraints,
         net_classes,
         groups,
         abutment,

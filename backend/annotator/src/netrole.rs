@@ -137,6 +137,10 @@ pub struct AnnotationConfig {
     pub offset_sigma_mv: Option<f32>,
     /// Emission tuning numbers ([`crate::policy::Policy`]).
     pub policy: crate::policy::Policy,
+    /// Victim guard rings' return net (case-insensitive name). `None`: a
+    /// Ground-class net named like `avss`/`vssa`/`agnd` that no aggressor
+    /// touches, else no victim rings ([`crate::rings`]).
+    pub quiet_ring_net: Option<String>,
 }
 
 /// Every process number the annotator uses. A `None` means the deck does not
@@ -175,6 +179,14 @@ pub struct ProcessNumbers {
     /// The routing stack's per-layer parasitics and antenna stages; `None`
     /// leaves the routing budgets on drawn length and the cumulative antenna.
     pub stack: Option<&'static analog::routing::Stack>,
+    /// Deck `min_guard_ring_width`, nm; `0` = none stated.
+    pub min_ring_width_nm: i32,
+    /// Sidecar `ecgr_min_width_nm`: an electron-collecting ring's width for
+    /// a stated collection efficiency; `None` on every shipped deck.
+    pub ecgr_min_width_nm: Option<i32>,
+    /// The process can draw an `Ecgr` / `Hcgr` (`cells::post_cell::drawable`).
+    pub ecgr_drawable: bool,
+    pub hcgr_drawable: bool,
 }
 
 #[cfg(test)]
