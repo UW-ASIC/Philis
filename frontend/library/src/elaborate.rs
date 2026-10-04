@@ -299,6 +299,12 @@ pub(crate) fn stack(pdk: &Pdk) -> analog::routing::Stack {
                 sheet_ohm: pdk.pex_f32(l, "sheet_res_ohm_sq").unwrap_or(0.0),
                 cut: pdk.routing_cuts.contains(&l),
                 thickness_nm: pdk.pex_f32(l, "thickness_nm").unwrap_or(0.0),
+                // Metals only: a cut is no lateral conductor.
+                latent_merge_nm: if pdk.routing_cuts.contains(&l) {
+                    0
+                } else {
+                    pdk.cell_f32("latent_merge_nm").map_or_else(|| pdk.min_spacing(l.0).unwrap_or(0), |v| v as i32)
+                },
             })
             .collect(),
         antenna_cumulative: rules.iter().flatten().any(|r| r.2),

@@ -1,5 +1,6 @@
 //! Antenna ratio (routing tier).
 
+use pnr_core::geom::Shape;
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
 use crate::rule::Rule;
@@ -64,7 +65,12 @@ impl Antenna {
     /// all-layers form, which over-estimates a per-layer rule), in the ×100
     /// fixed point it has always been measured in.
     fn worst(self, r: &Routes) -> (f32, f32) {
-        if let Some(w) = self.stack.and_then(|s| s.antenna(r.shapes(self.net), r.cell_metal(self.net), r.gate_pins(self.net), self.gate_area_nm2)) {
+        // ponytail: O(all shapes) per evaluation; a per-layer spatial index if routing time shows it.
+        let foreign = |per_net: &[Vec<Shape>]| {
+            per_net.iter().enumerate().filter(|(k, _)| *k != self.net.0 as usize).flat_map(|(_, v)| v.iter().copied()).collect::<Vec<_>>()
+        };
+        let others = [foreign(&r.wires), foreign(&r.cell)].concat();
+        if let Some(w) = self.stack.and_then(|s| s.antenna(r.shapes(self.net), r.cell_metal(self.net), &others, r.gate_pins(self.net), self.gate_area_nm2)) {
             return w;
         }
         let area: i64 = r.shapes(self.net).iter().chain(r.cell_metal(self.net)).map(|s| i64::from(s.rect.w) * i64::from(s.rect.h)).sum();

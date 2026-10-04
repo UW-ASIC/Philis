@@ -30,6 +30,9 @@ pub struct Layer {
     /// Conductor thickness, nm (pex `thickness_nm`); `0` = unknown. The ESD
     /// width floor ([`super::em::EsdWidth`]) reads it.
     pub thickness_nm: f32,
+    /// Foreign shapes on this layer within this edge gap, nm, join a piece's
+    /// antenna area ([`Stack::antenna`]'s latent merge, GAP-13); `0` = none.
+    pub latent_merge_nm: i32,
 }
 
 /// The routing stack, bottom-up (metals and cuts interleaved).
@@ -303,12 +306,19 @@ impl Stack {
     /// `fallback_nm2`. A piece touching a net shape on the deck's credited
     /// diode layer has its ratio lowered by the deck's `bonus` (floored at 0).
     ///
+    /// `others` are other nets' shapes: at stage `s` a piece's area also takes
+    /// every one on layer `s` within that layer's `latent_merge_nm` (Euclidean
+    /// edge gap) of the piece's layer-`s` rects, charged to the piece's own
+    /// gates (latent antenna, GAP-13).
+    ///
     /// ponytail: the sidewall area sums per-rect perimeters (signoff merges
     /// them), and the bonus goes only to pieces touching a diode (signoff
     /// gives it to every gate net of the row) — both pessimistic. O(k²) per
     /// stage.
+    // ponytail: one hop, foreign gates uncredited; a chain of min-spaced nets is charged only its direct
+    // neighbours.
     #[must_use]
-    pub fn antenna(&self, shapes: &[Shape], cell: &[Shape], gates: &[GatePin], fallback_nm2: i64) -> Option<(f32, f32)> {
+    pub fn antenna(&self, shapes: &[Shape], cell: &[Shape], others: &[Shape], gates: &[GatePin], fallback_nm2: i64) -> Option<(f32, f32)> {
         let all: Vec<&Shape> = shapes.iter().chain(cell).collect();
         let diodes: Vec<Rect> = self.diode.map_or_else(Vec::new, |d| all.iter().filter(|s| s.layer.0 == d.layer).map(|s| s.rect).collect());
         let rank = |s: &Shape| self.at(s.layer.0).map(|(i, _)| i);
@@ -333,7 +343,21 @@ impl Stack {
                     continue;
                 }
                 let gate = if gates.is_empty() { fallback_nm2 } else { reached.iter().map(|g| g.nm2).sum() };
-                let area: f32 = piece.iter().map(|&k| built[k]).filter(|&(r, _)| counts(r)).map(|(_, q)| exposed(q)).sum();
+                let mut area: f32 = piece.iter().map(|&k| built[k]).filter(|&(r, _)| counts(r)).map(|(_, q)| exposed(q)).sum();
+                if layer.latent_merge_nm > 0 {
+                    let g = i64::from(layer.latent_merge_nm);
+                    let near = |a: &Rect, b: &Rect| {
+                        let dx = i64::from((b.x - (a.x + a.w)).max(a.x - (b.x + b.w)).max(0));
+                        let dy = i64::from((b.y - (a.y + a.h)).max(a.y - (b.y + b.h)).max(0));
+                        dx * dx + dy * dy <= g * g
+                    };
+                    let own: Vec<&Rect> = piece.iter().map(|&k| &built[k]).filter(|&&(r, _)| r == stage).map(|(_, q)| q).collect();
+                    area += others
+                        .iter()
+                        .filter(|s| rank(s) == Some(stage) && own.iter().any(|q| near(q, &s.rect)))
+                        .map(|s| exposed(s.rect))
+                        .sum::<f32>();
+                }
                 let mut ratio = area / gate.max(1) as f32;
                 if let Some(d) = self.diode.filter(|_| diodes.iter().any(touches)) {
                     ratio = (ratio - d.bonus).max(0.0);
@@ -594,7 +618,7 @@ mod tests {
         let gate = 1_000_000; // 1 µm²
         // One 180 µm × 1 µm m1 run: ratio 180 at the m1 stage (limit 100).
         let long = [shape(1, 0, 0, 180_000, 1_000)];
-        assert_eq!(s.antenna(&long, &[], &[], gate), Some((180.0, 100.0)));
+        assert_eq!(s.antenna(&long, &[], &[], &[], gate), Some((180.0, 100.0)));
         // The same length as 20 µm m1 + a 140 µm m2 bridge + 20 µm m1.
         let bridged = [
             shape(1, 0, 0, 20_000, 1_000),
@@ -603,17 +627,17 @@ mod tests {
             shape(2, 160_000, 0, 1_000, 1_000),
             shape(1, 160_000, 0, 20_000, 1_000),
         ];
-        let (ratio, limit) = s.antenna(&bridged, &[], &[], gate).unwrap();
+        let (ratio, limit) = s.antenna(&bridged, &[], &[], &[], gate).unwrap();
         assert!(ratio / limit < 1.0, "bridged: {ratio}/{limit}");
         // m1 stage: 20 each; m2 stage: 142 of 400 — the m2 stage is worst.
         assert_eq!(limit, 400.0);
         // Cumulative rules count m1 (not the cuts) at the m2 stage too: 142 + 40.
-        let cum = stack(100.0, 400.0, true).antenna(&bridged, &[], &[], gate).unwrap();
+        let cum = stack(100.0, 400.0, true).antenna(&bridged, &[], &[], &[], gate).unwrap();
         assert!((cum.0 - 182.0).abs() < 1e-3 && cum.1 == 400.0, "{cum:?}");
         // A sidewall rule counts perimeter × thickness: 2·(180+1) µm · 0.36 µm.
         let mut side = stack(100.0, 400.0, false);
         side.layers[0].antenna_sidewall_nm = 360.0;
-        assert!((side.antenna(&long, &[], &[], gate).unwrap().0 - 130.32).abs() < 1e-2);
+        assert!((side.antenna(&long, &[], &[], &[], gate).unwrap().0 - 130.32).abs() < 1e-2);
     }
 
     /// A piece is charged the oxide of the gates it touches, each device once,
@@ -627,9 +651,9 @@ mod tests {
         let gates = [pin(0, 0, 1_000_000), pin(2_000, 0, 1_000_000), pin(100_000, 1, 9_000_000)];
         let wires = [shape(3, 0, 0, 50_000, 1_000), shape(3, 100_000, 0, 9_000, 1_000)];
         // A/1 µm² = 50 (charged the net's 10 µm²: 5); dev 1's piece: 1.
-        assert_eq!(s.antenna(&wires, &[], &gates, 10_000_000), Some((50.0, 400.0)));
+        assert_eq!(s.antenna(&wires, &[], &[], &gates, 10_000_000), Some((50.0, 400.0)));
         // No gate pins known: every piece is charged the fallback.
-        assert_eq!(s.antenna(&wires, &[], &[], 10_000_000), Some((5.0, 400.0)));
+        assert_eq!(s.antenna(&wires, &[], &[], &[], 10_000_000), Some((5.0, 400.0)));
     }
 
     /// The diode credit is the deck's `diode_bonus`, to a piece touching a
@@ -639,10 +663,10 @@ mod tests {
         let gate = 1_000_000;
         let long = [shape(1, 0, 0, 120_000, 1_000), shape(9, 0, 0, 500, 500)];
         let credited = Stack { diode: Some(DiodeCredit { layer: 9, bonus: 50.0 }), ..stack(100.0, 400.0, false) };
-        assert_eq!(credited.antenna(&long, &[], &[], gate), Some((70.0, 100.0)));
-        assert_eq!(stack(100.0, 400.0, false).antenna(&long, &[], &[], gate), Some((120.0, 100.0)), "deck credits no diode");
+        assert_eq!(credited.antenna(&long, &[], &[], &[], gate), Some((70.0, 100.0)));
+        assert_eq!(stack(100.0, 400.0, false).antenna(&long, &[], &[], &[], gate), Some((120.0, 100.0)), "deck credits no diode");
         let apart = [long[0], shape(9, 200_000, 0, 500, 500)];
-        assert_eq!(credited.antenna(&apart, &[], &[], gate), Some((120.0, 100.0)), "a diode off the piece");
+        assert_eq!(credited.antenna(&apart, &[], &[], &[], gate), Some((120.0, 100.0)), "a diode off the piece");
     }
 
     /// A cell's plate on the net counts with the wires; once a jumper cuts it
@@ -655,11 +679,38 @@ mod tests {
         // A short m1 wire from the gate to a 150 µm² m1 plate: 151 > 100.
         let wire = [shape(1, 0, 0, 2_000, 1_000)];
         let plate = [shape(1, 2_000, 0, 150_000, 1_000)];
-        assert_eq!(s.antenna(&wire, &plate, &[pin], gate).map(|w| w.0), Some(152.0));
+        assert_eq!(s.antenna(&wire, &plate, &[], &[pin], gate).map(|w| w.0), Some(152.0));
         // Jumped through m2: at the m1 stage the plate is its own piece, off
         // the gate, and only the wire stub is charged.
         let jumped = [shape(1, 0, 0, 1_000, 1_000), shape(2, 500, 0, 500, 1_000), shape(3, 500, 0, 2_500, 1_000), shape(2, 2_500, 0, 500, 1_000)];
-        let (ratio, limit) = s.antenna(&jumped, &plate, &[pin], gate).unwrap();
+        let (ratio, limit) = s.antenna(&jumped, &plate, &[], &[pin], gate).unwrap();
         assert!(ratio / limit < 1.0, "{ratio}/{limit}");
+    }
+
+    /// `stack(100, 400, false)` with met1 merging foreign shapes 140 nm away.
+    fn latent() -> Stack {
+        let mut s = stack(100.0, 400.0, false);
+        s.layers[0].latent_merge_nm = 140;
+        s
+    }
+
+    /// GAP-13: a foreign met1 run 140 nm off joins the piece: 60 + 60 > 100.
+    #[test]
+    fn two_min_spaced_pieces_share_one_antenna() {
+        let gate = 1_000_000;
+        let mine = [shape(1, 0, 0, 60_000, 1_000)];
+        let foreign = [shape(1, 0, 1_140, 60_000, 1_000)];
+        assert_eq!(latent().antenna(&mine, &[], &foreign, &[], gate), Some((120.0, 100.0)));
+        assert_eq!(latent().antenna(&mine, &[], &[], &[], gate), Some((60.0, 100.0)));
+        assert_eq!(stack(100.0, 400.0, false).antenna(&mine, &[], &foreign, &[], gate), Some((60.0, 100.0)), "no latent merge");
+        // Corner to corner: dx 100, dy 100, √2e4 = 141.4 > 140; dx 90, dy 100 = 134.5 joins.
+        assert_eq!(latent().antenna(&mine, &[], &[shape(1, 60_100, 1_100, 60_000, 1_000)], &[], gate), Some((60.0, 100.0)));
+        assert_eq!(latent().antenna(&mine, &[], &[shape(1, 60_090, 1_100, 60_000, 1_000)], &[], gate), Some((120.0, 100.0)));
+    }
+
+    #[test]
+    fn a_wider_gap_is_independent() {
+        let mine = [shape(1, 0, 0, 60_000, 1_000)];
+        assert_eq!(latent().antenna(&mine, &[], &[shape(1, 0, 1_141, 60_000, 1_000)], &[], 1_000_000), Some((60.0, 100.0)));
     }
 }

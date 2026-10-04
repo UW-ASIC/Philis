@@ -2919,10 +2919,10 @@ mod tests {
                 self.residual(r)
             }
             fn satisfied(self, r: &Routes) -> bool {
-                self.0.antenna(r.shapes(NetId(0)), &[], &[], 1_000_000).is_none_or(|(x, l)| x <= l)
+                self.0.antenna(r.shapes(NetId(0)), &[], &[], &[], 1_000_000).is_none_or(|(x, l)| x <= l)
             }
             fn residual(self, r: &Routes) -> f32 {
-                self.0.antenna(r.shapes(NetId(0)), &[], &[], 1_000_000).map_or(0.0, |(x, l)| (x / l - 1.0).max(0.0))
+                self.0.antenna(r.shapes(NetId(0)), &[], &[], &[], 1_000_000).map_or(0.0, |(x, l)| (x / l - 1.0).max(0.0))
             }
             fn touches(self, out: &mut Vec<u32>) {
                 out.push(0);
