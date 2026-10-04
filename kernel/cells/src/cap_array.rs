@@ -615,7 +615,6 @@ mod tests {
                 unit_w: 2000,
                 unit_l: 2000,
                 series_parallel: SeriesParallel::Parallel,
-                same_variant_required: true,
                 dummy_required: true,
                 route_matching_required: true,
             }],

@@ -7,11 +7,10 @@
 //! interpreted against any [`Process`] ([`elaborate_ir`]) or pretty-printed
 //! as macroMaster [`Composition`] source ([`to_rust`]).
 //!
-//! v1 scope (deliberate): per-device instances only — a merged matched group
-//! (group collapse) draws interdigitated legs one `variants::Mos` cannot yet
-//! express (M5: patterned library). Symmetry axes ride in `Layout::axis` but
-//! are not yet lifted to `place_mirrored` (P2). Both return
-//! [`EmitError::Unsupported`] rather than emitting wrong code.
+//! Scope: per-device instances and equal-leg merged pairs (`MatchedPair`); a
+//! ratioed merged group returns [`EmitError::Unsupported`] rather than wrong
+//! code. Symmetry axes ride in `Layout::axis` but are not lifted to
+//! `place_mirrored`.
 
 use std::collections::HashSet;
 
@@ -283,7 +282,7 @@ fn lift(
                 },
             ]
         } else {
-            // New row: nearest below with x-overlap, else the previous anchor.
+            // New row: the nearest earlier cell below (any x), else the first anchor.
             let below = order[..k]
                 .iter()
                 .copied()

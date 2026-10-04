@@ -89,7 +89,7 @@ pub struct Config {
     /// rules' input. Empty means a uniform die (thermal rules pass vacuously).
     pub device_power_uw: Vec<i32>,
     /// Solve the DC operating point with ngspice; overrides `device_power_uw`.
-    /// A failed solve falls back to zero power and the report says so.
+    /// A failed solve falls back to `device_power_uw` and the report says so.
     pub op: Option<oppoint::OpConfig>,
     /// Score every epoch by simulating the extracted circuit against these
     /// specs: a failed spec outranks every budget. `None` = geometry-only.
@@ -1113,7 +1113,7 @@ impl Flow<'_> {
         let mut labelled = placed;
         labelled.extend(rings.iter().cloned());
         let mut signoff = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), self.pdk);
-        signoff.report.hard_violations.extend(undrawable(&macros, self.netlist));
+        signoff.report.hard_violations.extend(undrawable(&macros, &self.cells.devices_of, self.netlist));
         lap(6);
         let mut budgets = metadata::build(
             placement,
@@ -1157,9 +1157,15 @@ fn common_node_ohm(left: &[(u32, u32, f32)], a: DeviceId, b: DeviceId, i_ua: Opt
 }
 
 impl Flow<'_> {
-    /// Promote `epoch` to post-layout simulation and fold the spec miss into
-    /// its key. No extraction or no simulator: every spec unknown (a full
-    /// miss each), never passed.
+    /// The member device and terminal a placed cell pin names ([`pin_member`]),
+    /// only when that device has the terminal: a cell's non-terminal pins
+    /// (`ring`) name nothing.
+    fn member_pin<'n>(&self, members: &[DeviceId], name: &'n str) -> Option<(DeviceId, &'n str)> {
+        let (k, t) = pin_member(name)?;
+        let &d = members.get(k)?;
+        self.netlist.devices[usize::from(d.0)].terminals.iter().any(|(n, _)| n == t).then_some((d, t))
+    }
+
     /// What the epoch's layout adds to the schematic: its extracted C, each
     /// device terminal's routed branch R (parallel pins of one terminal
     /// combine), and each device's mean LOD stress over its drawn fingers.
@@ -1170,10 +1176,9 @@ impl Flow<'_> {
         let mut pins: Vec<Vec<(usize, String, pnr_core::Rect)>> = vec![Vec::new(); self.netlist.nets.len()];
         for (m, members) in placed.iter().zip(&self.cells.devices_of) {
             for p in &m.pins {
-                let Some((k, t)) = p.name.strip_prefix('d').and_then(|r| r.split_once(':')) else { continue };
-                let Some(&d) = k.parse::<usize>().ok().and_then(|k| members.get(k)) else { continue };
+                let Some((d, t)) = self.member_pin(members, &p.name) else { continue };
                 if let Some(v) = pins.get_mut(p.net.0 as usize) {
-                    v.push((d.0 as usize, t.to_string(), p.at));
+                    v.push((usize::from(d.0), t.to_string(), p.at));
                 }
             }
         }
@@ -1218,8 +1223,7 @@ impl Flow<'_> {
         let mut on_net: Vec<Vec<(DeviceId, String, pnr_core::Rect)>> = vec![Vec::new(); self.netlist.nets.len()];
         for (m, members) in placed.iter().zip(&self.cells.devices_of) {
             for p in &m.pins {
-                let Some((k, t)) = p.name.strip_prefix('d').and_then(|r| r.split_once(':')) else { continue };
-                let Some(&d) = k.parse::<usize>().ok().and_then(|k| members.get(k)) else { continue };
+                let Some((d, t)) = self.member_pin(members, &p.name) else { continue };
                 if let Some(v) = on_net.get_mut(p.net.0 as usize) {
                     v.push((d, t.to_string(), p.at));
                 }
@@ -1498,9 +1502,7 @@ pub fn signoff_c_tier(
     c_tier(&signoff.caps, names, classes, rows)
 }
 
-/// Edge-to-edge gap `dp` keeps between cells: the deck's widest same-layer
-/// spacing, so no two cells' layers can merge. (`dp`'s default is a sky130
-/// guess; measured: chain4 ERC 93 → 74 with the deck value.)
+/// `v` rounded up to a multiple of `grid` (`v ≥ 0`, `grid > 0`).
 fn round_up(v: i32, grid: i32) -> i32 {
     (v + grid - 1) / grid * grid
 }
@@ -1572,6 +1574,17 @@ fn em_rules(
     problem.routing.hard.push(Box::new(rules));
 }
 
+/// Member and terminal a cell pin names: `d{k}:T` is terminal `T` of member
+/// `k`, a bare `T` (an injected macro's pin) member 0 — the
+/// `cellgen::bind_pins` rule. `GND` (a cell's substrate pin) and malformed
+/// ordinals name no member.
+fn pin_member(name: &str) -> Option<(usize, &str)> {
+    match name.split_once(':') {
+        Some((k, t)) => Some((k.strip_prefix('d')?.parse().ok()?, t)),
+        None => (name != "GND").then_some((0, name)),
+    }
+}
+
 /// Per placed cell, `(pin name, µA)` for every terminal of its members: pin
 /// `d{k}:T` is terminal `T` of member `k`, a bare `T` member 0 (see
 /// `cellgen::bind_pins`). An unresolved device's terminals are `None` (its
@@ -1608,7 +1621,7 @@ fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> Bias {
         .and_then(|oc| match oppoint::extract(netlist, oc) {
             Ok(o) => Some((o, oc.testbench.is_none())),
             Err(e) => {
-                eprintln!("[op] operating point unavailable ({e}); continuing with zero power");
+                eprintln!("[op] operating point unavailable ({e}); continuing with `device_power_uw`");
                 None
             }
         });
@@ -1834,20 +1847,24 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
 pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
     let (shapes, pins, reference) = signoff_inputs(sol, pdk);
     let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
-    s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.netlist));
+    s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.devices_of, &sol.netlist));
     s
 }
 
 /// A device this process has no construction for (an NPN without a deep
 /// well, a poly resistor on a fin process, any inductor) is drawn as nothing:
-/// one hard `cell/undrawable` row per empty cell of `cells`, never hidden
+/// one hard `cell/undrawable` row per empty cell of `cells`, naming its
+/// members (`devices_of`, indexed like `cells`), never hidden
 /// behind an LVS that cannot see it either. The epoch counts them in |V| too
 /// (the same rows every epoch, so ranking is unchanged), so a run with an
 /// undrawn device never reads feasible or converged.
-fn undrawable<'a>(cells: &'a [Macro], netlist: &'a pnr_core::Netlist) -> impl Iterator<Item = pnr_core::report::Violation> + 'a {
-    cells.iter().enumerate().filter(|(_, m)| m.shapes.is_empty()).map(|(i, _)| {
-        let (name, model) = netlist.devices.get(i).map_or(("?", "?"), |d| (d.name.as_str(), d.model.as_str()));
-        pnr_core::report::Violation { rule: format!("cell/undrawable: {name} ({model}) has no construction on this process"), margin: 1 }
+fn undrawable<'a>(cells: &'a [Macro], devices_of: &'a [Vec<DeviceId>], netlist: &'a pnr_core::Netlist) -> impl Iterator<Item = pnr_core::report::Violation> + 'a {
+    cells.iter().enumerate().filter(|(_, m)| m.shapes.is_empty()).map(move |(i, _)| {
+        let who = devices_of.get(i).map_or_else(
+            || "?".to_string(),
+            |ds| ds.iter().map(|d| netlist.devices.get(d.0 as usize).map_or("?".to_string(), |d| format!("{} ({})", d.name, d.model))).collect::<Vec<_>>().join(", "),
+        );
+        pnr_core::report::Violation { rule: format!("cell/undrawable: {who} has no construction on this process"), margin: 1 }
     })
 }
 
@@ -2517,5 +2534,70 @@ mod common_node_tests {
         assert!((common_node_ohm(&left, DeviceId(1), DeviceId(0), Some(100.0)) - 2.37).abs() < 1e-4);
         assert_eq!(common_node_ohm(&left, DeviceId(2), DeviceId(3), Some(100.0)), 0.0);
         assert_eq!(common_node_ohm(&left, DeviceId(0), DeviceId(1), None), 0.0);
+    }
+
+    /// AF-32: cell pins `d{k}:T` and an injected macro's bare `T` both name a
+    /// member; `GND` and a malformed ordinal name none.
+    #[test]
+    fn pin_member_reads_bare_and_ordinal_pins() {
+        assert_eq!(crate::pin_member("d1:D"), Some((1, "D")));
+        assert_eq!(crate::pin_member("S"), Some((0, "S")));
+        assert_eq!(crate::pin_member("GND"), None);
+        assert_eq!(crate::pin_member("dx:S"), None);
+    }
+
+    const PAIR: &str = ".subckt pair a b g vss\nXM1 a g vss vss nfet_01v8 W=1u L=0.15u\nXM2 b g vss vss nfet_01v8 W=1u L=0.15u\n.ends pair\n";
+
+    /// A pair whose `XM1` is injected (a real transistor with bare `G/D/S/B`
+    /// pins) still has both members' source pins on its common node; before,
+    /// the injected member's pins were skipped and `a` was empty.
+    #[test]
+    fn common_node_sees_injected_macro_pins() {
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let mut nl = crate::parse(PAIR).unwrap();
+        crate::deck_models(&mut nl, &pdk);
+        // XM1 alone, drawn by the generator, its `d0:T` pins renamed `T`.
+        let one = crate::cellgen::enumerate(&nl, &Default::default(), &Default::default(), &pdk, true);
+        let cell = one.devices_of.iter().position(|m| m == &[DeviceId(0)]).expect("XM1 has its own cell");
+        let mut m = one.spaces[cell].alternatives[0].clone();
+        m.pins.iter_mut().for_each(|p| p.name = p.name.strip_prefix("d0:").expect("generated pin").to_string());
+        let mut injected = crate::Macros::default();
+        injected.register(&nl.devices[0].name, m);
+        let cfg = crate::Config::default();
+        let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
+        let ann = crate::annotation_with(&pdk, &cfg.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
+        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &[], &[0], true);
+        let n = t.flow.cells.variants.len();
+        let layout = pnr_core::Layout {
+            x: (0..n).map(|i| i as i32 * 20_000).collect(),
+            y: vec![0; n],
+            hw: vec![50; n],
+            hh: vec![50; n],
+            axis: vec![0; t.flow.problem.blocks.len().max(1)],
+            groups: Vec::new(),
+            orient: vec![pnr_core::Orient::default(); n],
+            variant: vec![0; n],
+            branch: Vec::new(),
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        };
+        let nodes = t.flow.common_nodes(&layout).nodes;
+        assert_eq!(nodes.len(), 1, "one common source node");
+        assert!(!nodes[0].a.is_empty() && !nodes[0].b.is_empty(), "both members' source pins: a {:?} b {:?}", nodes[0].a, nodes[0].b);
+    }
+
+    /// AF-31: an empty cell is named by its members, not by its cell index
+    /// read as a device index.
+    #[test]
+    fn undrawable_names_the_cell_members() {
+        let mut nl = crate::parse(PAIR).unwrap();
+        crate::deck_models(&mut nl, &verify::Pdk::builtin("sky130").unwrap());
+        let cells = [pnr_core::Macro::default(), pnr_core::Macro::default()];
+        let rows: Vec<String> = crate::undrawable(&cells, &[vec![DeviceId(1)], vec![DeviceId(0)]], &nl).map(|v| v.rule).collect();
+        let (d0, d1) = (&nl.devices[0].name, &nl.devices[1].name);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains(d1.as_str()) && !rows[0].contains(d0.as_str()), "{rows:?}");
+        assert!(rows[1].contains(d0.as_str()) && !rows[1].contains(d1.as_str()), "{rows:?}");
     }
 }

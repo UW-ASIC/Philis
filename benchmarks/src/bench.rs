@@ -489,7 +489,10 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            let ln = visualizer::parse_layer_names(&deck);
+            // Drawn layers only: a derived layer's `(0, 0)` row names nothing.
+            let gds = p.layer_gds();
+            let pairs: Vec<_> = p.layers.iter().map(|(n, id)| (n.clone(), gds[id.0 as usize])).filter(|(_, g)| *g != (0, 0)).collect();
+            let ln = visualizer::layer_names(&pairs);
             pdk_cache.insert(pdk_json_path.clone(), (p, ln));
         }
         let (pdk, layer_names) = &pdk_cache[&pdk_json_path];

@@ -47,7 +47,6 @@ pub struct Unitization {
     /// Unit length, nm.
     pub unit_l: i32,
     pub series_parallel: SeriesParallel,
-    pub same_variant_required: bool,
     pub dummy_required: bool,
     pub route_matching_required: bool,
 }
@@ -57,5 +56,4 @@ pub struct Unitization {
 pub enum SeriesParallel {
     Parallel,
     Series,
-    RepeatedStage,
 }

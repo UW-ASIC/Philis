@@ -2087,7 +2087,6 @@ dependencies = [
  "earcutr",
  "pnr_core",
  "pollster",
- "serde_json",
  "wgpu",
  "winit",
 ]

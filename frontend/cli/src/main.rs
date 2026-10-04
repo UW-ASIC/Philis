@@ -189,7 +189,7 @@ fn perf_config(path: &str, sim: library::oppoint::OpConfig) -> Result<library::p
             Ok(library::perf::Spec { metric: metric.to_string(), min: bound(s, "min")?, max: bound(s, "max")? })
         })
         .collect::<Result<_, String>>()?;
-    Ok(library::perf::PerfConfig { sim, testbench, specs })
+    Ok(library::perf::PerfConfig { sim, testbenches: vec![testbench], specs, scenarios: Vec::new() })
 }
 
 fn num<T: std::str::FromStr>(flag: &str, v: &str) -> Result<T, String> {

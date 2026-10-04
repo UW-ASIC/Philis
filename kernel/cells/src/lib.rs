@@ -78,7 +78,6 @@ pub(crate) mod testkit {
             unit_w: w,
             unit_l: l,
             series_parallel: SeriesParallel::Parallel,
-            same_variant_required: true,
             // `false` keeps the zero-dummy variants in the sweep.
             dummy_required: false,
             route_matching_required: false,
