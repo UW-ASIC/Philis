@@ -74,8 +74,9 @@ impl CommonNodes {
         Some(self.delta_ohm(n, r)? / n.max_delta_ohm)
     }
 
-    /// A star broken: with the net's shapes touching a feed grown by
-    /// `halo_nm` dropped, one connected piece (by [`Self::joins`]) touches
+    /// A star broken: with the feeds grown by `halo_nm` cut out of the net's
+    /// shapes (the remainder kept: a trunk leaving the halo still joins the
+    /// branches it carries), one connected piece (by [`Self::joins`]) touches
     /// pins of two groups. `false` for a node that is no star.
     #[must_use]
     pub fn star_broken(&self, n: &CommonNode, r: &Routes) -> bool {
@@ -83,8 +84,11 @@ impl CommonNodes {
             return false;
         }
         let h = self.halo_nm;
-        let root = |s: &Shape| n.feeds.iter().any(|f| s.rect.touches(&Rect { x: f.x - h, y: f.y - h, w: f.w + 2 * h, h: f.h + 2 * h }));
-        let shapes: Vec<Shape> = r.shapes(n.net).iter().copied().filter(|s| !root(s)).collect();
+        let mut shapes: Vec<Shape> = r.shapes(n.net).to_vec();
+        for f in &n.feeds {
+            let g = Rect { x: f.x - h, y: f.y - h, w: f.w + 2 * h, h: f.h + 2 * h };
+            shapes = shapes.into_iter().flat_map(|s| minus(s.rect, g).into_iter().map(move |rect| Shape { rect, ..s })).collect();
+        }
         let mut seen = vec![false; shapes.len()];
         for first in 0..shapes.len() {
             if seen[first] {
@@ -108,6 +112,25 @@ impl CommonNodes {
         }
         false
     }
+}
+
+/// `a` less the interior of `g`: up to four pieces (left and right full
+/// height, bottom and top between them); `a` whole when they do not overlap.
+fn minus(a: Rect, g: Rect) -> Vec<Rect> {
+    let (ar, at, gr, gt) = (a.x + a.w, a.y + a.h, g.x + g.w, g.y + g.h);
+    if a.x >= gr || g.x >= ar || a.y >= gt || g.y >= at {
+        return vec![a];
+    }
+    let (l, r) = (a.x.max(g.x), ar.min(gr));
+    [
+        Rect { x: a.x, y: a.y, w: l - a.x, h: a.h },
+        Rect { x: r, y: a.y, w: ar - r, h: a.h },
+        Rect { x: l, y: a.y, w: r - l, h: g.y - a.y },
+        Rect { x: l, y: gt, w: r - l, h: at - gt },
+    ]
+    .into_iter()
+    .filter(|p| p.w > 0 && p.h > 0)
+    .collect()
 }
 
 impl RuleBatch<Routes> for CommonNodes {
@@ -198,6 +221,18 @@ mod tests {
     #[test]
     fn a_shared_segment_breaks_the_star() {
         let (c, r) = star(5_000);
+        assert_eq!(c.violations(&r), 1);
+    }
+
+    /// One trunk drawn from the feed out to 5 µm, the branches leaving it at
+    /// x = 2 µm and 4 µm (they never touch each other): the trunk beyond the
+    /// halo is shared, one star break.
+    #[test]
+    fn branches_leaving_one_trunk_apart_break_the_star() {
+        let (mut c, mut r) = star(5_000);
+        let wire = |x, y, w, h| Shape { layer: LayerId(1), rect: Rect { x, y, w, h } };
+        r.wires[0] = vec![wire(0, 0, 5_100, 100), wire(2_000, 0, 100, 10_000), wire(4_000, -10_000, 100, 10_000)];
+        c.nodes[0].groups = vec![vec![Rect { x: 2_000, y: 9_900, w: 100, h: 100 }], vec![Rect { x: 4_000, y: -10_000, w: 100, h: 100 }]];
         assert_eq!(c.violations(&r), 1);
     }
 

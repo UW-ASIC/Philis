@@ -266,10 +266,10 @@ pub struct RouteStats {
     pub width_fallbacks: u32,
     pub single_cut_vias: u32,
     pub congestion: Vec<(Rect, f32)>,
-    /// Matched pairs routed as exact images (RTE-15), and the rest as
-    /// `(pos, neg, reason)`: `no pin map`, `axis off lattice`, `wide pair`,
-    /// `landing failed`.
-    pub pairs_exact: u32,
+    /// Matched pairs routed as exact images (RTE-15), `(leader, image)`, and
+    /// the rest as `(pos, neg, reason)`: `no pin map`, `axis off lattice`,
+    /// `wide pair`, `landing failed`.
+    pub pairs_exact: Vec<(u32, u32)>,
     pub pairs_fallback: Vec<(u32, u32, &'static str)>,
     /// Per capacitor set (RTE-20), its lead-C spread after equalising,
     /// percent of one unit's C; `None` = unknown (no unit C).
@@ -970,7 +970,7 @@ impl DetailedRoute {
         // wider than one track falls back (its image would grow toward −x).
         for (a, b, map) in exact {
             if tie_pair(&mut cold, a, b, map) {
-                stats.pairs_exact += 1;
+                stats.pairs_exact.push((compact[a] as u32, compact[b] as u32));
             } else {
                 stats.pairs_fallback.push((compact[a] as u32, compact[b] as u32, "wide pair"));
             }
@@ -1481,7 +1481,7 @@ impl DetailedRoute {
                 if bumped.contains(&a) || bumped.contains(&b) {
                     if !tie_pair(&mut cold, a, b, map) {
                         (cold.mirror[a], cold.mirror[b]) = (None, None);
-                        stats.pairs_exact -= 1;
+                        stats.pairs_exact.retain(|&p| p != (compact[a] as u32, compact[b] as u32));
                         stats.pairs_fallback.push((compact[a] as u32, compact[b] as u32, "wide pair"));
                     }
                     bumped.extend([a, b]);
@@ -1498,16 +1498,21 @@ impl DetailedRoute {
             run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS, &mut dij);
             round += 1;
         };
+        // RTE-20: equalise the bits' lead C per unit with dead-end stubs
+        // before scoring, so every row (coupling, differential, antenna) sees
+        // them; then report what spread remains and any bit crossing the top
+        // plate outside the array.
+        let metals: Vec<LayerId> = layers[..n_layers as usize].to_vec();
+        let plates = plate_rules((0, 0)).0;
+        for rule in &plates {
+            equalize_leads(&mut routes, rule, &metals, &foreign_metal, &|l| cfg.space(l, 0, 0, cfg.pitch - cfg.wire_width), cfg.grid);
+            stats.plate_spread_pct.push(rule.spread_pct(&routes));
+        }
         let overuse = overuse(&hot);
         let mut report = score(&routes, reqs, overuse, &joins, &foreign_metal, &sacrificed, side);
         report.hard_violations.extend(star_v);
-        // RTE-20: equalise the bits' lead C per unit with dead-end stubs,
-        // then report what remains and any bit crossing the top plate.
-        let metals: Vec<LayerId> = layers[..n_layers as usize].to_vec();
-        for rule in &plate_rules((0, 0)).0 {
-            equalize_leads(&mut routes, rule, &metals, &foreign_metal, &|l| cfg.space(l, 0, 0, cfg.pitch - cfg.wire_width), cfg.grid);
-            stats.plate_spread_pct.push(rule.spread_pct(&routes));
-            if let Some(spread) = rule.spread_pct(&routes) {
+        for (rule, spread) in plates.iter().zip(&stats.plate_spread_pct) {
+            if let Some(spread) = *spread {
                 let tol = rule.tol_pct10 as f32 / 10.0;
                 if spread > tol {
                     report.budget_violations.push(Violation::from_residual(format!("plate ratio net {}", rule.set.top.0), f64::from((spread - tol) / tol)));
@@ -1516,10 +1521,15 @@ impl DetailedRoute {
             let a = rule.set.array;
             let top = routes.shapes(rule.set.top);
             for &(bit, _) in &rule.set.bits {
+                // Adjacent metals overlapping where the overlap is not wholly
+                // inside the array (the plates' own stack): a crossing.
                 let crossed = routes.shapes(bit).iter().any(|p| {
                     top.iter().any(|q| {
                         let (lp, lq) = (metals.iter().position(|&l| l == p.layer), metals.iter().position(|&l| l == q.layer));
-                        lp.zip(lq).is_some_and(|(x, y)| x.abs_diff(y) == 1) && overlaps(p.rect, q.rect) && !(overlaps(p.rect, a) && overlaps(q.rect, a))
+                        let (x0, y0) = (p.rect.x.max(q.rect.x), p.rect.y.max(q.rect.y));
+                        let (x1, y1) = ((p.rect.x + p.rect.w).min(q.rect.x + q.rect.w), (p.rect.y + p.rect.h).min(q.rect.y + q.rect.h));
+                        let inside = x0 >= a.x && y0 >= a.y && x1 <= a.x + a.w && y1 <= a.y + a.h;
+                        lp.zip(lq).is_some_and(|(x, y)| x.abs_diff(y) == 1) && overlaps(p.rect, q.rect) && !inside
                     })
                 });
                 if crossed {
@@ -3475,25 +3485,25 @@ mod tests {
         r.wires[a].iter().flat_map(|p| r.wires[b].iter().filter(move |q| q.layer == p.layer).map(move |q| rect_gap(p.rect, q.rect))).min().unwrap_or(i32::MAX)
     }
 
-    /// A hard `CrosstalkExclusion` of 900 nm is kept in the search: net 1's
+    /// A hard `CrosstalkExclusion` of 1 000 nm is kept in the search: net 1's
     /// pins sit two pitches above net 0's straight line, so one of them
     /// leaves the other's tracks; the rule holds and no same-layer gap is
-    /// under 900 nm.
+    /// under 1 000 nm.
     #[test]
     fn separated_nets_never_share_adjacent_tracks() {
         use analog::routing::CrosstalkExclusion;
         use analog::Rule;
-        let rule = CrosstalkExclusion { a: NetId(0), b: NetId(1), min_spacing_nm: 900, margin_pct: 0 };
+        let rule = CrosstalkExclusion { a: NetId(0), b: NetId(1), min_spacing_nm: 1_000, margin_pct: 0 };
         let mut reqs = Requirements::<Routes>::default();
         reqs.hard.push(Box::new(vec![rule]));
         let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000), pin(1, 4_000, 5_860), pin(1, 12_000, 5_860)];
         let (routes, report, _) = DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
         assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
         assert!(rule.satisfied(&routes), "gap {}", min_gap(&routes, 0, 1));
-        assert!(min_gap(&routes, 0, 1) >= 900, "{}", min_gap(&routes, 0, 1));
+        assert!(min_gap(&routes, 0, 1) >= 1_000, "{}", min_gap(&routes, 0, 1));
         // Without the rule the straight runs sit 570 nm apart.
         let (plain, _, _) = DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], &Requirements::default(), &LAYERS, &CUTS, &mut gr::Negotiation::new());
-        assert!(min_gap(&plain, 0, 1) < 900, "the set-up does not force the pair together");
+        assert!(min_gap(&plain, 0, 1) < 1_000, "the set-up does not force the pair together");
     }
 
     /// A no-cross separation: net 1's vertical run would cross net 0's
@@ -3560,7 +3570,7 @@ mod tests {
             ..Default::default()
         };
         let (routes, report, stats, reqs) = pair_run(0, &[ring]);
-        assert_eq!(stats.pairs_exact, 1, "{:?}", stats.pairs_fallback);
+        assert_eq!(stats.pairs_exact.len(), 1, "{:?}", stats.pairs_fallback);
         assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
         assert_eq!(signature(&routes, 0), signature(&routes, 1));
         for s in &routes.wires[1] {
@@ -3574,7 +3584,7 @@ mod tests {
     #[test]
     fn the_axis_track_is_never_used_by_a_pair() {
         let (routes, _, stats, _) = pair_run(0, &[]);
-        assert_eq!(stats.pairs_exact, 1, "{:?}", stats.pairs_fallback);
+        assert_eq!(stats.pairs_exact.len(), 1, "{:?}", stats.pairs_fallback);
         for n in 0..2 {
             assert!(!routes.wires[n].iter().any(|s| s.layer == LAYERS[1] && s.rect.x <= 10_290 && 10_290 <= s.rect.x + s.rect.w), "net {n} covers the axis");
         }
@@ -3587,7 +3597,7 @@ mod tests {
     #[test]
     fn unmatched_pins_fall_back_to_the_guide() {
         let (routes, report, stats, _) = pair_run(5, &[]);
-        assert_eq!(stats.pairs_exact, 0);
+        assert!(stats.pairs_exact.is_empty());
         assert_eq!(stats.pairs_fallback, vec![(0, 1, "no pin map")]);
         assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
         for n in 0..2 {
@@ -4212,20 +4222,22 @@ mod tests {
         assert!(cov >= 0.95, "coverage {cov}");
     }
 
-    /// The shield adds no coupling of its own: with the reference excluded,
-    /// the victim's coupling is the same with and without the shield shapes
-    /// (the foreign net taken out); with the foreign net in, the shield only
-    /// screens it.
+    /// The shield is drawn and adds no coupling of its own: excluded, the
+    /// reference (shields included) counts nothing; not excluded, it does.
+    /// It screens the foreign net: the victim's coupling is strictly lower
+    /// with the shield shapes than without them.
     #[test]
     fn a_shield_does_not_count_as_an_aggressor() {
         use analog::routing::CouplingBudget;
-        let (routes, _, _) = shield_run();
+        let (routes, _, shield) = shield_run();
+        assert!(analog::Rule::usage(shield, &routes).is_some_and(|u| u > 0.0), "no shield drawn");
         let b = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None, exclude: Some(NetId(1)), aggressor_weight: None };
-        let total = |r: &Routes| analog::Rule::usage(b, r).unwrap();
+        let total = |b: CouplingBudget, r: &Routes| analog::Rule::usage(b, r).unwrap();
         let without = |r: &Routes| Routes { wires: vec![r.wires[0].clone(), Vec::new(), r.wires[2].clone()], ..Default::default() };
         let quiet = |r: &Routes| Routes { wires: vec![r.wires[0].clone(), r.wires[1].clone(), Vec::new()], ..Default::default() };
-        assert_eq!(total(&quiet(&routes)), total(&quiet(&without(&routes))));
-        assert!(total(&routes) <= total(&without(&routes)));
+        assert_eq!(total(b, &quiet(&routes)), 0.0, "an excluded reference counts");
+        assert!(total(CouplingBudget { exclude: None, ..b }, &quiet(&routes)) > 0.0, "an included reference counts nothing");
+        assert!(total(b, &routes) < total(b, &without(&routes)), "the shield screens nothing");
     }
 
     /// A ring band on layer 0 between two pins of another net at its rows:

@@ -100,34 +100,33 @@ fn coupling_tracks_pex() {
     assert!(worst <= 0.20, "coupling model off PEX by {:.1} %", worst * 100.0);
 }
 
-/// Per layer: (Σ long side, Σ area, shape count) of `net`'s routed shapes.
-fn signature(r: &pnr_core::Routes, net: usize) -> Vec<(u16, i64, i64, usize)> {
-    let mut by: std::collections::BTreeMap<u16, (i64, i64, usize)> = std::collections::BTreeMap::new();
-    for s in r.wires.get(net).into_iter().flatten() {
-        let e = by.entry(s.layer.0).or_default();
-        *e = (e.0 + i64::from(s.rect.w.max(s.rect.h)), e.1 + i64::from(s.rect.w) * i64::from(s.rect.h), e.2 + 1);
-    }
-    by.into_iter().map(|(l, (a, b, c))| (l, a, b, c)).collect()
+/// `v` with every net but `a` and `b` emptied.
+fn pair_only<T: Clone>(v: &[Vec<T>], a: u32, b: u32) -> Vec<Vec<T>> {
+    v.iter().enumerate().map(|(n, x)| if n == a as usize || n == b as usize { x.clone() } else { Vec::new() }).collect()
 }
 
 /// RTE-15: per fixture, the matched pairs dr routed as exact images and why
-/// the rest fell back; an exact pair's two nets have equal per-layer route
-/// signatures (Differential mismatch 0).
+/// the rest fell back; every exact pair's Differential mismatch is 0.0 on its
+/// own two nets (the rest of the layout taken out: foreign coupling is not
+/// the image's to match).
 #[test]
 #[ignore = "full flow on the OTA-class fixtures; run with --include-ignored"]
 fn pairs_report() {
     let pdk = pdk();
     for name in ["ota", "ota_constrained", "tt_ota"] {
         let sol = run(name, &pdk);
+        let diff = batches(&sol.routing, "Differential");
         let mut ids = Vec::new();
-        for b in batches(&sol.routing, "Differential") {
+        for b in &diff {
             b.touched(&mut ids);
         }
-        let pairs: Vec<(u32, u32)> = ids.chunks_exact(2).map(|p| (p[0], p[1])).collect();
-        let fell: Vec<(u32, u32)> = sol.route_stats.pairs_fallback.iter().map(|f| (f.0, f.1)).collect();
-        println!("{name:16} pairs exact {}/{}  fallback {:?}", sol.route_stats.pairs_exact, pairs.len(), sol.route_stats.pairs_fallback);
-        for &(a, b) in pairs.iter().filter(|p| !fell.contains(p)) {
-            assert_eq!(signature(&sol.routes, a as usize), signature(&sol.routes, b as usize), "{name}: exact pair {a}/{b} differs");
+        let st = &sol.route_stats;
+        println!("{name:16} pairs exact {:?} of {}  fallback {:?}", st.pairs_exact, ids.len() / 2, st.pairs_fallback);
+        for &(a, b) in &st.pairs_exact {
+            let r = &sol.routes;
+            let only = pnr_core::Routes { wires: pair_only(&r.wires, a, b), cell: pair_only(&r.cell, a, b), gates: pair_only(&r.gates, a, b), terms: pair_only(&r.terms, a, b) };
+            let worst = diff.iter().filter_map(|d| d.worst_usage(&only)).reduce(f32::max);
+            assert_eq!(worst, Some(0.0), "{name}: exact pair {a}/{b} Differential usage");
         }
     }
 }

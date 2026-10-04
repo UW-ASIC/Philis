@@ -1233,6 +1233,12 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
         block.iter().try_fold(0.0, |s, &m| Some(s + congestion(m as usize)?))
     };
 
+    // RTE-15: a shift has no side, so the leader could step onto the image
+    // (or pre-image) of its own metal; both trees would then share it.
+    // ponytail: nodes, not wide footprints.
+    let shift = q.mirror.as_ref().map(|m| m.map).filter(|m| matches!(m, LatticeMap::Shift { .. }));
+    let shift_clash = |n: u32, mine: &dyn Fn(u32) -> bool| shift.is_some_and(|m| g.map(m, n).is_some_and(mine) || g.map(m.inverse(), n).is_some_and(mine));
+    let mut forbid: Vec<u32> = Vec::new();
     let (x0, y0, _) = g.pos(root);
     let mut targets: Vec<usize> = (1..terms.len()).collect();
     if q.term_k.is_empty() {
@@ -1251,56 +1257,88 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
         }
         let tk = q.term_k.get(t).unwrap_or(&q.k);
         let wide = wide_at(tk);
-        *stamp = stamp.wrapping_add(1);
-        let s = *stamp;
-        heap.clear();
-        // A*: keyed by `g + h`; a stale entry's key no longer equals the
-        // same expression over the node's settled `g`, bit for bit.
-        let h = |n: u32| g.lower_bound(n, target);
-        for &n in &tree {
-            seen[n as usize] = s;
-            dist[n as usize] = 0.0;
-            prev[n as usize] = NONE;
-            heap.push(Reverse((h(n).to_bits(), n)));
-        }
-        let mut found = false;
-        while let Some(Reverse((fb, n))) = heap.pop() {
-            *pops += 1;
-            let d = dist[n as usize];
-            if fb != (d + h(n)).to_bits() {
-                continue;
+        forbid.clear();
+        let path = 'retry: loop {
+            *stamp = stamp.wrapping_add(1);
+            let s = *stamp;
+            heap.clear();
+            // A*: keyed by `g + h`; a stale entry's key no longer equals the
+            // same expression over the node's settled `g`, bit for bit.
+            let h = |n: u32| g.lower_bound(n, target);
+            for &n in &tree {
+                seen[n as usize] = s;
+                dist[n as usize] = 0.0;
+                prev[n as usize] = NONE;
+                heap.push(Reverse((h(n).to_bits(), n)));
             }
-            if n == target {
-                found = true;
-                break;
-            }
-            let k = g.neighbors(n, &mut buf);
-            for &(nb, base) in &buf[..k] {
-                let i = nb as usize;
-                if closed(i) || separated(nb) {
+            let mut found = false;
+            while let Some(Reverse((fb, n))) = heap.pop() {
+                *pops += 1;
+                let d = dist[n as usize];
+                if fb != (d + h(n)).to_bits() {
                     continue;
                 }
-                let (Some(c), Some(v)) = (node_cost(i, tk, wide), corner(n, nb, tk, wide)) else { continue };
-                debug_assert!(c >= 0.0 && v >= 0.0, "negative node cost breaks A*");
-                let nd = d + base + c + v + via(n, nb);
-                if seen[i] != s || nd < dist[i] {
-                    seen[i] = s;
-                    dist[i] = nd;
-                    prev[i] = n;
-                    heap.push(Reverse(((nd + h(nb)).to_bits(), nb)));
+                if n == target {
+                    found = true;
+                    break;
+                }
+                let k = g.neighbors(n, &mut buf);
+                for &(nb, base) in &buf[..k] {
+                    let i = nb as usize;
+                    if closed(i) || separated(nb) {
+                        continue;
+                    }
+                    if shift.is_some() && (forbid.contains(&nb) || shift_clash(nb, &|x| in_tree[x as usize] == call)) {
+                        continue;
+                    }
+                    let (Some(c), Some(v)) = (node_cost(i, tk, wide), corner(n, nb, tk, wide)) else { continue };
+                    debug_assert!(c >= 0.0 && v >= 0.0, "negative node cost breaks A*");
+                    let nd = d + base + c + v + via(n, nb);
+                    if seen[i] != s || nd < dist[i] {
+                        seen[i] = s;
+                        dist[i] = nd;
+                        prev[i] = n;
+                        heap.push(Reverse(((nd + h(nb)).to_bits(), nb)));
+                    }
                 }
             }
-        }
-        if !found {
-            return None;
-        }
-        let mut path = vec![target];
-        let mut cur = target;
-        while prev[cur as usize] != NONE {
-            cur = prev[cur as usize];
-            path.push(cur);
-        }
-        path.reverse();
+            if !found {
+                return None;
+            }
+            let mut path = vec![target];
+            let mut cur = target;
+            while prev[cur as usize] != NONE {
+                cur = prev[cur as usize];
+                path.push(cur);
+            }
+            path.reverse();
+            // A path node whose image is the tree's or an earlier path node's:
+            // forbidden, and the branch searched again (a static set keeps A*
+            // sound, where a path-dependent rejection would not).
+            if let Some(m) = shift {
+                let before = forbid.len();
+                for (at, &n) in path.iter().enumerate() {
+                    // The later of the two goes, or the earlier when the later is
+                    // the target; a clash with the tree drops the path node.
+                    let hit = [g.map(m, n), g.map(m.inverse(), n)]
+                        .into_iter()
+                        .flatten()
+                        .find(|&x| in_tree[x as usize] == call || path[..at].contains(&x));
+                    match hit {
+                        Some(x) if n == target && in_tree[x as usize] != call => forbid.push(x),
+                        Some(_) => forbid.push(n),
+                        None => {}
+                    }
+                }
+                if forbid.len() > before {
+                    if forbid.len() > SHIFT_FORBIDS {
+                        return None;
+                    }
+                    continue 'retry;
+                }
+            }
+            break path;
+        };
         for &n in &path {
             tree.push(n);
             in_tree[n as usize] = call;
@@ -1309,6 +1347,10 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
     }
     Some(branches)
 }
+
+/// Nodes a shift pair's leader may forbid itself over self-images
+/// ([`route_net`]) before the joint route gives up (the pair falls back).
+const SHIFT_FORBIDS: usize = 64;
 
 /// [`Elec`]'s cost of node `i` for one net; `mine(j)` = node `j` holds that
 /// net's own metal (its share of `sens`/`agg` is taken out).
@@ -1810,6 +1852,29 @@ mod tests {
         let ids = [0, 1, 2, 3, 4];
         assert_eq!(order_by_priority(&[2; 5], &ids, &reqs, &[], &[false, false, false, true, false]), vec![0, 1, 3, 2, 4]);
         assert_eq!(order_by_priority(&[2; 5], &ids, &reqs, &[], &[false; 5]), vec![0, 1, 2, 3, 4]);
+    }
+
+    /// RTE-15: a pair shifted six rows up. The leader's trunk runs along
+    /// row 3 and its second branch reaches row 9 at x = 20: every L (two
+    /// vias) holds a node and its image (a six-row climb, or a row-9 run
+    /// over the trunk's image), so the pair would short. The joint search
+    /// keeps every image off the leader's own metal (a Z, four vias).
+    #[test]
+    fn a_shifted_pair_never_meets_its_image() {
+        let g = TrackGrid::with_layers((30 * 200, 16 * 200), 200, 4.0, 2);
+        let map = LatticeMap::Shift { dx: 0, dy: 6 };
+        assert!(g.lattice_map(map));
+        let terms = [g.node(0, 3, 0), g.node(15, 3, 0), g.node(20, 9, 0)];
+        let hot = RouteHot::new(g.nodes(), 2);
+        let mirror = Mirror { map, partner: 1, partner_own: &[], partner_halo: &[], partner_blocked: &[], partner_penalty: &[], partner_cells: &[], partner_elec: Elec::default() };
+        let q = NetSearch { mirror: Some(mirror), ..search(&terms, Elec::default()) };
+        let tree = route_net(&g, &hot, &[], &q, 1.0, &mut Dij::new(g.nodes())).expect("a legal joint tree");
+        let mut nodes = tree.concat();
+        nodes.sort_unstable();
+        nodes.dedup();
+        assert!(terms.iter().all(|t| nodes.contains(t)));
+        let clash: Vec<u32> = nodes.iter().filter_map(|&n| g.map(map, n)).filter(|j| nodes.binary_search(j).is_ok()).collect();
+        assert!(clash.is_empty(), "leader nodes that are images of its own: {clash:?}");
     }
 
     fn search<'a>(terms: &'a [u32], elec: Elec<'a>) -> NetSearch<'a> {

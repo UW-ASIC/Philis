@@ -1653,8 +1653,6 @@ mod tests {
         assert_eq!(ov.enclosure("bottom", "plate"), Some(140), "capm.3");
     }
 
-    /// The sidecar's tier arrays reach `Process::tier` by class index; a
-    /// removed key reads `None` (the class env reports it missing).
     /// RTE-18: crossing C from the deck's heights (sky130: met1–met2 gap
     /// 270 nm, k 4.5; met2–met3 420 nm, k 4.2).
     #[test]
@@ -1666,6 +1664,8 @@ mod tests {
         assert!((c12 - 147.6).abs() < 0.1 && (c23 - 88.5).abs() < 0.1, "{c12} {c23}");
     }
 
+    /// The sidecar's tier arrays reach `Process::tier` by class index; a
+    /// removed key reads `None` (the class env reports it missing).
     #[test]
     fn sky130_tiers_are_read() {
         let p = load("sky130");

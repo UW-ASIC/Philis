@@ -101,3 +101,28 @@ passed after every item.
   clock: none yet.
 - RTE-20: `dac4_plates` passes. No crossing; spread unknown because the sky130 MIM X-cards carry no `c_af`, so the
   ratio check is vacuous. The sets come from capacitor Unitizations with ≥ 3 members (EXT-19).
+
+## Review fixes 3
+- RTE-19: `a_shield_does_not_count_as_an_aggressor` was vacuous (both sides 0). It now asserts the shield is drawn,
+  the excluded reference counts 0 while an included one counts > 0, and coupling with the shield is strictly below
+  coupling without it (net 2 screened).
+- RTE-17: `star_broken` cuts the grown feeds out of each shape and keeps the remainder, instead of dropping every
+  shape that touches the halo. New `branches_leaving_one_trunk_apart_break_the_star` (branches leave one trunk at
+  x = 2 and 4 µm) was a false negative before.
+- RTE-20: the crossing check exempts a bit/top overlap only when the overlap rect lies inside the array.
+  `equalize_leads` now runs before `score()`, so every scored row sees the stubs. The plate rows are appended after.
+  The repair loop's `PlateRatio` still sees routes without stubs, because the stubs are added after repair.
+- RTE-15: a Shift has no side. The leader's search now refuses a node whose image or pre-image is in its tree. After
+  each branch, a path node that clashes with the tree or with an earlier path node is forbidden, and the branch is
+  searched again. The forbidden set is static, so A* stays sound. After 64 forbidden nodes the search returns `None`
+  and the pair falls back. This checks nodes only, not wide footprints. New `a_shifted_pair_never_meets_its_image`
+  fails without the fix (2 clashing nodes). `RouteStats::pairs_exact` now lists the exact pairs. `pairs_report`
+  asserts that each exact pair's Differential worst usage is 0.0 on its own two nets. Foreign coupling is taken out
+  because it is not the image's to match. With 0 exact pairs the check is still vacuous on these fixtures.
+- RTE-18: `separated_nets_never_share_adjacent_tracks` uses 1 000 nm as the card specifies, and passes. The
+  `sky130_overlap_c_matches_the_deck` doc is now separate from `sky130_tiers_are_read`'s.
+- Still open: RTE-19 coverage 0.768 < 0.95 (unchanged and not lowered). Fixing it needs guard tracks along the
+  landing jogs. Redefining the coverage to the trunk alone would loosen the rule. Also open: RTE-18 crosstalk 2/4 and
+  PEX 45–99 % (PERF-16).
+- Debug-profile `library` tests trip gp's `bind` debug_assert (a batch kind in both hard and budget). It is outside
+  routing and not reached in `--release`, where all library tests pass.
