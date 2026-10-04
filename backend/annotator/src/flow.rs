@@ -209,10 +209,19 @@ mod tests {
         let nl = crate::tests::three_stage();
         let (hg, classes, canon) = setup(&nl);
         let dop = |i: f64| Some(DeviceOp { id_ua: i, headroom_mv: 100.0, gm_us: 100.0, power_uw: 0.0, vgs_mv: None, vbs_mv: None, vth_mv: None, gmb_us: None, gds_us: None });
-        let op = OpFacts { dev: nl.devices.iter().map(|d| dop(if matches!(d.name.as_str(), "M8" | "M9") { 0.001 } else { 10.0 })).collect(), net_mv: vec![None; nl.nets.len()] };
+        let op = OpFacts { dev: nl.devices.iter().map(|d| dop(match d.name.as_str() {
+            "M8" | "M9" => 0.001,
+            "M3" => 20.0,
+            "M6" | "M7" => 40.0,
+            _ => 10.0,
+        })).collect(), net_mv: vec![None; nl.nets.len()] };
         let (m8, m9) = (DeviceId(7), DeviceId(8));
         let has = |c: &[(Vec<Vec<DeviceId>>, f64)]| c.iter().any(|(s, _)| s.iter().flatten().any(|&d| d == m8 || d == m9));
         assert!(has(&current_paths(&hg, None, &classes, &canon)), "without op the output stage is a chain");
         assert!(!has(&current_paths(&hg, Some(&op), &classes, &canon)));
+        // lib.rs weights each V order by its chain current over the largest.
+        let ev = crate::Evidence { op: Some(op), ..Default::default() };
+        let w: Vec<f32> = crate::annotate_with(&nl, &AnnotationConfig::default(), &ev).intent.order.iter().filter(|o| o.dir == analog::intent::AxisDir::V).map(|o| o.weight).collect();
+        assert!(w.contains(&1.0) && w.iter().any(|&x| x < 1.0), "{w:?}");
     }
 }

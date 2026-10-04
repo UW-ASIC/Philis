@@ -100,9 +100,8 @@ pub fn ports_pair(nl: &Netlist, a: u32, b: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::requirements;
-    use crate::{annotate, pattern, size, AnnotationConfig};
-    use analog::intent::ReqType;
+    use crate::{annotate, size, AnnotationConfig};
+    use analog::intent::GroupKind;
     use pnr_core::netlist::{DeviceKind, Net, SubcktInst};
     use pnr_core::BipartiteHypergraph;
 
@@ -143,6 +142,20 @@ mod tests {
         }
     }
 
+    /// Some `kind` node's subtree holds every device of `devs`.
+    fn grouped(p: &crate::Problem, kind: GroupKind, devs: &[DeviceId]) -> bool {
+        fn under(t: &[analog::intent::GroupNode], g: usize, out: &mut Vec<DeviceId>) {
+            out.extend(&t[g].devices);
+            t[g].children.iter().for_each(|&c| under(t, c as usize, out));
+        }
+        let t = &p.intent.tree;
+        (0..t.len()).filter(|&g| t[g].kind == kind).any(|g| {
+            let mut v = Vec::new();
+            under(t, g, &mut v);
+            devs.iter().all(|d| v.contains(d))
+        })
+    }
+
     fn drawn(nl: &Netlist) -> Vec<Drawn> {
         let mut m = Vec::new();
         nl.devices.iter().map(|d| size::drawn(d, &mut m)).collect()
@@ -168,19 +181,10 @@ mod tests {
         let nl = two_otas();
         let dr = drawn(&nl);
         assert_eq!(same_template(&nl, &dr), [(0, 1)]);
-        let cfg = AnnotationConfig::default();
-        let p = annotate(&nl, &cfg);
-        let hg = BipartiteHypergraph::from_netlist(&nl);
-        let roles = crate::netrole::classify_nets(&hg, &cfg);
-        let mut models = Vec::new();
-        let dr2: Vec<_> = nl.devices.iter().map(|d| size::drawn(d, &mut models)).collect();
-        let canon = pattern::canonical_labels(&hg, &dr2, &models, &roles);
-        let couples = corresponding(&nl, &dr, 0, 1).unwrap();
-        let reqs = requirements(&[], &[], &[], &[], &[], &couples, &[], &nl.device_inst, &hg, &p.net_classes, &canon, &cfg.policy);
-        let (a5, b5) = (id(&nl, "X1/MN5"), id(&nl, "X2/MN5"));
-        assert!(reqs.iter().any(|r| r.ty == ReqType::MatchBlock && ([r.a, r.b] == [a5, b5] || [r.b, r.a] == [a5, b5])), "{reqs:?}");
-        let name = |d: DeviceId| nl.devices[d.0 as usize].name.as_str();
-        assert!(!reqs.iter().any(|r| r.ty == ReqType::ProxNet && name(r.a)[..3] != name(r.b)[..3]), "{reqs:?}");
+        let p = annotate(&nl, &AnnotationConfig::default());
+        // lib.rs passes the EXT-27 couples through: one Matching subtree holds X1/MN1 and X2/MN1
+        // (shared bias alone matches only the tails on `vb`).
+        assert!(grouped(&p, GroupKind::Matching, &[id(&nl, "X1/MN1"), id(&nl, "X2/MN1")]), "{:?}", p.intent.tree);
         // Each OTA keeps its own input pair.
         let pairs: Vec<(DeviceId, DeviceId)> = p.intent.compounds.iter().flat_map(|c| c.pairs.iter().copied()).collect();
         let has = |x: &str, y: &str| pairs.iter().any(|&(a, b)| (a, b) == (id(&nl, x), id(&nl, y)) || (b, a) == (id(&nl, x), id(&nl, y)));
@@ -196,6 +200,10 @@ mod tests {
         inst(&mut nl, "X1", "inv", &f, &["a", "b", "vdd", "vss"], &inv);
         inst(&mut nl, "X2", "inv", &f, &["c", "d", "vdd", "vss"], &inv);
         assert!(ports_pair(&nl, 0, 1));
+        // Crossed ports: `a` pairs with both `a` and `b`, so no couple seeds.
+        let mut crossed = nl.clone();
+        crossed.insts[1].ports = ["a", "a", "vdd", "vss"].map(|n| net(&mut crossed, n)).to_vec();
+        assert!(!ports_pair(&crossed, 0, 1));
         let p = annotate(&nl, &AnnotationConfig::default());
         let pairs: Vec<(DeviceId, DeviceId)> = p.intent.compounds.iter().flat_map(|c| c.pairs.iter().copied()).collect();
         for (x, y) in [("X1/MN", "X2/MN"), ("X1/MP", "X2/MP")] {
@@ -205,7 +213,7 @@ mod tests {
     }
 
     fn cells(k: usize) -> Netlist {
-        let cell: [Dev; 2] = [("MC", N, "vb", "o", "vss", "vss", 2_000, 1_000), ("MK", N, "vc", "d", "o", "vss", 2_000, 500)];
+        let cell: [Dev; 2] = [("MC", N, "vb", "o", "vss", "vss", 2_000, 1_000), ("MK", N, "vc", "d", "vss", "vss", 2_000, 500)];
         let mut nl = Netlist::default();
         let (vb, vss) = (net(&mut nl, "vb"), net(&mut nl, "vss"));
         nl.devices.push(crate::tests::fet("MREF", N, vb.0, vb.0, vss.0, vss.0, 2_000, 1_000));
@@ -225,6 +233,10 @@ mod tests {
         let arr: Vec<_> = p.intent.order.iter().filter(|o| o.dir == analog::intent::AxisDir::H && o.steps.len() == 4).collect();
         assert_eq!(arr.len(), 1, "{:?}", p.intent.order);
         assert!(arr[0].reversible && arr[0].steps.iter().all(|s| s.len() == 2), "{arr:?}");
+        // lib.rs passes the array devices through: one Proximity subtree holds every MK (MK shares
+        // no ProxNet with its MC, so only the EXT-27 ProxBlock star joins them).
+        let mk: Vec<DeviceId> = (0..4).map(|i| id(&nl, &format!("X{i}/MK"))).collect();
+        assert!(grouped(&p, GroupKind::Proximity, &mk), "{:?}", p.intent.tree);
         let nl = cells(2);
         assert_eq!(arrays(&nl, &drawn(&nl), &bias(&nl)), Vec::<Vec<u32>>::new());
     }

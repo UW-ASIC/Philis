@@ -183,6 +183,9 @@ mod tests {
         let c = [[DeviceId(0), DeviceId(1), DeviceId(2), DeviceId(3)]];
         assert_eq!(kinds(&audit(&Intent::default(), &nl(2_000, 4_000), &c, None)), ["cascode_ratio"]);
         assert!(audit(&Intent::default(), &nl(2_000, 2_000), &c, None).is_empty());
+        let mut tied = nl(2_000, 2_000);
+        tied.devices[3] = fet("T1", n, 2, 4, 1, 3, 2_000, 500); // top bulk on vss, source on b
+        assert_eq!(kinds(&audit(&Intent::default(), &tied, &c, None)), ["cascode_bulk"]);
     }
 
     #[test]
