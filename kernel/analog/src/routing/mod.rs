@@ -18,7 +18,7 @@ pub use common_node::{CommonNode, CommonNodes};
 pub use coupling::CouplingBudget;
 pub use crosstalk::CrosstalkExclusion;
 pub use differential::Differential;
-pub use em::Electromigration;
+pub use em::{Electromigration, EsdWidth};
 pub use ir::IrDrop;
 pub use parasitic::ParasiticBudget;
 pub use performance::PerformanceBudget;

@@ -35,7 +35,7 @@ use analog::intent::{ClassSource, Intent, MatchSpec};
 use analog::matching::class::{self, phi_arm, Family, MatchClass};
 use analog::matching::mismatch::{self, Budget, Coeffs};
 use analog::placement::symmetry::SymmetryGroup;
-use analog::placement::{DtiBand, Isolation, MatchedSet, OrientCheck, OrientationSet, Proximity, Symmetry};
+use analog::placement::{DtiBand, Isolation, MatchedSet, OrientCheck, OrientationSet, Proximity, SubstrateBalance, Symmetry};
 use analog::Requirements;
 use pnr_core::ids::{BranchId, DeviceId, Target};
 use pnr_core::layout::Layout;
@@ -300,6 +300,26 @@ pub fn isolation(
     calibrated.err()
 }
 
+/// Substrate balance (REL-15, Charbon §8.3.1): every EXT-23 `aggressor` outside
+/// a two-device DiffPair's stage (`block_of`, entries of `blocks`) pulled onto
+/// the pair's bisector. Cost only: the source states no threshold.
+pub fn substrate_balance(aggressor: &[bool], blocks: &[Block], block_of: &[usize], r: &mut Requirements<Layout>) {
+    let dev = |d: usize| Target::Device(DeviceId(d as u16));
+    let rules: Vec<SubstrateBalance> = leaves(blocks)
+        .iter()
+        .filter(|l| l.kind == BlockKind::DiffPair && l.devices.len() == 2)
+        .flat_map(|l| {
+            let (a, b) = (l.devices[0].0 as usize, l.devices[1].0 as usize);
+            (0..aggressor.len())
+                .filter(move |&g| aggressor[g] && block_of[g] != block_of[a])
+                .map(move |g| SubstrateBalance { aggressor: dev(g), a: dev(a), b: dev(b) })
+        })
+        .collect();
+    if !rules.is_empty() {
+        r.cost.push(Box::new(rules));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,6 +514,27 @@ mod tests {
         devs.sort_unstable();
         assert_eq!(devs, [mn1 as u16, xs as u16]);
         assert!(c[0].message.starts_with(&format!("ids {user_id},{iso_id}:")), "{}", c[0].message);
+    }
+
+    /// REL-15: the stage's own clocked tail is no imbalance source for its
+    /// pair; the lone `XS` gets one rule per pair, tagged net-class.
+    #[test]
+    fn substrate_balance_skips_the_aggressors_own_block() {
+        let (nl, cfg) = strongarm_like();
+        let p = crate::annotate(&nl, &cfg);
+        let (mn1, mn2, mn0, xs) = (0u32, 1, 4, 5);
+        let batches: Vec<_> = p.placement.cost.iter().filter(|b| b.kind().ends_with("::SubstrateBalance")).collect();
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0].meta().is_some_and(|m| m.origin == analog::intent::Origin::NetClass));
+        let mut ids = Vec::new();
+        batches[0].touched(&mut ids);
+        let triples: Vec<&[u32]> = ids.chunks(3).collect();
+        assert!(!triples.iter().any(|t| t[0] == mn0), "own stage: {triples:?}");
+        let pairs = leaves(&p.blocks).iter().filter(|l| l.kind == BlockKind::DiffPair && l.devices.len() == 2).count();
+        assert!(pairs >= 1);
+        assert_eq!(triples.iter().filter(|t| t[0] == xs).count(), pairs, "{triples:?}");
+        assert!(triples.contains(&&[xs, mn1, mn2][..]) || triples.contains(&&[xs, mn2, mn1][..]), "{triples:?}");
+        assert!(p.placement.budget.iter().chain(&p.placement.hard).all(|b| !b.kind().ends_with("::SubstrateBalance")), "cost only");
     }
 
     /// REL C3: epi on p+ saturates at 4·t_epi (Su), a budget the search pays.

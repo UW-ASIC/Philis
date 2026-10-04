@@ -118,6 +118,8 @@ pub struct Config {
     /// User constraint sidecar, JSON text (EXT-26, `annotator::sidecar`):
     /// [`run`] merges it over `annotation` (lists extend, scalars from the base).
     pub constraints: Option<String>,
+    /// ESD pad nets (REL-17); `None` = no ESD width floor.
+    pub esd: Option<EsdSpec>,
 }
 
 /// A die edge.
@@ -209,8 +211,17 @@ impl Default for Config {
             interface: None,
             top: None,
             constraints: None,
+            esd: None,
         }
     }
+}
+
+/// ESD pad nets and their HBM rating (REL-17): each named net gets a hard
+/// [`analog::routing::EsdWidth`] floor on its routed metal.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EsdSpec {
+    pub hbm_v: f32,
+    pub nets: Vec<String>,
 }
 
 /// A finished placement + routing (pre-signoff).
@@ -415,6 +426,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     });
     let base = annotator::annotate_with(&netlist, &ann, &ev);
     let plan = performance_rows(&netlist, cfg, &ann, &base.net_classes);
+    let ev = annotator::Evidence { sens: plan.evidence.clone(), ..ev };
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
     // linear gradient but splits one drain across the row ends (asymmetric
@@ -459,6 +471,10 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
             win = (j, k);
         }
     }
+    let mut pareto = Vec::new();
+    for p in runs.iter().flatten().flat_map(|r| r.pareto.iter().cloned()) {
+        metadata::pareto_insert(&mut pareto, p);
+    }
     let searched = runs.into_iter().nth(win.0).expect("one start at least").swap_remove(win.1);
     let t = if win.1 == 0 { merged } else { apart.expect("index 1 is `apart`") };
     let mut sol = finish(t, searched, &bias, pdk);
@@ -467,6 +483,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     sol.stats.sims = sims;
     sol.metadata.budget_rows = plan.notes;
     sol.metadata.sensitivity = plan.sens;
+    sol.metadata.pareto = pareto;
     Ok(sol)
 }
 
@@ -483,7 +500,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 /// table (PERF-11), noted in [`PerfPlan::sens`].
 fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationConfig, classes: &[analog::metadata::NetClassification]) -> PerfPlan {
     use analog::metadata::NetClass;
-    let plan = |rows, notes, active| PerfPlan { rows, notes, active, tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0 };
+    let plan = |rows, notes, active| PerfPlan { rows, notes, active, tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0, evidence: None, r_weight: Vec::new(), pair_weight: Vec::new(), beta_key: false };
     let Some(p) = &cfg.performance else { return plan(Vec::new(), Vec::new(), vec![0]) };
     let all: Vec<usize> = (0..p.scenarios().len()).collect();
     let bounds = || {
@@ -548,13 +565,47 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
         Ok((start, active, tables, sens_notes))
     });
     match sens {
-        Ok((start, active, tables, sens_notes)) => {
+        Ok((start, active, tables, mut sens_notes)) => {
             let rows = perf::budget_rows(p, &start, &tables, &nets, af_per_um / 1000.0);
+            // PERF-12: EXT-17's evidence and RTE-21's router weights, each
+            // bound scaled by its statistical headroom (PERF-06's scale).
+            let stats = robust::bound_stats(&tables, &sigma_v, &start, &p.specs, &[], &[]);
+            let evidence = perf::to_evidence(p, &tables, &start, &stats, netlist);
+            // PERF-14: decided once per run so every epoch is keyed alike.
+            let beta_key = stats.iter().all(|s| s.sigma_f.is_some());
+            let h_bounds: Vec<(usize, f64, usize)> = start
+                .bounds
+                .iter()
+                .zip(&stats)
+                .filter_map(|(b, st)| {
+                    let spec = &p.specs[b.spec];
+                    let (bound, sign) = if b.upper { (spec.max?, 1.0) } else { (spec.min?, -1.0) };
+                    let plain = sign * (bound - b.value?);
+                    let h = match st.headroom_stat {
+                        Some(h) if h > 0.0 => h,
+                        None if plain > 0.0 => plain,
+                        _ if bound == 0.0 => 1.0,
+                        _ => bound.abs(),
+                    };
+                    Some((b.spec, h, b.scenario))
+                })
+                .collect();
+            let (r_weight, pair_weight) = perf::router_weights(&tables, &h_bounds, netlist);
+            let unknown = || "unknown".to_string();
+            for e in &evidence.specs {
+                let sigma = e.sigma_f.map_or_else(unknown, |v| format!("{v:.3e}"));
+                sens_notes.push(format!("evidence {}: d_c {}, d_r {}, d_vt {}, d_cc {}, σ_f {sigma}", e.metric, e.d_c.len(), e.d_r.len(), e.d_vt.len(), e.d_cc.len()));
+            }
+            let net_name = |n: pnr_core::NetId| &netlist.nets[n.0 as usize].name;
+            for (n, w) in r_weight.iter().enumerate().filter(|(_, &w)| w != 0.0) {
+                sens_notes.push(format!("r_weight {} {w:.3}", netlist.nets[n].name));
+            }
+            sens_notes.extend(pair_weight.iter().filter(|p| p.2 != 0.0).map(|&(a, b, w)| format!("pair_weight {}-{} {w:.3e}", net_name(a), net_name(b))));
             let mut out = scenario_notes(&active);
             out.extend(notes(&rows, "not measured at the schematic"));
             sens_notes.iter().for_each(|n| eprintln!("[perf] sens {n}"));
             let sims = (all.len() * p.testbenches.len()) as u32 + tables.iter().map(|t| t.sims).sum::<u32>();
-            PerfPlan { rows, notes: out, active, tables, sigma_v, sens: sens_notes, sims }
+            PerfPlan { rows, notes: out, active, tables, sigma_v, sens: sens_notes, sims, evidence: Some(evidence), r_weight, pair_weight, beta_key }
         }
         Err(e) => {
             let mut out = scenario_notes(&all);
@@ -582,6 +633,18 @@ struct PerfPlan {
     sens: Vec<String>,
     /// ngspice decks run on the schematic.
     sims: u32,
+    /// EXT-17's spec sensitivities ([`perf::to_evidence`]); `None` without tables.
+    evidence: Option<annotator::evidence::Sensitivities>,
+    /// RTE-21's per-net R weight ([`perf::router_weights`]); computed and
+    /// reported only until `DetailedCfg` takes it.
+    #[allow(dead_code)] // RTE-21 step 1 writes it into `DetailedCfg` (not landed)
+    r_weight: Vec<f32>,
+    /// RTE-21's coupling pair weight; as `r_weight`.
+    #[allow(dead_code)] // as `r_weight`
+    pair_weight: Vec<(pnr_core::NetId, pnr_core::NetId, f32)>,
+    /// PERF-14: every schematic bound has a σ_f, so epochs are keyed on β
+    /// ([`robust::key_tiers`]); else on the spec miss.
+    beta_key: bool,
 }
 
 /// The operating point, solved once per run.
@@ -705,7 +768,20 @@ fn topology<'a>(
         Some(verify::EmLimit { derating: Some(_), .. }) => "deck",
         _ => "none",
     };
-    em_rules(&mut problem, netlist, &em, &em_layers, &em_cuts, ann.process.stack, pdk);
+    em_rules(&mut problem, netlist, &em, &em_layers, &em_cuts, ann.process.stack, em_front_row(pdk), pdk);
+    if let (Some(esd), Some(stack)) = (&cfg.esd, ann.process.stack) {
+        let (rho, cv) = analog::routing::em::metal_family(pdk.cell_str("metal_family"));
+        let area_um2 = analog::routing::em::esd_area_um2(esd.hbm_v, rho, cv);
+        let mut rules = Vec::new();
+        for name in &esd.nets {
+            match netlist.nets.iter().position(|n| n.name == *name) {
+                Some(k) => rules.push(analog::routing::EsdWidth { net: pnr_core::NetId(k as u16), area_um2, stack }),
+                // ponytail: leaked once per run, as `em_rules`'s names are.
+                None => problem.missing.push(("EsdWidth", Box::leak(format!("net {name} (Config::esd) not in the netlist").into_boxed_str()))),
+            }
+        }
+        problem.routing.hard.push(Box::new(rules));
+    }
     // IR-drop budgets (PWR-02) on nets carrying op current (`annotator::ir`).
     let net_ua = bias.currents.as_ref().map_or_else(Vec::new, |c| oppoint::net_current_ua(netlist, c));
     let ir = if let (Some(_), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
@@ -801,6 +877,10 @@ struct Searched {
     stats: RunStats,
     binding: Vec<String>,
     key: LexKey,
+    /// [`metadata::MetadataReport::pareto`] of this search.
+    pareto: Vec<metadata::ParetoPoint>,
+    /// [`metadata::MetadataReport::epochs`].
+    epochs: Vec<metadata::ParetoPoint>,
 }
 
 /// 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
@@ -814,6 +894,7 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
     let mut neg = gr::Negotiation::new();
     let mut best: Option<Epoch> = None;
     let mut stats = RunStats::default();
+    let (mut pareto, mut epochs) = (Vec::new(), Vec::new());
 
     let n_outer = cfg.outer_iters.max(1);
     for outer in 0..n_outer {
@@ -830,6 +911,21 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
             // beat the incumbent; its spec miss then decides against it.
             if best.as_ref().is_none_or(|b| epoch.key.0 <= b.key.0) {
                 flow.score_perf(&mut epoch, &mut stats);
+                let k = &epoch.key;
+                let point = metadata::ParetoPoint {
+                    outer,
+                    iteration: iter,
+                    v: k.0,
+                    residual: epoch.perf.as_ref().map_or(0.0, |p| p.residual),
+                    min_beta: epoch.min_beta,
+                    theta: k.3,
+                    c_tier: k.4,
+                    area_um2: k.5 / 1e6,
+                };
+                if k.0 == 0 && k.1 == 0 {
+                    metadata::pareto_insert(&mut pareto, point.clone());
+                }
+                epochs.push(point);
             }
             for (s, e) in stats.stage_ms.iter_mut().zip(epoch.stats.stage_ms) {
                 *s += e;
@@ -852,7 +948,7 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
         // settled in `drift` but is still binding, so it blocks convergence.
         let feasible = best
             .as_ref()
-            .is_some_and(|b| b.key.0 == 0 && b.key.1 <= 0.0 && b.key.2 <= 0.0);
+            .is_some_and(|b| b.key.0 == 0 && b.key.1 == 0 && b.key.3 <= 0.0);
         if feasible && prices.drift() < PRICE_STATIONARY && prices.saturated().is_empty() {
             stats.converged = true;
             break;
@@ -883,7 +979,7 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
         ..best.stats.merge(stats)
     };
     let binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
-    Searched { key: best.key, best, stats, binding }
+    Searched { key: best.key, best, stats, binding, pareto, epochs }
 }
 
 /// 7. The winner only, redrawn from its own variant choice, with its guard
@@ -932,6 +1028,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     );
     let mut metadata = metadata;
     metadata.binding = s.binding;
+    metadata.epochs = s.epochs;
     let pairs = matched_pairs(&flow.problem.blocks);
     if let Some(op) = &bias.op {
         let (_, aging, unknown) = reliability::voltage_findings(flow.netlist, op, &pdk.fet_voltage_limits(), &pairs, false);
@@ -1180,6 +1277,8 @@ fn placement_space(pdk: &Pdk) -> Vec<(String, String, i32)> {
 /// One scored epoch.
 struct Epoch {
     key: LexKey,
+    /// Smallest β over the bounds after [`Flow::score_perf`] ([`robust::min_beta`]).
+    min_beta: Option<f64>,
     /// Measured specs, when performance scoring is on and this epoch was
     /// promoted to simulation.
     perf: Option<perf::PerfResult>,
@@ -1364,6 +1463,7 @@ impl Flow<'_> {
         let stats = RunStats { place, dp: dp_stats, stage_ms: ms, ..stats };
         Epoch {
             key,
+            min_beta: None,
             perf: None,
             caps: signoff.caps,
             coverage: signoff.coverage,
@@ -1501,7 +1601,10 @@ impl Flow<'_> {
                 unknown()
             })
         };
-        epoch.key.1 = result.residual;
+        let plan = self.perf_plan;
+        let stats_b = robust::bound_stats(&plan.tables, &plan.sigma_v, &result, &p.specs, &[], &[]);
+        (epoch.key.1, epoch.key.2) = robust::key_tiers(&stats_b, &result, &p.specs, plan.beta_key);
+        epoch.min_beta = robust::min_beta(&stats_b);
         epoch.perf = Some(result);
         stats.stage_ms[8] += clock.elapsed().as_secs_f64() * 1e3;
     }
@@ -1524,17 +1627,18 @@ impl RunStats {
     }
 }
 
-/// `(|V|, spec miss, Θ, C tier, footprint nm²)`, compared by [`key_lt`]:
-/// no parasitic gain buys past a budget residual, no budget slack past a missed
-/// circuit spec, nothing past a hard violation. V counts violated hard rules
+/// `(|V|, failed bounds, spec shortfall, Θ, C tier, footprint nm²)`, compared
+/// by [`key_lt`]: no parasitic gain buys past a budget residual, no budget
+/// slack past a failed bound or a β short of 3, nothing past a hard violation. V counts violated hard rules
 /// ([`metadata::MetadataReport::hard_violated`]), the stages' own non-batch
 /// rows, and signoff errors (deck warnings are never in that report). Θ is
 /// [`metadata::MetadataReport::theta`] plus dr's own non-batch budget rows, all
-/// in milli-budgets. The spec miss is the post-layout simulation's Σ normalised
-/// miss (`0` without performance scoring); the C tier is [`c_tier`] over
+/// in milli-budgets. The spec tiers are [`robust::key_tiers`] of the post-layout
+/// simulation (PERF-14: on β when every schematic bound has a σ_f, else on the
+/// Σ normalised miss; `(0, 0)` without performance scoring); the C tier is [`c_tier`] over
 /// signoff's extracted matrix, not its total (`Report::cost`), which on ota is
 /// 79 % supply-related (AV-06).
-type LexKey = (usize, f64, f64, f32, f64);
+type LexKey = (usize, u32, f64, f64, f32, f64);
 
 /// Relative [`c_tier`] difference read as a tie, which area then breaks.
 ///
@@ -1543,7 +1647,7 @@ type LexKey = (usize, f64, f64, f32, f64);
 /// would replace it.
 const C_TIE: f32 = 0.02;
 
-/// `a` beats `b`: `|V|`, spec miss, Θ lexicographically, then the C tier —
+/// `a` beats `b`: `|V|`, failed bounds, spec shortfall, Θ lexicographically, then the C tier —
 /// except that C within [`C_TIE`] is a tie decided by footprint. A feasible
 /// optimum is a vector (area, C, …) and a scalarisation must be a declared
 /// policy (Graeb 2007 ch.1); this is ours. Not transitive inside a C band;
@@ -1551,16 +1655,16 @@ const C_TIE: f32 = 0.02;
 /// reads as +∞, so it loses to any finite value and never sticks as incumbent.
 fn key_lt(a: &LexKey, b: &LexKey) -> bool {
     let nan_last = |x: f64| if x.is_nan() { f64::INFINITY } else { x };
-    let c = |k: &LexKey| if k.3.is_nan() { f32::INFINITY } else { k.3 };
-    let (a3, b3) = (c(a), c(b));
-    let head = |k: &LexKey| (k.0, nan_last(k.1), nan_last(k.2));
+    let c = |k: &LexKey| if k.4.is_nan() { f32::INFINITY } else { k.4 };
+    let (a4, b4) = (c(a), c(b));
+    let head = |k: &LexKey| (k.0, k.1, nan_last(k.2), nan_last(k.3));
     if head(a) != head(b) {
         return head(a) < head(b);
     }
-    if (a3 - b3).abs() <= C_TIE * a3.abs().min(b3.abs()) {
-        nan_last(a.4) < nan_last(b.4)
+    if (a4 - b4).abs() <= C_TIE * a4.abs().min(b4.abs()) {
+        nan_last(a.5) < nan_last(b.5)
     } else {
-        a3 < b3
+        a4 < b4
     }
 }
 
@@ -1576,7 +1680,7 @@ fn epoch_score(
     c_tier: f32,
     footprint_nm2: f64,
 ) -> (LexKey, RunStats) {
-    let key = lex_key(place, route, &signoff.report, budgets, None, c_tier, footprint_nm2);
+    let key = lex_key(place, route, &signoff.report, budgets, c_tier, footprint_nm2);
     let stats = RunStats {
         c_tier,
         place_hard: place.hard_violations.len(),
@@ -1594,7 +1698,6 @@ fn lex_key(
     route: &Report,
     signoff: &Report,
     budgets: &metadata::MetadataReport,
-    perf: Option<&perf::PerfResult>,
     c_tier: f32,
     footprint_nm2: f64,
 ) -> LexKey {
@@ -1609,7 +1712,7 @@ fn lex_key(
     let v = budgets.hard_violated() + own(place) + own(route) + checked;
     let theta = budgets.theta()
         + route.budget_violations.iter().filter(|x| !x.is_batch_row()).map(|x| x.margin as f64).sum::<f64>();
-    (v, perf.map_or(0.0, |p| p.residual), theta, c_tier, footprint_nm2)
+    (v, 0, 0.0, theta, c_tier, footprint_nm2)
 }
 
 /// The epoch key's C tier. With sensitivity rows: Σ_n w⁺_n·C_n(ground) +
@@ -1691,6 +1794,12 @@ fn check_injected(netlist: &pnr_core::Netlist, injected: &Macros, pdk: &Pdk) -> 
     Ok(())
 }
 
+/// Sidecar `em_front_row_cuts` (default `true`): EM counts a via group by its
+/// front row (REL-12), in `em_rules` and the detailed router alike.
+fn em_front_row(pdk: &Pdk) -> bool {
+    pdk.cell.get("em_front_row_cuts").and_then(serde_json::Value::as_bool).unwrap_or(true)
+}
+
 /// One hard [`analog::routing::Electromigration`] per routed (≥ 2-terminal)
 /// net: every routed segment and via against its layer's derated deck limit,
 /// on the currents `dr` records per terminal (`Routes::terms`; unknown
@@ -1705,6 +1814,7 @@ fn em_rules(
     metals: &[LayerId],
     cuts: &[elaborate::Cut],
     stack: Option<&'static analog::routing::Stack>,
+    front_row: bool,
     pdk: &Pdk,
 ) {
     use analog::routing::em::{Limit, MAX_LAYERS};
@@ -1734,7 +1844,7 @@ fn em_rules(
     }
     let rules: Vec<analog::routing::Electromigration> = (0..terminals.len())
         .filter(|&k| terminals[k] >= 2)
-        .map(|k| analog::routing::Electromigration { net: pnr_core::NetId(k as u16), limits, stack })
+        .map(|k| analog::routing::Electromigration { net: pnr_core::NetId(k as u16), limits, stack, front_row })
         .collect();
     problem.routing.hard.push(Box::new(rules));
 }
@@ -2519,13 +2629,13 @@ mod start_tests {
         let full: Vec<_> = (0..=MAX_LAYERS as u16).map(|l| (LayerId(l), lim)).collect();
 
         let mut p = problem();
-        crate::em_rules(&mut p, &nl, &full, &[LayerId(MAX_LAYERS as u16)], &[], None, &pdk);
+        crate::em_rules(&mut p, &nl, &full, &[LayerId(MAX_LAYERS as u16)], &[], None, true, &pdk);
         let rows: Vec<&str> = p.missing.iter().filter(|m| m.0 == "Electromigration").map(|m| m.1).collect();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(rows[0].contains("MAX_LAYERS"), "{rows:?}");
 
         let mut p = problem();
-        crate::em_rules(&mut p, &nl, &[], &[id], &[], None, &pdk);
+        crate::em_rules(&mut p, &nl, &[], &[id], &[], None, true, &pdk);
         let rows: Vec<&str> = p.missing.iter().filter(|m| m.0 == "Electromigration").map(|m| m.1).collect();
         assert_eq!(rows, [format!("deck EM limit on every routed and pin-access layer ({name} unchecked)")]);
     }
@@ -2533,10 +2643,10 @@ mod start_tests {
     /// C within the tie band goes to the smaller footprint; outside it, C wins.
     #[test]
     fn close_c_is_decided_by_area_and_far_c_by_c() {
-        let k = |c: f32, area: f64| (0usize, 0.0, 0.0, c, area);
+        let k = |c: f32, area: f64| (0usize, 0u32, 0.0, 0.0, c, area);
         assert!(crate::key_lt(&k(30.0, 265.0), &k(29.6, 385.0)), "1.3% more C, 31% less area");
         assert!(crate::key_lt(&k(29.0, 385.0), &k(30.0, 265.0)), "3.3% less C wins outright");
-        assert!(!crate::key_lt(&(1usize, 0.0, 0.0, 1.0, 1.0), &k(99.0, 999.0)), "a violation never wins on C");
+        assert!(!crate::key_lt(&(1usize, 0, 0.0, 0.0, 1.0, 1.0), &k(99.0, 999.0)), "a violation never wins on C");
     }
 
     use crate::metadata::{Arm, BudgetStatus, MetadataReport};
@@ -2551,7 +2661,7 @@ mod start_tests {
     }
 
     fn key(place: &Report, signoff: &Report, budgets: &MetadataReport) -> crate::LexKey {
-        crate::lex_key(place, &Report::default(), signoff, budgets, None, 0.0, 1.0)
+        crate::lex_key(place, &Report::default(), signoff, budgets, 0.0, 1.0)
     }
 
     /// |V| counts the 40 violated rules of a hard batch, not its one stage row.
@@ -2572,7 +2682,7 @@ mod start_tests {
             ..Default::default()
         };
         assert_eq!(place.budget_violations[0].margin, 500);
-        assert_eq!(key(&place, &Report::default(), &budgets).2, 500.0);
+        assert_eq!(key(&place, &Report::default(), &budgets).3, 500.0);
     }
 
     /// A deck warning is reported, not counted as a hard violation: the
@@ -2599,7 +2709,7 @@ mod start_tests {
     /// A NaN tier loses to a finite one, whichever side it is on.
     #[test]
     fn nan_loses() {
-        let (nan, finite) = ((0usize, f64::NAN, 0.0, 1.0, 1.0), (0usize, 5.0, 0.0, 1.0, 1.0));
+        let (nan, finite) = ((0usize, 0u32, f64::NAN, 0.0, 1.0, 1.0), (0usize, 0u32, 5.0, 0.0, 1.0, 1.0));
         assert!(crate::key_lt(&finite, &nan), "the finite key displaces a NaN incumbent");
         assert!(!crate::key_lt(&nan, &finite), "a NaN candidate never wins");
     }
@@ -2629,7 +2739,7 @@ mod start_tests {
         assert!((ca - 46.0).abs() < 1e-3 && (cb - 50.0).abs() < 1e-3, "c_tier A {ca}, B {cb}");
         let total = |m: &verify::CapMatrix| m.iter().map(|r| r.2).sum::<f64>();
         assert!(total(&a) > 6.0 * total(&b), "A carries 94 fF, B 15 fF");
-        assert!(crate::key_lt(&(0, 0.0, 0.0, ca, 1.0), &(0, 0.0, 0.0, cb, 1.0)), "A ranks better");
+        assert!(crate::key_lt(&(0, 0, 0.0, 0.0, ca, 1.0), &(0, 0, 0.0, 0.0, cb, 1.0)), "A ranks better");
 
         // Coupling by each end's own w⁺, summed over rows, clamped at 0:
         // vout1 0.01 + max(-0.005, 0) → 10/fF, vbn 0 + 0.002 → 2/fF, VSS 0.
@@ -2651,7 +2761,7 @@ mod start_tests {
         signoff.report.hard_violations = rows(&[&short]);
         let tier = crate::signoff_c_tier(&signoff, &net_names(), &classes(), &[]);
         assert!(tier.is_nan(), "shorted tier {tier}");
-        let (shorted, finite) = ((1usize, 0.0, 0.0, tier, 0.5), (1usize, 0.0, 0.0, 1000.0, 1.0));
+        let (shorted, finite) = ((1usize, 0u32, 0.0, 0.0, tier, 0.5), (1usize, 0u32, 0.0, 0.0, 1000.0, 1.0));
         assert!(crate::key_lt(&finite, &shorted) && !crate::key_lt(&shorted, &finite));
     }
 
@@ -2774,7 +2884,7 @@ mod common_node_tests {
         let cfg = crate::Config::default();
         let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
         let ann = crate::annotation_with(&pdk, &cfg.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
-        let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0 };
+        let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0, evidence: None, r_weight: Vec::new(), pair_weight: Vec::new(), beta_key: false };
         let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &Default::default(), &plan, true);
         let n = t.flow.cells.variants.len();
         let layout = pnr_core::Layout {

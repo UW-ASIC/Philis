@@ -143,6 +143,50 @@ pub struct MetadataReport {
     /// REL-10: FETs whose voltage rating could not be checked (a voltage
     /// unresolved, or no deck rule names the model). `0` without an op.
     pub voltage_unknown: usize,
+    /// PERF-14: the non-dominated promoted epochs with `|V| = 0` and no failed
+    /// bound, over every start and topology ([`pareto_insert`]). Empty from
+    /// [`build`]; the flow fills it. The winner stays the lexicographic one.
+    pub pareto: Vec<ParetoPoint>,
+    /// PERF-14: every promoted epoch of the winning search, in order;
+    /// `v`/`residual` let a caller re-rank under the pre-PERF-14 key.
+    pub epochs: Vec<ParetoPoint>,
+}
+
+/// One promoted epoch's metrics (PERF-14); `Layout` is not `Clone`, so no geometry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParetoPoint {
+    pub outer: u32,
+    pub iteration: u32,
+    pub v: usize,
+    /// Σ normalised spec miss ([`crate::perf::PerfResult::residual`]); `0` without scoring.
+    pub residual: f64,
+    pub min_beta: Option<f64>,
+    pub theta: f64,
+    pub c_tier: f32,
+    pub area_um2: f64,
+}
+
+/// Front size cap [policy].
+pub const PARETO_MAX: usize = 16;
+
+/// Inserts `p` unless dominated in (−min_beta [None = −∞], theta, c_tier, area_um2) or equal there to a kept
+/// point (first kept), removes points it dominates; over [`PARETO_MAX`] drops the largest-area point.
+pub fn pareto_insert(front: &mut Vec<ParetoPoint>, p: ParetoPoint) {
+    let obj = |q: &ParetoPoint| [-q.min_beta.unwrap_or(f64::NEG_INFINITY), q.theta, f64::from(q.c_tier), q.area_um2];
+    // `a` dominates `b`: no worse anywhere, better somewhere.
+    let dom = |a: &ParetoPoint, b: &ParetoPoint| {
+        let (a, b) = (obj(a), obj(b));
+        a.iter().zip(&b).all(|(x, y)| x <= y) && a.iter().zip(&b).any(|(x, y)| x < y)
+    };
+    if front.iter().any(|q| dom(q, &p) || obj(q) == obj(&p)) {
+        return;
+    }
+    front.retain(|q| !dom(&p, q));
+    front.push(p);
+    if front.len() > PARETO_MAX {
+        let worst = (0..front.len()).max_by(|&i, &j| front[i].area_um2.total_cmp(&front[j].area_um2)).expect("non-empty");
+        front.remove(worst);
+    }
 }
 
 impl MetadataReport {
@@ -318,6 +362,8 @@ pub fn build(
         unconstrained: Vec::new(),
         aging: Vec::new(),
         voltage_unknown: 0,
+        pareto: Vec::new(),
+        epochs: Vec::new(),
     }
 }
 
@@ -682,5 +728,40 @@ mod tests {
         assert!(!MetadataReport::default().to_string().contains("price at cap"));
         let r = MetadataReport { binding: vec!["WireLength".into()], ..MetadataReport::default() };
         assert!(r.to_string().contains("price at cap on the last epoch (search stopped binding): WireLength"), "{r}");
+    }
+
+    fn point(beta: f64, theta: f64, c_tier: f32, area_um2: f64) -> ParetoPoint {
+        ParetoPoint { outer: 0, iteration: 0, v: 0, residual: 0.0, min_beta: Some(beta), theta, c_tier, area_um2 }
+    }
+
+    #[test]
+    fn pareto_keeps_only_nondominated() {
+        let [a, b, c, d, e] = [point(3.0, 0.0, 10.0, 100.0), point(2.0, 0.0, 10.0, 100.0), point(1.0, 0.0, 5.0, 100.0), point(1.0, 0.0, 6.0, 100.0), point(0.5, 0.0, 20.0, 50.0)];
+        let mut front = Vec::new();
+        for p in [a.clone(), b.clone(), c.clone(), d.clone(), e.clone()] {
+            pareto_insert(&mut front, p);
+        }
+        assert_eq!(front.len(), 3, "{front:?}");
+        assert!([&a, &c, &e].iter().all(|p| front.contains(p)), "{front:?}");
+        // Reversed, B and D arrive first and are removed by A and C.
+        let mut front = Vec::new();
+        for p in [e.clone(), d, c.clone(), b, a.clone()] {
+            pareto_insert(&mut front, p);
+        }
+        assert_eq!(front.len(), 3, "{front:?}");
+        assert!([&a, &c, &e].iter().all(|p| front.contains(p)), "{front:?}");
+        // Equal objectives from another start: the first is kept, once.
+        let twin = ParetoPoint { outer: 1, iteration: 7, ..a.clone() };
+        pareto_insert(&mut front, twin);
+        assert_eq!(front.len(), 3, "{front:?}");
+        assert!(front.contains(&a), "{front:?}");
+
+        // β up, area up: mutually non-dominated.
+        let mut front = Vec::new();
+        for i in 0..17 {
+            pareto_insert(&mut front, point(f64::from(i), 0.0, 1.0, f64::from(i)));
+        }
+        assert_eq!(front.len(), PARETO_MAX);
+        assert!(front.iter().all(|p| p.area_um2 < 16.0), "{front:?}");
     }
 }

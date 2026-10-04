@@ -482,3 +482,116 @@ fn ota_probe_regions() {
     assert_eq!(facts("XM5").role, analog::intent::DeviceRole::CurrentSource);
     assert!(p.intent.diagnostics.iter().any(|d| d.kind == "probe_bias"));
 }
+
+/// PERF-12 acceptance: the flow reports EXT-17's evidence and RTE-21's router
+/// weights, and `to_evidence` on ota's schematic table exports R, V_T and
+/// process spread.
+#[test]
+fn ota_exports_sensitivities() {
+    use library::perf::{add_coupling, default_params, sensitivities, to_evidence, StepPolicy};
+    let Some(lib) = models() else { return };
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
+    // UGF moves with the load on `vout2`, so its `CouplingC` rows are nonzero (gain's are exactly 0 on ota).
+    let mut p = PerfConfig { scenarios: vec![scenario("tt_27", "tt", 27.0), scenario("ff_27", "ff", 27.0)], ..cfg(lib.clone()) };
+    p.testbenches = vec![BENCH.replace(".endc", "meas ac ugf when vdb(vout2)=0\n.endc")];
+    p.specs.push(Spec { metric: "ugf".into(), min: Some(1e3), max: None });
+    let c = library::Config {
+        feedback_iters: 2,
+        outer_iters: 1,
+        starts: 1,
+        op: Some(OpConfig { model_lib: Some(lib), ..OpConfig::default() }),
+        performance: Some(p.clone()),
+        ..library::Config::default()
+    };
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &c).expect("flow");
+    let s = &sol.metadata.sensitivity;
+    eprintln!("{s:#?}");
+    let ev = s.iter().find(|l| l.starts_with("evidence gain: ")).unwrap_or_else(|| panic!("{s:?}"));
+    let count = |k: &str| ev.split(&format!("{k} ")).nth(1).and_then(|r| r.split(',').next()?.parse::<usize>().ok()).unwrap_or(0);
+    assert!(count("d_c") > 0 && count("d_r") > 0 && count("d_vt") > 0, "{ev}");
+    assert!(!ev.ends_with("σ_f unknown"), "{ev}");
+    assert!(s.iter().any(|l| l.starts_with("r_weight vtail ")), "{s:?}");
+    let pair = |l: &&String| l.strip_prefix("pair_weight ").and_then(|r| r.rsplit(' ').next()?.parse::<f64>().ok());
+    assert!(s.iter().filter_map(|l| pair(&l)).any(|w| w > 0.0), "{s:?}");
+
+    let nl = ota();
+    let start = evaluate(&nl, &Parasitics::default(), &p, &[0, 1]).expect("schematic simulates");
+    let nets: Vec<pnr_core::NetId> = (0..nl.nets.len() as u16)
+        .map(pnr_core::NetId)
+        .filter(|n| !matches!(nl.nets[n.0 as usize].name.to_ascii_lowercase().as_str(), "vdd" | "vss"))
+        .collect();
+    let params = default_params(&nl, &nets);
+    let steps = StepPolicy::default();
+    let mut t = sensitivities(&nl, &p, start.bounds[0].scenario, &params, &[], &steps, &Parasitics::default()).expect("schematic simulates");
+    add_coupling(&mut t, &nl, &p, &nets, &steps, 64).expect("coupling rows");
+    let e = &to_evidence(&p, &[t], &start, &[], &nl).specs[0];
+    let net = |n: &str| pnr_core::NetId(nl.nets.iter().position(|x| x.name == n).unwrap() as u16);
+    let dev = |n: &str| pnr_core::ids::DeviceId(nl.devices.iter().position(|d| d.name == n).unwrap() as u16);
+    assert!(e.d_r.iter().any(|r| r.0 == net("vtail")), "{e:?}");
+    assert!(["XM1", "XM2"].iter().all(|n| e.d_vt.iter().any(|v| v.0 == dev(n))), "{e:?}");
+    assert!(e.proc.is_some(), "{e:?}");
+}
+
+/// PERF-14 acceptance: keyed on β, the winner of ota's search is at least as
+/// robust as the epoch the pre-PERF-14 key (|V|, spec miss, Θ, then C band,
+/// area) would pick from the same promoted epochs. Within the winning
+/// topology's search only (`epochs` is the winner's).
+///
+/// Limitation: vacuous on ota. In all 5 seeds every epoch has min β ≈ 907 (gain margin ≈ 13 dB over σ_f ≈
+/// 0.014 dB), far above [`BETA_TARGET`](library::robust::BETA_TARGET), so shortfall and failed are 0 throughout,
+/// the β key reduces to the old (|V|, Θ, C, area) order and both keys pick the same epoch. A `min` within
+/// ~3σ_f (≈ 0.04 dB) of the post-layout gain would make the tiers discriminate, but that is a per-fixture tune
+/// below epoch-to-epoch gain spread; the tier logic itself is pinned by `robust::tests`.
+#[test]
+fn beta_key_winner_is_at_least_as_robust() {
+    use library::metadata::ParetoPoint;
+    let Some(lib) = models() else { return };
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
+    let p = PerfConfig { scenarios: vec![scenario("tt_27", "tt", 27.0)], ..cfg(lib.clone()) };
+    // The pre-PERF-14 `key_lt`, on the reported metrics.
+    let old_lt = |a: &ParetoPoint, b: &ParetoPoint| {
+        let head = |k: &ParetoPoint| (k.v, k.residual, k.theta);
+        if head(a) != head(b) {
+            return head(a) < head(b);
+        }
+        if (a.c_tier - b.c_tier).abs() <= 0.02 * a.c_tier.abs().min(b.c_tier.abs()) {
+            a.area_um2 < b.area_um2
+        } else {
+            a.c_tier < b.c_tier
+        }
+    };
+    let sols: Vec<library::Solution> = std::thread::scope(|s| {
+        let hs: Vec<_> = (1..=5u64)
+            .map(|seed| {
+                let c = library::Config {
+                    feedback_iters: 4,
+                    outer_iters: 1,
+                    starts: 1,
+                    seed,
+                    op: Some(OpConfig { model_lib: Some(lib.clone()), ..OpConfig::default() }),
+                    performance: Some(p.clone()),
+                    ..library::Config::default()
+                };
+                let (spice, pdk) = (&spice, &pdk);
+                s.spawn(move || library::run(spice, pdk, &library::Macros::default(), &c).expect("flow"))
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().expect("run")).collect()
+    });
+    for (seed, sol) in (1..=5).zip(&sols) {
+        let e = &sol.metadata.epochs;
+        let winner = e.iter().find(|x| x.iteration == sol.stats.best_iteration).unwrap_or_else(|| panic!("seed {seed}: {e:?}"));
+        let old = e.iter().skip(1).fold(&e[0], |b, x| if old_lt(x, b) { x } else { b });
+        eprintln!("seed {seed}: winner {winner:?}, old {old:?}");
+        let b = |x: &ParetoPoint| x.min_beta.unwrap_or(f64::NEG_INFINITY);
+        assert!(winner.min_beta.is_some(), "seed {seed}: {winner:?}");
+        assert!(b(winner) >= b(old), "seed {seed}: winner {winner:?} old {old:?}");
+        if winner.v == 0 {
+            assert!(!sol.metadata.pareto.is_empty(), "seed {seed}");
+        }
+    }
+}

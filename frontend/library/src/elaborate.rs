@@ -298,6 +298,13 @@ pub(crate) fn stack(pdk: &Pdk) -> analog::routing::Stack {
                 antenna_sidewall_nm: rule.map_or(0.0, |r| r.1),
                 sheet_ohm: pdk.pex_f32(l, "sheet_res_ohm_sq").unwrap_or(0.0),
                 cut: pdk.routing_cuts.contains(&l),
+                thickness_nm: pdk.pex_f32(l, "thickness_nm").unwrap_or(0.0),
+                // Metals only: a cut is no lateral conductor.
+                latent_merge_nm: if pdk.routing_cuts.contains(&l) {
+                    0
+                } else {
+                    pdk.cell_f32("latent_merge_nm").map_or_else(|| pdk.min_spacing(l.0).unwrap_or(0), |v| v as i32)
+                },
             })
             .collect(),
         antenna_cumulative: rules.iter().flatten().any(|r| r.2),
@@ -454,7 +461,7 @@ pub(crate) fn layer_specs(pdk: &Pdk, layers: &[LayerId], cuts: &[Cut], pin_acces
 pub(crate) fn detailed_router(pdk: &Pdk, stack: &RoutingStack) -> dr::DetailedRoute {
     let RoutingStack { layers, cuts, pin_access, p0, .. } = stack;
     let (layers, cuts, pin_access, p0, specs) = (&layers[..], &cuts[..], *pin_access, *p0, stack.specs.clone());
-    let mut cfg = dr::DetailedCfg { grid: pdk.grid, ..dr::DetailedCfg::default() };
+    let mut cfg = dr::DetailedCfg { grid: pdk.grid, em_front_row: crate::em_front_row(pdk), ..dr::DetailedCfg::default() };
     cfg.pitch = p0;
     cfg.wire_width = specs.first().map_or(0, |s| s.wire);
     cfg.spacing = layers
