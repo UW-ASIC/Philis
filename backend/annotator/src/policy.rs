@@ -39,6 +39,14 @@ pub struct Policy {
     /// minority-carrier injector, Ω (GAP-03): Hastings §14.2 L43629–43638
     /// (below about 50 kΩ); H05-47 (10 kΩ usual, 50–100 kΩ conservative).
     pub inj_series_ohm: f64,
+    /// Yield reserve in spec σ held back from every margin (EXT-21): graeb_centering.txt
+    /// L4266–4281, three-σ design.
+    pub beta_target: f64,
+    /// Philis policy: a set's allowance is at most this many of its random 1σ (EXT-21).
+    pub max_eta: f32,
+    /// Philis policy: a set explaining less than this share of every spec's variance is
+    /// Minimal (EXT-21; < 1 %).
+    pub minor_weight: f32,
 }
 
 impl Default for Policy {
@@ -56,6 +64,9 @@ impl Default for Policy {
             ir_high_current_share: 0.1,
             pn_max_degree: 8,
             inj_series_ohm: 50_000.0,
+            beta_target: 3.0,
+            max_eta: 3.0,
+            minor_weight: 0.01,
         }
     }
 }

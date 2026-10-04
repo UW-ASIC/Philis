@@ -945,3 +945,23 @@ fn intent_axes_per_compound() {
     assert_eq!(p.axis_count, 1);
     assert!(p.blocks.len() > 1, "not per block");
 }
+
+/// EXT-21: offset f0 0, hi 5 (M 5) touches the DP (S 1) and the load (S 0.2);
+/// K 2 gives the DP 5/(2·1) = 2.5 mV (its cap 3·5/√10 = 4.74 does not bind)
+/// and the load min(12.5, 3·5/√20 = 3.35).
+#[test]
+fn ext21_ota_dp_allowance_below_load() {
+    use crate::evidence::{Evidence, Sensitivities, SpecSens};
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.avt_mv_um = [Some(5.0), Some(5.0)];
+    let d_vt = vec![(DeviceId(0), 1.0), (DeviceId(1), -1.0), (DeviceId(2), 0.2), (DeviceId(3), -0.2)];
+    let s = SpecSens { metric: "offset".into(), f0: 0.0, lo: None, hi: Some(5.0), proc: None, sigma_f: None, d_c: vec![], d_r: vec![], d_vt, d_t: vec![], d_cc: vec![] };
+    let ev = Evidence { sens: Some(Sensitivities { specs: vec![s] }), ..Evidence::default() };
+    let p = crate::annotate_with(&ota(), &cfg, &ev);
+    let allowance = |d: u16| p.intent.sets.iter().find(|s| s.members.iter().any(|m| m.device == DeviceId(d))).and_then(|s| s.allowance);
+    let (dp, load) = (allowance(0).expect("DP allowance"), allowance(2).expect("load allowance"));
+    assert!((dp - 2.5).abs() < 1e-4, "{dp}");
+    assert!(dp < load, "{dp} vs {load}");
+    let bare = annotate(&ota(), &cfg);
+    assert!(bare.intent.sets.iter().all(|s| s.allowance.is_none()));
+}

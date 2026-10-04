@@ -7,6 +7,7 @@
 //! ([`classify`]) and cell-tier ([`constraints`]) constraints from them, then
 //! reports conflicts ([`conflict`]).
 
+pub mod allocate;
 pub mod block;
 pub mod catalog;
 pub mod class;
@@ -263,6 +264,19 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         let user_kind = cfg.classes.iter().find(|c| covering(&c.0, s)).and_then(|c| c.2);
         s.kind = user_kind.unwrap_or_else(|| class::kind_of(s, kinds, netlist.devices[s.members[0].device.0 as usize].kind));
     }
+    // EXT-21: allowances split from spec sensitivities over the MOS sets a sidecar
+    // OffsetBudget does not cover (a user budget wins over a computed one).
+    if let Some(sens) = &ev.sens {
+        let (ix, ins): (Vec<usize>, Vec<allocate::SetIn>) = (0..intent.sets.len())
+            .filter(|&i| !cfg.offset_budgets.iter().any(|b| covering(&b.0, &intent.sets[i])))
+            .filter_map(|i| allocate::set_in(&intent.sets[i], netlist, cfg.process.avt_mv_um).map(|s| (i, s)))
+            .unzip();
+        let (out, diags) = allocate::allocate(&ins, sens, cfg.policy.beta_target, cfg.policy.max_eta);
+        for (i, (a, w)) in ix.into_iter().zip(out) {
+            (intent.sets[i].allowance, intent.sets[i].weight) = (a, w);
+        }
+        intent.diagnostics.extend(diags);
+    }
     let input = |i: usize| roles[i].contains(&BlockKind::DiffPair);
     let mut set_roles = Vec::with_capacity(intent.sets.len());
     let input_compounds: std::collections::HashSet<u16> = (0..intent.sets.len()).filter(|&j| input(j)).filter_map(|j| intent.sets[j].compound).collect();
@@ -291,8 +305,14 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         set_roles.push(role);
         let user = cfg.classes.iter().find(|c| covering(&c.0, s)).map(|c| c.1);
         let sigma = cfg.offset_budgets.iter().find(|b| covering(&b.0, s)).map(|b| b.1).or(cfg.offset_sigma_mv);
-        let mut ctx = class::ClassCtx { user, spec_6sigma: sigma.map(|v| 6.0 * v), role, diags: &mut intent.diagnostics };
-        let (c, src) = class::class_of(s, &mut ctx);
+        // class_of reads only mV limits, so an allocated allowance sets a Voltage set's 6σ target.
+        let alloc = s.allowance.filter(|_| s.kind == analog::intent::MatchKind::Voltage);
+        let mut ctx = class::ClassCtx { user, spec_6sigma: sigma.map(|v| 6.0 * v).or(alloc.map(|a| 6.0 * a)), role, diags: &mut intent.diagnostics };
+        let (mut c, mut src) = class::class_of(s, &mut ctx);
+        // EXT-21: a set explaining under `minor_weight` of every spec's variance is Minimal.
+        if src != analog::intent::ClassSource::User && s.weight.is_some_and(|w| w < cfg.policy.minor_weight) {
+            (c, src) = (analog::intent::MatchClass::Minimal, analog::intent::ClassSource::Spec);
+        }
         let source = |d: DeviceId| {
             let i = d.0 as usize;
             hg.terminals[i].iter().position(|t| t == "S" || t == "E").map(|k| hg.device_nets[i][k])

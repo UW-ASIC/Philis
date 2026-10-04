@@ -33,7 +33,7 @@
 
 use analog::intent::{ClassSource, Intent, MatchSpec};
 use analog::matching::class::{self, phi_arm, Family, MatchClass};
-use analog::matching::mismatch::{self, Budget, Coeffs, MatchKind};
+use analog::matching::mismatch::{self, Budget, Coeffs};
 use analog::placement::symmetry::SymmetryGroup;
 use analog::placement::{DtiBand, Isolation, MatchedSet, OrientCheck, OrientationSet, Proximity, Symmetry};
 use analog::Requirements;
@@ -45,12 +45,13 @@ use crate::block::{leaves, Block, BlockKind};
 use crate::size::Drawn;
 use crate::ProcessNumbers;
 
-/// A set's budget: an allocated Voltage allowance as itself (C13), else MAT-08's rule, with the
+/// A set's budget: an allocated MOS allowance as itself (C13), else MAT-08's rule, with the
 /// class limit only for a User/Spec class.
 fn set_budget(s: &MatchSpec, offset_sigma_mv: Option<f32>) -> Budget {
     match s.allowance {
-        // Current/Ratio allowances wait for EXT-21: `Budget::to_pct` would read them as mV.
-        Some(a) if s.kind == MatchKind::Voltage => Budget::Allowance(a),
+        // EXT-21 allocates MOS sets only, in mV ΔV_T: the ledger converts it to % for a
+        // Current set (`MatchedSet::budget_in`); any other family's ledger would misread it.
+        Some(a) if s.family == Family::Mos => Budget::Allowance(a),
         _ => {
             let limit = (s.class_source != ClassSource::Role).then(|| class::limit(s.family, s.kind, s.class)).flatten();
             mismatch::choose(offset_sigma_mv, None, limit, s.kind)
@@ -60,7 +61,7 @@ fn set_budget(s: &MatchSpec, offset_sigma_mv: Option<f32>) -> Budget {
 
 /// `d`'s entry of a deck `[nmos, pmos]` pair; `None` for a non-FET or a
 /// missing entry.
-fn by_polarity(nl: &Netlist, d: DeviceId, v: [Option<f32>; 2]) -> Option<f32> {
+pub(crate) fn by_polarity(nl: &Netlist, d: DeviceId, v: [Option<f32>; 2]) -> Option<f32> {
     match nl.devices[d.0 as usize].kind {
         DeviceKind::Nmos => v[0],
         DeviceKind::Pmos => v[1],
@@ -302,6 +303,7 @@ pub fn isolation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use analog::matching::mismatch::MatchKind;
 
     /// StrongARM-like stage: input pair `mn1`/`mn2` on a tail node, `mn0` the
     /// tail on `clk`, PMOS loads on `clk` (the StrongARM's precharge pair); plus `XS`, a lone clocked
@@ -415,7 +417,10 @@ mod tests {
         assert_eq!(set_budget(&spec(Voltage, ClassSource::User, None), None), Budget::Sigma1Mv(0.5));
         assert_eq!(set_budget(&spec(Voltage, ClassSource::Role, None), Some(0.4)), Budget::Sigma1Mv(0.4));
         assert_eq!(set_budget(&spec(Voltage, ClassSource::Role, Some(0.4)), None), Budget::Allowance(0.4));
-        assert_eq!(set_budget(&spec(Current, ClassSource::Role, Some(0.4)), None), eta);
+        assert_eq!(set_budget(&spec(Current, ClassSource::Role, Some(0.4)), None), Budget::Allowance(0.4));
+        let mut r = spec(Current, ClassSource::Role, Some(0.4));
+        r.family = Family::Resistor;
+        assert_eq!(set_budget(&r, None), eta);
     }
 
     /// C13: an allocated allowance reaches the ledger unchanged.
