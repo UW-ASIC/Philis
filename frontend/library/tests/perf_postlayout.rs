@@ -114,7 +114,7 @@ fn a_flow_scores_its_layout_in_simulation() {
     // Real models measure the schematic, so the floor gets a row with nets
     // (`row (N nets)`; an empty row reads `row with no measured nets`).
     let rows = &sol.metadata.budget_rows;
-    assert!(rows.len() == 1 && rows[0].starts_with("gain:min: row ("), "{rows:?}");
+    assert!(rows.len() == 2 && rows[0].ends_with(": active") && rows[1].starts_with("gain:min: row ("), "{rows:?}");
     assert_eq!(sol.stats.sim_failures, 0, "{:?}", sol.stats);
 }
 
@@ -177,6 +177,10 @@ fn a_flow_reports_the_worst_scenario_per_bound() {
     assert!(worst[0].contains(&format!(" at {} (", p.scenarios[lowest].name)), "gains {gains:?}: {worst:?}");
     let k: usize = worst[0].split("(over ").nth(1).and_then(|t| t.split(' ').next()).and_then(|k| k.parse().ok()).expect("active count");
     assert!(k <= 2 && worst[0].contains(" active of 3 scenarios)"), "{worst:?}");
+    let rows = &sol.metadata.budget_rows;
+    let active: Vec<_> = p.scenarios.iter().filter(|sc| rows.contains(&format!("scenario {}: active", sc.name))).collect();
+    let inactive = p.scenarios.iter().filter(|sc| rows.contains(&format!("scenario {}: inactive", sc.name))).count();
+    assert!(active.len() == k && inactive == 3 - k && active[0].name == "tt_27", "{rows:?}");
 }
 
 /// PERF-17: with an operating point, each supply's IR budget reaches
@@ -195,6 +199,8 @@ fn op_runs_carry_ir_limits() {
     assert!(drops.iter().all(|(n, _)| sol.intent.supplies.iter().any(|s| s.0 == *n)), "{:?}", sol.intent);
     let s = library::signoff(&sol, &pdk);
     assert!(s.coverage.em_ir.0 >= 1, "{:?}", s.coverage);
+    // `em_ir` also counts the EM rules the op currents arm: `ir_drop` itself ran over nodes.
+    assert!(s.coverage.ir.1 >= 1 && s.coverage.ir.0 == s.coverage.ir.1, "{:?}", s.coverage);
     assert!(!s.coverage.skipped_rules.iter().any(|(r, _)| r == "ir_drop"), "{:?}", s.coverage.skipped_rules);
 }
 

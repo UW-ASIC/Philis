@@ -327,6 +327,8 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 /// Also the active scenarios (PERF-10): nominal (index 0) plus each bound's
 /// worst scenario on the schematic, in order; every scenario when the
 /// schematic cannot be evaluated. Epochs are simulated over these only.
+/// The notes open with `"scenario {name}: active"` / `": inactive"` per
+/// scenario, ahead of the per-bound notes.
 fn performance_rows(
     netlist: &pnr_core::Netlist,
     pdk: &Pdk,
@@ -352,9 +354,21 @@ fn performance_rows(
         notes.iter().for_each(|n| eprintln!("[perf] {n}"));
         notes
     };
+    let scenario_notes = |active: &[usize]| -> Vec<String> {
+        let notes: Vec<String> = p
+            .scenarios()
+            .iter()
+            .enumerate()
+            .map(|(i, sc)| format!("scenario {}: {}", sc.name, if active.contains(&i) { "active" } else { "inactive" }))
+            .collect();
+        notes.iter().for_each(|n| eprintln!("[perf] {n}"));
+        notes
+    };
     let ann = annotation(pdk, &cfg.annotation);
     let Some(af_per_um) = ann.process.wire_af_per_um else {
-        return (Vec::new(), notes(&[], "deck has no wire capacitance"), all);
+        let mut out = scenario_notes(&all);
+        out.extend(notes(&[], "deck has no wire capacitance"));
+        return (Vec::new(), out, all);
     };
     let classes = annotate(netlist, &ann).net_classes;
     let nets: Vec<pnr_core::NetId> = classes
@@ -371,18 +385,20 @@ fn performance_rows(
                 active.push(b.scenario);
             }
         }
-        for (i, sc) in p.scenarios().iter().enumerate() {
-            eprintln!("[perf] scenario {}: {}", sc.name, if active.contains(&i) { "active" } else { "inactive" });
-        }
         perf::sensitivities(netlist, p, &names, 10_000.0, &active).map(|s| (s, active))
     });
     match sens {
         Ok((s, active)) => {
             let rows = perf::budget_rows(p, &s, &nets, af_per_um / 1000.0);
-            let notes = notes(&rows, "not measured at the schematic");
-            (rows, notes, active)
+            let mut out = scenario_notes(&active);
+            out.extend(notes(&rows, "not measured at the schematic"));
+            (rows, out, active)
         }
-        Err(e) => (Vec::new(), notes(&[], &format!("sensitivities unavailable: {e}")), all),
+        Err(e) => {
+            let mut out = scenario_notes(&all);
+            out.extend(notes(&[], &format!("sensitivities unavailable: {e}")));
+            (Vec::new(), out, all)
+        }
     }
 }
 
@@ -1939,9 +1955,11 @@ mod start_tests {
         assert!(sol.stats.sim_failures >= 1, "{:?}", sol.stats);
         assert_eq!(sol.metadata.sim_failures, sol.stats.sim_failures);
         let rows = &sol.metadata.budget_rows;
-        assert_eq!(rows.len(), 2, "{rows:?}");
-        assert!(rows[0].starts_with("gain:min: no row (sensitivities unavailable"), "{rows:?}");
-        assert!(rows[1].starts_with("gain:max: no row (sensitivities unavailable"), "{rows:?}");
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        // Unevaluated, every scenario stays active (here the one `sim` implies).
+        assert!(rows[0].starts_with("scenario ") && rows[0].ends_with(": active"), "{rows:?}");
+        assert!(rows[1].starts_with("gain:min: no row (sensitivities unavailable"), "{rows:?}");
+        assert!(rows[2].starts_with("gain:max: no row (sensitivities unavailable"), "{rows:?}");
         let text = sol.metadata.to_string();
         assert!(text.contains(&format!("simulations failed: {}", sol.stats.sim_failures)), "{text}");
         assert!(text.contains("budget gain:max: no row"), "{text}");

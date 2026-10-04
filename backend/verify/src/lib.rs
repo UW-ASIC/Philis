@@ -86,6 +86,9 @@ pub struct Coverage {
     /// `Outcome::Ran` with `examined > 0` (a rule that ran over no node
     /// checked nothing).
     pub em_ir: (u32, u32),
+    /// The same `(ran, in deck)` over `ir_drop` alone: `em_ir` cannot tell
+    /// a grid drop check from the EM rules an operating point arms.
+    pub ir: (u32, u32),
 }
 
 /// GPurify's layout-only range checks, recorded `Skipped(NotInDeck)` because
@@ -313,9 +316,14 @@ fn harvest(checker: &Checker, summary: &Summary, s: &mut Signoff) {
     s.coverage.skipped_rules = checker.skipped_rules().into_iter().map(|(r, why)| (r.to_string(), why)).collect();
     for r in &out.runs {
         let name = checker.rule_name(r.rule);
+        let ran = u32::from(r.outcome == gdsverify::check::report::Outcome::Ran && r.examined > 0);
         if name.starts_with("EM") || name == "ir_drop" {
             s.coverage.em_ir.1 += 1;
-            s.coverage.em_ir.0 += u32::from(r.outcome == gdsverify::check::report::Outcome::Ran && r.examined > 0);
+            s.coverage.em_ir.0 += ran;
+        }
+        if name == "ir_drop" {
+            s.coverage.ir.1 += 1;
+            s.coverage.ir.0 += ran;
         }
     }
     s.report.cost = checker.total_cap_ff();
