@@ -5,30 +5,38 @@
 //!
 //! | kind          | emits                                                    |
 //! |---------------|----------------------------------------------------------|
-//! | DiffPair      | Symmetry, MatchingPair, ThermalGradient, centroid sides, DTI |
-//! | CurrentMirror | Symmetry, MatchingPair, Proximity, ThermalGradient, sides, DTI |
-//! | Load          | Symmetry, MatchingPair, ThermalGradient, sides, DTI      |
+//! | DiffPair      | Symmetry, MatchedSet (Voltage), Orientation, DTI         |
+//! | CurrentMirror | Symmetry, MatchedSet (Current), Orientation, Proximity,  |
+//! |               | DTI                                                      |
+//! | Load          | Symmetry, MatchedSet (Current), Orientation, DTI         |
+//! | CascodePair   | Symmetry, MatchedSet (Current), Orientation, DTI         |
 //! | Stack         | Proximity                                                |
 //!
 //! Every matched pair mirrors about its stage axis (a pair merged into one cell
-//! centres on it). A stage holding a diff pair is differential: each member
-//! outside a pair (the tail) is also self-symmetric with a Proximity pull to
-//! the input pair.
+//! centres on it), except one sharing a device with an earlier pair's Symmetry
+//! (a multi-output mirror's reference): it keeps MatchedSet, Orientation,
+//! Proximity and DTI but no Symmetry. A stage holding a diff
+//! pair is differential: each declared self (tail, shared bias) is also
+//! self-symmetric with a Proximity pull to the input pair.
 //!
 //! One batch per pair (per-batch criticality weights each pair by its own
 //! urgency; one merged batch regressed the OTA). Arms: `SymmetryGroup` (one per stage) and `DtiBand` are hard + cost — the cost
 //! copy is the gradient toward the hard set (and what prices dp's DTI branch
-//! flip). `ThermalGradient`, `CentroidGroup` and `Proximity` (MAT-07, a
-//! distance allowance) are budget + cost. `MatchingPair` is budget + cost when
-//! the deck gives `A_VT` and `S_VT`, else a cost-only pull. Placement owns only the
-//! distance term of Pelgrom; area is the cell generator's.
+//! flip). `MatchedSet` (one pair's gradient, thermal and LOD terms against one
+//! allowance, plus coincidence when its unit counts admit a centroid row) and
+//! `Proximity` (MAT-07, a distance allowance) are budget + cost; a
+//! `MatchedSet` pair without deck data or units reads unknown and only pulls.
+//! Placement owns the systematic terms of Pelgrom; area is the cell generator's.
+//! `Orientation` (MAT-05) is Axis hard (a quarter-turned partner is illegal)
+//! and Φ budget only: Φ changes by a discrete flip, so a cost copy has no
+//! gradient to give; Θ prices it.
 //!
 //! Matching and thermal budgets come from the netlist's gate areas and the
 //! deck's mismatch data; without them the documented fallbacks apply.
 
-use analog::placement::cc::CentroidGroup;
+use analog::matching::mismatch::{Budget, Coeffs, MatchKind};
 use analog::placement::symmetry::SymmetryGroup;
-use analog::placement::{DtiBand, Isolation, MatchingPair, Proximity, Symmetry, ThermalGradient};
+use analog::placement::{DtiBand, Isolation, MatchedSet, OrientCheck, OrientationSet, Proximity, Symmetry};
 use analog::Requirements;
 use pnr_core::ids::{AxisId, BranchId, DeviceId, Target};
 use pnr_core::layout::Layout;
@@ -37,12 +45,6 @@ use pnr_core::{DeviceKind, Netlist};
 use crate::block::{leaves, Block, BlockKind};
 use crate::ProcessNumbers;
 
-/// ponytail: a fixed ΔT limit when the deck gives no `A_VT` or dVT/dT to
-/// derive one from (see [`Pelgrom::thermal_limit_mc`]); a tuning number.
-const THERMAL_MAX_DELTA_MC: i32 = 500;
-/// Held back from the thermal spec so a converged run lands inside it.
-const THERMAL_MARGIN_PCT: u8 = 20;
-const PROXIMITY_NM: i32 = 5_000;
 /// Placement's share η of a matched pair's mismatch when no offset budget is
 /// given: the gradient term may reach this fraction of the random term the
 /// sizing bought (σ grows ≤ 4.4%).
@@ -55,51 +57,9 @@ fn gate_um2(nl: &Netlist, d: DeviceId) -> f32 {
     crate::gate_um2(&nl.devices[d.0 as usize])
 }
 
-/// A matched pair's allowance for systematic offset beyond its random one,
-/// `η·σ_rand`, mV: `η` as the matching rules allocate it (from
-/// `offset_sigma_mv` when set). `None` without `A_VT` or a gate area.
-#[must_use]
-pub fn systematic_allowance_mv(avt: Option<f32>, gate_um2: f32, offset_sigma_mv: Option<f32>) -> Option<f32> {
-    let pel = Pelgrom::new(avt, gate_um2, &ProcessNumbers::default(), offset_sigma_mv);
-    pel.sigma_rand_mv.map(|s| pel.eta * s)
-}
-
-/// A matched set's Pelgrom numbers (Pelgrom & Duinmaijer 1988 eq.(1)).
-#[derive(Clone, Copy)]
-struct Pelgrom {
-    /// Random term `σ_rand = A_VT/√(W·L)`, mV; `None` without `A_VT` or a gate.
-    sigma_rand_mv: Option<f32>,
-    /// η = allowed `σ_grad/σ_rand`.
-    eta: f32,
-    /// `S_VT/A_VT`, 1/µm²; `0` = unknown.
-    s_over_a: f32,
-}
-
-impl Pelgrom {
-    /// `avt` = the set's (tightest) `A_VT`, mV·µm; `gate` = its W·L, µm².
-    /// With an offset budget σ_b the gradient may take what the random term
-    /// leaves in quadrature: `η = √(σ_b² − σ_rand²)/σ_rand`, so
-    /// `D ≤ η·A/(S·√WL)`; `η = 0` means the sizing alone spends the budget.
-    fn new(avt: Option<f32>, gate: f32, p: &ProcessNumbers, offset_sigma_mv: Option<f32>) -> Self {
-        let sigma_rand_mv = avt.filter(|&a| a > 0.0 && gate > 0.0).map(|a| a / gate.sqrt());
-        let eta = match (sigma_rand_mv, offset_sigma_mv) {
-            (Some(r), Some(b)) => (b * b - r * r).max(0.0).sqrt() / r,
-            _ => GRADIENT_SHARE,
-        };
-        let s_over_a = avt.zip(p.svt_uv_per_um).filter(|&(a, s)| a > 0.0 && s > 0.0).map_or(0.0, |(a, s)| s * 1e-3 / a);
-        Self { sigma_rand_mv, eta, s_over_a }
-    }
-
-    /// |ΔT| limit, m°C: the same allowance `η·σ_rand` spent as `TC·ΔT`
-    /// (Hastings 3e eq.8.23, PDF p.388: mismatch ∝ TC·d·∂T/∂x), `tc` = the
-    /// pair's polarity's |dVT/dT|, µV/K. Fixed fallback without `A_VT` or TC.
-    fn thermal_limit_mc(self, tc: Option<f32>) -> i32 {
-        match (self.sigma_rand_mv, tc) {
-            // mV → µV, / (µV/K) → K, → mK.
-            (Some(r), Some(tc)) if tc > 0.0 => ((self.eta * r * 1e3 / tc * 1e3) as i32).max(1),
-            _ => THERMAL_MAX_DELTA_MC,
-        }
-    }
+/// The pair budget: the 1σ offset when given, else [`GRADIENT_SHARE`].
+fn budget(offset_sigma_mv: Option<f32>) -> Budget {
+    offset_sigma_mv.map_or(Budget::Eta(GRADIENT_SHARE), Budget::Sigma1Mv)
 }
 
 /// `d`'s entry of a deck `[nmos, pmos]` pair; `None` for a non-FET or a
@@ -119,16 +79,17 @@ fn avt(nl: &Netlist, p: &ProcessNumbers, d: DeviceId) -> Option<f32> {
 
 /// Build the placement [`Requirements`] from the recognised blocks.
 ///
-/// A `MatchingPair` is a priced budget only when the deck carries its
-/// polarity's `A_VT` and the process `S_VT`; without them it is a pull whose
-/// check reads unknown. `offset_sigma_mv` (1σ input-referred offset a pair
-/// may spend) sets η; absent, [`GRADIENT_SHARE`].
+/// A `MatchedSet` pair is priced against its allowance when the deck carries
+/// its polarity's `A_VT`; the terms whose coefficient is missing (`S_VT`, TC,
+/// `KVTH0`) spend nothing. `offset_sigma_mv` (1σ input-referred offset a pair
+/// may spend) sets the allowance; absent, [`GRADIENT_SHARE`]`·σ_rand`.
 #[must_use]
 pub fn placement(
     blocks: &[Block],
     nl: &Netlist,
     p: &ProcessNumbers,
     offset_sigma_mv: Option<f32>,
+    policy: &crate::policy::Policy,
 ) -> Requirements<Layout> {
     let dti_rule = p.dti;
     let mut r = Requirements::<Layout>::default();
@@ -142,12 +103,13 @@ pub fn placement(
             .filter(|l| l.devices.len() == 2)
             .map(|l| (l.kind, l.devices[0], l.devices[1]))
             .collect();
-        let (mut syms, mut a_side, mut b_side) = (Vec::new(), Vec::new(), Vec::new());
+        let mut syms = Vec::new();
+        let mut in_sym: Vec<DeviceId> = Vec::new();
 
         for &(kind, a, b) in &pairs {
-            let prox = vec![Proximity { a: td(a), b: td(b), max_distance_nm: PROXIMITY_NM }];
+            let prox = vec![Proximity { a: td(a), b: td(b), max_distance_nm: policy.proximity_nm }];
             match kind {
-                BlockKind::DiffPair | BlockKind::CurrentMirror | BlockKind::Load => {}
+                BlockKind::DiffPair | BlockKind::CurrentMirror | BlockKind::Load | BlockKind::CascodePair => {}
                 BlockKind::Stack => {
                     r.budget.push(Box::new(prox.clone()));
                     r.cost.push(Box::new(prox));
@@ -155,32 +117,36 @@ pub fn placement(
                 }
                 BlockKind::Group | BlockKind::Glue => continue,
             }
-            syms.push(Symmetry { a: td(a), b: td(b), axis });
-            let gate = gate_um2(nl, a).min(gate_um2(nl, b));
-            let pel = Pelgrom::new(avt(nl, p, a), gate, p, offset_sigma_mv);
-            let pair = vec![MatchingPair {
-                a: td(a),
-                b: td(b),
-                gate_um2: gate,
-                gradient_share: pel.eta,
-                gradient_per_avt_um2: pel.s_over_a,
-            }];
-            if pel.s_over_a > 0.0 {
-                r.budget.push(Box::new(pair.clone()));
+            // ponytail: pairwise emission; a multi-output mirror's pairs share their reference.
+            let shared = in_sym.contains(&a) || in_sym.contains(&b);
+            if !shared {
+                syms.push(Symmetry { a: td(a), b: td(b), axis });
+                in_sym.extend([a, b]);
             }
-            r.cost.push(Box::new(pair));
+            let set = MatchedSet {
+                members: vec![a, b],
+                kind: if kind == BlockKind::DiffPair { MatchKind::Voltage } else { MatchKind::Current },
+                mos: matches!(nl.devices[a.0 as usize].kind, DeviceKind::Nmos | DeviceKind::Pmos),
+                coeffs: Coeffs {
+                    avt_mv_um: avt(nl, p, a),
+                    svt_uv_per_um: p.svt_uv_per_um,
+                    kvth0_mv_um: by_polarity(nl, a, p.lod_kvth0_mv_um),
+                    tc_uv_per_k: by_polarity(nl, a, p.vt_tc_uv_per_k),
+                },
+                budget: budget(offset_sigma_mv),
+                gate_um2: vec![gate_um2(nl, a), gate_um2(nl, b)],
+                tol_nm: p.lattice_nm.max(1) as f32 / 2.0,
+                cell_of: Vec::new(),
+            };
+            r.budget.push(Box::new(set.clone()));
+            r.cost.push(Box::new(set));
+            let orient = |check| OrientationSet { members: vec![a, b], check, cell_of: Vec::new() };
+            r.hard.push(Box::new(orient(OrientCheck::Axis)));
+            r.budget.push(Box::new(orient(OrientCheck::Phi)));
             if kind == BlockKind::CurrentMirror {
                 r.budget.push(Box::new(prox.clone()));
                 r.cost.push(Box::new(prox));
             }
-            let therm = vec![ThermalGradient {
-                a: td(a),
-                b: td(b),
-                max_delta_mc: pel.thermal_limit_mc(by_polarity(nl, a, p.vt_tc_uv_per_k)),
-                margin_pct: THERMAL_MARGIN_PCT,
-            }];
-            r.cost.push(Box::new(therm.clone()));
-            r.budget.push(Box::new(therm));
             // Matched devices share one trench. Ids are dense in emission order,
             // which is deterministic, so a branch never transfers between pairs.
             if let Some((s_max_nm, d_dti_nm)) = dti_rule {
@@ -193,18 +159,15 @@ pub fn placement(
                     seed_isolate: false,
                 });
             }
-            a_side.push(a);
-            b_side.push(b);
         }
         // Every stage mirrors its matched pairs (diff pair, mirror, load) about
         // its one axis (MAT-06; Lampaert 1999 §4.6–4.7 symmetry groups). A
-        // differential stage also puts each member outside any pair (the
-        // tail) on the axis, near the input pair.
+        // differential stage also puts each declared self (tail, shared bias)
+        // on the axis, near the input pair.
         if let Some(dp) = pairs.iter().find(|p| p.0 == BlockKind::DiffPair) {
-            let paired: Vec<DeviceId> = pairs.iter().flat_map(|p| [p.1, p.2]).collect();
-            for &d in stage.devices.iter().filter(|d| !paired.contains(d)) {
+            for &d in &stage.selfs {
                 syms.push(Symmetry { a: td(d), b: td(d), axis });
-                let tail = [dp.1, dp.2].map(|m| Proximity { a: td(d), b: td(m), max_distance_nm: PROXIMITY_NM }).to_vec();
+                let tail = [dp.1, dp.2].map(|m| Proximity { a: td(d), b: td(m), max_distance_nm: policy.proximity_nm }).to_vec();
                 r.budget.push(Box::new(tail.clone()));
                 r.cost.push(Box::new(tail));
             }
@@ -212,29 +175,6 @@ pub fn placement(
         if !syms.is_empty() {
             r.cost.push(Box::new(SymmetryGroup(syms.clone())));
             r.hard.push(Box::new(SymmetryGroup(syms)));
-        }
-        if !a_side.is_empty() {
-            // Tightest member: the largest gate and the smallest `A_VT` (any
-            // member without one leaves the gradient half unknown).
-            let members = || a_side.iter().chain(&b_side);
-            let gate = members().map(|&d| gate_um2(nl, d)).fold(0.0, f32::max);
-            let a_min = members().map(|&d| avt(nl, p, d)).try_fold(f32::INFINITY, |m, a| a.map(|a| m.min(a)));
-            let pel = Pelgrom::new(a_min, gate, p, offset_sigma_mv);
-            // LOD: the members' largest KVTH0 over the random σ.
-            let kvth0 = members().filter_map(|&d| by_polarity(nl, d, p.lod_kvth0_mv_um)).fold(0.0, f32::max);
-            let lod_per_sigma_um = pel.sigma_rand_mv.filter(|&s| s > 0.0).map_or(0.0, |s| kvth0 / s);
-            let cc = CentroidGroup {
-                a_side,
-                b_side,
-                gate_um2: gate,
-                gradient_share: pel.eta,
-                gradient_per_avt_um2: pel.s_over_a,
-                lod_per_sigma_um,
-                cell_of: Vec::new(),
-            };
-            // Always budgeted: coincidence in an interleaved array needs no deck data.
-            r.budget.push(Box::new(cc.clone()));
-            r.cost.push(Box::new(cc));
         }
     }
 
@@ -248,76 +188,178 @@ pub fn placement(
 /// Isolation saturates beyond this multiple of the epi thickness (Charbon et
 /// al. 2001 ch.8, PDF p.127: 2.5–5×; Su et al. 4×): farther buys nothing.
 const ISOLATION_EPI_MULTIPLE: i32 = 4;
-/// ponytail: nominal epi when the deck has none, so the pull still acts;
-/// the check then reads unknown. The decks' `p_epi_thickness` is not it: a
-/// guard-ring depth default (3000 nm in all four decks, finfet included), and
-/// sky130 is bulk p-substrate, not epi on p+, where Charbon's plateau does not
-/// hold (isolation keeps improving with distance). Read `cell.epi_thickness_nm`.
+/// ponytail: nominal epi when the distance is uncalibrated, so the pull still
+/// acts; the check then reads unknown. The decks' `p_epi_thickness` is not it:
+/// a guard-ring depth default (3000 nm in all four decks, finfet included),
+/// and sky130 is bulk p-substrate, not epi on p+, where Charbon's plateau does
+/// not hold (isolation keeps improving with distance; SUB-32).
 const NOMINAL_EPI_NM: i32 = 2_500;
 
 /// Substrate isolation (ENV-04; Charbon 2001 ch.2 injection → propagation →
 /// reception): every device on a Clock-class net (an injector) is kept
 /// `ISOLATION_EPI_MULTIPLE·t_epi` edge-to-edge from every `sensitive`
-/// (matched) device. Budget + cost with the deck's epi thickness; without it a
-/// cost-only pull at [`NOMINAL_EPI_NM`]. Returns whether any rule was emitted.
+/// (matched) device, except where `same_group(aggressor, victim)`: a stage's
+/// own clocked tail sits by its pair by design (AA-13), so isolating them
+/// contradicts the stage's Proximity.
+///
+/// Budget + cost only on `EpiOnLowRes` with `epi_nm` known (the plateau
+/// distance). Otherwise a cost-only pull at [`NOMINAL_EPI_NM`], and the
+/// returned `Some(why)` is the `missing` input that leaves it unknown: bulk has
+/// no plateau distance. `None` when calibrated or nothing was emitted.
 pub fn isolation(
     hg: &pnr_core::BipartiteHypergraph,
     classes: &[analog::metadata::NetClassification],
     sensitive: &[bool],
+    same_group: &dyn Fn(usize, usize) -> bool,
+    kind: pnr_core::SubstrateKind,
     epi_nm: Option<i32>,
     r: &mut Requirements<Layout>,
-) -> bool {
+) -> Option<&'static str> {
     use analog::metadata::NetClass;
+    use pnr_core::SubstrateKind;
     let clocked = |d: usize| hg.device_nets[d].iter().any(|n| classes[n.0 as usize].class == NetClass::Clock);
     let n = hg.device_nets.len();
-    let aggressors: Vec<usize> = (0..n).filter(|&d| clocked(d) && !sensitive[d]).collect();
-    let min_distance_nm = ISOLATION_EPI_MULTIPLE * epi_nm.unwrap_or(NOMINAL_EPI_NM);
+    let calibrated = match (kind, epi_nm) {
+        (SubstrateKind::EpiOnLowRes, Some(epi)) => Ok(epi),
+        (SubstrateKind::EpiOnLowRes, None) => Err("deck epi_thickness_nm"),
+        (SubstrateKind::Bulk, _) => Err("bulk substrate: no plateau distance"),
+        (SubstrateKind::Unknown, _) => Err("substrate kind unknown"),
+    };
+    let min_distance_nm = ISOLATION_EPI_MULTIPLE * calibrated.unwrap_or(NOMINAL_EPI_NM);
     let dev = |d: usize| Target::Device(DeviceId(d as u16));
-    let rules: Vec<Isolation> = aggressors
-        .iter()
-        .flat_map(|&a| (0..n).filter(|&v| sensitive[v]).map(move |v| Isolation { a: dev(a), b: dev(v), min_distance_nm }))
+    let rules: Vec<Isolation> = (0..n)
+        .filter(|&a| clocked(a) && !sensitive[a])
+        .flat_map(|a| {
+            (0..n).filter(move |&v| sensitive[v] && !same_group(a, v)).map(move |v| Isolation { a: dev(a), b: dev(v), min_distance_nm })
+        })
         .collect();
     if rules.is_empty() {
-        return false;
+        return None;
     }
-    if epi_nm.is_some() {
+    if calibrated.is_ok() {
         r.budget.push(Box::new(rules.clone()));
     }
     r.cost.push(Box::new(rules));
-    true
+    calibrated.err()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn deck() -> ProcessNumbers {
-        ProcessNumbers { avt_mv_um: [Some(30.0), Some(35.0)], svt_uv_per_um: Some(4.0), vt_tc_uv_per_k: [Some(765.0), Some(1_850.0)], ..ProcessNumbers::default() }
+    /// StrongARM-like stage: input pair `mn1`/`mn2` on a tail node, `mn0` the
+    /// tail on `clk`, PMOS loads on `clk` (the StrongARM's precharge pair); plus `XS`, a lone clocked
+    /// switch outside every block. Nets: 0=outp 1=inp 2=tail 3=VSS 4=outn
+    /// 5=inn 6=clk 7=VDD 8=sw 9=sw2.
+    fn strongarm_like() -> (Netlist, crate::AnnotationConfig) {
+        use crate::tests::{fet, nets};
+        let nl = Netlist {
+            devices: vec![
+                fet("mn1", DeviceKind::Nmos, 1, 0, 2, 3, 10_000, 1_000),
+                fet("mn2", DeviceKind::Nmos, 5, 4, 2, 3, 10_000, 1_000),
+                fet("mp3", DeviceKind::Pmos, 6, 0, 7, 7, 20_000, 1_000),
+                fet("mp4", DeviceKind::Pmos, 6, 4, 7, 7, 20_000, 1_000),
+                fet("mn0", DeviceKind::Nmos, 6, 2, 3, 3, 40_000, 1_000),
+                fet("XS", DeviceKind::Nmos, 6, 8, 9, 3, 1_000, 150),
+            ],
+            nets: nets(&["outp", "inp", "tail", "VSS", "outn", "inn", "clk", "VDD", "sw", "sw2"]),
+            ..Default::default()
+        };
+        let cfg = crate::AnnotationConfig {
+            supply_nets: vec!["VDD".into()],
+            ground_nets: vec!["VSS".into()],
+            clock_nets: vec!["clk".into()],
+            ..crate::AnnotationConfig::default()
+        };
+        (nl, cfg)
     }
 
+    type Arm = Vec<Box<dyn analog::RuleBatch<Layout>>>;
+
+    /// Device id pairs of every `Isolation` batch in `arm`.
+    fn isolated(arm: &Arm) -> Vec<(u32, u32)> {
+        let mut ids = Vec::new();
+        arm.iter().filter(|b| b.kind().ends_with("::Isolation")).for_each(|b| b.touched(&mut ids));
+        ids.chunks(2).map(|p| (p[0], p[1])).collect()
+    }
+
+    /// Point devices all at the origin except `XS` (id 5) at `x`: every edge
+    /// gap from `XS` is `x`.
+    fn xs_at(x: i32) -> Layout {
+        let n = 6;
+        Layout {
+            x: (0..n).map(|d| if d == 5 { x } else { 0 }).collect(),
+            y: vec![0; n],
+            hw: vec![0; n],
+            hh: vec![0; n],
+            axis: vec![0; 8],
+            groups: vec![],
+            orient: vec![pnr_core::Orient::default(); n],
+            variant: vec![0; n],
+            branch: Vec::new(),
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        }
+    }
+
+    /// The smallest `XS` distance (nm, 1 nm resolution) at which `arm`'s
+    /// Isolation batches are all satisfied.
+    fn isolation_distance(arm: &Arm) -> i32 {
+        let ok = |x| arm.iter().filter(|b| b.kind().ends_with("::Isolation")).all(|b| b.violations(&xs_at(x)) == 0);
+        let (mut lo, mut hi) = (0, 1_000_000);
+        assert!(ok(hi) && !ok(lo));
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if ok(mid) { hi = mid } else { lo = mid }
+        }
+        hi
+    }
+
+    /// REL C3 / AA-13: the stage's clocked tail sits by its pair (Proximity);
+    /// isolating it from the pair would contradict that. A clocked device
+    /// outside the stage is still isolated from the pair.
     #[test]
-    fn pelgrom_numbers_come_from_the_deck_and_the_budget() {
-        // Pelgrom 1988 Table 1: n-channel S/A = 4 µV/µm / 30 mV·µm ≈ 1.33e-4 /µm².
-        let p = Pelgrom::new(Some(30.0), 100.0, &deck(), None);
-        assert!((p.s_over_a - 1.333e-4).abs() < 1e-6);
-        assert_eq!(p.eta, GRADIENT_SHARE, "no budget: the heuristic share");
-        assert!((p.sigma_rand_mv.unwrap() - 3.0).abs() < 1e-6, "30/√100");
+    fn a_clocked_tail_is_not_isolated_from_its_own_pair() {
+        let (nl, cfg) = strongarm_like();
+        let p = crate::annotate(&nl, &cfg);
+        let (mn1, mn2, mn0, xs) = (0u32, 1, 4, 5);
+        let block = |d: u32| p.blocks.iter().position(|b| b.kind != BlockKind::Glue && b.devices.contains(&DeviceId(d as u16)));
+        assert!(block(mn0).is_some() && block(mn0) == block(mn1), "the tail is in the pair's stage");
+        let iso = isolated(&p.placement.cost);
+        assert!(!iso.iter().any(|&(a, v)| a == mn0 && (v == mn1 || v == mn2)), "tail isolated from its pair: {iso:?}");
+        assert!(iso.contains(&(xs, mn1)) && iso.contains(&(xs, mn2)), "an outside aggressor still is: {iso:?}");
+    }
 
-        // A 1σ budget of √1.09·σ_rand leaves the gradient exactly 0.3·σ_rand.
-        let b = Pelgrom::new(Some(30.0), 100.0, &deck(), Some(3.0 * 1.09f32.sqrt()));
-        assert!((b.eta - 0.3).abs() < 1e-3);
-        // Sizing that already spends the budget leaves placement nothing.
-        assert_eq!(Pelgrom::new(Some(30.0), 100.0, &deck(), Some(2.0)).eta, 0.0);
+    /// REL C3: epi on p+ saturates at 4·t_epi (Su), a budget the search pays.
+    #[test]
+    fn epi_decks_get_a_plateau_budget() {
+        let (nl, mut cfg) = strongarm_like();
+        cfg.process.substrate = pnr_core::SubstrateKind::EpiOnLowRes;
+        cfg.process.epi_nm = Some(10_000);
+        let p = crate::annotate(&nl, &cfg);
+        assert!(!isolated(&p.placement.budget).is_empty(), "in the budget arm");
+        assert_eq!(isolation_distance(&p.placement.budget), 40_000, "min_distance_nm");
+        assert!(!p.missing.iter().any(|m| m.0 == "Isolation"), "{:?}", p.missing);
+    }
 
-        // ΔT limit = η·σ_rand / TC, per polarity (sky130 ngspice TCs):
-        // nfet 0.3·3 mV / 765 µV/K = 1.176 K; a pfet pair (A 35, 3.5 mV)
-        // at 1850 µV/K = 0.567 K — the steeper TC buys less ΔT.
-        let tc = deck().vt_tc_uv_per_k;
-        assert_eq!(p.thermal_limit_mc(tc[0]), 1_176);
-        assert_eq!(Pelgrom::new(Some(35.0), 100.0, &deck(), None).thermal_limit_mc(tc[1]), 567);
-        let bare = ProcessNumbers::default();
-        let q = Pelgrom::new(None, 100.0, &bare, None);
-        assert_eq!((q.s_over_a, q.thermal_limit_mc(None)), (0.0, THERMAL_MAX_DELTA_MC), "fallbacks");
-        assert_eq!(p.thermal_limit_mc(None), THERMAL_MAX_DELTA_MC, "A without TC: fallback");
+    /// Bulk (sky130's `substrate_kind`) has no plateau distance: a cost-only
+    /// pull at 4·2500 nm, reported unknown, whatever epi the deck states.
+    #[test]
+    fn bulk_is_cost_only_and_unknown() {
+        let (nl, mut cfg) = strongarm_like();
+        assert_eq!(pnr_core::SubstrateKind::from_key(Some("epi_on_pplus")), pnr_core::SubstrateKind::EpiOnLowRes);
+        cfg.process.substrate = pnr_core::SubstrateKind::from_key(Some("bulk"));
+        cfg.process.epi_nm = Some(10_000);
+        let p = crate::annotate(&nl, &cfg);
+        assert!(isolated(&p.placement.budget).is_empty(), "not a budget");
+        assert!(!isolated(&p.placement.cost).is_empty(), "a pull");
+        assert_eq!(isolation_distance(&p.placement.cost), 4 * NOMINAL_EPI_NM);
+        assert!(p.missing.contains(&("Isolation", "bulk substrate: no plateau distance")), "{:?}", p.missing);
+
+        cfg.process.substrate = pnr_core::SubstrateKind::Unknown;
+        let p = crate::annotate(&nl, &cfg);
+        assert!(p.missing.contains(&("Isolation", "substrate kind unknown")));
+        assert!(isolated(&p.placement.budget).is_empty());
     }
 }

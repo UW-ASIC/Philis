@@ -1,0 +1,6 @@
+* mirror_ratio — 1:2:4 NMOS mirror. Known optimum: one merged cell, centroid residual 0.
+.subckt mirror_ratio d1 d2 d3 VSS
+XM1 d1 d1 VSS VSS nfet_01v8 W=2u L=1u nf=2
+XM2 d2 d1 VSS VSS nfet_01v8 W=4u L=1u nf=4
+XM3 d3 d1 VSS VSS nfet_01v8 W=8u L=1u nf=8
+.ends mirror_ratio

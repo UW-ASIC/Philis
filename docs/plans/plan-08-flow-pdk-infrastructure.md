@@ -328,7 +328,7 @@ Status: done in M0 (`65f5f8c`); amended by the review panel: `lex_key` leaves th
 
 ### FLOW-03 One dual step per epoch; prices that relax on slack; saturation reported
 
-Status: done in M0 (`de04d31`); `RunStats::dual_steps` equals `iterations` (T6). GAP-10 (prices keyed by ID) is still open; on m0 the key is `fn keys` → `(&'static str, u32)` (backend/gp/src/lib.rs:151) into `Prices.priced: BTreeMap` (:27-28).
+Status: done in M0 (`de04d31`); `RunStats::dual_steps` equals `iterations` (T6). GAP-10 (prices keyed by ID) is done in M1 (`809c844`); before it, on m0, the key was `fn keys` → `(&'static str, u32)` (backend/gp/src/lib.rs:151) into `Prices.priced: BTreeMap` (:27-28).
 
 - Priority: **P0**. Effort: **S**. Depends on: FLOW-02.
 - Why: AF-07, AP-06, PL-9/PL-10 (audit-07 §2.14.1). PLAN.md:92 (λ ← λ − ρ·c on true residuals) and PLAN.md:124
@@ -619,6 +619,9 @@ Status: done in M0 (`bb556b4`); `tie_max_dist_nm` is sourced on all four sidecar
   `Process::tier(name, class as usize)` (kernel/core cannot name an `analog` type).
 
 ### FLOW-07 SPICE front end: hierarchy, ports, parameters, values, deck-classified models
+- Status: done in M1 (`40755ad`, `295bef3`). Deviation: step 8's `opts.top` wins over file-level cards (amended
+  above). Acceptance gap: `preprocess_spice` is not reduced to model mapping; carried to CELL-06/CELL-08, which did not
+  reduce it either (it still appends `l=0.15u` and rewrites bare R/C at the M1 close); carried to M2 (FLOW T2).
 - Priority: **P0**. Effort: **L**. Depends on: FLOW-01, FLOW-04.
 - Why: AF-02 (critical), AF-10, AF-17, AF-33 (parser part), I4, AA-11/G8 (ports and sources are role evidence), AV-04
   (true ports vs labels), PERF §0.2 row 2. LAYLA's inputs are a netlist, a spec file and a technology file
@@ -675,8 +678,9 @@ Status: done in M0 (`bb556b4`); `tie_max_dist_nm` is sourced on all four sidecar
      `Err("device {name}: unknown model {model}: not a .subckt here and not a deck model")` — no NMOS default.
   8. Flattening: device name = `path + "/" + name` (e.g. `X1/XM2`); internal net = `path + "/" + net`; formal ports
      map to the actuals; `.global` nets and `0` are never prefixed; instance `m=k` multiplies every child device's `m`.
-     Top = the file-level cards if any, else the unique uninstantiated `.subckt` (several → error listing them unless
-     `opts.top`); `Netlist.ports` = the top sub-circuit's formals.
+     Top = `opts.top` when set (file-level cards and sources are then dropped: a simulator deck's testbench around
+     its DUT); else the file-level cards if any; else the unique uninstantiated `.subckt` (several → error listing
+     them, naming `ParseOptions::top`); `Netlist.ports` = the top sub-circuit's formals.
   9. MOS sizes normalised per FLOW-01; `w`/`l` ≤ 0 after evaluation is an error for a MOS.
   10. `oppoint::instance_name` (oppoint.rs:296–302, PERF-owned) maps `/` to `__` so `parse_show`'s `m.<name>.` split
       (oppoint.rs:457–461) keeps working; collisions after mapping are a parse error.
@@ -705,7 +709,7 @@ Status: done in M0 (`bb556b4`); `tie_max_dist_nm` is sourced on all four sidecar
 
 Field report: FR-2 (a 100-iteration run never stopped early at DRC 0 and LVS match). On m0 the loop stops once `converged` (FLOW-03; bench "conv."); this item's stop reasons make the reason visible per run.
 
-- Priority: **P1**. Effort: **M**. Depends on: FLOW-02, FLOW-03, FLOW-09 step 1 (`search` is where the loop lives), PLC-10 step 0 (`dp::Schedule`, flat path; PLC's M0); PLC-10 step 1 (`dp::Start::Warm`) only once `DpMode::Sp` is the default.
+- Priority: **P1**. Effort: **M**. Depends on: FLOW-02, FLOW-03, FLOW-09 step 1 (`search` is where the loop lives), PLC-10 step 0 (`dp::Schedule`, flat path; done in M1, `2eb81b2`); PLC-10 step 1 (`dp::Start::Warm`) only once `DpMode::Sp` is the default.
 - Why: AF-06, AF-14, AP-09, AT-10, AT-34 (history part), NOTES-08 (termination reason), PL-19/PL-21 (audit-07
   §2.14.1). PLAN.md:52 carries "the best feasible incumbent" and the representation between iterations; PLAN.md:115
   terminates on feasibility + stationary prices + no improving move; PLAN.md:178 rests convergence on PathFinder's
@@ -722,13 +726,12 @@ Field report: FR-2 (a 100-iteration run never stopped early at DRC 0 and LVS mat
      and variants. Ablation over `COLD_EVERY ∈ {2, 4, 8, ∞}` on the bench decides the default.
   3. `Flow::epoch(&self, assignment, reshape, start: Start, w: &Weights, prices, neg, seed)`:
      - Cold: today's path (`gp::place` → `dp::place(…, dp::Schedule::cold())`).
-     - Warm: no gp; `coarse = incumbent.clone()`; `dp::place(&coarse, …, dp::Schedule::warm())`, where PLC defines
-       `Schedule::cold()` = today's constants (backend/dp/src/lib.rs:21–27, `t0 = 0.02·mean|ΔPEX|` at :276–289) and
-       `Schedule::warm()` = `{ range0: 0.05, max_temps: 60, t0_scale: 0.002, .. }` [policy, measure] (field names as
-       plan-04 PLC-10 step 0 defines `dp::Schedule`; the flat path takes the incumbent as its `coarse` input, so it needs
+     - Warm: no gp; `coarse = incumbent.clone()`; `dp::place(&coarse, …, dp::Schedule::warm())`. PLC-10 step 0 (M1) built
+       `dp::Schedule { range0, max_temps, t0_scale }` (backend/dp/src/lib.rs): `cold()` = `{ 0.4, 220, 0.02 }`, today's
+       constants, which the flow passes now; `warm()` = `{ 0.05, 60, 0.002 }` [policy, measure], unused until this item. The flat path takes the incumbent as its `coarse` input, so it needs
        no `dp::Start`).
   4. History: `neg = gr::Negotiation::new()` before every cold epoch; kept across warm epochs (same placement
-     neighbourhood). `Negotiation` gains `#[derive(Clone)]` (backend/gr/src/lib.rs:43–46, a `BTreeMap`); dr's second
+     neighbourhood). `Negotiation` is already `Clone` (backend/gr/src/lib.rs, RTE-08 in M1; a `BTreeMap` keyed on quantised `(layer, x, y)`); dr's second
      run after diode insertion (lib.rs:646) routes with a clone of `neg` taken before the first run and that clone
      replaces `neg` afterwards, so one epoch accumulates history once (AT-34).
   5. Weights: `struct Weights { place: Vec<f32>, route: Vec<f32> }` moves out of `Flow` (lib.rs:294–296, 312–316)
@@ -972,6 +975,8 @@ Field report: FR-7 (export half) and FR-8. The m0 CLI accepts the four built-in 
 
 ### FLOW-13 emit and macroMaster round trip
 
+Status: step 0 done in M1 (`add9e94`; input merge `5a21f2b`). As built: the cause was detailed routing, not macroMaster; the fix is the card's step 2 (access jogs prefer unowned nodes; PathFinder history on foreign nodes a jog touches), because step 1 regressed dac4. Steps 1+ stay in M2.
+
 Carried from M0 (step 0, M1): `frontend/library/tests/hier_elaborate.rs::hierarchical_composition_elaborates_with_a_correct_schematic` is red on m0 at hier_elaborate.rs:216 with 8 × `lvs/lvs.unpaired_device` and 17 × `lvs/lvs.unpaired_net` (FLOW-14 replaced its assertion-free check). It drives `CompBuilder::instantiate_comp` through `library::elaborate`, the macroMaster path this item owns, and no M0 item fixed it. Step 0: find why the elaborated hierarchical layout does not pair with `BuiltComp::netlist` and fix it with the test unchanged.
 - Priority: **P1**. Effort: **M**. Depends on: FLOW-01, FLOW-07.
 - Why: AF-08, AF-19, AF-21, SUBSTRATE3 B P2/P3 (docs/SUBSTRATE3.md). Hastings Table 13.2 rule 5: matched MOS need equal
@@ -1074,8 +1079,8 @@ Status: done in M0 (`89a1740`). Deviation: the tool gates live once in `library:
      AT-36). `docs/API-WISH.md` D4: mark "not implemented; superseded by FLOW-08 blame escalation". 
      `docs/LAYOUT-FUNDAMENTALS.md` rows listed stale in audit-07 §2.14.3 (§1g #65, §1e #53, §1a #5, §1c #39, LF-10) and
      `docs/SUBSTRATE3.md` M3/M4 status updated.
-  6. At M4: delete `GuardRingRequirement.tap_pitch_nm`, `.enclosure_complete`, `Unitization.same_variant_required`,
-     `SeriesParallel::RepeatedStage` (kernel/analog/src/cell.rs:14, 20, 53, 63) unless a CELL/PLC item has wired them;
+  6. At M4: delete `Unitization.same_variant_required`, `SeriesParallel::RepeatedStage` (kernel/analog/src/cell.rs;
+     `tap_pitch_nm` and `enclosure_complete` were deleted by GAP-05 in M1) unless a CELL/PLC item has wired them;
      the deprecated `*_moderate` scalars are MAT-07's to delete (plan-02 MAT-07 step 4); FLOW-15 only drops their
      registry rows afterwards.
 - Tests: `common_node_sees_injected_macro_pins` (lib.rs tests, the injected-macro fixture of
@@ -1083,6 +1088,7 @@ Status: done in M0 (`89a1740`). Deviation: the tool gates live once in `library:
 - Acceptance: grep for `Generator`, `variant_signoff`, `EM_UA_PER_UM` in docs → 0; CRATES.md open issues each have an owner.
 
 ### FLOW-16 Fold classes per cell, not per netlist-wide size class
+- Status: done in M1 (`baeda1c`; cells merge `726bc13`): MatchedSet 2/2 on each OTA fixture (was 0/2). **Regression:** its fold classes add routing overuse on the OTA trio (472 alone, 1458 merged, CrosstalkExclusion 12/12 → 0/12, WL +21.8 % vs M0; m1-report §4); carried to M2 item 0.
 - Priority: **P1** (moved to M1 by the M0 close-out for step 4). Effort: **S**. Depends on: FLOW-01 (`w_finger_nm`), FLOW-05 step 4 (one R□ read in `folds`), both done in M0; MAT-03 (`diffusion_cc_row`) and CELL-10 (the merged row is drawn) for step 4.
 - Why: AF-15 (audit-07; owned by no other plan: grep of plans 01–07 finds no AF-15 entry). `folds` groups every MOS of
   equal `(kind, W, L)` in the whole netlist into one fold class (cellgen.rs:647–652) and scores aspect and ABBA/chain
@@ -1121,6 +1127,8 @@ Status: done in M0 (`89a1740`). Deviation: the tool gates live once in `library:
   point; no second deck measurement exists).
 
 ### FLOW-17 Land `fix-export` on m0: GPurify past `bde681c`, the re-vendored sky130 deck, labelled GDS and `philis run` (added at the M0 close-out)
+
+Status: done in M1: `fix-export` (GPurify `6341f18`, re-vendored decks whose LVS MOS references carry a 4th bulk terminal, labelled GDS, `philis run`) is on `m1a` via `2a09c30`. dac4 signs off ERC 0 at `feedback_iters = 1`. pwm_driver through the CLI signs off CLEAN; **strongarm `lvs.parameter_mismatch` is unmeasured** (no strongarm layout fixture); carried to M2 item 0.
 
 Field report: FR-3 (false LVS), FR-8 (packaging), and the export half of FR-7.
 

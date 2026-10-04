@@ -1,5 +1,49 @@
 # 00 — Master audit and implementation roadmap (read this first)
 
+## Status (after M1)
+
+M1 ("P0 correctness", §5) ran on branch `m1a` as six module batches plus M1a (EXT-02, EXT-11), each merged after an
+item review; their cards are `cards/m1-*.md`. The measured close-out is `m1-report.md` (verify pass on `f5fd676`,
+release, PDK_ROOT set): **5 of the 8 exit-criterion groups are met (EXT, PLC, PERF, RTE, carried M0); MAT, CELL and
+field report 01 are not.** `cargo test --release --workspace`: 592 passed, 0 failed, 2 ignored; `bench local` 14/14
+placed and routed, DRC 0 everywhere, LVS as M0 on the 10 shared rows.
+
+**Done (each item file carries `Status: done in M1 (<commit>)` with its deviations).** Input (merge `5a21f2b`):
+FLOW-07, PERF-03 steps 3–4, PERF-08, PERF-09, PERF-30, FLOW-13 step 0. Annotator (`ae38f4f`): GAP-04 steps 1–2,
+EXT-03, EXT-04, EXT-05, EXT-06, EXT-07, EXT-09, EXT-10, GAP-10; M1a: EXT-02 (`ca3e509`), EXT-11 (`ccf66a7`).
+Matching (`59371b5`): MAT-01 … MAT-06. Cells (`726bc13`): CELL-03, GAP-05, CELL-30, CELL-06, CELL-07, CELL-08,
+CELL-09, CELL-10, FLOW-16. Placement (`f5fd676`): PLC-02, PLC-04, PLC-03, PLC-10 step 0; PLC-06's code is in
+(`c29b238`). Routing (`57e3cc8`): RTE-05, RTE-07, RTE-08. FLOW-17 (`fix-export`, GPurify `6341f18`) via `2a09c30`.
+RTE-06 is not needed: dac4 signs off ERC 0 at `feedback_iters = 1` after FLOW-17 (branch `m0-rte06-rejected` stays
+unmerged).
+
+**Not met or deferred, and where each goes (all M2 item 0 unless noted):**
+
+- **OTA-class regression** (m1-report §4): FLOW-16's fold classes add routing overuse (472 alone; 1458 merged, with
+  WL +21.8 %, area +15.7 %, C sig +48 %, CrosstalkExclusion 12/12 → 0/12 on ota, ota_constrained, tt_ota). quad
+  (WL +67 %, area 15.9 → 33.7 µm²), bgr_core (area 135.0 → 422.7) and bjt_mirror (64.8 → 104.3) also grew. This
+  blocks the MAT ±5 % HPWL/footprint criterion (MAT-04 T5, T8), which is re-checked at the end of M2 item 0.
+- **mirror_ratio not merged** (CELL-10): 3 cells for 3 devices on `m1a`; check whether the annotator splits the
+  mirror before EXT-15 takes it over.
+- **CELL-08 leftovers:** no `BASELINE` row for `dac4_mim` and `tq_chain`; tq_chain through the CLI has
+  `drc/m1.2.notch:met1` (routing-layer notch: RTE-26 case, M2) and the bench ERC `erc/ar.met3.1:gate`.
+- **strongarm `lvs.parameter_mismatch`** (field report 01, FLOW-17): unmeasured, there is no strongarm layout
+  fixture; add one and measure.
+- **REL-02 per-net T2:** still waits on GPurify tagging antenna rows with a net (§6.4 Q7).
+- **Op-point failures seen in the bench** (out of M1 scope): mirror_ratio BSIM4 fatal on `xm3` (`Drout`/`Eta0`
+  negative), res_m2 `sky130_fd_pr__res_high_po` not found by ngspice, bgr_core PNP without an ngspice subckt. Owner:
+  PERF-09 follow-up (M2 item 0); the PNP stays PERF-18 (M3).
+- **Measurement gaps:** PLC was re-measured on `m1a` at seed 1 only (seeds 1–5 on `m1a-placement`), and no full flow
+  ran in debug; M2 item 0 re-runs bench seeds 1–5 on the merged tree.
+- **Owner decisions** (§6.4 Q9, Q10, defaults in force): PLC-06's +0.1 % OTA key tier, and RTE-03 keep-or-revert of
+  `ba49ae2`.
+
+**Plan edits for M2.** Later items whose Current/Change/Tests M1 made wrong were corrected against the `m1a` code:
+EXT-12, EXT-16, EXT-20 (plan-01); CELL-05 note, CELL-17 (plan-03, GAP-05's enum); PLC-14, PLC-15 (plan-04);
+RTE-20 (plan-05, `trim_pair` deleted); REL-07, REL-14 (plan-06); PERF-20 (plan-07); FLOW-03 note, FLOW-07 note,
+FLOW-08, FLOW-15 (plan-08). Line numbers in M1-touched files (`backend/{annotator,gp,dp,gr,dr}`,
+`frontend/library/src/{lib,cellgen,elaborate}.rs`, `kernel/{analog,cells}`) moved again; resolve citations by symbol.
+
 ## Status (after M0)
 
 M0 ("Honest measurement", §5) ran as `eba9954..e2577a4` on branch `m0` (92 commits); the plan edits in this section
@@ -300,6 +344,8 @@ Exit criteria:
 
 ### M1 — P0 correctness
 
+Status: closed with 5 of 8 criterion groups met; see "Status (after M1)" and `m1-report.md`.
+
 Goal: fix every P0 defect in input, extraction, generators, matched-set scoring, placement legality and routing
 honesty, so later work builds on correct physics.
 
@@ -363,6 +409,11 @@ Goal: one agreed constraint data model and class table; generators at hand-layou
 multi-layer routing lattice with width reserved in search; real inputs and outputs.
 
 Items, in order:
+0. **Carried from M1 (Status after M1).** FLOW-16 follow-up: remove the OTA-class overuse and WL/area growth, then
+   re-check the MAT ±5 % band against M0; CELL-10 mirror_ratio merged in one cell (centroid residual 0); CELL-08
+   `BASELINE` rows for dac4_mim and tq_chain and their DRC/ERC rows; a strongarm layout fixture with 0
+   `lvs.parameter_mismatch`; PERF-09 follow-up for the mirror_ratio and res_m2 op points; REL-02 per-net T2 once
+   GPurify answers §6.4 Q7; bench seeds 1–5 on the merged tree (`lattice_off == 0`, `matched_geometry_mismatch == 0`).
 1. GAP-01 (`pnr_core::MatchClass`, `Process::tier`, tier table, `mos_env`/`resistor_env`, class limit table) with
    FLOW-06 (registry rows, recipe layers, provenance), GAP-06 (`em_derating` table and reader), GAP-07
    (`Pdk::model_markers`).
@@ -384,6 +435,7 @@ Items, in order:
    columns join in M5.
 
 Exit criteria:
+- Carried from M1: the M1 MAT, CELL and field-report-01 criteria that `m1-report.md` §2 lists as not met.
 - EXT T1 (StrongARM gold, one axis) and T2 on all 17 corpus circuits (`mirror6` 6 members, `bgr_core` [1,8], `dac4`
   Exceptional [1,1,2,4,8], `brokaw`, `rdiv`, `splitdac`); T5 one rule per set; T10; cellgen side recognizers deleted
   with unchanged drawings on dac4, bgr_core, pair, quad.
@@ -732,6 +784,9 @@ should patch their text when they pick up an item. Master decisions beyond the c
    stays in `coverage` as "not checked", and PERF-30 rewrites the cards in Philis.
 8. **Hastings eq. 8.29 vs Fig. 8.20** (MAT Q7). Resolved by GAP-20 (`ref-hastings-99` §2.1): Fig. 8.20 is eq. 8.29 with
    j and k exchanged; the printed form is right. Default unchanged: implement eq. 8.29 as printed, use eq. 8.27 as primary.
+9. **PLC-06's bench B change** (m1-report §1): OTA key-tier median 265.0 → 265.3 fF (+0.1 %), hard and area
+   unchanged. Default: accepted as noise; PLC-06 stays merged.
+10. **RTE-03 (`ba49ae2`): keep or revert.** Default: keep; RTE-08 met its acceptance 3 with it (M1 RTE criterion).
 
 ---
 

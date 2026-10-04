@@ -9,7 +9,7 @@ use pnr_core::ids::{DeviceId, NetId};
 use pnr_core::netlist::{Device, DeviceKind, Net, Netlist};
 
 /// A FET with G,D,S,B terminals on the given net ids, W/L in nm.
-fn fet(name: &str, kind: DeviceKind, g: u16, d: u16, s: u16, b: u16, w: i64, l: i64) -> Device {
+pub(crate) fn fet(name: &str, kind: DeviceKind, g: u16, d: u16, s: u16, b: u16, w: i64, l: i64) -> Device {
     Device {
         name: name.into(),
         kind, model: String::new(),
@@ -23,7 +23,7 @@ fn fet(name: &str, kind: DeviceKind, g: u16, d: u16, s: u16, b: u16, w: i64, l: 
     }
 }
 
-fn nets(names: &[&str]) -> Vec<Net> {
+pub(crate) fn nets(names: &[&str]) -> Vec<Net> {
     names.iter().map(|n| Net { name: (*n).into() }).collect()
 }
 
@@ -36,7 +36,7 @@ fn block_of(blocks: &[Block], d: u16) -> Option<&Block> {
 
 /// 5-transistor OTA. Nets: 0=vout1 1=vinp 2=vtail 3=VSS 4=vout2 5=vinm 6=vbias
 /// 7=VDD 8=vbn.
-fn ota() -> Netlist {
+pub(crate) fn ota() -> Netlist {
     Netlist {
         devices: vec![
             fet("XM1", DeviceKind::Nmos, 1, 0, 2, 3, 10_000, 1_000),
@@ -46,6 +46,7 @@ fn ota() -> Netlist {
             fet("XM5", DeviceKind::Nmos, 8, 2, 3, 3, 40_000, 2_000),
         ],
         nets: nets(&["vout1", "vinp", "vtail", "VSS", "vout2", "vinm", "vbias", "VDD", "vbn"]),
+        ..Default::default()
     }
 }
 
@@ -69,6 +70,7 @@ fn current_mirror_recognised() {
             fet("XM2", DeviceKind::Pmos, 0, 1, 2, 2, 5_000, 1_000),
         ],
         nets: nets(&["vref", "iout", "VDD"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     let b = block_of(&p.blocks, 0).expect("mirror recognised");
@@ -85,6 +87,7 @@ fn cross_coupled_recognised() {
             fet("XM2", DeviceKind::Pmos, 0, 1, 2, 2, 2_000, 500),
         ],
         nets: nets(&["outp", "outn", "VDD", "VSS"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     let b = block_of(&p.blocks, 0).expect("cross-coupled recognised");
@@ -136,24 +139,24 @@ fn diff_pair_lives_in_the_hierarchy() {
 
 #[test]
 fn diff_pair_emits_its_constraints() {
-    // A recognised diff pair emits Symmetry (hard), ThermalGradient (budget — a
-    // spec plus a margin on a derived field, PLAN §4d) and MatchingPair +
-    // CommonCentroid (cost) — the BlockKind mapping, driven by recognition.
-    // MatchingPair is Cost, not Hard: its `satisfied` bounds device AREA
-    // (Pelgrom `σ²_u = A²/(W·L)`), which no placement move can change, so
-    // gating SA on it is inert. See `backend/TODO.md` §2.
+    // A recognised diff pair emits Symmetry (hard) and MatchedSet (budget +
+    // cost: one pair's gradient, thermal and LOD ledger, PLAN §4d) — the
+    // BlockKind mapping, driven by recognition. MatchedSet is never Hard: its
+    // allowance follows device AREA (Pelgrom `σ²_u = A²/(W·L)`), which no
+    // placement move can change, so gating SA on it is inert. See
+    // `backend/TODO.md` §2.
     let nl = ota();
     let p = annotate(&nl, &AnnotationConfig::default());
     assert!(count(&p.placement.hard) >= 1, "expected >=1 hard placement rule (sym), got {}", count(&p.placement.hard));
     assert!(count(&p.placement.budget) >= 1, "expected >=1 budget placement rule (thermal), got {}", count(&p.placement.budget));
-    assert!(count(&p.placement.cost) >= 2, "expected >=2 cost placement rules (match/CC/prox), got {}", count(&p.placement.cost));
+    assert!(count(&p.placement.cost) >= 2, "expected >=2 cost placement rules (matched set/prox), got {}", count(&p.placement.cost));
 
     // The partition itself is the contract: nothing in `hard` may be a rule the
     // placer cannot act on.
     let hard_kinds: Vec<&str> = p.placement.hard.iter().map(|b| b.kind()).collect();
     assert!(
-        !hard_kinds.iter().any(|k| k.contains("MatchingPair")),
-        "MatchingPair must not gate placement moves: {hard_kinds:?}"
+        !hard_kinds.iter().any(|k| k.contains("MatchedSet")),
+        "MatchedSet must not gate placement moves: {hard_kinds:?}"
     );
 }
 
@@ -168,7 +171,7 @@ fn budget_rules_land_in_exactly_one_partition() {
     let p = annotate(&nl, &AnnotationConfig::default());
     let arms: [(&str, &Vec<Box<dyn RuleBatch<pnr_core::Routes>>>); 3] =
         [("hard", &p.routing.hard), ("budget", &p.routing.budget), ("cost", &p.routing.cost)];
-    for kind in ["CrosstalkExclusion", "ParasiticBudget", "CouplingBudget"] {
+    for kind in ["Differential", "CrosstalkExclusion", "ParasiticBudget", "CouplingBudget"] {
         let hits: Vec<&str> = arms
             .iter()
             .filter(|(_, a)| a.iter().any(|b| b.kind().ends_with(kind)))
@@ -189,17 +192,27 @@ fn budget_rules_land_in_exactly_one_partition() {
     assert!(sym(&p.placement.hard), "SymmetryGroup must stay Hard");
     assert!(!sym(&p.placement.budget), "SymmetryGroup must never be priced as a budget");
 
-    // And the placement-tier budget, from the other other side: `ThermalGradient`
-    // carries a spec *and* a margin on a derived field, is tradeable while
-    // converging, and PLAN §4d calls it a budget outright. Its cost copy (the
-    // per-move isotherm pull over the epoch-frozen field — see
-    // `emit::budget_and_cost`) is a gradient, not a classification; the classified
-    // copy must be priced, never gated.
-    let therm = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| {
-        a.iter().any(|b| b.kind().ends_with("ThermalGradient"))
+    // And the placement-tier budget, from the other other side: `MatchedSet`
+    // carries an allowance on derived fields (gradient, live thermal, LOD), is
+    // tradeable while converging, and PLAN §4d calls it a budget outright. Its
+    // cost copy is a gradient, not a classification; the classified copy must
+    // be priced, never gated.
+    let set = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| {
+        a.iter().any(|b| b.kind().ends_with("MatchedSet"))
     };
-    assert!(therm(&p.placement.budget), "ThermalGradient must be a priced budget");
-    assert!(!therm(&p.placement.hard), "ThermalGradient must never gate legality as Hard");
+    assert!(set(&p.placement.budget), "MatchedSet must be a priced budget");
+    assert!(!set(&p.placement.hard), "MatchedSet must never gate legality as Hard");
+}
+
+#[test]
+fn matched_pairs_get_orientation_rules() {
+    // MAT-05: channel axes are a hard placement rule (a quarter-turned partner is
+    // illegal); Φ is budget only (a discrete flip, no gradient for a cost copy).
+    let p = annotate(&ota(), &AnnotationConfig::default());
+    let has = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| a.iter().any(|b| b.kind() == "Orientation");
+    assert!(has(&p.placement.hard), "Orientation axis must be Hard");
+    assert!(has(&p.placement.budget), "Orientation Φ must be a budget");
+    assert!(!has(&p.placement.cost), "Orientation has no cost copy");
 }
 
 #[test]
@@ -294,6 +307,7 @@ fn glue_only_netlist_emits_no_placement() {
             Device { name: "R2".into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("A".into(), NetId(2)), ("B".into(), NetId(3))], params: vec![] },
         ],
         nets: nets(&["a", "b", "c", "d"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(count(&p.placement.hard), 0);
@@ -306,6 +320,61 @@ fn glue_only_netlist_emits_no_placement() {
 
 
 
+
+#[test]
+fn missing_is_relevant() {
+    // Two resistors: no matched leaf and no gate, so no MatchedSet or Antenna entry.
+    let nl = Netlist {
+        devices: vec![
+            Device { name: "R1".into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("A".into(), NetId(0)), ("B".into(), NetId(1))], params: vec![] },
+            Device { name: "R2".into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("A".into(), NetId(2)), ("B".into(), NetId(3))], params: vec![] },
+        ],
+        nets: nets(&["a", "b", "c", "d"]),
+        ..Default::default()
+    };
+    let p = annotate(&nl, &AnnotationConfig::default());
+    // ... and no gate area, so no net budget either.
+    assert!(!p.missing.iter().any(|m| ["MatchedSet", "Antenna", "ParasiticBudget", "CouplingBudget"].contains(&m.0)), "{:?}", p.missing);
+    let p = annotate(&ota(), &AnnotationConfig::default());
+    assert!(p.missing.contains(&("MatchedSet", "deck svt_uv_per_um — distance term unknown")), "{:?}", p.missing);
+    assert!(p.missing.contains(&("ParasiticBudget", "deck gate_cap_af_um2")), "{:?}", p.missing);
+}
+
+#[test]
+fn every_batch_is_tagged() {
+    let mut clocked = ota();
+    clocked.nets.push(Net { name: "clk".into() });
+    clocked.nets.push(Net { name: "sw".into() });
+    let (clk, sw) = (clocked.nets.len() as u16 - 2, clocked.nets.len() as u16 - 1);
+    clocked.devices.push(fet("XS", DeviceKind::Nmos, clk, sw, 3, 3, 1_000, 150));
+    for nl in [ota(), clocked] {
+        let p = annotate(&nl, &AnnotationConfig::default());
+        let (pl, ro) = (&p.placement, &p.routing);
+        let mut ids: Vec<u32> = (pl.hard.iter().chain(&pl.budget).chain(&pl.cost))
+            .map(|b| b.meta().expect("placement batch tagged").id.0)
+            .chain(ro.hard.iter().chain(&ro.budget).chain(&ro.cost).map(|b| b.meta().expect("routing batch tagged").id.0))
+            .collect();
+        let total = ids.len() as u32;
+        assert!(total > 0);
+        assert_eq!(ids, (0..total).collect::<Vec<_>>(), "dense, in arm order");
+        ids.dedup();
+        assert_eq!(ids.len() as u32, total);
+
+        // Origin: the XM1/XM2 pair came from its pattern; Isolation and routing from net classes.
+        let net_class = Some(analog::intent::Origin::NetClass);
+        let origin = |b: &dyn analog::RuleBatch<pnr_core::Layout>| b.meta().map(|m| m.origin);
+        let pair = (pl.cost.iter()).find(|b| {
+            let mut t = Vec::new();
+            b.touched(&mut t);
+            t.sort_unstable();
+            b.kind() == "MatchedSet" && t == [0, 1]
+        });
+        assert_eq!(origin(pair.expect("XM1/XM2 MatchedSet").as_ref()), Some(analog::intent::Origin::Pattern { template: "five_transistor_ota" }));
+        let iso = (pl.hard.iter().chain(&pl.budget).chain(&pl.cost)).filter(|b| b.kind().ends_with("::Isolation"));
+        assert!(iso.map(|b| origin(b.as_ref())).all(|o| o == net_class));
+        assert!(ro.hard.iter().chain(&ro.budget).chain(&ro.cost).all(|b| b.meta().map(|m| m.origin) == net_class));
+    }
+}
 
 #[test]
 fn every_device_accounted_for() {
@@ -379,6 +448,35 @@ fn a_differential_stage_is_symmetric_about_one_axis() {
     assert!(p.constraints.guard_rings.iter().any(|g| g.device == DeviceId(4)), "and a ring");
 }
 
+/// AA-23: only declared selfs go on the axis. `telescopic_ota_full` declares
+/// the tail (slot 6) and no role for the load bias (slot 7, a diode PMOS on the
+/// loads' source). Nets: 0=inp 1=x1 2=tail 3=VSS 4=inn 5=x2 6=vbn2 7=o1 8=o2
+/// 9=vbp 10=VDD 11=vbn.
+#[test]
+fn telescopic_slot7_is_not_self_symmetric() {
+    let (n, p) = (DeviceKind::Nmos, DeviceKind::Pmos);
+    let nl = Netlist {
+        devices: vec![
+            fet("M0", n, 0, 1, 2, 3, 10_000, 1_000),
+            fet("M1", n, 4, 5, 2, 3, 10_000, 1_000),
+            fet("M2", n, 6, 7, 1, 3, 10_000, 1_000),
+            fet("M3", n, 6, 8, 5, 3, 10_000, 1_000),
+            fet("M4", p, 9, 7, 10, 10, 20_000, 1_000),
+            fet("M5", p, 9, 8, 10, 10, 20_000, 1_000),
+            fet("M6", n, 11, 2, 3, 3, 40_000, 1_000),
+            fet("M7", p, 9, 9, 10, 10, 5_000, 1_000),
+        ],
+        nets: nets(&["inp", "x1", "tail", "VSS", "inn", "x2", "vbn2", "o1", "o2", "vbp", "VDD", "vbn"]),
+        ..Default::default()
+    };
+    let pr = annotate(&nl, &AnnotationConfig::default());
+    assert_eq!((pr.blocks[0].template, pr.blocks[0].devices.len()), ("telescopic_ota_full", 8));
+    let mut m = Vec::new();
+    pr.placement.hard.iter().for_each(|b| b.mirror_pairs(&mut m));
+    let selfs: Vec<u32> = m.iter().filter(|p| p.0 == p.1).map(|p| p.0).collect();
+    assert_eq!(selfs, [6], "the tail only, not slot 7: {m:?}");
+}
+
 #[test]
 fn a_shared_gate_chain_is_a_series_stack_not_a_cascode() {
     // chain4: four same-size nfets in series on one gate net.
@@ -387,10 +485,13 @@ fn a_shared_gate_chain_is_a_series_stack_not_a_cascode() {
             .map(|i| fet(&format!("M{i}"), DeviceKind::Nmos, 0, i + 1, i + 2, 6, 2_000, 500))
             .collect(),
         nets: nets(&["g", "a", "b", "c", "d", "e", "VSS"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(p.blocks[0].devices.len(), 4, "one series_stack_4 group");
     assert!(p.blocks[0].sub_blocks.iter().all(|b| b.kind == BlockKind::Stack), "stack pairs, not a cascode");
+    // The shared gate net is still a Sensitive bias reference (EXT-18 changes this).
+    assert_eq!(p.net_classes[0].class, analog::metadata::NetClass::Sensitive);
 }
 
 #[test]
@@ -402,13 +503,61 @@ fn a_cascode_stack_is_adjacent_not_matched() {
             fet("M2", DeviceKind::Nmos, 3, 4, 1, 2, 8_000, 500),
         ],
         nets: nets(&["vin", "x", "VSS", "vcas", "out"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(p.blocks[0].kind, BlockKind::Stack);
     let kinds: Vec<&str> = p.placement.cost.iter().map(|b| b.kind()).collect();
     assert!(kinds.iter().any(|k| k.ends_with("Proximity")), "{kinds:?}");
-    assert!(!kinds.iter().any(|k| k.ends_with("MatchingPair") || k.ends_with("ThermalGradient")), "{kinds:?}");
+    assert!(!kinds.iter().any(|k| k.ends_with("MatchedSet")), "{kinds:?}");
     assert!(p.placement.hard.is_empty());
+    // `vcas` (gates M2 only, no DC path) is still a Sensitive bias reference.
+    assert_eq!(p.net_classes[3].class, analog::metadata::NetClass::Sensitive);
+}
+
+/// EXT-07: a `Stack` is adjacent/symmetric, not a gate reference, so it is no
+/// longer an isolation victim. A clocked switch elsewhere used to be an
+/// aggressor that forced isolation onto the stack's two devices.
+#[test]
+fn a_cascode_stack_is_not_an_isolation_victim() {
+    let nl = Netlist {
+        devices: vec![
+            fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 4_000, 500),
+            fet("M2", DeviceKind::Nmos, 3, 4, 1, 2, 8_000, 500),
+            fet("XS", DeviceKind::Nmos, 5, 6, 2, 2, 1_000, 150),
+        ],
+        nets: nets(&["vin", "x", "VSS", "vcas", "out", "clk", "sw"]),
+        ..Default::default()
+    };
+    let p = annotate(&nl, &AnnotationConfig::default());
+    let mut touched = Vec::new();
+    for b in &p.placement.cost {
+        if b.kind().ends_with("Isolation") {
+            b.touched(&mut touched);
+        }
+    }
+    assert!(
+        !touched.contains(&0) && !touched.contains(&1),
+        "stack devices are no longer isolation victims: {touched:?}"
+    );
+}
+
+/// EXT-07 variant: once `vcas` also touches a channel (not gates only), its
+/// class is ordinary `Signal`, not `Sensitive`: with `Stack` no longer a gate
+/// reference in `is_sensitive`, a `vcas` that touches a channel is `Signal`.
+#[test]
+fn a_cascode_gate_net_with_a_channel_use_is_signal() {
+    let nl = Netlist {
+        devices: vec![
+            fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 4_000, 500),
+            fet("M2", DeviceKind::Nmos, 3, 4, 1, 2, 8_000, 500),
+            fet("MD", DeviceKind::Nmos, 0, 3, 2, 2, 4_000, 500),
+        ],
+        nets: nets(&["vin", "x", "VSS", "vcas", "out"]),
+        ..Default::default()
+    };
+    let p = annotate(&nl, &AnnotationConfig::default());
+    assert_eq!(p.net_classes[3].class, analog::metadata::NetClass::Signal);
 }
 
 #[test]
@@ -417,6 +566,7 @@ fn antenna_gate_area_lands_on_the_gate_net_not_the_drain() {
     let nl = Netlist {
         devices: vec![fet("XM1", DeviceKind::Nmos, 0, 1, 2, 2, 1_000, 1_000)],
         nets: nets(&["g", "d", "VSS"]),
+        ..Default::default()
     };
     let mut cfg = AnnotationConfig::default();
     cfg.process.antenna_max_ratio = Some(400.0);
@@ -491,6 +641,7 @@ fn a_lone_mirror_stage_is_symmetric_too() {
             fet("XM2", DeviceKind::Pmos, 0, 1, 2, 2, 5_000, 1_000),
         ],
         nets: nets(&["vref", "iout", "VDD"]),
+        ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
     let sym = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| {
@@ -504,22 +655,18 @@ fn a_lone_mirror_stage_is_symmetric_too() {
 }
 
 #[test]
-fn matching_is_budgeted_only_with_the_deck_s_mismatch_data() {
-    let is_mp = |b: &Box<dyn RuleBatch<pnr_core::Layout>>| b.kind().ends_with("MatchingPair");
+fn matched_sets_are_budgeted_and_missing_deck_terms_are_listed() {
+    let is_set = |b: &Box<dyn RuleBatch<pnr_core::Layout>>| b.kind() == "MatchedSet";
     let bare = annotate(&ota(), &AnnotationConfig::default());
-    assert!(!bare.placement.budget.iter().any(is_mp), "no S_VT: a pull, not a budget");
-    assert!(bare.missing.iter().any(|m| m.0 == "MatchingPair"), "and listed unknown");
-    assert!(
-        bare.placement.budget.iter().any(|b| b.kind() == "CommonCentroid"),
-        "coincidence needs no deck data"
-    );
+    assert!(bare.placement.budget.iter().any(is_set), "coincidence needs no deck data");
+    assert!(bare.missing.iter().any(|m| m.0 == "MatchedSet"), "the deck terms are listed unknown");
 
     let mut cfg = AnnotationConfig::default();
     cfg.process.avt_mv_um = [Some(5.0), Some(6.0)];
     cfg.process.svt_uv_per_um = Some(4.0);
     let full = annotate(&ota(), &cfg);
-    assert!(full.placement.budget.iter().any(is_mp));
-    assert!(!full.missing.iter().any(|m| m.0 == "MatchingPair"));
+    assert!(full.placement.budget.iter().any(is_set));
+    assert!(!full.missing.iter().any(|m| m.0 == "MatchedSet"));
 }
 
 #[test]
@@ -540,6 +687,7 @@ fn clocked_devices_are_kept_away_from_matched_ones() {
     assert!(p.missing.iter().any(|m| m.0 == "Isolation"), "and reported unknown");
 
     let mut cfg = AnnotationConfig::default();
+    cfg.process.substrate = pnr_core::SubstrateKind::EpiOnLowRes;
     cfg.process.epi_nm = Some(3_000);
     let p = annotate(&nl, &cfg);
     assert!(p.placement.budget.iter().any(is_iso));
@@ -579,6 +727,7 @@ fn capacitor_plate_nets_get_no_invented_budget() {
             fet("XMC", DeviceKind::Nmos, 0, 5, 4, 4, 1_000, 150),
         ],
         nets: nets(&["top", "b0", "d0", "VDD", "VSS", "cmp"]),
+        ..Default::default()
     };
     let mut cfg = AnnotationConfig::default();
     cfg.process.gate_af_per_um2 = Some(8_325.0);
@@ -587,4 +736,12 @@ fn capacitor_plate_nets_get_no_invented_budget() {
     assert_eq!(p.net_classes[1].c_budget_af, None, "bit plate");
     assert!(p.net_classes[2].c_budget_af.is_some(), "the inverter input keeps its gate-load budget");
     assert!(p.missing.iter().any(|m| m.0 == "ParasiticBudget" && m.1.contains("ARR-05")));
+}
+
+#[test]
+#[should_panic(expected = "annotator: 65536 devices/nets exceed the u16 id space (65535)")]
+fn more_nets_than_u16_ids_is_refused_not_wrapped() {
+    // `NetId(n as u16)` would alias net 65536 onto net 0 (AA-35).
+    let nl = Netlist { devices: Vec::new(), nets: vec![Net { name: "n".into() }; 65_536], ..Default::default() };
+    let _ = annotate(&nl, &AnnotationConfig::default());
 }

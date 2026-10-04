@@ -16,7 +16,7 @@ pub enum Arm {
 /// How one constraint family came out.
 #[derive(Clone, Debug)]
 pub struct BudgetStatus {
-    /// Rule kind, path-trimmed (`ThermalGradient`, `CrosstalkExclusion`, …).
+    /// Rule kind, path-trimmed (`MatchedSet`, `CrosstalkExclusion`, …).
     pub kind: String,
     /// Which arm the family was registered in.
     pub arm: Arm,
@@ -112,6 +112,12 @@ pub struct MetadataReport {
     /// devices block [`Self::certified`]; skipped rules are listed). Empty
     /// from [`build`]; the flow fills it from the winner.
     pub coverage: verify::Coverage,
+    /// `(template, recognised non-glue blocks)`, by template name. Empty from
+    /// [`build`]; the flow fills it from `annotator::Problem::blocks`.
+    pub recognition: Vec<(&'static str, usize)>,
+    /// `(device, reason)` for every `annotator::Coverage::Unconstrained` device.
+    /// Empty from [`build`]; the flow fills it.
+    pub unconstrained: Vec<(String, &'static str)>,
 }
 
 impl MetadataReport {
@@ -151,6 +157,7 @@ impl MetadataReport {
             && self.coverage.unverified.is_empty()
             && self.placement.iter().chain(&self.routing).all(|b| b.met() && b.unknown == 0)
             && self.performance.iter().all(|p| p.4 <= 0.0)
+            && self.bias.as_ref().map_or(true, |b| !b.probe)
     }
 }
 
@@ -166,6 +173,8 @@ pub struct BiasSummary {
     pub total_power_uw: i64,
     /// Hottest device: `(name, µW)`.
     pub hottest: Option<(String, i32)>,
+    /// Synthesised mid-rail probe, not a testbench: never a sign-off bias.
+    pub probe: bool,
 }
 
 /// Collect budget status for one requirement arm. `arm` tags every row, because
@@ -181,7 +190,7 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         let violations = b.violations(state) as usize;
         let unknown = b.unknown(state) as usize;
         // ponytail: a batch may count a rule both violated and unknown
-        // (`CentroidGroup` on its bbox proxy); saturating keeps it out of both.
+        // (a batch that counts both); saturating keeps it out of both.
         let satisfied = (total - violations).saturating_sub(unknown);
         let criticality = b.criticality(state);
         let residual = b.residual(state);
@@ -264,6 +273,8 @@ pub fn build(
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
         binding: Vec::new(),
         coverage: verify::Coverage::default(),
+        recognition: Vec::new(),
+        unconstrained: Vec::new(),
     }
 }
 
@@ -352,6 +363,14 @@ impl std::fmt::Display for MetadataReport {
         }
         for (kind, input) in &self.missing {
             writeln!(f, "  {kind:<22} {:>6} {:>5} {:>5} {:>5} {:>5}  {:>9}  {:>9}  UNKNOWN (no {input})", "-", "-", "-", "-", "-", "-", "-")?;
+        }
+        if !self.recognition.is_empty() {
+            let r: Vec<String> = self.recognition.iter().map(|(t, n)| format!("{t} ×{n}")).collect();
+            writeln!(f, "  RECOGNITION: {}", r.join(", "))?;
+        }
+        if !self.unconstrained.is_empty() {
+            let u: Vec<String> = self.unconstrained.iter().map(|(d, why)| format!("{d} ({why})")).collect();
+            writeln!(f, "  UNCONSTRAINED: {}", u.join(", "))?;
         }
         if !self.assumed.is_empty() {
             writeln!(f, "\n  assumed (UNVERIFIED sidecar values): {}", self.assumed.join(", "))?;
@@ -451,6 +470,18 @@ mod tests {
         let s = &statuses(&reqs(&[0.1, -1.0]).hard, &empty_routes(), Arm::Hard)[0];
         assert!(s.met() && s.satisfied == 1, "{s:?}");
         assert_eq!(s.verdict(), "UNKNOWN");
+    }
+
+    #[test]
+    fn recognition_is_printed() {
+        let report = MetadataReport {
+            recognition: vec![("five_transistor_ota", 1)],
+            unconstrained: vec![("R1".into(), "no pattern")],
+            ..Default::default()
+        };
+        let out = report.to_string();
+        assert!(out.contains("  RECOGNITION: five_transistor_ota ×1\n"), "{out}");
+        assert!(out.contains("  UNCONSTRAINED: R1 (no pattern)\n"), "{out}");
     }
 
     #[test]
@@ -572,6 +603,17 @@ mod tests {
         let r = MetadataReport { assumed: vec!["tie_max_dist_nm".into()], ..MetadataReport::default() };
         assert!(r.certified());
         assert!(r.to_string().contains("assumed (UNVERIFIED sidecar values): tie_max_dist_nm"), "{r}");
+    }
+
+    /// A probe bias (no user testbench) never certifies, whatever else is
+    /// met: the bench's rows are all probes, so none of them can be a
+    /// sign-off certificate.
+    #[test]
+    fn a_probe_bias_never_certifies() {
+        let probe = BiasSummary { provenance: String::new(), resolved: 0, devices: 0, total_power_uw: 0, hottest: None, probe: true };
+        let real = BiasSummary { probe: false, ..probe.clone() };
+        assert!(!MetadataReport { bias: Some(probe), ..MetadataReport::default() }.certified());
+        assert!(MetadataReport { bias: Some(real), ..MetadataReport::default() }.certified());
     }
 
     /// A saturated price is printed as the search's last-epoch state, never as

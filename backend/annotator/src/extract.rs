@@ -4,8 +4,8 @@
 //! | rule                 | arm    | where                                          |
 //! |----------------------|--------|------------------------------------------------|
 //! | `Antenna`            | hard   | self-extracted                                 |
-//! | `Differential`       | hard   | self-extracted diff-pair net pairs             |
-//! | `CrosstalkExclusion` | budget | self-extracted, spacing raised to victim class |
+//! | `Differential`       | budget | from the DiffPair leaves                       |
+//! | `CrosstalkExclusion` | budget | from the DiffPair leaves, spacing by class      |
 //! | `ParasiticBudget`    | budget | every budgeted net, C budget as drawn length   |
 //! | `CouplingBudget`     | budget | every budgeted net, from its class and load;   |
 //! |                      |        | own shield excluded, quiet rails weigh 0       |
@@ -16,26 +16,49 @@ use analog::metadata::{NetClass, NetClassification};
 use analog::routing::{
     Antenna, CouplingBudget, CrosstalkExclusion, Differential, ParasiticBudget, Shield,
 };
-use analog::rule::Rule;
 use analog::Requirements;
-use pnr_core::{BipartiteHypergraph, NetId, Routes, UnionFind};
+use pnr_core::ids::DeviceId;
+use pnr_core::{BipartiteHypergraph, NetId, Routes};
 
 /// Assemble the routing [`Requirements`]. `classes` is indexed by net id.
+/// `pairs` are the recognised `DiffPair` leaves (2 devices each), the source of
+/// `Differential` and `CrosstalkExclusion`.
 #[must_use]
 pub fn routing(
     hg: &BipartiteHypergraph,
     classes: &[NetClassification],
     gate_um2: &[f32],
     process: &crate::ProcessNumbers,
+    pairs: &[(DeviceId, DeviceId)],
+    policy: &crate::policy::Policy,
 ) -> Requirements<Routes> {
-    let mut uf = UnionFind::new(hg.device_count()); // routing rules don't group
+    let margin_pct = |c: NetClass| {
+        policy.margin_pct[match c {
+            NetClass::Sensitive => 0,
+            NetClass::Clock => 1,
+            NetClass::Supply | NetClass::Ground => 2,
+            _ => 3,
+        }]
+    };
+    let spacing_multiple = |c: NetClass| {
+        policy.spacing_multiple[match c {
+            NetClass::Sensitive => 0,
+            NetClass::Clock => 1,
+            NetClass::Signal => 2,
+            _ => 3,
+        }]
+    };
     let mut r = Requirements::<Routes>::default();
     // One Antenna per gate net, over the total gate area it drives.
     let mut gate_nm2 = vec![0i64; hg.net_names.len()];
     for (d, nets) in hg.device_nets.iter().enumerate() {
         if gate_um2[d] > 0.0 {
-            // Terminal 0 is G (G,D,S,B). A diode-connected FET hides a wrong index.
-            gate_nm2[nets[0].0 as usize] += (f64::from(gate_um2[d]) * 1e6) as i64;
+            if let Some(t) = hg.terminals[d]
+                .iter()
+                .position(|t| crate::terms::term_role(hg.kinds[d], t) == crate::terms::TermRole::FetGate)
+            {
+                gate_nm2[nets[t].0 as usize] += (f64::from(gate_um2[d]) * 1e6) as i64;
+            }
         }
     }
     let antenna: Vec<Antenna> = process.antenna_max_ratio
@@ -45,20 +68,44 @@ pub fn routing(
                 net: NetId(n as u16),
                 max_ratio_x100: (ratio * 100.0) as i32,
                 gate_area_nm2: a,
-                margin_pct: 20,
+                margin_pct: policy.antenna_margin_pct,
                 stack: process.stack,
             })
         })
         .collect();
     r.hard.push(Box::new(antenna));
-    let diff: Vec<Differential> = Differential::extract(hg, &mut uf).into_iter().map(|d| Differential { stack: process.stack, ..d }).collect();
-    r.hard.push(Box::new(diff));
 
+    // Differential and crosstalk-exclusion both come from the recognised DiffPair
+    // leaves (EXT-09): no positional-pin or O(N²) device-pair scan.
     let class = |n: NetId| classes[n.0 as usize].class;
-    let mut xtalk = CrosstalkExclusion::extract(hg, &mut uf);
-    for x in &mut xtalk {
-        x.min_spacing_nm = process.route_space_nm * spacing_multiple(class(x.a)).max(spacing_multiple(class(x.b)));
+    let pin = |d: DeviceId, p: &str| crate::pattern::pin_net(hg, u32::from(d.0), p);
+    // Leaves can share nets (latch: two pairs on q/qb; gilbert: a leaf whose devices
+    // share a gate): one rule per unordered net pair, first orientation kept.
+    let mut seen = std::collections::HashSet::new();
+    let mut fresh = |x: NetId, y: NetId, kind: u8| seen.insert((kind, x.0.min(y.0), x.0.max(y.0)));
+    // Σ coupling per victim: several minimum-spaced aggressors pass every pairwise
+    // crosstalk rule and still blow this. The victim's own shield is the remedy,
+    // not an aggressor, and the quiet rails weigh nothing.
+    let weights: &'static [f32] =
+        Box::leak(CouplingBudget::default_weights(classes, hg.net_names.len()).into_boxed_slice());
+    let mut diff: Vec<Differential> = Vec::new();
+    let mut xtalk: Vec<CrosstalkExclusion> = Vec::new();
+    for &(a, b) in pairs {
+        if let (Some(da), Some(db)) = (pin(a, "D"), pin(b, "D")) {
+            if da != db && fresh(da, db, 0) {
+                diff.push(Differential { pos: da, neg: db, max_len_delta_pct10: policy.diff_pct10, same_layer_required: true, stack: process.stack, aggressor_weight: Some(weights) });
+            }
+        }
+        for g in [pin(a, "G"), pin(b, "G")].into_iter().flatten() {
+            for d in [pin(a, "D"), pin(b, "D")].into_iter().flatten() {
+                if g != d && fresh(g, d, 1) {
+                    let min_spacing_nm = process.route_space_nm * spacing_multiple(class(g)).max(spacing_multiple(class(d)));
+                    xtalk.push(CrosstalkExclusion { a: g, b: d, min_spacing_nm, margin_pct: 25 });
+                }
+            }
+        }
     }
+    r.budget.push(Box::new(diff));
     r.budget.push(Box::new(xtalk));
 
     // Every net a device touches — a one-device net is still routed to its pin.
@@ -83,11 +130,6 @@ pub fn routing(
     let ground = routed().find(|c| c.class == NetClass::Ground).map(|c| c.net);
     let shield_ref = |c: &NetClassification| ground.filter(|_| has_clock && c.class == NetClass::Sensitive);
 
-    // Σ coupling per victim: several minimum-spaced aggressors pass every pairwise
-    // crosstalk rule and still blow this. The victim's own shield is the remedy,
-    // not an aggressor, and the quiet rails weigh nothing.
-    let weights: &'static [f32] =
-        Box::leak(CouplingBudget::default_weights(classes, hg.net_names.len()).into_boxed_slice());
     let coup: Vec<CouplingBudget> = routed()
         .filter_map(|c| {
             Some(CouplingBudget {
@@ -107,9 +149,8 @@ pub fn routing(
             Some(Shield {
                 victim: c.net,
                 reference: shield_ref(c)?,
-                min_coverage_pct: 80,
-                // The adjacent track: one routing space, with a spacing of slack.
-                max_gap_nm: 2 * process.route_space_nm,
+                min_coverage_pct: policy.shield_coverage_pct,
+                max_gap_nm: policy.shield_gap_spaces * process.route_space_nm,
             })
         })
         .collect();
@@ -119,23 +160,3 @@ pub fn routing(
     r
 }
 
-
-/// Safety margin held back from a class's budgets, percent.
-fn margin_pct(class: NetClass) -> u8 {
-    match class {
-        NetClass::Sensitive => 35,
-        NetClass::Clock => 30,
-        NetClass::Supply | NetClass::Ground => 25,
-        _ => 20,
-    }
-}
-
-/// Minimum run-adjacent spacing a class demands, nm.
-fn spacing_multiple(class: NetClass) -> i32 {
-    match class {
-        NetClass::Sensitive => 8,
-        NetClass::Clock => 7,
-        NetClass::Signal => 3,
-        _ => 1,
-    }
-}

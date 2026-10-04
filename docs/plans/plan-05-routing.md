@@ -203,7 +203,7 @@ Status: done in M0 (`de602df`).
 
 ### RTE-03 Foreign metal is a hard obstacle; shorts, opens and congestion are measured as violations
 
-Status: not merged through review; the code is on m0 as `ba49ae2` (ported outside the item review) with acceptance 3 not met. Owner decision open (keep with the residual congestion handed to RTE-08, or revert); see the Status note under Acceptance and 00-MASTER-PLAN Status.
+Status: not merged through review; the code is on m0 as `ba49ae2` (ported outside the item review) with acceptance 3 not met. Owner decision open (keep with the residual congestion handed to RTE-08, or revert); see the Status note under Acceptance and 00-MASTER-PLAN Status. M1: `ba49ae2` stays and RTE-08 met acceptance 3; the decision is still not recorded (§6.4 Q10, default keep).
 
 Field report: FR-6, see RTE-08 (the residual shorts and congestion are this item's measure and RTE-08's convergence).
 
@@ -247,6 +247,8 @@ Field report: FR-6, see RTE-08 (the residual shorts and congestion are this item
 
 ### RTE-05 Differential: terminal-resolved RC, via count, coupling asymmetry, `known`; no stub trim
 
+Status: done in M1 (`7f8d92b`; routing merge `57e3cc8`). `trim_pair` and its test are deleted (RTE-20 recovers them from `7f8d92b^`).
+
 - Priority: P0. Effort: M. Depends on: REL-03 (`Routes::terms`), RTE-02 (weights), RTE-09 (`RepairKind::Mirror`); EXT-09 moves the rule to the budget arm and deletes `Differential::extract`. REL-03, RTE-02 and RTE-09 landed in M0: `Routes::terminals(net)` (kernel/core/src/routes.rs:101), `CouplingBudget::aggressor_weight` (coupling.rs:47), `gr::symmetric_nets` already reads both arms (gr:277), while dr's trim loop still filters `reqs.hard` only (dr:876-880 on m0; `trim_pair` at dr:1016).
 - Why: AR-12, AR-39, AR-44, AA-14, AT-20; BAL2-22 (per-aggressor balance, balasa_graeb_survey.txt:8905–8909, 9745–9753); NOTES-43; SURV-14 (exact per-layer matching, perf_driven_survey L86–89); SUB-44 (by analogy only: a 5 % mismatch of a receiver pair's *substrate* capacitances costs ≈ 40 dB of differential isolation at 1 GHz and ≈ 27 dB at 100 MHz, values read from Charbon Fig 8.10b per SUB-44; the source concerns substrate coupling, not routing coupling).
 - Current: see §1.5; `trim_pair` adds a stub off the lighter net that equalises the summed metric while terminal R stays unequal (dr:944–990, "it is not on a terminal path").
@@ -272,7 +274,7 @@ Field report: FR-6, see RTE-08 (the residual shorts and congestion are this item
 
 ### RTE-06 Antenna repair on the drawn geometry
 
-Status: not merged (rejected; commits on branch `m0-rte06-rejected`); carried to M1 with M0 exit criterion 2 (dac4 `erc/ar.met2.1:gate`). See the Status note at the end of this item and 00-MASTER-PLAN Status.
+Status: not merged (rejected; commits on branch `m0-rte06-rejected`); carried to M1 with M0 exit criterion 2 (dac4 `erc/ar.met2.1:gate`). See the Status note at the end of this item and 00-MASTER-PLAN Status. M1: not needed; after FLOW-17 dac4 signs off ERC 0 at `feedback_iters = 1` (`fixtures_sign_off_within_baseline`), so the branch stays unmerged.
 
 - Priority: P0. Effort: S. Depends on: REL-02 (the model: `GatePin { at, dev, nm2 }` per gate, gate area per piece, deck-only diode credit, `Antenna::known`); RTE-09 (`RepairKind::Antenna`). Gate-area-per-piece and stage-aware diode credit, formerly steps 1–3 of this item, are REL-02 steps 1–3 (C3).
 - Why: AV-15 (dac4 `erc/ar.met2.1:gate` red at `feedback_iters = 1`, clean at 5, signoff_fixtures.rs:139); AT-23 (repair judged on `probe` without access jogs, dr:555); REL-02 risk note ("If dac4 still fails after this item, the remaining work is RTE's repair"); H05-26 (the node ratio counts "the gate oxide area beneath the poly regions belonging to the node", hastings.txt:13148–13157).
@@ -291,6 +293,8 @@ Status: not merged (rejected; commits on branch `m0-rte06-rejected`); carried to
   re-scopes M0 exit criterion 2 in 00-MASTER-PLAN §5. The dac4 ERC baseline is not relaxed.
 
 ### RTE-07 Retire the coarse `GlobalRoute`; frame, corridors and group pricing
+
+Status: done in M1 (`f61390f`; routing merge `57e3cc8`). `GlobalRoute`, the gcell grid (`gcell_capacity`) and `gr::price_group` are gone.
 
 - Priority: P0. Effort: M. Depends on: none (RTE-25 provides congestion to PLC).
 - Why: AT-08, AT-09, AT-32, AT-37 (reporting), AT-30; LAMP-36 (area routing for 10–20 nets, lampaert.txt:5511–5540); AF-06.
@@ -326,6 +330,8 @@ Status: not merged (rejected; commits on branch `m0-rte06-rejected`); carried to
 - Risks / notes: the deleted items' outside callers are exactly the ones steps 3–5 edit: `price_group` (cellgen.rs:360), `GlobalCfg` (cellgen.rs:332, 357), `GlobalRoute` (lib.rs:618, elaborate.rs:176), `GcellGrid` (dr:21, 261); `gr::Tier` is also used by dr (dr:506, 584) and goes with RTE-08's `Negotiation` change. PLC-15 names a `gr::OverflowMap` from the coarse router; after this item PLC reads `RouteStats::congestion` (RTE-25) instead (plan-04 §0.2 already lists it).
 
 ### RTE-08 Negotiation keys and PathFinder convergence
+
+Status: done in M1 (`a192c02`; routing merge `57e3cc8`). RTE-03 acceptance 3: 0/45 dac4 score calls with congestion (routing branch).
 
 Field report: FR-6 (a short between two nets of a 7-device PTAT core, "device count mismatch"). FR-6's netlist is not in the report; ptat_bias signs off CLEAN on m0. The same failure class reproduces on m0 on a FET-only circuit: the CLI run of pwm_driver (34 FETs, default `Config`, two runs, identical) ends with `lvs/extract: label short: labels ["vss", "ba_m"]`, and 4 of that run's 25 non-empty dr reports carry `drawn short nets a/b` (2/13 twice, 3/15, 2/3), with `open net` and `pin access sacrificed` rows beside them (instrumented copy, one `eprintln!` at the end of `dr::score`). Whether the winning epoch's own dr report flags the short was not measured. Added acceptance: a `benchmarks/fixtures/pwm_driver.spice` (field-report netlist) run through the CLI has no `lvs/extract: label short` row; if the winner's dr report reads 0 hard rows while signoff finds the short, the gap goes to RTE-03's short detection.
 
@@ -634,7 +640,7 @@ Status: done in M0 (`e4915ea`). The acceptance grep must be word-bounded: `grep 
 
 - Priority: P1. Effort: M. Depends on: RTE-18 (`Separation`, crossing C); FLOW-07 (`c_af`, the schematic capacitance, for `c_unit_af`). Plate R/C weighting (formerly step 3) moves to RTE-21 step 1, which it needs.
 - Why: AT-33; CC-14 (C_TS gives gain error, C_TB code-dependent nonlinearity, C_BS only power, cc_dac_constructive.txt:142–173); CC-28 ("nonoverlapped routing that separates the wires that route the top-plate and bottom-plate", cc_dac_constructive.txt:792–794); CC-44 (routing wirelength proportional to capacitance keeps ratios, cc_review.txt:349–353); H08-22 (equal lead C per unit; rule C10: "insert jogs or dead-end branches into its lead until the two capacitances match", hastings.txt:22640–22670, 25584–25595); AV-06 / AV-32 (dac4 top–bit couplings 0.42/0.85/1.67/3.36 fF, audit-06 L310–311; the numbers sit in audit-06's narrative and in AV-32, not in the AV-06 row).
-- Current: inside the array the generator keeps C_TB structurally absent (cap_array.rs:12–17); outside it dr has no plate policy; `trim_pair` (dr:944–990) holds the stub machinery.
+- Current: inside the array the generator keeps C_TB structurally absent (cap_array.rs:12–17); outside it dr has no plate policy; `trim_pair`, which held the stub machinery, was deleted by RTE-05 (M1, `7f8d92b`); its last version is in `7f8d92b^:backend/dr/src/lib.rs`.
 - Change:
   1. `DetailedCfg::plates: Vec<PlateSet>`: `pub struct PlateSet { pub top: NetId, pub bits: Vec<(NetId, u32 /*units*/)>, pub c_unit_af: f32 }`. The library builds it from `cellgen::dac_banks` (cellgen.rs:760, made `pub(crate)`; one `Vec<DeviceId>` per bank, members sorted by `m`, slot 0 the electrical dummy): `top` = the `P` terminal net of any member; `bits` = `(N net, m)` of every member whose `N` net is not a rail (the dummy's bottom plate is a bulk rail, cellgen.rs:779–782); `c_unit_af` = FLOW-07's `c_af` of a member with `m = 1`, `f32::NAN` when absent. EXT-19's capacitor sets replace the source later; the struct stays.
   2. Separation: for every bit net, `Separation { a: top, b: bit, lateral_nm: S_l of the first routed metal, no_cross: true }` (RTE-18).
@@ -643,7 +649,7 @@ Status: done in M0 (`e4915ea`). The acceptance grep must be word-bounded: `grep 
      pub struct PlateRatio { pub set: &'static PlateSet, pub array: Rect, pub tol_pct10: i32, pub stack: &'static Stack }
      ```
      `array` = the placed cap-array macro's bbox. Lead C of bit `i`: `C_i = stack.ground_af(S_i) + Σ_{other nets m} coupling::net_pair_af(Some(stack), S_i, r.shapes(m))` with `S_i` = bit `i`'s routed shapes not contained in `array` (RTE-18's screened measure, weights 1). `spread_pct = max_i |C_i/n_i − mean_j(C_j/n_j)| / c_unit_af · 100`; `violations = (spread_pct > tol) as u32`, `residual = over(spread_pct − tol, tol)` (rule.rs) with `tol = tol_pct10/10`, default 1 % (tuning default; H08-22 gives the check form, not a number); `known` = `c_unit_af` finite and every bit net has shapes. Budget arm.
-  4. Repair `equalize_leads` (from `trim_pair`, dr:944–990): `target = max_j C_j/n_j`; for each bit with `C_i/n_i < target`, add a same-layer dead-end stub continuing one of its runs outside `array`, length `L = (target − C_i/n_i)·n_i / c_per_nm(l)` nm, with `c_per_nm(l) = (area_af_um2(l)·wire_l/1000 + 2·fringe_af_um(l))/1000` aF/nm (Stack terms, stack.rs:55–64); keep it only if `spread_pct` drops and the stub clears foreign metal by `S_l`.
+  4. Repair `equalize_leads` (restored from `trim_pair`, `7f8d92b^`): `target = max_j C_j/n_j`; for each bit with `C_i/n_i < target`, add a same-layer dead-end stub continuing one of its runs outside `array`, length `L = (target − C_i/n_i)·n_i / c_per_nm(l)` nm, with `c_per_nm(l) = (area_af_um2(l)·wire_l/1000 + 2·fringe_af_um(l))/1000` aF/nm (Stack terms, stack.rs:55–64); keep it only if `spread_pct` drops and the stub clears foreign metal by `S_l`.
 - Tests: `dr`: `bottom_plates_never_cross_the_top_plate` (synthetic 4-bit bank: one macro with pins `P` and four `N_i`; after routing, no bit-net shape overlaps a top-net shape in xy on adjacent layers and every same-layer gap ≥ `S`); `plate_ratio.rs`: `lead_capacitance_is_equalised_per_unit` (bits of 1/2/4/8 units, equal 10 µm met1 leads, `c_unit_af = 1 000` → before: spread > 1 %; after `equalize_leads`: spread ≤ 1 %, i.e. every `C_i/n_i` within 10 aF of the mean).
 - Acceptance: `dac4`: no top-plate/bit-plate crossing outside the array; `PlateRatio` residual 0.
 - Risks / notes: the array-internal parasitics are CELL's (CC-26/27/29); this item only governs what leaves the macro.

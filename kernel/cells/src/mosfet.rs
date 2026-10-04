@@ -4,10 +4,11 @@
 use crate::builder::dim;
 use std::collections::BTreeMap;
 
+use analog::matching::pattern::{self, Outer};
 use analog::Constraints;
 use pnr_core::{DeviceGroup, DeviceKind, Macro, Process, Rect};
 
-use crate::builder::{cut_lattice, greedy_centroid, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
+use crate::builder::{cut_lattice, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
 use crate::{Cell, Pattern};
 
 /// One MOSFET variant: `nf` fingers per device arranged by `style`, with
@@ -25,7 +26,7 @@ use crate::{Cell, Pattern};
 /// the matched interconnect a differential route copies (MAT-11; Karmokar et
 /// al. ASP-DAC 2022 §V-A, unequal access skews a matched pair). The centroids
 /// coincide only where such an order exists; otherwise they sit one drain
-/// pair apart, which `CentroidGroup` prices, so the search trades the two.
+/// pair apart, which `MatchedSet` prices, so the search trades the two.
 ///
 /// `double_gate`: see the field.
 ///
@@ -85,13 +86,17 @@ impl Cell for Mosfet {
             return vec![Mosfet { nf, style: Pattern::Chain, dummies_per_edge: dummies, split_gates: false, mirror_pins: false, rows: 1, double_gate: false }];
         }
         // Interdig is never offered: an ABAB boundary between devices lands on
-        // a drain region and shorts two drains over shared diffusion.
-        let mut styles = vec![(Pattern::Single, false, false)];
-        if centroid_sequence(n_dev, usize::from(nf)).is_some() {
+        // a drain region and shorts two drains over shared diffusion. Blocks
+        // only where every boundary can sit on a source ([`legal_row`]): all
+        // even counts from S, two odd ones from D; mixed parity is not offered.
+        let blocks: Vec<usize> = s.dev_nf.iter().enumerate().flat_map(|(d, &n)| std::iter::repeat_n(d, usize::from(n))).collect();
+        let mut styles = if legal_row(&blocks, true) || legal_row(&blocks, false) { vec![(Pattern::Single, false, false)] } else { Vec::new() };
+        if pattern::diffusion_cc_row(&s.dev_nf, Outer::Drain).is_some() {
             styles.push((Pattern::Cc1d, false, false));
             // Split gates, then mirror pins, last: indices of the existing
-            // variants stay stable.
-            if n_dev == 2 {
+            // variants stay stable. Equal pairs only: mirror pins swap two
+            // equal devices by reflection.
+            if n_dev == 2 && s.dev_nf[0] == s.dev_nf[1] {
                 styles.push((Pattern::Cc1d, true, false));
                 styles.push((Pattern::Cc1d, true, true));
                 // Mirror pins on one shared gate strap: a mirror or load pair
@@ -114,7 +119,7 @@ impl Cell for Mosfet {
                 && s.dev_nf.iter().map(|&n| u32::from(n)).sum::<u32>() >= 4
                 && match (style, mirror) {
                     (_, true) => half % 2 == 0,
-                    (Pattern::Cc1d, false) => centroid_sequence(n_dev, usize::from(half)).is_some(),
+                    (Pattern::Cc1d, false) => pattern::diffusion_cc_row(&s.dev_nf.iter().map(|&n| n / 2).collect::<Vec<_>>(), Outer::Drain).is_some(),
                     _ => true,
                 }
         };
@@ -143,7 +148,7 @@ impl Cell for Mosfet {
         } else if self.style == Pattern::Chain {
             dev_nf.iter().enumerate().flat_map(|(d, &n)| std::iter::repeat_n(d, usize::from(n))).collect()
         } else {
-            finger_sequence(n_dev, self.style, nf, &dev_nf)
+            finger_sequence(self.style, &dev_nf)
         };
         let row0 = self.draw_row(group, constraints, process, &first);
         if rows == 1 {
@@ -257,6 +262,14 @@ impl Mosfet {
         let gate_space = r("licon_to_gate_spacing", 0).max(process.space_between("licon", "poly").unwrap_or(0));
         let tap_enc = r("tap_encloses_licon_one_side", 0).max(cap("tap", "licon")).max(enc("tap", "licon"));
         let gate_l = s.unit_l;
+        // Dummy L = min(active L, microloading reach): H13-26, a dummy wider
+        // than the process's local-oxide-thinning reach draws no benefit, so a
+        // long active gate keeps its dummies short rather than growing them to
+        // match.
+        let dummy_l = match r("dummy_max_l_nm", 0) {
+            cap if cap > 0 && gate_l > cap => cap,
+            _ => gate_l,
+        };
         let finger_w = s.unit_w;
         let m1_pitch = dim(process, "mcon_size") + 2 * dim(process, "m1_enc") + dim(process, "met1_space");
         let (sd_w, pitch) = sd_and_pitch(process, gate_l);
@@ -282,7 +295,7 @@ impl Mosfet {
         } else {
             sd_end
         };
-        let d_step = gate_l + sd_end;
+        let d_step = dummy_l + sd_end;
         let gates_end = sd_edge + (n_fingers - 1) * pitch + gate_l;
         // LOD moat where devices share a row: their fingers sit at different
         // distances from the diffusion ends (ABBA: A owns both ends), so the
@@ -321,14 +334,16 @@ impl Mosfet {
         // Snapped down (away from the diff) so the cut sits on the lattice.
         let pad_y = snap_cut(-(poly_ext + stub), lat);
         let stub = -pad_y - poly_ext;
-        // S/D regions. Single device: region 0 is S. Multi-device: region 0 is
-        // D, so every inter-device boundary (odd region) is a shared source.
-        // Mirror pins pair fingers on drains instead: region 0 is S again.
-        let multi = n_dev > 1 && !self.mirror_pins;
-        let is_s = |region: i32| (region % 2 == 0) != multi;
-        // Terminal of the finger at `idx` on its left (`right_side = false`)
-        // or right side. A chain restarts at drain with each member.
+        // S/D regions: region 0 is S iff `s0`, chosen so every inter-device
+        // boundary is a shared source ([`legal_row`]): a single device or an
+        // even-count block row from S, a centroid row from D. Mirror pins pair
+        // fingers on drains: region 0 is S. A chain restarts per member.
         let chain = self.style == Pattern::Chain;
+        let s0 = if self.mirror_pins { true } else { legal_row(sequence, true) };
+        let is_s = |region: i32| (region % 2 == 0) == s0;
+        debug_assert!(chain || self.mirror_pins || legal_row(sequence, s0), "{sequence:?}");
+        // Terminal of the finger at `idx` on its left (`right_side = false`)
+        // or right side.
         let start: Vec<i32> = (0..sequence.len()).map(|i| sequence[..i].iter().rposition(|&d| d != sequence[i]).map_or(0, |p| p as i32 + 1)).collect();
         let term = |idx: i32, right_side: bool| -> &'static str {
             if chain {
@@ -510,11 +525,11 @@ impl Mosfet {
         let ends = [(sequence[0], term(0, false)), (sequence[sequence.len() - 1], term(n_fingers - 1, true))];
         for k in 0..nd {
             // Gate `k` out from each end, and the S/D region beyond it.
-            let left = -(k + 1) * gate_l - k * sd_end;
+            let left = -(k + 1) * dummy_l - k * sd_end;
             let right = gates_end + sd_edge + k * d_step;
-            for (edge, (dx, rx)) in [(left, left - sd_end), (right, right + gate_l)].into_iter().enumerate() {
-                b.rect(poly, Rect { x: dx, y: -poly_ext, w: gate_l, h: finger_w + 2 * poly_ext });
-                let cx = snap_cut(dx + gate_l / 2 - ct / 2, lat);
+            for (edge, (dx, rx)) in [(left, left - sd_end), (right, right + dummy_l)].into_iter().enumerate() {
+                b.rect(poly, Rect { x: dx, y: -poly_ext, w: dummy_l, h: finger_w + 2 * poly_ext });
+                let cx = snap_cut(dx + dummy_l / 2 - ct / 2, lat);
                 b.rect(licon, Rect { x: cx, y: licon_y, w: ct, h: ct });
                 let px = snap_cut(rx + sd_end / 2 - ct / 2, lat);
                 b.rect(licon, Rect { x: px, y: cy, w: ct, h: ct });
@@ -528,12 +543,12 @@ impl Mosfet {
                     pmos: is_pmos,
                     edge: if k == 0 { near } else { "B" },
                     w: finger_w,
-                    l: gate_l,
+                    l: dummy_l,
                 });
             }
         }
         let stub_top = licon_y + ct + licon_poly_enc;
-        let dpad_w = gate_l.max(ct + 2 * licon_poly_side);
+        let dpad_w = dummy_l.max(ct + 2 * licon_poly_side);
         let skirt_y = finger_w + poly_ext - 10;
         // Riser strips lap the rail's li but stay above its cut row (a grazed
         // cut reads as an under-sized contact).
@@ -544,8 +559,8 @@ impl Mosfet {
             // The skirt joins this edge's dummy gates only (outer S/D cuts sit
             // on diff, not poly): its x span is the dummy cuts'.
             let gates: Vec<i32> = (0..nd)
-                .map(|k| if e == 0 { -(k + 1) * gate_l - k * sd_end } else { gates_end + sd_edge + k * d_step })
-                .map(|dx| snap_cut(dx + gate_l / 2 - ct / 2, lat))
+                .map(|k| if e == 0 { -(k + 1) * dummy_l - k * sd_end } else { gates_end + sd_edge + k * d_step })
+                .map(|dx| snap_cut(dx + dummy_l / 2 - ct / 2, lat))
                 .collect();
             let (g0, g1) = (gates.iter().copied().min().unwrap_or(cx0), gates.iter().copied().max().unwrap_or(cx1));
             let x0 = g0 + ct / 2 - dpad_w / 2;
@@ -719,34 +734,26 @@ fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> 
     sizing(group, c, dim(process, "min_finger_width"), dim(process, "min_gate_l"))
 }
 
-/// The common-centroid finger order for `n_dev` devices at `nf` fingers each,
-/// or `None` when none exists.
-///
-/// A boundary between two devices must land on a source (odd) region, so
-/// fingers pair up (`seq[1] == seq[2]`, …) and mirror symmetry forces both
-/// array ends onto one device. A pair (`ABBA`…) works at any even `nf`; with
-/// more devices only one owns the middle pair, so `nf` must be a multiple of 4
-/// (unit `A BB CC .. AA .. CC BB A`, repeated `nf / 4` times).
-fn centroid_sequence(n_dev: usize, nf: usize) -> Option<Vec<usize>> {
-    if n_dev < 2 || nf == 0 || nf % 2 != 0 {
-        return None;
+/// Every inter-device boundary of `seq` (device index per finger) lies on a
+/// source region, with region 0 a source iff `s0`. Region i sits left of
+/// finger i; region `seq.len()` is the right end.
+pub(crate) fn legal_row(seq: &[usize], s0: bool) -> bool {
+    (1..seq.len()).all(|i| seq[i] == seq[i - 1] || ((i % 2 == 0) == s0))
+}
+
+/// Whether `enumerate` offers a centroid-exact row for these per-member finger
+/// counts: a route-matched equal pair draws only mirror orders
+/// ([`mirror_sequence`] exact), anything else a [`pattern::diffusion_cc_row`].
+#[must_use]
+pub fn cc_row_exists(dev_nf: &[u16], route_matched: bool) -> bool {
+    let cc = pattern::diffusion_cc_row(dev_nf, Outer::Drain).is_some();
+    if dev_nf.len() == 2 && dev_nf[0] == dev_nf[1] && route_matched {
+        // `cc` excludes odd nf, where the mirror order is empty and its
+        // offset a vacuous 0.
+        cc && mirror_offset(usize::from(dev_nf[0])) == 0
+    } else {
+        cc
     }
-    if n_dev == 2 {
-        return Some([0, 1, 1, 0].into_iter().cycle().take(2 * nf).collect());
-    }
-    if nf % 4 != 0 {
-        return None;
-    }
-    let mut unit = vec![0usize];
-    for d in 1..n_dev {
-        unit.extend([d, d]);
-    }
-    unit.extend([0, 0]);
-    for d in (1..n_dev).rev() {
-        unit.extend([d, d]);
-    }
-    unit.push(0);
-    Some(unit.into_iter().cycle().take(n_dev * nf).collect())
 }
 
 /// Finger order for a pair at `nf` fingers each whose pin sets mirror onto
@@ -758,41 +765,47 @@ fn centroid_sequence(n_dev: usize, nf: usize) -> Option<Vec<usize>> {
 /// ponytail: brute force over `2^(nf/2)` halves, capped at `nf = 32`; larger
 /// arrays fall back to alternating pairs (one pair of centroid offset).
 fn mirror_sequence(nf: usize) -> Vec<usize> {
+    mirror_pairs(nf).into_iter().flat_map(|d| [d, d]).collect()
+}
+
+/// [`mirror_sequence`]'s order, one entry per drain pair.
+fn mirror_pairs(nf: usize) -> Vec<usize> {
     let half = nf / 2;
     let build = |h: u32| -> Vec<usize> {
         let first: Vec<usize> = (0..half).map(|i| ((h >> (half - 1 - i)) & 1) as usize).collect();
         first.iter().copied().chain(first.iter().rev().map(|&d| 1 - d)).collect()
     };
-    // Twice device 0's pair-index sum minus the balanced one: 0 = coincident.
-    let offset = |pairs: &[usize]| {
-        let sum: i64 = pairs.iter().enumerate().filter(|&(_, &d)| d == 0).map(|(i, _)| i as i64).sum();
-        (2 * sum - (half as i64) * (nf as i64 - 1)).abs()
-    };
-    let pairs = if half == 0 {
+    if half == 0 {
         Vec::new()
     } else if half <= 16 {
-        (0..1u32 << half).map(build).min_by_key(|p| offset(p)).unwrap_or_default()
+        (0..1u32 << half).map(build).min_by_key(|p| pair_offset(p)).unwrap_or_default()
     } else {
         build(0b0101_0101_0101_0101 & ((1 << 16) - 1))
-    };
-    pairs.into_iter().flat_map(|d| [d, d]).collect()
+    }
 }
 
-/// Device index per finger slot. Unequal per-device counts (ratioed mirror)
-/// use the greedy centroid interleave; `Cc1d` its centroid order when one
-/// exists; everything else each device's fingers in a block.
-fn finger_sequence(n_dev: usize, style: Pattern, nf: u16, dev_nf: &[u16]) -> Vec<usize> {
-    if dev_nf.len() == n_dev && dev_nf.iter().any(|&x| x != dev_nf[0]) {
-        let counts: Vec<usize> = dev_nf.iter().map(|&x| usize::from(x)).collect();
-        return greedy_centroid(&counts);
-    }
-    let nf = usize::from(nf);
+/// Twice device 0's pair-index sum minus the balanced one: 0 = coincident.
+fn pair_offset(pairs: &[usize]) -> i64 {
+    let (nf, half) = (pairs.len() as i64, pairs.len() as i64 / 2);
+    let sum: i64 = pairs.iter().enumerate().filter(|&(_, &d)| d == 0).map(|(i, _)| i as i64).sum();
+    (2 * sum - half * (nf - 1)).abs()
+}
+
+/// The centroid offset of the order [`mirror_sequence`] draws at `nf`.
+fn mirror_offset(nf: usize) -> i64 {
+    pair_offset(&mirror_pairs(nf))
+}
+
+/// Device index per finger slot: `Cc1d` the diffusion-legal centroid row
+/// ([`pattern::diffusion_cc_row`], ratioed counts too) when one exists;
+/// everything else each device's fingers in a block.
+fn finger_sequence(style: Pattern, dev_nf: &[u16]) -> Vec<usize> {
     if style == Pattern::Cc1d {
-        if let Some(seq) = centroid_sequence(n_dev, nf) {
+        if let Some(seq) = pattern::diffusion_cc_row(dev_nf, Outer::Drain) {
             return seq;
         }
     }
-    (0..n_dev).flat_map(|d| std::iter::repeat_n(d, nf)).collect()
+    dev_nf.iter().enumerate().flat_map(|(d, &n)| std::iter::repeat_n(d, usize::from(n))).collect()
 }
 
 #[cfg(test)]
@@ -827,6 +840,19 @@ mod tests {
             dirty.extend(testkit::dirty::<Mosfet>(kind, 2, 2, 5000, 1000, &pdk));
             // Wide and short: its poly R outweighs a contact, so two-ended.
             dirty.extend(testkit::dirty::<Mosfet>(kind, 2, 2, 10_000, 150, &pdk));
+            // CELL-30: gate L on both sides of the dummy_max_l_nm cap (3000).
+            for (w, l) in [(420, 1000), (420, 16_200), (420, 64_800), (2160, 9600)] {
+                dirty.extend(testkit::dirty::<Mosfet>(kind, 1, 1, w, l, &pdk));
+            }
+            // CELL-10: ratioed mirrors.
+            for counts in RATIOED {
+                let (g, mut c) = testkit::group_of(kind, 2, counts[0], 1680, 150);
+                c.unitization[0].dev_nf = counts.to_vec();
+                for dummies in [false, true] {
+                    c.unitization[0].dummy_required = dummies;
+                    dirty.extend(testkit::dirty_group::<Mosfet>(&g, &c, &pdk).into_iter().map(|d| format!("{kind:?} {counts:?} dummies={dummies} {d}")));
+                }
+            }
         }
         assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
     }
@@ -840,22 +866,52 @@ mod tests {
         let Some(pdk) = testkit::pdk() else { return };
         let mut wrong = Vec::new();
         for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
-            for (n, nf, w, l) in [(1usize, 1u16, 1680, 150), (2, 2, 1680, 150), (2, 2, 5000, 1000), (2, 2, 10_000, 150), (4, 4, 1680, 150)] {
+            for (n, nf, w, l) in [
+                (1usize, 1u16, 1680, 150),
+                (2, 2, 1680, 150),
+                (2, 2, 5000, 1000),
+                (2, 2, 10_000, 150),
+                (4, 4, 1680, 150),
+                // CELL-30: gate L on both sides of the dummy_max_l_nm cap (3000).
+                (1, 1, 420, 150),
+                (1, 1, 420, 1000),
+                (1, 1, 420, 16_200),
+                (1, 1, 420, 64_800),
+                (1, 1, 2160, 9600),
+            ] {
                 for dummies in [false, true] {
                     let (g, mut c) = testkit::group_of(kind, n, nf, w, l);
                     c.unitization[0].dummy_required = dummies;
-                    for (i, v) in Mosfet::enumerate(&g, &c, &pdk).iter().enumerate() {
-                        let m = v.draw(&g, &c, &pdk);
-                        let spice = verify::extract_spice(&m.shapes, &[], &pdk, verify::Detail::Schematic).unwrap_or_default();
-                        let got = spice.lines().filter(|l| l.starts_with('M')).count();
-                        if got != m.units.len() + m.dummies.len() {
-                            wrong.push(format!("{kind:?} n={n} nf={nf} w={w} dummies={dummies} #{i}: {got} vs {}", m.units.len() + m.dummies.len()));
-                        }
-                    }
+                    wrong.extend(miscounted(&g, &c, &pdk).into_iter().map(|e| format!("{kind:?} n={n} nf={nf} w={w} dummies={dummies} {e}")));
+                }
+            }
+            for counts in RATIOED {
+                for dummies in [false, true] {
+                    let (g, mut c) = testkit::group_of(kind, 2, counts[0], 1680, 150);
+                    c.unitization[0].dev_nf = counts.to_vec();
+                    c.unitization[0].dummy_required = dummies;
+                    wrong.extend(miscounted(&g, &c, &pdk).into_iter().map(|e| format!("{kind:?} {counts:?} dummies={dummies} {e}")));
                 }
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// CELL-10 sweep members: 1:2, 1:3, 1:2 at four fingers a unit.
+    const RATIOED: [&[u16]; 3] = [&[2, 4], &[2, 6], &[4, 8]];
+
+    /// Variants whose extracted MOS count is not their fingers plus dummies.
+    fn miscounted(g: &DeviceGroup, c: &Constraints, pdk: &verify::Pdk) -> Vec<String> {
+        let mut out = Vec::new();
+        for (i, v) in Mosfet::enumerate(g, c, pdk).iter().enumerate() {
+            let m = v.draw(g, c, pdk);
+            let spice = verify::extract_spice(&m.shapes, &[], pdk, verify::Detail::Schematic).unwrap_or_default();
+            let got = spice.lines().filter(|l| l.starts_with('M')).count();
+            if got != m.units.len() + m.dummies.len() {
+                out.push(format!("#{i}: {got} vs {}", m.units.len() + m.dummies.len()));
+            }
+        }
+        out
     }
 
     /// Every admitted centroid order is balanced, centred, and never puts two
@@ -864,7 +920,7 @@ mod tests {
     fn a_centroid_order_is_symmetric_and_never_abuts_two_drains() {
         for n_dev in 2..=6usize {
             for nf in 1..=12usize {
-                let Some(seq) = centroid_sequence(n_dev, nf) else { continue };
+                let Some(seq) = pattern::diffusion_cc_row(&vec![nf as u16; n_dev], Outer::Drain) else { continue };
                 assert_eq!(seq.len(), n_dev * nf);
                 for d in 0..n_dev {
                     assert_eq!(seq.iter().filter(|&&x| x == d).count(), nf, "n={n_dev} nf={nf} d={d}");
@@ -880,11 +936,111 @@ mod tests {
 
     #[test]
     fn a_quad_needs_four_fingers_before_a_centroid_exists() {
-        assert!(centroid_sequence(4, 1).is_none());
-        assert!(centroid_sequence(4, 2).is_none());
-        assert!(centroid_sequence(4, 4).is_some());
-        assert!(centroid_sequence(2, 2).is_some());
-        assert!(centroid_sequence(2, 1).is_none());
+        let row = |c: &[u16]| pattern::diffusion_cc_row(c, Outer::Drain);
+        assert!(row(&[1; 4]).is_none());
+        assert!(row(&[2; 4]).is_none());
+        assert!(row(&[4; 4]).is_some());
+        assert!(row(&[2, 2]).is_some());
+        assert!(row(&[1, 1]).is_none());
+    }
+
+    /// CELL-10: the region rule, by hand.
+    #[test]
+    fn legal_row_matches_the_region_rule() {
+        assert!(legal_row(&[0, 1, 1, 0], false) && !legal_row(&[0, 1, 1, 0], true));
+        assert!(legal_row(&[0, 0, 1, 1], true) && !legal_row(&[0, 0, 1, 1], false));
+        assert!(legal_row(&[0, 1], false));
+    }
+
+    /// CELL-10: `[2, 2]` blocked starts on S, so the two drains never share a pad.
+    #[test]
+    fn a_blocked_even_row_puts_boundaries_on_sources() {
+        use crate::testkit;
+        use pnr_core::DeviceKind;
+        let Some(pdk) = testkit::pdk() else { return };
+        let (g, c) = testkit::group_of(DeviceKind::Nmos, 2, 2, 1680, 150);
+        let v = Mosfet::enumerate(&g, &c, &pdk).into_iter().find(|v| v.style == Pattern::Single).expect("a blocked [2, 2] is offered");
+        let m = v.draw(&g, &c, &pdk);
+        let d = |i: usize| m.pins.iter().filter(move |p| p.name == format!("d{i}:D")).map(|p| p.at).collect::<Vec<_>>();
+        assert!(d(0).iter().all(|a| !d(1).contains(a)), "a pad carries both drains");
+    }
+
+    /// CELL-10: a 1:2 mirror `[2, 4]` merges as A BBBB A with no shared drain
+    /// pad, DRC/ERC clean.
+    #[test]
+    fn a_ratioed_mirror_merges() {
+        use crate::testkit;
+        use pnr_core::DeviceKind;
+        let Some(pdk) = testkit::pdk() else { return };
+        let (g, mut c) = testkit::group_of(DeviceKind::Nmos, 2, 2, 1680, 150);
+        c.unitization[0].dev_nf = vec![2, 4];
+        let v = Mosfet::enumerate(&g, &c, &pdk).into_iter().find(|v| v.style == Pattern::Cc1d && v.rows == 1).expect("a centroid [2, 4] is offered");
+        assert_eq!(finger_sequence(v.style, &[2, 4]), [0, 1, 1, 1, 1, 0]);
+        let m = v.draw(&g, &c, &pdk);
+        let d = |i: usize| m.pins.iter().filter(move |p| p.name == format!("d{i}:D")).map(|p| p.at).collect::<Vec<_>>();
+        assert!(d(0).iter().all(|a| !d(1).contains(a)), "a pad carries both drains");
+        let dirty = testkit::dirty_group::<Mosfet>(&g, &c, &pdk);
+        assert!(dirty.is_empty(), "{dirty:?}");
+    }
+
+    /// CELL-10: the predicate FLOW-16 folds by agrees with what `enumerate` offers.
+    #[test]
+    fn cc_row_exists_follows_the_offered_variants() {
+        assert!(!cc_row_exists(&[2, 2], true), "nf=2 mirror orders are one pair off");
+        assert!(cc_row_exists(&[8, 8], true));
+        assert!(!cc_row_exists(&[1, 1], true));
+        assert!(cc_row_exists(&[2, 2], false));
+        assert!(!cc_row_exists(&[1, 2], false));
+    }
+
+    /// A long active gate (well past the microloading reach) keeps its dummy
+    /// gates capped at `dummy_max_l_nm`, so the dummy ring's footprint stops
+    /// growing with the active L (H13-26).
+    #[test]
+    fn a_long_gate_keeps_short_dummies() {
+        use crate::testkit;
+        use pnr_core::DeviceKind::Pmos;
+        let Some(pdk) = testkit::pdk() else { return };
+        let (g, mut c) = testkit::group_of(Pmos, 1, 1, 420, 64_800);
+        c.unitization[0].dummy_required = false;
+        let without: Vec<Macro> = Mosfet::enumerate(&g, &c, &pdk).iter().map(|v| v.draw(&g, &c, &pdk)).collect();
+        c.unitization[0].dummy_required = true;
+        let with: Vec<Macro> = Mosfet::enumerate(&g, &c, &pdk).iter().map(|v| v.draw(&g, &c, &pdk)).collect();
+        assert_eq!(without.len(), with.len(), "dummy_required must not change the variant count");
+        let mut findings = Vec::new();
+        for (i, m) in with.iter().enumerate() {
+            for dm in &m.dummies {
+                assert_eq!(dm.l, 3000, "variant #{i}: dummy gate l {} not capped", dm.l);
+            }
+            let w_nd = without[i].bbox.w;
+            assert!(m.bbox.w <= w_nd + 2 * (3_000 + 500), "variant #{i}: bbox.w {} grew past the capped dummy footprint (no-dummy {w_nd})", m.bbox.w);
+            assert!(m.bbox.w <= 73_000, "variant #{i}: bbox.w {} exceeds FR-5", m.bbox.w);
+            let labels = testkit::ports_with(m, &["G", "S", "B"]);
+            findings.extend(testkit::findings(&m.shapes, &labels, &pdk));
+            let spice = verify::extract_spice(&m.shapes, &[], &pdk, verify::Detail::Schematic).unwrap_or_default();
+            let got = spice.lines().filter(|l| l.starts_with('M')).count();
+            assert_eq!(got, m.units.len() + m.dummies.len(), "variant #{i}: extracted {got} vs {} units+dummies", m.units.len() + m.dummies.len());
+        }
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// A short active gate (below `dummy_max_l_nm`) draws full-length dummies,
+    /// unchanged from before the cap existed.
+    #[test]
+    fn a_short_gate_keeps_full_dummies() {
+        use crate::testkit;
+        use pnr_core::DeviceKind::Nmos;
+        let Some(pdk) = testkit::pdk() else { return };
+        for l in [150, 1000] {
+            let (g, mut c) = testkit::group_of(Nmos, 1, 1, 420, l);
+            c.unitization[0].dummy_required = true;
+            for v in Mosfet::enumerate(&g, &c, &pdk) {
+                let m = v.draw(&g, &c, &pdk);
+                for dm in &m.dummies {
+                    assert_eq!(dm.l, l, "gate_l={l}: dummy gate l {} not left at the active L", dm.l);
+                }
+            }
+        }
     }
 
     /// Each finger is one unit on its channel, with signed S→D direction: a

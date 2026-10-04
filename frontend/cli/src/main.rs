@@ -115,8 +115,8 @@ fn cli() -> Result<bool, String> {
 
     if let Some(dir) = out {
         let (top, ports) = interface(&spice, Path::new(netlist));
-        write_outputs(&dir, &top, &ports, &sol, &pdk, &report, &summary, clean)?;
-        println!("wrote {}/{{{top}.gds, {top}_ref.spice, signoff.txt, signoff.json}}", dir.display());
+        let pex = if write_outputs(&dir, &top, &ports, &sol, &pdk, &report, &summary, clean)? { format!(" {top}_pex.spice,") } else { String::new() };
+        println!("wrote {}/{{{top}.gds, {top}_ref.spice,{pex} signoff.txt, signoff.json}}", dir.display());
     }
     Ok(clean)
 }
@@ -149,7 +149,7 @@ fn write_outputs(
     report: &pnr_core::report::Report,
     summary: &str,
     clean: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let write = |name: String, bytes: &[u8]| {
         let p = dir.join(name);
         std::fs::write(&p, bytes).map_err(|e| format!("write {}: {e}", p.display()))
@@ -157,6 +157,15 @@ fn write_outputs(
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     write(format!("{top}.gds"), &library::export_gds(sol, pdk, top, ports))?;
     write(format!("{top}_ref.spice"), library::reference_spice(sol, pdk, top, ports).as_bytes())?;
+    // A previous run's file in `dir` would read as this layout's extraction: removed when none is written.
+    let pex = match library::post_layout_spice(sol, pdk, top) {
+        Ok(s) => write(format!("{top}_pex.spice"), s.as_bytes()).map(|()| true)?,
+        Err(e) => {
+            eprintln!("{top}_pex.spice not written: {e}");
+            let _ = std::fs::remove_file(dir.join(format!("{top}_pex.spice")));
+            false
+        }
+    };
 
     let lines = |vs: &[pnr_core::report::Violation]| -> String {
         vs.iter().map(|v| format!("{}\t{}\n", v.rule, v.margin)).collect()
@@ -184,7 +193,8 @@ fn write_outputs(
         arr(&report.hard_violations),
         arr(&report.budget_violations),
     );
-    write("signoff.json".into(), json.as_bytes())
+    write("signoff.json".into(), json.as_bytes())?;
+    Ok(pex)
 }
 
 fn json_str(s: &str) -> String {

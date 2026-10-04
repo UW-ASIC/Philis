@@ -11,24 +11,9 @@
 use analog::metadata::{NetClass, NetClassification};
 use pnr_core::NetId;
 
-/// Share of a net's saturation headroom its wiring may drop.
-///
-/// ponytail: a fixed 10%; the circuit's own error budget (ΔI ≈ g_m·ΔV) should
-/// set it once specs carry one.
-const HEADROOM_SHARE: f64 = 0.1;
-/// Drop allowed when no saturated device reports headroom, as a share of the
-/// supply.
-///
-/// ponytail: 1% of the rail, a common analog rail-drop target, not derived.
-const RAIL_SHARE: f64 = 0.01;
-/// A signal net is "high-current" at this share of the busiest net's current.
-///
-/// ponytail: relative, so a µA bias net is not budgeted like a mA branch.
-const HIGH_CURRENT_SHARE: f64 = 0.1;
-
 /// `(net, |I| µA, allowed drop µV)` — the router checks `I·R_route` against
 /// the drop, i.e. `R ≤ ΔV/I` — for every supply/ground net that carries current and
-/// every signal net carrying at least [`HIGH_CURRENT_SHARE`] of the largest
+/// every signal net carrying at least `policy.ir_high_current_share` of the largest
 /// net current. `current_ua` and `headroom_mv` are per net (from the op
 /// point); `supply_mv` sizes the fallback. Nets without a current are skipped:
 /// no current, no drop.
@@ -38,6 +23,7 @@ pub fn budgets(
     current_ua: &[Option<i32>],
     headroom_mv: &[Option<f64>],
     supply_mv: f64,
+    policy: &crate::policy::Policy,
 ) -> Vec<(NetId, i32, i64)> {
     let i_max = current_ua.iter().flatten().map(|i| i.unsigned_abs()).max().unwrap_or(0) as f64;
     classes
@@ -47,14 +33,14 @@ pub fn budgets(
             let i_ua = current_ua.get(n).copied().flatten()?.saturating_abs();
             let i = f64::from(i_ua);
             let rail = matches!(c.class, NetClass::Supply | NetClass::Ground);
-            if i <= 0.0 || !(rail || i >= HIGH_CURRENT_SHARE * i_max) {
+            if i <= 0.0 || !(rail || i >= policy.ir_high_current_share * i_max) {
                 return None;
             }
             let dv_mv = headroom_mv
                 .get(n)
                 .copied()
                 .flatten()
-                .map_or(RAIL_SHARE * supply_mv, |h| HEADROOM_SHARE * h);
+                .map_or(policy.ir_rail_share * supply_mv, |h| policy.ir_headroom_share * h);
             Some((c.net, i_ua, (dv_mv * 1e3) as i64))
         })
         .collect()
@@ -79,7 +65,7 @@ mod tests {
         // VDD: 1 mA, a 200 mV headroom device → 20 mV (R ≤ 20 Ω).
         // Net 1: 500 µA, no saturated device → 1% of 1.8 V = 18 mV (R ≤ 36 Ω).
         // Net 2: 5 µA, under 10% of the busiest: no budget. Net 3: no current.
-        let b = budgets(&classes, &[Some(1_000), Some(-500), Some(5), None], &[Some(200.0), None, None, None], 1_800.0);
+        let b = budgets(&classes, &[Some(1_000), Some(-500), Some(5), None], &[Some(200.0), None, None, None], 1_800.0, &crate::policy::Policy::default());
         assert_eq!(b, [(NetId(0), 1_000, 20_000), (NetId(1), 500, 18_000)]);
         let r_max_ohm = |(_, i, uv): (NetId, i32, i64)| uv as f64 / f64::from(i);
         assert_eq!(b.into_iter().map(r_max_ohm).collect::<Vec<_>>(), [20.0, 36.0], "R_max = ΔV/I");

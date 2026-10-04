@@ -596,6 +596,13 @@ impl Pdk {
         self.cell.get(key)?.as_f64().map(|x| x as f32)
     }
 
+    /// A text value from the deck's `cell` section (e.g. `substrate_kind`);
+    /// `None` when absent, null or not a string.
+    #[must_use]
+    pub fn cell_str(&self, key: &str) -> Option<&str> {
+        self.cell.get(key)?.as_str()
+    }
+
     /// Where a `cell.*` value comes from (`<key>_source`); `None` when the
     /// sidecar gives no source text.
     #[must_use]
@@ -898,7 +905,8 @@ impl Pdk {
 
     /// `x` is `drawn` or a part of it: through the operands whose area it
     /// keeps (all of an `and`/`or`, the first of a `not` or a selection).
-    fn reaches(&self, x: GvLayerId, drawn: u16) -> bool {
+    #[must_use]
+    pub fn reaches(&self, x: GvLayerId, drawn: u16) -> bool {
         use gdsverify::ingest::deck::DerivedOp as Op;
         if x.0 == drawn {
             return true;
@@ -1207,6 +1215,11 @@ pub struct Recipe {
 /// Roles a resistor recipe controls: unset in the recipe = not drawn.
 const RESISTOR_ROLES: &[&str] = &["rpoly", "rpoly_b", "res_block", "rpm", "npc", "res_implant"];
 
+/// Roles a capacitor recipe controls (MIM: `bottom` plate, `plate` the
+/// insulator/top-plate marker, `top_contact` cuts onto it, `top` and `strap`
+/// metal, `bottom_contact` the cut off the bottom plate's stub).
+const CAPACITOR_ROLES: &[&str] = &["bottom", "plate", "top_contact", "top", "strap", "bottom_contact"];
+
 impl Pdk {
     /// How far `outer` must pass cut `inner` on every side, nm: the deck's
     /// all-round enclosure and its two-opposite-sides end-cap, the larger
@@ -1222,7 +1235,7 @@ impl Pdk {
     /// Every layer some recipe draws.
     fn recipe_layers(&self) -> Vec<String> {
         let mut out = Vec::new();
-        for kind in ["resistors"] {
+        for kind in ["resistors", "capacitors"] {
             let Some(rs) = self.cell.get(kind).and_then(|t| t.get("recipes")).and_then(|r| r.as_object()) else { continue };
             for r in rs.values() {
                 if let Some(l) = r.get("layers").and_then(|l| l.as_object()) {
@@ -1275,7 +1288,7 @@ impl Process for Overlay<'_> {
     fn layer(&self, role: &str) -> Option<LayerId> {
         match self.recipe.layers.iter().find(|(r, _)| r == role) {
             Some((_, l)) => self.pdk.layers.iter().find(|(n, _)| n == l).map(|(_, id)| *id),
-            None if RESISTOR_ROLES.contains(&role) => None,
+            None if RESISTOR_ROLES.contains(&role) || CAPACITOR_ROLES.contains(&role) => None,
             None => self.pdk.layer(role),
         }
     }
@@ -1490,6 +1503,23 @@ mod tests {
             let first = text.lines().next().unwrap_or_default();
             assert!(first.starts_with(&format!("# vendored from GPurify {rev}")), "{name}: line 1 is {first:?}, Cargo.lock pins {rev}");
         }
+    }
+
+    /// The capacitor table adds capm/met4 to the layers cell rules are read
+    /// on (`recipe_layers`): routing metal rules must not move, and the MIM
+    /// recipe's plate enclosure (capm.3) must resolve through it.
+    #[test]
+    fn capacitor_recipes_do_not_move_routing_rules() {
+        let with = sky130_with(|_| {}).unwrap();
+        let without = sky130_with(|c| {
+            c.remove("capacitors");
+        })
+        .unwrap();
+        assert!(with.cell.get("capacitors").is_some() && without.cell.get("capacitors").is_none());
+        let q = |p: &Pdk| (Process::space(p, "met3"), Process::width(p, "met3"), Process::space(p, "met4"), Process::enclosure(p, "met3", "via3"));
+        assert_eq!(q(&with), q(&without));
+        let ov = Overlay { pdk: &with, recipe: with.recipe("capacitor", "sky130_fd_pr__cap_mim_m3_1").unwrap() };
+        assert_eq!(ov.enclosure("bottom", "plate"), Some(140), "capm.3");
     }
 
     fn sky130_with(edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>)) -> Result<Pdk, String> {

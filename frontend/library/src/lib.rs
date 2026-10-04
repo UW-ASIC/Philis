@@ -8,7 +8,7 @@ mod cellgen;
 mod fill;
 mod geometry;
 mod parse;
-pub use parse::SizeConvention;
+pub use parse::{spice_report, spice_with, ParseOptions, ParseReport, SizeConvention};
 
 /// Substrate3 elaboration: build a `macro_master::Composition` against a PDK
 /// and route its declared nets — the "PDK on the fly" entry.
@@ -158,6 +158,8 @@ pub struct Solution {
     pub folds: Vec<(u16, i32)>,
     /// The deck's nwell: bridged wells merge into one rect in [`Solution::geometry`].
     pub well_layer: Option<LayerId>,
+    /// The operating point the run was biased with; `None` without one.
+    pub op: Option<oppoint::OpPoint>,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -231,21 +233,57 @@ pub fn deck_models(netlist: &mut pnr_core::Netlist, pdk: &Pdk) {
     }
 }
 
+/// Every model the deck recognises (its `device` rows) and every sidecar
+/// resistor recipe's `model`/`aliases`, with the kind the parser files an `X`
+/// card naming it under ([`ParseOptions::models`]). A MOS is P-type when its
+/// S/D terminal layer, or its marker, is computed from the `psdm` role (the
+/// marker for gf180, whose n and p devices share one `sd` layer); a BJT is a
+/// PNP when its model has a `pnp` token, else an NPN.
+#[must_use]
+pub fn model_table(pdk: &Pdk) -> Vec<(String, pnr_core::DeviceKind)> {
+    use pnr_core::{DeviceKind as K, Process as _};
+    use verify::DeviceKind as D;
+    let d = &pdk.deck.devices;
+    let psdm = pdk.layer("psdm");
+    let p_type = |x| psdm.is_some_and(|l| pdk.reaches(x, l.0));
+    let mut out: Vec<(String, K)> = (0..d.kind.len())
+        .map(|row| {
+            let model = pdk.strings.resolve(d.model[row]).to_string();
+            let kind = match d.kind[row] {
+                D::Mos if p_type(d.terminal[d.terminal_start[row] as usize + 1]) || p_type(d.marker[row]) => K::Pmos,
+                D::Mos => K::Nmos,
+                D::Bjt if model.to_ascii_lowercase().split('_').any(|t| t == "pnp") => K::Pnp,
+                D::Bjt => K::Npn,
+                D::Resistor => K::Resistor,
+                D::Capacitor => K::Capacitor,
+                D::Diode => K::Diode,
+            };
+            (model, kind)
+        })
+        .collect();
+    let recipes = pdk.cell.get("resistors").and_then(|t| t.get("recipes")).and_then(|r| r.as_object());
+    for r in recipes.into_iter().flat_map(|rs| rs.values()) {
+        let aliases = r.get("aliases").and_then(|a| a.as_array()).into_iter().flatten().filter_map(|a| a.as_str());
+        out.extend(aliases.chain(r.get("model").and_then(|m| m.as_str())).map(|m| (m.to_string(), K::Resistor)));
+    }
+    out
+}
+
 /// Place and route a SPICE netlist against a PDK. Deterministic for `cfg.seed`.
 ///
 /// `injected` maps instance names to user-drawn macros: those devices are used
 /// as drawn, never reshaped or moved by `dp`.
 pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<Solution, FlowError> {
     // 1. Parse, naming each device by the deck's model.
-    let mut netlist = parse::spice_with(spice, &parse::ParseOptions { size: cfg.size_convention }).map_err(FlowError::Parse)?;
+    let opts = ParseOptions { size: cfg.size_convention, models: model_table(pdk), ..Default::default() };
+    let mut netlist = parse::spice_with(spice, &opts).map_err(FlowError::Parse)?;
     deck_models(&mut netlist, pdk);
 
     check_injected(&netlist, injected, pdk)?;
 
     // 2. Bias: per-device power and per-net current. Placement-independent,
     //    so solved once.
-    let (power, bias, currents, net_headroom_mv, gm_us) = bias(&netlist, cfg);
-    let bias = Bias { power, summary: bias, currents, net_headroom_mv, gm_us };
+    let bias = bias(&netlist, cfg);
     let (perf_rows, perf_bounds) = performance_rows(&netlist, pdk, cfg);
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
@@ -342,6 +380,8 @@ struct Bias {
     net_headroom_mv: Option<Vec<Option<f64>>>,
     /// Per device transconductance, µS (fold floor for gate R); empty = none.
     gm_us: Vec<Option<f64>>,
+    /// The operating point the run was biased with; `None` without one.
+    op: Option<oppoint::OpPoint>,
 }
 
 /// Annotate, draw cells and search at one cell topology: `merge_distinct_gates`
@@ -373,8 +413,10 @@ fn solve(
     // Cells: every legal variant drawn once; matched groups collapse to one
     // cell and every device-indexed table moves to cell space.
     // One fold table for the cells and every LVS reference of this run.
-    let fold = cellgen::folds(&netlist, pdk, &bias.gm_us);
+    let unit_cells: Vec<(Vec<DeviceId>, bool)> = problem.constraints.unitization.iter().map(|u| (u.devices.clone(), u.route_matching_required)).collect();
+    let fold = cellgen::folds(&netlist, pdk, &bias.gm_us, &unit_cells);
     let cells = CellSpace::new(&netlist, injected, &mut problem, pdk, &bias.power, merge_distinct_gates, &fold);
+    let locks = dp::locks::locks(&problem.placement, cells.variants.len(), &cells.variants);
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
@@ -389,7 +431,7 @@ fn solve(
     if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
         let vdd_mv = cfg.op.as_ref().map_or(1_800.0, |o| o.vdd * 1e3);
         let i = oppoint::net_current_ua(&netlist, c);
-        let rules: Vec<analog::routing::IrDrop> = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv)
+        let rules: Vec<analog::routing::IrDrop> = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv, &ann.policy)
             .into_iter()
             .map(|(net, current_ua, max_drop_uv)| analog::routing::IrDrop { net, current_ua, max_drop_uv, margin_pct: 20, stack: ann.process.stack })
             .collect();
@@ -433,6 +475,7 @@ fn solve(
         cuts,
         problem,
         cells,
+        locks,
         perf: cfg.performance.as_ref(),
         perf_rows,
         intent: intent.clone(),
@@ -443,15 +486,13 @@ fn solve(
             .as_ref()
             .map(|c| c.iter().map(|d| d.as_ref().and_then(|t| t.iter().find(|(n, _)| n == "D").map(|&(_, i)| i))).collect())
             .unwrap_or_default(),
-        avt_mv_um: ann.process.avt_mv_um,
-        offset_sigma_mv: ann.offset_sigma_mv,
         gp_mode: cfg.gp_mode,
     };
 
     // 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
     //    keeping the best [`LexKey`], whose V includes the epoch's own signoff
     //    errors. Prices and routing history persist across epochs.
-    let mut assignment = cellgen::seed_assignment(&flow.cells.variants, &flow.layers, pdk);
+    let mut assignment = cellgen::seed_assignment(&flow.cells.variants, pdk);
     let mut prices = gp::Prices::new();
     let mut neg = gr::Negotiation::new();
     let mut best: Option<Epoch> = None;
@@ -557,6 +598,17 @@ fn solve(
     );
     let mut metadata = metadata;
     metadata.binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
+    let mut recognition = std::collections::BTreeMap::new();
+    for b in flow.problem.blocks.iter().filter(|b| b.kind != annotator::BlockKind::Glue) {
+        *recognition.entry(b.template).or_insert(0) += 1;
+    }
+    metadata.recognition = recognition.into_iter().collect();
+    metadata.unconstrained = flow.problem.coverage.iter()
+        .filter_map(|&(d, c)| match c {
+            annotator::Coverage::Unconstrained(why) => Some((netlist.devices[d.0 as usize].name.clone(), why)),
+            _ => None,
+        })
+        .collect();
     metadata.coverage = best.coverage;
     metadata.add_routing(&[Box::new(flow.common_nodes(&best.layout)), Box::new(flow.environment(&best.layout, &best.rings))], &best.routes);
     if let (Some(cfg), Some(result)) = (flow.perf, &best.perf) {
@@ -584,6 +636,7 @@ fn solve(
         intent,
         folds: fold,
         well_layer: pnr_core::Process::layer(pdk, "nwell"),
+        op: bias.op.clone(),
     };
     (solution, key, distinct)
 }
@@ -597,6 +650,8 @@ struct Flow<'a> {
     /// Rules and constraints; placement rules retargeted to cell ids.
     problem: Problem,
     cells: CellSpace,
+    /// Matched-cell orient/shape locks (PLC-03), over all variants.
+    locks: dp::locks::Locks,
     /// Post-layout performance scoring, when configured.
     perf: Option<&'a perf::PerfConfig>,
     /// Spec bounds as sensitivity rows ([`performance_rows`]); weigh [`c_tier`].
@@ -614,10 +669,6 @@ struct Flow<'a> {
     stack: &'static analog::routing::Stack,
     /// Per device drain current, µA (`None` = unresolved).
     id_ua: Vec<Option<f64>>,
-    /// Deck `A_VT`, mV·µm, `[nmos, pmos]`.
-    avt_mv_um: [Option<f32>; 2],
-    /// The pair offset budget the matching rules allocate from.
-    offset_sigma_mv: Option<f32>,
     gp_mode: GpMode,
 }
 
@@ -640,6 +691,8 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
         svt_uv_per_um: pos("svt_uv_per_um"),
         vt_tc_uv_per_k: [pos("vt_tc_uv_per_k"), pos("vt_tc_uv_per_k_p")],
         lod_kvth0_mv_um: [pos("lod_kvth0_n_mv_um"), pos("lod_kvth0_p_mv_um")],
+        lattice_nm: cells::builder::cut_lattice(pdk),
+        substrate: pnr_core::SubstrateKind::from_key(pdk.cell_str("substrate_kind")),
         epi_nm: pos("epi_thickness_nm").map(|v| v as i32),
         // Rules are `Copy`, so they borrow the stack for 'static.
         // ponytail: leaked once per `annotation` call (twice per run, a few
@@ -704,36 +757,46 @@ impl Flow<'_> {
         neg: &mut gr::Negotiation,
         seed: u64,
     ) -> Epoch {
+        let unified = {
+            let mut a = assignment.to_vec();
+            self.locks.unify(&mut a);
+            a
+        };
+        let assignment = &unified[..];
         let placement = &self.problem.placement;
         let cells = &self.cells;
         let layers = &self.layers;
 
         // Place: coarse analytical, then legalising anneal (which may reshape).
         let macros = cellgen::realize(&cells.variants, assignment);
-        let (mut coarse, _) = gp::place(&macros, &cells.variants, assignment, placement, prices, place_rules(self.pdk), &self.net_weight, seed, self.gp_mode == GpMode::Analytic);
+        let inp = gp::GpInput {
+            macros: &macros,
+            variants: &cells.variants,
+            assignment,
+            reqs: placement,
+            rules: place_rules(self.pdk),
+            net_weight: &self.net_weight,
+            n_axes: self.problem.blocks.len(),
+            power_uw: &cells.power,
+            units: cells.units.clone(),
+            iterate: self.gp_mode == GpMode::Analytic,
+        };
+        let (coarse, _) = gp::place(&inp, prices, seed);
         coarse.debug_check("gp::place");
-        // dp reads groups as abutment permission, so it gets the diffusion-sharing
-        // table; after dp, groups are the recognition table for `Target::Group`.
-        coarse.groups = cells.abutment.clone();
-        if coarse.axis.len() < self.problem.blocks.len() {
-            let centre = coarse.centre_x_estimate();
-            coarse.axis.resize(self.problem.blocks.len(), centre);
-        }
-        coarse.power_uw = cells.power.clone();
-        coarse.units = cells.units.clone();
-        coarse.refresh_temps();
         let (mut layout, place_report, dp_stats) = dp::place(
             &coarse,
             &macros,
             if reshape { &cells.variants } else { &[] },
             placement,
             &cells.fixed,
+            &self.locks,
             prices,
             place_rules(self.pdk),
             &self.net_weight,
             seed,
+            dp::Schedule::cold(),
         );
-        layout.debug_check_placed("dp::place");
+        layout.debug_check("dp::place");
         layout.groups = cells.groups.clone();
         // The epoch's one dual step, on the layout it is scored on (T6).
         prices.settle(placement, &layout);
@@ -744,7 +807,8 @@ impl Flow<'_> {
         };
         // Measured on the macros dp's variants draw, so `lattice_off` stamps what is drawn.
         let lattice = cells::builder::cut_lattice(self.pdk);
-        let place = geometry::placement_metrics(&macros, &layout, lattice, place_rules(self.pdk).clearance, placement);
+        let place = geometry::placement_metrics(&macros, &layout, lattice, place_rules(self.pdk).clearance, placement, &self.locks);
+        debug_assert_eq!(place.lattice_off, 0, "dp::place: cell origin off the cut lattice");
 
         // Guard rings enclose placed cells, so they are drawn now, before routing.
         let mut rings = cells::post_cell::guard_rings(&layout, &cells.guard_rings, self.pdk, ring_cut_ohm(self.pdk));
@@ -755,12 +819,8 @@ impl Flow<'_> {
         let placed_now: Vec<Macro> = gr::place_macros(&macros, &layout).into_iter().chain(rings.iter().cloned()).collect();
         rings.extend(cells::post_cell::implant_bridges(&placed_now, self.pdk));
 
-        // Route: global gcell plan, then track realisation onto the real pins.
+        // Route: track realisation onto the real pins.
         let routing = &self.problem.routing;
-        let (global, _) =
-            gr::GlobalRoute { net_weight: self.d_router.cfg.net_weight.clone(), ..Default::default() }.route(&layout, &macros, &rings, routing, layers, neg);
-        // gr's coarse route draws every net on one layer: no joins.
-        global.debug_check_joined("gr::route", &[]);
         let placed = gr::place_macros(&macros, &layout);
         let pins: Vec<_> = placed
             .iter()
@@ -773,12 +833,12 @@ impl Flow<'_> {
                 common: self.common_nodes(&layout).nodes,
                 stack: Some(self.stack),
                 pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
+                n_nets: self.netlist.nets.len(),
                 ..self.d_router.cfg.clone()
             },
         };
-        let (mut routes, mut route_report) = router.route(
-            &global, &pins, &placed, &rings, routing, layers, &self.cuts, neg,
-        );
+        let (mut routes, mut route_report, _route_stats) =
+            router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
         // Antenna nets the jumper could not fix get a diode each, routed in as
         // a fixed cell; its shape on the deck's credited diode layer joins the
         // net's routes (the rule's credit, `Stack::diode`).
@@ -794,7 +854,7 @@ impl Flow<'_> {
                 extra.push(device);
                 rings.push(m);
             }
-            (routes, route_report) = router.route(&global, &pins, &placed, &rings, routing, layers, &self.cuts, neg);
+            (routes, route_report, _) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
             for (net, shape) in marks {
                 if let Some(w) = routes.wires.get_mut(net.0 as usize) {
                     w.push(shape);
@@ -850,6 +910,16 @@ impl Flow<'_> {
     }
 }
 
+/// A common node's ΔR budget, Ω: the pair's remaining allowance (mV, either order) over I_D (µA); 0 = unknown.
+fn common_node_ohm(left: &[(u32, u32, f32)], a: DeviceId, b: DeviceId, i_ua: Option<f32>) -> f32 {
+    let (a, b) = (u32::from(a.0), u32::from(b.0));
+    let mv = left.iter().find(|&&(x, y, _)| (x, y) == (a, b) || (x, y) == (b, a)).map(|&(_, _, mv)| mv);
+    match (mv, i_ua) {
+        (Some(mv), Some(i)) => mv / i * 1e3,
+        _ => 0.0,
+    }
+}
+
 impl Flow<'_> {
     /// Promote `epoch` to post-layout simulation and fold the spec miss into
     /// its key. No extraction or no simulator: every spec unknown (a full
@@ -894,15 +964,18 @@ impl Flow<'_> {
                 (k > 0).then(|| s / k as f32)
             })
             .collect();
-        perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um }
+        perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true }
     }
 
     /// Each recognised matched pair on one source net, with its members'
     /// source pins and the net's other pins (feeds) as placed, budgeted
-    /// `ΔR ≤ η·σ_rand / I_D` with the matching rules' `η`
-    /// ([`annotator::emit::systematic_allowance_mv`]).
+    /// `ΔR ≤ (allowance − placement spend) / I_D` from the pair's `MatchedSet` ledger.
     fn common_nodes(&self, layout: &Layout) -> analog::routing::CommonNodes {
         use annotator::BlockKind::{CurrentMirror, DiffPair, Load};
+        let mut left = Vec::new();
+        for b in &self.problem.placement.budget {
+            b.offset_allowances(layout, &mut left);
+        }
         let placed = gr::place_macros(&cellgen::realize(&self.cells.variants, &layout.variant), layout);
         let term = |d: DeviceId, t: &str| self.netlist.devices[d.0 as usize].terminals.iter().find(|(n, _)| n == t).map(|&(_, n)| n);
         // (device, terminal, rect) of every placed pin, per net.
@@ -926,15 +999,8 @@ impl Flow<'_> {
             let list = &on_net[net.0 as usize];
             let pins = |d: DeviceId| list.iter().filter(|p| p.0 == d && p.1 == "S").map(|p| p.2).collect::<Vec<_>>();
             let feeds = list.iter().filter(|p| p.0 != a && p.0 != b).map(|p| p.2).collect();
-            // σ_rand = A_VT/√(W_total·L·m) of member a, over its drain current.
-            let dev = &self.netlist.devices[a.0 as usize];
-            let avt = if dev.kind == pnr_core::DeviceKind::Nmos { self.avt_mv_um[0] } else { self.avt_mv_um[1] };
-            let gate_um2 = dev.gate_area_um2() as f32;
             let i_ua = self.id_ua.get(a.0 as usize).copied().flatten().map(|i| i.abs() as f32).filter(|&i| i > 0.0);
-            let max_delta_ohm = match (annotator::emit::systematic_allowance_mv(avt, gate_um2, self.offset_sigma_mv), i_ua) {
-                (Some(mv), Some(i)) => mv / i * 1e3,
-                _ => 0.0,
-            };
+            let max_delta_ohm = common_node_ohm(&left, a, b, i_ua);
             nodes.push(analog::routing::CommonNode { net, a: pins(a), b: pins(b), feeds, max_delta_ohm });
         }
         analog::routing::CommonNodes { nodes, stack: self.stack }
@@ -1151,8 +1217,7 @@ fn lex_key(
 /// `Supply`/`Ground`/`Substrate` net, or a name outside `names` weighs 0.
 /// `caps` is [`verify::CapMatrix`]; `names` indexes it by `NetId`.
 ///
-/// ponytail: rails are what the name classifier says (`annotator::netrole`);
-/// node `0` reads `Signal` until EXT-02's `rail_of`.
+/// ponytail: rails are what the name classifier says (`annotator::netrole`).
 fn c_tier(
     caps: &verify::CapMatrix,
     names: &[String],
@@ -1301,23 +1366,19 @@ fn pin_currents(netlist: &pnr_core::Netlist, devices_of: &[Vec<DeviceId>], draws
 /// Per-device power (µW), per-terminal current (µA) and the bias provenance for
 /// the report: the ngspice operating point when configured and solvable, else
 /// `cfg.device_power_uw` and no currents.
-#[allow(clippy::type_complexity)]
-fn bias(
-    netlist: &pnr_core::Netlist,
-    cfg: &Config,
-) -> (Vec<i32>, Option<metadata::BiasSummary>, Option<Vec<Option<Vec<(String, f64)>>>>, Option<Vec<Option<f64>>>, Vec<Option<f64>>) {
+fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> Bias {
     let op = cfg
         .op
         .as_ref()
         .and_then(|oc| match oppoint::extract(netlist, oc) {
-            Ok(o) => Some(o),
+            Ok(o) => Some((o, oc.testbench.is_none())),
             Err(e) => {
                 eprintln!("[op] operating point unavailable ({e}); continuing with zero power");
                 None
             }
         });
-    let Some(o) = op else {
-        return (cfg.device_power_uw.clone(), None, None, None, Vec::new());
+    let Some((o, probe)) = op else {
+        return Bias { power: cfg.device_power_uw.clone(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
     };
     let hottest = o
         .power_uw
@@ -1332,20 +1393,19 @@ fn bias(
         devices: netlist.devices.len(),
         total_power_uw: o.total_power_uw(),
         hottest,
+        probe,
     };
     let currents = o.terminal_ua(netlist);
     let headroom = o.net_headroom_mv(netlist);
-    (o.power_uw, Some(summary), Some(currents), Some(headroom), o.gm_us)
+    Bias { power: o.power_uw.clone(), summary: Some(summary), currents: Some(currents), net_headroom_mv: Some(headroom), gm_us: o.gm_us.clone(), op: Some(o) }
 }
 
 /// The collapsed cell table and every device-indexed input translated to it.
 struct CellSpace {
     /// Pre-drawn alternatives per cell — what `gp`/`dp` search over.
     variants: Vec<gp::VariantSpace>,
-    /// Injected (user-macro) cells: `dp` never moves or reshapes them.
+    /// Injected (user-macro) cells, drawn as given: dp never reshapes or rotates them.
     fixed: Vec<bool>,
-    /// `Layout::groups` for `dp`: groups that may share diffusion.
-    abutment: Vec<Vec<DeviceId>>,
     /// `Layout::groups` after `dp`: the recognition table.
     groups: Vec<Vec<DeviceId>>,
     /// Guard-ring requirements, one per requesting cell.
@@ -1428,7 +1488,6 @@ impl CellSpace {
                         .fold(0, i32::saturating_add)
                 })
                 .collect(),
-            abutment: problem.abutment.iter().map(to_cells).collect(),
             groups,
             variants: spaces,
             guard_rings,
@@ -1438,8 +1497,9 @@ impl CellSpace {
         };
         // Reserve each ring's halo in the requester's bbox so the placer keeps
         // neighbours out of it; the ring is drawn back inside the reservation.
+        let lattice = cells::builder::cut_lattice(pdk);
         for r in &cells.guard_rings.guard_rings {
-            let ext = round_up(cells::post_cell::ring_halo(r, pdk, ring_cut_ohm(pdk)), pdk.grid.max(1));
+            let ext = round_up(cells::post_cell::ring_halo(r, pdk, ring_cut_ohm(pdk)), lattice);
             let Some(space) = cells.variants.get_mut(r.device.0 as usize) else {
                 continue;
             };
@@ -1449,6 +1509,11 @@ impl CellSpace {
                 m.bbox.w += 2 * ext;
                 m.bbox.h += 2 * ext;
             }
+        }
+        // Origins on the cut lattice need extents on twice it (PLC-02); generated
+        // and injected cells alike, before unit frames are taken from the bbox.
+        for m in cells.variants.iter_mut().flat_map(|s| s.alternatives.iter_mut()) {
+            m.align_bbox(lattice);
         }
         // After the halo: a unit's frame is the bbox `place_macro` anchors on.
         let per_cell: Vec<Vec<(pnr_core::Rect, &[pnr_core::Unit])>> = cells
@@ -1605,6 +1670,98 @@ pub fn reference_spice(sol: &Solution, pdk: &Pdk, top: &str, ports: &[String]) -
     pdk.reference_spice(&signoff_inputs(sol, pdk).2, top, ports)
 }
 
+/// The routed layout extracted with parasitics as `.subckt {top}` over the schematic's ports
+/// ([`pnr_core::Netlist::ports`], declaration order), simulatable against the PDK's ngspice library (FR-7):
+/// MOS cards become `X` cards in µm (the library's `.option scale=1.0u`, as [`oppoint`] assumes), a
+/// modelled resistor an `R` element with the schematic's `w`/`l`, parasitic `Cp`/`Rp` kept. A port is
+/// the extractor's `{port}:0` piece; its other `:k` pieces hang off it through the parasitics.
+///
+/// # Errors
+/// A schematic device other than a MOS or resistor (the extractor reports no BJT or capacitor card, so the
+/// file would silently lack it), no ports, a port with no label, a MOS card without a bulk node, a resistor
+/// matching no single schematic resistor, rewritten resistor cards not one per schematic resistor, any other
+/// device card (not rewritten yet), or the extractor's own error.
+pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String, String> {
+    use pnr_core::DeviceKind as K;
+    let nl = &sol.netlist;
+    if let Some(d) = nl.devices.iter().find(|d| !matches!(d.kind, K::Nmos | K::Pmos | K::Resistor)) {
+        return Err(format!("{}: {:?} not extracted (PERF-30)", d.name, d.kind));
+    }
+    let (shapes, pins, _) = signoff_inputs(sol, pdk);
+    let raw = verify::extract_spice(&shapes, &pins, pdk, verify::Detail::WithParasitics)?;
+    let ports: Vec<&str> = nl.ports.iter().map(|n| nl.nets[n.0 as usize].name.as_str()).collect();
+    if ports.is_empty() {
+        return Err("no .subckt ports".into());
+    }
+    if let Some(p) = ports.iter().find(|p| !pins.iter().any(|q| q.name.eq_ignore_ascii_case(p))) {
+        return Err(format!("port {p} has no label"));
+    }
+    let base = |node: &str| node.rsplit_once(':').map_or(node, |(n, _)| n).to_string();
+    let um = |nm: f64| nm / 1000.0;
+    let mut out = String::new();
+    let mut resistors = 0;
+    for line in raw.lines() {
+        let t: Vec<&str> = line
+            .split_whitespace()
+            .map(|tok| ports.iter().find(|p| tok.eq_ignore_ascii_case(&format!("{p}:0"))).copied().unwrap_or(tok))
+            .collect();
+        let name = t.first().copied().unwrap_or("");
+        // Positional tokens (nodes, model) end at the first `k=v`.
+        let pos = t.iter().take_while(|s| !s.contains('=')).count();
+        let kv = |k: &str| t[pos..].iter().find_map(|s| s.split_once('=').filter(|(n, _)| n.eq_ignore_ascii_case(k))?.1.parse::<f64>().ok());
+        let card = match name.chars().next().map(|c| c.to_ascii_uppercase()) {
+            None => String::new(),
+            Some('.') if name.eq_ignore_ascii_case(".subckt") => format!(".subckt {top} {}", ports.join(" ")),
+            Some('.') if name.eq_ignore_ascii_case(".ends") => format!(".ends {top}"),
+            Some('*') if line.contains("database units") => "* lengths in um (the model library's .option scale=1.0u)".into(),
+            Some('*' | '.') => line.to_string(),
+            Some('M') => {
+                if pos < 6 {
+                    return Err(format!("{name}: MOS card without a bulk node"));
+                }
+                let (w, l) = kv("w").zip(kv("l")).ok_or_else(|| format!("{name}: MOS card without w/l"))?;
+                format!("X{name} {} w={} l={}", t[1..6].join(" "), um(w), um(l))
+            }
+            Some('R' | 'C') if t.get(3).is_some_and(|v| v.trim_end_matches(char::is_alphabetic).parse::<f64>().is_ok()) => {
+                line.to_string()
+            }
+            Some('R') if pos == 4 => {
+                let model = t[3];
+                let ends = |a: &str, b: &str| {
+                    let (a, b) = (base(a), base(b));
+                    let (x, y) = (base(t[1]), base(t[2]));
+                    (a.eq_ignore_ascii_case(&x) && b.eq_ignore_ascii_case(&y)) || (a.eq_ignore_ascii_case(&y) && b.eq_ignore_ascii_case(&x))
+                };
+                let net = |d: &pnr_core::Device, k: &str| d.terminals.iter().find(|(n, _)| n == k).map(|(_, n)| nl.nets[n.0 as usize].name.as_str());
+                // The deck model the LVS reference names (as in [`labels_and_reference`]).
+                let deck = |m: &str| pdk.recipe("resistor", m).map_or_else(|| m.to_string(), |r| r.model);
+                let hits: Vec<&pnr_core::Device> = nl
+                    .devices
+                    .iter()
+                    .filter(|d| d.kind == K::Resistor && deck(&d.model).eq_ignore_ascii_case(model))
+                    .filter(|d| net(d, "P").zip(net(d, "N")).is_some_and(|(p, n)| ends(p, n)))
+                    .collect();
+                // ponytail: a resistor drawn as several segments (CELL-06) extracts several cards and errs here
+                let [d] = hits[..] else {
+                    return Err(format!("{name}: {} schematic resistors match", hits.len()));
+                };
+                let p = |k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| um(v as f64));
+                let (w, l) = p("w").zip(p("l")).ok_or_else(|| format!("{name}: schematic {} has no w/l", d.name))?;
+                resistors += 1;
+                format!("R{name} {} {} {model} w={w} l={l}", t[1], t[2])
+            }
+            _ => return Err(format!("{name}: card not rewritten (PERF-30)")),
+        };
+        out.push_str(&card);
+        out.push('\n');
+    }
+    let want = nl.devices.iter().filter(|d| d.kind == K::Resistor).count();
+    if resistors != want {
+        return Err(format!("{resistors} resistor cards extracted for {want} schematic resistors"));
+    }
+    Ok(out)
+}
+
 /// Signoff over drawn `shapes`; `fold`: the table the cells were drawn at
 /// ([`cellgen::folds`], the flow), `None` for the schematic's own fingers.
 pub(crate) fn signoff_shapes(
@@ -1642,6 +1799,10 @@ fn labels_and_reference(
     reference.devices.extend(cellgen::dummy_cards(placed, nets, &reference.devices));
     reference.devices.extend(drawn);
     reference.ports = pins.iter().map(|p| p.name.clone()).collect();
+    // PERF-03: only the declared `.subckt` ports leave the cell; with none
+    // (no `.subckt` around the top) every labelled net stays exempt.
+    reference.external_ports = (!schematic.ports.is_empty())
+        .then(|| schematic.ports.iter().map(|n| schematic.nets[n.0 as usize].name.clone()).collect());
     (pins, reference)
 }
 
@@ -1687,6 +1848,17 @@ pub(crate) fn labeled_pins(
 
 #[cfg(test)]
 mod start_tests {
+    /// GAP-04: the substrate kind comes from the deck's `substrate_kind`; a
+    /// misspelt key (here or in the sidecar) would silently read Unknown.
+    #[test]
+    fn substrate_kind_is_read_from_the_deck() {
+        use pnr_core::SubstrateKind::{Bulk, Unknown};
+        for (name, kind) in [("sky130", Bulk), ("gf180mcu", Unknown), ("ihp_sg13g2", Unknown), ("generic_finfet", Unknown)] {
+            let pdk = verify::Pdk::builtin(name).expect("deck loads");
+            assert_eq!(crate::annotation(&pdk, &Default::default()).process.substrate, kind, "{name}");
+        }
+    }
+
     /// Parallel starts stay deterministic: the same seed and start count give
     /// the same layout, however the threads interleave.
     #[test]
@@ -1770,7 +1942,7 @@ mod start_tests {
             terminals: ["D", "G", "S", "B"].iter().enumerate().map(|(i, t)| ((*t).into(), NetId(i as u16))).collect(),
             params: vec![],
         };
-        let nl = Netlist { devices: vec![fet("M0"), fet("M1"), fet("M2")], nets: ["a", "b", "c", "d"].iter().map(|n| Net { name: (*n).into() }).collect() };
+        let nl = Netlist { devices: vec![fet("M0"), fet("M1"), fet("M2")], nets: ["a", "b", "c", "d"].iter().map(|n| Net { name: (*n).into() }).collect(), ..Default::default() };
         let known = |id: f64| Some(vec![("D".into(), id), ("G".into(), 0.0), ("S".into(), -id), ("B".into(), 0.0)]);
         let cells = [vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2)], vec![DeviceId(1), DeviceId(0)]];
         let pins = crate::pin_currents(&nl, &cells, &[known(10.0), None, known(20.0)]);
@@ -1793,7 +1965,7 @@ mod start_tests {
         for fixture in ["rc_filter", "dac4"] {
             let mut nl = crate::parse(&std::fs::read_to_string(root.join(format!("benchmarks/fixtures/{fixture}.spice"))).unwrap()).unwrap();
             crate::deck_models(&mut nl, &pdk);
-            let currents = crate::bias(&nl, &cfg).2.expect("operating point");
+            let currents = crate::bias(&nl, &cfg).currents.expect("operating point");
             let one_per_cell: Vec<_> = (0..nl.devices.len()).map(|i| vec![pnr_core::DeviceId(i as u16)]).collect();
             let pins = crate::pin_currents(&nl, &one_per_cell, &currents);
             for (k, net) in nl.nets.iter().enumerate() {
@@ -2008,7 +2180,7 @@ mod size_tests {
             let mut netlist = crate::parse::spice(&spice).expect("parses");
             crate::deck_models(&mut netlist, &pdk);
             let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
-            let fold = crate::cellgen::folds(&netlist, &pdk, &[]);
+            let fold = crate::cellgen::folds(&netlist, &pdk, &[], &[]);
             let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
             for (i, dev) in netlist.devices.iter().enumerate() {
                 if !matches!(dev.kind, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
@@ -2026,12 +2198,29 @@ mod size_tests {
                 checked += 1;
             }
             if name == "ota" {
-                let card = crate::oppoint::flat_circuit(&netlist, &crate::oppoint::OpConfig::default());
+                let card = crate::oppoint::flat_circuit(&netlist, &crate::oppoint::OpConfig::default()).unwrap();
                 let xm5 = card.lines().find(|l| l.starts_with("XM5 ")).expect("XM5 card");
                 assert!(xm5.contains("W=40 L=2 nf=1 m=4"), "{xm5}");
             }
         }
         // ota ×3: 5 each; pair 2, quad 4, chain4 4, rc_filter 2, dac4 9.
         assert_eq!(checked, 36, "every fixture MOS checked");
+    }
+}
+
+#[cfg(test)]
+mod common_node_tests {
+    use super::common_node_ohm;
+    use pnr_core::DeviceId;
+
+    /// A common node's ΔR budget is the pair's remaining allowance (either
+    /// member order) over I_D; an absent pair or an unresolved current reads 0.
+    #[test]
+    fn common_node_budget_is_the_remaining_allowance() {
+        let left = [(0u32, 1u32, 0.237f32)];
+        assert!((common_node_ohm(&left, DeviceId(0), DeviceId(1), Some(100.0)) - 2.37).abs() < 1e-4);
+        assert!((common_node_ohm(&left, DeviceId(1), DeviceId(0), Some(100.0)) - 2.37).abs() < 1e-4);
+        assert_eq!(common_node_ohm(&left, DeviceId(2), DeviceId(3), Some(100.0)), 0.0);
+        assert_eq!(common_node_ohm(&left, DeviceId(0), DeviceId(1), None), 0.0);
     }
 }

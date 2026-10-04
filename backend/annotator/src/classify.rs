@@ -8,12 +8,6 @@ use pnr_core::BipartiteHypergraph;
 
 use crate::netrole::NetRole;
 
-/// FET terminal order in `hg.device_nets`: G, D, S, B.
-const G: usize = 0;
-const D: usize = 1;
-const S: usize = 2;
-const B: usize = 3;
-
 /// Budgets as multiples of the capacitive load `c_load_af` the net drives:
 /// `(wire C, total coupling)`, aF. A sensitive net (matched gate, bias rail)
 /// may add at most its own load as wire, and again as coupling; a plain signal
@@ -60,28 +54,21 @@ pub fn classify(
     let mut on_plate = vec![false; n_nets];
 
     for (d, nets) in hg.device_nets.iter().enumerate() {
-        // A capacitor's terminals are plates, not a gate and a channel.
-        if hg.kinds[d] == pnr_core::DeviceKind::Capacitor {
-            for n in nets {
-                on_plate[n.0 as usize] = true;
+        for (t, n) in hg.terminals[d].iter().zip(nets) {
+            let i = n.0 as usize;
+            match crate::terms::term_role(hg.kinds[d], t) {
+                crate::terms::TermRole::FetGate => {
+                    touches_gate[i] = true;
+                    load_um2[i] += gate_um2[d];
+                    gate_of_sensitive[i] |= sensitive_devices[d];
+                }
+                crate::terms::TermRole::Channel
+                | crate::terms::TermRole::BjtBase
+                | crate::terms::TermRole::Passive => touches_channel[i] = true,
+                crate::terms::TermRole::Body => touches_bulk[i] = true,
+                crate::terms::TermRole::Plate => on_plate[i] = true,
             }
-            continue;
         }
-        let mark = |slot: usize, v: &mut [bool]| {
-            if let Some(n) = nets.get(slot) {
-                v[n.0 as usize] = true;
-            }
-        };
-        mark(G, &mut touches_gate);
-        if let Some(n) = nets.get(G) {
-            load_um2[n.0 as usize] += gate_um2[d];
-        }
-        if sensitive_devices[d] {
-            mark(G, &mut gate_of_sensitive);
-        }
-        mark(D, &mut touches_channel);
-        mark(S, &mut touches_channel);
-        mark(B, &mut touches_bulk);
     }
 
     let smallest = load_um2.iter().copied().filter(|&a| a > 0.0).reduce(f32::min);
@@ -201,5 +188,84 @@ mod tests {
         assert_eq!((c_s, k_s), (Some(100_000), Some(100_000)));
         assert!(budgets(NetClass::Sensitive, 1_000_000.0).1 > k_s, "a bigger load tolerates more");
         assert_eq!(budgets(NetClass::Supply, 100_000.0), (None, None), "rails are unbudgeted");
+    }
+
+    fn classify_netlist(nl: &pnr_core::netlist::Netlist) -> Vec<NetClassification> {
+        let hg = pnr_core::BipartiteHypergraph::from_netlist(nl);
+        let roles = crate::netrole::classify_nets(&hg, &crate::netrole::AnnotationConfig::default());
+        let gates: Vec<f32> = nl.devices.iter().map(crate::gate_um2).collect();
+        let sensitive = vec![false; nl.devices.len()];
+        classify(&hg, &roles, &sensitive, &gates, None)
+    }
+
+    fn class_of(nl: &pnr_core::netlist::Netlist, classes: &[NetClassification], name: &str) -> NetClass {
+        let i = nl.nets.iter().position(|n| n.name == name).unwrap();
+        classes[i].class
+    }
+
+    #[test]
+    fn bjt_terminals_are_not_gates() {
+        use pnr_core::ids::NetId;
+        use pnr_core::netlist::{Device, DeviceKind, Netlist};
+
+        let nl = Netlist {
+            devices: vec![
+                Device {
+                    name: "XQ1".into(),
+                    kind: DeviceKind::Npn,
+                    model: String::new(),
+                    terminals: vec![
+                        ("C".into(), NetId(0)),
+                        ("B".into(), NetId(1)),
+                        ("E".into(), NetId(2)),
+                    ],
+                    params: vec![],
+                },
+                Device {
+                    name: "XQ2".into(),
+                    kind: DeviceKind::Pnp,
+                    model: String::new(),
+                    terminals: vec![
+                        ("C".into(), NetId(3)),
+                        ("B".into(), NetId(1)),
+                        ("E".into(), NetId(4)),
+                    ],
+                    params: vec![],
+                },
+            ],
+            nets: crate::tests::nets(&["outn", "in", "VSS", "outp", "VDD"]),
+            ..Default::default()
+        };
+        let classes = classify_netlist(&nl);
+        assert_eq!(class_of(&nl, &classes, "outn"), NetClass::Signal);
+        assert_eq!(class_of(&nl, &classes, "outp"), NetClass::Signal);
+        assert_eq!(class_of(&nl, &classes, "in"), NetClass::Signal);
+    }
+
+    #[test]
+    fn resistor_ends_are_channels() {
+        use pnr_core::ids::NetId;
+        use pnr_core::netlist::{Device, DeviceKind, Netlist};
+
+        let r1 = Device {
+            name: "R1".into(),
+            kind: DeviceKind::Resistor,
+            model: String::new(),
+            terminals: vec![("P".into(), NetId(0)), ("N".into(), NetId(1))],
+            params: vec![],
+        };
+        let m1 = crate::tests::fet("M1", DeviceKind::Nmos, 0, 2, 3, 3, 1_000, 1_000);
+        let nl = Netlist {
+            devices: vec![r1, m1],
+            nets: crate::tests::nets(&["a", "b", "dn", "VSS"]),
+            ..Default::default()
+        };
+        let classes = classify_netlist(&nl);
+        assert_eq!(class_of(&nl, &classes, "a"), NetClass::Signal);
+
+        // Control: without R1, `a` has no DC path off the gate and is Sensitive.
+        let nl_no_r = Netlist { devices: vec![nl.devices[1].clone()], nets: nl.nets.clone(), ..Default::default() };
+        let classes_no_r = classify_netlist(&nl_no_r);
+        assert_eq!(class_of(&nl_no_r, &classes_no_r, "a"), NetClass::Sensitive);
     }
 }

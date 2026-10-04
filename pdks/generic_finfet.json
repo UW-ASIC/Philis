@@ -4,6 +4,7 @@
   "cell": {
     "min_finger_width": 27,
     "via_enclosure": 5,
+    "dummy_max_l_nm": null,
     "layers": {
       "diff": "ACTIVE",
       "tap": "ACTIVE",
@@ -68,6 +69,8 @@
     "guard_licon_pitch": 54,
     "p_epi_thickness": 3000,
     "p_epi_thickness_source": "UNVERIFIED: no source was recorded with this value. Read by no code.",
+    "substrate_kind": null,
+    "epi_thickness_nm": null,
     "p_well_depth": 1500,
     "p_well_depth_source": "UNVERIFIED: no source was recorded with this value. Read by no code.",
     "n_well_depth": 2000,
@@ -87,6 +90,7 @@
     "mom_finger_space": 200,
     "mom_finger_width": 200,
     "res_min_width": 500,
+    "res_value_tol_ppm": 5000,
     "tie_max_dist_nm": 30000,
     "tie_max_dist_nm_source": "generic_finfet.deck ACTIVE.LUP.1.PMOS/NMOS missing_tie max_distance 30um. Read by no code yet (CELL-13 tap reach).",
     "wpe_clearance_moderate": 3000,

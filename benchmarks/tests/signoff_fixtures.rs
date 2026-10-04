@@ -25,10 +25,12 @@ const BASELINE: &[(&str, usize, &[&str], bool)] = &[
     ("pair",              0,  &[], true),
     ("quad",              0,  &[], true),
     ("rc_filter",         0,  &[], true),
+    ("res_m2",            0,  &[], true),
     ("bjt_mirror",        0,  &[], true),
     ("bgr_core",          0,  &[], true),
     ("chain4",            0,  &[], true),
     ("dac4",              0,  &[], true),
+    ("mirror_ratio",      0,  &[], true),
 ];
 
 /// Fixtures big enough that a full flow dominates the suite runtime. Same
@@ -40,10 +42,10 @@ const SLOW: &[(&str, usize, &[&str], bool)] = &[
 ];
 
 /// Devices LVS cannot compare on sky130, counted from the netlist alone: the
-/// deck recognises no BJT and no MOM capacitor (every capacitor generator
-/// draws one), so each drawn unit — `m` per BJT, `max(nf, m)` per capacitor —
-/// is one `lvs-coverage/` unit.
-fn unverified(netlist: &pnr_core::Netlist) -> i64 {
+/// deck recognises no BJT and no MOM capacitor, so each drawn unit — `m` per
+/// BJT, `max(nf, m)` per capacitor whose recipe draws no `plate` (MOM) — is
+/// one `lvs-coverage/` unit. A MIM-recipe capacitor is compared (CELL-08).
+fn unverified(netlist: &pnr_core::Netlist, pdk: &verify::Pdk) -> i64 {
     use pnr_core::DeviceKind::{Capacitor, Npn, Pnp};
     let p = |d: &pnr_core::Device, k: &str| d.params.iter().find(|(n, _)| n == k).map_or(1, |&(_, v)| v);
     netlist
@@ -51,6 +53,7 @@ fn unverified(netlist: &pnr_core::Netlist) -> i64 {
         .iter()
         .map(|d| match d.kind {
             Npn | Pnp => p(d, "m"),
+            Capacitor if pdk.recipe("capacitor", &d.model).is_some_and(|r| r.layers.iter().any(|(role, _)| role == "plate")) => 0,
             Capacitor => p(d, "nf").max(p(d, "m")),
             _ => 0,
         })
@@ -163,7 +166,7 @@ fn check(name: &str, max_drc: usize, expected_erc: &[&str], lvs_must_match: bool
 
     // Every device is compared or declared: none dropped before LVS. First, so a
     // known DRC/ERC failure (dac4's antenna gate row, RTE-06) cannot mask it.
-    let want = unverified(&sol.netlist);
+    let want = unverified(&sol.netlist, &pdk);
     assert_eq!(uncompared, want, "{name}: lvs-coverage units {uncompared}, the netlist has {want} uncomparable{}", detail());
     assert!(
         raw.len() <= max_drc,
@@ -238,7 +241,7 @@ fn uncompared_devices_do_not_block_convergence() {
     let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("bjt_mirror: {e:?}"));
     let report = library::signoff(&sol, &pdk).report;
     let uncompared: i64 = report.hard_violations.iter().filter(|v| v.rule.starts_with("lvs-coverage/")).map(|v| v.margin).sum();
-    assert_eq!(uncompared, unverified(&sol.netlist), "{:?}", report.hard_violations.iter().map(|v| &v.rule).collect::<Vec<_>>());
+    assert_eq!(uncompared, unverified(&sol.netlist, &pdk), "{:?}", report.hard_violations.iter().map(|v| &v.rule).collect::<Vec<_>>());
     assert!(uncompared > 0, "bjt_mirror has no uncompared device: the test checks nothing");
     assert!(sol.stats.converged, "bjt_mirror stopped on budget: {:?}", sol.stats);
 }
@@ -317,4 +320,24 @@ L1 vmid vout 1n
     assert!(undrawable[0].contains("L1"), "{undrawable:?}");
     // The epoch counts it too: an undrawn device is never a feasible stop.
     assert!(!sol.stats.converged, "converged with L1 undrawn: {:?}", sol.stats);
+}
+
+/// PERF-03: with a `.subckt` header, only its declared ports are exempt from
+/// the floating-gate check; `ota`'s old (pre-M1) header left `vbias`/`vbn`
+/// undeclared, so they were exempt too and their undriven gates went
+/// unflagged. The M1 exit criterion is exactly 2 such rows (vbias, vbn).
+#[test]
+fn ota_old_header_flags_its_undriven_bias_gates() {
+    let pdk = pdk();
+    let text = std::fs::read_to_string(root().join("benchmarks/fixtures/ota.spice")).expect("read fixture");
+    let old = text.replacen(" vbias vbn", "", 1);
+    assert_ne!(old, text, "ota.spice lost its vbias/vbn ports");
+    let cfg = library::Config { feedback_iters: 1, starts: 1, ..Default::default() };
+    let sol = library::run(&old, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("ota: {e:?}"));
+    let signoff = library::signoff(&sol, &pdk);
+    let fg = erc_rows(&signoff.report.hard_violations, &signoff.warnings)
+        .iter()
+        .filter(|r| r.starts_with("erc/floating_gate"))
+        .count();
+    assert_eq!(fg, 2, "expected 2 floating_gate rows (vbias, vbn) with the old header");
 }

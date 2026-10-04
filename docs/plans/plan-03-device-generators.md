@@ -224,6 +224,7 @@ Status: done in M0 (`85e05bb`).
 - Risks: per-member gate labels may expose real shorts in some variants. That is the purpose.
 
 ### CELL-03 Macro extents on twice the cut lattice
+- Status: done in M1 (`9b21b3a`; cells merge `726bc13`).
 - Priority: P0. Effort: S. Depends on: none. Cross: PLC (origin snap and debug assertion, AP-05).
 - Why: AP-05, CRATES #4. Grid discipline, H01-26 (hastings.txt L6565–6568, L6720–6726: centred objects need extents on twice the increment).
 - Current:
@@ -258,9 +259,10 @@ Status: done in M0 (`9dba018`, `3b06b02`); `Inductor::enumerate` is empty, every
 - Acceptance: no inductor geometry in any output.
 
 ### CELL-05 Guard-ring kinds name what is drawn — moved to REL-07
-- Status: cut from this plan (see appendix). REL-07 step 1 replaces `GuardRingType` with `PTap | NTap | Ecgr`, deletes `Hcgr`, `Hbgr`, `Ebgr`, `tap_pitch_nm` and `enclosure_complete` (with construction sources for each deletion, H05-58/H14-33 plus §5.4.4 L15614–15618 for the EBGR), and step 2 rewrites `post_cell::implant_name`/`in_nwell` (post_cell.rs:315, 321) and the annotator request. The type change and the drawing change are one diff there; a separate CELL rename would be undone by it. CELL's remaining ring work is CELL-17 (the ECGR well shape REL-07 does not draw).
+- Status: reinstated as GAP-05 (master §6 C6) and done in M1 (`b1510f4`): `GuardRingType { Tap { in_well }, Ecgr, Hcgr }`, `post_cell::drawable`; `Hbgr`, `Ebgr`, `tap_pitch_nm`, `enclosure_complete` deleted. The rest of this line is superseded. Was: cut from this plan (see appendix). REL-07 step 1 replaces `GuardRingType` with `PTap | NTap | Ecgr`, deletes `Hcgr`, `Hbgr`, `Ebgr`, `tap_pitch_nm` and `enclosure_complete` (with construction sources for each deletion, H05-58/H14-33 plus §5.4.4 L15614–15618 for the EBGR), and step 2 rewrites `post_cell::implant_name`/`in_nwell` (post_cell.rs:315, 321) and the annotator request. The type change and the drawing change are one diff there; a separate CELL rename would be undone by it. CELL's remaining ring work is CELL-17 (the ECGR well shape REL-07 does not draw).
 
 ### CELL-06 Resistors: honour multiplicity and keep the value exact under segmentation
+- Status: done in M1 (`bda5935`; cells merge `726bc13`).
 - Priority: P0. Effort: M. Depends on: CELL-01. Cross: FLOW (bare `R` values and `sheet_ohm` fixes, AF-02 and AV-16), EXT (ratio sets, CELL-14).
 - Why:
   - AC-02 (critical).
@@ -315,6 +317,7 @@ Status: done in M0 (`9dba018`, `3b06b02`); `Inductor::enumerate` is empty, every
   - `res_high_po` exact-width rules (rpm.1b–1f) are not in the deck (sky130.deck:653), §5.
 
 ### CELL-07 Diodes: multiplicity, contact arrays, and a licon.7-legal anode tap
+- Status: done in M1 (`1d03998`; cells merge `726bc13`).
 - Priority: P0. Effort: S. Depends on: CELL-01, MAT-02 (`pattern::grids`, `pattern::centro_assign`).
 - Why:
   - AC-02, AC-18, CRATES #7.
@@ -334,6 +337,8 @@ Status: done in M0 (`9dba018`, `3b06b02`); `Inductor::enumerate` is empty, every
 - Acceptance: T4 for diodes. The flow-inserted antenna diode stays clean (`frontend/library/tests/antenna_diode.rs`).
 
 ### CELL-08 Capacitors drawn as the deck's device (MIM on sky130), unit-exact MOM elsewhere
+
+Status: done in M1 (`c72a623`, `47a8231`, `6cdfc7a`; cells merge `726bc13`). Step 7 (`"cap"` alias) not taken: sky130 `mim_m3_1.aliases` is `["cap_mim_m3_1"]`. **Open:** `dac4_mim` and `tq_chain` have no `BASELINE` row; tq_chain through the CLI has `drc/m1.2.notch:met1`, and the bench (FI 5) ERC `erc/ar.met3.1:gate` (m1-report §2); carried to M2 item 0.
 
 Field report: FR-1 (several `cap_mim_m3_1` hang; LVS device-class mismatch with one). The hang and the class message are the old packaged build's (Philis `e8bc59e`, GPurify `e3c8eb2`); on m0 there is no hang (async_ctrl `tq_chain`, 8 caps of 21.87 µm: 3 min 20 s, 37 MB) but sky130 has no `cell.capacitors` recipe, so the MIM is drawn as met1/met2 MOM plates on the only two routing layers. Measured with the m0 CLI and bench (seed 1): one cap → every one of 56 dr reports carries `drawn short net <tap1|vss> to cell metal`, signoff `lvs/extract: label short: labels ["vss", "tap1"]`; eight caps → label short (`tap3`, `tap2`, `vss`), 5 × `drc/m1.2:met1`, 1 × `drc/via.2:via`; wta (one 9.83 µm MIM) → label short (`vss`, `mrail`). Added acceptance: the fixture `benchmarks/fixtures/tq_chain.spice` (async_ctrl `tq_chain`, 8 × `sky130_fd_pr__cap_mim_m3_1 W=21.87 L=21.87`) signs off with DRC 0, no `lvs/` row, and no dr report on it carries `drawn short`.
 
@@ -389,6 +394,7 @@ Field report: FR-1 (several `cap_mim_m3_1` hang; LVS device-class mismatch with 
   - GPurify compares no capacitor value (CELL-01 step 7); the value guarantee is this item's `drawn` test, and PERF-16 calibrates PEX.
 
 ### CELL-09 BJT arrays: fixed-geometry emitters and drawn cards
+- Status: done in M1 (`2a1ff0f`; cells merge `726bc13`).
 - Priority: P0. Effort: S. Depends on: CELL-01, MAT-02. Cross: PERF-18 (sky130 BJT recogniser; sky130.deck:663-665 says "the bipolars … still wait"), EXT-19 (BJT sets).
 - Why:
   - AC-08, CRATES #1, AV-03 (bgr_core's stated optimum), AV-23 (the bench appends `l=0.15u` to BJT cards).
@@ -417,6 +423,7 @@ Field report: FR-1 (several `cap_mim_m3_1` hang; LVS device-class mismatch with 
 - Risks: whether magic or GPurify extracts the generated construction as the foundry `pnp_05v5_W3p40L3p40` is not established (§5 Q6). The drawn size matches the model either way; the construction may still differ from the foundry cell.
 
 ### CELL-10 MOS: legal region parity for every multi-device row; ratioed mirrors merge
+- Status: done in M1 (`878e222`; cells merge `726bc13`); cellgen declines a merge with no drawn variant. **Acceptance not met on `m1a`:** the bench draws mirror_ratio as 3 cells for 3 devices (expected devices − 2 = 1; m1-report §2); carried to M2 item 0.
 - Priority: P0. Effort: S. Depends on: MAT-03 (`pattern::diffusion_cc_row`, which replaces `centroid_sequence` and the `greedy_centroid` branch of `finger_sequence`). Cross: EXT-15 (unit width, amendment below), FLOW-01 (W is SPICE total width).
 - Why:
   - AC-05. H13-22: ratioed devices from identical units (hastings.txt L40850–40864, L42360–42368). H12-29: minimise drain (L36550–36564).
@@ -627,13 +634,13 @@ Field report: FR-1 (several `cap_mim_m3_1` hang; LVS device-class mismatch with 
 - Risks: 5 V thick-oxide devices (`*_g5v0d10v5`, marker `hvi`) are deferred (appendix): `hvi` is not a drawn role, and making it one through `recipe_layers` would make `diff and hvi`-style rules count for every cell (pdk.rs:775-790), which can widen every diffusion dimension.
 
 ### CELL-17 Electron-collecting ring: an n-well band, not a filled well
-- Priority: P1. Effort: S. Depends on: REL-07 (the `PTap | NTap | Ecgr` taxonomy, `in_nwell(Ecgr) == true`, `ring_gap` for `Ecgr`), REL-08 (which devices get an `Ecgr`).
+- Priority: P1. Effort: S. Depends on: GAP-05 (done in M1, `b1510f4`: `Tap { in_well } | Ecgr | Hcgr`, `drawable`, `in_nwell(Ecgr) == false`, `ring_gap` for `Ecgr` ≥ `space_between("nwell","diff")`), REL-07, REL-08 (which devices get an `Ecgr`).
 - Why:
   - AC-06. H14-28: the CMOS ECGR is an N-well ring with n+ contact, around the NMOS injector (hastings.txt L43803–43837). H14-30: tied to a supply (L43650–43658).
-  - Defect REL-07 does not fix: `tap_ring` draws, for any in-well ring, one nwell rect over the ring's full outer extent (post_cell.rs:276-282: `Rect { x: ox0 - enc, …, w: (ox1 - ox0) + 2*enc }`). For an `NTap` around a PMOS that is right. For an `Ecgr` around an NMOS it buries the NMOS in the n-well, which shorts its diffusion to the well (ERC) and is not a guard ring. REL-07's test `ecgr_is_n_plus_in_its_own_well_clear_of_the_nmos` fails until this lands.
-- Scope split: REL owns which device gets which ring, its net and width, and the merge predicate. The earlier CELL items `Hcgr` drawing, `drawable(GuardRingType, &dyn Process)` and concentric ring nesting are dropped: REL-07 deletes `Hcgr` (no deck states a retrograde well, §14.2.4 L43842–43855) and allows one ring per device, so nothing asks for them.
+  - Defect REL-07 does not fix: `tap_ring` draws, for any in-well ring, one nwell rect over the ring's full outer extent (post_cell.rs:276-282: `Rect { x: ox0 - enc, …, w: (ox1 - ox0) + 2*enc }`). For a `Tap { in_well: true }` around a PMOS that is right. Since GAP-05 (M1) `in_nwell(Ecgr)` is false, so an `Ecgr` draws n+ taps with no well at all, and `drawable(Ecgr)` returns false so nothing requests one. GAP-05's test `ecgr_is_n_plus_in_its_own_well_clear_of_the_nmos` was not written in M1; this item writes it.
+- Scope split: REL owns which device gets which ring, its net and width, and the merge predicate. GAP-05 (M1) kept `Hcgr` behind `drawable(Hcgr) = retrograde_pwell` (false on sky130; no deck states a retrograde well, §14.2.4 L43842–43855). This item also sets `drawable(Ecgr)` to `p.layer("nwell").is_some() && p.layer("nsdm").is_some()` (GAP-05's spec; the M1 `ponytail:` in `drawable` names it). Concentric ring nesting stays dropped: one ring per device.
 - Change (post_cell.rs):
-  1. `tap_ring(…, well: WellShape)` with `enum WellShape { None, Filled, Band }` in place of the `in_well: bool` test at 276-282: `NTap` → `Filled` (today's rect), `PTap` → `None`, `Ecgr` → `Band`.
+  1. `tap_ring(…, well: WellShape)` with `enum WellShape { None, Filled, Band }` in place of the `in_well: bool` test at 276-282: `Tap { in_well: true }` → `Filled` (today's rect), `Tap { in_well: false }` → `None`, `Ecgr` → `Band`.
   2. `Band`: four nwell rects, each covering one side of the tap band grown by `e = max(dim("nwell_diff_enc"), enclosure("nwell","tap"))` (difftap.10, 180 nm) and at least `width("nwell")` wide (nwell.1, 840 nm on sky130; the band alone is narrower). Corners overlap so the four rects form one ring. The ring's inner nwell edge is the band's inner edge minus `e`; REL-07's `ring_gap` for `Ecgr` keeps that edge ≥ `space_between("nwell","diff")` (340) from the NMOS diffusion.
   3. `ring_halo` for `Ecgr` uses the band well's outer edge (`max(e, (width(nwell) − band)/2)` past the band) plus `outer_clear`.
 - Tests (post_cell.rs, sky130):
@@ -782,6 +789,8 @@ Field report: FR-1 (several `cap_mim_m3_1` hang; LVS device-class mismatch with 
 - Acceptance: `grep -rn` for each removed key over `*.rs` and `pdks/*.json` returns nothing.
 
 ### CELL-30 MOS dummy gates capped at the microloading reach; long-L and narrow devices in the generator sweeps (added at the M0 close-out)
+
+Status: done in M1 (`79f1a6a`; cells merge `726bc13`).
 
 Field report: FR-5 (and the generator half of FR-4).
 

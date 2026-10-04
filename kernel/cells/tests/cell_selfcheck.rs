@@ -281,6 +281,24 @@ fn the_bbox_contains_every_drawn_shape() {
     }
 }
 
+#[test]
+fn every_half_extent_is_on_the_cut_lattice() {
+    // The placer stamps a cell at `centre - bbox.w / 2`; if that half-extent is
+    // off the cut lattice, every cut the cell draws lands off-lattice too.
+    let Some(pdk) = pdk() else { return };
+    let bad: Vec<_> = all_variants(&pdk)
+        .into_iter()
+        .filter_map(|(name, m)| {
+            let off = (m.bbox.w / 2) % 10 != 0
+                || (m.bbox.h / 2) % 10 != 0
+                || m.bbox.x % 10 != 0
+                || m.bbox.y % 10 != 0;
+            off.then_some(name)
+        })
+        .collect();
+    assert!(bad.is_empty(), "variants with an off-lattice half-extent: {bad:?}");
+}
+
 /// A PNP's base is an n-well; an NPN's n-well is only its isolation ring,
 /// always over a deep n-well (a plain n-well under an NPN would short its
 /// base to the collector).

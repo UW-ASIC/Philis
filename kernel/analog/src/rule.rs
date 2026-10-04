@@ -125,6 +125,13 @@ pub trait Rule: Copy {
         None
     }
 
+    /// `(a, b)` cells that must be drawn alike (same orientation, same variant
+    /// when their variant spaces agree): what dp's locks preserve. Default none.
+    #[inline]
+    fn matched_pair(self) -> Option<(u32, u32)> {
+        None
+    }
+
     /// `(victim, aggressor)` nets this rule wants routed apart: what a router
     /// can price as a keep-away field while searching, not only after.
     #[inline]
@@ -241,6 +248,10 @@ pub trait RuleBatch<On>: Send + Sync {
     fn mirror_pairs(&self, out: &mut Vec<(u32, u32, u16)>) {
         let _ = out;
     }
+    /// Append every matched pair (see [`Rule::matched_pair`]).
+    fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        let _ = out;
+    }
     /// Append every keep-away `(victim, aggressor)` (see [`Rule::keepaway`]).
     fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
         let _ = out;
@@ -248,6 +259,91 @@ pub trait RuleBatch<On>: Send + Sync {
     /// Append every shield request `(victim, reference)` (see [`Rule::shield`]).
     fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
         let _ = out;
+    }
+    /// `(device_a, device_b, mV)`: the 1σ systematic allowance each matched pair has left after
+    /// placement's own spend — what a routing rule may use. Default none.
+    fn offset_allowances(&self, state: &On, out: &mut Vec<(u32, u32, f32)>) {
+        let _ = (state, out);
+    }
+    /// Stable id and origin; `None` for a batch nobody tagged ([`Tagged`]).
+    fn meta(&self) -> Option<&crate::intent::BatchMeta> {
+        None
+    }
+}
+
+/// A batch with its [`crate::intent::BatchMeta`]: every method delegates to
+/// `inner`. Boxed so the annotator tags batches after emission.
+pub struct Tagged<On> {
+    pub meta: crate::intent::BatchMeta,
+    pub inner: Box<dyn RuleBatch<On>>,
+}
+
+impl<On> RuleBatch<On> for Tagged<On> {
+    fn cost(&self, s: &On) -> f32 {
+        self.inner.cost(s)
+    }
+    fn violations(&self, s: &On) -> u32 {
+        self.inner.violations(s)
+    }
+    fn residual(&self, s: &On) -> f64 {
+        self.inner.residual(s)
+    }
+    fn kind(&self) -> &'static str {
+        self.inner.kind()
+    }
+    fn repair_kind(&self) -> RepairKind {
+        self.inner.repair_kind()
+    }
+    fn count(&self) -> usize {
+        self.inner.count()
+    }
+    fn worst_cost(&self, s: &On) -> f32 {
+        self.inner.worst_cost(s)
+    }
+    fn criticality(&self, s: &On) -> f32 {
+        self.inner.criticality(s)
+    }
+    fn worst_usage(&self, s: &On) -> Option<f32> {
+        self.inner.worst_usage(s)
+    }
+    fn inapplicable(&self, s: &On) -> u32 {
+        self.inner.inapplicable(s)
+    }
+    fn unknown(&self, s: &On) -> u32 {
+        self.inner.unknown(s)
+    }
+    fn violating_ids(&self, s: &On, out: &mut Vec<u32>) {
+        self.inner.violating_ids(s, out);
+    }
+    fn violating_residuals(&self, s: &On, out: &mut Vec<(u32, f32)>) {
+        self.inner.violating_residuals(s, out);
+    }
+    fn touched(&self, out: &mut Vec<u32>) {
+        self.inner.touched(out);
+    }
+    fn project(&self, s: &mut On, grid: i32) {
+        self.inner.project(s, grid);
+    }
+    fn retarget(&mut self, cell_of: &[u16]) {
+        self.inner.retarget(cell_of);
+    }
+    fn branches(&self, out: &mut Vec<(BranchId, bool)>) {
+        self.inner.branches(out);
+    }
+    fn mirror_pairs(&self, out: &mut Vec<(u32, u32, u16)>) {
+        self.inner.mirror_pairs(out);
+    }
+    fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        self.inner.keepaway_pairs(out);
+    }
+    fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        self.inner.shield_pairs(out);
+    }
+    fn offset_allowances(&self, s: &On, out: &mut Vec<(u32, u32, f32)>) {
+        self.inner.offset_allowances(s, out);
+    }
+    fn meta(&self) -> Option<&crate::intent::BatchMeta> {
+        Some(&self.meta)
     }
 }
 
@@ -322,6 +418,9 @@ impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {
     }
     fn mirror_pairs(&self, out: &mut Vec<(u32, u32, u16)>) {
         out.extend(self.iter().filter_map(|r| r.mirror_pair()));
+    }
+    fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        out.extend(self.iter().filter_map(|r| r.matched_pair()));
     }
     fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
         out.extend(self.iter().filter_map(|r| r.keepaway()));

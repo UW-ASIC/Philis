@@ -29,16 +29,25 @@ pub struct PlacementMetrics {
     pub clearance_residue_nm2: f64,
     /// Plain pairwise bbox overlap, nm².
     pub overlap_nm2: f64,
-    /// Hard mirror pairs `a ≠ b` drawn at different (variant, orient, hw, hh).
+    /// Matched pairs (`RuleBatch::matched_pairs`) drawn at different orient,
+    /// or at different shape `(variant, hw, hh)` inside one shape set.
     pub matched_geometry_mismatch: u32,
     /// Symmetry islands beyond one per group; `None` (not measured) until PLC-12.
     pub islands_extra: Option<u32>,
 }
 
 /// [`PlacementMetrics`] of `l` with cells drawn as `macros` (indexed like `l`),
-/// against the cut `lattice` and the cell-to-cell `clearance`, nm.
+/// against the cut `lattice` and the cell-to-cell `clearance`, nm; `locks`
+/// says which matched pairs must share a shape.
 #[must_use]
-pub fn placement_metrics(macros: &[Macro], l: &Layout, lattice: i32, clearance: i32, reqs: &analog::Requirements<Layout>) -> PlacementMetrics {
+pub fn placement_metrics(
+    macros: &[Macro],
+    l: &Layout,
+    lattice: i32,
+    clearance: i32,
+    reqs: &analog::Requirements<Layout>,
+    locks: &dp::locks::Locks,
+) -> PlacementMetrics {
     let n = l.x.len();
     let cells: f64 = (0..n).map(|i| 4.0 * f64::from(l.hw[i]) * f64::from(l.hh[i])).sum();
     let lat = lattice.max(1);
@@ -51,12 +60,22 @@ pub fn placement_metrics(macros: &[Macro], l: &Layout, lattice: i32, clearance: 
         .count() as u32;
     let overlap_nm2 = gp::mechanics::encroachment(l, 0);
     let mut pairs = Vec::new();
-    for b in &reqs.hard {
-        b.mirror_pairs(&mut pairs);
+    for b in reqs.hard.iter().chain(&reqs.budget).chain(&reqs.cost) {
+        b.matched_pairs(&mut pairs);
     }
-    let shape = |i: usize| (l.variant.get(i), l.orient.get(i), l.hw.get(i), l.hh.get(i));
-    let matched_geometry_mismatch =
-        pairs.iter().filter(|&&(a, b, _)| a != b && shape(a as usize) != shape(b as usize)).count() as u32;
+    pairs.retain(|&(a, b)| a != b && (a as usize) < n && (b as usize) < n);
+    for p in &mut pairs {
+        *p = (p.0.min(p.1), p.0.max(p.1));
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+    let shape = |i: usize| (l.variant.get(i), l.hw.get(i), l.hh.get(i));
+    let locked = |a: usize, b: usize| locks.shape_of.get(a).copied().flatten().is_some_and(|s| locks.shape_of.get(b) == Some(&Some(s)));
+    let matched_geometry_mismatch = pairs
+        .iter()
+        .map(|&(a, b)| (a as usize, b as usize))
+        .filter(|&(a, b)| l.orient.get(a) != l.orient.get(b) || (locked(a, b) && shape(a) != shape(b)))
+        .count() as u32;
     PlacementMetrics {
         area_usage: if cells > 0.0 { (l.footprint_nm2() / cells) as f32 } else { 0.0 },
         lattice_off,
@@ -133,7 +152,7 @@ pub fn debug_check_connected(macros: &[Macro], layout: &Layout, routes: &Routes)
         assert!(
             !wires.is_empty(),
             "routing: net {net} has {} pins and no routed geometry at all — it was \
-             dropped, not routed (see gr::build_nets' obstacle-only path)",
+             dropped, not routed",
             pins.len()
         );
         // Flood over pins ∪ wires, starting from the first pin.
@@ -373,19 +392,25 @@ mod tests {
             // (0, 2) differs in variant; (0, 1) matches; (1, 1) is a pair collapsed into one cell.
             hard: vec![Box::new(vec![sym(0, 2), sym(0, 1), sym(1, 1)])],
             budget: vec![],
-            // A soft pair is not a hard mirror pair, however it differs.
+            // Matched pairs come from every tier.
             cost: vec![Box::new(vec![sym(1, 2)])],
         };
-        let m = placement_metrics(&vec![Macro::default(); 3], &l, 100, 50, &reqs);
+        // No variants: every pair is shape-locked.
+        let locks = dp::locks::locks(&reqs, 3, &[]);
+        let m = placement_metrics(&vec![Macro::default(); 3], &l, 100, 50, &reqs, &locks);
         assert_eq!(m.lattice_off, 1, "{m:?}");
         // c0–c1: 100 × 200.
         assert_eq!(m.overlap_nm2, 20_000.0, "{m:?}");
         // At clearance 50: c0–c1 150 × 250, c1–c2 20 × 250; minus the plain overlap.
         assert_eq!(m.clearance_residue_nm2, 37_500.0 + 5_000.0 - 20_000.0, "{m:?}");
-        assert_eq!(m.matched_geometry_mismatch, 1, "{m:?}");
+        assert_eq!(m.matched_geometry_mismatch, 2, "{m:?}");
         // Footprint 530 × 200 over 3 × 200 × 200.
         assert!((m.area_usage - 106_000.0 / 120_000.0).abs() < 1e-6, "{m:?}");
         assert_eq!(m.islands_extra, None, "not measured before PLC-12");
+        // A turned partner counts on orient alone: (0, 1) joins.
+        l.orient[1] = Orient::R90;
+        let m = placement_metrics(&vec![Macro::default(); 3], &l, 100, 50, &reqs, &locks);
+        assert_eq!(m.matched_geometry_mismatch, 3, "{m:?}");
     }
 
     /// Four quarter-turns return the exact original geometry — no drift creeps in

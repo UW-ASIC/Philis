@@ -157,7 +157,8 @@ pub(crate) fn route_built(
     };
 
     let (layers, cuts, pin_access) = routing_stack(pdk);
-    let d_router = detailed_router(pdk, &layers, &cuts, pin_access);
+    let mut d_router = detailed_router(pdk, &layers, &cuts, pin_access);
+    d_router.cfg.n_nets = built.netlist.as_ref().map_or(0, |n| n.nets.len());
     // The netlist shares the pins' NetId numbering, so its routing rules key
     // the right nets with no remap.
     let reqs = built
@@ -175,18 +176,7 @@ pub(crate) fn route_built(
 
     let mut best: Option<(Routes, Report)> = None;
     for _ in 0..cfg.epochs.max(1) {
-        let (global, _) =
-            gr::GlobalRoute::default().route(&layout, &macros, &[], &reqs, &layers, &mut neg);
-        let (routes, report) = d_router.route(
-            &global,
-            &pins,
-            &placed,
-            &[],
-            &reqs,
-            &layers,
-            &cuts,
-            &mut neg,
-        );
+        let (routes, report, _) = d_router.route(&pins, &placed, &[], &reqs, &layers, &cuts, &mut neg);
         if best.as_ref().is_none_or(|(_, b)| report.lex() < b.lex()) {
             best = Some((routes, report));
         }
@@ -357,7 +347,7 @@ pub(crate) fn antenna_diodes(
         return Vec::new();
     }
     let one = pnr_core::DeviceGroup { devices: vec![pnr_core::DeviceId(0)] };
-    let template = cells::diode::Diode { pattern: cells::Pattern::Single, columns: 1 }.draw(&one, &analog::Constraints::default(), pdk);
+    let template = cells::diode::Diode { rows: 1, cols: 1 }.draw(&one, &analog::Constraints::default(), pdk);
     let mut obstacles: Vec<pnr_core::Rect> = placed.iter().chain(rings).map(|m| m.bbox).collect();
     let mut out = Vec::new();
     for net in nets.into_iter().map(|n| pnr_core::NetId(n as u16)) {
@@ -487,6 +477,7 @@ mod tests {
         let nl = Netlist {
             devices: vec![dev("M0", DeviceKind::Nmos, &[("D", 0), ("G", 2), ("S", 1), ("B", 1)]), dev("R1", DeviceKind::Resistor, &[("P", 0), ("N", 2)])],
             nets: ["vdd", "vss", "x"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
         };
         let class = |n: u16, class| NetClassification { net: NetId(n), class, c_budget_af: None, max_coupling_af: None };
         let draws = [Some(vec![("D".into(), 10.0), ("G".into(), 0.0), ("S".into(), -10.0), ("B".into(), 0.0)]), None];
