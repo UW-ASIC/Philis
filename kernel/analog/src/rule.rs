@@ -689,7 +689,7 @@ mod tests {
         use RepairKind as K;
         assert_eq!(Vec::<Differential>::new().repair_kind(), K::Mirror);
         let stack: &'static Stack = Box::leak(Box::default());
-        assert_eq!(CommonNodes { nodes: Vec::new(), stack }.repair_kind(), K::Balance);
+        assert_eq!(CommonNodes { nodes: Vec::new(), stack, halo_nm: 0, joins: Vec::new() }.repair_kind(), K::Balance);
         assert_eq!(Vec::<CrosstalkExclusion>::new().repair_kind(), K::KeepAway);
         assert_eq!(Vec::<CouplingBudget>::new().repair_kind(), K::KeepAway);
         assert_eq!(Vec::<Antenna>::new().repair_kind(), K::Antenna);

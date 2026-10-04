@@ -131,3 +131,16 @@ fn pairs_report() {
         }
     }
 }
+
+/// RTE-17: on `ota` every common node with a ΔR allowance meets it (the
+/// winner's metadata row; unknown = no allowance). Star/Kelvin nodes wait on
+/// EXT-24's producers.
+#[test]
+#[ignore = "full flow on ota; run with --include-ignored"]
+fn common_nodes_meet_allowance() {
+    let pdk = pdk();
+    let sol = run("ota", &pdk);
+    let row = sol.metadata.routing.iter().find(|r| r.kind == "CommonNode").expect("a CommonNode row");
+    println!("ota CommonNode total {} violated {} unknown {}", row.total, row.violations, row.unknown);
+    assert_eq!(row.violations, 0);
+}

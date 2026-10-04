@@ -733,6 +733,9 @@ pub struct RouteCtx<G> {
     /// this net onto it, leader)`. The leader routes jointly with its image
     /// ([`Mirror`]); either net's reroute and commit move both. Empty = none.
     pub mirror: Vec<Option<(u32, LatticeMap, bool)>>,
+    /// Per net, the id its `reserved` nodes carry (a star branch's pseudo-net
+    /// uses its parent's, RTE-17); empty = its own.
+    pub owner: Vec<u32>,
     /// Per net [`Elec::current`], and per layer [`Elec::layer_r`] / [`Elec::via_r`];
     /// empty = none.
     pub current: Vec<f32>,
@@ -773,6 +776,7 @@ impl<G: RGraph> RouteCtx<G> {
             cross_c: Vec::new(),
             sep: Vec::new(),
             mirror: Vec::new(),
+            owner: Vec::new(),
             current: Vec::new(),
             layer_r: Vec::new(),
             via_r: Vec::new(),
@@ -915,6 +919,7 @@ impl<G: RGraph> RouteCtx<G> {
         let (k, guard) = self.k_of(net);
         let q = NetSearch {
             net: net as u32,
+            owner: self.owner.get(net).copied().unwrap_or(net as u32),
             terms: &self.terms[net],
             k,
             guard,
@@ -1011,6 +1016,8 @@ pub struct Elec<'a> {
 /// One net's search query for [`route_net`].
 pub struct NetSearch<'a> {
     pub net: u32,
+    /// The id `reserved` uses for this net (`net` but for a pseudo-net).
+    pub owner: u32,
     /// Terminals; `terms[0]` is the root.
     pub terms: &'a [u32],
     /// Tracks per layer, and wide-metal guard tracks each side ([`RGraph::footprint`]).
@@ -1144,7 +1151,7 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
         })
     };
     // Congestion of one footprint node: `None` when another net holds it.
-    let closed = |i: usize| reserved.get(i).is_some_and(|&o| o != NONE && o != net) || q.blocked.binary_search(&(i as u32)).is_ok();
+    let closed = |i: usize| reserved.get(i).is_some_and(|&o| o != NONE && o != net && o != q.owner) || q.blocked.binary_search(&(i as u32)).is_ok();
     let congestion = |i: usize| -> Option<f32> {
         if closed(i) {
             return None;
@@ -1806,7 +1813,7 @@ mod tests {
     }
 
     fn search<'a>(terms: &'a [u32], elec: Elec<'a>) -> NetSearch<'a> {
-        NetSearch { net: 0, terms, k: [1; MAX_LAYERS], guard: [0; MAX_LAYERS], term_k: &[], own: &[], own_halo: &[], penalty: &[], keepout: (&[], &[]), blocked: &[], sep: &[], foot: &[], terms_of: &[], mirror: None, elec }
+        NetSearch { net: 0, owner: 0, terms, k: [1; MAX_LAYERS], guard: [0; MAX_LAYERS], term_k: &[], own: &[], own_halo: &[], penalty: &[], keepout: (&[], &[]), blocked: &[], sep: &[], foot: &[], terms_of: &[], mirror: None, elec }
     }
 
     fn spec(stride: u32, halo_via: u8) -> LayerSpec {

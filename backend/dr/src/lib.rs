@@ -399,7 +399,7 @@ impl DetailedRoute {
         }
         let die = (hi_x + halo, hi_y + halo);
 
-        let compact: Vec<usize> = (0..n_nets).filter(|&i| !term_rects[i].is_empty()).collect();
+        let mut compact: Vec<usize> = (0..n_nets).filter(|&i| !term_rects[i].is_empty()).collect();
         if compact.is_empty() {
             let routes = Routes { wires: vec![Vec::new(); n_nets], ..Default::default()  };
             let report = score(&routes, reqs, 0.0, &[], &[], &[], 1);
@@ -409,7 +409,7 @@ impl DetailedRoute {
         for (ci, &ni) in compact.iter().enumerate() {
             ci_of[ni] = ci;
         }
-        let n_compact = compact.len();
+        let mut n_compact = compact.len();
 
         let grid = if cfg.layers.is_empty() {
             TrackGrid::with_layers(die, cfg.pitch, VIA_COST, n_layers)
@@ -605,6 +605,8 @@ impl DetailedRoute {
                 && zones.iter().all(|&(zci, zx, zy)| zci as usize == ci || rect_gap(pad, Rect { x: zx - stitch / 2, y: zy - stitch / 2, w: stitch, h: stitch }) >= pad_space)
         };
         let mut jointly: HashSet<(usize, i32, i32, i32, i32)> = HashSet::new();
+        // The node each pin landed on, by `(compact net, pin rect)`.
+        let mut landed_at: HashMap<(usize, i32, i32, i32, i32), u32> = HashMap::new();
         let mut exact: Vec<(usize, usize, gr::LatticeMap)> = Vec::new();
         let mut mirror_ids = Vec::new();
         for b in reqs.hard.iter().chain(&reqs.budget).filter(|b| b.repair_kind() == RepairKind::Mirror) {
@@ -682,6 +684,7 @@ impl DetailedRoute {
                     laid_legs.extend(legs.iter().map(|&l| (ci, l)));
                     jog_hist.extend(jog_hist_nodes(&grid, cfg, &legs, jog_l, &reserved, ci));
                     claimed[node as usize] = true;
+                    landed_at.insert((ci, r.x, r.y, r.w, r.h), node);
                     reserved[node as usize] = ci as u32;
                     if let Some(ua) = ua {
                         node_ua[ci].push((node, ua));
@@ -779,6 +782,7 @@ impl DetailedRoute {
                     continue;
                 };
                 claimed[n as usize] = true;
+                landed_at.insert((ci, r.x, r.y, r.w, r.h), n);
                 reserved[n as usize] = ci as u32;
                 if let Some(ua) = ua {
                     node_ua[ci].push((n, ua));
@@ -795,6 +799,67 @@ impl DetailedRoute {
             }
         }
 
+        // RTE-17: each group of a star node routes as its own pseudo-net (a
+        // compact net past the real ones, `compact[pseudo]` = the parent's
+        // `NetId`, so `build_routes` draws it into the parent): its pins'
+        // landed nodes plus one root node of its own inside the feeds' halo
+        // (`p0`); the parent keeps its other pins and joins the roots. The
+        // pseudo-nets repel each other like any two nets, so the branches
+        // meet only at the root. A halo with too few free nodes is a V.
+        let mut owner: Vec<u32> = Vec::new();
+        let mut star_v: Vec<Violation> = Vec::new();
+        // Per star, its branches' pseudo-nets: kept a track apart (below).
+        let mut star_sibs: Vec<Vec<usize>> = Vec::new();
+        for node in cfg.common.iter().filter(|n| n.star && n.groups.len() > 1) {
+            let n = node.net.0 as usize;
+            let Some(ci) = ci_of.get(n).copied().filter(|&c| c != usize::MAX) else { continue };
+            let pins: Vec<Vec<u32>> = node.groups.iter().map(|g| g.iter().filter_map(|&r| { let r = shift(r); landed_at.get(&(ci, r.x, r.y, r.w, r.h)).copied() }).collect()).collect();
+            let p = grid.pitch;
+            let mut roots: Vec<(i64, u32)> = Vec::new();
+            for f in node.feeds.iter().map(|&f| grown(shift(f), p)) {
+                let c = (f.x + f.w / 2, f.y + f.h / 2);
+                for l in 0..grid.n_layers.min(2) {
+                    for iy in grid.bin_y(f.y)..=grid.bin_y(f.y + f.h) {
+                        for ix in grid.bin_x(f.x)..=grid.bin_x(f.x + f.w) {
+                            let m = grid.node(ix, iy, l);
+                            let (x, y, _) = grid.pos(m);
+                            let inside = (f.x..=f.x + f.w).contains(&x) && (f.y..=f.y + f.h).contains(&y);
+                            if inside && grid.on_track(m) && !claimed[m as usize] && [NONE, ci as u32].contains(&reserved[m as usize]) && blocked_for[ci].binary_search(&m).is_err() {
+                                roots.push((i64::from((x - c.0).abs() + (y - c.1).abs()) + i64::from(l) * i64::from(p), m));
+                            }
+                        }
+                    }
+                }
+            }
+            roots.sort_unstable();
+            roots.dedup_by_key(|r| r.1);
+            if roots.len() < pins.len() || pins.iter().any(Vec::is_empty) {
+                star_v.push(Violation { rule: format!("star root too small net {n}"), margin: (pins.len() - roots.len().min(pins.len())) as i64 });
+                continue;
+            }
+            if owner.is_empty() {
+                owner = (0..n_compact as u32).collect();
+            }
+            star_sibs.push((n_compact..n_compact + pins.len()).collect());
+            for (g, &(_, root)) in pins.iter().zip(&roots) {
+                claimed[root as usize] = true;
+                reserved[root as usize] = ci as u32;
+                c_terms[ci].retain(|t| !g.contains(t));
+                c_terms[ci].push(root);
+                let mut terms = vec![root];
+                terms.extend(g.iter().copied().filter(|t| *t != root));
+                terms.dedup();
+                let ua: Vec<(u32, f32)> = node_ua[ci].iter().copied().filter(|e| g.contains(&e.0)).collect();
+                node_ua[ci].retain(|e| !g.contains(&e.0));
+                c_terms.push(terms);
+                node_ua.push(ua);
+                blocked_for.push(blocked_for[ci].clone());
+                unlanded.push(0);
+                compact.push(n);
+                owner.push(ci as u32);
+                n_compact += 1;
+            }
+        }
         stats.us_landing = us(t_landing);
         let weight: Vec<f32> = compact.iter().map(|&n| cfg.net_weight.get(n).copied().unwrap_or(0.0)).collect();
         let counts: Vec<usize> = c_terms.iter().map(Vec::len).collect();
@@ -867,6 +932,7 @@ impl DetailedRoute {
             layer_r: cfg.layer_r.clone(),
             via_r: cfg.via_r.clone(),
             mirror: Vec::new(),
+            owner,
             keepout: Vec::new(),
             own_cells: Vec::new(),
             blocked_for,
@@ -918,8 +984,23 @@ impl DetailedRoute {
         for b in reqs.hard.iter().chain(&reqs.budget) {
             b.separations(&mut seps);
         }
+        // A star's branches keep a free track between them: adjacent same-net
+        // runs would be merged by the same-net fill, joining the branches.
+        for sibs in &star_sibs {
+            for (i, &a) in sibs.iter().enumerate() {
+                for &b in &sibs[i + 1..] {
+                    if cold.sep.is_empty() {
+                        cold.sep = vec![Vec::new(); n_compact];
+                    }
+                    cold.sep[a].push((b as u32, [1; gr::MAX_LAYERS], false));
+                    cold.sep[b].push((a as u32, [1; gr::MAX_LAYERS], false));
+                }
+            }
+        }
         if !seps.is_empty() {
-            cold.sep = vec![Vec::new(); n_compact];
+            if cold.sep.is_empty() {
+                cold.sep = vec![Vec::new(); n_compact];
+            }
             let p = cold.graph.pitch;
             for (a, b, lateral, no_cross) in seps {
                 let (Some(a), Some(b)) = (ci_of.get(a as usize).copied().filter(|&c| c != usize::MAX), ci_of.get(b as usize).copied().filter(|&c| c != usize::MAX)) else { continue };
@@ -979,14 +1060,13 @@ impl DetailedRoute {
             .common
             .iter()
             .map(|n| analog::routing::CommonNode {
-                a: n.a.iter().map(|&r| shift(r)).collect(),
-                b: n.b.iter().map(|&r| shift(r)).collect(),
+                groups: n.groups.iter().map(|g| g.iter().map(|&r| shift(r)).collect()).collect(),
                 feeds: n.feeds.iter().map(|&r| shift(r)).collect(),
                 ..n.clone()
             })
             .collect();
         let extra: Vec<Box<dyn analog::RuleBatch<Routes>>> = match cfg.stack {
-            Some(stack) if !common.is_empty() => vec![Box::new(analog::routing::CommonNodes { nodes: common.clone(), stack })],
+            Some(stack) if !common.is_empty() => vec![Box::new(analog::routing::CommonNodes { nodes: common.clone(), stack, halo_nm: cfg.pitch, joins: joins(layers, cuts, cfg.pin_access) })],
             _ => Vec::new(),
         };
         // Per net, for the antenna lift: the top lattice layer of its cells'
@@ -1360,6 +1440,7 @@ impl DetailedRoute {
         };
         let overuse = overuse(&hot);
         let mut report = score(&routes, reqs, overuse, &joins, &foreign_metal, &sacrificed, side);
+        report.hard_violations.extend(star_v);
         report.hard_violations.extend(access_v);
         let mut metals = [u16::MAX; analog::routing::metal_over_gate::MAX_METALS];
         for (m, l) in metals.iter_mut().zip(&layers[..n_layers as usize]) {
@@ -2164,7 +2245,9 @@ fn repair_constraints(
                     batch.violating_ids(&routes, &mut ids);
                     for n in common.iter().filter(|n| ids.contains(&u32::from(n.net.0))) {
                         if let Some(c) = ci(u32::from(n.net.0)) {
-                            trials.push(vec![(c, balance_field(&cold.graph, &n.a, &n.b))]);
+                            if let [a, b] = n.groups.as_slice() {
+                                trials.push(vec![(c, balance_field(&cold.graph, a, b))]);
+                            }
                         }
                     }
                 }
@@ -3103,10 +3186,10 @@ mod tests {
             diode: None,
         }));
         let (feed, a, b) = (pin(0, 1_000, 2_000), pin(0, 12_000, 2_000), pin(0, 12_000, 14_000));
-        let node = CommonNode { net: NetId(0), a: vec![a.1], b: vec![b.1], feeds: vec![feed.1], max_delta_ohm: 0.2 };
+        let node = CommonNode { net: NetId(0), groups: vec![vec![a.1], vec![b.1]], feeds: vec![feed.1], max_delta_ohm: 0.2, star: false };
         let skew = |cfg: DetailedCfg| {
             let (routes, _) = route(cfg, &[feed, a, b], &[], &[], &mut gr::Negotiation::new());
-            CommonNodes { nodes: vec![node.clone()], stack }.worst_usage(&routes).unwrap()
+            CommonNodes { nodes: vec![node.clone()], stack, halo_nm: 420, joins: joins(&LAYERS, &CUTS, None) }.worst_usage(&routes).unwrap()
         };
         let plain = skew(test_cfg());
         let balanced = skew(DetailedCfg { common: vec![node.clone()], stack: Some(stack), ..test_cfg() });
@@ -3354,6 +3437,51 @@ mod tests {
                 assert!(at_pin, "net {n}: dead-end shape {s:?}");
             }
         }
+    }
+
+    /// Kelvin: force and sense groups of one net, the tap the feed, a star.
+    /// The sense lead starts at the tap: every shape of its branch (the
+    /// piece holding the sense pin once the tap's halo is cut out) carries
+    /// 0 µA by `net_flow`, and the star check passes. Without the star the
+    /// sense pin joins the force trunk, whose current then flows through it.
+    #[test]
+    fn a_kelvin_sense_branch_starts_at_the_tap() {
+        use analog::routing::{current::net_flow, CommonNode, CommonNodes};
+        use analog::RuleBatch;
+        let (tap, force, sense) = (pin(0, 8_000, 2_000), pin(0, 8_000, 14_000), pin(0, 9_000, 14_000));
+        let node = |star| CommonNode { net: NetId(0), groups: vec![vec![force.1], vec![sense.1]], feeds: vec![tap.1], max_delta_ohm: 0.0, star };
+        let run = |star: bool| {
+            let cfg = DetailedCfg { common: vec![node(star)], stack: Some(test_stack()), ..test_cfg() };
+            let (routes, report) = route(cfg, &[tap, force, sense], &[], &[], &mut gr::Negotiation::new());
+            assert!(!rules(&report).iter().any(|r| r.starts_with("open net") || r.starts_with("star root")), "{:?}", rules(&report));
+            let terms = [(tap.1, -1_000.0), (force.1, 1_000.0), (sense.1, 0.0)].map(|(at, ua)| pnr_core::Terminal { at, ua: Some(ua) });
+            let flow = net_flow(test_stack(), &routes.wires[0], &terms).expect("flow");
+            // The sense branch: the tap's halo cut out, flood from the sense pin.
+            let p = test_cfg().pitch;
+            let halo = Rect { x: tap.1.x - p, y: tap.1.y - p, w: tap.1.w + 2 * p, h: tap.1.h + 2 * p };
+            let w = &routes.wires[0];
+            let keep: Vec<usize> = (0..w.len()).filter(|&i| !w[i].rect.touches(&halo)).collect();
+            let j = joins(&LAYERS, &CUTS, None);
+            let mut branch: Vec<usize> = keep.iter().copied().filter(|&i| w[i].rect.touches(&sense.1)).collect();
+            let mut k = 0;
+            while k < branch.len() {
+                let a = branch[k];
+                for &b in &keep {
+                    if !branch.contains(&b) && w[a].rect.touches(&w[b].rect) && conductor_layers_meet(&w[a], &w[b], &j) {
+                        branch.push(b);
+                    }
+                }
+                k += 1;
+            }
+            let star_v = CommonNodes { nodes: vec![node(true)], stack: test_stack(), halo_nm: p, joins: j }.violations(&routes);
+            (branch.iter().map(|&i| flow.shape_ua[i]).fold(0.0f32, f32::max), star_v, branch.is_empty())
+        };
+        let (ua, star_v, empty) = run(true);
+        assert!(!empty, "the sense pin has a branch");
+        assert_eq!(ua, 0.0, "force current in the sense lead");
+        assert_eq!(star_v, 0);
+        let (ua, star_v, _) = run(false);
+        assert!(ua > 0.0 || star_v > 0, "without the star the sense lead is not separate");
     }
 
     /// History survives the call and changes the next one.

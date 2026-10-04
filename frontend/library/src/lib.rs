@@ -1405,9 +1405,12 @@ impl Flow<'_> {
             let feeds = list.iter().filter(|p| p.0 != a && p.0 != b).map(|p| p.2).collect();
             let i_ua = self.id_ua.get(a.0 as usize).copied().flatten().map(|i| i.abs() as f32).filter(|&i| i > 0.0);
             let max_delta_ohm = common_node_ohm(&left, a, b, i_ua);
-            nodes.push(analog::routing::CommonNode { net, a: pins(a), b: pins(b), feeds, max_delta_ohm });
+            // RTE-17 step 4: EXT-24's CommonNodeReq/StarReq/KelvinReq replace
+            // this leaf mapping (a StarReq supersedes the net's node, star = true).
+            nodes.push(analog::routing::CommonNode { net, groups: vec![pins(a), pins(b)], feeds, max_delta_ohm, star: false });
         }
-        analog::routing::CommonNodes { nodes, stack: self.stack }
+        let joins = dr::joins(&self.layers, &self.cuts, self.d_router.cfg.pin_access);
+        analog::routing::CommonNodes { nodes, stack: self.stack, halo_nm: self.d_router.cfg.pitch, joins }
     }
 
     /// Each recognised matched pair's surroundings on the placed geometry
@@ -2769,7 +2772,7 @@ mod common_node_tests {
         };
         let nodes = t.flow.common_nodes(&layout).nodes;
         assert_eq!(nodes.len(), 1, "one common source node");
-        assert!(!nodes[0].a.is_empty() && !nodes[0].b.is_empty(), "both members' source pins: a {:?} b {:?}", nodes[0].a, nodes[0].b);
+        assert!(nodes[0].groups.len() == 2 && nodes[0].groups.iter().all(|g| !g.is_empty()), "both members' source pins: {:?}", nodes[0].groups);
     }
 
     /// AF-31: an empty cell is named by its members, not by its cell index
