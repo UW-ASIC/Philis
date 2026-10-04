@@ -509,6 +509,21 @@ Tests:
   - Run (B) on the commit before PLC-06 (after PLC-03) and after it. No fixture's lex key regresses (median, seeds
     1–5). Record both tables. A regression is reported, not tuned away.
   - The ablation note in baseline-plc-01.md (Pile vs Analytic) is now measured on this tree; leave it to PLC-11.
+- Measured (B, seeds 1–5, `c29b238` vs the same tree with only `c29b238` reverted), median `(hard, key tier, area)`:
+
+  | fixture | before | after |
+  |---|---|---|
+  | bgr_core | 0, 18.1, 135.0 | 0, 18.1, 135.0 |
+  | bjt_mirror | 0, 32.8, 64.7 | 0, 32.8, 64.7 |
+  | chain4 | 0, 8.5, 62.7 | 0, 8.5, 62.7 |
+  | dac4 | 1, 127.1, 1722.4 | 1, 127.1, 1722.4 |
+  | ota, ota_constrained, tt_ota | 0, 265.0, 1723.4 | 0, **265.3**, 1723.4 |
+  | pair | 0, 3.3, 8.6 | 0, 3.3, 8.6 |
+  | quad | 0, 6.0, 16.0 | 0, 6.0, 16.0 |
+  | rc_filter | 0, 7.4, 131.8 | 0, 7.4, 131.8 |
+
+  **Not met:** the three OTA fixtures (one circuit, identical outputs) regress on key tier by 0.3 fF (0.1 %).
+  Per seed before → after: 265.9→266.5, 264.8→264.6, 265.9→266.5, 265.0→265.3, 264.9→265.0. Reported, not tuned.
 
 ---
 
