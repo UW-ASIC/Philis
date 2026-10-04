@@ -16,8 +16,8 @@ use pnr_core::ids::BranchId;
 use pnr_core::{Layout, Macro, Orient, Report};
 
 use gp::mechanics::{
-    analog_cost, analog_phi, analog_theta, choose_variants,
-    hpwl, report, snap, variant_extents, Nets, SplitMix64,
+    analog_phi, analog_theta, choose_variants,
+    pex, report, snap, variant_extents, Nets, SplitMix64,
 };
 
 /// Inner moves per epoch = `MOVES_PER_CELL · n`.
@@ -151,9 +151,9 @@ impl<'a> Sa<'a> {
         self.fixed.get(i).copied().unwrap_or(false)
     }
 
-    /// PEX tier: pin HPWL + priced analog cost.
+    /// PEX tier, dimensionless: pin HPWL / L_ref + priced analog cost.
     fn pex(&self, l: &Layout) -> f64 {
-        hpwl(&self.nets, l) + f64::from(analog_cost(self.reqs, l, self.prices))
+        pex(&self.nets, self.reqs, l, self.prices)
     }
 
     /// Clearance encroachment of every pair with a member in `self.moved`.
@@ -313,7 +313,10 @@ pub fn place(
         sum += (sa.pex(&l) - pex0).abs();
         (l.x[c], l.y[c]) = (ox, oy);
     }
-    let mut temp = (sum / 128.0).max(1.0) * schedule.t0_scale;
+    // No floor in PEX units (PLC-18: PEX is O(1)); the fallback only covers a
+    // layout where no probe changes PEX.
+    let mean = sum / 128.0;
+    let mut temp = if mean > 0.0 { mean } else { 1.0 } * schedule.t0_scale;
 
     let can_rotate = l.orient.len() == n;
     let can_reshape = variants.len() == n && l.variant.len() == n;

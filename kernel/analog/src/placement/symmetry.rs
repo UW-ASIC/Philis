@@ -25,11 +25,12 @@ pub struct Symmetry {
 
 impl Rule for Symmetry {
     type On = Layout;
-    /// `(ex² + ey²)·1e-3` with `ex = xa + xb − 2·axis`, `ey = ya − yb`.
+    /// `((|ex| + |ey|) / L_ref)²` with `ex = xa + xb − 2·axis`, `ey = ya − yb`,
+    /// `L_ref` = [`Layout::l_ref`] (PLC-18: dimensionless).
     fn cost(self, l: &Layout) -> f32 {
         let (ex, ey) = self.error(l);
-        let (ex, ey) = (ex as f32, ey as f32);
-        (ex * ex + ey * ey) * 1e-3
+        let e = (ex.abs() + ey.abs()) as f32 / l.l_ref();
+        e * e
     }
     fn satisfied(self, l: &Layout) -> bool {
         self.error(l) == (0, 0) && self.same_shape(l)

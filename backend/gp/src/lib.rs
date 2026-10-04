@@ -347,6 +347,9 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
     let (hw, hh) = half_extents(&drawn);
     let side = canvas_side(&hw, &hh, UTILIZATION, rules.grid);
     let mut l = initial_layout(&drawn, variant, side, n_axes, &mut rng);
+    // gp minimises `L_ref·E` (PLC-18): hw/hh are fixed here, so that is a constant
+    // multiple of E and (a)/(c) keep their nm-unit balance against (b).
+    let l_ref = l.l_ref();
     if power_uw.len() == n {
         l.power_uw.copy_from_slice(power_uw);
     }
@@ -398,7 +401,7 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
         }
 
         // (b) analog-cost gradient (priced budgets included) by central difference.
-        let inv = 1.0f32 / (2.0 * ANALOG_PROBE as f32);
+        let inv = l_ref / (2.0 * ANALOG_PROBE as f32);
         for i in 0..n {
             let ox = l.x[i];
             l.x[i] = ox + ANALOG_PROBE;

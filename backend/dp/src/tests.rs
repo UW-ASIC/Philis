@@ -6,7 +6,7 @@ const CLEARANCE_NM: i32 = 2000;
 fn rules(c: i32) -> gp::PlaceRules {
     gp::PlaceRules::uniform(5, c)
 }
-use gp::mechanics::{analog_violations, encroachment};
+use gp::mechanics::{analog_violations, encroachment, hpwl};
 use analog::placement::symmetry::{Symmetry, SymmetryGroup};
 use analog::placement::DtiBand;
 use analog::Rule;
@@ -588,4 +588,60 @@ fn cold_schedule_reproduces_todays_layout() {
     assert_eq!(l.x, vec![26615, 8990, 44550, 53905]);
     assert_eq!(l.y, vec![-975, -2545, 2190, 265]);
     assert_eq!(l.orient, vec![Orient::R270, Orient::R0, Orient::R180, Orient::R0]);
+}
+
+// ---- PLC-18: dimensionless PEX ----
+
+/// Two cells with every converted cost term live; all lengths ×`k`.
+fn scene(k: i32) -> (Nets, Layout, Requirements<Layout>) {
+    let mut l = layout(&[(0, 0, 5_000 * k, 5_000 * k), (40_000 * k, 3_000 * k, 5_000 * k, 5_000 * k)]);
+    l.axis = vec![10_000 * k; 2];
+    l.branch = vec![true];
+    let pin = |x: i32| Macro {
+        pins: vec![pnr_core::Pin {
+            name: "G".to_string(),
+            net: pnr_core::NetId(0),
+            at: Rect { x: x * k, y: 4_950 * k, w: 100 * k, h: 100 * k },
+            layer: pnr_core::LayerId(0),
+        }],
+        bbox: Rect { x: 0, y: 0, w: 10_000 * k, h: 10_000 * k },
+        ..Default::default()
+    };
+    let nets = Nets::from_macros(&[pin(0), pin(9_900)]);
+    let (d0, d1) = (Target::Device(DeviceId(0)), Target::Device(DeviceId(1)));
+    let reqs = Requirements {
+        hard: Vec::new(),
+        budget: Vec::new(),
+        cost: vec![
+            Box::new(vec![analog::placement::Proximity { a: d0, b: d1, max_distance_nm: 10_000 * k }]),
+            Box::new(vec![analog::placement::Isolation { a: d0, b: d1, min_distance_nm: 60_000 * k }]),
+            Box::new(vec![DtiBand {
+                a: d0,
+                b: d1,
+                s_max_nm: 200 * k,
+                d_dti_nm: 50_000 * k,
+                branch: BranchId(0),
+                seed_isolate: true,
+            }]),
+            Box::new(SymmetryGroup(vec![Symmetry { a: d0, b: d1, axis: AxisId(0) }])),
+        ],
+    };
+    (nets, l, reqs)
+}
+
+/// PEX reads no absolute length: scaling every length by 2 (exact in binary
+/// float) leaves it unchanged. Breaks if a cost keeps nm units or HPWL loses `/L_ref`.
+#[test]
+fn energy_is_invariant_to_scaling_all_lengths() {
+    let (nets1, l1, reqs1) = scene(1);
+    let (nets2, l2, reqs2) = scene(2);
+    for b in &reqs1.cost {
+        assert!(b.cost(&l1) > 0.0, "{:?} must be live", b.kind());
+    }
+    assert!(hpwl(&nets1, &l1) > 0.0);
+    let prices = gp::Prices::new();
+    let sa1 = Sa::new(nets1, 2, &reqs1, &prices, &[], &rules(0));
+    let sa2 = Sa::new(nets2, 2, &reqs2, &prices, &[], &rules(0));
+    let (e1, e2) = (sa1.pex(&l1), sa2.pex(&l2));
+    assert!((e2 - e1).abs() <= 1e-6 * e1.abs(), "{e1} vs {e2}");
 }
