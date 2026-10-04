@@ -56,6 +56,17 @@ impl Layout {
         f64::from(x1 - x0) * f64::from(y1 - y0)
     }
 
+    /// Normalising length, nm: `sqrt(Σ cell area)` over every cell's current
+    /// `hw`/`hh` (PLC-18); `1` with no cells, so callers never divide by 0.
+    ///
+    /// ponytail: O(n) per call, read once per rule eval; cache on `Layout` if
+    /// PLC-09's T7 profile shows it. Live, not cached, so dp's reshape moves stay exact.
+    #[must_use]
+    pub fn l_ref(&self) -> f32 {
+        let a: f64 = self.hw.iter().zip(&self.hh).map(|(&w, &h)| 4.0 * f64::from(w) * f64::from(h)).sum();
+        a.sqrt().max(1.0) as f32
+    }
+
     /// `(cx, cy, hw, hh)` of a target, nm; a group is its members' bounding box.
     ///
     /// # Panics
@@ -173,5 +184,35 @@ impl Layout {
         let gx = i64::from(((ax - bx).abs() - (ahw + bhw)).max(0));
         let gy = i64::from(((ay - by).abs() - (ahh + bhh)).max(0));
         ((gx * gx + gy * gy) as f32).sqrt()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cells(hw: Vec<i32>, hh: Vec<i32>) -> Layout {
+        let n = hw.len();
+        Layout {
+            x: vec![0; n],
+            y: vec![0; n],
+            hw,
+            hh,
+            orient: vec![Orient::default(); n],
+            variant: vec![0; n],
+            axis: Vec::new(),
+            branch: Vec::new(),
+            groups: Vec::new(),
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        }
+    }
+
+    #[test]
+    fn l_ref_is_root_of_cell_area() {
+        // Areas 4·3·4 + 4·6·2 = 96 nm².
+        assert_eq!(cells(vec![3, 6], vec![4, 2]).l_ref(), 96f32.sqrt());
+        assert_eq!(cells(Vec::new(), Vec::new()).l_ref(), 1.0);
     }
 }

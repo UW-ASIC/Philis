@@ -19,10 +19,11 @@ pub struct Isolation {
 
 impl Rule for Isolation {
     type On = Layout;
-    /// `shortfall²·4e-3`.
+    /// `(shortfall / min_distance)²` (PLC-18: dimensionless).
     fn cost(self, l: &Layout) -> f32 {
-        let v = (self.min_distance_nm as f32 - l.edge_gap(self.a, self.b)).max(0.0);
-        v * v * 4e-3
+        let m = self.min_distance_nm.max(1) as f32;
+        let s = (m - l.edge_gap(self.a, self.b)).max(0.0) / m;
+        s * s
     }
     fn satisfied(self, l: &Layout) -> bool {
         l.edge_gap(self.a, self.b) >= self.min_distance_nm as f32
