@@ -16,7 +16,7 @@ use pnr_core::ids::BranchId;
 use pnr_core::{Layout, Macro, Orient, Report};
 
 use gp::mechanics::{
-    analog_cost, analog_phi, analog_theta, choose_variants, encroach,
+    analog_cost, analog_phi, analog_theta, choose_variants,
     hpwl, report, snap, variant_extents, Nets, SplitMix64,
 };
 
@@ -116,7 +116,8 @@ struct Sa<'a> {
     /// Read-only during the anneal: Metropolis needs a fixed energy.
     prices: &'a gp::Prices,
     fixed: &'a [bool],
-    clearance: i32,
+    /// Per-pair spacing (Arc-backed, cheap to own).
+    rules: gp::PlaceRules,
     grid: i32,
     snap: Snap,
     moved: Vec<usize>,
@@ -130,7 +131,7 @@ impl<'a> Sa<'a> {
         reqs: &'a Requirements<Layout>,
         prices: &'a gp::Prices,
         fixed: &'a [bool],
-        rules: gp::Rules,
+        rules: &gp::PlaceRules,
     ) -> Self {
         Sa {
             cell_nets: nets.cell_nets(n),
@@ -138,7 +139,7 @@ impl<'a> Sa<'a> {
             reqs,
             prices,
             fixed,
-            clearance: rules.clearance,
+            rules: rules.clone(),
             grid: rules.grid,
             snap: Snap::default(),
             moved: Vec::new(),
@@ -161,7 +162,7 @@ impl<'a> Sa<'a> {
         for (i, &c) in self.moved.iter().enumerate() {
             for b in 0..l.x.len() {
                 if b != c && !self.moved[..i].contains(&b) {
-                    t += encroach(l, c, b, self.clearance);
+                    t += self.rules.encroach(l, c, b);
                 }
             }
         }
@@ -235,12 +236,12 @@ pub fn place(
     fixed: &[bool],
     locks: &locks::Locks,
     prices: &mut gp::Prices,
-    rules: gp::Rules,
+    rules: &gp::PlaceRules,
     net_weight: &[f32],
     seed: u64,
     schedule: Schedule,
 ) -> (Layout, Report, PlaceStats) {
-    let gp::Rules { grid, clearance } = rules;
+    let grid = rules.grid;
     let n = coarse.x.len();
     let mut rng = SplitMix64::new(seed);
     let mut l = Layout {
@@ -266,12 +267,12 @@ pub fn place(
     // Nets from the geometry `l.variant` names, so HPWL scores real pins.
     let nets = Nets::from_macros(&choose_variants(macros, variants, &l.variant)).weigh(net_weight);
     if n == 0 {
-        let rep = report(&nets, reqs, &l, prices, clearance);
+        let rep = report(&nets, reqs, &l, prices, rules);
         return (l, rep, PlaceStats { matched_incompatible: Some(locks.incompatible), ..Default::default() });
     }
 
     // Move region: the coarse footprint bbox, grown about its centre until the
-    // clearance-inflated cells fit at `REGION_FILL`.
+    // halo-inflated cells fit at `REGION_FILL`.
     let (mut xmin, mut ymin, mut xmax, mut ymax) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
     let mut need = 0.0f64;
     for i in 0..n {
@@ -279,7 +280,8 @@ pub fn place(
         ymin = ymin.min(l.y[i] - l.hh[i]);
         xmax = xmax.max(l.x[i] + l.hw[i]);
         ymax = ymax.max(l.y[i] + l.hh[i]);
-        need += f64::from(2 * l.hw[i] + clearance) * f64::from(2 * l.hh[i] + clearance);
+        let halo = rules.halo(&l, i);
+        need += f64::from(2 * l.hw[i] + halo) * f64::from(2 * l.hh[i] + halo);
     }
     let side = (need / REGION_FILL).sqrt() as i32;
     let grow = |lo: &mut i32, hi: &mut i32| {
@@ -383,11 +385,11 @@ pub fn place(
         l.y[i] = snap(l.y[i], grid);
     }
     // Grid snap can shave a clearance by a few nm; the legalizer restores it.
-    legalize::separate_overlaps(&mut l, reqs, grid, clearance, LEGALIZE_SWEEPS);
+    legalize::separate_overlaps(&mut l, reqs, rules, LEGALIZE_SWEEPS);
     l.refresh_temps();
 
     let Sa { nets, stats, .. } = sa;
-    let rep = report(&nets, reqs, &l, prices, clearance);
+    let rep = report(&nets, reqs, &l, prices, rules);
     (l, rep, stats)
 }
 

@@ -107,6 +107,7 @@ pub const KEYS: &[Key] = &[
     k("npn_isolation_note", Text, false, false, "documentation"),
     k("p_epi_thickness", Nm, false, true, "unread"),
     k("p_well_depth", Nm, false, true, "unread"),
+    k("placement_space", Table, false, false, "frontend/library/src/lib.rs place_rules"),
     k("plate_spacing", Nm, true, false, "kernel/cells/src/capacitor.rs, cap_array.rs"),
     k("polycon_to_diff_spacing", Nm, false, false, "kernel/cells/src/mosfet.rs"),
     k("polycon_to_pdiff_spacing", Nm, false, false, "kernel/cells/src/mosfet.rs"),

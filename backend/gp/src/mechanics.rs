@@ -289,7 +289,7 @@ pub fn analog_violations(reqs: &Requirements<Layout>, l: &Layout) -> u32 {
 /// overlap and clearance-only encroachment, one budget entry per positive
 /// residual, cost = HPWL + analog cost.
 #[must_use]
-pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Prices, clearance: i32) -> Report {
+pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Prices, rules: &crate::PlaceRules) -> Report {
     let mut hard_violations: Vec<Violation> = reqs
         .hard
         .iter()
@@ -313,7 +313,7 @@ pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Pri
     if ov > 0.5 {
         hard_violations.push(Violation { rule: "device overlap".into(), margin: ov as i64 });
     }
-    let residue = encroachment(l, clearance) - ov;
+    let residue = rules.encroachment(l) - ov;
     if residue > 0.5 {
         hard_violations.push(Violation { rule: "clearance encroachment".into(), margin: residue.ceil() as i64 });
     }

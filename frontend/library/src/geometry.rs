@@ -37,14 +37,14 @@ pub struct PlacementMetrics {
 }
 
 /// [`PlacementMetrics`] of `l` with cells drawn as `macros` (indexed like `l`),
-/// against the cut `lattice` and the cell-to-cell `clearance`, nm; `locks`
+/// against the cut `lattice` and the per-pair cell spacing `rules`; `locks`
 /// says which matched pairs must share a shape.
 #[must_use]
 pub fn placement_metrics(
     macros: &[Macro],
     l: &Layout,
     lattice: i32,
-    clearance: i32,
+    rules: &gp::PlaceRules,
     reqs: &analog::Requirements<Layout>,
     locks: &dp::locks::Locks,
 ) -> PlacementMetrics {
@@ -79,7 +79,7 @@ pub fn placement_metrics(
     PlacementMetrics {
         area_usage: if cells > 0.0 { (l.footprint_nm2() / cells) as f32 } else { 0.0 },
         lattice_off,
-        clearance_residue_nm2: gp::mechanics::encroachment(l, clearance) - overlap_nm2,
+        clearance_residue_nm2: rules.encroachment(l) - overlap_nm2,
         overlap_nm2,
         matched_geometry_mismatch,
         islands_extra: None,
@@ -397,7 +397,7 @@ mod tests {
         };
         // No variants: every pair is shape-locked.
         let locks = dp::locks::locks(&reqs, 3, &[]);
-        let m = placement_metrics(&vec![Macro::default(); 3], &l, 100, 50, &reqs, &locks);
+        let m = placement_metrics(&vec![Macro::default(); 3], &l, 100, &gp::PlaceRules::uniform(100, 50), &reqs, &locks);
         assert_eq!(m.lattice_off, 1, "{m:?}");
         // c0–c1: 100 × 200.
         assert_eq!(m.overlap_nm2, 20_000.0, "{m:?}");
@@ -409,7 +409,7 @@ mod tests {
         assert_eq!(m.islands_extra, None, "not measured before PLC-12");
         // A turned partner counts on orient alone: (0, 1) joins.
         l.orient[1] = Orient::R90;
-        let m = placement_metrics(&vec![Macro::default(); 3], &l, 100, 50, &reqs, &locks);
+        let m = placement_metrics(&vec![Macro::default(); 3], &l, 100, &gp::PlaceRules::uniform(100, 50), &reqs, &locks);
         assert_eq!(m.matched_geometry_mismatch, 3, "{m:?}");
     }
 

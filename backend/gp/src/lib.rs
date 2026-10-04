@@ -4,8 +4,10 @@
 //! shared placement primitives in [`mechanics`] that `dp` reuses.
 
 pub mod mechanics;
+pub mod spacing;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use analog::Requirements;
 use pnr_core::{Layout, Macro, Report};
@@ -209,14 +211,89 @@ pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr
     raw.iter().map(|r| r.map_or(1.0, |w| w / mean)).collect()
 }
 
-/// Process numbers placement needs, from the deck (shared with `dp`).
-#[derive(Clone, Copy, Debug)]
-pub struct Rules {
+/// Process numbers placement needs, from the deck (shared with `dp`), built
+/// once per run.
+#[derive(Clone, Debug)]
+pub struct PlaceRules {
     /// Every cell origin snaps to it, nm.
     pub grid: i32,
-    /// Edge-to-edge gap between cells, nm: below it wells/implants of
-    /// different cells merge.
-    pub clearance: i32,
+    /// Role × role spacing; its `fallback` is the old scalar clearance.
+    pub spacing: Arc<spacing::SpacingTable>,
+    /// Per (cell, variant, orient) edge profile; empty = every pair at `fallback`.
+    pub profiles: Arc<spacing::Profiles>,
+    /// `spacing.max_gap()`, cached: past it on either axis a pair owes nothing.
+    far: i32,
+}
+
+impl PlaceRules {
+    /// One scalar `clearance` between every pair (no profiles).
+    #[must_use]
+    pub fn uniform(grid: i32, clearance: i32) -> Self {
+        Self::new(grid, spacing::SpacingTable::uniform(clearance, grid), spacing::Profiles::default())
+    }
+
+    /// `profiles.of[cell]` indexes like the layout's cells.
+    #[must_use]
+    pub fn new(grid: i32, spacing: spacing::SpacingTable, profiles: spacing::Profiles) -> Self {
+        PlaceRules { grid, far: spacing.max_gap(), spacing: Arc::new(spacing), profiles: Arc::new(profiles) }
+    }
+
+    fn profile(&self, l: &Layout, c: usize) -> Option<&spacing::Profile> {
+        let v = usize::from(*l.variant.get(c)?);
+        let o = l.orient.get(c).copied().unwrap_or_default() as usize;
+        self.profiles.of.get(c)?.get(v).map(|p| &p[o])
+    }
+
+    /// Edge gaps `(gx, gy)` cells `a` and `b` owe each other, nm: `gap(lo, R, hi).min`
+    /// for the pair ordered by centre x (a tie takes both orders' max), `T` by
+    /// centre y. Never exploits `abut`. A cell without a profile: `fallback`.
+    #[must_use]
+    pub fn gaps(&self, l: &Layout, a: usize, b: usize) -> (i32, i32) {
+        let (Some(pa), Some(pb)) = (self.profile(l, a), self.profile(l, b)) else {
+            return (self.spacing.fallback, self.spacing.fallback);
+        };
+        let t = &self.spacing;
+        let along = |da: i32, db: i32, f: spacing::Face| match da.cmp(&db) {
+            std::cmp::Ordering::Less => t.gap(pa, f, pb).min,
+            std::cmp::Ordering::Greater => t.gap(pb, f, pa).min,
+            std::cmp::Ordering::Equal => t.gap(pa, f, pb).min.max(t.gap(pb, f, pa).min),
+        };
+        (along(l.x[a], l.x[b], spacing::Face::R), along(l.y[a], l.y[b], spacing::Face::T))
+    }
+
+    /// Spacing-inflated overlap of `a` and `b`, nm²:
+    /// `(gx + hw_a + hw_b − |Δx|)⁺ · (gy + hh_a + hh_b − |Δy|)⁺` over [`Self::gaps`].
+    #[inline]
+    #[must_use]
+    pub fn encroach(&self, l: &Layout, a: usize, b: usize) -> f64 {
+        // Pairs farther apart than any rule reaches skip the profile lookup.
+        let far = self.far;
+        if (l.x[a] - l.x[b]).abs() >= l.hw[a] + l.hw[b] + far || (l.y[a] - l.y[b]).abs() >= l.hh[a] + l.hh[b] + far {
+            return 0.0;
+        }
+        let (gx, gy) = self.gaps(l, a, b);
+        let ox = (l.hw[a] + l.hw[b] + gx) - (l.x[a] - l.x[b]).abs();
+        let oy = (l.hh[a] + l.hh[b] + gy) - (l.y[a] - l.y[b]).abs();
+        if ox > 0 && oy > 0 {
+            f64::from(ox) * f64::from(oy)
+        } else {
+            0.0
+        }
+    }
+
+    /// [`Self::encroach`] over all pairs; `+0.0` with fewer than two cells.
+    #[must_use]
+    pub fn encroachment(&self, l: &Layout) -> f64 {
+        let n = l.x.len();
+        (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).fold(0.0, |t, (a, b)| t + self.encroach(l, a, b))
+    }
+
+    /// Room cell `c` can owe past its bbox ([`spacing::SpacingTable::halo`]);
+    /// `fallback` without a profile.
+    #[must_use]
+    pub fn halo(&self, l: &Layout, c: usize) -> i32 {
+        self.profile(l, c).map_or(self.spacing.fallback, |p| self.spacing.halo(p))
+    }
 }
 
 const MAX_ITERS: u32 = 500;
@@ -238,7 +315,7 @@ pub struct GpInput<'a> {
     pub variants: &'a [VariantSpace],
     pub assignment: &'a [u16],
     pub reqs: &'a Requirements<Layout>,
-    pub rules: Rules,
+    pub rules: &'a PlaceRules,
     pub net_weight: &'a [f32],
     /// Symmetry axes, one per block (`Problem::blocks`).
     pub n_axes: usize,
@@ -277,7 +354,7 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
     let nets = Nets::from_macros(&drawn).weigh(net_weight);
     if n == 0 || !iterate {
         l.refresh_temps();
-        let rep = report(&nets, reqs, &l, prices, rules.clearance);
+        let rep = report(&nets, reqs, &l, prices, rules);
         return (l, rep);
     }
     let mut pairs = Vec::new();
@@ -417,7 +494,7 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
     }
 
     l.refresh_temps();
-    let rep = report(&nets, reqs, &l, prices, rules.clearance);
+    let rep = report(&nets, reqs, &l, prices, rules);
     (l, rep)
 }
 
@@ -732,12 +809,40 @@ mod place_tests {
             variants: &[],
             assignment: &[],
             reqs,
-            rules: Rules { grid: 10, clearance: 270 },
+            rules: Box::leak(Box::new(PlaceRules::uniform(10, 270))),
             net_weight: &[],
             n_axes,
             power_uw: power,
             units: Default::default(),
             iterate: true,
+        }
+    }
+
+    /// PLC-07: without profiles the per-pair rules are exactly the scalar clearance.
+    #[test]
+    fn uniform_rules_match_scalar_encroach() {
+        let mut rng = SplitMix64::new(11);
+        let mut r = |m: u64| (rng.next_u64() % m) as i32;
+        for _ in 0..50 {
+            let n = 2 + r(8) as usize;
+            let (g, c) = (5 * (1 + r(4)), r(2_000));
+            let mut v = || (0..n).map(|_| r(20_000)).collect::<Vec<i32>>();
+            let (x, y, hw, hh) = (v(), v(), v(), v());
+            let l = Layout {
+                x,
+                y,
+                hw: hw.iter().map(|w| 1 + w / 7).collect(),
+                hh: hh.iter().map(|h| 1 + h / 7).collect(),
+                variant: vec![0; n],
+                axis: vec![],
+                branch: vec![],
+                groups: vec![],
+                orient: vec![pnr_core::Orient::R0; n],
+                power_uw: vec![0; n],
+                temp_mc: vec![0; n],
+                units: Default::default(),
+            };
+            assert_eq!(PlaceRules::uniform(g, c).encroachment(&l), mechanics::encroachment(&l, c), "g {g} c {c}");
         }
     }
 
