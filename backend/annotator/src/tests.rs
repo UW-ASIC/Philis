@@ -658,10 +658,10 @@ fn a_shielded_victim_books_no_coupling_to_its_shield() {
     assert!(coup.violations(&clocked) > 0, "a clock beside the victim still counts");
 }
 
+/// EXT-20 (AA-23): a mirror with no compound is matched, not mirrored: one
+/// `MatchedSet` on both devices and its Axis Orientation, no Symmetry.
 #[test]
-fn a_lone_mirror_stage_is_symmetric_too() {
-    // No diff pair in the stage: the mirror pair still shares the stage axis,
-    // hard (the equality) and cost (the pull toward it).
+fn a_lone_mirror_is_matched_not_mirrored() {
     let nl = Netlist {
         devices: vec![
             fet("XM1", DeviceKind::Pmos, 0, 0, 2, 2, 5_000, 1_000),
@@ -671,14 +671,18 @@ fn a_lone_mirror_stage_is_symmetric_too() {
         ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
-    let sym = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| {
-        a.iter().filter(|b| b.kind() == "Symmetry").map(|b| b.count()).sum::<usize>()
-    };
-    assert_eq!(sym(&p.placement.hard), 1);
-    assert_eq!(sym(&p.placement.cost), 1);
-    let mut pairs = Vec::new();
-    p.placement.hard.iter().for_each(|b| b.mirror_pairs(&mut pairs));
-    assert_eq!(pairs, [(0, 1, 0)], "the reference and output mirror about stage 0's axis");
+    let count = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>, k: &str| a.iter().filter(|b| b.kind() == k).map(|b| b.count()).sum::<usize>();
+    assert_eq!(count(&p.placement.hard, "Symmetry") + count(&p.placement.cost, "Symmetry"), 0);
+    let sets: Vec<Vec<u32>> = (p.placement.budget.iter().filter(|b| b.kind() == "MatchedSet"))
+        .map(|b| {
+            let mut t = Vec::new();
+            b.touched(&mut t);
+            t.sort_unstable();
+            t
+        })
+        .collect();
+    assert_eq!(sets, [vec![0, 1]]);
+    assert_eq!(p.placement.hard.iter().filter(|b| b.kind() == "Orientation").count(), 1);
 }
 
 #[test]
@@ -922,10 +926,11 @@ mod rings {
 }
 
 #[test]
-fn intent_empty_axes_per_block() {
+fn intent_axes_per_compound() {
     let p = annotate(&ota(), &AnnotationConfig::default());
     // EXT-14 fills compounds (one here), EXT-15 sets (DP and load; without a unit
-    // deck they have no unit); axes stay per block until EXT-20 (card D-b).
+    // deck they have no unit); EXT-20: one axis per compound.
     assert!(p.intent.sets.len() == 2 && p.intent.compounds.len() == 1);
-    assert_eq!(p.axis_count, p.blocks.len());
+    assert_eq!(p.axis_count, 1);
+    assert!(p.blocks.len() > 1, "not per block");
 }

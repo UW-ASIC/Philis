@@ -192,7 +192,8 @@ pub fn canon(p: &annotator::Problem, nl: &Netlist) -> Canon {
 }
 
 /// [`Canon`] of `p.intent.compounds`: `pairs` (names sorted), `selfs`, `net_pairs`
-/// and `axes = compounds.len()`. Replaced by [`canon`] once EXT-20 emits per compound.
+/// and `axes = compounds.len()`: what extraction inferred, before EXT-20 keeps only
+/// equal couples ([`canon`] reads what was emitted).
 pub fn canon_intent(p: &annotator::Problem, nl: &Netlist) -> Canon {
     let dev = |d: pnr_core::ids::DeviceId| nl.devices[d.0 as usize].name.as_str();
     let net = |n: NetId| nl.nets[n.0 as usize].name.as_str();

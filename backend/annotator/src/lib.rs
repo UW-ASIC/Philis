@@ -60,7 +60,7 @@ pub struct Problem {
     pub coverage: Vec<(DeviceId, Coverage)>,
     /// Extraction's contract (EXT-12); filled from EXT-13 on.
     pub intent: analog::intent::Intent,
-    /// Symmetry axes the placement emits: one per block until EXT-20 (card D-b).
+    /// Symmetry axes the placement emits: one per compound, at least one (EXT-20).
     pub axis_count: usize,
 }
 
@@ -172,7 +172,6 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     let gates: Vec<f32> = netlist.devices.iter().map(gate_um2).collect();
     let net_classes = classify::classify(&hg, &roles, &sensitive, &gates, cfg.process.gate_af_per_um2);
 
-    let mut placement = emit::placement(&blocks, netlist, &cfg.process, cfg.offset_sigma_mv, &cfg.policy);
     let fet = |k: pnr_core::DeviceKind| matches!(k, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos);
     let needs = Needs {
         matched: block::leaves(&blocks)
@@ -189,17 +188,6 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     if netlist.devices.iter().any(|d| d.kind == pnr_core::DeviceKind::Capacitor) {
         missing.push(("ParasiticBudget", "capacitor-plate nets: settling / code-error spec (ARR-03, ARR-05)"));
     }
-    // Same entry of `blocks`, glue excluded: glue is no stage.
-    let mut block_of = vec![usize::MAX; netlist.devices.len()];
-    for (bi, b) in blocks.iter().enumerate().filter(|(_, b)| b.kind != BlockKind::Glue) {
-        b.devices.iter().for_each(|d| block_of[d.0 as usize] = bi);
-    }
-    let same_block = |a: usize, v: usize| block_of[a] != usize::MAX && block_of[a] == block_of[v];
-    let p = &cfg.process;
-    if let Some(why) = emit::isolation(&hg, &net_classes, &sensitive, &same_block, p.substrate, p.epi_nm, &mut placement) {
-        missing.push(("Isolation", why));
-    }
-
     let mut routing = extract::routing(
         &hg,
         &net_classes,
@@ -208,58 +196,6 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         &block::leaves(&blocks).iter().filter(|b| b.kind == BlockKind::DiffPair).map(|b| (b.devices[0], b.devices[1])).collect::<Vec<_>>(),
         &cfg.policy,
     );
-
-    // Stable ids in emission order (permutation-invariant since EXT-06). A
-    // placement batch whose first touched device is in a recognised block came
-    // from that block's pattern; Isolation is cross-block, and the rest are net-class.
-    let mut next = 0u32;
-    let mut id = |origin| {
-        next += 1;
-        analog::intent::BatchMeta { id: analog::intent::ConstraintId(next - 1), origin }
-    };
-    let mut touched = vec![false; netlist.devices.len()];
-    for arm in [&mut placement.hard, &mut placement.budget, &mut placement.cost] {
-        *arm = std::mem::take(arm)
-            .into_iter()
-            .map(|inner| -> Box<dyn analog::RuleBatch<pnr_core::Layout>> {
-                let mut ids = Vec::new();
-                inner.touched(&mut ids);
-                ids.iter().for_each(|&d| touched[d as usize] = true);
-                let bi = ids.first().map_or(usize::MAX, |&d| block_of[d as usize]);
-                let origin = if bi == usize::MAX || inner.kind().ends_with("::Isolation") {
-                    analog::intent::Origin::NetClass
-                } else {
-                    analog::intent::Origin::Pattern { template: blocks[bi].template }
-                };
-                Box::new(analog::rule::Tagged { meta: id(origin), inner })
-            })
-            .collect();
-    }
-    for arm in [&mut routing.hard, &mut routing.budget, &mut routing.cost] {
-        *arm = std::mem::take(arm)
-            .into_iter()
-            .map(|inner| -> Box<dyn analog::RuleBatch<pnr_core::Routes>> {
-                Box::new(analog::rule::Tagged { meta: id(analog::intent::Origin::NetClass), inner })
-            })
-            .collect();
-    }
-
-    let coverage = (0..netlist.devices.len())
-        .map(|d| {
-            let c = if touched[d] {
-                Coverage::Constrained
-            } else if block_of[d] != usize::MAX {
-                Coverage::Grouped(blocks[block_of[d]].template)
-            } else if cfg.do_not_identify.contains(&(d as u32)) {
-                Coverage::Unconstrained("do_not_identify")
-            } else if size::unknown_size(netlist.devices[d].kind, &drawn[d]) {
-                Coverage::Unconstrained("unknown size")
-            } else {
-                Coverage::Unconstrained("no pattern")
-            };
-            (DeviceId(d as u16), c)
-        })
-        .collect();
 
     let mut intent = analog::intent::Intent::default();
     // Symmetry seeds: the disjoint DiffPair/Load/CascodePair leaves (never contradictory),
@@ -365,6 +301,70 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         c.kind = if perfect { analog::intent::SymKind::Perfect } else { analog::intent::SymKind::Mirror };
     }
     sets::set_pairs(&mut intent.compounds, &intent.sets);
+    let mut placement = emit::placement(&intent, &blocks, netlist, &drawn, &cfg.process, cfg.offset_sigma_mv, &cfg.policy);
+    // Same entry of `blocks`, glue excluded: glue is no stage.
+    let mut block_of = vec![usize::MAX; netlist.devices.len()];
+    for (bi, b) in blocks.iter().enumerate().filter(|(_, b)| b.kind != BlockKind::Glue) {
+        b.devices.iter().for_each(|d| block_of[d.0 as usize] = bi);
+    }
+    let same_block = |a: usize, v: usize| block_of[a] != usize::MAX && block_of[a] == block_of[v];
+    let p = &cfg.process;
+    if let Some(why) = emit::isolation(&hg, &net_classes, &sensitive, &same_block, p.substrate, p.epi_nm, &mut placement) {
+        missing.push(("Isolation", why));
+    }
+
+    // Stable ids in emission order (permutation-invariant since EXT-06). A
+    // placement batch whose first touched device is in a recognised block came
+    // from that block's pattern; Isolation is cross-block, and the rest are net-class.
+    let mut next = 0u32;
+    let mut id = |origin| {
+        next += 1;
+        analog::intent::BatchMeta { id: analog::intent::ConstraintId(next - 1), origin }
+    };
+    let mut touched = vec![false; netlist.devices.len()];
+    for arm in [&mut placement.hard, &mut placement.budget, &mut placement.cost] {
+        *arm = std::mem::take(arm)
+            .into_iter()
+            .map(|inner| -> Box<dyn analog::RuleBatch<pnr_core::Layout>> {
+                let mut ids = Vec::new();
+                inner.touched(&mut ids);
+                ids.iter().for_each(|&d| touched[d as usize] = true);
+                let bi = ids.first().map_or(usize::MAX, |&d| block_of[d as usize]);
+                let origin = if bi == usize::MAX || inner.kind().ends_with("::Isolation") {
+                    analog::intent::Origin::NetClass
+                } else {
+                    analog::intent::Origin::Pattern { template: blocks[bi].template }
+                };
+                Box::new(analog::rule::Tagged { meta: id(origin), inner })
+            })
+            .collect();
+    }
+    for arm in [&mut routing.hard, &mut routing.budget, &mut routing.cost] {
+        *arm = std::mem::take(arm)
+            .into_iter()
+            .map(|inner| -> Box<dyn analog::RuleBatch<pnr_core::Routes>> {
+                Box::new(analog::rule::Tagged { meta: id(analog::intent::Origin::NetClass), inner })
+            })
+            .collect();
+    }
+
+    let coverage = (0..netlist.devices.len())
+        .map(|d| {
+            let c = if touched[d] {
+                Coverage::Constrained
+            } else if block_of[d] != usize::MAX {
+                Coverage::Grouped(blocks[block_of[d]].template)
+            } else if cfg.do_not_identify.contains(&(d as u32)) {
+                Coverage::Unconstrained("do_not_identify")
+            } else if size::unknown_size(netlist.devices[d].kind, &drawn[d]) {
+                Coverage::Unconstrained("unknown size")
+            } else {
+                Coverage::Unconstrained("no pattern")
+            };
+            (DeviceId(d as u16), c)
+        })
+        .collect();
+
     // REL-07: guard rings by role. Without EXT-23 tags an aggressor is a
     // device on a Clock-class net; there are no victims or injectors yet.
     let mut constraints = constraints::assemble(netlist, &drawn, &blocks, &intent.sets);
@@ -404,8 +404,9 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     }
 
     Problem {
+        // One axis per compound (`Compound.axis`); a spare one when there is none.
+        axis_count: intent.compounds.len().max(1),
         intent,
-        axis_count: blocks.len(),
         placement,
         routing,
         coverage,
