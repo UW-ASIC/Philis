@@ -43,10 +43,16 @@ const BLOCKED: u32 = NONE - 2;
 /// Track-lattice configuration (set from the deck by `frontend/library`).
 #[derive(Debug, Clone)]
 pub struct DetailedCfg {
+    /// Base lattice pitch `p0`, nm: every layer's tracks lie on it.
     pub pitch: i32,
     /// The deck's manufacturing grid, nm: everything routed snaps to it.
     pub grid: i32,
+    /// Layer 0's wire, nm: what landing and pin access draw.
     pub wire_width: i32,
+    /// Per routing layer (parallel to `route`'s `layers`), its track stride,
+    /// wire, spacing, oriented via pad and halos. Empty = the uniform lattice:
+    /// stride 1, every wire `wire_width`, square pads from the `Cut`s, no halos.
+    pub layers: Vec<gr::LayerSpec>,
     /// `min_spacing` of the layer landing pads sit on; `0` disables the check.
     pub pin_access_spacing: i32,
     /// `min_spacing` of the pin-access cut; `0` disables the check.
@@ -119,6 +125,7 @@ impl Default for DetailedCfg {
             pitch: 0,
             grid: 1,
             wire_width: 0,
+            layers: Vec::new(),
             pin_access_spacing: 0,
             pin_access_cut_spacing: 0,
             pin_access: None,
@@ -159,6 +166,11 @@ impl DetailedCfg {
         };
         let w = a.max(b);
         steps.iter().filter(|&&(t, _)| w >= t).map(|&(_, s)| s).fold(*min, i32::max)
+    }
+
+    /// Wire width on lattice layer `l`: its spec's, else `wire_width`.
+    fn wire(&self, l: usize) -> i32 {
+        self.layers.get(l).map_or(self.wire_width, |s| s.wire)
     }
 
     /// The layer's derated EM limit, if the deck has one.
@@ -263,7 +275,9 @@ impl DetailedRoute {
             let pins = all_pins.iter().map(|(_, r, _)| f(r));
             pins.chain(placed.iter().chain(rings).map(|m| f(&m.bbox))).min().unwrap_or(0).min(0)
         };
-        let origin = (low(|r| r.x) - halo - margin, low(|r| r.y) - halo - margin);
+        // On a multiple of the lattice period, so every layer's tracks sit at
+        // the same absolute coordinates whatever the frame.
+        let origin = frame_origin((low(|r| r.x), low(|r| r.y)), halo + margin, lattice_period(cfg));
         let shift = |r: Rect| Rect { x: r.x - origin.0, y: r.y - origin.1, ..r };
         // The cells' metal and gate pins per net, for the rules that score the
         // whole conductor (antenna): absolute, and in the routing frame.
@@ -331,7 +345,11 @@ impl DetailedRoute {
         }
         let n_compact = compact.len();
 
-        let grid = TrackGrid::with_layers(die, cfg.pitch, VIA_COST, n_layers);
+        let grid = if cfg.layers.is_empty() {
+            TrackGrid::with_layers(die, cfg.pitch, VIA_COST, n_layers)
+        } else {
+            TrackGrid::new(die, cfg.pitch, cfg.layers[..(n_layers as usize).min(cfg.layers.len())].to_vec(), VIA_COST)
+        };
 
         let mut claimed = vec![false; grid.nodes()];
         let mut reserved = vec![NONE; grid.nodes()];
@@ -438,7 +456,7 @@ impl DetailedRoute {
         for &(owner, s) in &foreign_metal {
             let Some(l) = layers.iter().position(|&l| l == s.layer).filter(|&l| (l as u32) < n_layers) else { continue };
             let own = owner.map(|n| ci_of[n as usize]).filter(|&c| c != usize::MAX).map_or(BLOCKED, |c| c as u32);
-            let g = cfg.space(s.layer, s.rect.w.min(s.rect.h), cfg.wire_width, min_space) + cfg.wire_width / 2;
+            let g = cfg.space(s.layer, s.rect.w.min(s.rect.h), cfg.wire(l), min_space) + cfg.wire(l) / 2;
             let r = shift(s.rect);
             let (x0, y0, x1, y1) = (r.x - g, r.y - g, r.x + r.w + g, r.y + r.h + g);
             for iy in grid.bin_y(y0)..=grid.bin_y(y1) {
@@ -604,7 +622,7 @@ impl DetailedRoute {
         // supply) over the heaviest such net's. A net within budget does not
         // pay: extra length or vias spent on R that buys nothing is only C.
         let broken = {
-            let routes = build_routes(&hot, &cold.graph, cfg.wire_width, &compact, n_nets, layers, cuts);
+            let routes = build_routes(&hot, &cold.graph, cfg, &compact, n_nets, layers, cuts);
             let mut ids = Vec::new();
             for b in reqs.budget.iter().filter(|b| b.repair_kind() == RepairKind::Ir && b.residual(&routes) > 0.0) {
                 b.violating_ids(&routes, &mut ids);
@@ -627,7 +645,7 @@ impl DetailedRoute {
         // Constraint repair: the analog rules never make a net congestion-dirty, so
         // PathFinder alone ignores them. Rip up what they name, reroute steered by
         // the rule's own data, keep only what improves the rules.
-        let probe = |hot: &RouteHot| Routes { cell: cell_f.clone(), gates: gates_f.clone(), ..build_routes(hot, &cold.graph, cfg.wire_width, &compact, n_nets, layers, cuts) };
+        let probe = |hot: &RouteHot| Routes { cell: cell_f.clone(), gates: gates_f.clone(), ..build_routes(hot, &cold.graph, cfg, &compact, n_nets, layers, cuts) };
         // Common-node balance, in the routing frame.
         let common: Vec<analog::routing::CommonNode> = cfg
             .common
@@ -681,7 +699,7 @@ impl DetailedRoute {
             edge_ua[ci].iter().filter(|&&(a, b, _)| at(g.pos(a)) && at(g.pos(b))).map(|e| e.2).fold(0.0, f32::max)
         };
 
-        let mut routes = build_routes(&hot, &cold.graph, cfg.wire_width, &compact, n_nets, layers, cuts);
+        let mut routes = build_routes(&hot, &cold.graph, cfg, &compact, n_nets, layers, cuts);
         // Shapes at or past this index per net are access geometry — the only
         // shapes the short resolver may sacrifice.
         let pre_access: Vec<usize> = routes.wires.iter().map(Vec::len).collect();
@@ -932,8 +950,14 @@ impl DetailedRoute {
             let own = wires.len();
             wires.extend(mine);
             let pins = wires.len() - own;
-            heal_same_net_slivers(wires, &fill_layers, min_space, cfg.wire_width, &foreign, cfg.grid);
-            fill_same_net_notches(wires, &fill_layers, min_space, cfg.wire_width, &foreign, cfg.grid);
+            // Per layer: its own spacing (met3's is not met1's) and min width.
+            for &l in &fill_layers {
+                let floor = if cfg.pin_access.is_some_and(|(p, _)| p == l) { min_space.max(cfg.pin_access_spacing) } else { min_space };
+                let space = cfg.space(l, 0, 0, floor);
+                let feat = cfg.min_width.iter().find(|&&(m, _)| m == l).map_or(cfg.wire_width, |&(_, w)| w);
+                heal_same_net_slivers(wires, &[l], space, feat, &foreign, cfg.grid);
+                fill_same_net_notches(wires, &[l], space, feat, &foreign, cfg.grid);
+            }
             wires.drain(own..own + pins);
             drop_contained(wires);
             for s in wires.iter_mut() {
@@ -957,6 +981,24 @@ impl DetailedRoute {
         }
         (routes, report, RouteStats { trials, overuse, pf_iters, ..RouteStats::default() })
     }
+}
+
+/// The lattice's repeat, nm: `p0 · lcm(strides)` (`p0` with no specs).
+fn lattice_period(cfg: &DetailedCfg) -> i32 {
+    let gcd = |mut a: u32, mut b: u32| {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    let lcm = cfg.layers.iter().map(|s| s.stride.max(1)).fold(1u32, |l, s| l / gcd(l, s) * s);
+    cfg.pitch.max(1) * lcm as i32
+}
+
+/// The frame origin: `low − pad` rounded down, per axis, to a multiple of `period`.
+fn frame_origin(low: (i32, i32), pad: i32, period: i32) -> (i32, i32) {
+    let f = |v: i32| (v - pad).div_euclid(period) * period;
+    (f(low.0), f(low.1))
 }
 
 /// DC current through every edge of one net's routed tree, `(a, b, µA)`:
@@ -1327,18 +1369,21 @@ fn add_pin_access(
 }
 
 /// Current routing state as per-net shapes on real PDK layers: track wires on
-/// `layers[i]`, vias as `cuts[i]` resized to the deck's exact cut size, then a
-/// landing pad on each side of every cut (sized to satisfy enclosure alone).
+/// `layers[i]` at the layer's width, vias as `cuts[i]` resized to the deck's
+/// exact cut size, then a landing pad on each side of every cut (sized to
+/// satisfy enclosure alone): `pad_along × pad_across` along the layer's wire
+/// with specs, else the `Cut`'s square.
 fn build_routes(
     hot: &RouteHot,
     grid: &TrackGrid,
-    wire_width: i32,
+    cfg: &DetailedCfg,
     compact: &[usize],
     n_nets: usize,
     layers: &[LayerId],
     cuts: &[Cut],
 ) -> Routes {
-    let (wires, vias) = extract_geometry(hot, grid, wire_width);
+    let widths: Vec<i32> = (0..grid.n_layers as usize).map(|l| cfg.wire(l)).collect();
+    let (wires, vias) = extract_geometry(hot, grid, &widths);
     let mut out = vec![Vec::new(); n_nets];
     let wire_shapes = to_shapes(compact.len(), &wires, &[]);
     let via_shapes = to_shapes(compact.len(), &[], &vias);
@@ -1346,16 +1391,20 @@ fn build_routes(
         let dst = &mut out[compact[ci]];
         dst.extend(ws.into_iter().filter_map(|s| Some(Shape { layer: *layers.get(s.layer.0 as usize)?, ..s })));
         // Resized about the stamped rect's centre.
-        let centred = |r: Rect, s: i32| Rect { x: r.x + (r.w - s) / 2, y: r.y + (r.h - s) / 2, w: s, h: s };
+        let centred = |r: Rect, w: i32, h: i32| Rect { x: r.x + (r.w - w) / 2, y: r.y + (r.h - h) / 2, w, h };
         let mut pads = Vec::new();
         for v in &vs {
             let i = v.layer.0 as usize;
             let Some(&(cut, size, below, above)) = cuts.get(i) else { continue };
-            dst.push(Shape { layer: cut, rect: centred(v.rect, size) });
-            for (metal, pad) in [(layers.get(i), below), (layers.get(i + 1), above)] {
-                if let Some(&metal) = metal {
-                    pads.push(Shape { layer: metal, rect: centred(v.rect, pad) });
-                }
+            dst.push(Shape { layer: cut, rect: centred(v.rect, size, size) });
+            for (k, square) in [(i, below), (i + 1, above)] {
+                let Some(&metal) = layers.get(k) else { continue };
+                let (w, h) = match cfg.layers.get(k) {
+                    Some(s) if s.horizontal => (s.pad_along, s.pad_across),
+                    Some(s) => (s.pad_across, s.pad_along),
+                    None => (square, square),
+                };
+                pads.push(Shape { layer: metal, rect: centred(v.rect, w, h) });
             }
         }
         dst.append(&mut pads);
@@ -1382,9 +1431,9 @@ fn assert_on_stack(out: &[Vec<Shape>], layers: &[LayerId], cuts: &[Cut]) {
     }
 }
 
-/// Residual track overuse `Σ max(0, usage − 1)`.
+/// Residual track overuse `Σ over` ([`RouteHot::over`], halos included).
 fn overuse(hot: &RouteHot) -> f32 {
-    hot.usage.iter().map(|&u| f32::from(u.saturating_sub(1))).sum()
+    (0..hot.usage.len()).map(|n| f32::from(hot.over(n, 1))).sum()
 }
 
 /// Extra cost per node for a mirrored net off its partner's mirror image.
@@ -1463,7 +1512,7 @@ fn repair_constraints(
                         for (from, to) in [(a, b), (b, a)] {
                             if let Some(tree) = copy_tree(hot, cold, from, to) {
                                 n += 1;
-                                accepted |= commit_trial(hot, to, tree, &key);
+                                accepted |= commit_trial(hot, cold, to, tree, &key);
                             }
                         }
                         trials.extend(mirror_guide(hot, &cold.graph, &cold.terms, a, b).map(|g| vec![(b, g)]));
@@ -1557,18 +1606,18 @@ fn trial(
     let before = key(hot);
     let old: Vec<(usize, Vec<Vec<u32>>)> = reroutes.iter().map(|(n, _)| (*n, hot.trees[*n].clone())).collect();
     for &(n, _) in &old {
-        hot.commit(n, Vec::new());
+        cold.commit(hot, n, Vec::new());
     }
     let mut dij = Dij::new(cold.graph.nodes());
     for ((n, field), (_, prev)) in reroutes.into_iter().zip(&old) {
         let tree = cold.reroute(hot, n, p_fac, &field, &mut dij).unwrap_or_else(|| prev.clone());
-        hot.commit(n, tree);
+        cold.commit(hot, n, tree);
     }
     let after = key(hot);
     let better = after.2 <= before.2 && (after.0, after.1) < (before.0, before.1);
     if !better {
         for (n, tree) in old {
-            hot.commit(n, tree);
+            cold.commit(hot, n, tree);
         }
     }
     better
@@ -1598,7 +1647,8 @@ fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize,
         }
         for run in runs.into_iter().filter(|r| r.len() >= 2) {
             let horiz = g.ixy(run[0]).2 % 2 == 0;
-            for side in [-1i64, 1] {
+            let stride = i64::from(g.stride(g.ixy(run[0]).2));
+            for side in [-stride, stride] {
                 // The parallel track, split into maximal free stretches (a pin's
                 // access or another net may block part of it).
                 let mut stretch: Vec<u32> = Vec::new();
@@ -1633,11 +1683,11 @@ fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize,
     let routed = cold.reroute(hot, reference, P_FAC, &[], &mut dij);
     if let Some(mut tree) = routed {
         tree.extend(claims);
-        hot.commit(reference, tree);
+        cold.commit(hot, reference, tree);
         if overuse(hot) <= over0 {
             return;
         }
-        hot.commit(reference, old_tree);
+        cold.commit(hot, reference, old_tree);
     }
     cold.terms[reference] = old_terms;
     for (i, o) in old_reserved {
@@ -1649,14 +1699,14 @@ fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize,
 
 /// Keep `tree` as `net`'s route iff `key` improves on (hard, budget) without
 /// raising overuse; else restore. Returns whether it was kept.
-fn commit_trial(hot: &mut RouteHot, net: usize, tree: Vec<Vec<u32>>, key: &impl Fn(&RouteHot) -> (u32, f64, f32)) -> bool {
+fn commit_trial(hot: &mut RouteHot, cold: &RouteCtx<TrackGrid>, net: usize, tree: Vec<Vec<u32>>, key: &impl Fn(&RouteHot) -> (u32, f64, f32)) -> bool {
     let before = key(hot);
     let old = hot.trees[net].clone();
-    hot.commit(net, tree);
+    cold.commit(hot, net, tree);
     let after = key(hot);
     let better = after.2 <= before.2 && (after.0, after.1) < (before.0, before.1);
     if !better {
-        hot.commit(net, old);
+        cold.commit(hot, net, old);
     }
     better
 }
@@ -2797,7 +2847,7 @@ mod tests {
         let n = |ix, iy| grid.node(ix, iy, 0);
         let terms = vec![vec![n(1, 2), n(3, 2)], vec![n(8, 2), n(6, 2)], vec![n(8, 5), n(6, 2)]];
         let mut hot = RouteHot::new(grid.nodes(), 3);
-        hot.commit(0, vec![vec![n(1, 2), n(2, 2), n(3, 2)]]);
+        hot.commit(0, vec![vec![n(1, 2), n(2, 2), n(3, 2)]], Vec::new());
         let g = mirror_guide(&hot, &grid, &terms, 0, 1).expect("mirror-placed pair");
         let free: Vec<u32> = (0..grid.nodes() as u32).filter(|&i| g[i as usize] == 0.0).collect();
         assert_eq!(free, vec![n(6, 2), n(7, 2), n(8, 2)]);
@@ -2860,9 +2910,9 @@ mod tests {
         let run = |t1: Vec<u32>, blocker: Option<u32>| {
             let cold = RouteCtx::new(TrackGrid::with_layers((20_000, 20_000), 200, VIA_COST, 2), vec![t0.clone(), t1, vec![]], vec![0, 1, 2]);
             let mut hot = RouteHot::new(cold.graph.nodes(), 3);
-            hot.commit(0, tree0.clone());
+            hot.commit(0, tree0.clone(), Vec::new());
             if let Some(b) = blocker {
-                hot.commit(2, vec![vec![b]]);
+                hot.commit(2, vec![vec![b]], Vec::new());
             }
             copy_tree(&hot, &cold, 0, 1)
         };
@@ -2994,5 +3044,49 @@ mod tests {
             "net 0 kept off its own strap: {:?}",
             routes.wires[0]
         );
+    }
+
+    /// The frame origin sits on the lattice period, at or below `low − pad`.
+    #[test]
+    fn origin_is_a_multiple_of_the_lattice_period() {
+        let (x, y) = frame_origin((-12_345, 7), 2_100, 840);
+        for (v, low) in [(x, -12_345), (y, 7)] {
+            assert_eq!(v.rem_euclid(840), 0);
+            assert!(v <= low - 2_100 && v > low - 2_100 - 840, "{v}");
+        }
+    }
+
+    /// Two nets each climbing a layer from pins one `p0` apart along a
+    /// layer-0 track: the via halo pushes one via off, so no two foreign
+    /// same-layer shapes come closer than the 140 nm spacing (pads 320 nm
+    /// along the track, 400 nm apart, would leave 80 nm).
+    #[test]
+    fn adjacent_foreign_vias_keep_the_along_track_halo() {
+        fn run(halo_via: u8) -> (Routes, Report) {
+            let spec = |horizontal| gr::LayerSpec { horizontal, wire: 260, space: 140, pad_across: 260, pad_along: 320, halo_via, ..gr::LayerSpec::default() };
+            let cfg = DetailedCfg { pitch: 400, wire_width: 260, layers: vec![spec(true), spec(false)], ..test_cfg() };
+            // Pin centres on nodes (absolute x ≡ 200 mod 400): one up, one down.
+            let p = |net, x: i32, y: i32| pin(net, x - 85, y - 85);
+            let pins = [p(0, 4_200, 4_200), p(0, 4_200, 8_200), p(1, 4_600, 4_200), p(1, 4_600, 200)];
+            route(cfg, &pins, &[], &[], &mut gr::Negotiation::new())
+        }
+        let gaps = |r: &Routes| {
+            let mut worst = i32::MAX;
+            for a in 0..r.wires.len() {
+                for b in a + 1..r.wires.len() {
+                    for sa in &r.wires[a] {
+                        for sb in r.wires[b].iter().filter(|s| s.layer == sa.layer) {
+                            worst = worst.min(rect_gap(sa.rect, sb.rect));
+                        }
+                    }
+                }
+            }
+            worst
+        };
+        let (with, report) = run(1);
+        assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
+        assert!(gaps(&with) >= 140, "{}", gaps(&with));
+        let without = run(0).0;
+        assert!(gaps(&without) < 140, "without the halo the pads crowd: {}", gaps(&without));
     }
 }

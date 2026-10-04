@@ -376,9 +376,57 @@ fn access_pad(pdk: &Pdk) -> i32 {
     pdk.routing_vias().first().map_or(0, |&(_, _, b, a)| b.max(a))
 }
 
-/// The detailed router configured from the deck: one track pitch that clears
-/// the worst layer's spacing *and* the widest via pad, and wires drawn at pad
-/// width (a pad wider than its wire leaves notches beside every via).
+/// The per-layer lattice (Hastings Eq 15.19, `P = W_v + 2·E_mv + S_m`): the
+/// base pitch `p0` and one [`gr::LayerSpec`] per routed metal, bottom-up,
+/// horizontal first. Per metal, over the cuts landing on it (`cuts` below and
+/// above, and the pin-access cut for `layers[0]`): `pad_across = size +
+/// 2·E_across`, `pad_along = max(size + 2·E_along, ⌈min_area / pad_across⌉)`,
+/// each on the manufacturing grid; `wire = max(min_width, pad_across)`; `S =
+/// route_spacing`; `P = wire + S`. `p0` is the larger `P` of the two lowest
+/// metals on `2·grid`; `stride = ⌈P/p0⌉`, `halo_wire = ⌈(wire + S)/p0⌉ − 1`,
+/// `halo_via = ⌈(pad_along/2 + max(pad_along, wire)/2 + S)/p0⌉ − 1`.
+pub(crate) fn layer_specs(pdk: &Pdk, layers: &[LayerId], cuts: &[Cut], pin_access: Option<(LayerId, Cut)>) -> (i32, Vec<gr::LayerSpec>) {
+    let g = pdk.grid.max(1);
+    let up = |v: i64, q: i64| (v + q - 1).div_euclid(q) * q;
+    let mut specs: Vec<gr::LayerSpec> = layers
+        .iter()
+        .enumerate()
+        .map(|(i, &l)| {
+            let below = if i == 0 { pin_access.map(|(_, c)| c) } else { cuts.get(i - 1).copied() };
+            let landing = below.into_iter().chain(cuts.get(i).copied());
+            let (mut across, mut along) = (0, 0);
+            for (c, size, ..) in landing {
+                let (ea, eg) = pdk.cut_enclosure_pair(l, c);
+                across = across.max(size + 2 * ea);
+                along = along.max(size + 2 * eg);
+            }
+            let across = up(i64::from(across), i64::from(g)) as i32;
+            let area = pdk.min_area(l.0).filter(|_| across > 0).map_or(0, |a| up(a, i64::from(across)) / i64::from(across));
+            let along = up(i64::from(along).max(area), i64::from(g)) as i32;
+            let wire = pdk.min_width(l.0).unwrap_or(0).max(across);
+            gr::LayerSpec {
+                id: l,
+                horizontal: i % 2 == 0,
+                wire,
+                space: pdk.route_spacing(l.0).unwrap_or(0),
+                pad_across: across,
+                pad_along: along,
+                ..gr::LayerSpec::default()
+            }
+        })
+        .collect();
+    let p0 = up(specs.iter().take(2).map(|s| i64::from(s.wire + s.space)).max().unwrap_or(1).max(1), i64::from(2 * g)) as i32;
+    let ceil = |v: i32| ((v + p0 - 1) / p0).max(0);
+    for s in &mut specs {
+        s.stride = ceil(s.wire + s.space).max(1) as u32;
+        s.halo_wire = (ceil(s.wire + s.space) - 1).max(0) as u8;
+        s.halo_via = (ceil(s.pad_along / 2 + s.pad_along.max(s.wire) / 2 + s.space) - 1).max(0) as u8;
+    }
+    (p0, specs)
+}
+
+/// The detailed router configured from the deck: the per-layer lattice
+/// ([`layer_specs`]); landing and pin access draw layer 0's wire.
 pub(crate) fn detailed_router(
     pdk: &Pdk,
     layers: &[LayerId],
@@ -386,16 +434,9 @@ pub(crate) fn detailed_router(
     pin_access: Option<(LayerId, Cut)>,
 ) -> dr::DetailedRoute {
     let mut cfg = dr::DetailedCfg { grid: pdk.grid, ..dr::DetailedCfg::default() };
-    let stack: Vec<_> = layers.iter().map(|l| l.0).collect();
-    // Wires are drawn at pad width (a pad wider than its wire leaves notches
-    // beside every via) and never under a layer's min_width.
-    let pad_extent = cuts.iter().map(|&(.., b, a)| b.max(a)).max().unwrap_or(0);
-    let min_w = stack.iter().filter_map(|&l| pdk.min_width(l)).max().unwrap_or(0);
-    // Wires at the pin-access pad (a larger via pad up the stack is drawn
-    // at the via only); the lattice pitch clears the largest pad, so every
-    // track stays legal wherever a via lands.
-    cfg.wire_width = access_pad(pdk).max(min_w);
-    cfg.pitch = pdk.routing_pitch(cfg.wire_width.max(pad_extent), &stack);
+    let (p0, specs) = layer_specs(pdk, layers, cuts, pin_access);
+    cfg.pitch = p0;
+    cfg.wire_width = specs.first().map_or(0, |s| s.wire);
     cfg.spacing = layers
         .iter()
         .copied()
@@ -432,18 +473,19 @@ pub(crate) fn detailed_router(
         .map(|t| t - 2 * pdk.grid);
     cfg.fat_signal = pnr_core::Process::rule(pdk, "route_signal_width", 2 * cfg.wire_width);
     cfg.fat_supply = pnr_core::Process::rule(pdk, "route_supply_width", widest_step.unwrap_or(4 * cfg.wire_width));
-    // Electrical path cost (gr::Elec): per track step, ground C and the lateral
-    // C to an occupied neighbour track, over the cheapest layer's ground C.
-    let per_step = |af_per_um: Option<f32>| af_per_um.map(|c| c * cfg.pitch as f32 / 1_000.0);
-    let ground: Vec<Option<f32>> = layers.iter().map(|&l| per_step(pdk.wire_af_per_um(l, cfg.wire_width))).collect();
-    let side: Vec<Option<f32>> = layers.iter().map(|&l| per_step(pdk.lateral_af_per_um(l, cfg.pitch - cfg.wire_width))).collect();
+    // Electrical path cost (gr::Elec): per base-pitch step, ground C at the
+    // layer's wire and the lateral C to an occupied neighbour track (one
+    // stride over), over the cheapest layer's ground C.
+    let per_step = |af_per_um: Option<f32>| af_per_um.map(|c| c * p0 as f32 / 1_000.0);
+    let ground: Vec<Option<f32>> = specs.iter().map(|s| per_step(pdk.wire_af_per_um(s.id, s.wire))).collect();
+    let side: Vec<Option<f32>> = specs.iter().map(|s| per_step(pdk.lateral_af_per_um(s.id, s.stride as i32 * p0 - s.wire))).collect();
     if let Some(cheapest) = ground.iter().flatten().copied().reduce(f32::min).filter(|&c| c > 0.0) {
         cfg.layer_c = ground.iter().map(|c| c.unwrap_or(cheapest) / cheapest).collect();
         cfg.beside_c = side.iter().map(|c| c.unwrap_or(0.0) / cheapest).collect();
     }
     // Series R per track step (sheet · pitch / width) and per via cut, over the
     // least resistive layer's step.
-    let r_step: Vec<Option<f32>> = layers.iter().map(|&l| pdk.pex_f32(l, "sheet_res_ohm_sq").map(|r| r * cfg.pitch as f32 / cfg.wire_width.max(1) as f32)).collect();
+    let r_step: Vec<Option<f32>> = specs.iter().map(|s| pdk.pex_f32(s.id, "sheet_res_ohm_sq").map(|r| r * p0 as f32 / s.wire.max(1) as f32)).collect();
     if let Some(least) = r_step.iter().flatten().copied().reduce(f32::min).filter(|&r| r > 0.0) {
         cfg.layer_r = r_step.iter().map(|r| r.unwrap_or(least) / least).collect();
         cfg.via_r = cuts.iter().map(|&(c, ..)| pdk.pex_f32(c, "sheet_res_ohm_sq").unwrap_or(0.0) / least).collect();
@@ -455,11 +497,50 @@ pub(crate) fn detailed_router(
     };
     cfg.pin_access_spacing = pad_layer.and_then(|l| pdk.min_spacing(l.0)).unwrap_or(0);
     cfg.pin_access_cut_spacing = pad_cut.and_then(|l| pdk.min_spacing(l.0)).unwrap_or(0);
+    cfg.layers = specs;
     dr::DetailedRoute { cfg }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Every cell of plan-05's RTE-10 table (sky130 met1–met4, li pin access).
+    #[test]
+    fn sky130_layer_specs_match_the_hand_derivation() {
+        let pdk = Pdk::builtin("sky130").unwrap();
+        let (metals, vias) = (pdk.routing_layers(), pdk.routing_vias());
+        let (p0, specs) = layer_specs(&pdk, &metals[1..5], &vias[1..4], Some((metals[0], vias[0])));
+        assert_eq!(p0, 420);
+        let col = |f: fn(&gr::LayerSpec) -> i64| specs.iter().map(f).collect::<Vec<_>>();
+        assert_eq!(col(|s| i64::from(s.pad_across)), [260, 280, 330, 330]);
+        assert_eq!(col(|s| i64::from(s.pad_along)), [320, 370, 730, 730]);
+        assert_eq!(col(|s| i64::from(s.wire)), [260, 280, 330, 330]);
+        assert_eq!(col(|s| i64::from(s.space)), [140, 140, 300, 300]);
+        assert_eq!(col(|s| i64::from(s.stride)), [1, 1, 2, 2]);
+        assert_eq!(col(|s| i64::from(s.halo_wire)), [0, 0, 1, 1]);
+        assert_eq!(col(|s| i64::from(s.halo_via)), [1, 1, 2, 2]);
+        assert_eq!(col(|s| i64::from(s.horizontal)), [1, 0, 1, 0]);
+    }
+
+    /// Every built-in deck's lattice clears each layer's spacing between
+    /// adjacent tracks, wire to wire and pad to pad (replaces pdk's
+    /// `routing_pitch_clears_every_layer_of_its_stack`).
+    #[test]
+    fn every_layer_pitch_clears_its_spacing() {
+        for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "generic_finfet"] {
+            let pdk = Pdk::builtin(deck).unwrap();
+            let (layers, cuts, pin_access) = routing_stack(&pdk);
+            let (p0, specs) = layer_specs(&pdk, &layers, &cuts, pin_access);
+            for s in &specs {
+                let need = pdk.min_spacing(s.id.0).unwrap_or(0);
+                let pitch = s.stride as i32 * p0;
+                assert!(pitch - s.wire >= need, "{deck} {:?}: pitch {pitch} wire {} needs {need}", s.id, s.wire);
+                assert!(pitch >= s.pad_across + s.space, "{deck} {:?}: pitch {pitch} pad {} space {}", s.id, s.pad_across, s.space);
+            }
+        }
+    }
+
     /// A rail with an unresolved device on it states no current (signoff's EM
     /// rule then skips it); a rail with only known devices keeps its current.
     #[test]

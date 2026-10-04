@@ -500,18 +500,6 @@ impl Pdk {
         })
     }
 
-    /// `wire_width + max(min_spacing)` over `stack`: the one lattice pitch
-    /// legal on every layer actually routed on.
-    ///
-    /// ponytail: one pitch for the whole stack, so the upper layers are routed
-    /// more coarsely than they need. Per-layer pitch means a per-layer track
-    /// lattice in `gr::TrackGrid`; do that if upper-layer density ever matters.
-    #[must_use]
-    pub fn routing_pitch(&self, wire_width: i32, stack: &[u16]) -> i32 {
-        let worst = stack.iter().filter_map(|&l| self.route_spacing(l)).max().unwrap_or(0);
-        wire_width + worst
-    }
-
     /// Spacing a routed wire keeps on `layer`, nm: its `min_spacing`, and its
     /// end-of-line spacing (a wire end is a line end; the lattice cannot
     /// tell ends from sides, so every track keeps the larger).
@@ -1226,10 +1214,19 @@ impl Pdk {
     /// (a centred square pad clears both). `0` when the deck sets none.
     #[must_use]
     pub fn cut_enclosure(&self, outer: LayerId, inner: LayerId) -> i32 {
+        self.cut_enclosure_pair(outer, inner).1
+    }
+
+    /// `(across, along)`: how far `outer` must pass cut `inner` on the two
+    /// sides of a wire's width, and on its two ends, nm — the all-round
+    /// enclosure, and the larger of that and the one-pair-of-opposite-sides
+    /// end-cap (Hastings H15-18). `0` for a rule the deck does not set.
+    #[must_use]
+    pub fn cut_enclosure_pair(&self, outer: LayerId, inner: LayerId) -> (i32, i32) {
         let l = [outer.0, inner.0];
         let e = self.widest_on("min_enclosure", "limit", &l).unwrap_or(0);
         let c = self.widest_on("asymmetric_enclosure", "min_one_side", &l).unwrap_or(0);
-        e.max(c) as i32
+        (e as i32, e.max(c) as i32)
     }
 
     /// Every layer some recipe draws.
@@ -1615,33 +1612,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// `routing_pitch` leaves at least `min_spacing` between adjacent tracks
-    /// on every layer of the stack it is given: one global pitch, so the worst
-    /// layer in that stack sets it.
-    #[test]
-    fn routing_pitch_clears_every_layer_of_its_stack() {
-        for deck in DECKS {
-            let pdk = load(deck);
-            let w = 290;
-            let stack: Vec<_> = pdk.routing_layers().into_iter().take_while(|l| pdk.min_width(l.0).is_none_or(|mw| mw <= w)).map(|l| l.0).collect();
-            let pitch = pdk.routing_pitch(w, &stack);
-            for &l in &stack {
-                let need = pdk.min_spacing(l).unwrap_or(0);
-                assert!(pitch - w >= need, "{deck}: pitch {pitch} leaves {} nm, layer {l:?} needs {need}", pitch - w);
-            }
-        }
-    }
-
-    /// A layer the router cannot reach must not set the pitch for the layers
-    /// it can (sky130 met5's spacing once gave a 1890 nm lattice on a 170 nm pin).
-    #[test]
-    fn an_unreachable_layer_does_not_set_the_pitch() {
-        let pdk = load("sky130");
-        let all: Vec<_> = pdk.routing_layers().into_iter().map(|l| l.0).collect();
-        let reachable: Vec<_> = pdk.routing_layers().into_iter().take_while(|l| pdk.min_width(l.0).is_none_or(|mw| mw <= 290)).map(|l| l.0).collect();
-        assert!(pdk.routing_pitch(290, &reachable) < pdk.routing_pitch(290, &all));
     }
 
     /// No diode is inserted where LVS cannot extract one: gf180's deck has no
