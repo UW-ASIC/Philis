@@ -137,6 +137,10 @@ pub struct AnnotationConfig {
     pub offset_sigma_mv: Option<f32>,
     /// Emission tuning numbers ([`crate::policy::Policy`]).
     pub policy: crate::policy::Policy,
+    /// Victim guard rings' return net (case-insensitive name). `None`: a
+    /// Ground-class net named like `avss`/`vssa`/`agnd` that no aggressor
+    /// touches, else no victim rings ([`crate::rings`]).
+    pub quiet_ring_net: Option<String>,
 }
 
 /// Every process number the annotator uses. A `None` means the deck does not
@@ -155,9 +159,15 @@ pub struct ProcessNumbers {
     pub dti: Option<(i32, i32)>,
     /// Pelgrom `A_VT` (ΔVT of a pair), mV·µm, `[nmos, pmos]`.
     pub avt_mv_um: [Option<f32>; 2],
+    /// Current-factor mismatch `A_β` (Δβ/β of a pair), %·µm, `[nmos, pmos]`:
+    /// with a mirror's `g_m/I` it puts the ledger in % (MAT-09).
+    pub abeta_pct_um: [Option<f32>; 2],
     /// Pelgrom distance coefficient `S_VT`, µV/µm. Process-specific and rarely
     /// published: absent leaves the matching distance check unknown.
     pub svt_uv_per_um: Option<f32>,
+    /// `S_VT² = a + b/L²` fit `(a µV²/µm², b µV²)`: with a set's gate L it
+    /// replaces `svt_uv_per_um` (MAT-16).
+    pub svt_fit: Option<(f32, f32)>,
     /// |dVT/dT|, µV/K, `[nmos, pmos]`: turns a matched pair's offset allowance
     /// into a ΔT limit.
     pub vt_tc_uv_per_k: [Option<f32>; 2],
@@ -175,6 +185,18 @@ pub struct ProcessNumbers {
     /// The routing stack's per-layer parasitics and antenna stages; `None`
     /// leaves the routing budgets on drawn length and the cumulative antenna.
     pub stack: Option<&'static analog::routing::Stack>,
+    /// Deck `min_guard_ring_width`, nm; `0` = none stated.
+    pub min_ring_width_nm: i32,
+    /// Sidecar `ecgr_min_width_nm`: an electron-collecting ring's width for
+    /// a stated collection efficiency; `None` on every shipped deck.
+    pub ecgr_min_width_nm: Option<i32>,
+    /// The process can draw an `Ecgr` / `Hcgr` (`cells::post_cell::drawable`).
+    pub ecgr_drawable: bool,
+    pub hcgr_drawable: bool,
+    /// `Config.op` temperature, K (not a deck key): a mirror's mobility term (MAT-14).
+    pub die_temp_k: Option<f32>,
+    /// Unitization bounds (EXT-15); 0 = deck key missing.
+    pub unit: crate::sets::UnitDeck,
 }
 
 #[cfg(test)]

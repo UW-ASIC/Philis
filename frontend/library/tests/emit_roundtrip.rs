@@ -41,19 +41,20 @@ fn matched_pair_emits_as_one_interdigitated_instance() {
     let cfg = Config::default();
     let netlist = library::parse(MIRROR).expect("mirror parses");
 
-    // Hand layout sized for either outcome (1 collapsed cell or 2).
+    // Hand layout for the one collapsed cell (`emit` refuses a layout whose
+    // cell count differs from the cell table).
     let layout = Layout {
-        x: vec![800, 3000],
-        y: vec![600, 600],
-        hw: vec![800, 800],
-        hh: vec![600, 600],
+        x: vec![800],
+        y: vec![600],
+        hw: vec![800],
+        hh: vec![600],
         axis: vec![0],
         groups: Vec::new(),
-        orient: vec![Orient::default(); 2],
-        variant: vec![0; 2],
+        orient: vec![Orient::default(); 1],
+        variant: vec![0; 1],
         branch: Vec::new(),
-        power_uw: vec![0; 2],
-        temp_mc: vec![0; 2],
+        power_uw: vec![0; 1],
+        temp_mc: vec![0; 1],
         units: Default::default(),
     };
 
@@ -213,5 +214,30 @@ fn chain2_roundtrips_through_ir() {
             src.contains(needle),
             "emitted source missing `{needle}`:\n{src}"
         );
+    }
+}
+
+/// T11 round trip: a `run` result → `emit_solution` → `elaborate_ir` → signoff
+/// with no LVS row. chain4's 4-member matched group is out of the emitter's
+/// scope (no quad variant): it must say so, not emit wrong code.
+#[test]
+fn run_emit_elaborate_signs_off() {
+    let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+    let cfg = Config { feedback_iters: 2, outer_iters: 1, starts: 1, ..Config::default() };
+    for (name, spice) in [
+        ("chain4", include_str!("../../../benchmarks/fixtures/chain4.spice")),
+        ("ota", include_str!("../../../benchmarks/fixtures/ota.spice")),
+    ] {
+        let sol = library::run(spice, &pdk, &Default::default(), &cfg).expect("flow");
+        let ir = match library::emit::emit_solution(&sol, &pdk) {
+            Ok(ir) => ir,
+            Err(library::emit::EmitError::Unsupported(m)) if name == "chain4" && m.contains("no quad variant") => continue,
+            Err(e) => panic!("{name}: {e:?}"),
+        };
+        assert_ne!(name, "chain4", "chain4 now emits: give it the full check");
+        let re = elaborate_ir(&ir, &pdk, &ElabConfig::default()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let report = re.signoff(&pdk).unwrap_or_else(|| panic!("{name}: no schematic"));
+        let lvs: Vec<&str> = report.hard_violations.iter().map(|v| v.rule.as_str()).filter(|r| r.starts_with("lvs/")).collect();
+        assert!(lvs.is_empty(), "{name}: {lvs:?}");
     }
 }

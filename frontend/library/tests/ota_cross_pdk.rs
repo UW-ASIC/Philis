@@ -59,17 +59,18 @@ impl Composition for Ota5T {
         let nmos = || Mos::new(DeviceKind::Nmos, 420, 150, 1);
         let pmos = || Mos::new(DeviceKind::Pmos, 840, 150, 1);
 
-        // Diff pair: m1 | axis | m2 (exact mirror symmetry).
+        // Diff pair: m1, m2 as translated copies (one finger: a mirror would
+        // reverse m2's current, `GenError::Orientation`).
         let i1 = c.instantiate("m1", &nmos())?;
         let m1 = c.place(i1)?;
         let i2 = c.instantiate("m2", &nmos())?;
-        let m2 = c.place_mirrored(i2, &m1, sep)?;
+        let m2 = c.place_copy(i2, &m1, sep)?;
 
-        // Mirror load above, same axis discipline.
+        // Mirror load above, copied likewise.
         let i3 = c.instantiate("m3", &pmos())?;
         let m3 = c.place_by(i3, AlignMode::Above, &m1, vgap)?;
         let i4 = c.instantiate("m4", &pmos())?;
-        let m4 = c.place_mirrored(i4, &m3, wellsep)?;
+        let m4 = c.place_copy(i4, &m3, wellsep)?;
 
         // Tail below the pair.
         let i5 = c.instantiate("m5", &nmos())?;

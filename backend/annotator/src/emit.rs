@@ -71,6 +71,16 @@ fn avt(nl: &Netlist, p: &ProcessNumbers, d: DeviceId) -> Option<f32> {
     by_polarity(nl, d, p.avt_mv_um)
 }
 
+/// `S_VT` at `d`'s gate length: the deck's S(L) fit when it has one and `d`
+/// a length, else its single `svt_uv_per_um`.
+fn svt(nl: &Netlist, p: &ProcessNumbers, d: DeviceId) -> Option<f32> {
+    let l = crate::param(&nl.devices[d.0 as usize], "l", 0);
+    match p.svt_fit {
+        Some((a, b)) if l > 0 => Some(mismatch::svt_of_l(a, b, l as f32 / 1000.0)),
+        _ => p.svt_uv_per_um,
+    }
+}
+
 /// Build the placement [`Requirements`] from the recognised blocks.
 ///
 /// A `MatchedSet` pair is priced against its allowance when the deck carries
@@ -92,15 +102,15 @@ pub fn placement(
 
     for (bi, stage) in blocks.iter().enumerate() {
         let axis = AxisId(bi as u16);
-        let pairs: Vec<(BlockKind, DeviceId, DeviceId)> = leaves(std::slice::from_ref(stage))
+        let pairs: Vec<(BlockKind, DeviceId, DeviceId, &str)> = leaves(std::slice::from_ref(stage))
             .into_iter()
             .filter(|l| l.devices.len() == 2)
-            .map(|l| (l.kind, l.devices[0], l.devices[1]))
+            .map(|l| (l.kind, l.devices[0], l.devices[1], l.template))
             .collect();
         let mut syms = Vec::new();
         let mut in_sym: Vec<DeviceId> = Vec::new();
 
-        for &(kind, a, b) in &pairs {
+        for &(kind, a, b, template) in &pairs {
             let prox = vec![Proximity { a: td(a), b: td(b), max_distance_nm: policy.proximity_nm }];
             match kind {
                 BlockKind::DiffPair | BlockKind::CurrentMirror | BlockKind::Load | BlockKind::CascodePair => {}
@@ -116,7 +126,9 @@ pub fn placement(
             let Some(family) = Family::of(nl.devices[a.0 as usize].kind) else { continue };
             // ponytail: pairwise emission; a multi-output mirror's pairs share their reference.
             let shared = in_sym.contains(&a) || in_sym.contains(&b);
-            if !shared {
+            // A 1:N bipolar ratioed pair is a centroid array (its Unitization), not a mirror
+            // image: matched only, so `bgr_core` draws as before EXT-19 (T9 gate).
+            if !shared && !template.starts_with("bjt_ratioed_pair") {
                 syms.push(Symmetry { a: td(a), b: td(b), axis });
                 in_sym.extend([a, b]);
             }
@@ -129,14 +141,22 @@ pub fn placement(
                 class: MatchClass::Moderate,
                 coeffs: Coeffs {
                     avt_mv_um: avt(nl, p, a),
-                    svt_uv_per_um: p.svt_uv_per_um,
+                    svt_uv_per_um: svt(nl, p, a),
                     kvth0_mv_um: by_polarity(nl, a, p.lod_kvth0_mv_um),
                     tc_uv_per_k: by_polarity(nl, a, p.vt_tc_uv_per_k),
+                    abeta_pct_um: by_polarity(nl, a, p.abeta_pct_um),
+                    mobility_exp: by_polarity(nl, a, [Some(1.7), Some(1.5)]),
+                    die_temp_k: p.die_temp_k,
+                    ..Coeffs::default()
                 },
                 budget: budget(offset_sigma_mv, match_kind),
                 gate_um2: vec![gate_um2(nl, a), gate_um2(nl, b)],
                 tol_nm: p.lattice_nm.max(1) as f32 / 2.0,
                 cell_of: Vec::new(),
+                // ponytail: EXT-17 fills it from Evidence.op.
+                gm_over_id: None,
+                // PERF-27 fills it (pair_sigma_mc).
+                sigma_rand_override: None,
             };
             let phi = phi_arm(set.class);
             r.budget.push(Box::new(set.clone()));

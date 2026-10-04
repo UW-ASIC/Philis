@@ -16,6 +16,17 @@ pub struct GuardRingRequirement {
     pub max_ring_resistance_mohm: i64,
     /// Net the ring taps (substrate/well rail).
     pub connection_net: NetId,
+    /// Why the ring exists; rings of different roles never merge (post_cell).
+    pub role: RingRole,
+}
+
+/// What a guard ring protects against (REL-07): an injector's minority
+/// carriers, an aggressor's majority-carrier noise, or a victim's exposure.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RingRole {
+    Injector,
+    Aggressor,
+    Victim,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -47,9 +58,16 @@ pub struct Unitization {
     /// Unit length, nm.
     pub unit_l: i32,
     pub series_parallel: SeriesParallel,
-    pub same_variant_required: bool,
     pub dummy_required: bool,
     pub route_matching_required: bool,
+    /// Match class of the set (EXT-16 from a spec, or the user); `None` = not given, matched-cell readers use
+    /// `unwrap_or(Moderate)` (C16). Read by `cells::cap_array` (GAP-18): an Exceptional binary bank lists its
+    /// variants best-matching first.
+    pub class: Option<crate::intent::MatchClass>,
+    /// Per member; empty = all 1.
+    pub series: Vec<u16>,
+    /// None = today's choice.
+    pub style: Option<crate::intent::ArrayStyle>,
 }
 
 /// How units compose into one instance.
@@ -57,5 +75,4 @@ pub struct Unitization {
 pub enum SeriesParallel {
     Parallel,
     Series,
-    RepeatedStage,
 }

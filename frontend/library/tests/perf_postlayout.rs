@@ -118,6 +118,50 @@ fn a_flow_scores_its_layout_in_simulation() {
     assert_eq!(sol.stats.sim_failures, 0, "{:?}", sol.stats);
 }
 
+/// PERF-11 acceptance: on ota at one scenario the engine produces every
+/// parameter class within the run budget, and the two input FETs' gate
+/// offsets move the gain in opposite directions.
+#[test]
+fn ota_sensitivities_cover_every_parameter_class() {
+    use library::perf::{add_coupling, default_params, sensitivities, Param, StepPolicy};
+    let Some(lib) = models() else { return };
+    let (nl, p) = (ota(), cfg(lib));
+    let nets: Vec<pnr_core::NetId> = (0..nl.nets.len() as u16)
+        .map(pnr_core::NetId)
+        .filter(|n| !matches!(nl.nets[n.0 as usize].name.to_ascii_lowercase().as_str(), "vdd" | "vss"))
+        .collect();
+    let params = default_params(&nl, &nets);
+    let steps = StepPolicy::default();
+    let t0 = std::time::Instant::now();
+    let mut t = sensitivities(&nl, &p, 0, &params, &[], &steps, &Parasitics::default()).expect("schematic simulates");
+    add_coupling(&mut t, &nl, &p, &nets, &steps, 64).expect("coupling rows");
+    let kind = |r: &Param| match r {
+        Param::GroundC { .. } => 0,
+        Param::CouplingC { .. } => 1,
+        Param::SeriesR { .. } => 2,
+        Param::GateOffset { .. } => 3,
+    };
+    let count = |k: usize, ps: &mut dyn Iterator<Item = &Param>| ps.filter(|r| kind(r) == k).count();
+    for k in 0..4 {
+        assert!(count(k, &mut t.rows.iter().map(|r| &r.param)) >= 1, "class {k}: {:?}", t.rows.iter().map(|r| r.param).collect::<Vec<_>>());
+    }
+    assert!(count(1, &mut t.rows.iter().map(|r| &r.param)) <= 64);
+    let (n_nets, n_terms, n_fets) = (count(0, &mut params.iter()), count(2, &mut params.iter()), count(3, &mut params.iter()));
+    assert!(t.sims as usize <= 1 + 2 * (n_nets + n_terms + n_fets + 64), "{} sims", t.sims);
+    let nonlinear: Vec<Param> = t.rows.iter().filter(|r| !r.linear).map(|r| r.param).collect();
+    eprintln!("{} rows, {} sims, {:?}; nonlinear {nonlinear:?}", t.rows.len(), t.sims, t0.elapsed());
+    for r in &t.rows {
+        eprintln!("  {:?} step {:.3e} d {:?} linear {}", r.param, r.step, r.d, r.linear);
+    }
+    let net = |n: &str| pnr_core::NetId(nl.nets.iter().position(|x| x.name == n).unwrap() as u16);
+    let dev = |n: &str| nl.devices.iter().position(|d| d.name == n).unwrap() as u16;
+    let d = |p: Param| t.rows.iter().find(|r| r.param == p).and_then(|r| r.d[0]);
+    assert!(d(Param::GroundC { net: net("vout2") }).is_some());
+    let (g1, g2) = (d(Param::GateOffset { device: dev("XM1") }), d(Param::GateOffset { device: dev("XM2") }));
+    let (g1, g2) = (g1.expect("XM1 measured"), g2.expect("XM2 measured"));
+    assert!(g1 * g2 < 0.0, "XM1 {g1} XM2 {g2}");
+}
+
 fn scenario(name: &str, corner: &str, temp_c: f64) -> Scenario {
     Scenario { name: name.into(), corner: corner.into(), temp_c, params: Vec::new() }
 }
@@ -229,11 +273,33 @@ fn op_cfg(lib: std::path::PathBuf) -> OpConfig {
 #[test]
 fn fixtures_resolve_every_device() {
     let Some(lib) = models() else { return };
-    for name in ["rc_filter", "bjt_mirror"] {
+    for name in ["rc_filter", "bjt_mirror", "bgr_core"] {
         let nl = fixture(name);
         let op = library::oppoint::extract(&nl, &op_cfg(lib.clone())).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(op.resolved, nl.devices.len(), "{name}");
     }
+}
+
+/// GAP-17: the op run resolves every net's DC voltage; the probe holds the
+/// rails and drives the gate-only bias nets at mid-rail.
+#[test]
+fn ota_op_resolves_every_net_voltage() {
+    let Some(lib) = models() else { return };
+    let nl = fixture("ota");
+    let cfg = op_cfg(lib);
+    let op = library::oppoint::extract(&nl, &cfg).unwrap();
+    assert_eq!(op.net_v.len(), nl.nets.len());
+    let v = |name: &str| op.net_v[nl.nets.iter().position(|n| n.name == name).unwrap()];
+    for (n, x) in nl.nets.iter().zip(&op.net_v) {
+        assert!(x.is_some(), "{} unresolved", n.name);
+    }
+    assert_eq!(v("VSS"), Some(0.0));
+    assert!((v("VDD").unwrap() - cfg.vdd).abs() < 1e-6, "{:?}", v("VDD"));
+    for g in ["vbias", "vbn"] {
+        assert!((v(g).unwrap() - cfg.vdd / 2.0).abs() < 1e-6, "{g}: {:?}", v(g));
+    }
+    let t = v("vtail").unwrap();
+    assert!(t > 0.0 && t < cfg.vdd, "vtail {t}");
 }
 
 /// The poly resistor carries the inverter's output into a load, and its
@@ -368,4 +434,33 @@ fn every_mos_card_has_four_nodes() {
         let rail = if t[5].contains("nfet") { "VSS" } else { "VDD" };
         assert!(bulk.eq_ignore_ascii_case(rail), "{t:?}");
     }
+}
+
+/// PERF-13 acceptance: the winner's metadata carries σ_f, β, Φ(β) and the
+/// top three contributing devices per bound, and a linear joint yield.
+#[test]
+fn ota_reports_robustness_per_bound() {
+    let Some(lib) = models() else { return };
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
+    let p = PerfConfig { scenarios: vec![scenario("tt_27", "tt", 27.0)], ..cfg(lib.clone()) };
+    let c = library::Config {
+        feedback_iters: 2,
+        outer_iters: 1,
+        starts: 1,
+        op: Some(OpConfig { model_lib: Some(lib), ..OpConfig::default() }),
+        performance: Some(p),
+        ..library::Config::default()
+    };
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &c).expect("flow");
+    let r = &sol.metadata.robustness;
+    eprintln!("{r:#?}");
+    let bounds: Vec<&String> = r.iter().filter(|l| !l.starts_with("joint yield")).collect();
+    assert_eq!(bounds.len(), 1, "{r:?}");
+    let l = bounds[0];
+    assert!(l.starts_with("gain:min σ_f ") && l.contains(" β ") && l.contains(" Φ(β) "), "{l}");
+    let top = l.split(" top ").nth(1).expect("top devices");
+    assert_eq!(top.split(", ").filter(|d| d.starts_with('X') || d.starts_with('M')).count(), 3, "{l}");
+    assert!(r.iter().any(|l| l.starts_with("joint yield")), "{r:?}");
 }

@@ -53,8 +53,13 @@ pub fn unknown_size(kind: DeviceKind, d: &Drawn) -> bool {
 }
 
 /// `SizeMatch::ExactAs`: same known W/L (or both fixed-geometry), same model,
-/// and the same bulk net or both bulks on rails.
+/// and the same bulk net or both bulks on rails. A bipolar compares its written
+/// W, L and model as they are (EXT-19): its size is the model's emitter, and a
+/// flow may write only a default `l`.
 pub(crate) fn exact_as(kind: DeviceKind, a: &Drawn, b: &Drawn, roles: &[NetRole]) -> bool {
+    if matches!(kind, DeviceKind::Npn | DeviceKind::Pnp) {
+        return (a.w_finger_nm, a.l_nm, a.model) == (b.w_finger_nm, b.l_nm, b.model);
+    }
     let rail = |n: NetId| matches!(roles[n.0 as usize], NetRole::Supply | NetRole::Ground);
     let size = if fixed_geometry(kind, a) {
         b.w_finger_nm.is_none() && b.l_nm.is_none()
@@ -111,7 +116,7 @@ mod tests {
         let mut models = Vec::new();
         let drawn: Vec<_> = nl.devices.iter().map(|d| super::drawn(d, &mut models)).collect();
         let both = Block { kind: BlockKind::Group, template: "test", devices: vec![DeviceId(0), DeviceId(1)], injected: false, sub_blocks: Vec::new(), selfs: Vec::new() };
-        assert_eq!(constraints::assemble(&nl, &drawn, &[both]).unitization.len(), 2, "two unitization classes");
+        assert_eq!(constraints::assemble(&nl, &drawn, &[both], &[]).unitization.len(), 2, "two unitization classes");
         // Control: one flavour, written in either case, is a pair.
         assert_eq!(diff_pairs(&pair([("nfet_01v8", 5), ("NFET_01V8", 5)], Some(10_000))), 1);
     }

@@ -37,6 +37,18 @@ pub struct EmLimit {
     pub derating_assumed: bool,
 }
 
+/// One FET model's voltage ratings, mV (deck `gate_oxide` / `drain_source`
+/// rules); `None` = the deck states no such rule for the model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FetLimit {
+    /// Full model name as the deck spells it (`sky130_fd_pr__nfet_01v8`).
+    pub model: String,
+    /// Largest |V_GS|, mV.
+    pub vgs_max_mv: Option<f32>,
+    /// Largest |V_DS|, mV.
+    pub vds_max_mv: Option<f32>,
+}
+
 /// Process design kit: layers, design-rule values, grid, and the gdsverify deck.
 pub struct Pdk {
     /// Layer name → [`LayerId`]; row `i` is `LayerId(i)` is deck layer `i`
@@ -675,6 +687,36 @@ impl Pdk {
             .map(|e| EmLimit { ua_per_um: 0.0, blech: 0.0, ..e })
     }
 
+    /// Every `gate_oxide` / `drain_source` rule's `max_voltage` per model it
+    /// names, merged by model: a model in both kinds gets both fields, two
+    /// rules of one kind keep the tighter. Empty when the deck rates no FET.
+    #[must_use]
+    pub fn fet_voltage_limits(&self) -> Vec<FetLimit> {
+        let mut out: Vec<FetLimit> = Vec::new();
+        let (Some(max), Some(model)) = (self.strings.get("max_voltage"), self.strings.get("model")) else { return out };
+        for (kind, gate) in [("gate_oxide", true), ("drain_source", false)] {
+            let Some(kind) = self.strings.get(kind) else { continue };
+            for s in self.deck.rules.spec.iter().filter(|s| s.kind == kind) {
+                let Some(ParamValue::Ratio(mv)) = self.deck.rules.param(s, max) else { continue };
+                let mv = mv as f32;
+                for &(name, v) in self.deck.rules.params_of(s) {
+                    let ParamValue::Model(id) = v else { continue };
+                    if name != model {
+                        continue;
+                    }
+                    let m = self.strings.resolve(id);
+                    let i = out.iter().position(|f| f.model == m).unwrap_or_else(|| {
+                        out.push(FetLimit { model: m.to_string(), vgs_max_mv: None, vds_max_mv: None });
+                        out.len() - 1
+                    });
+                    let f = if gate { &mut out[i].vgs_max_mv } else { &mut out[i].vds_max_mv };
+                    *f = Some(f.map_or(mv, |o| o.min(mv)));
+                }
+            }
+        }
+        out
+    }
+
     /// `cell.em_derating` (GAP-06) as `((T_ref K, Ea eV, n), assumed)`; `None`
     /// without a `t_ref_k`. A null Ea or n takes Lienig's Cu values at the most
     /// conservative stated n (0.9 eV, 1.1; the largest Ea/n, so the strongest
@@ -1290,6 +1332,45 @@ impl Pdk {
         self.deck.devices.model.iter().map(|&m| self.strings.resolve(m)).find(|n| hit(n)).map(str::to_string)
     }
 
+    /// Layers `model`'s recogniser requires (`and`) and forbids (`not`) beyond its
+    /// gate layer, from the marker's derived-layer expression (sky130
+    /// `nfet_01v8_lvt = (ngate and lvtn) not hvi` → `([lvtn], [hvi])`). The walk
+    /// expands the expression's own hidden sub-layers (`name#n`) only, so a named
+    /// operand (`ngate`) is a leaf, and the leftmost required leaf is the gate.
+    /// `None` when the deck has no recogniser for `model`.
+    #[must_use]
+    pub fn model_markers(&self, model: &str) -> Option<(Vec<LayerId>, Vec<LayerId>)> {
+        use gdsverify::ingest::deck::DerivedOp;
+        fn walk(p: &Pdk, x: GvLayerId, root: bool, sign: bool, out: &mut Vec<(GvLayerId, bool)>) {
+            let hidden = root || p.strings.resolve(p.deck.layers.name(x)).contains(['#', '@']);
+            let ops = p.deck.layers.operands(x);
+            match p.deck.layers.op(x) {
+                Some(DerivedOp::And) if hidden => ops.iter().for_each(|&o| walk(p, o, false, sign, out)),
+                Some(DerivedOp::Not) if hidden => {
+                    for (k, &o) in ops.iter().enumerate() {
+                        walk(p, o, false, if k == 0 { sign } else { !sign }, out);
+                    }
+                }
+                _ => out.push((x, sign)),
+            }
+        }
+        let m = self.deck_model(model)?;
+        let d = &self.deck.devices;
+        let r = (0..d.model.len()).find(|&r| self.strings.resolve(d.model[r]) == m)?;
+        let mut leaves = Vec::new();
+        walk(self, d.marker[r], true, true, &mut leaves);
+        let pick = |s: bool, skip: usize| {
+            let mut v: Vec<LayerId> = Vec::new();
+            for id in leaves.iter().filter(|l| l.1 == s).skip(skip).map(|l| LayerId(l.0 .0)) {
+                if !v.contains(&id) {
+                    v.push(id);
+                }
+            }
+            v
+        };
+        Some((pick(true, 1), pick(false, 0)))
+    }
+
     /// The recipe for a `kind` (`"resistor"`) of schematic `model`: the one
     /// naming it (its deck model or an alias, a vendor prefix ignored), else
     /// the table's `default`. `None` when the sidecar has no table.
@@ -1583,6 +1664,30 @@ mod tests {
         Pdk::from_json(&v.to_string())
     }
 
+    /// A `Tier` key is exactly MIN/MOD/EXC, each non-negative or `null`.
+    #[test]
+    fn tier_arrays_are_validated() {
+        for bad in [serde_json::json!([2000, 3000]), serde_json::json!([2000, -1, 5000])] {
+            let err = sky130_with(|c| {
+                c.insert("wpe_clearance_nm".into(), bad.clone());
+            })
+            .err()
+            .unwrap_or_else(|| panic!("{bad} must not load"));
+            assert!(err.contains("cell.wpe_clearance_nm"), "{err}");
+        }
+        sky130_with(|c| {
+            c.insert("wpe_clearance_nm".into(), serde_json::json!([2000, 3000, null]));
+        })
+        .expect("an unstated tier is null");
+    }
+
+    #[test]
+    fn cap_density_is_sourced() {
+        let p = Pdk::builtin("sky130").unwrap();
+        assert!(p.provenance("cap_density_ff_um2").is_some_and(|s| s.starts_with("= camimc")));
+        assert!(!p.unverified().contains(&"cap_density_ff_um2"));
+    }
+
     /// A misspelt key is an error, not a value silently ignored while the
     /// generator falls back to its default.
     #[test]
@@ -1631,6 +1736,31 @@ mod tests {
     const DECKS: [&str; 3] = ["sky130", "gf180mcu", "ihp_sg13g2"];
     fn id(p: &Pdk, n: &str) -> LayerId {
         p.layers.iter().find(|(l, _)| l == n).unwrap().1
+    }
+
+    #[test]
+    fn lvt_needs_lvtn_and_forbids_hvi() {
+        let p = load("sky130");
+        assert_eq!(p.model_markers("nfet_01v8_lvt"), Some((vec![id(&p, "lvtn")], vec![id(&p, "hvi")])));
+    }
+
+    #[test]
+    fn hvt_pmos_needs_hvtp() {
+        let p = load("sky130");
+        assert_eq!(p.model_markers("pfet_01v8_hvt"), Some((vec![id(&p, "hvtp")], vec![id(&p, "hvi")])));
+    }
+
+    /// `nfet_01v8 = (ngate not hvi) not lvtn`: the core device is the gate minus
+    /// both markers.
+    #[test]
+    fn core_nfet_has_no_required_marker() {
+        let p = load("sky130");
+        assert_eq!(p.model_markers("nfet_01v8"), Some((vec![], vec![id(&p, "hvi"), id(&p, "lvtn")])));
+    }
+
+    #[test]
+    fn unknown_model_has_no_markers() {
+        assert!(load("sky130").model_markers("no_such_fet").is_none());
     }
 
     /// A router indexes `routing_layers()` by its internal layer index, so the
@@ -1720,6 +1850,18 @@ mod tests {
         let text: String = Pdk::deck_text(&sidecar).unwrap().lines().filter(|l| !l.contains("em_current_density")).collect::<Vec<_>>().join("\n");
         let bare = Pdk::load(&text, &sidecar).unwrap();
         assert!(bare.routing_metals.iter().all(|&l| bare.em_limit(l).is_none()), "no EM rules: unknown");
+    }
+
+    /// REL-10: sky130's `gate_oxide` / `drain_source` rules, merged per model
+    /// (the ESD NFET's own 5 V gate rule, both kinds on one model).
+    #[test]
+    fn sky130_fet_ratings_come_from_the_deck() {
+        let lim = load("sky130").fet_voltage_limits();
+        let of = |m: &str| lim.iter().find(|f| f.model == format!("sky130_fd_pr__{m}")).map(|f| (f.vgs_max_mv, f.vds_max_mv));
+        assert_eq!(of("nfet_01v8"), Some((Some(1950.0), Some(1950.0))));
+        assert_eq!(of("nfet_g5v0d10v5"), Some((Some(5500.0), Some(11000.0))));
+        assert_eq!(of("esd_nfet_g5v0d10v5"), Some((Some(5000.0), Some(11000.0))));
+        assert!(of("pfet_01v8_hvt").is_some());
     }
 
     /// GAP-06: no deck states Black's parameters, so each EM limit takes the

@@ -82,7 +82,7 @@ fn clusters(reqs: &[&GuardRingRequirement], layout: &Layout, merge_gap: f32) -> 
     for i in 0..n {
         for j in (i + 1)..n {
             let (a, b) = (reqs[i], reqs[j]);
-            let same_class = a.connection_net == b.connection_net && a.ring_type == b.ring_type;
+            let same_class = a.connection_net == b.connection_net && a.ring_type == b.ring_type && a.role == b.role;
             let adjacent = layout
                 .edge_gap(Target::Device(a.device), Target::Device(b.device))
                 <= merge_gap;
@@ -526,6 +526,7 @@ mod tests {
             min_width_nm: 420,
             max_ring_resistance_mohm: 10_000,
             connection_net: pnr_core::NetId(net),
+            role: analog::cell::RingRole::Aggressor,
         }
     }
 
@@ -646,6 +647,19 @@ mod tests {
         let refs: Vec<&GuardRingRequirement> = reqs.iter().collect();
         let c = clusters(&refs, &l, 2000.0);
         assert_eq!(c.len(), 4, "class/net/private all block the merge");
+    }
+
+    /// REL-07: a victim ring never shares an aggressor's return, even on the
+    /// same net and type, adjacent and shareable.
+    #[test]
+    fn rings_of_different_roles_never_merge() {
+        let tap = GuardRingType::Tap { in_well: false };
+        let l = layout_at(&[(0, 0), (300, 0)]);
+        let reqs = [req(0, 5, tap, true), GuardRingRequirement { role: analog::cell::RingRole::Victim, ..req(1, 5, tap, true) }];
+        let refs: Vec<&GuardRingRequirement> = reqs.iter().collect();
+        assert_eq!(clusters(&refs, &l, 2000.0).len(), 2);
+        let same = [req(0, 5, tap, true), req(1, 5, tap, true)];
+        assert_eq!(clusters(&same.iter().collect::<Vec<_>>(), &l, 2000.0).len(), 1, "same role merges");
     }
 
     #[test]

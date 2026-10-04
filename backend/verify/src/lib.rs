@@ -23,7 +23,7 @@ pub use gdsverify::ingest::deck::DeviceKind;
 pub use gdsverify::engine::Checks;
 pub use geom::LabeledPin;
 pub use netlist::{extract_spice, Detail};
-pub use pdk::{EmLimit, Pdk};
+pub use pdk::{EmLimit, FetLimit, Pdk};
 pub use reference::{RefDeviceIn, RefInput, RefKind};
 
 /// Shortfall of one violation row, in one of two units. A length pair is nm
@@ -711,22 +711,24 @@ mod tests {
         assert_eq!(n.param, vec![(w, 2e-6), (l, 5e-7), (w, 1e-6)]);
         let model = checker.loaded.strings.resolve(n.device_model[0]);
         assert_eq!(model, "sky130_fd_pr__nfet_01v8");
-        // A bipolar has no recogniser in this deck: skipped, not mismatched.
-        let with_cap = RefInput {
+        // Both bipolars have a row now; an inductor still has none: skipped, not mismatched.
+        let one = |kind, n: usize| RefInput {
             devices: vec![RefDeviceIn {
-                kind: RefKind::Npn,
+                kind,
                 model: None,
-                terminals: vec!["a".into(), "b".into()],
+                terminals: ["a", "b", "c"][..n].iter().map(|&t| t.into()).collect(),
                 params: vec![],
             }],
             ports: vec![],
             external_ports: None,
         };
-        assert_eq!(checker.set_reference(&with_cap).unwrap(), [(RefKind::Npn, None)]);
+        assert_eq!(checker.set_reference(&one(RefKind::Npn, 3)).unwrap(), []);
+        assert_eq!(checker.set_reference(&one(RefKind::Pnp, 3)).unwrap(), []);
+        assert_eq!(checker.set_reference(&one(RefKind::Inductor, 2)).unwrap(), [(RefKind::Inductor, None)]);
     }
 
     // AV-01/NOTES-02: a schematic device no recogniser extracts is named in
-    // the coverage, not left on stderr (sky130 has no NPN recogniser).
+    // the coverage, not left on stderr (sky130 has no VPP capacitor recogniser).
     #[test]
     fn a_skipped_reference_device_is_listed_in_coverage() {
         let pdk = sky130();
@@ -740,7 +742,10 @@ mod tests {
             devices: vec![
                 dev(RefKind::Nmos, &["out", "in", "vss", "vss"]),
                 dev(RefKind::Nmos, &["vss", "bias", "out", "vss"]),
-                dev(RefKind::Npn, &["a", "b", "c"]),
+                RefDeviceIn {
+                    model: Some("sky130_fd_pr__cap_vpp_02p4x04p6_m1m2_noshield".into()),
+                    ..dev(RefKind::Capacitor, &["a", "b"])
+                },
             ],
             ports: vec![],
             external_ports: None,
@@ -748,7 +753,7 @@ mod tests {
         let shapes = [rect(&pdk, "li", 0, 0, 500, 500)];
         let s = signoff_checked(&shapes, &[], &reference, &Intent::default(), &pdk);
         assert!(
-            matches!(s.coverage.unverified.as_slice(), [(RefKind::Npn, _, 1)]),
+            matches!(s.coverage.unverified.as_slice(), [(RefKind::Capacitor, _, 1)]),
             "{:?}",
             s.coverage.unverified
         );
@@ -867,6 +872,84 @@ mod tests {
             "a 300 nm declared width against a 200 nm channel must be a \
              parameter mismatch, got {wrong:?}"
         );
+    }
+
+    /// The body is compared: an nfet reference whose bulk is the source net,
+    /// which the layout does not tie, is an LVS mismatch.
+    #[test]
+    fn a_wrong_body_tie_is_an_lvs_mismatch() {
+        let pdk = sky130();
+        let shapes = [
+            rect(&pdk, "poly", 200, 0, 100, 400),
+            rect(&pdk, "diff", 0, 100, 260, 200),
+            rect(&pdk, "diff", 240, 100, 260, 200),
+            rect(&pdk, "nsdm", 0, 0, 500, 400),
+        ];
+        let lvs_rows = |t: [&str; 4]| -> Vec<String> {
+            let reference = RefInput {
+                devices: vec![RefDeviceIn {
+                    kind: RefKind::Nmos,
+                    model: None,
+                    terminals: t.iter().map(|&n| n.into()).collect(),
+                    params: vec![("w".into(), 2e-7), ("l".into(), 1e-7)],
+                }],
+                ports: vec![],
+                external_ports: None,
+            };
+            let mut checker = Checker::new(&pdk, true).unwrap();
+            checker.set_reference(&reference).unwrap();
+            checker.run(&shapes, &[], Checks { drc: false, erc: false, lvs: true, pex: false }).unwrap();
+            let out = checker.outputs();
+            (0..out.violations.len())
+                .map(|i| checker.rule_name(out.violations.get(i).rule).to_owned())
+                .filter(|r| r.starts_with("lvs."))
+                .collect()
+        };
+        assert_eq!(lvs_rows(["d", "g", "s", "b"]), Vec::<String>::new());
+        let wrong = lvs_rows(["d", "g", "s", "s"]);
+        assert!(!wrong.is_empty(), "a body on the source net must mismatch");
+    }
+
+    /// Each n-well is its own net: two pfets in two wells sharing one bulk
+    /// net in the reference is an LVS mismatch.
+    #[test]
+    fn a_pmos_in_a_foreign_well_is_an_lvs_mismatch() {
+        let pdk = sky130();
+        let stack = |x: i32| {
+            [
+                rect(&pdk, "poly", x + 200, 0, 100, 400),
+                rect(&pdk, "diff", x, 100, 260, 200),
+                rect(&pdk, "diff", x + 240, 100, 260, 200),
+                rect(&pdk, "psdm", x, 0, 500, 400),
+                rect(&pdk, "nwell", x - 200, -200, 900, 800),
+            ]
+        };
+        let shapes: Vec<_> = stack(0).into_iter().chain(stack(5900)).collect();
+        assert_eq!(Checker::new(&pdk, true).unwrap().device_count(&shapes), Some(2));
+        let lvs_rows = |b1: &str, b2: &str| -> Vec<String> {
+            let card = |d: &str, g: &str, s: &str, b: &str| RefDeviceIn {
+                kind: RefKind::Pmos,
+                model: None,
+                terminals: [d, g, s, b].iter().map(|&n| n.into()).collect(),
+                params: vec![("w".into(), 2e-7), ("l".into(), 1e-7)],
+            };
+            let reference = RefInput {
+                devices: vec![card("d1", "g1", "s1", b1), card("d2", "g2", "s2", b2)],
+                ports: vec![],
+                external_ports: None,
+            };
+            let mut checker = Checker::new(&pdk, true).unwrap();
+            checker.set_reference(&reference).unwrap();
+            checker.run(&shapes, &[], Checks { drc: false, erc: false, lvs: true, pex: false }).unwrap();
+            let out = checker.outputs();
+            (0..out.violations.len())
+                .map(|i| checker.rule_name(out.violations.get(i).rule).to_owned())
+                .filter(|r| r.starts_with("lvs."))
+                .collect()
+        };
+        assert_eq!(lvs_rows("w1", "w2"), Vec::<String>::new());
+        let shared = lvs_rows("w", "w");
+        assert!(!shared.is_empty(), "two wells on one bulk net must mismatch");
     }
 
     // The diode is recognisable now: a `diom` marker over the junction with

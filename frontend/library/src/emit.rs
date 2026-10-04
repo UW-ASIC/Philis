@@ -7,19 +7,20 @@
 //! interpreted against any [`Process`] ([`elaborate_ir`]) or pretty-printed
 //! as macroMaster [`Composition`] source ([`to_rust`]).
 //!
-//! v1 scope (deliberate): per-device instances only — a merged matched group
-//! (group collapse) draws interdigitated legs one `variants::Mos` cannot yet
-//! express (M5: patterned library). Symmetry axes ride in `Layout::axis` but
-//! are not yet lifted to `place_mirrored` (P2). Both return
-//! [`EmitError::Unsupported`] rather than emitting wrong code.
+//! Scope: per-device instances and equal-leg merged pairs (`MatchedPair`); a
+//! ratioed merged group returns [`EmitError::Unsupported`] rather than wrong
+//! code. Symmetry axes ride in `Layout::axis` but are not lifted to
+//! `place_mirrored`.
+
+use std::collections::HashSet;
 
 use annotator::{annotate};
 use macro_master::{build_with, variants, AlignMode, GenError, Macros};
-use pnr_core::{DeviceKind, Process as _};
+use pnr_core::{DeviceId, DeviceKind, Orient, Process as _};
 use verify::Pdk;
 
 use crate::elaborate::{route_built, ElabConfig, Elaborated};
-use crate::{cellgen, Config};
+use crate::{cellgen, Config, Solution};
 
 /// One emitted device instance.
 #[derive(Debug)]
@@ -36,6 +37,8 @@ pub struct IrInst {
     /// drawn as one interdigitated macro (`variants::MatchedPair`, per-leg
     /// pins `g1…s2`). This is how group collapse survives decompilation.
     pub legs: u8,
+    /// The solved orientation (`layout.orient`), applied about the bbox origin.
+    pub orient: Orient,
 }
 
 /// A gap in a placement op: attributed to a named process rule when the
@@ -69,12 +72,12 @@ pub struct IrPlace {
 #[derive(Debug)]
 pub struct GenIr {
     pub name: String,
-    /// Io port names (v1: every named net).
+    /// Io port names: the netlist's `.subckt` ports, else every named net.
     pub ports: Vec<String>,
     pub instances: Vec<IrInst>,
     /// In placement order; references always point at earlier entries.
     pub place: Vec<IrPlace>,
-    /// Connect edges: `inst.term` ↔ net/port name.
+    /// Connect edges: `inst.term` ↔ an io port name or another `inst.term`.
     pub edges: Vec<(String, String)>,
 }
 
@@ -97,34 +100,24 @@ pub fn emit(
 ) -> Result<GenIr, EmitError> {
     let problem = annotate(netlist, &crate::annotation(pdk, &cfg.annotation));
     let cells = cellgen::enumerate(netlist, &Macros::default(), &problem.constraints, pdk, true);
-
-    // Instances: device family + electrical params from the covering
-    // unitization (cellgen synthesizes one per un-matched device). A 2-member
-    // cell is a merged matched pair → `MatchedPair` (per-leg pins); >2 members
-    // (quads) still need a patterned quad variant.
-    let mut instances = Vec::with_capacity(cells.devices_of.len());
-    for members in &cells.devices_of {
-        if members.len() > 2 {
-            return Err(EmitError::Unsupported(format!(
-                "merged matched group of {} devices: no quad variant yet",
-                members.len()
-            )));
-        }
+    if layout.x.len() != cells.devices_of.len() {
+        return Err(EmitError::Unsupported("layout does not match the cell table".into()));
+    }
+    // Sizes from the covering unitization (cellgen synthesizes one per
+    // un-matched device).
+    let size = |members: &[DeviceId]| -> Result<(i32, i32, u16), EmitError> {
         let d = &netlist.devices[members[0].0 as usize];
-        match d.kind {
-            DeviceKind::Nmos | DeviceKind::Pmos | DeviceKind::Resistor => {}
-            k => {
-                return Err(EmitError::Unsupported(format!(
-                    "device kind {k:?} has no macroMaster variant yet (M5)"
-                )))
-            }
-        }
         let u = problem
             .constraints
             .unitization
             .iter()
             .find(|u| members.iter().all(|m| u.devices.contains(m)));
-        let (w, l, nf) = match u {
+        // Equal legs only: a ratioed mirror (nf 1:2) needs per-leg counts
+        // MatchedPair does not model yet.
+        if members.len() == 2 && u.is_some_and(|u| u.dev_nf.windows(2).any(|w| w[0] != w[1])) {
+            return Err(EmitError::Unsupported("ratioed merged group: MatchedPair models equal legs only".into()));
+        }
+        Ok(match u {
             Some(u) => {
                 let slot = u.devices.iter().position(|x| x == &members[0]);
                 let nf = slot
@@ -149,25 +142,76 @@ pub fn emit(
                 };
                 (w.min(i64::from(i32::MAX)) as i32, l.min(i64::from(i32::MAX)) as i32, nf.min(u32::from(u16::MAX)) as u16)
             }
+        })
+    };
+    lift(netlist, layout, pdk, &cells.devices_of, size)
+}
+
+/// Decompile a [`crate::run`] result on its own cell table
+/// ([`Solution::devices_of`]) and drawn sizes: a MOS at unit width
+/// `W_total/nf/k` and `nf·m·k` fingers, `k` from [`Solution::folds`].
+pub fn emit_solution(sol: &Solution, pdk: &Pdk) -> Result<GenIr, EmitError> {
+    let fingers = |m: DeviceId| -> Option<(i64, i64, u32)> {
+        let s = sol.netlist.devices[m.0 as usize].mos_size()?;
+        Some(match sol.folds.get(m.0 as usize) {
+            Some(&(k, wk)) if k > 0 => (i64::from(wk), s.l_nm, s.fingers() * u32::from(k)),
+            _ => (s.w_finger_nm(), s.l_nm, s.fingers()),
+        })
+    };
+    let size = |members: &[DeviceId]| -> Result<(i32, i32, u16), EmitError> {
+        let d = &sol.netlist.devices[members[0].0 as usize];
+        let p = |k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v).filter(|&v| v > 0);
+        let size = match fingers(members[0]) {
+            Some(f) => Some(f),
+            None if d.kind == DeviceKind::Resistor => p("w").zip(p("l")).map(|(w, l)| (w, l, 1)),
+            None => None,
         };
-        let legs = members.len() as u8;
-        if legs == 2 {
-            let d2 = &netlist.devices[members[1].0 as usize];
-            if d2.kind != d.kind {
-                return Err(EmitError::Unsupported(
-                    "mixed-kind merged group (implants would merge)".into(),
-                ));
-            }
-            // Equal legs only: a ratioed mirror (nf 1:2) needs per-leg counts
-            // MatchedPair does not model yet.
-            if let Some(u) = u {
-                if u.dev_nf.windows(2).any(|w| w[0] != w[1]) {
-                    return Err(EmitError::Unsupported(
-                        "ratioed merged group: MatchedPair models equal legs only".into(),
-                    ));
-                }
+        let Some((w, l, nf)) = size else {
+            return Err(EmitError::Unsupported(format!("{}: no W/L in the netlist", d.name)));
+        };
+        if members.len() == 2 && fingers(members[1]).map(|f| f.2) != Some(nf) {
+            return Err(EmitError::Unsupported("ratioed merged group: MatchedPair models equal legs only".into()));
+        }
+        Ok((w.min(i64::from(i32::MAX)) as i32, l.min(i64::from(i32::MAX)) as i32, nf.min(u32::from(u16::MAX)) as u16))
+    };
+    lift(&sol.netlist, &sol.layout, pdk, &sol.devices_of, size)
+}
+
+/// The IR of `layout`, whose cell `i` draws schematic devices `devices_of[i]`
+/// at `size(devices_of[i])` = `(unit w, l, fingers per leg)`.
+fn lift(
+    netlist: &pnr_core::Netlist,
+    layout: &pnr_core::Layout,
+    pdk: &Pdk,
+    devices_of: &[Vec<DeviceId>],
+    size: impl Fn(&[DeviceId]) -> Result<(i32, i32, u16), EmitError>,
+) -> Result<GenIr, EmitError> {
+    // A 2-member cell is a merged matched pair → `MatchedPair` (per-leg pins);
+    // >2 members (quads) still need a patterned quad variant.
+    let mut instances = Vec::with_capacity(devices_of.len());
+    for (i, members) in devices_of.iter().enumerate() {
+        if members.len() > 2 {
+            return Err(EmitError::Unsupported(format!(
+                "merged matched group of {} devices: no quad variant yet",
+                members.len()
+            )));
+        }
+        let d = &netlist.devices[members[0].0 as usize];
+        match d.kind {
+            DeviceKind::Nmos | DeviceKind::Pmos | DeviceKind::Resistor => {}
+            k => {
+                return Err(EmitError::Unsupported(format!(
+                    "device kind {k:?} has no macroMaster variant yet (M5)"
+                )))
             }
         }
+        let legs = members.len() as u8;
+        if legs == 2 && netlist.devices[members[1].0 as usize].kind != d.kind {
+            return Err(EmitError::Unsupported(
+                "mixed-kind merged group (implants would merge)".into(),
+            ));
+        }
+        let (w, l, nf) = size(members)?;
         let name = if legs == 2 {
             format!("{}_{}", d.name, netlist.devices[members[1].0 as usize].name)
         } else {
@@ -180,6 +224,7 @@ pub fn emit(
             l,
             nf,
             legs,
+            orient: layout.orient.get(i).copied().unwrap_or_default(),
         });
     }
 
@@ -237,7 +282,7 @@ pub fn emit(
                 },
             ]
         } else {
-            // New row: nearest below with x-overlap, else the previous anchor.
+            // New row: the nearest earlier cell below (any x), else the first anchor.
             let below = order[..k]
                 .iter()
                 .copied()
@@ -262,12 +307,20 @@ pub fn emit(
         place.push(IrPlace { inst: i, aligns });
     }
 
-    // Connectivity: every device terminal to its net name. For a merged pair
-    // the member ordinal becomes the leg suffix (`MatchedPair`'s `g1`/`g2`),
-    // except the shared body — one `b` pin serves both legs.
+    // Connectivity: every device terminal to its net — a port by name, an
+    // internal net through its first terminal (only ports are names
+    // `build_with` knows). For a merged pair the member ordinal becomes the
+    // leg suffix (`MatchedPair`'s `g1`/`g2`), except the shared body — one
+    // `b` pin serves both legs.
     let net_name = |id: pnr_core::NetId| netlist.nets[id.0 as usize].name.clone();
+    let ports: Vec<String> = if netlist.ports.is_empty() {
+        netlist.nets.iter().map(|nt| nt.name.clone()).collect()
+    } else {
+        netlist.ports.iter().map(|&p| net_name(p)).collect()
+    };
+    let mut first: std::collections::HashMap<pnr_core::NetId, String> = std::collections::HashMap::new();
     let mut edges = Vec::new();
-    for (inst, members) in instances.iter().zip(&cells.devices_of) {
+    for (inst, members) in instances.iter().zip(devices_of) {
         for (o, m) in members.iter().enumerate() {
             let d = &netlist.devices[m.0 as usize];
             for (idx, (t, net)) in d.terminals.iter().enumerate() {
@@ -275,11 +328,18 @@ pub fn emit(
                 if inst.legs == 2 && term != "b" {
                     term = format!("{term}{}", o + 1);
                 }
-                edges.push((format!("{}.{}", inst.name, term), net_name(*net)));
+                let term = format!("{}.{}", inst.name, term);
+                let name = net_name(*net);
+                if ports.contains(&name) {
+                    edges.push((term, name));
+                } else if let Some(f) = first.get(net) {
+                    edges.push((term, f.clone()));
+                } else {
+                    first.insert(*net, term);
+                }
             }
         }
     }
-    let ports: Vec<String> = netlist.nets.iter().map(|nt| nt.name.clone()).collect();
 
     Ok(GenIr {
         name: "emitted".into(),
@@ -288,6 +348,32 @@ pub fn emit(
         place,
         edges,
     })
+}
+
+/// A Rust identifier for net `name`, unique within `taken`: lowercased,
+/// chars outside `[a-z0-9_]` → `_`, `n_` before an empty or digit-led name,
+/// `_` after a keyword, then `_2`, `_3`, … on a collision.
+fn ident(name: &str, taken: &mut HashSet<String>) -> String {
+    const KEYWORDS: [&str; 52] = [
+        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self",
+        "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while", "abstract", "become",
+        "box", "do", "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "gen",
+    ];
+    let mut id: String = name.to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+    if id.is_empty() || id.starts_with(|c: char| c.is_ascii_digit()) {
+        id.insert_str(0, "n_");
+    }
+    if KEYWORDS.contains(&id.as_str()) || id == "_" {
+        id.push('_');
+    }
+    let mut out = id.clone();
+    let mut k = 2;
+    while !taken.insert(out.clone()) {
+        out = format!("{id}_{k}");
+        k += 1;
+    }
+    out
 }
 
 /// Map a schematic terminal to the macroMaster variant's port name.
@@ -339,6 +425,7 @@ pub fn elaborate_ir(ir: &GenIr, pdk: &Pdk, cfg: &ElabConfig) -> Result<Elaborate
                     &variants::Mos::new(kind, spec.w, spec.l, spec.nf),
                 )?,
             };
+            inst.orient(spec.orient);
             for a in &p.aligns {
                 let gap = match &a.gap {
                     IrGap::Rule(name, default) => c.process().rule(name, *default),
@@ -377,15 +464,17 @@ pub fn to_rust(ir: &GenIr) -> String {
         s,
         "    Composition, GenError, InOut, Io, PortInfo, Process, Signal}};"
     );
-    let _ = writeln!(s, "use pnr_core::DeviceKind;\n");
+    let _ = writeln!(s, "use pnr_core::{{DeviceKind, Orient}};\n");
     let _ = writeln!(s, "#[derive(Default)]\npub struct EmittedIo {{");
-    for p in &ir.ports {
-        let _ = writeln!(s, "    pub {p}: InOut<Signal>,");
+    let mut taken = HashSet::new();
+    let fields: Vec<String> = ir.ports.iter().map(|p| ident(p, &mut taken)).collect();
+    for f in &fields {
+        let _ = writeln!(s, "    pub {f}: InOut<Signal>,");
     }
     let _ = writeln!(s, "}}\nimpl Io for EmittedIo {{");
     let _ = writeln!(s, "    fn ports(&self) -> Vec<PortInfo> {{\n        vec![");
-    for p in &ir.ports {
-        let _ = writeln!(s, "            self.{p}.port(\"{p}\"),");
+    for (f, p) in fields.iter().zip(&ir.ports) {
+        let _ = writeln!(s, "            self.{f}.port({p:?}),");
     }
     let _ = writeln!(s, "        ]\n    }}\n}}\n");
     let _ = writeln!(s, "pub struct {};\nimpl Block for {} {{", ir.name, ir.name);
@@ -420,6 +509,9 @@ pub fn to_rust(ir: &GenIr) -> String {
             var(p.inst),
             inst.name
         );
+        if inst.orient != Orient::R0 {
+            let _ = writeln!(s, "        {}.orient(Orient::{:?});", var(p.inst), inst.orient);
+        }
         for a in &p.aligns {
             let gap = match &a.gap {
                 IrGap::Rule(name, d) => format!("c.process().rule(\"{name}\", {d})"),
@@ -446,4 +538,21 @@ pub fn to_rust(ir: &GenIr) -> String {
     }
     let _ = writeln!(s, "        Ok(())\n    }}\n}}");
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifiers_compile_shaped() {
+        let mut taken = HashSet::new();
+        let got: Vec<String> = ["in", "0", "a<1>", "vout-", "VDD", "vdd"].iter().map(|n| ident(n, &mut taken)).collect();
+        assert_eq!(got, ["in_", "n_0", "a_1_", "vout_", "vdd", "vdd_2"]);
+        for g in &got {
+            let mut c = g.chars();
+            assert!(c.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_') && c.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'), "{g}");
+            assert!(ident(g, &mut HashSet::new()) == *g, "{g} is not a keyword");
+        }
+    }
 }

@@ -2,11 +2,15 @@
   "deck": "sky130.deck",
   "_about": "Philis sidecar: every rule, layer, device and PEX value comes from the GPurify deck named here; this file holds only what the checker does not read (layer roles, generator dimensions, process coefficients).",
   "cell": {
+    "bjt_ka_pct_um": 2.0,
+    "bjt_ka_pct_um_source": "textbook, not sky130: Hastings, The Art of Analog Layout, §10.2.1 (PDF p.507), I_S mismatch area constant of a bipolar pair; replace with the PDK's own figure when one is published.",
+    "vbe_tc_uv_per_k": 2000,
+    "vbe_tc_uv_per_k_source": "textbook, not sky130: Hastings, The Art of Analog Layout, §9.1 (PDF p.433), |dV_BE/dT| ~ 2 mV/K.",
     "m1_enc": 65,
     "min_finger_width": 420,
     "via_enclosure": 300,
     "cap_density_ff_um2": 2.0,
-    "cap_density_ff_um2_source": "UNVERIFIED: no source was recorded with this value. 2.0 equals the sky130 MIM camimc (2.00e-15 F/um2, typical corner) while the capacitor generator draws met1/met2 MOM (plan-08 D10); FLOW-06 sources it.",
+    "cap_density_ff_um2_source": "= camimc of sky130_fd_pr__cap_mim_m3_1 (MIM), 2.00e-15 F/um2: VOL/libs.tech/ngspice/r+c/res_typical__cap_typical__lin.spice:7 (volare 1341f54f); the MOM that cap_array draws is not this value (AV-32). Deleted once the benchmark preprocessor reads capacitors.mim_m3_1.c_area_af_um2.",
     "gate_cap_af_um2": 8325,
     "gate_cap_af_um2_source": "UNVERIFIED: no source was recorded with this value.",
     "dummy_max_l_nm": 3000,
@@ -133,8 +137,14 @@
     "avt_n_mv_um_source": "Monte Carlo of the installed models: benchmarks/characterize_mismatch.py, .lib sky130.lib.spice tt_mm (MC_MM_SWITCH=1), 250 pairs x 6 W/L (1/0.15..8/2 um), constant-current VT at 0.1uA*W/L, sigma(dVT) fit through origin vs 1/sqrt(WL); seeds 1,2 gave 9.32, 9.66 -> mean 9.5. Model card alone: sqrt(2)*vth0_slope 3.356e-3 = 4.7 mV.um (toxe/voff terms add the rest). Gradient S_VT is wafer-level and not in the models, so gradient_per_avt_um2 stays absent.",
     "avt_p_mv_um": 11.5,
     "avt_p_mv_um_source": "Monte Carlo of the installed models: benchmarks/characterize_mismatch.py, same method as avt_n; seeds 1,2 gave 11.84, 11.18 -> mean 11.5. Point estimates range 8.4 (8/2) to 12.4 (1/0.15): the pfet card bins vth0_slope 4.356..7.356e-3, so A_VT is geometry dependent.",
+    "abeta_p_pct_um": 2.2,
+    "abeta_p_pct_um_source": "Monte Carlo of the installed models: benchmarks/characterize_mismatch.py bpv sky130 250 1 (MM-17), .lib sky130.lib.spice tt_mm, 250 voltage-biased pairs x 6 W/L (1/0.15..8/2 um) x Vov 0.1, 0.4 V (VGS = VDS = |VT|tt + Vov), G = gm/I from a tt +-1 mV difference (4.8..13.4 /V); sigma(dI/I)^2 = A_VT^2 (0.1 G)^2/WL + A_beta^2/WL fit over the 12 points gave A_beta 2.213 %.um with refit A_VT 11.65 mV.um (avt_p 11.5 agrees). One seed. abeta_n is absent: the same nfet fit gave A_beta^2 < 0 (-2.558^2) and refit A_VT 7.82 vs avt_n 9.5, so the two-term model does not separate the nfet's current mismatch.",
+    "svt_a_uv2_per_um2": 0.1835,
+    "svt_a_uv2_per_um2_source": "PROXY: fit to Schaper & Linnenbank 130 nm Table 1 (S_D^2 = a + b/L^2, MM-25); derived, not sky130 data",
+    "svt_b_uv2": 0.03533,
+    "svt_b_uv2_source": "PROXY: fit to Schaper & Linnenbank 130 nm Table 1 (S_D^2 = a + b/L^2, MM-25); derived, not sky130 data",
     "svt_uv_per_um": 1.63,
-    "svt_uv_per_um_source": "PROXY, not sky130 data: Schaper & Linnenbank (Infineon), 'Comparison of distance mismatch and pair matching of CMOS devices', IEEE, 130nm thin-oxide NMOS, Table 1 distance parameter S_D [mV/mm = uV/um] of dVGS: L/W 0.12/1.6 -> 1.63, 0.24/1.6 -> 0.780, 0.24/12.8 -> 0.941, 0.48/1.6 -> 0.582, 0.48/3.2 -> 0.644; Fig. 8: S_D^2 grows with 1/Leff^2. Worst case (shortest L, nearest sky130 Lmin 0.15) taken so the Pelgrom distance limit errs tight for every L. Replace with measured sky130 gradient data when available. Same S used for pfet (paper has NMOS only).",
+    "svt_uv_per_um_source": "PROXY, not sky130 data: Schaper & Linnenbank (Infineon), 'Comparison of distance mismatch and pair matching of CMOS devices', IEEE, 130nm thin-oxide NMOS, Table 1 distance parameter S_D [mV/mm = uV/um] of dVGS: L/W 0.12/1.6 -> 1.63, 0.24/1.6 -> 0.780, 0.24/12.8 -> 0.941, 0.48/1.6 -> 0.582, 0.48/3.2 -> 0.644; Fig. 8: S_D^2 grows with 1/Leff^2. Worst case (shortest L, nearest sky130 Lmin 0.15) taken so the Pelgrom distance limit errs tight for every L. Replace with measured sky130 gradient data when available. Same S used for pfet (paper has NMOS only). Since MAT-16 this is only the fallback for devices without an `l`; devices with one use the S(L) PROXY fit svt_a_uv2_per_um2/svt_b_uv2 (e.g. 0.580 at L = 0.48).",
     "em_current_density_source": "rules EM.met1_mcon, EM.met2_via1 .. EM.met5_via4 (IHP convention: a metal with the cut below it; max_density is the metal's, max_current_per_cut the cut's) from sky130A/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef (volare fa87f8f4): DCCURRENTDENSITY AVERAGE met1 2.8, met2 2.8, met3 6.8, met4 6.8, met5 10.17 mA/um; mcon 0.36, via 0.29, via2 0.48, via3 0.48, via4 2.49 mA per via; Iavg_max at Tj=90C. Stored as uA/um and uA/cut. li1 has no EM limit in the PDK, so li is not covered.",
     "em_derating": {"t_ref_k": 363.15, "ea_ev": null, "n": null},
     "em_derating_source": "Iavg_max at Tj=90C, sky130A/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef:92,119 (volare fa87f8f4); Ea and n not stated by the PDK",
@@ -182,7 +192,11 @@
           "res_head_dw_nm": 156,
           "res_narrow_permille": 67,
           "res_knee_nm": 690,
-          "res_model_source": "sky130_fd_pr__res_high_po.model.spice (volare fa87f8f4) lines 27-40: R = 317.3885*(L+0.247)/weff + 345.8312/(weff+0.1558), weff = W - 0.001 - 0.0672*max(0.69-W, 0), W, L in um; res_narrow_permille 67 and res_head_dw_nm 156 round 0.0672 and 0.1558."
+          "res_model_source": "sky130_fd_pr__res_high_po.model.spice (volare fa87f8f4) lines 27-40: R = 317.3885*(L+0.247)/weff + 345.8312/(weff+0.1558), weff = W - 0.001 - 0.0672*max(0.69-W, 0), W, L in um; res_narrow_permille 67 and res_head_dw_nm 156 round 0.0672 and 0.1558.",
+          "k_a_pct_um": 4.26,
+          "k_a_pct_um_source": "Monte Carlo of the installed model: benchmarks/characterize_mismatch.py res sky130 250 1, .lib sky130.lib.spice tt_mm, 250 1 uA-driven pairs x W/L 0.69/5, 1.41/10, 2.85/20, 5.73/40, 1.41/2 um, sigma(dR/R) of the pair fit through the origin vs 1/sqrt(WL): 4.26 %.um (points 3.88..4.68; the model's body_pelgrom 0.03552/sqrt(WL) per device plus head_pelgrom). One seed.",
+          "tc_ppm_per_k": 514,
+          "tc_ppm_per_k_source": "body tc1 of the installed model: sky130_fd_pr__res_high_po.model.spice:56 tc1 = {tc1rpolybody}, sky130_fd_pr__model__r+c.model.spice:62 tc1rpolybody = .514e-3 /K (tnom 30). The heads' tc1 -4.3e-4 (line 49) is ignored: a long body dominates."
         },
         "generic_po": {
           "model": "sky130_fd_pr__res_generic_po",
@@ -200,7 +214,11 @@
           "res_head_mohm_um": 0,
           "res_dl_nm": 0,
           "res_dw_nm": 0,
-          "res_model_source": "rp1 = 48.2 ohm/sq, VOL/libs.tech/ngspice/r+c/res_typical__cap_typical.spice:21 (volare fa87f8f4). The model's dw = -tol_poly/2 - poly_dw/2 (+0.028 um at typical, sky130_fd_pr__model__r+c.model.spice:134) is not applied: how ngspice applies it to W was not checked (plan-03 section 5)."
+          "res_model_source": "rp1 = 48.2 ohm/sq, VOL/libs.tech/ngspice/r+c/res_typical__cap_typical.spice:21 (volare fa87f8f4). The model's dw = -tol_poly/2 - poly_dw/2 (+0.028 um at typical, sky130_fd_pr__model__r+c.model.spice:134) is not applied: how ngspice applies it to W was not checked (plan-03 section 5).",
+          "k_a_pct_um": 1.70,
+          "k_a_pct_um_source": "PROXY, not sky130 data: the installed model carries no mismatch (r+c.mrp1monte.spice:16 sky130_fd_pr__res_generic_po__slope = 0.0; characterize_mismatch.py res gave sigma(dR/R) = 0 at every W/L). Value: DVP Table 1 poly resistor pair constant 1.70 %.um, as plan-02 MAT-10. Replace with measured sky130 data when available.",
+          "tc_ppm_per_k": 892,
+          "tc_ppm_per_k_source": "tc1r of the installed model: sky130_fd_pr__model__r+c.model.spice:134 tc1r=tc1rsgpu, :28 tc1rsgpu = 8.916e-4 /K."
         }
       },
       "note": "Per schematic model, the construction GPurify's sky130.deck recognises: rbody_high_po = poly_res and rpm (licon.1b slot contacts 190x2000 inside rpm+psdm), rbody_po = poly_res outside rpm/urpm."

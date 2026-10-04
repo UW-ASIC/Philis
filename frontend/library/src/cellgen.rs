@@ -319,28 +319,68 @@ fn region_spans(m: &Macro, members: usize) -> Vec<Option<(i32, i32)>> {
 }
 
 /// Starting variant per cell, chosen by measuring each alternative in
-/// isolation (see [`price`]). Ties break on index, so the seed is deterministic.
+/// isolation (see [`price`], [`seed_of`]). Ties break on index, so the seed is deterministic.
+/// Also per cell the alternatives [`escalate`] may visit ([`keep`] over
+/// `(DRC+ERC, bbox w, bbox h)` from the same prices; `matched[i]` keeps all).
+/// `ranked[i]` (missing = false) marks a cell whose generator lists its
+/// alternatives best-matching first (GAP-18).
 #[must_use]
-pub fn seed_assignment(variants: &[gp::VariantSpace], pdk: &Pdk) -> Vec<u16> {
+pub fn seed_assignment(variants: &[gp::VariantSpace], matched: &[bool], ranked: &[bool], pdk: &Pdk) -> (Vec<u16>, Vec<Vec<u16>>) {
     let mut checker = Checker::new(pdk, true).expect("a loaded Pdk re-parses its own deck");
     variants
         .iter()
-        .map(|space| {
-            space
-                .alternatives
-                .iter()
-                .map(|m| price(m, &mut checker))
-                .enumerate()
-                .min_by(|a, b| a.1.cmp(&b.1))
-                .map_or(0, |(v, _)| v as u16)
+        .enumerate()
+        .map(|(i, space)| {
+            let prices: Vec<(usize, i64)> = space.alternatives.iter().map(|m| price(m, &mut checker)).collect();
+            let seed = seed_of(&prices, ranked.get(i).copied().unwrap_or(false));
+            let cost: Vec<(usize, i32, i32)> = prices.iter().zip(&space.alternatives).map(|(p, m)| (p.0, m.bbox.w, m.bbox.h)).collect();
+            (seed as u16, keep(&cost, seed, matched.get(i).copied().unwrap_or(true)))
         })
-        .collect()
+        .unzip()
+}
+
+/// Seed index from `(DRC+ERC, HPWL)` prices: the cheapest, ties → index; a `ranked` cell (its generator lists
+/// alternatives best-first, GAP-18) seeds at 0. Not "first DRC+ERC-minimal": [`price`] passes no ports, so each
+/// conductor is an x.22 finding and the count tracks shape count (dac4: 178/176/178), which would seed the
+/// fewest-shapes variant, not the best-matching one; every CapArray variant is proven DRC/ERC-clean
+/// (`cap_array::tests::every_variant_is_drc_and_erc_clean`).
+fn seed_of(prices: &[(usize, i64)], ranked: bool) -> usize {
+    if ranked {
+        return 0;
+    }
+    prices.iter().enumerate().min_by(|a, b| a.1.cmp(b.1)).map_or(0, |(v, _)| v)
+}
+
+/// The alternatives of one cell worth escalating to, ascending: all when
+/// `matched` (a matched cell's alternatives differ in pattern, which its own
+/// rules price, not the bbox); else every one not dominated in `(DRC+ERC,
+/// w, h)` — some other is no worse in all three and better in one (BAL2-39,
+/// dominated-variant pruning). `seed` is always kept, so the start digit is
+/// in its own set even when a smaller, higher-HPWL alternative dominates it.
+/// ponytail: O(n²) per cell, n ≤ a few dozen alternatives.
+fn keep(cost: &[(usize, i32, i32)], seed: usize, matched: bool) -> Vec<u16> {
+    let dominated = |v: usize| {
+        let c = cost[v];
+        cost.iter().any(|u| u.0 <= c.0 && u.1 <= c.1 && u.2 <= c.2 && *u != c)
+    };
+    (0..cost.len()).filter(|&v| matched || v == seed || !dominated(v)).map(|v| v as u16).collect()
+}
+
+#[cfg(test)]
+thread_local!(static PRICE_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
+
+/// [`price`] calls on this thread so far (tests: pricing happens once per run).
+#[cfg(test)]
+pub(crate) fn price_calls() -> u32 {
+    PRICE_CALLS.with(std::cell::Cell::get)
 }
 
 /// `(DRC+ERC findings, pin HPWL)`, compared lexicographically. DRC runs
 /// density-stripped (fill rules are chip-level); a macro the engine cannot
 /// load prices as maximally illegal.
 fn price(m: &Macro, checker: &mut Checker) -> (usize, i64) {
+    #[cfg(test)]
+    PRICE_CALLS.with(|c| c.set(c.get() + 1));
     let geom = match checker.run(
         &m.shapes,
         &[],
@@ -377,11 +417,13 @@ pub fn realize(variants: &[gp::VariantSpace], assignment: &[u16]) -> Vec<Macro> 
 
 /// The next joint assignment to try, or `None` when the space is exhausted.
 ///
-/// A mixed-radix odometer over the cells, fastest digit = the cell whose
-/// alternatives move pins the most ([`pin_spread`]): never repeats, always
-/// terminates, and changes pin geometry first.
+/// A mixed-radix odometer over the cells, digit `i` ranging over
+/// `allowed[i]` (ascending = best-matching first for a ranked cell; [`seed_assignment`]), fastest digit = the cell
+/// whose alternatives move pins the most ([`pin_spread`]): never repeats,
+/// always terminates, and changes pin geometry first. A cell with an empty
+/// or one-entry `allowed` row is a fixed digit.
 #[must_use]
-pub fn escalate(variants: &[gp::VariantSpace], current: &[u16]) -> Option<Vec<u16>> {
+pub fn escalate(variants: &[gp::VariantSpace], allowed: &[Vec<u16>], current: &[u16]) -> Option<Vec<u16>> {
     let spread: Vec<usize> = variants.iter().map(pin_spread).collect();
     let mut order: Vec<usize> = (0..variants.len()).collect();
     order.sort_by_key(|&i| (std::cmp::Reverse(spread[i]), i));
@@ -389,11 +431,14 @@ pub fn escalate(variants: &[gp::VariantSpace], current: &[u16]) -> Option<Vec<u1
         .map(|i| current.get(i).copied().unwrap_or(0))
         .collect();
     for &i in &order {
-        if usize::from(next[i]) + 1 < variants[i].alternatives.len() {
-            next[i] += 1;
+        let row = allowed.get(i).map_or(&[][..], Vec::as_slice);
+        if let Some(&v) = row.iter().find(|&&v| v > next[i]) {
+            next[i] = v;
             return Some(next);
         }
-        next[i] = 0; // carry
+        if let Some(&v) = row.first() {
+            next[i] = v; // carry
+        }
     }
     None
 }
@@ -422,7 +467,8 @@ fn pin_spread(space: &gp::VariantSpace) -> usize {
 /// The generator-facing constraints: the annotator's unitizations split by
 /// device kind (a unitization draws every member as its one `device_type`, and
 /// opposite polarities never match anyway), plus a 1-device unitization for
-/// every device no unitization covers: a MOS gets `nf·m` fingers of
+/// every device no unitization covers (banks, bipolar arrays and identical
+/// parallel MOS are the annotator's matched-set unitizations, EXT-19): a MOS gets `nf·m` fingers of
 /// `W_total/nf` ([`pnr_core::MosSize`]), a bipolar `m` units, anything else
 /// its written `w` and `nf`/`m` count.
 fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, i32)]) -> Constraints {
@@ -468,70 +514,8 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             *c = true;
         }
     }
-    for bank in dac_banks(netlist, &covered) {
-        let dev_nf: Vec<u16> = bank.iter().map(|d| multiplier(&netlist.devices[d.0 as usize])).collect();
-        let dev = &netlist.devices[bank[0].0 as usize];
-        let nm = |k: &str| dev.params.iter().find(|(n, _)| n == k).map_or(0, |&(_, v)| v.clamp(0, i64::from(i32::MAX)) as i32);
-        for d in &bank {
-            covered[d.0 as usize] = true;
-        }
-        unitization.push(Unitization {
-            devices: bank,
-            device_type: DeviceKind::Capacitor,
-            target_ratio: dev_nf.clone(),
-            dev_nf,
-            unit_w: nm("w"),
-            unit_l: nm("l"),
-            series_parallel: SeriesParallel::Parallel,
-            same_variant_required: true,
-            dummy_required: true,
-            route_matching_required: true,
-        });
-    }
-    // Uncovered bipolars of one kind and geometry on one base net are a
-    // ratioed set (a bandgap's 1:N): one array cell, units centre-out.
-    for group in bjt_groups(netlist, &covered) {
-        let dev_nf: Vec<u16> = group.iter().map(|d| multiplier(&netlist.devices[d.0 as usize])).collect();
-        let dev = &netlist.devices[group[0].0 as usize];
-        let nm = |k: &str| dev.params.iter().find(|(n, _)| n == k).map_or(0, |&(_, v)| v.clamp(0, i64::from(i32::MAX)) as i32);
-        for d in &group {
-            covered[d.0 as usize] = true;
-        }
-        unitization.push(Unitization {
-            devices: group,
-            device_type: dev.kind,
-            target_ratio: dev_nf.clone(),
-            dev_nf,
-            unit_w: nm("w"),
-            unit_l: nm("l"),
-            series_parallel: SeriesParallel::Parallel,
-            same_variant_required: true,
-            dummy_required: false,
-            route_matching_required: true,
-        });
-    }
-    // Uncovered MOS devices on the same four nets at the same W/L are one
-    // device written as several cards: one cell, one shared diffusion row.
-    for group in parallel_groups(netlist, &covered) {
-        let dev = &netlist.devices[group[0].0 as usize];
-        let nm = |k: &str| dev.params.iter().find(|(n, _)| n == k).map_or(0, |&(_, v)| v.clamp(0, i64::from(i32::MAX)) as i32);
-        let dev_nf: Vec<u16> = group.iter().map(|d| mos_fingers(&netlist.devices[d.0 as usize])).collect();
-        for d in &group {
-            covered[d.0 as usize] = true;
-        }
-        unitization.push(Unitization {
-            devices: group,
-            device_type: dev.kind,
-            target_ratio: dev_nf.clone(),
-            dev_nf,
-            unit_w: dev.mos_size().map_or(0, |s| s.w_finger_nm().min(i64::from(i32::MAX)) as i32),
-            unit_l: nm("l"),
-            series_parallel: SeriesParallel::Parallel,
-            same_variant_required: true,
-            dummy_required: false,
-            route_matching_required: false,
-        });
-    }
+    // Banks, bipolar arrays and identical parallel MOS are the annotator's
+    // matched-set Unitizations (EXT-19 moved cellgen's recognizers there).
     for (i, dev) in netlist
         .devices
         .iter()
@@ -565,9 +549,9 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
                 DeviceKind::Capacitor => SeriesParallel::Series,
                 _ => SeriesParallel::Parallel,
             },
-            same_variant_required: false,
             dummy_required: false,
             route_matching_required: false,
+            class: None, series: Vec::new(), style: None,
         });
     }
     // Fold every MOS unitization by its width class's factor: `k`× the
@@ -728,81 +712,8 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
     out
 }
 
-/// [`pnr_core::MosSize::fingers`] as a unitization count; `1` without a size.
-fn mos_fingers(d: &Device) -> u16 {
-    d.mos_size().map_or(1, |s| s.fingers().min(u32::from(u16::MAX)) as u16)
-}
-
-/// Uncovered bipolars sharing kind, W, L and base net, in netlist order;
-/// singletons left out.
-fn bjt_groups(netlist: &Netlist, covered: &[bool]) -> Vec<Vec<DeviceId>> {
-    let param = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
-    let mut groups: Vec<(_, Vec<DeviceId>)> = Vec::new();
-    for (i, d) in netlist.devices.iter().enumerate() {
-        if covered[i] || !matches!(d.kind, DeviceKind::Npn | DeviceKind::Pnp) {
-            continue;
-        }
-        let k = (d.kind, param(d, "w"), param(d, "l"), terminal(d, "B"));
-        match groups.iter_mut().find(|(g, _)| *g == k) {
-            Some((_, v)) => v.push(DeviceId(i as u16)),
-            None => groups.push((k, vec![DeviceId(i as u16)])),
-        }
-    }
-    groups.into_iter().map(|(_, v)| v).filter(|v| v.len() > 1).collect()
-}
-
-/// Uncovered MOS devices sharing kind, finger W, L and every terminal net, in
-/// netlist order; singletons are left out.
-fn parallel_groups(netlist: &Netlist, covered: &[bool]) -> Vec<Vec<DeviceId>> {
-    let key = |d: &Device| (d.kind, d.mos_size().map(|s| (s.w_finger_nm(), s.l_nm)), d.terminals.clone());
-    let mut groups: Vec<(_, Vec<DeviceId>)> = Vec::new();
-    for (i, d) in netlist.devices.iter().enumerate() {
-        if covered[i] || !matches!(d.kind, DeviceKind::Nmos | DeviceKind::Pmos) {
-            continue;
-        }
-        let k = key(d);
-        match groups.iter_mut().find(|(g, _)| *g == k) {
-            Some((_, v)) => v.push(DeviceId(i as u16)),
-            None => groups.push((k, vec![DeviceId(i as u16)])),
-        }
-    }
-    groups.into_iter().map(|(_, v)| v).filter(|v| v.len() > 1).collect()
-}
-
 fn multiplier(d: &Device) -> u16 {
     d.params.iter().find(|(n, _)| n == "m").map_or(1, |&(_, v)| v.clamp(1, i64::from(u16::MAX)) as u16)
-}
-
-/// Uncovered capacitors on one top plate (`P`), one model and one `w`×`l` whose `m` are
-/// `[1, 1, 2, …, 2^(N-1)]`: a binary-weighted DAC bank (DACP §II), members in
-/// slot order. The electrical dummy (slot 0) is the one-unit cap whose bottom
-/// plate is a MOS bulk, i.e. a rail; else the first one-unit cap listed.
-fn dac_banks(netlist: &Netlist, covered: &[bool]) -> Vec<Vec<DeviceId>> {
-    let bulks: Vec<NetId> = netlist.devices.iter().filter_map(|d| terminal(d, "B")).collect();
-    let param = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
-    let mut by_plate: Vec<((NetId, String, Option<i64>, Option<i64>), Vec<DeviceId>)> = Vec::new();
-    for (i, d) in netlist.devices.iter().enumerate() {
-        let Some(p) = terminal(d, "P").filter(|_| d.kind == DeviceKind::Capacitor && !covered[i]) else { continue };
-        let key = (p, d.model.clone(), param(d, "w"), param(d, "l"));
-        match by_plate.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, v)) => v.push(DeviceId(i as u16)),
-            None => by_plate.push((key, vec![DeviceId(i as u16)])),
-        }
-    }
-    let dev = |d: &DeviceId| &netlist.devices[d.0 as usize];
-    by_plate
-        .into_iter()
-        .filter_map(|(_, mut bank)| {
-            bank.sort_by_key(|d| multiplier(dev(d)));
-            let counts: Vec<u16> = bank.iter().map(|d| multiplier(dev(d))).collect();
-            cells::cap_array::bits(&counts)?;
-            let on_rail = |d: &DeviceId| terminal(dev(d), "N").is_some_and(|n| bulks.contains(&n));
-            if !on_rail(&bank[0]) && on_rail(&bank[1]) {
-                bank.swap(0, 1);
-            }
-            Some(bank)
-        })
-        .collect()
 }
 
 /// Every enumerated variant of one group, by device kind.
@@ -949,8 +860,9 @@ pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceI
     }
 }
 
-/// BJT terminals in LVS card order: [`reference`]'s and `Macro::drawn`'s.
-pub(crate) const BJT_PINS: [&str; 3] = ["E", "B", "C"];
+/// BJT terminals in LVS card order, collector first (GPurify `lvs/graph.rs`
+/// reads card position 0 as Collector): [`reference`]'s and `Macro::drawn`'s.
+pub(crate) const BJT_PINS: [&str; 3] = ["C", "B", "E"];
 
 /// LVS cards for everything the placed cells drew as `Macro::drawn`, and the
 /// schematic devices they replace (sorted, distinct), whose own cards
@@ -1297,9 +1209,10 @@ mod tests {
         // 3 × 2 × 1 = 6 joint assignments; the single-alternative cell is a fixed
         // digit and must not stall the odometer.
         let spaces = vec![space(3), space(2), space(1)];
+        let all = full(&spaces);
         let mut seen = vec![vec![0u16, 0, 0]];
         let mut cur = vec![0u16, 0, 0];
-        while let Some(next) = escalate(&spaces, &cur) {
+        while let Some(next) = escalate(&spaces, &all, &cur) {
             assert!(!seen.contains(&next), "escalate repeated {next:?}");
             seen.push(next.clone());
             cur = next;
@@ -1307,11 +1220,50 @@ mod tests {
         }
         assert_eq!(seen.len(), 6, "escalate stopped before covering the space");
         assert!(
-            escalate(&spaces, &cur).is_none(),
+            escalate(&spaces, &all, &cur).is_none(),
             "exhaustion must stay exhausted"
         );
         // Nothing to escalate is exhaustion, not a panic.
-        assert!(escalate(&[], &[]).is_none());
+        assert!(escalate(&[], &[], &[]).is_none());
+    }
+
+    /// Every alternative allowed: the unpruned odometer.
+    fn full(spaces: &[gp::VariantSpace]) -> Vec<Vec<u16>> {
+        spaces.iter().map(|s| (0..s.alternatives.len() as u16).collect()).collect()
+    }
+
+    /// GAP-16: the pruned odometer visits exactly the product of the allowed
+    /// sets, never a digit outside them, and stays exhausted.
+    #[test]
+    fn escalate_still_terminates() {
+        let spaces = vec![space(3), space(2), space(1)];
+        let allowed = vec![vec![0u16, 2], vec![0, 1], vec![0]];
+        let mut seen = vec![vec![0u16, 0, 0]];
+        let mut cur = vec![0u16, 0, 0];
+        while let Some(next) = escalate(&spaces, &allowed, &cur) {
+            assert!(!seen.contains(&next), "escalate repeated {next:?}");
+            assert!(next.iter().zip(&allowed).all(|(v, a)| a.contains(v)), "{next:?} outside {allowed:?}");
+            seen.push(next.clone());
+            cur = next;
+            assert!(seen.len() <= 4, "escalate exceeded the allowed space");
+        }
+        assert_eq!(seen.len(), 4);
+        assert!(escalate(&spaces, &allowed, &cur).is_none());
+    }
+
+    /// GAP-16: an alternative no better in DRC, w and h than another, and
+    /// worse in one, is dropped; an incomparable one stays.
+    #[test]
+    fn a_dominated_alternative_is_pruned() {
+        assert_eq!(keep(&[(0, 100, 100), (0, 200, 100), (1, 100, 100), (0, 50, 300)], 0, false), [0, 3]);
+    }
+
+    /// GAP-16: matched cells keep every alternative, and the seed survives
+    /// even when dominated.
+    #[test]
+    fn matched_cells_are_never_pruned() {
+        assert_eq!(keep(&[(0, 100, 100), (0, 200, 100), (1, 100, 100), (0, 50, 300)], 0, true), [0, 1, 2, 3]);
+        assert_eq!(keep(&[(0, 50, 50), (0, 100, 100)], 1, false), [0, 1]);
     }
 
     /// Two matched NMOS on a shared source (tail), distinct gates and drains — the
@@ -1364,9 +1316,9 @@ mod tests {
                 unit_w: 1000,
                 unit_l: 210,
                 series_parallel: SeriesParallel::Parallel,
-                same_variant_required: true,
                 dummy_required: false,
                 route_matching_required: false,
+                class: None, series: Vec::new(), style: None,
             }],
             ..Default::default()
         }
@@ -1764,7 +1716,7 @@ mod tests {
 
         let mut cur = vec![0u16];
         let mut seen = vec![cur.clone()];
-        while let Some(next) = escalate(spaces, &cur) {
+        while let Some(next) = escalate(spaces, &full(spaces), &cur) {
             assert!(!seen.contains(&next), "escalate repeated {next:?}");
             seen.push(next.clone());
             cur = next;
@@ -1784,8 +1736,10 @@ mod tests {
         let pdk = pdk();
         let netlist = two_devices();
         let cells = enumerate(&netlist, &Macros::default(), &Constraints::default(), &pdk, true);
-        let a = seed_assignment(&cells.spaces, &pdk);
-        let b = seed_assignment(&cells.spaces, &pdk);
+        let matched = vec![false; cells.spaces.len()];
+        let (a, allowed) = seed_assignment(&cells.spaces, &matched, &[], &pdk);
+        let (b, _) = seed_assignment(&cells.spaces, &matched, &[], &pdk);
+        assert!(a.iter().zip(&allowed).all(|(v, row)| row.contains(v)), "the seed is always allowed");
         assert_eq!(a, b);
         assert_eq!(a.len(), cells.spaces.len());
         for (i, &v) in a.iter().enumerate() {
@@ -1819,7 +1773,9 @@ mod tests {
             nets,
             ..Default::default()
         };
-        let cells = enumerate(&netlist, &Macros::default(), &Constraints::default(), &pdk, true);
+        // The bank is the annotator's matched set since EXT-19 (cellgen's `dac_banks` moved there).
+        let annot = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default())).constraints;
+        let cells = enumerate(&netlist, &Macros::default(), &annot, &pdk, true);
         let bank = &cells.devices_of[cells.cell_of[0] as usize];
         assert_eq!(bank, &[DeviceId(3), DeviceId(0), DeviceId(1), DeviceId(2)], "dummy first, then by weight");
         let alts = &cells.spaces[cells.cell_of[0] as usize].alternatives;
@@ -1837,6 +1793,30 @@ mod tests {
         let u = sized.unitization.iter().find(|u| u.devices == [DeviceId(0)]).expect("a 1-device unitization");
         assert_eq!(u.dev_nf, vec![2], "drawn units");
         assert_eq!(reference(&netlist, None, &[]).devices.len(), 2, "one reference card per drawn unit");
+    }
+
+    /// BJT cards are collector first, schematic and drawn alike (GPurify reads
+    /// card position 0 as Collector).
+    #[test]
+    fn a_bjt_reference_is_collector_first() {
+        let pdk = pdk();
+        let mut netlist = crate::parse(include_str!("../../../benchmarks/fixtures/bjt_mirror.spice")).expect("parses");
+        crate::deck_models(&mut netlist, &pdk);
+        let r = reference(&netlist, None, &[]);
+        assert_eq!(r.devices[0].terminals, ["outn", "in", "VSS"]);
+        let q2 = netlist.devices.iter().position(|d| d.name == "XQ2").unwrap();
+        assert_eq!(netlist.devices[q2].kind, DeviceKind::Pnp);
+        let group = DeviceGroup { devices: vec![DeviceId(q2 as u16)] };
+        let sized = with_per_device_sizing(&netlist, &Constraints::default(), &folds(&netlist, &pdk, &[], &[]));
+        let mut m = draw_variants(DeviceKind::Pnp, &netlist.devices[q2].model, &group, &sized, &pdk)
+            .into_iter()
+            .next()
+            .expect("a PNP variant");
+        bind_pins(&mut m, &netlist, &group.devices, None);
+        let names: Vec<String> = netlist.nets.iter().map(|n| n.name.clone()).collect();
+        let (cards, _) = drawn_cards(&[m], &names, &netlist, &pdk);
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].terminals, ["outp", "in", "VDD"]);
     }
 
     /// A 2-segment resistor's drawn cards: one per segment, joined by the
@@ -1869,5 +1849,58 @@ mod tests {
         let (cards, _) = drawn_cards(&[m], &names, &netlist, &pdk);
         assert_eq!(cards.len(), 2, "{cards:?}");
         assert!(cards.iter().any(|c| c.terminals.iter().any(|t| t == "~0.0.no-P")), "{cards:?}");
+    }
+
+    /// GAP-18: a ranked cell seeds at alternative 0 whatever its prices; unranked keeps `(DRC+ERC, HPWL)` with
+    /// index ties.
+    #[test]
+    fn ranked_cells_seed_at_their_first_alternative() {
+        assert_eq!(seed_of(&[(1, 5), (0, 90), (0, 10)], false), 2);
+        assert_eq!(seed_of(&[(1, 5), (0, 90), (0, 10)], true), 0);
+        assert_eq!(seed_of(&[(9, 9), (0, 1)], true), 0);
+    }
+
+    /// GAP-18 acceptance: dac4's bank, annotated Exceptional, draws its lowest-M_sys variant as alternative 0
+    /// and the flow seeds it (`seed_assignment(...).0[ci] == 0`; non-vacuous: the unranked seed differs).
+    #[test]
+    fn exceptional_dac4_seeds_the_lowest_msys() {
+        let pdk = pdk();
+        let mut nl = crate::parse(include_str!("../../../benchmarks/fixtures/dac4.spice")).expect("parses");
+        crate::deck_models(&mut nl, &pdk);
+        let id = |n: &str| DeviceId(nl.devices.iter().position(|d| d.name == n).unwrap_or_else(|| panic!("{n}")) as u16);
+        let devices: Vec<DeviceId> = ["XC0", "XC1", "XC2", "XC3", "XC4"].into_iter().map(id).collect();
+        let c = Constraints {
+            unitization: vec![Unitization {
+                devices: devices.clone(),
+                device_type: DeviceKind::Capacitor,
+                dev_nf: vec![1, 1, 2, 4, 8],
+                target_ratio: vec![1, 1, 2, 4, 8],
+                unit_w: 2000,
+                unit_l: 2000,
+                series_parallel: SeriesParallel::Parallel,
+                dummy_required: true,
+                route_matching_required: true,
+                class: Some(pnr_core::MatchClass::Exceptional), series: Vec::new(), style: None,
+            }],
+            ..Default::default()
+        };
+        let cells = enumerate(&nl, &Macros::default(), &c, &pdk, false);
+        let ci = usize::from(cells.cell_of[devices[0].0 as usize]);
+        assert_eq!(cells.devices_of[ci], devices, "the bank is one cell");
+        let group = DeviceGroup { devices };
+        let model = &nl.devices[group.devices[0].0 as usize].model;
+        let recipe = pdk.recipe("capacitor", model).expect("cap_generic_m1m2 has a capacitor recipe");
+        let p = verify::pdk::Overlay { pdk: &pdk, recipe };
+        let variants = CapArray::enumerate(&group, &c, &p);
+        let ms: Vec<f64> = variants.iter().map(|v| v.metrics(&group, &c, &p, cells::cap_array::RANK_G_PER_UM).msys).collect();
+        assert!(ms.iter().any(|&m| m > ms[0]), "vacuous: every variant has M_sys {ms:?}");
+        assert!(ms.iter().all(|&m| ms[0] <= m), "variant 0 is not the lowest M_sys: {ms:?}");
+        assert!(cells.spaces[ci].alternatives[0].shapes == variants[0].draw(&group, &c, &p).shapes, "alternative 0 is not the ranked first variant");
+        let mut ranked = vec![false; cells.spaces.len()];
+        ranked[ci] = true;
+        let matched = vec![true; cells.spaces.len()];
+        assert_eq!(seed_assignment(&cells.spaces, &matched, &ranked, &pdk).0[ci], 0, "the ranked bank seeds at its best-matching variant");
+        // Non-vacuous: unranked, the same bank seeds elsewhere (fewer x.22 findings on variant 1).
+        assert_ne!(seed_assignment(&cells.spaces, &matched, &[], &pdk).0[ci], 0, "ranking does not change the seed here");
     }
 }

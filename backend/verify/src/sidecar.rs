@@ -27,7 +27,8 @@ pub enum Kind {
     Bool,
     /// Any number.
     Real,
-    /// Array of integers, one per matching tier.
+    /// Array of exactly 3 (MIN, MOD, EXC; index = `MatchClass as usize`), each a
+    /// non-negative integer or `null` (the process does not state that tier).
     Tier,
     Text,
     /// Array of strings.
@@ -60,9 +61,12 @@ use Kind::{Bool, Count, Layers, List, Nm, Real, Table, Text, Tier};
 
 /// Every key, alphabetical. `<name>_source` of a registered key is implied.
 pub const KEYS: &[Key] = &[
+    k("abeta_n_pct_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
+    k("abeta_p_pct_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("antenna_source", Text, false, false, "provenance of the deck's antenna rules"),
     k("avt_n_mv_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("avt_p_mv_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
+    k("bjt_ka_pct_um", Real, false, true, "unread (EXT-20)"),
     k("bjt_max_emitter_stripe", Nm, false, false, "unread"),
     k("bjt_min_emitter_side", Nm, true, false, "kernel/cells/src/bjt.rs"),
     k("bjt_stripe_gap", Nm, false, false, "unread"),
@@ -128,8 +132,11 @@ pub const KEYS: &[Key] = &[
     k("sd_width", Nm, true, false, "kernel/cells/src/mosfet.rs"),
     k("sheet_tolerance", Table, false, false, "unread"),
     k("substrate_kind", Text, false, true, "frontend/library/src/lib.rs annotation (\"bulk\" | \"epi_on_pplus\" | null)"),
+    k("svt_a_uv2_per_um2", Real, false, true, "frontend/library/src/lib.rs annotation"),
+    k("svt_b_uv2", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("svt_uv_per_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("tie_max_dist_nm", Nm, false, true, "unread"),
+    k("vbe_tc_uv_per_k", Real, false, true, "unread (EXT-20)"),
     k("via_enclosure", Nm, false, false, "kernel/cells/src/builder.rs dim (raises the deck's)"),
     k("via_spacing", Nm, false, false, "kernel/cells/src/builder.rs dim (raises the deck's)"),
     k("vt_tc_uv_per_k", Real, false, true, "frontend/library/src/lib.rs annotation"),
@@ -169,7 +176,7 @@ pub fn validate(cell: &Value) -> Vec<String> {
             Count => v.is_u64(),
             Bool => v.is_boolean(),
             Real => v.is_number(),
-            Tier => v.as_array().is_some_and(|a| a.iter().all(Value::is_i64)),
+            Tier => v.as_array().is_some_and(|a| a.len() == 3 && a.iter().all(|e| e.is_null() || e.is_u64())),
             Text => v.is_string(),
             List => v.as_array().is_some_and(|a| a.iter().all(Value::is_string)),
             Table | Layers => v.is_object(),

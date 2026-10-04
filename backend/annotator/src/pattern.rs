@@ -27,6 +27,10 @@ pub enum SlotKind {
     AnyFet,
     SameTypeAs(u8),
     ComplementOf(u8),
+    /// Exactly this device kind (EXT-19: bipolar slots).
+    Kind(DeviceKind),
+    /// The same device kind as slot `r`, any family.
+    SameKindAs(u8),
 }
 
 /// Size relation to slot `r`, over [`Drawn`]: `ExactAs` is [`size::exact_as`] (known
@@ -111,20 +115,28 @@ pub(crate) fn pins(hg: &BipartiteHypergraph) -> Vec<[Option<NetId>; 8]> {
         .collect()
 }
 
-/// [`on_pin`] column half: 0 NMOS, 1 PMOS.
+/// [`on_pin`] column half: 0 NMOS or NPN, 1 PMOS or PNP.
 fn pol(k: DeviceKind) -> usize {
-    usize::from(k == DeviceKind::Pmos)
+    usize::from(matches!(k, DeviceKind::Pmos | DeviceKind::Pnp))
 }
 
-/// Per net, the FETs with [`pin_index`] pin `i` on that net and polarity [`pol`]
+fn fet(k: DeviceKind) -> bool {
+    matches!(k, DeviceKind::Nmos | DeviceKind::Pmos)
+}
+
+fn bjt(k: DeviceKind) -> bool {
+    matches!(k, DeviceKind::Npn | DeviceKind::Pnp)
+}
+
+/// Per net, the FETs and BJTs with [`pin_index`] pin `i` on that net and polarity [`pol`]
 /// `p` at column `2i + p` (ascending id), so a candidate list holds only devices
 /// that can satisfy the link and the slot's polarity: a rail's thousands of
 /// sources never stand in for its few drains, nor NMOS for PMOS. Other kinds
-/// are left out ([`slot_ok`] rejects them).
+/// are left out (no pattern slot takes them).
 pub(crate) fn on_pin(hg: &BipartiteHypergraph, pins: &[[Option<NetId>; 8]]) -> Vec<[Vec<u32>; 16]> {
     let mut on = vec![<[Vec<u32>; 16]>::default(); hg.net_devices.len()];
     for (d, row) in pins.iter().enumerate() {
-        if !matches!(hg.kinds[d], DeviceKind::Nmos | DeviceKind::Pmos) {
+        if !fet(hg.kinds[d]) && !bjt(hg.kinds[d]) {
             continue;
         }
         for (i, n) in row.iter().enumerate() {
@@ -140,21 +152,30 @@ fn pin_of(pins: &[[Option<NetId>; 8]], cell: u32, pin: &str) -> Option<NetId> {
     pin_index(pin).and_then(|i| pins[cell as usize][i])
 }
 
-fn is_diode(pins: &[[Option<NetId>; 8]], cell: u32) -> bool {
-    let d = pin_of(pins, cell, "D");
-    d.is_some() && d == pin_of(pins, cell, "G")
+/// FET `D == G` or BJT `C == B`.
+fn is_diode(pins: &[[Option<NetId>; 8]], kind: DeviceKind, cell: u32) -> bool {
+    let (d, g) = if bjt(kind) { ("C", "B") } else { ("D", "G") };
+    let d = pin_of(pins, cell, d);
+    d.is_some() && d == pin_of(pins, cell, g)
 }
 
-/// The part of [`slot_ok`] that reads no other slot: a FET, diode and gate rules.
+/// The part of [`slot_ok`] that reads no other slot: the family, diode and
+/// gate (a BJT's base) rules.
 fn unary_ok(slot: &Slot, s: &Search, cell: u32) -> bool {
+    let k = s.hg.kinds[cell as usize];
     let diode_ok = match slot.diode {
-        DiodeReq::Required => is_diode(s.pins, cell),
-        DiodeReq::Forbidden => !is_diode(s.pins, cell),
+        DiodeReq::Required => is_diode(s.pins, k, cell),
+        DiodeReq::Forbidden => !is_diode(s.pins, k, cell),
         DiodeReq::Any => true,
     };
     let gate_ok = !slot.gate_is_signal
-        || pin_of(s.pins, cell, "G").map_or(true, |n| s.roles[n.0 as usize] == NetRole::Signal);
-    matches!(s.hg.kinds[cell as usize], DeviceKind::Nmos | DeviceKind::Pmos) && diode_ok && gate_ok
+        || pin_of(s.pins, cell, if bjt(k) { "B" } else { "G" }).map_or(true, |n| s.roles[n.0 as usize] == NetRole::Signal);
+    let family_ok = match slot.kind {
+        SlotKind::AnyFet | SlotKind::SameTypeAs(_) | SlotKind::ComplementOf(_) => fet(k),
+        SlotKind::Kind(want) => k == want,
+        SlotKind::SameKindAs(_) => true,
+    };
+    family_ok && diode_ok && gate_ok
 }
 
 /// `assigned` is indexed by slot; every slot `slot` refers to is assigned ([`slot_order`]).
@@ -169,6 +190,8 @@ fn slot_ok(slot: &Slot, s: &Search, cell: u32, assigned: &[u32]) -> bool {
         SlotKind::AnyFet => true,
         SlotKind::SameTypeAs(r) => kind(other(r)) == dt,
         SlotKind::ComplementOf(r) => kind(other(r)) != dt && matches!(kind(other(r)), DeviceKind::Nmos | DeviceKind::Pmos),
+        SlotKind::Kind(_) => true,
+        SlotKind::SameKindAs(r) => kind(other(r)) == dt,
     };
     let (g, gr) = (&s.drawn[cell as usize], |r: u8| &s.drawn[other(r) as usize]);
     let size_ok = match slot.size_match {
@@ -212,8 +235,8 @@ fn slot_order(p: &Pattern) -> Vec<usize> {
         let refs_placed = |k: usize| {
             let s = &p.slots[k];
             let kr = match s.kind {
-                SlotKind::AnyFet => None,
-                SlotKind::SameTypeAs(r) | SlotKind::ComplementOf(r) => Some(r),
+                SlotKind::AnyFet | SlotKind::Kind(_) => None,
+                SlotKind::SameTypeAs(r) | SlotKind::ComplementOf(r) | SlotKind::SameKindAs(r) => Some(r),
             };
             let sr = match s.size_match {
                 SizeMatch::Any => None,
@@ -276,6 +299,8 @@ impl Search<'_> {
             SlotKind::AnyFet => 0..2,
             SlotKind::SameTypeAs(r) => at(r)..at(r) + 1,
             SlotKind::ComplementOf(r) => 1 - at(r)..2 - at(r),
+            SlotKind::Kind(k) => pol(k)..pol(k) + 1,
+            SlotKind::SameKindAs(r) => at(r)..at(r) + 1,
         };
         let mut best: Option<(NetId, usize)> = None;
         for l in self.pat.links.iter().filter(|l| matches!(l.rel, PinRel::Same | PinRel::SameSignal)) {

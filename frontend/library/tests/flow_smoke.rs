@@ -76,4 +76,6 @@ fn matched_sets_are_reported() {
         assert!(r.allowance == 0.0 && r.sizing_limited, "{r:?}");
         assert!(r.usage > 1.0 || r.sigma_layout + r.mu_thermal + r.mu_lod == 0.0, "{r:?}");
     }
+    // GAP-02: the same shortfall is named as a sizing note, once.
+    assert_eq!(sol.metadata.sizing.iter().filter(|n| n.members == (0, 1) && n.kind == "budget_area").count(), 1);
 }

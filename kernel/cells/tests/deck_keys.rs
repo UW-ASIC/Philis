@@ -81,9 +81,9 @@ fn group_of(kind: DeviceKind, dev_nf: &[u16], w: i32, l: i32, dummy_required: bo
         unit_w: w,
         unit_l: l,
         series_parallel: sp,
-        same_variant_required: true,
         dummy_required,
         route_matching_required: dummy_required,
+        class: None, series: Vec::new(), style: None,
     });
     (group, c)
 }

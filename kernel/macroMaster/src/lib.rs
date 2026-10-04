@@ -17,9 +17,9 @@ mod adapter;
 
 pub use pnr_core::Process;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use pnr_core::{Device, DeviceKind, Dir, LayerId, Macro, Net, NetId, Netlist, Pin, Rect};
+use pnr_core::{Device, DeviceKind, Dir, LayerId, Macro, Net, NetId, Netlist, Orient, Pin, Rect};
 
 // ===========================================================================
 //  Typed IO
@@ -123,6 +123,15 @@ pub enum GenError {
     OffGrid,
     /// A placed instance's bbox overlaps an already-placed one.
     Overlap,
+    /// [`CompBuilder::place_mirrored`] would reverse the named instance's net
+    /// current direction (an odd-finger device): use
+    /// [`CompBuilder::place_copy`].
+    Orientation(String),
+    /// Two placed instances share this name.
+    DuplicateName(String),
+    /// A connect endpoint that is neither an io port nor a pin or device
+    /// terminal of a placed instance.
+    UnknownTerminal(String),
 }
 
 // ===========================================================================
@@ -181,6 +190,24 @@ impl Instance {
         self.transform(|r| Rect { x: r.x + dx, y: r.y + dy, ..r });
     }
 
+    /// Apply `o` about the bbox origin: the bbox keeps its lower-left corner,
+    /// and each unit's centre and current direction turn with the geometry.
+    pub fn orient(&mut self, o: Orient) {
+        let b = self.bbox();
+        let nb = o.apply_rect(b);
+        let (dx, dy) = (b.x - nb.x, b.y - nb.y);
+        self.transform(|r| {
+            let r = o.apply_rect(r);
+            Rect { x: r.x + dx, y: r.y + dy, ..r }
+        });
+        for u in &mut self.mac.units {
+            let (px, py) = o.apply(i32::from(u.phi.0), i32::from(u.phi.1));
+            u.phi = (px as i8, py as i8);
+        }
+    }
+
+    /// Map bbox, shapes, pins and unit centres (as zero-size rects) by `f`.
+    /// Unit directions and dummies are left as they are.
     fn transform(&mut self, f: impl Fn(Rect) -> Rect) {
         self.mac.bbox = f(self.mac.bbox);
         for s in &mut self.mac.shapes {
@@ -189,6 +216,15 @@ impl Instance {
         for p in &mut self.mac.pins {
             p.at = f(p.at);
         }
+        for u in &mut self.mac.units {
+            let r = f(Rect { x: u.x, y: u.y, w: 0, h: 0 });
+            (u.x, u.y) = (r.x, r.y);
+        }
+    }
+
+    /// Σ of the units' current directions: what a mirror must preserve.
+    fn phi_sum(&self) -> (i32, i32) {
+        self.mac.units.iter().fold((0, 0), |(x, y), u| (x + i32::from(u.phi.0), y + i32::from(u.phi.1)))
     }
 }
 
@@ -338,19 +374,41 @@ impl<P: Process> CompBuilder<'_, P> {
     }
 
     /// Place `inst` as `reference`'s mirror partner about a vertical axis
-    /// `gap / 2` (snapped up to grid) right of `reference`.
+    /// `gap / 2` (snapped up to grid) right of `reference`. When both carry
+    /// units, a mirror that changes Σ current direction (an odd-finger MOS) ⇒
+    /// [`GenError::Orientation`]: the pair would not match.
     pub fn place_mirrored(&mut self, mut inst: Instance, reference: &Instance, gap: i32) -> Result<Instance, GenError> {
         let g = self.process.grid().max(1);
         let (a, b) = (reference.bbox(), inst.bbox());
         let axis = (a.x + a.w + gap / 2 + g - 1) / g * g;
         let (dx, dy) = (a.x - b.x, a.y - b.y);
         inst.transform(|r| Rect { x: 2 * axis - (r.x + dx + r.w), y: r.y + dy, ..r });
+        for u in &mut inst.mac.units {
+            u.phi.0 = -u.phi.0;
+        }
+        if !inst.mac.units.is_empty() && !reference.mac.units.is_empty() && inst.phi_sum() != reference.phi_sum() {
+            return Err(GenError::Orientation(inst.name));
+        }
         self.place(inst)
     }
 
-    /// Commit `inst` where it stands; overlap with any placed instance ⇒
-    /// [`GenError::Overlap`]. Returns the placed handle.
+    /// Place `inst` as a translated copy right of `reference` (bottoms
+    /// aligned, `gap` between): the matching partner for a device a mirror
+    /// would reverse.
+    pub fn place_copy(&mut self, mut inst: Instance, reference: &Instance, gap: i32) -> Result<Instance, GenError> {
+        inst.align(AlignMode::Bottom, reference, 0);
+        self.place_by(inst, AlignMode::ToTheRight, reference, gap)
+    }
+
+    /// Commit `inst` where it stands. A name already placed ⇒
+    /// [`GenError::DuplicateName`], a bbox off the grid ⇒ [`GenError::OffGrid`],
+    /// overlap with any placed instance ⇒ [`GenError::Overlap`]. Returns the
+    /// placed handle.
     pub fn place(&mut self, inst: Instance) -> Result<Instance, GenError> {
+        if self.placed.iter().any(|p| p.name == inst.name) {
+            return Err(GenError::DuplicateName(inst.name));
+        }
+        check_grid(inst.bbox(), self.process.grid())?;
         if self.placed.iter().any(|p| overlaps(p.bbox(), inst.bbox())) {
             return Err(GenError::Overlap);
         }
@@ -409,6 +467,18 @@ pub fn build_with<P: Process>(
     let mut c = CompBuilder { process, placed: Vec::new(), edges: Vec::new() };
     f(&mut c)?;
     let CompBuilder { placed, edges, .. } = c;
+    // Every endpoint names an io port, or a pin, device terminal or imported
+    // edge endpoint of a placed instance.
+    let mut known: HashSet<String> = ports.iter().cloned().collect();
+    for i in &placed {
+        let q = |t: &str| format!("{}.{t}", i.name);
+        known.extend(i.mac.pins.iter().map(|p| q(&p.name)));
+        known.extend(i.devices.iter().flatten().flat_map(|(_, d)| d.terminals.iter().map(|(_, port)| q(port))));
+        known.extend(i.edges.iter().flat_map(|(a, b)| [q(a), q(b)]));
+    }
+    if let Some(t) = edges.iter().flat_map(|(a, b)| [a, b]).find(|t| !known.contains(*t)) {
+        return Err(GenError::UnknownTerminal(t.clone()));
+    }
 
     // Qualify each instance's devices and ports by its name (`x1` + `m1` ⇒
     // `x1.m1`), the same keys the pins get. One opaque instance ⇒ no netlist.
@@ -491,6 +561,9 @@ pub mod variants {
             let (d, t) = p.name.split_once(':').unwrap_or(("d0", &p.name));
             let di = d.trim_start_matches('d').parse().unwrap_or(0);
             cell.pin(&rename(di, t), p.layer, p.at)?;
+        }
+        for &u in &mac.units {
+            cell.builder.unit(u);
         }
         Ok(())
     }

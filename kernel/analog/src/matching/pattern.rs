@@ -153,6 +153,23 @@ pub fn centro_assign(counts: &[u16], rows: usize, cols: usize, fill: Fill) -> (V
     (g.slot, exact)
 }
 
+/// Segment order of one resistor row (`centro_assign(counts, 1, Σc, Fill::Balanced)`): point-symmetric, second
+/// moments balanced; `exact` false when ≥ 2 members have odd counts ([`scale2`] gives the exact doubled counts).
+/// Resistor segments carry no diffusion constraint: any order is legal.
+#[must_use]
+pub fn segment_row(counts: &[u16]) -> (Vec<usize>, bool) {
+    let total = counts.iter().map(|&c| usize::from(c)).sum();
+    let (slots, exact) = centro_assign(counts, 1, total, Fill::Balanced);
+    (slots.into_iter().map(|s| usize::from(s.expect("a 1×Σc row has no empty slot"))).collect(), exact)
+}
+
+/// Every count ×2 when ≥ 2 counts are odd, else unchanged.
+#[must_use]
+pub fn scale2(counts: &[u16]) -> Vec<u16> {
+    let k = if cc_feasible(counts) { 1 } else { 2 };
+    counts.iter().map(|&c| c * k).collect()
+}
+
 /// A row-major unit grid under construction. Point reflection through the
 /// centre is index reversal: `(R-1-r)·C + (C-1-c) = RC-1-i`.
 pub struct Grid {
@@ -278,6 +295,55 @@ pub enum Outer {
 #[must_use]
 pub fn diffusion_legal(s: &[usize], outer: Outer) -> bool {
     s.windows(2).enumerate().all(|(i, w)| w[0] == w[1] || ((i + 1) % 2 == 1) == (outer == Outer::Drain))
+}
+
+/// Rows of a two-member pattern (labels 0/1) cancelling gradient orders
+/// 1..=order: `P_1 = [row]`; `P_n = P_{n−1}` stacked on `rot180(P_{n−1})`
+/// (rows reversed, each row reversed), labels swapped when `n` is even (NTH
+/// §III, nth_order.txt L94–119, L154–222). `2^(order−1)` rows; empty for
+/// order 0. Vertical stacking only: every row stays `row` or its label
+/// swap/reversal, so a diffusion-legal `row` of even length stays legal.
+/// Odd length breaks this: reversal maps window `i` to `len−2−i`, flipping
+/// the parity `diffusion_legal` ties label changes to (`[0,1,1]` is legal,
+/// its order-2 row `[0,0,1]` is not).
+#[must_use]
+pub fn nth_order_rows(order: u8, row: &[u8]) -> Vec<Vec<u8>> {
+    if order == 0 {
+        return Vec::new();
+    }
+    let mut p = vec![row.to_vec()];
+    for n in 2..=order {
+        let rot = p.iter().rev().map(|r| r.iter().rev().map(|&l| if n % 2 == 0 { 1 - l } else { l }).collect::<Vec<u8>>()).collect::<Vec<_>>();
+        p.extend(rot);
+    }
+    let legal = |r: &[u8]| diffusion_legal(&r.iter().map(|&l| usize::from(l)).collect::<Vec<_>>(), Outer::Drain);
+    debug_assert!(row.len() % 2 == 1 || !legal(row) || p.iter().all(|r| legal(r)));
+    p
+}
+
+/// Hastings eqs 8.27/8.28 sweep (hastings.txt L23725–23859): for `N` in
+/// `1..=n_max`, `M = round(N·R_M/R_N)`, `S = |N/R_N − M/R_M|` (1/Ω).
+/// Unsorted, index `N − 1`; returns `(N, M, S)`.
+#[must_use]
+pub fn segmentation(r_n_ohm: f64, r_m_ohm: f64, n_max: u16) -> Vec<(u16, u16, f64)> {
+    (1..=n_max)
+        .map(|n| {
+            let m = (f64::from(n) * r_m_ohm / r_n_ohm).round();
+            (n, m as u16, (f64::from(n) / r_n_ohm - m / r_m_ohm).abs())
+        })
+        .collect()
+}
+
+/// Hastings eqs 8.29–8.33 at one segment value `R0`: `M = ⌊R_M/R0⌋`,
+/// `j = R_M/R0 − M`, `N = ⌊R_N/R0⌋`, `k = R_N/R0 − N`,
+/// `S = |(N+1)/(N+k) − (M+1)/(M+j)|` as printed (GAP-20: Fig. 8.20 swaps `j`
+/// and `k`). Returns `(M, N, j, k, S)`.
+#[must_use]
+pub fn partial_segments(r_n_ohm: f64, r_m_ohm: f64, r0_ohm: f64) -> (u16, u16, f64, f64, f64) {
+    let (qm, qn) = (r_m_ohm / r0_ohm, r_n_ohm / r0_ohm);
+    let (m, n) = (qm.floor(), qn.floor());
+    let (j, k) = (qm - m, qn - n);
+    (m as u16, n as u16, j, k, ((n + 1.0) / (n + k) - (m + 1.0) / (m + j)).abs())
 }
 
 /// Deals `p` reflected pairs of fingers at `seq[off..off + 2p]` in quads
@@ -409,6 +475,57 @@ pub fn diffusion_cc_row(counts: &[u16], outer: Outer) -> Option<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matching::moments::{cancelled_order, Pt};
+
+    /// A/B string → per-member positions (pitch units about the row centre).
+    fn members(row: &str) -> [Vec<f64>; 2] {
+        let c = (row.len() as f64 - 1.0) / 2.0;
+        let pos = |m| row.chars().enumerate().filter(|&(_, ch)| ch == m).map(|(i, _)| i as f64 - c).collect();
+        [pos('A'), pos('B')]
+    }
+
+    /// |⟨x²⟩_A − ⟨x²⟩_B| per unit.
+    fn dm(row: &str) -> f64 {
+        let m2 = |v: &Vec<f64>| v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64;
+        let [a, b] = members(row);
+        (m2(&a) - m2(&b)).abs()
+    }
+
+    #[test]
+    fn table_8_5_every_ratio_is_exact_and_no_worse() {
+        // (counts, Hastings Table 8.5 book string, generated, generated |ΔM|).
+        let table: [(&[u16], &str, &str, f64); 10] = [
+            (&[2, 2], "ABBA", "ABBA", 2.0),
+            (&[2, 1], "ABA", "ABA", 1.0),
+            (&[4, 1], "AABAA", "AABAA", 2.5),
+            (&[4, 3], "ABABABA", "ABABABA", 2.333),
+            (&[5, 2], "AABABAA", "ABAAABA", 0.0),
+            (&[10, 2], "AAABAAAABAAA", "AABAAAAAABAA", 0.4),
+            (&[10, 6], "ABAABABAABABAABA", "ABABAAABBAAABABA", 0.533),
+            (&[3, 2], "ABABA", "ABABA", 1.667),
+            (&[6, 2], "AABAABAA", "ABAAAABA", 1.333),
+            (&[5, 4], "ABABABABA", "ABBAAABBA", 0.300),
+        ];
+        for (counts, book, generated, want) in table {
+            let (row, exact) = segment_row(counts);
+            let s: String = row.iter().map(|&m| if m == 0 { 'A' } else { 'B' }).collect();
+            assert_eq!((s.as_str(), exact), (generated, true), "{counts:?}");
+            let n = |r: &str, ch| r.chars().filter(|&c| c == ch).count() as u16;
+            assert_eq!([n(book, 'A'), n(book, 'B')], [counts[0], counts[1]], "{book}");
+            let pts = members(generated).map(|v| v.iter().map(|&x| Pt { x, y: 0.0, w: 1.0, phi: (0, 0) }).collect::<Vec<_>>());
+            assert!(cancelled_order(&[&pts[0], &pts[1]], 4, 1e-3).0 >= 1, "{generated}");
+            assert!((dm(generated) - want).abs() < 1e-3, "{generated}: {}", dm(generated));
+            assert!(dm(generated) <= dm(book) + 1e-9, "{generated} vs {book}");
+        }
+    }
+
+    #[test]
+    fn scale2_makes_two_odd_members_exact() {
+        assert_eq!(scale2(&[3, 1]), vec![6, 2]);
+        assert!(segment_row(&[6, 2]).1);
+        assert!(!segment_row(&[3, 1]).1);
+        assert_eq!(scale2(&[4, 1]), vec![4, 1]);
+    }
 
     fn owners(slot: &[Option<u8>]) -> String {
         slot.iter().map(|s| s.map_or('_', |d| char::from(b'0' + d))).collect()
@@ -566,5 +683,70 @@ mod tests {
             assert_eq!(sum, 0, "member {d} off centre");
         }
         assert_eq!(letters(&diffusion_cc_row(&[4, 8], Outer::Drain).unwrap()), "ABBBBAABBBBA");
+    }
+
+    /// `rows` → per-member unit points (col, row), weight 1.
+    fn grid(rows: &[Vec<u8>]) -> [Vec<Pt>; 2] {
+        let mut m = [Vec::new(), Vec::new()];
+        for (r, row) in rows.iter().enumerate() {
+            for (c, &l) in row.iter().enumerate() {
+                m[usize::from(l)].push(Pt { x: c as f64, y: r as f64, w: 1.0, phi: (1, 0) });
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn nth_order_rows_cancel_their_order() {
+        for order in 1..=4u8 {
+            let rows = nth_order_rows(order, &[0, 1, 1, 0]);
+            assert_eq!(rows.len(), 1 << (order - 1));
+            let [a, b] = grid(&rows);
+            assert_eq!((a.len(), b.len()), (1 << order, 1 << order));
+            let (got, r) = cancelled_order(&[&a, &b], 4, 1e-9);
+            assert_eq!(got, order, "{r:?}");
+            if order < 4 {
+                assert!(r[usize::from(order) + 1] > 1e-6, "{order}: {r:?}");
+            }
+        }
+        assert!(nth_order_rows(0, &[0, 1, 1, 0]).is_empty());
+    }
+
+    #[test]
+    fn order_three_is_nth_fig_3b() {
+        assert_eq!(nth_order_rows(3, &[0, 1, 1, 0]), vec![vec![0, 1, 1, 0], vec![1, 0, 0, 1], vec![1, 0, 0, 1], vec![0, 1, 1, 0]]);
+    }
+
+    #[test]
+    fn nth_rows_are_diffusion_legal() {
+        for order in 1..=4 {
+            for r in nth_order_rows(order, &[0, 1, 1, 0]) {
+                let s: Vec<usize> = r.iter().map(|&l| usize::from(l)).collect();
+                assert!(diffusion_legal(&s, Outer::Drain), "{order}: {r:?}");
+            }
+        }
+        // Odd length: legal input, illegal order-2 row (documented limit).
+        assert!(diffusion_legal(&[0, 1, 1], Outer::Drain));
+        assert_eq!(nth_order_rows(2, &[0, 1, 1]), vec![vec![0, 1, 1], vec![0, 0, 1]]);
+        assert!(!diffusion_legal(&[0, 0, 1], Outer::Drain));
+    }
+
+    #[test]
+    fn segmentation_reproduces_fig_8_19() {
+        let mut s = segmentation(146e3, 200e3, 15);
+        assert_eq!(s.len(), 15);
+        assert_eq!(s[7].0, 8);
+        s.sort_by(|a, b| a.2.total_cmp(&b.2));
+        for (got, (n, m, v)) in s.iter().zip([(8, 11, 2.05e-7), (11, 15, 3.42e-7), (3, 4, 5.48e-7)]) {
+            assert_eq!((got.0, got.1), (n, m), "{s:?}");
+            assert!((got.2 - v).abs() < 0.01e-7, "{got:?}");
+        }
+    }
+
+    #[test]
+    fn partial_segments_reproduces_the_book_decomposition() {
+        let (m, n, j, k, _) = partial_segments(146e3, 200e3, 10.34e3);
+        assert_eq!((m, n), (19, 14));
+        assert!((j - 0.342).abs() < 2e-3 && (k - 0.120).abs() < 2e-3, "{j} {k}");
     }
 }
