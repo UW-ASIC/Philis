@@ -123,6 +123,8 @@ pub struct PerfResult {
     pub miss: Vec<f64>,
     /// Σ `miss` (`0` = all met). Unknown never passes.
     pub residual: f64,
+    /// Per spec, (min, max) of the metric over the evaluated scenarios; None if any did not measure it.
+    pub spread: Vec<Option<(f64, f64)>>,
 }
 
 impl PerfResult {
@@ -150,8 +152,10 @@ pub fn score(specs: &[Spec], measured: &[Vec<Option<f64>>], scenarios: &[usize])
     let metrics = specs.iter().enumerate().map(|(j, s)| (s.metric.clone(), measured.first().and_then(|m| m[j]))).collect();
     let mut bounds = Vec::new();
     let mut misses = Vec::new();
+    let mut spread = Vec::new();
     for (j, s) in specs.iter().enumerate() {
         let col = || measured.iter().zip(scenarios).map(move |(m, &sc)| (m[j], sc));
+        spread.push(col().map(|(v, _)| v).collect::<Option<Vec<_>>>().and_then(|v| Some((v.iter().copied().reduce(f64::min)?, v.iter().copied().reduce(f64::max)?))));
         // The worst `(value, scenario)` for a bound: `margin` grows with slack.
         let worst = |margin: fn(f64) -> f64| {
             col().find(|(v, _)| v.is_none()).or_else(|| col().reduce(|a, b| if margin(b.0.unwrap()) < margin(a.0.unwrap()) { b } else { a }))
@@ -170,7 +174,7 @@ pub fn score(specs: &[Spec], measured: &[Vec<Option<f64>>], scenarios: &[usize])
             _ => 1.0,
         });
     }
-    PerfResult { metrics, bounds, residual: misses.iter().sum(), miss: misses }
+    PerfResult { metrics, bounds, residual: misses.iter().sum(), miss: misses, spread }
 }
 
 /// The deck: models at `sc`'s corner, its `.temp` and `.param`s, flat
@@ -634,6 +638,107 @@ pub fn budget_rows(
         .collect()
 }
 
+/// EXT-17's input, one `SpecSens` per spec with a finite bound in `start`: the table read is the one at the
+/// scenario of the spec's tighter bound (smaller margin, unmeasured tightest; floor on a tie), `f0` its `base`
+/// metric (spec skipped when unmeasured or without a table). `proc` = `start.spread[j]` when
+/// `cfg.scenarios.len() > 1`; `sigma_f` = max over the spec's bounds of `stats[b].sigma_f` (`None` if any is).
+/// `d_c`/`d_cc` per aF from linear `GroundC`/`CouplingC` rows; `d_r` per Ω, linear `SeriesR` rows summed per net
+/// of the terminal; `d_vt` per mV from every `GateOffset` row (σ_f's rule, [`crate::robust`]): `−d/1000` NMOS,
+/// `+d/1000` PMOS; `d_t` empty.
+#[must_use]
+pub fn to_evidence(
+    cfg: &PerfConfig,
+    tables: &[SensTable],
+    start: &PerfResult,
+    stats: &[crate::robust::BoundStat],
+    netlist: &Netlist,
+) -> annotator::evidence::Sensitivities {
+    use annotator::evidence::SpecSens;
+    use pnr_core::ids::DeviceId;
+    let specs = cfg
+        .specs
+        .iter()
+        .enumerate()
+        .filter_map(|(j, spec)| {
+            let bs: Vec<usize> = (0..start.bounds.len()).filter(|&b| start.bounds[b].spec == j).collect();
+            let margin = |b: usize| {
+                let r = &start.bounds[b];
+                r.value.map_or(f64::NEG_INFINITY, |v| if r.upper { spec.max.unwrap_or(f64::INFINITY) - v } else { v - spec.min.unwrap_or(f64::NEG_INFINITY) })
+            };
+            let tight = bs.iter().copied().reduce(|a, b| if margin(b) < margin(a) { b } else { a })?;
+            let t = tables.iter().find(|t| t.scenario == start.bounds[tight].scenario)?;
+            let f0 = t.base.metrics.get(j)?.1?;
+            let lin = |r: &&SensRow| r.linear;
+            let d = |r: &SensRow| r.d[j];
+            let mut d_r: Vec<(pnr_core::NetId, f64)> = Vec::new();
+            for r in t.rows.iter().filter(lin) {
+                if let (Param::SeriesR { device, terminal }, Some(x)) = (r.param, d(r)) {
+                    let net = netlist.devices[device as usize].terminals[terminal as usize].1;
+                    match d_r.iter_mut().find(|e| e.0 == net) {
+                        Some(e) => e.1 += x,
+                        None => d_r.push((net, x)),
+                    }
+                }
+            }
+            Some(SpecSens {
+                metric: spec.metric.clone(),
+                f0,
+                lo: spec.min,
+                hi: spec.max,
+                proc: if cfg.scenarios.len() > 1 { start.spread.get(j).copied().flatten() } else { None },
+                sigma_f: bs.iter().map(|&b| stats.get(b)?.sigma_f).collect::<Option<Vec<_>>>().and_then(|v| v.into_iter().reduce(f64::max)),
+                d_c: t.rows.iter().filter(lin).filter_map(|r| match r.param { Param::GroundC { net } => Some((net, d(r)?)), _ => None }).collect(),
+                d_r,
+                d_vt: t
+                    .rows
+                    .iter()
+                    .filter_map(|r| match r.param {
+                        Param::GateOffset { device } => {
+                            let sign = if netlist.devices[device as usize].kind == pnr_core::DeviceKind::Pmos { 1.0 } else { -1.0 };
+                            Some((DeviceId(device), sign * d(r)? / 1000.0))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                d_t: Vec::new(),
+                d_cc: t.rows.iter().filter(lin).filter_map(|r| match r.param { Param::CouplingC { a, b } => Some((a, b, d(r)?)), _ => None }).collect(),
+            })
+        })
+        .collect();
+    annotator::evidence::Sensitivities { specs }
+}
+
+/// RTE-21's router weights. `bounds[k] = (spec, h_b, scenario)`, `h_b > 0`. `r_weight[n]` (len `netlist.nets`)
+/// = Σ_b Σ_{linear SeriesR rows on n} |d_b| / h_b, scaled so the max is 1 (all 0 if none);
+/// `pair_weight` = `(a, b, Σ_b ½·|d_b| / h_b)` per linear `CouplingC` row, unscaled. Row `d` read in the table
+/// whose `scenario` is the bound's.
+#[must_use]
+pub fn router_weights(
+    tables: &[SensTable],
+    bounds: &[(usize, f64, usize)],
+    netlist: &Netlist,
+) -> (Vec<f32>, Vec<(pnr_core::NetId, pnr_core::NetId, f32)>) {
+    let mut r = vec![0.0f64; netlist.nets.len()];
+    let mut pairs: Vec<(pnr_core::NetId, pnr_core::NetId, f64)> = Vec::new();
+    for &(j, h, sc) in bounds {
+        let Some(t) = tables.iter().find(|t| t.scenario == sc) else { continue };
+        for row in t.rows.iter().filter(|r| r.linear) {
+            let Some(x) = row.d[j] else { continue };
+            match row.param {
+                Param::SeriesR { device, terminal } => r[netlist.devices[device as usize].terminals[terminal as usize].1 .0 as usize] += x.abs() / h,
+                Param::CouplingC { a, b } => match pairs.iter_mut().find(|p| (p.0, p.1) == (a, b)) {
+                    Some(p) => p.2 += 0.5 * x.abs() / h,
+                    None => pairs.push((a, b, 0.5 * x.abs() / h)),
+                },
+                _ => {}
+            }
+        }
+    }
+    let max = r.iter().copied().fold(0.0, f64::max);
+    let r_weight = r.iter().map(|&w| if max > 0.0 { (w / max) as f32 } else { 0.0 }).collect();
+    (r_weight, pairs.into_iter().map(|(a, b, w)| (a, b, w as f32)).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,5 +1044,102 @@ mod tests {
             assert!(a.0 < b.0, "{q:?}");
             assert!(seen.insert((a.0, b.0)), "duplicate {q:?}");
         }
+    }
+
+    /// Nets `[vout1, vtail, x]`; XM1/XM2 NMOS with S on `vtail`, XM3 PMOS.
+    fn sens_netlist() -> Netlist {
+        use pnr_core::{Device, DeviceKind, NetId};
+        let fet = |name: &str, kind| Device {
+            name: name.into(),
+            kind,
+            model: String::new(),
+            terminals: vec![("D".into(), NetId(0)), ("G".into(), NetId(2)), ("S".into(), NetId(1)), ("B".into(), NetId(1))],
+            params: Vec::new(),
+        };
+        Netlist { devices: vec![fet("XM1", DeviceKind::Nmos), fet("XM2", DeviceKind::Nmos), fet("XM3", DeviceKind::Pmos)], nets: nets(&["vout1", "vtail", "x"]), ..Default::default() }
+    }
+
+    fn row(param: Param, d: f64, linear: bool) -> SensRow {
+        SensRow { param, step: 1.0, d: vec![Some(d)], linear }
+    }
+
+    fn sens_rows(linear: bool) -> Vec<SensRow> {
+        use pnr_core::NetId;
+        vec![
+            row(Param::GroundC { net: NetId(0) }, -0.002, linear),
+            row(Param::SeriesR { device: 0, terminal: 2 }, -0.01, linear),
+            row(Param::SeriesR { device: 1, terminal: 2 }, -0.01, linear),
+            row(Param::GateOffset { device: 0 }, 1000.0, linear),
+            row(Param::GateOffset { device: 2 }, 1000.0, linear),
+            row(Param::CouplingC { a: NetId(0), b: NetId(2) }, 0.003, linear),
+        ]
+    }
+
+    fn gain_cfg() -> (PerfConfig, PerfResult) {
+        let cfg = PerfConfig { sim: OpConfig::default(), testbenches: Vec::new(), specs: vec![Spec { metric: "gain".into(), min: Some(40.0), max: None }], scenarios: Vec::new() };
+        let start = score(&cfg.specs, &[vec![Some(60.0)]], &[0]);
+        (cfg, start)
+    }
+
+    fn stat(sigma_f: Option<f64>) -> crate::robust::BoundStat {
+        crate::robust::BoundStat { bound: 0, sigma_f, beta: None, yield_part: None, headroom_stat: None, shares: Vec::new() }
+    }
+
+    #[test]
+    fn evidence_maps_units_and_signs() {
+        use pnr_core::{ids::DeviceId, NetId};
+        let (cfg, start) = gain_cfg();
+        let t = SensTable { scenario: 0, at: Parasitics::default(), base: start.clone(), rows: sens_rows(true), sims: 0 };
+        let ev = to_evidence(&cfg, &[t], &start, &[stat(Some(1.5))], &sens_netlist());
+        assert_eq!(ev.specs.len(), 1);
+        let s = &ev.specs[0];
+        assert_eq!((s.metric.as_str(), s.f0, s.lo, s.hi), ("gain", 60.0, Some(40.0), None));
+        assert_eq!(s.d_c, vec![(NetId(0), -0.002)]);
+        assert_eq!(s.d_r.len(), 1);
+        assert!(s.d_r[0].0 == NetId(1) && (s.d_r[0].1 + 0.02).abs() < 1e-12, "{:?}", s.d_r);
+        assert_eq!(s.d_vt, vec![(DeviceId(0), -1.0), (DeviceId(2), 1.0)]);
+        assert_eq!(s.d_cc, vec![(NetId(0), NetId(2), 0.003)]);
+        assert_eq!((s.sigma_f, s.proc), (Some(1.5), None));
+        assert!(s.d_t.is_empty());
+    }
+
+    #[test]
+    fn router_weights_scale_r_to_one() {
+        use pnr_core::NetId;
+        let mut nl = sens_netlist();
+        nl.devices[1].terminals[2].1 = NetId(0);
+        let rows = vec![
+            row(Param::SeriesR { device: 1, terminal: 2 }, -0.3, true),
+            row(Param::SeriesR { device: 0, terminal: 2 }, 0.6, true),
+            row(Param::CouplingC { a: NetId(0), b: NetId(1) }, 0.4, true),
+        ];
+        let t = SensTable { scenario: 0, at: Parasitics::default(), base: PerfResult::default(), rows, sims: 0 };
+        let (r, pairs) = router_weights(&[t], &[(0, 2.0, 0)], &nl);
+        assert!((r[0] - 0.5).abs() < 1e-6 && (r[1] - 1.0).abs() < 1e-6 && r[2] == 0.0, "{r:?}");
+        assert_eq!(pairs.len(), 1);
+        assert!((pairs[0].0, pairs[0].1) == (NetId(0), NetId(1)) && (pairs[0].2 - 0.1).abs() < 1e-6, "{pairs:?}");
+    }
+
+    #[test]
+    fn a_nonlinear_row_is_not_exported() {
+        let (cfg, start) = gain_cfg();
+        let nl = sens_netlist();
+        let t = SensTable { scenario: 0, at: Parasitics::default(), base: start.clone(), rows: sens_rows(false), sims: 0 };
+        let ev = to_evidence(&cfg, std::slice::from_ref(&t), &start, &[stat(None)], &nl);
+        let s = &ev.specs[0];
+        assert!(s.d_c.is_empty() && s.d_r.is_empty() && s.d_cc.is_empty(), "{s:?}");
+        assert_eq!(s.d_vt.len(), 2, "gate offset rows follow σ_f's rule: {s:?}");
+        assert_eq!(s.sigma_f, None);
+        let (r, pairs) = router_weights(&[t], &[(0, 2.0, 0)], &nl);
+        assert!(r.iter().all(|&w| w == 0.0) && pairs.is_empty(), "{r:?} {pairs:?}");
+    }
+
+    #[test]
+    fn score_reports_the_spread() {
+        let specs = vec![Spec { metric: "gain".into(), min: Some(40.0), max: None }];
+        let r = score(&specs, &[vec![Some(60.0)], vec![Some(55.0)], vec![Some(70.0)]], &[0, 1, 2]);
+        assert_eq!(r.spread, vec![Some((55.0, 70.0))]);
+        let r = score(&specs, &[vec![Some(60.0)], vec![None], vec![Some(70.0)]], &[0, 1, 2]);
+        assert_eq!(r.spread, vec![None]);
     }
 }
