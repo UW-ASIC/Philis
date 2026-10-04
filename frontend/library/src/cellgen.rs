@@ -340,11 +340,13 @@ pub fn seed_assignment(variants: &[gp::VariantSpace], matched: &[bool], ranked: 
 }
 
 /// Seed index from `(DRC+ERC, HPWL)` prices: the cheapest, ties → index; a `ranked` cell (its generator lists
-/// alternatives best-first, GAP-18) takes its lowest index among the DRC+ERC-minimal ones, HPWL ignored.
+/// alternatives best-first, GAP-18) seeds at 0. Not "first DRC+ERC-minimal": [`price`] passes no ports, so each
+/// conductor is an x.22 finding and the count tracks shape count (dac4: 178/176/178), which would seed the
+/// fewest-shapes variant, not the best-matching one; every CapArray variant is proven DRC/ERC-clean
+/// (`cap_array::tests::every_variant_is_drc_and_erc_clean`).
 fn seed_of(prices: &[(usize, i64)], ranked: bool) -> usize {
     if ranked {
-        let clean = prices.iter().map(|p| p.0).min();
-        return prices.iter().position(|p| Some(p.0) == clean).unwrap_or(0);
+        return 0;
     }
     prices.iter().enumerate().min_by(|a, b| a.1.cmp(b.1)).map_or(0, |(v, _)| v)
 }
@@ -1981,17 +1983,17 @@ mod tests {
         assert!(cards.iter().any(|c| c.terminals.iter().any(|t| t == "~0.0.no-P")), "{cards:?}");
     }
 
-    /// GAP-18: a ranked cell seeds at its first DRC+ERC-minimal alternative, HPWL ignored; unranked keeps
-    /// `(DRC+ERC, HPWL)` with index ties.
+    /// GAP-18: a ranked cell seeds at alternative 0 whatever its prices; unranked keeps `(DRC+ERC, HPWL)` with
+    /// index ties.
     #[test]
-    fn ranked_cells_seed_at_their_first_clean_alternative() {
+    fn ranked_cells_seed_at_their_first_alternative() {
         assert_eq!(seed_of(&[(1, 5), (0, 90), (0, 10)], false), 2);
-        assert_eq!(seed_of(&[(1, 5), (0, 90), (0, 10)], true), 1);
-        assert_eq!(seed_of(&[(0, 9), (0, 1)], true), 0);
+        assert_eq!(seed_of(&[(1, 5), (0, 90), (0, 10)], true), 0);
+        assert_eq!(seed_of(&[(9, 9), (0, 1)], true), 0);
     }
 
     /// GAP-18 acceptance: dac4's bank, annotated Exceptional, draws its lowest-M_sys variant as alternative 0
-    /// and the flow seeds a lowest-M_sys variant (non-vacuous: some other variant has a higher M_sys).
+    /// and the flow seeds it (`seed_assignment(...).0[ci] == 0`; non-vacuous: the unranked seed differs).
     #[test]
     fn exceptional_dac4_seeds_the_lowest_msys() {
         let pdk = pdk();
@@ -2028,9 +2030,9 @@ mod tests {
         assert!(cells.spaces[ci].alternatives[0].shapes == variants[0].draw(&group, &c, &p).shapes, "alternative 0 is not the ranked first variant");
         let mut ranked = vec![false; cells.spaces.len()];
         ranked[ci] = true;
-        // Not `== 0`: `price` passes no ports, so every conductor is an x.22 finding and the count tracks shape
-        // count (178/176/178 here); the seed is the first ranked variant with the fewest, still at the lowest M_sys.
-        let seed = usize::from(seed_assignment(&cells.spaces, &vec![true; cells.spaces.len()], &ranked, &pdk).0[ci]);
-        assert!(ms[seed] <= ms.iter().copied().fold(f64::INFINITY, f64::min), "seed {seed} M_sys {ms:?}");
+        let matched = vec![true; cells.spaces.len()];
+        assert_eq!(seed_assignment(&cells.spaces, &matched, &ranked, &pdk).0[ci], 0, "the ranked bank seeds at its best-matching variant");
+        // Non-vacuous: unranked, the same bank seeds elsewhere (fewer x.22 findings on variant 1).
+        assert_ne!(seed_assignment(&cells.spaces, &matched, &[], &pdk).0[ci], 0, "ranking does not change the seed here");
     }
 }
