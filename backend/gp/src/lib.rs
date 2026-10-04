@@ -182,7 +182,13 @@ fn keys(reqs: &Requirements<Layout>) -> Vec<PriceKey> {
 /// spends (Lampaert 1999 eq.2.12–2.13, `ΔP = Σ S·Δx`; CRATES #3): the positive
 /// performance sensitivities `sens` (`(net, 1/aF)`, summed over specs) where a
 /// spec sees the net, else `1/c_budget` of its class. A tighter budget pulls
-/// harder; rails (unbudgeted) keep `1`.
+/// harder; an unbudgeted signal net keeps `1`.
+///
+/// Rails (`Supply` / `Ground`) are left out of that mean and weighted by their
+/// op current instead (PLC-17, AP-18: each source normalised separately):
+/// `current_ua[net]` (µA, indexed by `NetId`) over the largest rail current,
+/// clamped to [`RAIL_MIN`]`..=1`; [`RAIL_UNKNOWN`] without one (no op point,
+/// unresolved, or `net` past `current_ua`).
 ///
 /// Placement's HPWL weights, and the routers' (library masks those to budgeted
 /// nets).
@@ -192,8 +198,14 @@ fn keys(reqs: &Requirements<Layout>) -> Vec<PriceKey> {
 /// 315.0 → 286.9 fF) and, after routing changes, *hurt* (256.1 → 280.3 fF;
 /// chain4 +6%, rc_filter +7% at seed 1). Kept on that later data; re-measure
 /// over seeds whenever routing changes.
+/// Weight of a rail with no op current. Policy: a rail's HPWL matters for
+/// IR/EM, not for C (EM-11; lienig_em L3457-3462), so it pulls below a signal.
+pub const RAIL_UNKNOWN: f32 = 0.25;
+/// Floor of a rail's current weight. Policy: a near-idle rail still stays short.
+pub const RAIL_MIN: f32 = 0.1;
+
 #[must_use]
-pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr_core::NetId, f32)]) -> Vec<f32> {
+pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr_core::NetId, f32)], current_ua: &[Option<i32>]) -> Vec<f32> {
     let mut raw: Vec<Option<f32>> = classes.iter().map(|c| c.c_budget_af.filter(|&b| b > 0).map(|b| 1.0 / b as f32)).collect();
     let mut from_perf = vec![0.0f32; raw.len()];
     for &(n, w) in sens {
@@ -206,9 +218,19 @@ pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr
             *r = Some(s);
         }
     }
-    let known: Vec<f32> = raw.iter().flatten().copied().collect();
+    let rail = |i: usize| matches!(classes[i].class, analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground);
+    let known: Vec<f32> = raw.iter().enumerate().filter(|&(i, _)| !rail(i)).filter_map(|(_, r)| *r).collect();
     let mean = known.iter().sum::<f32>() / known.len().max(1) as f32;
-    raw.iter().map(|r| r.map_or(1.0, |w| w / mean)).collect()
+    let ua = |i: usize| current_ua.get(i).copied().flatten();
+    let i_ref = (0..classes.len()).filter(|&i| rail(i)).filter_map(ua).max().unwrap_or(0).max(1) as f32;
+    raw.iter()
+        .enumerate()
+        .map(|(i, r)| match (rail(i), ua(i)) {
+            (true, Some(c)) => (c as f32 / i_ref).clamp(RAIL_MIN, 1.0),
+            (true, None) => RAIL_UNKNOWN,
+            (false, _) => r.map_or(1.0, |w| w / mean),
+        })
+        .collect()
 }
 
 /// Process numbers placement needs, from the deck (shared with `dp`), built
@@ -785,14 +807,43 @@ mod weight_tests {
     #[test]
     fn a_tighter_budget_pulls_harder_and_sensitivities_win() {
         let classes = [class(0, Some(1_000)), class(1, Some(4_000)), class(2, None)];
-        let w = super::net_weights(&classes, &[]);
+        let w = super::net_weights(&classes, &[], &[]);
         assert!(w[0] > w[1], "1 fF budget outweighs 4 fF: {w:?}");
         assert!((w[0] + w[1] - 2.0).abs() < 1e-5, "mean 1 over weighted nets");
-        assert_eq!(w[2], 1.0, "a rail keeps unit weight");
+        assert_eq!(w[2], 1.0, "an unbudgeted signal net keeps unit weight");
 
         // A spec that feels net 1 hardest overrides its class weight.
-        let w = super::net_weights(&classes, &[(NetId(1), 1e-2), (NetId(1), -5.0)]);
+        let w = super::net_weights(&classes, &[(NetId(1), 1e-2), (NetId(1), -5.0)], &[]);
         assert!(w[1] > w[0], "{w:?}");
+    }
+
+    fn rail(net: u16, class: NetClass, c_budget_af: Option<i64>) -> NetClassification {
+        NetClassification { net: NetId(net), class, c_budget_af, max_coupling_af: None }
+    }
+
+    /// PLC-17: a rail pulls by its op current over the largest rail's,
+    /// floored at `RAIL_MIN`; no current reads `RAIL_UNKNOWN`.
+    #[test]
+    fn supply_weight_scales_with_current() {
+        let classes = [rail(0, NetClass::Supply, None), rail(1, NetClass::Ground, None), rail(2, NetClass::Supply, None), class(3, Some(1_000))];
+        let w = super::net_weights(&classes, &[], &[Some(100), Some(1_000), None, None]);
+        assert!((w[0] - 0.1).abs() < 1e-6, "{w:?}");
+        assert_eq!(w[1], 1.0, "{w:?}");
+        assert_eq!(w[2], super::RAIL_UNKNOWN, "{w:?}");
+        assert_eq!(w[3], 1.0, "sole budgeted net, mean 1: {w:?}");
+        let w = super::net_weights(&classes, &[], &[]);
+        assert!(w[..3].iter().all(|&x| x == super::RAIL_UNKNOWN), "{w:?}");
+        let w = super::net_weights(&classes, &[], &[Some(10), Some(1_000)]);
+        assert_eq!(w[0], super::RAIL_MIN, "0.01 raw clamps: {w:?}");
+    }
+
+    /// A rail's C budget does not move the signal nets' mean.
+    #[test]
+    fn rails_do_not_move_the_signal_mean() {
+        let classes = [class(0, Some(1_000)), class(1, Some(4_000)), rail(2, NetClass::Supply, Some(10))];
+        let w = super::net_weights(&classes, &[], &[None, None, Some(50)]);
+        assert!((w[0] + w[1] - 2.0).abs() < 1e-5, "{w:?}");
+        assert_eq!(w[2], 1.0, "only rail: I_ref is its own current: {w:?}");
     }
 
 }
