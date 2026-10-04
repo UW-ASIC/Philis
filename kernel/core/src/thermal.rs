@@ -1,7 +1,8 @@
-//! Steady-state die temperature by superposition of per-device point sources,
-//! `ΔT(r) = P / (2π·k·r)` (semi-infinite substrate), with `r` floored at the
-//! source's own half-extent. Linear in power, so the sum is exact for the
-//! per-source model. Global in the power map: refresh per epoch, never per move.
+//! Steady-state die temperature by superposition of per-device sources on a
+//! semi-infinite substrate: outside a source's floor disc (radius = its
+//! larger half-extent) a point source, `ΔT(r) = P / (2π·k·r)`; inside it the
+//! source's own-area rise, Hastings eq. 5.6 ([`self_rise_mc`]). Linear in
+//! power, so the sum is exact for the per-source model. Global in the power map: refresh per epoch, never per move.
 
 use crate::layout::Layout;
 
@@ -42,9 +43,10 @@ pub fn rises_mc(l: &Layout, power_uw: &[i32]) -> Vec<i32> {
     (0..l.x.len()).map(|i| rise_at(l, power_uw, l.x[i], l.y[i]).round() as i32).collect()
 }
 
-/// Rise at `(x, y)` from every source at the current positions, milli-°C,
-/// `r` floored at each source's half-extent (so a device's own centre reads
-/// its self-heating at `r_floor`). O(n).
+/// Rise at `(x, y)` from every source at the current positions, milli-°C.
+/// Inside a source's floor disc (its larger half-extent) the term is eq. 5.6
+/// for that source, so a device's own centre, or an overlapping neighbour
+/// anywhere in the disc, reads the same self term. O(n).
 fn rise_at(l: &Layout, power_uw: &[i32], x: i32, y: i32) -> f32 {
     let denom = 2.0 * std::f32::consts::PI * K_SI_W_PER_M_K;
     let mut rise = 0.0f32;
@@ -55,7 +57,12 @@ fn rise_at(l: &Layout, power_uw: &[i32], x: i32, y: i32) -> f32 {
         }
         let r_floor = (l.hw[j].max(l.hh[j])).max(1) as f32;
         let (dx, dy) = ((x - l.x[j]) as f32, (y - l.y[j]) as f32);
-        rise += (p as f32) * SCALE_UW_NM_TO_MK / (denom * dx.hypot(dy).max(r_floor));
+        let r = dx.hypot(dy);
+        rise += if r < r_floor {
+            self_rise_mc(p, 2 * l.hw[j].min(l.hh[j]), 2 * l.hw[j].max(l.hh[j]), K_SI_W_PER_M_K)
+        } else {
+            (p as f32) * SCALE_UW_NM_TO_MK / (denom * r)
+        };
     }
     rise
 }
@@ -180,6 +187,21 @@ mod tests {
                 assert!(t as f32 <= bound, "device {i} at {:?}/{:?}: {t} > {bound}", l.x, l.y);
             }
         }
+    }
+
+    /// REL-14: a lone 100 mW device on a 25 µm square reads eq. 5.6,
+    /// ln4·0.1 W/(π·148·25 µm) = 11.93 K, not the floored point source
+    /// (0.1 W/(2π·148·12.5 µm) = 8.60 K).
+    #[test]
+    fn the_self_term_is_eq_5_6() {
+        let (mut l, _) = bench();
+        l.x.truncate(1);
+        l.y.truncate(1);
+        l.hw = vec![12_500];
+        l.hh = vec![12_500];
+        l.power_uw = vec![100_000];
+        let t = rises_mc(&l, &l.power_uw)[0];
+        assert!((t - 11_930).abs() <= 20, "{t}");
     }
 
     #[test]
