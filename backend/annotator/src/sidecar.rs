@@ -122,7 +122,21 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                     _ => None,
                 };
                 match devices(&strs("instances")) {
-                    Ok(ds) => cfg.classes.push((ds, class, mk)),
+                    Ok(ds) => {
+                        // GAP-09 (c): kind, model and L must agree (W may differ: a ratioed set).
+                        let mut models = Vec::new();
+                        let key = |d: DeviceId, models: &mut Vec<String>| {
+                            let dev = &nl.devices[d.0 as usize];
+                            let s = crate::size::drawn(dev, models);
+                            (dev.kind, s.model, s.l_nm)
+                        };
+                        let first = ds.first().map(|&d| key(d, &mut models));
+                        if ds.iter().any(|&d| Some(key(d, &mut models)) != first) {
+                            diags.push(crate::conflict::diag(&[id], ds, "Match on unequal kind/model/L; entry dropped"));
+                            continue;
+                        }
+                        cfg.classes.push((ds, class, mk));
+                    }
                     Err(n) => unknown!(n),
                 }
             }

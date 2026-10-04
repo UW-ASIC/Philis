@@ -10,6 +10,7 @@ use pnr_core::ids::{AxisId, DeviceId, NetId};
 use pnr_core::netlist::DeviceKind;
 use pnr_core::BipartiteHypergraph;
 
+use crate::conflict;
 use crate::size::{self, Drawn};
 
 /// A couple symmetry starts from: declared leaf pairs now, sidecar nets and
@@ -57,6 +58,12 @@ struct State<'a> {
     /// Net is on half A of its pair.
     a_side: Vec<bool>,
     queue: VecDeque<(u32, u32)>,
+    /// GAP-09 (a): the seed being applied, and the seed that paired or
+    /// self-marked each device / mated each net (`cur` stays the last seed's
+    /// during the fixpoint, where no conflict is reported).
+    cur: ConstraintId,
+    by: Vec<Option<ConstraintId>>,
+    net_by: Vec<Option<ConstraintId>>,
 }
 
 impl State<'_> {
@@ -113,12 +120,14 @@ impl State<'_> {
         self.mate[xi] = Some(y);
         self.mate[yi] = Some(x);
         self.a_side[xi] = true;
+        (self.net_by[xi], self.net_by[yi]) = (Some(self.cur), Some(self.cur));
         self.queue.push_back((x, y));
     }
 
     fn pair(&mut self, d: u32, e: u32, flip: bool) {
         self.pair_of[d as usize] = Some(e);
         self.pair_of[e as usize] = Some(d);
+        (self.by[d as usize], self.by[e as usize]) = (Some(self.cur), Some(self.cur));
         self.half_a[d as usize] = true;
         self.flip[d as usize] = flip;
         self.flip[e as usize] = flip;
@@ -127,6 +136,17 @@ impl State<'_> {
                 self.bind(x, y);
             }
         }
+    }
+
+    /// The seed whose pairing or net mate a seed `(a, b)` contradicts: one that
+    /// took `a` or `b`, else the one that mated the first inconsistent net of `a`.
+    fn owner(&self, a: u32, b: u32) -> Option<ConstraintId> {
+        self.by[a as usize].or(self.by[b as usize]).or_else(|| {
+            self.hg.terminals[a as usize].iter().find_map(|t| {
+                let (x, y) = (self.net(a, t)?, self.net(b, t)?);
+                (!self.consistent_nets(x, y)).then(|| self.net_by[x as usize].or(self.net_by[y as usize])).flatten()
+            })
+        })
     }
 
     fn free(&self, d: u32) -> bool {
@@ -162,25 +182,26 @@ impl State<'_> {
 pub fn analyze(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetClassification], seeds: &[Seed], canon: &[u64]) -> (Vec<Compound>, Vec<Diagnostic>) {
     let (nd, nn) = (hg.device_count(), hg.net_devices.len());
     let rail: Vec<bool> = classes.iter().map(|c| matches!(c.class, NetClass::Supply | NetClass::Ground | NetClass::Substrate)).collect();
-    let mut s = State { hg, rail, pair_of: vec![None; nd], half_a: vec![false; nd], flip: vec![false; nd], is_self: vec![false; nd], mate: vec![None; nn], a_side: vec![false; nn], queue: VecDeque::new() };
+    let mut s = State { hg, rail, pair_of: vec![None; nd], half_a: vec![false; nd], flip: vec![false; nd], is_self: vec![false; nd], mate: vec![None; nn], a_side: vec![false; nn], queue: VecDeque::new(), cur: ConstraintId(0), by: vec![None; nd], net_by: vec![None; nn] };
     let sigs: Vec<_> = (0..nd).map(|d| sig(hg.kinds[d], &drawn[d])).collect();
     let pairable = |d: u32| !size::unknown_size(hg.kinds[d as usize], &drawn[d as usize]);
     let mut diags = Vec::new();
     let mut ambiguous: BTreeSet<Vec<u32>> = BTreeSet::new();
 
     for seed in seeds {
+        s.cur = match *seed {
+            Seed::Devices(.., id) | Seed::Nets(.., id) | Seed::SelfDevice(_, id) => id,
+        };
         match *seed {
-            Seed::Devices(a, b, _) => {
+            Seed::Devices(a, b, id) => {
                 let (a, b) = (a.0 as u32, b.0 as u32);
                 if s.pair_of[a as usize] == Some(b) || sigs[a as usize] != sigs[b as usize] {
                     continue;
                 }
                 if !s.free(a) || !s.free(b) || !s.consistent(a, b, false) {
-                    diags.push(Diagnostic {
-                        kind: "conflicting_seed",
-                        devices: vec![DeviceId(a as u16), DeviceId(b as u16)],
-                        message: "seed pair contradicts an existing pairing or net mate".into(),
-                    });
+                    // GAP-09 (a): the earlier seed wins (user seeds first, in entry order).
+                    let ids: Vec<ConstraintId> = std::iter::once(id).chain(s.owner(a, b)).collect();
+                    diags.push(conflict::diag(&ids, vec![DeviceId(a as u16), DeviceId(b as u16)], "SymmetricBlocks pair contradicts an earlier pairing; dropped"));
                     continue;
                 }
                 s.pair(a, b, false);
@@ -193,9 +214,14 @@ pub fn analyze(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetClassifi
                     s.bind(x.0 as u32, y.0 as u32);
                 }
             }
-            Seed::SelfDevice(d, _) => {
+            Seed::SelfDevice(d, id) => {
+                let i = d.0 as usize;
                 if s.free(d.0 as u32) {
-                    s.is_self[d.0 as usize] = true;
+                    s.is_self[i] = true;
+                    s.by[i] = Some(id);
+                } else if s.by[i] != Some(id) {
+                    let ids: Vec<ConstraintId> = std::iter::once(id).chain(s.by[i]).collect();
+                    diags.push(conflict::diag(&ids, vec![d], "self-symmetric device already paired; dropped"));
                 }
             }
         }
@@ -232,6 +258,7 @@ fn propagate(s: &mut State, sigs: &[Sig], pairable: &dyn Fn(u32) -> bool, canon:
                 let selfsym = |n: u32| s.rail[n as usize] || s.mate[n as usize] == Some(n);
                 if s.free(d) && pairable(d) && !ch.is_empty() && ch.iter().all(|&n| selfsym(n)) && ch.iter().any(|&n| !s.rail[n as usize]) {
                     s.is_self[i] = true;
+                    s.by[i] = Some(s.cur);
                 }
             }
             continue;

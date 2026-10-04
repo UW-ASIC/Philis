@@ -4,12 +4,14 @@
 //! non-overlapping matches into blocks (one group each, plus a trailing glue
 //! block for the unclaimed devices), gives each composite its declared children
 //! ([`catalog::roles_of`]), and emits placement ([`emit`]), routing ([`extract`]), net-class
-//! ([`classify`]) and cell-tier ([`constraints`]) constraints from them.
+//! ([`classify`]) and cell-tier ([`constraints`]) constraints from them, then
+//! reports conflicts ([`conflict`]).
 
 pub mod block;
 pub mod catalog;
 pub mod class;
 pub mod classify;
+pub mod conflict;
 pub mod constraints;
 pub mod emit;
 pub mod evidence;
@@ -396,6 +398,16 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     let shares = |idx: &[Vec<usize>], a: usize, v: usize| idx[a].iter().any(|i| idx[v].contains(i));
     let related = |a: usize, v: usize| (block_of[a] != usize::MAX && block_of[a] == block_of[v]) || shares(&in_set, a, v) || shares(&in_compound, a, v);
     let p = &cfg.process;
+    // GAP-09 (b): a sidecar GroupBlocks pull (≤ proximity_nm) on an aggressor–victim
+    // pair that Isolation would push ≥ isolation_min_nm apart: the user pull wins.
+    let iso_nm = emit::isolation_min_nm(p.substrate, p.epi_nm);
+    let clash: Vec<(usize, usize, u32)> = cfg
+        .groups
+        .iter()
+        .flat_map(|(e, g)| g.iter().skip(1).map(move |m| (g[0].0 as usize, m.0 as usize, *e)))
+        .filter(|&(x, y, _)| ((aggressor[x] && victim[y]) || (aggressor[y] && victim[x])) && !related(x, y) && cfg.policy.proximity_nm < iso_nm)
+        .collect();
+    let related = |a: usize, v: usize| related(a, v) || clash.iter().any(|&(x, y, _)| (x, y) == (a, v) || (y, x) == (a, v));
     if let Some(why) = emit::isolation(&aggressor, &victim, &related, p.substrate, p.epi_nm, &mut placement) {
         missing.push(("Isolation", why));
     }
@@ -436,6 +448,19 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
                 Box::new(analog::rule::Tagged { meta: id(analog::intent::Origin::NetClass), inner })
             })
             .collect();
+    }
+
+    // GAP-09 (b) report: the user pull's id, then the Isolation batch's (left
+    // out when the dropped pairs were its only ones, so no batch was emitted).
+    let first_id = |f: &dyn Fn(&dyn analog::RuleBatch<pnr_core::Layout>) -> bool| {
+        placement.budget.iter().chain(&placement.cost).find(|b| f(b.as_ref())).and_then(|b| b.meta()).map(|m| m.id)
+    };
+    let iso_id = first_id(&|b| b.kind().ends_with("::Isolation"));
+    for &(x, y, e) in &clash {
+        let user_id = first_id(&|b| b.meta().is_some_and(|m| m.origin == analog::intent::Origin::User { index: e }));
+        let ids: Vec<_> = user_id.into_iter().chain(iso_id).collect();
+        let what = format!("GroupBlocks Proximity ≤ {} nm vs Isolation ≥ {iso_nm} nm; Isolation dropped", cfg.policy.proximity_nm);
+        intent.diagnostics.push(conflict::diag(&ids, vec![DeviceId(x as u16), DeviceId(y as u16)], what));
     }
 
     let coverage = (0..netlist.devices.len())
@@ -497,7 +522,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         missing.extend(notes);
     }
 
-    Problem {
+    let mut out = Problem {
         // One axis per compound (`Compound.axis`); a spare one when there is none.
         axis_count: intent.compounds.len().max(1),
         intent,
@@ -510,7 +535,10 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         abutment,
         blocks,
         missing,
-    }
+    };
+    let d = conflict::check(&out, netlist);
+    out.intent.diagnostics.extend(d);
+    out
 }
 
 /// `cfg` plus the testbench's rails and clocks (EXT-17): with ≥ 2 distinct DC
