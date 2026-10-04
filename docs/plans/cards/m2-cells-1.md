@@ -126,3 +126,45 @@ bar ≥ 1 µm are re-added there. Their 550 nm pitch is T5's. Hand-off for CELL-
 - T5: `sd_and_pitch(sky130, 150) == (280, 430)`. Interior S/D region 280 (was 580).
 - Bench (`cargo run --release -p benchmark --bin bench`, background): an area and active % table per fixture, before (`c2940c6`) and after, in the item report.
 - Report any fixture whose cell count rises, i.e. a group no longer merged because `bar_cuts` returned `None` on every variant.
+
+## CELL-11 report (commit 0cbc61b) — status: escalate
+
+T5 met: `sd_and_pitch(sky130, 150) == (280, 430)`; interior S/D 280 (was 580). Cell suites green
+(`cargo test --release -p cells`, `-p library`, `-p pnr_core -p verify`).
+
+Departures from the card:
+- `Process::space("met1")` returns 280 (it folds in m1.3b wide spacing), so `m1_land` was 570. Added
+  `Process::min_space` (default = `space`; verify returns the plain `min_spacing`), used only by `m1_land`.
+- licon.8a is "opposite": 80 on both y sides, so the bar is `ct + 2·licon_poly_side` = 330 tall (card: 300).
+- Cuts sit on the 10 nm cut lattice; at 430 the inner cut has no slack, so `sd_and_pitch` rounds the pitch to a
+  lattice multiple and gate 0 sits where inner cuts land exactly (gates at x ≡ 5 mod 10). End cuts round to the
+  nearest lattice step; a dummied end grows by lattice steps until its cut keeps `gate_space`.
+- Dummy skirt: cut enclosed 50 on x / 80 on y (was 80 on x), so `skirt_over` = 65 and the edge gap is 285,
+  keeping `dummies_keep_the_finger_pitch` (step 435 vs 430). `clear` = space + max(bar_over, skirt_over)
+  unsplit (the active gate end sits beside the skirt), + both for split/double.
+- `draw` of a non-enumerated unsplit variant whose bars cannot fit falls back to split (existing direct-draw tests).
+- `a_gate_bar_has_no_notch`: an unsplit Cc1d row also counts one run (overlapping bars merge, as before).
+- `double_gate` keeps a top poly bar; extraction stays correct (no need to drop it).
+
+Blocker: signoff `res_m2` DRC 1 > baseline 0 (m1.2, routing origin: a via1 landing 100 nm from an mcon
+landing on the same S/D column, (5860, 11940)). Same on m2-routing tip + this patch (DRC 2). Base c2940c6 passes.
+
+Bench (area µm², active %, DRC), c2940c6 → CELL-11. Cell counts unchanged on every fixture.
+
+| fixture | area | active % | DRC |
+|---|---|---|---|
+| chain4 | 62.7 → 58.6 | 19.4 → 17.0 | 0 → 0 |
+| dac4 | 1619.5 → 1542.8 | 1.2 → 0.5 | 0 → 6 (m1.2) |
+| dac4_mim | 3692.4 → 3752.1 | 0.5 → 0.2 | 0 → 5 (m1.2, m1.2.notch, m1.7) |
+| mirror_ratio | 176.9 → 170.9 | 22.1 → 15.7 | 0 → 0 |
+| ota / ota_constrained / tt_ota | 2001.1 → 1853.5 | 29.3 → 28.8 | 0 → 0 |
+| pair | 8.6 → 9.8 | 48.3 → 34.9 | 0 → 0 |
+| quad | 33.7 → 18.1 | 25.6 → 36.1 | 0 → 0 |
+| rc_filter | 131.8 → 110.2 | 3.4 → 1.6 | 0 → 0 |
+| res_m2 | 343.8 → 321.6 | 1.8 → 0.6 | 0 → 1 (m1.2) |
+| tq_chain | 9682.4 → 8513.9 | 0.6 → 0.4 | 0 → 10 (m1.2, m1.2.notch; ERC 2 antenna) |
+| bgr_core, bjt_mirror | unchanged | unchanged | 0 → 0 |
+
+Every new finding is router met1 (pin access) on rows with S/D columns now 430 apart: met1 landings there
+have 140 nm (= m1.2) of room, and the router's via landings (320 wide) or jogs do not fit. Needs routing:
+pin access that respects the minimum contacted pitch (or CELL-11 to count the via1 landing in `m1_land`, pitch 460).
