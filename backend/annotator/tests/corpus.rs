@@ -876,6 +876,48 @@ fn mirror6_common_nodes_and_star() {
     assert_eq!((p.intent.stars[0].net, p.intent.stars[0].branches.len()), (net_id(&nl, "VSS"), 6));
 }
 
+/// EXT-24 step 4 with an op point: `MX` on mirror6's `VSS` is a star only when
+/// its current exceeds 1% of the six members' (60 µA here); a port is the feed.
+#[test]
+fn star_needs_nonmember_current_with_an_op_point() {
+    use annotator::evidence::DeviceOp;
+    let nl = net(&format!("{} | MX z g VSS VSS nfet w=2u l=1u", src("mirror6")));
+    let mx = nl.devices.iter().position(|d| d.name == "MX").unwrap();
+    let stars = |mx_ua: f64, ports: Vec<pnr_core::ids::NetId>| {
+        let op = DeviceOp { id_ua: 10.0, headroom_mv: 200.0, gm_us: 100.0, power_uw: 0.0, vgs_mv: None, vbs_mv: None, vth_mv: None, gmb_us: None, gds_us: None };
+        let mut dev = vec![Some(op); nl.devices.len()];
+        dev[mx] = Some(DeviceOp { id_ua: mx_ua, ..op });
+        let ev = annotator::Evidence { op: Some(annotator::OpFacts { dev, net_mv: vec![None; nl.nets.len()] }), ..Default::default() };
+        let nl = pnr_core::Netlist { ports, ..nl.clone() };
+        annotator::annotate_with(&nl, &cfg("mirror6"), &ev).intent.stars
+    };
+    let s = stars(1.0, vec![]);
+    assert_eq!((s.len(), s[0].net, s[0].branches.len()), (1, net_id(&nl, "VSS"), 6));
+    assert!(stars(-0.5, vec![]).is_empty(), "0.5 µA ≤ 0.6 µA: no star");
+    assert_eq!(stars(1.0, vec![net_id(&nl, "VSS")]).len(), 1);
+    // ota5t's tail feeds `vtail` (no star); when `vtail` is a port, the port is
+    // the feed and the tail drain is non-member current.
+    let mut nl = net(src("ota5t"));
+    nl.ports = vec![net_id(&nl, "vtail")];
+    let p = annotate(&nl, &cfg("ota5t"));
+    assert_eq!(p.intent.stars.iter().map(|s| (s.net, s.root.is_none())).collect::<Vec<_>>(), [(net_id(&nl, "vtail"), true)]);
+}
+
+/// EXT-26 step 4: a sidecar `NetClass` beats the 'CurrentSource gate is Bias'
+/// pass. mirror6's outputs are CurrentSources (shared bias) gated by `ref`.
+#[test]
+fn user_net_class_survives_the_current_source_gate_pass() {
+    use annotator::evidence::DeviceOp;
+    let nl = net(src("mirror6"));
+    let op = DeviceOp { id_ua: 10.0, headroom_mv: 200.0, gm_us: 100.0, power_uw: 0.0, vgs_mv: None, vbs_mv: None, vth_mv: None, gmb_us: None, gds_us: None };
+    let ev = annotator::Evidence { op: Some(annotator::OpFacts { dev: vec![Some(op); nl.devices.len()], net_mv: vec![None; nl.nets.len()] }), ..Default::default() };
+    let r = net_id(&nl, "ref");
+    let user = AnnotationConfig { net_classes: vec![(r, analog::metadata::NetClass::Signal)], ..cfg("mirror6") };
+    let p = annotator::annotate_with(&nl, &user, &ev);
+    assert!(p.intent.devices.iter().any(|f| f.role == analog::intent::DeviceRole::CurrentSource));
+    assert_eq!((p.net_classes[r.0 as usize].class, p.intent.nets[r.0 as usize].evidence), (analog::metadata::NetClass::Signal, analog::intent::EvidenceLevel::User));
+}
+
 /// EXT-24: a sense resistor across the input pair's gates is Kelvin-sensed at
 /// each end by the gate on that net (one request per terminal).
 #[test]

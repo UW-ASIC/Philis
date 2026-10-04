@@ -774,8 +774,6 @@ mod tests {
         assert_eq!(instance_device("notadevice"), None);
     }
 
-    /// Mirror-ish stub: `vbias` reaches only gates (no DC path), `vout` is
-    /// driven by a drain, `VDD`/`VSS` are rails.
     /// EXT-17: PULSE drives a switching net, DC cards their level in mV, a card
     /// between two non-reference nodes holds no level.
     #[test]
@@ -790,6 +788,8 @@ mod tests {
         assert_eq!(dc[1].0, pnr_core::NetId(2));
     }
 
+    /// Mirror-ish stub: `vbias` reaches only gates (no DC path), `vout` is
+    /// driven by a drain, `VDD`/`VSS` are rails.
     fn stub_netlist() -> pnr_core::Netlist {
         use pnr_core::{Device, DeviceKind, Net, NetId, Netlist};
         let nets = ["vdd", "vss", "vbias", "vout"]

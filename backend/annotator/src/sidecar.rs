@@ -75,7 +75,7 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                         if let Some(name) = e.get("instance_name").and_then(Value::as_str) {
                             alias.insert(name.to_ascii_lowercase(), ds.clone());
                         }
-                        cfg.groups.push(ds);
+                        cfg.groups.push((i as u32, ds));
                     }
                     Err(n) => unknown!(n),
                 }
@@ -209,6 +209,19 @@ mod tests {
         let nl = crate::tests::ota();
         let (_, d) = parse(r#"[{"constraint":"Align","instances":["XM1"]}]"#, &nl).unwrap();
         assert_eq!(d.iter().map(|d| d.kind).collect::<Vec<_>>(), ["sidecar_unsupported"]);
+    }
+
+    /// EXT-26: a `GroupBlocks` pull carries its entry as `Origin::User`, not
+    /// the pattern or net class of its first device.
+    #[test]
+    fn group_blocks_batches_have_user_origin() {
+        let nl = crate::tests::ota();
+        let (cfg, _) = parse(r#"[{"constraint":"Align","instances":["XM1"]},{"constraint":"GroupBlocks","instances":["XM1","XM5"]}]"#, &nl).unwrap();
+        let p = crate::annotate(&nl, &cfg);
+        let user = |arm: &[Box<dyn analog::RuleBatch<pnr_core::Layout>>]| {
+            arm.iter().filter(|b| b.meta().map(|m| m.origin) == Some(analog::intent::Origin::User { index: 1 })).map(|b| b.kind().ends_with("Proximity")).collect::<Vec<_>>()
+        };
+        assert_eq!((user(&p.placement.budget), user(&p.placement.cost)), (vec![true], vec![true]));
     }
 
     #[test]

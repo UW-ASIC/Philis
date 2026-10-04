@@ -124,7 +124,7 @@ fn area_um2(nl: &Netlist, drawn: &[Drawn], d: DeviceId) -> f32 {
 pub fn placement(
     intent: &Intent,
     blocks: &[Block],
-    user_groups: &[Vec<DeviceId>],
+    user_groups: &[(u32, Vec<DeviceId>)],
     nl: &Netlist,
     drawn: &[Drawn],
     p: &ProcessNumbers,
@@ -218,11 +218,13 @@ pub fn placement(
         }
     }
 
-    // Sidecar `GroupBlocks` (EXT-26): each member pulled to the first.
-    for g in user_groups.iter().filter(|g| g.len() >= 2) {
+    // Sidecar `GroupBlocks` (EXT-26): each member pulled to the first, tagged
+    // with its entry (the annotator keeps a pre-set origin, renumbering the id).
+    for (index, g) in user_groups.iter().filter(|g| g.1.len() >= 2) {
         let pull: Vec<Proximity> = g[1..].iter().map(|&m| prox(g[0], m)).collect();
-        r.budget.push(Box::new(pull.clone()));
-        r.cost.push(Box::new(pull));
+        let meta = analog::intent::BatchMeta { id: analog::intent::ConstraintId(0), origin: analog::intent::Origin::User { index: *index } };
+        r.budget.push(Box::new(analog::rule::Tagged { meta, inner: Box::new(pull.clone()) }));
+        r.cost.push(Box::new(analog::rule::Tagged { meta, inner: Box::new(pull) }));
     }
     if !dti.is_empty() {
         r.cost.push(Box::new(dti.clone()));

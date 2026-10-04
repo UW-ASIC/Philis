@@ -40,8 +40,9 @@ fn rail(c: NetClass) -> bool {
 
 /// Assemble the routing [`Requirements`] from structure (EXT-24) and fill
 /// `intent`'s routing facts. `classes` is indexed by net id; `set_roles` by
-/// `intent.sets`.
+/// `intent.sets`. `ports` and `op` decide star points (EXT-24 step 4).
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn routing(
     hg: &BipartiteHypergraph,
     classes: &[NetClassification],
@@ -50,6 +51,8 @@ pub fn routing(
     intent: &mut Intent,
     set_roles: &[crate::class::SetRole],
     policy: &crate::policy::Policy,
+    ports: &[NetId],
+    op: Option<&crate::evidence::OpFacts>,
 ) -> Requirements<Routes> {
     let margin_pct = |c: NetClass| {
         policy.margin_pct[match c {
@@ -200,7 +203,7 @@ pub fn routing(
     if ground.is_some() {
         r.budget.push(Box::new(shields));
     }
-    common_nodes(hg, classes, intent, set_roles);
+    common_nodes(hg, classes, intent, set_roles, ports, op);
     r
 }
 
@@ -216,10 +219,25 @@ pub fn quiet_ground(classes: &[NetClassification], net_names: &[String], aggress
     grounds().find(analog).or_else(|| grounds().find(quiet)).map(|n| (n, false)).or_else(|| grounds().next().map(|n| (n, true)))
 }
 
+/// Star threshold (EXT-24 step 4, **Philis threshold**): a shared node is a
+/// star when non-member current exceeds this share of the members' current.
+const STAR_CURRENT_SHARE: f64 = 0.01;
+
 /// EXT-24 steps 3–6: common nodes of sets sharing a source (emitter), star
 /// points where other devices share that node, Kelvin sensing of a resistor
-/// between a Voltage set's gates, and the RC class of DAC plates.
-fn common_nodes(hg: &BipartiteHypergraph, classes: &[NetClassification], intent: &mut Intent, set_roles: &[crate::class::SetRole]) {
+/// between a Voltage set's gates, and the RC class of DAC plates. The node's
+/// one feed is the port when it is one (no root), else a drain/collector.
+/// With an op point covering every device on the node, a star needs
+/// `Σ|I_others| > STAR_CURRENT_SHARE·Σ|I_members|`; else any other
+/// S/D/E terminal makes one.
+fn common_nodes(
+    hg: &BipartiteHypergraph,
+    classes: &[NetClassification],
+    intent: &mut Intent,
+    set_roles: &[crate::class::SetRole],
+    ports: &[NetId],
+    op: Option<&crate::evidence::OpFacts>,
+) {
     let pin = |d: DeviceId, t: &str| crate::pattern::pin_net(hg, u32::from(d.0), t);
     let mut stars: Vec<StarReq> = Vec::new();
     for (si, s) in intent.sets.iter().enumerate() {
@@ -250,16 +268,25 @@ fn common_nodes(hg: &BipartiteHypergraph, classes: &[NetClassification], intent:
         if stars.iter().any(|st| st.net == net) {
             continue;
         }
-        // Other devices on the node: the one feed (a drain/collector) is the
-        // star's root; anything else shares the matched return.
+        // Other devices on the node: the one feed (the port, else a
+        // drain/collector) is the star's root; anything else shares the matched return.
         let mut others: Vec<(DeviceId, &str)> = hg.net_devices[net.0 as usize]
             .iter()
             .filter(|d| !ids.contains(d))
             .flat_map(|&d| ["S", "D", "E", "C"].into_iter().filter(move |&t| pin(d, t) == Some(net)).map(move |t| (d, t)))
             .collect();
         others.dedup_by_key(|o| o.0);
-        let root = others.iter().position(|o| o.1 == "D" || o.1 == "C").map(|i| others.remove(i)).map(|(d, t)| (d, if t == "D" { Term::D } else { Term::C }));
-        if !others.is_empty() {
+        let root = if ports.contains(&net) {
+            None
+        } else {
+            others.iter().position(|o| o.1 == "D" || o.1 == "C").map(|i| others.remove(i)).map(|(d, t)| (d, if t == "D" { Term::D } else { Term::C }))
+        };
+        let amps = |ds: &mut dyn Iterator<Item = DeviceId>| -> Option<f64> { ds.map(|d| op?.dev.get(d.0 as usize).copied().flatten().map(|o| o.id_ua.abs())).sum() };
+        let carries = match (amps(&mut others.iter().map(|o| o.0)), amps(&mut ids.iter().copied())) {
+            (Some(i_others), Some(i_members)) => i_others > STAR_CURRENT_SHARE * i_members,
+            _ => !others.is_empty(),
+        };
+        if carries {
             stars.push(StarReq { net, root, branches: ids.iter().map(|&d| (d, term)).collect() });
         }
     }

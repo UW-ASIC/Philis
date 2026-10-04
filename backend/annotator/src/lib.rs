@@ -346,9 +346,10 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     );
     intent.devices = evidence::device_facts(netlist, ev.op.as_ref(), &net_classes, &shared, &load_leaf);
     // The gate of every CurrentSource is a bias line. Cascode/CurrentSource-by-class
-    // gates already are, so one pass is a fixpoint.
+    // gates already are, so one pass is a fixpoint. A sidecar class (User) wins (EXT-26 step 4).
     for (d, f) in intent.devices.iter().enumerate() {
         let g = (f.role == analog::intent::DeviceRole::CurrentSource).then(|| pattern::pin_net(&hg, d as u32, "G")).flatten();
+        let g = g.filter(|g| intent.nets[g.0 as usize].evidence != analog::intent::EvidenceLevel::User);
         if let Some(g) = g.filter(|g| matches!(net_classes[g.0 as usize].class, analog::metadata::NetClass::Signal | analog::metadata::NetClass::Sensitive)) {
             classify::set_class(&mut net_classes[g.0 as usize], analog::metadata::NetClass::Bias, load_af[g.0 as usize]);
             intent.nets[g.0 as usize].evidence = analog::intent::EvidenceLevel::OpPoint;
@@ -368,6 +369,8 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         &mut intent,
         &set_roles,
         &cfg.policy,
+        &netlist.ports,
+        ev.op.as_ref(),
     );
     intent.kelvins.extend(cfg.kelvins.iter().cloned());
     if ev.op.is_some() && ev.probe_bias {
@@ -398,6 +401,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     }
 
     // Stable ids in emission order (permutation-invariant since EXT-06). A
+    // pre-tagged batch (sidecar `GroupBlocks`) keeps its origin; else a
     // placement batch whose first touched device is in a recognised block came
     // from that block's pattern; Isolation is cross-block, and the rest are net-class.
     let mut next = 0u32;
@@ -414,7 +418,9 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
                 inner.touched(&mut ids);
                 ids.iter().for_each(|&d| touched[d as usize] = true);
                 let bi = ids.first().map_or(usize::MAX, |&d| block_of[d as usize]);
-                let origin = if bi == usize::MAX || inner.kind().ends_with("::Isolation") {
+                let origin = if let Some(m) = inner.meta() {
+                    m.origin
+                } else if bi == usize::MAX || inner.kind().ends_with("::Isolation") {
                     analog::intent::Origin::NetClass
                 } else {
                     analog::intent::Origin::Pattern { template: blocks[bi].template }

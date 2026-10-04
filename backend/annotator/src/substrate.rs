@@ -40,13 +40,16 @@ pub fn tag(nl: &Netlist, classes: &[NetClassification], sets: &[MatchSpec]) -> (
     }
     let mut is_aggressor = vec![false; nl.devices.len()];
     aggressors.iter().for_each(|a| is_aggressor[a.device.0 as usize] = true);
+    let member_ids: Vec<Vec<DeviceId>> = sets.iter().map(|s| s.members.iter().map(|m| m.device).collect()).collect();
+    let set_idx = crate::sets::device_index(nl.devices.len(), member_ids.iter().map(Vec::as_slice));
     let victims = (0..nl.devices.len())
         .filter(|&d| !is_aggressor[d])
         .filter_map(|d| {
             let device = DeviceId(d as u16);
-            let held: Vec<&MatchSpec> = sets.iter().filter(|s| s.class >= MatchClass::Moderate && s.members.iter().any(|m| m.device == device)).collect();
+            let mine = || set_idx[d].iter().map(|&i| &sets[i]);
+            let held: Vec<&MatchSpec> = mine().filter(|s| s.class >= MatchClass::Moderate).collect();
             if !held.is_empty() {
-                let weight = sets.iter().filter(|s| s.members.iter().any(|m| m.device == device)).filter_map(|s| s.weight).reduce(f32::max);
+                let weight = mine().filter_map(|s| s.weight).reduce(f32::max);
                 let rank = |s: &&MatchSpec| if s.class == MatchClass::Exceptional { 10.0 } else { 3.0 };
                 let weight = weight.unwrap_or_else(|| held.iter().map(rank).fold(0.0, f32::max));
                 return Some(Victim { device, weight, reason: "matched set" });

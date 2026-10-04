@@ -36,7 +36,7 @@ pub fn requirements(
     compounds: &[Compound],
     shared_bias: &[Vec<DeviceId>],
     passive: &[Vec<DeviceId>],
-    user_groups: &[Vec<DeviceId>],
+    user_groups: &[(u32, Vec<DeviceId>)],
     hg: &BipartiteHypergraph,
     classes: &[NetClassification],
     canon: &[u64],
@@ -80,7 +80,7 @@ pub fn requirements(
         g.iter().skip(1).for_each(|&d| push(g[0], d, ReqType::MatchBlock, src));
     }
     // Sidecar `GroupBlocks` (EXT-26): a star from the first member.
-    for (gi, g) in user_groups.iter().enumerate() {
+    for (gi, (_, g)) in user_groups.iter().enumerate() {
         g.iter().skip(1).for_each(|&d| push(g[0], d, ReqType::ProxBlock, gi));
     }
     for (n, devs) in hg.net_devices.iter().enumerate() {

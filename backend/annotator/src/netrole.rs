@@ -146,8 +146,9 @@ pub struct AnnotationConfig {
     pub seeds: Vec<crate::symmetry::Seed>,
     /// Sidecar `SymmetricBlocks` direction: the axis of a single compound.
     pub symmetry_dir: Option<analog::intent::AxisDir>,
-    /// Sidecar `GroupBlocks`: kept together (ProxBlock, Proximity).
-    pub groups: Vec<Vec<pnr_core::ids::DeviceId>>,
+    /// Sidecar `GroupBlocks`: (entry index, members) kept together (ProxBlock,
+    /// Proximity); the batches carry `Origin::User { index }`.
+    pub groups: Vec<(u32, Vec<pnr_core::ids::DeviceId>)>,
     /// Sidecar `Match`: the class (and optionally kind) of the set holding these devices.
     pub classes: Vec<(Vec<pnr_core::ids::DeviceId>, analog::intent::MatchClass, Option<analog::intent::MatchKind>)>,
     /// Sidecar `NetClass`: overrides with `User` evidence.
