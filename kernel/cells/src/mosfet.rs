@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use analog::matching::pattern::{self, Outer};
 use analog::Constraints;
-use pnr_core::{DeviceGroup, DeviceKind, Macro, Process, Rect};
+use pnr_core::{DeviceGroup, DeviceKind, Macro, MatchClass, Process, Rect};
 
 use crate::builder::{cut_lattice, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
 use crate::{Cell, Pattern};
@@ -303,7 +303,8 @@ impl Mosfet {
         // junction grows) until SA/SB are long enough that the stress term
         // fades (Hastings §13.3 r9). A lone device, a parallel group and a
         // series stack have no such mismatch.
-        let moat = if n_dev > 1 && nd > 0 && self.style != Pattern::Chain { r("lod_moat_ext_moderate", 0) } else { 0 };
+        // ponytail: today's 3 µm; CELL-12 reads mos_env(class)
+        let moat = if n_dev > 1 && nd > 0 && self.style != Pattern::Chain { process.tier("lod_moat_ext_nm", MatchClass::Minimal).unwrap_or(0) } else { 0 };
         let diff_x_start = -nd * d_step - moat;
         let diff_x_end = gates_end + sd_edge + nd * d_step + moat;
         // One continuous diff row; extraction splits S from D at each gate
@@ -641,7 +642,8 @@ impl Mosfet {
         // PMOS nwell, inflated by the WPE halo on matched groups.
         if is_pmos {
             if let Some(nwell) = process.layer("nwell") {
-                let wpe_halo = if matched { r("wpe_clearance_moderate", 0) } else { 0 };
+                // ponytail: today's 3 µm; CELL-12 reads mos_env(class)
+                let wpe_halo = if matched { process.tier("wpe_clearance_nm", MatchClass::Moderate).unwrap_or(0) } else { 0 };
                 let nw_enc = dim(process, "nwell_diff_enc") + wpe_halo;
                 let nw_min = dim(process, "nwell_min_width");
                 let mut w = tap_w + 2 * nw_enc;

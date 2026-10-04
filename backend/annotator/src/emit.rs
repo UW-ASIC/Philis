@@ -34,7 +34,8 @@
 //! Matching and thermal budgets come from the netlist's gate areas and the
 //! deck's mismatch data; without them the documented fallbacks apply.
 
-use analog::matching::mismatch::{Budget, Coeffs, MatchKind};
+use analog::matching::class::{phi_arm, Family, MatchClass};
+use analog::matching::mismatch::{self, Budget, Coeffs, MatchKind};
 use analog::placement::symmetry::SymmetryGroup;
 use analog::placement::{DtiBand, Isolation, MatchedSet, OrientCheck, OrientationSet, Proximity, Symmetry};
 use analog::Requirements;
@@ -45,21 +46,14 @@ use pnr_core::{DeviceKind, Netlist};
 use crate::block::{leaves, Block, BlockKind};
 use crate::ProcessNumbers;
 
-/// Placement's share η of a matched pair's mismatch when no offset budget is
-/// given: the gradient term may reach this fraction of the random term the
-/// sizing bought (σ grows ≤ 4.4%).
-///
-/// ponytail: Pelgrom prescribes no η; it is the circuit's to allocate. Set
-/// `AnnotationConfig::offset_sigma_mv` to derive it.
-const GRADIENT_SHARE: f32 = 0.3;
-
 fn gate_um2(nl: &Netlist, d: DeviceId) -> f32 {
     crate::gate_um2(&nl.devices[d.0 as usize])
 }
 
-/// The pair budget: the 1σ offset when given, else [`GRADIENT_SHARE`].
-fn budget(offset_sigma_mv: Option<f32>) -> Budget {
-    offset_sigma_mv.map_or(Budget::Eta(GRADIENT_SHARE), Budget::Sigma1Mv)
+/// The pair budget: the 1σ offset when given, else
+/// [`mismatch::GRADIENT_SHARE`] (no allowance or class source yet: EXT-20).
+fn budget(offset_sigma_mv: Option<f32>, kind: MatchKind) -> Budget {
+    mismatch::choose(offset_sigma_mv, None, None, kind)
 }
 
 /// `d`'s entry of a deck `[nmos, pmos]` pair; `None` for a non-FET or a
@@ -82,7 +76,7 @@ fn avt(nl: &Netlist, p: &ProcessNumbers, d: DeviceId) -> Option<f32> {
 /// A `MatchedSet` pair is priced against its allowance when the deck carries
 /// its polarity's `A_VT`; the terms whose coefficient is missing (`S_VT`, TC,
 /// `KVTH0`) spend nothing. `offset_sigma_mv` (1σ input-referred offset a pair
-/// may spend) sets the allowance; absent, [`GRADIENT_SHARE`]`·σ_rand`.
+/// may spend) sets the allowance; absent, [`mismatch::GRADIENT_SHARE`]`·σ_rand`.
 #[must_use]
 pub fn placement(
     blocks: &[Block],
@@ -117,32 +111,43 @@ pub fn placement(
                 }
                 BlockKind::Group | BlockKind::Glue => continue,
             }
+            // Only an inductor has no family, and an inductor pair is never matched; checked before
+            // the Symmetry push so a familyless pair gets no batch at all.
+            let Some(family) = Family::of(nl.devices[a.0 as usize].kind) else { continue };
             // ponytail: pairwise emission; a multi-output mirror's pairs share their reference.
             let shared = in_sym.contains(&a) || in_sym.contains(&b);
             if !shared {
                 syms.push(Symmetry { a: td(a), b: td(b), axis });
                 in_sym.extend([a, b]);
             }
+            let match_kind = if kind == BlockKind::DiffPair { MatchKind::Voltage } else { MatchKind::Current };
             let set = MatchedSet {
                 members: vec![a, b],
-                kind: if kind == BlockKind::DiffPair { MatchKind::Voltage } else { MatchKind::Current },
-                mos: matches!(nl.devices[a.0 as usize].kind, DeviceKind::Nmos | DeviceKind::Pmos),
+                kind: match_kind,
+                family,
+                // ponytail: every set Moderate; EXT-20 sets it from intent::MatchedSet.
+                class: MatchClass::Moderate,
                 coeffs: Coeffs {
                     avt_mv_um: avt(nl, p, a),
                     svt_uv_per_um: p.svt_uv_per_um,
                     kvth0_mv_um: by_polarity(nl, a, p.lod_kvth0_mv_um),
                     tc_uv_per_k: by_polarity(nl, a, p.vt_tc_uv_per_k),
                 },
-                budget: budget(offset_sigma_mv),
+                budget: budget(offset_sigma_mv, match_kind),
                 gate_um2: vec![gate_um2(nl, a), gate_um2(nl, b)],
                 tol_nm: p.lattice_nm.max(1) as f32 / 2.0,
                 cell_of: Vec::new(),
             };
+            let phi = phi_arm(set.class);
             r.budget.push(Box::new(set.clone()));
             r.cost.push(Box::new(set));
             let orient = |check| OrientationSet { members: vec![a, b], check, cell_of: Vec::new() };
             r.hard.push(Box::new(orient(OrientCheck::Axis)));
-            r.budget.push(Box::new(orient(OrientCheck::Phi)));
+            match phi {
+                Some(true) => r.hard.push(Box::new(orient(OrientCheck::Phi))),
+                Some(false) => r.budget.push(Box::new(orient(OrientCheck::Phi))),
+                None => {}
+            }
             if kind == BlockKind::CurrentMirror {
                 r.budget.push(Box::new(prox.clone()));
                 r.cost.push(Box::new(prox));
@@ -314,6 +319,21 @@ mod tests {
             if ok(mid) { hi = mid } else { lo = mid }
         }
         hi
+    }
+
+    /// MAT-07: every set is Moderate, so each matched pair keeps Axis hard and
+    /// Φ as a budget; nothing is lost or moved between arms.
+    #[test]
+    fn default_class_is_moderate_mos() {
+        let nl = crate::tests::ota();
+        let cfg = crate::AnnotationConfig::default();
+        let blocks = crate::annotate(&nl, &cfg).blocks;
+        let r = placement(&blocks, &nl, &cfg.process, None, &cfg.policy);
+        let count = |arm: &Arm, k: &str| arm.iter().filter(|b| b.kind() == k).count();
+        let pairs = count(&r.budget, "MatchedSet");
+        assert!(pairs > 0);
+        assert_eq!(count(&r.hard, "Orientation"), pairs, "Axis hard");
+        assert_eq!(count(&r.budget, "Orientation"), pairs, "Phi budget");
     }
 
     /// REL C3 / AA-13: the stage's clocked tail sits by its pair (Proximity);

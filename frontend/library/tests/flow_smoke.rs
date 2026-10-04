@@ -47,3 +47,33 @@ fn chain2_open_epoch_is_scored_not_fatal() {
         "signoff plumbing failed (mislanded pin label / bad reference?): {plumbing_faults:?}"
     );
 }
+
+/// MAT-13 / MAT-08: the report carries one ledger row per matched pair, and
+/// a 1 mV offset budget under the input pair's σ_rand (9.5/√10 ≈ 3.0 mV)
+/// leaves the layout no allowance: the row is sizing-limited and its set is
+/// violated whenever placement spends anything.
+#[test]
+fn matched_sets_are_reported() {
+    let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+    let cfg = Config {
+        feedback_iters: 1,
+        outer_iters: 1,
+        annotation: annotator::AnnotationConfig { offset_sigma_mv: Some(1.0), ..Default::default() },
+        ..Default::default()
+    };
+    let sol = library::run(include_str!("../../../benchmarks/fixtures/ota.spice"), &pdk, &library::Macros::default(), &cfg)
+        .expect("the flow returns a solution");
+    let rows = &sol.metadata.matched;
+    assert!(!rows.is_empty());
+    for r in rows {
+        let f = [r.sigma_rand, r.sigma_layout, r.mu_thermal, r.mu_lod, r.allowance, r.usage, r.second_order_nm];
+        assert!(f.iter().all(|v| v.is_finite()), "{r:?}");
+        assert!(!r.known || r.sigma_rand > 0.0, "{r:?}");
+    }
+    let pair = rows.iter().find(|r| r.members == (0, 1)).expect("XM1/XM2 row");
+    assert!(pair.sigma_rand >= 1.0, "{pair:?}");
+    for r in rows.iter().filter(|r| r.sigma_rand >= 1.0) {
+        assert!(r.allowance == 0.0 && r.sizing_limited, "{r:?}");
+        assert!(r.usage > 1.0 || r.sigma_layout + r.mu_thermal + r.mu_lod == 0.0, "{r:?}");
+    }
+}

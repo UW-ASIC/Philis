@@ -22,7 +22,7 @@ pub use hypergraph::BipartiteHypergraph;
 pub use ids::{AxisId, DeviceId, GroupId, NetId, Target};
 pub use layout::Layout;
 pub use netlist::{Device, DeviceGroup, DeviceKind, MosSize, Net, Netlist, SourceCard, SubcktInst};
-pub use process::{Process, SubstrateKind};
+pub use process::{MatchClass, Process, SubstrateKind};
 pub use r#macro::{pin_shares, place_macro, place_macros, Drawn, DrawnKind, Dummy, Figures, KeepWhy, Keepout, Macro, Node};
 pub use report::{Report, Violation};
 pub use routes::{GatePin, Routes, Terminal};

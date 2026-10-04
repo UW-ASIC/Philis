@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use analog::cell::{SeriesParallel, Unitization};
 use analog::Constraints;
 use cells::{bjt::Bjt, cap_array::CapArray, capacitor::Capacitor, diode::Diode, finfet::FinFet, inductor::Inductor, mosfet::Mosfet, resistor::Resistor, Cell};
-use pnr_core::{DeviceGroup, DeviceId, DeviceKind, LayerId, Process};
+use pnr_core::{DeviceGroup, DeviceId, DeviceKind, LayerId, MatchClass, Process};
 use verify::sidecar::KEYS;
 
 /// `pdk`, recording every `rule()` name asked of it.
@@ -62,6 +62,9 @@ impl Process for Recording<'_> {
     }
     fn space_between(&self, a: &str, b: &str) -> Option<i32> {
         self.0.space_between(a, b)
+    }
+    fn tier(&self, key: &str, c: MatchClass) -> Option<i32> {
+        self.0.tier(key, c)
     }
 }
 
@@ -197,4 +200,29 @@ fn generators_read_exactly_the_required_keys() {
     assert!(stray.is_empty(), "sidecar keys generators read that the registry lacks: {stray:?}");
     let stale: Vec<_> = KEYS.iter().filter(|k| k.reader == "unread" && recorded.contains(k.name)).map(|k| k.name).collect();
     assert!(stale.is_empty(), "keys registered as unread that generators read: {stale:?}");
+}
+
+/// The class environments read the shipped tier table (GAP-01) through
+/// `Process::tier`, and no deck lacks a tier.
+#[test]
+fn mos_env_follows_the_table() {
+    use analog::matching::class::{missing_tiers, mos_env, resistor_env, GateStrap, MosEnv, PassiveEnv};
+    let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+    let rec = Recording(&pdk, RefCell::default());
+    assert_eq!(
+        mos_env(MatchClass::Moderate, &rec),
+        MosEnv { dummy_reach_nm: 3000, moat_nm: 5000, wpe_nm: 3000, gate_ext_extra_nm: 1000, gate_strap: GateStrap::PolyBarFar }
+    );
+    assert_eq!(
+        mos_env(MatchClass::Exceptional, &rec),
+        MosEnv { dummy_reach_nm: 10000, moat_nm: 10000, wpe_nm: 5000, gate_ext_extra_nm: 1000, gate_strap: GateStrap::MetalIsolated }
+    );
+    assert_eq!(
+        resistor_env(MatchClass::Exceptional, &rec),
+        PassiveEnv { min_dummies: 1, dummy_span_nm: 10000, width_floor_permille: 4000, length_floor_x: 10 }
+    );
+    for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "generic_finfet"] {
+        let p = verify::Pdk::builtin(deck).unwrap_or_else(|e| panic!("{deck}: {e}"));
+        assert_eq!(missing_tiers(&p).count(), 0, "{deck}");
+    }
 }

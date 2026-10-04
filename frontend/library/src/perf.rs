@@ -56,25 +56,69 @@ pub struct Spec {
     pub max: Option<f64>,
 }
 
+/// One process/environment point: model corner, temperature, and `.param`
+/// values the testbenches read (e.g. `Vdd vdd 0 {vdd}`).
+#[derive(Clone, Debug)]
+pub struct Scenario {
+    pub name: String,
+    pub corner: String,
+    pub temp_c: f64,
+    pub params: Vec<(String, f64)>,
+}
+
 /// How to score a layout electrically.
 #[derive(Clone, Debug)]
 pub struct PerfConfig {
     /// Models, corner and ngspice binary (the circuit card format is shared
     /// with the operating point).
     pub sim: OpConfig,
-    /// Sources, loads, analyses and `.measure` statements over the schematic's
-    /// net names. Must not contain `.end`.
-    pub testbench: String,
+    /// Each a complete bench (sources, loads, analyses, `.measure`) over the
+    /// schematic's net names, no `.end`; a spec's metric comes from exactly
+    /// one of them.
+    pub testbenches: Vec<String>,
     pub specs: Vec<Spec>,
+    /// Index 0 is nominal. Empty = one scenario from `sim.corner` /
+    /// `sim.temp_c`.
+    pub scenarios: Vec<Scenario>,
+}
+
+impl PerfConfig {
+    /// `scenarios`, or the single one `sim` implies.
+    #[must_use]
+    pub fn scenarios(&self) -> Vec<Scenario> {
+        if self.scenarios.is_empty() {
+            vec![Scenario { name: self.sim.corner.clone(), corner: self.sim.corner.clone(), temp_c: self.sim.temp_c, params: Vec::new() }]
+        } else {
+            self.scenarios.clone()
+        }
+    }
+}
+
+/// A finite bound's worst value over the evaluated scenarios.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoundResult {
+    pub spec: usize,
+    /// The ceiling (`max`); `false` = the floor (`min`).
+    pub upper: bool,
+    /// `None` = some scenario did not measure it (that scenario is the worst).
+    pub value: Option<f64>,
+    /// Index into [`PerfConfig::scenarios`].
+    pub scenario: usize,
 }
 
 /// The measured metrics of one layout and how far they miss their specs.
 #[derive(Clone, Debug, Default)]
 pub struct PerfResult {
-    /// Every spec's metric, `None` when the testbench did not produce it.
+    /// Every spec's metric at the first evaluated scenario (nominal in the
+    /// flow), `None` when no testbench produced it there.
     pub metrics: Vec<(String, Option<f64>)>,
-    /// Σ normalised miss over the specs (`0` = all met). A metric that could
-    /// not be measured counts a full `1.0`: unknown never passes.
+    /// One per finite bound, spec order, floor before ceiling.
+    pub bounds: Vec<BoundResult>,
+    /// Per spec: `1.0` if any scenario did not measure it, else the floor miss
+    /// at the worst floor value plus the ceiling miss at the worst ceiling
+    /// value (one scenario: [`miss`]).
+    pub miss: Vec<f64>,
+    /// Σ `miss` (`0` = all met). Unknown never passes.
     pub residual: f64,
 }
 
@@ -95,12 +139,43 @@ pub fn miss(spec: &Spec, v: Option<f64>) -> f64 {
     spec.min.map_or(0.0, |lo| over(lo - v, lo)) + spec.max.map_or(0.0, |hi| over(v - hi, hi))
 }
 
-/// The deck: models, flat circuit, one capacitor per extracted matrix entry,
-/// the testbench.
+/// Score `measured[i][j]` (spec `j` at `scenarios[i]`): per finite bound the
+/// scenario with the smallest margin (`v − lo` / `hi − v`), the first
+/// unmeasured one if any; ties go to the earlier scenario.
+#[must_use]
+pub fn score(specs: &[Spec], measured: &[Vec<Option<f64>>], scenarios: &[usize]) -> PerfResult {
+    let metrics = specs.iter().enumerate().map(|(j, s)| (s.metric.clone(), measured.first().and_then(|m| m[j]))).collect();
+    let mut bounds = Vec::new();
+    let mut misses = Vec::new();
+    for (j, s) in specs.iter().enumerate() {
+        let col = || measured.iter().zip(scenarios).map(move |(m, &sc)| (m[j], sc));
+        // The worst `(value, scenario)` for a bound: `margin` grows with slack.
+        let worst = |margin: fn(f64) -> f64| {
+            col().find(|(v, _)| v.is_none()).or_else(|| col().reduce(|a, b| if margin(b.0.unwrap()) < margin(a.0.unwrap()) { b } else { a }))
+        };
+        let lo = worst(|v| v);
+        let hi = worst(|v| -v);
+        for (bound, upper, w) in [(s.min, false, lo), (s.max, true, hi)] {
+            if let (Some(_), Some((value, scenario))) = (bound.filter(|b| b.is_finite()), w) {
+                bounds.push(BoundResult { spec: j, upper, value, scenario });
+            }
+        }
+        let floor = Spec { max: None, ..s.clone() };
+        let ceiling = Spec { min: None, ..s.clone() };
+        misses.push(match (lo, hi) {
+            (Some((Some(a), _)), Some((Some(b), _))) => miss(&floor, Some(a)) + miss(&ceiling, Some(b)),
+            _ => 1.0,
+        });
+    }
+    PerfResult { metrics, bounds, residual: misses.iter().sum(), miss: misses }
+}
+
+/// The deck: models at `sc`'s corner, its `.temp` and `.param`s, flat
+/// circuit, one capacitor per extracted matrix entry, the testbench `tb`.
 ///
 /// # Errors
 /// A device the circuit cannot express (`flat_circuit_with`).
-fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig) -> Result<String, String> {
+fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, tb: &str, sc: &Scenario) -> Result<String, String> {
     let caps = &par.caps;
     let node = |name: &str| {
         netlist
@@ -116,7 +191,9 @@ fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig) -> Result<String,
             pex.push_str(&format!("Cpex{i} {a} {b} {c:.6e}f\n"));
         }
     }
-    let lib = cfg.sim.lib_lines();
+    let mut lib = OpConfig { corner: sc.corner.clone(), ..cfg.sim.clone() }.lib_lines();
+    lib.push_str(&format!(".temp {}\n", sc.temp_c));
+    lib.extend(sc.params.iter().map(|(k, v)| format!(".param {k}={v}\n")));
     // Branch resistors: a terminal with routed R gets its own node,
     // `<net>__<device>_<terminal>`, joined to the net through it.
     let branch = |di: usize, t: &str| par.series.get(di).and_then(|v| v.iter().find(|(n, _)| n == t)).map(|&(_, r)| r).filter(|&r| r > 0.0);
@@ -145,8 +222,7 @@ fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig) -> Result<String,
         !par.extracted,
     )?;
     Ok(format!(
-        "* Philis post-layout performance (generated)\n{lib}{circuit}\n* extracted capacitance\n{pex}\n* routed branch resistance\n{rs}\n{}\n.end\n",
-        cfg.testbench
+        "* Philis post-layout performance (generated)\n{lib}{circuit}\n* extracted capacitance\n{pex}\n* routed branch resistance\n{rs}\n{tb}\n.end\n"
     ))
 }
 
@@ -162,58 +238,93 @@ fn parse_measures(text: &str) -> Vec<(String, f64)> {
         .collect()
 }
 
-/// Simulate and score. `Err` when the circuit cannot be simulated at all; a
-/// failed measurement is a `None` metric (and a full miss), not an error.
+/// Simulate every `(testbench, scenario)` deck of `scenarios` (indices into
+/// [`PerfConfig::scenarios`]) and [`score`] them. `Err` when the circuit
+/// cannot be simulated at all; a failed measurement is a `None` metric (and a
+/// full miss), not an error.
 ///
 /// # Errors
-/// The deck cannot be built ("cannot simulate: …") or written, ngspice cannot
-/// be started, or it exits with an error ("cannot simulate: ngspice exit …").
-pub fn evaluate(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig) -> Result<PerfResult, String> {
-    let text = deck(netlist, par, cfg).map_err(|e| format!("cannot simulate: {e}"))?;
-    // One dir per run: sensitivity runs go in parallel and must not share a
-    // deck or the ngspice cwd (`bsim4v5.out`).
-    let out = run_deck(&cfg.sim.ngspice, "perf", &text)?;
-    let measured = parse_measures(&String::from_utf8_lossy(&out.stdout));
-    let metrics: Vec<(String, Option<f64>)> = cfg
-        .specs
+/// A deck cannot be built ("cannot simulate: …") or written, ngspice cannot be
+/// started, or it exits with an error ("cannot simulate: ngspice exit …"); a
+/// metric measured by two testbenches ("metric {m} measured by testbenches
+/// {a} and {b}").
+pub fn evaluate(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, scenarios: &[usize]) -> Result<PerfResult, String> {
+    let all = cfg.scenarios();
+    let jobs: Vec<(usize, &Scenario)> = scenarios
         .iter()
-        .map(|s| {
+        .flat_map(|&i| cfg.testbenches.iter().enumerate().map(move |(t, _)| (t, i)))
+        .map(|(t, i)| all.get(i).map(|sc| (t, sc)).ok_or(format!("cannot simulate: no scenario {i}")))
+        .collect::<Result<_, _>>()?;
+    // ponytail: one thread per deck; PERF-11's run_jobs bounds it
+    // One dir per run (`run_deck`): decks go in parallel and must not share a
+    // deck or the ngspice cwd (`bsim4v5.out`).
+    let outs: Vec<Result<Vec<(String, f64)>, String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = jobs
+            .iter()
+            .map(|&(t, sc)| {
+                scope.spawn(move || {
+                    let text = deck(netlist, par, cfg, &cfg.testbenches[t], sc).map_err(|e| format!("cannot simulate: {e}"))?;
+                    let out = run_deck(&cfg.sim.ngspice, "perf", &text)?;
+                    Ok(parse_measures(&String::from_utf8_lossy(&out.stdout)))
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("cannot simulate: a deck panicked".into()))).collect()
+    });
+    let outs = outs.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let n_tb = cfg.testbenches.len();
+    let mut measured = Vec::with_capacity(scenarios.len());
+    for per_sc in outs.chunks(n_tb.max(1)) {
+        let mut row = Vec::with_capacity(cfg.specs.len());
+        for s in &cfg.specs {
             let key = s.metric.to_ascii_lowercase();
-            (s.metric.clone(), measured.iter().rev().find(|(k, _)| *k == key).map(|&(_, v)| v))
-        })
-        .collect();
-    let residual = cfg.specs.iter().zip(&metrics).map(|(s, (_, v))| miss(s, *v)).sum();
-    Ok(PerfResult { metrics, residual })
+            let found: Vec<(usize, f64)> =
+                per_sc.iter().enumerate().filter_map(|(t, m)| m.iter().rev().find(|(k, _)| *k == key).map(|&(_, v)| (t, v))).collect();
+            if let [(a, _), (b, _), ..] = found[..] {
+                return Err(format!("metric {} measured by testbenches {a} and {b}", s.metric));
+            }
+            row.push(found.first().map(|&(_, v)| v));
+        }
+        measured.push(row);
+    }
+    if n_tb == 0 {
+        measured = vec![vec![None; cfg.specs.len()]; scenarios.len()];
+    }
+    Ok(score(&cfg.specs, &measured, scenarios))
 }
 
 /// Finite-difference sensitivities at the schematic operating point: the
-/// baseline (no parasitics), and `∂f/∂C` per spec per net from one run with
-/// `delta_af` of ground capacitance added to that net alone. Runs in parallel.
+/// baseline (no parasitics), and `∂f/∂C` per bound per net from one run with
+/// `delta_af` of ground capacitance added to that net alone, both over the
+/// same scenarios. Runs in parallel.
 pub struct Sensitivity {
     pub base: PerfResult,
-    /// `[spec][net]`, metric units per aF; `None` where a run did not measure.
+    /// `[bound][net]`, aligned with `base.bounds`: the change of the bound's
+    /// worst value over the scenarios, metric units per aF; `None` where a run
+    /// did not measure. The worst scenario may switch under the step; the
+    /// difference is still of the worst case, the corner-safe margin.
     pub d_per_af: Vec<Vec<Option<f64>>>,
 }
 
 /// # Errors
 /// As [`evaluate`], for the baseline run.
-pub fn sensitivities(netlist: &Netlist, cfg: &PerfConfig, nets: &[String], delta_af: f64) -> Result<Sensitivity, String> {
-    let base = evaluate(netlist, &Parasitics::default(), cfg)?;
+pub fn sensitivities(netlist: &Netlist, cfg: &PerfConfig, nets: &[String], delta_af: f64, scenarios: &[usize]) -> Result<Sensitivity, String> {
+    let base = evaluate(netlist, &Parasitics::default(), cfg, scenarios)?;
     let runs: Vec<Option<PerfResult>> = std::thread::scope(|scope| {
         let handles: Vec<_> = nets
             .iter()
             .map(|n| {
                 let caps = vec![(n.clone(), None, delta_af / 1000.0)];
-                scope.spawn(move || evaluate(netlist, &Parasitics { caps, ..Parasitics::default() }, cfg).ok())
+                scope.spawn(move || evaluate(netlist, &Parasitics { caps, ..Parasitics::default() }, cfg, scenarios).ok())
             })
             .collect();
         handles.into_iter().map(|h| h.join().ok().flatten()).collect()
     });
-    let d_per_af = (0..cfg.specs.len())
-        .map(|j| {
+    let d_per_af = (0..base.bounds.len())
+        .map(|k| {
             runs.iter()
                 .map(|r| {
-                    let (f0, f1) = (base.metrics[j].1?, r.as_ref()?.metrics[j].1?);
+                    let (f0, f1) = (base.bounds[k].value?, r.as_ref()?.bounds[k].value?);
                     Some((f1 - f0) / delta_af)
                 })
                 .collect()
@@ -222,14 +333,15 @@ pub fn sensitivities(netlist: &Netlist, cfg: &PerfConfig, nets: &[String], delta
     Ok(Sensitivity { base, d_per_af })
 }
 
-/// One [`analog::routing::PerformanceBudget`] row per finite bound, metric
-/// `"{metric}:min"` / `"{metric}:max"`: `w_i = sign·(∂f/∂C_i) / headroom`,
-/// `limit = 1`, with floor headroom `f0 − lo` (`sign = −1`) and ceiling `hi −
-/// f0` (`sign = +1`). A bound the schematic already misses (`headroom ≤ 0`)
-/// keeps a do-not-worsen row: `limit = 0`, `w_i = sign·(∂f/∂C_i) / |bound|`
-/// (`miss`'s unit-free scale, `1` for a zero bound). A spec the schematic does
-/// not measure finitely, or a non-finite bound, has no row (reported by the
-/// caller); a net whose run did not measure is left out of the row.
+/// One [`analog::routing::PerformanceBudget`] row per bound of `s.base`,
+/// metric `"{metric}:min"` / `"{metric}:max"`: `w_i = sign·(∂f/∂C_i) /
+/// headroom`, `limit = 1`, with floor headroom `f0 − lo` (`sign = −1`) and
+/// ceiling `hi − f0` (`sign = +1`), `f0` the bound's worst value over the
+/// scenarios. A bound the schematic already misses (`headroom ≤ 0`) keeps a
+/// do-not-worsen row: `limit = 0`, `w_i = sign·(∂f/∂C_i) / |bound|` (`miss`'s
+/// unit-free scale, `1` for a zero bound). A bound the schematic does not
+/// measure finitely has no row (reported by the caller); a net whose run did
+/// not measure is left out of the row.
 #[must_use]
 pub fn budget_rows(
     cfg: &PerfConfig,
@@ -237,22 +349,19 @@ pub fn budget_rows(
     nets: &[pnr_core::NetId],
     af_per_nm: f32,
 ) -> Vec<analog::routing::PerformanceBudget> {
-    cfg.specs
+    s.base
+        .bounds
         .iter()
-        .enumerate()
-        .flat_map(|(j, spec)| {
-            let f0 = s.base.metrics[j].1;
-            [(spec.min, -1.0, "min"), (spec.max, 1.0, "max")].into_iter().filter_map(move |(bound, sign, side)| {
-                let (f0, bound) = (f0.filter(|v| v.is_finite())?, bound.filter(|v| v.is_finite())?);
-                let headroom = sign * (bound - f0);
-                let (scale, limit) = if headroom > 0.0 { (headroom, 1.0) } else { (if bound == 0.0 { 1.0 } else { bound.abs() }, 0.0) };
-                let (nets, weights): (Vec<_>, Vec<_>) = nets
-                    .iter()
-                    .zip(&s.d_per_af[j])
-                    .filter_map(|(&n, d)| Some((n, (sign * d.as_ref()? / scale) as f32)))
-                    .unzip();
-                Some(analog::routing::PerformanceBudget { metric: format!("{}:{side}", spec.metric), nets, weights, af_per_nm, limit })
-            })
+        .zip(&s.d_per_af)
+        .filter_map(|(b, d)| {
+            let spec = &cfg.specs[b.spec];
+            let (bound, sign, side) = if b.upper { (spec.max?, 1.0, "max") } else { (spec.min?, -1.0, "min") };
+            let f0 = b.value.filter(|v| v.is_finite())?;
+            let headroom = sign * (bound - f0);
+            let (scale, limit) = if headroom > 0.0 { (headroom, 1.0) } else { (if bound == 0.0 { 1.0 } else { bound.abs() }, 0.0) };
+            let (nets, weights): (Vec<_>, Vec<_>) =
+                nets.iter().zip(d).filter_map(|(&n, d)| Some((n, (sign * d.as_ref()? / scale) as f32))).unzip();
+            Some(analog::routing::PerformanceBudget { metric: format!("{}:{side}", spec.metric), nets, weights, af_per_nm, limit })
         })
         .collect()
 }
@@ -298,8 +407,8 @@ mod tests {
             ..Default::default()
         };
         let caps = vec![("out".to_string(), None, 2.5), ("in".to_string(), Some("out".to_string()), 0.4), ("ghost".to_string(), None, 9.0)];
-        let cfg = PerfConfig { sim: OpConfig::default(), testbench: ".measure tran x avg v(out)".into(), specs: vec![] };
-        let d = deck(&nl, &Parasitics { caps, ..Parasitics::default() }, &cfg).unwrap();
+        let cfg = PerfConfig { sim: OpConfig::default(), testbenches: vec![".measure tran x avg v(out)".into()], specs: vec![], scenarios: Vec::new() };
+        let d = deck(&nl, &Parasitics { caps, ..Parasitics::default() }, &cfg, &cfg.testbenches[0], &cfg.scenarios()[0]).unwrap();
         assert!(d.contains("out 0 2.500000e0f"), "{d}");
         assert!(d.contains("in out 4.000000e-1f"), "{d}");
         assert!(!d.contains("ghost"), "a net the schematic lacks has no node");
@@ -323,8 +432,8 @@ mod tests {
             ..Default::default()
         };
         let par = Parasitics { caps: Vec::new(), series: vec![vec![("D".into(), 12.5)]], lod_inv_um: vec![Some(1.0)], extracted: false };
-        let cfg = PerfConfig { sim: OpConfig::default(), testbench: String::new(), specs: vec![] };
-        let d = deck(&nl, &par, &cfg).unwrap();
+        let cfg = PerfConfig { sim: OpConfig::default(), testbenches: vec![String::new()], specs: vec![], scenarios: Vec::new() };
+        let d = deck(&nl, &par, &cfg, "", &cfg.scenarios()[0]).unwrap();
         assert!(d.contains("Rpex_0_D out__0_D out 12.5000"), "{d}");
         assert!(d.contains("XM1 out__0_D in"), "{d}");
         // SA = SB = S with (1/2)(1/(S+0.25) + 1/(S+0.75)) = 0.5.
@@ -337,12 +446,13 @@ mod tests {
     fn rows_turn_sensitivities_into_shares_of_the_headroom() {
         let cfg = PerfConfig {
             sim: OpConfig::default(),
-            testbench: String::new(),
+            testbenches: Vec::new(),
             specs: vec![spec(Some(300e6), None), spec(None, Some(1.0)), spec(Some(10.0), None)],
+            scenarios: Vec::new(),
         };
         let s = Sensitivity {
             // UGF 400 MHz (100 MHz headroom); power 0.5 (0.5 headroom); gain 5 (already short).
-            base: PerfResult { metrics: vec![("a".into(), Some(400e6)), ("b".into(), Some(0.5)), ("c".into(), Some(5.0))], residual: 0.0 },
+            base: score(&cfg.specs, &[vec![Some(400e6), Some(0.5), Some(5.0)]], &[0]),
             // UGF drops 1 MHz per aF on net 0, not at all on net 1.
             d_per_af: vec![vec![Some(-1e6), Some(0.0)], vec![Some(0.01), None], vec![Some(0.0), Some(0.0)]],
         };
@@ -356,11 +466,9 @@ mod tests {
     }
 
     fn one_net(specs: Vec<Spec>, f0: f64, d: f64) -> Vec<analog::routing::PerformanceBudget> {
-        let cfg = PerfConfig { sim: OpConfig::default(), testbench: String::new(), specs };
-        let s = Sensitivity {
-            base: PerfResult { metrics: vec![("m".into(), Some(f0))], residual: 0.0 },
-            d_per_af: vec![vec![Some(d)]],
-        };
+        let cfg = PerfConfig { sim: OpConfig::default(), testbenches: Vec::new(), specs, scenarios: Vec::new() };
+        let base = score(&cfg.specs, &[vec![Some(f0)]], &[0]);
+        let s = Sensitivity { d_per_af: vec![vec![Some(d)]; base.bounds.len()], base };
         budget_rows(&cfg, &s, &[pnr_core::NetId(0)], 1.0)
     }
 
@@ -392,5 +500,43 @@ mod tests {
     fn a_non_finite_bound_or_value_has_no_row() {
         assert!(one_net(vec![spec(Some(f64::NAN), Some(f64::INFINITY))], 5.0, -1.0).is_empty());
         assert!(one_net(vec![spec(Some(10.0), None)], f64::NAN, -1.0).is_empty());
+    }
+
+    #[test]
+    fn the_deck_sets_corner_temperature_and_params() {
+        use pnr_core::{Device, DeviceKind, Net, NetId};
+        let nl = Netlist {
+            devices: vec![Device {
+                name: "M1".into(),
+                kind: DeviceKind::Nmos, model: String::new(),
+                terminals: vec![("D".into(), NetId(0)), ("G".into(), NetId(1)), ("S".into(), NetId(2)), ("B".into(), NetId(2))],
+                params: vec![("w".into(), 1000), ("l".into(), 150)],
+            }],
+            nets: ["out", "in", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
+        };
+        let sim = OpConfig { model_lib: Some("/m.lib".into()), ..OpConfig::default() };
+        let cfg = PerfConfig { sim, testbenches: vec![String::new()], specs: vec![], scenarios: Vec::new() };
+        let sc = Scenario { name: "ss_hot".into(), corner: "ss".into(), temp_c: 125.0, params: vec![("vdd".into(), 1.62)] };
+        let d = deck(&nl, &Parasitics::default(), &cfg, "", &sc).unwrap();
+        assert!(d.contains(".lib /m.lib ss\n"), "{d}");
+        assert!(d.contains(".param vdd=1.62"), "{d}");
+        let temp = d.find(".temp 125").expect(".temp line");
+        assert!(temp < d.find("XM1").expect("device card"), "{d}");
+    }
+
+    #[test]
+    fn the_worst_scenario_is_chosen_per_bound() {
+        let specs = [spec(Some(10.0), Some(20.0))];
+        let r = score(&specs, &[vec![Some(15.0)], vec![Some(11.0)], vec![Some(19.0)]], &[0, 1, 2]);
+        assert_eq!(r.bounds[0], BoundResult { spec: 0, upper: false, value: Some(11.0), scenario: 1 });
+        assert_eq!(r.bounds[1], BoundResult { spec: 0, upper: true, value: Some(19.0), scenario: 2 });
+        assert_eq!(r.residual, 0.0);
+        assert_eq!(r.metrics[0].1, Some(15.0));
+        let r = score(&specs, &[vec![Some(15.0)], vec![Some(8.0)], vec![Some(19.0)]], &[0, 1, 2]);
+        assert!((r.miss[0] - 0.2).abs() < 1e-12, "{:?}", r.miss);
+        let r = score(&specs, &[vec![Some(15.0)], vec![None], vec![Some(19.0)]], &[0, 1, 2]);
+        assert!(r.bounds.iter().all(|b| b.value.is_none() && b.scenario == 1), "{:?}", r.bounds);
+        assert_eq!(r.residual, 1.0);
     }
 }
