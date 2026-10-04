@@ -177,6 +177,12 @@ fn keys(reqs: &Requirements<Layout>) -> Vec<PriceKey> {
         .collect()
 }
 
+/// Weight of a rail with no op current. Policy: a rail's HPWL matters for
+/// IR/EM, not for C (EM-11; lienig_em L3457-3462), so it pulls below a signal.
+pub const RAIL_UNKNOWN: f32 = 0.25;
+/// Floor of a rail's current weight. Policy: a near-idle rail still stays short.
+pub const RAIL_MIN: f32 = 0.1;
+
 /// Per-net HPWL weight, indexed by `NetId`, mean `1` over the weighted nets
 /// (unweighted = `1`). A net's weight is the fraction of a budget one aF of it
 /// spends (Lampaert 1999 eq.2.12–2.13, `ΔP = Σ S·Δx`; CRATES #3): the positive
@@ -198,12 +204,6 @@ fn keys(reqs: &Requirements<Layout>) -> Vec<PriceKey> {
 /// 315.0 → 286.9 fF) and, after routing changes, *hurt* (256.1 → 280.3 fF;
 /// chain4 +6%, rc_filter +7% at seed 1). Kept on that later data; re-measure
 /// over seeds whenever routing changes.
-/// Weight of a rail with no op current. Policy: a rail's HPWL matters for
-/// IR/EM, not for C (EM-11; lienig_em L3457-3462), so it pulls below a signal.
-pub const RAIL_UNKNOWN: f32 = 0.25;
-/// Floor of a rail's current weight. Policy: a near-idle rail still stays short.
-pub const RAIL_MIN: f32 = 0.1;
-
 #[must_use]
 pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr_core::NetId, f32)], current_ua: &[Option<i32>]) -> Vec<f32> {
     let mut raw: Vec<Option<f32>> = classes.iter().map(|c| c.c_budget_af.filter(|&b| b > 0).map(|b| 1.0 / b as f32)).collect();
