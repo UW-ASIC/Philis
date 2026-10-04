@@ -467,7 +467,8 @@ fn pin_spread(space: &gp::VariantSpace) -> usize {
 /// The generator-facing constraints: the annotator's unitizations split by
 /// device kind (a unitization draws every member as its one `device_type`, and
 /// opposite polarities never match anyway), plus a 1-device unitization for
-/// every device no unitization covers: a MOS gets `nf·m` fingers of
+/// every device no unitization covers (banks, bipolar arrays and identical
+/// parallel MOS are the annotator's matched-set unitizations, EXT-19): a MOS gets `nf·m` fingers of
 /// `W_total/nf` ([`pnr_core::MosSize`]), a bipolar `m` units, anything else
 /// its written `w` and `nf`/`m` count.
 fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, i32)]) -> Constraints {
@@ -513,70 +514,8 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             *c = true;
         }
     }
-    for bank in dac_banks(netlist, &covered) {
-        let dev_nf: Vec<u16> = bank.iter().map(|d| multiplier(&netlist.devices[d.0 as usize])).collect();
-        let dev = &netlist.devices[bank[0].0 as usize];
-        let nm = |k: &str| dev.params.iter().find(|(n, _)| n == k).map_or(0, |&(_, v)| v.clamp(0, i64::from(i32::MAX)) as i32);
-        for d in &bank {
-            covered[d.0 as usize] = true;
-        }
-        unitization.push(Unitization {
-            devices: bank,
-            device_type: DeviceKind::Capacitor,
-            target_ratio: dev_nf.clone(),
-            dev_nf,
-            unit_w: nm("w"),
-            unit_l: nm("l"),
-            series_parallel: SeriesParallel::Parallel,
-            dummy_required: true,
-            route_matching_required: true,
-            class: None,
-        });
-    }
-    // Uncovered bipolars of one kind and geometry on one base net are a
-    // ratioed set (a bandgap's 1:N): one array cell, units centre-out.
-    for group in bjt_groups(netlist, &covered) {
-        let dev_nf: Vec<u16> = group.iter().map(|d| multiplier(&netlist.devices[d.0 as usize])).collect();
-        let dev = &netlist.devices[group[0].0 as usize];
-        let nm = |k: &str| dev.params.iter().find(|(n, _)| n == k).map_or(0, |&(_, v)| v.clamp(0, i64::from(i32::MAX)) as i32);
-        for d in &group {
-            covered[d.0 as usize] = true;
-        }
-        unitization.push(Unitization {
-            devices: group,
-            device_type: dev.kind,
-            target_ratio: dev_nf.clone(),
-            dev_nf,
-            unit_w: nm("w"),
-            unit_l: nm("l"),
-            series_parallel: SeriesParallel::Parallel,
-            dummy_required: false,
-            route_matching_required: true,
-            class: None,
-        });
-    }
-    // Uncovered MOS devices on the same four nets at the same W/L are one
-    // device written as several cards: one cell, one shared diffusion row.
-    for group in parallel_groups(netlist, &covered) {
-        let dev = &netlist.devices[group[0].0 as usize];
-        let nm = |k: &str| dev.params.iter().find(|(n, _)| n == k).map_or(0, |&(_, v)| v.clamp(0, i64::from(i32::MAX)) as i32);
-        let dev_nf: Vec<u16> = group.iter().map(|d| mos_fingers(&netlist.devices[d.0 as usize])).collect();
-        for d in &group {
-            covered[d.0 as usize] = true;
-        }
-        unitization.push(Unitization {
-            devices: group,
-            device_type: dev.kind,
-            target_ratio: dev_nf.clone(),
-            dev_nf,
-            unit_w: dev.mos_size().map_or(0, |s| s.w_finger_nm().min(i64::from(i32::MAX)) as i32),
-            unit_l: nm("l"),
-            series_parallel: SeriesParallel::Parallel,
-            dummy_required: false,
-            route_matching_required: false,
-            class: None,
-        });
-    }
+    // Banks, bipolar arrays and identical parallel MOS are the annotator's
+    // matched-set Unitizations (EXT-19 moved cellgen's recognizers there).
     for (i, dev) in netlist
         .devices
         .iter()
@@ -612,7 +551,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
             },
             dummy_required: false,
             route_matching_required: false,
-            class: None,
+            class: None, series: Vec::new(), style: None,
         });
     }
     // Fold every MOS unitization by its width class's factor: `k`× the
@@ -773,81 +712,8 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
     out
 }
 
-/// [`pnr_core::MosSize::fingers`] as a unitization count; `1` without a size.
-fn mos_fingers(d: &Device) -> u16 {
-    d.mos_size().map_or(1, |s| s.fingers().min(u32::from(u16::MAX)) as u16)
-}
-
-/// Uncovered bipolars sharing kind, W, L and base net, in netlist order;
-/// singletons left out.
-fn bjt_groups(netlist: &Netlist, covered: &[bool]) -> Vec<Vec<DeviceId>> {
-    let param = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
-    let mut groups: Vec<(_, Vec<DeviceId>)> = Vec::new();
-    for (i, d) in netlist.devices.iter().enumerate() {
-        if covered[i] || !matches!(d.kind, DeviceKind::Npn | DeviceKind::Pnp) {
-            continue;
-        }
-        let k = (d.kind, param(d, "w"), param(d, "l"), terminal(d, "B"));
-        match groups.iter_mut().find(|(g, _)| *g == k) {
-            Some((_, v)) => v.push(DeviceId(i as u16)),
-            None => groups.push((k, vec![DeviceId(i as u16)])),
-        }
-    }
-    groups.into_iter().map(|(_, v)| v).filter(|v| v.len() > 1).collect()
-}
-
-/// Uncovered MOS devices sharing kind, finger W, L and every terminal net, in
-/// netlist order; singletons are left out.
-fn parallel_groups(netlist: &Netlist, covered: &[bool]) -> Vec<Vec<DeviceId>> {
-    let key = |d: &Device| (d.kind, d.mos_size().map(|s| (s.w_finger_nm(), s.l_nm)), d.terminals.clone());
-    let mut groups: Vec<(_, Vec<DeviceId>)> = Vec::new();
-    for (i, d) in netlist.devices.iter().enumerate() {
-        if covered[i] || !matches!(d.kind, DeviceKind::Nmos | DeviceKind::Pmos) {
-            continue;
-        }
-        let k = key(d);
-        match groups.iter_mut().find(|(g, _)| *g == k) {
-            Some((_, v)) => v.push(DeviceId(i as u16)),
-            None => groups.push((k, vec![DeviceId(i as u16)])),
-        }
-    }
-    groups.into_iter().map(|(_, v)| v).filter(|v| v.len() > 1).collect()
-}
-
 fn multiplier(d: &Device) -> u16 {
     d.params.iter().find(|(n, _)| n == "m").map_or(1, |&(_, v)| v.clamp(1, i64::from(u16::MAX)) as u16)
-}
-
-/// Uncovered capacitors on one top plate (`P`), one model and one `w`×`l` whose `m` are
-/// `[1, 1, 2, …, 2^(N-1)]`: a binary-weighted DAC bank (DACP §II), members in
-/// slot order. The electrical dummy (slot 0) is the one-unit cap whose bottom
-/// plate is a MOS bulk, i.e. a rail; else the first one-unit cap listed.
-fn dac_banks(netlist: &Netlist, covered: &[bool]) -> Vec<Vec<DeviceId>> {
-    let bulks: Vec<NetId> = netlist.devices.iter().filter_map(|d| terminal(d, "B")).collect();
-    let param = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
-    let mut by_plate: Vec<((NetId, String, Option<i64>, Option<i64>), Vec<DeviceId>)> = Vec::new();
-    for (i, d) in netlist.devices.iter().enumerate() {
-        let Some(p) = terminal(d, "P").filter(|_| d.kind == DeviceKind::Capacitor && !covered[i]) else { continue };
-        let key = (p, d.model.clone(), param(d, "w"), param(d, "l"));
-        match by_plate.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, v)) => v.push(DeviceId(i as u16)),
-            None => by_plate.push((key, vec![DeviceId(i as u16)])),
-        }
-    }
-    let dev = |d: &DeviceId| &netlist.devices[d.0 as usize];
-    by_plate
-        .into_iter()
-        .filter_map(|(_, mut bank)| {
-            bank.sort_by_key(|d| multiplier(dev(d)));
-            let counts: Vec<u16> = bank.iter().map(|d| multiplier(dev(d))).collect();
-            cells::cap_array::bits(&counts)?;
-            let on_rail = |d: &DeviceId| terminal(dev(d), "N").is_some_and(|n| bulks.contains(&n));
-            if !on_rail(&bank[0]) && on_rail(&bank[1]) {
-                bank.swap(0, 1);
-            }
-            Some(bank)
-        })
-        .collect()
 }
 
 /// Every enumerated variant of one group, by device kind.
@@ -1452,7 +1318,7 @@ mod tests {
                 series_parallel: SeriesParallel::Parallel,
                 dummy_required: false,
                 route_matching_required: false,
-                class: None,
+                class: None, series: Vec::new(), style: None,
             }],
             ..Default::default()
         }
@@ -1907,7 +1773,9 @@ mod tests {
             nets,
             ..Default::default()
         };
-        let cells = enumerate(&netlist, &Macros::default(), &Constraints::default(), &pdk, true);
+        // The bank is the annotator's matched set since EXT-19 (cellgen's `dac_banks` moved there).
+        let annot = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default())).constraints;
+        let cells = enumerate(&netlist, &Macros::default(), &annot, &pdk, true);
         let bank = &cells.devices_of[cells.cell_of[0] as usize];
         assert_eq!(bank, &[DeviceId(3), DeviceId(0), DeviceId(1), DeviceId(2)], "dummy first, then by weight");
         let alts = &cells.spaces[cells.cell_of[0] as usize].alternatives;
@@ -2012,7 +1880,7 @@ mod tests {
                 series_parallel: SeriesParallel::Parallel,
                 dummy_required: true,
                 route_matching_required: true,
-                class: Some(pnr_core::MatchClass::Exceptional),
+                class: Some(pnr_core::MatchClass::Exceptional), series: Vec::new(), style: None,
             }],
             ..Default::default()
         };

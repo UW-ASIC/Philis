@@ -32,6 +32,9 @@ pub struct Policy {
     /// busiest net's current (relative, so a µA bias net is not budgeted like a
     /// mA branch).
     pub ir_high_current_share: f64,
+    /// ProxNet star cap (EXT-13, Philis policy: the survey does not say whether rails are excluded;
+    /// BAL1-49).
+    pub pn_max_degree: usize,
 }
 
 impl Default for Policy {
@@ -47,6 +50,7 @@ impl Default for Policy {
             ir_headroom_share: 0.1,
             ir_rail_share: 0.01,
             ir_high_current_share: 0.1,
+            pn_max_degree: 8,
         }
     }
 }

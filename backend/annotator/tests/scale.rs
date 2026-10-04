@@ -3,6 +3,9 @@
 //! catalog stopped pairing devices across copies (`diff_pair_with_degen` deleted,
 //! `eq_sig` sources: N² genuine matches before) and candidates came from a
 //! (net, pin, polarity) index, so a rail's devices are never scanned for a drain.
+//! EXT-14..19 review fixes 1: set origins, roles and `set_pairs` look leaves, passive
+//! and shared groups up through a per-device index rather than scanning every set and
+//! leaf (debug 5.0 s → 1.0 s; release 437 ms before the fix).
 
 mod common;
 

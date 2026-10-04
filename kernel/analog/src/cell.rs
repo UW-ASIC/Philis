@@ -60,9 +60,14 @@ pub struct Unitization {
     pub series_parallel: SeriesParallel,
     pub dummy_required: bool,
     pub route_matching_required: bool,
-    /// Match class of the set (EXT-16 from a spec, or the user); `None` = not given (Moderate behaviour).
-    /// Read by `cells::cap_array` (GAP-18): an Exceptional binary bank lists its variants best-matching first.
-    pub class: Option<pnr_core::MatchClass>,
+    /// Match class of the set (EXT-16 from a spec, or the user); `None` = not given, matched-cell readers use
+    /// `unwrap_or(Moderate)` (C16). Read by `cells::cap_array` (GAP-18): an Exceptional binary bank lists its
+    /// variants best-matching first.
+    pub class: Option<crate::intent::MatchClass>,
+    /// Per member; empty = all 1.
+    pub series: Vec<u16>,
+    /// None = today's choice.
+    pub style: Option<crate::intent::ArrayStyle>,
 }
 
 /// How units compose into one instance.

@@ -195,6 +195,8 @@ pub struct ProcessNumbers {
     pub hcgr_drawable: bool,
     /// `Config.op` temperature, K (not a deck key): a mirror's mobility term (MAT-14).
     pub die_temp_k: Option<f32>,
+    /// Unitization bounds (EXT-15); 0 = deck key missing.
+    pub unit: crate::sets::UnitDeck,
 }
 
 #[cfg(test)]

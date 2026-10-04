@@ -1051,6 +1051,13 @@ fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::r
         hcgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Hcgr, pdk),
         // Set by the callers from `Config.op` (not a deck key).
         die_temp_k: None,
+        unit: annotator::sets::UnitDeck {
+            grid_nm: i64::from(pdk.grid()),
+            min_w_nm: i64::from(pdk.rule("min_finger_width", 0)),
+            max_w_nm: i64::from(pdk.rule("max_finger_width", 0)),
+            min_l_nm: pdk.layer("poly").and_then(|l| pdk.min_width(l.0)).map_or(0, i64::from),
+            res_min_segment_nm: i64::from(pdk.rule("res_min_segment", 0)),
+        },
     };
     AnnotationConfig { process, ..base.clone() }
 }
@@ -1129,7 +1136,7 @@ impl Flow<'_> {
             reqs: placement,
             rules: place_rules(self.pdk),
             net_weight: &self.net_weight,
-            n_axes: self.problem.blocks.len(),
+            n_axes: self.problem.axis_count,
             power_uw: &cells.power,
             units: cells.units.clone(),
             iterate: self.gp_mode == GpMode::Analytic,
@@ -1933,7 +1940,7 @@ fn debug_check_retargeted(problem: &Problem, n: usize, groups: &[Vec<DeviceId>])
         y: (0..n).map(|i| i as i32 * 7_919 + 29).collect(),
         hw: vec![50; n],
         hh: vec![50; n],
-        axis: vec![0; problem.blocks.len().max(1)],
+        axis: vec![0; problem.axis_count.max(1)],
         groups: groups.to_vec(),
         orient: vec![pnr_core::Orient::default(); n],
         variant: vec![0; n],

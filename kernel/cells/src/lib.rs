@@ -81,7 +81,7 @@ pub(crate) mod testkit {
             // `false` keeps the zero-dummy variants in the sweep.
             dummy_required: false,
             route_matching_required: false,
-            class: None,
+            class: None, series: Vec::new(), style: None,
         });
         (group, c)
     }

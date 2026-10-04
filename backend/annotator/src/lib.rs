@@ -8,16 +8,21 @@
 
 pub mod block;
 pub mod catalog;
+pub mod class;
 pub mod classify;
 pub mod constraints;
 pub mod emit;
 pub mod extract;
+pub mod graph;
 pub mod ir;
 pub mod netrole;
+pub mod passive;
 pub mod pattern;
 pub mod policy;
 pub mod rings;
+pub mod sets;
 pub mod size;
+pub mod symmetry;
 pub mod terms;
 
 #[cfg(test)]
@@ -53,6 +58,10 @@ pub struct Problem {
     pub missing: Vec<(&'static str, &'static str)>,
     /// Every device, by id, with how recognition covers it (T7).
     pub coverage: Vec<(DeviceId, Coverage)>,
+    /// Extraction's contract (EXT-12); filled from EXT-13 on.
+    pub intent: analog::intent::Intent,
+    /// Symmetry axes the placement emits: one per block until EXT-20 (card D-b).
+    pub axis_count: usize,
 }
 
 /// How a device is covered: the one report that it got a constraint or why not.
@@ -127,6 +136,13 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
             Block::from_match(&m)
         })
         .collect();
+    // A source-degenerated diff pair no joined-source pattern sees (EXT-19 step 5).
+    for (a, b) in passive::degenerated_pairs(&hg, &drawn, &roles) {
+        if !claimed[a.0 as usize] && !claimed[b.0 as usize] {
+            (claimed[a.0 as usize], claimed[b.0 as usize]) = (true, true);
+            blocks.push(Block { kind: BlockKind::DiffPair, template: "diff_pair_with_degen", devices: vec![a, b], injected: false, sub_blocks: Vec::new(), selfs: Vec::new() });
+        }
+    }
     let glue = (0..netlist.devices.len() as u16).filter(|&d| !claimed[d as usize]).map(DeviceId);
     blocks.push(Block { kind: BlockKind::Glue, template: "glue", devices: glue.collect(), injected: false, sub_blocks: Vec::new(), selfs: Vec::new() });
 
@@ -245,9 +261,113 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
         })
         .collect();
 
+    let mut intent = analog::intent::Intent::default();
+    // Symmetry seeds: the disjoint DiffPair/Load/CascodePair leaves (never contradictory),
+    // each couple and the list in canonical order, names breaking exact ties.
+    let ck = |d: DeviceId| (canon[d.0 as usize], names[d.0 as usize]);
+    let mut seeds: Vec<(DeviceId, DeviceId, usize)> = block::leaves(&blocks)
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(b.kind, BlockKind::DiffPair | BlockKind::Load | BlockKind::CascodePair))
+        .map(|(i, b)| if ck(b.devices[0]) <= ck(b.devices[1]) { (b.devices[0], b.devices[1], i) } else { (b.devices[1], b.devices[0], i) })
+        .collect();
+    seeds.sort_by_key(|&(a, b, _)| (ck(a), ck(b)));
+    let seeds: Vec<symmetry::Seed> = seeds.into_iter().map(|(a, b, i)| symmetry::Seed::Devices(a, b, analog::intent::ConstraintId(i as u32))).collect();
+    let (compounds, diags) = symmetry::analyze(&hg, &drawn, &net_classes, &seeds, &canon);
+    intent.compounds = compounds;
+    intent.diagnostics.extend(diags);
+    let shared = sets::shared_bias_groups(&hg, &drawn, &net_classes);
+    // EXT-19: passive, bipolar-core and diode sets.
+    let pair_of = |m: &pattern::PatternMatch| (DeviceId(m.instances[0] as u16), DeviceId(m.instances[1] as u16));
+    let bjt_ratioed: Vec<(DeviceId, DeviceId)> = all.iter().filter(|m| m.template.starts_with("bjt_ratioed_pair")).map(pair_of).collect();
+    let mut pairs: Vec<(DeviceId, DeviceId)> =
+        block::leaves(&blocks).iter().filter(|b| b.kind == BlockKind::DiffPair).map(|b| (b.devices[0], b.devices[1])).collect();
+    pairs.extend(all.iter().filter(|m| m.template.starts_with("bjt_")).map(pair_of));
+    // Degeneration first: its role (the pair's) wins over a plain symmetric couple.
+    let mut passive_sets = passive::degeneration(&hg, &drawn, &pairs, &mut intent.diagnostics);
+    passive_sets.extend(passive::resistor_sets(&hg, &drawn, &net_classes, &intent.compounds));
+    passive_sets.extend(passive::bandgap_cores(&hg, &drawn, &bjt_ratioed));
+    passive_sets.extend(passive::capacitor_sets(&hg, &drawn, &net_classes, &mut intent.diagnostics));
+    passive_sets.extend(passive::diode_sets(&hg, &drawn));
+    let passive_groups: Vec<Vec<DeviceId>> = passive_sets.iter().map(|p| p.devices.clone()).collect();
+    let reqs = graph::requirements(&all, &intent.compounds, &shared, &passive_groups, &hg, &net_classes, &canon, &cfg.policy);
+    intent.tree = graph::hsmpg(netlist.devices.len(), &reqs, &canon);
+    intent.sets = sets::matched_sets(&reqs, &intent.compounds, &shared, &passive_sets, &block::leaves(&blocks), &canon, &drawn, &hg, &cfg.process.unit, &mut intent.diagnostics);
+    // EXT-16: kind, class and style per set; the unit floors depend on the class.
+    let leaves = block::leaves(&blocks);
+    let n = netlist.devices.len();
+    let leaf_idx = sets::device_index(n, leaves.iter().map(|b| b.devices.as_slice()));
+    let passive_idx = sets::device_index(n, passive_sets.iter().map(|p| p.devices.as_slice()));
+    let mut roles = Vec::new();
+    for s in &intent.sets {
+        let has = |d: DeviceId| s.members.iter().any(|m| m.device == d);
+        let pair = |b: usize| leaves[b].devices.len() == 2 && leaves[b].devices.iter().all(|&d| has(d));
+        let kinds: Vec<BlockKind> = sets::inside(&leaf_idx, s.members.iter().map(|m| m.device.0 as usize), pair).into_iter().map(|b| leaves[b].kind).collect();
+        roles.push(kinds);
+    }
+    for (s, kinds) in intent.sets.iter_mut().zip(&roles) {
+        s.kind = class::kind_of(s, kinds, netlist.devices[s.members[0].device.0 as usize].kind);
+    }
+    let input = |i: usize| roles[i].contains(&BlockKind::DiffPair);
+    let input_compounds: std::collections::HashSet<u16> = (0..intent.sets.len()).filter(|&j| input(j)).filter_map(|j| intent.sets[j].compound).collect();
+    for i in 0..intent.sets.len() {
+        let s = &intent.sets[i];
+        let role = if input(i) {
+            class::SetRole::InputPair
+        } else if roles[i].iter().any(|k| matches!(k, BlockKind::Load | BlockKind::CascodePair))
+            && s.compound.is_some_and(|c| input_compounds.contains(&c))
+        {
+            class::SetRole::LoadOfPair
+        } else if let Some(&p) = sets::inside(&passive_idx, s.members.iter().map(|m| m.device.0 as usize), |p| {
+            passive_sets[p].devices.iter().all(|d| s.members.iter().any(|m| m.device == *d))
+        })
+        .first()
+        {
+            passive_sets[p].role
+        } else if matches!(s.origin, analog::intent::Origin::Pattern { template } if template.starts_with("bjt_ratioed_pair")) {
+            // A ratioed pair's ΔV_BE is a bandgap core (H09-01).
+            class::SetRole::BandgapCore
+        } else if roles[i].contains(&BlockKind::CurrentMirror) || s.origin == analog::intent::Origin::SharedBias {
+            class::SetRole::BiasMirror
+        } else {
+            class::SetRole::Other
+        };
+        let mut ctx = class::ClassCtx { user: None, spec_6sigma: cfg.offset_sigma_mv.map(|v| 6.0 * v), role, diags: &mut intent.diagnostics };
+        let (c, src) = class::class_of(s, &mut ctx);
+        let source = |d: DeviceId| {
+            let i = d.0 as usize;
+            hg.terminals[i].iter().position(|t| t == "S" || t == "E").map(|k| hg.device_nets[i][k])
+        };
+        let shares_source = s.members.iter().all(|m| source(m.device).is_some() && source(m.device) == source(s.members[0].device));
+        let s = &mut intent.sets[i];
+        (s.class, s.class_source, s.style) = (c, src, class::style_of(c, s.kind, shares_source));
+        let ids: Vec<DeviceId> = s.members.iter().map(|m| m.device).collect();
+        if let Ok((u, units)) = sets::unitize_set(&ids, &passive_sets, &drawn, netlist.devices[ids[0].0 as usize].kind, c, &cfg.process.unit) {
+            s.unit = Some(u);
+            for (m, (p, ser)) in s.members.iter_mut().zip(units) {
+                (m.parallel, m.series) = (p, ser);
+            }
+            if c == analog::intent::MatchClass::Exceptional && s.members.iter().any(|m| m.series > 1) {
+                intent.diagnostics.push(analog::intent::Diagnostic {
+                    kind: "series_units_exceptional",
+                    devices: ids,
+                    message: "series units carry inherent mismatch (Hastings H13-22)".into(),
+                });
+            }
+        }
+    }
+    // EXT-14 step 9 (card D-d): a compound holding an Exceptional Voltage set is Perfect.
+    let mut perfect = vec![false; intent.compounds.len()];
+    for s in intent.sets.iter().filter(|s| s.kind == analog::intent::MatchKind::Voltage && s.class == analog::intent::MatchClass::Exceptional) {
+        s.compound.and_then(|c| perfect.get_mut(c as usize)).into_iter().for_each(|p| *p = true);
+    }
+    for (c, &perfect) in intent.compounds.iter_mut().zip(&perfect) {
+        c.kind = if perfect { analog::intent::SymKind::Perfect } else { analog::intent::SymKind::Mirror };
+    }
+    sets::set_pairs(&mut intent.compounds, &intent.sets);
     // REL-07: guard rings by role. Without EXT-23 tags an aggressor is a
     // device on a Clock-class net; there are no victims or injectors yet.
-    let mut constraints = constraints::assemble(netlist, &drawn, &blocks);
+    let mut constraints = constraints::assemble(netlist, &drawn, &blocks, &intent.sets);
     {
         use analog::metadata::NetClass;
         let of_class = |c: NetClass| net_classes.iter().filter(move |k| k.class == c).map(|k| k.net);
@@ -284,6 +404,8 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     }
 
     Problem {
+        intent,
+        axis_count: blocks.len(),
         placement,
         routing,
         coverage,
