@@ -22,7 +22,7 @@
 //! 3. **Well-hosted.** A PMOS must sit in an nwell that encloses its diffusion.
 
 use analog::cell::{SeriesParallel, Unitization};
-use cells::{mosfet::Mosfet, Cell};
+use cells::{Cell, mosfet::Mosfet};
 use pnr_core::{DeviceGroup, DeviceId, DeviceKind, Macro, Rect, Shape};
 
 /// Load the sky130 deck the benchmarks use. Skips (rather than fails) when the
@@ -39,15 +39,8 @@ fn pdk() -> Option<verify::Pdk> {
 ///
 /// The dummy count follows `dummy_required` (not a variant), so the caller
 /// sweeps it: a variant nobody ever draws is a variant nobody ever checks.
-fn group_of(
-    kind: DeviceKind,
-    n: usize,
-    nf: u16,
-    dummy_required: bool,
-) -> (DeviceGroup, analog::Constraints) {
-    let group = DeviceGroup {
-        devices: (0..n).map(|i| DeviceId(i as u16)).collect(),
-    };
+fn group_of(kind: DeviceKind, n: usize, nf: u16, dummy_required: bool) -> (DeviceGroup, analog::Constraints) {
+    let group = DeviceGroup { devices: (0..n).map(|i| DeviceId(i as u16)).collect() };
     let mut c = analog::Constraints::default();
     c.unitization.push(Unitization {
         devices: group.devices.clone(),
@@ -59,9 +52,7 @@ fn group_of(
         series_parallel: SeriesParallel::Parallel,
         dummy_required,
         route_matching_required: false,
-        class: None,
-        series: Vec::new(),
-        style: None,
+        class: None, series: Vec::new(), style: None,
     });
     (group, c)
 }
@@ -105,13 +96,8 @@ fn all_variants(pdk: &verify::Pdk) -> Vec<(String, Macro)> {
 fn on_layer<'a>(m: &'a Macro, pdk: &verify::Pdk, name: &str) -> Vec<&'a Shape> {
     // Shapes carry PDK-local `LayerId`s; resolve both sides through the deck so
     // the comparison is by *name*, not by whatever index the deck assigned.
-    let Some(target) = pdk.gv_layer_by_name(name) else {
-        return Vec::new();
-    };
-    m.shapes
-        .iter()
-        .filter(|s| pdk.gv_layer(s.layer) == target)
-        .collect()
+    let Some(target) = pdk.gv_layer_by_name(name) else { return Vec::new() };
+    m.shapes.iter().filter(|s| pdk.gv_layer(s.layer) == target).collect()
 }
 
 fn covers(outer: &Rect, inner: &Rect) -> bool {
@@ -142,31 +128,15 @@ fn every_mos_terminal_s_pin_shares_sum_to_one() {
     for (label, m) in all_variants(&pdk) {
         let shares = pnr_core::pin_shares(&m);
         for u in &m.units {
-            let fingers = m
-                .units
-                .iter()
-                .filter(|v| v.owner == u.owner && v.phi != (0, 0))
-                .count() as f32;
+            let fingers = m.units.iter().filter(|v| v.owner == u.owner && v.phi != (0, 0)).count() as f32;
             for t in ["S", "D"] {
                 let name = format!("d{}:{t}", u.owner);
-                let mine: Vec<f32> = m
-                    .pins
-                    .iter()
-                    .zip(&shares)
-                    .filter(|(p, _)| p.name == name)
-                    .map(|(_, &s)| s)
-                    .collect();
+                let mine: Vec<f32> = m.pins.iter().zip(&shares).filter(|(p, _)| p.name == name).map(|(_, &s)| s).collect();
                 let sum: f32 = mine.iter().sum();
-                assert!(
-                    (sum - 1.0).abs() < 1e-6,
-                    "{label}: {name} pins carry {sum} of the terminal"
-                );
+                assert!((sum - 1.0).abs() < 1e-6, "{label}: {name} pins carry {sum} of the terminal");
                 for s in mine {
                     let touched = s * fingers;
-                    assert!(
-                        (touched - 1.0).abs() < 1e-6 || (touched - 2.0).abs() < 1e-6,
-                        "{label}: a {name} region touches {touched} of {fingers} fingers"
-                    );
+                    assert!((touched - 1.0).abs() < 1e-6 || (touched - 2.0).abs() < 1e-6, "{label}: a {name} region touches {touched} of {fingers} fingers");
                 }
             }
         }
@@ -184,13 +154,7 @@ fn the_self_check_covers_every_axis_value() {
         return;
     };
     let labels: Vec<String> = all_variants(&pdk).into_iter().map(|(l, _)| l).collect();
-    for needle in [
-        "dummies=0",
-        "dummies=1",
-        "Single",
-        "n=2 nf=2 dummies=1 Cc1d",
-        "n=4 nf=4 dummies=1 Cc1d",
-    ] {
+    for needle in ["dummies=0", "dummies=1", "Single", "n=2 nf=2 dummies=1 Cc1d", "n=4 nf=4 dummies=1 Cc1d"] {
         assert!(
             labels.iter().any(|l| l.contains(needle)),
             "no drawn variant carries `{needle}` — the checks above pass vacuously \
@@ -332,10 +296,7 @@ fn every_half_extent_is_on_the_cut_lattice() {
             off.then_some(name)
         })
         .collect();
-    assert!(
-        bad.is_empty(),
-        "variants with an off-lattice half-extent: {bad:?}"
-    );
+    assert!(bad.is_empty(), "variants with an off-lattice half-extent: {bad:?}");
 }
 
 /// A PNP's base is an n-well; an NPN's n-well is only its isolation ring,
@@ -352,20 +313,15 @@ fn a_bipolar_draws_its_well_only_as_its_construction() {
                 let m = v.draw(&group, &c, &pdk);
                 let (nwell, deep) = (on_layer(&m, &pdk, "nwell"), on_layer(&m, &pdk, "dnwell"));
                 if kind == DeviceKind::Npn {
-                    assert!(
-                        nwell.is_empty() || !deep.is_empty(),
-                        "{label}: an NPN's well only isolates, over a deep well"
-                    );
+                    assert!(nwell.is_empty() || !deep.is_empty(), "{label}: an NPN's well only isolates, over a deep well");
                     continue;
                 }
-                assert!(
-                    !nwell.is_empty() && deep.is_empty(),
-                    "{label}: a PNP draws the n-well that is its base"
-                );
+                assert!(!nwell.is_empty() && deep.is_empty(), "{label}: a PNP draws the n-well that is its base");
             }
         }
     }
 }
+
 
 /// The MOS generator on every deck: its process numbers come from the deck,
 /// so no variant may be clean only on the one it was written against.
@@ -379,46 +335,22 @@ fn the_mosfet_is_clean_on_every_deck() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut dirty = Vec::new();
     for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "generic_finfet"] {
-        let Ok(json) = std::fs::read_to_string(root.join(format!("pdks/{deck}.json"))) else {
-            continue;
-        };
+        let Ok(json) = std::fs::read_to_string(root.join(format!("pdks/{deck}.json"))) else { continue };
         let pdk = verify::Pdk::from_json(&json).expect("deck loads");
         // A fin deck draws its MOS with the FinFET generator (`cellgen`).
         let fin = pnr_core::Process::layer(&pdk, "fin").is_some();
         let check_mos = |kind, n, nf, w, l, pdk: &verify::Pdk, sp| {
-            if fin {
-                check::<cells::finfet::FinFet>(deck, kind, n, nf, w, l, pdk, sp)
-            } else {
-                check::<Mosfet>(deck, kind, n, nf, w, l, pdk, sp)
-            }
+            if fin { check::<cells::finfet::FinFet>(deck, kind, n, nf, w, l, pdk, sp) } else { check::<Mosfet>(deck, kind, n, nf, w, l, pdk, sp) }
         };
         for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
             // The widest finger the deck allows (the flow folds to it).
-            let wide = pdk
-                .p2p_max_ohm()
-                .zip(pnr_core::Process::sheet_ohm(&pdk, "poly"))
-                .map_or(10_000, |(r, sq)| {
-                    ((0.55 * r / sq * 500.0) as i32).min(10_000)
-                });
-            for (n, nf, w, l) in [
-                (1usize, 1u16, 1680, 500),
-                (2, 2, 1680, 500),
-                (2, 2, 5000, 1000),
-                (1, 2, wide, 500),
-            ] {
-                dirty.extend(
-                    check_mos(kind, n, nf, w, l, &pdk, SeriesParallel::Parallel)
-                        .into_iter()
-                        .map(|d| format!("{deck} {d}")),
-                );
+            let wide = pdk.p2p_max_ohm().zip(pnr_core::Process::sheet_ohm(&pdk, "poly")).map_or(10_000, |(r, sq)| ((0.55 * r / sq * 500.0) as i32).min(10_000));
+            for (n, nf, w, l) in [(1usize, 1u16, 1680, 500), (2, 2, 1680, 500), (2, 2, 5000, 1000), (1, 2, wide, 500)] {
+                dirty.extend(check_mos(kind, n, nf, w, l, &pdk, SeriesParallel::Parallel).into_iter().map(|d| format!("{deck} {d}")));
             }
             // Series stacks: the chain row.
             for (n, nf) in [(2usize, 1u16), (4, 1), (2, 3)] {
-                dirty.extend(
-                    check_mos(kind, n, nf, 2000, 500, &pdk, SeriesParallel::Series)
-                        .into_iter()
-                        .map(|d| format!("{deck} chain {d}")),
-                );
+                dirty.extend(check_mos(kind, n, nf, 2000, 500, &pdk, SeriesParallel::Series).into_iter().map(|d| format!("{deck} chain {d}")));
             }
         }
     }
@@ -435,129 +367,30 @@ fn every_generator_is_clean_on_every_deck() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut dirty = Vec::new();
     for deck in ["sky130", "gf180mcu", "ihp_sg13g2"] {
-        let Ok(json) = std::fs::read_to_string(root.join(format!("pdks/{deck}.json"))) else {
-            continue;
-        };
+        let Ok(json) = std::fs::read_to_string(root.join(format!("pdks/{deck}.json"))) else { continue };
         let pdk = verify::Pdk::from_json(&json).expect("deck loads");
         let lmin = pnr_core::Process::rule(&pdk, "min_gate_l", 150);
-        let mut add = |tag: &str, d: Vec<String>| {
-            dirty.extend(d.into_iter().map(|d| format!("{deck} {tag} {d}")))
-        };
+        let mut add = |tag: &str, d: Vec<String>| dirty.extend(d.into_iter().map(|d| format!("{deck} {tag} {d}")));
         for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
             for (n, nf, w) in [(1usize, 1u16, 500), (2, 1, 500), (2, 2, 1000)] {
-                add(
-                    "mos",
-                    check::<cells::mosfet::Mosfet>(
-                        deck,
-                        kind,
-                        n,
-                        nf,
-                        w,
-                        lmin,
-                        &pdk,
-                        SeriesParallel::Parallel,
-                    ),
-                );
+                add("mos", check::<cells::mosfet::Mosfet>(deck, kind, n, nf, w, lmin, &pdk, SeriesParallel::Parallel));
             }
         }
         // Every resistor recipe, drawn as the flow draws it.
-        let recipes: Vec<String> = pdk
-            .cell
-            .get("resistors")
-            .and_then(|r| r.get("recipes"))
-            .and_then(|r| r.as_object())
-            .map_or(Vec::new(), |o| {
-                o.values()
-                    .filter_map(|v| v.get("model")?.as_str().map(String::from))
-                    .collect()
-            });
+        let recipes: Vec<String> = pdk.cell.get("resistors").and_then(|r| r.get("recipes")).and_then(|r| r.as_object()).map_or(Vec::new(), |o| o.values().filter_map(|v| v.get("model")?.as_str().map(String::from)).collect());
         for model in recipes {
-            let ov = verify::pdk::Overlay {
-                pdk: &pdk,
-                recipe: pdk.recipe("resistor", &model).expect("recipe"),
-            };
-            add(
-                &format!("res {model}"),
-                check_on::<Resistor>(
-                    deck,
-                    DeviceKind::Resistor,
-                    vec![1],
-                    500,
-                    2000,
-                    &ov,
-                    SeriesParallel::Parallel,
-                ),
-            );
-            add(
-                &format!("res {model}"),
-                check_on::<Resistor>(
-                    deck,
-                    DeviceKind::Resistor,
-                    vec![2, 2],
-                    500,
-                    4000,
-                    &ov,
-                    SeriesParallel::Parallel,
-                ),
-            );
+            let ov = verify::pdk::Overlay { pdk: &pdk, recipe: pdk.recipe("resistor", &model).expect("recipe") };
+            add(&format!("res {model}"), check_on::<Resistor>(deck, DeviceKind::Resistor, vec![1], 500, 2000, &ov, SeriesParallel::Parallel));
+            add(&format!("res {model}"), check_on::<Resistor>(deck, DeviceKind::Resistor, vec![2, 2], 500, 4000, &ov, SeriesParallel::Parallel));
         }
-        add(
-            "cap",
-            check_nf::<Capacitor>(
-                deck,
-                DeviceKind::Capacitor,
-                vec![1],
-                2000,
-                2000,
-                &pdk,
-                SeriesParallel::Parallel,
-            ),
-        );
-        add(
-            "bank",
-            check_nf::<CapArray>(
-                deck,
-                DeviceKind::Capacitor,
-                vec![1, 1, 2, 4, 8],
-                2000,
-                2000,
-                &pdk,
-                SeriesParallel::Parallel,
-            ),
-        );
-        add(
-            "bank",
-            check_nf::<CapArray>(
-                deck,
-                DeviceKind::Capacitor,
-                vec![2, 2],
-                2000,
-                2000,
-                &pdk,
-                SeriesParallel::Parallel,
-            ),
-        );
+        add("cap", check_nf::<Capacitor>(deck, DeviceKind::Capacitor, vec![1], 2000, 2000, &pdk, SeriesParallel::Parallel));
+        add("bank", check_nf::<CapArray>(deck, DeviceKind::Capacitor, vec![1, 1, 2, 4, 8], 2000, 2000, &pdk, SeriesParallel::Parallel));
+        add("bank", check_nf::<CapArray>(deck, DeviceKind::Capacitor, vec![2, 2], 2000, 2000, &pdk, SeriesParallel::Parallel));
         for kind in [DeviceKind::Pnp, DeviceKind::Npn] {
-            add(
-                "bjt",
-                check_nf::<Bjt>(
-                    deck,
-                    kind,
-                    vec![1, 8],
-                    5000,
-                    5000,
-                    &pdk,
-                    SeriesParallel::Parallel,
-                ),
-            );
+            add("bjt", check_nf::<Bjt>(deck, kind, vec![1, 8], 5000, 5000, &pdk, SeriesParallel::Parallel));
         }
     }
-    assert!(
-        dirty.is_empty(),
-        "{} findings:\n{}",
-        dirty.len(),
-        dirty.join("\n")
-    );
+    assert!(dirty.is_empty(), "{} findings:\n{}", dirty.len(), dirty.join("\n"));
 }
 
 /// `(deck, kind)` pairs a generator cannot draw, each with the enumerate
@@ -566,42 +399,20 @@ fn every_generator_is_clean_on_every_deck() {
 /// [`every_generator_enumerates_on_every_deck`]).
 const UNDRAWABLE: &[(&str, DeviceKind, &str)] = &[
     ("gf180mcu", DeviceKind::Npn, "no npn_isolation (bjt.rs:34)"),
-    (
-        "ihp_sg13g2",
-        DeviceKind::Npn,
-        "no npn_isolation (bjt.rs:34)",
-    ),
-    (
-        "generic_finfet",
-        DeviceKind::Npn,
-        "no npn_isolation (bjt.rs:34)",
-    ),
-    (
-        "generic_finfet",
-        DeviceKind::Resistor,
-        "no rpoly role (resistor.rs:23)",
-    ),
+    ("ihp_sg13g2", DeviceKind::Npn, "no npn_isolation (bjt.rs:34)"),
+    ("generic_finfet", DeviceKind::Npn, "no npn_isolation (bjt.rs:34)"),
+    ("generic_finfet", DeviceKind::Resistor, "no rpoly role (resistor.rs:23)"),
     ("*", DeviceKind::Inductor, "no recogniser (inductor.rs)"),
 ];
 
 fn undrawable(deck: &str, kind: DeviceKind) -> bool {
-    UNDRAWABLE
-        .iter()
-        .any(|&(d, k, _)| (d == deck || d == "*") && k == kind)
+    UNDRAWABLE.iter().any(|&(d, k, _)| (d == deck || d == "*") && k == kind)
 }
 
 /// A group of `dev_nf.len()` members of `kind`, member `i` at `dev_nf[i]`
 /// units of `w`×`l` nm, dummies on.
-fn sized(
-    kind: DeviceKind,
-    dev_nf: Vec<u16>,
-    w: i32,
-    l: i32,
-    series_parallel: SeriesParallel,
-) -> (DeviceGroup, analog::Constraints) {
-    let group = DeviceGroup {
-        devices: (0..dev_nf.len()).map(|i| DeviceId(i as u16)).collect(),
-    };
+fn sized(kind: DeviceKind, dev_nf: Vec<u16>, w: i32, l: i32, series_parallel: SeriesParallel) -> (DeviceGroup, analog::Constraints) {
+    let group = DeviceGroup { devices: (0..dev_nf.len()).map(|i| DeviceId(i as u16)).collect() };
     let mut c = analog::Constraints::default();
     c.unitization.push(Unitization {
         devices: group.devices.clone(),
@@ -613,9 +424,7 @@ fn sized(
         series_parallel,
         dummy_required: true,
         route_matching_required: false,
-        class: None,
-        series: Vec::new(),
-        style: None,
+        class: None, series: Vec::new(), style: None,
     });
     (group, c)
 }
@@ -628,10 +437,7 @@ fn sized(
 /// MOS on a fin deck, `CapArray` before `Capacitor`.
 #[test]
 fn every_generator_enumerates_on_every_deck() {
-    use cells::{
-        bjt::Bjt, cap_array::CapArray, capacitor::Capacitor, diode::Diode, finfet::FinFet,
-        inductor::Inductor, resistor::Resistor,
-    };
+    use cells::{bjt::Bjt, cap_array::CapArray, capacitor::Capacitor, diode::Diode, finfet::FinFet, inductor::Inductor, resistor::Resistor};
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let count = |kind, w, l, pdk: &verify::Pdk| -> usize {
         let (g, c) = sized(kind, vec![1], w, l, SeriesParallel::Parallel);
@@ -651,8 +457,7 @@ fn every_generator_enumerates_on_every_deck() {
     };
     let mut wrong = Vec::new();
     for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "generic_finfet"] {
-        let json = std::fs::read_to_string(root.join(format!("pdks/{deck}.json")))
-            .unwrap_or_else(|e| panic!("pdks/{deck}.json: {e}"));
+        let json = std::fs::read_to_string(root.join(format!("pdks/{deck}.json"))).unwrap_or_else(|e| panic!("pdks/{deck}.json: {e}"));
         let pdk = verify::Pdk::from_json(&json).expect("deck loads");
         let lmin = pnr_core::Process::rule(&pdk, "min_gate_l", 150);
         // The DRC sweeps' sizes (the generators' own tests for the diode and inductor).
@@ -668,14 +473,7 @@ fn every_generator_enumerates_on_every_deck() {
         ] {
             let n = count(kind, w, l, &pdk);
             if (n > 0) == undrawable(deck, kind) {
-                wrong.push(format!(
-                    "{deck} {kind:?}: {n} variants, {} UNDRAWABLE",
-                    if undrawable(deck, kind) {
-                        "listed in"
-                    } else {
-                        "not in"
-                    }
-                ));
+                wrong.push(format!("{deck} {kind:?}: {n} variants, {} UNDRAWABLE", if undrawable(deck, kind) { "listed in" } else { "not in" }));
             }
         }
     }
@@ -685,29 +483,12 @@ fn every_generator_enumerates_on_every_deck() {
 /// DRC/ERC findings of every variant of a `n`-member group (dummies on),
 /// density and a lone cell's `floating_gate` excepted.
 #[cfg(not(debug_assertions))]
-fn check<G: Cell>(
-    deck: &str,
-    kind: DeviceKind,
-    n: usize,
-    nf: u16,
-    w: i32,
-    l: i32,
-    pdk: &verify::Pdk,
-    series_parallel: SeriesParallel,
-) -> Vec<String> {
+fn check<G: Cell>(deck: &str, kind: DeviceKind, n: usize, nf: u16, w: i32, l: i32, pdk: &verify::Pdk, series_parallel: SeriesParallel) -> Vec<String> {
     check_nf::<G>(deck, kind, vec![nf; n], w, l, pdk, series_parallel)
 }
 
 #[cfg(not(debug_assertions))]
-fn check_nf<G: Cell>(
-    deck: &str,
-    kind: DeviceKind,
-    dev_nf: Vec<u16>,
-    w: i32,
-    l: i32,
-    pdk: &verify::Pdk,
-    series_parallel: SeriesParallel,
-) -> Vec<String> {
+fn check_nf<G: Cell>(deck: &str, kind: DeviceKind, dev_nf: Vec<u16>, w: i32, l: i32, pdk: &verify::Pdk, series_parallel: SeriesParallel) -> Vec<String> {
     check_on::<G>(deck, kind, dev_nf, w, l, pdk, series_parallel)
 }
 
@@ -716,15 +497,7 @@ fn check_nf<G: Cell>(
 /// [`UNDRAWABLE`] lists `(deck, kind)`: a generator that draws nothing
 /// has nothing dirty, and would otherwise read clean.
 #[cfg(not(debug_assertions))]
-fn check_on<G: Cell>(
-    deck: &str,
-    kind: DeviceKind,
-    dev_nf: Vec<u16>,
-    w: i32,
-    l: i32,
-    view: &dyn Checked,
-    series_parallel: SeriesParallel,
-) -> Vec<String> {
+fn check_on<G: Cell>(deck: &str, kind: DeviceKind, dev_nf: Vec<u16>, w: i32, l: i32, view: &dyn Checked, series_parallel: SeriesParallel) -> Vec<String> {
     let (process, pdk) = (view.process(), view.deck());
     let (n, nf) = (dev_nf.len(), dev_nf[0]);
     let (group, c) = sized(kind, dev_nf, w, l, series_parallel);
@@ -746,29 +519,16 @@ fn check_on<G: Cell>(
                     let name = match p.name.split_once(':') {
                         Some((_, t @ ("G" | "S" | "B"))) => t.to_string(),
                         Some((_, "C")) if kind == DeviceKind::Pnp => "C".to_string(),
-                        Some((_, "P"))
-                            if kind == DeviceKind::Diode && process.layer("diode_mk").is_none() =>
-                        {
-                            "P".to_string()
-                        }
+                        Some((_, "P")) if kind == DeviceKind::Diode && process.layer("diode_mk").is_none() => "P".to_string(),
                         _ => p.name.replace(':', "_"),
                     };
-                    labels.push(verify::LabeledPin {
-                        name,
-                        layer: p.layer.0,
-                        x,
-                        y,
-                    });
+                    labels.push(verify::LabeledPin { name, layer: p.layer.0, x, y });
                 }
             }
             let rules: Vec<String> = verify::drc(&m.shapes, &labels, pdk)
                 .into_iter()
                 .chain(verify::erc(&m.shapes, &labels, pdk))
-                .filter(|f| {
-                    !f.rule.contains("density")
-                        && f.rule != "floating_gate"
-                        && !f.rule.starts_with("soft_connection")
-                })
+                .filter(|f| !f.rule.contains("density") && f.rule != "floating_gate" && !f.rule.starts_with("soft_connection"))
                 .map(|f| format!("{}:{}", f.rule, f.layer))
                 .collect();
             (!rules.is_empty()).then(|| format!("{kind:?} n={n} nf={nf} w={w} #{i}: {rules:?}"))

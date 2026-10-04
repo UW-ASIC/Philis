@@ -23,12 +23,7 @@ const RING_MERGE_GAP_NM: i32 = 2_000;
 /// `cut_ohm` is one tap contact's resistance (the deck's `pex` value); it
 /// sizes each ring's contact rows against `max_ring_resistance_mohm`.
 #[must_use]
-pub fn guard_rings(
-    layout: &Layout,
-    c: &Constraints,
-    process: &dyn Process,
-    cut_ohm: f32,
-) -> Vec<Macro> {
+pub fn guard_rings(layout: &Layout, c: &Constraints, process: &dyn Process, cut_ohm: f32) -> Vec<Macro> {
     let n_dev = layout.x.len();
     // Only requirements whose device is actually placed.
     let reqs: Vec<&GuardRingRequirement> = c
@@ -87,11 +82,10 @@ fn clusters(reqs: &[&GuardRingRequirement], layout: &Layout, merge_gap: f32) -> 
     for i in 0..n {
         for j in (i + 1)..n {
             let (a, b) = (reqs[i], reqs[j]);
-            let same_class = a.connection_net == b.connection_net
-                && a.ring_type == b.ring_type
-                && a.role == b.role;
-            let adjacent =
-                layout.edge_gap(Target::Device(a.device), Target::Device(b.device)) <= merge_gap;
+            let same_class = a.connection_net == b.connection_net && a.ring_type == b.ring_type && a.role == b.role;
+            let adjacent = layout
+                .edge_gap(Target::Device(a.device), Target::Device(b.device))
+                <= merge_gap;
             if a.shareable && b.shareable && same_class && adjacent {
                 union(&mut parent, i, j);
             }
@@ -120,19 +114,11 @@ fn clusters(reqs: &[&GuardRingRequirement], layout: &Layout, merge_gap: f32) -> 
             safe.push(members);
             continue;
         }
-        members.sort_by_key(|&i| {
-            (
-                layout.x[reqs[i].device.0 as usize],
-                layout.y[reqs[i].device.0 as usize],
-            )
-        });
+        members.sort_by_key(|&i| (layout.x[reqs[i].device.0 as usize], layout.y[reqs[i].device.0 as usize]));
         let mut subs: Vec<Vec<usize>> = Vec::new();
         for i in members {
             let near = |j: &usize| {
-                layout.edge_gap(
-                    Target::Device(reqs[i].device),
-                    Target::Device(reqs[*j].device),
-                ) <= merge_gap
+                layout.edge_gap(Target::Device(reqs[i].device), Target::Device(reqs[*j].device)) <= merge_gap
             };
             let home = subs.iter_mut().find(|sub| {
                 sub.iter().any(near) && {
@@ -192,12 +178,7 @@ fn union(parent: &mut [usize], i: usize, j: usize) {
 
 fn dev_rect(l: &Layout, d: DeviceId) -> Rect {
     let (cx, cy, hw, hh) = l.bbox(Target::Device(d));
-    Rect {
-        x: cx - hw,
-        y: cy - hh,
-        w: 2 * hw,
-        h: 2 * hh,
-    }
+    Rect { x: cx - hw, y: cy - hh, w: 2 * hw, h: 2 * hh }
 }
 
 fn union_rect(a: Rect, b: Rect) -> Rect {
@@ -205,87 +186,40 @@ fn union_rect(a: Rect, b: Rect) -> Rect {
     let y0 = a.y.min(b.y);
     let x1 = (a.x + a.w).max(b.x + b.w);
     let y1 = (a.y + a.h).max(b.y + b.h);
-    Rect {
-        x: x0,
-        y: y0,
-        w: x1 - x0,
-        h: y1 - y0,
-    }
+    Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
+
 
 /// Device-to-band gap, the deck's: the widest spacing among the implants,
 /// tap and diffusion, so the band clears a cell's diffusion and its implant
 /// of either type (sky130 380, gf180 400).
 fn ring_clear(process: &dyn Process) -> i32 {
-    ["psdm", "nsdm", "tap", "diff"]
-        .iter()
-        .filter_map(|r| process.space(r))
-        .max()
-        .unwrap_or(0)
+    ["psdm", "nsdm", "tap", "diff"].iter().filter_map(|r| process.space(r)).max().unwrap_or(0)
 }
 
 /// Draw the four contacted tap/implant/li bands of `r`'s ring around `inner`.
 ///
 /// No met1 band: routing is met1-and-up, so a met1 loop would short every
 /// route crossing it. The `ring` pins sit on li; the router stitches down.
-fn draw_ring(
-    b: &mut Builder,
-    process: &dyn Process,
-    r: &GuardRingRequirement,
-    inner: Rect,
-    cut_ohm: f32,
-) {
+fn draw_ring(b: &mut Builder, process: &dyn Process, r: &GuardRingRequirement, inner: Rect, cut_ohm: f32) {
     let perimeter = 2 * i64::from(inner.w + inner.h + 4 * ring_clear(process));
     let (width, rows) = band(process, r, perimeter, cut_ohm);
     let gap = ring_gap(process, r, width);
-    let pin = Pin {
-        name: "ring".into(),
-        net: r.connection_net,
-        layer: req(process, "li"),
-        at: Rect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        },
-    };
-    tap_ring(
-        b,
-        process,
-        implant_name(r.ring_type),
-        well_shape(r.ring_type),
-        inner,
-        gap,
-        (width, rows),
-        &pin,
-    );
+    let pin = Pin { name: "ring".into(), net: r.connection_net, layer: req(process, "li"), at: Rect { x: 0, y: 0, w: 0, h: 0 } };
+    tap_ring(b, process, implant_name(r.ring_type), well_shape(r.ring_type), inner, gap, (width, rows), &pin);
 }
 
 /// A contacted tap ring `gap` outside `inner`: four bands of tap under
 /// `implant` and li, `rows` rows of cuts along each, a copy of `pin` on
 /// each band, and its `well` (see [`WellShape`]). Returns the band's outer
 /// edge.
-pub(crate) fn tap_ring(
-    b: &mut Builder,
-    process: &dyn Process,
-    implant: &str,
-    well: WellShape,
-    inner: Rect,
-    gap: i32,
-    (ring_width, rows): (i32, i32),
-    pin: &Pin,
-) -> Rect {
+pub(crate) fn tap_ring(b: &mut Builder, process: &dyn Process, implant: &str, well: WellShape, inner: Rect, gap: i32, (ring_width, rows): (i32, i32), pin: &Pin) -> Rect {
     let ct = dim(process, "contact");
     let lat = cut_lattice(process);
     let pitch = cut_pitch(process);
     let (ix0, iy0) = (inner.x - gap, inner.y - gap);
     let (ix1, iy1) = (inner.x + inner.w + gap, inner.y + inner.h + gap);
-    let (ox0, oy0, ox1, oy1) = (
-        ix0 - ring_width,
-        iy0 - ring_width,
-        ix1 + ring_width,
-        iy1 + ring_width,
-    );
+    let (ox0, oy0, ox1, oy1) = (ix0 - ring_width, iy0 - ring_width, ix1 + ring_width, iy1 + ring_width);
     // The implant passes the tap by the deck's enclosure, never under its
     // own width.
     let imp_enc = process
@@ -308,21 +242,8 @@ pub(crate) fn tap_ring(
         if bw <= 0 || bh <= 0 {
             continue;
         }
-        let band = Rect {
-            x: bx,
-            y: by,
-            w: bw,
-            h: bh,
-        };
-        b.rect(
-            implant,
-            Rect {
-                x: bx - imp_enc,
-                y: by - imp_enc,
-                w: bw + 2 * imp_enc,
-                h: bh + 2 * imp_enc,
-            },
-        );
+        let band = Rect { x: bx, y: by, w: bw, h: bh };
+        b.rect(implant, Rect { x: bx - imp_enc, y: by - imp_enc, w: bw + 2 * imp_enc, h: bh + 2 * imp_enc });
         b.rect(li, band);
         b.rect(tap, band);
         // `rows` lines of cuts along the band, centred across it.
@@ -331,22 +252,12 @@ pub(crate) fn tap_ring(
             let off = margin + row * pitch;
             // Along the band, cuts sit on one pitch grid from the cell
             // origin: two rings sharing a band draw the very same cuts.
-            let on_grid = |v: i32| {
-                v.div_euclid(pitch) * pitch + if v.rem_euclid(pitch) == 0 { 0 } else { pitch }
-            };
+            let on_grid = |v: i32| v.div_euclid(pitch) * pitch + if v.rem_euclid(pitch) == 0 { 0 } else { pitch };
             if bw >= bh {
                 let cy = snap_cut(by + off, lat);
                 let mut cx = on_grid(bx + margin);
                 while cx + ct <= bx + bw - margin {
-                    b.rect(
-                        licon,
-                        Rect {
-                            x: cx,
-                            y: cy,
-                            w: ct,
-                            h: ct,
-                        },
-                    );
+                    b.rect(licon, Rect { x: cx, y: cy, w: ct, h: ct });
                     cx += pitch;
                 }
             } else {
@@ -355,29 +266,12 @@ pub(crate) fn tap_ring(
                 let cx = snap_cut(bx + off, lat);
                 let mut cy = on_grid(by - ring_width + margin + rows * pitch);
                 while cy + pitch <= by + bh + margin {
-                    b.rect(
-                        licon,
-                        Rect {
-                            x: cx,
-                            y: cy,
-                            w: ct,
-                            h: ct,
-                        },
-                    );
+                    b.rect(licon, Rect { x: cx, y: cy, w: ct, h: ct });
                     cy += pitch;
                 }
             }
         }
-        b.pin(Pin {
-            at: Rect {
-                x: bx + bw / 2 - ct / 2,
-                y: by + bh / 2 - ct / 2,
-                w: ct,
-                h: ct,
-            },
-            layer: li,
-            ..pin.clone()
-        });
+        b.pin(Pin { at: Rect { x: bx + bw / 2 - ct / 2, y: by + bh / 2 - ct / 2, w: ct, h: ct }, layer: li, ..pin.clone() });
     }
     // An n+ ring lives in an n-well; a p+ ring in the substrate has none.
     if let Some(nwell) = process.layer("nwell") {
@@ -385,15 +279,7 @@ pub(crate) fn tap_ring(
             WellShape::None => {}
             WellShape::Filled => {
                 let enc = dim(process, "nwell_diff_enc");
-                b.rect(
-                    nwell,
-                    Rect {
-                        x: ox0 - enc,
-                        y: oy0 - enc,
-                        w: (ox1 - ox0) + 2 * enc,
-                        h: (oy1 - oy0) + 2 * enc,
-                    },
-                );
+                b.rect(nwell, Rect { x: ox0 - enc, y: oy0 - enc, w: (ox1 - ox0) + 2 * enc, h: (oy1 - oy0) + 2 * enc });
             }
             // Each tap band grown by `g`, full length: they overlap at the
             // corners, so the union is one ring with the interior left out.
@@ -401,42 +287,17 @@ pub(crate) fn tap_ring(
                 let g = band_well_ext(process, ring_width);
                 let (fw, fh, bw) = (ox1 - ox0 + 2 * g, oy1 - oy0 + 2 * g, ring_width + 2 * g);
                 for r in [
-                    Rect {
-                        x: ox0 - g,
-                        y: oy0 - g,
-                        w: fw,
-                        h: bw,
-                    },
-                    Rect {
-                        x: ox0 - g,
-                        y: iy1 - g,
-                        w: fw,
-                        h: bw,
-                    },
-                    Rect {
-                        x: ox0 - g,
-                        y: oy0 - g,
-                        w: bw,
-                        h: fh,
-                    },
-                    Rect {
-                        x: ix1 - g,
-                        y: oy0 - g,
-                        w: bw,
-                        h: fh,
-                    },
+                    Rect { x: ox0 - g, y: oy0 - g, w: fw, h: bw },
+                    Rect { x: ox0 - g, y: iy1 - g, w: fw, h: bw },
+                    Rect { x: ox0 - g, y: oy0 - g, w: bw, h: fh },
+                    Rect { x: ix1 - g, y: oy0 - g, w: bw, h: fh },
                 ] {
                     b.rect(nwell, r);
                 }
             }
         }
     }
-    Rect {
-        x: ox0,
-        y: oy0,
-        w: ox1 - ox0,
-        h: oy1 - oy0,
-    }
+    Rect { x: ox0, y: oy0, w: ox1 - ox0, h: oy1 - oy0 }
 }
 
 /// The placement halo: how far `r`'s ring (gap + band + outer clearance)
@@ -446,10 +307,7 @@ pub(crate) fn tap_ring(
 #[must_use]
 pub fn ring_halo(r: &GuardRingRequirement, process: &dyn Process, cut_ohm: f32) -> i32 {
     let width = band(process, r, 8 * i64::from(ring_clear(process)), cut_ohm).0;
-    width
-        + ring_gap(process, r, width)
-        + outer_clear(r.ring_type, process, width)
-        + ring_implant_enc(process, r.ring_type)
+    width + ring_gap(process, r, width) + outer_clear(r.ring_type, process, width) + ring_implant_enc(process, r.ring_type)
 }
 
 /// Device-to-band gap: the deck's diffusion/implant clearance past the
@@ -463,11 +321,7 @@ fn ring_gap(process: &dyn Process, r: &GuardRingRequirement, width: i32) -> i32 
     if r.ring_type == GuardRingType::Ecgr {
         // ponytail: conservative for large devices (sky130 845 vs 550); size the
         // hole from `inner` if the area matters.
-        let g = band_well_ext(process, width)
-            + process
-                .space_between("nwell", "diff")
-                .unwrap_or(0)
-                .max((nwell_space(process) + 1) / 2);
+        let g = band_well_ext(process, width) + process.space_between("nwell", "diff").unwrap_or(0).max((nwell_space(process) + 1) / 2);
         return on_grid_up(process, g);
     }
     ring_clear(process) + ring_implant_enc(process, r.ring_type)
@@ -475,18 +329,14 @@ fn ring_gap(process: &dyn Process, r: &GuardRingRequirement, width: i32) -> i32 
 
 /// The deck's n-well to n-well spacing (nwell.2a, sky130 1270).
 fn nwell_space(process: &dyn Process) -> i32 {
-    process
-        .rule("nwell_min_spacing", 0)
-        .max(process.space("nwell").unwrap_or(0))
+    process.rule("nwell_min_spacing", 0).max(process.space("nwell").unwrap_or(0))
 }
 
 /// How far an ECGR's band well grows past its tap band of `width`: the deck's
 /// well-over-diff/tap enclosure, and enough that the band well is
 /// `width("nwell")` wide (sky130 840 > 420 + 2·180), snapped up to the grid.
 fn band_well_ext(process: &dyn Process, width: i32) -> i32 {
-    let e = dim(process, "nwell_diff_enc")
-        .max(process.enclosure("nwell", "tap").unwrap_or(0))
-        .max((dim(process, "nwell_min_width") - width + 1) / 2);
+    let e = dim(process, "nwell_diff_enc").max(process.enclosure("nwell", "tap").unwrap_or(0)).max((dim(process, "nwell_min_width") - width + 1) / 2);
     on_grid_up(process, e)
 }
 
@@ -498,10 +348,9 @@ fn on_grid_up(process: &dyn Process, v: i32) -> i32 {
 
 /// How far a ring's implant grows past its tap (see [`tap_ring`]).
 fn ring_implant_enc(process: &dyn Process, ring_type: GuardRingType) -> i32 {
-    process
-        .enclosure(implant_name(ring_type), "tap")
-        .unwrap_or(0)
+    process.enclosure(implant_name(ring_type), "tap").unwrap_or(0)
 }
+
 
 /// The ring band's implant. A `Tap` ring is its device's bulk tap: n+ in the
 /// n-well for a PMOS (`in_well`), p+ in the substrate for an NMOS. `Ecgr` is
@@ -557,8 +406,7 @@ pub fn drawable(t: GuardRingType, p: &dyn Process) -> bool {
 /// `Ecgr`'s band well grows [`band_well_ext`] past a band of `width`.
 fn outer_clear(ring_type: GuardRingType, process: &dyn Process, width: i32) -> i32 {
     if in_nwell(ring_type) {
-        nwell_space(process)
-            + dim(process, "nwell_diff_enc").max(process.enclosure("nwell", "tap").unwrap_or(0))
+        nwell_space(process) + dim(process, "nwell_diff_enc").max(process.enclosure("nwell", "tap").unwrap_or(0))
     } else if ring_type == GuardRingType::Ecgr {
         nwell_space(process) + band_well_ext(process, width)
     } else {
@@ -573,11 +421,7 @@ pub(crate) fn cut_pitch(process: &dyn Process) -> i32 {
     // row is one).
     let ct = dim(process, "contact");
     let floor = ct + process.space("licon").unwrap_or(0);
-    snap_cut(
-        process.rule("guard_licon_pitch", 0).max(floor) + lat - 1,
-        lat,
-    )
-    .max(lat)
+    snap_cut(process.rule("guard_licon_pitch", 0).max(floor) + lat - 1, lat).max(lat)
 }
 
 /// `(band width, cut rows)` for a ring whose inner loop is `perimeter` nm.
@@ -589,19 +433,11 @@ pub(crate) fn cut_pitch(process: &dyn Process) -> i32 {
 /// ponytail: ring R is the parallel cut resistance only; tap spreading and
 /// the li run to the tie point are left out. Extract the ring if a budget is
 /// ever tight.
-fn band(
-    process: &dyn Process,
-    r: &GuardRingRequirement,
-    perimeter: i64,
-    cut_ohm: f32,
-) -> (i32, i32) {
+fn band(process: &dyn Process, r: &GuardRingRequirement, perimeter: i64, cut_ohm: f32) -> (i32, i32) {
     let ct = dim(process, "contact");
     let pitch = cut_pitch(process);
     // Wide enough to enclose its cut row in diffusion on both sides.
-    let floor = process
-        .rule("min_guard_ring_width", 0)
-        .max(r.min_width_nm)
-        .max(ct + 2 * process.rule("diff_encloses_licon", 0));
+    let floor = process.rule("min_guard_ring_width", 0).max(r.min_width_nm).max(ct + 2 * process.rule("diff_encloses_licon", 0));
     let per_row = (perimeter / i64::from(pitch)).max(1) as f32;
     let budget = r.max_ring_resistance_mohm as f32 / 1000.0;
     let mut rows = 1;
@@ -614,9 +450,7 @@ fn band(
 /// A drawn ring's resistance to its net: its cuts in parallel, ohms.
 #[must_use]
 pub fn ring_ohm(ring: &Macro, process: &dyn Process, cut_ohm: f32) -> f32 {
-    let cuts = process
-        .layer("licon")
-        .map_or(0, |l| ring.shapes.iter().filter(|s| s.layer == l).count());
+    let cuts = process.layer("licon").map_or(0, |l| ring.shapes.iter().filter(|s| s.layer == l).count());
     cut_ohm / cuts.max(1) as f32
 }
 
@@ -632,9 +466,7 @@ pub fn ring_ohm(ring: &Macro, process: &dyn Process, cut_ohm: f32) -> f32 {
 /// `placed`: the cells, placed (absolute). `rings`: this layout's rings.
 #[must_use]
 pub fn well_bridges(placed: &[Macro], rings: &[Macro], process: &dyn Process) -> Vec<Macro> {
-    let Some(nwell) = process.layer("nwell") else {
-        return Vec::new();
-    };
+    let Some(nwell) = process.layer("nwell") else { return Vec::new() };
     // All from the deck; without a well spacing there is nothing to bridge.
     let space = process.rule("nwell_min_spacing", 0);
     let min_w = dim(process, "nwell_min_width");
@@ -642,53 +474,26 @@ pub fn well_bridges(placed: &[Macro], rings: &[Macro], process: &dyn Process) ->
     if space <= 0 {
         return Vec::new();
     }
-    let blocking: Vec<pnr_core::LayerId> = ["diff", "poly", "psdm"]
-        .iter()
-        .filter_map(|r| process.layer(r))
-        .collect();
+    let blocking: Vec<pnr_core::LayerId> = ["diff", "poly", "psdm"].iter().filter_map(|r| process.layer(r)).collect();
     // Per cell: its well's bbox and its bulk net.
     let wells: Vec<Option<(Rect, pnr_core::NetId)>> = placed
         .iter()
         .map(|m| {
-            let well = m
-                .shapes
-                .iter()
-                .filter(|s| s.layer == nwell)
-                .map(|s| s.rect)
-                .reduce(union_rect)?;
+            let well = m.shapes.iter().filter(|s| s.layer == nwell).map(|s| s.rect).reduce(union_rect)?;
             let bulk = m.pins.iter().find(|p| p.name.ends_with(":B"))?.net;
             Some((well, bulk))
         })
         .collect();
     let hits = |r: Rect, skip: [usize; 2]| {
-        let grown = Rect {
-            x: r.x - keep,
-            y: r.y - keep,
-            w: r.w + 2 * keep,
-            h: r.h + 2 * keep,
-        };
-        let meets = |a: &Rect| {
-            a.x < grown.x + grown.w
-                && grown.x < a.x + a.w
-                && a.y < grown.y + grown.h
-                && grown.y < a.y + a.h
-        };
-        placed
-            .iter()
-            .enumerate()
-            .filter(|(k, _)| !skip.contains(k))
-            .map(|(_, m)| m)
-            .chain(rings)
-            .flat_map(|m| &m.shapes)
-            .any(|s| blocking.contains(&s.layer) && meets(&s.rect))
+        let grown = Rect { x: r.x - keep, y: r.y - keep, w: r.w + 2 * keep, h: r.h + 2 * keep };
+        let meets = |a: &Rect| a.x < grown.x + grown.w && grown.x < a.x + a.w && a.y < grown.y + grown.h && grown.y < a.y + a.h;
+        placed.iter().enumerate().filter(|(k, _)| !skip.contains(k)).map(|(_, m)| m).chain(rings).flat_map(|m| &m.shapes).any(|s| blocking.contains(&s.layer) && meets(&s.rect))
     };
     let mut b = Builder::new(process.grid());
     let mut any = false;
     for i in 0..wells.len() {
         for j in i + 1..wells.len() {
-            let (Some((a, na)), Some((c, nc))) = (wells[i], wells[j]) else {
-                continue;
-            };
+            let (Some((a, na)), Some((c, nc))) = (wells[i], wells[j]) else { continue };
             if na != nc {
                 continue;
             }
@@ -697,24 +502,10 @@ pub fn well_bridges(placed: &[Macro], rings: &[Macro], process: &dyn Process) ->
             let (lo_y, hi_y) = if a.y <= c.y { (a, c) } else { (c, a) };
             let gap_x = hi.x - (lo.x + lo.w);
             let gap_y = hi_y.y - (lo_y.y + lo_y.h);
-            let bridge = if (a.y, a.h) == (c.y, c.h)
-                && gap_x > 0
-                && gap_x <= 2 * space
-                && a.h >= min_w
-            {
-                Some(Rect {
-                    x: lo.x + lo.w,
-                    y: a.y,
-                    w: gap_x,
-                    h: a.h,
-                })
+            let bridge = if (a.y, a.h) == (c.y, c.h) && gap_x > 0 && gap_x <= 2 * space && a.h >= min_w {
+                Some(Rect { x: lo.x + lo.w, y: a.y, w: gap_x, h: a.h })
             } else if (a.x, a.w) == (c.x, c.w) && gap_y > 0 && gap_y <= 2 * space && a.w >= min_w {
-                Some(Rect {
-                    x: a.x,
-                    y: lo_y.y + lo_y.h,
-                    w: a.w,
-                    h: gap_y,
-                })
+                Some(Rect { x: a.x, y: lo_y.y + lo_y.h, w: a.w, h: gap_y })
             } else {
                 None
             };
@@ -724,11 +515,7 @@ pub fn well_bridges(placed: &[Macro], rings: &[Macro], process: &dyn Process) ->
             }
         }
     }
-    if any {
-        vec![b.finish()]
-    } else {
-        Vec::new()
-    }
+    if any { vec![b.finish()] } else { Vec::new() }
 }
 
 #[cfg(test)]
@@ -746,13 +533,7 @@ mod tests {
         let nwell = pdk.layer("nwell").unwrap();
         let (g, c) = testkit::group_of(DeviceKind::Pmos, 1, 2, 1680, 150);
         let cell = crate::mosfet::Mosfet::enumerate(&g, &c, &pdk)[0].draw(&g, &c, &pdk);
-        let well = cell
-            .shapes
-            .iter()
-            .filter(|s| s.layer == nwell)
-            .map(|s| s.rect)
-            .reduce(union_rect)
-            .unwrap();
+        let well = cell.shapes.iter().filter(|s| s.layer == nwell).map(|s| s.rect).reduce(union_rect).unwrap();
         let shift = |m: &Macro, dx: i32, bulk: u16| {
             let mut m = m.clone();
             for s in &mut m.shapes {
@@ -760,11 +541,7 @@ mod tests {
             }
             for p in &mut m.pins {
                 p.at.x += dx;
-                p.net = if p.name.ends_with(":B") {
-                    NetId(bulk)
-                } else {
-                    NetId(10 + bulk + p.net.0)
-                };
+                p.net = if p.name.ends_with(":B") { NetId(bulk) } else { NetId(10 + bulk + p.net.0) };
             }
             m.bbox.x += dx;
             m
@@ -774,42 +551,18 @@ mod tests {
         let bridges = well_bridges(&pair, &[], &pdk);
         assert_eq!(bridges.len(), 1);
         // Merged as the flow's geometry does: the three rects are one well.
-        let mut shapes: Vec<pnr_core::Shape> = pair
-            .iter()
-            .chain(&bridges)
-            .flat_map(|m| m.shapes.clone())
-            .collect();
-        let (mut wells, rest): (Vec<pnr_core::Shape>, Vec<pnr_core::Shape>) =
-            shapes.drain(..).partition(|s| s.layer == nwell);
+        let mut shapes: Vec<pnr_core::Shape> = pair.iter().chain(&bridges).flat_map(|m| m.shapes.clone()).collect();
+        let (mut wells, rest): (Vec<pnr_core::Shape>, Vec<pnr_core::Shape>) = shapes.drain(..).partition(|s| s.layer == nwell);
         let r = wells.iter().map(|s| s.rect).reduce(union_rect).unwrap();
-        assert_eq!(
-            wells
-                .iter()
-                .map(|s| i64::from(s.rect.w) * i64::from(s.rect.h))
-                .sum::<i64>(),
-            i64::from(r.w) * i64::from(r.h),
-            "the rects tile one rectangle"
-        );
-        wells = vec![pnr_core::Shape {
-            layer: nwell,
-            rect: r,
-        }];
+        assert_eq!(wells.iter().map(|s| i64::from(s.rect.w) * i64::from(s.rect.h)).sum::<i64>(), i64::from(r.w) * i64::from(r.h), "the rects tile one rectangle");
+        wells = vec![pnr_core::Shape { layer: nwell, rect: r }];
         shapes = rest.into_iter().chain(wells).collect();
         let labels: Vec<verify::LabeledPin> = pair
             .iter()
             .enumerate()
             .flat_map(|(k, m)| m.pins.iter().map(move |p| (k, p)))
             .filter(|(_, p)| !p.name.ends_with(":S") || true)
-            .map(|(k, p)| verify::LabeledPin {
-                name: if p.name.ends_with(":B") {
-                    "B".into()
-                } else {
-                    format!("c{k}_{}", p.name.replace(':', "_"))
-                },
-                layer: p.layer.0,
-                x: p.at.x + p.at.w / 2,
-                y: p.at.y + p.at.h / 2,
-            })
+            .map(|(k, p)| verify::LabeledPin { name: if p.name.ends_with(":B") { "B".into() } else { format!("c{k}_{}", p.name.replace(':', "_")) }, layer: p.layer.0, x: p.at.x + p.at.w / 2, y: p.at.y + p.at.h / 2 })
             .fold(Vec::new(), |mut v: Vec<verify::LabeledPin>, l| {
                 if !v.iter().any(|o| (o.x, o.y) == (l.x, l.y)) {
                     v.push(l);
@@ -818,26 +571,13 @@ mod tests {
             });
         let dirty = crate::testkit::findings(&shapes, &labels, &pdk);
         assert!(dirty.is_empty(), "{dirty:?}");
-        assert!(
-            well_bridges(&[shift(&cell, 0, 1), shift(&cell, dx, 2)], &[], &pdk).is_empty(),
-            "different bulks"
-        );
+        assert!(well_bridges(&[shift(&cell, 0, 1), shift(&cell, dx, 2)], &[], &pdk).is_empty(), "different bulks");
         let mut blocker = shift(&cell, 0, 3);
-        blocker
-            .shapes
-            .retain(|s| Some(s.layer) == pdk.layer("diff"));
+        blocker.shapes.retain(|s| Some(s.layer) == pdk.layer("diff"));
         for s in &mut blocker.shapes {
-            s.rect = Rect {
-                x: well.x + well.w + 500,
-                y: well.y + well.h / 2,
-                w: 400,
-                h: 400,
-            };
+            s.rect = Rect { x: well.x + well.w + 500, y: well.y + well.h / 2, w: 400, h: 400 };
         }
-        assert!(
-            well_bridges(&[pair[0].clone(), pair[1].clone(), blocker], &[], &pdk).is_empty(),
-            "active in the gap"
-        );
+        assert!(well_bridges(&[pair[0].clone(), pair[1].clone(), blocker], &[], &pdk).is_empty(), "active in the gap");
     }
 
     fn req(dev: u16, net: u16, ty: GuardRingType, shareable: bool) -> GuardRingRequirement {
@@ -934,23 +674,10 @@ mod tests {
                 Some(400)
             }
         }
-        assert_eq!(
-            ring_gap(
-                &Narrow,
-                &req(0, 5, GuardRingType::Tap { in_well: false }, true),
-                0
-            ),
-            150
-        );
+        assert_eq!(ring_gap(&Narrow, &req(0, 5, GuardRingType::Tap { in_well: false }, true), 0), 150);
         // The gap runs from the band well's inner edge: g 50 + max(400, 50).
-        assert_eq!(
-            ring_gap(&Narrow, &req(0, 5, GuardRingType::Ecgr, true), 0),
-            450
-        );
-        assert!(
-            ring_gap(&pdk, &req(0, 5, GuardRingType::Ecgr, true), 420) - band_well_ext(&pdk, 420)
-                >= 340
-        );
+        assert_eq!(ring_gap(&Narrow, &req(0, 5, GuardRingType::Ecgr, true), 0), 450);
+        assert!(ring_gap(&pdk, &req(0, 5, GuardRingType::Ecgr, true), 420) - band_well_ext(&pdk, 420) >= 340);
     }
 
     /// An NMOS (2 µm × 2 µm-ish) inside an `Ecgr`: the cell, the ring macro
@@ -961,22 +688,12 @@ mod tests {
         let cell = crate::mosfet::Mosfet::enumerate(&g, &c, pdk)[0].draw(&g, &c, pdk);
         let inner = cell.bbox;
         let mut b = Builder::new(pdk.grid());
-        draw_ring(
-            &mut b,
-            pdk,
-            &req(0, 9, GuardRingType::Ecgr, false),
-            inner,
-            15.0,
-        );
+        draw_ring(&mut b, pdk, &req(0, 9, GuardRingType::Ecgr, false), inner, 15.0);
         (cell, b.finish(), inner)
     }
 
     fn rects_on(m: &Macro, layer: Option<pnr_core::LayerId>) -> Vec<Rect> {
-        m.shapes
-            .iter()
-            .filter(|s| Some(s.layer) == layer)
-            .map(|s| s.rect)
-            .collect()
+        m.shapes.iter().filter(|s| Some(s.layer) == layer).map(|s| s.rect).collect()
     }
 
     fn inside(a: Rect, b: Rect) -> bool {
@@ -991,31 +708,17 @@ mod tests {
         let Some(pdk) = testkit::pdk() else { return };
         let (cell, ring, inner) = ecgr_around_nmos(&pdk);
         let s = pdk.space_between("nwell", "diff").unwrap();
-        let keep_out = Rect {
-            x: inner.x - s,
-            y: inner.y - s,
-            w: inner.w + 2 * s,
-            h: inner.h + 2 * s,
-        };
+        let keep_out = Rect { x: inner.x - s, y: inner.y - s, w: inner.w + 2 * s, h: inner.h + 2 * s };
         let wells = rects_on(&ring, pdk.layer("nwell"));
         assert_eq!(wells.len(), 4);
         for w in &wells {
-            let hits = w.x < keep_out.x + keep_out.w
-                && keep_out.x < w.x + w.w
-                && w.y < keep_out.y + keep_out.h
-                && keep_out.y < w.y + w.h;
+            let hits = w.x < keep_out.x + keep_out.w && keep_out.x < w.x + w.w && w.y < keep_out.y + keep_out.h && keep_out.y < w.y + w.h;
             assert!(!hits, "{w:?} reaches within {s} of {inner:?}");
             assert!(w.w.min(w.h) >= dim(&pdk, "nwell_min_width"), "{w:?}");
         }
-        let shapes: Vec<pnr_core::Shape> =
-            cell.shapes.iter().chain(&ring.shapes).cloned().collect();
+        let shapes: Vec<pnr_core::Shape> = cell.shapes.iter().chain(&ring.shapes).cloned().collect();
         let mut labels = testkit::ports_with(&cell, &["G", "S", "B"]);
-        labels.extend(ring.pins.iter().map(|p| verify::LabeledPin {
-            name: "VDD".into(),
-            layer: p.layer.0,
-            x: p.at.x + p.at.w / 2,
-            y: p.at.y + p.at.h / 2,
-        }));
+        labels.extend(ring.pins.iter().map(|p| verify::LabeledPin { name: "VDD".into(), layer: p.layer.0, x: p.at.x + p.at.w / 2, y: p.at.y + p.at.h / 2 }));
         let dirty = testkit::findings(&shapes, &labels, &pdk);
         assert!(dirty.is_empty(), "{dirty:?}");
     }
@@ -1027,10 +730,7 @@ mod tests {
         let Some(pdk) = testkit::pdk() else { return };
         let (_, ring, _) = ecgr_around_nmos(&pdk);
         assert!(drawable(GuardRingType::Ecgr, &pdk));
-        let (nsdm, nwell) = (
-            rects_on(&ring, pdk.layer("nsdm")),
-            rects_on(&ring, pdk.layer("nwell")),
-        );
+        let (nsdm, nwell) = (rects_on(&ring, pdk.layer("nsdm")), rects_on(&ring, pdk.layer("nwell")));
         let taps = rects_on(&ring, pdk.layer("tap"));
         assert_eq!(taps.len(), 4);
         for t in taps {
@@ -1079,21 +779,11 @@ mod tests {
     fn rings_of_different_roles_never_merge() {
         let tap = GuardRingType::Tap { in_well: false };
         let l = layout_at(&[(0, 0), (300, 0)]);
-        let reqs = [
-            req(0, 5, tap, true),
-            GuardRingRequirement {
-                role: analog::cell::RingRole::Victim,
-                ..req(1, 5, tap, true)
-            },
-        ];
+        let reqs = [req(0, 5, tap, true), GuardRingRequirement { role: analog::cell::RingRole::Victim, ..req(1, 5, tap, true) }];
         let refs: Vec<&GuardRingRequirement> = reqs.iter().collect();
         assert_eq!(clusters(&refs, &l, 2000.0).len(), 2);
         let same = [req(0, 5, tap, true), req(1, 5, tap, true)];
-        assert_eq!(
-            clusters(&same.iter().collect::<Vec<_>>(), &l, 2000.0).len(),
-            1,
-            "same role merges"
-        );
+        assert_eq!(clusters(&same.iter().collect::<Vec<_>>(), &l, 2000.0).len(), 1, "same role merges");
     }
 
     #[test]
@@ -1106,11 +796,7 @@ mod tests {
         let reqs = [req(0, 5, hcgr, true), req(2, 5, hcgr, true)];
         let refs: Vec<&GuardRingRequirement> = reqs.iter().collect();
         let c = clusters(&refs, &l, 2000.0);
-        assert_eq!(
-            c.len(),
-            2,
-            "hull would cross the middle cell: split to singletons"
-        );
+        assert_eq!(c.len(), 2, "hull would cross the middle cell: split to singletons");
         assert_eq!(c, vec![vec![0], vec![1]]);
 
         // Control: the same pair with no middle cell merges.
@@ -1118,11 +804,7 @@ mod tests {
         let reqs2 = [req(0, 5, hcgr, true), req(1, 5, hcgr, true)];
         let refs2: Vec<&GuardRingRequirement> = reqs2.iter().collect();
         let c2 = clusters(&refs2, &l2, 2000.0);
-        assert_eq!(
-            c2,
-            vec![vec![0, 1]],
-            "no foreigner in the hull: pair merges"
-        );
+        assert_eq!(c2, vec![vec![0, 1]], "no foreigner in the hull: pair merges");
     }
 }
 
@@ -1133,26 +815,14 @@ mod tests {
 /// opposite implant (it would re-dope a diffusion), is not drawn.
 #[must_use]
 pub fn implant_bridges(all: &[Macro], process: &dyn Process) -> Vec<Macro> {
-    let (Some(n), Some(p)) = (process.layer("nsdm"), process.layer("psdm")) else {
-        return Vec::new();
-    };
+    let (Some(n), Some(p)) = (process.layer("nsdm"), process.layer("psdm")) else { return Vec::new() };
     let mut b = Builder::new(process.grid());
     let mut any = false;
     for (role, own, other) in [("nsdm", n, p), ("psdm", p, n)] {
-        let (Some(space), wmin) = (process.space(role), process.width(role).unwrap_or(0)) else {
-            continue;
-        };
-        let of = |l| {
-            all.iter()
-                .flat_map(|m| &m.shapes)
-                .filter(|s| s.layer == l)
-                .map(|s| s.rect)
-                .collect::<Vec<_>>()
-        };
+        let (Some(space), wmin) = (process.space(role), process.width(role).unwrap_or(0)) else { continue };
+        let of = |l| all.iter().flat_map(|m| &m.shapes).filter(|s| s.layer == l).map(|s| s.rect).collect::<Vec<_>>();
         let (mine, theirs) = (of(own), of(other));
-        let overlaps = |a: &Rect, c: &Rect| {
-            a.x < c.x + c.w && c.x < a.x + a.w && a.y < c.y + c.h && c.y < a.y + a.h
-        };
+        let overlaps = |a: &Rect, c: &Rect| a.x < c.x + c.w && c.x < a.x + a.w && a.y < c.y + c.h && c.y < a.y + a.h;
         for i in 0..mine.len() {
             for j in i + 1..mine.len() {
                 let (a, c) = (mine[i], mine[j]);
@@ -1162,45 +832,20 @@ pub fn implant_bridges(all: &[Macro], process: &dyn Process) -> Vec<Macro> {
                 let (x0, x1) = (a.x.max(c.x), (a.x + a.w).min(c.x + c.w));
                 // Only where the two share a span, so the union is one clean
                 // rectangle (a partial span leaves notches).
-                let bridge = if gap_x > 0
-                    && gap_x < space
-                    && (a.y, a.h) == (c.y, c.h)
-                    && y1 - y0 >= wmin
-                {
-                    Some(Rect {
-                        x: a.x.min(c.x) + if a.x < c.x { a.w } else { c.w },
-                        y: y0,
-                        w: gap_x,
-                        h: y1 - y0,
-                    })
-                } else if gap_y > 0 && gap_y < space && (a.x, a.w) == (c.x, c.w) && x1 - x0 >= wmin
-                {
-                    Some(Rect {
-                        x: x0,
-                        y: a.y.min(c.y) + if a.y < c.y { a.h } else { c.h },
-                        w: x1 - x0,
-                        h: gap_y,
-                    })
+                let bridge = if gap_x > 0 && gap_x < space && (a.y, a.h) == (c.y, c.h) && y1 - y0 >= wmin {
+                    Some(Rect { x: a.x.min(c.x) + if a.x < c.x { a.w } else { c.w }, y: y0, w: gap_x, h: y1 - y0 })
+                } else if gap_y > 0 && gap_y < space && (a.x, a.w) == (c.x, c.w) && x1 - x0 >= wmin {
+                    Some(Rect { x: x0, y: a.y.min(c.y) + if a.y < c.y { a.h } else { c.h }, w: x1 - x0, h: gap_y })
                 } else {
                     None
                 };
-                let inside = |r: &Rect| {
-                    mine.iter().any(|m| {
-                        m.x <= r.x && m.y <= r.y && m.x + m.w >= r.x + r.w && m.y + m.h >= r.y + r.h
-                    })
-                };
-                if let Some(r) =
-                    bridge.filter(|r| !theirs.iter().any(|t| overlaps(r, t)) && !inside(r))
-                {
+                let inside = |r: &Rect| mine.iter().any(|m| m.x <= r.x && m.y <= r.y && m.x + m.w >= r.x + r.w && m.y + m.h >= r.y + r.h);
+                if let Some(r) = bridge.filter(|r| !theirs.iter().any(|t| overlaps(r, t)) && !inside(r)) {
                     b.rect(own, r);
                     any = true;
                 }
             }
         }
     }
-    if any {
-        vec![b.finish()]
-    } else {
-        Vec::new()
-    }
+    if any { vec![b.finish()] } else { Vec::new() }
 }

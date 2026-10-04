@@ -7,9 +7,7 @@ use analog::cell::SeriesParallel;
 use analog::Constraints;
 use pnr_core::{DeviceGroup, Drawn, DrawnKind, Macro, Node, Process, Rect};
 
-use crate::builder::{
-    cut_lattice, greedy_centroid, pin, req, sizing, snap_cut, unitization, Builder, Sizing,
-};
+use crate::builder::{cut_lattice, greedy_centroid, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
 use crate::{Cell, Pattern};
 
 /// A recipe's per-device resistance, integers from the sidecar:
@@ -50,8 +48,7 @@ impl ResModel {
     /// Effective width, µm.
     fn weff(&self, w_nm: i32) -> f64 {
         let w = f64::from(w_nm) / 1e3;
-        w + f64::from(self.dw_nm) / 1e3
-            - f64::from(self.narrow_permille) / 1e3 * (f64::from(self.knee_nm) / 1e3 - w).max(0.0)
+        w + f64::from(self.dw_nm) / 1e3 - f64::from(self.narrow_permille) / 1e3 * (f64::from(self.knee_nm) / 1e3 - w).max(0.0)
     }
 
     /// Both heads of one device, Ω.
@@ -63,27 +60,16 @@ impl ResModel {
     #[must_use]
     pub fn ohm(&self, w_nm: i32, l_nm: i32) -> f64 {
         let weff = self.weff(w_nm);
-        self.sheet_mohm as f64 / 1e3 * (f64::from(l_nm) + f64::from(self.dl_nm)) / 1e3 / weff
-            + self.head_ohm(weff)
+        self.sheet_mohm as f64 / 1e3 * (f64::from(l_nm) + f64::from(self.dl_nm)) / 1e3 / weff + self.head_ohm(weff)
     }
 
     /// Body length so `n` series devices of width `w` total `target`:
     /// L = (target/n − head/(weff+head_dw))·weff/sheet − dl, snapped to `lat`;
     /// `None` below `min_nm` or when the snapped residual exceeds `tol_ppm`.
     #[must_use]
-    pub fn seg_len(
-        &self,
-        w_nm: i32,
-        target_ohm: f64,
-        n: u32,
-        min_nm: i32,
-        lat: i32,
-        tol_ppm: i32,
-    ) -> Option<i32> {
+    pub fn seg_len(&self, w_nm: i32, target_ohm: f64, n: u32, min_nm: i32, lat: i32, tol_ppm: i32) -> Option<i32> {
         let weff = self.weff(w_nm);
-        let l_um = (target_ohm / f64::from(n.max(1)) - self.head_ohm(weff)) * weff
-            / (self.sheet_mohm as f64 / 1e3)
-            - f64::from(self.dl_nm) / 1e3;
+        let l_um = (target_ohm / f64::from(n.max(1)) - self.head_ohm(weff)) * weff / (self.sheet_mohm as f64 / 1e3) - f64::from(self.dl_nm) / 1e3;
         let lat = lat.max(1);
         let l = ((l_um * 1e3 / f64::from(lat)).round() as i32).saturating_mul(lat);
         let err = (f64::from(n) * self.ohm(w_nm, l) - target_ohm).abs() / target_ohm * 1e6;
@@ -101,12 +87,8 @@ pub fn value_tol_ppm(p: &dyn Process) -> i32 {
 /// Parallel strings per member: `dev_nf[d]` when the unitization composes
 /// units in parallel (SPICE `m`), else one.
 fn strings(group: &DeviceGroup, c: &Constraints, s: &Sizing) -> Vec<usize> {
-    let parallel =
-        unitization(group, c).is_some_and(|u| u.series_parallel == SeriesParallel::Parallel);
-    s.dev_nf
-        .iter()
-        .map(|&nf| if parallel { usize::from(nf.max(1)) } else { 1 })
-        .collect()
+    let parallel = unitization(group, c).is_some_and(|u| u.series_parallel == SeriesParallel::Parallel);
+    s.dev_nf.iter().map(|&nf| if parallel { usize::from(nf.max(1)) } else { 1 }).collect()
 }
 
 /// One resistor variant: each string split into `segments` series segments
@@ -120,11 +102,7 @@ pub struct Resistor {
 }
 
 impl Cell for Resistor {
-    fn enumerate(
-        group: &DeviceGroup,
-        constraints: &Constraints,
-        process: &dyn Process,
-    ) -> Vec<Self> {
+    fn enumerate(group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Vec<Self> {
         // No resistor marker, no poly resistor on this process.
         if group.devices.is_empty() || process.layer("rpoly").is_none() {
             return vec![];
@@ -143,13 +121,9 @@ impl Cell for Resistor {
         feasible_segments(&s, process)
             .into_iter()
             .flat_map(|segments| {
-                patterns
-                    .iter()
-                    .map(move |&pattern| Resistor { segments, pattern })
+                patterns.iter().map(move |&pattern| Resistor { segments, pattern })
             })
-            .filter(|r| {
-                !(matches!(r.pattern, Pattern::Interdig) && r.segments > 1 && n_strings > tracks)
-            })
+            .filter(|r| !(matches!(r.pattern, Pattern::Interdig) && r.segments > 1 && n_strings > tracks))
             .collect()
     }
 
@@ -194,16 +168,7 @@ impl Cell for Resistor {
         // model value (heads included); without a model only n = 1 is
         // offered, which draws the written L.
         let seg_l = ResModel::of(process)
-            .and_then(|m| {
-                m.seg_len(
-                    body_w,
-                    m.ohm(s.unit_w, s.unit_l),
-                    n_segments as u32,
-                    0,
-                    lat,
-                    i32::MAX,
-                )
-            })
+            .and_then(|m| m.seg_len(body_w, m.ohm(s.unit_w, s.unit_l), n_segments as u32, 0, lat, i32::MAX))
             .unwrap_or(s.unit_l / n_segments)
             .max(process.width("rpoly").unwrap_or(0));
         let seg_pitch = body_w + seg_gap;
@@ -226,11 +191,7 @@ impl Cell for Resistor {
 
         // String g is string j of member di: one pseudo-device for sequencing.
         let per = strings(group, constraints, &s);
-        let owner: Vec<(usize, usize)> = per
-            .iter()
-            .enumerate()
-            .flat_map(|(d, &k)| (0..k).map(move |j| (d, j)))
-            .collect();
+        let owner: Vec<(usize, usize)> = per.iter().enumerate().flat_map(|(d, &k)| (0..k).map(move |j| (d, j))).collect();
         let sequence = res_segment_sequence(owner.len(), self.pattern, n_segments);
         let mut seg_of = vec![0i32; owner.len()];
         // Per string, the column x of its previous segment.
@@ -243,35 +204,14 @@ impl Cell for Resistor {
             // Even segments run bottom -> top, odd ones top -> bottom.
             let enters_top = seg % 2 == 1;
 
-            b.rect(
-                poly,
-                Rect {
-                    x: sx,
-                    y: 0,
-                    w: body_w,
-                    h: total_h,
-                },
-            );
+            b.rect(poly, Rect { x: sx, y: 0, w: body_w, h: total_h });
             // The body: its marker(s) and salicide block, as the recipe says.
-            let body = Rect {
-                x: sx,
-                y: head - lap,
-                w: body_w,
-                h: seg_l + 2 * lap,
-            };
+            let body = Rect { x: sx, y: head - lap, w: body_w, h: seg_l + 2 * lap };
             b.rect(rpoly, body);
             if let Some(l) = process.layer("rpoly_b") {
                 b.rect(l, body);
             }
-            b.keepout(
-                Rect {
-                    x: sx,
-                    y: head,
-                    w: body_w,
-                    h: seg_l,
-                },
-                pnr_core::KeepWhy::ResistorBody { owner: di as u8 },
-            );
+            b.keepout(Rect { x: sx, y: head, w: body_w, h: seg_l }, pnr_core::KeepWhy::ResistorBody { owner: di as u8 });
             // The body: current runs up an even segment, down an odd one. With
             // m parallel strings a segment carries 1/m² of the member's
             // value (∂R/∂R_i, Hastings eqs 8.24-8.25).
@@ -286,26 +226,10 @@ impl Cell for Resistor {
             });
             for top in [false, true] {
                 let y0 = if top { total_h - head_li_h } else { 0 };
-                b.rect(
-                    li,
-                    Rect {
-                        x: sx,
-                        y: y0,
-                        w: body_w,
-                        h: head_li_h,
-                    },
-                );
+                b.rect(li, Rect { x: sx, y: y0, w: body_w, h: head_li_h });
                 for &cy in &cut_ys {
                     let y = if top { total_h - cy - ch } else { cy };
-                    b.rect(
-                        licon,
-                        Rect {
-                            x: sx + cut_x,
-                            y,
-                            w: cw,
-                            h: ch,
-                        },
-                    );
+                    b.rect(licon, Rect { x: sx + cut_x, y, w: cw, h: ch });
                 }
             }
             match prev[g] {
@@ -317,39 +241,15 @@ impl Cell for Resistor {
                 Some(px) if sx - px == seg_pitch => {
                     let h = border + ch + border;
                     let y = if enters_top { total_h - h } else { 0 };
-                    b.rect(
-                        li,
-                        Rect {
-                            x: px,
-                            y,
-                            w: sx + body_w - px,
-                            h,
-                        },
-                    );
+                    b.rect(li, Rect { x: px, y, w: sx + body_w - px, h });
                 }
                 Some(px) => {
                     let t = tracks[g % tracks.len().max(1)];
                     let y = if enters_top { total_h - t - m_ct } else { t };
                     for cx in [px, sx] {
-                        b.rect(
-                            mcon,
-                            Rect {
-                                x: cx + cut_x,
-                                y,
-                                w: m_ct,
-                                h: m_ct,
-                            },
-                        );
+                        b.rect(mcon, Rect { x: cx + cut_x, y, w: m_ct, h: m_ct });
                     }
-                    b.rect(
-                        met1,
-                        Rect {
-                            x: px + cut_x - m_enc,
-                            y: y - m_enc,
-                            w: sx - px + m_ct + 2 * m_enc,
-                            h: m_ct + 2 * m_enc,
-                        },
-                    );
+                    b.rect(met1, Rect { x: px + cut_x - m_enc, y: y - m_enc, w: sx - px + m_ct + 2 * m_enc, h: m_ct + 2 * m_enc });
                 }
             }
             // Each segment extracts as its own resistor: string j runs
@@ -359,14 +259,7 @@ impl Cell for Resistor {
                 k if k == n_segments => Node::Pin("N"),
                 k => Node::Internal((j as i32 * n_segments + k) as u16),
             };
-            b.drawn(Drawn {
-                owner: di as u8,
-                device: None,
-                kind: DrawnKind::Resistor,
-                nodes: [node(seg), node(seg + 1), Node::Unused],
-                w: body_w,
-                l: seg_l,
-            });
+            b.drawn(Drawn { owner: di as u8, device: None, kind: DrawnKind::Resistor, nodes: [node(seg), node(seg + 1), Node::Unused], w: body_w, l: seg_l });
             prev[g] = Some(sx);
             if seg == n_segments - 1 {
                 b.pin(pin(di, "N", end_cut(sx, !enters_top), li));
@@ -378,65 +271,27 @@ impl Cell for Resistor {
         // resistor), tied to ground through a `GND` pin, so the end segments
         // see the same etch neighbours as the inner ones (Hastings §8.3 r7).
         let n_cols = sequence.len() as i32;
-        let dummies = n_dev > 1
-            || crate::builder::unitization(group, constraints).is_some_and(|u| u.dummy_required);
+        let dummies = n_dev > 1 || crate::builder::unitization(group, constraints).is_some_and(|u| u.dummy_required);
         // Dummies are plain poly: they keep the deck's resistor-body-to-poly
         // spacing (sky130 poly.9), never less than the segment gap.
         let d_pitch = body_w + seg_gap.max(process.space_between("rpoly", "poly").unwrap_or(0));
         // Plain poly takes plain (square) contacts: the precision slot is
         // the resistor body's.
         let sq_x = snap_cut(body_w / 2 - ct / 2, lat);
-        let sq_ys: Vec<i32> = (0..)
-            .map(|k| border + k * (ct + cut_space))
-            .take_while(|&y| y + ct + inner <= head_li_h)
-            .collect();
+        let sq_ys: Vec<i32> = (0..).map(|k| border + k * (ct + cut_space)).take_while(|&y| y + ct + inner <= head_li_h).collect();
         let (lo, hi) = if dummies {
             for sx in [-d_pitch, (n_cols - 1) * seg_pitch + d_pitch] {
-                b.rect(
-                    poly,
-                    Rect {
-                        x: sx,
-                        y: 0,
-                        w: body_w,
-                        h: total_h,
-                    },
-                );
+                b.rect(poly, Rect { x: sx, y: 0, w: body_w, h: total_h });
                 for top in [false, true] {
                     let y0 = if top { total_h - head_li_h } else { 0 };
-                    b.rect(
-                        li,
-                        Rect {
-                            x: sx,
-                            y: y0,
-                            w: body_w,
-                            h: head_li_h,
-                        },
-                    );
+                    b.rect(li, Rect { x: sx, y: y0, w: body_w, h: head_li_h });
                     for &cy in &sq_ys {
                         let y = if top { total_h - cy - ct } else { cy };
-                        b.rect(
-                            licon,
-                            Rect {
-                                x: sx + sq_x,
-                                y,
-                                w: ct,
-                                h: ct,
-                            },
-                        );
+                        b.rect(licon, Rect { x: sx + sq_x, y, w: ct, h: ct });
                     }
                 }
-                let at = Rect {
-                    x: sx + sq_x,
-                    y: border,
-                    w: ct,
-                    h: ct,
-                };
-                b.pin(pnr_core::Pin {
-                    name: "GND".into(),
-                    net: pnr_core::NetId(u16::MAX),
-                    at,
-                    layer: li,
-                });
+                let at = Rect { x: sx + sq_x, y: border, w: ct, h: ct };
+                b.pin(pnr_core::Pin { name: "GND".into(), net: pnr_core::NetId(u16::MAX), at, layer: li });
             }
             (-d_pitch, (n_cols - 1) * seg_pitch + d_pitch + body_w)
         } else {
@@ -449,12 +304,7 @@ impl Cell for Resistor {
         let array_w = hi - lo;
         let rpm_enc = r("rpm_encloses_poly", 0).max(process.enclosure("rpm", "poly").unwrap_or(0));
         let rpm_w = (array_w + 2 * rpm_enc).max(process.width("rpm").unwrap_or(0));
-        let rpm_rect = Rect {
-            x: lo + array_w / 2 - rpm_w / 2,
-            y: -rpm_enc,
-            w: rpm_w,
-            h: total_h + 2 * rpm_enc,
-        };
+        let rpm_rect = Rect { x: lo + array_w / 2 - rpm_w / 2, y: -rpm_enc, w: rpm_w, h: total_h + 2 * rpm_enc };
         if let Some(rpm) = process.layer("rpm") {
             b.rect(rpm, rpm_rect);
             if let Some(npc) = process.layer("npc") {
@@ -463,28 +313,12 @@ impl Cell for Resistor {
         }
         if let Some(imp) = process.layer("res_implant") {
             // The implant past the resistor's poly, the deck's.
-            let keep = r("res_keepout", 0)
-                .max(process.enclosure("res_implant", "rpoly").unwrap_or(0))
-                .max(process.enclosure("res_implant", "poly").unwrap_or(0));
+            let keep = r("res_keepout", 0).max(process.enclosure("res_implant", "rpoly").unwrap_or(0)).max(process.enclosure("res_implant", "poly").unwrap_or(0));
             // ...and past the rpm it dopes (sky130 rpm.4).
             let ri = process.enclosure("res_implant", "rpm").unwrap_or(0);
-            let (x0, x1) = (
-                (rpm_rect.x - ri).min(lo - keep),
-                (rpm_rect.x + rpm_w + ri).max(hi + keep),
-            );
-            let (y0, y1) = (
-                (rpm_rect.y - ri).min(-keep),
-                (rpm_rect.y + rpm_rect.h + ri).max(total_h + keep),
-            );
-            b.rect(
-                imp,
-                Rect {
-                    x: x0,
-                    y: y0,
-                    w: x1 - x0,
-                    h: y1 - y0,
-                },
-            );
+            let (x0, x1) = ((rpm_rect.x - ri).min(lo - keep), (rpm_rect.x + rpm_w + ri).max(hi + keep));
+            let (y0, y1) = ((rpm_rect.y - ri).min(-keep), (rpm_rect.y + rpm_rect.h + ri).max(total_h + keep));
+            b.rect(imp, Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
         }
         // One salicide block over every body (dummies too: a blocked
         // neighbour is the resistor's own environment), past the poly by the
@@ -494,9 +328,7 @@ impl Cell for Resistor {
             let (y0, h) = (head - lap, seg_l + 2 * lap);
             let mut x0 = lo - ext;
             let mut w = hi - lo + 2 * ext;
-            let need =
-                i32::try_from(process.area("res_block").unwrap_or(0) / i64::from(h.max(1)) + 1)
-                    .unwrap_or(0);
+            let need = i32::try_from(process.area("res_block").unwrap_or(0) / i64::from(h.max(1)) + 1).unwrap_or(0);
             if w < need {
                 x0 -= (need - w) / 2;
                 w = need;
@@ -515,50 +347,30 @@ impl Cell for Resistor {
 fn jumper_tracks(process: &dyn Process) -> Vec<i32> {
     let r = |name: &str, default: i32| process.rule(name, default);
     let lat = cut_lattice(process);
-    let (ct, m_ct, m_enc) = (
-        dim(process, "contact"),
-        dim(process, "mcon_size"),
-        dim(process, "m1_enc"),
-    );
+    let (ct, m_ct, m_enc) = (dim(process, "contact"), dim(process, "mcon_size"), dim(process, "m1_enc"));
     let border = r("poly_encloses_licon_one_side", 0)
-        .max(r("li_encloses_licon", 0))
-        .max(process.enclosure("poly", "licon").unwrap_or(0))
-        .max(process.endcap("poly", "licon").unwrap_or(0))
-        .max(process.endcap("li", "licon").unwrap_or(0));
+            .max(r("li_encloses_licon", 0))
+            .max(process.enclosure("poly", "licon").unwrap_or(0))
+            .max(process.endcap("poly", "licon").unwrap_or(0))
+            .max(process.endcap("li", "licon").unwrap_or(0));
     let head_li_h = head_len(process) - LAP;
     let pitch = m_ct + 2 * m_enc + dim(process, "met1_space");
-    let first = snap_cut(
-        border + ct + (m_ct + 2 * m_enc) + dim(process, "met1_space") + lat - 1,
-        lat,
-    );
-    (0..)
-        .map(|k| first + k * snap_cut(pitch + lat - 1, lat))
-        .take_while(|&y| y + m_ct + m_enc + border <= head_li_h)
-        .collect()
+    let first = snap_cut(border + ct + (m_ct + 2 * m_enc) + dim(process, "met1_space") + lat - 1, lat);
+    (0..).map(|k| first + k * snap_cut(pitch + lat - 1, lat)).take_while(|&y| y + m_ct + m_enc + border <= head_li_h).collect()
 }
 
 /// Column gap: the deck's segment gap, and never under the li spacing its
 /// full-width heads need (wide-metal spacing included).
 fn seg_gap(process: &dyn Process) -> i32 {
     let lat = cut_lattice(process);
-    snap_cut(
-        process
-            .rule("res_seg_gap", 0)
-            .max(process.space("li").unwrap_or(0))
-            + lat
-            - 1,
-        lat,
-    )
+    snap_cut(process.rule("res_seg_gap", 0).max(process.space("li").unwrap_or(0)) + lat - 1, lat)
 }
 
 /// Head contact `(w, h)`: the sidecar's precision-resistor slot
 /// (`res_contact_w`/`res_contact_h`), else a square `contact`.
 fn slot(process: &dyn Process) -> (i32, i32) {
     let ct = dim(process, "contact");
-    match (
-        process.rule("res_contact_w", 0),
-        process.rule("res_contact_h", 0),
-    ) {
+    match (process.rule("res_contact_w", 0), process.rule("res_contact_h", 0)) {
         (w, h) if w > 0 && h > 0 => (w, h),
         _ => (ct, ct),
     }
@@ -575,19 +387,16 @@ const LAP: i32 = 0;
 fn head_len(process: &dyn Process) -> i32 {
     let r = |name: &str, default: i32| process.rule(name, default);
     let border = r("poly_encloses_licon_one_side", 0)
-        .max(r("li_encloses_licon", 0))
-        .max(process.enclosure("poly", "licon").unwrap_or(0))
-        .max(process.endcap("poly", "licon").unwrap_or(0))
-        .max(process.endcap("li", "licon").unwrap_or(0));
+            .max(r("li_encloses_licon", 0))
+            .max(process.enclosure("poly", "licon").unwrap_or(0))
+            .max(process.endcap("poly", "licon").unwrap_or(0))
+            .max(process.endcap("li", "licon").unwrap_or(0));
     let inner = border
         .max(process.space_between("rpoly", "licon").unwrap_or(0))
         .max(process.space_between("rpoly_b", "licon").unwrap_or(0))
         .max(process.space_between("res_block", "licon").unwrap_or(0));
     let lat = cut_lattice(process);
-    snap_cut(
-        r("res_head", 0).max(LAP + border + slot(process).1 + inner) + lat - 1,
-        lat,
-    )
+    snap_cut(r("res_head", 0).max(LAP + border + slot(process).1 + inner) + lat - 1, lat)
 }
 
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
@@ -604,9 +413,7 @@ fn res_segment_sequence(n_dev: usize, pattern: Pattern, n_segments: i32) -> Vec<
     if pattern == Pattern::Interdig && n_dev >= 2 {
         return greedy_centroid(&vec![per_dev; n_dev]);
     }
-    (0..n_dev)
-        .flat_map(|di| std::iter::repeat_n(di, per_dev))
-        .collect()
+    (0..n_dev).flat_map(|di| std::iter::repeat_n(di, per_dev)).collect()
 }
 
 /// Segment counts (1 or even) whose value-preserving length
@@ -616,9 +423,7 @@ fn res_segment_sequence(n_dev: usize, pattern: Pattern, n_segments: i32) -> Vec<
 fn feasible_segments(s: &Sizing, process: &dyn Process) -> Vec<u16> {
     let tol = value_tol_ppm(process);
     let min_seg = process.rule("res_min_segment", 0).max(1);
-    let Some(model) = ResModel::of(process) else {
-        return vec![1];
-    };
+    let Some(model) = ResModel::of(process) else { return vec![1] };
     let lat = cut_lattice(process);
     let target = model.ohm(s.unit_w, s.unit_l);
     let body_w = s.unit_w.max(process.rule("res_min_width", 0));
@@ -627,21 +432,10 @@ fn feasible_segments(s: &Sizing, process: &dyn Process) -> Vec<u16> {
     // n = 1 never changes the value: kept even below the minimum segment.
     let mut opts: Vec<(i32, i32)> = (1..=64u32)
         .filter(|&n| n == 1 || n % 2 == 0)
-        .filter_map(|n| {
-            Some((
-                n as i32,
-                model
-                    .seg_len(body_w, target, n, min_seg, lat, tol)
-                    .or((n == 1).then_some(s.unit_l))?,
-            ))
-        })
+        .filter_map(|n| Some((n as i32, model.seg_len(body_w, target, n, min_seg, lat, tol).or((n == 1).then_some(s.unit_l))?)))
         .collect();
     opts.sort_by(|&(a, la), &(b, lb)| {
-        let quality = |n: i32, l: i32| {
-            (f64::from(n * (body_w + seg_gap)) / f64::from(2 * head + l))
-                .ln()
-                .abs()
-        };
+        let quality = |n: i32, l: i32| (f64::from(n * (body_w + seg_gap)) / f64::from(2 * head + l)).ln().abs();
         quality(a, la).total_cmp(&quality(b, lb))
     });
     opts.truncate(8);
@@ -665,32 +459,11 @@ mod tests {
         };
         let mut dirty = Vec::new();
         for n in [1, 2] {
-            dirty.extend(testkit::dirty::<Resistor>(
-                DeviceKind::Resistor,
-                n,
-                1,
-                500,
-                10_000,
-                &pdk,
-            ));
+            dirty.extend(testkit::dirty::<Resistor>(DeviceKind::Resistor, n, 1, 500, 10_000, &pdk));
             // Long enough for several segments: interleaved met1 jumpers.
-            dirty.extend(testkit::dirty::<Resistor>(
-                DeviceKind::Resistor,
-                n,
-                1,
-                500,
-                40_000,
-                &pdk,
-            ));
+            dirty.extend(testkit::dirty::<Resistor>(DeviceKind::Resistor, n, 1, 500, 40_000, &pdk));
         }
-        dirty.extend(testkit::dirty::<Resistor>(
-            DeviceKind::Resistor,
-            3,
-            1,
-            500,
-            40_000,
-            &pdk,
-        ));
+        dirty.extend(testkit::dirty::<Resistor>(DeviceKind::Resistor, 3, 1, 500, 40_000, &pdk));
         // Through the high_po recipe (a model: segmented variants), one and
         // two members, one and two parallel strings each.
         let op = high_po(&pdk);
@@ -702,60 +475,36 @@ mod tests {
                 }
             }
         }
-        assert!(
-            dirty.is_empty(),
-            "DRC/ERC-dirty variants:\n{}",
-            dirty.join("\n")
-        );
+        assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
     }
 
     /// sky130 `res_high_po` W = 0.69, L = 40 µm, from the model card (derived).
     const R_690_40: f64 = 18_949.2;
 
     fn high_po(pdk: &verify::Pdk) -> verify::pdk::Overlay<'_> {
-        verify::pdk::Overlay {
-            pdk,
-            recipe: pdk
-                .recipe("resistor", "res_high_po")
-                .expect("high_po recipe"),
-        }
+        verify::pdk::Overlay { pdk, recipe: pdk.recipe("resistor", "res_high_po").expect("high_po recipe") }
     }
 
     /// Every variant of `n` members of W = 690, L = 40 µm at `nf` parallel
     /// strings each, drawn.
     fn variants(n: usize, nf: u16, p: &dyn Process) -> Vec<(usize, Macro)> {
-        let (group, c) =
-            crate::testkit::group_of(pnr_core::DeviceKind::Resistor, n, nf, 690, 40_000);
+        let (group, c) = crate::testkit::group_of(pnr_core::DeviceKind::Resistor, n, nf, 690, 40_000);
         let vs = Resistor::enumerate(&group, &c, p);
         assert!(!vs.is_empty(), "no variants");
-        vs.iter()
-            .map(|v| (usize::from(v.segments), v.draw(&group, &c, p)))
-            .collect()
+        vs.iter().map(|v| (usize::from(v.segments), v.draw(&group, &c, p))).collect()
     }
 
     /// Model value per string (owner, string), Σ over its segments: string
     /// j's internal nodes are j·n + 1 ..= j·n + n − 1; with n = 1 every card
     /// is its own string.
-    fn string_ohms(
-        m: &Macro,
-        n: usize,
-        model: &ResModel,
-    ) -> std::collections::BTreeMap<(u8, usize), f64> {
+    fn string_ohms(m: &Macro, n: usize, model: &ResModel) -> std::collections::BTreeMap<(u8, usize), f64> {
         let mut out = std::collections::BTreeMap::new();
         for (i, d) in m.drawn.iter().enumerate() {
             let j = d.nodes.iter().find_map(|x| match x {
                 Node::Internal(k) => Some(usize::from(*k) / n),
                 _ => None,
             });
-            *out.entry((
-                d.owner,
-                if n == 1 {
-                    i
-                } else {
-                    j.expect("a segmented string's card has an internal node")
-                },
-            ))
-            .or_insert(0.0) += model.ohm(d.w, d.l);
+            *out.entry((d.owner, if n == 1 { i } else { j.expect("a segmented string's card has an internal node") })).or_insert(0.0) += model.ohm(d.w, d.l);
         }
         out
     }
@@ -766,21 +515,12 @@ mod tests {
 
     #[test]
     fn segments_preserve_the_model_value() {
-        let Some(pdk) = crate::testkit::pdk() else {
-            return;
-        };
+        let Some(pdk) = crate::testkit::pdk() else { return };
         let op = high_po(&pdk);
         let model = ResModel::of(&op).expect("high_po states a model");
-        assert!(
-            (model.ohm(690, 40_000) - R_690_40).abs() < 0.5,
-            "{}",
-            model.ohm(690, 40_000)
-        );
+        assert!((model.ohm(690, 40_000) - R_690_40).abs() < 0.5, "{}", model.ohm(690, 40_000));
         let vs = variants(1, 1, &op);
-        assert!(
-            vs.iter().any(|(n, _)| *n == 2),
-            "a 2-segment variant at L = 40 um"
-        );
+        assert!(vs.iter().any(|(n, _)| *n == 2), "a 2-segment variant at L = 40 um");
         for (n, m) in vs {
             let ohms = string_ohms(&m, n, &model);
             assert_eq!(ohms.len(), 1, "n={n}");
@@ -790,28 +530,20 @@ mod tests {
 
     #[test]
     fn short_segments_are_not_offered() {
-        let Some(pdk) = crate::testkit::pdk() else {
-            return;
-        };
+        let Some(pdk) = crate::testkit::pdk() else { return };
         // n = 4 needs 9.148 um segments, under res_min_segment 10 um.
         assert!(variants(1, 1, &high_po(&pdk)).iter().all(|(n, _)| *n != 4));
     }
 
     #[test]
     fn a_multiplied_resistor_draws_parallel_strings() {
-        let Some(pdk) = crate::testkit::pdk() else {
-            return;
-        };
+        let Some(pdk) = crate::testkit::pdk() else { return };
         let op = high_po(&pdk);
         let model = ResModel::of(&op).expect("model");
         for (n, m) in variants(1, 2, &op) {
             assert_eq!(m.drawn.len(), 2 * n, "n={n}");
             for t in ["d0:P", "d0:N"] {
-                assert_eq!(
-                    m.pins.iter().filter(|p| p.name == t).count(),
-                    2,
-                    "n={n} {t}"
-                );
+                assert_eq!(m.pins.iter().filter(|p| p.name == t).count(), 2, "n={n} {t}");
             }
             let ohms = string_ohms(&m, n, &model);
             assert_eq!(ohms.len(), 2, "n={n}: {ohms:?}");
@@ -821,14 +553,11 @@ mod tests {
 
     #[test]
     fn every_variant_extracts_one_resistor_per_segment() {
-        let Some(pdk) = crate::testkit::pdk() else {
-            return;
-        };
+        let Some(pdk) = crate::testkit::pdk() else { return };
         let op = high_po(&pdk);
         for nf in [1, 2] {
             for (n, m) in variants(1, nf, &op) {
-                let spice = verify::extract_spice(&m.shapes, &[], &pdk, verify::Detail::Schematic)
-                    .expect("extracts");
+                let spice = verify::extract_spice(&m.shapes, &[], &pdk, verify::Detail::Schematic).expect("extracts");
                 let rs = spice.lines().filter(|l| l.starts_with('R')).count();
                 assert_eq!(rs, m.drawn.len(), "nf={nf} n={n}:\n{spice}");
             }

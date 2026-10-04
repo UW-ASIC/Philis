@@ -45,11 +45,7 @@ pub struct Capacitor {
 const MAX_VARIANTS: usize = 16;
 
 impl Cell for Capacitor {
-    fn enumerate(
-        group: &DeviceGroup,
-        constraints: &Constraints,
-        process: &dyn Process,
-    ) -> Vec<Self> {
+    fn enumerate(group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Vec<Self> {
         if group.devices.is_empty() {
             return vec![];
         }
@@ -63,10 +59,7 @@ impl Cell for Capacitor {
         let mut specs: Vec<Self> = Vec::new();
         for &cols in &columns {
             for &kind in &kinds {
-                specs.push(Capacitor {
-                    units_x: cols,
-                    kind,
-                });
+                specs.push(Capacitor { units_x: cols, kind });
             }
         }
 
@@ -81,12 +74,7 @@ impl Cell for Capacitor {
 
         let mut x0 = 0;
         for (di, &n_units) in per_device_units(&s).iter().enumerate() {
-            let plate = Rect {
-                x: x0,
-                y: 0,
-                w: g.grid_w(n_units),
-                h: g.grid_h(n_units),
-            };
+            let plate = Rect { x: x0, y: 0, w: g.grid_w(n_units), h: g.grid_h(n_units) };
             let (bot_pin, top_pin) = match self.kind {
                 Kind::VerticalInOneLayer => g.comb(&mut b, plate),
                 Kind::HorizontalAcrossLayers => g.plates(&mut b, plate, None),
@@ -142,10 +130,7 @@ impl Geom {
         // Per-layer cut dimensions, the deck's: each cut layer's exact width
         // and its own (array) spacing.
         let via_spacing = dim(process, "via_spacing");
-        let cut_w = [
-            process.width("via1").unwrap_or(ct),
-            process.width("via2").unwrap_or(ct),
-        ];
+        let cut_w = [process.width("via1").unwrap_or(ct), process.width("via2").unwrap_or(ct)];
         let via_pitch = (cut_w[0] + process.space("via1").unwrap_or(via_spacing))
             .max(cut_w[1] + process.space("via2").unwrap_or(via_spacing));
         // The strap column carries rails on every sandwich metal beside a plate
@@ -156,27 +141,14 @@ impl Geom {
         // Fingers: the deck's MOM pitch, never under the comb metal's own
         // width and spacing (the MOM keys may be another metal's).
         let comb = ["met1", "met2"];
-        let finger_w = comb
-            .iter()
-            .filter_map(|m| process.width(m))
-            .fold(process.rule("mom_finger_width", 0), i32::max);
-        let finger_space = comb
-            .iter()
-            .filter_map(|m| process.space(m))
-            .fold(process.rule("mom_finger_space", 0), i32::max);
+        let finger_w = comb.iter().filter_map(|m| process.width(m)).fold(process.rule("mom_finger_width", 0), i32::max);
+        let finger_space = comb.iter().filter_map(|m| process.space(m)).fold(process.rule("mom_finger_space", 0), i32::max);
         Self {
             bot_metal: met(0),
             // The comb keeps both electrodes on one metal — that *is* the kind.
-            top_metal: if spec.kind == Kind::VerticalInOneLayer {
-                met(0)
-            } else {
-                met(1)
-            },
+            top_metal: if spec.kind == Kind::VerticalInOneLayer { met(0) } else { met(1) },
             third_metal: sandwich.then(|| met(2)),
-            cuts: [
-                v.first().copied().unwrap_or(LayerId(0)),
-                v.get(1).copied().unwrap_or(LayerId(0)),
-            ],
+            cuts: [v.first().copied().unwrap_or(LayerId(0)), v.get(1).copied().unwrap_or(LayerId(0))],
             cut_w,
             unit_w: s.unit_w,
             unit_h: s.unit_l,
@@ -188,11 +160,7 @@ impl Geom {
             via_enc,
             via_pitch,
             max_cols: i32::from(spec.units_x.max(1)),
-            strap_w: if sandwich {
-                cut_w[0].max(cut_w[1]) + 2 * via_enc
-            } else {
-                0
-            },
+            strap_w: if sandwich { cut_w[0].max(cut_w[1]) + 2 * via_enc } else { 0 },
         }
     }
 
@@ -219,12 +187,7 @@ impl Geom {
     /// One device's full footprint: the plate plus, for the sandwich, its strap
     /// column.
     fn tile_w(&self, n_units: i32) -> i32 {
-        self.grid_w(n_units)
-            + if self.strap_w > 0 {
-                self.m_space + self.strap_w
-            } else {
-                0
-            }
+        self.grid_w(n_units) + if self.strap_w > 0 { self.m_space + self.strap_w } else { 0 }
     }
 
     /// Stacked plates: BOT fills `plate`, TOP is inset so the plate edges never
@@ -235,12 +198,7 @@ impl Geom {
         b.rect(self.bot_metal, plate);
         let i = self.inset;
         let top = if plate.w > 2 * i && plate.h > 2 * i {
-            Rect {
-                x: plate.x + i,
-                y: plate.y + i,
-                w: plate.w - 2 * i,
-                h: plate.h - 2 * i,
-            }
+            Rect { x: plate.x + i, y: plate.y + i, w: plate.w - 2 * i, h: plate.h - 2 * i }
         } else {
             plate
         };
@@ -248,38 +206,20 @@ impl Geom {
 
         let Some(third) = third else {
             // BOT's exposed border is the only place a router can land on it.
-            return (
-                Rect {
-                    x: plate.x,
-                    y: plate.y,
-                    w: plate.w,
-                    h: i.max(1),
-                },
-                top,
-            );
+            return (Rect { x: plate.x, y: plate.y, w: plate.w, h: i.max(1) }, top);
         };
         b.rect(third, plate);
         // Strap column, clear of the plates by `m_space`: met_n and met_n+2 rails
         // joined by a met_n+1 jumper and two via stacks. Running this through the
         // plate stack instead would short TOP to BOT.
         let sx = plate.x + plate.w + self.m_space;
-        let rail = Rect {
-            x: sx,
-            y: plate.y,
-            w: self.strap_w,
-            h: plate.h,
-        };
+        let rail = Rect { x: sx, y: plate.y, w: self.strap_w, h: plate.h };
         for l in [self.bot_metal, self.top_metal, third] {
             b.rect(l, rail);
         }
         // Bridge the gap on the BOT levels only: without it both BOT plates float
         // (ERC `floating_interconnect`). The met_n+1 jumper keeps its gap to TOP.
-        let bridge = Rect {
-            x: plate.x + plate.w,
-            y: plate.y,
-            w: self.m_space,
-            h: plate.h,
-        };
+        let bridge = Rect { x: plate.x + plate.w, y: plate.y, w: self.m_space, h: plate.h };
         for l in [self.bot_metal, third] {
             b.rect(l, bridge);
         }
@@ -288,15 +228,7 @@ impl Geom {
         // A deck stating no cut size or spacing gets no cuts, not a hang.
         while self.via_pitch > 0 && vy + max_cut + self.via_enc <= plate.y + plate.h {
             for (cut, w) in self.cuts.into_iter().zip(self.cut_w) {
-                b.rect(
-                    cut,
-                    Rect {
-                        x: sx + self.via_enc,
-                        y: vy,
-                        w,
-                        h: w,
-                    },
-                );
+                b.rect(cut, Rect { x: sx + self.via_enc, y: vy, w, h: w });
             }
             vy += self.via_pitch;
         }
@@ -318,12 +250,7 @@ impl Geom {
             let half = ((w - fs) / 2).max(1);
             let (bot, top) = (
                 Rect { x, y, w: half, h },
-                Rect {
-                    x: x + half + fs,
-                    y,
-                    w: w - half - fs,
-                    h,
-                },
+                Rect { x: x + half + fs, y, w: w - half - fs, h },
             );
             b.rect(m, bot);
             b.rect(m, top);
@@ -341,12 +268,7 @@ impl Geom {
         }
 
         let bot = Rect { x, y, w, h: fw };
-        let top = Rect {
-            x,
-            y: y + h - fw,
-            w,
-            h: fw,
-        };
+        let top = Rect { x, y: y + h - fw, w, h: fw };
         b.rect(m, bot);
         b.rect(m, top);
 
@@ -356,15 +278,7 @@ impl Geom {
         for i in 0..n {
             let fx = x + i * pitch;
             let fy = if i % 2 == 0 { y } else { y + fw + fs };
-            b.rect(
-                m,
-                Rect {
-                    x: fx,
-                    y: fy,
-                    w: fw,
-                    h: reach,
-                },
-            );
+            b.rect(m, Rect { x: fx, y: fy, w: fw, h: reach });
         }
         (bot, top)
     }
@@ -373,16 +287,12 @@ impl Geom {
 /// The PDK's metal stack bottom-up, as far as it is populated. `map_while` stops
 /// at the first absent level, so a deck with only `met1` yields one entry.
 fn metals(process: &dyn Process) -> Vec<LayerId> {
-    (1..=5)
-        .map_while(|n| process.layer(&format!("met{n}")))
-        .collect()
+    (1..=5).map_while(|n| process.layer(&format!("met{n}"))).collect()
 }
 
 /// Cut layers between consecutive metals (`via1` joins met1↔met2, …).
 fn vias(process: &dyn Process) -> Vec<LayerId> {
-    (1..=4)
-        .map_while(|n| process.layer(&format!("via{n}")))
-        .collect()
+    (1..=4).map_while(|n| process.layer(&format!("via{n}"))).collect()
 }
 
 /// Kinds this process can actually build — a deck without `met2` cannot stack a
@@ -428,20 +338,9 @@ mod tests {
         };
         let mut dirty = Vec::new();
         for n in [1, 2] {
-            dirty.extend(testkit::dirty::<Capacitor>(
-                DeviceKind::Capacitor,
-                n,
-                4,
-                2000,
-                2000,
-                &pdk,
-            ));
+            dirty.extend(testkit::dirty::<Capacitor>(DeviceKind::Capacitor, n, 4, 2000, 2000, &pdk));
         }
-        assert!(
-            dirty.is_empty(),
-            "DRC/ERC-dirty variants:\n{}",
-            dirty.join("\n")
-        );
+        assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
     }
     use analog::cell::{SeriesParallel, Unitization};
     use pnr_core::{DeviceId, DeviceKind, Shape};
@@ -461,9 +360,7 @@ mod tests {
     impl Process for TestPdk {
         fn layer(&self, role: &str) -> Option<LayerId> {
             let idx = |p: &str, n: usize| {
-                role.strip_prefix(p)
-                    .and_then(|d| d.parse::<usize>().ok())
-                    .filter(|&i| i <= n)
+                role.strip_prefix(p).and_then(|d| d.parse::<usize>().ok()).filter(|&i| i <= n)
             };
             idx("met", self.metals)
                 .map(|i| LayerId(i as u16))
@@ -484,9 +381,7 @@ mod tests {
     }
 
     fn one_cap(units: u16, side: i32) -> (DeviceGroup, Constraints) {
-        let group = DeviceGroup {
-            devices: vec![DeviceId(0)],
-        };
+        let group = DeviceGroup { devices: vec![DeviceId(0)] };
         let c = Constraints {
             unitization: vec![Unitization {
                 devices: vec![DeviceId(0)],
@@ -498,9 +393,7 @@ mod tests {
                 series_parallel: SeriesParallel::Series,
                 dummy_required: false,
                 route_matching_required: false,
-                class: None,
-                series: Vec::new(),
-                style: None,
+                class: None, series: Vec::new(), style: None,
             }],
             ..Default::default()
         };
@@ -521,10 +414,7 @@ mod tests {
     fn comb_electrodes_never_short() {
         let pdk = TestPdk::full();
         let (group, c) = one_cap(4, 2000);
-        let spec = Capacitor {
-            units_x: 2,
-            kind: Kind::VerticalInOneLayer,
-        };
+        let spec = Capacitor { units_x: 2, kind: Kind::VerticalInOneLayer };
         let m = spec.draw(&group, &c, &pdk);
         // Every rect is on one metal, so BOT and TOP are distinguished purely by
         // geometry: any contact at all merges the two electrodes.
@@ -540,7 +430,9 @@ mod tests {
                 if reached[i] {
                     continue;
                 }
-                if (0..m.shapes.len()).any(|j| reached[j] && overlaps(&m.shapes[i], &m.shapes[j])) {
+                if (0..m.shapes.len())
+                    .any(|j| reached[j] && overlaps(&m.shapes[i], &m.shapes[j]))
+                {
                     reached[i] = true;
                     grew = true;
                 }
@@ -550,15 +442,9 @@ mod tests {
             }
         }
         for (i, s) in m.shapes.iter().enumerate() {
-            assert!(
-                !(reached[i] && s.rect == top_spine),
-                "TOP spine reachable from BOT — shorted"
-            );
+            assert!(!(reached[i] && s.rect == top_spine), "TOP spine reachable from BOT — shorted");
         }
-        assert!(
-            reached.iter().filter(|r| **r).count() > 1,
-            "BOT spine must reach its fingers"
-        );
+        assert!(reached.iter().filter(|r| **r).count() > 1, "BOT spine must reach its fingers");
     }
 
     /// CELL-08: four 2 µm units merge into one 16 µm² plate in every aspect.
@@ -567,17 +453,8 @@ mod tests {
         let pdk = TestPdk::full();
         let (group, c) = one_cap(4, 2000);
         for units_x in [1, 2, 4] {
-            let m = Capacitor {
-                units_x,
-                kind: Kind::HorizontalAcrossLayers,
-            }
-            .draw(&group, &c, &pdk);
-            let plate = m
-                .shapes
-                .iter()
-                .filter(|s| s.layer.0 == 1)
-                .map(|s| i64::from(s.rect.w) * i64::from(s.rect.h))
-                .max();
+            let m = Capacitor { units_x, kind: Kind::HorizontalAcrossLayers }.draw(&group, &c, &pdk);
+            let plate = m.shapes.iter().filter(|s| s.layer.0 == 1).map(|s| i64::from(s.rect.w) * i64::from(s.rect.h)).max();
             assert_eq!(plate, Some(16_000_000), "units_x={units_x}");
         }
     }
@@ -590,26 +467,14 @@ mod tests {
         let (group, c) = one_cap(1, 2000);
         let stack = |kind| {
             let spec = Capacitor { units_x: 1, kind };
-            let mut ls: Vec<u16> = spec
-                .draw(&group, &c, &pdk)
-                .shapes
-                .iter()
-                .map(|s| s.layer.0)
-                .collect();
+            let mut ls: Vec<u16> =
+                spec.draw(&group, &c, &pdk).shapes.iter().map(|s| s.layer.0).collect();
             ls.sort_unstable();
             ls.dedup();
             ls
         };
-        assert_eq!(
-            stack(Kind::VerticalInOneLayer),
-            vec![1],
-            "comb is single-metal"
-        );
-        assert_eq!(
-            stack(Kind::HorizontalAcrossLayers),
-            vec![1, 2],
-            "plate is met1+met2"
-        );
+        assert_eq!(stack(Kind::VerticalInOneLayer), vec![1], "comb is single-metal");
+        assert_eq!(stack(Kind::HorizontalAcrossLayers), vec![1, 2], "plate is met1+met2");
         // met1 + met2 + met3 + via1 + via2.
         assert_eq!(stack(Kind::VerticalAcrossLayers), vec![1, 2, 3, 101, 102]);
     }
@@ -622,10 +487,7 @@ mod tests {
         let specs = Capacitor::enumerate(&group, &c, &pdk);
         assert!(specs.len() <= MAX_VARIANTS, "got {} variants", specs.len());
         for kind in feasible_kinds(&pdk) {
-            assert!(
-                specs.iter().any(|s| s.kind == kind),
-                "{kind:?} missing from the space"
-            );
+            assert!(specs.iter().any(|s| s.kind == kind), "{kind:?} missing from the space");
         }
     }
 

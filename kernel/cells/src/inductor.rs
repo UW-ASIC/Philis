@@ -18,20 +18,11 @@ use crate::Cell;
 pub struct Inductor;
 
 impl Cell for Inductor {
-    fn enumerate(
-        _group: &DeviceGroup,
-        _constraints: &Constraints,
-        _process: &dyn Process,
-    ) -> Vec<Self> {
+    fn enumerate(_group: &DeviceGroup, _constraints: &Constraints, _process: &dyn Process) -> Vec<Self> {
         vec![]
     }
 
-    fn draw(
-        &self,
-        _group: &DeviceGroup,
-        _constraints: &Constraints,
-        process: &dyn Process,
-    ) -> Macro {
+    fn draw(&self, _group: &DeviceGroup, _constraints: &Constraints, process: &dyn Process) -> Macro {
         Builder::new(process.grid()).finish()
     }
 }
