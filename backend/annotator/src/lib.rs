@@ -19,6 +19,7 @@ pub mod emit;
 pub mod evidence;
 pub mod extract;
 pub mod graph;
+pub mod hier;
 pub mod ir;
 pub mod netrole;
 pub mod passive;
@@ -222,7 +223,27 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         .collect();
     seeds.sort_by_key(|&(a, b, _)| (ck(a), ck(b)));
     // User seeds first (EXT-26).
-    let seeds: Vec<symmetry::Seed> = cfg.seeds.iter().copied().chain(seeds.into_iter().map(|(a, b, i)| symmetry::Seed::Devices(a, b, analog::intent::ConstraintId(i as u32)))).collect();
+    let mut seeds: Vec<symmetry::Seed> = cfg.seeds.iter().copied().chain(seeds.into_iter().map(|(a, b, i)| symmetry::Seed::Devices(a, b, analog::intent::ConstraintId(i as u32)))).collect();
+    // EXT-27: couples of identical instance pairs whose ports pair up, after the leaf seeds;
+    // a device already seeded (leaf symmetry inside an instance) keeps its own couple.
+    let inst_pairs = hier::same_template(netlist, &drawn);
+    let hier_couples: Vec<(DeviceId, DeviceId)> = inst_pairs.iter().flat_map(|&(a, b)| hier::corresponding(netlist, &drawn, a, b).unwrap_or_default()).collect();
+    let seeded: std::collections::HashSet<DeviceId> = seeds.iter().flat_map(|s| match *s {
+        symmetry::Seed::Devices(a, b, _) => vec![a, b],
+        symmetry::Seed::SelfDevice(a, _) => vec![a],
+        symmetry::Seed::Nets(..) => vec![],
+    }).collect();
+    let mut k = 0;
+    for &(a, b) in &inst_pairs {
+        if hier::ports_pair(netlist, a, b) {
+            for (x, y) in hier::corresponding(netlist, &drawn, a, b).unwrap_or_default() {
+                if !seeded.contains(&x) && !seeded.contains(&y) {
+                    seeds.push(symmetry::Seed::Devices(x, y, analog::intent::ConstraintId(u32::MAX / 2 + k)));
+                    k += 1;
+                }
+            }
+        }
+    }
     let (compounds, diags) = symmetry::analyze(&hg, &drawn, &net_classes, &seeds, &canon);
     intent.compounds = compounds;
     if let (Some(dir), [c]) = (cfg.symmetry_dir, intent.compounds.as_mut_slice()) {
@@ -244,7 +265,28 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     passive_sets.extend(passive::capacitor_sets(&hg, &drawn, &net_classes, &mut intent.diagnostics));
     passive_sets.extend(passive::diode_sets(&hg, &drawn));
     let passive_groups: Vec<Vec<DeviceId>> = passive_sets.iter().map(|p| p.devices.clone()).collect();
-    let reqs = graph::requirements(&all, &intent.compounds, &shared, &passive_groups, &cfg.groups, &hg, &net_classes, &canon, &cfg.policy);
+    // EXT-27 arrays: one ProxBlock group and one horizontal, reversible order step per instance.
+    let ck2 = |d: &DeviceId| (canon[d.0 as usize], d.0);
+    let array_steps: Vec<Vec<Vec<DeviceId>>> = hier::arrays(netlist, &drawn, &{
+        use analog::metadata::NetClass as C;
+        let fixed = |c: C| matches!(c, C::Supply | C::Ground | C::Substrate | C::Clock);
+        classify::bias_lines(&hg).into_iter().zip(&net_classes).map(|(b, c)| b && !fixed(c.class)).collect::<Vec<bool>>()
+    })
+        .into_iter()
+        .map(|a| {
+            a.into_iter()
+                .map(|i| {
+                    let mut v: Vec<DeviceId> = hier::devices(netlist, i).into_iter().map(|(d, _)| d).collect();
+                    v.sort_by_key(ck2);
+                    v
+                })
+                .collect()
+        })
+        .collect();
+    let array_devs: Vec<Vec<DeviceId>> = array_steps.iter().map(|a| a.concat()).collect();
+    let array_orders: Vec<analog::intent::Order> =
+        array_steps.into_iter().map(|steps| analog::intent::Order { steps, dir: analog::intent::AxisDir::H, reversible: true, weight: 1.0 }).collect();
+    let reqs = graph::requirements(&all, &intent.compounds, &shared, &passive_groups, &cfg.groups, &hier_couples, &array_devs, &netlist.device_inst, &hg, &net_classes, &canon, &cfg.policy);
     intent.tree = graph::hsmpg(netlist.devices.len(), &reqs, &canon);
     intent.sets = sets::matched_sets(&reqs, &intent.compounds, &shared, &passive_sets, &block::leaves(&blocks), &canon, &drawn, &hg, &cfg.process.unit, &mut intent.diagnostics);
     // EXT-16: kind, class and style per set; the unit floors depend on the class.
@@ -385,6 +427,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         },
     );
     intent.devices = evidence::device_facts(netlist, ev.op.as_ref(), &net_classes, &shared, &load_leaf);
+    intent.order.extend(array_orders);
     // The gate of every CurrentSource is a bias line. Cascode/CurrentSource-by-class
     // gates already are, so one pass is a fixpoint. A sidecar class (User) wins (EXT-26 step 4).
     for (d, f) in intent.devices.iter().enumerate() {

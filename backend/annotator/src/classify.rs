@@ -155,6 +155,24 @@ const LOGIC: [&str; 3] = ["cmos_inverter", "nand_gate", "nor_gate"];
 /// A Signal net at or above this impedance is Sensitive (EXT-18; Philis policy).
 const HIGH_Z_OHM: f32 = 100_000.0;
 
+/// Nets touched only by FET gates and diode-connected drains: the structural Bias rule of
+/// [`refine`] step 7 (rails not excluded), readable before `refine` runs (EXT-27 arrays).
+#[must_use]
+pub fn bias_lines(hg: &BipartiteHypergraph) -> Vec<bool> {
+    let pin = |d: u32, t: &str| crate::pattern::pin_net(hg, d, t);
+    let mut only_gates: Vec<Option<bool>> = vec![None; hg.net_names.len()];
+    for (d, nets) in hg.device_nets.iter().enumerate() {
+        let fet = matches!(hg.kinds[d], pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos);
+        let diode = fet && pin(d as u32, "D") == pin(d as u32, "G");
+        for (t, n) in hg.terminals[d].iter().zip(nets) {
+            let ok = fet && (t == "G" || (t == "D" && diode));
+            let g = only_gates[n.0 as usize].get_or_insert(true);
+            *g &= ok;
+        }
+    }
+    only_gates.into_iter().map(|g| g == Some(true)).collect()
+}
+
 /// EXT-18 step 3: refine the pre-pass classes once sets exist, recompute the
 /// budgets, return per-net facts. Rails, Substrate and Clock keep their class.
 /// Every other net takes the first rule that applies: DigitalSwitching (a logic
@@ -263,20 +281,8 @@ pub fn refine(classes: &mut [NetClassification], cx: &RefineCtx) -> Vec<NetFacts
         }
     }
     // 7. Bias: gates and diode-connected drains only.
-    let mut only_gates: Vec<Option<bool>> = vec![None; n_nets];
-    for (d, nets) in hg.device_nets.iter().enumerate() {
-        let fet = matches!(hg.kinds[d], pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos);
-        let diode = fet && pin(d as u32, "D") == pin(d as u32, "G");
-        for (t, n) in hg.terminals[d].iter().zip(nets) {
-            let ok = fet && (t == "G" || (t == "D" && diode));
-            let g = only_gates[n.0 as usize].get_or_insert(true);
-            *g &= ok;
-        }
-    }
-    for n in 0..n_nets {
-        if only_gates[n] == Some(true) {
-            put(&mut got, Some(NetId(n as u16)), C::Bias, E::Structure);
-        }
+    for (n, _) in bias_lines(hg).iter().enumerate().filter(|(_, &b)| b) {
+        put(&mut got, Some(NetId(n as u16)), C::Bias, E::Structure);
     }
 
     let tb = |n: NetId| cx.ev.switching_nets.contains(&n) || cx.ev.dc_sources.iter().any(|s| s.0 == n);
