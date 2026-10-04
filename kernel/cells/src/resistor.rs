@@ -84,6 +84,31 @@ pub fn value_tol_ppm(p: &dyn Process) -> i32 {
     p.rule("res_value_tol_ppm", 0)
 }
 
+/// κ_ox, W/(m·K) (Hastings's 0.011 W/cm/°C).
+const K_OX: f64 = 1.1;
+
+/// Hastings eq. 5.8 (L12044–12073): W_min = I·√(t_ox·R_s/(κ_ox·ΔT)), nm, rounded up; 0 when any input ≤ 0.
+/// `t_ox_nm` = the oxide under the body (sidecar `res_tox_nm`, else the body layer's pex `height_nm`);
+/// `dt_k` = the allowed rise (`res_self_heat_dt_k`, 5 K). CELL-23 applies it.
+#[must_use]
+pub fn self_heating_min_width_nm(i_ua: f32, sheet_ohm: f32, t_ox_nm: f32, dt_k: f32) -> i32 {
+    if i_ua <= 0.0 || sheet_ohm <= 0.0 || t_ox_nm <= 0.0 || dt_k <= 0.0 {
+        return 0;
+    }
+    let w = f64::from(i_ua) * 1e-6 * (f64::from(t_ox_nm) * 1e-9 * f64::from(sheet_ohm) / (K_OX * f64::from(dt_k))).sqrt();
+    (w * 1e9).ceil() as i32
+}
+
+/// Eq. 5.8 inverted, the reported figure: ΔT = t_ox·R_s·(I/W)²/κ_ox, K; 0 when any input ≤ 0.
+#[must_use]
+pub fn self_heating_rise_k(i_ua: f32, sheet_ohm: f32, t_ox_nm: f32, w_nm: i32) -> f32 {
+    if i_ua <= 0.0 || sheet_ohm <= 0.0 || t_ox_nm <= 0.0 || w_nm <= 0 {
+        return 0.0;
+    }
+    let j = f64::from(i_ua) * 1e-6 / (f64::from(w_nm) * 1e-9);
+    (f64::from(t_ox_nm) * 1e-9 * f64::from(sheet_ohm) * j * j / K_OX) as f32
+}
+
 /// Parallel strings per member: `dev_nf[d]` when the unitization composes
 /// units in parallel (SPICE `m`), else one.
 fn strings(group: &DeviceGroup, c: &Constraints, s: &Sizing) -> Vec<usize> {
@@ -447,6 +472,20 @@ fn feasible_segments(s: &Sizing, process: &dyn Process) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2 kΩ/□ poly over 326.2 nm of oxide (sky130 `rbody_po`), 5 K.
+    #[test]
+    fn hastings_eq_5_8() {
+        assert!((self_heating_min_width_nm(100.0, 2000.0, 326.2, 5.0) - 1089).abs() <= 5);
+        assert!((self_heating_min_width_nm(1000.0, 2000.0, 326.2, 5.0) - 10_891).abs() <= 5);
+        for (i, r, t, dt) in [(0.0, 2000.0, 326.2, 5.0), (100.0, -1.0, 326.2, 5.0), (100.0, 2000.0, 0.0, 5.0), (100.0, 2000.0, 326.2, 0.0)] {
+            assert_eq!(self_heating_min_width_nm(i, r, t, dt), 0);
+        }
+        assert_eq!(self_heating_rise_k(100.0, 2000.0, 326.2, 0), 0.0);
+        assert_eq!(self_heating_rise_k(-1.0, 2000.0, 326.2, 1089), 0.0);
+        let dt = self_heating_rise_k(100.0, 2000.0, 326.2, 1089);
+        assert!((dt - 5.0).abs() < 0.02, "{dt}");
+    }
 
     /// Every variant, drawn alone, is DRC- and ERC-clean.
     #[test]

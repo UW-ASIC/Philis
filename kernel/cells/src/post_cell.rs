@@ -454,6 +454,23 @@ pub fn ring_ohm(ring: &Macro, process: &dyn Process, cut_ohm: f32) -> f32 {
     cut_ohm / cuts.max(1) as f32
 }
 
+/// Substrate tags of one placed cell, OR over its members (EXT-23): `injector` = a
+/// `MinorityElectron`/`MinorityHole` aggressor, `noisy` = any aggressor, `sensitive` = a victim.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CellFlags {
+    pub injector: bool,
+    pub noisy: bool,
+    pub sensitive: bool,
+}
+
+/// Hastings §14.1.5 (L43595–43612): two cells may share a well only if both inject or neither does,
+/// and neither is noisy beside a sensitive one. §14.1.4: output (injecting) devices get their own.
+/// The predicate only; CELL-22 applies it in `well_bridges`.
+#[must_use]
+pub fn may_share_well(a: CellFlags, b: CellFlags) -> bool {
+    a.injector == b.injector && !((a.noisy && b.sensitive) || (b.noisy && a.sensitive))
+}
+
 /// One well for neighbouring PMOS cells on the same bulk: where two placed
 /// cells' nwells face each other across a gap up to twice the well spacing,
 /// with the same span on the other axis, the gap is filled (the three rects
@@ -805,6 +822,17 @@ mod tests {
         let refs2: Vec<&GuardRingRequirement> = reqs2.iter().collect();
         let c2 = clusters(&refs2, &l2, 2000.0);
         assert_eq!(c2, vec![vec![0, 1]], "no foreigner in the hull: pair merges");
+    }
+
+    #[test]
+    fn may_share_well_table() {
+        let f = |i, n, s| CellFlags { injector: i, noisy: n, sensitive: s };
+        assert!(!may_share_well(f(true, false, false), f(false, false, false)), "injector beside a non-injector");
+        assert!(!may_share_well(f(false, true, false), f(false, false, true)), "noisy beside sensitive");
+        assert!(!may_share_well(f(false, false, true), f(false, true, false)), "mirrored");
+        assert!(may_share_well(f(false, true, false), f(false, true, false)));
+        assert!(may_share_well(f(true, false, false), f(true, false, false)));
+        assert!(may_share_well(f(false, false, false), f(false, false, false)));
     }
 }
 

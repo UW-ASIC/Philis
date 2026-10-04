@@ -84,6 +84,9 @@ pub struct DetailedCfg {
     /// Derated DC EM limits per routing metal and cut, from the deck; a layer
     /// absent here is unknown (no EM sizing — never a guessed constant).
     pub em: Vec<(LayerId, analog::routing::em::Limit)>,
+    /// Count a via group by its front row ([`analog::routing::Electromigration::front_row`];
+    /// sidecar `em_front_row_cuts`, default `true`).
+    pub em_front_row: bool,
     /// Supply/ground nets. No special width since RTE-12 (a supply's tracks
     /// come from its EM current like any net's); kept for IR repair (RTE-21).
     pub supply_nets: Vec<NetId>,
@@ -142,6 +145,7 @@ impl Default for DetailedCfg {
             pin_share: Vec::new(),
             gate_nm2: Vec::new(),
             em: Vec::new(),
+            em_front_row: true,
             supply_nets: Vec::new(),
             spacing: Vec::new(),
             array_spacing: Vec::new(),
@@ -1014,7 +1018,7 @@ impl DetailedRoute {
                     continue;
                 }
                 let net = NetId(compact[ci] as u16);
-                let rule = analog::routing::Electromigration { net, limits, stack: Some(stack) };
+                let rule = analog::routing::Electromigration { net, limits, stack: Some(stack), front_row: cfg.em_front_row };
                 let Some(bad) = rule.failing(&routes) else { continue };
                 let mut hit: Vec<(usize, usize)> = Vec::new();
                 for i in bad {
@@ -2575,7 +2579,7 @@ mod tests {
             // A cut is limited per cut only (`Pdk::em_limit`).
             *slot = (l.0, if CUTS.iter().any(|c| c.0 == l) { analog::routing::em::Limit { ua_per_um: 0.0, ..lim } } else { lim });
         }
-        analog::routing::Electromigration { net: NetId(net), limits, stack: Some(test_stack()) }
+        analog::routing::Electromigration { net: NetId(net), limits, stack: Some(test_stack()), front_row: cfg.em_front_row }
     }
 
     fn rules(r: &Report) -> Vec<&String> {
@@ -2915,10 +2919,10 @@ mod tests {
                 self.residual(r)
             }
             fn satisfied(self, r: &Routes) -> bool {
-                self.0.antenna(r.shapes(NetId(0)), &[], &[], 1_000_000).is_none_or(|(x, l)| x <= l)
+                self.0.antenna(r.shapes(NetId(0)), &[], &[], &[], 1_000_000).is_none_or(|(x, l)| x <= l)
             }
             fn residual(self, r: &Routes) -> f32 {
-                self.0.antenna(r.shapes(NetId(0)), &[], &[], 1_000_000).map_or(0.0, |(x, l)| (x / l - 1.0).max(0.0))
+                self.0.antenna(r.shapes(NetId(0)), &[], &[], &[], 1_000_000).map_or(0.0, |(x, l)| (x / l - 1.0).max(0.0))
             }
             fn touches(self, out: &mut Vec<u32>) {
                 out.push(0);

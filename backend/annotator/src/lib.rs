@@ -411,11 +411,13 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     if let Some(why) = emit::isolation(&aggressor, &victim, &related, p.substrate, p.epi_nm, &mut placement) {
         missing.push(("Isolation", why));
     }
+    emit::substrate_balance(&aggressor, &blocks, &block_of, &mut placement);
 
     // Stable ids in emission order (permutation-invariant since EXT-06). A
     // pre-tagged batch (sidecar `GroupBlocks`) keeps its origin; else a
     // placement batch whose first touched device is in a recognised block came
-    // from that block's pattern; Isolation is cross-block, and the rest are net-class.
+    // from that block's pattern; Isolation and SubstrateBalance are cross-block,
+    // and the rest are net-class.
     let mut next = 0u32;
     let mut id = |origin| {
         next += 1;
@@ -432,7 +434,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
                 let bi = ids.first().map_or(usize::MAX, |&d| block_of[d as usize]);
                 let origin = if let Some(m) = inner.meta() {
                     m.origin
-                } else if bi == usize::MAX || inner.kind().ends_with("::Isolation") {
+                } else if bi == usize::MAX || inner.kind().ends_with("::Isolation") || inner.kind().ends_with("::SubstrateBalance") {
                     analog::intent::Origin::NetClass
                 } else {
                     analog::intent::Origin::Pattern { template: blocks[bi].template }

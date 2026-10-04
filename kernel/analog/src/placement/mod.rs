@@ -11,7 +11,7 @@ pub mod utilization;
 
 pub use dti::DtiBand;
 pub use environment::{EnvGeo, Environment, LiveEnvironment, Surroundings};
-pub use isolation::Isolation;
+pub use isolation::{Isolation, SubstrateBalance};
 pub use matched_set::MatchedSet;
 pub use orientation::{OrientCheck, OrientationSet};
 pub use proximity::Proximity;
