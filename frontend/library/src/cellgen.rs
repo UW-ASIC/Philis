@@ -183,15 +183,12 @@ pub fn enumerate_folded(
                 devices: vec![DeviceId(i as u16)],
             };
             let mut alternatives = draw_variants(d.kind, &d.model, &group, &sized, pdk);
+            let flip = d.kind == DeviceKind::Capacitor && bottom_on_p(netlist, &rails, d);
             for m in &mut alternatives {
-                bind_pins(m, netlist, &group.devices, ground);
-            }
-            if d.kind == DeviceKind::Capacitor {
-                if let (Some(p), Some(n)) = (terminal(d, "P"), terminal(d, "N")) {
-                    if plate_rank(netlist, &rails, p) < plate_rank(netlist, &rails, n) {
-                        alternatives.iter_mut().for_each(swap_plates);
-                    }
+                if flip {
+                    swap_plates(m);
                 }
+                bind_pins(m, netlist, &group.devices, ground);
             }
             (group.devices, alternatives)
         };
@@ -227,18 +224,43 @@ fn plate_rank(netlist: &Netlist, rails: &[NetId], net: NetId) -> u8 {
     if gate_only { 2 } else { 1 }
 }
 
-/// Put the bottom (`N`, high-parasitic) plate on the lower-impedance net:
-/// swap the bound nets of every `P` and `N` pin. The drawn card's nodes are
-/// these pins, so the LVS reference follows.
+/// Whether capacitor `d`'s bottom plate belongs on its `P` net: `P` ranks
+/// strictly lower ([`plate_rank`]) than `N`. Equal ranks keep the drawn order.
+fn bottom_on_p(netlist: &Netlist, rails: &[NetId], d: &Device) -> bool {
+    match (terminal(d, "P"), terminal(d, "N")) {
+        (Some(p), Some(n)) => plate_rank(netlist, rails, p) < plate_rank(netlist, rails, n),
+        _ => false,
+    }
+}
+
+/// Put the bottom (drawn `N`, high-parasitic) plate on terminal `P`: rename
+/// every `P` pin to `N` and back, and swap the capacitor cards' `P`/`N`
+/// nodes, before [`bind_pins`] — so a pin's name stays its terminal
+/// everywhere downstream (parasitics, currents) and the LVS card, which
+/// lists top plate then bottom, follows the geometry.
 fn swap_plates(m: &mut Macro) {
-    let term = |name: &str| name.rsplit(':').next().unwrap_or(name).to_string();
-    let net_of = |t: &str| m.pins.iter().find(|p| term(&p.name) == t).map(|p| p.net);
-    let (Some(p), Some(n)) = (net_of("P"), net_of("N")) else { return };
+    use pnr_core::{DrawnKind, Node};
+    let other = |t: &str| match t {
+        "P" => Some("N"),
+        "N" => Some("P"),
+        _ => None,
+    };
     for pin in &mut m.pins {
-        match term(&pin.name).as_str() {
-            "P" => pin.net = n,
-            "N" => pin.net = p,
-            _ => {}
+        let renamed = match pin.name.rsplit_once(':') {
+            Some((head, t)) => other(t).map(|o| format!("{head}:{o}")),
+            None => other(&pin.name).map(str::to_string),
+        };
+        if let Some(name) = renamed {
+            pin.name = name;
+        }
+    }
+    for d in m.drawn.iter_mut().filter(|d| d.kind == DrawnKind::Capacitor) {
+        for n in &mut d.nodes {
+            if let Node::Pin(t) = *n {
+                if let Some(o) = other(t) {
+                    *n = Node::Pin(o);
+                }
+            }
         }
     }
 }
@@ -1083,25 +1105,36 @@ mod tests {
     }
 
     /// CELL-18: a rail ranks 0, a drain net 1, a gate-only net 2 (a
-    /// capacitor on it keeps it so); `swap_plates` swaps only `P`/`N`.
+    /// capacitor on it keeps it so); the bottom plate moves to `P` only when
+    /// `P` ranks strictly lower; `swap_plates` renames only `P`/`N` pins and
+    /// capacitor nodes.
     #[test]
     fn plate_rank_orders_rail_signal_gate() {
+        use pnr_core::{Drawn, DrawnKind, Node};
         let mut nl = two_devices();
         let rails = [NetId(0), NetId(1)];
         assert_eq!([0, 3, 2].map(|n| plate_rank(&nl, &rails, NetId(n))), [0, 1, 2]);
-        nl.devices.push(Device {
+        let cap = |p: u16, n: u16| Device {
             name: "C1".into(),
             kind: DeviceKind::Capacitor, model: String::new(),
-            terminals: vec![("P".into(), NetId(2)), ("N".into(), NetId(3))],
+            terminals: vec![("P".into(), NetId(p)), ("N".into(), NetId(n))],
             params: Vec::new(),
-        });
+        };
+        nl.devices.push(cap(2, 3));
         assert_eq!(plate_rank(&nl, &rails, NetId(2)), 2, "a cap on a gate net keeps it high-Z");
+        assert!(!bottom_on_p(&nl, &rails, &cap(0, 1)), "equal rank (two rails): no swap");
+        assert!(!bottom_on_p(&nl, &rails, &cap(3, 3)), "equal rank (one signal net): no swap");
+        assert!(!bottom_on_p(&nl, &rails, &cap(2, 0)), "rail on N: no swap");
+        assert!(bottom_on_p(&nl, &rails, &cap(0, 2)), "rail on P: swap");
         let mut m = Macro::default();
-        for (name, net) in [("P", 3), ("N", 0), ("GND", 1)] {
-            m.pins.push(Pin { name: name.into(), net: NetId(net), layer: LayerId(1), at: Rect { x: 0, y: 0, w: 1, h: 1 } });
+        for name in ["d0:P", "N", "GND"] {
+            m.pins.push(Pin { name: name.into(), net: NetId(0), layer: LayerId(1), at: Rect { x: 0, y: 0, w: 1, h: 1 } });
         }
+        let card = |kind| Drawn { owner: 0, device: None, kind, nodes: [Node::Pin("P"), Node::Pin("N"), Node::Unused], w: 1, l: 1 };
+        m.drawn = vec![card(DrawnKind::Capacitor), card(DrawnKind::Diode)];
         swap_plates(&mut m);
-        assert_eq!(m.pins.iter().map(|p| p.net.0).collect::<Vec<_>>(), [0, 3, 1]);
+        assert_eq!(m.pins.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["d0:N", "P", "GND"]);
+        assert_eq!(m.drawn.iter().map(|d| d.nodes).collect::<Vec<_>>(), [[Node::Pin("N"), Node::Pin("P"), Node::Unused], [Node::Pin("P"), Node::Pin("N"), Node::Unused]]);
     }
 
     /// A hand-built space, so `realize`/`escalate` can be exercised with no PDK.

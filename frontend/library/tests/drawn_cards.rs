@@ -4,7 +4,7 @@
 use analog::cell::{SeriesParallel, Unitization};
 use cells::resistor::Resistor;
 use cells::{Cell, Pattern};
-use pnr_core::{DeviceGroup, DeviceId, DeviceKind, Macro};
+use pnr_core::{DeviceGroup, DeviceId, DeviceKind, DrawnKind, Macro, Node};
 
 fn pdk() -> verify::Pdk {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -103,23 +103,34 @@ fn a_mim_dac_signs_off_with_its_capacitors() {
     assert!(rows.is_empty(), "{rows:?}");
 }
 
-/// CELL-18: a decoupling MIM written `VDD g` binds its bottom plate (`N`,
-/// the high-parasitic one) to the rail and its top plate to the gate-only
-/// net, and still signs off LVS clean.
+/// CELL-18: a decoupling MIM written `VDD g` draws its bottom plate (`N`,
+/// the high-parasitic one, the drawn card's second node) on the rail and its
+/// top plate on the gate-only net, keeps every pin's name its schematic
+/// terminal (so parasitics and currents land on the right one), and still
+/// signs off LVS clean.
 #[test]
 fn a_decoupling_cap_puts_its_bottom_plate_on_the_rail() {
     let pdk = pdk();
     let spice = ".subckt t VDD VSS g\nXM1 VSS g VSS VSS sky130_fd_pr__nfet_01v8 w=1u l=0.15u\nXC1 VDD g sky130_fd_pr__cap_mim_m3_1 W=5u L=5u m=1\n.ends t\n";
     let cfg = library::Config { feedback_iters: 1, ..Default::default() };
     let sol = library::run(spice, &pdk, &library::Macros::default(), &cfg).expect("flow");
-    let is = |name: &str, t: &str| name == t || name.ends_with(&format!(":{t}"));
-    let cap = sol.macros.iter().find(|m| m.pins.iter().any(|p| is(&p.name, "N"))).expect("the capacitor's cell");
-    let net = |t: &str| {
-        let p = cap.pins.iter().find(|p| is(&p.name, t)).expect("plate pin");
-        sol.netlist.nets[p.net.0 as usize].name.clone()
+    let cap = sol.macros.iter().find(|m| m.drawn.iter().any(|d| d.kind == DrawnKind::Capacitor)).expect("the capacitor's cell");
+    let card = cap.drawn.iter().find(|d| d.kind == DrawnKind::Capacitor).expect("its card");
+    let dev = &sol.netlist.devices[card.device.expect("bound").0 as usize];
+    let pin_net = |t: &str| {
+        let p = cap.pins.iter().find(|p| p.name == format!("d{}:{t}", card.owner)).expect("plate pin");
+        p.net
     };
-    assert_eq!(net("N"), "VDD", "bottom plate on the rail");
-    assert_eq!(net("P"), "g", "top plate on the gate net");
+    for t in ["P", "N"] {
+        let schem = dev.terminals.iter().find(|(n, _)| n == t).expect("terminal").1;
+        assert_eq!(pin_net(t), schem, "pin {t} sits on terminal {t}'s net");
+    }
+    let name = |n: &Node| match *n {
+        Node::Pin(t) => sol.netlist.nets[pin_net(t).0 as usize].name.clone(),
+        _ => panic!("plate node is a pin"),
+    };
+    assert_eq!(name(&card.nodes[1]), "VDD", "bottom plate on the rail");
+    assert_eq!(name(&card.nodes[0]), "g", "top plate on the gate net");
     let rows = lvs_rows(&sol, &pdk);
     assert!(rows.is_empty(), "{rows:?}");
 }

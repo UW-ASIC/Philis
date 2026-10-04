@@ -97,8 +97,11 @@ impl Cell for Mosfet {
         // a drain region and shorts two drains over shared diffusion. Blocks
         // only where every boundary can sit on a source ([`legal_row`]): all
         // even counts from S, two odd ones from D; mixed parity is not offered.
-        let blocks: Vec<usize> = s.dev_nf.iter().enumerate().flat_map(|(d, &n)| std::iter::repeat_n(d, usize::from(n))).collect();
-        let mut styles = if legal_row(&blocks, true) || legal_row(&blocks, false) { vec![(Pattern::Single, false, false)] } else { Vec::new() };
+        let blocks_legal = |dev_nf: &[u16]| {
+            let blocks: Vec<usize> = dev_nf.iter().enumerate().flat_map(|(d, &n)| std::iter::repeat_n(d, usize::from(n))).collect();
+            legal_row(&blocks, true) || legal_row(&blocks, false)
+        };
+        let mut styles = if blocks_legal(&s.dev_nf) { vec![(Pattern::Single, false, false)] } else { Vec::new() };
         if pattern::diffusion_cc_row(&s.dev_nf, Outer::Drain).is_some() {
             styles.push((Pattern::Cc1d, false, false));
             // Split gates, then mirror pins, last: indices of the existing
@@ -125,7 +128,9 @@ impl Cell for Mosfet {
             styles.push((Pattern::Single, true, false));
         }
         // Two rows when every member splits evenly and each half still has
-        // its order (a centroid order at nf/2, mirror pairs at nf/2).
+        // its order (a centroid order at nf/2, mirror pairs at nf/2, blocks
+        // legal at nf/2: three 2-finger members halve to `0 1 2`, whose two
+        // boundaries cannot both sit on a source).
         let half = nf / 2;
         let two_rows = |style: Pattern, mirror: bool| {
             nf % 2 == 0
@@ -134,7 +139,7 @@ impl Cell for Mosfet {
                 && match (style, mirror) {
                     (_, true) => half % 2 == 0,
                     (Pattern::Cc1d, false) => pattern::diffusion_cc_row(&s.dev_nf.iter().map(|&n| n / 2).collect::<Vec<_>>(), Outer::Drain).is_some(),
-                    _ => true,
+                    _ => blocks_legal(&s.dev_nf.iter().map(|&n| n / 2).collect::<Vec<_>>()),
                 }
         };
         // Two-ended gates where a finger's poly R outweighs its contact's.
