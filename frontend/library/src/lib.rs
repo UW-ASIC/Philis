@@ -235,6 +235,10 @@ pub struct Solution {
     pub pairs: Vec<(DeviceId, DeviceId)>,
     /// Schematic devices per cell, indexed like `layout`.
     pub devices_of: Vec<Vec<DeviceId>>,
+    /// The winner's detailed-routing report and stats (`dr`'s own rows:
+    /// `open net`, `metal over gate`, …; the pairs it routed exactly).
+    pub route: Report,
+    pub route_stats: dr::RouteStats,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -975,6 +979,8 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
         op: bias.op.clone(),
         pairs,
         devices_of: flow.cells.devices_of,
+        route: best.route,
+        route_stats: best.route_stats,
     }
 }
 
@@ -1104,6 +1110,9 @@ struct Epoch {
     /// are in `rings`.
     extra: Vec<pnr_core::Device>,
     stats: RunStats,
+    /// dr's report and stats for `routes`.
+    route: Report,
+    route_stats: dr::RouteStats,
 }
 
 impl Flow<'_> {
@@ -1201,13 +1210,23 @@ impl Flow<'_> {
             // Pin shares from the unplaced macros: `place_macro` leaves units local.
             cfg: dr::DetailedCfg {
                 common: self.common_nodes(&layout).nodes,
+                blockages: elaborate::blockages(&placed, self.pdk, |c| elaborate::match_class(&self.problem.constraints.unitization, self.cells.devices_of.get(c).map_or(&[][..], Vec::as_slice)), layers),
+                aggressor: {
+                    let mut a = vec![false; self.netlist.nets.len()];
+                    for c in self.problem.net_classes.iter().filter(|c| c.class == analog::metadata::NetClass::Clock) {
+                        if let Some(x) = a.get_mut(c.net.0 as usize) {
+                            *x = true;
+                        }
+                    }
+                    a
+                },
                 stack: Some(self.stack),
                 pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
                 n_nets: self.netlist.nets.len(),
                 ..self.d_router.cfg.clone()
             },
         };
-        let (mut routes, mut route_report, _route_stats) =
+        let (mut routes, mut route_report, mut route_stats) =
             router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
         lap(3);
         // Antenna nets the jumper could not fix get a diode each, routed in as
@@ -1226,7 +1245,7 @@ impl Flow<'_> {
                 extra.push(device);
                 rings.push(m);
             }
-            (routes, route_report, _) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
+            (routes, route_report, route_stats) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
             lap(4);
             for (net, shape) in marks {
                 if let Some(w) = routes.wires.get_mut(net.0 as usize) {
@@ -1281,6 +1300,8 @@ impl Flow<'_> {
             rings,
             extra,
             stats,
+            route: route_report,
+            route_stats,
         }
     }
 }

@@ -45,6 +45,30 @@ const CONTESTED: u32 = NONE - 1;
 /// no net's trunk may use it, and unlike [`CONTESTED`] no pin lands there.
 const BLOCKED: u32 = NONE - 2;
 
+/// A region routed metal must respect (absolute nm; built per layout by the
+/// library from the cells' keep-outs and match classes, RTE-16).
+#[derive(Clone, Copy, Debug)]
+pub struct Blockage {
+    /// The protected area as drawn (the gate, the body, the plate).
+    pub rect: Rect,
+    /// How far routed metal keeps off `rect`, nm (the library's: the lowest
+    /// routed metal's spacing). The `metal over gate` check reads `rect` alone.
+    pub halo: i32,
+    /// Bit `l` = lattice layer `l`.
+    pub layers: u16,
+    /// Hard: no node inside for the nets it applies to; soft: [`gr::KEEPOUT_COST`]
+    /// per node for nets without a pin in `cell` (soft always exempts its own).
+    pub hard: bool,
+    /// Hard only: the nets with a pin in `cell` may pass.
+    pub own_exempt: bool,
+    /// Hard only: applies to aggressor nets ([`DetailedCfg::aggressor`]) alone.
+    pub only_aggressors: bool,
+    /// Index of the placed cell it protects.
+    pub cell: u32,
+    /// A matched gate: any routed metal over `rect` is a `metal over gate` V.
+    pub gate: bool,
+}
+
 /// Track-lattice configuration (set from the deck by `frontend/library`).
 #[derive(Debug, Clone)]
 pub struct DetailedCfg {
@@ -126,6 +150,10 @@ pub struct DetailedCfg {
     /// Nets in the netlist: `Routes` is sized to at least this, so a rule on a
     /// net with no pin reads empty shapes. `0` = the pins' highest net + 1.
     pub n_nets: usize,
+    /// Keep-outs over matched gates, resistor bodies and cap plates; empty = none.
+    pub blockages: Vec<Blockage>,
+    /// Per `NetId`, an aggressor-class net (`Clock` today); empty = none.
+    pub aggressor: Vec<bool>,
 }
 
 impl Default for DetailedCfg {
@@ -156,6 +184,8 @@ impl Default for DetailedCfg {
             common: Vec::new(),
             stack: None,
             n_nets: 0,
+            blockages: Vec::new(),
+            aggressor: Vec::new(),
         }
     }
 }
@@ -500,6 +530,51 @@ impl DetailedRoute {
                 }
             }
         }
+        // Hard blockages (RTE-16): a node of a blocked layer whose centre lies
+        // inside the rect grown by its halo and half a wire is closed to every net
+        // (`BLOCKED`), or, when the blockage spares the cell's own nets or
+        // binds aggressors only, to the nets it applies to (`blocked_for`).
+        // Per net, the rects (with layer bits) its access jogs keep out of.
+        let applies = |b: &Blockage, ni: usize| {
+            let own = placed.get(b.cell as usize).is_some_and(|m| m.pins.iter().any(|p| p.net.0 as usize == ni));
+            !(b.own_exempt && own) && (!b.only_aggressors || cfg.aggressor.get(ni).copied().unwrap_or(false))
+        };
+        let mut blocked_for: Vec<Vec<u32>> = vec![Vec::new(); n_compact];
+        let mut jog_blocks: Vec<Vec<(Rect, u16)>> = vec![Vec::new(); n_compact];
+        for b in cfg.blockages.iter().filter(|b| b.hard) {
+            let everyone = !b.own_exempt && !b.only_aggressors;
+            let nets: Vec<usize> = (0..n_compact).filter(|&ci| everyone || applies(b, compact[ci])).collect();
+            let r = grown(shift(b.rect), b.halo);
+            for &ci in &nets {
+                jog_blocks[ci].push((r, b.layers));
+            }
+            for l in (0..n_layers as usize).filter(|&l| b.layers >> l & 1 == 1) {
+                let g = cfg.wire(l) / 2;
+                let (x0, y0, x1, y1) = (r.x - g, r.y - g, r.x + r.w + g, r.y + r.h + g);
+                for iy in grid.bin_y(y0)..=grid.bin_y(y1) {
+                    for ix in grid.bin_x(x0)..=grid.bin_x(x1) {
+                        let n = grid.node(ix, iy, l as u32);
+                        let (px, py, _) = grid.pos(n);
+                        if !(x0 < px && px < x1 && y0 < py && py < y1) {
+                            continue;
+                        }
+                        // A pin's stitch node inside stays its pin's, but no
+                        // net it binds may land or run there.
+                        if everyone && pre[n as usize] {
+                            reserved[n as usize] = BLOCKED;
+                        } else {
+                            nets.iter().for_each(|&ci| blocked_for[ci].push(n));
+                        }
+                    }
+                }
+            }
+        }
+        for v in &mut blocked_for {
+            v.sort_unstable();
+            v.dedup();
+        }
+        // The rects of `jog_blocks[ci]` that bind lattice layer `l`.
+        let blocks_on = |ci: usize, l: u32| -> Vec<Rect> { jog_blocks[ci].iter().filter(|b| b.1 >> l & 1 == 1).map(|b| b.0).collect() };
 
         for (ci, &ni) in compact.iter().enumerate() {
             let known = term_rects[ni].iter().all(|t| t.2.is_some());
@@ -508,7 +583,7 @@ impl DetailedRoute {
                 let ua = ua.filter(|_| known);
                 let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
                 // Never land inside another net's stitch reservation.
-                let mine = |n: u32| [NONE, CONTESTED, ci as u32].contains(&reserved[n as usize]);
+                let mine = |n: u32| [NONE, CONTESTED, ci as u32].contains(&reserved[n as usize]) && blocked_for[ci].binary_search(&n).is_err();
                 let at = |n: u32| {
                     let (px, py, _) = grid.pos(n);
                     (px, py)
@@ -527,6 +602,7 @@ impl DetailedRoute {
                 // zone and every jog already laid.
                 let jog_l = jog_layer(cfg, layers, cuts, grid.n_layers, r_layer);
                 let metal = layers.get(jog_l as usize);
+                let blocks = blocks_on(ci, jog_l);
                 // No candidate jog narrower than its EM width.
                 let need = metal.map_or(0, |&m| access_need(cfg, m, ua));
                 let full = cfg.wire_width.max(1).max(need);
@@ -543,7 +619,7 @@ impl DetailedRoute {
                         let (px, py, _) = grid.pos(n);
                         [full, narrow].into_iter().find_map(|w| {
                             let both = jog_legs(px, py, cx, cy, w);
-                            let f = (0..2).find(|&f| jog_clean(&both[f], ci, zone, gap, &zones, &laid_legs))?;
+                            let f = (0..2).find(|&f| jog_clean(&both[f], ci, zone, gap, &zones, &laid_legs, &blocks))?;
                             Some((n, (w, f == 1), both[f]))
                         })
                     })
@@ -670,31 +746,33 @@ impl DetailedRoute {
             },
             keepout: Vec::new(),
             own_cells: Vec::new(),
+            blocked_for,
             k: ks,
             guard: guards,
             term_k,
         };
-        // Matched cells (units of more than one member): foreign nets pay to
-        // cross them, their own nets (finger straps, drains) do not.
-        let matched: Vec<usize> = (0..placed.len())
-            .filter(|&c| placed[c].units.iter().any(|u| u.owner != placed[c].units[0].owner))
-            .collect();
-        if !matched.is_empty() {
+        // Soft blockages: nets without a pin in the cell pay `KEEPOUT_COST`
+        // per node inside the rect; its own nets (finger straps, drains) do not.
+        let soft: Vec<&Blockage> = cfg.blockages.iter().filter(|b| !b.hard).collect();
+        if !soft.is_empty() {
             let mut keep = vec![NONE; cold.graph.nodes()];
-            for &c in &matched {
-                let r = shift(placed[c].bbox);
-                for l in 0..n_layers {
+            for b in &soft {
+                let r = grown(shift(b.rect), b.halo);
+                for l in (0..n_layers).filter(|&l| b.layers >> l & 1 == 1) {
                     for y in cold.graph.bin_y(r.y)..=cold.graph.bin_y(r.y + r.h) {
                         for x in cold.graph.bin_x(r.x)..=cold.graph.bin_x(r.x + r.w) {
-                            keep[cold.graph.node(x, y, l) as usize] = c as u32;
+                            keep[cold.graph.node(x, y, l) as usize] = b.cell;
                         }
                     }
                 }
             }
             cold.keepout = keep;
+            let mut cells: Vec<u32> = soft.iter().map(|b| b.cell).collect();
+            cells.sort_unstable();
+            cells.dedup();
             cold.own_cells = compact
                 .iter()
-                .map(|&n| matched.iter().filter(|&&c| placed[c].pins.iter().any(|p| p.net.0 as usize == n)).map(|&c| c as u32).collect())
+                .map(|&n| cells.iter().copied().filter(|&c| placed.get(c as usize).is_some_and(|m| m.pins.iter().any(|p| p.net.0 as usize == n))).collect())
                 .collect();
         }
         let mut hot = RouteHot::new(cold.graph.nodes(), n_compact);
@@ -795,7 +873,7 @@ impl DetailedRoute {
             // Shapes at or past this index per net are access geometry — the only
             // shapes the short resolver may sacrifice.
             let pre_access: Vec<usize> = routes.wires.iter().map(Vec::len).collect();
-            let access_v = add_pin_access(&mut routes, &access, &compact, cfg, layers, cuts, &joins, &zones, origin);
+            let access_v = add_pin_access(&mut routes, &access, &compact, cfg, layers, cuts, &joins, &zones, origin, &jog_blocks);
 
             // A drawn short must never ship silently. Break each by deleting access
             // geometry (an open is reported), counted per net so `score` reports pins
@@ -884,7 +962,9 @@ impl DetailedRoute {
                         }
                     }
                     let cut_space = pitch - size;
-                    if nx * ny < 2 {
+                    // An overlap narrower than one enclosed cut holds no array
+                    // (`(w − size)/pitch + 1` truncates a negative to 1).
+                    if nx * ny < 2 || w < size || h < size {
                         out.push(*c);
                         continue;
                     }
@@ -938,6 +1018,16 @@ impl DetailedRoute {
                 .filter(|s| fill_layers.contains(&s.layer))
                 .map(|s| Shape { rect: shift(s.rect), ..*s })
                 .collect();
+            // Each hard blockage, as drawn, per blocked layer, with the compact nets it binds.
+            let hard_fill: Vec<(Vec<usize>, Shape)> = cfg
+                .blockages
+                .iter()
+                .filter(|b| b.hard)
+                .flat_map(|b| {
+                    let nets: Vec<usize> = (0..n_compact).filter(|&ci| (!b.own_exempt && !b.only_aggressors) || applies(b, compact[ci])).collect();
+                    (0..n_layers as usize).filter(move |&l| b.layers >> l & 1 == 1).map(move |l| (nets.clone(), Shape { layer: layers[l], rect: shift(b.rect) }))
+                })
+                .collect();
             let touch = |a: Rect, b: Rect| rect_gap(a, b) == 0;
             let cell_of = |n: usize| -> Vec<Shape> {
                 // The pins, then every cell shape joined to them on their layer
@@ -965,6 +1055,8 @@ impl DetailedRoute {
                     .map(|&(_, s)| s)
                     .chain((0..n_nets).filter(|&n| n != ni).flat_map(|n| term_rects[n].iter().map(|&(r, l, _)| Shape { layer: l, rect: r })))
                     .chain(fill_metal.iter().copied().filter(|c| !mine.contains(c)))
+                    // Fillers keep off the hard blockages binding the net too.
+                    .chain(hard_fill.iter().filter(|(c, _)| ci_of.get(ni).is_some_and(|&c0| c0 != usize::MAX && c.contains(&c0))).map(|&(_, s)| s))
                     .collect();
                 let own = wires.len();
                 wires.extend(mine);
@@ -1091,6 +1183,17 @@ impl DetailedRoute {
         let overuse = overuse(&hot);
         let mut report = score(&routes, reqs, overuse, &joins, &foreign_metal, &sacrificed, side);
         report.hard_violations.extend(access_v);
+        let mut metals = [u16::MAX; analog::routing::metal_over_gate::MAX_METALS];
+        for (m, l) in metals.iter_mut().zip(&layers[..n_layers as usize]) {
+            *m = l.0;
+        }
+        for b in cfg.blockages.iter().filter(|b| b.gate) {
+            let um2 = analog::routing::MetalOverGate { rect: b.rect, cell: b.cell, metals }.overlap_um2(&routes);
+            if um2 > 0.0 {
+                // 10⁻³ µm²: a sliver is not 0.
+                report.hard_violations.push(Violation { rule: format!("metal over gate cell {}", b.cell), margin: (um2 * 1_000.0).ceil() as i64 });
+            }
+        }
         (stats.overuse, stats.expanded, stats.coarsened) = (overuse, dij.pops, cold.graph.coarsened);
         (routes, report, stats)
     }
@@ -1339,12 +1442,25 @@ fn jog_layer(cfg: &DetailedCfg, layers: &[LayerId], cuts: &[Cut], n_layers: u32,
 /// leg already laid.
 /// No leg touches another net's pin zone (a `zone`-sided square at the pin,
 /// kept `gap` away: a pin landed later still draws its pad there) or a jog
-/// already laid.
-fn jog_clean(legs: &[Rect; 2], ci: usize, zone: i32, gap: i32, zones: &[(u32, i32, i32)], laid: &[(usize, Rect)]) -> bool {
+/// already laid, or overlaps a hard blockage in `blocks` (those binding the
+/// net on the jog's layer).
+#[allow(clippy::too_many_arguments)]
+fn jog_clean(legs: &[Rect; 2], ci: usize, zone: i32, gap: i32, zones: &[(u32, i32, i32)], laid: &[(usize, Rect)], blocks: &[Rect]) -> bool {
     zones.iter().all(|&(zci, zx, zy)| {
         let zr = Rect { x: zx - zone / 2, y: zy - zone / 2, w: zone, h: zone };
         zci as usize == ci || legs.iter().all(|&l| rect_gap(l, zr) >= gap.max(1))
     }) && laid.iter().all(|&(lci, lr)| lci == ci || legs.iter().all(|&l| rect_gap(l, lr) > 0))
+        && blocks.iter().all(|&b| legs.iter().all(|&l| !overlaps(l, b)))
+}
+
+/// `r` grown by `g` on every side.
+fn grown(r: Rect, g: i32) -> Rect {
+    Rect { x: r.x - g, y: r.y - g, w: r.w + 2 * g, h: r.h + 2 * g }
+}
+
+/// `a` and `b` share area (touching edges do not).
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
 /// Reserve for `a.ci` the lattice nodes its jog will occupy (legs inflated by half
@@ -1418,6 +1534,7 @@ fn add_pin_access(
     joins: &[Join],
     zones: &[(u32, i32, i32)],
     origin: (i32, i32),
+    jog_blocks: &[Vec<(Rect, u16)>],
 ) -> Vec<Violation> {
     let spacing = (cfg.pitch - cfg.wire_width).max(0);
     let mut laid: Vec<(usize, Rect)> = Vec::new();
@@ -1441,6 +1558,8 @@ fn add_pin_access(
             }
         };
         let metal = climb.map_or(base, |(up, ..)| up);
+        let bit = layers.iter().position(|&l| l == metal).map_or(0, |l| 1u16 << l);
+        let blocks: Vec<Rect> = jog_blocks[a.ci].iter().filter(|b| b.1 & bit != 0).map(|b| b.0).collect();
         let (nx, ny) = a.node;
         let (px, py) = (a.pin.x + a.pin.w / 2, a.pin.y + a.pin.h / 2);
         // No jog narrower than its EM width: narrow survives only where it meets it.
@@ -1466,11 +1585,11 @@ fn add_pin_access(
         let pick = |gap: i32| {
             cands.iter().copied().find(|&c| {
                 let legs = legs_of(c);
-                jog_clean(&legs, a.ci, pad_zone, gap, zones, &laid) && clear(&legs, gap)
+                jog_clean(&legs, a.ci, pad_zone, gap, zones, &laid, &blocks) && clear(&legs, gap)
             })
         };
         let (w, flip) = pick(spacing).or_else(|| pick(1)).or(choice).unwrap_or_else(|| {
-            options.into_iter().find(|&c| jog_clean(&legs_of(c), a.ci, full, 1, zones, &laid)).unwrap_or(options[3])
+            options.into_iter().find(|&c| jog_clean(&legs_of(c), a.ci, full, 1, zones, &laid, &blocks)).unwrap_or(options[3])
         });
         let legs = legs_of((w, flip));
         laid.extend(legs.iter().map(|&l| (a.ci, l)));
@@ -2715,26 +2834,117 @@ mod tests {
         assert!(balanced < plain * 0.5, "skew {plain} → {balanced}");
     }
 
-    /// A matched cell (units of two members) is priced for foreign nets only:
-    /// net 0, straight across the cell otherwise, goes around it; net 1, with
-    /// a pin in the cell, still runs over it.
+    /// A matched cell's soft blockage is priced for foreign nets only: net 0,
+    /// straight across the cell otherwise, goes around it; net 1, with a pin
+    /// in the cell, still runs over it.
     #[test]
     fn foreign_nets_route_around_a_matched_cell() {
         let cell = Rect { x: 6_000, y: 3_000, w: 4_000, h: 4_000 };
-        let unit = |owner| pnr_core::Unit { owner, x: 0, y: 0, weight: 1, phi: (1, 0), sa: 0, sb: 0 };
         let matched = Macro {
             shapes: Vec::new(),
             pins: vec![pnr_core::Pin { name: "d0:D".into(), net: NetId(1), at: Rect { x: 8_000, y: 5_000, w: 1, h: 1 }, layer: LAYERS[0] }],
             bbox: cell,
-            units: vec![unit(0), unit(1)],
-            dummies: Vec::new(),
             ..Default::default()
         };
         let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000), pin(1, 8_000, 12_000)];
-        let (routes, _) = route(test_cfg(), &pins, &[matched], &[], &mut gr::Negotiation::new());
+        let soft = Blockage { rect: cell, halo: 0, layers: 0b11, hard: false, own_exempt: true, only_aggressors: false, cell: 0, gate: false };
+        let cfg = DetailedCfg { blockages: vec![soft], ..test_cfg() };
+        let (routes, _) = route(cfg, &pins, &[matched], &[], &mut gr::Negotiation::new());
         let over = |n: usize| routes.wires[n].iter().any(|s| s.rect.x < cell.x + cell.w && cell.x < s.rect.x + s.rect.w && s.rect.y < cell.y + cell.h && cell.y < s.rect.y + s.rect.h);
         assert!(!over(0), "net 0 crossed the matched cell: {:?}", routes.wires[0]);
         assert!(over(1), "net 1 must reach its pin inside the cell");
+    }
+
+    /// Routed metal of `net` over `rect` on the test lattice's metals, µm².
+    fn metal_over(routes: &Routes, net: usize, rect: Rect) -> f32 {
+        let mut metals = [u16::MAX; analog::routing::metal_over_gate::MAX_METALS];
+        (metals[0], metals[1]) = (LAYERS[0].0, LAYERS[1].0);
+        let one = Routes { wires: vec![routes.wires[net].clone()], ..Default::default() };
+        analog::routing::MetalOverGate { rect, cell: 0, metals }.overlap_um2(&one)
+    }
+
+    /// Four gate strips, 300 × 4 000 nm, 1 µm apart, in a 4 µm row across y = 5 000.
+    fn gate_row(hard: bool) -> Vec<Blockage> {
+        (0..4)
+            .map(|i| Blockage { rect: Rect { x: 6_000 + i * 1_000, y: 3_000, w: 300, h: 4_000 }, halo: 0, layers: 0b11, hard, own_exempt: !hard, only_aggressors: false, cell: 0, gate: true })
+            .collect()
+    }
+
+    /// A blank cell standing in for the matched transistor (blockage `cell 0`).
+    fn blank_cell(pins: Vec<pnr_core::Pin>) -> Macro {
+        Macro { bbox: Rect { x: 5_500, y: 3_000, w: 4_500, h: 4_000 }, pins, ..Default::default() }
+    }
+
+    /// Ring bands on both lattice layers over `rects`: no net passes them.
+    fn walls(rects: &[Rect]) -> Macro {
+        let shapes = rects.iter().flat_map(|&rect| LAYERS.map(|layer| Shape { layer, rect })).collect();
+        Macro { shapes, bbox: rects[0], ..Default::default() }
+    }
+
+    /// Hard gate blockages (Moderate): a foreign net whose straight route
+    /// crosses the row goes around it; no `metal over gate` row.
+    #[test]
+    fn no_route_crosses_a_moderately_matched_gate() {
+        let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000)];
+        let cfg = DetailedCfg { blockages: gate_row(true), ..test_cfg() };
+        let (routes, report) = route(cfg, &pins, &[blank_cell(Vec::new())], &[], &mut gr::Negotiation::new());
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net") || r.starts_with("metal over gate")), "{:?}", rules(&report));
+        for b in gate_row(true) {
+            assert_eq!(metal_over(&routes, 0, b.rect), 0.0, "{:?}", b.rect);
+        }
+    }
+
+    /// At Moderate the cell's own drain may not cross its gates either
+    /// (`own_exempt = false`): pins either side of one gate join around it.
+    #[test]
+    fn own_drain_does_not_cross_its_gates_at_mod() {
+        let at = |x| pnr_core::Pin { name: "d0:D".into(), net: NetId(0), at: Rect { x, y: 4_915, w: 170, h: 170 }, layer: LAYERS[0] };
+        let gate = Blockage { rect: Rect { x: 7_000, y: 3_000, w: 300, h: 4_000 }, halo: 0, layers: 0b11, hard: true, own_exempt: false, only_aggressors: false, cell: 0, gate: true };
+        let cfg = DetailedCfg { blockages: vec![gate], ..test_cfg() };
+        let (routes, report) = route(cfg, &[], &[blank_cell(vec![at(6_000), at(8_200)])], &[], &mut gr::Negotiation::new());
+        assert!(!routes.wires[0].is_empty());
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net") || r.starts_with("metal over gate")), "{:?}", rules(&report));
+        assert_eq!(metal_over(&routes, 0, gate.rect), 0.0);
+    }
+
+    /// Minimal class: soft gate blockages. With the detour walled off far
+    /// out, crossing at `KEEPOUT_COST` a node is cheaper: the route crosses
+    /// and the gate check reports it; the hard set-up detours instead.
+    #[test]
+    fn a_min_class_pair_allows_crossing_at_a_cost() {
+        let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000)];
+        let ring = walls(&[Rect { x: 5_500, y: 7_000, w: 4_500, h: 30_000 }, Rect { x: 5_500, y: -27_000, w: 4_500, h: 30_000 }]);
+        let run = |hard: bool| {
+            let cfg = DetailedCfg { blockages: gate_row(hard), ..test_cfg() };
+            route(cfg, &pins, &[blank_cell(Vec::new())], &[ring.clone()], &mut gr::Negotiation::new())
+        };
+        let (routes, report) = run(false);
+        let over: f32 = gate_row(false).iter().map(|b| metal_over(&routes, 0, b.rect)).sum();
+        assert!(over > 0.0, "the soft route detours: {:?}", rules(&report));
+        assert!(rules(&report).iter().any(|r| r.starts_with("metal over gate")), "{:?}", rules(&report));
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        let (routes, report) = run(true);
+        let over: f32 = gate_row(true).iter().map(|b| metal_over(&routes, 0, b.rect)).sum();
+        assert_eq!(over, 0.0);
+        assert!(!rules(&report).iter().any(|r| r.starts_with("metal over gate")), "{:?}", rules(&report));
+    }
+
+    /// A Minimal resistor body: soft for every foreign net plus a hard copy
+    /// for aggressors. Walls leave only the body and a head gap: the signal
+    /// (net 0) crosses the body, the clock (net 1) the head.
+    #[test]
+    fn a_clock_never_crosses_a_resistor_body() {
+        let body = Rect { x: 7_000, y: 3_000, w: 1_000, h: 6_000 };
+        let soft = Blockage { rect: body, halo: 0, layers: 0b11, hard: false, own_exempt: true, only_aggressors: false, cell: 0, gate: false };
+        let hard = Blockage { hard: true, only_aggressors: true, ..soft };
+        let ring = walls(&[Rect { x: 7_000, y: 11_000, w: 1_000, h: 30_000 }, Rect { x: 7_000, y: -27_000, w: 1_000, h: 30_000 }]);
+        let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000), pin(1, 1_000, 7_000), pin(1, 15_000, 7_000)];
+        let cfg = DetailedCfg { blockages: vec![soft, hard], aggressor: vec![false, true], ..test_cfg() };
+        let cell = Macro { bbox: body, ..Default::default() };
+        let (routes, report) = route(cfg, &pins, &[cell], &[ring], &mut gr::Negotiation::new());
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        assert!(metal_over(&routes, 0, body) > 0.0, "the signal crosses the body");
+        assert_eq!(metal_over(&routes, 1, body), 0.0, "the clock crosses a head");
     }
 
     /// History survives the call and changes the next one.
@@ -3053,7 +3263,7 @@ mod tests {
         let mut routes = Routes { wires: vec![vec![at(1_000, 1_190, cut, size), at(1_000, 1_190, LAYERS[0], below), at(1_000, 1_190, LAYERS[1], above)]], ..Default::default()  };
         let access = [Access { ci: 0, pin: Rect { x: 915, y: 915, w: 170, h: 170 }, pin_layer: LAYERS[0], node: (1_000, 1_190), node_layer: 0, choice: None, ua: None, node_ua: None }];
         let joins = joins(&LAYERS, &CUTS, None);
-        add_pin_access(&mut routes, &access, &[0], &cfg, &LAYERS, &CUTS, &joins, &[], (0, 0));
+        add_pin_access(&mut routes, &access, &[0], &cfg, &LAYERS, &CUTS, &joins, &[], (0, 0), &[Vec::new()]);
         let cuts: Vec<Rect> = routes.wires[0].iter().filter(|s| s.layer == cut).map(|s| s.rect).collect();
         for (i, a) in cuts.iter().enumerate() {
             for b in &cuts[i + 1..] {
@@ -3452,7 +3662,7 @@ mod tests {
         let foreign = Shape { layer: LAYERS[1], rect: Rect { x: 1_250, y: 800, w: 290, h: 900 } };
         let mut routes = Routes { wires: vec![Vec::new(), vec![foreign]], ..Default::default() };
         let access = [Access { ci: 0, pin: Rect { x: 915, y: 915, w: 170, h: 170 }, pin_layer: LAYERS[0], node: (1_000, 1_430), node_layer: 1, choice: None, ua: None, node_ua: Some(1_000.0) }];
-        add_pin_access(&mut routes, &access, &[0], &cfg, &LAYERS, &CUTS, &joins(&LAYERS, &CUTS, None), &[], (0, 0));
+        add_pin_access(&mut routes, &access, &[0], &cfg, &LAYERS, &CUTS, &joins(&LAYERS, &CUTS, None), &[], (0, 0), &[Vec::new()]);
         let jogs: Vec<i32> = routes.wires[0].iter().filter(|s| s.layer == LAYERS[1] && s.rect.w != s.rect.h).map(|s| s.rect.w.min(s.rect.h)).collect();
         assert!(!jogs.is_empty() && jogs.iter().all(|&w| w >= 360), "{jogs:?}");
     }

@@ -636,6 +636,10 @@ pub struct RouteCtx<G> {
     /// pair skews it, Razavi Fig. 19.17). Empty = none.
     pub keepout: Vec<u32>,
     pub own_cells: Vec<Vec<u32>>,
+    /// Per net, sorted nodes a hard blockage closes to it alone (a matched
+    /// cell's foreign nets, aggressor nets over a resistor body): treated as
+    /// reserved for another net ([`NetSearch::blocked`]). Empty = none.
+    pub blocked_for: Vec<Vec<u32>>,
     /// Per net, tracks per layer of its connections, and wide-metal guard
     /// tracks each side ([`RGraph::footprint`]); empty = 1 track, no guard.
     pub k: Vec<[u8; MAX_LAYERS]>,
@@ -664,6 +668,7 @@ impl<G: RGraph> RouteCtx<G> {
             via_r: Vec::new(),
             keepout: Vec::new(),
             own_cells: Vec::new(),
+            blocked_for: Vec::new(),
             k: Vec::new(),
             guard: Vec::new(),
             term_k: Vec::new(),
@@ -765,6 +770,7 @@ impl<G: RGraph> RouteCtx<G> {
             own_halo: &hot.halos[net],
             penalty,
             keepout: (&self.keepout, self.own_cells.get(net).map_or(&[][..], Vec::as_slice)),
+            blocked: self.blocked_for.get(net).map_or(&[][..], Vec::as_slice),
             elec,
         };
         route_net(&self.graph, hot, &self.reserved, &q, p_fac, dij)
@@ -854,6 +860,8 @@ pub struct NetSearch<'a> {
     pub penalty: &'a [f32],
     /// `(matched cell per node, the net's own cells)`: [`KEEPOUT_COST`] over any other cell.
     pub keepout: (&'a [u32], &'a [u32]),
+    /// Sorted nodes closed to this net alone ([`RouteCtx::blocked_for`]).
+    pub blocked: &'a [u32],
     pub elec: Elec<'a>,
 }
 
@@ -865,7 +873,7 @@ pub struct NetSearch<'a> {
 /// itself. A via edge adds the same over its corner block
 /// ([`RGraph::via_block`]) and `p_fac` per foreign metal node in the halo it
 /// casts. `None` if a target is unreachable without a footprint entering a
-/// node `reserved` for another net or leaving the graph.
+/// node `reserved` for another net (or in `q.blocked`) or leaving the graph.
 pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSearch, p_fac: f32, dij: &mut Dij) -> Option<Vec<Vec<u32>>> {
     let (usage, hist, terms, net, elec) = (&hot.usage[..], &hot.hist[..], q.terms, q.net, &q.elec);
     let halo = (&hot.halo[..], q.own_halo);
@@ -919,8 +927,9 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
         r + p_fac * crowd as f32
     };
     // Congestion of one footprint node: `None` when another net holds it.
+    let closed = |i: usize| reserved.get(i).is_some_and(|&o| o != NONE && o != net) || q.blocked.binary_search(&(i as u32)).is_ok();
     let congestion = |i: usize| -> Option<f32> {
-        if reserved.get(i).is_some_and(|&o| o != NONE && o != net) {
+        if closed(i) {
             return None;
         }
         // ponytail: a via's own halo is priced (`via`), a run end's is not;
@@ -1003,7 +1012,7 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
             let k = g.neighbors(n, &mut buf);
             for &(nb, base) in &buf[..k] {
                 let i = nb as usize;
-                if reserved.get(i).is_some_and(|&o| o != NONE && o != net) {
+                if closed(i) {
                     continue;
                 }
                 let (Some(c), Some(v)) = (node_cost(i, tk, wide), corner(n, nb, tk, wide)) else { continue };
@@ -1464,7 +1473,7 @@ mod tests {
     }
 
     fn search<'a>(terms: &'a [u32], elec: Elec<'a>) -> NetSearch<'a> {
-        NetSearch { net: 0, terms, k: [1; MAX_LAYERS], guard: [0; MAX_LAYERS], term_k: &[], own: &[], own_halo: &[], penalty: &[], keepout: (&[], &[]), elec }
+        NetSearch { net: 0, terms, k: [1; MAX_LAYERS], guard: [0; MAX_LAYERS], term_k: &[], own: &[], own_halo: &[], penalty: &[], keepout: (&[], &[]), blocked: &[], elec }
     }
 
     fn spec(stride: u32, halo_via: u8) -> LayerSpec {
