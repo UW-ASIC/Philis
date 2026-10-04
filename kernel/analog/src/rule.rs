@@ -139,10 +139,11 @@ pub trait Rule: Copy {
         None
     }
 
-    /// `(victim, reference)` when this rule asks for `victim` to be shielded by
-    /// `reference` metal — what a router must generate, not only check.
+    /// `(victim, reference, max gap nm)` when this rule asks for `victim` to
+    /// be shielded by `reference` metal no farther than the gap — what a
+    /// router must generate, not only check.
     #[inline]
-    fn shield(self) -> Option<(u32, u32)> {
+    fn shield(self) -> Option<(u32, u32, i32)> {
         None
     }
 
@@ -266,7 +267,7 @@ pub trait RuleBatch<On>: Send + Sync {
         let _ = out;
     }
     /// Append every shield request `(victim, reference)` (see [`Rule::shield`]).
-    fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
+    fn shield_pairs(&self, out: &mut Vec<(u32, u32, i32)>) {
         let _ = out;
     }
     /// Every [`Rule::separation`] of the batch. Default none.
@@ -357,7 +358,7 @@ impl<On> RuleBatch<On> for Tagged<On> {
     fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
         self.inner.keepaway_pairs(out);
     }
-    fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
+    fn shield_pairs(&self, out: &mut Vec<(u32, u32, i32)>) {
         self.inner.shield_pairs(out);
     }
     fn separations(&self, out: &mut Vec<(u32, u32, i32, bool)>) {
@@ -455,7 +456,7 @@ impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {
     fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
         out.extend(self.iter().filter_map(|r| r.keepaway()));
     }
-    fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
+    fn shield_pairs(&self, out: &mut Vec<(u32, u32, i32)>) {
         out.extend(self.iter().filter_map(|r| r.shield()));
     }
     fn separations(&self, out: &mut Vec<(u32, u32, i32, bool)>) {

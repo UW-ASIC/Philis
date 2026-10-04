@@ -974,6 +974,40 @@ impl DetailedRoute {
                 .map(|&n| cells.iter().copied().filter(|&c| placed.get(c as usize).is_some_and(|m| m.pins.iter().any(|p| p.net.0 as usize == n))).collect())
                 .collect();
         }
+        // RTE-19: a shield's victim routes with a guard track each side on
+        // every layer whose edge gap `s·p0 − (W(k) + wire)/2` is within the
+        // shield's `max_gap`: foreign metal keeps off them during the search,
+        // and the shield stage hands them to the reference. No such layer:
+        // a budget V, and no shield.
+        let mut asks = Vec::new();
+        for b in reqs.hard.iter().chain(&reqs.budget) {
+            b.shield_pairs(&mut asks);
+        }
+        let mut shield_v = Vec::new();
+        let mut shielded: Vec<(usize, usize, [u8; gr::MAX_LAYERS])> = Vec::new();
+        for (v, rf, max_gap) in asks {
+            let ci = |n: u32| ci_of.get(n as usize).copied().filter(|&c| c != usize::MAX);
+            let (Some(v), Some(rf)) = (ci(v), ci(rf)) else { continue };
+            if cold.guard.is_empty() {
+                cold.guard = vec![[0; gr::MAX_LAYERS]; n_compact];
+            }
+            let (k, old) = (cold.k.get(v).copied().unwrap_or([1; gr::MAX_LAYERS]), cold.guard[v]);
+            let (mut nearest, mut any) = (i32::MAX, false);
+            for l in 0..n_l {
+                let step = cfg.stride(l) * cold.graph.pitch;
+                let edge = step - (cfg.wire(l) + (i32::from(k[l]) - 1) * step + cfg.wire(l)) / 2;
+                nearest = nearest.min(edge);
+                if edge <= max_gap {
+                    cold.guard[v][l] = cold.guard[v][l].max(1);
+                    any = true;
+                }
+            }
+            if !any {
+                shield_v.push(Violation { rule: format!("shield gap off lattice net {}", compact[v]), margin: i64::from(nearest - max_gap) });
+            } else {
+                shielded.push((v, rf, old));
+            }
+        }
         let mut hot = RouteHot::new(cold.graph.nodes(), n_compact);
         let agg_w: Vec<f32> = if cfg.aggressor_weight.is_empty() { Vec::new() } else { compact.iter().map(|&n| cfg.aggressor_weight.get(n).copied().unwrap_or(1.0)).collect() };
         hot.set_weights(cold.weight.clone(), agg_w);
@@ -1086,17 +1120,14 @@ impl DetailedRoute {
         jog_hist.iter().for_each(|&n| hot.hist[n as usize] -= JOG_HIST);
         stats.congestion = congestion(&hot, &cold.graph, origin);
         neg.accumulate(&hot.hist, abs);
-        // Shields: requested nets get reference tracks alongside, tied in by
-        // rerouting the reference to them.
-        let mut asks = Vec::new();
-        for b in reqs.hard.iter().chain(&reqs.budget) {
-            b.shield_pairs(&mut asks);
-        }
-        let ci = |n: u32| ci_of.get(n as usize).copied().filter(|&c| c != usize::MAX);
-        for (v, rf) in asks {
-            if let (Some(v), Some(rf)) = (ci(v), ci(rf)) {
-                add_shield(&mut hot, &mut cold, v, rf, &mut dij);
-            }
+        // Shields: the victim gives up its guard tracks (recommitted, so the
+        // search's free side tracks are free), then the reference claims
+        // them, tied in by rerouting it to them.
+        for (v, rf, old) in shielded {
+            cold.guard[v] = old;
+            let tree = hot.trees[v].clone();
+            cold.commit(&mut hot, v, tree);
+            add_shield(&mut hot, &mut cold, v, rf, &mut dij);
         }
         stats.us_repair = us(t_repair);
         let joins = joins(layers, cuts, cfg.pin_access);
@@ -1441,6 +1472,7 @@ impl DetailedRoute {
         let overuse = overuse(&hot);
         let mut report = score(&routes, reqs, overuse, &joins, &foreign_metal, &sacrificed, side);
         report.hard_violations.extend(star_v);
+        report.budget_violations.extend(shield_v);
         report.hard_violations.extend(access_v);
         let mut metals = [u16::MAX; analog::routing::metal_over_gate::MAX_METALS];
         for (m, l) in metals.iter_mut().zip(&layers[..n_layers as usize]) {
@@ -2343,8 +2375,8 @@ fn trial(
 /// (≥ 2 nodes on one layer) claims the free stretches (≥ 2 nodes) of the
 /// parallel track on each side, and the reference net is rerouted with one node of each claim
 /// as an extra terminal, so each shield is tied in by real routing. The claims
-/// join the reference tree. All-or-nothing: if the reroute fails or adds
-/// overuse, nothing changes.
+/// join the reference tree. If the reroute fails or adds overuse, the
+/// shortest claim is dropped and the rest retried ([`try_shield`]).
 fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize, reference: usize, dij: &mut Dij) {
     let g = &cold.graph;
     let free = |n: u32| {
@@ -2384,9 +2416,22 @@ fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize,
             }
         }
     }
-    if claims.is_empty() {
-        return;
+    // Longest first: a claim the reference cannot reach without crossing
+    // foreign metal costs the whole set, so the shortest is dropped and the
+    // rest retried (RTE-19).
+    claims.sort_by_key(|c| std::cmp::Reverse(c.len()));
+    while !claims.is_empty() {
+        if try_shield(hot, cold, reference, &claims, dij) {
+            return;
+        }
+        claims.pop();
     }
+}
+
+/// Reroute `reference` with one node of each claim as an extra terminal and
+/// the claims joined to its tree; kept only when overuse does not rise, else
+/// everything is restored. Returns whether it was kept.
+fn try_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, reference: usize, claims: &[Vec<u32>], dij: &mut Dij) -> bool {
     let (old_tree, old_terms, over0) = (hot.trees[reference].clone(), cold.terms[reference].clone(), overuse(hot));
     let old_reserved: Vec<(usize, u32)> = claims.iter().flatten().map(|&n| (n as usize, cold.reserved.get(n as usize).copied().unwrap_or(NONE))).collect();
     for &n in claims.iter().flatten() {
@@ -2397,10 +2442,10 @@ fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize,
     cold.terms[reference].extend(claims.iter().map(|c| c[0]));
     let routed = cold.reroute(hot, reference, P_FAC, &[], dij);
     if let Some(mut tree) = routed {
-        tree.extend(claims);
+        tree.extend(claims.iter().cloned());
         cold.commit(hot, reference, tree);
         if overuse(hot) <= over0 {
-            return;
+            return true;
         }
         cold.commit(hot, reference, old_tree);
     }
@@ -2410,6 +2455,7 @@ fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize,
             *r = o;
         }
     }
+    false
 }
 
 /// Keep `tree` as `net`'s route iff `key` improves on (hard, budget) without
@@ -3978,6 +4024,48 @@ mod tests {
         let (plain, _) = route(test_cfg(), &pins, &[], &[], &mut gr::Negotiation::new());
         assert!(analog::Rule::usage(shield, &plain).unwrap() < 0.1, "no request, no shield");
         assert!(routes.wires[1].len() > plain.wires[1].len());
+    }
+
+    /// RTE-19 set-up: a 20 µm two-pin victim (net 0) under a 430 nm shield
+    /// by net 1, and a foreign net 2 whose natural run is the victim's
+    /// adjacent track.
+    fn shield_run() -> (Routes, Report, analog::routing::Shield) {
+        use analog::routing::Shield;
+        let pins = [pin(0, 1_000, 5_000), pin(0, 21_000, 5_000), pin(1, 1_000, 1_000), pin(1, 21_000, 1_000), pin(2, 3_000, 5_430), pin(2, 19_000, 5_430)];
+        let shield = Shield { victim: NetId(0), reference: NetId(1), min_coverage_pct: 80, max_gap_nm: 430 };
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.budget.push(Box::new(vec![shield]));
+        let (routes, report, _) = DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        (routes, report, shield)
+    }
+
+    /// The victim's side tracks are kept free during the search, so the
+    /// foreign net detours and the reference takes both: coverage ≥ 0.95.
+    #[test]
+    fn a_shielded_victim_gets_both_side_tracks() {
+        let (routes, report, shield) = shield_run();
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        let cov = analog::Rule::usage(shield, &routes).expect("victim routed");
+        // Measured 0.768 (RTE-19): the access jogs and pads at the victim's
+        // ends count in its length and no track runs beside them; the trunk
+        // alone is 0.93 covered. Not lowered: reported in m2-routing-report.
+        assert!(cov >= 0.95, "coverage {cov}");
+    }
+
+    /// The shield adds no coupling of its own: with the reference excluded,
+    /// the victim's coupling is the same with and without the shield shapes
+    /// (the foreign net taken out); with the foreign net in, the shield only
+    /// screens it.
+    #[test]
+    fn a_shield_does_not_count_as_an_aggressor() {
+        use analog::routing::CouplingBudget;
+        let (routes, _, _) = shield_run();
+        let b = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None, exclude: Some(NetId(1)), aggressor_weight: None };
+        let total = |r: &Routes| analog::Rule::usage(b, r).unwrap();
+        let without = |r: &Routes| Routes { wires: vec![r.wires[0].clone(), Vec::new(), r.wires[2].clone()], ..Default::default() };
+        let quiet = |r: &Routes| Routes { wires: vec![r.wires[0].clone(), r.wires[1].clone(), Vec::new()], ..Default::default() };
+        assert_eq!(total(&quiet(&routes)), total(&quiet(&without(&routes))));
+        assert!(total(&routes) <= total(&without(&routes)));
     }
 
     /// A ring band on layer 0 between two pins of another net at its rows:

@@ -112,7 +112,7 @@ pub fn order_by_priority(pins: &[usize], net_ids: &[u32], reqs: &Requirements<Ro
         } else {
             [&hard, &budget].iter().position(|ids| ids.contains(&net)).map_or(4, |t| t + 2)
         };
-        (shields.iter().any(|&(_, r)| r == net), t)
+        (shields.iter().any(|&(_, r, _)| r == net), t)
     };
     let impact = |ci: u32| Reverse(weight.get(ci as usize).copied().unwrap_or(0.0).to_bits());
     let mut order: Vec<u32> = (0..pins.len() as u32).collect();

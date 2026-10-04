@@ -109,8 +109,8 @@ impl Rule for Shield {
         out.push(u32::from(self.victim.0));
         out.push(u32::from(self.reference.0));
     }
-    fn shield(self) -> Option<(u32, u32)> {
-        Some((u32::from(self.victim.0), u32::from(self.reference.0)))
+    fn shield(self) -> Option<(u32, u32, i32)> {
+        Some((u32::from(self.victim.0), u32::from(self.reference.0), self.max_gap_nm))
     }
 }
 

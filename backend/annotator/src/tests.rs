@@ -623,7 +623,7 @@ fn shields_are_requested_only_against_a_clock() {
     b.shield_pairs(&mut pairs);
     assert!(!pairs.is_empty());
     let vss = 3u32;
-    assert!(pairs.iter().all(|&(_, r)| r == vss), "shielded by ground: {pairs:?}");
+    assert!(pairs.iter().all(|&(_, r, _)| r == vss), "shielded by ground: {pairs:?}");
 }
 
 #[test]
@@ -642,7 +642,7 @@ fn a_shielded_victim_books_no_coupling_to_its_shield() {
     let p = annotate(&nl, &cfg);
     let mut pairs = Vec::new();
     p.routing.budget.iter().find(|b| b.kind().ends_with("Shield")).expect("shield batch").shield_pairs(&mut pairs);
-    let (victim, vss) = pairs[0];
+    let (victim, vss, _) = pairs[0];
     let coup = p.routing.budget.iter().find(|b| b.kind().ends_with("CouplingBudget")).expect("coupling batch");
     // 100 mm of victim between its shield tracks 1 nm away: far past any budget.
     let wire = |y: i32| Shape { layer: LayerId(0), rect: Rect { x: 0, y, w: 100_000_000, h: 1 } };
