@@ -28,7 +28,10 @@ Batch-wide decisions (deviations from plan-02, each for a stated reason):
   CC-feasible pair split into two cells escaped the check and Θ ranked the split candidate first (ota 1729.8 →
   2057.0 µm²). Consequence: a CC-feasible pair drawn as two cells is a permanent `MatchedSet` violation (two cells'
   centroids never coincide) that placement cannot fix; with merged pairs drawn AABB the bench reads `MatchedSet`
-  0/6 satisfied. FLOW-16 step 4 and the M1 exit criterion are written against this rule.
+  0/6 satisfied. FLOW-16 step 4 and the M1 exit criterion are written against this rule. Risk (review, FLOW-16/PLC-03):
+  such a pair's `coincidence` (Δm/tol, ~13 600 at 34 µm) dominates `residual` and is a `violating_residuals`
+  target; on this branch only the report reads it (library metadata.rs:190), but a dp/gp repair consuming
+  budget-arm violating ids would churn on it. FLOW-16/PLC-03 must offer the merged variant (MAT-07) or skip it.
 
 Out of scope, reported: `CentroidGroup::kind()` is `"CommonCentroid"` (cc.rs:176-178). MAT-04 deletes it, but
 FLOW-16 step 4 (plan-08 ~L1108) and the M1 exit criterion "ota, ota_constrained, tt_ota `CommonCentroid` rows 3/3"
@@ -429,7 +432,9 @@ one-unit cells 400 000 nm apart → `σ_grad` 0.4 → `offset_allowances` == `[(
 
 Run: `cargo test -p analog matched_set && cargo test -p library --lib common_node`.
 Acceptance (T5): holds by construction (ΔR·I·1e-3 = max(0, allowance − spent)); bench CommonNode rows reported
-before/after in the merge commit.
+before/after in the merge commit. Recorded in review (d12b34b/850560f carry no body): `PNR_BENCH_SEED=1 bench
+local`, c41f71b and d12b34b both `CommonNode budget 6 6 0 0 0 100% 0.000 tt_ota 0.000`; the whole report table is
+identical (only wall times differ), so the remaining allowance changed no bench verdict.
 
 ## MAT-05 `OrientationSet`: axes parallel, Φ equal — class: judgment
 
