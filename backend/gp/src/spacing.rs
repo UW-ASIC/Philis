@@ -7,21 +7,21 @@ use pnr_core::{LayerId, Macro, NetId, Orient, Process};
 
 /// Placement spacing roles. `*_in` / `*_out`: inside / outside the cell's own n-well.
 /// `other`: a drawn layer no listed role maps to (always spaced at `fallback`).
-pub const ROLES: [&str; 27] = [
+pub const ROLES: [&str; 28] = [
     "nwell", "dnwell", "diff_in", "diff_out", "tap_in", "tap_out", "poly", "nsdm", "psdm", "li", "licon", "mcon",
     "met1", "npc", "rpm", "res_implant", "diode_mk", "rpoly", "diom", "via1", "met2", "via2", "met3", "via3", "met4",
-    "pnp", "other",
+    "pnp", "npn", "other",
 ];
 /// The `Process` role each placement role reads; `""` = none. `Pdk::layer`
 /// falls back to a deck layer of the same name, so `dnwell`, `npc`, `rpm`
 /// resolve on sky130; `rpoly`/`diom` are sky130 `cell.layers` roles the
 /// generators draw; `via1`..`met4` resolve by stack position (capacitor
-/// plates and straps), `pnp` is sky130's BJT id layer. Whether every drawn
+/// plates and straps), `pnp`/`npn` are sky130's BJT id layers. Whether every drawn
 /// layer is covered is checked by the library test
 /// `shipped_cells_draw_no_unmapped_layer`, not by this list.
-pub const DECK_ROLE: [&str; 27] = [
+pub const DECK_ROLE: [&str; 28] = [
     "nwell", "dnwell", "diff", "diff", "tap", "tap", "poly", "nsdm", "psdm", "li", "licon", "mcon", "met1", "npc",
-    "rpm", "res_implant", "diode_mk", "rpoly", "diom", "via1", "met2", "via2", "met3", "via3", "met4", "pnp", "",
+    "rpm", "res_implant", "diode_mk", "rpoly", "diom", "via1", "met2", "via2", "met3", "via3", "met4", "pnp", "npn", "",
 ];
 pub const N: usize = ROLES.len();
 const _: () = assert!(N <= 32, "Edge::present is a u32");
@@ -32,7 +32,7 @@ const OTHER: usize = N - 1;
 const MERGEABLE: [usize; 5] = [NWELL, 7 /*nsdm*/, 8 /*psdm*/, 13 /*npc*/, 14 /*rpm*/];
 /// Marker (id) layers: no drawn material, so a same-role pair with no deck
 /// value is `NoRule` (0), not `fallback`.
-const MARKER: [usize; 3] = [16 /*diode_mk*/, 18 /*diom*/, 25 /*pnp*/];
+const MARKER: [usize; 4] = [16 /*diode_mk*/, 18 /*diom*/, 25 /*pnp*/, 26 /*npn*/];
 
 /// The eight orients in `Orient as usize` order.
 pub const ORIENTS: [Orient; 8] =
