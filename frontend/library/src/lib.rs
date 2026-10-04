@@ -1649,12 +1649,18 @@ pub fn reference_spice(sol: &Solution, pdk: &Pdk, top: &str, ports: &[String]) -
 /// the extractor's `{port}:0` piece; its other `:k` pieces hang off it through the parasitics.
 ///
 /// # Errors
-/// No ports, a port with no label, a MOS card without a bulk node, a resistor matching no single schematic
-/// resistor, any other device card (not rewritten yet), or the extractor's own error.
+/// A schematic device other than a MOS or resistor (the extractor reports no BJT or capacitor card, so the
+/// file would silently lack it), no ports, a port with no label, a MOS card without a bulk node, a resistor
+/// matching no single schematic resistor, rewritten resistor cards not one per schematic resistor, any other
+/// device card (not rewritten yet), or the extractor's own error.
 pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String, String> {
+    use pnr_core::DeviceKind as K;
+    let nl = &sol.netlist;
+    if let Some(d) = nl.devices.iter().find(|d| !matches!(d.kind, K::Nmos | K::Pmos | K::Resistor)) {
+        return Err(format!("{}: {:?} not extracted (PERF-30)", d.name, d.kind));
+    }
     let (shapes, pins, _) = signoff_inputs(sol, pdk);
     let raw = verify::extract_spice(&shapes, &pins, pdk, verify::Detail::WithParasitics)?;
-    let nl = &sol.netlist;
     let ports: Vec<&str> = nl.ports.iter().map(|n| nl.nets[n.0 as usize].name.as_str()).collect();
     if ports.is_empty() {
         return Err("no .subckt ports".into());
@@ -1665,6 +1671,7 @@ pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String,
     let base = |node: &str| node.rsplit_once(':').map_or(node, |(n, _)| n).to_string();
     let um = |nm: f64| nm / 1000.0;
     let mut out = String::new();
+    let mut resistors = 0;
     for line in raw.lines() {
         let t: Vec<&str> = line
             .split_whitespace()
@@ -1703,7 +1710,7 @@ pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String,
                 let hits: Vec<&pnr_core::Device> = nl
                     .devices
                     .iter()
-                    .filter(|d| d.kind == pnr_core::DeviceKind::Resistor && deck(&d.model).eq_ignore_ascii_case(model))
+                    .filter(|d| d.kind == K::Resistor && deck(&d.model).eq_ignore_ascii_case(model))
                     .filter(|d| net(d, "P").zip(net(d, "N")).is_some_and(|(p, n)| ends(p, n)))
                     .collect();
                 // ponytail: a resistor drawn as several segments (CELL-06) extracts several cards and errs here
@@ -1712,12 +1719,17 @@ pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String,
                 };
                 let p = |k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| um(v as f64));
                 let (w, l) = p("w").zip(p("l")).ok_or_else(|| format!("{name}: schematic {} has no w/l", d.name))?;
+                resistors += 1;
                 format!("R{name} {} {} {model} w={w} l={l}", t[1], t[2])
             }
             _ => return Err(format!("{name}: card not rewritten (PERF-30)")),
         };
         out.push_str(&card);
         out.push('\n');
+    }
+    let want = nl.devices.iter().filter(|d| d.kind == K::Resistor).count();
+    if resistors != want {
+        return Err(format!("{resistors} resistor cards extracted for {want} schematic resistors"));
     }
     Ok(out)
 }

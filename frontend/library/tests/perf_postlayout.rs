@@ -226,10 +226,30 @@ XM1 vmid vin VDD VDD sky130_fd_pr__pfet_01v8 W=1 L=0.15 nf=1 m=1
 XM2 vmid vin VSS VSS sky130_fd_pr__nfet_01v8 W=0.5 L=0.15 nf=1 m=1
 RXR1 vmid vout sky130_fd_pr__res_generic_po w=0.5 l=2
 .ends";
+    // Removed even when `vout` panics.
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _scratch = Scratch(dir.clone());
     let v_pex = vout(&dir, "pex.spice", &bench(&pex));
     let v_sch = vout(&dir, "sch.spice", &bench(sch));
-    std::fs::remove_dir_all(&dir).unwrap();
     assert!((v_pex - v_sch).abs() <= 0.01 * v_sch.abs(), "post-layout {v_pex} V vs schematic {v_sch} V\n{pex}");
+}
+
+/// The extractor reports no BJT card: bjt_mirror's post-layout netlist would
+/// hold no device, so it is refused, naming a BJT.
+#[test]
+fn post_layout_refuses_a_device_it_does_not_extract() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/bjt_mirror.spice")).unwrap();
+    let c = library::Config { feedback_iters: 1, starts: 1, ..library::Config::default() };
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &c).expect("flow");
+    let e = library::post_layout_spice(&sol, &pdk, "bjt_mirror").expect_err("BJTs are not extracted");
+    assert!(e.contains("Npn") || e.contains("Pnp"), "{e}");
 }
 
 #[test]
