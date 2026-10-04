@@ -262,10 +262,9 @@ impl Grid {
     }
 }
 
-/// Which end of a diffusion-legal CC row carries the shared, device-crossing
-/// region: a `Drain` row never joins two devices across a source (so every
-/// mismatched boundary is a drain, the quiet node for a ratioed mirror), a
-/// `Source` row the reverse.
+/// Which region the row's two ends are: `Drain` = multi-device rows (region
+/// `i` is S iff `i` is odd), `Source` = mirror-pins rows (region 0 = S); in
+/// both, every boundary between two devices is a shared source.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Outer {
     Drain,
@@ -273,9 +272,9 @@ pub enum Outer {
 }
 
 /// Whether `s` never joins two different devices across the wrong region:
-/// the boundary between fingers `i, i+1` is region `i+1`, even (`D`) when
-/// `outer` is `Source`, odd (`S`) when `outer` is `Drain` (mosfet.rs
-/// `is_s`).
+/// the boundary between fingers `i, i+1` is region `i+1`, legal only on a
+/// source: even (`S`) when `outer` is `Source`, odd (`S`) when `outer` is
+/// `Drain` (mosfet.rs `is_s`).
 #[must_use]
 pub fn diffusion_legal(s: &[usize], outer: Outer) -> bool {
     s.windows(2).enumerate().all(|(i, w)| w[0] == w[1] || ((i + 1) % 2 == 1) == (outer == Outer::Drain))

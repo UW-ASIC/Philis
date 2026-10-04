@@ -86,3 +86,30 @@ pub trait Process {
     }
 
 }
+
+/// What the active area sits on, from the sidecar's `cell.substrate_kind`
+/// (`"bulk"`, `"epi_on_pplus"`, null). It decides whether substrate isolation
+/// has a calibrated distance: on epi over a low-resistivity p+ substrate it
+/// saturates at a few epi thicknesses (Charbon et al. 2001 ch.8, PDF p.127; Su
+/// et al. 4×); on bulk it keeps improving with distance (PDF pp.127–130), so
+/// there is no plateau to budget.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SubstrateKind {
+    Bulk,
+    EpiOnLowRes,
+    /// The deck does not say: isolation reads unknown.
+    #[default]
+    Unknown,
+}
+
+impl SubstrateKind {
+    /// The sidecar spelling; anything else (or absent) is `Unknown`.
+    #[must_use]
+    pub fn from_key(s: Option<&str>) -> Self {
+        match s {
+            Some("bulk") => Self::Bulk,
+            Some("epi_on_pplus") => Self::EpiOnLowRes,
+            _ => Self::Unknown,
+        }
+    }
+}

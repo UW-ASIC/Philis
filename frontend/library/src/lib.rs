@@ -430,7 +430,7 @@ fn solve(
     if let (Some(c), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
         let vdd_mv = cfg.op.as_ref().map_or(1_800.0, |o| o.vdd * 1e3);
         let i = oppoint::net_current_ua(&netlist, c);
-        let rules: Vec<analog::routing::IrDrop> = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv)
+        let rules: Vec<analog::routing::IrDrop> = annotator::ir::budgets(&problem.net_classes, &i, h, vdd_mv, &ann.policy)
             .into_iter()
             .map(|(net, current_ua, max_drop_uv)| analog::routing::IrDrop { net, current_ua, max_drop_uv, margin_pct: 20, stack: ann.process.stack })
             .collect();
@@ -491,7 +491,7 @@ fn solve(
     // 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
     //    keeping the best [`LexKey`], whose V includes the epoch's own signoff
     //    errors. Prices and routing history persist across epochs.
-    let mut assignment = cellgen::seed_assignment(&flow.cells.variants, &flow.layers, pdk);
+    let mut assignment = cellgen::seed_assignment(&flow.cells.variants, pdk);
     let mut prices = gp::Prices::new();
     let mut neg = gr::Negotiation::new();
     let mut best: Option<Epoch> = None;
@@ -597,6 +597,17 @@ fn solve(
     );
     let mut metadata = metadata;
     metadata.binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
+    let mut recognition = std::collections::BTreeMap::new();
+    for b in flow.problem.blocks.iter().filter(|b| b.kind != annotator::BlockKind::Glue) {
+        *recognition.entry(b.template).or_insert(0) += 1;
+    }
+    metadata.recognition = recognition.into_iter().collect();
+    metadata.unconstrained = flow.problem.coverage.iter()
+        .filter_map(|&(d, c)| match c {
+            annotator::Coverage::Unconstrained(why) => Some((netlist.devices[d.0 as usize].name.clone(), why)),
+            _ => None,
+        })
+        .collect();
     metadata.coverage = best.coverage;
     metadata.add_routing(&[Box::new(flow.common_nodes(&best.layout)), Box::new(flow.environment(&best.layout, &best.rings))], &best.routes);
     if let (Some(cfg), Some(result)) = (flow.perf, &best.perf) {
@@ -680,6 +691,7 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
         vt_tc_uv_per_k: [pos("vt_tc_uv_per_k"), pos("vt_tc_uv_per_k_p")],
         lod_kvth0_mv_um: [pos("lod_kvth0_n_mv_um"), pos("lod_kvth0_p_mv_um")],
         lattice_nm: cells::builder::cut_lattice(pdk),
+        substrate: pnr_core::SubstrateKind::from_key(pdk.cell_str("substrate_kind")),
         epi_nm: pos("epi_thickness_nm").map(|v| v as i32),
         // Rules are `Copy`, so they borrow the stack for 'static.
         // ponytail: leaked once per `annotation` call (twice per run, a few
@@ -805,12 +817,8 @@ impl Flow<'_> {
         let placed_now: Vec<Macro> = gr::place_macros(&macros, &layout).into_iter().chain(rings.iter().cloned()).collect();
         rings.extend(cells::post_cell::implant_bridges(&placed_now, self.pdk));
 
-        // Route: global gcell plan, then track realisation onto the real pins.
+        // Route: track realisation onto the real pins.
         let routing = &self.problem.routing;
-        let (global, _) =
-            gr::GlobalRoute { net_weight: self.d_router.cfg.net_weight.clone(), ..Default::default() }.route(&layout, &macros, &rings, routing, layers, neg);
-        // gr's coarse route draws every net on one layer: no joins.
-        global.debug_check_joined("gr::route", &[]);
         let placed = gr::place_macros(&macros, &layout);
         let pins: Vec<_> = placed
             .iter()
@@ -823,12 +831,12 @@ impl Flow<'_> {
                 common: self.common_nodes(&layout).nodes,
                 stack: Some(self.stack),
                 pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
+                n_nets: self.netlist.nets.len(),
                 ..self.d_router.cfg.clone()
             },
         };
-        let (mut routes, mut route_report) = router.route(
-            &global, &pins, &placed, &rings, routing, layers, &self.cuts, neg,
-        );
+        let (mut routes, mut route_report, _route_stats) =
+            router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
         // Antenna nets the jumper could not fix get a diode each, routed in as
         // a fixed cell; its shape on the deck's credited diode layer joins the
         // net's routes (the rule's credit, `Stack::diode`).
@@ -844,7 +852,7 @@ impl Flow<'_> {
                 extra.push(device);
                 rings.push(m);
             }
-            (routes, route_report) = router.route(&global, &pins, &placed, &rings, routing, layers, &self.cuts, neg);
+            (routes, route_report, _) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
             for (net, shape) in marks {
                 if let Some(w) = routes.wires.get_mut(net.0 as usize) {
                     w.push(shape);
@@ -1667,12 +1675,18 @@ pub fn reference_spice(sol: &Solution, pdk: &Pdk, top: &str, ports: &[String]) -
 /// the extractor's `{port}:0` piece; its other `:k` pieces hang off it through the parasitics.
 ///
 /// # Errors
-/// No ports, a port with no label, a MOS card without a bulk node, a resistor matching no single schematic
-/// resistor, any other device card (not rewritten yet), or the extractor's own error.
+/// A schematic device other than a MOS or resistor (the extractor reports no BJT or capacitor card, so the
+/// file would silently lack it), no ports, a port with no label, a MOS card without a bulk node, a resistor
+/// matching no single schematic resistor, rewritten resistor cards not one per schematic resistor, any other
+/// device card (not rewritten yet), or the extractor's own error.
 pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String, String> {
+    use pnr_core::DeviceKind as K;
+    let nl = &sol.netlist;
+    if let Some(d) = nl.devices.iter().find(|d| !matches!(d.kind, K::Nmos | K::Pmos | K::Resistor)) {
+        return Err(format!("{}: {:?} not extracted (PERF-30)", d.name, d.kind));
+    }
     let (shapes, pins, _) = signoff_inputs(sol, pdk);
     let raw = verify::extract_spice(&shapes, &pins, pdk, verify::Detail::WithParasitics)?;
-    let nl = &sol.netlist;
     let ports: Vec<&str> = nl.ports.iter().map(|n| nl.nets[n.0 as usize].name.as_str()).collect();
     if ports.is_empty() {
         return Err("no .subckt ports".into());
@@ -1683,6 +1697,7 @@ pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String,
     let base = |node: &str| node.rsplit_once(':').map_or(node, |(n, _)| n).to_string();
     let um = |nm: f64| nm / 1000.0;
     let mut out = String::new();
+    let mut resistors = 0;
     for line in raw.lines() {
         let t: Vec<&str> = line
             .split_whitespace()
@@ -1721,7 +1736,7 @@ pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String,
                 let hits: Vec<&pnr_core::Device> = nl
                     .devices
                     .iter()
-                    .filter(|d| d.kind == pnr_core::DeviceKind::Resistor && deck(&d.model).eq_ignore_ascii_case(model))
+                    .filter(|d| d.kind == K::Resistor && deck(&d.model).eq_ignore_ascii_case(model))
                     .filter(|d| net(d, "P").zip(net(d, "N")).is_some_and(|(p, n)| ends(p, n)))
                     .collect();
                 // ponytail: a resistor drawn as several segments (CELL-06) extracts several cards and errs here
@@ -1730,12 +1745,17 @@ pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String,
                 };
                 let p = |k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| um(v as f64));
                 let (w, l) = p("w").zip(p("l")).ok_or_else(|| format!("{name}: schematic {} has no w/l", d.name))?;
+                resistors += 1;
                 format!("R{name} {} {} {model} w={w} l={l}", t[1], t[2])
             }
             _ => return Err(format!("{name}: card not rewritten (PERF-30)")),
         };
         out.push_str(&card);
         out.push('\n');
+    }
+    let want = nl.devices.iter().filter(|d| d.kind == K::Resistor).count();
+    if resistors != want {
+        return Err(format!("{resistors} resistor cards extracted for {want} schematic resistors"));
     }
     Ok(out)
 }
@@ -1826,6 +1846,17 @@ pub(crate) fn labeled_pins(
 
 #[cfg(test)]
 mod start_tests {
+    /// GAP-04: the substrate kind comes from the deck's `substrate_kind`; a
+    /// misspelt key (here or in the sidecar) would silently read Unknown.
+    #[test]
+    fn substrate_kind_is_read_from_the_deck() {
+        use pnr_core::SubstrateKind::{Bulk, Unknown};
+        for (name, kind) in [("sky130", Bulk), ("gf180mcu", Unknown), ("ihp_sg13g2", Unknown), ("generic_finfet", Unknown)] {
+            let pdk = verify::Pdk::builtin(name).expect("deck loads");
+            assert_eq!(crate::annotation(&pdk, &Default::default()).process.substrate, kind, "{name}");
+        }
+    }
+
     /// Parallel starts stay deterministic: the same seed and start count give
     /// the same layout, however the threads interleave.
     #[test]

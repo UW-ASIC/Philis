@@ -22,10 +22,11 @@ pub struct VariantSpace {
 }
 
 /// Augmented-Lagrangian state per budget batch, carried across epochs by the
-/// caller. Batches are keyed by `(kind, ordinal among same-kind batches)` so a
-/// price survives batches appended after it.
+/// caller. Keyed by `BatchMeta::id` when the batch carries one, else by
+/// `(kind, ordinal among untagged same-kind batches)`: order matters only for
+/// untagged batches, so a price survives batches appended or reordered after it.
 pub struct Prices {
-    priced: BTreeMap<(&'static str, u32), Price>,
+    priced: BTreeMap<PriceKey, Price>,
     /// `−λ` per positional batch index for this epoch (hot-path read).
     weight: Vec<f32>,
     /// `‖λ_{k+1} − λ_k‖` of the last [`Prices::settle`]; `INFINITY` before one.
@@ -35,6 +36,15 @@ pub struct Prices {
     /// Kinds, each once, whose λ sits at `−LAMBDA_MAX` with a batch still violated
     /// after the last step: the cap, not the layout, is what stopped them.
     saturated: Vec<&'static str>,
+}
+
+/// A priced batch's identity: the stable [`analog::intent::ConstraintId`] when
+/// the annotator tagged it, else its position among untagged same-kind
+/// batches (GAP-10; FLOW-03 step 5).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum PriceKey {
+    Id(analog::intent::ConstraintId),
+    Ord(&'static str, u32),
 }
 
 #[derive(Clone, Copy)]
@@ -118,8 +128,9 @@ impl Prices {
             let next = (p.lambda - p.rho * g).clamp(-LAMBDA_MAX, 0.0);
             drift_sq += f64::from(next - p.lambda).powi(2);
             p.lambda = next;
-            if next <= -LAMBDA_MAX && r > 0.0 && !self.saturated.contains(&key.0) {
-                self.saturated.push(key.0);
+            let kind = b.kind();
+            if next <= -LAMBDA_MAX && r > 0.0 && !self.saturated.contains(&kind) {
+                self.saturated.push(kind);
             }
         }
         self.drift = drift_sq.sqrt();
@@ -148,11 +159,18 @@ impl Prices {
     }
 }
 
-fn keys(reqs: &Requirements<Layout>) -> Vec<(&'static str, u32)> {
+fn keys(reqs: &Requirements<Layout>) -> Vec<PriceKey> {
     (0..reqs.budget.len())
         .map(|bi| {
+            if let Some(m) = reqs.budget[bi].meta() {
+                return PriceKey::Id(m.id);
+            }
             let kind = reqs.budget[bi].kind();
-            (kind, reqs.budget[..bi].iter().filter(|o| o.kind() == kind).count() as u32)
+            let ord = reqs.budget[..bi]
+                .iter()
+                .filter(|o| o.meta().is_none() && o.kind() == kind)
+                .count() as u32;
+            PriceKey::Ord(kind, ord)
         })
         .collect()
 }
@@ -602,6 +620,76 @@ mod price_tests {
         prices.bind(&grown);
         assert_eq!(prices.weight_of(0), paid, "the surviving batch kept its price");
         assert_eq!(prices.weight_of(1), 0.0, "the new batch starts unpriced");
+    }
+
+    fn tagged(id: u32, inner: Box<dyn analog::RuleBatch<Layout>>) -> Box<dyn analog::RuleBatch<Layout>> {
+        Box::new(analog::rule::Tagged {
+            meta: analog::intent::BatchMeta {
+                id: analog::intent::ConstraintId(id),
+                origin: analog::intent::Origin::NetClass,
+            },
+            inner,
+        })
+    }
+
+    /// GAP-10: a tagged batch is keyed by its `BatchMeta::id`, so swapping two
+    /// tagged batches' positions keeps each its own price instead of the
+    /// position-derived one (today's contract for untagged batches only).
+    #[test]
+    fn reordered_tagged_batches_keep_their_prices() {
+        let (_, mut l) = bench();
+        l.x[0] = 1_000;
+        let reqs = Requirements {
+            hard: Vec::new(),
+            budget: vec![
+                tagged(1, Box::new(vec![Budget])),
+                tagged(2, Box::new(vec![Budget, Budget])),
+            ],
+            cost: Vec::new(),
+        };
+        let mut prices = Prices::new();
+        prices.settle(&reqs, &l);
+        let wa = prices.weight_of(0);
+        let wb = prices.weight_of(1);
+        assert!(wa > 0.0 && wa != wb, "distinct batches must price distinctly: {wa} vs {wb}");
+
+        let swapped = Requirements {
+            hard: Vec::new(),
+            budget: vec![
+                tagged(2, Box::new(vec![Budget, Budget])),
+                tagged(1, Box::new(vec![Budget])),
+            ],
+            cost: Vec::new(),
+        };
+        prices.bind(&swapped);
+        assert_eq!(prices.weight_of(0), wb, "id 2 kept its price after the swap");
+        assert_eq!(prices.weight_of(1), wa, "id 1 kept its price after the swap");
+    }
+
+    /// Untagged batches keep today's position-derived keying: a swap moves
+    /// the price with the position, not with the batch.
+    #[test]
+    fn untagged_batches_keep_todays_behaviour() {
+        let (_, mut l) = bench();
+        l.x[0] = 1_000;
+        let reqs = Requirements {
+            hard: Vec::new(),
+            budget: vec![Box::new(vec![Budget]), Box::new(vec![Budget, Budget])],
+            cost: Vec::new(),
+        };
+        let mut prices = Prices::new();
+        prices.settle(&reqs, &l);
+        let wa = prices.weight_of(0);
+        let wb = prices.weight_of(1);
+        assert!(wa > 0.0 && wa != wb);
+
+        let swapped = Requirements {
+            hard: Vec::new(),
+            budget: vec![Box::new(vec![Budget, Budget]), Box::new(vec![Budget])],
+            cost: Vec::new(),
+        };
+        prices.bind(&swapped);
+        assert_eq!(prices.weight_of(0), wa, "position 0 keeps wa (today's position keying)");
     }
 }
 

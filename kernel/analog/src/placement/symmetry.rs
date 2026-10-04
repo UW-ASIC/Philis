@@ -149,6 +149,9 @@ impl RuleBatch<Layout> for SymmetryGroup {
     fn violating_ids(&self, l: &Layout, out: &mut Vec<u32>) {
         self.0.violating_ids(l, out);
     }
+    fn touched(&self, out: &mut Vec<u32>) {
+        self.0.touched(out);
+    }
     fn retarget(&mut self, cell_of: &[u16]) {
         self.0.retarget(cell_of);
     }

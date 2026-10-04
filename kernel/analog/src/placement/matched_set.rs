@@ -264,6 +264,16 @@ mod tests {
         UnitLib::build(vec![0, 0], &[vec![DeviceId(0), DeviceId(1)]], std::iter::once(&alts[..]))
     }
 
+    /// Devices 0 and 1, one 20 µm² unit each, alone in cells 0 and 1 `dx` apart.
+    fn singles(dx: i32) -> Layout {
+        let one = [unit(0, 50, 50, 20_000_000)];
+        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &one[..])];
+        let lib = UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &alts[..]].into_iter());
+        let mut l = layout(&[0, dx], &[0, 0], 50);
+        l.units = Arc::new(lib);
+        l
+    }
+
     /// One 800 × 100 cell drawing `order` (owner per unit) at x 100…700.
     fn row(order: [u8; 4]) -> UnitLib {
         let units: Vec<Unit> = order.iter().zip([100, 300, 500, 700]).map(|(&o, x)| unit(o, x, 50, 10)).collect();
@@ -290,12 +300,7 @@ mod tests {
 
     #[test]
     fn separate_cells_a_millimetre_apart_spend_the_distance_term() {
-        let one = [unit(0, 50, 50, 20_000_000)];
-        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &one[..])];
-        let lib = UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &alts[..]].into_iter());
-        let mut l = layout(&[0, 1_000_000], &[0, 0], 50);
-        l.units = Arc::new(lib);
-        let g = pair(0, 1).ledger(&l, 1);
+        let g = pair(0, 1).ledger(&singles(1_000_000), 1);
         assert!((g.sigma_grad - 1.63).abs() < 0.01, "{}", g.sigma_grad);
         assert_eq!(g.coincidence, None, "one unit each admits no centroid row");
     }
@@ -347,8 +352,17 @@ mod tests {
     }
 
     #[test]
+    fn units_without_avt_or_a_row_are_unknown() {
+        // 1:1 single units admit no row; `Eta` without A_VT has no allowance.
+        let s = MatchedSet { coeffs: Coeffs { avt_mv_um: None, ..pair(0, 1).coeffs }, ..pair(0, 1) };
+        let l = singles(1_000_000);
+        assert!(!s.ledger(&l, 1).known);
+        assert_eq!((s.violations(&l), s.unknown(&l)), (0, 1));
+    }
+
+    #[test]
     fn thermal_reads_unit_centroids_of_a_merged_pair() {
-        let at = |a: [i32; 2], b: [i32; 2]| {
+        let lay = |a: [i32; 2], b: [i32; 2]| {
             let units: Vec<Unit> = a.iter().map(|&x| unit(0, x, 500, 10)).chain(b.iter().map(|&x| unit(1, x, 500, 10))).collect();
             let heater = [(Rect { x: 0, y: 0, w: 2_000, h: 2_000 }, &[][..])];
             let alts = [(Rect { x: 0, y: 0, w: 20_000, h: 1_000 }, &units[..])];
@@ -357,11 +371,18 @@ mod tests {
             (l.hw[1], l.hh[1]) = (10_000, 500);
             l.power_uw[0] = 10_000;
             l.units = Arc::new(lib);
-            pair(0, 1).ledger(&l, 1).mu_thermal
+            l
         };
-        let aabb = at([2_500, 7_500], [12_500, 17_500]);
-        assert!((aabb - 1.097).abs() < 0.01, "{aabb}");
-        assert!(at([2_500, 17_500], [7_500, 12_500]) < 0.01);
+        let mut aabb = lay([2_500, 7_500], [12_500, 17_500]);
+        let mu = pair(0, 1).ledger(&aabb, 1).mu_thermal;
+        assert!((mu - 1.097).abs() < 0.01, "{mu}");
+        assert!(pair(0, 1).ledger(&lay([2_500, 17_500], [7_500, 12_500]), 1).mu_thermal < 0.01);
+        // `cost` adds 3e5·(μ/allowance)² over the geometric pull.
+        let s = MatchedSet { budget: Budget::Allowance(1.0), ..pair(0, 1) };
+        let hot = s.cost(&aabb);
+        aabb.power_uw[0] = 0;
+        let heat = hot - s.cost(&aabb);
+        assert!((heat / (3e5 * mu * mu) - 1.0).abs() < 1e-3, "{heat}");
     }
 
     #[test]
@@ -389,6 +410,13 @@ mod tests {
         let abba = mk(&[[0, 1, 1, 0]]);
         assert!(abba > 1_000.0, "{abba}");
         assert!(mk(&[[0, 1, 1, 0], [1, 0, 0, 1]]) < 1.0);
+        // Diagonal A, anti-diagonal B: equal xx and yy, only xy differs, so
+        // F = √2·|Δxy| = 7.07e5 nm² over reach 707 nm.
+        let diag = [unit(0, 0, 0, 10), unit(0, 1_000, 1_000, 10), unit(1, 0, 1_000, 10), unit(1, 1_000, 0, 10)];
+        let mut l = layout(&[5_000], &[5_000], 2_000);
+        l.units = Arc::new(merged(&diag, Rect { x: 0, y: 0, w: 4_000, h: 4_000 }));
+        let so = pair(0, 1).ledger(&l, 1).second_order_nm;
+        assert!((so - 1_000.0).abs() < 1.0, "{so}");
     }
 
     #[test]
@@ -402,11 +430,7 @@ mod tests {
     #[test]
     fn remaining_allowance_subtracts_placement_spend() {
         // Two one-unit cells 400 um apart: S_VT 1.0 µV/µm·nm → σ_grad 0.4 mV.
-        let one = [unit(0, 50, 50, 20_000_000)];
-        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &one[..])];
-        let lib = UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &alts[..]].into_iter());
-        let mut l = layout(&[0, 400_000], &[0, 0], 50);
-        l.units = Arc::new(lib);
+        let l = singles(400_000);
         let s = MatchedSet {
             members: vec![DeviceId(0), DeviceId(1)],
             kind: MatchKind::Current,
@@ -431,17 +455,20 @@ mod tests {
 
     #[test]
     fn violating_ids_are_cells() {
-        // Cell 0 is an unrelated device; the pair is drawn AABB in cell 1.
-        let units: Vec<Unit> = [0u8, 0, 1, 1].iter().zip([100, 300, 500, 700]).map(|(&o, x)| unit(o, x, 50, 10)).collect();
+        // Cell 0 is an unrelated device; devices 0 and 1 sit alone in cells 1
+        // and 2, 1 mm apart (σ_grad over the allowance, as above).
+        let one = [unit(0, 50, 50, 20_000_000)];
         let other = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &[][..])];
-        let alts = [(Rect { x: 0, y: 0, w: 800, h: 100 }, &units[..])];
-        let lib = UnitLib::build(vec![1, 1], &[vec![], vec![DeviceId(0), DeviceId(1)]], [&other[..], &alts[..]].into_iter());
-        let mut l = layout(&[0, 5_000], &[0, 0], 400);
+        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &one[..])];
+        let members = [vec![], vec![DeviceId(0)], vec![DeviceId(1)]];
+        let lib = UnitLib::build(vec![1, 2], &members, [&other[..], &alts[..], &alts[..]].into_iter());
+        let mut l = layout(&[0, 0, 1_000_000], &[0; 3], 50);
         l.units = Arc::new(lib);
         let mut s = pair(0, 1);
-        s.retarget(&[1, 1]);
+        s.retarget(&[1, 2]);
         let mut ids = Vec::new();
         s.violating_ids(&l, &mut ids);
-        assert!(!ids.is_empty() && ids.iter().all(|&i| i == 1), "{ids:?}");
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2]);
     }
 }

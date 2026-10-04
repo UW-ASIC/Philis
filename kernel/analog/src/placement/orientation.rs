@@ -154,6 +154,19 @@ mod tests {
         assert_eq!(s.violations(&l), 0);
         let m: Vec<_> = [0, 1].map(|d| sums(l.units.of_device(&l, DeviceId(d)).map(Pt::from))).to_vec();
         assert!(mirror_allowed(&m));
+
+        let l = two_cells(&[(1, 0), (-1, 0), (1, 0)], Orient::R0);
+        let m: Vec<_> = [0, 1].map(|d| sums(l.units.of_device(&l, DeviceId(d)).map(Pt::from))).to_vec();
+        assert!(!mirror_allowed(&m), "net φx survives no mirror");
+    }
+
+    #[test]
+    fn a_flipped_vertical_partner_breaks_phi() {
+        let s = set(OrientCheck::Phi);
+        for o in [Orient::Mx, Orient::R180] {
+            let l = two_cells(&[(0, 1)], o);
+            assert_eq!((s.violations(&l), s.residual(&l)), (1, 2.0), "{o:?}");
+        }
     }
 
     #[test]
@@ -168,6 +181,14 @@ mod tests {
     fn no_units_is_unknown() {
         let mut l = two_cells(&[(1, 0)], Orient::R90);
         l.units = Arc::default();
+        for c in [OrientCheck::Axis, OrientCheck::Phi] {
+            assert_eq!((set(c).violations(&l), set(c).unknown(&l)), (0, 1), "{c:?}");
+        }
+        // One member drawn, its partner not: still unknown.
+        let units = [Unit { owner: 0, x: 50, y: 50, weight: 10, phi: (1, 0), sa: 0, sb: 0 }];
+        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &units[..])];
+        let none = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &[][..])];
+        l.units = Arc::new(UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &none[..]].into_iter()));
         for c in [OrientCheck::Axis, OrientCheck::Phi] {
             assert_eq!((set(c).violations(&l), set(c).unknown(&l)), (0, 1), "{c:?}");
         }

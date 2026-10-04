@@ -4,7 +4,6 @@ pub mod dti;
 pub mod environment;
 pub mod isolation;
 pub mod matched_set;
-pub mod matching_pair;
 pub mod orientation;
 pub mod proximity;
 pub mod symmetry;

@@ -152,7 +152,7 @@ pub fn debug_check_connected(macros: &[Macro], layout: &Layout, routes: &Routes)
         assert!(
             !wires.is_empty(),
             "routing: net {net} has {} pins and no routed geometry at all — it was \
-             dropped, not routed (see gr::build_nets' obstacle-only path)",
+             dropped, not routed",
             pins.len()
         );
         // Flood over pins ∪ wires, starting from the first pin.

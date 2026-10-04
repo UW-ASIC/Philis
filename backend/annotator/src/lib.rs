@@ -2,8 +2,8 @@
 //!
 //! [`annotate`] runs the [`pattern`] catalog over the netlist, turns the
 //! non-overlapping matches into blocks (one group each, plus a trailing glue
-//! block for the unclaimed devices), recovers each composite's primitive
-//! children, and emits placement ([`emit`]), routing ([`extract`]), net-class
+//! block for the unclaimed devices), gives each composite its declared children
+//! ([`catalog::roles_of`]), and emits placement ([`emit`]), routing ([`extract`]), net-class
 //! ([`classify`]) and cell-tier ([`constraints`]) constraints from them.
 
 pub mod block;
@@ -15,13 +15,16 @@ pub mod extract;
 pub mod ir;
 pub mod netrole;
 pub mod pattern;
+pub mod policy;
 pub mod size;
+pub mod terms;
 
 #[cfg(test)]
 mod tests;
 
 pub use block::{Block, BlockKind};
 pub use netrole::{rail_of, AnnotationConfig, NetRole, ProcessNumbers};
+pub use policy::Policy;
 
 use pnr_core::ids::DeviceId;
 use pnr_core::Netlist;
@@ -47,25 +50,49 @@ pub struct Problem {
     /// `(rule kind, missing input)` for every family left unemitted because the
     /// deck lacks a number: **unknown**, never a pass.
     pub missing: Vec<(&'static str, &'static str)>,
+    /// Every device, by id, with how recognition covers it (T7).
+    pub coverage: Vec<(DeviceId, Coverage)>,
 }
 
-/// Rule families [`ProcessNumbers`] cannot instantiate. DTI is absent from the
-/// list: a process without trenches makes `DtiBand` inapplicable, not unknown.
-fn missing(p: &ProcessNumbers) -> Vec<(&'static str, &'static str)> {
+/// How a device is covered: the one report that it got a constraint or why not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Coverage {
+    /// Touched by a placement batch.
+    Constrained,
+    /// In a recognised block of this template whose roles emit nothing for it.
+    Grouped(&'static str),
+    /// In no constraint: `"do_not_identify"`, `"unknown size"` or `"no pattern"`.
+    Unconstrained(&'static str),
+}
+
+/// What the netlist needs, so `missing` lists only families that would apply.
+struct Needs {
+    /// A matched leaf (DiffPair, CurrentMirror, Load, CascodePair) exists.
+    matched: bool,
+    /// A FET exists: gate nets an antenna rule would check.
+    gate_nets: bool,
+    /// A device has gate area: `classify` would budget nets (its own precondition).
+    budgeted_nets: bool,
+}
+
+/// Rule families [`ProcessNumbers`] cannot instantiate, among those `needs`
+/// says apply. DTI is absent from the list: a process without trenches makes
+/// `DtiBand` inapplicable, not unknown.
+fn missing(p: &ProcessNumbers, needs: &Needs) -> Vec<(&'static str, &'static str)> {
     let mut out = Vec::new();
-    if p.svt_uv_per_um.is_none() {
+    if needs.matched && p.svt_uv_per_um.is_none() {
         out.push(("MatchedSet", "deck svt_uv_per_um — distance term unknown"));
     }
-    if p.avt_mv_um.iter().any(Option::is_none) {
+    if needs.matched && p.avt_mv_um.iter().any(Option::is_none) {
         out.push(("MatchedSet", "deck avt_n_mv_um/avt_p_mv_um"));
     }
-    if p.antenna_max_ratio.is_none() {
+    if needs.gate_nets && p.antenna_max_ratio.is_none() {
         out.push(("Antenna", "deck antenna ratio"));
     }
-    if p.gate_af_per_um2.is_none() {
+    if needs.budgeted_nets && p.gate_af_per_um2.is_none() {
         out.push(("ParasiticBudget", "deck gate_cap_af_um2"));
         out.push(("CouplingBudget", "deck gate_cap_af_um2"));
-    } else if p.wire_af_per_um.is_none() {
+    } else if needs.budgeted_nets && p.wire_af_per_um.is_none() {
         out.push(("ParasiticBudget", "deck wire capacitance"));
     }
     out
@@ -84,28 +111,23 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     let mut models = Vec::new();
     let drawn: Vec<size::Drawn> = netlist.devices.iter().map(|d| size::drawn(d, &mut models)).collect();
     let roles = netrole::classify_nets(&hg, cfg);
-    let all: Vec<u32> = (0..netlist.devices.len() as u32).collect();
 
-    // Recognised blocks, each composite with its primitive children.
+    // Recognised blocks in selection order, each composite with its primitive children.
+    let canon = pattern::canonical_labels(&hg, &drawn, &models, &roles);
+    let names: Vec<&str> = netlist.devices.iter().map(|d| d.name.as_str()).collect();
+    let all = pattern::recognize_all(&hg, &drawn, &roles, cfg, &canon, &names);
     let mut claimed = vec![false; netlist.devices.len()];
-    let mut blocks: Vec<Block> = pattern::recognize(&hg, &drawn, &roles, cfg, &all, usize::MAX)
+    let mut blocks: Vec<Block> = pattern::select_disjoint(&all, &canon, &names)
         .into_iter()
         .map(|m| {
             for &d in &m.instances {
                 claimed[d as usize] = true;
             }
-            let mut b = Block::from_match(&m);
-            if b.devices.len() > 2 {
-                b.sub_blocks = pattern::recognize(&hg, &drawn, &roles, cfg, &m.instances, 2)
-                    .iter()
-                    .map(Block::from_match)
-                    .collect();
-            }
-            b
+            Block::from_match(&m)
         })
         .collect();
     let glue = (0..netlist.devices.len() as u16).filter(|&d| !claimed[d as usize]).map(DeviceId);
-    blocks.push(Block { kind: BlockKind::Glue, devices: glue.collect(), injected: false, sub_blocks: Vec::new() });
+    blocks.push(Block { kind: BlockKind::Glue, template: "glue", devices: glue.collect(), injected: false, sub_blocks: Vec::new(), selfs: Vec::new() });
 
     let groups: Vec<Vec<DeviceId>> = blocks.iter().map(|b| b.devices.clone()).collect();
     let abutment = groups
@@ -133,21 +155,99 @@ pub fn annotate(netlist: &Netlist, cfg: &AnnotationConfig) -> Problem {
     let gates: Vec<f32> = netlist.devices.iter().map(gate_um2).collect();
     let net_classes = classify::classify(&hg, &roles, &sensitive, &gates, cfg.process.gate_af_per_um2);
 
-    let mut placement = emit::placement(&blocks, netlist, &cfg.process, cfg.offset_sigma_mv);
-    let mut missing = missing(&cfg.process);
-    if netlist.devices.iter().zip(&drawn).any(|(d, s)| size::unknown_size(d.kind, s)) {
+    let mut placement = emit::placement(&blocks, netlist, &cfg.process, cfg.offset_sigma_mv, &cfg.policy);
+    let fet = |k: pnr_core::DeviceKind| matches!(k, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos);
+    let needs = Needs {
+        matched: block::leaves(&blocks)
+            .iter()
+            .any(|b| matches!(b.kind, BlockKind::DiffPair | BlockKind::CurrentMirror | BlockKind::Load | BlockKind::CascodePair)),
+        gate_nets: netlist.devices.iter().any(|d| fet(d.kind)),
+        budgeted_nets: gates.iter().any(|&g| g > 0.0),
+    };
+    let mut missing = missing(&cfg.process, &needs);
+    // The matcher pairs FETs only: an unsized FET is a pair nobody could check.
+    if netlist.devices.iter().zip(&drawn).any(|(d, s)| fet(d.kind) && size::unknown_size(d.kind, s)) {
         missing.push(("MatchedSet", "device W/L"));
     }
     if netlist.devices.iter().any(|d| d.kind == pnr_core::DeviceKind::Capacitor) {
         missing.push(("ParasiticBudget", "capacitor-plate nets: settling / code-error spec (ARR-03, ARR-05)"));
     }
-    if emit::isolation(&hg, &net_classes, &sensitive, cfg.process.epi_nm, &mut placement) && cfg.process.epi_nm.is_none() {
-        missing.push(("Isolation", "deck epi_thickness_nm"));
+    // Same entry of `blocks`, glue excluded: glue is no stage.
+    let mut block_of = vec![usize::MAX; netlist.devices.len()];
+    for (bi, b) in blocks.iter().enumerate().filter(|(_, b)| b.kind != BlockKind::Glue) {
+        b.devices.iter().for_each(|d| block_of[d.0 as usize] = bi);
     }
+    let same_block = |a: usize, v: usize| block_of[a] != usize::MAX && block_of[a] == block_of[v];
+    let p = &cfg.process;
+    if let Some(why) = emit::isolation(&hg, &net_classes, &sensitive, &same_block, p.substrate, p.epi_nm, &mut placement) {
+        missing.push(("Isolation", why));
+    }
+
+    let mut routing = extract::routing(
+        &hg,
+        &net_classes,
+        &gates,
+        &cfg.process,
+        &block::leaves(&blocks).iter().filter(|b| b.kind == BlockKind::DiffPair).map(|b| (b.devices[0], b.devices[1])).collect::<Vec<_>>(),
+        &cfg.policy,
+    );
+
+    // Stable ids in emission order (permutation-invariant since EXT-06). A
+    // placement batch whose first touched device is in a recognised block came
+    // from that block's pattern; Isolation is cross-block, and the rest are net-class.
+    let mut next = 0u32;
+    let mut id = |origin| {
+        next += 1;
+        analog::intent::BatchMeta { id: analog::intent::ConstraintId(next - 1), origin }
+    };
+    let mut touched = vec![false; netlist.devices.len()];
+    for arm in [&mut placement.hard, &mut placement.budget, &mut placement.cost] {
+        *arm = std::mem::take(arm)
+            .into_iter()
+            .map(|inner| -> Box<dyn analog::RuleBatch<pnr_core::Layout>> {
+                let mut ids = Vec::new();
+                inner.touched(&mut ids);
+                ids.iter().for_each(|&d| touched[d as usize] = true);
+                let bi = ids.first().map_or(usize::MAX, |&d| block_of[d as usize]);
+                let origin = if bi == usize::MAX || inner.kind().ends_with("::Isolation") {
+                    analog::intent::Origin::NetClass
+                } else {
+                    analog::intent::Origin::Pattern { template: blocks[bi].template }
+                };
+                Box::new(analog::rule::Tagged { meta: id(origin), inner })
+            })
+            .collect();
+    }
+    for arm in [&mut routing.hard, &mut routing.budget, &mut routing.cost] {
+        *arm = std::mem::take(arm)
+            .into_iter()
+            .map(|inner| -> Box<dyn analog::RuleBatch<pnr_core::Routes>> {
+                Box::new(analog::rule::Tagged { meta: id(analog::intent::Origin::NetClass), inner })
+            })
+            .collect();
+    }
+
+    let coverage = (0..netlist.devices.len())
+        .map(|d| {
+            let c = if touched[d] {
+                Coverage::Constrained
+            } else if block_of[d] != usize::MAX {
+                Coverage::Grouped(blocks[block_of[d]].template)
+            } else if cfg.do_not_identify.contains(&(d as u32)) {
+                Coverage::Unconstrained("do_not_identify")
+            } else if size::unknown_size(netlist.devices[d].kind, &drawn[d]) {
+                Coverage::Unconstrained("unknown size")
+            } else {
+                Coverage::Unconstrained("no pattern")
+            };
+            (DeviceId(d as u16), c)
+        })
+        .collect();
 
     Problem {
         placement,
-        routing: extract::routing(&hg, &net_classes, &gates, &cfg.process),
+        routing,
+        coverage,
         constraints: constraints::assemble(netlist, &drawn, &blocks),
         net_classes,
         groups,
