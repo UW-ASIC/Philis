@@ -5,12 +5,14 @@ Specs: plan-03 §3 (CELL-*), 98-gap-critic.md `### GAP-05`, plan-08 `### FLOW-16
 numbers are this base's; where the plan differs, the card wins.
 
 **Status (re-run 2026-10-04 after a second `git merge m1a`, clean, merge `22a1094`; it brings the input, annotator,
-routing and matching review merges).** Eight of nine items are implemented on this branch, one commit each:
+routing and matching review merges).** All nine items are implemented on this branch, one commit each:
 GAP-05 `b1510f4`, CELL-30 `79f1a6a`, CELL-06 `bda5935`, CELL-07 `1d03998`, CELL-09 `2a1ff0f`, CELL-08 `c72a623` +
-`47a8231` (dr drops a route cut beside a same-net cell cut, tq_chain via.2), CELL-10 `878e222`, FLOW-16 `baeda1c`.
+`47a8231` (dr drops a route cut beside a same-net cell cut, tq_chain via.2) + `6cdfc7a` (dr test follows RTE-07's
+route signature), CELL-03 `9b21b3a`, CELL-10 `878e222`, FLOW-16 `baeda1c`.
 The cards for those items are the spec they were built from; their line numbers are the pre-implementation base and
-are stale (read the commit diff instead). **CELL-03 is not implemented** (`finish` still rounds `w`/`h` to `step`, the
-halo still to `pdk.grid`); its card is refreshed to today's lines and it is the only item left to build.
+are stale (read the commit diff instead). Outside any item, `1d03998` (CELL-07) also makes `cellgen::drawn_cards`
+skip a `Drawn` whose device id is past the schematic (a stale id would self-reference the macro and always match); no
+test covers it.
 The merge overlaps this branch's files only in `dr/src/lib.rs`, `verify/src/{pdk,sidecar}.rs`,
 `library/src/{cellgen,lib,elaborate}.rs` and the four sidecars, all textually clean; the routing merge removed
 `gr::price_group` from `cellgen::price`, unrelated to the cells edits. Post-merge, `cargo test --release -p cells -p
@@ -27,13 +29,13 @@ Open acceptance recorded in the commits, not met yet (not loosened):
 
 | Item | Class | State |
 |---|---|---|
-| CELL-03 | mechanical | to build (card below, current lines) |
+| CELL-03 | mechanical | done `9b21b3a` |
 | GAP-05 | mechanical | done `b1510f4` |
 | CELL-30 | mechanical | done `79f1a6a` |
 | CELL-06 | judgment | done `bda5935` |
 | CELL-07 | mechanical | done `1d03998` |
 | CELL-09 | mechanical | done `2a1ff0f` |
-| CELL-08 | judgment | done `c72a623`, `47a8231`; BASELINE rows and step 7 open |
+| CELL-08 | judgment | done `c72a623`, `47a8231`, `6cdfc7a`; BASELINE rows and step 7 open |
 | CELL-10 | judgment | done `878e222` |
 | FLOW-16 | judgment | done `baeda1c` |
 

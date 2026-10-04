@@ -588,6 +588,31 @@ mod tests {
         };
         assert_eq!(space, 340);
         assert!(ring_gap(&pdk, &req(0, 5, GuardRingType::Ecgr, true), 0) >= 340);
+        // sky130's base gap already clears 340, so the well term is checked
+        // on a deck whose clearance (100 + 50) is under the 400 well spacing.
+        struct Narrow;
+        impl Process for Narrow {
+            fn layer(&self, _: &str) -> Option<pnr_core::LayerId> {
+                None
+            }
+            fn rule(&self, _: &str, default: i32) -> i32 {
+                default
+            }
+            fn grid(&self) -> i32 {
+                5
+            }
+            fn space(&self, _: &str) -> Option<i32> {
+                Some(100)
+            }
+            fn enclosure(&self, _: &str, _: &str) -> Option<i32> {
+                Some(50)
+            }
+            fn space_between(&self, _: &str, _: &str) -> Option<i32> {
+                Some(400)
+            }
+        }
+        assert_eq!(ring_gap(&Narrow, &req(0, 5, GuardRingType::Tap { in_well: false }, true), 0), 150);
+        assert_eq!(ring_gap(&Narrow, &req(0, 5, GuardRingType::Ecgr, true), 0), 400);
     }
 
     #[test]

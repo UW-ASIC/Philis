@@ -22,7 +22,9 @@
 //! array (via3) on it, a `top` strap (met4) per column joined in the gap
 //! under the top dummy row, and the bottom stub dropping through
 //! `bottom_contact` (via2) onto the same met2 branch. Ring dummies carry an
-//! uncontacted capm (no met4 over it, so extraction sees no device).
+//! uncontacted capm (no met4 over it, so extraction sees no device). The
+//! MIM ring is drawn only when `dummy_required`: without it a lone MIM
+//! (tq_chain's) is one plate, not the centre of nine.
 
 use crate::builder::dim;
 
@@ -405,10 +407,13 @@ impl CapArray {
         let vx = up((m2s + e1 - inset).max(0));
         let t0 = vx + v1 + e1o + m1s;
         let tp = w1 + m1s;
-        let (gr, gc) = (rows + 2, cols + 2);
+        // Ring offset: 1 with the dummy ring, 0 for a MIM set without
+        // `dummy_required` (a MOM bank's ring is C0's, always drawn).
+        let o = usize::from(!mim || crate::builder::unitization(group, c).is_some_and(|u| u.dummy_required));
+        let (gr, gc) = (rows + 2 * o, cols + 2 * o);
         let dummy_slot = if general { n + 1 } else { 0 };
         let owner = |r: usize, c: usize| -> Option<u8> {
-            if r > 0 && c > 0 && r <= rows && c <= cols { slots[(r - 1) * cols + c - 1] } else { None }
+            if r >= o && c >= o && r < rows + o && c < cols + o { slots[(r - o) * cols + c - o] } else { None }
         };
         // Per column, the slots with a unit there (dummies are slot 0), in slot order.
         let tracks: Vec<Vec<u8>> = (0..gc)
@@ -443,7 +448,7 @@ impl CapArray {
                 let slot = owner(r, c);
                 let s = slot.unwrap_or(dummy_slot);
                 if mim {
-                    Self::mim_unit(&mut b, process, &st, Rect { x: x0, y: y0, w: uw, h: uh }, encp, slot, r == 0 || c == 0 || r == gr - 1 || c == gc - 1);
+                    Self::mim_unit(&mut b, process, &st, Rect { x: x0, y: y0, w: uw, h: uh }, encp, slot, o == 1 && (r == 0 || c == 0 || r == gr - 1 || c == gc - 1));
                     let tx = track_x(c, s);
                     let (vy, vb) = (y0 + floor((uh - v1) / 2), process.width(st.bot_cut).unwrap_or(v2));
                     let vyb = y0 + floor((uh - vb) / 2);
@@ -515,7 +520,8 @@ impl CapArray {
             b.rect(req(process, dcut), Rect { x: cx - vd / 2, y: cy - vd / 2, w: vd, h: vd });
         };
         for s in 0..=dummy_slot.max(n) {
-            let x0 = (0..gc).filter(|&c| tracks[c].contains(&s)).map(|c| track_x(c, s)).min().expect("every slot has a unit");
+            // Only a ringless set's dummy slot can be empty (no hole, no ring).
+            let Some(x0) = (0..gc).filter(|&c| tracks[c].contains(&s)).map(|c| track_x(c, s)).min() else { continue };
             let bus = Rect { x: x0, y: bus_y(s), w: x_right - x0, h: w1 };
             b.rect(m2, bus);
             route[usize::from(s)].0 += i64::from(bus.w);
@@ -550,13 +556,14 @@ impl CapArray {
         // gap under the top dummy row, down through via3 onto a met3 island
         // (off capm, capm.11) and its via2 to the same met2/via1 stack.
         let (vx2, vy2) = if mim {
-            let join_y = rows as i32 * py + uh;
+            let join_y = (rows + o - 1) as i32 * py + uh;
             let strap = req(process, st.strap);
-            for c in 1..=cols {
-                let y = py + encp;
+            for c in o..cols + o {
+                let y = o as i32 * py + encp;
                 b.rect(strap, Rect { x: c as i32 * px + encp, y, w: uw - 2 * encp, h: join_y + jw - y });
             }
-            b.rect(strap, Rect { x: px + encp, y: join_y, w: x_right - px - encp, h: jw });
+            let x0 = o as i32 * px + encp;
+            b.rect(strap, Rect { x: x0, y: join_y, w: x_right - x0, h: jw });
             let (cx, cy) = (x_right - e4 - vt + vt / 2, join_y + (jw - vt) / 2 + vt / 2);
             island(&mut b, cx, cy);
             (cx - vd / 2, cy - vd / 2)
@@ -787,13 +794,16 @@ mod tests {
             .collect()
     }
 
-    /// CELL-08: a MIM bank is DRC- and ERC-clean in every variant.
+    /// CELL-08: a MIM bank is DRC- and ERC-clean in every variant, ringed or not.
     #[test]
     fn a_mim_bank_is_drc_and_erc_clean() {
         let Some(pdk) = crate::testkit::pdk() else { return };
-        let (g, c) = mim_set(&[1, 1, 2, 4], 5000);
-        let dirty = dirty_mim(&g, &c, &pdk);
-        assert!(dirty.is_empty(), "DRC/ERC-dirty MIM variants:\n{}", dirty.join("\n"));
+        let (g, mut c) = mim_set(&[1, 1, 2, 4], 5000);
+        for dummies in [true, false] {
+            c.unitization[0].dummy_required = dummies;
+            let dirty = dirty_mim(&g, &c, &pdk);
+            assert!(dirty.is_empty(), "DRC/ERC-dirty MIM variants (dummies {dummies}):\n{}", dirty.join("\n"));
+        }
     }
 
     /// CELL-08: the deck's capm recogniser finds one capacitor per active
@@ -829,16 +839,20 @@ mod tests {
         }
     }
 
-    /// CELL-08: a lone MIM (tq_chain's 21.87 µm) is one drawn unit, clean.
+    /// CELL-08: a lone MIM (tq_chain's 21.87 µm, no `dummy_required`) is one
+    /// drawn unit with no dummy ring (bbox under two units a side), clean.
     #[test]
     fn a_single_mim_is_one_unit() {
         let Some(pdk) = crate::testkit::pdk() else { return };
-        let (g, c) = mim_set(&[1], 21_870);
+        let (g, mut c) = mim_set(&[1], 21_870);
+        c.unitization[0].dummy_required = false;
         let ov = mim(&pdk);
         let variants = CapArray::enumerate(&g, &c, &ov);
         assert!(!variants.is_empty());
         for v in &variants {
-            assert_eq!(v.draw(&g, &c, &ov).drawn.len(), 1, "{v:?}");
+            let m = v.draw(&g, &c, &ov);
+            assert_eq!(m.drawn.len(), 1, "{v:?}");
+            assert!(m.bbox.w < 2 * 21_870 && m.bbox.h < 2 * 21_870, "{v:?}: ringed, bbox {:?}", m.bbox);
         }
         let dirty = dirty_mim(&g, &c, &pdk);
         assert!(dirty.is_empty(), "{}", dirty.join("\n"));

@@ -1698,7 +1698,8 @@ mod tests {
     fn unrelated_same_size_devices_fold_independently() {
         let pdk = pdk();
         let (a, b) = ("XA da g s s nfet_01v8 W=2u L=0.5u\n", "XB g g s s nfet_01v8 W=2u L=0.5u\n");
-        let c = "XC dc gc sc sc nfet_01v8 W=2u L=0.5u nf=16\n";
+        // XC: 2 µm fingers too, so a netlist-wide (kind, finger W, L) class would take it in.
+        let c = "XC dc gc sc sc nfet_01v8 W=32u L=0.5u nf=16\n";
         let nl = |body: &str| crate::parse(&format!("{body}.end\n")).expect("parses");
         let ab = [(vec![DeviceId(0), DeviceId(1)], false)];
         let all = folds(&nl(&format!("{a}{b}{c}")), &pdk, &[], &ab);

@@ -56,16 +56,6 @@ fn two_segment_resistor(pdk: &verify::Pdk) -> library::Solution {
     sol.layout.hw[0] = m.bbox.w / 2;
     sol.layout.hh[0] = m.bbox.h / 2;
     sol.macros[0] = m;
-    let placed = pnr_core::place_macros(&sol.macros, &sol.layout);
-    let bank = &placed[0];
-    for (n, ws) in sol.routes.wires.iter().enumerate() {
-        for w in ws {
-            for s in bank.shapes.iter().filter(|s| s.layer == w.layer && s.rect.x < w.rect.x + w.rect.w && w.rect.x < s.rect.x + s.rect.w && s.rect.y < w.rect.y + w.rect.h && w.rect.y < s.rect.y + s.rect.h) {
-                eprintln!("PROBE overlap net {} wire {:?} cell {:?}", sol.netlist.nets[n].name, w, s);
-            }
-        }
-    }
-    eprintln!("PROBE bank pins {:?}", bank.pins.iter().map(|p| (&p.name, sol.netlist.nets.get(p.net.0 as usize).map(|n| &n.name), p.at)).collect::<Vec<_>>());
     sol.routes.wires.iter_mut().for_each(Vec::clear);
     sol
 }
