@@ -544,14 +544,25 @@ fn a_cascode_stack_is_adjacent_not_matched() {
 
 /// EXT-07: a `Stack` is adjacent/symmetric, not a gate reference, so it is no
 /// longer an isolation victim. A clocked switch elsewhere used to be an
-/// aggressor that forced isolation onto the stack's two devices.
+/// aggressor that forced isolation onto the stack's two devices. Since EXT-23
+/// a Bias-gated FET is a victim on its own, so `R1`/`R2` give both gates a DC
+/// path (Signal, not Bias): only the stack membership is under test.
 #[test]
 fn a_cascode_stack_is_not_an_isolation_victim() {
+    let r = |name: &str, p: u16| Device {
+        name: name.into(),
+        kind: DeviceKind::Resistor,
+        model: String::new(),
+        terminals: vec![("P".into(), pnr_core::NetId(p)), ("N".into(), pnr_core::NetId(2))],
+        params: vec![],
+    };
     let nl = Netlist {
         devices: vec![
             fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 4_000, 500),
             fet("M2", DeviceKind::Nmos, 3, 4, 1, 2, 8_000, 500),
             fet("XS", DeviceKind::Nmos, 5, 6, 2, 2, 1_000, 150),
+            r("R1", 0),
+            r("R2", 3),
         ],
         nets: nets(&["vin", "x", "VSS", "vcas", "out", "clk", "sw"]),
         ..Default::default()
@@ -760,7 +771,7 @@ fn clocked_devices_are_kept_away_from_matched_ones() {
     nl.devices.push(fet("XS", DeviceKind::Nmos, clk, sw, 3, 3, 1_000, 150));
     let p = annotate(&nl, &AnnotationConfig::default());
     let b = p.placement.cost.iter().find(|b| is_iso(b)).expect("isolation pull");
-    assert_eq!(b.count(), 4, "XS against each of the four matched devices");
+    assert_eq!(b.count(), 5, "XS against the four matched devices and the bias-gated tail (EXT-23)");
     assert!(!p.placement.budget.iter().any(is_iso), "uncalibrated: a pull, not a budget");
     assert!(p.missing.iter().any(|m| m.0 == "Isolation"), "and reported unknown");
 

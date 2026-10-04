@@ -23,6 +23,7 @@ pub mod policy;
 pub mod rings;
 pub mod sets;
 pub mod size;
+pub mod substrate;
 pub mod symmetry;
 pub mod terms;
 
@@ -341,6 +342,11 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
             intent.nets[g.0 as usize].evidence = analog::intent::EvidenceLevel::OpPoint;
         }
     }
+    // EXT-23: substrate tags; an aggressor is never a victim.
+    (intent.aggressors, intent.victims) = substrate::tag(netlist, &net_classes, &intent.sets);
+    let victim = substrate::victim_mask(n, &intent.victims);
+    let mut aggressor = vec![false; n];
+    intent.aggressors.iter().filter(|a| matches!(a.inject, analog::intent::Inject::Switching | analog::intent::Inject::Capacitive)).for_each(|a| aggressor[a.device.0 as usize] = true);
     let mut routing = extract::routing(
         &hg,
         &net_classes,
@@ -362,9 +368,17 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     for (bi, b) in blocks.iter().enumerate().filter(|(_, b)| b.kind != BlockKind::Glue) {
         b.devices.iter().for_each(|d| block_of[d.0 as usize] = bi);
     }
-    let same_block = |a: usize, v: usize| block_of[a] != usize::MAX && block_of[a] == block_of[v];
+    // Related devices sit together by design (AA-13): same block, same matched
+    // set, or same symmetry compound (EXT-23 step 4: strongarm's `mn0` on the axis).
+    let set_devs: Vec<Vec<DeviceId>> = intent.sets.iter().map(|s| s.members.iter().map(|m| m.device).collect()).collect();
+    let compound_devs: Vec<Vec<DeviceId>> =
+        intent.compounds.iter().map(|c| c.pairs.iter().flat_map(|&(a, b)| [a, b]).chain(c.selfs.iter().copied()).collect()).collect();
+    let in_set = sets::device_index(n, set_devs.iter().map(Vec::as_slice));
+    let in_compound = sets::device_index(n, compound_devs.iter().map(Vec::as_slice));
+    let shares = |idx: &[Vec<usize>], a: usize, v: usize| idx[a].iter().any(|i| idx[v].contains(i));
+    let related = |a: usize, v: usize| (block_of[a] != usize::MAX && block_of[a] == block_of[v]) || shares(&in_set, a, v) || shares(&in_compound, a, v);
     let p = &cfg.process;
-    if let Some(why) = emit::isolation(&hg, &net_classes, &sensitive, &same_block, p.substrate, p.epi_nm, &mut placement) {
+    if let Some(why) = emit::isolation(&aggressor, &victim, &related, p.substrate, p.epi_nm, &mut placement) {
         missing.push(("Isolation", why));
     }
 
@@ -420,14 +434,11 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         })
         .collect();
 
-    // REL-07: guard rings by role. Without EXT-23 tags an aggressor is a
-    // device on a Clock-class net; there are no victims or injectors yet.
+    // REL-07: guard rings by role, from the EXT-23 tags.
     let mut constraints = constraints::assemble(netlist, &drawn, &blocks, &intent.sets);
     {
         use analog::metadata::NetClass;
         let of_class = |c: NetClass| net_classes.iter().filter(move |k| k.class == c).map(|k| k.net);
-        let clocks: Vec<NetId> = of_class(NetClass::Clock).collect();
-        let aggressor: Vec<bool> = netlist.devices.iter().map(|d| d.terminals.iter().any(|(_, n)| clocks.contains(n))).collect();
         let touched_by_aggressor = |n: NetId| netlist.devices.iter().zip(&aggressor).any(|(d, &a)| a && d.terminals.iter().any(|t| t.1 == n));
         let name = |n: NetId| netlist.nets[n.0 as usize].name.to_lowercase();
         let quiet_ring_net = match &cfg.quiet_ring_net {
@@ -440,14 +451,13 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         let (rings, notes) = rings::plan(&rings::RingInputs {
             netlist,
             aggressor: &aggressor,
-            victim: &vec![false; netlist.devices.len()],
+            victim: &victim,
             injector: &vec![None; netlist.devices.len()],
             substrate: p.substrate,
             quiet_ring_net,
-            // ponytail: the lowest-id Supply net, not the highest rail: the
-            // annotator has no rail voltages; read them when EXT-23 brings
-            // them (row 1 needs CELL-17's drawable ECGR first anyway).
-            highest_supply: of_class(NetClass::Supply).min_by_key(|n| n.0),
+            // The Supply net at the highest known DC level; the lowest id
+            // when the op point gives none.
+            highest_supply: of_class(NetClass::Supply).max_by_key(|n| (intent.nets[n.0 as usize].dc_mv.map(|v| v.0), std::cmp::Reverse(n.0))),
             ground: of_class(NetClass::Ground).min_by_key(|n| n.0),
             min_ring_width_nm: p.min_ring_width_nm,
             ecgr_min_width_nm: p.ecgr_min_width_nm,

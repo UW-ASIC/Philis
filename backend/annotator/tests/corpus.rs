@@ -756,3 +756,41 @@ fn net_classes() {
     let vbn = net(src("ota5t")).nets.iter().position(|x| x.name == "vbn").unwrap();
     assert_eq!(p.intent.nets[vbn].evidence, analog::intent::EvidenceLevel::Structure);
 }
+
+fn names(nl: &pnr_core::Netlist, ds: impl Iterator<Item = pnr_core::ids::DeviceId>) -> Vec<String> {
+    let mut v: Vec<String> = ds.map(|d| nl.devices[d.0 as usize].name.clone()).collect();
+    v.sort();
+    v
+}
+
+/// EXT-23: the clocked tail and precharge devices aggress; the Moderate sets
+/// are victims minus aggressors; the Minimal output inverter is not.
+#[test]
+fn strongarm_tags() {
+    let nl = net(STRONGARM);
+    let p = annotate(&nl, &strongarm_cfg());
+    assert!(p.intent.aggressors.iter().all(|a| a.inject == analog::intent::Inject::Switching));
+    assert_eq!(names(&nl, p.intent.aggressors.iter().map(|a| a.device)), ["mn0", "mp10", "mp7", "mp8", "mp9"]);
+    assert_eq!(names(&nl, p.intent.victims.iter().map(|v| v.device)), ["mn1", "mn2", "mn3", "mn4", "mp11", "mp12", "mp5", "mp6"]);
+}
+
+/// EXT-23, C19/T8: the 5T OTA has no aggressor, so no guard ring.
+#[test]
+fn ota5t_tags() {
+    let nl = net(src("ota5t"));
+    let p = annotate(&nl, &cfg("ota5t"));
+    assert!(p.intent.aggressors.is_empty(), "{:?}", p.intent.aggressors);
+    assert_eq!(names(&nl, p.intent.victims.iter().map(|v| v.device)), ["XM1", "XM2", "XM3", "XM4", "XM5"]);
+    let xm5 = p.intent.victims.iter().find(|v| nl.devices[v.device.0 as usize].name == "XM5").unwrap();
+    assert_eq!(xm5.reason, "bias/reference gate");
+    assert_eq!(p.constraints.guard_rings.len(), 0, "C19: no aggressor, no ring");
+}
+
+/// EXT-23: DAC4's switch logic is digital, so no inverter device is a victim.
+#[test]
+fn dac4_logic_is_no_victim() {
+    let nl = net(src("dac4"));
+    let p = annotate(&nl, &cfg("dac4"));
+    let v = names(&nl, p.intent.victims.iter().map(|v| v.device));
+    assert!(!v.iter().any(|n| n.starts_with("XMN") || n.starts_with("XMP")), "{v:?}");
+}
