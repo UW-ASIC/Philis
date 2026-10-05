@@ -218,6 +218,12 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                     diags.push(Diagnostic { kind: "sidecar_unsupported", devices: ds, message: format!("entry {i}: IsolatedTub members must be NMOS on one bulk net") });
                     continue;
                 }
+                if ds.iter().any(|d| cfg.tubs.iter().any(|(m, _)| m.contains(d))) {
+                    diags.push(Diagnostic { kind: "sidecar_unsupported", devices: ds, message: format!("entry {i}: device already in an IsolatedTub") });
+                    continue;
+                }
+                // One dnwell needs its members side by side: a user group (GroupBlocks proximity) keeps them so.
+                cfg.groups.push((i as u32, ds.clone()));
                 cfg.tubs.push((ds, tie));
             }
             "Load" | "Order" => diags.push(Diagnostic {
@@ -269,6 +275,31 @@ mod tests {
         let (cfg, d) = parse(r#"[{"constraint":"IsolatedTub","instances":["XM1","XM2"],"tie":"vdd"}]"#, &nl).unwrap();
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(cfg.tubs, [(vec![DeviceId(0), DeviceId(1)], NetId(7))]);
+        assert_eq!(cfg.groups, [(0, vec![DeviceId(0), DeviceId(1)])], "a tub is also a proximity group");
+    }
+
+    /// The tie must be a quiet supply (GAP-14): a signal net is drawn as asked and reported.
+    #[test]
+    fn a_tub_tied_to_a_signal_is_reported() {
+        let nl = crate::tests::ota();
+        let note = ("IsolatedTub", "tie is not a supply net");
+        for (tie, warned) in [("vdd", false), ("vtail", true)] {
+            let (cfg, _) = parse(&format!(r#"[{{"constraint":"IsolatedTub","instances":["XM1","XM2"],"tie":"{tie}"}}]"#), &nl).unwrap();
+            assert_eq!(crate::annotate(&nl, &cfg).missing.contains(&note), warned, "tie {tie}");
+        }
+    }
+
+    /// A device in two tubs is refused, not silently given the first.
+    #[test]
+    fn overlapping_tubs_are_refused() {
+        let nl = crate::tests::ota();
+        let (cfg, d) = parse(
+            r#"[{"constraint":"IsolatedTub","instances":["XM1","XM2"],"tie":"vdd"},{"constraint":"IsolatedTub","instances":["XM2"],"tie":"vdd"}]"#,
+            &nl,
+        )
+        .unwrap();
+        assert_eq!(d.iter().map(|d| d.kind).collect::<Vec<_>>(), ["sidecar_unsupported"]);
+        assert_eq!(cfg.tubs.len(), 1);
     }
 
     #[test]

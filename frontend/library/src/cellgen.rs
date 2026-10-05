@@ -1595,6 +1595,37 @@ mod tests {
         nl
     }
 
+    /// GAP-11 through `enumerate`: an Exceptional current mirror (1.5:1) keeps only the variants that meet
+    /// the limit (4 fingers: some do), or the squarest alone counted in `aspect_missed` (1 finger: none
+    /// does). The same mirror with no kind is unfiltered and has variants past the limit in both cases.
+    #[test]
+    fn an_exceptional_mirror_keeps_compact_variants() {
+        use analog::intent::{MatchClass, MatchKind};
+        let (pdk, nl) = (pdk(), matched_mirror());
+        let lim = aspect_limit(Some(MatchClass::Exceptional), Some(MatchKind::Current)).unwrap();
+        for (nf, missed) in [(4, false), (1, true)] {
+            let free = enumerate(&nl, &Macros::default(), &matched_unit_nf(&[0, 1], DeviceKind::Nmos, nf), &pdk, true);
+            let mut c = matched_unit_nf(&[0, 1], DeviceKind::Nmos, nf);
+            c.unitization[0].class = Some(MatchClass::Exceptional);
+            c.unitization[0].kind = Some(MatchKind::Current);
+            let cells = enumerate(&nl, &Macros::default(), &c, &pdk, true);
+            assert_eq!((free.spaces.len(), cells.spaces.len()), (1, 1), "nf={nf}: the mirror is one cell");
+            let all: Vec<f64> = free.spaces[0].alternatives.iter().map(member_aspect).collect();
+            let kept: Vec<f64> = cells.spaces[0].alternatives.iter().map(member_aspect).collect();
+            assert_eq!(free.aspect_missed, 0);
+            assert!(all.iter().any(|&a| a > lim), "nf={nf}: unfiltered space has a variant past {lim}: {all:?}");
+            assert_eq!(all.iter().all(|&a| a > lim), missed, "nf={nf}: {all:?}");
+            if missed {
+                let best = all.iter().copied().fold(f64::INFINITY, f64::min);
+                assert_eq!((kept, cells.aspect_missed), (vec![best], 1), "nf={nf}: the squarest is kept and the miss counted");
+            } else {
+                assert!(!kept.is_empty() && kept.iter().all(|&a| a <= lim), "nf={nf}: {kept:?}");
+                assert_eq!(kept.len(), all.iter().filter(|&&a| a <= lim).count(), "nf={nf}: every compact variant survives");
+                assert_eq!(cells.aspect_missed, 0);
+            }
+        }
+    }
+
     /// PLAN §2's collapse, end to end: a matched unitization becomes ONE cell whose
     /// alternatives are merged stacks with every pin bound to a real net — and at
     /// least one alternative is genuinely interleaved (ABBA), which is what makes
