@@ -1,7 +1,7 @@
 //! Declared utilization floor (placement tier, budget).
 
-use crate::rule::RuleBatch;
 use pnr_core::layout::Layout;
+use crate::rule::RuleBatch;
 
 /// The cells fill at least `u_min` of their enclosing box: footprint ≤
 /// Σ cell area / `u_min`. Its residual is Θ, so it outranks extracted C in
@@ -17,9 +17,7 @@ pub struct Utilization {
 impl Utilization {
     /// Footprint over the allowed footprint (`1.0` = at the floor).
     fn used(&self, l: &Layout) -> f32 {
-        let cells: f64 = (0..l.x.len())
-            .map(|i| 4.0 * f64::from(l.hw[i]) * f64::from(l.hh[i]))
-            .sum();
+        let cells: f64 = (0..l.x.len()).map(|i| 4.0 * f64::from(l.hw[i]) * f64::from(l.hh[i])).sum();
         if cells <= 0.0 || self.u_min <= 0.0 {
             return 0.0;
         }
@@ -77,10 +75,7 @@ mod tests {
     fn sprawl_past_the_floor_is_a_budget_overshoot() {
         let u = Utilization { u_min: 0.6 };
         // Abutted: 100% full.
-        assert_eq!(
-            (u.violations(&two_cells(0)), u.residual(&two_cells(0))),
-            (0, 0.0)
-        );
+        assert_eq!((u.violations(&two_cells(0)), u.residual(&two_cells(0))), (0, 0.0));
         // 2 µm² of cells in a 1 × 4 µm box: 50% < 60%, 20% over the allowed box.
         let sprawl = two_cells(2_000);
         assert_eq!(u.violations(&sprawl), 1);

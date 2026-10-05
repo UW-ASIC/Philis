@@ -1,10 +1,10 @@
 //! Per-net parasitic budget (routing tier).
 
-use super::Stack;
-use crate::rule::Rule;
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
 use pnr_core::{BipartiteHypergraph, UnionFind};
+use crate::rule::Rule;
+use super::Stack;
 
 /// Per-net ground-capacitance budget (NET-02): the routed net's C, measured
 /// per layer from the deck's `pex` (area + fringe; Lampaert 1999 eqs.
@@ -107,76 +107,25 @@ mod tests {
     fn the_budget_is_extracted_c_per_layer() {
         let stack: &'static Stack = Box::leak(Box::new(Stack {
             layers: vec![
-                Layer {
-                    id: 0,
-                    area_af_um2: 40.0,
-                    fringe_af_um: 40.0,
-                    ..Layer::default()
-                },
-                Layer {
-                    id: 1,
-                    area_af_um2: 10.0,
-                    fringe_af_um: 20.0,
-                    ..Layer::default()
-                },
+                Layer { id: 0, area_af_um2: 40.0, fringe_af_um: 40.0, ..Layer::default() },
+                Layer { id: 1, area_af_um2: 10.0, fringe_af_um: 20.0, ..Layer::default() },
             ],
             antenna_cumulative: false,
-            diode: None,
+        diode: None,
         }));
-        let run = |layer| Routes {
-            wires: vec![vec![Shape {
-                layer: LayerId(layer),
-                rect: Rect {
-                    x: 0,
-                    y: 0,
-                    w: 10_000,
-                    h: 500,
-                },
-            }]],
-            ..Default::default()
-        };
+        let run = |layer| Routes { wires: vec![vec![Shape { layer: LayerId(layer), rect: Rect { x: 0, y: 0, w: 10_000, h: 500 } }]], ..Default::default()  };
         // m0: 40·5 + 40·21 = 1040 aF; m1: 10·5 + 20·21 = 470 aF (full perimeter).
-        let b = ParasiticBudget {
-            net: NetId(0),
-            max_len_nm: 1_000_000,
-            max_c_af: 600,
-            margin_pct: 20,
-            stack: Some(stack),
-        };
+        let b = ParasiticBudget { net: NetId(0), max_len_nm: 1_000_000, max_c_af: 600, margin_pct: 20, stack: Some(stack) };
         assert!(!b.satisfied(&run(0)) && b.satisfied(&run(1)));
         assert!((b.usage(&run(1)).unwrap() - 470.0 / 600.0).abs() < 1e-4);
-        let length_only = ParasiticBudget {
-            stack: None,
-            max_len_nm: 5_000,
-            ..b
-        };
-        assert!(
-            !length_only.satisfied(&run(1)),
-            "falls back to the length cap"
-        );
+        let length_only = ParasiticBudget { stack: None, max_len_nm: 5_000, ..b };
+        assert!(!length_only.satisfied(&run(1)), "falls back to the length cap");
     }
 
     #[test]
     fn cost_is_the_squared_budget_fraction() {
-        let routes = Routes {
-            wires: vec![vec![Shape {
-                layer: LayerId(0),
-                rect: Rect {
-                    x: 0,
-                    y: 0,
-                    w: 500_000,
-                    h: 500,
-                },
-            }]],
-            ..Default::default()
-        };
-        let b = ParasiticBudget {
-            net: NetId(0),
-            max_len_nm: 1_000_000,
-            max_c_af: 0,
-            margin_pct: 20,
-            stack: None,
-        };
+        let routes = Routes { wires: vec![vec![Shape { layer: LayerId(0), rect: Rect { x: 0, y: 0, w: 500_000, h: 500 } }]], ..Default::default() };
+        let b = ParasiticBudget { net: NetId(0), max_len_nm: 1_000_000, max_c_af: 0, margin_pct: 20, stack: None };
         assert!((b.cost(&routes) - 0.25).abs() < 1e-6, "{}", b.cost(&routes));
     }
 }

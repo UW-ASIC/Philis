@@ -18,29 +18,19 @@ pub struct ConstraintId(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Origin {
     /// Emitted for a recognised block of this template.
-    Pattern {
-        template: &'static str,
-    },
+    Pattern { template: &'static str },
     /// Emitted from net classes, the substrate, or a cross-block rule.
     NetClass,
     /// Propagated from a symmetry seed (EXT-14).
-    Symmetry {
-        seed: ConstraintId,
-    },
+    Symmetry { seed: ConstraintId },
     /// A shared-bias group (EXT-15).
     SharedBias,
     /// A passive or bipolar set rule (EXT-19), e.g. `"divider"`, `"dac_bank"`.
-    PassiveSet {
-        rule: &'static str,
-    },
+    PassiveSet { rule: &'static str },
     Sensitivity,
     /// Index into the user sidecar (EXT-26).
-    User {
-        index: u32,
-    },
-    Derived {
-        parent: ConstraintId,
-    },
+    User { index: u32 },
+    Derived { parent: ConstraintId },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -328,10 +318,7 @@ mod tests {
 
     #[test]
     fn match_class_orders() {
-        assert!(
-            MatchClass::Minimal < MatchClass::Moderate
-                && MatchClass::Moderate < MatchClass::Exceptional
-        );
+        assert!(MatchClass::Minimal < MatchClass::Moderate && MatchClass::Moderate < MatchClass::Exceptional);
         assert_eq!(MatchClass::default(), MatchClass::Moderate);
     }
 

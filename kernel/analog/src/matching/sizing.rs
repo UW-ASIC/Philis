@@ -48,15 +48,7 @@ pub fn notes(set: &MatchedSet, l: &Layout, class_limit_mv: Option<f32>) -> Vec<S
         let (a0, ai) = set.pair_areas(l, i);
         let have_a = a0.min(ai);
         let members = (u32::from(set.members[0].0), u32::from(set.members[i].0));
-        let mut note = |kind, have, need, lever| {
-            out.push(SizingNote {
-                members,
-                kind,
-                have,
-                need,
-                lever,
-            })
-        };
+        let mut note = |kind, have, need, lever| out.push(SizingNote { members, kind, have, need, lever });
         if let (MatchKind::Voltage, Some(dv), Some(av)) = (set.kind, class_limit_mv, avt) {
             let need = area_need_um2(av, dv);
             if have_a < need {
@@ -65,27 +57,14 @@ pub fn notes(set: &MatchedSet, l: &Layout, class_limit_mv: Option<f32>) -> Vec<S
         }
         if let Budget::Sigma1Mv(b) | Budget::Sigma1Pct(b) = set.budget_in(g.unit) {
             if b > 0.0 && g.sigma_rand > b {
-                let lever = if set.kind == MatchKind::Current {
-                    "length"
-                } else {
-                    "area"
-                };
-                note(
-                    "budget_area",
-                    have_a,
-                    have_a * (g.sigma_rand / b).powi(2),
-                    lever,
-                );
+                let lever = if set.kind == MatchKind::Current { "length" } else { "area" };
+                note("budget_area", have_a, have_a * (g.sigma_rand / b).powi(2), lever);
             }
         }
         if let (Some(av), Some(sv), true) = (avt, set.coeffs.svt_uv_per_um, g.known) {
             let (have, need) = (g.delta_m_nm / 1000.0, dstar_um(av, sv, have_a));
             // ponytail: 0.1 is policy; the source gives only "ignorable below 100 µm²".
-            let lever = if have < 0.1 * need {
-                "distance term non-binding"
-            } else {
-                "distance"
-            };
+            let lever = if have < 0.1 * need { "distance term non-binding" } else { "distance" };
             note("dstar", have, need, lever);
         }
     }
@@ -100,11 +79,7 @@ mod tests {
     /// Voltage pair 0/1, A_VT 9.5, 20 µm² each from the netlist (no units):
     /// σ_rand 2.124 mV over a 1 mV 1σ budget.
     fn voltage() -> MatchedSet {
-        MatchedSet {
-            kind: MatchKind::Voltage,
-            budget: Budget::Sigma1Mv(1.0),
-            ..pair(0, 1)
-        }
+        MatchedSet { kind: MatchKind::Voltage, budget: Budget::Sigma1Mv(1.0), ..pair(0, 1) }
     }
 
     #[test]
@@ -122,28 +97,15 @@ mod tests {
         let l = layout(&[0, 5_000], &[0, 0], 100);
         let n = notes(&voltage(), &l, None);
         assert_eq!(n.len(), 1, "{n:?}");
-        assert_eq!(
-            (n[0].members, n[0].kind, n[0].lever),
-            ((0, 1), "budget_area", "area")
-        );
+        assert_eq!((n[0].members, n[0].kind, n[0].lever), ((0, 1), "budget_area", "area"));
         assert!((n[0].need / n[0].have - 4.51).abs() < 0.01, "{n:?}");
     }
 
     #[test]
     fn mirror_names_length() {
         let l = layout(&[0, 5_000], &[0, 0], 100);
-        let n = notes(
-            &MatchedSet {
-                kind: MatchKind::Current,
-                ..voltage()
-            },
-            &l,
-            None,
-        );
-        assert_eq!(
-            (n.len(), n[0].kind, n[0].lever),
-            (1, "budget_area", "length")
-        );
+        let n = notes(&MatchedSet { kind: MatchKind::Current, ..voltage() }, &l, None);
+        assert_eq!((n.len(), n[0].kind, n[0].lever), (1, "budget_area", "length"));
     }
 
     /// Units drawn, 20 µm² each: D* = 1303 µm; 1 µm apart is non-binding,
@@ -167,14 +129,8 @@ mod tests {
     fn area_note_only_with_class_limit() {
         let l = layout(&[0, 5_000], &[0, 0], 100);
         assert!(notes(&voltage(), &l, None).iter().all(|n| n.kind != "area"));
-        let n: Vec<_> = notes(&voltage(), &l, Some(3.0))
-            .into_iter()
-            .filter(|n| n.kind == "area")
-            .collect();
+        let n: Vec<_> = notes(&voltage(), &l, Some(3.0)).into_iter().filter(|n| n.kind == "area").collect();
         assert_eq!(n.len(), 1);
-        assert!(
-            (n[0].need - 361.0).abs() < 0.1 && n[0].have == 20.0,
-            "{n:?}"
-        );
+        assert!((n[0].need - 361.0).abs() < 0.1 && n[0].have == 20.0, "{n:?}");
     }
 }

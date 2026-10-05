@@ -1,10 +1,10 @@
 //! Antenna ratio (routing tier).
 
-use super::Stack;
-use crate::rule::Rule;
 use pnr_core::geom::Shape;
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
+use crate::rule::Rule;
+use super::Stack;
 
 /// Conductor-area / gate-area ratio on a gate net stays under the limit at
 /// every etch stage (MFG-04): per layer at its own stage from the deck's
@@ -68,34 +68,13 @@ impl Antenna {
     fn worst(self, r: &Routes) -> (f32, f32) {
         // ponytail: O(all shapes) per evaluation; a per-layer spatial index if routing time shows it.
         let foreign = |per_net: &[Vec<Shape>]| {
-            per_net
-                .iter()
-                .enumerate()
-                .filter(|(k, _)| *k != self.net.0 as usize)
-                .flat_map(|(_, v)| v.iter().copied())
-                .collect::<Vec<_>>()
+            per_net.iter().enumerate().filter(|(k, _)| *k != self.net.0 as usize).flat_map(|(_, v)| v.iter().copied()).collect::<Vec<_>>()
         };
         let others = [foreign(&r.wires), foreign(&r.cell)].concat();
-        if let Some(w) = self.stack.and_then(|s| {
-            s.antenna(
-                r.shapes(self.net),
-                r.cell_metal(self.net),
-                &others,
-                r.gate_pins(self.net),
-                self.gate_area_nm2,
-            )
-        }) {
+        if let Some(w) = self.stack.and_then(|s| s.antenna(r.shapes(self.net), r.cell_metal(self.net), &others, r.gate_pins(self.net), self.gate_area_nm2)) {
             return w;
         }
-        let area: i64 = r
-            .shapes(self.net)
-            .iter()
-            .chain(r.cell_metal(self.net))
-            .map(|s| i64::from(s.rect.w) * i64::from(s.rect.h))
-            .sum();
-        (
-            (area * 100 / self.gate_area_nm2.max(1)) as f32 / 100.0,
-            self.max_ratio_x100 as f32 / 100.0,
-        )
+        let area: i64 = r.shapes(self.net).iter().chain(r.cell_metal(self.net)).map(|s| i64::from(s.rect.w) * i64::from(s.rect.h)).sum();
+        ((area * 100 / self.gate_area_nm2.max(1)) as f32 / 100.0, self.max_ratio_x100 as f32 / 100.0)
     }
 }

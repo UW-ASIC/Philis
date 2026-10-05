@@ -35,11 +35,7 @@ impl MetalOverGate {
             .map(|s| {
                 let w = (s.rect.x + s.rect.w).min(g.x + g.w) - s.rect.x.max(g.x);
                 let h = (s.rect.y + s.rect.h).min(g.y + g.h) - s.rect.y.max(g.y);
-                if w > 0 && h > 0 {
-                    i64::from(w) * i64::from(h)
-                } else {
-                    0
-                }
+                if w > 0 && h > 0 { i64::from(w) * i64::from(h) } else { 0 }
             })
             .sum();
         nm2 as f32 * 1e-6
@@ -70,44 +66,13 @@ mod tests {
     fn overlap_is_area_in_um2() {
         let mut metals = [u16::MAX; MAX_METALS];
         metals[0] = 1;
-        let rule = MetalOverGate {
-            rect: Rect {
-                x: 500,
-                y: 0,
-                w: 1_000,
-                h: 1_000,
-            },
-            cell: 0,
-            metals,
-        };
+        let rule = MetalOverGate { rect: Rect { x: 500, y: 0, w: 1_000, h: 1_000 }, cell: 0, metals };
         // 1 000 × 500 nm shape, half (500 × 500) over the gate.
-        let r = Routes {
-            wires: vec![vec![Shape {
-                layer: LayerId(1),
-                rect: Rect {
-                    x: 0,
-                    y: 0,
-                    w: 1_000,
-                    h: 500,
-                },
-            }]],
-            ..Default::default()
-        };
+        let r = Routes { wires: vec![vec![Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 1_000, h: 500 } }]], ..Default::default() };
         assert!((rule.residual(&r) - 0.25).abs() < 1e-6);
         assert!(!rule.satisfied(&r));
         // The same shape on a layer that is no routed metal is not a lead.
-        let cut = Routes {
-            wires: vec![vec![Shape {
-                layer: LayerId(2),
-                rect: Rect {
-                    x: 0,
-                    y: 0,
-                    w: 1_000,
-                    h: 500,
-                },
-            }]],
-            ..Default::default()
-        };
+        let cut = Routes { wires: vec![vec![Shape { layer: LayerId(2), rect: Rect { x: 0, y: 0, w: 1_000, h: 500 } }]], ..Default::default() };
         assert_eq!(rule.residual(&cut), 0.0);
     }
 }

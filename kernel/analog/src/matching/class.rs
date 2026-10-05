@@ -108,24 +108,14 @@ const TIERS: [(&str, &str); 7] = [
     ("lod_moat_ext_nm", "lod_moat_ext_nm tier missing"),
     ("res_dummy_span_nm", "res_dummy_span_nm tier missing"),
     ("res_length_floor_x", "res_length_floor_x tier missing"),
-    (
-        "res_width_floor_permille",
-        "res_width_floor_permille tier missing",
-    ),
+    ("res_width_floor_permille", "res_width_floor_permille tier missing"),
     ("wpe_clearance_nm", "wpe_clearance_nm tier missing"),
 ];
 
 /// `"<key> tier missing"` for each tier key `p` lacks on any class.
 pub fn missing_tiers(p: &dyn Process) -> impl Iterator<Item = &'static str> + '_ {
-    let classes = [
-        MatchClass::Minimal,
-        MatchClass::Moderate,
-        MatchClass::Exceptional,
-    ];
-    TIERS
-        .iter()
-        .filter(move |(k, _)| classes.iter().any(|&c| p.tier(k, c).is_none()))
-        .map(|(_, m)| *m)
+    let classes = [MatchClass::Minimal, MatchClass::Moderate, MatchClass::Exceptional];
+    TIERS.iter().filter(move |(k, _)| classes.iter().any(|&c| p.tier(k, c).is_none())).map(|(_, m)| *m)
 }
 
 /// Whether a matched pair's Φ (common-orientation) check is armed: hard at
@@ -200,55 +190,19 @@ mod tests {
     #[test]
     fn missing_tier_reads_zero_and_is_reported() {
         let e = mos_env(Mod, &NoReach);
-        assert_eq!(
-            e,
-            MosEnv {
-                dummy_reach_nm: 0,
-                moat_nm: 5000,
-                wpe_nm: 3000,
-                gate_ext_extra_nm: 1000,
-                gate_strap: GateStrap::PolyBarFar
-            }
-        );
-        assert_eq!(
-            missing_tiers(&NoReach).collect::<Vec<_>>(),
-            ["dummy_reach_nm tier missing"]
-        );
+        assert_eq!(e, MosEnv { dummy_reach_nm: 0, moat_nm: 5000, wpe_nm: 3000, gate_ext_extra_nm: 1000, gate_strap: GateStrap::PolyBarFar });
+        assert_eq!(missing_tiers(&NoReach).collect::<Vec<_>>(), ["dummy_reach_nm tier missing"]);
     }
 
     #[test]
     fn limits_match_hastings() {
         let cases = [
-            (
-                Family::Mos,
-                MatchKind::Voltage,
-                [Mv(10.0), Mv(3.0), Mv(1.0)],
-            ),
-            (
-                Family::Mos,
-                MatchKind::Current,
-                [Pct(10.0), Pct(3.0), Pct(1.0)],
-            ),
-            (
-                Family::Bipolar,
-                MatchKind::Voltage,
-                [Mv(2.0), Mv(0.5), Mv(0.1)],
-            ),
-            (
-                Family::Bipolar,
-                MatchKind::Current,
-                [Pct(8.0), Pct(2.0), Pct(0.5)],
-            ),
-            (
-                Family::Resistor,
-                MatchKind::Ratio,
-                [Pct(1.0), Pct(0.1), Pct(0.01)],
-            ),
-            (
-                Family::Capacitor,
-                MatchKind::Ratio,
-                [Pct(1.0), Pct(0.1), Pct(0.01)],
-            ),
+            (Family::Mos, MatchKind::Voltage, [Mv(10.0), Mv(3.0), Mv(1.0)]),
+            (Family::Mos, MatchKind::Current, [Pct(10.0), Pct(3.0), Pct(1.0)]),
+            (Family::Bipolar, MatchKind::Voltage, [Mv(2.0), Mv(0.5), Mv(0.1)]),
+            (Family::Bipolar, MatchKind::Current, [Pct(8.0), Pct(2.0), Pct(0.5)]),
+            (Family::Resistor, MatchKind::Ratio, [Pct(1.0), Pct(0.1), Pct(0.01)]),
+            (Family::Capacitor, MatchKind::Ratio, [Pct(1.0), Pct(0.1), Pct(0.01)]),
         ];
         for (f, k, want) in cases {
             for (c, w) in [Min, Mod, Exc].into_iter().zip(want) {

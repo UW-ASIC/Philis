@@ -7,9 +7,8 @@ use pnr_core::layout::Layout;
 
 use crate::matching::class::{Family, MatchClass};
 use crate::matching::mismatch::{
-    bjt_sigma_vbe_mv, mobility_pct, ratio_thermal_pct, sigma_current_pct, sigma_grad_mv,
-    sigma_pair, sigma_voltage_mv, Budget, Coeffs, Ledger, LedgerRow, LedgerUnit, MatchKind,
-    GRADIENT_SHARE,
+    bjt_sigma_vbe_mv, mobility_pct, ratio_thermal_pct, sigma_grad_mv, sigma_current_pct, sigma_pair, sigma_voltage_mv, Budget, Coeffs, Ledger, LedgerRow, LedgerUnit,
+    MatchKind, GRADIENT_SHARE,
 };
 use crate::matching::moments::{cancelled_order, phi_equal, sums, Pt};
 use crate::matching::pattern::{cc_feasible, diffusion_cc_row, Outer};
@@ -55,20 +54,15 @@ pub struct MatchedSet {
 /// 7·cells but is 50 % low within ~L of a heater (card m2-analog-matching-3).
 fn member(l: &Layout, d: DeviceId, hot: bool) -> (crate::matching::moments::Sums, f64, f64, f64) {
     let (mut lw, mut w, mut t) = (0.0f64, 0.0f64, 0.0f64);
-    let s = sums(
-        l.units
-            .of_device(l, d)
-            .inspect(|u| {
-                if u.lod.is_finite() {
-                    lw += u.weight as f64 * f64::from(u.lod);
-                    w += u.weight as f64;
-                }
-                if hot {
-                    t += u.weight as f64 * f64::from(l.rise_at_point_mc(u.x, u.y));
-                }
-            })
-            .map(Pt::from),
-    );
+    let s = sums(l.units.of_device(l, d).inspect(|u| {
+        if u.lod.is_finite() {
+            lw += u.weight as f64 * f64::from(u.lod);
+            w += u.weight as f64;
+        }
+        if hot {
+            t += u.weight as f64 * f64::from(l.rise_at_point_mc(u.x, u.y));
+        }
+    }).map(Pt::from));
     (s, lw, w, t)
 }
 
@@ -88,19 +82,7 @@ impl MatchedSet {
         areas_um2: Vec<f32>,
         tol_nm: f32,
     ) -> MatchedSet {
-        MatchedSet {
-            members,
-            kind,
-            family,
-            class,
-            coeffs,
-            budget,
-            gate_um2: areas_um2,
-            tol_nm,
-            cell_of: Vec::new(),
-            gm_over_id: None,
-            sigma_rand_override: None,
-        }
+        MatchedSet { members, kind, family, class, coeffs, budget, gate_um2: areas_um2, tol_nm, cell_of: Vec::new(), gm_over_id: None, sigma_rand_override: None }
     }
 
     fn cell(&self, d: DeviceId) -> usize {
@@ -123,11 +105,7 @@ impl MatchedSet {
         let at = |s: &crate::matching::moments::Sums, d: DeviceId| {
             s.centroid().unwrap_or_else(|| {
                 let c = self.cell(d);
-                if c < l.x.len() {
-                    (f64::from(l.x[c]), f64::from(l.y[c]))
-                } else {
-                    (0.0, 0.0)
-                }
+                if c < l.x.len() { (f64::from(l.x[c]), f64::from(l.y[c])) } else { (0.0, 0.0) }
             })
         };
         let (ca, cb) = (at(&sa, a), at(&sb, b));
@@ -139,8 +117,7 @@ impl MatchedSet {
         let counts = [sa.n as u16, sb.n as u16];
         let feasible = || {
             if self.family == Family::Mos {
-                diffusion_cc_row(&counts, Outer::Drain).is_some()
-                    || diffusion_cc_row(&counts, Outer::Source).is_some()
+                diffusion_cc_row(&counts, Outer::Drain).is_some() || diffusion_cc_row(&counts, Outer::Source).is_some()
             } else {
                 cc_feasible(&counts)
             }
@@ -157,11 +134,7 @@ impl MatchedSet {
                 .flat_map(|&m| l.units.of_device(l, m))
                 .map(|u| (f64::from(u.x) - c.0).hypot(f64::from(u.y) - c.1))
                 .fold(0.0, f64::max);
-            if reach > 0.0 {
-                (f / reach) as f32
-            } else {
-                0.0
-            }
+            if reach > 0.0 { (f / reach) as f32 } else { 0.0 }
         } else {
             0.0
         };
@@ -175,14 +148,8 @@ impl MatchedSet {
                 // MAT-09: with A_β and G a mirror's ledger is in % (eq. 13.43) and a
                 // pair's σ gains the β share (eq. 13.42); without them, mV as before.
                 match (c.abeta_pct_um.zip(self.gm_over_id), self.kind) {
-                    (Some((ab, g)), MatchKind::Current) => (
-                        LedgerUnit::Pct,
-                        sigma_current_pct(sigma_vt, g, sigma_pair(ab, a0, ai)),
-                    ),
-                    (Some((ab, g)), _) => (
-                        LedgerUnit::Mv,
-                        sigma_voltage_mv(sigma_vt, g, sigma_pair(ab, a0, ai)),
-                    ),
+                    (Some((ab, g)), MatchKind::Current) => (LedgerUnit::Pct, sigma_current_pct(sigma_vt, g, sigma_pair(ab, a0, ai))),
+                    (Some((ab, g)), _) => (LedgerUnit::Mv, sigma_voltage_mv(sigma_vt, g, sigma_pair(ab, a0, ai))),
                     (None, _) => (LedgerUnit::Mv, sigma_vt),
                 }
             }
@@ -201,33 +168,24 @@ impl MatchedSet {
             } else if units {
                 (ta / sa.w - tb / sb.w).abs() as f32
             } else {
-                let rise =
-                    |(x, y): (f64, f64)| l.rise_at_point_mc(x.round() as i32, y.round() as i32);
+                let rise = |(x, y): (f64, f64)| l.rise_at_point_mc(x.round() as i32, y.round() as i32);
                 (rise(ca) - rise(cb)).abs()
             };
             match self.family {
                 Family::Mos => {
                     let s = c.svt_uv_per_um.unwrap_or(0.0);
-                    sigma_grad = sigma_grad_mv(
-                        c.svt_xy.unwrap_or((s, s)),
-                        (ca.0 - cb.0) as f32,
-                        (ca.1 - cb.1) as f32,
-                    );
+                    sigma_grad = sigma_grad_mv(c.svt_xy.unwrap_or((s, s)), (ca.0 - cb.0) as f32, (ca.1 - cb.1) as f32);
                     if units && wa > 0.0 && wb > 0.0 {
-                        mu_lod =
-                            c.kvth0_mv_um.unwrap_or(0.0) * ((lwa / wa - lwb / wb).abs() as f32);
+                        mu_lod = c.kvth0_mv_um.unwrap_or(0.0) * ((lwa / wa - lwb / wb).abs() as f32);
                     }
                     // µV/K · mK → mV.
                     mu_thermal = c.tc_uv_per_k.unwrap_or(0.0) * dt_mk * 1e-6;
                     // mV systematic terms → % of current: ΔI/I = G·ΔV (×0.1 for mV → %).
                     if unit == LedgerUnit::Pct {
                         let k = 0.1 * self.gm_over_id.unwrap_or(0.0);
-                        (sigma_grad, mu_thermal, mu_lod) =
-                            (k * sigma_grad, k * mu_thermal, k * mu_lod);
+                        (sigma_grad, mu_thermal, mu_lod) = (k * sigma_grad, k * mu_thermal, k * mu_lod);
                         // MAT-14: a mirror's β ∝ T^−exp adds by magnitude; an mV ledger has no G for it.
-                        if let (MatchKind::Current, Some(e), Some(t)) =
-                            (self.kind, c.mobility_exp, c.die_temp_k)
-                        {
+                        if let (MatchKind::Current, Some(e), Some(t)) = (self.kind, c.mobility_exp, c.die_temp_k) {
                             mu_thermal += mobility_pct(e, dt_mk / 1e3, t).abs();
                         }
                     }
@@ -238,9 +196,7 @@ impl MatchedSet {
                     mu_thermal = ratio_thermal_pct(c.tc_ppm_per_k.unwrap_or(0.0), dt_mk);
                 }
                 // µV/K · mK → mV.
-                Family::Bipolar | Family::Diode => {
-                    mu_thermal = c.vbe_tc_uv_per_k.unwrap_or(0.0) * dt_mk * 1e-6
-                }
+                Family::Bipolar | Family::Diode => mu_thermal = c.vbe_tc_uv_per_k.unwrap_or(0.0) * dt_mk * 1e-6,
             }
         }
         Ledger {
@@ -260,19 +216,11 @@ impl MatchedSet {
     /// Areas of pair `(0, i)`, µm²: MOS unit weights (gate nm²) when both
     /// members have units, else `gate_um2` (always for R/C/BJT: a resistor
     /// unit's weight is not its area).
-    fn areas(
-        &self,
-        sa: &crate::matching::moments::Sums,
-        sb: &crate::matching::moments::Sums,
-        i: usize,
-    ) -> (f32, f32) {
+    fn areas(&self, sa: &crate::matching::moments::Sums, sb: &crate::matching::moments::Sums, i: usize) -> (f32, f32) {
         if self.family == Family::Mos && sa.w > 0.0 && sb.w > 0.0 {
             ((sa.w / 1e6) as f32, (sb.w / 1e6) as f32)
         } else {
-            (
-                self.gate_um2.first().copied().unwrap_or(0.0),
-                self.gate_um2.get(i).copied().unwrap_or(0.0),
-            )
+            (self.gate_um2.first().copied().unwrap_or(0.0), self.gate_um2.get(i).copied().unwrap_or(0.0))
         }
     }
 
@@ -284,8 +232,7 @@ impl MatchedSet {
     pub fn budget_in(&self, unit: LedgerUnit) -> Budget {
         match (unit, self.gm_over_id, self.budget) {
             (LedgerUnit::Pct, Some(g), b) => b.to_pct(g),
-            (LedgerUnit::Pct, None, Budget::Sigma1Mv(_))
-            | (LedgerUnit::Mv, _, Budget::Sigma1Pct(_)) => Budget::Eta(GRADIENT_SHARE),
+            (LedgerUnit::Pct, None, Budget::Sigma1Mv(_)) | (LedgerUnit::Mv, _, Budget::Sigma1Pct(_)) => Budget::Eta(GRADIENT_SHARE),
             (_, _, b) => b,
         }
     }
@@ -293,11 +240,7 @@ impl MatchedSet {
     /// The areas [`Self::ledger`] reads for pair `(0, i)` on `l`, µm².
     #[must_use]
     pub fn pair_areas(&self, l: &Layout, i: usize) -> (f32, f32) {
-        self.areas(
-            &member(l, self.members[0], false).0,
-            &member(l, self.members[i], false).0,
-            i,
-        )
+        self.areas(&member(l, self.members[0], false).0, &member(l, self.members[i], false).0, i)
     }
 
     fn ledgers<'a>(&'a self, l: &'a Layout) -> impl Iterator<Item = Ledger> + 'a {
@@ -313,34 +256,22 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
         (1..self.members.len())
             .map(|i| self.ledger_with(l, i, false))
             .map(|g| {
-                let thermal = if g.allowance > 0.0 {
-                    (g.mu_thermal / g.allowance).powi(2)
-                } else {
-                    0.0
-                };
+                let thermal = if g.allowance > 0.0 { (g.mu_thermal / g.allowance).powi(2) } else { 0.0 };
                 (g.delta_m_nm * g.delta_m_nm + g.second_order_nm * g.second_order_nm) / r2 + thermal
             })
             .sum()
     }
     fn violations(&self, l: &Layout) -> u32 {
-        self.ledgers(l)
-            .filter(|g| g.known && g.usage() > 1.0)
-            .count() as u32
+        self.ledgers(l).filter(|g| g.known && g.usage() > 1.0).count() as u32
     }
     fn residual(&self, l: &Layout) -> f64 {
-        self.ledgers(l)
-            .filter(|g| g.known)
-            .map(|g| f64::from(g.residual()))
-            .sum()
+        self.ledgers(l).filter(|g| g.known).map(|g| f64::from(g.residual())).sum()
     }
     fn unknown(&self, l: &Layout) -> u32 {
         self.ledgers(l).filter(|g| !g.known).count() as u32
     }
     fn worst_usage(&self, l: &Layout) -> Option<f32> {
-        self.ledgers(l)
-            .filter(|g| g.known)
-            .map(|g| g.usage())
-            .reduce(f32::max)
+        self.ledgers(l).filter(|g| g.known).map(|g| g.usage()).reduce(f32::max)
     }
     fn kind(&self) -> &'static str {
         "MatchedSet"
@@ -358,9 +289,7 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
         out.extend(self.members.iter().map(|&m| self.cell(m) as u32));
     }
     fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
-        let Some((&m0, rest)) = self.members.split_first() else {
-            return;
-        };
+        let Some((&m0, rest)) = self.members.split_first() else { return };
         let c0 = self.cell(m0) as u32;
         out.extend(rest.iter().map(|&m| (c0, self.cell(m) as u32)));
     }
@@ -417,11 +346,7 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
         for i in 1..self.members.len() {
             let g = self.ledger(l, i);
             if g.known {
-                out.push((
-                    u32::from(self.members[0].0),
-                    u32::from(self.members[i].0),
-                    (g.allowance - g.spent()).max(0.0),
-                ));
+                out.push((u32::from(self.members[0].0), u32::from(self.members[i].0), (g.allowance - g.spent()).max(0.0)));
             }
         }
     }
@@ -473,35 +398,15 @@ pub(crate) fn layout(xs: &[i32], ys: &[i32], half: i32) -> Layout {
 
 #[cfg(test)]
 pub(crate) fn unit(owner: u8, x: i32, y: i32, weight: i64) -> pnr_core::Unit {
-    pnr_core::Unit {
-        owner,
-        x,
-        y,
-        weight,
-        phi: (1, 0),
-        sa: 0,
-        sb: 0,
-    }
+    pnr_core::Unit { owner, x, y, weight, phi: (1, 0), sa: 0, sb: 0 }
 }
 
 /// Devices 0 and 1, one 20 µm² unit each, alone in cells 0 and 1 `dx` apart.
 #[cfg(test)]
 pub(crate) fn singles(dx: i32) -> Layout {
     let one = [unit(0, 50, 50, 20_000_000)];
-    let alts = [(
-        pnr_core::Rect {
-            x: 0,
-            y: 0,
-            w: 100,
-            h: 100,
-        },
-        &one[..],
-    )];
-    let lib = pnr_core::UnitLib::build(
-        vec![0, 1],
-        &[vec![DeviceId(0)], vec![DeviceId(1)]],
-        [&alts[..], &alts[..]].into_iter(),
-    );
+    let alts = [(pnr_core::Rect { x: 0, y: 0, w: 100, h: 100 }, &one[..])];
+    let lib = pnr_core::UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &alts[..]].into_iter());
     let mut l = layout(&[0, dx], &[0, 0], 50);
     l.units = std::sync::Arc::new(lib);
     l
@@ -517,29 +422,13 @@ mod tests {
     /// Devices 0 and 1 drawn in one cell (cell 0) over `bbox`.
     fn merged(units: &[Unit], bbox: Rect) -> UnitLib {
         let alts = [(bbox, units)];
-        UnitLib::build(
-            vec![0, 0],
-            &[vec![DeviceId(0), DeviceId(1)]],
-            std::iter::once(&alts[..]),
-        )
+        UnitLib::build(vec![0, 0], &[vec![DeviceId(0), DeviceId(1)]], std::iter::once(&alts[..]))
     }
 
     /// One 800 × 100 cell drawing `order` (owner per unit) at x 100…700.
     fn row(order: [u8; 4]) -> UnitLib {
-        let units: Vec<Unit> = order
-            .iter()
-            .zip([100, 300, 500, 700])
-            .map(|(&o, x)| unit(o, x, 50, 10))
-            .collect();
-        merged(
-            &units,
-            Rect {
-                x: 0,
-                y: 0,
-                w: 800,
-                h: 100,
-            },
-        )
+        let units: Vec<Unit> = order.iter().zip([100, 300, 500, 700]).map(|(&o, x)| unit(o, x, 50, 10)).collect();
+        merged(&units, Rect { x: 0, y: 0, w: 800, h: 100 })
     }
 
     #[test]
@@ -552,14 +441,8 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let r = &rows[0];
         assert_eq!((r.members, r.unit, r.known), ((0, 1), "mV", g.known));
-        assert_eq!(
-            (r.sigma_rand, r.sigma_layout, r.mu_thermal, r.mu_lod),
-            (g.sigma_rand, g.sigma_grad, g.mu_thermal, g.mu_lod)
-        );
-        assert_eq!(
-            (r.allowance, r.usage, r.second_order_nm),
-            (g.allowance, g.usage(), g.second_order_nm)
-        );
+        assert_eq!((r.sigma_rand, r.sigma_layout, r.mu_thermal, r.mu_lod), (g.sigma_rand, g.sigma_grad, g.mu_thermal, g.mu_lod));
+        assert_eq!((r.allowance, r.usage, r.second_order_nm), (g.allowance, g.usage(), g.second_order_nm));
         assert_eq!(r.phi_equal, Some(true));
         assert!(!r.sizing_limited);
         assert_eq!(r.sigma_source, "Pelgrom");
@@ -567,11 +450,7 @@ mod tests {
         s.budget = Budget::Sigma1Mv(1.0);
         rows.clear();
         s.ledger_rows(&l, &mut rows);
-        assert!(
-            (rows[0].sigma_rand - 2.124).abs() < 1e-3,
-            "{}",
-            rows[0].sigma_rand
-        );
+        assert!((rows[0].sigma_rand - 2.124).abs() < 1e-3, "{}", rows[0].sigma_rand);
         assert_eq!(rows[0].allowance, 0.0);
         assert!(rows[0].sizing_limited);
         // ABBA cancels the first moment order (common centroid); AABB none.
@@ -598,10 +477,7 @@ mod tests {
         let g = s.ledger(&l, 1);
         assert!((g.sigma_rand - 2.124).abs() < 1e-3, "{}", g.sigma_rand);
         assert_eq!(rows(&s).sigma_source, "Pelgrom");
-        let s = MatchedSet {
-            sigma_rand_override: Some(1.5),
-            ..pair(0, 1)
-        };
+        let s = MatchedSet { sigma_rand_override: Some(1.5), ..pair(0, 1) };
         let g = s.ledger(&l, 1);
         assert_eq!(g.sigma_rand, 1.5);
         assert!((g.allowance - 0.45).abs() < 1e-6, "{}", g.allowance);
@@ -651,20 +527,8 @@ mod tests {
     fn splitting_a_feasible_pair_into_two_cells_is_no_escape() {
         // ABBA-feasible counts [2, 2], drawn as two 2-unit cells 10 µm apart.
         let two = [unit(0, 25, 50, 10), unit(0, 75, 50, 10)];
-        let alts = [(
-            Rect {
-                x: 0,
-                y: 0,
-                w: 100,
-                h: 100,
-            },
-            &two[..],
-        )];
-        let lib = UnitLib::build(
-            vec![0, 1],
-            &[vec![DeviceId(0)], vec![DeviceId(1)]],
-            [&alts[..], &alts[..]].into_iter(),
-        );
+        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &two[..])];
+        let lib = UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &alts[..]].into_iter());
         let mut l = layout(&[0, 10_000], &[0, 0], 50);
         l.units = Arc::new(lib);
         let s = pair(0, 1);
@@ -681,21 +545,9 @@ mod tests {
     #[test]
     fn ratioed_mos_pair_has_no_coincidence_check() {
         // [1, 2] passes `cc_feasible` but has no diffusion-legal row (MAT-03).
-        let units = [
-            unit(0, 300, 50, 10),
-            unit(1, 100, 50, 10),
-            unit(1, 500, 50, 10),
-        ];
+        let units = [unit(0, 300, 50, 10), unit(1, 100, 50, 10), unit(1, 500, 50, 10)];
         let mut l = layout(&[5_000], &[5_000], 400);
-        l.units = Arc::new(merged(
-            &units,
-            Rect {
-                x: 0,
-                y: 0,
-                w: 800,
-                h: 100,
-            },
-        ));
+        l.units = Arc::new(merged(&units, Rect { x: 0, y: 0, w: 800, h: 100 }));
         let mut s = pair(0, 1);
         assert_eq!(s.ledger(&l, 1).coincidence, None);
         s.family = Family::Resistor;
@@ -726,13 +578,7 @@ mod tests {
     #[test]
     fn units_without_avt_or_a_row_are_unknown() {
         // 1:1 single units admit no row; `Eta` without A_VT has no allowance.
-        let s = MatchedSet {
-            coeffs: Coeffs {
-                avt_mv_um: None,
-                ..pair(0, 1).coeffs
-            },
-            ..pair(0, 1)
-        };
+        let s = MatchedSet { coeffs: Coeffs { avt_mv_um: None, ..pair(0, 1).coeffs }, ..pair(0, 1) };
         let l = singles(1_000_000);
         assert!(!s.ledger(&l, 1).known);
         assert_eq!((s.violations(&l), s.unknown(&l)), (0, 1));
@@ -747,34 +593,10 @@ mod tests {
     /// (centre `cx`, half-extents 10 µm × 500 nm); cell 0 a 10 mW heater at
     /// `hx` with half-extent `hh`.
     fn heated(a: &[i32], b: &[i32], uy: i32, cx: i32, hx: i32, hh: i32) -> Layout {
-        let units: Vec<Unit> = a
-            .iter()
-            .map(|&x| unit(0, x, uy, 10))
-            .chain(b.iter().map(|&x| unit(1, x, uy, 10)))
-            .collect();
-        let heater = [(
-            Rect {
-                x: 0,
-                y: 0,
-                w: 2 * hh,
-                h: 2 * hh,
-            },
-            &[][..],
-        )];
-        let alts = [(
-            Rect {
-                x: 0,
-                y: 0,
-                w: 20_000,
-                h: 1_000,
-            },
-            &units[..],
-        )];
-        let lib = UnitLib::build(
-            vec![1, 1],
-            &[vec![], vec![DeviceId(0), DeviceId(1)]],
-            [&heater[..], &alts[..]].into_iter(),
-        );
+        let units: Vec<Unit> = a.iter().map(|&x| unit(0, x, uy, 10)).chain(b.iter().map(|&x| unit(1, x, uy, 10))).collect();
+        let heater = [(Rect { x: 0, y: 0, w: 2 * hh, h: 2 * hh }, &[][..])];
+        let alts = [(Rect { x: 0, y: 0, w: 20_000, h: 1_000 }, &units[..])];
+        let lib = UnitLib::build(vec![1, 1], &[vec![], vec![DeviceId(0), DeviceId(1)]], [&heater[..], &alts[..]].into_iter());
         let mut l = layout(&[hx, cx], &[0, 0], hh);
         (l.hw[1], l.hh[1]) = (10_000, 500);
         l.power_uw[0] = 10_000;
@@ -803,10 +625,7 @@ mod tests {
         assert!(abba > 0.5 && (abba - 1.003).abs() < 2e-3, "{abba}");
         // `cost` adds (μ/allowance)² over the geometric pull.
         let mut aabb = lay([2_500, 7_500], [12_500, 17_500]);
-        let s = MatchedSet {
-            budget: Budget::Allowance(1.0),
-            ..pair(0, 1)
-        };
+        let s = MatchedSet { budget: Budget::Allowance(1.0), ..pair(0, 1) };
         let hot = s.cost(&aabb);
         aabb.power_uw[0] = 0;
         let heat = hot - s.cost(&aabb);
@@ -822,18 +641,8 @@ mod tests {
     /// 1-row units at x = 0…3 µm, a 10 mW heater (half-extent 1 µm) 8 µm away.
     fn near_heater(order: [u8; 4]) -> Layout {
         let (a, b): (Vec<i32>, Vec<i32>) = {
-            let a = order
-                .iter()
-                .zip([0, 1_000, 2_000, 3_000])
-                .filter(|(&o, _)| o == 0)
-                .map(|(_, x)| x)
-                .collect();
-            let b = order
-                .iter()
-                .zip([0, 1_000, 2_000, 3_000])
-                .filter(|(&o, _)| o == 1)
-                .map(|(_, x)| x)
-                .collect();
+            let a = order.iter().zip([0, 1_000, 2_000, 3_000]).filter(|(&o, _)| o == 0).map(|(_, x)| x).collect();
+            let b = order.iter().zip([0, 1_000, 2_000, 3_000]).filter(|(&o, _)| o == 1).map(|(_, x)| x).collect();
             (a, b)
         };
         // Cell 1 centred at 10 µm: local x + 0 → placed x 0…3 µm; heater at 8 µm.
@@ -848,19 +657,12 @@ mod tests {
         };
         let l = near_heater([0, 0, 1, 1]);
         let (mu, b) = (pair(0, 1).ledger(&l, 1).mu_thermal, brute(&l));
-        assert!(
-            (mu - b).abs() < 1e-3 * b && (b - 0.406).abs() < 0.01,
-            "{mu} vs {b}"
-        );
+        assert!((mu - b).abs() < 1e-3 * b && (b - 0.406).abs() < 0.01, "{mu} vs {b}");
         let l = near_heater([0, 1, 1, 0]);
         let g = pair(0, 1).ledger(&l, 1);
         let b = brute(&l);
         assert_eq!(g.delta_m_nm, 0.0);
-        assert!(
-            (g.mu_thermal - b).abs() < 1e-3 * b && g.mu_thermal > 0.05,
-            "{} vs {b}",
-            g.mu_thermal
-        );
+        assert!((g.mu_thermal - b).abs() < 1e-3 * b && g.mu_thermal > 0.05, "{} vs {b}", g.mu_thermal);
         assert!((b - 0.0637).abs() < 0.005, "{b}");
     }
 
@@ -871,61 +673,23 @@ mod tests {
         let dt = (brute_t(&l, &pa, y) - brute_t(&l, &pb, y)).abs();
         let base = pair(0, 1);
         let pct = |exp| MatchedSet {
-            coeffs: Coeffs {
-                abeta_pct_um: Some(2.2),
-                mobility_exp: exp,
-                die_temp_k: Some(300.0),
-                ..base.coeffs
-            },
+            coeffs: Coeffs { abeta_pct_um: Some(2.2), mobility_exp: exp, die_temp_k: Some(300.0), ..base.coeffs },
             gm_over_id: Some(10.0),
             ..pair(0, 1)
         };
-        let (with, without) = (
-            pct(Some(1.7)).ledger(&l, 1).mu_thermal,
-            pct(None).ledger(&l, 1).mu_thermal,
-        );
+        let (with, without) = (pct(Some(1.7)).ledger(&l, 1).mu_thermal, pct(None).ledger(&l, 1).mu_thermal);
         let want = 1.7 * (dt / 1000.0) / 300.0 * 100.0;
-        assert!(
-            (with - without - want).abs() < 1e-4,
-            "{with} − {without} vs {want}"
-        );
-        let mv = |exp| {
-            MatchedSet {
-                gm_over_id: None,
-                ..pct(exp)
-            }
-            .ledger(&l, 1)
-            .mu_thermal
-        };
+        assert!((with - without - want).abs() < 1e-4, "{with} − {without} vs {want}");
+        let mv = |exp| MatchedSet { gm_over_id: None, ..pct(exp) }.ledger(&l, 1).mu_thermal;
         assert_eq!(mv(Some(1.7)), mv(None));
     }
 
     #[test]
     fn lod_is_weighted_by_unit_area() {
-        let u = |owner, sa, sb, weight| Unit {
-            owner,
-            x: 100,
-            y: 50,
-            weight,
-            phi: (1, 0),
-            sa,
-            sb,
-        };
-        let units = [
-            u(0, 500, 1_500, 10),
-            u(0, 1_000, 1_000, 30),
-            u(1, 1_000, 1_000, 40),
-        ];
+        let u = |owner, sa, sb, weight| Unit { owner, x: 100, y: 50, weight, phi: (1, 0), sa, sb };
+        let units = [u(0, 500, 1_500, 10), u(0, 1_000, 1_000, 30), u(1, 1_000, 1_000, 40)];
         let mut l = layout(&[5_000], &[5_000], 400);
-        l.units = Arc::new(merged(
-            &units,
-            Rect {
-                x: 0,
-                y: 0,
-                w: 800,
-                h: 100,
-            },
-        ));
+        l.units = Arc::new(merged(&units, Rect { x: 0, y: 0, w: 800, h: 100 }));
         let g = pair(0, 1).ledger(&l, 1);
         assert!((g.mu_lod - 1.633).abs() < 1e-3, "{}", g.mu_lod);
     }
@@ -936,22 +700,10 @@ mod tests {
             let units: Vec<Unit> = rows
                 .iter()
                 .enumerate()
-                .flat_map(|(r, o)| {
-                    o.iter()
-                        .zip([0, 1_000, 2_000, 3_000])
-                        .map(move |(&w, x)| unit(w, x, r as i32 * 1_000, 10))
-                })
+                .flat_map(|(r, o)| o.iter().zip([0, 1_000, 2_000, 3_000]).map(move |(&w, x)| unit(w, x, r as i32 * 1_000, 10)))
                 .collect();
             let mut l = layout(&[5_000], &[5_000], 2_000);
-            l.units = Arc::new(merged(
-                &units,
-                Rect {
-                    x: 0,
-                    y: 0,
-                    w: 4_000,
-                    h: 4_000,
-                },
-            ));
+            l.units = Arc::new(merged(&units, Rect { x: 0, y: 0, w: 4_000, h: 4_000 }));
             pair(0, 1).ledger(&l, 1).second_order_nm
         };
         let abba = mk(&[[0, 1, 1, 0]]);
@@ -959,22 +711,9 @@ mod tests {
         assert!(mk(&[[0, 1, 1, 0], [1, 0, 0, 1]]) < 1.0);
         // Diagonal A, anti-diagonal B: equal xx and yy, only xy differs, so
         // F = √2·|Δxy| = 7.07e5 nm² over reach 707 nm.
-        let diag = [
-            unit(0, 0, 0, 10),
-            unit(0, 1_000, 1_000, 10),
-            unit(1, 0, 1_000, 10),
-            unit(1, 1_000, 0, 10),
-        ];
+        let diag = [unit(0, 0, 0, 10), unit(0, 1_000, 1_000, 10), unit(1, 0, 1_000, 10), unit(1, 1_000, 0, 10)];
         let mut l = layout(&[5_000], &[5_000], 2_000);
-        l.units = Arc::new(merged(
-            &diag,
-            Rect {
-                x: 0,
-                y: 0,
-                w: 4_000,
-                h: 4_000,
-            },
-        ));
+        l.units = Arc::new(merged(&diag, Rect { x: 0, y: 0, w: 4_000, h: 4_000 }));
         let so = pair(0, 1).ledger(&l, 1).second_order_nm;
         assert!((so - 1_000.0).abs() < 1.0, "{so}");
     }
@@ -996,10 +735,7 @@ mod tests {
             kind: MatchKind::Current,
             family: Family::Resistor,
             class: MatchClass::Moderate,
-            coeffs: Coeffs {
-                sd_pct_per_mm: Some(1.0),
-                ..Coeffs::default()
-            },
+            coeffs: Coeffs { sd_pct_per_mm: Some(1.0), ..Coeffs::default() },
             budget: Budget::Allowance(0.637),
             gate_um2: vec![0.0, 0.0],
             tol_nm: 5.0,
@@ -1013,10 +749,7 @@ mod tests {
         assert_eq!((out[0].0, out[0].1), (0, 1));
         assert!((out[0].2 - 0.237).abs() < 1e-3, "{:?}", out[0]);
 
-        let s = MatchedSet {
-            budget: Budget::Allowance(0.3),
-            ..s
-        };
+        let s = MatchedSet { budget: Budget::Allowance(0.3), ..s };
         out.clear();
         s.offset_allowances(&l, &mut out);
         assert_eq!(out[0].2, 0.0);
@@ -1034,27 +767,14 @@ mod tests {
         let mv = rows(&base);
         let sigma_vt = sigma_pair(9.5, 20.0, 20.0);
         let sb = sigma_pair(1.0, 20.0, 20.0);
-        let s = MatchedSet {
-            coeffs: Coeffs {
-                abeta_pct_um: Some(1.0),
-                ..base.coeffs
-            },
-            gm_over_id: Some(10.0),
-            ..pair(0, 1)
-        };
+        let s = MatchedSet { coeffs: Coeffs { abeta_pct_um: Some(1.0), ..base.coeffs }, gm_over_id: Some(10.0), ..pair(0, 1) };
         let r = rows(&s);
         assert_eq!(r.unit, "%");
         assert_eq!(r.sigma_rand, sigma_current_pct(sigma_vt, 10.0, sb));
         assert!(r.sigma_rand > 0.1 * 10.0 * sigma_vt + 1e-3, "{r:?}");
-        let r = rows(&MatchedSet {
-            gm_over_id: None,
-            ..s.clone()
-        });
+        let r = rows(&MatchedSet { gm_over_id: None, ..s.clone() });
         assert_eq!((r.unit, r.sigma_rand), ("mV", mv.sigma_rand));
-        let r = rows(&MatchedSet {
-            kind: MatchKind::Voltage,
-            ..s
-        });
+        let r = rows(&MatchedSet { kind: MatchKind::Voltage, ..s });
         assert_eq!(r.unit, "mV");
         assert!(r.sigma_rand > sigma_vt, "{r:?}");
     }
@@ -1068,72 +788,32 @@ mod tests {
             out.remove(0)
         };
         let set = |family, ka| {
-            let coeffs = Coeffs {
-                ka_pct_um: ka,
-                sd_pct_per_mm: Some(1.0),
-                tc_ppm_per_k: Some(100.0),
-                ..Coeffs::default()
-            };
+            let coeffs = Coeffs { ka_pct_um: ka, sd_pct_per_mm: Some(1.0), tc_ppm_per_k: Some(100.0), ..Coeffs::default() };
             let ids = vec![DeviceId(0), DeviceId(1)];
-            MatchedSet::for_family(
-                ids,
-                family,
-                MatchKind::Ratio,
-                MatchClass::Moderate,
-                coeffs,
-                Budget::Eta(0.3),
-                vec![36.0, 36.0],
-                5.0,
-            )
+            MatchedSet::for_family(ids, family, MatchKind::Ratio, MatchClass::Moderate, coeffs, Budget::Eta(0.3), vec![36.0, 36.0], 5.0)
         };
         let r = row(&set(Family::Resistor, Some(2.0)));
         assert_eq!((r.unit, r.known, r.mu_lod), ("%", true, 0.0), "{r:?}");
         // B2: the netlist 36 µm², not the 20 µm² unit weight.
-        assert!(
-            (r.sigma_rand - sigma_pair(2.0, 36.0, 36.0)).abs() < 1e-6,
-            "{r:?}"
-        );
-        assert!(
-            (r.sigma_layout - 1e-3).abs() < 1e-6,
-            "1 %/mm over 1 µm: {r:?}"
-        );
+        assert!((r.sigma_rand - sigma_pair(2.0, 36.0, 36.0)).abs() < 1e-6, "{r:?}");
+        assert!((r.sigma_layout - 1e-3).abs() < 1e-6, "1 %/mm over 1 µm: {r:?}");
         assert!(!row(&set(Family::Resistor, None)).known);
         let r = row(&set(Family::Bipolar, Some(2.0)));
         assert_eq!((r.unit, r.sigma_layout), ("mV", 0.0));
-        assert!(
-            (r.sigma_rand - bjt_sigma_vbe_mv(sigma_pair(2.0, 36.0, 36.0))).abs() < 1e-7,
-            "{r:?}"
-        );
+        assert!((r.sigma_rand - bjt_sigma_vbe_mv(sigma_pair(2.0, 36.0, 36.0))).abs() < 1e-7, "{r:?}");
     }
 
     /// A budget of the other unit with no G is `Eta(GRADIENT_SHARE)`: a % class
     /// on an mV pair, an mV offset on an R/C ratio.
     #[test]
     fn budget_in_never_crosses_units_without_g() {
-        let mv = MatchedSet {
-            budget: Budget::Sigma1Pct(0.5),
-            ..pair(0, 1)
-        };
+        let mv = MatchedSet { budget: Budget::Sigma1Pct(0.5), ..pair(0, 1) };
         assert_eq!(mv.budget_in(LedgerUnit::Mv), Budget::Eta(GRADIENT_SHARE));
-        let mirror = MatchedSet {
-            gm_over_id: Some(10.0),
-            ..mv
-        };
+        let mirror = MatchedSet { gm_over_id: Some(10.0), ..mv };
         assert_eq!(mirror.budget_in(LedgerUnit::Pct), Budget::Sigma1Pct(0.5));
-        let rc = MatchedSet {
-            family: Family::Resistor,
-            budget: Budget::Sigma1Mv(1.0),
-            ..pair(0, 1)
-        };
+        let rc = MatchedSet { family: Family::Resistor, budget: Budget::Sigma1Mv(1.0), ..pair(0, 1) };
         assert_eq!(rc.budget_in(LedgerUnit::Pct), Budget::Eta(GRADIENT_SHARE));
-        assert_eq!(
-            MatchedSet {
-                budget: Budget::Sigma1Pct(0.5),
-                ..rc
-            }
-            .budget_in(LedgerUnit::Pct),
-            Budget::Sigma1Pct(0.5)
-        );
+        assert_eq!(MatchedSet { budget: Budget::Sigma1Pct(0.5), ..rc }.budget_in(LedgerUnit::Pct), Budget::Sigma1Pct(0.5));
     }
 
     #[test]
@@ -1141,30 +821,10 @@ mod tests {
         // Cell 0 is an unrelated device; devices 0 and 1 sit alone in cells 1
         // and 2, 1 mm apart (σ_grad over the allowance, as above).
         let one = [unit(0, 50, 50, 20_000_000)];
-        let other = [(
-            Rect {
-                x: 0,
-                y: 0,
-                w: 100,
-                h: 100,
-            },
-            &[][..],
-        )];
-        let alts = [(
-            Rect {
-                x: 0,
-                y: 0,
-                w: 100,
-                h: 100,
-            },
-            &one[..],
-        )];
+        let other = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &[][..])];
+        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &one[..])];
         let members = [vec![], vec![DeviceId(0)], vec![DeviceId(1)]];
-        let lib = UnitLib::build(
-            vec![1, 2],
-            &members,
-            [&other[..], &alts[..], &alts[..]].into_iter(),
-        );
+        let lib = UnitLib::build(vec![1, 2], &members, [&other[..], &alts[..], &alts[..]].into_iter());
         let mut l = layout(&[0, 0, 1_000_000], &[0; 3], 50);
         l.units = Arc::new(lib);
         let mut s = pair(0, 1);

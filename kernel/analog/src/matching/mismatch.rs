@@ -101,9 +101,7 @@ impl Budget {
     pub fn allowance(self, sigma_rand: f32) -> f32 {
         match self {
             Budget::Eta(eta) => eta * sigma_rand,
-            Budget::Sigma1Mv(b) | Budget::Sigma1Pct(b) => {
-                (b * b - sigma_rand * sigma_rand).max(0.0).sqrt()
-            }
+            Budget::Sigma1Mv(b) | Budget::Sigma1Pct(b) => (b * b - sigma_rand * sigma_rand).max(0.0).sqrt(),
             Budget::Allowance(a) => a,
         }
     }
@@ -127,12 +125,7 @@ impl Budget {
 /// is under sky130's 2.124 mV σ_rand of a 20 µm² pair and would fail every
 /// Moderate pair.
 #[must_use]
-pub fn choose(
-    offset_sigma_mv: Option<f32>,
-    allowance: Option<f32>,
-    class_limit: Option<ClassLimit>,
-    kind: MatchKind,
-) -> Budget {
+pub fn choose(offset_sigma_mv: Option<f32>, allowance: Option<f32>, class_limit: Option<ClassLimit>, kind: MatchKind) -> Budget {
     match (offset_sigma_mv, allowance, class_limit) {
         (Some(b), _, _) => Budget::Sigma1Mv(b),
         (None, Some(a), _) => Budget::Allowance(a),
@@ -302,12 +295,7 @@ mod tests {
 
     #[test]
     fn one_allowance_is_spent_once() {
-        let l = Ledger {
-            mu_thermal: 0.4,
-            mu_lod: 0.4,
-            allowance: 0.637,
-            ..Ledger::default()
-        };
+        let l = Ledger { mu_thermal: 0.4, mu_lod: 0.4, allowance: 0.637, ..Ledger::default() };
         assert!((l.usage() - 1.256).abs() < 1e-3, "{}", l.usage());
         assert!((l.residual() - 0.256).abs() < 1e-3, "{}", l.residual());
     }
@@ -320,36 +308,18 @@ mod tests {
 
     #[test]
     fn class_budget_is_one_sixth_of_the_limit() {
-        assert_eq!(
-            Budget::from_class(ClassLimit::Mv(3.0), MatchKind::Voltage),
-            Budget::Sigma1Mv(0.5)
-        );
-        assert_eq!(
-            Budget::from_class(ClassLimit::Pct(3.0), MatchKind::Current),
-            Budget::Sigma1Pct(0.5)
-        );
-        assert_eq!(
-            Budget::from_class(ClassLimit::Mv(3.0), MatchKind::Current),
-            Budget::Eta(0.3)
-        );
+        assert_eq!(Budget::from_class(ClassLimit::Mv(3.0), MatchKind::Voltage), Budget::Sigma1Mv(0.5));
+        assert_eq!(Budget::from_class(ClassLimit::Pct(3.0), MatchKind::Current), Budget::Sigma1Pct(0.5));
+        assert_eq!(Budget::from_class(ClassLimit::Mv(3.0), MatchKind::Current), Budget::Eta(0.3));
     }
 
     #[test]
     fn role_default_keeps_eta() {
         let v = MatchKind::Voltage;
         assert_eq!(choose(None, None, None, v), Budget::Eta(0.3));
-        assert_eq!(
-            choose(Some(1.0), Some(0.2), Some(ClassLimit::Mv(3.0)), v),
-            Budget::Sigma1Mv(1.0)
-        );
-        assert_eq!(
-            choose(None, Some(0.2), Some(ClassLimit::Mv(3.0)), v),
-            Budget::Allowance(0.2)
-        );
-        assert_eq!(
-            choose(None, None, Some(ClassLimit::Mv(3.0)), v),
-            Budget::Sigma1Mv(0.5)
-        );
+        assert_eq!(choose(Some(1.0), Some(0.2), Some(ClassLimit::Mv(3.0)), v), Budget::Sigma1Mv(1.0));
+        assert_eq!(choose(None, Some(0.2), Some(ClassLimit::Mv(3.0)), v), Budget::Allowance(0.2));
+        assert_eq!(choose(None, None, Some(ClassLimit::Mv(3.0)), v), Budget::Sigma1Mv(0.5));
     }
 
     #[test]
@@ -361,21 +331,13 @@ mod tests {
     fn bjt_eq_10_9() {
         let s = sigma_pair(2.0, 36.0, 36.0);
         assert!((s - 0.333).abs() < 1e-3, "{s}");
-        assert!(
-            (bjt_sigma_vbe_mv(s) - 0.0855).abs() < 5e-4,
-            "{}",
-            bjt_sigma_vbe_mv(s)
-        );
+        assert!((bjt_sigma_vbe_mv(s) - 0.0855).abs() < 5e-4, "{}", bjt_sigma_vbe_mv(s));
     }
 
     #[test]
     fn svt_fit_reproduces_dvp_table_1() {
         for (l, s) in [(0.12, 1.624), (0.24, 0.893), (0.48, 0.580)] {
-            assert!(
-                (svt_of_l(0.1835, 0.03533, l) - s).abs() < 0.01,
-                "{l}: {}",
-                svt_of_l(0.1835, 0.03533, l)
-            );
+            assert!((svt_of_l(0.1835, 0.03533, l) - s).abs() < 0.01, "{l}: {}", svt_of_l(0.1835, 0.03533, l));
         }
     }
 
@@ -403,14 +365,7 @@ mod tests {
 
     #[test]
     fn without_abeta_usage_is_domain_invariant() {
-        let mv = Ledger {
-            sigma_rand: 2.0,
-            sigma_grad: 0.3,
-            mu_thermal: 0.2,
-            mu_lod: 0.1,
-            allowance: Budget::Sigma1Mv(3.0).allowance(2.0),
-            ..Ledger::default()
-        };
+        let mv = Ledger { sigma_rand: 2.0, sigma_grad: 0.3, mu_thermal: 0.2, mu_lod: 0.1, allowance: Budget::Sigma1Mv(3.0).allowance(2.0), ..Ledger::default() };
         for g in [10.0f32, 7.0] {
             let k = 0.1 * g;
             let pct = Ledger {
@@ -422,21 +377,13 @@ mod tests {
                 unit: LedgerUnit::Pct,
                 ..Ledger::default()
             };
-            assert!(
-                (pct.usage() - mv.usage()).abs() < 1e-6,
-                "G {g}: {} vs {}",
-                pct.usage(),
-                mv.usage()
-            );
+            assert!((pct.usage() - mv.usage()).abs() < 1e-6, "G {g}: {} vs {}", pct.usage(), mv.usage());
         }
     }
 
     #[test]
     fn zero_allowance_is_a_violation_not_nan() {
-        let l = Ledger {
-            mu_lod: 0.01,
-            ..Ledger::default()
-        };
+        let l = Ledger { mu_lod: 0.01, ..Ledger::default() };
         assert_eq!(l.residual(), 1.0);
         assert!(l.usage().is_finite());
         assert_eq!(Ledger::default().residual(), 0.0);

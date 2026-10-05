@@ -1,9 +1,9 @@
 //! DC IR drop along a current-carrying net (routing tier, budget).
 
-use super::Stack;
-use crate::rule::Rule;
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
+use crate::rule::Rule;
+use super::Stack;
 
 /// The drop a net's routing adds stays within `max_drop_uv` (PWR-02;
 /// Lampaert 1999 eq. 2.33 as `R ≤ ΔV_max / I`). With every terminal current
@@ -38,10 +38,7 @@ impl IrDrop {
         let all = [shapes, r.cell_metal(self.net)].concat();
         super::current::net_flow(st, &all, r.terminals(self.net))
             .map(|f| f.drop_uv)
-            .or_else(|| {
-                (self.current_ua >= 0 && !shapes.is_empty())
-                    .then(|| self.current_ua as f32 * st.path_resistance_ohm(shapes))
-            })
+            .or_else(|| (self.current_ua >= 0 && !shapes.is_empty()).then(|| self.current_ua as f32 * st.path_resistance_ohm(shapes)))
     }
 }
 
@@ -60,12 +57,10 @@ impl Rule for IrDrop {
     }
     fn residual(self, r: &Routes) -> f32 {
         let budget = self.max_drop_uv as f32;
-        self.drop_uv(r)
-            .map_or(0.0, |d| crate::rule::over(d - budget, budget))
+        self.drop_uv(r).map_or(0.0, |d| crate::rule::over(d - budget, budget))
     }
     fn headroom(self, r: &Routes) -> f32 {
-        self.drop_uv(r)
-            .map_or(1.0, |d| 1.0 - d / (self.max_drop_uv as f32).max(1.0))
+        self.drop_uv(r).map_or(1.0, |d| 1.0 - d / (self.max_drop_uv as f32).max(1.0))
     }
     fn usage(self, r: &Routes) -> Option<f32> {
         Some(self.drop_uv(r)? / (self.max_drop_uv as f32).max(1.0))
@@ -89,65 +84,21 @@ mod tests {
     #[test]
     fn drop_is_current_times_route_resistance() {
         let stack: &'static Stack = Box::leak(Box::new(Stack {
-            layers: vec![
-                Layer {
-                    id: 1,
-                    sheet_ohm: 0.125,
-                    ..Layer::default()
-                },
-                Layer {
-                    id: 2,
-                    sheet_ohm: 4.5,
-                    cut: true,
-                    ..Layer::default()
-                },
-            ],
+            layers: vec![Layer { id: 1, sheet_ohm: 0.125, ..Layer::default() }, Layer { id: 2, sheet_ohm: 4.5, cut: true, ..Layer::default() }],
             antenna_cumulative: false,
-            diode: None,
+        diode: None,
         }));
         let r = Routes {
             wires: vec![vec![
-                Shape {
-                    layer: LayerId(1),
-                    rect: Rect {
-                        x: 0,
-                        y: 0,
-                        w: 10_000,
-                        h: 500,
-                    },
-                },
-                Shape {
-                    layer: LayerId(2),
-                    rect: Rect {
-                        x: 0,
-                        y: 0,
-                        w: 170,
-                        h: 170,
-                    },
-                },
+                Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 10_000, h: 500 } },
+                Shape { layer: LayerId(2), rect: Rect { x: 0, y: 0, w: 170, h: 170 } },
             ]],
             ..Default::default()
         };
-        let ir = |max_drop_uv| IrDrop {
-            net: NetId(0),
-            current_ua: 1_000,
-            max_drop_uv,
-            margin_pct: 20,
-            stack: Some(stack),
-        };
+        let ir = |max_drop_uv| IrDrop { net: NetId(0), current_ua: 1_000, max_drop_uv, margin_pct: 20, stack: Some(stack) };
         assert!(ir(7_000).satisfied(&r) && !ir(6_000).satisfied(&r));
-        assert!(
-            (ir(3_500).residual(&r) - 1.0).abs() < 1e-4,
-            "twice the budget = one budget over"
-        );
-        assert!(
-            !IrDrop {
-                stack: None,
-                ..ir(1)
-            }
-            .known(&r),
-            "no stack: unknown"
-        );
+        assert!((ir(3_500).residual(&r) - 1.0).abs() < 1e-4, "twice the budget = one budget over");
+        assert!(!IrDrop { stack: None, ..ir(1) }.known(&r), "no stack: unknown");
     }
 
     /// REL-04: 1 mA from A to B, 19.8 µm between the pin centres on 0.5 µm
@@ -159,73 +110,21 @@ mod tests {
     #[test]
     fn a_dead_branch_adds_no_drop() {
         let stack: &'static Stack = Box::leak(Box::new(Stack {
-            layers: vec![Layer {
-                id: 1,
-                sheet_ohm: 0.125,
-                ..Layer::default()
-            }],
+            layers: vec![Layer { id: 1, sheet_ohm: 0.125, ..Layer::default() }],
             antenna_cumulative: false,
             diode: None,
         }));
-        let m1 = |x, y, w, h| Shape {
-            layer: LayerId(1),
-            rect: Rect { x, y, w, h },
-        };
-        let wires = vec![
-            m1(0, 0, 10_000, 500),
-            m1(10_000, 0, 10_000, 500),
-            m1(9_750, 500, 500, 50_000),
-        ];
+        let m1 = |x, y, w, h| Shape { layer: LayerId(1), rect: Rect { x, y, w, h } };
+        let wires = vec![m1(0, 0, 10_000, 500), m1(10_000, 0, 10_000, 500), m1(9_750, 500, 500, 50_000)];
         let terms = vec![
-            Terminal {
-                at: Rect {
-                    x: 0,
-                    y: 0,
-                    w: 200,
-                    h: 500,
-                },
-                ua: Some(1_000.0),
-            },
-            Terminal {
-                at: Rect {
-                    x: 19_800,
-                    y: 0,
-                    w: 200,
-                    h: 500,
-                },
-                ua: Some(-1_000.0),
-            },
-            Terminal {
-                at: Rect {
-                    x: 9_750,
-                    y: 50_300,
-                    w: 500,
-                    h: 200,
-                },
-                ua: Some(0.0),
-            },
+            Terminal { at: Rect { x: 0, y: 0, w: 200, h: 500 }, ua: Some(1_000.0) },
+            Terminal { at: Rect { x: 19_800, y: 0, w: 200, h: 500 }, ua: Some(-1_000.0) },
+            Terminal { at: Rect { x: 9_750, y: 50_300, w: 500, h: 200 }, ua: Some(0.0) },
         ];
-        let ir = IrDrop {
-            net: NetId(0),
-            current_ua: 1_000,
-            max_drop_uv: 1,
-            margin_pct: 20,
-            stack: Some(stack),
-        };
-        let bound = ir
-            .drop_uv(&Routes {
-                wires: vec![wires.clone()],
-                ..Default::default()
-            })
-            .unwrap();
+        let ir = IrDrop { net: NetId(0), current_ua: 1_000, max_drop_uv: 1, margin_pct: 20, stack: Some(stack) };
+        let bound = ir.drop_uv(&Routes { wires: vec![wires.clone()], ..Default::default() }).unwrap();
         assert!(bound > 13_000.0, "bound {bound}");
-        let d = ir
-            .drop_uv(&Routes {
-                wires: vec![wires],
-                terms: vec![terms],
-                ..Default::default()
-            })
-            .unwrap();
+        let d = ir.drop_uv(&Routes { wires: vec![wires], terms: vec![terms], ..Default::default() }).unwrap();
         assert!((d - 4_950.0).abs() <= 75.0, "terminal-resolved drop {d}");
     }
 }

@@ -1,12 +1,12 @@
 //! DC electromigration (routing tier, hard), plus the per-layer limit model
 //! the detailed router sizes segments and via arrays with.
 
-use super::current::net_flow;
-use super::Stack;
-use crate::rule::Rule;
 use pnr_core::geom::{Rect, Shape};
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
+use crate::rule::Rule;
+use super::current::net_flow;
+use super::Stack;
 
 /// Boltzmann's constant, eV/K.
 const K_EV: f32 = 8.617e-5;
@@ -39,11 +39,7 @@ impl Limit {
     /// Scale both current limits by a [`derate`] factor.
     #[must_use]
     pub fn derated(self, f: f32) -> Self {
-        Self {
-            ua_per_um: self.ua_per_um * f,
-            ua_per_cut: self.ua_per_cut * f,
-            ..self
-        }
+        Self { ua_per_um: self.ua_per_um * f, ua_per_cut: self.ua_per_cut * f, ..self }
     }
 
     /// Width a segment carrying `i_ua` needs, nm: `w ≥ I/J` (Lienig & Thiele
@@ -126,29 +122,14 @@ fn front_row(cuts: &[&Rect], m: &Rect) -> u32 {
     if m.w == m.h {
         return cuts.len() as u32;
     }
-    let mut c: Vec<i64> = cuts
-        .iter()
-        .map(|r| {
-            if m.w > m.h {
-                2 * r.x as i64 + r.w as i64
-            } else {
-                2 * r.y as i64 + r.h as i64
-            }
-        })
-        .collect();
+    let mut c: Vec<i64> = cuts.iter().map(|r| if m.w > m.h { 2 * r.x as i64 + r.w as i64 } else { 2 * r.y as i64 + r.h as i64 }).collect();
     c.sort_unstable();
-    c.chunk_by(|a, b| a == b)
-        .map(|g| g.len() as u32)
-        .max()
-        .unwrap_or(0)
+    c.chunk_by(|a, b| a == b).map(|g| g.len() as u32).max().unwrap_or(0)
 }
 
 impl Electromigration {
     fn limit(self, layer: u16) -> Option<Limit> {
-        self.limits
-            .iter()
-            .find(|(l, _)| *l == layer)
-            .map(|&(_, lim)| lim)
+        self.limits.iter().find(|(l, _)| *l == layer).map(|&(_, lim)| lim)
     }
 
     /// `(worst residual, worst need/have)` over the routed metal shapes and
@@ -159,10 +140,7 @@ impl Electromigration {
         let (mut worst, mut checked) = ((0.0f32, 0.0f32), false);
         self.walk(r, |_, need, have, ratio| {
             checked = true;
-            worst = (
-                worst.0.max(crate::rule::over(need - have, need)),
-                worst.1.max(ratio),
-            );
+            worst = (worst.0.max(crate::rule::over(need - have, need)), worst.1.max(ratio));
         })?;
         checked.then_some(worst)
     }
@@ -190,9 +168,7 @@ impl Electromigration {
         let all = [routed, r.cell_metal(self.net)].concat();
         let flow = net_flow(stack, &all, r.terminals(self.net))?;
         for (i, (s, &ua)) in routed.iter().zip(&flow.shape_ua).enumerate() {
-            let Some(lim) = self.limit(s.layer.0).filter(|l| l.ua_per_um > 0.0) else {
-                continue;
-            };
+            let Some(lim) = self.limit(s.layer.0).filter(|l| l.ua_per_um > 0.0) else { continue };
             let have = s.rect.w.min(s.rect.h).max(1) as f32;
             let need = lim.width_nm(ua, s.rect.w.max(s.rect.h) as f32);
             f(i, need, have, need / have);
@@ -202,9 +178,7 @@ impl Electromigration {
         // index into `all`), share the group's current.
         let rank = |l: u16| stack.layers.iter().position(|x| x.id == l);
         let lands = |c: &Shape, side: usize| -> Vec<usize> {
-            (0..all.len())
-                .filter(|&m| rank(all[m].layer.0) == Some(side) && all[m].rect.touches(&c.rect))
-                .collect()
+            (0..all.len()).filter(|&m| rank(all[m].layer.0) == Some(side) && all[m].rect.touches(&c.rect)).collect()
         };
         let cuts: Vec<(usize, Limit, Vec<usize>, Vec<usize>)> = routed
             .iter()
@@ -229,10 +203,7 @@ impl Electromigration {
         for i in 0..cuts.len() {
             for j in i + 1..cuts.len() {
                 let (p, q) = (&cuts[i], &cuts[j]);
-                if routed[p.0].layer == routed[q.0].layer
-                    && shares(&p.2, &q.2)
-                    && shares(&p.3, &q.3)
-                {
+                if routed[p.0].layer == routed[q.0].layer && shares(&p.2, &q.2) && shares(&p.3, &q.3) {
                     uf.union(i as u32, j as u32);
                 }
             }
@@ -253,14 +224,8 @@ impl Electromigration {
             for (root, ms) in members.iter().enumerate().filter(|(_, ms)| !ms.is_empty()) {
                 let rects: Vec<&Rect> = ms.iter().map(|&i| &routed[cuts[i].0].rect).collect();
                 let first = &cuts[ms[0]];
-                let front = first
-                    .2
-                    .iter()
-                    .chain(&first.3)
-                    .filter(|m| {
-                        ms.iter()
-                            .all(|&i| cuts[i].2.contains(m) || cuts[i].3.contains(m))
-                    })
+                let front = first.2.iter().chain(&first.3)
+                    .filter(|m| ms.iter().all(|&i| cuts[i].2.contains(m) || cuts[i].3.contains(m)))
                     .map(|&m| front_row(&rects, &all[m].rect))
                     .min();
                 if let Some(n) = front {
@@ -271,12 +236,7 @@ impl Electromigration {
         for (i, cut) in cuts.iter().enumerate() {
             let (have, ua) = group[uf.find(i as u32) as usize];
             let lim = cuts[uf.find(i as u32) as usize].1;
-            f(
-                cut.0,
-                lim.cuts(ua) as f32,
-                have as f32,
-                ua / (lim.ua_per_cut * have as f32),
-            );
+            f(cut.0, lim.cuts(ua) as f32, have as f32, ua / (lim.ua_per_cut * have as f32));
         }
         Some(())
     }
@@ -316,21 +276,11 @@ impl EsdWidth {
     fn check(self, r: &Routes) -> Option<(f32, f32)> {
         let mut worst: Option<(f32, f32)> = None;
         for s in r.shapes(self.net) {
-            let Some(l) = self
-                .stack
-                .layers
-                .iter()
-                .find(|l| l.id == s.layer.0 && !l.cut && l.thickness_nm > 0.0)
-            else {
-                continue;
-            };
+            let Some(l) = self.stack.layers.iter().find(|l| l.id == s.layer.0 && !l.cut && l.thickness_nm > 0.0) else { continue };
             let need = (f64::from(self.area_um2) * 1e6 / f64::from(l.thickness_nm)) as f32;
             let have = s.rect.w.min(s.rect.h).max(1) as f32;
             let (res, q) = worst.unwrap_or((f32::MIN, 0.0));
-            worst = Some((
-                res.max(crate::rule::over(need - have, need)),
-                q.max(need / have),
-            ));
+            worst = Some((res.max(crate::rule::over(need - have, need)), q.max(need / have)));
         }
         worst
     }
@@ -408,24 +358,8 @@ mod tests {
 
     /// met1 (id 1, 0.125 Ω/□), via (2, 4.5 Ω/cut), met2 (3).
     fn stack() -> &'static Stack {
-        let metal = |id| Layer {
-            id,
-            sheet_ohm: 0.125,
-            ..Layer::default()
-        };
-        Box::leak(Box::new(Stack {
-            layers: vec![
-                metal(1),
-                Layer {
-                    id: 2,
-                    sheet_ohm: 4.5,
-                    cut: true,
-                    ..Layer::default()
-                },
-                metal(3),
-            ],
-            ..Stack::default()
-        }))
+        let metal = |id| Layer { id, sheet_ohm: 0.125, ..Layer::default() };
+        Box::leak(Box::new(Stack { layers: vec![metal(1), Layer { id: 2, sheet_ohm: 4.5, cut: true, ..Layer::default() }, metal(3)], ..Stack::default() }))
     }
 
     /// The sky130 values (`pdks/decks/sky130.deck:496-497`) as `em_limits`
@@ -433,57 +367,22 @@ mod tests {
     /// 290 µA/cut, met2 2800 µA/µm keeping `EM.met2_via1`'s 290 µA/cut.
     fn em() -> Electromigration {
         let mut limits = [(u16::MAX, Limit::default()); MAX_LAYERS];
-        limits[0] = (
-            1,
-            Limit {
-                ua_per_um: 2_800.0,
-                ua_per_cut: 360.0,
-                ..Limit::default()
-            },
-        );
-        limits[1] = (
-            2,
-            Limit {
-                ua_per_cut: 290.0,
-                ..Limit::default()
-            },
-        );
-        limits[2] = (
-            3,
-            Limit {
-                ua_per_um: 2_800.0,
-                ua_per_cut: 290.0,
-                ..Limit::default()
-            },
-        );
-        Electromigration {
-            net: NetId(0),
-            limits,
-            stack: Some(stack()),
-            front_row: true,
-        }
+        limits[0] = (1, Limit { ua_per_um: 2_800.0, ua_per_cut: 360.0, ..Limit::default() });
+        limits[1] = (2, Limit { ua_per_cut: 290.0, ..Limit::default() });
+        limits[2] = (3, Limit { ua_per_um: 2_800.0, ua_per_cut: 290.0, ..Limit::default() });
+        Electromigration { net: NetId(0), limits, stack: Some(stack()), front_row: true }
     }
 
     fn shape(layer: u16, x: i32, y: i32, w: i32, h: i32) -> Shape {
-        Shape {
-            layer: LayerId(layer),
-            rect: Rect { x, y, w, h },
-        }
+        Shape { layer: LayerId(layer), rect: Rect { x, y, w, h } }
     }
 
     fn term(x: i32, y: i32, w: i32, h: i32, ua: Option<f32>) -> Terminal {
-        Terminal {
-            at: Rect { x, y, w, h },
-            ua,
-        }
+        Terminal { at: Rect { x, y, w, h }, ua }
     }
 
     fn routes(wires: Vec<Shape>, terms: Vec<Terminal>) -> Routes {
-        Routes {
-            wires: vec![wires],
-            terms: vec![terms],
-            ..Default::default()
-        }
+        Routes { wires: vec![wires], terms: vec![terms], ..Default::default() }
     }
 
     fn need(ua: f32) -> f32 {
@@ -493,14 +392,8 @@ mod tests {
     /// A 1 µm met1 trunk and a 140 nm × 400 nm jog up to B.
     fn jog(b_ua: Option<f32>) -> Routes {
         routes(
-            vec![
-                shape(1, 0, 0, 10_000, 1_000),
-                shape(1, 9_000, 1_000, 140, 400),
-            ],
-            vec![
-                term(0, 400, 200, 200, Some(500.0)),
-                term(9_000, 1_300, 140, 100, b_ua),
-            ],
+            vec![shape(1, 0, 0, 10_000, 1_000), shape(1, 9_000, 1_000, 140, 400)],
+            vec![term(0, 400, 200, 200, Some(500.0)), term(9_000, 1_300, 140, 100, b_ua)],
         )
     }
 
@@ -508,17 +401,10 @@ mod tests {
     fn a_narrow_access_jog_fails_even_if_the_trunk_is_wide() {
         let r = jog(Some(-500.0));
         // need = 500·1000/2800 = 178.6 nm: the trunk has it, the jog does not.
-        assert!(
-            (need(500.0) - 178.6).abs() < 0.05 && need(500.0) <= 1_000.0,
-            "the old best-segment rule passes on the trunk"
-        );
+        assert!((need(500.0) - 178.6).abs() < 0.05 && need(500.0) <= 1_000.0, "the old best-segment rule passes on the trunk");
         let e = em();
         assert!(e.known(&r) && !e.satisfied(&r));
-        assert!(
-            (e.residual(&r) - (178.57 - 140.0) / 178.57).abs() < 1e-3,
-            "{}",
-            e.residual(&r)
-        );
+        assert!((e.residual(&r) - (178.57 - 140.0) / 178.57).abs() < 1e-3, "{}", e.residual(&r));
         assert!((e.residual(&r) - 0.216).abs() < 1e-3);
     }
 
@@ -526,15 +412,7 @@ mod tests {
     fn failing_names_the_violating_shapes() {
         // 1 000 µA end to end needs 357.1 nm: the 200 nm shape fails, the 400 nm one passes.
         let wires = vec![shape(1, 0, 0, 2_000, 200), shape(1, 2_000, 0, 2_000, 400)];
-        let r = |b| {
-            routes(
-                wires.clone(),
-                vec![
-                    term(0, 0, 200, 200, Some(1_000.0)),
-                    term(3_800, 0, 200, 400, b),
-                ],
-            )
-        };
+        let r = |b| routes(wires.clone(), vec![term(0, 0, 200, 200, Some(1_000.0)), term(3_800, 0, 200, 400, b)]);
         assert_eq!(em().failing(&r(Some(-1_000.0))), Some(vec![0]));
         assert_eq!(em().failing(&r(None)), None);
     }
@@ -543,65 +421,26 @@ mod tests {
     fn a_trunk_carries_the_sum_of_its_branches() {
         // Root sink at the trunk's left end; branches up at x = 4 µm (+300)
         // and 8 µm (+200).
-        let wires = vec![
-            shape(1, 0, 0, 10_000, 1_000),
-            shape(1, 4_000, 1_000, 500, 3_000),
-            shape(1, 8_000, 1_000, 500, 3_000),
-        ];
-        let terms = vec![
-            term(0, 400, 200, 200, Some(-500.0)),
-            term(4_000, 3_900, 500, 100, Some(300.0)),
-            term(8_000, 3_900, 500, 100, Some(200.0)),
-        ];
+        let wires = vec![shape(1, 0, 0, 10_000, 1_000), shape(1, 4_000, 1_000, 500, 3_000), shape(1, 8_000, 1_000, 500, 3_000)];
+        let terms = vec![term(0, 400, 200, 200, Some(-500.0)), term(4_000, 3_900, 500, 100, Some(300.0)), term(8_000, 3_900, 500, 100, Some(200.0))];
         let flow = net_flow(stack(), &wires, &terms).unwrap();
         let needs: Vec<f32> = flow.shape_ua.iter().map(|&i| need(i)).collect();
-        assert!(
-            (needs[0] - 178.6).abs() < 0.05,
-            "trunk carries 300 + 200: {needs:?}"
-        );
-        assert!(
-            (needs[1] - 107.1).abs() < 0.05 && (needs[2] - 71.4).abs() < 0.05,
-            "{needs:?}"
-        );
-        assert!(
-            em().known(&routes(wires.clone(), terms.clone()))
-                && em().satisfied(&routes(wires, terms))
-        );
+        assert!((needs[0] - 178.6).abs() < 0.05, "trunk carries 300 + 200: {needs:?}");
+        assert!((needs[1] - 107.1).abs() < 0.05 && (needs[2] - 71.4).abs() < 0.05, "{needs:?}");
+        assert!(em().known(&routes(wires.clone(), terms.clone())) && em().satisfied(&routes(wires, terms)));
     }
 
     #[test]
     fn a_via_group_needs_ceil_i_over_i_cut() {
         // met1 → two via cuts → met2, 700 µA end to end.
-        let wires = vec![
-            shape(1, 0, 0, 5_000, 1_000),
-            shape(2, 4_200, 200, 200, 200),
-            shape(2, 4_600, 600, 200, 200),
-            shape(3, 4_000, 0, 6_000, 1_000),
-        ];
-        let r = routes(
-            wires,
-            vec![
-                term(0, 400, 200, 200, Some(700.0)),
-                term(9_800, 400, 200, 200, Some(-700.0)),
-            ],
-        );
+        let wires = vec![shape(1, 0, 0, 5_000, 1_000), shape(2, 4_200, 200, 200, 200), shape(2, 4_600, 600, 200, 200), shape(3, 4_000, 0, 6_000, 1_000)];
+        let r = routes(wires, vec![term(0, 400, 200, 200, Some(700.0)), term(9_800, 400, 200, 200, Some(-700.0))]);
         assert_eq!(em().limit(2).unwrap().cuts(700.0), 3, "⌈700/290⌉");
         // Front row: the cuts lie along both metals' long axis x, one per column.
-        assert!(
-            (em().residual(&r) - 2.0 / 3.0).abs() < 1e-4,
-            "(3 − 1)/3: {}",
-            em().residual(&r)
-        );
-        let e = Electromigration {
-            front_row: false,
-            ..em()
-        };
+        assert!((em().residual(&r) - 2.0 / 3.0).abs() < 1e-4, "(3 − 1)/3: {}", em().residual(&r));
+        let e = Electromigration { front_row: false, ..em() };
         assert!(e.known(&r) && !e.satisfied(&r));
-        assert!(
-            (e.residual(&r) - 1.0 / 3.0).abs() < 1e-4,
-            "(3 − 2)/3: {}",
-            e.residual(&r)
-        );
+        assert!((e.residual(&r) - 1.0 / 3.0).abs() < 1e-4, "(3 − 2)/3: {}", e.residual(&r));
         // A third cut in the group meets it.
         let mut wide = r.wires[0].clone();
         wide.push(shape(2, 4_200, 600, 200, 200));
@@ -615,19 +454,9 @@ mod tests {
     #[test]
     fn a_metal_with_a_per_cut_limit_is_not_a_via() {
         let e = em();
-        let r = routes(
-            vec![shape(1, 0, 0, 10_000, 1_000)],
-            vec![
-                term(0, 0, 200, 1_000, Some(500.0)),
-                term(9_800, 0, 200, 1_000, Some(-500.0)),
-            ],
-        );
+        let r = routes(vec![shape(1, 0, 0, 10_000, 1_000)], vec![term(0, 0, 200, 1_000, Some(500.0)), term(9_800, 0, 200, 1_000, Some(-500.0))]);
         assert!(e.known(&r) && e.satisfied(&r), "{}", e.residual(&r));
-        assert!(
-            (e.usage(&r).unwrap() - need(500.0) / 1_000.0).abs() < 1e-4,
-            "{:?}",
-            e.usage(&r)
-        );
+        assert!((e.usage(&r).unwrap() - need(500.0) / 1_000.0).abs() < 1e-4, "{:?}", e.usage(&r));
     }
 
     /// `dr`'s via array: each cut lands on its own met2 pad, and every pad
@@ -635,41 +464,20 @@ mod tests {
     /// differ ({pad k, trunk}), yet the three cuts are one group in parallel.
     #[test]
     fn array_cuts_on_separate_pads_over_one_trunk_are_one_group() {
-        let mut wires = vec![
-            shape(1, 0, 0, 5_000, 1_000),
-            shape(3, 4_000, 0, 6_000, 1_000),
-        ];
+        let mut wires = vec![shape(1, 0, 0, 5_000, 1_000), shape(3, 4_000, 0, 6_000, 1_000)];
         for x in [4_200, 4_600, 5_000] {
             wires.push(shape(3, x - 75, 300, 350, 1_200));
             wires.push(shape(2, x, 400, 200, 200));
         }
-        let terms = vec![
-            term(0, 400, 200, 200, Some(700.0)),
-            term(9_800, 400, 200, 200, Some(-700.0)),
-        ];
+        let terms = vec![term(0, 400, 200, 200, Some(700.0)), term(9_800, 400, 200, 200, Some(-700.0))];
         let r = routes(wires.clone(), terms.clone());
         // Front row: the pads touch one cut each; met1 and the trunk run along
         // x, the cuts' row, so one cut faces the current.
-        assert!(
-            (em().residual(&r) - 2.0 / 3.0).abs() < 1e-4,
-            "{}",
-            em().residual(&r)
-        );
-        let e = Electromigration {
-            front_row: false,
-            ..em()
-        };
-        assert!(
-            e.known(&r) && e.satisfied(&r),
-            "⌈700/290⌉ = 3 cuts in one group: {}",
-            e.residual(&r)
-        );
+        assert!((em().residual(&r) - 2.0 / 3.0).abs() < 1e-4, "{}", em().residual(&r));
+        let e = Electromigration { front_row: false, ..em() };
+        assert!(e.known(&r) && e.satisfied(&r), "⌈700/290⌉ = 3 cuts in one group: {}", e.residual(&r));
         // usage = I/(I_cut·n) pins n = 3 (a pad may carry all 700 µA: 250/350 nm).
-        assert!(
-            (e.usage(&r).unwrap() - 700.0 / (290.0 * 3.0)).abs() < 1e-4,
-            "{:?}",
-            e.usage(&r)
-        );
+        assert!((e.usage(&r).unwrap() - 700.0 / (290.0 * 3.0)).abs() < 1e-4, "{:?}", e.usage(&r));
         // Two cuts left: still one group, now short.
         wires.pop();
         assert!((e.residual(&routes(wires, terms)) - 1.0 / 3.0).abs() < 1e-4);
@@ -679,57 +487,25 @@ mod tests {
     /// cuts per column face the current, so 700 µA (3 cuts) is short by one.
     #[test]
     fn a_deep_array_counts_its_front_row() {
-        let mut wires = vec![
-            shape(1, 0, 0, 10_000, 800),
-            shape(3, -100, -100, 1_500, 1_500),
-        ];
+        let mut wires = vec![shape(1, 0, 0, 10_000, 800), shape(3, -100, -100, 1_500, 1_500)];
         for x in [0, 500, 1_000] {
             for y in [0, 500] {
                 wires.push(shape(2, x, y, 200, 200));
             }
         }
-        let r = routes(
-            wires,
-            vec![
-                term(9_800, 0, 200, 800, Some(700.0)),
-                term(500, 1_200, 200, 200, Some(-700.0)),
-            ],
-        );
+        let r = routes(wires, vec![term(9_800, 0, 200, 800, Some(700.0)), term(500, 1_200, 200, 200, Some(-700.0))]);
         let e = em();
         assert!(e.known(&r) && !e.satisfied(&r));
-        assert!(
-            (e.usage(&r).unwrap() - 700.0 / (290.0 * 2.0)).abs() < 1e-4,
-            "{:?}",
-            e.usage(&r)
-        );
-        assert!(
-            (e.residual(&r) - 1.0 / 3.0).abs() < 1e-4,
-            "(3 − 2)/3: {}",
-            e.residual(&r)
-        );
-        let all = Electromigration {
-            front_row: false,
-            ..em()
-        };
-        assert!(
-            all.known(&r) && all.satisfied(&r),
-            "6 ≥ 3: {}",
-            all.residual(&r)
-        );
+        assert!((e.usage(&r).unwrap() - 700.0 / (290.0 * 2.0)).abs() < 1e-4, "{:?}", e.usage(&r));
+        assert!((e.residual(&r) - 1.0 / 3.0).abs() < 1e-4, "(3 − 2)/3: {}", e.residual(&r));
+        let all = Electromigration { front_row: false, ..em() };
+        assert!(all.known(&r) && all.satisfied(&r), "6 ≥ 3: {}", all.residual(&r));
     }
 
     #[test]
     fn hbm_2kv_on_sky130_met1_needs_18_6um() {
-        assert!(
-            (esd_area_um2(2000., 2.7, 2.42) - 6.68).abs() < 0.01,
-            "{}",
-            esd_area_um2(2000., 2.7, 2.42)
-        );
-        assert!(
-            (esd_area_um2(2000., 1.7, 3.45) - 4.44).abs() < 0.01,
-            "{}",
-            esd_area_um2(2000., 1.7, 3.45)
-        );
+        assert!((esd_area_um2(2000., 2.7, 2.42) - 6.68).abs() < 0.01, "{}", esd_area_um2(2000., 2.7, 2.42));
+        assert!((esd_area_um2(2000., 1.7, 3.45) - 4.44).abs() < 0.01, "{}", esd_area_um2(2000., 1.7, 3.45));
         assert_eq!(metal_family(None), metal_family(Some("al")));
         assert_eq!(metal_family(Some("cu")), (1.7, 3.45));
         let need = esd_area_um2(2000., 2.7, 2.42) * 1e6 / 360.0;
@@ -739,20 +515,9 @@ mod tests {
     #[test]
     fn an_esd_net_narrower_than_its_floor_fails() {
         let at = |t: f32| -> &'static Stack {
-            Box::leak(Box::new(Stack {
-                layers: vec![Layer {
-                    id: 1,
-                    thickness_nm: t,
-                    ..Layer::default()
-                }],
-                ..Stack::default()
-            }))
+            Box::leak(Box::new(Stack { layers: vec![Layer { id: 1, thickness_nm: t, ..Layer::default() }], ..Stack::default() }))
         };
-        let rule = |t| EsdWidth {
-            net: NetId(0),
-            area_um2: esd_area_um2(2000., 2.7, 2.42),
-            stack: at(t),
-        };
+        let rule = |t| EsdWidth { net: NetId(0), area_um2: esd_area_um2(2000., 2.7, 2.42), stack: at(t) };
         let one = |w, h| routes(vec![shape(1, 0, 0, w, h)], vec![]);
         let e = rule(360.0);
         // Short side ≥ 18 557 nm passes; 10 000 does not, whatever the length.
@@ -763,11 +528,7 @@ mod tests {
         let r = one(10_000, 9_000);
         assert!(e.known(&r) && !e.satisfied(&r));
         let need = esd_area_um2(2000., 2.7, 2.42) * 1e6 / 360.0;
-        assert!(
-            (e.residual(&r) - (need - 9_000.0) / need).abs() < 1e-3,
-            "{}",
-            e.residual(&r)
-        );
+        assert!((e.residual(&r) - (need - 9_000.0) / need).abs() < 1e-3, "{}", e.residual(&r));
         assert!((e.residual(&r) - (18_557.0 - 9_000.0) / 18_557.0).abs() < 1e-3);
         assert!(!rule(0.0).known(&r), "thickness unknown");
     }
@@ -782,19 +543,9 @@ mod tests {
         let terms = vec![r.terms[0][0], term(12_000, 400, 200, 200, Some(-500.0))];
         let strap = vec![shape(1, 10_000, 450, 2_200, 30)];
         let open = routes(wires.clone(), terms.clone());
-        assert!(
-            !em().known(&open),
-            "the strap is what joins the second terminal"
-        );
-        let r = Routes {
-            cell: vec![strap],
-            ..routes(wires, terms)
-        };
-        assert!(
-            em().known(&r) && em().satisfied(&r),
-            "{}",
-            em().residual(&r)
-        );
+        assert!(!em().known(&open), "the strap is what joins the second terminal");
+        let r = Routes { cell: vec![strap], ..routes(wires, terms) };
+        assert!(em().known(&r) && em().satisfied(&r), "{}", em().residual(&r));
     }
 
     /// A pin on met1 under the met2 it is routed to: the terminal joins its
@@ -802,22 +553,11 @@ mod tests {
     /// cut — never a 0-Ω shortcut to the met2 over it.
     #[test]
     fn a_pin_cut_carries_its_terminal_current() {
-        let mut wires = vec![
-            shape(1, 0, 0, 400, 400),
-            shape(3, 0, 0, 10_000, 400),
-            shape(2, 100, 100, 200, 200),
-        ];
-        let terms = vec![
-            term(0, 0, 400, 400, Some(700.0)),
-            term(9_800, 0, 200, 400, Some(-700.0)),
-        ];
+        let mut wires = vec![shape(1, 0, 0, 400, 400), shape(3, 0, 0, 10_000, 400), shape(2, 100, 100, 200, 200)];
+        let terms = vec![term(0, 0, 400, 400, Some(700.0)), term(9_800, 0, 200, 400, Some(-700.0))];
         let r = routes(wires.clone(), terms.clone());
         assert!(em().known(&r) && !em().satisfied(&r));
-        assert!(
-            (em().residual(&r) - 2.0 / 3.0).abs() < 1e-4,
-            "⌈700/290⌉ = 3 cuts, 1 drawn: {}",
-            em().residual(&r)
-        );
+        assert!((em().residual(&r) - 2.0 / 3.0).abs() < 1e-4, "⌈700/290⌉ = 3 cuts, 1 drawn: {}", em().residual(&r));
         // Without the cut the pin is open, not joined through the met2 over it.
         wires.pop();
         assert!(!em().known(&routes(wires, terms)));
@@ -826,10 +566,7 @@ mod tests {
     #[test]
     fn an_unknown_terminal_current_is_unknown() {
         let r = jog(None);
-        assert!(
-            !em().known(&r) && em().satisfied(&r),
-            "search cannot act on an unknown"
-        );
+        assert!(!em().known(&r) && em().satisfied(&r), "search cannot act on an unknown");
         assert_eq!(em().residual(&r), 0.0);
     }
 
@@ -837,20 +574,8 @@ mod tests {
     fn an_unbalanced_net_charges_the_larger_side() {
         // +300 and +200 on one wire, no sink: the edge carries max(200, 500 − 200).
         let wires = vec![shape(1, 0, 0, 10_000, 500)];
-        let flow = net_flow(
-            stack(),
-            &wires,
-            &[
-                term(0, 0, 200, 500, Some(300.0)),
-                term(9_800, 0, 200, 500, Some(200.0)),
-            ],
-        )
-        .unwrap();
-        assert!(
-            (flow.shape_ua[0] - 300.0).abs() < 1e-3,
-            "{:?}",
-            flow.shape_ua
-        );
+        let flow = net_flow(stack(), &wires, &[term(0, 0, 200, 500, Some(300.0)), term(9_800, 0, 200, 500, Some(200.0))]).unwrap();
+        assert!((flow.shape_ua[0] - 300.0).abs() < 1e-3, "{:?}", flow.shape_ua);
         // Drop end to end: 0.125 Ω/□ · 9.8 µm / 0.5 µm = 2.45 Ω at 300 µA.
         assert!((flow.drop_uv - 735.0).abs() < 0.1, "{}", flow.drop_uv);
     }
@@ -864,20 +589,8 @@ mod tests {
             shape(1, 0, 2_000, 10_000, 200),
             shape(1, 0, 0, 10_000, 200),
         ];
-        let flow = net_flow(
-            stack(),
-            &wires,
-            &[
-                term(0, 1_000, 200, 200, Some(1_000.0)),
-                term(9_800, 1_000, 200, 200, Some(-1_000.0)),
-            ],
-        )
-        .unwrap();
-        assert!(
-            (flow.shape_ua[2] - 1_000.0).abs() < 1e-3 && (flow.shape_ua[3] - 1_000.0).abs() < 1e-3,
-            "{:?}",
-            flow.shape_ua
-        );
+        let flow = net_flow(stack(), &wires, &[term(0, 1_000, 200, 200, Some(1_000.0)), term(9_800, 1_000, 200, 200, Some(-1_000.0))]).unwrap();
+        assert!((flow.shape_ua[2] - 1_000.0).abs() < 1e-3 && (flow.shape_ua[3] - 1_000.0).abs() < 1e-3, "{:?}", flow.shape_ua);
     }
 
     /// Unknown without the stack, without a limit on any routed layer, or
@@ -885,43 +598,15 @@ mod tests {
     #[test]
     fn missing_stack_limit_or_terminals_is_unknown_and_zero_is_known() {
         let r = jog(Some(-500.0));
-        assert!(
-            !Electromigration {
-                stack: None,
-                ..em()
-            }
-            .known(&r),
-            "no stack"
-        );
+        assert!(!Electromigration { stack: None, ..em() }.known(&r), "no stack");
         let mut other = em();
         other.limits = [(u16::MAX, Limit::default()); MAX_LAYERS];
-        other.limits[0] = (
-            3,
-            Limit {
-                ua_per_um: 2_800.0,
-                ..Limit::default()
-            },
-        );
-        assert!(
-            !other.known(&r),
-            "a limit listed for another layer does not apply to met1"
-        );
-        assert!(
-            !em().known(&routes(r.wires[0].clone(), Vec::new())),
-            "no terminals"
-        );
-        let open = routes(
-            r.wires[0].clone(),
-            vec![r.terms[0][0], term(50_000, 0, 10, 10, Some(-500.0))],
-        );
+        other.limits[0] = (3, Limit { ua_per_um: 2_800.0, ..Limit::default() });
+        assert!(!other.known(&r), "a limit listed for another layer does not apply to met1");
+        assert!(!em().known(&routes(r.wires[0].clone(), Vec::new())), "no terminals");
+        let open = routes(r.wires[0].clone(), vec![r.terms[0][0], term(50_000, 0, 10, 10, Some(-500.0))]);
         assert!(!em().known(&open), "an unreached terminal");
-        let zero = routes(
-            r.wires[0].clone(),
-            vec![
-                term(0, 400, 200, 200, Some(0.0)),
-                term(9_000, 1_300, 140, 100, Some(0.0)),
-            ],
-        );
+        let zero = routes(r.wires[0].clone(), vec![term(0, 400, 200, 200, Some(0.0)), term(9_000, 1_300, 140, 100, Some(0.0))]);
         assert!(em().known(&zero) && em().satisfied(&zero));
     }
 
@@ -932,24 +617,13 @@ mod tests {
     fn hotter_never_needs_fewer_cuts_or_less_width() {
         let f = derate(398.0, 378.0, 0.7, 2.0);
         assert!((f - 0.58).abs() < 0.02, "Hastings eq. 15.25 example: {f}");
-        assert_eq!(
-            derate(300.0, 378.0, 0.7, 2.0),
-            1.0,
-            "cooler than the rating is not credited"
-        );
-        let base = Limit {
-            ua_per_um: 1_000.0,
-            ua_per_cut: 100.0,
-            blech: 0.0,
-        };
+        assert_eq!(derate(300.0, 378.0, 0.7, 2.0), 1.0, "cooler than the rating is not credited");
+        let base = Limit { ua_per_um: 1_000.0, ua_per_cut: 100.0, blech: 0.0 };
         let mut prev = (0u32, 0.0f32);
         for t in [378.0, 398.0, 423.0, 448.0] {
             let hot = base.derated(derate(t, 378.0, 0.9, 2.0));
             let now = (hot.cuts(250.0), hot.width_nm(250.0, 0.0));
-            assert!(
-                now.0 >= prev.0 && now.1 >= prev.1,
-                "T {t}: {now:?} after {prev:?}"
-            );
+            assert!(now.0 >= prev.0 && now.1 >= prev.1, "T {t}: {now:?} after {prev:?}");
             prev = now;
         }
         assert_eq!(base.cuts(250.0), 3, "⌈250/100⌉ at the rating");
@@ -960,11 +634,7 @@ mod tests {
     /// a deck Blech product the density limit always applies.
     #[test]
     fn a_short_run_below_the_blech_product_needs_less_width() {
-        let l = Limit {
-            ua_per_um: 1_000.0,
-            ua_per_cut: 0.0,
-            blech: 54_000.0,
-        };
+        let l = Limit { ua_per_um: 1_000.0, ua_per_cut: 0.0, blech: 54_000.0 };
         // 500 µA: I/J = 500 nm. Over 20 µm, I·L/B = 500·20_000/54_000 ≈ 185 nm.
         assert!((l.width_nm(500.0, 20_000.0) - 185.2).abs() < 1.0);
         // A long run is bounded by density again.

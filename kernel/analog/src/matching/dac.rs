@@ -8,12 +8,7 @@
 
 /// Per-slot capacitance, unit-normalised: `Σ 1/(1 + g·(x cosθ + y sinθ))`.
 #[must_use]
-pub fn gradient_caps(
-    units: &[(u8, f64, f64)],
-    slots: usize,
-    g_per_um: f64,
-    theta: f64,
-) -> Vec<f64> {
+pub fn gradient_caps(units: &[(u8, f64, f64)], slots: usize, g_per_um: f64, theta: f64) -> Vec<f64> {
     let (c, s) = (theta.cos(), theta.sin());
     let mut cap = vec![0.0; slots];
     for &(k, x, y) in units {
@@ -31,21 +26,9 @@ pub fn inl_dnl(units: &[(u8, f64, f64)], n_bits: u8, g_per_um: f64, steps: usize
     let codes = 1usize << n;
     let (mut inl, mut dnl) = (0.0f64, 0.0f64);
     for k in 0..steps {
-        let cap = gradient_caps(
-            units,
-            n + 1,
-            g_per_um,
-            k as f64 * std::f64::consts::PI / steps as f64,
-        );
+        let cap = gradient_caps(units, n + 1, g_per_um, k as f64 * std::f64::consts::PI / steps as f64);
         let total: f64 = cap.iter().sum();
-        let t = |c: usize| {
-            (1..=n)
-                .filter(|b| c >> (b - 1) & 1 == 1)
-                .map(|b| cap[b])
-                .sum::<f64>()
-                / total
-                * codes as f64
-        };
+        let t = |c: usize| (1..=n).filter(|b| c >> (b - 1) & 1 == 1).map(|b| cap[b]).sum::<f64>() / total * codes as f64;
         for c in 0..codes {
             inl = inl.max((t(c) - c as f64).abs());
             if c + 1 < codes {
@@ -63,12 +46,7 @@ pub fn inl_dnl(units: &[(u8, f64, f64)], n_bits: u8, g_per_um: f64, steps: usize
 pub fn msys(units: &[(u8, f64, f64)], counts: &[u16], g_per_um: f64, steps: usize) -> f64 {
     let mut worst = 0.0f64;
     for k in 0..steps {
-        let cap = gradient_caps(
-            units,
-            counts.len(),
-            g_per_um,
-            k as f64 * std::f64::consts::PI / steps as f64,
-        );
+        let cap = gradient_caps(units, counts.len(), g_per_um, k as f64 * std::f64::consts::PI / steps as f64);
         let unit0 = cap[0] / f64::from(counts[0]);
         for i in 1..counts.len() {
             worst = worst.max((cap[i] / f64::from(counts[i]) / unit0 - 1.0).abs());
@@ -88,15 +66,10 @@ pub fn second_um2(units: &[(u8, f64, f64)], slots: usize) -> f64 {
         }
         (n > 0.0).then(|| m.map(|v| v / n))
     };
-    let Some(all) = mean(&|_| true) else {
-        return 0.0;
-    };
+    let Some(all) = mean(&|_| true) else { return 0.0 };
     (0..slots)
         .filter_map(|s| mean(&|u| usize::from(u.0) == s))
-        .map(|m| {
-            ((m[0] - all[0]).powi(2) + 2.0 * (m[1] - all[1]).powi(2) + (m[2] - all[2]).powi(2))
-                .sqrt()
-        })
+        .map(|m| ((m[0] - all[0]).powi(2) + 2.0 * (m[1] - all[1]).powi(2) + (m[2] - all[2]).powi(2)).sqrt())
         .fold(0.0, f64::max)
 }
 
@@ -112,15 +85,7 @@ mod tests {
         slots
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| {
-                s.map(|s| {
-                    (
-                        s,
-                        ((i % cols) as f64 - cx) * p,
-                        ((i / cols) as f64 - cy) * p,
-                    )
-                })
-            })
+            .filter_map(|(i, s)| s.map(|s| (s, ((i % cols) as f64 - cx) * p, ((i / cols) as f64 - cy) * p)))
             .collect()
     }
 
@@ -128,15 +93,7 @@ mod tests {
     fn chessboard_inl_not_worse_on_uniform_pitch() {
         let counts = [1, 1, 2, 4, 8, 16];
         for (rows, cols) in [(4, 8), (8, 4)] {
-            let inl = |f| {
-                inl_dnl(
-                    &grid(&counts, rows, cols, f, 2.0),
-                    5,
-                    1e-4,
-                    4 * rows.max(cols),
-                )
-                .0
-            };
+            let inl = |f| inl_dnl(&grid(&counts, rows, cols, f, 2.0), 5, 1e-4, 4 * rows.max(cols)).0;
             let (d, c) = (inl(Fill::Dispersed), inl(Fill::Compact));
             assert!(d < c, "{rows}×{cols}: dispersed {d} vs compact {c}");
         }
@@ -150,12 +107,7 @@ mod tests {
 
     #[test]
     fn msys_second_order_for_exact_cc() {
-        let row = |o: [u8; 4]| {
-            o.iter()
-                .zip([-3.0, -1.0, 1.0, 3.0])
-                .map(|(&s, x)| (s, x, 0.0))
-                .collect::<Vec<_>>()
-        };
+        let row = |o: [u8; 4]| o.iter().zip([-3.0, -1.0, 1.0, 3.0]).map(|(&s, x)| (s, x, 0.0)).collect::<Vec<_>>();
         let abba = msys(&row([0, 1, 1, 0]), &[2, 2], 1e-4, 16);
         let aabb = msys(&row([0, 0, 1, 1]), &[2, 2], 1e-4, 16);
         assert!(abba < 1e-6, "{abba}");

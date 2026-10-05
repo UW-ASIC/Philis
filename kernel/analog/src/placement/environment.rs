@@ -37,11 +37,7 @@ impl Surroundings {
             (a - b).abs() / a.max(b).max(1.0) / ENV_TOL
         };
         let wpe = (self.wpe_min_nm > 0.0).then(|| {
-            let near = self
-                .wpe_nm
-                .iter()
-                .map(|&d| self.wpe_min_nm / d.max(1.0))
-                .fold(0.0f32, f32::max);
+            let near = self.wpe_nm.iter().map(|&d| self.wpe_min_nm / d.max(1.0)).fold(0.0f32, f32::max);
             near.max(skew(self.wpe_nm, 10.0 * self.wpe_min_nm))
         });
         let ose = (self.ose_range_nm > 0.0).then(|| skew(self.ose_nm, self.ose_range_nm));
@@ -62,17 +58,10 @@ impl<S> RuleBatch<S> for Environment {
         self.0.iter().filter_map(Surroundings::usage).sum()
     }
     fn violations(&self, _: &S) -> u32 {
-        self.0
-            .iter()
-            .filter(|s| s.usage().is_some_and(|u| u > 1.0))
-            .count() as u32
+        self.0.iter().filter(|s| s.usage().is_some_and(|u| u > 1.0)).count() as u32
     }
     fn residual(&self, _: &S) -> f64 {
-        self.0
-            .iter()
-            .filter_map(Surroundings::usage)
-            .map(|u| f64::from((u - 1.0).max(0.0)))
-            .sum()
+        self.0.iter().filter_map(Surroundings::usage).map(|u| f64::from((u - 1.0).max(0.0))).sum()
     }
     fn unknown(&self, _: &S) -> u32 {
         self.0.iter().filter(|s| s.usage().is_none()).count() as u32
@@ -84,10 +73,7 @@ impl<S> RuleBatch<S> for Environment {
         self.0.len()
     }
     fn worst_usage(&self, _: &S) -> Option<f32> {
-        self.0
-            .iter()
-            .filter_map(Surroundings::usage)
-            .reduce(f32::max)
+        self.0.iter().filter_map(Surroundings::usage).reduce(f32::max)
     }
 }
 
@@ -122,18 +108,11 @@ impl LiveEnvironment {
         let geo = &*self.geo;
         let placed = |well: bool, c: usize| {
             let v = usize::from(l.variant.get(c).copied().unwrap_or(0));
-            (if well { &geo.wells } else { &geo.diffs })[c][v]
-                .iter()
-                .map(move |&r| place_rect(geo.bbox[c][v], r, l, c))
+            (if well { &geo.wells } else { &geo.diffs })[c][v].iter().map(move |&r| place_rect(geo.bbox[c][v], r, l, c))
         };
-        let wells: Vec<Rect> = extra_wells
-            .iter()
-            .copied()
-            .chain((0..n).flat_map(|c| placed(true, c)))
-            .collect();
+        let wells: Vec<Rect> = extra_wells.iter().copied().chain((0..n).flat_map(|c| placed(true, c))).collect();
         let diffs: Vec<Vec<Rect>> = (0..n).map(|c| placed(false, c).collect()).collect();
-        let inside =
-            |r: &Rect, (x, y): (i32, i32)| r.x <= x && x <= r.x + r.w && r.y <= y && y <= r.y + r.h;
+        let inside = |r: &Rect, (x, y): (i32, i32)| r.x <= x && x <= r.x + r.w && r.y <= y && y <= r.y + r.h;
         let covered = |p: (i32, i32)| wells.iter().any(|r| inside(r, p));
         let gap = |r: &Rect, (x, y): (i32, i32)| {
             let dx = (r.x - x).max(x - (r.x + r.w)).max(0);
@@ -145,26 +124,14 @@ impl LiveEnvironment {
         // well edge (projections onto every edge, and the corners).
         let wpe = |p: (i32, i32)| -> f32 {
             if !covered(p) {
-                return wells
-                    .iter()
-                    .map(|r| gap(r, p))
-                    .fold(f32::INFINITY, f32::min);
+                return wells.iter().map(|r| gap(r, p)).fold(f32::INFINITY, f32::min);
             }
             let mut best = f32::INFINITY;
             for r in &wells {
                 let (x0, x1, y0, y1) = (r.x, r.x + r.w, r.y, r.y + r.h);
                 let cx = p.0.clamp(x0, x1);
                 let cy = p.1.clamp(y0, y1);
-                for q in [
-                    (x0 - 1, cy),
-                    (x1 + 1, cy),
-                    (cx, y0 - 1),
-                    (cx, y1 + 1),
-                    (x0 - 1, y0 - 1),
-                    (x1 + 1, y0 - 1),
-                    (x0 - 1, y1 + 1),
-                    (x1 + 1, y1 + 1),
-                ] {
+                for q in [(x0 - 1, cy), (x1 + 1, cy), (cx, y0 - 1), (cx, y1 + 1), (x0 - 1, y0 - 1), (x1 + 1, y0 - 1), (x0 - 1, y1 + 1), (x1 + 1, y1 + 1)] {
                     if !covered(q) {
                         best = best.min(f64::from(q.0 - p.0).hypot(f64::from(q.1 - p.1)) as f32);
                     }
@@ -178,20 +145,12 @@ impl LiveEnvironment {
             f64::from(dx).hypot(f64::from(dy)) as f32
         };
         let mean_wpe = |d: DeviceId| {
-            let (s, n) = l.units.of_device(l, d).fold((0.0f32, 0u32), |(s, n), u| {
-                (s + wpe((u.x, u.y)).min(1e7), n + 1)
-            });
-            if n == 0 {
-                f32::INFINITY
-            } else {
-                s / n as f32
-            }
+            let (s, n) = l.units.of_device(l, d).fold((0.0f32, 0u32), |(s, n), u| (s + wpe((u.x, u.y)).min(1e7), n + 1));
+            if n == 0 { f32::INFINITY } else { s / n as f32 }
         };
         let ose = |c: u16| {
             let c = usize::from(c);
-            let Some(own) = diffs.get(c) else {
-                return f32::INFINITY;
-            };
+            let Some(own) = diffs.get(c) else { return f32::INFINITY };
             (0..diffs.len())
                 .filter(|&o| o != c)
                 .flat_map(|o| &diffs[o])
@@ -254,44 +213,16 @@ mod tests {
 
     #[test]
     fn near_or_unequal_surroundings_spend_the_budget() {
-        let far = Surroundings {
-            wpe_nm: [f32::INFINITY; 2],
-            ose_nm: [f32::INFINITY; 2],
-            wpe_min_nm: 3_000.0,
-            ose_range_nm: 3_000.0,
-        };
+        let far = Surroundings { wpe_nm: [f32::INFINITY; 2], ose_nm: [f32::INFINITY; 2], wpe_min_nm: 3_000.0, ose_range_nm: 3_000.0 };
         assert_eq!(far.usage(), Some(0.0), "nothing nearby");
-        let wpe = Surroundings {
-            wpe_nm: [1_500.0, 1_500.0],
-            ..far
-        };
-        assert!(
-            (wpe.usage().unwrap() - 2.0).abs() < 1e-6,
-            "a well edge at half the floor"
-        );
-        let ose = Surroundings {
-            ose_nm: [500.0, 2_000.0],
-            ..far
-        };
-        assert!(
-            ose.usage().unwrap() > 1.0,
-            "one member crowded by foreign diffusion, the other not"
-        );
-        let even = Surroundings {
-            ose_nm: [500.0, 520.0],
-            ..far
-        };
+        let wpe = Surroundings { wpe_nm: [1_500.0, 1_500.0], ..far };
+        assert!((wpe.usage().unwrap() - 2.0).abs() < 1e-6, "a well edge at half the floor");
+        let ose = Surroundings { ose_nm: [500.0, 2_000.0], ..far };
+        assert!(ose.usage().unwrap() > 1.0, "one member crowded by foreign diffusion, the other not");
+        let even = Surroundings { ose_nm: [500.0, 520.0], ..far };
         assert!(even.usage().unwrap() < 1.0, "crowded alike: matched");
-        let blind = Surroundings {
-            wpe_min_nm: 0.0,
-            ose_range_nm: 0.0,
-            ..ose
-        };
-        assert_eq!(
-            blind.usage(),
-            None,
-            "a deck without the ranges: unknown, not a pass"
-        );
+        let blind = Surroundings { wpe_min_nm: 0.0, ose_range_nm: 0.0, ..ose };
+        assert_eq!(blind.usage(), None, "a deck without the ranges: unknown, not a pass");
     }
 
     use pnr_core::{Unit, UnitLib};
@@ -299,18 +230,8 @@ mod tests {
     /// Cells a, b (1000², diff = bbox, one unit at the centre, devices 0/1)
     /// and c (2000×1000, nwell = bbox, no diff); a, b at x = 500, 3500.
     fn env() -> LiveEnvironment {
-        let sq = Rect {
-            x: 0,
-            y: 0,
-            w: 1000,
-            h: 1000,
-        };
-        let wide = Rect {
-            x: 0,
-            y: 0,
-            w: 2000,
-            h: 1000,
-        };
+        let sq = Rect { x: 0, y: 0, w: 1000, h: 1000 };
+        let wide = Rect { x: 0, y: 0, w: 2000, h: 1000 };
         LiveEnvironment {
             pairs: vec![(DeviceId(0), DeviceId(1), 0, 1)],
             geo: std::sync::Arc::new(EnvGeo {
@@ -324,36 +245,11 @@ mod tests {
     }
 
     fn layout(cx: i32) -> Layout {
-        let unit = [Unit {
-            owner: 0,
-            x: 500,
-            y: 500,
-            weight: 1,
-            phi: (1, 0),
-            sa: 0,
-            sb: 0,
-        }];
-        let sq = Rect {
-            x: 0,
-            y: 0,
-            w: 1000,
-            h: 1000,
-        };
+        let unit = [Unit { owner: 0, x: 500, y: 500, weight: 1, phi: (1, 0), sa: 0, sb: 0 }];
+        let sq = Rect { x: 0, y: 0, w: 1000, h: 1000 };
         let one = [(sq, &unit[..])];
-        let none = [(
-            Rect {
-                x: 0,
-                y: 0,
-                w: 2000,
-                h: 1000,
-            },
-            &[][..],
-        )];
-        let units = UnitLib::build(
-            vec![0, 1],
-            &[vec![DeviceId(0)], vec![DeviceId(1)], vec![]],
-            [&one[..], &one[..], &none[..]].into_iter(),
-        );
+        let none = [(Rect { x: 0, y: 0, w: 2000, h: 1000 }, &[][..])];
+        let units = UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)], vec![]], [&one[..], &one[..], &none[..]].into_iter());
         Layout {
             x: vec![500, 3500, cx],
             y: vec![500; 3],
@@ -385,19 +281,7 @@ mod tests {
     #[test]
     fn ring_wells_join_the_report_only() {
         let (env, l) = (env(), layout(41_000));
-        assert_eq!(
-            env.surroundings_with(
-                &l,
-                &[Rect {
-                    x: 4000,
-                    y: 0,
-                    w: 1000,
-                    h: 1000
-                }]
-            )[0]
-            .wpe_nm[1],
-            500.0
-        );
+        assert_eq!(env.surroundings_with(&l, &[Rect { x: 4000, y: 0, w: 1000, h: 1000 }])[0].wpe_nm[1], 500.0);
         assert!(env.surroundings(&l)[0].wpe_nm[1] > 30_000.0);
     }
 }

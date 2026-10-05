@@ -43,34 +43,14 @@ impl PlateRatio {
     #[must_use]
     pub fn lead_af(&self, r: &Routes) -> Vec<f32> {
         let a = self.set.array;
-        let inside = |s: &Shape| {
-            s.rect.x >= a.x
-                && s.rect.y >= a.y
-                && s.rect.x + s.rect.w <= a.x + a.w
-                && s.rect.y + s.rect.h <= a.y + a.h
-        };
+        let inside = |s: &Shape| s.rect.x >= a.x && s.rect.y >= a.y && s.rect.x + s.rect.w <= a.x + a.w && s.rect.y + s.rect.h <= a.y + a.h;
         self.set
             .bits
             .iter()
             .map(|&(bit, _)| {
-                let lead: Vec<Shape> = r
-                    .shapes(bit)
-                    .iter()
-                    .copied()
-                    .filter(|s| !inside(s))
-                    .collect();
+                let lead: Vec<Shape> = r.shapes(bit).iter().copied().filter(|s| !inside(s)).collect();
                 let b = bit.0 as usize;
-                let coupled: f32 = (0..r.wires.len())
-                    .filter(|&m| m != b)
-                    .map(|m| {
-                        net_pair_af(
-                            Some(self.stack),
-                            &lead,
-                            &r.wires[m],
-                            &screens_but(r, &[b, m]),
-                        )
-                    })
-                    .sum();
+                let coupled: f32 = (0..r.wires.len()).filter(|&m| m != b).map(|m| net_pair_af(Some(self.stack), &lead, &r.wires[m], &screens_but(r, &[b, m]))).sum();
                 self.stack.ground_af(&lead) + coupled
             })
             .collect()
@@ -79,20 +59,14 @@ impl PlateRatio {
     /// `C_i / n_i` per bit, aF.
     #[must_use]
     pub fn per_unit_af(&self, r: &Routes) -> Vec<f32> {
-        self.lead_af(r)
-            .iter()
-            .zip(&self.set.bits)
-            .map(|(&c, &(_, n))| c / n.max(1) as f32)
-            .collect()
+        self.lead_af(r).iter().zip(&self.set.bits).map(|(&c, &(_, n))| c / n.max(1) as f32).collect()
     }
 
     /// Spread of the per-unit lead C over one unit's C, percent; `None`
     /// when unknown (no unit C, or a bit unrouted).
     #[must_use]
     pub fn spread_pct(&self, r: &Routes) -> Option<f32> {
-        let known = self.set.c_unit_af.is_finite()
-            && self.set.c_unit_af > 0.0
-            && self.set.bits.iter().all(|&(b, _)| !r.shapes(b).is_empty());
+        let known = self.set.c_unit_af.is_finite() && self.set.c_unit_af > 0.0 && self.set.bits.iter().all(|&(b, _)| !r.shapes(b).is_empty());
         if !known || self.set.bits.is_empty() {
             return None;
         }
@@ -103,8 +77,7 @@ impl PlateRatio {
 
     fn residual(&self, r: &Routes) -> f32 {
         let tol = self.tol_pct10 as f32 / 10.0;
-        self.spread_pct(r)
-            .map_or(0.0, |s| crate::rule::over(s - tol, tol))
+        self.spread_pct(r).map_or(0.0, |s| crate::rule::over(s - tol, tol))
     }
 }
 
@@ -149,12 +122,7 @@ impl RuleBatch<Routes> for PlateRatios {
     /// Top against every bit: `space_nm` apart, never stacked (C_TB).
     fn separations(&self, out: &mut Vec<(u32, u32, i32, bool)>) {
         for p in &self.0 {
-            out.extend(
-                p.set
-                    .bits
-                    .iter()
-                    .map(|b| (u32::from(p.set.top.0), u32::from(b.0 .0), p.space_nm, true)),
-            );
+            out.extend(p.set.bits.iter().map(|b| (u32::from(p.set.top.0), u32::from(b.0 .0), p.space_nm, true)));
         }
     }
 }
@@ -168,16 +136,7 @@ mod tests {
     /// Ground C only (30 aF/µm², no fringe, negligible lateral `ε·t`): a
     /// lead's C is its area.
     pub(crate) fn area_stack() -> &'static Stack {
-        Box::leak(Box::new(Stack {
-            layers: vec![Layer {
-                id: 1,
-                area_af_um2: 30.0,
-                lateral: 1e-9,
-                ..Layer::default()
-            }],
-            antenna_cumulative: false,
-            diode: None,
-        }))
+        Box::leak(Box::new(Stack { layers: vec![Layer { id: 1, area_af_um2: 30.0, lateral: 1e-9, ..Layer::default() }], antenna_cumulative: false, diode: None }))
     }
 
     /// Bits of 1/2/4/8 units with equal 10 µm met1 leads, 20 µm apart: per
@@ -185,60 +144,19 @@ mod tests {
     /// the spread is far over 1 %.
     #[test]
     fn lead_capacitance_is_equalised_per_unit() {
-        let set = PlateSet {
-            top: NetId(0),
-            bits: [1, 2, 4, 8]
-                .iter()
-                .enumerate()
-                .map(|(i, &n)| (NetId(i as u16 + 1), n))
-                .collect(),
-            c_unit_af: 1_000.0,
-            array: Rect {
-                x: 0,
-                y: 0,
-                w: 100_000,
-                h: 1_000,
-            },
-        };
-        let rule = PlateRatio {
-            set,
-            tol_pct10: 10,
-            stack: area_stack(),
-            space_nm: 140,
-        };
+        let set = PlateSet { top: NetId(0), bits: [1, 2, 4, 8].iter().enumerate().map(|(i, &n)| (NetId(i as u16 + 1), n)).collect(), c_unit_af: 1_000.0, array: Rect { x: 0, y: 0, w: 100_000, h: 1_000 } };
+        let rule = PlateRatio { set, tol_pct10: 10, stack: area_stack(), space_nm: 140 };
         let mut wires = vec![Vec::new()];
         for i in 0..4 {
-            wires.push(vec![Shape {
-                layer: LayerId(1),
-                rect: Rect {
-                    x: i * 20_000,
-                    y: 1_000,
-                    w: 260,
-                    h: 10_000,
-                },
-            }]);
+            wires.push(vec![Shape { layer: LayerId(1), rect: Rect { x: i * 20_000, y: 1_000, w: 260, h: 10_000 } }]);
         }
-        let r = Routes {
-            wires,
-            ..Default::default()
-        };
+        let r = Routes { wires, ..Default::default() };
         let per = rule.per_unit_af(&r);
-        assert!(
-            (per[0] - 78.0).abs() < 0.1 && (per[3] - 9.75).abs() < 0.1,
-            "{per:?}"
-        );
+        assert!((per[0] - 78.0).abs() < 0.1 && (per[3] - 9.75).abs() < 0.1, "{per:?}");
         assert!(rule.spread_pct(&r).unwrap() > 1.0);
         assert!(PlateRatios(vec![rule.clone()]).violations(&r) == 1);
         let mut seps = Vec::new();
         PlateRatios(vec![rule]).separations(&mut seps);
-        assert_eq!(
-            seps,
-            vec![
-                (0, 1, 140, true),
-                (0, 2, 140, true),
-                (0, 3, 140, true),
-                (0, 4, 140, true)
-            ]
-        );
+        assert_eq!(seps, vec![(0, 1, 140, true), (0, 2, 140, true), (0, 3, 140, true), (0, 4, 140, true)]);
     }
 }

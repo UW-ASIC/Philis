@@ -39,11 +39,7 @@ impl Rule for HeatSeparation {
         }
     }
     fn retarget(self, cell_of: &[u16]) -> Self {
-        Self {
-            victim: self.victim.retarget(cell_of),
-            source: self.source.retarget(cell_of),
-            ..self
-        }
+        Self { victim: self.victim.retarget(cell_of), source: self.source.retarget(cell_of), ..self }
     }
 }
 
@@ -52,11 +48,7 @@ impl Rule for HeatSeparation {
 /// (k = 1 µm/mW = 1 nm/µW for Moderate and Exceptional; Exceptional is policy).
 /// `sets` are cell-indexed; a set merged into one cell is one victim.
 #[must_use]
-pub fn separations(
-    sets: &[(MatchClass, Vec<u16>)],
-    power_uw: &[i32],
-    source_uw: i32,
-) -> Vec<HeatSeparation> {
+pub fn separations(sets: &[(MatchClass, Vec<u16>)], power_uw: &[i32], source_uw: i32) -> Vec<HeatSeparation> {
     let mut out = Vec::new();
     for (_, cells) in sets.iter().filter(|(c, _)| *c != MatchClass::Minimal) {
         let mut victims = cells.clone();
@@ -67,11 +59,7 @@ pub fn separations(
                 continue;
             }
             for &v in &victims {
-                out.push(HeatSeparation {
-                    victim: Target::Device(DeviceId(v)),
-                    source: Target::Device(DeviceId(s as u16)),
-                    min_gap_nm: p,
-                });
+                out.push(HeatSeparation { victim: Target::Device(DeviceId(v)), source: Target::Device(DeviceId(s as u16)), min_gap_nm: p });
             }
         }
     }
@@ -88,15 +76,10 @@ mod tests {
         let set = |c| [(c, vec![0u16, 1])];
         let r = separations(&set(MatchClass::Moderate), &[0, 0, 2000], 1000);
         assert_eq!(r.len(), 2);
-        assert!(r
-            .iter()
-            .all(|h| h.min_gap_nm == 2000 && h.source == Target::Device(DeviceId(2))));
+        assert!(r.iter().all(|h| h.min_gap_nm == 2000 && h.source == Target::Device(DeviceId(2))));
         assert!(separations(&set(MatchClass::Minimal), &[0, 0, 2000], 1000).is_empty());
         assert!(separations(&set(MatchClass::Moderate), &[0, 0, 999], 1000).is_empty());
-        assert!(
-            separations(&set(MatchClass::Moderate), &[2000, 0, 0], 1000).is_empty(),
-            "source inside the set"
-        );
+        assert!(separations(&set(MatchClass::Moderate), &[2000, 0, 0], 1000).is_empty(), "source inside the set");
     }
 
     #[test]
@@ -116,11 +99,7 @@ mod tests {
             temp_mc: vec![0; 2],
             units: Default::default(),
         };
-        let h = HeatSeparation {
-            victim: Target::Device(DeviceId(0)),
-            source: Target::Device(DeviceId(1)),
-            min_gap_nm: 2000,
-        };
+        let h = HeatSeparation { victim: Target::Device(DeviceId(0)), source: Target::Device(DeviceId(1)), min_gap_nm: 2000 };
         assert!(!h.satisfied(&at(1999)));
         assert!(h.residual(&at(1999)) > 0.0);
         assert!(h.satisfied(&at(2000)));

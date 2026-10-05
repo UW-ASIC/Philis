@@ -1,8 +1,8 @@
 //! Deep-trench isolation banding (placement tier).
 
-use crate::rule::Rule;
 use pnr_core::ids::{BranchId, Target};
 use pnr_core::layout::Layout;
+use crate::rule::Rule;
 
 /// Two devices either abut (gap `≤ s_max`, one shared trench) or fully
 /// separate (gap `≥ d_dti`); the band between is illegal.
@@ -32,10 +32,7 @@ impl DtiBand {
     /// Committed side; an unsized `Layout::branch` reads as share.
     #[inline]
     fn isolating(self, l: &Layout) -> bool {
-        l.branch
-            .get(self.branch.0 as usize)
-            .copied()
-            .unwrap_or(false)
+        l.branch.get(self.branch.0 as usize).copied().unwrap_or(false)
     }
 
     /// Distance, nm, to the committed side's interval.
@@ -85,11 +82,7 @@ impl Rule for DtiBand {
         }
     }
     fn retarget(self, cell_of: &[u16]) -> Self {
-        Self {
-            a: self.a.retarget(cell_of),
-            b: self.b.retarget(cell_of),
-            ..self
-        }
+        Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
     }
     fn branch(self) -> Option<(BranchId, bool)> {
         Some((self.branch, self.seed_isolate))
@@ -139,48 +132,22 @@ mod tests {
         // Same geometry, opposite instructions: `share` measures the distance still to
         // close (1100 − 200), `isolate` the distance still to open (2000 − 1100).
         // Both are 900 nm of an 1800 nm band: (900/1800)² = 0.25.
-        assert!(
-            (share - 0.25).abs() < 1e-6,
-            "share should pull together: {share}"
-        );
-        assert!(
-            (isolate - 0.25).abs() < 1e-6,
-            "isolate should push apart: {isolate}"
-        );
+        assert!((share - 0.25).abs() < 1e-6, "share should pull together: {share}");
+        assert!((isolate - 0.25).abs() < 1e-6, "isolate should push apart: {isolate}");
 
         // The discriminating case, and the one the old band-penetration metric could not
         // express: move the pair *closer* and the two branches disagree about whether it
         // improved. A branch-free penalty peaks mid-band and falls off both ways, so it
         // called this an improvement unconditionally (PLAN §4b).
         let closer = 400;
-        assert!(
-            rule().cost(&bench(closer, false)) < share,
-            "closer is better when sharing"
-        );
-        assert!(
-            rule().cost(&bench(closer, true)) > isolate,
-            "closer is worse when isolating"
-        );
+        assert!(rule().cost(&bench(closer, false)) < share, "closer is better when sharing");
+        assert!(rule().cost(&bench(closer, true)) > isolate, "closer is worse when isolating");
 
         // Each branch bottoms out on its own interval, and only on its own.
-        assert_eq!(
-            rule().cost(&bench(100, false)),
-            0.0,
-            "abutting satisfies `share`"
-        );
-        assert!(
-            rule().cost(&bench(100, true)) > 0.0,
-            "abutting does not satisfy `isolate`"
-        );
-        assert_eq!(
-            rule().cost(&bench(3_000, true)),
-            0.0,
-            "far apart satisfies `isolate`"
-        );
-        assert!(
-            rule().cost(&bench(3_000, false)) > 0.0,
-            "far apart does not satisfy `share`"
-        );
+        assert_eq!(rule().cost(&bench(100, false)), 0.0, "abutting satisfies `share`");
+        assert!(rule().cost(&bench(100, true)) > 0.0, "abutting does not satisfy `isolate`");
+        assert_eq!(rule().cost(&bench(3_000, true)), 0.0, "far apart satisfies `isolate`");
+        assert!(rule().cost(&bench(3_000, false)) > 0.0, "far apart does not satisfy `share`");
     }
 
     #[test]
@@ -196,18 +163,9 @@ mod tests {
         // violation would make Φ rise on the move that resolves a pending flip, and
         // Φ-monotone acceptance in `dp` would reject exactly that move.
         for &isolate in &[false, true] {
-            assert!(
-                rule().satisfied(&bench(100, isolate)),
-                "abutting is legal (share side)"
-            );
-            assert!(
-                rule().satisfied(&bench(3_000, isolate)),
-                "separated is legal (isolate side)"
-            );
-            assert!(
-                !rule().satisfied(&bench(1_100, isolate)),
-                "mid-band is never legal"
-            );
+            assert!(rule().satisfied(&bench(100, isolate)), "abutting is legal (share side)");
+            assert!(rule().satisfied(&bench(3_000, isolate)), "separated is legal (isolate side)");
+            assert!(!rule().satisfied(&bench(1_100, isolate)), "mid-band is never legal");
         }
         // ...and the residual agrees with `satisfied`, not with the branch: zero on both
         // components, positive only inside the band.
@@ -224,16 +182,8 @@ mod tests {
         // A batch of `DtiBand`s hands the consumer exactly its `(id, seed)` pairs, in
         // rule order — the seam `dp`'s flip move seeds `Layout::branch` from.
         let batch = vec![
-            DtiBand {
-                branch: BranchId(0),
-                seed_isolate: false,
-                ..rule()
-            },
-            DtiBand {
-                branch: BranchId(1),
-                seed_isolate: true,
-                ..rule()
-            },
+            DtiBand { branch: BranchId(0), seed_isolate: false, ..rule() },
+            DtiBand { branch: BranchId(1), seed_isolate: true, ..rule() },
         ];
         let mut out = Vec::new();
         batch.branches(&mut out);

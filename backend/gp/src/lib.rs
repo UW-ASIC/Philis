@@ -68,13 +68,7 @@ const LAMBDA_MAX: f32 = 64.0;
 
 impl Default for Prices {
     fn default() -> Self {
-        Self {
-            priced: BTreeMap::new(),
-            weight: Vec::new(),
-            drift: f64::INFINITY,
-            steps: 0,
-            saturated: Vec::new(),
-        }
+        Self { priced: BTreeMap::new(), weight: Vec::new(), drift: f64::INFINITY, steps: 0, saturated: Vec::new() }
     }
 }
 
@@ -93,9 +87,7 @@ impl Prices {
     /// Bind carried prices to this epoch's batch order (no dual step).
     pub fn bind(&mut self, reqs: &Requirements<Layout>) {
         debug_assert!(
-            reqs.budget
-                .iter()
-                .all(|b| reqs.hard.iter().all(|h| h.kind() != b.kind())),
+            reqs.budget.iter().all(|b| reqs.hard.iter().all(|h| h.kind() != b.kind())),
             "gp::Prices: a batch kind is registered in both `hard` and `budget`"
         );
         self.weight = keys(reqs)
@@ -122,8 +114,7 @@ impl Prices {
             let g = if r > 0.0 {
                 r
             } else {
-                b.worst_usage(l)
-                    .map_or(-(1.0 - b.criticality(l)), |u| (u - 1.0).min(0.0))
+                b.worst_usage(l).map_or(-(1.0 - b.criticality(l)), |u| (u - 1.0).min(0.0))
             };
             let p = self.priced.entry(key).or_insert(Price {
                 lambda: 0.0,
@@ -214,15 +205,8 @@ pub const RAIL_MIN: f32 = 0.1;
 /// chain4 +6%, rc_filter +7% at seed 1). Kept on that later data; re-measure
 /// over seeds whenever routing changes.
 #[must_use]
-pub fn net_weights(
-    classes: &[analog::metadata::NetClassification],
-    sens: &[(pnr_core::NetId, f32)],
-    current_ua: &[Option<i32>],
-) -> Vec<f32> {
-    let mut raw: Vec<Option<f32>> = classes
-        .iter()
-        .map(|c| c.c_budget_af.filter(|&b| b > 0).map(|b| 1.0 / b as f32))
-        .collect();
+pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr_core::NetId, f32)], current_ua: &[Option<i32>]) -> Vec<f32> {
+    let mut raw: Vec<Option<f32>> = classes.iter().map(|c| c.c_budget_af.filter(|&b| b > 0).map(|b| 1.0 / b as f32)).collect();
     let mut from_perf = vec![0.0f32; raw.len()];
     for &(n, w) in sens {
         if let Some(s) = from_perf.get_mut(usize::from(n.0)) {
@@ -234,26 +218,11 @@ pub fn net_weights(
             *r = Some(s);
         }
     }
-    let rail = |i: usize| {
-        matches!(
-            classes[i].class,
-            analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground
-        )
-    };
-    let known: Vec<f32> = raw
-        .iter()
-        .enumerate()
-        .filter(|&(i, _)| !rail(i))
-        .filter_map(|(_, r)| *r)
-        .collect();
+    let rail = |i: usize| matches!(classes[i].class, analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground);
+    let known: Vec<f32> = raw.iter().enumerate().filter(|&(i, _)| !rail(i)).filter_map(|(_, r)| *r).collect();
     let mean = known.iter().sum::<f32>() / known.len().max(1) as f32;
     let ua = |i: usize| current_ua.get(i).copied().flatten();
-    let i_ref = (0..classes.len())
-        .filter(|&i| rail(i))
-        .filter_map(ua)
-        .max()
-        .unwrap_or(0)
-        .max(1) as f32;
+    let i_ref = (0..classes.len()).filter(|&i| rail(i)).filter_map(ua).max().unwrap_or(0).max(1) as f32;
     raw.iter()
         .enumerate()
         .map(|(i, r)| match (rail(i), ua(i)) {
@@ -282,22 +251,13 @@ impl PlaceRules {
     /// One scalar `clearance` between every pair (no profiles).
     #[must_use]
     pub fn uniform(grid: i32, clearance: i32) -> Self {
-        Self::new(
-            grid,
-            spacing::SpacingTable::uniform(clearance, grid),
-            spacing::Profiles::default(),
-        )
+        Self::new(grid, spacing::SpacingTable::uniform(clearance, grid), spacing::Profiles::default())
     }
 
     /// `profiles.of[cell]` indexes like the layout's cells.
     #[must_use]
     pub fn new(grid: i32, spacing: spacing::SpacingTable, profiles: spacing::Profiles) -> Self {
-        PlaceRules {
-            grid,
-            far: spacing.max_gap(),
-            spacing: Arc::new(spacing),
-            profiles: Arc::new(profiles),
-        }
+        PlaceRules { grid, far: spacing.max_gap(), spacing: Arc::new(spacing), profiles: Arc::new(profiles) }
     }
 
     fn profile(&self, l: &Layout, c: usize) -> Option<&spacing::Profile> {
@@ -320,10 +280,7 @@ impl PlaceRules {
             std::cmp::Ordering::Greater => t.gap(pb, f, pa).min,
             std::cmp::Ordering::Equal => t.gap(pa, f, pb).min.max(t.gap(pb, f, pa).min),
         };
-        (
-            along(l.x[a], l.x[b], spacing::Face::R),
-            along(l.y[a], l.y[b], spacing::Face::T),
-        )
+        (along(l.x[a], l.x[b], spacing::Face::R), along(l.y[a], l.y[b], spacing::Face::T))
     }
 
     /// Spacing-inflated overlap of `a` and `b`, nm²:
@@ -333,9 +290,7 @@ impl PlaceRules {
     pub fn encroach(&self, l: &Layout, a: usize, b: usize) -> f64 {
         // Pairs farther apart than any rule reaches skip the profile lookup.
         let far = self.far;
-        if (l.x[a] - l.x[b]).abs() >= l.hw[a] + l.hw[b] + far
-            || (l.y[a] - l.y[b]).abs() >= l.hh[a] + l.hh[b] + far
-        {
+        if (l.x[a] - l.x[b]).abs() >= l.hw[a] + l.hw[b] + far || (l.y[a] - l.y[b]).abs() >= l.hh[a] + l.hh[b] + far {
             return 0.0;
         }
         let (gx, gy) = self.gaps(l, a, b);
@@ -352,17 +307,14 @@ impl PlaceRules {
     #[must_use]
     pub fn encroachment(&self, l: &Layout) -> f64 {
         let n = l.x.len();
-        (0..n)
-            .flat_map(|a| (a + 1..n).map(move |b| (a, b)))
-            .fold(0.0, |t, (a, b)| t + self.encroach(l, a, b))
+        (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).fold(0.0, |t, (a, b)| t + self.encroach(l, a, b))
     }
 
     /// Room cell `c` can owe past its bbox ([`spacing::SpacingTable::halo`]);
     /// `fallback` without a profile.
     #[must_use]
     pub fn halo(&self, l: &Layout, c: usize) -> i32 {
-        self.profile(l, c)
-            .map_or(self.spacing.fallback, |p| self.spacing.halo(p))
+        self.profile(l, c).map_or(self.spacing.fallback, |p| self.spacing.halo(p))
     }
 }
 
@@ -406,24 +358,11 @@ pub struct GpInput<'a> {
 /// what the analytic loop adds (neither mode moves prices; the epoch's one dual
 /// step is the caller's, after dp).
 pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) {
-    let &GpInput {
-        macros,
-        variants,
-        assignment,
-        reqs,
-        rules,
-        net_weight,
-        n_axes,
-        power_uw,
-        iterate,
-        ..
-    } = inp;
+    let &GpInput { macros, variants, assignment, reqs, rules, net_weight, n_axes, power_uw, iterate, .. } = inp;
     let n = macros.len();
     let mut rng = SplitMix64::new(seed);
     // gp does not search variants: it keeps the caller's, dp reshapes.
-    let variant: Vec<u16> = (0..n)
-        .map(|i| assignment.get(i).copied().unwrap_or(0))
-        .collect();
+    let variant: Vec<u16> = (0..n).map(|i| assignment.get(i).copied().unwrap_or(0)).collect();
     let drawn = choose_variants(macros, variants, &variant);
     prices.bind(reqs);
 
@@ -537,11 +476,7 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
         // (d) momentum step, largest gradient moves ~step·span. A step that
         // raises hard-rule Φ is undone, momentum killed, step halved. Overlap
         // is deliberately not in this gate: the start is a pile at the centre.
-        let gmax = gx
-            .iter()
-            .chain(&gy)
-            .fold(0.0f32, |m, g| m.max(g.abs()))
-            .max(1e-6);
+        let gmax = gx.iter().chain(&gy).fold(0.0f32, |m, g| m.max(g.abs())).max(1e-6);
         let scale = step * span / gmax;
         let before_phi = analog_phi(reqs, &l);
         save_axis.clone_from(&l.axis);
@@ -558,12 +493,7 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
             let (s, k) = pairs
                 .iter()
                 .filter(|p| usize::from(p.2) == id && (p.0 as usize) < n && (p.1 as usize) < n)
-                .fold((0i64, 0i64), |(s, k), p| {
-                    (
-                        s + i64::from(l.x[p.0 as usize]) + i64::from(l.x[p.1 as usize]),
-                        k + 2,
-                    )
-                });
+                .fold((0i64, 0i64), |(s, k), p| (s + i64::from(l.x[p.0 as usize]) + i64::from(l.x[p.1 as usize]), k + 2));
             if k > 0 {
                 l.axis[id] = snap((s / k) as i32, rules.grid);
             }
@@ -595,16 +525,11 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
 
 /// Σ bin overflow area over total device area.
 fn bin_overflow(util: &[f32], l: &Layout, bw: f32) -> f32 {
-    let total: f32 = (0..l.x.len())
-        .map(|i| 4.0 * l.hw[i] as f32 * l.hh[i] as f32)
-        .sum();
+    let total: f32 = (0..l.x.len()).map(|i| 4.0 * l.hw[i] as f32 * l.hh[i] as f32).sum();
     if total <= 0.0 {
         return 0.0;
     }
-    util.iter()
-        .map(|&u| (u - TARGET_UTIL).max(0.0) * bw * bw)
-        .sum::<f32>()
-        / total
+    util.iter().map(|&u| (u - TARGET_UTIL).max(0.0) * bw * bw).sum::<f32>() / total
 }
 
 #[cfg(test)]
@@ -678,10 +603,7 @@ mod price_tests {
         // No dual step yet ⇒ no price, and explicitly *not* stationary.
         prices.bind(&reqs);
         assert_eq!(prices.weight_of(0), 0.0);
-        assert!(
-            prices.drift().is_infinite(),
-            "a fresh Prices must not read as settled"
-        );
+        assert!(prices.drift().is_infinite(), "a fresh Prices must not read as settled");
 
         // `x[0] = 1000` pins the residual at one full budget, so it never shrinks.
         let mut weights = Vec::new();
@@ -750,10 +672,7 @@ mod price_tests {
         while last > 0.0 {
             prices.settle(&reqs, &l);
             let w = prices.weight_of(0);
-            assert!(
-                w < last,
-                "the price must fall every slack epoch: {w} after {last}"
-            );
+            assert!(w < last, "the price must fall every slack epoch: {w} after {last}");
             last = w;
             relaxing += 1;
             assert!(relaxing < 100, "price never reached zero: {last}");
@@ -775,22 +694,12 @@ mod price_tests {
         reqs.budget.push(Box::new(vec![Budget]));
         let mut prices = Prices::new();
         prices.settle(&reqs, &l);
-        assert!(
-            prices.saturated().is_empty(),
-            "one step does not reach the cap"
-        );
+        assert!(prices.saturated().is_empty(), "one step does not reach the cap");
         for _ in 1..30 {
             prices.settle(&reqs, &l);
         }
-        assert_eq!(
-            (prices.weight_of(0), prices.weight_of(1)),
-            (LAMBDA_MAX, LAMBDA_MAX)
-        );
-        assert_eq!(
-            prices.saturated(),
-            [reqs.budget[0].kind()],
-            "the capped kind is reported binding, once"
-        );
+        assert_eq!((prices.weight_of(0), prices.weight_of(1)), (LAMBDA_MAX, LAMBDA_MAX));
+        assert_eq!(prices.saturated(), [reqs.budget[0].kind()], "the capped kind is reported binding, once");
         assert_eq!(prices.steps(), 30);
     }
 
@@ -811,18 +720,11 @@ mod price_tests {
             cost: Vec::new(),
         };
         prices.bind(&grown);
-        assert_eq!(
-            prices.weight_of(0),
-            paid,
-            "the surviving batch kept its price"
-        );
+        assert_eq!(prices.weight_of(0), paid, "the surviving batch kept its price");
         assert_eq!(prices.weight_of(1), 0.0, "the new batch starts unpriced");
     }
 
-    fn tagged(
-        id: u32,
-        inner: Box<dyn analog::RuleBatch<Layout>>,
-    ) -> Box<dyn analog::RuleBatch<Layout>> {
+    fn tagged(id: u32, inner: Box<dyn analog::RuleBatch<Layout>>) -> Box<dyn analog::RuleBatch<Layout>> {
         Box::new(analog::rule::Tagged {
             meta: analog::intent::BatchMeta {
                 id: analog::intent::ConstraintId(id),
@@ -851,10 +753,7 @@ mod price_tests {
         prices.settle(&reqs, &l);
         let wa = prices.weight_of(0);
         let wb = prices.weight_of(1);
-        assert!(
-            wa > 0.0 && wa != wb,
-            "distinct batches must price distinctly: {wa} vs {wb}"
-        );
+        assert!(wa > 0.0 && wa != wb, "distinct batches must price distinctly: {wa} vs {wb}");
 
         let swapped = Requirements {
             hard: Vec::new(),
@@ -865,16 +764,8 @@ mod price_tests {
             cost: Vec::new(),
         };
         prices.bind(&swapped);
-        assert_eq!(
-            prices.weight_of(0),
-            wb,
-            "id 2 kept its price after the swap"
-        );
-        assert_eq!(
-            prices.weight_of(1),
-            wa,
-            "id 1 kept its price after the swap"
-        );
+        assert_eq!(prices.weight_of(0), wb, "id 2 kept its price after the swap");
+        assert_eq!(prices.weight_of(1), wa, "id 1 kept its price after the swap");
     }
 
     /// Untagged batches keep today's position-derived keying: a swap moves
@@ -900,11 +791,7 @@ mod price_tests {
             cost: Vec::new(),
         };
         prices.bind(&swapped);
-        assert_eq!(
-            prices.weight_of(0),
-            wa,
-            "position 0 keeps wa (today's position keying)"
-        );
+        assert_eq!(prices.weight_of(0), wa, "position 0 keeps wa (today's position keying)");
     }
 }
 
@@ -914,12 +801,7 @@ mod weight_tests {
     use pnr_core::NetId;
 
     fn class(net: u16, c_budget_af: Option<i64>) -> NetClassification {
-        NetClassification {
-            net: NetId(net),
-            class: NetClass::Signal,
-            c_budget_af,
-            max_coupling_af: None,
-        }
+        NetClassification { net: NetId(net), class: NetClass::Signal, c_budget_af, max_coupling_af: None }
     }
 
     #[test]
@@ -927,10 +809,7 @@ mod weight_tests {
         let classes = [class(0, Some(1_000)), class(1, Some(4_000)), class(2, None)];
         let w = super::net_weights(&classes, &[], &[]);
         assert!(w[0] > w[1], "1 fF budget outweighs 4 fF: {w:?}");
-        assert!(
-            (w[0] + w[1] - 2.0).abs() < 1e-5,
-            "mean 1 over weighted nets"
-        );
+        assert!((w[0] + w[1] - 2.0).abs() < 1e-5, "mean 1 over weighted nets");
         assert_eq!(w[2], 1.0, "an unbudgeted signal net keeps unit weight");
 
         // A spec that feels net 1 hardest overrides its class weight.
@@ -939,24 +818,14 @@ mod weight_tests {
     }
 
     fn rail(net: u16, class: NetClass, c_budget_af: Option<i64>) -> NetClassification {
-        NetClassification {
-            net: NetId(net),
-            class,
-            c_budget_af,
-            max_coupling_af: None,
-        }
+        NetClassification { net: NetId(net), class, c_budget_af, max_coupling_af: None }
     }
 
     /// PLC-17: a rail pulls by its op current over the largest rail's,
     /// floored at `RAIL_MIN`; no current reads `RAIL_UNKNOWN`.
     #[test]
     fn supply_weight_scales_with_current() {
-        let classes = [
-            rail(0, NetClass::Supply, None),
-            rail(1, NetClass::Ground, None),
-            rail(2, NetClass::Supply, None),
-            class(3, Some(1_000)),
-        ];
+        let classes = [rail(0, NetClass::Supply, None), rail(1, NetClass::Ground, None), rail(2, NetClass::Supply, None), class(3, Some(1_000))];
         let w = super::net_weights(&classes, &[], &[Some(100), Some(1_000), None, None]);
         assert!((w[0] - 0.1).abs() < 1e-6, "{w:?}");
         assert_eq!(w[1], 1.0, "{w:?}");
@@ -971,15 +840,12 @@ mod weight_tests {
     /// A rail's C budget does not move the signal nets' mean.
     #[test]
     fn rails_do_not_move_the_signal_mean() {
-        let classes = [
-            class(0, Some(1_000)),
-            class(1, Some(4_000)),
-            rail(2, NetClass::Supply, Some(10)),
-        ];
+        let classes = [class(0, Some(1_000)), class(1, Some(4_000)), rail(2, NetClass::Supply, Some(10))];
         let w = super::net_weights(&classes, &[], &[None, None, Some(50)]);
         assert!((w[0] + w[1] - 2.0).abs() < 1e-5, "{w:?}");
         assert_eq!(w[2], 1.0, "only rail: I_ref is its own current: {w:?}");
     }
+
 }
 
 #[cfg(test)]
@@ -991,12 +857,7 @@ mod place_tests {
     use pnr_core::geom::Rect;
     use pnr_core::ids::{AxisId, DeviceId, Target};
 
-    fn input<'a>(
-        macros: &'a [Macro],
-        reqs: &'a Requirements<Layout>,
-        n_axes: usize,
-        power: &'a [i32],
-    ) -> GpInput<'a> {
+    fn input<'a>(macros: &'a [Macro], reqs: &'a Requirements<Layout>, n_axes: usize, power: &'a [i32]) -> GpInput<'a> {
         GpInput {
             macros,
             variants: &[],
@@ -1035,36 +896,16 @@ mod place_tests {
                 temp_mc: vec![0; n],
                 units: Default::default(),
             };
-            assert_eq!(
-                PlaceRules::uniform(g, c).encroachment(&l),
-                mechanics::encroachment(&l, c),
-                "g {g} c {c}"
-            );
+            assert_eq!(PlaceRules::uniform(g, c).encroachment(&l), mechanics::encroachment(&l, c), "g {g} c {c}");
         }
     }
 
     fn cells(n: usize) -> Vec<Macro> {
-        vec![
-            Macro {
-                bbox: Rect {
-                    x: 0,
-                    y: 0,
-                    w: 1_000,
-                    h: 1_000
-                },
-                ..Default::default()
-            };
-            n
-        ]
+        vec![Macro { bbox: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() }; n]
     }
 
     fn sym(a: u16, b: u16, axis: u16) -> SymmetryGroup {
-        SymmetryGroup(vec![Symmetry {
-            a: Target::Device(DeviceId(a)),
-            b: Target::Device(DeviceId(b)),
-            axis: AxisId(axis),
-            mode: SymMode::Perfect,
-        }])
+        SymmetryGroup(vec![Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(axis), mode: SymMode::Perfect }])
     }
 
     #[test]
@@ -1097,10 +938,7 @@ mod place_tests {
                 kind: MatchKind::Voltage,
                 family: analog::matching::class::Family::Mos,
                 class: pnr_core::MatchClass::Moderate,
-                coeffs: Coeffs {
-                    tc_uv_per_k: Some(1_000.0),
-                    ..Default::default()
-                },
+                coeffs: Coeffs { tc_uv_per_k: Some(1_000.0), ..Default::default() },
                 budget: Budget::Allowance(1.0),
                 gate_um2: vec![],
                 tol_nm: 5.0,
@@ -1121,9 +959,6 @@ mod place_tests {
             off.push(spread(&[0, 0, 0], seed));
         }
         let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
-        assert!(
-            mean(&on) < mean(&off),
-            "powered {on:?} vs unpowered {off:?}"
-        );
+        assert!(mean(&on) < mean(&off), "powered {on:?} vs unpowered {off:?}");
     }
 }

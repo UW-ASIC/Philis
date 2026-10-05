@@ -8,9 +8,9 @@ use pnr_core::geom::{Rect, Shape};
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
 
-use super::Stack;
 use crate::metadata::{NetClass, NetClassification};
 use crate::rule::Rule;
+use super::Stack;
 
 /// `ε·h` in `C = ε·h·run/gap`, aF (εr 3.9, ~0.35 µm metal): two wires 400 nm
 /// apart couple ~30 aF/µm of parallel run.
@@ -21,9 +21,7 @@ const EPS_H_AF: f32 = 12.0;
 /// Lateral coupling over `run` nm at `gap` nm on `layer`, aF: the deck's
 /// `ε0·k·t·run/gap` when known (TOPO eq. 4.3), else `EPS_H_AF`.
 fn run_af(stack: Option<&Stack>, layer: u16, run: i32, gap: i32) -> f32 {
-    stack
-        .and_then(|s| s.lateral_run_af(layer, run, gap))
-        .unwrap_or(EPS_H_AF * run as f32 / gap.max(1) as f32)
+    stack.and_then(|s| s.lateral_run_af(layer, run, gap)).unwrap_or(EPS_H_AF * run as f32 / gap.max(1) as f32)
 }
 
 /// `shapes` merged per layer into maximal runs `(layer, rect, along x)`:
@@ -37,8 +35,7 @@ fn runs(shapes: &[Shape]) -> Vec<(u16, Rect, bool)> {
     for s in order {
         let r = s.rect;
         let joined = out.iter_mut().find(|(l, q, horiz)| {
-            let touch =
-                r.x <= q.x + q.w && q.x <= r.x + r.w && r.y <= q.y + q.h && q.y <= r.y + r.h;
+            let touch = r.x <= q.x + q.w && q.x <= r.x + r.w && r.y <= q.y + q.h && q.y <= r.y + r.h;
             *l == s.layer.0 && touch && if *horiz { r.w >= r.h } else { r.h >= r.w }
         });
         match joined {
@@ -82,21 +79,9 @@ pub fn net_pair_af(stack: Option<&Stack>, a: &[Shape], b: &[Shape], screens: &[S
                 .chain(screens.iter().map(|q| (q, false)))
                 .filter(|(q, _)| q.layer.0 == layer)
                 .filter_map(|(q, mine)| {
-                    let (v0, v1, s0, s1) = if horiz {
-                        (r.y, r.y + r.h, q.rect.y, q.rect.y + q.rect.h)
-                    } else {
-                        (r.x, r.x + r.w, q.rect.x, q.rect.x + q.rect.w)
-                    };
-                    let gap = if below {
-                        (s1 <= v0).then_some(v0 - s1)
-                    } else {
-                        (s0 >= v1).then_some(s0 - v1)
-                    }?;
-                    let (lo, hi) = if horiz {
-                        (r.x.max(q.rect.x), (r.x + r.w).min(q.rect.x + q.rect.w))
-                    } else {
-                        (r.y.max(q.rect.y), (r.y + r.h).min(q.rect.y + q.rect.h))
-                    };
+                    let (v0, v1, s0, s1) = if horiz { (r.y, r.y + r.h, q.rect.y, q.rect.y + q.rect.h) } else { (r.x, r.x + r.w, q.rect.x, q.rect.x + q.rect.w) };
+                    let gap = if below { (s1 <= v0).then_some(v0 - s1) } else { (s0 >= v1).then_some(s0 - v1) }?;
+                    let (lo, hi) = if horiz { (r.x.max(q.rect.x), (r.x + r.w).min(q.rect.x + q.rect.w)) } else { (r.y.max(q.rect.y), (r.y + r.h).min(q.rect.y + q.rect.h)) };
                     (gap > 0 && lo < hi).then_some((gap, (lo, hi), mine))
                 })
                 .collect();
@@ -104,8 +89,7 @@ pub fn net_pair_af(stack: Option<&Stack>, a: &[Shape], b: &[Shape], screens: &[S
             let mut covered: Vec<(i32, i32)> = Vec::new();
             for (gap, span, mine) in side {
                 if mine {
-                    let free = i64::from(span.1 - span.0)
-                        - super::shield::intersection_len(&covered, &[span]);
+                    let free = i64::from(span.1 - span.0) - super::shield::intersection_len(&covered, &[span]);
                     c += run_af(stack, layer, free as i32, gap);
                 }
                 covered.push(span);
@@ -123,11 +107,7 @@ pub fn net_pair_af(stack: Option<&Stack>, a: &[Shape], b: &[Shape], screens: &[S
         // End-on: separated along the run, overlapping across it.
         for q in b.iter().filter(|q| q.layer.0 == layer) {
             if let Some((run, gap)) = super::stack::parallel(&r, &q.rect) {
-                let along = if horiz {
-                    q.rect.x >= r.x + r.w || q.rect.x + q.rect.w <= r.x
-                } else {
-                    q.rect.y >= r.y + r.h || q.rect.y + q.rect.h <= r.y
-                };
+                let along = if horiz { q.rect.x >= r.x + r.w || q.rect.x + q.rect.w <= r.x } else { q.rect.y >= r.y + r.h || q.rect.y + q.rect.h <= r.y };
                 if along {
                     c += run_af(stack, layer, run, gap);
                 }
@@ -138,9 +118,7 @@ pub fn net_pair_af(stack: Option<&Stack>, a: &[Shape], b: &[Shape], screens: &[S
         let rb = runs(b);
         for &(la, p, _) in &ra {
             for &(lb, q, _) in &rb {
-                let Some(per) = st.cross_af_um2(la, lb) else {
-                    continue;
-                };
+                let Some(per) = st.cross_af_um2(la, lb) else { continue };
                 let w = (p.x + p.w).min(q.x + q.w) - p.x.max(q.x);
                 let h = (p.y + p.h).min(q.y + q.h) - p.y.max(q.y);
                 if w > 0 && h > 0 {
@@ -155,12 +133,7 @@ pub fn net_pair_af(stack: Option<&Stack>, a: &[Shape], b: &[Shape], screens: &[S
 /// Every shape of `r` but those of the nets in `skip`: what screens a pair.
 #[must_use]
 pub fn screens_but(r: &Routes, skip: &[usize]) -> Vec<Shape> {
-    r.wires
-        .iter()
-        .enumerate()
-        .filter(|(n, _)| !skip.contains(n))
-        .flat_map(|(_, w)| w.iter().copied())
-        .collect()
+    r.wires.iter().enumerate().filter(|(n, _)| !skip.contains(n)).flat_map(|(_, w)| w.iter().copied()).collect()
 }
 
 /// Budget on the total coupling onto `net`, aF. Registered in the budget arm.
@@ -189,10 +162,7 @@ impl CouplingBudget {
     pub fn default_weights(classes: &[NetClassification], n_nets: usize) -> Vec<f32> {
         let mut w = vec![1.0; n_nets];
         for c in classes {
-            if matches!(
-                c.class,
-                NetClass::Supply | NetClass::Ground | NetClass::Substrate
-            ) {
+            if matches!(c.class, NetClass::Supply | NetClass::Ground | NetClass::Substrate) {
                 if let Some(x) = w.get_mut(c.net.0 as usize) {
                     *x = 0.0;
                 }
@@ -217,19 +187,11 @@ impl CouplingBudget {
             if other == self.net.0 as usize || self.exclude.is_some_and(|e| other == e.0 as usize) {
                 continue;
             }
-            let w = self
-                .aggressor_weight
-                .and_then(|w| w.get(other).copied())
-                .unwrap_or(1.0);
+            let w = self.aggressor_weight.and_then(|w| w.get(other).copied()).unwrap_or(1.0);
             if w == 0.0 {
                 continue;
             }
-            total += w * net_pair_af(
-                self.stack,
-                victim,
-                shapes,
-                &screens_but(r, &[self.net.0 as usize, other]),
-            );
+            total += w * net_pair_af(self.stack, victim, shapes, &screens_but(r, &[self.net.0 as usize, other]));
         }
         total
     }
@@ -270,10 +232,7 @@ mod tests {
     use pnr_core::geom::{LayerId, Shape};
 
     fn wire(x: i32, y: i32, w: i32, h: i32, layer: u16) -> Shape {
-        Shape {
-            layer: LayerId(layer),
-            rect: Rect { x, y, w, h },
-        }
+        Shape { layer: LayerId(layer), rect: Rect { x, y, w, h } }
     }
 
     /// A victim running vertically, with `n` aggressors beside it at `gap`.
@@ -284,21 +243,11 @@ mod tests {
             let x = if i % 2 == 0 { 100 + gap } else { -(gap + 100) };
             wires.push(vec![wire(x, 0, 100, 10_000, 0)]);
         }
-        Routes {
-            wires,
-            ..Default::default()
-        }
+        Routes { wires, ..Default::default()  }
     }
 
     fn budget(max_af: i64) -> Vec<CouplingBudget> {
-        vec![CouplingBudget {
-            net: NetId(0),
-            max_coupling_af: max_af,
-            margin_pct: 20,
-            stack: None,
-            exclude: None,
-            aggressor_weight: None,
-        }]
+        vec![CouplingBudget { net: NetId(0), max_coupling_af: max_af, margin_pct: 20, stack: None, exclude: None, aggressor_weight: None }]
     }
 
     #[test]
@@ -307,28 +256,11 @@ mod tests {
         // spacing, so every pairwise check passes — but the total does not.
         let one = budget(400).cost(&routes(1, 400));
         let four = budget(400).cost(&routes(4, 400));
-        let t1 = CouplingBudget {
-            net: NetId(0),
-            max_coupling_af: 400,
-            margin_pct: 20,
-            stack: None,
-            exclude: None,
-            aggressor_weight: None,
-        }
-        .total_af(&routes(1, 400));
-        let t4 = CouplingBudget {
-            net: NetId(0),
-            max_coupling_af: 400,
-            margin_pct: 20,
-            stack: None,
-            exclude: None,
-            aggressor_weight: None,
-        }
-        .total_af(&routes(4, 400));
-        assert!(
-            (t4 - 4.0 * t1).abs() < 1.0,
-            "four equal neighbours ⇒ 4× coupling"
-        );
+        let t1 = CouplingBudget { net: NetId(0), max_coupling_af: 400, margin_pct: 20, stack: None, exclude: None, aggressor_weight: None }
+            .total_af(&routes(1, 400));
+        let t4 = CouplingBudget { net: NetId(0), max_coupling_af: 400, margin_pct: 20, stack: None, exclude: None, aggressor_weight: None }
+            .total_af(&routes(4, 400));
+        assert!((t4 - 4.0 * t1).abs() < 1.0, "four equal neighbours ⇒ 4× coupling");
         assert_eq!(one, 0.0, "a single neighbour is inside budget");
         assert!(four > 0.0, "the same spacing with four neighbours is not");
         assert_eq!(budget(400).violations(&routes(4, 400)), 1);
@@ -341,26 +273,12 @@ mod tests {
         // residual has to be measured on `total_af` — not per pair. Set the budget to
         // exactly one neighbour's contribution and the four-aggressor case is 4× it,
         // i.e. 3 full budgets over.
-        let one = CouplingBudget {
-            net: NetId(0),
-            max_coupling_af: 1,
-            margin_pct: 0,
-            stack: None,
-            exclude: None,
-            aggressor_weight: None,
-        }
-        .total_af(&routes(1, 400));
+        let one = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None, exclude: None, aggressor_weight: None }
+            .total_af(&routes(1, 400));
         let b = budget(one.round() as i64);
-        assert_eq!(
-            b[0].residual(&routes(1, 400)),
-            0.0,
-            "at its budget ⇒ nothing past it"
-        );
+        assert_eq!(b[0].residual(&routes(1, 400)), 0.0, "at its budget ⇒ nothing past it");
         let four = b[0].residual(&routes(4, 400));
-        assert!(
-            (four - 3.0).abs() < 0.05,
-            "4× the coupling on a 1× budget ⇒ 3.0, got {four}"
-        );
+        assert!((four - 3.0).abs() < 0.05, "4× the coupling on a 1× budget ⇒ 3.0, got {four}");
         // The batch's Θ contribution is that same number — and `cost` now agrees with it,
         // because the `× 1e-3` that made them differ by a thousand is gone.
         assert!((b.residual(&routes(4, 400)) - f64::from(four)).abs() < 1e-6);
@@ -369,43 +287,18 @@ mod tests {
 
     #[test]
     fn coupling_falls_off_with_spacing() {
-        let near = CouplingBudget {
-            net: NetId(0),
-            max_coupling_af: 1,
-            margin_pct: 0,
-            stack: None,
-            exclude: None,
-            aggressor_weight: None,
-        }
-        .total_af(&routes(1, 200));
-        let far = CouplingBudget {
-            net: NetId(0),
-            max_coupling_af: 1,
-            margin_pct: 0,
-            stack: None,
-            exclude: None,
-            aggressor_weight: None,
-        }
-        .total_af(&routes(1, 800));
-        assert!(
-            (near / far - 4.0).abs() < 0.1,
-            "1/d: 4× the gap ⇒ ¼ the coupling"
-        );
+        let near = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None, exclude: None, aggressor_weight: None }
+            .total_af(&routes(1, 200));
+        let far = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None, exclude: None, aggressor_weight: None }
+            .total_af(&routes(1, 800));
+        assert!((near / far - 4.0).abs() < 0.1, "1/d: 4× the gap ⇒ ¼ the coupling");
     }
 
     #[test]
     fn different_layers_do_not_couple_laterally() {
         let mut r = routes(1, 400);
         r.wires[1][0].layer = LayerId(1);
-        let t = CouplingBudget {
-            net: NetId(0),
-            max_coupling_af: 1,
-            margin_pct: 0,
-            stack: None,
-            exclude: None,
-            aggressor_weight: None,
-        }
-        .total_af(&r);
+        let t = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None, exclude: None, aggressor_weight: None }.total_af(&r);
         assert_eq!(t, 0.0, "lateral coupling is same-layer");
     }
 
@@ -422,15 +315,8 @@ mod tests {
     #[test]
     fn magnitude_is_physical() {
         // Two min-width wires 400 nm apart, 10 µm of parallel run: ~300 aF.
-        let t = CouplingBudget {
-            net: NetId(0),
-            max_coupling_af: 1,
-            margin_pct: 0,
-            stack: None,
-            exclude: None,
-            aggressor_weight: None,
-        }
-        .total_af(&routes(1, 400));
+        let t = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None, exclude: None, aggressor_weight: None }
+            .total_af(&routes(1, 400));
         assert!((250.0..350.0).contains(&t), "expected ~300 aF, got {t}");
     }
 
@@ -438,33 +324,13 @@ mod tests {
     fn the_victims_own_shield_is_not_an_aggressor() {
         // 10 µm victim (net 0), reference (net 1) tracks both sides at 280 nm.
         let r = Routes {
-            wires: vec![
-                vec![wire(0, 0, 100, 10_000, 0)],
-                vec![wire(380, 0, 100, 10_000, 0), wire(-380, 0, 100, 10_000, 0)],
-            ],
+            wires: vec![vec![wire(0, 0, 100, 10_000, 0)], vec![wire(380, 0, 100, 10_000, 0), wire(-380, 0, 100, 10_000, 0)]],
             ..Default::default()
         };
-        let b = CouplingBudget {
-            net: NetId(0),
-            max_coupling_af: 1,
-            margin_pct: 0,
-            stack: None,
-            exclude: None,
-            aggressor_weight: None,
-        };
+        let b = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None, exclude: None, aggressor_weight: None };
         let t = b.total_af(&r);
-        assert!(
-            (t - 2.0 * 12.0 * 10_000.0 / 280.0).abs() < 0.5,
-            "two 280 nm sides of EPS_H_AF: 857.1 aF, got {t}"
-        );
-        assert_eq!(
-            CouplingBudget {
-                exclude: Some(NetId(1)),
-                ..b
-            }
-            .total_af(&r),
-            0.0
-        );
+        assert!((t - 2.0 * 12.0 * 10_000.0 / 280.0).abs() < 0.5, "two 280 nm sides of EPS_H_AF: 857.1 aF, got {t}");
+        assert_eq!(CouplingBudget { exclude: Some(NetId(1)), ..b }.total_af(&r), 0.0);
     }
 
     /// Victim 10 µm along y; X at gap 280 over the full run, Y at gap 1 000
@@ -484,30 +350,14 @@ mod tests {
         use crate::routing::stack::Layer;
         let stack = Stack {
             layers: vec![
-                Layer {
-                    id: 0,
-                    cross_af_um2: 147.6,
-                    ..Layer::default()
-                },
-                Layer {
-                    id: 2,
-                    cut: true,
-                    ..Layer::default()
-                },
-                Layer {
-                    id: 1,
-                    ..Layer::default()
-                },
+                Layer { id: 0, cross_af_um2: 147.6, ..Layer::default() },
+                Layer { id: 2, cut: true, ..Layer::default() },
+                Layer { id: 1, ..Layer::default() },
             ],
             antenna_cumulative: false,
             diode: None,
         };
-        let c = net_pair_af(
-            Some(&stack),
-            &[wire(0, 0, 5_000, 260, 0)],
-            &[wire(1_000, -2_000, 280, 5_000, 1)],
-            &[],
-        );
+        let c = net_pair_af(Some(&stack), &[wire(0, 0, 5_000, 260, 0)], &[wire(1_000, -2_000, 280, 5_000, 1)], &[]);
         assert!((c - 10.75).abs() < 0.1, "{c}");
     }
 
@@ -526,41 +376,15 @@ mod tests {
     #[test]
     fn a_quiet_rail_weighs_nothing() {
         let w: &'static [f32] = Box::leak(vec![1.0, 0.0].into_boxed_slice());
-        let b = CouplingBudget {
-            net: NetId(0),
-            max_coupling_af: 1,
-            margin_pct: 0,
-            stack: None,
-            exclude: None,
-            aggressor_weight: Some(w),
-        };
-        assert!(
-            CouplingBudget {
-                aggressor_weight: None,
-                ..b
-            }
-            .total_af(&routes(1, 400))
-                > 0.0
-        );
+        let b = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None, exclude: None, aggressor_weight: Some(w) };
+        assert!(CouplingBudget { aggressor_weight: None, ..b }.total_af(&routes(1, 400)) > 0.0);
         assert_eq!(b.total_af(&routes(1, 400)), 0.0);
     }
 
     #[test]
     fn default_weights_zero_only_the_rails() {
-        let c = |n: u16, class| NetClassification {
-            net: NetId(n),
-            class,
-            c_budget_af: None,
-            max_coupling_af: None,
-        };
-        let classes = [
-            c(0, NetClass::Supply),
-            c(1, NetClass::Signal),
-            c(2, NetClass::Ground),
-        ];
-        assert_eq!(
-            CouplingBudget::default_weights(&classes, 4),
-            vec![0.0, 1.0, 0.0, 1.0]
-        );
+        let c = |n: u16, class| NetClassification { net: NetId(n), class, c_budget_af: None, max_coupling_af: None };
+        let classes = [c(0, NetClass::Supply), c(1, NetClass::Signal), c(2, NetClass::Ground)];
+        assert_eq!(CouplingBudget::default_weights(&classes, 4), vec![0.0, 1.0, 0.0, 1.0]);
     }
 }

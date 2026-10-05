@@ -15,23 +15,13 @@ pub struct Pt {
 
 impl From<pnr_core::PlacedUnit> for Pt {
     fn from(u: pnr_core::PlacedUnit) -> Self {
-        Pt {
-            x: f64::from(u.x),
-            y: f64::from(u.y),
-            w: u.weight as f64,
-            phi: u.phi,
-        }
+        Pt { x: f64::from(u.x), y: f64::from(u.y), w: u.weight as f64, phi: u.phi }
     }
 }
 
 impl From<pnr_core::Unit> for Pt {
     fn from(u: pnr_core::Unit) -> Self {
-        Pt {
-            x: f64::from(u.x),
-            y: f64::from(u.y),
-            w: u.weight as f64,
-            phi: u.phi,
-        }
+        Pt { x: f64::from(u.x), y: f64::from(u.y), w: u.weight as f64, phi: u.phi }
     }
 }
 
@@ -118,10 +108,7 @@ impl Sums {
         if self.n == 0 {
             (0.0, 0.0)
         } else {
-            (
-                f64::from(self.phi_x) / f64::from(self.n),
-                f64::from(self.phi_y) / f64::from(self.n),
-            )
+            (f64::from(self.phi_x) / f64::from(self.n), f64::from(self.phi_y) / f64::from(self.n))
         }
     }
 }
@@ -140,14 +127,7 @@ pub fn phi_equal(a: &Sums, b: &Sums) -> bool {
 #[must_use]
 pub fn phi_equal_all(units: &[pnr_core::Unit], members: usize) -> bool {
     let live: Vec<Sums> = (0..members)
-        .map(|d| {
-            sums(
-                units
-                    .iter()
-                    .filter(|u| usize::from(u.owner) == d)
-                    .map(|&u| Pt::from(u)),
-            )
-        })
+        .map(|d| sums(units.iter().filter(|u| usize::from(u.owner) == d).map(|&u| Pt::from(u))))
         .filter(|s| s.n > 0)
         .collect();
     live.windows(2).all(|w| phi_equal(&w[0], &w[1]))
@@ -167,10 +147,7 @@ pub fn mirror_allowed_units(units: &[pnr_core::Unit]) -> bool {
     let mut owners: Vec<u8> = units.iter().map(|u| u.owner).collect();
     owners.sort_unstable();
     owners.dedup();
-    let per: Vec<Sums> = owners
-        .iter()
-        .map(|&o| sums(units.iter().filter(|u| u.owner == o).map(|&u| Pt::from(u))))
-        .collect();
+    let per: Vec<Sums> = owners.iter().map(|&o| sums(units.iter().filter(|u| u.owner == o).map(|&u| Pt::from(u)))).collect();
     mirror_allowed(&per)
 }
 
@@ -199,22 +176,12 @@ pub fn cancelled_order(devs: &[&[Pt]], nmax: u8, tol: f64) -> (u8, [f64; 5]) {
     if w <= 0.0 {
         return (nmax, r);
     }
-    let c = (
-        all.iter().map(|p| p.w * p.x).sum::<f64>() / w,
-        all.iter().map(|p| p.w * p.y).sum::<f64>() / w,
-    );
-    let l = all
-        .iter()
-        .map(|p| (p.x - c.0).hypot(p.y - c.1))
-        .fold(0.0, f64::max);
+    let c = (all.iter().map(|p| p.w * p.x).sum::<f64>() / w, all.iter().map(|p| p.w * p.y).sum::<f64>() / w);
+    let l = all.iter().map(|p| (p.x - c.0).hypot(p.y - c.1)).fold(0.0, f64::max);
     if l == 0.0 {
         return (nmax, r);
     }
-    let devices: Vec<&[Pt]> = devs
-        .iter()
-        .copied()
-        .filter(|d| d.iter().map(|p| p.w).sum::<f64>() > 0.0)
-        .collect();
+    let devices: Vec<&[Pt]> = devs.iter().copied().filter(|d| d.iter().map(|p| p.w).sum::<f64>() > 0.0).collect();
     let mut r = r;
     let mut order = 0u8;
     let mut still_ok = true;
@@ -247,17 +214,7 @@ mod tests {
     #[test]
     fn mirror_is_refused_for_an_odd_finger_pair() {
         let units = |phis: &[(i8, i8)]| -> Vec<pnr_core::Unit> {
-            phis.iter()
-                .map(|&phi| pnr_core::Unit {
-                    owner: 0,
-                    x: 0,
-                    y: 0,
-                    weight: 1,
-                    phi,
-                    sa: 0,
-                    sb: 0,
-                })
-                .collect()
+            phis.iter().map(|&phi| pnr_core::Unit { owner: 0, x: 0, y: 0, weight: 1, phi, sa: 0, sb: 0 }).collect()
         };
         assert!(!mirror_allowed_units(&units(&[(1, 0), (-1, 0), (1, 0)])));
         assert!(mirror_allowed_units(&units(&[(1, 0), (-1, 0)])));
@@ -265,12 +222,7 @@ mod tests {
     }
 
     fn pt(x: f64, y: f64) -> Pt {
-        Pt {
-            x,
-            y,
-            w: 1.0,
-            phi: (0, 0),
-        }
+        Pt { x, y, w: 1.0, phi: (0, 0) }
     }
 
     #[test]
@@ -287,11 +239,7 @@ mod tests {
     fn row(abba: bool, y: f64) -> (Vec<Pt>, Vec<Pt>) {
         let outer: Vec<Pt> = [0.0, 3000.0].iter().map(|&x| pt(x, y)).collect();
         let inner: Vec<Pt> = [1000.0, 2000.0].iter().map(|&x| pt(x, y)).collect();
-        if abba {
-            (outer, inner)
-        } else {
-            (inner, outer)
-        }
+        if abba { (outer, inner) } else { (inner, outer) }
     }
 
     #[test]
@@ -332,20 +280,10 @@ mod tests {
     #[test]
     fn hastings_phi_example() {
         let mk = |xs: &[i8]| -> Sums {
-            sums(xs.iter().map(|&s| Pt {
-                x: 0.0,
-                y: 0.0,
-                w: 1.0,
-                phi: (s, 0),
-            }))
+            sums(xs.iter().map(|&s| Pt { x: 0.0, y: 0.0, w: 1.0, phi: (s, 0) }))
         };
         let a = mk(&[1, 1, 1, -1]);
-        let b = mk(&[1; 9]
-            .iter()
-            .chain([-1; 3].iter())
-            .copied()
-            .collect::<Vec<i8>>()
-            .as_slice());
+        let b = mk(&[1; 9].iter().chain([-1; 3].iter()).copied().collect::<Vec<i8>>().as_slice());
         assert!(phi_equal(&a, &b));
         let c = mk(&[-1, -1, -1, 1]);
         assert!(!phi_equal(&a, &c));
@@ -369,42 +307,11 @@ mod tests {
 
     #[test]
     fn axis_ignores_zero_phi_units() {
-        let s = sums([
-            Pt {
-                x: 0.0,
-                y: 0.0,
-                w: 1.0,
-                phi: (1, 0),
-            },
-            Pt {
-                x: 0.0,
-                y: 0.0,
-                w: 1.0,
-                phi: (0, 0),
-            },
-        ]);
+        let s = sums([Pt { x: 0.0, y: 0.0, w: 1.0, phi: (1, 0) }, Pt { x: 0.0, y: 0.0, w: 1.0, phi: (0, 0) }]);
         assert_eq!(s.axis, Axis::H);
-        let s = sums([Pt {
-            x: 0.0,
-            y: 0.0,
-            w: 1.0,
-            phi: (0, 0),
-        }]);
+        let s = sums([Pt { x: 0.0, y: 0.0, w: 1.0, phi: (0, 0) }]);
         assert_eq!(s.axis, Axis::None);
-        let s = sums([
-            Pt {
-                x: 0.0,
-                y: 0.0,
-                w: 1.0,
-                phi: (1, 0),
-            },
-            Pt {
-                x: 0.0,
-                y: 0.0,
-                w: 1.0,
-                phi: (0, 1),
-            },
-        ]);
+        let s = sums([Pt { x: 0.0, y: 0.0, w: 1.0, phi: (1, 0) }, Pt { x: 0.0, y: 0.0, w: 1.0, phi: (0, 1) }]);
         assert_eq!(s.axis, Axis::Mixed);
     }
 }

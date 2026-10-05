@@ -67,24 +67,13 @@ pub fn cc_feasible(counts: &[u16]) -> bool {
 /// up across the centre (inexact). Then reflected pairs by `fill`; `Compact`
 /// and `Dispersed` serve the largest member first.
 #[must_use]
-pub fn centro_assign(
-    counts: &[u16],
-    rows: usize,
-    cols: usize,
-    fill: Fill,
-) -> (Vec<Option<u8>>, bool) {
+pub fn centro_assign(counts: &[u16], rows: usize, cols: usize, fill: Fill) -> (Vec<Option<u8>>, bool) {
     let total: usize = counts.iter().map(|&u| usize::from(u)).sum();
     debug_assert!(rows * cols >= total, "{rows}×{cols} cannot hold {total}");
     let n = rows * cols;
-    let mut g = Grid {
-        cols,
-        slot: vec![None; n],
-    };
+    let mut g = Grid { cols, slot: vec![None; n] };
     let key = |i: usize| {
-        let (dr, dc) = (
-            2 * (i / cols) as i64 - rows as i64 + 1,
-            2 * (i % cols) as i64 - cols as i64 + 1,
-        );
+        let (dr, dc) = (2 * (i / cols) as i64 - rows as i64 + 1, 2 * (i % cols) as i64 - cols as i64 + 1);
         ((dr * dr + dc * dc), (dr as f64).atan2(dc as f64))
     };
     let mut order: Vec<usize> = (0..n).collect();
@@ -100,9 +89,7 @@ pub fn centro_assign(
         }
     }
     for pair in odd.chunks(2) {
-        let Some(i) = order.iter().copied().find(|&i| g.free_pair(i)) else {
-            break;
-        };
+        let Some(i) = order.iter().copied().find(|&i| g.free_pair(i)) else { break };
         let j = g.refl(i);
         g.slot[i] = Some(pair[0] as u8);
         left[pair[0]] -= 1;
@@ -129,8 +116,7 @@ pub fn centro_assign(
         // Member d's share of the r² total R is count_d·R/T; deal the
         // outermost pair to the member furthest below it (integer, ×T).
         let r2 = |i: usize| key(i).0;
-        let r_all: i64 = (0..n).filter(|&i| g.slot[i].is_some()).map(r2).sum::<i64>()
-            + 2 * reps.iter().map(|&i| r2(i)).sum::<i64>();
+        let r_all: i64 = (0..n).filter(|&i| g.slot[i].is_some()).map(r2).sum::<i64>() + 2 * reps.iter().map(|&i| r2(i)).sum::<i64>();
         let mut s = vec![0i64; counts.len()];
         for i in 0..n {
             if let Some(d) = g.slot[i] {
@@ -141,13 +127,7 @@ pub fn centro_assign(
         for i in reps {
             let deficit = |d: usize| i64::from(counts[d]) * r_all - total as i64 * s[d];
             // Ties → lower d: `max_by_key` keeps the last maximum, so walk down.
-            let Some(d) = (0..counts.len())
-                .rev()
-                .filter(|&d| left[d] >= 2)
-                .max_by_key(|&d| deficit(d))
-            else {
-                break;
-            };
+            let Some(d) = (0..counts.len()).rev().filter(|&d| left[d] >= 2).max_by_key(|&d| deficit(d)) else { break };
             g.put_pair(i, d as u8);
             left[d] -= 2;
             s[d] += 2 * r2(i);
@@ -180,13 +160,7 @@ pub fn centro_assign(
 pub fn segment_row(counts: &[u16]) -> (Vec<usize>, bool) {
     let total = counts.iter().map(|&c| usize::from(c)).sum();
     let (slots, exact) = centro_assign(counts, 1, total, Fill::Balanced);
-    (
-        slots
-            .into_iter()
-            .map(|s| usize::from(s.expect("a 1×Σc row has no empty slot")))
-            .collect(),
-        exact,
-    )
+    (slots.into_iter().map(|s| usize::from(s.expect("a 1×Σc row has no empty slot"))).collect(), exact)
 }
 
 /// Every count ×2 when ≥ 2 counts are odd, else unchanged.
@@ -221,10 +195,7 @@ impl Grid {
 
     /// Cells of the `rows × cols` rectangle at `(r0, c0)`.
     pub fn rect(&self, (r0, c0, rows, cols): (usize, usize, usize, usize)) -> Vec<usize> {
-        (r0..r0 + rows)
-            .flat_map(|r| (c0..c0 + cols).map(move |c| (r, c)))
-            .map(|(r, c)| r * self.cols + c)
-            .collect()
+        (r0..r0 + rows).flat_map(|r| (c0..c0 + cols).map(move |c| (r, c))).map(|(r, c)| r * self.cols + c).collect()
     }
 
     pub fn rc(&self, i: usize) -> (i64, i64) {
@@ -249,12 +220,7 @@ impl Grid {
             let (r, c) = self.rc(i);
             (2 * r - rows as i64 + 1).pow(2) + (2 * c - self.cols as i64 + 1).pow(2)
         };
-        let mid = cells
-            .iter()
-            .copied()
-            .filter(|&i| self.free_pair(i))
-            .min_by_key(|&i| (off(i), i))
-            .expect("C0/C1 pair");
+        let mid = cells.iter().copied().filter(|&i| self.free_pair(i)).min_by_key(|&i| (off(i), i)).expect("C0/C1 pair");
         self.slot[mid] = Some(0);
         let j = self.refl(mid);
         self.slot[j] = Some(1);
@@ -276,10 +242,7 @@ impl Grid {
                 .filter(|&i| self.free_pair(i))
                 .max_by_key(|&i| {
                     let (r, c) = self.rc(i);
-                    let near = mine
-                        .iter()
-                        .map(|&(qr, qc)| (r - qr).pow(2) + (c - qc).pow(2))
-                        .min();
+                    let near = mine.iter().map(|&(qr, qc)| (r - qr).pow(2) + (c - qc).pow(2)).min();
                     (near.unwrap_or(i64::MAX), Reverse(i))
                 })
                 .expect("a free reflected pair");
@@ -295,19 +258,9 @@ impl Grid {
     /// ponytail: the paper walks the upper-half blocks explicitly; this orders
     /// the corridor by block parity and lets the reflection mirror it, so a
     /// block whose mirror has the other parity mixes colours.
-    pub fn corridor(
-        &mut self,
-        outer: (usize, usize, usize, usize),
-        inner: (usize, usize, usize, usize),
-        i: u8,
-        bs: usize,
-    ) {
+    pub fn corridor(&mut self, outer: (usize, usize, usize, usize), inner: (usize, usize, usize, usize), i: u8, bs: usize) {
         let inside = self.rect(inner);
-        let mut cells: Vec<usize> = self
-            .rect(outer)
-            .into_iter()
-            .filter(|c| !inside.contains(c))
-            .collect();
+        let mut cells: Vec<usize> = self.rect(outer).into_iter().filter(|c| !inside.contains(c)).collect();
         cells.sort_by_key(|&c| {
             let (r, col) = self.rc(c);
             let (br, bc) = ((r as usize - outer.0) / bs, (col as usize - outer.1) / bs);
@@ -341,9 +294,7 @@ pub enum Outer {
 /// `Drain` (mosfet.rs `is_s`).
 #[must_use]
 pub fn diffusion_legal(s: &[usize], outer: Outer) -> bool {
-    s.windows(2)
-        .enumerate()
-        .all(|(i, w)| w[0] == w[1] || ((i + 1) % 2 == 1) == (outer == Outer::Drain))
+    s.windows(2).enumerate().all(|(i, w)| w[0] == w[1] || ((i + 1) % 2 == 1) == (outer == Outer::Drain))
 }
 
 /// Rows of a two-member pattern (labels 0/1) cancelling gradient orders
@@ -362,24 +313,10 @@ pub fn nth_order_rows(order: u8, row: &[u8]) -> Vec<Vec<u8>> {
     }
     let mut p = vec![row.to_vec()];
     for n in 2..=order {
-        let rot = p
-            .iter()
-            .rev()
-            .map(|r| {
-                r.iter()
-                    .rev()
-                    .map(|&l| if n % 2 == 0 { 1 - l } else { l })
-                    .collect::<Vec<u8>>()
-            })
-            .collect::<Vec<_>>();
+        let rot = p.iter().rev().map(|r| r.iter().rev().map(|&l| if n % 2 == 0 { 1 - l } else { l }).collect::<Vec<u8>>()).collect::<Vec<_>>();
         p.extend(rot);
     }
-    let legal = |r: &[u8]| {
-        diffusion_legal(
-            &r.iter().map(|&l| usize::from(l)).collect::<Vec<_>>(),
-            Outer::Drain,
-        )
-    };
+    let legal = |r: &[u8]| diffusion_legal(&r.iter().map(|&l| usize::from(l)).collect::<Vec<_>>(), Outer::Drain);
     debug_assert!(row.len() % 2 == 1 || !legal(row) || p.iter().all(|r| legal(r)));
     p
 }
@@ -406,27 +343,14 @@ pub fn partial_segments(r_n_ohm: f64, r_m_ohm: f64, r0_ohm: f64) -> (u16, u16, f
     let (qm, qn) = (r_m_ohm / r0_ohm, r_n_ohm / r0_ohm);
     let (m, n) = (qm.floor(), qn.floor());
     let (j, k) = (qm - m, qn - n);
-    (
-        m as u16,
-        n as u16,
-        j,
-        k,
-        ((n + 1.0) / (n + k) - (m + 1.0) / (m + j)).abs(),
-    )
+    (m as u16, n as u16, j, k, ((n + 1.0) / (n + k) - (m + 1.0) / (m + j)).abs())
 }
 
 /// Deals `p` reflected pairs of fingers at `seq[off..off + 2p]` in quads
 /// (token `t` with its mirror `p − 1 − t`), each quad to the member whose
 /// share of the centred weight `Σ(2i − n + 1)²` is furthest ahead of what it
 /// already holds in `seq`. `h[d]` is device `d`'s remaining quad count.
-fn deal(
-    counts: &[u16],
-    n: usize,
-    seq: &mut [Option<usize>],
-    p: usize,
-    h: &mut [usize],
-    off: usize,
-) {
+fn deal(counts: &[u16], n: usize, seq: &mut [Option<usize>], p: usize, h: &mut [usize], off: usize) {
     let k = |i: usize| -> i64 {
         let v = 2 * i as i64 - n as i64 + 1;
         v * v
@@ -457,12 +381,7 @@ fn deal(
             }
         }
         let d = best_d.expect("a device with quads left");
-        let fingers = [
-            off + 2 * t,
-            off + 2 * t + 1,
-            off + 2 * (p - 1 - t),
-            off + 2 * (p - 1 - t) + 1,
-        ];
+        let fingers = [off + 2 * t, off + 2 * t + 1, off + 2 * (p - 1 - t), off + 2 * (p - 1 - t) + 1];
         let sum_k: i64 = fingers.iter().map(|&f| k(f)).sum();
         for &f in &fingers {
             seq[f] = Some(d);
@@ -478,12 +397,7 @@ fn deal(
 fn row_r2(seq: &[usize], ndev: usize) -> f64 {
     let mut by_member: Vec<Vec<moments::Pt>> = vec![Vec::new(); ndev];
     for (i, &d) in seq.iter().enumerate() {
-        by_member[d].push(moments::Pt {
-            x: i as f64,
-            y: 0.0,
-            w: 1.0,
-            phi: (0, 0),
-        });
+        by_member[d].push(moments::Pt { x: i as f64, y: 0.0, w: 1.0, phi: (0, 0) });
     }
     let refs: Vec<&[moments::Pt]> = by_member.iter().map(Vec::as_slice).collect();
     moments::cancelled_order(&refs, 2, 0.0).1[2]
@@ -524,10 +438,7 @@ pub fn diffusion_cc_row(counts: &[u16], outer: Outer) -> Option<Vec<usize>> {
                     seq[2 + 2 * (p / 2)] = Some(odd_member);
                 }
                 deal(&c, n, &mut seq, p, &mut h, 1);
-                let seq: Vec<usize> = seq
-                    .into_iter()
-                    .map(|s| s.expect("deal fills every finger"))
-                    .collect();
+                let seq: Vec<usize> = seq.into_iter().map(|s| s.expect("deal fills every finger")).collect();
                 let r2 = row_r2(&seq, counts.len());
                 match &best {
                     None => best = Some((seq, r2)),
@@ -556,11 +467,7 @@ pub fn diffusion_cc_row(counts: &[u16], outer: Outer) -> Option<Vec<usize>> {
                 seq[2 * (p / 2) + 1] = Some(odd_member);
             }
             deal(counts, n, &mut seq, p, &mut h, 0);
-            Some(
-                seq.into_iter()
-                    .map(|s| s.expect("deal fills every finger"))
-                    .collect(),
-            )
+            Some(seq.into_iter().map(|s| s.expect("deal fills every finger")).collect())
         }
     }
 }
@@ -573,13 +480,7 @@ mod tests {
     /// A/B string → per-member positions (pitch units about the row centre).
     fn members(row: &str) -> [Vec<f64>; 2] {
         let c = (row.len() as f64 - 1.0) / 2.0;
-        let pos = |m| {
-            row.chars()
-                .enumerate()
-                .filter(|&(_, ch)| ch == m)
-                .map(|(i, _)| i as f64 - c)
-                .collect()
-        };
+        let pos = |m| row.chars().enumerate().filter(|&(_, ch)| ch == m).map(|(i, _)| i as f64 - c).collect();
         [pos('A'), pos('B')]
     }
 
@@ -607,36 +508,13 @@ mod tests {
         ];
         for (counts, book, generated, want) in table {
             let (row, exact) = segment_row(counts);
-            let s: String = row
-                .iter()
-                .map(|&m| if m == 0 { 'A' } else { 'B' })
-                .collect();
+            let s: String = row.iter().map(|&m| if m == 0 { 'A' } else { 'B' }).collect();
             assert_eq!((s.as_str(), exact), (generated, true), "{counts:?}");
             let n = |r: &str, ch| r.chars().filter(|&c| c == ch).count() as u16;
-            assert_eq!(
-                [n(book, 'A'), n(book, 'B')],
-                [counts[0], counts[1]],
-                "{book}"
-            );
-            let pts = members(generated).map(|v| {
-                v.iter()
-                    .map(|&x| Pt {
-                        x,
-                        y: 0.0,
-                        w: 1.0,
-                        phi: (0, 0),
-                    })
-                    .collect::<Vec<_>>()
-            });
-            assert!(
-                cancelled_order(&[&pts[0], &pts[1]], 4, 1e-3).0 >= 1,
-                "{generated}"
-            );
-            assert!(
-                (dm(generated) - want).abs() < 1e-3,
-                "{generated}: {}",
-                dm(generated)
-            );
+            assert_eq!([n(book, 'A'), n(book, 'B')], [counts[0], counts[1]], "{book}");
+            let pts = members(generated).map(|v| v.iter().map(|&x| Pt { x, y: 0.0, w: 1.0, phi: (0, 0) }).collect::<Vec<_>>());
+            assert!(cancelled_order(&[&pts[0], &pts[1]], 4, 1e-3).0 >= 1, "{generated}");
+            assert!((dm(generated) - want).abs() < 1e-3, "{generated}: {}", dm(generated));
             assert!(dm(generated) <= dm(book) + 1e-9, "{generated} vs {book}");
         }
     }
@@ -650,9 +528,7 @@ mod tests {
     }
 
     fn owners(slot: &[Option<u8>]) -> String {
-        slot.iter()
-            .map(|s| s.map_or('_', |d| char::from(b'0' + d)))
-            .collect()
+        slot.iter().map(|s| s.map_or('_', |d| char::from(b'0' + d))).collect()
     }
 
     /// Every a:b with at most one odd count, on every grid offered, is exact:
@@ -670,20 +546,11 @@ mod tests {
                     let at = format!("{counts:?} on {rows}×{cols}: {}", owners(&slot));
                     assert!(exact, "{at}");
                     let n = slot.len();
-                    assert!(
-                        (0..n).all(|i| slot[i].is_none() == slot[n - 1 - i].is_none()),
-                        "{at}"
-                    );
+                    assert!((0..n).all(|i| slot[i].is_none() == slot[n - 1 - i].is_none()), "{at}");
                     for (d, &k) in counts.iter().enumerate() {
-                        let mine: Vec<usize> =
-                            (0..n).filter(|&i| slot[i] == Some(d as u8)).collect();
+                        let mine: Vec<usize> = (0..n).filter(|&i| slot[i] == Some(d as u8)).collect();
                         assert_eq!(mine.len(), usize::from(k), "{at}: member {d}");
-                        let off = mine.iter().fold((0i64, 0i64), |(r, c), &i| {
-                            (
-                                r + 2 * (i / cols) as i64 - rows as i64 + 1,
-                                c + 2 * (i % cols) as i64 - cols as i64 + 1,
-                            )
-                        });
+                        let off = mine.iter().fold((0i64, 0i64), |(r, c), &i| (r + 2 * (i / cols) as i64 - rows as i64 + 1, c + 2 * (i % cols) as i64 - cols as i64 + 1));
                         assert_eq!(off, (0, 0), "{at}: member {d} off centre");
                     }
                 }
@@ -694,10 +561,7 @@ mod tests {
     #[test]
     fn equal_pair_is_a_diagonal_quad() {
         assert_eq!(grids(&[2, 2], 3.0), [(2, 2), (3, 2), (1, 4)]);
-        assert_eq!(
-            centro_assign(&[2, 2], 2, 2, Fill::Balanced),
-            (vec![Some(0), Some(1), Some(1), Some(0)], true)
-        );
+        assert_eq!(centro_assign(&[2, 2], 2, 2, Fill::Balanced), (vec![Some(0), Some(1), Some(1), Some(0)], true));
     }
 
     /// 1:4 is the "+" cross on 3×3 (not Hastings' Fig. 10.24A, which needs a
@@ -722,10 +586,7 @@ mod tests {
 
     #[test]
     fn grid_order_is_deterministic() {
-        assert_eq!(
-            grids(&[4, 4, 4], 3.0),
-            [(3, 4), (4, 3), (5, 3), (2, 6), (1, 12)]
-        );
+        assert_eq!(grids(&[4, 4, 4], 3.0), [(3, 4), (4, 3), (5, 3), (2, 6), (1, 12)]);
         assert_eq!(grids(&[1, 8], 3.0), [(3, 3), (5, 3), (1, 9)]);
         assert_eq!(grids(&[1, 2, 2], 3.0), [(3, 3), (1, 5)]);
         assert_eq!(grids(&[3, 5], 3.0), [(3, 3), (2, 4), (4, 2), (1, 8)]);
@@ -747,29 +608,16 @@ mod tests {
     fn diffusion_rows_never_join_two_devices_on_a_drain() {
         let check = |counts: &[u16], outer: Outer| {
             if counts.iter().any(|&c| c % 2 == 1) {
-                assert!(
-                    diffusion_cc_row(counts, outer).is_none(),
-                    "{counts:?} {outer:?}: odd count admitted a row"
-                );
+                assert!(diffusion_cc_row(counts, outer).is_none(), "{counts:?} {outer:?}: odd count admitted a row");
                 return;
             }
             if let Some(s) = diffusion_cc_row(counts, outer) {
                 for (d, &cnt) in counts.iter().enumerate() {
-                    assert_eq!(
-                        s.iter().filter(|&&x| x == d).count(),
-                        usize::from(cnt),
-                        "{counts:?} {outer:?}: {s:?}"
-                    );
+                    assert_eq!(s.iter().filter(|&&x| x == d).count(), usize::from(cnt), "{counts:?} {outer:?}: {s:?}");
                 }
                 let n = s.len();
-                assert!(
-                    (0..n).all(|i| s[i] == s[n - 1 - i]),
-                    "{counts:?} {outer:?}: {s:?} not a palindrome"
-                );
-                assert!(
-                    diffusion_legal(&s, outer),
-                    "{counts:?} {outer:?}: {s:?} not diffusion-legal"
-                );
+                assert!((0..n).all(|i| s[i] == s[n - 1 - i]), "{counts:?} {outer:?}: {s:?} not a palindrome");
+                assert!(diffusion_legal(&s, outer), "{counts:?} {outer:?}: {s:?} not diffusion-legal");
             }
         };
         for outer in [Outer::Drain, Outer::Source] {
@@ -790,63 +638,33 @@ mod tests {
 
     #[test]
     fn equal_counts_reproduce_the_old_orders() {
-        assert_eq!(
-            letters(&diffusion_cc_row(&[2, 2], Outer::Drain).unwrap()),
-            "ABBA"
-        );
-        assert_eq!(
-            letters(&diffusion_cc_row(&[4, 4], Outer::Drain).unwrap()),
-            "ABBAABBA"
-        );
-        assert_eq!(
-            letters(&diffusion_cc_row(&[6, 6], Outer::Drain).unwrap()),
-            "ABBAABBAABBA"
-        );
-        assert_eq!(
-            letters(&diffusion_cc_row(&[8, 8], Outer::Drain).unwrap()),
-            "ABBAABBAABBAABBA"
-        );
-        assert_eq!(
-            letters(&diffusion_cc_row(&[4, 4, 4], Outer::Drain).unwrap()),
-            "ABBCCAACCBBA"
-        );
-        assert_eq!(
-            letters(&diffusion_cc_row(&[4, 4, 4, 4], Outer::Drain).unwrap()),
-            "ABBCCDDAADDCCBBA"
-        );
+        assert_eq!(letters(&diffusion_cc_row(&[2, 2], Outer::Drain).unwrap()), "ABBA");
+        assert_eq!(letters(&diffusion_cc_row(&[4, 4], Outer::Drain).unwrap()), "ABBAABBA");
+        assert_eq!(letters(&diffusion_cc_row(&[6, 6], Outer::Drain).unwrap()), "ABBAABBAABBA");
+        assert_eq!(letters(&diffusion_cc_row(&[8, 8], Outer::Drain).unwrap()), "ABBAABBAABBAABBA");
+        assert_eq!(letters(&diffusion_cc_row(&[4, 4, 4], Outer::Drain).unwrap()), "ABBCCAACCBBA");
+        assert_eq!(letters(&diffusion_cc_row(&[4, 4, 4, 4], Outer::Drain).unwrap()), "ABBCCDDAADDCCBBA");
         let new = diffusion_cc_row(&[8, 8, 8], Outer::Drain).unwrap();
         assert_eq!(letters(&new), "ABBCCCCAABBAABBAACCCCBBA");
         let old = devs("ABBCCAACCBBAABBCCAACCBBA");
         let (r2_new, r2_old) = (row_r2(&new, 3), row_r2(&old, 3));
-        assert!(
-            r2_new <= r2_old + 1e-9,
-            "r2(new)={r2_new} should not exceed r2(old)={r2_old}"
-        );
+        assert!(r2_new <= r2_old + 1e-9, "r2(new)={r2_new} should not exceed r2(old)={r2_old}");
     }
 
     #[test]
     fn two_to_four_is_a_bbbb_a() {
-        assert_eq!(
-            diffusion_cc_row(&[2, 4], Outer::Drain).unwrap(),
-            vec![0, 1, 1, 1, 1, 0]
-        );
+        assert_eq!(diffusion_cc_row(&[2, 4], Outer::Drain).unwrap(), vec![0, 1, 1, 1, 1, 0]);
     }
 
     #[test]
     fn two_to_four_source_is_bb_aa_bb() {
-        assert_eq!(
-            diffusion_cc_row(&[2, 4], Outer::Source).unwrap(),
-            vec![1, 1, 0, 0, 1, 1]
-        );
+        assert_eq!(diffusion_cc_row(&[2, 4], Outer::Source).unwrap(), vec![1, 1, 0, 0, 1, 1]);
     }
 
     #[test]
     fn source_needs_even_pair_parity() {
         assert!(diffusion_cc_row(&[2, 2], Outer::Source).is_none());
-        assert_eq!(
-            letters(&diffusion_cc_row(&[4, 4], Outer::Source).unwrap()),
-            "AABBBBAA"
-        );
+        assert_eq!(letters(&diffusion_cc_row(&[4, 4], Outer::Source).unwrap()), "AABBBBAA");
     }
 
     #[test]
@@ -861,18 +679,10 @@ mod tests {
         assert_eq!(letters(&s), "ADDEECCEEDDBBDDEECCEEDDA");
         let n = s.len() as i64;
         for d in 0..5usize {
-            let sum: i64 = s
-                .iter()
-                .enumerate()
-                .filter(|&(_, &x)| x == d)
-                .map(|(i, _)| 2 * i as i64 - (n - 1))
-                .sum();
+            let sum: i64 = s.iter().enumerate().filter(|&(_, &x)| x == d).map(|(i, _)| 2 * i as i64 - (n - 1)).sum();
             assert_eq!(sum, 0, "member {d} off centre");
         }
-        assert_eq!(
-            letters(&diffusion_cc_row(&[4, 8], Outer::Drain).unwrap()),
-            "ABBBBAABBBBA"
-        );
+        assert_eq!(letters(&diffusion_cc_row(&[4, 8], Outer::Drain).unwrap()), "ABBBBAABBBBA");
     }
 
     /// `rows` → per-member unit points (col, row), weight 1.
@@ -880,12 +690,7 @@ mod tests {
         let mut m = [Vec::new(), Vec::new()];
         for (r, row) in rows.iter().enumerate() {
             for (c, &l) in row.iter().enumerate() {
-                m[usize::from(l)].push(Pt {
-                    x: c as f64,
-                    y: r as f64,
-                    w: 1.0,
-                    phi: (1, 0),
-                });
+                m[usize::from(l)].push(Pt { x: c as f64, y: r as f64, w: 1.0, phi: (1, 0) });
             }
         }
         m
@@ -909,15 +714,7 @@ mod tests {
 
     #[test]
     fn order_three_is_nth_fig_3b() {
-        assert_eq!(
-            nth_order_rows(3, &[0, 1, 1, 0]),
-            vec![
-                vec![0, 1, 1, 0],
-                vec![1, 0, 0, 1],
-                vec![1, 0, 0, 1],
-                vec![0, 1, 1, 0]
-            ]
-        );
+        assert_eq!(nth_order_rows(3, &[0, 1, 1, 0]), vec![vec![0, 1, 1, 0], vec![1, 0, 0, 1], vec![1, 0, 0, 1], vec![0, 1, 1, 0]]);
     }
 
     #[test]
@@ -930,10 +727,7 @@ mod tests {
         }
         // Odd length: legal input, illegal order-2 row (documented limit).
         assert!(diffusion_legal(&[0, 1, 1], Outer::Drain));
-        assert_eq!(
-            nth_order_rows(2, &[0, 1, 1]),
-            vec![vec![0, 1, 1], vec![0, 0, 1]]
-        );
+        assert_eq!(nth_order_rows(2, &[0, 1, 1]), vec![vec![0, 1, 1], vec![0, 0, 1]]);
         assert!(!diffusion_legal(&[0, 0, 1], Outer::Drain));
     }
 
@@ -943,10 +737,7 @@ mod tests {
         assert_eq!(s.len(), 15);
         assert_eq!(s[7].0, 8);
         s.sort_by(|a, b| a.2.total_cmp(&b.2));
-        for (got, (n, m, v)) in s
-            .iter()
-            .zip([(8, 11, 2.05e-7), (11, 15, 3.42e-7), (3, 4, 5.48e-7)])
-        {
+        for (got, (n, m, v)) in s.iter().zip([(8, 11, 2.05e-7), (11, 15, 3.42e-7), (3, 4, 5.48e-7)]) {
             assert_eq!((got.0, got.1), (n, m), "{s:?}");
             assert!((got.2 - v).abs() < 0.01e-7, "{got:?}");
         }
@@ -956,9 +747,6 @@ mod tests {
     fn partial_segments_reproduces_the_book_decomposition() {
         let (m, n, j, k, _) = partial_segments(146e3, 200e3, 10.34e3);
         assert_eq!((m, n), (19, 14));
-        assert!(
-            (j - 0.342).abs() < 2e-3 && (k - 0.120).abs() < 2e-3,
-            "{j} {k}"
-        );
+        assert!((j - 0.342).abs() < 2e-3 && (k - 0.120).abs() < 2e-3, "{j} {k}");
     }
 }

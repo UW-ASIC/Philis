@@ -1,9 +1,9 @@
 //! DC current distribution over a routed net's drawn shapes: what the
 //! electromigration rule checks each segment and via against.
 
-use super::Stack;
 use pnr_core::geom::Shape;
 use pnr_core::routes::Terminal;
+use super::Stack;
 
 /// DC current distribution of one routed net.
 pub struct NetFlow {
@@ -39,11 +39,7 @@ pub fn net_flow(stack: &Stack, shapes: &[Shape], terms: &[Terminal]) -> Option<N
     let root = (*g.term.first()?)?;
     let parent = g.tree(root);
     let reached = |n: usize| n == root || parent[n].is_some();
-    let nodes: Vec<usize> = g
-        .term
-        .iter()
-        .map(|t| t.filter(|&n| reached(n)))
-        .collect::<Option<_>>()?;
+    let nodes: Vec<usize> = g.term.iter().map(|t| t.filter(|&n| reached(n))).collect::<Option<_>>()?;
 
     // Injection per node, then subtree sums leaf-up (children before parents:
     // reverse of a preorder from the root).
@@ -71,11 +67,7 @@ pub fn net_flow(stack: &Stack, shapes: &[Shape], terms: &[Terminal]) -> Option<N
     let mut edge = vec![0.0f32; g.adj.len()];
     for &n in order.iter().rev().filter(|&&n| n != root) {
         let s = sum[n];
-        edge[n] = if bal {
-            s.abs()
-        } else {
-            s.abs().max((total - s).abs())
-        };
+        edge[n] = if bal { s.abs() } else { s.abs().max((total - s).abs()) };
         if let Some((p, ..)) = parent[n] {
             sum[p] += s;
         }
