@@ -228,6 +228,24 @@ fn antenna_in_loop_never_passes_what_signoff_fails() {
     }
 }
 
+/// dr's rule rows describe the routes that ship (RTE-23): the winner's
+/// batch rows (`sol.route`) equal `gr::analog_tiers` re-measured on
+/// `sol.routes`, rule and margin, antenna diode markers included.
+#[test]
+fn routing_rows_are_measured_on_the_shipped_routes() {
+    let pdk = pdk();
+    for &(name, ..) in BASELINE {
+        let spice = std::fs::read_to_string(root().join(format!("benchmarks/fixtures/{name}.spice"))).expect("read fixture");
+        let cfg = library::Config { feedback_iters: 1, ..Default::default() };
+        let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let (hard, budget) = gr::analog_tiers(&sol.routes, &sol.routing);
+        let want: Vec<(String, i64)> = hard.iter().chain(&budget).filter(|v| v.is_batch_row()).map(|v| (v.rule.clone(), v.margin)).collect();
+        let got: Vec<(String, i64)> = sol.route.hard_violations.iter().chain(&sol.route.budget_violations).filter(|v| v.is_batch_row()).map(|v| (v.rule.clone(), v.margin)).collect();
+        println!("{name:16} dr rows {got:?}");
+        assert_eq!(got, want, "{name}");
+    }
+}
+
 /// A device LVS cannot compare is a signoff row, not an epoch violation: it
 /// is the same on every layout, so a MOM capacitor (2 units, which sky130
 /// does not extract) beside a compared nfet still stops converged at bench's

@@ -34,6 +34,8 @@ const K_MAX: u8 = 8;
 /// EM verify/repair rounds after geometry (tuning default): each bumps the
 /// tracks of the branches `Electromigration::failing` names and reroutes.
 const EM_ROUNDS: u32 = 3;
+/// Repair rounds on the drawn routes after fill (RTE-23).
+const POST_ROUNDS: u32 = 2;
 /// Rip-up rounds for nets named by violated hard rules, each at doubled `p_fac`.
 const HARD_ROUNDS: u32 = 4;
 /// History on a node another net owns under a laid access jog: that net's trunk
@@ -44,6 +46,30 @@ const CONTESTED: u32 = NONE - 1;
 /// `reserved` owner of a node within spacing of foreign cell or ring metal:
 /// no net's trunk may use it, and unlike [`CONTESTED`] no pin lands there.
 const BLOCKED: u32 = NONE - 2;
+
+/// A region routed metal must respect (absolute nm; built per layout by the
+/// library from the cells' keep-outs and match classes, RTE-16).
+#[derive(Clone, Copy, Debug)]
+pub struct Blockage {
+    /// The protected area as drawn (the gate, the body, the plate).
+    pub rect: Rect,
+    /// How far routed metal keeps off `rect`, nm (the library's: the lowest
+    /// routed metal's spacing). The `metal over gate` check reads `rect` alone.
+    pub halo: i32,
+    /// Bit `l` = lattice layer `l`.
+    pub layers: u16,
+    /// Hard: no node inside for the nets it applies to; soft: [`gr::KEEPOUT_COST`]
+    /// per node for nets without a pin in `cell` (soft always exempts its own).
+    pub hard: bool,
+    /// Hard only: the nets with a pin in `cell` may pass.
+    pub own_exempt: bool,
+    /// Hard only: applies to aggressor nets ([`DetailedCfg::aggressor`]) alone.
+    pub only_aggressors: bool,
+    /// Index of the placed cell it protects.
+    pub cell: u32,
+    /// A matched gate: any routed metal over `rect` is a `metal over gate` V.
+    pub gate: bool,
+}
 
 /// Track-lattice configuration (set from the deck by `frontend/library`).
 #[derive(Debug, Clone)]
@@ -118,6 +144,12 @@ pub struct DetailedCfg {
     /// C (`gr::Elec`).
     pub layer_c: Vec<f32>,
     pub beside_c: Vec<f32>,
+    /// Per lower lattice layer: the crossing C of one node to the layer
+    /// above, same scale (`gr::Elec::cross_c`); empty = none.
+    pub cross_c: Vec<f32>,
+    /// Aggressor weight per net, `[0, 1]`, by `NetId`
+    /// (`CouplingBudget::default_weights`); empty = 1.0 each.
+    pub aggressor_weight: Vec<f32>,
     /// Per lattice layer: series R of one track step, and of one via up from
     /// it, over the least resistive layer's step (`gr::Elec`); empty = none.
     pub layer_r: Vec<f32>,
@@ -129,6 +161,13 @@ pub struct DetailedCfg {
     /// Nets in the netlist: `Routes` is sized to at least this, so a rule on a
     /// net with no pin reads empty shapes. `0` = the pins' highest net + 1.
     pub n_nets: usize,
+    /// Keep-outs over matched gates, resistor bodies and cap plates; empty = none.
+    pub blockages: Vec<Blockage>,
+    /// Per `NetId`, an aggressor-class net (`Clock` today); empty = none.
+    pub aggressor: Vec<bool>,
+    /// Capacitor sets whose plate leads are routed apart and equalised
+    /// (RTE-20; absolute array rects); empty = none. Needs `stack`.
+    pub plates: Vec<analog::routing::PlateSet>,
 }
 
 impl Default for DetailedCfg {
@@ -155,11 +194,16 @@ impl Default for DetailedCfg {
             net_weight: Vec::new(),
             layer_c: Vec::new(),
             beside_c: Vec::new(),
+            cross_c: Vec::new(),
+            aggressor_weight: Vec::new(),
             layer_r: Vec::new(),
             via_r: Vec::new(),
             common: Vec::new(),
             stack: None,
             n_nets: 0,
+            blockages: Vec::new(),
+            aggressor: Vec::new(),
+            plates: Vec::new(),
         }
     }
 }
@@ -228,6 +272,19 @@ pub struct RouteStats {
     pub width_fallbacks: u32,
     pub single_cut_vias: u32,
     pub congestion: Vec<(Rect, f32)>,
+    /// Matched pairs routed as exact images (RTE-15), `(leader, image)`, and
+    /// the rest as `(pos, neg, reason)`: `no pin map`, `axis off lattice`,
+    /// `wide pair`, `landing failed`.
+    pub pairs_exact: Vec<(u32, u32)>,
+    pub pairs_fallback: Vec<(u32, u32, &'static str)>,
+    /// Per capacitor set (RTE-20), its lead-C spread after equalising,
+    /// percent of one unit's C; `None` = unknown (no unit C).
+    pub plate_spread_pct: Vec<Option<f32>>,
+    /// Leader fillers whose image on an exact pair's other net would sit
+    /// within spacing of foreign metal, dropped from both nets (RTE-23).
+    pub pair_fillers_dropped: u32,
+    /// Repair rounds run on the drawn routes after fill (RTE-23).
+    pub post_rounds: u32,
 }
 
 /// The detailed router.
@@ -306,6 +363,24 @@ impl DetailedRoute {
         // the same absolute coordinates whatever the frame.
         let origin = frame_origin((low(|r| r.x), low(|r| r.y)), halo + margin, lattice_period(cfg));
         let shift = |r: Rect| Rect { x: r.x - origin.0, y: r.y - origin.1, ..r };
+        // RTE-20: the capacitor sets' plate rules, arrays moved by `-off`
+        // (`origin` for the routing frame, `(0, 0)` for absolute routes).
+        let plate_rules = |off: (i32, i32)| {
+            let space_nm = layers.first().map_or(0, |&l| cfg.space(l, 0, 0, cfg.pitch - cfg.wire_width));
+            analog::routing::PlateRatios(match cfg.stack {
+                Some(stack) => cfg
+                    .plates
+                    .iter()
+                    .map(|p| analog::routing::PlateRatio {
+                        set: analog::routing::PlateSet { array: Rect { x: p.array.x - off.0, y: p.array.y - off.1, ..p.array }, ..p.clone() },
+                        tol_pct10: PLATE_TOL_PCT10,
+                        stack,
+                        space_nm,
+                    })
+                    .collect(),
+                None => Vec::new(),
+            })
+        };
         // The cells' metal and gate pins per net, for the rules that score the
         // whole conductor (antenna): absolute, and in the routing frame.
         let (cell_abs, gates_abs) = cell_metal(placed, n_nets, cfg.stack, &cfg.gate_nm2);
@@ -360,7 +435,7 @@ impl DetailedRoute {
         }
         let die = (hi_x + halo, hi_y + halo);
 
-        let compact: Vec<usize> = (0..n_nets).filter(|&i| !term_rects[i].is_empty()).collect();
+        let mut compact: Vec<usize> = (0..n_nets).filter(|&i| !term_rects[i].is_empty()).collect();
         if compact.is_empty() {
             let routes = Routes { wires: vec![Vec::new(); n_nets], ..Default::default()  };
             let report = score(&routes, reqs, 0.0, &[], &[], &[], 1);
@@ -370,7 +445,7 @@ impl DetailedRoute {
         for (ci, &ni) in compact.iter().enumerate() {
             ci_of[ni] = ci;
         }
-        let n_compact = compact.len();
+        let mut n_compact = compact.len();
 
         let grid = if cfg.layers.is_empty() {
             TrackGrid::with_layers(die, cfg.pitch, VIA_COST, n_layers)
@@ -504,15 +579,180 @@ impl DetailedRoute {
                 }
             }
         }
+        // Hard blockages (RTE-16): a node of a blocked layer whose centre lies
+        // inside the rect grown by its halo and half a wire is closed to every net
+        // (`BLOCKED`), or, when the blockage spares the cell's own nets or
+        // binds aggressors only, to the nets it applies to (`blocked_for`).
+        // Per net, the rects (with layer bits) its access jogs keep out of.
+        let applies = |b: &Blockage, ni: usize| {
+            let own = placed.get(b.cell as usize).is_some_and(|m| m.pins.iter().any(|p| p.net.0 as usize == ni));
+            !(b.own_exempt && own) && (!b.only_aggressors || cfg.aggressor.get(ni).copied().unwrap_or(false))
+        };
+        let mut blocked_for: Vec<Vec<u32>> = vec![Vec::new(); n_compact];
+        let mut jog_blocks: Vec<Vec<(Rect, u16)>> = vec![Vec::new(); n_compact];
+        for b in cfg.blockages.iter().filter(|b| b.hard) {
+            let everyone = !b.own_exempt && !b.only_aggressors;
+            let nets: Vec<usize> = (0..n_compact).filter(|&ci| everyone || applies(b, compact[ci])).collect();
+            let r = grown(shift(b.rect), b.halo);
+            for &ci in &nets {
+                jog_blocks[ci].push((r, b.layers));
+            }
+            for l in (0..n_layers as usize).filter(|&l| b.layers >> l & 1 == 1) {
+                let g = cfg.wire(l) / 2;
+                let (x0, y0, x1, y1) = (r.x - g, r.y - g, r.x + r.w + g, r.y + r.h + g);
+                for iy in grid.bin_y(y0)..=grid.bin_y(y1) {
+                    for ix in grid.bin_x(x0)..=grid.bin_x(x1) {
+                        let n = grid.node(ix, iy, l as u32);
+                        let (px, py, _) = grid.pos(n);
+                        if !(x0 < px && px < x1 && y0 < py && py < y1) {
+                            continue;
+                        }
+                        // A pin's stitch node inside stays its pin's, but no
+                        // net it binds may land or run there.
+                        if everyone && pre[n as usize] {
+                            reserved[n as usize] = BLOCKED;
+                        } else {
+                            nets.iter().for_each(|&ci| blocked_for[ci].push(n));
+                        }
+                    }
+                }
+            }
+        }
+        for v in &mut blocked_for {
+            v.sort_unstable();
+            v.dedup();
+        }
+        // The rects of `jog_blocks[ci]` that bind lattice layer `l`.
+        let blocks_on = |ci: usize, l: u32| -> Vec<Rect> { jog_blocks[ci].iter().filter(|b| b.1 >> l & 1 == 1).map(|b| b.0).collect() };
+
+        // RTE-15: exact matched pairs land jointly, before every other pin.
+        // Per pair `(a = pos, b = neg)` from the `Mirror` batches, the lattice
+        // map carrying a's pins exactly onto b's ([`pair_map`]); each a pin
+        // (by `(y, x)`) lands on a node `n` clean for a whose image is clean
+        // for b's partner pin, on a's side, with both jogs clean; both claim.
+        // A pair whose map or landing fails routes alone (`pairs_fallback`).
+        let clean_at = |reserved: &[u32], ci: usize, r: Rect, n: u32| -> bool {
+            let (px, py, _) = grid.pos(n);
+            let pad = Rect { x: px - pad0 / 2, y: py - pad0 / 2, w: pad0, h: pad0 };
+            [NONE, CONTESTED, ci as u32].contains(&reserved[n as usize])
+                && blocked_for[ci].binary_search(&n).is_err()
+                && short_free(ci, r, px, py)
+                && good_site((r.x + r.w / 2, r.y + r.h / 2), px, py)
+                && zones.iter().all(|&(zci, zx, zy)| zci as usize == ci || rect_gap(pad, Rect { x: zx - stitch / 2, y: zy - stitch / 2, w: stitch, h: stitch }) >= pad_space)
+        };
+        let mut jointly: HashSet<(usize, i32, i32, i32, i32)> = HashSet::new();
+        // The node each pin landed on, by `(compact net, pin rect)`.
+        let mut landed_at: HashMap<(usize, i32, i32, i32, i32), u32> = HashMap::new();
+        let mut exact: Vec<(usize, usize, gr::LatticeMap)> = Vec::new();
+        let mut mirror_ids = Vec::new();
+        for b in reqs.hard.iter().chain(&reqs.budget).filter(|b| b.repair_kind() == RepairKind::Mirror) {
+            b.touched(&mut mirror_ids);
+        }
+        for p in mirror_ids.chunks_exact(2) {
+            let (pa, pb) = (p[0] as usize, p[1] as usize);
+            let (Some(&a), Some(&b)) = (ci_of.get(pa), ci_of.get(pb)) else { continue };
+            if a == usize::MAX || b == usize::MAX || a == b || exact.iter().any(|e| [e.0, e.1].contains(&a) || [e.0, e.1].contains(&b)) {
+                continue;
+            }
+            let map = match pair_map(&term_rects[pa], &term_rects[pb], &grid, cfg.grid) {
+                Ok(m) => m,
+                Err(why) => {
+                    stats.pairs_fallback.push((pa as u32, pb as u32, why));
+                    continue;
+                }
+            };
+            let side = |n: u32, m: u32| match map {
+                gr::LatticeMap::MirrorX { .. } => (grid.pos(m).0 - grid.pos(n).0).signum(),
+                gr::LatticeMap::Shift { .. } => 0,
+            };
+            // A mirror keeps a's metal on a's side of the axis (toward b, the image).
+            let want_side = {
+                let mean = |v: &[(Rect, LayerId, Option<f32>)]| v.iter().map(|t| i64::from(t.0.x) * 2 + i64::from(t.0.w)).sum::<i64>() / v.len().max(1) as i64;
+                match map {
+                    gr::LatticeMap::MirrorX { .. } => (mean(&term_rects[pb]) - mean(&term_rects[pa])).signum() as i32,
+                    gr::LatticeMap::Shift { .. } => 0,
+                }
+            };
+            let (known_a, known_b) = (term_rects[pa].iter().all(|t| t.2.is_some()), term_rects[pb].iter().all(|t| t.2.is_some()));
+            let mut pins_a = term_rects[pa].clone();
+            pins_a.sort_by_key(|t| (t.0.y, t.0.x));
+            let mut ok = true;
+            for (ra, la, ua_a) in pins_a {
+                let image = map_rect(ra, map, &grid);
+                let Some(&(rb, lb, ua_b)) = term_rects[pb].iter().find(|t| t.1 == la && (t.0.x - image.x).abs() <= cfg.grid && (t.0.y - image.y).abs() <= cfg.grid && t.0.w == image.w && t.0.h == image.h) else {
+                    ok = false;
+                    break;
+                };
+                let (ca, cb) = ((ra.x + ra.w / 2, ra.y + ra.h / 2), (rb.x + rb.w / 2, rb.y + rb.h / 2));
+                let jog_l = jog_layer(cfg, layers, cuts, grid.n_layers, la);
+                let (blk_a, blk_b) = (blocks_on(a, jog_l), blocks_on(b, jog_l));
+                let metal = layers.get(jog_l as usize);
+                let need = metal.map_or(0, |&m| access_need(cfg, m, ua_a.filter(|_| known_a)).max(access_need(cfg, m, ua_b.filter(|_| known_b))));
+                let full = cfg.wire_width.max(1).max(need);
+                let floor = cfg.min_width.iter().find(|&&(l, _)| Some(&l) == metal).map_or(1, |&(_, w)| w);
+                let narrow = full.min(ra.w).min(ra.h).max(floor).max(need);
+                let ok_n = |n: u32| {
+                    clean_at(&reserved, a, ra, n) && grid.map(map, n).is_some_and(|m| m != n && !claimed[m as usize] && side(n, m) == want_side && clean_at(&reserved, b, rb, m))
+                };
+                let cands = grid.candidates(ca.0, ca.1, &claimed, ok_n, 8, 12);
+                let spaced = (stitch, (cfg.pitch - cfg.wire_width).max(1));
+                let pick = [spaced, (full, 1)].into_iter().find_map(|(zone, gap)| {
+                    cands.iter().copied().find_map(|n| {
+                        let m = grid.map(map, n)?;
+                        let ((nx, ny, _), (mx, my, _)) = (grid.pos(n), grid.pos(m));
+                        [full, narrow].into_iter().find_map(|w| {
+                            let (la_, lb_) = (jog_legs(nx, ny, ca.0, ca.1, w), jog_legs(mx, my, cb.0, cb.1, w));
+                            let f = (0..2).find(|&f| {
+                                let mut laid = laid_legs.clone();
+                                laid.extend(la_[f].iter().map(|&l| (a, l)));
+                                jog_clean(&la_[f], a, zone, gap, &zones, &laid_legs, &blk_a) && jog_clean(&lb_[f], b, zone, gap, &zones, &laid, &blk_b)
+                            })?;
+                            Some((n, m, (w, f == 1), la_[f], lb_[f]))
+                        })
+                    })
+                });
+                let Some((n, m, choice, legs_a, legs_b)) = pick else {
+                    ok = false;
+                    break;
+                };
+                for (ci, r, rl, ua, node, legs, known) in [(a, ra, la, ua_a, n, legs_a, known_a), (b, rb, lb, ua_b, m, legs_b, known_b)] {
+                    let ua = ua.filter(|_| known);
+                    laid_legs.extend(legs.iter().map(|&l| (ci, l)));
+                    jog_hist.extend(jog_hist_nodes(&grid, cfg, &legs, jog_l, &reserved, ci));
+                    claimed[node as usize] = true;
+                    landed_at.insert((ci, r.x, r.y, r.w, r.h), node);
+                    reserved[node as usize] = ci as u32;
+                    if let Some(ua) = ua {
+                        node_ua[ci].push((node, ua));
+                    }
+                    if !c_terms[ci].contains(&node) {
+                        c_terms[ci].push(node);
+                    }
+                    let (px, py, node_layer) = grid.pos(node);
+                    let acc = Access { ci, pin: r, pin_layer: rl, node: (px, py), node_layer, choice: Some(choice), ua, node_ua: ua };
+                    claim_jog_sweep(&grid, cfg, layers, cuts, &acc, &mut claimed, &mut reserved);
+                    access.push(acc);
+                    jointly.insert((ci, r.x, r.y, r.w, r.h));
+                }
+            }
+            if ok && term_rects[pa].len() == term_rects[pb].len() {
+                exact.push((a, b, map));
+            } else {
+                stats.pairs_fallback.push((pa as u32, pb as u32, "landing failed"));
+            }
+        }
 
         for (ci, &ni) in compact.iter().enumerate() {
             let known = term_rects[ni].iter().all(|t| t.2.is_some());
             for &(r, r_layer, ua) in &term_rects[ni] {
+                if jointly.contains(&(ci, r.x, r.y, r.w, r.h)) {
+                    continue;
+                }
                 // A net with any unknown terminal gets no EM sizing at all.
                 let ua = ua.filter(|_| known);
                 let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
                 // Never land inside another net's stitch reservation.
-                let mine = |n: u32| [NONE, CONTESTED, ci as u32].contains(&reserved[n as usize]);
+                let mine = |n: u32| [NONE, CONTESTED, ci as u32].contains(&reserved[n as usize]) && blocked_for[ci].binary_search(&n).is_err();
                 let at = |n: u32| {
                     let (px, py, _) = grid.pos(n);
                     (px, py)
@@ -531,6 +771,7 @@ impl DetailedRoute {
                 // zone and every jog already laid.
                 let jog_l = jog_layer(cfg, layers, cuts, grid.n_layers, r_layer);
                 let metal = layers.get(jog_l as usize);
+                let blocks = blocks_on(ci, jog_l);
                 // No candidate jog narrower than its EM width.
                 let need = metal.map_or(0, |&m| access_need(cfg, m, ua));
                 let full = cfg.wire_width.max(1).max(need);
@@ -547,7 +788,7 @@ impl DetailedRoute {
                         let (px, py, _) = grid.pos(n);
                         [full, narrow].into_iter().find_map(|w| {
                             let both = jog_legs(px, py, cx, cy, w);
-                            let f = (0..2).find(|&f| jog_clean(&both[f], ci, zone, gap, &zones, &laid_legs))?;
+                            let f = (0..2).find(|&f| jog_clean(&both[f], ci, zone, gap, &zones, &laid_legs, &blocks))?;
                             Some((n, (w, f == 1), both[f]))
                         })
                     })
@@ -562,13 +803,7 @@ impl DetailedRoute {
                         // short `break_shorts` settles only by deleting this access.
                         // Only a node whose wire would touch a leg: the swept bins
                         // reach up to a pitch past it.
-                        let infl = cfg.wire_width / 2;
-                        let touches = |n: &u32| {
-                            let (px, py, _) = grid.pos(*n);
-                            legs.iter().any(|l| (l.x - infl..=l.x + l.w + infl).contains(&px) && (l.y - infl..=l.y + l.h + infl).contains(&py))
-                        };
-                        let foreign = |n: &u32| reserved[*n as usize] != ci as u32 && reserved[*n as usize] < BLOCKED;
-                        jog_hist.extend(jog_nodes(&grid, cfg, &legs, jog_l).filter(foreign).filter(touches));
+                        jog_hist.extend(jog_hist_nodes(&grid, cfg, &legs, jog_l, &reserved, ci));
                         Some((n, Some(choice)))
                     }
                     None => grid
@@ -583,6 +818,7 @@ impl DetailedRoute {
                     continue;
                 };
                 claimed[n as usize] = true;
+                landed_at.insert((ci, r.x, r.y, r.w, r.h), n);
                 reserved[n as usize] = ci as u32;
                 if let Some(ua) = ua {
                     node_ua[ci].push((n, ua));
@@ -599,6 +835,67 @@ impl DetailedRoute {
             }
         }
 
+        // RTE-17: each group of a star node routes as its own pseudo-net (a
+        // compact net past the real ones, `compact[pseudo]` = the parent's
+        // `NetId`, so `build_routes` draws it into the parent): its pins'
+        // landed nodes plus one root node of its own inside the feeds' halo
+        // (`p0`); the parent keeps its other pins and joins the roots. The
+        // pseudo-nets repel each other like any two nets, so the branches
+        // meet only at the root. A halo with too few free nodes is a V.
+        let mut owner: Vec<u32> = Vec::new();
+        let mut star_v: Vec<Violation> = Vec::new();
+        // Per star, its branches' pseudo-nets: kept a track apart (below).
+        let mut star_sibs: Vec<Vec<usize>> = Vec::new();
+        for node in cfg.common.iter().filter(|n| n.star && n.groups.len() > 1) {
+            let n = node.net.0 as usize;
+            let Some(ci) = ci_of.get(n).copied().filter(|&c| c != usize::MAX) else { continue };
+            let pins: Vec<Vec<u32>> = node.groups.iter().map(|g| g.iter().filter_map(|&r| { let r = shift(r); landed_at.get(&(ci, r.x, r.y, r.w, r.h)).copied() }).collect()).collect();
+            let p = grid.pitch;
+            let mut roots: Vec<(i64, u32)> = Vec::new();
+            for f in node.feeds.iter().map(|&f| grown(shift(f), p)) {
+                let c = (f.x + f.w / 2, f.y + f.h / 2);
+                for l in 0..grid.n_layers.min(2) {
+                    for iy in grid.bin_y(f.y)..=grid.bin_y(f.y + f.h) {
+                        for ix in grid.bin_x(f.x)..=grid.bin_x(f.x + f.w) {
+                            let m = grid.node(ix, iy, l);
+                            let (x, y, _) = grid.pos(m);
+                            let inside = (f.x..=f.x + f.w).contains(&x) && (f.y..=f.y + f.h).contains(&y);
+                            if inside && grid.on_track(m) && !claimed[m as usize] && [NONE, ci as u32].contains(&reserved[m as usize]) && blocked_for[ci].binary_search(&m).is_err() {
+                                roots.push((i64::from((x - c.0).abs() + (y - c.1).abs()) + i64::from(l) * i64::from(p), m));
+                            }
+                        }
+                    }
+                }
+            }
+            roots.sort_unstable();
+            roots.dedup_by_key(|r| r.1);
+            if roots.len() < pins.len() || pins.iter().any(Vec::is_empty) {
+                star_v.push(Violation { rule: format!("star root too small net {n}"), margin: (pins.len() - roots.len().min(pins.len())) as i64 });
+                continue;
+            }
+            if owner.is_empty() {
+                owner = (0..n_compact as u32).collect();
+            }
+            star_sibs.push((n_compact..n_compact + pins.len()).collect());
+            for (g, &(_, root)) in pins.iter().zip(&roots) {
+                claimed[root as usize] = true;
+                reserved[root as usize] = ci as u32;
+                c_terms[ci].retain(|t| !g.contains(t));
+                c_terms[ci].push(root);
+                let mut terms = vec![root];
+                terms.extend(g.iter().copied().filter(|t| *t != root));
+                terms.dedup();
+                let ua: Vec<(u32, f32)> = node_ua[ci].iter().copied().filter(|e| g.contains(&e.0)).collect();
+                node_ua[ci].retain(|e| !g.contains(&e.0));
+                c_terms.push(terms);
+                node_ua.push(ua);
+                blocked_for.push(blocked_for[ci].clone());
+                unlanded.push(0);
+                compact.push(n);
+                owner.push(ci as u32);
+                n_compact += 1;
+            }
+        }
         stats.us_landing = us(t_landing);
         let weight: Vec<f32> = compact.iter().map(|&n| cfg.net_weight.get(n).copied().unwrap_or(0.0)).collect();
         let counts: Vec<usize> = c_terms.iter().map(Vec::len).collect();
@@ -664,45 +961,128 @@ impl DetailedRoute {
             weight,
             layer_c: cfg.layer_c.clone(),
             beside_c: cfg.beside_c.clone(),
+            cross_c: cfg.cross_c.clone(),
+            sep: Vec::new(),
             // Series R is priced only once a drop budget is broken (below).
             current: Vec::new(),
             layer_r: cfg.layer_r.clone(),
             via_r: cfg.via_r.clone(),
-            plain: {
-                let sym = gr::symmetric_nets(reqs);
-                net_ids.iter().map(|n| sym.contains(n)).collect()
-            },
+            mirror: Vec::new(),
+            owner,
             keepout: Vec::new(),
             own_cells: Vec::new(),
+            blocked_for,
             k: ks,
             guard: guards,
             term_k,
         };
-        // Matched cells (units of more than one member): foreign nets pay to
-        // cross them, their own nets (finger straps, drains) do not.
-        let matched: Vec<usize> = (0..placed.len())
-            .filter(|&c| placed[c].units.iter().any(|u| u.owner != placed[c].units[0].owner))
-            .collect();
-        if !matched.is_empty() {
+        // Exact pairs: b's terminals are a's images, in a's order, at tracks
+        // tied to the larger of the two per terminal; a vertical-layer pair
+        // wider than one track falls back (its image would grow toward −x).
+        for (a, b, map) in exact {
+            if tie_pair(&mut cold, a, b, map) {
+                stats.pairs_exact.push((compact[a] as u32, compact[b] as u32));
+            } else {
+                stats.pairs_fallback.push((compact[a] as u32, compact[b] as u32, "wide pair"));
+            }
+        }
+        // Soft blockages: nets without a pin in the cell pay `KEEPOUT_COST`
+        // per node inside the rect; its own nets (finger straps, drains) do not.
+        let soft: Vec<&Blockage> = cfg.blockages.iter().filter(|b| !b.hard).collect();
+        if !soft.is_empty() {
             let mut keep = vec![NONE; cold.graph.nodes()];
-            for &c in &matched {
-                let r = shift(placed[c].bbox);
-                for l in 0..n_layers {
+            for b in &soft {
+                let r = grown(shift(b.rect), b.halo);
+                for l in (0..n_layers).filter(|&l| b.layers >> l & 1 == 1) {
                     for y in cold.graph.bin_y(r.y)..=cold.graph.bin_y(r.y + r.h) {
                         for x in cold.graph.bin_x(r.x)..=cold.graph.bin_x(r.x + r.w) {
-                            keep[cold.graph.node(x, y, l) as usize] = c as u32;
+                            keep[cold.graph.node(x, y, l) as usize] = b.cell;
                         }
                     }
                 }
             }
             cold.keepout = keep;
+            let mut cells: Vec<u32> = soft.iter().map(|b| b.cell).collect();
+            cells.sort_unstable();
+            cells.dedup();
             cold.own_cells = compact
                 .iter()
-                .map(|&n| matched.iter().filter(|&&c| placed[c].pins.iter().any(|p| p.net.0 as usize == n)).map(|&c| c as u32).collect())
+                .map(|&n| cells.iter().copied().filter(|&c| placed.get(c as usize).is_some_and(|m| m.pins.iter().any(|p| p.net.0 as usize == n))).collect())
                 .collect();
         }
+        // RTE-19: a shield's victim routes with a guard track each side on
+        // every layer whose edge gap `s·p0 − (W(k) + wire)/2` is within the
+        // shield's `max_gap`: foreign metal keeps off them during the search,
+        // and the shield stage hands them to the reference. No such layer:
+        // a budget V, and no shield.
+        let mut asks = Vec::new();
+        for b in reqs.hard.iter().chain(&reqs.budget) {
+            b.shield_pairs(&mut asks);
+        }
+        let mut shield_v = Vec::new();
+        let mut shielded: Vec<(usize, usize, [u8; gr::MAX_LAYERS])> = Vec::new();
+        for (v, rf, max_gap) in asks {
+            let ci = |n: u32| ci_of.get(n as usize).copied().filter(|&c| c != usize::MAX);
+            let (Some(v), Some(rf)) = (ci(v), ci(rf)) else { continue };
+            if cold.guard.is_empty() {
+                cold.guard = vec![[0; gr::MAX_LAYERS]; n_compact];
+            }
+            let (k, old) = (cold.k.get(v).copied().unwrap_or([1; gr::MAX_LAYERS]), cold.guard[v]);
+            let (mut nearest, mut any) = (i32::MAX, false);
+            for l in 0..n_l {
+                let step = cfg.stride(l) * cold.graph.pitch;
+                let edge = step - (cfg.wire(l) + (i32::from(k[l]) - 1) * step + cfg.wire(l)) / 2;
+                nearest = nearest.min(edge);
+                if edge <= max_gap {
+                    cold.guard[v][l] = cold.guard[v][l].max(1);
+                    any = true;
+                }
+            }
+            if !any {
+                shield_v.push(Violation { rule: format!("shield gap off lattice net {}", compact[v]), margin: i64::from(nearest - max_gap) });
+            } else {
+                shielded.push((v, rf, old));
+            }
+        }
         let mut hot = RouteHot::new(cold.graph.nodes(), n_compact);
-        hot.set_weights(cold.weight.clone());
+        let agg_w: Vec<f32> = if cfg.aggressor_weight.is_empty() { Vec::new() } else { compact.iter().map(|&n| cfg.aggressor_weight.get(n).copied().unwrap_or(1.0)).collect() };
+        hot.set_weights(cold.weight.clone(), agg_w);
+        // Hard separations (RTE-18): per net, the tracks across it keeps from
+        // the other, per layer, `⌈max(0, lateral − (s·p0 − wire)) / (s·p0)⌉`;
+        // both nets carry the entry, the later-routed one avoids.
+        let mut seps = Vec::new();
+        for b in reqs.hard.iter().chain(&reqs.budget) {
+            b.separations(&mut seps);
+        }
+        analog::RuleBatch::separations(&plate_rules((0, 0)), &mut seps);
+        // A star's branches keep a free track between them: adjacent same-net
+        // runs would be merged by the same-net fill, joining the branches.
+        for sibs in &star_sibs {
+            for (i, &a) in sibs.iter().enumerate() {
+                for &b in &sibs[i + 1..] {
+                    if cold.sep.is_empty() {
+                        cold.sep = vec![Vec::new(); n_compact];
+                    }
+                    cold.sep[a].push((b as u32, [1; gr::MAX_LAYERS], false));
+                    cold.sep[b].push((a as u32, [1; gr::MAX_LAYERS], false));
+                }
+            }
+        }
+        if !seps.is_empty() {
+            if cold.sep.is_empty() {
+                cold.sep = vec![Vec::new(); n_compact];
+            }
+            let p = cold.graph.pitch;
+            for (a, b, lateral, no_cross) in seps {
+                let (Some(a), Some(b)) = (ci_of.get(a as usize).copied().filter(|&c| c != usize::MAX), ci_of.get(b as usize).copied().filter(|&c| c != usize::MAX)) else { continue };
+                let tracks: [u8; gr::MAX_LAYERS] = std::array::from_fn(|l| {
+                    let step = cfg.stride(l) * p;
+                    ((lateral - (step - cfg.wire(l))).max(0) + step - 1).div_euclid(step.max(1)).min(i32::from(u8::MAX)) as u8
+                });
+                cold.sep[a].push((b as u32, tracks, no_cross));
+                cold.sep[b].push((a as u32, tracks, no_cross));
+            }
+        }
         // History is keyed by absolute position: add the frame shift back.
         let abs = |n: u32| {
             let (x, y, l) = cold.graph.pos(n);
@@ -745,22 +1125,32 @@ impl DetailedRoute {
         // Constraint repair: the analog rules never make a net congestion-dirty, so
         // PathFinder alone ignores them. Rip up what they name, reroute steered by
         // the rule's own data, keep only what improves the rules.
-        let probe = |hot: &RouteHot| Routes { cell: cell_f.clone(), gates: gates_f.clone(), ..build_routes(hot, &cold, cfg, &compact, n_nets, layers, cuts) };
+        // The probe draws pin access too (RTE-23): a rule its jogs break is
+        // seen by repair. Frame coordinates; access violations are reported
+        // on the shipped drawing.
+        let joins = joins(layers, cuts, cfg.pin_access);
+        let probe = |hot: &RouteHot, cold: &RouteCtx<TrackGrid>| {
+            let mut r = Routes { cell: cell_f.clone(), gates: gates_f.clone(), ..build_routes(hot, cold, cfg, &compact, n_nets, layers, cuts) };
+            add_pin_access(&mut r, &access, &compact, cfg, layers, cuts, &joins, &zones, origin, &jog_blocks);
+            r
+        };
         // Common-node balance, in the routing frame.
         let common: Vec<analog::routing::CommonNode> = cfg
             .common
             .iter()
             .map(|n| analog::routing::CommonNode {
-                a: n.a.iter().map(|&r| shift(r)).collect(),
-                b: n.b.iter().map(|&r| shift(r)).collect(),
+                groups: n.groups.iter().map(|g| g.iter().map(|&r| shift(r)).collect()).collect(),
                 feeds: n.feeds.iter().map(|&r| shift(r)).collect(),
                 ..n.clone()
             })
             .collect();
-        let extra: Vec<Box<dyn analog::RuleBatch<Routes>>> = match cfg.stack {
-            Some(stack) if !common.is_empty() => vec![Box::new(analog::routing::CommonNodes { nodes: common.clone(), stack })],
+        let mut extra: Vec<Box<dyn analog::RuleBatch<Routes>>> = match cfg.stack {
+            Some(stack) if !common.is_empty() => vec![Box::new(analog::routing::CommonNodes { nodes: common.clone(), stack, halo_nm: cfg.pitch, joins: joins.clone() })],
             _ => Vec::new(),
         };
+        if !cfg.plates.is_empty() {
+            extra.push(Box::new(plate_rules(origin)));
+        }
         // Per net, for the antenna lift: the top lattice layer of its cells'
         // metal (a plate), and each gate's landed node and pin.
         let lift: Vec<Option<(u32, Vec<((i32, i32), Rect)>)>> = compact
@@ -772,329 +1162,510 @@ impl DetailedRoute {
                 (top + 1 < n_layers && !sites.is_empty()).then_some((top, sites))
             })
             .collect();
-        stats.trials = repair_constraints(&mut hot, &cold, reqs, &extra, &common, &ci_of, &lift, probe, &mut dij);
+        stats.trials = repair_constraints(&mut hot, &cold, reqs, &extra, &common, &ci_of, &lift, &probe, &mut dij);
 
         // The jog price is this layout's, not negotiation history.
         jog_hist.iter().for_each(|&n| hot.hist[n as usize] -= JOG_HIST);
         stats.congestion = congestion(&hot, &cold.graph, origin);
         neg.accumulate(&hot.hist, abs);
-        // Shields: requested nets get reference tracks alongside, tied in by
-        // rerouting the reference to them.
-        let mut asks = Vec::new();
-        for b in reqs.hard.iter().chain(&reqs.budget) {
-            b.shield_pairs(&mut asks);
-        }
-        let ci = |n: u32| ci_of.get(n as usize).copied().filter(|&c| c != usize::MAX);
-        for (v, rf) in asks {
-            if let (Some(v), Some(rf)) = (ci(v), ci(rf)) {
-                add_shield(&mut hot, &mut cold, v, rf, &mut dij);
-            }
+        // Shields: the victim gives up its guard tracks (recommitted, so the
+        // search's free side tracks are free), then the reference claims
+        // them, tied in by rerouting it to them.
+        for (v, rf, old) in shielded {
+            cold.guard[v] = old;
+            let tree = hot.trees[v].clone();
+            cold.commit(&mut hot, v, tree);
+            add_shield(&mut hot, &mut cold, v, rf, &mut dij);
         }
         stats.us_repair = us(t_repair);
-        let joins = joins(layers, cuts, cfg.pin_access);
-        let mut round = 0;
+        // Post-fill repair (RTE-23): a hard rule the probe saw satisfied but
+        // the drawing (arrays, fill, stubs, terminals) breaks reroutes the nets
+        // it names and redraws, up to `POST_ROUNDS`; a round is kept only when
+        // the drawing's `(hard violations, Σ residual)` improves without
+        // raising overuse, else every tree and the previous drawing return.
+        // dr's own drawn rows (opens, shorts, sacrificed or failed access)
+        // count as hard violations there: a round never trades a rule for a
+        // short.
+        let pre: Vec<u32> = {
+            let r = probe(&hot, &cold);
+            reqs.hard.iter().map(|b| b.violations(&r)).collect()
+        };
+        let metals: Vec<LayerId> = layers[..n_layers as usize].to_vec();
+        let plates = plate_rules((0, 0)).0;
+        let none = Requirements::<Routes>::default();
+        let drawn_key = |r: &Routes, hot: &RouteHot, sacrificed: &[usize], access_v: &[Violation]| {
+            let own = score(r, &none, 0.0, &joins, &foreign_metal, sacrificed, side).hard_violations.len() + access_v.len();
+            (reqs.hard.iter().map(|b| b.violations(r)).sum::<u32>() + own as u32, reqs.hard.iter().chain(&reqs.budget).map(|b| b.residual(r)).sum::<f64>(), overuse(hot))
+        };
+        #[allow(clippy::type_complexity)]
+        let mut prev: Option<((u32, f64, f32), Vec<Vec<Vec<u32>>>, Vec<[u8; gr::MAX_LAYERS]>, Vec<Vec<[u8; gr::MAX_LAYERS]>>, Vec<Option<(u32, gr::LatticeMap, bool)>>, RouteStats, (Routes, Vec<usize>, Vec<Violation>))> = None;
+        let mut post = 0;
         let (routes, sacrificed, access_v) = loop {
-            let t_geometry = std::time::Instant::now();
-            let mut routes = build_routes(&hot, &cold, cfg, &compact, n_nets, layers, cuts);
-            // Shapes at or past this index per net are access geometry — the only
-            // shapes the short resolver may sacrifice.
-            let pre_access: Vec<usize> = routes.wires.iter().map(Vec::len).collect();
-            let access_v = add_pin_access(&mut routes, &access, &compact, cfg, layers, cuts, &joins, &zones, origin);
+            stats.plate_spread_pct.clear();
+            let mut round = 0;
+            let (mut routes, sacrificed, access_v) = loop {
+                let t_geometry = std::time::Instant::now();
+                // Counts the drawing this pass makes, not every redraw.
+                stats.pair_fillers_dropped = 0;
+                let mut routes = build_routes(&hot, &cold, cfg, &compact, n_nets, layers, cuts);
+                // Shapes at or past this index per net are access geometry — the only
+                // shapes the short resolver may sacrifice.
+                let pre_access: Vec<usize> = routes.wires.iter().map(Vec::len).collect();
+                let access_v = add_pin_access(&mut routes, &access, &compact, cfg, layers, cuts, &joins, &zones, origin, &jog_blocks);
 
-            // A drawn short must never ship silently. Break each by deleting access
-            // geometry (an open is reported), counted per net so `score` reports pins
-            // that may now float.
-            let mut sacrificed = vec![0usize; n_nets];
-            for (ci, &n) in unlanded.iter().enumerate() {
-                sacrificed[compact[ci]] += n;
-            }
-            let mut rank = vec![usize::MAX; n_nets];
-            for (k, &ci) in cold.order.iter().enumerate() {
-                rank[compact[ci as usize]] = k;
-            }
-            break_shorts(&mut routes.wires, &pre_access, &rank, &joins, &mut sacrificed, side);
+                // A drawn short must never ship silently. Break each by deleting access
+                // geometry (an open is reported), counted per net so `score` reports pins
+                // that may now float.
+                let mut sacrificed = vec![0usize; n_nets];
+                for (ci, &n) in unlanded.iter().enumerate() {
+                    sacrificed[compact[ci]] += n;
+                }
+                let mut rank = vec![usize::MAX; n_nets];
+                for (k, &ci) in cold.order.iter().enumerate() {
+                    rank[compact[ci as usize]] = k;
+                }
+                break_shorts(&mut routes.wires, &pre_access, &rank, &joins, &mut sacrificed, side);
 
-            // Via arrays: a cut between two multi-track runs becomes as many cuts as fit
-            // in their overlap (deck cut size, cut spacing, per-axis enclosure). The
-            // hard `Electromigration` rule checks the count (Lienig eq. 3.25) on the
-            // drawn routes; a short group bumps its branches' tracks below.
-            //
-            // ponytail: equal sharing across an array's cuts; crowding at a turn
-            // (Lienig §4.6.4) is unchecked.
-            let all_cuts: Vec<(usize, Shape)> = routes
-                .wires
-                .iter()
-                .enumerate()
-                .flat_map(|(n, w)| w.iter().filter(|c| cuts.iter().any(|&(l, ..)| l == c.layer)).map(move |c| (n, *c)))
-                .collect();
-            let cut_index = ShapeIndex::new(side, all_cuts.iter().map(|(_, c)| (c.layer, c.rect)));
-            for (net, wires) in routes.wires.iter_mut().enumerate() {
-                // The pair of same-net rects on `lo` and `hi` that both fully
-                // cover `r` with the largest overlap.
-                let best = |wires: &[Shape], lo: LayerId, hi: LayerId, r: Rect| {
-                    let on = |l: LayerId| wires.iter().filter(move |m| m.layer == l && contains(m.rect, r)).map(|m| m.rect);
-                    let area = |(a, b): &(Rect, Rect)| {
-                        let w = (a.x + a.w).min(b.x + b.w) - a.x.max(b.x);
-                        let h = (a.y + a.h).min(b.y + b.h) - a.y.max(b.y);
-                        i64::from(w) * i64::from(h)
+                // Via arrays: a cut between two multi-track runs becomes as many cuts as fit
+                // in their overlap (deck cut size, cut spacing, per-axis enclosure). The
+                // hard `Electromigration` rule checks the count (Lienig eq. 3.25) on the
+                // drawn routes; a short group bumps its branches' tracks below.
+                //
+                // ponytail: equal sharing across an array's cuts; crowding at a turn
+                // (Lienig §4.6.4) is unchecked.
+                let all_cuts: Vec<(usize, Shape)> = routes
+                    .wires
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(n, w)| w.iter().filter(|c| cuts.iter().any(|&(l, ..)| l == c.layer)).map(move |c| (n, *c)))
+                    .collect();
+                let cut_index = ShapeIndex::new(side, all_cuts.iter().map(|(_, c)| (c.layer, c.rect)));
+                for (net, wires) in routes.wires.iter_mut().enumerate() {
+                    // The pair of same-net rects on `lo` and `hi` that both fully
+                    // cover `r` with the largest overlap.
+                    let best = |wires: &[Shape], lo: LayerId, hi: LayerId, r: Rect| {
+                        let on = |l: LayerId| wires.iter().filter(move |m| m.layer == l && contains(m.rect, r)).map(|m| m.rect);
+                        let area = |(a, b): &(Rect, Rect)| {
+                            let w = (a.x + a.w).min(b.x + b.w) - a.x.max(b.x);
+                            let h = (a.y + a.h).min(b.y + b.h) - a.y.max(b.y);
+                            i64::from(w) * i64::from(h)
+                        };
+                        on(lo).flat_map(|a| on(hi).map(move |b| (a, b))).max_by_key(area)
                     };
-                    on(lo).flat_map(|a| on(hi).map(move |b| (a, b))).max_by_key(area)
+                    let mut out = Vec::with_capacity(wires.len());
+                    // Array cuts placed for earlier cuts of this net.
+                    let mut placed: Vec<Shape> = Vec::new();
+                    for c in wires.iter() {
+                        let Some(i) = cuts.iter().position(|&(l, ..)| l == c.layer) else {
+                            out.push(*c);
+                            continue;
+                        };
+                        let (_, size, below, above) = cuts[i];
+                        // Per axis, the larger of what the two metals need there: a
+                        // horizontal metal's along-wire enclosure is on x.
+                        let (ex, ey) = match cfg.cut_enclosure_pair.iter().find(|e| e.0 == c.layer) {
+                            Some(&(_, lo, hi)) => {
+                                let horiz = |k: usize| cfg.layers.get(k).map_or(k % 2 == 0, |s| s.horizontal);
+                                let xy = |k: usize, (across, along): (i32, i32)| if horiz(k) { (along, across) } else { (across, along) };
+                                let (a, b) = (xy(i, lo), xy(i + 1, hi));
+                                (a.0.max(b.0), a.1.max(b.1))
+                            }
+                            None => ((below.max(above) - size) / 2, (below.max(above) - size) / 2),
+                        };
+                        let Some((a, b)) = best(wires, layers[i], layers[i + 1], c.rect) else {
+                            out.push(*c);
+                            continue;
+                        };
+                        // A cell cut of this net within cut spacing whose own metal on
+                        // both layers this cut's wires overlap (a cap array's tie stack
+                        // under its pin lead) already joins them: this cut would only
+                        // break the spacing, which binds same-net cuts too.
+                        let space = cfg.space(c.layer, 0, 0, size);
+                        let mine = cell_f.get(net).map_or(&[][..], Vec::as_slice);
+                        let hosts = |l: LayerId, w: Rect, f: Rect| mine.iter().any(|m| m.layer == l && contains(m.rect, f) && rect_gap(m.rect, w) == 0);
+                        if mine.iter().any(|f| f.layer == c.layer && (1..space).contains(&rect_gap(f.rect, c.rect)) && hosts(layers[i], a, f.rect) && hosts(layers[i + 1], b, f.rect)) {
+                            continue;
+                        }
+                        let (x, y) = (a.x.max(b.x) + ex, a.y.max(b.y) + ey);
+                        let w = (a.x + a.w).min(b.x + b.w) - ex - x;
+                        let h = (a.y + a.h).min(b.y + b.h) - ey - y;
+                        let fit = |space: i32| {
+                            let pitch = size + space;
+                            (pitch, (w - size) / pitch + 1, (h - size) / pitch + 1)
+                        };
+                        let (mut pitch, mut nx, mut ny) = fit(cfg.space(c.layer, 0, 0, size));
+                        if let Some(&(_, count, space)) = cfg.array_spacing.iter().find(|(l, ..)| *l == c.layer) {
+                            if nx * ny >= count {
+                                (pitch, nx, ny) = fit(space);
+                            }
+                        }
+                        let cut_space = pitch - size;
+                        // An overlap narrower than one enclosed cut holds no array
+                        // (`(w − size)/pitch + 1` truncates a negative to 1).
+                        if nx * ny < 2 || w < size || h < size {
+                            out.push(*c);
+                            continue;
+                        }
+                        // Centred in the overlap, snapped to the nearest grid
+                        // point, a tie toward the original cut's centre: both
+                        // commute with a mirror or shift of the whole net, so an
+                        // exact pair's arrays stay images (RTE-15; flooring a
+                        // halved width does not).
+                        let g = cfg.grid.max(1);
+                        let snap = |lo: i32, room: i32, span: i32, orig2: i32| {
+                            let l2 = 2 * lo + room - span;
+                            let floor = l2.div_euclid(2 * g) * g;
+                            let (d_lo, d_hi) = (l2 - 2 * floor, 2 * (floor + g) - l2);
+                            let off = |v: i32| (2 * v + span - orig2).abs();
+                            if d_lo < d_hi || (d_lo == d_hi && off(floor) <= off(floor + g)) { floor } else { floor + g }
+                        };
+                        let x0 = snap(x, w, (nx - 1) * pitch + size, 2 * c.rect.x + c.rect.w);
+                        let y0 = snap(y, h, (ny - 1) * pitch + size, 2 * c.rect.y + c.rect.h);
+                        let before = out.len();
+                        for ix in 0..nx {
+                            for iy in 0..ny {
+                                let r = Rect { x: x0 + ix * pitch, y: y0 + iy * pitch, w: size, h: size };
+                                // Cut spacing binds same-net cuts too: every other original cut,
+                                // and every array cut already placed.
+                                let ok = |f: &Shape| f.layer != c.layer || rect_gap(f.rect, r) >= cut_space;
+                                let clear = cut_index.near(c.layer, r, cut_space).all(|k| {
+                                    let (n, f) = all_cuts[k as usize];
+                                    (n == net && f.rect == c.rect) || ok(&f)
+                                })
+                                    && out[before..].iter().chain(&placed).all(ok);
+                                if clear {
+                                    out.push(Shape { layer: c.layer, rect: r });
+                                }
+                            }
+                        }
+                        if out.len() == before {
+                            out.push(*c);
+                        }
+                        placed.extend_from_slice(&out[before..]);
+                    }
+                    *wires = out;
+                }
+
+                stats.us_geometry += us(t_geometry);
+                let t_fill = std::time::Instant::now();
+                // Same-net sliver and notch filling (never within spacing of foreign metal).
+                let flat: Vec<(usize, Shape)> =
+                    routes.wires.iter().enumerate().flat_map(|(i, w)| w.iter().map(move |s| (i, *s))).collect();
+                // A net's own pin rects, and the cell metal touching them on their
+                // layer (the pin's lead), join it for the fill — a trunk stopping short
+                // of its pin's metal is a sliver or notch too — then leave: they are
+                // the cell's. All other cell metal is foreign.
+                // The pin-access conductor too: its landing pads meet the cells' own
+                // straps and rails there.
+                let fill_layers: Vec<LayerId> = layers.iter().copied().chain(cfg.pin_access.map(|(l, _)| l)).collect();
+                // Cell metal on every fill layer: on a deck whose pin-access layer is
+                // not routed (metal1 on ihp) it is still a net's own lead or foreign.
+                let fill_metal: Vec<Shape> = placed
+                    .iter()
+                    .chain(rings)
+                    .flat_map(|m| &m.shapes)
+                    .filter(|s| fill_layers.contains(&s.layer))
+                    .map(|s| Shape { rect: shift(s.rect), ..*s })
+                    .collect();
+                // Each hard blockage, as drawn, per blocked layer, with the compact nets it binds.
+                let hard_fill: Vec<(Vec<usize>, Shape)> = cfg
+                    .blockages
+                    .iter()
+                    .filter(|b| b.hard)
+                    .flat_map(|b| {
+                        let nets: Vec<usize> = (0..n_compact).filter(|&ci| (!b.own_exempt && !b.only_aggressors) || applies(b, compact[ci])).collect();
+                        (0..n_layers as usize).filter(move |&l| b.layers >> l & 1 == 1).map(move |l| (nets.clone(), Shape { layer: layers[l], rect: shift(b.rect) }))
+                    })
+                    .collect();
+                let touch = |a: Rect, b: Rect| rect_gap(a, b) == 0;
+                let cell_of = |n: usize| -> Vec<Shape> {
+                    // The pins, then every cell shape joined to them on their layer
+                    // (a pin, its rail, the strap off the rail), by flood fill.
+                    let mut out: Vec<Shape> = term_rects.get(n).into_iter().flatten().map(|&(r, l, _)| Shape { layer: l, rect: r }).collect();
+                    let mut taken = vec![false; fill_metal.len()];
+                    let mut i = 0;
+                    while i < out.len() {
+                        let a = out[i];
+                        for (k, c) in fill_metal.iter().enumerate() {
+                            if !taken[k] && c.layer == a.layer && touch(a.rect, c.rect) {
+                                taken[k] = true;
+                                out.push(*c);
+                            }
+                        }
+                        i += 1;
+                    }
+                    out
                 };
-                let mut out = Vec::with_capacity(wires.len());
-                // Array cuts placed for earlier cuts of this net.
-                let mut placed: Vec<Shape> = Vec::new();
-                for c in wires.iter() {
-                    let Some(i) = cuts.iter().position(|&(l, ..)| l == c.layer) else {
-                        out.push(*c);
-                        continue;
-                    };
-                    let (_, size, below, above) = cuts[i];
-                    // Per axis, the larger of what the two metals need there: a
-                    // horizontal metal's along-wire enclosure is on x.
-                    let (ex, ey) = match cfg.cut_enclosure_pair.iter().find(|e| e.0 == c.layer) {
-                        Some(&(_, lo, hi)) => {
-                            let horiz = |k: usize| cfg.layers.get(k).map_or(k % 2 == 0, |s| s.horizontal);
-                            let xy = |k: usize, (across, along): (i32, i32)| if horiz(k) { (along, across) } else { (across, along) };
-                            let (a, b) = (xy(i, lo), xy(i + 1, hi));
-                            (a.0.max(b.0), a.1.max(b.1))
-                        }
-                        None => ((below.max(above) - size) / 2, (below.max(above) - size) / 2),
-                    };
-                    let Some((a, b)) = best(wires, layers[i], layers[i + 1], c.rect) else {
-                        out.push(*c);
-                        continue;
-                    };
-                    // A cell cut of this net within cut spacing whose own metal on
-                    // both layers this cut's wires overlap (a cap array's tie stack
-                    // under its pin lead) already joins them: this cut would only
-                    // break the spacing, which binds same-net cuts too.
-                    let space = cfg.space(c.layer, 0, 0, size);
-                    let mine = cell_f.get(net).map_or(&[][..], Vec::as_slice);
-                    let hosts = |l: LayerId, w: Rect, f: Rect| mine.iter().any(|m| m.layer == l && contains(m.rect, f) && rect_gap(m.rect, w) == 0);
-                    if mine.iter().any(|f| f.layer == c.layer && (1..space).contains(&rect_gap(f.rect, c.rect)) && hosts(layers[i], a, f.rect) && hosts(layers[i + 1], b, f.rect)) {
-                        continue;
+                // Per layer: its own spacing (met3's is not met1's).
+                let fill_space = |l: LayerId| {
+                    let floor = if cfg.pin_access.is_some_and(|(p, _)| p == l) { min_space.max(cfg.pin_access_spacing) } else { min_space };
+                    cfg.space(l, 0, 0, floor)
+                };
+                // An exact image (RTE-15) fills after its leader and first takes
+                // the image of each leader filler that clears its foreign metal by
+                // the fill's spacing; one that does not is dropped from both sides
+                // (DRC beats symmetry). Cell metal is not mirrored: the image's own
+                // fill runs after, as for any net (RTE-23).
+                //
+                // ponytail: a dropped pair can leave a sliver on one side; signoff
+                // DRC reports it. Re-fill with the pair frozen if it shows up.
+                let mut lead: Vec<Option<(usize, gr::LatticeMap)>> = vec![None; n_nets];
+                for (a, m) in cold.mirror.iter().enumerate() {
+                    if let Some((b, map, true)) = *m {
+                        lead[compact[b as usize]] = Some((compact[a], map));
                     }
-                    let (x, y) = (a.x.max(b.x) + ex, a.y.max(b.y) + ey);
-                    let w = (a.x + a.w).min(b.x + b.w) - ex - x;
-                    let h = (a.y + a.h).min(b.y + b.h) - ey - y;
-                    let fit = |space: i32| {
-                        let pitch = size + space;
-                        (pitch, (w - size) / pitch + 1, (h - size) / pitch + 1)
-                    };
-                    let (mut pitch, mut nx, mut ny) = fit(cfg.space(c.layer, 0, 0, size));
-                    if let Some(&(_, count, space)) = cfg.array_spacing.iter().find(|(l, ..)| *l == c.layer) {
-                        if nx * ny >= count {
-                            (pitch, nx, ny) = fit(space);
-                        }
-                    }
-                    let cut_space = pitch - size;
-                    if nx * ny < 2 {
-                        out.push(*c);
-                        continue;
-                    }
-                    // Centred in the overlap, snapped to the manufacturing grid.
-                    let snap = |v: i32| v.div_euclid(cfg.grid) * cfg.grid;
-                    let x0 = snap(x + (w - (nx - 1) * pitch - size) / 2);
-                    let y0 = snap(y + (h - (ny - 1) * pitch - size) / 2);
-                    let before = out.len();
-                    for ix in 0..nx {
-                        for iy in 0..ny {
-                            let r = Rect { x: x0 + ix * pitch, y: y0 + iy * pitch, w: size, h: size };
-                            // Cut spacing binds same-net cuts too: every other original cut,
-                            // and every array cut already placed.
-                            let ok = |f: &Shape| f.layer != c.layer || rect_gap(f.rect, r) >= cut_space;
-                            let clear = cut_index.near(c.layer, r, cut_space).all(|k| {
-                                let (n, f) = all_cuts[k as usize];
-                                (n == net && f.rect == c.rect) || ok(&f)
-                            })
-                                && out[before..].iter().chain(&placed).all(ok);
-                            if clear {
-                                out.push(Shape { layer: c.layer, rect: r });
+                }
+                let mut order: Vec<usize> = (0..n_nets).collect();
+                order.sort_by_key(|&ni| lead[ni].is_some());
+                let mut fillers: Vec<Vec<Shape>> = vec![Vec::new(); n_nets];
+                for ni in order {
+                    let mine = cell_of(ni);
+                    let foreign: Vec<Shape> = flat
+                        .iter()
+                        .filter(|&&(i, _)| i != ni)
+                        .map(|&(_, s)| s)
+                        .chain((0..n_nets).filter(|&n| n != ni).flat_map(|n| term_rects[n].iter().map(|&(r, l, _)| Shape { layer: l, rect: r })))
+                        .chain(fill_metal.iter().copied().filter(|c| !mine.contains(c)))
+                        // Fillers keep off the hard blockages binding the net too.
+                        .chain(hard_fill.iter().filter(|(c, _)| ci_of.get(ni).is_some_and(|&c0| c0 != usize::MAX && c.contains(&c0))).map(|&(_, s)| s))
+                        .collect();
+                    if let Some((a, map)) = lead[ni] {
+                        for f in std::mem::take(&mut fillers[a]) {
+                            let img = Shape { layer: f.layer, rect: map_rect(f.rect, map, &cold.graph) };
+                            let space = fill_space(f.layer);
+                            if foreign.iter().all(|g| g.layer != f.layer || rect_gap(g.rect, img.rect) >= space) {
+                                routes.wires[ni].push(img);
+                            } else {
+                                routes.wires[a].retain(|s| *s != f);
+                                stats.pair_fillers_dropped += 1;
                             }
                         }
                     }
-                    if out.len() == before {
-                        out.push(*c);
+                    let wires = &mut routes.wires[ni];
+                    let before = wires.clone();
+                    let own = wires.len();
+                    wires.extend(mine);
+                    let pins = wires.len() - own;
+                    // Per layer: its own spacing and min width.
+                    for &l in &fill_layers {
+                        let space = fill_space(l);
+                        let feat = cfg.min_width.iter().find(|&&(m, _)| m == l).map_or(cfg.wire_width, |&(_, w)| w);
+                        heal_same_net_slivers(wires, &[l], space, feat, &foreign, cfg.grid);
+                        fill_same_net_notches(wires, &[l], space, feat, &foreign, cfg.grid);
                     }
-                    placed.extend_from_slice(&out[before..]);
+                    wires.drain(own..own + pins);
+                    fillers[ni] = wires.iter().filter(|s| !before.contains(s)).copied().collect();
+                    drop_contained(wires);
                 }
-                *wires = out;
-            }
-
-            stats.us_geometry += us(t_geometry);
-            let t_fill = std::time::Instant::now();
-            // Same-net sliver and notch filling (never within spacing of foreign metal).
-            let flat: Vec<(usize, Shape)> =
-                routes.wires.iter().enumerate().flat_map(|(i, w)| w.iter().map(move |s| (i, *s))).collect();
-            // A net's own pin rects, and the cell metal touching them on their
-            // layer (the pin's lead), join it for the fill — a trunk stopping short
-            // of its pin's metal is a sliver or notch too — then leave: they are
-            // the cell's. All other cell metal is foreign.
-            // The pin-access conductor too: its landing pads meet the cells' own
-            // straps and rails there.
-            let fill_layers: Vec<LayerId> = layers.iter().copied().chain(cfg.pin_access.map(|(l, _)| l)).collect();
-            // Cell metal on every fill layer: on a deck whose pin-access layer is
-            // not routed (metal1 on ihp) it is still a net's own lead or foreign.
-            let fill_metal: Vec<Shape> = placed
-                .iter()
-                .chain(rings)
-                .flat_map(|m| &m.shapes)
-                .filter(|s| fill_layers.contains(&s.layer))
-                .map(|s| Shape { rect: shift(s.rect), ..*s })
-                .collect();
-            let touch = |a: Rect, b: Rect| rect_gap(a, b) == 0;
-            let cell_of = |n: usize| -> Vec<Shape> {
-                // The pins, then every cell shape joined to them on their layer
-                // (a pin, its rail, the strap off the rail), by flood fill.
-                let mut out: Vec<Shape> = term_rects.get(n).into_iter().flatten().map(|&(r, l, _)| Shape { layer: l, rect: r }).collect();
-                let mut taken = vec![false; fill_metal.len()];
-                let mut i = 0;
-                while i < out.len() {
-                    let a = out[i];
-                    for (k, c) in fill_metal.iter().enumerate() {
-                        if !taken[k] && c.layer == a.layer && touch(a.rect, c.rect) {
-                            taken[k] = true;
-                            out.push(*c);
-                        }
-                    }
-                    i += 1;
-                }
-                out
-            };
-            for (ni, wires) in routes.wires.iter_mut().enumerate() {
-                let mine = cell_of(ni);
-                let foreign: Vec<Shape> = flat
-                    .iter()
-                    .filter(|&&(i, _)| i != ni)
-                    .map(|&(_, s)| s)
-                    .chain((0..n_nets).filter(|&n| n != ni).flat_map(|n| term_rects[n].iter().map(|&(r, l, _)| Shape { layer: l, rect: r })))
-                    .chain(fill_metal.iter().copied().filter(|c| !mine.contains(c)))
-                    .collect();
-                let own = wires.len();
-                wires.extend(mine);
-                let pins = wires.len() - own;
-                // Per layer: its own spacing (met3's is not met1's) and min width.
-                for &l in &fill_layers {
-                    let floor = if cfg.pin_access.is_some_and(|(p, _)| p == l) { min_space.max(cfg.pin_access_spacing) } else { min_space };
-                    let space = cfg.space(l, 0, 0, floor);
-                    let feat = cfg.min_width.iter().find(|&&(m, _)| m == l).map_or(cfg.wire_width, |&(_, w)| w);
-                    heal_same_net_slivers(wires, &[l], space, feat, &foreign, cfg.grid);
-                    fill_same_net_notches(wires, &[l], space, feat, &foreign, cfg.grid);
-                }
-                wires.drain(own..own + pins);
-                drop_contained(wires);
-                for s in wires.iter_mut() {
+                for s in routes.wires.iter_mut().flatten() {
                     s.rect.x += origin.0;
                     s.rect.y += origin.1;
                 }
-            }
 
-            stats.us_fill += us(t_fill);
-            (routes.cell, routes.gates) = (cell_abs.clone(), gates_abs.clone());
-            // The terminals and their currents, for the EM rule. Final routes only:
-            // the repair probes carry none, so EM reads unknown there; repair
-            // spends no trial on `RepairKind::Em` either (width is not a search
-            // resource).
-            routes.terms = vec![Vec::new(); n_nets];
-            for &(net, r, _) in &all_pins {
-                routes.terms[net.0 as usize].push(pnr_core::Terminal { at: r, ua: pin_ua(net, r) });
-            }
-            // EM verify/repair (C18): the drawn routes against the hard rule.
-            // Each failing shape bumps by one track, per layer, the narrowest
-            // of the branches it may belong to (a branch is keyed by the
-            // terminal it ends at, `RouteCtx::branch_k`; a metal shape holds
-            // the branch nodes on its layer inside it, a cut those on its two
-            // metals within a pitch, where its array spreads); the bumped nets
-            // reroute and negotiation clears what they crowd. A net whose
-            // reroute fails keeps its tree; what still fails is the rule's V.
-            let Some(stack) = cfg.stack.filter(|_| round < EM_ROUNDS) else { break (routes, sacrificed, access_v) };
-            let mut limits = [(u16::MAX, analog::routing::em::Limit::default()); analog::routing::em::MAX_LAYERS];
-            for (slot, &(l, lim)) in limits.iter_mut().zip(&cfg.em) {
-                *slot = (l.0, lim);
-            }
-            let mut bumped = Vec::new();
-            for ci in 0..n_compact {
-                if cold.term_k[ci].is_empty() {
-                    continue;
+                stats.us_fill += us(t_fill);
+                (routes.cell, routes.gates) = (cell_abs.clone(), gates_abs.clone());
+                // The terminals and their currents, for the EM rule. Final routes only:
+                // the repair probes carry none, so EM reads unknown there; repair
+                // spends no trial on `RepairKind::Em` either (width is not a search
+                // resource).
+                routes.terms = vec![Vec::new(); n_nets];
+                for &(net, r, _) in &all_pins {
+                    routes.terms[net.0 as usize].push(pnr_core::Terminal { at: r, ua: pin_ua(net, r) });
                 }
-                let net = NetId(compact[ci] as u16);
-                let rule = analog::routing::Electromigration { net, limits, stack: Some(stack), front_row: cfg.em_front_row };
-                let Some(bad) = rule.failing(&routes) else { continue };
-                let mut hit: Vec<(usize, usize)> = Vec::new();
-                for i in bad {
-                    let s = routes.shapes(net)[i];
-                    let (ls, grow) = match (layers.iter().position(|&l| l == s.layer), cuts.iter().position(|c| c.0 == s.layer)) {
-                        (Some(li), _) => ([li, li], 0),
-                        (None, Some(k)) => ([k, k + 1], cfg.pitch),
-                        _ => continue,
-                    };
-                    let r = s.rect;
-                    let inside = |n: &u32| {
-                        let (x, y, l) = cold.graph.pos(*n);
-                        let (x, y) = (x + origin.0, y + origin.1);
-                        ls.contains(&(l as usize)) && (r.x - grow..=r.x + r.w + grow).contains(&x) && (r.y - grow..=r.y + r.h + grow).contains(&y)
-                    };
-                    // The root's own branch draws nothing: the next one starts
-                    // there. `None`: a branch ending off every terminal (a tree
-                    // edit), drawn at the net's `k`.
-                    let ts: Vec<Option<usize>> = hot.trees[ci]
-                        .iter()
-                        .filter(|b| b.iter().any(inside))
-                        .map(|b| b.last().and_then(|n| cold.terms[ci].iter().position(|x| x == n)))
-                        .filter(|&t| t != Some(0))
-                        .collect();
-                    // A metal shape is a branch's only at that branch's drawn
-                    // width (a run, its corner block, or one wire of a
-                    // bundle): an access jog or pad is no track's to widen.
-                    // Of those, the narrowest on the layer drew it (a wider
-                    // branch through the same spot draws its own wider metal).
-                    for &l in ls.iter().filter(|&&l| l < n_l) {
-                        let drawn = |t: &&usize| {
-                            let k = i32::from(cold.term_k[ci][**t][l]);
-                            grow > 0 || [cfg.wire(l), cfg.wire(l) + (k - 1) * cfg.stride(l) * cfg.pitch].contains(&r.w.min(r.h))
+                // EM verify/repair (C18): the drawn routes against the hard rule.
+                // Each failing shape bumps by one track, per layer, the narrowest
+                // of the branches it may belong to (a branch is keyed by the
+                // terminal it ends at, `RouteCtx::branch_k`; a metal shape holds
+                // the branch nodes on its layer inside it, a cut those on its two
+                // metals within a pitch, where its array spreads); the bumped nets
+                // reroute and negotiation clears what they crowd. A net whose
+                // reroute fails keeps its tree; what still fails is the rule's V.
+                let Some(stack) = cfg.stack.filter(|_| round < EM_ROUNDS) else { break (routes, sacrificed, access_v) };
+                let mut limits = [(u16::MAX, analog::routing::em::Limit::default()); analog::routing::em::MAX_LAYERS];
+                for (slot, &(l, lim)) in limits.iter_mut().zip(&cfg.em) {
+                    *slot = (l.0, lim);
+                }
+                let mut bumped = Vec::new();
+                for ci in 0..n_compact {
+                    if cold.term_k[ci].is_empty() {
+                        continue;
+                    }
+                    let net = NetId(compact[ci] as u16);
+                    let rule = analog::routing::Electromigration { net, limits, stack: Some(stack), front_row: cfg.em_front_row };
+                    let Some(bad) = rule.failing(&routes) else { continue };
+                    let mut hit: Vec<(usize, usize)> = Vec::new();
+                    for i in bad {
+                        let s = routes.shapes(net)[i];
+                        let (ls, grow) = match (layers.iter().position(|&l| l == s.layer), cuts.iter().position(|c| c.0 == s.layer)) {
+                            (Some(li), _) => ([li, li], 0),
+                            (None, Some(k)) => ([k, k + 1], cfg.pitch),
+                            _ => continue,
                         };
-                        // An off-terminal branch bumps every terminal at the
-                        // net's `k` on this layer: those set its width.
-                        let top = cold.k[ci][l];
-                        let cands: Vec<usize> = ts
+                        let r = s.rect;
+                        let inside = |n: &u32| {
+                            let (x, y, l) = cold.graph.pos(*n);
+                            let (x, y) = (x + origin.0, y + origin.1);
+                            ls.contains(&(l as usize)) && (r.x - grow..=r.x + r.w + grow).contains(&x) && (r.y - grow..=r.y + r.h + grow).contains(&y)
+                        };
+                        // The root's own branch draws nothing: the next one starts
+                        // there. `None`: a branch ending off every terminal (a tree
+                        // edit), drawn at the net's `k`.
+                        let ts: Vec<Option<usize>> = hot.trees[ci]
                             .iter()
-                            .flat_map(|&t| t.map_or_else(|| (1..cold.term_k[ci].len()).filter(|&t| cold.term_k[ci][t][l] == top).collect(), |t| vec![t]))
+                            .filter(|b| b.iter().any(inside))
+                            .map(|b| b.last().and_then(|n| cold.terms[ci].iter().position(|x| x == n)))
+                            .filter(|&t| t != Some(0))
                             .collect();
-                        let own: Vec<usize> = cands.iter().filter(drawn).copied().collect();
-                        let min = own.iter().map(|&t| cold.term_k[ci][t][l]).min();
-                        hit.extend(own.iter().filter(|&&t| Some(cold.term_k[ci][t][l]) == min).map(|&t| (t, l)));
+                        // A metal shape is a branch's only at that branch's drawn
+                        // width (a run, its corner block, or one wire of a
+                        // bundle): an access jog or pad is no track's to widen.
+                        // Of those, the narrowest on the layer drew it (a wider
+                        // branch through the same spot draws its own wider metal).
+                        for &l in ls.iter().filter(|&&l| l < n_l) {
+                            let drawn = |t: &&usize| {
+                                let k = i32::from(cold.term_k[ci][**t][l]);
+                                grow > 0 || [cfg.wire(l), cfg.wire(l) + (k - 1) * cfg.stride(l) * cfg.pitch].contains(&r.w.min(r.h))
+                            };
+                            // An off-terminal branch bumps every terminal at the
+                            // net's `k` on this layer: those set its width.
+                            let top = cold.k[ci][l];
+                            let cands: Vec<usize> = ts
+                                .iter()
+                                .flat_map(|&t| t.map_or_else(|| (1..cold.term_k[ci].len()).filter(|&t| cold.term_k[ci][t][l] == top).collect(), |t| vec![t]))
+                                .collect();
+                            let own: Vec<usize> = cands.iter().filter(drawn).copied().collect();
+                            let min = own.iter().map(|&t| cold.term_k[ci][t][l]).min();
+                            hit.extend(own.iter().filter(|&&t| Some(cold.term_k[ci][t][l]) == min).map(|&t| (t, l)));
+                        }
+                    }
+                    hit.sort_unstable();
+                    hit.dedup();
+                    let tk = &mut cold.term_k[ci];
+                    let mut any = false;
+                    for (t, l) in hit {
+                        if tk[t][l] < K_MAX {
+                            tk[t][l] += 1;
+                            any = true;
+                        }
+                    }
+                    if any {
+                        tk[0] = max_k(&tk[1..]);
+                        cold.k[ci] = tk[0];
+                        bumped.push(ci);
                     }
                 }
-                hit.sort_unstable();
-                hit.dedup();
-                let tk = &mut cold.term_k[ci];
-                let mut any = false;
-                for (t, l) in hit {
-                    if tk[t][l] < K_MAX {
-                        tk[t][l] += 1;
-                        any = true;
+                // An exact pair keeps its tracks tied; one now too wide falls back.
+                for a in 0..n_compact {
+                    let Some((b, map, true)) = cold.mirror.get(a).copied().flatten() else { continue };
+                    let b = b as usize;
+                    if bumped.contains(&a) || bumped.contains(&b) {
+                        if !tie_pair(&mut cold, a, b, map) {
+                            (cold.mirror[a], cold.mirror[b]) = (None, None);
+                            stats.pairs_exact.retain(|&p| p != (compact[a] as u32, compact[b] as u32));
+                            stats.pairs_fallback.push((compact[a] as u32, compact[b] as u32, "wide pair"));
+                        }
+                        bumped.extend([a, b]);
                     }
                 }
-                if any {
-                    tk[0] = max_k(&tk[1..]);
-                    cold.k[ci] = tk[0];
-                    bumped.push(ci);
+                if bumped.is_empty() {
+                    break (routes, sacrificed, access_v);
+                }
+                for &ci in &bumped {
+                    if let Some(t) = cold.reroute(&hot, ci, P_FAC, &[], &mut dij) {
+                        cold.commit(&mut hot, ci, t);
+                    }
+                }
+                run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS, &mut dij);
+                round += 1;
+            };
+            // RTE-20: equalise the bits' lead C per unit with dead-end stubs
+            // before scoring, so every row (coupling, differential, antenna) sees
+            // them; then report what spread remains and any bit crossing the top
+            // plate outside the array.
+            for rule in &plates {
+                equalize_leads(&mut routes, rule, &metals, &foreign_metal, &|l| cfg.space(l, 0, 0, cfg.pitch - cfg.wire_width), cfg.grid);
+                stats.plate_spread_pct.push(rule.spread_pct(&routes));
+            }
+            let key = drawn_key(&routes, &hot, &sacrificed, &access_v);
+            if let Some((before, trees, k, term_k, mirror, st, drawing)) = prev.take() {
+                if !improves(key, before) {
+                    for (ci, t) in trees.into_iter().enumerate() {
+                        cold.commit(&mut hot, ci, t);
+                    }
+                    (cold.k, cold.term_k, cold.mirror) = (k, term_k, mirror);
+                    (stats.pairs_exact, stats.pairs_fallback, stats.plate_spread_pct, stats.pair_fillers_dropped) = (st.pairs_exact, st.pairs_fallback, st.plate_spread_pct, st.pair_fillers_dropped);
+                    break drawing;
                 }
             }
-            if bumped.is_empty() {
+            let newly: Vec<usize> = (0..reqs.hard.len()).filter(|&i| pre[i] == 0 && reqs.hard[i].violations(&routes) > 0).collect();
+            if newly.is_empty() || post == POST_ROUNDS {
                 break (routes, sacrificed, access_v);
             }
-            for &ci in &bumped {
-                if let Some(t) = cold.reroute(&hot, ci, P_FAC, &[], &mut dij) {
+            let mut ids = Vec::new();
+            for &i in &newly {
+                reqs.hard[i].violating_ids(&routes, &mut ids);
+            }
+            ids.sort_unstable();
+            ids.dedup();
+            prev = Some((key, hot.trees.clone(), cold.k.clone(), cold.term_k.clone(), cold.mirror.clone(), stats.clone(), (routes, sacrificed, access_v)));
+            stats.post_rounds += 1;
+            post += 1;
+            // `reroute` returns only its own net's tree: an exact pair goes
+            // both sides, as in the EM round, or it ships unmirrored.
+            let mut cis: Vec<usize> = ids.iter().filter_map(|&n| ci_of.get(n as usize).copied().filter(|&c| c != usize::MAX)).collect();
+            let partners: Vec<usize> = cis.iter().filter_map(|&ci| cold.mirror.get(ci).copied().flatten().filter(|m| m.2).map(|m| m.0 as usize)).collect();
+            cis.extend(partners);
+            cis.sort_unstable();
+            cis.dedup();
+            for ci in cis {
+                if let Some(t) = cold.reroute(&hot, ci, 2.0 * P_FAC, &[], &mut dij) {
                     cold.commit(&mut hot, ci, t);
                 }
             }
             run_pathfinder(&mut hot, &cold, P_FAC, HIST_INC, MAX_ITERS, &mut dij);
-            round += 1;
         };
         let overuse = overuse(&hot);
         let mut report = score(&routes, reqs, overuse, &joins, &foreign_metal, &sacrificed, side);
+        report.hard_violations.extend(star_v);
+        for (rule, spread) in plates.iter().zip(&stats.plate_spread_pct) {
+            if let Some(spread) = *spread {
+                let tol = rule.tol_pct10 as f32 / 10.0;
+                if spread > tol {
+                    report.budget_violations.push(Violation::from_residual(format!("plate ratio net {}", rule.set.top.0), f64::from((spread - tol) / tol)));
+                }
+            }
+            let a = rule.set.array;
+            let top = routes.shapes(rule.set.top);
+            for &(bit, _) in &rule.set.bits {
+                // Adjacent metals overlapping where the overlap is not wholly
+                // inside the array (the plates' own stack): a crossing.
+                let crossed = routes.shapes(bit).iter().any(|p| {
+                    top.iter().any(|q| {
+                        let (lp, lq) = (metals.iter().position(|&l| l == p.layer), metals.iter().position(|&l| l == q.layer));
+                        let (x0, y0) = (p.rect.x.max(q.rect.x), p.rect.y.max(q.rect.y));
+                        let (x1, y1) = ((p.rect.x + p.rect.w).min(q.rect.x + q.rect.w), (p.rect.y + p.rect.h).min(q.rect.y + q.rect.h));
+                        let inside = x0 >= a.x && y0 >= a.y && x1 <= a.x + a.w && y1 <= a.y + a.h;
+                        lp.zip(lq).is_some_and(|(x, y)| x.abs_diff(y) == 1) && overlaps(p.rect, q.rect) && !inside
+                    })
+                });
+                if crossed {
+                    report.hard_violations.push(Violation { rule: format!("plate crossing net {}", bit.0), margin: 1 });
+                }
+            }
+        }
+        report.budget_violations.extend(shield_v);
         report.hard_violations.extend(access_v);
+        let mut metals = [u16::MAX; analog::routing::metal_over_gate::MAX_METALS];
+        for (m, l) in metals.iter_mut().zip(&layers[..n_layers as usize]) {
+            *m = l.0;
+        }
+        for b in cfg.blockages.iter().filter(|b| b.gate) {
+            let um2 = analog::routing::MetalOverGate { rect: b.rect, cell: b.cell, metals }.overlap_um2(&routes);
+            if um2 > 0.0 {
+                // 10⁻³ µm²: a sliver is not 0.
+                report.hard_violations.push(Violation { rule: format!("metal over gate cell {}", b.cell), margin: (um2 * 1_000.0).ceil() as i64 });
+            }
+        }
         (stats.overuse, stats.expanded, stats.coarsened) = (overuse, dij.pops, cold.graph.coarsened);
         (routes, report, stats)
     }
@@ -1199,6 +1770,112 @@ fn tracks(cfg: &DetailedCfg, l: usize, layer: LayerId, ua: f32) -> (u8, u8) {
         0
     };
     (k as u8, guard)
+}
+
+/// Tie exact pair `a` → `b` under `map` in `cold` (RTE-15): `b`'s terminals
+/// become `a`'s images in `a`'s order, both nets' terminal tracks, tracks and
+/// guards the elementwise max, and [`RouteCtx::mirror`] links them. `false`
+/// (and no link) when an image is missing or the tied pair is wider than one
+/// track, or has guard tracks, on a vertical layer.
+fn tie_pair(cold: &mut RouteCtx<TrackGrid>, a: usize, b: usize, map: gr::LatticeMap) -> bool {
+    let Some(terms_b) = cold.terms[a].iter().map(|&n| cold.graph.map(map, n)).collect::<Option<Vec<u32>>>() else { return false };
+    if !terms_b.iter().all(|n| cold.terms[b].contains(n)) || terms_b.len() != cold.terms[b].len() {
+        return false;
+    }
+    let one = [1u8; gr::MAX_LAYERS];
+    let get = |v: &[Vec<[u8; gr::MAX_LAYERS]>], net: usize, i: usize| v.get(net).and_then(|t| t.get(i)).copied().unwrap_or(one);
+    let tk: Vec<[u8; gr::MAX_LAYERS]> = terms_b
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let j = cold.terms[b].iter().position(|x| x == n).unwrap_or(0);
+            let (x, y) = (get(&cold.term_k, a, i), get(&cold.term_k, b, j));
+            std::array::from_fn(|l| x[l].max(y[l]))
+        })
+        .collect();
+    let at = |v: &[[u8; gr::MAX_LAYERS]], net: usize, d: u8| v.get(net).copied().unwrap_or([d; gr::MAX_LAYERS]);
+    let k: [u8; gr::MAX_LAYERS] = std::array::from_fn(|l| at(&cold.k, a, 1)[l].max(at(&cold.k, b, 1)[l]));
+    let guard: [u8; gr::MAX_LAYERS] = std::array::from_fn(|l| at(&cold.guard, a, 0)[l].max(at(&cold.guard, b, 0)[l]));
+    let vertical_wide = |t: &[u8; gr::MAX_LAYERS]| (0..cold.graph.n_layers as usize).filter(|l| l % 2 == 1).any(|l| t[l] > 1 || guard[l] > 0);
+    if matches!(map, gr::LatticeMap::MirrorX { .. }) && (vertical_wide(&k) || tk.iter().any(vertical_wide)) {
+        return false;
+    }
+    cold.terms[b] = terms_b;
+    if !cold.term_k.is_empty() {
+        (cold.term_k[a], cold.term_k[b]) = (tk.clone(), tk);
+    }
+    if !cold.k.is_empty() {
+        (cold.k[a], cold.k[b]) = (k, k);
+    }
+    if !cold.guard.is_empty() {
+        (cold.guard[a], cold.guard[b]) = (guard, guard);
+    }
+    if cold.mirror.is_empty() {
+        cold.mirror = vec![None; cold.terms.len()];
+    }
+    cold.mirror[a] = Some((b as u32, map, true));
+    cold.mirror[b] = Some((a as u32, map.inverse(), false));
+    true
+}
+
+/// Plate-lead spread tolerance, tenths of a percent of one unit's C
+/// (tuning default: Hastings §8.2 gives the check, not a number).
+const PLATE_TOL_PCT10: i32 = 10;
+
+/// Hastings §8.2 rule C10 (restored from M1's `trim_pair`): per bit whose
+/// lead C per unit is under the largest, a same-layer dead-end stub
+/// continuing one of its runs outside the array, `L = (target − C_i/n_i)·n_i
+/// / c_per_nm` (the layer's area and fringe C at the run's width), snapped
+/// to `grid`; kept only when the spread drops and the stub keeps `space`
+/// from every foreign shape on its layer (other nets' routes and the cell
+/// and ring metal of `foreign` not owned by the bit). Bits are visited most-deficient first, each once.
+#[allow(clippy::too_many_arguments)]
+fn equalize_leads(routes: &mut Routes, rule: &analog::routing::PlateRatio, metals: &[LayerId], foreign: &[(Option<u32>, Shape)], space: &dyn Fn(LayerId) -> i32, grid: i32) {
+    let Some(_) = rule.spread_pct(routes) else { return };
+    let mut order: Vec<usize> = (0..rule.set.bits.len()).collect();
+    let per = rule.per_unit_af(routes);
+    order.sort_by(|&a, &b| per[a].total_cmp(&per[b]));
+    let a = rule.set.array;
+    let g = grid.max(1);
+    for i in order {
+        let per = rule.per_unit_af(routes);
+        let target = per.iter().copied().fold(0.0, f32::max);
+        let (net, n) = rule.set.bits[i];
+        let need = (target - per[i]) * n as f32;
+        let Some(before) = rule.spread_pct(routes) else { return };
+        if need <= 0.0 {
+            continue;
+        }
+        let b = net.0 as usize;
+        let runs: Vec<Shape> = routes.wires[b].iter().copied().filter(|s| s.rect.w != s.rect.h && metals.contains(&s.layer) && !overlaps(s.rect, a)).collect();
+        'run: for s in runs {
+            let Some(l) = rule.stack.layers.iter().find(|l| l.id == s.layer.0) else { continue };
+            let width = s.rect.w.min(s.rect.h);
+            let per_nm = (l.area_af_um2 * width as f32 / 1_000.0 + 2.0 * l.fringe_af_um) / 1_000.0;
+            if per_nm <= 0.0 {
+                continue;
+            }
+            let len = ((need / per_nm / g as f32).round() as i32) * g;
+            if len <= 0 {
+                continue;
+            }
+            let r = s.rect;
+            let stubs = if r.w > r.h { [Rect { x: r.x + r.w, w: len, ..r }, Rect { x: r.x - len, w: len, ..r }] } else { [Rect { y: r.y + r.h, h: len, ..r }, Rect { y: r.y - len, h: len, ..r }] };
+            for stub in stubs {
+                let gap = space(s.layer);
+                let clear = !overlaps(stub, a)
+                    && routes.wires.iter().enumerate().filter(|&(k, _)| k != b).flat_map(|(_, w)| w).chain(foreign.iter().filter(|f| f.0 != Some(b as u32)).map(|f| &f.1)).all(|f| f.layer != s.layer || rect_gap(f.rect, stub) >= gap);
+                if !clear {
+                    continue;
+                }
+                routes.wires[b].push(Shape { layer: s.layer, rect: stub });
+                if rule.spread_pct(routes).is_some_and(|after| after < before) {
+                    break 'run;
+                }
+                routes.wires[b].pop();
+            }
+        }
+    }
 }
 
 /// Elementwise max of `ks` (all ones when empty).
@@ -1343,12 +2020,25 @@ fn jog_layer(cfg: &DetailedCfg, layers: &[LayerId], cuts: &[Cut], n_layers: u32,
 /// leg already laid.
 /// No leg touches another net's pin zone (a `zone`-sided square at the pin,
 /// kept `gap` away: a pin landed later still draws its pad there) or a jog
-/// already laid.
-fn jog_clean(legs: &[Rect; 2], ci: usize, zone: i32, gap: i32, zones: &[(u32, i32, i32)], laid: &[(usize, Rect)]) -> bool {
+/// already laid, or overlaps a hard blockage in `blocks` (those binding the
+/// net on the jog's layer).
+#[allow(clippy::too_many_arguments)]
+fn jog_clean(legs: &[Rect; 2], ci: usize, zone: i32, gap: i32, zones: &[(u32, i32, i32)], laid: &[(usize, Rect)], blocks: &[Rect]) -> bool {
     zones.iter().all(|&(zci, zx, zy)| {
         let zr = Rect { x: zx - zone / 2, y: zy - zone / 2, w: zone, h: zone };
         zci as usize == ci || legs.iter().all(|&l| rect_gap(l, zr) >= gap.max(1))
     }) && laid.iter().all(|&(lci, lr)| lci == ci || legs.iter().all(|&l| rect_gap(l, lr) > 0))
+        && blocks.iter().all(|&b| legs.iter().all(|&l| !overlaps(l, b)))
+}
+
+/// `r` grown by `g` on every side.
+fn grown(r: Rect, g: i32) -> Rect {
+    Rect { x: r.x - g, y: r.y - g, w: r.w + 2 * g, h: r.h + 2 * g }
+}
+
+/// `a` and `b` share area (touching edges do not).
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
 /// Reserve for `a.ci` the lattice nodes its jog will occupy (legs inflated by half
@@ -1392,6 +2082,64 @@ fn claim_jog_sweep(
     }
 }
 
+/// The nodes another net owns (its stitch reach, landing or jog) that a jog
+/// of `ci` crosses, where that net's trunk may run: a short `break_shorts`
+/// settles only by deleting this access, so they get [`JOG_HIST`]. Only a
+/// node whose wire would touch a leg: the swept bins reach up to a pitch past it.
+fn jog_hist_nodes(grid: &TrackGrid, cfg: &DetailedCfg, legs: &[Rect; 2], jog_l: u32, reserved: &[u32], ci: usize) -> Vec<u32> {
+    let infl = cfg.wire_width / 2;
+    let touches = |n: &u32| {
+        let (px, py, _) = grid.pos(*n);
+        legs.iter().any(|l| (l.x - infl..=l.x + l.w + infl).contains(&px) && (l.y - infl..=l.y + l.h + infl).contains(&py))
+    };
+    let foreign = |n: &u32| reserved[*n as usize] != ci as u32 && reserved[*n as usize] < BLOCKED;
+    jog_nodes(grid, cfg, legs, jog_l).filter(foreign).filter(touches).collect()
+}
+
+/// `r` carried by `m` on `grid` (frame nm): a mirror reflects it about the
+/// axis `x = (k·p + p)/2`, a shift moves it by `(dx, dy)` pitches.
+fn map_rect(r: Rect, m: gr::LatticeMap, grid: &TrackGrid) -> Rect {
+    let p = grid.pitch;
+    match m {
+        gr::LatticeMap::MirrorX { k } => Rect { x: k * p + p - r.x - r.w, ..r },
+        gr::LatticeMap::Shift { dx, dy } => Rect { x: r.x + dx * p, y: r.y + dy * p, ..r },
+    }
+}
+
+/// The lattice map carrying pin set `a` exactly (within `snap` nm) onto `b`
+/// (frame nm, RTE-15): a mirror about the axis between the two sets' x
+/// extents when it reflects every `a` pin onto a `b` pin, else the shift by
+/// the centroid difference when that does. `Err` names why there is none:
+/// `no pin map` (neither carries the pins), `axis off lattice` (the map is
+/// not track to track, or the lattice was coarsened).
+fn pair_map(a: &[(Rect, LayerId, Option<f32>)], b: &[(Rect, LayerId, Option<f32>)], grid: &TrackGrid, snap: i32) -> Result<gr::LatticeMap, &'static str> {
+    if a.is_empty() || a.len() != b.len() {
+        return Err("no pin map");
+    }
+    let hits = |f: &dyn Fn(Rect) -> Rect| {
+        a.iter().all(|&(r, l, _)| {
+            let t = f(r);
+            b.iter().any(|&(q, lq, _)| lq == l && (q.x - t.x).abs() < snap.max(1) && (q.y - t.y).abs() < snap.max(1) && q.w == t.w && q.h == t.h)
+        })
+    };
+    let ext = |v: &[(Rect, LayerId, Option<f32>)]| (v.iter().map(|t| t.0.x).min().unwrap_or(0), v.iter().map(|t| t.0.x + t.0.w).max().unwrap_or(0));
+    let ((a0, a1), (b0, b1)) = (ext(a), ext(b));
+    let sum = i64::from(a0) + i64::from(a1) + i64::from(b0) + i64::from(b1);
+    let p = grid.pitch;
+    let candidate = if sum % 2 == 0 && hits(&|r: Rect| Rect { x: (sum / 2) as i32 - r.x - r.w, ..r }) {
+        let axis2 = (sum / 2) as i32;
+        ((axis2 - p) % p == 0).then_some(gr::LatticeMap::MirrorX { k: (axis2 - p) / p })
+    } else {
+        let mean = |v: &[(Rect, LayerId, Option<f32>)], f: fn(&Rect) -> i64| v.iter().map(|t| f(&t.0)).sum::<i64>() / v.len() as i64;
+        let (dx, dy) = ((mean(b, |r| i64::from(r.x)) - mean(a, |r| i64::from(r.x))) as i32, (mean(b, |r| i64::from(r.y)) - mean(a, |r| i64::from(r.y))) as i32);
+        if !hits(&|r: Rect| Rect { x: r.x + dx, y: r.y + dy, ..r }) {
+            return Err("no pin map");
+        }
+        (dx % p == 0 && dy % p == 0).then_some(gr::LatticeMap::Shift { dx: dx / p, dy: dy / p })
+    };
+    candidate.filter(|&m| !grid.coarsened && grid.lattice_map(m)).ok_or("axis off lattice")
+}
+
 /// The lattice nodes on layer `jog_l` that jog `legs` cover, legs inflated by
 /// half a wire.
 fn jog_nodes<'a>(grid: &'a TrackGrid, cfg: &DetailedCfg, legs: &'a [Rect], jog_l: u32) -> impl Iterator<Item = u32> + 'a {
@@ -1422,6 +2170,7 @@ fn add_pin_access(
     joins: &[Join],
     zones: &[(u32, i32, i32)],
     origin: (i32, i32),
+    jog_blocks: &[Vec<(Rect, u16)>],
 ) -> Vec<Violation> {
     let spacing = (cfg.pitch - cfg.wire_width).max(0);
     let mut laid: Vec<(usize, Rect)> = Vec::new();
@@ -1445,6 +2194,8 @@ fn add_pin_access(
             }
         };
         let metal = climb.map_or(base, |(up, ..)| up);
+        let bit = layers.iter().position(|&l| l == metal).map_or(0, |l| 1u16 << l);
+        let blocks: Vec<Rect> = jog_blocks[a.ci].iter().filter(|b| b.1 & bit != 0).map(|b| b.0).collect();
         let (nx, ny) = a.node;
         let (px, py) = (a.pin.x + a.pin.w / 2, a.pin.y + a.pin.h / 2);
         // No jog narrower than its EM width: narrow survives only where it meets it.
@@ -1470,11 +2221,11 @@ fn add_pin_access(
         let pick = |gap: i32| {
             cands.iter().copied().find(|&c| {
                 let legs = legs_of(c);
-                jog_clean(&legs, a.ci, pad_zone, gap, zones, &laid) && clear(&legs, gap)
+                jog_clean(&legs, a.ci, pad_zone, gap, zones, &laid, &blocks) && clear(&legs, gap)
             })
         };
         let (w, flip) = pick(spacing).or_else(|| pick(1)).or(choice).unwrap_or_else(|| {
-            options.into_iter().find(|&c| jog_clean(&legs_of(c), a.ci, full, 1, zones, &laid)).unwrap_or(options[3])
+            options.into_iter().find(|&c| jog_clean(&legs_of(c), a.ci, full, 1, zones, &laid, &blocks)).unwrap_or(options[3])
         });
         let legs = legs_of((w, flip));
         laid.extend(legs.iter().map(|&l| (a.ci, l)));
@@ -1695,9 +2446,9 @@ const LIFT_COST: f32 = 16.0 * VIA_COST;
 ///   along the mirror image of the other;
 /// * `Balance` (`CommonNodes`): reroute the skewed shared node along the
 ///   members' bisector ([`balance_field`]);
-/// * `KeepAway`, pairs named (`CrosstalkExclusion`): reroute the victim, else
-///   the aggressor, priced away from the other's tracks; victim only
-///   (`CouplingBudget`): reroute each victim priced away from all foreign tracks;
+/// * `KeepAway`, victim only (`CouplingBudget`): reroute each victim priced
+///   away from all foreign tracks (pairs named by `CrosstalkExclusion` are
+///   kept apart in the search itself);
 /// * `Antenna`: reroute the net with one layer priced up (a jumper), per layer,
 ///   then with its gates lifted over its cells' metal ([`lift_field`]), then
 ///   plainly;
@@ -1708,7 +2459,13 @@ const LIFT_COST: f32 = 16.0 * VIA_COST;
 /// Returns the number of trials run (each a rip-up/reroute or a tree copy).
 ///
 /// A trial is kept only if `(hard violations, Σ residual)` improves
-/// lexicographically without raising overuse. `probe` draws the current state.
+/// lexicographically without raising overuse. `probe` draws the current state
+/// with pin access (what ships, less arrays and fill). The key and the
+/// violated list cover `reqs.hard ∪ reqs.budget ∪ extra` less
+/// `RepairKind::Em` (probes carry no terminals; EM is repaired on the drawn
+/// routes). `IrDrop` stays in until IR repair moves out (RTE-21). Each
+/// trial probes once: the key before it is the last accepted one, and
+/// [`rescore`] reuses unchanged local batches (RTE-23).
 #[allow(clippy::too_many_arguments)]
 fn repair_constraints(
     hot: &mut RouteHot,
@@ -1718,25 +2475,31 @@ fn repair_constraints(
     common: &[analog::routing::CommonNode],
     ci_of: &[usize],
     lift: &[Option<(u32, Vec<((i32, i32), Rect)>)>],
-    probe: impl Fn(&RouteHot) -> Routes,
+    probe: &impl Fn(&RouteHot, &RouteCtx<TrackGrid>) -> Routes,
     dij: &mut Dij,
 ) -> u32 {
-    let key = |hot: &RouteHot| {
-        let r = probe(hot);
-        let hard: u32 = reqs.hard.iter().map(|b| b.violations(&r)).sum();
-        let residual: f64 = reqs.hard.iter().chain(&reqs.budget).chain(extra).map(|b| b.residual(&r)).sum();
-        (hard, residual, overuse(hot))
+    let not_em = |b: &&Box<dyn analog::RuleBatch<Routes>>| b.repair_kind() != RepairKind::Em;
+    let hard: Vec<&dyn analog::RuleBatch<Routes>> = reqs.hard.iter().filter(not_em).map(|b| &**b).collect();
+    let n_hard = hard.len();
+    let batches: Vec<&dyn analog::RuleBatch<Routes>> = hard.into_iter().chain(reqs.budget.iter().chain(extra).filter(not_em).map(|b| &**b)).collect();
+    let measure = |hot: &RouteHot, prev: Option<&Probed>| {
+        let routes = probe(hot, cold);
+        let scores = rescore(&batches, &routes, prev.map(|p| (&p.routes, &p.scores[..])));
+        let key = (scores[..n_hard].iter().map(|s| s.0).sum(), scores.iter().map(|s| s.1).sum(), overuse(hot));
+        Probed { routes, scores, key }
     };
     let ci = |n: u32| ci_of.get(n as usize).copied().filter(|&c| c != usize::MAX);
     let (mut p_fac, mut n) = (P_FAC, 0);
+    let mut cur = measure(hot, None);
     for _ in 0..HARD_ROUNDS {
         p_fac *= 2.0;
-        let routes = probe(hot);
-        let violated: Vec<_> = reqs
-            .hard
+        let routes = cur.routes.clone();
+        let violated: Vec<_> = batches
             .iter()
-            .filter(|b| b.violations(&routes) > 0)
-            .chain(reqs.budget.iter().chain(extra).filter(|b| b.residual(&routes) > 0.0))
+            .zip(&cur.scores)
+            .enumerate()
+            .filter(|&(i, (_, s))| if i < n_hard { s.0 > 0 } else { s.1 > 0.0 })
+            .map(|(_, (b, _))| *b)
             .collect();
         let mut accepted = false;
         for batch in violated {
@@ -1747,11 +2510,12 @@ fn repair_constraints(
             let mut trials: Vec<Vec<(usize, Vec<f32>)>> = Vec::new();
             match batch.repair_kind() {
                 RepairKind::Mirror => {
-                    for &(a, b) in &pairs {
+                    // An exact pair is mirrored by construction (RTE-15).
+                    for &(a, b) in pairs.iter().filter(|&&(a, _)| cold.mirror.get(a).is_none_or(Option::is_none)) {
                         for (from, to) in [(a, b), (b, a)] {
                             if let Some(tree) = copy_tree(hot, cold, from, to) {
                                 n += 1;
-                                accepted |= commit_trial(hot, cold, to, tree, &key);
+                                accepted |= commit_trial(hot, cold, to, tree, &mut cur, &measure);
                             }
                         }
                         trials.extend(mirror_guide(hot, &cold.graph, &cold.terms, a, b).map(|g| vec![(b, g)]));
@@ -1766,13 +2530,15 @@ fn repair_constraints(
                     batch.violating_ids(&routes, &mut ids);
                     for n in common.iter().filter(|n| ids.contains(&u32::from(n.net.0))) {
                         if let Some(c) = ci(u32::from(n.net.0)) {
-                            trials.push(vec![(c, balance_field(&cold.graph, &n.a, &n.b))]);
+                            if let [a, b] = n.groups.as_slice() {
+                                trials.push(vec![(c, balance_field(&cold.graph, a, b))]);
+                            }
                         }
                     }
                 }
-                // A rule naming its pairs (`CrosstalkExclusion`): reroute the
-                // victim, else the aggressor, away from the other. A victim-only
-                // rule (`CouplingBudget`): away from all foreign tracks.
+                // A victim-only rule (`CouplingBudget`): reroute away from all
+                // foreign tracks. A rule naming its pairs (`CrosstalkExclusion`)
+                // is enforced in the search (`RouteCtx::sep`, RTE-18): no trial.
                 RepairKind::KeepAway => {
                     let mut named = Vec::new();
                     batch.keepaway_pairs(&mut named);
@@ -1781,10 +2547,6 @@ fn repair_constraints(
                             let others: Vec<usize> = (0..hot.trees.len()).filter(|&o| o != v).collect();
                             trials.push(vec![(v, keep_away(hot, &cold.graph, &others))]);
                         }
-                    }
-                    for (a, b) in named.into_iter().filter_map(|(a, b)| Some((ci(a)?, ci(b)?))) {
-                        trials.push(vec![(a, keep_away(hot, &cold.graph, &[b]))]);
-                        trials.push(vec![(b, keep_away(hot, &cold.graph, &[a]))]);
                     }
                 }
                 // Jumpers first (Hastings pp. 228–229): price one layer so the
@@ -1819,7 +2581,7 @@ fn repair_constraints(
             }
             for t in trials {
                 n += u32::from(!t.is_empty());
-                accepted |= trial(hot, cold, t, p_fac, &key, dij);
+                accepted |= trial(hot, cold, t, p_fac, &mut cur, &measure, dij);
             }
         }
         if !accepted {
@@ -1829,21 +2591,57 @@ fn repair_constraints(
     n
 }
 
+/// The last accepted repair probe: its routes, per-batch `(violations,
+/// residual)`, and key `(Σ hard violations, Σ residual, overuse)`.
+struct Probed {
+    routes: Routes,
+    scores: Vec<(u32, f64)>,
+    key: (u32, f64, f32),
+}
+
+/// Per batch `(violations, residual)` on `r`. With `prev` (an earlier probe
+/// and its scores), a [`analog::RuleBatch::local`] batch none of whose
+/// touched nets' wires differ between `prev` and `r` keeps its score; every
+/// other batch is rescored. Probes share their cell metal and gates, so
+/// wires are the only state a local batch can see change.
+fn rescore(batches: &[&dyn analog::RuleBatch<Routes>], r: &Routes, prev: Option<(&Routes, &[(u32, f64)])>) -> Vec<(u32, f64)> {
+    let mut ids = Vec::new();
+    batches
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            if let Some((p, s)) = prev.filter(|_| b.local()) {
+                ids.clear();
+                b.touched(&mut ids);
+                if ids.iter().all(|&n| p.wires.get(n as usize) == r.wires.get(n as usize)) {
+                    return s[i];
+                }
+            }
+            (b.violations(r), b.residual(r))
+        })
+        .collect()
+}
+
+/// `after` beats `before`: `(hard, residual)` lower without raising overuse.
+fn improves(after: (u32, f64, f32), before: (u32, f64, f32)) -> bool {
+    after.2 <= before.2 && (after.0, after.1) < (before.0, before.1)
+}
+
 /// Rip up every net in `reroutes`, reroute each with its penalty field, and keep
-/// the result only if `key` improves on (hard, budget) without raising overuse;
-/// otherwise restore the old trees. Returns whether it was kept.
+/// the result only if it [`improves`] on `cur` (the state's last accepted
+/// probe); otherwise restore the old trees. Returns whether it was kept.
 fn trial(
     hot: &mut RouteHot,
     cold: &RouteCtx<TrackGrid>,
     reroutes: Vec<(usize, Vec<f32>)>,
     p_fac: f32,
-    key: &impl Fn(&RouteHot) -> (u32, f64, f32),
+    cur: &mut Probed,
+    measure: &impl Fn(&RouteHot, Option<&Probed>) -> Probed,
     dij: &mut Dij,
 ) -> bool {
     if reroutes.is_empty() {
         return false;
     }
-    let before = key(hot);
     let old: Vec<(usize, Vec<Vec<u32>>)> = reroutes.iter().map(|(n, _)| (*n, hot.trees[*n].clone())).collect();
     for &(n, _) in &old {
         cold.commit(hot, n, Vec::new());
@@ -1852,9 +2650,11 @@ fn trial(
         let tree = cold.reroute(hot, n, p_fac, &field, dij).unwrap_or_else(|| prev.clone());
         cold.commit(hot, n, tree);
     }
-    let after = key(hot);
-    let better = after.2 <= before.2 && (after.0, after.1) < (before.0, before.1);
-    if !better {
+    let after = measure(hot, Some(cur));
+    let better = improves(after.key, cur.key);
+    if better {
+        *cur = after;
+    } else {
         for (n, tree) in old {
             cold.commit(hot, n, tree);
         }
@@ -1866,8 +2666,8 @@ fn trial(
 /// (≥ 2 nodes on one layer) claims the free stretches (≥ 2 nodes) of the
 /// parallel track on each side, and the reference net is rerouted with one node of each claim
 /// as an extra terminal, so each shield is tied in by real routing. The claims
-/// join the reference tree. All-or-nothing: if the reroute fails or adds
-/// overuse, nothing changes.
+/// join the reference tree. If the reroute fails or adds overuse, the
+/// shortest claim is dropped and the rest retried ([`try_shield`]).
 fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize, reference: usize, dij: &mut Dij) {
     let g = &cold.graph;
     let free = |n: u32| {
@@ -1907,9 +2707,22 @@ fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize,
             }
         }
     }
-    if claims.is_empty() {
-        return;
+    // Longest first: a claim the reference cannot reach without crossing
+    // foreign metal costs the whole set, so the shortest is dropped and the
+    // rest retried (RTE-19).
+    claims.sort_by_key(|c| std::cmp::Reverse(c.len()));
+    while !claims.is_empty() {
+        if try_shield(hot, cold, reference, &claims, dij) {
+            return;
+        }
+        claims.pop();
     }
+}
+
+/// Reroute `reference` with one node of each claim as an extra terminal and
+/// the claims joined to its tree; kept only when overuse does not rise, else
+/// everything is restored. Returns whether it was kept.
+fn try_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, reference: usize, claims: &[Vec<u32>], dij: &mut Dij) -> bool {
     let (old_tree, old_terms, over0) = (hot.trees[reference].clone(), cold.terms[reference].clone(), overuse(hot));
     let old_reserved: Vec<(usize, u32)> = claims.iter().flatten().map(|&n| (n as usize, cold.reserved.get(n as usize).copied().unwrap_or(NONE))).collect();
     for &n in claims.iter().flatten() {
@@ -1920,10 +2733,10 @@ fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize,
     cold.terms[reference].extend(claims.iter().map(|c| c[0]));
     let routed = cold.reroute(hot, reference, P_FAC, &[], dij);
     if let Some(mut tree) = routed {
-        tree.extend(claims);
+        tree.extend(claims.iter().cloned());
         cold.commit(hot, reference, tree);
         if overuse(hot) <= over0 {
-            return;
+            return true;
         }
         cold.commit(hot, reference, old_tree);
     }
@@ -1933,17 +2746,19 @@ fn add_shield(hot: &mut RouteHot, cold: &mut RouteCtx<TrackGrid>, victim: usize,
             *r = o;
         }
     }
+    false
 }
 
-/// Keep `tree` as `net`'s route iff `key` improves on (hard, budget) without
-/// raising overuse; else restore. Returns whether it was kept.
-fn commit_trial(hot: &mut RouteHot, cold: &RouteCtx<TrackGrid>, net: usize, tree: Vec<Vec<u32>>, key: &impl Fn(&RouteHot) -> (u32, f64, f32)) -> bool {
-    let before = key(hot);
+/// Keep `tree` as `net`'s route iff it [`improves`] on `cur`; else restore.
+/// Returns whether it was kept.
+fn commit_trial(hot: &mut RouteHot, cold: &RouteCtx<TrackGrid>, net: usize, tree: Vec<Vec<u32>>, cur: &mut Probed, measure: &impl Fn(&RouteHot, Option<&Probed>) -> Probed) -> bool {
     let old = hot.trees[net].clone();
     cold.commit(hot, net, tree);
-    let after = key(hot);
-    let better = after.2 <= before.2 && (after.0, after.1) < (before.0, before.1);
-    if !better {
+    let after = measure(hot, Some(cur));
+    let better = improves(after.key, cur.key);
+    if better {
+        *cur = after;
+    } else {
         cold.commit(hot, net, old);
     }
     better
@@ -2709,36 +3524,347 @@ mod tests {
             diode: None,
         }));
         let (feed, a, b) = (pin(0, 1_000, 2_000), pin(0, 12_000, 2_000), pin(0, 12_000, 14_000));
-        let node = CommonNode { net: NetId(0), a: vec![a.1], b: vec![b.1], feeds: vec![feed.1], max_delta_ohm: 0.2 };
+        let node = CommonNode { net: NetId(0), groups: vec![vec![a.1], vec![b.1]], feeds: vec![feed.1], max_delta_ohm: 0.2, star: false };
         let skew = |cfg: DetailedCfg| {
             let (routes, _) = route(cfg, &[feed, a, b], &[], &[], &mut gr::Negotiation::new());
-            CommonNodes { nodes: vec![node.clone()], stack }.worst_usage(&routes).unwrap()
+            CommonNodes { nodes: vec![node.clone()], stack, halo_nm: 420, joins: joins(&LAYERS, &CUTS, None) }.worst_usage(&routes).unwrap()
         };
         let plain = skew(test_cfg());
         let balanced = skew(DetailedCfg { common: vec![node.clone()], stack: Some(stack), ..test_cfg() });
         assert!(balanced < plain * 0.5, "skew {plain} → {balanced}");
     }
 
-    /// A matched cell (units of two members) is priced for foreign nets only:
-    /// net 0, straight across the cell otherwise, goes around it; net 1, with
-    /// a pin in the cell, still runs over it.
+    /// A matched cell's soft blockage is priced for foreign nets only: net 0,
+    /// straight across the cell otherwise, goes around it; net 1, with a pin
+    /// in the cell, still runs over it.
     #[test]
     fn foreign_nets_route_around_a_matched_cell() {
         let cell = Rect { x: 6_000, y: 3_000, w: 4_000, h: 4_000 };
-        let unit = |owner| pnr_core::Unit { owner, x: 0, y: 0, weight: 1, phi: (1, 0), sa: 0, sb: 0 };
         let matched = Macro {
             shapes: Vec::new(),
             pins: vec![pnr_core::Pin { name: "d0:D".into(), net: NetId(1), at: Rect { x: 8_000, y: 5_000, w: 1, h: 1 }, layer: LAYERS[0] }],
             bbox: cell,
-            units: vec![unit(0), unit(1)],
-            dummies: Vec::new(),
             ..Default::default()
         };
         let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000), pin(1, 8_000, 12_000)];
-        let (routes, _) = route(test_cfg(), &pins, &[matched], &[], &mut gr::Negotiation::new());
+        let soft = Blockage { rect: cell, halo: 0, layers: 0b11, hard: false, own_exempt: true, only_aggressors: false, cell: 0, gate: false };
+        let cfg = DetailedCfg { blockages: vec![soft], ..test_cfg() };
+        let (routes, _) = route(cfg, &pins, &[matched], &[], &mut gr::Negotiation::new());
         let over = |n: usize| routes.wires[n].iter().any(|s| s.rect.x < cell.x + cell.w && cell.x < s.rect.x + s.rect.w && s.rect.y < cell.y + cell.h && cell.y < s.rect.y + s.rect.h);
         assert!(!over(0), "net 0 crossed the matched cell: {:?}", routes.wires[0]);
         assert!(over(1), "net 1 must reach its pin inside the cell");
+    }
+
+    /// Routed metal of `net` over `rect` on the test lattice's metals, µm².
+    fn metal_over(routes: &Routes, net: usize, rect: Rect) -> f32 {
+        let mut metals = [u16::MAX; analog::routing::metal_over_gate::MAX_METALS];
+        (metals[0], metals[1]) = (LAYERS[0].0, LAYERS[1].0);
+        let one = Routes { wires: vec![routes.wires[net].clone()], ..Default::default() };
+        analog::routing::MetalOverGate { rect, cell: 0, metals }.overlap_um2(&one)
+    }
+
+    /// Four gate strips, 300 × 4 000 nm, 1 µm apart, in a 4 µm row across y = 5 000.
+    fn gate_row(hard: bool) -> Vec<Blockage> {
+        (0..4)
+            .map(|i| Blockage { rect: Rect { x: 6_000 + i * 1_000, y: 3_000, w: 300, h: 4_000 }, halo: 0, layers: 0b11, hard, own_exempt: !hard, only_aggressors: false, cell: 0, gate: true })
+            .collect()
+    }
+
+    /// A blank cell standing in for the matched transistor (blockage `cell 0`).
+    fn blank_cell(pins: Vec<pnr_core::Pin>) -> Macro {
+        Macro { bbox: Rect { x: 5_500, y: 3_000, w: 4_500, h: 4_000 }, pins, ..Default::default() }
+    }
+
+    /// Ring bands on both lattice layers over `rects`: no net passes them.
+    fn walls(rects: &[Rect]) -> Macro {
+        let shapes = rects.iter().flat_map(|&rect| LAYERS.map(|layer| Shape { layer, rect })).collect();
+        Macro { shapes, bbox: rects[0], ..Default::default() }
+    }
+
+    /// Hard gate blockages (Moderate): a foreign net whose straight route
+    /// crosses the row goes around it; no `metal over gate` row.
+    #[test]
+    fn no_route_crosses_a_moderately_matched_gate() {
+        let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000)];
+        let cfg = DetailedCfg { blockages: gate_row(true), ..test_cfg() };
+        let (routes, report) = route(cfg, &pins, &[blank_cell(Vec::new())], &[], &mut gr::Negotiation::new());
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net") || r.starts_with("metal over gate")), "{:?}", rules(&report));
+        for b in gate_row(true) {
+            assert_eq!(metal_over(&routes, 0, b.rect), 0.0, "{:?}", b.rect);
+        }
+    }
+
+    /// At Moderate the cell's own drain may not cross its gates either
+    /// (`own_exempt = false`): pins either side of one gate join around it.
+    #[test]
+    fn own_drain_does_not_cross_its_gates_at_mod() {
+        let at = |x| pnr_core::Pin { name: "d0:D".into(), net: NetId(0), at: Rect { x, y: 4_915, w: 170, h: 170 }, layer: LAYERS[0] };
+        let gate = Blockage { rect: Rect { x: 7_000, y: 3_000, w: 300, h: 4_000 }, halo: 0, layers: 0b11, hard: true, own_exempt: false, only_aggressors: false, cell: 0, gate: true };
+        let cfg = DetailedCfg { blockages: vec![gate], ..test_cfg() };
+        let (routes, report) = route(cfg, &[], &[blank_cell(vec![at(6_000), at(8_200)])], &[], &mut gr::Negotiation::new());
+        assert!(!routes.wires[0].is_empty());
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net") || r.starts_with("metal over gate")), "{:?}", rules(&report));
+        assert_eq!(metal_over(&routes, 0, gate.rect), 0.0);
+    }
+
+    /// Minimal class: soft gate blockages. With the detour walled off far
+    /// out, crossing at `KEEPOUT_COST` a node is cheaper: the route crosses
+    /// and the gate check reports it; the hard set-up detours instead.
+    #[test]
+    fn a_min_class_pair_allows_crossing_at_a_cost() {
+        let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000)];
+        let ring = walls(&[Rect { x: 5_500, y: 7_000, w: 4_500, h: 30_000 }, Rect { x: 5_500, y: -27_000, w: 4_500, h: 30_000 }]);
+        let run = |hard: bool| {
+            let cfg = DetailedCfg { blockages: gate_row(hard), ..test_cfg() };
+            route(cfg, &pins, &[blank_cell(Vec::new())], &[ring.clone()], &mut gr::Negotiation::new())
+        };
+        let (routes, report) = run(false);
+        let over: f32 = gate_row(false).iter().map(|b| metal_over(&routes, 0, b.rect)).sum();
+        assert!(over > 0.0, "the soft route detours: {:?}", rules(&report));
+        assert!(rules(&report).iter().any(|r| r.starts_with("metal over gate")), "{:?}", rules(&report));
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        let (routes, report) = run(true);
+        let over: f32 = gate_row(true).iter().map(|b| metal_over(&routes, 0, b.rect)).sum();
+        assert_eq!(over, 0.0);
+        assert!(!rules(&report).iter().any(|r| r.starts_with("metal over gate")), "{:?}", rules(&report));
+    }
+
+    /// A Minimal resistor body: soft for every foreign net plus a hard copy
+    /// for aggressors. Walls leave only the body and a head gap: the signal
+    /// (net 0) crosses the body, the clock (net 1) the head.
+    #[test]
+    fn a_clock_never_crosses_a_resistor_body() {
+        let body = Rect { x: 7_000, y: 3_000, w: 1_000, h: 6_000 };
+        let soft = Blockage { rect: body, halo: 0, layers: 0b11, hard: false, own_exempt: true, only_aggressors: false, cell: 0, gate: false };
+        let hard = Blockage { hard: true, only_aggressors: true, ..soft };
+        let ring = walls(&[Rect { x: 7_000, y: 11_000, w: 1_000, h: 30_000 }, Rect { x: 7_000, y: -27_000, w: 1_000, h: 30_000 }]);
+        let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000), pin(1, 1_000, 7_000), pin(1, 15_000, 7_000)];
+        let cfg = DetailedCfg { blockages: vec![soft, hard], aggressor: vec![false, true], ..test_cfg() };
+        let cell = Macro { bbox: body, ..Default::default() };
+        let (routes, report) = route(cfg, &pins, &[cell], &[ring], &mut gr::Negotiation::new());
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        assert!(metal_over(&routes, 0, body) > 0.0, "the signal crosses the body");
+        assert_eq!(metal_over(&routes, 1, body), 0.0, "the clock crosses a head");
+    }
+
+    /// Minimum same-layer edge gap between two nets' shapes, nm.
+    fn min_gap(r: &Routes, a: usize, b: usize) -> i32 {
+        r.wires[a].iter().flat_map(|p| r.wires[b].iter().filter(move |q| q.layer == p.layer).map(move |q| rect_gap(p.rect, q.rect))).min().unwrap_or(i32::MAX)
+    }
+
+    /// A hard `CrosstalkExclusion` of 1 000 nm is kept in the search: net 1's
+    /// pins sit two pitches above net 0's straight line, so one of them
+    /// leaves the other's tracks; the rule holds and no same-layer gap is
+    /// under 1 000 nm.
+    #[test]
+    fn separated_nets_never_share_adjacent_tracks() {
+        use analog::routing::CrosstalkExclusion;
+        use analog::Rule;
+        let rule = CrosstalkExclusion { a: NetId(0), b: NetId(1), min_spacing_nm: 1_000, margin_pct: 0 };
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.hard.push(Box::new(vec![rule]));
+        let pins = [pin(0, 1_000, 5_000), pin(0, 15_000, 5_000), pin(1, 4_000, 5_860), pin(1, 12_000, 5_860)];
+        let (routes, report, _) = DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        assert!(rule.satisfied(&routes), "gap {}", min_gap(&routes, 0, 1));
+        assert!(min_gap(&routes, 0, 1) >= 1_000, "{}", min_gap(&routes, 0, 1));
+        // Without the rule the straight runs sit 570 nm apart.
+        let (plain, _, _) = DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], &Requirements::default(), &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        assert!(min_gap(&plain, 0, 1) < 1_000, "the set-up does not force the pair together");
+    }
+
+    /// A no-cross separation: net 1's vertical run would cross net 0's
+    /// horizontal one; it goes around net 0's end instead, and no shape of
+    /// one overlaps the other's in xy on the adjacent layer.
+    #[test]
+    fn a_no_cross_pair_never_stacks() {
+        struct NoCross;
+        impl analog::RuleBatch<Routes> for NoCross {
+            fn cost(&self, _: &Routes) -> f32 {
+                0.0
+            }
+            fn violations(&self, _: &Routes) -> u32 {
+                0
+            }
+            fn separations(&self, out: &mut Vec<(u32, u32, i32, bool)>) {
+                out.push((0, 1, 0, true));
+            }
+        }
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.hard.push(Box::new(NoCross));
+        let pins = [pin(0, 6_000, 6_000), pin(0, 10_000, 6_000), pin(1, 8_000, 1_000), pin(1, 8_000, 11_000)];
+        let route = |reqs: &Requirements<Routes>| DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        let stacked = |r: &Routes| r.wires[0].iter().filter(|p| LAYERS.contains(&p.layer)).any(|p| r.wires[1].iter().any(|q| q.layer != p.layer && LAYERS.contains(&q.layer) && overlaps(p.rect, q.rect)));
+        let (routes, report, _) = route(&reqs);
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        assert!(!stacked(&routes));
+        assert!(stacked(&route(&Requirements::default()).0), "the set-up does not force a crossing");
+    }
+
+    /// RTE-15 set-up: p0 = 420, axis x = 10 290 (a track centre), nets 0/1
+    /// under a `Differential` (no length tolerance); net 1's pins are net
+    /// 0's mirrored, its second pin shifted by `off` nm.
+    fn pair_run(off: i32, rings: &[Macro]) -> (Routes, Report, RouteStats, Requirements<Routes>) {
+        use analog::routing::Differential;
+        let cfg = DetailedCfg { pitch: 420, grid: 5, wire_width: 260, ..test_cfg() };
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.budget.push(Box::new(vec![Differential { pos: NetId(0), neg: NetId(1), max_len_delta_pct10: 0, same_layer_required: true, stack: Some(test_stack()), aggressor_weight: None }]));
+        let a = [(6_000, 3_000), (8_000, 9_000), (5_000, 12_000)];
+        let mut pins: Vec<(NetId, Rect, LayerId)> = a.iter().map(|&(x, y)| pin(0, x, y)).collect();
+        pins.extend(a.iter().enumerate().map(|(i, &(x, y))| pin(1, 2 * 10_290 - x - 170 + if i == 1 { off } else { 0 }, y)));
+        let (routes, report, stats) = DetailedRoute { cfg }.route(&pins, &[], rings, &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        (routes, report, stats, reqs)
+    }
+
+    /// Per layer: (Σ long side, Σ area, shape count) of `net`.
+    fn signature(r: &Routes, net: usize) -> Vec<(u16, i64, i64, usize)> {
+        let mut by: std::collections::BTreeMap<u16, (i64, i64, usize)> = std::collections::BTreeMap::new();
+        for s in &r.wires[net] {
+            let e = by.entry(s.layer.0).or_default();
+            *e = (e.0 + i64::from(s.rect.w.max(s.rect.h)), e.1 + i64::from(s.rect.w) * i64::from(s.rect.h), e.2 + 1);
+        }
+        by.into_iter().map(|(l, (a, b, c))| (l, a, b, c)).collect()
+    }
+
+    /// Mirrored pins route as exact images: an obstacle on net 0's side only
+    /// makes both detour; equal per-layer signatures, every net-1 shape a
+    /// net-0 shape mirrored about 10 290, Differential residual 0.
+    #[test]
+    fn mirrored_pins_route_as_exact_mirrors() {
+        let ring = Macro {
+            shapes: LAYERS.map(|layer| Shape { layer, rect: Rect { x: 5_500, y: 5_500, w: 3_500, h: 1_000 } }).to_vec(),
+            bbox: Rect { x: 5_500, y: 5_500, w: 3_500, h: 1_000 },
+            ..Default::default()
+        };
+        let (routes, report, stats, reqs) = pair_run(0, &[ring]);
+        assert_eq!(stats.pairs_exact.len(), 1, "{:?}", stats.pairs_fallback);
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        assert_eq!(signature(&routes, 0), signature(&routes, 1));
+        for s in &routes.wires[1] {
+            let m = Rect { x: 2 * 10_290 - s.rect.x - s.rect.w, ..s.rect };
+            assert!(routes.wires[0].iter().any(|t| t.layer == s.layer && t.rect == m), "net 1 {s:?} has no mirror in net 0: {:?} vs {:?}", routes.wires[0].iter().filter(|t| t.layer == s.layer).collect::<Vec<_>>(), routes.wires[1].iter().filter(|t| t.layer == s.layer).collect::<Vec<_>>());
+        }
+        assert_eq!(reqs.budget[0].residual(&routes), 0.0);
+    }
+
+    /// Without the obstacle neither net uses the axis track on the vertical layer.
+    #[test]
+    fn the_axis_track_is_never_used_by_a_pair() {
+        let (routes, _, stats, _) = pair_run(0, &[]);
+        assert_eq!(stats.pairs_exact.len(), 1, "{:?}", stats.pairs_fallback);
+        for n in 0..2 {
+            assert!(!routes.wires[n].iter().any(|s| s.layer == LAYERS[1] && s.rect.x <= 10_290 && 10_290 <= s.rect.x + s.rect.w), "net {n} covers the axis");
+        }
+    }
+
+    /// One of net 1's pins one grid step (5 nm) off the mirror (all of them
+    /// off would be an exact mirror about an off-lattice axis): no map, both nets
+    /// route alone (guide fallback), and no metal shape is a dead end: each
+    /// one off every pin touches at least two other shapes of its net.
+    #[test]
+    fn unmatched_pins_fall_back_to_the_guide() {
+        let (routes, report, stats, _) = pair_run(5, &[]);
+        assert!(stats.pairs_exact.is_empty());
+        assert_eq!(stats.pairs_fallback, vec![(0, 1, "no pin map")]);
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        for n in 0..2 {
+            let w = &routes.wires[n];
+            for (i, s) in w.iter().enumerate().filter(|(_, s)| s.layer == LAYERS[0] || s.layer == LAYERS[1]) {
+                let touches = w.iter().enumerate().filter(|&(j, t)| j != i && rect_gap(s.rect, t.rect) == 0 && (t.layer == s.layer || t.layer == CUTS[0].0)).count();
+                let at_pin = w.iter().any(|t| t.layer != s.layer && t.layer != CUTS[0].0 && rect_gap(s.rect, t.rect) == 0) || touches >= 2;
+                assert!(at_pin, "net {n}: dead-end shape {s:?}");
+            }
+        }
+    }
+
+    /// Kelvin: force and sense groups of one net, the tap the feed, a star.
+    /// The sense lead starts at the tap: every shape of its branch (the
+    /// piece holding the sense pin once the tap's halo is cut out) carries
+    /// 0 µA by `net_flow`, and the star check passes. Without the star the
+    /// sense pin joins the force trunk, whose current then flows through it.
+    #[test]
+    fn a_kelvin_sense_branch_starts_at_the_tap() {
+        use analog::routing::{current::net_flow, CommonNode, CommonNodes};
+        use analog::RuleBatch;
+        let (tap, force, sense) = (pin(0, 8_000, 2_000), pin(0, 8_000, 14_000), pin(0, 9_000, 14_000));
+        let node = |star| CommonNode { net: NetId(0), groups: vec![vec![force.1], vec![sense.1]], feeds: vec![tap.1], max_delta_ohm: 0.0, star };
+        let run = |star: bool| {
+            let cfg = DetailedCfg { common: vec![node(star)], stack: Some(test_stack()), ..test_cfg() };
+            let (routes, report) = route(cfg, &[tap, force, sense], &[], &[], &mut gr::Negotiation::new());
+            assert!(!rules(&report).iter().any(|r| r.starts_with("open net") || r.starts_with("star root")), "{:?}", rules(&report));
+            let terms = [(tap.1, -1_000.0), (force.1, 1_000.0), (sense.1, 0.0)].map(|(at, ua)| pnr_core::Terminal { at, ua: Some(ua) });
+            let flow = net_flow(test_stack(), &routes.wires[0], &terms).expect("flow");
+            // The sense branch: the tap's halo cut out, flood from the sense pin.
+            let p = test_cfg().pitch;
+            let halo = Rect { x: tap.1.x - p, y: tap.1.y - p, w: tap.1.w + 2 * p, h: tap.1.h + 2 * p };
+            let w = &routes.wires[0];
+            let keep: Vec<usize> = (0..w.len()).filter(|&i| !w[i].rect.touches(&halo)).collect();
+            let j = joins(&LAYERS, &CUTS, None);
+            let mut branch: Vec<usize> = keep.iter().copied().filter(|&i| w[i].rect.touches(&sense.1)).collect();
+            let mut k = 0;
+            while k < branch.len() {
+                let a = branch[k];
+                for &b in &keep {
+                    if !branch.contains(&b) && w[a].rect.touches(&w[b].rect) && conductor_layers_meet(&w[a], &w[b], &j) {
+                        branch.push(b);
+                    }
+                }
+                k += 1;
+            }
+            let star_v = CommonNodes { nodes: vec![node(true)], stack: test_stack(), halo_nm: p, joins: j }.violations(&routes);
+            (branch.iter().map(|&i| flow.shape_ua[i]).fold(0.0f32, f32::max), star_v, branch.is_empty())
+        };
+        let (ua, star_v, empty) = run(true);
+        assert!(!empty, "the sense pin has a branch");
+        assert_eq!(ua, 0.0, "force current in the sense lead");
+        assert_eq!(star_v, 0);
+        let (ua, star_v, _) = run(false);
+        assert!(ua > 0.0 || star_v > 0, "without the star the sense lead is not separate");
+    }
+
+    /// Bits of 1/2/4/8 units with equal 10 µm leads (ground C only): the
+    /// stubs bring every bit's lead C per unit within 10 aF of the mean.
+    #[test]
+    fn equalize_leads_matches_per_unit_lead_c() {
+        use analog::routing::{stack::Layer, PlateRatio, PlateSet, Stack};
+        let stack: &'static Stack = Box::leak(Box::new(Stack { layers: vec![Layer { id: LAYERS[1].0, area_af_um2: 30.0, lateral: 1e-9, ..Layer::default() }], antenna_cumulative: false, diode: None }));
+        let set = PlateSet { top: NetId(0), bits: [1, 2, 4, 8].iter().enumerate().map(|(i, &n)| (NetId(i as u16 + 1), n)).collect(), c_unit_af: 1_000.0, array: Rect { x: 0, y: 0, w: 100_000, h: 1_000 } };
+        let rule = PlateRatio { set, tol_pct10: 10, stack, space_nm: 140 };
+        let mut wires = vec![Vec::new()];
+        for i in 0..4 {
+            wires.push(vec![Shape { layer: LAYERS[1], rect: Rect { x: i * 20_000, y: 1_000, w: 260, h: 10_000 } }]);
+        }
+        let mut r = Routes { wires, ..Default::default() };
+        assert!(rule.spread_pct(&r).unwrap() > 1.0);
+        equalize_leads(&mut r, &rule, &LAYERS, &[], &|_| 140, 5);
+        let per = rule.per_unit_af(&r);
+        let mean = per.iter().sum::<f32>() / 4.0;
+        assert!(per.iter().all(|c| (c - mean).abs() <= 10.0), "{per:?}");
+    }
+
+    /// A 4-bit bank: the top plate (net 0) leaves the array downward, the
+    /// bits (nets 1–4) upward, so they would cross; the no-cross separation
+    /// keeps every bit off the top on adjacent layers and the top a spacing
+    /// away on its own.
+    #[test]
+    fn bottom_plates_never_cross_the_top_plate() {
+        use analog::routing::PlateSet;
+        let array = Rect { x: 8_000, y: 8_000, w: 5_000, h: 4_000 };
+        let at = |net: u16, x, y| pnr_core::Pin { name: format!("c{net}"), net: NetId(net), at: Rect { x, y, w: 170, h: 170 }, layer: LAYERS[0] };
+        let cell = Macro { pins: [at(0, 10_400, 11_600)].into_iter().chain((1..5).map(|i| at(i, 8_400 + i32::from(i) * 900, 8_200))).collect(), bbox: array, ..Default::default() };
+        let mut pins = vec![pin(0, 10_400, 2_000)];
+        pins.extend((1..5).map(|i| pin(i, 8_400 + i32::from(i) * 900, 18_000)));
+        let set = PlateSet { top: NetId(0), bits: (1..5).map(|i| (NetId(i), 1)).collect(), c_unit_af: f32::NAN, array };
+        let run = |plates: Vec<PlateSet>| {
+            let cfg = DetailedCfg { plates, stack: Some(test_stack()), ..test_cfg() };
+            route(cfg, &pins, &[cell.clone()], &[], &mut gr::Negotiation::new())
+        };
+        let crossed = |r: &Routes| (1..5).any(|b| r.wires[b].iter().any(|p| r.wires[0].iter().any(|q| p.layer != q.layer && LAYERS.contains(&p.layer) && LAYERS.contains(&q.layer) && overlaps(p.rect, q.rect))));
+        let (routes, report) = run(vec![set]);
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net") || r.starts_with("plate crossing")), "{:?}", rules(&report));
+        assert!(!crossed(&routes));
+        assert!((1..5).all(|b| min_gap(&routes, 0, b) >= 140), "{:?}", (1..5).map(|b| min_gap(&routes, 0, b)).collect::<Vec<_>>());
+        assert!(crossed(&run(Vec::new()).0), "the set-up does not force a crossing");
     }
 
     /// History survives the call and changes the next one.
@@ -2987,6 +4113,192 @@ mod tests {
         assert!(trials(&reroute) > 0, "a Reroute rule on the same net does spend trials");
     }
 
+    /// dr's rows are the measurement of the routes it returns (RTE-23):
+    /// every hard batch has a row iff it is violated there, every budget
+    /// batch iff its residual is positive, each with that residual's margin.
+    #[test]
+    fn the_report_is_the_measurement_of_the_drawn_routes() {
+        use analog::routing::CouplingBudget;
+        let check = |routes: &Routes, report: &Report, reqs: &Requirements<Routes>| {
+            let row = |rows: &[Violation], tier: &str, i: usize| rows.iter().find(|v| v.rule == format!("{}routing {tier} {i}", Violation::BATCH)).map(|v| v.margin);
+            for (i, b) in reqs.hard.iter().enumerate() {
+                let want = (b.violations(routes) > 0).then(|| Violation::from_residual("", b.residual(routes)).margin);
+                assert_eq!(row(&report.hard_violations, "hard", i), want, "hard {i}");
+            }
+            for (i, b) in reqs.budget.iter().enumerate() {
+                let r = b.residual(routes);
+                assert_eq!(row(&report.budget_violations, "budget", i), (r > 0.0).then(|| Violation::from_residual("", r).margin), "budget {i}");
+            }
+        };
+        // A victim beside an aggressor, over budget.
+        let pins = [pin(0, 1_000, 5_000), pin(0, 21_000, 5_000), pin(1, 1_000, 5_430), pin(1, 21_000, 5_430)];
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.budget.push(Box::new(vec![CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: Some(test_stack()), exclude: None, aggressor_weight: None }]));
+        let (routes, report, _) = DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        assert!(reqs.budget[0].residual(&routes) > 0.0, "the coupling row is live");
+        check(&routes, &report, &reqs);
+        let (routes, report, shield) = shield_run();
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.budget.push(Box::new(vec![shield]));
+        check(&routes, &report, &reqs);
+        let (routes, report, _, reqs) = pair_run(300, &[]);
+        check(&routes, &report, &reqs);
+    }
+
+    /// Step 1: the repair probe draws pin access, so a hard rule its jogs
+    /// break is violated before fill already: no post-fill round runs for it,
+    /// and the row ships. The stand-in rule fails when a net-0 shape on any
+    /// layer overlaps net 0's cell metal in plan (its pins, a half-pitch off
+    /// every track: only the access jogs and fill reach them).
+    #[test]
+    fn a_rule_broken_by_pin_access_is_seen_by_repair() {
+        use analog::Rule;
+        #[derive(Clone, Copy)]
+        struct Untouched;
+        impl Rule for Untouched {
+            type On = Routes;
+            fn cost(self, _: &Routes) -> f32 {
+                1.0
+            }
+            fn satisfied(self, r: &Routes) -> bool {
+                !r.shapes(NetId(0)).iter().any(|s| r.cell_metal(NetId(0)).iter().any(|c| s.rect.touches(&c.rect)))
+            }
+            fn touches(self, out: &mut Vec<u32>) {
+                out.push(0);
+            }
+        }
+        let pins = [pin(0, 1_805, 1_805), pin(0, 15_035, 13_145), pin(1, 3_695, 15_035), pin(1, 13_145, 3_695)];
+        let cell = Macro {
+            shapes: pins.iter().map(|&(_, rect, layer)| Shape { layer, rect }).collect(),
+            pins: pins.iter().enumerate().map(|(i, &(net, at, layer))| pnr_core::Pin { name: format!("P{i}"), net, at, layer }).collect(),
+            bbox: Rect { x: 1_805, y: 1_805, w: 13_400, h: 13_400 },
+            ..Default::default()
+        };
+        let cfg = DetailedCfg { pitch: 1_890, stack: Some(test_stack()), ..test_cfg() };
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.hard.push(Box::new(vec![Untouched]));
+        let (routes, report, stats) = DetailedRoute { cfg }.route(&pins, &[cell], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        assert!(!Untouched.satisfied(&routes), "the jogs reach the pins");
+        assert_eq!(stats.post_rounds, 0, "the probe saw the jogs");
+        assert!(rules(&report).contains(&&format!("{}routing hard 0", Violation::BATCH)), "{:?}", rules(&report));
+    }
+
+    /// Step 4: a hard rule only the drawing breaks (the stand-in fails once
+    /// terminals are attached, which probes never carry) gets one post-fill
+    /// round; it cannot improve, so the round is rejected and the drawing is
+    /// the one without the rule. A rule already broken on the probe gets none.
+    #[test]
+    fn a_rule_broken_after_fill_gets_a_post_round() {
+        use analog::Rule;
+        #[derive(Clone, Copy)]
+        struct NoTerms<const EVER: bool>;
+        impl<const EVER: bool> Rule for NoTerms<EVER> {
+            type On = Routes;
+            fn cost(self, _: &Routes) -> f32 {
+                1.0
+            }
+            fn satisfied(self, r: &Routes) -> bool {
+                EVER && r.terms.iter().all(Vec::is_empty)
+            }
+            fn touches(self, out: &mut Vec<u32>) {
+                out.push(0);
+            }
+        }
+        let pins = [pin(0, 1_000, 1_000), pin(0, 12_000, 9_000), pin(1, 1_000, 9_000), pin(1, 12_000, 1_000)];
+        let run = |reqs: &Requirements<Routes>| DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        let (plain, _, _) = run(&Requirements::default());
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.hard.push(Box::new(vec![NoTerms::<true>]));
+        let (routes, report, stats) = run(&reqs);
+        assert_eq!(stats.post_rounds, 1);
+        assert_eq!(rules(&report), [&format!("{}routing hard 0", Violation::BATCH)]);
+        assert_eq!(routes.wires, plain.wires, "the rejected round restored the drawing");
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.hard.push(Box::new(vec![NoTerms::<false>]));
+        assert_eq!(run(&reqs).2.post_rounds, 0, "broken on the probe: repair's, not a post round's");
+    }
+
+    /// Step 2: an unchanged local batch keeps its score, a non-local one is
+    /// always rescored, and a local one whose net changed is rescored; the
+    /// incremental scores equal a full rescore.
+    #[test]
+    fn rescore_reuses_only_unchanged_local_batches() {
+        use analog::Rule;
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        static CALLS: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+        #[derive(Clone, Copy)]
+        struct Count<const L: bool>;
+        impl<const L: bool> Rule for Count<L> {
+            type On = Routes;
+            const LOCAL: bool = L;
+            fn cost(self, _: &Routes) -> f32 {
+                1.0
+            }
+            fn satisfied(self, r: &Routes) -> bool {
+                CALLS[usize::from(L)].fetch_add(1, SeqCst);
+                r.wires[0].len() < 2
+            }
+            fn touches(self, out: &mut Vec<u32>) {
+                out.push(0);
+            }
+        }
+        let (local, global) = (vec![Count::<true>], vec![Count::<false>]);
+        let b: [&dyn analog::RuleBatch<Routes>; 2] = [&local, &global];
+        let w = |x| Shape { layer: LAYERS[0], rect: Rect { x, y: 0, w: 100, h: 100 } };
+        let r = |a: Vec<Shape>, c: Vec<Shape>| Routes { wires: vec![a, c], ..Routes::default() };
+        let (r1, r2, r3) = (r(vec![w(0)], vec![w(500)]), r(vec![w(0)], vec![w(900)]), r(vec![w(0), w(300)], vec![w(500)]));
+        let n = |i: usize| CALLS[i].load(SeqCst);
+        let s1 = rescore(&b, &r1, None);
+        let (l0, g0) = (n(1), n(0));
+        let inc = rescore(&b, &r2, Some((&r1, &s1)));
+        assert_eq!(n(1), l0, "net 0 unchanged: the local batch kept its score");
+        assert!(n(0) > g0, "the non-local batch is rescored");
+        assert_eq!(inc, rescore(&b, &r2, None));
+        let l1 = n(1);
+        let s3 = rescore(&b, &r3, Some((&r1, &s1)));
+        assert!(n(1) > l1, "net 0 changed: the local batch is rescored");
+        assert_eq!(s3, rescore(&b, &r3, None));
+        assert_eq!(s3[0].0, 1);
+    }
+
+    /// Step 3: on an exact pair the leader's fillers are mirrored onto its
+    /// image. Net 0 has two pins 100 nm apart (a sliver its fill closes);
+    /// without an obstacle both nets fill it and stay images. A foreign
+    /// shape within spacing of the image's filler site only: the filler is
+    /// dropped from both, so the pair stays shape-for-shape mirrored.
+    #[test]
+    fn fill_on_a_pair_is_mirrored() {
+        use analog::routing::Differential;
+        let cfg = DetailedCfg { pitch: 420, grid: 5, wire_width: 260, ..test_cfg() };
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.budget.push(Box::new(vec![Differential { pos: NetId(0), neg: NetId(1), max_len_delta_pct10: 0, same_layer_required: true, stack: Some(test_stack()), aggressor_weight: None }]));
+        let a = [(6_000, 3_000), (6_270, 3_000), (8_000, 9_000), (5_000, 12_000)];
+        let mut pins: Vec<(NetId, Rect, LayerId)> = a.iter().map(|&(x, y)| pin(0, x, y)).collect();
+        pins.extend(a.iter().map(|&(x, y)| pin(1, 2 * 10_290 - x - 170, y)));
+        let gap = Rect { x: 6_170, y: 3_000, w: 100, h: 170 };
+        let mirror = |r: Rect| Rect { x: 2 * 10_290 - r.x - r.w, ..r };
+        let run = |rings: &[Macro]| DetailedRoute { cfg: cfg.clone() }.route(&pins, &[], rings, &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        let imaged = |r: &Routes| {
+            let set = |n: usize, f: &dyn Fn(Rect) -> Rect| {
+                let mut v: Vec<(LayerId, i32, i32, i32, i32)> = r.wires[n].iter().map(|s| f(s.rect)).zip(&r.wires[n]).map(|(q, s)| (s.layer, q.x, q.y, q.w, q.h)).collect();
+                v.sort_unstable_by_key(|t| (t.0 .0, t.1, t.2, t.3, t.4));
+                v
+            };
+            set(0, &mirror) == set(1, &|q| q)
+        };
+        let (routes, _, stats) = run(&[]);
+        assert_eq!(stats.pairs_exact.len(), 1, "{:?}", stats.pairs_fallback);
+        assert!(routes.wires[0].iter().any(|s| s.layer == LAYERS[0] && contains(s.rect, gap)), "net 0's fill closes the gap");
+        assert!(imaged(&routes), "{:?}\n{:?}", routes.wires[0], routes.wires[1]);
+        assert_eq!(stats.pair_fillers_dropped, 0);
+        let site = mirror(gap);
+        let ring = Macro { shapes: vec![Shape { layer: LAYERS[0], rect: Rect { x: site.x, y: site.y - 60 - 50, w: 100, h: 50 } }], bbox: Rect { x: site.x, y: site.y - 110, w: 100, h: 50 }, ..Default::default() };
+        let (routes, _, stats) = run(&[ring]);
+        assert_eq!(stats.pairs_exact.len(), 1, "{:?}", stats.pairs_fallback);
+        assert_eq!(stats.pair_fillers_dropped, 1, "one filler faces the ring, counted once");
+        assert!(imaged(&routes), "{:?}\n{:?}", routes.wires[0], routes.wires[1]);
+    }
+
     /// Series R is priced only for a net over its IR-drop budget: a heavy
     /// net within budget routes exactly as with no budget at all.
     #[test]
@@ -3057,7 +4369,7 @@ mod tests {
         let mut routes = Routes { wires: vec![vec![at(1_000, 1_190, cut, size), at(1_000, 1_190, LAYERS[0], below), at(1_000, 1_190, LAYERS[1], above)]], ..Default::default()  };
         let access = [Access { ci: 0, pin: Rect { x: 915, y: 915, w: 170, h: 170 }, pin_layer: LAYERS[0], node: (1_000, 1_190), node_layer: 0, choice: None, ua: None, node_ua: None }];
         let joins = joins(&LAYERS, &CUTS, None);
-        add_pin_access(&mut routes, &access, &[0], &cfg, &LAYERS, &CUTS, &joins, &[], (0, 0));
+        add_pin_access(&mut routes, &access, &[0], &cfg, &LAYERS, &CUTS, &joins, &[], (0, 0), &[Vec::new()]);
         let cuts: Vec<Rect> = routes.wires[0].iter().filter(|s| s.layer == cut).map(|s| s.rect).collect();
         for (i, a) in cuts.iter().enumerate() {
             for b in &cuts[i + 1..] {
@@ -3235,6 +4547,50 @@ mod tests {
         let (plain, _) = route(test_cfg(), &pins, &[], &[], &mut gr::Negotiation::new());
         assert!(analog::Rule::usage(shield, &plain).unwrap() < 0.1, "no request, no shield");
         assert!(routes.wires[1].len() > plain.wires[1].len());
+    }
+
+    /// RTE-19 set-up: a 20 µm two-pin victim (net 0) under a 430 nm shield
+    /// by net 1, and a foreign net 2 whose natural run is the victim's
+    /// adjacent track.
+    fn shield_run() -> (Routes, Report, analog::routing::Shield) {
+        use analog::routing::Shield;
+        let pins = [pin(0, 1_000, 5_000), pin(0, 21_000, 5_000), pin(1, 1_000, 1_000), pin(1, 21_000, 1_000), pin(2, 3_000, 5_430), pin(2, 19_000, 5_430)];
+        let shield = Shield { victim: NetId(0), reference: NetId(1), min_coverage_pct: 80, max_gap_nm: 430 };
+        let mut reqs = Requirements::<Routes>::default();
+        reqs.budget.push(Box::new(vec![shield]));
+        let (routes, report, _) = DetailedRoute { cfg: test_cfg() }.route(&pins, &[], &[], &reqs, &LAYERS, &CUTS, &mut gr::Negotiation::new());
+        (routes, report, shield)
+    }
+
+    /// The victim's side tracks are kept free during the search, so the
+    /// foreign net detours and the reference takes both: coverage ≥ 0.95.
+    #[test]
+    fn a_shielded_victim_gets_both_side_tracks() {
+        let (routes, report, shield) = shield_run();
+        assert!(!rules(&report).iter().any(|r| r.starts_with("open net")), "{:?}", rules(&report));
+        let cov = analog::Rule::usage(shield, &routes).expect("victim routed");
+        // Measured 0.768 (RTE-19): the access jogs and pads at the victim's
+        // ends count in its length and no track runs beside them; the trunk
+        // alone is 0.93 covered. Not lowered: reported in m2-routing-report.
+        assert!(cov >= 0.95, "coverage {cov}");
+    }
+
+    /// The shield is drawn and adds no coupling of its own: excluded, the
+    /// reference (shields included) counts nothing; not excluded, it does.
+    /// It screens the foreign net: the victim's coupling is strictly lower
+    /// with the shield shapes than without them.
+    #[test]
+    fn a_shield_does_not_count_as_an_aggressor() {
+        use analog::routing::CouplingBudget;
+        let (routes, _, shield) = shield_run();
+        assert!(analog::Rule::usage(shield, &routes).is_some_and(|u| u > 0.0), "no shield drawn");
+        let b = CouplingBudget { net: NetId(0), max_coupling_af: 1, margin_pct: 0, stack: None, exclude: Some(NetId(1)), aggressor_weight: None };
+        let total = |b: CouplingBudget, r: &Routes| analog::Rule::usage(b, r).unwrap();
+        let without = |r: &Routes| Routes { wires: vec![r.wires[0].clone(), Vec::new(), r.wires[2].clone()], ..Default::default() };
+        let quiet = |r: &Routes| Routes { wires: vec![r.wires[0].clone(), r.wires[1].clone(), Vec::new()], ..Default::default() };
+        assert_eq!(total(b, &quiet(&routes)), 0.0, "an excluded reference counts");
+        assert!(total(CouplingBudget { exclude: None, ..b }, &quiet(&routes)) > 0.0, "an included reference counts nothing");
+        assert!(total(b, &routes) < total(b, &without(&routes)), "the shield screens nothing");
     }
 
     /// A ring band on layer 0 between two pins of another net at its rows:
@@ -3456,7 +4812,7 @@ mod tests {
         let foreign = Shape { layer: LAYERS[1], rect: Rect { x: 1_250, y: 800, w: 290, h: 900 } };
         let mut routes = Routes { wires: vec![Vec::new(), vec![foreign]], ..Default::default() };
         let access = [Access { ci: 0, pin: Rect { x: 915, y: 915, w: 170, h: 170 }, pin_layer: LAYERS[0], node: (1_000, 1_430), node_layer: 1, choice: None, ua: None, node_ua: Some(1_000.0) }];
-        add_pin_access(&mut routes, &access, &[0], &cfg, &LAYERS, &CUTS, &joins(&LAYERS, &CUTS, None), &[], (0, 0));
+        add_pin_access(&mut routes, &access, &[0], &cfg, &LAYERS, &CUTS, &joins(&LAYERS, &CUTS, None), &[], (0, 0), &[Vec::new()]);
         let jogs: Vec<i32> = routes.wires[0].iter().filter(|s| s.layer == LAYERS[1] && s.rect.w != s.rect.h).map(|s| s.rect.w.min(s.rect.h)).collect();
         assert!(!jogs.is_empty() && jogs.iter().all(|&w| w >= 360), "{jogs:?}");
     }

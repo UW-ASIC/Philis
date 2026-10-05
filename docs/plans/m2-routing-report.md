@@ -68,3 +68,97 @@ Departures from the card:
 - gr: `term_k_targets_route_in_order_at_their_own_width` covers MST order and the per-target search width. Each of the
   two reviewed mutations makes it fail.
 - Tests: `cargo test --release -p analog -p gr -p dr` all pass; `signoff_fixtures --include-ignored`: 19 passed.
+
+## Segment 3 (RTE-16, RTE-18, RTE-15, RTE-17, RTE-19, RTE-20)
+Acceptance: `benchmarks/tests/routing_quality.rs` (`--release -- --include-ignored`); `signoff_fixtures` stays 19
+passed after every item.
+- RTE-16: `no_metal_over_gates` passes on ota and tt_ota with 0 `metal over gate` and 0 `open net` (the run with no
+  blockages also had 0 open). Departures: `Blockage` has `rect` as drawn plus a `halo` (the library sets the
+  spacing), so the V checks the real gate and not the grown rect. A pin's stitch node inside a hard blockage is
+  closed to the nets the blockage binds. Same-net fill keeps off hard blockages. A via array narrower than one
+  enclosed cut is no longer placed (`(w − size)/pitch + 1` truncated to 1 and drew via.4a on quad). Out of scope:
+  CELL has no `KeepWhy::Gate`, so gates come from poly ∩ diff.
+- RTE-18: FLOW file `verify/src/pdk.rs` gains `Pdk::overlap_af_um2` (sky130 147.6/88.5 aF/µm²). Departures: no `gr::Separation`
+  struct; `RuleBatch::separations` tuples are used directly. A separation box covers along-track nodes too, so
+  corners count. It also keeps off the other net's terminals and is waived within its own terminals' box, because
+  closer pins belong to the cell and walling them in caused opens in `emit_roundtrip`. `Solution` gains
+  `routing`, `route` and `route_stats` for the bench. **Not met:** `crosstalk_exclusions_hold` gives 2/4 violated on
+  ota, ota_constrained and tt_ota (gate–drain pairs whose access pads are 430/806 nm apart at pins the cell puts that
+  close; the floor is larger). `coupling_tracks_pex` is off PEX by 45–99 %: the model is routed+cell metal only, and
+  the PEX rows include device and terminal C (vbias 27.6 fF vs 1.3 fF). PERF-16 owns this.
+- RTE-15: `pairs_report`: ota/ota_constrained/tt_ota 0/1 exact, `(1, 5, "axis off lattice")`. This waits for PLC-28
+  axis snapping. Departures: the mirror axis is taken from both pin sets' x extents, so a set shifted as a whole is an
+  off-lattice mirror; the "no pin map" test therefore moves one pin. Via arrays snap to the nearest grid point with
+  ties broken toward the original cut, so mirrored arrays stay mirrored. Not priced for the partner: its via halos
+  and separations.
+- RTE-17: `common_nodes_meet_allowance`: ota 2 nodes, 0 violated, 2 unknown (no allowance without an op), so the
+  check is vacuous. Star/Kelvin nodes have no producer until EXT-24. Departure: a star's branch pseudo-nets keep one
+  free track between them, because same-net fill merged adjacent branches.
+- RTE-19: **not met:** `a_shielded_victim_gets_both_side_tracks` measures 0.768 against the asserted 0.95. The victim's
+  end jogs and pads count in its length and have no track beside them. The trunk alone is 0.93 covered. The test
+  stays red and the assertion was not lowered. `add_shield` now drops its shortest claim and retries instead of
+  giving up all-or-nothing (before this, the 2-node claims sank the whole set: coverage 0). Bench circuits with a
+  clock: none yet.
+- RTE-20: `dac4_plates` passes. No crossing; spread unknown because the sky130 MIM X-cards carry no `c_af`, so the
+  ratio check is vacuous. The sets come from capacitor Unitizations with ≥ 3 members (EXT-19).
+
+## Review fixes 3
+- RTE-19: `a_shield_does_not_count_as_an_aggressor` was vacuous (both sides 0). It now asserts the shield is drawn,
+  the excluded reference counts 0 while an included one counts > 0, and coupling with the shield is strictly below
+  coupling without it (net 2 screened).
+- RTE-17: `star_broken` cuts the grown feeds out of each shape and keeps the remainder, instead of dropping every
+  shape that touches the halo. New `branches_leaving_one_trunk_apart_break_the_star` (branches leave one trunk at
+  x = 2 and 4 µm) was a false negative before.
+- RTE-20: the crossing check exempts a bit/top overlap only when the overlap rect lies inside the array.
+  `equalize_leads` now runs before `score()`, so every scored row sees the stubs. The plate rows are appended after.
+  The repair loop's `PlateRatio` still sees routes without stubs, because the stubs are added after repair.
+- RTE-15: a Shift has no side. The leader's search now refuses a node whose image or pre-image is in its tree. After
+  each branch, a path node that clashes with the tree or with an earlier path node is forbidden, and the branch is
+  searched again. The forbidden set is static, so A* stays sound. After 64 forbidden nodes the search returns `None`
+  and the pair falls back. This checks nodes only, not wide footprints. New `a_shifted_pair_never_meets_its_image`
+  fails without the fix (2 clashing nodes). `RouteStats::pairs_exact` now lists the exact pairs. `pairs_report`
+  asserts that each exact pair's Differential worst usage is 0.0 on its own two nets. Foreign coupling is taken out
+  because it is not the image's to match. With 0 exact pairs the check is still vacuous on these fixtures.
+- RTE-18: `separated_nets_never_share_adjacent_tracks` uses 1 000 nm as the card specifies, and passes. The
+  `sky130_overlap_c_matches_the_deck` doc is now separate from `sky130_tiers_are_read`'s.
+- Still open: RTE-19 coverage 0.768 < 0.95 (unchanged and not lowered). Fixing it needs guard tracks along the
+  landing jogs. Redefining the coverage to the trunk alone would loosen the rule. Also open: RTE-18 crosstalk 2/4 and
+  PEX 45–99 % (PERF-16).
+- Debug-profile `library` tests trip gp's `bind` debug_assert (a batch kind in both hard and budget). It is outside
+  routing and not reached in `--release`, where all library tests pass.
+
+## RTE-23 (edda8b6) and review fixes 4
+- Signoff baseline, release `signoff_fixtures --include-ignored`, parent c552a17 vs edda8b6 + these fixes: same
+  result on both. 17/18 passed on the parent, 18/20 after (the 2 new tests pass). The same 2 fail on both:
+  `fixtures_sign_off_within_baseline` (pair: `lvs.unpaired_device`) and `large_fixtures_sign_off_within_baseline`
+  (ota DRC 3 = m1.2.notch 1 + m1.2 2, LVS label short vout1/vout2). `bench local`, seed 1: ota route hard 39,
+  overuse 8356, DRC 8, LVS MISMATCH, ERC 0; dac4 route hard 1, DRC 7, LVS PARTIAL(16), ERC 0. Identical on both.
+- T13 protocol (uncommitted `dr_us` probe, `bench local`, seed 1, p50 over all dr calls; ota 120 calls, dac4 60).
+  The host ran the other modules' builds at load 32–150 on 32 cores, so one run is noise-dominated:
+  | build | ota p50 ms | dac4 p50 ms | load |
+  |---|---|---|---|
+  | parent, run 1 | 1215 | 108 | 80–147 |
+  | parent, run 2 | 330 | 46 | 35–51 |
+  | edda8b6 | 352 | 97 | 32–69 |
+  | edda8b6 + fixes, run 1 | 526 | 43 | (not recorded) |
+  | edda8b6 + fixes, run 2 | 447 | 56 | 39–70 |
+  | edda8b6 + fixes, run 3 | 551 | 96 | 35–83 |
+  At similar load, ota dr p50 went up (330 on the parent, 447–551 after). The card's "step 2 must not make dr
+  slower than the parent" is not shown to hold. Under this load, the numbers neither prove nor rule out a
+  regression. A quiet-host re-run is needed.
+- `pair_fillers_dropped` is reset at the start of every geometry pass and restored from the snapshot when a post
+  round is rejected. It now counts the drawing that ships. `fill_on_a_pair_is_mirrored` asserts `== 1` (it was `>= 1`).
+- A post-fill round reroutes each violating net's exact-pair partner too, the same way the EM round does.
+  `reroute` returns only its own net's tree, so a lone reroute shipped an "exact" pair unmirrored.
+- Item 2: `routing_rows_are_measured_on_the_shipped_routes` prints `dr rows []` on all 9 fixtures, so it compares
+  nothing. `antenna_diode.rs` now asserts that dr's rows equal `gr::analog_tiers` on the shipped routes and are
+  non-empty (`batch:routing hard 0`, 1225400). That test inserts a diode, so its `diom` marker joins the routes and
+  the `marked` branch runs. **Acceptance is still unexercised:** the marker touches no routed piece, so the row is
+  the same with or without the re-derive. Checked by disabling the block: the check stays green. Killing that
+  mutant needs a fixture whose marker lowers a routed ratio. The test itself still fails afterwards on LVS
+  (`unpaired_device`), as it does on the parent.
+- Card deviation: there is no `RunStats::route_rows`, because RunStats is Copy. The test reads `Solution::route`.
+- Already failing on the parent (release): library `antenna_diode`, `extra_devices`, `drawn_cards`
+  (`a_mim_dac_signs_off…`: label short b3/VDD) and `emit_roundtrip` (ota) all fail on LVS. `perf_postlayout`
+  `ota_probe_regions` also fails; it was not re-run on the parent. dr `a_shielded_victim_gets_both_side_tracks`
+  fails at 0.768 (RTE-19, open).

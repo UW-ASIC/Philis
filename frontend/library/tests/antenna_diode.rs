@@ -57,6 +57,17 @@ fn an_antenna_the_jumper_cannot_fix_gets_a_diode_and_lvs_matches() {
     assert_eq!(on(":N", "nsdm"), (net("g"), true), "cathode: n+ on the gate net");
     assert_eq!(on(":P", "psdm"), (net("VSS"), true), "anode: p+ tap on ground");
 
+    // dr scored before the diode's marker joined the gate net: the rows that
+    // ship are re-derived on the shipped routes (RTE-23), and the tight deck
+    // leaves at least one, so the comparison is not empty on both sides.
+    // ponytail: here the marker touches no routed piece, so the re-derived row
+    // equals dr's; a fixture whose marker lowers a routed ratio would make
+    // this fail without the re-derive.
+    let rows = |v: &mut dyn Iterator<Item = &pnr_core::Violation>| v.filter(|v| v.is_batch_row()).map(|v| (v.rule.clone(), v.margin)).collect::<Vec<_>>();
+    let (hard, budget) = gr::analog_tiers(&sol.routes, &sol.routing);
+    let got = rows(&mut sol.route.hard_violations.iter().chain(&sol.route.budget_violations));
+    assert_eq!(got, rows(&mut hard.iter().chain(&budget)), "dr rows describe the routes that ship");
+    assert!(!got.is_empty(), "no batch row: the comparison checks nothing");
     let report = library::signoff(&sol, &pdk).report;
     let lvs: Vec<&String> = report.hard_violations.iter().map(|v| &v.rule).filter(|r| r.starts_with("lvs")).collect();
     assert!(lvs.is_empty(), "the inserted diode matches: {lvs:?}");
