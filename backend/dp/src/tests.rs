@@ -665,3 +665,24 @@ fn energy_is_invariant_to_scaling_all_lengths() {
     assert!((e2 - e1).abs() <= 1e-6 * e1.abs(), "{e1} vs {e2}");
 }
 
+// ---- thermal separation (PLC-14) ----
+
+/// A matched pair seeded against a hot cell: dp must open both gaps to the
+/// 1 µm/mW floor.
+#[test]
+fn dp_pushes_a_matched_pair_away_from_a_hot_cell() {
+    use analog::placement::HeatSeparation;
+    let coarse = layout(&[(0, 0, 1_000, 1_000), (2_000, 0, 1_000, 1_000), (4_000, 0, 1_000, 1_000)]);
+    let d = |i: u16| Target::Device(DeviceId(i));
+    let heat = vec![
+        HeatSeparation { victim: d(0), source: d(2), min_gap_nm: 2_000 },
+        HeatSeparation { victim: d(1), source: d(2), min_gap_nm: 2_000 },
+    ];
+    let reqs = Requirements { budget: vec![Box::new(heat.clone())], cost: vec![Box::new(heat.clone())], ..Default::default() };
+    for seed in 1..=10u64 {
+        let l = run(&coarse, &[], &[], &reqs, &[false; 3], seed);
+        for h in &heat {
+            assert_eq!(h.residual(&l), 0.0, "seed {seed}: gap {}", l.edge_gap(h.victim, h.source));
+        }
+    }
+}

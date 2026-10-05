@@ -105,6 +105,10 @@ pub struct Config {
     /// bounding box (a priced budget, so it outranks C; see
     /// `analog::placement::utilization`). `0` disables it.
     pub min_utilization: f32,
+    /// Power threshold, µW, past which a cell is a heat source a Moderate or
+    /// Exceptional matched set keeps ≥ 1 µm/mW from (PLC-14). Policy: Hastings
+    /// rule 14 exempts "small power devices" without a number.
+    pub heat_source_uw: i32,
     /// What a MOS card's `W` means; [`run`] stores it as the SPICE total.
     /// Only [`run`] reads it: [`parse`] is always [`SizeConvention::Spice`].
     pub size_convention: SizeConvention,
@@ -206,6 +210,7 @@ impl Default for Config {
             performance: None,
             starts: 3,
             min_utilization: 0.6,
+            heat_source_uw: 1000,
             size_convention: SizeConvention::Spice,
             gp_mode: GpMode::default(),
             interface: None,
@@ -735,6 +740,23 @@ fn topology<'a>(
     let env = live_environment(&problem, &cells, pdk);
     if !env.pairs.is_empty() {
         problem.placement.budget.push(Box::new(env.clone()));
+    }
+    // PLC-14: matched sets keep their distance from hot cells.
+    let sets: Vec<(pnr_core::MatchClass, Vec<u16>)> = problem
+        .intent
+        .sets
+        .iter()
+        .map(|s| {
+            let mut c: Vec<u16> = s.members.iter().filter_map(|m| cells.units.cell_of.get(m.device.0 as usize).copied()).collect();
+            c.sort_unstable();
+            c.dedup();
+            (s.class, c)
+        })
+        .collect();
+    let heat = analog::placement::heat::separations(&sets, &cells.power, cfg.heat_source_uw);
+    if !heat.is_empty() {
+        problem.placement.budget.push(Box::new(heat.clone()));
+        problem.placement.cost.push(Box::new(heat));
     }
     // PLC-21: a Mirror pair stays Mirror only if no variant of either cell
     // leaves a net φx (Mx180 would reverse its current). Every variant, since
