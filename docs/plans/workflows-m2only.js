@@ -83,7 +83,7 @@ async function runModule(name, list) {
       if (bad.length) { pk.ids.forEach(id => settle(id, 'blocked', 'hard dependency not merged: ' + bad.map(x => `${x.id}=${x.status}`).join(', '))); continue }
       if (over2()) { for (const it of list.slice(i)) settle(it[0], 'deferred-cap'); break }
       segN = Math.max(segN, pk.seg)
-      await runSeg(pk.seg, pk.ids, { card_path: pk.card, items: pk.ids.map(id => ({ id, cls: 'judgment', reason: '' })) })
+      await runSeg(pk.seg, pk.ids, { card_path: pk.card, items: pk.ids.map(id => ({ id, cls: 'judgment', reason: '' })) }, pk)
       continue
     }
     const ds = await Promise.all(fdeps.map(x => d2[x].p))
@@ -105,7 +105,9 @@ async function runModule(name, list) {
   }
   return { name, items: out }
 
-  async function runSeg(segN, ids, cardOverride) {
+  // `done` (from restart_args.py): steps an earlier run finished for this segment — skipped, not repeated.
+  async function runSeg(segN, ids, cardOverride, done) {
+    done = done || {}
     const fmil = (list.find(x => x[0] === ids[0]) || [0, ''])[1]
     const tag = `${name}#${segN}`
     const card = cardOverride || await ag(`${CONTEXT2}
@@ -115,7 +117,7 @@ TASK (spec hardening, no product code): cd ${wt}; git merge --no-edit m2 (resolv
     const doIds = card.items.filter(x => x.cls !== 'defer').map(x => x.id)
     card.items.filter(x => x.cls === 'defer').forEach(x => settle(x.id, 'deferred', x.reason))
     if (!doIds.length) return
-    const ex = await ag(`${CONTEXT2}
+    const ex = done.exec || await ag(`${CONTEXT2}
 MODULE: ${name} (worktree ${wt}). ${cardOverride ? 'This card was written by an earlier run: first cd there and git merge --no-edit m2 (resolve conflicts keeping both sides), then check each step still matches the code. ' : ''}CARD: ${card.card_path}. Implement items ${doIds.join(', ')} in that order, following the card (record departures in the note).
 For each: implement; write the card's tests; run them plus cargo test --release -p <each crate you touched> (PDK_ROOT set); fix what you broke; commit "M2+ <ID>: <short title>". Return per-item status (done / blocked) with a one-line note, and the crates you touched.`, { label: `exec:${tag}`, phase: 'Execute', schema: EXEC, effort: 'medium' })
     if (!ex) { doIds.forEach(id => settle(id, 'failed', 'exec agent failed')); return }
@@ -124,9 +126,9 @@ For each: implement; write the card's tests; run them plus cargo test --release 
     doIds.filter(id => !ex.results.some(r => r.id === id)).forEach(id => settle(id, 'failed', 'not reported by exec'))
     if (!doneIds.length) return
     const crates = ex.touched_crates.length ? ex.touched_crates : ['library']
-    const rev = await ag(`${CONTEXT2}
+    const rev = done.review || await ag(`${CONTEXT2}
 MODULE: ${name} (worktree ${wt}). Review segment ${segN}: git -C ${wt} diff m2...HEAD (items ${doneIds.join(', ')}; card ${card.card_path}). Real defects only: missing/wrong card or spec steps and named tests, correctness bugs, honesty violations, vacuous tests (mutation-check the important ones), out-of-scope edits. Run the tests yourself (PDK_ROOT set). Do not edit. Each issue: file:line, what is wrong, the fix.`, { label: `review:${tag}`, phase: 'Review', schema: REVIEW, effort: 'medium' })
-    if (rev && rev.issues.length) {
+    if (rev && rev.issues.length && !done.fixDone) {
       await ag(`${CONTEXT2}
 MODULE: ${name} (worktree ${wt}). Fix these review findings (verify each; fix real ones; one line per rejected one), re-run tests for ${crates.join(', ')}, commit "M2+ ${name}: review fixes ${segN}":
 ${rev.issues.map((x, k) => `${k + 1}. ${x}`).join('\n')}`, { label: `fix:${tag}`, phase: 'Review', effort: 'medium' })

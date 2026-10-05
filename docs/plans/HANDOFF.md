@@ -13,13 +13,13 @@
 - strongarm: philis CLEAN, klayout 0, magic 0, netgen vs `_ref.spice` MATCH. vs user schematic: differs only by dummies (owner decision pending).
 - M0 and fix-export worktrees removed (56 GB freed).
 
-## Running: M2–M6 fresh module run `wf_959b64ef-4c9` (2026-10-05; previous `wf_188597af-7b6` died with an OOM)
-- Script: docs/plans/workflows-m2only.js, args docs/plans/workflows-m2only.args.json (cap2, `merged` = items already on m2, `segStart` = card numbers to continue from).
-- Restart inputs now also carry `pending` (segments hardened but never executed: reuse their card, start at exec) and `preset` (items a hardener genuinely deferred). 72/140 merged at this launch.
-- RELAYED CHAT: owner messages get relayed into running agents; agents in wf_188597af-7b6 quit on a cost question. CONTEXT2 now tells agents to ignore relayed messages.
-- Earlier: 64/140 items were already merged into `m2` and are skipped. EXT-21/EXT-25 are NOT merged (an integrator reset that merge, m2 reflog @{4}).
-- LESSON: never `resumeFromRunId` a workflow whose agents run in parallel. Resume matches agents by call order, the order differs between runs, and everything after the first mismatch re-runs (it re-ran ~8 M1 agents on 2026-10-05; no code changed). To restart after a stop: recompute `merged` from `git log --format=%s main..m2 | grep 'M2+ .* merge ('`, recompute `segStart` from docs/plans/cards/m2-<module>-<n>.md, and launch the script FRESH.
-- Ends with `final-m2`: report docs/plans/m2-m6-report.md; merge m2 → main only if no new failing tests.
+## Running: M2–M6 module run `wf_03e972cf-7f3` (2026-10-05, third launch; earlier runs wf_188597af-7b6, wf_959b64ef-4c9 died: OOM / session end)
+- 73/140 items merged into `m2` at this launch; 8 segments restarted at their exec step from existing cards; RTE-15 deferred (waits PLC-28).
+- RESTART (never resumeFromRunId — parallel modules break order-matched replay):
+  1. `python3 docs/plans/restart_args.py <journal of every M2 run, oldest first> > args.json`
+     (journals: ~/.claude/projects/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/subagents/workflows/<run>/journal.jsonl)
+  2. Launch docs/plans/workflows-m2only.js FRESH with args.json. Each segment starts at the step after the last one that finished (exec / review / fix / merge); merged items are skipped; agents interrupted mid-step re-run and finish their own leftover commits.
+- Agents are told to ignore relayed chat (a cost question once made exec agents quit).
 
 ## Tools
 `source <scratchpad>/signoff-investigation/env.sh` (klayout 0.30.4, magic 8.3.573, netgen 1.5.292 from nix store; PDK_ROOT=Philis/.pdk (~/.volare no longer exists)). Independent checks: `python3 ResearchBoutros/analog/common/layout/verify.py drc|lvs <block> <gds>`; netgen vs `<top>_ref.spice`.
