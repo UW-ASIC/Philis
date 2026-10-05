@@ -1,8 +1,8 @@
 //! Substrate-noise isolation (placement tier).
 
+use crate::rule::Rule;
 use pnr_core::ids::Target;
 use pnr_core::layout::Layout;
-use crate::rule::Rule;
 
 /// Keep noisy `a` at least `min_distance_nm` edge-to-edge from sensitive `b`:
 /// spacing attenuates substrate propagation (Charbon et al. 2001 ch.8, PDF
@@ -36,7 +36,11 @@ impl Rule for Isolation {
         }
     }
     fn retarget(self, cell_of: &[u16]) -> Self {
-        Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
+        Self {
+            a: self.a.retarget(cell_of),
+            b: self.b.retarget(cell_of),
+            ..self
+        }
     }
     /// Linear shortfall / required distance (squares do not sum across rules).
     fn residual(self, l: &Layout) -> f32 {
@@ -79,7 +83,11 @@ impl Rule for SubstrateBalance {
         }
     }
     fn retarget(self, cell_of: &[u16]) -> Self {
-        Self { aggressor: self.aggressor.retarget(cell_of), a: self.a.retarget(cell_of), b: self.b.retarget(cell_of) }
+        Self {
+            aggressor: self.aggressor.retarget(cell_of),
+            a: self.a.retarget(cell_of),
+            b: self.b.retarget(cell_of),
+        }
     }
 }
 
@@ -94,9 +102,21 @@ mod tests {
     fn touched_yields_device_ids_only() {
         let (d, g) = (|i| Target::Device(DeviceId(i)), Target::Group(GroupId(0)));
         let batch = vec![
-            Isolation { a: d(3), b: d(1), min_distance_nm: 10_000 },
-            Isolation { a: d(7), b: g, min_distance_nm: 10_000 },
-            Isolation { a: g, b: g, min_distance_nm: 10_000 },
+            Isolation {
+                a: d(3),
+                b: d(1),
+                min_distance_nm: 10_000,
+            },
+            Isolation {
+                a: d(7),
+                b: g,
+                min_distance_nm: 10_000,
+            },
+            Isolation {
+                a: g,
+                b: g,
+                min_distance_nm: 10_000,
+            },
         ];
         let mut ids = Vec::new();
         batch.touched(&mut ids);
@@ -124,23 +144,38 @@ mod tests {
 
     fn balance(g: u16) -> SubstrateBalance {
         let d = |i| Target::Device(DeviceId(i));
-        SubstrateBalance { aggressor: d(g), a: d(0), b: d(1) }
+        SubstrateBalance {
+            aggressor: d(g),
+            a: d(0),
+            b: d(1),
+        }
     }
 
     #[test]
     fn an_aggressor_on_the_bisector_costs_nothing() {
         let l = at(&[(-5_000, 0), (5_000, 0), (0, 10_000)]);
         assert!(balance(2).cost(&l).abs() < 1e-6, "{}", balance(2).cost(&l));
-        assert!(balance(2).satisfied(&l) && balance(2).residual(&l) == 0.0, "cost-only");
+        assert!(
+            balance(2).satisfied(&l) && balance(2).residual(&l) == 0.0,
+            "cost-only"
+        );
     }
 
     #[test]
     fn off_axis_costs() {
         let l = at(&[(-5_000, 0), (5_000, 0), (-20_000, 0), (-5_000, 10_000)]);
         // On the axis: d_ca 15 000, d_cb 25 000, d_ab 10 000.
-        assert!((balance(2).cost(&l) - 1.0).abs() < 1e-6, "{}", balance(2).cost(&l));
+        assert!(
+            (balance(2).cost(&l) - 1.0).abs() < 1e-6,
+            "{}",
+            balance(2).cost(&l)
+        );
         // d_ca 10 000, d_cb √2e8 = 14 142.1: (4 142.1/10 000)² = 0.1716.
-        assert!((balance(3).cost(&l) - 0.1716).abs() < 1e-3, "{}", balance(3).cost(&l));
+        assert!(
+            (balance(3).cost(&l) - 0.1716).abs() < 1e-3,
+            "{}",
+            balance(3).cost(&l)
+        );
         let mut ids = Vec::new();
         balance(3).touches(&mut ids);
         assert_eq!(ids, [3, 0, 1]);

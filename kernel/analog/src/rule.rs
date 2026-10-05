@@ -272,6 +272,10 @@ pub trait RuleBatch<On>: Send + Sync {
     fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
         let _ = out;
     }
+    /// The class of the pairs from [`Self::matched_pairs`], if the batch has one.
+    fn matched_class(&self) -> Option<pnr_core::MatchClass> {
+        None
+    }
     /// Append every distinct pair drawn as reflections (`SymMode::Mirror`, PLC-21). Default none.
     fn mirrored_pairs(&self, out: &mut Vec<(u32, u32)>) {
         let _ = out;
@@ -379,6 +383,9 @@ impl<On> RuleBatch<On> for Tagged<On> {
     fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
         self.inner.matched_pairs(out);
     }
+    fn matched_class(&self) -> Option<pnr_core::MatchClass> {
+        self.inner.matched_class()
+    }
     fn mirrored_pairs(&self, out: &mut Vec<(u32, u32)>) {
         self.inner.mirrored_pairs(out);
     }
@@ -434,11 +441,16 @@ impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {
         self.len()
     }
     fn worst_cost(&self, s: &R::On) -> f32 {
-        self.iter().filter(|r| !r.satisfied(s)).map(|r| r.cost(s)).fold(0.0, f32::max)
+        self.iter()
+            .filter(|r| !r.satisfied(s))
+            .map(|r| r.cost(s))
+            .fold(0.0, f32::max)
     }
     #[inline]
     fn criticality(&self, s: &R::On) -> f32 {
-        self.iter().map(|r| rule_criticality(*r, s)).fold(0.0, f32::max)
+        self.iter()
+            .map(|r| rule_criticality(*r, s))
+            .fold(0.0, f32::max)
     }
     fn worst_usage(&self, s: &R::On) -> Option<f32> {
         self.iter().filter_map(|r| r.usage(s)).reduce(f32::max)
@@ -577,15 +589,27 @@ mod tests {
     fn slack_rich_budget_is_ignored_tight_one_dominates() {
         let s = ();
         // 50% spent, 20% margin → headroom 0.5 > 0.2 → no pressure.
-        let slack: Vec<Budgeted> = vec![Budgeted { used: 0.5, margin: 0.2 }];
+        let slack: Vec<Budgeted> = vec![Budgeted {
+            used: 0.5,
+            margin: 0.2,
+        }];
         assert_eq!(slack.criticality(&s), 0.0);
         // 90% spent → headroom 0.1, half-way into the 0.2 margin → 0.5.
-        let tight: Vec<Budgeted> = vec![Budgeted { used: 0.9, margin: 0.2 }];
+        let tight: Vec<Budgeted> = vec![Budgeted {
+            used: 0.9,
+            margin: 0.2,
+        }];
         assert!((tight.criticality(&s) - 0.5).abs() < 1e-6);
         // At the raw spec → fully critical, and past it → still 1 (clamped).
-        let at_spec: Vec<Budgeted> = vec![Budgeted { used: 1.0, margin: 0.2 }];
+        let at_spec: Vec<Budgeted> = vec![Budgeted {
+            used: 1.0,
+            margin: 0.2,
+        }];
         assert_eq!(at_spec.criticality(&s), 1.0);
-        let over: Vec<Budgeted> = vec![Budgeted { used: 1.5, margin: 0.2 }];
+        let over: Vec<Budgeted> = vec![Budgeted {
+            used: 1.5,
+            margin: 0.2,
+        }];
         assert_eq!(over.criticality(&s), 1.0);
         assert_eq!(over.violations(&s), 1);
     }
@@ -594,8 +618,14 @@ mod tests {
     fn batch_criticality_follows_the_tightest_rule() {
         let s = ();
         let mixed: Vec<Budgeted> = vec![
-            Budgeted { used: 0.1, margin: 0.2 },
-            Budgeted { used: 0.95, margin: 0.2 },
+            Budgeted {
+                used: 0.1,
+                margin: 0.2,
+            },
+            Budgeted {
+                used: 0.95,
+                margin: 0.2,
+            },
         ];
         assert!((mixed.criticality(&s) - 0.75).abs() < 1e-6);
     }
@@ -609,7 +639,15 @@ mod tests {
     fn one_wire(len: i32, h: i32) -> pnr_core::Routes {
         use pnr_core::geom::{LayerId, Rect, Shape};
         pnr_core::Routes {
-            wires: vec![vec![Shape { layer: LayerId(0), rect: Rect { x: 0, y: 0, w: len, h } }]],
+            wires: vec![vec![Shape {
+                layer: LayerId(0),
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: len,
+                    h,
+                },
+            }]],
             ..Default::default()
         }
     }
@@ -654,13 +692,22 @@ mod tests {
         // **ratio ×100**. Same wire, both rules 50% past their own spec.
         let r = one_wire(15_000, 100); // length 15_000 nm, area 1.5e6 nm²
         let p = parasitic(10_000); // 50% over a 10_000 nm cap
-        // area/gate ×100 = 1.5e6/1e4 ×100 = 15_000; cap it at 10_000.
-        let a = crate::routing::Antenna { net: pnr_core::NetId(0), max_ratio_x100: 10_000, gate_area_nm2: 10_000, margin_pct: 20, stack: None };
+                                   // area/gate ×100 = 1.5e6/1e4 ×100 = 15_000; cap it at 10_000.
+        let a = crate::routing::Antenna {
+            net: pnr_core::NetId(0),
+            max_ratio_x100: 10_000,
+            gate_area_nm2: 10_000,
+            margin_pct: 20,
+            stack: None,
+        };
 
         let (pr, ar) = (p.residual(&r), a.residual(&r));
         assert!((pr - 0.5).abs() < 1e-6, "length residual {pr}");
         assert!((ar - 0.5).abs() < 1e-6, "antenna residual {ar}");
-        assert!((pr - ar).abs() < 1e-6, "equal proportional overshoot ⇒ equal residual");
+        assert!(
+            (pr - ar).abs() < 1e-6,
+            "equal proportional overshoot ⇒ equal residual"
+        );
 
         // And the reason it has to be `residual` rather than `cost` that Θ sums: the raw
         // costs of the same two misses differ by more than an order of magnitude (2.25 vs
@@ -669,7 +716,10 @@ mod tests {
         // choice of unit pick the priority.
         let (pc, ac) = (p.cost(&r), a.cost(&r));
         let spread = pc.max(ac) / pc.min(ac);
-        assert!(spread > 10.0, "raw costs are incommensurable: {pc} vs {ac} (×{spread})");
+        assert!(
+            spread > 10.0,
+            "raw costs are incommensurable: {pc} vs {ac} (×{spread})"
+        );
     }
 
     /// `touched` pushes every rule's ids, satisfied or not (FD-PEX flagging).
@@ -701,7 +751,11 @@ mod tests {
         assert_eq!(viol, vec![2], "violating_ids filters");
         let mut res = Vec::new();
         batch.violating_residuals(&(), &mut res);
-        assert_eq!(res, vec![(2, 1.0)], "per violated rule, its own residual (default 1.0)");
+        assert_eq!(
+            res,
+            vec![(2, 1.0)],
+            "per violated rule, its own residual (default 1.0)"
+        );
     }
 
     #[test]
@@ -723,7 +777,16 @@ mod tests {
         use RepairKind as K;
         assert_eq!(Vec::<Differential>::new().repair_kind(), K::Mirror);
         let stack: &'static Stack = Box::leak(Box::default());
-        assert_eq!(CommonNodes { nodes: Vec::new(), stack, halo_nm: 0, joins: Vec::new() }.repair_kind(), K::Balance);
+        assert_eq!(
+            CommonNodes {
+                nodes: Vec::new(),
+                stack,
+                halo_nm: 0,
+                joins: Vec::new()
+            }
+            .repair_kind(),
+            K::Balance
+        );
         assert_eq!(Vec::<CrosstalkExclusion>::new().repair_kind(), K::KeepAway);
         assert_eq!(Vec::<CouplingBudget>::new().repair_kind(), K::KeepAway);
         assert_eq!(Vec::<Antenna>::new().repair_kind(), K::Antenna);

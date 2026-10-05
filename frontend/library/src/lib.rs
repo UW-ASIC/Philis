@@ -49,7 +49,13 @@ pub mod tools {
     /// `bin` counts as present when it spawns at all (`--version` exits either
     /// way); only a failed spawn, i.e. not on PATH, is absent.
     pub fn tool_or_skip(bin: &str) -> bool {
-        present_or_skip(bin, std::process::Command::new(bin).arg("--version").output().is_ok())
+        present_or_skip(
+            bin,
+            std::process::Command::new(bin)
+                .arg("--version")
+                .output()
+                .is_ok(),
+        )
     }
 
     /// ngspice and the sky130 ngspice library (`$PDK_ROOT`, else `~/.volare`,
@@ -158,30 +164,56 @@ impl Interface {
     /// `{"die": {"w": nm, "h": nm}, "pins": [{"net", "side": "north"|"south"|"east"|"west",
     /// "frac", "width": nm, "layer"}]}` (`benchmarks/fixtures/ota_constrained.interface.json`).
     pub fn from_json(text: &str) -> Result<Interface, String> {
-        let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("interface: {e}"))?;
+        let v: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| format!("interface: {e}"))?;
         let int = |o: &serde_json::Value, k: &str| -> Result<i32, String> {
-            o.get(k).and_then(serde_json::Value::as_i64).and_then(|x| i32::try_from(x).ok()).ok_or_else(|| format!("interface: `{k}` must be an integer, nm"))
+            o.get(k)
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|x| i32::try_from(x).ok())
+                .ok_or_else(|| format!("interface: `{k}` must be an integer, nm"))
         };
         let die_nm = match v.get("die") {
             None | Some(serde_json::Value::Null) => None,
             Some(d) => Some((int(d, "w")?, int(d, "h")?)),
         };
-        let pins = v.get("pins").and_then(serde_json::Value::as_array).map_or(&[][..], Vec::as_slice);
+        let pins = v
+            .get("pins")
+            .and_then(serde_json::Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
         let pins = pins
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let text = |k: &str| p.get(k).and_then(serde_json::Value::as_str).ok_or_else(|| format!("interface: pins[{i}].{k} must be a string"));
+                let text = |k: &str| {
+                    p.get(k)
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| format!("interface: pins[{i}].{k} must be a string"))
+                };
                 let side = match text("side")? {
                     "north" => Side::North,
                     "south" => Side::South,
                     "east" => Side::East,
                     "west" => Side::West,
-                    s => return Err(format!("interface: pins[{i}].side {s:?} is not north|south|east|west")),
+                    s => {
+                        return Err(format!(
+                            "interface: pins[{i}].side {s:?} is not north|south|east|west"
+                        ))
+                    }
                 };
-                let frac = p.get("frac").and_then(serde_json::Value::as_f64).filter(|f| (0.0..=1.0).contains(f));
-                let frac = frac.ok_or_else(|| format!("interface: pins[{i}].frac must be in [0, 1]"))? as f32;
-                Ok(IoPin { net: text("net")?.to_string(), side, frac, width_nm: int(p, "width")?, layer: text("layer")?.to_string() })
+                let frac = p
+                    .get("frac")
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|f| (0.0..=1.0).contains(f));
+                let frac = frac
+                    .ok_or_else(|| format!("interface: pins[{i}].frac must be in [0, 1]"))?
+                    as f32;
+                Ok(IoPin {
+                    net: text("net")?.to_string(),
+                    side,
+                    frac,
+                    width_nm: int(p, "width")?,
+                    layer: text("layer")?.to_string(),
+                })
             })
             .collect::<Result<_, String>>()?;
         Ok(Interface { die_nm, pins })
@@ -319,7 +351,9 @@ pub struct RunStats {
 
 /// [`RunStats::stage_ms`]'s stages: `route` is gr+dr, `reroute` dr again
 /// after antenna diodes, `perf` the post-layout simulation.
-pub const STAGES: [&str; 9] = ["gp", "dp", "rings", "route", "reroute", "diodes", "signoff", "metadata", "perf"];
+pub const STAGES: [&str; 9] = [
+    "gp", "dp", "rings", "route", "reroute", "diodes", "signoff", "metadata", "perf",
+];
 
 /// Anything that stops the flow.
 #[derive(Debug)]
@@ -366,7 +400,12 @@ pub fn model_table(pdk: &Pdk) -> Vec<(String, pnr_core::DeviceKind)> {
         .map(|row| {
             let model = pdk.strings.resolve(d.model[row]).to_string();
             let kind = match d.kind[row] {
-                D::Mos if p_type(d.terminal[d.terminal_start[row] as usize + 1]) || p_type(d.marker[row]) => K::Pmos,
+                D::Mos
+                    if p_type(d.terminal[d.terminal_start[row] as usize + 1])
+                        || p_type(d.marker[row]) =>
+                {
+                    K::Pmos
+                }
                 D::Mos => K::Nmos,
                 D::Bjt if model.to_ascii_lowercase().split('_').any(|t| t == "pnp") => K::Pnp,
                 D::Bjt => K::Npn,
@@ -377,10 +416,23 @@ pub fn model_table(pdk: &Pdk) -> Vec<(String, pnr_core::DeviceKind)> {
             (model, kind)
         })
         .collect();
-    let recipes = pdk.cell.get("resistors").and_then(|t| t.get("recipes")).and_then(|r| r.as_object());
+    let recipes = pdk
+        .cell
+        .get("resistors")
+        .and_then(|t| t.get("recipes"))
+        .and_then(|r| r.as_object());
     for r in recipes.into_iter().flat_map(|rs| rs.values()) {
-        let aliases = r.get("aliases").and_then(|a| a.as_array()).into_iter().flatten().filter_map(|a| a.as_str());
-        out.extend(aliases.chain(r.get("model").and_then(|m| m.as_str())).map(|m| (m.to_string(), K::Resistor)));
+        let aliases = r
+            .get("aliases")
+            .and_then(|a| a.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str());
+        out.extend(
+            aliases
+                .chain(r.get("model").and_then(|m| m.as_str()))
+                .map(|m| (m.to_string(), K::Resistor)),
+        );
     }
     out
 }
@@ -391,14 +443,31 @@ pub fn model_table(pdk: &Pdk) -> Vec<(String, pnr_core::DeviceKind)> {
 /// as drawn, never reshaped or moved by `dp`.
 pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<Solution, FlowError> {
     // 1. Parse, naming each device by the deck's model.
-    let opts = ParseOptions { size: cfg.size_convention, models: model_table(pdk), top: cfg.top.clone(), ..Default::default() };
+    let opts = ParseOptions {
+        size: cfg.size_convention,
+        models: model_table(pdk),
+        top: cfg.top.clone(),
+        ..Default::default()
+    };
     let mut netlist = parse::spice_with(spice, &opts).map_err(FlowError::Parse)?;
     deck_models(&mut netlist, pdk);
     if let Some(i) = &cfg.interface {
-        let is_port = |n: &str| netlist.ports.iter().any(|p| netlist.nets[p.0 as usize].name == n);
-        let bad: Vec<&str> = i.pins.iter().map(|p| p.net.as_str()).filter(|n| !is_port(n)).collect();
+        let is_port = |n: &str| {
+            netlist
+                .ports
+                .iter()
+                .any(|p| netlist.nets[p.0 as usize].name == n)
+        };
+        let bad: Vec<&str> = i
+            .pins
+            .iter()
+            .map(|p| p.net.as_str())
+            .filter(|n| !is_port(n))
+            .collect();
         if !bad.is_empty() {
-            return Err(FlowError::Interface(format!("interface pins on non-port nets {bad:?}")));
+            return Err(FlowError::Interface(format!(
+                "interface pins on non-port nets {bad:?}"
+            )));
         }
     }
 
@@ -410,7 +479,8 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     let mut ann = annotation_with(pdk, &cfg.annotation, stack);
     ann.process.die_temp_k = cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15);
     if let Some(text) = &cfg.constraints {
-        let (side, diags) = AnnotationConfig::from_json(text, &netlist).map_err(FlowError::Interface)?;
+        let (side, diags) =
+            AnnotationConfig::from_json(text, &netlist).map_err(FlowError::Interface)?;
         ann.supply_nets.extend(side.supply_nets);
         ann.ground_nets.extend(side.ground_nets);
         ann.clock_nets.extend(side.clock_nets);
@@ -438,7 +508,10 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     });
     let base = annotator::annotate_with(&netlist, &ann, &ev);
     let plan = performance_rows(&netlist, cfg, &ann, &base.net_classes);
-    let ev = annotator::Evidence { sens: plan.evidence.clone(), ..ev };
+    let ev = annotator::Evidence {
+        sens: plan.evidence.clone(),
+        ..ev
+    };
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
     // linear gradient but splits one drain across the row ends (asymmetric
@@ -448,19 +521,26 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // Both topologies are built once on this thread (pricing every variant
     // once); the starts only search them.
     let merged = topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, true);
-    let apart = merged.distinct.then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, false));
+    let apart = merged
+        .distinct
+        .then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, false));
     let tops: Vec<&Topology> = std::iter::once(&merged).chain(apart.as_ref()).collect();
     let tops = &tops;
     let runs: Vec<Vec<Searched>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..cfg.starts.max(1))
             .map(|j| {
                 s.spawn(move || {
-                    let seed = cfg.seed.wrapping_add(u64::from(j).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                    let seed = cfg
+                        .seed
+                        .wrapping_add(u64::from(j).wrapping_mul(0x9E37_79B9_7F4A_7C15));
                     tops.iter().map(|t| search(t, cfg, seed)).collect()
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().expect("a search start panicked")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("a search start panicked"))
+            .collect()
     });
     // Failures and stage times count over every start and topology, not just
     // the winner's: a failed simulation scores its epoch unmeasured, so
@@ -470,7 +550,10 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     let sims = all().map(|s| s.sims).sum::<u32>() + plan.sims;
     let mut stage_ms = [0.0; 9];
     for s in all() {
-        stage_ms.iter_mut().zip(s.stage_ms).for_each(|(a, b)| *a += b);
+        stage_ms
+            .iter_mut()
+            .zip(s.stage_ms)
+            .for_each(|(a, b)| *a += b);
     }
     // Per start, `apart` wins only when strictly better; over starts, the
     // lex-best wins and ties go to the earliest (`key_lt` is not transitive
@@ -487,8 +570,16 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     for p in runs.iter().flatten().flat_map(|r| r.pareto.iter().cloned()) {
         metadata::pareto_insert(&mut pareto, p);
     }
-    let searched = runs.into_iter().nth(win.0).expect("one start at least").swap_remove(win.1);
-    let t = if win.1 == 0 { merged } else { apart.expect("index 1 is `apart`") };
+    let searched = runs
+        .into_iter()
+        .nth(win.0)
+        .expect("one start at least")
+        .swap_remove(win.1);
+    let t = if win.1 == 0 {
+        merged
+    } else {
+        apart.expect("index 1 is `apart`")
+    };
     let mut sol = finish(t, searched, &bias, pdk);
     (sol.stats.sim_failures, sol.metadata.sim_failures) = (sim_failures, sim_failures);
     sol.stats.stage_ms = stage_ms;
@@ -510,14 +601,36 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 /// The notes open with `"scenario {name}: active"` / `": inactive"` per
 /// scenario, ahead of the per-bound notes. Per active scenario a sensitivity
 /// table (PERF-11), noted in [`PerfPlan::sens`].
-fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationConfig, classes: &[analog::metadata::NetClassification]) -> PerfPlan {
+fn performance_rows(
+    netlist: &pnr_core::Netlist,
+    cfg: &Config,
+    ann: &AnnotationConfig,
+    classes: &[analog::metadata::NetClassification],
+) -> PerfPlan {
     use analog::metadata::NetClass;
-    let plan = |rows, notes, active| PerfPlan { rows, notes, active, tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0, evidence: None, r_weight: Vec::new(), pair_weight: Vec::new(), beta_key: false };
-    let Some(p) = &cfg.performance else { return plan(Vec::new(), Vec::new(), vec![0]) };
+    let plan = |rows, notes, active| PerfPlan {
+        rows,
+        notes,
+        active,
+        tables: Vec::new(),
+        sigma_v: Vec::new(),
+        sens: Vec::new(),
+        sims: 0,
+        evidence: None,
+        r_weight: Vec::new(),
+        pair_weight: Vec::new(),
+        beta_key: false,
+    };
+    let Some(p) = &cfg.performance else {
+        return plan(Vec::new(), Vec::new(), vec![0]);
+    };
     let all: Vec<usize> = (0..p.scenarios().len()).collect();
     let bounds = || {
         p.specs.iter().flat_map(|s| {
-            [(s.min, "min"), (s.max, "max")].into_iter().filter(|b| b.0.is_some_and(f64::is_finite)).map(move |(_, side)| format!("{}:{side}", s.metric))
+            [(s.min, "min"), (s.max, "max")]
+                .into_iter()
+                .filter(|b| b.0.is_some_and(f64::is_finite))
+                .map(move |(_, side)| format!("{}:{side}", s.metric))
         })
     };
     let notes = |rows: &[analog::routing::PerformanceBudget], why: &str| -> Vec<String> {
@@ -537,7 +650,17 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
             .scenarios()
             .iter()
             .enumerate()
-            .map(|(i, sc)| format!("scenario {}: {}", sc.name, if active.contains(&i) { "active" } else { "inactive" }))
+            .map(|(i, sc)| {
+                format!(
+                    "scenario {}: {}",
+                    sc.name,
+                    if active.contains(&i) {
+                        "active"
+                    } else {
+                        "inactive"
+                    }
+                )
+            })
             .collect();
         notes.iter().for_each(|n| eprintln!("[perf] {n}"));
         notes
@@ -549,10 +672,18 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
     };
     let nets: Vec<pnr_core::NetId> = classes
         .iter()
-        .filter(|c| !matches!(c.class, NetClass::Supply | NetClass::Ground | NetClass::Substrate))
+        .filter(|c| {
+            !matches!(
+                c.class,
+                NetClass::Supply | NetClass::Ground | NetClass::Substrate
+            )
+        })
         .map(|c| c.net)
         .collect();
-    let steps = perf::StepPolicy { gate_af_um2: ann.process.gate_af_per_um2.map_or(0.0, f64::from), ..Default::default() };
+    let steps = perf::StepPolicy {
+        gate_af_um2: ann.process.gate_af_per_um2.map_or(0.0, f64::from),
+        ..Default::default()
+    };
     let params = perf::default_params(netlist, &nets);
     let sigma_v = robust::device_sigma_v(netlist, ann.process.avt_mv_um);
     let names = p.scenarios();
@@ -567,11 +698,29 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
         let mut tables = Vec::new();
         for &s in &active {
             let t0 = std::time::Instant::now();
-            let mut t = perf::sensitivities(netlist, p, s, &params, &sigma_v, &steps, &perf::Parasitics::default())?;
+            let mut t = perf::sensitivities(
+                netlist,
+                p,
+                s,
+                &params,
+                &sigma_v,
+                &steps,
+                &perf::Parasitics::default(),
+            )?;
             perf::add_coupling(&mut t, netlist, p, &nets, &steps, 64)?;
             let name = &names[s].name;
-            sens_notes.push(format!("{name}: {} rows, {} sims, {} ms", t.rows.len(), t.sims, t0.elapsed().as_millis()));
-            sens_notes.extend(t.rows.iter().filter(|r| !r.linear).map(|r| format!("{name}: nonlinear {:?}", r.param)));
+            sens_notes.push(format!(
+                "{name}: {} rows, {} sims, {} ms",
+                t.rows.len(),
+                t.sims,
+                t0.elapsed().as_millis()
+            ));
+            sens_notes.extend(
+                t.rows
+                    .iter()
+                    .filter(|r| !r.linear)
+                    .map(|r| format!("{name}: nonlinear {:?}", r.param)),
+            );
             tables.push(t);
         }
         Ok((start, active, tables, sens_notes))
@@ -591,7 +740,11 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
                 .zip(&stats)
                 .filter_map(|(b, st)| {
                     let spec = &p.specs[b.spec];
-                    let (bound, sign) = if b.upper { (spec.max?, 1.0) } else { (spec.min?, -1.0) };
+                    let (bound, sign) = if b.upper {
+                        (spec.max?, 1.0)
+                    } else {
+                        (spec.min?, -1.0)
+                    };
                     let plain = sign * (bound - b.value?);
                     let h = match st.headroom_stat {
                         Some(h) if h > 0.0 => h,
@@ -606,18 +759,42 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
             let unknown = || "unknown".to_string();
             for e in &evidence.specs {
                 let sigma = e.sigma_f.map_or_else(unknown, |v| format!("{v:.3e}"));
-                sens_notes.push(format!("evidence {}: d_c {}, d_r {}, d_vt {}, d_cc {}, σ_f {sigma}", e.metric, e.d_c.len(), e.d_r.len(), e.d_vt.len(), e.d_cc.len()));
+                sens_notes.push(format!(
+                    "evidence {}: d_c {}, d_r {}, d_vt {}, d_cc {}, σ_f {sigma}",
+                    e.metric,
+                    e.d_c.len(),
+                    e.d_r.len(),
+                    e.d_vt.len(),
+                    e.d_cc.len()
+                ));
             }
             let net_name = |n: pnr_core::NetId| &netlist.nets[n.0 as usize].name;
             for (n, w) in r_weight.iter().enumerate().filter(|(_, &w)| w != 0.0) {
                 sens_notes.push(format!("r_weight {} {w:.3}", netlist.nets[n].name));
             }
-            sens_notes.extend(pair_weight.iter().filter(|p| p.2 != 0.0).map(|&(a, b, w)| format!("pair_weight {}-{} {w:.3e}", net_name(a), net_name(b))));
+            sens_notes.extend(
+                pair_weight.iter().filter(|p| p.2 != 0.0).map(|&(a, b, w)| {
+                    format!("pair_weight {}-{} {w:.3e}", net_name(a), net_name(b))
+                }),
+            );
             let mut out = scenario_notes(&active);
             out.extend(notes(&rows, "not measured at the schematic"));
             sens_notes.iter().for_each(|n| eprintln!("[perf] sens {n}"));
-            let sims = (all.len() * p.testbenches.len()) as u32 + tables.iter().map(|t| t.sims).sum::<u32>();
-            PerfPlan { rows, notes: out, active, tables, sigma_v, sens: sens_notes, sims, evidence: Some(evidence), r_weight, pair_weight, beta_key }
+            let sims = (all.len() * p.testbenches.len()) as u32
+                + tables.iter().map(|t| t.sims).sum::<u32>();
+            PerfPlan {
+                rows,
+                notes: out,
+                active,
+                tables,
+                sigma_v,
+                sens: sens_notes,
+                sims,
+                evidence: Some(evidence),
+                r_weight,
+                pair_weight,
+                beta_key,
+            }
         }
         Err(e) => {
             let mut out = scenario_notes(&all);
@@ -724,7 +901,12 @@ fn topology<'a>(
     // Per topology: `CellSpace::new` mutates the problem, which is not `Clone`.
     let mut problem = annotator::annotate_with(netlist, ann, ev);
     if cfg.min_utilization > 0.0 {
-        problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min: cfg.min_utilization }));
+        problem
+            .placement
+            .budget
+            .push(Box::new(analog::placement::utilization::Utilization {
+                u_min: cfg.min_utilization,
+            }));
     }
     let (perf_rows, perf_active) = (&perf.rows[..], &perf.active[..]);
     for row in perf_rows {
@@ -734,9 +916,22 @@ fn topology<'a>(
     // Cells: every legal variant drawn once; matched groups collapse to one
     // cell and every device-indexed table moves to cell space.
     // One fold table for the cells and every LVS reference of this run.
-    let unit_cells: Vec<(Vec<DeviceId>, bool)> = problem.constraints.unitization.iter().map(|u| (u.devices.clone(), u.route_matching_required)).collect();
+    let unit_cells: Vec<(Vec<DeviceId>, bool)> = problem
+        .constraints
+        .unitization
+        .iter()
+        .map(|u| (u.devices.clone(), u.route_matching_required))
+        .collect();
     let fold = cellgen::folds(&netlist, pdk, &bias.gm_us, &unit_cells);
-    let cells = CellSpace::new(&netlist, injected, &mut problem, pdk, &bias.power, merge_distinct_gates, &fold);
+    let cells = CellSpace::new(
+        &netlist,
+        injected,
+        &mut problem,
+        pdk,
+        &bias.power,
+        merge_distinct_gates,
+        &fold,
+    );
     // Already cell-indexed: pushed after the retarget.
     let env = live_environment(&problem, &cells, pdk);
     if !env.pairs.is_empty() {
@@ -748,7 +943,11 @@ fn topology<'a>(
         .sets
         .iter()
         .map(|s| {
-            let mut c: Vec<u16> = s.members.iter().filter_map(|m| cells.units.cell_of.get(m.device.0 as usize).copied()).collect();
+            let mut c: Vec<u16> = s
+                .members
+                .iter()
+                .filter_map(|m| cells.units.cell_of.get(m.device.0 as usize).copied())
+                .collect();
             c.sort_unstable();
             c.dedup();
             (s.class, c)
@@ -763,24 +962,43 @@ fn topology<'a>(
     // leaves a net φx (Mx180 would reverse its current). Every variant, since
     // dp reshapes.
     let mirror_ok = |c: u32| {
-        cells.variants.get(c as usize).is_some_and(|v| v.alternatives.iter().all(|m| analog::matching::moments::mirror_allowed_units(&m.units)))
+        cells.variants.get(c as usize).is_some_and(|v| {
+            v.alternatives
+                .iter()
+                .all(|m| analog::matching::moments::mirror_allowed_units(&m.units))
+        })
     };
     let keep = |a: u32, b: u32| a != b && mirror_ok(a) && mirror_ok(b);
-    for b in problem.placement.hard.iter_mut().chain(&mut problem.placement.budget).chain(&mut problem.placement.cost) {
+    for b in problem
+        .placement
+        .hard
+        .iter_mut()
+        .chain(&mut problem.placement.budget)
+        .chain(&mut problem.placement.cost)
+    {
         b.demote_mirrors(&keep);
     }
     let locks = dp::locks::locks(&problem.placement, cells.variants.len(), &cells.variants);
-    let rules = place_rules(pdk, &cells);
+    let rules = place_rules(pdk, &cells, &locks, &match_class(&problem, &cells));
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
     // ponytail: a bad deck still panics here; FLOW-11 propagates the `Err`.
-    let stack = elaborate::routing_stack(pdk, None).unwrap_or_else(|e| panic!("routing stack: {e}"));
+    let stack =
+        elaborate::routing_stack(pdk, None).unwrap_or_else(|e| panic!("routing stack: {e}"));
     let (layers, cuts, pin_access) = (stack.layers.clone(), stack.cuts.clone(), stack.pin_access);
     // EM limits on the pin-access layer and cut too (sky130 mcon 0.36 mA/cut):
     // the access jogs and pin cuts carry their terminal's current.
-    let em_layers: Vec<LayerId> = layers.iter().copied().chain(pin_access.map(|p| p.0)).collect();
-    let em_cuts: Vec<elaborate::Cut> = cuts.iter().copied().chain(pin_access.map(|p| p.1)).collect();
+    let em_layers: Vec<LayerId> = layers
+        .iter()
+        .copied()
+        .chain(pin_access.map(|p| p.0))
+        .collect();
+    let em_cuts: Vec<elaborate::Cut> = cuts
+        .iter()
+        .copied()
+        .chain(pin_access.map(|p| p.1))
+        .collect();
     // REL-05: EM is derated at T_amb + θ_JA·P_total + the worst on-die rise
     // any placement can give ([`pnr_core::thermal::rise_bound_mc`]). Per cell,
     // the variant whose eq. 5.6 self term is largest: it bounds every
@@ -795,40 +1013,81 @@ fn topology<'a>(
             .iter()
             .zip(&cells.power)
             .map(|(v, &p)| {
-                v.alternatives.iter().map(|m| (m.bbox.w, m.bbox.h)).max_by(|a, b| self_rise_mc(p, a.0, a.1, K).total_cmp(&self_rise_mc(p, b.0, b.1, K))).unwrap_or((1, 1))
+                v.alternatives
+                    .iter()
+                    .map(|m| (m.bbox.w, m.bbox.h))
+                    .max_by(|a, b| {
+                        self_rise_mc(p, a.0, a.1, K).total_cmp(&self_rise_mc(p, b.0, b.1, K))
+                    })
+                    .unwrap_or((1, 1))
             })
             .collect();
-        let package = o.theta_ja_c_per_w.unwrap_or(0.0) * bias.summary.as_ref().map_or(0, |s| s.total_power_uw) as f64 * 1e-6;
+        let package = o.theta_ja_c_per_w.unwrap_or(0.0)
+            * bias.summary.as_ref().map_or(0, |s| s.total_power_uw) as f64
+            * 1e-6;
         o.temp_c as f32 + 273.15 + package as f32 + rise_bound_mc(&cells.power, &foot, K) / 1e3
     });
     let em = elaborate::em_limits(pdk, &em_layers, &em_cuts, t_em_k);
     let em_derate = match layers.first().and_then(|&l| pdk.em_limit(l)) {
-        Some(verify::EmLimit { derating: Some(_), derating_assumed: true, .. }) => "sidecar+fallback Ea/n",
-        Some(verify::EmLimit { derating: Some(_), .. }) => "deck",
+        Some(verify::EmLimit {
+            derating: Some(_),
+            derating_assumed: true,
+            ..
+        }) => "sidecar+fallback Ea/n",
+        Some(verify::EmLimit {
+            derating: Some(_), ..
+        }) => "deck",
         _ => "none",
     };
-    em_rules(&mut problem, netlist, &em, &em_layers, &em_cuts, ann.process.stack, em_front_row(pdk), pdk);
+    em_rules(
+        &mut problem,
+        netlist,
+        &em,
+        &em_layers,
+        &em_cuts,
+        ann.process.stack,
+        em_front_row(pdk),
+        pdk,
+    );
     if let (Some(esd), Some(stack)) = (&cfg.esd, ann.process.stack) {
         let (rho, cv) = analog::routing::em::metal_family(pdk.cell_str("metal_family"));
         let area_um2 = analog::routing::em::esd_area_um2(esd.hbm_v, rho, cv);
         let mut rules = Vec::new();
         for name in &esd.nets {
             match netlist.nets.iter().position(|n| n.name == *name) {
-                Some(k) => rules.push(analog::routing::EsdWidth { net: pnr_core::NetId(k as u16), area_um2, stack }),
+                Some(k) => rules.push(analog::routing::EsdWidth {
+                    net: pnr_core::NetId(k as u16),
+                    area_um2,
+                    stack,
+                }),
                 // ponytail: leaked once per run, as `em_rules`'s names are.
-                None => problem.missing.push(("EsdWidth", Box::leak(format!("net {name} (Config::esd) not in the netlist").into_boxed_str()))),
+                None => problem.missing.push((
+                    "EsdWidth",
+                    Box::leak(
+                        format!("net {name} (Config::esd) not in the netlist").into_boxed_str(),
+                    ),
+                )),
             }
         }
         problem.routing.hard.push(Box::new(rules));
     }
     // IR-drop budgets (PWR-02) on nets carrying op current (`annotator::ir`).
-    let net_ua = bias.currents.as_ref().map_or_else(Vec::new, |c| oppoint::net_current_ua(netlist, c));
+    let net_ua = bias
+        .currents
+        .as_ref()
+        .map_or_else(Vec::new, |c| oppoint::net_current_ua(netlist, c));
     let ir = if let (Some(_), Some(h)) = (&bias.currents, &bias.net_headroom_mv) {
         let vdd_mv = cfg.op.as_ref().map_or(1_800.0, |o| o.vdd * 1e3);
         let ir = annotator::ir::budgets(&problem.net_classes, &net_ua, h, vdd_mv, &ann.policy);
         let rules: Vec<analog::routing::IrDrop> = ir
             .iter()
-            .map(|&(net, current_ua, max_drop_uv)| analog::routing::IrDrop { net, current_ua, max_drop_uv, margin_pct: 20, stack: ann.process.stack })
+            .map(|&(net, current_ua, max_drop_uv)| analog::routing::IrDrop {
+                net,
+                current_ua,
+                max_drop_uv,
+                margin_pct: 20,
+                stack: ann.process.stack,
+            })
             .collect();
         problem.routing.budget.push(Box::new(rules));
         ir
@@ -836,11 +1095,21 @@ fn topology<'a>(
         problem.missing.push(("IrDrop", "operating point"));
         Vec::new()
     };
-    problem.missing.extend(analog::matching::class::missing_tiers(pdk).map(|m| ("MatchClass", m)));
-    let sens: Vec<(pnr_core::NetId, f32)> =
-        perf_rows.iter().flat_map(|r| r.nets.iter().copied().zip(r.weights.iter().copied())).collect();
+    problem
+        .missing
+        .extend(analog::matching::class::missing_tiers(pdk).map(|m| ("MatchClass", m)));
+    let sens: Vec<(pnr_core::NetId, f32)> = perf_rows
+        .iter()
+        .flat_map(|r| r.nets.iter().copied().zip(r.weights.iter().copied()))
+        .collect();
     let net_weight = gp::net_weights(&problem.net_classes, &sens, &net_ua);
-    let intent = elaborate::intent(netlist, &problem.net_classes, currents.as_deref(), cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0), &ir);
+    let intent = elaborate::intent(
+        netlist,
+        &problem.net_classes,
+        currents.as_deref(),
+        cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0),
+        &ir,
+    );
     let flow = Flow {
         pdk,
         netlist,
@@ -850,23 +1119,55 @@ fn topology<'a>(
             r.cfg.supply_nets = problem
                 .net_classes
                 .iter()
-                .filter(|c| matches!(c.class, analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground))
+                .filter(|c| {
+                    matches!(
+                        c.class,
+                        analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground
+                    )
+                })
                 .map(|c| c.net)
                 .collect();
-            r.cfg.pin_ua = currents.as_deref().map_or_else(Vec::new, |c| pin_currents(netlist, &cells.devices_of, c));
+            r.cfg.pin_ua = currents
+                .as_deref()
+                .map_or_else(Vec::new, |c| pin_currents(netlist, &cells.devices_of, c));
             // Per cell, each member's gate pin, device and `W·L·m` (the
             // annotator's antenna gate area, µm² → nm²).
             r.cfg.gate_nm2 = cells
                 .devices_of
                 .iter()
-                .map(|members| members.iter().enumerate().map(|(k, d)| (format!("d{k}:G"), u32::from(d.0), (netlist.devices[d.0 as usize].gate_area_um2() * 1e6) as i64)).collect())
+                .map(|members| {
+                    members
+                        .iter()
+                        .enumerate()
+                        .map(|(k, d)| {
+                            (
+                                format!("d{k}:G"),
+                                u32::from(d.0),
+                                (netlist.devices[d.0 as usize].gate_area_um2() * 1e6) as i64,
+                            )
+                        })
+                        .collect()
+                })
                 .collect();
             r.cfg.em = em;
             // Routing prices parasitics only on nets something budgets, on [0, 1].
-            let budgeted = |n: usize| problem.net_classes.get(n).is_some_and(|c| c.c_budget_af.is_some()) || sens.iter().any(|(s, _)| usize::from(s.0) == n);
-            let w: Vec<f32> = net_weight.iter().enumerate().map(|(n, &w)| if budgeted(n) { w } else { 0.0 }).collect();
+            let budgeted = |n: usize| {
+                problem
+                    .net_classes
+                    .get(n)
+                    .is_some_and(|c| c.c_budget_af.is_some())
+                    || sens.iter().any(|(s, _)| usize::from(s.0) == n)
+            };
+            let w: Vec<f32> = net_weight
+                .iter()
+                .enumerate()
+                .map(|(n, &w)| if budgeted(n) { w } else { 0.0 })
+                .collect();
             let top = w.iter().copied().fold(0.0f32, f32::max);
-            r.cfg.net_weight = w.iter().map(|&x| if top > 0.0 { x / top } else { 0.0 }).collect();
+            r.cfg.net_weight = w
+                .iter()
+                .map(|&x| if top > 0.0 { x / top } else { 0.0 })
+                .collect();
             r
         },
         layers,
@@ -882,31 +1183,49 @@ fn topology<'a>(
         intent,
         net_weight,
         fold,
-        stack: ann.process.stack.expect("`annotation` always carries the stack"),
+        stack: ann
+            .process
+            .stack
+            .expect("`annotation` always carries the stack"),
         id_ua: currents
             .as_ref()
-            .map(|c| c.iter().map(|d| d.as_ref().and_then(|t| t.iter().find(|(n, _)| n == "D").map(|&(_, i)| i))).collect())
+            .map(|c| {
+                c.iter()
+                    .map(|d| {
+                        d.as_ref()
+                            .and_then(|t| t.iter().find(|(n, _)| n == "D").map(|&(_, i)| i))
+                    })
+                    .collect()
+            })
             .unwrap_or_default(),
         gp_mode: cfg.gp_mode,
         rules,
     };
     // Matched cells keep every alternative: a merged group, or a member of a
     // 2-device leaf that emits a `MatchedSet` (annotator emit.rs table).
-    let paired: Vec<DeviceId> = annotator::block::leaves(&flow.problem.blocks)
-        .into_iter()
-        .filter(|l| l.devices.len() == 2 && matches!(l.kind, annotator::BlockKind::DiffPair | annotator::BlockKind::CurrentMirror | annotator::BlockKind::Load | annotator::BlockKind::CascodePair))
-        .flat_map(|l| l.devices.iter().copied())
-        .collect();
-    let matched: Vec<bool> = flow.cells.devices_of.iter().map(|m| m.len() > 1 || m.iter().any(|d| paired.contains(d))).collect();
+    let matched = matched_cells(&flow.problem.blocks, &flow.cells.devices_of);
     // GAP-18: a cell inside an Exceptional unitization lists its alternatives best-matching first.
     let ranked: Vec<bool> = flow
         .cells
         .devices_of
         .iter()
-        .map(|m| flow.problem.constraints.unitization.iter().any(|u| u.class == Some(pnr_core::MatchClass::Exceptional) && m.iter().all(|d| u.devices.contains(d))))
+        .map(|m| {
+            flow.problem.constraints.unitization.iter().any(|u| {
+                u.class == Some(pnr_core::MatchClass::Exceptional)
+                    && m.iter().all(|d| u.devices.contains(d))
+            })
+        })
         .collect();
-    let (assignment0, allowed) = cellgen::seed_assignment(&flow.cells.variants, &matched, &ranked, pdk);
-    Topology { flow, assignment0, allowed, distinct, t_em_k, em_derate }
+    let (assignment0, allowed) =
+        cellgen::seed_assignment(&flow.cells.variants, &matched, &ranked, pdk);
+    Topology {
+        flow,
+        assignment0,
+        allowed,
+        distinct,
+        t_em_k,
+        em_derate,
+    }
 }
 
 /// One start's search on a shared topology: the winning epoch, the start's
@@ -1011,14 +1330,30 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
 
     let best = best.expect("at least one epoch ran");
     stats.dual_steps = prices.steps();
-    let all: usize = flow.cells.variants.iter().map(|v| v.alternatives.len()).sum();
+    let all: usize = flow
+        .cells
+        .variants
+        .iter()
+        .map(|v| v.alternatives.len())
+        .sum();
     stats.pruned = (all - t.allowed.iter().map(Vec::len).sum::<usize>()) as u32;
     let stats = RunStats {
         best_iteration: best.iteration,
         ..best.stats.merge(stats)
     };
-    let binding = prices.saturated().iter().map(|k| (*k).to_string()).collect();
-    Searched { key: best.key, best, stats, binding, pareto, epochs }
+    let binding = prices
+        .saturated()
+        .iter()
+        .map(|k| (*k).to_string())
+        .collect();
+    Searched {
+        key: best.key,
+        best,
+        stats,
+        binding,
+        pareto,
+        epochs,
+    }
 }
 
 /// 7. The winner only, redrawn from its own variant choice, with its guard
@@ -1034,23 +1369,57 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
         // rides in the routes as the antenna rule's credit (`Flow::epoch`),
         // not as conductor.
         let marker = pdk.antenna_diode_credit().map(|(l, _)| l);
-        let wires = best.routes.wires.iter().map(|w| w.iter().filter(|s| Some(s.layer) != marker).copied().collect()).collect();
+        let wires = best
+            .routes
+            .wires
+            .iter()
+            .map(|w| {
+                w.iter()
+                    .filter(|s| Some(s.layer) != marker)
+                    .copied()
+                    .collect()
+            })
+            .collect();
         let joins = dr::joins(&flow.layers, &flow.cuts, flow.d_router.cfg.pin_access);
-        Routes { wires, ..Routes::default() }.debug_check_joined("dr::route (winner)", &joins);
+        Routes {
+            wires,
+            ..Routes::default()
+        }
+        .debug_check_joined("dr::route (winner)", &joins);
         geometry::debug_check_connected(&macros, &best.layout, &best.routes);
     }
     macros.extend(best.rings.iter().cloned());
     // MFG-01: density fill, once, on the winner; the search never sees it.
     let drawn = geometry::collect(&macros, &best.layout, &best.routes);
     let wires_of = |classes: &[analog::metadata::NetClass]| -> Vec<pnr_core::Shape> {
-        flow.problem.net_classes.iter().filter(|c| classes.contains(&c.class))
-            .flat_map(|c| best.routes.wires.get(c.net.0 as usize).into_iter().flatten().copied()).collect()
+        flow.problem
+            .net_classes
+            .iter()
+            .filter(|c| classes.contains(&c.class))
+            .flat_map(|c| {
+                best.routes
+                    .wires
+                    .get(c.net.0 as usize)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+            })
+            .collect()
     };
     // Matched cells: more than one member owns its units.
-    let matched: Vec<pnr_core::Rect> = pnr_core::place_macros(&macros, &best.layout).iter()
-        .filter(|m| m.units.iter().any(|u| u.owner != m.units[0].owner)).map(|m| m.bbox).collect();
+    let matched: Vec<pnr_core::Rect> = pnr_core::place_macros(&macros, &best.layout)
+        .iter()
+        .filter(|m| m.units.iter().any(|u| u.owner != m.units[0].owner))
+        .map(|m| m.bbox)
+        .collect();
     use analog::metadata::NetClass::{Bias, Ground, Reference, Sensitive};
-    macros.extend(fill::fill(&drawn, &wires_of(&[Ground]), &wires_of(&[Sensitive, Bias, Reference]), &matched, pdk));
+    macros.extend(fill::fill(
+        &drawn,
+        &wires_of(&[Ground]),
+        &wires_of(&[Sensitive, Bias, Reference]),
+        &matched,
+        pdk,
+    ));
     let metadata = metadata::build(
         &flow.problem.placement,
         &best.layout,
@@ -1068,27 +1437,59 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     let mut metadata = metadata;
     metadata.binding = s.binding;
     metadata.epochs = s.epochs;
-    metadata.audit = flow.problem.intent.diagnostics.iter().filter(|d| annotator::audit::KINDS.contains(&d.kind)).map(|d| format!("{}: {}", d.kind, d.message)).collect();
+    metadata.audit = flow
+        .problem
+        .intent
+        .diagnostics
+        .iter()
+        .filter(|d| annotator::audit::KINDS.contains(&d.kind))
+        .map(|d| format!("{}: {}", d.kind, d.message))
+        .collect();
     let pairs = matched_pairs(&flow.problem.blocks);
     if let Some(op) = &bias.op {
-        let (_, aging, unknown) = reliability::voltage_findings(flow.netlist, op, &pdk.fet_voltage_limits(), &pairs, false);
+        let (_, aging, unknown) = reliability::voltage_findings(
+            flow.netlist,
+            op,
+            &pdk.fet_voltage_limits(),
+            &pairs,
+            false,
+        );
         let name = |d: DeviceId| flow.netlist.devices[d.0 as usize].name.clone();
-        metadata.aging = aging.into_iter().map(|a| (name(a.a), name(a.b), a.dvds_mv, a.dvgs_mv, a.dvbs_mv)).collect();
+        metadata.aging = aging
+            .into_iter()
+            .map(|a| (name(a.a), name(a.b), a.dvds_mv, a.dvgs_mv, a.dvbs_mv))
+            .collect();
         metadata.voltage_unknown = unknown;
     }
     let mut recognition = std::collections::BTreeMap::new();
-    for b in flow.problem.blocks.iter().filter(|b| b.kind != annotator::BlockKind::Glue) {
+    for b in flow
+        .problem
+        .blocks
+        .iter()
+        .filter(|b| b.kind != annotator::BlockKind::Glue)
+    {
         *recognition.entry(b.template).or_insert(0) += 1;
     }
     metadata.recognition = recognition.into_iter().collect();
-    metadata.unconstrained = flow.problem.coverage.iter()
+    metadata.unconstrained = flow
+        .problem
+        .coverage
+        .iter()
         .filter_map(|&(d, c)| match c {
-            annotator::Coverage::Unconstrained(why) => Some((flow.netlist.devices[d.0 as usize].name.clone(), why)),
+            annotator::Coverage::Unconstrained(why) => {
+                Some((flow.netlist.devices[d.0 as usize].name.clone(), why))
+            }
             _ => None,
         })
         .collect();
     metadata.coverage = best.coverage;
-    metadata.add_routing(&[Box::new(flow.common_nodes(&best.layout)), Box::new(flow.environment(&best.layout, &best.rings))], &best.routes);
+    metadata.add_routing(
+        &[
+            Box::new(flow.common_nodes(&best.layout)),
+            Box::new(flow.environment(&best.layout, &best.rings)),
+        ],
+        &best.routes,
+    );
     if let (Some(cfg), Some(result)) = (flow.perf, &best.perf) {
         metadata.performance = cfg
             .specs
@@ -1102,7 +1503,9 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
             .bounds
             .iter()
             .map(|b| {
-                let value = b.value.map_or_else(|| "unmeasured".to_string(), |v| format!("{v:.4e}"));
+                let value = b
+                    .value
+                    .map_or_else(|| "unmeasured".to_string(), |v| format!("{v:.4e}"));
                 format!(
                     "{}:{} worst {value} at {} (over {} active of {} scenarios)",
                     cfg.specs[b.spec].metric,
@@ -1116,19 +1519,64 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
         metadata.sim_failures = stats.sim_failures;
         // ponytail: no systematic/gradient terms; MAT's per-pair ledger is not
         // exported at the winner yet.
-        let stats = robust::bound_stats(&flow.perf_plan.tables, &flow.perf_plan.sigma_v, result, &cfg.specs, &[], &[]);
+        let stats = robust::bound_stats(
+            &flow.perf_plan.tables,
+            &flow.perf_plan.sigma_v,
+            result,
+            &cfg.specs,
+            &[],
+            &[],
+        );
         metadata.robustness = stats
             .iter()
             .map(|st| {
                 let b = &result.bounds[st.bound];
-                let name = format!("{}:{}", cfg.specs[b.spec].metric, if b.upper { "max" } else { "min" });
-                let (Some(sf), Some(beta), Some(y)) = (st.sigma_f, st.beta, st.yield_part) else { return format!("{name} UNKNOWN ({})", robust::unknown_reason(&flow.perf_plan.tables, &flow.perf_plan.sigma_v, result, st.bound)) };
-                let top: Vec<String> = st.shares.iter().map(|&(d, w)| format!("{} {:.0}%", flow.netlist.devices[d as usize].name, w * 100.0)).collect();
-                format!("{name} σ_f {sf:.4e} β {beta:.2} Φ(β) {y:.4} (V_T only) top {}", top.join(", "))
+                let name = format!(
+                    "{}:{}",
+                    cfg.specs[b.spec].metric,
+                    if b.upper { "max" } else { "min" }
+                );
+                let (Some(sf), Some(beta), Some(y)) = (st.sigma_f, st.beta, st.yield_part) else {
+                    return format!(
+                        "{name} UNKNOWN ({})",
+                        robust::unknown_reason(
+                            &flow.perf_plan.tables,
+                            &flow.perf_plan.sigma_v,
+                            result,
+                            st.bound
+                        )
+                    );
+                };
+                let top: Vec<String> = st
+                    .shares
+                    .iter()
+                    .map(|&(d, w)| {
+                        format!(
+                            "{} {:.0}%",
+                            flow.netlist.devices[d as usize].name,
+                            w * 100.0
+                        )
+                    })
+                    .collect();
+                format!(
+                    "{name} σ_f {sf:.4e} β {beta:.2} Φ(β) {y:.4} (V_T only) top {}",
+                    top.join(", ")
+                )
             })
             .collect();
-        let y = robust::linear_joint_yield(&flow.perf_plan.tables, &flow.perf_plan.sigma_v, result, &cfg.specs, &[], 100_000, 1);
-        metadata.robustness.push(y.map_or_else(|| "joint yield (linear, 1e5) UNKNOWN".into(), |y| format!("joint yield (linear, 1e5) {y:.4}")));
+        let y = robust::linear_joint_yield(
+            &flow.perf_plan.tables,
+            &flow.perf_plan.sigma_v,
+            result,
+            &cfg.specs,
+            &[],
+            100_000,
+            1,
+        );
+        metadata.robustness.push(y.map_or_else(
+            || "joint yield (linear, 1e5) UNKNOWN".into(),
+            |y| format!("joint yield (linear, 1e5) {y:.4}"),
+        ));
     }
     // Inserted devices (antenna diodes) join the schematic LVS reads.
     let mut netlist = flow.netlist.clone();
@@ -1201,9 +1649,15 @@ pub fn annotation(pdk: &Pdk, base: &AnnotationConfig) -> AnnotationConfig {
 /// [`annotation`] on a stack the caller already holds. Rules are `Copy`, so
 /// they borrow the stack for 'static. ponytail: [`run`] leaks one per call (a
 /// few hundred bytes); cache by deck if runs ever loop in one process.
-fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::routing::Stack) -> AnnotationConfig {
+fn annotation_with(
+    pdk: &Pdk,
+    base: &AnnotationConfig,
+    stack: &'static analog::routing::Stack,
+) -> AnnotationConfig {
     use pnr_core::Process;
-    let layers = elaborate::routing_stack(pdk, None).map(|s| s.layers).unwrap_or_default();
+    let layers = elaborate::routing_stack(pdk, None)
+        .map(|s| s.layers)
+        .unwrap_or_default();
     let wire = layers.first().copied();
     let width = wire.and_then(|l| pdk.min_width(l.0)).unwrap_or(0);
     let opt = |key: &str| Some(pdk.rule(key, 0)).filter(|&v| v > 0);
@@ -1212,7 +1666,10 @@ fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::r
         antenna_max_ratio: pdk.antenna_max_ratio(),
         gate_af_per_um2: opt("gate_cap_af_um2").map(|v| v as f32),
         wire_af_per_um: wire.and_then(|l| pdk.wire_af_per_um(l, width)),
-        wire_ohm_per_um: wire.and_then(|l| pdk.pex_f32(l, "sheet_res_ohm_sq")).filter(|&r| r > 0.0 && width > 0).map(|r| r * 1000.0 / width as f32),
+        wire_ohm_per_um: wire
+            .and_then(|l| pdk.pex_f32(l, "sheet_res_ohm_sq"))
+            .filter(|&r| r > 0.0 && width > 0)
+            .map(|r| r * 1000.0 / width as f32),
         route_space_nm: wire.and_then(|l| pdk.min_spacing(l.0)).unwrap_or(0),
         dti: opt("dti_max_spacing").zip(opt("dti_width")),
         avt_mv_um: [pos("avt_n_mv_um"), pos("avt_p_mv_um")],
@@ -1238,11 +1695,17 @@ fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::r
             grid_nm: i64::from(pdk.grid()),
             min_w_nm: i64::from(pdk.rule("min_finger_width", 0)),
             max_w_nm: i64::from(pdk.rule("max_finger_width", 0)),
-            min_l_nm: pdk.layer("poly").and_then(|l| pdk.min_width(l.0)).map_or(0, i64::from),
+            min_l_nm: pdk
+                .layer("poly")
+                .and_then(|l| pdk.min_width(l.0))
+                .map_or(0, i64::from),
             res_min_segment_nm: i64::from(pdk.rule("res_min_segment", 0)),
         },
     };
-    AnnotationConfig { process, ..base.clone() }
+    AnnotationConfig {
+        process,
+        ..base.clone()
+    }
 }
 
 /// One guard-ring tap contact's resistance, ohms: the deck's `pex` value for
@@ -1262,7 +1725,15 @@ pub fn ring_cut_ohm(pdk: &Pdk) -> f32 {
 /// `cell.placement_space`. `fallback` is the old scalar, the widest spacing
 /// of any device layer: unmapped layers and same-role pairs the deck leaves
 /// open still get it.
-fn place_rules(pdk: &Pdk, cells: &CellSpace) -> gp::PlaceRules {
+/// PLC-13: a matched cell (`class[c]`) owes foreign cells outside its orient
+/// set (`locks.orient_of`) the deck's `wpe_clearance_nm` tier and
+/// [`gp::spacing::FOREIGN_POLY_NM`].
+fn place_rules(
+    pdk: &Pdk,
+    cells: &CellSpace,
+    locks: &dp::locks::Locks,
+    class: &[Option<pnr_core::MatchClass>],
+) -> gp::PlaceRules {
     use gp::spacing::{profile, Profiles, SpacingTable, DECK_ROLE, N, ROLES};
     use pnr_core::Process;
     let fallback = ["nwell", "diff", "tap", "poly", "nsdm", "psdm", "li"]
@@ -1272,32 +1743,93 @@ fn place_rules(pdk: &Pdk, cells: &CellSpace) -> gp::PlaceRules {
         .max()
         .unwrap_or(0);
     let lattice = cells::builder::cut_lattice(pdk);
-    let table = SpacingTable::new(pdk, &placement_space(pdk), fallback, lattice);
+    let mut table = SpacingTable::new(pdk, &placement_space(pdk), fallback, lattice);
+    use pnr_core::MatchClass::{Exceptional, Minimal, Moderate};
+    table.wpe =
+        [Minimal, Moderate, Exceptional].map(|c| analog::matching::class::mos_env(c, pdk).wpe_nm);
+    table.foreign_poly = gp::spacing::FOREIGN_POLY_NM;
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let open: Vec<_> = (0..N - 1)
             .flat_map(|i| (i..N - 1).map(move |j| (i, j)))
-            .filter(|&(i, j)| DECK_ROLE[i] == DECK_ROLE[j] && table.src[i][j] == gp::spacing::Src::Fallback)
+            .filter(|&(i, j)| {
+                DECK_ROLE[i] == DECK_ROLE[j] && table.src[i][j] == gp::spacing::Src::Fallback
+            })
             .map(|(i, j)| format!("{}/{}", ROLES[i], ROLES[j]))
             .collect();
         if !open.is_empty() {
-            eprintln!("placement spacing: no deck value, fallback {fallback} nm for {}", open.join(", "));
+            eprintln!(
+                "placement spacing: no deck value, fallback {fallback} nm for {}",
+                open.join(", ")
+            );
         }
     });
     let of = cells
         .variants
         .iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(c, s)| {
             s.alternatives
                 .iter()
                 .map(|m| {
-                    let bulk = m.pins.iter().find(|p| p.name.ends_with(":B")).map(|p| p.net);
-                    Profiles::orients(&profile(m, pdk, bulk))
+                    let bulk = m
+                        .pins
+                        .iter()
+                        .find(|p| p.name.ends_with(":B"))
+                        .map(|p| p.net);
+                    let p = gp::spacing::Profile {
+                        matched: class.get(c).copied().flatten(),
+                        set: locks.orient_of.get(c).copied().flatten(),
+                        ..profile(m, pdk, bulk)
+                    };
+                    Profiles::orients(&p)
                 })
                 .collect()
         })
         .collect();
     gp::PlaceRules::new(lattice, table, Profiles { of })
+}
+
+/// Matched cells: a merged group, or a member of a 2-device leaf that emits a
+/// `MatchedSet` (annotator emit.rs table).
+fn matched_cells(blocks: &[annotator::Block], devices_of: &[Vec<DeviceId>]) -> Vec<bool> {
+    use annotator::BlockKind::{CascodePair, CurrentMirror, DiffPair, Load};
+    let paired: Vec<DeviceId> = annotator::block::leaves(blocks)
+        .into_iter()
+        .filter(|l| {
+            l.devices.len() == 2 && matches!(l.kind, DiffPair | CurrentMirror | Load | CascodePair)
+        })
+        .flat_map(|l| l.devices.iter().copied())
+        .collect();
+    devices_of
+        .iter()
+        .map(|m| m.len() > 1 || m.iter().any(|d| paired.contains(d)))
+        .collect()
+}
+
+/// Each cell's matching class: `Moderate` for a [`matched_cells`] cell, raised
+/// to the highest class of any placement batch pairing it
+/// ([`analog::RuleBatch::matched_class`]); `None` when unmatched.
+fn match_class(problem: &Problem, cells: &CellSpace) -> Vec<Option<pnr_core::MatchClass>> {
+    let mut class: Vec<_> = matched_cells(&problem.blocks, &cells.devices_of)
+        .into_iter()
+        .map(|m| m.then_some(pnr_core::MatchClass::Moderate))
+        .collect();
+    let p = &problem.placement;
+    let mut pairs = Vec::new();
+    for b in p.hard.iter().chain(&p.budget).chain(&p.cost) {
+        let Some(k) = b.matched_class() else { continue };
+        pairs.clear();
+        b.matched_pairs(&mut pairs);
+        for &(x, y) in &pairs {
+            for c in [x, y] {
+                if let Some(slot) = class.get_mut(c as usize) {
+                    *slot = Some(slot.map_or(k, |v| v.max(k)));
+                }
+            }
+        }
+    }
+    class
 }
 
 /// The sidecar's `cell.placement_space`: `{"role_a,role_b": [nm, "source"]}`.
@@ -1306,13 +1838,24 @@ fn place_rules(pdk: &Pdk, cells: &CellSpace) -> gp::PlaceRules {
 /// On a malformed entry, naming its key: a typo must not silently drop a rule
 /// (an unknown role panics in [`gp::spacing::SpacingTable::new`]).
 fn placement_space(pdk: &Pdk) -> Vec<(String, String, i32)> {
-    let Some(obj) = pdk.cell.get("placement_space").filter(|v| !v.is_null()) else { return Vec::new() };
-    let obj = obj.as_object().expect("cell.placement_space: an object of \"role_a,role_b\": [nm, \"source\"]");
+    let Some(obj) = pdk.cell.get("placement_space").filter(|v| !v.is_null()) else {
+        return Vec::new();
+    };
+    let obj = obj
+        .as_object()
+        .expect("cell.placement_space: an object of \"role_a,role_b\": [nm, \"source\"]");
     obj.iter()
         .map(|(k, v)| {
-            let (a, b) = k.split_once(',').unwrap_or_else(|| panic!("cell.placement_space.{k}: key is \"role_a,role_b\""));
-            let nm = v.get(0).and_then(|n| n.as_i64()).and_then(|n| i32::try_from(n).ok());
-            let nm = nm.unwrap_or_else(|| panic!("cell.placement_space.{k}: value is [nm, \"source\"], got {v}"));
+            let (a, b) = k
+                .split_once(',')
+                .unwrap_or_else(|| panic!("cell.placement_space.{k}: key is \"role_a,role_b\""));
+            let nm = v
+                .get(0)
+                .and_then(|n| n.as_i64())
+                .and_then(|n| i32::try_from(n).ok());
+            let nm = nm.unwrap_or_else(|| {
+                panic!("cell.placement_space.{k}: value is [nm, \"source\"], got {v}")
+            });
             (a.trim().to_owned(), b.trim().to_owned(), nm)
         })
         .collect()
@@ -1414,18 +1957,41 @@ impl Flow<'_> {
         };
         // Measured on the macros dp's variants draw, so `lattice_off` stamps what is drawn.
         let lattice = cells::builder::cut_lattice(self.pdk);
-        let place = geometry::placement_metrics(&macros, &layout, lattice, &self.rules, placement, &self.locks);
-        debug_assert_eq!(place.lattice_off, 0, "dp::place: cell origin off the cut lattice");
+        let place = geometry::placement_metrics(
+            &macros,
+            &layout,
+            lattice,
+            &self.rules,
+            placement,
+            &self.locks,
+        );
+        debug_assert_eq!(
+            place.lattice_off, 0,
+            "dp::place: cell origin off the cut lattice"
+        );
 
         // Guard rings enclose placed cells, so they are drawn now, before routing.
-        let mut rings = cells::post_cell::guard_rings(&layout, &cells.guard_rings, self.pdk, ring_cut_ohm(self.pdk));
+        let mut rings = cells::post_cell::guard_rings(
+            &layout,
+            &cells.guard_rings,
+            self.pdk,
+            ring_cut_ohm(self.pdk),
+        );
         // Same-bulk PMOS cells facing each other share one well.
         // Never across REL-16's forbidden pairs (CELL-22).
         let flags = cell_flags(&self.problem.intent, &self.cells.devices_of);
-        let bridges = cells::post_cell::well_bridges(&gr::place_macros(&macros, &layout), &rings, self.pdk, &|i, j| cells::post_cell::may_share_well(flags[i], flags[j]));
+        let bridges = cells::post_cell::well_bridges(
+            &gr::place_macros(&macros, &layout),
+            &rings,
+            self.pdk,
+            &|i, j| cells::post_cell::may_share_well(flags[i], flags[j]),
+        );
         rings.extend(bridges);
         // Same-type implants of neighbours closer than their spacing merge.
-        let placed_now: Vec<Macro> = gr::place_macros(&macros, &layout).into_iter().chain(rings.iter().cloned()).collect();
+        let placed_now: Vec<Macro> = gr::place_macros(&macros, &layout)
+            .into_iter()
+            .chain(rings.iter().cloned())
+            .collect();
         rings.extend(cells::post_cell::implant_bridges(&placed_now, self.pdk));
         lap(2);
 
@@ -1441,10 +2007,25 @@ impl Flow<'_> {
             // Pin shares from the unplaced macros: `place_macro` leaves units local.
             cfg: dr::DetailedCfg {
                 common: self.common_nodes(&layout).nodes,
-                blockages: elaborate::blockages(&placed, self.pdk, |c| elaborate::match_class(&self.problem.constraints.unitization, self.cells.devices_of.get(c).map_or(&[][..], Vec::as_slice)), layers),
+                blockages: elaborate::blockages(
+                    &placed,
+                    self.pdk,
+                    |c| {
+                        elaborate::match_class(
+                            &self.problem.constraints.unitization,
+                            self.cells.devices_of.get(c).map_or(&[][..], Vec::as_slice),
+                        )
+                    },
+                    layers,
+                ),
                 aggressor: {
                     let mut a = vec![false; self.netlist.nets.len()];
-                    for c in self.problem.net_classes.iter().filter(|c| c.class == analog::metadata::NetClass::Clock) {
+                    for c in self
+                        .problem
+                        .net_classes
+                        .iter()
+                        .filter(|c| c.class == analog::metadata::NetClass::Clock)
+                    {
                         if let Some(x) = a.get_mut(c.net.0 as usize) {
                             *x = true;
                         }
@@ -1452,7 +2033,10 @@ impl Flow<'_> {
                     a
                 },
                 plates: self.plate_sets(&placed),
-                aggressor_weight: analog::routing::CouplingBudget::default_weights(&self.problem.net_classes, self.netlist.nets.len()),
+                aggressor_weight: analog::routing::CouplingBudget::default_weights(
+                    &self.problem.net_classes,
+                    self.netlist.nets.len(),
+                ),
                 stack: Some(self.stack),
                 pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
                 n_nets: self.netlist.nets.len(),
@@ -1465,8 +2049,21 @@ impl Flow<'_> {
         // Antenna nets the jumper could not fix get a diode each, routed in as
         // a fixed cell; its shape on the deck's credited diode layer joins the
         // net's routes (the rule's credit, `Stack::diode`).
-        let ground = self.problem.net_classes.iter().find(|c| c.class == analog::metadata::NetClass::Ground).map(|c| c.net);
-        let diodes = elaborate::antenna_diodes(self.pdk, routing, &routes, &placed, &rings, ground, self.rules.spacing.fallback);
+        let ground = self
+            .problem
+            .net_classes
+            .iter()
+            .find(|c| c.class == analog::metadata::NetClass::Ground)
+            .map(|c| c.net);
+        let diodes = elaborate::antenna_diodes(
+            self.pdk,
+            routing,
+            &routes,
+            &placed,
+            &rings,
+            ground,
+            self.rules.spacing.fallback,
+        );
         lap(5);
         let mut extra = Vec::new();
         if !diodes.is_empty() {
@@ -1474,11 +2071,14 @@ impl Flow<'_> {
             let mut marks = Vec::new();
             for (device, m) in diodes {
                 let cathode = device.terminals.iter().find(|t| t.0 == "N").map(|t| t.1);
-                marks.extend(cathode.zip(m.shapes.iter().find(|s| Some(s.layer) == marker).copied()));
+                marks.extend(
+                    cathode.zip(m.shapes.iter().find(|s| Some(s.layer) == marker).copied()),
+                );
                 extra.push(device);
                 rings.push(m);
             }
-            (routes, route_report, route_stats) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
+            (routes, route_report, route_stats) =
+                router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
             lap(4);
             let marked = !marks.is_empty();
             for (net, shape) in marks {
@@ -1513,8 +2113,20 @@ impl Flow<'_> {
         // The epoch is scored by the same DRC/ERC/LVS gate as the final result.
         let mut labelled = placed;
         labelled.extend(rings.iter().cloned());
-        let mut signoff = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), self.pdk);
-        signoff.report.hard_violations.extend(undrawable(&macros, &self.cells.devices_of, self.netlist));
+        let mut signoff = signoff_shapes(
+            &self.intent,
+            &shapes,
+            &labelled,
+            &self.net_names,
+            &netlist,
+            Some(&self.fold),
+            self.pdk,
+        );
+        signoff.report.hard_violations.extend(undrawable(
+            &macros,
+            &self.cells.devices_of,
+            self.netlist,
+        ));
         lap(6);
         let mut budgets = metadata::build(
             placement,
@@ -1528,10 +2140,27 @@ impl Flow<'_> {
         );
         budgets.add_routing(&[Box::new(self.common_nodes(&layout))], &routes);
 
-        let c = signoff_c_tier(&signoff, &self.net_names, &self.problem.net_classes, self.perf_rows);
-        let (key, stats) = epoch_score(&place_report, &route_report, &signoff, &budgets, c, layout.footprint_nm2());
+        let c = signoff_c_tier(
+            &signoff,
+            &self.net_names,
+            &self.problem.net_classes,
+            self.perf_rows,
+        );
+        let (key, stats) = epoch_score(
+            &place_report,
+            &route_report,
+            &signoff,
+            &budgets,
+            c,
+            layout.footprint_nm2(),
+        );
         lap(7);
-        let stats = RunStats { place, dp: dp_stats, stage_ms: ms, ..stats };
+        let stats = RunStats {
+            place,
+            dp: dp_stats,
+            stage_ms: ms,
+            ..stats
+        };
         Epoch {
             key,
             min_beta: None,
@@ -1553,7 +2182,10 @@ impl Flow<'_> {
 /// A common node's ΔR budget, Ω: the pair's remaining allowance (mV, either order) over I_D (µA); 0 = unknown.
 fn common_node_ohm(left: &[(u32, u32, f32)], a: DeviceId, b: DeviceId, i_ua: Option<f32>) -> f32 {
     let (a, b) = (u32::from(a.0), u32::from(b.0));
-    let mv = left.iter().find(|&&(x, y, _)| (x, y) == (a, b) || (x, y) == (b, a)).map(|&(_, _, mv)| mv);
+    let mv = left
+        .iter()
+        .find(|&&(x, y, _)| (x, y) == (a, b) || (x, y) == (b, a))
+        .map(|&(_, _, mv)| mv);
     match (mv, i_ua) {
         (Some(mv), Some(i)) => mv / i * 1e3,
         _ => 0.0,
@@ -1567,7 +2199,11 @@ impl Flow<'_> {
     fn member_pin<'n>(&self, members: &[DeviceId], name: &'n str) -> Option<(DeviceId, &'n str)> {
         let (k, t) = pin_member(name)?;
         let &d = members.get(k)?;
-        self.netlist.devices[usize::from(d.0)].terminals.iter().any(|(n, _)| n == t).then_some((d, t))
+        self.netlist.devices[usize::from(d.0)]
+            .terminals
+            .iter()
+            .any(|(n, _)| n == t)
+            .then_some((d, t))
     }
 
     /// What the epoch's layout adds to the schematic: its extracted C, each
@@ -1575,12 +2211,18 @@ impl Flow<'_> {
     /// combine), and each device's mean LOD stress over its drawn fingers.
     fn parasitics(&self, epoch: &Epoch) -> perf::Parasitics {
         let n = self.netlist.devices.len();
-        let placed = gr::place_macros(&cellgen::realize(&self.cells.variants, &epoch.layout.variant), &epoch.layout);
+        let placed = gr::place_macros(
+            &cellgen::realize(&self.cells.variants, &epoch.layout.variant),
+            &epoch.layout,
+        );
         // Per net: (device, terminal, pin rect) of every placed pin.
-        let mut pins: Vec<Vec<(usize, String, pnr_core::Rect)>> = vec![Vec::new(); self.netlist.nets.len()];
+        let mut pins: Vec<Vec<(usize, String, pnr_core::Rect)>> =
+            vec![Vec::new(); self.netlist.nets.len()];
         for (m, members) in placed.iter().zip(&self.cells.devices_of) {
             for p in &m.pins {
-                let Some((d, t)) = self.member_pin(members, &p.name) else { continue };
+                let Some((d, t)) = self.member_pin(members, &p.name) else {
+                    continue;
+                };
                 if let Some(v) = pins.get_mut(p.net.0 as usize) {
                     v.push((usize::from(d.0), t.to_string(), p.at));
                 }
@@ -1593,8 +2235,13 @@ impl Flow<'_> {
                 continue;
             }
             let rects: Vec<pnr_core::Rect> = list.iter().map(|&(_, _, r)| r).collect();
-            for ((d, t, _), r) in list.iter().zip(self.stack.terminal_resistance_ohm(shapes, &rects)) {
-                let Some(r) = r.filter(|&r| r > 0.0) else { continue };
+            for ((d, t, _), r) in list
+                .iter()
+                .zip(self.stack.terminal_resistance_ohm(shapes, &rects))
+            {
+                let Some(r) = r.filter(|&r| r > 0.0) else {
+                    continue;
+                };
                 let v = &mut conductance[*d];
                 match v.iter_mut().find(|(n, _)| n == t) {
                     Some((_, g)) => *g += 1.0 / r,
@@ -1602,14 +2249,28 @@ impl Flow<'_> {
                 }
             }
         }
-        let series = conductance.into_iter().map(|v| v.into_iter().map(|(t, g)| (t, 1.0 / g)).collect()).collect();
+        let series = conductance
+            .into_iter()
+            .map(|v| v.into_iter().map(|(t, g)| (t, 1.0 / g)).collect())
+            .collect();
         let lod_inv_um = (0..n)
             .map(|d| {
-                let (s, k) = epoch.layout.units.of_device(&epoch.layout, pnr_core::DeviceId(d as u16)).filter(|u| u.lod.is_finite()).fold((0.0f32, 0u32), |(s, k), u| (s + u.lod, k + 1));
+                let (s, k) = epoch
+                    .layout
+                    .units
+                    .of_device(&epoch.layout, pnr_core::DeviceId(d as u16))
+                    .filter(|u| u.lod.is_finite())
+                    .fold((0.0f32, 0u32), |(s, k), u| (s + u.lod, k + 1));
                 (k > 0).then(|| s / k as f32)
             })
             .collect();
-        perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true, gate_offset_v: Vec::new() }
+        perf::Parasitics {
+            caps: epoch.caps.clone(),
+            series,
+            lod_inv_um,
+            extracted: true,
+            gate_offset_v: Vec::new(),
+        }
     }
 
     /// RTE-20: each capacitor `Unitization` of three or more members (EXT-19's
@@ -1619,23 +2280,65 @@ impl Flow<'_> {
     /// bbox of the cell drawing the members.
     fn plate_sets(&self, placed: &[Macro]) -> Vec<analog::routing::PlateSet> {
         use analog::metadata::NetClass::{Ground, Substrate, Supply};
-        let rail = |n: pnr_core::NetId| self.problem.net_classes.iter().any(|c| c.net == n && matches!(c.class, Supply | Ground | Substrate));
-        let term = |d: DeviceId, t: &str| self.netlist.devices[d.0 as usize].terminals.iter().find(|(n, _)| n == t).map(|&(_, n)| n);
+        let rail = |n: pnr_core::NetId| {
+            self.problem
+                .net_classes
+                .iter()
+                .any(|c| c.net == n && matches!(c.class, Supply | Ground | Substrate))
+        };
+        let term = |d: DeviceId, t: &str| {
+            self.netlist.devices[d.0 as usize]
+                .terminals
+                .iter()
+                .find(|(n, _)| n == t)
+                .map(|&(_, n)| n)
+        };
         let mut out = Vec::new();
-        for u in self.problem.constraints.unitization.iter().filter(|u| u.device_type == pnr_core::DeviceKind::Capacitor && u.devices.len() >= 3) {
-            let Some(top) = term(u.devices[0], "P") else { continue };
-            let Some(c) = self.cells.devices_of.iter().position(|m| !m.is_empty() && m.iter().all(|d| u.devices.contains(d))) else { continue };
-            let Some(array) = placed.get(c).map(|m| m.bbox) else { continue };
+        for u in
+            self.problem.constraints.unitization.iter().filter(|u| {
+                u.device_type == pnr_core::DeviceKind::Capacitor && u.devices.len() >= 3
+            })
+        {
+            let Some(top) = term(u.devices[0], "P") else {
+                continue;
+            };
+            let Some(c) = self
+                .cells
+                .devices_of
+                .iter()
+                .position(|m| !m.is_empty() && m.iter().all(|d| u.devices.contains(d)))
+            else {
+                continue;
+            };
+            let Some(array) = placed.get(c).map(|m| m.bbox) else {
+                continue;
+            };
             let units = |i: usize| u32::from(u.dev_nf.get(i).copied().unwrap_or(1));
-            let bits: Vec<(pnr_core::NetId, u32)> = u.devices.iter().enumerate().filter_map(|(i, &d)| term(d, "N").filter(|&n| !rail(n)).map(|n| (n, units(i)))).collect();
+            let bits: Vec<(pnr_core::NetId, u32)> = u
+                .devices
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &d)| term(d, "N").filter(|&n| !rail(n)).map(|n| (n, units(i))))
+                .collect();
             let c_unit_af = u
                 .devices
                 .iter()
                 .enumerate()
                 .filter(|&(i, _)| units(i) == 1)
-                .find_map(|(_, &d)| self.netlist.devices[d.0 as usize].params.iter().find(|(k, _)| k == "c_af").map(|&(_, v)| v as f32))
+                .find_map(|(_, &d)| {
+                    self.netlist.devices[d.0 as usize]
+                        .params
+                        .iter()
+                        .find(|(k, _)| k == "c_af")
+                        .map(|&(_, v)| v as f32)
+                })
                 .unwrap_or(f32::NAN);
-            out.push(analog::routing::PlateSet { top, bits, c_unit_af, array });
+            out.push(analog::routing::PlateSet {
+                top,
+                bits,
+                c_unit_af,
+                array,
+            });
         }
         out
     }
@@ -1649,12 +2352,18 @@ impl Flow<'_> {
         for b in &self.problem.placement.budget {
             b.offset_allowances(layout, &mut left);
         }
-        let placed = gr::place_macros(&cellgen::realize(&self.cells.variants, &layout.variant), layout);
+        let placed = gr::place_macros(
+            &cellgen::realize(&self.cells.variants, &layout.variant),
+            layout,
+        );
         // (device, terminal, rect) of every placed pin, per net.
-        let mut on_net: Vec<Vec<(DeviceId, String, pnr_core::Rect)>> = vec![Vec::new(); self.netlist.nets.len()];
+        let mut on_net: Vec<Vec<(DeviceId, String, pnr_core::Rect)>> =
+            vec![Vec::new(); self.netlist.nets.len()];
         for (m, members) in placed.iter().zip(&self.cells.devices_of) {
             for p in &m.pins {
-                let Some((d, t)) = self.member_pin(members, &p.name) else { continue };
+                let Some((d, t)) = self.member_pin(members, &p.name) else {
+                    continue;
+                };
                 if let Some(v) = on_net.get_mut(p.net.0 as usize) {
                     v.push((d, t.to_string(), p.at));
                 }
@@ -1662,19 +2371,47 @@ impl Flow<'_> {
         }
         let mut nodes = Vec::new();
         for req in &self.problem.intent.common_nodes {
-            let (Some(&a), Some(&b)) = (req.a.first(), req.b.first()) else { continue };
+            let (Some(&a), Some(&b)) = (req.a.first(), req.b.first()) else {
+                continue;
+            };
             let list = &on_net[req.net.0 as usize];
             let term = format!("{:?}", req.term);
-            let pins = |ds: &[DeviceId]| list.iter().filter(|p| ds.contains(&p.0) && p.1 == term).map(|p| p.2).collect::<Vec<_>>();
-            let feeds = list.iter().filter(|p| !req.a.contains(&p.0) && !req.b.contains(&p.0)).map(|p| p.2).collect();
-            let i_ua = self.id_ua.get(a.0 as usize).copied().flatten().map(|i| i.abs() as f32).filter(|&i| i > 0.0);
+            let pins = |ds: &[DeviceId]| {
+                list.iter()
+                    .filter(|p| ds.contains(&p.0) && p.1 == term)
+                    .map(|p| p.2)
+                    .collect::<Vec<_>>()
+            };
+            let feeds = list
+                .iter()
+                .filter(|p| !req.a.contains(&p.0) && !req.b.contains(&p.0))
+                .map(|p| p.2)
+                .collect();
+            let i_ua = self
+                .id_ua
+                .get(a.0 as usize)
+                .copied()
+                .flatten()
+                .map(|i| i.abs() as f32)
+                .filter(|&i| i > 0.0);
             let max_delta_ohm = common_node_ohm(&left, a, b, i_ua);
             // RTE-17 step 4: EXT-24's StarReq/KelvinReq (`intent.stars`/`kelvins`)
             // are not mapped yet (a StarReq supersedes the net's node, star = true).
-            nodes.push(analog::routing::CommonNode { net: req.net, groups: vec![pins(&req.a), pins(&req.b)], feeds, max_delta_ohm, star: false });
+            nodes.push(analog::routing::CommonNode {
+                net: req.net,
+                groups: vec![pins(&req.a), pins(&req.b)],
+                feeds,
+                max_delta_ohm,
+                star: false,
+            });
         }
         let joins = dr::joins(&self.layers, &self.cuts, self.d_router.cfg.pin_access);
-        analog::routing::CommonNodes { nodes, stack: self.stack, halo_nm: self.d_router.cfg.pitch, joins }
+        analog::routing::CommonNodes {
+            nodes,
+            stack: self.stack,
+            halo_nm: self.d_router.cfg.pitch,
+            joins,
+        }
     }
 
     /// Each recognised matched pair's surroundings on the placed geometry,
@@ -1684,7 +2421,14 @@ impl Flow<'_> {
         let ring_wells: Vec<pnr_core::Rect> = self
             .pdk
             .layer("nwell")
-            .map(|nwell| rings.iter().flat_map(|m| &m.shapes).filter(|s| s.layer == nwell).map(|s| s.rect).collect())
+            .map(|nwell| {
+                rings
+                    .iter()
+                    .flat_map(|m| &m.shapes)
+                    .filter(|s| s.layer == nwell)
+                    .map(|s| s.rect)
+                    .collect()
+            })
             .unwrap_or_default();
         analog::placement::Environment(self.env.surroundings_with(layout, &ring_wells))
     }
@@ -1699,11 +2443,12 @@ impl Flow<'_> {
             unknown()
         } else {
             stats.sims += (self.perf_active.len() * p.testbenches.len()) as u32;
-            perf::evaluate(self.netlist, &self.parasitics(epoch), p, self.perf_active).unwrap_or_else(|e| {
-                eprintln!("[perf] {e}");
-                stats.sim_failures += 1;
-                unknown()
-            })
+            perf::evaluate(self.netlist, &self.parasitics(epoch), p, self.perf_active)
+                .unwrap_or_else(|e| {
+                    eprintln!("[perf] {e}");
+                    stats.sim_failures += 1;
+                    unknown()
+                })
         };
         let plan = self.perf_plan;
         let stats_b = robust::bound_stats(&plan.tables, &plan.sigma_v, &result, &p.specs, &[], &[]);
@@ -1784,7 +2529,14 @@ fn epoch_score(
     c_tier: f32,
     footprint_nm2: f64,
 ) -> (LexKey, RunStats) {
-    let key = lex_key(place, route, &signoff.report, budgets, c_tier, footprint_nm2);
+    let key = lex_key(
+        place,
+        route,
+        &signoff.report,
+        budgets,
+        c_tier,
+        footprint_nm2,
+    );
     let stats = RunStats {
         c_tier,
         place_hard: place.hard_violations.len(),
@@ -1805,17 +2557,31 @@ fn lex_key(
     c_tier: f32,
     footprint_nm2: f64,
 ) -> LexKey {
-    let own = |r: &Report| r.hard_violations.iter().filter(|v| !v.is_batch_row()).count();
+    let own = |r: &Report| {
+        r.hard_violations
+            .iter()
+            .filter(|v| !v.is_batch_row())
+            .count()
+    };
     // `lvs-coverage/` rows (devices no deck recogniser extracts) are the same
     // every epoch: no layout fixes them, so they stay out of |V| or no design
     // with a BJT/MOM could ever read feasible, converge or debug-check its
     // winner. They stay in the report, so signoff and bench still see them.
     // An amendment to PERF-01 step 5 / PERF-02 step 3 (plan-07, master §6.1):
     // `converged` does not imply LVS-complete; `MetadataReport::certified` does.
-    let checked = signoff.hard_violations.iter().filter(|v| !v.rule.starts_with("lvs-coverage/")).count();
+    let checked = signoff
+        .hard_violations
+        .iter()
+        .filter(|v| !v.rule.starts_with("lvs-coverage/"))
+        .count();
     let v = budgets.hard_violated() + own(place) + own(route) + checked;
     let theta = budgets.theta()
-        + route.budget_violations.iter().filter(|x| !x.is_batch_row()).map(|x| x.margin as f64).sum::<f64>();
+        + route
+            .budget_violations
+            .iter()
+            .filter(|x| !x.is_batch_row())
+            .map(|x| x.margin as f64)
+            .sum::<f64>();
     (v, 0, 0.0, theta, c_tier, footprint_nm2)
 }
 
@@ -1837,11 +2603,17 @@ fn c_tier(
 ) -> f32 {
     use analog::metadata::NetClass;
     let w = |name: &str| -> f64 {
-        let Some(id) = names.iter().position(|n| n == name) else { return 0.0 };
+        let Some(id) = names.iter().position(|n| n == name) else {
+            return 0.0;
+        };
         if rows.is_empty() {
-            let signal = classes
-                .iter()
-                .any(|c| usize::from(c.net.0) == id && !matches!(c.class, NetClass::Supply | NetClass::Ground | NetClass::Substrate));
+            let signal = classes.iter().any(|c| {
+                usize::from(c.net.0) == id
+                    && !matches!(
+                        c.class,
+                        NetClass::Supply | NetClass::Ground | NetClass::Substrate
+                    )
+            });
             return f64::from(u8::from(signal));
         }
         let per_af: f64 = rows
@@ -1852,7 +2624,9 @@ fn c_tier(
             .sum();
         per_af * 1000.0
     };
-    caps.iter().map(|(a, b, c)| c * (w(a) + b.as_deref().map_or(0.0, w))).sum::<f64>() as f32
+    caps.iter()
+        .map(|(a, b, c)| c * (w(a) + b.as_deref().map_or(0.0, w)))
+        .sum::<f64>() as f32
 }
 
 /// [`c_tier`] over `signoff`'s extracted matrix, or NaN when signoff reports a
@@ -1868,7 +2642,12 @@ pub fn signoff_c_tier(
     rows: &[analog::routing::PerformanceBudget],
 ) -> f32 {
     let short = format!("lvs/{}", verify::checker::LABEL_SHORT);
-    if signoff.report.hard_violations.iter().any(|v| v.rule.starts_with(&short)) {
+    if signoff
+        .report
+        .hard_violations
+        .iter()
+        .any(|v| v.rule.starts_with(&short))
+    {
         return f32::NAN;
     }
     c_tier(&signoff.caps, names, classes, rows)
@@ -1882,14 +2661,25 @@ fn round_up(v: i32, grid: i32) -> i32 {
 /// Every injected FET macro extracts to exactly one device (the one it
 /// replaces). Other families are skipped: some (capacitors) are LVS reference
 /// skips and legitimately extract to none.
-fn check_injected(netlist: &pnr_core::Netlist, injected: &Macros, pdk: &Pdk) -> Result<(), FlowError> {
+fn check_injected(
+    netlist: &pnr_core::Netlist,
+    injected: &Macros,
+    pdk: &Pdk,
+) -> Result<(), FlowError> {
     let mut checker: Option<verify::Checker> = None;
     for d in &netlist.devices {
-        if !matches!(d.kind, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
+        if !matches!(
+            d.kind,
+            pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos
+        ) {
             continue;
         }
-        let Some(m) = injected.get(&d.name) else { continue };
-        let c = checker.get_or_insert_with(|| verify::Checker::new(pdk, true).expect("a loaded Pdk re-parses its own deck"));
+        let Some(m) = injected.get(&d.name) else {
+            continue;
+        };
+        let c = checker.get_or_insert_with(|| {
+            verify::Checker::new(pdk, true).expect("a loaded Pdk re-parses its own deck")
+        });
         match c.device_count(&m.shapes) {
             Some(1) => {}
             n => return Err(FlowError::InjectedNotADevice(d.name.clone(), n)),
@@ -1901,7 +2691,10 @@ fn check_injected(netlist: &pnr_core::Netlist, injected: &Macros, pdk: &Pdk) -> 
 /// Sidecar `em_front_row_cuts` (default `true`): EM counts a via group by its
 /// front row (REL-12), in `em_rules` and the detailed router alike.
 fn em_front_row(pdk: &Pdk) -> bool {
-    pdk.cell.get("em_front_row_cuts").and_then(serde_json::Value::as_bool).unwrap_or(true)
+    pdk.cell
+        .get("em_front_row_cuts")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
 }
 
 /// One hard [`analog::routing::Electromigration`] per routed (≥ 2-terminal)
@@ -1927,20 +2720,37 @@ fn em_rules(
         *slot = (l.0, lim);
     }
     if em.len() > MAX_LAYERS {
-        problem.missing.push(("Electromigration", "slot for every deck EM limit (more than MAX_LAYERS = 16; the rest unchecked)"));
+        problem.missing.push((
+            "Electromigration",
+            "slot for every deck EM limit (more than MAX_LAYERS = 16; the rest unchecked)",
+        ));
     }
     let has = |l: LayerId, f: fn(&Limit) -> f32| em.iter().any(|(x, lim)| *x == l && f(lim) > 0.0);
-    let name = |l: LayerId| pdk.layers.iter().find(|(_, x)| *x == l).map_or_else(|| format!("layer {}", l.0), |(n, _)| n.clone());
+    let name = |l: LayerId| {
+        pdk.layers
+            .iter()
+            .find(|(_, x)| *x == l)
+            .map_or_else(|| format!("layer {}", l.0), |(n, _)| n.clone())
+    };
     let unchecked: Vec<String> = metals
         .iter()
         .filter(|&&l| !has(l, |e| e.ua_per_um))
-        .chain(cuts.iter().map(|(c, ..)| c).filter(|&&c| !has(c, |e| e.ua_per_cut)))
+        .chain(
+            cuts.iter()
+                .map(|(c, ..)| c)
+                .filter(|&&c| !has(c, |e| e.ua_per_cut)),
+        )
         .map(|&l| name(l))
         .collect();
     if !unchecked.is_empty() {
         // ponytail: leaked once per run (`missing` holds `&'static str`), as the stack is.
-        let input = format!("deck EM limit on every routed and pin-access layer ({} unchecked)", unchecked.join(", "));
-        problem.missing.push(("Electromigration", Box::leak(input.into_boxed_str())));
+        let input = format!(
+            "deck EM limit on every routed and pin-access layer ({} unchecked)",
+            unchecked.join(", ")
+        );
+        problem
+            .missing
+            .push(("Electromigration", Box::leak(input.into_boxed_str())));
     }
     let mut terminals = vec![0usize; netlist.nets.len()];
     for (_, net) in netlist.devices.iter().flat_map(|d| &d.terminals) {
@@ -1948,7 +2758,12 @@ fn em_rules(
     }
     let rules: Vec<analog::routing::Electromigration> = (0..terminals.len())
         .filter(|&k| terminals[k] >= 2)
-        .map(|k| analog::routing::Electromigration { net: pnr_core::NetId(k as u16), limits, stack, front_row })
+        .map(|k| analog::routing::Electromigration {
+            net: pnr_core::NetId(k as u16),
+            limits,
+            stack,
+            front_row,
+        })
         .collect();
     problem.routing.hard.push(Box::new(rules));
 }
@@ -1966,7 +2781,10 @@ fn pin_member(name: &str) -> Option<(usize, &str)> {
 
 /// Per placed cell, its members' substrate tags OR-ed (EXT-23, for REL-16's
 /// [`cells::post_cell::may_share_well`]); a device in no cell is skipped.
-fn cell_flags(intent: &analog::intent::Intent, devices_of: &[Vec<DeviceId>]) -> Vec<cells::post_cell::CellFlags> {
+fn cell_flags(
+    intent: &analog::intent::Intent,
+    devices_of: &[Vec<DeviceId>],
+) -> Vec<cells::post_cell::CellFlags> {
     use analog::intent::Inject::{MinorityElectron, MinorityHole};
     let mut flags = vec![cells::post_cell::CellFlags::default(); devices_of.len()];
     let cell = |d: DeviceId| devices_of.iter().position(|m| m.contains(&d));
@@ -1994,12 +2812,43 @@ mod cell_flags_tests {
     #[test]
     fn cell_flags_or_over_members() {
         let intent = Intent {
-            aggressors: vec![Aggressor { device: DeviceId(1), inject: Inject::MinorityHole, reason: "" }, Aggressor { device: DeviceId(9), inject: Inject::Switching, reason: "" }],
-            victims: vec![Victim { device: DeviceId(2), weight: 1.0, reason: "" }],
+            aggressors: vec![
+                Aggressor {
+                    device: DeviceId(1),
+                    inject: Inject::MinorityHole,
+                    reason: "",
+                },
+                Aggressor {
+                    device: DeviceId(9),
+                    inject: Inject::Switching,
+                    reason: "",
+                },
+            ],
+            victims: vec![Victim {
+                device: DeviceId(2),
+                weight: 1.0,
+                reason: "",
+            }],
             ..Default::default()
         };
-        let flags = super::cell_flags(&intent, &[vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2)]]);
-        assert_eq!(flags, vec![CellFlags { injector: true, noisy: true, sensitive: false }, CellFlags { sensitive: true, ..Default::default() }]);
+        let flags = super::cell_flags(
+            &intent,
+            &[vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2)]],
+        );
+        assert_eq!(
+            flags,
+            vec![
+                CellFlags {
+                    injector: true,
+                    noisy: true,
+                    sensitive: false
+                },
+                CellFlags {
+                    sensitive: true,
+                    ..Default::default()
+                }
+            ]
+        );
     }
 }
 
@@ -2007,15 +2856,26 @@ mod cell_flags_tests {
 /// `d{k}:T` is terminal `T` of member `k`, a bare `T` member 0 (see
 /// `cellgen::bind_pins`). An unresolved device's terminals are `None` (its
 /// nets get no EM sizing); every other device keeps its currents.
-fn pin_currents(netlist: &pnr_core::Netlist, devices_of: &[Vec<DeviceId>], draws: &[Option<Vec<(String, f64)>>]) -> Vec<Vec<(String, Option<i32>)>> {
+fn pin_currents(
+    netlist: &pnr_core::Netlist,
+    devices_of: &[Vec<DeviceId>],
+    draws: &[Option<Vec<(String, f64)>>],
+) -> Vec<Vec<(String, Option<i32>)>> {
     devices_of
         .iter()
         .map(|members| {
             let mut out = Vec::new();
             for (k, d) in members.iter().enumerate() {
                 let terms: Vec<(String, Option<i32>)> = match &draws[d.0 as usize] {
-                    Some(ts) => ts.iter().map(|(t, ua)| (t.clone(), Some(ua.round() as i32))).collect(),
-                    None => netlist.devices[d.0 as usize].terminals.iter().map(|(t, _)| (t.clone(), None)).collect(),
+                    Some(ts) => ts
+                        .iter()
+                        .map(|(t, ua)| (t.clone(), Some(ua.round() as i32)))
+                        .collect(),
+                    None => netlist.devices[d.0 as usize]
+                        .terminals
+                        .iter()
+                        .map(|(t, _)| (t.clone(), None))
+                        .collect(),
                 };
                 for (t, ua) in terms {
                     out.push((format!("d{k}:{t}"), ua));
@@ -2039,12 +2899,21 @@ fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> Bias {
         .and_then(|oc| match oppoint::extract(netlist, oc) {
             Ok(o) => Some((o, oc.testbench.is_none())),
             Err(e) => {
-                eprintln!("[op] operating point unavailable ({e}); continuing with `device_power_uw`");
+                eprintln!(
+                    "[op] operating point unavailable ({e}); continuing with `device_power_uw`"
+                );
                 None
             }
         });
     let Some((o, probe)) = op else {
-        return Bias { power: cfg.device_power_uw.clone(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
+        return Bias {
+            power: cfg.device_power_uw.clone(),
+            summary: None,
+            currents: None,
+            net_headroom_mv: None,
+            gm_us: Vec::new(),
+            op: None,
+        };
     };
     let hottest = o
         .power_uw
@@ -2065,38 +2934,77 @@ fn bias(netlist: &pnr_core::Netlist, cfg: &Config) -> Bias {
     };
     let currents = o.terminal_ua(netlist);
     let headroom = o.net_headroom_mv(netlist);
-    Bias { power: o.power_uw.clone(), summary: Some(summary), currents: Some(currents), net_headroom_mv: Some(headroom), gm_us: o.gm_us.clone(), op: Some(o) }
+    Bias {
+        power: o.power_uw.clone(),
+        summary: Some(summary),
+        currents: Some(currents),
+        net_headroom_mv: Some(headroom),
+        gm_us: o.gm_us.clone(),
+        op: Some(o),
+    }
 }
 
 /// The matched pairs (2-device `DiffPair`/`CurrentMirror`/`Load` leaves) and
 /// every cell variant's n-well and diff rects, for the live WPE/OSE batch.
 /// Ranges: the deck's moderate WPE clearance and its minimal-tier LOD moat
 /// extension. No `nwell` or `diff` layer: no pairs (nothing measurable).
-fn live_environment(problem: &Problem, cells: &CellSpace, pdk: &Pdk) -> analog::placement::LiveEnvironment {
+fn live_environment(
+    problem: &Problem,
+    cells: &CellSpace,
+    pdk: &Pdk,
+) -> analog::placement::LiveEnvironment {
     use annotator::BlockKind::{CurrentMirror, DiffPair, Load};
     use pnr_core::Process;
     let mut env = analog::placement::LiveEnvironment {
         pairs: Vec::new(),
         geo: std::sync::Arc::default(),
-        wpe_min_nm: analog::matching::class::mos_env(pnr_core::MatchClass::Moderate, pdk).wpe_nm as f32,
-        ose_range_nm: pdk.tier("lod_moat_ext_nm", pnr_core::MatchClass::Minimal).unwrap_or(0) as f32,
+        wpe_min_nm: analog::matching::class::mos_env(pnr_core::MatchClass::Moderate, pdk).wpe_nm
+            as f32,
+        ose_range_nm: pdk
+            .tier("lod_moat_ext_nm", pnr_core::MatchClass::Minimal)
+            .unwrap_or(0) as f32,
     };
-    let (Some(nwell), Some(diff)) = (pdk.layer("nwell"), pdk.layer("diff")) else { return env };
-    let on = |m: &Macro, layer| m.shapes.iter().filter(|s| s.layer == layer).map(|s| s.rect).collect::<Vec<_>>();
+    let (Some(nwell), Some(diff)) = (pdk.layer("nwell"), pdk.layer("diff")) else {
+        return env;
+    };
+    let on = |m: &Macro, layer| {
+        m.shapes
+            .iter()
+            .filter(|s| s.layer == layer)
+            .map(|s| s.rect)
+            .collect::<Vec<_>>()
+    };
     let alts = || cells.variants.iter().map(|v| &v.alternatives);
     env.geo = std::sync::Arc::new(analog::placement::EnvGeo {
         bbox: alts().map(|a| a.iter().map(|m| m.bbox).collect()).collect(),
-        wells: alts().map(|a| a.iter().map(|m| on(m, nwell)).collect()).collect(),
-        diffs: alts().map(|a| a.iter().map(|m| on(m, diff)).collect()).collect(),
+        wells: alts()
+            .map(|a| a.iter().map(|m| on(m, nwell)).collect())
+            .collect(),
+        diffs: alts()
+            .map(|a| a.iter().map(|m| on(m, diff)).collect())
+            .collect(),
     });
-    let cell = |d: DeviceId| cells.devices_of.iter().position(|m| m.contains(&d)).map(|c| c as u16);
+    let cell = |d: DeviceId| {
+        cells
+            .devices_of
+            .iter()
+            .position(|m| m.contains(&d))
+            .map(|c| c as u16)
+    };
     for leaf in annotator::block::leaves(&problem.blocks) {
-        let &[a, b] = leaf.devices.as_slice() else { continue };
+        let &[a, b] = leaf.devices.as_slice() else {
+            continue;
+        };
         if !matches!(leaf.kind, DiffPair | CurrentMirror | Load) {
             continue;
         }
         // A member in no cell reads no OSE (`∞`), as before.
-        env.pairs.push((a, b, cell(a).unwrap_or(u16::MAX), cell(b).unwrap_or(u16::MAX)));
+        env.pairs.push((
+            a,
+            b,
+            cell(a).unwrap_or(u16::MAX),
+            cell(b).unwrap_or(u16::MAX),
+        ));
     }
     env
 }
@@ -2137,13 +3045,25 @@ impl CellSpace {
             cell_of,
             devices_of,
             aspect_missed,
-        } = cellgen::enumerate_folded(netlist, injected, &problem.constraints, pdk, merge_distinct_gates, fold, &problem.net_classes);
+        } = cellgen::enumerate_folded(
+            netlist,
+            injected,
+            &problem.constraints,
+            pdk,
+            merge_distinct_gates,
+            fold,
+            &problem.net_classes,
+        );
         let note = ("MatchClass", "no variant meets the aspect limit");
         if aspect_missed > 0 && !problem.missing.contains(&note) {
             problem.missing.push(note);
         }
         let gate = |d: &DeviceId| {
-            netlist.devices[d.0 as usize].terminals.iter().find(|(t, _)| t == "G").map(|(_, n)| *n)
+            netlist.devices[d.0 as usize]
+                .terminals
+                .iter()
+                .find(|(t, _)| t == "G")
+                .map(|(_, n)| *n)
         };
         let distinct_gate_merges = devices_of
             .iter()
@@ -2202,7 +3122,10 @@ impl CellSpace {
         // neighbours out of it; the ring is drawn back inside the reservation.
         let lattice = cells::builder::cut_lattice(pdk);
         for r in &cells.guard_rings.guard_rings {
-            let ext = round_up(cells::post_cell::ring_halo(r, pdk, ring_cut_ohm(pdk)), lattice);
+            let ext = round_up(
+                cells::post_cell::ring_halo(r, pdk, ring_cut_ohm(pdk)),
+                lattice,
+            );
             let Some(space) = cells.variants.get_mut(r.device.0 as usize) else {
                 continue;
             };
@@ -2215,16 +3138,26 @@ impl CellSpace {
         }
         // Origins on the cut lattice need extents on twice it (PLC-02); generated
         // and injected cells alike, before unit frames are taken from the bbox.
-        for m in cells.variants.iter_mut().flat_map(|s| s.alternatives.iter_mut()) {
+        for m in cells
+            .variants
+            .iter_mut()
+            .flat_map(|s| s.alternatives.iter_mut())
+        {
             m.align_bbox(lattice);
         }
         // After the halo: a unit's frame is the bbox `place_macro` anchors on.
         let per_cell: Vec<Vec<(pnr_core::Rect, &[pnr_core::Unit])>> = cells
             .variants
             .iter()
-            .map(|s| s.alternatives.iter().map(|m| (m.bbox, &m.units[..])).collect())
+            .map(|s| {
+                s.alternatives
+                    .iter()
+                    .map(|m| (m.bbox, &m.units[..]))
+                    .collect()
+            })
             .collect();
-        let units = pnr_core::UnitLib::build(cell_of, &devices_of, per_cell.iter().map(Vec::as_slice));
+        let units =
+            pnr_core::UnitLib::build(cell_of, &devices_of, per_cell.iter().map(Vec::as_slice));
         cells.units = std::sync::Arc::new(units);
         cells.devices_of = devices_of;
         cells
@@ -2302,10 +3235,23 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
 pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
     let (shapes, pins, reference) = signoff_inputs(sol, pdk);
     let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
-    s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.devices_of, &sol.netlist));
+    s.report.hard_violations.extend(undrawable(
+        &sol.macros[..sol.layout.x.len()],
+        &sol.devices_of,
+        &sol.netlist,
+    ));
     if let Some(op) = &sol.op {
         let probe = sol.metadata.bias.as_ref().is_some_and(|b| b.probe);
-        s.report.hard_violations.extend(reliability::voltage_findings(&sol.netlist, op, &pdk.fet_voltage_limits(), &sol.pairs, probe).0);
+        s.report.hard_violations.extend(
+            reliability::voltage_findings(
+                &sol.netlist,
+                op,
+                &pdk.fet_voltage_limits(),
+                &sol.pairs,
+                probe,
+            )
+            .0,
+        );
     }
     s
 }
@@ -2330,21 +3276,46 @@ fn matched_pairs(blocks: &[annotator::Block]) -> Vec<(DeviceId, DeviceId)> {
 /// behind an LVS that cannot see it either. The epoch counts them in |V| too
 /// (the same rows every epoch, so ranking is unchanged), so a run with an
 /// undrawn device never reads feasible or converged.
-fn undrawable<'a>(cells: &'a [Macro], devices_of: &'a [Vec<DeviceId>], netlist: &'a pnr_core::Netlist) -> impl Iterator<Item = pnr_core::report::Violation> + 'a {
-    cells.iter().enumerate().filter(|(_, m)| m.shapes.is_empty()).map(move |(i, _)| {
-        let who = devices_of.get(i).map_or_else(
-            || "?".to_string(),
-            |ds| ds.iter().map(|d| netlist.devices.get(d.0 as usize).map_or("?".to_string(), |d| format!("{} ({})", d.name, d.model))).collect::<Vec<_>>().join(", "),
-        );
-        pnr_core::report::Violation { rule: format!("cell/undrawable: {who} has no construction on this process"), margin: 1 }
-    })
+fn undrawable<'a>(
+    cells: &'a [Macro],
+    devices_of: &'a [Vec<DeviceId>],
+    netlist: &'a pnr_core::Netlist,
+) -> impl Iterator<Item = pnr_core::report::Violation> + 'a {
+    cells
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.shapes.is_empty())
+        .map(move |(i, _)| {
+            let who = devices_of.get(i).map_or_else(
+                || "?".to_string(),
+                |ds| {
+                    ds.iter()
+                        .map(|d| {
+                            netlist
+                                .devices
+                                .get(d.0 as usize)
+                                .map_or("?".to_string(), |d| format!("{} ({})", d.name, d.model))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+            );
+            pnr_core::report::Violation {
+                rule: format!("cell/undrawable: {who} has no construction on this process"),
+                margin: 1,
+            }
+        })
 }
 
 /// Adopt devices a later stage inserted (an antenna diode from `dr`): each
 /// device joins the schematic, so [`cellgen::reference`] gives LVS its entry,
 /// and its macro, already placed and pin-bound (absolute, like a guard ring),
 /// joins the geometry. A diode is `P` = anode, `N` = cathode.
-pub fn adopt_devices(netlist: &mut pnr_core::Netlist, macros: &mut Vec<Macro>, extra: Vec<(pnr_core::Device, Macro)>) {
+pub fn adopt_devices(
+    netlist: &mut pnr_core::Netlist,
+    macros: &mut Vec<Macro>,
+    extra: Vec<(pnr_core::Device, Macro)>,
+) {
     for (device, m) in extra {
         netlist.devices.push(device);
         macros.push(m);
@@ -2365,7 +3336,14 @@ pub fn signoff_inputs(
     let shapes = sol.geometry();
     let placed = pnr_core::place_macros(&sol.macros, &sol.layout);
     let names: Vec<String> = sol.netlist.nets.iter().map(|n| n.name.clone()).collect();
-    let (pins, reference) = labels_and_reference(&shapes, &placed, &names, &sol.netlist, Some(&sol.folds), pdk);
+    let (pins, reference) = labels_and_reference(
+        &shapes,
+        &placed,
+        &names,
+        &sol.netlist,
+        Some(&sol.folds),
+        pdk,
+    );
     (shapes, pins, reference)
 }
 
@@ -2375,12 +3353,24 @@ pub fn signoff_inputs(
 /// magic makes every top-level label a port, so an internal net labelled
 /// here fails pin matching against the schematic's `.subckt`.
 /// `Err` when a shape is on a layer with no GDS stream number ([`gds::emit`]).
-pub fn export_gds(sol: &Solution, pdk: &Pdk, top: &str, ports: &[String]) -> Result<Vec<u8>, String> {
+pub fn export_gds(
+    sol: &Solution,
+    pdk: &Pdk,
+    top: &str,
+    ports: &[String],
+) -> Result<Vec<u8>, String> {
     let (shapes, pins, _) = signoff_inputs(sol, pdk);
     let texts: Vec<gds::Text> = pins
         .iter()
         .filter(|p| ports.is_empty() || ports.contains(&p.name))
-        .filter_map(|p| Some(gds::Text { name: p.name.clone(), gds: pdk.label_gds(p.layer)?, x: p.x, y: p.y }))
+        .filter_map(|p| {
+            Some(gds::Text {
+                name: p.name.clone(),
+                gds: pdk.label_gds(p.layer)?,
+                x: p.x,
+                y: p.y,
+            })
+        })
         .collect();
     gds::emit(top, &shapes, &pdk.layer_gds(), &texts)
 }
@@ -2408,16 +3398,27 @@ pub fn reference_spice(sol: &Solution, pdk: &Pdk, top: &str, ports: &[String]) -
 pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String, String> {
     use pnr_core::DeviceKind as K;
     let nl = &sol.netlist;
-    if let Some(d) = nl.devices.iter().find(|d| !matches!(d.kind, K::Nmos | K::Pmos | K::Resistor)) {
+    if let Some(d) = nl
+        .devices
+        .iter()
+        .find(|d| !matches!(d.kind, K::Nmos | K::Pmos | K::Resistor))
+    {
         return Err(format!("{}: {:?} not extracted (PERF-30)", d.name, d.kind));
     }
     let (shapes, pins, _) = signoff_inputs(sol, pdk);
     let raw = verify::extract_spice(&shapes, &pins, pdk, verify::Detail::WithParasitics)?;
-    let ports: Vec<&str> = nl.ports.iter().map(|n| nl.nets[n.0 as usize].name.as_str()).collect();
+    let ports: Vec<&str> = nl
+        .ports
+        .iter()
+        .map(|n| nl.nets[n.0 as usize].name.as_str())
+        .collect();
     if ports.is_empty() {
         return Err("no .subckt ports".into());
     }
-    if let Some(p) = ports.iter().find(|p| !pins.iter().any(|q| q.name.eq_ignore_ascii_case(p))) {
+    if let Some(p) = ports
+        .iter()
+        .find(|p| !pins.iter().any(|q| q.name.eq_ignore_ascii_case(p)))
+    {
         return Err(format!("port {p} has no label"));
     }
     let base = |node: &str| node.rsplit_once(':').map_or(node, |(n, _)| n).to_string();
@@ -2427,26 +3428,52 @@ pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String,
     for line in raw.lines() {
         let t: Vec<&str> = line
             .split_whitespace()
-            .map(|tok| ports.iter().find(|p| tok.eq_ignore_ascii_case(&format!("{p}:0"))).copied().unwrap_or(tok))
+            .map(|tok| {
+                ports
+                    .iter()
+                    .find(|p| tok.eq_ignore_ascii_case(&format!("{p}:0")))
+                    .copied()
+                    .unwrap_or(tok)
+            })
             .collect();
         let name = t.first().copied().unwrap_or("");
         // Positional tokens (nodes, model) end at the first `k=v`.
         let pos = t.iter().take_while(|s| !s.contains('=')).count();
-        let kv = |k: &str| t[pos..].iter().find_map(|s| s.split_once('=').filter(|(n, _)| n.eq_ignore_ascii_case(k))?.1.parse::<f64>().ok());
+        let kv = |k: &str| {
+            t[pos..].iter().find_map(|s| {
+                s.split_once('=')
+                    .filter(|(n, _)| n.eq_ignore_ascii_case(k))?
+                    .1
+                    .parse::<f64>()
+                    .ok()
+            })
+        };
         let card = match name.chars().next().map(|c| c.to_ascii_uppercase()) {
             None => String::new(),
-            Some('.') if name.eq_ignore_ascii_case(".subckt") => format!(".subckt {top} {}", ports.join(" ")),
+            Some('.') if name.eq_ignore_ascii_case(".subckt") => {
+                format!(".subckt {top} {}", ports.join(" "))
+            }
             Some('.') if name.eq_ignore_ascii_case(".ends") => format!(".ends {top}"),
-            Some('*') if line.contains("database units") => "* lengths in um (the model library's .option scale=1.0u)".into(),
+            Some('*') if line.contains("database units") => {
+                "* lengths in um (the model library's .option scale=1.0u)".into()
+            }
             Some('*' | '.') => line.to_string(),
             Some('M') => {
                 if pos < 6 {
                     return Err(format!("{name}: MOS card without a bulk node"));
                 }
-                let (w, l) = kv("w").zip(kv("l")).ok_or_else(|| format!("{name}: MOS card without w/l"))?;
+                let (w, l) = kv("w")
+                    .zip(kv("l"))
+                    .ok_or_else(|| format!("{name}: MOS card without w/l"))?;
                 format!("X{name} {} w={} l={}", t[1..6].join(" "), um(w), um(l))
             }
-            Some('R' | 'C') if t.get(3).is_some_and(|v| v.trim_end_matches(char::is_alphabetic).parse::<f64>().is_ok()) => {
+            Some('R' | 'C')
+                if t.get(3).is_some_and(|v| {
+                    v.trim_end_matches(char::is_alphabetic)
+                        .parse::<f64>()
+                        .is_ok()
+                }) =>
+            {
                 line.to_string()
             }
             Some('R') if pos == 4 => {
@@ -2454,23 +3481,43 @@ pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String,
                 let ends = |a: &str, b: &str| {
                     let (a, b) = (base(a), base(b));
                     let (x, y) = (base(t[1]), base(t[2]));
-                    (a.eq_ignore_ascii_case(&x) && b.eq_ignore_ascii_case(&y)) || (a.eq_ignore_ascii_case(&y) && b.eq_ignore_ascii_case(&x))
+                    (a.eq_ignore_ascii_case(&x) && b.eq_ignore_ascii_case(&y))
+                        || (a.eq_ignore_ascii_case(&y) && b.eq_ignore_ascii_case(&x))
                 };
-                let net = |d: &pnr_core::Device, k: &str| d.terminals.iter().find(|(n, _)| n == k).map(|(_, n)| nl.nets[n.0 as usize].name.as_str());
+                let net = |d: &pnr_core::Device, k: &str| {
+                    d.terminals
+                        .iter()
+                        .find(|(n, _)| n == k)
+                        .map(|(_, n)| nl.nets[n.0 as usize].name.as_str())
+                };
                 // The deck model the LVS reference names (as in [`labels_and_reference`]).
-                let deck = |m: &str| pdk.recipe("resistor", m).map_or_else(|| m.to_string(), |r| r.model);
+                let deck = |m: &str| {
+                    pdk.recipe("resistor", m)
+                        .map_or_else(|| m.to_string(), |r| r.model)
+                };
                 let hits: Vec<&pnr_core::Device> = nl
                     .devices
                     .iter()
                     .filter(|d| d.kind == K::Resistor && deck(&d.model).eq_ignore_ascii_case(model))
-                    .filter(|d| net(d, "P").zip(net(d, "N")).is_some_and(|(p, n)| ends(p, n)))
+                    .filter(|d| {
+                        net(d, "P")
+                            .zip(net(d, "N"))
+                            .is_some_and(|(p, n)| ends(p, n))
+                    })
                     .collect();
                 // ponytail: a resistor drawn as several segments (CELL-06) extracts several cards and errs here
                 let [d] = hits[..] else {
                     return Err(format!("{name}: {} schematic resistors match", hits.len()));
                 };
-                let p = |k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| um(v as f64));
-                let (w, l) = p("w").zip(p("l")).ok_or_else(|| format!("{name}: schematic {} has no w/l", d.name))?;
+                let p = |k: &str| {
+                    d.params
+                        .iter()
+                        .find(|(n, _)| n == k)
+                        .map(|&(_, v)| um(v as f64))
+                };
+                let (w, l) = p("w")
+                    .zip(p("l"))
+                    .ok_or_else(|| format!("{name}: schematic {} has no w/l", d.name))?;
                 resistors += 1;
                 format!("R{name} {} {} {model} w={w} l={l}", t[1], t[2])
             }
@@ -2481,7 +3528,9 @@ pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String,
     }
     let want = nl.devices.iter().filter(|d| d.kind == K::Resistor).count();
     if resistors != want {
-        return Err(format!("{resistors} resistor cards extracted for {want} schematic resistors"));
+        return Err(format!(
+            "{resistors} resistor cards extracted for {want} schematic resistors"
+        ));
     }
     Ok(out)
 }
@@ -2515,18 +3564,29 @@ fn labels_and_reference(
     let (drawn, replaced) = cellgen::drawn_cards(placed, nets, schematic, pdk);
     let mut reference = cellgen::reference(schematic, fold, &replaced);
     // A resistor is drawn to its model's recipe: the deck model that names.
-    for d in reference.devices.iter_mut().filter(|d| d.kind == verify::reference::RefKind::Resistor) {
+    for d in reference
+        .devices
+        .iter_mut()
+        .filter(|d| d.kind == verify::reference::RefKind::Resistor)
+    {
         if let Some(r) = pdk.recipe("resistor", d.model.as_deref().unwrap_or("")) {
             d.model = Some(r.model);
         }
     }
-    reference.devices.extend(cellgen::dummy_cards(placed, nets, &reference.devices));
+    reference
+        .devices
+        .extend(cellgen::dummy_cards(placed, nets, &reference.devices));
     reference.devices.extend(drawn);
     reference.ports = pins.iter().map(|p| p.name.clone()).collect();
     // PERF-03: only the declared `.subckt` ports leave the cell; with none
     // (no `.subckt` around the top) every labelled net stays exempt.
-    reference.external_ports = (!schematic.ports.is_empty())
-        .then(|| schematic.ports.iter().map(|n| schematic.nets[n.0 as usize].name.clone()).collect());
+    reference.external_ports = (!schematic.ports.is_empty()).then(|| {
+        schematic
+            .ports
+            .iter()
+            .map(|n| schematic.nets[n.0 as usize].name.clone())
+            .collect()
+    });
     (pins, reference)
 }
 
@@ -2577,9 +3637,20 @@ mod start_tests {
     #[test]
     fn substrate_kind_is_read_from_the_deck() {
         use pnr_core::SubstrateKind::{Bulk, Unknown};
-        for (name, kind) in [("sky130", Bulk), ("gf180mcu", Unknown), ("ihp_sg13g2", Unknown), ("generic_finfet", Unknown)] {
+        for (name, kind) in [
+            ("sky130", Bulk),
+            ("gf180mcu", Unknown),
+            ("ihp_sg13g2", Unknown),
+            ("generic_finfet", Unknown),
+        ] {
             let pdk = verify::Pdk::builtin(name).expect("deck loads");
-            assert_eq!(crate::annotation(&pdk, &Default::default()).process.substrate, kind, "{name}");
+            assert_eq!(
+                crate::annotation(&pdk, &Default::default())
+                    .process
+                    .substrate,
+                kind,
+                "{name}"
+            );
         }
     }
 
@@ -2589,7 +3660,13 @@ mod start_tests {
     fn multi_start_is_deterministic() {
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
         let spice = ".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\nXM2 d x VSS VSS nfet_01v8 W=2u L=0.5u\n.ends p\n";
-        let cfg = crate::Config { seed: 7, feedback_iters: 2, outer_iters: 1, starts: 3, ..Default::default() };
+        let cfg = crate::Config {
+            seed: 7,
+            feedback_iters: 2,
+            outer_iters: 1,
+            starts: 3,
+            ..Default::default()
+        };
         let run = || crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow");
         let (a, b) = (run(), run());
         assert_eq!((a.layout.x, a.layout.y), (b.layout.x, b.layout.y));
@@ -2602,10 +3679,21 @@ mod start_tests {
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
         let spice = ".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=8u L=0.5u\nXM2 d x VSS VSS nfet_01v8 W=8u L=0.5u\n.ends p\n";
         let calls = |starts| {
-            let before = (crate::cellgen::price_calls(), crate::APART_BUILDS.with(std::cell::Cell::get));
-            let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts, ..Default::default() };
+            let before = (
+                crate::cellgen::price_calls(),
+                crate::APART_BUILDS.with(std::cell::Cell::get),
+            );
+            let cfg = crate::Config {
+                feedback_iters: 2,
+                outer_iters: 1,
+                starts,
+                ..Default::default()
+            };
             crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow");
-            (crate::cellgen::price_calls() - before.0, crate::APART_BUILDS.with(std::cell::Cell::get) - before.1)
+            (
+                crate::cellgen::price_calls() - before.0,
+                crate::APART_BUILDS.with(std::cell::Cell::get) - before.1,
+            )
         };
         let (n1, n3) = (calls(1), calls(3));
         // The pair merges with distinct gates, so both topologies are hoisted.
@@ -2618,9 +3706,26 @@ mod start_tests {
     #[test]
     fn same_seed_same_gds_bytes() {
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
-        let cfg = crate::Config { seed: 1, feedback_iters: 2, outer_iters: 1, starts: 3, ..Default::default() };
-        for spice in [include_str!("../../../benchmarks/fixtures/chain4.spice"), include_str!("../../../benchmarks/fixtures/ota.spice")] {
-            let gds = || crate::export_gds(&crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow"), &pdk, "top", &[]).unwrap();
+        let cfg = crate::Config {
+            seed: 1,
+            feedback_iters: 2,
+            outer_iters: 1,
+            starts: 3,
+            ..Default::default()
+        };
+        for spice in [
+            include_str!("../../../benchmarks/fixtures/chain4.spice"),
+            include_str!("../../../benchmarks/fixtures/ota.spice"),
+        ] {
+            let gds = || {
+                crate::export_gds(
+                    &crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow"),
+                    &pdk,
+                    "top",
+                    &[],
+                )
+                .unwrap()
+            };
             assert!(gds() == gds());
         }
     }
@@ -2629,23 +3734,51 @@ mod start_tests {
     fn stage_times_are_reported() {
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
         let spice = include_str!("../../../benchmarks/fixtures/pair.spice");
-        let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts: 1, ..Default::default() };
-        let ms = crate::run(spice, &pdk, &Default::default(), &cfg).expect("flow").stats.stage_ms;
+        let cfg = crate::Config {
+            feedback_iters: 2,
+            outer_iters: 1,
+            starts: 1,
+            ..Default::default()
+        };
+        let ms = crate::run(spice, &pdk, &Default::default(), &cfg)
+            .expect("flow")
+            .stats
+            .stage_ms;
         assert!(ms.iter().sum::<f64>() > 0.0, "{ms:?}");
         assert!(ms[6] > 0.0, "signoff runs every epoch: {ms:?}");
     }
 
     #[test]
     fn interface_parses_the_fixture_and_rejects_a_non_port() {
-        let i = crate::Interface::from_json(include_str!("../../../benchmarks/fixtures/ota_constrained.interface.json")).expect("parses");
+        let i = crate::Interface::from_json(include_str!(
+            "../../../benchmarks/fixtures/ota_constrained.interface.json"
+        ))
+        .expect("parses");
         assert_eq!(i.die_nm, Some((30000, 70000)));
         assert_eq!(i.pins.len(), 6);
         assert_eq!(i.pins[0].side, crate::Side::South);
         assert_eq!(i.pins[0].width_nm, 800);
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
-        let pin = crate::IoPin { net: "nope".into(), side: crate::Side::North, frac: 0.5, width_nm: 800, layer: "met3".into() };
-        let cfg = crate::Config { interface: Some(crate::Interface { die_nm: None, pins: vec![pin] }), ..Default::default() };
-        match crate::run(include_str!("../../../benchmarks/fixtures/pair.spice"), &pdk, &Default::default(), &cfg) {
+        let pin = crate::IoPin {
+            net: "nope".into(),
+            side: crate::Side::North,
+            frac: 0.5,
+            width_nm: 800,
+            layer: "met3".into(),
+        };
+        let cfg = crate::Config {
+            interface: Some(crate::Interface {
+                die_nm: None,
+                pins: vec![pin],
+            }),
+            ..Default::default()
+        };
+        match crate::run(
+            include_str!("../../../benchmarks/fixtures/pair.spice"),
+            &pdk,
+            &Default::default(),
+            &cfg,
+        ) {
             Err(crate::FlowError::Interface(m)) => assert!(m.contains("nope"), "{m}"),
             r => panic!("expected FlowError::Interface, got {:?}", r.err()),
         }
@@ -2656,9 +3789,17 @@ mod start_tests {
     #[test]
     fn one_dual_step_per_epoch() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).expect("sky130 loads");
+        let pdk = verify::Pdk::from_json(
+            &std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap(),
+        )
+        .expect("sky130 loads");
         let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/pair.spice")).unwrap();
-        let cfg = crate::Config { feedback_iters: 3, outer_iters: 1, starts: 1, ..Default::default() };
+        let cfg = crate::Config {
+            feedback_iters: 3,
+            outer_iters: 1,
+            starts: 1,
+            ..Default::default()
+        };
         let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
         assert!(sol.stats.iterations > 0);
         assert_eq!(sol.stats.dual_steps, sol.stats.iterations);
@@ -2669,26 +3810,54 @@ mod start_tests {
     #[test]
     fn a_failed_simulation_is_counted_and_every_bound_reported() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).expect("sky130 loads");
+        let pdk = verify::Pdk::from_json(
+            &std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap(),
+        )
+        .expect("sky130 loads");
         let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/pair.spice")).unwrap();
         let performance = crate::perf::PerfConfig {
-            sim: crate::oppoint::OpConfig { ngspice: "philis-no-such-binary-7f3a".into(), ..Default::default() },
+            sim: crate::oppoint::OpConfig {
+                ngspice: "philis-no-such-binary-7f3a".into(),
+                ..Default::default()
+            },
             testbenches: vec![String::new()],
             scenarios: Vec::new(),
-            specs: vec![crate::perf::Spec { metric: "gain".into(), min: Some(20.0), max: Some(60.0) }],
+            specs: vec![crate::perf::Spec {
+                metric: "gain".into(),
+                min: Some(20.0),
+                max: Some(60.0),
+            }],
         };
-        let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts: 1, performance: Some(performance), ..Default::default() };
+        let cfg = crate::Config {
+            feedback_iters: 2,
+            outer_iters: 1,
+            starts: 1,
+            performance: Some(performance),
+            ..Default::default()
+        };
         let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
         assert!(sol.stats.sim_failures >= 1, "{:?}", sol.stats);
         assert_eq!(sol.metadata.sim_failures, sol.stats.sim_failures);
         let rows = &sol.metadata.budget_rows;
         assert_eq!(rows.len(), 3, "{rows:?}");
         // Unevaluated, every scenario stays active (here the one `sim` implies).
-        assert!(rows[0].starts_with("scenario ") && rows[0].ends_with(": active"), "{rows:?}");
-        assert!(rows[1].starts_with("gain:min: no row (sensitivities unavailable"), "{rows:?}");
-        assert!(rows[2].starts_with("gain:max: no row (sensitivities unavailable"), "{rows:?}");
+        assert!(
+            rows[0].starts_with("scenario ") && rows[0].ends_with(": active"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[1].starts_with("gain:min: no row (sensitivities unavailable"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[2].starts_with("gain:max: no row (sensitivities unavailable"),
+            "{rows:?}"
+        );
         let text = sol.metadata.to_string();
-        assert!(text.contains(&format!("simulations failed: {}", sol.stats.sim_failures)), "{text}");
+        assert!(
+            text.contains(&format!("simulations failed: {}", sol.stats.sim_failures)),
+            "{text}"
+        );
         assert!(text.contains("budget gain:max: no row"), "{text}");
     }
 
@@ -2699,15 +3868,31 @@ mod start_tests {
     #[test]
     fn failed_simulations_count_over_every_start() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).expect("sky130 loads");
+        let pdk = verify::Pdk::from_json(
+            &std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap(),
+        )
+        .expect("sky130 loads");
         let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/pair.spice")).unwrap();
         let performance = crate::perf::PerfConfig {
-            sim: crate::oppoint::OpConfig { ngspice: "philis-no-such-binary-7f3a".into(), ..Default::default() },
+            sim: crate::oppoint::OpConfig {
+                ngspice: "philis-no-such-binary-7f3a".into(),
+                ..Default::default()
+            },
             testbenches: vec![String::new()],
             scenarios: Vec::new(),
-            specs: vec![crate::perf::Spec { metric: "gain".into(), min: Some(20.0), max: None }],
+            specs: vec![crate::perf::Spec {
+                metric: "gain".into(),
+                min: Some(20.0),
+                max: None,
+            }],
         };
-        let cfg = crate::Config { feedback_iters: 1, outer_iters: 1, starts: 2, performance: Some(performance), ..Default::default() };
+        let cfg = crate::Config {
+            feedback_iters: 1,
+            outer_iters: 1,
+            starts: 2,
+            performance: Some(performance),
+            ..Default::default()
+        };
         let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
         assert_eq!(sol.stats.iterations, 1, "{:?}", sol.stats);
         assert!(sol.stats.sim_failures >= 2, "{:?}", sol.stats);
@@ -2723,18 +3908,56 @@ mod start_tests {
             name: name.into(),
             kind: DeviceKind::Nmos,
             model: String::new(),
-            terminals: ["D", "G", "S", "B"].iter().enumerate().map(|(i, t)| ((*t).into(), NetId(i as u16))).collect(),
+            terminals: ["D", "G", "S", "B"]
+                .iter()
+                .enumerate()
+                .map(|(i, t)| ((*t).into(), NetId(i as u16)))
+                .collect(),
             params: vec![],
         };
-        let nl = Netlist { devices: vec![fet("M0"), fet("M1"), fet("M2")], nets: ["a", "b", "c", "d"].iter().map(|n| Net { name: (*n).into() }).collect(), ..Default::default() };
-        let known = |id: f64| Some(vec![("D".into(), id), ("G".into(), 0.0), ("S".into(), -id), ("B".into(), 0.0)]);
-        let cells = [vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2)], vec![DeviceId(1), DeviceId(0)]];
+        let nl = Netlist {
+            devices: vec![fet("M0"), fet("M1"), fet("M2")],
+            nets: ["a", "b", "c", "d"]
+                .iter()
+                .map(|n| Net { name: (*n).into() })
+                .collect(),
+            ..Default::default()
+        };
+        let known = |id: f64| {
+            Some(vec![
+                ("D".into(), id),
+                ("G".into(), 0.0),
+                ("S".into(), -id),
+                ("B".into(), 0.0),
+            ])
+        };
+        let cells = [
+            vec![DeviceId(0), DeviceId(1)],
+            vec![DeviceId(2)],
+            vec![DeviceId(1), DeviceId(0)],
+        ];
         let pins = crate::pin_currents(&nl, &cells, &[known(10.0), None, known(20.0)]);
         let ua = |cell: usize, pin: &str| pins[cell].iter().find(|(n, _)| n == pin).map(|p| p.1);
-        assert_eq!((ua(0, "d0:D"), ua(0, "D"), ua(0, "d0:S")), (Some(Some(10)), Some(Some(10)), Some(Some(-10))), "member 0 known");
-        assert_eq!((ua(0, "d1:D"), ua(0, "d1:S"), ua(0, "d1:G")), (Some(None), Some(None), Some(None)), "member 1 unknown, never zero");
-        assert_eq!((ua(1, "d0:D"), ua(1, "S")), (Some(Some(20)), Some(Some(-20))), "the other cell known");
-        assert_eq!((ua(2, "D"), ua(2, "d0:S"), ua(2, "d1:D")), (Some(None), Some(None), Some(Some(10))), "unresolved member 0: bare names unknown too");
+        assert_eq!(
+            (ua(0, "d0:D"), ua(0, "D"), ua(0, "d0:S")),
+            (Some(Some(10)), Some(Some(10)), Some(Some(-10))),
+            "member 0 known"
+        );
+        assert_eq!(
+            (ua(0, "d1:D"), ua(0, "d1:S"), ua(0, "d1:G")),
+            (Some(None), Some(None), Some(None)),
+            "member 1 unknown, never zero"
+        );
+        assert_eq!(
+            (ua(1, "d0:D"), ua(1, "S")),
+            (Some(Some(20)), Some(Some(-20))),
+            "the other cell known"
+        );
+        assert_eq!(
+            (ua(2, "D"), ua(2, "d0:S"), ua(2, "d1:D")),
+            (Some(None), Some(None), Some(Some(10))),
+            "unresolved member 0: bare names unknown too"
+        );
     }
 
     /// REL-01 acceptance on the real fixtures and ngspice bias: every pin on a
@@ -2743,21 +3966,53 @@ mod start_tests {
     #[test]
     fn fixture_nets_without_a_resistor_keep_em_sizing() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let Some(lib) = crate::tools::sky130_models() else { return };
-        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
-        let cfg = crate::Config { op: Some(crate::oppoint::OpConfig { model_lib: Some(lib), ..Default::default() }), ..Default::default() };
+        let Some(lib) = crate::tools::sky130_models() else {
+            return;
+        };
+        let pdk = verify::Pdk::from_json(
+            &std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap(),
+        )
+        .unwrap();
+        let cfg = crate::Config {
+            op: Some(crate::oppoint::OpConfig {
+                model_lib: Some(lib),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         for fixture in ["rc_filter", "dac4"] {
-            let mut nl = crate::parse(&std::fs::read_to_string(root.join(format!("benchmarks/fixtures/{fixture}.spice"))).unwrap()).unwrap();
+            let mut nl = crate::parse(
+                &std::fs::read_to_string(root.join(format!("benchmarks/fixtures/{fixture}.spice")))
+                    .unwrap(),
+            )
+            .unwrap();
             crate::deck_models(&mut nl, &pdk);
             let currents = crate::bias(&nl, &cfg).currents.expect("operating point");
-            let one_per_cell: Vec<_> = (0..nl.devices.len()).map(|i| vec![pnr_core::DeviceId(i as u16)]).collect();
+            let one_per_cell: Vec<_> = (0..nl.devices.len())
+                .map(|i| vec![pnr_core::DeviceId(i as u16)])
+                .collect();
             let pins = crate::pin_currents(&nl, &one_per_cell, &currents);
             for (k, net) in nl.nets.iter().enumerate() {
-                let on = || nl.devices.iter().enumerate().flat_map(|(i, d)| d.terminals.iter().filter(|(_, n)| n.0 as usize == k).map(move |(t, _)| (i, d, t)));
+                let on = || {
+                    nl.devices.iter().enumerate().flat_map(|(i, d)| {
+                        d.terminals
+                            .iter()
+                            .filter(|(_, n)| n.0 as usize == k)
+                            .map(move |(t, _)| (i, d, t))
+                    })
+                };
                 let resistor = on().any(|(_, d, _)| d.kind == pnr_core::DeviceKind::Resistor);
-                let known = on().all(|(i, _, t)| pins[i].iter().any(|(p, ua)| *p == format!("d0:{t}") && ua.is_some()));
+                let known = on().all(|(i, _, t)| {
+                    pins[i]
+                        .iter()
+                        .any(|(p, ua)| *p == format!("d0:{t}") && ua.is_some())
+                });
                 eprintln!("{fixture} {}: resistor={resistor} known={known}", net.name);
-                assert!(resistor || known, "{fixture} {} touches no resistor but has an unknown pin current", net.name);
+                assert!(
+                    resistor || known,
+                    "{fixture} {} touches no resistor but has an unknown pin current",
+                    net.name
+                );
             }
         }
     }
@@ -2770,42 +4025,98 @@ mod start_tests {
         use analog::routing::em::{Limit, MAX_LAYERS};
         use pnr_core::LayerId;
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
-        let nl = crate::parse(".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\n.ends p\n").unwrap();
+        let nl =
+            crate::parse(".subckt p d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\n.ends p\n")
+                .unwrap();
         let problem = || annotator::annotate(&nl, &crate::annotation(&pdk, &Default::default()));
         let (name, id) = pdk.layers[0].clone();
-        let lim = Limit { ua_per_um: 1.0, ua_per_cut: 1.0, ..Limit::default() };
+        let lim = Limit {
+            ua_per_um: 1.0,
+            ua_per_cut: 1.0,
+            ..Limit::default()
+        };
         let full: Vec<_> = (0..=MAX_LAYERS as u16).map(|l| (LayerId(l), lim)).collect();
 
         let mut p = problem();
-        crate::em_rules(&mut p, &nl, &full, &[LayerId(MAX_LAYERS as u16)], &[], None, true, &pdk);
-        let rows: Vec<&str> = p.missing.iter().filter(|m| m.0 == "Electromigration").map(|m| m.1).collect();
+        crate::em_rules(
+            &mut p,
+            &nl,
+            &full,
+            &[LayerId(MAX_LAYERS as u16)],
+            &[],
+            None,
+            true,
+            &pdk,
+        );
+        let rows: Vec<&str> = p
+            .missing
+            .iter()
+            .filter(|m| m.0 == "Electromigration")
+            .map(|m| m.1)
+            .collect();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(rows[0].contains("MAX_LAYERS"), "{rows:?}");
 
         let mut p = problem();
         crate::em_rules(&mut p, &nl, &[], &[id], &[], None, true, &pdk);
-        let rows: Vec<&str> = p.missing.iter().filter(|m| m.0 == "Electromigration").map(|m| m.1).collect();
-        assert_eq!(rows, [format!("deck EM limit on every routed and pin-access layer ({name} unchecked)")]);
+        let rows: Vec<&str> = p
+            .missing
+            .iter()
+            .filter(|m| m.0 == "Electromigration")
+            .map(|m| m.1)
+            .collect();
+        assert_eq!(
+            rows,
+            [format!(
+                "deck EM limit on every routed and pin-access layer ({name} unchecked)"
+            )]
+        );
     }
 
     /// C within the tie band goes to the smaller footprint; outside it, C wins.
     #[test]
     fn close_c_is_decided_by_area_and_far_c_by_c() {
         let k = |c: f32, area: f64| (0usize, 0u32, 0.0, 0.0, c, area);
-        assert!(crate::key_lt(&k(30.0, 265.0), &k(29.6, 385.0)), "1.3% more C, 31% less area");
-        assert!(crate::key_lt(&k(29.0, 385.0), &k(30.0, 265.0)), "3.3% less C wins outright");
-        assert!(!crate::key_lt(&(1usize, 0, 0.0, 0.0, 1.0, 1.0), &k(99.0, 999.0)), "a violation never wins on C");
+        assert!(
+            crate::key_lt(&k(30.0, 265.0), &k(29.6, 385.0)),
+            "1.3% more C, 31% less area"
+        );
+        assert!(
+            crate::key_lt(&k(29.0, 385.0), &k(30.0, 265.0)),
+            "3.3% less C wins outright"
+        );
+        assert!(
+            !crate::key_lt(&(1usize, 0, 0.0, 0.0, 1.0, 1.0), &k(99.0, 999.0)),
+            "a violation never wins on C"
+        );
     }
 
     use crate::metadata::{Arm, BudgetStatus, MetadataReport};
     use pnr_core::{Report, Violation};
 
     fn row(arm: Arm, total: usize, satisfied: usize, residual: f64) -> BudgetStatus {
-        BudgetStatus { kind: "K".into(), arm, total, satisfied, violations: total - satisfied, unknown: 0, criticality: 0.0, residual, usage: None, violated: Vec::new() }
+        BudgetStatus {
+            kind: "K".into(),
+            arm,
+            total,
+            satisfied,
+            violations: total - satisfied,
+            unknown: 0,
+            criticality: 0.0,
+            residual,
+            usage: None,
+            violated: Vec::new(),
+        }
     }
 
     fn rows(rules: &[&str]) -> Vec<Violation> {
-        rules.iter().map(|r| Violation { rule: (*r).into(), margin: 1 }).collect()
+        rules
+            .iter()
+            .map(|r| Violation {
+                rule: (*r).into(),
+                margin: 1,
+            })
+            .collect()
     }
 
     fn key(place: &Report, signoff: &Report, budgets: &MetadataReport) -> crate::LexKey {
@@ -2815,18 +4126,30 @@ mod start_tests {
     /// |V| counts the 40 violated rules of a hard batch, not its one stage row.
     #[test]
     fn v_counts_rules_not_batches() {
-        let budgets = MetadataReport { placement: vec![row(Arm::Hard, 40, 0, 3.0)], ..Default::default() };
-        let place = Report { hard_violations: rows(&["batch:analog hard 0 (Symmetry)"]), ..Default::default() };
+        let budgets = MetadataReport {
+            placement: vec![row(Arm::Hard, 40, 0, 3.0)],
+            ..Default::default()
+        };
+        let place = Report {
+            hard_violations: rows(&["batch:analog hard 0 (Symmetry)"]),
+            ..Default::default()
+        };
         assert_eq!(key(&place, &Report::default(), &budgets).0, 40);
     }
 
     /// A budget residual restated by the placement report is not added twice.
     #[test]
     fn theta_counts_each_budget_once() {
-        let budgets = MetadataReport { placement: vec![row(Arm::Budget, 1, 0, 0.5)], ..Default::default() };
+        let budgets = MetadataReport {
+            placement: vec![row(Arm::Budget, 1, 0, 0.5)],
+            ..Default::default()
+        };
         assert_eq!(budgets.theta(), 500.0);
         let place = Report {
-            budget_violations: vec![Violation::from_residual(format!("{}analog budget 0", Violation::BATCH), 0.5)],
+            budget_violations: vec![Violation::from_residual(
+                format!("{}analog budget 0", Violation::BATCH),
+                0.5,
+            )],
             ..Default::default()
         };
         assert_eq!(place.budget_violations[0].margin, 500);
@@ -2841,8 +4164,14 @@ mod start_tests {
         let mut signoff = verify::Signoff::default();
         signoff.report.hard_violations = rows(&["drc/m1.1:met1"]);
         signoff.warnings = rows(&["erc/tie_high_low:li", "erc/tie_high_low:li"]);
-        let (key, stats) =
-            crate::epoch_score(&Report::default(), &Report::default(), &signoff, &MetadataReport::default(), 0.0, 1.0);
+        let (key, stats) = crate::epoch_score(
+            &Report::default(),
+            &Report::default(),
+            &signoff,
+            &MetadataReport::default(),
+            0.0,
+            1.0,
+        );
         assert_eq!((key.0, stats.drc_hard, stats.warnings), (1, 1, 2));
     }
 
@@ -2850,66 +4179,127 @@ mod start_tests {
     /// design with a BJT must still converge) but stays a signoff row.
     #[test]
     fn coverage_rows_are_not_epoch_violations() {
-        let signoff = Report { hard_violations: rows(&["lvs-coverage/unverified:Pnp:-", "drc/m1.1:met1"]), ..Default::default() };
-        assert_eq!(key(&Report::default(), &signoff, &MetadataReport::default()).0, 1);
+        let signoff = Report {
+            hard_violations: rows(&["lvs-coverage/unverified:Pnp:-", "drc/m1.1:met1"]),
+            ..Default::default()
+        };
+        assert_eq!(
+            key(&Report::default(), &signoff, &MetadataReport::default()).0,
+            1
+        );
     }
 
     /// A NaN tier loses to a finite one, whichever side it is on.
     #[test]
     fn nan_loses() {
-        let (nan, finite) = ((0usize, 0u32, f64::NAN, 0.0, 1.0, 1.0), (0usize, 0u32, 5.0, 0.0, 1.0, 1.0));
-        assert!(crate::key_lt(&finite, &nan), "the finite key displaces a NaN incumbent");
+        let (nan, finite) = (
+            (0usize, 0u32, f64::NAN, 0.0, 1.0, 1.0),
+            (0usize, 0u32, 5.0, 0.0, 1.0, 1.0),
+        );
+        assert!(
+            crate::key_lt(&finite, &nan),
+            "the finite key displaces a NaN incumbent"
+        );
         assert!(!crate::key_lt(&nan, &finite), "a NaN candidate never wins");
     }
 
     fn net_names() -> Vec<String> {
-        ["vout1", "vbn", "VSS", "VDD", "x"].map(String::from).to_vec()
+        ["vout1", "vbn", "VSS", "VDD", "x"]
+            .map(String::from)
+            .to_vec()
     }
 
     fn classes() -> Vec<analog::metadata::NetClassification> {
         use analog::metadata::{NetClass, NetClassification};
-        [NetClass::Signal, NetClass::Signal, NetClass::Ground, NetClass::Supply]
-            .into_iter()
-            .enumerate()
-            .map(|(i, class)| NetClassification { net: pnr_core::NetId(i as u16), class, c_budget_af: None, max_coupling_af: None })
-            .collect()
+        [
+            NetClass::Signal,
+            NetClass::Signal,
+            NetClass::Ground,
+            NetClass::Supply,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, class)| NetClassification {
+            net: pnr_core::NetId(i as u16),
+            class,
+            c_budget_af: None,
+            max_coupling_af: None,
+        })
+        .collect()
     }
 
     /// AV-06: a layout that parks C on the vbn–VSS decoupling the specs do not
     /// feel ranks better than one with less total C but more on the output.
     #[test]
     fn supply_decoupling_does_not_rank_layouts() {
-        let rows = [analog::routing::PerformanceBudget::ground_c("gain:min".into(), vec![pnr_core::NetId(0), pnr_core::NetId(1)], vec![0.01, 0.0], 1.0)];
+        let rows = [analog::routing::PerformanceBudget::ground_c(
+            "gain:min".into(),
+            vec![pnr_core::NetId(0), pnr_core::NetId(1)],
+            vec![0.01, 0.0],
+            1.0,
+        )];
         let cap = |a: &str, b: Option<&str>, c: f64| (a.to_owned(), b.map(str::to_owned), c);
         let a = vec![cap("VSS", Some("vbn"), 89.4), cap("vout1", None, 4.6)];
         let b = vec![cap("VSS", Some("vbn"), 10.0), cap("vout1", None, 5.0)];
-        let (ca, cb) = (crate::c_tier(&a, &net_names(), &classes(), &rows), crate::c_tier(&b, &net_names(), &classes(), &rows));
-        assert!((ca - 46.0).abs() < 1e-3 && (cb - 50.0).abs() < 1e-3, "c_tier A {ca}, B {cb}");
+        let (ca, cb) = (
+            crate::c_tier(&a, &net_names(), &classes(), &rows),
+            crate::c_tier(&b, &net_names(), &classes(), &rows),
+        );
+        assert!(
+            (ca - 46.0).abs() < 1e-3 && (cb - 50.0).abs() < 1e-3,
+            "c_tier A {ca}, B {cb}"
+        );
         let total = |m: &verify::CapMatrix| m.iter().map(|r| r.2).sum::<f64>();
         assert!(total(&a) > 6.0 * total(&b), "A carries 94 fF, B 15 fF");
-        assert!(crate::key_lt(&(0, 0, 0.0, 0.0, ca, 1.0), &(0, 0, 0.0, 0.0, cb, 1.0)), "A ranks better");
+        assert!(
+            crate::key_lt(&(0, 0, 0.0, 0.0, ca, 1.0), &(0, 0, 0.0, 0.0, cb, 1.0)),
+            "A ranks better"
+        );
 
         // Coupling by each end's own w⁺, summed over rows, clamped at 0:
         // vout1 0.01 + max(-0.005, 0) → 10/fF, vbn 0 + 0.002 → 2/fF, VSS 0.
         let mut two = rows.to_vec();
-        two.push(analog::routing::PerformanceBudget { metric: "ugf:min".into(), weights: vec![-0.005, 0.002], ..rows[0].clone() });
-        let m = vec![cap("VSS", Some("vout1"), 1.0), cap("vbn", Some("vout1"), 2.0), cap("vout1", None, 0.5)];
+        two.push(analog::routing::PerformanceBudget {
+            metric: "ugf:min".into(),
+            weights: vec![-0.005, 0.002],
+            ..rows[0].clone()
+        });
+        let m = vec![
+            cap("VSS", Some("vout1"), 1.0),
+            cap("vbn", Some("vout1"), 2.0),
+            cap("vout1", None, 0.5),
+        ];
         let c = crate::c_tier(&m, &net_names(), &classes(), &two);
-        assert!((c - 39.0).abs() < 1e-3, "(10 + 0)·1 + (2 + 10)·2 + 10·0.5 = 39, got {c}");
+        assert!(
+            (c - 39.0).abs() < 1e-3,
+            "(10 + 0)·1 + (2 + 10)·2 + 10·0.5 = 39, got {c}"
+        );
     }
 
     /// A label short leaves the tier unknown: NaN, which loses to a finite
     /// tier at equal |V| even with the smaller footprint.
     #[test]
     fn label_short_tier_is_nan_and_loses() {
-        let mut signoff = verify::Signoff { caps: vec![("vout1".into(), None, 4.6)], ..Default::default() };
+        let mut signoff = verify::Signoff {
+            caps: vec![("vout1".into(), None, 4.6)],
+            ..Default::default()
+        };
         let clean = crate::signoff_c_tier(&signoff, &net_names(), &classes(), &[]);
-        assert!((clean - 4.6).abs() < 1e-4, "no short: signal C, got {clean}");
-        let short = format!("lvs/{}: labels [\"b0\", \"VSS\"] bind to one extracted net", verify::checker::LABEL_SHORT);
+        assert!(
+            (clean - 4.6).abs() < 1e-4,
+            "no short: signal C, got {clean}"
+        );
+        let short = format!(
+            "lvs/{}: labels [\"b0\", \"VSS\"] bind to one extracted net",
+            verify::checker::LABEL_SHORT
+        );
         signoff.report.hard_violations = rows(&[&short]);
         let tier = crate::signoff_c_tier(&signoff, &net_names(), &classes(), &[]);
         assert!(tier.is_nan(), "shorted tier {tier}");
-        let (shorted, finite) = ((1usize, 0u32, 0.0, 0.0, tier, 0.5), (1usize, 0u32, 0.0, 0.0, 1000.0, 1.0));
+        let (shorted, finite) = (
+            (1usize, 0u32, 0.0, 0.0, tier, 0.5),
+            (1usize, 0u32, 0.0, 0.0, 1000.0, 1.0),
+        );
         assert!(crate::key_lt(&finite, &shorted) && !crate::key_lt(&shorted, &finite));
     }
 
@@ -2932,9 +4322,6 @@ mod start_tests {
     }
 }
 
-
-
-
 #[cfg(test)]
 mod size_tests {
     use pnr_core::Process as _;
@@ -2948,36 +4335,83 @@ mod size_tests {
     #[test]
     fn drawn_width_equals_simulated_width() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let json = std::fs::read_to_string(root.join("pdks/sky130.json")).expect("pdks/sky130.json");
+        let json =
+            std::fs::read_to_string(root.join("pdks/sky130.json")).expect("pdks/sky130.json");
         let pdk = verify::Pdk::from_json(&json).expect("sky130 loads");
-        let fixtures = ["ota", "ota_constrained", "tt_ota", "pair", "quad", "chain4", "rc_filter", "dac4", "bjt_mirror", "bgr_core"];
+        let fixtures = [
+            "ota",
+            "ota_constrained",
+            "tt_ota",
+            "pair",
+            "quad",
+            "chain4",
+            "rc_filter",
+            "dac4",
+            "bjt_mirror",
+            "bgr_core",
+        ];
         let mut checked = 0;
         for name in fixtures {
             let path = root.join(format!("benchmarks/fixtures/{name}.spice"));
-            let spice = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let spice = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             let mut netlist = crate::parse::spice(&spice).expect("parses");
             crate::deck_models(&mut netlist, &pdk);
-            let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
+            let mut problem =
+                annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
             let fold = crate::cellgen::folds(&netlist, &pdk, &[], &[]);
-            let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
+            let cells = crate::CellSpace::new(
+                &netlist,
+                &Default::default(),
+                &mut problem,
+                &pdk,
+                &[],
+                true,
+                &fold,
+            );
             for (i, dev) in netlist.devices.iter().enumerate() {
-                if !matches!(dev.kind, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
+                if !matches!(
+                    dev.kind,
+                    pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos
+                ) {
                     continue;
                 }
-                let s = dev.mos_size().unwrap_or_else(|| panic!("{name} {}: no size", dev.name));
+                let s = dev
+                    .mos_size()
+                    .unwrap_or_else(|| panic!("{name} {}: no size", dev.name));
                 let id = pnr_core::DeviceId(i as u16);
-                let cell = cells.devices_of.iter().position(|m| m.contains(&id)).expect("device has a cell");
-                let owner = cells.devices_of[cell].iter().position(|&d| d == id).unwrap();
+                let cell = cells
+                    .devices_of
+                    .iter()
+                    .position(|m| m.contains(&id))
+                    .expect("device has a cell");
+                let owner = cells.devices_of[cell]
+                    .iter()
+                    .position(|&d| d == id)
+                    .unwrap();
                 let units = &cells.variants[cell].alternatives[0].units;
-                let drawn: i64 = units.iter().filter(|u| usize::from(u.owner) == owner).map(|u| u.weight / s.l_nm).sum();
+                let drawn: i64 = units
+                    .iter()
+                    .filter(|u| usize::from(u.owner) == owner)
+                    .map(|u| u.weight / s.l_nm)
+                    .sum();
                 let want = s.w_total_nm * i64::from(s.m);
                 let tol = i64::from(s.fingers()) * i64::from(pdk.grid());
-                assert!((drawn - want).abs() <= tol, "{name} {}: drawn {drawn} nm, simulated {want} nm (±{tol})", dev.name);
+                assert!(
+                    (drawn - want).abs() <= tol,
+                    "{name} {}: drawn {drawn} nm, simulated {want} nm (±{tol})",
+                    dev.name
+                );
                 checked += 1;
             }
             if name == "ota" {
-                let card = crate::oppoint::flat_circuit(&netlist, &crate::oppoint::OpConfig::default()).unwrap();
-                let xm5 = card.lines().find(|l| l.starts_with("XM5 ")).expect("XM5 card");
+                let card =
+                    crate::oppoint::flat_circuit(&netlist, &crate::oppoint::OpConfig::default())
+                        .unwrap();
+                let xm5 = card
+                    .lines()
+                    .find(|l| l.starts_with("XM5 "))
+                    .expect("XM5 card");
                 assert!(xm5.contains("W=40 L=2 nf=1 m=4"), "{xm5}");
             }
         }
@@ -2996,9 +4430,16 @@ mod common_node_tests {
     #[test]
     fn common_node_budget_is_the_remaining_allowance() {
         let left = [(0u32, 1u32, 0.237f32)];
-        assert!((common_node_ohm(&left, DeviceId(0), DeviceId(1), Some(100.0)) - 2.37).abs() < 1e-4);
-        assert!((common_node_ohm(&left, DeviceId(1), DeviceId(0), Some(100.0)) - 2.37).abs() < 1e-4);
-        assert_eq!(common_node_ohm(&left, DeviceId(2), DeviceId(3), Some(100.0)), 0.0);
+        assert!(
+            (common_node_ohm(&left, DeviceId(0), DeviceId(1), Some(100.0)) - 2.37).abs() < 1e-4
+        );
+        assert!(
+            (common_node_ohm(&left, DeviceId(1), DeviceId(0), Some(100.0)) - 2.37).abs() < 1e-4
+        );
+        assert_eq!(
+            common_node_ohm(&left, DeviceId(2), DeviceId(3), Some(100.0)),
+            0.0
+        );
         assert_eq!(common_node_ohm(&left, DeviceId(0), DeviceId(1), None), 0.0);
     }
 
@@ -3023,17 +4464,61 @@ mod common_node_tests {
         let mut nl = crate::parse(PAIR).unwrap();
         crate::deck_models(&mut nl, &pdk);
         // XM1 alone, drawn by the generator, its `d0:T` pins renamed `T`.
-        let one = crate::cellgen::enumerate(&nl, &Default::default(), &Default::default(), &pdk, true);
-        let cell = one.devices_of.iter().position(|m| m == &[DeviceId(0)]).expect("XM1 has its own cell");
+        let one =
+            crate::cellgen::enumerate(&nl, &Default::default(), &Default::default(), &pdk, true);
+        let cell = one
+            .devices_of
+            .iter()
+            .position(|m| m == &[DeviceId(0)])
+            .expect("XM1 has its own cell");
         let mut m = one.spaces[cell].alternatives[0].clone();
-        m.pins.iter_mut().for_each(|p| p.name = p.name.strip_prefix("d0:").expect("generated pin").to_string());
+        m.pins.iter_mut().for_each(|p| {
+            p.name = p
+                .name
+                .strip_prefix("d0:")
+                .expect("generated pin")
+                .to_string()
+        });
         let mut injected = crate::Macros::default();
         injected.register(&nl.devices[0].name, m);
         let cfg = crate::Config::default();
-        let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
-        let ann = crate::annotation_with(&pdk, &cfg.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
-        let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0, evidence: None, r_weight: Vec::new(), pair_weight: Vec::new(), beta_key: false };
-        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &Default::default(), &plan, true);
+        let bias = crate::Bias {
+            power: Vec::new(),
+            summary: None,
+            currents: None,
+            net_headroom_mv: None,
+            gm_us: Vec::new(),
+            op: None,
+        };
+        let ann = crate::annotation_with(
+            &pdk,
+            &cfg.annotation,
+            Box::leak(Box::new(crate::elaborate::stack(&pdk))),
+        );
+        let plan = crate::PerfPlan {
+            rows: Vec::new(),
+            notes: Vec::new(),
+            active: vec![0],
+            tables: Vec::new(),
+            sigma_v: Vec::new(),
+            sens: Vec::new(),
+            sims: 0,
+            evidence: None,
+            r_weight: Vec::new(),
+            pair_weight: Vec::new(),
+            beta_key: false,
+        };
+        let t = crate::topology(
+            &nl,
+            &injected,
+            &pdk,
+            &cfg,
+            &bias,
+            &ann,
+            &Default::default(),
+            &plan,
+            true,
+        );
         let n = t.flow.cells.variants.len();
         let layout = pnr_core::Layout {
             x: (0..n).map(|i| i as i32 * 20_000).collect(),
@@ -3051,7 +4536,11 @@ mod common_node_tests {
         };
         let nodes = t.flow.common_nodes(&layout).nodes;
         assert_eq!(nodes.len(), 1, "one common source node");
-        assert!(nodes[0].groups.len() == 2 && nodes[0].groups.iter().all(|g| !g.is_empty()), "both members' source pins: {:?}", nodes[0].groups);
+        assert!(
+            nodes[0].groups.len() == 2 && nodes[0].groups.iter().all(|g| !g.is_empty()),
+            "both members' source pins: {:?}",
+            nodes[0].groups
+        );
     }
 
     /// AF-31: an empty cell is named by its members, not by its cell index
@@ -3061,18 +4550,27 @@ mod common_node_tests {
         let mut nl = crate::parse(PAIR).unwrap();
         crate::deck_models(&mut nl, &verify::Pdk::builtin("sky130").unwrap());
         let cells = [pnr_core::Macro::default(), pnr_core::Macro::default()];
-        let rows: Vec<String> = crate::undrawable(&cells, &[vec![DeviceId(1)], vec![DeviceId(0)]], &nl).map(|v| v.rule).collect();
+        let rows: Vec<String> =
+            crate::undrawable(&cells, &[vec![DeviceId(1)], vec![DeviceId(0)]], &nl)
+                .map(|v| v.rule)
+                .collect();
         let (d0, d1) = (&nl.devices[0].name, &nl.devices[1].name);
         assert_eq!(rows.len(), 2);
-        assert!(rows[0].contains(d1.as_str()) && !rows[0].contains(d0.as_str()), "{rows:?}");
-        assert!(rows[1].contains(d0.as_str()) && !rows[1].contains(d1.as_str()), "{rows:?}");
+        assert!(
+            rows[0].contains(d1.as_str()) && !rows[0].contains(d0.as_str()),
+            "{rows:?}"
+        );
+        assert!(
+            rows[1].contains(d0.as_str()) && !rows[1].contains(d1.as_str()),
+            "{rows:?}"
+        );
     }
 }
 
 /// PLC-07: per-pair placement spacing on the shipped decks and fixtures.
 #[cfg(test)]
 mod spacing_tests {
-    use gp::spacing::{profile, Face, Src, SpacingTable, N, ROLES};
+    use gp::spacing::{profile, Face, SpacingTable, Src, N, ROLES};
     use pnr_core::{DeviceId, Layout, Macro, Orient, Process as _};
     use std::collections::BTreeMap;
 
@@ -3081,21 +4579,44 @@ mod spacing_tests {
     }
 
     fn pdk(deck: &str) -> verify::Pdk {
-        let json = std::fs::read_to_string(root().join(format!("pdks/{deck}.json"))).expect("sidecar");
+        let json =
+            std::fs::read_to_string(root().join(format!("pdks/{deck}.json"))).expect("sidecar");
         verify::Pdk::from_json(&json).unwrap_or_else(|e| panic!("{deck} loads: {e}"))
     }
 
     /// The `CellSpace` the flow builds for fixture `name` (as `size_tests`).
     fn cells(name: &str, pdk: &verify::Pdk) -> crate::CellSpace {
-        let spice = std::fs::read_to_string(root().join(format!("benchmarks/fixtures/{name}.spice"))).expect("fixture");
+        let spice =
+            std::fs::read_to_string(root().join(format!("benchmarks/fixtures/{name}.spice")))
+                .expect("fixture");
         let mut netlist = crate::parse::spice(&spice).expect("parses");
         crate::deck_models(&mut netlist, pdk);
-        let mut problem = annotator::annotate(&netlist, &crate::annotation(pdk, &Default::default()));
+        let mut problem =
+            annotator::annotate(&netlist, &crate::annotation(pdk, &Default::default()));
         let fold = crate::cellgen::folds(&netlist, pdk, &[], &[]);
-        crate::CellSpace::new(&netlist, &Default::default(), &mut problem, pdk, &[], true, &fold)
+        crate::CellSpace::new(
+            &netlist,
+            &Default::default(),
+            &mut problem,
+            pdk,
+            &[],
+            true,
+            &fold,
+        )
     }
 
-    const FIXTURES: [&str; 10] = ["ota", "ota_constrained", "tt_ota", "pair", "quad", "chain4", "rc_filter", "dac4", "bjt_mirror", "bgr_core"];
+    const FIXTURES: [&str; 10] = [
+        "ota",
+        "ota_constrained",
+        "tt_ota",
+        "pair",
+        "quad",
+        "chain4",
+        "rc_filter",
+        "dac4",
+        "bjt_mirror",
+        "bgr_core",
+    ];
 
     /// Layers `profile` reads as `other`, by name, over every cell × variant.
     fn unmapped(deck: &str) -> BTreeMap<String, usize> {
@@ -3104,12 +4625,30 @@ mod spacing_tests {
         for name in FIXTURES {
             let cells = cells(name, &pdk);
             for m in cells.variants.iter().flat_map(|s| &s.alternatives) {
-                let r0 = profile(&Macro { shapes: vec![], ..m.clone() }, &pdk, None);
+                let r0 = profile(
+                    &Macro {
+                        shapes: vec![],
+                        ..m.clone()
+                    },
+                    &pdk,
+                    None,
+                );
                 assert_eq!(r0.edge[0].present, 0, "an empty macro has no roles");
                 for s in &m.shapes {
-                    let one = profile(&Macro { shapes: vec![*s], ..m.clone() }, &pdk, None);
+                    let one = profile(
+                        &Macro {
+                            shapes: vec![*s],
+                            ..m.clone()
+                        },
+                        &pdk,
+                        None,
+                    );
                     if one.edge[0].present & (1 << (N - 1)) != 0 {
-                        let layer = pdk.layers.iter().find(|(_, l)| *l == s.layer).map_or_else(|| format!("#{}", s.layer.0), |(n, _)| n.clone());
+                        let layer = pdk
+                            .layers
+                            .iter()
+                            .find(|(_, l)| *l == s.layer)
+                            .map_or_else(|| format!("#{}", s.layer.0), |(n, _)| n.clone());
                         *out.entry(layer).or_default() += 1;
                     }
                 }
@@ -3128,7 +4667,10 @@ mod spacing_tests {
             }
         }
         let sky = unmapped("sky130");
-        assert!(sky.is_empty(), "sky130 cells draw layers no placement role maps: {sky:?}");
+        assert!(
+            sky.is_empty(),
+            "sky130 cells draw layers no placement role maps: {sky:?}"
+        );
     }
 
     #[test]
@@ -3143,20 +4685,43 @@ mod spacing_tests {
         let r = |a: &str| ROLES.iter().position(|&x| x == a).unwrap();
         assert_eq!(t.rule[r("diff_out")][r("nwell")], 340);
         // poly.9 is on derived layers (`poly_res`): only the sidecar sees it from rpm.
-        assert_eq!((t.rule[r("rpm")][r("poly")], t.src[r("rpm")][r("poly")]), (480, Src::Sidecar));
-        assert_eq!((t.rule[r("nwell")][r("nwell")], t.src[r("nwell")][r("nwell")]), (1270, Src::Deck));
+        assert_eq!(
+            (t.rule[r("rpm")][r("poly")], t.src[r("rpm")][r("poly")]),
+            (480, Src::Sidecar)
+        );
+        assert_eq!(
+            (
+                t.rule[r("nwell")][r("nwell")],
+                t.src[r("nwell")][r("nwell")]
+            ),
+            (1270, Src::Deck)
+        );
         assert_eq!(t.rule[r("diff_in")][r("diff_out")], 270);
         assert_eq!(t.rule[r("diom")][r("diom")], 0, "a marker owes no spacing");
     }
 
     /// Drawn shapes of `cells` placed by `l`, plus rings and bridges as `Flow::epoch` adds them.
-    fn drawn(macros: &[Macro], l: &Layout, rings: &analog::Constraints, pdk: &verify::Pdk) -> Vec<pnr_core::Shape> {
+    fn drawn(
+        macros: &[Macro],
+        l: &Layout,
+        rings: &analog::Constraints,
+        pdk: &verify::Pdk,
+    ) -> Vec<pnr_core::Shape> {
         let placed = pnr_core::place_macros(macros, l);
         let mut extra = cells::post_cell::guard_rings(l, rings, pdk, crate::ring_cut_ohm(pdk));
-        extra.extend(cells::post_cell::well_bridges(&placed, &extra, pdk, &|_, _| true));
+        extra.extend(cells::post_cell::well_bridges(
+            &placed,
+            &extra,
+            pdk,
+            &|_, _| true,
+        ));
         let all: Vec<Macro> = placed.iter().chain(&extra).cloned().collect();
         extra.extend(cells::post_cell::implant_bridges(&all, pdk));
-        let mut shapes: Vec<_> = placed.iter().chain(&extra).flat_map(|m| m.shapes.iter().copied()).collect();
+        let mut shapes: Vec<_> = placed
+            .iter()
+            .chain(&extra)
+            .flat_map(|m| m.shapes.iter().copied())
+            .collect();
         if let Some(nw) = pdk.layer("nwell") {
             crate::geometry::merge_rects(&mut shapes, nw);
         }
@@ -3165,7 +4730,10 @@ mod spacing_tests {
 
     fn findings(shapes: &[pnr_core::Shape], pdk: &verify::Pdk) -> BTreeMap<String, usize> {
         let mut out = BTreeMap::new();
-        for f in verify::drc(shapes, &[], pdk).into_iter().filter(|f| !f.warning) {
+        for f in verify::drc(shapes, &[], pdk)
+            .into_iter()
+            .filter(|f| !f.warning)
+        {
             *out.entry(f.rule).or_default() += 1;
         }
         out
@@ -3174,7 +4742,8 @@ mod spacing_tests {
     /// Cells at lower-left corners `at`, unturned.
     fn layout(macros: &[Macro], at: &[(i32, i32)]) -> Layout {
         let n = macros.len();
-        let (hw, hh): (Vec<i32>, Vec<i32>) = macros.iter().map(|m| (m.bbox.w / 2, m.bbox.h / 2)).unzip();
+        let (hw, hh): (Vec<i32>, Vec<i32>) =
+            macros.iter().map(|m| (m.bbox.w / 2, m.bbox.h / 2)).unzip();
         Layout {
             x: (0..n).map(|i| at[i].0 + hw[i]).collect(),
             y: (0..n).map(|i| at[i].1 + hh[i]).collect(),
@@ -3199,21 +4768,33 @@ mod spacing_tests {
         let pdk = pdk("sky130");
         let lattice = cells::builder::cut_lattice(&pdk);
         // (macro, profile, its ring request with `device` cleared)
-        let mut uniq: Vec<(Macro, gp::spacing::Profile, Option<analog::cell::GuardRingRequirement>)> = Vec::new();
+        let mut uniq: Vec<(
+            Macro,
+            gp::spacing::Profile,
+            Option<analog::cell::GuardRingRequirement>,
+        )> = Vec::new();
         for name in ["ota", "dac4", "rc_filter", "chain4", "pair"] {
             let cs = cells(name, &pdk);
-            let rules = crate::place_rules(&pdk, &cs);
+            let rules = crate::place_rules(&pdk, &cs, &Default::default(), &[]);
             for (c, s) in cs.variants.iter().enumerate() {
                 for (v, m) in s.alternatives.iter().enumerate().take(2) {
-                    if uniq.iter().any(|(u, ..)| u.shapes == m.shapes && u.bbox == m.bbox) {
+                    if uniq
+                        .iter()
+                        .any(|(u, ..)| u.shapes == m.shapes && u.bbox == m.bbox)
+                    {
                         continue;
                     }
-                    let ring = cs.guard_rings.guard_rings.iter().find(|g| usize::from(g.device.0) == c).cloned();
+                    let ring = cs
+                        .guard_rings
+                        .guard_rings
+                        .iter()
+                        .find(|g| usize::from(g.device.0) == c)
+                        .cloned();
                     uniq.push((m.clone(), rules.profiles.of[c][v][0], ring));
                 }
             }
         }
-        let rules = crate::place_rules(&pdk, &cells("pair", &pdk));
+        let rules = crate::place_rules(&pdk, &cells("pair", &pdk), &Default::default(), &[]);
         let t = &rules.spacing;
         let rings_of = |ids: &[usize]| {
             let mut c = analog::Constraints::default();
@@ -3226,7 +4807,17 @@ mod spacing_tests {
             c
         };
         let single: Vec<BTreeMap<String, usize>> = (0..uniq.len())
-            .map(|i| findings(&drawn(&[uniq[i].0.clone()], &layout(&[uniq[i].0.clone()], &[(0, 0)]), &rings_of(&[i]), &pdk), &pdk))
+            .map(|i| {
+                findings(
+                    &drawn(
+                        &[uniq[i].0.clone()],
+                        &layout(&[uniq[i].0.clone()], &[(0, 0)]),
+                        &rings_of(&[i]),
+                        &pdk,
+                    ),
+                    &pdk,
+                )
+            })
             .collect();
         let (mut probes, mut tight, mut tight_of, mut bad) = (0, 0, 0, Vec::new());
         for a in 0..uniq.len() {
@@ -3239,13 +4830,29 @@ mod spacing_tests {
                         gaps.push(0);
                     }
                     let at = |gap: i32| match f {
-                        Face::R => (ma.bbox.w + gap, (ma.bbox.h - mb.bbox.h) / 2 / lattice * lattice),
-                        _ => ((ma.bbox.w - mb.bbox.w) / 2 / lattice * lattice, ma.bbox.h + gap),
+                        Face::R => (
+                            ma.bbox.w + gap,
+                            (ma.bbox.h - mb.bbox.h) / 2 / lattice * lattice,
+                        ),
+                        _ => (
+                            (ma.bbox.w - mb.bbox.w) / 2 / lattice * lattice,
+                            ma.bbox.h + gap,
+                        ),
                     };
                     let run = |gap: i32| {
                         let pair = [ma.clone(), mb.clone()];
-                        let mut got = findings(&drawn(&pair, &layout(&pair, &[(0, 0), at(gap)]), &rings_of(&[a, b]), &pdk), &pdk);
-                        got.retain(|r, n| *n > single[a].get(r).unwrap_or(&0) + single[b].get(r).unwrap_or(&0));
+                        let mut got = findings(
+                            &drawn(
+                                &pair,
+                                &layout(&pair, &[(0, 0), at(gap)]),
+                                &rings_of(&[a, b]),
+                                &pdk,
+                            ),
+                            &pdk,
+                        );
+                        got.retain(|r, n| {
+                            *n > single[a].get(r).unwrap_or(&0) + single[b].get(r).unwrap_or(&0)
+                        });
                         got
                     };
                     for gap in gaps {
@@ -3262,8 +4869,16 @@ mod spacing_tests {
                 }
             }
         }
-        eprintln!("{} cells, {probes} probes; tightness: {tight}/{tight_of} fail at min − 2·lattice", uniq.len());
-        assert!(bad.is_empty(), "{} of {probes} probes add DRC findings:\n{}", bad.len(), bad.join("\n"));
+        eprintln!(
+            "{} cells, {probes} probes; tightness: {tight}/{tight_of} fail at min − 2·lattice",
+            uniq.len()
+        );
+        assert!(
+            bad.is_empty(),
+            "{} of {probes} probes add DRC findings:\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
     }
 }
 
@@ -3276,7 +4891,10 @@ mod environment_tests {
     }
 
     fn pdk() -> verify::Pdk {
-        verify::Pdk::from_json(&std::fs::read_to_string(root().join("pdks/sky130.json")).expect("sidecar")).expect("sky130 loads")
+        verify::Pdk::from_json(
+            &std::fs::read_to_string(root().join("pdks/sky130.json")).expect("sidecar"),
+        )
+        .expect("sky130 loads")
     }
 
     /// The live batch's geometry (`EnvGeo` + `place_rect`) is the placed
@@ -3284,22 +4902,49 @@ mod environment_tests {
     #[test]
     fn env_geo_places_like_place_macros_on_ota() {
         let pdk = pdk();
-        let spice = std::fs::read_to_string(root().join("benchmarks/fixtures/ota.spice")).expect("fixture");
+        let spice =
+            std::fs::read_to_string(root().join("benchmarks/fixtures/ota.spice")).expect("fixture");
         let mut netlist = crate::parse::spice(&spice).expect("parses");
         crate::deck_models(&mut netlist, &pdk);
-        let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
+        let mut problem =
+            annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
         let fold = crate::cellgen::folds(&netlist, &pdk, &[], &[]);
-        let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
+        let cells = crate::CellSpace::new(
+            &netlist,
+            &Default::default(),
+            &mut problem,
+            &pdk,
+            &[],
+            true,
+            &fold,
+        );
         let env = crate::live_environment(&problem, &cells, &pdk);
         let n = cells.variants.len();
         assert!(!env.pairs.is_empty(), "ota has a matched pair");
-        assert!(env.pairs.iter().all(|&(_, _, a, b)| usize::from(a) < n && usize::from(b) < n));
+        assert!(env
+            .pairs
+            .iter()
+            .all(|&(_, _, a, b)| usize::from(a) < n && usize::from(b) < n));
 
-        const ALL: [Orient; 8] = [Orient::R0, Orient::R90, Orient::R180, Orient::R270, Orient::Mx, Orient::Mx90, Orient::Mx180, Orient::Mx270];
-        let variant: Vec<u16> = cells.variants.iter().map(|v| (v.alternatives.len() - 1) as u16).collect();
+        const ALL: [Orient; 8] = [
+            Orient::R0,
+            Orient::R90,
+            Orient::R180,
+            Orient::R270,
+            Orient::Mx,
+            Orient::Mx90,
+            Orient::Mx180,
+            Orient::Mx270,
+        ];
+        let variant: Vec<u16> = cells
+            .variants
+            .iter()
+            .map(|v| (v.alternatives.len() - 1) as u16)
+            .collect();
         let orient: Vec<Orient> = (0..n).map(|c| ALL[c % 8]).collect();
         let half = |c: usize| {
-            let r = orient[c].apply_rect(cells.variants[c].alternatives[usize::from(variant[c])].bbox);
+            let r =
+                orient[c].apply_rect(cells.variants[c].alternatives[usize::from(variant[c])].bbox);
             (r.w / 2, r.h / 2)
         };
         let l = Layout {
@@ -3316,14 +4961,26 @@ mod environment_tests {
             temp_mc: vec![0; n],
             units: std::sync::Arc::default(),
         };
-        let placed = pnr_core::place_macros(&crate::cellgen::realize(&cells.variants, &l.variant), &l);
-        let (nwell, diff) = (pdk.layer("nwell").expect("nwell"), pdk.layer("diff").expect("diff"));
+        let placed =
+            pnr_core::place_macros(&crate::cellgen::realize(&cells.variants, &l.variant), &l);
+        let (nwell, diff) = (
+            pdk.layer("nwell").expect("nwell"),
+            pdk.layer("diff").expect("diff"),
+        );
         for c in 0..n {
             let v = usize::from(l.variant[c]);
             for (layer, local) in [(nwell, &env.geo.wells[c][v]), (diff, &env.geo.diffs[c][v])] {
                 let key = |r: &Rect| (r.x, r.y, r.w, r.h);
-                let mut want: Vec<_> = placed[c].shapes.iter().filter(|s| s.layer == layer).map(|s| key(&s.rect)).collect();
-                let mut got: Vec<_> = local.iter().map(|&r| key(&pnr_core::place_rect(env.geo.bbox[c][v], r, &l, c))).collect();
+                let mut want: Vec<_> = placed[c]
+                    .shapes
+                    .iter()
+                    .filter(|s| s.layer == layer)
+                    .map(|s| key(&s.rect))
+                    .collect();
+                let mut got: Vec<_> = local
+                    .iter()
+                    .map(|&r| key(&pnr_core::place_rect(env.geo.bbox[c][v], r, &l, c)))
+                    .collect();
                 want.sort_unstable();
                 got.sort_unstable();
                 assert_eq!(got, want, "cell {c}");
@@ -3339,10 +4996,18 @@ mod environment_tests {
     /// debug_assert on ota); see `docs/plans/m2-placement-report.md`.
     #[test]
     fn environment_is_in_the_placement_arm_once() {
-        let spice = std::fs::read_to_string(root().join("benchmarks/fixtures/ota.spice")).expect("fixture");
-        let cfg = crate::Config { feedback_iters: 1, outer_iters: 1, starts: 1, ..Default::default() };
+        let spice =
+            std::fs::read_to_string(root().join("benchmarks/fixtures/ota.spice")).expect("fixture");
+        let cfg = crate::Config {
+            feedback_iters: 1,
+            outer_iters: 1,
+            starts: 1,
+            ..Default::default()
+        };
         let sol = crate::run(&spice, &pdk(), &Default::default(), &cfg).expect("flow");
-        let rows = |r: &[crate::metadata::BudgetStatus]| r.iter().filter(|b| b.kind == "Environment").count();
+        let rows = |r: &[crate::metadata::BudgetStatus]| {
+            r.iter().filter(|b| b.kind == "Environment").count()
+        };
         assert_eq!(rows(&sol.metadata.placement), 1);
         assert_eq!(rows(&sol.metadata.routing), 1);
     }

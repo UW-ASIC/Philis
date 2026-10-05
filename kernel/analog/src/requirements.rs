@@ -26,6 +26,10 @@ pub struct Requirements<On> {
 
 impl<On> Default for Requirements<On> {
     fn default() -> Self {
-        Self { hard: Vec::new(), budget: Vec::new(), cost: Vec::new() }
+        Self {
+            hard: Vec::new(),
+            budget: Vec::new(),
+            cost: Vec::new(),
+        }
     }
 }

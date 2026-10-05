@@ -73,7 +73,13 @@ impl Nets {
     #[must_use]
     pub fn from_macros(macros: &[Macro]) -> Self {
         let Some(max_net) = macros.iter().flat_map(|m| &m.pins).map(|p| p.net.0).max() else {
-            return Self { start: vec![0], items: Vec::new(), off: Vec::new(), net: Vec::new(), weight: Vec::new() };
+            return Self {
+                start: vec![0],
+                items: Vec::new(),
+                off: Vec::new(),
+                net: Vec::new(),
+                weight: Vec::new(),
+            };
         };
         let mut per_net: Vec<Vec<(u32, i32, i32)>> = vec![Vec::new(); max_net as usize + 1];
         for (di, m) in macros.iter().enumerate() {
@@ -109,7 +115,13 @@ impl Nets {
             }
         }
         let weight = vec![1.0; net.len()];
-        Self { start, items, off, net, weight }
+        Self {
+            start,
+            items,
+            off,
+            net,
+            weight,
+        }
     }
 
     /// Weight each net's HPWL by `by_net[NetId]` (missing = 1): a net whose
@@ -176,7 +188,10 @@ impl Nets {
                 sy += i64::from(p.at.y + p.at.h / 2 - cy);
                 n += 1;
             }
-            debug_assert!(n > 0, "reshape_cell: cell {c}'s new variant has no pin on net {want}");
+            debug_assert!(
+                n > 0,
+                "reshape_cell: cell {c}'s new variant has no pin on net {want}"
+            );
             if n > 0 {
                 self.off[k] = ((sx / n) as i32, (sy / n) as i32);
             }
@@ -238,7 +253,9 @@ pub fn encroach(l: &Layout, a: usize, b: usize, clearance: i32) -> f64 {
 #[must_use]
 pub fn encroachment(l: &Layout, clearance: i32) -> f64 {
     let n = l.x.len();
-    (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).fold(0.0, |t, (a, b)| t + encroach(l, a, b, clearance))
+    (0..n)
+        .flat_map(|a| (a + 1..n).map(move |b| (a, b)))
+        .fold(0.0, |t, (a, b)| t + encroach(l, a, b, clearance))
 }
 
 /// PEX-tier objective: `Σ criticality·cost` over `reqs.cost` plus the priced
@@ -295,14 +312,23 @@ pub fn analog_violations(reqs: &Requirements<Layout>, l: &Layout) -> u32 {
 /// overlap and clearance-only encroachment, one budget entry per positive
 /// residual, cost = HPWL/L_ref + analog cost ([`pex`]).
 #[must_use]
-pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Prices, rules: &crate::PlaceRules) -> Report {
+pub fn report(
+    nets: &Nets,
+    reqs: &Requirements<Layout>,
+    l: &Layout,
+    prices: &Prices,
+    rules: &crate::PlaceRules,
+) -> Report {
     let mut hard_violations: Vec<Violation> = reqs
         .hard
         .iter()
         .enumerate()
         .filter(|(_, b)| b.violations(l) > 0)
         .map(|(bi, b)| {
-            Violation::from_residual(format!("{}analog hard {bi} ({:?})", Violation::BATCH, b.kind()), b.residual(l))
+            Violation::from_residual(
+                format!("{}analog hard {bi} ({:?})", Violation::BATCH, b.kind()),
+                b.residual(l),
+            )
         })
         .collect();
     let budget_violations = reqs
@@ -311,20 +337,34 @@ pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Pri
         .enumerate()
         .filter_map(|(bi, b)| {
             let residual = b.residual(l);
-            (residual > 0.0)
-                .then(|| Violation::from_residual(format!("{}analog budget {bi}", Violation::BATCH), residual))
+            (residual > 0.0).then(|| {
+                Violation::from_residual(
+                    format!("{}analog budget {bi}", Violation::BATCH),
+                    residual,
+                )
+            })
         })
         .collect();
     let ov = encroachment(l, 0);
     if ov > 0.5 {
-        hard_violations.push(Violation { rule: "device overlap".into(), margin: ov as i64 });
+        hard_violations.push(Violation {
+            rule: "device overlap".into(),
+            margin: ov as i64,
+        });
     }
     let residue = rules.encroachment(l) - ov;
     if residue > 0.5 {
-        hard_violations.push(Violation { rule: "clearance encroachment".into(), margin: residue.ceil() as i64 });
+        hard_violations.push(Violation {
+            rule: "clearance encroachment".into(),
+            margin: residue.ceil() as i64,
+        });
     }
     let cost = pex(nets, reqs, l, prices) as f32;
-    Report { hard_violations, budget_violations, cost }
+    Report {
+        hard_violations,
+        budget_violations,
+        cost,
+    }
 }
 
 /// Half-extents of a drawn macro — the `Layout::variant` ⇒ `hw`/`hh` rule.
@@ -359,9 +399,20 @@ pub fn choose_variants(macros: &[Macro], variants: &[VariantSpace], variant: &[u
 /// largest footprint, rounded up to `grid`.
 #[must_use]
 pub fn canvas_side(hw: &[i32], hh: &[i32], utilization: f32, grid: i32) -> i32 {
-    let total: f64 = hw.iter().zip(hh).map(|(&w, &h)| f64::from(2 * w) * f64::from(2 * h)).sum();
-    let area_side = (total / f64::from(utilization.clamp(0.05, 0.95))).sqrt().ceil() as i32;
-    let largest = hw.iter().zip(hh).map(|(&w, &h)| (2 * w).max(2 * h)).max().unwrap_or(1000);
+    let total: f64 = hw
+        .iter()
+        .zip(hh)
+        .map(|(&w, &h)| f64::from(2 * w) * f64::from(2 * h))
+        .sum();
+    let area_side = (total / f64::from(utilization.clamp(0.05, 0.95)))
+        .sqrt()
+        .ceil() as i32;
+    let largest = hw
+        .iter()
+        .zip(hh)
+        .map(|(&w, &h)| (2 * w).max(2 * h))
+        .max()
+        .unwrap_or(1000);
     let side = area_side.max(largest).max(1);
     let g = grid.max(1);
     (side + g - 1) / g * g
@@ -371,7 +422,13 @@ pub fn canvas_side(hw: &[i32], hh: &[i32], utilization: f32, grid: i32) -> i32 {
 /// single-device groups, `n_axes` (at least one) axes at the centre, every
 /// branch `false`, no power.
 #[must_use]
-pub fn initial_layout(macros: &[Macro], variant: Vec<u16>, side: i32, n_axes: usize, rng: &mut SplitMix64) -> Layout {
+pub fn initial_layout(
+    macros: &[Macro],
+    variant: Vec<u16>,
+    side: i32,
+    n_axes: usize,
+    rng: &mut SplitMix64,
+) -> Layout {
     let n = macros.len();
     let (hw, hh) = half_extents(macros);
     let c = side / 2;

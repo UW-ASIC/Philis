@@ -1,9 +1,9 @@
 //! Crosstalk exclusion (routing tier).
 
+use crate::rule::Rule;
 use pnr_core::geom::Rect;
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
-use crate::rule::Rule;
 
 /// Same-layer clearance between nets `a` and `b` ≥ `min_spacing_nm`.
 /// Nets sharing no layer do not couple and always pass.
@@ -67,7 +67,12 @@ impl Rule for CrosstalkExclusion {
     }
     /// Enforced in the search (RTE-18): same-layer only.
     fn separation(self) -> Option<(u32, u32, i32, bool)> {
-        Some((u32::from(self.a.0), u32::from(self.b.0), self.min_spacing_nm, false))
+        Some((
+            u32::from(self.a.0),
+            u32::from(self.b.0),
+            self.min_spacing_nm,
+            false,
+        ))
     }
     /// `(d − floor) / floor`; `1.0` when the nets share no layer.
     fn headroom(self, r: &Routes) -> f32 {
@@ -103,28 +108,53 @@ mod tests {
     use pnr_core::geom::{LayerId, Shape};
 
     fn met1(x: i32) -> Shape {
-        Shape { layer: LayerId(1), rect: Rect { x, y: 0, w: 1_000, h: 260 } }
+        Shape {
+            layer: LayerId(1),
+            rect: Rect {
+                x,
+                y: 0,
+                w: 1_000,
+                h: 260,
+            },
+        }
     }
     fn rule() -> CrosstalkExclusion {
-        CrosstalkExclusion { a: NetId(0), b: NetId(1), min_spacing_nm: 280, margin_pct: 0 }
+        CrosstalkExclusion {
+            a: NetId(0),
+            b: NetId(1),
+            min_spacing_nm: 280,
+            margin_pct: 0,
+        }
     }
 
     #[test]
     fn an_unrouted_pair_is_unknown() {
-        let r = Routes { wires: vec![vec![met1(0)], vec![]], ..Default::default() };
+        let r = Routes {
+            wires: vec![vec![met1(0)], vec![]],
+            ..Default::default()
+        };
         assert!(!rule().known(&r));
-        let both = Routes { wires: vec![vec![met1(0)], vec![met1(1_280)]], ..Default::default() };
+        let both = Routes {
+            wires: vec![vec![met1(0)], vec![met1(1_280)]],
+            ..Default::default()
+        };
         assert!(rule().known(&both));
     }
 
     #[test]
     fn the_floor_is_an_edge_gap() {
         // Edge gap 280 nm (1 000 → 1 280): at the floor.
-        let ok = Routes { wires: vec![vec![met1(0)], vec![met1(1_280)]], ..Default::default() };
+        let ok = Routes {
+            wires: vec![vec![met1(0)], vec![met1(1_280)]],
+            ..Default::default()
+        };
         assert!(rule().satisfied(&ok));
         assert_eq!(rule().residual(&ok), 0.0);
         // Edge gap 270 nm: 10 nm short.
-        let near = Routes { wires: vec![vec![met1(0)], vec![met1(1_270)]], ..Default::default() };
+        let near = Routes {
+            wires: vec![vec![met1(0)], vec![met1(1_270)]],
+            ..Default::default()
+        };
         assert!(!rule().satisfied(&near));
         assert_eq!(rule().residual(&near), crate::rule::over(10.0, 280.0));
     }

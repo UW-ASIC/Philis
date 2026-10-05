@@ -41,7 +41,11 @@ impl OrientationSet {
 
     /// `0.0` = satisfied, `> 0` = violated, `None` = unknown.
     fn residual_of(&self, l: &Layout) -> Option<f32> {
-        let s: Vec<_> = self.members.iter().map(|&d| sums(l.units.of_device(l, d).map(Pt::from))).collect();
+        let s: Vec<_> = self
+            .members
+            .iter()
+            .map(|&d| sums(l.units.of_device(l, d).map(Pt::from)))
+            .collect();
         if s.iter().any(|m| m.n == 0) {
             return None;
         }
@@ -55,7 +59,11 @@ impl OrientationSet {
                     0.0
                 } else {
                     let p0 = s[0].phi();
-                    s[1..].iter().map(|m| m.phi()).map(|p| (p0.0 - p.0).abs() + (p0.1 - p.1).abs()).fold(0.0, f64::max) as f32
+                    s[1..]
+                        .iter()
+                        .map(|m| m.phi())
+                        .map(|p| (p0.0 - p.0).abs() + (p0.1 - p.1).abs())
+                        .fold(0.0, f64::max) as f32
                 }
             }
         })
@@ -90,7 +98,9 @@ impl crate::rule::RuleBatch<Layout> for OrientationSet {
         out.extend(self.members.iter().map(|&d| self.cell(d)));
     }
     fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
-        let Some((&m0, rest)) = self.members.split_first() else { return };
+        let Some((&m0, rest)) = self.members.split_first() else {
+            return;
+        };
         let c0 = self.cell(m0);
         out.extend(rest.iter().map(|&m| (c0, self.cell(m))));
     }
@@ -112,9 +122,32 @@ mod tests {
     /// Devices 0 and 1, each alone in its own 100 × 100 cell drawing `phis`
     /// (one unit per entry); cell 1 turned `o1`.
     fn two_cells(phis: &[(i8, i8)], o1: Orient) -> Layout {
-        let units: Vec<Unit> = phis.iter().map(|&phi| Unit { owner: 0, x: 50, y: 50, weight: 10, phi, sa: 0, sb: 0 }).collect();
-        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &units[..])];
-        let lib = UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &alts[..]].into_iter());
+        let units: Vec<Unit> = phis
+            .iter()
+            .map(|&phi| Unit {
+                owner: 0,
+                x: 50,
+                y: 50,
+                weight: 10,
+                phi,
+                sa: 0,
+                sb: 0,
+            })
+            .collect();
+        let alts = [(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
+            &units[..],
+        )];
+        let lib = UnitLib::build(
+            vec![0, 1],
+            &[vec![DeviceId(0)], vec![DeviceId(1)]],
+            [&alts[..], &alts[..]].into_iter(),
+        );
         Layout {
             x: vec![0, 10_000],
             y: vec![0, 0],
@@ -132,7 +165,11 @@ mod tests {
     }
 
     fn set(check: OrientCheck) -> OrientationSet {
-        OrientationSet { members: vec![DeviceId(0), DeviceId(1)], check, cell_of: Vec::new() }
+        OrientationSet {
+            members: vec![DeviceId(0), DeviceId(1)],
+            check,
+            cell_of: Vec::new(),
+        }
     }
 
     #[test]
@@ -147,16 +184,28 @@ mod tests {
         let s = set(OrientCheck::Phi);
         let l = two_cells(&[(1, 0), (-1, 0), (1, 0)], Orient::Mx180);
         assert_eq!(s.violations(&l), 1);
-        assert!((s.residual(&l) - 2.0 / 3.0).abs() < 1e-6, "{}", s.residual(&l));
-        assert_eq!(set(OrientCheck::Axis).violations(&l), 0, "mirrored, still parallel");
+        assert!(
+            (s.residual(&l) - 2.0 / 3.0).abs() < 1e-6,
+            "{}",
+            s.residual(&l)
+        );
+        assert_eq!(
+            set(OrientCheck::Axis).violations(&l),
+            0,
+            "mirrored, still parallel"
+        );
 
         let l = two_cells(&[(1, 0), (-1, 0)], Orient::Mx180);
         assert_eq!(s.violations(&l), 0);
-        let m: Vec<_> = [0, 1].map(|d| sums(l.units.of_device(&l, DeviceId(d)).map(Pt::from))).to_vec();
+        let m: Vec<_> = [0, 1]
+            .map(|d| sums(l.units.of_device(&l, DeviceId(d)).map(Pt::from)))
+            .to_vec();
         assert!(mirror_allowed(&m));
 
         let l = two_cells(&[(1, 0), (-1, 0), (1, 0)], Orient::R0);
-        let m: Vec<_> = [0, 1].map(|d| sums(l.units.of_device(&l, DeviceId(d)).map(Pt::from))).to_vec();
+        let m: Vec<_> = [0, 1]
+            .map(|d| sums(l.units.of_device(&l, DeviceId(d)).map(Pt::from)))
+            .to_vec();
         assert!(!mirror_allowed(&m), "net φx survives no mirror");
     }
 
@@ -185,10 +234,38 @@ mod tests {
             assert_eq!((set(c).violations(&l), set(c).unknown(&l)), (0, 1), "{c:?}");
         }
         // One member drawn, its partner not: still unknown.
-        let units = [Unit { owner: 0, x: 50, y: 50, weight: 10, phi: (1, 0), sa: 0, sb: 0 }];
-        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &units[..])];
-        let none = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &[][..])];
-        l.units = Arc::new(UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &none[..]].into_iter()));
+        let units = [Unit {
+            owner: 0,
+            x: 50,
+            y: 50,
+            weight: 10,
+            phi: (1, 0),
+            sa: 0,
+            sb: 0,
+        }];
+        let alts = [(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
+            &units[..],
+        )];
+        let none = [(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
+            &[][..],
+        )];
+        l.units = Arc::new(UnitLib::build(
+            vec![0, 1],
+            &[vec![DeviceId(0)], vec![DeviceId(1)]],
+            [&alts[..], &none[..]].into_iter(),
+        ));
         for c in [OrientCheck::Axis, OrientCheck::Phi] {
             assert_eq!((set(c).violations(&l), set(c).unknown(&l)), (0, 1), "{c:?}");
         }

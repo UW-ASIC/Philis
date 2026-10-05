@@ -1,8 +1,8 @@
 //! Preferential proximity (placement tier).
 
+use crate::rule::Rule;
 use pnr_core::ids::Target;
 use pnr_core::layout::Layout;
-use crate::rule::Rule;
 
 /// Soft pull keeping related devices within `max_distance_nm` of each other,
 /// edge to edge (a centre distance would make the spec depend on cell size).
@@ -51,7 +51,11 @@ impl Rule for Proximity {
         }
     }
     fn retarget(self, cell_of: &[u16]) -> Self {
-        Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
+        Self {
+            a: self.a.retarget(cell_of),
+            b: self.b.retarget(cell_of),
+            ..self
+        }
     }
 }
 
@@ -66,9 +70,21 @@ mod tests {
     fn touched_yields_device_ids_only() {
         let (d, g) = (|i| Target::Device(DeviceId(i)), Target::Group(GroupId(0)));
         let batch = vec![
-            Proximity { a: d(3), b: d(1), max_distance_nm: 5_000 },
-            Proximity { a: g, b: d(7), max_distance_nm: 5_000 },
-            Proximity { a: g, b: g, max_distance_nm: 5_000 },
+            Proximity {
+                a: d(3),
+                b: d(1),
+                max_distance_nm: 5_000,
+            },
+            Proximity {
+                a: g,
+                b: d(7),
+                max_distance_nm: 5_000,
+            },
+            Proximity {
+                a: g,
+                b: g,
+                max_distance_nm: 5_000,
+            },
         ];
         let mut ids = Vec::new();
         batch.touched(&mut ids);

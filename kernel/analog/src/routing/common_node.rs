@@ -4,8 +4,8 @@ use pnr_core::geom::{Rect, Shape};
 use pnr_core::ids::NetId;
 use pnr_core::routes::{conductor_layers_meet, Join, Routes};
 
-use crate::rule::RuleBatch;
 use super::Stack;
+use crate::rule::RuleBatch;
 
 /// Terminal groups sharing a net (a pair's tail, a mirror's rail; a star's
 /// branches; a Kelvin force/sense split): the routed R from the feeds to each
@@ -53,10 +53,14 @@ impl CommonNodes {
         let branch = if n.feeds.is_empty() {
             self.stack.terminal_resistance_ohm(r.shapes(n.net), &pins)
         } else {
-            self.stack.fed_resistance_ohm(r.shapes(n.net), &n.feeds, &pins)
+            self.stack
+                .fed_resistance_ohm(r.shapes(n.net), &n.feeds, &pins)
         };
         let side = |k: std::ops::Range<usize>| -> Option<f32> {
-            let g: f32 = branch[k].iter().map(|r| r.map(|r| 1.0 / r.max(1e-3))).sum::<Option<f32>>()?;
+            let g: f32 = branch[k]
+                .iter()
+                .map(|r| r.map(|r| 1.0 / r.max(1e-3)))
+                .sum::<Option<f32>>()?;
             (g > 0.0).then(|| 1.0 / g)
         };
         let mut start = 0;
@@ -65,7 +69,11 @@ impl CommonNodes {
             rs.push(side(start..start + g.len())?);
             start += g.len();
         }
-        let (lo, hi) = rs.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &x| (a.min(x), b.max(x)));
+        let (lo, hi) = rs
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &x| {
+                (a.min(x), b.max(x))
+            });
         (hi >= lo).then_some(hi - lo)
     }
 
@@ -86,8 +94,20 @@ impl CommonNodes {
         let h = self.halo_nm;
         let mut shapes: Vec<Shape> = r.shapes(n.net).to_vec();
         for f in &n.feeds {
-            let g = Rect { x: f.x - h, y: f.y - h, w: f.w + 2 * h, h: f.h + 2 * h };
-            shapes = shapes.into_iter().flat_map(|s| minus(s.rect, g).into_iter().map(move |rect| Shape { rect, ..s })).collect();
+            let g = Rect {
+                x: f.x - h,
+                y: f.y - h,
+                w: f.w + 2 * h,
+                h: f.h + 2 * h,
+            };
+            shapes = shapes
+                .into_iter()
+                .flat_map(|s| {
+                    minus(s.rect, g)
+                        .into_iter()
+                        .map(move |rect| Shape { rect, ..s })
+                })
+                .collect();
         }
         let mut seen = vec![false; shapes.len()];
         for first in 0..shapes.len() {
@@ -98,14 +118,24 @@ impl CommonNodes {
             let (mut stack, mut piece) = (vec![first], vec![first]);
             while let Some(a) = stack.pop() {
                 for b in 0..shapes.len() {
-                    if !seen[b] && shapes[a].rect.touches(&shapes[b].rect) && conductor_layers_meet(&shapes[a], &shapes[b], &self.joins) {
+                    if !seen[b]
+                        && shapes[a].rect.touches(&shapes[b].rect)
+                        && conductor_layers_meet(&shapes[a], &shapes[b], &self.joins)
+                    {
                         seen[b] = true;
                         stack.push(b);
                         piece.push(b);
                     }
                 }
             }
-            let groups = n.groups.iter().filter(|g| g.iter().any(|p| piece.iter().any(|&k| shapes[k].rect.touches(p)))).count();
+            let groups = n
+                .groups
+                .iter()
+                .filter(|g| {
+                    g.iter()
+                        .any(|p| piece.iter().any(|&k| shapes[k].rect.touches(p)))
+                })
+                .count();
             if groups > 1 {
                 return true;
             }
@@ -123,10 +153,30 @@ fn minus(a: Rect, g: Rect) -> Vec<Rect> {
     }
     let (l, r) = (a.x.max(g.x), ar.min(gr));
     [
-        Rect { x: a.x, y: a.y, w: l - a.x, h: a.h },
-        Rect { x: r, y: a.y, w: ar - r, h: a.h },
-        Rect { x: l, y: a.y, w: r - l, h: g.y - a.y },
-        Rect { x: l, y: gt, w: r - l, h: at - gt },
+        Rect {
+            x: a.x,
+            y: a.y,
+            w: l - a.x,
+            h: a.h,
+        },
+        Rect {
+            x: r,
+            y: a.y,
+            w: ar - r,
+            h: a.h,
+        },
+        Rect {
+            x: l,
+            y: a.y,
+            w: r - l,
+            h: g.y - a.y,
+        },
+        Rect {
+            x: l,
+            y: gt,
+            w: r - l,
+            h: at - gt,
+        },
     ]
     .into_iter()
     .filter(|p| p.w > 0 && p.h > 0)
@@ -139,10 +189,20 @@ impl RuleBatch<Routes> for CommonNodes {
     }
     /// Star breaks plus ΔR overshoots.
     fn violations(&self, r: &Routes) -> u32 {
-        self.nodes.iter().map(|n| u32::from(self.star_broken(n, r)) + u32::from(self.usage(n, r).is_some_and(|u| u > 1.0))).sum()
+        self.nodes
+            .iter()
+            .map(|n| {
+                u32::from(self.star_broken(n, r))
+                    + u32::from(self.usage(n, r).is_some_and(|u| u > 1.0))
+            })
+            .sum()
     }
     fn residual(&self, r: &Routes) -> f64 {
-        self.nodes.iter().filter_map(|n| self.usage(n, r)).map(|u| f64::from((u - 1.0).max(0.0))).sum()
+        self.nodes
+            .iter()
+            .filter_map(|n| self.usage(n, r))
+            .map(|u| f64::from((u - 1.0).max(0.0)))
+            .sum()
     }
     fn kind(&self) -> &'static str {
         "CommonNode"
@@ -158,16 +218,27 @@ impl RuleBatch<Routes> for CommonNodes {
         self.nodes.len()
     }
     fn worst_usage(&self, r: &Routes) -> Option<f32> {
-        self.nodes.iter().filter_map(|n| self.usage(n, r)).reduce(f32::max)
+        self.nodes
+            .iter()
+            .filter_map(|n| self.usage(n, r))
+            .reduce(f32::max)
     }
     fn unknown(&self, r: &Routes) -> u32 {
-        self.nodes.iter().filter(|n| self.usage(n, r).is_none()).count() as u32
+        self.nodes
+            .iter()
+            .filter(|n| self.usage(n, r).is_none())
+            .count() as u32
     }
     fn touched(&self, out: &mut Vec<u32>) {
         out.extend(self.nodes.iter().map(|n| u32::from(n.net.0)));
     }
     fn violating_ids(&self, r: &Routes, out: &mut Vec<u32>) {
-        out.extend(self.nodes.iter().filter(|n| self.star_broken(n, r) || self.usage(n, r).is_some_and(|u| u > 1.0)).map(|n| u32::from(n.net.0)));
+        out.extend(
+            self.nodes
+                .iter()
+                .filter(|n| self.star_broken(n, r) || self.usage(n, r).is_some_and(|u| u > 1.0))
+                .map(|n| u32::from(n.net.0)),
+        );
     }
 }
 
@@ -182,22 +253,47 @@ mod tests {
     #[test]
     fn two_groups_match_the_old_a_b_measure() {
         let stack: &'static Stack = Box::leak(Box::new(Stack {
-            layers: vec![Layer { id: 1, sheet_ohm: 0.125, ..Layer::default() }],
+            layers: vec![Layer {
+                id: 1,
+                sheet_ohm: 0.125,
+                ..Layer::default()
+            }],
             antenna_cumulative: false,
             diode: None,
         }));
-        let wire = |x, y, w, h| Shape { layer: LayerId(1), rect: Rect { x, y, w, h } };
-        let pin = |x| Rect { x, y: 0, w: 100, h: 100 };
-        let mut routes = Routes { wires: vec![Vec::new()], ..Default::default()  };
+        let wire = |x, y, w, h| Shape {
+            layer: LayerId(1),
+            rect: Rect { x, y, w, h },
+        };
+        let pin = |x| Rect {
+            x,
+            y: 0,
+            w: 100,
+            h: 100,
+        };
+        let mut routes = Routes {
+            wires: vec![Vec::new()],
+            ..Default::default()
+        };
         // 40 µm rail at 0.5 µm: members at x = 0 and 10 µm, fed at 40 µm.
         routes.wires[0] = vec![wire(0, 0, 40_100, 500)];
         let node = |feed: i32, max| CommonNodes {
-            nodes: vec![CommonNode { net: NetId(0), groups: vec![vec![pin(0)], vec![pin(10_000)]], feeds: vec![pin(feed)], max_delta_ohm: max, star: false }],
+            nodes: vec![CommonNode {
+                net: NetId(0),
+                groups: vec![vec![pin(0)], vec![pin(10_000)]],
+                feeds: vec![pin(feed)],
+                max_delta_ohm: max,
+                star: false,
+            }],
             stack,
             halo_nm: 0,
             joins: Vec::new(),
         };
-        assert_eq!(node(40_000, 0.0).unknown(&routes), 1, "no budget: unknown, never a pass");
+        assert_eq!(
+            node(40_000, 0.0).unknown(&routes),
+            1,
+            "no budget: unknown, never a pass"
+        );
         // 10 µm more rail to a: 20 squares, 2.5 Ω of skew.
         let u = node(40_000, 1.0).worst_usage(&routes).unwrap();
         assert!((u - 2.5).abs() < 1e-3, "{u}");
@@ -209,16 +305,50 @@ mod tests {
     /// Two groups' branches from a feed at x = 0: `a_end`/`b_end` pins, the
     /// branches sharing the rail up to `shared` nm before they split.
     fn star(shared: i32) -> (CommonNodes, Routes) {
-        let stack: &'static Stack = Box::leak(Box::new(Stack { layers: vec![Layer { id: 1, sheet_ohm: 0.125, ..Layer::default() }], antenna_cumulative: false, diode: None }));
-        let wire = |x, y, w, h| Shape { layer: LayerId(1), rect: Rect { x, y, w, h } };
-        let pin = |x, y| Rect { x, y, w: 100, h: 100 };
+        let stack: &'static Stack = Box::leak(Box::new(Stack {
+            layers: vec![Layer {
+                id: 1,
+                sheet_ohm: 0.125,
+                ..Layer::default()
+            }],
+            antenna_cumulative: false,
+            diode: None,
+        }));
+        let wire = |x, y, w, h| Shape {
+            layer: LayerId(1),
+            rect: Rect { x, y, w, h },
+        };
+        let pin = |x, y| Rect {
+            x,
+            y,
+            w: 100,
+            h: 100,
+        };
         // Trunk from the feed to x = shared, then one branch up, one down.
         let routes = Routes {
-            wires: vec![vec![wire(0, 0, shared + 100, 100), wire(shared, 0, 100, 10_000), wire(shared, -10_000, 100, 10_000)]],
+            wires: vec![vec![
+                wire(0, 0, shared + 100, 100),
+                wire(shared, 0, 100, 10_000),
+                wire(shared, -10_000, 100, 10_000),
+            ]],
             ..Default::default()
         };
-        let node = CommonNode { net: NetId(0), groups: vec![vec![pin(shared, 9_900)], vec![pin(shared, -10_000)]], feeds: vec![pin(0, 0)], max_delta_ohm: 0.0, star: true };
-        (CommonNodes { nodes: vec![node], stack, halo_nm: 420, joins: Vec::new() }, routes)
+        let node = CommonNode {
+            net: NetId(0),
+            groups: vec![vec![pin(shared, 9_900)], vec![pin(shared, -10_000)]],
+            feeds: vec![pin(0, 0)],
+            max_delta_ohm: 0.0,
+            star: true,
+        };
+        (
+            CommonNodes {
+                nodes: vec![node],
+                stack,
+                halo_nm: 420,
+                joins: Vec::new(),
+            },
+            routes,
+        )
     }
 
     /// Branches sharing 5 µm of rail outside the root halo: one star break.
@@ -234,9 +364,29 @@ mod tests {
     #[test]
     fn branches_leaving_one_trunk_apart_break_the_star() {
         let (mut c, mut r) = star(5_000);
-        let wire = |x, y, w, h| Shape { layer: LayerId(1), rect: Rect { x, y, w, h } };
-        r.wires[0] = vec![wire(0, 0, 5_100, 100), wire(2_000, 0, 100, 10_000), wire(4_000, -10_000, 100, 10_000)];
-        c.nodes[0].groups = vec![vec![Rect { x: 2_000, y: 9_900, w: 100, h: 100 }], vec![Rect { x: 4_000, y: -10_000, w: 100, h: 100 }]];
+        let wire = |x, y, w, h| Shape {
+            layer: LayerId(1),
+            rect: Rect { x, y, w, h },
+        };
+        r.wires[0] = vec![
+            wire(0, 0, 5_100, 100),
+            wire(2_000, 0, 100, 10_000),
+            wire(4_000, -10_000, 100, 10_000),
+        ];
+        c.nodes[0].groups = vec![
+            vec![Rect {
+                x: 2_000,
+                y: 9_900,
+                w: 100,
+                h: 100,
+            }],
+            vec![Rect {
+                x: 4_000,
+                y: -10_000,
+                w: 100,
+                h: 100,
+            }],
+        ];
         assert_eq!(c.violations(&r), 1);
     }
 
