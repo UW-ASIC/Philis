@@ -2,8 +2,8 @@
 //! `{"constraint": <kind>, ...}` entries, parsed into [`AnnotationConfig`]
 //! fields. Names resolve case-insensitively; an unknown name skips its entry
 //! with a `sidecar_unknown_name` diagnostic. Only kinds with a reader today
-//! are applied: `Load` (EXT-25) and `Order` (EXT-28) are `sidecar_unconsumed`,
-//! anything else (`Align`, `HorizontalDistance`, …) `sidecar_unsupported`.
+//! are applied; anything else (`Align`, `HorizontalDistance`, …) is
+//! `sidecar_unsupported`.
 //!
 //! | kind                                     | fields                                  |
 //! |------------------------------------------|-----------------------------------------|
@@ -16,10 +16,12 @@
 //! | `NetClass`                               | `nets`, `class`                         |
 //! | `OffsetBudget`                           | `instances`, `sigma_mv`                 |
 //! | `Kelvin`                                 | `pin: "R/P"`, `sense: ["M/G"]`          |
+//! | `Load`                                   | `net`, `ff` (external load, fF)         |
+//! | `Order`                                  | `instances` (names or aliases), `direction` (`bottom_to_top`, `top_to_bottom`, `left_to_right`, `right_to_left`) |
 
 use std::collections::HashMap;
 
-use analog::intent::{ConstraintId, Diagnostic, KelvinReq, MatchClass, MatchKind, Term};
+use analog::intent::{AxisDir, ConstraintId, Diagnostic, KelvinReq, MatchClass, MatchKind, Order, Term};
 use analog::metadata::NetClass;
 use pnr_core::ids::{DeviceId, NetId};
 use pnr_core::Netlist;
@@ -196,11 +198,37 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                     _ => unknown!(format!("pin in {at}")),
                 }
             }
-            "Load" | "Order" => diags.push(Diagnostic {
-                kind: "sidecar_unconsumed",
-                devices: vec![],
-                message: format!("entry {i} ({kind}): read by {}", if kind == "Load" { "EXT-25" } else { "EXT-28" }),
-            }),
+            "Load" => {
+                let name = e.get("net").and_then(Value::as_str).unwrap_or("");
+                match (net(name), e.get("ff").and_then(Value::as_f64)) {
+                    (Some(n), Some(ff)) => cfg.loads.push((n, (ff * 1000.0) as f32)),
+                    (None, _) => unknown!(format!("net {name}")),
+                    (Some(_), None) => diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: Load without ff") }),
+                }
+            }
+            "Order" => {
+                let (dir, flip) = match e.get("direction").and_then(Value::as_str) {
+                    Some("bottom_to_top") => (AxisDir::V, false),
+                    Some("top_to_bottom") => (AxisDir::V, true),
+                    Some("left_to_right") => (AxisDir::H, false),
+                    Some("right_to_left") => (AxisDir::H, true),
+                    _ => {
+                        diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: Order direction") });
+                        continue;
+                    }
+                };
+                let names = strs("instances");
+                let steps: Option<Vec<Vec<DeviceId>>> = names.iter().map(|n| alias.get(&n.to_ascii_lowercase()).cloned().or_else(|| device(n).map(|d| vec![d]))).collect();
+                match steps {
+                    Some(mut steps) => {
+                        if flip {
+                            steps.reverse();
+                        }
+                        cfg.order.push(Order { steps, dir, reversible: false, weight: 1.0 });
+                    }
+                    None => unknown!(format!("instance in {names:?}")),
+                }
+            }
             _ => diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i} ({kind})") }),
         }
     }
@@ -217,6 +245,15 @@ impl AnnotationConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// EXT-25: a `Load` entry is an external load on its net, aF.
+    #[test]
+    fn load_entry_sets_a_net_load() {
+        let nl = crate::tests::ota();
+        let (cfg, d) = parse(r#"[{"constraint":"Load","net":"vout2","ff":1000}]"#, &nl).unwrap();
+        assert_eq!(cfg.loads, [(NetId(4), 1e6)]);
+        assert!(d.is_empty(), "{d:?}");
+    }
 
     #[test]
     fn unknown_constraint_is_diagnosed() {

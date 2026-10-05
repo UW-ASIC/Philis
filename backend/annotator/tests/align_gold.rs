@@ -62,12 +62,57 @@ fn symmetric_blocks_become_seeds() {
     let (mut c, d) = annotator::AnnotationConfig::from_json(GOLD_JSON, &nl).unwrap();
     c.process = common::cfg().process;
     let count = |k: &str| d.iter().filter(|x| x.kind == k).count();
-    assert_eq!((count("sidecar_unsupported"), count("sidecar_unconsumed"), d.len()), (4, 1, 5), "{d:?}");
+    assert_eq!((count("sidecar_unsupported"), count("sidecar_unconsumed"), d.len()), (4, 0, 4), "{d:?}");
     c.sidecar_diags = d;
     let p = annotate(&nl, &c);
     let got = canon(&p, &nl);
     assert_eq!(got.pairs, GOLD_PAIRS.iter().map(|&(a, b)| sorted(a, b)).collect());
     assert!(got.selfs.contains("mn0"), "{:?}", got.selfs);
     assert_eq!(got.axes, 1);
-    assert_eq!(p.intent.diagnostics.iter().filter(|x| x.kind.starts_with("sidecar_")).count(), 5);
+    assert_eq!(p.intent.diagnostics.iter().filter(|x| x.kind.starts_with("sidecar_")).count(), 4);
+}
+
+/// Step names of `o`, each step sorted.
+fn step_names(nl: &pnr_core::Netlist, o: &analog::intent::Order) -> Vec<Vec<String>> {
+    o.steps
+        .iter()
+        .map(|s| {
+            let mut v: Vec<String> = s.iter().map(|d| nl.devices[d.0 as usize].name.clone()).collect();
+            v.sort();
+            v
+        })
+        .collect()
+}
+
+/// EXT-28: the extracted vertical current chains, `mn0` (clocked tail) at the bottom and
+/// the precharge switches `mp9`/`mp10` left out of the load step; the output inverters' chains.
+#[test]
+fn strongarm_order_matches_gold() {
+    use analog::intent::AxisDir;
+    let nl = net(STRONGARM);
+    let p = annotate(&nl, &strongarm_cfg());
+    let v: Vec<_> = p.intent.order.iter().filter(|o| o.dir == AxisDir::V).collect();
+    let mn0 = nl.devices.iter().position(|d| d.name == "mn0").unwrap() as u16;
+    let o = v.iter().find(|o| o.steps.iter().flatten().any(|d| d.0 == mn0)).expect("an order through mn0");
+    assert_eq!(step_names(&nl, o), [vec!["mn0"], vec!["mn1", "mn2"], vec!["mn3", "mn4"], vec!["mp5", "mp6"]]);
+    assert!(o.reversible);
+    for chain in [[["mn13"], ["mp11"]], [["mn14"], ["mp12"]]] {
+        assert!(v.iter().any(|o| step_names(&nl, o) == chain), "{chain:?}");
+    }
+}
+
+/// EXT-28: the gold's `Order` (top_to_bottom mn0, xdp, xccn, xccp) is read bottom-up, and the
+/// extracted chain (its reverse) is not repeated: the gold is reproduced.
+#[test]
+fn gold_order_entry() {
+    use analog::intent::{AxisDir, Order};
+    let nl = net(STRONGARM);
+    let id = |n: &str| pnr_core::ids::DeviceId(nl.devices.iter().position(|d| d.name == n).unwrap() as u16);
+    let (mut c, _) = annotator::AnnotationConfig::from_json(GOLD_JSON, &nl).unwrap();
+    let steps = vec![vec![id("mp5"), id("mp6")], vec![id("mn3"), id("mn4")], vec![id("mn1"), id("mn2")], vec![id("mn0")]];
+    assert_eq!(c.order, [Order { steps, dir: AxisDir::V, reversible: false, weight: 1.0 }]);
+    c.process = common::cfg().process;
+    let p = annotate(&nl, &c);
+    let with_mn0: Vec<_> = p.intent.order.iter().filter(|o| o.steps.iter().flatten().any(|&d| d == id("mn0"))).collect();
+    assert_eq!(with_mn0, [&c.order[0]]);
 }

@@ -24,11 +24,11 @@ pub enum Seed {
 
 /// What two devices must share to mirror each other (card D-e): kind, model,
 /// finger W, L and finger count. Bulk is left out (a PMOS pair's bulk may be its source).
-type Sig = (DeviceKind, u16, Option<i64>, Option<i64>, u32);
+pub(crate) type Sig = (DeviceKind, u16, Option<i64>, Option<i64>, u32);
 /// `(A device, B device, passive flipped, rank)`.
 type Cand = (u32, u32, bool, (usize, usize));
 
-fn sig(k: DeviceKind, s: &Drawn) -> Sig {
+pub(crate) fn sig(k: DeviceKind, s: &Drawn) -> Sig {
     (k, s.model, s.w_finger_nm, s.l_nm, s.fingers)
 }
 
