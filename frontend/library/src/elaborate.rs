@@ -739,6 +739,7 @@ mod tests {
             dummy_required: false,
             route_matching_required: true,
             class,
+            kind: None,
             series: Vec::new(),
             style: None,
         };
