@@ -125,3 +125,17 @@ T11 stays open for >2-member groups (chain4, dac4*, mirror_ratio) and non-MOS/R 
 
 - The worktree carries uncommitted edits from segment 2 (docs/LAYOUT-FUNDAMENTALS.md line refs,
   docs/plans/cards/m2-flow-2.md CLI/bench-name notes); not part of this commit.
+- FLOW-13 outcome (resume run, after merging m2 at `e241ff3`): two causes. (1) `elaborate::route_built` never set
+  `dr::DetailedCfg::stack`, so every route landing on cell metal read as `drawn short net N to cell metal`; fixed
+  (set from `annotation(..).process.stack`, as `Flow` does). (2) Still red: annotator EXT-24 (`0e5edfa`,
+  backend/annotator/src/extract.rs:121-130) emits a `CrosstalkExclusion` between each Voltage set's gate and drain
+  nets (ota: vinp/vinm × vout1/vout2), and routing RTE-18 (`407ce25`, backend/dr/src/lib.rs:1050-1084) enforces it as
+  a hard separation in the search with no pin exemption. In an interdigitated pair those pins sit one finger apart,
+  so dr routes nothing on vout1/vout2 (`open net 1 7`, `open net 4 7`) and LVS reports unpaired devices/nets. The
+  flow's own winner shows it too (`sol.route`: `open net 1`, `open net 5`). With the crosstalk batch dropped (debug
+  only, not committed) the round trip is 3/3. Owners: routing (exempt pin approach / cell footprints from `sep`) or
+  annotator (no gate-drain exclusion inside one matched cell). Assertion at emit_roundtrip.rs:241 unchanged.
+- Resume check (release, PDK_ROOT set): `library --lib` 176/176, `philis` all green, `verify --lib` 57/57. Red on
+  `library::run` paths this commit does not touch: `antenna_diode`, `extra_devices::an_adopted_antenna_diode_keeps_lvs_matched`,
+  `drawn_cards::a_mim_dac_signs_off_with_its_capacitors`, `perf_postlayout::ota_probe_regions` (LVS unpaired rows,
+  consistent with the same crosstalk-separation cause); not investigated further here.

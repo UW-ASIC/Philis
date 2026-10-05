@@ -161,14 +161,17 @@ pub(crate) fn route_built(
     let (layers, cuts) = (&stack.layers, &stack.cuts);
     let mut d_router = detailed_router(pdk, &stack);
     d_router.cfg.n_nets = built.netlist.as_ref().map_or(0, |n| n.nets.len());
+    let ann = crate::annotation(pdk, &AnnotationConfig::default());
+    // dr credits cell metal a pin reaches to that pin's net only through the
+    // stack; without it every route landing on cell metal reads as a drawn
+    // short (as `Flow` sets it).
+    d_router.cfg.stack = ann.process.stack;
     // The netlist shares the pins' NetId numbering, so its routing rules key
     // the right nets with no remap.
     let reqs = built
         .netlist
         .as_ref()
-        .map_or_else(Requirements::<Routes>::default, |nl| {
-            annotate(nl, &crate::annotation(pdk, &AnnotationConfig::default())).routing
-        });
+        .map_or_else(Requirements::<Routes>::default, |nl| annotate(nl, &ann).routing);
     let mut neg = gr::Negotiation::new();
     let placed = gr::place_macros(&macros, &layout);
     let pins: Vec<_> = placed
