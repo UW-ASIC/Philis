@@ -15,4 +15,4 @@ pub use isolation::{Isolation, SubstrateBalance};
 pub use matched_set::MatchedSet;
 pub use orientation::{OrientCheck, OrientationSet};
 pub use proximity::Proximity;
-pub use symmetry::Symmetry;
+pub use symmetry::{SymMode, Symmetry};

@@ -736,6 +736,16 @@ fn topology<'a>(
     if !env.pairs.is_empty() {
         problem.placement.budget.push(Box::new(env.clone()));
     }
+    // PLC-21: a Mirror pair stays Mirror only if no variant of either cell
+    // leaves a net φx (Mx180 would reverse its current). Every variant, since
+    // dp reshapes.
+    let mirror_ok = |c: u32| {
+        cells.variants.get(c as usize).is_some_and(|v| v.alternatives.iter().all(|m| analog::matching::moments::mirror_allowed_units(&m.units)))
+    };
+    let keep = |a: u32, b: u32| a != b && mirror_ok(a) && mirror_ok(b);
+    for b in problem.placement.hard.iter_mut().chain(&mut problem.placement.budget).chain(&mut problem.placement.cost) {
+        b.demote_mirrors(&keep);
+    }
     let locks = dp::locks::locks(&problem.placement, cells.variants.len(), &cells.variants);
     let rules = place_rules(pdk, &cells);
     let distinct = cells.distinct_gate_merges > 0;

@@ -35,7 +35,7 @@ use analog::intent::{ClassSource, Intent, MatchSpec};
 use analog::matching::class::{self, phi_arm, Family, MatchClass};
 use analog::matching::mismatch::{self, Budget, Coeffs, MatchKind};
 use analog::placement::symmetry::SymmetryGroup;
-use analog::placement::{DtiBand, Isolation, MatchedSet, OrientCheck, OrientationSet, Proximity, SubstrateBalance, Symmetry};
+use analog::placement::{DtiBand, Isolation, MatchedSet, OrientCheck, OrientationSet, Proximity, SubstrateBalance, SymMode, Symmetry};
 use analog::Requirements;
 use pnr_core::ids::{BranchId, DeviceId, Target};
 use pnr_core::layout::Layout;
@@ -160,9 +160,12 @@ pub fn placement(
         _ => false,
     };
     for c in &intent.compounds {
+        // PLC-21: a Mirror compound asks for reflected partners; `topology` demotes the
+        // pairs whose unit φ would flip (`mirror_allowed_units`) once cells exist.
+        let mode = if c.kind == analog::intent::SymKind::Mirror { SymMode::Mirror } else { SymMode::Perfect };
         let mut syms: Vec<Symmetry> =
-            c.pairs.iter().filter(|&&(a, b)| equal(a, b)).map(|&(a, b)| Symmetry { a: td(a), b: td(b), axis: c.axis }).collect();
-        syms.extend(c.selfs.iter().map(|&d| Symmetry { a: td(d), b: td(d), axis: c.axis }));
+            c.pairs.iter().filter(|&&(a, b)| equal(a, b)).map(|&(a, b)| Symmetry { a: td(a), b: td(b), axis: c.axis, mode }).collect();
+        syms.extend(c.selfs.iter().map(|&d| Symmetry { a: td(d), b: td(d), axis: c.axis, mode: SymMode::Perfect }));
         if !syms.is_empty() {
             r.cost.push(Box::new(SymmetryGroup(syms.clone())));
             r.hard.push(Box::new(SymmetryGroup(syms)));
