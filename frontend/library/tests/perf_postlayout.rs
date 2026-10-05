@@ -534,6 +534,49 @@ fn ota_exports_sensitivities() {
     assert!(e.proc.is_some(), "{e:?}");
 }
 
+/// EXT-21 acceptance: on ota's real `d_vt`, the set with the larger offset sensitivity gets the smaller
+/// allowance, and each uncapped set consumes the same share M/K of the margin (LAMP-09).
+#[test]
+fn ota_allowance_follows_offset_sensitivity() {
+    use library::perf::{default_params, sensitivities, to_evidence, StepPolicy};
+    let Some(lib) = models() else { return };
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+    let (nl, p) = (ota(), cfg(lib));
+    let start = evaluate(&nl, &Parasitics::default(), &p, &[0]).expect("schematic simulates");
+    let nets: Vec<pnr_core::NetId> = (0..nl.nets.len() as u16)
+        .map(pnr_core::NetId)
+        .filter(|n| !matches!(nl.nets[n.0 as usize].name.to_ascii_lowercase().as_str(), "vdd" | "vss"))
+        .collect();
+    let params = default_params(&nl, &nets);
+    let t = sensitivities(&nl, &p, 0, &params, &[], &StepPolicy::default(), &Parasitics::default()).expect("schematic simulates");
+    let mut e = to_evidence(&p, &[t], &start, &[], &nl);
+    // Test input, not a threshold: a 0.01 dB margin so no set reaches its max_eta·σ_k cap (mV scale).
+    e.specs[0].lo = Some(e.specs[0].f0 - 0.01);
+    let ev = annotator::Evidence { sens: Some(e.clone()), ..Default::default() };
+    let prob = annotator::annotate_with(&nl, &library::annotation(&pdk, &Default::default()), &ev);
+    let dev = |n: &str| pnr_core::ids::DeviceId(nl.devices.iter().position(|d| d.name == n).unwrap() as u16);
+    let d_vt = |n: &str| e.specs[0].d_vt.iter().find(|v| v.0 == dev(n)).map_or(0.0, |v| v.1.abs());
+    let set = |a: &str, b: &str| {
+        let want = [dev(a), dev(b)];
+        let s = prob.intent.sets.iter().find(|s| s.members.len() == 2 && s.members.iter().all(|m| want.contains(&m.device)));
+        s.unwrap_or_else(|| panic!("no set {{{a}, {b}}}: {:?}", prob.intent.sets)).allowance
+    };
+    let (s_dp, s_load) = ((d_vt("XM1") + d_vt("XM2")) / 2.0, (d_vt("XM3") + d_vt("XM4")) / 2.0);
+    let (a_dp, a_load) = (set("XM1", "XM2"), set("XM3", "XM4"));
+    eprintln!("S dp {s_dp} load {s_load}; allowance dp {a_dp:?} load {a_load:?}");
+    assert!(s_dp > 0.0 && s_load > 0.0, "{e:?}");
+    let (Some(a_dp), Some(a_load)) = (a_dp, a_load) else { panic!("unallocated: {a_dp:?} {a_load:?}") };
+    let (a_dp, a_load) = (f64::from(a_dp), f64::from(a_load));
+    assert!(a_dp > 0.0 && a_load > 0.0);
+    assert_eq!(s_dp > s_load, a_dp < a_load, "larger offset sensitivity must get the smaller allowance");
+    let (u_dp, u_load) = (s_dp * a_dp, s_load * a_load);
+    assert!((u_dp - u_load).abs() <= 1e-3 * u_dp.max(u_load), "unequal shares: {u_dp} vs {u_load}");
+    // K: the allocated sets some spec's d_vt touches (S > 0).
+    let k = prob.intent.sets.iter().filter(|s| s.allowance.is_some() && s.members.iter().any(|m| d_vt(&nl.devices[m.device.0 as usize].name) > 0.0)).count();
+    assert!((u_dp - 0.01 / k as f64).abs() <= 1e-3 * u_dp, "share {u_dp} vs M/K = 0.01/{k}");
+}
+
 /// PERF-14 acceptance: keyed on β, the winner of ota's search is at least as
 /// robust as the epoch the pre-PERF-14 key (|V|, spec miss, Θ, then C band,
 /// area) would pick from the same promoted epochs. Within the winning
