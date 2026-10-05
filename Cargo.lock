@@ -133,6 +133,7 @@ dependencies = [
  "analog",
  "annotator",
  "gpurify",
+ "gr",
  "library",
  "pnr_core",
  "serde_json",

@@ -65,6 +65,10 @@ impl Rule for CrosstalkExclusion {
     fn keepaway(self) -> Option<(u32, u32)> {
         Some((u32::from(self.a.0), u32::from(self.b.0)))
     }
+    /// Enforced in the search (RTE-18): same-layer only.
+    fn separation(self) -> Option<(u32, u32, i32, bool)> {
+        Some((u32::from(self.a.0), u32::from(self.b.0), self.min_spacing_nm, false))
+    }
     /// `(d − floor) / floor`; `1.0` when the nets share no layer.
     fn headroom(self, r: &Routes) -> f32 {
         let floor = self.min_spacing_nm.max(1) as f32;

@@ -139,10 +139,20 @@ pub trait Rule: Copy {
         None
     }
 
-    /// `(victim, reference)` when this rule asks for `victim` to be shielded by
-    /// `reference` metal — what a router must generate, not only check.
+    /// `(victim, reference, max gap nm)` when this rule asks for `victim` to
+    /// be shielded by `reference` metal no farther than the gap — what a
+    /// router must generate, not only check.
     #[inline]
-    fn shield(self) -> Option<(u32, u32)> {
+    fn shield(self) -> Option<(u32, u32, i32)> {
+        None
+    }
+
+    /// `(a, b, lateral_nm, no_cross)` when this rule wants nets `a` and `b`
+    /// kept `lateral_nm` apart on a layer (and, with `no_cross`, never
+    /// overlapping on adjacent layers): what a router enforces while
+    /// searching (RTE-18). Default none.
+    #[inline]
+    fn separation(self) -> Option<(u32, u32, i32, bool)> {
         None
     }
 
@@ -154,6 +164,11 @@ pub trait Rule: Copy {
 
     /// How a router repairs a violated instance; see [`RuleBatch::repair_kind`].
     const REPAIR: RepairKind = RepairKind::Reroute;
+
+    /// Reads only the routes of the nets [`Rule::touches`] pushes: repair may
+    /// keep a cached score while those nets' shapes are unchanged (RTE-23).
+    /// Default `false` (coupling-style rules read their aggressors too).
+    const LOCAL: bool = false;
 
     /// Every instance of this rule in the netlist. Group↔group rules `union`
     /// each side in `uf` and emit `Target::Group`s. Default: none.
@@ -186,6 +201,11 @@ pub trait RuleBatch<On>: Send + Sync {
     /// How a router repairs this batch's violations. Default `Reroute`.
     fn repair_kind(&self) -> RepairKind {
         RepairKind::Reroute
+    }
+    /// Every rule reads only the state of the ids [`RuleBatch::touched`]
+    /// lists (see [`Rule::LOCAL`]). Default `false`.
+    fn local(&self) -> bool {
+        false
     }
     /// Number of rules in the batch.
     fn count(&self) -> usize {
@@ -257,7 +277,11 @@ pub trait RuleBatch<On>: Send + Sync {
         let _ = out;
     }
     /// Append every shield request `(victim, reference)` (see [`Rule::shield`]).
-    fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
+    fn shield_pairs(&self, out: &mut Vec<(u32, u32, i32)>) {
+        let _ = out;
+    }
+    /// Every [`Rule::separation`] of the batch. Default none.
+    fn separations(&self, out: &mut Vec<(u32, u32, i32, bool)>) {
         let _ = out;
     }
     /// `(device_a, device_b, mV)`: the 1σ systematic allowance each matched pair has left after
@@ -302,6 +326,9 @@ impl<On> RuleBatch<On> for Tagged<On> {
     fn repair_kind(&self) -> RepairKind {
         self.inner.repair_kind()
     }
+    fn local(&self) -> bool {
+        self.inner.local()
+    }
     fn count(&self) -> usize {
         self.inner.count()
     }
@@ -344,8 +371,11 @@ impl<On> RuleBatch<On> for Tagged<On> {
     fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
         self.inner.keepaway_pairs(out);
     }
-    fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
+    fn shield_pairs(&self, out: &mut Vec<(u32, u32, i32)>) {
         self.inner.shield_pairs(out);
+    }
+    fn separations(&self, out: &mut Vec<(u32, u32, i32, bool)>) {
+        self.inner.separations(out);
     }
     fn offset_allowances(&self, s: &On, out: &mut Vec<(u32, u32, f32)>) {
         self.inner.offset_allowances(s, out);
@@ -379,6 +409,9 @@ impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {
     }
     fn repair_kind(&self) -> RepairKind {
         R::REPAIR
+    }
+    fn local(&self) -> bool {
+        R::LOCAL
     }
     fn count(&self) -> usize {
         self.len()
@@ -439,8 +472,11 @@ impl<R: Rule + Send + Sync> RuleBatch<R::On> for Vec<R> {
     fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
         out.extend(self.iter().filter_map(|r| r.keepaway()));
     }
-    fn shield_pairs(&self, out: &mut Vec<(u32, u32)>) {
+    fn shield_pairs(&self, out: &mut Vec<(u32, u32, i32)>) {
         out.extend(self.iter().filter_map(|r| r.shield()));
+    }
+    fn separations(&self, out: &mut Vec<(u32, u32, i32, bool)>) {
+        out.extend(self.iter().filter_map(|r| r.separation()));
     }
 }
 
@@ -670,7 +706,7 @@ mod tests {
         use RepairKind as K;
         assert_eq!(Vec::<Differential>::new().repair_kind(), K::Mirror);
         let stack: &'static Stack = Box::leak(Box::default());
-        assert_eq!(CommonNodes { nodes: Vec::new(), stack }.repair_kind(), K::Balance);
+        assert_eq!(CommonNodes { nodes: Vec::new(), stack, halo_nm: 0, joins: Vec::new() }.repair_kind(), K::Balance);
         assert_eq!(Vec::<CrosstalkExclusion>::new().repair_kind(), K::KeepAway);
         assert_eq!(Vec::<CouplingBudget>::new().repair_kind(), K::KeepAway);
         assert_eq!(Vec::<Antenna>::new().repair_kind(), K::Antenna);

@@ -278,7 +278,7 @@ pub(crate) fn em_limits(pdk: &Pdk, layers: &[LayerId], cuts: &[Cut], temp_k: Opt
 
 /// The deck's routing stack, bottom-up, metals and cuts interleaved: `pex`
 /// ground and lateral C, and each etch stage's antenna rule.
-pub(crate) fn stack(pdk: &Pdk) -> analog::routing::Stack {
+pub fn stack(pdk: &Pdk) -> analog::routing::Stack {
     let mut order = Vec::new();
     for (i, &m) in pdk.routing_metals.iter().enumerate() {
         order.push(m);
@@ -305,11 +305,102 @@ pub(crate) fn stack(pdk: &Pdk) -> analog::routing::Stack {
                 } else {
                     pdk.cell_f32("latent_merge_nm").map_or_else(|| pdk.min_spacing(l.0).unwrap_or(0), |v| v as i32)
                 },
+                cross_af_um2: pdk.routing_metals.iter().position(|&m| m == l).and_then(|i| pdk.overlap_af_um2(l, *pdk.routing_metals.get(i + 1)?)).unwrap_or(0.0),
             })
             .collect(),
         antenna_cumulative: rules.iter().flatten().any(|r| r.2),
         diode: pdk.antenna_diode_credit().map(|(l, bonus)| analog::routing::DiodeCredit { layer: l.0, bonus }),
     }
+}
+
+/// Sheet resistance past which a resistor body is protected whatever its
+/// class: Hastings's minimal-matching allowance holds only to 500 Ω/□
+/// (§8.2.3; §6.1 names > 1 kΩ/□ as modulated by leads above).
+const BODY_SHEET_OHM: f32 = 500.0;
+/// How far aggressor-class nets keep off a cap plate, nm (Hastings §8.2.2:
+/// "≥ 3–4 µm around the shielded area", lower end).
+const PLATE_AGGRESSOR_NM: i32 = 3_000;
+
+/// The match class of the set a cell drawing `members` belongs to: the
+/// `Unitization` of more than one device holding every member, its class or
+/// `Moderate` when not given (C16); `None` = in no matched set.
+pub(crate) fn match_class(units: &[analog::cell::Unitization], members: &[pnr_core::DeviceId]) -> Option<pnr_core::MatchClass> {
+    units
+        .iter()
+        .find(|u| u.devices.len() > 1 && !members.is_empty() && members.iter().all(|d| u.devices.contains(d)))
+        .map(|u| u.class.unwrap_or(pnr_core::MatchClass::Moderate))
+}
+
+/// RTE-16's routing blockages for the placed cells over the routed `layers`
+/// (lattice order). Sources: each cell's keep-outs; a transistor cell with
+/// no `Gate` keep-out (no generator emits one yet) gets its gates as the
+/// pairwise intersections of its `poly` and `diff` shapes. Every rect keeps
+/// the lowest routed metal's spacing as its halo. `class_of(c)` is the match class of
+/// the set cell `c` draws, `None` = in no matched set: no blockage (C16).
+/// Policy (Hastings §13.3 rule 17, §8.2): a gate at Moderate/Exceptional is
+/// hard on every layer, own nets included (marked `gate` for the V check);
+/// at Minimal soft. A resistor body at ≥ Moderate or over
+/// [`BODY_SHEET_OHM`] is hard for foreign nets, else soft plus a hard copy
+/// for aggressors; heads stay crossable. A cap plate at ≥ Moderate is hard
+/// for foreign nets below the plate's top conductor (the highest routed
+/// metal of the cell over it) and soft above, at Minimal soft; aggressors
+/// keep [`PLATE_AGGRESSOR_NM`] off it on every layer.
+pub(crate) fn blockages(placed: &[Macro], pdk: &Pdk, class_of: impl Fn(usize) -> Option<pnr_core::MatchClass>, layers: &[LayerId]) -> Vec<dr::Blockage> {
+    use pnr_core::{KeepWhy, MatchClass, Process, Rect};
+    let all: u16 = if layers.len() >= 16 { u16::MAX } else { (1u16 << layers.len()) - 1 };
+    let s = layers.first().and_then(|l| pdk.route_spacing(l.0)).unwrap_or(0);
+    let (poly, diff) = (Process::layer(pdk, "poly"), Process::layer(pdk, "diff"));
+    let body_sheet = Process::layer(pdk, "rpoly").and_then(|l| pdk.pex_f32(l, "sheet_res_ohm_sq"));
+    let mut out = Vec::new();
+    for (c, m) in placed.iter().enumerate() {
+        let Some(class) = class_of(c) else { continue };
+        let strong = class >= MatchClass::Moderate;
+        let b = |rect: Rect, layers: u16, hard: bool, gate: bool| dr::Blockage { rect, halo: s, layers, hard, own_exempt: !(hard && gate), only_aggressors: false, cell: c as u32, gate };
+        let mut gates: Vec<Rect> = m.keepouts.iter().filter(|k| matches!(k.why, KeepWhy::Gate { .. })).map(|k| k.rect).collect();
+        if gates.is_empty() {
+            if let (Some(p), Some(d)) = (poly, diff) {
+                let on = |l: LayerId| m.shapes.iter().filter(move |x| x.layer == l).map(|x| x.rect);
+                for pr in on(p) {
+                    for dr_ in on(d) {
+                        let (x0, y0) = (pr.x.max(dr_.x), pr.y.max(dr_.y));
+                        let (x1, y1) = ((pr.x + pr.w).min(dr_.x + dr_.w), (pr.y + pr.h).min(dr_.y + dr_.h));
+                        if x1 > x0 && y1 > y0 {
+                            gates.push(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+                        }
+                    }
+                }
+            }
+        }
+        out.extend(gates.into_iter().map(|g| b(g, all, strong, true)));
+        for k in &m.keepouts {
+            match k.why {
+                KeepWhy::Gate { .. } => {}
+                KeepWhy::ResistorBody { .. } => {
+                    if strong || body_sheet.is_some_and(|r| r > BODY_SHEET_OHM) {
+                        out.push(b(k.rect, all, true, false));
+                    } else {
+                        out.push(b(k.rect, all, false, false));
+                        out.push(dr::Blockage { only_aggressors: true, hard: true, ..b(k.rect, all, false, false) });
+                    }
+                }
+                KeepWhy::CapPlate { .. } => {
+                    let over = |x: &&Shape| x.rect.x < k.rect.x + k.rect.w && k.rect.x < x.rect.x + x.rect.w && x.rect.y < k.rect.y + k.rect.h && k.rect.y < x.rect.y + x.rect.h;
+                    let top = m.shapes.iter().filter(over).filter_map(|x| layers.iter().position(|&l| l == x.layer)).max();
+                    let below: u16 = top.map_or(all, |t| (1u16 << t) - 1);
+                    if strong && below != 0 {
+                        out.push(b(k.rect, below, true, false));
+                        if all & !below != 0 {
+                            out.push(b(k.rect, all & !below, false, false));
+                        }
+                    } else {
+                        out.push(b(k.rect, all, false, false));
+                    }
+                    out.push(dr::Blockage { halo: PLATE_AGGRESSOR_NM + s, only_aggressors: true, hard: true, ..b(k.rect, all, true, false) });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Design intent for signoff's EM/IR rules: every Supply/Ground-class net at
@@ -505,6 +596,11 @@ pub(crate) fn detailed_router(pdk: &Pdk, stack: &RoutingStack) -> dr::DetailedRo
     if let Some(cheapest) = ground.iter().flatten().copied().reduce(f32::min).filter(|&c| c > 0.0) {
         cfg.layer_c = ground.iter().map(|c| c.unwrap_or(cheapest) / cheapest).collect();
         cfg.beside_c = side.iter().map(|c| c.unwrap_or(0.0) / cheapest).collect();
+        // A crossing node's overlap with the layer above, `wire_l·wire_{l+1}` (RTE-18).
+        cfg.cross_c = specs
+            .windows(2)
+            .map(|w| pdk.overlap_af_um2(w[0].id, w[1].id).map_or(0.0, |c| c * w[0].wire as f32 * w[1].wire as f32 / 1e6) / cheapest)
+            .collect();
     }
     // Series R per track step (sheet · pitch / width) and per via cut, over the
     // least resistive layer's step.
@@ -621,6 +717,52 @@ mod tests {
         let mut metal_cut = load();
         metal_cut.routing_cuts[0] = metal_cut.routing_metals[2];
         assert!(routing_stack(&metal_cut, None).is_err());
+    }
+
+    /// A 2-device set with no class is Moderate: its gates (poly ∩ diff) are
+    /// hard on every layer, own nets included; Minimal makes them soft; a
+    /// cell in no set gets none.
+    #[test]
+    fn blockages_follow_class() {
+        use analog::cell::{SeriesParallel, Unitization};
+        use pnr_core::{DeviceId, DeviceKind, MatchClass, Process, Rect};
+        let pdk = Pdk::builtin("sky130").unwrap();
+        let layers = routing_stack(&pdk, None).unwrap().layers;
+        let unit = |devices: Vec<DeviceId>, class| Unitization {
+            devices,
+            device_type: DeviceKind::Nmos,
+            dev_nf: vec![1, 1],
+            target_ratio: vec![1, 1],
+            unit_w: 1_000,
+            unit_l: 150,
+            series_parallel: SeriesParallel::Parallel,
+            dummy_required: false,
+            route_matching_required: true,
+            class,
+            series: Vec::new(),
+            style: None,
+        };
+        let units = [unit(vec![DeviceId(0), DeviceId(1)], None), unit(vec![DeviceId(2), DeviceId(3)], Some(MatchClass::Minimal))];
+        let members = [vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2), DeviceId(3)], vec![DeviceId(4)]];
+        assert_eq!(match_class(&units, &members[0]), Some(MatchClass::Moderate));
+        assert_eq!(match_class(&units, &members[1]), Some(MatchClass::Minimal));
+        assert_eq!(match_class(&units, &members[2]), None);
+        let (poly, diff) = (Process::layer(&pdk, "poly").unwrap(), Process::layer(&pdk, "diff").unwrap());
+        let shape = |layer, x, y, w, h| Shape { layer, rect: Rect { x, y, w, h } };
+        // Two fingers over one diffusion: two gates.
+        let cell = Macro {
+            shapes: vec![shape(diff, 0, 0, 2_000, 1_000), shape(poly, 500, -200, 150, 1_400), shape(poly, 1_300, -200, 150, 1_400)],
+            ..Default::default()
+        };
+        let placed = vec![cell.clone(), cell.clone(), cell];
+        let b = blockages(&placed, &pdk, |c| match_class(&units, &members[c]), &layers);
+        let of = |c: u32| b.iter().filter(move |x| x.cell == c).collect::<Vec<_>>();
+        let s = pdk.route_spacing(layers[0].0).unwrap();
+        assert_eq!(of(0).len(), 2);
+        assert!(of(0).iter().all(|x| x.hard && x.gate && !x.own_exempt && x.layers == (1 << layers.len()) - 1));
+        assert_eq!((of(0)[0].rect, of(0)[0].halo), (Rect { x: 500, y: 0, w: 150, h: 1_000 }, s));
+        assert!(of(1).len() == 2 && of(1).iter().all(|x| !x.hard && x.gate));
+        assert!(of(2).is_empty());
     }
 
     /// The lattice dr builds for sky130, as the placer reads it (PLC-28).

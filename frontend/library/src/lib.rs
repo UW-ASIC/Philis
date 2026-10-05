@@ -13,7 +13,7 @@ pub use parse::{spice_report, spice_with, ParseOptions, ParseReport, SizeConvent
 /// Substrate3 elaboration: build a `macro_master::Composition` against a PDK
 /// and route its declared nets — the "PDK on the fly" entry.
 pub mod elaborate;
-pub use elaborate::{elaborate, ElabConfig, Elaborated};
+pub use elaborate::{elaborate, stack as parasitic_stack, ElabConfig, Elaborated};
 
 /// Decompile a solved [`Solution`] into a PDK-agnostic generator.
 pub mod emit;
@@ -236,6 +236,8 @@ pub struct Solution {
     pub metadata: metadata::MetadataReport,
     /// The placement rules the search scored, retargeted to `layout`'s cell ids.
     pub placement: analog::Requirements<Layout>,
+    /// The routing rules dr scored `routes` against.
+    pub routing: analog::Requirements<Routes>,
     /// Supplies and their currents, for signoff's EM/IR rules (empty without an
     /// operating point).
     pub intent: verify::Intent,
@@ -250,6 +252,10 @@ pub struct Solution {
     pub pairs: Vec<(DeviceId, DeviceId)>,
     /// Schematic devices per cell, indexed like `layout`.
     pub devices_of: Vec<Vec<DeviceId>>,
+    /// The winner's detailed-routing report and stats (`dr`'s own rows:
+    /// `open net`, `metal over gate`, …; the pairs it routed exactly).
+    pub route: Report,
+    pub route_stats: dr::RouteStats,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -1102,12 +1108,15 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
         stats,
         metadata,
         placement: flow.problem.placement,
+        routing: flow.problem.routing,
         intent: flow.intent,
         folds: flow.fold,
         well_layer: pnr_core::Process::layer(pdk, "nwell"),
         op: bias.op.clone(),
         pairs,
         devices_of: flow.cells.devices_of,
+        route: best.route,
+        route_stats: best.route_stats,
     }
 }
 
@@ -1296,6 +1305,9 @@ struct Epoch {
     /// are in `rings`.
     extra: Vec<pnr_core::Device>,
     stats: RunStats,
+    /// dr's report and stats for `routes`.
+    route: Report,
+    route_stats: dr::RouteStats,
 }
 
 impl Flow<'_> {
@@ -1395,13 +1407,25 @@ impl Flow<'_> {
             // Pin shares from the unplaced macros: `place_macro` leaves units local.
             cfg: dr::DetailedCfg {
                 common: self.common_nodes(&layout).nodes,
+                blockages: elaborate::blockages(&placed, self.pdk, |c| elaborate::match_class(&self.problem.constraints.unitization, self.cells.devices_of.get(c).map_or(&[][..], Vec::as_slice)), layers),
+                aggressor: {
+                    let mut a = vec![false; self.netlist.nets.len()];
+                    for c in self.problem.net_classes.iter().filter(|c| c.class == analog::metadata::NetClass::Clock) {
+                        if let Some(x) = a.get_mut(c.net.0 as usize) {
+                            *x = true;
+                        }
+                    }
+                    a
+                },
+                plates: self.plate_sets(&placed),
+                aggressor_weight: analog::routing::CouplingBudget::default_weights(&self.problem.net_classes, self.netlist.nets.len()),
                 stack: Some(self.stack),
                 pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
                 n_nets: self.netlist.nets.len(),
                 ..self.d_router.cfg.clone()
             },
         };
-        let (mut routes, mut route_report, _route_stats) =
+        let (mut routes, mut route_report, mut route_stats) =
             router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
         lap(3);
         // Antenna nets the jumper could not fix get a diode each, routed in as
@@ -1420,12 +1444,22 @@ impl Flow<'_> {
                 extra.push(device);
                 rings.push(m);
             }
-            (routes, route_report, _) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
+            (routes, route_report, route_stats) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
             lap(4);
+            let marked = !marks.is_empty();
             for (net, shape) in marks {
                 if let Some(w) = routes.wires.get_mut(net.0 as usize) {
                     w.push(shape);
                 }
+            }
+            // dr scored the routes before the markers joined them: re-derive
+            // its rule rows on the routes that ship (RTE-23).
+            if marked {
+                let (hard, budget) = gr::analog_tiers(&routes, routing);
+                route_report.hard_violations.retain(|v| !v.is_batch_row());
+                route_report.budget_violations.retain(|v| !v.is_batch_row());
+                route_report.hard_violations.extend(hard);
+                route_report.budget_violations.extend(budget);
             }
         }
         let netlist = if extra.is_empty() {
@@ -1476,6 +1510,8 @@ impl Flow<'_> {
             rings,
             extra,
             stats,
+            route: route_report,
+            route_stats,
         }
     }
 }
@@ -1542,6 +1578,34 @@ impl Flow<'_> {
         perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true, gate_offset_v: Vec::new() }
     }
 
+    /// RTE-20: each capacitor `Unitization` of three or more members (EXT-19's
+    /// sets) as placed: `top` the members' `P` net, `bits` the `(N net, units)`
+    /// of every member whose `N` is no rail (the terminated unit's is),
+    /// `c_unit_af` a one-unit member's `c_af` (`NAN` without one), `array` the
+    /// bbox of the cell drawing the members.
+    fn plate_sets(&self, placed: &[Macro]) -> Vec<analog::routing::PlateSet> {
+        use analog::metadata::NetClass::{Ground, Substrate, Supply};
+        let rail = |n: pnr_core::NetId| self.problem.net_classes.iter().any(|c| c.net == n && matches!(c.class, Supply | Ground | Substrate));
+        let term = |d: DeviceId, t: &str| self.netlist.devices[d.0 as usize].terminals.iter().find(|(n, _)| n == t).map(|&(_, n)| n);
+        let mut out = Vec::new();
+        for u in self.problem.constraints.unitization.iter().filter(|u| u.device_type == pnr_core::DeviceKind::Capacitor && u.devices.len() >= 3) {
+            let Some(top) = term(u.devices[0], "P") else { continue };
+            let Some(c) = self.cells.devices_of.iter().position(|m| !m.is_empty() && m.iter().all(|d| u.devices.contains(d))) else { continue };
+            let Some(array) = placed.get(c).map(|m| m.bbox) else { continue };
+            let units = |i: usize| u32::from(u.dev_nf.get(i).copied().unwrap_or(1));
+            let bits: Vec<(pnr_core::NetId, u32)> = u.devices.iter().enumerate().filter_map(|(i, &d)| term(d, "N").filter(|&n| !rail(n)).map(|n| (n, units(i)))).collect();
+            let c_unit_af = u
+                .devices
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| units(i) == 1)
+                .find_map(|(_, &d)| self.netlist.devices[d.0 as usize].params.iter().find(|(k, _)| k == "c_af").map(|&(_, v)| v as f32))
+                .unwrap_or(f32::NAN);
+            out.push(analog::routing::PlateSet { top, bits, c_unit_af, array });
+        }
+        out
+    }
+
     /// Each extracted common node (EXT-24 `Intent.common_nodes`), with its
     /// halves' pins on the node and the net's other pins (feeds) as placed,
     /// budgeted `ΔR ≤ (allowance − placement spend) / I_D` from the first
@@ -1571,9 +1635,12 @@ impl Flow<'_> {
             let feeds = list.iter().filter(|p| !req.a.contains(&p.0) && !req.b.contains(&p.0)).map(|p| p.2).collect();
             let i_ua = self.id_ua.get(a.0 as usize).copied().flatten().map(|i| i.abs() as f32).filter(|&i| i > 0.0);
             let max_delta_ohm = common_node_ohm(&left, a, b, i_ua);
-            nodes.push(analog::routing::CommonNode { net: req.net, a: pins(&req.a), b: pins(&req.b), feeds, max_delta_ohm });
+            // RTE-17 step 4: EXT-24's StarReq/KelvinReq (`intent.stars`/`kelvins`)
+            // are not mapped yet (a StarReq supersedes the net's node, star = true).
+            nodes.push(analog::routing::CommonNode { net: req.net, groups: vec![pins(&req.a), pins(&req.b)], feeds, max_delta_ohm, star: false });
         }
-        analog::routing::CommonNodes { nodes, stack: self.stack }
+        let joins = dr::joins(&self.layers, &self.cuts, self.d_router.cfg.pin_access);
+        analog::routing::CommonNodes { nodes, stack: self.stack, halo_nm: self.d_router.cfg.pitch, joins }
     }
 
     /// Each recognised matched pair's surroundings on the placed geometry,
@@ -2956,7 +3023,7 @@ mod common_node_tests {
         };
         let nodes = t.flow.common_nodes(&layout).nodes;
         assert_eq!(nodes.len(), 1, "one common source node");
-        assert!(!nodes[0].a.is_empty() && !nodes[0].b.is_empty(), "both members' source pins: a {:?} b {:?}", nodes[0].a, nodes[0].b);
+        assert!(nodes[0].groups.len() == 2 && nodes[0].groups.iter().all(|g| !g.is_empty()), "both members' source pins: {:?}", nodes[0].groups);
     }
 
     /// AF-31: an empty cell is named by its members, not by its cell index
