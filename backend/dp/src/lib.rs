@@ -259,6 +259,17 @@ pub fn place(
         units: coarse.units.clone(),
     };
     l.refresh_temps();
+    // PLC-21: seed Mirror partners as reflections of their set's first member;
+    // extents follow any member whose axes the realignment swapped.
+    if l.orient.len() == n {
+        let before = l.orient.clone();
+        locks.align(&mut l.orient);
+        for (c, o) in before.iter().enumerate() {
+            if o.swaps_axes() != l.orient[c].swaps_axes() {
+                (l.hw[c], l.hh[c]) = (l.hh[c], l.hw[c]);
+            }
+        }
+    }
 
     let branch_ids = seed_branches(reqs, &mut l.branch);
     let sym = sym_groups(reqs, n);
@@ -366,7 +377,7 @@ pub fn place(
                 let set = locks.members(c, false);
                 can_rotate
                     && !set.iter().any(|&m| sa.is_fixed(m))
-                    && try_rotate(&mut sa, &mut l, &mut rng, temp, &set, &clamp_x, &clamp_y)
+                    && try_rotate(&mut sa, &mut l, &mut rng, temp, &set, &locks.rel, &clamp_x, &clamp_y)
             };
         }
 
@@ -596,21 +607,25 @@ fn quarter_turn(o: Orient) -> Orient {
 }
 
 /// Turn a whole orient set a quarter, in one trial; `hw`/`hh` swap with the
-/// orientation (`Layout::orient`). No move introduces a mirror, so a matched
-/// set keeps one orientation: channels stay parallel and S→D current runs the
-/// same way across it.
+/// orientation (`Layout::orient`). Every member becomes `o0.then(rel[c])` with
+/// `o0` the first member's turned orient, so a Perfect set keeps one
+/// orientation and a Mirror partner stays its `Mx180` reflection (PLC-21). No
+/// move introduces a mirror; only seeding ([`locks::Locks::align`]) does.
+#[allow(clippy::too_many_arguments)]
 fn try_rotate(
     sa: &mut Sa,
     l: &mut Layout,
     rng: &mut SplitMix64,
     temp: f64,
     set: &[usize],
+    rel: &[Orient],
     clamp_x: &impl Fn(i32, i32) -> i32,
     clamp_y: &impl Fn(i32, i32) -> i32,
 ) -> bool {
     sa.trial(l, rng, temp, |l, _, _| {
+        let o0 = quarter_turn(l.orient[set[0]]);
         for &c in set {
-            l.orient[c] = quarter_turn(l.orient[c]);
+            l.orient[c] = o0.then(rel.get(c).copied().unwrap_or(Orient::R0));
             (l.hw[c], l.hh[c]) = (l.hh[c], l.hw[c]);
             l.x[c] = clamp_x(l.x[c], l.hw[c]);
             l.y[c] = clamp_y(l.y[c], l.hh[c]);

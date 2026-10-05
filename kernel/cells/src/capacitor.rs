@@ -393,7 +393,7 @@ mod tests {
                 series_parallel: SeriesParallel::Series,
                 dummy_required: false,
                 route_matching_required: false,
-                class: None, series: Vec::new(), style: None,
+                class: None, kind: None, series: Vec::new(), style: None,
             }],
             ..Default::default()
         };

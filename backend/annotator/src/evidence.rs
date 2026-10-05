@@ -12,7 +12,8 @@ use pnr_core::{DeviceKind, Netlist};
 #[derive(Clone, Debug, Default)]
 pub struct Evidence {
     pub op: Option<OpFacts>,
-    /// Spec sensitivities; PERF-12 fills them (M4), nothing reads them yet.
+    /// Spec sensitivities; PERF-12 fills them (M4); EXT-21 allocates set allowances
+    /// from `d_vt`, EXT-25 parasitic budgets from `d_c`/`d_r`/`d_cc`.
     pub sens: Option<Sensitivities>,
     /// Nets driven by PULSE/PWL/SIN testbench sources.
     pub switching_nets: Vec<NetId>,

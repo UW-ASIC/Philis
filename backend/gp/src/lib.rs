@@ -852,7 +852,7 @@ mod weight_tests {
 mod place_tests {
     use super::*;
     use analog::matching::mismatch::{Budget, Coeffs, MatchKind};
-    use analog::placement::symmetry::{Symmetry, SymmetryGroup};
+    use analog::placement::symmetry::{SymMode, Symmetry, SymmetryGroup};
     use analog::placement::MatchedSet;
     use pnr_core::geom::Rect;
     use pnr_core::ids::{AxisId, DeviceId, Target};
@@ -905,7 +905,7 @@ mod place_tests {
     }
 
     fn sym(a: u16, b: u16, axis: u16) -> SymmetryGroup {
-        SymmetryGroup(vec![Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(axis) }])
+        SymmetryGroup(vec![Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(axis), mode: SymMode::Perfect }])
     }
 
     #[test]

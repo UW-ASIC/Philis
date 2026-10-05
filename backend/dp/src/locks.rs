@@ -2,7 +2,7 @@
 //! members' variant spaces agree index by index, reshapes together.
 
 use analog::Requirements;
-use pnr_core::{Layout, UnionFind};
+use pnr_core::{Layout, Orient, UnionFind};
 
 /// Orient and shape sets over cells, from every tier's `matched_pairs`.
 #[derive(Clone, Debug, Default)]
@@ -17,6 +17,9 @@ pub struct Locks {
     pub shape_of: Vec<Option<u16>>,
     /// Distinct matched pairs whose variant spaces differ (not shape-locked).
     pub incompatible: u32,
+    /// Cell → its orient relative to its orient set's first member (PLC-21):
+    /// `Mx180` across each Mirror pair, `R0` otherwise. Length `n`.
+    pub rel: Vec<Orient>,
 }
 
 /// Locks of `n` cells. A pair is shape-compatible when both cells' variant
@@ -24,16 +27,19 @@ pub struct Locks {
 /// empty (or too short) every pair is.
 #[must_use]
 pub fn locks(reqs: &Requirements<Layout>, n: usize, variants: &[gp::VariantSpace]) -> Locks {
-    let mut pairs = Vec::new();
+    let (mut pairs, mut mirrored) = (Vec::new(), Vec::new());
     for b in reqs.hard.iter().chain(&reqs.budget).chain(&reqs.cost) {
         b.matched_pairs(&mut pairs);
+        b.mirrored_pairs(&mut mirrored);
     }
-    pairs.retain(|&(a, b)| a != b && (a as usize) < n && (b as usize) < n);
-    for p in &mut pairs {
-        *p = (p.0.min(p.1), p.0.max(p.1));
+    for v in [&mut pairs, &mut mirrored] {
+        v.retain(|&(a, b)| a != b && (a as usize) < n && (b as usize) < n);
+        for p in v.iter_mut() {
+            *p = (p.0.min(p.1), p.0.max(p.1));
+        }
+        v.sort_unstable();
+        v.dedup();
     }
-    pairs.sort_unstable();
-    pairs.dedup();
 
     let dims = |i: u32| {
         variants.get(i as usize).map(|s| s.alternatives.iter().map(|m| (m.bbox.w, m.bbox.h)).collect::<Vec<_>>())
@@ -50,7 +56,35 @@ pub fn locks(reqs: &Requirements<Layout>, n: usize, variants: &[gp::VariantSpace
     }
     let (orient, orient_of) = sets(&mut orient, n);
     let (shape, shape_of) = sets(&mut shape, n);
-    Locks { orient, shape, orient_of, shape_of, incompatible }
+    let rel = relative(&orient, &pairs, &mirrored, n);
+    Locks { orient, shape, orient_of, shape_of, incompatible, rel }
+}
+
+/// BFS from each set's first member over the pair edges: a Mirror edge
+/// composes `Mx180`, any other keeps the orient. First assignment wins.
+// ponytail: an inconsistent cycle (odd Mirror loop) is left to `Symmetry::satisfied` to report.
+fn relative(sets: &[Vec<u16>], pairs: &[(u32, u32)], mirrored: &[(u32, u32)], n: usize) -> Vec<Orient> {
+    let mut adj: Vec<Vec<(usize, bool)>> = vec![Vec::new(); n];
+    for &(a, b) in pairs {
+        let m = mirrored.binary_search(&(a, b)).is_ok();
+        adj[a as usize].push((b as usize, m));
+        adj[b as usize].push((a as usize, m));
+    }
+    let mut rel = vec![Orient::R0; n];
+    let mut seen = vec![false; n];
+    for set in sets {
+        let mut queue = std::collections::VecDeque::from([usize::from(set[0])]);
+        seen[usize::from(set[0])] = true;
+        while let Some(a) = queue.pop_front() {
+            for &(b, m) in &adj[a] {
+                if !std::mem::replace(&mut seen[b], true) {
+                    rel[b] = if m { rel[a].then(Orient::Mx180) } else { rel[a] };
+                    queue.push_back(b);
+                }
+            }
+        }
+    }
+    rel
 }
 
 /// Non-singleton groups, sorted, and the cell → set map.
@@ -86,6 +120,19 @@ impl Locks {
         }
     }
 
+    /// Re-derive every orient set's members from its first member:
+    /// `orient[m] = orient[set[0]].then(rel[m])`.
+    pub fn align(&self, orient: &mut [Orient]) {
+        for set in &self.orient {
+            let Some(&o0) = orient.get(usize::from(set[0])) else { continue };
+            for &m in &set[1..] {
+                if let (Some(o), Some(&r)) = (orient.get_mut(usize::from(m)), self.rel.get(usize::from(m))) {
+                    *o = o0.then(r);
+                }
+            }
+        }
+    }
+
     /// Set every shape set's members to its first member's variant.
     pub fn unify(&self, assignment: &mut [u16]) {
         for set in &self.shape {
@@ -102,14 +149,14 @@ impl Locks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use analog::placement::symmetry::Symmetry;
+    use analog::placement::symmetry::{SymMode, Symmetry};
     use gp::VariantSpace;
     use pnr_core::geom::Rect;
     use pnr_core::ids::{AxisId, Target};
     use pnr_core::{DeviceId, Macro};
 
     fn sym(a: u16, b: u16) -> Symmetry {
-        Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0) }
+        Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0), mode: SymMode::Perfect }
     }
 
     fn space(w: i32, h: i32) -> VariantSpace {
@@ -128,5 +175,18 @@ mod tests {
         let mut a = [2, 0, 1];
         k.unify(&mut a);
         assert_eq!(a, [2, 2, 1]);
+    }
+
+    #[test]
+    fn mirror_partner_is_related_by_mx180() {
+        let reqs = Requirements::<Layout> {
+            hard: vec![Box::new(analog::placement::symmetry::SymmetryGroup(vec![Symmetry { mode: SymMode::Mirror, ..sym(0, 1) }]))],
+            ..Default::default()
+        };
+        let k = locks(&reqs, 2, &[]);
+        assert_eq!(k.rel, [Orient::R0, Orient::Mx180]);
+        let mut o = [Orient::R90, Orient::R0];
+        k.align(&mut o);
+        assert_eq!(o, [Orient::R90, Orient::R90.then(Orient::Mx180)]);
     }
 }
