@@ -19,7 +19,7 @@ the owner), but none of these four items reads anything PLC-06 left open.
   after it.
 - `place_rules(pdk, cells)` is at `frontend/library/src/lib.rs:1229`. It is built once per topology (`:740`).
 - The sidecar reader `placement_space` is at `lib.rs:1268+`.
-- The tests are `spacing.rs:339-396` (the plan's 7), plus `start_tests::shipped_cells_draw_no_unmapped_layer`
+- The tests are `spacing.rs:339-396` (the plan's 7), plus `spacing_tests::shipped_cells_draw_no_unmapped_layer`
   (`lib.rs:3087`) and `table_gaps_are_drc_clean_on_sky130` (`lib.rs:3163`). They live in `lib.rs`, not in
   `tests/placement_spacing.rs` as the plan says.
 - **Missing:** the acceptance. `docs/plans/m2-placement-report.md` holds only PLC-29's table. Nothing records T2 or
