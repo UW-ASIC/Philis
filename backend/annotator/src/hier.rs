@@ -237,8 +237,32 @@ mod tests {
         // no ProxNet with its MC, so only the EXT-27 ProxBlock star joins them).
         let mk: Vec<DeviceId> = (0..4).map(|i| id(&nl, &format!("X{i}/MK"))).collect();
         assert!(grouped(&p, GroupKind::Proximity, &mk), "{:?}", p.intent.tree);
+        // Three or more siblings are array candidates, never paired; exactly two pair.
+        assert!(same_template(&nl, &drawn(&nl)).is_empty());
         let nl = cells(2);
         assert_eq!(arrays(&nl, &drawn(&nl), &bias(&nl)), Vec::<Vec<u32>>::new());
+        assert_eq!(same_template(&nl, &drawn(&nl)), [(0, 1)]);
+    }
+
+    /// EXT-27: ProxNet stays inside an instance, one star per instance on a shared net. Both
+    /// OTAs drive `out1`: each instance keeps its MN2–MP4 edge, no edge crosses X1/X2.
+    #[test]
+    fn proxnet_per_instance() {
+        let mut nl = Netlist::default();
+        inst(&mut nl, "X1", "ota", &OTA_PORTS, &["inp1", "inn1", "out1", "vdd", "vss", "vb"], &OTA);
+        inst(&mut nl, "X2", "ota", &OTA_PORTS, &["inp2", "inn2", "out1", "vdd", "vss", "vb"], &OTA);
+        let cfg = AnnotationConfig::default();
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let mut models = Vec::new();
+        let drawn: Vec<_> = nl.devices.iter().map(|d| size::drawn(d, &mut models)).collect();
+        let canon = crate::pattern::canonical_labels(&hg, &drawn, &models, &crate::netrole::classify_nets(&hg, &cfg));
+        let classes = annotate(&nl, &cfg).net_classes;
+        let reqs = crate::graph::requirements(&[], &[], &[], &[], &[], &[], &[], &nl.device_inst, &hg, &classes, &canon, &cfg.policy);
+        let out1 = net(&mut nl, "out1");
+        let pn: Vec<(u16, u16)> = reqs.iter().filter(|r| r.ty == analog::intent::ReqType::ProxNet && r.source.0 == u32::from(out1.0)).map(|r| (r.a.0.min(r.b.0), r.a.0.max(r.b.0))).collect();
+        let e = |x: &str, y: &str| (id(&nl, x).0.min(id(&nl, y).0), id(&nl, x).0.max(id(&nl, y).0));
+        assert_eq!(pn.len(), 2, "{pn:?}");
+        assert!(pn.contains(&e("X1/MN2", "X1/MP4")) && pn.contains(&e("X2/MN2", "X2/MP4")), "{pn:?}");
     }
 
     #[test]

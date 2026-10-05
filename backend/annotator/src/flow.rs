@@ -202,6 +202,10 @@ mod tests {
         let nl = crate::tests::three_stage();
         let (hg, classes, canon) = setup(&nl);
         assert_eq!(names(&nl, &stage_order(&hg, &classes, &[], &canon)), [vec!["M1", "M2", "M4", "M5"], vec!["M6", "M7"], vec!["M8", "M9"]]);
+        // Only inputs that are ports seed level 0: without vin_n (5), M2 leaves the first stage.
+        let ports = [1, 3, 7, 9].map(NetId);
+        let st = names(&nl, &stage_order(&hg, &classes, &ports, &canon));
+        assert_eq!(st, [vec!["M1", "M4"], vec!["M2", "M5"], vec!["M6", "M7"], vec!["M8", "M9"]]);
     }
 
     #[test]

@@ -107,7 +107,13 @@ pub fn requirements(
         ds.sort_by_key(|d| (canon[d.0 as usize], d.0));
         ds.dedup();
         if ds.len() <= policy.pn_max_degree {
-            ds.iter().skip(1).filter(|&&d| inst_of(ds[0]) == inst_of(d)).for_each(|&d| push(ds[0], d, ReqType::ProxNet, n));
+            // One star per instance (first device of the group by canon), so
+            // no edge crosses an instance boundary yet none inside one is lost.
+            for (i, &d) in ds.iter().enumerate() {
+                if let Some(&h) = ds[..i].iter().find(|&&h| inst_of(h) == inst_of(d)) {
+                    push(h, d, ReqType::ProxNet, n);
+                }
+            }
         }
     }
     out

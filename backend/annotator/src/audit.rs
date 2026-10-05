@@ -29,7 +29,8 @@ fn bjt(s: &MatchSpec) -> bool {
 /// `clm_mismatch`: `gds_ref·|ΔV_DS|/Id_ref` over half the class's % limit, per member against the
 /// reference; `cascode_ratio`: bottom W/L ratio ≠ top ratio (> 1 %); `cascode_bulk`: a top device's B ≠ S;
 /// `bjt_ratio`: a Moderate+ bipolar ratio over 16 or odd (no common centroid); `vce_unequal`: its V_CE spread
-/// over 10 mV; `audit_not_checked`: the op-dependent checks a set qualified for, without an op point.
+/// over 10 mV; `audit_not_checked`: the op-dependent checks a set qualified for whose data (op point,
+/// a member's dev entry, `gds_us`, or a pin's `net_mv`) is absent.
 #[must_use]
 pub fn audit(intent: &Intent, nl: &Netlist, cascodes: &[[DeviceId; 4]], op: Option<&OpFacts>) -> Vec<Diagnostic> {
     let mut out = Vec::new();
@@ -45,9 +46,6 @@ pub fn audit(intent: &Intent, nl: &Netlist, cascodes: &[[DeviceId; 4]], op: Opti
     for s in &intent.sets {
         let ids: Vec<DeviceId> = s.members.iter().map(|m| m.device).collect();
         if mos_current(s) {
-            if op.is_none() {
-                skipped.extend(["vgst_low", "clm_mismatch"]);
-            }
             let vgst = |d: DeviceId| {
                 let o = dop(d)?;
                 match (o.vgs_mv, o.vth_mv) {
@@ -55,12 +53,19 @@ pub fn audit(intent: &Intent, nl: &Netlist, cascodes: &[[DeviceId; 4]], op: Opti
                     _ => (o.gm_us > 0.0).then(|| 2.0 * o.id_ua.abs() / o.gm_us * 1000.0),
                 }
             };
+            if ids.iter().any(|&d| vgst(d).is_none()) {
+                skipped.push("vgst_low");
+            }
             let low: Vec<DeviceId> = ids.iter().copied().filter(|&d| vgst(d).is_some_and(|v| v < VGST_MIN_MV)).collect();
             if !low.is_empty() {
                 let msg = format!("V_GS−V_th < {VGST_MIN_MV} mV on {:?}: current matching degrades (Hastings H13-32)", low.iter().map(|&d| name(d)).collect::<Vec<_>>());
                 out.push(Diagnostic { kind: "vgst_low", devices: low, message: msg });
             }
             let r = ids[s.reference.unwrap_or(0).min(ids.len() - 1)];
+            let qualifies = matches!(limit(s.family, MatchKind::Current, s.class), Some(ClassLimit::Pct(_)));
+            if qualifies && (op.is_none() || dop(r).and_then(|o| o.gds_us).is_none() || ids.iter().any(|&d| mv(d, "D", "S").is_none())) {
+                skipped.push("clm_mismatch");
+            }
             if let (Some(o), Some(ClassLimit::Pct(x)), Some(vr)) = (dop(r), limit(s.family, MatchKind::Current, s.class), mv(r, "D", "S")) {
                 for &d in ids.iter().filter(|&&d| d != r) {
                     let (Some(gds), Some(vd)) = (o.gds_us, mv(d, "D", "S")) else { continue };
@@ -78,10 +83,10 @@ pub fn audit(intent: &Intent, nl: &Netlist, cascodes: &[[DeviceId; 4]], op: Opti
             if units.iter().any(|&u| u / min > 16 || (u / min > 1 && (u / min) % 2 == 1)) {
                 out.push(Diagnostic { kind: "bjt_ratio", devices: ids.clone(), message: format!("unit ratio {units:?}: over 16 or odd, no common centroid (Hastings H09-04)") });
             }
-            if op.is_none() {
+            let vce: Option<Vec<f64>> = ids.iter().map(|&d| mv(d, "C", "E")).collect();
+            if vce.is_none() {
                 skipped.push("vce_unequal");
             }
-            let vce: Option<Vec<f64>> = ids.iter().map(|&d| mv(d, "C", "E")).collect();
             if let Some(v) = vce.filter(|v| !v.is_empty()) {
                 let spread = v.iter().copied().fold(f64::MIN, f64::max) - v.iter().copied().fold(f64::MAX, f64::min);
                 if spread > VCE_MAX_MV {
@@ -107,7 +112,7 @@ pub fn audit(intent: &Intent, nl: &Netlist, cascodes: &[[DeviceId; 4]], op: Opti
     skipped.sort_unstable();
     skipped.dedup();
     if !skipped.is_empty() {
-        out.push(Diagnostic { kind: "audit_not_checked", devices: vec![], message: format!("no op point: {} not checked", skipped.join(", ")) });
+        out.push(Diagnostic { kind: "audit_not_checked", devices: vec![], message: format!("no op data: {} not checked", skipped.join(", ")) });
     }
     out
 }
@@ -159,18 +164,19 @@ mod tests {
     #[test]
     fn vgst_floor() {
         let (nl, i) = (pair(), intent(set(Family::Mos, MatchClass::Moderate, &[1, 1])));
-        let d = audit(&i, &nl, &[], Some(&op(0.6, 20.0, None, vec![None; 4])));
+        let d = audit(&i, &nl, &[], Some(&op(0.6, 20.0, Some(1.0), vec![Some(0.0); 4])));
         assert_eq!(kinds(&d), ["vgst_low"]);
         assert_eq!(d[0].devices, [DeviceId(0), DeviceId(1)]);
-        assert!(audit(&i, &nl, &[], Some(&op(0.6, 10.0, None, vec![None; 4]))).is_empty());
+        assert!(audit(&i, &nl, &[], Some(&op(0.6, 10.0, Some(1.0), vec![Some(0.0); 4]))).is_empty());
     }
 
     #[test]
     fn bjt_ratio_odd() {
-        let nl = pair(); // the ratio reads units only
-        assert_eq!(kinds(&audit(&intent(set(Family::Bipolar, MatchClass::Moderate, &[1, 7])), &nl, &[], Some(&op(1.0, 1.0, None, vec![])))), ["bjt_ratio"]);
-        assert!(audit(&intent(set(Family::Bipolar, MatchClass::Moderate, &[1, 8])), &nl, &[], Some(&op(1.0, 1.0, None, vec![]))).is_empty());
-        assert!(audit(&intent(set(Family::Bipolar, MatchClass::Minimal, &[1, 7])), &nl, &[], Some(&op(1.0, 1.0, None, vec![]))).is_empty());
+        let nl = pair(); // the ratio reads units only; no C/E pins, so V_CE is never checked
+        let k = |c, u: &[u16]| kinds(&audit(&intent(set(Family::Bipolar, c, u)), &nl, &[], Some(&op(1.0, 1.0, None, vec![])))).join(" ");
+        assert_eq!(k(MatchClass::Moderate, &[1, 7]), "bjt_ratio audit_not_checked");
+        assert_eq!(k(MatchClass::Moderate, &[1, 8]), "audit_not_checked");
+        assert_eq!(k(MatchClass::Minimal, &[1, 7]), "");
     }
 
     #[test]
@@ -201,5 +207,14 @@ mod tests {
     fn no_op_not_checked() {
         let (nl, i) = (pair(), intent(set(Family::Mos, MatchClass::Moderate, &[1, 1])));
         assert_eq!(kinds(&audit(&i, &nl, &[], None)), ["audit_not_checked"]);
+    }
+
+    /// An op point without `gds_us` still reports `clm_mismatch` as not checked.
+    #[test]
+    fn missing_gds_not_checked() {
+        let (nl, i) = (pair(), intent(set(Family::Mos, MatchClass::Moderate, &[1, 1])));
+        let d = audit(&i, &nl, &[], Some(&op(10.0, 1.0, None, vec![Some(0.0); 4])));
+        assert_eq!(kinds(&d), ["audit_not_checked"]);
+        assert!(d[0].message.contains("clm_mismatch") && !d[0].message.contains("vgst_low"), "{}", d[0].message);
     }
 }
