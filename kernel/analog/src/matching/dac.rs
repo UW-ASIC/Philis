@@ -230,6 +230,19 @@ mod tests {
             let ca = lb + mb + 1;
             let min = (0..n).filter(|&i| r2(i) > 0).map(r2).min().unwrap();
             assert!((0..n).filter(|&i| slot[i] == Some(ca)).all(|i| r2(i) == min), "L={lb} M={mb} C_A not central");
+            if (lb, mb, rows, cols) == (3, 3, 3, 6) {
+                // §IV-C order: the first pairs after C_A and the odd caps hold C_L, then C_{L+M}.
+                let fixed = [Some(0), Some(1), Some(lb + 1), Some(ca), None];
+                let mut seen = vec![false; n];
+                let mut ids = Vec::new();
+                for i in crate::matching::pattern::spiral(rows, cols) {
+                    if !seen[n - 1 - i] && !fixed.contains(&slot[i]) {
+                        ids.push(slot[i].unwrap());
+                    }
+                    seen[i] = true;
+                }
+                assert_eq!(ids[..2], [lb, lb + mb], "pair order {ids:?}");
+            }
         }
     }
 }
