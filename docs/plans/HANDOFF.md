@@ -13,18 +13,11 @@
 - strongarm: philis CLEAN, klayout 0, magic 0, netgen vs `_ref.spice` MATCH. vs user schematic: differs only by dummies (owner decision pending).
 - M0 and fix-export worktrees removed (56 GB freed).
 
-## STOPPED by owner (2026-10-04): M2–M6 module run, workflow run `wf_2ab8e777-05e`
-- M1: merged to main (f50ef00). M2–M6: 64/140 items merged into branch `m2` (../philis-m2/integrate), 84 implemented; 247 agents done.
-  Per module merged/total: reliability 12/12, analog-matching 15/16, annotator 14/19, perf 8/21, routing 7/23, cells 5/19, flow 2/10, placement 1/20. Not done so far: MAT-18 (deferred), CELL-11, PLC-07.
-- At stop: uncommitted WIP saved to docs/plans/wip-patches/m2-{flow,integrate,reliability}.patch. flow and reliability edits left in their worktrees (resumed agents finish them); the integrate (m2) partial dr fix was reset to keep m2 clean (its patch is kept).
-- History rewritten 2026-10-04 (Claude co-author trailers removed from all branches/tags; trees identical; main force-pushed to origin at a376052). Old SHAs quoted in the workflow script/journal (e.g. 2a09c30, m1a base) live on under refs/original/ and in /tmp/claude-1000/philis-before-rewrite.bundle — keep refs/original until the M2–M6 run has finished.
-- RESUME (one call, same args): Workflow({scriptPath: "~/.claude/projects/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/workflows/scripts/philis-m1-modules-wf_2ab8e777-05e.js", resumeFromRunId: "wf_2ab8e777-05e", args: {"cap": 2500000, "cap2": 15000000}}).
-  Finished agents replay from the journal; agents cut off mid-step rerun (Opus 5.5, effort medium) and are told to finish any commits they left. Module worktrees ../philis-m2/<module> keep their branches m2-<module>.
-- Ends with `final-m2`: report docs/plans/m2-m6-report.md, merge m2 → main only if no new failing tests.
-- Side branch `progress-charts` (worktree ../philis-snap): records every epoch's candidate for the README feedback chart; merge into main after m2 lands.
-- Known regressions seen in snapshots on m2: dac4 DRC 6 / ERC 1 (0/20 clean candidates), tq_chain DRC 18; runtime up vs M0 (dac4 279 s vs 19 s). Check after landing.
-- Disk: ../philis-m2/*/target/debug can be deleted when no cargo runs there.
-- Planned follow-up: significance threshold for convergence (an improvement resets the stall counter only if > ~0.5% in C/area or any drop in |V|/spec miss), after the run (flow module edits that loop).
+## Running: M2–M6 fresh module run `wf_188597af-7b6` (2026-10-05)
+- Script: docs/plans/workflows-m2only.js, args docs/plans/workflows-m2only.args.json (cap2, `merged` = items already on m2, `segStart` = card numbers to continue from).
+- 64/140 items were already merged into `m2` and are skipped. EXT-21/EXT-25 are NOT merged (an integrator reset that merge, m2 reflog @{4}).
+- LESSON: never `resumeFromRunId` a workflow whose agents run in parallel. Resume matches agents by call order, the order differs between runs, and everything after the first mismatch re-runs (it re-ran ~8 M1 agents on 2026-10-05; no code changed). To restart after a stop: recompute `merged` from `git log --format=%s main..m2 | grep 'M2+ .* merge ('`, recompute `segStart` from docs/plans/cards/m2-<module>-<n>.md, and launch the script FRESH.
+- Ends with `final-m2`: report docs/plans/m2-m6-report.md; merge m2 → main only if no new failing tests.
 
 ## Tools
 `source <scratchpad>/signoff-investigation/env.sh` (klayout 0.30.4, magic 8.3.573, netgen 1.5.292 from nix store; PDK_ROOT=Philis/.pdk (~/.volare no longer exists)). Independent checks: `python3 ResearchBoutros/analog/common/layout/verify.py drc|lvs <block> <gds>`; netgen vs `<top>_ref.spice`.
