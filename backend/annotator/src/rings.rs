@@ -39,10 +39,16 @@ pub struct RingInputs<'a> {
     pub ecgr_drawable: bool,
     /// `cells::post_cell::drawable(Hcgr, ..)`.
     pub hcgr_drawable: bool,
+    /// Sidecar `IsolatedTub` (GAP-14): members and tie net.
+    pub tubs: &'a [(Vec<DeviceId>, NetId)],
+    /// `cells::post_cell::drawable(Tub, ..)`.
+    pub tub_drawable: bool,
 }
 
 /// At most one ring per device, the first matching row winning (plan-06
-/// REL-07): 1 electron injector → supply-tied `Ecgr`; 2 hole injector →
+/// REL-07): 0 a member of user tub `k` (GAP-14) → a shareable `Tub { id: k }`
+/// victim ring on its tie, when the deck draws a deep n-well (else
+/// `("IsolatedTub", ..)` and the rows below); 1 electron injector → supply-tied `Ecgr`; 2 hole injector →
 /// ground-tied `Hcgr`; 3/4 an injector whose collector cannot be drawn → a
 /// majority tap on its bulk; 5 an aggressor (not a victim) → a shareable tap
 /// on its bulk; 6 a victim, once some device got a row 1–5 ring, → a
@@ -73,6 +79,16 @@ pub fn plan(i: &RingInputs) -> (Vec<GuardRingRequirement>, Vec<(&'static str, &'
     for (d, dev) in i.netlist.devices.iter().enumerate() {
         let Some(&(_, bulk)) = dev.terminals.iter().find(|(t, _)| t == "B") else { continue };
         let pmos = dev.kind == DeviceKind::Pmos;
+        if let Some((k, (_, tie))) = i.tubs.iter().enumerate().find(|(_, (m, _))| m.contains(&DeviceId(d as u16))) {
+            if i.tub_drawable {
+                rings.push(ring(d, GuardRingType::Tub { id: k as u16 }, RingRole::Victim, *tie, w, true));
+                continue;
+            }
+            let why = ("IsolatedTub", "deck has no deep n-well: tub drawn as an ordinary ring");
+            if !missing.contains(&why) {
+                missing.push(why);
+            }
+        }
         let r = match i.injector.get(d).copied().flatten() {
             Some(Carrier::Electrons) => match i.highest_supply.filter(|_| i.ecgr_drawable) {
                 Some(vdd) => {

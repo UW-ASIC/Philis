@@ -18,6 +18,7 @@
 //! | `Kelvin`                                 | `pin: "R/P"`, `sense: ["M/G"]`          |
 //! | `Load`                                   | `net`, `ff` (external load, fF)         |
 //! | `Order`                                  | `instances` (names or aliases), `direction` (`bottom_to_top`, `top_to_bottom`, `left_to_right`, `right_to_left`) |
+//! | `IsolatedTub`                            | `instances` (NMOS, one bulk net), `tie` |
 
 use std::collections::HashMap;
 
@@ -229,6 +230,35 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                     None => unknown!(format!("instance in {names:?}")),
                 }
             }
+            "IsolatedTub" => {
+                let ds = match devices(&strs("instances")) {
+                    Ok(ds) => ds,
+                    Err(n) => {
+                        unknown!(n);
+                        continue;
+                    }
+                };
+                let tie_name = e.get("tie").and_then(Value::as_str).unwrap_or("");
+                let Some(tie) = net(tie_name) else {
+                    unknown!(format!("net {tie_name}"));
+                    continue;
+                };
+                let bulk = |d: &DeviceId| {
+                    let dev = &nl.devices[d.0 as usize];
+                    (dev.kind == pnr_core::DeviceKind::Nmos).then(|| dev.terminals.iter().find(|(t, _)| t == "B").map(|t| t.1)).flatten()
+                };
+                if ds.is_empty() || ds.iter().any(|d| bulk(d).is_none() || bulk(d) != bulk(&ds[0])) {
+                    diags.push(Diagnostic { kind: "sidecar_unsupported", devices: ds, message: format!("entry {i}: IsolatedTub members must be NMOS on one bulk net") });
+                    continue;
+                }
+                if ds.iter().any(|d| cfg.tubs.iter().any(|(m, _)| m.contains(d))) {
+                    diags.push(Diagnostic { kind: "sidecar_unsupported", devices: ds, message: format!("entry {i}: device already in an IsolatedTub") });
+                    continue;
+                }
+                // One dnwell needs its members side by side: a user group (GroupBlocks proximity) keeps them so.
+                cfg.groups.push((i as u32, ds.clone()));
+                cfg.tubs.push((ds, tie));
+            }
             _ => diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i} ({kind})") }),
         }
     }
@@ -273,6 +303,48 @@ mod tests {
             arm.iter().filter(|b| b.meta().map(|m| m.origin) == Some(analog::intent::Origin::User { index: 1 })).map(|b| b.kind().ends_with("Proximity")).collect::<Vec<_>>()
         };
         assert_eq!((user(&p.placement.budget), user(&p.placement.cost)), (vec![true], vec![true]));
+    }
+
+    /// GAP-14: two NMOS on one bulk, tied to a supply.
+    #[test]
+    fn an_isolated_tub_parses() {
+        let nl = crate::tests::ota();
+        let (cfg, d) = parse(r#"[{"constraint":"IsolatedTub","instances":["XM1","XM2"],"tie":"vdd"}]"#, &nl).unwrap();
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(cfg.tubs, [(vec![DeviceId(0), DeviceId(1)], NetId(7))]);
+        assert_eq!(cfg.groups, [(0, vec![DeviceId(0), DeviceId(1)])], "a tub is also a proximity group");
+    }
+
+    /// The tie must be a quiet supply (GAP-14): a signal net is drawn as asked and reported.
+    #[test]
+    fn a_tub_tied_to_a_signal_is_reported() {
+        let nl = crate::tests::ota();
+        let note = ("IsolatedTub", "tie is not a supply net");
+        for (tie, warned) in [("vdd", false), ("vtail", true)] {
+            let (cfg, _) = parse(&format!(r#"[{{"constraint":"IsolatedTub","instances":["XM1","XM2"],"tie":"{tie}"}}]"#), &nl).unwrap();
+            assert_eq!(crate::annotate(&nl, &cfg).missing.contains(&note), warned, "tie {tie}");
+        }
+    }
+
+    /// A device in two tubs is refused, not silently given the first.
+    #[test]
+    fn overlapping_tubs_are_refused() {
+        let nl = crate::tests::ota();
+        let (cfg, d) = parse(
+            r#"[{"constraint":"IsolatedTub","instances":["XM1","XM2"],"tie":"vdd"},{"constraint":"IsolatedTub","instances":["XM2"],"tie":"vdd"}]"#,
+            &nl,
+        )
+        .unwrap();
+        assert_eq!(d.iter().map(|d| d.kind).collect::<Vec<_>>(), ["sidecar_unsupported"]);
+        assert_eq!(cfg.tubs.len(), 1);
+    }
+
+    #[test]
+    fn a_tub_with_a_pmos_is_refused() {
+        let nl = crate::tests::ota();
+        let (cfg, d) = parse(r#"[{"constraint":"IsolatedTub","instances":["XM1","XM3"],"tie":"vdd"}]"#, &nl).unwrap();
+        assert_eq!(d.iter().map(|d| d.kind).collect::<Vec<_>>(), ["sidecar_unsupported"]);
+        assert!(cfg.tubs.is_empty());
     }
 
     #[test]

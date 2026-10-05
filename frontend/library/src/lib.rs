@@ -417,6 +417,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         ann.net_classes.extend(side.net_classes);
         ann.offset_budgets.extend(side.offset_budgets);
         ann.kelvins.extend(side.kelvins);
+        ann.tubs.extend(side.tubs);
         ann.sidecar_diags.extend(diags);
     }
     // 2. Bias: per-device power and per-net current. Placement-independent,
@@ -1198,6 +1199,7 @@ fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::r
         ecgr_min_width_nm: opt("ecgr_min_width_nm"),
         ecgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Ecgr, pdk),
         hcgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Hcgr, pdk),
+        tub_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Tub { id: 0 }, pdk),
         // Set by the callers from `Config.op` (not a deck key).
         die_temp_k: None,
         unit: annotator::sets::UnitDeck {
@@ -2102,7 +2104,12 @@ impl CellSpace {
             spaces,
             cell_of,
             devices_of,
+            aspect_missed,
         } = cellgen::enumerate_folded(netlist, injected, &problem.constraints, pdk, merge_distinct_gates, fold, &problem.net_classes);
+        let note = ("MatchClass", "no variant meets the aspect limit");
+        if aspect_missed > 0 && !problem.missing.contains(&note) {
+            problem.missing.push(note);
+        }
         let gate = |d: &DeviceId| {
             netlist.devices[d.0 as usize].terminals.iter().find(|(t, _)| t == "G").map(|(_, n)| *n)
         };

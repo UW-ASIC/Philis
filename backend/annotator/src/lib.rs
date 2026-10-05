@@ -635,6 +635,10 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
                 .find(|&n| !touched_by_aggressor(n)),
         };
         let p = &cfg.process;
+        // GAP-14: the tie is a quiet supply; any other net is drawn as asked and reported.
+        if cfg.tubs.iter().any(|(_, t)| !of_class(NetClass::Supply).chain(of_class(NetClass::Ground)).any(|n| n == *t)) {
+            missing.push(("IsolatedTub", "tie is not a supply net"));
+        }
         let (rings, notes) = rings::plan(&rings::RingInputs {
             netlist,
             aggressor: &aggressor,
@@ -650,6 +654,8 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
             ecgr_min_width_nm: p.ecgr_min_width_nm,
             ecgr_drawable: p.ecgr_drawable,
             hcgr_drawable: p.hcgr_drawable,
+            tubs: &cfg.tubs,
+            tub_drawable: p.tub_drawable,
         });
         constraints.guard_rings.extend(rings);
         missing.extend(notes);

@@ -874,7 +874,32 @@ mod rings {
             ecgr_min_width_nm: None,
             ecgr_drawable: false,
             hcgr_drawable: false,
+            tubs: &[],
+            tub_drawable: false,
         }
+    }
+
+    /// GAP-14: tub members get the tub's ring on its tie; the rest keep their rows.
+    #[test]
+    fn tub_members_get_a_tub_ring() {
+        let nl = nl();
+        let tubs = [(vec![DeviceId(1), DeviceId(2)], NetId(4))];
+        let i = RingInputs { tubs: &tubs, tub_drawable: true, ..inputs(&nl, &[true, false, false, false], &[false; 4], &[None; 4]) };
+        let (rings, missing) = plan(&i);
+        let tub: Vec<_> = rings.iter().filter(|r| r.ring_type == GuardRingType::Tub { id: 0 }).map(|r| (r.device, r.connection_net, r.shareable)).collect();
+        assert_eq!(tub, [(DeviceId(1), NetId(4), true), (DeviceId(2), NetId(4), true)]);
+        let other: Vec<_> = rings.iter().filter(|r| !matches!(r.ring_type, GuardRingType::Tub { .. })).map(|r| (r.device, r.ring_type)).collect();
+        assert_eq!(other, [(DeviceId(0), GuardRingType::Tap { in_well: false })]);
+        assert!(!missing.iter().any(|m| m.0 == "IsolatedTub"));
+    }
+
+    #[test]
+    fn no_dnwell_falls_back_and_says_so() {
+        let nl = nl();
+        let tubs = [(vec![DeviceId(1), DeviceId(2)], NetId(4))];
+        let (rings, missing) = plan(&RingInputs { tubs: &tubs, ..inputs(&nl, &[true, false, false, false], &[false; 4], &[None; 4]) });
+        assert!(rings.iter().all(|r| !matches!(r.ring_type, GuardRingType::Tub { .. })));
+        assert!(missing.contains(&("IsolatedTub", "deck has no deep n-well: tub drawn as an ordinary ring")), "{missing:?}");
     }
 
     #[test]
