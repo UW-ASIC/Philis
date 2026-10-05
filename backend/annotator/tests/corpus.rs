@@ -951,3 +951,24 @@ fn dac4_plate_rc() {
         assert_eq!(rc(b), analog::intent::RcClass::R, "{b}");
     }
 }
+
+/// EXT-29: the audit runs on every circuit with an op point (Id 10 µA everywhere). gm 100 µS gives
+/// 2·Id/gm = 200 mV of overdrive: three_stage has no `vgst_low`; gm 400 µS (50 mV) flags its
+/// Current Moderate load set {M4, M5}.
+#[test]
+fn audit_on_corpus() {
+    use annotator::evidence::DeviceOp;
+    let run = |src: &str, name: &str, gm_us: f64| {
+        let nl = net(src);
+        let op = DeviceOp { id_ua: 10.0, headroom_mv: 200.0, gm_us, power_uw: 0.0, vgs_mv: None, vbs_mv: None, vth_mv: None, gmb_us: None, gds_us: None };
+        let ev = annotator::Evidence { op: Some(annotator::OpFacts { dev: vec![Some(op); nl.devices.len()], net_mv: vec![None; nl.nets.len()] }), ..Default::default() };
+        let p = annotator::annotate_with(&nl, &cfg(name), &ev);
+        let low: Vec<Vec<String>> = p.intent.diagnostics.iter().filter(|d| d.kind == "vgst_low").map(|d| names(&nl, d.devices.iter().copied())).collect();
+        low
+    };
+    for (name, src) in all() {
+        run(src, name, 100.0);
+    }
+    assert!(run(src("three_stage"), "three_stage", 100.0).is_empty());
+    assert_eq!(run(src("three_stage"), "three_stage", 400.0), [vec!["M4", "M5"]]);
+}

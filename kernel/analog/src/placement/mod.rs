@@ -2,6 +2,7 @@
 
 pub mod dti;
 pub mod environment;
+pub mod heat;
 pub mod isolation;
 pub mod matched_set;
 pub mod orientation;
@@ -11,8 +12,9 @@ pub mod utilization;
 
 pub use dti::DtiBand;
 pub use environment::{EnvGeo, Environment, LiveEnvironment, Surroundings};
+pub use heat::HeatSeparation;
 pub use isolation::{Isolation, SubstrateBalance};
 pub use matched_set::MatchedSet;
 pub use orientation::{OrientCheck, OrientationSet};
 pub use proximity::Proximity;
-pub use symmetry::Symmetry;
+pub use symmetry::{SymMode, Symmetry};

@@ -168,6 +168,19 @@ pub struct GroupNode {
     pub children: Vec<u32>,
 }
 
+/// A placement order (EXT-28, EXT-27 arrays, sidecar `Order`). `steps[0]` sits at the low
+/// coordinate of `dir` (bottom for `V`, left for `H`); each step is a set of devices
+/// (PLC-25 takes the bbox of a step's devices).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Order {
+    pub steps: Vec<Vec<DeviceId>>,
+    pub dir: AxisDir,
+    /// The sense along `dir` is placement's choice (extracted orders); `false` for a user order.
+    pub reversible: bool,
+    /// Path current / the largest extracted path current, 0..=1; 1.0 without an op point.
+    pub weight: f32,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Region {
     Unknown,
@@ -287,6 +300,8 @@ pub struct Intent {
     pub compounds: Vec<Compound>,
     /// HSMPG tree, `Root` last (EXT-13).
     pub tree: Vec<GroupNode>,
+    /// User orders, current paths, signal stages, then instance arrays (EXT-27/28).
+    pub order: Vec<Order>,
     pub nets: Vec<NetFacts>,
     pub devices: Vec<DeviceFacts>,
     pub aggressors: Vec<Aggressor>,

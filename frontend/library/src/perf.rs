@@ -633,7 +633,7 @@ pub fn budget_rows(
             let table = tables.iter().find(|t| t.scenario == b.scenario);
             let d = |n: pnr_core::NetId| table?.rows.iter().find(|r| r.param == Param::GroundC { net: n } && r.linear)?.d[b.spec];
             let (nets, weights): (Vec<_>, Vec<_>) = nets.iter().filter_map(|&n| Some((n, (sign * d(n)? / scale) as f32))).unzip();
-            Some(analog::routing::PerformanceBudget { metric: format!("{}:{side}", spec.metric), nets, weights, af_per_nm, limit })
+            Some(analog::routing::PerformanceBudget { limit, ..analog::routing::PerformanceBudget::ground_c(format!("{}:{side}", spec.metric), nets, weights, af_per_nm) })
         })
         .collect()
 }

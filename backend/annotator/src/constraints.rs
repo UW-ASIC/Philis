@@ -88,6 +88,7 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block], sets: &[Ma
             dummy_required: dummy_required(kind, s.class),
             route_matching_required: s.kind != MatchKind::Ratio || s.class >= MatchClass::Moderate,
             class: Some(s.class),
+            kind: Some(s.kind),
             series: vec![1; s.members.len()],
             style: Some(s.style),
         });
@@ -121,7 +122,7 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block], sets: &[Ma
                 series_parallel: series_parallel(kind),
                 dummy_required: true,
                 route_matching_required: true,
-                class: None, series: Vec::new(), style: None,
+                class: None, kind: None, series: Vec::new(), style: None,
             });
         }
     }
@@ -149,7 +150,7 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block], sets: &[Ma
             series_parallel: SeriesParallel::Parallel,
             dummy_required: false,
             route_matching_required: false,
-            class: None, series: Vec::new(), style: None,
+            class: None, kind: None, series: Vec::new(), style: None,
         });
     }
     c

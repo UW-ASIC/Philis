@@ -378,7 +378,7 @@ mod tests {
     /// c1: inside clearance only; origin 330 is off the lattice).
     #[test]
     fn placement_metrics_counts_each_defect() {
-        use analog::placement::symmetry::Symmetry;
+        use analog::placement::symmetry::{SymMode, Symmetry};
         use pnr_core::ids::{AxisId, DeviceId, Target};
         let mut l = layout_of(Orient::R0, 0, 0);
         l.x = vec![100, 200, 430];
@@ -387,7 +387,7 @@ mod tests {
         l.hh = vec![100; 3];
         l.orient = vec![Orient::R0; 3];
         l.variant = vec![0, 0, 1];
-        let sym = |a: u16, b: u16| Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0) };
+        let sym = |a: u16, b: u16| Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0), mode: SymMode::Perfect };
         let reqs = analog::Requirements::<Layout> {
             // (0, 2) differs in variant; (0, 1) matches; (1, 1) is a pair collapsed into one cell.
             hard: vec![Box::new(vec![sym(0, 2), sym(0, 1), sym(1, 1)])],

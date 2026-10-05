@@ -272,6 +272,14 @@ pub trait RuleBatch<On>: Send + Sync {
     fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
         let _ = out;
     }
+    /// Append every distinct pair drawn as reflections (`SymMode::Mirror`, PLC-21). Default none.
+    fn mirrored_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        let _ = out;
+    }
+    /// Turn every Mirror pair with `!keep(a, b)` into Perfect (PLC-21). Default no-op.
+    fn demote_mirrors(&mut self, keep: &dyn Fn(u32, u32) -> bool) {
+        let _ = keep;
+    }
     /// Append every keep-away `(victim, aggressor)` (see [`Rule::keepaway`]).
     fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
         let _ = out;
@@ -367,6 +375,15 @@ impl<On> RuleBatch<On> for Tagged<On> {
     }
     fn mirror_pairs(&self, out: &mut Vec<(u32, u32, u16)>) {
         self.inner.mirror_pairs(out);
+    }
+    fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        self.inner.matched_pairs(out);
+    }
+    fn mirrored_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        self.inner.mirrored_pairs(out);
+    }
+    fn demote_mirrors(&mut self, keep: &dyn Fn(u32, u32) -> bool) {
+        self.inner.demote_mirrors(keep);
     }
     fn keepaway_pairs(&self, out: &mut Vec<(u32, u32)>) {
         self.inner.keepaway_pairs(out);
@@ -714,7 +731,7 @@ mod tests {
         assert_eq!(Vec::<Electromigration>::new().repair_kind(), K::Em);
         assert_eq!(Vec::<IrDrop>::new().repair_kind(), K::Ir);
         assert_eq!(Vec::<ParasiticBudget>::new().repair_kind(), K::Budget);
-        let perf = PerformanceBudget { metric: String::new(), nets: Vec::new(), weights: Vec::new(), af_per_nm: 0.0, limit: 1.0 };
+        let perf = PerformanceBudget::ground_c(String::new(), Vec::new(), Vec::new(), 0.0);
         assert_eq!(perf.repair_kind(), K::Budget);
         // A rule that declares nothing is rerouted plainly.
         assert_eq!(vec![Plain].repair_kind(), K::Reroute);

@@ -37,6 +37,9 @@ pub enum GuardRingType {
     /// Electron-collecting: n+ ring in its own n-well band, tied to a
     /// supply, collects electrons (the band well is drawn separately).
     Ecgr,
+    /// User-declared isolated tub (GAP-14): n+ ring in an n-well band over a deep n-well, tied to a quiet supply;
+    /// the devices' bulk is the isolated p-well. `id` keeps distinct tubs from merging (distinct p-wells).
+    Tub { id: u16 },
     /// Hole-collecting: p+ collecting ring, needs a retrograde/isolated well
     /// the deck declares.
     Hcgr,
@@ -64,6 +67,8 @@ pub struct Unitization {
     /// `unwrap_or(Moderate)` (C16). Read by `cells::cap_array` (GAP-18): an Exceptional binary bank lists its
     /// variants best-matching first.
     pub class: Option<crate::intent::MatchClass>,
+    /// Match kind of the set (EXT-15/16 from the set); None = unknown, no aspect limit (GAP-11).
+    pub kind: Option<crate::intent::MatchKind>,
     /// Per member; empty = all 1.
     pub series: Vec<u16>,
     /// None = today's choice.

@@ -155,8 +155,15 @@ pub struct AnnotationConfig {
     pub net_classes: Vec<(pnr_core::ids::NetId, analog::metadata::NetClass)>,
     /// Sidecar `OffsetBudget`: 1σ offset, mV, of the set holding these devices.
     pub offset_budgets: Vec<(Vec<pnr_core::ids::DeviceId>, f32)>,
+    /// Sidecar `Load`: external load per net, aF, added to its gate load (AA-25).
+    pub loads: Vec<(pnr_core::ids::NetId, f32)>,
+    /// Sidecar `IsolatedTub` (GAP-14): NMOS members drawn in one deep-n-well tub, its ring tied to the net.
+    /// User-declared only: the sources give no automatic threshold for when a tub pays.
+    pub tubs: Vec<(Vec<pnr_core::ids::DeviceId>, pnr_core::ids::NetId)>,
     /// Sidecar `Kelvin` requests, appended to the extracted ones.
     pub kelvins: Vec<analog::intent::KelvinReq>,
+    /// Sidecar `Order` (EXT-28): placed ahead of the extracted orders, `reversible: false`.
+    pub order: Vec<analog::intent::Order>,
     /// The sidecar parse's diagnostics, carried into `Intent.diagnostics`.
     pub sidecar_diags: Vec<analog::intent::Diagnostic>,
 }
@@ -171,6 +178,9 @@ pub struct ProcessNumbers {
     pub gate_af_per_um2: Option<f32>,
     /// Ground capacitance of a minimum-width lowest routing wire, aF/µm.
     pub wire_af_per_um: Option<f32>,
+    /// Series resistance of a minimum-width lowest routing wire, Ω/µm (sheet
+    /// ohms / width; EXT-25's R class reference).
+    pub wire_ohm_per_um: Option<f32>,
     /// Lowest routing metal's min spacing, nm; crosstalk spacings are multiples.
     pub route_space_nm: i32,
     /// Deep-trench isolation: (max spacing sharing one trench, trench width), nm.
@@ -216,6 +226,8 @@ pub struct ProcessNumbers {
     /// The process can draw an `Ecgr` / `Hcgr` (`cells::post_cell::drawable`).
     pub ecgr_drawable: bool,
     pub hcgr_drawable: bool,
+    /// The process can draw a `Tub` (deep n-well; `cells::post_cell::drawable`).
+    pub tub_drawable: bool,
     /// `Config.op` temperature, K (not a deck key): a mirror's mobility term (MAT-14).
     pub die_temp_k: Option<f32>,
     /// Unitization bounds (EXT-15); 0 = deck key missing.

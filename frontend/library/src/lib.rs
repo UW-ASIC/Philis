@@ -105,6 +105,10 @@ pub struct Config {
     /// bounding box (a priced budget, so it outranks C; see
     /// `analog::placement::utilization`). `0` disables it.
     pub min_utilization: f32,
+    /// Power threshold, µW, past which a cell is a heat source a Moderate or
+    /// Exceptional matched set keeps ≥ 1 µm/mW from (PLC-14). Policy: Hastings
+    /// rule 14 exempts "small power devices" without a number.
+    pub heat_source_uw: i32,
     /// What a MOS card's `W` means; [`run`] stores it as the SPICE total.
     /// Only [`run`] reads it: [`parse`] is always [`SizeConvention::Spice`].
     pub size_convention: SizeConvention,
@@ -206,6 +210,7 @@ impl Default for Config {
             performance: None,
             starts: 3,
             min_utilization: 0.6,
+            heat_source_uw: 1000,
             size_convention: SizeConvention::Spice,
             gp_mode: GpMode::default(),
             interface: None,
@@ -417,6 +422,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         ann.net_classes.extend(side.net_classes);
         ann.offset_budgets.extend(side.offset_budgets);
         ann.kelvins.extend(side.kelvins);
+        ann.tubs.extend(side.tubs);
         ann.sidecar_diags.extend(diags);
     }
     // 2. Bias: per-device power and per-net current. Placement-independent,
@@ -736,6 +742,33 @@ fn topology<'a>(
     if !env.pairs.is_empty() {
         problem.placement.budget.push(Box::new(env.clone()));
     }
+    // PLC-14: matched sets keep their distance from hot cells.
+    let sets: Vec<(pnr_core::MatchClass, Vec<u16>)> = problem
+        .intent
+        .sets
+        .iter()
+        .map(|s| {
+            let mut c: Vec<u16> = s.members.iter().filter_map(|m| cells.units.cell_of.get(m.device.0 as usize).copied()).collect();
+            c.sort_unstable();
+            c.dedup();
+            (s.class, c)
+        })
+        .collect();
+    let heat = analog::placement::heat::separations(&sets, &cells.power, cfg.heat_source_uw);
+    if !heat.is_empty() {
+        problem.placement.budget.push(Box::new(heat.clone()));
+        problem.placement.cost.push(Box::new(heat));
+    }
+    // PLC-21: a Mirror pair stays Mirror only if no variant of either cell
+    // leaves a net φx (Mx180 would reverse its current). Every variant, since
+    // dp reshapes.
+    let mirror_ok = |c: u32| {
+        cells.variants.get(c as usize).is_some_and(|v| v.alternatives.iter().all(|m| analog::matching::moments::mirror_allowed_units(&m.units)))
+    };
+    let keep = |a: u32, b: u32| a != b && mirror_ok(a) && mirror_ok(b);
+    for b in problem.placement.hard.iter_mut().chain(&mut problem.placement.budget).chain(&mut problem.placement.cost) {
+        b.demote_mirrors(&keep);
+    }
     let locks = dp::locks::locks(&problem.placement, cells.variants.len(), &cells.variants);
     let rules = place_rules(pdk, &cells);
     let distinct = cells.distinct_gate_merges > 0;
@@ -1035,6 +1068,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     let mut metadata = metadata;
     metadata.binding = s.binding;
     metadata.epochs = s.epochs;
+    metadata.audit = flow.problem.intent.diagnostics.iter().filter(|d| annotator::audit::KINDS.contains(&d.kind)).map(|d| format!("{}: {}", d.kind, d.message)).collect();
     let pairs = matched_pairs(&flow.problem.blocks);
     if let Some(op) = &bias.op {
         let (_, aging, unknown) = reliability::voltage_findings(flow.netlist, op, &pdk.fet_voltage_limits(), &pairs, false);
@@ -1178,6 +1212,7 @@ fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::r
         antenna_max_ratio: pdk.antenna_max_ratio(),
         gate_af_per_um2: opt("gate_cap_af_um2").map(|v| v as f32),
         wire_af_per_um: wire.and_then(|l| pdk.wire_af_per_um(l, width)),
+        wire_ohm_per_um: wire.and_then(|l| pdk.pex_f32(l, "sheet_res_ohm_sq")).filter(|&r| r > 0.0 && width > 0).map(|r| r * 1000.0 / width as f32),
         route_space_nm: wire.and_then(|l| pdk.min_spacing(l.0)).unwrap_or(0),
         dti: opt("dti_max_spacing").zip(opt("dti_width")),
         avt_mv_um: [pos("avt_n_mv_um"), pos("avt_p_mv_um")],
@@ -1196,6 +1231,7 @@ fn annotation_with(pdk: &Pdk, base: &AnnotationConfig, stack: &'static analog::r
         ecgr_min_width_nm: opt("ecgr_min_width_nm"),
         ecgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Ecgr, pdk),
         hcgr_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Hcgr, pdk),
+        tub_drawable: cells::post_cell::drawable(analog::cell::GuardRingType::Tub { id: 0 }, pdk),
         // Set by the callers from `Config.op` (not a deck key).
         die_temp_k: None,
         unit: annotator::sets::UnitDeck {
@@ -2100,7 +2136,12 @@ impl CellSpace {
             spaces,
             cell_of,
             devices_of,
+            aspect_missed,
         } = cellgen::enumerate_folded(netlist, injected, &problem.constraints, pdk, merge_distinct_gates, fold, &problem.net_classes);
+        let note = ("MatchClass", "no variant meets the aspect limit");
+        if aspect_missed > 0 && !problem.missing.contains(&note) {
+            problem.missing.push(note);
+        }
         let gate = |d: &DeviceId| {
             netlist.devices[d.0 as usize].terminals.iter().find(|(t, _)| t == "G").map(|(_, n)| *n)
         };
@@ -2838,13 +2879,7 @@ mod start_tests {
     /// feel ranks better than one with less total C but more on the output.
     #[test]
     fn supply_decoupling_does_not_rank_layouts() {
-        let rows = [analog::routing::PerformanceBudget {
-            metric: "gain:min".into(),
-            nets: vec![pnr_core::NetId(0), pnr_core::NetId(1)],
-            weights: vec![0.01, 0.0],
-            af_per_nm: 1.0,
-            limit: 1.0,
-        }];
+        let rows = [analog::routing::PerformanceBudget::ground_c("gain:min".into(), vec![pnr_core::NetId(0), pnr_core::NetId(1)], vec![0.01, 0.0], 1.0)];
         let cap = |a: &str, b: Option<&str>, c: f64| (a.to_owned(), b.map(str::to_owned), c);
         let a = vec![cap("VSS", Some("vbn"), 89.4), cap("vout1", None, 4.6)];
         let b = vec![cap("VSS", Some("vbn"), 10.0), cap("vout1", None, 5.0)];

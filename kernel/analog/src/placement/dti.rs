@@ -196,6 +196,7 @@ mod tests {
             a: Target::Device(DeviceId(0)),
             b: Target::Device(DeviceId(1)),
             axis: pnr_core::ids::AxisId(0),
+            mode: crate::placement::SymMode::Perfect,
         }];
         sym.branches(&mut out);
         assert_eq!(out.len(), 2, "a branch-less kind must not invent ids");
