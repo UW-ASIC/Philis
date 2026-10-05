@@ -59,6 +59,19 @@ pub fn cc_feasible(counts: &[u16]) -> bool {
     counts.iter().filter(|&&c| c % 2 == 1).count() <= 1
 }
 
+/// Cells of a `rows × cols` grid nearest the centre first (doubled offsets,
+/// r²), ties by angle `atan2(dr, dc)`.
+#[must_use]
+pub fn spiral(rows: usize, cols: usize) -> Vec<usize> {
+    let key = |i: usize| {
+        let (dr, dc) = (2 * (i / cols) as i64 - rows as i64 + 1, 2 * (i % cols) as i64 - cols as i64 + 1);
+        ((dr * dr + dc * dc), (dr as f64).atan2(dc as f64))
+    };
+    let mut order: Vec<usize> = (0..rows * cols).collect();
+    order.sort_by(|&a, &b| key(a).0.cmp(&key(b).0).then(key(a).1.total_cmp(&key(b).1)));
+    order
+}
+
 /// Owner per cell of a `rows × cols` grid (row-major, `None` = empty or
 /// dummy), and `exact`: every member's cells are closed under the 180°
 /// rotation about the grid centre (first moments coincide exactly).
@@ -76,8 +89,7 @@ pub fn centro_assign(counts: &[u16], rows: usize, cols: usize, fill: Fill) -> (V
         let (dr, dc) = (2 * (i / cols) as i64 - rows as i64 + 1, 2 * (i % cols) as i64 - cols as i64 + 1);
         ((dr * dr + dc * dc), (dr as f64).atan2(dc as f64))
     };
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| key(a).0.cmp(&key(b).0).then(key(a).1.total_cmp(&key(b).1)));
+    let order = spiral(rows, cols);
     // Odd counts first: the centre cell (odd grid) for one, reflected pairs
     // split between two for the rest.
     let mut left: Vec<usize> = counts.iter().map(|&u| usize::from(u)).collect();
