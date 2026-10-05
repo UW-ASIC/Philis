@@ -56,3 +56,23 @@ fn an_adopted_antenna_diode_keeps_lvs_matched() {
     library::adopt_devices(&mut sol.netlist, &mut sol.macros, vec![(diode, placed)]);
     assert!(lvs(&sol, &pdk).is_empty(), "adopted: {:?}", lvs(&sol, &pdk));
 }
+
+/// GAP-14 acceptance: a user-declared tub around a mirror pair signs off with
+/// no DRC/LVS violation, both members in one deep n-well.
+#[test]
+fn a_declared_tub_signs_off_clean() {
+    let pdk = pdk();
+    let spice = ".subckt tub out ref vdd VSS\nXM1 ref ref VSS VSS nfet_01v8 W=2u L=0.5u\nXM2 out ref VSS VSS nfet_01v8 W=2u L=0.5u\n\
+                 XR1 vdd ref sky130_fd_pr__res_high_po w=0.69u l=10u\nXR2 vdd out sky130_fd_pr__res_high_po w=0.69u l=10u\n.ends tub\n";
+    let cfg = library::Config {
+        constraints: Some(r#"[{"constraint":"IsolatedTub","instances":["XM1","XM2"],"tie":"vdd"}]"#.into()),
+        feedback_iters: 1,
+        ..Default::default()
+    };
+    let sol = library::run(spice, &pdk, &library::Macros::default(), &cfg).expect("flow");
+    let bad: Vec<String> = library::signoff(&sol, &pdk).report.hard_violations.into_iter().map(|v| v.rule).filter(|r| r.starts_with("drc") || r.starts_with("lvs")).collect();
+    assert!(bad.is_empty(), "{bad:?}");
+    let dnwell = pdk.layer("dnwell").unwrap();
+    let (shapes, _, _) = library::signoff_inputs(&sol, &pdk);
+    assert_eq!(shapes.iter().filter(|s| s.layer == dnwell).count(), 1, "both members in one tub");
+}

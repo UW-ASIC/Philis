@@ -910,6 +910,7 @@ pub fn max_finger_for_taps(process: &dyn Process, l: i32) -> i32 {
                     dummy_required,
                     route_matching_required: false,
                     class: None,
+                    kind: None,
                     series: Vec::new(),
                     style: None,
                 });

@@ -7,7 +7,7 @@ fn rules(c: i32) -> gp::PlaceRules {
     gp::PlaceRules::uniform(5, c)
 }
 use gp::mechanics::{analog_violations, encroachment, hpwl};
-use analog::placement::symmetry::{Symmetry, SymmetryGroup};
+use analog::placement::symmetry::{SymMode, Symmetry, SymmetryGroup};
 use analog::placement::DtiBand;
 use analog::Rule;
 use gp::VariantSpace;
@@ -47,7 +47,7 @@ fn run(
 }
 
 fn sym(a: u16, b: u16) -> Symmetry {
-    Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0) }
+    Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0), mode: SymMode::Perfect }
 }
 
 // ---- rotation ----
@@ -85,6 +85,24 @@ fn mixed_polarity_composite_halves_turn_together() {
         turned |= l.orient[0] != Orient::R0;
     }
     assert!(turned, "the locked set never turned");
+}
+
+/// PLC-21: a Mirror pair is seeded as reflections and every set rotation keeps
+/// the partner at `orient[0].then(Mx180)`.
+#[test]
+fn mirror_pair_keeps_its_reflection_through_rotation() {
+    let coarse = rotate_bench();
+    let reqs = Requirements {
+        hard: vec![Box::new(SymmetryGroup(vec![Symmetry { mode: SymMode::Mirror, ..sym(0, 1) }]))],
+        ..Default::default()
+    };
+    let mut turned = false;
+    for seed in 1..=10u64 {
+        let l = run(&coarse, &[], &[], &reqs, &[false; 4], seed);
+        assert_eq!(l.orient[1], l.orient[0].then(Orient::Mx180), "seed {seed}");
+        turned |= l.orient[0] != Orient::R0;
+    }
+    assert!(turned, "the mirrored set never turned");
 }
 
 #[test]
@@ -438,6 +456,7 @@ fn sym_bench() -> (Requirements<Layout>, Layout) {
             a: Target::Device(DeviceId(0)),
             b: Target::Device(DeviceId(1)),
             axis: AxisId(0),
+            mode: SymMode::Perfect,
         }]))],
         budget: Vec::new(),
         cost: Vec::new(),
@@ -481,7 +500,7 @@ fn a_stacked_symmetric_pair_separates_and_stays_mirrored() {
 /// a self-symmetric tail cell, all starting piled on top of each other.
 #[test]
 fn two_pairs_and_a_tail_share_one_axis_legally() {
-    let sym = |a: u16, b: u16| Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0) };
+    let sym = |a: u16, b: u16| Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0), mode: SymMode::Perfect };
     let group = || SymmetryGroup(vec![sym(0, 1), sym(2, 3), sym(4, 4)]);
     let reqs = Requirements { hard: vec![Box::new(group())], budget: Vec::new(), cost: vec![Box::new(group())] };
     for seed in 0..4 {
@@ -536,7 +555,7 @@ fn incident_encroachment_difference_matches_full_scan() {
 /// projection: Φ never rises, so `trial` never reaches for `project`.
 #[test]
 fn compound_moves_keep_a_mirrored_stage_mirrored() {
-    let sym = |a: u16, b: u16| Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0) };
+    let sym = |a: u16, b: u16| Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0), mode: SymMode::Perfect };
     let reqs = Requirements {
         hard: vec![Box::new(SymmetryGroup(vec![sym(0, 1), sym(2, 3), sym(4, 4)]))],
         budget: Vec::new(),
@@ -623,7 +642,7 @@ fn scene(k: i32) -> (Nets, Layout, Requirements<Layout>) {
                 branch: BranchId(0),
                 seed_isolate: true,
             }]),
-            Box::new(SymmetryGroup(vec![Symmetry { a: d0, b: d1, axis: AxisId(0) }])),
+            Box::new(SymmetryGroup(vec![Symmetry { a: d0, b: d1, axis: AxisId(0), mode: SymMode::Perfect }])),
         ],
     };
     (nets, l, reqs)
@@ -644,4 +663,26 @@ fn energy_is_invariant_to_scaling_all_lengths() {
     let sa2 = Sa::new(nets2, 2, &reqs2, &prices, &[], &rules(0));
     let (e1, e2) = (sa1.pex(&l1), sa2.pex(&l2));
     assert!((e2 - e1).abs() <= 1e-6 * e1.abs(), "{e1} vs {e2}");
+}
+
+// ---- thermal separation (PLC-14) ----
+
+/// A matched pair seeded against a hot cell: dp must open both gaps to the
+/// 1 µm/mW floor.
+#[test]
+fn dp_pushes_a_matched_pair_away_from_a_hot_cell() {
+    use analog::placement::HeatSeparation;
+    let coarse = layout(&[(0, 0, 1_000, 1_000), (2_000, 0, 1_000, 1_000), (4_000, 0, 1_000, 1_000)]);
+    let d = |i: u16| Target::Device(DeviceId(i));
+    let heat = vec![
+        HeatSeparation { victim: d(0), source: d(2), min_gap_nm: 2_000 },
+        HeatSeparation { victim: d(1), source: d(2), min_gap_nm: 2_000 },
+    ];
+    let reqs = Requirements { budget: vec![Box::new(heat.clone())], cost: vec![Box::new(heat.clone())], ..Default::default() };
+    for seed in 1..=10u64 {
+        let l = run(&coarse, &[], &[], &reqs, &[false; 3], seed);
+        for h in &heat {
+            assert_eq!(h.residual(&l), 0.0, "seed {seed}: gap {}", l.edge_gap(h.victim, h.source));
+        }
+    }
 }

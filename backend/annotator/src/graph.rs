@@ -29,6 +29,10 @@ pub struct Req {
 /// pattern's first pair, and a star from `g[0]` of each sidecar group; `Sym` as a path over each compound's members; `ProxNet` a
 /// star from the canonically first device of each net that is not Supply, Ground,
 /// Substrate or Clock (card D-j) with at most `policy.pn_max_degree` devices.
+/// EXT-27: `MatchBlock` per couple of identical instances (`hier_pairs`) not already
+/// `MatchSym`; `ProxBlock` a star from `g[0]` of each instance array; `ProxNet` does not
+/// cross an instance boundary (**Philis policy**): an edge joins devices of one innermost
+/// instance (`inst`, `netlist.device_inst`; empty = all top level).
 #[allow(clippy::too_many_arguments)] // the plan's signature: one slice per evidence source
 #[must_use]
 pub fn requirements(
@@ -37,6 +41,9 @@ pub fn requirements(
     shared_bias: &[Vec<DeviceId>],
     passive: &[Vec<DeviceId>],
     user_groups: &[(u32, Vec<DeviceId>)],
+    hier_pairs: &[(DeviceId, DeviceId)],
+    arrays: &[Vec<DeviceId>],
+    inst: &[Option<u32>],
     hg: &BipartiteHypergraph,
     classes: &[NetClassification],
     canon: &[u64],
@@ -83,6 +90,15 @@ pub fn requirements(
     for (gi, (_, g)) in user_groups.iter().enumerate() {
         g.iter().skip(1).for_each(|&d| push(g[0], d, ReqType::ProxBlock, gi));
     }
+    for (i, &(a, b)) in hier_pairs.iter().enumerate() {
+        if !sym_pair.contains(&(a.0.min(b.0), a.0.max(b.0))) {
+            push(a, b, ReqType::MatchBlock, i);
+        }
+    }
+    for (gi, g) in arrays.iter().enumerate() {
+        g.iter().skip(1).for_each(|&d| push(g[0], d, ReqType::ProxBlock, gi));
+    }
+    let inst_of = |d: DeviceId| inst.get(d.0 as usize).copied().flatten();
     for (n, devs) in hg.net_devices.iter().enumerate() {
         if matches!(classes[n].class, NetClass::Supply | NetClass::Ground | NetClass::Substrate | NetClass::Clock) {
             continue;
@@ -91,7 +107,13 @@ pub fn requirements(
         ds.sort_by_key(|d| (canon[d.0 as usize], d.0));
         ds.dedup();
         if ds.len() <= policy.pn_max_degree {
-            ds.iter().skip(1).for_each(|&d| push(ds[0], d, ReqType::ProxNet, n));
+            // One star per instance (first device of the group by canon), so
+            // no edge crosses an instance boundary yet none inside one is lost.
+            for (i, &d) in ds.iter().enumerate() {
+                if let Some(&h) = ds[..i].iter().find(|&&h| inst_of(h) == inst_of(d)) {
+                    push(h, d, ReqType::ProxNet, n);
+                }
+            }
         }
     }
     out
@@ -211,7 +233,7 @@ mod tests {
         let names: Vec<&str> = nl.devices.iter().map(|d| d.name.as_str()).collect();
         let all = pattern::recognize_all(&hg, &drawn, &roles, &cfg, &canon, &names);
         let p = crate::annotate(nl, &cfg);
-        let reqs = requirements(&all, c, shared, &[], &[], &hg, &p.net_classes, &canon, &cfg.policy);
+        let reqs = requirements(&all, c, shared, &[], &[], &[], &[], &[], &hg, &p.net_classes, &canon, &cfg.policy);
         let tree = hsmpg(nl.devices.len(), &reqs, &canon);
         (reqs, render(&tree, &names))
     }

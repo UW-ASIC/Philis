@@ -140,6 +140,17 @@ pub fn mirror_allowed(members: &[Sums]) -> bool {
     members.iter().all(|s| s.phi_x == 0)
 }
 
+/// [`mirror_allowed`] over a macro's units, grouped per owner as in
+/// [`phi_equal_all`]: an odd finger count leaves a net φx and refuses Mirror.
+#[must_use]
+pub fn mirror_allowed_units(units: &[pnr_core::Unit]) -> bool {
+    let mut owners: Vec<u8> = units.iter().map(|u| u.owner).collect();
+    owners.sort_unstable();
+    owners.dedup();
+    let per: Vec<Sums> = owners.iter().map(|&o| sums(units.iter().filter(|u| u.owner == o).map(|&u| Pt::from(u)))).collect();
+    mirror_allowed(&per)
+}
+
 fn moment(pts: &[Pt], c: (f64, f64), l: f64, p: i32, q: i32) -> f64 {
     let w: f64 = pts.iter().map(|pt| pt.w).sum();
     if w <= 0.0 {
@@ -198,6 +209,17 @@ pub fn cancelled_order(devs: &[&[Pt]], nmax: u8, tol: f64) -> (u8, [f64; 5]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mx180 negates φx: an odd finger pair keeps a net φx and must not mirror.
+    #[test]
+    fn mirror_is_refused_for_an_odd_finger_pair() {
+        let units = |phis: &[(i8, i8)]| -> Vec<pnr_core::Unit> {
+            phis.iter().map(|&phi| pnr_core::Unit { owner: 0, x: 0, y: 0, weight: 1, phi, sa: 0, sb: 0 }).collect()
+        };
+        assert!(!mirror_allowed_units(&units(&[(1, 0), (-1, 0), (1, 0)])));
+        assert!(mirror_allowed_units(&units(&[(1, 0), (-1, 0)])));
+        assert!(mirror_allowed_units(&units(&[(0, 1); 3])));
+    }
 
     fn pt(x: f64, y: f64) -> Pt {
         Pt { x, y, w: 1.0, phi: (0, 0) }
