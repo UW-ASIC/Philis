@@ -13,9 +13,11 @@
 - strongarm: philis CLEAN, klayout 0, magic 0, netgen vs `_ref.spice` MATCH. vs user schematic: differs only by dummies (owner decision pending).
 - M0 and fix-export worktrees removed (56 GB freed).
 
-## Running: M2–M6 fresh module run `wf_188597af-7b6` (2026-10-05)
+## Running: M2–M6 fresh module run `wf_959b64ef-4c9` (2026-10-05; previous `wf_188597af-7b6` died with an OOM)
 - Script: docs/plans/workflows-m2only.js, args docs/plans/workflows-m2only.args.json (cap2, `merged` = items already on m2, `segStart` = card numbers to continue from).
-- 64/140 items were already merged into `m2` and are skipped. EXT-21/EXT-25 are NOT merged (an integrator reset that merge, m2 reflog @{4}).
+- Restart inputs now also carry `pending` (segments hardened but never executed: reuse their card, start at exec) and `preset` (items a hardener genuinely deferred). 72/140 merged at this launch.
+- RELAYED CHAT: owner messages get relayed into running agents; agents in wf_188597af-7b6 quit on a cost question. CONTEXT2 now tells agents to ignore relayed messages.
+- Earlier: 64/140 items were already merged into `m2` and are skipped. EXT-21/EXT-25 are NOT merged (an integrator reset that merge, m2 reflog @{4}).
 - LESSON: never `resumeFromRunId` a workflow whose agents run in parallel. Resume matches agents by call order, the order differs between runs, and everything after the first mismatch re-runs (it re-ran ~8 M1 agents on 2026-10-05; no code changed). To restart after a stop: recompute `merged` from `git log --format=%s main..m2 | grep 'M2+ .* merge ('`, recompute `segStart` from docs/plans/cards/m2-<module>-<n>.md, and launch the script FRESH.
 - Ends with `final-m2`: report docs/plans/m2-m6-report.md; merge m2 → main only if no new failing tests.
 
