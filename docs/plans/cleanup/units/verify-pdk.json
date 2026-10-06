@@ -1,0 +1,27 @@
+{
+  "unit": "verify-pdk",
+  "commits": [
+    "e22f69a cleanup(verify-pdk): step 1",
+    "14c55b1 cleanup(verify-pdk): step 2",
+    "cleanup(verify-pdk): step 3 (this commit)"
+  ],
+  "testsAdded": 40,
+  "flaggedFixed": [
+    "ceil_sqrt overflowed s*s near sqrt(i64::MAX) and wrapped sides past i32: now i128 correction steps and saturation to i32::MAX",
+    "same_model matched an empty deck/recipe name against a model ending in `__`: an empty name now names nothing",
+    "parse_roles wrapped a cell.* integer past i32 into a different (possibly negative) length: now left out",
+    "Overlay::space resolved a role by round-tripping through a layer name, which re-resolves as a role on the PDK: now by layer id (step 1)",
+    "Overlay::width skipped Pdk::width's widest_on min_width fallback: both share width_of (step 1)",
+    "parse_roles errors said `deck` for the sidecar: now name the sidecar (step 1)"
+  ],
+  "flaggedOpen": [],
+  "seamRequests": [],
+  "risks": [
+    "No build was run (per instructions): step-1 refactor (rules_on/length/pair_rule/space_of/width_of, same_model, recipe_draws, single sidecar JSON parse) and ~40 new tests are unverified by the compiler; rustfmt parse check passes",
+    "Tests assume sky130 deck facts (positive met1 fringe/area C, density limits as fractions, parse_deck rejecting a malformed line); a deck change could need a test update",
+    "round_up_to_grid overflows for v within one grid of i32::MAX (unreachable for real nm dimensions); left as is",
+    "scalar_rules, rule_limit_nm callers and pad sizes still cast Dbu i64 to i32 with `as` (decks are far below 2.1 m)",
+    "No SIMD or branchless rewrite: every loop here scans a few hundred deck rules once per query at setup time, cold code below the size where SIMD pays",
+    "Relayed user note about 9 branches to merge: this checkout has only `main` (and origin/main), so there was nothing to merge from this unit"
+  ]
+}

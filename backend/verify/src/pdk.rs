@@ -1542,9 +1542,10 @@ fn parse_roles(v: &serde_json::Value) -> Result<Roles, String> {
         if k == "layers" {
             continue;
         }
-        let n = val.as_i64().or_else(|| val.as_bool().map(i64::from));
+        // An integer past i32 is no length: left out rather than wrapped.
+        let n = val.as_i64().or_else(|| val.as_bool().map(i64::from)).and_then(|n| i32::try_from(n).ok());
         if let Some(n) = n {
-            roles.scalars.push((k.clone(), n as i32));
+            roles.scalars.push((k.clone(), n));
         }
     }
     Ok(roles)
@@ -1556,14 +1557,16 @@ fn ceil_sqrt(area: i64) -> i32 {
     if area <= 0 {
         return 0;
     }
-    let mut s = (area as f64).sqrt() as i64;
+    // i128: the correction steps square a root just past √i64::MAX.
+    let area = i128::from(area);
+    let mut s = (area as f64).sqrt() as i128;
     while s * s > area {
         s -= 1;
     }
     while s * s < area {
         s += 1;
     }
-    s as i32
+    i32::try_from(s).unwrap_or(i32::MAX)
 }
 
 /// `v` rounded up to the next multiple of `grid` (a grid below 1 is 1).
@@ -1577,7 +1580,7 @@ fn round_up_to_grid(v: i32, grid: i32) -> i32 {
 /// and `nfet_01v8`). An empty `model` names nothing.
 fn same_model(n: &str, model: &str) -> bool {
     let behind = |long: &str, short: &str| long.strip_suffix(short).is_some_and(|p| p.ends_with("__"));
-    !model.is_empty() && (n == model || behind(n, model) || behind(model, n))
+    !model.is_empty() && !n.is_empty() && (n == model || behind(n, model) || behind(model, n))
 }
 
 /// Manufacturing grid from the deck's `off_grid` rule (`pitch` param), else `1`.
