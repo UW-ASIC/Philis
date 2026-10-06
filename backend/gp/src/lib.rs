@@ -261,9 +261,14 @@ impl PlaceRules {
     }
 
     fn profile(&self, l: &Layout, c: usize) -> Option<&spacing::Profile> {
-        let v = usize::from(*l.variant.get(c)?);
-        let o = l.orient.get(c).copied().unwrap_or_default() as usize;
-        self.profiles.of.get(c)?.get(v).map(|p| &p[o])
+        self.profile_of(c, *l.variant.get(c)?, l.orient.get(c).copied().unwrap_or_default())
+    }
+
+    /// Cell `c`'s profile drawn as variant `v` under `o`; `None` when `c` has none
+    /// (every pair with it is then spaced at `fallback`).
+    #[must_use]
+    pub fn profile_of(&self, c: usize, v: u16, o: pnr_core::Orient) -> Option<&spacing::Profile> {
+        self.profiles.of.get(c)?.get(usize::from(v)).map(|p| &p[o as usize])
     }
 
     /// Edge gaps `(gx, gy)` cells `a` and `b` owe each other, nm: `gap(lo, R, hi).min`

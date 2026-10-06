@@ -56,7 +56,9 @@ pub enum Face {
 
 impl Face {
     const ALL: [Face; 4] = [Face::L, Face::B, Face::R, Face::T];
-    fn opposite(self) -> Face {
+    /// The facing face across a gap: `L`↔`R`, `B`↔`T`.
+    #[must_use]
+    pub fn opposite(self) -> Face {
         Face::ALL[(self as usize + 2) % 4]
     }
     /// Outward normal.

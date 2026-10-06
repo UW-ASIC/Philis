@@ -10,6 +10,7 @@
 
 pub mod legalize;
 pub mod locks;
+pub mod sp;
 
 use analog::Requirements;
 use pnr_core::ids::BranchId;
