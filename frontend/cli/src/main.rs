@@ -24,7 +24,8 @@
 //! deck's text layers), `<top>_ref.spice` (the LVS reference signoff used,
 //! dummies included), `<top>_pex.spice` when extraction allows,
 //! `signoff.txt`, `signoff.json` and `report.txt` (constraint budgets, the
-//! signoff hard rows and the run's stats). `<top>` is the netlist's `.subckt`
+//! signoff hard rows, the run's stats and one `kind\tmessage` line per
+//! annotator diagnostic, unknown `--constraints` names included). `<top>` is the netlist's `.subckt`
 //! name, else the file stem. Exit code: 0 signoff clean, 1 not clean, 2 error.
 
 use std::path::{Path, PathBuf};
@@ -270,7 +271,7 @@ fn write_outputs(
     let st = &sol.stats;
     let stages: String = library::STAGES.iter().zip(st.stage_ms).map(|(n, ms)| format!(" {n}={ms:.0}")).collect();
     let rep = format!(
-        "{}\n# signoff hard ({})\n{}\n# run\nconverged\t{}\niterations\t{}\nouter_iterations\t{}\nsim_failures\t{}\nwarnings\t{}\nstage_ms\t{}\n",
+        "{}\n# signoff hard ({})\n{}\n# run\nconverged\t{}\niterations\t{}\nouter_iterations\t{}\nsim_failures\t{}\nwarnings\t{}\nstage_ms\t{}\n# diagnostics ({})\n{}",
         sol.metadata,
         report.hard_violations.len(),
         lines(&report.hard_violations),
@@ -280,6 +281,8 @@ fn write_outputs(
         st.sim_failures,
         st.warnings,
         stages.trim_start(),
+        sol.diagnostics.len(),
+        sol.diagnostics.iter().map(|d| format!("{}\t{}\n", d.kind, d.message)).collect::<String>(),
     );
     write("report.txt".into(), rep.as_bytes())?;
     Ok(pex)

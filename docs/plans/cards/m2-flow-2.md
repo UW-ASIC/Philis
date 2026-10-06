@@ -9,6 +9,8 @@ tier block at the top of `cell`, `[3000, 5000, 10000]`); `frontend/library/src/l
 `topology`/`search` split and added m2's `perf_active` (threaded `run` → `topology` → `Flow`), IR budgets passed to
 `elaborate::intent`, and `perf::score` for the unknown result (FLOW-09's `clock` kept). `cargo build -p library
 --tests` is clean; `cargo test -p library --lib`: 124 pass, 1 fail, see "Out of scope".
+The CLI was repaired for m2's `perf::PerfConfig` shape (`frontend/cli/src/main.rs:192`: `testbenches: vec![testbench]`,
+`scenarios: Vec::new()`); the merge left it not compiling. The edit sits in the FLOW-15 commit (df9432b).
 
 ## FLOW-15 Housekeeping, stale comments, docs and dead fields — class: do
 
@@ -85,7 +87,7 @@ tier block at the top of `cell`, `[3000, 5000, 10000]`); `frontend/library/src/l
   [[d1], [d0]]` names `d1` then `d0` (today it names `d0` then `d1`).
 - Visualizer `layer_names_and_bounds`: built from `layer_names(&[("met1".into(), (68, 20)), ("via".into(), (68, 44))])`,
   same asserts; plus `polys_from_shapes(&[shape on LayerId(1)], &[(0,0), (68, 20)])[0]` has `layer 68, datatype 20`.
-- Command: `cargo test -p library --lib && cargo test -p visualizer && cargo build -p benchmarks --bins &&
+- Command: `cargo test -p library --lib && cargo test -p visualizer && cargo build -p benchmark --bins &&
   cargo build --workspace --examples --tests` (step 6 touches every crate's initialisers).
 - Acceptance: `grep -rn -e Generator -e variant_signoff -e EM_UA_PER_UM docs --exclude-dir=plans` → 0 lines; every
   CRATES.md open issue has an owner.
@@ -131,7 +133,7 @@ tier block at the top of `cell`, `[3000, 5000, 10000]`); `frontend/library/src/l
   `escalate_never_repeats_and_exhausts` and the `lib.rs` callers pass full `allowed` (`(0..n).collect()`), same asserts.
 - Acceptance: T9 unchanged by construction (`price_calls` per run as before: pruning reuses the seed's prices; the
   existing FLOW-09 price-count test must still pass). `bench local` lex keys unchanged or better on every fixture:
-  `PDK_ROOT=… cargo run --release -p benchmarks --bin bench -- local` (background, ~10 min) on the branch before and
+  `PDK_ROOT=… cargo run --release -p benchmark --bin bench -- local` (background, ~10 min) on the branch before and
   after; compare per-fixture keys. If any key regresses, report it with the fixture; do not keep the change.
 
 ## Out of scope (found while merging)

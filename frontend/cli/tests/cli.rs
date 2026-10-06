@@ -91,3 +91,29 @@ fn constraints_flag_reads_the_file() {
     assert!(err.contains("constraints: ") && !err.contains("--constraints"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// FLOW-12: an annotator diagnostic (here a `--constraints` entry naming a
+/// net the netlist lacks; `Align` has no reader and yields
+/// `sidecar_unsupported` instead) is one `kind\tmessage` line of `report.txt`,
+/// never dropped.
+#[test]
+fn constraint_diagnostics_reach_the_report() {
+    let dir = std::env::temp_dir().join(format!("philis_cli_diags_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let json = dir.join("pair.const.json");
+    std::fs::write(&json, r#"[{"constraint":"GroundPorts","ports":["NOPE"]}]"#).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_philis"))
+        .arg(fixture("pair.spice"))
+        .args(["--pdk", "sky130", "--starts", "1", "--iters", "2", "--outer", "1", "--constraints"])
+        .arg(&json)
+        .args(["-o"])
+        .arg(&dir)
+        .env("PDK_ROOT", std::env::var_os("PDK_ROOT").unwrap_or_default())
+        .output()
+        .expect("philis runs");
+    let code = out.status.code();
+    assert!(matches!(code, Some(0 | 1)), "exit {code:?}: {}", String::from_utf8_lossy(&out.stderr));
+    let report = std::fs::read_to_string(dir.join("report.txt")).expect("report.txt written");
+    assert!(report.lines().any(|l| l.starts_with("sidecar_unknown_name\t")), "{report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

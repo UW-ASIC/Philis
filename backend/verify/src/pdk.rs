@@ -1327,7 +1327,7 @@ impl Pdk {
     /// Every layer some recipe draws.
     fn recipe_layers(&self) -> Vec<String> {
         let mut out = Vec::new();
-        for kind in ["resistors", "capacitors"] {
+        for kind in ["resistors", "capacitors", "bjts"] {
             let Some(rs) = self.cell.get(kind).and_then(|t| t.get("recipes")).and_then(|r| r.as_object()) else { continue };
             for r in rs.values() {
                 if let Some(l) = r.get("layers").and_then(|l| l.as_object()) {

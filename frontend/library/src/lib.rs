@@ -261,6 +261,10 @@ pub struct Solution {
     /// `open net`, `metal over gate`, …; the pairs it routed exactly).
     pub route: Report,
     pub route_stats: dr::RouteStats,
+    /// Annotator findings (EXT-26 sidecar entries it could not apply,
+    /// ambiguous symmetry, conflicts), in annotator order; the CLI writes one
+    /// line each to `report.txt`.
+    pub diagnostics: Vec<analog::intent::Diagnostic>,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -1150,6 +1154,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
         devices_of: flow.cells.devices_of,
         route: best.route,
         route_stats: best.route_stats,
+        diagnostics: flow.problem.intent.diagnostics,
     }
 }
 
