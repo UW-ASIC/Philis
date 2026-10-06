@@ -215,6 +215,8 @@ fn child_config(cfg: &Config) -> Config {
         warm: cfg.warm,
         max_wall: cfg.max_wall,
         hierarchy: Hierarchy::Flat,
+        dp_mode: cfg.dp_mode,
+        place_perf: cfg.place_perf,
     }
 }
 

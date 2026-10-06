@@ -3350,7 +3350,7 @@ mod start_tests {
     #[test]
     fn warm_epoch_starts_from_the_incumbent() {
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
-        let cfg = |cold_every| crate::Config { cold_every, feedback_iters: 2, outer_iters: 1, starts: 1, warm: dp::Schedule { range0: 0.0, max_temps: 0, t0_scale: 0.0 }, ..Default::default() };
+        let cfg = |cold_every| crate::Config { cold_every, feedback_iters: 2, outer_iters: 1, starts: 1, warm: dp::Schedule { range0: 0.0, max_temps: 0, t0_scale: 0.0, ..dp::Schedule::warm() }, ..Default::default() };
         let mut nl = crate::parse(THREE_FET).unwrap();
         crate::deck_models(&mut nl, &pdk);
         let cfg_warm = cfg(u32::MAX);
@@ -3835,7 +3835,7 @@ mod size_tests {
         crate::deck_models(&mut netlist, &pdk);
         let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
         let fold = crate::cellgen::folds(&netlist, &pdk, &[], &[]);
-        let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
+        let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold, &[]);
         let placed: Vec<pnr_core::Macro> = cells.variants.iter().map(|v| v.alternatives[0].clone()).collect();
         let j = crate::junctions(&placed, &cells.devices_of, &netlist);
         let mut quartered = false;
