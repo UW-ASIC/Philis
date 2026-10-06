@@ -241,3 +241,139 @@ mod tests {
         }
     }
 }
+
+/// Corner cases for the diode generator on a hand-built deck (cleanup step
+/// 2). Oracles: the doc comments and positions derived by hand.
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::builder::fake::Deck;
+    use crate::testkit::group_of;
+    use pnr_core::DeviceKind;
+
+    /// Cuts 170 on a 340 pitch, the tap 270 from the cathode, devices 400
+    /// apart; no implant or contact enclosure. A 500×1000 unit then draws
+    /// its cathode at (0, 0, 500, 1000), its 170-wide anode tap at x = 770,
+    /// and one device spans 940.
+    fn deck() -> Deck {
+        Deck::new(1, &["diff", "tap", "li", "licon", "nsdm", "psdm", "diom"])
+            .with("w:licon", 170)
+            .with("s:licon", 170)
+            .with("s:diff", 270)
+            .with("diode_gap", 400)
+    }
+
+    /// `deck` with the gf180 well form: a `diode_mk` marker and an n-well
+    /// 100 past the diffusion.
+    fn well_deck() -> Deck {
+        let mut d = deck().with("enc:nwell:diff", 100);
+        d.roles.push(("diode_mk", 50));
+        d.roles.push(("nwell", 51));
+        d
+    }
+
+    fn rects(m: &Macro, d: &Deck, role: &str) -> Vec<Rect> {
+        let l = d.layer(role).unwrap();
+        m.shapes.iter().filter(|s| s.layer == l).map(|s| s.rect).collect()
+    }
+
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        outer.x <= inner.x && outer.y <= inner.y && outer.x + outer.w >= inner.x + inner.w && outer.y + outer.h >= inner.y + inner.h
+    }
+
+    #[test]
+    fn an_empty_group_has_no_variants() {
+        let g = DeviceGroup { devices: vec![] };
+        assert!(Diode::enumerate(&g, &Constraints::default(), &deck()).is_empty());
+    }
+
+    #[test]
+    fn a_lone_member_offers_row_column_and_square() {
+        let (g, c) = group_of(DeviceKind::Diode, 1, 4, 500, 1000);
+        let v: Vec<(u16, u16)> = Diode::enumerate(&g, &c, &deck()).iter().map(|d| (d.rows, d.cols)).collect();
+        assert_eq!(v, [(4, 1), (2, 2), (1, 4)]);
+    }
+
+    #[test]
+    fn the_sizing_defaults_to_the_deck_s_diode() {
+        let d = deck().with("diode_w", 700).with("diode_l", 900);
+        let s = group_sizing(&DeviceGroup { devices: vec![pnr_core::DeviceId(0)] }, &Constraints::default(), &d);
+        assert_eq!((s.unit_w, s.unit_l, s.dev_nf), (700, 900, vec![1]));
+    }
+
+    #[test]
+    fn a_unit_draws_cathode_anode_and_marker_where_derived() {
+        let d = deck();
+        let (g, c) = group_of(DeviceKind::Diode, 1, 1, 500, 1000);
+        let m = Diode { rows: 1, cols: 1 }.draw(&g, &c, &d);
+        let k = Rect { x: 0, y: 0, w: 500, h: 1000 };
+        let a = Rect { x: 770, y: 0, w: 170, h: 1000 };
+        assert_eq!(rects(&m, &d, "diff"), [k]);
+        assert_eq!(rects(&m, &d, "tap"), [a]);
+        assert_eq!(rects(&m, &d, "diom"), [Rect { x: 0, y: 0, w: 940, h: 1000 }]);
+        // One column of three cuts in each pad.
+        assert_eq!(rects(&m, &d, "licon").len(), 6);
+        let pin = |n: &str| m.pins.iter().find(|p| p.name == n).unwrap_or_else(|| panic!("{n}")).at;
+        assert!(inside(k, pin("d0:N")));
+        assert!(inside(a, pin("d0:P")));
+        assert_eq!(m.units.len(), 1);
+        assert_eq!(m.units[0].weight, 500 * 1000);
+        assert_eq!((m.units[0].x, m.units[0].y), (250, 500));
+        assert_eq!(m.drawn.len(), 1);
+        assert_eq!(m.drawn[0].kind, DrawnKind::Diode);
+        assert_eq!(m.drawn[0].nodes, [Node::Pin("P"), Node::Pin("N"), Node::Unused]);
+        assert_eq!((m.drawn[0].w, m.drawn[0].l), (500, 1000));
+    }
+
+    #[test]
+    fn units_step_one_device_plus_the_gap() {
+        let d = deck();
+        let (g, c) = group_of(DeviceKind::Diode, 1, 2, 500, 1000);
+        let m = Diode { rows: 1, cols: 2 }.draw(&g, &c, &d);
+        let xs: Vec<i32> = rects(&m, &d, "diff").iter().map(|r| r.x).collect();
+        assert_eq!(xs, [0, 940 + 400]);
+        let m = Diode { rows: 2, cols: 1 }.draw(&g, &c, &d);
+        let ys: Vec<i32> = rects(&m, &d, "diff").iter().map(|r| r.y).collect();
+        assert_eq!(ys, [0, 1000 + 400]);
+    }
+
+    /// The well form swaps the terminals: the diff pad is the p+ anode
+    /// under `diode_mk`, the tap the n-well's cathode contact, both in one
+    /// n-well; no `diom`.
+    #[test]
+    fn the_well_form_swaps_terminals_and_wraps_a_well() {
+        let d = well_deck();
+        let (g, c) = group_of(DeviceKind::Diode, 1, 1, 500, 1000);
+        let m = Diode { rows: 1, cols: 1 }.draw(&g, &c, &d);
+        let k = Rect { x: 0, y: 0, w: 500, h: 1000 };
+        let a = Rect { x: 770, y: 0, w: 170, h: 1000 };
+        assert_eq!(rects(&m, &d, "diode_mk"), [k]);
+        assert_eq!(rects(&m, &d, "nwell"), [Rect { x: -100, y: -100, w: 1140, h: 1200 }]);
+        assert!(rects(&m, &d, "diom").is_empty());
+        let pin = |n: &str| m.pins.iter().find(|p| p.name == n).unwrap_or_else(|| panic!("{n}")).at;
+        assert!(inside(k, pin("d0:P")));
+        assert!(inside(a, pin("d0:N")));
+    }
+
+    #[test]
+    fn matched_members_share_a_centroid_on_the_fake_deck() {
+        let d = deck();
+        let (g, mut c) = group_of(DeviceKind::Diode, 2, 1, 500, 1000);
+        c.unitization[0].dev_nf = vec![2, 2];
+        for v in Diode::enumerate(&g, &c, &d) {
+            let m = v.draw(&g, &c, &d);
+            let sum = |o: u8| m.units.iter().filter(|u| u.owner == o).fold((0i64, 0i64), |(x, y), u| (x + i64::from(u.x), y + i64::from(u.y)));
+            assert_eq!(sum(0), sum(1), "{}x{}", v.rows, v.cols);
+            assert_eq!(m.units.len(), 4);
+        }
+    }
+
+    /// A deck that states no contact size or spacing still draws.
+    #[test]
+    fn a_deck_without_contact_rules_draws() {
+        let d = Deck::new(1, &["diff", "tap", "li", "licon", "nsdm", "psdm"]);
+        let (g, c) = group_of(DeviceKind::Diode, 1, 1, 500, 1000);
+        let m = Diode { rows: 1, cols: 1 }.draw(&g, &c, &d);
+        assert_eq!(m.drawn.len(), 1);
+    }
+}

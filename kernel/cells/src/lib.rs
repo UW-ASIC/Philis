@@ -190,3 +190,75 @@ pub(crate) mod testkit {
         out
     }
 }
+
+/// Corner cases for the crate-root helpers (cleanup step 2). Oracles: the
+/// doc comments, hand-derived grids.
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use pnr_core::{LayerId, NetId, Pin, Rect};
+
+    #[test]
+    fn unit_grids_of_no_members_is_empty() {
+        assert!(unit_grids(&[]).is_empty());
+    }
+
+    #[test]
+    fn unit_grids_of_one_unit_is_one_cell() {
+        assert_eq!(unit_grids(&[1]), [(1, 1)]);
+    }
+
+    #[test]
+    fn unit_grids_of_one_member_offers_row_column_and_square() {
+        assert_eq!(unit_grids(&[4]), [(4, 1), (2, 2), (1, 4)]);
+        // ceil(sqrt 5) = 3 columns: two rows, one cell spare.
+        assert_eq!(unit_grids(&[5]), [(5, 1), (2, 3), (1, 5)]);
+        // n = 2: sqrt rounds up to 2, deduplicated against n.
+        assert_eq!(unit_grids(&[2]), [(2, 1), (1, 2)]);
+    }
+
+    /// A member with no units has nothing to draw: no grid, no panic.
+    #[test]
+    fn unit_grids_of_a_zero_count_is_empty() {
+        assert!(unit_grids(&[0]).is_empty());
+    }
+
+    #[test]
+    fn unit_grids_of_several_members_hold_every_unit() {
+        let g = unit_grids(&[1, 8]);
+        assert!(g.contains(&(3, 3)), "{g:?}");
+        assert!(g.iter().all(|&(r, c)| usize::from(r) * usize::from(c) >= 9), "{g:?}");
+    }
+
+    /// A total past `u16::MAX` never comes back truncated: every grid
+    /// offered still holds every unit.
+    #[test]
+    fn unit_grids_never_truncate_a_large_total() {
+        let g = unit_grids(&[40_000, 40_000]);
+        assert!(!g.is_empty());
+        assert!(g.iter().all(|&(r, c)| usize::from(r) * usize::from(c) >= 80_000), "{g:?}");
+    }
+
+    fn pin_at(name: &str, x: i32, layer: u16) -> Pin {
+        Pin { name: name.into(), net: NetId(0), at: Rect { x, y: 0, w: 10, h: 10 }, layer: LayerId(layer) }
+    }
+
+    #[test]
+    fn ports_label_each_pad_once_and_name_common_terminals_alone() {
+        let m = Macro {
+            pins: vec![
+            pin_at("d0:G", 0, 1),
+            // Same pad, same layer: one label (the first pin's name).
+            pin_at("d1:G", 0, 1),
+            // Same centre, other layer: its own label.
+            pin_at("d1:D", 0, 2),
+            pin_at("d1:S", 100, 1),
+            pin_at("GND", 200, 1),
+            ],
+            ..Macro::default()
+        };
+        let l = testkit::ports_with(&m, &["G"]);
+        let names: Vec<(&str, i32, u16)> = l.iter().map(|p| (p.name.as_str(), p.x, p.layer)).collect();
+        assert_eq!(names, [("G", 5, 1), ("d1_D", 5, 2), ("d1_S", 105, 1), ("GND", 205, 1)]);
+    }
+}

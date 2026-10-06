@@ -849,3 +849,453 @@ mod tests {
         }
     }
 }
+
+/// Corner cases for every resistor helper on a hand-built deck (cleanup
+/// step 2). Oracles: the doc comments, the model equation worked by hand,
+/// and inverse/metamorphic relations between `ohm` and `seg_len`.
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::builder::fake::Deck;
+    use crate::testkit::group_of;
+    use pnr_core::{DeviceId, DeviceKind};
+
+    const ROLES: [&str; 6] = ["poly", "rpoly", "li", "licon", "mcon", "met1"];
+
+    /// 2 kΩ/□ with no head, `dl`, `dw` or narrowing: R = 2000·L/W exactly.
+    /// Cuts 170 on a 340 pitch, poly 80 past a cut, the marker 200 from it,
+    /// heads 2160, mcon 170 under met1 60 past it, met1 140 apart.
+    fn deck() -> Deck {
+        Deck::new(1, &ROLES)
+            .with("res_sheet_mohm", 2_000_000)
+            .with("res_value_tol_ppm", 10)
+            .with("res_min_width", 350)
+            .with("res_min_segment", 2000)
+            .with("res_head", 2160)
+            .with("res_seg_gap", 500)
+            .with("w:licon", 170)
+            .with("s:licon", 170)
+            .with("cap:poly:licon", 80)
+            .with("sb:rpoly:licon", 200)
+            .with("w:mcon", 170)
+            .with("enc:met1:mcon", 60)
+            .with("s:met1", 140)
+    }
+
+    fn model(sheet_mohm: i64) -> ResModel {
+        ResModel { sheet_mohm, head_mohm_um: 0, dl_nm: 0, dw_nm: 0, head_dw_nm: 0, narrow_permille: 0, knee_nm: 0 }
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() <= 1e-9 * b.abs().max(1.0)
+    }
+
+    // ---- ResModel ----
+
+    #[test]
+    fn a_model_needs_a_positive_sheet() {
+        assert!(ResModel::of(&Deck::new(1, &ROLES)).is_none());
+        assert!(ResModel::of(&Deck::new(1, &ROLES).with("res_sheet_mohm", -5)).is_none());
+        let d = Deck::new(1, &ROLES)
+            .with("res_sheet_mohm", 7)
+            .with("res_head_mohm_um", 11)
+            .with("res_dl_nm", 13)
+            .with("res_dw_nm", 17)
+            .with("res_head_dw_nm", 19)
+            .with("res_narrow_permille", 23)
+            .with("res_knee_nm", 29);
+        let m = ResModel::of(&d).expect("positive sheet");
+        assert_eq!(
+            (m.sheet_mohm, m.head_mohm_um, m.dl_nm, m.dw_nm, m.head_dw_nm, m.narrow_permille, m.knee_nm),
+            (7, 11, 13, 17, 19, 23, 29)
+        );
+    }
+
+    #[test]
+    fn ohm_is_sheet_times_squares() {
+        let m = model(2_000_000);
+        assert!(close(m.ohm(1000, 10_000), 20_000.0));
+        assert!(close(m.ohm(500, 10_000), 40_000.0));
+        assert!(close(m.ohm(1000, 0), 0.0));
+    }
+
+    #[test]
+    fn ohm_adds_both_heads_over_their_width() {
+        let m = ResModel { head_mohm_um: 1_000_000, head_dw_nm: 1000, ..model(2_000_000) };
+        // 1000 Ω·µm over (1 + 1) µm.
+        assert!(close(m.ohm(1000, 10_000), 20_000.0 + 500.0));
+    }
+
+    #[test]
+    fn ohm_lengthens_by_dl_and_widens_by_dw() {
+        let m = ResModel { dl_nm: 1000, ..model(2_000_000) };
+        assert!(close(m.ohm(1000, 9000), 20_000.0));
+        let m = ResModel { dw_nm: 1000, ..model(2_000_000) };
+        assert!(close(m.ohm(1000, 10_000), 10_000.0));
+    }
+
+    /// Below the knee the width loses `narrow`‰ of the shortfall; at or
+    /// above it nothing.
+    #[test]
+    fn ohm_narrows_only_below_the_knee() {
+        let m = ResModel { narrow_permille: 500, knee_nm: 2000, ..model(2_000_000) };
+        // weff = 1 − 0.5·(2 − 1) = 0.5 µm.
+        assert!(close(m.ohm(1000, 10_000), 40_000.0));
+        assert!(close(m.ohm(2000, 10_000), 10_000.0));
+        assert!(close(m.ohm(4000, 10_000), 5_000.0));
+    }
+
+    #[test]
+    fn seg_len_inverts_ohm() {
+        let m = model(2_000_000);
+        assert_eq!(m.seg_len(1000, 20_000.0, 1, 0, 2, 0), Some(10_000));
+        assert_eq!(m.seg_len(1000, 20_000.0, 2, 0, 2, 0), Some(5000));
+        assert_eq!(m.seg_len(1000, 20_000.0, 4, 0, 2, 0), Some(2500));
+        let m = ResModel { head_mohm_um: 1_000_000, dl_nm: 200, ..model(2_000_000) };
+        for l in [2000, 9000, 40_000] {
+            assert_eq!(m.seg_len(1000, m.ohm(1000, l), 1, 0, 2, 0), Some(l), "{l}");
+        }
+    }
+
+    #[test]
+    fn seg_len_rejects_a_segment_under_the_minimum() {
+        let m = model(2_000_000);
+        assert_eq!(m.seg_len(1000, 20_000.0, 2, 5000, 2, 0), Some(5000));
+        assert_eq!(m.seg_len(1000, 20_000.0, 2, 5001, 2, 0), None);
+    }
+
+    /// 10 µm on a 3 nm lattice snaps to 9999 nm: 100 ppm off.
+    #[test]
+    fn seg_len_holds_the_snapped_value_to_its_tolerance() {
+        let m = model(2_000_000);
+        assert_eq!(m.seg_len(1000, 20_000.0, 1, 0, 3, 101), Some(9999));
+        assert_eq!(m.seg_len(1000, 20_000.0, 1, 0, 3, 99), None);
+    }
+
+    #[test]
+    fn seg_len_reads_a_non_positive_lattice_and_zero_count_as_one() {
+        let m = model(2_000_000);
+        for lat in [0, -4] {
+            let got = m.seg_len(1000, 20_001.0, 1, 0, lat, i32::MAX);
+            assert!(got.is_some() && got == m.seg_len(1000, 20_001.0, 1, 0, 1, i32::MAX), "lat {lat}");
+        }
+        assert_eq!(m.seg_len(1000, 20_000.0, 0, 0, 2, 0), Some(10_000));
+    }
+
+    #[test]
+    fn seg_len_has_no_length_for_a_non_positive_target() {
+        let m = model(2_000_000);
+        for t in [0.0, -20_000.0] {
+            assert_eq!(m.seg_len(1000, t, 1, i32::MIN, 2, i32::MAX), None, "{t}");
+        }
+    }
+
+    #[test]
+    fn value_tolerance_defaults_to_exact() {
+        assert_eq!(value_tol_ppm(&Deck::new(1, &ROLES)), 0);
+        assert_eq!(value_tol_ppm(&deck()), 10);
+    }
+
+    // ---- self-heating (Hastings eq. 5.8) ----
+
+    #[test]
+    fn self_heating_width_scales_with_current() {
+        let w1 = self_heating_min_width_nm(100.0, 2000.0, 326.2, 5.0);
+        let w2 = self_heating_min_width_nm(200.0, 2000.0, 326.2, 5.0);
+        assert!((w2 - 2 * w1).abs() <= 1, "{w1} {w2}");
+    }
+
+    /// At the minimum width (rounded up) the rise is at most the budget.
+    #[test]
+    fn self_heating_rise_at_the_minimum_width_meets_the_budget() {
+        for (i, dt) in [(50.0, 5.0), (300.0, 2.0), (1000.0, 10.0)] {
+            let w = self_heating_min_width_nm(i, 2000.0, 326.2, dt);
+            let rise = self_heating_rise_k(i, 2000.0, 326.2, w);
+            assert!(rise <= dt * 1.000_01 && rise >= dt * 0.99, "I={i} dT={dt}: {rise} at {w}");
+        }
+    }
+
+    // ---- strings, series, unit length ----
+
+    #[test]
+    fn parallel_members_draw_their_finger_count_in_strings() {
+        let (g, c) = group_of(DeviceKind::Resistor, 2, 3, 1000, 10_000);
+        let s = group_sizing(&g, &c, &deck());
+        assert_eq!(strings(&g, &c, &s), [3, 3]);
+        let mut series = c.clone();
+        series.unitization[0].series_parallel = SeriesParallel::Series;
+        assert_eq!(strings(&g, &series, &s), [1, 1]);
+        let none = Constraints::default();
+        let s = group_sizing(&g, &none, &deck());
+        assert_eq!(strings(&g, &none, &s), [1, 1]);
+    }
+
+    fn series(ser: &[u16]) -> (DeviceGroup, Constraints) {
+        let (g, mut c) = group_of(DeviceKind::Resistor, ser.len(), 1, 1000, 10_000);
+        c.unitization[0].series_parallel = SeriesParallel::Series;
+        c.unitization[0].series = ser.to_vec();
+        (g, c)
+    }
+
+    #[test]
+    fn series_counts_need_a_series_group_of_two() {
+        let (g, c) = series(&[2, 5]);
+        assert_eq!(series_counts(&g, &c), Some(vec![2, 5]));
+        let (g1, c1) = series(&[3]);
+        assert_eq!(series_counts(&g1, &c1), None, "one member");
+        let mut par = c.clone();
+        par.unitization[0].series_parallel = SeriesParallel::Parallel;
+        assert_eq!(series_counts(&g, &par), None, "parallel");
+        let mut empty = c.clone();
+        empty.unitization[0].series.clear();
+        assert_eq!(series_counts(&g, &empty), None, "equal lengths");
+    }
+
+    /// Counts follow the group's member order; a missing or zero count is 1.
+    #[test]
+    fn series_counts_follow_member_order_and_floor_at_one() {
+        let (_, c) = series(&[2, 5]);
+        let rev = DeviceGroup { devices: vec![DeviceId(1), DeviceId(0)] };
+        assert_eq!(series_counts(&rev, &c), Some(vec![5, 2]));
+        let (g, c) = series(&[0, 4]);
+        assert_eq!(series_counts(&g, &c), Some(vec![1, 4]));
+        let (g, mut c) = series(&[3, 4]);
+        c.unitization[0].series = vec![3];
+        assert_eq!(series_counts(&g, &c), Some(vec![3, 1]));
+    }
+
+    #[test]
+    fn unit_len_is_exact_without_heads() {
+        let s = Sizing { unit_w: 1000, unit_l: 10_000, dev_nf: vec![1, 1] };
+        assert_eq!(unit_len(&s, &[1, 2], &deck()), Some(10_000));
+        assert_eq!(unit_len(&s, &[2, 3], &deck()), Some(10_000));
+        assert_eq!(unit_len(&s, &[], &deck()), None);
+        assert_eq!(unit_len(&s, &[1, 2], &Deck::new(1, &ROLES)), None, "no model");
+    }
+
+    /// 1000 Ω of heads per device: two units carry 2000 Ω where one 2× body
+    /// carries 1000, far past 10 ppm.
+    #[test]
+    fn unit_len_refuses_when_heads_break_the_ratio() {
+        let s = Sizing { unit_w: 1000, unit_l: 10_000, dev_nf: vec![1, 1] };
+        let d = deck().with("res_head_mohm_um", 1_000_000);
+        assert_eq!(unit_len(&s, &[1, 2], &d), None);
+        // Equal counts are exact: L_u = (41000/2 − 1000)·1/2000 µm.
+        assert_eq!(unit_len(&s, &[2, 2], &d), Some(9750));
+    }
+
+    // ---- sequences ----
+
+    #[test]
+    fn far_join_spots_a_string_split_by_another() {
+        assert!(!far_join(&[]));
+        assert!(!far_join(&[0]));
+        assert!(!far_join(&[0, 0, 1, 1]));
+        assert!(far_join(&[0, 1, 0]));
+        assert!(far_join(&[0, 1, 1, 0]));
+        assert!(far_join(&[1, 0, 0, 1, 1]));
+    }
+
+    #[test]
+    fn single_keeps_each_string_together() {
+        assert_eq!(res_segment_sequence(&[2, 1, 3], Pattern::Single), [0, 0, 1, 2, 2, 2]);
+        assert_eq!(res_segment_sequence(&[], Pattern::Single), Vec::<usize>::new());
+        // A lone string has nothing to interleave with.
+        assert_eq!(res_segment_sequence(&[3], Pattern::Interdig), [0, 0, 0]);
+        assert_eq!(res_segment_sequence(&[2, 2], Pattern::Cc1d), [0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn interdig_is_point_symmetric_and_keeps_counts() {
+        assert_eq!(res_segment_sequence(&[1, 2], Pattern::Interdig), [1, 0, 1]);
+        for counts in [[2u16, 2], [2, 4], [4, 2]] {
+            let seq = res_segment_sequence(&counts, Pattern::Interdig);
+            assert!(seq.iter().eq(seq.iter().rev()), "{counts:?}: {seq:?}");
+            for (g, &n) in counts.iter().enumerate() {
+                assert_eq!(seq.iter().filter(|&&x| x == g).count(), usize::from(n));
+            }
+        }
+    }
+
+    // ---- head geometry ----
+
+    #[test]
+    fn the_head_contact_is_the_slot_only_when_both_sides_are_stated() {
+        assert_eq!(slot(&deck()), (170, 170));
+        assert_eq!(slot(&deck().with("res_contact_w", 190)), (170, 170));
+        assert_eq!(slot(&deck().with("res_contact_w", 190).with("res_contact_h", 2000)), (190, 2000));
+    }
+
+    #[test]
+    fn head_border_and_inner_take_the_widest_rule() {
+        assert_eq!(head_border(&deck()), 80);
+        assert_eq!(head_border(&deck().with("li_encloses_licon", 90)), 90);
+        assert_eq!(head_inner(&deck(), 80), 200);
+        assert_eq!(head_inner(&deck(), 300), 300);
+        assert_eq!(head_inner(&deck().with("sb:res_block:licon", 250), 80), 250);
+    }
+
+    /// The deck's `res_head`, or one bordered cut plus its inner clearance
+    /// (80 + 170 + 200), rounded up onto the cut lattice.
+    #[test]
+    fn head_len_is_the_deck_s_or_one_cut_whichever_is_longer() {
+        assert_eq!(head_len(&deck()), 2160);
+        assert_eq!(head_len(&deck().with("res_head", 2161)), 2162);
+        assert_eq!(head_len(&deck().with("res_head", 0)), 450);
+    }
+
+    #[test]
+    fn seg_gap_is_the_widest_spacing_rounded_up() {
+        assert_eq!(seg_gap(&deck()), 500);
+        assert_eq!(seg_gap(&deck().with("res_seg_gap", 501)), 502);
+        assert_eq!(seg_gap(&deck().with("s:li", 600)), 600);
+        assert_eq!(seg_gap(&deck().with("sb:rpoly:poly", 700)), 700);
+    }
+
+    /// First track 80 + 170 + 290 + 140 = 680, then every 430, while a pad
+    /// and the border fit under the head's 2160.
+    #[test]
+    fn jumper_tracks_fit_inside_the_head() {
+        assert_eq!(jumper_tracks(&deck(), 2160), [680, 1110, 1540]);
+        assert!(jumper_tracks(&deck(), 600).is_empty());
+    }
+
+    #[test]
+    fn head_for_grows_until_the_tracks_fit() {
+        assert_eq!(head_for(&deck(), 0), 2160);
+        assert_eq!(head_for(&deck(), 3), 2160);
+        // A fourth track at 1970 needs 1970 + 170 + 60 + 80.
+        assert_eq!(head_for(&deck(), 4), 2280);
+    }
+
+    /// A deck with no metal rules still yields finitely many tracks.
+    #[test]
+    fn jumper_tracks_terminate_on_a_rule_free_deck() {
+        let d = Deck::new(1, &ROLES);
+        let t = jumper_tracks(&d, 1000);
+        assert!(!t.is_empty() && t.len() <= 1000, "{}", t.len());
+        assert!(t.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    // ---- segment choice ----
+
+    /// L/n on a 2 nm lattice at ≥ 2000 nm: 1, 2 and 4 are exact; 6 is short.
+    #[test]
+    fn feasible_segments_keep_the_value_and_the_minimum() {
+        assert_eq!(feasible_segments(1000, 10_000, &deck()), [1, 2, 4]);
+        assert_eq!(feasible_segments(1000, 10_000, &Deck::new(1, &ROLES)), [1], "no model");
+        // Under the minimum segment even unsplit: 1 is still offered.
+        assert_eq!(feasible_segments(1000, 1000, &deck()), [1]);
+    }
+
+    #[test]
+    fn feasible_segments_are_at_most_eight_sorted_one_or_even() {
+        let v = feasible_segments(1000, 1_000_000, &deck());
+        assert!(!v.is_empty() && v.len() <= 8, "{v:?}");
+        assert!(v.windows(2).all(|w| w[0] < w[1]), "{v:?}");
+        assert!(v.iter().all(|&n| n == 1 || n % 2 == 0), "{v:?}");
+    }
+
+    #[test]
+    fn the_sizing_defaults_to_the_minimum_body() {
+        let s = group_sizing(&DeviceGroup { devices: vec![DeviceId(0)] }, &Constraints::default(), &deck());
+        assert_eq!((s.unit_w, s.unit_l), (350, 2000));
+    }
+
+    // ---- enumerate / draw ----
+
+    #[test]
+    fn no_group_or_no_marker_has_no_variants() {
+        let g = DeviceGroup { devices: vec![] };
+        assert!(Resistor::enumerate(&g, &Constraints::default(), &deck()).is_empty());
+        let (g, c) = group_of(DeviceKind::Resistor, 1, 1, 1000, 10_000);
+        let no_rpoly = Deck { roles: vec![("poly", 0), ("li", 2), ("licon", 3)], ..deck() };
+        assert!(Resistor::enumerate(&g, &c, &no_rpoly).is_empty());
+    }
+
+    #[test]
+    fn a_lone_member_offers_every_feasible_count_unpatterned() {
+        let (g, c) = group_of(DeviceKind::Resistor, 1, 1, 1000, 10_000);
+        let v: Vec<(u16, Pattern)> = Resistor::enumerate(&g, &c, &deck()).iter().map(|r| (r.segments, r.pattern)).collect();
+        assert_eq!(v, [(1, Pattern::Single), (2, Pattern::Single), (4, Pattern::Single)]);
+    }
+
+    #[test]
+    fn unequal_members_get_blocks_and_an_array_only_when_exact() {
+        let (g, c) = series(&[1, 2]);
+        let p: Vec<Pattern> = Resistor::enumerate(&g, &c, &deck()).iter().map(|r| r.pattern).collect();
+        assert_eq!(p, [Pattern::Single, Pattern::Interdig]);
+        let d = deck().with("res_head_mohm_um", 1_000_000);
+        let p: Vec<Pattern> = Resistor::enumerate(&g, &c, &d).iter().map(|r| r.pattern).collect();
+        assert_eq!(p, [Pattern::Single]);
+    }
+
+    /// Two 5 µm segments of a 10 µm body: P → Internal(1) → N, joined by li
+    /// (adjacent), current up then down, one keep-out per body.
+    #[test]
+    fn a_two_segment_string_chains_its_cards() {
+        let d = deck();
+        let (g, c) = group_of(DeviceKind::Resistor, 1, 1, 1000, 10_000);
+        let m = Resistor { segments: 2, pattern: Pattern::Single }.draw(&g, &c, &d);
+        let cards: Vec<([Node; 3], i32, i32)> = m.drawn.iter().map(|x| (x.nodes, x.w, x.l)).collect();
+        assert_eq!(
+            cards,
+            [([Node::Pin("P"), Node::Internal(1), Node::Unused], 1000, 5000), ([Node::Internal(1), Node::Pin("N"), Node::Unused], 1000, 5000)]
+        );
+        let total: f64 = m.drawn.iter().map(|x| model(2_000_000).ohm(x.w, x.l)).sum();
+        assert!(close(total, 20_000.0));
+        for t in ["d0:P", "d0:N"] {
+            assert_eq!(m.pins.iter().filter(|p| p.name == t).count(), 1, "{t}");
+        }
+        assert_eq!(m.units.iter().map(|u| i32::from(u.phi.1)).collect::<Vec<_>>(), [1, -1]);
+        assert_eq!(m.keepouts.len(), 2);
+        let mcon = d.layer("mcon").unwrap();
+        assert!(m.shapes.iter().all(|s| s.layer != mcon), "adjacent joins are li");
+    }
+
+    #[test]
+    fn zero_segments_draw_as_one() {
+        let (g, c) = group_of(DeviceKind::Resistor, 1, 1, 1000, 10_000);
+        let m = Resistor { segments: 0, pattern: Pattern::Single }.draw(&g, &c, &deck());
+        assert_eq!(m.drawn.len(), 1);
+        assert_eq!(m.drawn[0].nodes, [Node::Pin("P"), Node::Pin("N"), Node::Unused]);
+    }
+
+    /// Two members: one plain-poly dummy per end, at the segment pitch,
+    /// each tied to a `GND` pin.
+    #[test]
+    fn a_matched_pair_gets_end_dummies_at_the_pitch() {
+        let d = deck();
+        let (g, c) = group_of(DeviceKind::Resistor, 2, 1, 1000, 10_000);
+        let m = Resistor { segments: 1, pattern: Pattern::Single }.draw(&g, &c, &d);
+        let poly = d.layer("poly").unwrap();
+        let mut xs: Vec<i32> = m.shapes.iter().filter(|s| s.layer == poly).map(|s| s.rect.x).collect();
+        xs.sort_unstable();
+        assert_eq!(xs, [-1500, 0, 1500, 3000]);
+        assert_eq!(m.pins.iter().filter(|p| p.name == "GND").count(), 2);
+        let rpoly = d.layer("rpoly").unwrap();
+        assert_eq!(m.shapes.iter().filter(|s| s.layer == rpoly).count(), 2, "dummies are unmarked");
+    }
+
+    #[test]
+    fn drawing_is_deterministic() {
+        let d = deck();
+        let (g, c) = series(&[1, 2]);
+        for v in Resistor::enumerate(&g, &c, &d) {
+            assert_eq!(v.draw(&g, &c, &d), v.draw(&g, &c, &d));
+        }
+    }
+
+    /// A deck that states only the layers neither hangs nor divides by
+    /// zero: every variant of a matched pair draws.
+    #[test]
+    fn a_rule_free_deck_enumerates_and_draws() {
+        let d = Deck::new(1, &ROLES);
+        let (g, c) = group_of(DeviceKind::Resistor, 2, 1, 0, 0);
+        let vs = Resistor::enumerate(&g, &c, &d);
+        assert!(!vs.is_empty());
+        for v in vs {
+            assert_eq!(v.draw(&g, &c, &d).drawn.len(), 2);
+        }
+    }
+}
