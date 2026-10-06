@@ -1,0 +1,393 @@
+{
+ "units": [
+  {
+   "id": "core",
+   "files": [
+    "kernel/core/src/geom.rs",
+    "kernel/core/src/hypergraph.rs",
+    "kernel/core/src/ids.rs",
+    "kernel/core/src/lanes.rs",
+    "kernel/core/src/layout.rs",
+    "kernel/core/src/lib.rs",
+    "kernel/core/src/macro.rs",
+    "kernel/core/src/netlist.rs",
+    "kernel/core/src/process.rs",
+    "kernel/core/src/report.rs",
+    "kernel/core/src/routes.rs",
+    "kernel/core/src/thermal.rs",
+    "kernel/core/src/unionfind.rs",
+    "kernel/core/src/units.rs"
+   ],
+   "lines": 2058
+  },
+  {
+   "id": "analog-placement",
+   "files": [
+    "kernel/analog/src/placement/dti.rs",
+    "kernel/analog/src/placement/environment.rs",
+    "kernel/analog/src/placement/heat.rs",
+    "kernel/analog/src/placement/island.rs",
+    "kernel/analog/src/placement/isolation.rs",
+    "kernel/analog/src/placement/matched_set.rs",
+    "kernel/analog/src/placement/mod.rs",
+    "kernel/analog/src/placement/orientation.rs",
+    "kernel/analog/src/placement/perf.rs",
+    "kernel/analog/src/placement/proximity.rs",
+    "kernel/analog/src/placement/symmetry.rs",
+    "kernel/analog/src/placement/utilization.rs"
+   ],
+   "lines": 2841
+  },
+  {
+   "id": "analog-matching",
+   "files": [
+    "kernel/analog/src/cell.rs",
+    "kernel/analog/src/constraints.rs",
+    "kernel/analog/src/intent.rs",
+    "kernel/analog/src/lib.rs",
+    "kernel/analog/src/matching/class.rs",
+    "kernel/analog/src/matching/dac.rs",
+    "kernel/analog/src/matching/mismatch.rs",
+    "kernel/analog/src/matching/mod.rs",
+    "kernel/analog/src/matching/moments.rs",
+    "kernel/analog/src/matching/pattern.rs",
+    "kernel/analog/src/matching/sizing.rs",
+    "kernel/analog/src/metadata.rs",
+    "kernel/analog/src/requirements.rs",
+    "kernel/analog/src/rule.rs"
+   ],
+   "lines": 3407
+  },
+  {
+   "id": "analog-routing",
+   "files": [
+    "kernel/analog/src/routing/antenna.rs",
+    "kernel/analog/src/routing/common_node.rs",
+    "kernel/analog/src/routing/coupling.rs",
+    "kernel/analog/src/routing/crosstalk.rs",
+    "kernel/analog/src/routing/current.rs",
+    "kernel/analog/src/routing/differential.rs",
+    "kernel/analog/src/routing/em.rs",
+    "kernel/analog/src/routing/ir.rs",
+    "kernel/analog/src/routing/metal_over_gate.rs",
+    "kernel/analog/src/routing/mod.rs",
+    "kernel/analog/src/routing/parasitic.rs",
+    "kernel/analog/src/routing/performance.rs",
+    "kernel/analog/src/routing/plate_ratio.rs",
+    "kernel/analog/src/routing/shield.rs",
+    "kernel/analog/src/routing/stack.rs"
+   ],
+   "lines": 3598
+  },
+  {
+   "id": "cells-mosfet",
+   "files": [
+    "kernel/cells/src/builder.rs",
+    "kernel/cells/src/finfet.rs",
+    "kernel/cells/src/mosfet.rs"
+   ],
+   "lines": 2948
+  },
+  {
+   "id": "cells-caps",
+   "files": [
+    "kernel/cells/src/cap_array.rs",
+    "kernel/cells/src/capacitor.rs",
+    "kernel/cells/src/post_cell.rs"
+   ],
+   "lines": 2766
+  },
+  {
+   "id": "cells-misc",
+   "files": [
+    "kernel/cells/src/bjt.rs",
+    "kernel/cells/src/diode.rs",
+    "kernel/cells/src/inductor.rs",
+    "kernel/cells/src/lib.rs",
+    "kernel/cells/src/resistor.rs"
+   ],
+   "lines": 1660
+  },
+  {
+   "id": "macromaster-visualizer",
+   "files": [
+    "kernel/macroMaster/src/adapter.rs",
+    "kernel/macroMaster/src/lib.rs",
+    "kernel/macroMaster/src/tests.rs",
+    "kernel/visualizer/src/lib.rs",
+    "kernel/visualizer/src/main.rs"
+   ],
+   "lines": 2393
+  },
+  {
+   "id": "gp",
+   "files": [
+    "backend/gp/src/lib.rs",
+    "backend/gp/src/mechanics.rs",
+    "backend/gp/src/spacing.rs"
+   ],
+   "lines": 1958
+  },
+  {
+   "id": "dp-search",
+   "files": [
+    "backend/dp/src/anneal.rs",
+    "backend/dp/src/sp.rs"
+   ],
+   "lines": 1898
+  },
+  {
+   "id": "dp-core",
+   "files": [
+    "backend/dp/src/eval.rs",
+    "backend/dp/src/legalize.rs",
+    "backend/dp/src/lib.rs",
+    "backend/dp/src/locks.rs",
+    "backend/dp/src/tests.rs"
+   ],
+   "lines": 2010
+  },
+  {
+   "id": "gr",
+   "files": [
+    "backend/gr/src/lib.rs"
+   ],
+   "lines": 2142
+  },
+  {
+   "id": "dr",
+   "files": [
+    "backend/dr/src/lib.rs"
+   ],
+   "lines": 5421
+  },
+  {
+   "id": "annotator-catalog",
+   "files": [
+    "backend/annotator/src/catalog.rs"
+   ],
+   "lines": 2719
+  },
+  {
+   "id": "annotator-core",
+   "files": [
+    "backend/annotator/src/classify.rs",
+    "backend/annotator/src/emit.rs",
+    "backend/annotator/src/lib.rs",
+    "backend/annotator/src/pattern.rs"
+   ],
+   "lines": 2435
+  },
+  {
+   "id": "annotator-sets",
+   "files": [
+    "backend/annotator/src/extract.rs",
+    "backend/annotator/src/passive.rs",
+    "backend/annotator/src/sets.rs",
+    "backend/annotator/src/sidecar.rs",
+    "backend/annotator/src/symmetry.rs"
+   ],
+   "lines": 2002
+  },
+  {
+   "id": "annotator-graph",
+   "files": [
+    "backend/annotator/src/allocate.rs",
+    "backend/annotator/src/audit.rs",
+    "backend/annotator/src/evidence.rs",
+    "backend/annotator/src/flow.rs",
+    "backend/annotator/src/graph.rs",
+    "backend/annotator/src/hier.rs",
+    "backend/annotator/src/netrole.rs",
+    "backend/annotator/src/substrate.rs"
+   ],
+   "lines": 1993
+  },
+  {
+   "id": "annotator-misc",
+   "files": [
+    "backend/annotator/src/block.rs",
+    "backend/annotator/src/budget.rs",
+    "backend/annotator/src/class.rs",
+    "backend/annotator/src/conflict.rs",
+    "backend/annotator/src/constraints.rs",
+    "backend/annotator/src/ir.rs",
+    "backend/annotator/src/policy.rs",
+    "backend/annotator/src/rings.rs",
+    "backend/annotator/src/size.rs",
+    "backend/annotator/src/terms.rs",
+    "backend/annotator/src/tests.rs"
+   ],
+   "lines": 2281
+  },
+  {
+   "id": "verify-pdk",
+   "files": [
+    "backend/verify/src/pdk.rs"
+   ],
+   "lines": 2025
+  },
+  {
+   "id": "verify-core",
+   "files": [
+    "backend/verify/src/checker.rs",
+    "backend/verify/src/decks.rs",
+    "backend/verify/src/geom.rs",
+    "backend/verify/src/lib.rs",
+    "backend/verify/src/netlist.rs",
+    "backend/verify/src/reference.rs",
+    "backend/verify/src/sidecar.rs"
+   ],
+   "lines": 2188
+  },
+  {
+   "id": "library-flow",
+   "files": [
+    "frontend/library/src/lib.rs"
+   ],
+   "lines": 4382
+  },
+  {
+   "id": "library-cellgen",
+   "files": [
+    "frontend/library/src/cellgen.rs"
+   ],
+   "lines": 2337
+  },
+  {
+   "id": "library-perf",
+   "files": [
+    "frontend/library/src/oppoint.rs",
+    "frontend/library/src/perf.rs",
+    "frontend/library/src/reliability.rs",
+    "frontend/library/src/robust.rs"
+   ],
+   "lines": 2786
+  },
+  {
+   "id": "library-input",
+   "files": [
+    "frontend/library/src/elaborate.rs",
+    "frontend/library/src/hier.rs",
+    "frontend/library/src/parse.rs"
+   ],
+   "lines": 2172
+  },
+  {
+   "id": "library-output",
+   "files": [
+    "frontend/library/src/emit.rs",
+    "frontend/library/src/fill.rs",
+    "frontend/library/src/gds.rs",
+    "frontend/library/src/geometry.rs",
+    "frontend/library/src/metadata.rs"
+   ],
+   "lines": 2392
+  },
+  {
+   "id": "cli-bench",
+   "files": [
+    "benchmarks/src/bench.rs",
+    "benchmarks/src/fixtures.rs",
+    "benchmarks/src/gds2svg.rs",
+    "examples/op_demo/src/main.rs",
+    "examples/three_stage_opamp/src/main.rs",
+    "frontend/cli/src/main.rs"
+   ],
+   "lines": 2127
+  }
+ ],
+ "seams": [
+  {
+   "id": "core-types",
+   "focus": "pnr_core types every crate shares (Layout, Macro, Netlist, geom, ids, units, routes, report)",
+   "crates": [
+    "kernel/core",
+    "everything that imports pnr_core"
+   ]
+  },
+  {
+   "id": "analog-annotator",
+   "focus": "constraint/intent types in kernel/analog that backend/annotator produces",
+   "crates": [
+    "kernel/analog",
+    "backend/annotator"
+   ]
+  },
+  {
+   "id": "annotator-library",
+   "focus": "annotator output (Problem, blocks, intent, diagnostics) consumed by frontend/library",
+   "crates": [
+    "backend/annotator",
+    "frontend/library"
+   ]
+  },
+  {
+   "id": "cells-cellgen",
+   "focus": "device generators (kernel/cells) called from frontend/library/src/cellgen.rs",
+   "crates": [
+    "kernel/cells",
+    "frontend/library"
+   ]
+  },
+  {
+   "id": "placement",
+   "focus": "gp and dp entry points (GpInput, PlaceInput, Schedule, Start, Prices, locks) and their callers in frontend/library",
+   "crates": [
+    "backend/gp",
+    "backend/dp",
+    "frontend/library"
+   ]
+  },
+  {
+   "id": "routing",
+   "focus": "gr and dr entry points (Negotiation, router config, lattice spec, route stats) and their callers in frontend/library",
+   "crates": [
+    "backend/gr",
+    "backend/dr",
+    "frontend/library"
+   ]
+  },
+  {
+   "id": "analog-consumers",
+   "focus": "kernel/analog constraint evaluators (placement/routing rule checks, budgets) as consumed by dp, dr and frontend/library",
+   "crates": [
+    "kernel/analog",
+    "backend/dp",
+    "backend/dr",
+    "frontend/library"
+   ]
+  },
+  {
+   "id": "verify-signoff",
+   "focus": "verify signoff API (signoff_checked/extract, ExtractOptions, Pdk, Signoff, RefInput) and its callers",
+   "crates": [
+    "backend/verify",
+    "frontend/library",
+    "benchmarks",
+    "frontend/cli"
+   ]
+  },
+  {
+   "id": "library-public",
+   "focus": "frontend/library public API (run, Config, Solution, signoff, emit, parse) as used by cli, benchmarks, examples, tests",
+   "crates": [
+    "frontend/library",
+    "frontend/cli",
+    "benchmarks",
+    "examples"
+   ]
+  },
+  {
+   "id": "geometry-out",
+   "focus": "macroMaster, visualizer and GDS/emit output path (frontend/library gds.rs, emit.rs, geometry.rs)",
+   "crates": [
+    "kernel/macroMaster",
+    "kernel/visualizer",
+    "frontend/library"
+   ]
+  }
+ ],
+ "skipUnits": [],
+ "skipSeams": []
+}
