@@ -686,3 +686,42 @@ fn dp_pushes_a_matched_pair_away_from_a_hot_cell() {
         }
     }
 }
+
+// ---- performance rows (PLC-16) ----
+
+/// 10 µm square cell: a pin on `own` at the left face, one on the shared net 2
+/// at the right face.
+fn perf_cell(own: u16) -> Macro {
+    let pin = |net: u16, x: i32| pnr_core::Pin {
+        name: format!("P{net}"),
+        net: pnr_core::NetId(net),
+        at: Rect { x, y: 4_950, w: 100, h: 100 },
+        layer: pnr_core::LayerId(0),
+    };
+    Macro { pins: vec![pin(own, 0), pin(2, 9_900)], bbox: Rect { x: 0, y: 0, w: 10_000, h: 10_000 }, ..Default::default() }
+}
+
+/// T5 (unit): net 0 (cells 0, 1) and net 1 (cells 2, 3) compete with the
+/// shared net 2 for adjacency. A row on net 0 alone, priced with
+/// residual > 0 at the no-row MST (w·mst·1e-3 / 0.8 > 1 for mst > 800 nm),
+/// must shorten net 0's mean MST over seeds 1..=10. Fresh `Prices` (λ0) each
+/// run: `place` does not settle prices (`place_does_not_settle`).
+#[test]
+fn a_row_shortens_its_sensitive_net() {
+    use analog::placement::PlacePerf;
+    use analog::routing::PerformanceBudget;
+    let macros: Vec<Macro> = [0, 0, 1, 1].into_iter().map(perf_cell).collect();
+    let variants: Vec<VariantSpace> = macros.iter().map(|m| VariantSpace { alternatives: vec![m.clone()] }).collect();
+    let alts: Vec<&[Macro]> = variants.iter().map(|v| &v.alternatives[..]).collect();
+    let row = PerformanceBudget::ground_c("t".into(), vec![pnr_core::NetId(0)], vec![1.0], 1e-3);
+    let perf = PlacePerf::new(&row, &alts, analog::placement::perf::RESERVE);
+    assert_eq!(perf.items.len(), 1, "net 0 joins two cells");
+    let coarse = layout(&[(0, 0, 5_000, 5_000), (40_000, 30_000, 5_000, 5_000), (40_000, 0, 5_000, 5_000), (0, 30_000, 5_000, 5_000)]);
+    let with = Requirements { budget: vec![Box::new(perf.clone())], ..Default::default() };
+    let mean = |reqs: &Requirements<Layout>| {
+        (1..=10u64).map(|s| perf.mst_len(0, &run(&coarse, &macros, &variants, reqs, &[false; 4], s)) as f64).sum::<f64>() / 10.0
+    };
+    let (without, with) = (mean(&Requirements::default()), mean(&with));
+    assert!(without > 800.0, "the row must bind at the no-row MST: {without}");
+    assert!(with < without, "mean MST with the row {with} !< without {without}");
+}

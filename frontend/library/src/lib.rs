@@ -126,6 +126,9 @@ pub struct Config {
     pub constraints: Option<String>,
     /// ESD pad nets (REL-17); `None` = no ESD width floor.
     pub esd: Option<EsdSpec>,
+    /// PLC-16: price each performance row's MST ground-C estimate on
+    /// placement ([`analog::placement::PlacePerf`]); the T5 A/B switch.
+    pub place_perf: bool,
 }
 
 /// A die edge.
@@ -224,6 +227,7 @@ impl Default for Config {
             top: None,
             constraints: None,
             esd: None,
+            place_perf: true,
         }
     }
 }
@@ -790,6 +794,13 @@ fn topology<'a>(
     for island in symmetry_islands(&problem.placement, &rules) {
         problem.placement.budget.push(Box::new(island.clone()));
         problem.placement.cost.push(Box::new(island));
+    }
+    // PLC-16: each performance row's ground C, estimated on placement.
+    if cfg.place_perf && !perf_rows.is_empty() {
+        let alts: Vec<&[Macro]> = cells.variants.iter().map(|v| &v.alternatives[..]).collect();
+        for row in perf_rows {
+            problem.placement.budget.push(Box::new(analog::placement::PlacePerf::new(row, &alts, analog::placement::perf::RESERVE)));
+        }
     }
     let distinct = cells.distinct_gate_merges > 0;
 
