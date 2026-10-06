@@ -607,22 +607,33 @@ pub fn realize(variants: &[gp::VariantSpace], assignment: &[u16]) -> Vec<Macro> 
 #[must_use]
 pub fn escalate(variants: &[gp::VariantSpace], allowed: &[Vec<u16>], current: &[u16]) -> Option<Vec<u16>> {
     let spread: Vec<usize> = variants.iter().map(pin_spread).collect();
-    let mut order: Vec<usize> = (0..variants.len()).collect();
+    let mut next: Vec<u16> = (0..variants.len()).map(|i| current.get(i).copied().unwrap_or(0)).collect();
+    odometer_step(&odometer_order(&spread), allowed, &mut next).then_some(next)
+}
+
+/// Cells in odometer digit order, fastest first: widest pin spread, ties by
+/// lower index. `spread[i]` is cell `i`'s [`pin_spread`].
+fn odometer_order(spread: &[usize]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..spread.len()).collect();
     order.sort_by_key(|&i| (std::cmp::Reverse(spread[i]), i));
-    let mut next: Vec<u16> = (0..variants.len())
-        .map(|i| current.get(i).copied().unwrap_or(0))
-        .collect();
-    for &i in &order {
+    order
+}
+
+/// Advances `digits` one step of the mixed-radix odometer over `allowed`,
+/// digits taken in `order`; `false` when every digit wrapped (the space is
+/// exhausted). A missing or empty `allowed` row is a fixed digit.
+fn odometer_step(order: &[usize], allowed: &[Vec<u16>], digits: &mut [u16]) -> bool {
+    for &i in order {
         let row = allowed.get(i).map_or(&[][..], Vec::as_slice);
-        if let Some(&v) = row.iter().find(|&&v| v > next[i]) {
-            next[i] = v;
-            return Some(next);
+        if let Some(&v) = row.iter().find(|&&v| v > digits[i]) {
+            digits[i] = v;
+            return true;
         }
         if let Some(&v) = row.first() {
-            next[i] = v; // carry
+            digits[i] = v; // carry
         }
     }
-    None
+    false
 }
 
 /// Next assignment on an infeasible stall: the most-blamed cell with an
@@ -637,8 +648,10 @@ pub fn escalate_blamed(variants: &[gp::VariantSpace], allowed: &[Vec<u16>], curr
     let n = variants.len();
     let cur: Vec<u16> = (0..n).map(|i| current.get(i).copied().unwrap_or(0)).collect();
     let fresh = |a: &Vec<u16>| *a != cur && !tried.contains(a);
+    // Pin spread once per call: the odometer walk below steps many times.
+    let spread: Vec<usize> = variants.iter().map(pin_spread).collect();
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by_key(|&i| (Reverse(blame.get(i).copied().unwrap_or(0)), Reverse(pin_spread(&variants[i])), i));
+    order.sort_by_key(|&i| (Reverse(blame.get(i).copied().unwrap_or(0)), Reverse(spread[i]), i));
     for &i in &order {
         for &a in allowed.get(i).map_or(&[][..], Vec::as_slice).iter().filter(|&&a| a > cur[i]) {
             let mut next = cur.clone();
@@ -650,12 +663,15 @@ pub fn escalate_blamed(variants: &[gp::VariantSpace], allowed: &[Vec<u16>], curr
     }
     // ponytail: a linear odometer walk per call, O(space); the space is the
     // pruned product of `allowed`, small after GAP-16.
+    let odometer = odometer_order(&spread);
     let mut a: Vec<u16> = (0..n).map(|i| allowed.get(i).and_then(|r| r.first()).copied().unwrap_or(cur[i])).collect();
     loop {
         if fresh(&a) {
             return Some(a);
         }
-        a = escalate(variants, allowed, &a)?;
+        if !odometer_step(&odometer, allowed, &mut a) {
+            return None;
+        }
     }
 }
 
@@ -867,7 +883,8 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
             None => vec![i],
         };
         let fingers: Vec<u32> = class.iter().map(|&j| netlist.devices[j].mos_size().map_or(1, |s| s.fingers())).collect();
-        let row: u32 = fingers.iter().sum();
+        // Saturating: a row past `u16::MAX` fingers cannot fold anyway.
+        let row: u32 = fingers.iter().fold(0u32, |a, &f| a.saturating_add(f));
         let parallel = class.iter().all(|&j| netlist.devices[j].terminals == d.terminals);
         // A series stack needs odd fingers per member (each starts on D and
         // ends on S); any other multi-device class wants even (ABBA).
@@ -892,21 +909,28 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
             .max()
             .unwrap_or(1)
             .max(1);
-        let snap = |v: i32| (v + grid / 2) / grid * grid;
+        // In i64: rounding a finger near `i32::MAX` up must not wrap; past it,
+        // round down instead.
+        let snap = |v: i32| {
+            let (v, g) = (i64::from(v), i64::from(grid));
+            i32::try_from((v + g / 2) / g * g).unwrap_or_else(|_| (v / g * g) as i32)
+        };
         // (wrong member finger parity, |log aspect|) — lexicographic.
         let score = |k: u32| {
             let fw = snap(w / k as i32);
+            // `f·k` is odd iff both are: no product, no overflow.
+            let odd = |f: u32| f & k & 1 == 1;
             let bad_parity = if stack {
-                fingers.iter().any(|&f| (f * k) % 2 == 0)
+                fingers.iter().any(|&f| !odd(f))
             } else {
-                !parallel && class.len() > 1 && fingers.iter().any(|&f| (f * k) % 2 == 1)
+                !parallel && class.len() > 1 && fingers.iter().any(|&f| odd(f))
             };
-            let aspect = (f64::from(row * k) * f64::from(pitch) / f64::from(fw)).ln().abs();
+            let aspect = (f64::from(row) * f64::from(k) * f64::from(pitch) / f64::from(fw)).ln().abs();
             (bad_parity, aspect)
         };
-        let mut ks: Vec<u32> = (1u32..=64).filter(|&k| k == 1 || (snap(w / k as i32) >= w_min && row * k <= u32::from(u16::MAX))).collect();
+        let mut ks: Vec<u32> = (1u32..=64).filter(|&k| k == 1 || (snap(w / k as i32) >= w_min && row.saturating_mul(k) <= u32::from(u16::MAX))).collect();
         if class.len() > 1 && !stack && !parallel {
-            let cc = |k: &u32| cells::mosfet::cc_row_exists(&fingers.iter().map(|&f| (f * k).min(u32::from(u16::MAX)) as u16).collect::<Vec<_>>(), route);
+            let cc = |k: &u32| cells::mosfet::cc_row_exists(&fingers.iter().map(|&f| f.saturating_mul(*k).min(u32::from(u16::MAX)) as u16).collect::<Vec<_>>(), route);
             if ks.iter().any(cc) {
                 ks.retain(cc);
             }
@@ -968,7 +992,7 @@ fn member_aspect(m: &Macro) -> f64 {
         let us = m.units.iter().filter(|u| u.owner == o);
         let (x0, x1) = us.clone().fold((i32::MAX, i32::MIN), |(a, b), u| (a.min(u.x), b.max(u.x)));
         let (y0, y1) = us.fold((i32::MAX, i32::MIN), |(a, b), u| (a.min(u.y), b.max(u.y)));
-        let (w, h) = ((x1 - x0) as f64 + px, (y1 - y0) as f64 + py);
+        let (w, h) = (f64::from(x1) - f64::from(x0) + px, f64::from(y1) - f64::from(y0) + py);
         if w > 0.0 && h > 0.0 {
             worst = worst.max(w.max(h) / w.min(h));
         }
@@ -979,11 +1003,17 @@ fn member_aspect(m: &Macro) -> f64 {
 /// Keep the variants within `limit` (GAP-11) and return `true`; when none is, keep only the squarest (first
 /// on ties) and return `false` (the caller reports it).
 fn keep_compact(alts: &mut Vec<Macro>, limit: f64) -> bool {
-    if alts.iter().any(|m| member_aspect(m) <= limit) {
-        alts.retain(|m| member_aspect(m) <= limit);
+    // One aspect per alternative: `member_aspect` allocates per call.
+    let aspect: Vec<f64> = alts.iter().map(member_aspect).collect();
+    if aspect.iter().any(|&a| a <= limit) {
+        let mut i = 0;
+        alts.retain(|_| {
+            i += 1;
+            aspect[i - 1] <= limit
+        });
         return true;
     }
-    let best = (0..alts.len()).min_by(|&a, &b| member_aspect(&alts[a]).total_cmp(&member_aspect(&alts[b])));
+    let best = (0..alts.len()).min_by(|&a, &b| aspect[a].total_cmp(&aspect[b]));
     if let Some(i) = best {
         alts.swap(0, i);
         alts.truncate(1);
@@ -2494,6 +2524,9 @@ mod unit_tests {
         assert_eq!(member_aspect(&one), 1.0, "one unit fills its pitch");
         let column = Macro { bbox: Rect { x: 0, y: 0, w: 1000, h: 2000 }, units: vec![unit(0, 500, 500), unit(0, 500, 1500)], ..Default::default() };
         assert_eq!(member_aspect(&column), 2.0, "a vertical stack is long too");
+        let wide = Macro { bbox: Rect { x: 0, y: 0, w: i32::MAX, h: 1000 }, units: vec![unit(0, -2_000_000_000, 0), unit(0, 2_000_000_000, 0)], ..Default::default() };
+        let r = member_aspect(&wide);
+        assert!(r.is_finite() && r > 1.0, "a span past i32 must not wrap: {r}");
     }
 
     #[test]

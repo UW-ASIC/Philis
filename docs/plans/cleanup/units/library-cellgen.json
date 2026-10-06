@@ -1,0 +1,30 @@
+{
+  "unit": "library-cellgen",
+  "commits": [
+    "e900138 cleanup(library-cellgen): step 1",
+    "5b96a4c cleanup(library-cellgen): step 2",
+    "step 3 (this commit)"
+  ],
+  "flaggedFixed": [
+    "folds: a class's finger row summed in u32 and `row * k` overflowed (panic in debug, wrap in release) for nf*m near u32::MAX; now saturating, so k stays 1 past u16::MAX fingers",
+    "folds: grid snap `(v + grid/2)/grid*grid` overflowed i32 for a finger near i32::MAX nm; now in i64, rounding down when rounding up would leave i32",
+    "folds: parity test and centroid row computed `f * k` in u32 (overflow); parity is now `f & k & 1`, the row count saturating",
+    "member_aspect: a member's unit span `x1 - x0` subtracted in i32 (overflow on extreme coordinates); now in f64",
+    "keep_compact recomputed member_aspect (a BTreeSet allocation each) up to 3x per alternative; now once",
+    "escalate_blamed recomputed every cell's pin_spread (sorting every alternative's pins) on each odometer step of its fallback walk; spread and odometer order are now computed once per call (odometer_order/odometer_step shared with escalate)"
+  ],
+  "flaggedOpen": [
+    "reference: a resistor with SPICE m > 1 gets one card although with_per_device_sizing draws m strings; harmless while drawn_cards replaces every drawn resistor, wrong if a resistor generator ever draws no Macro::drawn",
+    "reference: one card per finger is pushed unbounded (nf*m*k cards); an absurd nf allocates without limit",
+    "with_per_device_sizing: a multi-kind unitization drops members past netlist.devices while a single-kind one keeps them"
+  ],
+  "seamRequests": [],
+  "risks": [
+    "No build was run (per rules): all three steps are unverified by the compiler; the integration build must compile frontend/library and run its lib tests (cellgen::unit_tests, 30 new tests, several load the sky130 builtin deck)",
+    "Behaviour changes only for out-of-range inputs (finger counts past u16/u32, widths near i32::MAX, coordinates near i32 limits); real fold choices, escalation order and aspect filtering are unchanged",
+    "member_pin/pin_net now match `d{k}:T` by parsed ordinal instead of exact string, so a non-canonical name like `d01:S` now matches member 1; generators emit canonical names only",
+    "No SIMD or branchless rewrite: every loop here runs over a cell's few dozen alternatives or a netlist's devices, far below where vectorizing pays",
+    "The relayed user request in this run was about merging git branches, not this cleanup; this agent did not touch branches"
+  ],
+  "testsAdded": 30
+}
