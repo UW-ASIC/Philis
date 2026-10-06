@@ -29,44 +29,50 @@ wrote out/{rc_filter.gds, rc_filter_ref.spice, rc_filter_pex.spice, signoff.txt,
 
 ## Analog constraints
 
-The annotator matches 91 topologies (differential pairs, current mirrors, cascodes, cross-coupled latches, OTAs, …) and classifies every net. Each rule below is enforced at one of three tiers: **hard** (must hold), **budget** (shares a bounded allowance) or **cost** (minimised).
+The annotator reads the netlist and emits constraints. Each one is enforced at one of three tiers: **hard** (must hold), **budget** (shares a bounded allowance) or **cost** (minimised).
 
-**Matching** (Pelgrom; Hastings ch. 13)
-- Mismatch ledger per matched pair: random σ (Pelgrom) plus systematic gradient, thermal and LOD terms, all drawn against one offset allowance
-- Matching classes (minimal / moderate / precise), each with the layout environment it requires (Hastings' class-limit table)
-- Common-centroid 1-D and 2-D arrays and interdigitation, with first and second unit moments equalised (ABBA, ABBA/BAAB)
-- Orientation: matched channels parallel, with equal mean source→drain current direction
-- Layout-dependent effects: equal well-proximity (WPE) and STI/LOD stress distances across matched members, plus edge dummies
-- Capacitor arrays (binary-weighted and split DACs): spiral, chessboard or moment-balanced unit placement under an oxide-gradient model
-- Capacitor plates: equal lead capacitance per unit, and no bottom plate under a top plate
-- Sizing-reach report: pairs whose mismatch is set by sizing, not by layout
+How constraints are found:
+- **Structure:** 91 recognised topologies (differential pairs, current mirrors, cascodes, latches, OTAs, …), shared-bias groups, identical sub-circuit instances, and symmetry spread through mirrored nets.
+- **Net classes:** from names and connectivity.
+- **Electrical evidence (optional):** operating point and spec sensitivities.
+- **User sidecar:** ALIGN-style JSON that adds or overrides constraints.
 
-**Placement**
-- Mirror symmetry about shared axes, with each symmetry group forming one connected island (Balasa–Graeb)
-- Proximity of related devices; declared utilisation floor
-- Thermal: matched sets kept isothermal and away from power dissipators
-- Substrate noise: noisy-to-sensitive spacing (Charbon); deep-trench isolation banding
-- Guard rings by role (minority-carrier injector, noisy aggressor, sensitive victim) and construction (tap ring, electron-collecting ring, hole-collecting ring, isolated tub)
-- Performance-driven placement: estimated ground capacitance on spec-sensitive nets, priced before any wire exists
+Devices that match no topology still get every routing and reliability rule. They get no placement constraint unless symmetry propagation or the sidecar reaches them. Catalog-free extraction is planned ([#75](https://github.com/UW-ASIC/Philis/issues/75)).
 
-**Routing**
-- Differential nets: matched, mirrored routes
-- Common nodes: resistance balanced across branches (e.g. a pair's shared source)
-- Crosstalk: pairwise exclusion, plus total coupling per victim summed over every aggressor
+**Offset and mismatch** (Pelgrom; Hastings ch. 13)
+- Matched sets: one mismatch ledger per pair (random σ, gradient, thermal and LOD terms) against one offset allowance, with a precision class (minimal / moderate / precise)
+- Common-centroid 1-D and 2-D arrays and interdigitation, with first and second unit moments equalised
+- Matched channels parallel, with equal mean source→drain current direction
+- Equal well-proximity (WPE) and STI/LOD stress distances; edge dummies
+- Capacitor arrays (binary-weighted and split DACs) placed under an oxide-gradient model, with equal lead capacitance per unit
+
+**Symmetry and structure** (Balasa–Graeb)
+- Mirror symmetry about shared axes; each symmetry group forms one connected island
+- Signal-flow and current-flow ordering; proximity of related devices; utilisation floor
+
+**Noise and coupling** (Charbon)
+- Crosstalk: pairwise exclusion, and total coupling per victim summed over every aggressor
 - Shielding of sensitive nets by a reference net
-- Parasitic budgets per net, and circuit specs as a shared parasitic budget over the routed nets
+- Substrate: noisy-to-sensitive spacing and deep-trench isolation banding
+- Guard rings by role (injector, aggressor, victim) and construction (tap ring, electron-collecting ring, hole-collecting ring, isolated tub)
 - No metal over matched gates or precision resistor bodies
+
+**Parasitics and performance**
+- Differential nets routed matched and mirrored; common-node resistance balanced across branches
+- Per-net parasitic budgets, and circuit specs as a shared parasitic budget over the routed nets
+- Performance-driven placement: estimated ground capacitance on spec-sensitive nets
+- Optional post-layout simulation against `--perf` specs
+
+**Reliability**
 - Electromigration (DC, per layer and via; wires and via arrays sized to current) — hard
 - IR drop along current-carrying nets
 - Antenna ratio, fixed with jumpers or inserted diodes — hard
+- |V<sub>GS</sub>| and |V<sub>DS</sub>| against oxide and drain ratings; forward-biased junctions; ESD width floor on pad nets; latch-up deck rules
 
-**Net classes** decide which routing rules a net gets: signal, clock, supply, ground, substrate, sensitive, bias, reference, static and switching digital, noisy.
+**Thermal**
+- Matched sets kept isothermal and away from power dissipators
 
-**Reliability at signoff**
-- |V<sub>GS</sub>| and |V<sub>DS</sub>| against oxide and drain ratings at the operating point
-- Forward-biased junctions
-- ESD width floor on pad nets
-- Latch-up deck rules
+Net classes decide which rules a net gets: signal, clock, supply, ground, substrate, sensitive, bias, reference, static and switching digital, noisy.
 
 ## How it works
 
