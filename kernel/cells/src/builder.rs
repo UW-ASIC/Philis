@@ -337,3 +337,390 @@ mod tests {
         assert!(m.bbox.x + m.bbox.w >= s.x + s.w && m.bbox.y + m.bbox.h >= s.y + s.h);
     }
 }
+
+/// A hand-built [`Process`] for unit tests that must not depend on a real
+/// deck: every number is stated by the test, so an expected value is
+/// derivable by hand.
+#[cfg(test)]
+pub(crate) mod fake {
+    use pnr_core::{LayerId, Process};
+
+    /// Layers by role (`LayerId` = position unless aliased) and numbers by
+    /// key: a bare rule name for [`Process::rule`], else `w:role`, `s:role`,
+    /// `eol:role`, `a:role`, `enc:outer:inner`, `cap:outer:inner`,
+    /// `ext:outer:inner`, `sb:a:b`; ohms under `sheet:role` / `cut:cut:onto`.
+    pub struct Deck {
+        pub grid: i32,
+        pub roles: Vec<(&'static str, u16)>,
+        pub nums: Vec<(String, i32)>,
+        pub ohms: Vec<(String, f32)>,
+    }
+
+    impl Deck {
+        pub fn new(grid: i32, roles: &[&'static str]) -> Self {
+            Deck { grid, roles: roles.iter().enumerate().map(|(i, &r)| (r, i as u16)).collect(), nums: Vec::new(), ohms: Vec::new() }
+        }
+        pub fn with(mut self, key: &str, v: i32) -> Self {
+            self.nums.push((key.to_string(), v));
+            self
+        }
+        pub fn ohm(mut self, key: &str, v: f32) -> Self {
+            self.ohms.push((key.to_string(), v));
+            self
+        }
+        /// `role` resolves to `id` (two roles on one layer).
+        pub fn alias(mut self, role: &'static str, id: u16) -> Self {
+            self.roles.push((role, id));
+            self
+        }
+        fn get(&self, key: &str) -> Option<i32> {
+            self.nums.iter().rev().find(|(k, _)| k == key).map(|&(_, v)| v)
+        }
+    }
+
+    impl Process for Deck {
+        fn layer(&self, role: &str) -> Option<LayerId> {
+            self.roles.iter().find(|(r, _)| *r == role).map(|&(_, i)| LayerId(i))
+        }
+        fn rule(&self, name: &str, default: i32) -> i32 {
+            self.get(name).unwrap_or(default)
+        }
+        fn grid(&self) -> i32 {
+            self.grid
+        }
+        fn sheet_ohm(&self, role: &str) -> Option<f32> {
+            let k = format!("sheet:{role}");
+            self.ohms.iter().find(|(x, _)| *x == k).map(|&(_, v)| v)
+        }
+        fn cut_ohm(&self, cut: &str, onto: &str) -> Option<f32> {
+            let k = format!("cut:{cut}:{onto}");
+            self.ohms.iter().find(|(x, _)| *x == k).map(|&(_, v)| v)
+        }
+        fn space(&self, role: &str) -> Option<i32> {
+            self.get(&format!("s:{role}"))
+        }
+        fn eol_space(&self, role: &str) -> Option<i32> {
+            self.get(&format!("eol:{role}"))
+        }
+        fn width(&self, role: &str) -> Option<i32> {
+            self.get(&format!("w:{role}"))
+        }
+        fn enclosure(&self, outer: &str, inner: &str) -> Option<i32> {
+            self.get(&format!("enc:{outer}:{inner}"))
+        }
+        fn endcap(&self, outer: &str, inner: &str) -> Option<i32> {
+            self.get(&format!("cap:{outer}:{inner}"))
+        }
+        fn extension(&self, outer: &str, inner: &str) -> Option<i32> {
+            self.get(&format!("ext:{outer}:{inner}"))
+        }
+        fn area(&self, role: &str) -> Option<i64> {
+            self.get(&format!("a:{role}")).map(i64::from)
+        }
+        fn space_between(&self, a: &str, b: &str) -> Option<i32> {
+            self.get(&format!("sb:{a}:{b}"))
+        }
+    }
+}
+
+/// Corner cases for every builder function (cleanup step 2). Oracles: the
+/// doc comments and hand-derived values on [`fake::Deck`].
+#[cfg(test)]
+mod cleanup_tests {
+    use super::fake::Deck;
+    use super::*;
+    use analog::cell::{SeriesParallel, Unitization};
+    use pnr_core::{DeviceId, DeviceKind, Dummy, KeepWhy, Unit};
+
+    const R0: Rect = Rect { x: 0, y: 0, w: 0, h: 0 };
+
+    fn uz(devices: &[u16], dev_nf: &[u16], w: i32, l: i32) -> Unitization {
+        Unitization {
+            devices: devices.iter().map(|&d| DeviceId(d)).collect(),
+            device_type: DeviceKind::Nmos,
+            dev_nf: dev_nf.to_vec(),
+            target_ratio: vec![1; dev_nf.len()],
+            unit_w: w,
+            unit_l: l,
+            series_parallel: SeriesParallel::Parallel,
+            dummy_required: false,
+            route_matching_required: false,
+            class: None,
+            kind: None,
+            series: Vec::new(),
+            style: None,
+        }
+    }
+
+    fn group(devices: &[u16]) -> DeviceGroup {
+        DeviceGroup { devices: devices.iter().map(|&d| DeviceId(d)).collect() }
+    }
+
+    fn constraints(us: Vec<Unitization>) -> Constraints {
+        let mut c = Constraints::default();
+        c.unitization = us;
+        c
+    }
+
+    #[test]
+    fn snap_to_grid_is_identity_without_a_grid() {
+        assert_eq!(snap_to_grid(7, 0), 7);
+        assert_eq!(snap_to_grid(-7, -3), -7);
+        assert_eq!(snap_to_grid(i32::MIN, 0), i32::MIN);
+        assert_eq!(snap_to_grid(123, 1), 123);
+    }
+
+    #[test]
+    fn snap_to_grid_rounds_half_away_from_zero_at_even_and_odd_grids() {
+        for (v, g, want) in [(0, 5, 0), (10, 10, 10), (5, 10, 10), (-5, 10, -10), (4, 10, 0), (-4, 10, 0), (3, 5, 5), (2, 5, 0), (-3, 5, -5), (-2, 5, 0)] {
+            assert_eq!(snap_to_grid(v, g), want, "snap({v}, {g})");
+        }
+    }
+
+    /// The nearest representable multiple, never an overflow.
+    #[test]
+    fn snap_to_grid_saturates_at_the_i32_extremes() {
+        assert_eq!(snap_to_grid(i32::MAX, 10), 2_147_483_640);
+        assert_eq!(snap_to_grid(i32::MIN, 10), -2_147_483_640);
+    }
+
+    #[test]
+    fn rect_snaps_and_clamps_extents_to_one_step() {
+        let mut b = Builder::new(5);
+        b.rect(LayerId(0), Rect { x: 3, y: -3, w: 0, h: 2 });
+        assert_eq!(b.finish().shapes[0].rect, Rect { x: 5, y: -5, w: 5, h: 5 });
+        let mut b = Builder::new(0);
+        b.rect(LayerId(0), Rect { x: 3, y: 4, w: 0, h: -2 });
+        assert_eq!(b.finish().shapes[0].rect, Rect { x: 3, y: 4, w: 1, h: 1 });
+    }
+
+    #[test]
+    fn pins_and_keepouts_snap_units_and_dummies_do_not() {
+        let mut b = Builder::new(5);
+        b.rect(LayerId(0), Rect { x: 0, y: 0, w: 100, h: 100 });
+        b.pin(Pin { name: "d0:G".into(), net: NetId(0), at: Rect { x: 7, y: 7, w: 7, h: 7 }, layer: LayerId(1) });
+        b.keepout(Rect { x: 7, y: 7, w: 1, h: 1 }, KeepWhy::Gate { owner: 0 });
+        let u = Unit { owner: 0, x: 7, y: 9, weight: 3, phi: (1, 0), sa: 1, sb: 2 };
+        b.unit(u);
+        let d = Dummy { owner: 0, pmos: false, edge: "S", w: 7, l: 3 };
+        b.dummy(d);
+        let m = b.finish();
+        assert_eq!(m.pins[0].at, Rect { x: 5, y: 5, w: 5, h: 5 });
+        assert_eq!(m.pins[0].name, "d0:G");
+        assert_eq!(m.keepouts[0].rect, Rect { x: 5, y: 5, w: 5, h: 5 });
+        assert_eq!(m.units, vec![u]);
+        assert_eq!(m.dummies, vec![d]);
+    }
+
+    #[test]
+    fn finish_keeps_one_of_each_exact_duplicate_only() {
+        let mut b = Builder::new(5);
+        let r = Rect { x: 0, y: 0, w: 10, h: 10 };
+        b.rect(LayerId(0), r);
+        b.rect(LayerId(0), r);
+        b.rect(LayerId(1), r);
+        b.rect(LayerId(0), Rect { x: 5, ..r });
+        let m = b.finish();
+        assert_eq!(m.shapes.len(), 3);
+        assert_eq!(m.shapes[0].rect, r, "first occurrence kept, order stable");
+    }
+
+    #[test]
+    fn finish_of_nothing_is_a_zero_bbox() {
+        let m = Builder::new(5).finish();
+        assert!(m.shapes.is_empty());
+        assert_eq!(m.bbox, R0);
+    }
+
+    #[test]
+    fn finish_bbox_encloses_on_the_lattice_for_negative_coordinates_and_no_grid() {
+        for grid in [5, 0, -2] {
+            let mut b = Builder::new(grid);
+            b.rect(LayerId(0), Rect { x: -13, y: -27, w: 41, h: 9 });
+            b.rect(LayerId(1), Rect { x: 40, y: 3, w: 11, h: 30 });
+            let m = b.finish();
+            let step = 2 * grid.max(1);
+            assert_eq!(m.bbox.x.rem_euclid(step), 0, "grid {grid}");
+            assert_eq!(m.bbox.y.rem_euclid(step), 0, "grid {grid}");
+            assert_eq!(m.bbox.w % (2 * step), 0, "grid {grid}");
+            assert_eq!(m.bbox.h % (2 * step), 0, "grid {grid}");
+            for s in &m.shapes {
+                assert!(contains(&m.bbox, &s.rect), "grid {grid}: {:?} outside {:?}", s.rect, m.bbox);
+            }
+        }
+    }
+
+    #[test]
+    fn cut_lattice_is_two_grid_steps_and_never_below_two() {
+        assert_eq!(cut_lattice(&Deck::new(5, &[])), 10);
+        assert_eq!(cut_lattice(&Deck::new(0, &[])), 2);
+        assert_eq!(cut_lattice(&Deck::new(-3, &[])), 2);
+    }
+
+    #[test]
+    fn snap_cut_rounds_toward_negative_infinity() {
+        for (v, lat, want) in [(15, 10, 10), (10, 10, 10), (0, 10, 0), (-1, 10, -10), (-10, 10, -10), (-11, 10, -20), (7, 1, 7)] {
+            assert_eq!(snap_cut(v, lat), want, "snap_cut({v}, {lat})");
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn snap_cut_panics_on_a_zero_lattice() {
+        let _ = snap_cut(5, 0);
+    }
+
+    #[test]
+    fn bbox_of_covers_every_shape() {
+        assert_eq!(bbox_of(&[]), R0);
+        let s = |x, y, w, h| Shape { layer: LayerId(0), rect: Rect { x, y, w, h } };
+        assert_eq!(bbox_of(&[s(1, 2, 3, 4)]), Rect { x: 1, y: 2, w: 3, h: 4 });
+        assert_eq!(bbox_of(&[s(1, 2, 3, 4), s(-5, 10, 2, 2), s(0, 0, 0, 0)]), Rect { x: -5, y: 0, w: 9, h: 12 });
+    }
+
+    #[test]
+    fn hull_and_contains_agree() {
+        let a = Rect { x: 0, y: 0, w: 10, h: 10 };
+        let b = Rect { x: 20, y: -5, w: 5, h: 5 };
+        let h = hull(a, b);
+        assert_eq!(h, Rect { x: 0, y: -5, w: 25, h: 15 });
+        assert_eq!(hull(a, a), a);
+        assert_eq!(hull(a, b), hull(b, a));
+        assert!(contains(&h, &a) && contains(&h, &b));
+        assert!(contains(&a, &a), "edges included");
+        assert!(!contains(&a, &Rect { x: 1, y: 0, w: 10, h: 10 }));
+        assert!(!contains(&a, &Rect { x: -1, y: 0, w: 1, h: 1 }));
+    }
+
+    #[test]
+    fn req_resolves_a_declared_role() {
+        assert_eq!(req(&Deck::new(5, &["diff", "poly"]), "poly"), LayerId(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "mandatory role")]
+    fn req_panics_on_a_missing_role() {
+        let _ = req(&Deck::new(5, &["diff"]), "poly");
+    }
+
+    #[test]
+    fn dim_takes_the_larger_of_sidecar_and_deck() {
+        let p = Deck::new(5, &[]);
+        assert_eq!(dim(&p, "contact"), 0);
+        assert_eq!(dim(&p, "no_such_key"), 0);
+        let p = Deck::new(5, &[]).with("w:licon", 170);
+        assert_eq!(dim(&p, "contact"), 170);
+        assert_eq!(dim(&p.with("contact", 200), "contact"), 200, "sidecar raises");
+        let p = Deck::new(5, &[]).with("w:licon", 170).with("contact", 100);
+        assert_eq!(dim(&p, "contact"), 170, "sidecar never lowers");
+        let p = Deck::new(5, &[]).with("enc:met1:mcon", 30).with("cap:met1:mcon", 60);
+        assert_eq!(dim(&p, "m1_enc"), 60);
+        assert_eq!(dim(&Deck::new(5, &[]).with("w:poly", 150), "min_gate_l"), 150);
+        assert_eq!(dim(&Deck::new(5, &[]).with("custom", 42), "custom"), 42, "an unknown key reads the sidecar");
+    }
+
+    #[test]
+    fn pin_names_and_placeholder_nets_are_distinct_per_member_and_terminal() {
+        let at = Rect { x: 1, y: 2, w: 3, h: 4 };
+        let p = pin(3, "G", at, LayerId(9));
+        assert_eq!((p.name.as_str(), p.at, p.layer), ("d3:G", at, LayerId(9)));
+        let mut nets = Vec::new();
+        for di in 0..64 {
+            for t in ["G", "S", "D", "B", "P", "N", "C", "X"] {
+                nets.push(pin(di, t, at, LayerId(0)).net);
+            }
+        }
+        let n = nets.len();
+        nets.sort_by_key(|n| n.0);
+        nets.dedup();
+        assert_eq!(nets.len(), n);
+        assert_eq!(pin(5, "X", at, LayerId(0)).net, pin(5, "Y", at, LayerId(0)).net, "unknown terminals share slot 7");
+    }
+
+    #[test]
+    fn unitization_needs_a_cover_of_every_member() {
+        let c = constraints(vec![uz(&[0, 1], &[1, 1], 0, 0), uz(&[1, 2, 3], &[1, 1, 1], 0, 0), uz(&[2, 3], &[1, 1], 0, 0)]);
+        assert!(unitization(&group(&[]), &c).is_none());
+        assert_eq!(unitization(&group(&[1, 0]), &c).map(|u| u.devices.len()), Some(2));
+        assert_eq!(unitization(&group(&[3]), &c).map(|u| u.devices.len()), Some(3), "first covering wins");
+        assert!(unitization(&group(&[0, 2]), &c).is_none());
+        assert!(unitization(&group(&[0]), &Constraints::default()).is_none());
+    }
+
+    #[test]
+    fn sizing_defaults_without_a_unitization() {
+        let s = sizing(&group(&[0, 1, 2]), &Constraints::default(), 420, 150);
+        assert_eq!((s.unit_w, s.unit_l, s.dev_nf), (420, 150, vec![1, 1, 1]));
+        let s = sizing(&group(&[]), &Constraints::default(), 420, 150);
+        assert_eq!(s.dev_nf, vec![1], "one entry for an empty group");
+    }
+
+    #[test]
+    fn sizing_reads_each_member_s_own_slot() {
+        let c = constraints(vec![uz(&[5, 6, 7], &[2, 0, 4], 1000, 0)]);
+        let s = sizing(&group(&[7, 5, 6]), &c, 420, 150);
+        assert_eq!(s.dev_nf, vec![4, 2, 1], "own slot, zero reads 1");
+        assert_eq!((s.unit_w, s.unit_l), (1000, 150), "non-positive l falls back");
+        // A short `dev_nf` column: the missing slot reads 1.
+        let c = constraints(vec![uz(&[5, 6], &[3], -1, 200)]);
+        let s = sizing(&group(&[5, 6]), &c, 420, 150);
+        assert_eq!((s.unit_w, s.unit_l, s.dev_nf), (420, 200, vec![3, 1]));
+    }
+
+    fn poly_deck() -> Deck {
+        Deck::new(5, &["poly", "licon", "npc"]).with("enc:npc:licon", 50)
+    }
+
+    fn npc_rects(m: &Macro) -> Vec<Rect> {
+        m.shapes.iter().filter(|s| s.layer == LayerId(2)).map(|s| s.rect).collect()
+    }
+
+    #[test]
+    fn cover_poly_cuts_does_nothing_without_the_role_or_when_it_is_poly() {
+        for p in [Deck::new(5, &["poly", "licon"]), Deck::new(5, &["poly", "licon"]).alias("npc", 0)] {
+            let mut b = Builder::new(5);
+            b.rect(LayerId(0), Rect { x: -100, y: -100, w: 400, h: 400 });
+            b.rect(LayerId(1), Rect { x: 0, y: 0, w: 170, h: 170 });
+            b.cover_poly_cuts(&p);
+            assert_eq!(b.finish().shapes.len(), 2);
+        }
+    }
+
+    #[test]
+    fn cover_poly_cuts_encloses_only_cuts_on_poly() {
+        let mut b = Builder::new(5);
+        b.rect(LayerId(0), Rect { x: -100, y: -100, w: 400, h: 400 });
+        b.rect(LayerId(1), Rect { x: 0, y: 0, w: 170, h: 170 });
+        b.rect(LayerId(1), Rect { x: 1000, y: 0, w: 170, h: 170 }); // on diffusion
+        b.cover_poly_cuts(&poly_deck());
+        assert_eq!(npc_rects(&b.finish()), vec![Rect { x: -50, y: -50, w: 270, h: 270 }]);
+    }
+
+    #[test]
+    fn cover_poly_cuts_joins_a_row_and_near_rows() {
+        let mut b = Builder::new(5);
+        b.rect(LayerId(0), Rect { x: -100, y: -100, w: 2000, h: 2000 });
+        b.rect(LayerId(1), Rect { x: 0, y: 0, w: 170, h: 170 });
+        b.rect(LayerId(1), Rect { x: 1000, y: 0, w: 170, h: 170 });
+        b.rect(LayerId(1), Rect { x: 0, y: 1000, w: 170, h: 170 });
+        let mut far = Builder::new(5);
+        far.shapes = b.shapes.clone();
+        // No spacing: one strip per row, two rows apart.
+        b.cover_poly_cuts(&poly_deck());
+        let mut rows = npc_rects(&b.finish());
+        rows.sort_by_key(|r| r.y);
+        assert_eq!(rows, vec![Rect { x: -50, y: -50, w: 1270, h: 270 }, Rect { x: -50, y: 950, w: 270, h: 270 }]);
+        // Rows closer than the mask spacing merge into one figure.
+        far.cover_poly_cuts(&poly_deck().with("s:npc", 1000));
+        assert_eq!(npc_rects(&far.finish()), vec![Rect { x: -50, y: -50, w: 1270, h: 1270 }]);
+    }
+
+    #[test]
+    fn cover_poly_cuts_grows_a_strip_to_the_mask_width_about_its_centre() {
+        let mut b = Builder::new(5);
+        b.rect(LayerId(0), Rect { x: -100, y: -100, w: 400, h: 400 });
+        b.rect(LayerId(1), Rect { x: 0, y: 0, w: 170, h: 170 });
+        b.cover_poly_cuts(&poly_deck().with("w:npc", 400));
+        assert_eq!(npc_rects(&b.finish()), vec![Rect { x: -115, y: -115, w: 400, h: 400 }]);
+    }
+}

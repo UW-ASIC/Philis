@@ -442,3 +442,69 @@ mod tests {
         assert!(dirty.is_empty(), "{}", dirty.join("\n"));
     }
 }
+
+/// Corner cases for the FinFET generator (cleanup step 2). Oracles: the doc
+/// comments and structural invariants of a drawn macro.
+#[cfg(test)]
+mod cleanup_tests {
+    use super::FinFet;
+    use crate::builder::{contains, fake::Deck};
+    use crate::testkit::group_of;
+    use crate::Cell;
+    use pnr_core::{DeviceGroup, DeviceKind};
+
+    fn finfet_deck() -> verify::Pdk {
+        verify::Pdk::builtin("generic_finfet").expect("generic_finfet builtin")
+    }
+
+    #[test]
+    fn enumerate_offers_nothing_for_an_empty_group_or_a_planar_deck() {
+        let (_, c) = group_of(DeviceKind::Nmos, 1, 1, 1680, 20);
+        assert!(FinFet::enumerate(&DeviceGroup { devices: vec![] }, &c, &finfet_deck()).is_empty());
+        let (g, c) = group_of(DeviceKind::Nmos, 2, 2, 1680, 150);
+        assert!(FinFet::enumerate(&g, &c, &verify::Pdk::builtin("sky130").unwrap()).is_empty(), "no fin layer");
+    }
+
+    #[test]
+    fn a_lone_device_is_never_shared() {
+        let (g, c) = group_of(DeviceKind::Nmos, 1, 4, 1680, 20);
+        let vs = FinFet::enumerate(&g, &c, &finfet_deck());
+        assert_eq!(vs.iter().map(|v| v.shared).collect::<Vec<_>>(), [false]);
+    }
+
+    /// Metamorphic: drawing is pure and stays inside its bbox, with one
+    /// S/D/G/B pin per member.
+    #[test]
+    fn every_variant_draws_deterministically_inside_its_bbox() {
+        let pdk = finfet_deck();
+        for (kind, n, nf) in [(DeviceKind::Nmos, 1, 1), (DeviceKind::Pmos, 2, 2), (DeviceKind::Nmos, 2, 4)] {
+            let (g, c) = group_of(kind, n, nf, 1680, 20);
+            for v in FinFet::enumerate(&g, &c, &pdk) {
+                let (a, b) = (v.draw(&g, &c, &pdk), v.draw(&g, &c, &pdk));
+                assert_eq!(a.shapes, b.shapes, "{kind:?} shared={}", v.shared);
+                assert_eq!(a.pins, b.pins);
+                assert!(a.shapes.iter().all(|s| contains(&a.bbox, &s.rect)));
+                assert!(a.pins.iter().all(|p| contains(&a.bbox, &p.at)));
+                for di in 0..n {
+                    for t in ["S", "D", "G", "B"] {
+                        let k = a.pins.iter().filter(|p| p.name == format!("d{di}:{t}")).count();
+                        assert_eq!(k, 1, "{kind:?} shared={} d{di}:{t}", v.shared);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A deck with a fin layer but no gate pitch must still draw (the tap
+    /// strip's contact walk advances by the gate pitch).
+    #[test]
+    fn a_zero_gate_pitch_terminates() {
+        let roles = ["fin", "poly", "diff", "sdt", "lisd", "lig", "licon", "li", "mcon", "met1", "nsdm", "psdm"];
+        let p = Deck::new(5, &roles).with("w:fin", 10).with("s:fin", 10).with("w:licon", 20).with("w:li", 20).with("ext:diff:poly", 100);
+        let (g, c) = group_of(DeviceKind::Nmos, 1, 1, 40, 20);
+        let vs = FinFet::enumerate(&g, &c, &p);
+        assert_eq!(vs.len(), 1);
+        let m = vs[0].draw(&g, &c, &p);
+        assert!(!m.shapes.is_empty());
+    }
+}
