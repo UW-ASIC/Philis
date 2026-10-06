@@ -186,3 +186,10 @@ T12 = the bottom-up test clean; flat vs bottom-up wall time on two_ota recorded 
 parent cannot land on block port pins (risk: RTE pin landing on layers 0–1, backend/gr/src/lib.rs:586) or routing
 rules on block-internal nets raise rows in the parent (nets with no pin there), report the rows with evidence; do not
 loosen the test.
+
+### Baseline after the merge
+`qcargo test -p library --lib` (debug): 180 pass, 4 fail (`start_tests::same_seed_same_gds_bytes`,
+`start_tests::winner_signoff_matches_its_certificate`, `environment_tests::environment_is_in_the_placement_arm_once`,
+`environment_tests::sidecar_loads_reach_the_annotator`), all on ota.spice with the known `debug_assert` at
+backend/gp/src/lib.rs:89 ("a batch kind is registered in both `hard` and `budget`"; MAT-07 annotator emit.rs:145–148,
+m2-placement-report.md:44–48). Pre-existing, not from this merge; FLOW-11 must not add to it.
