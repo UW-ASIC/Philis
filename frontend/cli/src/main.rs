@@ -272,7 +272,7 @@ fn write_outputs(
     let st = &sol.stats;
     let stages: String = library::STAGES.iter().zip(st.stage_ms).map(|(n, ms)| format!(" {n}={ms:.0}")).collect();
     let rep = format!(
-        "{}\n# signoff hard ({})\n{}\n# run\nconverged\t{}\nstop {:?}\nwarm {}\niterations\t{}\nouter_iterations\t{}\nsim_failures\t{}\nwarnings\t{}\nstage_ms\t{}\n# diagnostics ({})\n{}",
+        "{}\n# signoff hard ({})\n{}\n# run\nconverged\t{}\nstop\t{:?}\nwarm\t{}\niterations\t{}\nouter_iterations\t{}\nsim_failures\t{}\nwarnings\t{}\nstage_ms\t{}\n# diagnostics ({})\n{}",
         sol.metadata,
         report.hard_violations.len(),
         lines(&report.hard_violations),

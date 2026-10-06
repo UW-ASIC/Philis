@@ -134,6 +134,6 @@ fn max_wall_is_accepted() {
     let code = out.status.code();
     assert!(matches!(code, Some(0 | 1)), "exit {code:?}: {}", String::from_utf8_lossy(&out.stderr));
     let report = std::fs::read_to_string(dir.join("report.txt")).expect("report.txt written");
-    assert!(report.contains("stop WallBudget"), "{report}");
+    assert!(report.contains("stop\tWallBudget"), "{report}");
     let _ = std::fs::remove_dir_all(&dir);
 }

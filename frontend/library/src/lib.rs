@@ -124,10 +124,12 @@ pub struct Config {
     pub constraints: Option<String>,
     /// ESD pad nets (REL-17); `None` = no ESD width floor.
     pub esd: Option<EsdSpec>,
-    /// FLOW-08: with an incumbent, every `cold_every`-th epoch (counted over
-    /// the whole search) is cold (gp + [`dp::Schedule::cold`], fresh routing
-    /// history); the rest anneal the incumbent warm ([`epoch_kind`]). `1` =
-    /// every epoch cold, the pre-FLOW-08 loop.
+    /// FLOW-08: with an incumbent from the current assignment, every
+    /// `cold_every`-th epoch (counted over the whole search) is cold (gp +
+    /// [`dp::Schedule::cold`], fresh routing history); the rest anneal the
+    /// incumbent warm ([`epoch_kind`]). `1` = every epoch cold: T10's
+    /// cold-only baseline, not the pre-FLOW-08 loop (which kept routing
+    /// history across all epochs and ran on past a feasible incumbent).
     pub cold_every: u32,
     /// A warm epoch's dp schedule.
     pub warm: dp::Schedule,
@@ -229,7 +231,8 @@ impl Default for Config {
             constraints: None,
             esd: None,
             // ponytail: T10 (`bench local` over cold_every ∈ {1,2,4,8,∞}) has
-            // not been measured, so the default stays the pre-FLOW-08 loop.
+            // not been measured, so the default stays all-cold (history reset
+            // every epoch; not the pre-FLOW-08 loop, which kept it).
             cold_every: 1,
             warm: dp::Schedule::warm(),
             max_wall: None,
@@ -368,10 +371,11 @@ enum Kind {
     Warm,
 }
 
-/// Epoch `k` (counted over the whole search) is cold without an incumbent,
-/// right after an escalation, or every `cold_every`-th epoch; else warm.
-fn epoch_kind(k: u32, has_incumbent: bool, escalated: bool, cold_every: u32) -> Kind {
-    if !has_incumbent || escalated || k % cold_every.max(1) == 0 {
+/// Epoch `k` (counted over the whole search) is cold without an incumbent
+/// from the current assignment (none yet, or the incumbent predates the last
+/// escalation) or every `cold_every`-th epoch; else warm.
+fn epoch_kind(k: u32, current_incumbent: bool, cold_every: u32) -> Kind {
+    if !current_incumbent || k % cold_every.max(1) == 0 {
         Kind::Cold
     } else {
         Kind::Warm
@@ -1013,7 +1017,10 @@ fn search(t: &Topology, cfg: &Config, seed: u64, deadline: Option<std::time::Ins
     let (mut pareto, mut epochs) = (Vec::new(), Vec::new());
     // Every unified assignment an epoch ran: escalation never revisits one.
     let mut tried: std::collections::BTreeSet<Vec<u16>> = std::collections::BTreeSet::new();
-    let (mut k, mut escalated) = (0u32, false);
+    // `current`: `best` came from an epoch of the current assignment (its
+    // variants are that assignment's, maybe dp-reshaped); after an escalation
+    // a warm start from it would anneal the old assignment instead.
+    let (mut k, mut current) = (0u32, false);
 
     let n_outer = cfg.outer_iters.max(1);
     'search: for outer in 0..n_outer {
@@ -1026,8 +1033,8 @@ fn search(t: &Topology, cfg: &Config, seed: u64, deadline: Option<std::time::Ins
             }
             stats.iterations += 1;
             let seed = seed ^ u64::from(iter) ^ (u64::from(outer) << 32);
-            let kind = epoch_kind(k, best.is_some(), escalated, cfg.cold_every);
-            (k, escalated) = (k + 1, false);
+            let kind = epoch_kind(k, best.is_some() && current, cfg.cold_every);
+            k += 1;
             let start = match kind {
                 Kind::Warm => best.as_ref().map(|b| &b.layout),
                 Kind::Cold => {
@@ -1071,7 +1078,7 @@ fn search(t: &Topology, cfg: &Config, seed: u64, deadline: Option<std::time::Ins
                     iteration: iter,
                     ..epoch
                 });
-                stall = 0;
+                (stall, current) = (0, true);
             } else {
                 stall += 1;
                 if stall >= PATIENCE {
@@ -1115,7 +1122,7 @@ fn search(t: &Topology, cfg: &Config, seed: u64, deadline: Option<std::time::Ins
         };
         stats.variant_escalations += 1;
         assignment = next;
-        escalated = true;
+        current = false;
     }
 
     let best = best.expect("at least one epoch ran");
@@ -2774,19 +2781,21 @@ pub(crate) fn labeled_pins(
 mod start_tests {
     use crate::{Kind, StopReason};
 
+    const THREE_FET: &str = ".subckt three a b c g VSS\nXM1 a g VSS VSS nfet_01v8 W=2u L=0.5u\nXM2 b a VSS VSS nfet_01v8 W=4u L=0.15u\nXM3 c b VSS VSS nfet_01v8 W=1u L=1u\n.ends three\n";
     const ONE_FET: &str = ".subckt one d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\n.ends one\n";
 
-    /// FLOW-08: cold first, after an escalation and every `cold_every`-th
-    /// epoch; `1` is all cold, `u32::MAX` warm after the first.
+    /// FLOW-08: cold first, without a current-assignment incumbent (after an
+    /// escalation) and every `cold_every`-th epoch; `1` is all cold,
+    /// `u32::MAX` warm after the first.
     #[test]
     fn schedule_is_cold_first_then_periodic() {
         use crate::epoch_kind;
-        assert_eq!(epoch_kind(0, false, false, 4), Kind::Cold);
-        assert_eq!(epoch_kind(1, true, false, 4), Kind::Warm);
-        assert_eq!(epoch_kind(4, true, false, 4), Kind::Cold);
-        assert_eq!(epoch_kind(5, true, true, 4), Kind::Cold);
-        assert!((0..8).all(|k| epoch_kind(k, true, false, 1) == Kind::Cold));
-        assert_eq!(epoch_kind(7, true, false, u32::MAX), Kind::Warm);
+        assert_eq!(epoch_kind(0, false, 4), Kind::Cold);
+        assert_eq!(epoch_kind(1, true, 4), Kind::Warm);
+        assert_eq!(epoch_kind(4, true, 4), Kind::Cold);
+        assert_eq!(epoch_kind(5, false, 4), Kind::Cold);
+        assert!((0..8).all(|k| epoch_kind(k, true, 1) == Kind::Cold));
+        assert_eq!(epoch_kind(7, true, u32::MAX), Kind::Warm);
     }
 
     /// FLOW-08: feasible stops (converged or not); infeasible escalates
@@ -2812,24 +2821,34 @@ mod start_tests {
         assert_eq!((sol.stats.iterations, sol.stats.stop), (1, StopReason::WallBudget));
     }
 
-    /// FLOW-08: a warm epoch with a no-op schedule reproduces its incumbent;
-    /// `cold_every: 1` never runs warm.
+    /// FLOW-08: a warm epoch with a no-op schedule keeps its incumbent's
+    /// positions and variants, where a cold epoch at its seed places elsewhere
+    /// (so the match is the warm start's); `cold_every: 1` never runs warm.
     #[test]
     fn warm_epoch_starts_from_the_incumbent() {
         let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
         let cfg = |cold_every| crate::Config { cold_every, feedback_iters: 2, outer_iters: 1, starts: 1, warm: dp::Schedule { range0: 0.0, max_temps: 0, t0_scale: 0.0 }, ..Default::default() };
-        let sol = crate::run(ONE_FET, &pdk, &Default::default(), &cfg(u32::MAX)).expect("flow");
-        assert_eq!(sol.stats.warm_epochs, 1);
-        let e = &sol.metadata.epochs;
-        assert_eq!(e.len(), 2, "both epochs promoted");
-        assert_eq!((e[0].v, e[0].theta, e[0].area_um2), (e[1].v, e[1].theta, e[1].area_um2));
-        let cold = crate::run(ONE_FET, &pdk, &Default::default(), &cfg(1)).expect("flow");
-        assert_eq!(cold.stats.warm_epochs, 0);
+        let mut nl = crate::parse(THREE_FET).unwrap();
+        crate::deck_models(&mut nl, &pdk);
+        let cfg_warm = cfg(u32::MAX);
+        let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
+        let ann = crate::annotation_with(&pdk, &cfg_warm.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
+        let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0, evidence: None, r_weight: Vec::new(), pair_weight: Vec::new(), beta_key: false };
+        let t = crate::topology(&nl, &Default::default(), &pdk, &cfg_warm, &bias, &ann, &Default::default(), &plan, true);
+        let f = &t.flow;
+        let epoch = |start: Option<&pnr_core::Layout>, seed: u64| f.epoch(&t.assignment0, false, start, &f.weights, &mut gp::Prices::new(), &mut gr::Negotiation::new(), seed).layout;
+        let pos = |l: &pnr_core::Layout| (l.x.clone(), l.y.clone(), l.variant.clone());
+        let inc = epoch(None, 1);
+        assert_ne!(pos(&epoch(None, 2)), pos(&inc), "seed 2 places elsewhere cold");
+        assert_eq!(pos(&epoch(Some(&inc), 2)), pos(&inc));
+        let run = |c| crate::run(THREE_FET, &pdk, &Default::default(), &cfg(c)).expect("flow").stats.warm_epochs;
+        assert_eq!((run(u32::MAX), run(1)), (1, 0));
     }
 
     /// FLOW-10 (T7): the shipped `drc_hard` is the signoff of the shipped
     /// geometry. Without a covered density rule nothing is filled; with a
-    /// 10 µm metal1 floor fill is kept and the stats are re-measured on it.
+    /// 10 µm metal1 floor fill is kept and the stats and caps are re-measured
+    /// on it.
     /// 80 %, not 40 %: fill counts a 2 µm tile any metal1 touches as covered,
     /// which reads ota's metal1 as 69 % (291/420 tiles), so 40 % fills nothing.
     #[test]
@@ -2847,9 +2866,17 @@ mod start_tests {
         let text = verify::Pdk::deck_text(&sidecar).expect("deck");
         let text = format!("{text}\nrule TEST.m1_density density(metal1; window: 10um, step: 5um) >= 80%\n");
         let pdk = verify::Pdk::load(&text, &sidecar).expect("deck loads");
-        let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
+        let mut sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
         assert!(sol.metadata.post_fill, "ota's block is filled at a 10 µm window");
-        assert_eq!(crate::signoff(&sol, &pdk).report.hard_violations.len(), sol.stats.drc_hard);
+        let post = crate::signoff(&sol, &pdk);
+        assert_eq!(post.report.hard_violations.len(), sol.stats.drc_hard);
+        assert_eq!((&post.caps, post.warnings.len() as u32), (&sol.caps, sol.stats.warnings));
+        // The fill macro is appended last. Fill clears no density window here
+        // (the hard count is the same either way), but grounded fill moves the
+        // extracted caps: the winner's own pre-fill caps would not match.
+        sol.macros.pop();
+        let pre = crate::signoff(&sol, &pdk);
+        assert_ne!(pre.caps, sol.caps, "the shipped caps are re-extracted with fill");
     }
 
     /// GAP-04: the substrate kind comes from the deck's `substrate_kind`; a
