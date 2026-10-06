@@ -978,4 +978,220 @@ mod tests {
         assert_ne!(t.nodes[0].kids.len(), t2.nodes[0].kids.len());
         assert!(rep.hard_violations.is_empty());
     }
+
+    // ---- step-2 coverage: move kernels, undo, edge inputs, report rows ----
+
+    #[test]
+    fn two_draws_distinct_indices_in_range() {
+        let mut rng = SplitMix64::new(1);
+        for k in 2..7 {
+            for _ in 0..1_000 {
+                let (i, j) = two(&mut rng, k);
+                assert!(i < k && j < k && i != j, "k {k}: ({i}, {j})");
+            }
+        }
+        assert_eq!(two(&mut rng, 1), (0, 0));
+    }
+
+    /// Positions where `a` and `b` differ.
+    fn diff(a: &[u16], b: &[u16]) -> usize {
+        a.iter().zip(b).filter(|(x, y)| x != y).count()
+    }
+
+    #[test]
+    fn m1_m2_swap_exactly_two_kids_on_a_plain_node() {
+        let (mut t, _) = Tree::build(5, &[], &[]);
+        let mut rng = SplitMix64::new(2);
+        for _ in 0..200 {
+            let before = t.nodes[0].clone();
+            m1(&mut t, 0, &mut rng);
+            assert_eq!(diff(&before.alpha, &t.nodes[0].alpha), 2);
+            assert_eq!(before.beta, t.nodes[0].beta);
+            let before = t.nodes[0].clone();
+            m2(&mut t, 0, &mut rng);
+            assert_eq!(diff(&before.beta, &t.nodes[0].beta), 2);
+            assert_eq!(before.alpha, t.nodes[0].alpha);
+        }
+    }
+
+    #[test]
+    fn m3_swaps_the_same_two_kids_in_both_sequences() {
+        let (mut t, _) = Tree::build(5, &[], &[]);
+        let mut rng = SplitMix64::new(4);
+        for _ in 0..200 {
+            let before = t.nodes[0].clone();
+            assert!(m3(&mut t, 0, &mut rng));
+            let after = &t.nodes[0];
+            let moved: Vec<u16> = (0..5).filter(|&p| before.alpha[p] != after.alpha[p]).map(|p| before.alpha[p]).collect();
+            assert_eq!(moved.len(), 2);
+            let moved_b: Vec<u16> = (0..5).filter(|&p| before.beta[p] != after.beta[p]).map(|p| before.beta[p]).collect();
+            let (mut a, mut b) = (moved, moved_b);
+            a.sort_unstable();
+            b.sort_unstable();
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn m3_flips_a_mirror_pair_and_declines_selfs_only() {
+        let (mut t, _) = Tree::build(2, &[(0, 0, 0), (1, 1, 0)], &[]);
+        let mut rng = SplitMix64::new(5);
+        let before = t.nodes[0].clone();
+        assert!(!m3(&mut t, 0, &mut rng));
+        assert_eq!(t.nodes[0], before);
+        let (mut t, _) = Tree::build(3, &[(0, 1, 0), (2, 2, 0)], &[]);
+        for _ in 0..100 {
+            assert!(m3(&mut t, 0, &mut rng));
+            assert!(t.is_sf(0));
+            // A pair flip never moves the self kid (slot 2, last in slot order).
+            let a = &t.nodes[0].alpha;
+            assert_eq!(a.iter().position(|&g| g == 2), Some(2));
+        }
+    }
+
+    /// Model test of the undo log: propose, decode, score, undo restores
+    /// every discrete and geometric variable and the energy bit for bit.
+    #[test]
+    fn undo_restores_the_state_exactly() {
+        let macros: Vec<Macro> = (0..6).map(|i| cell(1_000 + 200 * (i % 3), 2_000, Some((i % 2) as u16))).collect();
+        let reqs = Requirements { hard: vec![Box::new(SymmetryGroup(vec![sym(0, 3)]))], ..Default::default() };
+        let lk = locks::locks(&reqs, 6, &[]);
+        let inp = input(&macros, &reqs, &lk, 270);
+        let prices = gp::Prices::new();
+        let (mut st, _, ok) = init(&inp, &Start::Constructive, &prices);
+        assert!(ok);
+        let mut rng = SplitMix64::new(12);
+        let snap = |st: &St| {
+            let l = &st.l;
+            (st.tree.clone(), l.x.clone(), l.y.clone(), l.hw.clone(), l.hh.clone(), l.axis.clone(), l.variant.clone(), l.orient.clone(), l.branch.clone(), st.w.clone(), st.h.clone())
+        };
+        let mut undone = 0;
+        for _ in 0..500 {
+            let (before, e0, k0) = (snap(&st), st.energy(), st.key(true));
+            if !st.propose(&mut rng) {
+                assert_eq!(snap(&st), before, "a declined move changed the state");
+                continue;
+            }
+            if st.realize().is_ok() {
+                st.rescore();
+            }
+            st.undo();
+            undone += 1;
+            assert_eq!(snap(&st), before);
+            assert_eq!((st.energy().to_bits(), st.key(true)), (e0.to_bits(), k0));
+        }
+        assert!(undone > 100);
+    }
+
+    /// A decode that fails right after [`init`] is undone with no realize in
+    /// between; the undo must not replay [`init`]'s own decode log.
+    #[test]
+    fn undo_of_the_first_move_after_init_keeps_the_layout() {
+        let (macros, reqs) = bench14();
+        let lk = locks::locks(&reqs, 14, &[]);
+        let inp = input(&macros, &reqs, &lk, 270);
+        let prices = gp::Prices::new();
+        let (mut st, _, ok) = init(&inp, &Start::Constructive, &prices);
+        assert!(ok);
+        let (x, y, axis) = (st.l.x.clone(), st.l.y.clone(), st.l.axis.clone());
+        let mut rng = SplitMix64::new(1);
+        while !st.propose(&mut rng) {}
+        st.undo();
+        assert_eq!((&st.l.x, &st.l.y, &st.l.axis), (&x, &y, &axis));
+    }
+
+    fn two_shapes() -> gp::VariantSpace {
+        gp::VariantSpace { alternatives: vec![cell(1_000, 1_000, Some(0)), cell(2_000, 500, Some(0))] }
+    }
+
+    #[test]
+    fn reshape_draws_the_other_variant_and_undo_restores_it() {
+        let macros: Vec<Macro> = (0..3).map(|_| cell(1_000, 1_000, Some(0))).collect();
+        let variants: Vec<gp::VariantSpace> = (0..3).map(|c| if c == 2 { gp::VariantSpace { alternatives: vec![] } } else { two_shapes() }).collect();
+        let reqs = Requirements::<Layout>::default();
+        let lk = locks::locks(&reqs, 3, &variants);
+        let fixed = [false, true, false];
+        let inp = PlaceInput { variants: &variants, fixed: &fixed, ..input(&macros, &reqs, &lk, 0) };
+        let prices = gp::Prices::new();
+        let (mut st, _, ok) = init(&inp, &Start::Constructive, &prices);
+        assert!(ok);
+        let mut rng = SplitMix64::new(3);
+        assert!(!st.reshape(1, &mut rng), "fixed cell");
+        assert!(!st.reshape(2, &mut rng), "a single shape");
+        assert!(st.u_cells.is_empty());
+        assert!(st.reshape(0, &mut rng));
+        assert_eq!((st.l.variant[0], st.w[0], st.h[0]), (1, 2_000, 500));
+        st.realize().unwrap();
+        st.rescore();
+        st.undo();
+        assert_eq!((st.l.variant[0], st.w[0], st.h[0]), (0, 1_000, 1_000));
+    }
+
+    #[test]
+    fn no_cells_places_nothing() {
+        let reqs = Requirements::<Layout>::default();
+        let lk = locks::locks(&reqs, 0, &[]);
+        let inp = input(&[], &reqs, &lk, 0);
+        let (l, t, rep, stats) = place_sp(&inp, Start::Constructive, Schedule::cold(), &mut gp::Prices::new(), 1);
+        assert!(l.x.is_empty() && t.nodes.len() == 1);
+        assert!(rep.hard_violations.is_empty());
+        assert_eq!(stats.proposals, 0);
+    }
+
+    #[test]
+    fn single_cell_sits_at_the_origin() {
+        let macros = [cell(1_000, 2_000, None)];
+        let reqs = Requirements::<Layout>::default();
+        let lk = locks::locks(&reqs, 1, &[]);
+        let inp = input(&macros, &reqs, &lk, 0);
+        let (l, ..) = place_sp(&inp, Start::Constructive, Schedule::cold(), &mut gp::Prices::new(), 7);
+        assert_eq!((l.x[0] - l.hw[0], l.y[0] - l.hh[0]), (0, 0));
+        let mut half = [l.hw[0], l.hh[0]];
+        half.sort_unstable();
+        assert_eq!(half, [500, 1_000]);
+    }
+
+    #[test]
+    fn undecodable_start_is_a_hard_report_row() {
+        // Two self-symmetric cells 1000 and 1010 nm wide: no axis puts both
+        // corners on the 10 nm lattice, whatever the code.
+        let macros = [cell(1_000, 1_000, None), cell(1_010, 1_000, None)];
+        let reqs = Requirements { hard: vec![Box::new(SymmetryGroup(vec![sym(0, 0), sym(1, 1)]))], ..Default::default() };
+        let lk = locks::locks(&reqs, 2, &[]);
+        let inp = input(&macros, &reqs, &lk, 0);
+        let (_, _, rep, stats) = place_sp(&inp, Start::Constructive, Schedule::cold(), &mut gp::Prices::new(), 1);
+        assert!(rep.hard_violations.iter().any(|v| v.rule == "sp decode failed"));
+        assert_eq!((stats.temps, stats.proposals), (0, 0));
+    }
+
+    #[test]
+    fn conflicting_axes_are_hard_report_rows() {
+        let macros: Vec<Macro> = (0..3).map(|_| cell(1_000, 1_000, None)).collect();
+        let other = Symmetry { axis: AxisId(1), ..sym(0, 2) };
+        let reqs = Requirements { hard: vec![Box::new(SymmetryGroup(vec![sym(0, 1), other]))], ..Default::default() };
+        let lk = locks::locks(&reqs, 3, &[]);
+        let inp = PlaceInput { n_axes: 2, ..input(&macros, &reqs, &lk, 0) };
+        let (_, _, rep, _) = place_sp(&inp, Start::Constructive, Schedule::cold(), &mut gp::Prices::new(), 1);
+        assert!(rep.hard_violations.iter().any(|v| v.rule == "conflicting symmetry cell 0"));
+    }
+
+    #[test]
+    fn warm_start_with_short_vectors_falls_back() {
+        let macros: Vec<Macro> = (0..6).map(|_| cell(1_000, 1_000, None)).collect();
+        let reqs = Requirements { hard: vec![Box::new(SymmetryGroup(vec![sym(0, 3)]))], ..Default::default() };
+        let lk = locks::locks(&reqs, 6, &[]);
+        let inp = input(&macros, &reqs, &lk, 0);
+        let (t, _) = Tree::build(6, &[(0, 3, 0)], &[]);
+        let fits = Start::Warm { tree: &t, variant: &[0; 6], orient: &[Orient::R0; 6] };
+        let (.., st) = place_sp(&inp, fits, Schedule::warm(), &mut gp::Prices::new(), 1);
+        assert!(!st.warm_fallback);
+        let short = Start::Warm { tree: &t, variant: &[0; 5], orient: &[Orient::R0; 6] };
+        let (.., st) = place_sp(&inp, short, Schedule::warm(), &mut gp::Prices::new(), 1);
+        assert!(st.warm_fallback);
+    }
+
+    #[test]
+    fn dp_mode_defaults_to_flat() {
+        assert_eq!(DpMode::default(), DpMode::Flat);
+    }
 }
