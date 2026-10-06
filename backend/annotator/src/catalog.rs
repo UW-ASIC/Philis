@@ -323,7 +323,6 @@ pub const LATCH_HALF: Pattern = Pattern {
 /// Series stack: same-type, source of top = drain of bottom,
 /// SAME gate (series combination for effective L doubling or
 /// high-voltage tolerance). Different from cascode where gates differ.
-/// Outranks `mirror_pair_split_source`, which a shared-gate chain also fits.
 pub const SERIES_STACK: Pattern = Pattern {
     name: "series_stack",
     priority: 7,
@@ -2470,6 +2469,222 @@ mod tests {
                 p.name,
                 ms
             );
+        }
+    }
+
+    // ── Shorthand constructors ──
+
+    #[test]
+    fn slot_shorthands_set_only_their_kind_and_size() {
+        let plain = |s: Slot| matches!(s.diode, DiodeReq::Any) && !s.gate_is_signal;
+        assert!(matches!(S_ANY.kind, SlotKind::AnyFet) && matches!(S_ANY.size_match, SizeMatch::Any) && plain(S_ANY));
+        for r in [0u8, 3, 7, u8::MAX] {
+            let s = same_as(r);
+            assert!(matches!(s.kind, SlotKind::SameTypeAs(x) if x == r) && matches!(s.size_match, SizeMatch::Any) && plain(s));
+            let s = same_l(r);
+            assert!(matches!(s.kind, SlotKind::SameTypeAs(x) if x == r) && matches!(s.size_match, SizeMatch::SameLAs(x) if x == r) && plain(s));
+            let s = same_exact(r);
+            assert!(matches!(s.kind, SlotKind::SameTypeAs(x) if x == r) && matches!(s.size_match, SizeMatch::ExactAs(x) if x == r) && plain(s));
+            let s = comp(r);
+            assert!(matches!(s.kind, SlotKind::ComplementOf(x) if x == r) && matches!(s.size_match, SizeMatch::Any) && plain(s));
+        }
+    }
+
+    #[test]
+    fn link_shorthands_keep_operands_in_order() {
+        for (l, want) in [(eq(1, "G", 2, "D"), 0), (ne(1, "G", 2, "D"), 1), (eq_sig(1, "G", 2, "D"), 2)] {
+            assert!(l.a == 1 && l.pin_a == "G" && l.b == 2 && l.pin_b == "D");
+            let got = match l.rel {
+                PinRel::Same => 0,
+                PinRel::Diff => 1,
+                PinRel::SameSignal => 2,
+            };
+            assert_eq!(got, want);
+        }
+    }
+
+    // ── PATTERNS ──
+
+    /// A slot's device family: a FET polarity as (root slot, flipped from the
+    /// root), or a fixed device kind.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Fam {
+        Fet(u8, bool),
+        Fixed(DeviceKind),
+    }
+
+    /// Every slot's [`Fam`], following back-references (well-formedness first).
+    fn families(p: &Pattern) -> Vec<Fam> {
+        let mut f: Vec<Fam> = Vec::with_capacity(p.slots.len());
+        for (k, s) in p.slots.iter().enumerate() {
+            let x = match s.kind {
+                SlotKind::AnyFet => Fam::Fet(k as u8, false),
+                SlotKind::SameTypeAs(r) | SlotKind::SameKindAs(r) => f[r as usize],
+                SlotKind::ComplementOf(r) => match f[r as usize] {
+                    Fam::Fet(root, flip) => Fam::Fet(root, !flip),
+                    fixed => fixed,
+                },
+                SlotKind::Kind(d) => Fam::Fixed(d),
+            };
+            f.push(x);
+        }
+        f
+    }
+
+    #[test]
+    fn catalog_holds_91_mos_and_6_bipolar_patterns() {
+        let bjt = PATTERNS.iter().filter(|p| matches!(families(p)[0], Fam::Fixed(DeviceKind::Npn | DeviceKind::Pnp))).count();
+        assert_eq!((PATTERNS.len(), bjt), (97, 6));
+        for p in PATTERNS {
+            assert!((2..=8).contains(&p.slots.len()), "{}: {} slots", p.name, p.slots.len());
+            assert!(!p.links.is_empty(), "{}: no links", p.name);
+        }
+    }
+
+    #[test]
+    fn patterns_listed_by_non_increasing_priority() {
+        for w in PATTERNS.windows(2) {
+            assert!(w[0].priority >= w[1].priority, "{} ({}) listed before {} ({})", w[0].name, w[0].priority, w[1].name, w[1].priority);
+        }
+    }
+
+    #[test]
+    fn priority_lies_in_its_device_count_tier() {
+        for p in PATTERNS {
+            let tier = match p.slots.len() {
+                2 => 5..=13,
+                3 => 14..=19,
+                4 => 20..=29,
+                5 => 30..=39,
+                6 => 40..=49,
+                8 => 50..=59,
+                n => panic!("{}: no priority tier for {n} devices", p.name),
+            };
+            assert!(tier.contains(&p.priority), "{}: priority {} outside {tier:?}", p.name, p.priority);
+        }
+    }
+
+    #[test]
+    fn documented_precedences_hold() {
+        // DIFF_SWITCH's doc: a signal-gated pair matches both, and diff_pair wins.
+        assert!(DIFF_PAIR.priority > DIFF_SWITCH.priority);
+        // The same shape with a stricter size rule ranks higher.
+        assert!(CASCODE_MATCHED.priority > CASCODE.priority);
+    }
+
+    #[test]
+    fn links_join_two_distinct_slots() {
+        for p in PATTERNS {
+            for l in p.links {
+                assert_ne!(l.a, l.b, "{}: link {l:?} relates a slot to itself (use DiodeReq)", p.name);
+            }
+        }
+    }
+
+    #[test]
+    fn fet_back_references_name_fet_slots() {
+        for p in PATTERNS {
+            let f = families(p);
+            for s in p.slots {
+                if let SlotKind::SameTypeAs(r) | SlotKind::ComplementOf(r) = s.kind {
+                    assert!(matches!(f[r as usize], Fam::Fet(..)), "{}: FET rule refers to non-FET slot {r}", p.name);
+                }
+            }
+        }
+    }
+
+    // ── ROLES / roles_of ──
+
+    /// `a` and `b` share a net in `p`'s minimal netlist, bulk pins aside.
+    fn share_net(p: &'static Pattern, a: u8, b: u8) -> bool {
+        let nl = minimal_netlist(p);
+        let nets = |k: u8| -> Vec<NetId> {
+            nl.devices[k as usize].terminals.iter().filter(|(pin, _)| pin != "B" || !matches!(nl.devices[k as usize].kind, DeviceKind::Nmos | DeviceKind::Pmos)).map(|&(_, n)| n).collect()
+        };
+        let nb = nets(b);
+        nets(a).iter().any(|n| nb.contains(n))
+    }
+
+    fn pattern(name: &str) -> &'static Pattern {
+        PATTERNS.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("{name} not in PATTERNS"))
+    }
+
+    #[test]
+    fn declared_couples_are_distinct_connected_and_same_family() {
+        for &(name, r) in ROLES {
+            let p = pattern(name);
+            let f = families(p);
+            for &(a, b, _) in r.pairs {
+                assert_ne!(a, b, "{name}: pair ({a},{b}) is one slot");
+                assert_eq!(f[a as usize], f[b as usize], "{name}: pair ({a},{b}) mixes device families");
+                assert!(share_net(p, a, b), "{name}: pair ({a},{b}) shares no net");
+            }
+            for &(a, b) in r.prox {
+                assert_ne!(a, b, "{name}: prox ({a},{b}) is one slot");
+                assert!(share_net(p, a, b), "{name}: prox ({a},{b}) shares no net");
+            }
+            for &s in r.selfs {
+                assert!(r.pairs.iter().any(|&(a, b, _)| share_net(p, s, a) || share_net(p, s, b)), "{name}: self {s} touches no pair");
+            }
+        }
+    }
+
+    type RolesKey = (Vec<(u8, u8, BlockKind)>, Vec<u8>, Vec<(u8, u8)>);
+
+    fn key(r: Roles) -> RolesKey {
+        (r.pairs.to_vec(), r.selfs.to_vec(), r.prox.to_vec())
+    }
+
+    #[test]
+    fn roles_of_returns_the_declared_row() {
+        let want: RolesKey = (vec![(0, 1, DiffPair), (2, 3, Load)], vec![4], vec![]);
+        assert_eq!(key(roles_of(&FIVE_TRANSISTOR_OTA)), want);
+        assert_eq!(key(roles_of(&CMOS_INVERTER)), (vec![], vec![], vec![(0, 1)]));
+        // A declared 2-slot row wins over the name fallback (which gives Group).
+        assert_eq!(BlockKind::from_template("bjt_ratioed_pair_npn", 2), BlockKind::Group);
+        assert_eq!(key(roles_of(&BJT_RATIOED_PAIR_NPN)), (vec![(0, 1, CurrentMirror)], vec![], vec![]));
+    }
+
+    #[test]
+    fn roles_of_falls_back_to_the_name_for_two_slots() {
+        let pair = |k: BlockKind| -> RolesKey { (vec![(0, 1, k)], vec![], vec![]) };
+        assert_eq!(key(roles_of(&DIFF_PAIR)), pair(DiffPair));
+        assert_eq!(key(roles_of(&CROSS_COUPLED)), pair(DiffPair));
+        assert_eq!(key(roles_of(&CURRENT_MIRROR)), pair(CurrentMirror));
+        assert_eq!(key(roles_of(&DIODE_LOAD_PAIR)), pair(Load));
+        for p in [&CASCODE, &SERIES_STACK, &SOURCE_FOLLOWER] {
+            assert_eq!(key(roles_of(p)), (vec![], vec![], vec![(0, 1)]), "{}", p.name);
+        }
+        // Group: no couple.
+        for p in [&PUSH_PULL_PAIR, &LATCH_HALF, &TRANSMISSION_GATE] {
+            assert_eq!(key(roles_of(p)), key(Roles::default()), "{}", p.name);
+        }
+    }
+
+    #[test]
+    fn roles_of_gives_nothing_to_an_undeclared_composite_or_odd_size() {
+        assert!(!ROLES.iter().any(|(n, _)| *n == WILSON_MIRROR.name));
+        assert_eq!(key(roles_of(&WILSON_MIRROR)), key(Roles::default()));
+        // The fallback is for exactly two slots, whatever the name says.
+        const NONE: Pattern = Pattern { name: "x_mirror", priority: 0, slots: &[], links: &[] };
+        const ONE: Pattern = Pattern { name: "x_mirror", priority: 0, slots: &[S_ANY], links: &[] };
+        const THREE: Pattern = Pattern { name: "x_mirror", priority: 0, slots: &[S_ANY, S_ANY, S_ANY], links: &[] };
+        const TWO: Pattern = Pattern { name: "x_mirror", priority: 0, slots: &[S_ANY, S_ANY], links: &[] };
+        for p in [&NONE, &ONE, &THREE] {
+            assert_eq!(key(roles_of(p)), key(Roles::default()), "{} slots", p.slots.len());
+        }
+        assert_eq!(key(roles_of(&TWO)), (vec![(0, 1, CurrentMirror)], vec![], vec![]));
+    }
+
+    #[test]
+    fn roles_of_every_pattern_stays_in_range() {
+        for p in PATTERNS {
+            let r = roles_of(p);
+            let n = p.slots.len() as u8;
+            let slots = r.pairs.iter().flat_map(|&(a, b, _)| [a, b]).chain(r.selfs.iter().copied()).chain(r.prox.iter().flat_map(|&(a, b)| [a, b]));
+            for s in slots {
+                assert!(s < n, "{}: role slot {s} >= {n}", p.name);
+            }
         }
     }
 }
