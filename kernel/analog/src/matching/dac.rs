@@ -151,7 +151,7 @@ pub fn split_dac_assign(l_bits: u8, m_bits: u8, rows: usize, cols: usize) -> Vec
     let n = rows * cols;
     debug_assert!(n >= (1 << l) + (1 << m) - 1 + 2, "{rows}×{cols} cannot hold L={l}, M={m}");
     let order = spiral(rows, cols);
-    let mut g = Grid { cols, slot: vec![None; n] };
+    let mut g = Grid::new(rows, cols);
     let next = |g: &Grid| order.iter().copied().find(|&i| g.free_pair(i));
     if let Some(i) = next(&g) {
         g.put_pair(i, (l + m + 1) as u8);

@@ -100,7 +100,7 @@ pub fn centro_assign(counts: &[u16], rows: usize, cols: usize, fill: Fill) -> (V
     let total: usize = counts.iter().map(|&u| usize::from(u)).sum();
     debug_assert!(rows * cols >= total, "{rows}×{cols} cannot hold {total}");
     let n = rows * cols;
-    let mut g = Grid { cols, slot: vec![None; n] };
+    let mut g = Grid::new(rows, cols);
     let key = |i: usize| spiral_key(i, rows, cols);
     let order = spiral(rows, cols);
     // Odd counts first: the centre cell (odd grid) for one, reflected pairs
@@ -211,6 +211,13 @@ pub struct Grid {
 pub type CellRect = (usize, usize, usize, usize);
 
 impl Grid {
+    /// An all-free `rows × cols` grid; upholds the `slot.len() % cols == 0`
+    /// invariant by construction.
+    #[must_use]
+    pub fn new(rows: usize, cols: usize) -> Self {
+        Grid { cols, slot: vec![None; rows * cols] }
+    }
+
     /// The cell `i` reflects to through the grid centre. Panics on an empty grid.
     #[must_use]
     pub fn refl(&self, i: usize) -> usize {
