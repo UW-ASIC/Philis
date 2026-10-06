@@ -2,32 +2,40 @@
 //! precision poly resistors — a continuous poly strip whose body is marked by
 //! `rpoly`, with long contacted heads, all under rpm + npc + psdm.
 
-use crate::builder::dim;
 use analog::cell::SeriesParallel;
 use analog::matching::{class::resistor_env, pattern::segment_row};
 use analog::Constraints;
 use pnr_core::{DeviceGroup, Drawn, DrawnKind, Macro, MatchClass, Node, Process, Rect};
 
-use crate::builder::{cut_lattice, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
+use crate::builder::{cut_lattice, dim, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
 use crate::{Cell, Pattern};
 
 /// A recipe's per-device resistance, integers from the sidecar:
 /// R = sheet·(L + dl)/weff + head/(weff + head_dw),  weff = W + dw − narrow·max(knee − W, 0),
 /// W and L in µm (Hastings eq 6.22: a body's value plus its two heads, so
 /// splitting a body into n devices adds n − 1 head terms).
+///
+/// Each field is the sidecar key `res_<field>`; a key the recipe omits reads 0.
 #[derive(Clone, Copy, Debug)]
 pub struct ResModel {
+    /// Body sheet resistance, mΩ/□ (> 0: [`ResModel::of`] rejects any other).
     pub sheet_mohm: i64,
+    /// Both heads of one device together, mΩ·µm (divided by the head width).
     pub head_mohm_um: i64,
+    /// Electrical minus drawn body length, nm.
     pub dl_nm: i32,
+    /// Electrical minus drawn body width, nm.
     pub dw_nm: i32,
+    /// Extra width the heads' term sees over `weff`, nm.
     pub head_dw_nm: i32,
+    /// Width lost per unit of drawn width below `knee_nm`, ‰.
     pub narrow_permille: i32,
+    /// Drawn width below which the narrow-body loss applies, nm.
     pub knee_nm: i32,
 }
 
 impl ResModel {
-    /// `None` when the recipe states no `res_sheet_mohm`.
+    /// The process's model; `None` when it states no positive `res_sheet_mohm`.
     #[must_use]
     pub fn of(p: &dyn Process) -> Option<Self> {
         let sheet = p.rule("res_sheet_mohm", 0);
@@ -57,16 +65,20 @@ impl ResModel {
         self.head_mohm_um as f64 / 1e3 / (weff + f64::from(self.head_dw_nm) / 1e3)
     }
 
-    /// One device of drawn W×L, Ω.
+    /// One device of drawn W×L (nm), both heads included, Ω. Not finite when
+    /// the effective width (or its heads' width) is not positive.
     #[must_use]
     pub fn ohm(&self, w_nm: i32, l_nm: i32) -> f64 {
         let weff = self.weff(w_nm);
         self.sheet_mohm as f64 / 1e3 * (f64::from(l_nm) + f64::from(self.dl_nm)) / 1e3 / weff + self.head_ohm(weff)
     }
 
-    /// Body length so `n` series devices of width `w` total `target`:
-    /// L = (target/n − head/(weff+head_dw))·weff/sheet − dl, snapped to `lat`;
-    /// `None` below `min_nm` or when the snapped residual exceeds `tol_ppm`.
+    /// Body length, nm, so `n` series devices of drawn width `w_nm` total
+    /// `target_ohm`: L = (target/n − head/(weff+head_dw))·weff/sheet − dl,
+    /// rounded to the nearest multiple of `lat` (`lat <= 0` reads 1, `n = 0`
+    /// reads 1). `None` below `min_nm`, when the snapped chain's value misses
+    /// `target_ohm` by more than `tol_ppm`, or when the target is not
+    /// positive.
     #[must_use]
     pub fn seg_len(&self, w_nm: i32, target_ohm: f64, n: u32, min_nm: i32, lat: i32, tol_ppm: i32) -> Option<i32> {
         let weff = self.weff(w_nm);
@@ -79,7 +91,8 @@ impl ResModel {
 }
 
 /// How far a segmented resistor may drift from its schematic value, ppm
-/// (`res_value_tol_ppm`): lengths snap to the cut lattice.
+/// (`res_value_tol_ppm`, 0 when absent): lengths snap to the cut lattice,
+/// so a 0 tolerance admits only exactly representable splits.
 #[must_use]
 pub fn value_tol_ppm(p: &dyn Process) -> i32 {
     p.rule("res_value_tol_ppm", 0)
@@ -159,9 +172,15 @@ fn far_join(seq: &[usize]) -> bool {
 /// whose lengths keep the string's model value; member d draws `dev_nf[d]`
 /// parallel strings when its unitization is `Parallel`. Strings laid out
 /// `Single` (each string's segments adjacent) or `Interdig`.
+///
+/// A group of unequal `Series` members (EXT-15) ignores `segments`: each
+/// member draws its own count (blocks) or `series[d]` common units
+/// (`Interdig`).
 #[derive(Clone)]
 pub struct Resistor {
+    /// Series segments per string, `1` or even (`0` reads 1).
     pub segments: u16,
+    /// [`Pattern::Single`] or [`Pattern::Interdig`]; any other draws as `Single`.
     pub pattern: Pattern,
 }
 
@@ -218,19 +237,9 @@ impl Cell for Resistor {
         // where it states one (sky130 licon.1b: 190 x 2000 inside rpm).
         let (cw, ch) = slot(process);
         let cut_space = process.space("licon").unwrap_or(ct);
-        // Poly past a cut, and li past a cut, on every side.
-        let border = r("poly_encloses_licon_one_side", 0)
-            .max(r("li_encloses_licon", 0))
-            .max(process.enclosure("poly", "licon").unwrap_or(0))
-            .max(process.endcap("poly", "licon").unwrap_or(0))
-            .max(process.endcap("li", "licon").unwrap_or(0));
+        let border = head_border(process);
         let lap = LAP;
-        // A cut's inner side keeps the marker's spacing too, where the deck
-        // states one.
-        let inner = border
-            .max(process.space_between("rpoly", "licon").unwrap_or(0))
-            .max(process.space_between("rpoly_b", "licon").unwrap_or(0))
-            .max(process.space_between("res_block", "licon").unwrap_or(0));
+        let inner = head_inner(process, border);
         let seg_gap = seg_gap(process);
         let n_segments = i32::from(self.segments.max(1));
         let body_w = s.unit_w.max(r("res_min_width", 0));
@@ -471,14 +480,9 @@ impl Cell for Resistor {
 /// pin's cut row by a met1 pad (the router lands one on the pin) and met1
 /// spacing, a met1 pitch apart, inside a head of length `head`.
 fn jumper_tracks(process: &dyn Process, head: i32) -> Vec<i32> {
-    let r = |name: &str, default: i32| process.rule(name, default);
     let lat = cut_lattice(process);
     let (ct, m_ct, m_enc) = (dim(process, "contact"), dim(process, "mcon_size"), dim(process, "m1_enc"));
-    let border = r("poly_encloses_licon_one_side", 0)
-            .max(r("li_encloses_licon", 0))
-            .max(process.enclosure("poly", "licon").unwrap_or(0))
-            .max(process.endcap("poly", "licon").unwrap_or(0))
-            .max(process.endcap("li", "licon").unwrap_or(0));
+    let border = head_border(process);
     let head_li_h = head - LAP;
     let pitch = m_ct + 2 * m_enc + dim(process, "met1_space");
     let first = snap_cut(border + ct + (m_ct + 2 * m_enc) + dim(process, "met1_space") + lat - 1, lat);
@@ -524,22 +528,35 @@ const LAP: i32 = 0;
 /// the body by >= 2.16 um), and never less than one bordered cut past
 /// [`LAP`], or the head carries no contact and the resistor no terminal.
 fn head_len(process: &dyn Process) -> i32 {
-    let r = |name: &str, default: i32| process.rule(name, default);
-    let border = r("poly_encloses_licon_one_side", 0)
-            .max(r("li_encloses_licon", 0))
-            .max(process.enclosure("poly", "licon").unwrap_or(0))
-            .max(process.endcap("poly", "licon").unwrap_or(0))
-            .max(process.endcap("li", "licon").unwrap_or(0));
-    let inner = border
-        .max(process.space_between("rpoly", "licon").unwrap_or(0))
-        .max(process.space_between("rpoly_b", "licon").unwrap_or(0))
-        .max(process.space_between("res_block", "licon").unwrap_or(0));
+    let border = head_border(process);
+    let inner = head_inner(process, border);
     let lat = cut_lattice(process);
-    snap_cut(r("res_head", 0).max(LAP + border + slot(process).1 + inner) + lat - 1, lat)
+    snap_cut(process.rule("res_head", 0).max(LAP + border + slot(process).1 + inner) + lat - 1, lat)
 }
 
+/// Poly past a head cut, and li past it, on every side, nm: the widest of
+/// the deck's enclosure and end-cap rules.
+fn head_border(process: &dyn Process) -> i32 {
+    process
+        .rule("poly_encloses_licon_one_side", 0)
+        .max(process.rule("li_encloses_licon", 0))
+        .max(process.enclosure("poly", "licon").unwrap_or(0))
+        .max(process.endcap("poly", "licon").unwrap_or(0))
+        .max(process.endcap("li", "licon").unwrap_or(0))
+}
+
+/// A head cut's clearance on its body side, nm: `border`, or the resistor
+/// markers' (`rpoly`, `rpoly_b`, `res_block`) spacing to licon where the
+/// deck states a larger one.
+fn head_inner(process: &dyn Process, border: i32) -> i32 {
+    border
+        .max(process.space_between("rpoly", "licon").unwrap_or(0))
+        .max(process.space_between("rpoly_b", "licon").unwrap_or(0))
+        .max(process.space_between("res_block", "licon").unwrap_or(0))
+}
+
+/// The group's sizing, a body defaulting to `res_min_width` × `res_min_segment`.
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
-    // Default body: min segment width and a nominal 10µm body (`res_min_segment`).
     let def_w = process.rule("res_min_width", 0);
     let def_l = process.rule("res_min_segment", 0);
     sizing(group, c, def_w, def_l)

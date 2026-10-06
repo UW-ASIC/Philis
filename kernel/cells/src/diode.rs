@@ -5,48 +5,45 @@
 //! anode `P` under the marker, an n+ tap as the nwell's cathode contact `N`,
 //! both in one nwell per device.
 
-use crate::builder::dim;
 use analog::matching::pattern::{self, Fill};
 use analog::Constraints;
 use pnr_core::{DeviceGroup, Drawn, DrawnKind, Macro, Node, Process, Rect};
 
-use crate::builder::{cut_lattice, pin, req, sizing, snap_cut, Builder, Sizing};
-use crate::Cell;
+use crate::builder::{cut_lattice, dim, pin, req, sizing, snap_cut, Builder, Sizing};
+use crate::{unit_grids, Cell};
 
-/// ponytail: the gf180 well form is drawn but unusable. Its recogniser's
-/// `nwell` terminal is not a conductor in the deck, so extraction finds 0
-/// devices (gpurify: terminals must be conductors; wells-as-nets is coming
-/// upstream), and the li pad fails M1.3 until verify exposes `li_min_area`.
+// ponytail: the gf180 well form is drawn but unusable. Its recogniser's
+// `nwell` terminal is not a conductor in the deck, so extraction finds 0
+// devices (gpurify: terminals must be conductors; wells-as-nets is coming
+// upstream), and the li pad fails M1.3 until verify exposes `li_min_area`.
+
+/// One diode variant: a `rows × cols` grid of units, each a cathode pad and
+/// an anode pad side by side; member `d` owns `dev_nf[d]` units, dealt by
+/// [`pattern::centro_assign`]`(Balanced)`. Empty cells stay empty.
 ///
-/// One diode variant: `rows × cols` grid; units of member `d` are
-/// `dev_nf[d]`, owners from [`pattern::centro_assign`]`(Balanced)`.
+/// Invariant (from [`Cell::enumerate`]): `rows · cols` is at least the
+/// group's total unit count.
 #[derive(Clone)]
 pub struct Diode {
+    /// Unit rows, bottom to top.
     pub rows: u16,
+    /// Unit columns, left to right.
     pub cols: u16,
 }
 
 impl Cell for Diode {
+    /// Empty for an empty group.
     fn enumerate(group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Vec<Self> {
         if group.devices.is_empty() {
             return vec![];
         }
         let s = group_sizing(group, constraints, process);
-        let counts: Vec<u16> = s.dev_nf.iter().map(|&n| n.max(1)).collect();
-        let n: u16 = counts.iter().sum();
-        if counts.len() > 1 {
-            return pattern::grids(&counts, 3.0).into_iter().map(|(r, c)| Diode { rows: r as u16, cols: c as u16 }).collect();
-        }
-        let mut cols = vec![1, n, (f64::from(n).sqrt().ceil() as u16).max(1)];
-        cols.sort_unstable();
-        cols.dedup();
-        cols.into_iter().map(|cols| Diode { rows: n.div_ceil(cols), cols }).collect()
+        unit_grids(&s.dev_nf).into_iter().map(|(rows, cols)| Diode { rows, cols }).collect()
     }
 
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro {
         let mut b = Builder::new(process.grid());
         let s = group_sizing(group, constraints, process);
-        let counts: Vec<u16> = s.dev_nf.iter().map(|&n| n.max(1)).collect();
         let r = |name: &str, default: i32| process.rule(name, default);
         let lat = cut_lattice(process);
         let up = |v: i32| snap_cut(v + lat - 1, lat);
@@ -83,7 +80,7 @@ impl Cell for Diode {
         let gap = well.map_or(gap, |(_, _, enc)| gap.max(2 * enc + r("nwell_min_spacing", 0).max(process.space("nwell").unwrap_or(0))));
         // The li pad also clears the li min area (the deck states its side).
         let pad_enc = li_enc.max(up((r("li_min_area", 0) - ct + 1) / 2));
-        // Contact array pitch and the cathode's cut counts (bjt.rs:166-178).
+        // Contact array pitch and the cathode's cut counts (as the BJT emitter's).
         let pitch = up(ct + process.space("licon").unwrap_or(ct));
         let fit = |len: i32, inset: i32| ((len - 2 * inset - ct) / pitch + 1).max(1);
         let (nx, ny) = (fit(w, diff_cap), fit(l, diff_cap));
@@ -91,7 +88,7 @@ impl Cell for Diode {
         let ny_tap = fit(tap_h, tap_cap);
         let ax_cut = tap_side / 2 - ct / 2;
 
-        let (owners, _) = pattern::centro_assign(&counts, rows, cols, Fill::Balanced);
+        let (owners, _) = pattern::centro_assign(&s.dev_nf, rows, cols, Fill::Balanced);
         for (slot, d) in owners.iter().enumerate().filter_map(|(i, d)| Some((i, (*d)?))) {
             let di = usize::from(d);
             let ox = (slot % cols) as i32 * (dev_w + gap);
@@ -143,6 +140,7 @@ impl Cell for Diode {
     }
 }
 
+/// The group's sizing, a unit defaulting to `diode_w` × `diode_l`.
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
     sizing(group, c, process.rule("diode_w", 0), process.rule("diode_l", 0))
 }

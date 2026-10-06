@@ -45,11 +45,33 @@ pub enum Pattern {
 /// A device-family generator over its variant space.
 pub trait Cell: Clone {
     /// Every feasible variant for `group`, in a deterministic order (the order
-    /// `Layout::variant` indexes). Never ranked: the placer picks.
+    /// `Layout::variant` indexes). Never ranked: the placer picks. Empty when
+    /// the group is empty or the process cannot build the family, which
+    /// signoff reports as `cell/undrawable`.
     fn enumerate(group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Vec<Self>;
 
-    /// Draw this variant.
+    /// Draws this variant in the cell's local frame, nm. Pure and
+    /// byte-deterministic in its inputs. Expects a variant [`Cell::enumerate`]
+    /// returned for the same `group`, `constraints` and `process`; any other
+    /// may panic (a mandatory layer role missing from the deck, via
+    /// [`builder::req`]) or draw a grid that cannot hold every unit.
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro;
+}
+
+/// Unit-array grid shapes `(rows, cols)` for a group whose member `d` draws
+/// `counts[d]` units (each `>= 1`, as [`builder::Sizing`] guarantees), in
+/// a deterministic order. Several members: the point-symmetric grids of
+/// [`analog::matching::pattern::grids`] at aspect `<= 3`. One member of `n`
+/// units: one row, one column, and the squarest `ceil(sqrt n)` columns,
+/// deduplicated. Empty when `counts` is empty.
+pub(crate) fn unit_grids(counts: &[u16]) -> Vec<(u16, u16)> {
+    if let [n] = *counts {
+        let mut cols = vec![1, n, (f64::from(n).sqrt().ceil() as u16).max(1)];
+        cols.sort_unstable();
+        cols.dedup();
+        return cols.into_iter().map(|c| (n.div_ceil(c), c)).collect();
+    }
+    analog::matching::pattern::grids(counts, 3.0).into_iter().map(|(r, c)| (r as u16, c as u16)).collect()
 }
 
 /// Shared helpers for each generator's in-file DRC/ERC self-check: one device

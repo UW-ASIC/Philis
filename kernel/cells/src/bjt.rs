@@ -5,14 +5,13 @@
 //! n-well ring and a deep n-well isolate, the collector tapped on that ring.
 //! Every gap and width is the deck's.
 
-use crate::builder::dim;
 use analog::matching::pattern::{self, Fill};
 use analog::Constraints;
 use pnr_core::{DeviceGroup, DeviceKind, Macro, NetId, Pin, Process, Rect};
 
-use crate::builder::{cut_lattice, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
+use crate::builder::{cut_lattice, dim, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
 use crate::post_cell::{tap_ring, WellShape};
-use crate::Cell;
+use crate::{unit_grids, Cell};
 
 /// One BJT variant: the group's unit devices (each member's `dev_nf` units)
 /// on a `rows × columns` grid, owners from
@@ -21,33 +20,29 @@ use crate::Cell;
 /// classic 3×3 with the one unit centred (Hastings §10.2, ratioed bipolars).
 /// Empty cells stay empty. Area ratio comes from unit count, never emitter
 /// scaling. Neighbouring units share their collector band.
+///
+/// Invariant (from [`Cell::enumerate`]): `rows · columns` is at least the
+/// group's total unit count.
 #[derive(Clone)]
 pub struct Bjt {
+    /// Unit rows, bottom to top.
     pub rows: u16,
+    /// Unit columns, left to right.
     pub columns: u16,
 }
 
 impl Cell for Bjt {
-    fn enumerate(group: &DeviceGroup, _constraints: &Constraints, _process: &dyn Process) -> Vec<Self> {
+    /// Empty for an empty group, and for an NPN where the process lacks the
+    /// isolated p-base (a `dnwell` layer and a non-zero `npn_isolation`).
+    fn enumerate(group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Vec<Self> {
         if group.devices.is_empty() {
             return vec![];
         }
-        // An NPN needs an isolated p-base: a deep n-well under an n-well
-        // ring. Only where the process declares that construction
-        // (`npn_isolation`), and has the deep well.
-        if !device_is_pnp(group, _constraints) && (_process.layer("dnwell").is_none() || _process.rule("npn_isolation", 0) == 0) {
+        if !device_is_pnp(group, constraints) && (process.layer("dnwell").is_none() || process.rule("npn_isolation", 0) == 0) {
             return vec![];
         }
-        let s = group_sizing(group, _constraints, _process);
-        let counts = unit_counts(&s);
-        let n = counts.iter().sum::<u16>();
-        if group.devices.len() > 1 {
-            return pattern::grids(&counts, 3.0).into_iter().map(|(r, c)| Bjt { rows: r as u16, columns: c as u16 }).collect();
-        }
-        let mut cols = vec![1, n, (f64::from(n).sqrt().ceil() as u16).max(1)];
-        cols.sort_unstable();
-        cols.dedup();
-        cols.into_iter().map(|columns| Bjt { rows: n.div_ceil(columns), columns }).collect()
+        let s = group_sizing(group, constraints, process);
+        unit_grids(&s.dev_nf).into_iter().map(|(rows, columns)| Bjt { rows, columns }).collect()
     }
 
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro {
@@ -56,7 +51,7 @@ impl Cell for Bjt {
         let pnp = device_is_pnp(group, constraints);
         let u = Unit::new(&s, pnp, process);
         let cols = i32::from(self.columns);
-        let (owners, _) = pattern::centro_assign(&unit_counts(&s), usize::from(self.rows), usize::from(self.columns), Fill::Balanced);
+        let (owners, _) = pattern::centro_assign(&s.dev_nf, usize::from(self.rows), usize::from(self.columns), Fill::Balanced);
         // PNP units abut on a shared collector band (the substrate); NPN
         // units each keep their own isolation, the deck's spacings apart.
         let lat = cut_lattice(process);
@@ -70,26 +65,53 @@ impl Cell for Bjt {
     }
 }
 
-/// One unit's geometry at the origin: the emitter, the base band's outer
-/// edge, the collector band's outer edge.
+/// An NPN's isolation, unit frame: an n-well ring (`hole` inside `outer`)
+/// over a deep n-well `dnwell`.
+#[derive(Clone, Copy)]
+struct Isolation {
+    hole: Rect,
+    outer: Rect,
+    dnwell: Rect,
+}
+
+/// One unit's geometry with its emitter's lower-left corner at the origin,
+/// nm. All derived from the deck once per draw.
 struct Unit {
     pnp: bool,
     emitter: Rect,
+    /// Emitter edge to the base band's inner edge.
     base_gap: i32,
+    /// The base band's outer edge.
     base_outer: Rect,
+    /// Base band's outer edge to the collector band's inner edge.
     coll_gap: i32,
+    /// Width of the base and collector bands.
     ring_w: i32,
-    /// NPN isolation: the n-well ring's hole and outer edge, the deep well.
-    iso: Option<(Rect, Rect, Rect)>,
-    /// Unit-to-unit step.
+    /// `Some` exactly for an NPN.
+    iso: Option<Isolation>,
+    /// Unit-to-unit step `(x, y)` before lattice snapping.
     pitch: (i32, i32),
+}
+
+/// Implant roles `(emitter, base, collector)`: PNP p+/n+/p+, NPN n+/p+/n+.
+fn implants(pnp: bool) -> (&'static str, &'static str, &'static str) {
+    if pnp {
+        ("psdm", "nsdm", "psdm")
+    } else {
+        ("nsdm", "psdm", "nsdm")
+    }
+}
+
+/// `r` grown by `d` on every side.
+fn grow(r: Rect, d: i32) -> Rect {
+    Rect { x: r.x - d, y: r.y - d, w: r.w + 2 * d, h: r.h + 2 * d }
 }
 
 impl Unit {
     fn new(s: &Sizing, pnp: bool, process: &dyn Process) -> Self {
         let r = |name: &str, d: i32| process.rule(name, d);
         let enc = |o: &str, i: &str| process.enclosure(o, i).unwrap_or(0);
-        let (emit_imp, base_imp, coll_imp) = if pnp { ("psdm", "nsdm", "psdm") } else { ("nsdm", "psdm", "nsdm") };
+        let (emit_imp, base_imp, coll_imp) = implants(pnp);
         let min_side = r("bjt_min_emitter_side", 0);
         // A fixed-geometry model's recipe slot overrides the netlist's size
         // (sky130 BJTs are fixed devices: any other drawn size simulates a
@@ -116,7 +138,6 @@ impl Unit {
             .max(enc(emit_imp, "diff") + enc(base_imp, "tap"))
             .max(enc(emit_imp, "diff") + beyond(emit_imp))
             .max(enc(base_imp, "tap") + process.space_between(base_imp, "diff").unwrap_or(0));
-        let grow = |x: Rect, d: i32| Rect { x: x.x - d, y: x.y - d, w: x.w + 2 * d, h: x.h + 2 * d };
         let base_outer = grow(emitter, base_gap + ring_w);
         // Base band to collector band: the base implant against the
         // collector's, and the well (PNP: the base n-well; NPN: the isolating
@@ -143,11 +164,11 @@ impl Unit {
             let past = process.enclosure("nwell", "dnwell").unwrap_or(0);
             let reach = (dn.x - hole.x).abs() + past;
             let full = grow(hole, reach.max(hole.x - outer.x + nw));
-            (hole, full, dn)
+            Isolation { hole, outer: full, dnwell: dn }
         });
         let pitch = match iso {
             None => (outer.w - ring_w, outer.h - ring_w),
-            Some((_, full, dn)) => {
+            Some(Isolation { outer: full, dnwell: dn, .. }) => {
                 let (sw, sd) = (process.space("nwell").unwrap_or(0), process.space("dnwell").unwrap_or(0));
                 ((full.w + sw).max(dn.w + sd), (full.h + sw).max(dn.h + sd))
             }
@@ -155,12 +176,13 @@ impl Unit {
         Self { pnp, emitter, base_gap, base_outer, coll_gap, ring_w, iso, pitch }
     }
 
+    /// Draws member `di`'s unit with its emitter corner at `(ox, oy)`.
     fn draw(&self, b: &mut Builder, process: &dyn Process, di: usize, ox: i32, oy: i32) {
         let at = |x: Rect| Rect { x: x.x + ox, y: x.y + oy, ..x };
         let r = |name: &str, d: i32| process.rule(name, d);
         let enc = |o: &str, i: &str| process.enclosure(o, i).unwrap_or(0);
         let cap = |o: &str, i: &str| process.endcap(o, i).unwrap_or(0);
-        let (emit_imp, base_imp, coll_imp) = if self.pnp { ("psdm", "nsdm", "psdm") } else { ("nsdm", "psdm", "nsdm") };
+        let (emit_imp, base_imp, coll_imp) = implants(self.pnp);
         let (diff, li, licon) = (req(process, "diff"), req(process, "li"), req(process, "licon"));
         let lat = cut_lattice(process);
         let ct = dim(process, "contact");
@@ -181,7 +203,7 @@ impl Unit {
         // end-cap past the outer cuts on every side).
         b.rect(diff, e);
         let ei = enc(emit_imp, "diff");
-        b.rect(req(process, emit_imp), Rect { x: e.x - ei, y: e.y - ei, w: e.w + 2 * ei, h: e.h + 2 * ei });
+        b.rect(req(process, emit_imp), grow(e, ei));
         let inset = r("diff_encloses_licon", 0).max(enc("diff", "licon")).max(cap("diff", "licon"));
         let pitch = ct + process.space("licon").unwrap_or(ct);
         let fit = |len: i32| ((len - 2 * inset - ct) / pitch + 1).max(1);
@@ -206,8 +228,8 @@ impl Unit {
         let coll = Pin { name: format!("d{di}:C"), net, layer: li, at: e };
         let bo = at(self.base_outer);
         let co = tap_ring(b, process, coll_imp, WellShape::None, bo, self.coll_gap, (self.ring_w, 1), &coll);
-        if let (Some((hole, full, dn)), Some(nwell), Some(dnwell)) = (self.iso, process.layer("nwell"), process.layer("dnwell")) {
-            let (hole, full) = (at(hole), at(full));
+        if let (Some(iso), Some(nwell), Some(dnwell)) = (self.iso, process.layer("nwell"), process.layer("dnwell")) {
+            let (hole, full) = (at(iso.hole), at(iso.outer));
             for band in [
                 Rect { x: full.x, y: full.y, w: full.w, h: hole.y - full.y },
                 Rect { x: full.x, y: hole.y + hole.h, w: full.w, h: full.y + full.h - hole.y - hole.h },
@@ -216,7 +238,7 @@ impl Unit {
             ] {
                 b.rect(nwell, band);
             }
-            b.rect(dnwell, at(dn));
+            b.rect(dnwell, at(iso.dnwell));
         }
         // The device marker over the unit.
         if let Some(m) = process.layer(if self.pnp { "pnp" } else { "npn" }) {
@@ -225,11 +247,7 @@ impl Unit {
     }
 }
 
-/// Units per member: a member without units draws one.
-fn unit_counts(s: &Sizing) -> Vec<u16> {
-    s.dev_nf.iter().map(|&u| u.max(1)).collect()
-}
-
+/// The group's sizing, emitter defaulting to `bjt_min_emitter_side` square.
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
     let def = process.rule("bjt_min_emitter_side", 0);
     sizing(group, c, def, def)
