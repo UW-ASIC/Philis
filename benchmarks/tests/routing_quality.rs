@@ -156,3 +156,16 @@ fn dac4_plates() {
     assert!(rows(&sol, "plate crossing").is_empty());
     assert!(!sol.route.budget_violations.iter().any(|v| v.rule.starts_with("plate ratio")));
 }
+
+/// Distinct vias on ota before RTE-28's wrong-way jogs (measured with only
+/// the `RouteStats::vias` counter landed).
+const OTA_VIAS_BEFORE: u32 = 136;
+
+/// RTE-28: one-pitch wrong-way jogs on stride-1 layers replace via detours.
+#[test]
+#[ignore = "full flow on ota; run with --include-ignored"]
+fn wrong_way_jogs_cut_vias() {
+    let sol = run("ota", &pdk());
+    println!("ota vias {}", sol.route_stats.vias);
+    assert!(sol.route_stats.vias < OTA_VIAS_BEFORE, "ota vias {} (before {OTA_VIAS_BEFORE})", sol.route_stats.vias);
+}

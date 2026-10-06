@@ -285,6 +285,8 @@ pub struct RouteStats {
     pub pair_fillers_dropped: u32,
     /// Repair rounds run on the drawn routes after fill (RTE-23).
     pub post_rounds: u32,
+    /// Distinct vias drawn (RTE-28 reports the drop).
+    pub vias: u32,
 }
 
 /// The detailed router.
@@ -1667,6 +1669,9 @@ impl DetailedRoute {
             }
         }
         (stats.overuse, stats.expanded, stats.coarsened) = (overuse, dij.pops, cold.graph.coarsened);
+        // Lower node of each layer-changing step, deduplicated as `extract_geometry` does.
+        let via_at: HashSet<u32> = hot.trees.iter().flatten().flat_map(|b| b.windows(2)).filter(|w| cold.graph.ixy(w[0]).2 != cold.graph.ixy(w[1]).2).map(|w| w[0].min(w[1])).collect();
+        stats.vias = via_at.len() as u32;
         (routes, report, stats)
     }
 }
@@ -3871,11 +3876,12 @@ mod tests {
     #[test]
     fn negotiation_persists_across_calls() {
         let cfg = DetailedCfg { pitch: 1_300, ..test_cfg() };
-        // Five nets whose terminals all sit within one pitch of the same two rows:
+        // Six nets whose terminals all sit within one pitch of the same two rows
+        // (five no longer jam once nets jog one row over, RTE-28):
         // every net wants the same horizontal track.
-        let pins: Vec<(NetId, Rect, LayerId)> = (0..5u16)
+        let pins: Vec<(NetId, Rect, LayerId)> = (0..6u16)
             .flat_map(|n| {
-                let off = i32::from(n) * 130;
+                let off = i32::from(n) * 104;
                 [
                     (NetId(n), Rect { x: 1_000, y: 7_000 + off, w: 1, h: 1 }, LAYERS[0]),
                     (NetId(n), Rect { x: 15_000, y: 7_000 + off, w: 1, h: 1 }, LAYERS[0]),
