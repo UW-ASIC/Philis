@@ -114,7 +114,7 @@ pub fn bandgap_cores(hg: &BipartiteHypergraph, drawn: &[Drawn], bjt_pairs: &[(De
 fn binary(counts: &[u32]) -> bool {
     let mut c = counts.to_vec();
     c.sort_unstable();
-    c.len() >= 3 && c[0] == 1 && c[1..].iter().enumerate().all(|(i, &u)| u == 1 << i)
+    c.len() >= 3 && c[0] == 1 && c[1..].iter().enumerate().all(|(i, &u)| u32::try_from(i).ok().and_then(|i| 1u32.checked_shl(i)) == Some(u))
 }
 
 /// Bridge mismatch tolerance, relative to the drawn bridge area (**Philis
@@ -143,6 +143,19 @@ pub fn capacitor_sets(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetC
         v.sort_by_key(|&d| (!terminated(d), d));
     }
     let reference = |v: &[usize]| v.first().filter(|&&d| terminated(d)).map(|&d| DeviceId(d as u16));
+    // Bridge candidates, once: capacitors in no bank, by unordered plate-net pair.
+    let mut in_bank = vec![false; hg.device_count()];
+    for (_, v) in &banks {
+        for &d in v {
+            in_bank[d] = true;
+        }
+    }
+    let bridges: std::collections::HashMap<(u16, u16), Vec<usize>> = crate::sets::group((0..hg.device_count()).filter(|&d| cap(d) && !in_bank[d]).filter_map(|d| {
+        let (p, q) = (net(hg, d, "P")?.0, net(hg, d, "N")?.0);
+        Some(((p.min(q), p.max(q)), d))
+    }))
+    .into_iter()
+    .collect();
     let mut out = Vec::new();
     let mut used = vec![false; banks.len()];
     for i in 0..banks.len() {
@@ -150,7 +163,7 @@ pub fn capacitor_sets(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetC
             if used[i] || used[j] {
                 continue;
             }
-            let Some(ca) = lone_bridge(hg, banks[i].0 .0, banks[j].0 .0, &banks) else { continue };
+            let Some(ca) = lone_bridge(&bridges, banks[i].0 .0, banks[j].0 .0) else { continue };
             (used[i], used[j]) = (true, true);
             let (lsb, msb) = if banks[i].1.iter().any(|&d| terminated(d)) { (&banks[i].1, &banks[j].1) } else { (&banks[j].1, &banks[i].1) };
             check_bridge(drawn, lsb, msb, ca, diags);
@@ -168,15 +181,9 @@ pub fn capacitor_sets(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetC
 
 /// The one capacitor in no bank with its plates on `ti` and `tj` (either way
 /// round), `None` when there is none or several.
-fn lone_bridge<K>(hg: &BipartiteHypergraph, ti: NetId, tj: NetId, banks: &[(K, Vec<usize>)]) -> Option<usize> {
-    let mut bridges = (0..hg.device_count()).filter(|&d| {
-        let (p, n) = (net(hg, d, "P"), net(hg, d, "N"));
-        hg.kinds[d] == DeviceKind::Capacitor
-            && ((p, n) == (Some(ti), Some(tj)) || (p, n) == (Some(tj), Some(ti)))
-            && !banks.iter().any(|(_, v)| v.contains(&d))
-    });
-    match (bridges.next(), bridges.next()) {
-        (Some(ca), None) => Some(ca),
+fn lone_bridge(bridges: &std::collections::HashMap<(u16, u16), Vec<usize>>, ti: NetId, tj: NetId) -> Option<usize> {
+    match bridges.get(&(ti.0.min(tj.0), ti.0.max(tj.0))).map(Vec::as_slice) {
+        Some(&[ca]) => Some(ca),
         _ => None,
     }
 }
@@ -265,8 +272,18 @@ pub fn degenerated_pairs(hg: &BipartiteHypergraph, drawn: &[Drawn], roles: &[cra
 pub fn diode_sets(hg: &BipartiteHypergraph, drawn: &[Drawn]) -> Vec<PassiveSet> {
     let keyed = (0..hg.device_count())
         .filter(|&d| hg.kinds[d] == DeviceKind::Diode)
-        .flat_map(|d| ["P", "N"].map(|t| ((t, net(hg, d, t), drawn[d].model, drawn[d].w_finger_nm, drawn[d].l_nm), d)));
-    crate::sets::group(keyed).into_iter().filter(|(_, v)| v.len() > 1).map(|(_, v)| set(v, "diode_set", SetRole::Other)).collect()
+        .flat_map(|d| ["P", "N"].map(|t| (t, d)))
+        .filter_map(|(t, d)| Some(((t, net(hg, d, t)?, drawn[d].model, drawn[d].w_finger_nm, drawn[d].l_nm), d)));
+    let mut out: Vec<PassiveSet> = Vec::new();
+    for (_, v) in crate::sets::group(keyed) {
+        // Members ascend (keyed in id order), so equal groups compare element-wise.
+        // ponytail: linear scan of found sets; diode sets are few.
+        let seen = out.iter().any(|s| s.devices.iter().map(|d| d.0 as usize).eq(v.iter().copied()));
+        if v.len() > 1 && !seen {
+            out.push(set(v, "diode_set", SetRole::Other));
+        }
+    }
+    out
 }
 
 #[cfg(test)]

@@ -255,10 +255,11 @@ fn common_nodes(
     let pin = |d: DeviceId, t: &str| crate::pattern::pin_net(hg, u32::from(d.0), t);
     let mut stars: Vec<StarReq> = Vec::new();
     for (si, s) in intent.sets.iter().enumerate() {
-        let kind = hg.kinds[s.members[0].device.0 as usize];
+        let Some(m0) = s.members.first() else { continue };
+        let kind = hg.kinds[m0.device.0 as usize];
         let (bjt, fet) = (crate::sets::bjt(kind), crate::sets::fet(kind));
         let (t, term) = if bjt { ("E", Term::E) } else { ("S", Term::S) };
-        let Some(net) = pin(s.members[0].device, t) else { continue };
+        let Some(net) = pin(m0.device, t) else { continue };
         if !(fet || bjt) || s.members.len() < 2 || s.members.iter().any(|m| pin(m.device, t) != Some(net)) {
             continue;
         }
@@ -334,7 +335,8 @@ fn kelvins(hg: &BipartiteHypergraph, intent: &mut Intent) {
 fn dac_plates(hg: &BipartiteHypergraph, classes: &[NetClassification], intent: &mut Intent, set_roles: &[crate::class::SetRole]) {
     for (s, _) in intent.sets.iter().zip(set_roles).filter(|(_, &r)| r == crate::class::SetRole::DacBank) {
         let devs: Vec<DeviceId> = s.members.iter().map(|m| m.device).collect();
-        let Some(&plate) = hg.device_nets[devs[0].0 as usize].iter().find(|n| devs.iter().all(|d| hg.device_nets[d.0 as usize].contains(n))) else { continue };
+        let Some(d0) = devs.first() else { continue };
+        let Some(&plate) = hg.device_nets[d0.0 as usize].iter().find(|n| devs.iter().all(|d| hg.device_nets[d.0 as usize].contains(n))) else { continue };
         let mut set_rc = |n: NetId, rc| {
             if let Some(f) = intent.nets.get_mut(n.0 as usize) {
                 f.rc = rc;

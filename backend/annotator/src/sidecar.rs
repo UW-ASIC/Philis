@@ -46,8 +46,18 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
     let mut cfg = AnnotationConfig::default();
     let mut diags = Vec::new();
     let mut alias: HashMap<String, Vec<DeviceId>> = HashMap::new();
-    let device = |n: &str| nl.devices.iter().position(|d| d.name.eq_ignore_ascii_case(n)).map(|i| DeviceId(i as u16));
-    let net = |n: &str| nl.nets.iter().position(|x| x.name.eq_ignore_ascii_case(n)).map(|i| NetId(i as u16));
+    // Lowercased name → first index with it: one hash lookup per name, not a
+    // scan of the netlist (12 k devices).
+    let mut device_by: HashMap<String, u16> = HashMap::with_capacity(nl.devices.len());
+    for (i, d) in nl.devices.iter().enumerate() {
+        device_by.entry(d.name.to_ascii_lowercase()).or_insert(i as u16);
+    }
+    let mut net_by: HashMap<String, u16> = HashMap::with_capacity(nl.nets.len());
+    for (i, x) in nl.nets.iter().enumerate() {
+        net_by.entry(x.name.to_ascii_lowercase()).or_insert(i as u16);
+    }
+    let device = |n: &str| device_by.get(&n.to_ascii_lowercase()).map(|&i| DeviceId(i));
+    let net = |n: &str| net_by.get(&n.to_ascii_lowercase()).map(|&i| NetId(i));
     for (i, e) in entries.iter().enumerate() {
         let id = ConstraintId(u32::MAX - i as u32);
         let kind = e.get("constraint").and_then(Value::as_str).unwrap_or("");

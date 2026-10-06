@@ -218,6 +218,11 @@ pub fn analyze(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetClassifi
     let mut ambiguous: BTreeSet<Vec<u32>> = BTreeSet::new();
 
     for seed in seeds {
+        // A device seeded against itself is on the axis, not a pair.
+        let seed = &match *seed {
+            Seed::Devices(a, b, id) if a == b => Seed::SelfDevice(a, id),
+            other => other,
+        };
         s.cur = match *seed {
             Seed::Devices(.., id) | Seed::Nets(.., id) | Seed::SelfDevice(_, id) => id,
         };

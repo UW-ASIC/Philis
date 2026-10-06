@@ -228,6 +228,9 @@ pub fn unitize(members: &[DeviceId], drawn: &[Drawn], kind: DeviceKind, class: M
     if deck_keys.contains(&0) {
         return Err(err("unit_deck_incomplete", members, format!("deck unit bounds {deck:?}")));
     }
+    if members.is_empty() {
+        return Err(ratio(members, "no members"));
+    }
     let model = members.first().map_or(0, |m| drawn[m.0 as usize].model);
     if members.iter().any(|m| drawn[m.0 as usize].model != model) {
         return Err(ratio(members, "models differ"));
@@ -369,13 +372,18 @@ pub fn matched_sets(
     let shared_idx = device_index(n, shared.iter().map(Vec::as_slice));
     let passive_idx = device_index(n, passive.iter().map(|p| p.devices.as_slice()));
     let leaf_idx = device_index(n, leaves.iter().map(|b| b.devices.as_slice()));
+    // Group stamp per device: membership in O(1), not a scan of the group.
+    let mut stamp = vec![usize::MAX; n];
     groups
         .into_iter()
         .enumerate()
         .map(|(i, g)| {
             let kind = hg.kinds[g[0]];
             let ids: Vec<DeviceId> = g.iter().map(|&d| DeviceId(d as u16)).collect();
-            let has = |d: &DeviceId| g.contains(&(d.0 as usize));
+            for &d in &g {
+                stamp[d] = i;
+            }
+            let has = |d: &DeviceId| stamp.get(d.0 as usize) == Some(&i);
             let ps = inside(&passive_idx, g.iter().copied(), |p| passive[p].devices.iter().all(has));
             let origin = if !inside(&shared_idx, g.iter().copied(), |s| shared[s].iter().all(has)).is_empty() {
                 Origin::SharedBias
