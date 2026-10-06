@@ -454,7 +454,7 @@ fn init<'a>(inp: &'a PlaceInput<'a>, start: &Start, prices: &'a gp::Prices) -> (
         Start::Warm { tree: t0, .. } if warm_ok => tree.clone_from(t0),
         _ => {}
     }
-    let eval = Eval::new(reqs, &nets, n, &l.power_uw);
+    let eval = Eval::new(reqs, &nets, n);
     let mut st = St {
         inp,
         prices,
