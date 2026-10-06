@@ -221,14 +221,23 @@ impl Interface {
     /// offending field (`pins[2].frac`).
     pub fn from_json(text: &str) -> Result<Interface, String> {
         let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("interface: {e}"))?;
+        // Extents and widths are lengths: a zero or negative one is degenerate geometry.
         let int = |o: &serde_json::Value, k: &str| -> Result<i32, String> {
-            o.get(k).and_then(serde_json::Value::as_i64).and_then(|x| i32::try_from(x).ok()).ok_or_else(|| format!("interface: `{k}` must be an integer, nm"))
+            o.get(k)
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|x| i32::try_from(x).ok())
+                .filter(|&x| x > 0)
+                .ok_or_else(|| format!("interface: `{k}` must be a positive integer, nm"))
         };
         let die_nm = match v.get("die") {
             None | Some(serde_json::Value::Null) => None,
             Some(d) => Some((int(d, "w")?, int(d, "h")?)),
         };
-        let pins = v.get("pins").and_then(serde_json::Value::as_array).map_or(&[][..], Vec::as_slice);
+        let pins = match v.get("pins") {
+            None | Some(serde_json::Value::Null) => &[][..],
+            Some(serde_json::Value::Array(a)) => a.as_slice(),
+            Some(_) => return Err("interface: `pins` must be an array".into()),
+        };
         let pins = pins
             .iter()
             .enumerate()
@@ -1825,10 +1834,14 @@ fn axis_grid(spec: &dr::LatticeSpec, lattice: i32) -> Option<(i32, i32)> {
     fn gcd(a: u32, b: u32) -> u32 {
         if b == 0 { a } else { gcd(b, a % b) }
     }
-    let lcm = |a: u32, b: u32| a / gcd(a, b) * b;
-    let s = spec.strides.iter().skip(1).step_by(2).fold(1, |acc, &st| lcm(acc, st.max(1)));
-    let p = spec.p0 * (lcm(2, s) / 2) as i32;
-    (spec.p0 > 0 && spec.p0 % (2 * lattice.max(1)) == 0).then_some((spec.p0, p))
+    // Checked: a period past i32 (or an lcm past u32) has no representable grid.
+    let lcm = |a: u32, b: u32| (a / gcd(a, b)).checked_mul(b);
+    if spec.p0 <= 0 || spec.p0 % (2 * lattice.max(1)) != 0 {
+        return None;
+    }
+    let s = spec.strides.iter().skip(1).step_by(2).try_fold(1, |acc, &st| lcm(acc, st.max(1)))?;
+    let half = i32::try_from(lcm(2, s)? / 2).ok()?;
+    Some((spec.p0, spec.p0.checked_mul(half)?))
 }
 
 /// Per-net weights an epoch places and routes with (FLOW-08 plumbing: a
@@ -1844,8 +1857,14 @@ pub(crate) struct Weights {
 /// dr prices parasitics only on nets something budgets (a C budget or a
 /// sensitivity row), `place` scaled to [0, 1]; every other net 0.
 fn route_weights(place: &[f32], classes: &[analog::metadata::NetClassification], sens: &[(pnr_core::NetId, f32)]) -> Vec<f32> {
-    let budgeted = |n: usize| classes.get(n).is_some_and(|c| c.c_budget_af.is_some()) || sens.iter().any(|(s, _)| usize::from(s.0) == n);
-    let w: Vec<f32> = place.iter().enumerate().map(|(n, &w)| if budgeted(n) { w } else { 0.0 }).collect();
+    // One pass over `sens` instead of one per net.
+    let mut budgeted: Vec<bool> = (0..place.len()).map(|n| classes.get(n).is_some_and(|c| c.c_budget_af.is_some())).collect();
+    for (s, _) in sens {
+        if let Some(b) = budgeted.get_mut(usize::from(s.0)) {
+            *b = true;
+        }
+    }
+    let w: Vec<f32> = place.iter().zip(&budgeted).map(|(&w, &b)| if b { w } else { 0.0 }).collect();
     let top = w.iter().copied().fold(0.0f32, f32::max);
     w.iter().map(|&x| if top > 0.0 { x / top } else { 0.0 }).collect()
 }
@@ -2155,7 +2174,7 @@ impl Flow<'_> {
 fn common_node_ohm(left: &[(u32, u32, f32)], a: DeviceId, b: DeviceId, i_ua: Option<f32>) -> f32 {
     let (a, b) = (u32::from(a.0), u32::from(b.0));
     let mv = left.iter().find(|&&(x, y, _)| (x, y) == (a, b) || (x, y) == (b, a)).map(|&(_, _, mv)| mv);
-    match (mv, i_ua) {
+    match (mv, i_ua.filter(|&i| i > 0.0 && i.is_finite())) {
         (Some(mv), Some(i)) => mv / i * 1e3,
         _ => 0.0,
     }
@@ -2417,7 +2436,8 @@ fn key_lt(a: &LexKey, b: &LexKey) -> bool {
     if head(a) != head(b) {
         return head(a) < head(b);
     }
-    if (a4 - b4).abs() <= C_TIE * a4.abs().min(b4.abs()) {
+    // `a4 == b4` first: two +∞ (unknown) tiers tie, where ∞ − ∞ is NaN.
+    if a4 == b4 || (a4 - b4).abs() <= C_TIE * a4.abs().min(b4.abs()) {
         nan_last(a.5) < nan_last(b.5)
     } else {
         a4 < b4
@@ -2491,22 +2511,30 @@ fn c_tier(
     classes: &[analog::metadata::NetClassification],
     rows: &[analog::routing::PerformanceBudget],
 ) -> f32 {
-    let w = |name: &str| -> f64 {
-        let Some(id) = names.iter().position(|n| n == name) else { return 0.0 };
-        if rows.is_empty() {
-            let signal = classes
-                .iter()
-                .any(|c| usize::from(c.net.0) == id && !is_rail(c.class));
-            return f64::from(u8::from(signal));
+    // Each net's weight once, then one hash lookup per matrix entry: every
+    // epoch calls this, and a name scan plus a row scan per entry was
+    // O(|caps|·(|names| + |rows|)).
+    let mut weight = vec![0.0f64; names.len()];
+    if rows.is_empty() {
+        for c in classes.iter().filter(|c| !is_rail(c.class)) {
+            if let Some(w) = weight.get_mut(usize::from(c.net.0)) {
+                *w = 1.0;
+            }
         }
-        let per_af: f64 = rows
-            .iter()
-            .flat_map(|r| r.nets.iter().zip(&r.weights))
-            .filter(|(n, _)| usize::from(n.0) == id)
-            .map(|(_, &w)| f64::from(w.max(0.0)))
-            .sum();
-        per_af * 1000.0
-    };
+    } else {
+        for (n, &w) in rows.iter().flat_map(|r| r.nets.iter().zip(&r.weights)) {
+            if let Some(x) = weight.get_mut(usize::from(n.0)) {
+                *x += f64::from(w.max(0.0));
+            }
+        }
+        weight.iter_mut().for_each(|w| *w *= 1000.0);
+    }
+    // The first net of a repeated name owns it.
+    let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::with_capacity(names.len());
+    for (i, n) in names.iter().enumerate() {
+        index.entry(n.as_str()).or_insert(i);
+    }
+    let w = |name: &str| index.get(name).map_or(0.0, |&i| weight[i]);
     caps.iter().map(|(a, b, c)| c * (w(a) + b.as_deref().map_or(0.0, w))).sum::<f64>() as f32
 }
 
@@ -2531,7 +2559,9 @@ pub fn signoff_c_tier(
 
 /// `v` rounded up to a multiple of `grid` (`v ≥ 0`, `grid > 0`).
 fn round_up(v: i32, grid: i32) -> i32 {
-    (v + grid - 1) / grid * grid
+    // Saturating: past i32::MAX the largest representable multiple stands in
+    // (callers cap the result far below it).
+    v.saturating_add(grid - 1) / grid * grid
 }
 
 /// The [`gp::spacing::Face`] (L, B, R, T) nearest pin rect `r`'s centre in
@@ -2723,7 +2753,15 @@ fn pin_member(name: &str) -> Option<(usize, &str)> {
 fn cell_flags(intent: &analog::intent::Intent, devices_of: &[Vec<DeviceId>]) -> Vec<cells::post_cell::CellFlags> {
     use analog::intent::Inject::{MinorityElectron, MinorityHole};
     let mut flags = vec![cells::post_cell::CellFlags::default(); devices_of.len()];
-    let cell = |d: DeviceId| devices_of.iter().position(|m| m.contains(&d));
+    // Device → first cell holding it, built once (this runs every epoch).
+    let n = devices_of.iter().flatten().map(|d| usize::from(d.0) + 1).max().unwrap_or(0);
+    let mut cell_of: Vec<Option<usize>> = vec![None; n];
+    for (k, m) in devices_of.iter().enumerate() {
+        for d in m {
+            cell_of[usize::from(d.0)].get_or_insert(k);
+        }
+    }
+    let cell = |d: DeviceId| cell_of.get(usize::from(d.0)).copied().flatten();
     for a in &intent.aggressors {
         if let Some(k) = cell(a.device) {
             flags[k].noisy = true;
@@ -2768,7 +2806,8 @@ fn pin_currents(netlist: &pnr_core::Netlist, devices_of: &[Vec<DeviceId>], draws
             let mut out = Vec::new();
             for (k, d) in members.iter().enumerate() {
                 let terms: Vec<(String, Option<i32>)> = match &draws[d.0 as usize] {
-                    Some(ts) => ts.iter().map(|(t, ua)| (t.clone(), Some(ua.round() as i32))).collect(),
+                    // A non-finite current is unresolved, never a known 0 µA.
+                    Some(ts) => ts.iter().map(|(t, ua)| (t.clone(), ua.is_finite().then(|| ua.round() as i32))).collect(),
                     None => netlist.devices[d.0 as usize].terminals.iter().map(|(t, _)| (t.clone(), None)).collect(),
                 };
                 for (t, ua) in terms {
@@ -3326,10 +3365,11 @@ pub(crate) fn labeled_pins(
     shapes: &[pnr_core::Shape],
 ) -> Vec<verify::LabeledPin> {
     let mut out: Vec<verify::LabeledPin> = Vec::new();
-    let mut labelled: Vec<u16> = Vec::new();
+    // Indexed by net: an O(1) seen test (an unnamed net is never labelled).
+    let mut labelled = vec![false; nets.len()];
     // ponytail: O(pins × shapes), once per signoff; index shapes per layer if it shows.
     for p in placed.iter().flat_map(|m| &m.pins) {
-        if labelled.contains(&p.net.0) {
+        if labelled.get(usize::from(p.net.0)).is_none_or(|&seen| seen) {
             continue;
         }
         if verify::geom::label_layer(&pdk.deck, p.layer.0).is_none() {
@@ -3344,7 +3384,7 @@ pub(crate) fn labeled_pins(
         let Some(name) = nets.get(p.net.0 as usize).filter(|_| on_drawn) else {
             continue;
         };
-        labelled.push(p.net.0);
+        labelled[usize::from(p.net.0)] = true;
         out.push(verify::LabeledPin {
             name: name.clone(),
             layer: p.layer.0,
