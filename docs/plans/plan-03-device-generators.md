@@ -575,7 +575,7 @@ Field report: FR-1 (several `cap_mim_m3_1` hang; LVS device-class mismatch with 
 - Change (resistor.rs):
   1. `series_parallel == Series` and the value rule passes: member d = `series_d` units of `unit_w × L_u′` in series; the `segments` axis is fixed to 1.
   2. Order: `pattern::segment_row(&series)` (MAT-12). Traversal alternates up/down per member, so Σφ_y = 0 for even counts (already per segment, resistor.rs:109-110).
-  3. Jumpers: if any series join in the array is non-adjacent, every join of every member uses the met1-track construction with 2 mcon; one track per member, up to `jumper_tracks(process).len()`; more members than tracks → the variant is not offered. MAT-12's `jumper_spread` over the drawn joins is then 0.
+  3. Jumpers: if any series join in the array is non-adjacent, every join of every member uses the met1-track construction with 2 mcon; one track per member; the heads are grown (`head_for`) until one track per member fits, rather than the variant being dropped (as built: on `generic_po` no track fits at the base head length, so a track bound would drop every series-unit array). MAT-12's `jumper_spread` over the drawn joins is then 0.
   4. `seg_gap(process) = snap(max(res_seg_gap, space(li), space_between(rpoly, poly)))` → 480 on sky130 (poly.9, sky130.deck:284). Dummies sit exactly at the segment pitch (Hastings §8.3.1 r9, hastings.txt L25263–25273).
   5. Dummies per end from `class::resistor_env(class)`: `min_dummies` and `dummy_span_nm` (MAT-07: MIN 1 min-width, MOD 1 full-width, EXC span ≥ 10 000 nm, i.e. `ceil(10000/seg_pitch)` dummies). Tied through the `GND` pin (bound by `cellgen::bind_pins`, cellgen.rs:937).
   6. `Drawn` per unit as in CELL-06 step 6; unit weights = body area (all equal).

@@ -103,6 +103,28 @@ fn a_mim_dac_signs_off_with_its_capacitors() {
     assert!(rows.is_empty(), "{rows:?}");
 }
 
+/// CELL-21: EXT-19's `splitdac` on sky130 MIM (CA the 3×4 µm bridge) is one
+/// split array, a card per unit with the bridge as two half plates, and signs
+/// off LVS clean.
+#[test]
+fn a_split_dac_signs_off() {
+    let pdk = pdk();
+    let caps = [("C0", "tl", "VSS", 1), ("C1", "tl", "b0", 1), ("C2", "tl", "b1", 2), ("C3", "tm", "b2", 1), ("C4", "tm", "b3", 2)];
+    let mut spice = String::from(".subckt splitdac tl tm b0 b1 b2 b3 VSS\n");
+    for (n, p, q, m) in caps {
+        spice += &format!("X{n} {p} {q} sky130_fd_pr__cap_mim_m3_1 W=3u L=3u m={m}\n");
+    }
+    spice += "XCA tl tm sky130_fd_pr__cap_mim_m3_1 W=3u L=4u m=1\n.ends splitdac\n";
+    let cfg = library::Config { feedback_iters: 1, ..Default::default() };
+    let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).expect("flow");
+    let cards = |m: &pnr_core::Macro| m.drawn.iter().filter(|d| d.kind == DrawnKind::Capacitor).count();
+    let units = caps.iter().map(|c| c.3).sum::<usize>() + 2;
+    let array = sol.macros.iter().max_by_key(|m| cards(m)).expect("a cell");
+    assert_eq!(cards(array), units, "banks' units plus two bridge halves in one cell");
+    let rows = lvs_rows(&sol, &pdk);
+    assert!(rows.is_empty(), "{rows:?}");
+}
+
 /// CELL-18: a decoupling MIM written `VDD g` draws its bottom plate (`N`,
 /// the high-parasitic one, the drawn card's second node) on the rail and its
 /// top plate on the gate-only net, keeps every pin's name its schematic

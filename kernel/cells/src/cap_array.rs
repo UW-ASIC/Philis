@@ -48,11 +48,19 @@ pub enum Pattern {
     /// Algorithm 1: a complete chessboard for C0..=Ck, then corridors of Ci in
     /// `bs`-sided blocks with Ci+1 in the leftovers.
     BlockChessboard { k: u8, bs: u8 },
+    /// Split DAC (DACP §IV-C, CELL-21; offered by [`CapArray::split`] only):
+    /// members ordered LSB bank `[1, 1, 2, …, 2^(lsb-1)]` (termination first),
+    /// then MSB `[1, 2, …]`, then the bridge C_A; owner ids as in
+    /// [`analog::matching::dac::split_dac_assign`]; MSB bits = `members − lsb − 2`.
+    /// The bridge draws two square half plates. Each bank has its own top:
+    /// `bridge_top_lsb` puts the bridge's `P` on the LSB one.
+    Split { lsb: u8, bridge_top_lsb: bool },
 }
 
 /// One array variant.
 ///
-/// Pins: `d{i}:P` (all on the TOP join, one net), `d{i}:N` on bus `i`.
+/// Pins: `d{i}:P` (all on the TOP join, one net; a [`Pattern::Split`] has one
+/// TOP lead per bank), `d{i}:N` on bus `i`.
 #[derive(Clone, Debug)]
 pub struct CapArray {
     pub pattern: Pattern,
@@ -198,6 +206,21 @@ pub fn c_u_af(p: &dyn Process, w_nm: i32, l_nm: i32) -> Option<f64> {
     (area > 0).then(|| f64::from(area) * w * l + f64::from(p.rule("c_perim_af_um", 0)) * 2.0 * (w + l))
 }
 
+/// Side, nm, of the square half of a split DAC's bridge C_A =
+/// `C_T^LSB/C_T^MSB·C_u` ([`analog::matching::dac::attenuation_cap`]), by
+/// [`c_u_af`]'s model: `C = c_area·u² + 4·c_perim·u`, `u = t + dw`, snapped up
+/// to the cut lattice. `None` without `c_area_af_um2`.
+fn ca_half_side(p: &dyn Process, unit_w: i32, unit_l: i32, lsb: u8, msb: u8) -> Option<i32> {
+    // ponytail: square half; an off-grid C_A (keeps k_u) is the upgrade.
+    let ca = analog::matching::dac::attenuation_cap(1 << lsb, (1 << msb) - 1);
+    let target = ca * c_u_af(p, unit_w, unit_l)? / 2.0;
+    let (a, cp) = (f64::from(p.rule("c_area_af_um2", 0)), f64::from(p.rule("c_perim_af_um", 0)));
+    let u = (-4.0 * cp + (16.0 * cp * cp + 4.0 * a * target).sqrt()) / (2.0 * a);
+    let t_nm = (u - f64::from(p.rule("c_dw_nm", 0)) * 1e-3) * 1e3;
+    let lat = cut_lattice(p);
+    Some((t_nm / f64::from(lat)).ceil() as i32 * lat)
+}
+
 /// Rows × columns holding `2^m` units, columns ≥ rows unless `tall`.
 fn dims(m: u8, tall: bool) -> (usize, usize) {
     let (r, c) = (1usize << (m / 2), 1usize << (m - m / 2));
@@ -238,6 +261,7 @@ impl CapArray {
                 }
             }
             Pattern::Chessboard => g.chessboard((0, 0, rows, cols), n),
+            Pattern::Split { .. } => unreachable!("a split DAC is assigned by `split_dac_assign`"),
             Pattern::BlockChessboard { k, bs } => {
                 g.chessboard(centred(dims(k, self.tall)), k);
                 for i in (k + 1..n).step_by(2) {
@@ -246,6 +270,27 @@ impl CapArray {
             }
         }
         g.slot.into_iter().map(|s| s.expect("every cell assigned")).collect()
+    }
+
+    /// The [`Pattern::Split`] variant of a split DAC whose members are
+    /// ordered as that pattern says: `None` unless the stack is MIM, the dummy
+    /// ring is drawn, the LSB bank is a binary bank of `lsb` bits, the MSB
+    /// counts are `[1, 2, …, 2^(M-1)]` (M ≥ 1), the bridge's count is 1, and its square half
+    /// fits between the plate's min width and the unit plate.
+    /// [`Cell::enumerate`] never offers it: it cannot see which bank is which.
+    #[must_use]
+    pub fn split(group: &DeviceGroup, c: &Constraints, process: &dyn Process, lsb: u8, bridge_top_lsb: bool) -> Option<Self> {
+        plate_stack(process)?.plate?;
+        crate::builder::unitization(group, c)?.dummy_required.then_some(())?;
+        let s = group_sizing(group, c, process);
+        let l = usize::from(lsb);
+        (s.dev_nf.len() >= l + 3 && bits(&s.dev_nf[..=l]) == Some(lsb) && *s.dev_nf.last()? == 1).then_some(())?;
+        let msb = &s.dev_nf[l + 1..s.dev_nf.len() - 1];
+        msb.iter().enumerate().all(|(i, &u)| u32::from(u) == 1 << i).then_some(())?;
+        let half = ca_half_side(process, s.unit_w, s.unit_l, lsb, msb.len() as u8)?;
+        let lat = cut_lattice(process);
+        let unit = |v: i32| ((v + lat - 1) / lat * lat).max(process.width("plate").unwrap_or(0));
+        (half >= process.width("plate").unwrap_or(0) && half <= unit(s.unit_w).min(unit(s.unit_l))).then_some(CapArray { pattern: Pattern::Split { lsb, bridge_top_lsb }, tall: false })
     }
 
     /// ARR-02/03 figures for this variant under the t0/t gradient `g` (1/µm).
@@ -291,17 +336,22 @@ impl CapArray {
     /// enclosure (capm.4) at its cut pitch, the LVS card and the plate
     /// keep-out. A ring dummy keeps its plate, uncontacted; an interior
     /// empty cell draws none, as the column strap would make it a device.
+    /// `side`: a centred square plate of that side instead (a split DAC's
+    /// bridge half); the bottom plate stays the cell. Returns the plate.
     #[allow(clippy::too_many_arguments)]
-    fn mim_unit(b: &mut Builder, process: &dyn Process, st: &PlateStack, cell: Rect, encp: i32, slot: Option<u8>, ring: bool) {
+    fn mim_unit(b: &mut Builder, process: &dyn Process, st: &PlateStack, cell: Rect, encp: i32, slot: Option<u8>, ring: bool, side: Option<i32>) -> Rect {
         let plate_role = st.plate.expect("MIM");
+        let lat = cut_lattice(process);
         b.rect(req(process, st.bot), cell);
-        let plate = Rect { x: cell.x + encp, y: cell.y + encp, w: cell.w - 2 * encp, h: cell.h - 2 * encp };
+        let plate = match side {
+            Some(t) => Rect { x: cell.x + (cell.w - t) / 2 / lat * lat, y: cell.y + (cell.h - t) / 2 / lat * lat, w: t, h: t },
+            None => Rect { x: cell.x + encp, y: cell.y + encp, w: cell.w - 2 * encp, h: cell.h - 2 * encp },
+        };
         if slot.is_none() && !ring {
-            return;
+            return plate;
         }
         b.rect(req(process, plate_role), plate);
-        let Some(owner) = slot else { return };
-        let lat = cut_lattice(process);
+        let Some(owner) = slot else { return plate };
         let v = process.width(st.top_cut).unwrap_or(lat);
         let pitch = v + process.space(st.top_cut).unwrap_or(v);
         let e = process.enclosure(plate_role, st.top_cut).unwrap_or(0);
@@ -315,9 +365,10 @@ impl CapArray {
                 b.rect(cut, Rect { x: x0 + i * pitch, y: y0 + j * pitch, w: v, h: v });
             }
         }
-        b.unit(Unit { owner, x: cell.x + cell.w / 2, y: cell.y + cell.h / 2, weight: i64::from(cell.w) * i64::from(cell.h), phi: (0, 0), sa: 0, sb: 0 });
+        b.unit(Unit { owner, x: cell.x + cell.w / 2, y: cell.y + cell.h / 2, weight: i64::from(plate.w) * i64::from(plate.h), phi: (0, 0), sa: 0, sb: 0 });
         b.drawn(Drawn { owner, device: None, kind: DrawnKind::Capacitor, nodes: [Node::Pin("P"), Node::Pin("N"), Node::Unused], w: plate.w, l: plate.h });
         b.keepout(plate, KeepWhy::CapPlate { owner });
+        plate
     }
 
     /// The macro, plus each slot's `(bottom-route length nm, via1 cuts)`.
@@ -327,17 +378,29 @@ impl CapArray {
         // join C0 (its electrical dummy, on a rail); a general set's get a bus
         // of their own, slot `n + 1`, pinned `GND` for the caller to tie to
         // ground: tied to a member they would load its bottom plate alone.
-        let general = bits(&s.dev_nf).is_none();
-        let (n, rows, cols, slots) = match bits(&s.dev_nf) {
-            Some(n) => {
-                let (rows, cols) = dims(n, self.tall);
-                (n, rows, cols, self.assign(n).into_iter().map(Some).collect::<Vec<_>>())
-            }
-            None => {
-                let (rows, cols) = pattern::grids(&s.dev_nf, 3.0)[0];
-                let fill = if self.pattern == Pattern::Chessboard { Fill::Dispersed } else { Fill::Compact };
-                let slots = pattern::centro_assign(&s.dev_nf, rows, cols, fill).0;
-                ((s.dev_nf.len() - 1) as u8, rows, cols, slots)
+        let split = match self.pattern {
+            Pattern::Split { lsb, bridge_top_lsb } => Some((lsb, bridge_top_lsb, (s.dev_nf.len() - 2 - usize::from(lsb)) as u8)),
+            _ => None,
+        };
+        let general = split.is_none() && bits(&s.dev_nf).is_none();
+        let (n, rows, cols, slots) = if let Some((lsb, _, msb)) = split {
+            // The bridge is two halves: `[2]` in its place sizes the grid.
+            let mut counts = s.dev_nf.clone();
+            *counts.last_mut().expect("split has members") = 2;
+            let (rows, cols) = pattern::grids(&counts, 3.0)[0];
+            ((s.dev_nf.len() - 1) as u8, rows, cols, analog::matching::dac::split_dac_assign(lsb, msb, rows, cols))
+        } else {
+            match bits(&s.dev_nf) {
+                Some(n) => {
+                    let (rows, cols) = dims(n, self.tall);
+                    (n, rows, cols, self.assign(n).into_iter().map(Some).collect::<Vec<_>>())
+                }
+                None => {
+                    let (rows, cols) = pattern::grids(&s.dev_nf, 3.0)[0];
+                    let fill = if self.pattern == Pattern::Chessboard { Fill::Dispersed } else { Fill::Compact };
+                    let slots = pattern::centro_assign(&s.dev_nf, rows, cols, fill).0;
+                    ((s.dev_nf.len() - 1) as u8, rows, cols, slots)
+                }
             }
         };
         let st = plate_stack(process).expect("enumerate offers variants only on a plate stack");
@@ -410,7 +473,14 @@ impl CapArray {
         // the met4 join, which then stays `encp` off the dummy capm above.
         let gap_y = if mim {
             let capm_gap = up(process.space("plate").unwrap_or(0) - 2 * encp);
-            inset.max(m1s).max(m2s).max(capm_gap).max(space(st.bot)).max(jw)
+            let g = inset.max(m1s).max(m2s).max(capm_gap).max(space(st.bot)).max(jw);
+            // Split: a bank's top line runs in each row gap clear of the
+            // other bank's pads, centred (gap − jw an even lattice count).
+            if split.is_some() {
+                (g.max(jw + 2 * (space(st.top) - encp)) + 2 * lat - 1) / (2 * lat) * 2 * lat
+            } else {
+                g
+            }
         } else {
             inset.max(m1s).max(m2s)
         };
@@ -451,6 +521,9 @@ impl CapArray {
         // Pins stand one track pitch clear of the last channel.
         let x_right = gc as i32 * px + tp;
 
+        let half = split.and_then(|(lsb, _, msb)| ca_half_side(process, s.unit_w, s.unit_l, lsb, msb));
+        // Split: (interior row, plate, owner) of every member unit.
+        let mut plates: Vec<(usize, Rect, u8)> = Vec::new();
         let mut b = Builder::new(process.grid());
         let mut route = vec![(0i64, 0u32); usize::from(dummy_slot.max(n)) + 1];
         // Per (column, slot): the highest via on its track.
@@ -461,7 +534,11 @@ impl CapArray {
                 let slot = owner(r, c);
                 let s = slot.unwrap_or(dummy_slot);
                 if mim {
-                    Self::mim_unit(&mut b, process, &st, Rect { x: x0, y: y0, w: uw, h: uh }, encp, slot, o == 1 && (r == 0 || c == 0 || r == gr - 1 || c == gc - 1));
+                    let side = half.filter(|_| slot == Some(n));
+                    let plate = Self::mim_unit(&mut b, process, &st, Rect { x: x0, y: y0, w: uw, h: uh }, encp, slot, o == 1 && (r == 0 || c == 0 || r == gr - 1 || c == gc - 1), side);
+                    if let Some(owner) = slot {
+                        plates.push((r - o, plate, owner));
+                    }
                     let tx = track_x(c, s);
                     let (vy, vb) = (y0 + floor((uh - v1) / 2), process.width(st.bot_cut).unwrap_or(v2));
                     let vyb = y0 + floor((uh - vb) / 2);
@@ -568,7 +645,40 @@ impl CapArray {
         // MIM: a met4 strap over each interior column's plates, joined in the
         // gap under the top dummy row, down through via3 onto a met3 island
         // (off capm, capm.11) and its via2 to the same met2/via1 stack.
-        let (vx2, vy2) = if mim {
+        // Split: each unit's met4 pad over its own capm, run through the
+        // cell edge to its bank's line in the row gap next to it (gap `k`, under
+        // interior row `k`: LSB when `k` is even, MSB when odd); the LSB lines
+        // join a spine left of the array, the MSB lines one at `x_right`. A
+        // strap could not carry two nets: met4 over a plate binds it (deck capm).
+        // Each entry: (via2 corner, lead to the left, the slots pinned there).
+        let all: Vec<u8> = (0..=n).collect();
+        let stacks: Vec<(i32, i32, bool, Vec<u8>)> = if let Some((lsb, top_lsb, _)) = split {
+            let strap = req(process, st.strap);
+            let in_lsb = |s: u8| s <= lsb || (s == n && top_lsb);
+            let line_y = |k: usize| (o + k) as i32 * py - gap_y + (gap_y - jw) / 2;
+            let cxl = -(space(st.bot) + side);
+            // Pad and stub are one rect, plate-wide: the deck binds a capm's
+            // top to the one met4 polygon on it (a second refuses the device).
+            for &(r, plate, s) in &plates {
+                let ly = line_y(r + usize::from((r % 2 == 0) != in_lsb(s)));
+                let y0 = ly.min(plate.y);
+                b.rect(strap, Rect { y: y0, h: (ly + jw).max(plate.y + plate.h) - y0, ..plate });
+            }
+            for k in 0..=rows {
+                let (x0, x1) = if k % 2 == 0 { (cxl - jw / 2, (cols + o) as i32 * px) } else { (o as i32 * px, x_right) };
+                b.rect(strap, Rect { x: x0, y: line_y(k), w: x1 - x0, h: jw });
+            }
+            let mut out = Vec::new();
+            for (parity, cx, left) in [(0, cxl, true), (1, x_right - jw / 2, false)] {
+                let ks: Vec<usize> = (0..=rows).filter(|k| k % 2 == parity).collect();
+                let (lo, hi) = (line_y(ks[0]), line_y(*ks.last().expect("rows ≥ 1")));
+                b.rect(strap, Rect { x: cx - jw / 2, y: lo, w: jw, h: hi + jw - lo });
+                let cy = hi + jw / 2;
+                island(&mut b, cx, cy);
+                out.push((cx - vd / 2, cy - vd / 2, left, all.iter().copied().filter(|&s| in_lsb(s) == left).collect()));
+            }
+            out
+        } else if mim {
             let join_y = (rows + o - 1) as i32 * py + uh;
             let strap = req(process, st.strap);
             for c in o..cols + o {
@@ -579,7 +689,7 @@ impl CapArray {
             b.rect(strap, Rect { x: x0, y: join_y, w: x_right - x0, h: jw });
             let (cx, cy) = (x_right - e4 - vt + vt / 2, join_y + (jw - vt) / 2 + vt / 2);
             island(&mut b, cx, cy);
-            (cx - vd / 2, cy - vd / 2)
+            vec![(cx - vd / 2, cy - vd / 2, false, all)]
         } else {
             let join_y = gr as i32 * py + gap_y;
             let strap_x = |c: usize| c as i32 * px + uw / 2 - m3w / 2;
@@ -591,15 +701,24 @@ impl CapArray {
             b.rect(m3, join);
             let (vx2, vy2) = (x_right - e3 - v2, join_y + (m3w - v2) / 2);
             b.rect(v2l, Rect { x: vx2, y: vy2, w: v2, h: v2 });
-            (vx2, vy2)
+            vec![(vx2, vy2, false, all)]
         };
         let v2 = vd;
-        b.rect(m2, tall(Rect { x: vx2 - e2, y: vy2 - e2, w: v2 + 2 * e2, h: v2 + 2 * e2 }));
-        let (vx1, vy1) = (vx2 + floor((v2 - v1) / 2), vy2 + floor((v2 - v1) / 2));
-        b.rect(v1l, Rect { x: vx1, y: vy1, w: v1, h: v1 });
-        let top = lead(&mut b, vx1, vy1);
-        for s in 0..=usize::from(n) {
-            b.pin(pin(s, "P", top, m1));
+        for (vx2, vy2, left, slots) in stacks {
+            b.rect(m2, tall(Rect { x: vx2 - e2, y: vy2 - e2, w: v2 + 2 * e2, h: v2 + 2 * e2 }));
+            let (vx1, vy1) = (vx2 + floor((v2 - v1) / 2), vy2 + floor((v2 - v1) / 2));
+            b.rect(v1l, Rect { x: vx1, y: vy1, w: v1, h: v1 });
+            let top = if left {
+                // `lead` mirrored: the met1 run goes left, clear of the array.
+                let x1 = vx1 + v1 + e1o;
+                b.rect(m1, Rect { x: x1 - reach - pp, y: vy1 - e1o, w: reach + pp, h: pp });
+                Rect { x: x1 - reach - pp, y: vy1 - e1o, w: pp, h: pp }
+            } else {
+                lead(&mut b, vx1, vy1)
+            };
+            for s in slots {
+                b.pin(pin(usize::from(s), "P", top, m1));
+            }
         }
         (b.finish(), route)
     }
@@ -907,6 +1026,84 @@ mod tests {
         }
         let dirty = dirty_mim(&g, &c, &pdk);
         assert!(dirty.is_empty(), "{}", dirty.join("\n"));
+    }
+
+    /// A split DAC as [`Pattern::Split`] orders it: LSB bank of `l` bits, MSB
+    /// bank of `m` bits, the bridge last, at 3 µm MIM units, ringed.
+    fn split_set(l: u8, m: u8) -> (DeviceGroup, Constraints) {
+        let counts: Vec<u16> = (0..=l).map(|i| if i == 0 { 1 } else { 1 << (i - 1) }).chain((0..m).map(|i| 1 << i)).chain([1]).collect();
+        let (g, mut c) = mim_set(&counts, 3000);
+        c.unitization[0].dummy_required = true;
+        (g, c)
+    }
+
+    /// CELL-21: every member draws its count (the bridge two halves), every
+    /// even-count cap, the bridge's halves included, is point-symmetric about the
+    /// units' centre (exact common centroid), the array is DRC/ERC-clean with
+    /// one top net per bank, and the deck extracts one capacitor per unit on
+    /// exactly two top nodes.
+    #[test]
+    fn a_split_bank_is_point_symmetric() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let ov = mim(&pdk);
+        for (l, mb) in [(3u8, 3u8), (2, 2)] {
+            let (g, c) = split_set(l, mb);
+            let counts = c.unitization[0].dev_nf.clone();
+            let n = counts.len() - 1;
+            let m = CapArray::split(&g, &c, &ov, l, true).expect("offered").draw(&g, &c, &ov);
+            let (xs, ys) = (m.units.iter().map(|u| u.x), m.units.iter().map(|u| u.y));
+            let (sx, sy) = (xs.clone().min().unwrap() + xs.max().unwrap(), ys.clone().min().unwrap() + ys.max().unwrap());
+            for (i, &k) in counts.iter().enumerate() {
+                let units: Vec<(i32, i32)> = m.units.iter().filter(|u| usize::from(u.owner) == i).map(|u| (u.x, u.y)).collect();
+                assert_eq!(units.len(), if i == n { 2 } else { usize::from(k) }, "({l}, {mb}) member {i}");
+                if ![0, 1, usize::from(l) + 1].contains(&i) {
+                    assert!(units.iter().all(|&(x, y)| units.contains(&(sx - x, sy - y))), "({l}, {mb}) member {i} not point-symmetric: {units:?}");
+                }
+            }
+            let mut ports = crate::testkit::ports_with(&m, &[]);
+            for p in &mut ports {
+                let i: usize = p.name.strip_prefix('d').and_then(|r| r.strip_suffix("_P")).map_or(usize::MAX, |d| d.parse().unwrap());
+                if i != usize::MAX {
+                    p.name = if i <= usize::from(l) || i == n { "TL" } else { "TM" }.into();
+                }
+            }
+            let f = crate::testkit::findings(&m.shapes, &ports, &pdk);
+            assert!(f.is_empty(), "({l}, {mb}): {f:?}");
+            let spice = verify::extract_spice(&m.shapes, &[], &pdk, verify::Detail::Schematic).expect("extracts");
+            let caps: Vec<&str> = spice.lines().filter(|x| x.starts_with('C')).collect();
+            assert_eq!(caps.len(), (1 << l) + (1 << mb) + 1, "({l}, {mb}):\n{spice}");
+            let tops: std::collections::BTreeSet<&str> = caps.iter().map(|x| x.split_whitespace().nth(1).unwrap()).collect();
+            assert_eq!(tops.len(), 2, "({l}, {mb}) top nodes {tops:?}:\n{spice}");
+        }
+    }
+
+    /// CELL-21: the two square halves sum to MAT-18's C_A within one lattice
+    /// step of side, and are the drawn bridge plates. Their edge ratio k stays
+    /// above the unit's (equal k is impossible inside a unit cell, see the
+    /// card); the Δk is printed. A C_A larger than the unit cell (a 4+1 split,
+    /// C_A = 16 C_u) is not offered.
+    #[test]
+    fn the_bridge_is_the_attenuation_cap() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let ov = mim(&pdk);
+        let lat = cut_lattice(&ov);
+        let c = |w: i32| c_u_af(&ov, w, w).expect("MIM model");
+        let k = |w: f64| 2.0 / w;
+        for (l, mb) in [(2u8, 2u8), (3, 3)] {
+            let half = ca_half_side(&ov, 3000, 3000, l, mb).expect("MIM model");
+            let want = analog::matching::dac::attenuation_cap(1 << l, (1 << mb) - 1) * c(3000);
+            let step = 2.0 * (c(half + lat) - c(half));
+            assert!((2.0 * c(half) - want).abs() <= step, "({l}, {mb}): 2·C({half}) = {} aF vs C_A {want} aF", 2.0 * c(half));
+            assert!(k(f64::from(half)) >= k(3000.0));
+            eprintln!("({l}, {mb}): half {half} nm, k {:.3e} vs k_u {:.3e} /nm (Δk {:.3e})", k(f64::from(half)), k(3000.0), k(f64::from(half)) - k(3000.0));
+            let (g, cs) = split_set(l, mb);
+            let n = cs.unitization[0].dev_nf.len() - 1;
+            let m = CapArray::split(&g, &cs, &ov, l, false).expect("offered").draw(&g, &cs, &ov);
+            let bridge: Vec<(i32, i32)> = m.drawn.iter().filter(|d| usize::from(d.owner) == n).map(|d| (d.w, d.l)).collect();
+            assert_eq!(bridge, vec![(half, half); 2], "({l}, {mb})");
+        }
+        let (g, cs) = split_set(4, 1);
+        assert!(CapArray::split(&g, &cs, &ov, 4, true).is_none(), "C_A = 16 C_u cannot fit a unit cell");
     }
 
     /// ARR-01, measured: each variant extracted alone on sky130, the TOP-to-Ci
