@@ -190,7 +190,7 @@ impl<'a> St<'a> {
             halo: self.inp.halo,
             table: &self.inp.rules.spacing,
             lattice: self.inp.rules.grid,
-            axis_grid: None,
+            axis_grid: self.inp.rules.axis_grid,
         };
         decode(&self.tree, &g, &mut self.scratch, &mut self.out)?;
         self.moved.clear();
@@ -598,7 +598,14 @@ pub fn place_sp(inp: &PlaceInput, start: Start, schedule: Schedule, prices: &mut
         st.realize().expect("the best state decoded once");
         st.l.refresh_temps();
     }
-    let St { l, nets, tree, stats, .. } = st;
+    let St { l, nets, tree, mut stats, .. } = st;
+    for nd in &tree.nodes {
+        if let Some(sym) = &nd.sym {
+            stats.axes += 1;
+            let on = inp.rules.axis_grid.is_some_and(|(p0, p)| l.axis_x(sym.axis).rem_euclid(p) == p0 / 2);
+            stats.axes_on_lattice += u32::from(on);
+        }
+    }
     let mut rep = report(&nets, reqs, &l, prices, &inp.rules);
     for e in errs {
         let sp::TreeError::CellInTwoAxes { cell, .. } = e;

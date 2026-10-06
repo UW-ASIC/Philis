@@ -74,6 +74,11 @@ pub struct PlaceStats {
     /// [`anneal::place_sp`]: a [`anneal::Start::Warm`] tree no longer fit the
     /// inputs (cells or symmetry groups changed), so the anneal started constructive.
     pub warm_fallback: bool,
+    /// [`anneal::place_sp`]: symmetry axes placed, and of them those on a
+    /// routing track centreline (`axis ≡ p0/2 mod P`, PLC-28; `0` without
+    /// `PlaceRules::axis_grid`).
+    pub axes: u32,
+    pub axes_on_lattice: u32,
 }
 
 /// The mutable columns a move can touch, for rollback.

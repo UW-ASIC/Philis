@@ -302,6 +302,8 @@ pub struct Scratch {
     /// Per node: needs a re-decode; parent node and slot there (empty = nothing cached yet).
     dirty: Vec<bool>,
     parent: Vec<(u16, u16)>,
+    /// Per node: it is, or contains, a symmetry node (PLC-28 origin rounding).
+    has_sym: Vec<bool>,
     /// Per node: its kid-pair gap cache `[R, T]` by `i·k + j`, and per slot
     /// whether that kid's profile changed since (its row and column are stale).
     gcn: Vec<Vec<[Option<Gap>; 2]>>,
@@ -507,7 +509,10 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
     y.clear();
     y.resize(k, 0);
 
-    let Scratch { pa, pb, lb, lby, kw, kh, kp, khalo, knode, gcn, .. } = s;
+    let Scratch { pa, pb, lb, lby, kw, kh, kp, khalo, knode, gcn, has_sym, .. } = s;
+    // PLC-28 step 3: a kid that is or holds a symmetry node starts on a multiple of `P`.
+    let on_grid: Vec<bool> = nd.kids.iter().map(|k| matches!(*k, Kid::Node(m) if has_sym[usize::from(m)])).collect();
+    let period = g.axis_grid.map(|(_, p)| p);
     let gc = &mut gcn[ni][..];
     let (pa, beta) = (&*pa, &nd.beta);
     let _ = pb;
@@ -582,6 +587,9 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
                         v = v.max((2 * ax2 - (2 * x[l] + kw[l]) - kw[j]) / 2);
                     }
                 }
+                if let (Some(p), true) = (period, on_grid[j]) {
+                    v = round_up(v, p);
+                }
                 x[j] = v;
             }
         };
@@ -653,9 +661,15 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
 
 /// Step 2x′: the least admissible `2·axis` ≥ `v`: a multiple of `2·lattice`
 /// with a self-symmetric kid (its centre must land on the lattice), else of
-/// `lattice`.
-fn axis_snap(v: i32, lattice: i32, has_self: bool, _grid: Option<(i32, i32)>) -> i32 {
-    round_up(v, if has_self { 2 * lattice } else { lattice })
+/// `lattice`. With `grid = Some((p0, P))` (PLC-28) the least `≥ v` with
+/// `2·axis ≡ p0 (mod 2P)`, so the node-relative axis is `≡ p0/2 (mod P)`
+/// (a track centreline once the node's origin is a multiple of `P`); `p0` and
+/// `2P` are multiples of `2·lattice`, so self kids still land on the lattice.
+fn axis_snap(v: i32, lattice: i32, has_self: bool, grid: Option<(i32, i32)>) -> i32 {
+    match grid {
+        Some((p0, p)) => v + (p0 - v).rem_euclid(2 * p),
+        None => round_up(v, if has_self { 2 * lattice } else { lattice }),
+    }
 }
 
 /// Decode `t` (post-order; only nodes marked by [`Scratch::touch`] once
@@ -686,6 +700,11 @@ pub fn decode(t: &Tree, g: &Geo, s: &mut Scratch, out: &mut Out) -> Result<(), F
         s.gcn.resize(nn, Vec::new());
         s.stale.clear();
         s.stale.resize(nn, Vec::new());
+        s.has_sym.clear();
+        for nd in &t.nodes {
+            let deep = nd.kids.iter().any(|k| matches!(*k, Kid::Node(m) if s.has_sym[usize::from(m)]));
+            s.has_sym.push(nd.sym.is_some() || deep);
+        }
     }
     let mut fixes = 0;
     for ni in 0..nn {

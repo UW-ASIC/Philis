@@ -861,7 +861,7 @@ fn topology<'a>(
         perf_rows.iter().flat_map(|r| r.nets.iter().copied().zip(r.weights.iter().copied())).collect();
     let net_weight = gp::net_weights(&problem.net_classes, &sens, &net_ua);
     let intent = elaborate::intent(netlist, &problem.net_classes, currents.as_deref(), cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0), &ir);
-    let flow = Flow {
+    let mut flow = Flow {
         pdk,
         netlist,
         net_names: netlist.nets.iter().map(|n| n.name.clone()).collect(),
@@ -922,6 +922,8 @@ fn topology<'a>(
         .map(|m| flow.problem.constraints.unitization.iter().any(|u| u.class == Some(pnr_core::MatchClass::Exceptional) && m.iter().all(|d| u.devices.contains(d))))
         .collect();
     let (assignment0, allowed) = cellgen::seed_assignment(&flow.cells.variants, &matched, &ranked, pdk);
+    // PLC-28: symmetry axes on the router's track centrelines.
+    flow.rules.axis_grid = axis_grid(&dr::lattice_spec(&flow.d_router.cfg), flow.rules.grid);
     Topology { flow, assignment0, allowed, distinct, t_em_k, em_derate }
 }
 
@@ -1458,6 +1460,24 @@ fn symmetry_islands(reqs: &analog::Requirements<Layout>, rules: &gp::PlaceRules)
             Some(analog::placement::SymmetryIsland { members, touch_nm: gap + rules.grid })
         })
         .collect()
+}
+
+/// `(p0, P)` for `gp::PlaceRules::axis_grid` (PLC-28): the router maps a pair
+/// mirror-exactly (`dr` `pair_map`) when `2·axis − p0 ≡ 0 (mod p0)` relative to
+/// its frame and the mirror shift is a multiple of every vertical (odd-index)
+/// layer's stride, i.e. `axis ≡ p0/2 (mod P)` with `S = lcm(odd strides)` (1
+/// if none) and `P = p0·lcm(2, S)/2`. Frame origins are multiples of
+/// `p0·lcm(all strides)`, which `P` divides, so absolute = frame-relative mod
+/// `P`. `None` when `p0` is not a multiple of `2·lattice` (an axis there would
+/// leave the placement lattice).
+fn axis_grid(spec: &dr::LatticeSpec, lattice: i32) -> Option<(i32, i32)> {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let lcm = |a: u32, b: u32| a / gcd(a, b) * b;
+    let s = spec.strides.iter().skip(1).step_by(2).fold(1, |acc, &st| lcm(acc, st.max(1)));
+    let p = spec.p0 * (lcm(2, s) / 2) as i32;
+    (spec.p0 > 0 && spec.p0 % (2 * lattice.max(1)) == 0).then_some((spec.p0, p))
 }
 
 /// One scored epoch.
@@ -2746,6 +2766,14 @@ pub(crate) fn labeled_pins(
 
 #[cfg(test)]
 mod start_tests {
+    #[test]
+    fn axis_period_from_strides() {
+        let spec = |strides: Vec<u32>| dr::LatticeSpec { p0: 420, strides, origin_multiple: 0 };
+        assert_eq!(super::axis_grid(&spec(vec![1, 1, 2, 2]), 10), Some((420, 420)));
+        assert_eq!(super::axis_grid(&spec(vec![1, 3]), 10), Some((420, 1260)));
+        assert_eq!(super::axis_grid(&spec(vec![1, 1, 2, 2]), 25), None);
+    }
+
     /// PLC-24: the floor is capped by what tiny cells plus their gaps can fill.
     #[test]
     fn utilization_floor_is_reachable_for_tiny_cells() {

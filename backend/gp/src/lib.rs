@@ -253,6 +253,10 @@ pub struct PlaceRules {
     pub profiles: Arc<spacing::Profiles>,
     /// `spacing.max_gap()`, cached: past it on either axis a pair owes nothing.
     far: i32,
+    /// `(p0, P)`: the SP decoder puts every symmetry axis at `p0/2 (mod P)`,
+    /// a routing track centreline (PLC-28; the library derives it from dr's
+    /// lattice). `None`: axes only on the lattice.
+    pub axis_grid: Option<(i32, i32)>,
 }
 
 impl PlaceRules {
@@ -265,7 +269,7 @@ impl PlaceRules {
     /// `profiles.of[cell]` indexes like the layout's cells.
     #[must_use]
     pub fn new(grid: i32, spacing: spacing::SpacingTable, profiles: spacing::Profiles) -> Self {
-        PlaceRules { grid, far: spacing.max_gap(), spacing: Arc::new(spacing), profiles: Arc::new(profiles) }
+        PlaceRules { grid, far: spacing.max_gap(), spacing: Arc::new(spacing), profiles: Arc::new(profiles), axis_grid: None }
     }
 
     fn profile(&self, l: &Layout, c: usize) -> Option<&spacing::Profile> {

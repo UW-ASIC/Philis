@@ -149,3 +149,47 @@ fn every_coordinate_is_on_the_lattice() {
         assert!(out.axis.iter().all(|a| (2 * a.1) % 10 == 0));
     }
 }
+
+fn run_grid(c: &Case, grid: Option<(i32, i32)>) -> (Result<(), dp::sp::Fail>, Out) {
+    let prof = vec![None; c.w.len()];
+    let g = Geo { w: &c.w, h: &c.h, prof: &prof, halo: &[], table: &c.table, lattice: 10, axis_grid: grid };
+    let mut out = Out::default();
+    let r = decode(&c.t, &g, &mut Scratch::default(), &mut out);
+    assert!(r.is_err() || verify(&c.t, &g, &out), "decoded but verify failed");
+    (r, out)
+}
+
+/// PLC-28: with sky130's `(p0, P) = (420, 420)` every axis lands on a track
+/// centreline (`210 mod 420`), and every code still decodes.
+#[test]
+fn axes_land_on_track_centrelines() {
+    let mut rng = SplitMix64::new(7);
+    for _ in 0..10_000 {
+        let b = rng.below(2) == 0;
+        let c = case(&mut rng, b);
+        let (r, out) = run_grid(&c, Some((420, 420)));
+        assert_eq!(r, Ok(()));
+        assert!(!out.axis.is_empty() && out.axis.iter().all(|a| a.1.rem_euclid(420) == 210), "{:?}", out.axis);
+    }
+}
+
+/// Snapping raises a symmetry node's width by less than `2·P`.
+#[test]
+fn axis_snapping_costs_at_most_one_period_per_level() {
+    let mut rng = SplitMix64::new(7);
+    let mut hist = [0u32; 9];
+    for _ in 0..2_000 {
+        let c = case(&mut rng, false);
+        let width = |out: &Out| {
+            let mut cells = Vec::new();
+            cells_under(&c.t, 0, &mut cells);
+            let x0 = cells.iter().map(|&i| out.x0[i]).min().unwrap();
+            cells.iter().map(|&i| out.x0[i] + c.w[i]).max().unwrap() - x0
+        };
+        let (free, snapped) = (run_grid(&c, None).1, run_grid(&c, Some((420, 420))).1);
+        let grow = width(&snapped) - width(&free);
+        assert!((0..2 * 420).contains(&grow), "symmetry node grew {grow} nm");
+        hist[(grow / 100) as usize] += 1;
+    }
+    eprintln!("axis_snapping_costs_at_most_one_period_per_level: width growth by 100 nm bin {hist:?}");
+}
