@@ -1128,7 +1128,7 @@ impl ApplicationHandler for App {
                 // Zoom about the cursor.
                 let ndc = self.cursor_ndc();
                 let inv_old = 1.0 / self.cam.scale;
-                self.cam.scale *= if d > 0.0 { 1.1 } else { 1.0 / 1.1 };
+                self.cam.scale *= zoom_factor(d);
                 let diff = 1.0 / self.cam.scale - inv_old;
                 self.cam.offset[0] += ndc[0] * self.cam.aspect * diff;
                 self.cam.offset[1] += ndc[1] * diff;
@@ -1181,6 +1181,12 @@ impl ApplicationHandler for App {
             w.request_redraw();
         }
     }
+}
+
+/// The scale multiplier for one wheel step of `d` (positive zooms in):
+/// 1.1 per step in, 1 / 1.1 out, 1 for no movement.
+fn zoom_factor(d: f32) -> f32 {
+    if d > 0.0 { 1.1 } else { 1.0 / 1.1 }
 }
 
 /// Opens a window on a GDS file, reloading it whenever it changes on disk,
@@ -1304,6 +1310,428 @@ mod tests {
         assert_eq!((q.layer, q.datatype), (68, 20));
         let q = &polys_from_shapes(&[s], &[])[0];
         assert_eq!((q.layer, q.datatype), (1, 0), "no table row: layer id, datatype 0");
+    }
+
+    // ── GDS stream builders ──
+
+    fn rec(t: u8, dt: u8, payload: &[u8]) -> Vec<u8> {
+        let len = u16::try_from(4 + payload.len()).unwrap();
+        let mut v = len.to_be_bytes().to_vec();
+        v.extend([t, dt]);
+        v.extend(payload);
+        v
+    }
+    fn s_rec(t: u8, s: &str) -> Vec<u8> {
+        let mut b = s.as_bytes().to_vec();
+        if b.len() % 2 == 1 {
+            b.push(0);
+        }
+        rec(t, 6, &b)
+    }
+    fn i16_rec(t: u8, v: &[i16]) -> Vec<u8> {
+        rec(t, 2, &v.iter().flat_map(|x| x.to_be_bytes()).collect::<Vec<_>>())
+    }
+    fn xy(pts: &[[i32; 2]]) -> Vec<u8> {
+        rec(0x10, 3, &pts.iter().flat_map(|p| p.iter().flat_map(|c| c.to_be_bytes())).collect::<Vec<_>>())
+    }
+    fn bgn(name: &str) -> Vec<u8> {
+        [rec(0x05, 2, &[]), s_rec(0x06, name)].concat()
+    }
+    fn end() -> Vec<u8> {
+        rec(0x07, 0, &[])
+    }
+    fn boundary(layer: i16, dt: i16, pts: &[[i32; 2]]) -> Vec<u8> {
+        [rec(0x08, 0, &[]), i16_rec(0x0D, &[layer]), i16_rec(0x0E, &[dt]), xy(pts), rec(0x11, 0, &[])].concat()
+    }
+    fn path(layer: i16, width: i32, pts: &[[i32; 2]]) -> Vec<u8> {
+        [rec(0x09, 0, &[]), i16_rec(0x0D, &[layer]), rec(0x0F, 3, &width.to_be_bytes()), xy(pts), rec(0x11, 0, &[])]
+            .concat()
+    }
+    /// SREF with optional mirror and angle (90 or 180 only: exact reals).
+    fn sref(name: &str, at: [i32; 2], mirror: bool, angle: u16) -> Vec<u8> {
+        let mut v = [rec(0x0A, 0, &[]), s_rec(0x12, name)].concat();
+        if mirror || angle != 0 {
+            v.extend(rec(0x1A, 1, &(if mirror { 0x8000u16 } else { 0 }).to_be_bytes()));
+        }
+        match angle {
+            0 => {}
+            90 => v.extend(rec(0x1C, 5, &[0x42, 0x5A, 0, 0, 0, 0, 0, 0])),
+            180 => v.extend(rec(0x1C, 5, &[0x42, 0xB4, 0, 0, 0, 0, 0, 0])),
+            _ => unreachable!(),
+        }
+        [v, xy(&[at]), rec(0x11, 0, &[])].concat()
+    }
+    fn square(x: i32, y: i32, s: i32) -> Vec<[i32; 2]> {
+        vec![[x, y], [x + s, y], [x + s, y + s], [x, y + s], [x, y]]
+    }
+    fn sorted_pts(p: &Poly) -> Vec<[i32; 2]> {
+        let mut v = p.pts.clone();
+        v.sort_unstable();
+        v
+    }
+
+    // ── Decoders ──
+
+    #[test]
+    fn gds_real_decodes_excess_64_hex_floats() {
+        assert_eq!(gds_real(&[0x41, 0x10, 0, 0, 0, 0, 0, 0]), 1.0);
+        assert_eq!(gds_real(&[0x42, 0x5A, 0, 0, 0, 0, 0, 0]), 90.0);
+        assert_eq!(gds_real(&[0xC0, 0x80, 0, 0, 0, 0, 0, 0]), -0.5);
+        assert_eq!(gds_real(&[0; 8]), 0.0);
+        // 1e-3 (the usual user unit) to within f64 rounding of 56-bit mantissa.
+        let mm = gds_real(&[0x3E, 0x41, 0x89, 0x37, 0x4B, 0xC6, 0xA7, 0xF0]);
+        assert!((mm - 1e-3).abs() < 1e-15, "{mm}");
+    }
+
+    #[test]
+    fn read_string_stops_at_nul_padding() {
+        assert_eq!(read_string(b"ab\0\0", 0, 4), "ab");
+        assert_eq!(read_string(b"xabc", 1, 3), "abc");
+        assert_eq!(read_string(b"", 0, 0), "");
+    }
+
+    // ── Parser ──
+
+    #[test]
+    fn malformed_streams_parse_to_nothing_without_panicking() {
+        let cases: [&[u8]; 5] = [&[], &[0, 4], &[0, 2, 0x05, 0], &[0, 200, 0x05, 0, 1, 2], &[0xFF; 3]];
+        for data in cases {
+            let (p, t) = parse_gds(data);
+            assert!(p.is_empty() && t.is_empty());
+        }
+        // A structure cut off before ENDSTR is not emitted.
+        let cut = [bgn("A"), boundary(1, 0, &square(0, 0, 10))].concat();
+        assert!(parse_gds(&cut).0.is_empty());
+        // XY with an odd trailing word reads only whole points.
+        let mut odd = bgn("A");
+        odd.extend([rec(0x08, 0, &[]), rec(0x10, 3, &[0, 0, 0, 1, 0, 0, 0, 2, 0, 0])].concat());
+        odd.extend([rec(0x11, 0, &[]), end()].concat());
+        assert!(parse_gds(&odd).0.is_empty(), "one point is no polygon");
+    }
+
+    #[test]
+    fn boundary_drops_closing_vertex_and_degenerate_polygons() {
+        let gds = [
+            bgn("TOP"),
+            boundary(68, 20, &square(0, 0, 10)),
+            boundary(68, 20, &[[0, 0], [5, 5], [0, 0]]),
+            boundary(68, 20, &[[0, 0], [5, 5]]),
+            end(),
+        ]
+        .concat();
+        let (polys, _) = parse_gds(&gds);
+        assert_eq!(polys.len(), 1);
+        assert_eq!((polys[0].layer, polys[0].datatype), (68, 20));
+        assert_eq!(polys[0].pts, vec![[0, 0], [10, 0], [10, 10], [0, 10]]);
+    }
+
+    #[test]
+    fn box_record_is_read_as_a_boundary() {
+        let el = [rec(0x2D, 0, &[]), i16_rec(0x0D, &[5]), xy(&square(0, 0, 4)), rec(0x11, 0, &[])].concat();
+        let (polys, _) = parse_gds(&[bgn("T"), el, end()].concat());
+        assert_eq!(polys.len(), 1);
+        assert_eq!(polys[0].layer, 5);
+    }
+
+    #[test]
+    fn paths_become_one_quad_per_segment() {
+        let gds = [bgn("T"), path(3, 10, &[[0, 0], [100, 0], [100, 50]]), end()].concat();
+        let (polys, _) = parse_gds(&gds);
+        assert_eq!(polys.len(), 2);
+        assert_eq!(sorted_pts(&polys[0]), vec![[0, -5], [0, 5], [100, -5], [100, 5]]);
+        assert_eq!(sorted_pts(&polys[1]), vec![[95, 0], [95, 50], [105, 0], [105, 50]]);
+        // Reversed direction draws the same rectangle.
+        let back = parse_gds(&[bgn("T"), path(3, 10, &[[100, 0], [0, 0]]), end()].concat()).0;
+        assert_eq!(sorted_pts(&back[0]), sorted_pts(&polys[0]));
+    }
+
+    #[test]
+    fn path_width_zero_still_draws_and_negative_width_is_absolute() {
+        let zero = parse_gds(&[bgn("T"), path(3, 0, &[[0, 0], [10, 0]]), end()].concat()).0;
+        assert_eq!(sorted_pts(&zero[0]), vec![[0, -1], [0, 1], [10, -1], [10, 1]]);
+        // GDS: a negative WIDTH is an absolute (unscaled) width of |w|.
+        let neg = parse_gds(&[bgn("T"), path(3, -10, &[[0, 0], [10, 0]]), end()].concat()).0;
+        assert_eq!(sorted_pts(&neg[0]), vec![[0, -5], [0, 5], [10, -5], [10, 5]]);
+    }
+
+    #[test]
+    fn diagonal_path_quads_are_offset_perpendicular() {
+        let quads = path_to_polys(1, 0, 10, &[[0, 0], [100, 100]]);
+        assert_eq!(quads.len(), 1);
+        // Normal (−7, 7) rounded from (−7.07, 7.07).
+        assert_eq!(quads[0].pts, vec![[-7, 7], [93, 107], [107, 93], [7, -7]]);
+        assert!(path_to_polys(1, 0, 10, &[[0, 0]]).is_empty());
+    }
+
+    #[test]
+    fn sref_translates_mirrors_and_rotates() {
+        let child = [bgn("C"), boundary(1, 0, &[[0, 0], [10, 0], [10, 20], [0, 20], [0, 0]]), end()].concat();
+        let top = |r: Vec<u8>| [child.clone(), bgn("TOP"), r, end()].concat();
+
+        let p = parse_gds(&top(sref("C", [100, 200], false, 0))).0;
+        assert_eq!(sorted_pts(&p[0]), vec![[100, 200], [100, 220], [110, 200], [110, 220]]);
+
+        let p = parse_gds(&top(sref("C", [0, 0], true, 0))).0;
+        assert_eq!(sorted_pts(&p[0]), vec![[0, -20], [0, 0], [10, -20], [10, 0]]);
+
+        // 90° CCW: (x, y) ↦ (−y, x).
+        let p = parse_gds(&top(sref("C", [0, 0], false, 90))).0;
+        assert_eq!(sorted_pts(&p[0]), vec![[-20, 0], [-20, 10], [0, 0], [0, 10]]);
+
+        // Mirror then rotate 90: (x, y) ↦ (y, x).
+        let p = parse_gds(&top(sref("C", [0, 0], true, 90))).0;
+        assert_eq!(sorted_pts(&p[0]), vec![[0, 0], [0, 10], [20, 0], [20, 10]]);
+    }
+
+    /// Nested transforms compose as parent ∘ child: a mirrored parent
+    /// reverses the child's rotation sense.
+    #[test]
+    fn nested_transforms_compose_parent_after_child() {
+        let gds = [
+            bgn("LEAF"),
+            boundary(1, 0, &[[10, 0], [20, 0], [20, 5], [10, 5]]),
+            end(),
+            bgn("MID"),
+            sref("LEAF", [0, 0], false, 90),
+            end(),
+            bgn("TOP"),
+            sref("MID", [1000, 0], true, 0),
+            end(),
+        ]
+        .concat();
+        let p = parse_gds(&gds).0;
+        // LEAF point (10, 0) → R90 → (0, 10) → Mx → (0, −10) → +1000.
+        assert!(p[0].pts.contains(&[1000, -10]), "{:?}", p[0].pts);
+        // (20, 5) → (−5, 20) → (−5, −20) → (995, −20).
+        assert!(p[0].pts.contains(&[995, -20]), "{:?}", p[0].pts);
+    }
+
+    #[test]
+    fn aref_expands_to_a_cols_by_rows_lattice() {
+        let aref = [
+            rec(0x0B, 0, &[]),
+            s_rec(0x12, "C"),
+            i16_rec(0x13, &[2, 3]),
+            xy(&[[0, 0], [200, 0], [0, 900]]),
+            rec(0x11, 0, &[]),
+        ]
+        .concat();
+        let gds = [bgn("C"), boundary(1, 0, &square(0, 0, 10)), end(), bgn("TOP"), aref, end()].concat();
+        let polys = parse_gds(&gds).0;
+        assert_eq!(polys.len(), 6);
+        let mut origins: Vec<[i32; 2]> = polys.iter().map(|p| sorted_pts(p)[0]).collect();
+        origins.sort_unstable();
+        assert_eq!(origins, vec![[0, 0], [0, 300], [0, 600], [100, 0], [100, 300], [100, 600]]);
+    }
+
+    #[test]
+    fn texts_follow_their_instance_transform() {
+        let text = [rec(0x0C, 0, &[]), s_rec(0x19, "vout"), xy(&[[5, 7]]), rec(0x11, 0, &[])].concat();
+        let empty_text = [rec(0x0C, 0, &[]), xy(&[[1, 1]]), rec(0x11, 0, &[])].concat();
+        let gds = [bgn("C"), text, empty_text, end(), bgn("TOP"), sref("C", [100, 0], false, 180), end()].concat();
+        let (_, texts) = parse_gds(&gds);
+        assert_eq!(texts.len(), 1, "an empty TEXT is dropped");
+        assert_eq!((texts[0].x, texts[0].y, texts[0].text.as_str()), (95, -7, "vout"));
+    }
+
+    #[test]
+    fn unknown_references_are_dropped_and_cycles_terminate() {
+        let gds = [bgn("TOP"), boundary(1, 0, &square(0, 0, 1)), sref("NOPE", [0, 0], false, 0), end()].concat();
+        assert_eq!(parse_gds(&gds).0.len(), 1);
+        // A ↔ B cycle: neither is a top cell, so either is shown; depth caps it.
+        let cyc = [
+            bgn("A"),
+            boundary(1, 0, &square(0, 0, 1)),
+            sref("B", [1, 0], false, 0),
+            end(),
+            bgn("B"),
+            sref("A", [1, 0], false, 0),
+            end(),
+        ]
+        .concat();
+        let n = parse_gds(&cyc).0.len();
+        assert!(n > 0 && n <= 65, "{n}");
+    }
+
+    /// With several unreferenced structures the last one defined is the top
+    /// (GDS writers emit the top cell last), every time.
+    #[test]
+    fn the_last_unreferenced_structure_is_the_top() {
+        let gds = [
+            bgn("FIRST"),
+            boundary(1, 0, &square(0, 0, 1)),
+            end(),
+            bgn("SECOND"),
+            boundary(2, 0, &square(0, 0, 1)),
+            end(),
+        ]
+        .concat();
+        for _ in 0..16 {
+            let p = parse_gds(&gds).0;
+            assert_eq!(p.len(), 1);
+            assert_eq!(p[0].layer, 2);
+        }
+    }
+
+    // ── Styling and meshes ──
+
+    #[test]
+    fn layer_style_fills_devices_and_outlines_wells_and_implants() {
+        let names = layer_names(&[
+            ("met1".into(), (68, 20)),
+            ("nwell".into(), (64, 20)),
+            ("nsdm".into(), (93, 44)),
+            ("areaid_mk".into(), (81, 4)),
+            ("psd".into(), (94, 20)),
+        ]);
+        assert!(layer_style(&names, (68, 20)).1);
+        for k in [(64, 20), (93, 44), (81, 4), (94, 20)] {
+            assert!(!layer_style(&names, k).1, "{k:?} is outline-only");
+        }
+        // Unknown: hashed, filled, deterministic.
+        let s = layer_style(&names, (7, 3));
+        assert!(s.1);
+        assert_eq!(s, layer_style(&names, (7, 3)));
+    }
+
+    #[test]
+    fn outline_color_is_brighter_and_opaque() {
+        assert_eq!(outline_color([0.5, 0.8, 0.0, 0.25]), [0.75, 1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn meshes_count_vertices_per_polygon() {
+        let names = layer_names(&[("nwell".into(), (64, 20))]);
+        let sq = Poly { layer: 1, datatype: 0, pts: vec![[0, 0], [10, 0], [10, 10], [0, 10]] };
+        let well = Poly { layer: 64, datatype: 20, ..sq.clone() };
+        assert_eq!(triangulate(&[sq.clone()], &names).len(), 6, "two triangles");
+        assert!(triangulate(&[well.clone()], &names).is_empty(), "outline-only layers do not fill");
+        let lines = outline_vertices(&[sq, well], &names);
+        assert_eq!(lines.len(), 16, "four closed edges each");
+        assert_eq!(lines[7].pos, [0.0, 0.0], "the last edge closes on the first vertex");
+        assert!(triangulate(&[], &names).is_empty() && outline_vertices(&[], &names).is_empty());
+    }
+
+    #[test]
+    fn glyphs_are_well_formed_stroke_pairs() {
+        for ch in (' '..='~').chain(['é']) {
+            let g = glyph(ch);
+            assert_eq!(g.len() % 2, 0, "{ch:?}");
+            for seg in g.chunks_exact(2) {
+                let up = seg.iter().filter(|&&p| p == PEN_UP).count();
+                assert!(up == 0 || up == 2, "{ch:?}: half a pen-up");
+                if up == 0 {
+                    assert!(seg.iter().all(|&(x, y)| x <= 5 && y <= 7), "{ch:?} leaves the cell");
+                }
+            }
+        }
+        assert!(glyph(' ').is_empty());
+        assert_eq!(glyph('a'), glyph('A'));
+    }
+
+    #[test]
+    fn push_text_strokes_each_segment_as_two_triangles() {
+        let mut v = Vec::new();
+        push_text(&mut v, " ", 0.0, 0.0, 1.0, [1.0; 4]);
+        assert!(v.is_empty());
+        push_text(&mut v, "I", 0.0, 0.0, 1.0, [1.0; 4]);
+        assert_eq!(v.len(), 3 * 6, "I is three strokes");
+        // The second glyph starts six units right.
+        let mut w = Vec::new();
+        push_text(&mut w, " I", 0.0, 0.0, 1.0, [1.0; 4]);
+        assert!(w.iter().zip(&v).all(|(a, b)| (a.pos[0] - b.pos[0] - 6.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_zero_length_stroke_has_no_nan() {
+        let mut v = Vec::new();
+        stroke_quad(&mut v, [1.0, 1.0], [1.0, 1.0], 0.5, [1.0; 4]);
+        assert_eq!(v.len(), 6);
+        assert!(v.iter().all(|x| x.pos.iter().all(|c| c.is_finite())));
+    }
+
+    #[test]
+    fn legend_has_a_backdrop_and_one_row_per_layer() {
+        let names = LayerMap::new();
+        assert!(build_legend(&[], &names).is_empty());
+        let p = |layer| Poly { layer, datatype: 0, pts: vec![[0, 0], [1, 0], [1, 1]] };
+        let one = build_legend(&[p(1), p(1)], &names);
+        let two = build_legend(&[p(1), p(2)], &names);
+        assert!(two.len() > one.len(), "duplicate layers collapse to one row");
+        assert!(one.iter().all(|v| v.pos.iter().all(|c| (-1.0..=1.0).contains(c))), "legend stays on screen");
+    }
+
+    #[test]
+    fn text_vertices_scale_with_the_layout() {
+        let t = [TextEntry { x: 0, y: 0, text: "I".into() }];
+        let big = Poly { layer: 1, datatype: 0, pts: vec![[0, 0], [70_000, 0], [0, 70_000]] };
+        let height = |v: &[Vertex]| v.iter().map(|x| x.pos[1]).fold(f32::MIN, f32::max);
+        let default = height(&text_vertices(&t, &[]));
+        let scaled = height(&text_vertices(&t, &[big]));
+        assert!((scaled / default - 10.0).abs() < 0.1, "{default} {scaled}");
+        assert!(text_vertices(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn fit_view_centres_and_fills_the_view() {
+        let id = fit_view(&[], 2.0);
+        assert_eq!((id.offset, id.scale, id.aspect), ([0.0; 2], 1.0, 2.0));
+        let p = Poly { layer: 1, datatype: 0, pts: vec![[100, 0], [300, 0], [300, 100]] };
+        let c = fit_view(&[p], 1.0);
+        assert_eq!(c.offset, [-200.0, -50.0]);
+        assert!((c.scale * 200.0 - 1.8).abs() < 1e-6);
+        // A single point: span floors at one unit.
+        let dot = Poly { layer: 1, datatype: 0, pts: vec![[5, 5]] };
+        assert!((fit_view(&[dot], 1.0).scale - 1.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn extreme_coordinates_do_not_overflow() {
+        let p = Poly { layer: 1, datatype: 0, pts: vec![[i32::MIN, i32::MIN], [i32::MAX, i32::MIN], [i32::MAX, i32::MAX]] };
+        let c = fit_view(std::slice::from_ref(&p), 1.0);
+        assert!(c.scale > 0.0 && c.scale.is_finite());
+        assert!(c.offset.iter().all(|o| o.abs() <= 1.0), "{:?}", c.offset);
+        assert!(!text_vertices(&[TextEntry { x: 0, y: 0, text: "A".into() }], &[p]).is_empty());
+        let gds = [bgn("T"), boundary(1, 0, &[[i32::MIN, i32::MIN], [i32::MAX, i32::MIN], [i32::MAX, i32::MAX]]), end()].concat();
+        assert!(export_svg(&gds, &LayerMap::new()).contains("<polygon"));
+    }
+
+    #[test]
+    fn zoom_steps_by_ten_percent_and_ignores_no_movement() {
+        assert!((zoom_factor(1.0) - 1.1).abs() < 1e-6);
+        assert!((zoom_factor(-3.0) - 1.0 / 1.1).abs() < 1e-6);
+        assert_eq!(zoom_factor(0.0), 1.0, "a horizontal scroll must not zoom");
+        assert_eq!(zoom_factor(-0.0), 1.0);
+    }
+
+    // ── SVG ──
+
+    #[test]
+    fn svg_groups_layers_and_flips_labels_upright() {
+        let text = [rec(0x0C, 0, &[]), s_rec(0x19, "a&b<c"), xy(&[[0, 100]]), rec(0x11, 0, &[])].concat();
+        let gds = [bgn("T"), boundary(68, 20, &square(0, 0, 400)), boundary(64, 20, &square(0, 0, 800)), text, end()].concat();
+        let names = layer_names(&[("met1".into(), (68, 20)), ("nwell".into(), (64, 20))]);
+        let svg = export_svg(&gds, &names);
+        assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"));
+        // pad = 800 / 40 = 20.
+        assert!(svg.contains(r#"viewBox="-20 -20 840 840""#), "{svg}");
+        assert!(svg.contains(r#"<g id="met1" fill="rgba("#));
+        assert!(svg.contains(r#"<g id="nwell" fill="none""#), "wells are outline-only");
+        // flip = 2·vy + vh = 800; label y = 800 − 100.
+        assert!(svg.contains(r#"<text x="0" y="700""#), "{svg}");
+        assert!(svg.contains(">a&amp;b&lt;c</text>"));
+        assert_eq!(svg.matches("<polygon").count(), 2);
+    }
+
+    #[test]
+    fn svg_attributes_are_escaped_and_never_degenerate() {
+        // A tiny layout still strokes, and a zero-width one keeps a viewBox.
+        let gds = [bgn("T"), boundary(1, 0, &[[0, 0], [0, 10], [0, 20]]), end()].concat();
+        let names = layer_names(&[("a\"b<".into(), (1, 0))]);
+        let svg = export_svg(&gds, &names);
+        assert!(!svg.contains(r#"stroke-width="0""#), "{svg}");
+        assert!(svg.contains(r#"viewBox="-1 -1 2 22""#), "{svg}");
+        assert!(svg.contains(r#"id="a&quot;b&lt;""#), "{svg}");
     }
 
     #[test]
