@@ -131,8 +131,9 @@ pub fn bound_stats(tables: &[SensTable], sigma_v: &[Option<f64>], post: &PerfRes
             let s = |dev: u16| t.rows.iter().find(|r| r.param == Param::GateOffset { device: dev }).and_then(|r| r.d[bound.spec]).unwrap_or(0.0);
             let var: f64 = ts.iter().map(|&(_, x)| x * x).sum::<f64>() + grad.iter().map(|&(p, q, g)| ((s(p) - s(q)) / 2.0 * g).powi(2)).sum::<f64>();
             let sigma = var.sqrt();
-            let beta = m / sigma;
-            let mut shares: Vec<(u16, f64)> = ts.iter().map(|&(d, x)| (d, x * x / var)).collect();
+            // σ_f = 0: no spread, so the bound holds for certain when its margin does.
+            let beta = if sigma > 0.0 { m / sigma } else if m >= 0.0 { f64::INFINITY } else { f64::NEG_INFINITY };
+            let mut shares: Vec<(u16, f64)> = ts.iter().map(|&(d, x)| (d, if var > 0.0 { x * x / var } else { 0.0 })).collect();
             shares.sort_by(|a, b| b.1.total_cmp(&a.1));
             shares.truncate(3);
             BoundStat { bound: b, sigma_f: Some(sigma), beta: Some(beta), yield_part: Some(phi(beta)), headroom_stat: Some(m - BETA_TARGET * sigma), shares }
@@ -147,8 +148,9 @@ pub fn bound_stats(tables: &[SensTable], sigma_v: &[Option<f64>], post: &PerfRes
 #[must_use]
 pub fn key_tiers(stats: &[BoundStat], post: &PerfResult, specs: &[Spec], beta_key: bool) -> (u32, f64) {
     if beta_key {
-        let failed = stats.iter().filter(|s| s.beta.is_none_or(|b| b < 0.0)).count() as u32;
-        let shortfall = stats.iter().map(|s| s.beta.map_or(f64::INFINITY, |b| (BETA_TARGET - b).max(0.0))).fold(0.0, f64::max);
+        let beta = |s: &BoundStat| s.beta.filter(|b| !b.is_nan());
+        let failed = stats.iter().filter(|s| beta(s).is_none_or(|b| b < 0.0)).count() as u32;
+        let shortfall = stats.iter().map(|s| beta(s).map_or(f64::INFINITY, |b| (BETA_TARGET - b).max(0.0))).fold(0.0, f64::max);
         return (failed, shortfall);
     }
     let failed = post.bounds.iter().filter(|b| crate::perf::side_miss(&specs[b.spec], b.upper, b.value) > 0.0).count() as u32;
@@ -160,7 +162,7 @@ pub fn key_tiers(stats: &[BoundStat], post: &PerfResult, specs: &[Spec], beta_ke
 #[must_use]
 pub fn min_beta(stats: &[BoundStat]) -> Option<f64> {
     stats.iter().try_fold(None, |acc: Option<f64>, s| {
-        let b = s.beta?;
+        let b = s.beta.filter(|b| !b.is_nan())?;
         Some(Some(acc.map_or(b, |a| a.min(b))))
     })?
 }
@@ -172,6 +174,9 @@ pub fn min_beta(stats: &[BoundStat]) -> Option<f64> {
 /// `seed`. Cost O(samples · (devices + Σ_b terms_b)).
 #[must_use]
 pub fn linear_joint_yield(tables: &[SensTable], sigma_v: &[Option<f64>], post: &PerfResult, specs: &[Spec], sys: &[f64], samples: usize, seed: u64) -> Option<f64> {
+    if samples == 0 {
+        return None;
+    }
     // Per bound: margin and (device, s·σ) signed so a positive sum eats margin.
     let bounds: Vec<(f64, Vec<(usize, f64)>)> = (0..post.bounds.len())
         .map(|b| {
@@ -200,7 +205,7 @@ pub fn linear_joint_yield(tables: &[SensTable], sigma_v: &[Option<f64>], post: &
             pass += 1;
         }
     }
-    Some(pass as f64 / samples.max(1) as f64)
+    Some(pass as f64 / samples as f64)
 }
 
 /// Standard normal cdf, `0.5·erfc(−x/√2)`; erfc by Abramowitz–Stegun 7.1.26

@@ -171,7 +171,7 @@ pub(crate) fn side_miss(spec: &Spec, upper: bool, v: Option<f64>) -> f64 {
 
 /// [`miss`] against a bare floor and ceiling.
 fn miss_bounds(min: Option<f64>, max: Option<f64>, v: Option<f64>) -> f64 {
-    let Some(v) = v else { return 1.0 };
+    let Some(v) = v.filter(|v| !v.is_nan()) else { return 1.0 };
     let over = |excess: f64, bound: f64| (excess / if bound == 0.0 { 1.0 } else { bound.abs() }).max(0.0);
     min.map_or(0.0, |lo| over(lo - v, lo)) + max.map_or(0.0, |hi| over(v - hi, hi))
 }
@@ -187,12 +187,13 @@ fn miss_bounds(min: Option<f64>, max: Option<f64>, v: Option<f64>) -> f64 {
 /// If a row of `measured` is shorter than `specs`.
 #[must_use]
 pub fn score(specs: &[Spec], measured: &[Vec<Option<f64>>], scenarios: &[usize]) -> PerfResult {
-    let metrics = specs.iter().enumerate().map(|(j, s)| (s.metric.clone(), measured.first().and_then(|m| m[j]))).collect();
+    let metrics = specs.iter().enumerate().map(|(j, s)| (s.metric.clone(), measured.first().and_then(|m| m[j]).filter(|v| !v.is_nan()))).collect();
     let mut bounds = Vec::new();
     let mut misses = Vec::new();
     let mut spread = Vec::new();
     for (j, s) in specs.iter().enumerate() {
-        let col = || measured.iter().zip(scenarios).map(move |(m, &sc)| (m[j], sc));
+        // NaN is unmeasured, so it is the worst and the spread is unknown.
+        let col = || measured.iter().zip(scenarios).map(move |(m, &sc)| (m[j].filter(|v| !v.is_nan()), sc));
         spread.push(col().map(|(v, _)| v).collect::<Option<Vec<_>>>().and_then(|v| Some((v.iter().copied().reduce(f64::min)?, v.iter().copied().reduce(f64::max)?))));
         // The worst `(value, scenario)` for a bound: `margin` grows with slack.
         let worst = |margin: fn(f64) -> f64| {
@@ -246,7 +247,7 @@ pub(crate) fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, tb: &s
         Some(routed.max(0.0) + gate.max(0.0)).filter(|&r| r > 0.0)
     };
     // A gate offset sits between the gate and its net (or branch-R) node.
-    let offset = |di: usize| par.gate_offset_v.get(di).copied().filter(|&v| v != 0.0);
+    let offset = |di: usize| par.gate_offset_v.get(di).copied().filter(|&v| v != 0.0 && v.is_finite());
     let prev = |di: usize, t: &str, n: String| if branch(di, t).is_some() { format!("{n}__{di}_{t}") } else { n };
     let mut rs = String::new();
     for (di, dev) in netlist.devices.iter().enumerate() {
@@ -655,18 +656,21 @@ pub fn default_params(netlist: &Netlist, nets: &[pnr_core::NetId]) -> Vec<Param>
 pub fn coupling_params(t: &SensTable, netlist: &Netlist, nets: &[pnr_core::NetId], max: usize) -> Vec<Param> {
     let scale: Vec<f64> = t.base.metrics.iter().map(|m| m.1.map_or(1.0, f64::abs)).map(|s| if s == 0.0 { 1.0 } else { s }).collect();
     let d = |n: u16| t.rows.iter().find(|r| r.param == Param::GroundC { net: pnr_core::NetId(n) }).map(|r| &r.d);
-    let mut pairs: Vec<(f64, u16, u16)> = Vec::new();
-    for a in nets.iter().map(|n| n.0) {
-        for b in (0..netlist.nets.len() as u16).filter(|&b| b != a && node_name(netlist, pnr_core::NetId(b)) != "0") {
-            let (a, b) = (a.min(b), a.max(b));
-            if pairs.iter().any(|p| (p.1, p.2) == (a, b)) {
-                continue;
-            }
-            let g = |n: u16, j: usize| d(n).and_then(|d| d[j]).map_or(0.0, f64::abs);
-            let score = scale.iter().enumerate().map(|(j, s)| (g(a, j) + g(b, j)) / s).fold(0.0, f64::max);
-            pairs.push((score, a, b));
-        }
-    }
+    let grounded: Vec<bool> = (0..netlist.nets.len()).map(|b| node_name(netlist, pnr_core::NetId(b as u16)) == "0").collect();
+    let is_ground = |n: u16| grounded.get(n as usize).copied().unwrap_or(false);
+    // Every unordered pair once: collect, sort, dedup, then score.
+    let mut keys: Vec<(u16, u16)> = nets
+        .iter()
+        .map(|n| n.0)
+        .filter(|&a| !is_ground(a))
+        .flat_map(|a| (0..netlist.nets.len() as u16).filter(move |&b| b != a).map(move |b| (a.min(b), a.max(b))))
+        .filter(|&(a, b)| !is_ground(a) && !is_ground(b))
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let g = |n: u16, j: usize| d(n).and_then(|d| d[j]).map_or(0.0, f64::abs);
+    let mut pairs: Vec<(f64, u16, u16)> =
+        keys.into_iter().map(|(a, b)| (scale.iter().enumerate().map(|(j, s)| (g(a, j) + g(b, j)) / s).fold(0.0, f64::max), a, b)).collect();
     pairs.sort_by(|x, y| y.0.total_cmp(&x.0).then((x.1, x.2).cmp(&(y.1, y.2))));
     pairs.into_iter().take(max).map(|(_, a, b)| Param::CouplingC { a: pnr_core::NetId(a), b: pnr_core::NetId(b) }).collect()
 }
@@ -761,7 +765,7 @@ pub fn router_weights(
 ) -> (Vec<f32>, Vec<(pnr_core::NetId, pnr_core::NetId, f32)>) {
     let mut r = vec![0.0f64; netlist.nets.len()];
     let mut pairs: Vec<(pnr_core::NetId, pnr_core::NetId, f64)> = Vec::new();
-    for &(j, h, sc) in bounds {
+    for &(j, h, sc) in bounds.iter().filter(|b| b.1 > 0.0 && b.1.is_finite()) {
         let Some(t) = tables.iter().find(|t| t.scenario == sc) else { continue };
         for row in t.rows.iter().filter(|r| r.linear) {
             let Some(x) = row.d[j] else { continue };

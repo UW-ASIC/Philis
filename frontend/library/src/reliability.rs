@@ -51,7 +51,11 @@ pub fn voltage_findings(
 ) -> (Vec<Violation>, Vec<PairAging>, usize) {
     let src = if probe { " (probe)" } else { "" };
     // `(V_GS, V_DS, V_BS)` of device `i`, V, when all three are resolved.
-    let v3 = |i: usize| Some((*op.vgs_v.get(i)?.as_ref()?, *op.vds_v.get(i)?.as_ref()?, *op.vbs_v.get(i)?.as_ref()?));
+    // A non-finite voltage is no voltage: unresolved, never a silent pass.
+    let v3 = |i: usize| {
+        let v = (*op.vgs_v.get(i)?.as_ref()?, *op.vds_v.get(i)?.as_ref()?, *op.vbs_v.get(i)?.as_ref()?);
+        (v.0.is_finite() && v.1.is_finite() && v.2.is_finite()).then_some(v)
+    };
     let (mut rows, mut unknown) = (Vec::new(), 0);
     for (i, d) in netlist.devices.iter().enumerate() {
         if !matches!(d.kind, DeviceKind::Nmos | DeviceKind::Pmos) {

@@ -565,10 +565,15 @@ fn spice_number(t: &str) -> Option<f64> {
     let (num, suf) = t.split_at(split);
     let scale = match suf {
         "" => 1.0,
+        "t" => 1e12,
+        "g" => 1e9,
+        "meg" => 1e6,
+        "k" => 1e3,
         "m" => 1e-3,
         "u" => 1e-6,
         "n" => 1e-9,
-        "k" => 1e3,
+        "p" => 1e-12,
+        "f" => 1e-15,
         _ => return None,
     };
     num.parse::<f64>().ok().map(|v| v * scale)
