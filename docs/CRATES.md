@@ -50,6 +50,35 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
   | rc_filter | (3,0,0) both | ran (1/1), 0 rows both | 1.645 ×5 both |
   Pass (no worse), but no measured gain: IR Θ is 0 before and after, and signoff
   exposes only violating rows, not the worst drop/limit of a passing grid.
+- **gp ablation and seeding decision (PLC-11).** `DpMode::Sp`, release, sky130,
+  `feedback_iters = 5`, default `starts`, seeds 1–5, 11 fixtures, tree `3de954d`
+  (PLC-10; its decode and scores are bit-identical to PLC-09's). Per seed `+`/`=`/`-` =
+  lex key better / equal / worse than `Analytic` (V, Θ, then C within 2 % → area; the
+  spec tier is 0 without performance scoring). gp s and dp s are CPU summed over the
+  three start threads (`RunStats::stage_ms`).
+  | fixture | Pile vs Analytic | Constructive vs Analytic | T2 A / P / C (median) | dp s A / P / C (Σ 5 seeds) | gp s A / P / C |
+  |---|---|---|---|---|---|
+  | pair | ===== | ===== | 1.0000 / 1.0000 / 1.0000 | 0.01 / 0.01 / 0.01 | 0.0 / 0.0 / 0.0 |
+  | quad | +=+-+ | +-+-= | 1.0000 / 1.0000 / 1.0000 | 0.14 / 0.15 / 0.15 | 0.0 / 0.0 / 0.0 |
+  | chain4 | ===== | ===== | 1.0000 / 1.0000 / 1.0000 | 0.01 / 0.01 / 0.01 | 0.0 / 0.0 / 0.0 |
+  | rc_filter | ===== | ===== | 1.0340 / 1.0340 / 1.0340 | 0.14 / 0.15 / 0.14 | 0.1 / 0.0 / 0.0 |
+  | mirror_ratio | ===== | ===== | 1.0000 / 1.0000 / 1.0000 | 0.09 / 0.09 / 0.09 | 3.3 / 0.0 / 0.0 |
+  | bjt_mirror | ===== | ===== | 1.1305 / 1.1305 / 1.1305 | 0.03 / 0.03 / 0.03 | 0.0 / 0.0 / 0.0 |
+  | bgr_core | ===== | ===== | 1.0000 / 1.0000 / 1.0000 | 0.13 / 0.14 / 0.15 | 4.6 / 0.0 / 0.0 |
+  | dac4 | -+-++ | +-+-+ | 1.0591 / 1.0649 / 1.1422 | 9.62 / 10.21 / 10.72 | 38.5 / 0.0 / 0.0 |
+  | ota | --=+- | =-++- | 1.1585 / 1.1585 / 1.1585 | 9.07 / 10.51 / 10.21 | 58.6 / 0.0 / 0.0 |
+  | ota_constrained | --=+- | =-++- | 1.1585 / 1.1585 / 1.1585 | 9.34 / 8.35 / 8.31 | 60.1 / 0.0 / 0.0 |
+  | tt_ota | --=+- | =-++- | 1.1585 / 1.1585 / 1.1585 | 8.30 / 9.37 / 8.66 | 53.8 / 0.0 / 0.0 |
+  Not worse than `Analytic` (median over seeds): `Constructive` 11/11, `Pile` 8/11
+  (worse on the three OTAs). **Decision: the rule (≥ 9/11) is met by `Constructive`,
+  so the gradient loop is deletable — but deletion is deferred**: PLC-09 missed its
+  acceptance, so `DpMode::Flat` stays the default, and the flat anneal refines gp's
+  analytic layout (`GpMode::Analytic` is the default flow). Deleting the loop now would
+  change the default flow's results unmeasured. The loop stays, gp keeps seeding
+  (`Tree::seed_from` under `Sp`), and `gp_spreads_a_pile` covers it. Delete
+  (`gp::place` lines of the gradient loop, `bin_overflow`, `fill_bins`, its
+  constants; keep `Prices`, `net_weights`, `mechanics`, `initial_layout`) in the same
+  change that flips the default to `Sp` (PLC-27 deletes the flat path).
 
 ## backend/dp — deps: core, analog, gp
 - **In:** coarse `Layout` (groups, axis, power filled by library), macros,

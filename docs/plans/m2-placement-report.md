@@ -176,3 +176,108 @@ PLC-24 tree (`cd443cb` + PLC-24), seed 1, with the default floor (0.6, capped by
   - The four LVS tests above. They fail identically on `1df326d`, before this segment's items.
   - `perf_postlayout::ota_probe_regions` (XM1 in triode). The ota layouts are identical per seed on `1df326d`,
     `cd443cb` and PLC-24, so none of this segment's items moved them.
+
+## PLC-09 acceptance (annealing over sequence-pair codes)
+
+Tree `78ac3a9` (PLC-09) plus an uncommitted probe, `frontend/library/tests/zz_probe.rs`: `library::run` per fixture and
+seed with `Config { dp_mode, gp_mode: Analytic, feedback_iters: 5, ..Default }` (3 starts), release, sky130, built through
+`tools/qcargo` in the flake dev shell; `Flat` and `Sp` (and the fixed-schedule run) ran at the same time. Lex key as
+`library::key_lt`: |V| (= metadata hard rows + place/route/signoff hard), Θ = `MetadataReport::theta`, then the C tier with
+its 2 % tie broken by footprint; the spec tier is 0 without performance scoring. Per seed `+`/`=`/`-` = `Sp` better /
+equal / worse than `Flat`; "lex" = median over seeds. Medians over seeds 1–5; drc per seed.
+
+| fixture | seeds | Sp vs Flat per seed | lex | V Flat | V Sp | T2 Flat | T2 Sp | drc Flat | drc Sp | C tier Flat | C tier Sp | Θ Flat | Θ Sp |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|--- |
+| pair | 5 | ----- | WORSE | 2 | 3 | 1 | 1 | 0/0/0/0/0 | 1/1/1/1/1 | 7.119 | 7.422 | 0 | 0 |
+| quad | 5 | -+++= | ok | 0 | 0 | 1.275 | 1 | 0/0/0/0/0 | 0/0/0/0/0 | 17.31 | 17.07 | 0 | 0 |
+| chain4 | 5 | ---+- | WORSE | 12 | 15 | 1 | 1 | 3/5/3/7/5 | 8/8/8/8/8 | 13.75 | 12.67 | 0 | 0 |
+| rc_filter | 5 | +++++ | ok | 0 | 0 | 1.32 | 1.034 | 0/0/0/0/0 | 0/0/0/0/0 | 9.326 | 8.729 | 0 | 0 |
+| mirror_ratio | 5 | +++++ | ok | 15 | 15 | 1 | 1 | 0/0/0/0/0 | 0/0/0/0/0 | 35.52 | 33.47 | 0 | 0 |
+| bjt_mirror | 5 | ===== | ok | 3 | 3 | 1.131 | 1.131 | 3/3/3/3/3 | 3/3/3/3/3 | nan | nan | 0 | 0 |
+| bgr_core | 5 | --=== | ok | 0 | 0 | 1 | 1 | 0/0/0/0/0 | 0/0/0/0/0 | 77.36 | 78.33 | 238 | 238 |
+| dac4 | 5 | -+++- | ok | 16 | 12 | 1.362 | 1.059 | 11/16/13/15/11 | 12/12/12/10/12 | 116 | 114.3 | 1.681e+06 | 1.85e+06 |
+| ota | 5 | ----- | WORSE | 197 | 205 | 1.329 | 1.159 | 162/160/162/162/162 | 167/167/167/167/167 | 201.4 | 370.4 | 2e+06 | 3.012e+04 |
+| ota_constrained | 5 | ----- | WORSE | 197 | 205 | 1.329 | 1.159 | 162/160/162/162/162 | 167/167/167/167/167 | 201.4 | 370.4 | 2e+06 | 3.012e+04 |
+| tt_ota | 5 | ----- | WORSE | 197 | 205 | 1.329 | 1.159 | 162/160/162/162/162 | 167/167/167/167/167 | 201.4 | 370.4 | 2e+06 | 3.012e+04 |
+
+- **T1: all zero under `Sp`** in all 55 runs: overlap 0, clearance residue 0, lattice offenders 0, and no placement hard
+  row (`place_hard` 0, so every Symmetry batch holds).
+- **Signoff DRC ≤ Flat: fails** on pair (1 vs 0, `drc/m1.2.notch`), chain4 (8 vs 3–7), dac4 seeds 1 and 5 (12 vs 11) and
+  the three OTAs (167 vs 160–162, two `drc/m1.2` and three `lvs.unpaired_net` more). These are routing outcomes of a
+  different (more compact) placement, not placement overlap. Note the OTAs' baseline: 136 `lvs/lvs.unpaired_device` and
+  26 `lvs.unpaired_net` rows under **both** dp modes on this tree (`git archive` of the integration state this segment
+  started from; PLC-07's report had ota at drc 0). That baseline is not placement's (reported, not chased).
+- **Lex key ≥ Flat on 6/11 — fails** (needs 9/11). Better or equal: quad, rc_filter, mirror_ratio, bjt_mirror,
+  bgr_core, dac4. Worse: pair and chain4 (one cell each: the SP anneal has 23 proposals and leaves a different
+  orientation/variant, which routes with one more DRC row), ota, ota_constrained, tt_ota (|V| 205 vs 197). On the OTAs
+  `Sp` has Θ 3.0e4 vs 2.0e6 but loses on |V| first; its C tier is 370 vs 201 fF.
+- **T2 ≤ Flat: passes** on every fixture (medians; e.g. dac4 1.059 vs 1.362, OTAs 1.159 vs 1.329, rc_filter 1.034 vs
+  1.320).
+- **Schedule A/B: passes.** The adaptive schedule against the same anneal with stopping rules (a) and (b) disabled (all
+  220 temperatures, probe-only env switch): lex key not worse on 11/11 fixtures (identical on 7; per-seed differences on
+  quad, dac4 and the OTAs balance), at 4.4 % of the fixed schedule's summed dp time (65.6 s vs 1489 s over the 55 runs).
+- dp time: `Sp` 65.6 s vs `Flat` 6222 s summed over the 55 runs (stage `dp`, CPU summed over the start threads).
+- **`DpMode` default stays `Flat`**, as the card requires on a miss. Not tuned.
+
+## PLC-10 acceptance (warm start, incremental evaluation, undo log)
+
+Same probe and protocol as PLC-09, `DpMode::Sp`. T7 runs: `78ac3a9` (PLC-09) and PLC-10 at the same time, on `dac4` and
+`examples/three_stage_opamp` (its netlist as a fixture file; the example's injected `M8` macro is not used, so `M8` is
+generated), seeds 1–5. "dp s" = stage `dp` CPU summed over the start threads and all epochs; the runs make identical
+decisions, so equal work, and the ratio is the proposals/s ratio.
+
+| tree | dac4 dp s | dac4 wall s | opamp3 dp s | opamp3 wall s | identical to PLC-09 |
+|---|---|---|---|---|---|
+| PLC-09 `78ac3a9` | 20.3 | 41.6 | 72.2 | 292.0 | — |
+| PLC-10 `3de954d` (`MatchedSet` global; `b6c3acd` is the same code path) | 10.0 | 36.1 | 31.6 | 259.7 | 10/10 runs |
+| PLC-10 `f4a621c` (`MatchedSet` on members ∪ powered cells) | 3.27× faster | | 2.56× faster | | dac4 5/5, opamp3 1/5 |
+
+- **Exactness: 55/55 runs identical to PLC-09** over the 11 fixtures × seeds 1–5 (`3de954d`): same layout, report row
+  and proposal count. `incremental_matches_full_evaluation` holds after every one of 2,000 moves (accepted and rejected)
+  with a thermal-field rule, and `cached_decode_equals_fresh_decode` with turn-dependent profiles; both fail when the
+  cache invalidation they guard is removed (checked by mutation).
+- **T7 ≥ 3×: fails** — 2.04× on dac4 and 2.28× on opamp3. With the cache in place, `MatchedSet` dominates what is left
+  (perf on dac4: `UnitLib::placed`, the moment sums, `hypot` and `MatchedSet::ledger_with` took most of the samples
+  before it was narrowed). It must be re-scored on every move: `f4a621c` re-scored it only when a member or a powered
+  cell moved (3.27× on dac4), but that changed 4/5 opamp3 runs, whose power is all 0, so the batch reads cells its
+  `touched` does not name. `b6c3acd` makes it global again. Out of scope: `MatchedSet::touched` should list every cell
+  its members' units sit in (owner: matching); dp narrows it once that is exact.
+- **Bench wall ≤ PLC-09: passes** in the paired runs (36.1 vs 41.6 s, 259.7 vs 292.0 s).
+- **Lex key equal on 11/11** (all 55 runs, above).
+- Step 2 was already done (stale card note); `touched_names_both_targets` added for `DtiBand` and `HeatSeparation`.
+  Step 1: `Start::Warm` falls back to `seed_constructive` with `PlaceStats::warm_fallback` when the tree no longer fits;
+  `Epoch::tree` holds the code; mapping FLOW-08's warm start to it is FLOW-08's (not on `m2`).
+
+## PLC-12 and PLC-28 acceptance (symmetry islands; axes on the routing lattice)
+
+Tree `4093679` (PLC-28 on PLC-12) plus the probe; `Flat`, `Sp`, and `Sp` with `PlaceRules::axis_grid` forced to `None`
+(probe-only env switch in `topology`) ran at the same time. Same protocol as PLC-09. "islands" = the winner's
+`SymmetryIsland` budget batches at residual 0 / all; "pairs exact" = `RouteStats::pairs_exact` (RTE-15) out of the
+recognised matched pairs; fallback reasons from `RouteStats::pairs_fallback`.
+
+| fixture | runs | islands Flat (at 0 / all) | islands Sp (at 0 / all) | clusters_extra Flat / Sp (max) | axes on lattice / axes (Sp, Σ) | T2 Sp axis_grid / without (median) | ΔT2 | pairs exact Sp (per seed) | fallback reasons (seed 1) |
+|---|---|---|---|---|---|---|---|---|---|
+| pair | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0000 / 1.0000 | +0.0% | 0/0/0/0/0 | [] |
+| quad | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0000 / 1.0000 | +0.0% | 0/0/0/0/0 | [] |
+| chain4 | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0000 / 1.0000 | +0.0% | 0/0/0/0/0 | [] |
+| rc_filter | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0340 / 1.0340 | +0.0% | 0/0/0/0/0 | [] |
+| mirror_ratio | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0000 / 1.0000 | +0.0% | 0/0/0/0/0 | [] |
+| bjt_mirror | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.1305 / 1.1305 | +0.0% | 0/0/0/0/0 | [] |
+| bgr_core | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0000 / 1.0000 | +0.0% | 0/0/0/0/0 | [] |
+| dac4 | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0591 / 1.0591 | +0.0% | 0/0/0/0/0 | [] |
+| ota | 5 | 5/5 | 5/5 | 0 / 0 | 5/5 | 1.2096 / 1.3544 | -10.7% | 1/1/1/1/1 | ["no pin map"] |
+| ota_constrained | 5 | 5/5 | 5/5 | 0 / 0 | 5/5 | 1.2096 / 1.3544 | -10.7% | 1/1/1/1/1 | ["no pin map"] |
+| tt_ota | 5 | 5/5 | 5/5 | 0 / 0 | 5/5 | 1.2096 / 1.3544 | -10.7% | 1/1/1/1/1 | ["no pin map"] |
+
+- **PLC-12 T4: 100 % ≥ 90 % — passes** under both modes: every `SymmetryIsland` batch at residual 0 in all 15 winners that
+  have one (`Flat` 15/15, `Sp` 15/15; only the three OTAs have a symmetry axis with ≥ 2 cells). `clusters_extra` is 0 on
+  every run (no fixture's recognition block splits).
+- **PLC-28: `axes_on_lattice == axes` on all 11 fixtures under `Sp`** (15/15 axes; the other 8 fixtures have none).
+- **T2 within +3 % of `Sp` without `axis_grid`: passes** (OTAs −10.7 %, i.e. smaller; every other fixture identical:
+  without an axis the grid changes nothing). The island budget (PLC-12) and the snapping move the OTA optimum together.
+- **RTE-15 "pairs exact" n/n on ota, ota_constrained, tt_ota: fails — 1/2 on every seed.** Without `axis_grid` it is
+  0/2 (`axis off lattice` on seeds 1, 2, 5); with it the remaining pair falls back with `no pin map` on all three
+  fixtures: dr's `pair_map` found no mirror-exact pin correspondence for that pair, which the axis cannot supply (pin
+  geometry of the cells; owner: routing/cells).
+- `axis_snapping_costs_at_most_one_period_per_level` (2,000 trees): width growth by 100 nm bin
+  `[240, 255, 233, 233, 231, 237, 229, 247, 95]`, all < 2·P = 840 nm.

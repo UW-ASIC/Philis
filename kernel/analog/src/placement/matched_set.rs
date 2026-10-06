@@ -288,6 +288,10 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
     fn touched(&self, out: &mut Vec<u32>) {
         out.extend(self.members.iter().map(|&m| self.cell(m) as u32));
     }
+    /// `mu_thermal` reads ΔT at unit centroids from every powered cell.
+    fn reads_field(&self) -> bool {
+        true
+    }
     fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
         let Some((&m0, rest)) = self.members.split_first() else { return };
         let c0 = self.cell(m0) as u32;

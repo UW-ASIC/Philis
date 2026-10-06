@@ -114,6 +114,8 @@ pub struct Config {
     pub size_convention: SizeConvention,
     /// What gp does before dp; [`GpMode::Pile`] measures gp's contribution.
     pub gp_mode: GpMode,
+    /// Which detailed placer runs ([`dp::DpMode::Sp`]: sequence-pair anneal, PLC-09).
+    pub dp_mode: dp::DpMode,
     /// Fixed die and boundary pins. [`run`] checks each pin names a port;
     /// nothing else reads it yet (PLC/RTE consume it).
     pub interface: Option<Interface>,
@@ -196,6 +198,10 @@ pub enum GpMode {
     Analytic,
     /// dp starts from gp's seeded pile, unrefined.
     Pile,
+    /// gp skipped: under [`dp::DpMode::Sp`] dp starts from
+    /// [`dp::sp::Tree::seed_constructive`]; under `Flat` (which needs
+    /// coordinates) it starts from the pile, as [`GpMode::Pile`].
+    Constructive,
 }
 
 impl Default for Config {
@@ -213,6 +219,7 @@ impl Default for Config {
             heat_source_uw: 1000,
             size_convention: SizeConvention::Spice,
             gp_mode: GpMode::default(),
+            dp_mode: dp::DpMode::default(),
             interface: None,
             top: None,
             constraints: None,
@@ -779,6 +786,11 @@ fn topology<'a>(
         let u_min = u_eff(cfg.min_utilization, &dims, median_x_gap(&rules));
         problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min }));
     }
+    // PLC-12: each symmetry axis's cells form one island.
+    for island in symmetry_islands(&problem.placement, &rules) {
+        problem.placement.budget.push(Box::new(island.clone()));
+        problem.placement.cost.push(Box::new(island));
+    }
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
@@ -849,7 +861,7 @@ fn topology<'a>(
         perf_rows.iter().flat_map(|r| r.nets.iter().copied().zip(r.weights.iter().copied())).collect();
     let net_weight = gp::net_weights(&problem.net_classes, &sens, &net_ua);
     let intent = elaborate::intent(netlist, &problem.net_classes, currents.as_deref(), cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0), &ir);
-    let flow = Flow {
+    let mut flow = Flow {
         pdk,
         netlist,
         net_names: netlist.nets.iter().map(|n| n.name.clone()).collect(),
@@ -896,6 +908,7 @@ fn topology<'a>(
             .map(|c| c.iter().map(|d| d.as_ref().and_then(|t| t.iter().find(|(n, _)| n == "D").map(|&(_, i)| i))).collect())
             .unwrap_or_default(),
         gp_mode: cfg.gp_mode,
+        dp_mode: cfg.dp_mode,
         rules,
     };
     // Matched cells keep every alternative: a merged group, or a member of a
@@ -909,6 +922,8 @@ fn topology<'a>(
         .map(|m| flow.problem.constraints.unitization.iter().any(|u| u.class == Some(pnr_core::MatchClass::Exceptional) && m.iter().all(|d| u.devices.contains(d))))
         .collect();
     let (assignment0, allowed) = cellgen::seed_assignment(&flow.cells.variants, &matched, &ranked, pdk);
+    // PLC-28: symmetry axes on the router's track centrelines.
+    flow.rules.axis_grid = axis_grid(&dr::lattice_spec(&flow.d_router.cfg), flow.rules.grid);
     Topology { flow, assignment0, allowed, distinct, t_em_k, em_derate }
 }
 
@@ -1194,6 +1209,7 @@ struct Flow<'a> {
     /// Per device drain current, µA (`None` = unresolved).
     id_ua: Vec<Option<f64>>,
     gp_mode: GpMode,
+    dp_mode: dp::DpMode,
 }
 
 /// `base` plus what the annotator needs from the deck.
@@ -1400,6 +1416,69 @@ fn placement_space(pdk: &Pdk) -> Vec<(String, String, i32)> {
         .collect()
 }
 
+/// One [`analog::placement::SymmetryIsland`] per symmetry axis of `reqs.hard`
+/// (cell ids) with ≥ 2 distinct cells. `touch_nm` = the largest gap any two
+/// members owe across any face, at any variant and orient (a mirror partner
+/// drawn MY/MX180 meets with the face its R0 profile calls the same side),
+/// + one lattice step.
+fn symmetry_islands(reqs: &analog::Requirements<Layout>, rules: &gp::PlaceRules) -> Vec<analog::placement::SymmetryIsland> {
+    use gp::spacing::Face;
+    let mut pairs = Vec::new();
+    for b in &reqs.hard {
+        b.mirror_pairs(&mut pairs);
+    }
+    let mut axes: Vec<u16> = pairs.iter().map(|p| p.2).collect();
+    axes.sort_unstable();
+    axes.dedup();
+    let profiles = |c: u32| rules.profiles.of.get(c as usize).map(|v| v.iter().flat_map(|o| o.iter()).collect::<Vec<_>>()).unwrap_or_default();
+    axes.into_iter()
+        .filter_map(|ax| {
+            let mut cells: Vec<u32> = pairs.iter().filter(|p| p.2 == ax).flat_map(|p| [p.0, p.1]).collect();
+            cells.sort_unstable();
+            cells.dedup();
+            if cells.len() < 2 {
+                return None;
+            }
+            let mut gap = 0;
+            for (i, &a) in cells.iter().enumerate() {
+                for &b in &cells[i + 1..] {
+                    let (pa, pb) = (profiles(a), profiles(b));
+                    if pa.is_empty() || pb.is_empty() {
+                        gap = gap.max(rules.spacing.fallback);
+                    }
+                    for p in &pa {
+                        for q in &pb {
+                            for f in [Face::L, Face::B, Face::R, Face::T] {
+                                gap = gap.max(rules.spacing.gap(p, f, q).min);
+                            }
+                        }
+                    }
+                }
+            }
+            let members = cells.iter().map(|&c| pnr_core::ids::Target::Device(DeviceId(c as u16))).collect();
+            Some(analog::placement::SymmetryIsland { members, touch_nm: gap + rules.grid })
+        })
+        .collect()
+}
+
+/// `(p0, P)` for `gp::PlaceRules::axis_grid` (PLC-28): the router maps a pair
+/// mirror-exactly (`dr` `pair_map`) when `2·axis − p0 ≡ 0 (mod p0)` relative to
+/// its frame and the mirror shift is a multiple of every vertical (odd-index)
+/// layer's stride, i.e. `axis ≡ p0/2 (mod P)` with `S = lcm(odd strides)` (1
+/// if none) and `P = p0·lcm(2, S)/2`. Frame origins are multiples of
+/// `p0·lcm(all strides)`, which `P` divides, so absolute = frame-relative mod
+/// `P`. `None` when `p0` is not a multiple of `2·lattice` (an axis there would
+/// leave the placement lattice).
+fn axis_grid(spec: &dr::LatticeSpec, lattice: i32) -> Option<(i32, i32)> {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let lcm = |a: u32, b: u32| a / gcd(a, b) * b;
+    let s = spec.strides.iter().skip(1).step_by(2).fold(1, |acc, &st| lcm(acc, st.max(1)));
+    let p = spec.p0 * (lcm(2, s) / 2) as i32;
+    (spec.p0 > 0 && spec.p0 % (2 * lattice.max(1)) == 0).then_some((spec.p0, p))
+}
+
 /// One scored epoch.
 struct Epoch {
     key: LexKey,
@@ -1424,6 +1503,10 @@ struct Epoch {
     /// dr's report and stats for `routes`.
     route: Report,
     route_stats: dr::RouteStats,
+    /// The code `dp::place_sp` returned under [`dp::DpMode::Sp`] (PLC-10):
+    /// FLOW-08's warm start resumes from it (`dp::Start::Warm`).
+    #[allow(dead_code)] // read once FLOW-08 lands
+    tree: Option<dp::sp::Tree>,
 }
 
 impl Flow<'_> {
@@ -1467,23 +1550,50 @@ impl Flow<'_> {
             ms[i] += clock.elapsed().as_secs_f64() * 1e3;
             clock = std::time::Instant::now();
         };
-        let (coarse, _) = gp::place(&inp, prices, seed);
-        lap(0);
-        coarse.debug_check("gp::place");
-        let (mut layout, place_report, dp_stats) = dp::place(
-            &coarse,
-            &macros,
-            if reshape { &cells.variants } else { &[] },
-            placement,
-            &cells.fixed,
-            &self.locks,
-            prices,
-            &self.rules,
-            &self.net_weight,
-            // Its own stream (AP-19): gp and dp drawing the same sequence correlate their moves.
-            seed ^ 0xD1B5_4A32_D192_ED03,
-            dp::Schedule::cold(),
-        );
+        // Its own stream (AP-19): gp and dp drawing the same sequence correlate their moves.
+        let dp_seed = seed ^ 0xD1B5_4A32_D192_ED03;
+        let dp_variants = if reshape { &cells.variants[..] } else { &[] };
+        let mut tree = None;
+        let (mut layout, place_report, dp_stats) = if self.dp_mode == dp::DpMode::Sp {
+            let coarse = (self.gp_mode != GpMode::Constructive).then(|| gp::place(&inp, prices, seed).0);
+            lap(0);
+            let sp_in = dp::PlaceInput {
+                macros: &macros,
+                variants: dp_variants,
+                assignment,
+                reqs: placement,
+                fixed: &cells.fixed,
+                blocks: &cells.groups,
+                rules: self.rules.clone(),
+                locks: &self.locks,
+                halo: &[],
+                net_weight: &self.net_weight,
+                n_axes: self.problem.axis_count,
+                power_uw: &cells.power,
+                units: cells.units.clone(),
+            };
+            let start = coarse.as_ref().map_or(dp::Start::Constructive, dp::Start::Cold);
+            let (l, t, rep, st) = dp::place_sp(&sp_in, start, dp::Schedule::cold(), prices, dp_seed);
+            tree = Some(t);
+            (l, rep, st)
+        } else {
+            let (coarse, _) = gp::place(&inp, prices, seed);
+            lap(0);
+            coarse.debug_check("gp::place");
+            dp::place(
+                &coarse,
+                &macros,
+                dp_variants,
+                placement,
+                &cells.fixed,
+                &self.locks,
+                prices,
+                &self.rules,
+                &self.net_weight,
+                dp_seed,
+                dp::Schedule::cold(),
+            )
+        };
         layout.debug_check("dp::place");
         layout.groups = cells.groups.clone();
         // The epoch's one dual step, on the layout it is scored on (T6).
@@ -1496,7 +1606,7 @@ impl Flow<'_> {
         };
         // Measured on the macros dp's variants draw, so `lattice_off` stamps what is drawn.
         let lattice = cells::builder::cut_lattice(self.pdk);
-        let place = geometry::placement_metrics(&macros, &layout, lattice, &self.rules, placement, &self.locks);
+        let place = geometry::placement_metrics(&macros, &layout, lattice, &self.rules, placement, &self.locks, &cells.groups);
         debug_assert_eq!(place.lattice_off, 0, "dp::place: cell origin off the cut lattice");
 
         // Guard rings enclose placed cells, so they are drawn now, before routing.
@@ -1628,6 +1738,7 @@ impl Flow<'_> {
             stats,
             route: route_report,
             route_stats,
+            tree,
         }
     }
 }
@@ -2654,6 +2765,14 @@ pub(crate) fn labeled_pins(
 
 #[cfg(test)]
 mod start_tests {
+    #[test]
+    fn axis_period_from_strides() {
+        let spec = |strides: Vec<u32>| dr::LatticeSpec { p0: 420, strides, origin_multiple: 0 };
+        assert_eq!(super::axis_grid(&spec(vec![1, 1, 2, 2]), 10), Some((420, 420)));
+        assert_eq!(super::axis_grid(&spec(vec![1, 3]), 10), Some((420, 1260)));
+        assert_eq!(super::axis_grid(&spec(vec![1, 1, 2, 2]), 25), None);
+    }
+
     /// PLC-24: the floor is capped by what tiny cells plus their gaps can fill.
     #[test]
     fn utilization_floor_is_reachable_for_tiny_cells() {

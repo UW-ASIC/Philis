@@ -31,6 +31,8 @@ pub struct Prices {
     priced: BTreeMap<PriceKey, Price>,
     /// `−λ` per positional batch index for this epoch (hot-path read).
     weight: Vec<f32>,
+    /// `ρ` per positional batch index for this epoch; `0` for an unpriced batch.
+    rho: Vec<f32>,
     /// `‖λ_{k+1} − λ_k‖` of the last [`Prices::settle`]; `INFINITY` before one.
     drift: f64,
     /// Dual steps taken: one per epoch (the flow's), none inside `place`.
@@ -68,7 +70,7 @@ const LAMBDA_MAX: f32 = 64.0;
 
 impl Default for Prices {
     fn default() -> Self {
-        Self { priced: BTreeMap::new(), weight: Vec::new(), drift: f64::INFINITY, steps: 0, saturated: Vec::new() }
+        Self { priced: BTreeMap::new(), weight: Vec::new(), rho: Vec::new(), drift: f64::INFINITY, steps: 0, saturated: Vec::new() }
     }
 }
 
@@ -90,10 +92,9 @@ impl Prices {
             reqs.budget.iter().all(|b| reqs.hard.iter().all(|h| h.kind() != b.kind())),
             "gp::Prices: a batch kind is registered in both `hard` and `budget`"
         );
-        self.weight = keys(reqs)
-            .iter()
-            .map(|k| self.priced.get(k).map_or(0.0, |p| -p.lambda))
-            .collect();
+        let keys = keys(reqs);
+        self.weight = keys.iter().map(|k| self.priced.get(k).map_or(0.0, |p| -p.lambda)).collect();
+        self.rho = keys.iter().map(|k| self.priced.get(k).map_or(0.0, |p| p.rho)).collect();
     }
 
     /// Projected dual step `λ ← clamp(λ − ρ·g, −LAMBDA_MAX, 0)`, once per
@@ -156,8 +157,15 @@ impl Prices {
     /// `−λ` for budget batch `bi`; `0.0` when unbound.
     #[inline]
     #[must_use]
-    pub(crate) fn weight_of(&self, bi: usize) -> f32 {
+    pub fn weight_of(&self, bi: usize) -> f32 {
         self.weight.get(bi).copied().unwrap_or(0.0)
+    }
+
+    /// `ρ` for budget batch `bi`; `0.0` when unbound or unpriced.
+    #[inline]
+    #[must_use]
+    pub fn rho_of(&self, bi: usize) -> f32 {
+        self.rho.get(bi).copied().unwrap_or(0.0)
     }
 }
 
@@ -245,6 +253,10 @@ pub struct PlaceRules {
     pub profiles: Arc<spacing::Profiles>,
     /// `spacing.max_gap()`, cached: past it on either axis a pair owes nothing.
     far: i32,
+    /// `(p0, P)`: the SP decoder puts every symmetry axis at `p0/2 (mod P)`,
+    /// a routing track centreline (PLC-28; the library derives it from dr's
+    /// lattice). `None`: axes only on the lattice.
+    pub axis_grid: Option<(i32, i32)>,
 }
 
 impl PlaceRules {
@@ -257,13 +269,18 @@ impl PlaceRules {
     /// `profiles.of[cell]` indexes like the layout's cells.
     #[must_use]
     pub fn new(grid: i32, spacing: spacing::SpacingTable, profiles: spacing::Profiles) -> Self {
-        PlaceRules { grid, far: spacing.max_gap(), spacing: Arc::new(spacing), profiles: Arc::new(profiles) }
+        PlaceRules { grid, far: spacing.max_gap(), spacing: Arc::new(spacing), profiles: Arc::new(profiles), axis_grid: None }
     }
 
     fn profile(&self, l: &Layout, c: usize) -> Option<&spacing::Profile> {
-        let v = usize::from(*l.variant.get(c)?);
-        let o = l.orient.get(c).copied().unwrap_or_default() as usize;
-        self.profiles.of.get(c)?.get(v).map(|p| &p[o])
+        self.profile_of(c, *l.variant.get(c)?, l.orient.get(c).copied().unwrap_or_default())
+    }
+
+    /// Cell `c`'s profile drawn as variant `v` under `o`; `None` when `c` has none
+    /// (every pair with it is then spaced at `fallback`).
+    #[must_use]
+    pub fn profile_of(&self, c: usize, v: u16, o: pnr_core::Orient) -> Option<&spacing::Profile> {
+        self.profiles.of.get(c)?.get(usize::from(v)).map(|p| &p[o as usize])
     }
 
     /// Edge gaps `(gx, gy)` cells `a` and `b` owe each other, nm: `gap(lo, R, hi).min`
@@ -443,15 +460,8 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
         }
 
         // (c) density push: overfull bins push toward the emptiest neighbour.
-        util.fill(0.0);
-        let bin_of = |x: i32, y: i32| -> usize {
-            let bx = ((x as f32 / bw) as usize).min(nb - 1);
-            let by = ((y as f32 / bw) as usize).min(nb - 1);
-            by * nb + bx
-        };
-        for i in 0..n {
-            util[bin_of(l.x[i], l.y[i])] += 4.0 * l.hw[i] as f32 * l.hh[i] as f32 / (bw * bw);
-        }
+        fill_bins(&mut util, &l, nb, bw);
+        let bin_of = |x: i32, y: i32| bin_of(x, y, nb, bw);
         for i in 0..n {
             let b = bin_of(l.x[i], l.y[i]);
             let over = util[b] - TARGET_UTIL;
@@ -523,6 +533,21 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
     (l, rep)
 }
 
+/// Row-major `nb × nb` bin of a point, bins `bw` nm wide from the origin.
+fn bin_of(x: i32, y: i32, nb: usize, bw: f32) -> usize {
+    let bx = ((x as f32 / bw) as usize).min(nb - 1);
+    let by = ((y as f32 / bw) as usize).min(nb - 1);
+    by * nb + bx
+}
+
+/// Each bin's cell area over its own area, cells binned by centre.
+fn fill_bins(util: &mut [f32], l: &Layout, nb: usize, bw: f32) {
+    util.fill(0.0);
+    for i in 0..l.x.len() {
+        util[bin_of(l.x[i], l.y[i], nb, bw)] += 4.0 * l.hw[i] as f32 * l.hh[i] as f32 / (bw * bw);
+    }
+}
+
 /// Σ bin overflow area over total device area.
 fn bin_overflow(util: &[f32], l: &Layout, bw: f32) -> f32 {
     let total: f32 = (0..l.x.len()).map(|i| 4.0 * l.hw[i] as f32 * l.hh[i] as f32).sum();
@@ -536,6 +561,40 @@ fn bin_overflow(util: &[f32], l: &Layout, bw: f32) -> f32 {
 mod price_tests {
     use super::*;
     use analog::Rule;
+
+    /// PLC-11 kept the analytic loop (the flat dp, still the default, starts
+    /// from it): 16 equal cells, no nets, no rules, start as a pile at the
+    /// centre; the loop must spread them to the density target.
+    #[test]
+    fn gp_spreads_a_pile() {
+        let m = Macro { bbox: pnr_core::Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() };
+        let macros = vec![m; 16];
+        let reqs = Requirements::<Layout>::default();
+        let rules = PlaceRules::uniform(10, 0);
+        let inp = GpInput {
+            macros: &macros,
+            variants: &[],
+            assignment: &[],
+            reqs: &reqs,
+            rules: &rules,
+            net_weight: &[],
+            n_axes: 1,
+            power_uw: &[],
+            units: Default::default(),
+            iterate: true,
+        };
+        let (l, _) = place(&inp, &mut Prices::new(), 1);
+        let side = canvas_side(&l.hw, &l.hh, UTILIZATION, 10);
+        let nb = 4;
+        let bw = side as f32 / nb as f32;
+        let mut util = vec![0.0; nb * nb];
+        fill_bins(&mut util, &l, nb, bw);
+        let overflow = bin_overflow(&util, &l, bw);
+        assert!(overflow <= OVERFLOW_TARGET, "overflow {overflow} at x {:?} y {:?}", l.x, l.y);
+        let (pile, _) = place(&GpInput { iterate: false, ..inp }, &mut Prices::new(), 1);
+        fill_bins(&mut util, &pile, nb, bw);
+        assert!(bin_overflow(&util, &pile, bw) > OVERFLOW_TARGET, "the start was already spread");
+    }
 
     /// A budget rule whose residual is **read out of the layout**, so a test can drive
     /// it epoch by epoch: `x[0] = 1000` ⇒ one full budget past spec, `x[0] = 0` ⇒

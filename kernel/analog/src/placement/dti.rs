@@ -94,6 +94,17 @@ mod tests {
     use super::*;
     use pnr_core::ids::DeviceId;
 
+    /// PLC-10: dp re-scores a batch only when a touched cell moves.
+    #[test]
+    fn touched_names_both_targets() {
+        use crate::rule::RuleBatch;
+        let band = |a, b| DtiBand { a, b, s_max_nm: 0, d_dti_nm: 1_000, branch: BranchId(0), seed_isolate: false };
+        let (d, g) = (|i| Target::Device(DeviceId(i)), Target::Group(pnr_core::GroupId(0)));
+        let mut ids = Vec::new();
+        vec![band(d(2), d(5)), band(g, g)].touched(&mut ids);
+        assert_eq!(ids, [2, 5]);
+    }
+
     /// Two 1 µm-wide devices on one row, edge gap `gap` nm, and one branch slot.
     fn bench(gap: i32, isolate: bool) -> Layout {
         Layout {

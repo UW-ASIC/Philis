@@ -8,8 +8,13 @@
 //! tier (pin HPWL + priced analog cost). [`legalize::separate_overlaps`] closes
 //! any residue.
 
+pub mod anneal;
+mod eval;
 pub mod legalize;
 pub mod locks;
+pub mod sp;
+
+pub use anneal::{place_sp, DpMode, PlaceInput, Start};
 
 use analog::Requirements;
 use pnr_core::ids::BranchId;
@@ -28,19 +33,24 @@ const RANGE_DECAY: f32 = 0.96;
 /// is grown until everything fits at this fill.
 const REGION_FILL: f64 = 0.5;
 
-/// The flat anneal's schedule (PLC-10 step 0): initial move window `range0` (fraction of the
+/// The anneal's schedule. Flat path (PLC-10 step 0): initial move window `range0` (fraction of the
 /// die span), `max_temps` temperature steps, `t0 = t0_scale · mean|ΔPEX|` over 128 probe moves.
+/// SP path (PLC-09, [`anneal::place_sp`]): `T0 = −mean(ΔE⁺)/ln p0`, cooling `alpha`,
+/// `moves_per_kid · Σ kids` moves per temperature, at most `max_temps` temperatures.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Schedule {
     pub range0: f32,
     pub max_temps: u32,
     pub t0_scale: f64,
+    pub p0: f64,
+    pub alpha: f64,
+    pub moves_per_kid: u32,
 }
 impl Schedule {
-    /// Today's constants: refine gp, don't randomise it.
-    pub fn cold() -> Self { Self { range0: 0.4, max_temps: 220, t0_scale: 0.02 } }
-    /// FLOW-08 step 3's flat warm start from an incumbent [policy, measure].
-    pub fn warm() -> Self { Self { range0: 0.05, max_temps: 60, t0_scale: 0.002 } }
+    /// Today's constants: refine gp, don't randomise it. SP: P0 0.6 (Lampaert eq 4.37–4.38), α 0.9.
+    pub fn cold() -> Self { Self { range0: 0.4, max_temps: 220, t0_scale: 0.02, p0: 0.6, alpha: 0.9, moves_per_kid: 20 } }
+    /// FLOW-08 step 3's warm start from an incumbent [policy, measure]; SP: P0 0.1.
+    pub fn warm() -> Self { Self { range0: 0.05, max_temps: 60, t0_scale: 0.002, p0: 0.1, alpha: 0.9, moves_per_kid: 20 } }
 }
 /// Runaway guard for the terminal legalizer (it exits early when clean/stalled).
 const LEGALIZE_SWEEPS: u32 = 64;
@@ -61,6 +71,14 @@ pub struct PlaceStats {
     /// Distinct matched pairs whose variant spaces differ, so they cannot be
     /// shape-locked ([`locks::Locks::incompatible`]).
     pub matched_incompatible: Option<u32>,
+    /// [`anneal::place_sp`]: a [`anneal::Start::Warm`] tree no longer fit the
+    /// inputs (cells or symmetry groups changed), so the anneal started constructive.
+    pub warm_fallback: bool,
+    /// [`anneal::place_sp`]: symmetry axes placed, and of them those on a
+    /// routing track centreline (`axis ≡ p0/2 mod P`, PLC-28; `0` without
+    /// `PlaceRules::axis_grid`).
+    pub axes: u32,
+    pub axes_on_lattice: u32,
 }
 
 /// The mutable columns a move can touch, for rollback.
