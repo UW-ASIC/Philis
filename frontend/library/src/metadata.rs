@@ -156,6 +156,8 @@ pub struct MetadataReport {
     /// FLOW-10: fill was kept, and `RunStats::drc_hard`/`warnings` and
     /// `Solution::caps` are re-measured on the filled geometry.
     pub post_fill: bool,
+    /// Every epoch of the winning search, in order ([`Candidate`]).
+    pub candidates: Vec<Candidate>,
 }
 
 /// One promoted epoch's metrics (PERF-14); `Layout` is not `Clone`, so no geometry.
@@ -170,6 +172,19 @@ pub struct ParetoPoint {
     pub theta: f64,
     pub c_tier: f32,
     pub area_um2: f64,
+}
+
+/// One epoch's candidate layout, every epoch of the winning search (not only
+/// promoted ones): what the README's feedback chart plots.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Candidate {
+    pub outer: u32,
+    pub iteration: u32,
+    /// Routed wire length, µm: Σ over every net's drawn shapes of the long side.
+    pub wl_um: f64,
+    pub area_um2: f64,
+    /// `|V| = 0`: no DRC/ERC/LVS error and no hard constraint violated.
+    pub clean: bool,
 }
 
 /// Front size cap [policy].
@@ -372,6 +387,7 @@ pub fn build(
         pareto: Vec::new(),
         epochs: Vec::new(),
         post_fill: false,
+        candidates: Vec::new(),
     }
 }
 

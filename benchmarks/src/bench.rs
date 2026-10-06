@@ -420,6 +420,11 @@ fn run_circuit(
     let _ = std::fs::create_dir_all(&assets);
     let svg = visualizer::export_svg(&gds_bytes, layer_names);
     let _ = std::fs::write(assets.join(format!("{}.svg", c.name)), &svg);
+    // Every epoch's candidate (README feedback chart: area vs wirelength, clean or not).
+    let rows: String = sol.metadata.candidates.iter()
+        .map(|k| format!("{},{},{:.3},{:.3},{}\n", k.outer, k.iteration, k.wl_um, k.area_um2, u8::from(k.clean)))
+        .collect();
+    let _ = std::fs::write(assets.join(format!("{}.candidates.csv", c.name)), format!("outer,iteration,wl_um,area_um2,clean\n{rows}"));
 
     (outcome, contracts)
 }
