@@ -4,6 +4,7 @@
 
 [![publish](https://github.com/UW-ASIC/Philis/actions/workflows/publish.yml/badge.svg)](https://github.com/UW-ASIC/Philis/actions/workflows/publish.yml)
 ![Rust](https://img.shields.io/badge/rust-stable-orange)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![PDKs](https://img.shields.io/badge/PDKs-sky130%20%7C%20gf180mcu%20%7C%20ihp__sg13g2-blue)
 
 <p align="center"><img src="docs/progress/layouts/ota.svg" alt="OTA placed, routed and signed off by Philis on sky130" width="560"></p>
@@ -140,3 +141,7 @@ cargo run --release -p benchmark --bin bench local   # sign off every benchmark 
 ```
 
 Issues labelled `enhancement` map one-to-one to plan items in `docs/plans/`. Each one lists its plan section, its dependencies and its "done when" check.
+
+## License
+
+[MIT](LICENSE)
