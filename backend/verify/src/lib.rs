@@ -2,7 +2,8 @@
 //!
 //! [`signoff_checked`] runs DRC/ERC/LVS/PEX in one engine pass and returns a
 //! [`Signoff`]: errors as a [`pnr_core::Report`], deck warnings and what was
-//! not checked ([`Coverage`]) apart from it; [`drc`]/[`erc`] are standalone probes. [`Pdk`] (the process schema every crate reads) lives here too.
+//! not checked ([`Coverage`]) apart from it; [`drc`]/[`erc`] are standalone
+//! probes. [`Pdk`] (the process schema every crate reads) lives here too.
 
 pub mod checker;
 mod decks;
@@ -12,6 +13,7 @@ pub mod pdk;
 pub mod reference;
 pub mod sidecar;
 
+use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use gdsverify::check::report::{Measurement, Severity};
@@ -26,7 +28,7 @@ pub use netlist::{extract_spice, Detail};
 pub use pdk::{EmLimit, FetLimit, Pdk};
 pub use reference::{RefDeviceIn, RefInput, RefKind};
 
-/// Shortfall of one violation row, in one of two units. A length pair is nm
+/// Returns the shortfall of one violation row, in one of two units. A length pair is nm
 /// (1 dbu = 1 nm): `|limit − measured|` — every row is a violation, so that
 /// is a minimum's shortfall and a maximum's overshoot alike (a row does not
 /// carry its rule's `LimitSense`; LU.2's 20 µm tap distance against 15 µm
@@ -35,6 +37,7 @@ pub use reference::{RefDeviceIn, RefInput, RefKind};
 /// resistance) is ‰ of the limit, `ceil(1000·|measured − limit| / |limit|)`
 /// (`|limit|` floored at 1e-12), so an antenna ratio 2× over reads 1000 and
 /// 1 % over reads 10; a NaN reads `i64::MAX`. Mismatched dimensions read 1.
+/// Never negative; saturates at `i64::MAX`.
 #[must_use]
 pub fn shortfall(limit: Measurement, measured: Measurement) -> i64 {
     use Measurement as M;
@@ -70,7 +73,7 @@ pub struct Signoff {
     /// PEX C over labelled nets, fF ([`Checker::cap_matrix`]); empty without
     /// PEX, still filled on the label-short fallback.
     pub caps: CapMatrix,
-    /// Wall time.
+    /// Wall time of the whole signoff, field-solve pass included.
     pub elapsed: Duration,
     /// Wall time of the PEX-only field-solve pass ([`ExtractOptions::field_solve`]);
     /// zero without one.
@@ -80,7 +83,8 @@ pub struct Signoff {
 /// How PEX extracts. The default is analytical over merged metal.
 #[derive(Clone, Debug, Default)]
 pub struct ExtractOptions {
-    /// Labelled nets to field-solve (overlaid on the analytical network).
+    /// Labelled nets to field-solve (overlaid on the analytical network);
+    /// empty: analytical only.
     pub field_solve: Vec<String>,
     /// Load every shape as its own polygon: overlaps double-count area and
     /// shared edges count as fringe. For calibration only.
@@ -130,7 +134,7 @@ impl std::fmt::Display for Coverage {
     }
 }
 
-/// Full signoff over drawn geometry, its pin labels and its schematic
+/// Runs full signoff over drawn geometry, its pin labels and its schematic
 /// reference: [`signoff_checked`] without intent or warnings; the
 /// [`Duration`] is wall time. Coverage is kept only as the report's
 /// `lvs-coverage/…` hard rows.
@@ -162,7 +166,8 @@ pub struct Intent {
 /// ground, `(a, Some(b), C)` coupling (see [`Checker::cap_matrix`]).
 pub type CapMatrix = Vec<(String, Option<String>, f64)>;
 
-/// [`signoff`], plus the extracted [`CapMatrix`] (empty when PEX did not run).
+/// Runs [`signoff`], also returning the extracted [`CapMatrix`] (empty when
+/// PEX did not run).
 #[must_use]
 pub fn signoff_with_caps(
     shapes: &[Shape],
@@ -173,8 +178,9 @@ pub fn signoff_with_caps(
     signoff_with_intent(shapes, pins, reference, &Intent::default(), pdk)
 }
 
-/// [`signoff_checked`]'s errors, wall time and caps; warnings are dropped,
-/// coverage is kept as the report's `lvs-coverage/…` hard rows.
+/// Runs [`signoff_checked`] and returns its errors, wall time and caps;
+/// warnings are dropped, coverage is kept as the report's `lvs-coverage/…`
+/// hard rows.
 #[must_use]
 pub fn signoff_with_intent(
     shapes: &[Shape],
@@ -187,7 +193,7 @@ pub fn signoff_with_intent(
     (s.report, s.elapsed, s.caps)
 }
 
-/// Full signoff with design [`Intent`] (so the deck's EM/IR rules run on the
+/// Runs full signoff with design [`Intent`] (so the deck's EM/IR rules run on the
 /// operating-point currents instead of skipping).
 ///
 /// A deck error row becomes a hard [`Violation`] named
@@ -198,7 +204,9 @@ pub fn signoff_with_intent(
 /// inside a stage that ran, and schematic devices no deck recogniser
 /// extracts, are this run's [`Coverage`]; each `(kind, model, n)` of the
 /// latter is also a hard `lvs-coverage/unverified:{kind}:{model}` row of
-/// margin `n`.
+/// margin `n`. A reference the deck refuses (too few terminals) runs no
+/// check at all: the result is that one `engine/reference` row. Never
+/// panics on engine failure; every failure is a row.
 #[must_use]
 pub fn signoff_checked(
     shapes: &[Shape],
@@ -210,7 +218,7 @@ pub fn signoff_checked(
     signoff_extract(shapes, pins, reference, intent, &ExtractOptions::default(), pdk)
 }
 
-/// [`signoff_checked`] with extraction options. With `field_solve` set, the
+/// Runs [`signoff_checked`] with extraction options. With `field_solve` set, the
 /// full run is analytical, then a timed PEX-only run field-solves those nets
 /// and its caps and `report.cost` replace the analytical ones
 /// ([`Signoff::pex_field`]). A refused or failed field solve keeps the
@@ -260,7 +268,7 @@ pub fn signoff_extract(
                 let rule = format!("lvs-coverage/unverified:{kind:?}:{}", model.as_deref().unwrap_or("-"));
                 s.report.hard_violations.push(Violation { rule, margin: *n as i64 });
             }
-            match checker.run(shapes, pins, Checks::ALL) {
+            let (run, kept, gone) = match checker.run(shapes, pins, Checks::ALL) {
                 // A label short aborts extraction and is LVS's verdict. Report
                 // it, then re-run DRC/ERC/PEX with one label per shorted net,
                 // so ERC still sees the ports and PEX still names the nets.
@@ -268,20 +276,16 @@ pub fn signoff_extract(
                     fail(&mut s, format!("lvs/{e}"));
                     let gone: Vec<String> = checker.shorted_labels().into_iter().flat_map(|g| g.into_iter().skip(1)).collect();
                     let kept: Vec<LabeledPin> = pins.iter().filter(|p| !gone.contains(&p.name)).cloned().collect();
-                    match checker.run(shapes, &kept, Checks { lvs: false, ..Checks::ALL }) {
-                        Err(e) => fail(&mut s, format!("engine/run: {e}")),
-                        Ok(summary) => {
-                            harvest(&checker, &summary, &mut s);
-                            s.caps = checker.cap_matrix();
-                            field_pass(&mut checker, shapes, &kept, &gone, opts, &mut s);
-                        }
-                    }
+                    (checker.run(shapes, &kept, Checks { lvs: false, ..Checks::ALL }), Cow::Owned(kept), gone)
                 }
+                run => (run, Cow::Borrowed(pins), Vec::new()),
+            };
+            match run {
                 Err(e) => fail(&mut s, format!("engine/run: {e}")),
                 Ok(summary) => {
                     harvest(&checker, &summary, &mut s);
                     s.caps = checker.cap_matrix();
-                    field_pass(&mut checker, shapes, pins, &[], opts, &mut s);
+                    field_pass(&mut checker, shapes, &kept, &gone, opts, &mut s);
                 }
             }
             // Only MOS cards carry params: a compared R/D/C/BJT matches by
@@ -299,7 +303,7 @@ pub fn signoff_extract(
     s
 }
 
-/// The PEX-only field-solve pass of [`signoff_extract`] over
+/// Runs the PEX-only field-solve pass of [`signoff_extract`] over
 /// `opts.field_solve` less the labels the label-short re-run `dropped` (those
 /// name no extracted net now); nothing when none are left.
 fn field_pass(checker: &mut Checker, shapes: &[Shape], pins: &[LabeledPin], dropped: &[String], opts: &ExtractOptions, s: &mut Signoff) {
@@ -324,8 +328,10 @@ fn field_pass(checker: &mut Checker, shapes: &[Shape], pins: &[LabeledPin], drop
 /// does not compare (every kind but MOS).
 pub const NON_MOS_VALUES: &str = "lvs.parameter_mismatch(non-MOS values)";
 
-/// A density window wider than the block (the shapes' union bbox) is chip
-/// integration's check: [`Checker::defer_density_wider_than`].
+/// Defers every density rule whose window is wider than the block (the
+/// shapes' union bbox) to chip integration
+/// ([`Checker::defer_density_wider_than`]); no shapes, or a zero-area bbox,
+/// defers nothing.
 fn defer_chip_level(checker: &mut Checker, shapes: &[Shape]) {
     let (x0, y0, x1, y1) = shapes.iter().fold((i64::MAX, i64::MAX, i64::MIN, i64::MIN), |(a, b, c, d), s| {
         let r = s.rect;
@@ -336,7 +342,7 @@ fn defer_chip_level(checker: &mut Checker, shapes: &[Shape]) {
     }
 }
 
-/// Errors to the hard tier, everything else (GPurify's `Severity` is
+/// Splits rows by severity, keeping order: errors to the hard tier, everything else (GPurify's `Severity` is
 /// `Warning` | `Error`) to the warnings: the pure split [`harvest`] applies.
 fn split_by_severity(rows: impl Iterator<Item = (Violation, Severity)>) -> (Vec<Violation>, Vec<Violation>) {
     let (mut hard, mut warn) = (Vec::new(), Vec::new());
@@ -346,6 +352,9 @@ fn split_by_severity(rows: impl Iterator<Item = (Violation, Severity)>) -> (Vec<
     (hard, warn)
 }
 
+/// Moves the last run's findings into `s`: rows split by severity, one hard
+/// `engine/{stage}` row per denied stage, the skipped rules (replacing
+/// earlier ones), the EM/IR coverage counts and PEX's total C as the cost.
 fn harvest(checker: &Checker, summary: &Summary, s: &mut Signoff) {
     let out = checker.outputs();
     let rows = (0..out.violations.len()).map(|i| {
@@ -384,7 +393,7 @@ fn harvest(checker: &Checker, summary: &Summary, s: &mut Signoff) {
     s.report.cost = checker.total_cap_ff();
 }
 
-/// `Some(reason)` for a stage that was requested but did not run.
+/// Returns `Some(reason)` for a stage that was requested but did not run.
 fn denied(status: &StageStatus) -> Option<String> {
     match status {
         StageStatus::Ran | StageStatus::NotSelected => None,
@@ -405,32 +414,38 @@ pub struct Finding {
     /// `"nm"` for a length rule, `"permille"` (of the limit) for any other —
     /// including the placeholder 1 of mismatched dimensions and `engine/…`.
     pub unit: &'static str,
+    /// Location of the finding, nm (`0` for an `engine/…` finding).
     pub x: i64,
+    /// Location of the finding, nm (`0` for an `engine/…` finding).
     pub y: i64,
     /// A row the deck states as a warning: [`Signoff::warnings`] in a full
     /// signoff, so never a DRC/ERC violation count.
     pub warning: bool,
 }
 
-/// Standalone DRC: a fresh full [`Checker`] per call; an engine failure is a
-/// single fail-closed `engine/…` finding.
+/// Runs standalone DRC: a fresh full [`Checker`] per call, density windows
+/// wider than the block deferred; an engine failure, or a stage the engine
+/// skipped or refused, is a fail-closed `engine/…` finding of margin 1.
 #[must_use]
 pub fn drc(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk) -> Vec<Finding> {
     drc_with(shapes, pins, pdk, &ExtractOptions::default())
 }
 
-/// [`drc`] over geometry loaded per `opts` (`unmerged`: one polygon per shape).
+/// Runs [`drc`] over geometry loaded per `opts` (`unmerged`: one polygon per
+/// shape).
 #[must_use]
 pub fn drc_with(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, opts: &ExtractOptions) -> Vec<Finding> {
     standalone(shapes, pins, pdk, Checks { drc: true, erc: false, lvs: false, pex: false }, opts)
 }
 
-/// Standalone ERC, as [`drc`].
+/// Runs standalone ERC, as [`drc`].
 #[must_use]
 pub fn erc(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk) -> Vec<Finding> {
     standalone(shapes, pins, pdk, Checks { drc: false, erc: true, lvs: false, pex: false }, &ExtractOptions::default())
 }
 
+/// The body of [`drc`]/[`erc`]: one fresh checker, `checks` only, every
+/// violation row as a [`Finding`].
 fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks, opts: &ExtractOptions) -> Vec<Finding> {
     let engine_fail =
         |rule: String| vec![Finding { rule, layer: "-".into(), margin: 1, unit: "permille", x: 0, y: 0, warning: false }];

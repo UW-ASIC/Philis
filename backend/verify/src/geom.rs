@@ -17,14 +17,17 @@ use pnr_core::Shape;
 /// and that binding names the extracted net (and makes it a port).
 #[derive(Clone, Debug)]
 pub struct LabeledPin {
+    /// The net name the label binds (an LVS reference net / port name).
     pub name: String,
-    /// Deck layer id (`pnr_core::LayerId.0`).
+    /// Deck layer id of the pin's drawing layer (`pnr_core::LayerId.0`).
     pub layer: u16,
+    /// Label x, nm.
     pub x: i32,
+    /// Label y, nm.
     pub y: i32,
 }
 
-/// Build the store the engine reads, in gdsverify's own load order: push →
+/// Builds the store the engine reads, in gdsverify's own load order: push →
 /// `finish` (sort by layer) → derive marker layers → bind labels.
 ///
 /// Shapes on a layer in `merge` are pushed as their union (KLayout merged
@@ -32,7 +35,9 @@ pub struct LabeledPin {
 /// that overlap would count the overlap twice and their shared edge as fringe.
 /// A merged polygon with holes goes in as its disjoint rect decomposition
 /// (a holed ring is not one store polygon); its slab edges inside the ring
-/// then count as fringe. Other layers go in one polygon per shape.
+/// then count as fringe. Other layers go in one polygon per shape. Shapes
+/// with a non-positive width or height draw nothing and are not loaded.
+/// Coordinates are taken as nm (1 dbu = 1 nm).
 ///
 /// # Errors
 /// A merge refused by gdsverify's boolean, a derived-layer failure, or a pin
@@ -93,10 +98,11 @@ pub fn build_store(
     Ok((store, provenance))
 }
 
-/// The label layer that names the conductor drawn on `drawn`: a label row
+/// Returns the label layer that names the conductor drawn on `drawn`: a label row
 /// whose conductor is `drawn` or is derived from it (sky130 `li` names
 /// `li_c = li not li_rs`; ihp labels only through `metal1_label`). `drawn`
-/// itself when it is such a label layer. `None` when no label reaches it.
+/// itself when it is such a label layer, else the first matching row in
+/// deck order. `None` when no label reaches it.
 #[must_use]
 pub fn label_layer(deck: &Deck, drawn: u16) -> Option<u16> {
     let c = &deck.connectivity;

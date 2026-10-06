@@ -22,12 +22,20 @@ use gdsverify::ingest::{StrId, StrTable};
 /// A schematic device kind, polarity included (recognisers are per-polarity).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefKind {
+    /// N-channel MOSFET, card order `d g s [b]`.
     Nmos,
+    /// P-channel MOSFET, card order `d g s [b]`.
     Pmos,
+    /// NPN bipolar, card order `c b e`.
     Npn,
+    /// PNP bipolar, card order `c b e`.
     Pnp,
+    /// Two-terminal resistor.
     Resistor,
+    /// Two-terminal capacitor; skipped without a model (see
+    /// [`RefDeviceIn::model`]).
     Capacitor,
+    /// Two-terminal diode, card order anode, cathode.
     Diode,
     /// No deck recognises one: always skipped.
     Inductor,
@@ -36,6 +44,7 @@ pub enum RefKind {
 /// One schematic device.
 #[derive(Clone, Debug)]
 pub struct RefDeviceIn {
+    /// Kind and polarity; picks the deck recogniser family.
     pub kind: RefKind,
     /// Deck model name; selects the matching recogniser row. `None` takes the
     /// first recogniser of the kind/polarity (a capacitor is skipped); a name
@@ -53,7 +62,9 @@ pub struct RefDeviceIn {
 /// match the [`crate::geom::LabeledPin`] names on the geometry).
 #[derive(Clone, Debug, Default)]
 pub struct RefInput {
+    /// Schematic devices, one card per drawn finger.
     pub devices: Vec<RefDeviceIn>,
+    /// Every labelled net name, in the order they become reference ports.
     pub ports: Vec<String>,
     /// The nets that leave the block (the `.subckt` port list), apart from
     /// `ports` (every labelled net, for LVS naming): only these are exempt
@@ -62,10 +73,12 @@ pub struct RefInput {
     pub external_ports: Option<Vec<String>>,
 }
 
-/// Compile `input` into a one-subckt (`"top"`) [`Netlist`], interning into the
+/// Compiles `input` into a one-subckt (`"top"`) [`Netlist`], interning into the
 /// **checker's** `strings` so reference and layout names share one id space.
 /// Returns the netlist and the indices into `input.devices` of the devices
-/// skipped for want of a recogniser.
+/// skipped for want of a recogniser, ascending. Nets are numbered in
+/// first-seen order over the ports, then each kept device's terminals; a
+/// name repeated in `ports` is one net and one port.
 ///
 /// # Errors
 /// A device whose terminals are fewer than its recogniser's arity.
@@ -143,7 +156,7 @@ pub fn build(
     Ok((n, skipped))
 }
 
-/// The deck recogniser row for one schematic device, `None` when the deck has
+/// Returns the deck recogniser row for one schematic device, `None` when the deck has
 /// no marker for its kind/polarity. Polarity is read off the marker layer name
 /// (`ngate`/`pgate`, `npn`/`pnp`: a leading `p` is P-type). For R/C/D a model
 /// hint no row names (exactly or as a `__` vendor suffix) is `None`: sky130's

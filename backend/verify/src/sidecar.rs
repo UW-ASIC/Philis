@@ -24,12 +24,14 @@ pub enum Kind {
     Nm,
     /// Non-negative integer (a count or 0/1 flag).
     Count,
+    /// `true` or `false`.
     Bool,
     /// Any number.
     Real,
     /// Array of exactly 3 (MIN, MOD, EXC; index = `MatchClass as usize`), each a
     /// non-negative integer or `null` (the process does not state that tier).
     Tier,
+    /// A string.
     Text,
     /// Array of strings.
     List,
@@ -43,7 +45,9 @@ pub enum Kind {
 /// One registry row.
 #[derive(Clone, Copy, Debug)]
 pub struct Key {
+    /// The key under `cell`, without the `cell.` prefix.
     pub name: &'static str,
+    /// The JSON shape its value must have.
     pub kind: Kind,
     /// Missing (or null) fails `Pdk::load`.
     pub required: bool,
@@ -53,13 +57,15 @@ pub struct Key {
     pub reader: &'static str,
 }
 
+/// Shorthand row constructor that keeps [`KEYS`] one line per key.
 const fn k(name: &'static str, kind: Kind, required: bool, sourced: bool, reader: &'static str) -> Key {
     Key { name, kind, required, sourced, reader }
 }
 
 use Kind::{Bool, Count, Layers, List, Nm, Real, Table, Text, Tier};
 
-/// Every key, alphabetical. `<name>_source` of a registered key is implied.
+/// Every key, sorted by name (ASCII order; [`validate`] binary-searches it).
+/// `<name>_source` of a registered key is implied.
 pub const KEYS: &[Key] = &[
     k("abeta_n_pct_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("abeta_p_pct_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
@@ -152,14 +158,16 @@ pub const KEYS: &[Key] = &[
     k("wpe_clearance_nm", Tier, false, true, "kernel/cells/src/mosfet.rs; frontend/library/src/lib.rs; kernel/analog/src/matching/class.rs"),
 ];
 
-/// The registry row for `name`.
+/// Returns the registry row for `name`.
 fn key(name: &str) -> Option<&'static Key> {
     KEYS.iter().find(|k| k.name == name)
 }
 
-/// Every problem at once: unknown key (a typo), wrong kind, a required key
-/// missing, a sourced key with a non-null value and no non-empty
-/// `<name>_source`.
+/// Returns every problem with a sidecar's `cell` object at once, one
+/// message per problem, empty when it is valid: not an object, an unknown
+/// key (a typo), a value of the wrong kind, a `<name>_source` that is not
+/// text, a required key missing or null, a sourced key with a non-null
+/// value and no non-empty `<name>_source`.
 #[must_use]
 pub fn validate(cell: &Value) -> Vec<String> {
     let Some(obj) = cell.as_object() else { return vec!["the sidecar's `cell` is not an object".into()] };
@@ -205,7 +213,7 @@ pub fn validate(cell: &Value) -> Vec<String> {
     bad
 }
 
-/// `<name>_source`, when non-empty text.
+/// Returns `<name>_source`, when it is text that is not all whitespace.
 pub(crate) fn source<'a>(cell: &'a serde_json::Map<String, Value>, name: &str) -> Option<&'a str> {
     cell.get(&format!("{name}_source"))?.as_str().filter(|s| !s.trim().is_empty())
 }
