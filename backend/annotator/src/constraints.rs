@@ -21,7 +21,7 @@
 //! Guard rings are not emitted here: [`crate::rings::plan`] places them by role (REL-07).
 
 use analog::cell::{SeriesParallel, Unitization};
-use analog::intent::{MatchClass, MatchKind, MatchSpec};
+use analog::intent::{MatchClass, MatchKind, MatchSpec, Origin};
 use analog::Constraints;
 use pnr_core::ids::DeviceId;
 use pnr_core::netlist::DeviceKind;
@@ -49,6 +49,19 @@ pub(crate) fn dummy_required(kind: DeviceKind, class: MatchClass) -> bool {
     !matches!(kind, DeviceKind::Npn | DeviceKind::Pnp) && class >= MatchClass::Moderate
 }
 
+/// The member of `s` whose `P` and `N` nets are both `P` nets of other members
+/// (a split DAC's bridge), if exactly one is.
+fn split_bridge(netlist: &Netlist, s: &MatchSpec) -> Option<DeviceId> {
+    let net = |d: DeviceId, t: &str| netlist.devices[d.0 as usize].terminals.iter().find(|(n, _)| n == t).map(|x| x.1);
+    let tops = |d: DeviceId| s.members.iter().filter(|m| m.device != d).filter_map(|m| net(m.device, "P")).collect::<Vec<_>>();
+    let mut it = s.members.iter().map(|m| m.device).filter(|&d| {
+        let t = tops(d);
+        [net(d, "P"), net(d, "N")].iter().all(|n| n.is_some_and(|n| t.contains(&n)))
+    });
+    let b = it.next();
+    it.next().is_none().then_some(b).flatten()
+}
+
 #[must_use]
 pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block], sets: &[MatchSpec]) -> Constraints {
     let mut c = Constraints::default();
@@ -57,8 +70,13 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block], sets: &[Ma
     let clamp = |v: Option<i64>| v.unwrap_or(0).clamp(0, i64::from(i32::MAX)) as i32;
     for s in sets {
         // Drawn in schematic fingers (see the module doc): one common finger W and L.
-        let d0 = drawn[s.members[0].device.0 as usize];
-        let same = s.members.iter().all(|m| (drawn[m.device.0 as usize].w_finger_nm, drawn[m.device.0 as usize].l_nm) == (d0.w_finger_nm, d0.l_nm));
+        // A split DAC's bridge is drawn off the unit (`CapArray::split`), so only the
+        // banks must share it; the bridge is the member whose `P` and `N` are both
+        // other members' `P` (CELL-21).
+        let bridge = if matches!(s.origin, Origin::PassiveSet { rule: "split_dac" }) { split_bridge(netlist, s) } else { None };
+        let banks: Vec<DeviceId> = s.members.iter().map(|m| m.device).filter(|&d| Some(d) != bridge).collect();
+        let d0 = drawn[banks[0].0 as usize];
+        let same = banks.iter().all(|d| (drawn[d.0 as usize].w_finger_nm, drawn[d.0 as usize].l_nm) == (d0.w_finger_nm, d0.l_nm));
         if !same {
             continue;
         }

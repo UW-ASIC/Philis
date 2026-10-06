@@ -119,6 +119,15 @@ pub fn enumerate_folded(
                 }
             }
         }
+        // A split DAC (CELL-21) is drawn as one array with a top per bank.
+        let mut split = None;
+        if kind == DeviceKind::Capacitor {
+            let nf = |d: DeviceId| u.devices.iter().position(|&x| x == d).map_or(1, |i| u.dev_nf[i]);
+            if let Some((order, lsb, top_lsb)) = split_dac(netlist, &rails, &members, nf) {
+                members = order;
+                split = Some((lsb, top_lsb));
+            }
+        }
         let group = DeviceGroup {
             devices: members.clone(),
         };
@@ -137,7 +146,12 @@ pub fn enumerate_folded(
             }
             // No legal merged row (`draw_all`'s empty placeholder): declined.
             None => {
-                let mut alts = draw_variants(kind, &dev(&members[0]).model, &group, &sized, pdk);
+                let model = &dev(&members[0]).model;
+                let split = split.and_then(|(lsb, top_lsb)| {
+                    let ov = verify::pdk::Overlay { pdk, recipe: pdk.recipe("capacitor", model)? };
+                    CapArray::split(&group, &sized, &ov, lsb, top_lsb).map(|a| a.draw(&group, &sized, &ov))
+                });
+                let mut alts = split.map_or_else(|| draw_variants(kind, model, &group, &sized, pdk), |m| vec![m]);
                 alts.retain(|m| !m.shapes.is_empty());
                 alts
             }
@@ -214,6 +228,37 @@ pub fn enumerate_folded(
         devices_of,
         aspect_missed,
     }
+}
+
+/// A split DAC's members as `Pattern::Split` orders them, with its LSB bit
+/// count and whether the bridge's `P` is the LSB top: the bridge is the one
+/// member whose `P` and `N` are both other members' `P` (as the annotator's
+/// `assemble` finds it), the LSB the bank on a bridge plate holding a unit
+/// whose `N` is a rail (the termination, passive.rs's `terminated`), each bank
+/// by `(count, !terminated, id)`. `None` unless the members are exactly two
+/// banks on the bridge's plates, one of them terminated.
+fn split_dac(netlist: &Netlist, rails: &[NetId], members: &[DeviceId], dev_nf: impl Fn(DeviceId) -> u16) -> Option<(Vec<DeviceId>, u8, bool)> {
+    let t = |d: DeviceId, name: &str| terminal(&netlist.devices[d.0 as usize], name);
+    let bridges: Vec<DeviceId> = members
+        .iter()
+        .copied()
+        .filter(|&d| [t(d, "P"), t(d, "N")].iter().all(|x| x.is_some() && members.iter().any(|&o| o != d && t(o, "P") == *x)))
+        .collect();
+    let [bridge] = bridges[..] else { return None };
+    let terminated = |d: DeviceId| dev_nf(d) == 1 && t(d, "N").is_some_and(|x| rails.contains(&x));
+    let bank = |top: Option<NetId>| {
+        let mut v: Vec<DeviceId> = members.iter().copied().filter(|&d| d != bridge && t(d, "P") == top).collect();
+        v.sort_by_key(|&d| (dev_nf(d), !terminated(d), d.0));
+        v
+    };
+    let (a, b) = (bank(t(bridge, "P")), bank(t(bridge, "N")));
+    let a_lsb = a.iter().any(|&d| terminated(d));
+    if a.len() + b.len() + 1 != members.len() || a_lsb == b.iter().any(|&d| terminated(d)) {
+        return None;
+    }
+    let (lsb, msb) = if a_lsb { (a, b) } else { (b, a) };
+    let l = u8::try_from(lsb.len().checked_sub(1)?).ok()?;
+    Some((lsb.into_iter().chain(msb).chain([bridge]).collect(), l, a_lsb))
 }
 
 fn terminal(d: &Device, name: &str) -> Option<NetId> {

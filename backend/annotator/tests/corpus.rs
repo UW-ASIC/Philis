@@ -562,12 +562,15 @@ fn per_set_unitization_follows_class() {
 
 /// EXT-19: the split DAC's bridge is checked against `(C_T^LSB/C_T^MSB)·C_u`
 /// (4/3 of the 9 µm² unit = 3×4 µm): exact gives no diagnostic, `l=5u` gives one.
+/// The set is one Unitization although the bridge is off the unit (CELL-21).
 #[test]
 fn split_dac_bridge_value() {
     let bridge = |p: &annotator::Problem| p.intent.diagnostics.iter().any(|d| d.kind == "bridge_cap_value");
     let p = annotate(&net(src("splitdac")), &cfg("splitdac"));
     assert!(!bridge(&p), "{:?}", p.intent.diagnostics);
     assert!(matches!(p.intent.sets[0].origin, analog::intent::Origin::PassiveSet { rule: "split_dac" }));
+    // CELL-21: the bridge's own W/L does not split the set; one Unitization holds all six.
+    assert!(p.constraints.unitization.iter().any(|u| u.devices.len() == 6), "{:?}", p.constraints.unitization.iter().map(|u| &u.devices).collect::<Vec<_>>());
     let p = annotate(&net(&src("splitdac").replace("CA tl tm cap w=3u l=4u", "CA tl tm cap w=3u l=5u")), &cfg("splitdac"));
     assert!(bridge(&p), "{:?}", p.intent.diagnostics);
 }
