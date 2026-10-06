@@ -504,7 +504,7 @@ mod cleanup_tests {
         b.rect(LayerId(0), Rect { x: 0, y: 0, w: 100, h: 100 });
         b.pin(Pin { name: "d0:G".into(), net: NetId(0), at: Rect { x: 7, y: 7, w: 7, h: 7 }, layer: LayerId(1) });
         b.keepout(Rect { x: 7, y: 7, w: 1, h: 1 }, KeepWhy::Gate { owner: 0 });
-        let u = Unit { owner: 0, x: 7, y: 9, weight: 3, phi: (1, 0), sa: 1, sb: 2 };
+        let u = Unit { owner: 0, x: 7, y: 9, weight: 3, phi: (1, 0), sa_sb: Unit::diffusion(1, 2) };
         b.unit(u);
         let d = Dummy { owner: 0, pmos: false, edge: "S", w: 7, l: 3 };
         b.dummy(d);

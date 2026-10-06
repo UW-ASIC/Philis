@@ -240,7 +240,7 @@ mod tests {
             shapes: Vec::new(),
             pins: pins.iter().map(|&(n, x)| Pin { name: n.into(), net: NetId(0), at: Rect { x: x - 85, y: -85, w: 170, h: 170 }, layer: LayerId(0) }).collect(),
             bbox: Rect { x: 0, y: 0, w: 8_000, h: 1_000 },
-            units: units.iter().map(|&(x, phi)| Unit { owner: 0, x, y: 0, weight: 1, phi: (phi, 0), sa: 0, sb: 0 }).collect(),
+            units: units.iter().map(|&(x, phi)| Unit { owner: 0, x, y: 0, weight: 1, phi: (phi, 0), sa_sb: None }).collect(),
             dummies: Vec::new(),
             ..Default::default()
         }

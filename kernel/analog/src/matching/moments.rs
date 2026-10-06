@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn mirror_is_refused_for_an_odd_finger_pair() {
         let units = |phis: &[(i8, i8)]| -> Vec<pnr_core::Unit> {
-            phis.iter().map(|&phi| pnr_core::Unit { owner: 0, x: 0, y: 0, weight: 1, phi, sa: 0, sb: 0 }).collect()
+            phis.iter().map(|&phi| pnr_core::Unit { owner: 0, x: 0, y: 0, weight: 1, phi, sa_sb: None }).collect()
         };
         assert!(!mirror_allowed_units(&units(&[(1, 0), (-1, 0), (1, 0)])));
         assert!(mirror_allowed_units(&units(&[(1, 0), (-1, 0)])));

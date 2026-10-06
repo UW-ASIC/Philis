@@ -187,7 +187,7 @@ impl Unit {
         let lat = cut_lattice(process);
         let ct = dim(process, "contact");
         let e = at(self.emitter);
-        b.unit(pnr_core::Unit { owner: di as u8, x: e.x + e.w / 2, y: e.y + e.h / 2, weight: i64::from(e.w) * i64::from(e.h), phi: (0, 0), sa: 0, sb: 0 });
+        b.unit(pnr_core::Unit { owner: di as u8, x: e.x + e.w / 2, y: e.y + e.h / 2, weight: i64::from(e.w) * i64::from(e.h), phi: (0, 0), sa_sb: None });
         // Pin order matches `cellgen::BJT_PINS`.
         b.drawn(pnr_core::Drawn {
             owner: di as u8,

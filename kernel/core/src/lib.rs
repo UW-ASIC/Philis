@@ -20,6 +20,7 @@ pub mod units;
 pub use geom::{Dir, LayerId, Orient, Pin, Rect, Shape};
 pub use hypergraph::BipartiteHypergraph;
 pub use ids::{AxisId, DeviceId, GroupId, NetId, Target};
+pub use lanes::Box4;
 pub use layout::Layout;
 pub use netlist::{Device, DeviceGroup, DeviceKind, MosSize, Net, Netlist, SourceCard, SubcktInst};
 pub use process::{MatchClass, Process, SubstrateKind};

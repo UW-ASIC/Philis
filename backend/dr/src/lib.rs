@@ -4413,7 +4413,7 @@ mod tests {
             pins: pins.iter().zip(["d0:D", "d0:D", "sink"]).map(|(&(net, at, layer), n)| pnr_core::Pin { name: n.into(), net, at, layer }).collect(),
             bbox: Rect { x: 0, y: -85, w: 13_000, h: 10_000 },
             units: [(1_000, 1), (3_000, -1), (5_000, 1), (7_000, -1)]
-                .map(|(x, phi)| pnr_core::Unit { owner: 0, x, y: 0, weight: 1, phi: (phi, 0), sa: 0, sb: 0 })
+                .map(|(x, phi)| pnr_core::Unit { owner: 0, x, y: 0, weight: 1, phi: (phi, 0), sa_sb: None })
                 .to_vec(),
             dummies: Vec::new(),
             ..Default::default()

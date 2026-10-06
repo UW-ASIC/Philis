@@ -264,7 +264,7 @@ impl Cell for FinFet {
                 b.rect(v0, Rect { x: g + r.gate_w / 2 - r.v0 / 2, y: gv0_y - off, w: r.v0, h: r.v0 });
                 let c = g + r.gate_w / 2;
                 let phi = if (i % 2 == 0) != *s_odd { 1 } else { -1 };
-                b.unit(pnr_core::Unit { owner: k as u8, x: c, y: h / 2, weight: i64::from(r.gate_w) * i64::from(h), phi: (phi, 0), sa: c - a.x, sb: a.x + a.w - c });
+                b.unit(pnr_core::Unit { owner: k as u8, x: c, y: h / 2, weight: i64::from(r.gate_w) * i64::from(h), phi: (phi, 0), sa_sb: pnr_core::Unit::diffusion(c - a.x, a.x + a.w - c) });
             }
             // One M1 strap per member over its own gate contacts.
             for &k in &members {
@@ -391,13 +391,13 @@ mod tests {
                 let m = v.draw(&g, &c, &pdk);
                 let acts = on(&m, &pdk, "diff");
                 for u in &m.units {
-                    assert!(u.sa > 0 && u.sb > 0);
+                    let (sa, sb) = u.sa_sb.map(|(a, b)| (a.get(), b.get())).expect("a MOS finger has sa/sb");
                     let a = acts.iter().find(|a| a.x <= u.x && u.x <= a.x + a.w && a.y <= u.y && u.y <= a.y + a.h).expect("unit on an active");
-                    assert_eq!(u.sa + u.sb, a.w, "nf={nf:?} shared={}", v.shared);
+                    assert_eq!(sa + sb, a.w as u32, "nf={nf:?} shared={}", v.shared);
                 }
                 for k in 0..nf.len() {
                     let mine = m.units.iter().filter(|u| usize::from(u.owner) == k);
-                    let (sa, sb) = mine.fold((0, 0), |(a, b), u| (a + u.sa, b + u.sb));
+                    let (sa, sb) = mine.filter_map(|u| u.sa_sb).fold((0, 0), |(a, b), (sa, sb)| (a + sa.get(), b + sb.get()));
                     assert_eq!(sa, sb, "nf={nf:?} shared={} member {k}", v.shared);
                 }
             }

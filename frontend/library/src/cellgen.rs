@@ -1314,7 +1314,7 @@ mod tests {
     fn row(units: &[(u8, i32)], w: i32) -> Macro {
         let units = units
             .iter()
-            .map(|&(owner, x)| pnr_core::Unit { owner, x, y: 500, weight: 1, phi: (1, 0), sa: 0, sb: 0 })
+            .map(|&(owner, x)| pnr_core::Unit { owner, x, y: 500, weight: 1, phi: (1, 0), sa_sb: None })
             .collect();
         Macro { bbox: Rect { x: 0, y: 0, w, h: 1000 }, units, ..Default::default() }
     }
@@ -2432,7 +2432,7 @@ mod unit_tests {
     }
 
     fn unit(owner: u8, x: i32, y: i32) -> Unit {
-        Unit { owner, x, y, weight: 1, phi: (1, 0), sa: 0, sb: 0 }
+        Unit { owner, x, y, weight: 1, phi: (1, 0), sa_sb: None }
     }
 
     fn netlist(devices: Vec<Device>, names: &[&str]) -> Netlist {

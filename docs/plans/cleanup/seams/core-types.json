@@ -1,0 +1,20 @@
+{
+  "seam": "core-types",
+  "commits": ["cleanup(seam core-types): Layout::bbox returns Box4; Unit sa/sb -> sa_sb Option<(NonZeroU32, NonZeroU32)>; PlacedUnit::lod Option<f32>; Layout::extent removed"],
+  "changes": [
+    "pnr_core::Layout::bbox returns lanes::Box4 {x, y, hw, hh} instead of a positional (cx, cy, hw, hh) tuple; Box4 re-exported as pnr_core::Box4; edge_gap reads named fields",
+    "Layout::extent removed (no non-test callers; use bbox(t).hw/.hh); Layout::centre kept ((x, y) is unambiguous, 3 callers)",
+    "Unit { sa, sb: i32 } with 0 = not a MOS finger -> Unit { sa_sb: Option<(NonZeroU32, NonZeroU32)> }; Unit::diffusion(sa, sb) builds it from signed spans (Some only when both > 0), the one place the 'both positive' rule lives",
+    "PlacedUnit::lod f32 with NaN = unknown -> Option<f32>; UnitLib stores Option<f32>",
+    "Callers updated: cells post_cell/mosfet/finfet(+tests)/resistor/diode/bjt/cap_array/builder test; analog island/matched_set(+test)/moments/environment/cleanup_analog_matching; library lib.rs LOD average and cellgen tests; dr test; core macro.rs test and cleanup_core tests"
+  ],
+  "risks": [
+    "No build run (per rules); edits reasoned against definitions",
+    "finfet test now compares sa + sb against a.w as u32 (a.w is i32, positive for a drawn active)",
+    "frontend/library/src/lib.rs also carried another agent's staged hunk at commit time; the `-- path` commit may include it",
+    "Relayed user note about 9 branches / merging: only `main` exists locally (plus origin/main); nothing to merge from this checkout, and branch work is outside this seam"
+  ],
+  "deferred": [
+    "lanes::Box4 lives in the SIMD module; could move to geom if more non-SIMD users appear"
+  ]
+}

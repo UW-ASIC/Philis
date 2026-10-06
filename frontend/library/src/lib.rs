@@ -2282,7 +2282,7 @@ impl Flow<'_> {
         let series = conductance.into_iter().map(|v| v.into_iter().map(|(t, g)| (t, 1.0 / g)).collect()).collect();
         let lod_inv_um = (0..self.netlist.devices.len())
             .map(|d| {
-                let (s, k) = epoch.layout.units.of_device(&epoch.layout, pnr_core::DeviceId(d as u16)).filter(|u| u.lod.is_finite()).fold((0.0f32, 0u32), |(s, k), u| (s + u.lod, k + 1));
+                let (s, k) = epoch.layout.units.of_device(&epoch.layout, pnr_core::DeviceId(d as u16)).filter_map(|u| u.lod).fold((0.0f32, 0u32), |(s, k), lod| (s + lod, k + 1));
                 (k > 0).then(|| s / k as f32)
             })
             .chain(std::iter::repeat(None).take(epoch.extra.len()))

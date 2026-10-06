@@ -295,7 +295,7 @@ mod tests {
     }
 
     fn layout(cx: i32) -> Layout {
-        let unit = [Unit { owner: 0, x: 500, y: 500, weight: 1, phi: (1, 0), sa: 0, sb: 0 }];
+        let unit = [Unit { owner: 0, x: 500, y: 500, weight: 1, phi: (1, 0), sa_sb: None }];
         let sq = Rect { x: 0, y: 0, w: 1000, h: 1000 };
         let one = [(sq, &unit[..])];
         let none = [(Rect { x: 0, y: 0, w: 2000, h: 1000 }, &[][..])];

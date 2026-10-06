@@ -2,6 +2,7 @@
 
 use crate::geom::Orient;
 use crate::ids::{AxisId, DeviceId, Target};
+use crate::lanes::Box4;
 
 /// Device-indexed SoA placement state. Rules read it and never mutate it
 /// (except `Rule::project`), so scoring is pure.
@@ -68,7 +69,7 @@ impl Layout {
         a.sqrt().max(1.0) as f32
     }
 
-    /// `(cx, cy, hw, hh)` of a target, nm; a group is the smallest
+    /// Centre/half-extent box of a target, nm; a group is the smallest
     /// centre/half-extent box enclosing every member's footprint (an odd-nm
     /// span rounds the box outward by up to 1 nm). O(members).
     ///
@@ -76,11 +77,11 @@ impl Layout {
     /// On an out-of-range target or an empty group.
     #[inline]
     #[must_use]
-    pub fn bbox(&self, t: Target) -> (i32, i32, i32, i32) {
+    pub fn bbox(&self, t: Target) -> Box4 {
         match t {
             Target::Device(d) => {
                 let i = d.0 as usize;
-                (self.x[i], self.y[i], self.hw[i], self.hh[i])
+                Box4 { x: self.x[i], y: self.y[i], hw: self.hw[i], hh: self.hh[i] }
             }
             Target::Group(g) => {
                 let members = &self.groups[g.0 as usize];
@@ -93,9 +94,9 @@ impl Layout {
                     hi_x = hi_x.max(self.x[i] + self.hw[i]);
                     hi_y = hi_y.max(self.y[i] + self.hh[i]);
                 }
-                let (cx, hw) = enclosing_half(lo_x, hi_x);
-                let (cy, hh) = enclosing_half(lo_y, hi_y);
-                (cx, cy, hw, hh)
+                let (x, hw) = enclosing_half(lo_x, hi_x);
+                let (y, hh) = enclosing_half(lo_y, hi_y);
+                Box4 { x, y, hw, hh }
             }
         }
     }
@@ -107,19 +108,8 @@ impl Layout {
     #[inline]
     #[must_use]
     pub fn centre(&self, t: Target) -> (i32, i32) {
-        let (cx, cy, _, _) = self.bbox(t);
-        (cx, cy)
-    }
-
-    /// Half-extents `(hw, hh)` of [`Layout::bbox`], nm.
-    ///
-    /// # Panics
-    /// As [`Layout::bbox`].
-    #[inline]
-    #[must_use]
-    pub fn extent(&self, t: Target) -> (i32, i32) {
-        let (_, _, hw, hh) = self.bbox(t);
-        (hw, hh)
+        let b = self.bbox(t);
+        (b.x, b.y)
     }
 
     /// Axis x; an id past the table falls back to [`Self::centre_x_estimate`]
@@ -202,10 +192,9 @@ impl Layout {
     #[inline]
     #[must_use]
     pub fn edge_gap(&self, a: Target, b: Target) -> f32 {
-        let (ax, ay, ahw, ahh) = self.bbox(a);
-        let (bx, by, bhw, bhh) = self.bbox(b);
-        let gx = i64::from(((ax - bx).abs() - (ahw + bhw)).max(0));
-        let gy = i64::from(((ay - by).abs() - (ahh + bhh)).max(0));
+        let (a, b) = (self.bbox(a), self.bbox(b));
+        let gx = i64::from(((a.x - b.x).abs() - (a.hw + b.hw)).max(0));
+        let gy = i64::from(((a.y - b.y).abs() - (a.hh + b.hh)).max(0));
         ((gx * gx + gy * gy) as f32).sqrt()
     }
 }

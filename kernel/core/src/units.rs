@@ -8,6 +8,8 @@
 //! them for every (cell, variant) so a rule can read the chosen variant's units
 //! in world coordinates from the [`Layout`] alone.
 
+use std::num::NonZeroU32;
+
 use crate::geom::{Orient, Rect};
 use crate::ids::DeviceId;
 use crate::layout::Layout;
@@ -26,12 +28,19 @@ pub struct Unit {
     pub weight: i64,
     /// Unit S→D current direction, each component in `{-1, 0, 1}`.
     pub phi: (i8, i8),
-    /// Channel centre to the diffusion's two ends along the current, nm
-    /// (BSIM4's `SA + L/2`, `SB + L/2`: the LOD stress distances). `0` = not a
-    /// MOS finger.
-    pub sa: i32,
-    /// Far-side counterpart of [`Unit::sa`], nm; `0` = not a MOS finger.
-    pub sb: i32,
+    /// Channel centre to the diffusion's two ends along the current, `(sa, sb)`
+    /// nm (BSIM4's `SA + L/2`, `SB + L/2`: the LOD stress distances); `None` =
+    /// not a MOS finger. Build from signed spans with [`Unit::diffusion`].
+    pub sa_sb: Option<(NonZeroU32, NonZeroU32)>,
+}
+
+impl Unit {
+    /// `(sa, sb)` for [`Unit::sa_sb`]: `Some` only when both spans are positive.
+    #[must_use]
+    pub fn diffusion(sa: i32, sb: i32) -> Option<(NonZeroU32, NonZeroU32)> {
+        let nz = |v: i32| u32::try_from(v).ok().and_then(NonZeroU32::new);
+        nz(sa).zip(nz(sb))
+    }
 }
 
 /// Every (cell, variant)'s units, SoA. Immutable once built; shared by `Arc`.
@@ -59,8 +68,8 @@ pub struct UnitLib {
     weight: Vec<i64>,
     /// Per unit: local-frame S→D direction.
     phi: Vec<(i8, i8)>,
-    /// Per unit: LOD stress term, 1/µm; `NaN` = unknown ([`PlacedUnit::lod`]).
-    lod: Vec<f32>,
+    /// Per unit: LOD stress term, 1/µm ([`PlacedUnit::lod`]).
+    lod: Vec<Option<f32>>,
 }
 
 /// A unit placed in the world: owner is the schematic device.
@@ -76,16 +85,16 @@ pub struct PlacedUnit {
     pub weight: i64,
     /// World S→D direction, each component in `{-1, 0, 1}`.
     pub phi: (i8, i8),
-    /// LOD stress term `1/(SA+L/2) + 1/(SB+L/2)`, 1/µm; `NaN` = unknown.
-    pub lod: f32,
+    /// LOD stress term `1/(SA+L/2) + 1/(SB+L/2)`, 1/µm; `None` = not a MOS
+    /// finger.
+    pub lod: Option<f32>,
 }
 
 impl UnitLib {
     /// Builds from each cell's variants (`(bbox, units)` per alternative, cell
     /// `i` being the `i`-th item of `variants`) and each cell's member devices
     /// (`members[cell][owner]`). A unit whose `owner` is not a member is
-    /// dropped. A unit's LOD term is known only when both `sa` and `sb` are
-    /// positive.
+    /// dropped. A unit's LOD term is known only when it has [`Unit::sa_sb`].
     ///
     /// # Panics
     /// If `variants` yields more cells than `members` has rows.
@@ -108,7 +117,7 @@ impl UnitLib {
                     lib.y.push(u.y);
                     lib.weight.push(u.weight);
                     lib.phi.push(u.phi);
-                    lib.lod.push(if u.sa > 0 && u.sb > 0 { 1e3 / u.sa as f32 + 1e3 / u.sb as f32 } else { f32::NAN });
+                    lib.lod.push(u.sa_sb.map(|(sa, sb)| 1e3 / sa.get() as f32 + 1e3 / sb.get() as f32));
                 }
             }
         }
@@ -187,8 +196,8 @@ mod tests {
     /// One cell, one variant: a 1000×200 bbox with two fingers of devices 7, 9.
     fn lib() -> UnitLib {
         let units = [
-            Unit { owner: 0, x: 100, y: 100, weight: 5, phi: (1, 0), sa: 0, sb: 0 },
-            Unit { owner: 1, x: 900, y: 100, weight: 5, phi: (-1, 0), sa: 0, sb: 0 },
+            Unit { owner: 0, x: 100, y: 100, weight: 5, phi: (1, 0), sa_sb: None },
+            Unit { owner: 1, x: 900, y: 100, weight: 5, phi: (-1, 0), sa_sb: None },
         ];
         let bbox = Rect { x: 0, y: 0, w: 1000, h: 200 };
         let alts = [(bbox, &units[..])];

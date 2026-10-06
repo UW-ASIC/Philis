@@ -594,8 +594,7 @@ impl Mosfet {
                 y: finger_w / 2,
                 weight: i64::from(gate_l) * i64::from(finger_w),
                 phi: (if term(idx as i32, false) == "S" { 1 } else { -1 }, 0),
-                sa: gx + gate_l / 2 - diff_x_start,
-                sb: diff_x_end - (gx + gate_l / 2),
+                sa_sb: pnr_core::Unit::diffusion(gx + gate_l / 2 - diff_x_start, diff_x_end - (gx + gate_l / 2)),
             });
             // Gate cut (the deck requires a cut to reach poly), centred on the
             // finger at the lattice.

@@ -285,7 +285,7 @@ impl CapArray {
     #[must_use]
     pub fn assign(&self, n: u8) -> Vec<u8> {
         let (rows, cols) = dims(n, self.tall);
-        let mut g = Grid { cols, slot: vec![None; rows * cols] };
+        let mut g = Grid::new(rows, cols);
         let centred = |(r, c): (usize, usize)| ((rows - r) / 2, (cols - c) / 2, r, c);
         match self.pattern {
             Pattern::Spiral => {
@@ -423,7 +423,7 @@ impl CapArray {
                 b.rect(cut, Rect { x: x0 + i * pitch, y: y0 + j * pitch, w: v, h: v });
             }
         }
-        b.unit(Unit { owner, x: cell.x + cell.w / 2, y: cell.y + cell.h / 2, weight: i64::from(plate.w) * i64::from(plate.h), phi: (0, 0), sa: 0, sb: 0 });
+        b.unit(Unit { owner, x: cell.x + cell.w / 2, y: cell.y + cell.h / 2, weight: i64::from(plate.w) * i64::from(plate.h), phi: (0, 0), sa_sb: None });
         b.drawn(Drawn { owner, device: None, kind: DrawnKind::Capacitor, nodes: [Node::Pin("P"), Node::Pin("N"), Node::Unused], w: plate.w, l: plate.h });
         b.keepout(plate, KeepWhy::CapPlate { owner });
         plate
@@ -624,7 +624,7 @@ impl CapArray {
                     let (cx, cy) = (x0 + floor((uw - v2) / 2), y0 + floor((uh - v2) / 2));
                     if slot.is_some() {
                         b.rect(v2l, Rect { x: cx, y: cy, w: v2, h: v2 });
-                        b.unit(Unit { owner: s, x: x0 + uw / 2, y: y0 + uh / 2, weight: i64::from(uw) * i64::from(uh), phi: (0, 0), sa: 0, sb: 0 });
+                        b.unit(Unit { owner: s, x: x0 + uw / 2, y: y0 + uh / 2, weight: i64::from(uw) * i64::from(uh), phi: (0, 0), sa_sb: None });
                     } else {
                         // A dummy's plates are shorted: it is environment, not C.
                         b.rect(v1l, Rect { x: cx, y: cy, w: v1, h: v1 });

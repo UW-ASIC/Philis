@@ -187,8 +187,8 @@ fn union(parent: &mut [usize], i: usize, j: usize) {
 
 /// Placed bbox of device `d` (halo included) as a corner rect.
 fn dev_rect(l: &Layout, d: DeviceId) -> Rect {
-    let (cx, cy, hw, hh) = l.bbox(Target::Device(d));
-    Rect { x: cx - hw, y: cy - hh, w: 2 * hw, h: 2 * hh }
+    let b = l.bbox(Target::Device(d));
+    Rect { x: b.x - b.hw, y: b.y - b.hh, w: 2 * b.hw, h: 2 * b.hh }
 }
 
 /// Smallest rect covering `a` and `b`.

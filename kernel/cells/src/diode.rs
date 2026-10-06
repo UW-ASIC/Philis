@@ -132,7 +132,7 @@ impl Cell for Diode {
                 b.rect(diom, Rect { x: ox, y: oy, w: dev_w, h: tap_h });
             }
 
-            b.unit(pnr_core::Unit { owner: d, x: k.x + w / 2, y: k.y + l / 2, weight: i64::from(w) * i64::from(l), phi: (0, 0), sa: 0, sb: 0 });
+            b.unit(pnr_core::Unit { owner: d, x: k.x + w / 2, y: k.y + l / 2, weight: i64::from(w) * i64::from(l), phi: (0, 0), sa_sb: None });
             b.drawn(Drawn { owner: d, device: None, kind: DrawnKind::Diode, nodes: [Node::Pin("P"), Node::Pin("N"), Node::Unused], w, l });
         }
 

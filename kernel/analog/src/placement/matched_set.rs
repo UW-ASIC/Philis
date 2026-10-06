@@ -79,8 +79,8 @@ fn member(l: &Layout, d: DeviceId, hot: bool) -> Member {
         l.units
             .of_device(l, d)
             .inspect(|u| {
-                if u.lod.is_finite() {
-                    lod_wsum += u.weight as f64 * f64::from(u.lod);
+                if let Some(lod) = u.lod {
+                    lod_wsum += u.weight as f64 * f64::from(lod);
                     lod_w += u.weight as f64;
                 }
                 if hot {
@@ -445,7 +445,7 @@ pub(crate) fn layout(xs: &[i32], ys: &[i32], half: i32) -> Layout {
 
 #[cfg(test)]
 pub(crate) fn unit(owner: u8, x: i32, y: i32, weight: i64) -> pnr_core::Unit {
-    pnr_core::Unit { owner, x, y, weight, phi: (1, 0), sa: 0, sb: 0 }
+    pnr_core::Unit { owner, x, y, weight, phi: (1, 0), sa_sb: None }
 }
 
 /// Devices 0 and 1, one 20 µm² unit each, alone in cells 0 and 1 `dx` apart.
@@ -733,7 +733,7 @@ mod tests {
 
     #[test]
     fn lod_is_weighted_by_unit_area() {
-        let u = |owner, sa, sb, weight| Unit { owner, x: 100, y: 50, weight, phi: (1, 0), sa, sb };
+        let u = |owner, sa, sb, weight| Unit { owner, x: 100, y: 50, weight, phi: (1, 0), sa_sb: Unit::diffusion(sa, sb) };
         let units = [u(0, 500, 1_500, 10), u(0, 1_000, 1_000, 30), u(1, 1_000, 1_000, 40)];
         let mut l = layout(&[5_000], &[5_000], 400);
         l.units = Arc::new(merged(&units, Rect { x: 0, y: 0, w: 800, h: 100 }));

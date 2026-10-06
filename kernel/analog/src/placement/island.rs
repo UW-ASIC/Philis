@@ -23,10 +23,10 @@ pub struct SymmetryIsland {
 /// an edge distance ≤ `touch_nm` on the other (a corner contact is not
 /// adjacency, so this is not `Layout::edge_gap`, which is 0 there).
 fn adjacent(l: &Layout, a: Target, b: Target, touch_nm: i32) -> bool {
-    let (ax, ay, aw, ah) = l.bbox(a);
-    let (bx, by, bw, bh) = l.bbox(b);
-    let (dx, dy) = ((ax - bx).abs(), (ay - by).abs());
-    (dx < aw + bw && dy - (ah + bh) <= touch_nm) || (dy < ah + bh && dx - (aw + bw) <= touch_nm)
+    let (a, b) = (l.bbox(a), l.bbox(b));
+    let (dx, dy) = ((a.x - b.x).abs(), (a.y - b.y).abs());
+    let (w, h) = (a.hw + b.hw, a.hh + b.hh);
+    (dx < w && dy - h <= touch_nm) || (dy < h && dx - w <= touch_nm)
 }
 
 /// Returns the number of connected components of `members` under edge

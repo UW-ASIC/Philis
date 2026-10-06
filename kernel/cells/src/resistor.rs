@@ -342,8 +342,7 @@ impl Cell for Resistor {
                 y: total_h / 2,
                 weight: i64::from(body_w) * i64::from(seg_l) / (per[di] * per[di]) as i64,
                 phi: (0, if enters_top { -1 } else { 1 }),
-                sa: 0,
-                sb: 0,
+                sa_sb: None,
             });
             for top in [false, true] {
                 let y0 = if top { total_h - head_li_h } else { 0 };

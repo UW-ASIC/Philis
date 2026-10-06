@@ -279,22 +279,21 @@ fn group_bbox_encloses_every_member() {
     // Members [-1, 1] and [2, 2] on x: span [-1, 2] is odd.
     let mut l = layout(vec![0, 2], vec![0, 0], vec![1, 0], vec![1, 1]);
     l.groups = vec![vec![DeviceId(0), DeviceId(1)]];
-    let (cx, cy, hw, hh) = l.bbox(Target::Group(GroupId(0)));
+    let Box4 { x: cx, y: cy, hw, hh } = l.bbox(Target::Group(GroupId(0)));
     assert!(cx - hw <= -1 && cx + hw >= 2, "x span not enclosed: {cx}±{hw}");
     assert!(hw <= 2, "rounded out by more than 1 nm: {hw}");
     assert_eq!((cy, hh), (0, 1));
     // Negative odd span [-3, 0].
     let mut l = layout(vec![-2, 0], vec![0, 0], vec![1, 0], vec![0, 0]);
     l.groups = vec![vec![DeviceId(0), DeviceId(1)]];
-    let (cx, _, hw, _) = l.bbox(Target::Group(GroupId(0)));
+    let Box4 { x: cx, hw, .. } = l.bbox(Target::Group(GroupId(0)));
     assert!(cx - hw <= -3 && cx + hw >= 0, "{cx}±{hw}");
     // Even span is exact.
     let mut l = layout(vec![0, 10], vec![0, 0], vec![2, 2], vec![1, 1]);
     l.groups = vec![vec![DeviceId(1), DeviceId(0)]];
-    assert_eq!(l.bbox(Target::Group(GroupId(0))), (5, 0, 7, 1));
+    assert_eq!(l.bbox(Target::Group(GroupId(0))), Box4 { x: 5, y: 0, hw: 7, hh: 1 });
     assert_eq!(l.centre(Target::Group(GroupId(0))), (5, 0));
-    assert_eq!(l.extent(Target::Group(GroupId(0))), (7, 1));
-    assert_eq!(l.bbox(Target::Device(DeviceId(1))), (10, 0, 2, 1));
+    assert_eq!(l.bbox(Target::Device(DeviceId(1))), Box4 { x: 10, y: 0, hw: 2, hh: 1 });
 }
 
 #[test]
@@ -425,7 +424,7 @@ fn pin_shares_degenerate_inputs() {
     // Units with phi = (0, 0) count for nothing: fallback 2/n.
     let m = Macro {
         pins: vec![pin("d0:D", rect(0, 0, 10, 10)), pin("d0:D", rect(100, 0, 10, 10))],
-        units: vec![Unit { owner: 0, x: 50, y: 5, weight: 1, phi: (0, 0), sa: 0, sb: 0 }],
+        units: vec![Unit { owner: 0, x: 50, y: 5, weight: 1, phi: (0, 0), sa_sb: None }],
         ..Default::default()
     };
     assert_eq!(pin_shares(&m), vec![1.0, 1.0]);
@@ -437,8 +436,8 @@ fn pin_shares_of_a_terminal_sum_to_one() {
     let m = Macro {
         pins: vec![pin("d1:D", rect(-5, -5, 10, 10)), pin("d1:S", rect(195, -5, 10, 10)), pin("d1:D", rect(395, -5, 10, 10))],
         units: vec![
-            Unit { owner: 1, x: 100, y: 0, weight: 1, phi: (-1, 0), sa: 0, sb: 0 },
-            Unit { owner: 1, x: 300, y: 0, weight: 1, phi: (1, 0), sa: 0, sb: 0 },
+            Unit { owner: 1, x: 100, y: 0, weight: 1, phi: (-1, 0), sa_sb: None },
+            Unit { owner: 1, x: 300, y: 0, weight: 1, phi: (1, 0), sa_sb: None },
         ],
         ..Default::default()
     };
@@ -604,7 +603,7 @@ fn far_apart_devices_do_not_overflow() {
 // ---------------------------------------------------------------- units
 
 fn unit(owner: u8, x: i32, phi: (i8, i8), sa: i32, sb: i32) -> Unit {
-    Unit { owner, x, y: 0, weight: 3, phi, sa, sb }
+    Unit { owner, x, y: 0, weight: 3, phi, sa_sb: Unit::diffusion(sa, sb) }
 }
 
 #[test]
@@ -632,13 +631,13 @@ fn unit_lib_selects_variant_turns_phi_and_computes_lod() {
     let u: Vec<_> = lib.placed(&l, 0).collect();
     assert_eq!(u.len(), 1);
     assert_eq!((u[0].owner, u[0].x, u[0].y, u[0].weight), (DeviceId(1), 960, -20, 3));
-    assert_eq!(u[0].lod, 2.0, "1e3/1000 + 1e3/1000 per µm");
+    assert_eq!(u[0].lod, Some(2.0), "1e3/1000 + 1e3/1000 per µm");
 
     l.variant[0] = 1;
     let u: Vec<_> = lib.of_device(&l, DeviceId(1)).collect();
     assert_eq!(u.len(), 2);
-    assert!(u[0].lod.is_nan(), "sa = 0: unknown");
-    assert_eq!(u[1].lod, 6.0);
+    assert_eq!(u[0].lod, None, "sa = 0: unknown");
+    assert_eq!(u[1].lod, Some(6.0));
     assert!(lib.of_device(&l, DeviceId(0)).next().is_none(), "maps to cell 0 but owns nothing");
     assert!(lib.of_device(&l, DeviceId(9)).next().is_none(), "no cell");
 

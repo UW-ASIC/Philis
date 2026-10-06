@@ -367,7 +367,7 @@ fn phi_equal_handles_empty_and_unequal_counts() {
 }
 
 fn unit(owner: u8, phi: (i8, i8)) -> pnr_core::Unit {
-    pnr_core::Unit { owner, x: 0, y: 0, weight: 1, phi, sa: 0, sb: 0 }
+    pnr_core::Unit { owner, x: 0, y: 0, weight: 1, phi, sa_sb: None }
 }
 
 #[test]
@@ -392,7 +392,7 @@ fn mirror_is_allowed_only_without_net_phi_x() {
 
 #[test]
 fn pt_from_unit_keeps_every_field() {
-    let u = pnr_core::Unit { owner: 2, x: -7, y: 9, weight: 1234, phi: (-1, 1), sa: 5, sb: 6 };
+    let u = pnr_core::Unit { owner: 2, x: -7, y: 9, weight: 1234, phi: (-1, 1), sa_sb: pnr_core::Unit::diffusion(5, 6) };
     assert_eq!(Pt::from(u), Pt { x: -7.0, y: 9.0, w: 1234.0, phi: (-1, 1) });
 }
 
