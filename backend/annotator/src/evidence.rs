@@ -11,6 +11,7 @@ use pnr_core::{DeviceKind, Netlist};
 /// What the flow knows beyond the netlist. Ports are `Netlist.ports` (FLOW-07).
 #[derive(Clone, Debug, Default)]
 pub struct Evidence {
+    /// DC operating point; `None` leaves every op-dependent rule unknown.
     pub op: Option<OpFacts>,
     /// Spec sensitivities; PERF-12 fills them (M4); EXT-21 allocates set allowances
     /// from `d_vt`, EXT-25 parasitic budgets from `d_c`/`d_r`/`d_cc`.
@@ -23,10 +24,13 @@ pub struct Evidence {
     pub probe_bias: bool,
 }
 
-/// DC operating point, indexed by device and by net.
+/// DC operating point, indexed by device and by net. Either vector may be
+/// shorter than the netlist: a missing entry reads as `None`.
 #[derive(Clone, Debug)]
 pub struct OpFacts {
+    /// Bias per [`DeviceId`]; `None` = the simulator reported nothing for it.
     pub dev: Vec<Option<DeviceOp>>,
+    /// Node voltage per [`NetId`], mV.
     pub net_mv: Vec<Option<f64>>,
 }
 
@@ -34,31 +38,48 @@ pub struct OpFacts {
 /// folds vdsat into it); `vth`/`gmb`/`gds` are `None` until PERF-09 produces them.
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceOp {
+    /// Drain (collector) current, µA; the sign follows the simulator, readers take `|Id|`.
     pub id_ua: f64,
+    /// `|V_DS| − |V_DSsat|`, mV; negative = triode.
     pub headroom_mv: f64,
+    /// Transconductance, µS.
     pub gm_us: f64,
+    /// Dissipated power, µW.
     pub power_uw: f64,
+    /// Gate-source voltage, mV.
     pub vgs_mv: Option<f64>,
+    /// Bulk-source voltage, mV; `> 0` on an NMOS (`< 0` on a PMOS) forward-biases the bulk.
     pub vbs_mv: Option<f64>,
+    /// Threshold voltage, mV.
     pub vth_mv: Option<f64>,
+    /// Body transconductance, µS.
     pub gmb_us: Option<f64>,
+    /// Output conductance, µS.
     pub gds_us: Option<f64>,
 }
 
 /// Per-spec sensitivities (Lampaert eqs. 2.2–2.7); PERF-12 produces them.
 #[derive(Clone, Debug, Default)]
 pub struct Sensitivities {
+    /// One entry per spec metric.
     pub specs: Vec<SpecSens>,
 }
 
+/// One spec metric: its nominal value, bounds, spreads and first-order
+/// sensitivities. All values are in the metric's own unit.
 #[derive(Clone, Debug)]
 pub struct SpecSens {
+    /// Metric name as the testbench measures it (diagnostics quote it).
     pub metric: String,
+    /// Nominal value; non-finite = unusable, the spec contributes no margin.
     pub f0: f64,
+    /// Lower spec bound; `None` or non-finite = none.
     pub lo: Option<f64>,
+    /// Upper spec bound; `None` or non-finite = none.
     pub hi: Option<f64>,
     /// Metric range over the process corners; `None` = nominal only.
     pub proc: Option<(f64, f64)>,
+    /// Random 1σ spread of the metric (mismatch); `None` = unknown.
     pub sigma_f: Option<f64>,
     /// Per aF of ground capacitance.
     pub d_c: Vec<(NetId, f64)>,
@@ -75,7 +96,9 @@ pub struct SpecSens {
 /// Operating region, first match wins: `|Id| < 1e-3·max_id` Off; `|Vgs| <
 /// |Vth|` when both are known, else `gm/|Id| ≥ 20 /V`, Subthreshold (H12-08;
 /// 20 /V is Philis policy, near the weak-inversion limit 1/(n·U_T)); negative
-/// headroom Triode; otherwise Saturation.
+/// headroom Triode; otherwise Saturation. `max_id_ua` is the largest |Id| of
+/// the circuit's FETs, µA. A device carrying no current is Off even when
+/// `max_id_ua` is 0 (every FET idle).
 #[must_use]
 pub fn region(op: &DeviceOp, max_id_ua: f64) -> Region {
     let id = op.id_ua.abs();
@@ -98,7 +121,12 @@ pub fn region(op: &DeviceOp, max_id_ua: f64) -> Region {
 /// CurrentSource, which it would otherwise always match), CurrentSource
 /// (Saturation, Bias/Reference gate or a `shared_bias` member), Amplifier
 /// (Saturation, Signal/Sensitive gate), Load (in a Load leaf). Without an op
-/// only Diode, Load and Passive (R/C/L) are assigned.
+/// only Diode, Load and Passive (R/C/L) are assigned. Non-FETs have region
+/// Unknown; BJTs and diodes role Unknown. One entry per device, in device order.
+///
+/// # Panics
+/// When `load_leaf` is shorter than `nl.devices`, `classes` shorter than the
+/// nets a FET touches, or a `shared_bias` id is out of range.
 #[must_use]
 pub fn device_facts(
     nl: &Netlist,

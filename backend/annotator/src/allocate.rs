@@ -16,14 +16,18 @@ use crate::evidence::{Sensitivities, SpecSens};
 
 /// One allocatable set: compared sides (device lists) and its random 1σ, mV.
 pub struct SetIn {
+    /// Compared `(side A, side B)` couples; the set's sensitivity is the largest
+    /// mean |ΔV_T sensitivity| over them (0 without sides).
     pub sides: Vec<(Vec<DeviceId>, Vec<DeviceId>)>,
+    /// Random 1σ ΔV_T, mV; `None` = unknown (no deck A_VT or gate area).
     pub sigma_mv: Option<f32>,
 }
 
 /// `(sign, margin, bound)` per finite bound of `s`: sign −1 floor, +1 ceiling.
 /// Headroom is `(proc.0 | f0) − lo` / `hi − (proc.1 | f0)` (LAMP-01, the process
 /// spread eats it first) less the `β·σ_f` yield reserve (GRAEB-16; no reserve
-/// without `σ_f`). A non-finite bound or `f0` gives no row. Shared with EXT-25.
+/// without `σ_f`). A non-finite bound or `f0` gives no row; floor first, then
+/// ceiling. Shared with EXT-25.
 pub(crate) fn margins(s: &SpecSens, beta: f64) -> Vec<(f64, f64, f64)> {
     if !s.f0.is_finite() {
         return Vec::new();
@@ -43,6 +47,7 @@ pub(crate) fn margins(s: &SpecSens, beta: f64) -> Vec<(f64, f64, f64)> {
 /// `max_j (S_jk·σ_k)²/σ_f,j²` clamped to 1 (GRAEB-06) over the specs with
 /// `S_jk > 0`, `None` unless σ_k and such a spec's σ_f are known: a set no spec's
 /// `d_vt` touches has no evidence of being minor, so D5 leaves it alone.
+/// One output per set, in set order; one diagnostic per infeasible row, in spec order.
 #[must_use]
 pub fn allocate(sets: &[SetIn], sens: &Sensitivities, beta: f64, max_eta: f32) -> (Vec<(Option<f32>, Option<f32>)>, Vec<Diagnostic>) {
     let n = sets.len();
@@ -96,7 +101,11 @@ pub fn allocate(sets: &[SetIn], sens: &Sensitivities, beta: f64, max_eta: f32) -
 /// [`SetIn`] of a MOS set (`None` otherwise): half A against half B when the set
 /// has halves, else the reference (slot `reference`, default 0) against each
 /// other member. σ_k is the largest Pelgrom pair σ over those comparisons at the
-/// summed gate areas (`None` without the deck's A_VT or a gate area).
+/// summed gate areas (`None` without the deck's A_VT or a gate area). A reference
+/// past the members is clamped to the last one, as [`crate::audit::audit`] does.
+///
+/// # Panics
+/// When a member id is out of bounds of `nl.devices`.
 pub(crate) fn set_in(s: &MatchSpec, nl: &Netlist, avt: [Option<f32>; 2]) -> Option<SetIn> {
     if s.family != Family::Mos || s.members.is_empty() {
         return None;

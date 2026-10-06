@@ -10,9 +10,13 @@ use pnr_core::BipartiteHypergraph;
 /// [`pnr_core::ids::NetId`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetRole {
+    /// Anything not recognised as a rail or clock.
     Signal,
+    /// Positive supply rail.
     Supply,
+    /// Ground or the most negative rail.
     Ground,
+    /// Clock or phase line.
     Clock,
 }
 
@@ -57,7 +61,7 @@ pub fn rail_of(name: &str) -> Option<NetRole> {
 /// name or config: the net that is the `B` terminal of the most PMOS (NMOS)
 /// devices (ties to the lowest net id) becomes Supply (Ground) if it is a
 /// Signal on no FET gate; otherwise nothing is inferred. A named rail
-/// therefore always disables the inference.
+/// therefore always disables the inference. One role per net, in net order.
 #[must_use]
 pub fn classify_nets(hg: &BipartiteHypergraph, cfg: &AnnotationConfig) -> Vec<NetRole> {
     let mut roles: Vec<NetRole> = hg
@@ -110,6 +114,8 @@ pub fn classify_nets(hg: &BipartiteHypergraph, cfg: &AnnotationConfig) -> Vec<Ne
     roles
 }
 
+/// A clock name: contains a [`CLK_SUBSTR`], or is a [`CLK_PREFIX`] followed only
+/// by digits, `_` and `b`. `lower` must already be lowercase.
 pub(crate) fn is_clock(lower: &str) -> bool {
     CLK_SUBSTR.iter().any(|p| lower.contains(p))
         || CLK_PREFIX.iter().any(|p| {
@@ -126,9 +132,11 @@ pub struct AnnotationConfig {
     pub do_not_identify: HashSet<u32>,
     /// Pattern template names to skip entirely.
     pub do_not_use: HashSet<String>,
-    /// Extra nets to force to each role (name match, case-insensitive).
+    /// Extra nets forced to Supply (name match, case-insensitive); wins over every other rule.
     pub supply_nets: Vec<String>,
+    /// Extra nets forced to Ground; loses only to `supply_nets`.
     pub ground_nets: Vec<String>,
+    /// Extra nets forced to Clock; loses to the rail rules ([`rail_of`] and the two lists above).
     pub clock_nets: Vec<String>,
     /// Process numbers from the deck; `library::annotation` fills them.
     pub process: ProcessNumbers,
@@ -223,8 +231,9 @@ pub struct ProcessNumbers {
     /// Sidecar `ecgr_min_width_nm`: an electron-collecting ring's width for
     /// a stated collection efficiency; `None` on every shipped deck.
     pub ecgr_min_width_nm: Option<i32>,
-    /// The process can draw an `Ecgr` / `Hcgr` (`cells::post_cell::drawable`).
+    /// The process can draw an `Ecgr` (`cells::post_cell::drawable`).
     pub ecgr_drawable: bool,
+    /// The process can draw an `Hcgr` (`cells::post_cell::drawable`).
     pub hcgr_drawable: bool,
     /// The process can draw a `Tub` (deep n-well; `cells::post_cell::drawable`).
     pub tub_drawable: bool,

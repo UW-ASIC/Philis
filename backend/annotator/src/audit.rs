@@ -16,10 +16,12 @@ const VGST_MIN_MV: f64 = 100.0;
 /// H09-23: unequal V_CE across a matched bipolar set, mV (**Philis threshold**).
 const VCE_MAX_MV: f64 = 10.0;
 
+/// A Moderate+ MOS current-matched set: the H13-32/33 checks apply.
 fn mos_current(s: &MatchSpec) -> bool {
     s.kind == MatchKind::Current && s.class >= MatchClass::Moderate && s.family == Family::Mos
 }
 
+/// A Moderate+ bipolar set: the H09-04/23 checks apply.
 fn bjt(s: &MatchSpec) -> bool {
     s.family == Family::Bipolar && s.class >= MatchClass::Moderate
 }
@@ -30,7 +32,12 @@ fn bjt(s: &MatchSpec) -> bool {
 /// reference; `cascode_ratio`: bottom W/L ratio ≠ top ratio (> 1 %); `cascode_bulk`: a top device's B ≠ S;
 /// `bjt_ratio`: a Moderate+ bipolar ratio over 16 or odd (no common centroid); `vce_unequal`: its V_CE spread
 /// over 10 mV; `audit_not_checked`: the op-dependent checks a set qualified for whose data (op point,
-/// a member's dev entry, `gds_us`, or a pin's `net_mv`) is absent.
+/// a member's dev entry, `gds_us`, or a pin's `net_mv`) is absent, at most one, last, naming each check once.
+/// The reference is slot `reference` (clamped to the last member), default 0; a set without members is
+/// skipped. A cascode whose four devices do not all have a W/L skips `cascode_ratio`.
+///
+/// # Panics
+/// When a member or cascode device id is out of bounds of `nl.devices`.
 #[must_use]
 pub fn audit(intent: &Intent, nl: &Netlist, cascodes: &[[DeviceId; 4]], op: Option<&OpFacts>) -> Vec<Diagnostic> {
     let mut out = Vec::new();

@@ -19,6 +19,11 @@ fn aggressor_net(c: NetClass) -> bool {
 /// and FETs gated by a Bias/Reference net. Weight: the largest `weight` of the
 /// device's sets, else the largest class rank over its Moderate+ sets
 /// (Moderate 3, Exceptional 10; Philis policy), else 1 for a bias-gated FET.
+/// A capacitor needs exactly two terminals to couple.
+///
+/// # Panics
+/// When `classes` is shorter than the nets the devices touch, or a set member
+/// is out of bounds of `nl.devices`.
 #[must_use]
 pub fn tag(nl: &Netlist, classes: &[NetClassification], sets: &[MatchSpec]) -> (Vec<Aggressor>, Vec<Victim>) {
     let class = |n: pnr_core::NetId| classes[n.0 as usize].class;
@@ -71,7 +76,12 @@ pub fn tag(nl: &Netlist, classes: &[NetClassification], sets: &[MatchSpec]) -> (
 /// D/S and a diode's N inject electrons, PMOS D/S and a diode's P holes;
 /// bipolars stay unclassified (noted in `missing`). With an op point, an NMOS
 /// with `vbs > 0` (PMOS `< 0`) gets the same tag. One tag per device, in
-/// device order, the first reason winning.
+/// device order, the first reason winning. "Within" is strict: a net exactly
+/// `inj_series_ohm` away is not reached, and `inj_series_ohm ≤ 0` reaches
+/// nothing. `missing` gains each note at most once.
+///
+/// # Panics
+/// When `classes` is shorter than a port's net id.
 #[must_use]
 pub fn injectors(
     nl: &Netlist,
@@ -143,6 +153,9 @@ pub fn injectors(
 }
 
 /// `victim[d]`: what REL-07's `RingInputs.victim` and REL-16's `CellFlags.sensitive` read.
+///
+/// # Panics
+/// When a victim's device is `>= n_devices`.
 #[must_use]
 pub fn victim_mask(n_devices: usize, v: &[Victim]) -> Vec<bool> {
     let mut out = vec![false; n_devices];

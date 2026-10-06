@@ -11,10 +11,12 @@ use pnr_core::BipartiteHypergraph;
 use crate::evidence::OpFacts;
 use crate::pattern::pin_net;
 
+/// Supply, Ground or Substrate: nets neither ordering traverses.
 fn rail(c: NetClass) -> bool {
     matches!(c, NetClass::Supply | NetClass::Ground | NetClass::Substrate)
 }
 
+/// Sorts each step by `(canon, id)`, the order every caller reports in.
 fn sort_steps(steps: &mut [Vec<DeviceId>], canon: &[u64]) {
     steps.iter_mut().for_each(|s| s.sort_by_key(|d| (canon[d.0 as usize], d.0)));
 }
@@ -22,7 +24,11 @@ fn sort_steps(steps: &mut [Vec<DeviceId>], canon: &[u64]) {
 /// Signal stages: BFS from input nets over net edges control→drain (FET G→D, BJT B→C) and
 /// source→drain (S→D, E→C), rails never traversed. Inputs: nets touched only by G/B terminals,
 /// class Signal or Sensitive, ∩ `ports` when `ports` is non-empty. Step k = devices whose D/C net
-/// is at level k ≥ 1, sorted by (canon, id).
+/// is at level k ≥ 1, sorted by (canon, id). A level with no device leaves an empty step, so step
+/// `k − 1` is always level `k`. No input net gives no steps.
+///
+/// # Panics
+/// When `classes` is shorter than `hg.net_names` or a device id is out of bounds of `canon`.
 #[must_use]
 pub fn stage_order(hg: &BipartiteHypergraph, classes: &[NetClassification], ports: &[NetId], canon: &[u64]) -> Vec<Vec<DeviceId>> {
     let n = hg.net_names.len();
@@ -72,7 +78,11 @@ pub fn stage_order(hg: &BipartiteHypergraph, classes: &[NetClassification], port
 /// Per component of non-rail nets, L = the deepest supply-side device; step k holds the devices of depth
 /// k on a longest path (depth + height − 1 = L). In a step with a non-Clock-gated device the Clock-gated
 /// ones (precharge switches beside a load) drop out; an all-clocked step (a clocked tail) stays
-/// (**Philis policy**). Chains in order of their first device (canon, id).
+/// (**Philis policy**). Chains in order of their first device (canon, id). Every step of a chain is
+/// non-empty; the current is the summed |Id| of step 0.
+///
+/// # Panics
+/// When `classes` is shorter than `hg.net_names` or a device id is out of bounds of `canon`.
 #[must_use]
 pub fn current_paths(hg: &BipartiteHypergraph, op: Option<&OpFacts>, classes: &[NetClassification], canon: &[u64]) -> Vec<(Vec<Vec<DeviceId>>, f64)> {
     let n = hg.net_names.len();
@@ -126,13 +136,7 @@ pub fn current_paths(hg: &BipartiteHypergraph, op: Option<&OpFacts>, classes: &[
     }
     // Components: union-find of the non-rail nets a device joins.
     let mut parent: Vec<usize> = (0..n).collect();
-    fn find(p: &mut [usize], mut x: usize) -> usize {
-        while p[x] != x {
-            p[x] = p[p[x]];
-            x = p[x];
-        }
-        x
-    }
+    let find = crate::graph::uf_find;
     for &(_, lo, hi) in &edges {
         if !rail(class(lo)) && !rail(class(hi)) {
             let (a, b) = (find(&mut parent, lo.0 as usize), find(&mut parent, hi.0 as usize));

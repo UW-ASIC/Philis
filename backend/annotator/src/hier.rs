@@ -12,7 +12,11 @@ use crate::size::Drawn;
 use crate::symmetry::sig;
 
 /// Devices of instance `i` (its own and its sub-instances'), with their names relative to
-/// its path, in device order.
+/// its path, in device order. A device whose name lacks the `path/` prefix is left out.
+/// Cost: O(devices × hierarchy depth).
+///
+/// # Panics
+/// When `i` is out of bounds of `nl.insts`.
 #[must_use]
 pub fn devices(nl: &Netlist, i: u32) -> Vec<(DeviceId, &str)> {
     let prefix = format!("{}/", nl.insts[i as usize].path);
@@ -33,7 +37,11 @@ pub fn devices(nl: &Netlist, i: u32) -> Vec<(DeviceId, &str)> {
 
 /// Device couples of instances `a`, `b` by name below the instance path (`X1/M3` ↔ `X2/M3`);
 /// `None` when the device lists or any couple's (kind, model, finger W, L, fingers) differ.
-/// Drawn signatures, not canonical labels: those include outside connections.
+/// Drawn signatures, not canonical labels: those include outside connections. Instances with no
+/// devices never correspond. Couples come in order of the relative name.
+///
+/// # Panics
+/// When `a` or `b` is out of bounds of `nl.insts`, or `drawn` is shorter than `nl.devices`.
 #[must_use]
 pub fn corresponding(nl: &Netlist, drawn: &[Drawn], a: u32, b: u32) -> Option<Vec<(DeviceId, DeviceId)>> {
     let (mut da, mut db) = (devices(nl, a), devices(nl, b));
@@ -46,7 +54,8 @@ pub fn corresponding(nl: &Netlist, drawn: &[Drawn], a: u32, b: u32) -> Option<Ve
     da.iter().zip(&db).map(|(&(x, nx), &(y, ny))| (nx == ny && s(x) == s(y)).then_some((x, y))).collect()
 }
 
-/// Instances grouped by (subckt, parent), in instance order.
+/// Instances grouped by (subckt, parent): groups in order of their first instance, members in
+/// instance order. Cost: O(instances × groups).
 fn siblings(nl: &Netlist) -> Vec<Vec<u32>> {
     let mut g: Vec<Vec<u32>> = Vec::new();
     for (i, x) in nl.insts.iter().enumerate() {
@@ -69,6 +78,9 @@ pub fn same_template(nl: &Netlist, drawn: &[Drawn]) -> Vec<(u32, u32)> {
 /// (`bias[net]`: the structural Bias rule, [`crate::classify::bias_lines`], since net classes are
 /// refined only after the requirement graph); per bias net the instances that carry it (and
 /// match its first), largest set first, instance order; a set two bias nets both give is listed once.
+///
+/// # Panics
+/// When `bias` is shorter than the net count of an instance port.
 #[must_use]
 pub fn arrays(nl: &Netlist, drawn: &[Drawn], bias: &[bool]) -> Vec<Vec<u32>> {
     let mut out: Vec<Vec<u32>> = Vec::new();
@@ -89,6 +101,10 @@ pub fn arrays(nl: &Netlist, drawn: &[Drawn], bias: &[bool]) -> Vec<Vec<u32>> {
 }
 
 /// Port nets of `a` and `b` pair up: per formal port k, equal nets (shared) or a couple, and no net in two couples.
+/// Port lists of different lengths never pair; two empty lists do.
+///
+/// # Panics
+/// When `a` or `b` is out of bounds of `nl.insts`.
 #[must_use]
 pub fn ports_pair(nl: &Netlist, a: u32, b: u32) -> bool {
     let (pa, pb) = (&nl.insts[a as usize].ports, &nl.insts[b as usize].ports);
