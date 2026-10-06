@@ -164,11 +164,12 @@ pub fn mirror_allowed(members: &[Sums]) -> bool {
 /// [`phi_equal_all`]: an odd finger count leaves a net φx and refuses Mirror.
 #[must_use]
 pub fn mirror_allowed_units(units: &[pnr_core::Unit]) -> bool {
-    let mut owners: Vec<u8> = units.iter().map(|u| u.owner).collect();
-    owners.sort_unstable();
-    owners.dedup();
-    let per: Vec<Sums> = owners.iter().map(|&o| sums(units.iter().filter(|u| u.owner == o).map(|&u| Pt::from(u)))).collect();
-    mirror_allowed(&per)
+    // One pass: Σφx per owner (owners are u8), no per-owner rescans.
+    let mut net_phi_x = [0i32; 256];
+    for u in units {
+        net_phi_x[usize::from(u.owner)] += i32::from(u.phi.0);
+    }
+    net_phi_x.iter().all(|&s| s == 0)
 }
 
 /// Normalised moment `Σw·((x−cx)/l)^p·((y−cy)/l)^q / Σw` of `pts`; `0`
@@ -197,29 +198,38 @@ fn moment(pts: &[Pt], c: (f64, f64), l: f64, p: i32, q: i32) -> f64 {
 #[must_use]
 pub fn cancelled_order(devs: &[&[Pt]], nmax: u8, tol: f64) -> (u8, [f64; 5]) {
     debug_assert!(nmax <= 4);
-    let all: Vec<Pt> = devs.iter().flat_map(|d| d.iter().copied()).collect();
-    let w: f64 = all.iter().map(|p| p.w).sum();
-    let r = [0.0f64; 5];
+    let mut r = [0.0f64; 5];
+    // Only weighted points define the figure: a weightless point must not
+    // stretch the scale `l`.
+    let weighted = || devs.iter().flat_map(|d| d.iter()).filter(|p| p.w > 0.0);
+    let w: f64 = weighted().map(|p| p.w).sum();
     if w <= 0.0 {
         return (nmax, r);
     }
-    let c = (all.iter().map(|p| p.w * p.x).sum::<f64>() / w, all.iter().map(|p| p.w * p.y).sum::<f64>() / w);
-    let l = all.iter().map(|p| (p.x - c.0).hypot(p.y - c.1)).fold(0.0, f64::max);
+    let c = (weighted().map(|p| p.w * p.x).sum::<f64>() / w, weighted().map(|p| p.w * p.y).sum::<f64>() / w);
+    let l = weighted().map(|p| (p.x - c.0).hypot(p.y - c.1)).fold(0.0, f64::max);
     if l == 0.0 {
         return (nmax, r);
     }
-    let devices: Vec<&[Pt]> = devs.iter().copied().filter(|d| d.iter().map(|p| p.w).sum::<f64>() > 0.0).collect();
-    let mut r = r;
+    // Every (p, q) with 1 ≤ p + q ≤ nmax, grouped by order: order n is the
+    // n + 1 terms starting at (n − 1)(n + 2)/2.
+    let terms: Vec<(i32, i32)> = (1..=i32::from(nmax)).flat_map(|n| (0..=n).map(move |p| (p, n - p))).collect();
+    // Each device's moments once (O(devices · points)), not once per pair.
+    let table: Vec<Vec<f64>> = devs
+        .iter()
+        .filter(|d| d.iter().map(|p| p.w).sum::<f64>() > 0.0)
+        .map(|d| terms.iter().map(|&(p, q)| moment(d, c, l, p, q)).collect())
+        .collect();
     let mut order = 0u8;
     let mut still_ok = true;
     for n in 1..=nmax {
+        let lo = (usize::from(n) - 1) * (usize::from(n) + 2) / 2;
+        let hi = lo + usize::from(n) + 1;
         let mut worst = 0.0f64;
-        for (ai, a) in devices.iter().enumerate() {
-            for b in &devices[ai + 1..] {
-                for p in 0..=i32::from(n) {
-                    let q = i32::from(n) - p;
-                    let d = (moment(a, c, l, p, q) - moment(b, c, l, p, q)).abs();
-                    worst = worst.max(d);
+        for (ai, a) in table.iter().enumerate() {
+            for b in &table[ai + 1..] {
+                for k in lo..hi {
+                    worst = worst.max((a[k] - b[k]).abs());
                 }
             }
         }

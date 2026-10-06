@@ -77,9 +77,10 @@ pub fn cc_feasible(counts: &[u16]) -> bool {
 /// (doubled offsets, r²), ties by angle `atan2(dr, dc)`. Empty for an empty grid.
 #[must_use]
 pub fn spiral(rows: usize, cols: usize) -> Vec<usize> {
-    let key = |i: usize| spiral_key(i, rows, cols);
+    // Keys once (one atan2 per cell), not twice per comparison.
+    let keys: Vec<(i64, f64)> = (0..rows * cols).map(|i| spiral_key(i, rows, cols)).collect();
     let mut order: Vec<usize> = (0..rows * cols).collect();
-    order.sort_by(|&a, &b| key(a).0.cmp(&key(b).0).then(key(a).1.total_cmp(&key(b).1)));
+    order.sort_by(|&a, &b| keys[a].0.cmp(&keys[b].0).then(keys[a].1.total_cmp(&keys[b].1)));
     order
 }
 
@@ -495,10 +496,10 @@ pub fn diffusion_cc_row(counts: &[u16], outer: Outer) -> Option<Vec<usize>> {
             best.map(|(seq, _)| seq)
         }
         Outer::Source => {
-            if counts.iter().any(|&c| c % 2 != 0) {
+            let n: usize = counts.iter().map(|&c| usize::from(c)).sum();
+            if n == 0 || counts.iter().any(|&c| c % 2 != 0) {
                 return None;
             }
-            let n: usize = counts.iter().map(|&c| usize::from(c)).sum();
             let p = n / 2;
             let pairs: Vec<usize> = counts.iter().map(|&x| usize::from(x) / 2).collect();
             let odd: Vec<usize> = (0..pairs.len()).filter(|&d| pairs[d] % 2 == 1).collect();

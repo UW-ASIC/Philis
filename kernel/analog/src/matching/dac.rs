@@ -31,15 +31,27 @@ pub fn inl_dnl(units: &[(u8, f64, f64)], n_bits: u8, g_per_um: f64, steps: usize
     let n = usize::from(n_bits);
     let codes = 1usize << n;
     let (mut inl, mut dnl) = (0.0f64, 0.0f64);
+    // Unscaled transfer Σ_{b set} C_b per code, reused across θ.
+    let mut t = vec![0.0f64; codes];
     for k in 0..steps {
         let cap = gradient_caps(units, n + 1, g_per_um, k as f64 * std::f64::consts::PI / steps as f64);
         let total: f64 = cap.iter().sum();
-        let t = |c: usize| (1..=n).filter(|b| c >> (b - 1) & 1 == 1).map(|b| cap[b]).sum::<f64>() / total * codes as f64;
-        for c in 0..codes {
-            inl = inl.max((t(c) - c as f64).abs());
-            if c + 1 < codes {
-                dnl = dnl.max((t(c + 1) - t(c) - 1.0).abs());
-            }
+        if total <= 0.0 {
+            continue;
+        }
+        // Code c is code c minus its lowest set bit, plus that bit's cap:
+        // O(2ⁿ) per θ instead of O(n·2ⁿ).
+        for c in 1..codes {
+            t[c] = t[c & (c - 1)] + cap[c.trailing_zeros() as usize + 1];
+        }
+        let scale = codes as f64 / total;
+        // ponytail: scalar max-reductions; 2ⁿ ≤ a few thousand codes on a
+        // cold ranking path, SIMD only if a profile shows it.
+        for (c, &tc) in t.iter().enumerate() {
+            inl = inl.max((tc * scale - c as f64).abs());
+        }
+        for w in t.windows(2) {
+            dnl = dnl.max(((w[1] - w[0]) * scale - 1.0).abs());
         }
     }
     (inl, dnl)
@@ -52,6 +64,9 @@ pub fn inl_dnl(units: &[(u8, f64, f64)], n_bits: u8, g_per_um: f64, steps: usize
 #[must_use]
 pub fn msys(units: &[(u8, f64, f64)], counts: &[u16], g_per_um: f64, steps: usize) -> f64 {
     let mut worst = 0.0f64;
+    if counts.len() < 2 {
+        return worst;
+    }
     for k in 0..steps {
         let cap = gradient_caps(units, counts.len(), g_per_um, k as f64 * std::f64::consts::PI / steps as f64);
         let unit0 = cap[0] / f64::from(counts[0]);
@@ -67,18 +82,31 @@ pub fn msys(units: &[(u8, f64, f64)], counts: &[u16], g_per_um: f64, steps: usiz
 /// without units, and slots `≥ slots`, are skipped; `0` without units.
 #[must_use]
 pub fn second_um2(units: &[(u8, f64, f64)], slots: usize) -> f64 {
-    let mean = |f: &dyn Fn(&(u8, f64, f64)) -> bool| {
-        let (mut m, mut n) = ([0.0f64; 3], 0.0f64);
-        for u in units.iter().filter(|u| f(u)) {
-            m = [m[0] + u.1 * u.1, m[1] + u.1 * u.2, m[2] + u.2 * u.2];
-            n += 1.0;
+    // One pass: [Σx², Σxy, Σy², n] for the array and per slot.
+    let mut per = vec![[0.0f64; 4]; slots];
+    let mut all = [0.0f64; 4];
+    for &(s, x, y) in units {
+        let m = [x * x, x * y, y * y, 1.0];
+        for (a, v) in all.iter_mut().zip(m) {
+            *a += v;
         }
-        (n > 0.0).then(|| m.map(|v| v / n))
-    };
-    let Some(all) = mean(&|_| true) else { return 0.0 };
-    (0..slots)
-        .filter_map(|s| mean(&|u| usize::from(u.0) == s))
-        .map(|m| ((m[0] - all[0]).powi(2) + 2.0 * (m[1] - all[1]).powi(2) + (m[2] - all[2]).powi(2)).sqrt())
+        if let Some(p) = per.get_mut(usize::from(s)) {
+            for (a, v) in p.iter_mut().zip(m) {
+                *a += v;
+            }
+        }
+    }
+    if all[3] == 0.0 {
+        return 0.0;
+    }
+    let mean = |a: &[f64; 4]| [a[0] / a[3], a[1] / a[3], a[2] / a[3]];
+    let all = mean(&all);
+    per.iter()
+        .filter(|a| a[3] > 0.0)
+        .map(|a| {
+            let m = mean(a);
+            ((m[0] - all[0]).powi(2) + 2.0 * (m[1] - all[1]).powi(2) + (m[2] - all[2]).powi(2)).sqrt()
+        })
         .fold(0.0, f64::max)
 }
 
