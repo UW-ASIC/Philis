@@ -3,13 +3,15 @@
 //! signoff`) on each, print a summary table, and emit GDS + SVG artifacts.
 //!
 //!   cargo run --release -p benchmark --bin bench [local|align|magical|tinytapeout|all]
+//!   cargo run --release -p benchmark --bin bench -- --pex-cal   # target/bench/pex_cal.json
 //!
 //! Env: `PNR_BENCH_SEED` (default 1), `PNR_BENCH_STARTS` (search starts,
 //! default the library's), `PNR_BENCH_PDK` (deck override, see
 //! `pdk_path`).
 //!
 //! Debug artifacts (`<name>.gds`, `signoff.txt`, `violations.txt`,
-//! `drc_located.txt`) land in `target/bench_debug/<name>/`; SVGs in `assets/`.
+//! `drc_located.txt`, and for `signoff_xcheck.py` `<name>.lvs.gds`,
+//! `<name>.ref.spice`, `caps.json`) land in `target/bench_debug/<name>/`; SVGs in `assets/`.
 //! `<stem>.interface.json` sidecars are ignored (`library::run` takes none).
 
 mod fixtures;
@@ -154,32 +156,21 @@ fn op_config(pdk_json: &Path) -> Option<library::oppoint::OpConfig> {
     })
 }
 
-fn run_circuit(
-    c: &BenchmarkCircuit,
-    pdk: &Pdk,
-    pdk_json_path: &Path,
-    layer_names: &visualizer::LayerMap,
-    seed: u64,
-) -> (String, Vec<ContractStat>) {
-    let raw = match std::fs::read_to_string(&c.spice_path) {
-        Ok(t) => t,
-        Err(e) => return (format!("read failed: {e}"), Vec::new()),
-    };
+/// Parse, size-gate and run the full flow on `c`; `Err` is the outcome text.
+fn solve(c: &BenchmarkCircuit, pdk: &Pdk, pdk_json_path: &Path, seed: u64) -> Result<library::Solution, String> {
+    let raw = std::fs::read_to_string(&c.spice_path).map_err(|e| format!("read failed: {e}"))?;
     // Generic-netlist preprocessing (backslash joins, bare R/C, nfin->W).
     let text = preprocess_spice(&raw, pdk_json_path).unwrap_or(raw);
 
     // Pre-parse only to size-gate before committing to the full flow. Uses the
     // exact parser and deck model table `run` uses, so the count is authoritative.
     let opts = library::ParseOptions { models: library::model_table(pdk), ..Default::default() };
-    let g = match library::spice_with(&text, &opts) {
-        Ok(g) => g,
-        Err(e) => return (format!("parse failed: {e}"), Vec::new()),
-    };
+    let g = library::spice_with(&text, &opts).map_err(|e| format!("parse failed: {e}"))?;
     if g.devices.is_empty() {
-        return ("no PDK devices resolved".into(), Vec::new());
+        return Err("no PDK devices resolved".into());
     }
     if g.devices.len() > MAX_CELLS {
-        return (format!("skipped ({} cells > {MAX_CELLS})", g.devices.len()), Vec::new());
+        return Err(format!("skipped ({} cells > {MAX_CELLS})", g.devices.len()));
     }
     let mut cfg = Config { seed, feedback_iters: FEEDBACK_ITERS, op: op_config(pdk_json_path), ..Config::default() };
     // FLOW-08's T10 sweep: `PNR_BENCH_COLD_EVERY` overrides the default schedule.
@@ -189,9 +180,19 @@ fn run_circuit(
     if let Some(k) = std::env::var("PNR_BENCH_STARTS").ok().and_then(|v| v.parse().ok()) {
         cfg.starts = k;
     }
-    let sol = match library::run(&text, pdk, &Macros::default(), &cfg) {
+    library::run(&text, pdk, &Macros::default(), &cfg).map_err(|e| format!("flow failed: {e:?}"))
+}
+
+fn run_circuit(
+    c: &BenchmarkCircuit,
+    pdk: &Pdk,
+    pdk_json_path: &Path,
+    layer_names: &visualizer::LayerMap,
+    seed: u64,
+) -> (String, Vec<ContractStat>) {
+    let sol = match solve(c, pdk, pdk_json_path, seed) {
         Ok(s) => s,
-        Err(e) => return (format!("flow failed: {e:?}"), Vec::new()),
+        Err(e) => return (e, Vec::new()),
     };
 
     let signoff = library::signoff(&sol, pdk);
@@ -363,6 +364,21 @@ fn run_circuit(
     let _ = std::fs::create_dir_all(&debug_dir);
     let gds_bytes = library::export_gds(&sol, pdk, &c.name, &[]).unwrap_or_else(|e| panic!("{}: {e}", c.name));
     let _ = std::fs::write(debug_dir.join(format!("{}.gds", c.name)), &gds_bytes);
+    // Foundry LVS inputs for `signoff_xcheck.py`: a GDS labelling only the schematic
+    // ports (magic/KLayout then see the same pins as the `.subckt`) and the matching
+    // reference with dummies. `<name>.gds` stays all-labelled (DRC, magic C per net).
+    let ports: Vec<String> = sol.netlist.ports.iter().map(|n| sol.netlist.nets[n.0 as usize].name.clone()).collect();
+    let lvs_gds = debug_dir.join(format!("{}.lvs.gds", c.name));
+    match library::export_gds(&sol, pdk, &c.name, &ports) {
+        Ok(b) => drop(std::fs::write(&lvs_gds, b)),
+        Err(e) => {
+            eprintln!("{}.lvs.gds not written: {e}", c.name);
+            let _ = std::fs::remove_file(&lvs_gds);
+        }
+    }
+    let _ = std::fs::write(debug_dir.join(format!("{}.ref.spice", c.name)), library::reference_spice(&sol, pdk, &c.name, &ports));
+    // `[net, other | null, fF]` rows of the signoff extraction.
+    let _ = std::fs::write(debug_dir.join("caps.json"), serde_json::to_string(&signoff.caps).expect("caps serialise"));
     match library::post_layout_spice(&sol, pdk, &c.name) {
         Ok(s) => drop(std::fs::write(debug_dir.join(format!("{}_pex.spice", c.name)), s)),
         Err(e) => {
@@ -453,9 +469,44 @@ fn print_constraint_summary(all: &[&ContractStat]) {
     println!("  (max use = spent fraction of the tightest rule's budget; 1.000 = at spec. unk = inputs missing, never a pass; n/a = nothing to check. rate = sat / checked.)");
 }
 
+/// `--pex-cal` row (PERF-16): ground C per labelled signal net (supplies
+/// excluded) unmerged, merged and field-solved (every such net), fF, plus
+/// the analytical and field PEX-only wall times — the measurement gating
+/// field solve on promoted epochs (kept only at ≤ 2× analytical).
+fn pex_cal(sol: &library::Solution, pdk: &Pdk) -> serde_json::Value {
+    let (shapes, pins, _) = library::signoff_inputs(sol, pdk);
+    let mut nets: Vec<String> = pins.iter().map(|p| p.name.clone()).filter(|n| !sol.intent.supplies.iter().any(|s| &s.0 == n)).collect();
+    nets.sort();
+    nets.dedup();
+    let run = |o: verify::ExtractOptions| library::signoff_with(sol, pdk, &o);
+    let unmerged = run(verify::ExtractOptions { unmerged: true, ..Default::default() });
+    let merged = run(verify::ExtractOptions::default());
+    let field = run(verify::ExtractOptions { field_solve: nets.clone(), ..Default::default() });
+    let mut checker = verify::Checker::new(pdk, false).expect("deck loads");
+    let t = Instant::now();
+    let pex_only = verify::Checks { drc: false, erc: false, lvs: false, pex: true };
+    let analytic_ok = checker.run(&shapes, &pins, pex_only).is_ok();
+    let t_pex = t.elapsed();
+    let g = |s: &verify::Signoff, n: &str| s.caps.iter().find(|(a, o, _)| a == n && o.is_none()).map(|r| r.2);
+    let rows: Vec<serde_json::Value> = nets
+        .iter()
+        .map(|n| serde_json::json!({ "net": n, "c_unmerged": g(&unmerged, n), "c_merged": g(&merged, n), "c_field": g(&field, n) }))
+        .collect();
+    let refused: Vec<&String> = field.coverage.skipped_rules.iter().filter(|(r, _)| r == "pex.field").map(|(_, w)| w).collect();
+    serde_json::json!({
+        "nets": rows,
+        "c_total": { "unmerged": unmerged.report.cost, "merged": merged.report.cost, "field": field.report.cost },
+        "t_pex_ms": analytic_ok.then(|| t_pex.as_secs_f64() * 1e3),
+        "t_field_ms": field.pex_field.as_secs_f64() * 1e3,
+        "field_refused": refused,
+    })
+}
+
 fn main() {
+    let pex_cal_mode = std::env::args().nth(1).as_deref() == Some("--pex-cal");
     let suite = std::env::args()
         .nth(1)
+        .filter(|_| !pex_cal_mode)
         .map(|s| Suite::from_str(&s))
         .unwrap_or(Suite::Local);
 
@@ -489,6 +540,7 @@ fn main() {
         HashMap::new();
 
     let mut rows = Vec::new();
+    let mut cal = serde_json::Map::new();
     for c in &circuits {
         let pdk_json_path = pdk_path(c.suite);
         if !pdk_cache.contains_key(&pdk_json_path) {
@@ -513,6 +565,17 @@ fn main() {
             pdk_cache.insert(pdk_json_path.clone(), (p, ln));
         }
         let (pdk, layer_names) = &pdk_cache[&pdk_json_path];
+        if pex_cal_mode {
+            match solve(c, pdk, &pdk_json_path, seed) {
+                Ok(sol) => {
+                    let row = pex_cal(&sol, pdk);
+                    println!("  {}: t_pex {} ms, t_field {} ms", c.name, row["t_pex_ms"], row["t_field_ms"]);
+                    cal.insert(c.name.clone(), row);
+                }
+                Err(e) => println!("  {}: {e}", c.name),
+            }
+            continue;
+        }
 
         let t = Instant::now();
         let (outcome, contracts) =
@@ -529,6 +592,14 @@ fn main() {
         println!("  [{:>11}/{deck}] {:32} {:6} ms  {}", r.suite, r.name, r.ms, r.outcome);
     }
 
+    if pex_cal_mode {
+        let out = Path::new("target/bench");
+        let _ = std::fs::create_dir_all(out);
+        let text = serde_json::to_string_pretty(&cal).expect("pex_cal serialises");
+        std::fs::write(out.join("pex_cal.json"), &text).expect("write target/bench/pex_cal.json");
+        println!("{text}");
+        return;
+    }
     let ok = rows.iter().filter(|r| r.outcome.contains("cells,")).count();
     println!(
         "{ok}/{} circuits placed+routed; debug in target/bench_debug/, SVGs in assets/",

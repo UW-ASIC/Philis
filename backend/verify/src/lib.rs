@@ -72,6 +72,19 @@ pub struct Signoff {
     pub caps: CapMatrix,
     /// Wall time.
     pub elapsed: Duration,
+    /// Wall time of the PEX-only field-solve pass ([`ExtractOptions::field_solve`]);
+    /// zero without one.
+    pub pex_field: Duration,
+}
+
+/// How PEX extracts. The default is analytical over merged metal.
+#[derive(Clone, Debug, Default)]
+pub struct ExtractOptions {
+    /// Labelled nets to field-solve (overlaid on the analytical network).
+    pub field_solve: Vec<String>,
+    /// Load every shape as its own polygon: overlaps double-count area and
+    /// shared edges count as fringe. For calibration only.
+    pub unmerged: bool,
 }
 
 /// What a signoff did not check. Never a pass: a certificate requires
@@ -194,6 +207,24 @@ pub fn signoff_checked(
     intent: &Intent,
     pdk: &Pdk,
 ) -> Signoff {
+    signoff_extract(shapes, pins, reference, intent, &ExtractOptions::default(), pdk)
+}
+
+/// [`signoff_checked`] with extraction options. With `field_solve` set, the
+/// full run is analytical, then a timed PEX-only run field-solves those nets
+/// and its caps and `report.cost` replace the analytical ones
+/// ([`Signoff::pex_field`]). A refused or failed field solve keeps the
+/// analytical caps and is a `("pex.field", why)` row of
+/// [`Coverage::skipped_rules`], never a hard row: the analytical PEX ran.
+#[must_use]
+pub fn signoff_extract(
+    shapes: &[Shape],
+    pins: &[LabeledPin],
+    reference: &RefInput,
+    intent: &Intent,
+    opts: &ExtractOptions,
+    pdk: &Pdk,
+) -> Signoff {
     let t0 = Instant::now();
     let mut s = Signoff::default();
     let fail = |s: &mut Signoff, rule: String| {
@@ -209,6 +240,7 @@ pub fn signoff_checked(
         }
     };
     defer_chip_level(&mut checker, shapes);
+    checker.set_extract(&ExtractOptions { field_solve: Vec::new(), ..opts.clone() });
     if let Err(e) = checker.set_intent(intent) {
         fail(&mut s, format!("engine/intent: {e}"));
     }
@@ -241,6 +273,7 @@ pub fn signoff_checked(
                         Ok(summary) => {
                             harvest(&checker, &summary, &mut s);
                             s.caps = checker.cap_matrix();
+                            field_pass(&mut checker, shapes, &kept, &gone, opts, &mut s);
                         }
                     }
                 }
@@ -248,6 +281,7 @@ pub fn signoff_checked(
                 Ok(summary) => {
                     harvest(&checker, &summary, &mut s);
                     s.caps = checker.cap_matrix();
+                    field_pass(&mut checker, shapes, pins, &[], opts, &mut s);
                 }
             }
             // Only MOS cards carry params: a compared R/D/C/BJT matches by
@@ -263,6 +297,27 @@ pub fn signoff_checked(
     }
     s.elapsed = t0.elapsed();
     s
+}
+
+/// The PEX-only field-solve pass of [`signoff_extract`] over
+/// `opts.field_solve` less the labels the label-short re-run `dropped` (those
+/// name no extracted net now); nothing when none are left.
+fn field_pass(checker: &mut Checker, shapes: &[Shape], pins: &[LabeledPin], dropped: &[String], opts: &ExtractOptions, s: &mut Signoff) {
+    let field_solve: Vec<String> = opts.field_solve.iter().filter(|n| !dropped.contains(n)).cloned().collect();
+    if field_solve.is_empty() {
+        return;
+    }
+    checker.set_extract(&ExtractOptions { field_solve, ..opts.clone() });
+    let t = Instant::now();
+    let run = checker.run(shapes, pins, Checks { drc: false, erc: false, lvs: false, pex: true });
+    s.pex_field = t.elapsed();
+    match run.map(|summary| denied(&summary.pex)) {
+        Ok(None) => {
+            s.caps = checker.cap_matrix();
+            s.report.cost = checker.total_cap_ff();
+        }
+        Ok(Some(why)) | Err(why) => s.coverage.skipped_rules.push(("pex.field".to_string(), why)),
+    }
 }
 
 /// The [`Coverage::skipped_rules`] row for compared devices whose value LVS
@@ -361,16 +416,22 @@ pub struct Finding {
 /// single fail-closed `engine/…` finding.
 #[must_use]
 pub fn drc(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk) -> Vec<Finding> {
-    standalone(shapes, pins, pdk, Checks { drc: true, erc: false, lvs: false, pex: false })
+    drc_with(shapes, pins, pdk, &ExtractOptions::default())
+}
+
+/// [`drc`] over geometry loaded per `opts` (`unmerged`: one polygon per shape).
+#[must_use]
+pub fn drc_with(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, opts: &ExtractOptions) -> Vec<Finding> {
+    standalone(shapes, pins, pdk, Checks { drc: true, erc: false, lvs: false, pex: false }, opts)
 }
 
 /// Standalone ERC, as [`drc`].
 #[must_use]
 pub fn erc(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk) -> Vec<Finding> {
-    standalone(shapes, pins, pdk, Checks { drc: false, erc: true, lvs: false, pex: false })
+    standalone(shapes, pins, pdk, Checks { drc: false, erc: true, lvs: false, pex: false }, &ExtractOptions::default())
 }
 
-fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks) -> Vec<Finding> {
+fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks, opts: &ExtractOptions) -> Vec<Finding> {
     let engine_fail =
         |rule: String| vec![Finding { rule, layer: "-".into(), margin: 1, unit: "permille", x: 0, y: 0, warning: false }];
     let mut checker = match Checker::new(pdk, false) {
@@ -378,6 +439,7 @@ fn standalone(shapes: &[Shape], pins: &[LabeledPin], pdk: &Pdk, checks: Checks) 
         Err(e) => return engine_fail(format!("engine/load: {e}")),
     };
     defer_chip_level(&mut checker, shapes);
+    checker.set_extract(opts);
     let summary = match checker.run(shapes, pins, checks) {
         Ok(s) => s,
         Err(e) => return engine_fail(format!("engine/run: {e}")),
@@ -511,6 +573,98 @@ mod tests {
             // sky130 ir_drop needs intent this run does not give.
             assert!(s.coverage.skipped_rules.iter().any(|(_, why)| why.contains("NoDesignIntent")), "{:?}", s.coverage.skipped_rules);
         }
+    }
+
+    /// Ground C (fF) of `net` in `caps`.
+    fn ground(caps: &CapMatrix, net: &str) -> f64 {
+        caps.iter().find(|(n, o, _)| n == net && o.is_none()).unwrap_or_else(|| panic!("no ground row for {net}: {caps:?}")).2
+    }
+
+    fn pin(pdk: &Pdk, name: &str, x: i32, y: i32) -> LabeledPin {
+        LabeledPin { name: name.into(), layer: pdk.layer("met1").unwrap().0, x, y }
+    }
+
+    fn extract(shapes: &[Shape], pins: &[LabeledPin], opts: &ExtractOptions, pdk: &Pdk) -> Signoff {
+        signoff_extract(shapes, pins, &RefInput::default(), &Intent::default(), opts, pdk)
+    }
+
+    const UNMERGED: ExtractOptions = ExtractOptions { field_solve: Vec::new(), unmerged: true };
+
+    // PERF-16: two overlapping met1 rects extract as their union. Deck met1
+    // (pdks/decks/sky130.deck): 25.78 aF/µm², 40.57 aF/µm. Union 7.5 µm²,
+    // perimeter 26 µm → 1248.2 aF; drawn rects 8 µm², 29 µm → 1382.8 aF.
+    #[test]
+    fn partial_overlaps_extract_as_their_union() {
+        let pdk = sky130();
+        let shapes = [rect(&pdk, "met1", 0, 0, 10_000, 500), rect(&pdk, "met1", 9000, -250, 3000, 1000)];
+        let pins = [pin(&pdk, "a", 500, 250)];
+        let merged = ground(&signoff_checked(&shapes, &pins, &RefInput::default(), &Intent::default(), &pdk).caps, "a");
+        assert!((merged - 1.2482).abs() / 1.2482 <= 1e-3, "merged C(a) = {merged} fF, want 1.2482");
+        let unmerged = ground(&extract(&shapes, &pins, &UNMERGED, &pdk).caps, "a");
+        assert!((unmerged - 1.3828).abs() / 1.3828 <= 1e-3, "unmerged C(a) = {unmerged} fF, want 1.3828");
+    }
+
+    // A met1 ring drawn as four overlapping bars: 40 µm² drawn, 36 µm² true.
+    // Merged it keeps its hole (decomposed to rects) and drops at least the
+    // 4 µm² counted twice; fringe is not pinned (slab edges inside the ring).
+    #[test]
+    fn a_ring_loop_keeps_its_area() {
+        let pdk = sky130();
+        let shapes = [
+            rect(&pdk, "met1", 0, 0, 1000, 10_000),
+            rect(&pdk, "met1", 9000, 0, 1000, 10_000),
+            rect(&pdk, "met1", 0, 0, 10_000, 1000),
+            rect(&pdk, "met1", 0, 9000, 10_000, 1000),
+        ];
+        let pins = [pin(&pdk, "a", 500, 5000)];
+        let merged = ground(&extract(&shapes, &pins, &ExtractOptions::default(), &pdk).caps, "a");
+        let unmerged = ground(&extract(&shapes, &pins, &UNMERGED, &pdk).caps, "a");
+        assert!(unmerged - merged >= 4.0 * 25.78e-3, "merged {merged} fF, unmerged {unmerged} fF");
+    }
+
+    fn three_lines(pdk: &Pdk) -> ([Shape; 3], [LabeledPin; 3]) {
+        let line = |y| rect(pdk, "met1", 0, y, 10_000, 500);
+        ([line(0), line(1000), line(2000)], [pin(pdk, "a", 500, 250), pin(pdk, "b", 500, 1250), pin(pdk, "c", 500, 2250)])
+    }
+
+    #[test]
+    fn field_solve_changes_only_selected_nets() {
+        let pdk = sky130();
+        let (shapes, pins) = three_lines(&pdk);
+        let analytic = extract(&shapes, &pins, &ExtractOptions::default(), &pdk);
+        let field = extract(&shapes, &pins, &ExtractOptions { field_solve: vec!["a".into()], unmerged: false }, &pdk);
+        assert!(field.coverage.skipped_rules.iter().all(|(r, _)| r != "pex.field"), "{:?}", field.coverage.skipped_rules);
+        let (a0, a1) = (ground(&analytic.caps, "a"), ground(&field.caps, "a"));
+        assert!((a1 - a0).abs() / a0 > 1e-3, "field C(a) {a1} vs analytical {a0}");
+        let (c0, c1) = (ground(&analytic.caps, "c"), ground(&field.caps, "c"));
+        assert!((c1 - c0).abs() <= 1e-9, "C(c) moved: {c0} -> {c1}");
+    }
+
+    #[test]
+    fn a_refused_field_solve_falls_back_with_coverage() {
+        let pdk = sky130();
+        let (shapes, pins) = three_lines(&pdk);
+        let s = extract(&shapes, &pins, &ExtractOptions { field_solve: vec!["nosuchnet".into()], unmerged: false }, &pdk);
+        let rules: Vec<&str> = s.report.hard_violations.iter().map(|v| v.rule.as_str()).collect();
+        assert!(!rules.iter().any(|r| r.starts_with("engine/pex")), "{rules:?}");
+        let why = s.coverage.skipped_rules.iter().find(|(r, _)| r == "pex.field").map(|(_, w)| w.as_str());
+        assert!(why.is_some_and(|w| w.contains("no extracted net")), "{:?}", s.coverage.skipped_rules);
+        assert!(!s.caps.is_empty());
+    }
+
+    // The label-short re-run keeps one label per shorted net: a dropped label
+    // names no extracted net there, so it leaves the field solve rather than
+    // refusing it.
+    #[test]
+    fn a_label_short_drops_its_label_from_the_field_solve() {
+        let pdk = sky130();
+        let pins = [pin(&pdk, "A", 500, 500), pin(&pdk, "B", 1500, 500)];
+        let reference = RefInput { devices: vec![], ports: vec!["A".into(), "B".into()], external_ports: None };
+        let opts = ExtractOptions { field_solve: vec!["A".into(), "B".into()], unmerged: false };
+        let s = signoff_extract(&[rect(&pdk, "met1", 0, 0, 2000, 1000)], &pins, &reference, &Intent::default(), &opts, &pdk);
+        assert!(s.report.hard_violations.iter().any(|v| v.rule.starts_with("lvs/extract: label short")));
+        assert!(s.coverage.skipped_rules.iter().all(|(r, _)| r != "pex.field"), "{:?}", s.coverage.skipped_rules);
+        assert!(s.pex_field > Duration::ZERO, "the kept label was not field-solved");
     }
 
     // AV-25: a label short still extracts capacitance (on the label-free re-run).

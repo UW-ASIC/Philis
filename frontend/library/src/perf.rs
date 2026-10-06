@@ -28,6 +28,11 @@ pub struct Parasitics {
     /// Per device, a DC source in series with the gate, V (`V_gate −
     /// V_net`); missing or `0` = none. Sensitivity runs only.
     pub gate_offset_v: Vec<f64>,
+    /// Per device, `[AS, AD, PS, PD]` per SPICE instance: µm², µm², µm, µm (the library's `.option scale=1.0u`
+    /// scales them, measured: `ad=100` moves capbd 670×, `ad=1e-10` not at all); `None` = not drawn-derived.
+    pub junction: Vec<Option<[f64; 4]>>,
+    /// Per device, the drawn gate's poly + cut R, Ω, in series with the card's gate; `None`/0 = none.
+    pub gate_ohm: Vec<Option<f64>>,
 }
 
 /// `SA = SB = S` (µm) at which BSIM4's multi-finger average `(1/nf)·Σᵢ
@@ -182,7 +187,7 @@ pub fn score(specs: &[Spec], measured: &[Vec<Option<f64>>], scenarios: &[usize])
 ///
 /// # Errors
 /// A device the circuit cannot express (`flat_circuit_with`).
-fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, tb: &str, sc: &Scenario) -> Result<String, String> {
+pub(crate) fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, tb: &str, sc: &Scenario) -> Result<String, String> {
     let caps = &par.caps;
     let node = |name: &str| {
         netlist
@@ -203,7 +208,12 @@ fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, tb: &str, sc: &Sc
     lib.extend(sc.params.iter().map(|(k, v)| format!(".param {k}={v}\n")));
     // Branch resistors: a terminal with routed R gets its own node,
     // `<net>__<device>_<terminal>`, joined to the net through it.
-    let branch = |di: usize, t: &str| par.series.get(di).and_then(|v| v.iter().find(|(n, _)| n == t)).map(|&(_, r)| r).filter(|&r| r > 0.0);
+    // The drawn gate R (`gate_ohm`) is in series with the routed G branch: one resistor of their sum.
+    let branch = |di: usize, t: &str| {
+        let routed = par.series.get(di).and_then(|v| v.iter().find(|(n, _)| n == t)).map_or(0.0, |&(_, r)| f64::from(r));
+        let gate = if t == "G" { par.gate_ohm.get(di).copied().flatten().unwrap_or(0.0) } else { 0.0 };
+        Some(routed.max(0.0) + gate.max(0.0)).filter(|&r| r > 0.0)
+    };
     // A gate offset sits between the gate and its net (or branch-R) node.
     let offset = |di: usize| par.gate_offset_v.get(di).copied().filter(|&v| v != 0.0);
     let prev = |di: usize, t: &str, n: String| if branch(di, t).is_some() { format!("{n}__{di}_{t}") } else { n };
@@ -234,7 +244,8 @@ fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, tb: &str, sc: &Sc
                 .copied()
                 .flatten()
                 .and_then(|t| equivalent_sa_um(f64::from(t), sz.l_nm as f64 / 1e3, i64::from(sz.nf)))
-                .map_or(String::new(), |s| format!(" sa={:.4e} sb={:.4e}", s * 1e-6, s * 1e-6))
+                .map_or(String::new(), |s| format!(" sa={s:.4e} sb={s:.4e}"))
+                + &par.junction.get(di).copied().flatten().map_or(String::new(), |j| format!(" as={} ad={} ps={} pd={}", j[0], j[1], j[2], j[3]))
         },
         !par.extracted,
     )?;
@@ -777,7 +788,32 @@ mod tests {
         // SA = SB = S with (1/2)(1/(S+0.25) + 1/(S+0.75)) = 0.5.
         let s = equivalent_sa_um(1.0, 0.5, 2).unwrap();
         assert!(((1.0 / (s + 0.25) + 1.0 / (s + 0.75)) / 2.0 - 0.5).abs() < 1e-9, "{s}");
-        assert!(d.contains(" sa="), "{d}");
+        assert!(d.contains(&format!(" sa={s:.4e}")), "{d}");
+    }
+
+    #[test]
+    fn junction_params_reach_the_card() {
+        use pnr_core::{Device, DeviceKind, Net, NetId};
+        let nl = Netlist {
+            devices: vec![Device {
+                name: "M1".into(),
+                kind: DeviceKind::Nmos, model: "sky130_fd_pr__nfet_01v8".into(),
+                terminals: vec![("D".into(), NetId(0)), ("G".into(), NetId(1)), ("S".into(), NetId(2)), ("B".into(), NetId(2))],
+                params: vec![("w".into(), 1000), ("l".into(), 500), ("nf".into(), 2)],
+            }],
+            nets: ["out", "in", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
+        };
+        let mut par = Parasitics { junction: vec![Some([2.0, 1.5, 6.0, 5.0])], gate_ohm: vec![Some(305.8)], ..Parasitics::default() };
+        let cfg = PerfConfig { sim: OpConfig::default(), testbenches: vec![String::new()], specs: vec![], scenarios: Vec::new() };
+        let d = deck(&nl, &par, &cfg, "", &cfg.scenarios()[0]).unwrap();
+        assert!(d.contains(" as=2 ad=1.5 ps=6 pd=5"), "{d}");
+        assert!(d.contains("Rpex_0_G in__0_G in 305.8000"), "{d}");
+        assert!(d.contains("XM1 out in__0_G"), "{d}");
+        par.series = vec![vec![("G".into(), 100.0)]];
+        let d = deck(&nl, &par, &cfg, "", &cfg.scenarios()[0]).unwrap();
+        assert!(d.contains("Rpex_0_G in__0_G in 405.8000"), "{d}");
+        assert_eq!(d.matches("Rpex_0_G").count(), 1, "{d}");
     }
 
     #[test]

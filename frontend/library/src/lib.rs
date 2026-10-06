@@ -327,6 +327,9 @@ pub struct Solution {
     pub blocks: Vec<(String, metadata::MetadataReport)>,
     /// The LVS side of the placed blocks ([`hier::BlockRef`]).
     pub(crate) block_ref: hier::BlockRef,
+    /// Nets to field-solve (PERF-16, [`field_nets`]); [`signoff`] does not yet
+    /// (deferred, owner decision: docs/plans/cards/m2-perf-5.md).
+    pub field_nets: Vec<String>,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -1278,6 +1281,14 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
             _ => None,
         })
         .collect();
+    if flow.perf.is_some() && best.perf.is_some() {
+        let par = flow.parasitics(&best);
+        let fets: Vec<usize> = (0..flow.netlist.devices.len()).filter(|&d| flow.netlist.devices[d].mos_size().is_some()).collect();
+        let k = fets.iter().filter(|&&d| par.junction[d].is_none()).count();
+        if k > 0 {
+            eprintln!("[perf] junction geometry: not drawn-derived for {k} of {} FETs", fets.len());
+        }
+    }
     metadata.coverage = best.coverage;
     metadata.add_routing(&[Box::new(flow.common_nodes(&best.layout)), Box::new(flow.environment(&best.layout, &best.rings))], &best.routes);
     if let (Some(cfg), Some(result)) = (flow.perf, &best.perf) {
@@ -1324,6 +1335,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     // Inserted devices (antenna diodes) join the schematic LVS reads.
     let mut netlist = flow.netlist.clone();
     netlist.devices.extend(best.extra);
+    let field_nets = field_nets(&flow);
     let mut sol = Solution {
         layout: best.layout,
         routes: best.routes,
@@ -1345,16 +1357,70 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
         caps: best.caps,
         blocks: Vec::new(),
         block_ref: hier::BlockRef::default(),
+        field_nets,
     };
     // FLOW-10: the certificate is of what ships. Budgets are not re-scored:
     // fill moves no cell and adds no route.
     if post_fill {
-        let s = drawn_signoff(&sol, pdk);
+        let s = drawn_signoff(&sol, pdk, &verify::ExtractOptions::default());
         sol.stats.drc_hard = s.report.hard_violations.len();
         sol.stats.warnings = s.warnings.len() as u32;
         sol.caps = s.caps;
     }
     sol
+}
+
+/// Sensitivity-ranked nets [`field_nets`] adds on top of the
+/// structural ones. ponytail: a fixed policy count.
+const FIELD_RANKED: usize = 8;
+
+/// The nets to field-solve (PERF-16): every non-rail net of a
+/// `Differential` routing row (the compounds' mirrored net pairs) and of a
+/// `CommonNode` row, then the [`FIELD_RANKED`] nets of largest
+/// Σ_b |d_b|/scale_b over the `GroundC` rows of every sensitivity table
+/// (scale_b = |bound|, 1 for a zero bound, as [`perf::miss`]). Until PERF-11
+/// (M4) refines the ranking, these rows are the ranking.
+fn field_nets(flow: &Flow) -> Vec<String> {
+    let rail = |n: pnr_core::NetId| {
+        use analog::metadata::NetClass::{Ground, Substrate, Supply};
+        flow.problem.net_classes.get(n.0 as usize).is_some_and(|c| matches!(c.class, Supply | Ground | Substrate))
+    };
+    let intent = &flow.problem.intent;
+    let mut nets: Vec<pnr_core::NetId> = intent
+        .compounds
+        .iter()
+        .flat_map(|c| c.net_pairs.iter().filter(|(x, y)| x != y).flat_map(|&(x, y)| [x, y]))
+        .chain(intent.common_nodes.iter().map(|c| c.net))
+        .filter(|&n| !rail(n))
+        .collect();
+    if let Some(p) = flow.perf {
+        let mut score: Vec<(pnr_core::NetId, f64)> = Vec::new();
+        for row in flow.perf_plan.tables.iter().flat_map(|t| &t.rows) {
+            let perf::Param::GroundC { net } = row.param else { continue };
+            let s: f64 = p
+                .specs
+                .iter()
+                .zip(&row.d)
+                .filter_map(|(spec, d)| d.map(|d| (spec, d.abs())))
+                .flat_map(|(spec, d)| [spec.min, spec.max].into_iter().flatten().map(move |b| d / if b == 0.0 { 1.0 } else { b.abs() }))
+                .sum();
+            match score.iter_mut().find(|(n, _)| *n == net) {
+                Some(e) => e.1 += s,
+                None => score.push((net, s)),
+            }
+        }
+        score.retain(|&(n, s)| s > 0.0 && !rail(n) && !nets.contains(&n));
+        score.sort_by(|a, b| b.1.total_cmp(&a.1));
+        nets.extend(score.iter().take(FIELD_RANKED).map(|&(n, _)| n));
+    }
+    let mut names: Vec<String> = Vec::new();
+    for n in nets {
+        let name = &flow.net_names[n.0 as usize];
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
 }
 
 /// Everything an epoch reads that is fixed for the run.
@@ -1903,13 +1969,7 @@ impl Flow<'_> {
                 route_report.budget_violations.extend(budget);
             }
         }
-        let netlist = if extra.is_empty() {
-            std::borrow::Cow::Borrowed(self.netlist)
-        } else {
-            let mut n = self.netlist.clone();
-            n.devices.extend(extra.iter().cloned());
-            std::borrow::Cow::Owned(n)
-        };
+        let netlist = with_extra(self.netlist, &extra);
 
         // Measure: signoff over the drawn geometry, budget residuals over the result.
         let mut shapes = geometry::collect(&macros, &layout, &routes);
@@ -2000,6 +2060,54 @@ fn common_node_ohm(left: &[(u32, u32, f32)], a: DeviceId, b: DeviceId, i_ua: Opt
     }
 }
 
+/// `netlist` with dr's inserted devices appended (borrowed when there are none).
+fn with_extra<'a>(netlist: &'a pnr_core::Netlist, extra: &[pnr_core::Device]) -> std::borrow::Cow<'a, pnr_core::Netlist> {
+    if extra.is_empty() {
+        return std::borrow::Cow::Borrowed(netlist);
+    }
+    let mut n = netlist.clone();
+    n.devices.extend(extra.iter().cloned());
+    std::borrow::Cow::Owned(n)
+}
+
+/// Per device `[AS, AD, PS, PD]` per SPICE instance from the placed cells' `Figures.sd` (CELL-19):
+/// owner `o` of cell `c` is `devices_of[c][o]`; S/D entries summed per device, ÷ the device's `m`
+/// (the card has `m` copies), nm² → µm² ÷ 1e6, nm → µm ÷ 1e3. `None` for a device no figure names.
+fn junctions(placed: &[Macro], devices_of: &[Vec<DeviceId>], netlist: &pnr_core::Netlist) -> Vec<Option<[f64; 4]>> {
+    let mut out: Vec<Option<[f64; 4]>> = vec![None; netlist.devices.len()];
+    for (m, members) in placed.iter().zip(devices_of) {
+        for &(o, t, area, perim) in &m.figures.sd {
+            let Some(&d) = members.get(usize::from(o)) else { continue };
+            let Some(slot) = out.get_mut(usize::from(d.0)) else { continue };
+            let j = slot.get_or_insert([0.0; 4]);
+            let k = usize::from(t == "D");
+            j[k] += area as f64;
+            j[2 + k] += perim as f64;
+        }
+    }
+    for (j, dev) in out.iter_mut().zip(&netlist.devices) {
+        if let Some(j) = j {
+            let m = f64::from(dev.mos_size().map_or(1, |s| s.m).max(1));
+            *j = [j[0] / m / 1e6, j[1] / m / 1e6, j[2] / m / 1e3, j[3] / m / 1e3];
+        }
+    }
+    out
+}
+
+/// Per device the drawn gate's R, Ω, from the placed cells' `Figures.gate_ohm` (owner as in
+/// [`junctions`]); the owner's whole gate over all copies, so not ÷ m. `None` where none is drawn.
+fn gate_ohms(placed: &[Macro], devices_of: &[Vec<DeviceId>], n: usize) -> Vec<Option<f64>> {
+    let mut out = vec![None; n];
+    for (m, members) in placed.iter().zip(devices_of) {
+        for &(o, r) in &m.figures.gate_ohm {
+            if let Some(slot) = members.get(usize::from(o)).and_then(|d| out.get_mut(usize::from(d.0))) {
+                *slot = Some(f64::from(r));
+            }
+        }
+    }
+    out
+}
+
 impl Flow<'_> {
     /// The member device and terminal a placed cell pin names ([`pin_member`]),
     /// only when that device has the terminal: a cell's non-terminal pins
@@ -2013,8 +2121,10 @@ impl Flow<'_> {
     /// What the epoch's layout adds to the schematic: its extracted C, each
     /// device terminal's routed branch R (parallel pins of one terminal
     /// combine), and each device's mean LOD stress over its drawn fingers.
+    /// Every per-device vector spans `netlist ∪ epoch.extra` (inserted devices get `None`/empty), and
+    /// AS/AD/PS/PD and the gate R come from the placed cells' `Figures` (CELL-19).
     fn parasitics(&self, epoch: &Epoch) -> perf::Parasitics {
-        let n = self.netlist.devices.len();
+        let n = self.netlist.devices.len() + epoch.extra.len();
         let placed = gr::place_macros(&cellgen::realize(&self.cells.variants, &epoch.layout.variant), &epoch.layout);
         // Per net: (device, terminal, pin rect) of every placed pin.
         let mut pins: Vec<Vec<(usize, String, pnr_core::Rect)>> = vec![Vec::new(); self.netlist.nets.len()];
@@ -2043,13 +2153,17 @@ impl Flow<'_> {
             }
         }
         let series = conductance.into_iter().map(|v| v.into_iter().map(|(t, g)| (t, 1.0 / g)).collect()).collect();
-        let lod_inv_um = (0..n)
+        let lod_inv_um = (0..self.netlist.devices.len())
             .map(|d| {
                 let (s, k) = epoch.layout.units.of_device(&epoch.layout, pnr_core::DeviceId(d as u16)).filter(|u| u.lod.is_finite()).fold((0.0f32, 0u32), |(s, k), u| (s + u.lod, k + 1));
                 (k > 0).then(|| s / k as f32)
             })
+            .chain(std::iter::repeat(None).take(epoch.extra.len()))
             .collect();
-        perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true, gate_offset_v: Vec::new() }
+        let mut junction = junctions(&placed, &self.cells.devices_of, self.netlist);
+        junction.resize(n, None);
+        let gate_ohm = gate_ohms(&placed, &self.cells.devices_of, n);
+        perf::Parasitics { caps: epoch.caps.clone(), series, lod_inv_um, extracted: true, gate_offset_v: Vec::new(), junction, gate_ohm }
     }
 
     /// RTE-20: each capacitor `Unitization` of three or more members (EXT-19's
@@ -2139,7 +2253,7 @@ impl Flow<'_> {
             unknown()
         } else {
             stats.sims += (self.perf_active.len() * p.testbenches.len()) as u32;
-            perf::evaluate(self.netlist, &self.parasitics(epoch), p, self.perf_active).unwrap_or_else(|e| {
+            perf::evaluate(&with_extra(self.netlist, &epoch.extra), &self.parasitics(epoch), p, self.perf_active).unwrap_or_else(|e| {
                 eprintln!("[perf] {e}");
                 stats.sim_failures += 1;
                 unknown()
@@ -2741,9 +2855,21 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
 
 /// Full DRC/ERC/LVS/PEX signoff of a solution against its own schematic:
 /// errors in `report`, deck warnings and coverage apart ([`verify::Signoff`]).
+/// PEX is analytical over merged metal. ponytail: [`Solution::field_nets`]
+/// are not field-solved here — measured (`bench --pex-cal`, PERF-16) at
+/// 10³–10⁴× the analytical time and 3–10× below magic's ground C; pass
+/// them to [`signoff_with`] once the solve reads near magic. Step 3
+/// deferred pending an owner decision (docs/plans/cards/m2-perf-5.md).
 #[must_use]
 pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
-    let mut s = drawn_signoff(sol, pdk);
+    signoff_with(sol, pdk, &verify::ExtractOptions::default())
+}
+
+/// [`signoff`] with explicit extraction options; `field_solve` is cut to the
+/// nets that carry a label (an unlabelled name would refuse the whole solve).
+#[must_use]
+pub fn signoff_with(sol: &Solution, pdk: &Pdk, opts: &verify::ExtractOptions) -> verify::Signoff {
+    let mut s = drawn_signoff(sol, pdk, opts);
     if let Some(op) = &sol.op {
         let probe = sol.metadata.bias.as_ref().is_some_and(|b| b.probe);
         s.report.hard_violations.extend(reliability::voltage_findings(&sol.netlist, op, &pdk.fet_voltage_limits(), &sol.pairs, probe).0);
@@ -2753,9 +2879,11 @@ pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
 
 /// DRC/ERC/LVS over the drawn solution plus undrawable devices — what an
 /// epoch's `RunStats::drc_hard` counts (no operating-point rows).
-fn drawn_signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
+fn drawn_signoff(sol: &Solution, pdk: &Pdk, opts: &verify::ExtractOptions) -> verify::Signoff {
     let (shapes, pins, reference) = signoff_inputs(sol, pdk);
-    let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
+    let field_solve = opts.field_solve.iter().filter(|n| pins.iter().any(|p| &p.name == *n)).cloned().collect();
+    let opts = verify::ExtractOptions { field_solve, ..opts.clone() };
+    let mut s = verify::signoff_extract(&shapes, &pins, &reference, &sol.intent, &opts, pdk);
     s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.devices_of, &sol.netlist));
     s
 }
@@ -3557,6 +3685,67 @@ mod size_tests {
         }
         // ota ×3: 5 each; pair 2, quad 4, chain4 4, rc_filter 2, dac4 9.
         assert_eq!(checked, 36, "every fixture MOS checked");
+    }
+
+    /// PERF-26: AS/AD/PS/PD per card are the owner's `Figures.sd` totals ÷ the card's `m`, µm(²);
+    /// every ota FET is drawn-derived, and XM5 (`m=4`) gets a quarter of its owner's total.
+    #[test]
+    fn junctions_come_from_the_drawn_figures() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+        let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
+        let mut netlist = crate::parse::spice(&spice).expect("parses");
+        crate::deck_models(&mut netlist, &pdk);
+        let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
+        let fold = crate::cellgen::folds(&netlist, &pdk, &[], &[]);
+        let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
+        let placed: Vec<pnr_core::Macro> = cells.variants.iter().map(|v| v.alternatives[0].clone()).collect();
+        let j = crate::junctions(&placed, &cells.devices_of, &netlist);
+        let mut quartered = false;
+        for (i, dev) in netlist.devices.iter().enumerate() {
+            let Some(s) = dev.mos_size() else { continue };
+            let id = pnr_core::DeviceId(i as u16);
+            let cell = cells.devices_of.iter().position(|m| m.contains(&id)).expect("device has a cell");
+            let owner = cells.devices_of[cell].iter().position(|&d| d == id).unwrap();
+            let total = |t: &str| placed[cell].figures.sd.iter().filter(|e| usize::from(e.0) == owner && e.1 == t).map(|e| e.2 as f64).sum::<f64>();
+            let jd = j[i].unwrap_or_else(|| panic!("{}: no junction", dev.name));
+            let m = f64::from(s.m);
+            assert!((jd[1] * m * 1e6 - total("D")).abs() < 1e-6 * total("D").max(1.0), "{} AD {jd:?} vs {}", dev.name, total("D"));
+            assert!((jd[0] * m * 1e6 - total("S")).abs() < 1e-6 * total("S").max(1.0), "{} AS {jd:?} vs {}", dev.name, total("S"));
+            assert!(total("D") > 0.0 && total("S") > 0.0, "{}: no drawn S/D", dev.name);
+            quartered |= s.m == 4 && (jd[1] - total("D") / 4.0 / 1e6).abs() < 1e-9;
+        }
+        assert!(quartered, "XM5 (m=4) carries a quarter of its owner's AD");
+    }
+
+    /// PERF-26: dr's antenna diode reaches the post-layout deck with the deck's diode model.
+    #[test]
+    fn an_inserted_diode_is_simulated() {
+        use pnr_core::{Device, DeviceKind, Net, NetId};
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let pdk = verify::Pdk::from_json(&std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap()).unwrap();
+        let nl = pnr_core::Netlist {
+            devices: vec![Device {
+                name: "M1".into(),
+                kind: DeviceKind::Nmos, model: "sky130_fd_pr__nfet_01v8".into(),
+                terminals: vec![("D".into(), NetId(0)), ("G".into(), NetId(1)), ("S".into(), NetId(2)), ("B".into(), NetId(2))],
+                params: vec![("w".into(), 1000), ("l".into(), 500)],
+            }],
+            nets: ["out", "in", "vss"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
+        };
+        let model = crate::model_table(&pdk).into_iter().find(|(_, k)| *k == DeviceKind::Diode).map(|(m, _)| m).unwrap();
+        let extra = [Device {
+            name: "XDANT1".into(),
+            kind: DeviceKind::Diode, model,
+            terminals: vec![("P".into(), NetId(2)), ("N".into(), NetId(1))],
+            params: vec![("w".into(), 450), ("l".into(), 450)],
+        }];
+        let cfg = crate::perf::PerfConfig { sim: crate::oppoint::OpConfig::default(), testbenches: vec![String::new()], specs: vec![], scenarios: Vec::new() };
+        let d = crate::perf::deck(&crate::with_extra(&nl, &extra), &crate::perf::Parasitics::default(), &cfg, "", &cfg.scenarios()[0]).unwrap();
+        // `vss` is the deck's ground node `0`.
+        assert!(d.contains("DXDANT1 0 in sky130_fd_pr__diode_pw2nd_05v5"), "{d}");
+        assert!(matches!(crate::with_extra(&nl, &[]), std::borrow::Cow::Borrowed(_)));
     }
 }
 

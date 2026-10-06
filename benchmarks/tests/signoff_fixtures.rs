@@ -119,6 +119,11 @@ fn check(name: &str, max_drc: usize, expected_erc: &[&str], lvs_must_match: bool
     // Errors only: a deck warning is `signoff.warnings`, as in the bench's DRC
     // column and the epoch's |V| (PERF-01).
     let raw: Vec<verify::Finding> = verify::drc(&shapes, &[], &pdk).into_iter().filter(|f| !f.warning).collect();
+    // merging_does_not_add_drc_findings (PERF-16): checks run on merged metal;
+    // the union can only remove findings one-polygon-per-shape loading produced.
+    let unmerged = verify::drc_with(&shapes, &[], &pdk, &verify::ExtractOptions { unmerged: true, ..Default::default() });
+    let unmerged_len = unmerged.iter().filter(|f| !f.warning).count();
+    assert!(raw.len() <= unmerged_len, "{name}: merging added DRC findings ({} merged vs {unmerged_len} unmerged)", raw.len());
 
     let mut by_origin: BTreeMap<&str, usize> = BTreeMap::new();
     let mut by_rule: BTreeMap<String, usize> = BTreeMap::new();
