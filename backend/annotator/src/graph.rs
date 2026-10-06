@@ -309,3 +309,160 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::tests::{fet, nets};
+    use pnr_core::ids::NetId;
+    use pnr_core::netlist::{DeviceKind, Netlist};
+
+    fn req(a: u16, b: u16, ty: ReqType) -> Req {
+        Req { a: DeviceId(a), b: DeviceId(b), ty, source: ConstraintId(0) }
+    }
+
+    fn classes(cs: &[NetClass]) -> Vec<NetClassification> {
+        cs.iter().enumerate().map(|(i, &class)| NetClassification { net: NetId(i as u16), class, c_budget_af: None, max_coupling_af: None }).collect()
+    }
+
+    /// Nets 0=a 1=b 2=vss. M0, M1: G on a, D on b. M2: G on b, D on a.
+    fn three() -> (Netlist, BipartiteHypergraph, Vec<NetClassification>) {
+        let n = DeviceKind::Nmos;
+        let nl = Netlist { devices: vec![fet("M0", n, 0, 1, 2, 2, 1_000, 500), fet("M1", n, 0, 1, 2, 2, 1_000, 500), fet("M2", n, 1, 0, 2, 2, 1_000, 500)], nets: nets(&["a", "b", "vss"]), ..Default::default() };
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        (nl, hg, classes(&[NetClass::Signal, NetClass::Signal, NetClass::Ground]))
+    }
+
+    fn compound(pairs: &[(u16, u16)], selfs: &[u16]) -> Compound {
+        Compound {
+            id: ConstraintId(0),
+            axis: pnr_core::ids::AxisId(0),
+            dir: analog::intent::AxisDir::V,
+            kind: analog::intent::SymKind::Mirror,
+            pairs: pairs.iter().map(|&(a, b)| (DeviceId(a), DeviceId(b))).collect(),
+            selfs: selfs.iter().map(|&s| DeviceId(s)).collect(),
+            net_pairs: Vec::new(),
+            self_nets: Vec::new(),
+            set_pairs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn uf_find_halves_paths() {
+        let mut p = vec![0, 0, 1, 2];
+        assert_eq!(uf_find(&mut p, 3), 0);
+        assert_eq!(uf_find(&mut p, 0), 0);
+        // Every node on the walked path now points closer to the root.
+        assert!(p[3] <= 1, "{p:?}");
+        assert_eq!(unordered(DeviceId(5), DeviceId(2)), (2, 5));
+        assert_eq!(unordered(DeviceId(2), DeviceId(5)), (2, 5));
+    }
+
+    #[test]
+    fn empty_inputs_give_no_requirements() {
+        let nl = Netlist::default();
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let r = requirements(&[], &[], &[], &[], &[], &[], &[], &[], &hg, &[], &[], &Policy::default());
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn edges_are_canonically_oriented_and_self_edges_dropped() {
+        let (_, hg, cls) = three();
+        let canon = [2, 1, 0];
+        // Compound (0, 1): MatchSym and one Sym edge, both read (1, 0) by canon.
+        let r = requirements(&[], &[compound(&[(0, 1)], &[])], &[vec![DeviceId(0), DeviceId(0)], vec![]], &[], &[], &[(DeviceId(1), DeviceId(0))], &[], &[], &hg, &cls, &canon, &Policy { pn_max_degree: 0, ..Policy::default() });
+        assert_eq!(r, [req(1, 0, ReqType::MatchSym), req(1, 0, ReqType::Sym)]);
+    }
+
+    #[test]
+    fn stars_and_sources() {
+        let (_, hg, cls) = three();
+        let canon = [0, 1, 2];
+        let g = vec![DeviceId(2), DeviceId(0), DeviceId(1)];
+        let pol = Policy { pn_max_degree: 0, ..Policy::default() };
+        let r = requirements(&[], &[], &[vec![], g.clone()], &[g.clone()], &[(7, g.clone())], &[(DeviceId(0), DeviceId(1))], &[g], &[], &hg, &cls, &canon, &pol);
+        let of = |ty: ReqType| r.iter().filter(|x| x.ty == ty).map(|x| (x.a.0, x.b.0, x.source.0)).collect::<Vec<_>>();
+        // shared_bias group 1 and passive group 0 (each from 0), then the hier couple 0.
+        assert_eq!(of(ReqType::MatchBlock), [(0, 2, 1), (1, 2, 1), (0, 2, 0), (1, 2, 0), (0, 1, 0)]);
+        // user group index 0 (not the entry index 7), then array 0.
+        assert_eq!(of(ReqType::ProxBlock), [(0, 2, 0), (1, 2, 0), (0, 2, 0), (1, 2, 0)]);
+    }
+
+    #[test]
+    fn proxnet_skips_rails_and_wide_nets_and_splits_instances() {
+        let (_, hg, cls) = three();
+        let canon = [2, 1, 0];
+        let pn = |r: &[Req]| r.iter().filter(|x| x.ty == ReqType::ProxNet).map(|x| (x.a.0, x.b.0, x.source.0)).collect::<Vec<_>>();
+        let all = requirements(&[], &[], &[], &[], &[], &[], &[], &[], &hg, &cls, &canon, &Policy::default());
+        // A star from M2 (lowest canon) on each Signal net; nothing on vss.
+        assert_eq!(pn(&all), [(2, 1, 0), (2, 0, 0), (2, 1, 1), (2, 0, 1)]);
+        // Degree 3 over a cap of 2: no star.
+        assert!(pn(&requirements(&[], &[], &[], &[], &[], &[], &[], &[], &hg, &cls, &canon, &Policy { pn_max_degree: 2, ..Policy::default() })).is_empty());
+        // M1 alone in instance 1: no edge reaches it.
+        let inst = [Some(0), Some(1), Some(0)];
+        assert_eq!(pn(&requirements(&[], &[], &[], &[], &[], &[], &[], &inst, &hg, &cls, &canon, &Policy::default())), [(2, 0, 0), (2, 0, 1)]);
+        // A Clock net is skipped like a rail.
+        let clk = classes(&[NetClass::Clock, NetClass::Signal, NetClass::Ground]);
+        assert_eq!(pn(&requirements(&[], &[], &[], &[], &[], &[], &[], &[], &hg, &clk, &canon, &Policy::default())), [(2, 1, 1), (2, 0, 1)]);
+    }
+
+    #[test]
+    fn sym_pair_suppresses_duplicate_match_block() {
+        let (_, hg, cls) = three();
+        let r = requirements(&[], &[compound(&[(0, 1)], &[2])], &[], &[], &[], &[(DeviceId(1), DeviceId(0))], &[], &[], &hg, &cls, &[0, 1, 2], &Policy { pn_max_degree: 0, ..Policy::default() });
+        assert!(r.iter().all(|x| x.ty != ReqType::MatchBlock), "{r:?}");
+        // Sym is a path over the members in canon order: 0-1, 1-2.
+        let sym: Vec<_> = r.iter().filter(|x| x.ty == ReqType::Sym).map(|x| (x.a.0, x.b.0)).collect();
+        assert_eq!(sym, [(0, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn hsmpg_empty_is_a_lone_root() {
+        let t = hsmpg(0, &[], &[]);
+        assert_eq!(t.len(), 1);
+        assert!(t[0].kind == GroupKind::Root && t[0].devices.is_empty() && t[0].children.is_empty());
+        assert_eq!(render(&t, &[]), "Root{}");
+        assert_eq!(render(&[], &[]), "");
+    }
+
+    #[test]
+    fn hsmpg_contracts_in_importance_order() {
+        let canon = [0, 1, 2, 3];
+        let names = ["a", "b", "c", "d"];
+        // MatchSym first: a later ProxNet on the same pair adds no node.
+        let t = hsmpg(4, &[req(0, 1, ReqType::ProxNet), req(0, 1, ReqType::MatchSym)], &canon);
+        assert_eq!(render(&t, &names), "Root{Matching{a,b},c,d}");
+        // A chain of MatchBlocks is one class; ProxBlock then joins d to it; Sym groups nothing new.
+        let t = hsmpg(4, &[req(0, 1, ReqType::MatchBlock), req(1, 2, ReqType::MatchBlock), req(2, 3, ReqType::ProxBlock), req(0, 3, ReqType::Sym)], &canon);
+        assert_eq!(render(&t, &names), "Root{Proximity{Matching{a,b,c},d}}");
+        assert_eq!(t.len(), 3);
+    }
+
+    #[test]
+    fn hsmpg_tree_invariants() {
+        let canon = [5, 3, 9, 1, 7, 2];
+        let reqs = [req(0, 1, ReqType::MatchSym), req(2, 3, ReqType::MatchBlock), req(1, 2, ReqType::Sym), req(4, 5, ReqType::ProxNet), req(0, 4, ReqType::ProxNet)];
+        let t = hsmpg(6, &reqs, &canon);
+        assert_eq!(t.last().unwrap().kind, GroupKind::Root);
+        let mut seen = [0u8; 6];
+        let mut parents = vec![0u8; t.len()];
+        for (i, n) in t.iter().enumerate() {
+            n.devices.iter().for_each(|d| seen[d.0 as usize] += 1);
+            for &c in &n.children {
+                assert!((c as usize) < i, "child {c} after parent {i}");
+                parents[c as usize] += 1;
+            }
+            if n.kind != GroupKind::Root {
+                assert!(n.devices.len() + n.children.len() >= 2, "{n:?}");
+            }
+        }
+        assert_eq!(seen, [1; 6], "every device in exactly one node");
+        assert!(parents[..t.len() - 1].iter().all(|&p| p == 1) && parents[t.len() - 1] == 0);
+        // Metamorphic: the input order of the requirements does not matter.
+        let mut rev = reqs;
+        rev.reverse();
+        let names = ["a", "b", "c", "d", "e", "f"];
+        assert_eq!(render(&hsmpg(6, &rev, &canon), &names), render(&t, &names));
+    }
+}

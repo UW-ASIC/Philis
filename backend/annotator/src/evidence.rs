@@ -263,3 +263,103 @@ mod tests {
         assert_eq!(role("M0"), DeviceRole::CurrentSource);
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::tests::{fet, nets};
+    use pnr_core::netlist::Device;
+
+    fn op(id_ua: f64, gm_us: f64, headroom_mv: f64) -> DeviceOp {
+        DeviceOp { id_ua, headroom_mv, gm_us, power_uw: 0.0, vgs_mv: None, vbs_mv: None, vth_mv: None, gmb_us: None, gds_us: None }
+    }
+
+    #[test]
+    fn region_boundaries() {
+        // Exactly 1e-3 of the largest current is not Off.
+        assert_eq!(region(&op(0.1, 1.0, 100.0), 100.0), Region::Saturation);
+        // gm/|Id| exactly 20 /V is Subthreshold; the sign of Id does not matter.
+        assert_eq!(region(&op(-10.0, 200.0, 100.0), 100.0), Region::Subthreshold);
+        // Zero headroom is still Saturation.
+        assert_eq!(region(&op(10.0, 50.0, 0.0), 100.0), Region::Saturation);
+        // Known V_GS ≥ V_TH overrides a large gm/Id.
+        let strong = DeviceOp { vgs_mv: Some(-500.0), vth_mv: Some(-400.0), ..op(10.0, 900.0, 100.0) };
+        assert_eq!(region(&strong, 100.0), Region::Saturation);
+        // Only one of V_GS/V_TH known: the gm/Id rule decides.
+        let half = DeviceOp { vgs_mv: Some(100.0), ..op(10.0, 50.0, 100.0) };
+        assert_eq!(region(&half, 100.0), Region::Saturation);
+    }
+
+    /// A device with no current is Off even when every FET is idle.
+    #[test]
+    fn idle_circuit_is_off() {
+        assert_eq!(region(&op(0.0, 0.0, 100.0), 0.0), Region::Off);
+        assert_eq!(region(&op(0.0, 5.0, -10.0), 0.0), Region::Off);
+    }
+
+    fn cls(cs: &[NetClass]) -> Vec<NetClassification> {
+        cs.iter().enumerate().map(|(i, &class)| NetClassification { net: NetId(i as u16), class, c_budget_af: None, max_coupling_af: None }).collect()
+    }
+
+    /// Nets 0=sig 1=bias 2=vss 3=x 4=clk. M0 amp, M1 current source, M2 cascode, M3 diode,
+    /// M4 triode on a signal gate (load leaf), M5 clocked switch, M6 shared-bias member, R0, Q0.
+    fn mixed() -> (Netlist, Vec<NetClassification>) {
+        use DeviceKind::Nmos as N;
+        let two = |name: &str, kind: DeviceKind, ts: &[(&str, u16)]| Device { name: name.into(), kind, model: String::new(), terminals: ts.iter().map(|&(t, n)| (t.into(), NetId(n))).collect(), params: vec![] };
+        let nl = Netlist {
+            devices: vec![
+                fet("M0", N, 0, 3, 2, 2, 1_000, 500),
+                fet("M1", N, 1, 3, 2, 2, 1_000, 500),
+                fet("M2", N, 1, 0, 3, 2, 1_000, 500),
+                fet("M3", N, 3, 3, 2, 2, 1_000, 500),
+                fet("M4", N, 0, 3, 2, 2, 1_000, 500),
+                fet("M5", N, 4, 3, 2, 2, 1_000, 500),
+                fet("M6", N, 0, 3, 2, 2, 1_000, 500),
+                two("R0", DeviceKind::Resistor, &[("P", 3), ("N", 2)]),
+                two("Q0", DeviceKind::Npn, &[("C", 3), ("B", 0), ("E", 2)]),
+            ],
+            nets: nets(&["sig", "bias", "vss", "x", "clk"]),
+            ..Default::default()
+        };
+        (nl, cls(&[NetClass::Signal, NetClass::Bias, NetClass::Ground, NetClass::Signal, NetClass::Clock]))
+    }
+
+    #[test]
+    fn roles_with_op() {
+        let (nl, c) = mixed();
+        let sat = op(10.0, 50.0, 100.0);
+        let tri = op(10.0, 50.0, -20.0);
+        let dev = [sat, sat, sat, sat, tri, tri, sat].into_iter().map(Some).chain([None, None]).collect();
+        let o = OpFacts { dev, net_mv: vec![] };
+        let mut load = vec![false; 9];
+        load[4] = true;
+        let f = device_facts(&nl, Some(&o), &c, &[vec![DeviceId(6)]], &load);
+        use DeviceRole as R;
+        let roles: Vec<DeviceRole> = f.iter().map(|x| x.role).collect();
+        assert_eq!(roles, [R::Amplifier, R::CurrentSource, R::Cascode, R::Diode, R::Load, R::Switch, R::CurrentSource, R::Passive, R::Unknown]);
+        assert_eq!((f[7].region, f[8].region, f[4].region), (Region::Unknown, Region::Unknown, Region::Triode));
+    }
+
+    #[test]
+    fn roles_without_op() {
+        let (nl, c) = mixed();
+        let mut load = vec![false; 9];
+        load[0] = true;
+        let f = device_facts(&nl, None, &c, &[vec![DeviceId(6)]], &load);
+        use DeviceRole as R;
+        let roles: Vec<DeviceRole> = f.iter().map(|x| x.role).collect();
+        assert_eq!(roles, [R::Load, R::Unknown, R::Unknown, R::Diode, R::Unknown, R::Unknown, R::Unknown, R::Passive, R::Unknown]);
+        assert!(f.iter().all(|x| x.region == Region::Unknown));
+        assert!(device_facts(&Netlist::default(), None, &[], &[], &[]).is_empty());
+    }
+
+    /// `max_id` comes from FETs only: a large BJT current does not push FETs Off.
+    #[test]
+    fn max_current_ignores_non_fets() {
+        let (nl, c) = mixed();
+        let mut dev: Vec<Option<DeviceOp>> = vec![Some(op(10.0, 50.0, 100.0)); 9];
+        dev[8] = Some(op(1e9, 1.0, 100.0));
+        let f = device_facts(&nl, Some(&OpFacts { dev, net_mv: vec![] }), &c, &[], &[false; 9]);
+        assert_eq!(f[0].region, Region::Saturation);
+    }
+}

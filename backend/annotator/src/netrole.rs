@@ -304,3 +304,79 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::tests::{fet, nets};
+    use pnr_core::netlist::Netlist;
+
+    #[test]
+    fn rail_of_edges() {
+        for (n, want) in [
+            ("", None),
+            ("vddx", None),
+            ("vdda_core", Some(NetRole::Supply)),
+            ("VDD_A", Some(NetRole::Supply)),
+            ("gnd0", Some(NetRole::Ground)),
+            ("vss!!", Some(NetRole::Ground)),
+            ("00", None),
+            ("avss", Some(NetRole::Ground)),
+            ("xvdd", None),
+            ("vdd3v3", Some(NetRole::Supply)),
+        ] {
+            assert_eq!(rail_of(n), want, "{n:?}");
+        }
+    }
+
+    #[test]
+    fn is_clock_edges() {
+        assert!(!is_clock(""));
+        assert!(is_clock("phi"));
+        assert!(is_clock("ck_b"));
+        assert!(is_clock("x_clk_y"));
+        assert!(!is_clock("phi1a"));
+        assert!(!is_clock("cka"));
+    }
+
+    fn roles(names: &[&str], cfg: &AnnotationConfig) -> Vec<NetRole> {
+        let nl = Netlist { nets: nets(names), ..Default::default() };
+        classify_nets(&BipartiteHypergraph::from_netlist(&nl), cfg)
+    }
+
+    #[test]
+    fn config_precedence() {
+        let cfg = AnnotationConfig {
+            supply_nets: vec!["GND".into(), "both".into()],
+            ground_nets: vec!["both".into(), "top".into()],
+            clock_nets: vec!["VDD".into(), "Strobe".into()],
+            ..Default::default()
+        };
+        use NetRole::{Clock as C, Ground as G, Signal as S, Supply as P};
+        assert_eq!(roles(&["gnd", "both", "top", "vdd", "strobe", "data"], &cfg), [P, P, G, P, C, S]);
+        assert!(roles(&[], &AnnotationConfig::default()).is_empty());
+    }
+
+    /// The most-bulked net is promoted only when it is still a Signal: a Clock-named bulk is left alone.
+    #[test]
+    fn bulk_inference_skips_non_signal() {
+        let nl = Netlist { devices: vec![fet("M0", DeviceKind::Pmos, 1, 1, 0, 0, 1_000, 500)], nets: nets(&["clk", "x"]), ..Default::default() };
+        let r = classify_nets(&BipartiteHypergraph::from_netlist(&nl), &AnnotationConfig::default());
+        assert_eq!(r, [NetRole::Clock, NetRole::Signal]);
+    }
+
+    /// A gate on a non-FET (a BJT base) does not block inference; only FET gates count.
+    #[test]
+    fn bulk_inference_counts_fet_gates_only() {
+        let q = pnr_core::netlist::Device {
+            name: "Q0".into(),
+            kind: DeviceKind::Npn,
+            model: String::new(),
+            terminals: vec![("C".into(), pnr_core::ids::NetId(1)), ("G".into(), pnr_core::ids::NetId(0)), ("E".into(), pnr_core::ids::NetId(1))],
+            params: vec![],
+        };
+        let nl = Netlist { devices: vec![fet("M0", DeviceKind::Nmos, 1, 1, 0, 0, 1_000, 500), q], nets: nets(&["sub", "x"]), ..Default::default() };
+        let r = classify_nets(&BipartiteHypergraph::from_netlist(&nl), &AnnotationConfig::default());
+        assert_eq!(r, [NetRole::Ground, NetRole::Signal]);
+    }
+}

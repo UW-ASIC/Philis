@@ -233,3 +233,90 @@ mod tests {
         assert!(w.contains(&1.0) && w.iter().any(|&x| x < 1.0), "{w:?}");
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::evidence::DeviceOp;
+    use crate::tests::{fet, nets};
+    use pnr_core::Netlist;
+
+    fn cls(cs: &[NetClass]) -> Vec<NetClassification> {
+        cs.iter().enumerate().map(|(i, &class)| NetClassification { net: NetId(i as u16), class, c_budget_af: None, max_coupling_af: None }).collect()
+    }
+
+    fn op(ids: &[f64]) -> OpFacts {
+        let d = |i: f64| DeviceOp { id_ua: i, headroom_mv: 100.0, gm_us: 10.0, power_uw: 0.0, vgs_mv: None, vbs_mv: None, vth_mv: None, gmb_us: None, gds_us: None };
+        OpFacts { dev: ids.iter().map(|&i| Some(d(i))).collect(), net_mv: vec![] }
+    }
+
+    /// Nets 0=in 1=x 2=vss 3=vdd 4=vb 5=clk. M0: NMOS in→x on vss. M1: PMOS load vb, x↔vdd.
+    /// M2 (with `clocked`): NMOS beside M0, gate clk.
+    fn stage(clocked: bool) -> (Netlist, Vec<NetClassification>) {
+        use pnr_core::netlist::DeviceKind::{Nmos, Pmos};
+        let mut devices = vec![fet("M0", Nmos, 0, 1, 2, 2, 1_000, 500), fet("M1", Pmos, 4, 1, 3, 3, 1_000, 500)];
+        if clocked {
+            devices.push(fet("M2", Nmos, 5, 1, 2, 2, 1_000, 500));
+        }
+        let nl = Netlist { devices, nets: nets(&["in", "x", "vss", "vdd", "vb", "clk"]), ..Default::default() };
+        (nl, cls(&[NetClass::Signal, NetClass::Signal, NetClass::Ground, NetClass::Supply, NetClass::Bias, NetClass::Clock]))
+    }
+
+    #[test]
+    fn empty_netlist() {
+        let hg = BipartiteHypergraph::from_netlist(&Netlist::default());
+        assert!(stage_order(&hg, &[], &[], &[]).is_empty());
+        assert!(current_paths(&hg, None, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn one_stage() {
+        let (nl, c) = stage(false);
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        // Both devices drain on `x` (level 1): the load sits in the stage it loads.
+        assert_eq!(stage_order(&hg, &c, &[], &[0, 1]), [vec![DeviceId(0), DeviceId(1)]]);
+        // `in` is not a port: no input, no stages.
+        assert!(stage_order(&hg, &c, &[NetId(1)], &[0, 1]).is_empty());
+        assert_eq!(stage_order(&hg, &c, &[NetId(0)], &[1, 0]), [vec![DeviceId(1), DeviceId(0)]], "sorted by canon");
+    }
+
+    #[test]
+    fn one_chain_ground_up() {
+        let (nl, c) = stage(false);
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        assert_eq!(current_paths(&hg, None, &c, &[0, 1]), [(vec![vec![DeviceId(0)], vec![DeviceId(1)]], 0.0)]);
+        assert_eq!(current_paths(&hg, Some(&op(&[5.0, -5.0])), &c, &[0, 1]), [(vec![vec![DeviceId(0)], vec![DeviceId(1)]], 5.0)]);
+        // M1 under 1 % of the largest current: no path reaches the supply, no chain.
+        assert!(current_paths(&hg, Some(&op(&[5.0, 0.01])), &c, &[0, 1]).is_empty());
+    }
+
+    #[test]
+    fn clocked_device_beside_a_load_drops_out() {
+        let (nl, c) = stage(true);
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let ch = current_paths(&hg, None, &c, &[0, 1, 2]);
+        assert_eq!(ch, [(vec![vec![DeviceId(0)], vec![DeviceId(1)]], 0.0)]);
+        // `clk` is Clock, never an input; M2 still drains on `x`, so it sits at x's level.
+        assert_eq!(stage_order(&hg, &c, &[], &[0, 1, 2]), [vec![DeviceId(0), DeviceId(1), DeviceId(2)]]);
+    }
+
+    /// A step whose devices are all clock-gated stays (a clocked tail).
+    #[test]
+    fn all_clocked_step_stays() {
+        use pnr_core::netlist::DeviceKind::{Nmos, Pmos};
+        let nl = Netlist { devices: vec![fet("M0", Nmos, 5, 1, 2, 2, 1_000, 500), fet("M1", Pmos, 4, 1, 3, 3, 1_000, 500)], nets: nets(&["in", "x", "vss", "vdd", "vb", "clk"]), ..Default::default() };
+        let (_, c) = stage(false);
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        assert_eq!(current_paths(&hg, None, &c, &[0, 1]), [(vec![vec![DeviceId(0)], vec![DeviceId(1)]], 0.0)]);
+    }
+
+    /// A device straight from ground to supply joins no non-rail net: no chain.
+    #[test]
+    fn rail_to_rail_device_is_no_chain() {
+        use pnr_core::netlist::DeviceKind::Nmos;
+        let nl = Netlist { devices: vec![fet("M0", Nmos, 0, 3, 2, 2, 1_000, 500)], nets: nets(&["in", "x", "vss", "vdd"]), ..Default::default() };
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let c = cls(&[NetClass::Signal, NetClass::Signal, NetClass::Ground, NetClass::Supply]);
+        assert!(current_paths(&hg, None, &c, &[0]).is_empty());
+    }
+}
