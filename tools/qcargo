@@ -67,10 +67,12 @@ snap_id() {
 }
 SNAP=$(snap_id)
 
+T_Q=$(date +%s)
 exec 9>"$LOCK"
 echo "qcargo: queued $(date +%T) src=$SRC snapshot=$SNAP" >&2
 flock 9
-echo "qcargo: running $(date +%T)" >&2
+T_S=$(date +%s)
+echo "qcargo: running $(date +%T) after $((T_S - T_Q))s in queue" >&2
 
 # Worker: the one that last built this source (warm), else the least recently used.
 pick=""
@@ -131,7 +133,8 @@ set +e
 rc=$?
 set -e
 
-printf '%s\t%s\t%s\tw%s\trc=%s\tcargo %s\n' "$(date -Is)" "$SRC" "$SNAP" "$pick" "$rc" "${args[*]}" >> "$WORKERS/runs.log"
+T_E=$(date +%s)
+printf '%s\t%s\t%s\tw%s\trc=%s\tcargo %s\twait=%ss\trun=%ss\n' "$(date -Is)" "$SRC" "$SNAP" "$pick" "$rc" "${args[*]}" "$((T_S - T_Q))" "$((T_E - T_S))" >> "$WORKERS/runs.log"
 
 collect
 exit $rc
