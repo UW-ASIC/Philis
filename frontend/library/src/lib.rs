@@ -786,6 +786,11 @@ fn topology<'a>(
         let u_min = u_eff(cfg.min_utilization, &dims, median_x_gap(&rules));
         problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min }));
     }
+    // PLC-12: each symmetry axis's cells form one island.
+    for island in symmetry_islands(&problem.placement, &rules) {
+        problem.placement.budget.push(Box::new(island.clone()));
+        problem.placement.cost.push(Box::new(island));
+    }
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
@@ -1409,6 +1414,52 @@ fn placement_space(pdk: &Pdk) -> Vec<(String, String, i32)> {
         .collect()
 }
 
+/// One [`analog::placement::SymmetryIsland`] per symmetry axis of `reqs.hard`
+/// (cell ids) with ≥ 2 distinct cells. `touch_nm` = the largest gap any two
+/// members owe across any face, at any variant, + one lattice step.
+///
+/// ponytail: profiles at R0 only (faces cover the turns up to which face
+/// meets which); read all 8 orients if a turned pair ever reads split.
+fn symmetry_islands(reqs: &analog::Requirements<Layout>, rules: &gp::PlaceRules) -> Vec<analog::placement::SymmetryIsland> {
+    use gp::spacing::Face;
+    let mut pairs = Vec::new();
+    for b in &reqs.hard {
+        b.mirror_pairs(&mut pairs);
+    }
+    let mut axes: Vec<u16> = pairs.iter().map(|p| p.2).collect();
+    axes.sort_unstable();
+    axes.dedup();
+    let profiles = |c: u32| rules.profiles.of.get(c as usize).map(|v| v.iter().map(|o| &o[0]).collect::<Vec<_>>()).unwrap_or_default();
+    axes.into_iter()
+        .filter_map(|ax| {
+            let mut cells: Vec<u32> = pairs.iter().filter(|p| p.2 == ax).flat_map(|p| [p.0, p.1]).collect();
+            cells.sort_unstable();
+            cells.dedup();
+            if cells.len() < 2 {
+                return None;
+            }
+            let mut gap = 0;
+            for (i, &a) in cells.iter().enumerate() {
+                for &b in &cells[i + 1..] {
+                    let (pa, pb) = (profiles(a), profiles(b));
+                    if pa.is_empty() || pb.is_empty() {
+                        gap = gap.max(rules.spacing.fallback);
+                    }
+                    for p in &pa {
+                        for q in &pb {
+                            for f in [Face::L, Face::B, Face::R, Face::T] {
+                                gap = gap.max(rules.spacing.gap(p, f, q).min);
+                            }
+                        }
+                    }
+                }
+            }
+            let members = cells.iter().map(|&c| pnr_core::ids::Target::Device(DeviceId(c as u16))).collect();
+            Some(analog::placement::SymmetryIsland { members, touch_nm: gap + rules.grid })
+        })
+        .collect()
+}
+
 /// One scored epoch.
 struct Epoch {
     key: LexKey,
@@ -1536,7 +1587,7 @@ impl Flow<'_> {
         };
         // Measured on the macros dp's variants draw, so `lattice_off` stamps what is drawn.
         let lattice = cells::builder::cut_lattice(self.pdk);
-        let place = geometry::placement_metrics(&macros, &layout, lattice, &self.rules, placement, &self.locks);
+        let place = geometry::placement_metrics(&macros, &layout, lattice, &self.rules, placement, &self.locks, &cells.groups);
         debug_assert_eq!(place.lattice_off, 0, "dp::place: cell origin off the cut lattice");
 
         // Guard rings enclose placed cells, so they are drawn now, before routing.
