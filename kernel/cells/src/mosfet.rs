@@ -821,6 +821,29 @@ impl Mosfet {
             b.pin(pin(di, "B", Rect { x: xi, y: tap_y0 + diff_enc, w: ct, h: ct }, li));
         }
 
+        // Flavour markers (CELL-16, a `gate_marker{i}` role per recogniser
+        // layer the caller's overlay names, e.g. sky130 lvtn/hvtp): one rect
+        // per row over every gate, dummies included, past the gates by the
+        // deck's enclosure, widened to its width and area.
+        let (gx0, gx1) = if nd > 0 { (-nd * dummy_l - (nd - 1) * sd_end, gates_end + sd_edge + (nd - 1) * d_step + dummy_l) } else { (sd_edge, gates_end) };
+        for i in 0.. {
+            let role = format!("gate_marker{i}");
+            let Some(l) = process.layer(&role) else { break };
+            let g = process.enclosure(&role, "poly").max(process.enclosure(&role, "diff")).unwrap_or(0);
+            let min_w = process.width(&role).unwrap_or(0);
+            let (mut x, mut y, mut w, mut h) = (gx0 - g, -g, gx1 - gx0 + 2 * g, finger_w + 2 * g);
+            if h < min_w {
+                y -= (min_w - h) / 2;
+                h = min_w;
+            }
+            let need = min_w.max(i32::try_from((process.area(&role).unwrap_or(0) + i64::from(h) - 1) / i64::from(h)).unwrap_or(i32::MAX));
+            if w < need {
+                x -= (need - w) / 2;
+                w = need;
+            }
+            b.rect(l, Rect { x, y, w, h });
+        }
+
         // PMOS nwell, inflated by the WPE halo on matched groups.
         if is_pmos {
             if let Some(nwell) = process.layer("nwell") {
@@ -1143,6 +1166,71 @@ fn finger_sequence(style: Pattern, dev_nf: &[u16]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `model`'s required recogniser layers that the generator does not draw, as `gate_marker{i}` roles (cellgen's
+    /// `mos_overlay`, rebuilt here: cells does not see the library).
+    fn flavour<'a>(pdk: &'a verify::Pdk, model: &str) -> verify::pdk::Overlay<'a> {
+        let (need, _) = pdk.model_markers(model).expect("a recogniser");
+        assert!(!need.is_empty(), "{model}: no marker beyond the gate");
+        let drawn: Vec<_> = ["diff", "tap", "poly", "licon", "li", "mcon", "met1", "nwell", "nsdm", "psdm", "npc"].iter().filter_map(|r| Process::layer(pdk, r)).collect();
+        let name = |l: &pnr_core::LayerId| pdk.layers.iter().find(|(_, id)| id == l).map(|(n, _)| n.clone());
+        let mut layers: Vec<(String, String)> =
+            need.iter().filter(|l| !drawn.contains(l)).filter_map(name).enumerate().map(|(i, n)| (format!("gate_marker{i}"), n)).collect();
+        layers.extend(Process::layer(pdk, "npc").as_ref().and_then(name).map(|n| ("npc".to_string(), n)));
+        verify::pdk::Overlay { pdk, recipe: verify::pdk::Recipe { model: model.into(), layers, rules: vec![] } }
+    }
+
+    #[test]
+    fn a_marker_covers_every_gate() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let ov = flavour(&pdk, "nfet_01v8_lvt");
+        let lvtn = ov.layer("gate_marker0").expect("lvtn");
+        assert_eq!(ov.enclosure("gate_marker0", "poly").max(ov.enclosure("gate_marker0", "diff")), Some(180));
+        let (poly, diff) = (req(&pdk, "poly"), req(&pdk, "diff"));
+        let (g, mut c) = crate::testkit::group_of(DeviceKind::Nmos, 2, 4, 1000, 150);
+        c.unitization[0].dummy_required = true;
+        let vs = Mosfet::enumerate(&g, &c, &ov);
+        assert!(!vs.is_empty());
+        for v in &vs {
+            let m = v.draw(&g, &c, &ov);
+            let marks: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == lvtn).map(|s| s.rect).collect();
+            assert_eq!(marks.len(), usize::from(v.rows.max(1)), "one marker per row");
+            for p in m.shapes.iter().filter(|s| s.layer == poly) {
+                for d in m.shapes.iter().filter(|s| s.layer == diff) {
+                    let (x0, y0) = (p.rect.x.max(d.rect.x), p.rect.y.max(d.rect.y));
+                    let (x1, y1) = ((p.rect.x + p.rect.w).min(d.rect.x + d.rect.w), (p.rect.y + p.rect.h).min(d.rect.y + d.rect.h));
+                    if x0 >= x1 || y0 >= y1 {
+                        continue;
+                    }
+                    let (x0, y0, x1, y1) = (x0 - 180, y0 - 180, x1 + 180, y1 + 180);
+                    assert!(marks.iter().any(|r| r.x <= x0 && r.y <= y0 && r.x + r.w >= x1 && r.y + r.h >= y1), "gate ({x0},{y0})-({x1},{y1}) uncovered");
+                }
+            }
+        }
+        // Plain nfet_01v8: no overlay, no marker.
+        for v in Mosfet::enumerate(&g, &c, &pdk) {
+            assert!(v.draw(&g, &c, &pdk).shapes.iter().all(|s| s.layer != lvtn));
+        }
+    }
+
+    #[test]
+    fn flavoured_devices_are_drc_and_erc_clean() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let mut dirty = Vec::new();
+        for (model, kind) in [("nfet_01v8_lvt", DeviceKind::Nmos), ("pfet_01v8_hvt", DeviceKind::Pmos)] {
+            let ov = flavour(&pdk, model);
+            let (g, mut c) = crate::testkit::group_of(kind, 2, 4, 1000, 150);
+            c.unitization[0].dummy_required = true;
+            for (i, v) in Mosfet::enumerate(&g, &c, &ov).iter().enumerate() {
+                let m = v.draw(&g, &c, &ov);
+                let rules = crate::testkit::findings(&m.shapes, &crate::testkit::ports_with(&m, &["G", "S", "B"]), &pdk);
+                if !rules.is_empty() {
+                    dirty.push(format!("{model} #{i}: {rules:?}"));
+                }
+            }
+        }
+        assert!(dirty.is_empty(), "{}", dirty.join("\n"));
+    }
 
     /// sky130: 48.2·10000/(3·150) = 1071 Ω of finger poly against a 152 Ω
     /// gate cut (`licon_po`), so a second gate contact pays.
