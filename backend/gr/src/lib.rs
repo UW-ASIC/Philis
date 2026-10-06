@@ -1836,6 +1836,43 @@ mod tests {
         assert_eq!(hist, [0.0, 0.0, 0.5, 2.0]);
     }
 
+    /// Usage near `u16::MAX` plus a halo saturates instead of wrapping.
+    #[test]
+    fn bump_history_does_not_overflow() {
+        let mut hist = [0.0f32; 2];
+        assert_eq!(bump_history(&[u16::MAX, 0], &[3, 9], &mut hist, 1, 1.0), 65_535.0 + 2.0);
+        assert_eq!(hist, [65_537.0, 0.0]);
+    }
+
+    #[test]
+    fn hist_key_floors_negative_coordinates() {
+        assert_eq!(hist_key((-1, 499, 2)), (2, -1, 0));
+        assert_eq!(hist_key((-500, -501, 0)), (0, -1, -2));
+    }
+
+    #[test]
+    fn present_cost_charges_only_past_capacity() {
+        assert_eq!(present_cost(0.5, 2.0, 0, 1), 0.5);
+        assert_eq!(present_cost(0.5, 2.0, 2, 1), 4.5);
+        assert_eq!(present_cost(0.0, 1.0, u16::MAX, 0), 65_535.0, "no overflow at the top");
+    }
+
+    /// A scratch whose stamp is about to wrap still finds the same tree: stale
+    /// marks from before the wrap must never read as current.
+    #[test]
+    fn a_wrapping_stamp_does_not_corrupt_the_search() {
+        let g = TrackGrid::with_layers((10 * 100, 10 * 100), 100, 4.0, 1);
+        let hot = RouteHot::new(g.nodes(), 1);
+        let terms = [g.node(0, 0, 0), g.node(5, 0, 0), g.node(5, 5, 0)];
+        let fresh = route_net(&g, &hot, &[], &search(&terms, Elec::default()), 1.0, &mut Dij::new(g.nodes()));
+        assert!(fresh.is_some());
+        let mut dij = Dij::new(g.nodes());
+        for start in [u32::MAX - 1, u32::MAX - 3, u32::MAX] {
+            dij.stamp = start;
+            assert_eq!(route_net(&g, &hot, &[], &search(&terms, Elec::default()), 1.0, &mut dij), fresh, "stamp {start}");
+        }
+    }
+
     /// A budgeted net (under a crosstalk-exclusion rule) routes ahead of an
     /// unconstrained one.
     #[test]
