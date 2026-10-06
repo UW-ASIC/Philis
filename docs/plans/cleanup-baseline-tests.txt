@@ -1,0 +1,11 @@
+# Release test suite on main before the cleanup (a382a1a, 2026-10-06):
+# 1067 passed, 9 failed, 11 ignored. Known failures (GitHub issues):
+benchmark  --test signoff_fixtures  fixtures_sign_off_within_baseline              #63
+library    --test antenna_diode     an_antenna_the_jumper_cannot_fix_gets_a_diode_and_lvs_matches  #64
+library    --test extra_devices     an_adopted_antenna_diode_keeps_lvs_matched     #64
+cells      --lib  cap_array::tests::extracted_bit_ratios_follow_the_weights        #65
+dr         --lib  tests::a_shielded_victim_gets_both_side_tracks                   #66
+dr         --lib  tests::foreign_nets_route_around_a_matched_cell                  #66
+library    --test emit_roundtrip    run_emit_elaborate_signs_off                   #67
+library    --test perf_postlayout   a_flow_scores_its_layout_in_simulation         #68
+library    --test perf_postlayout   ota_probe_regions                              #68
