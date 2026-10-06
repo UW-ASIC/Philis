@@ -205,4 +205,136 @@ mod tests {
         k.align(&mut o);
         assert_eq!(o, [Orient::R90, Orient::R90.then(Orient::Mx180)]);
     }
+
+    /// A batch that only declares pairs.
+    struct Pairs {
+        matched: Vec<(u32, u32)>,
+        mirrored: Vec<(u32, u32)>,
+    }
+
+    impl analog::RuleBatch<Layout> for Pairs {
+        fn cost(&self, _: &Layout) -> f32 {
+            0.0
+        }
+        fn violations(&self, _: &Layout) -> u32 {
+            0
+        }
+        fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
+            out.extend_from_slice(&self.matched);
+        }
+        fn mirrored_pairs(&self, out: &mut Vec<(u32, u32)>) {
+            out.extend_from_slice(&self.mirrored);
+        }
+    }
+
+    fn reqs_of(matched: &[(u32, u32)], mirrored: &[(u32, u32)]) -> Requirements<Layout> {
+        Requirements { budget: vec![Box::new(Pairs { matched: matched.to_vec(), mirrored: mirrored.to_vec() })], ..Default::default() }
+    }
+
+    #[test]
+    fn no_pairs_means_no_locks() {
+        for n in [0, 1, 4] {
+            let k = locks(&Requirements::default(), n, &[]);
+            assert!(k.orient.is_empty() && k.shape.is_empty());
+            assert_eq!((k.orient_of.len(), k.shape_of.len(), k.rel.len()), (n, n, n));
+            assert!(k.orient_of.iter().chain(&k.shape_of).all(Option::is_none));
+            assert!(k.rel.iter().all(|&o| o == Orient::R0));
+            assert_eq!(k.incompatible, 0);
+        }
+    }
+
+    #[test]
+    fn self_and_out_of_range_pairs_are_dropped() {
+        let k = locks(&reqs_of(&[(1, 1), (0, 3), (3, 7)], &[]), 3, &[]);
+        assert!(k.orient.is_empty(), "{:?}", k.orient);
+    }
+
+    /// `(a, b)` and `(b, a)` are one pair: counted once as incompatible.
+    #[test]
+    fn reversed_duplicates_count_once() {
+        let k = locks(&reqs_of(&[(0, 1), (1, 0), (0, 1)], &[]), 2, &[space(1, 2), space(2, 1)]);
+        assert_eq!(k.incompatible, 1);
+        assert_eq!(k.orient, vec![vec![0, 1]]);
+        assert!(k.shape.is_empty());
+    }
+
+    #[test]
+    fn sets_are_transitive_and_sorted() {
+        let k = locks(&reqs_of(&[(4, 3), (2, 0), (5, 4)], &[]), 6, &[]);
+        assert_eq!(k.orient, vec![vec![0, 2], vec![3, 4, 5]]);
+        assert_eq!(k.orient, k.shape, "no variant spaces: every pair is shape-compatible");
+        assert_eq!(k.orient_of, vec![Some(0), None, Some(0), Some(1), Some(1), Some(1)]);
+        assert_eq!(k.shape_of, k.orient_of);
+    }
+
+    /// Shape compatibility is the whole `(w, h)` list, in order.
+    #[test]
+    fn shape_compatibility_needs_the_same_list_in_the_same_order() {
+        let two = |a: (i32, i32), b: (i32, i32)| VariantSpace {
+            alternatives: [a, b].iter().map(|&(w, h)| Macro { bbox: Rect { x: 0, y: 0, w, h }, ..Default::default() }).collect(),
+        };
+        let pair = |p: VariantSpace, q: VariantSpace| locks(&reqs_of(&[(0, 1)], &[]), 2, &[p, q]).incompatible;
+        assert_eq!(pair(two((1, 2), (3, 4)), two((1, 2), (3, 4))), 0);
+        assert_eq!(pair(two((1, 2), (3, 4)), two((3, 4), (1, 2))), 1, "order matters");
+        assert_eq!(pair(two((1, 2), (3, 4)), space(1, 2)), 1, "length matters");
+        // Different origins, same extents: compatible.
+        let shifted = VariantSpace { alternatives: vec![Macro { bbox: Rect { x: 50, y: -9, w: 1, h: 2 }, ..Default::default() }] };
+        assert_eq!(pair(space(1, 2), shifted), 0);
+    }
+
+    /// Only one cell of the pair has a variant space: not shape-locked.
+    #[test]
+    fn a_pair_with_one_variant_space_is_incompatible() {
+        let k = locks(&reqs_of(&[(0, 1)], &[]), 2, &[space(1, 2)]);
+        assert_eq!((k.incompatible, k.shape.len(), k.orient.len()), (1, 0, 1));
+    }
+
+    /// Mirror composes along a chain: a reflection of a reflection is upright.
+    #[test]
+    fn rel_composes_mirror_edges_along_a_chain() {
+        let k = locks(&reqs_of(&[(0, 1), (1, 2), (2, 3)], &[(1, 0), (1, 2)]), 4, &[]);
+        assert_eq!(k.rel, vec![Orient::R0, Orient::Mx180, Orient::R0, Orient::R0]);
+    }
+
+    /// A mirrored pair that is not matched has no orient set, so no relation.
+    #[test]
+    fn mirrored_but_unmatched_pairs_relate_nothing() {
+        let k = locks(&reqs_of(&[], &[(0, 1)]), 2, &[]);
+        assert_eq!(k.rel, vec![Orient::R0, Orient::R0]);
+    }
+
+    #[test]
+    fn members_returns_the_set_or_the_cell_alone() {
+        let k = locks(&reqs_of(&[(0, 2)], &[]), 4, &[]);
+        assert_eq!(k.members(2, false), vec![0, 2]);
+        assert_eq!(k.members(0, true), vec![0, 2]);
+        assert_eq!(k.members(1, false), vec![1]);
+        assert_eq!(k.members(99, true), vec![99], "past the map reads as unlocked");
+    }
+
+    #[test]
+    fn align_and_unify_skip_members_past_the_slice() {
+        let k = locks(&reqs_of(&[(0, 1), (0, 3)], &[(0, 3)]), 4, &[]);
+        let mut o = [Orient::R90, Orient::R0];
+        k.align(&mut o);
+        assert_eq!(o, [Orient::R90, Orient::R90]);
+        let mut a = [2u16, 0];
+        k.unify(&mut a);
+        assert_eq!(a, [2, 2]);
+        let (mut none, mut empty): ([Orient; 0], [u16; 0]) = ([], []);
+        k.align(&mut none);
+        k.unify(&mut empty);
+    }
+
+    /// `align` keeps a Perfect partner equal and a Mirror partner reflected
+    /// for every starting orient of the first member.
+    #[test]
+    fn align_holds_for_every_orient() {
+        let k = locks(&reqs_of(&[(0, 1), (0, 2)], &[(0, 2)]), 3, &[]);
+        for o0 in Orient::ALL {
+            let mut o = [o0, Orient::R270, Orient::Mx];
+            k.align(&mut o);
+            assert_eq!(o, [o0, o0, o0.then(Orient::Mx180)], "{o0:?}");
+        }
+    }
 }

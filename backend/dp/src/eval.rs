@@ -227,3 +227,251 @@ impl Eval {
         hpwl / f64::from(l.l_ref()) + area + (objective + priced)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use analog::RuleBatch;
+    use gp::mechanics::{analog_phi, analog_theta, augmented_cost, hpwl};
+    use pnr_core::geom::Rect;
+    use pnr_core::ids::DeviceId;
+    use pnr_core::{LayerId, Macro, NetId, Orient, Pin};
+
+    /// Reads `l.x[cell]` (and `l.branch[0]` when `branchy`); claims to touch
+    /// only `touched`. Violated past `limit`, residual `x / 1000`.
+    struct XBatch {
+        cell: usize,
+        touched: Vec<u32>,
+        field: bool,
+        branchy: bool,
+        limit: i32,
+    }
+
+    impl XBatch {
+        fn local(cell: usize, limit: i32) -> Self {
+            XBatch { cell, touched: vec![cell as u32], field: false, branchy: false, limit }
+        }
+        fn value(&self, l: &Layout) -> i32 {
+            l.x[self.cell] + if self.branchy && l.branch.first() == Some(&true) { 7_000 } else { 0 }
+        }
+    }
+
+    impl RuleBatch<Layout> for XBatch {
+        fn cost(&self, l: &Layout) -> f32 {
+            self.value(l).abs() as f32
+        }
+        fn violations(&self, l: &Layout) -> u32 {
+            u32::from(self.value(l) > self.limit)
+        }
+        fn residual(&self, l: &Layout) -> f64 {
+            f64::from(self.value(l)) / 1_000.0
+        }
+        fn reads_field(&self) -> bool {
+            self.field
+        }
+        fn touched(&self, out: &mut Vec<u32>) {
+            out.extend_from_slice(&self.touched);
+        }
+    }
+
+    fn layout(xs: &[i32]) -> Layout {
+        let n = xs.len();
+        Layout {
+            x: xs.to_vec(),
+            y: vec![0; n],
+            hw: vec![500; n],
+            hh: vec![500; n],
+            variant: vec![0; n],
+            axis: vec![0; n],
+            branch: vec![false; n],
+            groups: (0..n).map(|i| vec![DeviceId(i as u16)]).collect(),
+            orient: vec![Orient::R0; n],
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        }
+    }
+
+    /// 1 µm cell with one pin on each of `nets`, at the centre.
+    fn cell(nets: &[u16]) -> Macro {
+        let pins = nets
+            .iter()
+            .map(|&n| Pin { name: format!("P{n}"), net: NetId(n), at: Rect { x: 450, y: 450, w: 100, h: 100 }, layer: LayerId(0) })
+            .collect();
+        Macro { pins, bbox: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() }
+    }
+
+    /// Reference energy: the full evaluation `anneal::energy` performs.
+    fn reference(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &gp::Prices) -> f64 {
+        let cells: f64 = l.hw.iter().zip(&l.hh).map(|(&w, &h)| 4.0 * f64::from(w) * f64::from(h)).sum();
+        let area = if cells > 0.0 { l.footprint_nm2() / cells - 1.0 } else { 0.0 };
+        hpwl(nets, l) / f64::from(l.l_ref()) + area + augmented_cost(reqs, l, prices)
+    }
+
+    fn assert_exact(e: &Eval, nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &gp::Prices) {
+        assert_eq!(e.phi(), analog_phi(reqs, l));
+        assert_eq!(e.theta().to_bits(), analog_theta(reqs, l).to_bits());
+        assert_eq!(e.energy(l).to_bits(), reference(nets, reqs, l, prices).to_bits(), "{} vs {}", e.energy(l), reference(nets, reqs, l, prices));
+    }
+
+    /// Three cells, two nets, one batch per tier plus a global cost batch.
+    fn bench() -> (Nets, Requirements<Layout>, Layout) {
+        let nets = Nets::from_macros(&[cell(&[0]), cell(&[0, 1]), cell(&[1])]);
+        let reqs = Requirements {
+            hard: vec![Box::new(XBatch::local(0, 1_000)) as Box<dyn RuleBatch<Layout>>],
+            budget: vec![Box::new(XBatch::local(1, 0))],
+            cost: vec![Box::new(XBatch::local(2, 0)), Box::new(XBatch { touched: vec![], ..XBatch::local(0, 0) })],
+        };
+        (nets, reqs, layout(&[0, 3_000, 9_000]))
+    }
+
+    #[test]
+    fn empty_eval_is_zero() {
+        let (nets, reqs) = (Nets::from_macros(&[]), Requirements::<Layout>::default());
+        let l = layout(&[]);
+        let mut e = Eval::new(&reqs, &nets, 0);
+        e.full(&reqs, &nets, &l, &gp::Prices::new());
+        e.update(&[], false, &reqs, &nets, &l, &gp::Prices::new());
+        assert_eq!((e.phi(), e.theta(), e.energy(&l)), ((0, 0.0), 0.0, 0.0));
+    }
+
+    #[test]
+    fn full_matches_a_fresh_evaluation_bit_for_bit() {
+        let (nets, reqs, l) = bench();
+        let prices = gp::Prices::new();
+        let mut e = Eval::new(&reqs, &nets, 3);
+        e.full(&reqs, &nets, &l, &prices);
+        assert_exact(&e, &nets, &reqs, &l, &prices);
+    }
+
+    #[test]
+    fn update_tracks_every_move_and_revert_restores() {
+        let (nets, reqs, mut l) = bench();
+        let prices = gp::Prices::new();
+        let mut e = Eval::new(&reqs, &nets, 3);
+        e.full(&reqs, &nets, &l, &prices);
+        let before = e.energy(&l);
+        for (c, x) in [(0, 5_000), (1, -4_000), (2, 100)] {
+            let old = l.x[c];
+            l.x[c] = x;
+            e.update(&[c], false, &reqs, &nets, &l, &prices);
+            assert_exact(&e, &nets, &reqs, &l, &prices);
+            e.revert();
+            l.x[c] = old;
+            assert_exact(&e, &nets, &reqs, &l, &prices);
+            assert_eq!(e.energy(&l).to_bits(), before.to_bits());
+        }
+    }
+
+    /// Two updates without a commit: one revert undoes both.
+    #[test]
+    fn revert_undoes_every_update_since_the_last_commit() {
+        let (nets, reqs, mut l) = bench();
+        let prices = gp::Prices::new();
+        let mut e = Eval::new(&reqs, &nets, 3);
+        e.full(&reqs, &nets, &l, &prices);
+        let x0 = l.x.clone();
+        l.x[0] = 2_000;
+        e.update(&[0], false, &reqs, &nets, &l, &prices);
+        l.x[0] = 4_000;
+        l.x[1] = 8_000;
+        e.update(&[0, 1, 0], false, &reqs, &nets, &l, &prices);
+        assert_exact(&e, &nets, &reqs, &l, &prices);
+        e.revert();
+        l.x = x0;
+        assert_exact(&e, &nets, &reqs, &l, &prices);
+    }
+
+    #[test]
+    fn commit_keeps_the_new_values() {
+        let (nets, reqs, mut l) = bench();
+        let prices = gp::Prices::new();
+        let mut e = Eval::new(&reqs, &nets, 3);
+        e.full(&reqs, &nets, &l, &prices);
+        l.x[2] = -6_000;
+        e.update(&[2], false, &reqs, &nets, &l, &prices);
+        e.commit();
+        e.revert();
+        assert_exact(&e, &nets, &reqs, &l, &prices);
+    }
+
+    /// A field reader touching only cell 1 still reads cell 0: it is global.
+    #[test]
+    fn a_field_reader_is_rescored_on_any_move() {
+        let nets = Nets::from_macros(&[]);
+        let reqs = Requirements::<Layout> {
+            budget: vec![Box::new(XBatch { touched: vec![1], field: true, ..XBatch::local(0, 0) })],
+            ..Default::default()
+        };
+        let prices = gp::Prices::new();
+        let mut l = layout(&[0, 3_000]);
+        let mut e = Eval::new(&reqs, &nets, 2);
+        assert_eq!(e.global, vec![0]);
+        e.full(&reqs, &nets, &l, &prices);
+        l.x[0] = 2_500;
+        e.update(&[0], false, &reqs, &nets, &l, &prices);
+        assert_exact(&e, &nets, &reqs, &l, &prices);
+    }
+
+    /// A branch flip moves no cell: `all` rescores every batch.
+    #[test]
+    fn all_rescores_batches_no_moved_cell_reaches() {
+        let nets = Nets::from_macros(&[]);
+        let reqs = Requirements::<Layout> {
+            hard: vec![Box::new(XBatch { branchy: true, ..XBatch::local(1, 5_000) })],
+            ..Default::default()
+        };
+        let prices = gp::Prices::new();
+        let mut l = layout(&[0, 0]);
+        let mut e = Eval::new(&reqs, &nets, 2);
+        e.full(&reqs, &nets, &l, &prices);
+        assert_eq!(e.phi().0, 0);
+        l.branch[0] = true;
+        e.update(&[], true, &reqs, &nets, &l, &prices);
+        assert_eq!(e.phi().0, 1);
+        assert_exact(&e, &nets, &reqs, &l, &prices);
+        e.revert();
+        assert_eq!(e.phi().0, 0);
+    }
+
+    /// Touched ids are deduplicated and ids past `n` dropped.
+    #[test]
+    fn index_dedups_touched_and_drops_out_of_range_ids() {
+        let reqs = Requirements::<Layout> {
+            cost: vec![Box::new(XBatch { touched: vec![1, 1, 0, 9], ..XBatch::local(0, 0) })],
+            ..Default::default()
+        };
+        let e = Eval::new(&reqs, &Nets::from_macros(&[]), 2);
+        assert_eq!(e.cell_rows, vec![vec![0], vec![0]]);
+        assert!(e.global.is_empty());
+    }
+
+    /// The dedup stamp wraps without leaving a stale mark that would skip a row.
+    #[test]
+    fn stamp_wraparound_still_rescores() {
+        let (nets, reqs, mut l) = bench();
+        let prices = gp::Prices::new();
+        let mut e = Eval::new(&reqs, &nets, 3);
+        e.full(&reqs, &nets, &l, &prices);
+        e.stamp = u32::MAX - 1;
+        for x in [1_000, 2_000, 3_000] {
+            l.x[0] = x;
+            e.update(&[0], false, &reqs, &nets, &l, &prices);
+            e.commit();
+            assert_exact(&e, &nets, &reqs, &l, &prices);
+        }
+    }
+
+    /// Pins ±1.5e9 nm apart: the span overflows `i32`, the cached HPWL must not.
+    #[test]
+    fn net_hpwl_is_exact_past_the_i32_span() {
+        let nets = Nets::from_macros(&[cell(&[0]), cell(&[0])]);
+        let reqs = Requirements::<Layout>::default();
+        let prices = gp::Prices::new();
+        let l = layout(&[-1_500_000_000, 1_500_000_000]);
+        let mut e = Eval::new(&reqs, &nets, 2);
+        e.full(&reqs, &nets, &l, &prices);
+        assert_eq!(e.net_hpwl, vec![3e9]);
+        assert_exact(&e, &nets, &reqs, &l, &prices);
+    }
+}
