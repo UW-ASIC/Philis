@@ -85,3 +85,67 @@ mod tests {
         assert!((u.residual(&sprawl) - 0.2).abs() < 1e-6);
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    fn cells(xs: &[i32], half: i32) -> Layout {
+        let n = xs.len();
+        Layout {
+            x: xs.to_vec(),
+            y: vec![0; n],
+            hw: vec![half; n],
+            hh: vec![half; n],
+            axis: vec![],
+            groups: vec![],
+            orient: vec![pnr_core::Orient::default(); n],
+            variant: vec![0; n],
+            branch: Vec::new(),
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        }
+    }
+
+    #[test]
+    fn no_cells_or_no_area_is_never_a_violation() {
+        let u = Utilization { u_min: 0.9 };
+        for l in [cells(&[], 500), cells(&[0, 5_000], 0)] {
+            assert_eq!((u.cost(&l), u.violations(&l), u.residual(&l)), (0.0, 0, 0.0));
+            assert_eq!(u.worst_usage(&l), Some(0.0));
+        }
+    }
+
+    #[test]
+    fn a_non_positive_floor_disables_the_rule() {
+        let sprawl = cells(&[0, 1_000_000], 500);
+        for u_min in [0.0, -1.0] {
+            let u = Utilization { u_min };
+            assert_eq!((u.violations(&sprawl), u.criticality(&sprawl)), (0, 0.0));
+        }
+    }
+
+    #[test]
+    fn exactly_at_the_floor_is_legal() {
+        // Abutted pair at u_min = 1: footprint equals the cells' area.
+        let l = cells(&[0, 1_000], 500);
+        let u = Utilization { u_min: 1.0 };
+        assert_eq!(u.worst_usage(&l), Some(1.0));
+        assert_eq!((u.violations(&l), u.residual(&l), u.cost(&l)), (0, 0.0, 0.0));
+        assert_eq!(u.criticality(&l), 1.0);
+    }
+
+    #[test]
+    fn criticality_clamps_and_cost_equals_residual() {
+        let l = cells(&[0, 3_000], 500);
+        let u = Utilization { u_min: 1.0 };
+        // 2 µm² of cells in a 4 × 1 µm box: used 2.
+        assert_eq!(u.worst_usage(&l), Some(2.0));
+        assert_eq!(u.criticality(&l), 1.0);
+        assert_eq!(f64::from(u.cost(&l)), u.residual(&l));
+        assert_eq!((u.count(), u.kind()), (1, "Utilization"));
+        let half = Utilization { u_min: 0.25 };
+        assert_eq!(half.criticality(&l), 0.5);
+    }
+}

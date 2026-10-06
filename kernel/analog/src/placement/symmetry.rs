@@ -495,3 +495,177 @@ mod tests {
         assert_eq!(l.x, vec![1_000, 5_000]);
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use pnr_core::ids::{DeviceId, GroupId};
+    use pnr_core::Orient;
+
+    fn d(i: u16) -> Target {
+        Target::Device(DeviceId(i))
+    }
+
+    fn layout(xs: &[i32], ys: &[i32]) -> Layout {
+        let n = xs.len();
+        Layout {
+            x: xs.to_vec(),
+            y: ys.to_vec(),
+            hw: vec![100; n],
+            hh: vec![100; n],
+            axis: vec![0],
+            groups: vec![vec![DeviceId(0)]],
+            orient: vec![Orient::default(); n],
+            variant: vec![0; n],
+            branch: Vec::new(),
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        }
+    }
+
+    fn sym(a: Target, b: Target) -> Symmetry {
+        Symmetry { a, b, axis: AxisId(0), mode: SymMode::Perfect }
+    }
+
+    #[test]
+    fn snap_rounds_half_away_from_zero() {
+        for (v, g, want) in [(0, 5, 0), (7, 5, 5), (8, 5, 10), (-7, 5, -5), (-8, 5, -10), (2, 4, 4), (-2, 4, -4), (1, 4, 0), (13, 1, 13), (13, 0, 13), (13, -3, 13)] {
+            assert_eq!(snap_to(v, g), want, "snap_to({v}, {g})");
+        }
+    }
+
+    #[test]
+    fn defaults_are_vertical_and_perfect() {
+        assert_eq!(AxisDir::default(), AxisDir::V);
+        assert_eq!(SymMode::default(), SymMode::Perfect);
+    }
+
+    #[test]
+    fn cost_is_the_squared_error_over_l_ref() {
+        // ex = 100 + 300 − 0 = 400, ey = 0 − 200 = −200: |e| = 600 nm.
+        let l = layout(&[100, 300], &[0, 200]);
+        let e = 600.0 / l.l_ref();
+        assert!((sym(d(0), d(1)).cost(&l) - e * e).abs() < 1e-6);
+        assert!((sym(d(0), d(1)).residual(&l) - 0.6).abs() < 1e-6, "µm");
+    }
+
+    #[test]
+    fn unequal_extents_or_orients_break_a_perfect_pair() {
+        let mut l = layout(&[-500, 500], &[0, 0]);
+        assert!(sym(d(0), d(1)).satisfied(&l));
+        l.hw[1] = 200;
+        assert!(!sym(d(0), d(1)).satisfied(&l), "hw");
+        l.hw[1] = 100;
+        l.hh[0] = 50;
+        assert!(!sym(d(0), d(1)).satisfied(&l), "hh");
+        l.hh[0] = 100;
+        l.orient[1] = Orient::R180;
+        assert!(!sym(d(0), d(1)).satisfied(&l), "orient");
+        // The mirror equation still holds: the error terms are zero.
+        assert_eq!(sym(d(0), d(1)).cost(&l), 0.0);
+    }
+
+    #[test]
+    fn a_self_pair_ignores_shape_and_wants_centre_on_axis() {
+        let mut l = layout(&[0, 9], &[0, 0]);
+        l.orient[0] = Orient::R90;
+        assert!(sym(d(0), d(0)).satisfied(&l));
+        l.x[0] = 10;
+        assert!(!sym(d(0), d(0)).satisfied(&l));
+    }
+
+    #[test]
+    fn group_targets_score_but_never_project() {
+        let mut l = layout(&[-300, 300], &[0, 0]);
+        let r = sym(Target::Group(GroupId(0)), d(1));
+        assert!(r.satisfied(&l), "group 0 = device 0's box; shape is not compared");
+        l.x[1] = 1_000;
+        assert!(!r.satisfied(&l));
+        let before = (l.x.clone(), l.y.clone(), l.axis.clone());
+        r.project(&mut l, 5);
+        assert_eq!((l.x.clone(), l.y.clone(), l.axis.clone()), before);
+        assert_eq!(r.mirror_pair(), None);
+        assert_eq!(r.matched_pair(), None);
+    }
+
+    #[test]
+    fn pair_ids_distinguish_self_pairs() {
+        let r = Symmetry { axis: AxisId(3), ..sym(d(2), d(5)) };
+        assert_eq!(r.mirror_pair(), Some((2, 5, 3)));
+        assert_eq!(r.matched_pair(), Some((2, 5)));
+        let s = sym(d(4), d(4));
+        assert_eq!(s.mirror_pair(), Some((4, 4, 0)));
+        assert_eq!(s.matched_pair(), None, "nothing to draw alike");
+    }
+
+    #[test]
+    fn projection_skips_out_of_range_devices_and_axis_slots() {
+        let mut l = layout(&[1_003, 5_017], &[40, 260]);
+        let before = (l.x.clone(), l.y.clone(), l.axis.clone());
+        sym(d(0), d(9)).project(&mut l, 5);
+        assert_eq!((l.x.clone(), l.y.clone(), l.axis.clone()), before, "device 9 does not exist");
+        // An axis id past `Layout::axis` still lands the pair, without growing the table.
+        let r = Symmetry { axis: AxisId(4), ..sym(d(0), d(1)) };
+        r.project(&mut l, 5);
+        assert_eq!(l.axis.len(), 1);
+        assert_eq!(l.y[0], l.y[1]);
+        assert_eq!((l.x[0] + l.x[1]) % 2, 0);
+    }
+
+    #[test]
+    fn a_zero_grid_reads_as_one() {
+        let mut l = layout(&[0, 7], &[0, 3]);
+        sym(d(0), d(1)).project(&mut l, 0);
+        assert!(sym(d(0), d(1)).satisfied(&l), "{:?}", (&l.x, &l.y, &l.axis));
+    }
+
+    #[test]
+    fn group_project_on_no_device_pairs_is_a_no_op() {
+        let mut l = layout(&[1, 2], &[3, 4]);
+        let before = (l.x.clone(), l.y.clone(), l.axis.clone());
+        SymmetryGroup(vec![]).project(&mut l, 5);
+        SymmetryGroup(vec![sym(Target::Group(GroupId(0)), d(1))]).project(&mut l, 5);
+        assert_eq!((l.x.clone(), l.y.clone(), l.axis.clone()), before);
+    }
+
+    #[test]
+    fn group_criticality_is_all_or_nothing() {
+        let g = SymmetryGroup(vec![sym(d(0), d(1))]);
+        assert_eq!(g.criticality(&layout(&[-5, 5], &[0, 0])), 0.0);
+        assert_eq!(g.criticality(&layout(&[-5, 6], &[0, 0])), 1.0);
+        assert_eq!((g.count(), g.kind()), (1, "Symmetry"));
+    }
+
+    #[test]
+    fn group_reports_each_violated_pairs_residual() {
+        // Pair (0, 1) is 1 µm off its axis; pair (2, 3) is exact.
+        let l = layout(&[-500, 1_500, -10, 10], &[0, 0, 0, 0]);
+        let g = SymmetryGroup(vec![sym(d(0), d(1)), sym(d(2), d(3))]);
+        let mut out = Vec::new();
+        g.violating_residuals(&l, &mut out);
+        assert_eq!(out, [(0, 1.0), (1, 1.0)], "the per-rule residual, not NaN");
+        let mut ids = Vec::new();
+        g.violating_ids(&l, &mut ids);
+        assert_eq!(ids, [0, 1]);
+    }
+
+    #[test]
+    fn group_delegates_pairs_and_retarget() {
+        let mut g = SymmetryGroup(vec![sym(d(0), d(1)), Symmetry { mode: SymMode::Mirror, ..sym(d(2), d(3)) }]);
+        let (mut mp, mut m, mut mir, mut t) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        g.mirror_pairs(&mut mp);
+        g.matched_pairs(&mut m);
+        g.mirrored_pairs(&mut mir);
+        g.touched(&mut t);
+        assert_eq!(mp, [(0, 1, 0), (2, 3, 0)]);
+        assert_eq!(m, [(0, 1), (2, 3)]);
+        assert_eq!(mir, [(2, 3)]);
+        assert_eq!(t, [0, 1, 2, 3]);
+        g.retarget(&[0, 0, 1, 1]);
+        assert_eq!((g.0[0].a, g.0[0].b, g.0[1].a, g.0[1].b), (d(0), d(0), d(1), d(1)));
+        // Collapsed into self-pairs: a Mirror self-pair has no partner to reflect.
+        g.demote_mirrors(&|_, _| true);
+        assert_eq!(g.0[1].mode, SymMode::Perfect);
+    }
+}

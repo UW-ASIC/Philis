@@ -200,3 +200,95 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::rule::RuleBatch;
+    use pnr_core::{Orient, Rect, Unit, UnitLib};
+    use std::sync::Arc;
+
+    /// Devices 0 and 1 in cells 0 and 1, each drawing one unit per entry of
+    /// its own φ list.
+    fn cells(phis: [&[(i8, i8)]; 2]) -> Layout {
+        let units: Vec<Vec<Unit>> = phis.iter().map(|p| p.iter().map(|&phi| Unit { owner: 0, x: 50, y: 50, weight: 10, phi, sa: 0, sb: 0 }).collect()).collect();
+        let a0 = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &units[0][..])];
+        let a1 = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &units[1][..])];
+        let lib = UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&a0[..], &a1[..]].into_iter());
+        Layout {
+            x: vec![0, 10_000],
+            y: vec![0, 0],
+            hw: vec![50; 2],
+            hh: vec![50; 2],
+            axis: vec![],
+            groups: vec![],
+            orient: vec![Orient::R0; 2],
+            variant: vec![0; 2],
+            branch: Vec::new(),
+            power_uw: vec![0; 2],
+            temp_mc: vec![0; 2],
+            units: Arc::new(lib),
+        }
+    }
+
+    fn set(members: &[u16], check: OrientCheck) -> OrientationSet {
+        OrientationSet { members: members.iter().map(|&d| DeviceId(d)).collect(), check, cell_of: Vec::new() }
+    }
+
+    #[test]
+    fn fewer_than_two_members_is_vacuously_met() {
+        let l = cells([&[(1, 0)], &[(0, 1)]]);
+        for c in [OrientCheck::Axis, OrientCheck::Phi] {
+            for m in [&[][..], &[0][..]] {
+                let s = set(m, c);
+                assert_eq!((s.cost(&l), s.violations(&l), s.residual(&l), s.unknown(&l)), (0.0, 0, 0.0, 0), "{c:?} {m:?}");
+                let mut ids = Vec::new();
+                s.violating_ids(&l, &mut ids);
+                assert!(ids.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn one_member_with_mixed_axes_breaks_the_axis_check() {
+        let l = cells([&[(1, 0), (0, 1)], &[(1, 0)]]);
+        assert_eq!(set(&[0, 1], OrientCheck::Axis).violations(&l), 1);
+        assert_eq!(set(&[0, 1], OrientCheck::Axis).cost(&l), 1.0);
+    }
+
+    #[test]
+    fn phi_residual_is_the_worst_member_l1_gap() {
+        // Member 1 reversed in x: |1 − (−1)| + 0 = 2.
+        let l = cells([&[(1, 0)], &[(-1, 0)]]);
+        let s = set(&[0, 1], OrientCheck::Phi);
+        assert_eq!((s.residual(&l), s.cost(&l)), (2.0, 2.0));
+        // Equal φ: met, whatever the magnitudes' units count.
+        let l = cells([&[(1, 0)], &[(1, 0), (1, 0)]]);
+        assert_eq!(s.violations(&l), 0);
+    }
+
+    #[test]
+    fn ids_go_through_cell_of() {
+        let mut s = set(&[0, 1, 2], OrientCheck::Axis);
+        s.retarget(&[4, 4, 6]);
+        let (mut t, mut p) = (Vec::new(), Vec::new());
+        s.touched(&mut t);
+        s.matched_pairs(&mut p);
+        assert_eq!(t, [4, 4, 6]);
+        assert_eq!(p, [(4, 4), (4, 6)]);
+        assert_eq!((s.count(), s.kind()), (1, "Orientation"));
+        let mut none = Vec::new();
+        set(&[], OrientCheck::Axis).matched_pairs(&mut none);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn violating_ids_name_every_member_only_when_violated() {
+        let s = set(&[0, 1], OrientCheck::Phi);
+        let mut ids = Vec::new();
+        s.violating_ids(&cells([&[(1, 0)], &[(1, 0)]]), &mut ids);
+        assert!(ids.is_empty());
+        s.violating_ids(&cells([&[(1, 0)], &[(-1, 0)]]), &mut ids);
+        assert_eq!(ids, [0, 1]);
+    }
+}

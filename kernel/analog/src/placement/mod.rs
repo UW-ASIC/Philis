@@ -40,3 +40,19 @@ pub(crate) fn push_devices(out: &mut Vec<u32>, targets: &[Target]) {
         Target::Group(_) => None,
     }));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::push_devices;
+    use pnr_core::ids::{DeviceId, GroupId, Target};
+
+    #[test]
+    fn push_devices_keeps_device_order_and_skips_groups() {
+        let mut out = vec![9];
+        push_devices(&mut out, &[]);
+        assert_eq!(out, [9], "empty input appends nothing");
+        let g = Target::Group(GroupId(4));
+        push_devices(&mut out, &[Target::Device(DeviceId(7)), g, Target::Device(DeviceId(u16::MAX)), Target::Device(DeviceId(7))]);
+        assert_eq!(out, [9, 7, u32::from(u16::MAX), 7], "appends, keeps duplicates, widens losslessly");
+    }
+}

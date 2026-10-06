@@ -232,3 +232,124 @@ mod tests {
         assert_eq!(p.violations(&l), 1);
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use pnr_core::{LayerId, Orient, Pin, Rect};
+
+    fn cells(xy: &[(i32, i32)]) -> Layout {
+        let n = xy.len();
+        Layout {
+            x: xy.iter().map(|p| p.0).collect(),
+            y: xy.iter().map(|p| p.1).collect(),
+            hw: vec![500; n],
+            hh: vec![500; n],
+            axis: vec![],
+            groups: vec![],
+            orient: vec![Orient::default(); n],
+            variant: vec![0; n],
+            branch: Vec::new(),
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        }
+    }
+
+    /// One net over point pins at every cell centre.
+    fn points(n: usize, limit: f32) -> PlacePerf {
+        PlacePerf {
+            metric: "m".into(),
+            nets: vec![NetId(0)],
+            weights: vec![1.0],
+            af_per_nm: 1e-3,
+            limit,
+            reserve: RESERVE,
+            items: vec![(0..n as u16).map(|c| (c, vec![(0, 0, 0, 0)])).collect()],
+        }
+    }
+
+    fn pin(net: u16, x: i32, y: i32, w: i32, h: i32) -> Pin {
+        Pin { name: String::new(), net: NetId(net), at: Rect { x, y, w, h }, layer: LayerId(0) }
+    }
+
+    #[test]
+    fn mst_of_fewer_than_two_cells_is_zero() {
+        let l = cells(&[(0, 0)]);
+        assert_eq!(points(0, 1.0).mst_len(0, &l), 0);
+        assert_eq!(points(1, 1.0).mst_len(0, &l), 0);
+    }
+
+    #[test]
+    fn mst_is_a_tree_not_a_star() {
+        // Collinear 0, 1 µm, 5 µm: the tree is 5 µm, a star from 0 would be 6.
+        let l = cells(&[(0, 0), (1_000, 0), (5_000, 0)]);
+        assert_eq!(points(3, 1.0).mst_len(0, &l), 5_000);
+        // An L of three: 3 µm + 4 µm.
+        let l = cells(&[(0, 0), (3_000, 0), (3_000, 4_000)]);
+        assert_eq!(points(3, 1.0).mst_len(0, &l), 7_000);
+    }
+
+    #[test]
+    fn variant_past_the_boxes_falls_back_to_the_first() {
+        let p = PlacePerf { items: vec![vec![(0, vec![(100, 0, 0, 0)]), (1, vec![(0, 0, 0, 0)])]], ..points(0, 1.0) };
+        let mut l = cells(&[(0, 0), (1_000, 0)]);
+        l.variant[0] = 3;
+        assert_eq!(p.mst_len(0, &l), 900);
+    }
+
+    #[test]
+    fn usage_criticality_and_reserve() {
+        // 7 µm of wire × 1e-3 = 7 used; placement may spend 0.8 of it.
+        let l = cells(&[(0, 0), (3_000, 4_000)]);
+        let p = points(2, 1.0);
+        let u = p.worst_usage(&l).unwrap();
+        assert!((u - 7.0 / 0.8).abs() < 1e-4, "{u}");
+        assert_eq!(p.criticality(&l), 1.0);
+        assert!((p.cost(&l) - (7.0 / 0.8 - 1.0)).abs() < 1e-4);
+        let near = cells(&[(0, 0), (100, 0)]);
+        assert!((p.criticality(&near) - 0.1 / 0.8).abs() < 1e-6);
+        assert_eq!((p.violations(&near), p.cost(&near)), (0, 0.0));
+        // No reserve: the whole headroom.
+        let all = PlacePerf { reserve: 0.0, ..points(2, 1.0) };
+        assert!((all.worst_usage(&near).unwrap() - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nets_without_a_weight_are_ignored() {
+        let p = PlacePerf { weights: vec![], ..points(2, 1.0) };
+        assert_eq!(p.worst_usage(&cells(&[(0, 0), (9_000, 0)])), Some(0.0));
+    }
+
+    #[test]
+    fn touched_lists_each_cell_once_sorted() {
+        let p = PlacePerf {
+            items: vec![vec![(5, vec![]), (2, vec![])], vec![(2, vec![]), (0, vec![])]],
+            nets: vec![NetId(0), NetId(1)],
+            weights: vec![1.0, 1.0],
+            ..points(0, 1.0)
+        };
+        let mut out = vec![9];
+        p.touched(&mut out);
+        assert_eq!(out, [9, 0, 2, 5]);
+        assert!(p.local());
+        assert_eq!((p.count(), p.kind()), (1, "PlacePerf"));
+    }
+
+    #[test]
+    fn new_keeps_nets_on_two_cells_with_pin_boxes_about_the_bbox_centre() {
+        // Cell 0: two net-0 pins spanning x 0…400, y 0…100 in a 1000² bbox.
+        let c0 = Macro { pins: vec![pin(0, 0, 0, 100, 100), pin(0, 300, 0, 100, 100), pin(1, 0, 0, 10, 10)], bbox: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() };
+        // Cell 1: one net-0 pin; alternative 1 has none.
+        let c1 = Macro { pins: vec![pin(0, 500, 500, 0, 0)], bbox: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() };
+        let c1_bare = Macro { bbox: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() };
+        let alts: [&[Macro]; 2] = [std::slice::from_ref(&c0), &[c1, c1_bare]];
+        let row = PerformanceBudget::ground_c("ota".into(), vec![NetId(0), NetId(1), NetId(2)], vec![2.0, 3.0, 4.0], 0.5);
+        let p = PlacePerf::new(&row, &alts, 0.3);
+        // Net 1 sits on cell 0 only; net 2 nowhere: both dropped with their weights.
+        assert_eq!((p.nets.clone(), p.weights.clone()), (vec![NetId(0)], vec![2.0]));
+        assert_eq!((p.metric.as_str(), p.af_per_nm, p.limit, p.reserve), ("ota", 0.5, 1.0, 0.3));
+        assert_eq!(p.items[0][0], (0, vec![(200 - 500, 50 - 500, 200, 50)]));
+        assert_eq!(p.items[0][1], (1, vec![(0, 0, 0, 0), (0, 0, 0, 0)]));
+    }
+}

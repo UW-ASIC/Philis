@@ -882,3 +882,98 @@ mod tests {
         assert_eq!(ids, vec![1, 2]);
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::rule::RuleBatch;
+    use pnr_core::{Rect, UnitLib};
+    use std::sync::Arc;
+
+    fn with_members(members: &[u16]) -> MatchedSet {
+        MatchedSet { members: members.iter().map(|&d| DeviceId(d)).collect(), ..pair(0, 1) }
+    }
+
+    #[test]
+    fn fewer_than_two_members_is_an_empty_batch() {
+        let l = singles(1_000);
+        for s in [with_members(&[]), with_members(&[0])] {
+            assert_eq!(s.count(), 0);
+            assert_eq!((s.cost(&l), s.violations(&l), s.residual(&l), s.unknown(&l)), (0.0, 0, 0.0, 0));
+            assert_eq!(s.worst_usage(&l), None);
+            let (mut rows, mut ids, mut res, mut allow) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            s.ledger_rows(&l, &mut rows);
+            s.violating_ids(&l, &mut ids);
+            s.violating_residuals(&l, &mut res);
+            s.offset_allowances(&l, &mut allow);
+            assert!(rows.is_empty() && ids.is_empty() && res.is_empty() && allow.is_empty());
+        }
+        let mut pairs = Vec::new();
+        with_members(&[]).matched_pairs(&mut pairs);
+        with_members(&[3]).matched_pairs(&mut pairs);
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_pair_is_pulled_by_its_centre_distance_over_l_ref() {
+        // No units: cell centres 5 µm apart; L_ref² = 2 · (200 nm)².
+        let l = layout(&[0, 5_000], &[0, 0], 100);
+        let c = pair(0, 1).cost(&l);
+        assert!((c - 5_000.0f32.powi(2) / 80_000.0).abs() < 1e-2, "{c}");
+        let mut allow = Vec::new();
+        pair(0, 1).offset_allowances(&l, &mut allow);
+        assert!(allow.is_empty(), "an unknown pair has no allowance to hand on");
+    }
+
+    #[test]
+    fn pair_areas_read_units_for_mos_else_the_netlist() {
+        let s = MatchedSet { gate_um2: vec![3.0, 4.0], ..pair(0, 1) };
+        assert_eq!(s.pair_areas(&singles(1_000), 1), (20.0, 20.0), "unit weight 2e7 nm²");
+        assert_eq!(s.pair_areas(&layout(&[0, 1], &[0, 0], 1), 1), (3.0, 4.0));
+        let r = MatchedSet { family: Family::Resistor, ..s.clone() };
+        assert_eq!(r.pair_areas(&singles(1_000), 1), (3.0, 4.0), "a resistor unit's weight is not its area");
+        let short = MatchedSet { members: vec![DeviceId(0), DeviceId(1), DeviceId(2)], ..s };
+        assert_eq!(short.pair_areas(&layout(&[0, 1, 2], &[0; 3], 1), 2), (3.0, 0.0), "missing area reads 0");
+    }
+
+    #[test]
+    fn an_allowance_keeps_its_unit_reading() {
+        let rc = MatchedSet { family: Family::Resistor, budget: Budget::Allowance(0.5), ..pair(0, 1) };
+        assert_eq!(rc.budget_in(LedgerUnit::Pct), Budget::Allowance(0.5));
+        assert_eq!(rc.budget_in(LedgerUnit::Mv), Budget::Allowance(0.5));
+        let mv = MatchedSet { budget: Budget::Sigma1Mv(1.0), ..pair(0, 1) };
+        assert_eq!(mv.budget_in(LedgerUnit::Mv), Budget::Sigma1Mv(1.0));
+    }
+
+    #[test]
+    fn ids_and_flags_go_through_cell_of() {
+        let mut s = MatchedSet { members: vec![DeviceId(0), DeviceId(1), DeviceId(2)], ..pair(0, 1) };
+        s.retarget(&[3, 5, 3]);
+        let (mut t, mut p) = (Vec::new(), Vec::new());
+        s.touched(&mut t);
+        s.matched_pairs(&mut p);
+        assert_eq!(t, [3, 5, 3]);
+        assert_eq!(p, [(3, 5), (3, 3)]);
+        assert_eq!((s.count(), s.kind(), s.reads_field(), s.matched_class()), (2, "MatchedSet", true, Some(MatchClass::Moderate)));
+    }
+
+    #[test]
+    fn violating_residuals_charge_both_cells_the_pairs_residual() {
+        // Devices 0 and 1 alone in cells 1 and 2, 1 mm apart (see `violating_ids_are_cells`).
+        let one = [unit(0, 50, 50, 20_000_000)];
+        let other = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &[][..])];
+        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &one[..])];
+        let members = [vec![], vec![DeviceId(0)], vec![DeviceId(1)]];
+        let lib = UnitLib::build(vec![1, 2], &members, [&other[..], &alts[..], &alts[..]].into_iter());
+        let mut l = layout(&[0, 0, 1_000_000], &[0; 3], 50);
+        l.units = Arc::new(lib);
+        let mut s = pair(0, 1);
+        s.retarget(&[1, 2]);
+        let r = s.ledger(&l, 1).residual();
+        assert!(r > 0.0);
+        let mut out = Vec::new();
+        s.violating_residuals(&l, &mut out);
+        assert_eq!(out, [(1, r), (2, r)]);
+        assert!((s.residual(&l) - f64::from(r)).abs() < 1e-9);
+    }
+}

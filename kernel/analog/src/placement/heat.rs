@@ -120,3 +120,95 @@ mod tests {
         assert_eq!(h.residual(&at(2000)), 0.0);
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::rule::RuleBatch;
+
+    fn d(i: u16) -> Target {
+        Target::Device(DeviceId(i))
+    }
+
+    /// Two 2 µm boxes on one row, edge gap `gap` nm.
+    fn at(gap: i32) -> Layout {
+        Layout {
+            x: vec![0, 2_000 + gap],
+            y: vec![0, 0],
+            hw: vec![1_000; 2],
+            hh: vec![1_000; 2],
+            axis: vec![],
+            groups: vec![],
+            orient: vec![Default::default(); 2],
+            variant: vec![0; 2],
+            branch: Vec::new(),
+            power_uw: vec![0; 2],
+            temp_mc: vec![0; 2],
+            units: Default::default(),
+        }
+    }
+
+    #[test]
+    fn cost_is_the_squared_relative_shortfall() {
+        let h = HeatSeparation { victim: d(0), source: d(1), min_gap_nm: 2_000 };
+        assert!((h.cost(&at(0)) - 1.0).abs() < 1e-6, "touching: the whole gap missing");
+        assert!((h.cost(&at(1_000)) - 0.25).abs() < 1e-6);
+        assert!((h.residual(&at(1_000)) - 0.5).abs() < 1e-6, "residual is linear");
+        assert_eq!(h.cost(&at(2_000)), 0.0);
+        assert_eq!(h.cost(&at(50_000)), 0.0);
+    }
+
+    #[test]
+    fn a_zero_or_negative_gap_requirement_costs_nothing() {
+        // Satisfied at any gap, so the pull must be zero too: a rule with no
+        // requirement must not push touching cells apart.
+        for min in [0, -5] {
+            let h = HeatSeparation { victim: d(0), source: d(1), min_gap_nm: min };
+            assert!(h.satisfied(&at(0)));
+            assert_eq!(h.residual(&at(0)), 0.0);
+            assert_eq!(h.cost(&at(0)), 0.0, "min {min}");
+        }
+    }
+
+    #[test]
+    fn separations_is_empty_without_sets_or_sources() {
+        assert!(separations(&[], &[5_000, 5_000], 1_000).is_empty());
+        assert!(separations(&[(MatchClass::Moderate, vec![0, 1])], &[], 1_000).is_empty());
+        assert!(separations(&[(MatchClass::Moderate, vec![])], &[5_000], 1_000).is_empty());
+    }
+
+    #[test]
+    fn a_source_exactly_at_the_threshold_counts() {
+        let r = separations(&[(MatchClass::Exceptional, vec![0])], &[0, 1_000], 1_000);
+        assert_eq!(r, [HeatSeparation { victim: d(0), source: d(1), min_gap_nm: 1_000 }]);
+    }
+
+    #[test]
+    fn a_repeated_cell_in_one_set_is_one_victim() {
+        let r = separations(&[(MatchClass::Moderate, vec![1, 0, 1, 0])], &[0, 0, 3_000], 1_000);
+        assert_eq!(r.len(), 2, "{r:?}");
+    }
+
+    #[test]
+    fn overlapping_sets_emit_each_victim_source_pair_once() {
+        // Sets {0,1} and {1,2} share cell 1; sources 3 and 4 heat both.
+        let sets = [(MatchClass::Moderate, vec![0, 1]), (MatchClass::Moderate, vec![1, 2])];
+        let r = separations(&sets, &[0, 0, 0, 5_000, 6_000], 1_000);
+        let distinct: std::collections::HashSet<(Target, Target)> = r.iter().map(|h| (h.victim, h.source)).collect();
+        assert_eq!(r.len(), distinct.len(), "duplicate rules double-charge one pair: {r:?}");
+        assert_eq!(r.len(), 6, "victims {{0,1,2}} × sources {{3,4}}");
+    }
+
+    #[test]
+    fn retarget_maps_both_sides() {
+        let h = HeatSeparation { victim: d(0), source: d(2), min_gap_nm: 7 }.retarget(&[4, 4, 9]);
+        assert_eq!(h, HeatSeparation { victim: d(4), source: d(9), min_gap_nm: 7 });
+    }
+
+    #[test]
+    fn a_batch_counts_violations_at_the_boundary() {
+        let h = HeatSeparation { victim: d(0), source: d(1), min_gap_nm: 2_000 };
+        assert_eq!(vec![h].violations(&at(1_999)), 1);
+        assert_eq!(vec![h].violations(&at(2_000)), 0);
+    }
+}

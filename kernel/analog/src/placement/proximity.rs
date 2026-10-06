@@ -73,3 +73,74 @@ mod tests {
         assert_eq!(ids, [3, 1, 7]);
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use pnr_core::ids::DeviceId;
+
+    fn d(i: u16) -> Target {
+        Target::Device(DeviceId(i))
+    }
+
+    /// Two 1 µm squares, `b` at `(x, y)`.
+    fn at(x: i32, y: i32) -> Layout {
+        Layout {
+            x: vec![0, x],
+            y: vec![0, y],
+            hw: vec![500; 2],
+            hh: vec![500; 2],
+            orient: vec![pnr_core::Orient::default(); 2],
+            variant: vec![0; 2],
+            axis: vec![],
+            branch: vec![],
+            groups: vec![],
+            power_uw: vec![0; 2],
+            temp_mc: vec![0; 2],
+            units: Default::default(),
+        }
+    }
+
+    fn near(max: i32) -> Proximity {
+        Proximity { a: d(0), b: d(1), max_distance_nm: max }
+    }
+
+    #[test]
+    fn gap_is_euclidean_edge_to_edge() {
+        // Edge gaps 3 µm and 4 µm → 5 µm.
+        let l = at(4_000, 5_000);
+        assert_eq!(near(5_000).usage(&l), Some(1.0));
+        assert!(near(5_000).satisfied(&l));
+        assert!(!near(4_999).satisfied(&l));
+        // Overlapping: no gap at all.
+        assert_eq!(near(5_000).usage(&at(300, 0)), Some(0.0));
+    }
+
+    #[test]
+    fn cost_and_residual_scale_with_the_excess() {
+        // 10 µm gap against a 5 µm limit: 100 % over.
+        let l = at(11_000, 0);
+        assert!((near(5_000).cost(&l) - 1.0).abs() < 1e-6);
+        assert!((near(5_000).residual(&l) - 1.0).abs() < 1e-6);
+        assert!((near(5_000).usage(&l).unwrap() - 2.0).abs() < 1e-6);
+        // Inside the limit: free.
+        let l = at(3_000, 0);
+        assert_eq!((near(5_000).cost(&l), near(5_000).residual(&l)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_zero_limit_asks_for_touching() {
+        assert!(near(0).satisfied(&at(1_000, 0)), "abutting");
+        let apart = at(1_010, 0);
+        assert!(!near(0).satisfied(&apart));
+        assert_eq!(near(0).residual(&apart), 1.0, "no budget to divide: a full violation");
+        assert!(near(0).cost(&apart) > 0.0, "the pull is still on");
+        assert!(near(0).usage(&apart).unwrap().is_finite(), "usage floors the limit at 1 nm");
+    }
+
+    #[test]
+    fn retarget_maps_both_sides() {
+        let r = near(7).retarget(&[3, 2]);
+        assert_eq!((r.a, r.b, r.max_distance_nm), (d(3), d(2), 7));
+    }
+}

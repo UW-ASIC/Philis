@@ -335,3 +335,128 @@ mod tests {
         assert!(env.surroundings(&l)[0].wpe_nm[1] > 30_000.0);
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    fn s(wpe_nm: [f32; 2], ose_nm: [f32; 2], wpe_min_nm: f32, ose_range_nm: f32) -> Surroundings {
+        Surroundings { wpe_nm, ose_nm, wpe_min_nm, ose_range_nm }
+    }
+
+    const INF: f32 = f32::INFINITY;
+
+    #[test]
+    fn usage_reads_only_the_ranges_the_deck_gives() {
+        // OSE alone: 500 vs 1000 nm differ by half the larger, over a 0.2 tolerance.
+        let ose = s([1.0, 1.0], [500.0, 1_000.0], 0.0, 3_000.0);
+        assert!((ose.usage().unwrap() - 2.5).abs() < 1e-6, "WPE must be ignored without its range");
+        // WPE alone, nothing near: free.
+        assert_eq!(s([INF; 2], [1.0, 9_000.0], 3_000.0, 0.0).usage(), Some(0.0));
+    }
+
+    #[test]
+    fn distances_past_range_count_as_the_range() {
+        assert_eq!(s([INF; 2], [5_000.0, 9_000.0], 0.0, 3_000.0).usage(), Some(0.0), "both faded");
+        // WPE skew range is ten times the floor: 40 µm vs 50 µm are both past 30 µm.
+        assert_eq!(s([40_000.0, 50_000.0], [INF; 2], 3_000.0, 0.0).usage().map(|u| u <= 0.1), Some(true));
+    }
+
+    #[test]
+    fn one_member_near_a_well_dominates() {
+        // Near term 3000/1000 = 3; skew (30 000 − 1000)/30 000/0.2 = 29/6 wins.
+        let u = s([INF, 1_000.0], [INF; 2], 3_000.0, 0.0).usage().unwrap();
+        assert!((u - 29.0 / 6.0).abs() < 1e-5, "{u}");
+    }
+
+    #[test]
+    fn an_empty_batch_reports_nothing() {
+        let e = Environment::default();
+        assert_eq!((RuleBatch::<()>::cost(&e, &()), e.violations(&()), e.residual(&()), e.unknown(&())), (0.0, 0, 0.0, 0));
+        assert_eq!((RuleBatch::<()>::worst_usage(&e, &()), RuleBatch::<()>::count(&e)), (None, 0));
+    }
+
+    #[test]
+    fn a_batch_sums_known_pairs_and_counts_unknown_ones() {
+        let hot = s([1_500.0, 1_500.0], [INF; 2], 3_000.0, 0.0); // usage 2
+        let blind = s([1.0; 2], [1.0, 2.0], 0.0, 0.0); // unknown
+        let calm = s([INF; 2], [INF; 2], 3_000.0, 3_000.0); // usage 0
+        let e = Environment(vec![hot, blind, calm]);
+        let cost = RuleBatch::<()>::cost(&e, &());
+        assert!((cost - 2.0).abs() < 1e-6);
+        assert_eq!((e.violations(&()), e.unknown(&()), RuleBatch::<()>::count(&e)), (1, 1, 3));
+        assert!((e.residual(&()) - 1.0).abs() < 1e-6);
+        assert_eq!(RuleBatch::<()>::worst_usage(&e, &()).map(|u| (u - 2.0).abs() < 1e-6), Some(true));
+        assert_eq!(RuleBatch::<()>::kind(&e), "Environment");
+    }
+
+    #[test]
+    fn rect_and_point_gaps_are_euclidean() {
+        let r = rect(0, 0, 1_000, 1_000);
+        assert!(contains(&r, (0, 0)) && contains(&r, (1_000, 1_000)) && !contains(&r, (1_001, 0)));
+        assert_eq!(point_gap(&r, (500, 500)), 0.0);
+        assert_eq!(point_gap(&r, (1_300, 1_400)), 500.0);
+        assert_eq!(point_gap(&r, (-300, 500)), 300.0);
+        assert_eq!(rect_gap(&r, &rect(1_300, 1_400, 10, 10)), 500.0);
+        assert_eq!(rect_gap(&r, &rect(1_000, 0, 10, 10)), 0.0, "touching");
+        assert_eq!(rect_gap(&r, &rect(200, 200, 10, 10)), 0.0, "nested");
+    }
+
+    #[test]
+    fn well_edge_distance_sees_the_union() {
+        assert_eq!(well_edge_distance(&[], (0, 0)), INF);
+        let one = [rect(0, 0, 1_000, 1_000)];
+        assert_eq!(well_edge_distance(&one, (1_300, 1_400)), 500.0, "outside: to the well");
+        assert_eq!(well_edge_distance(&one, (500, 500)), 501.0, "inside: to the first uncovered point");
+        assert_eq!(well_edge_distance(&one, (900, 500)), 101.0);
+        // A second well abutting on the right hides that edge.
+        let two = [one[0], rect(1_000, 0, 1_000, 1_000)];
+        assert_eq!(well_edge_distance(&two, (900, 500)), 501.0);
+    }
+
+    #[test]
+    fn foreign_diff_gap_skips_the_own_cell() {
+        let diffs = vec![vec![rect(0, 0, 100, 100)], vec![rect(400, 0, 100, 100), rect(5_000, 0, 1, 1)], vec![]];
+        assert_eq!(foreign_diff_gap(&diffs, 0), 300.0);
+        assert_eq!(foreign_diff_gap(&diffs, 1), 300.0);
+        assert_eq!(foreign_diff_gap(&diffs, 2), INF, "no diffusion of its own");
+        assert_eq!(foreign_diff_gap(&diffs, 9), INF, "past the geometry");
+        assert_eq!(foreign_diff_gap(&diffs[..1], 0), INF, "alone on the die");
+    }
+
+    fn empty_layout(n: usize) -> Layout {
+        Layout {
+            x: vec![0; n],
+            y: vec![0; n],
+            hw: vec![10; n],
+            hh: vec![10; n],
+            orient: vec![pnr_core::Orient::R0; n],
+            variant: vec![0; n],
+            axis: vec![],
+            branch: vec![],
+            groups: vec![],
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        }
+    }
+
+    #[test]
+    fn live_batch_without_geometry_or_units() {
+        let live = |pairs| LiveEnvironment { pairs, geo: Default::default(), wpe_min_nm: 3_000.0, ose_range_nm: 0.0 };
+        let none = live(vec![]);
+        let l = empty_layout(0);
+        assert!(none.surroundings(&l).is_empty());
+        assert_eq!((none.cost(&l), none.violations(&l), none.count(), none.worst_usage(&l)), (0.0, 0, 0, None));
+        // Members without units and cells past the geometry read "none on the die".
+        let one = live(vec![(DeviceId(0), DeviceId(1), 0, 1)]);
+        let l = empty_layout(2);
+        let got = one.surroundings(&l);
+        assert_eq!((got[0].wpe_nm, got[0].ose_nm), ([INF; 2], [INF; 2]));
+        assert_eq!((one.count(), one.kind(), one.unknown(&l)), (1, "Environment", 0));
+    }
+}

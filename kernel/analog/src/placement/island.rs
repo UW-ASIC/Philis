@@ -145,3 +145,83 @@ mod tests {
         assert_eq!(ids, [0, 1, 2]);
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use pnr_core::ids::DeviceId;
+
+    /// 1000 nm squares at the given centres.
+    fn squares(c: &[(i32, i32)]) -> Layout {
+        let n = c.len();
+        Layout {
+            x: c.iter().map(|p| p.0).collect(),
+            y: c.iter().map(|p| p.1).collect(),
+            hw: vec![500; n],
+            hh: vec![500; n],
+            axis: vec![],
+            groups: vec![],
+            orient: vec![pnr_core::Orient::default(); n],
+            variant: vec![0; n],
+            branch: Vec::new(),
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        }
+    }
+
+    fn ids(n: u16) -> Vec<Target> {
+        (0..n).map(|i| Target::Device(DeviceId(i))).collect()
+    }
+
+    #[test]
+    fn no_members_is_no_island_and_one_member_is_one() {
+        let l = squares(&[(0, 0)]);
+        assert_eq!(components(&l, &[], 0), 0);
+        assert_eq!(components(&l, &ids(1), 0), 1);
+        let empty = SymmetryIsland { members: vec![], touch_nm: 0 };
+        assert_eq!((empty.cost(&l), empty.violations(&l), empty.residual(&l)), (0.0, 0, 0.0));
+    }
+
+    #[test]
+    fn a_chain_is_one_island_through_its_middle() {
+        // 0 – 1 – 2 in a row: 0 and 2 never touch, 1 links them.
+        let l = squares(&[(0, 0), (1_000, 0), (2_000, 0)]);
+        assert_eq!(components(&l, &ids(3), 0), 1);
+        // Drop the middle and the ends fall apart.
+        assert_eq!(components(&l, &[ids(3)[0], ids(3)[2]], 0), 2);
+    }
+
+    #[test]
+    fn vertical_stacking_is_adjacent_too() {
+        let l = squares(&[(0, 0), (0, 1_000)]);
+        assert_eq!(components(&l, &ids(2), 0), 1);
+        let gap = squares(&[(0, 0), (0, 1_001)]);
+        assert_eq!(components(&gap, &ids(2), 0), 2);
+        assert_eq!(components(&gap, &ids(2), 1), 1, "within touch_nm");
+    }
+
+    #[test]
+    fn overlapping_members_are_adjacent() {
+        let l = squares(&[(0, 0), (200, 300)]);
+        assert_eq!(components(&l, &ids(2), 0), 1);
+    }
+
+    #[test]
+    fn three_islands_cost_two() {
+        let l = squares(&[(0, 0), (10_000, 0), (20_000, 0)]);
+        let i = SymmetryIsland { members: ids(3), touch_nm: 0 };
+        assert_eq!((i.cost(&l), i.violations(&l), i.residual(&l)), (2.0, 1, 2.0));
+        assert_eq!((i.count(), i.kind()), (1, "SymmetryIsland"));
+    }
+
+    #[test]
+    fn retarget_maps_members_through_cell_of() {
+        let mut i = SymmetryIsland { members: ids(3), touch_nm: 0 };
+        i.retarget(&[0, 0, 1]);
+        assert_eq!(i.members, [Target::Device(DeviceId(0)), Target::Device(DeviceId(0)), Target::Device(DeviceId(1))]);
+        // A collapsed pair is one cell, adjacent to itself.
+        let l = squares(&[(0, 0), (1_000, 0)]);
+        assert_eq!(components(&l, &i.members, 0), 1);
+    }
+}
