@@ -242,3 +242,36 @@ fn asymmetric_push_runs_fix_monotone() {
         }
     }
 }
+
+/// PLC-15: an R0 halo on cell 1's left face (`[500, 0, 0, 0]`) follows the
+/// cell's orient. At R0 the row gap 0→1 carries it; at R90
+/// (`oriented_faces` puts it on B) the row gap is the bare minimum and the
+/// column gap with cell 1 above cell 0 carries it.
+#[test]
+fn halo_follows_the_orient() {
+    use gp::spacing::oriented_faces;
+    use pnr_core::Orient;
+    let (w, h) = (vec![1000, 1000], vec![1000, 1000]);
+    let prof = vec![None; 2];
+    let table = SpacingTable::uniform(100, 10);
+    let (mut t, errs) = Tree::build(2, &[], &[]);
+    assert!(errs.is_empty());
+    let pos = |t: &Tree, c: u16| t.nodes[0].kids.iter().position(|k| matches!(*k, Kid::Cell(x) if x == c)).unwrap() as u16;
+    let (p0, p1) = (pos(&t, 0), pos(&t, 1));
+    let gaps = |t: &Tree, o: Orient| {
+        let halos = [[0; 4], oriented_faces([500, 0, 0, 0], o)];
+        let g = Geo { w: &w, h: &h, prof: &prof, halo: &halos, table: &table, lattice: 10, axis_grid: None };
+        let mut out = Out::default();
+        decode(t, &g, &mut Scratch::default(), &mut out).unwrap();
+        assert!(verify(t, &g, &out));
+        (out.x0[1] - (out.x0[0] + 1000), out.y0[1] - (out.y0[0] + 1000))
+    };
+    // Row: 0 left of 1.
+    (t.nodes[0].alpha, t.nodes[0].beta) = (vec![p0, p1], vec![p0, p1]);
+    assert_eq!(gaps(&t, Orient::R0).0, 600);
+    assert_eq!(gaps(&t, Orient::R90).0, 100);
+    // Column: 1 above 0.
+    (t.nodes[0].alpha, t.nodes[0].beta) = (vec![p1, p0], vec![p0, p1]);
+    assert_eq!(gaps(&t, Orient::R0).1, 100);
+    assert_eq!(gaps(&t, Orient::R90).1, 600);
+}
