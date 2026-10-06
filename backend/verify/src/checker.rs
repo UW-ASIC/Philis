@@ -460,3 +460,204 @@ impl Checker {
         "engine"
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::{ExtractOptions, Intent};
+
+    fn sky130() -> Checker {
+        Checker::new(&Pdk::builtin("sky130").unwrap(), true).unwrap()
+    }
+
+    fn nmos(terminals: &[&str]) -> crate::RefDeviceIn {
+        crate::RefDeviceIn {
+            kind: RefKind::Nmos,
+            model: None,
+            terminals: terminals.iter().map(|&t| t.into()).collect(),
+            params: vec![],
+        }
+    }
+
+    // Before any run there is nothing to report from: empty caps, zero C.
+    #[test]
+    fn a_fresh_checker_has_no_outputs() {
+        let c = sky130();
+        assert!(c.cap_matrix().is_empty());
+        assert_eq!(c.total_cap_ff(), 0.0);
+        assert!(c.shorted_labels().is_empty());
+        assert_eq!(c.outputs().violations.len(), 0);
+    }
+
+    // No port list: floating_gate's blanket exemption is always reported.
+    #[test]
+    fn skipped_rules_name_the_blanket_port_exemption_until_a_port_list_is_set() {
+        let mut c = sky130();
+        let blanket = |c: &Checker| c.skipped_rules().iter().any(|(r, why)| *r == "floating_gate" && why.contains("no port list"));
+        assert!(blanket(&c));
+        c.set_reference(&RefInput { external_ports: Some(vec![]), ..Default::default() }).unwrap();
+        assert!(!blanket(&c));
+    }
+
+    // A refused reference must not leave the previous one installed: LVS
+    // would then compare the layout against a stale schematic.
+    #[test]
+    fn a_refused_reference_clears_the_previous_one() {
+        let mut c = sky130();
+        let good = RefInput { devices: vec![nmos(&["d", "g", "s", "b"])], ..Default::default() };
+        c.set_reference(&good).unwrap();
+        assert!(c.loaded.reference.is_some());
+        let bad = RefInput { devices: vec![nmos(&["d"])], ..Default::default() };
+        let err = c.set_reference(&bad).unwrap_err();
+        assert!(err.contains("reference device 0"), "{err}");
+        assert!(c.loaded.reference.is_none(), "a stale reference survived a refused one");
+    }
+
+    // set_reference returns the skipped devices in input order with their hints.
+    #[test]
+    fn set_reference_lists_skipped_devices_in_input_order() {
+        let mut c = sky130();
+        let dev = |kind, model: Option<&str>| crate::RefDeviceIn {
+            kind,
+            model: model.map(Into::into),
+            terminals: vec!["a".into(), "b".into()],
+            params: vec![],
+        };
+        let input = RefInput {
+            devices: vec![dev(RefKind::Inductor, Some("l1")), dev(RefKind::Resistor, None), dev(RefKind::Capacitor, None)],
+            ..Default::default()
+        };
+        assert_eq!(
+            c.set_reference(&input).unwrap(),
+            [(RefKind::Inductor, Some("l1".to_string())), (RefKind::Capacitor, None)]
+        );
+    }
+
+    #[test]
+    fn empty_supplies_install_no_intent() {
+        let mut c = sky130();
+        c.set_intent(&Intent { supplies: vec![("VDD".into(), 1800.0, false)], ..Default::default() }).unwrap();
+        assert!(c.loaded.intent.is_some());
+        // Currents with no supply are dropped with the rest.
+        c.set_intent(&Intent { currents: vec![("VDD".into(), 1.0)], ..Default::default() }).unwrap();
+        assert!(c.loaded.intent.is_none());
+    }
+
+    // Grounds alone join a 0 mV domain; nothing to refuse.
+    #[test]
+    fn a_ground_only_intent_is_accepted() {
+        let mut c = sky130();
+        c.set_intent(&Intent { supplies: vec![("VSS".into(), 0.0, true)], ..Default::default() }).unwrap();
+        assert!(c.loaded.intent.is_some());
+    }
+
+    // Non-finite and non-positive limits are omitted, never sent as JSON null.
+    #[test]
+    fn non_finite_or_non_positive_limits_are_omitted() {
+        let mut c = sky130();
+        let intent = Intent {
+            supplies: vec![("VDD".into(), 1800.0, false), ("VSS".into(), 0.0, true)],
+            currents: vec![("VDD".into(), f64::INFINITY), ("VSS".into(), f64::NAN), ("VDD".into(), -1.0), ("VSS".into(), 0.0)],
+            max_drop_mv: vec![("VDD".into(), f64::INFINITY), ("VSS".into(), f64::NAN), ("VDD".into(), 0.0)],
+        };
+        assert_eq!(c.set_intent(&intent), Ok(()));
+    }
+
+    // A refused intent leaves none installed (not the previous one).
+    #[test]
+    fn a_refused_intent_leaves_none() {
+        let mut c = sky130();
+        c.set_intent(&Intent { supplies: vec![("VDD".into(), 1800.0, false)], ..Default::default() }).unwrap();
+        let twice = Intent { supplies: vec![("VDD".into(), 1800.0, false), ("VDD".into(), 3300.0, false)], ..Default::default() };
+        if c.set_intent(&twice).is_err() {
+            assert!(c.loaded.intent.is_none());
+        }
+    }
+
+    #[test]
+    fn set_extract_unmerged_empties_and_restores_the_merge_set() {
+        let mut c = sky130();
+        let default = c.merge.clone();
+        assert!(!default.is_empty(), "sky130 merges its routing metals");
+        assert!(default.windows(2).all(|w| w[0] < w[1]), "sorted, deduplicated: {default:?}");
+        c.set_extract(&ExtractOptions { field_solve: vec!["a".into()], unmerged: true });
+        assert!(c.merge.is_empty());
+        assert_eq!(c.field_nets, ["a"]);
+        c.set_extract(&ExtractOptions::default());
+        assert_eq!(c.merge, default);
+        assert!(c.field_nets.is_empty());
+    }
+
+    #[test]
+    fn layer_name_of_an_id_past_the_deck_is_a_dash() {
+        let c = sky130();
+        assert_eq!(c.layer_name(GvLayerId(u16::MAX)), "-");
+        let n = c.loaded.deck.layers.len() as u16;
+        assert_eq!(c.layer_name(GvLayerId(n)), "-");
+        assert_ne!(c.layer_name(GvLayerId(0)), "-");
+    }
+
+    #[test]
+    fn domain_of_by_kind_then_prefix() {
+        let mut c = sky130();
+        let lvs = c.loaded.strings.intern("lvs.something");
+        let other = c.loaded.strings.intern("not_a_rule");
+        assert_eq!(c.domain_of(lvs), "lvs");
+        assert_eq!(c.domain_of(other), "engine");
+        assert_eq!(c.rule_name(lvs), "lvs.something");
+        let li1 = c.loaded.strings.get("li.1").expect("sky130 li.1");
+        assert_eq!(c.domain_of(li1), "drc");
+    }
+
+    // A block smaller than every window defers every density rule once; a
+    // second call finds none left.
+    #[test]
+    fn deferring_density_is_idempotent() {
+        let mut c = Checker::new(&Pdk::builtin("sky130").unwrap(), false).unwrap();
+        let first = c.defer_density_wider_than(1, 1);
+        assert!(!first.is_empty(), "sky130 has density rules");
+        assert!(c.defer_density_wider_than(1, 1).is_empty());
+        let chip = c.skipped_rules().iter().filter(|(_, why)| why.starts_with("ChipLevel(window")).count();
+        assert_eq!(chip, first.len(), "each deferred once");
+    }
+
+    // A block exactly the window's size keeps the rule: only wider windows defer.
+    #[test]
+    fn a_window_equal_to_the_block_is_kept() {
+        let pdk = Pdk::builtin("sky130").unwrap();
+        let mut c = Checker::new(&pdk, false).unwrap();
+        let gone = c.defer_density_wider_than(700_000, 700_000);
+        assert!(!gone.iter().any(|n| n.starts_with('m') && n.ends_with(".density")), "{gone:?}");
+    }
+
+    #[test]
+    fn strip_density_removes_every_density_rule() {
+        let c = sky130();
+        let kinds = [c.loaded.strings.get("density"), c.loaded.strings.get("density_cmp")];
+        assert!(c.loaded.deck.rules.spec.iter().all(|s| !kinds.contains(&Some(s.kind))));
+    }
+
+    // Extraction only, on geometry with no devices: zero, not None.
+    #[test]
+    fn device_count_of_bare_metal_is_zero() {
+        let pdk = Pdk::builtin("sky130").unwrap();
+        let met1 = pnr_core::Process::layer(&pdk, "met1").unwrap();
+        let mut c = Checker::new(&pdk, true).unwrap();
+        let shapes = [Shape { layer: met1, rect: pnr_core::Rect { x: 0, y: 0, w: 1000, h: 1000 } }];
+        assert_eq!(c.device_count(&shapes), Some(0));
+    }
+
+    // A label short names both labels and carries the LABEL_SHORT prefix.
+    #[test]
+    fn a_label_short_is_reported_with_both_names() {
+        let pdk = Pdk::builtin("sky130").unwrap();
+        let met1 = pnr_core::Process::layer(&pdk, "met1").unwrap();
+        let mut c = Checker::new(&pdk, true).unwrap();
+        let shapes = [Shape { layer: met1, rect: pnr_core::Rect { x: 0, y: 0, w: 2000, h: 1000 } }];
+        let pin = |name: &str, x| LabeledPin { name: name.into(), layer: met1.0, x, y: 500 };
+        let err = c.run(&shapes, &[pin("A", 500), pin("B", 1500), pin("A", 1000)], Checks::ALL).unwrap_err();
+        assert!(err.starts_with(LABEL_SHORT), "{err}");
+        assert!(err.contains("\"A\"") && err.contains("\"B\""), "{err}");
+        assert_eq!(c.shorted_labels(), [vec!["A".to_string(), "B".to_string()]], "each name once, first-seen order");
+    }
+}

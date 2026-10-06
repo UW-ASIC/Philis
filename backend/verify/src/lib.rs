@@ -1177,3 +1177,198 @@ mod tests {
 }
 
 
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use gdsverify::geom::{Dbu, Qty};
+    use pnr_core::{Process, Rect};
+
+    fn sky130() -> Pdk {
+        Pdk::builtin("sky130").unwrap()
+    }
+
+    fn met1(pdk: &Pdk, x: i32, y: i32, w: i32, h: i32) -> Shape {
+        Shape { layer: pdk.layer("met1").unwrap(), rect: Rect { x, y, w, h } }
+    }
+
+    #[test]
+    fn shortfall_covers_every_dimension() {
+        use Measurement as M;
+        let area = |a: i64| M::Area(Dbu::new_unchecked(a).mul_wide(Dbu::new_unchecked(1)));
+        assert_eq!(shortfall(area(100), area(150)), 500);
+        assert_eq!(shortfall(M::Voltage(Qty::new(100.0)), M::Voltage(Qty::new(110.0))), 100);
+        assert_eq!(shortfall(M::Current(Qty::new(2.0)), M::Current(Qty::new(3.0))), 500);
+        assert_eq!(shortfall(M::Resistance(Qty::new(10.0)), M::Resistance(Qty::new(5.0))), 500);
+        assert_eq!(shortfall(M::Count(4), M::Count(5)), 250);
+    }
+
+    #[test]
+    fn shortfall_boundaries() {
+        use Measurement as M;
+        let len = |nm: i64| M::Length(Dbu::new_unchecked(nm));
+        assert_eq!(shortfall(len(0), len(0)), 0, "equal is no shortfall");
+        assert_eq!(shortfall(len(-50), len(50)), 100);
+        assert_eq!(shortfall(M::Ratio(0.0), M::Ratio(0.0)), 0);
+        // A zero limit floors at 1e-12: any excess is enormous, still finite.
+        let tiny = shortfall(M::Ratio(0.0), M::Ratio(1.0));
+        assert!(tiny > 999_000_000_000_000 && tiny < i64::MAX, "{tiny}");
+        assert_eq!(shortfall(M::Ratio(-2.0), M::Ratio(-3.0)), 500, "|limit| for a negative limit");
+        assert_eq!(shortfall(M::Ratio(1.0), M::Ratio(f64::INFINITY)), i64::MAX);
+        assert_eq!(shortfall(M::Ratio(f64::NAN), M::Ratio(1.0)), i64::MAX);
+        // Rounds up: a sliver over is 1 ‰, never 0.
+        assert_eq!(shortfall(M::Ratio(1000.0), M::Ratio(1000.001)), 1);
+        assert_eq!(shortfall(M::Count(1), M::Ratio(1.0)), 1, "mismatched dimensions");
+        assert_eq!(shortfall(len(1), area(1)), 1);
+        fn area(a: i64) -> Measurement {
+            Measurement::Area(Dbu::new_unchecked(a).mul_wide(Dbu::new_unchecked(1)))
+        }
+    }
+
+    #[test]
+    fn denied_reads_only_stages_that_did_not_run() {
+        assert_eq!(denied(&StageStatus::Ran), None);
+        assert_eq!(denied(&StageStatus::NotSelected), None);
+        assert_eq!(denied(&StageStatus::Skipped("no reference")), Some("skipped: no reference".into()));
+        assert_eq!(denied(&StageStatus::Refused("bad".into())), Some("refused: bad".into()));
+    }
+
+    #[test]
+    fn split_by_severity_of_nothing_is_nothing() {
+        let (hard, warn) = split_by_severity(std::iter::empty());
+        assert!(hard.is_empty() && warn.is_empty());
+    }
+
+    #[test]
+    fn coverage_display() {
+        assert_eq!(Coverage::default().to_string(), "");
+        let c = Coverage {
+            unverified: vec![(RefKind::Inductor, None, 2), (RefKind::Capacitor, Some("mom".into()), 1)],
+            skipped_rules: vec![("lvs.parametric".into(), "Skipped(NotInDeck)".into()), ("x".into(), "why".into())],
+            ..Default::default()
+        };
+        assert_eq!(
+            c.to_string(),
+            "  LVS unverified: 2 × Inductor (no model)\n  LVS unverified: 1 × Capacitor mom\n  rules not run (2):\n    \
+             lvs.parametric: Skipped(NotInDeck) (range limits; MOS W/L are compared as lvs.parameter_mismatch, other values are not)\n    \
+             x: why\n"
+        );
+    }
+
+    // No shapes, or a zero-area bbox, is no block: nothing deferred.
+    #[test]
+    fn defer_chip_level_needs_an_area() {
+        let pdk = sky130();
+        let chip = |c: &Checker| c.skipped_rules().iter().filter(|(_, w)| w.starts_with("ChipLevel(window")).count();
+        let mut c = Checker::new(&pdk, false).unwrap();
+        defer_chip_level(&mut c, &[]);
+        assert_eq!(chip(&c), 0);
+        defer_chip_level(&mut c, &[met1(&pdk, 0, 0, 0, 1000)]);
+        assert_eq!(chip(&c), 0, "a line has no area");
+        defer_chip_level(&mut c, &[met1(&pdk, 0, 0, 1000, 1000)]);
+        assert!(chip(&c) > 0);
+    }
+
+    // The bbox is taken in i64: a shape at the edge of i32 must not overflow.
+    #[test]
+    fn defer_chip_level_does_not_overflow_at_the_coordinate_limit() {
+        let pdk = sky130();
+        let mut c = Checker::new(&pdk, false).unwrap();
+        defer_chip_level(&mut c, &[met1(&pdk, i32::MAX - 10, i32::MAX - 10, 100, 100)]);
+        assert!(c.skipped_rules().iter().any(|(_, w)| w.contains("> block 100x100 nm")), "{:?}", c.skipped_rules());
+    }
+
+    // A reference the deck refuses stops the signoff at one engine row.
+    #[test]
+    fn a_refused_reference_is_one_engine_row() {
+        let pdk = sky130();
+        let reference = RefInput {
+            devices: vec![RefDeviceIn { kind: RefKind::Nmos, model: None, terminals: vec!["d".into()], params: vec![] }],
+            ..Default::default()
+        };
+        let s = signoff_checked(&[met1(&pdk, 0, 0, 1000, 1000)], &[], &reference, &Intent::default(), &pdk);
+        let rules: Vec<&str> = s.report.hard_violations.iter().map(|v| v.rule.as_str()).collect();
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        assert!(rules[0].starts_with("engine/reference: "), "{rules:?}");
+        assert!(s.caps.is_empty() && s.warnings.is_empty());
+    }
+
+    // Two identical skipped cards fold into one coverage row of count 2 and
+    // one hard row of margin 2.
+    #[test]
+    fn identical_skipped_cards_fold_into_one_row() {
+        let pdk = sky130();
+        let ind = RefDeviceIn { kind: RefKind::Inductor, model: None, terminals: vec!["a".into(), "b".into()], params: vec![] };
+        let reference = RefInput { devices: vec![ind.clone(), ind], ..Default::default() };
+        let s = signoff_checked(&[], &[], &reference, &Intent::default(), &pdk);
+        assert_eq!(s.coverage.unverified, [(RefKind::Inductor, None, 2)]);
+        let cov: Vec<_> = s.report.hard_violations.iter().filter(|v| v.rule.starts_with("lvs-coverage/")).map(|v| v.margin).collect();
+        assert_eq!(cov, [2]);
+        assert!(s.coverage.skipped_rules.iter().all(|(r, _)| r != NON_MOS_VALUES), "an uncompared inductor is not a valueless match");
+    }
+
+    // A MOS-only reference has no valueless match to report.
+    #[test]
+    fn a_mos_only_reference_lists_no_valueless_row() {
+        let pdk = sky130();
+        let reference = RefInput {
+            devices: vec![RefDeviceIn { kind: RefKind::Nmos, model: None, terminals: ["d", "g", "s", "b"].map(Into::into).to_vec(), params: vec![] }],
+            ..Default::default()
+        };
+        let s = signoff_checked(&[], &[], &reference, &Intent::default(), &pdk);
+        assert!(s.coverage.skipped_rules.iter().all(|(r, _)| r != NON_MOS_VALUES));
+    }
+
+    // Wall time is measured on every path.
+    #[test]
+    fn elapsed_is_set_and_field_time_is_zero_without_a_field_solve() {
+        let pdk = sky130();
+        let s = signoff_checked(&[met1(&pdk, 0, 0, 1000, 1000)], &[], &RefInput::default(), &Intent::default(), &pdk);
+        assert!(s.elapsed > Duration::ZERO);
+        assert_eq!(s.pex_field, Duration::ZERO);
+    }
+
+    // The thin wrappers return what signoff_checked returns.
+    #[test]
+    fn the_wrappers_agree_with_signoff_checked() {
+        let pdk = sky130();
+        let shapes = [met1(&pdk, 0, 0, 1000, 1000)];
+        let rules = |r: &Report| r.hard_violations.iter().map(|v| v.rule.clone()).collect::<Vec<_>>();
+        let full = signoff_checked(&shapes, &[], &RefInput::default(), &Intent::default(), &pdk);
+        let (r1, _) = signoff(&shapes, &[], &RefInput::default(), &pdk);
+        let (r2, _, caps) = signoff_with_caps(&shapes, &[], &RefInput::default(), &pdk);
+        assert_eq!(rules(&r1), rules(&full.report));
+        assert_eq!(rules(&r2), rules(&full.report));
+        assert_eq!(caps, full.caps);
+    }
+
+    // Standalone probes: a length finding is in nm and carries its location;
+    // an ERC probe reports no DRC rows.
+    #[test]
+    fn standalone_findings_carry_unit_and_location() {
+        let pdk = sky130();
+        let li = pdk.layer("li").unwrap();
+        let shapes = [Shape { layer: li, rect: Rect { x: 0, y: 0, w: 100, h: 1000 } }];
+        let f = drc(&shapes, &[], &pdk);
+        let hit = f.iter().find(|f| f.rule == "li.1").expect("li.1 width finding");
+        assert_eq!((hit.unit, hit.margin, hit.warning), ("nm", 70, false));
+        assert_eq!(hit.layer, "li");
+        assert!((0..=100).contains(&hit.x) && (0..=1000).contains(&hit.y), "({}, {})", hit.x, hit.y);
+        assert!(erc(&shapes, &[], &pdk).iter().all(|f| f.rule != "li.1"));
+        assert_eq!(
+            drc_with(&shapes, &[], &pdk, &ExtractOptions { field_solve: vec![], unmerged: true }).iter().filter(|f| f.rule == "li.1").count(),
+            f.iter().filter(|f| f.rule == "li.1").count()
+        );
+    }
+
+    // A mislanded pin label fails the run closed, as one engine finding.
+    #[test]
+    fn a_pin_on_no_shape_is_an_engine_finding() {
+        let pdk = sky130();
+        let pin = LabeledPin { name: "A".into(), layer: pdk.layer("met1").unwrap().0, x: 5000, y: 5000 };
+        let f = drc(&[met1(&pdk, 0, 0, 1000, 1000)], &[pin], &pdk);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].rule.starts_with("engine/run: "));
+        assert_eq!((f[0].margin, f[0].unit, f[0].layer.as_str()), (1, "permille", "-"));
+    }
+}
