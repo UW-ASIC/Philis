@@ -305,11 +305,12 @@ pub fn isolation(
     let calibrated = calibration(kind, epi_nm);
     let min_distance_nm = isolation_min_nm(kind, epi_nm);
     let dev = |d: usize| Target::Device(DeviceId(d as u16));
+    // Victims listed once: the pair scan touches aggressors × victims, not aggressors × devices.
+    let victims: Vec<usize> = (0..n).filter(|&v| victim[v]).collect();
+    let victims = victims.as_slice();
     let rules: Vec<Isolation> = (0..n)
         .filter(|&a| aggressor[a])
-        .flat_map(|a| {
-            (0..n).filter(move |&v| victim[v] && !related(a, v)).map(move |v| Isolation { a: dev(a), b: dev(v), min_distance_nm })
-        })
+        .flat_map(|a| victims.iter().filter(move |&&v| !related(a, v)).map(move |&v| Isolation { a: dev(a), b: dev(v), min_distance_nm }))
         .collect();
     if rules.is_empty() {
         return None;

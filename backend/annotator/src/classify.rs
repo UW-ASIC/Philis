@@ -229,18 +229,24 @@ pub fn refine(classes: &mut [NetClassification], cx: &RefineCtx) -> Vec<NetFacts
     let logic = |ts: &[&str]| cx.matches.iter().filter(move |m| ts.contains(&m.template)).collect::<Vec<_>>();
     let nets_of = |m: &crate::pattern::PatternMatch, t: &str| m.instances.iter().filter_map(|&d| pin(d, t)).collect::<Vec<_>>();
 
-    // 1. DigitalSwitching, to a fixpoint (at most #nets rounds: each adds a net).
-    let gates = logic(&LOGIC);
-    for _ in 0..=n_nets {
-        let before = got.iter().flatten().count();
-        for m in &gates {
+    // 1. DigitalSwitching, to a fixpoint. Each productive round fills at least
+    // one empty net, so it ends within #nets + 1 rounds; the G/D nets of every
+    // logic match are gathered once instead of per round.
+    let gate_io: Vec<(Vec<NetId>, Vec<NetId>)> = logic(&LOGIC).into_iter().map(|m| (nets_of(m, "G"), nets_of(m, "D"))).collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (g, d) in &gate_io {
             let switching = |n: &NetId| pre[n.0 as usize] == C::Clock || got[n.0 as usize].is_some_and(|g| g.0 == C::DigitalSwitching);
-            if nets_of(m, "G").iter().any(switching) {
-                nets_of(m, "D").into_iter().for_each(|n| put(&mut got, Some(n), C::DigitalSwitching, E::Structure));
+            if !g.iter().any(switching) {
+                continue;
             }
-        }
-        if got.iter().flatten().count() == before {
-            break;
+            for &n in d {
+                if !fixed(n) && got[n.0 as usize].is_none() {
+                    got[n.0 as usize] = Some((C::DigitalSwitching, E::Structure));
+                    changed = true;
+                }
+            }
         }
     }
     // 2. Voltage-set gates.
@@ -259,9 +265,11 @@ pub fn refine(classes: &mut [NetClassification], cx: &RefineCtx) -> Vec<NetFacts
     for m in cx.matches.iter().filter(|m| m.template == "charge_pump_cell") {
         put(&mut got, pin(m.instances[0], "D"), C::Noisy, E::Structure);
     }
+    // ponytail: one hash set of lower-cased names; the per-net linear scan was O(nets²).
+    let lower_set: std::collections::HashSet<&str> = lower.iter().map(String::as_str).collect();
     for n in 0..n_nets {
         if let Some(stem) = lower[n].strip_suffix("_n") {
-            if !lower.contains(&format!("{stem}_p")) {
+            if !lower_set.contains(format!("{stem}_p").as_str()) {
                 put(&mut got, Some(NetId(n as u16)), C::Noisy, E::Name);
             }
         }
@@ -308,6 +316,8 @@ pub fn refine(classes: &mut [NetClassification], cx: &RefineCtx) -> Vec<NetFacts
     }
 
     let tb = |n: NetId| cx.ev.switching_nets.contains(&n) || cx.ev.dc_sources.iter().any(|s| s.0 == n);
+    let mut is_port = vec![false; n_nets];
+    cx.ports.iter().filter_map(|p| is_port.get_mut(p.0 as usize)).for_each(|p| *p = true);
     (0..n_nets)
         .map(|i| {
             let n = NetId(i as u16);
@@ -328,7 +338,7 @@ pub fn refine(classes: &mut [NetClassification], cx: &RefineCtx) -> Vec<NetFacts
             set_class(&mut classes[i], class, cx.load_af[i]);
             NetFacts {
                 evidence,
-                port: cx.ports.contains(&n),
+                port: is_port[i],
                 dc_mv: cx.ev.op.as_ref().and_then(|o| o.net_mv.get(i).copied().flatten()).map(|v| (v as i32, v as i32)),
                 rc: RcClass::Unknown,
                 z_ohm: z_ohm[i],

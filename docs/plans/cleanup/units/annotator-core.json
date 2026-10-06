@@ -1,0 +1,36 @@
+{
+  "unit": "annotator-core",
+  "commits": [
+    "55744be cleanup(annotator-core): step 1",
+    "fa1b29e cleanup(annotator-core): step 2",
+    "cleanup(annotator-core): step 3 (this commit)"
+  ],
+  "testsAdded": 44,
+  "flaggedFixed": [
+    "classify::refine Noisy rule: `_p` twin lookup was a linear scan with a format! per `_n` net (O(nets^2)); now one HashSet of lower-cased names",
+    "classify::refine DigitalSwitching fixpoint: recomputed every logic match's G/D nets and recounted all of `got` each round; now gathered once with a changed flag (same result, same termination bound)",
+    "classify::refine port flag: `ports.contains` per net (O(nets*ports)) replaced by a port mask (out-of-range port ids ignored)",
+    "pattern::Search::run: the representative-assignment compare allocated two rank Vecs and a PatternMatch per complete assignment; now an iterator `lt` and a lazily built match",
+    "emit::isolation: pair scan over aggressors x victims instead of aggressors x devices",
+    "lib: LOCAL_NO_SB environment switch (a debug escape hatch that silently dropped SubstrateBalance) removed"
+  ],
+  "flaggedOpen": [
+    "lib::cleanup_tests::empty_netlist_is_one_empty_glue_block asserts an empty netlist annotates without panicking; untested against symmetry/passive/graph/rings on zero devices (not built in this run)",
+    "pattern::cleanup_tests::recognition_is_device_order_invariant asserts the documented permutation invariance of recognize_all + select_disjoint on ota and three_stage; any failure is a real determinism bug in matching",
+    "No build was run (per workflow rules): step 2/3 code was checked by reading definitions only"
+  ],
+  "seamRequests": [
+    {
+      "seam": "annotator-library",
+      "item": "Problem::groups (glue entry)",
+      "change": "Drop the trailing glue group from `groups` (or document it may be empty) when every device is claimed",
+      "why": "Problem::abutment's doc says an empty group panics Layout::bbox; `groups` itself can end with an empty glue group (empty netlist or fully recognised circuit)"
+    }
+  ],
+  "risks": [
+    "Step 1 extracted device_mask/abutment/coverage from annotate_with and moved `let n` to the top; behaviour-preserving by reading, not compiled",
+    "budget_and_cost/hard_and_cost helpers keep per-arm batch order, so constraint ids are unchanged",
+    "No SIMD or branchless rewrites: no loop in this unit is numeric, long and hot enough to pay (pattern search is pointer/backtracking bound; classify loops are scatter writes over nets); fearless_simd not added",
+    "substrate::injectors (other unit) reports ('GuardRing', 'no port list') even for an empty netlist"
+  ]
+}

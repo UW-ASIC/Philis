@@ -378,14 +378,15 @@ impl Search<'_> {
         let Some(&k) = self.order.get(depth) else {
             let mut key = assigned.to_vec();
             key.sort_unstable();
-            let m = PatternMatch { template: self.pat.name, pattern: self.pat, instances: assigned.to_vec(), priority: self.pat.priority };
-            let ranks = |i: &[u32]| i.iter().map(|&d| self.rank[d as usize]).collect::<Vec<_>>();
+            let m = || PatternMatch { template: self.pat.name, pattern: self.pat, instances: assigned.to_vec(), priority: self.pat.priority };
+            let rank = |d: &u32| self.rank[*d as usize];
             match seen.get(&key) {
                 None => {
                     seen.insert(key, out.len());
-                    out.push(m);
+                    out.push(m());
                 }
-                Some(&i) if ranks(assigned) < ranks(&out[i].instances) => out[i] = m,
+                // Lexicographic compare of the rank sequences, without collecting either.
+                Some(&i) if assigned.iter().map(rank).lt(out[i].instances.iter().map(rank)) => out[i] = m(),
                 Some(_) => {}
             }
             return;
