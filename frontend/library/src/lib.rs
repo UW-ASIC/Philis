@@ -2952,8 +2952,8 @@ impl CellSpace {
         {
             b.retarget(&cell_of);
         }
-        let to_cells = |g: &Vec<DeviceId>| remap_members(g, &cell_of);
-        let groups: Vec<_> = problem.groups.iter().map(to_cells).collect();
+        // Group i = block i (glue last), on cells.
+        let groups: Vec<_> = problem.blocks.iter().map(|b| remap_members(&b.devices, &cell_of)).collect();
         #[cfg(debug_assertions)]
         debug_check_retargeted(problem, spaces.len(), &groups);
 

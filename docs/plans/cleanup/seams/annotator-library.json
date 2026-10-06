@@ -1,0 +1,18 @@
+{
+  "seam": "annotator-library",
+  "commits": ["cleanup(seam annotator-library): Problem::blocks is the one group table (glue last, may be empty); dead groups/abutment removed"],
+  "changes": [
+    "backend/annotator/src/lib.rs: removed Problem::groups (a per-annotate clone of blocks[i].devices) and Problem::abutment (no consumer anywhere in the workspace; its doc contradicted the possibly-empty glue group) with the private abutment() helper and its test; Problem::blocks doc now states glue is last, may be empty, blocks[i].devices is Layout::groups[i], and no annotator rule targets a group so empty glue never reaches Layout::bbox; problem_shape_and_ids asserts every non-glue block is non-empty",
+    "backend/annotator/src/tests.rs: dropped abutment_excludes_mixed_polarity_groups (field gone)",
+    "backend/annotator/tests/scale.rs: device count summed over blocks",
+    "frontend/library/src/lib.rs (CellSpace build): cell groups derived from problem.blocks[i].devices via remap_members"
+  ],
+  "deferred": [
+    "annotator-core request 'drop the trailing glue group from groups': taken as the documented option instead. dp::sp::Tree::build and library geometry::clusters_extra both strip the last group as glue; dropping it would cross the library-dp seam owned by another agent",
+    "annotator-sets request on aggressor_weight Box::leak is tagged analog-consumers, not this seam"
+  ],
+  "risks": [
+    "Not compiled (no-build rule): any out-of-tree user of Problem::groups or Problem::abutment breaks; grep found none in the workspace",
+    "frontend/library/src/lib.rs had another agent's uncommitted hunk (lod filter_map near line 2285); only this seam's hunk was staged"
+  ]
+}

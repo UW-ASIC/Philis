@@ -48,8 +48,11 @@ use pnr_core::Netlist;
 
 /// Everything the annotator hands the generators, placer and router.
 pub struct Problem {
-    /// Recognised blocks, then the glue block. Index = [`pnr_core::GroupId`] and
-    /// the stage's symmetry [`pnr_core::ids::AxisId`].
+    /// Recognised blocks, then the glue block (always last, empty when every
+    /// device is claimed). Index = [`pnr_core::GroupId`] and the stage's symmetry
+    /// [`pnr_core::ids::AxisId`]; `blocks[i].devices` is [`pnr_core::Layout::groups`]`[i]`
+    /// (composites may mix polarities). The annotator emits no group-targeted
+    /// rule, so an empty glue never reaches [`pnr_core::Layout::bbox`]'s panic.
     pub blocks: Vec<Block>,
     /// Cell-tier directives (unitization, dummies, guard rings), read by `cells`.
     pub constraints: analog::Constraints,
@@ -61,13 +64,6 @@ pub struct Problem {
     pub routing: analog::Requirements<pnr_core::Routes>,
     /// Per-net class + budgets, indexed by [`pnr_core::NetId`].
     pub net_classes: Vec<analog::metadata::NetClassification>,
-    /// `blocks[i].devices` — feeds [`pnr_core::Layout::groups`]. Composites may mix
-    /// polarities.
-    pub groups: Vec<Vec<DeviceId>>,
-    /// Diffusion-sharing permission, parallel to `groups`: a mixed-polarity group is
-    /// cut to one member (NMOS/PMOS abutment merges implants — DRC-clean, LVS-fatal).
-    /// One member, not zero: an empty group panics `Layout::bbox`.
-    pub abutment: Vec<Vec<DeviceId>>,
     /// `(rule kind, missing input)` for every family left unemitted because the
     /// deck lacks a number: **unknown**, never a pass.
     pub missing: Vec<(&'static str, &'static str)>,
@@ -176,9 +172,6 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     }
     let glue = (0..netlist.devices.len() as u16).filter(|&d| !claimed[d as usize]).map(DeviceId);
     blocks.push(Block { kind: BlockKind::Glue, template: "glue", devices: glue.collect(), injected: false, sub_blocks: Vec::new(), selfs: Vec::new() });
-
-    let groups: Vec<Vec<DeviceId>> = blocks.iter().map(|b| b.devices.clone()).collect();
-    let abutment = abutment(netlist, &groups);
 
     // A net feeding a matched device's gate is the small-signal path whose coupling
     // shows up as offset: classified Sensitive, tight budgets.
@@ -641,8 +634,6 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         coverage,
         constraints,
         net_classes,
-        groups,
-        abutment,
         blocks,
         missing,
     };
@@ -665,20 +656,6 @@ fn device_mask<'a>(n: usize, devices: impl IntoIterator<Item = &'a DeviceId>) ->
         mask[d.0 as usize] = true;
     }
     mask
-}
-
-/// Diffusion-sharing permission per group ([`Problem::abutment`]): the group
-/// itself when every member has one device kind, else its first member only.
-/// An empty group stays empty.
-fn abutment(netlist: &Netlist, groups: &[Vec<DeviceId>]) -> Vec<Vec<DeviceId>> {
-    let kind = |d: &DeviceId| netlist.devices[d.0 as usize].kind;
-    groups
-        .iter()
-        .map(|g| match g.first() {
-            Some(first) if g.iter().any(|d| kind(d) != kind(first)) => vec![*first],
-            _ => g.clone(),
-        })
-        .collect()
 }
 
 /// [`Coverage`] of every device, by id: constrained when a placement batch
@@ -783,13 +760,6 @@ mod cleanup_tests {
     }
 
     #[test]
-    fn abutment_cuts_mixed_groups_to_one() {
-        let nl = ota();
-        let g = vec![vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2), DeviceId(0)], vec![], vec![DeviceId(4)]];
-        assert_eq!(abutment(&nl, &g), [vec![DeviceId(0), DeviceId(1)], vec![DeviceId(2)], vec![], vec![DeviceId(4)]]);
-    }
-
-    #[test]
     fn coverage_reason_order() {
         let nl = pnr_core::Netlist {
             devices: vec![
@@ -859,7 +829,6 @@ mod cleanup_tests {
         assert_eq!(p.blocks.len(), 1);
         assert_eq!((p.blocks[0].kind, p.blocks[0].template), (BlockKind::Glue, "glue"));
         assert!(p.blocks[0].devices.is_empty() && p.coverage.is_empty() && p.net_classes.is_empty());
-        assert_eq!(p.groups, [Vec::<DeviceId>::new()]);
         assert_eq!(p.axis_count, 1, "a spare axis when there is no compound");
     }
 
@@ -876,9 +845,9 @@ mod cleanup_tests {
         arms.iter().flat_map(|a| a.iter()).map(|b| b.meta().expect("tagged").id.0).collect()
     }
 
-    /// Shape invariants: one coverage row per device in id order, `groups`
-    /// mirrors `blocks` (glue last), `abutment` parallel and never empty for a
-    /// non-empty group, and batch ids dense from 0 (placement, then routing).
+    /// Shape invariants: one coverage row per device in id order, glue last,
+    /// every device in exactly one block, every non-glue block non-empty, and
+    /// batch ids dense from 0 (placement, then routing).
     #[test]
     fn problem_shape_and_ids() {
         for nl in [ota(), crate::tests::three_stage()] {
@@ -886,11 +855,9 @@ mod cleanup_tests {
             assert_eq!(p.coverage.len(), nl.devices.len());
             assert!(p.coverage.iter().enumerate().all(|(i, c)| c.0 == DeviceId(i as u16)));
             assert_eq!(p.blocks.last().map(|b| b.kind), Some(BlockKind::Glue));
-            assert_eq!(p.groups, p.blocks.iter().map(|b| b.devices.clone()).collect::<Vec<_>>());
-            assert_eq!(p.abutment.len(), p.groups.len());
-            assert!(p.abutment.iter().zip(&p.groups).all(|(a, g)| a.is_empty() == g.is_empty() && a.iter().all(|d| g.contains(d))));
+            assert!(p.blocks[..p.blocks.len() - 1].iter().all(|b| !b.devices.is_empty()), "only glue may be empty");
             let mut seen = vec![false; nl.devices.len()];
-            for d in p.groups.iter().flatten() {
+            for d in p.blocks.iter().flat_map(|b| &b.devices) {
                 assert!(!std::mem::replace(&mut seen[d.0 as usize], true), "device {d:?} in two groups");
             }
             assert!(seen.iter().all(|&s| s), "every device in exactly one group");
