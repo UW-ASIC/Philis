@@ -52,14 +52,18 @@ pub fn enumerate(
     merge_distinct_gates: bool,
 ) -> Cells {
     let cells: Vec<(Vec<DeviceId>, bool)> = constraints.unitization.iter().map(|u| (u.devices.clone(), u.route_matching_required)).collect();
-    enumerate_folded(netlist, macros, constraints, pdk, merge_distinct_gates, &folds(netlist, pdk, &[], &cells), &[])
+    enumerate_folded(netlist, macros, constraints, pdk, merge_distinct_gates, &folds(netlist, pdk, &[], &cells), &[], &[])
 }
 
 /// [`enumerate`] at a given fold table ([`folds`]); the flow computes it once
 /// so the cells and every LVS reference agree. `net_classes` names the rails:
 /// a dummy tie goes to Ground, and a single capacitor binds its bottom plate
-/// to the lower-impedance net (CELL-18, [`plate_rank`]).
+/// to the lower-impedance net (CELL-18, [`plate_rank`]). Each of `blocks`
+/// (FLOW-11: member devices, the child's geometry) is one cell of one
+/// alternative at its lowest member, drawn in the child, never here; a
+/// unitization touching a block member is declined.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn enumerate_folded(
     netlist: &Netlist,
     macros: &Macros,
@@ -68,6 +72,7 @@ pub fn enumerate_folded(
     merge_distinct_gates: bool,
     fold: &[(u16, i32)],
     net_classes: &[analog::metadata::NetClassification],
+    blocks: &[(Vec<DeviceId>, Macro)],
 ) -> Cells {
     use analog::metadata::NetClass;
     let ground = net_classes.iter().find(|c| c.class == NetClass::Ground).map(|c| c.net);
@@ -78,6 +83,11 @@ pub fn enumerate_folded(
 
     // Phase 1: decide and draw the merges.
     let mut unit_of: Vec<Option<usize>> = vec![None; n];
+    let mut block_of: Vec<Option<usize>> = vec![None; n];
+    for (b, (members, _)) in blocks.iter().enumerate() {
+        members.iter().filter(|d| (d.0 as usize) < n).for_each(|d| block_of[d.0 as usize] = Some(b));
+    }
+    let mut block_emitted = vec![false; blocks.len()];
     let mut merged: Vec<Option<(Vec<DeviceId>, Vec<Macro>)>> = Vec::new();
     let mut aspect_missed = 0usize;
     for u in &sized.unitization {
@@ -97,7 +107,7 @@ pub fn enumerate_folded(
             u.devices
         );
         if members.iter().any(|d| macros.get(&dev(d).name).is_some())
-            || members.iter().any(|d| unit_of[d.0 as usize].is_some())
+            || members.iter().any(|d| unit_of[d.0 as usize].is_some() || block_of[d.0 as usize].is_some())
         {
             continue;
         }
@@ -173,7 +183,12 @@ pub fn enumerate_folded(
     let mut devices_of: Vec<Vec<DeviceId>> = Vec::new();
     for (i, d) in netlist.devices.iter().enumerate() {
         let ci = spaces.len() as u16;
-        let (members, alternatives) = if let Some(ui) = unit_of[i] {
+        let (members, alternatives) = if let Some(b) = block_of[i] {
+            if std::mem::replace(&mut block_emitted[b], true) {
+                continue;
+            }
+            (blocks[b].0.clone(), vec![blocks[b].1.clone()])
+        } else if let Some(ui) = unit_of[i] {
             // Emitted at its lowest member; later members are no-ops.
             let Some(m) = merged[ui].take() else { continue };
             m

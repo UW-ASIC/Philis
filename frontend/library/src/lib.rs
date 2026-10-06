@@ -7,6 +7,7 @@
 mod cellgen;
 mod fill;
 mod geometry;
+mod hier;
 mod parse;
 pub use parse::{spice_report, spice_with, ParseOptions, ParseReport, SizeConvention};
 
@@ -137,6 +138,32 @@ pub struct Config {
     /// search that has an incumbent stops before its next epoch
     /// ([`StopReason::WallBudget`]). `None` = unbounded.
     pub max_wall: Option<std::time::Duration>,
+    /// Flat, or each eligible sub-circuit definition solved once as a block (FLOW-11).
+    pub hierarchy: Hierarchy,
+}
+
+/// Bottom-up hierarchy (FLOW-11). Opt-in: bottom-up is not globally optimal
+/// (Balasa–Graeb L3068–3075): a child is solved without its parent's context.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Hierarchy {
+    /// One flat solve of every device.
+    #[default]
+    Flat,
+    /// Every eligible definition with at least `min_devices` devices
+    /// (own + nested) solved once, children first, and instanced as a cell.
+    BottomUp { min_devices: usize },
+    /// `BottomUp { min_devices: 2 }` when the flattened top has more than 100
+    /// devices, else `Flat` (policy bound, Balasa–Graeb L1604–1605).
+    Auto,
+}
+
+/// [`Config::hierarchy`] resolved on `nl`: `Some(min_devices)`, `None` = flat.
+fn hierarchy(cfg: &Config, nl: &pnr_core::Netlist) -> Option<usize> {
+    match cfg.hierarchy {
+        Hierarchy::Flat => None,
+        Hierarchy::BottomUp { min_devices } => Some(min_devices),
+        Hierarchy::Auto => (nl.devices.len() > 100).then_some(2),
+    }
 }
 
 /// A die edge.
@@ -236,6 +263,7 @@ impl Default for Config {
             cold_every: 1,
             warm: dp::Schedule::warm(),
             max_wall: None,
+            hierarchy: Hierarchy::Flat,
         }
     }
 }
@@ -287,6 +315,11 @@ pub struct Solution {
     /// The shipped geometry's PEX matrix: post-fill when `metadata.post_fill`,
     /// else the winning epoch's (PERF-15/22 read it).
     pub caps: verify::CapMatrix,
+    /// Per sub-circuit definition solved as a block (FLOW-11), children first:
+    /// its name and its own solve's report. Empty when flat.
+    pub blocks: Vec<(String, metadata::MetadataReport)>,
+    /// The LVS side of the placed blocks ([`hier::BlockRef`]).
+    pub(crate) block_ref: hier::BlockRef,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -345,6 +378,8 @@ pub struct RunStats {
     pub warm_epochs: u32,
     /// Why the winning start's search ended.
     pub stop: StopReason,
+    /// Sub-circuit definitions solved as blocks (FLOW-11); 0 when flat.
+    pub block_solves: u32,
 }
 
 /// Why a search ended (FLOW-08).
@@ -407,6 +442,8 @@ pub enum FlowError {
     InjectedNotADevice(String, Option<usize>),
     /// [`Config::interface`] names a net that is not a port of the top cell.
     Interface(String),
+    /// The deck's routing stack is unusable (`elaborate::routing_stack`).
+    Deck(String),
 }
 
 /// Epochs without improvement before an assignment counts as stalled.
@@ -479,14 +516,37 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     }
 
     check_injected(&netlist, injected, pdk)?;
+    // 2. Bias: per-device power and per-net current. Placement-independent,
+    //    so solved once, before annotation: its op point and testbench are the
+    //    annotator's evidence (EXT-17).
+    let bias = bias(&netlist, cfg);
+    // FLOW-11: blocks are solved first, each from its first instance, and
+    // enter this solve as one cell per outermost instance.
+    let (blocks, placed) = match hierarchy(cfg, &netlist) {
+        Some(k) => {
+            let b = hier::solve_blocks(&netlist, pdk, cfg, &bias, k)?;
+            let p = hier::instantiate(&netlist, &b);
+            (b, p)
+        }
+        None => Default::default(),
+    };
+    let mut sol = solve(&netlist, pdk, injected, cfg, bias, &placed)?;
+    sol.stats.block_solves = blocks.len() as u32;
+    sol.blocks = blocks.into_iter().map(|b| (b.subckt, b.metadata)).collect();
+    Ok(sol)
+}
 
+/// Steps 3–7 of [`run`] on a parsed, biased `netlist`: annotate, draw cells
+/// (each of `blocks.cells` one fixed-geometry cell), search, finish. A block
+/// child is solved here too ([`hier::solve_blocks`]).
+fn solve(netlist: &pnr_core::Netlist, pdk: &Pdk, injected: &Macros, cfg: &Config, bias: Bias, blocks: &hier::Placed) -> Result<Solution, FlowError> {
     // Annotated once here for the sensitivity rows; each topology annotates
     // its own `Problem` with the same `ann` (one leaked stack per run).
     let stack: &'static analog::routing::Stack = Box::leak(Box::new(elaborate::stack(pdk)));
     let mut ann = annotation_with(pdk, &cfg.annotation, stack);
     ann.process.die_temp_k = cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15);
     if let Some(text) = &cfg.constraints {
-        let (side, diags) = AnnotationConfig::from_json(text, &netlist).map_err(FlowError::Interface)?;
+        let (side, diags) = AnnotationConfig::from_json(text, netlist).map_err(FlowError::Interface)?;
         ann.supply_nets.extend(side.supply_nets);
         ann.ground_nets.extend(side.ground_nets);
         ann.clock_nets.extend(side.clock_nets);
@@ -502,19 +562,15 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         ann.tubs.extend(side.tubs);
         ann.sidecar_diags.extend(diags);
     }
-    // 2. Bias: per-device power and per-net current. Placement-independent,
-    //    so solved once, before annotation: its op point and testbench are the
-    //    annotator's evidence (EXT-17).
-    let bias = bias(&netlist, cfg);
     let ev = bias.op.as_ref().map_or_else(Default::default, |o| {
-        let mut e = o.evidence(&netlist, bias.summary.as_ref().is_some_and(|s| s.probe));
+        let mut e = o.evidence(netlist, bias.summary.as_ref().is_some_and(|s| s.probe));
         if let Some(tb) = cfg.op.as_ref().and_then(|c| c.testbench.as_deref()) {
-            (e.switching_nets, e.dc_sources) = oppoint::testbench_sources(&netlist, tb);
+            (e.switching_nets, e.dc_sources) = oppoint::testbench_sources(netlist, tb);
         }
         e
     });
-    let base = annotator::annotate_with(&netlist, &ann, &ev);
-    let plan = performance_rows(&netlist, cfg, &ann, &base.net_classes);
+    let base = annotator::annotate_with(netlist, &ann, &ev);
+    let plan = performance_rows(netlist, cfg, &ann, &base.net_classes);
     let ev = annotator::Evidence { sens: plan.evidence.clone(), ..ev };
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
@@ -524,8 +580,8 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // lexicographically better kept.
     // Both topologies are built once on this thread (pricing every variant
     // once); the starts only search them.
-    let merged = topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, true);
-    let apart = merged.distinct.then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, false));
+    let merged = topology(netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, blocks, true)?;
+    let apart = if merged.distinct { Some(topology(netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, blocks, false)?) } else { None };
     let tops: Vec<&Topology> = std::iter::once(&merged).chain(apart.as_ref()).collect();
     let tops = &tops;
     let deadline = cfg.max_wall.map(|d| std::time::Instant::now() + d);
@@ -574,6 +630,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     sol.metadata.budget_rows = plan.notes;
     sol.metadata.sensitivity = plan.sens;
     sol.metadata.pareto = pareto;
+    sol.block_ref = blocks.refs.clone();
     Ok(sol)
 }
 
@@ -793,8 +850,9 @@ fn topology<'a>(
     ann: &AnnotationConfig,
     ev: &annotator::Evidence,
     perf: &'a PerfPlan,
+    blocks: &hier::Placed,
     merge_distinct_gates: bool,
-) -> Topology<'a> {
+) -> Result<Topology<'a>, FlowError> {
     #[cfg(test)]
     if !merge_distinct_gates {
         APART_BUILDS.with(|c| c.set(c.get() + 1));
@@ -813,7 +871,7 @@ fn topology<'a>(
     // One fold table for the cells and every LVS reference of this run.
     let unit_cells: Vec<(Vec<DeviceId>, bool)> = problem.constraints.unitization.iter().map(|u| (u.devices.clone(), u.route_matching_required)).collect();
     let fold = cellgen::folds(&netlist, pdk, &bias.gm_us, &unit_cells);
-    let cells = CellSpace::new(&netlist, injected, &mut problem, pdk, &bias.power, merge_distinct_gates, &fold);
+    let cells = CellSpace::new(netlist, injected, &mut problem, pdk, &bias.power, merge_distinct_gates, &fold, &blocks.cells);
     // Already cell-indexed: pushed after the retarget.
     let env = live_environment(&problem, &cells, pdk);
     if !env.pairs.is_empty() {
@@ -858,8 +916,7 @@ fn topology<'a>(
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
-    // ponytail: a bad deck still panics here; FLOW-11 propagates the `Err`.
-    let stack = elaborate::routing_stack(pdk, None).unwrap_or_else(|e| panic!("routing stack: {e}"));
+    let stack = elaborate::routing_stack(pdk, None).map_err(FlowError::Deck)?;
     let (layers, cuts, pin_access) = (stack.layers.clone(), stack.cuts.clone(), stack.pin_access);
     // EM limits on the pin-access layer and cut too (sky130 mcon 0.36 mA/cut):
     // the access jogs and pin cuts carry their terminal's current.
@@ -930,6 +987,7 @@ fn topology<'a>(
         pdk,
         netlist,
         net_names: netlist.nets.iter().map(|n| n.name.clone()).collect(),
+        block_ref: blocks.refs.clone(),
         d_router: {
             let mut r = elaborate::detailed_router(pdk, &stack);
             r.cfg.supply_nets = problem
@@ -982,7 +1040,7 @@ fn topology<'a>(
         .map(|m| flow.problem.constraints.unitization.iter().any(|u| u.class == Some(pnr_core::MatchClass::Exceptional) && m.iter().all(|d| u.devices.contains(d))))
         .collect();
     let (assignment0, allowed) = cellgen::seed_assignment(&flow.cells.variants, &matched, &ranked, pdk);
-    Topology { flow, assignment0, allowed, distinct, t_em_k, em_derate }
+    Ok(Topology { flow, assignment0, allowed, distinct, t_em_k, em_derate })
 }
 
 /// One start's search on a shared topology: the winning epoch, the start's
@@ -1270,6 +1328,8 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
         route_stats: best.route_stats,
         diagnostics: flow.problem.intent.diagnostics,
         caps: best.caps,
+        blocks: Vec::new(),
+        block_ref: hier::BlockRef::default(),
     };
     // FLOW-10: the certificate is of what ships. Budgets are not re-scored:
     // fill moves no cell and adds no route.
@@ -1288,6 +1348,8 @@ struct Flow<'a> {
     /// The schematic (LVS reference) and its net names (label text).
     netlist: &'a pnr_core::Netlist,
     net_names: Vec<String>,
+    /// Placed blocks' LVS cards and the schematic devices they replace (FLOW-11).
+    block_ref: hier::BlockRef,
     /// Rules and constraints; placement rules retargeted to cell ids.
     problem: Problem,
     cells: CellSpace,
@@ -1758,7 +1820,7 @@ impl Flow<'_> {
         // The epoch is scored by the same DRC/ERC/LVS gate as the final result.
         let mut labelled = placed;
         labelled.extend(rings.iter().cloned());
-        let mut signoff = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), self.pdk);
+        let mut signoff = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), &self.block_ref, self.pdk);
         signoff.report.hard_violations.extend(undrawable(&macros, &self.cells.devices_of, self.netlist));
         lap(6);
         let mut budgets = metadata::build(
@@ -2408,13 +2470,14 @@ impl CellSpace {
         power: &[i32],
         merge_distinct_gates: bool,
         fold: &[(u16, i32)],
+        blocks: &[(Vec<DeviceId>, Macro)],
     ) -> Self {
         let cellgen::Cells {
             spaces,
             cell_of,
             devices_of,
             aspect_missed,
-        } = cellgen::enumerate_folded(netlist, injected, &problem.constraints, pdk, merge_distinct_gates, fold, &problem.net_classes);
+        } = cellgen::enumerate_folded(netlist, injected, &problem.constraints, pdk, merge_distinct_gates, fold, &problem.net_classes, blocks);
         let note = ("MatchClass", "no variant meets the aspect limit");
         if aspect_missed > 0 && !problem.missing.contains(&note) {
             problem.missing.push(note);
@@ -2441,8 +2504,10 @@ impl CellSpace {
         debug_check_retargeted(problem, spaces.len(), &groups);
 
         // Guard rings land on cells; two members of one cell asking is one ring.
+        // A block member's ring was drawn in the block (FLOW-11).
         let mut guard_rings = analog::Constraints::default();
-        for r in &problem.constraints.guard_rings {
+        let in_block = |d: DeviceId| blocks.iter().any(|b| b.0.contains(&d));
+        for r in problem.constraints.guard_rings.iter().filter(|r| !in_block(r.device)) {
             let mut r = r.clone();
             if let Some(&c) = cell_of.get(r.device.0 as usize) {
                 r.device = DeviceId(c);
@@ -2649,7 +2714,7 @@ pub fn signoff_inputs(
     let shapes = sol.geometry();
     let placed = pnr_core::place_macros(&sol.macros, &sol.layout);
     let names: Vec<String> = sol.netlist.nets.iter().map(|n| n.name.clone()).collect();
-    let (pins, reference) = labels_and_reference(&shapes, &placed, &names, &sol.netlist, Some(&sol.folds), pdk);
+    let (pins, reference) = labels_and_reference(&shapes, &placed, &names, &sol.netlist, Some(&sol.folds), &sol.block_ref, pdk);
     (shapes, pins, reference)
 }
 
@@ -2772,6 +2837,7 @@ pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String,
 
 /// Signoff over drawn `shapes`; `fold`: the table the cells were drawn at
 /// ([`cellgen::folds`], the flow), `None` for the schematic's own fingers.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn signoff_shapes(
     intent: &verify::Intent,
     shapes: &[pnr_core::Shape],
@@ -2779,24 +2845,29 @@ pub(crate) fn signoff_shapes(
     nets: &[String],
     schematic: &pnr_core::Netlist,
     fold: Option<&[(u16, i32)]>,
+    blocks: &hier::BlockRef,
     pdk: &Pdk,
 ) -> verify::Signoff {
-    let (pins, reference) = labels_and_reference(shapes, placed, nets, schematic, fold, pdk);
+    let (pins, reference) = labels_and_reference(shapes, placed, nets, schematic, fold, blocks, pdk);
     verify::signoff_checked(shapes, &pins, &reference, intent, pdk)
 }
 
 /// Labels every provable net (see [`labeled_pins`]) and builds the LVS
 /// reference with exactly those names as ports — `verify` requires they match.
+/// A placed block's members are replaced by its own cards (`blocks`, FLOW-11).
+#[allow(clippy::too_many_arguments)]
 fn labels_and_reference(
     shapes: &[pnr_core::Shape],
     placed: &[Macro],
     nets: &[String],
     schematic: &pnr_core::Netlist,
     fold: Option<&[(u16, i32)]>,
+    blocks: &hier::BlockRef,
     pdk: &Pdk,
 ) -> (Vec<verify::LabeledPin>, verify::RefInput) {
     let pins = labeled_pins(placed, nets, pdk, shapes);
-    let (drawn, replaced) = cellgen::drawn_cards(placed, nets, schematic, pdk);
+    let (drawn, mut replaced) = cellgen::drawn_cards(placed, nets, schematic, pdk);
+    replaced.extend_from_slice(&blocks.members);
     let mut reference = cellgen::reference(schematic, fold, &replaced);
     // A resistor is drawn to its model's recipe: the deck model that names.
     for d in reference.devices.iter_mut().filter(|d| d.kind == verify::reference::RefKind::Resistor) {
@@ -2806,6 +2877,7 @@ fn labels_and_reference(
     }
     reference.devices.extend(cellgen::dummy_cards(placed, nets, &reference.devices));
     reference.devices.extend(drawn);
+    reference.devices.extend(blocks.cards.iter().cloned());
     reference.ports = pins.iter().map(|p| p.name.clone()).collect();
     // PERF-03: only the declared `.subckt` ports leave the cell; with none
     // (no `.subckt` around the top) every labelled net stays exempt.
@@ -2911,7 +2983,7 @@ mod start_tests {
         let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
         let ann = crate::annotation_with(&pdk, &cfg_warm.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
         let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0, evidence: None, r_weight: Vec::new(), pair_weight: Vec::new(), beta_key: false };
-        let t = crate::topology(&nl, &Default::default(), &pdk, &cfg_warm, &bias, &ann, &Default::default(), &plan, true);
+        let t = crate::topology(&nl, &Default::default(), &pdk, &cfg_warm, &bias, &ann, &Default::default(), &plan, &Default::default(), true).unwrap();
         let f = &t.flow;
         let epoch = |start: Option<&pnr_core::Layout>, seed: u64| f.epoch(&t.assignment0, false, start, &f.weights, &mut gp::Prices::new(), &mut gr::Negotiation::new(), seed).layout;
         let pos = |l: &pnr_core::Layout| (l.x.clone(), l.y.clone(), l.variant.clone());
@@ -3352,7 +3424,7 @@ mod size_tests {
             crate::deck_models(&mut netlist, &pdk);
             let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
             let fold = crate::cellgen::folds(&netlist, &pdk, &[], &[]);
-            let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
+            let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold, &[]);
             for (i, dev) in netlist.devices.iter().enumerate() {
                 if !matches!(dev.kind, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
                     continue;
@@ -3426,7 +3498,7 @@ mod common_node_tests {
         let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
         let ann = crate::annotation_with(&pdk, &cfg.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
         let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0, evidence: None, r_weight: Vec::new(), pair_weight: Vec::new(), beta_key: false };
-        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &Default::default(), &plan, true);
+        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &Default::default(), &plan, &Default::default(), true).unwrap();
         let n = t.flow.cells.variants.len();
         let layout = pnr_core::Layout {
             x: (0..n).map(|i| i as i32 * 20_000).collect(),
@@ -3490,7 +3562,7 @@ mod spacing_tests {
         crate::deck_models(&mut netlist, pdk);
         let mut problem = annotator::annotate(&netlist, &crate::annotation(pdk, &Default::default()));
         let fold = crate::cellgen::folds(&netlist, pdk, &[], &[]);
-        let cs = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, pdk, &[], true, &fold);
+        let cs = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, pdk, &[], true, &fold, &[]);
         (netlist.devices.iter().map(|d| d.name.clone()).collect(), problem, cs)
     }
 
@@ -3739,7 +3811,7 @@ mod environment_tests {
         crate::deck_models(&mut netlist, &pdk);
         let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
         let fold = crate::cellgen::folds(&netlist, &pdk, &[], &[]);
-        let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
+        let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold, &[]);
         let env = crate::live_environment(&problem, &cells, &pdk);
         let n = cells.variants.len();
         assert!(!env.pairs.is_empty(), "ota has a matched pair");
