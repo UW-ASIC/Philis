@@ -252,6 +252,10 @@ impl Instance {
             let r = f(Rect { x: u.x, y: u.y, w: 0, h: 0 });
             (u.x, u.y) = (r.x, r.y);
         }
+        // Keepouts are geometry too: they follow the shapes they protect.
+        for k in &mut self.mac.keepouts {
+            k.rect = f(k.rect);
+        }
     }
 
     /// Σ of the units' current directions: what a mirror must preserve.
@@ -435,7 +439,8 @@ impl<P: Process> CompBuilder<'_, P> {
     pub fn place_mirrored(&mut self, mut inst: Instance, reference: &Instance, gap: i32) -> Result<Instance, GenError> {
         let g = self.process.grid().max(1);
         let (a, b) = (reference.bbox(), inst.bbox());
-        let axis = (a.x + a.w + gap / 2 + g - 1) / g * g;
+        // Ceiling onto the grid (toward +∞, also for negative coordinates).
+        let axis = -(-(a.x + a.w + gap / 2)).div_euclid(g) * g;
         let (dx, dy) = (a.x - b.x, a.y - b.y);
         inst.transform(|r| Rect { x: 2 * axis - (r.x + dx + r.w), y: r.y + dy, ..r });
         for u in &mut inst.mac.units {
@@ -584,10 +589,16 @@ pub fn build_with<P: Process>(
     // per unwired qualified name.
     let (mut nets, mut binding) = resolve_nets(&edges, &ports);
     let mut net_of = |name: &str| {
-        let id = *binding.entry(name.to_string()).or_insert_with(|| {
-            nets.push(format!("net{}", nets.len()));
-            nets.len() - 1
-        });
+        // Look up before inserting: most names are already bound, and an
+        // `entry` would allocate the key every call.
+        let id = match binding.get(name) {
+            Some(&id) => id,
+            None => {
+                nets.push(format!("net{}", nets.len()));
+                binding.insert(name.to_string(), nets.len() - 1);
+                nets.len() - 1
+            }
+        };
         NetId(u16::try_from(id).expect("net count fits u16"))
     };
     let mut flat = cells::Builder::new(process.grid());
@@ -645,6 +656,9 @@ pub mod variants {
         }
         for &u in &mac.units {
             cell.builder.unit(u);
+        }
+        for k in &mac.keepouts {
+            cell.builder.keepout(k.rect, k.why);
         }
         Ok(())
     }

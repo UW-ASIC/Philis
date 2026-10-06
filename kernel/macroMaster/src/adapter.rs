@@ -33,7 +33,8 @@ pub(crate) fn draw<G: Cell>(
         unitization: vec![Unitization {
             devices: group.devices.clone(),
             device_type: kind,
-            dev_nf: dev_nf.iter().map(|&f| f.max(1)).collect(),
+            // One count per device: a missing or zero count reads as one.
+            dev_nf: (0..n).map(|i| dev_nf.get(i).map_or(1, |&f| f.max(1))).collect(),
             target_ratio: vec![1; n],
             unit_w: w,
             unit_l: l,

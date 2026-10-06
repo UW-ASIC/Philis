@@ -92,6 +92,9 @@ fn bounds(polys: &[Poly]) -> Option<(i32, i32, i32, i32)> {
 
 /// One GDS structure, unflattened (its own frame).
 struct GdsCell {
+    /// Position of the defining ENDSTR in the stream (the top is the last
+    /// unreferenced one).
+    ordinal: usize,
     polys: Vec<Poly>,
     srefs: Vec<SRef>,
     texts: Vec<TextEntry>,
@@ -176,8 +179,8 @@ fn path_to_polys(layer: u16, datatype: u16, hw: i32, pts: &[[i32; 2]]) -> Vec<Po
             let dx = (x1 - x0) as f64;
             let dy = (y1 - y0) as f64;
             let len = (dx * dx + dy * dy).sqrt();
-            let nx = (-dy / len * hw as f64) as i32;
-            let ny = (dx / len * hw as f64) as i32;
+            let nx = (-dy / len * f64::from(hw)).round() as i32;
+            let ny = (dx / len * f64::from(hw)).round() as i32;
             vec![
                 [x0 + nx, y0 + ny], [x1 + nx, y1 + ny],
                 [x1 - nx, y1 - ny], [x0 - nx, y0 - ny],
@@ -200,6 +203,7 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
     let mut cur_texts: Vec<TextEntry> = Vec::new();
 
     let mut el = Element::None;
+    let mut n_ended = 0usize;
     let mut layer: u16 = 0;
     let mut datatype: u16 = 0;
     let mut path_width: i32 = 0;
@@ -233,7 +237,10 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
             0x07 => {
                 // ENDSTR
                 if let Some(name) = cur_name.take() {
+                    let ordinal = n_ended;
+                    n_ended += 1;
                     cells.insert(name, GdsCell {
+                        ordinal,
                         polys: std::mem::take(&mut cur_polys),
                         srefs: std::mem::take(&mut cur_srefs),
                         texts: std::mem::take(&mut cur_texts),
@@ -332,7 +339,8 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
                         }
                     }
                     Element::Path if pts.len() >= 2 => {
-                        let hw = (path_width / 2).max(1);
+                        // A negative WIDTH is absolute (unscaled): same magnitude.
+                        let hw = ((path_width.unsigned_abs() / 2) as i32).max(1);
                         cur_polys.extend(path_to_polys(layer, datatype, hw, &pts));
                     }
                     Element::Sref if !pts.is_empty() => cur_srefs.push(SRef {
@@ -376,13 +384,29 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
     cells
 }
 
-/// `(x, y)` mirrored about x (when `mirror_x`), then rotated `angle_deg`
-/// counter-clockwise, rounded to the nearest unit.
-fn transform_point(x: i32, y: i32, mirror_x: bool, angle_deg: f64) -> (i32, i32) {
-    let (px, mut py) = (x as f64, y as f64);
-    if mirror_x { py = -py; }
-    let rad = angle_deg.to_radians();
-    let (s, c) = (rad.sin(), rad.cos());
+/// `(sin, cos)` of `angle_deg`, exact for quarter turns so Manhattan layouts
+/// stay integral.
+fn sin_cos_deg(angle_deg: f64) -> (f64, f64) {
+    let a = angle_deg.rem_euclid(360.0);
+    if a == 0.0 {
+        (0.0, 1.0)
+    } else if a == 90.0 {
+        (1.0, 0.0)
+    } else if a == 180.0 {
+        (0.0, -1.0)
+    } else if a == 270.0 {
+        (-1.0, 0.0)
+    } else {
+        a.to_radians().sin_cos()
+    }
+}
+
+/// `(x, y)` mirrored about x (when `mirror_x`), then rotated by the angle
+/// whose `(sin, cos)` is given (one trig evaluation per instance, not per
+/// vertex), rounded to the nearest unit and saturated at the i32 range.
+fn transform_sc(x: i32, y: i32, mirror_x: bool, (s, c): (f64, f64)) -> (i32, i32) {
+    let px = f64::from(x);
+    let py = if mirror_x { -f64::from(y) } else { f64::from(y) };
     ((px * c - py * s).round() as i32, (px * s + py * c).round() as i32)
 }
 
@@ -404,26 +428,30 @@ fn flatten_cell(
         Some(c) => c,
         None => return,
     };
+    let sc = sin_cos_deg(angle);
+    let place = |x: i32, y: i32| {
+        let (rx, ry) = transform_sc(x, y, mirror, sc);
+        [rx.saturating_add(tx), ry.saturating_add(ty)]
+    };
+    out.reserve(cell.polys.len());
     for poly in &cell.polys {
-        let pts: Vec<[i32; 2]> = poly.pts.iter().map(|&[x, y]| {
-            let (rx, ry) = transform_point(x, y, mirror, angle);
-            [rx + tx, ry + ty]
-        }).collect();
+        let pts = poly.pts.iter().map(|&[x, y]| place(x, y)).collect();
         out.push(Poly { layer: poly.layer, datatype: poly.datatype, pts });
     }
     for t in &cell.texts {
-        let (rx, ry) = transform_point(t.x, t.y, mirror, angle);
-        out_texts.push(TextEntry { x: rx + tx, y: ry + ty, text: t.text.clone() });
+        let [x, y] = place(t.x, t.y);
+        out_texts.push(TextEntry { x, y, text: t.text.clone() });
     }
     for sref in &cell.srefs {
-        for row in 0..sref.rows {
-            for col in 0..sref.cols {
-                let sx = sref.x + col as i32 * sref.col_vec.0 + row as i32 * sref.row_vec.0;
-                let sy = sref.y + col as i32 * sref.col_vec.1 + row as i32 * sref.row_vec.1;
-                let (px, py) = transform_point(sx, sy, mirror, angle);
+        for row in 0..i32::from(sref.rows) {
+            for col in 0..i32::from(sref.cols) {
+                let step = |o: i32, c: i32, r: i32| o.saturating_add(col.saturating_mul(c)).saturating_add(row.saturating_mul(r));
+                let sx = step(sref.x, sref.col_vec.0, sref.row_vec.0);
+                let sy = step(sref.y, sref.col_vec.1, sref.row_vec.1);
+                let (px, py) = transform_sc(sx, sy, mirror, sc);
                 let m = mirror ^ sref.mirror_x;
                 let a = if mirror { angle - sref.angle_deg } else { angle + sref.angle_deg };
-                flatten_cell(cells, &sref.name, tx + px, ty + py, m, a, out, out_texts, depth + 1);
+                flatten_cell(cells, &sref.name, tx.saturating_add(px), ty.saturating_add(py), m, a, out, out_texts, depth + 1);
             }
         }
     }
@@ -431,14 +459,16 @@ fn flatten_cell(
 
 /// A structure nothing references, else any structure; `None` when empty.
 fn find_top_cell(cells: &HashMap<String, GdsCell>) -> Option<String> {
-    let mut referenced = std::collections::HashSet::new();
-    for cell in cells.values() {
-        for sref in &cell.srefs {
-            referenced.insert(sref.name.clone());
-        }
-    }
-    cells.keys().find(|k| !referenced.contains(*k)).cloned()
-        .or_else(|| cells.keys().next().cloned())
+    let referenced: std::collections::HashSet<&str> =
+        cells.values().flat_map(|c| c.srefs.iter().map(|r| r.name.as_str())).collect();
+    let last = |top_only: bool| {
+        cells
+            .iter()
+            .filter(|(k, _)| !top_only || !referenced.contains(k.as_str()))
+            .max_by_key(|(_, c)| c.ordinal)
+            .map(|(k, _)| k.clone())
+    };
+    last(true).or_else(|| last(false))
 }
 
 /// Parses a GDS stream and returns the top cell's polygons and text labels,
@@ -635,7 +665,7 @@ fn push_rect(verts: &mut Vec<Vertex>, x0: f32, y0: f32, x1: f32, y1: f32, color:
 
 /// World-space text labels, sized to the layout's span.
 fn text_vertices(texts: &[TextEntry], polys: &[Poly]) -> Vec<Vertex> {
-    let span = bounds(polys).map_or(7000.0, |(x0, y0, x1, y1)| (x1 - x0).max(y1 - y0).max(1) as f32);
+    let span = bounds(polys).map_or(7000.0, |b| span_of(b) as f32);
     let mut verts = Vec::new();
     for t in texts {
         push_text(&mut verts, &t.text, t.x as f32, t.y as f32, span * 0.025 / 7.0, [1.0, 1.0, 1.0, 0.95]);
@@ -672,8 +702,30 @@ fn fit_view(polys: &[Poly], aspect: f32) -> CamUni {
     let Some((x0, y0, x1, y1)) = bounds(polys) else {
         return CamUni { offset: [0.0; 2], scale: 1.0, aspect };
     };
-    let span = (x1 - x0).max(y1 - y0).max(1) as f32;
-    CamUni { offset: [-(x0 + x1) as f32 / 2.0, -(y0 + y1) as f32 / 2.0], scale: 1.8 / span, aspect }
+    let span = span_of((x0, y0, x1, y1)) as f32;
+    let mid = |a: i32, b: i32| (i64::from(a) + i64::from(b)) as f32 / 2.0;
+    CamUni { offset: [-mid(x0, x1), -mid(y0, y1)], scale: 1.8 / span, aspect }
+}
+
+/// The larger side of `bounds`, at least 1; i64 because a full-range i32
+/// layout spans 2³² units.
+fn span_of((x0, y0, x1, y1): (i32, i32, i32, i32)) -> i64 {
+    (i64::from(x1) - i64::from(x0)).max(i64::from(y1) - i64::from(y0)).max(1)
+}
+
+/// `s` with `& < > "` escaped for XML text and attribute values.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 // ── SVG export (headless) ──
@@ -683,15 +735,19 @@ fn fit_view(polys: &[Poly], aspect: f32) -> CamUni {
 /// layer and the labels on top. An empty layout is an empty `<svg/>`.
 #[must_use]
 pub fn export_svg(gds_bytes: &[u8], layer_names: &LayerMap) -> String {
-    let (polys, texts) = parse_gds(gds_bytes);
-    let Some((x0, y0, x1, y1)) = bounds(&polys) else {
+    use std::fmt::Write as _;
+    let (mut polys, texts) = parse_gds(gds_bytes);
+    let Some(b) = bounds(&polys) else {
         return String::from(r#"<svg xmlns="http://www.w3.org/2000/svg"/>"#);
     };
-    let pad = (x1 - x0).max(y1 - y0) / 40;
+    let (x0, y0, x1, y1) = (i64::from(b.0), i64::from(b.1), i64::from(b.2), i64::from(b.3));
+    // At least one unit of pad, stroke and font so tiny or zero-width
+    // layouts still render.
+    let pad = (span_of(b) / 40).max(1);
     let (vx, vy, vw, vh) = (x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad);
-    let mut layers: Vec<(u16, u16)> = polys.iter().map(Poly::key).collect();
-    layers.sort_unstable();
-    layers.dedup();
+    let stroke = (vw.max(vh) / 1000).max(1);
+    let size = (vw.max(vh) / 60).max(1);
+    polys.sort_by_key(Poly::key);
 
     let byte = |v: f32| (v * 255.0) as u8;
     let mut svg = format!(
@@ -699,8 +755,10 @@ pub fn export_svg(gds_bytes: &[u8], layer_names: &LayerMap) -> String {
     );
     // GDS is y-up, SVG y-down.
     let flip = vy * 2 + vh;
-    svg.push_str(&format!(r#"<g transform="translate(0,{flip}) scale(1,-1)">"#));
-    for &layer in &layers {
+    // `write!` into a String cannot fail.
+    let _ = write!(svg, r#"<g transform="translate(0,{flip}) scale(1,-1)">"#);
+    for group in polys.chunk_by(|a, b| a.key() == b.key()) {
+        let layer = group[0].key();
         let (c, fill) = layer_style(layer_names, layer);
         let o = outline_color(c);
         let fill = if fill {
@@ -708,30 +766,34 @@ pub fn export_svg(gds_bytes: &[u8], layer_names: &LayerMap) -> String {
         } else {
             "none".into()
         };
-        svg.push_str(&format!(
-            r#"<g id="{}" fill="{fill}" stroke="rgba({},{},{},1)" stroke-width="{}">"#,
-            layer_label(layer_names, layer),
+        let _ = write!(
+            svg,
+            r#"<g id="{}" fill="{fill}" stroke="rgba({},{},{},1)" stroke-width="{stroke}">"#,
+            xml_escape(&layer_label(layer_names, layer)),
             byte(o[0]),
             byte(o[1]),
             byte(o[2]),
-            (vw.max(vh) as f32 * 0.001) as i32,
-        ));
-        for p in polys.iter().filter(|p| p.key() == layer) {
-            let pts: Vec<String> = p.pts.iter().map(|[x, y]| format!("{x},{y}")).collect();
-            svg.push_str(&format!(r#"<polygon points="{}"/>"#, pts.join(" ")));
+        );
+        for p in group {
+            svg.push_str(r#"<polygon points=""#);
+            for (i, [x, y]) in p.pts.iter().enumerate() {
+                let sep = if i == 0 { "" } else { " " };
+                let _ = write!(svg, "{sep}{x},{y}");
+            }
+            svg.push_str(r#""/>"#);
         }
         svg.push_str("</g>");
     }
     svg.push_str("</g>");
     // Labels outside the flip so the glyphs read upright.
-    let size = vw.max(vh) / 60;
     for t in &texts {
-        svg.push_str(&format!(
+        let _ = write!(
+            svg,
             r#"<text x="{}" y="{}" font-size="{size}" font-family="monospace" fill="white">{}</text>"#,
             t.x,
-            flip - t.y,
-            t.text.replace('&', "&amp;").replace('<', "&lt;"),
-        ));
+            flip - i64::from(t.y),
+            xml_escape(&t.text),
+        );
     }
     svg.push_str("</svg>");
     svg
@@ -1065,8 +1127,8 @@ impl App {
         self.win.as_ref().map_or([0.0; 2], |w| {
             let s = w.inner_size();
             [
-                2.0 * self.cursor[0] as f32 / s.width as f32 - 1.0,
-                -(2.0 * self.cursor[1] as f32 / s.height as f32 - 1.0),
+                2.0 * self.cursor[0] as f32 / s.width.max(1) as f32 - 1.0,
+                -(2.0 * self.cursor[1] as f32 / s.height.max(1) as f32 - 1.0),
             ]
         })
     }
@@ -1116,8 +1178,8 @@ impl ApplicationHandler for App {
                 if let (true, Some(w)) = (self.drag, &self.win) {
                     let s = w.inner_size();
                     self.cam.offset[0] +=
-                        (2.0 * dx as f32 / s.width as f32) * self.cam.aspect / self.cam.scale;
-                    self.cam.offset[1] -= (2.0 * dy as f32 / s.height as f32) / self.cam.scale;
+                        (2.0 * dx as f32 / s.width.max(1) as f32) * self.cam.aspect / self.cam.scale;
+                    self.cam.offset[1] -= (2.0 * dy as f32 / s.height.max(1) as f32) / self.cam.scale;
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1186,7 +1248,13 @@ impl ApplicationHandler for App {
 /// The scale multiplier for one wheel step of `d` (positive zooms in):
 /// 1.1 per step in, 1 / 1.1 out, 1 for no movement.
 fn zoom_factor(d: f32) -> f32 {
-    if d > 0.0 { 1.1 } else { 1.0 / 1.1 }
+    if d > 0.0 {
+        1.1
+    } else if d < 0.0 {
+        1.0 / 1.1
+    } else {
+        1.0
+    }
 }
 
 /// Opens a window on a GDS file, reloading it whenever it changes on disk,

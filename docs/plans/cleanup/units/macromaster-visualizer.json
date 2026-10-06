@@ -1,0 +1,35 @@
+{
+  "unit": "macromaster-visualizer",
+  "commits": [
+    "cleanup(macromaster-visualizer): step 1 — docs, GDS element enum, adapter fallback via Macro::default",
+    "cleanup(macromaster-visualizer): step 2 — 44 corner-case tests, zoom_factor extracted",
+    "cleanup(macromaster-visualizer): step 3 — fixes for every step-2 flag, trig hoisted per instance, single-pass SVG grouping"
+  ],
+  "testsAdded": 44,
+  "flaggedFixed": [
+    "visualizer: negative GDS PATH WIDTH (absolute width) collapsed to a 1-unit half width; now uses |w|/2",
+    "visualizer: top cell picked by HashMap order (nondeterministic with several unreferenced structures); now the last-defined unreferenced structure",
+    "visualizer: i32 overflow (debug panic) in fit_view / text_vertices / export_svg spans and SVG y-flip for full-range coordinates; now i64, transforms saturate",
+    "visualizer: SVG stroke-width, pad and font-size could be 0 (invisible outlines, zero-width viewBox); floored at 1",
+    "visualizer: SVG layer ids unescaped (quote in a layer name broke the attribute); text and ids now XML-escaped",
+    "visualizer: a zero wheel delta (horizontal scroll) zoomed out; now no-op",
+    "visualizer: cursor/drag NDC divided by a zero window extent when minimised",
+    "visualizer: diagonal path normals truncated instead of rounded; quarter-turn rotations now exact",
+    "macroMaster: place_mirrored snapped the axis toward zero for negative coordinates (mirror gap up to one grid step too wide); now ceil via div_euclid",
+    "macroMaster: replay dropped the cells generator's keepouts (resistor body); now replayed and transformed with the instance",
+    "macroMaster: adapter::draw with an empty dev_nf built a unitization with 1 device but 0 counts; counts now padded to one per device"
+  ],
+  "flaggedOpen": [
+    "macroMaster: BuiltComp::flat still carries only shapes and pins (no units/keepouts) by its documented contract",
+    "visualizer: PATHTYPE (square/round end extension) is not parsed; paths are drawn flush-ended",
+    "visualizer: about_to_wait requests a redraw every iteration, so the viewer redraws at vsync while idle"
+  ],
+  "seamRequests": [],
+  "risks": [
+    "No build was run: integration must compile and run `cargo test -p macro_master -p visualizer`",
+    "Instance macros from macroMaster now carry keepouts (resistor body); downstream RTE in frontend/library will start honouring them for user compositions",
+    "the_last_unreferenced_structure_is_the_top encodes a chosen convention (last-defined top) where GDS has none",
+    "resistor_keepouts_survive test assumes cells::resistor enumerates a variant for w=1000 nm, len=5000 nm on sky130",
+    "No SIMD/branchless rewrite: the per-vertex loops are short and cold (viewer reload, SVG export); trig was hoisted per instance instead"
+  ]
+}
