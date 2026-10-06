@@ -4,7 +4,7 @@
 
 [![publish](https://github.com/UW-ASIC/Philis/actions/workflows/publish.yml/badge.svg)](https://github.com/UW-ASIC/Philis/actions/workflows/publish.yml)
 ![Rust](https://img.shields.io/badge/rust-stable-orange)
-![PDKs](https://img.shields.io/badge/PDKs-sky130%20%7C%20gf180mcu%20%7C%20ihp__sg13g2-blue)
+![PDKs](https://img.shields.io/badge/PDKs-sky130%20%7C%20gf180mcu%20%7C%20ihp__sg13g2%20%7C%20asap7-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 <p align="center"><img src="docs/progress/layouts/ota.svg" alt="OTA placed, routed and signed off by Philis on sky130" width="520"></p>
@@ -24,7 +24,7 @@ wrote out/{rc_filter.gds, rc_filter_ref.spice, rc_filter_pex.spice, signoff.txt,
 
 - Exit code 0 = signoff clean, 1 = not clean, 2 = error.
 - `report.txt` lists every constraint as met, violated or unknown.
-- Built-in PDKs: sky130, gf180mcu, ihp_sg13g2 and generic_finfet. Any other process is one JSON sidecar.
+- Built-in PDKs: sky130, gf180mcu, ihp_sg13g2 and asap7 (7 nm FinFET). Any other process is one JSON sidecar.
 - Optional inputs: `--constraints` (ALIGN-style JSON), `--interface` (die and pins), `--op-lib`/`--perf` (ngspice operating point and post-layout specs). Full flag list: [`frontend/cli/src/main.rs`](frontend/cli/src/main.rs).
 
 ## Analog constraints

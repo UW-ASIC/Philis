@@ -1,0 +1,176 @@
+diff --git a/backend/dr/src/lib.rs b/backend/dr/src/lib.rs
+index d0069db..b2fc09e 100644
+--- a/backend/dr/src/lib.rs
++++ b/backend/dr/src/lib.rs
+@@ -2655,7 +2655,13 @@ fn add_pin_access(
+         if let (Some(nl), Some(ml)) = (node_layer.filter(|l| !reached.contains(l)).map(|_| a.node_layer as usize), layers.iter().position(|&l| l == metal)) {
+             for k in nl.min(ml)..nl.max(ml) {
+                 if let Some(&(cut, size, below, above)) = cuts.get(k) {
+-                    wires.push(pad(cut, (nx, ny), size));
++                    // As at the stitch: a same-net cut within cut spacing (the
++                    // pin end's, beside a node on a pin above the stack's
++                    // base) already joins these layers; its pads overlap.
++                    let c = pad(cut, (nx, ny), size);
++                    if !wires.iter().any(|w| w.layer == cut && rect_gap(w.rect, c.rect) < cfg.space(cut, 0, 0, size)) {
++                        wires.push(c);
++                    }
+                     wires.push(pad(layers[k], (nx, ny), below));
+                     wires.push(pad(layers[k + 1], (nx, ny), above));
+                 }
+diff --git a/frontend/cli/src/main.rs b/frontend/cli/src/main.rs
+index d912f5f..e2e4e48 100644
+--- a/frontend/cli/src/main.rs
++++ b/frontend/cli/src/main.rs
+@@ -15,7 +15,7 @@
+ //! [--corner C] [--vdd V] [--temp C] [--testbench FILE]` (operating point),
+ //! `--perf SPECS.json` (`{"testbench": "tb.spice", "specs": [{"metric", "min",
+ //! "max"}]}`, the testbench relative to the JSON), `--interface FILE`
+-//! (die and boundary pins, checked against the ports), `--out-rs FILE` (emit),
++//! (boundary pins, each on a port: drawn, routed in and labelled at its side), `--out-rs FILE` (emit),
+ //! `--constraints FILE` (ALIGN-style JSON sidecar, `annotator::sidecar`).
+ //! `--max-wall SECONDS` (wall budget: the search stops before its next epoch
+ //! once spent, keeping its incumbent). `--hierarchy flat|auto|bottom-up:N`
+diff --git a/frontend/library/src/lib.rs b/frontend/library/src/lib.rs
+index e5ef88a..33874bc 100644
+--- a/frontend/library/src/lib.rs
++++ b/frontend/library/src/lib.rs
+@@ -117,8 +117,10 @@ pub struct Config {
+     pub gp_mode: GpMode,
+     /// Which detailed placer runs ([`dp::DpMode::Sp`]: sequence-pair anneal, PLC-09).
+     pub dp_mode: dp::DpMode,
+-    /// Fixed die and boundary pins. [`run`] checks each pin names a port;
+-    /// nothing else reads it yet (PLC/RTE consume it).
++    /// Fixed die and boundary pins. [`run`] checks each pin names a port and a
++    /// deck layer; each pin is drawn at its side of the placed outline, routed
++    /// in as a terminal of its net and labelled there ([`io_pins`]). The die
++    /// size is not read yet (PLC consumes it).
+     pub interface: Option<Interface>,
+     /// The top sub-circuit ([`ParseOptions::top`]); `None`: the parser's choice.
+     pub top: Option<String>,
+@@ -530,6 +532,9 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
+         if !bad.is_empty() {
+             return Err(FlowError::Interface(format!("interface pins on non-port nets {bad:?}")));
+         }
++        if let Some(p) = i.pins.iter().find(|p| pnr_core::Process::layer(pdk, &p.layer).is_none()) {
++            return Err(FlowError::Interface(format!("interface pin on {}: layer {} is not in the deck", p.net, p.layer)));
++        }
+     }
+ 
+     check_injected(&netlist, injected, pdk)?;
+@@ -1061,6 +1066,7 @@ fn topology<'a>(
+         rules,
+         halo_st: Vec::new(),
+         halo_pins: Vec::new(),
++        io: cfg.interface.iter().flat_map(|i| &i.pins).filter_map(|p| Some((pnr_core::NetId(netlist.nets.iter().position(|n| n.name == p.net)? as u16), p.clone()))).collect(),
+     };
+     // PLC-15: J and w_min of the lowest layer with a wire EM limit.
+     if let Some(&(l, lim)) = flow.d_router.cfg.em.iter().find(|(_, lim)| lim.ua_per_um > 0.0) {
+@@ -1503,6 +1509,8 @@ struct Flow<'a> {
+     halo_st: Vec<Vec<[i32; 4]>>,
+     /// Pins per R0 face per cell and variant ([`face_pins`]).
+     halo_pins: Vec<Vec<[i32; 4]>>,
++    /// [`Config::interface`]'s pins on their nets ([`io_pins`]).
++    io: Vec<(pnr_core::NetId, IoPin)>,
+ }
+ 
+ /// `base` plus what the annotator needs from the deck.
+@@ -1936,6 +1944,9 @@ impl Flow<'_> {
+         // Same-type implants of neighbours closer than their spacing merge.
+         let placed_now: Vec<Macro> = gr::place_macros(&macros, &layout).into_iter().chain(rings.iter().cloned()).collect();
+         rings.extend(cells::post_cell::implant_bridges(&placed_now, self.pdk));
++        // Interface pins at their sides of this placement: fixed terminals the
++        // router reaches like any pin of their net.
++        rings.extend(io_pins(&self.io, &placed_now, self.pdk, self.rules.grid));
+         lap(2);
+ 
+         // Route: track realisation onto the real pins.
+@@ -3256,6 +3267,41 @@ fn labels_and_reference(
+     (pins, reference)
+ }
+ 
++/// One fixed one-rect cell per interface pin: `width` square on its layer,
++/// at its side of `around`'s outline (cleared by twice the layer's spacing),
++/// centred `frac` along that side. Its pin (`io:k`) is routed in as a terminal
++/// of its net and labels the net there ([`labeled_pins`]), so a port no
++/// drawable device touches (passive-only, floating) is still drawn and named.
++fn io_pins(io: &[(pnr_core::NetId, IoPin)], around: &[Macro], pdk: &Pdk, grid: i32) -> Vec<Macro> {
++    use pnr_core::{Pin, Process as _, Rect, Shape};
++    let g = grid.max(1);
++    let dn = |v: i32| v.div_euclid(g) * g;
++    let up = |v: i32| dn(v + g - 1);
++    let b = around.iter().map(|m| m.bbox).reduce(|a, b| {
++        let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
++        Rect { x: x0, y: y0, w: (a.x + a.w).max(b.x + b.w) - x0, h: (a.y + a.h).max(b.y + b.h) - y0 }
++    });
++    let b = b.unwrap_or(Rect { x: 0, y: 0, w: 0, h: 0 });
++    io.iter()
++        .enumerate()
++        .filter_map(|(k, (net, p))| {
++            let layer = pdk.layer(&p.layer)?;
++            let s = up(p.width_nm.max(pdk.width(&p.layer).unwrap_or(0)));
++            let gap = up(2 * pdk.space(&p.layer).unwrap_or(0));
++            let (x0, y0, x1, y1) = (b.x - gap, b.y - gap, b.x + b.w + gap, b.y + b.h + gap);
++            let along = |lo: i32, hi: i32| up(lo + ((hi - lo) as f32 * p.frac) as i32 - s / 2);
++            let (x, y) = match p.side {
++                Side::North => (along(x0, x1), up(y1)),
++                Side::South => (along(x0, x1), dn(y0 - s)),
++                Side::East => (up(x1), along(y0, y1)),
++                Side::West => (dn(x0 - s), along(y0, y1)),
++            };
++            let at = Rect { x, y, w: s, h: s };
++            Some(Macro { shapes: vec![Shape { layer, rect: at }], pins: vec![Pin { name: format!("io:{k}"), net: *net, at, layer }], bbox: at, ..Default::default() })
++        })
++        .collect()
++}
++
+ /// One label per net: the first placed pin on a label layer whose centre lies
+ /// on drawn conductor of that layer. `verify` fails closed on a label with no
+ /// shape under it, so only provable labels go in; an unlabelled net stays
+@@ -3269,7 +3315,10 @@ pub(crate) fn labeled_pins(
+     let mut out: Vec<verify::LabeledPin> = Vec::new();
+     let mut labelled: Vec<u16> = Vec::new();
+     // ponytail: O(pins × shapes), once per signoff; index shapes per layer if it shows.
+-    for p in placed.iter().flat_map(|m| &m.pins) {
++    // An interface pin ([`io_pins`]) names its net at its declared side.
++    let all = placed.iter().flat_map(|m| &m.pins);
++    let io = |p: &&pnr_core::Pin| p.name.starts_with("io:");
++    for p in all.clone().filter(io).chain(all.filter(|p| !io(p))) {
+         if labelled.contains(&p.net.0) {
+             continue;
+         }
+diff --git a/frontend/library/tests/interface_pins.rs b/frontend/library/tests/interface_pins.rs
+new file mode 100644
+index 0000000..5e0272d
+--- /dev/null
++++ b/frontend/library/tests/interface_pins.rs
+@@ -0,0 +1,30 @@
++//! Interface pins (field report): every `Config::interface` pin is drawn at
++//! its declared side and labels its net there, whether a drawable device
++//! touches the net (routed in) or not (a passive-only or floating port).
++
++use library::{Interface, IoPin, Side};
++
++#[test]
++fn a_passive_only_and_a_floating_port_are_drawn_and_labelled_at_their_sides() {
++    let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
++    let spice = ".subckt a out g cap fl VDD VSS\nXM1 out g VSS VSS nfet_01v8 W=1u L=0.15u\nC1 out cap 100f\n.ends a\n";
++    let pin = |net: &str, side| IoPin { net: net.into(), side, frac: 0.5, width_nm: 800, layer: "met3".into() };
++    let interface = Interface { die_nm: None, pins: vec![pin("cap", Side::North), pin("fl", Side::East)] };
++    let cfg = library::Config { feedback_iters: 1, interface: Some(interface), ..Default::default() };
++    let sol = library::run(spice, &pdk, &library::Macros::default(), &cfg).expect("flow");
++    let signoff = library::signoff(&sol, &pdk);
++    // No LVS row, and dr stacks no second via3 beside a met3 pin's own (via3.1 is an exact size).
++    let bad: Vec<&str> = signoff.report.hard_violations.iter().map(|v| v.rule.as_str()).filter(|r| r.starts_with("lvs") || r.starts_with("engine/") || r.starts_with("drc/via3.1")).collect();
++    assert!(bad.is_empty(), "{bad:?}");
++
++    // Every other macro's outline, against which the sides are read.
++    let placed = pnr_core::place_macros(&sol.macros, &sol.layout);
++    let rest: Vec<pnr_core::Rect> = placed.iter().filter(|m| !m.pins.iter().any(|p| p.name.starts_with("io:"))).map(|m| m.bbox).collect();
++    let (_, pins, _) = library::signoff_inputs(&sol, &pdk);
++    let met3 = pnr_core::Process::layer(&pdk, "met3").expect("met3").0;
++    let label = |net: &str| pins.iter().find(|p| p.name == net).unwrap_or_else(|| panic!("{net} has no label: {pins:?}"));
++    let cap = label("cap");
++    assert!(cap.layer == met3 && rest.iter().all(|r| cap.y > r.y + r.h), "cap not on the north side: {cap:?}");
++    let fl = label("fl");
++    assert!(fl.layer == met3 && rest.iter().all(|r| fl.x > r.x + r.w), "fl not on the east side: {fl:?}");
++}
