@@ -4,6 +4,7 @@
 use crate::builder::dim;
 use std::collections::BTreeMap;
 
+use analog::matching::class::{mos_env, GateStrap, MosEnv};
 use analog::matching::pattern::{self, Outer};
 use analog::Constraints;
 use pnr_core::{DeviceGroup, DeviceKind, Macro, MatchClass, Process, Rect};
@@ -62,6 +63,16 @@ pub struct Mosfet {
 /// follows the constraint, never the search.
 fn dummies_per_end(process: &dyn Process) -> u8 {
     process.rule("dummy_gates_per_end", 1).clamp(0, 4) as u8
+}
+
+/// The environment `u`'s matched set asks of a MOS row (Hastings §13.3 rules
+/// 12, 19, 21, 22 via [`mos_env`]): a multi-device, non-series unitization
+/// that wants dummies or matched routing, at its class, `Moderate` when unset
+/// (C16). `None` = a singleton, a series stack or a plain parallel group:
+/// today's unmatched row.
+fn row_env(u: Option<&analog::cell::Unitization>, process: &dyn Process) -> Option<MosEnv> {
+    u.filter(|u| u.devices.len() > 1 && u.series_parallel != analog::cell::SeriesParallel::Series && (u.route_matching_required || u.dummy_required))
+        .map(|u| mos_env(u.class.unwrap_or(MatchClass::Moderate), process))
 }
 
 /// Whether a finger's own distributed poly resistance, `R□·W/(3·L)`, exceeds
@@ -165,6 +176,8 @@ impl Cell for Mosfet {
                     ends.iter().map(move |&double_gate| Mosfet { nf, style, dummies_per_edge: dummies, split_gates, mirror_pins, rows, double_gate })
                 })
             })
+            // ponytail: EXC draws per-finger pads (no bar), so `bars_fit` drops
+            // variants it could draw; skip it when `row_env` is EXC to offer them.
             .filter(|v| v.bars_fit(&s.dev_nf, n_dev) && grid_legal(&v.row_orders(&s.dev_nf, n_dev)))
             .collect()
     }
@@ -338,9 +351,10 @@ impl Mosfet {
         let li = req(process, "li");
         let licon = process.layer("licon").unwrap_or(poly);
         let u = unitization(group, constraints);
-        // Matched = a multi-device unitization covers the group: draw the WPE
-        // well halo.
-        let matched = u.is_some_and(|u| u.devices.len() > 1);
+        // A matched set's class environment ([`row_env`]); all zeros unmatched.
+        let env = row_env(u, process);
+        let e = env.unwrap_or_default();
+        let exc = e.gate_strap == GateStrap::MetalIsolated;
         let is_pmos = u.is_some_and(|u| u.device_type == DeviceKind::Pmos);
 
         let ct = dim(process, "contact");
@@ -372,6 +386,18 @@ impl Mosfet {
         let finger_w = s.unit_w;
         let m1_pitch = m1_land(process);
         let (sd_w, pitch) = sd_and_pitch(process, gate_l);
+        let poly_space = r("poly_min_spacing", 0).max(process.space("poly").unwrap_or(0));
+        // EXC isolates each gate on its own pad (rule 22): the pitch holds a
+        // lattice-snapped cut's pad plus poly spacing. ponytail: local to the
+        // row; `sd_and_pitch` (cellgen's fold aspect) keeps the bar pitch.
+        let (sd_w, pitch) = if exc {
+            let lat = cut_lattice(process);
+            let p = pitch.max(ct + 2 * licon_poly_enc + lat + poly_space);
+            let p = p + (-p).rem_euclid(lat);
+            (p - gate_l, p)
+        } else {
+            (sd_w, pitch)
+        };
         // End regions hold one cut between the diff edge and a gate: it needs
         // `gate_space` to the gate, plus a lattice step of snap slack.
         let lat = cut_lattice(process);
@@ -382,7 +408,11 @@ impl Mosfet {
         // Dummy gates sit on the diffusion, one `sd_edge` region outside the
         // outer gates: wide enough for the edge contact, and for the gate pads
         // beside a dummy to keep poly spacing from it and its riser skirt.
-        let nd = i32::from(self.dummies_per_edge);
+        // A class environment wants at least one (the moat sits past a
+        // bulk-tied dummy, so no signal junction grows); the final count also
+        // meets its reach, below.
+        let nd0 = i32::from(self.dummies_per_edge);
+        let dummied = nd0 > 0 || e.moat_nm > 0 || e.dummy_reach_nm > 0;
         // A gate bar's worst-case overhang past an end gate: a lattice-snapped
         // cut plus its poly enclosure.
         let bar_over = ((ct + 2 * licon_poly_enc + lat - gate_l + 1) / 2).max(0);
@@ -391,7 +421,7 @@ impl Mosfet {
         let skirt_over = ((ct + 2 * licon_poly_enc + lat - dummy_l + 1) / 2).max(0);
         // With dummies, at least the inner gate-to-gate gap: every finger then
         // sees gates on both sides at one pitch (poly spacing effect, PSE;
-        // Hastings §13.3 r9: end dummies at the array's pitch).
+        // Hastings §13.3 rule 12: end dummies at the array's pitch).
         // Gate 0 sits where the inner S/D cuts, centred between gates at the
         // lattice pitch, land exactly on the cut lattice (gates then sit off
         // it: the pitch has no snap slack). An end region's cut is centred to
@@ -403,8 +433,8 @@ impl Mosfet {
             let p = edge_cut(start, w);
             p - start >= gate_space && start + w - p - ct >= gate_space
         };
-        let sd_edge = if nd > 0 {
-            let clear = r("poly_min_spacing", 0).max(process.space("poly").unwrap_or(0)) + if self.split_gates || self.double_gate { bar_over + skirt_over } else { bar_over.max(skirt_over) };
+        let sd_edge = if dummied {
+            let clear = poly_space + if self.split_gates || self.double_gate { bar_over + skirt_over } else { bar_over.max(skirt_over) };
             let mut e = on_lattice(clear.max(pitch - gate_l).max(ct + 2 * gate_space));
             while !(holds(0, e) && holds(e + (n_fingers - 1) * pitch + gate_l, e)) {
                 e += lat;
@@ -414,15 +444,18 @@ impl Mosfet {
             on_lattice(sd_end)
         };
         let d_step = dummy_l + sd_end;
+        // Outer dummy poly edge to the outermost active gate edge
+        // (`sd_edge - sd_end + nd·d_step`) ≥ the class's reach (rule 12).
+        let nd = nd0.max(i32::from(dummied)).max((e.dummy_reach_nm - sd_edge + sd_end + d_step - 1).div_euclid(d_step));
         let gates_end = sd_edge + (n_fingers - 1) * pitch + gate_l;
         // LOD moat where devices share a row: their fingers sit at different
         // distances from the diffusion ends (ABBA: A owns both ends), so the
         // diffusion runs on past the outer dummy (bulk-tied, no signal
         // junction grows) until SA/SB are long enough that the stress term
-        // fades (Hastings §13.3 r9). A lone device, a parallel group and a
-        // series stack have no such mismatch.
-        // ponytail: today's 3 µm; CELL-12 reads mos_env(class)
-        let moat = if n_dev > 1 && nd > 0 && self.style != Pattern::Chain { process.tier("lod_moat_ext_nm", MatchClass::Minimal).unwrap_or(0) } else { 0 };
+        // fades: the diffusion ends ≥ `moat_nm` past the outermost active gate
+        // edge (Hastings §13.3 rule 12; §13.2.2 for MIN). A lone device, a
+        // parallel group and a series stack have no such mismatch.
+        let moat = if env.is_some() && self.style != Pattern::Chain { (e.moat_nm - (sd_edge + nd * d_step)).max(0) } else { 0 };
         let diff_x_start = -nd * d_step - moat;
         let diff_x_end = gates_end + sd_edge + nd * d_step + moat;
         // One continuous diff row; extraction splits S from D at each gate
@@ -450,11 +483,16 @@ impl Mosfet {
             // Split rows leave a neighbour's gate end beside each pad: the pad
             // must sit a poly spacing below it.
             .max(if self.split_gates { ct + 2 * licon_poly_side + r("poly_min_spacing", 0) } else { 0 });
+        // Gate poly past the diffusion: the deck's, plus the class's (rule 21,
+        // every gate and dummy straight for `ext`).
+        let ext = poly_ext + e.gate_ext_extra_nm;
+        let pad_h = ct + 2 * licon_poly_side;
+        // The bar's near edge clears the diffusion by `ext` (a poly space more
+        // beside a split row's free gate end), MOD ≥ 1 µm (Hastings §13.2.2:
+        // poly 1–2 µm from the moat, hastings.txt L41125–41132).
+        let need = (ext + if self.split_gates { poly_space } else { 0 }).max(if e.gate_strap == GateStrap::PolyBarFar { 1000 } else { 0 });
         // Snapped down (away from the diff) so the cut sits on the lattice.
-        // The bar's distance below the stub's minimum (CELL-12 sets it by
-        // matching class).
-        let bar_gap = 0;
-        let pad_y = snap_cut(-(poly_ext + stub + bar_gap), lat);
+        let pad_y = snap_cut(-(poly_ext + stub).max(need + pad_h), lat);
         let stub = -pad_y - poly_ext;
         // S/D regions: region 0 is S iff `s0`, chosen so every inter-device
         // boundary is a shared source ([`legal_row`]): a single device or an
@@ -480,7 +518,6 @@ impl Mosfet {
         // Gate bar rows: a horizontal poly bar per device and row, its cuts
         // `licon_poly_side` inside both long edges (the deck's opposite-sides
         // enclosure, on y), `licon_poly_enc` past the end cuts on x.
-        let pad_h = ct + 2 * licon_poly_side;
         let li_w = ct + li_enc + li_side;
         // Gate pad li grows away from the diff to the deck's min area (a side
         // length; the li role may be a real metal with a sizeable one).
@@ -506,14 +543,15 @@ impl Mosfet {
         // Unsplit mirror pins run one bar under the whole row (a shared-gate
         // pair).
         let shared = self.mirror_pins && !self.split_gates;
-        let cut = bar_cuts(sequence, |a, b| up(a) == up(b), shared).expect("enumerate filters on bars_fit");
+        // EXC contacts every finger on its own pad: no boundary cut to drop.
+        let cut = if exc { vec![true; sequence.len()] } else { bar_cuts(sequence, |a, b| up(a) == up(b), shared).expect("enumerate filters on bars_fit") };
         // Per (top row, device) bar — device 0 for a shared one: the gates'
         // x span and the cuts' x span.
         let mut bars: BTreeMap<(bool, usize), ((i32, i32), Option<(i32, i32)>)> = BTreeMap::new();
         let mut pinned = vec![false; n_dev];
         for (idx, &di) in sequence.iter().enumerate() {
             let gx = idx as i32 * pitch + sd_edge;
-            b.rect(poly, Rect { x: gx, y: -poly_ext, w: gate_l, h: finger_w + 2 * poly_ext });
+            b.rect(poly, Rect { x: gx, y: -ext, w: gate_l, h: finger_w + 2 * ext });
             // Stub and gate overlap one lattice step (they join).
             let stub_top = finger_w + poly_ext - lat;
             if top_end(di) {
@@ -542,6 +580,10 @@ impl Mosfet {
                 if cut[idx] {
                     b.rect(licon, Rect { x: cut_x, y: cy_, w: ct, h: ct });
                 }
+                if exc {
+                    let (x0, x1) = (gx.min(cut_x - licon_poly_enc), (gx + gate_l).max(cut_x + ct + licon_poly_enc));
+                    b.rect(poly, Rect { x: x0, y: if top { top_pad_y } else { pad_y }, w: x1 - x0, h: pad_h });
+                }
                 let e = bars.entry((top, if shared { 0 } else { di })).or_insert(((gx, gx + gate_l), None));
                 e.0 = (e.0 .0.min(gx), e.0 .1.max(gx + gate_l));
                 if cut[idx] {
@@ -561,14 +603,17 @@ impl Mosfet {
         }
 
         // Each bar joins its fingers into one gate in poly, and an li strap
-        // over its cuts joins them in metal too (Hastings rule 22). A
+        // over its cuts joins them in metal too (Hastings rule 22; EXC: in
+        // metal only, its pads drawn per finger above). A
         // two-ended gate's top strap carries a second pin: the router ties
         // both ends in metal.
         for (&(top, di), &((x0, x1), cuts)) in &bars {
             let (c0, c1) = cuts.expect("bar_cuts keeps a cut per device");
             let bx0 = x0.min(c0 - licon_poly_enc);
             let bx1 = x1.max(c1 + ct + licon_poly_enc);
-            b.rect(poly, Rect { x: bx0, y: if top { top_pad_y } else { pad_y }, w: bx1 - bx0, h: pad_h });
+            if !exc {
+                b.rect(poly, Rect { x: bx0, y: if top { top_pad_y } else { pad_y }, w: bx1 - bx0, h: pad_h });
+            }
             // li `li_side` past the cuts toward the diff, the rest away from it.
             let ly = if top { top_cut_y - li_side } else { bot_cut_y + ct + li_side - pad_li_h };
             b.rect(li, Rect { x: c0 - li_enc, y: ly, w: c1 + ct + li_side - (c0 - li_enc), h: pad_li_h });
@@ -642,7 +687,7 @@ impl Mosfet {
         let tap_h = ct + diff_enc + tap_enc;
         // Dummy cut row: above the gate's poly end, and its riser strip
         // `li_space` above the edge regions' contact column.
-        let licon_y = snap_cut((finger_w + polycon_gap.max(poly_ext - lat + licon_poly_side)).max(col_top + li_space + rise_l) + lat - 1, lat);
+        let licon_y = snap_cut((finger_w + polycon_gap.max(ext + licon_poly_side)).max(col_top + li_space + rise_l) + lat - 1, lat);
         // The tap row clears the dummy cuts by the poly-cut-to-diff spacing.
         let tap_diff = process.space_between("tap", "diff").or(process.space("diff")).unwrap_or(0);
         // The tap's implant, past the strip, keeps its gate spacing (ihp pSD.j).
@@ -665,7 +710,8 @@ impl Mosfet {
             let left = -(k + 1) * dummy_l - k * sd_end;
             let right = gates_end + sd_edge + k * d_step;
             for (edge, (dx, rx)) in [(left, left - sd_end), (right, right + dummy_l)].into_iter().enumerate() {
-                b.rect(poly, Rect { x: dx, y: -poly_ext, w: dummy_l, h: finger_w + 2 * poly_ext });
+                // `lat` taller on top: it laps the skirt, which starts at `ext`.
+                b.rect(poly, Rect { x: dx, y: -ext, w: dummy_l, h: finger_w + 2 * ext + lat });
                 let cx = snap_cut(dx + dummy_l / 2 - ct / 2, lat);
                 b.rect(licon, Rect { x: cx, y: licon_y, w: ct, h: ct });
                 let px = snap_cut(rx + sd_end / 2 - ct / 2, lat);
@@ -686,7 +732,7 @@ impl Mosfet {
         }
         let stub_top = licon_y + ct + licon_poly_side;
         let dpad_w = dummy_l.max(ct + 2 * licon_poly_enc);
-        let skirt_y = finger_w + poly_ext - 10;
+        let skirt_y = finger_w + ext;
         // Riser strips lap the rail's li but stay above its cut row (a grazed
         // cut reads as an under-sized contact).
         // Symmetric about its cuts, so a row mirrored about the strip puts
@@ -775,11 +821,33 @@ impl Mosfet {
             b.pin(pin(di, "B", Rect { x: xi, y: tap_y0 + diff_enc, w: ct, h: ct }, li));
         }
 
+        // Flavour markers (CELL-16, a `gate_marker{i}` role per recogniser
+        // layer the caller's overlay names, e.g. sky130 lvtn/hvtp): one rect
+        // per row over every gate, dummies included, past the gates by the
+        // deck's enclosure, widened to its width and area.
+        let (gx0, gx1) = if nd > 0 { (-nd * dummy_l - (nd - 1) * sd_end, gates_end + sd_edge + (nd - 1) * d_step + dummy_l) } else { (sd_edge, gates_end) };
+        for i in 0.. {
+            let role = format!("gate_marker{i}");
+            let Some(l) = process.layer(&role) else { break };
+            let g = process.enclosure(&role, "poly").max(process.enclosure(&role, "diff")).unwrap_or(0);
+            let min_w = process.width(&role).unwrap_or(0);
+            let (mut x, mut y, mut w, mut h) = (gx0 - g, -g, gx1 - gx0 + 2 * g, finger_w + 2 * g);
+            if h < min_w {
+                y -= (min_w - h) / 2;
+                h = min_w;
+            }
+            let need = min_w.max(i32::try_from((process.area(&role).unwrap_or(0) + i64::from(h) - 1) / i64::from(h)).unwrap_or(i32::MAX));
+            if w < need {
+                x -= (need - w) / 2;
+                w = need;
+            }
+            b.rect(l, Rect { x, y, w, h });
+        }
+
         // PMOS nwell, inflated by the WPE halo on matched groups.
         if is_pmos {
             if let Some(nwell) = process.layer("nwell") {
-                // ponytail: today's 3 µm; CELL-12 reads mos_env(class)
-                let wpe_halo = if matched { process.tier("wpe_clearance_nm", MatchClass::Moderate).unwrap_or(0) } else { 0 };
+                let wpe_halo = e.wpe_nm;
                 let nw_enc = dim(process, "nwell_diff_enc") + wpe_halo;
                 let nw_min = dim(process, "nwell_min_width");
                 let mut w = tap_w + 2 * nw_enc;
@@ -1099,6 +1167,71 @@ fn finger_sequence(style: Pattern, dev_nf: &[u16]) -> Vec<usize> {
 mod tests {
     use super::*;
 
+    /// `model`'s required recogniser layers that the generator does not draw, as `gate_marker{i}` roles (cellgen's
+    /// `mos_overlay`, rebuilt here: cells does not see the library).
+    fn flavour<'a>(pdk: &'a verify::Pdk, model: &str) -> verify::pdk::Overlay<'a> {
+        let (need, _) = pdk.model_markers(model).expect("a recogniser");
+        assert!(!need.is_empty(), "{model}: no marker beyond the gate");
+        let drawn: Vec<_> = ["diff", "tap", "poly", "licon", "li", "mcon", "met1", "nwell", "nsdm", "psdm", "npc"].iter().filter_map(|r| Process::layer(pdk, r)).collect();
+        let name = |l: &pnr_core::LayerId| pdk.layers.iter().find(|(_, id)| id == l).map(|(n, _)| n.clone());
+        let mut layers: Vec<(String, String)> =
+            need.iter().filter(|l| !drawn.contains(l)).filter_map(name).enumerate().map(|(i, n)| (format!("gate_marker{i}"), n)).collect();
+        layers.extend(Process::layer(pdk, "npc").as_ref().and_then(name).map(|n| ("npc".to_string(), n)));
+        verify::pdk::Overlay { pdk, recipe: verify::pdk::Recipe { model: model.into(), layers, rules: vec![] } }
+    }
+
+    #[test]
+    fn a_marker_covers_every_gate() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let ov = flavour(&pdk, "nfet_01v8_lvt");
+        let lvtn = ov.layer("gate_marker0").expect("lvtn");
+        assert_eq!(ov.enclosure("gate_marker0", "poly").max(ov.enclosure("gate_marker0", "diff")), Some(180));
+        let (poly, diff) = (req(&pdk, "poly"), req(&pdk, "diff"));
+        let (g, mut c) = crate::testkit::group_of(DeviceKind::Nmos, 2, 4, 1000, 150);
+        c.unitization[0].dummy_required = true;
+        let vs = Mosfet::enumerate(&g, &c, &ov);
+        assert!(!vs.is_empty());
+        for v in &vs {
+            let m = v.draw(&g, &c, &ov);
+            let marks: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == lvtn).map(|s| s.rect).collect();
+            assert_eq!(marks.len(), usize::from(v.rows.max(1)), "one marker per row");
+            for p in m.shapes.iter().filter(|s| s.layer == poly) {
+                for d in m.shapes.iter().filter(|s| s.layer == diff) {
+                    let (x0, y0) = (p.rect.x.max(d.rect.x), p.rect.y.max(d.rect.y));
+                    let (x1, y1) = ((p.rect.x + p.rect.w).min(d.rect.x + d.rect.w), (p.rect.y + p.rect.h).min(d.rect.y + d.rect.h));
+                    if x0 >= x1 || y0 >= y1 {
+                        continue;
+                    }
+                    let (x0, y0, x1, y1) = (x0 - 180, y0 - 180, x1 + 180, y1 + 180);
+                    assert!(marks.iter().any(|r| r.x <= x0 && r.y <= y0 && r.x + r.w >= x1 && r.y + r.h >= y1), "gate ({x0},{y0})-({x1},{y1}) uncovered");
+                }
+            }
+        }
+        // Plain nfet_01v8: no overlay, no marker.
+        for v in Mosfet::enumerate(&g, &c, &pdk) {
+            assert!(v.draw(&g, &c, &pdk).shapes.iter().all(|s| s.layer != lvtn));
+        }
+    }
+
+    #[test]
+    fn flavoured_devices_are_drc_and_erc_clean() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let mut dirty = Vec::new();
+        for (model, kind) in [("nfet_01v8_lvt", DeviceKind::Nmos), ("pfet_01v8_hvt", DeviceKind::Pmos)] {
+            let ov = flavour(&pdk, model);
+            let (g, mut c) = crate::testkit::group_of(kind, 2, 4, 1000, 150);
+            c.unitization[0].dummy_required = true;
+            for (i, v) in Mosfet::enumerate(&g, &c, &ov).iter().enumerate() {
+                let m = v.draw(&g, &c, &ov);
+                let rules = crate::testkit::findings(&m.shapes, &crate::testkit::ports_with(&m, &["G", "S", "B"]), &pdk);
+                if !rules.is_empty() {
+                    dirty.push(format!("{model} #{i}: {rules:?}"));
+                }
+            }
+        }
+        assert!(dirty.is_empty(), "{}", dirty.join("\n"));
+    }
+
     /// sky130: 48.2·10000/(3·150) = 1071 Ω of finger poly against a 152 Ω
     /// gate cut (`licon_po`), so a second gate contact pays.
     #[test]
@@ -1140,6 +1273,11 @@ mod tests {
                     c.unitization[0].dummy_required = dummies;
                     dirty.extend(testkit::dirty_group::<Mosfet>(&g, &c, &pdk).into_iter().map(|d| format!("{kind:?} {counts:?} dummies={dummies} {d}")));
                 }
+            }
+            // CELL-12: each match class's environment.
+            for class in CLASSES {
+                let (g, c) = class_pair(kind, class);
+                dirty.extend(testkit::dirty_group::<Mosfet>(&g, &c, &pdk).into_iter().map(|d| format!("{kind:?} {class:?} {d}")));
             }
         }
         assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
@@ -1242,8 +1380,207 @@ mod tests {
                     wrong.extend(miscounted(&g, &c, &pdk).into_iter().map(|e| format!("{kind:?} {counts:?} dummies={dummies} {e}")));
                 }
             }
+            for class in CLASSES {
+                let (g, c) = class_pair(kind, class);
+                wrong.extend(miscounted(&g, &c, &pdk).into_iter().map(|e| format!("{kind:?} {class:?} {e}")));
+            }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    const CLASSES: [MatchClass; 3] = [MatchClass::Minimal, MatchClass::Moderate, MatchClass::Exceptional];
+
+    /// CELL-12's fixture: a two-finger pair wanting dummies, at `class`.
+    fn class_pair(kind: DeviceKind, class: MatchClass) -> (DeviceGroup, Constraints) {
+        let (g, mut c) = crate::testkit::group_of(kind, 2, 2, 1680, 150);
+        c.unitization[0].dummy_required = true;
+        c.unitization[0].class = Some(class);
+        (g, c)
+    }
+
+    /// Every variant's macro at `class`, with its env.
+    fn class_macros(kind: DeviceKind, class: MatchClass, pdk: &verify::Pdk) -> (MosEnv, Vec<(Mosfet, Macro)>) {
+        let (g, c) = class_pair(kind, class);
+        (mos_env(class, pdk), Mosfet::enumerate(&g, &c, pdk).into_iter().map(|v| (v.clone(), v.draw(&g, &c, pdk))).collect())
+    }
+
+    /// CELL-12 (rule 12): the diffusion runs `moat_nm` past the outermost
+    /// active gate edge, and the outer dummy sits `dummy_reach_nm` out.
+    #[test]
+    fn class_scales_the_moat_and_dummies() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        assert_eq!(CLASSES.map(|c| mos_env(c, &pdk).moat_nm), [3000, 5000, 10000]);
+        let (diff, poly) = (pdk.layer("diff").unwrap(), pdk.layer("poly").unwrap());
+        for kind in [DeviceKind::Nmos, DeviceKind::Pmos] {
+            for class in CLASSES {
+                let (env, ms) = class_macros(kind, class, &pdk);
+                assert!(!ms.is_empty());
+                for (i, (_, m)) in ms.iter().enumerate() {
+                    let tag = format!("{kind:?} {class:?} #{i}");
+                    let ch0 = m.units.iter().map(|u| u.x).min().unwrap() - 75;
+                    let ch1 = m.units.iter().map(|u| u.x).max().unwrap() + 75;
+                    let rects = |l| m.shapes.iter().filter(move |s| s.layer == l).map(|s| s.rect);
+                    let d0 = rects(diff).map(|r| r.x).min().unwrap();
+                    let d1 = rects(diff).map(|r| r.x + r.w).max().unwrap();
+                    assert!(ch0 - d0 >= env.moat_nm && d1 - ch1 >= env.moat_nm, "{tag}: moat {} {} < {}", ch0 - d0, d1 - ch1, env.moat_nm);
+                    // Dummies: tall poly over the diffusion holding no channel.
+                    let dummies: Vec<Rect> = rects(poly).filter(|r| r.h >= 1680 && m.units.iter().all(|u| u.x < r.x || u.x > r.x + r.w)).collect();
+                    let p0 = dummies.iter().map(|r| r.x).min().unwrap();
+                    let p1 = dummies.iter().map(|r| r.x + r.w).max().unwrap();
+                    assert!(ch0 - p0 >= env.dummy_reach_nm && p1 - ch1 >= env.dummy_reach_nm, "{tag}: reach {} {} < {}", ch0 - p0, p1 - ch1, env.dummy_reach_nm);
+                }
+            }
+        }
+    }
+
+    /// CELL-12 (rule 21): every gate and dummy runs straight `poly_ext +
+    /// gate_ext_extra_nm` past its diffusion; nothing wider touches that band.
+    #[test]
+    fn every_gate_overhangs_equally() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let (diff, poly) = (pdk.layer("diff").unwrap(), pdk.layer("poly").unwrap());
+        for class in [MatchClass::Moderate, MatchClass::Exceptional] {
+            let (env, ms) = class_macros(DeviceKind::Nmos, class, &pdk);
+            let ext = dim(&pdk, "poly_ext") + env.gate_ext_extra_nm;
+            assert!(ms.iter().any(|(v, _)| v.split_gates), "{class:?}: no split variant");
+            for (i, (_, m)) in ms.iter().enumerate() {
+                let polys: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == poly).map(|s| s.rect).collect();
+                let diffs: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == diff).map(|s| s.rect).collect();
+                let mut gates = 0;
+                for g in &polys {
+                    let Some(d) = diffs.iter().find(|d| d.x < g.x + g.w && g.x < d.x + d.w && d.y < g.y + g.h && g.y < d.y + d.h) else { continue };
+                    gates += 1;
+                    let tag = format!("{class:?} #{i} gate {g:?}");
+                    assert!(g.y <= d.y - ext && g.y + g.h >= d.y + d.h + ext, "{tag}: overhang < {ext}");
+                    for (lo, hi) in [(d.y - ext, d.y), (d.y + d.h, d.y + d.h + ext)] {
+                        for p in polys.iter().filter(|p| p.y < hi && lo < p.y + p.h && p.x < g.x + g.w && g.x < p.x + p.w) {
+                            assert!(p.x >= g.x && p.x + p.w <= g.x + g.w, "{tag}: {p:?} widens the band ({lo}, {hi})");
+                        }
+                    }
+                }
+                assert!(gates > 0);
+            }
+        }
+    }
+
+    /// CELL-12 (rule 19): a PMOS pair's well edge sits `wpe_nm` from every
+    /// channel.
+    #[test]
+    fn the_pmos_well_clears_by_class() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let nwell = pdk.layer("nwell").unwrap();
+        for class in CLASSES {
+            let (env, ms) = class_macros(DeviceKind::Pmos, class, &pdk);
+            for (i, (_, m)) in ms.iter().enumerate() {
+                let wells: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == nwell).map(|s| s.rect).collect();
+                for u in &m.units {
+                    let (x0, x1, y0, y1) = (u.x - 75, u.x + 75, u.y - 840, u.y + 840);
+                    let clear = wells.iter().map(|n| (x0 - n.x).min(n.x + n.w - x1).min(y0 - n.y).min(n.y + n.h - y1)).max().unwrap();
+                    assert!(clear >= env.wpe_nm, "{class:?} #{i}: {clear} < {}", env.wpe_nm);
+                }
+            }
+        }
+    }
+
+    /// CELL-12: a lone device has no class environment (nothing to match),
+    /// and draws as if unclassed; a block group (class unset, both flags)
+    /// reads Moderate (C16).
+    #[test]
+    fn a_singleton_has_no_environment() {
+        use crate::testkit;
+        let Some(pdk) = testkit::pdk() else { return };
+        let (g, mut c) = testkit::group_of(DeviceKind::Nmos, 1, 2, 1680, 150);
+        c.unitization[0].dummy_required = true;
+        let plain: Vec<Rect> = Mosfet::enumerate(&g, &c, &pdk).iter().map(|v| v.draw(&g, &c, &pdk).bbox).collect();
+        c.unitization[0].class = Some(MatchClass::Moderate);
+        assert!(row_env(Some(&c.unitization[0]), &pdk).is_none());
+        let classed: Vec<Rect> = Mosfet::enumerate(&g, &c, &pdk).iter().map(|v| v.draw(&g, &c, &pdk).bbox).collect();
+        assert_eq!(plain, classed);
+        let (_, mut c) = testkit::group_of(DeviceKind::Nmos, 2, 2, 1680, 150);
+        assert!(row_env(Some(&c.unitization[0]), &pdk).is_none(), "a plain parallel group");
+        c.unitization[0].dummy_required = true;
+        c.unitization[0].route_matching_required = true;
+        assert_eq!(row_env(Some(&c.unitization[0]), &pdk), Some(mos_env(MatchClass::Moderate, &pdk)));
+    }
+
+    /// CELL-12 (rule 22): an EXC pair contacts every gate on its own poly
+    /// pad, one cut each, at the pad-limited pitch (490 nm on sky130).
+    #[test]
+    fn exceptional_gates_are_isolated_pads() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let (poly, licon) = (pdk.layer("poly").unwrap(), pdk.layer("licon").unwrap());
+        let ct = dim(&pdk, "contact");
+        let (_, ms) = class_macros(DeviceKind::Nmos, MatchClass::Exceptional, &pdk);
+        assert!(!ms.is_empty());
+        for (i, (_, m)) in ms.iter().enumerate() {
+            let polys: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == poly).map(|s| s.rect).collect();
+            let mut ys: Vec<i32> = m.pins.iter().filter(|p| p.name.ends_with(":G")).map(|p| p.at.y).collect();
+            ys.sort_unstable();
+            ys.dedup();
+            let mut fingers = 0;
+            for y in ys {
+                let line = y + ct / 2;
+                let cuts: Vec<i32> = m.shapes.iter().filter(|s| s.layer == licon && s.rect.y == y).map(|s| s.rect.x).collect();
+                let mut spans: Vec<(i32, i32)> = polys.iter().filter(|p| p.y < line && line < p.y + p.h).map(|p| (p.x, p.x + p.w)).collect();
+                spans.sort_unstable();
+                let mut runs: Vec<(i32, i32)> = Vec::new();
+                for (a, b) in spans {
+                    match runs.last_mut() {
+                        Some(r) if a <= r.1 => r.1 = r.1.max(b),
+                        _ => runs.push((a, b)),
+                    }
+                }
+                // The dummy skirts may share the row: only runs over the channels.
+                let (ch0, ch1) = (m.units.iter().map(|u| u.x).min().unwrap() - 75, m.units.iter().map(|u| u.x).max().unwrap() + 75);
+                runs.retain(|r| r.0 < ch1 && ch0 < r.1);
+                for run in &runs {
+                    assert_eq!(cuts.iter().filter(|&&x| x >= run.0 && x + ct <= run.1).count(), 1, "#{i} y={y}: run {run:?}");
+                }
+                assert_eq!(runs.len(), cuts.iter().filter(|&&x| ch0 < x + ct && x < ch1).count(), "#{i} y={y}");
+                fingers += runs.len();
+            }
+            assert!(fingers >= m.units.len(), "#{i}: {fingers} pads for {} fingers", m.units.len());
+            let mut xs: Vec<(i32, i32)> = m.units.iter().map(|u| (u.y, u.x)).collect();
+            xs.sort_unstable();
+            for w in xs.windows(2).filter(|w| w[0].0 == w[1].0) {
+                assert_eq!(w[1].1 - w[0].1, 490, "#{i}");
+            }
+        }
+    }
+
+    /// CELL-12 (Hastings §13.2.2): a MOD pair's gate bars sit ≥ 1 µm off the
+    /// diffusion. Also on a deck with no extra gate overhang, where only the
+    /// `PolyBarFar` floor (not `poly_ext + gate_ext_extra_nm`) holds the gate
+    /// bars off; there the dummy skirt sits at `poly_ext` (rule 21 only), so
+    /// only bars holding a gate pad cut (inside the channel span) are checked.
+    #[test]
+    fn moderate_bar_sits_a_micron_off() {
+        let Some(base) = crate::testkit::pdk() else { return };
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let json = std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap();
+        let key = "\"gate_ext_extra_nm\": [0, 1000, 1000]";
+        assert!(json.contains(key), "sky130.json spells {key}");
+        let flat = verify::Pdk::from_json(&json.replace(key, "\"gate_ext_extra_nm\": [0, 0, 0]")).unwrap();
+        assert_eq!(mos_env(MatchClass::Moderate, &flat).gate_ext_extra_nm, 0);
+        for (pdk, every_bar) in [(base, true), (flat, false)] {
+            let (diff, poly, licon) = (pdk.layer("diff").unwrap(), pdk.layer("poly").unwrap(), pdk.layer("licon").unwrap());
+            let (_, ms) = class_macros(DeviceKind::Nmos, MatchClass::Moderate, &pdk);
+            let mut bars = 0;
+            for (i, (_, m)) in ms.iter().enumerate() {
+                let diffs: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == diff).map(|s| s.rect).collect();
+                let (ch0, ch1) = (m.units.iter().map(|u| u.x).min().unwrap() - 75, m.units.iter().map(|u| u.x).max().unwrap() + 75);
+                let pad_cuts: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == licon && (ch0..ch1).contains(&(s.rect.x + s.rect.w / 2))).map(|s| s.rect).collect();
+                let holds_pad = |p: &Rect| pad_cuts.iter().any(|c| p.x <= c.x && c.x + c.w <= p.x + p.w && p.y <= c.y && c.y + c.h <= p.y + p.h);
+                for p in m.shapes.iter().filter(|s| s.layer == poly && s.rect.w > 150).map(|s| s.rect).filter(|p| every_bar || holds_pad(p)) {
+                    for d in diffs.iter().filter(|d| d.x < p.x + p.w && p.x < d.x + d.w) {
+                        let gap = (d.y - (p.y + p.h)).max(p.y - (d.y + d.h));
+                        assert!(gap >= 1000, "#{i}: {p:?} {gap} nm from {d:?}");
+                    }
+                    bars += 1;
+                }
+            }
+            assert!(bars > 0);
+        }
     }
 
     /// CELL-10 sweep members: 1:2, 1:3, 1:2 at four fingers a unit.

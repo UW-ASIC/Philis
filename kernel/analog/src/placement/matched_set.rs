@@ -293,6 +293,9 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
         let c0 = self.cell(m0) as u32;
         out.extend(rest.iter().map(|&m| (c0, self.cell(m) as u32)));
     }
+    fn matched_class(&self) -> Option<MatchClass> {
+        Some(self.class)
+    }
     fn violating_ids(&self, l: &Layout, out: &mut Vec<u32>) {
         let mut v = Vec::new();
         self.violating_residuals(l, &mut v);

@@ -177,7 +177,7 @@ fn bbox_of(shapes: &[Shape]) -> Rect {
 }
 
 /// Round half away from zero to a multiple of `grid` (`grid <= 0`: identity).
-fn snap_to_grid(value: i32, grid: i32) -> i32 {
+pub(crate) fn snap_to_grid(value: i32, grid: i32) -> i32 {
     if grid <= 0 {
         return value;
     }
@@ -279,31 +279,6 @@ pub fn sizing(group: &DeviceGroup, c: &Constraints, def_w: i32, def_l: i32) -> S
     }
 }
 
-/// Centroid-leaning interleave for per-device counts: fill outside-in, each
-/// mirror pair from the device with the most fingers left.
-pub(crate) fn greedy_centroid(counts: &[usize]) -> Vec<usize> {
-    let total: usize = counts.iter().sum();
-    let mut remaining = counts.to_vec();
-    let mut seq = vec![0usize; total];
-    let most = |r: &[usize]| {
-        r.iter().enumerate().filter(|(_, &n)| n > 0).max_by_key(|(_, &n)| n).map_or(0, |(i, _)| i)
-    };
-    let (mut lo, mut hi) = (0, total);
-    while lo < hi {
-        let p = most(&remaining);
-        seq[lo] = p;
-        remaining[p] -= 1;
-        lo += 1;
-        if lo < hi {
-            let q = if remaining[p] > 0 { p } else { most(&remaining) };
-            hi -= 1;
-            seq[hi] = q;
-            remaining[q] = remaining[q].saturating_sub(1);
-        }
-    }
-    seq
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,15 +290,6 @@ mod tests {
         assert_eq!(snap_to_grid(-8, 5), -10);
         assert_eq!(snap_to_grid(-7, 5), -5);
         assert_eq!(snap_to_grid(10, 5), 10);
-    }
-
-    #[test]
-    fn greedy_centroid_uses_every_finger() {
-        let seq = greedy_centroid(&[4, 2, 2]);
-        assert_eq!(seq.len(), 8);
-        for (d, &n) in [4, 2, 2].iter().enumerate() {
-            assert_eq!(seq.iter().filter(|&&x| x == d).count(), n);
-        }
     }
 
     #[test]

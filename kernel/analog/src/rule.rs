@@ -272,6 +272,10 @@ pub trait RuleBatch<On>: Send + Sync {
     fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
         let _ = out;
     }
+    /// The class of the pairs from [`Self::matched_pairs`], if the batch has one.
+    fn matched_class(&self) -> Option<pnr_core::MatchClass> {
+        None
+    }
     /// Append every distinct pair drawn as reflections (`SymMode::Mirror`, PLC-21). Default none.
     fn mirrored_pairs(&self, out: &mut Vec<(u32, u32)>) {
         let _ = out;
@@ -378,6 +382,9 @@ impl<On> RuleBatch<On> for Tagged<On> {
     }
     fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
         self.inner.matched_pairs(out);
+    }
+    fn matched_class(&self) -> Option<pnr_core::MatchClass> {
+        self.inner.matched_class()
     }
     fn mirrored_pairs(&self, out: &mut Vec<(u32, u32)>) {
         self.inner.mirrored_pairs(out);

@@ -852,6 +852,26 @@ fn keep_compact(alts: &mut Vec<Macro>, limit: f64) -> bool {
     false
 }
 
+/// `model`'s recogniser markers (GAP-07) that the planar generator does not already draw, as `gate_marker{i}`
+/// roles over `pdk`; `None` when there are none (plain `nfet_01v8`). Forbidden layers are ignored: the generator never
+/// draws them.
+fn mos_overlay<'a>(pdk: &'a Pdk, model: &str) -> Option<verify::pdk::Overlay<'a>> {
+    let (need, _) = pdk.model_markers(model)?;
+    let drawn: Vec<_> = ["diff", "tap", "poly", "licon", "li", "mcon", "met1", "nwell", "nsdm", "psdm", "npc"]
+        .iter()
+        .filter_map(|r| pnr_core::Process::layer(pdk, r))
+        .collect();
+    let name = |l: &pnr_core::LayerId| pdk.layers.iter().find(|(_, id)| id == l).map(|(n, _)| n.clone());
+    let mut layers: Vec<(String, String)> =
+        need.iter().filter(|l| !drawn.contains(l)).filter_map(name).enumerate().map(|(i, n)| (format!("gate_marker{i}"), n)).collect();
+    if layers.is_empty() {
+        return None;
+    }
+    // `npc` is a recipe-controlled role on an overlay: the gate contacts keep the base deck's.
+    layers.extend(pnr_core::Process::layer(pdk, "npc").as_ref().and_then(name).map(|n| ("npc".to_string(), n)));
+    Some(verify::pdk::Overlay { pdk, recipe: verify::pdk::Recipe { model: model.into(), layers, rules: vec![] } })
+}
+
 /// Every enumerated variant of one group, by device kind.
 /// Every variant of `group`, a `kind` of schematic `model`. A resistor is
 /// drawn to its model's recipe ([`Pdk::recipe`]): the construction the
@@ -863,7 +883,9 @@ fn draw_variants(kind: DeviceKind, model: &str, group: &DeviceGroup, c: &Constra
         // A variant whose diffusion lies beyond the deck's latch-up tap reach
         // is dropped (CELL-13); none left keeps the empty placeholder.
         DeviceKind::Nmos | DeviceKind::Pmos => {
-            let mut v = draw_all::<Mosfet>(group, c, pdk);
+            // A flavoured model (lvt, hvt) draws its recogniser's markers.
+            let ov = mos_overlay(pdk, model);
+            let mut v = draw_all::<Mosfet>(group, c, ov.as_ref().map_or(pdk as &dyn pnr_core::Process, |o| o));
             v.retain(|m| cells::mosfet::taps_in_reach(m, pdk));
             if v.is_empty() {
                 v.push(Macro::default());
