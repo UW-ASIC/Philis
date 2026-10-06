@@ -62,15 +62,18 @@ pub fn separate_overlaps(
         project_violated(reqs, l, g);
         l.refresh_temps();
 
-        if analog_violations(reqs, l) > before_hard {
+        // A sweep that breaks a hard rule or leaves more encroachment than it
+        // found is undone: the legalizer never returns a worse layout.
+        let after = encroachment(l);
+        if analog_violations(reqs, l) > before_hard || after > before {
             l.x = save_x;
             l.y = save_y;
             l.axis = save_axis;
             l.refresh_temps();
-            return encroachment(l);
+            return before;
         }
-        if encroachment(l) >= before {
-            return encroachment(l);
+        if after == before {
+            return after;
         }
     }
     encroachment(l)

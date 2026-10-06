@@ -234,8 +234,9 @@ impl<'a> Sa<'a> {
 
         let s = &self.snap;
         self.moved.clear();
+        // `|` not `||`: four cheap compares beat three data-dependent branches.
         self.moved.extend((0..l.x.len()).filter(|&i| {
-            l.x[i] != s.x[i] || l.y[i] != s.y[i] || l.hw[i] != s.hw[i] || l.hh[i] != s.hh[i]
+            (l.x[i] != s.x[i]) | (l.y[i] != s.y[i]) | (l.hw[i] != s.hw[i]) | (l.hh[i] != s.hh[i])
         }));
         let ov1 = self.encroach_moved(l);
         self.snap.swap_geometry(l);
@@ -461,8 +462,14 @@ fn seed_branches(reqs: &Requirements<Layout>, branch: &mut Vec<bool>) -> Vec<Bra
     for b in &reqs.hard {
         b.branches(&mut branch_seeds);
     }
-    branch_seeds.sort_unstable_by_key(|&(id, _)| id.0);
-    branch_seeds.dedup();
+    // One entry per id; batches that disagree on a seed resolve to isolate
+    // (`true`), the commitment that is legal at any spacing.
+    branch_seeds.sort_unstable_by_key(|&(id, s)| (id.0, s));
+    branch_seeds.dedup_by(|later, kept| {
+        let same = later.0 .0 == kept.0 .0;
+        kept.1 |= same & later.1;
+        same
+    });
     if let Some(&(hi, _)) = branch_seeds.last() {
         if branch.len() <= usize::from(hi.0) {
             branch.resize(usize::from(hi.0) + 1, false);

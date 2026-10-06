@@ -96,12 +96,10 @@ impl Eval {
 
     /// Weighted HPWL of net row `ni` under `l`, nm.
     fn net(nets: &Nets, l: &Layout, ni: usize) -> f64 {
-        let (mut x0, mut x1, mut y0, mut y1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
-        for k in nets.span(ni) {
-            let (px, py) = nets.pin(k, l);
-            (x0, x1, y0, y1) = (x0.min(px), x1.max(px), y0.min(py), y1.max(py));
-        }
-        f64::from(nets.weight(ni)) * f64::from((x1 - x0) + (y1 - y0))
+        // The span in f64, term for term as `gp::mechanics::hpwl`: exact past
+        // an `i32` span and bit-identical to the full evaluation.
+        let (x0, x1, y0, y1) = nets.pin_bbox(ni, l);
+        f64::from(nets.weight(ni)) * ((f64::from(x1) - f64::from(x0)) + (f64::from(y1) - f64::from(y0)))
     }
 
     /// Fresh value of flattened batch row `i` (see [`Row`]); a budget's priced

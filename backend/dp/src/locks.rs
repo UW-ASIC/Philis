@@ -101,6 +101,7 @@ fn relative(sets: &[Vec<u16>], pairs: &[(u32, u32)], mirrored: &[(u32, u32)], n:
 /// Non-singleton groups (each sorted, sorted by first member) and the
 /// cell → set map of length `n`.
 fn sets(uf: &mut UnionFind, n: usize) -> (Vec<Vec<u16>>, Vec<Option<u16>>) {
+    debug_assert!(n <= usize::from(u16::MAX) + 1, "locks: {n} cells overflow u16 cell ids");
     let mut out: Vec<Vec<u16>> = uf
         .groups()
         .into_iter()
