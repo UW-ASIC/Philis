@@ -3,7 +3,7 @@
 //! deck says how far two facing roles must be apart. Two cells then owe each
 //! other `max(rule − inset_a − inset_b)`, not one worst-case scalar.
 
-use pnr_core::{LayerId, Macro, NetId, Orient, Process};
+use pnr_core::{LayerId, Macro, MatchClass, NetId, Orient, Process};
 
 /// Placement spacing roles. `*_in` / `*_out`: inside / outside the cell's own n-well.
 /// `other`: a drawn layer no listed role maps to (always spaced at `fallback`).
@@ -26,6 +26,9 @@ pub const DECK_ROLE: [&str; 28] = [
 pub const N: usize = ROLES.len();
 const _: () = assert!(N <= 32, "Edge::present is a u32");
 const NWELL: usize = 0;
+const DIFF_IN: usize = 2;
+const DIFF_OUT: usize = 3;
+const POLY: usize = 6;
 const OTHER: usize = N - 1;
 /// Roles whose facing shapes may touch and merge into one figure: implant and
 /// mask layers (no net), and the n-well when both wells carry the same bulk net.
@@ -33,6 +36,11 @@ const MERGEABLE: [usize; 5] = [NWELL, 7 /*nsdm*/, 8 /*psdm*/, 13 /*npc*/, 14 /*r
 /// Marker (id) layers: no drawn material, so a same-role pair with no deck
 /// value is `NoRule` (0), not `fallback`.
 const MARKER: [usize; 4] = [16 /*diode_mk*/, 18 /*diom*/, 25 /*pnp*/, 26 /*npn*/];
+
+/// Foreign poly keep-out from a matched device's diffusion, nm, by
+/// [`MatchClass`]: Hastings rule 23, lower ends (H13-55, L42648–42654). Policy,
+/// the same on every deck.
+pub const FOREIGN_POLY_NM: [i32; 3] = [0, 3000, 5000];
 
 /// The eight orients in `Orient as usize` order.
 pub const ORIENTS: [Orient; 8] =
@@ -85,6 +93,11 @@ pub struct Profile {
     pub edge: [Edge; 4],
     /// The cell's bulk net: two n-wells merge only on the same one.
     pub well_net: Option<NetId>,
+    /// The cell's matching class, `None` when unmatched (PLC-13 keep-outs).
+    pub matched: Option<MatchClass>,
+    /// The cell's orient set (`dp::locks::Locks::orient_of`): partners in one
+    /// set are exempt from each other's keep-outs.
+    pub set: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +125,12 @@ pub struct SpacingTable {
     /// Today's scalar: same-role pairs without a deck value and every pair
     /// with `other`; also the gap when a cell has no profile.
     pub fallback: i32,
+    /// Foreign n-well keep-out from a matched cell's `diff_out`, by
+    /// [`MatchClass`] (the deck's `wpe_clearance_nm` tier). Zero = none.
+    pub wpe: [i32; 3],
+    /// Foreign poly keep-out from a matched cell's diffusion, by
+    /// [`MatchClass`] ([`FOREIGN_POLY_NM`]). Zero = none.
+    pub foreign_poly: [i32; 3],
 }
 
 /// Placement roles a sidecar role names: `diff`/`tap` cover both sides of the well.
@@ -154,7 +173,7 @@ impl SpacingTable {
                 }
             }
         }
-        let mut t = SpacingTable { rule: [[0; N]; N], src: [[Src::NoRule; N]; N], lattice, fallback };
+        let mut t = SpacingTable { rule: [[0; N]; N], src: [[Src::NoRule; N]; N], lattice, fallback, wpe: [0; 3], foreign_poly: [0; 3] };
         for i in 0..N {
             for j in 0..N {
                 let (v, s) = match rule[i][j] {
@@ -173,19 +192,34 @@ impl SpacingTable {
     /// Every pair at `fallback`: today's scalar clearance, for callers without profiles.
     #[must_use]
     pub fn uniform(fallback: i32, lattice: i32) -> Self {
-        SpacingTable { rule: [[fallback; N]; N], src: [[Src::Fallback; N]; N], lattice, fallback }
+        SpacingTable { rule: [[fallback; N]; N], src: [[Src::Fallback; N]; N], lattice, fallback, wpe: [0; 3], foreign_poly: [0; 3] }
     }
 
-    /// The largest gap any pair can owe (insets are ≥ 0), lattice-rounded.
+    /// The largest gap any pair can owe (insets are ≥ 0), keep-outs included, lattice-rounded.
     #[must_use]
     pub fn max_gap(&self) -> i32 {
-        round_up(self.rule.iter().flatten().copied().max().unwrap_or(0).max(self.fallback), self.lattice)
+        let keep = self.wpe.iter().chain(&self.foreign_poly).copied().max().unwrap_or(0);
+        round_up(self.rule.iter().flatten().copied().max().unwrap_or(0).max(self.fallback).max(keep), self.lattice)
+    }
+
+    /// Keep-outs matched `m` (face `em`) owes `o` (face `eo`) unless they share
+    /// an orient set: `o`'s n-well ≥ `wpe` from `m`'s `diff_out`, `o`'s poly ≥
+    /// `foreign_poly` from `m`'s diffusion. Never mergeable.
+    fn keep(&self, m: &Profile, em: &Edge, o: &Profile, eo: &Edge) -> i32 {
+        let Some(c) = m.matched.filter(|_| m.set.is_none() || m.set != o.set) else { return 0 };
+        let need = |d: usize, r: usize, k: i32| {
+            let on = em.present & (1 << d) != 0 && eo.present & (1 << r) != 0 && k > 0;
+            if on { k - em.inset[d] - eo.inset[r] } else { 0 }
+        };
+        let (w, p) = (self.wpe[c as usize], self.foreign_poly[c as usize]);
+        need(DIFF_OUT, NWELL, w).max(need(DIFF_IN, POLY, p)).max(need(DIFF_OUT, POLY, p))
     }
 
     /// Gap `a`'s face `fa` owes `b`'s opposite face. A facing pair that merges
     /// at contact (same `MERGEABLE` role at inset 0 on both, n-well only on one
     /// bulk net) still sets `min` but not `abut`: any gap in `(0, min)` would
-    /// leave a notch the bridges do not fill.
+    /// leave a notch the bridges do not fill. Matched cells' keep-outs
+    /// ([`Self::keep`], PLC-13) apply both ways and are hard.
     #[must_use]
     pub fn gap(&self, a: &Profile, fa: Face, b: &Profile) -> Gap {
         let (ea, eb) = (&a.edge[fa as usize], &b.edge[fa.opposite() as usize]);
@@ -214,18 +248,27 @@ impl SpacingTable {
                 }
             }
         }
+        let k = self.keep(a, ea, b, eb).max(self.keep(b, eb, a, ea));
+        let (g_all, g_hard) = (g_all.max(k), g_hard.max(k));
         Gap { abut: g_hard <= 0, min: round_up(g_all, self.lattice) }
     }
 
     /// Room a cell can owe beyond its bbox: over faces and present roles `i`,
     /// `(max_j rule[i][j] − inset_i)⁺`, `j` over every role but `other` (shipped
-    /// cells draw none; region sizing only, never legality).
+    /// cells draw none; region sizing only, never legality), raised by a
+    /// matched cell's keep-outs on its diffusion.
     #[must_use]
     pub fn halo(&self, p: &Profile) -> i32 {
+        let (w, fp) = p.matched.map_or((0, 0), |c| (self.wpe[c as usize], self.foreign_poly[c as usize]));
         let mut h = 0;
         for e in &p.edge {
             for i in (0..N).filter(|&i| e.present & (1 << i) != 0) {
-                let reach = if i == OTHER { self.fallback } else { self.rule[i][..OTHER].iter().copied().max().unwrap_or(0) };
+                let keep = match i {
+                    DIFF_IN => fp,
+                    DIFF_OUT => w.max(fp),
+                    _ => 0,
+                };
+                let reach = if i == OTHER { self.fallback } else { self.rule[i][..OTHER].iter().copied().max().unwrap_or(0).max(keep) };
                 h = h.max(reach - e.inset[i]);
             }
         }
@@ -279,7 +322,7 @@ pub fn profile(m: &Macro, p: &dyn Process, bulk: Option<NetId>) -> Profile {
 /// normal (the same map `place_macro` stamps with).
 #[must_use]
 pub fn oriented(p: &Profile, o: Orient) -> Profile {
-    let mut out = Profile { well_net: p.well_net, ..Profile::default() };
+    let mut out = Profile { edge: [Edge::default(); 4], ..*p };
     for f in Face::ALL {
         let n = o.apply(f.normal().0, f.normal().1);
         let to = Face::ALL.iter().position(|g| g.normal() == n).expect("D4 maps axis normals to axis normals");
@@ -306,13 +349,11 @@ impl Profiles {
 mod tests {
     use super::*;
 
-    const DIFF_IN: usize = 2;
-    const DIFF_OUT: usize = 3;
     const NSDM: usize = 7;
     const DIOM: usize = 18;
 
     fn table(rules: &[(usize, usize, i32)]) -> SpacingTable {
-        let mut t = SpacingTable { rule: [[0; N]; N], src: [[Src::NoRule; N]; N], lattice: 5, fallback: 1270 };
+        let mut t = SpacingTable { rule: [[0; N]; N], src: [[Src::NoRule; N]; N], lattice: 5, fallback: 1270, wpe: [0; 3], foreign_poly: [0; 3] };
         for &(i, j, v) in rules {
             t.rule[i][j] = v;
             t.rule[j][i] = v;
@@ -398,5 +439,45 @@ mod tests {
         let a = face(Face::R, &[(DIOM, 0)], None);
         let b = face(Face::L, &[(DIOM, 0)], None);
         assert_eq!(t.gap(&a, Face::R, &b), Gap { abut: true, min: 0 });
+    }
+
+    /// The deck table plus sky130's `wpe_clearance_nm` tiers and the policy poly keep-out.
+    fn keep_table() -> SpacingTable {
+        SpacingTable { wpe: [2000, 3000, 5000], foreign_poly: FOREIGN_POLY_NM, ..table(&[(DIFF_OUT, NWELL, 340)]) }
+    }
+
+    /// `a`: `diff_out` at 200 on R in orient set `set`, class `matched`; `b`: n-well at 0 on L.
+    fn wpe_pair(matched: Option<MatchClass>, set: Option<u16>) -> (Profile, Profile) {
+        let a = Profile { matched, set, ..face(Face::R, &[(DIFF_OUT, 200)], Some(1)) };
+        let b = Profile { set, ..face(Face::L, &[(NWELL, 0)], Some(2)) };
+        (a, b)
+    }
+
+    #[test]
+    fn matched_nmos_keeps_wpe_distance_from_foreign_well() {
+        let t = keep_table();
+        let (a, b) = wpe_pair(Some(MatchClass::Moderate), None);
+        assert_eq!(t.gap(&a, Face::R, &b), Gap { abut: false, min: 2800 });
+        assert_eq!(t.gap(&b, Face::L, &a), Gap { abut: false, min: 2800 });
+        assert!(t.max_gap() >= 5000 && t.halo(&a) >= 3000 - 200);
+    }
+
+    #[test]
+    fn unmatched_nmos_uses_the_deck_rule() {
+        let (a, b) = wpe_pair(None, None);
+        assert_eq!(keep_table().gap(&a, Face::R, &b).min, 140);
+    }
+
+    #[test]
+    fn same_set_partners_are_exempt() {
+        let (a, b) = wpe_pair(Some(MatchClass::Moderate), Some(0));
+        assert_eq!(keep_table().gap(&a, Face::R, &b).min, 140);
+    }
+
+    #[test]
+    fn matched_diff_keeps_foreign_poly_away() {
+        let a = Profile { matched: Some(MatchClass::Exceptional), ..face(Face::R, &[(DIFF_IN, 100)], Some(1)) };
+        let b = face(Face::L, &[(POLY, 0)], None);
+        assert_eq!(keep_table().gap(&a, Face::R, &b), Gap { abut: false, min: 4900 });
     }
 }
