@@ -723,9 +723,6 @@ fn topology<'a>(
     // Annotate: placement/routing rules + cell constraints, device-indexed.
     // Per topology: `CellSpace::new` mutates the problem, which is not `Clone`.
     let mut problem = annotator::annotate_with(netlist, ann, ev);
-    if cfg.min_utilization > 0.0 {
-        problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min: cfg.min_utilization }));
-    }
     let (perf_rows, perf_active) = (&perf.rows[..], &perf.active[..]);
     for row in perf_rows {
         problem.routing.budget.push(Box::new(row.clone()));
@@ -771,6 +768,13 @@ fn topology<'a>(
     }
     let locks = dp::locks::locks(&problem.placement, cells.variants.len(), &cells.variants);
     let rules = place_rules(pdk, &cells, &locks, &match_class(&problem, &cells));
+    // PLC-24: the floor is pushed only now, capped by what these cells and gaps can reach.
+    if cfg.min_utilization > 0.0 {
+        let dims: Vec<(i32, i32)> =
+            cells.variants.iter().map(|v| v.alternatives.first().map_or((0, 0), |m| (m.bbox.w, m.bbox.h))).collect();
+        let u_min = u_eff(cfg.min_utilization, &dims, median_x_gap(&rules));
+        problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min }));
+    }
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
@@ -1305,6 +1309,37 @@ fn place_rules(pdk: &Pdk, cells: &CellSpace, locks: &dp::locks::Locks, class: &[
         })
         .collect();
     gp::PlaceRules::new(lattice, table, Profiles { of })
+}
+
+/// The utilization floor these cells can reach: `min(u_min, 0.9 · ΣA / Σ(w+g)(h+g))`,
+/// each cell (first variant, `w × h`) owing gap `g` on one side per axis. The
+/// 0.9 is policy (room for routing halos). `u_min` when there are no cells.
+fn u_eff(u_min: f32, cells: &[(i32, i32)], g: i32) -> f32 {
+    let (a, padded) = cells.iter().fold((0.0f64, 0.0f64), |(a, p), &(w, h)| {
+        let (w, h, g) = (f64::from(w), f64::from(h), f64::from(g));
+        (a + w * h, p + (w + g) * (h + g))
+    });
+    if padded <= 0.0 {
+        return u_min;
+    }
+    u_min.min((0.9 * a / padded) as f32)
+}
+
+/// Median over ordered cell pairs `a ≠ b` of the x gap `a`'s R face owes `b`
+/// (variant 0, R0); `spacing.fallback` with fewer than 2 profiled cells.
+/// ponytail: O(n²) once per topology (~10⁴ for 100 cells); sample if n grows.
+fn median_x_gap(r: &gp::PlaceRules) -> i32 {
+    let p: Vec<_> = r.profiles.of.iter().filter_map(|v| v.first().map(|o| &o[0])).collect();
+    let mut g: Vec<i32> = p
+        .iter()
+        .enumerate()
+        .flat_map(|(i, a)| p.iter().enumerate().filter(move |&(j, _)| j != i).map(move |(_, b)| r.spacing.gap(a, gp::spacing::Face::R, b).min))
+        .collect();
+    if g.is_empty() {
+        return r.spacing.fallback;
+    }
+    let mid = g.len() / 2;
+    *g.select_nth_unstable(mid).1
 }
 
 /// Matched cells: a merged group, or a member of a 2-device leaf that emits a
@@ -2614,6 +2649,15 @@ pub(crate) fn labeled_pins(
 
 #[cfg(test)]
 mod start_tests {
+    /// PLC-24: the floor is capped by what tiny cells plus their gaps can fill.
+    #[test]
+    fn utilization_floor_is_reachable_for_tiny_cells() {
+        let c = [(2000, 2000); 4];
+        assert!((crate::u_eff(0.6, &c, 270) - 0.6).abs() < 1e-6);
+        assert!((crate::u_eff(0.6, &c, 1270) - 0.3367).abs() < 1e-3);
+        assert_eq!(crate::u_eff(0.6, &[], 0), 0.6);
+    }
+
     /// GAP-04: the substrate kind comes from the deck's `substrate_kind`; a
     /// misspelt key (here or in the sidecar) would silently read Unknown.
     #[test]
