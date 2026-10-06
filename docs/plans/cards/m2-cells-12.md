@@ -101,6 +101,13 @@ Helpers: `generic_po(pdk)` = `Overlay { recipe: pdk.recipe("resistor", "res_gene
 ### Acceptance status
 T6 (common centroid) and T4 (value) for resistor sets are met on hand-built sets. "rdiv drawn as one array, LVS
 MATCH" waits on the annotator emission edit above. Report it as escalated with this evidence; do not mark it met.
+Deviation from edit 4 / plan-03 step 3 (as built): the series-unit `Interdig` variant is not bounded by
+`jumper_tracks(process).len()`; `draw` grows both heads (`head_for`) a cut-lattice step at a time until one met1 track
+per string fits. Reason: on `generic_po` `jumper_tracks` at `head_len` is empty, so the card's bound would drop the
+variant for every group and the ratio tests could never pass (a mutation with `head = head_len(process)` panics at
+`tracks[g % 0.max(1)]`). `frontend/library/tests/drawn_cards.rs::a_mim_dac_signs_off_with_its_capacitors` fails with
+`["lvs/lvs.floating_net:-"]` at HEAD and at the base `2676ece` alike; it is outside CELL-14/16 (CELL-08 / LVS
+floating-net owner), so `drawn_cards` is not green.
 
 ## CELL-16 MOS flavours, Vt markers: class **do**
 
