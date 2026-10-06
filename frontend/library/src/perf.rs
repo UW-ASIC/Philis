@@ -603,41 +603,6 @@ pub fn coupling_params(t: &SensTable, netlist: &Netlist, nets: &[pnr_core::NetId
     pairs.into_iter().take(max).map(|(_, a, b)| Param::CouplingC { a: pnr_core::NetId(a), b: pnr_core::NetId(b) }).collect()
 }
 
-/// One [`analog::routing::PerformanceBudget`] row per bound of `start`,
-/// metric `"{metric}:min"` / `"{metric}:max"`: `w_i = sign·(∂f/∂C_i) /
-/// headroom`, `limit = 1`, with floor headroom `f0 − lo` (`sign = −1`) and
-/// ceiling `hi − f0` (`sign = +1`), `f0` the bound's worst value over the
-/// scenarios and `∂f/∂C_i` the `GroundC` row of the table at that bound's
-/// scenario. A bound the schematic already misses (`headroom ≤ 0`) keeps a
-/// do-not-worsen row: `limit = 0`, `w_i = sign·(∂f/∂C_i) / |bound|` (`miss`'s
-/// unit-free scale, `1` for a zero bound). A bound the schematic does not
-/// measure finitely has no row (reported by the caller); a net without a
-/// measured, linear row is left out of the row.
-#[must_use]
-pub fn budget_rows(
-    cfg: &PerfConfig,
-    start: &PerfResult,
-    tables: &[SensTable],
-    nets: &[pnr_core::NetId],
-    af_per_nm: f32,
-) -> Vec<analog::routing::PerformanceBudget> {
-    start
-        .bounds
-        .iter()
-        .filter_map(|b| {
-            let spec = &cfg.specs[b.spec];
-            let (bound, sign, side) = if b.upper { (spec.max?, 1.0, "max") } else { (spec.min?, -1.0, "min") };
-            let f0 = b.value.filter(|v| v.is_finite())?;
-            let headroom = sign * (bound - f0);
-            let (scale, limit) = if headroom > 0.0 { (headroom, 1.0) } else { (if bound == 0.0 { 1.0 } else { bound.abs() }, 0.0) };
-            let table = tables.iter().find(|t| t.scenario == b.scenario);
-            let d = |n: pnr_core::NetId| table?.rows.iter().find(|r| r.param == Param::GroundC { net: n } && r.linear)?.d[b.spec];
-            let (nets, weights): (Vec<_>, Vec<_>) = nets.iter().filter_map(|&n| Some((n, (sign * d(n)? / scale) as f32))).unzip();
-            Some(analog::routing::PerformanceBudget { limit, ..analog::routing::PerformanceBudget::ground_c(format!("{}:{side}", spec.metric), nets, weights, af_per_nm) })
-        })
-        .collect()
-}
-
 /// EXT-17's input, one `SpecSens` per spec with a finite bound in `start`: the table read is the one at the
 /// scenario of the spec's tighter bound (smaller margin, unmeasured tightest; floor on a tie), `f0` its `base`
 /// metric (spec skipped when unmeasured or without a table). `proc` = `start.spread[j]` when
@@ -832,56 +797,21 @@ mod tests {
             ground_row(2, vec![Some(-5e6), Some(0.1), Some(0.0)], false),
         ];
         let t = SensTable { scenario: 0, at: Parasitics::default(), base: start.clone(), rows, sims: 0 };
-        let nets = [pnr_core::NetId(0), pnr_core::NetId(1), pnr_core::NetId(2)];
-        let rows = budget_rows(&cfg, &start, &[t], &nets, 0.1);
+        // EXT-25's path: evidence, then the annotator's conservative rows (helpful and nonlinear terms out).
+        let ev = to_evidence(&cfg, &[t], &start, &[], &Netlist::default());
+        let (rows, _, diags) = annotator::budget::rows(&ev, 0.1, None, &annotator::policy::Policy::default());
+        let n0 = pnr_core::NetId(0);
         assert_eq!(rows.len(), 3, "one row per bound, the missed one included");
-        assert_eq!(rows[0].nets, nets[..2], "a nonlinear row is left out");
+        assert_eq!(rows[0].nets, vec![n0], "a zero (not adverse) and a nonlinear term are left out");
         assert!((rows[0].weights[0] - 0.01).abs() < 1e-7, "1 MHz/aF of 100 MHz = 1% per aF");
-        assert_eq!(rows[0].weights[1], 0.0);
-        assert_eq!(rows[1].nets, vec![pnr_core::NetId(0)], "an unmeasured net is left out");
+        assert_eq!(rows[1].nets, vec![n0], "an unmeasured net is left out");
         assert!((rows[1].weights[0] - 0.02).abs() < 1e-7);
         assert_eq!((rows[2].metric.as_str(), rows[2].limit), ("m:min", 0.0), "the missed spec keeps a do-not-worsen row");
+        assert_eq!(diags.iter().filter(|d| d.kind == "no_layout_margin").count(), 1, "{diags:?}");
     }
 
     fn ground_row(net: u16, d: Vec<Option<f64>>, linear: bool) -> SensRow {
         SensRow { param: Param::GroundC { net: pnr_core::NetId(net) }, step: 1000.0, d, linear }
-    }
-
-    fn one_net(specs: Vec<Spec>, f0: f64, d: f64) -> Vec<analog::routing::PerformanceBudget> {
-        let cfg = PerfConfig { sim: OpConfig::default(), testbenches: Vec::new(), specs, scenarios: Vec::new() };
-        let base = score(&cfg.specs, &[vec![Some(f0)]], &[0]);
-        let t = SensTable { scenario: 0, at: Parasitics::default(), base: base.clone(), rows: vec![ground_row(0, vec![Some(d)], true)], sims: 0 };
-        budget_rows(&cfg, &base, &[t], &[pnr_core::NetId(0)], 1.0)
-    }
-
-    /// A window spec is two features (GRAEB-04): the floor row and the
-    /// ceiling row, each over its own headroom, with opposite signs.
-    #[test]
-    fn rows_cover_both_bounds_of_a_window_spec() {
-        let rows = one_net(vec![spec(Some(10.0), Some(20.0))], 15.0, -1.0);
-        assert_eq!(rows.len(), 2);
-        assert_eq!((rows[0].metric.as_str(), rows[0].limit), ("m:min", 1.0));
-        assert!((rows[0].weights[0] - 0.2).abs() < 1e-7, "{:?}", rows[0].weights);
-        assert_eq!((rows[1].metric.as_str(), rows[1].limit), ("m:max", 1.0));
-        assert!((rows[1].weights[0] + 0.2).abs() < 1e-7, "{:?}", rows[1].weights);
-    }
-
-    /// A floor the schematic already misses (GRAEB-11): a zero-limit row in
-    /// units of the bound, so any adverse C is a residual.
-    #[test]
-    fn a_missed_bound_keeps_a_do_not_worsen_row() {
-        let rows = one_net(vec![spec(Some(10.0), None)], 5.0, -1.0);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].limit, 0.0);
-        assert!((rows[0].weights[0] - 0.1).abs() < 1e-7, "{:?}", rows[0].weights);
-    }
-
-    /// Only a finite bound against a finite schematic value gets a row: a NaN
-    /// weight would never violate.
-    #[test]
-    fn a_non_finite_bound_or_value_has_no_row() {
-        assert!(one_net(vec![spec(Some(f64::NAN), Some(f64::INFINITY))], 5.0, -1.0).is_empty());
-        assert!(one_net(vec![spec(Some(10.0), None)], f64::NAN, -1.0).is_empty());
     }
 
     #[test]
