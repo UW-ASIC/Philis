@@ -247,3 +247,37 @@ decisions, so equal work, and the ratio is the proposals/s ratio.
 - Step 2 was already done (stale card note); `touched_names_both_targets` added for `DtiBand` and `HeatSeparation`.
   Step 1: `Start::Warm` falls back to `seed_constructive` with `PlaceStats::warm_fallback` when the tree no longer fits;
   `Epoch::tree` holds the code; mapping FLOW-08's warm start to it is FLOW-08's (not on `m2`).
+
+## PLC-12 and PLC-28 acceptance (symmetry islands; axes on the routing lattice)
+
+Tree `4093679` (PLC-28 on PLC-12) plus the probe; `Flat`, `Sp`, and `Sp` with `PlaceRules::axis_grid` forced to `None`
+(probe-only env switch in `topology`) ran at the same time. Same protocol as PLC-09. "islands" = the winner's
+`SymmetryIsland` budget batches at residual 0 / all; "pairs exact" = `RouteStats::pairs_exact` (RTE-15) out of the
+recognised matched pairs; fallback reasons from `RouteStats::pairs_fallback`.
+
+| fixture | runs | islands Flat (at 0 / all) | islands Sp (at 0 / all) | clusters_extra Flat / Sp (max) | axes on lattice / axes (Sp, Σ) | T2 Sp axis_grid / without (median) | ΔT2 | pairs exact Sp (per seed) | fallback reasons (seed 1) |
+|---|---|---|---|---|---|---|---|---|---|
+| pair | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0000 / 1.0000 | +0.0% | 0/0/0/0/0 | [] |
+| quad | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0000 / 1.0000 | +0.0% | 0/0/0/0/0 | [] |
+| chain4 | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0000 / 1.0000 | +0.0% | 0/0/0/0/0 | [] |
+| rc_filter | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0340 / 1.0340 | +0.0% | 0/0/0/0/0 | [] |
+| mirror_ratio | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0000 / 1.0000 | +0.0% | 0/0/0/0/0 | [] |
+| bjt_mirror | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.1305 / 1.1305 | +0.0% | 0/0/0/0/0 | [] |
+| bgr_core | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0000 / 1.0000 | +0.0% | 0/0/0/0/0 | [] |
+| dac4 | 5 | 0/0 | 0/0 | 0 / 0 | 0/0 | 1.0591 / 1.0591 | +0.0% | 0/0/0/0/0 | [] |
+| ota | 5 | 5/5 | 5/5 | 0 / 0 | 5/5 | 1.2096 / 1.3544 | -10.7% | 1/1/1/1/1 | ["no pin map"] |
+| ota_constrained | 5 | 5/5 | 5/5 | 0 / 0 | 5/5 | 1.2096 / 1.3544 | -10.7% | 1/1/1/1/1 | ["no pin map"] |
+| tt_ota | 5 | 5/5 | 5/5 | 0 / 0 | 5/5 | 1.2096 / 1.3544 | -10.7% | 1/1/1/1/1 | ["no pin map"] |
+
+- **PLC-12 T4: 100 % ≥ 90 % — passes** under both modes: every `SymmetryIsland` batch at residual 0 in all 15 winners that
+  have one (`Flat` 15/15, `Sp` 15/15; only the three OTAs have a symmetry axis with ≥ 2 cells). `clusters_extra` is 0 on
+  every run (no fixture's recognition block splits).
+- **PLC-28: `axes_on_lattice == axes` on all 11 fixtures under `Sp`** (15/15 axes; the other 8 fixtures have none).
+- **T2 within +3 % of `Sp` without `axis_grid`: passes** (OTAs −10.7 %, i.e. smaller; every other fixture identical:
+  without an axis the grid changes nothing). The island budget (PLC-12) and the snapping move the OTA optimum together.
+- **RTE-15 "pairs exact" n/n on ota, ota_constrained, tt_ota: fails — 1/2 on every seed.** Without `axis_grid` it is
+  0/2 (`axis off lattice` on seeds 1, 2, 5); with it the remaining pair falls back with `no pin map` on all three
+  fixtures: dr's `pair_map` found no mirror-exact pin correspondence for that pair, which the axis cannot supply (pin
+  geometry of the cells; owner: routing/cells).
+- `axis_snapping_costs_at_most_one_period_per_level` (2,000 trees): width growth by 100 nm bin
+  `[240, 255, 233, 233, 231, 237, 229, 247, 95]`, all < 2·P = 840 nm.
