@@ -26,8 +26,12 @@ use crate::Cell;
 /// not told this.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
+    /// Three-metal sandwich (`met_n`/`met_n+1`/`met_n+2`); needs three metals
+    /// and two cut layers.
     VerticalAcrossLayers,
+    /// Two-metal parallel plate (`met_n`/`met_n+1`); needs two metals.
     HorizontalAcrossLayers,
+    /// Single-metal lateral comb; needs one metal.
     VerticalInOneLayer,
 }
 
@@ -37,11 +41,15 @@ pub enum Kind {
 /// Pins: `P` is the top plate, `N` the bottom plate.
 #[derive(Clone)]
 pub struct Capacitor {
+    /// Unit-grid columns per device; a device with fewer units uses its unit
+    /// count. `0` draws as `1`.
     pub units_x: u16,
+    /// The metal stack drawn.
     pub kind: Kind,
 }
 
-/// Bound on the reshape search.
+/// Bound on the reshape search: a highly composite unit count would otherwise
+/// offer `divisors × kinds` variants for the placer to try.
 const MAX_VARIANTS: usize = 16;
 
 impl Cell for Capacitor {
@@ -73,7 +81,8 @@ impl Cell for Capacitor {
         let g = Geom::new(self, &s, process);
 
         let mut x0 = 0;
-        for (di, &n_units) in per_device_units(&s).iter().enumerate() {
+        for (di, &nf) in s.dev_nf.iter().enumerate() {
+            let n_units = i32::from(nf.max(1));
             let plate = Rect { x: x0, y: 0, w: g.grid_w(n_units), h: g.grid_h(n_units) };
             let (bot_pin, top_pin) = match self.kind {
                 Kind::VerticalInOneLayer => g.comb(&mut b, plate),
@@ -89,9 +98,12 @@ impl Cell for Capacitor {
     }
 }
 
-/// Every dimension and layer the three kinds draw from.
+/// Every dimension (nm) and layer the three kinds draw from, resolved once
+/// per [`Cell::draw`] from the deck.
 struct Geom {
+    /// BOT electrode metal (`met_n`), also the comb's only metal.
     bot_metal: LayerId,
+    /// TOP electrode metal: `met_n+1`, or `met_n` for the comb.
     top_metal: LayerId,
     /// `met_n+2` — present only for the three-metal sandwich.
     third_metal: Option<LayerId>,
@@ -100,17 +112,24 @@ struct Geom {
     /// Drawn width of each cut — via layers carry exact (min = max) widths, so
     /// each cut is sized from its own layer's rule, not one shared `contact`.
     cut_w: [i32; 2],
+    /// One unit's plate width and height.
     unit_w: i32,
     unit_h: i32,
+    /// Worst same-metal spacing over `met1..=met3` (plate to strap column).
     m_space: i32,
+    /// Gap between consecutive devices' tiles.
     device_gap: i32,
+    /// TOP plate inset from the BOT edge (`plate_spacing`).
     inset: i32,
+    /// Comb finger width and finger-to-finger space.
     finger_w: i32,
     finger_space: i32,
+    /// Metal enclosure of each strap cut.
     via_enc: i32,
     /// Vertical step between cut rows: the worst `size + spacing` over both cut
     /// layers, so neither layer's min-spacing is violated by the shared pitch.
     via_pitch: i32,
+    /// Column cap from [`Capacitor::units_x`], `>= 1`.
     max_cols: i32,
     /// Width of the `met_n`↔`met_n+2` strap column, `0` for the non-sandwich
     /// kinds. It sits **beside** the plates: a cut inside the stack would pierce
@@ -164,10 +183,12 @@ impl Geom {
         }
     }
 
+    /// Columns of an `n_units` device's grid: `units_x`, capped by the units.
     fn cols(&self, n_units: i32) -> i32 {
         self.max_cols.min(n_units).max(1)
     }
 
+    /// Rows holding `n_units` at [`Self::cols`] per row (last row may be partial).
     fn rows(&self, n_units: i32) -> i32 {
         let cols = self.cols(n_units);
         (n_units + cols - 1) / cols
@@ -180,6 +201,7 @@ impl Geom {
         self.cols(n_units) * self.unit_w
     }
 
+    /// Plate height for `n_units`; see [`Self::grid_w`].
     fn grid_h(&self, n_units: i32) -> i32 {
         self.rows(n_units) * self.unit_h
     }
@@ -191,9 +213,13 @@ impl Geom {
     }
 
     /// Stacked plates: BOT fills `plate`, TOP is inset so the plate edges never
-    /// align (fringe + misalignment tolerance). `third` adds a second BOT level
-    /// above TOP, doubling the coupled area, strapped in a side column.
+    /// align (fringe + misalignment tolerance); a plate too small to inset
+    /// keeps TOP flush with BOT. `third` adds a second BOT level above TOP,
+    /// doubling the coupled area, strapped in a side column.
     /// **Nothing is drawn between the plates** — that gap is the dielectric.
+    ///
+    /// Returns `(BOT pin, TOP pin)`: BOT's exposed bottom border (or, for the
+    /// sandwich, its strap rail) and the TOP plate.
     fn plates(&self, b: &mut Builder, plate: Rect, third: Option<LayerId>) -> (Rect, Rect) {
         b.rect(self.bot_metal, plate);
         let i = self.inset;
@@ -239,6 +265,10 @@ impl Geom {
     /// top (TOP) of `plate`, with alternating vertical fingers between them. The
     /// two electrodes **share a layer**, so no BOT rect may touch a TOP rect —
     /// that separation is what makes this a capacitor rather than a short.
+    /// A plate too small for two spines and two fingers degrades to two
+    /// side-by-side plates `finger_space` apart.
+    ///
+    /// Returns `(BOT spine, TOP spine)`.
     fn comb(&self, b: &mut Builder, plate: Rect) -> (Rect, Rect) {
         let (x, y, w, h) = (plate.x, plate.y, plate.w, plate.h);
         let (mut fw, fs) = (self.finger_w, self.finger_space);
@@ -312,15 +342,12 @@ fn feasible_kinds(process: &dyn Process) -> Vec<Kind> {
     kinds
 }
 
-fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
-    // Default plate: a nominal 2µm square unit cell.
+/// The group's capacitor sizing: its unitization, else one square unit per
+/// device of the deck's `cap_unit_side` (0 when the deck states none). Shared
+/// with [`crate::cap_array`].
+pub(crate) fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
     let def = process.rule("cap_unit_side", 0);
     sizing(group, c, def, def)
-}
-
-/// Units contributed by each device — the group's `dev_nf`, min 1.
-fn per_device_units(s: &Sizing) -> Vec<i32> {
-    s.dev_nf.iter().map(|&n| i32::from(n.max(1))).collect()
 }
 
 #[cfg(test)]
