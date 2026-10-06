@@ -1061,3 +1061,87 @@ mod place_tests {
         assert!(mean(&on) < mean(&off), "powered {on:?} vs unpowered {off:?}");
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn bin_of_clamps_to_the_grid() {
+        assert_eq!(bin_of(0, 0, 4, 100.0), 0);
+        assert_eq!(bin_of(150, 250, 4, 100.0), 2 * 4 + 1);
+        assert_eq!(bin_of(-500, -1, 4, 100.0), 0, "negative clamps to the first bin");
+        assert_eq!(bin_of(10_000, 399, 4, 100.0), 3 * 4 + 3);
+        assert_eq!(bin_of(i32::MAX, i32::MIN, 1, 1.0), 0, "one bin holds everything");
+    }
+
+    fn lay(x: Vec<i32>, hw: Vec<i32>) -> Layout {
+        let n = x.len();
+        Layout {
+            y: x.clone(),
+            x,
+            hh: hw.clone(),
+            hw,
+            variant: vec![0; n],
+            axis: vec![0],
+            branch: vec![false; n],
+            groups: Vec::new(),
+            orient: vec![pnr_core::Orient::R0; n],
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        }
+    }
+
+    #[test]
+    fn fill_bins_and_overflow() {
+        let mut util = vec![9.0; 4];
+        let empty = lay(Vec::new(), Vec::new());
+        fill_bins(&mut util, &empty, 2, 100.0);
+        assert_eq!(util, vec![0.0; 4], "refilled from zero");
+        assert_eq!(bin_overflow(&util, &empty, 100.0), 0.0, "no device area");
+        // Two 100 × 100 cells in bin 0 (fill 2.0), one in bin 3 (fill 1.0).
+        let l = lay(vec![10, 20, 150], vec![50, 50, 50]);
+        fill_bins(&mut util, &l, 2, 100.0);
+        assert_eq!(util, vec![2.0, 0.0, 0.0, 1.0]);
+        let want = ((2.0 - TARGET_UTIL) + (1.0 - TARGET_UTIL)) * 10_000.0 / 30_000.0;
+        assert!((bin_overflow(&util, &l, 100.0) - want).abs() < 1e-6);
+        let zero = lay(vec![0, 0], vec![0, 0]);
+        fill_bins(&mut util, &zero, 2, 100.0);
+        assert_eq!(bin_overflow(&util, &zero, 100.0), 0.0, "zero-area cells");
+    }
+
+    struct K(&'static str);
+    impl analog::RuleBatch<Layout> for K {
+        fn cost(&self, _: &Layout) -> f32 {
+            0.0
+        }
+        fn violations(&self, _: &Layout) -> u32 {
+            0
+        }
+        fn kind(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    #[test]
+    fn keys_count_ordinals_per_kind() {
+        let reqs = Requirements::<Layout> {
+            hard: Vec::new(),
+            budget: vec![Box::new(K("a")), Box::new(K("b")), Box::new(K("a")), Box::new(K("a")), Box::new(K("b"))],
+            cost: Vec::new(),
+        };
+        assert_eq!(
+            keys(&reqs),
+            vec![PriceKey::Ord("a", 0), PriceKey::Ord("b", 0), PriceKey::Ord("a", 1), PriceKey::Ord("a", 2), PriceKey::Ord("b", 1)]
+        );
+        assert!(keys(&Requirements::default()).is_empty());
+    }
+
+    #[test]
+    fn steps_saturate() {
+        let mut p = Prices { steps: u32::MAX, ..Prices::new() };
+        p.settle(&Requirements::default(), &lay(Vec::new(), Vec::new()));
+        assert_eq!(p.steps(), u32::MAX);
+    }
+}

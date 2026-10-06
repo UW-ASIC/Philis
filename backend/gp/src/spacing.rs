@@ -562,4 +562,40 @@ mod tests {
         let b = face(Face::L, &[(POLY, 0)], None);
         assert_eq!(keep_table().gap(&a, Face::R, &b), Gap { abut: false, min: 4900 });
     }
+
+    #[test]
+    fn round_up_is_a_ceiling_on_the_lattice() {
+        assert_eq!(round_up(0, 5), 0);
+        assert_eq!(round_up(1, 5), 5);
+        assert_eq!(round_up(5, 5), 5);
+        assert_eq!(round_up(-3, 5), 0);
+        assert_eq!(round_up(-5, 5), -5);
+        assert_eq!(round_up(-6, 5), -5);
+        assert_eq!(round_up(7, 0), 7, "lattice 0 reads 1");
+        assert_eq!(round_up(7, -4), 7, "negative lattice reads 1");
+        assert_eq!(round_up(i32::MAX, 10), 2_147_483_640, "saturates below i32::MAX");
+        assert_eq!(round_up(i32::MAX, 1), i32::MAX);
+        assert_eq!(round_up(i32::MIN, 10), -2_147_483_640);
+    }
+
+    #[test]
+    fn expand_names() {
+        assert_eq!(expand("diff"), vec![DIFF_IN, DIFF_OUT]);
+        assert_eq!(expand("tap"), vec![TAP_IN, TAP_OUT]);
+        assert_eq!(expand("poly"), vec![POLY]);
+        assert_eq!(expand("other"), vec![OTHER]);
+        assert!(expand("diff_inn").is_empty());
+        assert!(expand("").is_empty());
+    }
+
+    #[test]
+    fn role_of_takes_the_first_matching_role() {
+        let mut layers = [None; N];
+        layers[DIFF_IN] = Some(LayerId(2));
+        layers[DIFF_OUT] = Some(LayerId(2));
+        assert_eq!(role_of(&layers, LayerId(2)), DIFF_IN);
+        assert_eq!(role_of(&layers, LayerId(3)), OTHER);
+        layers[OTHER] = Some(LayerId(3));
+        assert_eq!(role_of(&layers, LayerId(3)), OTHER, "`other` is never matched by layer");
+    }
 }
