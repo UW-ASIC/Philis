@@ -253,4 +253,63 @@ mod tests {
         let cell = Rect { x: 50_000, y: 50_000, w: 20_000, h: 20_000 };
         assert!(fill(&[rail, signal], &[rail], &[signal], &[cell], &pdk).is_none());
     }
+
+    /// gf180 plus `extra` deck lines; `None` only when the sidecar is not in
+    /// the checkout, a load failure fails the test.
+    fn deck_strict(extra: &str) -> Option<Pdk> {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let sidecar = std::fs::read_to_string(root.join("pdks/gf180mcu.json")).ok()?;
+        let text = Pdk::deck_text(&sidecar).expect("deck text");
+        Some(Pdk::load(&format!("{text}\n{extra}"), &sidecar).expect("deck loads"))
+    }
+
+    #[test]
+    fn overlaps_is_open() {
+        let a = Rect { x: 0, y: 0, w: 10, h: 10 };
+        assert!(overlaps(&a, &Rect { x: 9, y: 9, w: 5, h: 5 }));
+        assert!(!overlaps(&a, &Rect { x: 10, y: 0, w: 5, h: 5 }), "abutting");
+        assert!(!overlaps(&a, &Rect { x: 10, y: 10, w: 5, h: 5 }), "corner");
+        assert!(overlaps(&a, &Rect { x: 2, y: 2, w: 1, h: 1 }), "contained");
+    }
+
+    /// Several floors on one layer fold into one: the strictest minimum and
+    /// the tightest ceiling, each only from a window the block covers.
+    #[test]
+    fn floors_fold_per_layer_and_respect_the_window() {
+        let Some(pdk) = deck_strict(
+            "rule TEST.a density(metal1; window: 200um, step: 100um) >= 30%\n\
+             rule TEST.b density(metal1; window: 100um, step: 50um) >= 40%\n\
+             rule TEST.c density(metal1; window: 100um, step: 50um) <= 70%\n",
+        ) else {
+            return;
+        };
+        let m1 = pdk.routing_metals[0];
+        let block = |side: i32| Rect { x: 0, y: 0, w: side, h: side };
+        let m1_floors = |b: Rect| floors(&pdk, b).into_iter().filter(|f| f.layer == m1).collect::<Vec<_>>();
+        let f = m1_floors(block(200_000));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!((f[0].min - 0.4).abs() < 1e-9 && (f[0].max - 0.7).abs() < 1e-9, "{f:?}");
+        // 150 µm covers only the 100 µm window; 99.999 µm covers none.
+        assert!((m1_floors(block(150_000))[0].min - 0.4).abs() < 1e-9);
+        assert!(m1_floors(block(99_999)).is_empty());
+        // The window must fit on the narrow side.
+        assert!(m1_floors(Rect { x: 0, y: 0, w: 500_000, h: 99_999 }).is_empty());
+    }
+
+    #[test]
+    fn nothing_drawn_is_nothing_filled() {
+        let Some(pdk) = deck_strict("") else { return };
+        assert!(fill(&[], &[], &[], &[], &pdk).is_none());
+    }
+
+    /// Without a ground wire on the layer there is nowhere to tie fill: none.
+    #[test]
+    fn no_ground_no_fill() {
+        let Some(pdk) = deck("gf180mcu", "") else { return };
+        let m1 = pdk.routing_metals[0];
+        let side = 200_000;
+        let signal = Shape { layer: m1, rect: Rect { x: 0, y: 0, w: side, h: 1_000 } };
+        let corner = Shape { layer: m1, rect: Rect { x: side - 1_000, y: side - 1_000, w: 1_000, h: 1_000 } };
+        assert!(fill(&[signal, corner], &[], &[], &[], &pdk).is_none());
+    }
 }

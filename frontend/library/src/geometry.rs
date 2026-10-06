@@ -468,4 +468,175 @@ mod tests {
             assert_eq!(a.rect, b.rect);
         }
     }
+
+    fn r(x: i32, y: i32, w: i32, h: i32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    fn on(layer: u16, rect: Rect) -> Shape {
+        Shape { layer: LayerId(layer), rect }
+    }
+
+    /// A layout with no cells: every macro is taken as already absolute.
+    fn no_cells() -> Layout {
+        let mut l = layout_of(Orient::R0, 0, 0);
+        for v in [&mut l.x, &mut l.y, &mut l.hw, &mut l.hh, &mut l.power_uw, &mut l.temp_mc] {
+            v.clear();
+        }
+        l.orient.clear();
+        l.variant.clear();
+        l
+    }
+
+    #[test]
+    fn collect_of_nothing_is_empty() {
+        assert!(collect(&[], &no_cells(), &Routes::default()).is_empty());
+    }
+
+    /// Macro shapes come first, then wires net by net, in order.
+    #[test]
+    fn collect_puts_wires_after_cells_in_net_order() {
+        let m = Macro { shapes: vec![on(1, r(0, 0, 5, 5))], ..Default::default() };
+        let routes = Routes { wires: vec![vec![on(2, r(10, 0, 1, 1))], vec![], vec![on(3, r(20, 0, 1, 1)), on(4, r(30, 0, 1, 1))]], ..Default::default() };
+        let got: Vec<u16> = collect(&[m], &no_cells(), &routes).iter().map(|s| s.layer.0).collect();
+        assert_eq!(got, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn bbox_corners() {
+        assert_eq!(bbox(&[]), None);
+        assert_eq!(bbox(&[on(0, r(-3, 4, 0, 0))]), Some(r(-3, 4, 0, 0)), "a point is its own bbox");
+        assert_eq!(bbox(&[on(0, r(-10, 0, 5, 5)), on(1, r(0, -20, 30, 1))]), Some(r(-10, -20, 40, 25)));
+    }
+
+    #[test]
+    fn rect_gap_is_chebyshev_and_symmetric() {
+        let a = r(0, 0, 10, 10);
+        for (b, want) in [
+            (r(5, 5, 10, 10), 0),   // overlap
+            (r(10, 0, 5, 5), 0),    // edge contact
+            (r(10, 10, 5, 5), 0),   // corner contact
+            (r(17, 2, 5, 5), 7),    // right
+            (r(-9, 0, 5, 5), 4),    // left
+            (r(0, -8, 5, 5), 3),    // below
+            (r(13, 16, 1, 1), 6),   // diagonal: max(3, 6)
+        ] {
+            assert_eq!(rect_gap(&a, &b), want, "{b:?}");
+            assert_eq!(rect_gap(&b, &a), want, "{b:?} symmetric");
+        }
+    }
+
+    fn merged(shapes: &[Shape]) -> Vec<Shape> {
+        let mut v = shapes.to_vec();
+        merge_rects(&mut v, LayerId(1));
+        v
+    }
+
+    #[test]
+    fn merge_rects_joins_abutting_rows_and_columns() {
+        assert_eq!(merged(&[on(1, r(0, 0, 10, 5)), on(1, r(10, 0, 7, 5))]), [on(1, r(0, 0, 17, 5))]);
+        assert_eq!(merged(&[on(1, r(0, 0, 5, 10)), on(1, r(0, 4, 5, 10))]), [on(1, r(0, 0, 5, 14))]);
+        // A chain of three collapses to one, in any order.
+        assert_eq!(merged(&[on(1, r(20, 0, 10, 5)), on(1, r(0, 0, 10, 5)), on(1, r(10, 0, 10, 5))]), [on(1, r(0, 0, 30, 5))]);
+    }
+
+    #[test]
+    fn merge_rects_absorbs_a_contained_rect() {
+        assert_eq!(merged(&[on(1, r(2, 2, 3, 3)), on(1, r(0, 0, 10, 10))]), [on(1, r(0, 0, 10, 10))]);
+    }
+
+    /// The union must be exactly one rectangle: a gap, an L or a step stays.
+    #[test]
+    fn merge_rects_keeps_non_rectangular_unions_apart() {
+        for pair in [
+            [on(1, r(0, 0, 10, 5)), on(1, r(11, 0, 10, 5))], // 1 nm gap
+            [on(1, r(0, 0, 10, 5)), on(1, r(5, 0, 10, 8))],  // different heights
+            [on(1, r(0, 0, 10, 5)), on(1, r(0, 5, 4, 5))],   // L
+        ] {
+            assert_eq!(merged(&pair).len(), 2, "{pair:?}");
+        }
+    }
+
+    /// Other layers are untouched and keep their order; an empty list stays empty.
+    #[test]
+    fn merge_rects_leaves_other_layers() {
+        let got = merged(&[on(2, r(0, 0, 1, 1)), on(1, r(0, 0, 10, 5)), on(3, r(5, 5, 1, 1)), on(1, r(10, 0, 5, 5))]);
+        assert_eq!(got, [on(2, r(0, 0, 1, 1)), on(3, r(5, 5, 1, 1)), on(1, r(0, 0, 15, 5))]);
+        assert!(merged(&[]).is_empty());
+    }
+
+    #[test]
+    fn unreached_pins_floods_through_wires() {
+        let pins = [r(0, 0, 2, 2), r(20, 0, 2, 2), r(50, 50, 1, 1)];
+        // A wire bridging the first two, touching at edges.
+        let wires = [on(1, r(2, 0, 18, 1))];
+        assert_eq!(unreached_pins(&pins, &wires), [2]);
+        assert!(unreached_pins(&[], &wires).is_empty());
+        assert!(unreached_pins(&pins[..1], &[]).is_empty(), "one pin reaches itself");
+        // Corner contact counts (closed intervals).
+        assert!(unreached_pins(&[r(0, 0, 2, 2), r(2, 2, 2, 2)], &[]).is_empty());
+    }
+
+    fn pin(net: u16, at: Rect) -> pnr_core::Pin {
+        pnr_core::Pin { name: String::new(), net: pnr_core::NetId(net), at, layer: LayerId(1) }
+    }
+
+    #[test]
+    fn connected_nets_pass_the_debug_check() {
+        let m = Macro { pins: vec![pin(0, r(0, 0, 2, 2)), pin(0, r(20, 0, 2, 2)), pin(1, r(90, 90, 1, 1))], ..Default::default() };
+        let routes = Routes { wires: vec![vec![on(1, r(1, 0, 20, 1))]], ..Default::default() };
+        debug_check_connected(&[m], &no_cells(), &routes);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "no routed geometry")]
+    fn a_net_without_wires_fails_the_debug_check() {
+        // Net 3 is past `routes.wires`: its pins still count.
+        let m = Macro { pins: vec![pin(3, r(0, 0, 2, 2)), pin(3, r(20, 0, 2, 2))], ..Default::default() };
+        debug_check_connected(&[m], &no_cells(), &Routes::default());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "is open")]
+    fn an_orphan_pin_fails_the_debug_check() {
+        let m = Macro { pins: vec![pin(0, r(0, 0, 2, 2)), pin(0, r(20, 0, 2, 2))], ..Default::default() };
+        let routes = Routes { wires: vec![vec![on(1, r(0, 0, 5, 1))]], ..Default::default() };
+        debug_check_connected(&[m], &no_cells(), &routes);
+    }
+
+    /// Islands past the first per non-glue group; the glue (last) group, ids
+    /// past the layout and duplicates never count.
+    #[test]
+    fn clusters_extra_counts_split_groups_only() {
+        use pnr_core::DeviceId;
+        let mut l = layout_of(Orient::R0, 0, 0);
+        l.x = vec![100, 10_000, 300];
+        l.y = vec![100; 3];
+        l.hw = vec![100; 3];
+        l.hh = vec![100; 3];
+        l.orient = vec![Orient::R0; 3];
+        l.variant = vec![0; 3];
+        let g = |ids: &[u16]| ids.iter().map(|&d| DeviceId(d)).collect::<Vec<_>>();
+        assert_eq!(clusters_extra(&l, &[], 10), 0);
+        assert_eq!(clusters_extra(&l, &[g(&[0, 1])], 10), 0, "the only group is glue");
+        assert_eq!(clusters_extra(&l, &[g(&[0, 1]), g(&[])], 10), 1);
+        assert_eq!(clusters_extra(&l, &[g(&[0, 2]), g(&[])], 10), 0, "abutting cells are one island");
+        assert_eq!(clusters_extra(&l, &[g(&[0, 0, 9]), g(&[])], 10), 0, "one distinct in-layout cell");
+    }
+
+    /// A non-positive lattice reads as 1 nm: nothing is off it.
+    #[test]
+    fn placement_metrics_with_no_lattice() {
+        let mut l = layout_of(Orient::R0, 0, 0);
+        l.x = vec![101];
+        l.y = vec![103];
+        l.hw = vec![100];
+        l.hh = vec![100];
+        let reqs = analog::Requirements::<Layout> { hard: vec![], budget: vec![], cost: vec![] };
+        let locks = dp::locks::locks(&reqs, 1, &[]);
+        let m = placement_metrics(&[Macro::default()], &l, 0, &gp::PlaceRules::uniform(100, 50), &reqs, &locks, &[]);
+        assert_eq!((m.lattice_off, m.matched_geometry_mismatch, m.overlap_nm2), (0, 0, 0.0), "{m:?}");
+    }
 }

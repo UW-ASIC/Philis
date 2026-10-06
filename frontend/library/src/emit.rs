@@ -599,4 +599,251 @@ mod tests {
             assert!(ident(g, &mut HashSet::new()) == *g, "{g} is not a keyword");
         }
     }
+
+    #[test]
+    fn identifier_corners() {
+        let mut taken = HashSet::new();
+        assert_eq!(ident("", &mut taken), "n_", "empty");
+        assert_eq!(ident("_", &mut taken), "__", "lone underscore is not an identifier");
+        assert_eq!(ident("Self", &mut taken), "self_", "keyword after lowercasing");
+        assert_eq!(ident("µa", &mut taken), "_a", "non-ASCII becomes _");
+        // A suffixed form already taken pushes the counter on.
+        let mut taken = HashSet::new();
+        assert_eq!(ident("vdd_2", &mut taken), "vdd_2");
+        assert_eq!(ident("vdd", &mut taken), "vdd");
+        assert_eq!(ident("VDD", &mut taken), "vdd_3");
+    }
+
+    #[test]
+    fn terminal_ports() {
+        assert_eq!(terminal_port(DeviceKind::Nmos, "G", 0), "g");
+        assert_eq!(terminal_port(DeviceKind::Pmos, "B", 3), "b");
+        assert_eq!(terminal_port(DeviceKind::Resistor, "P", 0), "a");
+        assert_eq!(terminal_port(DeviceKind::Resistor, "N", 1), "b");
+        assert_eq!(terminal_port(DeviceKind::Capacitor, "X", 2), "b");
+    }
+
+    fn device(name: &str, kind: DeviceKind, terminals: &[(&str, u16)], params: &[(&str, i64)]) -> pnr_core::Device {
+        pnr_core::Device {
+            name: name.into(),
+            kind,
+            model: String::new(),
+            terminals: terminals.iter().map(|&(t, n)| (t.to_string(), pnr_core::NetId(n))).collect(),
+            params: params.iter().map(|&(k, v)| (k.to_string(), v)).collect(),
+        }
+    }
+
+    #[test]
+    fn narrow_saturates_and_falls_back() {
+        let m = device("M1", DeviceKind::Nmos, &[], &[]);
+        assert_eq!(narrow(Some((500, 150, 4)), &m).unwrap(), (500, 150, 4));
+        assert_eq!(narrow(Some((1 << 40, 1 << 40, 1 << 20)), &m).unwrap(), (i32::MAX, i32::MAX, u16::MAX));
+        let r = device("R1", DeviceKind::Resistor, &[], &[("w", 400), ("l", 2_000)]);
+        assert_eq!(narrow(None, &r).unwrap(), (400, 2_000, 1));
+        let r0 = device("R2", DeviceKind::Resistor, &[], &[("w", 0), ("l", 2_000)]);
+        assert!(matches!(narrow(None, &r0), Err(EmitError::Unsupported(m)) if m.contains("R2")), "a zero width is no size");
+        assert!(narrow(None, &m).is_err(), "a MOS without a size is not guessed");
+        assert!(narrow(None, &device("C1", DeviceKind::Capacitor, &[], &[("w", 1), ("l", 1)])).is_err());
+    }
+
+    fn sky130() -> Option<Pdk> {
+        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../pdks/sky130.json")).ok()?;
+        Some(Pdk::from_json(&text).expect("sky130 sidecar parses"))
+    }
+
+    fn layout(cells: &[(i32, i32, i32, i32)]) -> pnr_core::Layout {
+        let n = cells.len();
+        pnr_core::Layout {
+            x: cells.iter().map(|c| c.0).collect(),
+            y: cells.iter().map(|c| c.1).collect(),
+            hw: cells.iter().map(|c| c.2).collect(),
+            hh: cells.iter().map(|c| c.3).collect(),
+            axis: vec![],
+            groups: vec![],
+            orient: vec![Orient::R0; n],
+            variant: vec![0; n],
+            branch: vec![],
+            power_uw: vec![0; n],
+            temp_mc: vec![0; n],
+            units: Default::default(),
+        }
+    }
+
+    /// `n` NMOS on distinct nets `4k..4k+3`, ports none.
+    fn nmos_netlist(n: u16) -> pnr_core::Netlist {
+        pnr_core::Netlist {
+            devices: (0..n).map(|k| device(&format!("M{k}"), DeviceKind::Nmos, &[("G", 4 * k), ("D", 4 * k + 1), ("S", 4 * k + 2), ("B", 4 * k + 3)], &[])).collect(),
+            nets: (0..4 * n).map(|k| pnr_core::Net { name: format!("n{k}") }).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn unit(_: &[DeviceId]) -> Result<(i32, i32, u16), EmitError> {
+        Ok((100, 100, 1))
+    }
+
+    fn singles(n: u16) -> Vec<Vec<DeviceId>> {
+        (0..n).map(|k| vec![DeviceId(k)]).collect()
+    }
+
+    /// Replays the IR's align programs on bboxes of the solved sizes, by
+    /// macroMaster's documented `AlignMode` semantics: the abut modes set
+    /// the primary axis from the reference, the flush modes set one axis
+    /// from it and nudge the other by the offset. Returns lower-left corners.
+    fn replay(ir: &GenIr, l: &pnr_core::Layout) -> Vec<(i32, i32)> {
+        let size = |i: usize| (2 * l.hw[i], 2 * l.hh[i]);
+        let mut at: Vec<Option<(i32, i32)>> = vec![None; ir.instances.len()];
+        for p in &ir.place {
+            let (w, h) = size(p.inst);
+            let (mut x, mut y) = (0, 0);
+            for a in &p.aligns {
+                let (bx, by) = at[a.reference].expect("reference placed earlier");
+                let (bw, bh) = size(a.reference);
+                let g = match &a.gap {
+                    IrGap::Rule(_, v) | IrGap::Nm(v) => *v,
+                };
+                match a.mode {
+                    AlignMode::Left => (x, y) = (bx, y + g),
+                    AlignMode::Right => (x, y) = (bx + bw - w, y + g),
+                    AlignMode::Bottom => (x, y) = (x + g, by),
+                    AlignMode::Top => (x, y) = (x + g, by + bh - h),
+                    AlignMode::ToTheRight => x = bx + bw + g,
+                    AlignMode::ToTheLeft => x = bx - w - g,
+                    AlignMode::Above => y = by + bh + g,
+                    AlignMode::Beneath => y = by - h - g,
+                    m => panic!("lift never emits {m:?}"),
+                }
+            }
+            at[p.inst] = Some((x, y));
+        }
+        at.into_iter().map(|p| p.expect("every instance placed")).collect()
+    }
+
+    fn corners(l: &pnr_core::Layout) -> Vec<(i32, i32)> {
+        (0..l.x.len()).map(|i| (l.x[i] - l.hw[i], l.y[i] - l.hh[i])).collect()
+    }
+
+    /// The lifted align programs put every cell back on its solved corner:
+    /// same row at a different bottom, a new row at an x offset, a cell left
+    /// of the anchor overlapping its row (negative gap), a lone cell.
+    #[test]
+    fn lift_replays_to_the_solved_corners() {
+        let Some(pdk) = sky130() else { return };
+        let gap = pnr_core::Process::rule(&pdk, "device_gap", 0);
+        for cells in [
+            vec![(100, 100, 100, 100), (200 + gap + 50, 70, 50, 30)],
+            vec![(100, 100, 100, 100), (100, 1_250, 50, 50)],
+            vec![(600, 100, 100, 100), (50, 200, 50, 100)],
+            vec![(100, 100, 100, 100), (2_000, 100, 100, 100), (100, 2_000, 100, 100), (2_000, 2_150, 100, 100)],
+            vec![(7, 9, 3, 3)],
+        ] {
+            let l = layout(&cells);
+            let n = cells.len() as u16;
+            let ir = lift(&nmos_netlist(n), &l, &pdk, &singles(n), unit).unwrap();
+            assert_eq!(replay(&ir, &l), corners(&l), "{cells:?}: {:?}", ir.place);
+            assert!(ir.place[0].aligns.is_empty(), "the first cell anchors");
+            assert_eq!(ir.place.len(), cells.len());
+        }
+    }
+
+    /// A gap within two grid steps of `device_gap` is the rule; one nm more is a residue.
+    #[test]
+    fn device_gap_attribution_window() {
+        let Some(pdk) = sky130() else { return };
+        let gap = pnr_core::Process::rule(&pdk, "device_gap", 0);
+        let tol = 2 * pnr_core::Process::grid(&pdk);
+        let row = |g: i32| layout(&[(100, 100, 100, 100), (200 + g + 100, 100, 100, 100)]);
+        let abut = |g: i32| {
+            let ir = lift(&nmos_netlist(2), &row(g), &pdk, &singles(2), unit).unwrap();
+            ir.place[1].aligns.iter().find(|a| a.mode == AlignMode::ToTheRight).map(|a| a.gap.clone()).unwrap()
+        };
+        assert!(matches!(abut(gap + tol), IrGap::Rule(n, v) if n == "device_gap" && v == gap));
+        assert!(matches!(abut(gap - tol), IrGap::Rule(..)));
+        assert!(matches!(abut(gap + tol + 1), IrGap::Nm(v) if v == gap + tol + 1));
+    }
+
+    #[test]
+    fn lift_refuses_what_it_cannot_express() {
+        let Some(pdk) = sky130() else { return };
+        let l = layout(&[(100, 100, 100, 100)]);
+        let err = |net: &pnr_core::Netlist, cells: &[Vec<DeviceId>]| match lift(net, &l, &pdk, cells, unit) {
+            Err(EmitError::Unsupported(m)) => m,
+            Ok(ir) => panic!("accepted {ir:?}"),
+        };
+        let net = nmos_netlist(3);
+        assert!(err(&net, &[vec![]]).contains("empty"), "a cell drawing no device");
+        assert!(err(&net, &[vec![DeviceId(0), DeviceId(1), DeviceId(2)]]).contains("quad"));
+        let mut mixed = nmos_netlist(2);
+        mixed.devices[1].kind = DeviceKind::Pmos;
+        assert!(err(&mixed, &[vec![DeviceId(0), DeviceId(1)]]).contains("mixed-kind"));
+        let mut cap = nmos_netlist(1);
+        cap.devices[0].kind = DeviceKind::Capacitor;
+        assert!(err(&cap, &[vec![DeviceId(0)]]).contains("Capacitor"));
+        let refuse = |_: &[DeviceId]| Err(EmitError::Unsupported("size".into()));
+        assert!(matches!(lift(&net, &l, &pdk, &singles(1), refuse), Err(EmitError::Unsupported(m)) if m == "size"));
+    }
+
+    /// Without `.subckt` ports every net is a port and every terminal an edge
+    /// to it; with ports, an internal net chains through its first terminal.
+    #[test]
+    fn lift_connectivity() {
+        let Some(pdk) = sky130() else { return };
+        let l = layout(&[(100, 100, 100, 100), (1_000, 100, 100, 100)]);
+        let mut net = nmos_netlist(2);
+        let ir = lift(&net, &l, &pdk, &singles(2), unit).unwrap();
+        assert_eq!(ir.ports.len(), 8);
+        assert_eq!(ir.edges.len(), 8);
+        assert!(ir.edges.contains(&("M0.g".into(), "n0".into())) && ir.edges.contains(&("M1.b".into(), "n7".into())));
+        // M1's drain shares M0's gate net, which is internal now.
+        net.devices[1].terminals[1].1 = pnr_core::NetId(0);
+        net.ports = vec![pnr_core::NetId(2)];
+        let ir = lift(&net, &l, &pdk, &singles(2), unit).unwrap();
+        assert_eq!(ir.ports, ["n2"]);
+        assert_eq!(ir.edges, [("M0.s".to_string(), "n2".to_string()), ("M1.d".to_string(), "M0.g".to_string())]);
+    }
+
+    /// A merged pair is one `a_b` instance with per-leg pins and one shared body.
+    #[test]
+    fn lift_merged_pair_names_legs() {
+        let Some(pdk) = sky130() else { return };
+        let l = layout(&[(100, 100, 100, 100)]);
+        let ir = lift(&nmos_netlist(2), &l, &pdk, &[vec![DeviceId(0), DeviceId(1)]], unit).unwrap();
+        assert_eq!((ir.instances[0].name.as_str(), ir.instances[0].legs), ("M0_M1", 2));
+        let terms: Vec<&str> = ir.edges.iter().map(|e| e.0.as_str()).collect();
+        assert_eq!(terms, ["M0_M1.g1", "M0_M1.d1", "M0_M1.s1", "M0_M1.b", "M0_M1.g2", "M0_M1.d2", "M0_M1.s2", "M0_M1.b"]);
+    }
+
+    fn inst(name: &str, kind: DeviceKind, legs: u8, orient: Orient) -> IrInst {
+        IrInst { name: name.into(), kind, w: 420, l: 150, nf: 2, legs, orient }
+    }
+
+    /// Every variant's constructor, orientation only when turned, both gap
+    /// kinds, and names written as escaped literals.
+    #[test]
+    fn to_rust_prints_each_construct() {
+        let ir = GenIr {
+            name: "emitted".into(),
+            ports: vec!["in".into(), "q\"x".into()],
+            instances: vec![
+                inst("M\"1", DeviceKind::Nmos, 1, Orient::R0),
+                inst("P", DeviceKind::Pmos, 2, Orient::R90),
+                inst("R\\1", DeviceKind::Resistor, 1, Orient::R0),
+            ],
+            place: vec![
+                IrPlace { inst: 0, aligns: vec![] },
+                IrPlace { inst: 1, aligns: vec![IrAlign { mode: AlignMode::ToTheRight, reference: 0, gap: IrGap::Rule("device_gap".into(), 600) }] },
+                IrPlace { inst: 2, aligns: vec![IrAlign { mode: AlignMode::Above, reference: 1, gap: IrGap::Nm(-40) }] },
+            ],
+            edges: vec![("M\"1.g".into(), "in".into())],
+        };
+        let src = to_rust(&ir);
+        assert!(src.contains(r#"let mut i0 = c.instantiate("M\"1", &Mos::new(DeviceKind::Nmos, 420, 150, 2))?;"#), "{src}");
+        assert!(src.contains("MatchedPair { kind: DeviceKind::Pmos, w: 420, l: 150, nf_each: 2, pattern: None }"), "{src}");
+        assert!(src.contains(r#"c.instantiate("R\\1", &Res { w: 420, len: 150 })?;"#), "{src}");
+        assert!(src.contains("i1.orient(Orient::R90);") && !src.contains("i0.orient") && !src.contains("i2.orient"), "{src}");
+        assert!(src.contains(r#"i1.align(AlignMode::ToTheRight, &i0, c.process().rule("device_gap", 600));"#), "{src}");
+        assert!(src.contains("i2.align(AlignMode::Above, &i1, -40 /* unattributed: PDK-specific residue */);"), "{src}");
+        assert!(src.contains(r#"c.connect("M\"1.g", "in");"#), "{src}");
+        assert!(src.contains("pub in_: InOut<Signal>,") && src.contains(r#"self.q_x.port("q\"x"),"#), "{src}");
+    }
 }
