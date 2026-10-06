@@ -1485,18 +1485,36 @@ impl DetailedRoute {
                 // they clear. Along the lower
                 // wire's current, so REL-12's front row gains nothing: this is
                 // redundancy against voiding, not EM capacity.
-                // A single within cut pitch of another same-net cut (a pin-access
-                // cut beside an array) is already grouped: no site, not counted.
+                // A single within cut spacing of another same-net cut on its cut
+                // layer (a stack cut drawn inside a corner block's array) gets no
+                // site: a second cut there would only stack pads on that group.
+                // It counts as single unless its pads touch that cut's on both
+                // metals (then the two are one redundant via).
+                let near = |n: usize, i: usize, c: Rect| {
+                    let (cut, size, ..) = cuts[i];
+                    let sp = cfg.space(cut, 0, 0, size);
+                    let pads = via_pads(cfg, layers, cuts[i], i, c);
+                    let mut near = routes.wires[n].iter().filter(|g| g.layer == cut && g.rect != c && rect_gap(g.rect, c) <= sp).peekable();
+                    near.peek()?;
+                    let shared = near.any(|g| {
+                        let other = via_pads(cfg, layers, cuts[i], i, g.rect);
+                        pads.iter().zip(&other).all(|(a, b)| a.zip(*b).is_some_and(|(a, b)| rect_gap(a.rect, b.rect) == 0))
+                    });
+                    Some(shared)
+                };
+                // An image's singles are its leader's, counted twice there.
+                let grouped_singles: u32 = singles
+                    .iter()
+                    .enumerate()
+                    .filter(|&(n, _)| !image.iter().flatten().any(|&(b, _)| b == n))
+                    .map(|(n, v)| v.iter().filter(|&&(i, c)| near(n, i, c) == Some(false)).count() as u32 * (1 + u32::from(image[n].is_some())))
+                    .sum();
                 let sites: Vec<Vec<Vec<Vec<Shape>>>> = singles
                     .iter()
                     .enumerate()
                     .map(|(n, v)| {
                         v.iter()
-                            .filter(|&&(i, c)| {
-                                let (cut, size, ..) = cuts[i];
-                                let sp = cfg.space(cut, 0, 0, size);
-                                !routes.wires[n].iter().any(|g| g.layer == cut && g.rect != c && rect_gap(g.rect, c) <= sp)
-                            })
+                            .filter(|&&(i, c)| near(n, i, c).is_none())
                             .map(|&(i, c)| {
                                 let (cut, size, ..) = cuts[i];
                                 let p = size + cfg.space(cut, 0, 0, size);
@@ -1505,6 +1523,9 @@ impl DetailedRoute {
                                 // Along the lower wire first (spec); across it, along the
                                 // upper wire, where the upper pad would reach a
                                 // neighbour's track (most misses on ota, met2 beside met2).
+                                // Card deviation: on ota the across shifts take
+                                // single_cut_vias 19 -> 12 of 60 stack vias. They widen
+                                // the lower pad across its wire; `clear` checks it.
                                 [(horiz, p), (horiz, -p), (!horiz, p), (!horiz, -p)]
                                     .into_iter()
                                     .map(|(along_x, d)| {
@@ -1519,7 +1540,7 @@ impl DetailedRoute {
                     })
                     .collect();
                 let taken = add_where_clear(&mut routes.wires, &sites, &image, pitch, &clear);
-                stats.single_cut_vias = taken.iter().enumerate().map(|(n, t)| t.iter().filter(|k| k.is_none()).count() as u32 * (1 + u32::from(image[n].is_some()))).sum();
+                stats.single_cut_vias = grouped_singles + taken.iter().enumerate().map(|(n, t)| t.iter().filter(|k| k.is_none()).count() as u32 * (1 + u32::from(image[n].is_some()))).sum::<u32>();
 
                 // GAP-12 (EM-27): every flush L of a critical net gets its
                 // inner-corner support square where it clears.
@@ -5288,6 +5309,12 @@ mod tests {
         let blocked = |_: usize, s: Shape, _: &[Vec<Shape>]| s.layer != LAYERS[1] || rect_gap(s.rect, foreign) >= 140;
         let mut wires = wires0.clone();
         assert_eq!(add_where_clear(&mut wires, &sites, &image, 400, &blocked), vec![vec![None], vec![]]);
+        assert_eq!(wires, wires0);
+        // The same rect's image blocks net 1 only: the leader's shapes clear,
+        // so this exercises the image check and the leader's rollback.
+        let foreign_img = map_rect(foreign, map, 400);
+        let image_blocked = |n: usize, s: Shape, _: &[Vec<Shape>]| n != 1 || s.layer != LAYERS[1] || rect_gap(s.rect, foreign_img) >= 140;
+        assert_eq!(add_where_clear(&mut wires, &sites, &image, 400, &image_blocked), vec![vec![None], vec![]]);
         assert_eq!(wires, wires0);
         let free = |_: usize, _: Shape, _: &[Vec<Shape>]| true;
         assert_eq!(add_where_clear(&mut wires, &sites, &image, 400, &free), vec![vec![Some(0)], vec![]]);
