@@ -4440,3 +4440,537 @@ mod halo_tests {
         assert_eq!(halo, vec![[420, 0, 0, 0]]);
     }
 }
+
+/// Step-2 coverage of the flow's own helpers: every branch and corner case
+/// (empty input, boundaries, degenerate geometry, error paths) against the
+/// doc comments' contracts.
+#[cfg(test)]
+mod cleanup_tests {
+    use crate::{Config, FlowError, Hierarchy, Interface, RunStats};
+    use annotator::{Block, BlockKind};
+    use pnr_core::geom::Rect;
+    use pnr_core::{Device, DeviceId, DeviceKind, LayerId, Macro, Net, NetId, Netlist, Pin, Report, Shape, Violation};
+
+    fn dev(name: &str, kind: DeviceKind, params: &[(&str, i64)]) -> Device {
+        Device { name: name.into(), kind, model: String::new(), terminals: Vec::new(), params: params.iter().map(|&(k, v)| (k.into(), v)).collect() }
+    }
+
+    fn netlist(devices: Vec<Device>, nets: &[&str]) -> Netlist {
+        Netlist { devices, nets: nets.iter().map(|n| Net { name: (*n).into() }).collect(), ..Default::default() }
+    }
+
+    fn block(kind: BlockKind, devices: &[u16], sub_blocks: Vec<Block>) -> Block {
+        Block { kind, template: "t", devices: devices.iter().map(|&d| DeviceId(d)).collect(), injected: false, sub_blocks, selfs: Vec::new() }
+    }
+
+    const ONE_FET: &str = ".subckt one d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\n.ends one\n";
+
+    // ---- tools ----
+
+    #[test]
+    fn a_present_tool_is_reported_present() {
+        assert!(crate::tools::present_or_skip("anything", true));
+    }
+
+    // ---- Config / hierarchy ----
+
+    #[test]
+    fn hierarchy_resolves_flat_bottom_up_and_auto_at_its_100_device_bound() {
+        let nl = |n: usize| netlist(vec![dev("M", DeviceKind::Nmos, &[]); n], &[]);
+        let cfg = |hierarchy| Config { hierarchy, ..Default::default() };
+        assert_eq!(crate::hierarchy(&cfg(Hierarchy::Flat), &nl(500)), None);
+        assert_eq!(crate::hierarchy(&cfg(Hierarchy::BottomUp { min_devices: 5 }), &nl(0)), Some(5));
+        assert_eq!(crate::hierarchy(&cfg(Hierarchy::Auto), &nl(100)), None, "exactly 100 stays flat");
+        assert_eq!(crate::hierarchy(&cfg(Hierarchy::Auto), &nl(101)), Some(2));
+        assert_eq!(crate::hierarchy(&cfg(Hierarchy::Auto), &nl(0)), None);
+    }
+
+    #[test]
+    fn stages_name_every_stage_ms_slot() {
+        assert_eq!(crate::STAGES.len(), RunStats::default().stage_ms.len());
+        assert_eq!((crate::STAGES[6], crate::STAGES[8]), ("signoff", "perf"), "Flow::epoch laps 6, score_perf writes 8");
+    }
+
+    // ---- Interface::from_json ----
+
+    #[test]
+    fn interface_defaults_when_die_and_pins_are_absent_or_null() {
+        assert_eq!(Interface::from_json("{}").unwrap(), Interface::default());
+        assert_eq!(Interface::from_json(r#"{"die": null, "pins": null}"#).unwrap(), Interface::default());
+    }
+
+    #[test]
+    fn interface_accepts_frac_at_both_ends() {
+        let i = Interface::from_json(r#"{"die":{"w":10,"h":20},"pins":[
+            {"net":"a","side":"west","frac":0,"width":5,"layer":"met3"},
+            {"net":"b","side":"east","frac":1,"width":5,"layer":"met3"},
+            {"net":"c","side":"north","frac":0.5,"width":5,"layer":"met2"}]}"#)
+        .unwrap();
+        assert_eq!(i.die_nm, Some((10, 20)));
+        assert_eq!(i.pins.iter().map(|p| (p.side, p.frac)).collect::<Vec<_>>(), [(crate::Side::West, 0.0), (crate::Side::East, 1.0), (crate::Side::North, 0.5)]);
+        assert_eq!(i.pins[2].layer, "met2");
+    }
+
+    #[test]
+    fn interface_rejects_each_malformed_field_by_name() {
+        let err = |t: &str| Interface::from_json(t).expect_err(t);
+        assert!(err("not json").starts_with("interface:"));
+        assert!(err(r#"{"die":{"w":"10","h":5}}"#).contains("`w`"));
+        assert!(err(r#"{"die":{"w":10}}"#).contains("`h`"));
+        assert!(err(r#"{"die":{"w":3000000000,"h":5}}"#).contains("`w`"), "past i32");
+        assert!(err(r#"{"pins":[{"net":"a","side":"up","frac":0.5,"width":5,"layer":"m"}]}"#).contains("pins[0].side"));
+        assert!(err(r#"{"pins":[{"net":"a","side":"north","frac":1.5,"width":5,"layer":"m"}]}"#).contains("pins[0].frac"));
+        assert!(err(r#"{"pins":[{"net":"a","side":"north","frac":-0.1,"width":5,"layer":"m"}]}"#).contains("pins[0].frac"));
+        assert!(err(r#"{"pins":[{"side":"north","frac":0.5,"width":5,"layer":"m"}]}"#).contains("pins[0].net"));
+        assert!(err(r#"{"pins":[{"net":"a","side":"north","frac":0.5,"layer":"m"}]}"#).contains("`width`"));
+    }
+
+    /// Degenerate geometry and a mistyped `pins` are errors, not a silent
+    /// default (the doc's "not a positive i32" / "wrong shape").
+    #[test]
+    fn interface_rejects_degenerate_die_widths_and_non_array_pins() {
+        assert!(Interface::from_json(r#"{"die":{"w":0,"h":5}}"#).is_err(), "zero-width die");
+        assert!(Interface::from_json(r#"{"die":{"w":10,"h":-5}}"#).is_err(), "negative die");
+        assert!(Interface::from_json(r#"{"pins":[{"net":"a","side":"north","frac":0.5,"width":0,"layer":"m"}]}"#).is_err(), "zero-width pin");
+        assert!(Interface::from_json(r#"{"pins": 5}"#).is_err(), "pins must be an array");
+        assert!(Interface::from_json(r#"{"die": 5}"#).is_err(), "die must be an object");
+    }
+
+    // ---- search control ----
+
+    #[test]
+    fn cold_every_zero_reads_as_every_epoch_cold() {
+        assert!((0..6).all(|k| crate::epoch_kind(k, true, 0) == crate::Kind::Cold));
+        assert_eq!(crate::epoch_kind(0, true, 3), crate::Kind::Cold, "epoch 0 is cold even with an incumbent");
+    }
+
+    #[test]
+    fn merge_keeps_the_winners_legality_and_the_runs_counters() {
+        let winner = RunStats { place_hard: 1, route_hard: 2, drc_hard: 3, warnings: 4, route_overuse: 5, c_tier: 6.0, iterations: 99, sims: 99, ..Default::default() };
+        let run = RunStats { place_hard: 50, iterations: 10, sims: 7, variant_escalations: 2, ..Default::default() };
+        let m = winner.merge(run);
+        assert_eq!((m.place_hard, m.route_hard, m.drc_hard, m.warnings, m.route_overuse, m.c_tier), (1, 2, 3, 4, 5, 6.0));
+        assert_eq!((m.iterations, m.sims, m.variant_escalations), (10, 7, 2));
+    }
+
+    // ---- key ----
+
+    #[test]
+    fn key_lt_is_irreflexive_and_ranks_v_before_everything() {
+        let k = (0usize, 0u32, 1.0, 2.0, 3.0f32, 4.0);
+        assert!(!crate::key_lt(&k, &k));
+        assert!(crate::key_lt(&(0, 9, 9.0, 9.0, 9.0, 9.0), &(1, 0, 0.0, 0.0, 0.0, 0.0)));
+        assert!(crate::key_lt(&(0, 0, 9.0, 9.0, 9.0, 9.0), &(0, 1, 0.0, 0.0, 0.0, 0.0)), "failed bounds before shortfall");
+        assert!(crate::key_lt(&(0, 0, 0.0, 9.0, 9.0, 9.0), &(0, 0, 1.0, 0.0, 0.0, 0.0)), "shortfall before Θ");
+        assert!(crate::key_lt(&(0, 0, 0.0, 0.0, 9.0, 9.0), &(0, 0, 0.0, 1.0, 0.0, 0.0)), "Θ before C");
+        assert!(crate::key_lt(&(0, 0, f64::NAN, 0.0, 0.0, 0.0), &(0, 0, f64::NAN, 1.0, 0.0, 0.0)), "equal NaN shortfalls fall through to Θ");
+    }
+
+    /// Equal C tiers are a tie whatever their value, so area decides: zero C
+    /// on both sides, and two unknown (NaN, read as +∞) tiers alike.
+    #[test]
+    fn equal_c_tiers_are_decided_by_area() {
+        assert!(crate::key_lt(&(0, 0, 0.0, 0.0, 0.0, 1.0), &(0, 0, 0.0, 0.0, 0.0, 2.0)));
+        assert!(crate::key_lt(&(0, 0, 0.0, 0.0, f32::NAN, 1.0), &(0, 0, 0.0, 0.0, f32::NAN, 2.0)), "two NaN tiers tie");
+        assert!(!crate::key_lt(&(0, 0, 0.0, 0.0, f32::NAN, 2.0), &(0, 0, 0.0, 0.0, f32::NAN, 1.0)));
+        assert!(crate::key_lt(&(0, 0, 0.0, 0.0, 1.0, 1.0), &(0, 0, 0.0, 0.0, 1.0, f64::NAN)), "a NaN footprint loses");
+    }
+
+    #[test]
+    fn epoch_score_sums_route_margins_and_leaves_spec_tiers_zero() {
+        let v = |rule: &str, margin| Violation { rule: rule.into(), margin };
+        let route = Report { hard_violations: vec![v("open net", 1)], budget_violations: vec![v("r", 3), v("s", 4)], ..Default::default() };
+        let (key, stats) = crate::epoch_score(&Report::default(), &route, &verify::Signoff::default(), &crate::metadata::MetadataReport::default(), 2.5, 9.0);
+        assert_eq!((key.0, key.1, key.2, key.3, key.4, key.5), (1, 0, 0.0, 7.0, 2.5, 9.0));
+        assert_eq!((stats.route_hard, stats.route_overuse, stats.c_tier, stats.place_hard, stats.drc_hard), (1, 7, 2.5, 0, 0));
+    }
+
+    #[test]
+    fn c_tier_of_nothing_is_zero_and_adverse_weights_only() {
+        let names = ["a".to_string(), "b".to_string()];
+        assert_eq!(crate::c_tier(&Vec::new(), &names, &[], &[]), 0.0);
+        let row = analog::routing::PerformanceBudget::ground_c("m:min".into(), vec![NetId(0), NetId(1)], vec![-1.0, 0.002], 1.0);
+        let caps = vec![("a".to_string(), None, 5.0), ("b".to_string(), None, 1.0)];
+        let c = crate::c_tier(&caps, &names, &[], &[row]);
+        assert!((c - 2.0).abs() < 1e-4, "a's negative weight clamps to 0, b 2/fF: {c}");
+    }
+
+    #[test]
+    fn only_a_label_short_makes_the_tier_unknown() {
+        let mut s = verify::Signoff { caps: vec![("a".into(), None, 1.0)], ..Default::default() };
+        s.report.hard_violations = vec![Violation { rule: "lvs/net mismatch".into(), margin: 1 }];
+        let classes = [analog::metadata::NetClassification { net: NetId(0), class: analog::metadata::NetClass::Signal, c_budget_af: None, max_coupling_af: None }];
+        assert!((crate::signoff_c_tier(&s, &["a".into()], &classes, &[]) - 1.0).abs() < 1e-6);
+    }
+
+    // ---- routing weights and budgets ----
+
+    #[test]
+    fn route_weights_keep_budgeted_nets_scaled_to_one() {
+        use analog::metadata::{NetClass, NetClassification};
+        let class = |n: u16, budget| NetClassification { net: NetId(n), class: NetClass::Signal, c_budget_af: budget, max_coupling_af: None };
+        let classes = [class(0, Some(10)), class(1, None), class(2, None)];
+        assert_eq!(crate::route_weights(&[2.0, 4.0, 8.0], &classes, &[(NetId(1), 1.0)]), vec![0.5, 1.0, 0.0]);
+        assert_eq!(crate::route_weights(&[2.0, 4.0], &[], &[]), vec![0.0, 0.0], "nothing budgeted");
+        assert_eq!(crate::route_weights(&[0.0], &classes, &[]), vec![0.0], "all-zero weights stay zero");
+        assert!(crate::route_weights(&[], &classes, &[]).is_empty());
+    }
+
+    /// No current, or a non-positive one, leaves the budget unknown (0), never ∞.
+    #[test]
+    fn common_node_budget_is_unknown_without_a_positive_current() {
+        let left = [(0u32, 1u32, 0.5f32)];
+        assert_eq!(crate::common_node_ohm(&left, DeviceId(0), DeviceId(1), Some(0.0)), 0.0);
+        assert_eq!(crate::common_node_ohm(&left, DeviceId(0), DeviceId(1), Some(-10.0)), 0.0);
+        assert_eq!(crate::common_node_ohm(&[], DeviceId(0), DeviceId(1), Some(10.0)), 0.0);
+    }
+
+    // ---- placement helpers ----
+
+    #[test]
+    fn u_eff_never_raises_the_floor_and_survives_empty_cells() {
+        assert_eq!(crate::u_eff(0.6, &[(0, 0), (0, 0)], 0), 0.6, "zero padded area");
+        assert_eq!(crate::u_eff(0.6, &[(1000, 1000)], 0), 0.6, "0.9 > 0.6: the floor stands");
+        assert!(crate::u_eff(0.6, &[(1000, 1000)], 1000) < 0.6);
+    }
+
+    #[test]
+    fn axis_grid_degenerate_inputs() {
+        let spec = |p0: i32, strides: Vec<u32>| dr::LatticeSpec { p0, strides, origin_multiple: 0 };
+        assert_eq!(crate::axis_grid(&spec(420, vec![]), 10), Some((420, 420)), "no layers: S = 1");
+        assert_eq!(crate::axis_grid(&spec(420, vec![1, 0]), 10), Some((420, 420)), "a 0 stride reads as 1");
+        assert_eq!(crate::axis_grid(&spec(420, vec![1, 1]), 0), Some((420, 420)), "lattice 0 reads as 1");
+        assert_eq!(crate::axis_grid(&spec(0, vec![1]), 10), None);
+        assert_eq!(crate::axis_grid(&spec(-420, vec![1]), 10), None);
+    }
+
+    /// A period past i32 is no grid at all, not an overflow panic.
+    #[test]
+    fn axis_grid_overflow_is_none() {
+        let spec = dr::LatticeSpec { p0: 420, strides: vec![1, 4_000_000_000], origin_multiple: 0 };
+        assert_eq!(crate::axis_grid(&spec, 10), None);
+        let spec = dr::LatticeSpec { p0: 420, strides: vec![1, 4_000_000_007, 1, 4_000_000_009], origin_multiple: 0 };
+        assert_eq!(crate::axis_grid(&spec, 10), None, "lcm past u32");
+    }
+
+    #[test]
+    fn matched_cells_are_merged_groups_or_two_device_pair_leaves() {
+        let blocks = [
+            block(BlockKind::DiffPair, &[0, 1], vec![]),
+            block(BlockKind::Stack, &[2, 3], vec![]),
+            block(BlockKind::DiffPair, &[4, 5, 6], vec![]),
+            block(BlockKind::Group, &[9, 10], vec![block(BlockKind::CascodePair, &[9, 10], vec![])]),
+        ];
+        let devices_of: Vec<Vec<DeviceId>> = [&[0][..], &[1], &[2], &[3], &[4], &[7, 8], &[10]].iter().map(|m| m.iter().map(|&d| DeviceId(d)).collect()).collect();
+        assert_eq!(crate::matched_cells(&blocks, &devices_of), [true, true, false, false, false, true, true]);
+        assert!(crate::matched_cells(&blocks, &[]).is_empty());
+    }
+
+    #[test]
+    fn matched_pairs_are_two_device_diff_mirror_load_leaves() {
+        let blocks = [
+            block(BlockKind::Group, &[0, 1, 2, 3], vec![block(BlockKind::Load, &[0, 1], vec![]), block(BlockKind::CascodePair, &[2, 3], vec![])]),
+            block(BlockKind::CurrentMirror, &[4, 5], vec![]),
+            block(BlockKind::Glue, &[6, 7], vec![]),
+            block(BlockKind::DiffPair, &[8, 9, 10], vec![]),
+        ];
+        assert_eq!(crate::matched_pairs(&blocks), [(DeviceId(0), DeviceId(1)), (DeviceId(4), DeviceId(5))]);
+        assert!(crate::matched_pairs(&[]).is_empty());
+    }
+
+    #[test]
+    fn remap_members_dedups_in_first_seen_order_and_keeps_unmapped_ids() {
+        let ids = |v: &[u16]| v.iter().map(|&d| DeviceId(d)).collect::<Vec<_>>();
+        assert_eq!(crate::remap_members(&ids(&[2, 0, 1, 3]), &[5, 5, 4]), ids(&[4, 5, 3]));
+        assert!(crate::remap_members(&[], &[0]).is_empty());
+    }
+
+    // ---- halos ----
+
+    fn cell() -> Macro {
+        let pin = |name: &str, x: i32| Pin { name: name.into(), net: NetId(0), at: Rect { x, y: 450, w: 100, h: 100 }, layer: LayerId(0) };
+        Macro { pins: vec![pin("D", 1_900), pin("S", 0)], bbox: Rect { x: 0, y: 0, w: 2_000, h: 1_000 }, ..Default::default() }
+    }
+
+    #[test]
+    fn round_up_boundaries() {
+        assert_eq!((crate::round_up(0, 10), crate::round_up(1, 10), crate::round_up(10, 10), crate::round_up(11, 10)), (0, 10, 10, 20));
+        assert_eq!(crate::round_up(7, 1), 7);
+    }
+
+    #[test]
+    fn nearest_face_ties_go_to_the_earlier_face_and_outside_pins_count() {
+        let m = Macro { bbox: Rect { x: 0, y: 0, w: 100, h: 100 }, ..Default::default() };
+        assert_eq!(crate::nearest_face(&m, Rect { x: 40, y: 40, w: 20, h: 20 }), 0, "centre: L wins the tie");
+        assert_eq!(crate::nearest_face(&m, Rect { x: 150, y: 40, w: 20, h: 20 }), 2, "beyond R");
+        assert_eq!(crate::nearest_face(&m, Rect { x: 40, y: 95, w: 10, h: 10 }), 3, "T");
+        assert_eq!(crate::nearest_face(&m, Rect { x: 40, y: -5, w: 10, h: 10 }), 1, "B");
+    }
+
+    #[test]
+    fn face_pins_count_each_pin_on_its_nearest_face() {
+        let v = vec![gp::VariantSpace { alternatives: vec![cell(), Macro::default()] }];
+        assert_eq!(crate::face_pins(&v), vec![vec![[1, 0, 1, 0], [0; 4]]]);
+        assert!(crate::face_pins(&[]).is_empty());
+    }
+
+    /// The halo starts strictly past one minimum-width wire's current; a
+    /// missing or unknown pin current and a zero J reserve nothing.
+    #[test]
+    fn static_halo_threshold_is_strict() {
+        let v = vec![gp::VariantSpace { alternatives: vec![cell()] }];
+        let at = |ua: Option<i32>| vec![vec![("D".to_string(), ua)]];
+        assert_eq!(crate::static_halos(&v, &at(Some(200)), 2.0, 100, 10), vec![vec![[0; 4]]], "I = j·w_min");
+        assert_eq!(crate::static_halos(&v, &at(Some(201)), 2.0, 100, 10), vec![vec![[0, 0, 10, 0]]], "1 nm over, rounded to the lattice");
+        assert_eq!(crate::static_halos(&v, &at(None), 2.0, 100, 10), vec![vec![[0; 4]]]);
+        assert_eq!(crate::static_halos(&v, &at(Some(1_000_000)), 0.0, 100, 10), vec![vec![[0; 4]]], "no J, no halo");
+        assert_eq!(crate::static_halos(&v, &[vec![]], 2.0, 100, 10), vec![vec![[0; 4]]], "pin not in the table");
+    }
+
+    #[test]
+    fn halo_target_ignores_unknown_and_sub_capacity_demand() {
+        assert_eq!(crate::halo_target(f32::NAN, 2, 420, 10), 0);
+        assert_eq!(crate::halo_target(0.5, 2, 420, 10), 0);
+        assert_eq!(crate::halo_target(2.0, 1, 420, 10), 420);
+    }
+
+    /// Any demand, however large, ends at the `4·p0` cap without overflow.
+    #[test]
+    fn huge_demand_is_capped_without_overflow() {
+        let t = crate::halo_target(1e9, 1_000, 420, 10);
+        assert!(t >= 1_680);
+        assert_eq!(crate::halo_step(0, t, 420, 10), 1_680);
+        assert_eq!(crate::halo_step(i32::MAX, i32::MAX, 420, 10), 1_680);
+    }
+
+    #[test]
+    fn dynamic_halo_decays_with_no_congestion_and_ignores_an_empty_table() {
+        let l = pnr_core::Layout {
+            x: vec![10_000],
+            y: vec![10_000],
+            hw: vec![1_000],
+            hh: vec![500],
+            axis: vec![0],
+            groups: vec![],
+            orient: vec![pnr_core::Orient::R0],
+            variant: vec![0],
+            branch: Vec::new(),
+            power_uw: vec![0],
+            temp_mc: vec![0],
+            units: Default::default(),
+        };
+        let mut halo = vec![[800, 0, 30, 0]];
+        crate::update_dyn_halo(&mut halo, &l, &[], &[], 420, 10);
+        assert_eq!(halo, vec![[400, 0, 20, 0]]);
+        let mut none: Vec<[i32; 4]> = Vec::new();
+        crate::update_dyn_halo(&mut none, &l, &[], &[], 420, 10);
+        assert!(none.is_empty());
+    }
+
+    // ---- per-device tables ----
+
+    /// AS/AD/PS/PD per device: S into 0/2, D into 1/3, ÷ m, nm² → µm²,
+    /// nm → µm; a non-MOS divides by 1; owners outside the cell and devices
+    /// outside the netlist are skipped; an unnamed device is `None`.
+    #[test]
+    fn junctions_split_s_and_d_and_divide_by_m() {
+        let nl = netlist(
+            vec![dev("M0", DeviceKind::Nmos, &[("w", 1000), ("l", 150), ("m", 2)]), dev("R1", DeviceKind::Resistor, &[]), dev("M2", DeviceKind::Nmos, &[("w", 1000), ("l", 150)])],
+            &[],
+        );
+        let mut m = Macro::default();
+        m.figures.sd = vec![(0, "S", 2_000_000, 4_000), (0, "D", 1_000_000, 2_000), (1, "S", 3_000_000, 6_000), (5, "D", 9, 9), (2, "D", 9, 9)];
+        let devices_of = vec![vec![DeviceId(0), DeviceId(1), DeviceId(40)]];
+        let j = crate::junctions(&[m], &devices_of, &nl);
+        assert_eq!(j, vec![Some([1.0f64, 0.5, 2.0, 1.0]), Some([3.0, 0.0, 6.0, 0.0]), None]);
+        assert_eq!(crate::junctions(&[], &[], &nl), vec![None::<[f64; 4]>; 3]);
+    }
+
+    #[test]
+    fn gate_ohms_map_owners_and_skip_strays() {
+        let mut m = Macro::default();
+        m.figures.gate_ohm = vec![(1, 12.5), (0, 3.0), (7, 1.0)];
+        let g = crate::gate_ohms(&[m], &[vec![DeviceId(2), DeviceId(0), DeviceId(9)]], 3);
+        assert_eq!(g, vec![Some(12.5f64), None, Some(3.0)]);
+        assert!(crate::gate_ohms(&[], &[], 0).is_empty());
+    }
+
+    #[test]
+    fn with_extra_appends_inserted_devices() {
+        let nl = netlist(vec![dev("M0", DeviceKind::Nmos, &[])], &[]);
+        let n = crate::with_extra(&nl, &[dev("D1", DeviceKind::Diode, &[])]);
+        assert!(matches!(n, std::borrow::Cow::Owned(_)));
+        assert_eq!(n.devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["M0", "D1"]);
+    }
+
+    #[test]
+    fn pin_member_edge_cases() {
+        assert_eq!(crate::pin_member("d:S"), None, "no ordinal");
+        assert_eq!(crate::pin_member("d12:G"), Some((12, "G")));
+        assert_eq!(crate::pin_member("x1:G"), None, "not a d ordinal");
+        assert_eq!(crate::pin_member("ring"), Some((0, "ring")), "a bare name is member 0's (member_pin filters it)");
+    }
+
+    #[test]
+    fn cell_flags_separate_noise_from_injection() {
+        use analog::intent::{Aggressor, Inject, Intent};
+        let intent = Intent {
+            aggressors: vec![Aggressor { device: DeviceId(0), inject: Inject::Switching, reason: "" }, Aggressor { device: DeviceId(1), inject: Inject::MinorityElectron, reason: "" }],
+            ..Default::default()
+        };
+        let f = crate::cell_flags(&intent, &[vec![DeviceId(0)], vec![DeviceId(1)], vec![]]);
+        assert_eq!((f[0].noisy, f[0].injector, f[1].noisy, f[1].injector), (true, false, true, true));
+        assert_eq!(f[2], Default::default());
+        assert!(crate::cell_flags(&intent, &[]).is_empty());
+    }
+
+    /// A non-finite current is unknown (`None`), never a known 0 µA; only
+    /// member 0 gets bare names.
+    #[test]
+    fn pin_currents_treat_a_non_finite_current_as_unknown() {
+        let mut a = dev("M0", DeviceKind::Nmos, &[]);
+        a.terminals = vec![("D".into(), NetId(0))];
+        let b = a.clone();
+        let nl = netlist(vec![a, b], &["n"]);
+        let draws = [Some(vec![("D".to_string(), f64::NAN)]), Some(vec![("D".to_string(), 2.6)])];
+        let pins = crate::pin_currents(&nl, &[vec![DeviceId(0), DeviceId(1)]], &draws);
+        assert_eq!(pins, vec![vec![("d0:D".to_string(), None), ("D".to_string(), None), ("d1:D".to_string(), Some(3))]]);
+        assert!(crate::pin_currents(&nl, &[], &draws).is_empty());
+        assert!(crate::pin_currents(&nl, &[vec![]], &draws)[0].is_empty());
+    }
+
+    #[test]
+    fn undrawable_skips_drawn_cells_and_names_unknown_members() {
+        let nl = netlist(vec![dev("M0", DeviceKind::Npn, &[])], &[]);
+        let drawn = Macro { shapes: vec![Shape { layer: LayerId(0), rect: Rect { x: 0, y: 0, w: 1, h: 1 } }], ..Default::default() };
+        let rows: Vec<String> = crate::undrawable(&[drawn, Macro::default(), Macro::default()], &[vec![DeviceId(0)], vec![DeviceId(7)]], &nl).map(|v| v.rule).collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].starts_with("cell/undrawable: ?"), "{rows:?}");
+        assert!(rows[1].starts_with("cell/undrawable: ?"), "cell outside devices_of: {rows:?}");
+    }
+
+    #[test]
+    fn adopt_devices_appends_in_order() {
+        let mut nl = netlist(vec![dev("M0", DeviceKind::Nmos, &[])], &[]);
+        let mut macros = vec![Macro::default()];
+        crate::adopt_devices(&mut nl, &mut macros, vec![(dev("D1", DeviceKind::Diode, &[]), Macro::default()), (dev("D2", DeviceKind::Diode, &[]), Macro::default())]);
+        assert_eq!(nl.devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["M0", "D1", "D2"]);
+        assert_eq!(macros.len(), 3);
+        crate::adopt_devices(&mut nl, &mut macros, Vec::new());
+        assert_eq!((nl.devices.len(), macros.len()), (3, 3));
+    }
+
+    // ---- deck reads ----
+
+    fn sky130() -> verify::Pdk {
+        verify::Pdk::builtin("sky130").expect("sky130 loads")
+    }
+
+    #[test]
+    fn model_table_files_sky130_fets_by_polarity() {
+        let t = crate::model_table(&sky130());
+        let kind = |needle: &str| t.iter().find(|(m, _)| m.contains(needle)).map(|e| e.1);
+        assert_eq!(kind("nfet_01v8"), Some(DeviceKind::Nmos));
+        assert_eq!(kind("pfet_01v8"), Some(DeviceKind::Pmos));
+    }
+
+    #[test]
+    fn deck_models_keep_an_unknown_model_as_written() {
+        let mut nl = netlist(vec![Device { model: "no_such_model_xyz".into(), ..dev("M0", DeviceKind::Nmos, &[]) }], &[]);
+        crate::deck_models(&mut nl, &sky130());
+        assert_eq!(nl.devices[0].model, "no_such_model_xyz");
+    }
+
+    #[test]
+    fn ring_cut_ohm_is_never_negative() {
+        assert!(crate::ring_cut_ohm(&sky130()) >= 0.0);
+    }
+
+    #[test]
+    fn placement_space_reads_null_absent_and_entries() {
+        let mut pdk = sky130();
+        pdk.cell["placement_space"] = serde_json::Value::Null;
+        assert!(crate::placement_space(&pdk).is_empty());
+        pdk.cell["placement_space"] = serde_json::json!({" a , b ": [120, "src"]});
+        assert_eq!(crate::placement_space(&pdk), [("a".to_string(), "b".to_string(), 120)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "cell.placement_space.ab")]
+    fn placement_space_panics_on_a_key_without_a_comma() {
+        let mut pdk = sky130();
+        pdk.cell["placement_space"] = serde_json::json!({"ab": [1, "x"]});
+        crate::placement_space(&pdk);
+    }
+
+    #[test]
+    #[should_panic(expected = "cell.placement_space.a,b")]
+    fn placement_space_panics_on_a_non_integer_value() {
+        let mut pdk = sky130();
+        pdk.cell["placement_space"] = serde_json::json!({"a,b": ["wide", "x"]});
+        crate::placement_space(&pdk);
+    }
+
+    #[test]
+    fn em_front_row_defaults_to_true() {
+        let mut pdk = sky130();
+        pdk.cell["em_front_row_cuts"] = serde_json::Value::Null;
+        assert!(crate::em_front_row(&pdk));
+        pdk.cell["em_front_row_cuts"] = serde_json::json!(false);
+        assert!(!crate::em_front_row(&pdk));
+    }
+
+    #[test]
+    fn em_rules_with_every_layer_limited_add_no_missing_row() {
+        let pdk = sky130();
+        let nl = crate::parse(ONE_FET).unwrap();
+        let mut p = annotator::annotate(&nl, &crate::annotation(&pdk, &Default::default()));
+        let rows = |p: &crate::Problem| p.missing.iter().filter(|m| m.0 == "Electromigration").count();
+        let before = rows(&p);
+        crate::em_rules(&mut p, &nl, &[], &[], &[], None, true, &pdk);
+        assert_eq!(rows(&p), before, "{:?}", p.missing);
+    }
+
+    /// One label per net, only where the pin centre is on drawn conductor of
+    /// its layer, and only for a net that has a name.
+    #[test]
+    fn labeled_pins_label_each_provable_net_once() {
+        let pdk = sky130();
+        let Some(&(_, l)) = pdk.layers.iter().find(|(_, l)| verify::geom::label_layer(&pdk.deck, l.0).is_some()) else {
+            panic!("sky130 has a label layer");
+        };
+        let pin = |net: u16, x: i32| Pin { name: "p".into(), net: NetId(net), at: Rect { x, y: 40, w: 20, h: 20 }, layer: l };
+        let shapes = [Shape { layer: l, rect: Rect { x: 0, y: 0, w: 100, h: 100 } }];
+        let placed = [Macro { pins: vec![pin(0, 40), pin(0, 60), pin(1, 500), pin(5, 40)], ..Default::default() }];
+        let got = crate::labeled_pins(&placed, &["a".into(), "b".into()], &pdk, &shapes);
+        assert_eq!(got.iter().map(|p| (p.name.as_str(), p.layer, p.x, p.y)).collect::<Vec<_>>(), [("a", l.0, 50, 50)]);
+        assert!(crate::labeled_pins(&[], &[], &pdk, &shapes).is_empty());
+    }
+
+    // ---- flow error paths ----
+
+    #[test]
+    fn an_injected_fet_that_is_not_one_device_is_refused() {
+        let pdk = sky130();
+        let name = crate::parse(ONE_FET).unwrap().devices[0].name.clone();
+        let mut injected = crate::Macros::default();
+        injected.register(&name, Macro::default());
+        match crate::run(ONE_FET, &pdk, &injected, &Config::default()) {
+            Err(FlowError::InjectedNotADevice(n, count)) => {
+                assert_eq!(n, name);
+                assert_ne!(count, Some(1));
+            }
+            r => panic!("expected InjectedNotADevice, got {:?}", r.err()),
+        }
+    }
+
+    #[test]
+    fn post_layout_spice_refuses_a_device_it_cannot_extract() {
+        let pdk = sky130();
+        let cfg = Config { feedback_iters: 1, outer_iters: 1, starts: 1, ..Default::default() };
+        let mut sol = crate::run(ONE_FET, &pdk, &Default::default(), &cfg).expect("flow");
+        sol.netlist.devices.push(dev("C9", DeviceKind::Capacitor, &[]));
+        let e = crate::post_layout_spice(&sol, &pdk, "top").expect_err("a capacitor is not extracted");
+        assert!(e.contains("C9") && e.contains("not extracted"), "{e}");
+    }
+}
