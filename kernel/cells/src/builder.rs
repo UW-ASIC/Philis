@@ -198,11 +198,15 @@ pub(crate) fn snap_to_grid(value: i32, grid: i32) -> i32 {
     if grid <= 0 {
         return value;
     }
+    // `down` (toward zero) never overflows; rounding away saturates to it
+    // at the i32 extremes. `grid - grid / 2` is `ceil(grid / 2)` without the
+    // `grid + 1` overflow.
     let rem = value % grid;
-    if rem.abs() >= (grid + 1) / 2 {
-        value - rem + grid * value.signum()
+    let down = value - rem;
+    if rem.abs() >= grid - grid / 2 {
+        down.checked_add(grid * value.signum()).unwrap_or(down)
     } else {
-        value - rem
+        down
     }
 }
 

@@ -304,6 +304,10 @@ impl Cell for FinFet {
             b.rect(lisd, Rect { x: cx - lw / 2, y: tap_y, w: lw, h: tap_h });
             b.rect(v0, Rect { x: cx - r.v0 / 2, y: tv0_y, w: r.v0, h: r.v0 });
             first.get_or_insert(cx);
+            // A deck without a gate pitch gets one contact, not an endless walk.
+            if r.gate_p <= 0 {
+                break;
+            }
             cx += r.gate_p;
         }
         let rail = Rect { x: tap.x, y: tv0_y + r.v0 / 2 - r.m1_w / 2, w: tap.w, h: r.m1_w };

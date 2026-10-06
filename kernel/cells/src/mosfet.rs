@@ -1155,16 +1155,19 @@ fn mirror_sequence(nf: usize) -> Vec<usize> {
 /// half of them device 0's.
 fn mirror_pairs(nf: usize) -> Vec<usize> {
     let half = nf / 2;
-    let build = |h: u32| -> Vec<usize> {
-        let first: Vec<usize> = (0..half).map(|i| ((h >> (half - 1 - i)) & 1) as usize).collect();
-        first.iter().copied().chain(first.iter().rev().map(|&d| 1 - d)).collect()
-    };
+    // `H ++ swap(reverse(H))` for a first half `H`.
+    let mirror = |first: Vec<usize>| -> Vec<usize> { first.iter().copied().chain(first.iter().rev().map(|&d| 1 - d)).collect() };
     if half == 0 {
         Vec::new()
     } else if half <= 16 {
-        (0..1u32 << half).map(build).min_by_key(|p| pair_offset(p)).unwrap_or_default()
+        // `H` from the bits of `h`, most significant first: ascending `h` is
+        // lexicographic order, so `min_by_key` keeps the first tie.
+        let bits = |h: u32| -> Vec<usize> { (0..half).map(|i| ((h >> (half - 1 - i)) & 1) as usize).collect() };
+        (0..1u32 << half).map(|h| mirror(bits(h))).min_by_key(|p| pair_offset(p)).unwrap_or_default()
     } else {
-        build(0b0101_0101_0101_0101 & ((1 << 16) - 1))
+        // Alternating pairs. (A 16-bit pattern shifted by `half − 1` read
+        // leading zeros past 16 and overflowed the shift past 32.)
+        mirror((0..half).map(|i| i % 2).collect())
     }
 }
 
