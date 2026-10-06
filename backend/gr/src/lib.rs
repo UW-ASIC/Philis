@@ -288,7 +288,9 @@ impl Default for LayerSpec {
 /// adjacent layers joined by `via_cost` at the same track coordinate. Nodes sit
 /// on a `pitch` (base pitch `p0`) grid on every layer; a layer of stride `s`
 /// has a track every `s` rows (horizontal) or columns (vertical), and nodes off
-/// its tracks get no edges.
+/// its tracks get no edges. A stride-1 layer also steps one pitch across its
+/// preferred direction at [`WRONG_WAY_COST`]; a stride-2 layer does not (the
+/// next row is off-track).
 pub struct TrackGrid {
     pub nx: u32,
     pub ny: u32,
@@ -445,6 +447,15 @@ impl RGraph for TrackGrid {
             push(iy > 0, n.wrapping_sub(self.nx), 1.0);
             push(iy + 1 < self.ny, n + self.nx, 1.0);
         }
+        if self.stride(layer) == 1 {
+            if layer % 2 == 0 {
+                push(iy > 0, n.wrapping_sub(self.nx), WRONG_WAY_COST);
+                push(iy + 1 < self.ny, n + self.nx, WRONG_WAY_COST);
+            } else {
+                push(ix > 0, n.wrapping_sub(1), WRONG_WAY_COST);
+                push(ix + 1 < self.nx, n + 1, WRONG_WAY_COST);
+            }
+        }
         push(layer > 0, n.wrapping_sub(self.layer_size()), self.via_cost);
         push(layer + 1 < self.n_layers, n + self.layer_size(), self.via_cost);
         k
@@ -561,17 +572,22 @@ impl RGraph for TrackGrid {
         for branch in tree {
             let mut start = 0;
             for i in 1..=branch.len() {
-                if i < branch.len() && self.ixy(branch[i]).2 == self.ixy(branch[i - 1]).2 {
+                // Same layer and same across coordinate: the run goes on.
+                let key = |n: u32| {
+                    let (x, y, l) = self.ixy(n);
+                    (l, if l % 2 == 0 { y } else { x })
+                };
+                if i < branch.len() && key(branch[i]) == key(branch[i - 1]) {
                     continue;
                 }
-                // `branch[start..i]` is one same-layer run; past each end.
+                // `branch[start..i]` is one straight along-track run; past each end.
                 if i - start >= 2 {
                     let (a, b) = (branch[start], branch[i - 1]);
                     let dir = if b > a { 1 } else { -1 };
                     self.along(a, spec(a).halo_wire, -dir, out);
                     self.along(b, spec(b).halo_wire, dir, out);
                 }
-                if i < branch.len() {
+                if i < branch.len() && self.ixy(branch[i]).2 != self.ixy(branch[i - 1]).2 {
                     self.via_halo(branch[i - 1], branch[i], out);
                 }
                 start = i;
@@ -761,6 +777,11 @@ pub struct RouteCtx<G> {
 
 /// Extra cost of one node over a foreign matched cell, in steps.
 pub const KEEPOUT_COST: f32 = 2.0;
+
+/// Base cost of a one-pitch step across a stride-1 layer's preferred
+/// direction (RTE-28, tuning default): below the 2·via_cost of a via detour
+/// (AT-02), above an along step so jogs stay rare.
+pub const WRONG_WAY_COST: f32 = 2.5;
 
 impl<G: RGraph> RouteCtx<G> {
     /// No reservations.
@@ -1291,6 +1312,14 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
                     if shift.is_some() && (forbid.contains(&nb) || shift_clash(nb, &|x| in_tree[x as usize] == call)) {
                         continue;
                     }
+                    // RTE-28: jogs are one-track only, and never step onto
+                    // another net's metal: that is a same-layer crossing (a
+                    // short), which one node's congestion price undercuts.
+                    let (pa, pb) = (g.pos(n), g.pos(nb));
+                    let jog = pa.2 == pb.2 && if pa.2 % 2 == 0 { pa.1 != pb.1 } else { pa.0 != pb.0 };
+                    if jog && (wide || usage[i].saturating_sub(u16::from(is_old[i] == call)) > 0) {
+                        continue;
+                    }
                     let (Some(c), Some(v)) = (node_cost(i, tk, wide), corner(n, nb, tk, wide)) else { continue };
                     debug_assert!(c >= 0.0 && v >= 0.0, "negative node cost breaks A*");
                     let nd = d + base + c + v + via(n, nb);
@@ -1535,8 +1564,9 @@ pub fn extract_geometry(hot: &RouteHot, grid: &TrackGrid, widths: &[i32], k: &dy
     (wires, vias)
 }
 
-/// Split a same-layer node run into straight wires, `k` tracks `step` apart
-/// (see [`extract_geometry`]).
+/// Split a same-layer node run into straight wires, along or across (a
+/// wrong-way jog is its own segment), `k` tracks `step` apart (see
+/// [`extract_geometry`]).
 #[allow(clippy::too_many_arguments)]
 fn emit_run(wires: &mut Vec<Wire>, grid: &TrackGrid, net: u32, nodes: &[u32], width: i32, k: i32, step: i32, wide: i32) {
     let Some(&first) = nodes.first() else { return };
@@ -1561,7 +1591,7 @@ fn emit_run(wires: &mut Vec<Wire>, grid: &TrackGrid, net: u32, nodes: &[u32], wi
     let (mut lx, mut ly) = (sx, sy);
     for &n in &nodes[1..] {
         let (x, y, _) = grid.pos(n);
-        let straight = if !horiz { x == lx } else { y == ly };
+        let straight = (x == lx && x == sx) || (y == ly && y == sy);
         if !straight {
             push((sx, sy), (lx, ly));
             (sx, sy) = (lx, ly);
@@ -1809,13 +1839,16 @@ mod tests {
     }
 
     /// A current-carrying net pays its vias' series R: where an idle net hops
-    /// layers to dodge a costly node, a heavy one goes straight through.
+    /// layers to dodge a costly column, a heavy one goes straight through. The
+    /// whole layer-0 column is costly, so no wrong-way jog (RTE-28) dodges it.
     #[test]
     fn a_current_carrying_net_avoids_via_resistance() {
         let g = TrackGrid::with_layers((40 * 200, 10 * 200), 200, 4.0, 2);
         let usage = vec![0u16; g.nodes()];
         let mut hist = vec![0.0; g.nodes()];
-        hist[g.node(20, 4, 0) as usize] = 20.0;
+        for y in 0..10 {
+            hist[g.node(20, y, 0) as usize] = 20.0;
+        }
         let terms = [g.node(0, 4, 0), g.node(39, 4, 0)];
         let vias = |current: f32| {
             let elec = Elec { current, layer_r: &[1.0, 1.0], via_r: &[24.0], ..Elec::default() };
@@ -1933,6 +1966,73 @@ mod tests {
         let empty = cold.graph.node(4, 5, 0);
         hot.halo[empty as usize] += 1;
         assert_eq!(hot.over(empty as usize, 1), 0, "two halos on an empty node");
+    }
+
+    /// RTE-28: a one-row offset on a stride-1 layer is one wrong-way step, not
+    /// a via detour, and the drawn wires stay axis-parallel (a jog is its own
+    /// segment, not a diagonal box).
+    #[test]
+    fn a_one_track_jog_stays_on_its_layer() {
+        let g = TrackGrid::with_layers((10 * 200, 4 * 200), 200, 4.0, 2);
+        let terms = vec![vec![g.node(0, 1, 0), g.node(9, 2, 0)]];
+        let cold = RouteCtx::new(g, terms, vec![0]);
+        let mut hot = RouteHot::new(cold.graph.nodes(), 1);
+        let (over, _) = run_pathfinder(&mut hot, &cold, 1.0, 0.5, 50, &mut Dij::new(cold.graph.nodes()));
+        assert_eq!(over, 0.0);
+        let g = &cold.graph;
+        let nodes: Vec<u32> = hot.trees[0].iter().flatten().copied().collect();
+        assert!(nodes.iter().all(|&n| g.ixy(n).2 == 0), "{:?}", hot.trees[0]);
+        let jogs = hot.trees[0].iter().flat_map(|b| b.windows(2)).filter(|w| g.ixy(w[0]).1 != g.ixy(w[1]).1).count();
+        assert_eq!(jogs, 1, "{:?}", hot.trees[0]);
+        let (wires, vias) = extract_geometry(&hot, g, &[100, 100], &|_, _| [1; MAX_LAYERS], &[i32::MAX; 2]);
+        assert!(vias.is_empty(), "{} vias", vias.len());
+        assert!(wires.iter().all(|w| w.x0 == w.x1 || w.y0 == w.y1), "a diagonal wire");
+    }
+
+    /// RTE-28: a stride-1 layer steps one row across at `WRONG_WAY_COST`; a
+    /// stride-2 layer never leaves its track row.
+    #[test]
+    fn wrong_way_steps_only_on_stride_one() {
+        let g = TrackGrid::new((10 * 100, 10 * 100), 100, vec![spec(1, 0), spec(1, 0), spec(2, 0)], 4.0);
+        let mut buf = [(0u32, 0.0f32); 6];
+        let k = g.neighbors(g.node(3, 4, 0), &mut buf);
+        for m in [g.node(3, 3, 0), g.node(3, 5, 0)] {
+            assert!(buf[..k].contains(&(m, WRONG_WAY_COST)), "{:?}", &buf[..k]);
+        }
+        let k = g.neighbors(g.node(3, 4, 2), &mut buf);
+        assert!(buf[..k].iter().all(|&(m, _)| g.ixy(m).2 != 2 || g.ixy(m).1 == 4), "{:?}", &buf[..k]);
+    }
+
+    /// RTE-28: a 2-track connection never takes a wrong-way step (its
+    /// footprint already spans the next row).
+    #[test]
+    fn a_wide_connection_never_jogs() {
+        let g = TrackGrid::with_layers((10 * 200, 4 * 200), 200, 4.0, 2);
+        let terms = vec![vec![g.node(0, 1, 0), g.node(9, 2, 0)]];
+        let mut cold = RouteCtx::new(g, terms, vec![0]);
+        cold.k = vec![[2; MAX_LAYERS]];
+        let mut hot = RouteHot::new(cold.graph.nodes(), 1);
+        run_pathfinder(&mut hot, &cold, 1.0, 0.5, 50, &mut Dij::new(cold.graph.nodes()));
+        let g = &cold.graph;
+        assert!(!hot.trees[0].is_empty());
+        let jog = |w: &[u32]| {
+            let (a, b) = (g.ixy(w[0]), g.ixy(w[1]));
+            a.2 == b.2 && a.1 != b.1 && a.2 % 2 == 0 || a.2 == b.2 && a.0 != b.0 && a.2 % 2 == 1
+        };
+        assert!(!hot.trees[0].iter().flat_map(|b| b.windows(2)).any(jog), "{:?}", hot.trees[0]);
+    }
+
+    /// RTE-28: each straight piece of a jogged run gets its own line-end
+    /// halos; the one-pitch stub gets none.
+    #[test]
+    fn a_jogged_run_halos_each_straight_piece() {
+        let g = TrackGrid::new((10 * 100, 10 * 100), 100, vec![LayerSpec { stride: 1, halo_wire: 1, ..LayerSpec::default() }], 4.0);
+        let n = |x, y| g.node(x, y, 0);
+        let mut out = Vec::new();
+        g.halo_nodes(&[vec![n(0, 0), n(1, 0), n(1, 1), n(2, 1)]], &mut out);
+        for m in [n(2, 0), n(0, 1), n(3, 1)] {
+            assert!(out.contains(&m), "{out:?}");
+        }
     }
 
     /// A 2-track via at the top edge: its corner block falls off the graph, so

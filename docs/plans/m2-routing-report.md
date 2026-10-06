@@ -162,3 +162,31 @@ passed after every item.
   (`a_mim_dac_signs_off…`: label short b3/VDD) and `emit_roundtrip` (ota) all fail on LVS. `perf_postlayout`
   `ota_probe_regions` also fails; it was not re-run on the parent. dr `a_shielded_victim_gets_both_side_tracks`
   fails at 0.768 (RTE-19, open).
+
+## Cards 6-7 (RTE-28 c57a73f, RTE-27 c8b239c, GAP-12 7d270fb) and review fixes 7
+- `foreign_nets_route_around_a_matched_cell` fails since RTE-28: it passes at 8ec6d56 and fails at c57a73f
+  (commit message: a jog pair dodges net 1's pin row for 5, crossing ~20 < ~28 detour). Open, not loosened.
+- `a_shielded_victim_gets_both_side_tracks` (RTE-19, open): 0.768 at c57a73f, **0.727** from c8b239c (RTE-27) on.
+  Likely the doubled-via pads at the victim's ends (length no track runs beside). The 0.95 assertion stays.
+- `vias_and_corners_on_ota` (release): `single_cut_vias 12`, `stack_vias 60`, `corners_unsupported 0`, em rows
+  `[]` (c57a73f: `[]` too). **RTE-27 acceptance not met:** 10·12 = 120 > 60 (20 % single). The test fails.
+- RTE-27 across shifts (card deviation): the second cut also tries one pitch across the lower wire (along the
+  upper). ota singles 19 → 12 of 60 with them. They widen the lower pad across its wire; `clear` checks it.
+- RTE-27 site filter: a single within cut spacing of another same-net cut on its own cut layer gets no site (on
+  `a_trunk_carrying_two_branches_is_wider` a stack cut inside a corner block's array: doubling it makes a 140 nm
+  joined pad the EM walk then fails). It now counts as single unless its pads touch that cut's pads on both metals.
+  The old comment's reason (pin-access cut) was wrong: pin access is mcon, never in `singles`. On ota no single is
+  near another cut, so the numbers above are the same with or without the filter.
+- GAP-12 `corner_stubs` skips a block `B` narrower across than long (the stub would neck the lower run; not in the
+  card). On ota it skips 0: no candidate corner block in any of the 24 drawings (stubs 0, taken 0).
+- `pair_vias_double_symmetrically` now has a case where only net 1's image is blocked; removing the leader's
+  rollback (`wires[n].truncate(len)`) fails it.
+- Exact stack-cut counts in dr tests: `a_two_by_two_corner_gets_four_cuts` (`== 4`, in the stub, GAP-12),
+  `a_corner_via_array_moves_onto_the_straight_run` (`hosts == 1`), `every_free_via_is_doubled`
+  (`single_cut_vias == 0`, `partners == 1`). `access_cuts_follow_current` (`== 3`) counts mcon access cuts, unchanged.
+- `qcargo test -p dr`: 67 passed, 2 failed (the two above).
+- `signoff_fixtures` (release): 16 passed, 3 failed, 1 ignored: `fixtures_sign_off_within_baseline` (pair
+  `lvs.unpaired_device`, failing since before RTE-23), `antenna_in_loop_never_passes_what_signoff_fails` and
+  `uncompared_devices_do_not_block_convergence` (both red since RTE-28 per its commit). With `--include-ignored`,
+  `large_fixtures_sign_off_within_baseline` stops at ota DRC 1 (`m1.2.notch:met1`, routing; RTE-28 reported the same
+  1). **Not met:** 19 passed and DRC 0 on ota/ota_constrained/tt_ota.
