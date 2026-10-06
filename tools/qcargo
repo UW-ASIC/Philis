@@ -11,13 +11,18 @@
 # build: -j 2 took 2m52s, system memory peaked at 7.1 GB; -j 6 took 1m05s,
 # peaked at 8.0 GB; largest rustc ~0.64 GB. Lower it under memory pressure.
 #
-# Builds run in one of two persistent workers, not in the caller's worktree:
+# Builds run in one of QCARGO_WORKERS_N persistent workers (default 4: one per
+# active agent plus the integrator), not in the caller's worktree. A worker
+# sticks to the source that last used it, so its target stays warm:
 # the caller's tree (tracked + untracked, deletions included; no .git, no
 # target) is copied into the worker by checksum without preserving times, so
 # every changed file gets a fresh mtime and unchanged files keep theirs — the
 # worker's warm target stays valid. Artifacts live in the worker target the
 # first line prints; files a test writes into the source tree land in the
 # worker copy, not the caller's tree.
+#
+# Incremental compilation is on for release builds too (Cargo's default is off
+# there), so an edit recompiles only what changed inside the touched crates.
 #
 # After each build, still holding the lock, the collector keeps each worker's
 # target under QCARGO_BUDGET_GB (default 15): incremental dirs first, then the
@@ -29,6 +34,7 @@ WORKERS=${QCARGO_WORKERS:-/home/omare/Documents/Projects/Rust/philis-workers}
 LOCK=${QCARGO_LOCK:-/tmp/philis-build-queue.lock}
 JOBS=${QCARGO_JOBS:-6}
 BUDGET_GB=${QCARGO_BUDGET_GB:-15}
+NW=${QCARGO_WORKERS_N:-4}
 
 mkdir -p "$WORKERS"
 touch "$LOCK" 2>/dev/null || { echo "qcargo: build queue lock $LOCK unreachable — stopping" >&2; exit 3; }
@@ -36,7 +42,7 @@ touch "$LOCK" 2>/dev/null || { echo "qcargo: build queue lock $LOCK unreachable 
 # Collector (stop-the-world: callers hold the lock, so no build is running).
 gb() { du -s --block-size=1G "$1" 2>/dev/null | cut -f1; }
 collect() {
-  for w in 1 2; do
+  for w in $(seq 1 "$NW"); do
     T="$WORKERS/w$w/target"; [ -d "$T" ] || continue
     for victim in "$T/debug/incremental" "$T/release/incremental" "$T/debug"; do
       [ "$(gb "$T")" -le "$BUDGET_GB" ] && break
@@ -68,15 +74,20 @@ echo "qcargo: running $(date +%T)" >&2
 
 # Worker: the one that last built this source (warm), else the least recently used.
 pick=""
-for w in 1 2; do
+for w in $(seq 1 "$NW"); do
   [ "$(cat "$WORKERS/w$w.owner" 2>/dev/null)" = "$SRC" ] && pick=$w
 done
 if [ -z "$pick" ]; then
-  t1=$(stat -c %Y "$WORKERS/w1.owner" 2>/dev/null || echo 0)
-  t2=$(stat -c %Y "$WORKERS/w2.owner" 2>/dev/null || echo 0)
-  if [ "$t1" -le "$t2" ]; then pick=1; else pick=2; fi
+  # least recently used (a never-used worker has time 0)
+  best=""; bt=""
+  for w in $(seq 1 "$NW"); do
+    t=$(stat -c %Y "$WORKERS/w$w.owner" 2>/dev/null || echo 0)
+    if [ -z "$bt" ] || [ "$t" -lt "$bt" ]; then best=$w; bt=$t; fi
+  done
+  pick=$best
 fi
 W="$WORKERS/w$pick"
+if [ ! -d "$W/target" ] && [ -d "$WORKERS/w1/target" ]; then cp -a --reflink=auto "$WORKERS/w1/target" "$W/target"; fi
 mkdir -p "$W/src" "$W/target"
 echo "$SRC" > "$WORKERS/w$pick.owner"
 
@@ -115,7 +126,7 @@ echo "qcargo: worker=w$pick target=$W/target cmd=cargo ${args[*]}" >&2
 set +e
 ( cd "$W/src" && \
   CARGO_TARGET_DIR="$W/target" CARGO_BUILD_JOBS="$JOBS" \
-  CARGO_PROFILE_DEV_DEBUG=line-tables-only \
+  CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_RELEASE_INCREMENTAL=true \
   cargo --config 'profile.dev.package."*".debug=false' "${args[@]}" )
 rc=$?
 set -e
