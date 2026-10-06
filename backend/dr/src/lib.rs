@@ -275,6 +275,10 @@ pub struct RouteStats {
     pub single_cut_vias: u32,
     /// Stack vias drawn, each array or single cut once; RTE-27's denominator.
     pub stack_vias: u32,
+    /// Inner-corner support squares (GAP-12) of EM-critical nets' flush Ls
+    /// left out because they would not clear foreign metal (an exact pair's
+    /// leader counts twice).
+    pub corners_unsupported: u32,
     pub congestion: Vec<(Rect, f32)>,
     /// Matched pairs routed as exact images (RTE-15), `(leader, image)`, and
     /// the rest as `(pos, neg, reason)`: `no pin map`, `axis off lattice`,
@@ -1213,7 +1217,7 @@ impl DetailedRoute {
                 let t_geometry = std::time::Instant::now();
                 // Counts the drawing this pass makes, not every redraw.
                 stats.pair_fillers_dropped = 0;
-                (stats.single_cut_vias, stats.stack_vias) = (0, 0);
+                (stats.single_cut_vias, stats.stack_vias, stats.corners_unsupported) = (0, 0, 0);
                 let mut routes = build_routes(&hot, &cold, cfg, &compact, n_nets, layers, cuts);
                 // Shapes at or past this index per net are access geometry — the only
                 // shapes the short resolver may sacrifice.
@@ -1322,6 +1326,30 @@ impl DetailedRoute {
                     }
                 }
                 let pitch = cold.graph.pitch;
+                // EM-critical nets (RTE-14: a current spread gives branch widths).
+                let crit: Vec<bool> = (0..n_nets).map(|n| ci_of.get(n).and_then(|&ci| cold.term_k.get(ci)).is_some_and(|t| !t.is_empty())).collect();
+
+                // GAP-12 (H15-39 recipe (b)): a critical net's cut in a merged
+                // corner block moves onto the straight run beside it, with a
+                // lower-metal stub under it, so the array below fills a straight
+                // overlap. No crowding credit. Skipped where the stub or cut
+                // would not clear.
+                {
+                    let stubs: Vec<Vec<(Rect, [Shape; 2])>> =
+                        routes.wires.iter().enumerate().map(|(n, w)| if crit[n] { corner_stubs(w, cfg, layers, cuts) } else { Vec::new() }).collect();
+                    let sites: Vec<Vec<Vec<Vec<Shape>>>> = stubs.iter().map(|v| v.iter().map(|(_, alt)| vec![alt.to_vec()]).collect()).collect();
+                    let taken = add_where_clear(&mut routes.wires, &sites, &image, pitch, &clear);
+                    for (n, t) in taken.iter().enumerate() {
+                        for (&(c, [_, cut]), _) in stubs[n].iter().zip(t).filter(|(_, k)| k.is_some()) {
+                            routes.wires[n].retain(|s| !(s.layer == cut.layer && s.rect == c));
+                            if let Some((b, map)) = image[n] {
+                                let m = map_rect(c, map, pitch);
+                                routes.wires[b].retain(|s| !(s.layer == cut.layer && s.rect == m));
+                            }
+                        }
+                    }
+                }
+
                 // Via arrays: a cut between two multi-track runs becomes as many cuts as fit
                 // in their overlap (deck cut size, cut spacing, per-axis enclosure). The
                 // hard `Electromigration` rule checks the count (Lienig eq. 3.25) on the
@@ -1492,6 +1520,20 @@ impl DetailedRoute {
                     .collect();
                 let taken = add_where_clear(&mut routes.wires, &sites, &image, pitch, &clear);
                 stats.single_cut_vias = taken.iter().enumerate().map(|(n, t)| t.iter().filter(|k| k.is_none()).count() as u32 * (1 + u32::from(image[n].is_some()))).sum();
+
+                // GAP-12 (EM-27): every flush L of a critical net gets its
+                // inner-corner support square where it clears.
+                let sites: Vec<Vec<Vec<Vec<Shape>>>> = routes
+                    .wires
+                    .iter()
+                    .enumerate()
+                    .map(|(n, w)| {
+                        let squares = if crit[n] { support_squares(w, &metals) } else { Vec::new() };
+                        squares.into_iter().filter(|q| !w.iter().any(|s| s.layer == q.layer && contains(s.rect, q.rect))).map(|q| vec![vec![q]]).collect()
+                    })
+                    .collect();
+                let taken = add_where_clear(&mut routes.wires, &sites, &image, pitch, &clear);
+                stats.corners_unsupported = taken.iter().enumerate().map(|(n, t)| t.iter().filter(|k| k.is_none()).count() as u32 * (1 + u32::from(image[n].is_some()))).sum();
 
                 stats.us_geometry += us(t_geometry);
                 let t_fill = std::time::Instant::now();
@@ -2269,6 +2311,87 @@ fn add_where_clear(
             out[n].push(pick);
         }
     }
+    out
+}
+
+/// GAP-12's array off the corner, per stack cut of one net's `wires` that
+/// sits in a merged corner block `B` (a rect on both of its metals, not a
+/// pad) where the upper metal's run `R` (⟂ to the lower layer's direction)
+/// leaves `B` on one side only: `(c, [stub S, cut c'])`, `S` the lower-metal
+/// rect of `B`'s size beside `B` on that side and inside `R`, `c'` = `c`
+/// moved by `B`'s length into `S`. The via array then fills the straight
+/// overlap `S` instead of the corner (Lienig Fig. 4.29). None where `B` is
+/// narrower across than it is long (the stub would neck the lower run).
+fn corner_stubs(wires: &[Shape], cfg: &DetailedCfg, layers: &[LayerId], cuts: &[Cut]) -> Vec<(Rect, [Shape; 2])> {
+    let mut out = Vec::new();
+    for c in wires {
+        let Some(i) = cuts.iter().position(|&(l, ..)| l == c.layer) else { continue };
+        let (Some(&lo), Some(&hi)) = (layers.get(i), layers.get(i + 1)) else { continue };
+        // A cut drawn twice (stack and pin access) moves once.
+        if out.iter().any(|(r, _)| *r == c.rect) {
+            continue;
+        }
+        let pads = via_pads(cfg, layers, cuts[i], i, c.rect);
+        let is_pad = |r: Rect| pads.iter().flatten().any(|p| p.rect == r);
+        let on = |l: LayerId| wires.iter().filter(move |s| s.layer == l && contains(s.rect, c.rect)).map(|s| s.rect);
+        let Some(b) = on(lo).find(|&b| !is_pad(b) && on(hi).any(|h| h == b)) else { continue };
+        // Along R's axis: x when the lower layer runs vertical.
+        let lower_h = cfg.layers.get(i).map_or(i % 2 == 0, |s| s.horizontal);
+        let span = |r: Rect| if lower_h { (r.y, r.y + r.h) } else { (r.x, r.x + r.w) };
+        let (b0, b1) = span(b);
+        let len = b1 - b0;
+        // The stub carries the lower run's current along R: narrower than that
+        // run (B's length) it would fail EM where the corner did not.
+        if (if lower_h { b.w } else { b.h }) < len {
+            continue;
+        }
+        let stub = |d: i32| {
+            let at = if d > 0 { b1 } else { b0 - len };
+            if lower_h { Rect { y: at, ..b } } else { Rect { x: at, ..b } }
+        };
+        let hit = on(hi).filter(|&r| r != b && (if lower_h { r.h > r.w } else { r.w > r.h })).find_map(|r| {
+            let (r0, r1) = span(r);
+            let d = match (r0 < b0, r1 > b1) {
+                (true, false) => -1,
+                (false, true) => 1,
+                _ => return None,
+            };
+            Some((d, stub(d))).filter(|&(_, s)| contains(r, s))
+        });
+        let Some((d, s)) = hit else { continue };
+        let moved = if lower_h { Rect { y: c.rect.y + d * len, ..c.rect } } else { Rect { x: c.rect.x + d * len, ..c.rect } };
+        out.push((c.rect, [Shape { layer: lo, rect: s }, Shape { layer: c.layer, rect: moved }]));
+    }
+    out
+}
+
+/// Inner-corner support squares (EM-27) of every flush L in `wires`: a
+/// horizontal and a vertical rect on one metal, `a.h == b.w == w`, meeting in
+/// a `w × w` square at an end of each. Each square is the `w × w` square
+/// diagonally inside the L, touching both legs. A T or + (the square not at
+/// an end of both) gives none. Built from the wires' own edges, so on grid
+/// when they are (the spec's snap is a no-op).
+///
+/// ponytail: flush Ls of one width only; a merged `k > 1` wrong-way run
+/// meeting a narrower leg gets none. Widen the match if EM shows such
+/// corners failing.
+fn support_squares(wires: &[Shape], metals: &[LayerId]) -> Vec<Shape> {
+    let mut out = Vec::new();
+    for a in wires.iter().filter(|s| metals.contains(&s.layer) && s.rect.w > s.rect.h) {
+        let w = a.rect.h;
+        for b in wires.iter().filter(|s| s.layer == a.layer && s.rect.h > s.rect.w && s.rect.w == w) {
+            let (x, y) = (b.rect.x, a.rect.y);
+            let meets = (x == a.rect.x || x + w == a.rect.x + a.rect.w) && (y == b.rect.y || y + w == b.rect.y + b.rect.h);
+            if !meets || x < a.rect.x || x + w > a.rect.x + a.rect.w || y < b.rect.y || y + w > b.rect.y + b.rect.h {
+                continue;
+            }
+            let dx = if x == a.rect.x { w } else { -w };
+            let dy = if y == b.rect.y { w } else { -w };
+            out.push(Shape { layer: a.layer, rect: Rect { x: x + dx, y: y + dy, w, h: w } });
+        }
+    }
+    out.sort_by_key(|s| (s.layer.0, s.rect.x, s.rect.y));
+    out.dedup();
     out
 }
 
@@ -5019,10 +5142,10 @@ mod tests {
     }
 
     /// sky130 met1/met2 at `k = 2`: runs drawn merged at
-    /// `W(2) = 260 + 420` and `280 + 420`, and the bend's 700×680 corner holds
-    /// a 2×2 via array (85 nm along-wire enclosure, 170 nm cut spacing).
-    #[test]
-    fn a_two_by_two_corner_gets_four_cuts() {
+    /// `W(2) = 260 + 420` and `280 + 420`, and a bend whose 700×680 corner
+    /// block would hold the 2×2 via array (85 nm along-wire enclosure, 170 nm
+    /// cut spacing). Returns the routes, report and the cell.
+    fn two_by_two_corner() -> (Routes, Report, Macro) {
         let via = LayerId(2);
         let spec = |horizontal, wire| gr::LayerSpec { horizontal, wire, space: 140, pad_across: wire, pad_along: if horizontal { 320 } else { 370 }, halo_via: 1, ..gr::LayerSpec::default() };
         // 680 µA: 680 nm at 1 mA/µm on met1 and 700 nm at 0.9715 mA/µm on met2, each
@@ -5042,19 +5165,80 @@ mod tests {
         let cuts = [(via, 150, 320, 370)];
         let reqs = Requirements::<Routes>::default();
         let (routes, report, _) = DetailedRoute { cfg }.route(&[], &[cell.clone()], &[], &reqs, &LAYERS, &cuts, &mut gr::Negotiation::new());
+        (routes, report, cell)
+    }
+
+    /// The fixture's 700×680 corner blocks on LAYERS[0] holding no pin centre.
+    fn corner_blocks(w: &[Shape], cell: &Macro) -> Vec<Rect> {
+        let pins: Vec<(i32, i32)> = cell.pins.iter().map(|p| (p.at.x + 85, p.at.y + 85)).collect();
+        let inside = |r: Rect, (x, y): (i32, i32)| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+        // A merged corner block is drawn on both metals (a stub only below).
+        w.iter()
+            .filter(|s| s.layer == LAYERS[0] && (s.rect.w, s.rect.h) == (700, 680) && w.contains(&Shape { layer: LAYERS[1], rect: s.rect }))
+            .map(|s| s.rect)
+            .filter(|&r| !pins.iter().any(|&p| inside(r, p)))
+            .collect()
+    }
+
+    /// Same-size rect sharing an edge with `b` (GAP-12's stub).
+    fn beside(r: Rect, b: Rect) -> bool {
+        r != b && (r.w, r.h) == (b.w, b.h) && rect_gap(r, b) == 0 && (r.x == b.x || r.y == b.y)
+    }
+
+    #[test]
+    fn a_two_by_two_corner_gets_four_cuts() {
+        let via = LayerId(2);
+        let (routes, report, cell) = two_by_two_corner();
         assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
         let w = &routes.wires[0];
         let widest = |l: LayerId| w.iter().filter(|s| s.layer == l && s.rect.w != s.rect.h).map(|s| s.rect.w.min(s.rect.h)).max();
         assert_eq!((widest(LAYERS[0]), widest(LAYERS[1])), (Some(680), Some(700)));
-        // The bend: the corner block holding no pin centre.
-        let pins: Vec<(i32, i32)> = cell.pins.iter().map(|p| (p.at.x + 85, p.at.y + 85)).collect();
-        let inside = |r: Rect, (x, y): (i32, i32)| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
-        let bends: Vec<Rect> = w.iter().filter(|s| s.layer == LAYERS[0] && (s.rect.w, s.rect.h) == (700, 680)).map(|s| s.rect).filter(|&r| !pins.iter().any(|&p| inside(r, p))).collect();
+        let bends = corner_blocks(w, &cell);
+        assert!(!bends.is_empty(), "no corner block");
+        // GAP-12: the array sits in the stub beside the corner, not in it.
+        for b in bends {
+            let stub = w.iter().find(|s| s.layer == LAYERS[0] && beside(s.rect, b)).unwrap_or_else(|| panic!("no stub beside {b:?}"));
+            let n = w.iter().filter(|s| s.layer == via && contains(stub.rect, s.rect)).count();
+            assert_eq!(n, 4, "cuts in the stub beside {b:?}");
+        }
+    }
+
+    /// GAP-12 step 2: the corner array moves onto the straight run beside the
+    /// corner block, inside a lower stub and the upper run, EM still clean.
+    #[test]
+    fn a_corner_via_array_moves_onto_the_straight_run() {
+        let via = LayerId(2);
+        let (routes, report, cell) = two_by_two_corner();
+        assert!(report.hard_violations.is_empty(), "{:?}", rules(&report));
+        let w = &routes.wires[0];
+        let cuts: Vec<Rect> = w.iter().filter(|s| s.layer == via).map(|s| s.rect).collect();
+        let bends = corner_blocks(w, &cell);
         assert!(!bends.is_empty(), "no corner block");
         for b in bends {
-            let n = w.iter().filter(|s| s.layer == via && contains(b, s.rect)).count();
-            assert_eq!(n, 4, "cuts in the corner {b:?}");
+            assert!(!cuts.iter().any(|&c| contains(b, c)), "a cut in the corner {b:?}: {cuts:?}");
+            let hosts = w
+                .iter()
+                .filter(|s| s.layer == LAYERS[0] && beside(s.rect, b))
+                .filter(|s| {
+                    let inn: Vec<Rect> = cuts.iter().copied().filter(|&c| contains(s.rect, c)).collect();
+                    inn.len() == 4 && inn.iter().all(|&c| w.iter().any(|r| r.layer == LAYERS[1] && r.rect.w != r.rect.h && contains(r.rect, c)))
+                })
+                .count();
+            assert_eq!(hosts, 1, "stubs beside {b:?} holding 4 cuts inside an upper run");
         }
+    }
+
+    /// GAP-12 step 1: a flush L's inner corner square; none for a T or
+    /// unequal widths.
+    #[test]
+    fn a_critical_corner_gets_a_support_square() {
+        let sh = |rect| Shape { layer: LAYERS[0], rect };
+        let a = sh(Rect { x: 0, y: 0, w: 1_000, h: 260 });
+        let sq = |b: Rect| support_squares(&[a, sh(b)], &LAYERS);
+        assert_eq!(sq(Rect { x: 740, y: 0, w: 260, h: 1_000 }), vec![sh(Rect { x: 480, y: 260, w: 260, h: 260 })]);
+        assert_eq!(sq(Rect { x: 0, y: 0, w: 260, h: 1_000 }), vec![sh(Rect { x: 260, y: 260, w: 260, h: 260 })]);
+        assert_eq!(sq(Rect { x: 370, y: 0, w: 260, h: 1_000 }), vec![]);
+        assert_eq!(sq(Rect { x: 700, y: 0, w: 300, h: 1_000 }), vec![]);
     }
 
     /// RTE-27: every stack via of free nets gets a second cut one cut pitch
