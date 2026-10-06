@@ -256,6 +256,24 @@ pub fn analog_cost(reqs: &Requirements<Layout>, l: &Layout, prices: &Prices) -> 
     objective + priced as f32
 }
 
+/// Augmented-Lagrangian cost (PLC-09): `Σ crit·cost` over `reqs.cost` plus
+/// `Σ_b (−λ_b·r_b + ½·ρ_b·r_b²)`, `r_b` = budget `b`'s residual clamped at 0.
+/// The quadratic term pulls before λ has grown.
+#[must_use]
+pub fn augmented_cost(reqs: &Requirements<Layout>, l: &Layout, prices: &Prices) -> f64 {
+    let objective: f64 = reqs.cost.iter().map(|b| f64::from(b.criticality(l) * b.cost(l))).sum();
+    let priced: f64 = reqs
+        .budget
+        .iter()
+        .enumerate()
+        .map(|(bi, b)| {
+            let r = b.residual(l).max(0.0);
+            f64::from(prices.weight_of(bi)) * r + 0.5 * f64::from(prices.rho_of(bi)) * r * r
+        })
+        .sum();
+    objective + priced
+}
+
 /// PEX-tier energy, dimensionless (PLC-18): `HPWL / L_ref + analog_cost`.
 #[must_use]
 pub fn pex(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Prices) -> f64 {

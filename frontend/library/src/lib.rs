@@ -114,6 +114,8 @@ pub struct Config {
     pub size_convention: SizeConvention,
     /// What gp does before dp; [`GpMode::Pile`] measures gp's contribution.
     pub gp_mode: GpMode,
+    /// Which detailed placer runs ([`dp::DpMode::Sp`]: sequence-pair anneal, PLC-09).
+    pub dp_mode: dp::DpMode,
     /// Fixed die and boundary pins. [`run`] checks each pin names a port;
     /// nothing else reads it yet (PLC/RTE consume it).
     pub interface: Option<Interface>,
@@ -196,6 +198,10 @@ pub enum GpMode {
     Analytic,
     /// dp starts from gp's seeded pile, unrefined.
     Pile,
+    /// gp skipped: under [`dp::DpMode::Sp`] dp starts from
+    /// [`dp::sp::Tree::seed_constructive`]; under `Flat` (which needs
+    /// coordinates) it starts from the pile, as [`GpMode::Pile`].
+    Constructive,
 }
 
 impl Default for Config {
@@ -213,6 +219,7 @@ impl Default for Config {
             heat_source_uw: 1000,
             size_convention: SizeConvention::Spice,
             gp_mode: GpMode::default(),
+            dp_mode: dp::DpMode::default(),
             interface: None,
             top: None,
             constraints: None,
@@ -896,6 +903,7 @@ fn topology<'a>(
             .map(|c| c.iter().map(|d| d.as_ref().and_then(|t| t.iter().find(|(n, _)| n == "D").map(|&(_, i)| i))).collect())
             .unwrap_or_default(),
         gp_mode: cfg.gp_mode,
+        dp_mode: cfg.dp_mode,
         rules,
     };
     // Matched cells keep every alternative: a merged group, or a member of a
@@ -1194,6 +1202,7 @@ struct Flow<'a> {
     /// Per device drain current, µA (`None` = unresolved).
     id_ua: Vec<Option<f64>>,
     gp_mode: GpMode,
+    dp_mode: dp::DpMode,
 }
 
 /// `base` plus what the annotator needs from the deck.
@@ -1467,23 +1476,48 @@ impl Flow<'_> {
             ms[i] += clock.elapsed().as_secs_f64() * 1e3;
             clock = std::time::Instant::now();
         };
-        let (coarse, _) = gp::place(&inp, prices, seed);
-        lap(0);
-        coarse.debug_check("gp::place");
-        let (mut layout, place_report, dp_stats) = dp::place(
-            &coarse,
-            &macros,
-            if reshape { &cells.variants } else { &[] },
-            placement,
-            &cells.fixed,
-            &self.locks,
-            prices,
-            &self.rules,
-            &self.net_weight,
-            // Its own stream (AP-19): gp and dp drawing the same sequence correlate their moves.
-            seed ^ 0xD1B5_4A32_D192_ED03,
-            dp::Schedule::cold(),
-        );
+        // Its own stream (AP-19): gp and dp drawing the same sequence correlate their moves.
+        let dp_seed = seed ^ 0xD1B5_4A32_D192_ED03;
+        let dp_variants = if reshape { &cells.variants[..] } else { &[] };
+        let (mut layout, place_report, dp_stats) = if self.dp_mode == dp::DpMode::Sp {
+            let coarse = (self.gp_mode != GpMode::Constructive).then(|| gp::place(&inp, prices, seed).0);
+            lap(0);
+            let sp_in = dp::PlaceInput {
+                macros: &macros,
+                variants: dp_variants,
+                assignment,
+                reqs: placement,
+                fixed: &cells.fixed,
+                blocks: &cells.groups,
+                rules: self.rules.clone(),
+                locks: &self.locks,
+                halo: &[],
+                net_weight: &self.net_weight,
+                n_axes: self.problem.axis_count,
+                power_uw: &cells.power,
+                units: cells.units.clone(),
+            };
+            let start = coarse.as_ref().map_or(dp::Start::Constructive, dp::Start::Cold);
+            let (l, _tree, rep, st) = dp::place_sp(&sp_in, start, dp::Schedule::cold(), prices, dp_seed);
+            (l, rep, st)
+        } else {
+            let (coarse, _) = gp::place(&inp, prices, seed);
+            lap(0);
+            coarse.debug_check("gp::place");
+            dp::place(
+                &coarse,
+                &macros,
+                dp_variants,
+                placement,
+                &cells.fixed,
+                &self.locks,
+                prices,
+                &self.rules,
+                &self.net_weight,
+                dp_seed,
+                dp::Schedule::cold(),
+            )
+        };
         layout.debug_check("dp::place");
         layout.groups = cells.groups.clone();
         // The epoch's one dual step, on the layout it is scored on (T6).

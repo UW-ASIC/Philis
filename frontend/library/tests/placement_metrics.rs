@@ -60,3 +60,17 @@ fn every_origin_is_on_the_cut_lattice() {
         }
     }
 }
+
+/// PLC-09: the sequence-pair placer's decode is exact, so ota places with no
+/// overlap, no clearance residue and every origin on the lattice, and it
+/// reports how many codes failed to decode.
+#[test]
+fn sp_mode_places_ota_legally() {
+    let sol = run_ota(&Config { dp_mode: dp::DpMode::Sp, ..small(GpMode::Analytic) });
+    let (p, d) = (&sol.stats.place, &sol.stats.dp);
+    eprintln!("{p:?}\n{d:?}");
+    assert_eq!(p.overlap_nm2, 0.0, "{p:?}");
+    assert_eq!(p.clearance_residue_nm2, 0.0, "{p:?}");
+    assert_eq!(p.lattice_off, 0, "{p:?}");
+    assert!(d.decode_fail.is_some(), "{d:?}");
+}

@@ -31,6 +31,8 @@ pub struct Prices {
     priced: BTreeMap<PriceKey, Price>,
     /// `−λ` per positional batch index for this epoch (hot-path read).
     weight: Vec<f32>,
+    /// `ρ` per positional batch index for this epoch; `0` for an unpriced batch.
+    rho: Vec<f32>,
     /// `‖λ_{k+1} − λ_k‖` of the last [`Prices::settle`]; `INFINITY` before one.
     drift: f64,
     /// Dual steps taken: one per epoch (the flow's), none inside `place`.
@@ -68,7 +70,7 @@ const LAMBDA_MAX: f32 = 64.0;
 
 impl Default for Prices {
     fn default() -> Self {
-        Self { priced: BTreeMap::new(), weight: Vec::new(), drift: f64::INFINITY, steps: 0, saturated: Vec::new() }
+        Self { priced: BTreeMap::new(), weight: Vec::new(), rho: Vec::new(), drift: f64::INFINITY, steps: 0, saturated: Vec::new() }
     }
 }
 
@@ -90,10 +92,9 @@ impl Prices {
             reqs.budget.iter().all(|b| reqs.hard.iter().all(|h| h.kind() != b.kind())),
             "gp::Prices: a batch kind is registered in both `hard` and `budget`"
         );
-        self.weight = keys(reqs)
-            .iter()
-            .map(|k| self.priced.get(k).map_or(0.0, |p| -p.lambda))
-            .collect();
+        let keys = keys(reqs);
+        self.weight = keys.iter().map(|k| self.priced.get(k).map_or(0.0, |p| -p.lambda)).collect();
+        self.rho = keys.iter().map(|k| self.priced.get(k).map_or(0.0, |p| p.rho)).collect();
     }
 
     /// Projected dual step `λ ← clamp(λ − ρ·g, −LAMBDA_MAX, 0)`, once per
@@ -156,8 +157,15 @@ impl Prices {
     /// `−λ` for budget batch `bi`; `0.0` when unbound.
     #[inline]
     #[must_use]
-    pub(crate) fn weight_of(&self, bi: usize) -> f32 {
+    pub fn weight_of(&self, bi: usize) -> f32 {
         self.weight.get(bi).copied().unwrap_or(0.0)
+    }
+
+    /// `ρ` for budget batch `bi`; `0.0` when unbound or unpriced.
+    #[inline]
+    #[must_use]
+    pub fn rho_of(&self, bi: usize) -> f32 {
+        self.rho.get(bi).copied().unwrap_or(0.0)
     }
 }
 
