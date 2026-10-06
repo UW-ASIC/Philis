@@ -8,11 +8,14 @@ use pnr_core::UnionFind;
 
 use crate::rule::RuleBatch;
 
-/// One island: `members` (cells after retarget) and the largest gap that
-/// still counts as touching, nm.
+/// One symmetry group whose members must form a single edge-connected island.
+/// The batch is one condition; its cost and residual are the islands past
+/// the first.
 #[derive(Clone, Debug)]
 pub struct SymmetryIsland {
+    /// The group's members (cells after retarget).
     pub members: Vec<Target>,
+    /// Largest edge gap that still counts as touching, nm.
     pub touch_nm: i32,
 }
 
@@ -26,7 +29,14 @@ fn adjacent(l: &Layout, a: Target, b: Target, touch_nm: i32) -> bool {
     (dx < aw + bw && dy - (ah + bh) <= touch_nm) || (dy < ah + bh && dx - (aw + bw) <= touch_nm)
 }
 
-/// Connected components of `members` under [`adjacent`]; `0` with no members.
+/// Returns the number of connected components of `members` under edge
+/// adjacency (a shared edge within `touch_nm`; a corner contact does not
+/// connect); `0` with no members.
+///
+/// Cost: O(n²) pair tests, n = `members.len()`.
+///
+/// # Panics
+/// On a target out of range of `l` (see [`Layout::bbox`]).
 #[must_use]
 pub fn components(l: &Layout, members: &[Target], touch_nm: i32) -> u32 {
     let n = members.len();
@@ -45,6 +55,7 @@ pub fn components(l: &Layout, members: &[Target], touch_nm: i32) -> u32 {
 }
 
 impl SymmetryIsland {
+    /// Islands past the first (`0` = connected or empty).
     fn extra(&self, l: &Layout) -> u32 {
         components(l, &self.members, self.touch_nm).saturating_sub(1)
     }
@@ -68,11 +79,7 @@ impl RuleBatch<Layout> for SymmetryIsland {
         1
     }
     fn touched(&self, out: &mut Vec<u32>) {
-        for t in &self.members {
-            if let Target::Device(d) = t {
-                out.push(u32::from(d.0));
-            }
-        }
+        super::push_devices(out, &self.members);
     }
     fn retarget(&mut self, cell_of: &[u16]) {
         for t in &mut self.members {

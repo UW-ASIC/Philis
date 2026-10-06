@@ -18,9 +18,13 @@ pub const ENV_TOL: f32 = 0.2;
 /// gives none, and that half reads unknown.
 #[derive(Clone, Copy, Debug)]
 pub struct Surroundings {
+    /// Per member, mean distance of its channels to the nearest nwell edge, nm.
     pub wpe_nm: [f32; 2],
+    /// Per member, gap from its cell's diffusion to the nearest foreign one, nm.
     pub ose_nm: [f32; 2],
+    /// Deck's moderate WPE clearance, nm; `≤ 0` = none given.
     pub wpe_min_nm: f32,
+    /// Deck's moderate LOD extension, nm; `≤ 0` = none given.
     pub ose_range_nm: f32,
 }
 
@@ -49,7 +53,8 @@ impl Surroundings {
 }
 
 /// Every matched pair's [`Surroundings`], measured once per placed layout.
-/// State-free (the numbers are precomputed), so it reports on any stage.
+/// State-free (the numbers are precomputed), so it reports on any stage. A
+/// pair whose deck gives neither range counts as unknown, never as a pass.
 #[derive(Clone, Debug, Default)]
 pub struct Environment(pub Vec<Surroundings>);
 
@@ -78,11 +83,15 @@ impl<S> RuleBatch<S> for Environment {
 }
 
 /// Per cell, per variant, in the macro's own frame: its bbox, n-well rects
-/// and diff rects.
+/// and diff rects. Indexed `[cell][variant]`; the three tables are parallel,
+/// and every variant a [`Layout::variant`] names must exist in each.
 #[derive(Debug, Default)]
 pub struct EnvGeo {
+    /// Macro bbox per `[cell][variant]` (the frame the rects below live in).
     pub bbox: Vec<Vec<Rect>>,
+    /// N-well rects per `[cell][variant]`.
     pub wells: Vec<Vec<Vec<Rect>>>,
+    /// Diffusion rects per `[cell][variant]`.
     pub diffs: Vec<Vec<Vec<Rect>>>,
 }
 
@@ -92,8 +101,11 @@ pub struct EnvGeo {
 pub struct LiveEnvironment {
     /// `(member a, member b, cell of a, cell of b)`.
     pub pairs: Vec<(DeviceId, DeviceId, u16, u16)>,
+    /// Cell geometry shared across starts.
     pub geo: std::sync::Arc<EnvGeo>,
+    /// See [`Surroundings::wpe_min_nm`].
     pub wpe_min_nm: f32,
+    /// See [`Surroundings::ose_range_nm`].
     pub ose_range_nm: f32,
 }
 
@@ -101,68 +113,37 @@ impl LiveEnvironment {
     /// Each pair's [`Surroundings`] on `l`, with `extra_wells` (placed, world
     /// frame) joining the cells' n-wells: WPE is a member's channels' mean
     /// distance to the nwell union's edge, OSE its cell's diffusion's gap to
-    /// every other cell's.
+    /// every other cell's. A member without units, or a cell past the
+    /// geometry, reads `f32::INFINITY`.
+    ///
+    /// Cost: O(units · wells²) for WPE plus O(diffs²) for OSE; allocates the
+    /// placed rects once per call.
+    ///
+    /// # Panics
+    /// When a cell's [`Layout::variant`] is past its [`EnvGeo`] variants.
     #[must_use]
     pub fn surroundings_with(&self, l: &Layout, extra_wells: &[Rect]) -> Vec<Surroundings> {
-        let n = self.geo.bbox.len().min(l.x.len());
         let geo = &*self.geo;
-        let placed = |well: bool, c: usize| {
+        let n = geo.bbox.len().min(l.x.len());
+        let placed = |table: &[Vec<Vec<Rect>>], c: usize| {
             let v = usize::from(l.variant.get(c).copied().unwrap_or(0));
-            (if well { &geo.wells } else { &geo.diffs })[c][v].iter().map(move |&r| place_rect(geo.bbox[c][v], r, l, c))
+            let frame = geo.bbox[c][v];
+            table[c][v].iter().map(move |&r| place_rect(frame, r, l, c)).collect::<Vec<_>>()
         };
-        let wells: Vec<Rect> = extra_wells.iter().copied().chain((0..n).flat_map(|c| placed(true, c))).collect();
-        let diffs: Vec<Vec<Rect>> = (0..n).map(|c| placed(false, c).collect()).collect();
-        let inside = |r: &Rect, (x, y): (i32, i32)| r.x <= x && x <= r.x + r.w && r.y <= y && y <= r.y + r.h;
-        let covered = |p: (i32, i32)| wells.iter().any(|r| inside(r, p));
-        let gap = |r: &Rect, (x, y): (i32, i32)| {
-            let dx = (r.x - x).max(x - (r.x + r.w)).max(0);
-            let dy = (r.y - y).max(y - (r.y + r.h)).max(0);
-            f64::from(dx).hypot(f64::from(dy)) as f32
-        };
-        // Distance from `p` to the nwell union's boundary: to the nearest
-        // well outside it, else to the nearest uncovered point just past a
-        // well edge (projections onto every edge, and the corners).
-        let wpe = |p: (i32, i32)| -> f32 {
-            if !covered(p) {
-                return wells.iter().map(|r| gap(r, p)).fold(f32::INFINITY, f32::min);
-            }
-            let mut best = f32::INFINITY;
-            for r in &wells {
-                let (x0, x1, y0, y1) = (r.x, r.x + r.w, r.y, r.y + r.h);
-                let cx = p.0.clamp(x0, x1);
-                let cy = p.1.clamp(y0, y1);
-                for q in [(x0 - 1, cy), (x1 + 1, cy), (cx, y0 - 1), (cx, y1 + 1), (x0 - 1, y0 - 1), (x1 + 1, y0 - 1), (x0 - 1, y1 + 1), (x1 + 1, y1 + 1)] {
-                    if !covered(q) {
-                        best = best.min(f64::from(q.0 - p.0).hypot(f64::from(q.1 - p.1)) as f32);
-                    }
-                }
-            }
-            best
-        };
-        let rect_gap = |a: &Rect, b: &Rect| {
-            let dx = (a.x - (b.x + b.w)).max(b.x - (a.x + a.w)).max(0);
-            let dy = (a.y - (b.y + b.h)).max(b.y - (a.y + a.h)).max(0);
-            f64::from(dx).hypot(f64::from(dy)) as f32
-        };
+        let mut wells = extra_wells.to_vec();
+        for c in 0..n {
+            wells.extend(placed(&geo.wells, c));
+        }
+        let diffs: Vec<Vec<Rect>> = (0..n).map(|c| placed(&geo.diffs, c)).collect();
         let mean_wpe = |d: DeviceId| {
-            let (s, n) = l.units.of_device(l, d).fold((0.0f32, 0u32), |(s, n), u| (s + wpe((u.x, u.y)).min(1e7), n + 1));
-            if n == 0 { f32::INFINITY } else { s / n as f32 }
-        };
-        let ose = |c: u16| {
-            let c = usize::from(c);
-            let Some(own) = diffs.get(c) else { return f32::INFINITY };
-            (0..diffs.len())
-                .filter(|&o| o != c)
-                .flat_map(|o| &diffs[o])
-                .flat_map(|f| own.iter().map(move |m| (f, m)))
-                .map(|(f, m)| rect_gap(f, m))
-                .fold(f32::INFINITY, f32::min)
+            let (s, k) = l.units.of_device(l, d).fold((0.0f32, 0u32), |(s, k), u| (s + well_edge_distance(&wells, (u.x, u.y)).min(WPE_CAP_NM), k + 1));
+            if k == 0 { f32::INFINITY } else { s / k as f32 }
         };
         self.pairs
             .iter()
             .map(|&(a, b, ca, cb)| Surroundings {
                 wpe_nm: [mean_wpe(a), mean_wpe(b)],
-                ose_nm: [ose(ca), ose(cb)],
+                ose_nm: [foreign_diff_gap(&diffs, ca), foreign_diff_gap(&diffs, cb)],
                 wpe_min_nm: self.wpe_min_nm,
                 ose_range_nm: self.ose_range_nm,
             })
@@ -175,9 +156,78 @@ impl LiveEnvironment {
         self.surroundings_with(l, &[])
     }
 
+    /// The precomputed batch for `l`.
     fn now(&self, l: &Layout) -> Environment {
         Environment(self.surroundings(l))
     }
+}
+
+/// Per-unit WPE distance cap, nm: a unit with no well on the die must not make
+/// its member's mean infinite while its partner's is finite.
+const WPE_CAP_NM: f32 = 1e7;
+
+/// Whether `p` lies in `r`, edges included.
+#[inline]
+fn contains(r: &Rect, (x, y): (i32, i32)) -> bool {
+    r.x <= x && x <= r.x + r.w && r.y <= y && y <= r.y + r.h
+}
+
+/// Euclidean gap from `p` to `r`, nm; `0` inside or on the edge.
+#[inline]
+fn point_gap(r: &Rect, (x, y): (i32, i32)) -> f32 {
+    let dx = (r.x - x).max(x - (r.x + r.w)).max(0);
+    let dy = (r.y - y).max(y - (r.y + r.h)).max(0);
+    f64::from(dx).hypot(f64::from(dy)) as f32
+}
+
+/// Euclidean edge-to-edge gap between two rects, nm; `0` when they touch.
+#[inline]
+fn rect_gap(a: &Rect, b: &Rect) -> f32 {
+    let dx = (a.x - (b.x + b.w)).max(b.x - (a.x + a.w)).max(0);
+    let dy = (a.y - (b.y + b.h)).max(b.y - (a.y + a.h)).max(0);
+    f64::from(dx).hypot(f64::from(dy)) as f32
+}
+
+/// Distance from `p` to the boundary of the union of `wells`, nm:
+/// outside, to the nearest well; inside, to the nearest uncovered lattice
+/// point just past a well edge (projections onto every edge, and the
+/// corners). `f32::INFINITY` with no wells, or when every candidate is
+/// covered.
+fn well_edge_distance(wells: &[Rect], p: (i32, i32)) -> f32 {
+    let covered = |q: (i32, i32)| wells.iter().any(|r| contains(r, q));
+    if !covered(p) {
+        return wells.iter().map(|r| point_gap(r, p)).fold(f32::INFINITY, f32::min);
+    }
+    let mut best = f32::INFINITY;
+    for r in wells {
+        let (x0, x1, y0, y1) = (r.x, r.x + r.w, r.y, r.y + r.h);
+        let (cx, cy) = (p.0.clamp(x0, x1), p.1.clamp(y0, y1));
+        for q in [(x0 - 1, cy), (x1 + 1, cy), (cx, y0 - 1), (cx, y1 + 1), (x0 - 1, y0 - 1), (x1 + 1, y0 - 1), (x0 - 1, y1 + 1), (x1 + 1, y1 + 1)] {
+            if !covered(q) {
+                best = best.min(f64::from(q.0 - p.0).hypot(f64::from(q.1 - p.1)) as f32);
+            }
+        }
+    }
+    best
+}
+
+/// Smallest gap from cell `c`'s diffusion to any other cell's, nm;
+/// `f32::INFINITY` when `c` is past `diffs` or nothing else has diffusion.
+fn foreign_diff_gap(diffs: &[Vec<Rect>], c: u16) -> f32 {
+    let c = usize::from(c);
+    let Some(own) = diffs.get(c) else { return f32::INFINITY };
+    let mut best = f32::INFINITY;
+    for (o, theirs) in diffs.iter().enumerate() {
+        if o == c {
+            continue;
+        }
+        for f in theirs {
+            for m in own {
+                best = best.min(rect_gap(f, m));
+            }
+        }
+    }
+    best
 }
 
 // ponytail: global batch, re-measured on every dp trial (`O(P·Σ_c rects)`); if

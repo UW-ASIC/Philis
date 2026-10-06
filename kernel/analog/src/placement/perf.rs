@@ -16,21 +16,32 @@ pub const RESERVE: f32 = 0.2;
 /// estimated as the rectilinear MST over its cells' pin boxes (edge to edge).
 /// R, differential and coupling terms are RTE-21's and are ignored here.
 #[derive(Clone)]
+///
+/// `nets`, `weights` and `items` are parallel, one entry per net that touches
+/// at least two cells.
+#[derive(Clone, Debug)]
 pub struct PlacePerf {
+    /// The routing row's metric name (reporting only).
     pub metric: String,
+    /// Nets the row prices.
     pub nets: Vec<NetId>,
+    /// Per net, the row's sensitivity weight.
     pub weights: Vec<f32>,
+    /// Ground capacitance per nm of wire, aF, scaled to the row's headroom.
     pub af_per_nm: f32,
     /// The routing row's `limit` (1 = headroom, 0 = do-not-worsen).
     pub limit: f32,
+    /// Share of the headroom left to routing, in `[0, 1)` (see [`RESERVE`]).
     pub reserve: f32,
     /// Per net: `(cell, per-variant pin box (dx, dy, hx, hy) about the bbox centre, R0)`.
     pub items: Vec<Vec<(u16, Vec<(i32, i32, i32, i32)>)>>,
 }
 
 impl PlacePerf {
-    /// `variants[c]` are cell `c`'s alternatives. Nets touching fewer than two
-    /// cells are dropped with their weight: they carry no placement wire.
+    /// Builds the term for `row`; `variants[c]` are cell `c`'s alternatives.
+    /// Nets touching fewer than two cells are dropped with their weight: they
+    /// carry no placement wire. An alternative without a pin on a net uses a
+    /// zero box at its bbox centre. Cost: O(nets · Σ pins).
     #[must_use]
     pub fn new(row: &PerformanceBudget, variants: &[&[Macro]], reserve: f32) -> Self {
         let (mut nets, mut weights, mut items) = (Vec::new(), Vec::new(), Vec::new());
@@ -63,7 +74,8 @@ impl PlacePerf {
         Self { metric: row.metric.clone(), nets, weights, af_per_nm: row.af_per_nm, limit: row.limit, reserve, items }
     }
 
-    /// Placed pin-box centre and half extents of cell `c`.
+    /// Placed pin-box centre and half extents of cell `c` under its current
+    /// variant (falling back to variant 0) and orientation.
     fn item(l: &Layout, c: u16, boxes: &[(i32, i32, i32, i32)]) -> (i64, i64, i64, i64) {
         let c = usize::from(c);
         let (bx, by, hx, hy) = boxes.get(usize::from(l.variant[c])).or(boxes.first()).copied().unwrap_or_default();
@@ -73,8 +85,12 @@ impl PlacePerf {
         (i64::from(l.x[c] + dx), i64::from(l.y[c] + dy), i64::from(hx), i64::from(hy))
     }
 
-    /// Rectilinear MST length of net `n`, nm, edge to edge between pin boxes.
-    /// ponytail: dense Prim, O(k²); k ≤ ~10 cells per sensitive net.
+    /// Returns the rectilinear MST length of net `n`, nm, edge to edge between
+    /// pin boxes; `0` for a net with fewer than two cells.
+    ///
+    /// # Panics
+    /// When `n` is out of range of `items`, or a cell is out of range of `l`.
+    // ponytail: dense Prim, O(k²); k ≤ ~10 cells per sensitive net.
     #[must_use]
     pub fn mst_len(&self, n: usize, l: &Layout) -> i64 {
         let pts: Vec<_> = self.items[n].iter().map(|(c, b)| Self::item(l, *c, b)).collect();
@@ -97,6 +113,7 @@ impl PlacePerf {
     }
 
     /// Σ w_i · mst_i · af_per_nm: fraction of the headroom the estimate spends.
+    /// Nets past `weights` are ignored.
     fn used(&self, l: &Layout) -> f32 {
         (0..self.items.len()).map(|n| self.weights[n] * self.mst_len(n, l) as f32 * self.af_per_nm).sum()
     }

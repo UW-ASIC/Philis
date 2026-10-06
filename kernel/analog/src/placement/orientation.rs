@@ -26,20 +26,24 @@ pub enum OrientCheck {
 
 /// One orientation condition over a matched set of schematic devices. A
 /// member without placed units is **unknown** (no drawing, no direction).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct OrientationSet {
+    /// Schematic devices; member 0 is the reference for [`OrientCheck::Phi`].
     pub members: Vec<DeviceId>,
+    /// The condition the members must meet.
     pub check: OrientCheck,
     /// `device → cell`, set by `retarget`; empty = the ids name cells.
     pub cell_of: Vec<u16>,
 }
 
 impl OrientationSet {
+    /// Cell holding `d`: through `cell_of`, else `d` itself names the cell.
     fn cell(&self, d: DeviceId) -> u32 {
         u32::from(self.cell_of.get(d.0 as usize).copied().unwrap_or(d.0))
     }
 
-    /// `0.0` = satisfied, `> 0` = violated, `None` = unknown.
+    /// `0.0` = satisfied, `> 0` = violated, `None` = unknown (a member
+    /// without placed units). Fewer than two members is vacuously `0.0`.
     fn residual_of(&self, l: &Layout) -> Option<f32> {
         let s: Vec<_> = self.members.iter().map(|&d| sums(l.units.of_device(l, d).map(Pt::from))).collect();
         if s.iter().any(|m| m.n == 0) {
@@ -94,6 +98,8 @@ impl crate::rule::RuleBatch<Layout> for OrientationSet {
         let c0 = self.cell(m0);
         out.extend(rest.iter().map(|&m| (c0, self.cell(m))));
     }
+    /// Every member's cell when the set is violated: the condition is
+    /// set-wide, so no single member is to blame.
     fn violating_ids(&self, l: &Layout, out: &mut Vec<u32>) {
         if self.violations(l) > 0 {
             self.touched(out);

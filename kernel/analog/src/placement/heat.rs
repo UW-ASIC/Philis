@@ -10,8 +10,11 @@ use pnr_core::MatchClass;
 /// [`super::Isolation`] so it keeps its own report row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HeatSeparation {
+    /// Cell of the matched set being protected.
     pub victim: Target,
+    /// Dissipating cell.
     pub source: Target,
+    /// Required edge-to-edge gap, nm; `≤ 0` is always satisfied.
     pub min_gap_nm: i32,
 }
 
@@ -26,27 +29,27 @@ impl Rule for HeatSeparation {
     fn satisfied(self, l: &Layout) -> bool {
         l.edge_gap(self.victim, self.source) >= self.min_gap_nm as f32
     }
-    /// Linear shortfall / required gap.
+    /// Linear shortfall / required gap (squares do not sum across rules).
     fn residual(self, l: &Layout) -> f32 {
         let floor = self.min_gap_nm as f32;
         crate::rule::over(floor - l.edge_gap(self.victim, self.source), floor)
     }
     fn touches(self, out: &mut Vec<u32>) {
-        for t in [self.victim, self.source] {
-            if let Target::Device(d) = t {
-                out.push(u32::from(d.0));
-            }
-        }
+        super::push_devices(out, &[self.victim, self.source]);
     }
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { victim: self.victim.retarget(cell_of), source: self.source.retarget(cell_of), ..self }
     }
 }
 
-/// One rule per (victim cell, source cell) with `power_uw[source] ≥ source_uw`,
-/// source outside the set, set class ≠ Minimal; `min_gap_nm = power_uw`
-/// (k = 1 µm/mW = 1 nm/µW for Moderate and Exceptional; Exceptional is policy).
-/// `sets` are cell-indexed; a set merged into one cell is one victim.
+/// Returns one rule per distinct (victim cell, source cell) with
+/// `power_uw[source] ≥ source_uw`, the source outside the victim's set and the
+/// set's class not Minimal; `min_gap_nm = power_uw[source]` (k = 1 µm/mW =
+/// 1 nm/µW for Moderate and Exceptional; Exceptional is policy).
+///
+/// `sets` are cell-indexed (a set merged into one cell is one victim);
+/// `power_uw` is indexed by cell, so it must hold at most `u16::MAX + 1` cells.
+/// Cost: O(Σ |set| · cells).
 #[must_use]
 pub fn separations(sets: &[(MatchClass, Vec<u16>)], power_uw: &[i32], source_uw: i32) -> Vec<HeatSeparation> {
     let mut out = Vec::new();

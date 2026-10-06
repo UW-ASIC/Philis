@@ -10,12 +10,15 @@ use crate::rule::RuleBatch;
 /// ponytail: a declared policy, not physics — a feasible optimum is a vector
 /// (area, C, …) and scalarising it is the designer's call (Graeb 2007 ch.1).
 /// An area spec from the design would replace `u_min`.
+#[derive(Clone, Copy, Debug)]
 pub struct Utilization {
+    /// Minimum fill fraction, in `(0, 1]`; `≤ 0` disables the rule.
     pub u_min: f32,
 }
 
 impl Utilization {
-    /// Footprint over the allowed footprint (`1.0` = at the floor).
+    /// Footprint over the allowed footprint (`1.0` = at the floor); `0` with
+    /// no cell area or a non-positive `u_min`.
     fn used(&self, l: &Layout) -> f32 {
         let cells: f64 = (0..l.x.len()).map(|i| 4.0 * f64::from(l.hw[i]) * f64::from(l.hh[i])).sum();
         if cells <= 0.0 || self.u_min <= 0.0 {

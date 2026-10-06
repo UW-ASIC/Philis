@@ -14,14 +14,17 @@ use crate::rule::Rule;
 ///
 /// Producer contract (`annotator::emit`): one dense [`BranchId`] per pair, seed
 /// from recognised structure (not current geometry), ids stable across epochs.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct DtiBand {
+    /// First device of the pair.
     pub a: Target,
+    /// Second device of the pair.
     pub b: Target,
     /// Max gap that counts as abutting, nm.
     pub s_max_nm: i32,
     /// Min gap that counts as separated, nm.
     pub d_dti_nm: i32,
+    /// Slot in [`Layout::branch`] holding the committed side.
     pub branch: BranchId,
     /// Starting commitment (`true` = isolate); `dp` re-seeds `Layout::branch`
     /// from it each epoch.
@@ -45,7 +48,7 @@ impl DtiBand {
         }
     }
 
-    /// Band width, nm, floored at 1.
+    /// Band width, nm, floored at 1 so `cost` never divides by zero.
     fn band(self) -> f32 {
         (self.d_dti_nm - self.s_max_nm).max(1) as f32
     }
@@ -75,11 +78,7 @@ impl Rule for DtiBand {
         crate::rule::over(self.miss(l), (self.d_dti_nm - self.s_max_nm) as f32)
     }
     fn touches(self, out: &mut Vec<u32>) {
-        for t in [self.a, self.b] {
-            if let Target::Device(d) = t {
-                out.push(u32::from(d.0));
-            }
-        }
+        super::push_devices(out, &[self.a, self.b]);
     }
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }

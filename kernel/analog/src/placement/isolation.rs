@@ -8,12 +8,13 @@ use crate::rule::Rule;
 /// spacing attenuates substrate propagation (Charbon et al. 2001 ch.8, PDF
 /// p.127), up to a saturation distance past which it buys nothing. A search
 /// aid, not the electrical acceptance test.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Isolation {
     /// Aggressor.
     pub a: Target,
     /// Victim.
     pub b: Target,
+    /// Required edge-to-edge distance, nm; `≤ 0` is always satisfied.
     pub min_distance_nm: i32,
 }
 
@@ -29,11 +30,7 @@ impl Rule for Isolation {
         l.edge_gap(self.a, self.b) >= self.min_distance_nm as f32
     }
     fn touches(self, out: &mut Vec<u32>) {
-        for t in [self.a, self.b] {
-            if let Target::Device(d) = t {
-                out.push(u32::from(d.0));
-            }
-        }
+        super::push_devices(out, &[self.a, self.b]);
     }
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
@@ -45,12 +42,17 @@ impl Rule for Isolation {
     }
 }
 
-/// Charbon §8.3.1 (L3382–3399): an injector equidistant from both halves of a differential pair
-/// couples a common-mode disturbance only. Cost-only (no threshold in the source).
-#[derive(Clone, Copy)]
+/// Keeps a substrate injector equidistant from both halves of a differential
+/// pair: Charbon §8.3.1 (L3382–3399), an equidistant injector couples a
+/// common-mode disturbance only. Cost-only (no threshold in the source), so
+/// it is always satisfied and never contributes residual.
+#[derive(Clone, Copy, Debug)]
 pub struct SubstrateBalance {
+    /// Noise injector.
     pub aggressor: Target,
+    /// First half of the pair.
     pub a: Target,
+    /// Second half of the pair.
     pub b: Target,
 }
 
@@ -72,11 +74,7 @@ impl Rule for SubstrateBalance {
         (s * s) as f32
     }
     fn touches(self, out: &mut Vec<u32>) {
-        for t in [self.aggressor, self.a, self.b] {
-            if let Target::Device(d) = t {
-                out.push(u32::from(d.0));
-            }
-        }
+        super::push_devices(out, &[self.aggressor, self.a, self.b]);
     }
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { aggressor: self.aggressor.retarget(cell_of), a: self.a.retarget(cell_of), b: self.b.retarget(cell_of) }

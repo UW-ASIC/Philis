@@ -7,8 +7,10 @@ use crate::rule::{Rule, RuleBatch};
 /// Direction of a symmetry axis (C14): `V` mirrors in x about a vertical line.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum AxisDir {
+    /// Vertical axis: partners mirror in x, share y.
     #[default]
     V,
+    /// Horizontal axis: partners mirror in y, share x.
     H,
 }
 
@@ -17,8 +19,10 @@ pub enum AxisDir {
 /// legal only when every unit's φ has no x component ([`crate::matching::moments::mirror_allowed`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SymMode {
+    /// Partners drawn with the same orientation.
     #[default]
     Perfect,
+    /// `b` drawn as `a` reflected about the vertical axis.
     Mirror,
 }
 
@@ -26,11 +30,18 @@ pub enum SymMode {
 /// distinct partners also share `hw`, `hh`, `variant` and `orient` up to `mode`. The mirror
 /// equation is an exact integer equality, so it is enforced by
 /// [`Rule::project`], not by weight; `residual` is the mirror error in µm.
-#[derive(Clone, Copy)]
+///
+/// `a == b` is legal: a pair collapsed into one cell degenerates to "centre on
+/// the axis". Group targets are scored but never projected.
+#[derive(Clone, Copy, Debug)]
 pub struct Symmetry {
+    /// Left partner.
     pub a: Target,
+    /// Right partner.
     pub b: Target,
+    /// Slot in [`Layout::axis`] holding the mirror line's x, nm.
     pub axis: AxisId,
+    /// How the partners' orientations relate.
     pub mode: SymMode,
 }
 
@@ -54,17 +65,14 @@ impl Rule for Symmetry {
     }
 
     fn touches(self, out: &mut Vec<u32>) {
-        for t in [self.a, self.b] {
-            if let Target::Device(d) = t {
-                out.push(u32::from(d.0));
-            }
-        }
+        super::push_devices(out, &[self.a, self.b]);
     }
 
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
     }
 
+    /// `Some` only when both sides are devices.
     fn mirror_pair(self) -> Option<(u32, u32, u16)> {
         match (self.a, self.b) {
             (Target::Device(a), Target::Device(b)) => Some((u32::from(a.0), u32::from(b.0), self.axis.0)),
@@ -72,6 +80,7 @@ impl Rule for Symmetry {
         }
     }
 
+    /// `Some` only for two distinct devices.
     fn matched_pair(self) -> Option<(u32, u32)> {
         match (self.a, self.b) {
             (Target::Device(a), Target::Device(b)) if a != b => Some((u32::from(a.0), u32::from(b.0))),
@@ -141,6 +150,8 @@ impl Symmetry {
         l.y[ib] = my;
     }
 
+    /// Midpoint of the partners' on-grid x, truncated toward zero; `None`
+    /// unless both are in-range devices.
     fn midpoint_x(self, l: &Layout, g: i32) -> Option<i32> {
         let (ia, ib) = self.indices(l)?;
         Some((snap_to(l.x[ia], g) + snap_to(l.x[ib], g)) / 2)
@@ -149,7 +160,9 @@ impl Symmetry {
 
 /// Mirror pairs of one differential stage, sharing **one** axis. Per-pair
 /// projection would let each pair drift onto its own line; choosing the shared
-/// axis needs every pair at once.
+/// axis needs every pair at once. Scoring delegates to the `Vec<Symmetry>`
+/// batch; only projection and the mirror-mode hooks differ.
+#[derive(Clone, Debug)]
 pub struct SymmetryGroup(pub Vec<Symmetry>);
 
 impl RuleBatch<Layout> for SymmetryGroup {
@@ -203,7 +216,8 @@ impl RuleBatch<Layout> for SymmetryGroup {
     }
 
     /// Put every pair on one axis at the mean of their midpoints (minimum total
-    /// displacement).
+    /// displacement), and write that axis to every pair's [`Layout::axis`]
+    /// slot. A group without one in-range device pair is left untouched.
     fn project(&self, l: &mut Layout, grid: i32) {
         let g = grid.max(1);
         let mids: Vec<i32> = self.0.iter().filter_map(|r| r.midpoint_x(l, g)).collect();
@@ -221,7 +235,8 @@ impl RuleBatch<Layout> for SymmetryGroup {
     }
 }
 
-/// Nearest multiple of `g`, half away from zero (matches the placer's `snap`).
+/// Nearest multiple of `g` (floored at 1), half away from zero (matches the
+/// placer's `snap`).
 #[inline]
 fn snap_to(v: i32, g: i32) -> i32 {
     let g = g.max(1);
