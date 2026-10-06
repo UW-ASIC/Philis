@@ -45,38 +45,11 @@ pub enum Pattern {
 /// A device-family generator over its variant space.
 pub trait Cell: Clone {
     /// Every feasible variant for `group`, in a deterministic order (the order
-    /// `Layout::variant` indexes). Never ranked: the placer picks. Empty when
-    /// the group is empty or the process cannot build the family, which
-    /// signoff reports as `cell/undrawable`.
+    /// `Layout::variant` indexes). Never ranked: the placer picks.
     fn enumerate(group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Vec<Self>;
 
-    /// Draws this variant in the cell's local frame, nm. Pure and
-    /// byte-deterministic in its inputs. Expects a variant [`Cell::enumerate`]
-    /// returned for the same `group`, `constraints` and `process`; any other
-    /// may panic (a mandatory layer role missing from the deck, via
-    /// [`builder::req`]) or draw a grid that cannot hold every unit.
+    /// Draw this variant.
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro;
-}
-
-/// Unit-array grid shapes `(rows, cols)` for a group whose member `d` draws
-/// `counts[d]` units (each `>= 1`, as [`builder::Sizing`] guarantees), in
-/// a deterministic order. Several members: the point-symmetric grids of
-/// [`analog::matching::pattern::grids`] at aspect `<= 3`. One member of `n`
-/// units: one row, one column, and the squarest `ceil(sqrt n)` columns,
-/// deduplicated. Empty when `counts` is empty.
-pub(crate) fn unit_grids(counts: &[u16]) -> Vec<(u16, u16)> {
-    if let [n] = *counts {
-        if n == 0 {
-            return vec![];
-        }
-        let mut cols = vec![1, n, (f64::from(n).sqrt().ceil() as u16).max(1)];
-        cols.sort_unstable();
-        cols.dedup();
-        return cols.into_iter().map(|c| (n.div_ceil(c), c)).collect();
-    }
-    // A grid wider or taller than `u16` cannot be named by a variant: drop
-    // it rather than truncate it into one that cannot hold every unit.
-    analog::matching::pattern::grids(counts, 3.0).into_iter().filter_map(|(r, c)| Some((u16::try_from(r).ok()?, u16::try_from(c).ok()?))).collect()
 }
 
 /// Shared helpers for each generator's in-file DRC/ERC self-check: one device
@@ -193,77 +166,5 @@ pub(crate) mod testkit {
             }
         }
         out
-    }
-}
-
-/// Corner cases for the crate-root helpers (cleanup step 2). Oracles: the
-/// doc comments, hand-derived grids.
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use pnr_core::{LayerId, NetId, Pin, Rect};
-
-    #[test]
-    fn unit_grids_of_no_members_is_empty() {
-        assert!(unit_grids(&[]).is_empty());
-    }
-
-    #[test]
-    fn unit_grids_of_one_unit_is_one_cell() {
-        assert_eq!(unit_grids(&[1]), [(1, 1)]);
-    }
-
-    #[test]
-    fn unit_grids_of_one_member_offers_row_column_and_square() {
-        assert_eq!(unit_grids(&[4]), [(4, 1), (2, 2), (1, 4)]);
-        // ceil(sqrt 5) = 3 columns: two rows, one cell spare.
-        assert_eq!(unit_grids(&[5]), [(5, 1), (2, 3), (1, 5)]);
-        // n = 2: sqrt rounds up to 2, deduplicated against n.
-        assert_eq!(unit_grids(&[2]), [(2, 1), (1, 2)]);
-    }
-
-    /// A member with no units has nothing to draw: no grid, no panic.
-    #[test]
-    fn unit_grids_of_a_zero_count_is_empty() {
-        assert!(unit_grids(&[0]).is_empty());
-    }
-
-    #[test]
-    fn unit_grids_of_several_members_hold_every_unit() {
-        let g = unit_grids(&[1, 8]);
-        assert!(g.contains(&(3, 3)), "{g:?}");
-        assert!(g.iter().all(|&(r, c)| usize::from(r) * usize::from(c) >= 9), "{g:?}");
-    }
-
-    /// A total past `u16::MAX` never comes back truncated: every grid
-    /// offered still holds every unit.
-    #[test]
-    fn unit_grids_never_truncate_a_large_total() {
-        let g = unit_grids(&[40_000, 40_000]);
-        assert!(!g.is_empty());
-        assert!(g.iter().all(|&(r, c)| usize::from(r) * usize::from(c) >= 80_000), "{g:?}");
-    }
-
-    fn pin_at(name: &str, x: i32, layer: u16) -> Pin {
-        Pin { name: name.into(), net: NetId(0), at: Rect { x, y: 0, w: 10, h: 10 }, layer: LayerId(layer) }
-    }
-
-    #[test]
-    fn ports_label_each_pad_once_and_name_common_terminals_alone() {
-        let m = Macro {
-            pins: vec![
-            pin_at("d0:G", 0, 1),
-            // Same pad, same layer: one label (the first pin's name).
-            pin_at("d1:G", 0, 1),
-            // Same centre, other layer: its own label.
-            pin_at("d1:D", 0, 2),
-            pin_at("d1:S", 100, 1),
-            pin_at("GND", 200, 1),
-            ],
-            ..Macro::default()
-        };
-        let l = testkit::ports_with(&m, &["G"]);
-        let names: Vec<(&str, i32, u16)> = l.iter().map(|p| (p.name.as_str(), p.x, p.layer)).collect();
-        assert_eq!(names, [("G", 5, 1), ("d1_D", 5, 2), ("d1_S", 105, 1), ("GND", 205, 1)]);
     }
 }

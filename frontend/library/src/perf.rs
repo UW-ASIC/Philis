@@ -37,9 +37,7 @@ pub struct Parasitics {
 
 /// `SA = SB = S` (µm) at which BSIM4's multi-finger average `(1/nf)·Σᵢ
 /// 1/(S + L/2 + i·L)` (SD = 0) gives `target/2`: an equivalent card for the
-/// layout's measured stress. `None` when no `S` in `[1e-3, 1e4]` µm reaches
-/// it (a non-positive or NaN target, or stress beyond what abutting fingers
-/// give). `nf < 1` reads as 1.
+/// layout's measured stress. `None` when no finite `S` reaches it.
 fn equivalent_sa_um(target_inv_um: f64, l_um: f64, nf: i64) -> Option<f64> {
     let f = |s: f64| (0..nf.max(1)).map(|i| 1.0 / (s + l_um / 2.0 + i as f64 * l_um)).sum::<f64>() / nf.max(1) as f64;
     let want = target_inv_um / 2.0;
@@ -61,11 +59,8 @@ fn equivalent_sa_um(target_inv_um: f64, l_um: f64, nf: i64) -> Option<f64> {
 /// One requirement on a measured metric (a `.measure` name).
 #[derive(Clone, Debug)]
 pub struct Spec {
-    /// The `.measure` name, matched case-insensitively.
     pub metric: String,
-    /// Floor, metric units; `None` (or non-finite) = no floor.
     pub min: Option<f64>,
-    /// Ceiling, metric units; `None` (or non-finite) = no ceiling.
     pub max: Option<f64>,
 }
 
@@ -73,13 +68,9 @@ pub struct Spec {
 /// values the testbenches read (e.g. `Vdd vdd 0 {vdd}`).
 #[derive(Clone, Debug)]
 pub struct Scenario {
-    /// Label for reports.
     pub name: String,
-    /// Corner inside [`OpConfig::model_lib`].
     pub corner: String,
-    /// Simulation temperature, °C.
     pub temp_c: f64,
-    /// `.param name=value` lines, in order.
     pub params: Vec<(String, f64)>,
 }
 
@@ -93,7 +84,6 @@ pub struct PerfConfig {
     /// schematic's net names, no `.end`; a spec's metric comes from exactly
     /// one of them.
     pub testbenches: Vec<String>,
-    /// The requirements, in report order; indices into this are "spec `j`".
     pub specs: Vec<Spec>,
     /// Index 0 is nominal. Empty = one scenario from `sim.corner` /
     /// `sim.temp_c`.
@@ -115,7 +105,6 @@ impl PerfConfig {
 /// A finite bound's worst value over the evaluated scenarios.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundResult {
-    /// Index into the scored specs.
     pub spec: usize,
     /// The ceiling (`max`); `false` = the floor (`min`).
     pub upper: bool,
@@ -152,48 +141,25 @@ impl PerfResult {
 }
 
 /// Normalised miss of `v` against `spec`: the overshoot past the violated
-/// bound over that bound's magnitude (`1` when the bound is zero). `≥ 0`;
-/// an unmeasured (`None`) or NaN value is a full miss, `1`.
+/// bound over that bound's magnitude (`1` when the bound is zero).
 #[must_use]
 pub fn miss(spec: &Spec, v: Option<f64>) -> f64 {
-    miss_bounds(spec.min, spec.max, v)
-}
-
-/// [`miss`] of one side of `spec`: its ceiling when `upper`, else its floor.
-#[must_use]
-pub(crate) fn side_miss(spec: &Spec, upper: bool, v: Option<f64>) -> f64 {
-    if upper {
-        miss_bounds(None, spec.max, v)
-    } else {
-        miss_bounds(spec.min, None, v)
-    }
-}
-
-/// [`miss`] against a bare floor and ceiling.
-fn miss_bounds(min: Option<f64>, max: Option<f64>, v: Option<f64>) -> f64 {
-    let Some(v) = v.filter(|v| !v.is_nan()) else { return 1.0 };
+    let Some(v) = v else { return 1.0 };
     let over = |excess: f64, bound: f64| (excess / if bound == 0.0 { 1.0 } else { bound.abs() }).max(0.0);
-    min.map_or(0.0, |lo| over(lo - v, lo)) + max.map_or(0.0, |hi| over(v - hi, hi))
+    spec.min.map_or(0.0, |lo| over(lo - v, lo)) + spec.max.map_or(0.0, |hi| over(v - hi, hi))
 }
 
 /// Score `measured[i][j]` (spec `j` at `scenarios[i]`): per finite bound the
 /// scenario with the smallest margin (`v − lo` / `hi − v`), the first
-/// unmeasured one if any; ties go to the earlier scenario. A NaN measurement
-/// is unmeasured. Rows past `scenarios.len()` are ignored, except that
-/// `metrics` always reads `measured[0]`; no rows at all leave every spec
-/// unmeasured (a full miss).
-///
-/// # Panics
-/// If a row of `measured` is shorter than `specs`.
+/// unmeasured one if any; ties go to the earlier scenario.
 #[must_use]
 pub fn score(specs: &[Spec], measured: &[Vec<Option<f64>>], scenarios: &[usize]) -> PerfResult {
-    let metrics = specs.iter().enumerate().map(|(j, s)| (s.metric.clone(), measured.first().and_then(|m| m[j]).filter(|v| !v.is_nan()))).collect();
+    let metrics = specs.iter().enumerate().map(|(j, s)| (s.metric.clone(), measured.first().and_then(|m| m[j]))).collect();
     let mut bounds = Vec::new();
     let mut misses = Vec::new();
     let mut spread = Vec::new();
     for (j, s) in specs.iter().enumerate() {
-        // NaN is unmeasured, so it is the worst and the spread is unknown.
-        let col = || measured.iter().zip(scenarios).map(move |(m, &sc)| (m[j].filter(|v| !v.is_nan()), sc));
+        let col = || measured.iter().zip(scenarios).map(move |(m, &sc)| (m[j], sc));
         spread.push(col().map(|(v, _)| v).collect::<Option<Vec<_>>>().and_then(|v| Some((v.iter().copied().reduce(f64::min)?, v.iter().copied().reduce(f64::max)?))));
         // The worst `(value, scenario)` for a bound: `margin` grows with slack.
         let worst = |margin: fn(f64) -> f64| {
@@ -206,8 +172,10 @@ pub fn score(specs: &[Spec], measured: &[Vec<Option<f64>>], scenarios: &[usize])
                 bounds.push(BoundResult { spec: j, upper, value, scenario });
             }
         }
+        let floor = Spec { max: None, ..s.clone() };
+        let ceiling = Spec { min: None, ..s.clone() };
         misses.push(match (lo, hi) {
-            (Some((Some(a), _)), Some((Some(b), _))) => side_miss(s, false, Some(a)) + side_miss(s, true, Some(b)),
+            (Some((Some(a), _)), Some((Some(b), _))) => miss(&floor, Some(a)) + miss(&ceiling, Some(b)),
             _ => 1.0,
         });
     }
@@ -247,7 +215,7 @@ pub(crate) fn deck(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, tb: &s
         Some(routed.max(0.0) + gate.max(0.0)).filter(|&r| r > 0.0)
     };
     // A gate offset sits between the gate and its net (or branch-R) node.
-    let offset = |di: usize| par.gate_offset_v.get(di).copied().filter(|&v| v != 0.0 && v.is_finite());
+    let offset = |di: usize| par.gate_offset_v.get(di).copied().filter(|&v| v != 0.0);
     let prev = |di: usize, t: &str, n: String| if branch(di, t).is_some() { format!("{n}__{di}_{t}") } else { n };
     let mut rs = String::new();
     for (di, dev) in netlist.devices.iter().enumerate() {
@@ -322,7 +290,7 @@ pub(crate) fn run_jobs<J: Sync, T: Send>(jobs: &[J], f: impl Fn(&J) -> T + Sync)
     out.into_inner().expect("a job panicked").into_iter().map(|r| r.expect("every job ran")).collect()
 }
 
-/// One deck's `.measure` results (testbench `tb` of `cfg` at `sc`). One dir per run (`run_deck`): decks go in
+/// One deck's `.measure` results. One dir per run (`run_deck`): decks go in
 /// parallel and must not share a deck or the ngspice cwd (`bsim4v5.out`). A
 /// panicking deck is `Err` (a sim failure), not a panic through [`run_jobs`].
 fn measure(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, tb: usize, sc: &Scenario) -> Result<Vec<(String, f64)>, String> {
@@ -337,8 +305,7 @@ fn measure(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, tb: usize, sc:
 /// Every spec's metric from one scenario's per-testbench measures.
 ///
 /// # Errors
-/// A metric measured by two testbenches. Within one testbench the last
-/// `name = value` line wins.
+/// A metric measured by two testbenches.
 fn assemble(cfg: &PerfConfig, per_tb: &[Vec<(String, f64)>]) -> Result<Vec<Option<f64>>, String> {
     let mut row = Vec::with_capacity(cfg.specs.len());
     for s in &cfg.specs {
@@ -398,7 +365,6 @@ pub enum Param {
 /// One parameter's derivative of every spec's metric.
 #[derive(Clone, Debug)]
 pub struct SensRow {
-    /// The perturbed quantity.
     pub param: Param,
     /// Δ, in the parameter's unit.
     pub step: f64,
@@ -415,11 +381,9 @@ pub struct SensRow {
 pub struct SensTable {
     /// Index into [`PerfConfig::scenarios`].
     pub scenario: usize,
-    /// The operating parasitics every perturbation is applied to.
     pub at: Parasitics,
     /// [`score`] of the unperturbed run at `scenario` alone.
     pub base: PerfResult,
-    /// One per perturbed parameter, in request order.
     pub rows: Vec<SensRow>,
     /// ngspice decks run for this table.
     pub sims: u32,
@@ -432,15 +396,11 @@ pub struct SensTable {
 /// `|s₁ − s₂| ≤ lin_tol·max(|s₁|, |s₂|)` over the two quotients.
 #[derive(Clone, Copy, Debug)]
 pub struct StepPolicy {
-    /// Smallest C step, aF.
     pub c_min_af: f64,
-    /// C step as a fraction of the net's gate capacitance.
     pub c_frac: f64,
     /// Gate capacitance, aF/µm²; `0` = unknown (every C step is `c_min_af`).
     pub gate_af_um2: f64,
-    /// R step, Ω.
     pub r_ohm: f64,
-    /// Relative agreement of the two quotients for a row to read `linear`.
     pub lin_tol: f64,
 }
 
@@ -450,22 +410,13 @@ impl Default for StepPolicy {
     }
 }
 
-/// Index of the `caps` entry between nets `a` and `b` (`None` = ground), in
-/// either order.
-fn cap_entry(caps: &verify::CapMatrix, a: &str, b: Option<&str>) -> Option<usize> {
-    caps.iter().position(|(x, y, _)| (x == a && y.as_deref() == b) || (Some(x.as_str()) == b && y.as_deref() == Some(a)))
-}
-
 /// `at` with `v` added to `p` (aF / Ω / V; may be negative).
-///
-/// # Panics
-/// If `p` names a net, device or terminal `netlist` does not have.
 fn perturb(netlist: &Netlist, at: &Parasitics, p: Param, v: f64) -> Parasitics {
     let mut out = at.clone();
-    let name = |n: pnr_core::NetId| netlist.nets[n.0 as usize].name.as_str();
-    let mut cap = |a: &str, b: Option<&str>| match cap_entry(&out.caps, a, b) {
-        Some(k) => out.caps[k].2 += v / 1000.0,
-        None => out.caps.push((a.to_string(), b.map(str::to_string), v / 1000.0)),
+    let name = |n: pnr_core::NetId| netlist.nets[n.0 as usize].name.clone();
+    let mut cap = |a: String, b: Option<String>| match out.caps.iter_mut().find(|(x, y, _)| (*x == a && *y == b) || (Some(x) == b.as_ref() && y.as_ref() == Some(&a))) {
+        Some(e) => e.2 += v / 1000.0,
+        None => out.caps.push((a, b, v / 1000.0)),
     };
     match p {
         Param::GroundC { net } => cap(name(net), None),
@@ -488,12 +439,11 @@ fn perturb(netlist: &Netlist, at: &Parasitics, p: Param, v: f64) -> Parasitics {
 }
 
 /// `p`'s value in `at` (aF / Ω / V), `0` when absent.
-///
-/// # Panics
-/// As [`perturb`].
 fn base_value(netlist: &Netlist, at: &Parasitics, p: Param) -> f64 {
     let name = |n: pnr_core::NetId| netlist.nets[n.0 as usize].name.as_str();
-    let cap = |a: &str, b: Option<&str>| cap_entry(&at.caps, a, b).map_or(0.0, |k| at.caps[k].2 * 1000.0);
+    let cap = |a: &str, b: Option<&str>| {
+        at.caps.iter().find(|(x, y, _)| (x == a && y.as_deref() == b) || (Some(x.as_str()) == b && y.as_deref() == Some(a))).map_or(0.0, |e| e.2 * 1000.0)
+    };
     match p {
         Param::GroundC { net } => cap(name(net), None),
         Param::CouplingC { a, b } => cap(name(a), Some(name(b))),
@@ -505,8 +455,7 @@ fn base_value(netlist: &Netlist, at: &Parasitics, p: Param) -> f64 {
     }
 }
 
-/// Δ for `p` under `steps` ([`StepPolicy`]); a coupling step reads the
-/// gate capacitance on its `a` net.
+/// Δ for `p` under `steps` ([`StepPolicy`]).
 fn step(netlist: &Netlist, p: Param, sigma_v: &[Option<f64>], steps: &StepPolicy) -> f64 {
     let c = |net: pnr_core::NetId| {
         let gates: f64 = netlist.devices.iter().filter(|d| d.terminals.iter().any(|(t, n)| t == "G" && *n == net)).map(pnr_core::Device::gate_area_um2).sum();
@@ -520,10 +469,7 @@ fn step(netlist: &Netlist, p: Param, sigma_v: &[Option<f64>], steps: &StepPolicy
 }
 
 /// The rows of `params` around `at` at `scenario`, and the base metrics
-/// (simulated unless given). Returns `(base, rows, sims)`, `sims` the decks run.
-///
-/// # Errors
-/// No scenario `scenario`, or the base run fails (as [`evaluate`]).
+/// (simulated unless given). Returns `(base, rows, sims)`.
 #[allow(clippy::too_many_arguments)]
 fn sens_rows(
     netlist: &Netlist,
@@ -590,9 +536,6 @@ fn sens_rows(
 ///
 /// # Errors
 /// As [`evaluate`], for the base run.
-///
-/// # Panics
-/// If a `param` names a net, device or terminal `netlist` does not have.
 pub fn sensitivities(
     netlist: &Netlist,
     cfg: &PerfConfig,
@@ -622,7 +565,7 @@ pub fn add_coupling(t: &mut SensTable, netlist: &Netlist, cfg: &PerfConfig, nets
 
 /// Steps 1–3 of the selection: `GroundC` per `nets`; `SeriesR` for FET S/D,
 /// BJT E/C, resistor P/N terminals on nets with ≥ 2 device pins;
-/// `GateOffset` per FET. In that order, each group in device / terminal order.
+/// `GateOffset` per FET.
 #[must_use]
 pub fn default_params(netlist: &Netlist, nets: &[pnr_core::NetId]) -> Vec<Param> {
     use pnr_core::DeviceKind as K;
@@ -650,27 +593,23 @@ pub fn default_params(netlist: &Netlist, nets: &[pnr_core::NetId]) -> Vec<Param>
 /// coupling is the `GroundC` row), unordered, ranked by `max_j (|∂f_j/∂C_a| +
 /// |∂f_j/∂C_b|) / s_j` from `t`'s `GroundC` rows (a net without one counts
 /// 0), `s_j` = |base metric j| (1 when 0 or unmeasured) so no spec's unit
-/// dominates; ties by `(a, b)`; at most `max`. A ground net in `nets` pairs
-/// with nothing. Each is `CouplingC { a, b }` with `a < b`.
+/// dominates; ties by `(a, b)`; at most `max`.
 #[must_use]
 pub fn coupling_params(t: &SensTable, netlist: &Netlist, nets: &[pnr_core::NetId], max: usize) -> Vec<Param> {
     let scale: Vec<f64> = t.base.metrics.iter().map(|m| m.1.map_or(1.0, f64::abs)).map(|s| if s == 0.0 { 1.0 } else { s }).collect();
     let d = |n: u16| t.rows.iter().find(|r| r.param == Param::GroundC { net: pnr_core::NetId(n) }).map(|r| &r.d);
-    let grounded: Vec<bool> = (0..netlist.nets.len()).map(|b| node_name(netlist, pnr_core::NetId(b as u16)) == "0").collect();
-    let is_ground = |n: u16| grounded.get(n as usize).copied().unwrap_or(false);
-    // Every unordered pair once: collect, sort, dedup, then score.
-    let mut keys: Vec<(u16, u16)> = nets
-        .iter()
-        .map(|n| n.0)
-        .filter(|&a| !is_ground(a))
-        .flat_map(|a| (0..netlist.nets.len() as u16).filter(move |&b| b != a).map(move |b| (a.min(b), a.max(b))))
-        .filter(|&(a, b)| !is_ground(a) && !is_ground(b))
-        .collect();
-    keys.sort_unstable();
-    keys.dedup();
-    let g = |n: u16, j: usize| d(n).and_then(|d| d[j]).map_or(0.0, f64::abs);
-    let mut pairs: Vec<(f64, u16, u16)> =
-        keys.into_iter().map(|(a, b)| (scale.iter().enumerate().map(|(j, s)| (g(a, j) + g(b, j)) / s).fold(0.0, f64::max), a, b)).collect();
+    let mut pairs: Vec<(f64, u16, u16)> = Vec::new();
+    for a in nets.iter().map(|n| n.0) {
+        for b in (0..netlist.nets.len() as u16).filter(|&b| b != a && node_name(netlist, pnr_core::NetId(b)) != "0") {
+            let (a, b) = (a.min(b), a.max(b));
+            if pairs.iter().any(|p| (p.1, p.2) == (a, b)) {
+                continue;
+            }
+            let g = |n: u16, j: usize| d(n).and_then(|d| d[j]).map_or(0.0, f64::abs);
+            let score = scale.iter().enumerate().map(|(j, s)| (g(a, j) + g(b, j)) / s).fold(0.0, f64::max);
+            pairs.push((score, a, b));
+        }
+    }
     pairs.sort_by(|x, y| y.0.total_cmp(&x.0).then((x.1, x.2).cmp(&(y.1, y.2))));
     pairs.into_iter().take(max).map(|(_, a, b)| Param::CouplingC { a: pnr_core::NetId(a), b: pnr_core::NetId(b) }).collect()
 }
@@ -682,9 +621,6 @@ pub fn coupling_params(t: &SensTable, netlist: &Netlist, nets: &[pnr_core::NetId
 /// `d_c`/`d_cc` per aF from linear `GroundC`/`CouplingC` rows; `d_r` per Ω, linear `SeriesR` rows summed per net
 /// of the terminal; `d_vt` per mV from every `GateOffset` row (σ_f's rule, [`crate::robust`]): `−d/1000` NMOS,
 /// `+d/1000` PMOS; `d_t` empty.
-///
-/// # Panics
-/// If a row names a device or terminal `netlist` does not have.
 #[must_use]
 pub fn to_evidence(
     cfg: &PerfConfig,
@@ -751,12 +687,7 @@ pub fn to_evidence(
 /// RTE-21's router weights. `bounds[k] = (spec, h_b, scenario)`, `h_b > 0`. `r_weight[n]` (len `netlist.nets`)
 /// = Σ_b Σ_{linear SeriesR rows on n} |d_b| / h_b, scaled so the max is 1 (all 0 if none);
 /// `pair_weight` = `(a, b, Σ_b ½·|d_b| / h_b)` per linear `CouplingC` row, unscaled. Row `d` read in the table
-/// whose `scenario` is the bound's. A bound with `h_b ≤ 0` or non-finite, or
-/// without a table, contributes nothing.
-///
-/// # Panics
-/// If a row's `d` is shorter than a bound's spec index + 1, or a row names a
-/// device or terminal `netlist` does not have.
+/// whose `scenario` is the bound's.
 #[must_use]
 pub fn router_weights(
     tables: &[SensTable],
@@ -765,7 +696,7 @@ pub fn router_weights(
 ) -> (Vec<f32>, Vec<(pnr_core::NetId, pnr_core::NetId, f32)>) {
     let mut r = vec![0.0f64; netlist.nets.len()];
     let mut pairs: Vec<(pnr_core::NetId, pnr_core::NetId, f64)> = Vec::new();
-    for &(j, h, sc) in bounds.iter().filter(|b| b.1 > 0.0 && b.1.is_finite()) {
+    for &(j, h, sc) in bounds {
         let Some(t) = tables.iter().find(|t| t.scenario == sc) else { continue };
         for row in t.rows.iter().filter(|r| r.linear) {
             let Some(x) = row.d[j] else { continue };
@@ -1176,337 +1107,5 @@ mod tests {
         assert_eq!(r.spread, vec![Some((55.0, 70.0))]);
         let r = score(&specs, &[vec![Some(60.0)], vec![None], vec![Some(70.0)]], &[0, 1, 2]);
         assert_eq!(r.spread, vec![None]);
-    }
-}
-
-/// Step-2 coverage: scoring, the deck, the perturbation helpers, parameter
-/// selection and the exports, without ngspice. Oracles: the doc contracts,
-/// hand-worked values, and round trips (`base_value ∘ perturb`).
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use pnr_core::{Device, DeviceKind, Net, NetId};
-
-    fn spec(min: Option<f64>, max: Option<f64>) -> Spec {
-        Spec { metric: "m".into(), min, max }
-    }
-
-    fn nets(names: &[&str]) -> Vec<Net> {
-        names.iter().map(|n| Net { name: (*n).into() }).collect()
-    }
-
-    /// `M1`: D=out(0) G=in(1) S=B=vss(2).
-    fn one_fet() -> Netlist {
-        Netlist {
-            devices: vec![Device {
-                name: "M1".into(),
-                kind: DeviceKind::Nmos,
-                model: String::new(),
-                terminals: vec![("D".into(), NetId(0)), ("G".into(), NetId(1)), ("S".into(), NetId(2)), ("B".into(), NetId(2))],
-                params: vec![("w".into(), 2000), ("l".into(), 500)],
-            }],
-            nets: nets(&["out", "in", "vss"]),
-            ..Default::default()
-        }
-    }
-
-    fn cfg(specs: Vec<Spec>, testbenches: Vec<String>) -> PerfConfig {
-        PerfConfig { sim: OpConfig::default(), testbenches, specs, scenarios: Vec::new() }
-    }
-
-    #[test]
-    fn miss_of_a_window_and_of_nan() {
-        let w = spec(Some(10.0), Some(20.0));
-        assert_eq!(miss(&w, Some(15.0)), 0.0);
-        assert_eq!(miss(&w, Some(10.0)), 0.0, "on the bound is met");
-        assert!((miss(&w, Some(5.0)) - 0.5).abs() < 1e-12);
-        assert!((miss(&w, Some(30.0)) - 0.5).abs() < 1e-12);
-        assert_eq!(miss(&spec(None, None), Some(1e9)), 0.0, "no bound, no miss");
-        assert_eq!(miss(&spec(None, None), None), 1.0, "unmeasured is a full miss even unbounded");
-        assert!((miss(&spec(Some(-10.0), None), Some(-15.0)) - 0.5).abs() < 1e-12, "a negative floor scales by its magnitude");
-        assert_eq!(miss(&w, Some(f64::NAN)), 1.0, "NaN is unmeasured");
-    }
-
-    #[test]
-    fn side_miss_reads_one_bound() {
-        let w = spec(Some(10.0), Some(20.0));
-        assert_eq!(side_miss(&w, true, Some(5.0)), 0.0, "the ceiling ignores a floor miss");
-        assert!((side_miss(&w, false, Some(5.0)) - 0.5).abs() < 1e-12);
-        assert!((side_miss(&w, true, Some(30.0)) - 0.5).abs() < 1e-12);
-        assert_eq!(side_miss(&w, false, None), 1.0);
-    }
-
-    #[test]
-    fn score_of_no_scenarios_is_unmeasured() {
-        let specs = [spec(Some(1.0), None), spec(None, None)];
-        let r = score(&specs, &[], &[]);
-        assert_eq!(r.metrics, vec![("m".to_string(), None), ("m".to_string(), None)]);
-        assert!(r.bounds.is_empty());
-        assert_eq!(r.miss, vec![1.0, 1.0]);
-        assert_eq!(r.residual, 2.0);
-        assert!(!r.met());
-        assert_eq!(r.spread, vec![None, None]);
-    }
-
-    #[test]
-    fn an_infinite_bound_is_not_a_bound_result() {
-        let r = score(&[spec(Some(f64::NEG_INFINITY), Some(5.0))], &[vec![Some(1.0)]], &[0]);
-        assert_eq!(r.bounds.len(), 1);
-        assert!(r.bounds[0].upper);
-        assert!(r.met());
-    }
-
-    #[test]
-    fn ties_go_to_the_earlier_scenario() {
-        let r = score(&[spec(Some(0.0), Some(10.0))], &[vec![Some(5.0)], vec![Some(5.0)]], &[3, 7]);
-        assert_eq!((r.bounds[0].scenario, r.bounds[1].scenario), (3, 3));
-    }
-
-    /// A NaN measurement is unmeasured wherever it sits: the bound's worst
-    /// is that scenario, the spec a full miss, no spread.
-    #[test]
-    fn a_nan_measurement_is_unmeasured() {
-        for rows in [vec![vec![Some(f64::NAN)], vec![Some(5.0)]], vec![vec![Some(5.0)], vec![Some(f64::NAN)]]] {
-            let r = score(&[spec(Some(0.0), None)], &rows, &[0, 1]);
-            assert_eq!(r.bounds[0].value, None, "{rows:?}");
-            assert_eq!(r.miss, vec![1.0]);
-            assert_eq!(r.spread, vec![None]);
-        }
-    }
-
-    #[test]
-    fn met_is_a_zero_residual() {
-        assert!(PerfResult::default().met());
-        assert!(!PerfResult { residual: 1e-12, ..Default::default() }.met());
-    }
-
-    #[test]
-    fn scenarios_default_to_the_sim_corner() {
-        let mut c = cfg(Vec::new(), Vec::new());
-        c.sim.corner = "ff".into();
-        c.sim.temp_c = -40.0;
-        let s = c.scenarios();
-        assert_eq!(s.len(), 1);
-        assert_eq!((s[0].name.as_str(), s[0].corner.as_str(), s[0].temp_c), ("ff", "ff", -40.0));
-        assert!(s[0].params.is_empty());
-        c.scenarios = vec![Scenario { name: "a".into(), corner: "ss".into(), temp_c: 125.0, params: Vec::new() }];
-        assert_eq!(c.scenarios()[0].name, "a");
-    }
-
-    #[test]
-    fn parse_measures_rejects_what_is_not_a_measure() {
-        let m = parse_measures("GAIN = 4.0\n = 1\na b = 2\nx = failed\ny=3e-3 at= 1\nno equals here\n");
-        assert_eq!(m, vec![("gain".to_string(), 4.0), ("y".to_string(), 3e-3)]);
-        assert!(parse_measures("").is_empty());
-    }
-
-    #[test]
-    fn assemble_takes_the_last_line_and_refuses_two_benches() {
-        let c = cfg(vec![Spec { metric: "Gain".into(), min: None, max: None }, Spec { metric: "pm".into(), min: None, max: None }], Vec::new());
-        let row = assemble(&c, &[vec![("gain".into(), 1.0), ("gain".into(), 2.0)], Vec::new()]).unwrap();
-        assert_eq!(row, vec![Some(2.0), None]);
-        let e = assemble(&c, &[vec![("gain".into(), 1.0)], vec![("gain".into(), 2.0)]]).unwrap_err();
-        assert!(e.contains("metric Gain measured by testbenches 0 and 1"), "{e}");
-        assert_eq!(assemble(&c, &[]).unwrap(), vec![None, None]);
-    }
-
-    /// No testbench: nothing runs (no ngspice needed) and every spec is an
-    /// unmeasured full miss; an unknown scenario index is an error.
-    #[test]
-    fn evaluate_without_testbenches_and_with_a_bad_scenario() {
-        let c = cfg(vec![spec(Some(1.0), None)], Vec::new());
-        let r = evaluate(&one_fet(), &Parasitics::default(), &c, &[0]).unwrap();
-        assert_eq!((r.residual, r.bounds.len(), r.bounds[0].value), (1.0, 1, None));
-        let r = evaluate(&one_fet(), &Parasitics::default(), &c, &[]).unwrap();
-        assert!(r.bounds.is_empty() && r.residual == 1.0);
-        let c = cfg(vec![spec(Some(1.0), None)], vec![String::new()]);
-        let e = evaluate(&one_fet(), &Parasitics::default(), &c, &[5]).unwrap_err();
-        assert!(e.contains("no scenario 5"), "{e}");
-    }
-
-    #[test]
-    fn sensitivities_without_testbenches_are_unmeasured() {
-        let c = cfg(vec![spec(Some(1.0), None)], Vec::new());
-        let p = [Param::GateOffset { device: 0 }, Param::GroundC { net: NetId(0) }];
-        let t = sensitivities(&one_fet(), &c, 0, &p, &[], &StepPolicy::default(), &Parasitics::default()).unwrap();
-        assert_eq!(t.rows.len(), 2);
-        assert!(t.rows.iter().all(|r| r.d == vec![None] && r.linear), "no quotient: vacuously linear");
-        assert_eq!(t.sims, 0);
-        assert_eq!(t.base.metrics[0].1, None);
-        assert!(sensitivities(&one_fet(), &c, 2, &p, &[], &StepPolicy::default(), &Parasitics::default()).unwrap_err().contains("no scenario 2"));
-    }
-
-    #[test]
-    fn equivalent_sa_corners() {
-        assert_eq!(equivalent_sa_um(0.0, 0.5, 1), None);
-        assert_eq!(equivalent_sa_um(-1.0, 0.5, 1), None);
-        assert_eq!(equivalent_sa_um(f64::NAN, 0.5, 1), None);
-        assert_eq!(equivalent_sa_um(1e9, 0.5, 1), None, "more stress than any S gives");
-        assert_eq!(equivalent_sa_um(1.0, 0.5, 0), equivalent_sa_um(1.0, 0.5, 1), "nf < 1 reads as 1");
-        // One finger: 1/(S + L/2) = target/2 ⇒ S = 2/target − L/2.
-        let s = equivalent_sa_um(0.5, 1.0, 1).unwrap();
-        assert!((s - 3.5).abs() < 1e-9, "{s}");
-    }
-
-    #[test]
-    fn the_deck_skips_degenerate_capacitors() {
-        let caps = vec![
-            ("out".to_string(), None, 0.0),
-            ("out".to_string(), Some("in".to_string()), -1.0),
-            ("out".to_string(), Some("out".to_string()), 1.0),
-            ("vss".to_string(), None, 1.0),
-            ("in".to_string(), None, f64::NAN),
-            ("in".to_string(), Some("vss".to_string()), 2.0),
-        ];
-        let c = cfg(Vec::new(), vec![String::new()]);
-        let d = deck(&one_fet(), &Parasitics { caps, ..Parasitics::default() }, &c, "", &c.scenarios()[0]).unwrap();
-        let pex: Vec<&str> = d.lines().filter(|l| l.starts_with("Cpex")).collect();
-        assert_eq!(pex, ["Cpex5 in 0 2.000000e0f"], "{d}");
-    }
-
-    #[test]
-    fn the_deck_drops_non_positive_resistance_and_a_non_finite_offset() {
-        let par = Parasitics {
-            series: vec![vec![("D".into(), -5.0), ("S".into(), 0.0)]],
-            gate_ohm: vec![Some(-3.0)],
-            gate_offset_v: vec![f64::NAN],
-            ..Parasitics::default()
-        };
-        let c = cfg(Vec::new(), vec![String::new()]);
-        let d = deck(&one_fet(), &par, &c, "", &c.scenarios()[0]).unwrap();
-        assert!(!d.contains("Rpex"), "{d}");
-        assert!(!d.contains("Vgo"), "a NaN offset is no source: {d}");
-        assert!(d.lines().any(|l| l.starts_with("XM1 out in 0 0 ")), "{d}");
-    }
-
-    /// A gate with both a branch R and an offset: net → R → offset → gate.
-    #[test]
-    fn the_deck_chains_gate_resistance_and_offset() {
-        let par = Parasitics { gate_ohm: vec![Some(10.0)], gate_offset_v: vec![2e-3], ..Parasitics::default() };
-        let c = cfg(Vec::new(), vec![String::new()]);
-        let d = deck(&one_fet(), &par, &c, "", &c.scenarios()[0]).unwrap();
-        assert!(d.contains("Rpex_0_G in__0_G in 10.0000"), "{d}");
-        assert!(d.contains("Vgo0 in__0_G__o0 in__0_G 2.000000e-3"), "{d}");
-        assert!(d.lines().any(|l| l.starts_with("XM1 out in__0_G__o0 0 0 ")), "{d}");
-    }
-
-    #[test]
-    fn the_deck_leaves_out_capacitor_cards_when_extracted() {
-        let mut nl = one_fet();
-        nl.devices.push(Device { name: "C1".into(), kind: DeviceKind::Capacitor, model: String::new(), terminals: vec![("P".into(), NetId(0)), ("N".into(), NetId(2))], params: vec![("c_af".into(), 500)] });
-        let c = cfg(Vec::new(), vec![String::new()]);
-        let sc = &c.scenarios()[0];
-        assert!(deck(&nl, &Parasitics::default(), &c, "", sc).unwrap().contains("CXC1 out 0 500a"));
-        assert!(!deck(&nl, &Parasitics { extracted: true, ..Parasitics::default() }, &c, "", sc).unwrap().contains("CXC1"));
-    }
-
-    #[test]
-    fn perturb_then_read_back_adds_the_step() {
-        let nl = one_fet();
-        let at = Parasitics { caps: vec![("in".into(), Some("out".into()), 0.5)], ..Parasitics::default() };
-        let params = [
-            Param::GroundC { net: NetId(0) },
-            Param::CouplingC { a: NetId(0), b: NetId(1) },
-            Param::SeriesR { device: 0, terminal: 2 },
-            Param::GateOffset { device: 0 },
-        ];
-        for p in params {
-            let before = base_value(&nl, &at, p);
-            let after = base_value(&nl, &perturb(&nl, &at, p, 250.0), p);
-            assert!((after - before - 250.0).abs() < 1e-9, "{p:?}: {before} → {after}");
-            let twice = perturb(&nl, &perturb(&nl, &at, p, 250.0), p, -250.0);
-            assert!((base_value(&nl, &twice, p) - before).abs() < 1e-9, "{p:?}");
-        }
-        // The coupling entry is found in either order: no second entry.
-        assert_eq!(base_value(&nl, &at, Param::CouplingC { a: NetId(0), b: NetId(1) }), 500.0);
-        assert_eq!(perturb(&nl, &at, Param::CouplingC { a: NetId(0), b: NetId(1) }, 1.0).caps.len(), 1);
-    }
-
-    #[test]
-    fn steps_follow_the_policy() {
-        let nl = one_fet();
-        let pol = StepPolicy { c_min_af: 10.0, c_frac: 0.5, gate_af_um2: 100.0, r_ohm: 7.0, lin_tol: 0.1 };
-        // Gate area on `in`: 2 µm × 0.5 µm = 1 µm² → 100 aF → half is 50.
-        assert!((step(&nl, Param::GroundC { net: NetId(1) }, &[], &pol) - 50.0).abs() < 1e-9);
-        assert_eq!(step(&nl, Param::GroundC { net: NetId(0) }, &[], &pol), 10.0, "no gate: the minimum");
-        assert_eq!(step(&nl, Param::SeriesR { device: 0, terminal: 0 }, &[], &pol), 7.0);
-        assert_eq!(step(&nl, Param::GateOffset { device: 0 }, &[Some(4e-3)], &pol), 4e-3);
-        assert_eq!(step(&nl, Param::GateOffset { device: 0 }, &[None], &pol), 1e-3);
-        assert_eq!(step(&nl, Param::GateOffset { device: 3 }, &[], &pol), 1e-3);
-    }
-
-    #[test]
-    fn default_params_in_order() {
-        let mut nl = one_fet();
-        nl.devices.push(Device { name: "R1".into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("P".into(), NetId(0)), ("N".into(), NetId(3))], params: Vec::new() });
-        nl.nets.push(Net { name: "lonely".into() });
-        let p = default_params(&nl, &[NetId(1)]);
-        assert_eq!(
-            p,
-            vec![
-                Param::GroundC { net: NetId(1) },
-                Param::SeriesR { device: 0, terminal: 0 },
-                Param::SeriesR { device: 0, terminal: 2 },
-                Param::SeriesR { device: 1, terminal: 0 },
-                Param::GateOffset { device: 0 },
-            ],
-            "R1's N sits alone on `lonely`; the FET's S shares vss with its own B"
-        );
-        assert!(default_params(&Netlist::default(), &[]).is_empty());
-    }
-
-    fn empty_table() -> SensTable {
-        SensTable { scenario: 0, at: Parasitics::default(), base: PerfResult::default(), rows: Vec::new(), sims: 0 }
-    }
-
-    #[test]
-    fn coupling_params_skip_ground_and_respect_max() {
-        let nl = one_fet(); // out, in, vss (ground)
-        let t = empty_table();
-        assert!(coupling_params(&t, &nl, &[NetId(0)], 0).is_empty());
-        assert_eq!(coupling_params(&t, &nl, &[NetId(0), NetId(1)], 9), vec![Param::CouplingC { a: NetId(0), b: NetId(1) }], "one pair, not two");
-        assert!(coupling_params(&t, &nl, &[NetId(2)], 9).is_empty(), "the ground net couples through GroundC only");
-    }
-
-    fn row(param: Param, d: Option<f64>, linear: bool) -> SensRow {
-        SensRow { param, step: 1.0, d: vec![d], linear }
-    }
-
-    #[test]
-    fn router_weights_skip_bounds_without_headroom_or_table() {
-        let nl = one_fet();
-        let t = SensTable { rows: vec![row(Param::SeriesR { device: 0, terminal: 0 }, Some(2.0), true)], ..empty_table() };
-        for h in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            let (r, pairs) = router_weights(std::slice::from_ref(&t), &[(0, h, 0)], &nl);
-            assert!(r.iter().all(|&w| w == 0.0) && pairs.is_empty(), "h = {h}: {r:?}");
-        }
-        let (r, _) = router_weights(std::slice::from_ref(&t), &[(0, 1.0, 4)], &nl);
-        assert!(r.iter().all(|&w| w == 0.0), "no table at scenario 4");
-        let (r, _) = router_weights(&[], &[], &nl);
-        assert_eq!(r, vec![0.0; 3]);
-        let (r, _) = router_weights(std::slice::from_ref(&t), &[(0, 1.0, 0)], &nl);
-        assert_eq!(r, vec![1.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn evidence_skips_unbounded_and_unmeasured_specs() {
-        let c = PerfConfig { scenarios: vec![Scenario { name: "a".into(), corner: "tt".into(), temp_c: 27.0, params: Vec::new() }; 2], ..cfg(vec![spec(None, None), spec(Some(1.0), None), spec(Some(1.0), None)], Vec::new()) };
-        let start = score(&c.specs, &[vec![Some(5.0), Some(5.0), None], vec![Some(6.0), Some(4.0), Some(2.0)]], &[0, 1]);
-        let t0 = SensTable { base: score(&c.specs, &[vec![Some(5.0), Some(5.0), None]], &[0]), ..empty_table() };
-        let t1 = SensTable { scenario: 1, base: score(&c.specs, &[vec![Some(6.0), Some(4.0), Some(2.0)]], &[1]), ..empty_table() };
-        let ev = to_evidence(&c, &[t0, t1], &start, &[], &one_fet());
-        // Spec 0 has no bound; spec 2's tightest bound is the unmeasured scenario 0, whose base is None.
-        assert_eq!(ev.specs.len(), 1, "{ev:?}");
-        let s = &ev.specs[0];
-        assert_eq!(s.f0, 4.0, "read at the worst scenario (1)");
-        assert_eq!(s.proc, Some((4.0, 5.0)), "two scenarios: the spread is the process term");
-        assert_eq!(s.sigma_f, None, "no stats");
-    }
-
-    #[test]
-    fn run_jobs_of_nothing_is_nothing() {
-        let out: Vec<u8> = run_jobs(&[] as &[u8], |&x| x);
-        assert!(out.is_empty());
-        assert_eq!(run_jobs(&[3u8], |&x| x + 1), vec![4]);
     }
 }

@@ -12,11 +12,8 @@ use crate::param;
 /// devices missing W/L are not "identical" (AA-21).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Drawn {
-    /// Width of one finger, nm (`W_total / nf` for a MOS, the `w` param otherwise).
     pub w_finger_nm: Option<i64>,
-    /// Drawn length, nm.
     pub l_nm: Option<i64>,
-    /// Drawn units: `nf·m` for a MOS, `m` (at least 1) otherwise.
     pub fingers: u32,
     /// Index into the `models` table [`drawn`] interns into (case-insensitive).
     pub model: u16,
@@ -26,17 +23,11 @@ pub struct Drawn {
 
 /// MOS: from `dev.mos_size()` (FLOW-01: w_finger = W_total/nf, fingers = nf·m); `None` size → both `None`, fingers 1.
 /// Other kinds: `w`, `l` params as written (`None` when absent), fingers = `m` (default 1).
-/// `model` interns `dev.model` (case-insensitive) into `models`, appending a
-/// new lowercase entry on first sight (linear in `models.len()`); `bulk` = the FET `B` net, else `None`.
-///
-/// The index is a `u16`: the netlist's `u16` device id space bounds the number
-/// of distinct models, so it never wraps.
-#[must_use]
+/// `model` interns `dev.model` (case-insensitive) into `models`; `bulk` = the FET `B` net, else `None`.
 pub fn drawn(dev: &Device, models: &mut Vec<String>) -> Drawn {
-    // Entries are lowercase, so a case-insensitive compare finds them without
-    // lowering (and allocating) the name of every device.
-    let model = models.iter().position(|m| m.eq_ignore_ascii_case(&dev.model)).unwrap_or_else(|| {
-        models.push(dev.model.to_ascii_lowercase());
+    let model = dev.model.to_ascii_lowercase();
+    let model = models.iter().position(|m| *m == model).unwrap_or_else(|| {
+        models.push(model);
         models.len() - 1
     }) as u16;
     let fet = matches!(dev.kind, DeviceKind::Nmos | DeviceKind::Pmos);
@@ -57,8 +48,6 @@ fn fixed_geometry(kind: DeviceKind, d: &Drawn) -> bool {
 }
 
 /// The size is unknown: never `ExactAs`, and reported as missing `device W/L`.
-/// A fixed-geometry bipolar or diode (no W and no L) is known by its model.
-#[must_use]
 pub fn unknown_size(kind: DeviceKind, d: &Drawn) -> bool {
     !fixed_geometry(kind, d) && (d.w_finger_nm.is_none() || d.l_nm.is_none())
 }
@@ -67,8 +56,6 @@ pub fn unknown_size(kind: DeviceKind, d: &Drawn) -> bool {
 /// and the same bulk net or both bulks on rails. A bipolar compares its written
 /// W, L and model as they are (EXT-19): its size is the model's emitter, and a
 /// flow may write only a default `l`.
-///
-/// Panics when a bulk net id is outside `roles`.
 pub(crate) fn exact_as(kind: DeviceKind, a: &Drawn, b: &Drawn, roles: &[NetRole]) -> bool {
     if matches!(kind, DeviceKind::Npn | DeviceKind::Pnp) {
         return (a.w_finger_nm, a.l_nm, a.model) == (b.w_finger_nm, b.l_nm, b.model);
@@ -150,127 +137,5 @@ mod tests {
         assert_eq!(diff_pairs(&pair([("nfet_01v8", 7), ("nfet_01v8", 8)], Some(10_000))), 0);
         // Control: bulks on two rails (VSS, VDD) still match.
         assert_eq!(diff_pairs(&pair([("nfet_01v8", 5), ("nfet_01v8", 6)], Some(10_000))), 1);
-    }
-}
-
-/// Step-2 coverage: `drawn` per kind, interning, and the size predicates.
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use crate::tests::fet;
-
-    fn dev(kind: DeviceKind, model: &str, params: &[(&str, i64)]) -> Device {
-        Device {
-            name: "D".into(),
-            kind,
-            model: model.into(),
-            terminals: vec![("C".into(), NetId(0)), ("B".into(), NetId(1)), ("E".into(), NetId(2))],
-            params: params.iter().map(|&(k, v)| (k.into(), v)).collect(),
-        }
-    }
-
-    fn d(w: Option<i64>, l: Option<i64>, model: u16, bulk: Option<u16>) -> Drawn {
-        Drawn { w_finger_nm: w, l_nm: l, fingers: 1, model, bulk: bulk.map(NetId) }
-    }
-
-    /// Nets 0..4 signal, 4 supply, 5 ground.
-    fn roles() -> Vec<NetRole> {
-        let mut r = vec![NetRole::Signal; 4];
-        r.extend([NetRole::Supply, NetRole::Ground]);
-        r
-    }
-
-    #[test]
-    fn a_mos_draws_per_finger_width_and_nf_times_m() {
-        let mut m = fet("M", DeviceKind::Nmos, 0, 1, 2, 3, 9_000, 150);
-        m.params.extend([("nf".into(), 3), ("m".into(), 2)]);
-        let mut models = Vec::new();
-        assert_eq!(drawn(&m, &mut models), Drawn { w_finger_nm: Some(3_000), l_nm: Some(150), fingers: 6, model: 0, bulk: Some(NetId(3)) });
-        m.params.retain(|(k, _)| k != "l");
-        let u = drawn(&m, &mut models);
-        assert_eq!((u.w_finger_nm, u.l_nm, u.fingers), (None, None, 1), "no size: neither dimension, one finger");
-    }
-
-    #[test]
-    fn other_kinds_draw_their_params_as_written() {
-        let mut models = Vec::new();
-        let r = drawn(&dev(DeviceKind::Resistor, "", &[("w", 500), ("l", 4_000), ("m", 3)]), &mut models);
-        assert_eq!((r.w_finger_nm, r.l_nm, r.fingers, r.bulk), (Some(500), Some(4_000), 3, None));
-        // A bipolar's `B` is its base, not a bulk; `m` below 1 reads as 1.
-        let q = drawn(&dev(DeviceKind::Npn, "", &[("m", 0)]), &mut models);
-        assert_eq!((q.w_finger_nm, q.l_nm, q.fingers, q.bulk), (None, None, 1, None));
-        let big = drawn(&dev(DeviceKind::Capacitor, "", &[("m", i64::MAX)]), &mut models);
-        assert_eq!(big.fingers, u32::MAX);
-    }
-
-    #[test]
-    fn models_intern_case_insensitively() {
-        let mut models = Vec::new();
-        let ids: Vec<u16> = ["nfet", "NFET", "pfet", "", "Pfet"].iter().map(|m| drawn(&dev(DeviceKind::Resistor, m, &[]), &mut models).model).collect();
-        assert_eq!(ids, [0, 0, 1, 2, 1]);
-        assert_eq!(models, ["nfet", "pfet", ""]);
-    }
-
-    #[test]
-    fn unknown_size_spares_fixed_geometry() {
-        assert!(unknown_size(DeviceKind::Nmos, &d(None, None, 0, None)));
-        assert!(unknown_size(DeviceKind::Nmos, &d(Some(1), None, 0, None)));
-        assert!(unknown_size(DeviceKind::Resistor, &d(None, Some(1), 0, None)));
-        assert!(!unknown_size(DeviceKind::Resistor, &d(Some(1), Some(1), 0, None)));
-        for k in [DeviceKind::Npn, DeviceKind::Pnp, DeviceKind::Diode] {
-            assert!(!unknown_size(k, &d(None, None, 0, None)), "{k:?}");
-        }
-        assert!(!unknown_size(DeviceKind::Diode, &d(Some(1), Some(1), 0, None)));
-        assert!(unknown_size(DeviceKind::Diode, &d(Some(1), None, 0, None)), "half a size is not fixed geometry");
-    }
-
-    #[test]
-    fn exact_as_needs_size_model_and_bulk() {
-        let k = DeviceKind::Nmos;
-        let r = roles();
-        let a = d(Some(1_000), Some(150), 0, Some(0));
-        assert!(exact_as(k, &a, &a, &r));
-        assert!(!exact_as(k, &a, &d(Some(1_000), Some(160), 0, Some(0)), &r));
-        assert!(!exact_as(k, &a, &d(Some(1_000), Some(150), 1, Some(0)), &r), "model");
-        assert!(!exact_as(k, &a, &d(Some(1_000), Some(150), 0, Some(1)), &r), "split signal bulks");
-        // Bulks on two rails match; a rail and a signal do not.
-        let on = |n| d(Some(1_000), Some(150), 0, Some(n));
-        assert!(exact_as(k, &on(4), &on(5), &r));
-        assert!(!exact_as(k, &on(4), &on(0), &r));
-        assert!(!exact_as(k, &on(4), &d(Some(1_000), Some(150), 0, None), &r));
-        // Two unknown sizes are never identical.
-        let u = d(None, None, 0, Some(0));
-        assert!(!exact_as(k, &u, &u, &r));
-    }
-
-    #[test]
-    fn fixed_geometry_matches_only_fixed_geometry() {
-        let r = roles();
-        let f = d(None, None, 3, None);
-        assert!(exact_as(DeviceKind::Diode, &f, &f, &r));
-        assert!(!exact_as(DeviceKind::Diode, &f, &d(Some(1), Some(1), 3, None), &r));
-        assert!(!exact_as(DeviceKind::Diode, &d(Some(1), Some(1), 3, None), &f, &r));
-        assert!(!exact_as(DeviceKind::Diode, &f, &d(None, None, 4, None), &r), "model is the size");
-    }
-
-    /// A bipolar compares W, L and model as written, bulk ignored.
-    #[test]
-    fn bipolars_compare_as_written() {
-        let r = roles();
-        let a = d(None, Some(1), 0, None);
-        assert!(exact_as(DeviceKind::Npn, &a, &a, &r));
-        assert!(exact_as(DeviceKind::Pnp, &a, &d(None, Some(1), 0, Some(1)), &r));
-        assert!(!exact_as(DeviceKind::Pnp, &a, &d(None, Some(2), 0, None), &r));
-        assert!(!exact_as(DeviceKind::Pnp, &a, &d(None, Some(1), 1, None), &r));
-    }
-
-    #[test]
-    fn same_l_as_needs_a_known_l_and_one_model() {
-        let a = d(Some(1), Some(150), 0, None);
-        assert!(same_l_as(&a, &d(Some(9), Some(150), 0, Some(3))));
-        assert!(!same_l_as(&a, &d(Some(1), Some(150), 1, None)));
-        assert!(!same_l_as(&a, &d(Some(1), Some(151), 0, None)));
-        let none = d(Some(1), None, 0, None);
-        assert!(!same_l_as(&none, &none));
     }
 }

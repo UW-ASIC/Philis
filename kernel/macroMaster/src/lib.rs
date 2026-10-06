@@ -44,28 +44,23 @@ pub struct InOut<T>(pub T);
 /// A named, directioned terminal of a block.
 #[derive(Clone, Debug)]
 pub struct PortInfo {
-    /// Port name; also the net name a connect class containing it takes.
     pub name: String,
-    /// Signal direction, as reported to the netlist.
     pub dir: Dir,
 }
 
 impl Input<Signal> {
-    /// This port as an input named `name`.
     #[must_use]
     pub fn port(&self, name: &str) -> PortInfo {
         PortInfo { name: name.into(), dir: Dir::In }
     }
 }
 impl Output<Signal> {
-    /// This port as an output named `name`.
     #[must_use]
     pub fn port(&self, name: &str) -> PortInfo {
         PortInfo { name: name.into(), dir: Dir::Out }
     }
 }
 impl InOut<Signal> {
-    /// This port as a bidirectional terminal named `name`.
     #[must_use]
     pub fn port(&self, name: &str) -> PortInfo {
         PortInfo { name: name.into(), dir: Dir::InOut }
@@ -84,14 +79,11 @@ pub trait Io: Default {
 
 /// A generator's parameter struct; implement [`DeviceGen`] or [`Composition`].
 pub trait Block {
-    /// The block's port bundle; its [`Io::ports`] order is the net-naming
-    /// priority in [`build_composition`].
     type Io: Io;
 
     /// Cell name, used in reports.
     fn name(&self) -> String;
 
-    /// The port bundle; the default is `Self::Io::default()`.
     fn io(&self) -> Self::Io {
         Self::Io::default()
     }
@@ -99,10 +91,6 @@ pub trait Block {
 
 /// A leaf that draws raw geometry.
 pub trait DeviceGen: Block {
-    /// Draws the device at the origin through `cell`.
-    ///
-    /// # Errors
-    /// [`GenError::OffGrid`] when a shape or pin is off the process grid.
     fn layout<P: Process>(&self, cell: &mut DeviceBuilder<P>) -> Result<(), GenError>;
 
     /// The schematic devices this generator draws. `None` (opaque) makes the
@@ -116,7 +104,6 @@ pub trait DeviceGen: Block {
 /// One schematic device a [`DeviceGen`] draws.
 #[derive(Clone, Debug)]
 pub struct GenDevice {
-    /// Schematic device class.
     pub kind: DeviceKind,
     /// `(schematic terminal, generator port)`, e.g. `("D", "d1")`.
     pub terminals: Vec<(String, String)>,
@@ -126,10 +113,6 @@ pub struct GenDevice {
 
 /// Assembles Devices; cannot draw raw geometry.
 pub trait Composition: Block {
-    /// Instantiates, places and connects the children through `cell`.
-    ///
-    /// # Errors
-    /// Whatever a [`CompBuilder`] call returns; the build stops at the first.
     fn build<P: Process>(&self, cell: &mut CompBuilder<P>) -> Result<(), GenError>;
 }
 
@@ -160,26 +143,15 @@ pub enum GenError {
 /// axis; the flush/centre modes nudge by `offset` along the free axis.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AlignMode {
-    /// Left edges flush; `offset` moves up.
     Left,
-    /// Right edges flush; `offset` moves up.
     Right,
-    /// Bottom edges flush; `offset` moves right.
     Bottom,
-    /// Top edges flush; `offset` moves right.
     Top,
-    /// Vertical centres equal (rounded toward −∞ of each half height);
-    /// `offset` moves right.
     CenterHorizontal,
-    /// Horizontal centres equal; `offset` moves up.
     CenterVertical,
-    /// Left edge on the reference's right edge plus `offset`; y unchanged.
     ToTheRight,
-    /// Right edge on the reference's left edge minus `offset`; y unchanged.
     ToTheLeft,
-    /// Bottom edge on the reference's top edge plus `offset`; x unchanged.
     Above,
-    /// Top edge on the reference's bottom edge minus `offset`; x unchanged.
     Beneath,
 }
 
@@ -196,13 +168,11 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// The instance's bounding box in the composition frame, nm.
     #[must_use]
     pub fn bbox(&self) -> Rect {
         self.mac.bbox
     }
 
-    /// The instance name: the prefix its pins and devices get.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -214,16 +184,14 @@ impl Instance {
         format!("{}.{}", self.name, port)
     }
 
-    /// Moves this instance relative to `reference` by [`AlignMode`]; shapes,
-    /// pins and unit centres move with the bbox.
+    /// Move this instance relative to a placed `reference`.
     pub fn align(&mut self, mode: AlignMode, reference: &Instance, offset: i32) {
         let (dx, dy) = align_delta(self.bbox(), reference.bbox(), mode, offset);
         self.transform(|r| Rect { x: r.x + dx, y: r.y + dy, ..r });
     }
 
-    /// Applies `o` about the bbox origin: the bbox keeps its lower-left
-    /// corner, and each unit's centre and current direction turn with the
-    /// geometry.
+    /// Apply `o` about the bbox origin: the bbox keeps its lower-left corner,
+    /// and each unit's centre and current direction turn with the geometry.
     pub fn orient(&mut self, o: Orient) {
         let b = self.bbox();
         let nb = o.apply_rect(b);
@@ -252,10 +220,6 @@ impl Instance {
             let r = f(Rect { x: u.x, y: u.y, w: 0, h: 0 });
             (u.x, u.y) = (r.x, r.y);
         }
-        // Keepouts are geometry too: they follow the shapes they protect.
-        for k in &mut self.mac.keepouts {
-            k.rect = f(k.rect);
-        }
     }
 
     /// Σ of the units' current directions: what a mirror must preserve.
@@ -264,8 +228,6 @@ impl Instance {
     }
 }
 
-/// The `(dx, dy)` that moves `a` into `mode` alignment with `b` (see
-/// [`AlignMode`] for what `offset` does per mode).
 fn align_delta(a: Rect, b: Rect, mode: AlignMode, offset: i32) -> (i32, i32) {
     match mode {
         AlignMode::Left => (b.x - a.x, offset),
@@ -342,27 +304,20 @@ pub struct DeviceBuilder<'a, P: Process> {
 }
 
 impl<'a, P: Process> DeviceBuilder<'a, P> {
-    /// The process the device is drawn against.
     #[must_use]
     pub fn process(&self) -> &P {
         self.process
     }
 
-    /// Draws `r` on `layer`, nm.
-    ///
-    /// # Errors
-    /// [`GenError::OffGrid`] when a corner is off the process grid.
+    /// Draw `r` on `layer`. Off-grid ⇒ [`GenError::OffGrid`].
     pub fn draw(&mut self, layer: LayerId, r: Rect) -> Result<(), GenError> {
         check_grid(r, self.process.grid())?;
         self.builder.rect(layer, r);
         Ok(())
     }
 
-    /// Registers a Device-local port pin (`g`, `d`, …); its net is bound when
+    /// Register a Device-local port pin (`g`, `d`, …); its net is bound when
     /// the composition is built.
-    ///
-    /// # Errors
-    /// [`GenError::OffGrid`] when a corner of `at` is off the process grid.
     pub fn pin(&mut self, name: &str, layer: LayerId, at: Rect) -> Result<(), GenError> {
         check_grid(at, self.process.grid())?;
         self.builder.pin(Pin { name: name.into(), net: NetId(0), at, layer });
@@ -370,8 +325,6 @@ impl<'a, P: Process> DeviceBuilder<'a, P> {
     }
 }
 
-/// `Ok` when every corner of `r` is a multiple of `grid`; `grid <= 0`
-/// disables the check.
 fn check_grid(r: Rect, grid: i32) -> Result<(), GenError> {
     let on = grid <= 0 || [r.x, r.y, r.x + r.w, r.y + r.h].iter().all(|v| v % grid == 0);
     if on { Ok(()) } else { Err(GenError::OffGrid) }
@@ -385,17 +338,12 @@ pub struct CompBuilder<'a, P: Process> {
 }
 
 impl<P: Process> CompBuilder<'_, P> {
-    /// The process the composition is built against.
     #[must_use]
     pub fn process(&self) -> &P {
         self.process
     }
 
-    /// Draws a [`DeviceGen`] into an [`Instance`] at the origin, ready to
-    /// place. A multi-device generator's devices are named `{name}.{ordinal}`.
-    ///
-    /// # Errors
-    /// Whatever [`DeviceGen::layout`] returns.
+    /// Draw a [`DeviceGen`] into an [`Instance`] at the origin, ready to place.
     pub fn instantiate<D: DeviceGen>(&mut self, name: &str, dev: &D) -> Result<Instance, GenError> {
         let mut b = cells::Builder::new(self.process.grid());
         dev.layout(&mut DeviceBuilder { builder: &mut b, process: self.process })?;
@@ -410,12 +358,9 @@ impl<P: Process> CompBuilder<'_, P> {
         Ok(Instance { name: name.into(), mac: b.finish(), edges: Vec::new(), devices })
     }
 
-    /// Instantiates a sub-composition. Its port-net pins surface under the
-    /// port name (`x1.vout`); internal pins stay qualified (`x1.m1.d`), and
-    /// its connect-graph is imported at commit.
-    ///
-    /// # Errors
-    /// Whatever building `comp` returns (see [`build_with`]).
+    /// Instantiate a sub-composition. Its port-net pins surface under the port
+    /// name (`x1.vout`); internal pins stay qualified (`x1.m1.d`), and its
+    /// connect-graph is imported at commit.
     pub fn instantiate_comp<C: Composition>(&mut self, name: &str, comp: &C) -> Result<Instance, GenError> {
         let built = build_composition(comp, self.process)?;
         let mut mac = built.flat;
@@ -428,19 +373,14 @@ impl<P: Process> CompBuilder<'_, P> {
         Ok(Instance { name: name.into(), mac, edges: built.edges, devices: built.devices })
     }
 
-    /// Places `inst` as `reference`'s mirror partner about a vertical axis
-    /// `gap / 2` right of `reference`'s right edge, snapped up (toward +∞) to
-    /// the grid, bottoms aligned.
-    ///
-    /// # Errors
-    /// [`GenError::Orientation`] when both carry units and the mirror changes
-    /// Σ current direction (an odd-finger MOS): the pair would not match.
-    /// Otherwise whatever [`CompBuilder::place`] returns.
+    /// Place `inst` as `reference`'s mirror partner about a vertical axis
+    /// `gap / 2` (snapped up to grid) right of `reference`. When both carry
+    /// units, a mirror that changes Σ current direction (an odd-finger MOS) ⇒
+    /// [`GenError::Orientation`]: the pair would not match.
     pub fn place_mirrored(&mut self, mut inst: Instance, reference: &Instance, gap: i32) -> Result<Instance, GenError> {
         let g = self.process.grid().max(1);
         let (a, b) = (reference.bbox(), inst.bbox());
-        // Ceiling onto the grid (toward +∞, also for negative coordinates).
-        let axis = -(-(a.x + a.w + gap / 2)).div_euclid(g) * g;
+        let axis = (a.x + a.w + gap / 2 + g - 1) / g * g;
         let (dx, dy) = (a.x - b.x, a.y - b.y);
         inst.transform(|r| Rect { x: 2 * axis - (r.x + dx + r.w), y: r.y + dy, ..r });
         for u in &mut inst.mac.units {
@@ -452,25 +392,18 @@ impl<P: Process> CompBuilder<'_, P> {
         self.place(inst)
     }
 
-    /// Places `inst` as a translated copy right of `reference` (bottoms
-    /// aligned, `gap` nm between): the matching partner for a device a mirror
+    /// Place `inst` as a translated copy right of `reference` (bottoms
+    /// aligned, `gap` between): the matching partner for a device a mirror
     /// would reverse.
-    ///
-    /// # Errors
-    /// Whatever [`CompBuilder::place`] returns.
     pub fn place_copy(&mut self, mut inst: Instance, reference: &Instance, gap: i32) -> Result<Instance, GenError> {
         inst.align(AlignMode::Bottom, reference, 0);
         self.place_by(inst, AlignMode::ToTheRight, reference, gap)
     }
 
-    /// Commits `inst` where it stands and returns the placed handle. A shared
-    /// edge with a placed instance is legal.
-    ///
-    /// # Errors
-    /// [`GenError::DuplicateName`] for a name already placed,
-    /// [`GenError::OffGrid`] for a bbox off the grid, [`GenError::Overlap`]
-    /// for positive-area overlap with any placed instance. Nothing is
-    /// committed on error.
+    /// Commit `inst` where it stands. A name already placed ⇒
+    /// [`GenError::DuplicateName`], a bbox off the grid ⇒ [`GenError::OffGrid`],
+    /// overlap with any placed instance ⇒ [`GenError::Overlap`]. Returns the
+    /// placed handle.
     pub fn place(&mut self, inst: Instance) -> Result<Instance, GenError> {
         if self.placed.iter().any(|p| p.name == inst.name) {
             return Err(GenError::DuplicateName(inst.name));
@@ -487,16 +420,12 @@ impl<P: Process> CompBuilder<'_, P> {
     }
 
     /// [`Instance::align`] then [`CompBuilder::place`].
-    ///
-    /// # Errors
-    /// Whatever [`CompBuilder::place`] returns.
     pub fn place_by(&mut self, mut inst: Instance, mode: AlignMode, reference: &Instance, offset: i32) -> Result<Instance, GenError> {
         inst.align(mode, reference, offset);
         self.place(inst)
     }
 
-    /// Joins two terminals (`m1.d`, or an io port name) into one net. Names
-    /// are checked when the build finishes ([`GenError::UnknownTerminal`]).
+    /// Join two terminals (`m1.d`, or an io port name) into one net.
     pub fn connect(&mut self, a: &str, b: &str) {
         self.edges.push((a.into(), b.into()));
     }
@@ -522,10 +451,7 @@ pub struct BuiltComp {
     devices: Option<Vec<(String, GenDevice)>>,
 }
 
-/// Builds a [`Composition`] against `process` and resolves its nets.
-///
-/// # Errors
-/// See [`build_with`].
+/// Build a [`Composition`] against `process` and resolve its nets.
 pub fn build_composition<C: Composition, P: Process>(comp: &C, process: &P) -> Result<BuiltComp, GenError> {
     let ports: Vec<String> = comp.io().ports().into_iter().map(|p| p.name).collect();
     build_with(process, ports, |c| comp.build(c))
@@ -533,18 +459,6 @@ pub fn build_composition<C: Composition, P: Process>(comp: &C, process: &P) -> R
 
 /// [`build_composition`] for a build script that is data (dynamic ports and
 /// body), not a type.
-///
-/// Every terminal in a connect class takes one net, named after the first
-/// io port (in `ports` order) in the class, else `net{k}`; each unwired pin or
-/// device port gets a singleton net.
-///
-/// # Errors
-/// Whatever `f` returns, then [`GenError::UnknownTerminal`] for a connect
-/// endpoint that is neither an io port nor a pin, device terminal or imported
-/// edge endpoint of a placed instance.
-///
-/// # Panics
-/// When the build needs more than `u16::MAX + 1` nets.
 pub fn build_with<P: Process>(
     process: &P,
     ports: Vec<String>,
@@ -589,16 +503,10 @@ pub fn build_with<P: Process>(
     // per unwired qualified name.
     let (mut nets, mut binding) = resolve_nets(&edges, &ports);
     let mut net_of = |name: &str| {
-        // Look up before inserting: most names are already bound, and an
-        // `entry` would allocate the key every call.
-        let id = match binding.get(name) {
-            Some(&id) => id,
-            None => {
-                nets.push(format!("net{}", nets.len()));
-                binding.insert(name.to_string(), nets.len() - 1);
-                nets.len() - 1
-            }
-        };
+        let id = *binding.entry(name.to_string()).or_insert_with(|| {
+            nets.push(format!("net{}", nets.len()));
+            nets.len() - 1
+        });
         NetId(u16::try_from(id).expect("net count fits u16"))
     };
     let mut flat = cells::Builder::new(process.grid());
@@ -657,22 +565,15 @@ pub mod variants {
         for &u in &mac.units {
             cell.builder.unit(u);
         }
-        for k in &mac.keepouts {
-            cell.builder.keepout(k.rect, k.why);
-        }
         Ok(())
     }
 
     /// MOS terminals: gate in, drain/source/body bidirectional.
     #[derive(Default)]
     pub struct MosIo {
-        /// Gate.
         pub g: Input<Signal>,
-        /// Drain.
         pub d: InOut<Signal>,
-        /// Source.
         pub s: InOut<Signal>,
-        /// Body (bulk).
         pub b: InOut<Signal>,
     }
     impl Io for MosIo {
@@ -683,13 +584,11 @@ pub mod variants {
 
     /// A multi-finger MOSFET (`cells::mosfet`).
     pub struct Mos {
-        /// `Nmos` or `Pmos`.
         pub kind: DeviceKind,
         /// Finger width, nm.
         pub w: i32,
         /// Gate length, nm.
         pub l: i32,
-        /// Finger count; `0` draws one.
         pub nf: u16,
         /// Finger pattern; `None` = smallest.
         pub pattern: Option<cells::Pattern>,
@@ -700,7 +599,6 @@ pub mod variants {
     }
 
     impl Mos {
-        /// The smallest pattern, no dummies.
         #[must_use]
         pub fn new(kind: DeviceKind, w: i32, l: i32, nf: u16) -> Self {
             Self { kind, w, l, nf, pattern: None, dummies_per_edge: None }
@@ -742,7 +640,6 @@ pub mod variants {
     }
 
     impl Mos {
-        /// Whether end dummies are drawn (`dummies_per_edge` is `Some(n > 0)`).
         fn dummies(&self) -> bool {
             self.dummies_per_edge.is_some_and(|n| n > 0)
         }
@@ -766,19 +663,12 @@ pub mod variants {
     /// Matched pair terminals: per-leg gate/drain/source, shared body.
     #[derive(Default)]
     pub struct MatchedPairIo {
-        /// Leg 1 gate.
         pub g1: Input<Signal>,
-        /// Leg 1 drain.
         pub d1: InOut<Signal>,
-        /// Leg 1 source.
         pub s1: InOut<Signal>,
-        /// Leg 2 gate.
         pub g2: Input<Signal>,
-        /// Leg 2 drain.
         pub d2: InOut<Signal>,
-        /// Leg 2 source.
         pub s2: InOut<Signal>,
-        /// Body (bulk).
         pub b: InOut<Signal>,
     }
     impl Io for MatchedPairIo {
@@ -798,13 +688,12 @@ pub mod variants {
     /// Two matched MOSFETs drawn as one interleaved macro (`d0:G` → `g1`,
     /// `d1:G` → `g2`; both bulk pins → `b`).
     pub struct MatchedPair {
-        /// `Nmos` or `Pmos`.
         pub kind: DeviceKind,
         /// Unit finger width, nm.
         pub w: i32,
         /// Gate length, nm.
         pub l: i32,
-        /// Fingers per leg; `0` draws one.
+        /// Fingers per leg.
         pub nf_each: u16,
         /// Interleaving; `None` = smallest.
         pub pattern: Option<cells::Pattern>,
@@ -840,9 +729,7 @@ pub mod variants {
     /// Resistor terminals.
     #[derive(Default)]
     pub struct ResIo {
-        /// Resistor end `P`.
         pub a: InOut<Signal>,
-        /// Resistor end `N`.
         pub b: InOut<Signal>,
     }
     impl Io for ResIo {
@@ -900,7 +787,7 @@ pub struct Macros {
 }
 
 impl Macros {
-    /// Registers `m` for `name`, replacing an earlier registration.
+    /// Register `m` for `name`, shadowing an earlier registration.
     pub fn register(&mut self, name: &str, m: Macro) {
         match self.entries.iter_mut().find(|(n, _)| n == name) {
             Some(slot) => slot.1 = m,
@@ -908,7 +795,6 @@ impl Macros {
         }
     }
 
-    /// The macro registered for `name`, if any. O(registrations).
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Macro> {
         self.entries.iter().find(|(n, _)| n == name).map(|(_, m)| m)

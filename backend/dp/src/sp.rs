@@ -11,58 +11,37 @@ use gp::spacing::{Face, Gap, Profile, SpacingTable};
 use pnr_core::ids::AxisId;
 use pnr_core::{DeviceId, Layout};
 
-/// One kid slot of a [`Node`]: a placed cell or a nested node, both by index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kid {
-    /// Cell index into the per-cell arrays ([`Geo::w`], [`Out::x0`], ...).
     Cell(u16),
-    /// Node index into [`Tree::nodes`]; always smaller than the parent's own index.
     Node(u16),
 }
 
-/// A symmetry node's axis and involution over its kid slots.
-///
-/// Invariant: `mate.len()` equals the node's kid count, `mate[mate[k]] == k`;
-/// `mate[k] == k` marks a self-symmetric kid (centred on the axis).
+/// A symmetry node's axis and involution: `mate[k]` = partner kid slot,
+/// `mate[k] == k` = self-symmetric (centred on the axis).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sym {
-    /// The axis this node's mirror pairs share (index into [`Layout::axis`]).
     pub axis: AxisId,
-    /// Partner kid slot per kid slot.
     pub mate: Vec<u16>,
 }
 
-/// One node of the hierarchy: its kids and their sequence pair.
-///
-/// Invariant: `alpha` and `beta` are permutations of `0..kids.len()`; on a
-/// symmetry node the pair is symmetric-feasible ([`Tree::is_sf`]).
+/// `alpha`, `beta`: permutations of kid slots (the node's sequence pair).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Node {
-    /// The kids, by slot; slot order is fixed by [`Tree::build`].
     pub kids: Vec<Kid>,
-    /// Positive sequence (Γ+), kid slots.
     pub alpha: Vec<u16>,
-    /// Negative sequence (Γ−), kid slots.
     pub beta: Vec<u16>,
-    /// Present on symmetry nodes only.
     pub sym: Option<Sym>,
 }
 
-/// The hierarchical sequence-pair code of one placement.
-///
-/// Invariant: every node kid's index is below its parent's, `root` is the
-/// last node, and every cell is the kid of exactly one node.
+/// `home[cell] = (node, kid slot)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tree {
-    /// Post-order: symmetry nodes, then proximity nodes, then the root.
     pub nodes: Vec<Node>,
-    /// Index of the root node, `nodes.len() - 1`.
     pub root: u16,
-    /// Per cell: `(node, kid slot)` holding it.
     pub home: Vec<(u16, u16)>,
 }
 
-/// A requirement [`Tree::build`] could not honour; the tree is still valid.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeError {
     /// `cell` is mirrored on axis `a` and again on `b`; `b`'s group was dropped.
@@ -70,8 +49,6 @@ pub enum TreeError {
 }
 
 /// Inverse permutation: `inv[seq[p]] = p`.
-/// `seq` must be a permutation of `0..seq.len()` (else panics on an
-/// out-of-range slot or leaves holes).
 fn inverse(seq: &[u16], inv: &mut Vec<u32>) {
     inv.clear();
     inv.resize(seq.len(), 0);
@@ -88,9 +65,6 @@ impl Tree {
     /// named on a second axis drops that axis's whole group and is reported. A
     /// cell paired twice on one axis keeps its first partner. Every node starts
     /// with α = β = slot order, symmetry nodes then [`Tree::make_sf`].
-    ///
-    /// Pairs naming a cell `≥ n_cells` and block members `≥ n_cells` are
-    /// ignored. `n_cells` must fit the `u16` cell ids (≤ 65 536).
     #[must_use]
     pub fn build(n_cells: usize, pairs: &[(u32, u32, u16)], blocks: &[Vec<DeviceId>]) -> (Tree, Vec<TreeError>) {
         let n = n_cells;
@@ -199,8 +173,8 @@ impl Tree {
         (t, errs)
     }
 
-    /// Whether `o` has the same nodes, kids, axes and mates (codes may
-    /// differ): a warm start's tree still fits the inputs (PLC-10).
+    /// Same nodes, kids, axes and mates (codes may differ): a warm start's
+    /// tree still fits the inputs (PLC-10).
     #[must_use]
     pub fn same_structure(&self, o: &Tree) -> bool {
         self.root == o.root
@@ -208,10 +182,8 @@ impl Tree {
             && self.nodes.iter().zip(&o.nodes).all(|(a, b)| a.kids == b.kids && a.sym == b.sym)
     }
 
-    /// Whether `node`'s code is symmetric-feasible: Balasa eq 1.1 for distinct
-    /// kids `x`, `y` of a symmetry node,
-    /// `(pa[x] < pa[y]) == (pb[mate[y]] < pb[mate[x]])`. `true` off symmetry
-    /// nodes. O(k²) in the kid count; panics if `node` is out of range.
+    /// Balasa eq 1.1 for distinct kids `x`, `y` of a symmetry node:
+    /// `(pa[x] < pa[y]) == (pb[mate[y]] < pb[mate[x]])`. `true` off symmetry nodes.
     #[must_use]
     pub fn is_sf(&self, node: u16) -> bool {
         let nd = &self.nodes[usize::from(node)];
@@ -224,21 +196,18 @@ impl Tree {
         (0..k).all(|x| (0..k).all(|y| x == y || (pa[x] < pa[y]) == (pb[m(y)] < pb[m(x)])))
     }
 
-    /// Rewrites a symmetry node's β as its α reversed through `mate`
+    /// Rewrite a symmetry node's β as its α reversed through `mate`
     /// (Balasa L2389–2390); then [`Tree::is_sf`] holds. No-op elsewhere.
-    /// Reuses β's buffer: no allocation. Panics if `node` is out of range.
     pub fn make_sf(&mut self, node: u16) {
         let nd = &mut self.nodes[usize::from(node)];
         if let Some(s) = &nd.sym {
-            nd.beta.clear();
-            nd.beta.extend(nd.alpha.iter().rev().map(|&g| s.mate[usize::from(g)]));
+            nd.beta = nd.alpha.iter().rev().map(|&g| s.mate[usize::from(g)]).collect();
         }
     }
 
-    /// Embeds a coordinate placement: per node, α by `(x − y, slot)` and β by
+    /// Embed a coordinate placement: per node, α by `(x − y, slot)` and β by
     /// `(x + y, slot)` of each kid's key point (cell centre, mean centre of a
-    /// node's cells), then [`Tree::make_sf`]. Panics when `l` has fewer
-    /// cells than the tree.
+    /// node's cells), then [`Tree::make_sf`].
     pub fn seed_from(&mut self, l: &Layout) {
         let mut key: Vec<(i64, i64, i64)> = vec![(0, 0, 0); self.nodes.len()];
         for ni in 0..self.nodes.len() {
@@ -262,11 +231,10 @@ impl Tree {
         }
     }
 
-    /// Seeds a deterministic start: symmetry nodes take Balasa's initial code
+    /// Deterministic start: symmetry nodes take Balasa's initial code
     /// `α = a_1…a_p c_1…c_s b_p…b_1` (L2375–2405; `a` the lower slot of each
     /// pair), every other node one row α = β by descending kid area (`w·h`
-    /// summed over a node's cells), ties by slot. `w`, `h` are per cell (nm)
-    /// and must cover every cell.
+    /// summed over a node's cells), ties by slot.
     pub fn seed_constructive(&mut self, w: &[i32], h: &[i32]) {
         let mut area: Vec<i64> = vec![0; self.nodes.len()];
         for ni in 0..self.nodes.len() {
@@ -300,19 +268,12 @@ impl Tree {
 /// (empty or short = zero; PLC-15). `axis_grid = Some((p0, P))` puts every axis
 /// on a routing track centreline (PLC-28).
 pub struct Geo<'a> {
-    /// Per cell width, nm, at its current variant and orient.
     pub w: &'a [i32],
-    /// Per cell height, nm.
     pub h: &'a [i32],
-    /// Per cell oriented spacing profile; short = `None` for the rest.
     pub prof: &'a [Option<&'a Profile>],
-    /// Per cell routing halo by [`Face`] discriminant, nm; short = zero.
     pub halo: &'a [[i32; 4]],
-    /// Pairwise gap rules ([`SpacingTable::gap`]).
     pub table: &'a SpacingTable,
-    /// Placement lattice, nm; `≤ 0` reads as 1.
     pub lattice: i32,
-    /// `(p0, P)`, nm: every axis on `p0/2 + k·P` (PLC-28); `None` = free.
     pub axis_grid: Option<(i32, i32)>,
 }
 
@@ -320,25 +281,17 @@ pub struct Geo<'a> {
 /// order, and how many `fix_monotone` passes the decode needed.
 #[derive(Default, Debug)]
 pub struct Out {
-    /// Per cell lower-left x, nm, relative to the root's origin `(0, 0)`.
     pub x0: Vec<i32>,
-    /// Per cell lower-left y, nm.
     pub y0: Vec<i32>,
-    /// `(axis id, absolute axis x in nm)` per symmetry node, node order.
     pub axis: Vec<(AxisId, i32)>,
-    /// Axis-raising passes summed over the nodes this decode re-decoded.
     pub fixes: u32,
 }
 
 /// Why a code has no realisation; payload: node index.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Fail {
-    /// A mirror pair's centre heights could not be equalised.
     SymY(u16),
-    /// No admissible axis: self kids disagree on their width residue, the
-    /// axis grid cannot centre them, or the axis did not settle.
     SymX(u16),
-    /// Merge bands (`0 < gap < min` with abutment allowed) did not close.
     Band(u16),
 }
 
@@ -355,13 +308,11 @@ pub struct Scratch {
     /// whether that kid's profile changed since (its row and column are stale).
     gcn: Vec<Vec<[Option<Gap>; 2]>>,
     stale: Vec<Vec<bool>>,
-    /// Current node: inverse α (`pa[slot]` = position in α).
     pa: Vec<u32>,
+    pb: Vec<u32>,
     /// Per node, per kid slot: position relative to the node's origin.
     rel_x: Vec<Vec<i32>>,
     rel_y: Vec<Vec<i32>>,
-    /// Current node, per kid slot: lower bounds on x and y raised by the
-    /// mirror (y) and merge-band (x, y) repairs.
     lb: Vec<i32>,
     lby: Vec<i32>,
     /// Per node: merged profile (`None` when a member has none), halo, `(W, H)`, `2·axis` relative, origin.
@@ -376,17 +327,11 @@ pub struct Scratch {
     kp: Vec<Option<Profile>>,
     khalo: Vec<[i32; 4]>,
     knode: Vec<bool>,
-    /// Current node: per kid slot, starts on a multiple of the track pitch
-    /// (PLC-28); its mirror pairs `(lower slot, upper slot)`.
-    on_grid: Vec<bool>,
-    pairs: Vec<(usize, usize)>,
 }
 
 impl Scratch {
-    /// Marks `node` and its ancestors for re-decode: its code, or a kid's
-    /// extents or profile, changed (or changed back). No-op until `self`
-    /// holds a decode of a tree with `t`'s node count (all nodes are then
-    /// decoded anyway). Cost O(depth).
+    /// Mark `node` and its ancestors for re-decode: its code, or a kid's
+    /// extents or profile, changed (or changed back).
     pub fn touch(&mut self, t: &Tree, node: u16) {
         if self.parent.len() != t.nodes.len() {
             return;
@@ -401,8 +346,7 @@ impl Scratch {
         }
     }
 
-    /// Records that cell `c`'s extents or profile changed: re-decode its node
-    /// and drop its cached gaps. Panics if `c` is not a cell of `t`.
+    /// Cell `c`'s extents or profile changed: re-decode its node, recompute its gaps.
     pub fn touch_cell(&mut self, t: &Tree, c: usize) {
         if self.parent.len() != t.nodes.len() {
             return;
@@ -414,15 +358,13 @@ impl Scratch {
         self.touch(t, node);
     }
 
-    /// Drops every cached node result. Required before decoding a different
-    /// tree with the same node count, or after a code change not reported
-    /// through [`Scratch::touch`].
+    /// Drop every cached node result (a new tree or a wholesale code change).
     pub fn invalidate(&mut self) {
         self.parent.clear();
     }
 }
 
-/// `table.gap` when both profiles exist, else `fallback` without abutment (as `PlaceRules::gaps`).
+/// `table.gap` when both profiles exist, else `fallback` (as `PlaceRules::gaps`).
 fn gap(g: &Geo, pi: Option<&Profile>, f: Face, pj: Option<&Profile>) -> Gap {
     match (pi, pj) {
         (Some(a), Some(b)) => g.table.gap(a, f, b),
@@ -440,7 +382,6 @@ fn need(gp: Gap, halo: i32) -> i32 {
     if gp.abut && halo == 0 { 0 } else { gp.min + halo }
 }
 
-/// The least multiple of `q` (`≤ 0` reads as 1) at or above `v`.
 fn round_up(v: i32, q: i32) -> i32 {
     let q = q.max(1);
     v.div_euclid(q) * q + if v.rem_euclid(q) == 0 { 0 } else { q }
@@ -467,8 +408,7 @@ impl Kids<'_> {
             gp.abut &= !self.node[i] && !self.node[j];
             gp
         });
-        let (hi, hj) = if ax == 0 { (Face::R, Face::L) } else { (Face::T, Face::B) };
-        let halo = self.halo[i][hi as usize] + self.halo[j][hj as usize];
+        let halo = if ax == 0 { self.halo[i][2] + self.halo[j][0] } else { self.halo[i][3] + self.halo[j][1] };
         (gp, halo)
     }
 
@@ -544,6 +484,7 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
         s.knode.push(is_node);
     }
     inverse(&nd.alpha, &mut s.pa);
+    inverse(&nd.beta, &mut s.pb);
     if s.gcn[ni].len() != k * k {
         s.gcn[ni].clear();
         s.gcn[ni].resize(k * k, [None; 2]);
@@ -568,21 +509,18 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
     y.clear();
     y.resize(k, 0);
 
-    let Scratch { pa, lb, lby, kw, kh, kp, khalo, knode, gcn, has_sym, on_grid, pairs, .. } = s;
+    let Scratch { pa, pb, lb, lby, kw, kh, kp, khalo, knode, gcn, has_sym, .. } = s;
     // PLC-28 step 3: a kid that is or holds a symmetry node starts on a multiple of `P`.
-    on_grid.clear();
-    on_grid.extend(nd.kids.iter().map(|k| matches!(*k, Kid::Node(m) if has_sym[usize::from(m)])));
-    let on_grid = &*on_grid;
+    let on_grid: Vec<bool> = nd.kids.iter().map(|k| matches!(*k, Kid::Node(m) if has_sym[usize::from(m)])).collect();
     let period = g.axis_grid.map(|(_, p)| p);
     let gc = &mut gcn[ni][..];
     let (pa, beta) = (&*pa, &nd.beta);
+    let _ = pb;
     let (kw, kh, kp, khalo, knode): (&[i32], &[i32], &[Option<Profile>], &[[i32; 4]], &[bool]) = (kw, kh, kp, khalo, knode);
     let mate = nd.sym.as_ref().map(|s| &s.mate);
-    pairs.clear();
-    if let Some(m) = mate {
-        pairs.extend((0..k).filter(|&a| usize::from(m[a]) > a).map(|a| (a, usize::from(m[a]))));
-    }
-    let pairs = &*pairs;
+    let pairs: Vec<(usize, usize)> = mate.map_or(Vec::new(), |m| {
+        (0..k).filter(|&a| usize::from(m[a]) > a).map(|a| (a, usize::from(m[a]))).collect()
+    });
     // A self kid sits at `(ax2 - w)/2`, on the lattice only when `ax2 ≡ w (mod 2·lattice)`:
     // every self kid's width must agree on that residue.
     let l2 = 2 * g.lattice.max(1);
@@ -613,7 +551,7 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
                 y[j] = v;
             }
             let mut raised = false;
-            for &(a, b) in pairs {
+            for &(a, b) in &pairs {
                 let (ca, cb) = (2 * y[a] + kh[a], 2 * y[b] + kh[b]);
                 let (lo, want) = match ca.cmp(&cb) {
                     std::cmp::Ordering::Less => (a, cb),
@@ -743,20 +681,13 @@ fn axis_snap(v: i32, lattice: i32, self_w: Option<i32>, grid: Option<(i32, i32)>
         (Some((p0, _)), Some(r)) if (p0 - r).rem_euclid(l2) != 0 => None,
         (Some((p0, p)), _) => Some(v + (p0 - v).rem_euclid(2 * p)),
         (None, Some(r)) => Some(v + (r - v).rem_euclid(l2)),
-        // `Out::axis` stores the axis in whole nm, so `2·axis` must also be
-        // even: on an odd lattice step to every other multiple.
-        (None, None) => Some(round_up(v, lattice.max(1) * (1 + (lattice.max(1) & 1)))),
+        (None, None) => Some(round_up(v, lattice)),
     }
 }
 
-/// Decodes `t` (post-order; only nodes marked by [`Scratch::touch`] once
-/// `s` holds a decode of `t`), then assembles absolute corners (pre-order)
-/// into `out`. `Err` names the first node with no realisation; `out` is then
-/// stale and the failing node stays marked. `g` must cover every cell of `t`.
-/// Allocates only when a buffer grows.
-///
-/// # Errors
-/// [`Fail`] with the first node (post-order) that has no realisation.
+/// Decode `t` (post-order; only nodes marked by [`Scratch::touch`] once
+/// `s` holds a decode of `t`), then assemble absolute corners (pre-order) into
+/// `out`. `Err` names the first node with no realisation; `out` is then stale.
 pub fn decode(t: &Tree, g: &Geo, s: &mut Scratch, out: &mut Out) -> Result<(), Fail> {
     let nn = t.nodes.len();
     s.rel_x.resize_with(nn, Vec::new);
@@ -827,11 +758,11 @@ pub fn decode(t: &Tree, g: &Geo, s: &mut Scratch, out: &mut Out) -> Result<(), F
     Ok(())
 }
 
-/// Checks a decode from scratch on absolute coordinates: in every node, every
+/// Check a decode from scratch on absolute coordinates: in every node, every
 /// two kids (node kids by their cells' bbox and merged profile) are apart on
 /// some axis by a gap they accept; every mirror pair has `C_l + C_r = 2·ax2`
 /// and equal centre y, every self kid `C_c = ax2`; every corner and `2·axis`
-/// on the lattice. O(Σ k²); allocates; for tests and audits, not the hot loop.
+/// on the lattice.
 #[must_use]
 pub fn verify(t: &Tree, g: &Geo, out: &Out) -> bool {
     let lat = g.lattice.max(1);
@@ -898,9 +829,8 @@ pub fn verify(t: &Tree, g: &Geo, out: &Out) -> bool {
     true
 }
 
-/// Writes a decode into `l` (assembly step 8): `x = x0 + w/2`, `hw = w/2`
-/// (same for y), and each symmetry node's axis into `l.axis` (grown when
-/// short). Panics when `l`, `w` or `h` are shorter than `out.x0`.
+/// Assembly step 8: `x = x0 + w/2`, `hw = w/2` (same for y), and each
+/// symmetry node's axis into `l.axis` (grown when short).
 pub fn to_layout(out: &Out, w: &[i32], h: &[i32], l: &mut Layout) {
     for c in 0..out.x0.len() {
         (l.hw[c], l.hh[c]) = (w[c] / 2, h[c] / 2);
@@ -1017,472 +947,5 @@ mod tests {
         let (t, errs) = Tree::build(4, &[(0, 1, 0), (0, 2, 1), (3, 2, 1)], &[]);
         assert_eq!(errs, vec![TreeError::CellInTwoAxes { cell: 0, a: AxisId(0), b: AxisId(1) }]);
         assert_eq!(t.nodes.iter().filter(|n| n.sym.is_some()).count(), 1);
-    }
-}
-
-/// Step-2 coverage of every function in this file: hand-worked expected
-/// values from the doc comments, not from re-running the code.
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-
-    fn geo<'a>(w: &'a [i32], h: &'a [i32], prof: &'a [Option<&'a Profile>], t: &'a SpacingTable, lattice: i32) -> Geo<'a> {
-        Geo { w, h, prof, halo: &[], table: t, lattice, axis_grid: None }
-    }
-
-    /// Decodes `t` from a fresh scratch and checks it with [`verify`].
-    fn fresh(t: &Tree, g: &Geo) -> Result<Out, Fail> {
-        let mut out = Out::default();
-        decode(t, g, &mut Scratch::default(), &mut out)?;
-        assert!(verify(t, g, &out), "decoded but verify rejects {out:?}");
-        Ok(out)
-    }
-
-    /// Every node kid's index is below its parent's, the root is last, and
-    /// every cell is homed exactly where `home` says.
-    fn check_tree(t: &Tree, n: usize) {
-        assert_eq!(usize::from(t.root), t.nodes.len() - 1);
-        assert_eq!(t.home.len(), n);
-        let mut seen = vec![0; n];
-        for (ni, nd) in t.nodes.iter().enumerate() {
-            assert_eq!(nd.alpha.len(), nd.kids.len());
-            assert_eq!(nd.beta.len(), nd.kids.len());
-            for (s, k) in nd.kids.iter().enumerate() {
-                match *k {
-                    Kid::Node(m) => assert!(usize::from(m) < ni),
-                    Kid::Cell(c) => {
-                        seen[usize::from(c)] += 1;
-                        assert_eq!(t.home[usize::from(c)], (ni as u16, s as u16));
-                    }
-                }
-            }
-            if let Some(s) = &nd.sym {
-                for (k, &m) in s.mate.iter().enumerate() {
-                    assert_eq!(usize::from(s.mate[usize::from(m)]), k, "mate is not an involution");
-                }
-            }
-        }
-        assert!(seen.iter().all(|&c| c == 1), "{seen:?}");
-    }
-
-    #[test]
-    fn inverse_inverts_a_permutation() {
-        let mut inv = vec![9; 7];
-        inverse(&[2, 0, 3, 1], &mut inv);
-        assert_eq!(inv, [1, 3, 0, 2]);
-        inverse(&[], &mut inv);
-        assert!(inv.is_empty());
-    }
-
-    #[test]
-    fn round_up_is_the_least_multiple_at_or_above() {
-        assert_eq!(round_up(0, 10), 0);
-        assert_eq!(round_up(1, 10), 10);
-        assert_eq!(round_up(10, 10), 10);
-        assert_eq!(round_up(11, 10), 20);
-        assert_eq!(round_up(-1, 10), 0);
-        assert_eq!(round_up(-15, 10), -10);
-        assert_eq!(round_up(-20, 10), -20);
-        // A non-positive quantum reads as 1.
-        assert_eq!(round_up(7, 0), 7);
-        assert_eq!(round_up(7, -3), 7);
-    }
-
-    #[test]
-    fn need_and_sep_ok_agree_on_abutment_and_bands() {
-        let abut = Gap { abut: true, min: 100 };
-        let hard = Gap { abut: false, min: 100 };
-        assert_eq!(need(abut, 0), 0);
-        assert_eq!(need(abut, 30), 130);
-        assert_eq!(need(hard, 0), 100);
-        assert_eq!(need(hard, 30), 130);
-        assert!(sep_ok(0, abut, 0));
-        assert!(!sep_ok(50, abut, 0), "a merge band is not acceptable");
-        assert!(sep_ok(100, abut, 0));
-        assert!(!sep_ok(0, abut, 1), "a halo forbids abutment");
-        assert!(!sep_ok(0, hard, 0));
-        assert!(!sep_ok(99, hard, 0));
-        assert!(sep_ok(100, hard, 0));
-        assert!(!sep_ok(129, hard, 30));
-        assert!(sep_ok(130, hard, 30));
-    }
-
-    #[test]
-    fn gap_falls_back_without_abutment_when_a_profile_is_missing() {
-        let table = SpacingTable::uniform(270, 10);
-        let w = [0];
-        let g = geo(&w, &w, &[], &table, 10);
-        let p = Profile::default();
-        for (a, b) in [(None, None), (Some(&p), None), (None, Some(&p))] {
-            assert_eq!(gap(&g, a, Face::R, b), Gap { abut: false, min: 270 });
-        }
-    }
-
-    #[test]
-    fn axis_snap_cases() {
-        // Pairs only: a multiple of the lattice at or above v.
-        assert_eq!(axis_snap(0, 10, None, None), Some(0));
-        assert_eq!(axis_snap(15, 10, None, None), Some(20));
-        assert_eq!(axis_snap(20, 10, None, None), Some(20));
-        // Self kids of width residue r: 2·axis ≡ r (mod 2·lattice).
-        assert_eq!(axis_snap(25, 10, Some(10), None), Some(30));
-        assert_eq!(axis_snap(30, 10, Some(10), None), Some(30));
-        assert_eq!(axis_snap(31, 10, Some(0), None), Some(40));
-        // Track grid (p0, P): 2·axis ≡ p0 (mod 2P).
-        assert_eq!(axis_snap(100, 10, None, Some((420, 420))), Some(420));
-        assert_eq!(axis_snap(421, 10, None, Some((420, 420))), Some(1260));
-        assert_eq!(axis_snap(421, 10, Some(0), Some((420, 420))), Some(1260));
-        // An odd-step self kid cannot sit on a track centreline.
-        assert_eq!(axis_snap(0, 10, Some(10), Some((420, 420))), None);
-    }
-
-    /// `Out::axis` holds the axis in whole nm, so `2·axis` must be even: on an
-    /// odd lattice a pair-only node must still land on a representable axis.
-    #[test]
-    fn odd_lattice_pair_axis_is_exact() {
-        // Two 5 nm cells, gap 5: the first X pass puts B at 10, so the pair
-        // bound 2·axis = 15 (axis 7.5 nm); the next lattice-and-even value is 20.
-        let table = SpacingTable::uniform(5, 5);
-        let (w, h) = ([5, 5], [5, 5]);
-        let prof = [None; 2];
-        let (t, errs) = Tree::build(2, &[(0, 1, 0)], &[]);
-        assert!(errs.is_empty());
-        let g = geo(&w, &h, &prof, &table, 5);
-        let out = fresh(&t, &g).unwrap();
-        assert_eq!(out.axis[0].1, 10);
-        assert_eq!((out.x0[0], out.x0[1]), (0, 15));
-    }
-
-    #[test]
-    fn build_empty_is_one_empty_root_and_decodes() {
-        let (t, errs) = Tree::build(0, &[], &[]);
-        assert!(errs.is_empty());
-        assert_eq!(t.nodes.len(), 1);
-        assert!(t.nodes[0].kids.is_empty());
-        check_tree(&t, 0);
-        let table = SpacingTable::uniform(0, 10);
-        let out = fresh(&t, &geo(&[], &[], &[], &table, 10)).unwrap();
-        assert!(out.x0.is_empty() && out.axis.is_empty());
-        assert_eq!(out.fixes, 0);
-    }
-
-    #[test]
-    fn build_single_cell_sits_at_the_origin() {
-        let (t, _) = Tree::build(1, &[], &[]);
-        check_tree(&t, 1);
-        assert_eq!(t.nodes[0].kids, [Kid::Cell(0)]);
-        let table = SpacingTable::uniform(200, 10);
-        let out = fresh(&t, &geo(&[100], &[50], &[None], &table, 10)).unwrap();
-        assert_eq!((out.x0[0], out.y0[0]), (0, 0));
-    }
-
-    #[test]
-    fn build_ignores_out_of_range_pairs_and_block_members() {
-        let (t, errs) = Tree::build(3, &[(0, 3, 0), (7, 7, 1)], &[vec![DeviceId(1), DeviceId(9)], Vec::new()]);
-        assert!(errs.is_empty());
-        assert!(t.nodes.iter().all(|n| n.sym.is_none()));
-        // The block keeps one in-range cell: fewer than two kids, no node.
-        assert_eq!(t.nodes.len(), 1);
-        check_tree(&t, 3);
-    }
-
-    #[test]
-    fn build_pairs_selfs_and_first_partner_wins() {
-        let (t, errs) = Tree::build(4, &[(0, 1, 2), (3, 3, 2), (0, 2, 2)], &[]);
-        assert!(errs.is_empty());
-        check_tree(&t, 4);
-        let s = t.nodes[0].sym.as_ref().unwrap();
-        assert_eq!(s.axis, AxisId(2));
-        let slot = |c: u16| usize::from(t.home[usize::from(c)].1);
-        assert_eq!(usize::from(s.mate[slot(0)]), slot(1));
-        assert_eq!(usize::from(s.mate[slot(3)]), slot(3), "a self pair is centred");
-        assert!(t.is_sf(0));
-    }
-
-    #[test]
-    fn build_groups_axes_in_first_appearance_order() {
-        let (t, errs) = Tree::build(4, &[(2, 3, 5), (0, 1, 1)], &[]);
-        assert!(errs.is_empty());
-        let axes: Vec<AxisId> = t.nodes.iter().filter_map(|n| n.sym.as_ref().map(|s| s.axis)).collect();
-        assert_eq!(axes, [AxisId(5), AxisId(1)]);
-        check_tree(&t, 4);
-    }
-
-    #[test]
-    fn conflicting_axis_is_reported_once_per_cell() {
-        let (t, errs) = Tree::build(3, &[(0, 1, 0), (0, 2, 1), (0, 1, 1)], &[]);
-        assert_eq!(errs, [TreeError::CellInTwoAxes { cell: 0, a: AxisId(0), b: AxisId(1) }, TreeError::CellInTwoAxes { cell: 1, a: AxisId(0), b: AxisId(1) }]);
-        check_tree(&t, 3);
-    }
-
-    #[test]
-    fn proximity_block_takes_whole_symmetry_nodes_and_loose_cells() {
-        // Block {0, 1, 2, 3}: symmetry node {0, 1} plus cells 2, 3; cell 4
-        // and the partial symmetry node {5, 6} stay at the root. The last
-        // block is the glue and never becomes a node.
-        let blocks = vec![vec![DeviceId(0), DeviceId(1), DeviceId(2), DeviceId(3), DeviceId(5)], vec![DeviceId(4)]];
-        let (t, errs) = Tree::build(7, &[(0, 1, 0), (5, 6, 1)], &blocks);
-        assert!(errs.is_empty());
-        check_tree(&t, 7);
-        assert_eq!(t.nodes.len(), 4);
-        assert_eq!(t.nodes[2].kids, [Kid::Node(0), Kid::Cell(2), Kid::Cell(3)]);
-        assert!(t.nodes[2].sym.is_none());
-        assert_eq!(t.nodes[3].kids, [Kid::Node(2), Kid::Node(1), Kid::Cell(4)]);
-        // A second block over the same cells finds them homed: no node.
-        let (t2, _) = Tree::build(7, &[(0, 1, 0), (5, 6, 1)], &[blocks[0].clone(), blocks[0].clone(), Vec::new()]);
-        assert_eq!(t2.nodes.len(), 4);
-    }
-
-    #[test]
-    fn same_structure_ignores_codes_only() {
-        let (a, _) = Tree::build(4, &[(0, 1, 0)], &[]);
-        let mut b = a.clone();
-        b.nodes[1].alpha.reverse();
-        assert!(a.same_structure(&b));
-        let (c, _) = Tree::build(4, &[(0, 1, 1)], &[]);
-        assert!(!a.same_structure(&c), "axis differs");
-        let (d, _) = Tree::build(4, &[(0, 2, 0)], &[]);
-        assert!(!a.same_structure(&d), "kids differ");
-        let (e, _) = Tree::build(5, &[(0, 1, 0)], &[]);
-        assert!(!a.same_structure(&e));
-    }
-
-    #[test]
-    fn is_sf_rejects_a_crossed_pair_and_make_sf_repairs_it() {
-        let (mut t, _) = Tree::build(2, &[(0, 1, 0)], &[]);
-        t.nodes[0].alpha = vec![0, 1];
-        t.nodes[0].beta = vec![1, 0];
-        assert!(!t.is_sf(0), "pair stacked vertically");
-        t.make_sf(0);
-        assert_eq!(t.nodes[0].beta, [0, 1]);
-        assert!(t.is_sf(0));
-        // Off symmetry nodes: always S-F, make_sf a no-op.
-        let r = t.root;
-        t.nodes[usize::from(r)].beta.reverse();
-        let before = t.nodes[usize::from(r)].clone();
-        assert!(t.is_sf(r));
-        t.make_sf(r);
-        assert_eq!(t.nodes[usize::from(r)], before);
-    }
-
-    fn row_layout(x: &[i32], y: &[i32]) -> Layout {
-        let n = x.len();
-        Layout {
-            x: x.to_vec(),
-            y: y.to_vec(),
-            hw: vec![50; n],
-            hh: vec![50; n],
-            variant: vec![0; n],
-            axis: vec![0],
-            branch: vec![],
-            groups: vec![],
-            orient: vec![pnr_core::Orient::R0; n],
-            power_uw: vec![0; n],
-            temp_mc: vec![0; n],
-            units: std::sync::Arc::default(),
-        }
-    }
-
-    #[test]
-    fn seed_from_keeps_left_of_and_below_relations() {
-        let (mut t, _) = Tree::build(3, &[], &[]);
-        // 0 left of 1; 2 above 0.
-        t.seed_from(&row_layout(&[0, 1000, 0], &[0, 0, 1000]));
-        let r = usize::from(t.root);
-        assert_eq!(t.nodes[r].alpha, [2, 0, 1]);
-        assert_eq!(t.nodes[r].beta, [0, 1, 2]);
-        let table = SpacingTable::uniform(100, 10);
-        let (w, h) = ([100; 3], [100; 3]);
-        let out = fresh(&t, &geo(&w, &h, &[None; 3], &table, 10)).unwrap();
-        assert!(out.x0[1] >= out.x0[0] + 200, "1 right of 0");
-        assert!(out.y0[2] >= out.y0[0] + 200, "2 above 0");
-    }
-
-    #[test]
-    fn seed_from_orders_node_kids_by_mean_centre() {
-        // Symmetry node {0, 1} centred at x = 3000 and loose cell 2 at x = 0:
-        // the root puts cell 2 first in both sequences.
-        let (mut t, _) = Tree::build(3, &[(0, 1, 0)], &[]);
-        t.seed_from(&row_layout(&[2000, 4000, 0], &[0, 0, 0]));
-        let r = usize::from(t.root);
-        assert_eq!(t.nodes[r].kids, [Kid::Node(0), Kid::Cell(2)]);
-        assert_eq!((t.nodes[r].alpha.clone(), t.nodes[r].beta.clone()), (vec![1, 0], vec![1, 0]));
-        assert!(t.is_sf(0));
-    }
-
-    #[test]
-    fn seed_constructive_balasa_code_and_area_row() {
-        let (mut t, _) = Tree::build(7, &[(0, 1, 0), (2, 2, 0), (3, 4, 0)], &[]);
-        let w = [10, 10, 10, 10, 10, 10, 30];
-        let h = [10, 10, 10, 10, 10, 20, 10];
-        t.seed_constructive(&w, &h);
-        // Slots 0..5 = cells 0..5; a = [0, 3], c = [2], then mates of a reversed.
-        assert_eq!(t.nodes[0].alpha, [0, 3, 2, 4, 1]);
-        assert!(t.is_sf(0));
-        // Root kids: Node(0) area 500, cell 5 area 200, cell 6 area 300.
-        let r = usize::from(t.root);
-        assert_eq!(t.nodes[r].kids, [Kid::Node(0), Kid::Cell(5), Kid::Cell(6)]);
-        assert_eq!(t.nodes[r].alpha, [0, 2, 1]);
-        assert_eq!(t.nodes[r].beta, t.nodes[r].alpha);
-    }
-
-    #[test]
-    fn seed_constructive_breaks_area_ties_by_slot() {
-        let (mut t, _) = Tree::build(3, &[], &[]);
-        t.seed_constructive(&[10, 10, 10], &[10, 10, 10]);
-        assert_eq!(t.nodes[0].alpha, [0, 1, 2]);
-    }
-
-    fn two_cells(alpha: Vec<u16>, beta: Vec<u16>) -> Tree {
-        let (mut t, _) = Tree::build(2, &[], &[]);
-        (t.nodes[0].alpha, t.nodes[0].beta) = (alpha, beta);
-        t
-    }
-
-    #[test]
-    fn decode_row_column_and_halo_gaps() {
-        let table = SpacingTable::uniform(200, 10);
-        let (w, h) = ([300, 400], [100, 500]);
-        let prof = [None; 2];
-        let g = geo(&w, &h, &prof, &table, 10);
-        let row = fresh(&two_cells(vec![0, 1], vec![0, 1]), &g).unwrap();
-        assert_eq!((row.x0.clone(), row.y0.clone()), (vec![0, 500], vec![0, 0]));
-        // 1 below 0: β = [1, 0], α = [0, 1].
-        let col = fresh(&two_cells(vec![0, 1], vec![1, 0]), &g).unwrap();
-        assert_eq!((col.x0.clone(), col.y0.clone()), (vec![0, 0], vec![700, 0]));
-        // Halo: 0's right face 50 plus 1's left face 30 adds to the gap.
-        let halo = [[0, 0, 50, 0], [30, 0, 0, 0]];
-        let gh = Geo { halo: &halo, ..geo(&w, &h, &prof, &table, 10) };
-        let out = fresh(&two_cells(vec![0, 1], vec![0, 1]), &gh).unwrap();
-        assert_eq!(out.x0[1], 300 + 200 + 80);
-    }
-
-    #[test]
-    fn decode_reports_disagreeing_self_widths() {
-        // Widths 100 and 110 at lattice 10: residues 0 and 10 mod 20.
-        let (t, _) = Tree::build(2, &[(0, 0, 0), (1, 1, 0)], &[]);
-        let table = SpacingTable::uniform(0, 10);
-        let (w, h, prof) = ([100, 110], [100, 100], [None; 2]);
-        let g = geo(&w, &h, &prof, &table, 10);
-        assert_eq!(fresh(&t, &g).unwrap_err(), Fail::SymX(0));
-    }
-
-    #[test]
-    fn decode_reports_unequal_pair_centres() {
-        // Heights 100 and 105: 2y + h never agrees on integer y.
-        let (t, _) = Tree::build(2, &[(0, 1, 0)], &[]);
-        let table = SpacingTable::uniform(0, 10);
-        let (w, h, prof) = ([100, 100], [100, 105], [None; 2]);
-        let g = geo(&w, &h, &prof, &table, 10);
-        assert_eq!(fresh(&t, &g).unwrap_err(), Fail::SymY(0));
-    }
-
-    #[test]
-    fn decode_centres_a_lone_self_kid_on_the_axis() {
-        let (t, _) = Tree::build(1, &[(0, 0, 3)], &[]);
-        let table = SpacingTable::uniform(0, 10);
-        let out = fresh(&t, &geo(&[200], &[100], &[None], &table, 10)).unwrap();
-        assert_eq!(out.axis, [(AxisId(3), 100)]);
-        assert_eq!(out.x0[0], 0);
-    }
-
-    #[test]
-    fn decode_puts_the_axis_on_the_track_grid() {
-        let (t, _) = Tree::build(3, &[(0, 1, 0)], &[]);
-        let table = SpacingTable::uniform(100, 10);
-        let (w, h, prof) = ([200, 200, 300], [100, 100, 100], [None; 3]);
-        let g = Geo { axis_grid: Some((420, 420)), ..geo(&w, &h, &prof, &table, 10) };
-        let out = fresh(&t, &g).unwrap();
-        assert_eq!(out.axis[0].1.rem_euclid(420), 210);
-    }
-
-    #[test]
-    fn scratch_touch_before_any_decode_is_a_no_op() {
-        let (t, _) = Tree::build(3, &[(0, 1, 0)], &[]);
-        let mut s = Scratch::default();
-        s.touch(&t, 0);
-        s.touch_cell(&t, 2);
-        s.invalidate();
-        let table = SpacingTable::uniform(100, 10);
-        let mut out = Out::default();
-        assert_eq!(decode(&t, &geo(&[100; 3], &[100; 3], &[None; 3], &table, 10), &mut s, &mut out), Ok(()));
-    }
-
-    /// Model test: a long run of code and size changes reported through
-    /// touch / touch_cell decodes exactly as a fresh scratch would.
-    #[test]
-    fn cached_decode_tracks_touched_changes() {
-        use gp::mechanics::SplitMix64;
-        let blocks = vec![vec![DeviceId(0), DeviceId(1), DeviceId(4), DeviceId(5)], Vec::new()];
-        let (mut t, _) = Tree::build(8, &[(0, 1, 0), (2, 3, 1)], &blocks);
-        check_tree(&t, 8);
-        let table = SpacingTable::uniform(50, 10);
-        let mut w = vec![100; 8];
-        let mut h = vec![100; 8];
-        let mut rng = SplitMix64::new(3);
-        let mut s = Scratch::default();
-        let mut out = Out::default();
-        let prof = [None; 8];
-        decode(&t, &geo(&w, &h, &prof, &table, 10), &mut s, &mut out).unwrap();
-        for _ in 0..500 {
-            if rng.below(2) == 0 {
-                let ni = rng.below(t.nodes.len());
-                let k = t.nodes[ni].alpha.len();
-                if k >= 2 {
-                    t.nodes[ni].alpha.swap(rng.below(k), rng.below(k));
-                    t.nodes[ni].beta.swap(rng.below(k), rng.below(k));
-                    t.make_sf(ni as u16);
-                    s.touch(&t, ni as u16);
-                }
-            } else {
-                let c = rng.below(8);
-                // Partners keep equal extents so the pair stays realisable.
-                let d = 100 + 20 * rng.below(5) as i32;
-                let e = 100 + 20 * rng.below(5) as i32;
-                for m in [c, c ^ 1] {
-                    if m == c || m < 4 {
-                        (w[m], h[m]) = (d, e);
-                        s.touch_cell(&t, m);
-                    }
-                }
-            }
-            let g = geo(&w, &h, &prof, &table, 10);
-            let cached = decode(&t, &g, &mut s, &mut out);
-            let want = fresh(&t, &g);
-            assert_eq!(cached.is_ok(), want.is_ok());
-            if let Ok(want) = want {
-                assert_eq!((&out.x0, &out.y0, &out.axis), (&want.x0, &want.y0, &want.axis));
-            }
-        }
-    }
-
-    #[test]
-    fn verify_rejects_overlap_off_lattice_and_broken_mirror() {
-        let (t, _) = Tree::build(3, &[(0, 1, 0)], &[]);
-        let table = SpacingTable::uniform(100, 10);
-        let (w, h, prof) = ([200; 3], [100; 3], [None; 3]);
-        let g = geo(&w, &h, &prof, &table, 10);
-        let good = fresh(&t, &g).unwrap();
-        fn tamper(t: &Tree, g: &Geo, good: &Out, f: impl Fn(&mut Out)) -> bool {
-            let mut o = Out { x0: good.x0.clone(), y0: good.y0.clone(), axis: good.axis.clone(), fixes: 0 };
-            f(&mut o);
-            verify(t, g, &o)
-        }
-        assert!(tamper(&t, &g, &good, |_: &mut Out| {}));
-        assert!(!tamper(&t, &g, &good, |o: &mut Out| o.x0[2] = o.x0[0]), "overlap");
-        assert!(!tamper(&t, &g, &good, |o: &mut Out| o.x0[0] += 5), "off lattice");
-        assert!(!tamper(&t, &g, &good, |o: &mut Out| o.axis[0].1 += 10), "axis off the pair");
-        assert!(!tamper(&t, &g, &good, |o: &mut Out| o.y0[1] += 10), "pair centres at different y");
-        assert!(!tamper(&t, &g, &good, |o: &mut Out| o.axis.clear()), "missing axis");
-    }
-
-    #[test]
-    fn to_layout_writes_centres_and_grows_axes() {
-        let out = Out { x0: vec![0, 300], y0: vec![10, 20], axis: vec![(AxisId(2), 250)], fixes: 0 };
-        let mut l = row_layout(&[0, 0], &[0, 0]);
-        to_layout(&out, &[200, 100], &[40, 60], &mut l);
-        assert_eq!((l.x.clone(), l.y.clone()), (vec![100, 350], vec![30, 50]));
-        assert_eq!((l.hw.clone(), l.hh.clone()), (vec![100, 50], vec![20, 30]));
-        assert_eq!(l.axis, [0, 250, 250]);
     }
 }

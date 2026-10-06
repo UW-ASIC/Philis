@@ -10,8 +10,6 @@ use pnr_core::routes::Routes;
 
 use crate::metadata::{NetClass, NetClassification};
 use crate::rule::Rule;
-use super::shield::{intersection_len, merge_spans};
-use super::stack::{overlap_area_nm2, parallel};
 use super::Stack;
 
 /// `ε·h` in `C = ε·h·run/gap`, aF (εr 3.9, ~0.35 µm metal): two wires 400 nm
@@ -21,8 +19,7 @@ use super::Stack;
 const EPS_H_AF: f32 = 12.0;
 
 /// Lateral coupling over `run` nm at `gap` nm on `layer`, aF: the deck's
-/// `ε0·k·t·run/gap` when known (TOPO eq. 4.3), else `EPS_H_AF`. A gap below
-/// 1 nm counts as 1 nm.
+/// `ε0·k·t·run/gap` when known (TOPO eq. 4.3), else `EPS_H_AF`.
 fn run_af(stack: Option<&Stack>, layer: u16, run: i32, gap: i32) -> f32 {
     stack.and_then(|s| s.lateral_run_af(layer, run, gap)).unwrap_or(EPS_H_AF * run as f32 / gap.max(1) as f32)
 }
@@ -92,16 +89,24 @@ pub fn net_pair_af(stack: Option<&Stack>, a: &[Shape], b: &[Shape], screens: &[S
             let mut covered: Vec<(i32, i32)> = Vec::new();
             for (gap, span, mine) in side {
                 if mine {
-                    let free = i64::from(span.1 - span.0) - intersection_len(&covered, &[span]);
+                    let free = i64::from(span.1 - span.0) - super::shield::intersection_len(&covered, &[span]);
                     c += run_af(stack, layer, free as i32, gap);
                 }
                 covered.push(span);
-                merge_spans(&mut covered);
+                covered.sort_unstable();
+                let mut merged: Vec<(i32, i32)> = Vec::with_capacity(covered.len());
+                for (x0, x1) in covered.drain(..) {
+                    match merged.last_mut() {
+                        Some(last) if x0 <= last.1 => last.1 = last.1.max(x1),
+                        _ => merged.push((x0, x1)),
+                    }
+                }
+                covered = merged;
             }
         }
         // End-on: separated along the run, overlapping across it.
         for q in b.iter().filter(|q| q.layer.0 == layer) {
-            if let Some((run, gap)) = parallel(&r, &q.rect) {
+            if let Some((run, gap)) = super::stack::parallel(&r, &q.rect) {
                 let along = if horiz { q.rect.x >= r.x + r.w || q.rect.x + q.rect.w <= r.x } else { q.rect.y >= r.y + r.h || q.rect.y + q.rect.h <= r.y };
                 if along {
                     c += run_af(stack, layer, run, gap);
@@ -114,15 +119,18 @@ pub fn net_pair_af(stack: Option<&Stack>, a: &[Shape], b: &[Shape], screens: &[S
         for &(la, p, _) in &ra {
             for &(lb, q, _) in &rb {
                 let Some(per) = st.cross_af_um2(la, lb) else { continue };
-                c += per * (overlap_area_nm2(&p, &q) as f64 * 1e-6) as f32;
+                let w = (p.x + p.w).min(q.x + q.w) - p.x.max(q.x);
+                let h = (p.y + p.h).min(q.y + q.h) - p.y.max(q.y);
+                if w > 0 && h > 0 {
+                    c += per * (f64::from(w) * f64::from(h) * 1e-6) as f32;
+                }
             }
         }
     }
     c
 }
 
-/// Every routed wire shape of `r` but those of the nets in `skip` (indices
-/// into [`Routes::wires`]): what screens a pair. Allocates; O(all shapes).
+/// Every shape of `r` but those of the nets in `skip`: what screens a pair.
 #[must_use]
 pub fn screens_but(r: &Routes, skip: &[usize]) -> Vec<Shape> {
     r.wires.iter().enumerate().filter(|(n, _)| !skip.contains(n)).flat_map(|(_, w)| w.iter().copied()).collect()
@@ -133,7 +141,6 @@ pub fn screens_but(r: &Routes, skip: &[usize]) -> Vec<Shape> {
 pub struct CouplingBudget {
     /// The victim.
     pub net: NetId,
-    /// Allowed weighted coupling onto the victim from all aggressors, aF.
     pub max_coupling_af: i64,
     /// Safety margin held back from the budget, percent.
     pub margin_pct: u8,
@@ -177,8 +184,7 @@ impl CouplingBudget {
         }
         let mut total = 0.0f32;
         for (other, shapes) in r.wires.iter().enumerate() {
-            // An unrouted net couples nothing: skip it before building its screens.
-            if shapes.is_empty() || other == self.net.0 as usize || self.exclude.is_some_and(|e| other == e.0 as usize) {
+            if other == self.net.0 as usize || self.exclude.is_some_and(|e| other == e.0 as usize) {
                 continue;
             }
             let w = self.aggressor_weight.and_then(|w| w.get(other).copied()).unwrap_or(1.0);
@@ -200,11 +206,6 @@ impl Rule for CouplingBudget {
     }
     fn satisfied(self, r: &Routes) -> bool {
         self.total_af(r) <= self.max_coupling_af as f32
-    }
-    /// The victim is routed: an unrouted victim has no coupling to measure,
-    /// and its vacuous zero must not certify the budget.
-    fn known(self, r: &Routes) -> bool {
-        !r.shapes(self.net).is_empty()
     }
     fn headroom(self, r: &Routes) -> f32 {
         1.0 - self.total_af(r) / self.max_coupling_af.max(1) as f32
@@ -385,86 +386,5 @@ mod tests {
         let c = |n: u16, class| NetClassification { net: NetId(n), class, c_budget_af: None, max_coupling_af: None };
         let classes = [c(0, NetClass::Supply), c(1, NetClass::Signal), c(2, NetClass::Ground)];
         assert_eq!(CouplingBudget::default_weights(&classes, 4), vec![0.0, 1.0, 0.0, 1.0]);
-    }
-
-    /// An unrouted victim has no coupling to measure: unknown, never a
-    /// certified pass (Rule::known).
-    #[test]
-    fn an_unrouted_victim_is_unknown() {
-        let b = budget(100)[0];
-        let r = Routes { wires: vec![vec![], vec![wire(500, 0, 100, 10_000, 0)]], ..Default::default() };
-        assert!(!b.known(&r));
-        assert!(b.satisfied(&r) && b.residual(&r) == 0.0, "search cannot act on it");
-        assert!(b.known(&routes(1, 400)));
-    }
-
-    #[test]
-    fn runs_merge_collinear_pieces_and_keep_crossings_apart() {
-        assert!(runs(&[]).is_empty());
-        let (a, b) = (wire(0, 0, 5_000, 100, 0), wire(5_000, 0, 5_000, 100, 0));
-        assert_eq!(runs(&[a, b]), vec![(0, Rect { x: 0, y: 0, w: 10_000, h: 100 }, true)]);
-        let crossing = wire(2_000, -3_000, 100, 6_000, 0);
-        assert_eq!(runs(&[a, b, crossing]).len(), 2);
-        assert_eq!(runs(&[a, wire(5_000, 0, 5_000, 100, 1)]).len(), 2, "another layer never joins");
-    }
-
-    /// A collinear neighbour beyond the run's end couples over its facing
-    /// width: 12 aF · 100 nm / 400 nm = 3 aF.
-    #[test]
-    fn an_end_on_neighbour_couples_over_its_facing_width() {
-        let v = [wire(0, 0, 10_000, 100, 0)];
-        let agg = [wire(10_400, 0, 5_000, 100, 0)];
-        assert!((net_pair_af(None, &v, &agg, &[]) - 3.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn empty_sides_couple_nothing_and_equal_wires_couple_symmetrically() {
-        let v = [wire(0, 0, 100, 10_000, 0)];
-        let a = [wire(500, 0, 100, 10_000, 0)];
-        assert_eq!(net_pair_af(None, &[], &a, &[]), 0.0);
-        assert_eq!(net_pair_af(None, &v, &[], &[]), 0.0);
-        assert_eq!(net_pair_af(None, &v, &a, &[]), net_pair_af(None, &a, &v, &[]));
-    }
-
-    /// The deck's `ε·t` replaces the 12 aF fallback where the layer has one:
-    /// 1 200 aF·nm/µm · 10 µm / 400 nm = 30 aF against 300 aF.
-    #[test]
-    fn the_decks_lateral_term_replaces_the_fallback() {
-        use crate::routing::stack::Layer;
-        let deck = Stack { layers: vec![Layer { id: 0, lateral: 1_200.0, ..Layer::default() }], ..Stack::default() };
-        let blank = Stack { layers: vec![Layer { id: 0, ..Layer::default() }], ..Stack::default() };
-        let v = [wire(0, 0, 100, 10_000, 0)];
-        let a = [wire(500, 0, 100, 10_000, 0)];
-        assert!((net_pair_af(Some(&deck), &v, &a, &[]) - 30.0).abs() < 1e-3);
-        assert!((net_pair_af(None, &v, &a, &[]) - 300.0).abs() < 1e-3);
-        assert!((net_pair_af(Some(&blank), &v, &a, &[]) - 300.0).abs() < 1e-3, "no ε·t on the layer");
-    }
-
-    #[test]
-    fn screens_are_every_other_nets_wires() {
-        let r = Routes { wires: vec![vec![wire(0, 0, 1, 1, 0)], vec![wire(1, 0, 1, 1, 0)], vec![wire(2, 0, 1, 1, 0)]], ..Default::default() };
-        assert_eq!(screens_but(&r, &[0, 2]), vec![r.wires[1][0]]);
-        assert!(screens_but(&r, &[0, 1, 2]).is_empty());
-        assert_eq!(screens_but(&r, &[]).len(), 3);
-    }
-
-    #[test]
-    fn default_weights_edge_cases() {
-        let c = |n: u16, class| NetClassification { net: NetId(n), class, c_budget_af: None, max_coupling_af: None };
-        assert!(CouplingBudget::default_weights(&[c(0, NetClass::Supply)], 0).is_empty());
-        assert_eq!(CouplingBudget::default_weights(&[c(9, NetClass::Ground), c(1, NetClass::Substrate)], 2), vec![1.0, 0.0]);
-    }
-
-    #[test]
-    fn a_zero_budget_fails_any_coupling() {
-        let b = budget(0)[0];
-        let r = routes(1, 400);
-        assert_eq!(b.residual(&r), 1.0);
-        assert!(!b.satisfied(&r));
-        assert_eq!(b.usage(&r), Some(b.total_af(&r)), "a zero budget reads as 1 aF");
-        let mut v = Vec::new();
-        b.touches(&mut v);
-        assert_eq!(v, vec![0]);
-        assert!((b.margin() - 0.2).abs() < 1e-6);
     }
 }

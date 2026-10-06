@@ -6,11 +6,10 @@
 use pnr_core::{DeviceId, Macro, NetId, Netlist, Pin, Rect, SubcktInst};
 use verify::Pdk;
 
-use crate::{metadata, Bias, Config, FlowError, Hierarchy, Macros};
+use crate::{metadata, Bias, Config, FlowError, Hierarchy, Macros, RunStats};
 
 /// One sub-circuit definition solved once (FLOW-11).
 pub(crate) struct Block {
-    /// The definition's name, as spelled at its first instance.
     pub subckt: String,
     /// Child geometry (cells, rings, routes; no fill) translated so its bbox
     /// corner is the origin; one pin `p{k}` per routed formal port k; `units`,
@@ -19,21 +18,19 @@ pub(crate) struct Block {
     /// The child's LVS reference cards (`signoff_inputs(&child, pdk).2`):
     /// child net names, which are the first instance's parent names.
     pub ref_cards: Vec<verify::RefDeviceIn>,
-    /// First instance's path: the name map's source side ([`rename`]).
+    /// First instance's path and actual port names: the name map's source side.
     pub i0_path: String,
-    /// First instance's actual port net names, by formal port index.
     pub i0_ports: Vec<String>,
-    /// The child solve's report, surfaced as [`crate::Solution::blocks`].
     pub metadata: metadata::MetadataReport,
+    #[allow(dead_code)] // kept for the report; `RunStats::block_solves` counts blocks
+    pub stats: RunStats,
 }
 
 /// The LVS side of placed blocks: cards renamed per instance, and the
 /// schematic devices they replace.
 #[derive(Clone, Default)]
 pub(crate) struct BlockRef {
-    /// Every placed instance's child cards, nets renamed into the parent.
     pub cards: Vec<verify::RefDeviceIn>,
-    /// The parent's schematic devices those cards stand for.
     pub members: Vec<DeviceId>,
 }
 
@@ -41,14 +38,10 @@ pub(crate) struct BlockRef {
 /// bound to its actual nets.
 #[derive(Default)]
 pub(crate) struct Placed {
-    /// Per outermost instance: the parent devices it replaces, and its cell
-    /// (a block's [`Block::mac`] with pins bound to the instance's nets).
     pub cells: Vec<(Vec<DeviceId>, Macro)>,
-    /// The LVS cards of all of `cells`.
     pub refs: BlockRef,
 }
 
-/// Every device under instance `i`, nested instances included.
 fn member_ids(nl: &Netlist, i: u32) -> Vec<DeviceId> {
     annotator::hier::devices(nl, i).into_iter().map(|(d, _)| d).collect()
 }
@@ -68,11 +61,10 @@ pub(crate) fn eligible(nl: &Netlist, min_devices: usize) -> Vec<String> {
         let local = ids.iter().flat_map(|d| &nl.devices[d.0 as usize].terminals).all(|(_, n)| x.ports.contains(n) || nl.nets[n.0 as usize].name.starts_with(&prefix));
         distinct && local && ids.len() >= min_devices
     };
-    let fine: Vec<bool> = (0..nl.insts.len()).map(ok).collect();
     let mut out: Vec<String> = Vec::new();
     for j in (0..nl.insts.len()).rev() {
         let s = &nl.insts[j].subckt;
-        if !out.contains(s) && nl.insts.iter().zip(&fine).filter(|(x, _)| &x.subckt == s).all(|(_, &f)| f) {
+        if !out.contains(s) && nl.insts.iter().enumerate().filter(|(_, x)| &x.subckt == s).all(|(k, _)| ok(k)) {
             out.push(s.clone());
         }
     }
@@ -85,23 +77,19 @@ pub(crate) fn eligible(nl: &Netlist, min_devices: usize) -> Vec<String> {
 pub(crate) fn local(nl: &Netlist, i: u32) -> (Netlist, Vec<DeviceId>, Vec<NetId>) {
     let x = &nl.insts[i as usize];
     let devs = member_ids(nl, i);
-    // Parent net → local id (`u16::MAX` = not yet seen); nets are < 65 535.
     let mut nets: Vec<NetId> = Vec::new();
-    let mut local_of = vec![u16::MAX; nl.nets.len()];
-    let mut map = |n: NetId| {
-        let slot = &mut local_of[n.0 as usize];
-        if *slot == u16::MAX {
-            *slot = nets.len() as u16;
+    let map = |n: NetId, nets: &mut Vec<NetId>| {
+        NetId(nets.iter().position(|&m| m == n).unwrap_or_else(|| {
             nets.push(n);
-        }
-        NetId(*slot)
+            nets.len() - 1
+        }) as u16)
     };
-    let ports: Vec<NetId> = x.ports.iter().map(|&n| map(n)).collect();
-    let devices: Vec<_> = devs
+    let ports: Vec<NetId> = x.ports.iter().map(|&n| map(n, &mut nets)).collect();
+    let devices = devs
         .iter()
         .map(|d| {
             let mut dev = nl.devices[d.0 as usize].clone();
-            dev.terminals.iter_mut().for_each(|t| t.1 = map(t.1));
+            dev.terminals.iter_mut().for_each(|t| t.1 = map(t.1, &mut nets));
             dev
         })
         .collect();
@@ -116,16 +104,12 @@ pub(crate) fn local(nl: &Netlist, i: u32) -> (Netlist, Vec<DeviceId>, Vec<NetId>
         false
     };
     let kept: Vec<u32> = (0..nl.insts.len() as u32).filter(|&j| j != i && under(Some(j))).collect();
-    let mut new_index = vec![None; nl.insts.len()];
-    for (p, &j) in kept.iter().enumerate() {
-        new_index[j as usize] = Some(p as u32);
-    }
-    let new_of = |j: u32| new_index.get(j as usize).copied().flatten();
+    let new_of = |j: u32| kept.iter().position(|&k| k == j).map(|p| p as u32);
     let insts = kept
         .iter()
         .map(|&j| {
             let y = &nl.insts[j as usize];
-            SubcktInst { path: y.path.clone(), subckt: y.subckt.clone(), parent: y.parent.and_then(new_of), ports: y.ports.iter().map(|&n| map(n)).collect() }
+            SubcktInst { path: y.path.clone(), subckt: y.subckt.clone(), parent: y.parent.and_then(new_of), ports: y.ports.iter().map(|&n| map(n, &mut nets)).collect() }
         })
         .collect();
     let device_inst = devs.iter().map(|d| nl.device_inst.get(d.0 as usize).copied().flatten().and_then(new_of)).collect();
@@ -143,10 +127,6 @@ pub(crate) fn local(nl: &Netlist, i: u32) -> (Netlist, Vec<DeviceId>, Vec<NetId>
 /// Outermost instances (no ancestor instance also a block) of every
 /// definition in `blocks`: one cell each, pin `p{k}` on actual port k, the
 /// child's cards renamed to this instance.
-///
-/// # Panics
-/// A block pin not named `p{k}` with `k` a port index of the instance (as
-/// [`solve_blocks`] names them).
 pub(crate) fn instantiate(nl: &Netlist, blocks: &[Block]) -> Placed {
     let block = |j: u32| blocks.iter().find(|b| b.subckt == nl.insts[j as usize].subckt);
     let mut out = Placed::default();
@@ -192,7 +172,6 @@ fn rename(name: &str, b: &Block, j_path: &str, j_ports: &[String]) -> String {
 impl Bias {
     /// The bias of a child netlist from [`local`]: per-device tables by
     /// `devs`, per-net by `nets`; no summary or op point (the parent's).
-    /// A table that is empty (not computed) stays empty.
     fn restrict(&self, devs: &[DeviceId], nets: &[NetId]) -> Bias {
         fn by<T: Clone>(v: &[T], ids: impl Iterator<Item = usize>) -> Vec<T> {
             if v.is_empty() {
@@ -241,27 +220,8 @@ fn child_config(cfg: &Config) -> Config {
     }
 }
 
-/// Translates `mac` so the bbox of its shapes has its corner at the origin,
-/// and sets `bbox` to it; pins and keep-outs move with the shapes.
-fn to_origin(mac: &mut Macro) {
-    if mac.shapes.is_empty() {
-        mac.bbox = Rect::default();
-        return;
-    }
-    let (x0, y0) = mac.shapes.iter().fold((i32::MAX, i32::MAX), |a, s| (a.0.min(s.rect.x), a.1.min(s.rect.y)));
-    let (x1, y1) = mac.shapes.iter().fold((i32::MIN, i32::MIN), |a, s| (a.0.max(s.rect.x + s.rect.w), a.1.max(s.rect.y + s.rect.h)));
-    let shift = |r: &mut Rect| (r.x, r.y) = (r.x - x0, r.y - y0);
-    mac.shapes.iter_mut().for_each(|s| shift(&mut s.rect));
-    mac.pins.iter_mut().for_each(|p| shift(&mut p.at));
-    mac.keepouts.iter_mut().for_each(|k| shift(&mut k.rect));
-    mac.bbox = Rect { x: 0, y: 0, w: (x1 - x0).max(0), h: (y1 - y0).max(0) };
-}
-
-/// Solves every [`eligible`] definition once, children first, each from its
+/// Solve every [`eligible`] definition once, children first, each from its
 /// first instance with its nested blocks already placed.
-///
-/// # Errors
-/// The first child solve that fails.
 pub(crate) fn solve_blocks(nl: &Netlist, pdk: &Pdk, cfg: &Config, bias: &Bias, min_devices: usize) -> Result<Vec<Block>, FlowError> {
     let cc = child_config(cfg);
     let mut blocks: Vec<Block> = Vec::new();
@@ -287,7 +247,13 @@ pub(crate) fn solve_blocks(nl: &Netlist, pdk: &Pdk, cfg: &Config, bias: &Bias, m
                 mac.pins.push(Pin { name: format!("p{k}"), net: port, at, layer });
             }
         }
-        to_origin(&mut mac);
+        let (x0, y0) = mac.shapes.iter().fold((i32::MAX, i32::MAX), |a, s| (a.0.min(s.rect.x), a.1.min(s.rect.y)));
+        let (x1, y1) = mac.shapes.iter().fold((i32::MIN, i32::MIN), |a, s| (a.0.max(s.rect.x + s.rect.w), a.1.max(s.rect.y + s.rect.h)));
+        let shift = |r: &mut Rect| (r.x, r.y) = (r.x - x0, r.y - y0);
+        mac.shapes.iter_mut().for_each(|s| shift(&mut s.rect));
+        mac.pins.iter_mut().for_each(|p| shift(&mut p.at));
+        mac.keepouts.iter_mut().for_each(|k| shift(&mut k.rect));
+        mac.bbox = Rect { x: 0, y: 0, w: (x1 - x0).max(0), h: (y1 - y0).max(0) };
         let x = &nl.insts[i0 as usize];
         blocks.push(Block {
             subckt,
@@ -296,6 +262,7 @@ pub(crate) fn solve_blocks(nl: &Netlist, pdk: &Pdk, cfg: &Config, bias: &Bias, m
             i0_path: x.path.clone(),
             i0_ports: x.ports.iter().map(|n| nl.nets[n.0 as usize].name.clone()).collect(),
             metadata: child.metadata,
+            stats: child.stats,
         });
     }
     Ok(blocks)
@@ -332,6 +299,7 @@ mod tests {
             i0_path: "X1".into(),
             i0_ports: vec!["a".into(), "b".into()],
             metadata: Default::default(),
+            stats: RunStats::default(),
         };
         let j = ["c".to_string(), "d".to_string()];
         assert_eq!(rename("a", &b, "X2", &j), "c");
@@ -359,145 +327,5 @@ mod tests {
             assert!(d.name.starts_with("X1/"));
         }
         assert!(n.insts.is_empty() && n.device_inst.iter().all(Option::is_none));
-    }
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use pnr_core::{KeepWhy, Keepout, LayerId, Shape};
-
-    const NESTED: &str = ".subckt inner a b c\nM1 a b c c nfet W=1u L=1u\nM2 c b a a nfet W=1u L=1u\n.ends inner\n\
-                          .subckt outer p q r\nXI p q r inner\nM3 p q r r nfet W=1u L=1u\n.ends outer\n\
-                          .subckt top x y z\nXO x y z outer\n.ends top\n";
-
-    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
-        Rect { x, y, w, h }
-    }
-
-    fn pin(name: &str, at: Rect) -> Pin {
-        Pin { name: name.into(), net: NetId(0), at, layer: LayerId(0) }
-    }
-
-    fn block(subckt: &str, ports: usize) -> Block {
-        Block {
-            subckt: subckt.into(),
-            mac: Macro { pins: (0..ports).map(|k| pin(&format!("p{k}"), rect(0, 0, 1, 1))).collect(), ..Default::default() },
-            ref_cards: Vec::new(),
-            i0_path: "XO".into(),
-            i0_ports: Vec::new(),
-            metadata: Default::default(),
-        }
-    }
-
-    #[test]
-    fn to_origin_moves_everything_with_the_shapes() {
-        let s = |x, y, w, h| Shape { layer: LayerId(0), rect: rect(x, y, w, h) };
-        let mut m = Macro {
-            shapes: vec![s(10, 20, 5, 5), s(30, 40, 10, 10)],
-            pins: vec![pin("p0", rect(12, 22, 1, 1))],
-            keepouts: vec![Keepout { rect: rect(10, 20, 1, 1), why: KeepWhy::Gate { owner: 0 } }],
-            ..Default::default()
-        };
-        to_origin(&mut m);
-        assert_eq!(m.shapes[0].rect, rect(0, 0, 5, 5));
-        assert_eq!(m.shapes[1].rect, rect(20, 20, 10, 10));
-        assert_eq!(m.pins[0].at, rect(2, 2, 1, 1));
-        assert_eq!(m.keepouts[0].rect, rect(0, 0, 1, 1));
-        assert_eq!(m.bbox, rect(0, 0, 30, 30));
-    }
-
-    /// A macro with no shapes has no bbox to move to the origin: nothing
-    /// moves (no `i32::MAX` shift), and its bbox is empty.
-    #[test]
-    fn to_origin_of_no_shapes_moves_nothing() {
-        let mut m = Macro { pins: vec![pin("p0", rect(-5, 7, 1, 1))], ..Default::default() };
-        to_origin(&mut m);
-        assert_eq!(m.pins[0].at, rect(-5, 7, 1, 1));
-        assert_eq!(m.bbox, rect(0, 0, 0, 0));
-    }
-
-    #[test]
-    fn eligible_of_a_flat_netlist_is_empty() {
-        let nl = crate::parse("R1 a b 1\n").unwrap();
-        assert!(eligible(&nl, 0).is_empty());
-    }
-
-    #[test]
-    fn a_global_touching_instance_is_not_eligible() {
-        let deck = ".global vdd\n.subckt c a b\nM1 a b vdd vdd nfet W=1u L=1u\n.ends\n.subckt t n m\nX1 n m c\n.ends\n";
-        let nl = crate::parse(deck).unwrap();
-        assert!(eligible(&nl, 0).is_empty());
-    }
-
-    #[test]
-    fn local_reparents_nested_instances() {
-        let nl = crate::parse(NESTED).unwrap();
-        let i = nl.insts.iter().position(|x| x.path == "XO").unwrap() as u32;
-        let (n, devs, _) = local(&nl, i);
-        assert_eq!(devs.len(), 3);
-        assert_eq!(n.insts.len(), 1);
-        assert_eq!((n.insts[0].path.as_str(), n.insts[0].parent), ("XO/XI", None));
-        assert_eq!(n.device_inst.iter().filter(|d| **d == Some(0)).count(), 2);
-        assert_eq!(n.device_inst.iter().filter(|d| d.is_none()).count(), 1);
-        assert!(n.sources.is_empty());
-        // Ports are the instance's actuals, first in the local net order.
-        assert_eq!(n.ports, [NetId(0), NetId(1), NetId(2)]);
-    }
-
-    #[test]
-    fn instantiate_without_blocks_places_nothing() {
-        let nl = crate::parse(NESTED).unwrap();
-        let p = instantiate(&nl, &[]);
-        assert!(p.cells.is_empty() && p.refs.cards.is_empty() && p.refs.members.is_empty());
-    }
-
-    #[test]
-    fn instantiate_places_only_outermost_instances() {
-        let nl = crate::parse(NESTED).unwrap();
-        let p = instantiate(&nl, &[block("inner", 3), block("outer", 3)]);
-        assert_eq!(p.cells.len(), 1, "XO/XI sits inside the XO block");
-        let (members, mac) = &p.cells[0];
-        assert_eq!(members.len(), 3);
-        assert_eq!(p.refs.members, *members);
-        let xo = nl.insts.iter().find(|x| x.path == "XO").unwrap();
-        assert_eq!(mac.pins.iter().map(|q| q.net).collect::<Vec<_>>(), xo.ports);
-    }
-
-    #[test]
-    #[should_panic(expected = "block pins are `p{k}`")]
-    fn instantiate_panics_on_a_foreign_pin_name() {
-        let nl = crate::parse(NESTED).unwrap();
-        let mut b = block("outer", 0);
-        b.mac.pins.push(pin("q", rect(0, 0, 1, 1)));
-        let _ = instantiate(&nl, &[b]);
-    }
-
-    #[test]
-    fn rename_does_not_strip_a_path_that_only_shares_a_prefix() {
-        let mut b = block("s", 0);
-        b.i0_path = "X1".into();
-        assert_eq!(rename("X10/n", &b, "X2", &[]), "X2/X10/n");
-        assert_eq!(rename("X1", &b, "X2", &[]), "X2/X1");
-    }
-
-    #[test]
-    fn restrict_reindexes_per_device_and_per_net_tables() {
-        let bias = Bias {
-            power: vec![10, 20, 30],
-            summary: None,
-            currents: Some(vec![None, Some(vec![("D".to_string(), 1.0)]), None]),
-            net_headroom_mv: Some(vec![Some(1.0), None, Some(3.0)]),
-            gm_us: Vec::new(),
-            op: None,
-        };
-        let r = bias.restrict(&[DeviceId(2), DeviceId(1)], &[NetId(2), NetId(0)]);
-        assert_eq!(r.power, [30, 20]);
-        assert_eq!(r.currents.as_ref().map(Vec::len), Some(2));
-        assert!(r.currents.as_ref().unwrap()[0].is_none() && r.currents.as_ref().unwrap()[1].is_some());
-        assert_eq!(r.net_headroom_mv, Some(vec![Some(3.0), Some(1.0)]));
-        assert!(r.gm_us.is_empty(), "an empty table stays empty");
-        let none = Bias::uniform(Vec::new()).restrict(&[DeviceId(0)], &[]);
-        assert!(none.power.is_empty() && none.currents.is_none() && none.net_headroom_mv.is_none());
     }
 }

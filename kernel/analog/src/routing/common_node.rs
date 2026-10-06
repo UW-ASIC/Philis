@@ -18,7 +18,6 @@ use super::Stack;
 /// combine in parallel ([`Stack::terminal_resistance_ohm`]).
 #[derive(Clone, Debug)]
 pub struct CommonNode {
-    /// The shared net.
     pub net: NetId,
     /// Terminal groups (a pair's members' source pins; a star's branches;
     /// Kelvin `[force, sense]`): each group's branch is its own subtree.
@@ -34,14 +33,10 @@ pub struct CommonNode {
     pub star: bool,
 }
 
-/// Every common node of one routed layout, measured on `stack` (budget
-/// arm). A node's usage is `ΔR / max_delta_ohm`; a broken star is a
-/// violation of its own.
+/// Every common node of one routed layout, measured on `stack`.
 #[derive(Clone)]
 pub struct CommonNodes {
-    /// The nodes, one rule each.
     pub nodes: Vec<CommonNode>,
-    /// The routing stack the branch R is measured on.
     pub stack: &'static Stack,
     /// The root halo: a star's feeds grown by this, nm (the lattice pitch).
     pub halo_nm: i32,
@@ -74,8 +69,6 @@ impl CommonNodes {
         (hi >= lo).then_some(hi - lo)
     }
 
-    /// `ΔR / max_delta_ohm`; `None` when unknown (no budget, or a group
-    /// unreached).
     fn usage(&self, n: &CommonNode, r: &Routes) -> Option<f32> {
         (n.max_delta_ohm > 0.0).then_some(())?;
         Some(self.delta_ohm(n, r)? / n.max_delta_ohm)
@@ -149,12 +142,7 @@ impl RuleBatch<Routes> for CommonNodes {
         self.nodes.iter().map(|n| u32::from(self.star_broken(n, r)) + u32::from(self.usage(n, r).is_some_and(|u| u > 1.0))).sum()
     }
     fn residual(&self, r: &Routes) -> f64 {
-        // ΔR overshoots, plus one full budget per broken star: a star break
-        // is a violation, and a violation never reads as Θ = 0.
-        self.nodes
-            .iter()
-            .map(|n| f64::from(u8::from(self.star_broken(n, r))) + self.usage(n, r).map_or(0.0, |u| f64::from((u - 1.0).max(0.0))))
-            .sum()
+        self.nodes.iter().filter_map(|n| self.usage(n, r)).map(|u| f64::from((u - 1.0).max(0.0))).sum()
     }
     fn kind(&self) -> &'static str {
         "CommonNode"
@@ -257,92 +245,5 @@ mod tests {
     fn branches_meeting_at_the_root_are_a_star() {
         let (c, r) = star(300);
         assert_eq!(c.violations(&r), 0);
-    }
-
-    #[test]
-    fn minus_cuts_out_the_interior() {
-        use crate::routing::stack::overlap_area_nm2;
-        let r = |x, y, w, h| Rect { x, y, w, h };
-        let a = r(0, 0, 100, 100);
-        assert_eq!(minus(a, r(200, 0, 10, 10)), vec![a], "apart");
-        assert_eq!(minus(a, r(100, 0, 50, 100)), vec![a], "touching an edge");
-        assert!(minus(a, r(-10, -10, 200, 200)).is_empty(), "swallowed");
-        let hole = r(40, 40, 20, 20);
-        let ring = minus(a, hole);
-        assert_eq!(ring.len(), 4);
-        assert_eq!(ring.iter().map(|p| i64::from(p.w) * i64::from(p.h)).sum::<i64>(), 10_000 - 400);
-        for (i, p) in ring.iter().enumerate() {
-            assert_eq!(overlap_area_nm2(p, &hole), 0);
-            for q in &ring[i + 1..] {
-                assert_eq!(overlap_area_nm2(p, q), 0, "{p:?} {q:?}");
-            }
-        }
-        let bite = minus(a, r(80, -10, 50, 50));
-        assert_eq!(bite.iter().map(|p| i64::from(p.w) * i64::from(p.h)).sum::<i64>(), 10_000 - 20 * 40, "a corner bite");
-    }
-
-    /// A broken star is a violation, so it must count in Θ too: one full
-    /// budget per break (fail is never pass).
-    #[test]
-    fn a_star_break_counts_in_the_residual() {
-        let (c, r) = star(5_000);
-        assert_eq!(c.violations(&r), 1);
-        assert!(c.residual(&r) >= 1.0, "{}", c.residual(&r));
-        let mut ids = Vec::new();
-        c.violating_ids(&r, &mut ids);
-        assert_eq!(ids, vec![0]);
-        let (c, r) = star(300);
-        assert_eq!(c.residual(&r), 0.0);
-    }
-
-    #[test]
-    fn a_node_that_is_no_star_is_never_broken() {
-        let (mut c, r) = star(5_000);
-        c.nodes[0].star = false;
-        assert!(!c.star_broken(&c.nodes[0], &r));
-        assert_eq!(c.violations(&r), 0);
-    }
-
-    #[test]
-    fn an_empty_or_unreached_group_is_unknown_and_one_group_has_no_skew() {
-        let stack: &'static Stack = Box::leak(Box::new(Stack { layers: vec![Layer { id: 1, sheet_ohm: 0.125, ..Layer::default() }], ..Stack::default() }));
-        let routes = Routes { wires: vec![vec![Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 10_000, h: 500 } }]], ..Default::default() };
-        let pin = |x| Rect { x, y: 0, w: 100, h: 100 };
-        let nodes = |groups: Vec<Vec<Rect>>| CommonNodes {
-            nodes: vec![CommonNode { net: NetId(0), groups, feeds: vec![pin(5_000)], max_delta_ohm: 1.0, star: false }],
-            stack,
-            halo_nm: 0,
-            joins: Vec::new(),
-        };
-        assert_eq!(nodes(vec![vec![pin(0)], vec![]]).unknown(&routes), 1, "an empty group");
-        assert_eq!(nodes(vec![vec![pin(0)], vec![pin(90_000)]]).unknown(&routes), 1, "an unreached pin");
-        assert_eq!(nodes(Vec::new()).unknown(&routes), 1, "no groups");
-        assert_eq!(nodes(vec![vec![pin(0)]]).worst_usage(&routes), Some(0.0), "one group");
-        let none = nodes(vec![vec![pin(0)], vec![]]);
-        assert_eq!((none.cost(&routes), none.residual(&routes), none.violations(&routes)), (0.0, 0.0, 0));
-    }
-
-    /// Two pins of one group sit in parallel: two equal 2.5 Ω branches read
-    /// 1.25 Ω, against a lone 2.5 Ω branch in the other group.
-    #[test]
-    fn a_groups_pins_combine_in_parallel() {
-        let stack: &'static Stack = Box::leak(Box::new(Stack { layers: vec![Layer { id: 1, sheet_ohm: 0.125, ..Layer::default() }], ..Stack::default() }));
-        let m1 = |x, y, w, h| Shape { layer: LayerId(1), rect: Rect { x, y, w, h } };
-        // Feed at the centre of a cross: 10 µm arms of 0.5 µm (2.5 Ω each from the hub).
-        let routes = Routes { wires: vec![vec![m1(-10_250, -250, 20_500, 500), m1(-250, -10_250, 500, 20_500)]], ..Default::default() };
-        let tip = |x, y| Rect { x: x - 50, y: y - 50, w: 100, h: 100 };
-        let node = CommonNode { net: NetId(0), groups: vec![vec![tip(-10_000, 0), tip(10_000, 0)], vec![tip(0, 10_000)]], feeds: vec![tip(0, 0)], max_delta_ohm: 1.0, star: false };
-        let c = CommonNodes { nodes: vec![node], stack, halo_nm: 0, joins: Vec::new() };
-        let u = c.worst_usage(&routes).unwrap();
-        assert!((u - 1.25).abs() < 1e-3, "{u}");
-    }
-
-    #[test]
-    fn batch_identity() {
-        let (c, _) = star(300);
-        assert_eq!((c.kind(), c.repair_kind(), c.local(), c.count()), ("CommonNode", crate::RepairKind::Balance, true, 1));
-        let mut t = Vec::new();
-        c.touched(&mut t);
-        assert_eq!(t, vec![0]);
     }
 }

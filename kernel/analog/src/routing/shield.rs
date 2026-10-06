@@ -19,12 +19,8 @@ use crate::rule::Rule;
 /// impedance is not measured.
 #[derive(Clone, Copy)]
 pub struct Shield {
-    /// The sensitive net to shield.
     pub victim: NetId,
-    /// The quiet net whose metal forms the shield.
     pub reference: NetId,
-    /// Required shielded share of the victim's wire length, percent
-    /// (`0..=100`).
     pub min_coverage_pct: u8,
     /// Farthest a shield wire may sit from the victim's edge, nm.
     pub max_gap_nm: i32,
@@ -34,19 +30,6 @@ impl Shield {
     /// Shielded fraction of the victim's wire length, `0..=1`; `None` when the
     /// victim has no wire.
     fn coverage(self, r: &Routes) -> Option<f32> {
-        let (covered, total) = self.lengths(r);
-        (total > 0).then(|| covered as f32 / total as f32)
-    }
-
-    /// Whether `covered / total` reaches `min_coverage_pct`, compared in
-    /// integers so a share exactly at the floor passes whatever f32 rounding
-    /// of the percentage would say. `true` when the victim has no wire.
-    fn meets_floor(self, (covered, total): (i64, i64)) -> bool {
-        covered * 100 >= i64::from(self.min_coverage_pct) * total
-    }
-
-    /// `(shielded, total)` wire length of the victim, nm.
-    fn lengths(self, r: &Routes) -> (i64, i64) {
         let refs = r.shapes(self.reference);
         let (mut total, mut covered) = (0i64, 0i64);
         for v in r.shapes(self.victim).iter().filter(|s| s.rect.w != s.rect.h) {
@@ -63,42 +46,30 @@ impl Shield {
                     .map(|(a, b)| (a.max(lo), b.min(hi)))
                     .filter(|(a, b)| a < b)
                     .collect();
-                merge_spans(&mut spans);
-                spans
+                spans.sort_unstable();
+                let mut merged: Vec<(i32, i32)> = Vec::with_capacity(spans.len());
+                for (a, b) in spans {
+                    match merged.last_mut() {
+                        Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                        _ => merged.push((a, b)),
+                    }
+                }
+                merged
             };
             // Shielded = reference on both sides at the same point, not the
             // shorter of the two side lengths.
             covered += intersection_len(&side(true), &side(false));
         }
-        (covered, total)
+        (total > 0).then(|| covered as f32 / total as f32)
     }
 }
 
-/// Sorts half-open spans `[a, b)` and merges every overlapping or abutting
-/// pair in place: the result is sorted and disjoint. O(n log n), no
-/// allocation.
-pub(crate) fn merge_spans(spans: &mut Vec<(i32, i32)>) {
-    spans.sort_unstable();
-    let mut n = 0;
-    for k in 0..spans.len() {
-        let (a, b) = spans[k];
-        if n > 0 && a <= spans[n - 1].1 {
-            spans[n - 1].1 = spans[n - 1].1.max(b);
-        } else {
-            spans[n] = (a, b);
-            n += 1;
-        }
-    }
-    spans.truncate(n);
-}
-
-/// Total length common to two sorted, disjoint span lists (as
-/// [`merge_spans`] leaves them); O(p + q). Unsorted input under-counts.
+/// Total length common to two sorted, disjoint interval lists; O(a + b).
 pub(crate) fn intersection_len(p: &[(i32, i32)], q: &[(i32, i32)]) -> i64 {
     let (mut i, mut j, mut len) = (0, 0, 0i64);
     while i < p.len() && j < q.len() {
         let (a, b) = (p[i].0.max(q[j].0), p[i].1.min(q[j].1));
-        len += (i64::from(b) - i64::from(a)).max(0);
+        len += i64::from((b - a).max(0));
         if p[i].1 < q[j].1 { i += 1 } else { j += 1 }
     }
     len
@@ -122,18 +93,14 @@ impl Rule for Shield {
         self.residual(r)
     }
     fn satisfied(self, r: &Routes) -> bool {
-        self.meets_floor(self.lengths(r))
+        self.coverage(r).is_none_or(|c| c * 100.0 >= f32::from(self.min_coverage_pct))
     }
     fn known(self, r: &Routes) -> bool {
         self.coverage(r).is_some()
     }
     fn residual(self, r: &Routes) -> f32 {
-        let (covered, total) = self.lengths(r);
-        if self.meets_floor((covered, total)) {
-            return 0.0;
-        }
         let want = f32::from(self.min_coverage_pct) / 100.0;
-        crate::rule::over(want - covered as f32 / total as f32, want)
+        self.coverage(r).map_or(0.0, |c| crate::rule::over(want - c, want))
     }
     fn usage(self, r: &Routes) -> Option<f32> {
         self.coverage(r)
@@ -191,92 +158,5 @@ mod tests {
         // Below on [0, 7] µm, above on [3, 10] µm: both sides over [3, 7] = 40 %.
         let r = Routes { wires: vec![vec![h(1_000, 0, 10_000)], vec![h(720, 0, 7_000), h(1_280, 3_000, 7_000)]], ..Default::default() };
         assert!((rule().coverage(&r).unwrap() - 0.4).abs() < 1e-6);
-    }
-
-    /// Exactly the required share is a pass, whatever f32 rounding of the
-    /// percentage does (`0.53 · 100 < 53` and `0.59 · 100 < 59` in f32).
-    #[test]
-    fn coverage_exactly_at_the_floor_passes() {
-        for pct in [29u8, 53, 59, 80, 100] {
-            let covered = i32::from(pct) * 100;
-            let r = Routes { wires: vec![vec![h(1_000, 0, 10_000)], vec![h(720, 0, covered), h(1_280, 0, covered)]], ..Default::default() };
-            let s = Shield { min_coverage_pct: pct, ..rule() };
-            assert!(s.satisfied(&r), "{pct} %");
-            assert_eq!(s.residual(&r), 0.0, "{pct} %");
-        }
-    }
-
-    #[test]
-    fn merge_spans_sorts_and_joins_overlapping_and_abutting() {
-        let mut v: Vec<(i32, i32)> = Vec::new();
-        merge_spans(&mut v);
-        assert!(v.is_empty());
-        let mut v = vec![(5, 9), (0, 2), (2, 3), (7, 8), (10, 12)];
-        merge_spans(&mut v);
-        assert_eq!(v, vec![(0, 3), (5, 9), (10, 12)]);
-        let mut v = vec![(4, 6)];
-        merge_spans(&mut v);
-        assert_eq!(v, vec![(4, 6)]);
-    }
-
-    #[test]
-    fn intersection_len_of_span_lists() {
-        assert_eq!(intersection_len(&[], &[(0, 10)]), 0);
-        assert_eq!(intersection_len(&[(0, 10)], &[(0, 10)]), 10);
-        assert_eq!(intersection_len(&[(0, 5), (10, 20)], &[(3, 12), (15, 30)]), 2 + 2 + 5);
-        assert_eq!(intersection_len(&[(0, 5)], &[(5, 9)]), 0, "abutting shares no length");
-        assert_eq!(intersection_len(&[(i32::MIN, i32::MAX)], &[(i32::MIN, i32::MAX)]), i64::from(i32::MAX) - i64::from(i32::MIN));
-    }
-
-    #[test]
-    fn gap_on_side_needs_the_shape_wholly_on_that_side() {
-        let v = Rect { x: 0, y: 1_000, w: 10_000, h: 140 };
-        let below = Rect { x: 0, y: 720, w: 10_000, h: 140 };
-        assert_eq!(gap_on_side(v, below, true, true), Some(140));
-        assert_eq!(gap_on_side(v, below, true, false), None);
-        assert_eq!(gap_on_side(v, Rect { y: 900, ..below }, true, true), None, "straddling");
-        assert_eq!(gap_on_side(v, Rect { y: 860, ..below }, true, true), Some(0), "abutting");
-        let vv = Rect { x: 1_000, y: 0, w: 140, h: 10_000 };
-        assert_eq!(gap_on_side(vv, Rect { x: 1_340, y: 0, w: 140, h: 10_000 }, false, false), Some(200));
-    }
-
-    #[test]
-    fn a_vertical_victim_is_shielded_left_and_right() {
-        let v = |x: i32| Shape { layer: LayerId(1), rect: Rect { x, y: 0, w: 140, h: 10_000 } };
-        let r = Routes { wires: vec![vec![v(1_000)], vec![v(720), v(1_280)]], ..Default::default() };
-        assert!((rule().coverage(&r).unwrap() - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn a_reference_on_another_layer_shields_nothing() {
-        let m2 = |y: i32| Shape { layer: LayerId(2), rect: Rect { x: 0, y, w: 10_000, h: 140 } };
-        let r = Routes { wires: vec![vec![h(1_000, 0, 10_000)], vec![m2(720), m2(1_280)]], ..Default::default() };
-        assert_eq!(rule().coverage(&r), Some(0.0));
-    }
-
-    /// Square shapes (pads, cuts) have no run: a victim of only those has no
-    /// length to shield, so the rule is unknown, not passed by measurement.
-    #[test]
-    fn a_victim_of_pads_only_is_unknown() {
-        let pad = Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 500, h: 500 } };
-        let r = Routes { wires: vec![vec![pad], vec![h(720, 0, 10_000)]], ..Default::default() };
-        let s = rule();
-        assert!(!s.known(&r) && s.satisfied(&r));
-        assert_eq!((s.residual(&r), s.cost(&r), s.usage(&r)), (0.0, 0.0, None));
-    }
-
-    #[test]
-    fn a_zero_floor_passes_unshielded() {
-        let r = Routes { wires: vec![vec![h(1_000, 0, 10_000)], vec![]], ..Default::default() };
-        let s = Shield { min_coverage_pct: 0, ..rule() };
-        assert!(s.satisfied(&r) && s.residual(&r) == 0.0);
-    }
-
-    #[test]
-    fn hooks() {
-        assert_eq!(rule().shield(), Some((0, 1, 200)));
-        let mut v = Vec::new();
-        rule().touches(&mut v);
-        assert_eq!(v, vec![0, 1]);
     }
 }

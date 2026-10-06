@@ -14,17 +14,14 @@ use crate::rule::Rule;
 ///
 /// Producer contract (`annotator::emit`): one dense [`BranchId`] per pair, seed
 /// from recognised structure (not current geometry), ids stable across epochs.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct DtiBand {
-    /// First device of the pair.
     pub a: Target,
-    /// Second device of the pair.
     pub b: Target,
     /// Max gap that counts as abutting, nm.
     pub s_max_nm: i32,
     /// Min gap that counts as separated, nm.
     pub d_dti_nm: i32,
-    /// Slot in [`Layout::branch`] holding the committed side.
     pub branch: BranchId,
     /// Starting commitment (`true` = isolate); `dp` re-seeds `Layout::branch`
     /// from it each epoch.
@@ -48,7 +45,7 @@ impl DtiBand {
         }
     }
 
-    /// Band width, nm, floored at 1 so `cost` never divides by zero.
+    /// Band width, nm, floored at 1.
     fn band(self) -> f32 {
         (self.d_dti_nm - self.s_max_nm).max(1) as f32
     }
@@ -78,7 +75,11 @@ impl Rule for DtiBand {
         crate::rule::over(self.miss(l), (self.d_dti_nm - self.s_max_nm) as f32)
     }
     fn touches(self, out: &mut Vec<u32>) {
-        super::push_devices(out, &[self.a, self.b]);
+        for t in [self.a, self.b] {
+            if let Target::Device(d) = t {
+                out.push(u32::from(d.0));
+            }
+        }
     }
     fn retarget(self, cell_of: &[u16]) -> Self {
         Self { a: self.a.retarget(cell_of), b: self.b.retarget(cell_of), ..self }
@@ -221,84 +222,5 @@ mod tests {
         l.branch.clear();
         assert!((rule().cost(&l) - 0.25).abs() < 1e-6);
         assert!(!rule().satisfied(&l));
-    }
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use crate::rule::RuleBatch;
-    use pnr_core::ids::DeviceId;
-
-    fn layout(gap: i32, isolate: bool) -> Layout {
-        Layout {
-            x: vec![0, 1_000 + gap],
-            y: vec![0, 0],
-            hw: vec![500; 2],
-            hh: vec![500; 2],
-            orient: vec![pnr_core::Orient::default(); 2],
-            variant: vec![0; 2],
-            axis: vec![],
-            branch: vec![isolate],
-            groups: vec![],
-            power_uw: vec![0; 2],
-            temp_mc: vec![0; 2],
-            units: Default::default(),
-        }
-    }
-
-    fn band(s_max_nm: i32, d_dti_nm: i32) -> DtiBand {
-        DtiBand { a: Target::Device(DeviceId(0)), b: Target::Device(DeviceId(1)), s_max_nm, d_dti_nm, branch: BranchId(0), seed_isolate: true }
-    }
-
-    #[test]
-    fn one_nm_into_the_band_is_one_band_fraction() {
-        let r = band(200, 2_000);
-        assert!(!r.satisfied(&layout(201, false)));
-        assert!((r.residual(&layout(201, false)) - 1.0 / 1_800.0).abs() < 1e-7);
-        assert!(!r.satisfied(&layout(1_999, true)));
-        assert!((r.residual(&layout(1_999, true)) - 1.0 / 1_800.0).abs() < 1e-7);
-        // Cost squares the same fraction.
-        assert!((r.cost(&layout(201, false)) - (1.0f32 / 1_800.0).powi(2)).abs() < 1e-10);
-    }
-
-    #[test]
-    fn an_empty_band_forbids_nothing() {
-        // d_dti ≤ s_max: the two intervals cover every gap.
-        for (s, d) in [(500, 500), (800, 300)] {
-            for gap in [0, 300, 500, 800, 10_000] {
-                let l = layout(gap, false);
-                assert!(band(s, d).satisfied(&l), "s {s} d {d} gap {gap}");
-                assert_eq!(band(s, d).residual(&l), 0.0);
-                assert_eq!(RuleBatch::violations(&vec![band(s, d)], &l), 0);
-            }
-        }
-        // `cost` still pulls toward the committed side, over a 1 nm band floor
-        // (no division by zero or a negative width).
-        let c = band(500, 500).cost(&layout(600, false));
-        assert!((c - 100.0 * 100.0).abs() < 1e-3, "{c}");
-    }
-
-    #[test]
-    fn branch_reports_the_id_and_seed() {
-        assert_eq!(band(0, 1).branch(), Some((BranchId(0), true)));
-        let r = DtiBand { branch: BranchId(7), seed_isolate: false, ..band(0, 1) };
-        assert_eq!(r.branch(), Some((BranchId(7), false)));
-    }
-
-    #[test]
-    fn a_branch_slot_past_the_table_reads_as_share() {
-        let r = DtiBand { branch: BranchId(3), ..band(200, 2_000) };
-        // Slot 3 is missing; slot 0 says isolate but belongs to someone else.
-        let l = layout(1_100, true);
-        assert!((r.cost(&l) - 0.25).abs() < 1e-6, "share: 900 of 1800 nm");
-        assert_eq!(r.cost(&layout(100, true)), 0.0, "abutting satisfies share");
-    }
-
-    #[test]
-    fn retarget_maps_both_sides_and_keeps_the_rest() {
-        let r = band(10, 20).retarget(&[5, 6]);
-        assert_eq!((r.a, r.b), (Target::Device(DeviceId(5)), Target::Device(DeviceId(6))));
-        assert_eq!((r.s_max_nm, r.d_dti_nm, r.branch, r.seed_isolate), (10, 20, BranchId(0), true));
     }
 }

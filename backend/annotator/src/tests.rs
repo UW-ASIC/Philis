@@ -23,7 +23,6 @@ pub(crate) fn fet(name: &str, kind: DeviceKind, g: u16, d: u16, s: u16, b: u16, 
     }
 }
 
-/// Nets named in order: `names[i]` is `NetId(i)`.
 pub(crate) fn nets(names: &[&str]) -> Vec<Net> {
     names.iter().map(|n| Net { name: (*n).into() }).collect()
 }
@@ -296,6 +295,27 @@ fn dti_bands_are_one_hard_batch_with_dense_ids_seeded_share() {
     for (i, &(id, isolate)) in seeds.iter().enumerate() {
         assert_eq!(usize::from(id.0), i, "ids must be dense in emission order");
         assert!(!isolate, "matched structures seed `share` — one trench by design");
+    }
+}
+
+
+#[test]
+fn abutment_excludes_mixed_polarity_groups() {
+    // D16: `groups` is the recognition table and deliberately contains composites
+    // spanning both polarities; `abutment` is diffusion-sharing permission. Granting
+    // abutment on a mixed group lets an NMOS and a PMOS merge implants — DRC-clean,
+    // LVS-fatal, and unrepairable downstream because nothing is illegal.
+    let nl = ota(); // XM1/XM2/XM5 Nmos, XM3/XM4 Pmos
+    let p = annotate(&nl, &AnnotationConfig::default());
+    assert_eq!(p.abutment.len(), p.groups.len(), "abutment is indexed by GroupId too");
+    for (gi, (grp, ab)) in p.groups.iter().zip(&p.abutment).enumerate() {
+        let mut kinds = grp.iter().filter_map(|d| nl.devices.get(d.0 as usize)).map(|d| d.kind);
+        let first = kinds.next();
+        let same = kinds.all(|k| Some(k) == first);
+        // A mixed group is truncated to one member (which grants no abutment, since
+        // `group_index` ignores groups below two members) rather than emptied — an
+        // empty group panics `Layout::bbox`.
+        assert_eq!(ab.len(), if same { grp.len() } else { 1 }, "group {gi}: {grp:?} -> {ab:?}");
     }
 }
 

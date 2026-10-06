@@ -20,22 +20,9 @@ pub enum Fill {
     Balanced,
 }
 
-/// Doubled offset `(2r − rows + 1, 2c − cols + 1)` of row-major cell `i`
-/// from the grid centre: integer for every grid parity.
-fn doubled_offset(i: usize, rows: usize, cols: usize) -> (i64, i64) {
-    (2 * (i / cols) as i64 - rows as i64 + 1, 2 * (i % cols) as i64 - cols as i64 + 1)
-}
-
-/// Spiral sort key of cell `i`: doubled squared radius, then angle.
-fn spiral_key(i: usize, rows: usize, cols: usize) -> (i64, f64) {
-    let (dr, dc) = doubled_offset(i, rows, cols);
-    (dr * dr + dc * dc, (dr as f64).atan2(dc as f64))
-}
-
 /// Grids `(rows, cols)` that can hold `counts` point-symmetrically, nearest
 /// square first (aspect compared exactly), then fewest empty cells, then
-/// fewest rows; the `1 × T` row is always offered, last unless it passes the
-/// aspect filter on its own. With exactly one odd member both
+/// fewest rows; the `1 × T` row always last. With exactly one odd member both
 /// sides are odd, so it takes the centre and the empties pair up. Aspect
 /// above `max_aspect` (≥ 1) is dropped. Empty for `T = 0`.
 #[must_use]
@@ -66,21 +53,22 @@ pub fn grids(counts: &[u16], max_aspect: f64) -> Vec<(usize, usize)> {
     out
 }
 
-/// Whether any grid admits an exact assignment: at most one member odd
-/// (an empty set is trivially feasible).
+/// Whether any grid admits an exact assignment: at most one member odd.
 #[must_use]
 pub fn cc_feasible(counts: &[u16]) -> bool {
     counts.iter().filter(|&&c| c % 2 == 1).count() <= 1
 }
 
-/// Every cell index of a `rows × cols` grid, nearest the centre first
-/// (doubled offsets, r²), ties by angle `atan2(dr, dc)`. Empty for an empty grid.
+/// Cells of a `rows × cols` grid nearest the centre first (doubled offsets,
+/// r²), ties by angle `atan2(dr, dc)`.
 #[must_use]
 pub fn spiral(rows: usize, cols: usize) -> Vec<usize> {
-    // Keys once (one atan2 per cell), not twice per comparison.
-    let keys: Vec<(i64, f64)> = (0..rows * cols).map(|i| spiral_key(i, rows, cols)).collect();
+    let key = |i: usize| {
+        let (dr, dc) = (2 * (i / cols) as i64 - rows as i64 + 1, 2 * (i % cols) as i64 - cols as i64 + 1);
+        ((dr * dr + dc * dc), (dr as f64).atan2(dc as f64))
+    };
     let mut order: Vec<usize> = (0..rows * cols).collect();
-    order.sort_by(|&a, &b| keys[a].0.cmp(&keys[b].0).then(keys[a].1.total_cmp(&keys[b].1)));
+    order.sort_by(|&a, &b| key(a).0.cmp(&key(b).0).then(key(a).1.total_cmp(&key(b).1)));
     order
 }
 
@@ -91,17 +79,16 @@ pub fn spiral(rows: usize, cols: usize) -> Vec<usize> {
 /// Odd counts first: one takes the centre cell of an odd grid, the rest pair
 /// up across the centre (inexact). Then reflected pairs by `fill`; `Compact`
 /// and `Dispersed` serve the largest member first.
-///
-/// Requires `rows · cols ≥ Σcounts` and at most 256 members (owners are
-/// `u8`); debug builds assert the first. Panics if the grid runs out of free
-/// reflected pairs under `Fill::Dispersed`.
 #[must_use]
 pub fn centro_assign(counts: &[u16], rows: usize, cols: usize, fill: Fill) -> (Vec<Option<u8>>, bool) {
     let total: usize = counts.iter().map(|&u| usize::from(u)).sum();
     debug_assert!(rows * cols >= total, "{rows}×{cols} cannot hold {total}");
     let n = rows * cols;
-    let mut g = Grid::new(rows, cols);
-    let key = |i: usize| spiral_key(i, rows, cols);
+    let mut g = Grid { cols, slot: vec![None; n] };
+    let key = |i: usize| {
+        let (dr, dc) = (2 * (i / cols) as i64 - rows as i64 + 1, 2 * (i % cols) as i64 - cols as i64 + 1);
+        ((dr * dr + dc * dc), (dr as f64).atan2(dc as f64))
+    };
     let order = spiral(rows, cols);
     // Odd counts first: the centre cell (odd grid) for one, reflected pairs
     // split between two for the rest.
@@ -188,73 +175,49 @@ pub fn segment_row(counts: &[u16]) -> (Vec<usize>, bool) {
     (slots.into_iter().map(|s| usize::from(s.expect("a 1×Σc row has no empty slot"))).collect(), exact)
 }
 
-/// Every count ×2 when ≥ 2 counts are odd, else unchanged: the smallest
-/// scaling [`cc_feasible`] accepts. Overflows (panics in debug) above 32767.
+/// Every count ×2 when ≥ 2 counts are odd, else unchanged.
 #[must_use]
 pub fn scale2(counts: &[u16]) -> Vec<u16> {
     let k = if cc_feasible(counts) { 1 } else { 2 };
     counts.iter().map(|&c| c * k).collect()
 }
 
-/// A row-major unit grid under construction: `slot[i]` is the owner of cell
-/// `i`, `None` while free. Invariant: `slot.len()` is a multiple of `cols`.
-/// Point reflection through the centre is index reversal:
-/// `(R-1-r)·C + (C-1-c) = RC-1-i`.
+/// A row-major unit grid under construction. Point reflection through the
+/// centre is index reversal: `(R-1-r)·C + (C-1-c) = RC-1-i`.
 pub struct Grid {
-    /// Columns per row (> 0).
     pub cols: usize,
-    /// Owner per cell, row-major.
     pub slot: Vec<Option<u8>>,
 }
 
-/// A sub-rectangle `(r0, c0, rows, cols)` of a [`Grid`], in cells.
-pub type CellRect = (usize, usize, usize, usize);
-
 impl Grid {
-    /// An all-free `rows × cols` grid; upholds the `slot.len() % cols == 0`
-    /// invariant by construction.
-    #[must_use]
-    pub fn new(rows: usize, cols: usize) -> Self {
-        Grid { cols, slot: vec![None; rows * cols] }
-    }
-
-    /// The cell `i` reflects to through the grid centre. Panics on an empty grid.
-    #[must_use]
     pub fn refl(&self, i: usize) -> usize {
         self.slot.len() - 1 - i
     }
 
-    /// Whether `i` and its reflection are distinct and both free (the centre
-    /// cell of an odd grid is never a pair).
-    #[must_use]
     pub fn free_pair(&self, i: usize) -> bool {
         let j = self.refl(i);
         i != j && self.slot[i].is_none() && self.slot[j].is_none()
     }
 
-    /// Gives `i` and its reflection to owner `s`, overwriting either.
     pub fn put_pair(&mut self, i: usize, s: u8) {
         let j = self.refl(i);
         self.slot[i] = Some(s);
         self.slot[j] = Some(s);
     }
 
-    /// Cells of the `rows × cols` rectangle at `(r0, c0)`, row-major.
-    fn rect(&self, (r0, c0, rows, cols): CellRect) -> Vec<usize> {
+    /// Cells of the `rows × cols` rectangle at `(r0, c0)`.
+    pub fn rect(&self, (r0, c0, rows, cols): (usize, usize, usize, usize)) -> Vec<usize> {
         (r0..r0 + rows).flat_map(|r| (c0..c0 + cols).map(move |c| (r, c))).map(|(r, c)| r * self.cols + c).collect()
     }
 
-    /// `(row, col)` of cell `i`.
-    fn rc(&self, i: usize) -> (i64, i64) {
+    pub fn rc(&self, i: usize) -> (i64, i64) {
         ((i / self.cols) as i64, (i % self.cols) as i64)
     }
 
     /// Complete chessboard of C0..=Ctop over `rect` (`2^top` cells): Ctop on
     /// the black squares, C0/C1 on the most central pair, each other bit by
-    /// [`Grid::spread`]. Panics when `rect` has no free reflected pair left
-    /// for C0/C1 or a bit (the rectangle must hold exactly `2^top` cells and
-    /// be centred).
-    pub fn chessboard(&mut self, rect: CellRect, top: u8) {
+    /// [`Grid::spread`].
+    pub fn chessboard(&mut self, rect: (usize, usize, usize, usize), top: u8) {
         let cells = self.rect(rect);
         for &i in &cells {
             let (r, c) = self.rc(i);
@@ -266,8 +229,8 @@ impl Grid {
         // pair nearest the centre before the spread claims it.
         let rows = self.slot.len() / self.cols;
         let off = |i: usize| {
-            let (dr, dc) = doubled_offset(i, rows, self.cols);
-            dr * dr + dc * dc
+            let (r, c) = self.rc(i);
+            (2 * r - rows as i64 + 1).pow(2) + (2 * c - self.cols as i64 + 1).pow(2)
         };
         let mid = cells.iter().copied().filter(|&i| self.free_pair(i)).min_by_key(|&i| (off(i), i)).expect("C0/C1 pair");
         self.slot[mid] = Some(0);
@@ -280,10 +243,9 @@ impl Grid {
 
     /// `count` units of `s` from `cells`, in reflected pairs, each pair the
     /// free cell farthest from the units already placed (max dispersion).
-    /// Rounds an odd `count` up to the next pair. Panics when `cells` has no
-    /// free reflected pair left.
-    // ponytail: greedy farthest-point, O(cells²) per bit; fine to 256 units.
-    fn spread(&mut self, cells: &[usize], s: u8, count: usize) {
+    ///
+    /// ponytail: greedy farthest-point, O(cells²) per bit; fine to 256 units.
+    pub fn spread(&mut self, cells: &[usize], s: u8, count: usize) {
         let mut mine: Vec<(i64, i64)> = Vec::new();
         while mine.len() < count {
             let best = cells
@@ -302,13 +264,13 @@ impl Grid {
         }
     }
 
-    /// Algorithm 1 step 2 for one corridor (`outer` minus `inner`): `2^(i−1)`
-    /// cells of Ci in reflected pairs, block-chessboard (block side `bs > 0`
-    /// cells) first, Ci+1 on every cell still free. Requires `i ≥ 2`.
-    // ponytail: the paper walks the upper-half blocks explicitly; this orders
-    // the corridor by block parity and lets the reflection mirror it, so a
-    // block whose mirror has the other parity mixes colours.
-    pub fn corridor(&mut self, outer: CellRect, inner: CellRect, i: u8, bs: usize) {
+    /// Algorithm 1 step 2 for one corridor (`outer` minus `inner`): Ci pairs
+    /// block-chessboard first, Ci+1 on what is left.
+    ///
+    /// ponytail: the paper walks the upper-half blocks explicitly; this orders
+    /// the corridor by block parity and lets the reflection mirror it, so a
+    /// block whose mirror has the other parity mixes colours.
+    pub fn corridor(&mut self, outer: (usize, usize, usize, usize), inner: (usize, usize, usize, usize), i: u8, bs: usize) {
         let inside = self.rect(inner);
         let mut cells: Vec<usize> = self.rect(outer).into_iter().filter(|c| !inside.contains(c)).collect();
         cells.sort_by_key(|&c| {
@@ -338,8 +300,7 @@ pub enum Outer {
     Source,
 }
 
-/// Whether finger row `s` (owner per finger) never joins two different
-/// devices across the wrong region:
+/// Whether `s` never joins two different devices across the wrong region:
 /// the boundary between fingers `i, i+1` is region `i+1`, legal only on a
 /// source: even (`S`) when `outer` is `Source`, odd (`S`) when `outer` is
 /// `Drain` (mosfet.rs `is_s`).
@@ -374,8 +335,7 @@ pub fn nth_order_rows(order: u8, row: &[u8]) -> Vec<Vec<u8>> {
 
 /// Hastings eqs 8.27/8.28 sweep (hastings.txt L23725–23859): for `N` in
 /// `1..=n_max`, `M = round(N·R_M/R_N)`, `S = |N/R_N − M/R_M|` (1/Ω).
-/// Unsorted, index `N − 1`; returns `(N, M, S)`. Resistances must be
-/// positive; `M` saturates at `u16::MAX`.
+/// Unsorted, index `N − 1`; returns `(N, M, S)`.
 #[must_use]
 pub fn segmentation(r_n_ohm: f64, r_m_ohm: f64, n_max: u16) -> Vec<(u16, u16, f64)> {
     (1..=n_max)
@@ -389,8 +349,7 @@ pub fn segmentation(r_n_ohm: f64, r_m_ohm: f64, n_max: u16) -> Vec<(u16, u16, f6
 /// Hastings eqs 8.29–8.33 at one segment value `R0`: `M = ⌊R_M/R0⌋`,
 /// `j = R_M/R0 − M`, `N = ⌊R_N/R0⌋`, `k = R_N/R0 − N`,
 /// `S = |(N+1)/(N+k) − (M+1)/(M+j)|` as printed (GAP-20: Fig. 8.20 swaps `j`
-/// and `k`). Returns `(M, N, j, k, S)`; `S` is infinite when `R0` exceeds
-/// both resistances (`N + k = 0`).
+/// and `k`). Returns `(M, N, j, k, S)`.
 #[must_use]
 pub fn partial_segments(r_n_ohm: f64, r_m_ohm: f64, r0_ohm: f64) -> (u16, u16, f64, f64, f64) {
     let (qm, qn) = (r_m_ohm / r0_ohm, r_n_ohm / r0_ohm);
@@ -402,8 +361,7 @@ pub fn partial_segments(r_n_ohm: f64, r_m_ohm: f64, r0_ohm: f64) -> (u16, u16, f
 /// Deals `p` reflected pairs of fingers at `seq[off..off + 2p]` in quads
 /// (token `t` with its mirror `p − 1 − t`), each quad to the member whose
 /// share of the centred weight `Σ(2i − n + 1)²` is furthest ahead of what it
-/// already holds in `seq`. `h[d]` is device `d`'s remaining quad count;
-/// panics when every `h[d]` runs out before `p / 2` quads are dealt.
+/// already holds in `seq`. `h[d]` is device `d`'s remaining quad count.
 fn deal(counts: &[u16], n: usize, seq: &mut [Option<usize>], p: usize, h: &mut [usize], off: usize) {
     let k = |i: usize| -> i64 {
         let v = 2 * i as i64 - n as i64 + 1;
@@ -503,10 +461,10 @@ pub fn diffusion_cc_row(counts: &[u16], outer: Outer) -> Option<Vec<usize>> {
             best.map(|(seq, _)| seq)
         }
         Outer::Source => {
-            let n: usize = counts.iter().map(|&c| usize::from(c)).sum();
-            if n == 0 || counts.iter().any(|&c| c % 2 != 0) {
+            if counts.iter().any(|&c| c % 2 != 0) {
                 return None;
             }
+            let n: usize = counts.iter().map(|&c| usize::from(c)).sum();
             let p = n / 2;
             let pairs: Vec<usize> = counts.iter().map(|&x| usize::from(x) / 2).collect();
             let odd: Vec<usize> = (0..pairs.len()).filter(|&d| pairs[d] % 2 == 1).collect();

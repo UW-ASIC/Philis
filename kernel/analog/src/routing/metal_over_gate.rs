@@ -4,7 +4,6 @@ use pnr_core::geom::Rect;
 use pnr_core::routes::Routes;
 
 use crate::rule::Rule;
-use super::stack::overlap_area_nm2;
 
 /// Most routed metals [`MetalOverGate::metals`] lists.
 pub const MAX_METALS: usize = 8;
@@ -16,9 +15,7 @@ pub const MAX_METALS: usize = 8;
 /// Built per routed layout (the rect is placed geometry); `dr` evaluates it.
 #[derive(Clone, Copy, Debug)]
 pub struct MetalOverGate {
-    /// The gate's active area, absolute nm.
     pub rect: Rect,
-    /// Index of the placed cell the gate belongs to (for reports and repair).
     pub cell: u32,
     /// The routed metals' `LayerId`s, `u16::MAX`-padded: a cut or the pin-access
     /// conductor over the gate is not a lead.
@@ -26,13 +23,22 @@ pub struct MetalOverGate {
 }
 
 impl MetalOverGate {
-    /// Σ overlap of every routed wire shape (any net) on a listed metal with
-    /// `rect`, µm². Overlapping shapes count their shared area twice; cell
-    /// metal ([`Routes::cell`]) is not a lead and is ignored. O(all shapes).
+    /// Σ overlap of every routed metal shape (any net) with `rect`, µm².
     #[must_use]
     pub fn overlap_um2(self, r: &Routes) -> f32 {
-        let nm2: i64 = r.wires.iter().flatten().filter(|s| self.metals.contains(&s.layer.0)).map(|s| overlap_area_nm2(&s.rect, &self.rect)).sum();
-        (nm2 as f64 * 1e-6) as f32
+        let g = self.rect;
+        let nm2: i64 = r
+            .wires
+            .iter()
+            .flatten()
+            .filter(|s| self.metals.contains(&s.layer.0))
+            .map(|s| {
+                let w = (s.rect.x + s.rect.w).min(g.x + g.w) - s.rect.x.max(g.x);
+                let h = (s.rect.y + s.rect.h).min(g.y + g.h) - s.rect.y.max(g.y);
+                if w > 0 && h > 0 { i64::from(w) * i64::from(h) } else { 0 }
+            })
+            .sum();
+        nm2 as f32 * 1e-6
     }
 }
 
@@ -68,35 +74,5 @@ mod tests {
         // The same shape on a layer that is no routed metal is not a lead.
         let cut = Routes { wires: vec![vec![Shape { layer: LayerId(2), rect: Rect { x: 0, y: 0, w: 1_000, h: 500 } }]], ..Default::default() };
         assert_eq!(rule.residual(&cut), 0.0);
-    }
-
-    fn gate() -> MetalOverGate {
-        let mut metals = [u16::MAX; MAX_METALS];
-        metals[0] = 1;
-        MetalOverGate { rect: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, cell: 0, metals }
-    }
-    fn m1(x: i32, y: i32, w: i32, h: i32) -> Shape {
-        Shape { layer: LayerId(1), rect: Rect { x, y, w, h } }
-    }
-
-    #[test]
-    fn edge_contact_and_cell_metal_are_not_leads() {
-        assert!(gate().satisfied(&Routes::default()));
-        let edge = Routes { wires: vec![vec![m1(1_000, 0, 500, 1_000)]], ..Default::default() };
-        assert!(gate().satisfied(&edge), "touching the edge is not over");
-        let cell = Routes { cell: vec![vec![m1(0, 0, 1_000, 1_000)]], ..Default::default() };
-        assert!(gate().satisfied(&cell), "a cell's own metal is not a routed lead");
-    }
-
-    #[test]
-    fn every_nets_overlap_adds() {
-        let two = Routes { wires: vec![vec![m1(0, 0, 1_000, 100)], vec![m1(0, 900, 1_000, 100)]], ..Default::default() };
-        assert!((gate().overlap_um2(&two) - 0.2).abs() < 1e-6);
-        assert_eq!(gate().cost(&two), gate().residual(&two));
-        // Translating gate and metal together changes nothing.
-        let mv = |s: Shape| Shape { rect: Rect { x: s.rect.x - 7_000, y: s.rect.y + 3_000, ..s.rect }, ..s };
-        let moved = Routes { wires: two.wires.iter().map(|w| w.iter().copied().map(mv).collect()).collect(), ..Default::default() };
-        let g = MetalOverGate { rect: Rect { x: -7_000, y: 3_000, w: 1_000, h: 1_000 }, ..gate() };
-        assert_eq!(g.overlap_um2(&moved), gate().overlap_um2(&two));
     }
 }

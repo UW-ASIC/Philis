@@ -8,8 +8,6 @@
 //! them for every (cell, variant) so a rule can read the chosen variant's units
 //! in world coordinates from the [`Layout`] alone.
 
-use std::num::NonZeroU32;
-
 use crate::geom::{Orient, Rect};
 use crate::ids::DeviceId;
 use crate::layout::Layout;
@@ -19,85 +17,55 @@ use crate::layout::Layout;
 pub struct Unit {
     /// Member index within the cell's group (the `d{owner}:` pin prefix).
     pub owner: u8,
-    /// Active-area centre x, nm.
+    /// Active-area centre, nm.
     pub x: i32,
-    /// Active-area centre y, nm.
     pub y: i32,
     /// Electrical weight (MOS: gate area W·L, nm²). Moments weight by this,
     /// never by drawn outline.
     pub weight: i64,
     /// Unit S→D current direction, each component in `{-1, 0, 1}`.
     pub phi: (i8, i8),
-    /// Channel centre to the diffusion's two ends along the current, `(sa, sb)`
-    /// nm (BSIM4's `SA + L/2`, `SB + L/2`: the LOD stress distances); `None` =
-    /// not a MOS finger. Build from signed spans with [`Unit::diffusion`].
-    pub sa_sb: Option<(NonZeroU32, NonZeroU32)>,
-}
-
-impl Unit {
-    /// `(sa, sb)` for [`Unit::sa_sb`]: `Some` only when both spans are positive.
-    #[must_use]
-    pub fn diffusion(sa: i32, sb: i32) -> Option<(NonZeroU32, NonZeroU32)> {
-        let nz = |v: i32| u32::try_from(v).ok().and_then(NonZeroU32::new);
-        nz(sa).zip(nz(sb))
-    }
+    /// Channel centre to the diffusion's two ends along the current, nm
+    /// (BSIM4's `SA + L/2`, `SB + L/2`: the LOD stress distances). `0` = not a
+    /// MOS finger.
+    pub sa: i32,
+    pub sb: i32,
 }
 
 /// Every (cell, variant)'s units, SoA. Immutable once built; shared by `Arc`.
-///
-/// Layout: cells own consecutive variant *slots*; each slot owns a consecutive
-/// unit range. The unit columns (`owner` … `lod`) are parallel.
 #[derive(Default, Debug)]
 pub struct UnitLib {
     /// `cell_of[device]` = its cell. Empty = no units known (rules fall back).
     pub cell_of: Vec<u16>,
-    /// First slot of each cell, plus one sentinel; slot = `slot0[cell] +
-    /// variant`, valid while `< slot0[cell + 1]`.
+    /// First slot of each cell; slot = `slot0[cell] + variant`.
     slot0: Vec<u32>,
-    /// Per slot plus one sentinel: unit range start (`start[slot]..start[slot + 1]`).
+    /// Per slot: unit range start (`start[slot]..start[slot + 1]`) and the
+    /// macro bbox the local frame is relative to.
     start: Vec<u32>,
-    /// Per slot: the macro bbox the local frame is relative to.
     bbox: Vec<Rect>,
-    /// Per unit: the schematic device that owns it.
     owner: Vec<DeviceId>,
-    /// Per unit: local-frame centre x, nm.
     x: Vec<i32>,
-    /// Per unit: local-frame centre y, nm.
     y: Vec<i32>,
-    /// Per unit: electrical weight ([`Unit::weight`]).
     weight: Vec<i64>,
-    /// Per unit: local-frame S→D direction.
     phi: Vec<(i8, i8)>,
-    /// Per unit: LOD stress term, 1/µm ([`PlacedUnit::lod`]).
-    lod: Vec<Option<f32>>,
+    lod: Vec<f32>,
 }
 
 /// A unit placed in the world: owner is the schematic device.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PlacedUnit {
-    /// Schematic device carrying this unit's current.
     pub owner: DeviceId,
-    /// World centre x, nm.
     pub x: i32,
-    /// World centre y, nm.
     pub y: i32,
-    /// Electrical weight ([`Unit::weight`]).
     pub weight: i64,
-    /// World S→D direction, each component in `{-1, 0, 1}`.
     pub phi: (i8, i8),
-    /// LOD stress term `1/(SA+L/2) + 1/(SB+L/2)`, 1/µm; `None` = not a MOS
-    /// finger.
-    pub lod: Option<f32>,
+    /// LOD stress term `1/(SA+L/2) + 1/(SB+L/2)`, 1/µm; `NaN` = unknown.
+    pub lod: f32,
 }
 
 impl UnitLib {
-    /// Builds from each cell's variants (`(bbox, units)` per alternative, cell
-    /// `i` being the `i`-th item of `variants`) and each cell's member devices
-    /// (`members[cell][owner]`). A unit whose `owner` is not a member is
-    /// dropped. A unit's LOD term is known only when it has [`Unit::sa_sb`].
-    ///
-    /// # Panics
-    /// If `variants` yields more cells than `members` has rows.
+    /// Build from each cell's variants (`(bbox, units)` per alternative) and
+    /// each cell's member devices (`members[cell][owner]`).
     #[must_use]
     pub fn build<'a>(
         cell_of: Vec<u16>,
@@ -117,7 +85,7 @@ impl UnitLib {
                     lib.y.push(u.y);
                     lib.weight.push(u.weight);
                     lib.phi.push(u.phi);
-                    lib.lod.push(u.sa_sb.map(|(sa, sb)| 1e3 / sa.get() as f32 + 1e3 / sb.get() as f32));
+                    lib.lod.push(if u.sa > 0 && u.sb > 0 { 1e3 / u.sa as f32 + 1e3 / u.sb as f32 } else { f32::NAN });
                 }
             }
         }
@@ -126,19 +94,14 @@ impl UnitLib {
         lib
     }
 
-    /// Returns `true` with no unit data: rules must fall back or report unknown.
+    /// No unit data: rules must fall back or report unknown.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.owner.is_empty()
     }
 
-    /// Units of `cell`'s current variant (`l.variant[cell]`, `0` when absent),
-    /// turned by `l.orient[cell]` and placed with the same stamp as
-    /// [`crate::place_macro`], in world coordinates. Empty when the cell or
-    /// variant is unknown to the library.
-    ///
-    /// # Panics
-    /// If the library knows `cell` but `l.x`/`l.y`/`l.hw`/`l.hh` are shorter.
+    /// Units of `cell`'s current variant, in world coordinates. Empty when the
+    /// cell or variant is unknown.
     pub fn placed(&self, l: &Layout, cell: usize) -> impl Iterator<Item = PlacedUnit> + '_ {
         let v = l.variant.get(cell).copied().unwrap_or(0) as usize;
         let slot = (cell < self.slot0.len().saturating_sub(1))
@@ -158,8 +121,7 @@ impl UnitLib {
         })
     }
 
-    /// Every placed unit owned by `device`, in its cell's unit order. Empty
-    /// when the device has no cell.
+    /// Every placed unit owned by `device`.
     pub fn of_device(&self, l: &Layout, device: DeviceId) -> impl Iterator<Item = PlacedUnit> + '_ {
         let cell = self.cell_of.get(device.0 as usize).map_or(usize::MAX, |&c| c as usize);
         self.placed(l, cell).filter(move |u| u.owner == device)
@@ -196,8 +158,8 @@ mod tests {
     /// One cell, one variant: a 1000×200 bbox with two fingers of devices 7, 9.
     fn lib() -> UnitLib {
         let units = [
-            Unit { owner: 0, x: 100, y: 100, weight: 5, phi: (1, 0), sa_sb: None },
-            Unit { owner: 1, x: 900, y: 100, weight: 5, phi: (-1, 0), sa_sb: None },
+            Unit { owner: 0, x: 100, y: 100, weight: 5, phi: (1, 0), sa: 0, sb: 0 },
+            Unit { owner: 1, x: 900, y: 100, weight: 5, phi: (-1, 0), sa: 0, sb: 0 },
         ];
         let bbox = Rect { x: 0, y: 0, w: 1000, h: 200 };
         let alts = [(bbox, &units[..])];

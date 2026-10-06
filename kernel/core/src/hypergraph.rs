@@ -8,18 +8,10 @@
 use crate::ids::{DeviceId, NetId};
 use crate::netlist::{DeviceKind, Netlist};
 
-/// Device↔net incidence in both directions, plus the per-device and per-net
-/// data recognisers key off. Built once per netlist by
-/// [`BipartiteHypergraph::from_netlist`]; read-only afterwards.
-///
-/// Invariant: `device_nets`, `kinds` and `terminals` are device-length;
-/// `net_devices` and `net_names` are net-length; `terminals[d]` is parallel to
-/// `device_nets[d]`.
 pub struct BipartiteHypergraph {
     /// Nets per device, in terminal order, by [`DeviceId`].
     pub device_nets: Vec<Vec<NetId>>,
-    /// Devices per net, by [`NetId`], ascending. A device appears once per
-    /// terminal on the net (a diode-connected FET lists twice on its gate net).
+    /// Devices per net, by [`NetId`].
     pub net_devices: Vec<Vec<DeviceId>>,
     /// Kind per device, parallel to `device_nets`.
     pub kinds: Vec<DeviceKind>,
@@ -29,11 +21,18 @@ pub struct BipartiteHypergraph {
     pub net_names: Vec<String>,
 }
 
+/// `netlist.into_bipartite_hypergraph()`; same as [`BipartiteHypergraph::from_netlist`].
+pub trait IntoBipartiteHypergraph {
+    fn into_bipartite_hypergraph(&self) -> BipartiteHypergraph;
+}
+
+impl IntoBipartiteHypergraph for Netlist {
+    fn into_bipartite_hypergraph(&self) -> BipartiteHypergraph {
+        BipartiteHypergraph::from_netlist(self)
+    }
+}
+
 impl BipartiteHypergraph {
-    /// Builds both incidence directions from `nl`. O(devices + terminals + nets).
-    ///
-    /// # Panics
-    /// If a terminal names a net past `nl.nets`.
     #[must_use]
     pub fn from_netlist(nl: &Netlist) -> Self {
         let mut net_devices = vec![Vec::new(); nl.nets.len()];
@@ -51,7 +50,6 @@ impl BipartiteHypergraph {
         }
     }
 
-    /// Number of devices (rows of `device_nets`).
     #[must_use]
     pub fn device_count(&self) -> usize {
         self.device_nets.len()

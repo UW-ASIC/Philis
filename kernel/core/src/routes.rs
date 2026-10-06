@@ -6,10 +6,9 @@ use crate::ids::NetId;
 /// `(cut, layer below, layer above)`: a cut and the two conductors it joins.
 pub type Join = (LayerId, LayerId, LayerId);
 
-/// Returns whether two shapes that touch in xy conduct into each other: same
-/// layer, or one is a cut that `joins` lists as joining the other's layer.
-/// Metals on different layers that overlap in xy do not. Ignores geometry;
-/// symmetric. O(|joins|).
+/// Two touching shapes conduct into each other: same layer, or one is a cut
+/// joining the other's layer. Metals on non-adjacent layers that overlap in xy
+/// do not.
 #[must_use]
 pub fn conductor_layers_meet(a: &Shape, b: &Shape, joins: &[Join]) -> bool {
     let joined = |cut: LayerId, other: LayerId| joins.iter().any(|&(c, lo, hi)| c == cut && (other == lo || other == hi));
@@ -42,19 +41,17 @@ pub fn open_components(shapes: &[Shape], joins: &[Join]) -> usize {
     parts.saturating_sub(1)
 }
 
-/// A routed terminal and the DC current it draws from its net.
+/// A routed terminal and the DC current it draws from its net, µA
+/// (+ into the device); `None` = unknown.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Terminal {
-    /// Pin rectangle, absolute nm.
     pub at: Rect,
-    /// DC current, µA (+ into the device); `None` = unknown.
     pub ua: Option<f32>,
 }
 
 /// A gate pin, the device it gates and that device's gate-oxide area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GatePin {
-    /// Where the conductor meets the gate, absolute nm.
     pub at: Rect,
     /// Schematic device id; `u32::MAX` = unknown.
     pub dev: u32,
@@ -62,9 +59,6 @@ pub struct GatePin {
     pub nm2: i64,
 }
 
-/// Per-net realised routing, every table indexed by [`NetId`]. Tables may be
-/// shorter than the netlist (nets the router never touched); the accessors
-/// read a missing row as empty.
 #[derive(Default, Clone)]
 pub struct Routes {
     /// Drawn wire/via shapes per net, by [`NetId`].
@@ -110,10 +104,7 @@ impl Routes {
 
     /// Debug-only stage-boundary check: no degenerate shapes, and each net is
     /// one conductor ([`open_components`] `== 0` under `joins`). An open here is
-    /// an LVS `unconnected_pin` later. O(k²) per net; a no-op in release builds.
-    ///
-    /// # Panics
-    /// In debug builds, on a degenerate shape or an open net, naming `ctx`.
+    /// an LVS `unconnected_pin` later. O(k²) per net.
     #[inline]
     pub fn debug_check_joined(&self, ctx: &str, joins: &[Join]) {
         if !cfg!(debug_assertions) {
@@ -128,8 +119,7 @@ impl Routes {
         }
     }
 
-    /// Drawn metal length of `net`, nm: Σ of each shape's long side (`0` when
-    /// unrouted). Counts overlap at joints twice.
+    /// Drawn metal length of `net`, nm: Σ of each shape's long side.
     #[must_use]
     pub fn length(&self, net: NetId) -> i64 {
         self.shapes(net).iter().map(|s| i64::from(s.rect.w.max(s.rect.h))).sum()

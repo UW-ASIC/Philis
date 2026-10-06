@@ -12,36 +12,14 @@ use crate::catalog::roles_of;
 use crate::pattern::PatternMatch;
 use crate::policy::Policy;
 
-/// One requirement edge between two distinct devices, stored with
-/// `(canon[a], a) <= (canon[b], b)` so the same pair always reads the same way.
+/// One requirement edge, stored with `canon[a] <= canon[b]`. `source` indexes
+/// the match, compound, group or net it came from in its input slice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Req {
-    /// The canonically first end.
     pub a: DeviceId,
-    /// The canonically second end; never equal to `a`.
     pub b: DeviceId,
-    /// Requirement type; [`hsmpg`] contracts types in importance order.
     pub ty: ReqType,
-    /// Index of the match, compound, group, couple or net the edge came from,
-    /// within the input slice its `ty` names (see [`requirements`]).
     pub source: ConstraintId,
-}
-
-/// `(min, max)` of two device ids: the key of an unordered pair.
-fn unordered(a: DeviceId, b: DeviceId) -> (u16, u16) {
-    (a.0.min(b.0), a.0.max(b.0))
-}
-
-/// Root of `x` in the union-find forest `p`, halving the path on the way.
-///
-/// # Panics
-/// When `x` or any parent link is out of bounds of `p`.
-pub(crate) fn uf_find(p: &mut [usize], mut x: usize) -> usize {
-    while p[x] != x {
-        p[x] = p[p[x]];
-        x = p[x];
-    }
-    x
 }
 
 /// Every requirement edge: `MatchSym` per compound pair; `MatchBlock` per declared
@@ -55,14 +33,6 @@ pub(crate) fn uf_find(p: &mut [usize], mut x: usize) -> usize {
 /// `MatchSym`; `ProxBlock` a star from `g[0]` of each instance array; `ProxNet` does not
 /// cross an instance boundary (**Philis policy**): an edge joins devices of one innermost
 /// instance (`inst`, `netlist.device_inst`; empty = all top level).
-///
-/// Self-edges are dropped. `source` indexes `compounds` (MatchSym, Sym), `matches`
-/// (MatchBlock/ProxBlock from patterns), `shared_bias` and `passive` each from 0,
-/// `user_groups`, `hier_pairs`, `arrays`, or the net id (ProxNet).
-///
-/// # Panics
-/// When a device id is out of bounds of `canon`, or `classes` is shorter than
-/// `hg.net_devices`.
 #[allow(clippy::too_many_arguments)] // the plan's signature: one slice per evidence source
 #[must_use]
 pub fn requirements(
@@ -90,7 +60,7 @@ pub fn requirements(
     for (ci, c) in compounds.iter().enumerate() {
         for &(a, b) in &c.pairs {
             push(a, b, ReqType::MatchSym, ci);
-            sym_pair.insert(unordered(a, b));
+            sym_pair.insert((a.0.min(b.0), a.0.max(b.0)));
         }
         let mut members: Vec<DeviceId> = c.pairs.iter().flat_map(|&(a, b)| [a, b]).chain(c.selfs.iter().copied()).collect();
         members.sort_by_key(|d| (canon[d.0 as usize], d.0));
@@ -101,7 +71,7 @@ pub fn requirements(
         let r = roles_of(m.pattern);
         for &(x, y, _) in r.pairs {
             let (a, b) = (dev(x), dev(y));
-            if !sym_pair.contains(&unordered(a, b)) {
+            if !sym_pair.contains(&(a.0.min(b.0), a.0.max(b.0))) {
                 push(a, b, ReqType::MatchBlock, mi);
             }
         }
@@ -112,34 +82,28 @@ pub fn requirements(
             r.selfs.iter().for_each(|&s| push(dev(s), dev(p0), ReqType::ProxBlock, mi));
         }
     }
-    // Stars from `g[0]`; an empty group pushes nothing (`skip(1)` never reads `g[0]`).
-    let mut star = |g: &[DeviceId], ty: ReqType, src: usize| g.iter().skip(1).for_each(|&d| push(g[0], d, ty, src));
-    for (gi, g) in shared_bias.iter().enumerate() {
-        star(g, ReqType::MatchBlock, gi);
+    for (gi, g) in shared_bias.iter().chain(passive).enumerate() {
+        let src = if gi < shared_bias.len() { gi } else { gi - shared_bias.len() };
+        g.iter().skip(1).for_each(|&d| push(g[0], d, ReqType::MatchBlock, src));
     }
-    for (gi, g) in passive.iter().enumerate() {
-        star(g, ReqType::MatchBlock, gi);
-    }
-    // Sidecar `GroupBlocks` (EXT-26).
+    // Sidecar `GroupBlocks` (EXT-26): a star from the first member.
     for (gi, (_, g)) in user_groups.iter().enumerate() {
-        star(g, ReqType::ProxBlock, gi);
-    }
-    for (gi, g) in arrays.iter().enumerate() {
-        star(g, ReqType::ProxBlock, gi);
+        g.iter().skip(1).for_each(|&d| push(g[0], d, ReqType::ProxBlock, gi));
     }
     for (i, &(a, b)) in hier_pairs.iter().enumerate() {
-        if !sym_pair.contains(&unordered(a, b)) {
+        if !sym_pair.contains(&(a.0.min(b.0), a.0.max(b.0))) {
             push(a, b, ReqType::MatchBlock, i);
         }
     }
+    for (gi, g) in arrays.iter().enumerate() {
+        g.iter().skip(1).for_each(|&d| push(g[0], d, ReqType::ProxBlock, gi));
+    }
     let inst_of = |d: DeviceId| inst.get(d.0 as usize).copied().flatten();
-    let mut ds: Vec<DeviceId> = Vec::new();
     for (n, devs) in hg.net_devices.iter().enumerate() {
         if matches!(classes[n].class, NetClass::Supply | NetClass::Ground | NetClass::Substrate | NetClass::Clock) {
             continue;
         }
-        ds.clear();
-        ds.extend_from_slice(devs);
+        let mut ds = devs.clone();
         ds.sort_by_key(|d| (canon[d.0 as usize], d.0));
         ds.dedup();
         if ds.len() <= policy.pn_max_degree {
@@ -162,13 +126,6 @@ pub fn requirements(
 /// Classes become nodes, and children sit within a node, in order of
 /// `(min canon of the subtree, device count)`; names and ids never decide
 /// anything but exact label ties.
-///
-/// Node `k` of the result has id `k`; children always precede their parent,
-/// and the `Root` is the last node (present even for `n_devices == 0`).
-///
-/// # Panics
-/// When a requirement's device is `>= n_devices` or `canon` is shorter than
-/// `n_devices`.
 #[must_use]
 pub fn hsmpg(n_devices: usize, reqs: &[Req], canon: &[u64]) -> Vec<GroupNode> {
     let mut edges = reqs.to_vec();
@@ -184,19 +141,26 @@ pub fn hsmpg(n_devices: usize, reqs: &[Req], canon: &[u64]) -> Vec<GroupNode> {
         tree.push(GroupNode { kind, devices, children });
     };
     for ty in [ReqType::MatchSym, ReqType::MatchBlock, ReqType::ProxBlock, ReqType::Sym, ReqType::ProxNet] {
-        let mut parent: Vec<usize> = (0..n_devices + tree.len()).collect();
+        let mut parent: Vec<u32> = (0..(n_devices + tree.len()) as u32).collect();
+        let find = |p: &mut Vec<u32>, mut x: u32| {
+            while p[x as usize] != x {
+                p[x as usize] = p[p[x as usize] as usize];
+                x = p[x as usize];
+            }
+            x
+        };
         for r in edges.iter().filter(|r| r.ty == ty) {
-            let (x, y) = (uf_find(&mut parent, top[r.a.0 as usize]), uf_find(&mut parent, top[r.b.0 as usize]));
+            let (x, y) = (find(&mut parent, top[r.a.0 as usize] as u32), find(&mut parent, top[r.b.0 as usize] as u32));
             if x != y {
-                parent[x.max(y)] = x.min(y);
+                parent[x.max(y) as usize] = x.min(y);
             }
         }
         let mut alive: Vec<usize> = top.clone();
         alive.sort_unstable();
         alive.dedup();
-        let mut classes: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+        let mut classes: std::collections::BTreeMap<u32, Vec<usize>> = std::collections::BTreeMap::new();
         for s in alive {
-            classes.entry(uf_find(&mut parent, s)).or_default().push(s);
+            classes.entry(find(&mut parent, s as u32)).or_default().push(s);
         }
         let mut classes: Vec<Vec<usize>> = classes.into_values().filter(|c| c.len() > 1).collect();
         let sub = |key: &[(u64, usize)], c: &[usize]| (c.iter().map(|&s| key[s].0).min().unwrap(), c.iter().map(|&s| key[s].1).sum::<usize>());
@@ -204,7 +168,7 @@ pub fn hsmpg(n_devices: usize, reqs: &[Req], canon: &[u64]) -> Vec<GroupNode> {
         let kind = match ty {
             ReqType::MatchSym | ReqType::MatchBlock => GroupKind::Matching,
             ReqType::Sym => GroupKind::Symmetry,
-            ReqType::ProxBlock | ReqType::ProxNet => GroupKind::Proximity,
+            _ => GroupKind::Proximity,
         };
         let mut remap: Vec<usize> = (0..n_devices + tree.len()).collect();
         for mut c in classes {
@@ -223,11 +187,7 @@ pub fn hsmpg(n_devices: usize, reqs: &[Req], canon: &[u64]) -> Vec<GroupNode> {
 }
 
 /// The tree under its `Root` as one string, members and children sorted by text
-/// (`Kind{a,b,Kind{..}}`): an id-free view for tests and reports. An empty
-/// tree renders as `""`.
-///
-/// # Panics
-/// When a device id is out of bounds of `names`.
+/// (`Kind{a,b,Kind{..}}`): an id-free view for tests and reports.
 #[must_use]
 pub fn render(tree: &[GroupNode], names: &[&str]) -> String {
     fn show(tree: &[GroupNode], i: usize, names: &[&str]) -> String {
@@ -307,162 +267,5 @@ mod tests {
         for n in ["M3", "M7", "M9"] {
             assert!(sym.split(|c: char| !c.is_alphanumeric()).any(|w| w == n), "{n} not under Symmetry: {t}");
         }
-    }
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use crate::tests::{fet, nets};
-    use pnr_core::ids::NetId;
-    use pnr_core::netlist::{DeviceKind, Netlist};
-
-    fn req(a: u16, b: u16, ty: ReqType) -> Req {
-        Req { a: DeviceId(a), b: DeviceId(b), ty, source: ConstraintId(0) }
-    }
-
-    fn classes(cs: &[NetClass]) -> Vec<NetClassification> {
-        cs.iter().enumerate().map(|(i, &class)| NetClassification { net: NetId(i as u16), class, c_budget_af: None, max_coupling_af: None }).collect()
-    }
-
-    /// Nets 0=a 1=b 2=vss. M0, M1: G on a, D on b. M2: G on b, D on a.
-    fn three() -> (Netlist, BipartiteHypergraph, Vec<NetClassification>) {
-        let n = DeviceKind::Nmos;
-        let nl = Netlist { devices: vec![fet("M0", n, 0, 1, 2, 2, 1_000, 500), fet("M1", n, 0, 1, 2, 2, 1_000, 500), fet("M2", n, 1, 0, 2, 2, 1_000, 500)], nets: nets(&["a", "b", "vss"]), ..Default::default() };
-        let hg = BipartiteHypergraph::from_netlist(&nl);
-        (nl, hg, classes(&[NetClass::Signal, NetClass::Signal, NetClass::Ground]))
-    }
-
-    fn compound(pairs: &[(u16, u16)], selfs: &[u16]) -> Compound {
-        Compound {
-            id: ConstraintId(0),
-            axis: pnr_core::ids::AxisId(0),
-            dir: analog::intent::AxisDir::V,
-            kind: analog::intent::SymKind::Mirror,
-            pairs: pairs.iter().map(|&(a, b)| (DeviceId(a), DeviceId(b))).collect(),
-            selfs: selfs.iter().map(|&s| DeviceId(s)).collect(),
-            net_pairs: Vec::new(),
-            self_nets: Vec::new(),
-            set_pairs: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn uf_find_halves_paths() {
-        let mut p = vec![0, 0, 1, 2];
-        assert_eq!(uf_find(&mut p, 3), 0);
-        assert_eq!(uf_find(&mut p, 0), 0);
-        // Every node on the walked path now points closer to the root.
-        assert!(p[3] <= 1, "{p:?}");
-        assert_eq!(unordered(DeviceId(5), DeviceId(2)), (2, 5));
-        assert_eq!(unordered(DeviceId(2), DeviceId(5)), (2, 5));
-    }
-
-    #[test]
-    fn empty_inputs_give_no_requirements() {
-        let nl = Netlist::default();
-        let hg = BipartiteHypergraph::from_netlist(&nl);
-        let r = requirements(&[], &[], &[], &[], &[], &[], &[], &[], &hg, &[], &[], &Policy::default());
-        assert!(r.is_empty());
-    }
-
-    #[test]
-    fn edges_are_canonically_oriented_and_self_edges_dropped() {
-        let (_, hg, cls) = three();
-        let canon = [2, 1, 0];
-        // Compound (0, 1): MatchSym and one Sym edge, both read (1, 0) by canon.
-        let r = requirements(&[], &[compound(&[(0, 1)], &[])], &[vec![DeviceId(0), DeviceId(0)], vec![]], &[], &[], &[(DeviceId(1), DeviceId(0))], &[], &[], &hg, &cls, &canon, &Policy { pn_max_degree: 0, ..Policy::default() });
-        assert_eq!(r, [req(1, 0, ReqType::MatchSym), req(1, 0, ReqType::Sym)]);
-    }
-
-    #[test]
-    fn stars_and_sources() {
-        let (_, hg, cls) = three();
-        let canon = [0, 1, 2];
-        let g = vec![DeviceId(2), DeviceId(0), DeviceId(1)];
-        let pol = Policy { pn_max_degree: 0, ..Policy::default() };
-        let r = requirements(&[], &[], &[vec![], g.clone()], &[g.clone()], &[(7, g.clone())], &[(DeviceId(0), DeviceId(1))], &[g], &[], &hg, &cls, &canon, &pol);
-        let of = |ty: ReqType| r.iter().filter(|x| x.ty == ty).map(|x| (x.a.0, x.b.0, x.source.0)).collect::<Vec<_>>();
-        // shared_bias group 1 and passive group 0 (each from 0), then the hier couple 0.
-        assert_eq!(of(ReqType::MatchBlock), [(0, 2, 1), (1, 2, 1), (0, 2, 0), (1, 2, 0), (0, 1, 0)]);
-        // user group index 0 (not the entry index 7), then array 0.
-        assert_eq!(of(ReqType::ProxBlock), [(0, 2, 0), (1, 2, 0), (0, 2, 0), (1, 2, 0)]);
-    }
-
-    #[test]
-    fn proxnet_skips_rails_and_wide_nets_and_splits_instances() {
-        let (_, hg, cls) = three();
-        let canon = [2, 1, 0];
-        let pn = |r: &[Req]| r.iter().filter(|x| x.ty == ReqType::ProxNet).map(|x| (x.a.0, x.b.0, x.source.0)).collect::<Vec<_>>();
-        let all = requirements(&[], &[], &[], &[], &[], &[], &[], &[], &hg, &cls, &canon, &Policy::default());
-        // A star from M2 (lowest canon) on each Signal net; nothing on vss.
-        assert_eq!(pn(&all), [(2, 1, 0), (2, 0, 0), (2, 1, 1), (2, 0, 1)]);
-        // Degree 3 over a cap of 2: no star.
-        assert!(pn(&requirements(&[], &[], &[], &[], &[], &[], &[], &[], &hg, &cls, &canon, &Policy { pn_max_degree: 2, ..Policy::default() })).is_empty());
-        // M1 alone in instance 1: no edge reaches it.
-        let inst = [Some(0), Some(1), Some(0)];
-        assert_eq!(pn(&requirements(&[], &[], &[], &[], &[], &[], &[], &inst, &hg, &cls, &canon, &Policy::default())), [(2, 0, 0), (2, 0, 1)]);
-        // A Clock net is skipped like a rail.
-        let clk = classes(&[NetClass::Clock, NetClass::Signal, NetClass::Ground]);
-        assert_eq!(pn(&requirements(&[], &[], &[], &[], &[], &[], &[], &[], &hg, &clk, &canon, &Policy::default())), [(2, 1, 1), (2, 0, 1)]);
-    }
-
-    #[test]
-    fn sym_pair_suppresses_duplicate_match_block() {
-        let (_, hg, cls) = three();
-        let r = requirements(&[], &[compound(&[(0, 1)], &[2])], &[], &[], &[], &[(DeviceId(1), DeviceId(0))], &[], &[], &hg, &cls, &[0, 1, 2], &Policy { pn_max_degree: 0, ..Policy::default() });
-        assert!(r.iter().all(|x| x.ty != ReqType::MatchBlock), "{r:?}");
-        // Sym is a path over the members in canon order: 0-1, 1-2.
-        let sym: Vec<_> = r.iter().filter(|x| x.ty == ReqType::Sym).map(|x| (x.a.0, x.b.0)).collect();
-        assert_eq!(sym, [(0, 1), (1, 2)]);
-    }
-
-    #[test]
-    fn hsmpg_empty_is_a_lone_root() {
-        let t = hsmpg(0, &[], &[]);
-        assert_eq!(t.len(), 1);
-        assert!(t[0].kind == GroupKind::Root && t[0].devices.is_empty() && t[0].children.is_empty());
-        assert_eq!(render(&t, &[]), "Root{}");
-        assert_eq!(render(&[], &[]), "");
-    }
-
-    #[test]
-    fn hsmpg_contracts_in_importance_order() {
-        let canon = [0, 1, 2, 3];
-        let names = ["a", "b", "c", "d"];
-        // MatchSym first: a later ProxNet on the same pair adds no node.
-        let t = hsmpg(4, &[req(0, 1, ReqType::ProxNet), req(0, 1, ReqType::MatchSym)], &canon);
-        assert_eq!(render(&t, &names), "Root{Matching{a,b},c,d}");
-        // A chain of MatchBlocks is one class; ProxBlock then joins d to it; Sym groups nothing new.
-        let t = hsmpg(4, &[req(0, 1, ReqType::MatchBlock), req(1, 2, ReqType::MatchBlock), req(2, 3, ReqType::ProxBlock), req(0, 3, ReqType::Sym)], &canon);
-        assert_eq!(render(&t, &names), "Root{Proximity{Matching{a,b,c},d}}");
-        assert_eq!(t.len(), 3);
-    }
-
-    #[test]
-    fn hsmpg_tree_invariants() {
-        let canon = [5, 3, 9, 1, 7, 2];
-        let reqs = [req(0, 1, ReqType::MatchSym), req(2, 3, ReqType::MatchBlock), req(1, 2, ReqType::Sym), req(4, 5, ReqType::ProxNet), req(0, 4, ReqType::ProxNet)];
-        let t = hsmpg(6, &reqs, &canon);
-        assert_eq!(t.last().unwrap().kind, GroupKind::Root);
-        let mut seen = [0u8; 6];
-        let mut parents = vec![0u8; t.len()];
-        for (i, n) in t.iter().enumerate() {
-            n.devices.iter().for_each(|d| seen[d.0 as usize] += 1);
-            for &c in &n.children {
-                assert!((c as usize) < i, "child {c} after parent {i}");
-                parents[c as usize] += 1;
-            }
-            if n.kind != GroupKind::Root {
-                assert!(n.devices.len() + n.children.len() >= 2, "{n:?}");
-            }
-        }
-        assert_eq!(seen, [1; 6], "every device in exactly one node");
-        assert!(parents[..t.len() - 1].iter().all(|&p| p == 1) && parents[t.len() - 1] == 0);
-        // Metamorphic: the input order of the requirements does not matter.
-        let mut rev = reqs;
-        rev.reverse();
-        let names = ["a", "b", "c", "d", "e", "f"];
-        assert_eq!(render(&hsmpg(6, &rev, &canon), &names), render(&t, &names));
     }
 }

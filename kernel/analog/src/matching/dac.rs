@@ -8,9 +8,7 @@
 //! Split DAC (MAT-18): C_A is DACP eq. 1, non-unit plate sizing §III-D, slot
 //! order §IV-C.
 
-/// Per-slot capacitance, unit-normalised: `Σ 1/(1 + g·(x cosθ + y sinθ))`
-/// over each slot's units, `slots` entries. Panics when a unit's slot is
-/// `≥ slots`.
+/// Per-slot capacitance, unit-normalised: `Σ 1/(1 + g·(x cosθ + y sinθ))`.
 #[must_use]
 pub fn gradient_caps(units: &[(u8, f64, f64)], slots: usize, g_per_um: f64, theta: f64) -> Vec<f64> {
     let (c, s) = (theta.cos(), theta.sin());
@@ -23,35 +21,21 @@ pub fn gradient_caps(units: &[(u8, f64, f64)], slots: usize, g_per_um: f64, thet
 
 /// Worst `(|INL|, |DNL|)`, LSB, over θ = k·π/`steps` (k < steps): slot 0 is
 /// the termination unit, bits 1..=`n_bits`; every code's transfer
-/// `Σ_{b set} C_b / ΣC · 2ⁿ` against the ideal code. `(0, 0)` when `steps`
-/// is 0 or there are no units. Cost O(steps · (units + 2ⁿ)); requires
-/// `n_bits < usize::BITS` and every unit slot `≤ n_bits`.
+/// `Σ_{b set} C_b / ΣC · 2ⁿ` against the ideal code.
 #[must_use]
 pub fn inl_dnl(units: &[(u8, f64, f64)], n_bits: u8, g_per_um: f64, steps: usize) -> (f64, f64) {
     let n = usize::from(n_bits);
     let codes = 1usize << n;
     let (mut inl, mut dnl) = (0.0f64, 0.0f64);
-    // Unscaled transfer Σ_{b set} C_b per code, reused across θ.
-    let mut t = vec![0.0f64; codes];
     for k in 0..steps {
         let cap = gradient_caps(units, n + 1, g_per_um, k as f64 * std::f64::consts::PI / steps as f64);
         let total: f64 = cap.iter().sum();
-        if total <= 0.0 {
-            continue;
-        }
-        // Code c is code c minus its lowest set bit, plus that bit's cap:
-        // O(2ⁿ) per θ instead of O(n·2ⁿ).
-        for c in 1..codes {
-            t[c] = t[c & (c - 1)] + cap[c.trailing_zeros() as usize + 1];
-        }
-        let scale = codes as f64 / total;
-        // ponytail: scalar max-reductions; 2ⁿ ≤ a few thousand codes on a
-        // cold ranking path, SIMD only if a profile shows it.
-        for (c, &tc) in t.iter().enumerate() {
-            inl = inl.max((tc * scale - c as f64).abs());
-        }
-        for w in t.windows(2) {
-            dnl = dnl.max(((w[1] - w[0]) * scale - 1.0).abs());
+        let t = |c: usize| (1..=n).filter(|b| c >> (b - 1) & 1 == 1).map(|b| cap[b]).sum::<f64>() / total * codes as f64;
+        for c in 0..codes {
+            inl = inl.max((t(c) - c as f64).abs());
+            if c + 1 < codes {
+                dnl = dnl.max((t(c + 1) - t(c) - 1.0).abs());
+            }
         }
     }
     (inl, dnl)
@@ -59,14 +43,10 @@ pub fn inl_dnl(units: &[(u8, f64, f64)], n_bits: u8, g_per_um: f64, steps: usize
 
 /// Systematic ratio mismatch M_sys: worst over θ (as [`inl_dnl`]) and slots
 /// `i ≥ 1` of `|(C_i/counts_i) / (C_0/counts_0) − 1|`, the per-unit
-/// capacitance of each slot against slot 0's. `counts[i]` is slot `i`'s unit
-/// count and must be positive; `0` with fewer than two slots or no steps.
+/// capacitance of each slot against slot 0's.
 #[must_use]
 pub fn msys(units: &[(u8, f64, f64)], counts: &[u16], g_per_um: f64, steps: usize) -> f64 {
     let mut worst = 0.0f64;
-    if counts.len() < 2 {
-        return worst;
-    }
     for k in 0..steps {
         let cap = gradient_caps(units, counts.len(), g_per_um, k as f64 * std::f64::consts::PI / steps as f64);
         let unit0 = cap[0] / f64::from(counts[0]);
@@ -78,40 +58,25 @@ pub fn msys(units: &[(u8, f64, f64)], counts: &[u16], g_per_um: f64, steps: usiz
 }
 
 /// max over slots of ‖M_slot − M_array‖_F per unit, µm² (M = [xx, xy, yy] about the array centroid).
-/// Unit coordinates must already be centred on the array centroid. Slots
-/// without units, and slots `≥ slots`, are skipped; `0` without units.
 #[must_use]
 pub fn second_um2(units: &[(u8, f64, f64)], slots: usize) -> f64 {
-    // One pass: [Σx², Σxy, Σy², n] for the array and per slot.
-    let mut per = vec![[0.0f64; 4]; slots];
-    let mut all = [0.0f64; 4];
-    for &(s, x, y) in units {
-        let m = [x * x, x * y, y * y, 1.0];
-        for (a, v) in all.iter_mut().zip(m) {
-            *a += v;
+    let mean = |f: &dyn Fn(&(u8, f64, f64)) -> bool| {
+        let (mut m, mut n) = ([0.0f64; 3], 0.0f64);
+        for u in units.iter().filter(|u| f(u)) {
+            m = [m[0] + u.1 * u.1, m[1] + u.1 * u.2, m[2] + u.2 * u.2];
+            n += 1.0;
         }
-        if let Some(p) = per.get_mut(usize::from(s)) {
-            for (a, v) in p.iter_mut().zip(m) {
-                *a += v;
-            }
-        }
-    }
-    if all[3] == 0.0 {
-        return 0.0;
-    }
-    let mean = |a: &[f64; 4]| [a[0] / a[3], a[1] / a[3], a[2] / a[3]];
-    let all = mean(&all);
-    per.iter()
-        .filter(|a| a[3] > 0.0)
-        .map(|a| {
-            let m = mean(a);
-            ((m[0] - all[0]).powi(2) + 2.0 * (m[1] - all[1]).powi(2) + (m[2] - all[2]).powi(2)).sqrt()
-        })
+        (n > 0.0).then(|| m.map(|v| v / n))
+    };
+    let Some(all) = mean(&|_| true) else { return 0.0 };
+    (0..slots)
+        .filter_map(|s| mean(&|u| usize::from(u.0) == s))
+        .map(|m| ((m[0] - all[0]).powi(2) + 2.0 * (m[1] - all[1]).powi(2) + (m[2] - all[2]).powi(2)).sqrt())
         .fold(0.0, f64::max)
 }
 
 /// C_A in units of C_u: `C_T^LSB / C_T^MSB` (DACP eq. 1); the LSB total
-/// counts the termination unit. Infinite when `ct_msb_units` is 0.
+/// counts the termination unit.
 #[must_use]
 pub fn attenuation_cap(ct_lsb_units: u32, ct_msb_units: u32) -> f64 {
     f64::from(ct_lsb_units) / f64::from(ct_msb_units)
@@ -120,8 +85,7 @@ pub fn attenuation_cap(ct_lsb_units: u32, ct_msb_units: u32) -> f64 {
 /// Non-unit side lengths `(H, l)`, `H ≥ l`, of area `A` with the unit's
 /// perimeter-to-area ratio `k = (H_u + l_u)/(H_u·l_u)`: roots of
 /// `z² − kA·z + A = 0` (DACP §III-D eqs 37–45). `None` when `k²A² < 4A` (no
-/// rectangle of that area keeps the unit's edge sensitivity). Unit sides
-/// must be positive.
+/// rectangle of that area keeps the unit's edge sensitivity).
 #[must_use]
 pub fn nonunit_dims(area_um2: f64, unit_h_um: f64, unit_l_um: f64) -> Option<(f64, f64)> {
     let ka = (unit_h_um + unit_l_um) / (unit_h_um * unit_l_um) * area_um2;
@@ -138,20 +102,16 @@ pub fn nonunit_dims(area_um2: f64, unit_h_um: f64, unit_l_um: f64) -> Option<(f6
 /// MSB tokens alternating (each bank largest cap first), each at the next free
 /// pair.
 ///
-/// Requires `l_bits ≥ 1`, `m_bits ≥ 1` (debug-asserted) and a grid of at
-/// least `2^L + 2^M + 1` cells; on a smaller grid the tail tokens are dropped.
-///
 /// [`pattern::spiral`]: crate::matching::pattern::spiral
 #[must_use]
 pub fn split_dac_assign(l_bits: u8, m_bits: u8, rows: usize, cols: usize) -> Vec<Option<u8>> {
     use crate::matching::pattern::{spiral, Grid};
     let (l, m) = (usize::from(l_bits), usize::from(m_bits));
-    debug_assert!(l >= 1 && m >= 1, "split DAC needs both banks: L={l}, M={m}");
     let mut left: Vec<usize> = std::iter::once(1).chain((0..l).map(|k| 1 << k)).chain((0..m).map(|k| 1 << k)).collect();
     let n = rows * cols;
     debug_assert!(n >= (1 << l) + (1 << m) - 1 + 2, "{rows}×{cols} cannot hold L={l}, M={m}");
     let order = spiral(rows, cols);
-    let mut g = Grid::new(rows, cols);
+    let mut g = Grid { cols, slot: vec![None; n] };
     let next = |g: &Grid| order.iter().copied().find(|&i| g.free_pair(i));
     if let Some(i) = next(&g) {
         g.put_pair(i, (l + m + 1) as u8);

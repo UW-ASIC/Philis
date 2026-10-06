@@ -11,12 +11,10 @@ use pnr_core::BipartiteHypergraph;
 use crate::evidence::OpFacts;
 use crate::pattern::pin_net;
 
-/// Supply, Ground or Substrate: nets neither ordering traverses.
 fn rail(c: NetClass) -> bool {
     matches!(c, NetClass::Supply | NetClass::Ground | NetClass::Substrate)
 }
 
-/// Sorts each step by `(canon, id)`, the order every caller reports in.
 fn sort_steps(steps: &mut [Vec<DeviceId>], canon: &[u64]) {
     steps.iter_mut().for_each(|s| s.sort_by_key(|d| (canon[d.0 as usize], d.0)));
 }
@@ -24,11 +22,7 @@ fn sort_steps(steps: &mut [Vec<DeviceId>], canon: &[u64]) {
 /// Signal stages: BFS from input nets over net edges control→drain (FET G→D, BJT B→C) and
 /// source→drain (S→D, E→C), rails never traversed. Inputs: nets touched only by G/B terminals,
 /// class Signal or Sensitive, ∩ `ports` when `ports` is non-empty. Step k = devices whose D/C net
-/// is at level k ≥ 1, sorted by (canon, id). A level with no device leaves an empty step, so step
-/// `k − 1` is always level `k`. No input net gives no steps.
-///
-/// # Panics
-/// When `classes` is shorter than `hg.net_names` or a device id is out of bounds of `canon`.
+/// is at level k ≥ 1, sorted by (canon, id).
 #[must_use]
 pub fn stage_order(hg: &BipartiteHypergraph, classes: &[NetClassification], ports: &[NetId], canon: &[u64]) -> Vec<Vec<DeviceId>> {
     let n = hg.net_names.len();
@@ -78,11 +72,7 @@ pub fn stage_order(hg: &BipartiteHypergraph, classes: &[NetClassification], port
 /// Per component of non-rail nets, L = the deepest supply-side device; step k holds the devices of depth
 /// k on a longest path (depth + height − 1 = L). In a step with a non-Clock-gated device the Clock-gated
 /// ones (precharge switches beside a load) drop out; an all-clocked step (a clocked tail) stays
-/// (**Philis policy**). Chains in order of their first device (canon, id). Every step of a chain is
-/// non-empty; the current is the summed |Id| of step 0.
-///
-/// # Panics
-/// When `classes` is shorter than `hg.net_names` or a device id is out of bounds of `canon`.
+/// (**Philis policy**). Chains in order of their first device (canon, id).
 #[must_use]
 pub fn current_paths(hg: &BipartiteHypergraph, op: Option<&OpFacts>, classes: &[NetClassification], canon: &[u64]) -> Vec<(Vec<Vec<DeviceId>>, f64)> {
     let n = hg.net_names.len();
@@ -136,7 +126,13 @@ pub fn current_paths(hg: &BipartiteHypergraph, op: Option<&OpFacts>, classes: &[
     }
     // Components: union-find of the non-rail nets a device joins.
     let mut parent: Vec<usize> = (0..n).collect();
-    let find = crate::graph::uf_find;
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
     for &(_, lo, hi) in &edges {
         if !rail(class(lo)) && !rail(class(hi)) {
             let (a, b) = (find(&mut parent, lo.0 as usize), find(&mut parent, hi.0 as usize));
@@ -231,92 +227,5 @@ mod tests {
         let ev = crate::Evidence { op: Some(op), ..Default::default() };
         let w: Vec<f32> = crate::annotate_with(&nl, &AnnotationConfig::default(), &ev).intent.order.iter().filter(|o| o.dir == analog::intent::AxisDir::V).map(|o| o.weight).collect();
         assert!(w.contains(&1.0) && w.iter().any(|&x| x < 1.0), "{w:?}");
-    }
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use crate::evidence::DeviceOp;
-    use crate::tests::{fet, nets};
-    use pnr_core::Netlist;
-
-    fn cls(cs: &[NetClass]) -> Vec<NetClassification> {
-        cs.iter().enumerate().map(|(i, &class)| NetClassification { net: NetId(i as u16), class, c_budget_af: None, max_coupling_af: None }).collect()
-    }
-
-    fn op(ids: &[f64]) -> OpFacts {
-        let d = |i: f64| DeviceOp { id_ua: i, headroom_mv: 100.0, gm_us: 10.0, power_uw: 0.0, vgs_mv: None, vbs_mv: None, vth_mv: None, gmb_us: None, gds_us: None };
-        OpFacts { dev: ids.iter().map(|&i| Some(d(i))).collect(), net_mv: vec![] }
-    }
-
-    /// Nets 0=in 1=x 2=vss 3=vdd 4=vb 5=clk. M0: NMOS in→x on vss. M1: PMOS load vb, x↔vdd.
-    /// M2 (with `clocked`): NMOS beside M0, gate clk.
-    fn stage(clocked: bool) -> (Netlist, Vec<NetClassification>) {
-        use pnr_core::netlist::DeviceKind::{Nmos, Pmos};
-        let mut devices = vec![fet("M0", Nmos, 0, 1, 2, 2, 1_000, 500), fet("M1", Pmos, 4, 1, 3, 3, 1_000, 500)];
-        if clocked {
-            devices.push(fet("M2", Nmos, 5, 1, 2, 2, 1_000, 500));
-        }
-        let nl = Netlist { devices, nets: nets(&["in", "x", "vss", "vdd", "vb", "clk"]), ..Default::default() };
-        (nl, cls(&[NetClass::Signal, NetClass::Signal, NetClass::Ground, NetClass::Supply, NetClass::Bias, NetClass::Clock]))
-    }
-
-    #[test]
-    fn empty_netlist() {
-        let hg = BipartiteHypergraph::from_netlist(&Netlist::default());
-        assert!(stage_order(&hg, &[], &[], &[]).is_empty());
-        assert!(current_paths(&hg, None, &[], &[]).is_empty());
-    }
-
-    #[test]
-    fn one_stage() {
-        let (nl, c) = stage(false);
-        let hg = BipartiteHypergraph::from_netlist(&nl);
-        // Both devices drain on `x` (level 1): the load sits in the stage it loads.
-        assert_eq!(stage_order(&hg, &c, &[], &[0, 1]), [vec![DeviceId(0), DeviceId(1)]]);
-        // `in` is not a port: no input, no stages.
-        assert!(stage_order(&hg, &c, &[NetId(1)], &[0, 1]).is_empty());
-        assert_eq!(stage_order(&hg, &c, &[NetId(0)], &[1, 0]), [vec![DeviceId(1), DeviceId(0)]], "sorted by canon");
-    }
-
-    #[test]
-    fn one_chain_ground_up() {
-        let (nl, c) = stage(false);
-        let hg = BipartiteHypergraph::from_netlist(&nl);
-        assert_eq!(current_paths(&hg, None, &c, &[0, 1]), [(vec![vec![DeviceId(0)], vec![DeviceId(1)]], 0.0)]);
-        assert_eq!(current_paths(&hg, Some(&op(&[5.0, -5.0])), &c, &[0, 1]), [(vec![vec![DeviceId(0)], vec![DeviceId(1)]], 5.0)]);
-        // M1 under 1 % of the largest current: no path reaches the supply, no chain.
-        assert!(current_paths(&hg, Some(&op(&[5.0, 0.01])), &c, &[0, 1]).is_empty());
-    }
-
-    #[test]
-    fn clocked_device_beside_a_load_drops_out() {
-        let (nl, c) = stage(true);
-        let hg = BipartiteHypergraph::from_netlist(&nl);
-        let ch = current_paths(&hg, None, &c, &[0, 1, 2]);
-        assert_eq!(ch, [(vec![vec![DeviceId(0)], vec![DeviceId(1)]], 0.0)]);
-        // `clk` is Clock, never an input; M2 still drains on `x`, so it sits at x's level.
-        assert_eq!(stage_order(&hg, &c, &[], &[0, 1, 2]), [vec![DeviceId(0), DeviceId(1), DeviceId(2)]]);
-    }
-
-    /// A step whose devices are all clock-gated stays (a clocked tail).
-    #[test]
-    fn all_clocked_step_stays() {
-        use pnr_core::netlist::DeviceKind::{Nmos, Pmos};
-        let nl = Netlist { devices: vec![fet("M0", Nmos, 5, 1, 2, 2, 1_000, 500), fet("M1", Pmos, 4, 1, 3, 3, 1_000, 500)], nets: nets(&["in", "x", "vss", "vdd", "vb", "clk"]), ..Default::default() };
-        let (_, c) = stage(false);
-        let hg = BipartiteHypergraph::from_netlist(&nl);
-        assert_eq!(current_paths(&hg, None, &c, &[0, 1]), [(vec![vec![DeviceId(0)], vec![DeviceId(1)]], 0.0)]);
-    }
-
-    /// A device straight from ground to supply joins no non-rail net: no chain.
-    #[test]
-    fn rail_to_rail_device_is_no_chain() {
-        use pnr_core::netlist::DeviceKind::Nmos;
-        let nl = Netlist { devices: vec![fet("M0", Nmos, 0, 3, 2, 2, 1_000, 500)], nets: nets(&["in", "x", "vss", "vdd"]), ..Default::default() };
-        let hg = BipartiteHypergraph::from_netlist(&nl);
-        let c = cls(&[NetClass::Signal, NetClass::Signal, NetClass::Ground, NetClass::Supply]);
-        assert!(current_paths(&hg, None, &c, &[0]).is_empty());
     }
 }

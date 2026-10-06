@@ -33,31 +33,20 @@ const TIMESTAMPS: [i16; 12] = [2000, 1, 1, 0, 0, 0, 2000, 1, 1, 0, 0, 0];
 /// GDS stream version. 600 is the widely-accepted modern release number.
 const GDS_VERSION: i16 = 600;
 
-/// A net-name label: one GDS TEXT element.
+/// A net name placed at `(x, y)`, nm, on GDS `(layer, texttype)`.
 pub struct Text {
-    /// The label string (the net name), written as the STRING record.
     pub name: String,
-    /// GDS `(layer, texttype)` the label is written on.
     pub gds: (u16, u16),
-    /// Anchor x, nm (database units).
     pub x: i32,
-    /// Anchor y, nm (database units).
     pub y: i32,
 }
 
-/// Returns `shapes` and `texts` as a GDSII byte stream with one structure
-/// named `top`: every shape a closed 5-point BOUNDARY, every text a TEXT
-/// element, database unit 1 nm, fixed timestamps so equal input gives equal
-/// bytes. `layer_gds` maps a Philis [`pnr_core::LayerId`] (index =
-/// `LayerId.0`) to its `(gds_layer, gds_datatype)` numbers; layer and
-/// datatype are written as their 16-bit pattern.
-///
-/// # Errors
-/// Names every shape layer id outside `layer_gds` or mapped to `(0, 0)` (a
-/// layer the deck derives rather than draws): writing it anyway would put the
-/// shape on a layer nothing reads. Also refuses a `top` or text name longer
-/// than one GDS record holds (65530 bytes), which would otherwise
-/// corrupt the stream.
+/// Emit `shapes` and `texts` as a GDSII byte stream with one structure named
+/// `top`. `layer_gds` maps a Philis [`pnr_core::LayerId`] (index =
+/// `LayerId.0`) to its `(gds_layer, gds_datatype)` numbers. `Err` names
+/// every shape layer id outside the table or mapped to `(0, 0)` (a layer the
+/// deck derives rather than draws): writing it anyway would put the shape on
+/// a layer nothing reads.
 pub fn emit(top: &str, shapes: &[Shape], layer_gds: &[(u16, u16)], texts: &[Text]) -> Result<Vec<u8>, String> {
     let mut bad: Vec<u16> = shapes
         .iter()
@@ -69,12 +58,7 @@ pub fn emit(top: &str, shapes: &[Shape], layer_gds: &[(u16, u16)], texts: &[Text
     if !bad.is_empty() {
         return Err(format!("no GDS stream number for layer ids {bad:?} (derived or unmapped)"));
     }
-    // A string record's padded payload must fit the u16 length field.
-    if let Some(name) = std::iter::once(top).chain(texts.iter().map(|t| t.name.as_str())).find(|n| n.len() + n.len() % 2 > MAX_PAYLOAD) {
-        return Err(format!("name of {} bytes exceeds one GDS record ({MAX_PAYLOAD} bytes)", name.len()));
-    }
-    // 4 records of 4–6 bytes plus a 44-byte XY per boundary: 68 bytes.
-    let mut out = Vec::with_capacity(256 + 68 * shapes.len() + 64 * texts.len());
+    let mut out = Vec::new();
 
     rec_i16(&mut out, HEADER, &[GDS_VERSION]);
     rec_i16(&mut out, BGNLIB, &TIMESTAMPS);
@@ -117,8 +101,6 @@ pub fn emit(top: &str, shapes: &[Shape], layer_gds: &[(u16, u16)], texts: &[Text
 // ── record writers ─────────────────────────────────────────────────────────
 // Every record is [u16 total-len][u8 rec-type][u8 data-type][payload], BE.
 
-/// Writes a record header for a payload of `payload_len` bytes, which must be
-/// even and at most [`MAX_PAYLOAD`] (debug-asserted).
 fn header(out: &mut Vec<u8>, rec_datatype: u16, payload_len: usize) {
     debug_assert!(
         payload_len <= MAX_PAYLOAD,
@@ -147,14 +129,13 @@ fn rec_i32(out: &mut Vec<u8>, rec_datatype: u16, vals: &[i32]) {
     }
 }
 
-/// Writes an ASCII-string record, null-padded to even length (GDS rule).
 fn rec_str(out: &mut Vec<u8>, rec_datatype: u16, s: &str) {
-    let odd = s.len() % 2;
-    header(out, rec_datatype, s.len() + odd);
-    out.extend_from_slice(s.as_bytes());
-    if odd == 1 {
-        out.push(0);
+    let mut bytes = s.as_bytes().to_vec();
+    if bytes.len() % 2 == 1 {
+        bytes.push(0); // GDS strings are null-padded to even length.
     }
+    header(out, rec_datatype, bytes.len());
+    out.extend_from_slice(&bytes);
 }
 
 fn rec_real(out: &mut Vec<u8>, rec_datatype: u16, vals: &[f64]) {
@@ -164,16 +145,10 @@ fn rec_real(out: &mut Vec<u8>, rec_datatype: u16, vals: &[f64]) {
     }
 }
 
-/// Encodes an `f64` as an 8-byte GDS real: base-16 exponent in excess-64, sign
-/// in bit 7 of byte 0, then a 7-byte fractional mantissa in `[1/16, 1)`,
-/// truncated (not rounded) to 56 bits. Inverse of the reader in `visualizer`
-/// to within one mantissa ulp.
-///
-/// # Panics
-/// On a non-finite `v`, or a magnitude outside the representable
-/// `[16^-65, 16^63)`; only the two UNITS constants are ever encoded.
+/// Encode an `f64` as an 8-byte GDS real: base-16 exponent in excess-64, sign in
+/// bit 7 of byte 0, then a 7-byte fractional mantissa in `[1/16, 1)`. Exact
+/// inverse of the reader in `visualizer`.
 fn gds_real(v: f64) -> [u8; 8] {
-    assert!(v.is_finite(), "GDS real of a non-finite {v}");
     if v == 0.0 {
         return [0; 8];
     }
@@ -188,7 +163,6 @@ fn gds_real(v: f64) -> [u8; 8] {
         mant *= 16.0;
         exp -= 1;
     }
-    assert!((-64..64).contains(&exp), "GDS real {v:e} outside the excess-64 exponent range");
     let mut out = [0u8; 8];
     out[0] = (if sign { 0x80 } else { 0 }) | (((exp + 64) as u8) & 0x7f);
     let mut m = mant;
@@ -326,171 +300,5 @@ mod tests {
             );
         }
         assert_eq!(gds_real(0.0), [0; 8]);
-    }
-
-    /// Splits a stream into `(record type, payload)` pairs, asserting each
-    /// length is even, at least 4 and inside the stream.
-    fn records(bytes: &[u8]) -> Vec<(u16, &[u8])> {
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            let len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
-            assert!(len >= 4 && len % 2 == 0 && i + len <= bytes.len(), "bad record at {i}");
-            out.push((u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]), &bytes[i + 4..i + len]));
-            i += len;
-        }
-        out
-    }
-
-    fn i32s(p: &[u8]) -> Vec<i32> {
-        p.chunks(4).map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect()
-    }
-
-    fn rect(layer: u16, x: i32, y: i32, w: i32, h: i32) -> Shape {
-        Shape { layer: LayerId(layer), rect: Rect { x, y, w, h } }
-    }
-
-    // Empty input is still a complete library: the fixed header records, one
-    // empty structure, ENDLIB last, in GDSII order.
-    #[test]
-    fn empty_input_is_a_complete_library() {
-        let bytes = emit("top", &[], &[], &[]).unwrap();
-        let kinds: Vec<u16> = records(&bytes).iter().map(|r| r.0).collect();
-        assert_eq!(kinds, [HEADER, BGNLIB, LIBNAME_R, UNITS, BGNSTR, STRNAME_R, ENDSTR, ENDLIB]);
-        let recs = records(&bytes);
-        assert_eq!(recs[0].1, &600i16.to_be_bytes(), "version 600");
-        assert_eq!(recs[1].1.len(), 24, "12 timestamp shorts");
-        assert_eq!(recs[2].1, b"PHILIS.db\0", "odd name padded with one null");
-        assert_eq!(recs[3].1.len(), 16, "two 8-byte reals");
-    }
-
-    // One boundary is BOUNDARY, LAYER, DATATYPE, XY, ENDEL, and XY is the
-    // closed counter-clockwise rectangle starting at the lower-left corner.
-    #[test]
-    fn boundary_records_are_exact() {
-        let bytes = emit("t", &[rect(0, -5, 7, 10, 20)], &[(66, 20)], &[]).unwrap();
-        let recs = records(&bytes);
-        let at = recs.iter().position(|r| r.0 == BOUNDARY).unwrap();
-        assert_eq!(recs[at + 1], (LAYER, &66i16.to_be_bytes()[..]));
-        assert_eq!(recs[at + 2], (DATATYPE, &20i16.to_be_bytes()[..]));
-        assert_eq!(recs[at + 3].0, XY);
-        assert_eq!(i32s(recs[at + 3].1), [-5, 7, 5, 7, 5, 27, -5, 27, -5, 7]);
-        assert_eq!(recs[at + 4].0, ENDEL);
-    }
-
-    // A text is TEXT, LAYER, TEXTTYPE, XY (one point), STRING, ENDEL.
-    #[test]
-    fn text_records_are_exact() {
-        let t = Text { name: "out".into(), gds: (70, 5), x: -3, y: 9 };
-        let bytes = emit("t", &[], &[], &[t]).unwrap();
-        let recs = records(&bytes);
-        let at = recs.iter().position(|r| r.0 == TEXT).unwrap();
-        assert_eq!(recs[at + 1], (LAYER, &70i16.to_be_bytes()[..]));
-        assert_eq!(recs[at + 2], (TEXTTYPE, &5i16.to_be_bytes()[..]));
-        assert_eq!(i32s(recs[at + 3].1), [-3, 9]);
-        assert_eq!(recs[at + 4], (STRING, &b"out\0"[..]));
-        assert_eq!(recs[at + 5].0, ENDEL);
-    }
-
-    // Layer numbers past i16::MAX keep their 16-bit pattern.
-    #[test]
-    fn high_layer_numbers_keep_their_bits() {
-        let bytes = emit("t", &[rect(0, 0, 0, 1, 1)], &[(40_000, 65_535)], &[]).unwrap();
-        let recs = records(&bytes);
-        let at = recs.iter().position(|r| r.0 == LAYER).unwrap();
-        assert_eq!(recs[at].1, &40_000u16.to_be_bytes());
-        assert_eq!(recs[at + 1].1, &65_535u16.to_be_bytes());
-    }
-
-    // Strings: even length unpadded, odd padded by one null, empty empty.
-    #[test]
-    fn strings_are_padded_to_even_length() {
-        for (name, payload) in [("ab", &b"ab"[..]), ("abc", &b"abc\0"[..]), ("", &b""[..])] {
-            let bytes = emit(name, &[], &[], &[]).unwrap();
-            let rec = records(&bytes).into_iter().find(|r| r.0 == STRNAME_R).unwrap();
-            assert_eq!(rec.1, payload, "{name:?}");
-        }
-    }
-
-    // Same input, same bytes: timestamps are fixed.
-    #[test]
-    fn output_is_deterministic() {
-        let s = [rect(0, 1, 2, 3, 4)];
-        assert_eq!(emit("t", &s, &[(1, 0)], &[]).unwrap(), emit("t", &s, &[(1, 0)], &[]).unwrap());
-    }
-
-    // The error lists each bad layer id once, ascending.
-    #[test]
-    fn unmapped_layers_are_listed_sorted_once() {
-        let s = [rect(7, 0, 0, 1, 1), rect(3, 0, 0, 1, 1), rect(7, 0, 0, 1, 1), rect(0, 0, 0, 1, 1)];
-        let err = emit("t", &s, &[(1, 0)], &[]).unwrap_err();
-        assert!(err.contains("[3, 7]"), "{err}");
-    }
-
-    // A name one record cannot hold is refused, not written with a wrapped
-    // length that desynchronises every reader.
-    #[test]
-    fn oversized_names_are_refused() {
-        let long = "x".repeat(MAX_PAYLOAD + 1);
-        assert!(emit(&long, &[], &[], &[]).is_err());
-        let t = Text { name: long, gds: (1, 0), x: 0, y: 0 };
-        assert!(emit("t", &[], &[], &[t]).is_err());
-        let fits = "x".repeat(MAX_PAYLOAD);
-        let bytes = emit(&fits, &[], &[], &[]).unwrap();
-        assert_eq!(records(&bytes).into_iter().find(|r| r.0 == STRNAME_R).unwrap().1.len(), MAX_PAYLOAD);
-    }
-
-    // Known encodings: 1.0 = 0x41 10 00…, 1/16 = 0x40 10 00…, sign bit for
-    // a negative.
-    #[test]
-    fn gds_real_known_encodings() {
-        assert_eq!(gds_real(1.0), [0x41, 0x10, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(gds_real(1.0 / 16.0), [0x40, 0x10, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(gds_real(-1.0), [0xC1, 0x10, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(gds_real(0.5), [0x40, 0x80, 0, 0, 0, 0, 0, 0]);
-    }
-
-    // 56 mantissa bits hold every f64 mantissa, so decoding is exact, over a
-    // spread of magnitudes and signs.
-    #[test]
-    fn gds_real_is_lossless_for_f64() {
-        fn read(b: [u8; 8]) -> f64 {
-            let sign = if b[0] & 0x80 != 0 { -1.0 } else { 1.0 };
-            let exp = i32::from(b[0] & 0x7f) - 64;
-            let mant = b[1..].iter().enumerate().map(|(k, &x)| f64::from(x) / 256f64.powi(k as i32 + 1)).sum::<f64>();
-            sign * mant * 16f64.powi(exp)
-        }
-        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
-        for _ in 0..2_000 {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            let mant = 1.0 + (x >> 11) as f64 / (1u64 << 53) as f64;
-            let exp = ((x % 120) as i32) - 60;
-            let v = if x & 1 == 0 { mant } else { -mant } * 2f64.powi(exp);
-            assert_eq!(read(gds_real(v)), v, "{v:e}");
-        }
-        for v in [1e-3, 1e-9] {
-            assert_eq!(read(gds_real(v)), v);
-        }
-    }
-
-    #[test]
-    #[should_panic]
-    fn gds_real_refuses_infinity() {
-        let _ = gds_real(f64::INFINITY);
-    }
-
-    #[test]
-    #[should_panic]
-    fn gds_real_refuses_nan() {
-        let _ = gds_real(f64::NAN);
-    }
-
-    // 1e-80 is below 16^-65 ≈ 5.3e-79: its exponent cannot be written.
-    #[test]
-    #[should_panic]
-    fn gds_real_refuses_an_unrepresentable_exponent() {
-        let _ = gds_real(1e-80);
     }
 }

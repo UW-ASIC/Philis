@@ -14,18 +14,13 @@ use cells::mosfet::Mosfet;
 use cells::resistor::Resistor;
 use cells::Cell;
 use macro_master::Macros;
-use pnr_core::{Device, DeviceGroup, DeviceId, DeviceKind, Macro, NetId, Netlist};
+use pnr_core::{Device, DeviceGroup, DeviceId, DeviceKind, Macro, NetId, Netlist, Rect};
 use verify::{Checker, Checks, Pdk, RefDeviceIn, RefInput, RefKind};
 
 /// The cell table `gp`/`dp` search, and its map to the netlist's devices.
 /// A matched group collapses to one cell, so `n_cells <= n_devices`.
-///
-/// Invariants: `spaces` and `devices_of` are parallel (one entry per cell, in
-/// order of each cell's lowest member device); every space holds at least one
-/// alternative; `cell_of` has one entry per netlist device and
-/// `devices_of[cell_of[d]]` contains `d`.
 pub struct Cells {
-    /// Variant space per cell; never empty, so variant 0 always exists.
+    /// Variant space per cell.
     pub spaces: Vec<gp::VariantSpace>,
     /// `cell_of[device]` = its cell.
     pub cell_of: Vec<u16>,
@@ -44,18 +39,11 @@ pub struct Cells {
 /// member is injected, it overlaps an earlier unitization, its MOS members do
 /// not share a source net, or every merged pattern draws a short. Declined
 /// merges fall back to one cell per device.
+#[must_use]
 ///
 /// `merge_distinct_gates = false` keeps members on different gate nets (a
 /// differential input) as separate cells: the alternative to a common-centroid
 /// merge, which splits one member's drain across the row.
-///
-/// Folds at [`folds`] with no transconductance, the annotator's unitizations
-/// as cells, and no net classes or blocks. Every cell gets at least one
-/// alternative.
-///
-/// # Panics
-/// If a unitization spans more than one device kind (an annotator bug).
-#[must_use]
 pub fn enumerate(
     netlist: &Netlist,
     macros: &Macros,
@@ -74,13 +62,6 @@ pub fn enumerate(
 /// (FLOW-11: member devices, the child's geometry) is one cell of one
 /// alternative at its lowest member, drawn in the child, never here; a
 /// unitization touching a block member is declined.
-///
-/// `fold` is indexed by device; devices past its end draw unfolded. Block
-/// members and unitization members past `netlist.devices` are ignored.
-///
-/// # Panics
-/// If a unitization spans more than one device kind (an annotator bug), or
-/// the netlist holds more than `u16::MAX` cells.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn enumerate_folded(
@@ -135,7 +116,7 @@ pub fn enumerate_folded(
         // members are a series stack, drawn as a chain whose junctions are
         // exactly the nets they share (Razavi Fig. 19.12).
         let mut chain: Option<Vec<bool>> = None;
-        if is_mos(kind) {
+        if matches!(kind, DeviceKind::Nmos | DeviceKind::Pmos) {
             let s = |d: &DeviceId| terminal(dev(d), "S");
             if s(&members[0]).is_none() || members.iter().any(|d| s(d) != s(&members[0])) {
                 let Some(order) = series_order(netlist, &members) else { continue };
@@ -295,32 +276,8 @@ fn split_dac(netlist: &Netlist, rails: &[NetId], members: &[DeviceId], dev_nf: i
     Some((lsb.into_iter().chain(msb).chain([bridge]).collect(), l, a_lsb))
 }
 
-/// The net on `d`'s terminal `name` (`"D"`, `"G"`, `"P"`, …), if it has one.
 fn terminal(d: &Device, name: &str) -> Option<NetId> {
     d.terminals.iter().find(|(t, _)| t == name).map(|(_, n)| *n)
-}
-
-/// `d`'s parameter `name` as written (nm or PDK units), if present.
-fn param(d: &Device, name: &str) -> Option<i64> {
-    d.params.iter().find(|(n, _)| n == name).map(|&(_, v)| v)
-}
-
-/// Whether `kind` is a MOSFET (drawn by the MOS or FinFET generator).
-fn is_mos(kind: DeviceKind) -> bool {
-    matches!(kind, DeviceKind::Nmos | DeviceKind::Pmos)
-}
-
-/// Splits a generated pin name `d{k}:{T}` into member ordinal `k` and
-/// terminal `T`; `None` for a bare name or a non-numeric ordinal.
-fn member_pin(name: &str) -> Option<(usize, &str)> {
-    let (k, t) = name.strip_prefix('d')?.split_once(':')?;
-    Some((k.parse().ok()?, t))
-}
-
-/// The net name bound to member `owner`'s pin `t` in `m`; `None` when `m`
-/// has no such pin or its net is outside `nets`.
-fn pin_net<'n>(m: &Macro, owner: usize, t: &str, nets: &'n [String]) -> Option<&'n String> {
-    m.pins.iter().find(|p| member_pin(&p.name) == Some((owner, t))).and_then(|p| nets.get(p.net.0 as usize))
 }
 
 /// A plate net's impedance rank (H06-40, H08-25): 0 a rail (Supply/Ground),
@@ -416,7 +373,7 @@ fn series_order(netlist: &Netlist, members: &[DeviceId]) -> Option<Vec<(DeviceId
 fn flip_members(m: &mut Macro, flips: &[bool]) {
     let flipped = |k: usize| flips.get(k).copied().unwrap_or(false);
     for p in &mut m.pins {
-        if let Some((k, t)) = member_pin(&p.name) {
+        if let Some((k, t)) = p.name.strip_prefix('d').and_then(|r| r.split_once(':')).and_then(|(k, t)| Some((k.parse::<usize>().ok()?, t))) {
             if flipped(k) && (t == "S" || t == "D") {
                 p.name = format!("d{k}:{}", if t == "S" { "D" } else { "S" });
             }
@@ -477,11 +434,15 @@ fn gate_straps_stay_private(m: &Macro, netlist: &Netlist, members: &[DeviceId], 
 fn region_spans(m: &Macro, members: usize) -> Vec<Option<(i32, i32)>> {
     let mut span: Vec<Option<(i32, i32)>> = vec![None; members];
     for pin in &m.pins {
-        let Some((n, t)) = member_pin(&pin.name) else { continue };
+        let Some((n, t)) = pin.name.strip_prefix('d').and_then(|r| r.split_once(':')) else {
+            continue;
+        };
         if t != "S" && t != "D" {
             continue;
         }
-        let Some(slot) = span.get_mut(n) else { continue };
+        let Some(slot) = n.parse::<usize>().ok().and_then(|i| span.get_mut(i)) else {
+            continue;
+        };
         let e = slot.get_or_insert((pin.at.x, pin.at.x));
         e.0 = e.0.min(pin.at.x);
         e.1 = e.1.max(pin.at.x);
@@ -495,11 +456,6 @@ fn region_spans(m: &Macro, members: usize) -> Vec<Option<(i32, i32)>> {
 /// `(DRC+ERC, bbox w, bbox h)` from the same prices; `matched[i]` keeps all).
 /// `ranked[i]` (missing = false) marks a cell whose generator lists its
 /// alternatives best-matching first (GAP-18).
-///
-/// Cost: one density-stripped DRC+ERC run per alternative of every cell.
-///
-/// # Panics
-/// If `pdk`'s own deck no longer parses into a [`Checker`].
 #[must_use]
 pub fn seed_assignment(variants: &[gp::VariantSpace], matched: &[bool], ranked: &[bool], pdk: &Pdk) -> (Vec<u16>, Vec<Vec<u16>>) {
     let mut checker = Checker::new(pdk, true).expect("a loaded Pdk re-parses its own deck");
@@ -573,12 +529,7 @@ fn price(m: &Macro, checker: &mut Checker) -> (usize, i64) {
     (geom, gr::group_hpwl(std::slice::from_ref(m)))
 }
 
-/// The geometry an assignment selects, one cloned macro per cell. A missing
-/// entry means variant 0; entries past `variants` are ignored.
-///
-/// # Panics
-/// If an entry names a variant its cell does not have (including any variant
-/// of an empty space).
+/// The geometry an assignment selects. A missing entry means variant 0.
 #[must_use]
 pub fn realize(variants: &[gp::VariantSpace], assignment: &[u16]) -> Vec<Macro> {
     variants
@@ -602,38 +553,26 @@ pub fn realize(variants: &[gp::VariantSpace], assignment: &[u16]) -> Vec<Macro> 
 /// `allowed[i]` (ascending = best-matching first for a ranked cell; [`seed_assignment`]), fastest digit = the cell
 /// whose alternatives move pins the most ([`pin_spread`]): never repeats,
 /// always terminates, and changes pin geometry first. A cell with an empty
-/// or one-entry `allowed` row is a fixed digit. Each `allowed` row must be
-/// ascending; a missing `current` entry reads as 0.
+/// or one-entry `allowed` row is a fixed digit.
 #[must_use]
 pub fn escalate(variants: &[gp::VariantSpace], allowed: &[Vec<u16>], current: &[u16]) -> Option<Vec<u16>> {
     let spread: Vec<usize> = variants.iter().map(pin_spread).collect();
-    let mut next: Vec<u16> = (0..variants.len()).map(|i| current.get(i).copied().unwrap_or(0)).collect();
-    odometer_step(&odometer_order(&spread), allowed, &mut next).then_some(next)
-}
-
-/// Cells in odometer digit order, fastest first: widest pin spread, ties by
-/// lower index. `spread[i]` is cell `i`'s [`pin_spread`].
-fn odometer_order(spread: &[usize]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..spread.len()).collect();
+    let mut order: Vec<usize> = (0..variants.len()).collect();
     order.sort_by_key(|&i| (std::cmp::Reverse(spread[i]), i));
-    order
-}
-
-/// Advances `digits` one step of the mixed-radix odometer over `allowed`,
-/// digits taken in `order`; `false` when every digit wrapped (the space is
-/// exhausted). A missing or empty `allowed` row is a fixed digit.
-fn odometer_step(order: &[usize], allowed: &[Vec<u16>], digits: &mut [u16]) -> bool {
-    for &i in order {
+    let mut next: Vec<u16> = (0..variants.len())
+        .map(|i| current.get(i).copied().unwrap_or(0))
+        .collect();
+    for &i in &order {
         let row = allowed.get(i).map_or(&[][..], Vec::as_slice);
-        if let Some(&v) = row.iter().find(|&&v| v > digits[i]) {
-            digits[i] = v;
-            return true;
+        if let Some(&v) = row.iter().find(|&&v| v > next[i]) {
+            next[i] = v;
+            return Some(next);
         }
         if let Some(&v) = row.first() {
-            digits[i] = v; // carry
+            next[i] = v; // carry
         }
     }
-    false
+    None
 }
 
 /// Next assignment on an infeasible stall: the most-blamed cell with an
@@ -648,10 +587,8 @@ pub fn escalate_blamed(variants: &[gp::VariantSpace], allowed: &[Vec<u16>], curr
     let n = variants.len();
     let cur: Vec<u16> = (0..n).map(|i| current.get(i).copied().unwrap_or(0)).collect();
     let fresh = |a: &Vec<u16>| *a != cur && !tried.contains(a);
-    // Pin spread once per call: the odometer walk below steps many times.
-    let spread: Vec<usize> = variants.iter().map(pin_spread).collect();
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by_key(|&i| (Reverse(blame.get(i).copied().unwrap_or(0)), Reverse(spread[i]), i));
+    order.sort_by_key(|&i| (Reverse(blame.get(i).copied().unwrap_or(0)), Reverse(pin_spread(&variants[i])), i));
     for &i in &order {
         for &a in allowed.get(i).map_or(&[][..], Vec::as_slice).iter().filter(|&&a| a > cur[i]) {
             let mut next = cur.clone();
@@ -663,15 +600,12 @@ pub fn escalate_blamed(variants: &[gp::VariantSpace], allowed: &[Vec<u16>], curr
     }
     // ponytail: a linear odometer walk per call, O(space); the space is the
     // pruned product of `allowed`, small after GAP-16.
-    let odometer = odometer_order(&spread);
     let mut a: Vec<u16> = (0..n).map(|i| allowed.get(i).and_then(|r| r.first()).copied().unwrap_or(cur[i])).collect();
     loop {
         if fresh(&a) {
             return Some(a);
         }
-        if !odometer_step(&odometer, allowed, &mut a) {
-            return None;
-        }
+        a = escalate(variants, allowed, &a)?;
     }
 }
 
@@ -754,7 +688,12 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
         .enumerate()
         .filter(|(i, _)| !covered[*i])
     {
-        let param = |k: &str| param(dev, k).unwrap_or(0);
+        let param = |k: &str| {
+            dev.params
+                .iter()
+                .find(|(n, _)| n == k)
+                .map_or(0, |(_, v)| *v)
+        };
         unitization.push(Unitization {
             devices: vec![DeviceId(i as u16)],
             device_type: dev.kind,
@@ -785,7 +724,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
     // fingers at `W/k`, ratios kept (every member scales alike).
     for u in &mut unitization {
         let Some(&(k, w)) = u.devices.first().and_then(|d| fold.get(d.0 as usize)) else { continue };
-        if k > 1 && is_mos(u.device_type) {
+        if k > 1 && matches!(u.device_type, DeviceKind::Nmos | DeviceKind::Pmos) {
             u.dev_nf = u.dev_nf.iter().map(|&n| n.saturating_mul(k)).collect();
             u.unit_w = w;
         }
@@ -831,10 +770,11 @@ const P2P_SHARE: f32 = 0.55;
 #[must_use]
 pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<DeviceId>, bool)]) -> Vec<(u16, i32)> {
     use pnr_core::Process;
+    let param = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
     let nm = |d: &Device, k: &str| param(d, k).map_or(0, |v| v.clamp(0, i64::from(i32::MAX)) as i32);
     // A MOS's width is its finger's, `W_total/nf`; anything else its written `w`.
     let w_of = |d: &Device| d.mos_size().map_or(nm(d, "w"), |s| s.w_finger_nm().min(i64::from(i32::MAX)) as i32);
-    let mos = |d: &Device| is_mos(d.kind);
+    let mos = |d: &Device| matches!(d.kind, DeviceKind::Nmos | DeviceKind::Pmos);
     // A channel below the deck's shortest legal one is drawn as asked (DRC
     // reports it), never resized behind the netlist's back: said here, by name.
     for d in netlist.devices.iter().filter(|d| mos(d)) {
@@ -883,8 +823,7 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
             None => vec![i],
         };
         let fingers: Vec<u32> = class.iter().map(|&j| netlist.devices[j].mos_size().map_or(1, |s| s.fingers())).collect();
-        // Saturating: a row past `u16::MAX` fingers cannot fold anyway.
-        let row: u32 = fingers.iter().fold(0u32, |a, &f| a.saturating_add(f));
+        let row: u32 = fingers.iter().sum();
         let parallel = class.iter().all(|&j| netlist.devices[j].terminals == d.terminals);
         // A series stack needs odd fingers per member (each starts on D and
         // ends on S); any other multi-device class wants even (ABBA).
@@ -909,28 +848,21 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
             .max()
             .unwrap_or(1)
             .max(1);
-        // In i64: rounding a finger near `i32::MAX` up must not wrap; past it,
-        // round down instead.
-        let snap = |v: i32| {
-            let (v, g) = (i64::from(v), i64::from(grid));
-            i32::try_from((v + g / 2) / g * g).unwrap_or_else(|_| (v / g * g) as i32)
-        };
+        let snap = |v: i32| (v + grid / 2) / grid * grid;
         // (wrong member finger parity, |log aspect|) — lexicographic.
         let score = |k: u32| {
             let fw = snap(w / k as i32);
-            // `f·k` is odd iff both are: no product, no overflow.
-            let odd = |f: u32| f & k & 1 == 1;
             let bad_parity = if stack {
-                fingers.iter().any(|&f| !odd(f))
+                fingers.iter().any(|&f| (f * k) % 2 == 0)
             } else {
-                !parallel && class.len() > 1 && fingers.iter().any(|&f| odd(f))
+                !parallel && class.len() > 1 && fingers.iter().any(|&f| (f * k) % 2 == 1)
             };
-            let aspect = (f64::from(row) * f64::from(k) * f64::from(pitch) / f64::from(fw)).ln().abs();
+            let aspect = (f64::from(row * k) * f64::from(pitch) / f64::from(fw)).ln().abs();
             (bad_parity, aspect)
         };
-        let mut ks: Vec<u32> = (1u32..=64).filter(|&k| k == 1 || (snap(w / k as i32) >= w_min && row.saturating_mul(k) <= u32::from(u16::MAX))).collect();
+        let mut ks: Vec<u32> = (1u32..=64).filter(|&k| k == 1 || (snap(w / k as i32) >= w_min && row * k <= u32::from(u16::MAX))).collect();
         if class.len() > 1 && !stack && !parallel {
-            let cc = |k: &u32| cells::mosfet::cc_row_exists(&fingers.iter().map(|&f| f.saturating_mul(*k).min(u32::from(u16::MAX)) as u16).collect::<Vec<_>>(), route);
+            let cc = |k: &u32| cells::mosfet::cc_row_exists(&fingers.iter().map(|&f| (f * k).min(u32::from(u16::MAX)) as u16).collect::<Vec<_>>(), route);
             if ks.iter().any(cc) {
                 ks.retain(cc);
             }
@@ -956,9 +888,8 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
     out
 }
 
-/// `d`'s SPICE `m` (parallel count), clamped to `1..=u16::MAX`; 1 when absent.
 fn multiplier(d: &Device) -> u16 {
-    param(d, "m").map_or(1, |v| v.clamp(1, i64::from(u16::MAX)) as u16)
+    d.params.iter().find(|(n, _)| n == "m").map_or(1, |&(_, v)| v.clamp(1, i64::from(u16::MAX)) as u16)
 }
 
 /// The longest-to-shortest side a matched member's subarray may have (GAP-11, Hastings rule 9, H13-46
@@ -992,7 +923,7 @@ fn member_aspect(m: &Macro) -> f64 {
         let us = m.units.iter().filter(|u| u.owner == o);
         let (x0, x1) = us.clone().fold((i32::MAX, i32::MIN), |(a, b), u| (a.min(u.x), b.max(u.x)));
         let (y0, y1) = us.fold((i32::MAX, i32::MIN), |(a, b), u| (a.min(u.y), b.max(u.y)));
-        let (w, h) = (f64::from(x1) - f64::from(x0) + px, f64::from(y1) - f64::from(y0) + py);
+        let (w, h) = ((x1 - x0) as f64 + px, (y1 - y0) as f64 + py);
         if w > 0.0 && h > 0.0 {
             worst = worst.max(w.max(h) / w.min(h));
         }
@@ -1003,17 +934,11 @@ fn member_aspect(m: &Macro) -> f64 {
 /// Keep the variants within `limit` (GAP-11) and return `true`; when none is, keep only the squarest (first
 /// on ties) and return `false` (the caller reports it).
 fn keep_compact(alts: &mut Vec<Macro>, limit: f64) -> bool {
-    // One aspect per alternative: `member_aspect` allocates per call.
-    let aspect: Vec<f64> = alts.iter().map(member_aspect).collect();
-    if aspect.iter().any(|&a| a <= limit) {
-        let mut i = 0;
-        alts.retain(|_| {
-            i += 1;
-            aspect[i - 1] <= limit
-        });
+    if alts.iter().any(|m| member_aspect(m) <= limit) {
+        alts.retain(|m| member_aspect(m) <= limit);
         return true;
     }
-    let best = (0..alts.len()).min_by(|&a, &b| aspect[a].total_cmp(&aspect[b]));
+    let best = (0..alts.len()).min_by(|&a, &b| member_aspect(&alts[a]).total_cmp(&member_aspect(&alts[b])));
     if let Some(i) = best {
         alts.swap(0, i);
         alts.truncate(1);
@@ -1041,9 +966,10 @@ fn mos_overlay<'a>(pdk: &'a Pdk, model: &str) -> Option<verify::pdk::Overlay<'a>
     Some(verify::pdk::Overlay { pdk, recipe: verify::pdk::Recipe { model: model.into(), layers, rules: vec![] } })
 }
 
+/// Every enumerated variant of one group, by device kind.
 /// Every variant of `group`, a `kind` of schematic `model`. A resistor is
 /// drawn to its model's recipe ([`Pdk::recipe`]): the construction the
-/// deck's recogniser for that model expects. Never empty.
+/// deck's recogniser for that model expects.
 fn draw_variants(kind: DeviceKind, model: &str, group: &DeviceGroup, c: &Constraints, pdk: &Pdk) -> Vec<Macro> {
     match kind {
         // A fin process draws its transistors from fins.
@@ -1084,14 +1010,27 @@ fn draw_variants(kind: DeviceKind, model: &str, group: &DeviceGroup, c: &Constra
     }
 }
 
-/// Every variant generator `G` enumerates for `group`, drawn, in
 /// `Cell::enumerate` order. Never empty: an empty enumeration yields one empty
-/// macro (no shapes) so `variant == 0` always names something; callers that
-/// must not keep it filter on `shapes.is_empty()`.
+/// macro so `variant == 0` always names something.
 fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &dyn pnr_core::Process) -> Vec<Macro> {
-    let mut drawn: Vec<Macro> = G::enumerate(group, c, pdk).iter().map(|v| v.draw(group, c, pdk)).collect();
+    let drawn: Vec<Macro> = G::enumerate(group, c, pdk)
+        .iter()
+        .map(|v| v.draw(group, c, pdk))
+        .collect();
     if drawn.is_empty() {
-        drawn.push(Macro::default());
+        return vec![Macro {
+            shapes: Vec::new(),
+            pins: Vec::new(),
+            bbox: Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
+            units: Vec::new(),
+            dummies: Vec::new(),
+            ..Default::default()
+        }];
     }
     drawn
 }
@@ -1122,12 +1061,6 @@ fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &dyn pnr_core::P
 /// geometry drawn at the schematic's own fingers (the manual path).
 ///
 /// `skip`: devices whose cards come from [`drawn_cards`] instead.
-///
-/// A terminal that is absent reads as the empty net name `""`.
-///
-/// # Panics
-/// If a device terminal names a net outside `netlist.nets`.
-#[must_use]
 pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceId]) -> RefInput {
     let mut devices: Vec<RefDeviceIn> = Vec::new();
     for (i, dev) in netlist.devices.iter().enumerate() {
@@ -1152,7 +1085,7 @@ pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceI
                 terminal(dev, p).map_or(String::new(), |n| netlist.nets[n.0 as usize].name.clone())
             })
             .collect();
-        let (fingers, params) = if is_mos(dev.kind) {
+        let (fingers, params) = if matches!(dev.kind, DeviceKind::Nmos | DeviceKind::Pmos) {
             // No size (missing or non-positive w/l): one card without params,
             // so LVS reports the device rather than a made-up size.
             match dev.mos_size() {
@@ -1167,7 +1100,7 @@ pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceI
             (i64::from(multiplier(dev)), Vec::new())
         } else if dev.kind == DeviceKind::Capacitor {
             // One card per drawn unit (dac4's XC4 `m=8` is 8 unit caps).
-            let nf = param(dev, "nf").unwrap_or(1);
+            let nf = dev.params.iter().find(|(n, _)| n == "nf").map_or(1, |&(_, v)| v);
             (nf.max(i64::from(multiplier(dev))).clamp(1, i64::from(u16::MAX)), Vec::new())
         } else {
             (1, Vec::new())
@@ -1224,7 +1157,11 @@ pub fn drawn_cards(placed: &[Macro], nets: &[String], schematic: &Netlist, pdk: 
             };
             let node = |n: &Node| match *n {
                 Node::Unused => None,
-                Node::Pin(t) => Some(pin_net(m, usize::from(d.owner), t, nets).cloned().unwrap_or_else(|| format!("~{cell}.{}.no-{t}", d.owner))),
+                Node::Pin(t) => {
+                    let name = format!("d{}:{t}", d.owner);
+                    let net = m.pins.iter().find(|p| p.name == name).and_then(|p| nets.get(p.net.0 as usize)).cloned();
+                    Some(net.unwrap_or_else(|| format!("~{cell}.{}.no-{t}", d.owner)))
+                }
                 Node::Internal(k) => Some(format!("~{cell}.{}.{k}", d.owner)),
             };
             let terminals: Vec<String> = d.nodes.iter().filter_map(node).collect();
@@ -1247,7 +1184,10 @@ pub fn dummy_cards(placed: &[Macro], nets: &[String], schematic_cards: &[RefDevi
     let sized = schematic_cards.iter().any(|c| matches!(c.kind, RefKind::Nmos | RefKind::Pmos) && !c.params.is_empty());
     let mut out = Vec::new();
     for m in placed {
-        let net = |owner: u8, t: &str| pin_net(m, usize::from(owner), t, nets).cloned();
+        let net = |owner: u8, t: &str| {
+            let name = format!("d{owner}:{t}");
+            m.pins.iter().find(|p| p.name == name).and_then(|p| nets.get(p.net.0 as usize)).cloned()
+        };
         for d in &m.dummies {
             let (Some(near), Some(bulk)) = (net(d.owner, d.edge), net(d.owner, "B")) else { continue };
             out.push(RefDeviceIn {
@@ -1302,7 +1242,7 @@ fn bind_pins(m: &mut Macro, netlist: &Netlist, members: &[DeviceId], ground: Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pnr_core::{LayerId, Net, Pin, Rect, Shape};
+    use pnr_core::{LayerId, Net, Pin, Shape};
 
     /// The sky130 deck the benchmarks use, compiled in: a sidecar that fails
     /// validation fails the test, never skips it.
@@ -1314,7 +1254,7 @@ mod tests {
     fn row(units: &[(u8, i32)], w: i32) -> Macro {
         let units = units
             .iter()
-            .map(|&(owner, x)| pnr_core::Unit { owner, x, y: 500, weight: 1, phi: (1, 0), sa_sb: None })
+            .map(|&(owner, x)| pnr_core::Unit { owner, x, y: 500, weight: 1, phi: (1, 0), sa: 0, sb: 0 })
             .collect();
         Macro { bbox: Rect { x: 0, y: 0, w, h: 1000 }, units, ..Default::default() }
     }
@@ -2393,586 +2333,5 @@ mod tests {
         assert_eq!(seed_assignment(&cells.spaces, &matched, &ranked, &pdk).0[ci], 0, "the ranked bank seeds at its best-matching variant");
         // Non-vacuous: unranked, the same bank seeds elsewhere (fewer x.22 findings on variant 1).
         assert_ne!(seed_assignment(&cells.spaces, &matched, &[], &pdk).0[ci], 0, "ranking does not change the seed here");
-    }
-}
-
-/// Branch and corner-case coverage for the unit's pure helpers: no PDK unless
-/// the function under test takes one.
-#[cfg(test)]
-mod unit_tests {
-    use super::*;
-    use pnr_core::{Drawn, DrawnKind, Dummy, LayerId, Net, Node, Pin, Rect, Unit};
-
-    fn nets(names: &[&str]) -> Vec<Net> {
-        names.iter().map(|n| Net { name: (*n).to_string() }).collect()
-    }
-
-    fn mos(name: &str, kind: DeviceKind, d: u16, g: u16, s: u16, b: u16, params: &[(&str, i64)]) -> Device {
-        Device {
-            name: name.into(),
-            kind,
-            model: String::new(),
-            terminals: [("D", d), ("G", g), ("S", s), ("B", b)].iter().map(|&(t, n)| (t.to_string(), NetId(n))).collect(),
-            params: params.iter().map(|&(k, v)| (k.to_string(), v)).collect(),
-        }
-    }
-
-    fn two_term(name: &str, kind: DeviceKind, p: u16, n: u16, params: &[(&str, i64)]) -> Device {
-        Device {
-            name: name.into(),
-            kind,
-            model: String::new(),
-            terminals: vec![("P".into(), NetId(p)), ("N".into(), NetId(n))],
-            params: params.iter().map(|&(k, v)| (k.to_string(), v)).collect(),
-        }
-    }
-
-    fn pin(name: &str, net: u16, x: i32) -> Pin {
-        Pin { name: name.into(), net: NetId(net), layer: LayerId(1), at: Rect { x, y: 0, w: 10, h: 10 } }
-    }
-
-    fn unit(owner: u8, x: i32, y: i32) -> Unit {
-        Unit { owner, x, y, weight: 1, phi: (1, 0), sa_sb: None }
-    }
-
-    fn netlist(devices: Vec<Device>, names: &[&str]) -> Netlist {
-        Netlist { devices, nets: nets(names), ..Default::default() }
-    }
-
-    fn unitization(devices: &[u16], kind: DeviceKind, nf: &[u16]) -> Unitization {
-        Unitization {
-            devices: devices.iter().map(|&d| DeviceId(d)).collect(),
-            device_type: kind,
-            dev_nf: nf.to_vec(),
-            target_ratio: vec![1; devices.len()],
-            unit_w: 1000,
-            unit_l: 150,
-            series_parallel: SeriesParallel::Parallel,
-            dummy_required: false,
-            route_matching_required: false,
-            class: None,
-            kind: None,
-            series: Vec::new(),
-            style: None,
-        }
-    }
-
-    #[test]
-    fn member_pin_parses_only_the_generated_shape() {
-        assert_eq!(member_pin("d0:S"), Some((0, "S")));
-        assert_eq!(member_pin("d12:G"), Some((12, "G")));
-        assert_eq!(member_pin("d1:"), Some((1, "")));
-        assert_eq!(member_pin("S"), None);
-        assert_eq!(member_pin("GND"), None);
-        assert_eq!(member_pin("d:S"), None);
-        assert_eq!(member_pin("dx:S"), None);
-        assert_eq!(member_pin("x0:S"), None);
-    }
-
-    #[test]
-    fn param_multiplier_and_is_mos() {
-        let d = mos("M", DeviceKind::Nmos, 0, 0, 0, 0, &[("w", 5), ("m", 0)]);
-        assert_eq!(param(&d, "w"), Some(5));
-        assert_eq!(param(&d, "l"), None);
-        assert_eq!(multiplier(&d), 1, "m = 0 reads as 1");
-        let big = mos("M", DeviceKind::Nmos, 0, 0, 0, 0, &[("m", 1 << 40)]);
-        assert_eq!(multiplier(&big), u16::MAX);
-        assert_eq!(multiplier(&mos("M", DeviceKind::Nmos, 0, 0, 0, 0, &[])), 1);
-        assert_eq!(multiplier(&mos("M", DeviceKind::Nmos, 0, 0, 0, 0, &[("m", 7)])), 7);
-        let kinds = [
-            DeviceKind::Nmos,
-            DeviceKind::Pmos,
-            DeviceKind::Resistor,
-            DeviceKind::Capacitor,
-            DeviceKind::Npn,
-            DeviceKind::Pnp,
-            DeviceKind::Diode,
-            DeviceKind::Inductor,
-        ];
-        assert_eq!(kinds.map(is_mos), [true, true, false, false, false, false, false, false]);
-        assert_eq!(terminal(&d, "G"), Some(NetId(0)));
-        assert_eq!(terminal(&d, "P"), None);
-    }
-
-    #[test]
-    fn pin_net_finds_the_member_pin_or_none() {
-        let m = Macro { pins: vec![pin("d0:S", 1, 0), pin("d1:S", 0, 20), pin("d1:D", 9, 40)], ..Default::default() };
-        let names = vec!["a".to_string(), "b".to_string()];
-        assert_eq!(pin_net(&m, 1, "S", &names).map(String::as_str), Some("a"));
-        assert_eq!(pin_net(&m, 0, "S", &names).map(String::as_str), Some("b"));
-        assert_eq!(pin_net(&m, 0, "D", &names), None, "no such pin");
-        assert_eq!(pin_net(&m, 1, "D", &names), None, "net outside the name table");
-    }
-
-    #[test]
-    fn aspect_limit_is_the_hastings_table() {
-        use analog::intent::{MatchClass as C, MatchKind as K};
-        let classes = [Some(C::Minimal), Some(C::Moderate), Some(C::Exceptional), None];
-        let current: Vec<_> = classes.iter().map(|&c| aspect_limit(c, Some(K::Current))).collect();
-        assert_eq!(current, [Some(10.0), Some(3.0), Some(1.5), Some(3.0)]);
-        let voltage: Vec<_> = classes.iter().map(|&c| aspect_limit(c, Some(K::Voltage))).collect();
-        assert_eq!(voltage, [Some(3.0), Some(1.5), Some(1.5), Some(1.5)]);
-        assert!(classes.iter().all(|&c| aspect_limit(c, Some(K::Ratio)).is_none() && aspect_limit(c, None).is_none()));
-    }
-
-    #[test]
-    fn member_aspect_corner_cases() {
-        assert_eq!(member_aspect(&Macro::default()), 1.0, "no units");
-        let zero = Macro { units: vec![unit(0, 0, 0)], ..Default::default() };
-        assert_eq!(member_aspect(&zero), 1.0, "zero extent");
-        let one = Macro { bbox: Rect { x: 0, y: 0, w: 1000, h: 1000 }, units: vec![unit(0, 500, 500)], ..Default::default() };
-        assert_eq!(member_aspect(&one), 1.0, "one unit fills its pitch");
-        let column = Macro { bbox: Rect { x: 0, y: 0, w: 1000, h: 2000 }, units: vec![unit(0, 500, 500), unit(0, 500, 1500)], ..Default::default() };
-        assert_eq!(member_aspect(&column), 2.0, "a vertical stack is long too");
-        let wide = Macro { bbox: Rect { x: 0, y: 0, w: i32::MAX, h: 1000 }, units: vec![unit(0, -2_000_000_000, 0), unit(0, 2_000_000_000, 0)], ..Default::default() };
-        let r = member_aspect(&wide);
-        assert!(r.is_finite() && r > 1.0, "a span past i32 must not wrap: {r}");
-    }
-
-    #[test]
-    fn keep_compact_on_nothing_keeps_nothing() {
-        let mut v: Vec<Macro> = Vec::new();
-        keep_compact(&mut v, 3.0);
-        assert!(v.is_empty());
-        // Exactly at the limit is within it.
-        let at = Macro { bbox: Rect { x: 0, y: 0, w: 3000, h: 1000 }, units: vec![unit(0, 500, 500), unit(0, 1500, 500), unit(0, 2500, 500)], ..Default::default() };
-        let mut v = vec![at];
-        assert!(keep_compact(&mut v, 3.0));
-        assert_eq!(v.len(), 1);
-        // Ties on the squarest keep the first.
-        let a = Macro { bbox: Rect { x: 0, y: 0, w: 4000, h: 1000 }, units: vec![unit(0, 500, 500), unit(0, 3500, 500)], ..Default::default() };
-        let mut b = a.clone();
-        b.bbox.x = 7;
-        let mut v = vec![a, b];
-        assert!(!keep_compact(&mut v, 1.5));
-        assert_eq!((v.len(), v[0].bbox.x), (1, 0));
-    }
-
-    #[test]
-    fn seed_of_and_keep_corner_cases() {
-        assert_eq!(seed_of(&[], false), 0, "no alternatives seeds at 0");
-        assert_eq!(seed_of(&[(0, 5), (0, 5)], false), 0, "ties break on index");
-        assert_eq!(seed_of(&[(usize::MAX, 0), (3, 99)], false), 1, "an unloadable macro loses");
-        assert!(keep(&[], 0, false).is_empty());
-        assert_eq!(keep(&[(0, 1, 1), (0, 1, 1)], 0, false), [0, 1], "equal costs dominate neither");
-        assert_eq!(keep(&[(0, 10, 10)], 0, false), [0]);
-    }
-
-    /// A one-pin alternative with its bbox at `x0` and its pin `dx` inside it.
-    fn alt(x0: i32, dx: i32) -> Macro {
-        Macro { pins: vec![pin("G", 0, x0 + dx)], bbox: Rect { x: x0, y: 0, w: 100, h: 100 }, ..Default::default() }
-    }
-
-    #[test]
-    fn pin_spread_counts_bbox_relative_arrangements() {
-        assert_eq!(pin_spread(&gp::VariantSpace { alternatives: Vec::new() }), 0);
-        assert_eq!(pin_spread(&gp::VariantSpace { alternatives: vec![alt(0, 10), alt(500, 10)] }), 1, "a shifted copy is the same arrangement");
-        assert_eq!(pin_spread(&gp::VariantSpace { alternatives: vec![alt(0, 10), alt(0, 20), alt(0, 10)] }), 2);
-        // Pin order does not matter.
-        let mut a = alt(0, 10);
-        a.pins.push(pin("D", 0, 50));
-        let mut b = a.clone();
-        b.pins.reverse();
-        assert_eq!(pin_spread(&gp::VariantSpace { alternatives: vec![a, b] }), 1);
-    }
-
-    #[test]
-    fn realize_ignores_extra_assignment_entries() {
-        let spaces = vec![gp::VariantSpace { alternatives: vec![alt(0, 10), alt(0, 20)] }];
-        let got = realize(&spaces, &[1, 7, 7]);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0], spaces[0].alternatives[1]);
-        assert!(realize(&[], &[3]).is_empty());
-    }
-
-    #[test]
-    #[should_panic(expected = "names variant")]
-    fn realize_panics_on_a_variant_out_of_range() {
-        let spaces = vec![gp::VariantSpace { alternatives: vec![alt(0, 10)] }];
-        let _ = realize(&spaces, &[1]);
-    }
-
-    #[test]
-    #[should_panic(expected = "names variant")]
-    fn realize_panics_on_an_empty_space() {
-        let _ = realize(&[gp::VariantSpace { alternatives: Vec::new() }], &[]);
-    }
-
-    #[test]
-    fn escalate_moves_the_widest_spread_digit_first() {
-        // Cell 1 spreads 3 ways, cell 0 two: cell 1 is the fastest digit.
-        let spaces = vec![
-            gp::VariantSpace { alternatives: vec![alt(0, 10), alt(0, 20)] },
-            gp::VariantSpace { alternatives: vec![alt(0, 10), alt(0, 20), alt(0, 30)] },
-        ];
-        let allowed = vec![vec![0u16, 1], vec![0, 1, 2]];
-        assert_eq!(escalate(&spaces, &allowed, &[0, 0]), Some(vec![0, 1]));
-        assert_eq!(escalate(&spaces, &allowed, &[0, 2]), Some(vec![1, 0]), "carry resets to the row's first entry");
-        assert_eq!(escalate(&spaces, &allowed, &[1, 2]), None);
-        // A missing `current` reads as 0; a missing or empty `allowed` row is a fixed digit.
-        assert_eq!(escalate(&spaces, &allowed, &[]), Some(vec![0, 1]));
-        assert_eq!(escalate(&spaces, &[], &[0, 0]), None);
-        assert_eq!(escalate(&spaces, &[vec![], vec![]], &[0, 0]), None);
-        // A current digit off its row moves to the next allowed one above it.
-        assert_eq!(escalate(&spaces, &[vec![0], vec![0, 2]], &[0, 1]), Some(vec![0, 2]));
-    }
-
-    #[test]
-    fn escalate_blamed_corner_cases() {
-        use std::collections::BTreeSet;
-        let spaces = vec![
-            gp::VariantSpace { alternatives: vec![alt(0, 10), alt(0, 20)] },
-            gp::VariantSpace { alternatives: vec![alt(0, 10), alt(0, 20), alt(0, 30)] },
-        ];
-        let allowed = vec![vec![0u16, 1], vec![0, 1, 2]];
-        // Equal blame: the wider pin spread moves first.
-        assert_eq!(escalate_blamed(&spaces, &allowed, &[0, 0], &[], &BTreeSet::new()), Some(vec![0, 1]));
-        // A blamed cell whose higher entries are all tried hands over to the next.
-        let tried = BTreeSet::from([vec![0u16, 1], vec![0, 2]]);
-        assert_eq!(escalate_blamed(&spaces, &allowed, &[0, 0], &[0, 9], &tried), Some(vec![1, 0]));
-        // Nothing higher anywhere: the first untried assignment from the origin.
-        let tried = BTreeSet::from([vec![0u16, 0], vec![0, 1]]);
-        assert_eq!(escalate_blamed(&spaces, &allowed, &[1, 2], &[], &tried), Some(vec![0, 2]));
-        // A one-assignment space is exhausted at once.
-        let one = vec![gp::VariantSpace { alternatives: vec![alt(0, 10)] }];
-        assert_eq!(escalate_blamed(&one, &[vec![0]], &[0], &[3], &BTreeSet::new()), None);
-        assert_eq!(escalate_blamed(&[], &[], &[], &[], &BTreeSet::new()), None);
-    }
-
-    #[test]
-    fn shared_pads_must_carry_one_net() {
-        assert!(shared_pads_carry_one_net(&Macro::default()));
-        let ok = Macro { pins: vec![pin("d0:S", 1, 0), pin("d1:S", 1, 0), pin("d0:D", 2, 50)], ..Default::default() };
-        assert!(shared_pads_carry_one_net(&ok));
-        let short = Macro { pins: vec![pin("d0:S", 1, 0), pin("d0:D", 2, 50), pin("d1:D", 3, 50)], ..Default::default() };
-        assert!(!shared_pads_carry_one_net(&short));
-    }
-
-    #[test]
-    fn currents_run_alike_needs_equal_mean_direction() {
-        let alike = Macro { units: vec![unit(0, 0, 0), unit(1, 10, 0)], ..Default::default() };
-        assert!(currents_run_alike(&alike, 2));
-        let mut opposed = alike.clone();
-        opposed.units[1].phi = (-1, 0);
-        assert!(!currents_run_alike(&opposed, 2));
-        assert!(currents_run_alike(&Macro::default(), 2), "no units: nothing to compare");
-    }
-
-    /// A three-device NMOS stack, out → n1 → n2 → gnd, bulk 0.
-    fn stack(flip_middle: bool) -> Netlist {
-        let mid = if flip_middle { mos("M1", DeviceKind::Nmos, 3, 5, 2, 0, &[]) } else { mos("M1", DeviceKind::Nmos, 2, 5, 3, 0, &[]) };
-        netlist(
-            vec![mos("M0", DeviceKind::Nmos, 1, 5, 2, 0, &[]), mid, mos("M2", DeviceKind::Nmos, 3, 5, 4, 0, &[])],
-            &["gnd", "out", "n1", "n2", "x", "g"],
-        )
-    }
-
-    #[test]
-    fn series_order_walks_a_stack() {
-        let ids = [DeviceId(0), DeviceId(1), DeviceId(2)];
-        assert_eq!(series_order(&stack(false), &ids), Some(vec![(ids[0], false), (ids[1], false), (ids[2], false)]));
-        assert_eq!(series_order(&stack(true), &ids), Some(vec![(ids[0], false), (ids[1], true), (ids[2], false)]));
-        // Listed out of order: walked from the first free end, every member reversed.
-        let shuffled = [ids[2], ids[0], ids[1]];
-        assert_eq!(series_order(&stack(false), &shuffled), Some(vec![(ids[2], true), (ids[1], true), (ids[0], true)]));
-    }
-
-    #[test]
-    fn series_order_rejects_non_paths() {
-        let nl = stack(false);
-        assert_eq!(series_order(&nl, &[]), None);
-        assert_eq!(series_order(&nl, &[DeviceId(0)]), None, "one member is no stack");
-        assert_eq!(series_order(&nl, &[DeviceId(0), DeviceId(2)]), None, "disjoint");
-        let mut bulk = stack(false);
-        bulk.devices[1].terminals[3].1 = NetId(4);
-        assert_eq!(series_order(&bulk, &[DeviceId(0), DeviceId(1)]), None, "bulks differ");
-        let ring = netlist(
-            vec![mos("A", DeviceKind::Nmos, 1, 0, 2, 0, &[]), mos("B", DeviceKind::Nmos, 2, 0, 3, 0, &[]), mos("C", DeviceKind::Nmos, 3, 0, 1, 0, &[])],
-            &["b", "x", "y", "z"],
-        );
-        assert_eq!(series_order(&ring, &[DeviceId(0), DeviceId(1), DeviceId(2)]), None, "a ring has no end");
-        let shorted = netlist(vec![mos("A", DeviceKind::Nmos, 1, 0, 1, 0, &[]), mos("B", DeviceKind::Nmos, 1, 0, 2, 0, &[])], &["b", "x", "y"]);
-        assert_eq!(series_order(&shorted, &[DeviceId(0), DeviceId(1)]), None, "D = S");
-        let branch = netlist(
-            vec![mos("A", DeviceKind::Nmos, 1, 0, 2, 0, &[]), mos("B", DeviceKind::Nmos, 2, 0, 3, 0, &[]), mos("C", DeviceKind::Nmos, 2, 0, 4, 0, &[])],
-            &["b", "x", "y", "z", "w"],
-        );
-        assert_eq!(series_order(&branch, &[DeviceId(0), DeviceId(1), DeviceId(2)]), None, "a net on three members");
-        let parallel = netlist(vec![mos("A", DeviceKind::Nmos, 1, 0, 2, 0, &[]), mos("B", DeviceKind::Nmos, 1, 0, 2, 0, &[])], &["b", "x", "y"]);
-        assert_eq!(series_order(&parallel, &[DeviceId(0), DeviceId(1)]), None, "parallel is not series");
-        let no_drain = Device { terminals: vec![("S".into(), NetId(1)), ("B".into(), NetId(0))], ..mos("A", DeviceKind::Nmos, 0, 0, 0, 0, &[]) };
-        let nl = netlist(vec![no_drain, mos("B", DeviceKind::Nmos, 1, 0, 2, 0, &[])], &["b", "x", "y"]);
-        assert_eq!(series_order(&nl, &[DeviceId(0), DeviceId(1)]), None, "a member without D");
-    }
-
-    #[test]
-    fn flip_members_swaps_only_flipped_members() {
-        let mut m = Macro {
-            pins: vec![pin("d0:S", 0, 0), pin("d1:S", 0, 0), pin("d1:D", 0, 0), pin("d1:G", 0, 0), pin("S", 0, 0), pin("d2:S", 0, 0)],
-            dummies: vec![
-                Dummy { owner: 1, pmos: false, edge: "S", w: 1, l: 1 },
-                Dummy { owner: 0, pmos: false, edge: "S", w: 1, l: 1 },
-                Dummy { owner: 1, pmos: false, edge: "D", w: 1, l: 1 },
-            ],
-            units: vec![unit(0, 0, 0), unit(1, 0, 0), unit(2, 0, 0)],
-            ..Default::default()
-        };
-        flip_members(&mut m, &[false, true]);
-        let names: Vec<&str> = m.pins.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["d0:S", "d1:D", "d1:S", "d1:G", "S", "d2:S"], "member 2 is past `flips`: unflipped");
-        assert_eq!(m.dummies.iter().map(|d| d.edge).collect::<Vec<_>>(), ["D", "S", "S"]);
-        assert_eq!(m.units.iter().map(|u| u.phi).collect::<Vec<_>>(), [(1, 0), (-1, 0), (1, 0)]);
-    }
-
-    #[test]
-    fn bind_pins_binds_members_ground_and_drawn_devices() {
-        // M0: D3 G2 S1; M1: D3 G2 S0.
-        let nl = netlist(
-            vec![mos("M0", DeviceKind::Nmos, 3, 2, 1, 1, &[]), mos("M1", DeviceKind::Pmos, 3, 2, 0, 0, &[])],
-            &["vdd", "vss", "g", "out"],
-        );
-        let members = [DeviceId(1), DeviceId(0)];
-        let card = |owner| Drawn { owner, device: None, kind: DrawnKind::Resistor, nodes: [Node::Pin("P"), Node::Pin("N"), Node::Unused], w: 1, l: 1 };
-        let base = Macro {
-            pins: vec![pin("d0:G", 9, 0), pin("d1:S", 9, 0), pin("S", 9, 0), pin("GND", 9, 0), pin("d0:X", 9, 0)],
-            drawn: vec![card(1), card(5)],
-            ..Default::default()
-        };
-        let mut m = base.clone();
-        bind_pins(&mut m, &nl, &members, Some(NetId(1)));
-        assert_eq!(m.pins.iter().map(|p| p.net.0).collect::<Vec<_>>(), [2, 1, 0, 1, 9], "an unknown terminal keeps its net");
-        assert_eq!(m.drawn.iter().map(|d| d.device).collect::<Vec<_>>(), [Some(DeviceId(0)), None]);
-        // No classified ground: member 0's N, else its S.
-        let mut m = base.clone();
-        bind_pins(&mut m, &nl, &members, None);
-        assert_eq!(m.pins[3].net, NetId(0));
-        let mut cap = netlist(vec![two_term("C", DeviceKind::Capacitor, 2, 3, &[])], &["a", "b", "c", "d"]);
-        let mut m = Macro { pins: vec![pin("GND", 9, 0), pin("P", 9, 0)], ..Default::default() };
-        bind_pins(&mut m, &cap, &[DeviceId(0)], None);
-        assert_eq!((m.pins[0].net, m.pins[1].net), (NetId(3), NetId(2)));
-        // Neither N nor S: the tie keeps its net.
-        cap.devices[0].terminals.truncate(1);
-        let mut m = Macro { pins: vec![pin("GND", 9, 0)], ..Default::default() };
-        bind_pins(&mut m, &cap, &[DeviceId(0)], None);
-        assert_eq!(m.pins[0].net, NetId(9));
-    }
-
-    /// A split DAC: LSB bank C0 (terminated unit), C1, C2 (×2) on `tl`; MSB bank C3, C4 (×2) on `tm`; bridge C5.
-    fn split_netlist(bridge_p_on_lsb: bool) -> (Netlist, [u16; 6]) {
-        let (bp, bn) = if bridge_p_on_lsb { (1, 2) } else { (2, 1) };
-        let nl = netlist(
-            vec![
-                two_term("C0", DeviceKind::Capacitor, 1, 0, &[]),
-                two_term("C1", DeviceKind::Capacitor, 1, 3, &[]),
-                two_term("C2", DeviceKind::Capacitor, 1, 4, &[]),
-                two_term("C3", DeviceKind::Capacitor, 2, 5, &[]),
-                two_term("C4", DeviceKind::Capacitor, 2, 6, &[]),
-                two_term("C5", DeviceKind::Capacitor, bp, bn, &[]),
-            ],
-            &["gnd", "tl", "tm", "b1", "b2", "b3", "b4"],
-        );
-        (nl, [1, 1, 2, 1, 2, 1])
-    }
-
-    #[test]
-    fn split_dac_orders_lsb_msb_bridge() {
-        let all: Vec<DeviceId> = (0..6).map(DeviceId).collect();
-        let rails = [NetId(0)];
-        let (nl, nf) = split_netlist(true);
-        let got = split_dac(&nl, &rails, &all, |d| nf[d.0 as usize]);
-        let order = [0, 1, 2, 3, 4, 5].map(DeviceId).to_vec();
-        assert_eq!(got, Some((order.clone(), 2, true)));
-        let (nl, nf) = split_netlist(false);
-        assert_eq!(split_dac(&nl, &rails, &all, |d| nf[d.0 as usize]), Some((order, 2, false)), "bridge P on the MSB top");
-    }
-
-    #[test]
-    fn split_dac_declines_what_is_not_two_banks() {
-        let all: Vec<DeviceId> = (0..6).map(DeviceId).collect();
-        let (nl, nf) = split_netlist(true);
-        assert_eq!(split_dac(&nl, &[], &all, |d| nf[d.0 as usize]), None, "no terminated bank");
-        assert_eq!(split_dac(&nl, &[NetId(0)], &all, |d| if d.0 == 0 { 2 } else { nf[d.0 as usize] }), None, "a terminating unit is one unit");
-        let both = [NetId(0), NetId(5)];
-        assert_eq!(split_dac(&nl, &both, &all, |d| nf[d.0 as usize]), None, "both banks terminated");
-        assert_eq!(split_dac(&nl, &[NetId(0)], &all[..5], |d| nf[d.0 as usize]), None, "no bridge");
-        let mut extra = nl.clone();
-        extra.devices.push(two_term("C6", DeviceKind::Capacitor, 7, 3, &[]));
-        let with_extra: Vec<DeviceId> = (0..7).map(DeviceId).collect();
-        assert_eq!(split_dac(&extra, &[NetId(0)], &with_extra, |d| nf.get(d.0 as usize).copied().unwrap_or(1)), None, "a member on neither bank");
-        assert_eq!(split_dac(&nl, &[NetId(0)], &[], |_| 1), None);
-    }
-
-    #[test]
-    fn plate_rank_of_an_unconnected_net_is_high_z() {
-        let nl = netlist(vec![mos("M", DeviceKind::Nmos, 1, 2, 0, 0, &[])], &["gnd", "d", "g", "float"]);
-        assert_eq!(plate_rank(&nl, &[], NetId(3)), 2, "reaches no channel");
-        assert_eq!(plate_rank(&nl, &[], NetId(0)), 1, "S/B without the rail class is a signal");
-        assert!(!bottom_on_p(&nl, &[], &two_term("C", DeviceKind::Capacitor, 0, 0, &[]).clone()));
-        let one = Device { terminals: vec![("P".into(), NetId(0))], ..two_term("C", DeviceKind::Capacitor, 0, 0, &[]) };
-        assert!(!bottom_on_p(&nl, &[NetId(0)], &one), "a missing plate never swaps");
-    }
-
-    #[test]
-    fn per_device_sizing_splits_kinds_and_sizes_singletons() {
-        let nl = netlist(
-            vec![
-                mos("M0", DeviceKind::Nmos, 1, 2, 0, 0, &[("w", 1000), ("l", 150), ("nf", 2), ("m", 3)]),
-                mos("M1", DeviceKind::Pmos, 1, 2, 0, 0, &[("w", 900), ("l", 150)]),
-                two_term("R0", DeviceKind::Resistor, 1, 0, &[("w", 350), ("l", 5000), ("m", 2)]),
-                two_term("C0", DeviceKind::Capacitor, 1, 0, &[("nf", 3), ("m", 5)]),
-                Device { kind: DeviceKind::Npn, ..two_term("Q0", DeviceKind::Npn, 1, 0, &[("m", 4), ("nf", 9)]) },
-                mos("M2", DeviceKind::Nmos, 1, 2, 0, 0, &[]),
-            ],
-            &["gnd", "d", "g"],
-        );
-        // A mixed-kind unitization (mislabelled Pmos) over M1 and R0, plus an out-of-range id.
-        let mut mixed = unitization(&[1, 2], DeviceKind::Capacitor, &[4, 5]);
-        mixed.target_ratio = vec![6, 7];
-        let annot = Constraints { unitization: vec![mixed, unitization(&[42], DeviceKind::Diode, &[1])], ..Default::default() };
-        let c = with_per_device_sizing(&nl, &annot, &[]);
-        let find = |d: u16| c.unitization.iter().find(|u| u.devices.first() == Some(&DeviceId(d))).expect("covered");
-        assert_eq!((find(1).device_type, find(1).dev_nf.clone(), find(1).target_ratio.clone()), (DeviceKind::Pmos, vec![4], vec![6]));
-        assert_eq!((find(2).device_type, find(2).dev_nf.clone(), find(2).target_ratio.clone()), (DeviceKind::Resistor, vec![5], vec![7]));
-        assert_eq!(find(42).device_type, DeviceKind::Diode, "an all-unknown unitization keeps its label");
-        // Singletons.
-        let m0 = find(0);
-        assert_eq!((m0.dev_nf.clone(), m0.unit_w, m0.unit_l, m0.series_parallel), (vec![6], 500, 150, SeriesParallel::Parallel), "nf·m fingers of W/nf");
-        assert_eq!(find(3).dev_nf, vec![5], "a capacitor draws max(nf, m)");
-        assert_eq!(find(3).series_parallel, SeriesParallel::Series);
-        assert_eq!(find(4).dev_nf, vec![4], "a bipolar draws m units, not nf");
-        assert_eq!((find(5).dev_nf.clone(), find(5).unit_w), (vec![1], 0), "an unsized MOS draws one finger");
-        assert_eq!(c.unitization.iter().filter(|u| u.devices.contains(&DeviceId(1))).count(), 1, "a covered device gets no singleton");
-    }
-
-    #[test]
-    fn per_device_sizing_folds_only_mos() {
-        let nl = netlist(
-            vec![
-                mos("M0", DeviceKind::Nmos, 1, 2, 0, 0, &[("w", 1000), ("l", 150), ("nf", 2)]),
-                two_term("R0", DeviceKind::Resistor, 1, 0, &[("w", 350), ("l", 5000)]),
-                mos("M1", DeviceKind::Nmos, 1, 2, 0, 0, &[("w", 1000), ("l", 150), ("nf", 65535)]),
-            ],
-            &["gnd", "d", "g"],
-        );
-        let c = with_per_device_sizing(&nl, &Constraints::default(), &[(3, 170), (4, 90), (2, 250)]);
-        assert_eq!((c.unitization[0].dev_nf.clone(), c.unitization[0].unit_w), (vec![6], 170));
-        assert_eq!((c.unitization[1].dev_nf.clone(), c.unitization[1].unit_w), (vec![1], 350), "a resistor never folds");
-        assert_eq!(c.unitization[2].dev_nf, vec![u16::MAX], "fingers saturate");
-        let c = with_per_device_sizing(&nl, &Constraints::default(), &[(1, 7)]);
-        assert_eq!(c.unitization[0].unit_w, 500, "k = 1 keeps the schematic width");
-    }
-
-    #[test]
-    fn reference_cards_follow_fingers_folds_and_skip() {
-        let nl = netlist(
-            vec![
-                mos("M0", DeviceKind::Nmos, 1, 2, 0, 0, &[("w", 1000), ("l", 150), ("nf", 2)]),
-                mos("M1", DeviceKind::Pmos, 1, 2, 0, 0, &[]),
-                two_term("C0", DeviceKind::Capacitor, 1, 0, &[("nf", 3), ("m", 2)]),
-                two_term("C1", DeviceKind::Capacitor, 1, 0, &[("nf", -4)]),
-                two_term("R0", DeviceKind::Resistor, 1, 0, &[("m", 5)]),
-                Device { terminals: vec![("P".into(), NetId(1))], ..two_term("L0", DeviceKind::Inductor, 1, 0, &[]) },
-                Device { model: "dmod".into(), ..two_term("D0", DeviceKind::Diode, 1, 0, &[]) },
-            ],
-            &["gnd", "d", "g"],
-        );
-        let r = reference(&nl, None, &[]);
-        let kinds: Vec<RefKind> = r.devices.iter().map(|c| c.kind).collect();
-        use RefKind as K;
-        assert_eq!(kinds, [K::Nmos, K::Nmos, K::Pmos, K::Capacitor, K::Capacitor, K::Capacitor, K::Capacitor, K::Resistor, K::Inductor, K::Diode]);
-        assert_eq!(r.devices[0].terminals, ["d", "g", "gnd", "gnd"]);
-        assert_eq!(r.devices[0].params, [("w".to_string(), 500.0 * 1e-9), ("l".to_string(), 150.0 * 1e-9)]);
-        assert!(r.devices[2].params.is_empty(), "an unsized MOS goes in bare");
-        assert_eq!(r.devices[8].terminals, ["d", ""], "a missing terminal is an empty name");
-        assert_eq!(r.devices[0].model, None);
-        assert_eq!(r.devices[9].model.as_deref(), Some("dmod"));
-        assert!(r.ports.is_empty() && r.external_ports.is_none());
-        // Folded: k× the cards at the fold width; past the table, unfolded.
-        let r = reference(&nl, Some(&[(2, 250)][..]), &[DeviceId(2), DeviceId(3), DeviceId(4), DeviceId(5), DeviceId(6)]);
-        assert_eq!(r.devices.len(), 5);
-        assert!(r.devices[..4].iter().all(|c| c.params[0].1 == 250.0 * 1e-9));
-        let r = reference(&nl, Some(&[(1, 7)][..]), &[DeviceId(1), DeviceId(2), DeviceId(3), DeviceId(4), DeviceId(5), DeviceId(6)]);
-        assert_eq!(r.devices.len(), 2);
-        assert_eq!(r.devices[0].params[0].1, 500.0 * 1e-9, "k = 1 keeps the schematic finger");
-        assert!(reference(&Netlist::default(), None, &[]).devices.is_empty());
-    }
-
-    #[test]
-    fn dummy_cards_read_the_owner_pins() {
-        let names = vec!["vss".to_string(), "a".to_string()];
-        let m = Macro {
-            pins: vec![pin("d0:S", 1, 0), pin("d0:B", 0, 0)],
-            dummies: vec![Dummy { owner: 0, pmos: true, edge: "S", w: 1000, l: 150 }, Dummy { owner: 1, pmos: false, edge: "S", w: 1, l: 1 }, Dummy { owner: 0, pmos: false, edge: "D", w: 1, l: 1 }],
-            ..Default::default()
-        };
-        let bare = dummy_cards(std::slice::from_ref(&m), &names, &[]);
-        assert_eq!(bare.len(), 1, "owner 1 has no pins, owner 0 no D");
-        assert_eq!(bare[0].kind, RefKind::Pmos);
-        assert_eq!(bare[0].terminals, ["a", "vss", "vss", "vss"]);
-        assert!(bare[0].params.is_empty() && bare[0].model.is_none());
-        let sized = RefDeviceIn { kind: RefKind::Nmos, model: None, terminals: Vec::new(), params: vec![("w".into(), 1.0)] };
-        let cards = dummy_cards(&[m], &names, &[sized]);
-        assert_eq!(cards[0].params, [("w".to_string(), 1000.0 * 1e-9), ("l".to_string(), 150.0 * 1e-9)]);
-        let sized_resistor = RefDeviceIn { kind: RefKind::Resistor, model: None, terminals: Vec::new(), params: vec![("w".into(), 1.0)] };
-        assert!(dummy_cards(&[Macro::default()], &names, &[sized_resistor]).is_empty());
-    }
-
-    #[test]
-    fn drawn_cards_skip_stale_and_unowned_bodies() {
-        let pdk = Pdk::builtin("sky130").expect("sky130 loads");
-        let nl = netlist(vec![two_term("R0", DeviceKind::Resistor, 1, 0, &[]), two_term("R1", DeviceKind::Resistor, 1, 0, &[])], &["gnd", "a"]);
-        let body = |device| Drawn { owner: 0, device, kind: DrawnKind::Resistor, nodes: [Node::Pin("P"), Node::Internal(0), Node::Unused], w: 1, l: 1 };
-        let m = Macro { pins: vec![pin("d0:P", 1, 0)], drawn: vec![body(None), body(Some(DeviceId(7))), body(Some(DeviceId(1))), body(Some(DeviceId(1)))], ..Default::default() };
-        let names = vec!["gnd".to_string(), "a".to_string()];
-        let (cards, replaced) = drawn_cards(&[Macro::default(), m], &names, &nl, &pdk);
-        assert_eq!(replaced, [DeviceId(1)], "sorted, distinct, stale ids dropped");
-        assert_eq!(cards.len(), 2);
-        assert_eq!(cards[0].terminals, ["a", "~1.0.0"], "Unused nodes are left out; cell index is the macro's");
-        assert!(cards.iter().all(|c| c.kind == RefKind::Resistor && c.params.is_empty()));
-    }
-
-    /// One sized NMOS on sky130 with `w` total over `nf` fingers.
-    fn lone(w: i64, nf: i64) -> Netlist {
-        netlist(vec![mos("M0", DeviceKind::Nmos, 1, 2, 0, 0, &[("w", w), ("l", 150), ("nf", nf)])], &["gnd", "d", "g"])
-    }
-
-    #[test]
-    fn folds_leaves_non_mos_and_unsized_alone() {
-        let pdk = Pdk::builtin("sky130").expect("sky130 loads");
-        let nl = netlist(
-            vec![two_term("R0", DeviceKind::Resistor, 1, 0, &[("w", 350), ("l", 5000)]), mos("M0", DeviceKind::Nmos, 1, 2, 0, 0, &[("l", 150)])],
-            &["gnd", "d", "g"],
-        );
-        assert_eq!(folds(&nl, &pdk, &[], &[]), [(1, 350), (1, 0)]);
-        assert!(folds(&Netlist::default(), &pdk, &[], &[]).is_empty());
-    }
-
-    #[test]
-    fn folds_respects_its_bounds() {
-        let pdk = Pdk::builtin("sky130").expect("sky130 loads");
-        for (w, nf) in [(420, 1), (1000, 2), (50_000, 1), (200_000, 4)] {
-            let (k, fw) = folds(&lone(w, nf), &pdk, &[], &[])[0];
-            assert!((1..=64).contains(&k), "{w}/{nf}: k = {k}");
-            assert!(fw > 0 && fw <= (w / nf) as i32 + pdk_grid(&pdk), "{w}/{nf}: finger {fw}");
-            if k == 1 {
-                assert_eq!(fw, (w / nf) as i32, "k = 1 keeps the exact schematic finger");
-            }
-        }
-    }
-
-    fn pdk_grid(pdk: &Pdk) -> i32 {
-        use pnr_core::Process;
-        pdk.grid().max(1)
-    }
-
-    /// Absurd sizes must clamp, never overflow: a row past `u16::MAX` fingers
-    /// cannot fold further (k = 1), and a finger at `i32::MAX` nm still snaps.
-    #[test]
-    fn folds_never_overflows_on_absurd_sizes() {
-        let pdk = Pdk::builtin("sky130").expect("sky130 loads");
-        let huge_row = lone(i64::from(u32::MAX) * 1_000_000, i64::from(u32::MAX));
-        assert_eq!(folds(&huge_row, &pdk, &[], &[])[0], (1, 1_000_000));
-        let (k, fw) = folds(&lone(i64::from(i32::MAX), 1), &pdk, &[], &[])[0];
-        assert!(k >= 1 && fw > 0, "{k} x {fw}");
     }
 }

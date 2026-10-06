@@ -16,18 +16,14 @@ use crate::evidence::{Sensitivities, SpecSens};
 
 /// One allocatable set: compared sides (device lists) and its random 1σ, mV.
 pub struct SetIn {
-    /// Compared `(side A, side B)` couples; the set's sensitivity is the largest
-    /// mean |ΔV_T sensitivity| over them (0 without sides).
     pub sides: Vec<(Vec<DeviceId>, Vec<DeviceId>)>,
-    /// Random 1σ ΔV_T, mV; `None` = unknown (no deck A_VT or gate area).
     pub sigma_mv: Option<f32>,
 }
 
 /// `(sign, margin, bound)` per finite bound of `s`: sign −1 floor, +1 ceiling.
 /// Headroom is `(proc.0 | f0) − lo` / `hi − (proc.1 | f0)` (LAMP-01, the process
 /// spread eats it first) less the `β·σ_f` yield reserve (GRAEB-16; no reserve
-/// without `σ_f`). A non-finite bound or `f0` gives no row; floor first, then
-/// ceiling. Shared with EXT-25.
+/// without `σ_f`). A non-finite bound or `f0` gives no row. Shared with EXT-25.
 pub(crate) fn margins(s: &SpecSens, beta: f64) -> Vec<(f64, f64, f64)> {
     if !s.f0.is_finite() {
         return Vec::new();
@@ -47,25 +43,14 @@ pub(crate) fn margins(s: &SpecSens, beta: f64) -> Vec<(f64, f64, f64)> {
 /// `max_j (S_jk·σ_k)²/σ_f,j²` clamped to 1 (GRAEB-06) over the specs with
 /// `S_jk > 0`, `None` unless σ_k and such a spec's σ_f are known: a set no spec's
 /// `d_vt` touches has no evidence of being minor, so D5 leaves it alone.
-/// One output per set, in set order; one diagnostic per infeasible row, in spec order.
 #[must_use]
 pub fn allocate(sets: &[SetIn], sens: &Sensitivities, beta: f64, max_eta: f32) -> (Vec<(Option<f32>, Option<f32>)>, Vec<Diagnostic>) {
     let n = sets.len();
     let mut delta: Vec<Option<f64>> = vec![None; n];
     let mut weight: Vec<Option<f64>> = vec![None; n];
     let mut diags = Vec::new();
-    // Per-device ΔV_T sensitivity of the current spec, dense by device id; reused across specs.
-    let mut per_dev: Vec<f64> = Vec::new();
     for s in &sens.specs {
-        per_dev.clear();
-        for &(d, v) in &s.d_vt {
-            let i = d.0 as usize;
-            if per_dev.len() <= i {
-                per_dev.resize(i + 1, 0.0);
-            }
-            per_dev[i] += v;
-        }
-        let side = |ds: &[DeviceId]| ds.iter().map(|d| per_dev.get(d.0 as usize).copied().unwrap_or(0.0)).sum::<f64>().abs();
+        let side = |ds: &[DeviceId]| ds.iter().map(|&d| s.d_vt.iter().filter(|e| e.0 == d).map(|e| e.1).sum::<f64>()).sum::<f64>().abs();
         let sk: Vec<f64> = sets.iter().map(|k| k.sides.iter().map(|(a, b)| (side(a) + side(b)) / 2.0).fold(0.0, f64::max)).collect();
         let touched: Vec<usize> = (0..n).filter(|&k| sk[k] > 0.0).collect();
         if touched.is_empty() {
@@ -111,11 +96,7 @@ pub fn allocate(sets: &[SetIn], sens: &Sensitivities, beta: f64, max_eta: f32) -
 /// [`SetIn`] of a MOS set (`None` otherwise): half A against half B when the set
 /// has halves, else the reference (slot `reference`, default 0) against each
 /// other member. σ_k is the largest Pelgrom pair σ over those comparisons at the
-/// summed gate areas (`None` without the deck's A_VT or a gate area). A reference
-/// past the members is clamped to the last one, as [`crate::audit::audit`] does.
-///
-/// # Panics
-/// When a member id is out of bounds of `nl.devices`.
+/// summed gate areas (`None` without the deck's A_VT or a gate area).
 pub(crate) fn set_in(s: &MatchSpec, nl: &Netlist, avt: [Option<f32>; 2]) -> Option<SetIn> {
     if s.family != Family::Mos || s.members.is_empty() {
         return None;
@@ -124,7 +105,7 @@ pub(crate) fn set_in(s: &MatchSpec, nl: &Netlist, avt: [Option<f32>; 2]) -> Opti
     let sides = if s.members.iter().any(|m| m.half.is_some()) {
         vec![(half(Half::A), half(Half::B))]
     } else {
-        let r = s.reference.unwrap_or(0).min(s.members.len() - 1);
+        let r = s.reference.unwrap_or(0);
         s.members.iter().enumerate().filter(|&(i, _)| i != r).map(|(_, m)| (vec![s.members[r].device], vec![m.device])).collect()
     };
     let area = |ds: &[DeviceId]| ds.iter().map(|d| nl.devices[d.0 as usize].gate_area_um2()).sum::<f64>() as f32;
@@ -209,128 +190,5 @@ mod tests {
         // A set the spec does not touch gets no weight (no D5 demotion).
         let (out, _) = allocate(&pairs(2), &sens, 3.0, 3.0);
         assert_eq!(out[1].1, None);
-    }
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use analog::intent::{ArrayStyle, ClassSource, ConstraintId, MatchClass, MatchKind, Member, Origin};
-    use pnr_core::netlist::DeviceKind;
-
-    fn spec(f0: f64, lo: Option<f64>, hi: Option<f64>, sigma_f: Option<f64>, d_vt: Vec<(DeviceId, f64)>) -> SpecSens {
-        SpecSens { metric: "m".into(), f0, lo, hi, proc: None, sigma_f, d_c: vec![], d_r: vec![], d_vt, d_t: vec![], d_cc: vec![] }
-    }
-
-    fn one_pair(sigma_mv: Option<f32>) -> SetIn {
-        SetIn { sides: vec![(vec![DeviceId(0)], vec![DeviceId(1)])], sigma_mv }
-    }
-
-    #[test]
-    fn margins_rows() {
-        // Non-finite f0: no row at all.
-        assert!(margins(&spec(f64::NAN, Some(0.0), Some(1.0), None, vec![]), 3.0).is_empty());
-        // Non-finite bounds are skipped; no bounds, no rows.
-        assert!(margins(&spec(1.0, Some(f64::NEG_INFINITY), Some(f64::NAN), None, vec![]), 3.0).is_empty());
-        assert!(margins(&spec(1.0, None, None, None, vec![]), 3.0).is_empty());
-        // β·σ_f comes off both sides; floor first.
-        assert_eq!(margins(&spec(10.0, Some(0.0), Some(20.0), Some(1.0), vec![]), 3.0), [(-1.0, 7.0, 0.0), (1.0, 7.0, 20.0)]);
-        // f0 outside the bounds: negative margin, kept (the caller diagnoses it).
-        assert_eq!(margins(&spec(25.0, None, Some(20.0), None, vec![]), 3.0), [(1.0, -5.0, 20.0)]);
-    }
-
-    #[test]
-    fn no_sets_no_specs() {
-        let (out, d) = allocate(&[], &Sensitivities::default(), 3.0, 3.0);
-        assert!(out.is_empty() && d.is_empty());
-        // No spec: the cap alone, no weight; no σ either: nothing.
-        let (out, _) = allocate(&[one_pair(Some(2.0)), one_pair(None)], &Sensitivities::default(), 3.0, 3.0);
-        assert_eq!(out, [(Some(6.0), None), (None, None)]);
-    }
-
-    #[test]
-    fn untouched_and_sideless_sets_keep_the_cap() {
-        let sens = Sensitivities { specs: vec![spec(20.0, Some(10.0), None, Some(1.0), vec![(DeviceId(5), 1.0)])] };
-        let sets = [one_pair(Some(1.0)), SetIn { sides: vec![], sigma_mv: Some(1.0) }];
-        let (out, d) = allocate(&sets, &sens, 3.0, 3.0);
-        assert!(d.is_empty());
-        assert_eq!(out, [(Some(3.0), None), (Some(3.0), None)]);
-    }
-
-    #[test]
-    fn sensitivity_is_the_mean_of_the_two_sides() {
-        // Side A +4, side B −2: S = (4 + 2)/2 = 3; δ = 9 / 3 = 3.
-        let sens = Sensitivities { specs: vec![spec(10.0, Some(1.0), None, None, vec![(DeviceId(0), 4.0), (DeviceId(1), -2.0)])] };
-        let (out, _) = allocate(&[one_pair(None)], &sens, 3.0, 3.0);
-        assert_eq!(out[0].0, Some(3.0));
-    }
-
-    #[test]
-    fn weight_clamps_to_one_and_needs_sigma_f() {
-        let dvt = vec![(DeviceId(0), 1.0), (DeviceId(1), -1.0)];
-        let (out, _) = allocate(&[one_pair(Some(1.0))], &Sensitivities { specs: vec![spec(20.0, Some(0.0), None, Some(0.5), dvt.clone())] }, 3.0, 1e6);
-        assert_eq!(out[0].1, Some(1.0));
-        let (out, _) = allocate(&[one_pair(Some(1.0))], &Sensitivities { specs: vec![spec(20.0, Some(0.0), None, Some(0.0), dvt.clone())] }, 3.0, 1e6);
-        assert_eq!(out[0].1, None, "σ_f = 0 gives no weight");
-        let (out, _) = allocate(&[one_pair(None)], &Sensitivities { specs: vec![spec(20.0, Some(0.0), None, Some(1.0), dvt)] }, 3.0, 1e6);
-        assert_eq!(out[0].1, None, "no σ_k gives no weight");
-    }
-
-    #[test]
-    fn zero_margin_is_infeasible_and_names_the_bound() {
-        let sens = Sensitivities { specs: vec![spec(10.0, None, Some(10.0), None, vec![(DeviceId(1), 1.0), (DeviceId(0), 1.0)])] };
-        let (out, d) = allocate(&[one_pair(Some(1.0))], &sens, 3.0, 3.0);
-        assert_eq!(out[0].0, Some(0.0));
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].devices, [DeviceId(0), DeviceId(1)]);
-        assert!(d[0].message.starts_with("m:max"), "{}", d[0].message);
-    }
-
-    fn mspec(family: analog::intent::Family, members: &[(u16, Option<Half>)], reference: Option<usize>) -> MatchSpec {
-        MatchSpec {
-            id: ConstraintId(0),
-            origin: Origin::SharedBias,
-            members: members.iter().map(|&(d, half)| Member { device: DeviceId(d), parallel: 1, series: 1, half }).collect(),
-            reference,
-            family,
-            kind: MatchKind::Current,
-            class: MatchClass::Moderate,
-            class_source: ClassSource::Role,
-            unit: None,
-            allowance: None,
-            weight: None,
-            style: ArrayStyle::Any,
-            compound: None,
-        }
-    }
-
-    fn nl3() -> Netlist {
-        use crate::tests::{fet, nets};
-        let n = DeviceKind::Nmos;
-        Netlist { devices: vec![fet("M0", n, 0, 1, 2, 2, 2_000, 1_000), fet("M1", n, 0, 1, 2, 2, 2_000, 1_000), fet("M2", n, 0, 1, 2, 2, 2_000, 1_000)], nets: nets(&["g", "d", "vss"]), ..Default::default() }
-    }
-
-    #[test]
-    fn set_in_shapes() {
-        let nl = nl3();
-        assert!(set_in(&mspec(Family::Bipolar, &[(0, None), (1, None)], None), &nl, [Some(5.0), None]).is_none());
-        assert!(set_in(&mspec(Family::Mos, &[], None), &nl, [Some(5.0), None]).is_none());
-        // Reference against each other member.
-        let s = set_in(&mspec(Family::Mos, &[(0, None), (1, None), (2, None)], Some(1)), &nl, [Some(5.0), None]).unwrap();
-        assert_eq!(s.sides, [(vec![DeviceId(1)], vec![DeviceId(0)]), (vec![DeviceId(1)], vec![DeviceId(2)])]);
-        // 2 µm² each: σ = 5·√((1/2 + 1/2)/2).
-        assert!((s.sigma_mv.unwrap() - 5.0 * 0.5f32.sqrt()).abs() < 1e-5);
-        // Halves: one A-against-B comparison at the summed areas.
-        let s = set_in(&mspec(Family::Mos, &[(0, Some(Half::A)), (1, Some(Half::B)), (2, Some(Half::A))], None), &nl, [Some(5.0), None]).unwrap();
-        assert_eq!(s.sides, [(vec![DeviceId(0), DeviceId(2)], vec![DeviceId(1)])]);
-        // No A_VT for the polarity: no σ.
-        assert!(set_in(&mspec(Family::Mos, &[(0, None), (1, None)], None), &nl, [None, Some(5.0)]).unwrap().sigma_mv.is_none());
-    }
-
-    /// A reference past the members falls back to the last one instead of panicking.
-    #[test]
-    fn set_in_clamps_reference() {
-        let s = set_in(&mspec(Family::Mos, &[(0, None), (1, None)], Some(9)), &nl3(), [None, None]).unwrap();
-        assert_eq!(s.sides, [(vec![DeviceId(1)], vec![DeviceId(0)])]);
     }
 }

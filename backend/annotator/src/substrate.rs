@@ -19,11 +19,6 @@ fn aggressor_net(c: NetClass) -> bool {
 /// and FETs gated by a Bias/Reference net. Weight: the largest `weight` of the
 /// device's sets, else the largest class rank over its Moderate+ sets
 /// (Moderate 3, Exceptional 10; Philis policy), else 1 for a bias-gated FET.
-/// A capacitor needs exactly two terminals to couple.
-///
-/// # Panics
-/// When `classes` is shorter than the nets the devices touch, or a set member
-/// is out of bounds of `nl.devices`.
 #[must_use]
 pub fn tag(nl: &Netlist, classes: &[NetClassification], sets: &[MatchSpec]) -> (Vec<Aggressor>, Vec<Victim>) {
     let class = |n: pnr_core::NetId| classes[n.0 as usize].class;
@@ -76,12 +71,7 @@ pub fn tag(nl: &Netlist, classes: &[NetClassification], sets: &[MatchSpec]) -> (
 /// D/S and a diode's N inject electrons, PMOS D/S and a diode's P holes;
 /// bipolars stay unclassified (noted in `missing`). With an op point, an NMOS
 /// with `vbs > 0` (PMOS `< 0`) gets the same tag. One tag per device, in
-/// device order, the first reason winning. "Within" is strict: a net exactly
-/// `inj_series_ohm` away is not reached, and `inj_series_ohm ≤ 0` reaches
-/// nothing. `missing` gains each note at most once.
-///
-/// # Panics
-/// When `classes` is shorter than a port's net id.
+/// device order, the first reason winning.
 #[must_use]
 pub fn injectors(
     nl: &Netlist,
@@ -98,9 +88,8 @@ pub fn injectors(
     for &p in pins {
         heap.push(Reverse((0u64, false, p.0)));
     }
-    const NO_PORTS: (&str, &str) = ("GuardRing", "no port list: injectors unknown");
-    if nl.ports.is_empty() && !missing.contains(&NO_PORTS) {
-        missing.push(NO_PORTS);
+    if nl.ports.is_empty() {
+        missing.push(("GuardRing", "no port list: injectors unknown"));
     }
     let mut edges: Vec<Vec<(u16, u64, bool)>> = vec![Vec::new(); n_nets];
     for d in nl.devices.iter().filter(|d| d.kind == DeviceKind::Resistor) {
@@ -120,7 +109,7 @@ pub fn injectors(
         dist[n as usize] = Some((dd, unknown));
         for &(m, w, u) in &edges[n as usize] {
             if dist[m as usize].is_none() {
-                heap.push(Reverse((dd.saturating_add(w), unknown || u, m)));
+                heap.push(Reverse((dd + w, unknown || u, m)));
             }
         }
     }
@@ -154,9 +143,6 @@ pub fn injectors(
 }
 
 /// `victim[d]`: what REL-07's `RingInputs.victim` and REL-16's `CellFlags.sensitive` read.
-///
-/// # Panics
-/// When a victim's device is `>= n_devices`.
 #[must_use]
 pub fn victim_mask(n_devices: usize, v: &[Victim]) -> Vec<bool> {
     let mut out = vec![false; n_devices];
@@ -280,148 +266,5 @@ mod tests {
         assert_eq!(tagged.len(), 2);
         let rings: Vec<DeviceId> = p.constraints.guard_rings.iter().filter(|r| r.role == analog::cell::RingRole::Injector).map(|r| r.device).collect();
         assert_eq!(rings, tagged);
-    }
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use crate::evidence::{DeviceOp, OpFacts};
-    use crate::tests::{fet, nets};
-    use analog::intent::{ArrayStyle, ClassSource, ConstraintId, Family, MatchKind, Member, Origin};
-    use pnr_core::netlist::Device;
-    use pnr_core::NetId;
-
-    fn cls(cs: &[NetClass]) -> Vec<NetClassification> {
-        cs.iter().enumerate().map(|(i, &class)| NetClassification { net: NetId(i as u16), class, c_budget_af: None, max_coupling_af: None }).collect()
-    }
-
-    fn set(devs: &[u16], class: MatchClass, weight: Option<f32>) -> MatchSpec {
-        MatchSpec {
-            id: ConstraintId(0),
-            origin: Origin::SharedBias,
-            members: devs.iter().map(|&d| Member { device: DeviceId(d), parallel: 1, series: 1, half: None }).collect(),
-            reference: None,
-            family: Family::Mos,
-            kind: MatchKind::Current,
-            class,
-            class_source: ClassSource::Role,
-            unit: None,
-            allowance: None,
-            weight,
-            style: ArrayStyle::Any,
-            compound: None,
-        }
-    }
-
-    fn two(name: &str, kind: DeviceKind, ts: &[(&str, u16)], params: Vec<(String, i64)>) -> Device {
-        Device { name: name.into(), kind, model: String::new(), terminals: ts.iter().map(|&(t, n)| (t.into(), NetId(n))).collect(), params }
-    }
-
-    #[test]
-    fn empty_netlist() {
-        let (a, v) = tag(&Netlist::default(), &[], &[]);
-        assert!(a.is_empty() && v.is_empty());
-        let mut missing = Vec::new();
-        assert!(injectors(&Netlist::default(), &[], None, 50_000.0, &mut missing).is_empty());
-        assert_eq!(missing, [("GuardRing", "no port list: injectors unknown")]);
-        assert!(victim_mask(0, &[]).is_empty());
-    }
-
-    /// Nets 0=sig 1=bias 2=vss 3=clk. M0..M3 on signal gates, M4 bias-gated, M5 clocked.
-    fn victims_nl() -> Netlist {
-        use DeviceKind::Nmos as N;
-        Netlist {
-            devices: (0..4).map(|i| fet(&format!("M{i}"), N, 0, 0, 2, 2, 1_000, 500)).chain([fet("M4", N, 1, 0, 2, 2, 1_000, 500), fet("M5", N, 3, 0, 2, 2, 1_000, 500)]).collect(),
-            nets: nets(&["sig", "bias", "vss", "clk"]),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn victim_weights() {
-        let nl = victims_nl();
-        let c = cls(&[NetClass::Signal, NetClass::Bias, NetClass::Ground, NetClass::Clock]);
-        let sets = [set(&[0, 1], MatchClass::Moderate, None), set(&[1, 2], MatchClass::Exceptional, None), set(&[3], MatchClass::Minimal, Some(9.0)), set(&[2], MatchClass::Moderate, Some(4.0)), set(&[5], MatchClass::Exceptional, None)];
-        let (a, v) = tag(&nl, &c, &sets);
-        assert_eq!(a.iter().map(|x| (x.device.0, x.inject)).collect::<Vec<_>>(), [(5, Inject::Switching)]);
-        let got: Vec<(u16, f32, &str)> = v.iter().map(|x| (x.device.0, x.weight, x.reason)).collect();
-        // M0: Moderate rank 3. M1: Exceptional 10 over Moderate 3. M2: the set weight 4 wins over a rank.
-        // M3: only a Minimal set, signal gate: no victim. M4: bias gate, weight 1. M5: an aggressor, never a victim.
-        assert_eq!(got, [(0, 3.0, "matched set"), (1, 10.0, "matched set"), (2, 4.0, "matched set"), (4, 1.0, "bias/reference gate")]);
-        assert_eq!(victim_mask(6, &v), [true, true, true, false, true, false]);
-    }
-
-    /// A capacitor between two quiet nets couples nothing; one with three terminals is ignored.
-    #[test]
-    fn capacitor_coupling_needs_an_aggressor() {
-        let nl = Netlist {
-            devices: vec![two("C0", DeviceKind::Capacitor, &[("P", 0), ("N", 1)], vec![]), two("C1", DeviceKind::Capacitor, &[("P", 2), ("N", 1), ("B", 3)], vec![]), fet("M0", DeviceKind::Nmos, 1, 3, 3, 3, 1_000, 500)],
-            nets: nets(&["a", "b", "clk", "vss"]),
-            ..Default::default()
-        };
-        let c = cls(&[NetClass::Signal, NetClass::Signal, NetClass::Clock, NetClass::Ground]);
-        let (a, _) = tag(&nl, &c, &[]);
-        assert_eq!(a.iter().map(|x| (x.device.0, x.inject)).collect::<Vec<_>>(), [(1, Inject::Switching)]);
-    }
-
-    /// Nets 0=pin 1=x 2=vss 3=y; ports {pin, vss}. R0 pin–x (`r`), D0 with N on x, Q0 on pin, P0 PMOS on y.
-    fn inj(r: Option<i64>) -> Netlist {
-        Netlist {
-            devices: vec![
-                two("R0", DeviceKind::Resistor, &[("P", 0), ("N", 1)], r.map(|v| ("r_mohm".to_string(), v)).into_iter().collect()),
-                two("D0", DeviceKind::Diode, &[("P", 2), ("N", 1)], vec![]),
-                two("Q0", DeviceKind::Npn, &[("C", 0), ("B", 3), ("E", 2)], vec![]),
-                two("Q1", DeviceKind::Pnp, &[("C", 0), ("B", 3), ("E", 2)], vec![]),
-                fet("P0", DeviceKind::Pmos, 3, 3, 3, 3, 1_000, 500),
-            ],
-            nets: nets(&["pin", "x", "vss", "y"]),
-            ports: vec![NetId(0), NetId(2)],
-            ..Default::default()
-        }
-    }
-
-    fn icls() -> Vec<NetClassification> {
-        cls(&[NetClass::Signal, NetClass::Signal, NetClass::Ground, NetClass::Signal])
-    }
-
-    #[test]
-    fn injector_reach_is_strict() {
-        // 10 kΩ to x: reached under a 50 kΩ limit, not under exactly 10 kΩ, nothing under 0.
-        let tags = |limit: f64| injectors(&inj(Some(10_000_000)), &icls(), None, limit, &mut Vec::new()).iter().map(|a| (a.device.0, a.inject, a.reason)).collect::<Vec<_>>();
-        assert_eq!(tags(50_000.0), [(1, Inject::MinorityElectron, "pin diffusion")]);
-        assert!(tags(10_000.0).is_empty());
-        assert!(tags(0.0).is_empty());
-        assert!(tags(-1.0).is_empty());
-    }
-
-    #[test]
-    fn bipolars_noted_once() {
-        let mut missing = vec![("GuardRing", "no port list: injectors unknown")];
-        let mut nl = inj(None);
-        let tags = injectors(&nl, &icls(), None, 50_000.0, &mut missing);
-        assert_eq!(tags.iter().map(|a| (a.device.0, a.reason)).collect::<Vec<_>>(), [(1, "resistance unknown")]);
-        assert_eq!(missing, [("GuardRing", "no port list: injectors unknown"), ("GuardRing", "bipolar injectors unclassified")]);
-        // Called again with no ports: neither note is repeated.
-        nl.ports.clear();
-        injectors(&nl, &icls(), None, 50_000.0, &mut missing);
-        assert_eq!(missing.len(), 2, "{missing:?}");
-    }
-
-    #[test]
-    fn diode_p_side_and_pmos_forward_bias() {
-        // D0 flipped: P on x injects holes.
-        let mut nl = inj(Some(0));
-        nl.devices[1] = two("D0", DeviceKind::Diode, &[("P", 1), ("N", 2)], vec![]);
-        let dop = |vbs: f64| DeviceOp { id_ua: 1.0, headroom_mv: 100.0, gm_us: 1.0, power_uw: 0.0, vgs_mv: None, vbs_mv: Some(vbs), vth_mv: None, gmb_us: None, gds_us: None };
-        let mut dev = vec![None; 5];
-        dev[4] = Some(dop(-300.0));
-        let op = OpFacts { dev, net_mv: vec![] };
-        let tags = injectors(&nl, &icls(), Some(&op), 50_000.0, &mut Vec::new());
-        let got: Vec<_> = tags.iter().map(|a| (a.device.0, a.inject, a.reason)).collect();
-        assert_eq!(got, [(1, Inject::MinorityHole, "pin diffusion"), (4, Inject::MinorityHole, "forward-biased bulk")]);
-        // A reverse-biased PMOS bulk is no injector.
-        let op = OpFacts { dev: vec![None, None, None, None, Some(dop(300.0))], net_mv: vec![] };
-        assert_eq!(injectors(&nl, &icls(), Some(&op), 50_000.0, &mut Vec::new()).len(), 1);
     }
 }

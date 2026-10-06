@@ -5,15 +5,11 @@
 use analog::cell::{SeriesParallel, Unitization};
 use analog::Constraints;
 use cells::Cell;
-use pnr_core::{DeviceGroup, DeviceId, DeviceKind, Macro, Process};
+use pnr_core::{DeviceGroup, DeviceId, DeviceKind, Macro, Process, Rect};
 
-/// Draws `dev_nf.len()` devices of `kind` at unit `w`×`l` nm, `dev_nf[i]`
-/// fingers/units each (a zero count reads as one), as one macro with `d{i}:`
-/// pins; `dummies` asks for the generator's end dummies.
-///
-/// Among the variants `pick` accepts (every variant when it accepts none) the
-/// one with the smallest bbox area wins; an empty `dev_nf` draws one device.
-/// A generator with no variant at all yields an empty [`Macro`].
+/// Draw `dev_nf.len()` devices of `kind` at unit `w`×`l`, `dev_nf[i]`
+/// fingers/units each, as one macro with `d{i}:` pins; `dummies` asks for the
+/// generator's end dummies.
 pub(crate) fn draw<G: Cell>(
     kind: DeviceKind,
     w: i32,
@@ -33,8 +29,7 @@ pub(crate) fn draw<G: Cell>(
         unitization: vec![Unitization {
             devices: group.devices.clone(),
             device_type: kind,
-            // One count per device: a missing or zero count reads as one.
-            dev_nf: (0..n).map(|i| dev_nf.get(i).map_or(1, |&f| f.max(1))).collect(),
+            dev_nf: dev_nf.iter().map(|&f| f.max(1)).collect(),
             target_ratio: vec![1; n],
             unit_w: w,
             unit_l: l,
@@ -51,5 +46,5 @@ pub(crate) fn draw<G: Cell>(
     pool.into_iter()
         .map(|v| v.draw(&group, &c, process))
         .min_by_key(|m| i64::from(m.bbox.w) * i64::from(m.bbox.h))
-        .unwrap_or_default()
+        .unwrap_or(Macro { shapes: Vec::new(), pins: Vec::new(), bbox: Rect { x: 0, y: 0, w: 0, h: 0 }, units: Vec::new(), dummies: Vec::new(), ..Default::default() })
 }

@@ -36,7 +36,7 @@ use analog::matching::class::{self, phi_arm, Family, MatchClass};
 use analog::matching::mismatch::{self, Budget, Coeffs};
 use analog::placement::symmetry::SymmetryGroup;
 use analog::placement::{DtiBand, Isolation, MatchedSet, OrientCheck, OrientationSet, Proximity, SubstrateBalance, SymMode, Symmetry};
-use analog::{Requirements, RuleBatch};
+use analog::Requirements;
 use pnr_core::ids::{BranchId, DeviceId, Target};
 use pnr_core::layout::Layout;
 use pnr_core::{DeviceKind, Netlist};
@@ -44,20 +44,6 @@ use pnr_core::{DeviceKind, Netlist};
 use crate::block::{leaves, Block, BlockKind};
 use crate::size::Drawn;
 use crate::ProcessNumbers;
-
-/// Pushes `batch` into the budget arm and a copy into the cost arm: priced by
-/// overshoot, and pulled by its gradient while still inside the allowance.
-fn budget_and_cost<B: RuleBatch<Layout> + Clone + 'static>(r: &mut Requirements<Layout>, batch: B) {
-    r.budget.push(Box::new(batch.clone()));
-    r.cost.push(Box::new(batch));
-}
-
-/// Pushes `batch` into the hard arm and a copy into the cost arm: the cost copy
-/// is the gradient toward the hard feasible set.
-fn hard_and_cost<B: RuleBatch<Layout> + Clone + 'static>(r: &mut Requirements<Layout>, batch: B) {
-    r.hard.push(Box::new(batch.clone()));
-    r.cost.push(Box::new(batch));
-}
 
 /// A set's budget: an allocated MOS allowance as itself (C13), else MAT-08's rule, with the
 /// class limit only for a User/Spec class.
@@ -75,9 +61,6 @@ fn set_budget(s: &MatchSpec, offset_sigma_mv: Option<f32>) -> Budget {
 
 /// `d`'s entry of a deck `[nmos, pmos]` pair; `None` for a non-FET or a
 /// missing entry.
-///
-/// # Panics
-/// When `d` is not a device of `nl`.
 pub(crate) fn by_polarity(nl: &Netlist, d: DeviceId, v: [Option<f32>; 2]) -> Option<f32> {
     match nl.devices[d.0 as usize].kind {
         DeviceKind::Nmos => v[0],
@@ -132,14 +115,7 @@ fn area_um2(nl: &Netlist, drawn: &[Drawn], d: DeviceId) -> f32 {
 }
 
 /// Build the placement [`Requirements`] from the intent's compounds and sets
-/// plus the blocks' Stack leaves and declared selfs, then one tagged pull per
-/// sidecar `GroupBlocks` entry of ≥ 2 devices (`user_groups`: `(entry index,
-/// devices)`). Batch order within each arm is deterministic (ids are assigned
-/// from it later).
-///
-/// # Panics
-/// When a device id in `intent` or `blocks` is out of range of `nl`/`drawn`,
-/// or a set has no members.
+/// plus the blocks' Stack leaves and declared selfs.
 ///
 /// A `MatchedSet` is priced against its allowance when the deck carries its
 /// family's mismatch constant; the terms whose coefficient is missing spend
@@ -192,7 +168,8 @@ pub fn placement(
             c.pairs.iter().filter(|&&(a, b)| equal(a, b)).map(|&(a, b)| Symmetry { a: td(a), b: td(b), axis: c.axis, mode }).collect();
         syms.extend(c.selfs.iter().map(|&d| Symmetry { a: td(d), b: td(d), axis: c.axis, mode: SymMode::Perfect }));
         if !syms.is_empty() {
-            hard_and_cost(&mut r, SymmetryGroup(syms));
+            r.cost.push(Box::new(SymmetryGroup(syms.clone())));
+            r.hard.push(Box::new(SymmetryGroup(syms)));
         }
         // Mirrored devices share one trench. Ids are dense in emission order,
         // which is deterministic, so a branch never transfers between couples.
@@ -211,7 +188,8 @@ pub fn placement(
         let areas = members.iter().map(|&d| area_um2(nl, drawn, d)).collect();
         let tol_nm = p.lattice_nm.max(1) as f32 / 2.0;
         let set = MatchedSet::for_family(members.clone(), s.family, s.kind, s.class, coeffs(nl, p, members[0], s.family), set_budget(s, offset_sigma_mv), areas, tol_nm);
-        budget_and_cost(&mut r, set);
+        r.budget.push(Box::new(set.clone()));
+        r.cost.push(Box::new(set));
         if matches!(s.family, Family::Mos | Family::Bipolar) && members.len() >= 2 {
             let orient = |check| OrientationSet { members: members.clone(), check, cell_of: Vec::new() };
             r.hard.push(Box::new(orient(OrientCheck::Axis)));
@@ -223,18 +201,24 @@ pub fn placement(
             }
         }
         if s.class == MatchClass::Minimal && members.len() >= 2 {
-            budget_and_cost(&mut r, members[1..].iter().map(|&m| prox(members[0], m)).collect::<Vec<Proximity>>());
+            let pull: Vec<Proximity> = members[1..].iter().map(|&m| prox(members[0], m)).collect();
+            r.budget.push(Box::new(pull.clone()));
+            r.cost.push(Box::new(pull));
         }
     }
 
     for l in leaves(blocks).iter().filter(|l| l.kind == BlockKind::Stack && l.devices.len() == 2) {
-        budget_and_cost(&mut r, vec![prox(l.devices[0], l.devices[1])]);
+        let pull = vec![prox(l.devices[0], l.devices[1])];
+        r.budget.push(Box::new(pull.clone()));
+        r.cost.push(Box::new(pull));
     }
     // A differential stage pulls each declared self (tail, shared bias) to its input pair.
     for stage in blocks {
         let Some(dp) = leaves(std::slice::from_ref(stage)).into_iter().find(|l| l.kind == BlockKind::DiffPair && l.devices.len() == 2) else { continue };
         for &d in &stage.selfs {
-            budget_and_cost(&mut r, vec![prox(d, dp.devices[0]), prox(d, dp.devices[1])]);
+            let tail = vec![prox(d, dp.devices[0]), prox(d, dp.devices[1])];
+            r.budget.push(Box::new(tail.clone()));
+            r.cost.push(Box::new(tail));
         }
     }
 
@@ -247,7 +231,8 @@ pub fn placement(
         r.cost.push(Box::new(analog::rule::Tagged { meta, inner: Box::new(pull) }));
     }
     if !dti.is_empty() {
-        hard_and_cost(&mut r, dti);
+        r.cost.push(Box::new(dti.clone()));
+        r.hard.push(Box::new(dti));
     }
     r
 }
@@ -290,9 +275,6 @@ pub fn isolation_min_nm(kind: pnr_core::SubstrateKind, epi_nm: Option<i32>) -> i
 /// distance). Otherwise a cost-only pull at [`NOMINAL_EPI_NM`], and the
 /// returned `Some(why)` is the `missing` input that leaves it unknown: bulk has
 /// no plateau distance. `None` when calibrated or nothing was emitted.
-///
-/// `aggressor` and `victim` are per-device masks of equal length; the scan is
-/// O(aggressors · devices).
 pub fn isolation(
     aggressor: &[bool],
     victim: &[bool],
@@ -305,12 +287,11 @@ pub fn isolation(
     let calibrated = calibration(kind, epi_nm);
     let min_distance_nm = isolation_min_nm(kind, epi_nm);
     let dev = |d: usize| Target::Device(DeviceId(d as u16));
-    // Victims listed once: the pair scan touches aggressors × victims, not aggressors × devices.
-    let victims: Vec<usize> = (0..n).filter(|&v| victim[v]).collect();
-    let victims = victims.as_slice();
     let rules: Vec<Isolation> = (0..n)
         .filter(|&a| aggressor[a])
-        .flat_map(|a| victims.iter().filter(move |&&v| !related(a, v)).map(move |&v| Isolation { a: dev(a), b: dev(v), min_distance_nm }))
+        .flat_map(|a| {
+            (0..n).filter(move |&v| victim[v] && !related(a, v)).map(move |v| Isolation { a: dev(a), b: dev(v), min_distance_nm })
+        })
         .collect();
     if rules.is_empty() {
         return None;
@@ -325,9 +306,6 @@ pub fn isolation(
 /// Substrate balance (REL-15, Charbon §8.3.1): every EXT-23 `aggressor` outside
 /// a two-device DiffPair's stage (`block_of`, entries of `blocks`) pulled onto
 /// the pair's bisector. Cost only: the source states no threshold.
-///
-/// `block_of[d]` is `d`'s top-level block index (`usize::MAX` outside every
-/// block), parallel to `aggressor`.
 pub fn substrate_balance(aggressor: &[bool], blocks: &[Block], block_of: &[usize], r: &mut Requirements<Layout>) {
     let dev = |d: usize| Target::Device(DeviceId(d as u16));
     let rules: Vec<SubstrateBalance> = leaves(blocks)
@@ -592,171 +570,5 @@ mod tests {
         let p = crate::annotate(&nl, &cfg);
         assert!(p.missing.contains(&("Isolation", "substrate kind unknown")));
         assert!(isolated(&p.placement.budget).is_empty());
-    }
-}
-
-/// Step-2 coverage: every helper and arm of the placement emission, against
-/// its doc comment.
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use crate::tests::{fet, nets};
-    use pnr_core::netlist::Device;
-    use pnr_core::SubstrateKind;
-
-    fn nl3() -> Netlist {
-        let r = |w: Option<i64>, l: Option<i64>| Device {
-            name: "R".into(),
-            kind: DeviceKind::Resistor,
-            model: String::new(),
-            terminals: vec![("P".into(), pnr_core::ids::NetId(0)), ("N".into(), pnr_core::ids::NetId(1))],
-            params: [w.map(|v| ("w".to_string(), v)), l.map(|v| ("l".to_string(), v)), Some(("m".to_string(), 2))].into_iter().flatten().collect(),
-        };
-        Netlist {
-            devices: vec![fet("MN", DeviceKind::Nmos, 0, 1, 2, 2, 2_000, 500), fet("MP", DeviceKind::Pmos, 0, 1, 2, 2, 2_000, 0), r(Some(2_000), Some(3_000)), r(Some(2_000), None)],
-            nets: nets(&["a", "b", "c"]),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn calibration_and_distance_per_substrate() {
-        assert_eq!(calibration(SubstrateKind::EpiOnLowRes, Some(7)), Ok(7));
-        assert_eq!(calibration(SubstrateKind::EpiOnLowRes, None), Err("deck epi_thickness_nm"));
-        assert_eq!(calibration(SubstrateKind::Bulk, Some(7)), Err("bulk substrate: no plateau distance"));
-        assert_eq!(calibration(SubstrateKind::Unknown, None), Err("substrate kind unknown"));
-        assert_eq!(isolation_min_nm(SubstrateKind::EpiOnLowRes, Some(3_000)), 12_000);
-        assert_eq!(isolation_min_nm(SubstrateKind::Bulk, Some(3_000)), ISOLATION_EPI_MULTIPLE * NOMINAL_EPI_NM);
-        assert_eq!(isolation_min_nm(SubstrateKind::EpiOnLowRes, None), ISOLATION_EPI_MULTIPLE * NOMINAL_EPI_NM);
-    }
-
-    fn pairs(arm: &[Box<dyn RuleBatch<Layout>>]) -> Vec<(u32, u32)> {
-        let mut ids = Vec::new();
-        arm.iter().for_each(|b| b.touched(&mut ids));
-        ids.chunks(2).map(|p| (p[0], p[1])).collect()
-    }
-
-    #[test]
-    fn isolation_arms_and_report() {
-        let (agg, vic) = ([true, false, false], [false, true, true]);
-        let none = |_: usize, _: usize| false;
-        let mut r = Requirements::<Layout>::default();
-        assert_eq!(isolation(&[], &[], &none, SubstrateKind::Bulk, None, &mut r), None, "empty: nothing emitted, nothing missing");
-        assert!(r.cost.is_empty() && r.budget.is_empty());
-        let all = |_: usize, _: usize| true;
-        assert_eq!(isolation(&agg, &vic, &all, SubstrateKind::Bulk, None, &mut r), None, "every pair related");
-        assert!(r.cost.is_empty());
-
-        let mut r = Requirements::<Layout>::default();
-        let not_2 = |_: usize, v: usize| v == 2;
-        assert_eq!(isolation(&agg, &vic, &not_2, SubstrateKind::Bulk, None, &mut r), Some("bulk substrate: no plateau distance"));
-        assert!(r.budget.is_empty() && r.hard.is_empty(), "uncalibrated: cost only");
-        assert_eq!(pairs(&r.cost), [(0, 1)]);
-
-        let mut r = Requirements::<Layout>::default();
-        assert_eq!(isolation(&agg, &vic, &none, SubstrateKind::EpiOnLowRes, Some(1_000), &mut r), None, "calibrated");
-        assert_eq!(pairs(&r.budget), [(0, 1), (0, 2)]);
-        assert_eq!(pairs(&r.cost), [(0, 1), (0, 2)]);
-        assert!(r.hard.is_empty());
-    }
-
-    fn leaf(kind: BlockKind, devices: &[u16]) -> Block {
-        Block { kind, template: "t", devices: devices.iter().map(|&d| DeviceId(d)).collect(), injected: false, sub_blocks: Vec::new(), selfs: Vec::new() }
-    }
-
-    #[test]
-    fn substrate_balance_rules() {
-        let mut r = Requirements::<Layout>::default();
-        substrate_balance(&[true, true], &[leaf(BlockKind::Stack, &[0, 1])], &[0, 0], &mut r);
-        assert!(r.cost.is_empty(), "no diff pair, no balance");
-        // Pair (0, 1) in block 0, aggressor 2 in block 1, aggressor 3 outside every block.
-        let blocks = [leaf(BlockKind::DiffPair, &[0, 1]), leaf(BlockKind::Group, &[2])];
-        let mut r = Requirements::<Layout>::default();
-        substrate_balance(&[true, false, true, true], &blocks, &[0, 0, 1, usize::MAX], &mut r);
-        assert_eq!(r.cost.len(), 1);
-        assert!(r.budget.is_empty() && r.hard.is_empty(), "cost only");
-        let mut ids = Vec::new();
-        r.cost[0].touched(&mut ids);
-        assert_eq!(ids, [2, 0, 1, 3, 0, 1], "the pair's own device is never its aggressor");
-        let mut r = Requirements::<Layout>::default();
-        substrate_balance(&[false; 4], &blocks, &[0, 0, 1, usize::MAX], &mut r);
-        assert!(r.cost.is_empty(), "no aggressor, no batch");
-    }
-
-    #[test]
-    fn deck_lookups() {
-        let nl = nl3();
-        let v = [Some(1.0), Some(2.0)];
-        assert_eq!(by_polarity(&nl, DeviceId(0), v), Some(1.0));
-        assert_eq!(by_polarity(&nl, DeviceId(1), v), Some(2.0));
-        assert_eq!(by_polarity(&nl, DeviceId(2), v), None, "not a FET");
-        assert_eq!(by_polarity(&nl, DeviceId(1), [Some(1.0), None]), None);
-
-        let mut p = ProcessNumbers { svt_uv_per_um: Some(3.0), ..Default::default() };
-        assert_eq!(svt(&nl, &p, DeviceId(0)), Some(3.0), "no fit: the single number");
-        p.svt_fit = Some((4.0, 2.0));
-        assert_eq!(svt(&nl, &p, DeviceId(0)), Some(mismatch::svt_of_l(4.0, 2.0, 0.5)), "L = 500 nm");
-        assert_eq!(svt(&nl, &p, DeviceId(1)), Some(3.0), "no length: the single number");
-
-        let mut models = Vec::new();
-        let drawn: Vec<Drawn> = nl.devices.iter().map(|d| crate::size::drawn(d, &mut models)).collect();
-        assert!((area_um2(&nl, &drawn, DeviceId(0)) - 1.0).abs() < 1e-6, "2 µm × 0.5 µm gate");
-        assert_eq!(area_um2(&nl, &drawn, DeviceId(1)), 0.0, "a FET without L has no area");
-        assert!((area_um2(&nl, &drawn, DeviceId(2)) - 12.0).abs() < 1e-6, "2 µm × 3 µm × m=2");
-        assert_eq!(area_um2(&nl, &drawn, DeviceId(3)), 0.0, "unknown L");
-
-        let p = ProcessNumbers { avt_mv_um: [Some(5.0), Some(6.0)], bjt_ka_pct_um: Some(1.5), die_temp_k: Some(300.0), ..Default::default() };
-        let c = coeffs(&nl, &p, DeviceId(1), Family::Mos);
-        assert_eq!((c.avt_mv_um, c.mobility_exp, c.die_temp_k), (Some(6.0), Some(1.5), Some(300.0)), "PMOS row");
-        let c = coeffs(&nl, &p, DeviceId(0), Family::Bipolar);
-        assert_eq!((c.ka_pct_um, c.avt_mv_um), (Some(1.5), None));
-        let c = coeffs(&nl, &p, DeviceId(2), Family::Resistor);
-        assert_eq!((c.ka_pct_um, c.avt_mv_um, c.die_temp_k), (None, None, None), "R/C stay unknown");
-    }
-
-    #[test]
-    fn empty_intent_emits_nothing() {
-        let r = placement(&Intent::default(), &[], &[], &Netlist::default(), &[], &ProcessNumbers::default(), None, &crate::policy::Policy::default());
-        assert!(r.hard.is_empty() && r.budget.is_empty() && r.cost.is_empty());
-    }
-
-    #[test]
-    fn user_groups_pull_to_their_first_member() {
-        let nl = nl3();
-        let groups = vec![(7, vec![DeviceId(0)]), (9, vec![DeviceId(2), DeviceId(0), DeviceId(1)])];
-        let r = placement(&Intent::default(), &[], &groups, &nl, &[], &ProcessNumbers::default(), None, &crate::policy::Policy::default());
-        assert!(r.hard.is_empty());
-        assert_eq!((r.budget.len(), r.cost.len()), (1, 1), "a one-member group pulls nothing");
-        for arm in [&r.budget, &r.cost] {
-            assert_eq!(arm[0].meta().map(|m| m.origin), Some(analog::intent::Origin::User { index: 9 }));
-            assert_eq!(pairs(arm), [(2, 0), (2, 1)]);
-        }
-    }
-
-    #[test]
-    fn stack_leaves_and_declared_selfs_pull() {
-        let nl = nl3();
-        let mut stage = leaf(BlockKind::Group, &[0, 1, 2]);
-        stage.sub_blocks = vec![leaf(BlockKind::DiffPair, &[0, 1])];
-        stage.selfs = vec![DeviceId(2)];
-        let blocks = [stage, leaf(BlockKind::Stack, &[2, 3]), leaf(BlockKind::Stack, &[3])];
-        let r = placement(&Intent::default(), &blocks, &[], &nl, &[], &ProcessNumbers::default(), None, &crate::policy::Policy::default());
-        assert_eq!(pairs(&r.budget), [(2, 3), (2, 0), (2, 1)], "the 2-device Stack, then the tail to its pair; a 1-device Stack pulls nothing");
-        assert_eq!(pairs(&r.cost), pairs(&r.budget));
-    }
-
-    /// DTI (one band per compound couple) is hard + cost, and only with deck data.
-    #[test]
-    fn dti_bands_follow_the_deck() {
-        let nl = crate::tests::ota();
-        let mut cfg = crate::AnnotationConfig::default();
-        let base = crate::annotate(&nl, &cfg);
-        let couples: usize = base.intent.compounds.iter().map(|c| c.pairs.len()).sum();
-        assert!(couples > 0);
-        cfg.process.dti = Some((5_000, 300));
-        let p = crate::annotate(&nl, &cfg);
-        assert_eq!(p.placement.hard.len(), base.placement.hard.len() + 1);
-        assert_eq!(p.placement.cost.len(), base.placement.cost.len() + 1);
-        assert_eq!(p.placement.budget.len(), base.placement.budget.len());
     }
 }

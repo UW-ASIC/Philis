@@ -2,7 +2,6 @@
 
 use crate::geom::Orient;
 use crate::ids::{AxisId, DeviceId, Target};
-use crate::lanes::Box4;
 
 /// Device-indexed SoA placement state. Rules read it and never mutate it
 /// (except `Rule::project`), so scoring is pure.
@@ -42,8 +41,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Area of the box enclosing every cell's footprint, nm² (`0` with no
-    /// cells). O(n).
+    /// Area of the box enclosing every cell, nm² (`0` with no cells).
     #[must_use]
     pub fn footprint_nm2(&self) -> f64 {
         let n = self.x.len();
@@ -55,7 +53,7 @@ impl Layout {
             (x0, y0) = (x0.min(self.x[i] - self.hw[i]), y0.min(self.y[i] - self.hh[i]));
             (x1, y1) = (x1.max(self.x[i] + self.hw[i]), y1.max(self.y[i] + self.hh[i]));
         }
-        (f64::from(x1) - f64::from(x0)) * (f64::from(y1) - f64::from(y0))
+        f64::from(x1 - x0) * f64::from(y1 - y0)
     }
 
     /// Normalising length, nm: `sqrt(Σ cell area)` over every cell's current
@@ -69,19 +67,17 @@ impl Layout {
         a.sqrt().max(1.0) as f32
     }
 
-    /// Centre/half-extent box of a target, nm; a group is the smallest
-    /// centre/half-extent box enclosing every member's footprint (an odd-nm
-    /// span rounds the box outward by up to 1 nm). O(members).
+    /// `(cx, cy, hw, hh)` of a target, nm; a group is its members' bounding box.
     ///
     /// # Panics
     /// On an out-of-range target or an empty group.
     #[inline]
     #[must_use]
-    pub fn bbox(&self, t: Target) -> Box4 {
+    pub fn bbox(&self, t: Target) -> (i32, i32, i32, i32) {
         match t {
             Target::Device(d) => {
                 let i = d.0 as usize;
-                Box4 { x: self.x[i], y: self.y[i], hw: self.hw[i], hh: self.hh[i] }
+                (self.x[i], self.y[i], self.hw[i], self.hh[i])
             }
             Target::Group(g) => {
                 let members = &self.groups[g.0 as usize];
@@ -94,22 +90,24 @@ impl Layout {
                     hi_x = hi_x.max(self.x[i] + self.hw[i]);
                     hi_y = hi_y.max(self.y[i] + self.hh[i]);
                 }
-                let (x, hw) = enclosing_half(lo_x, hi_x);
-                let (y, hh) = enclosing_half(lo_y, hi_y);
-                Box4 { x, y, hw, hh }
+                ((lo_x + hi_x) / 2, (lo_y + hi_y) / 2, (hi_x - lo_x) / 2, (hi_y - lo_y) / 2)
             }
         }
     }
 
-    /// Centre `(cx, cy)` of [`Layout::bbox`], nm.
-    ///
-    /// # Panics
-    /// As [`Layout::bbox`].
     #[inline]
     #[must_use]
     pub fn centre(&self, t: Target) -> (i32, i32) {
-        let b = self.bbox(t);
-        (b.x, b.y)
+        let (cx, cy, _, _) = self.bbox(t);
+        (cx, cy)
+    }
+
+    /// Half-extents `(hw, hh)`.
+    #[inline]
+    #[must_use]
+    pub fn extent(&self, t: Target) -> (i32, i32) {
+        let (_, _, hw, hh) = self.bbox(t);
+        (hw, hh)
     }
 
     /// Axis x; an id past the table falls back to [`Self::centre_x_estimate`]
@@ -120,7 +118,7 @@ impl Layout {
         self.axis.get(a.0 as usize).copied().unwrap_or_else(|| self.centre_x_estimate())
     }
 
-    /// Mean device centre x, nm, truncated toward zero (`0` when empty).
+    /// Mean device centre x, nm (`0` when empty).
     #[inline]
     #[must_use]
     pub fn centre_x_estimate(&self) -> i32 {
@@ -132,10 +130,6 @@ impl Layout {
 
     /// Debug-only structural check: every column device-length, extents
     /// non-negative, group members in range. `ctx` names the producing stage.
-    /// A no-op in release builds.
-    ///
-    /// # Panics
-    /// In debug builds, on the first violated invariant, naming `ctx`.
     #[inline]
     pub fn debug_check(&self, ctx: &str) {
         if !cfg!(debug_assertions) {
@@ -163,12 +157,8 @@ impl Layout {
         }
     }
 
-    /// Debug-only legality check: [`Layout::debug_check`], then no two device
-    /// footprints overlap with positive area (abutment is legal; stacked macros
-    /// become merged nets / doubled W in LVS). O(n²); a no-op in release builds.
-    ///
-    /// # Panics
-    /// In debug builds, on the first violation, naming `ctx` and the pair.
+    /// Debug-only legality check: no two device footprints overlap at all
+    /// (stacked macros become merged nets / doubled W in LVS).
     #[inline]
     pub fn debug_check_placed(&self, ctx: &str) {
         if !cfg!(debug_assertions) {
@@ -185,26 +175,16 @@ impl Layout {
     }
 
     /// Euclidean edge-to-edge gap between two targets' boxes, nm; `0` when they
-    /// touch or overlap. Symmetric.
-    ///
-    /// # Panics
-    /// As [`Layout::bbox`].
+    /// touch or overlap.
     #[inline]
     #[must_use]
     pub fn edge_gap(&self, a: Target, b: Target) -> f32 {
-        let (a, b) = (self.bbox(a), self.bbox(b));
-        let gx = i64::from(((a.x - b.x).abs() - (a.hw + b.hw)).max(0));
-        let gy = i64::from(((a.y - b.y).abs() - (a.hh + b.hh)).max(0));
+        let (ax, ay, ahw, ahh) = self.bbox(a);
+        let (bx, by, bhw, bhh) = self.bbox(b);
+        let gx = i64::from(((ax - bx).abs() - (ahw + bhw)).max(0));
+        let gy = i64::from(((ay - by).abs() - (ahh + bhh)).max(0));
         ((gx * gx + gy * gy) as f32).sqrt()
     }
-}
-
-/// Centre and half-extent of the smallest centre/half box containing
-/// `[lo, hi]`: an odd span rounds the half-extent up so no edge is cut off.
-/// In i64 so spans across the whole i32 range do not overflow.
-fn enclosing_half(lo: i32, hi: i32) -> (i32, i32) {
-    let half = (i64::from(hi) - i64::from(lo) + 1) / 2;
-    ((i64::from(lo) + half) as i32, half as i32)
 }
 
 #[cfg(test)]

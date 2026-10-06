@@ -32,8 +32,7 @@ use analog::matching::pattern::{self, Fill, Grid};
 use analog::Constraints;
 use pnr_core::{DeviceGroup, Drawn, DrawnKind, KeepWhy, Macro, MatchClass, Node, Process, Rect, Unit};
 
-use crate::builder::{cut_lattice, pin, req, Builder};
-use crate::capacitor::group_sizing;
+use crate::builder::{cut_lattice, pin, req, sizing, Builder, Sizing};
 use crate::Cell;
 
 /// Unit placement family (DACP §IV-A, Fig. 6).
@@ -48,24 +47,14 @@ pub enum Pattern {
     Chessboard,
     /// Algorithm 1: a complete chessboard for C0..=Ck, then corridors of Ci in
     /// `bs`-sided blocks with Ci+1 in the leftovers.
-    BlockChessboard {
-        /// Highest bit of the complete chessboard core, `2 <= k < N`, `N − k` even.
-        k: u8,
-        /// Corridor block side, units, `>= 1`.
-        bs: u8,
-    },
+    BlockChessboard { k: u8, bs: u8 },
     /// Split DAC (DACP §IV-C, CELL-21; offered by [`CapArray::split`] only):
     /// members ordered LSB bank `[1, 1, 2, …, 2^(lsb-1)]` (termination first),
     /// then MSB `[1, 2, …]`, then the bridge C_A; owner ids as in
     /// [`analog::matching::dac::split_dac_assign`]; MSB bits = `members − lsb − 2`.
     /// The bridge draws two square half plates. Each bank has its own top:
     /// `bridge_top_lsb` puts the bridge's `P` on the LSB one.
-    Split {
-        /// LSB-bank bits (`1..=8`).
-        lsb: u8,
-        /// The bridge's `P` joins the LSB bank's top (else the MSB's).
-        bridge_top_lsb: bool,
-    },
+    Split { lsb: u8, bridge_top_lsb: bool },
 }
 
 /// One array variant.
@@ -74,7 +63,6 @@ pub enum Pattern {
 /// TOP lead per bank), `d{i}:N` on bus `i`.
 #[derive(Clone, Debug)]
 pub struct CapArray {
-    /// How units are assigned to cells.
     pub pattern: Pattern,
     /// Rows > columns (odd N only; even N is square).
     pub tall: bool,
@@ -97,25 +85,21 @@ pub struct ArrayMetrics {
     /// Worst `|INL|` / `|DNL|`, LSB, under the t0/t gradient `g`
     /// ([`analog::matching::dac::inl_dnl`]), worst over θ in `π/(4·max(rows, cols))` steps.
     pub inl_lsb: f64,
-    /// Worst `|DNL|`, LSB, same sweep as [`Self::inl_lsb`].
     pub dnl_lsb: f64,
     /// Systematic per-unit ratio mismatch of each bit to C0 ([`analog::matching::dac::msys`]).
     pub msys: f64,
     /// Bottom-plate route length per unit, `max/min − 1` over C1..=CN: 0 when
     /// every bit carries the same wire per unit of capacitance.
     pub route_spread: f64,
-    /// Cuts on each slot's bottom-plate route (branch, track and bus vias),
-    /// indexed by slot.
+    /// `via1` cuts on each slot's bottom-plate route.
     pub vias: Vec<u32>,
-    /// Macro bounding-box area, µm².
     pub area_um2: f64,
 }
 
 /// t0/t gradient at which an Exceptional bank ranks its variants, 1/µm: DACP's γ = 100 ppm read per µm (GAP-18).
 pub const RANK_G_PER_UM: f64 = 1e-4;
 
-/// Largest bank, bits: `2^8` = 256 units, the most `u8` slot ids and the
-/// DAC transfer sweep stay cheap for.
+/// Largest bank: 256 units.
 const MAX_BITS: u8 = 8;
 
 impl Cell for CapArray {
@@ -174,8 +158,7 @@ impl Cell for CapArray {
     }
 }
 
-/// `N` when `dev_nf` is exactly `[1, 1, 2, …, 2^(N-1)]` with `2 <= N <= 8`
-/// (a binary bank with its electrical dummy C0), else `None`.
+/// `N` when `dev_nf` is exactly `[1, 1, 2, …, 2^(N-1)]`, `N ≥ 2`.
 #[must_use]
 pub fn bits(dev_nf: &[u16]) -> Option<u8> {
     let n = dev_nf.len().checked_sub(1)?;
@@ -188,24 +171,16 @@ pub fn bits(dev_nf: &[u16]) -> Option<u8> {
 /// `bottom`, `plate` (MIM only), `top_contact`, `top`, `strap` and
 /// `bottom_contact`; a role it leaves unset falls back to today's MOM layer
 /// (met1 BOT, met2 TOP, via2 centre cut, met3 strap, via1 off the stub), so the
-/// base deck and a MOM recipe draw the same array.
+/// base deck and a MOM recipe draw the same array. `None` when a layer is missing.
 struct PlateStack {
-    /// Bottom-plate metal role.
     bot: &'static str,
-    /// MIM dielectric plate role; `None` for a MOM stack.
     plate: Option<&'static str>,
-    /// Top-plate metal role.
     top: &'static str,
-    /// Cut from the top plate up to its strap.
     top_cut: &'static str,
-    /// Per-column top strap metal role.
     strap: &'static str,
-    /// Cut from the bottom-plate stub down to the met2 branch.
     bot_cut: &'static str,
 }
 
-/// [`PlateStack`] of `p`; `None` when any role, or the base `met1..=met3` /
-/// `via1..=via2` the routing uses, has no layer.
 fn plate_stack(p: &dyn Process) -> Option<PlateStack> {
     let role = |r: &'static str, mom: &'static str| if p.layer(r).is_some() { r } else { mom };
     let s = PlateStack {
@@ -235,10 +210,6 @@ pub fn c_u_af(p: &dyn Process, w_nm: i32, l_nm: i32) -> Option<f64> {
 /// `C_T^LSB/C_T^MSB·C_u` ([`analog::matching::dac::attenuation_cap`]), by
 /// [`c_u_af`]'s model: `C = c_area·u² + 4·c_perim·u`, `u = t + dw`, snapped up
 /// to the cut lattice. `None` without `c_area_af_um2`.
-///
-/// # Panics
-/// If `lsb >= 32` or `msb > 32` (shift overflow); [`CapArray::split`] only
-/// calls it with `lsb <= 8`, `msb <= 16`.
 fn ca_half_side(p: &dyn Process, unit_w: i32, unit_l: i32, lsb: u8, msb: u8) -> Option<i32> {
     // ponytail: square half; an off-grid C_A (keeps k_u) is the upgrade.
     let ca = analog::matching::dac::attenuation_cap(1 << lsb, (1 << msb) - 1);
@@ -250,42 +221,18 @@ fn ca_half_side(p: &dyn Process, unit_w: i32, unit_l: i32, lsb: u8, msb: u8) -> 
     Some((t_nm / f64::from(lat)).ceil() as i32 * lat)
 }
 
-/// Rows × columns holding `2^m` units, columns ≥ rows unless `tall`. Both
-/// are powers of two, so the grid has no centre cell.
+/// Rows × columns holding `2^m` units, columns ≥ rows unless `tall`.
 fn dims(m: u8, tall: bool) -> (usize, usize) {
     let (r, c) = (1usize << (m / 2), 1usize << (m - m / 2));
     if tall { (c, r) } else { (r, c) }
 }
 
-/// `v` rounded up to an even multiple of `lat` (`lat > 0`), so a wire of
-/// that width centres on a lattice point. `v >= 0`.
-fn even_up(v: i32, lat: i32) -> i32 {
-    (v + 2 * lat - 1) / (2 * lat) * 2 * lat
-}
-
-/// `r` grown across its run (in `y`, about its centre, the offset floored to
-/// `lat`) until `w·h >= area_nm2`, its height snapped up to `lat`. Never
-/// shrinks `r`.
-fn grow_to_area(r: Rect, area_nm2: i64, lat: i32) -> Rect {
-    let need = (area_nm2 + i64::from(r.w) - 1) / i64::from(r.w.max(1));
-    let h = i32::try_from(need).unwrap_or(i32::MAX).saturating_add(lat - 1).div_euclid(lat) * lat;
-    let h = h.max(r.h);
-    Rect { y: r.y - ((h - r.h) / 2).div_euclid(lat) * lat, h, ..r }
-}
-
 impl CapArray {
-    /// Slot per unit, row-major over the `2^n` interior cells of an `n`-bit
-    /// bank: slot 0 and 1 one unit each, slot `i >= 2` `2^(i-1)` units in
-    /// point-reflected pairs.
-    ///
-    /// # Panics
-    /// On a [`Pattern::Split`] (assigned by
-    /// [`analog::matching::dac::split_dac_assign`]), and when `n` or a
-    /// [`Pattern::BlockChessboard`]'s `k` is outside its documented range.
+    /// Slot per unit, row-major over the `2^n` interior cells.
     #[must_use]
     pub fn assign(&self, n: u8) -> Vec<u8> {
         let (rows, cols) = dims(n, self.tall);
-        let mut g = Grid::new(rows, cols);
+        let mut g = Grid { cols, slot: vec![None; rows * cols] };
         let centred = |(r, c): (usize, usize)| ((rows - r) / 2, (cols - c) / 2, r, c);
         match self.pattern {
             Pattern::Spiral => {
@@ -348,11 +295,6 @@ impl CapArray {
 
     /// ARR-02/03 figures for this variant under the t0/t gradient `g` (1/µm).
     /// No deck carries it, so it is the caller's sweep point, not a constant.
-    /// Draws the array once; the bit-weighted figures (`inl_lsb`, `dnl_lsb`,
-    /// `route_spread`) assume a binary bank.
-    ///
-    /// # Panics
-    /// As [`Cell::draw`]: when the deck has no plate stack.
     #[must_use]
     pub fn metrics(&self, group: &DeviceGroup, c: &Constraints, process: &dyn Process, g: f64) -> ArrayMetrics {
         use analog::matching::{dac, moments};
@@ -423,17 +365,13 @@ impl CapArray {
                 b.rect(cut, Rect { x: x0 + i * pitch, y: y0 + j * pitch, w: v, h: v });
             }
         }
-        b.unit(Unit { owner, x: cell.x + cell.w / 2, y: cell.y + cell.h / 2, weight: i64::from(plate.w) * i64::from(plate.h), phi: (0, 0), sa_sb: None });
+        b.unit(Unit { owner, x: cell.x + cell.w / 2, y: cell.y + cell.h / 2, weight: i64::from(plate.w) * i64::from(plate.h), phi: (0, 0), sa: 0, sb: 0 });
         b.drawn(Drawn { owner, device: None, kind: DrawnKind::Capacitor, nodes: [Node::Pin("P"), Node::Pin("N"), Node::Unused], w: plate.w, l: plate.h });
         b.keepout(plate, KeepWhy::CapPlate { owner });
         plate
     }
 
-    /// The macro, plus each slot's `(bottom-route length nm, via cuts)`,
-    /// indexed by slot (a general set's ground-dummy slot `n + 1` included).
-    ///
-    /// # Panics
-    /// When `process` has no [`PlateStack`] or lacks `met1..=met3`/`via1..=via2`.
+    /// The macro, plus each slot's `(bottom-route length nm, via1 cuts)`.
     fn build(&self, group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> (Macro, Vec<(i64, u32)>) {
         let s = group_sizing(group, c, process);
         // A binary bank, or a general set (see `enumerate`). A bank's dummies
@@ -505,7 +443,7 @@ impl CapArray {
         // centred on its cut like the met3 one.
         let vt = process.width(st.top_cut).unwrap_or(v2);
         let e4 = up(enc(st.top, st.top_cut).max(cap(st.top, st.top_cut)));
-        let jw = even_up((vt + 2 * e4).max(wmin(st.top)), lat);
+        let jw = ((vt + 2 * e4).max(wmin(st.top)) + 2 * lat - 1) / (2 * lat) * 2 * lat;
         // Track, branch and bus width: one via1, `e1` below/left and `e1o`
         // above/right, so the along-axis long side and this one together meet
         // the asymmetric rule (best side of *each* axis); never under either
@@ -523,11 +461,14 @@ impl CapArray {
         // Even multiple of the lattice so the strap centres on the plate.
         let e3o = up(cap("met3", "via2")).max(e3);
         // Centred on its vias, so the end-cap holds on both sides.
-        let m3w = even_up((v2 + 2 * e3o).max(wmin("met3")), lat);
+        let m3w = ((v2 + 2 * e3o).max(wmin("met3")) + 2 * lat - 1) / (2 * lat) * 2 * lat;
         // An isolated met2 piece (a branch, a via pad) grows across its run,
         // about its centre, to the deck's min area.
         let m2_area = process.area("met2").unwrap_or(0);
-        let tall = |r: Rect| grow_to_area(r, m2_area, lat);
+        let tall = |r: Rect| {
+            let h = up(i32::try_from((m2_area + i64::from(r.w) - 1) / i64::from(r.w.max(1))).unwrap_or(i32::MAX)).max(r.h);
+            Rect { y: r.y - floor((h - r.h) / 2), h, ..r }
+        };
         // MIM rows also clear capm spacing between plates (capm.2a) and hold
         // the met4 join, which then stays `encp` off the dummy capm above.
         let gap_y = if mim {
@@ -536,7 +477,7 @@ impl CapArray {
             // Split: a bank's top line runs in each row gap clear of the
             // other bank's pads, centred (gap − jw an even lattice count).
             if split.is_some() {
-                even_up(g.max(jw + 2 * (space(st.top) - encp)), lat)
+                (g.max(jw + 2 * (space(st.top) - encp)) + 2 * lat - 1) / (2 * lat) * 2 * lat
             } else {
                 g
             }
@@ -580,13 +521,6 @@ impl CapArray {
         // Pins stand one track pitch clear of the last channel.
         let x_right = gc as i32 * px + tp;
 
-        // MIM bottom-plate stub: its cut (`bottom_contact`), the plate metal's
-        // and met2's enclosure of it, and the stub's height. Also the cut under
-        // the met1/via1 pin stacks below.
-        let (dcut, vd) = if mim { (st.bot_cut, process.width(st.bot_cut).unwrap_or(v2)) } else { ("via2", v2) };
-        let eb3 = up(enc(st.bot, st.bot_cut).max(cap(st.bot, st.bot_cut)));
-        let eb2 = up(enc("met2", st.bot_cut).max(cap("met2", st.bot_cut)));
-        let hb = up((vd + 2 * eb3).max(wmin(st.bot)));
         let half = split.and_then(|(lsb, _, msb)| ca_half_side(process, s.unit_w, s.unit_l, lsb, msb));
         // Split: (interior row, plate, owner) of every member unit.
         let mut plates: Vec<(usize, Rect, u8)> = Vec::new();
@@ -599,47 +533,53 @@ impl CapArray {
                 let (x0, y0) = (c as i32 * px, r as i32 * py);
                 let slot = owner(r, c);
                 let s = slot.unwrap_or(dummy_slot);
-                // Every cell's bottom plate leaves on a met2 branch at `vy`,
-                // ending on a via1 onto its slot's track at `tx`.
-                let vy = y0 + floor((uh - v1) / 2);
-                let tx = track_x(c, s);
-                let bw = if mim {
+                if mim {
                     let side = half.filter(|_| slot == Some(n));
                     let plate = Self::mim_unit(&mut b, process, &st, Rect { x: x0, y: y0, w: uw, h: uh }, encp, slot, o == 1 && (r == 0 || c == 0 || r == gr - 1 || c == gc - 1), side);
                     if let Some(owner) = slot {
                         plates.push((r - o, plate, owner));
                     }
-                    let vyb = y0 + floor((uh - vd) / 2);
+                    let tx = track_x(c, s);
+                    let (vy, vb) = (y0 + floor((uh - v1) / 2), process.width(st.bot_cut).unwrap_or(v2));
+                    let vyb = y0 + floor((uh - vb) / 2);
+                    let eb3 = up(enc(st.bot, st.bot_cut).max(cap(st.bot, st.bot_cut)));
+                    let eb2 = up(enc("met2", st.bot_cut).max(cap("met2", st.bot_cut)));
                     // Stub on the bottom plate's metal, its cut onto the branch.
-                    b.rect(req(process, st.bot), Rect { x: x0 + uw - 2 * lat, y: vyb + vd / 2 - hb / 2, w: 2 * lat + vx + vd + eb3, h: hb });
-                    b.rect(req(process, st.bot_cut), Rect { x: x0 + uw + vx, y: vyb, w: vd, h: vd });
+                    let hb = up((vb + 2 * eb3).max(wmin(st.bot)));
+                    b.rect(req(process, st.bot), Rect { x: x0 + uw - 2 * lat, y: vyb + vb / 2 - hb / 2, w: 2 * lat + vx + vb + eb3, h: hb });
+                    b.rect(req(process, st.bot_cut), Rect { x: x0 + uw + vx, y: vyb, w: vb, h: vb });
                     let bx = x0 + uw + vx - eb2;
-                    let (by0, by1) = ((vy - e1).min(vyb - eb2), (vy - e1 + w1).max(vyb + vd + eb2));
+                    let (by0, by1) = ((vy - e1).min(vyb - eb2), (vy - e1 + w1).max(vyb + vb + eb2));
                     let bw = tx + e1 + v1 + e1o - bx;
                     b.rect(m2, tall(Rect { x: bx, y: by0, w: bw, h: by1 - by0 }));
-                    bw
+                    b.rect(v1l, Rect { x: tx + e1, y: vy, w: v1, h: v1 });
+                    let t = tracks[c].iter().position(|&x| x == s).unwrap();
+                    top_of[c][t] = top_of[c][t].max(vy + v1 + e1o);
+                    route[usize::from(s)].0 += i64::from(bw);
+                    route[usize::from(s)].1 += 2;
+                    continue;
+                }
+                b.rect(m1, Rect { x: x0, y: y0, w: uw, h: uh });
+                b.rect(m2, Rect { x: x0 + inset, y: y0 + inset, w: uw - 2 * inset, h: uh - 2 * inset });
+                let (cx, cy) = (x0 + floor((uw - v2) / 2), y0 + floor((uh - v2) / 2));
+                if slot.is_some() {
+                    b.rect(v2l, Rect { x: cx, y: cy, w: v2, h: v2 });
+                    b.unit(Unit { owner: s, x: x0 + uw / 2, y: y0 + uh / 2, weight: i64::from(uw) * i64::from(uh), phi: (0, 0), sa: 0, sb: 0 });
                 } else {
-                    b.rect(m1, Rect { x: x0, y: y0, w: uw, h: uh });
-                    b.rect(m2, Rect { x: x0 + inset, y: y0 + inset, w: uw - 2 * inset, h: uh - 2 * inset });
-                    let (cx, cy) = (x0 + floor((uw - v2) / 2), y0 + floor((uh - v2) / 2));
-                    if slot.is_some() {
-                        b.rect(v2l, Rect { x: cx, y: cy, w: v2, h: v2 });
-                        b.unit(Unit { owner: s, x: x0 + uw / 2, y: y0 + uh / 2, weight: i64::from(uw) * i64::from(uh), phi: (0, 0), sa_sb: None });
-                    } else {
-                        // A dummy's plates are shorted: it is environment, not C.
-                        b.rect(v1l, Rect { x: cx, y: cy, w: v1, h: v1 });
-                    }
-                    // Branch: met1 stub off the plate, via1, met2 over the
-                    // other tracks.
-                    b.rect(m1, Rect { x: x0 + uw - 2 * lat, y: vy - e1, w: 2 * lat + vx + v1 + e1o, h: w1 });
-                    b.rect(v1l, Rect { x: x0 + uw + vx, y: vy, w: v1, h: v1 });
-                    let bx = x0 + uw + vx - e1;
-                    let bw = tx + e1 + v1 + e1o - bx;
-                    b.rect(m2, tall(Rect { x: bx, y: vy - e1, w: bw, h: w1 }));
-                    bw
-                };
+                    // A dummy's plates are shorted: it is environment, not C.
+                    b.rect(v1l, Rect { x: cx, y: cy, w: v1, h: v1 });
+                }
+                // Branch: met1 stub off the plate, via1, met2 over the other
+                // tracks, via1 onto this slot's track.
+                let vy = y0 + floor((uh - v1) / 2);
+                let tx = track_x(c, s);
+                b.rect(m1, Rect { x: x0 + uw - 2 * lat, y: vy - e1, w: 2 * lat + vx + v1 + e1o, h: w1 });
+                b.rect(v1l, Rect { x: x0 + uw + vx, y: vy, w: v1, h: v1 });
+                let bx = x0 + uw + vx - e1;
+                let bw = tx + e1 + v1 + e1o - bx;
+                b.rect(m2, tall(Rect { x: bx, y: vy - e1, w: bw, h: w1 }));
                 b.rect(v1l, Rect { x: tx + e1, y: vy, w: v1, h: v1 });
-                let t = tracks[c].iter().position(|&x| x == s).expect("slot has a track");
+                let t = tracks[c].iter().position(|&x| x == s).unwrap();
                 top_of[c][t] = top_of[c][t].max(vy + v1 + e1o);
                 route[usize::from(s)].0 += i64::from(bw);
                 route[usize::from(s)].1 += 2;
@@ -656,14 +596,17 @@ impl CapArray {
         }
         // The via2 under the met1/via1 pin stack: TOP's (MOM: off the met3
         // strap; MIM: off the met3 island) and, MIM, the dummy tie's.
+        let (dcut, vd) = if mim { (st.bot_cut, process.width(st.bot_cut).unwrap_or(v2)) } else { ("via2", v2) };
         let e2 = up(enc("met2", dcut).max(cap("met2", dcut)));
         // MIM hop between met4 and met2, centred on (cx, cy): via3, a met3
         // island grown to the deck's area (off capm, capm.11), via2 under it.
         let ei = up(enc(st.bot, st.top_cut).max(cap(st.bot, st.top_cut)));
+        let eb3 = up(enc(st.bot, st.bot_cut).max(cap(st.bot, st.bot_cut)));
         let side = up((vt + 2 * ei).max(vd + 2 * eb3).max(wmin(st.bot)));
         let island = |b: &mut Builder, cx: i32, cy: i32| {
             b.rect(req(process, st.top_cut), Rect { x: cx - vt / 2, y: cy - vt / 2, w: vt, h: vt });
-            b.rect(req(process, st.bot), grow_to_area(Rect { x: cx - side / 2, y: cy - side / 2, w: side, h: side }, process.area(st.bot).unwrap_or(0), lat));
+            let h = up(i32::try_from((process.area(st.bot).unwrap_or(0) + i64::from(side) - 1) / i64::from(side)).unwrap_or(i32::MAX)).max(side);
+            b.rect(req(process, st.bot), Rect { x: cx - side / 2, y: cy - side / 2 - floor((h - side) / 2), w: side, h });
             b.rect(req(process, dcut), Rect { x: cx - vd / 2, y: cy - vd / 2, w: vd, h: vd });
         };
         for s in 0..=dummy_slot.max(n) {
@@ -779,6 +722,11 @@ impl CapArray {
         }
         (b.finish(), route)
     }
+}
+
+fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
+    let def = process.rule("cap_unit_side", 0);
+    sizing(group, c, def, def)
 }
 
 #[cfg(test)]
@@ -1195,240 +1143,5 @@ mod tests {
                 assert!((u / per_unit[0] - 1.0).abs() < 0.06, "{v:?}: C{} per unit {u} vs C1 {}", i + 1, per_unit[0]);
             }
         }
-    }
-
-    #[test]
-    fn bits_boundaries() {
-        let bank = |n: u8| -> Vec<u16> { (0..=n).map(|i| if i == 0 { 1 } else { 1 << (i - 1) }).collect() };
-        assert_eq!(bits(&[]), None, "empty");
-        assert_eq!(bits(&[1]), None, "C0 alone");
-        assert_eq!(bits(&[1, 1]), None, "N = 1 is below the smallest bank");
-        assert_eq!(bits(&bank(8)), Some(8), "largest bank");
-        assert_eq!(bits(&bank(9)), None, "past MAX_BITS");
-        assert_eq!(bits(&[2, 1, 2]), None, "C0 must be one unit");
-        assert_eq!(bits(&[1, 1, 2, 0]), None);
-    }
-
-    #[test]
-    fn dims_hold_two_to_the_m() {
-        assert_eq!(dims(0, false), (1, 1));
-        assert_eq!(dims(1, false), (1, 2));
-        assert_eq!(dims(1, true), (2, 1));
-        assert_eq!(dims(4, false), (4, 4));
-        assert_eq!(dims(5, false), (4, 8));
-        assert_eq!(dims(5, true), (8, 4));
-        for m in 0..=8 {
-            let (r, c) = dims(m, false);
-            assert_eq!(r * c, 1 << m);
-        }
-    }
-
-    #[test]
-    fn even_up_rounds_to_an_even_lattice_multiple() {
-        assert_eq!(even_up(0, 10), 0);
-        assert_eq!(even_up(1, 10), 20);
-        assert_eq!(even_up(20, 10), 20);
-        assert_eq!(even_up(21, 10), 40);
-    }
-
-    #[test]
-    fn grow_to_area_grows_about_the_centre_and_never_shrinks() {
-        let r = Rect { x: 0, y: 1000, w: 100, h: 100 };
-        assert_eq!(grow_to_area(r, 0, 10), r, "no area rule");
-        assert_eq!(grow_to_area(r, 5_000, 10), r, "already large enough");
-        let g = grow_to_area(r, 100_000, 10);
-        assert_eq!((g.x, g.w, g.h), (0, 100, 1000));
-        assert_eq!(g.y, 1000 - 450, "centred, offset on the lattice");
-        let z = grow_to_area(Rect { w: 0, ..r }, 1_000, 10);
-        assert_eq!(z.h, 1000, "a zero-width rect divides by one, not zero");
-    }
-
-    /// An area no `i32` height can meet saturates instead of overflowing.
-    #[test]
-    fn grow_to_area_saturates() {
-        let r = Rect { x: 0, y: 0, w: 1, h: 10 };
-        let g = grow_to_area(r, i64::MAX / 2, 10);
-        assert!(g.h >= r.h && g.h > 1_000_000_000, "{g:?}");
-    }
-
-    /// A deck with named model rules (and no layers).
-    struct Model(&'static [(&'static str, i32)]);
-    impl Process for Model {
-        fn layer(&self, _: &str) -> Option<pnr_core::LayerId> {
-            None
-        }
-        fn rule(&self, name: &str, d: i32) -> i32 {
-            self.0.iter().find(|(k, _)| *k == name).map_or(d, |r| r.1)
-        }
-        fn grid(&self) -> i32 {
-            5
-        }
-    }
-
-    /// sky130 `cap_mim_m3_1` typical: 2 fF/µm², 0.19 fF/µm, dw −25 nm.
-    const MIM_MODEL: &[(&str, i32)] = &[("c_area_af_um2", 2000), ("c_perim_af_um", 190), ("c_dw_nm", -25)];
-
-    #[test]
-    fn c_u_is_the_area_plus_perimeter_model() {
-        assert_eq!(c_u_af(&Flat, 5000, 5000), None, "a MOM deck states no C");
-        let c = c_u_af(&Model(MIM_MODEL), 5000, 5000).unwrap();
-        // 2000·4.975² + 190·2·(4.975 + 4.975).
-        assert!((c - (2000.0 * 4.975 * 4.975 + 190.0 * 2.0 * 9.95)).abs() < 1e-6, "{c}");
-        let c = c_u_af(&Model(&[("c_area_af_um2", 1000)]), 2000, 3000).unwrap();
-        assert!((c - 6000.0).abs() < 1e-9, "area only: {c}");
-    }
-
-    /// The bridge half is the smallest lattice side whose two halves reach C_A.
-    #[test]
-    fn ca_half_side_is_the_smallest_side_reaching_c_a() {
-        let p = Model(MIM_MODEL);
-        assert_eq!(ca_half_side(&Flat, 3000, 3000, 2, 2), None);
-        let lat = cut_lattice(&p);
-        for (l, m) in [(1u8, 1u8), (2, 2), (3, 3), (2, 4)] {
-            let half = ca_half_side(&p, 3000, 3000, l, m).unwrap();
-            assert_eq!(half % lat, 0, "({l}, {m}) on the lattice");
-            let want = analog::matching::dac::attenuation_cap(1 << l, (1 << m) - 1) * c_u_af(&p, 3000, 3000).unwrap();
-            let c = |t: i32| 2.0 * c_u_af(&p, t, t).unwrap();
-            assert!(c(half) >= want - 1e-6, "({l}, {m}): {} < {want}", c(half));
-            assert!(c(half - lat) < want, "({l}, {m}): {half} is not the smallest");
-        }
-    }
-
-    /// Exact counts and point symmetry hold up to the largest bank.
-    #[test]
-    fn the_largest_bank_is_exact_and_point_symmetric() {
-        let n = MAX_BITS;
-        for v in every_variant(n) {
-            let a = v.assign(n);
-            assert_eq!(a.len(), 1 << n);
-            for s in 0..=n {
-                let want = if s == 0 { 1 } else { 1usize << (s - 1) };
-                assert_eq!(a.iter().filter(|&&x| x == s).count(), want, "{v:?} C{s}");
-            }
-            assert!(a.iter().enumerate().all(|(i, &s)| s < 2 || a[a.len() - 1 - i] == s), "{v:?}");
-        }
-    }
-
-    /// The smallest bank: the spiral puts C0 and C1 diagonally opposite.
-    #[test]
-    fn a_two_bit_spiral_puts_c0_and_c1_diagonally() {
-        let a = CapArray { pattern: Pattern::Spiral, tall: false }.assign(2);
-        let i0 = a.iter().position(|&x| x == 0).unwrap();
-        assert_eq!(a[3 - i0], 1, "{a:?}");
-    }
-
-    #[test]
-    #[should_panic]
-    fn assign_refuses_a_split_pattern() {
-        let _ = CapArray { pattern: Pattern::Split { lsb: 2, bridge_top_lsb: true }, tall: false }.assign(4);
-    }
-
-    /// Nothing is offered without a plate stack, for a lone MOM device, or
-    /// past 256 units.
-    #[test]
-    fn enumerate_refuses_what_it_cannot_draw() {
-        struct Bare;
-        impl Process for Bare {
-            fn layer(&self, _: &str) -> Option<pnr_core::LayerId> {
-                None
-            }
-            fn rule(&self, _: &str, d: i32) -> i32 {
-                d
-            }
-            fn grid(&self) -> i32 {
-                5
-            }
-        }
-        let (g, c) = bank(4);
-        assert!(CapArray::enumerate(&g, &c, &Bare).is_empty(), "no plate stack");
-        let (g, c) = set(&[4]);
-        assert!(CapArray::enumerate(&g, &c, &Flat).is_empty(), "one MOM device");
-        let (g, c) = set(&[200, 57]);
-        assert!(CapArray::enumerate(&g, &c, &Flat).is_empty(), "257 units");
-        let (g, c) = set(&[200, 56]);
-        assert_eq!(CapArray::enumerate(&g, &c, &Flat).len(), 2, "256 units: compact and dispersed");
-    }
-
-    /// Odd N offers tall twins, even N does not; no two variants share an
-    /// assignment; every block chessboard has `N − k` even.
-    #[test]
-    fn enumerate_shapes_the_bank_space() {
-        for n in 2..=7u8 {
-            let (g, c) = bank(n);
-            let vs = CapArray::enumerate(&g, &c, &Flat);
-            assert_eq!(vs.iter().any(|v| v.tall), n % 2 == 1, "n={n}");
-            for (i, a) in vs.iter().enumerate() {
-                if let Pattern::BlockChessboard { k, bs } = a.pattern {
-                    assert!(k >= 2 && k < n && (n - k) % 2 == 0 && bs >= 1, "n={n}: {a:?}");
-                }
-                for b in &vs[i + 1..] {
-                    assert!(a.tall != b.tall || a.assign(n) != b.assign(n), "n={n}: {a:?} duplicates {b:?}");
-                }
-            }
-        }
-    }
-
-    /// One `N` pin per slot; every member's `P`; a general set's dummies get
-    /// a `GND` pin of their own, a bank's join C0.
-    #[test]
-    fn pins_cover_every_slot_once() {
-        let n_pins = |m: &Macro, name: &str| m.pins.iter().filter(|p| p.name == name).count();
-        let (g, c) = bank(3);
-        let m = CapArray { pattern: Pattern::Spiral, tall: false }.draw(&g, &c, &Flat);
-        for s in 0..=3 {
-            assert_eq!((n_pins(&m, &format!("d{s}:N")), n_pins(&m, &format!("d{s}:P"))), (1, 1), "bank slot {s}");
-        }
-        assert_eq!(n_pins(&m, "GND"), 0);
-        let (g, c) = set(&[2, 2]);
-        let m = CapArray { pattern: Pattern::Chessboard, tall: false }.draw(&g, &c, &Flat);
-        for s in 0..2 {
-            assert_eq!((n_pins(&m, &format!("d{s}:N")), n_pins(&m, &format!("d{s}:P"))), (1, 1), "set slot {s}");
-        }
-        assert_eq!(n_pins(&m, "GND"), 1);
-        assert_eq!(m.units.len(), 4, "dummies are not units");
-    }
-
-    /// Route bookkeeping: one entry per slot (the general set's ground slot
-    /// included), every slot routed, two cuts per unit cell plus one per track.
-    #[test]
-    fn routes_are_counted_per_slot() {
-        let (g, c) = bank(3);
-        let (_, routes) = CapArray { pattern: Pattern::Spiral, tall: false }.build(&g, &c, &Flat);
-        assert_eq!(routes.len(), 4);
-        assert!(routes.iter().all(|&(len, vias)| len > 0 && vias >= 3), "{routes:?}");
-        let (g, c) = set(&[3, 5]);
-        let (_, routes) = CapArray { pattern: Pattern::Spiral, tall: false }.build(&g, &c, &Flat);
-        assert_eq!(routes.len(), 3, "two members and the ground dummies");
-    }
-
-    /// Figures of a drawn bank are finite and self-consistent.
-    #[test]
-    fn metrics_are_finite_and_consistent() {
-        let (g, c) = bank(4);
-        for v in every_variant(4) {
-            let m = v.metrics(&g, &c, &Flat, RANK_G_PER_UM);
-            let drawn = v.draw(&g, &c, &Flat);
-            assert_eq!(m.vias.len(), 5, "{v:?}");
-            for x in [m.lin_um, m.second_um2, m.inl_lsb, m.dnl_lsb, m.msys, m.route_spread, m.area_um2] {
-                assert!(x.is_finite() && x >= 0.0, "{v:?}: {m:?}");
-            }
-            assert!((m.area_um2 - f64::from(drawn.bbox.w) * f64::from(drawn.bbox.h) * 1e-6).abs() < 1e-6);
-            assert!(m.order <= 4);
-        }
-    }
-
-    /// Without a gradient there is no mismatch.
-    #[test]
-    fn a_zero_gradient_has_no_inl_or_msys() {
-        let (g, c) = bank(4);
-        let m = CapArray { pattern: Pattern::Chessboard, tall: false }.metrics(&g, &c, &Flat, 0.0);
-        assert!(m.inl_lsb.abs() < 1e-12 && m.dnl_lsb.abs() < 1e-12 && m.msys.abs() < 1e-12, "{m:?}");
-    }
-
-    /// `split` needs a MIM stack, a dummy ring and a bank-shaped set.
-    #[test]
-    fn split_refuses_a_mom_stack() {
-        let (g, c) = set(&[1, 1, 2, 1, 2, 1]);
-        assert!(CapArray::split(&g, &c, &Flat, 2, true).is_none());
     }
 }

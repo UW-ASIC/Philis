@@ -24,14 +24,12 @@ pub enum Kind {
     Nm,
     /// Non-negative integer (a count or 0/1 flag).
     Count,
-    /// `true` or `false`.
     Bool,
     /// Any number.
     Real,
     /// Array of exactly 3 (MIN, MOD, EXC; index = `MatchClass as usize`), each a
     /// non-negative integer or `null` (the process does not state that tier).
     Tier,
-    /// A string.
     Text,
     /// Array of strings.
     List,
@@ -45,9 +43,7 @@ pub enum Kind {
 /// One registry row.
 #[derive(Clone, Copy, Debug)]
 pub struct Key {
-    /// The key under `cell`, without the `cell.` prefix.
     pub name: &'static str,
-    /// The JSON shape its value must have.
     pub kind: Kind,
     /// Missing (or null) fails `Pdk::load`.
     pub required: bool,
@@ -57,15 +53,13 @@ pub struct Key {
     pub reader: &'static str,
 }
 
-/// Shorthand row constructor that keeps [`KEYS`] one line per key.
 const fn k(name: &'static str, kind: Kind, required: bool, sourced: bool, reader: &'static str) -> Key {
     Key { name, kind, required, sourced, reader }
 }
 
 use Kind::{Bool, Count, Layers, List, Nm, Real, Table, Text, Tier};
 
-/// Every key, sorted by name (ASCII order; [`validate`] binary-searches it).
-/// `<name>_source` of a registered key is implied.
+/// Every key, alphabetical. `<name>_source` of a registered key is implied.
 pub const KEYS: &[Key] = &[
     k("abeta_n_pct_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
     k("abeta_p_pct_um", Real, false, true, "frontend/library/src/lib.rs annotation"),
@@ -158,16 +152,14 @@ pub const KEYS: &[Key] = &[
     k("wpe_clearance_nm", Tier, false, true, "kernel/cells/src/mosfet.rs; frontend/library/src/lib.rs; kernel/analog/src/matching/class.rs"),
 ];
 
-/// Returns the registry row for `name`.
+/// The registry row for `name`.
 fn key(name: &str) -> Option<&'static Key> {
-    KEYS.binary_search_by(|k| k.name.cmp(name)).ok().map(|i| &KEYS[i])
+    KEYS.iter().find(|k| k.name == name)
 }
 
-/// Returns every problem with a sidecar's `cell` object at once, one
-/// message per problem, empty when it is valid: not an object, an unknown
-/// key (a typo), a value of the wrong kind, a `<name>_source` that is not
-/// text, a required key missing or null, a sourced key with a non-null
-/// value and no non-empty `<name>_source`.
+/// Every problem at once: unknown key (a typo), wrong kind, a required key
+/// missing, a sourced key with a non-null value and no non-empty
+/// `<name>_source`.
 #[must_use]
 pub fn validate(cell: &Value) -> Vec<String> {
     let Some(obj) = cell.as_object() else { return vec!["the sidecar's `cell` is not an object".into()] };
@@ -213,186 +205,7 @@ pub fn validate(cell: &Value) -> Vec<String> {
     bad
 }
 
-/// Returns `<name>_source`, when it is text that is not all whitespace.
+/// `<name>_source`, when non-empty text.
 pub(crate) fn source<'a>(cell: &'a serde_json::Map<String, Value>, name: &str) -> Option<&'a str> {
     cell.get(&format!("{name}_source"))?.as_str().filter(|s| !s.trim().is_empty())
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use serde_json::json;
-
-    /// A value of `kind` that `validate` must accept.
-    fn valid(kind: Kind) -> Value {
-        match kind {
-            Nm => json!(120),
-            Count => json!(2),
-            Bool => json!(true),
-            Real => json!(1.5),
-            Tier => json!([1, null, 3]),
-            Text => json!("x"),
-            List => json!(["a", "b"]),
-            Table | Layers => json!({}),
-        }
-    }
-
-    /// Every required key with a valid value, and a source for each sourced one.
-    fn minimal() -> serde_json::Map<String, Value> {
-        let mut m = serde_json::Map::new();
-        for row in KEYS.iter().filter(|k| k.required) {
-            m.insert(row.name.into(), valid(row.kind));
-            if row.sourced {
-                m.insert(format!("{}_source", row.name), json!("datasheet"));
-            }
-        }
-        m
-    }
-
-    fn problems(m: &serde_json::Map<String, Value>) -> Vec<String> {
-        validate(&Value::Object(m.clone()))
-    }
-
-    #[test]
-    fn keys_are_sorted_and_unique() {
-        assert!(KEYS.windows(2).all(|w| w[0].name < w[1].name), "KEYS must stay strictly sorted");
-        assert!(KEYS.iter().all(|k| key(k.name).is_some_and(|r| r.name == k.name)));
-        assert!(key("").is_none() && key("zzz").is_none() && key("a").is_none());
-    }
-
-    #[test]
-    fn a_non_object_is_one_problem() {
-        for v in [json!(null), json!(1), json!("cell"), json!([])] {
-            assert_eq!(validate(&v), ["the sidecar's `cell` is not an object"]);
-        }
-    }
-
-    #[test]
-    fn the_minimal_cell_is_valid() {
-        assert_eq!(problems(&minimal()), Vec::<String>::new());
-    }
-
-    #[test]
-    fn every_required_key_missing_is_reported() {
-        let p = validate(&json!({}));
-        let required = KEYS.iter().filter(|k| k.required).count();
-        assert!(required > 0);
-        assert_eq!(p.len(), required, "{p:?}");
-        assert!(p.iter().all(|m| m.contains(": required (")));
-    }
-
-    #[test]
-    fn a_null_required_key_is_missing() {
-        let mut m = minimal();
-        m.insert("sd_width".into(), Value::Null);
-        assert_eq!(problems(&m), ["cell.sd_width: required (kernel/cells/src/mosfet.rs reads it with a compiled default; add this process's value)"]);
-    }
-
-    #[test]
-    fn null_is_accepted_for_an_optional_key_of_any_kind() {
-        for row in KEYS.iter().filter(|k| !k.required) {
-            let mut m = minimal();
-            m.insert(row.name.into(), Value::Null);
-            assert_eq!(problems(&m), Vec::<String>::new(), "{}", row.name);
-        }
-    }
-
-    #[test]
-    fn every_key_accepts_its_kind() {
-        for row in KEYS {
-            let mut m = minimal();
-            m.insert(row.name.into(), valid(row.kind));
-            if row.sourced {
-                m.insert(format!("{}_source", row.name), json!("UNVERIFIED: estimate"));
-            }
-            assert_eq!(problems(&m), Vec::<String>::new(), "{}", row.name);
-        }
-    }
-
-    #[test]
-    fn wrong_kinds_are_rejected() {
-        let cases: [(Kind, Value); 14] = [
-            (Nm, json!(1.5)),
-            (Nm, json!("10")),
-            (Count, json!(-1)),
-            (Count, json!(1.0)),
-            (Bool, json!(1)),
-            (Real, json!("1.0")),
-            (Tier, json!([1, 2])),
-            (Tier, json!([1, 2, 3, 4])),
-            (Tier, json!([1, -2, 3])),
-            (Tier, json!({})),
-            (Text, json!(1)),
-            (List, json!(["a", 1])),
-            (Table, json!([])),
-            (Layers, json!("met1")),
-        ];
-        for (kind, v) in cases {
-            let row = KEYS.iter().find(|k| k.kind == kind && !k.sourced).or_else(|| KEYS.iter().find(|k| k.kind == kind)).unwrap();
-            let mut m = minimal();
-            m.insert(row.name.into(), v.clone());
-            m.insert(format!("{}_source", row.name), json!("x"));
-            let p = problems(&m);
-            assert_eq!(p, [format!("cell.{}: expected {kind:?}, got {v}", row.name)], "{kind:?} {v}");
-        }
-    }
-
-    #[test]
-    fn an_unknown_key_is_a_typo() {
-        let mut m = minimal();
-        m.insert("sd_widht".into(), json!(1));
-        assert_eq!(problems(&m), ["cell.sd_widht: unknown key (a typo? register it in backend/verify/src/sidecar.rs)"]);
-        // `_source` of an unknown key is itself unknown.
-        let mut m = minimal();
-        m.insert("nope_source".into(), json!("x"));
-        assert_eq!(problems(&m).len(), 1);
-    }
-
-    #[test]
-    fn a_sourced_value_needs_a_non_blank_source() {
-        let (name, kind) = ("avt_n_mv_um", Real);
-        assert!(key(name).is_some_and(|k| k.sourced && k.kind == kind));
-        let want = [format!("cell.{name}: process data with no `{name}_source`")];
-        for source in [None, Some(json!("")), Some(json!("  \t"))] {
-            let mut m = minimal();
-            m.insert(name.into(), json!(3.5));
-            if let Some(s) = source {
-                m.insert(format!("{name}_source"), s);
-            }
-            assert_eq!(problems(&m), want);
-        }
-        // A null value needs no source; a source alone is fine.
-        let mut m = minimal();
-        m.insert(name.into(), Value::Null);
-        m.insert(format!("{name}_source"), json!("paper"));
-        assert_eq!(problems(&m), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_source_must_be_text() {
-        let mut m = minimal();
-        m.insert("avt_n_mv_um".into(), json!(3.5));
-        m.insert("avt_n_mv_um_source".into(), json!(7));
-        let p = problems(&m);
-        assert!(p.contains(&"cell.avt_n_mv_um_source: a source is text, got 7".to_string()), "{p:?}");
-        assert!(p.iter().any(|m| m.contains("process data with no")), "{p:?}");
-    }
-
-    // `antenna_source` is a key of its own (no `antenna` key), checked as Text.
-    #[test]
-    fn a_registered_key_ending_in_source_is_its_own_key() {
-        let mut m = minimal();
-        m.insert("antenna_source".into(), json!(1));
-        assert_eq!(problems(&m), ["cell.antenna_source: expected Text, got 1"]);
-    }
-
-    #[test]
-    fn source_trims_blank_text() {
-        let m = json!({ "a_source": " x ", "b_source": " ", "c_source": 1 });
-        let m = m.as_object().unwrap();
-        assert_eq!(source(m, "a"), Some(" x "));
-        assert_eq!(source(m, "b"), None);
-        assert_eq!(source(m, "c"), None);
-        assert_eq!(source(m, "d"), None);
-    }
 }

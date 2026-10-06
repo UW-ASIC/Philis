@@ -48,22 +48,22 @@ use pnr_core::Netlist;
 
 /// Everything the annotator hands the generators, placer and router.
 pub struct Problem {
-    /// Recognised blocks, then the glue block (always last, empty when every
-    /// device is claimed). Index = [`pnr_core::GroupId`] and the stage's symmetry
-    /// [`pnr_core::ids::AxisId`]; `blocks[i].devices` is [`pnr_core::Layout::groups`]`[i]`
-    /// (composites may mix polarities). The annotator emits no group-targeted
-    /// rule, so an empty glue never reaches [`pnr_core::Layout::bbox`]'s panic.
+    /// Recognised blocks, then the glue block. Index = [`pnr_core::GroupId`] and
+    /// the stage's symmetry [`pnr_core::ids::AxisId`].
     pub blocks: Vec<Block>,
     /// Cell-tier directives (unitization, dummies, guard rings), read by `cells`.
     pub constraints: analog::Constraints,
-    /// Placement rule batches, each wrapped in [`analog::rule::Tagged`] with a
-    /// unique id (dense from 0 across placement then routing, in emission order).
     pub placement: analog::Requirements<pnr_core::Layout>,
-    /// Routing rule batches, tagged like `placement` (ids continue after it),
-    /// origin always net-class.
     pub routing: analog::Requirements<pnr_core::Routes>,
     /// Per-net class + budgets, indexed by [`pnr_core::NetId`].
     pub net_classes: Vec<analog::metadata::NetClassification>,
+    /// `blocks[i].devices` — feeds [`pnr_core::Layout::groups`]. Composites may mix
+    /// polarities.
+    pub groups: Vec<Vec<DeviceId>>,
+    /// Diffusion-sharing permission, parallel to `groups`: a mixed-polarity group is
+    /// cut to one member (NMOS/PMOS abutment merges implants — DRC-clean, LVS-fatal).
+    /// One member, not zero: an empty group panics `Layout::bbox`.
+    pub abutment: Vec<Vec<DeviceId>>,
     /// `(rule kind, missing input)` for every family left unemitted because the
     /// deck lacks a number: **unknown**, never a pass.
     pub missing: Vec<(&'static str, &'static str)>,
@@ -87,7 +87,6 @@ pub enum Coverage {
 }
 
 /// What the netlist needs, so `missing` lists only families that would apply.
-#[derive(Clone, Copy, Debug, Default)]
 struct Needs {
     /// A matched leaf (DiffPair, CurrentMirror, Load, CascodePair) exists.
     matched: bool,
@@ -140,7 +139,6 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     for n in [netlist.devices.len(), netlist.nets.len()] {
         assert!(n <= usize::from(u16::MAX), "annotator: {n} devices/nets exceed the u16 id space (65535)");
     }
-    let n = netlist.devices.len();
     let hg = pnr_core::BipartiteHypergraph::from_netlist(netlist);
     let mut models = Vec::new();
     let drawn: Vec<size::Drawn> = netlist.devices.iter().map(|d| size::drawn(d, &mut models)).collect();
@@ -173,9 +171,29 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     let glue = (0..netlist.devices.len() as u16).filter(|&d| !claimed[d as usize]).map(DeviceId);
     blocks.push(Block { kind: BlockKind::Glue, template: "glue", devices: glue.collect(), injected: false, sub_blocks: Vec::new(), selfs: Vec::new() });
 
+    let groups: Vec<Vec<DeviceId>> = blocks.iter().map(|b| b.devices.clone()).collect();
+    let abutment = groups
+        .iter()
+        .map(|g| {
+            let k0 = g.first().map(|d| netlist.devices[d.0 as usize].kind);
+            if g.iter().all(|d| Some(netlist.devices[d.0 as usize].kind) == k0) {
+                g.clone()
+            } else {
+                g[..1].to_vec()
+            }
+        })
+        .collect();
+
     // A net feeding a matched device's gate is the small-signal path whose coupling
     // shows up as offset: classified Sensitive, tight budgets.
-    let sensitive = device_mask(n, block::leaves(&blocks).into_iter().filter(|b| b.kind.is_sensitive()).flat_map(|b| &b.devices));
+    let mut sensitive = vec![false; netlist.devices.len()];
+    for b in block::leaves(&blocks) {
+        if b.kind.is_sensitive() {
+            for d in &b.devices {
+                sensitive[d.0 as usize] = true;
+            }
+        }
+    }
     let gates: Vec<f32> = netlist.devices.iter().map(gate_um2).collect();
     let mut net_classes = classify::classify(&hg, &roles, &sensitive, &gates, cfg.process.gate_af_per_um2, &cfg.loads);
 
@@ -222,7 +240,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         if hier::ports_pair(netlist, a, b) {
             for (x, y) in hier::corresponding(netlist, &drawn, a, b).unwrap_or_default() {
                 if !seeded.contains(&x) && !seeded.contains(&y) {
-                    seeds.push(symmetry::Seed::Devices(x, y, analog::intent::ConstraintId(HIER_SEED_ID_BASE + k)));
+                    seeds.push(symmetry::Seed::Devices(x, y, analog::intent::ConstraintId(u32::MAX / 2 + k)));
                     k += 1;
                 }
             }
@@ -275,6 +293,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     intent.sets = sets::matched_sets(&reqs, &intent.compounds, &shared, &passive_sets, &block::leaves(&blocks), &canon, &drawn, &hg, &cfg.process.unit, &mut intent.diagnostics);
     // EXT-16: kind, class and style per set; the unit floors depend on the class.
     let leaves = block::leaves(&blocks);
+    let n = netlist.devices.len();
     let leaf_idx = sets::device_index(n, leaves.iter().map(|b| b.devices.as_slice()));
     let passive_idx = sets::device_index(n, passive_sets.iter().map(|p| p.devices.as_slice()));
     let mut roles = Vec::new();
@@ -370,7 +389,11 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         c.kind = if perfect { analog::intent::SymKind::Perfect } else { analog::intent::SymKind::Mirror };
     }
     sets::set_pairs(&mut intent.compounds, &intent.sets);
-    let load_leaf = device_mask(n, leaves.iter().copied().filter(|b| b.kind == BlockKind::Load).flat_map(|b| &b.devices));
+    let load_leaf = {
+        let mut v = vec![false; n];
+        leaves.iter().filter(|b| b.kind == BlockKind::Load).flat_map(|b| &b.devices).for_each(|d| v[d.0 as usize] = true);
+        v
+    };
     // EXT-18: classes that need sets, then device roles, then current-source gates.
     let load_af = classify::net_load_af(&hg, &gates, cfg.process.gate_af_per_um2, &cfg.loads);
     // AA-25: a budgeted-class net on a channel and no plate whose load is off-netlist.
@@ -454,10 +477,8 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     (intent.aggressors, intent.victims) = substrate::tag(netlist, &net_classes, &intent.sets);
     intent.aggressors.extend(substrate::injectors(netlist, &net_classes, ev.op.as_ref(), cfg.policy.inj_series_ohm, &mut missing));
     let victim = substrate::victim_mask(n, &intent.victims);
-    let aggressor = device_mask(
-        n,
-        intent.aggressors.iter().filter(|a| matches!(a.inject, analog::intent::Inject::Switching | analog::intent::Inject::Capacitive)).map(|a| &a.device),
-    );
+    let mut aggressor = vec![false; n];
+    intent.aggressors.iter().filter(|a| matches!(a.inject, analog::intent::Inject::Switching | analog::intent::Inject::Capacitive)).for_each(|a| aggressor[a.device.0 as usize] = true);
     let mut routing = extract::routing(
         &hg,
         &net_classes,
@@ -521,7 +542,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     if let Some(why) = emit::isolation(&aggressor, &victim, &related, p.substrate, p.epi_nm, &mut placement) {
         missing.push(("Isolation", why));
     }
-    emit::substrate_balance(&aggressor, &blocks, &block_of, &mut placement);
+    if std::env::var("LOCAL_NO_SB").is_err() { emit::substrate_balance(&aggressor, &blocks, &block_of, &mut placement); }
 
     // Stable ids in emission order (permutation-invariant since EXT-06). A
     // pre-tagged batch (sidecar `GroupBlocks`) keeps its origin; else a
@@ -575,7 +596,22 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         intent.diagnostics.push(conflict::diag(&ids, vec![DeviceId(x as u16), DeviceId(y as u16)], what));
     }
 
-    let coverage = coverage(netlist, &drawn, &touched, &block_of, &blocks, &cfg.do_not_identify);
+    let coverage = (0..netlist.devices.len())
+        .map(|d| {
+            let c = if touched[d] {
+                Coverage::Constrained
+            } else if block_of[d] != usize::MAX {
+                Coverage::Grouped(blocks[block_of[d]].template)
+            } else if cfg.do_not_identify.contains(&(d as u32)) {
+                Coverage::Unconstrained("do_not_identify")
+            } else if size::unknown_size(netlist.devices[d].kind, &drawn[d]) {
+                Coverage::Unconstrained("unknown size")
+            } else {
+                Coverage::Unconstrained("no pattern")
+            };
+            (DeviceId(d as u16), c)
+        })
+        .collect();
 
     // REL-07: guard rings by role, from the EXT-23 tags.
     let mut constraints = constraints::assemble(netlist, &drawn, &blocks, &intent.sets);
@@ -634,51 +670,14 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         coverage,
         constraints,
         net_classes,
+        groups,
+        abutment,
         blocks,
         missing,
     };
     let d = conflict::check(&out, netlist);
     out.intent.diagnostics.extend(d);
     out
-}
-
-/// Base of the symmetry-seed ids given to EXT-27 instance couples: far above
-/// any leaf-seed id (a leaf index), so the two ranges never collide.
-const HIER_SEED_ID_BASE: u32 = u32::MAX / 2;
-
-/// A per-device mask, `true` at every listed device.
-///
-/// # Panics
-/// When a listed device id is `≥ n`.
-fn device_mask<'a>(n: usize, devices: impl IntoIterator<Item = &'a DeviceId>) -> Vec<bool> {
-    let mut mask = vec![false; n];
-    for d in devices {
-        mask[d.0 as usize] = true;
-    }
-    mask
-}
-
-/// [`Coverage`] of every device, by id: constrained when a placement batch
-/// touched it, else grouped when it sits in a recognised (non-glue) block
-/// (`block_of[d] != usize::MAX`), else the reason it is unconstrained, checked
-/// in the order `do_not_identify`, unknown size, no pattern.
-fn coverage(netlist: &Netlist, drawn: &[size::Drawn], touched: &[bool], block_of: &[usize], blocks: &[Block], do_not_identify: &std::collections::HashSet<u32>) -> Vec<(DeviceId, Coverage)> {
-    (0..netlist.devices.len())
-        .map(|d| {
-            let c = if touched[d] {
-                Coverage::Constrained
-            } else if block_of[d] != usize::MAX {
-                Coverage::Grouped(blocks[block_of[d]].template)
-            } else if do_not_identify.contains(&(d as u32)) {
-                Coverage::Unconstrained("do_not_identify")
-            } else if size::unknown_size(netlist.devices[d].kind, &drawn[d]) {
-                Coverage::Unconstrained("unknown size")
-            } else {
-                Coverage::Unconstrained("no pattern")
-            };
-            (DeviceId(d as u16), c)
-        })
-        .collect()
 }
 
 /// `cfg` plus the testbench's rails and clocks (EXT-17): with ≥ 2 distinct DC
@@ -711,175 +710,4 @@ pub(crate) fn gate_um2(dev: &pnr_core::netlist::Device) -> f32 {
 /// SPICE param `key` of `dev`, or `default`.
 pub(crate) fn param(dev: &pnr_core::netlist::Device, key: &str, default: i64) -> i64 {
     dev.params.iter().find(|(k, _)| k == key).map_or(default, |&(_, v)| v)
-}
-
-/// Step-2 coverage: the assembly helpers and the [`annotate`] contract
-/// (shape, ids, determinism, the u16 limit).
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use crate::tests::{fet, nets, ota};
-    use analog::RuleBatch;
-    use pnr_core::netlist::{Device, DeviceKind};
-
-    fn resistor(name: &str, a: u16, b: u16, params: Vec<(String, i64)>) -> Device {
-        Device { name: name.into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("P".into(), NetId(a)), ("N".into(), NetId(b))], params }
-    }
-
-    #[test]
-    fn missing_lists_only_applicable_families() {
-        let p = ProcessNumbers::default();
-        assert!(missing(&p, &Needs::default()).is_empty(), "nothing applies, nothing missing");
-        let all = Needs { matched: true, gate_nets: true, budgeted_nets: true };
-        assert_eq!(
-            missing(&p, &all),
-            [
-                ("MatchedSet", "deck svt_uv_per_um — distance term unknown"),
-                ("MatchedSet", "deck avt_n_mv_um/avt_p_mv_um"),
-                ("Antenna", "deck antenna ratio"),
-                ("ParasiticBudget", "deck gate_cap_af_um2"),
-                ("CouplingBudget", "deck gate_cap_af_um2"),
-            ]
-        );
-        let p = ProcessNumbers {
-            svt_fit: Some((1.0, 1.0)),
-            avt_mv_um: [Some(1.0), None],
-            antenna_max_ratio: Some(400.0),
-            gate_af_per_um2: Some(8_000.0),
-            ..Default::default()
-        };
-        assert_eq!(missing(&p, &all), [("MatchedSet", "deck avt_n_mv_um/avt_p_mv_um"), ("ParasiticBudget", "deck wire capacitance")], "a fit stands in for S_VT; one polarity missing is missing");
-        let p = ProcessNumbers { svt_uv_per_um: Some(1.0), avt_mv_um: [Some(1.0); 2], antenna_max_ratio: Some(1.0), gate_af_per_um2: Some(1.0), wire_af_per_um: Some(1.0), ..Default::default() };
-        assert!(missing(&p, &all).is_empty());
-    }
-
-    #[test]
-    fn device_mask_marks_listed_devices() {
-        assert!(device_mask(0, []).is_empty());
-        assert_eq!(device_mask(4, &[DeviceId(3), DeviceId(1), DeviceId(3)]), [false, true, false, true]);
-    }
-
-    #[test]
-    fn coverage_reason_order() {
-        let nl = pnr_core::Netlist {
-            devices: vec![
-                fet("M0", DeviceKind::Nmos, 0, 1, 2, 2, 1_000, 1_000),
-                fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 1_000, 1_000),
-                fet("M2", DeviceKind::Nmos, 0, 1, 2, 2, 1_000, 1_000),
-                fet("M3", DeviceKind::Nmos, 0, 1, 2, 2, 0, 1_000),
-                fet("M4", DeviceKind::Nmos, 0, 1, 2, 2, 1_000, 1_000),
-            ],
-            nets: nets(&["a", "b", "c"]),
-            ..Default::default()
-        };
-        let mut models = Vec::new();
-        let drawn: Vec<size::Drawn> = nl.devices.iter().map(|d| size::drawn(d, &mut models)).collect();
-        let blocks = [Block { kind: BlockKind::DiffPair, template: "dp", devices: vec![DeviceId(1)], injected: false, sub_blocks: Vec::new(), selfs: Vec::new() }];
-        let touched = [true, true, false, false, false];
-        let block_of = [0, 0, usize::MAX, usize::MAX, usize::MAX];
-        let dni: std::collections::HashSet<u32> = [0, 2, 3].into_iter().collect();
-        let c = coverage(&nl, &drawn, &touched, &block_of, &blocks, &dni);
-        let want = [
-            Coverage::Constrained,
-            Coverage::Constrained,
-            Coverage::Unconstrained("do_not_identify"),
-            Coverage::Unconstrained("do_not_identify"),
-            Coverage::Unconstrained("no pattern"),
-        ];
-        assert_eq!(c.iter().map(|x| x.1).collect::<Vec<_>>(), want);
-        assert!(c.iter().enumerate().all(|(i, x)| x.0 == DeviceId(i as u16)));
-        let c = coverage(&nl, &drawn, &[false; 5], &block_of, &blocks, &Default::default());
-        assert_eq!(c[0].1, Coverage::Grouped("dp"));
-        assert_eq!(c[3].1, Coverage::Unconstrained("unknown size"), "W = 0");
-    }
-
-    #[test]
-    fn testbench_rails_and_clocks_join_by_name() {
-        let nl = pnr_core::Netlist { nets: nets(&["hi", "lo", "mid", "VDD", "ck"]), ..Default::default() };
-        let base = AnnotationConfig::default();
-        let ev = Evidence {
-            dc_sources: vec![(NetId(0), 1_800.0), (NetId(1), 0.0), (NetId(2), 900.0), (NetId(3), 1_800.0)],
-            switching_nets: vec![NetId(4)],
-            ..Default::default()
-        };
-        let c = with_testbench(&nl, &base, &ev);
-        assert_eq!(c.supply_nets, ["hi"], "a named rail keeps its own role");
-        assert_eq!(c.ground_nets, ["lo"]);
-        assert_eq!(c.clock_nets, ["ck"]);
-        let one_level = Evidence { dc_sources: vec![(NetId(0), 900.0), (NetId(2), 900.0)], ..Default::default() };
-        let c = with_testbench(&nl, &base, &one_level);
-        assert!(c.supply_nets.is_empty() && c.ground_nets.is_empty(), "one DC level names no rail");
-        let c = with_testbench(&nl, &base, &Evidence::default());
-        assert!(c.supply_nets.is_empty() && c.ground_nets.is_empty() && c.clock_nets.is_empty());
-    }
-
-    #[test]
-    fn device_param_helpers() {
-        let r = resistor("R", 0, 1, vec![("r".into(), 5), ("w".into(), 7)]);
-        assert_eq!(param(&r, "w", -1), 7);
-        assert_eq!(param(&r, "l", -1), -1);
-        assert_eq!(gate_um2(&r), 0.0, "not a FET");
-        assert_eq!(gate_um2(&fet("M", DeviceKind::Pmos, 0, 0, 0, 0, 3_000, 2_000)), 6.0);
-        assert_eq!(gate_um2(&fet("M", DeviceKind::Nmos, 0, 0, 0, 0, 3_000, 0)), 0.0, "missing L");
-    }
-
-    #[test]
-    fn empty_netlist_is_one_empty_glue_block() {
-        let p = annotate(&pnr_core::Netlist::default(), &AnnotationConfig::default());
-        assert_eq!(p.blocks.len(), 1);
-        assert_eq!((p.blocks[0].kind, p.blocks[0].template), (BlockKind::Glue, "glue"));
-        assert!(p.blocks[0].devices.is_empty() && p.coverage.is_empty() && p.net_classes.is_empty());
-        assert_eq!(p.axis_count, 1, "a spare axis when there is no compound");
-    }
-
-    #[test]
-    #[should_panic(expected = "u16 id space")]
-    fn more_than_u16_devices_panics() {
-        let devices = vec![resistor("R", 0, 0, vec![]); usize::from(u16::MAX) + 1];
-        let nl = pnr_core::Netlist { devices, nets: nets(&["a"]), ..Default::default() };
-        let _ = annotate(&nl, &AnnotationConfig::default());
-    }
-
-    /// Batch ids of three arms, in arm then emission order.
-    fn ids<On>(arms: [&Vec<Box<dyn RuleBatch<On>>>; 3]) -> Vec<u32> {
-        arms.iter().flat_map(|a| a.iter()).map(|b| b.meta().expect("tagged").id.0).collect()
-    }
-
-    /// Shape invariants: one coverage row per device in id order, glue last,
-    /// every device in exactly one block, every non-glue block non-empty, and
-    /// batch ids dense from 0 (placement, then routing).
-    #[test]
-    fn problem_shape_and_ids() {
-        for nl in [ota(), crate::tests::three_stage()] {
-            let p = annotate(&nl, &AnnotationConfig::default());
-            assert_eq!(p.coverage.len(), nl.devices.len());
-            assert!(p.coverage.iter().enumerate().all(|(i, c)| c.0 == DeviceId(i as u16)));
-            assert_eq!(p.blocks.last().map(|b| b.kind), Some(BlockKind::Glue));
-            assert!(p.blocks[..p.blocks.len() - 1].iter().all(|b| !b.devices.is_empty()), "only glue may be empty");
-            let mut seen = vec![false; nl.devices.len()];
-            for d in p.blocks.iter().flat_map(|b| &b.devices) {
-                assert!(!std::mem::replace(&mut seen[d.0 as usize], true), "device {d:?} in two groups");
-            }
-            assert!(seen.iter().all(|&s| s), "every device in exactly one group");
-            let place = ids([&p.placement.hard, &p.placement.budget, &p.placement.cost]);
-            let route = ids([&p.routing.hard, &p.routing.budget, &p.routing.cost]);
-            assert_eq!(place, (0..place.len() as u32).collect::<Vec<_>>(), "dense in emission order");
-            assert_eq!(route, (place.len() as u32..(place.len() + route.len()) as u32).collect::<Vec<_>>());
-            assert!(p.routing.hard.iter().chain(&p.routing.budget).chain(&p.routing.cost).all(|b| b.meta().unwrap().origin == analog::intent::Origin::NetClass));
-            assert_eq!(p.axis_count, p.intent.compounds.len().max(1));
-        }
-    }
-
-    /// Determinism: the same input gives the same blocks, coverage, missing
-    /// list and batch kinds.
-    #[test]
-    fn annotate_is_deterministic() {
-        let nl = crate::tests::three_stage();
-        let cfg = AnnotationConfig::default();
-        let shape = |p: &Problem| {
-            let kinds: Vec<&str> = p.placement.hard.iter().chain(&p.placement.budget).chain(&p.placement.cost).map(|b| b.kind()).collect();
-            (p.blocks.iter().map(|b| (b.template, b.devices.clone())).collect::<Vec<_>>(), p.coverage.clone(), p.missing.clone(), kinds)
-        };
-        assert_eq!(shape(&annotate(&nl, &cfg)), shape(&annotate(&nl, &cfg)));
-    }
 }

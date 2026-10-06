@@ -64,41 +64,26 @@ pub fn fold_i32<S: Simd, const K: usize, A>(
 
 /// Borrowed box columns: centre `(x, y)`, half-extents `(hw, hh)`, nm. The
 /// shape [`crate::Layout`] already stores, so borrowing it is free.
-/// All four columns must have the same length.
 #[derive(Clone, Copy)]
 pub struct Boxes<'a> {
-    /// Centre x per box, nm.
     pub x: &'a [i32],
-    /// Centre y per box, nm.
     pub y: &'a [i32],
-    /// Half-width per box, nm.
     pub hw: &'a [i32],
-    /// Half-height per box, nm.
     pub hh: &'a [i32],
 }
 
 /// One box, same convention as [`Boxes`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Box4 {
-    /// Centre x, nm.
     pub x: i32,
-    /// Centre y, nm.
     pub y: i32,
-    /// Half-width, nm.
     pub hw: i32,
-    /// Half-height, nm.
     pub hh: i32,
 }
 
 /// `Σ_b ox·oy` over every box `b` whose clearance-inflated overlap with `q` is
 /// positive on both axes, nm². Exact (i64 products). Includes `q` itself if it
 /// is one of `boxes`; the caller subtracts that term.
-///
-/// Precondition: per-axis sums `|q.x − x| ` and `q.hw + hw + clearance` fit
-/// `i32` (coordinates within ±1e9 nm with sub-mm boxes always do).
-///
-/// # Panics
-/// If the columns differ in length.
 #[must_use]
 pub fn overlap_area(boxes: Boxes, q: Box4, clearance: i32) -> i64 {
     dispatch!(level(), simd => overlap_area_simd(simd, boxes, q, clearance))

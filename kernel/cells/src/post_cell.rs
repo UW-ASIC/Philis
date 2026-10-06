@@ -22,13 +22,6 @@ const RING_MERGE_GAP_NM: i32 = 2_000;
 ///
 /// `cut_ohm` is one tap contact's resistance (the deck's `pex` value); it
 /// sizes each ring's contact rows against `max_ring_resistance_mohm`.
-/// Requirements naming an unplaced device are skipped.
-///
-/// # Panics
-/// When the deck has no `li`, `tap`, `licon` or ring-implant layer.
-///
-/// # Time complexity
-/// *O*(r² + r·d) for `r` requirements and `d` placed devices (clustering).
 #[must_use]
 pub fn guard_rings(layout: &Layout, c: &Constraints, process: &dyn Process, cut_ohm: f32) -> Vec<Macro> {
     let n_dev = layout.x.len();
@@ -168,7 +161,6 @@ fn hull_hits_foreign(members: &[usize], reqs: &[&GuardRingRequirement], layout: 
     })
 }
 
-/// Union-find root of `i`, halving the path on the way.
 fn find(parent: &mut [usize], mut i: usize) -> usize {
     while parent[i] != i {
         parent[i] = parent[parent[i]]; // path-halving
@@ -177,7 +169,6 @@ fn find(parent: &mut [usize], mut i: usize) -> usize {
     i
 }
 
-/// Joins `i`'s and `j`'s union-find sets.
 fn union(parent: &mut [usize], i: usize, j: usize) {
     let (ri, rj) = (find(parent, i), find(parent, j));
     if ri != rj {
@@ -185,13 +176,11 @@ fn union(parent: &mut [usize], i: usize, j: usize) {
     }
 }
 
-/// Placed bbox of device `d` (halo included) as a corner rect.
 fn dev_rect(l: &Layout, d: DeviceId) -> Rect {
-    let b = l.bbox(Target::Device(d));
-    Rect { x: b.x - b.hw, y: b.y - b.hh, w: 2 * b.hw, h: 2 * b.hh }
+    let (cx, cy, hw, hh) = l.bbox(Target::Device(d));
+    Rect { x: cx - hw, y: cy - hh, w: 2 * hw, h: 2 * hh }
 }
 
-/// Smallest rect covering `a` and `b`.
 fn union_rect(a: Rect, b: Rect) -> Rect {
     let x0 = a.x.min(b.x);
     let y0 = a.y.min(b.y);
@@ -199,6 +188,7 @@ fn union_rect(a: Rect, b: Rect) -> Rect {
     let y1 = (a.y + a.h).max(b.y + b.h);
     Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
+
 
 /// Device-to-band gap, the deck's: the widest spacing among the implants,
 /// tap and diffusion, so the band clears a cell's diffusion and its implant
@@ -246,10 +236,7 @@ fn band_well(b: &mut Builder, nwell: pnr_core::LayerId, o: Rect, inner: Rect, g:
 /// A contacted tap ring `gap` outside `inner`: four bands of tap under
 /// `implant` and li, `rows` rows of cuts along each, a copy of `pin` on
 /// each band, and its `well` (see [`WellShape`]). Returns the band's outer
-/// edge. A band of non-positive extent is skipped.
-///
-/// # Panics
-/// When the deck has no `implant`, `tap`, `li` or `licon` layer.
+/// edge.
 pub(crate) fn tap_ring(b: &mut Builder, process: &dyn Process, implant: &str, well: WellShape, inner: Rect, gap: i32, (ring_width, rows): (i32, i32), pin: &Pin) -> Rect {
     let ct = dim(process, "contact");
     let lat = cut_lattice(process);
@@ -383,17 +370,17 @@ fn tub_well_ext(process: &dyn Process, width: i32) -> i32 {
     band_well_ext(process, width).max(on_grid_up(process, (reach - width + 1) / 2))
 }
 
-/// `v` rounded up (toward +∞) to the manufacturing grid; negative `v`
-/// included (a reach that a band already covers).
+/// `v` (≥ 0) rounded up to the manufacturing grid.
 fn on_grid_up(process: &dyn Process, v: i32) -> i32 {
     let g = process.grid().max(1);
-    (v + g - 1).div_euclid(g) * g
+    (v + g - 1) / g * g
 }
 
 /// How far a ring's implant grows past its tap (see [`tap_ring`]).
 fn ring_implant_enc(process: &dyn Process, ring_type: GuardRingType) -> i32 {
     process.enclosure(implant_name(ring_type), "tap").unwrap_or(0)
 }
+
 
 /// The ring band's implant. A `Tap` ring is its device's bulk tap: n+ in the
 /// n-well for a PMOS (`in_well`), p+ in the substrate for an NMOS. `Ecgr` is
@@ -418,16 +405,11 @@ fn in_nwell(ring_type: GuardRingType) -> bool {
 /// around the tap band only (an ECGR, whose interior is an NMOS).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum WellShape {
-    /// No n-well (p+ ring in the substrate).
     None,
-    /// One n-well rect over the ring and its interior.
     Filled,
-    /// An n-well band around the tap band only.
     Band,
 }
 
-/// The [`WellShape`] [`tap_ring`] draws for `t`; a `Tub`'s well is drawn by
-/// [`draw_ring`] itself.
 fn well_shape(t: GuardRingType) -> WellShape {
     match t {
         GuardRingType::Tap { in_well: true } => WellShape::Filled,
@@ -503,8 +485,7 @@ fn band(process: &dyn Process, r: &GuardRingRequirement, perimeter: i64, cut_ohm
     (floor.max(ct) + (rows - 1) * pitch, rows)
 }
 
-/// A drawn ring's resistance to its net: its `licon` cuts in parallel, ohms.
-/// A ring with no cut (or a deck without `licon`) counts as one cut.
+/// A drawn ring's resistance to its net: its cuts in parallel, ohms.
 #[must_use]
 pub fn ring_ohm(ring: &Macro, process: &dyn Process, cut_ohm: f32) -> f32 {
     let cuts = process.layer("licon").map_or(0, |l| ring.shapes.iter().filter(|s| s.layer == l).count());
@@ -515,11 +496,8 @@ pub fn ring_ohm(ring: &Macro, process: &dyn Process, cut_ohm: f32) -> f32 {
 /// `MinorityElectron`/`MinorityHole` aggressor, `noisy` = any aggressor, `sensitive` = a victim.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CellFlags {
-    /// A member injects minority carriers.
     pub injector: bool,
-    /// A member is any substrate aggressor.
     pub noisy: bool,
-    /// A member is a substrate victim.
     pub sensitive: bool,
 }
 
@@ -548,13 +526,6 @@ pub fn may_share_well(a: CellFlags, b: CellFlags) -> bool {
 /// ([`may_share_well`] over their tags). The check is applied per merged
 /// well: a pair is bridged only if every cell already in `i`'s well may share
 /// with every cell in `j`'s, so A–B and B–C bridges never join a forbidden A–C.
-///
-/// Returns at most one macro holding every fill; empty without an `nwell`
-/// layer or a positive `nwell_min_spacing`.
-///
-/// # Time complexity
-/// *O*(n² · S) for `n` cells and `S` shapes scanned per clearance check,
-/// plus *O*(n²) per newly merged well.
 #[must_use]
 pub fn well_bridges(placed: &[Macro], rings: &[Macro], process: &dyn Process, can_share: &dyn Fn(usize, usize) -> bool) -> Vec<Macro> {
     let Some(nwell) = process.layer("nwell") else { return Vec::new() };
@@ -630,56 +601,6 @@ pub fn well_bridges(placed: &[Macro], rings: &[Macro], process: &dyn Process, ca
             }
             b.rect(nwell, bridge);
             any = true;
-        }
-    }
-    if any { vec![b.finish()] } else { Vec::new() }
-}
-
-/// Same-type implants of neighbouring cells (and rings) closer than the
-/// implant's spacing merge into one: the gap between two facing implant
-/// rects is filled, the usual cure for an implant spacing a cell cannot see
-/// alone. A fill narrower than the implant's width, or overlapping the
-/// opposite implant (it would re-dope a diffusion), is not drawn. Only
-/// pairs sharing the exact span on the other axis are bridged.
-///
-/// Returns at most one macro holding every fill; empty when the deck lacks
-/// `nsdm` or `psdm`.
-///
-/// # Time complexity
-/// *O*(k²) pairs for `k` implant rects of one type, each candidate checked
-/// against every rect.
-#[must_use]
-pub fn implant_bridges(all: &[Macro], process: &dyn Process) -> Vec<Macro> {
-    let (Some(n), Some(p)) = (process.layer("nsdm"), process.layer("psdm")) else { return Vec::new() };
-    let mut b = Builder::new(process.grid());
-    let mut any = false;
-    for (role, own, other) in [("nsdm", n, p), ("psdm", p, n)] {
-        let (Some(space), wmin) = (process.space(role), process.width(role).unwrap_or(0)) else { continue };
-        let of = |l| all.iter().flat_map(|m| &m.shapes).filter(|s| s.layer == l).map(|s| s.rect).collect::<Vec<_>>();
-        let (mine, theirs) = (of(own), of(other));
-        let overlaps = |a: &Rect, c: &Rect| a.x < c.x + c.w && c.x < a.x + a.w && a.y < c.y + c.h && c.y < a.y + a.h;
-        for i in 0..mine.len() {
-            for j in i + 1..mine.len() {
-                let (a, c) = (mine[i], mine[j]);
-                let gap_x = (c.x - (a.x + a.w)).max(a.x - (c.x + c.w));
-                let gap_y = (c.y - (a.y + a.h)).max(a.y - (c.y + c.h));
-                let (y0, y1) = (a.y.max(c.y), (a.y + a.h).min(c.y + c.h));
-                let (x0, x1) = (a.x.max(c.x), (a.x + a.w).min(c.x + c.w));
-                // Only where the two share a span, so the union is one clean
-                // rectangle (a partial span leaves notches).
-                let bridge = if gap_x > 0 && gap_x < space && (a.y, a.h) == (c.y, c.h) && y1 - y0 >= wmin {
-                    Some(Rect { x: a.x.min(c.x) + if a.x < c.x { a.w } else { c.w }, y: y0, w: gap_x, h: y1 - y0 })
-                } else if gap_y > 0 && gap_y < space && (a.x, a.w) == (c.x, c.w) && x1 - x0 >= wmin {
-                    Some(Rect { x: x0, y: a.y.min(c.y) + if a.y < c.y { a.h } else { c.h }, w: x1 - x0, h: gap_y })
-                } else {
-                    None
-                };
-                let inside = |r: &Rect| mine.iter().any(|m| m.x <= r.x && m.y <= r.y && m.x + m.w >= r.x + r.w && m.y + m.h >= r.y + r.h);
-                if let Some(r) = bridge.filter(|r| !theirs.iter().any(|t| overlaps(r, t)) && !inside(r)) {
-                    b.rect(own, r);
-                    any = true;
-                }
-            }
         }
     }
     if any { vec![b.finish()] } else { Vec::new() }
@@ -1148,253 +1069,46 @@ mod tests {
         assert!(may_share_well(f(true, false, false), f(true, false, false)));
         assert!(may_share_well(f(false, false, false), f(false, false, false)));
     }
+}
 
-    /// A deck of named layers (ids by position), rules, and per-role width,
-    /// spacing and enclosure tables; grid 5.
-    struct Fake {
-        layers: &'static [&'static str],
-        rules: &'static [(&'static str, i32)],
-        widths: &'static [(&'static str, i32)],
-        spaces: &'static [(&'static str, i32)],
-        encs: &'static [((&'static str, &'static str), i32)],
-    }
-
-    const EMPTY: Fake = Fake { layers: &[], rules: &[], widths: &[], spaces: &[], encs: &[] };
-
-    impl Process for Fake {
-        fn layer(&self, role: &str) -> Option<pnr_core::LayerId> {
-            self.layers.iter().position(|l| *l == role).map(|i| pnr_core::LayerId(i as u16 + 1))
-        }
-        fn rule(&self, name: &str, d: i32) -> i32 {
-            self.rules.iter().find(|(k, _)| *k == name).map_or(d, |r| r.1)
-        }
-        fn grid(&self) -> i32 {
-            5
-        }
-        fn width(&self, role: &str) -> Option<i32> {
-            self.widths.iter().find(|(k, _)| *k == role).map(|r| r.1)
-        }
-        fn space(&self, role: &str) -> Option<i32> {
-            self.spaces.iter().find(|(k, _)| *k == role).map(|r| r.1)
-        }
-        fn enclosure(&self, o: &str, i: &str) -> Option<i32> {
-            self.encs.iter().find(|(k, _)| *k == (o, i)).map(|r| r.1)
-        }
-    }
-
-    /// A licon-tapped ring deck: cut 170, spacing 170 (pitch 340).
-    const TAPS: Fake = Fake {
-        layers: &["li", "tap", "licon", "nsdm", "psdm", "nwell"],
-        rules: &[],
-        widths: &[("licon", 170)],
-        spaces: &[("licon", 170)],
-        encs: &[],
-    };
-
-    #[test]
-    fn on_grid_up_is_a_ceiling() {
-        for (v, want) in [(0, 0), (1, 5), (5, 5), (6, 10), (-1, 0), (-5, -5), (-7, -5)] {
-            assert_eq!(on_grid_up(&EMPTY, v), want, "on_grid_up({v})");
-        }
-    }
-
-    #[test]
-    fn union_rect_covers_both() {
-        let a = Rect { x: 0, y: 0, w: 10, h: 10 };
-        let b = Rect { x: 20, y: -5, w: 5, h: 5 };
-        assert_eq!(union_rect(a, b), Rect { x: 0, y: -5, w: 25, h: 15 });
-        assert_eq!(union_rect(a, a), a);
-    }
-
-    #[test]
-    fn union_find_joins_transitively() {
-        let mut p: Vec<usize> = (0..5).collect();
-        union(&mut p, 0, 1);
-        union(&mut p, 3, 4);
-        union(&mut p, 1, 4);
-        let r = find(&mut p, 0);
-        assert!([1, 3, 4].iter().all(|&i| find(&mut p, i) == r));
-        assert_ne!(find(&mut p, 2), r);
-        union(&mut p, 2, 2);
-        assert_eq!(find(&mut p, 2), 2, "self-union is a no-op");
-    }
-
-    #[test]
-    fn clusters_of_nothing_and_of_one() {
-        let l = layout_at(&[(0, 0)]);
-        assert!(clusters(&[], &l, 2000.0).is_empty());
-        let r = req(0, 5, GuardRingType::Tap { in_well: false }, true);
-        assert_eq!(clusters(&[&r], &l, 2000.0), vec![vec![0]]);
-    }
-
-    /// Edge gap exactly `merge_gap` merges (inclusive), one nm more does not.
-    #[test]
-    fn the_merge_gap_is_inclusive() {
-        let tap = GuardRingType::Tap { in_well: false };
-        let reqs = [req(0, 5, tap, true), req(1, 5, tap, true)];
-        let refs: Vec<&GuardRingRequirement> = reqs.iter().collect();
-        // Half-extents 100: centres 2200 apart leave a 2000 edge gap.
-        assert_eq!(clusters(&refs, &layout_at(&[(0, 0), (2200, 0)]), 2000.0).len(), 1);
-        assert_eq!(clusters(&refs, &layout_at(&[(0, 0), (2201, 0)]), 2000.0).len(), 2);
-    }
-
-    /// A requirement on an unplaced device draws nothing and does not panic.
-    #[test]
-    fn rings_of_unplaced_devices_are_skipped() {
-        let l = layout_at(&[(0, 0)]);
-        let c = Constraints { guard_rings: vec![req(3, 5, GuardRingType::Tap { in_well: false }, true)], ..Default::default() };
-        assert!(guard_rings(&l, &c, &EMPTY, 15.0).is_empty());
-        assert!(guard_rings(&l, &Constraints::default(), &EMPTY, 15.0).is_empty());
-    }
-
-    /// One ring per requirement: four tap bands, each with a `ring` pin on
-    /// `li` and at least one cut, around the device.
-    #[test]
-    fn a_tap_ring_has_four_contacted_bands() {
-        let mut l = layout_at(&[(0, 0)]);
-        (l.hw[0], l.hh[0]) = (5000, 5000);
-        let c = Constraints { guard_rings: vec![req(0, 5, GuardRingType::Tap { in_well: false }, true)], ..Default::default() };
-        let rings = guard_rings(&l, &c, &TAPS, 15.0);
-        assert_eq!(rings.len(), 1);
-        let m = &rings[0];
-        let on = |r: &str| m.shapes.iter().filter(|s| Some(s.layer) == TAPS.layer(r)).count();
-        assert_eq!(on("tap"), 4);
-        assert_eq!(on("li"), 4);
-        assert_eq!(m.pins.len(), 4);
-        assert!(m.pins.iter().all(|p| p.name == "ring" && Some(p.layer) == TAPS.layer("li") && p.net == pnr_core::NetId(5)));
-        assert!(on("licon") >= 4);
-        assert_eq!(on("nwell"), 0, "a substrate tap has no well");
-    }
-
-    /// Rows grow only while the parallel cut resistance misses the budget,
-    /// never past four, and a zero budget means one row.
-    #[test]
-    fn band_rows_follow_the_resistance_budget() {
-        let r = |mohm: i64| GuardRingRequirement { max_ring_resistance_mohm: mohm, ..req(0, 5, GuardRingType::Tap { in_well: false }, true) };
-        // Perimeter 3400 at pitch 340: 10 cuts a row, 15 Ω each → 1.5 Ω a row.
-        assert_eq!(cut_pitch(&TAPS), 340);
-        assert_eq!(band(&TAPS, &r(10_000), 3400, 15.0), (420, 1));
-        assert_eq!(band(&TAPS, &r(500), 3400, 15.0), (420 + 2 * 340, 3), "1.5/3 = 0.5 meets 0.5");
-        assert_eq!(band(&TAPS, &r(1), 3400, 15.0).1, 4, "capped");
-        assert_eq!(band(&TAPS, &r(0), 3400, 15.0).1, 1, "no budget");
-        assert_eq!(band(&TAPS, &r(10_000), 0, 15.0).1, 2, "a point perimeter still counts one cut a row: 15 Ω > 10 Ω");
-    }
-
-    #[test]
-    fn ring_ohm_is_the_cuts_in_parallel() {
-        let mut b = Builder::new(5);
-        let licon = TAPS.layer("licon").unwrap();
-        for i in 0..4 {
-            b.rect(licon, Rect { x: i * 400, y: 0, w: 170, h: 170 });
-        }
-        let m = b.finish();
-        assert!((ring_ohm(&m, &TAPS, 20.0) - 5.0).abs() < 1e-6);
-        assert!((ring_ohm(&m, &EMPTY, 20.0) - 20.0).abs() < 1e-6, "no licon layer: one cut");
-    }
-
-    #[test]
-    fn drawable_needs_the_named_layers() {
-        assert!(drawable(GuardRingType::Tap { in_well: true }, &EMPTY));
-        assert!(!drawable(GuardRingType::Ecgr, &EMPTY));
-        assert!(drawable(GuardRingType::Ecgr, &TAPS));
-        assert!(!drawable(GuardRingType::Hcgr, &TAPS));
-        assert!(drawable(GuardRingType::Hcgr, &Fake { rules: &[("retrograde_pwell", 1)], ..EMPTY }));
-        let tub = Fake { layers: &["dnwell", "nwell", "nsdm"], ..EMPTY };
-        assert!(!drawable(GuardRingType::Tub { id: 0 }, &tub), "no hole enclosure");
-        assert!(drawable(GuardRingType::Tub { id: 0 }, &Fake { encs: &[(("dnwell", "nwell"), 400)], ..tub }));
-    }
-
-    /// Sharing is symmetric over every flag combination.
-    #[test]
-    fn may_share_well_is_symmetric() {
-        let f = |b: u8| CellFlags { injector: b & 1 != 0, noisy: b & 2 != 0, sensitive: b & 4 != 0 };
-        for a in 0..8 {
-            assert!(may_share_well(f(a), f(a)) || (f(a).noisy && f(a).sensitive), "{a}: a cell shares with itself");
-            for b in 0..8 {
-                assert_eq!(may_share_well(f(a), f(b)), may_share_well(f(b), f(a)), "{a} {b}");
+/// Same-type implants of neighbouring cells (and rings) closer than the
+/// implant's spacing merge into one: the gap between two facing implant
+/// rects is filled, the usual cure for an implant spacing a cell cannot see
+/// alone. A fill narrower than the implant's width, or overlapping the
+/// opposite implant (it would re-dope a diffusion), is not drawn.
+#[must_use]
+pub fn implant_bridges(all: &[Macro], process: &dyn Process) -> Vec<Macro> {
+    let (Some(n), Some(p)) = (process.layer("nsdm"), process.layer("psdm")) else { return Vec::new() };
+    let mut b = Builder::new(process.grid());
+    let mut any = false;
+    for (role, own, other) in [("nsdm", n, p), ("psdm", p, n)] {
+        let (Some(space), wmin) = (process.space(role), process.width(role).unwrap_or(0)) else { continue };
+        let of = |l| all.iter().flat_map(|m| &m.shapes).filter(|s| s.layer == l).map(|s| s.rect).collect::<Vec<_>>();
+        let (mine, theirs) = (of(own), of(other));
+        let overlaps = |a: &Rect, c: &Rect| a.x < c.x + c.w && c.x < a.x + a.w && a.y < c.y + c.h && c.y < a.y + a.h;
+        for i in 0..mine.len() {
+            for j in i + 1..mine.len() {
+                let (a, c) = (mine[i], mine[j]);
+                let gap_x = (c.x - (a.x + a.w)).max(a.x - (c.x + c.w));
+                let gap_y = (c.y - (a.y + a.h)).max(a.y - (c.y + c.h));
+                let (y0, y1) = (a.y.max(c.y), (a.y + a.h).min(c.y + c.h));
+                let (x0, x1) = (a.x.max(c.x), (a.x + a.w).min(c.x + c.w));
+                // Only where the two share a span, so the union is one clean
+                // rectangle (a partial span leaves notches).
+                let bridge = if gap_x > 0 && gap_x < space && (a.y, a.h) == (c.y, c.h) && y1 - y0 >= wmin {
+                    Some(Rect { x: a.x.min(c.x) + if a.x < c.x { a.w } else { c.w }, y: y0, w: gap_x, h: y1 - y0 })
+                } else if gap_y > 0 && gap_y < space && (a.x, a.w) == (c.x, c.w) && x1 - x0 >= wmin {
+                    Some(Rect { x: x0, y: a.y.min(c.y) + if a.y < c.y { a.h } else { c.h }, w: x1 - x0, h: gap_y })
+                } else {
+                    None
+                };
+                let inside = |r: &Rect| mine.iter().any(|m| m.x <= r.x && m.y <= r.y && m.x + m.w >= r.x + r.w && m.y + m.h >= r.y + r.h);
+                if let Some(r) = bridge.filter(|r| !theirs.iter().any(|t| overlaps(r, t)) && !inside(r)) {
+                    b.rect(own, r);
+                    any = true;
+                }
             }
         }
     }
-
-    /// A well deck: nwell spacing 1270, width 840.
-    const WELLS: Fake = Fake {
-        layers: &["nwell", "diff", "poly", "psdm"],
-        rules: &[("nwell_min_spacing", 1270)],
-        widths: &[("nwell", 840)],
-        spaces: &[],
-        encs: &[],
-    };
-
-    /// A cell holding one n-well rect and a bulk pin on `bulk`.
-    fn well_cell(r: Rect, bulk: u16) -> Macro {
-        let nwell = WELLS.layer("nwell").unwrap();
-        let mut b = Builder::new(5);
-        b.rect(nwell, r);
-        b.pin(Pin { name: "d0:B".into(), net: pnr_core::NetId(bulk), at: Rect { x: r.x, y: r.y, w: 10, h: 10 }, layer: nwell });
-        b.finish()
-    }
-
-    #[test]
-    fn well_bridges_need_a_well_layer_and_spacing() {
-        let cells = [well_cell(Rect { x: 0, y: 0, w: 2000, h: 2000 }, 1), well_cell(Rect { x: 3000, y: 0, w: 2000, h: 2000 }, 1)];
-        assert!(well_bridges(&cells, &[], &EMPTY, &|_, _| true).is_empty(), "no nwell");
-        assert!(well_bridges(&cells, &[], &Fake { rules: &[], ..WELLS }, &|_, _| true).is_empty(), "no spacing");
-        assert!(well_bridges(&[], &[], &WELLS, &|_, _| true).is_empty(), "no cells");
-    }
-
-    /// Facing wells with equal spans: the bridge is exactly the gap, in x and
-    /// in y; a gap of twice the spacing still bridges, one step more does not.
-    #[test]
-    fn well_bridges_fill_exactly_the_gap() {
-        let nwell = WELLS.layer("nwell").unwrap();
-        let fill = |a: Rect, b: Rect| -> Vec<Rect> {
-            well_bridges(&[well_cell(a, 1), well_cell(b, 1)], &[], &WELLS, &|_, _| true)
-                .iter()
-                .flat_map(|m| m.shapes.iter().filter(move |s| s.layer == nwell).map(|s| s.rect))
-                .collect()
-        };
-        let a = Rect { x: 0, y: 0, w: 2000, h: 2000 };
-        assert_eq!(fill(a, Rect { x: 3000, ..a }), vec![Rect { x: 2000, y: 0, w: 1000, h: 2000 }]);
-        assert_eq!(fill(Rect { x: 3000, ..a }, a), vec![Rect { x: 2000, y: 0, w: 1000, h: 2000 }], "order-free");
-        assert_eq!(fill(a, Rect { y: 3000, ..a }), vec![Rect { x: 0, y: 2000, w: 2000, h: 1000 }]);
-        assert_eq!(fill(a, Rect { x: 2000 + 2540, ..a }).len(), 1, "gap 2·space");
-        assert!(fill(a, Rect { x: 2000 + 2545, ..a }).is_empty(), "past 2·space");
-        assert!(fill(a, Rect { x: 1000, ..a }).is_empty(), "overlapping wells");
-        assert!(fill(a, Rect { x: 3000, y: 1500, ..a }).is_empty(), "shared span under the well width");
-        let other_bulk = well_bridges(&[well_cell(a, 1), well_cell(Rect { x: 3000, ..a }, 2)], &[], &WELLS, &|_, _| true);
-        assert!(other_bulk.is_empty(), "different bulks");
-    }
-
-    /// An implant deck: nsdm/psdm spacing 380, width 380.
-    const IMPLANTS: Fake = Fake {
-        layers: &["nsdm", "psdm"],
-        rules: &[],
-        widths: &[("nsdm", 380), ("psdm", 380)],
-        spaces: &[("nsdm", 380), ("psdm", 380)],
-        encs: &[],
-    };
-
-    fn implants(rects: &[(&str, Rect)]) -> Macro {
-        let mut b = Builder::new(5);
-        for (l, r) in rects {
-            b.rect(IMPLANTS.layer(l).unwrap(), *r);
-        }
-        b.finish()
-    }
-
-    #[test]
-    fn implant_bridges_fill_only_clean_gaps() {
-        let n = IMPLANTS.layer("nsdm").unwrap();
-        let a = Rect { x: 0, y: 0, w: 1000, h: 1000 };
-        let fills = |m: Macro| -> Vec<Rect> { implant_bridges(&[m], &IMPLANTS).iter().flat_map(|m| m.shapes.iter().filter(move |s| s.layer == n).map(|s| s.rect)).collect() };
-        assert!(implant_bridges(&[implants(&[("nsdm", a)])], &EMPTY).is_empty(), "no implant layers");
-        assert!(implant_bridges(&[], &IMPLANTS).is_empty());
-        assert_eq!(fills(implants(&[("nsdm", a), ("nsdm", Rect { x: 1200, ..a })])), vec![Rect { x: 1000, y: 0, w: 200, h: 1000 }]);
-        assert_eq!(fills(implants(&[("nsdm", Rect { x: 1200, ..a }), ("nsdm", a)])), vec![Rect { x: 1000, y: 0, w: 200, h: 1000 }], "order-free");
-        assert_eq!(fills(implants(&[("nsdm", a), ("nsdm", Rect { y: 1200, ..a })])), vec![Rect { x: 0, y: 1000, w: 1000, h: 200 }]);
-        assert!(fills(implants(&[("nsdm", a), ("nsdm", Rect { x: 1380, ..a })])).is_empty(), "gap == spacing is legal");
-        assert!(fills(implants(&[("nsdm", a), ("nsdm", Rect { x: 1200, y: 100, ..a })])).is_empty(), "partial span");
-        assert!(fills(implants(&[("nsdm", a), ("nsdm", Rect { x: 1200, ..a }), ("psdm", Rect { x: 1050, y: 400, w: 100, h: 100 })])).is_empty(), "opposite implant in the gap");
-        assert!(fills(implants(&[("nsdm", a), ("nsdm", Rect { x: 1200, ..a }), ("nsdm", Rect { x: 0, y: 0, w: 2200, h: 1000 })])).is_empty(), "already covered");
-    }
+    if any { vec![b.finish()] } else { Vec::new() }
 }

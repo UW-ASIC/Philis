@@ -1,18 +1,12 @@
 //! Solve the operating point with ngspice, place-and-route against it, print
-//! the constraint-budget report and the signoff breakdown (hard violations
-//! counted per rule family, the text before the first `:`).
-//!
-//! Run: `cargo run -p op_demo`. Reads `benchmarks/fixtures/ota.spice` and
-//! `pdks/sky130.json`; the sky130 models come from `$PDK_ROOT/$PDK` (default
-//! `../.pdk/sky130A`), and without them the flow runs unbiased.
-
+//! the constraint-budget report and the signoff breakdown.
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 fn main() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).expect("read benchmarks/fixtures/ota.spice");
-    let pdk_json = std::fs::read_to_string(root.join("pdks/sky130.json")).expect("read pdks/sky130.json");
+    let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).unwrap();
+    let pdk_json = std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap();
     let pdk = verify::Pdk::from_json(&pdk_json).expect("pdk");
 
     // PDK_ROOT/PDK come from the dev shell; fall back to the in-repo .pdk.

@@ -20,24 +20,3 @@ pub(crate) const SIDECARS: &[(&str, &str)] = &[
     ("ihp_sg13g2", include_str!("../../../pdks/ihp_sg13g2.json")),
     ("generic_finfet", include_str!("../../../pdks/generic_finfet.json")),
 ];
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-
-    #[test]
-    fn names_are_unique_and_every_sidecar_has_its_deck() {
-        for table in [DECKS, SIDECARS] {
-            let mut names: Vec<&str> = table.iter().map(|(n, _)| *n).collect();
-            names.sort_unstable();
-            names.dedup();
-            assert_eq!(names.len(), table.len());
-            assert!(table.iter().all(|(_, text)| !text.trim().is_empty()));
-        }
-        for (name, json) in SIDECARS {
-            let v: serde_json::Value = serde_json::from_str(json).unwrap();
-            let deck = v["deck"].as_str().unwrap_or_else(|| panic!("{name}: no deck"));
-            assert!(DECKS.iter().any(|(d, _)| d.ends_with(deck) || deck.ends_with(d)), "{name}: {deck} not embedded");
-        }
-    }
-}

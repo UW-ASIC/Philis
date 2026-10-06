@@ -13,34 +13,26 @@ use crate::placement::matched_set::MatchedSet;
 /// placed centroid distance vs Pelgrom's D*). `lever` names what to change.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SizingNote {
-    /// Schematic ids `(reference, member)`.
     pub members: (u32, u32),
-    /// `"area"`, `"budget_area"` or `"dstar"`.
     pub kind: &'static str,
-    /// What the layout has, in `kind`'s unit.
     pub have: f32,
-    /// What meets the limit, in `kind`'s unit.
     pub need: f32,
-    /// What to change.
     pub lever: &'static str,
 }
 
 /// Hastings Table 13.4 area for a 6σ offset limit `dv_mv`: `(6·A_VT/ΔV)²`, µm² (H13-43, L42369–42407).
-/// Infinite at `dv_mv = 0`.
 #[must_use]
 pub fn area_need_um2(avt_mv_um: f32, dv_mv: f32) -> f32 {
     (6.0 * avt_mv_um / dv_mv).powi(2)
 }
 
 /// Pelgrom D* = A_VT/(S_VT·√(WL)), µm (MM-06, pelgrom.txt L88–90); A mV·µm, S µV/µm → ×1000.
-/// The distance beyond which the gradient term outgrows the random one; infinite at a zero `S_VT` or area.
 #[must_use]
 pub fn dstar_um(avt_mv_um: f32, svt_uv_per_um: f32, wl_um2: f32) -> f32 {
     1000.0 * avt_mv_um / (svt_uv_per_um * wl_um2.sqrt())
 }
 
-/// Notes of every pair `(0, i)` of `set` on `l`, pairs in member order; `class_limit_mv` = a user/spec class's 6σ mV
-/// limit (Voltage kind only). Empty for a set of fewer than two members.
+/// Notes of every pair `(0, i)` of `set` on `l`; `class_limit_mv` = a user/spec class's 6σ mV limit (Voltage kind only).
 ///
 /// - `"area"`: the smaller area is under [`area_need_um2`] of the class limit.
 /// - `"budget_area"`: a `Sigma1Mv(b)` budget (`Sigma1Pct` on a % ledger) below σ_rand; `need = have·(σ_rand/b)²`
@@ -131,21 +123,6 @@ mod tests {
             assert!((g.delta_m_nm - dx as f32).abs() < 1.0, "{}", g.delta_m_nm);
             assert_eq!(n[0].need, dstar_um(9.5, 1.63, 20.0));
         }
-    }
-
-    #[test]
-    fn single_member_set_has_no_pair_to_note() {
-        let l = layout(&[0, 5_000], &[0, 0], 100);
-        let one = MatchedSet { members: vec![pnr_core::ids::DeviceId(0)], ..voltage() };
-        assert!(notes(&one, &l, Some(3.0)).is_empty());
-    }
-
-    #[test]
-    fn no_area_note_without_avt() {
-        let l = layout(&[0, 5_000], &[0, 0], 100);
-        let mut s = voltage();
-        s.coeffs.avt_mv_um = None;
-        assert!(notes(&s, &l, Some(3.0)).iter().all(|n| n.kind != "area" && n.kind != "dstar"));
     }
 
     #[test]

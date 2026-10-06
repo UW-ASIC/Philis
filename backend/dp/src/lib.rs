@@ -27,12 +27,8 @@ use gp::mechanics::{
 
 /// Inner moves per epoch = `MOVES_PER_CELL · n`.
 const MOVES_PER_CELL: usize = 60;
-/// Flat path's geometric cooling factor per epoch (`T ← α·T`).
 const ALPHA: f64 = 0.93;
-/// Flat path's per-epoch shrink of the move window, floored at one grid step.
 const RANGE_DECAY: f32 = 0.96;
-/// Probe moves that estimate `mean|ΔPEX|` for the flat path's starting temperature.
-const T0_PROBES: u32 = 128;
 /// Clearance-inflated area / move-region area floor: the region the SA may use
 /// is grown until everything fits at this fill.
 const REGION_FILL: f64 = 0.5;
@@ -43,26 +39,17 @@ const REGION_FILL: f64 = 0.5;
 /// `moves_per_kid · Σ kids` moves per temperature, at most `max_temps` temperatures.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Schedule {
-    /// Flat path: starting displacement window, fraction of the move region's
-    /// longer side (`0.4` = moves reach 40% of the span).
     pub range0: f32,
-    /// Both paths: temperature steps run (flat) or allowed at most (SP).
     pub max_temps: u32,
-    /// Flat path: `t0 / mean|ΔPEX|`, dimensionless.
     pub t0_scale: f64,
-    /// SP path: probability of accepting the mean uphill move at `T0`, in `(0, 1)`.
     pub p0: f64,
-    /// SP path: geometric cooling factor per temperature, in `(0, 1)`.
     pub alpha: f64,
-    /// SP path: moves per temperature per sequence-pair kid.
     pub moves_per_kid: u32,
 }
 impl Schedule {
     /// Today's constants: refine gp, don't randomise it. SP: P0 0.6 (Lampaert eq 4.37–4.38), α 0.9.
-    #[must_use]
     pub fn cold() -> Self { Self { range0: 0.4, max_temps: 220, t0_scale: 0.02, p0: 0.6, alpha: 0.9, moves_per_kid: 20 } }
     /// FLOW-08 step 3's warm start from an incumbent [policy, measure]; SP: P0 0.1.
-    #[must_use]
     pub fn warm() -> Self { Self { range0: 0.05, max_temps: 60, t0_scale: 0.002, p0: 0.1, alpha: 0.9, moves_per_kid: 20 } }
 }
 /// Runaway guard for the terminal legalizer (it exits early when clean/stalled).
@@ -87,16 +74,14 @@ pub struct PlaceStats {
     /// [`anneal::place_sp`]: a [`anneal::Start::Warm`] tree no longer fit the
     /// inputs (cells or symmetry groups changed), so the anneal started constructive.
     pub warm_fallback: bool,
-    /// [`anneal::place_sp`]: symmetry axes placed.
+    /// [`anneal::place_sp`]: symmetry axes placed, and of them those on a
+    /// routing track centreline (`axis ≡ p0/2 mod P`, PLC-28; `0` without
+    /// `PlaceRules::axis_grid`).
     pub axes: u32,
-    /// [`anneal::place_sp`]: of [`PlaceStats::axes`], those on a routing track
-    /// centreline (`axis ≡ p0/2 mod P`, PLC-28; `0` without `PlaceRules::axis_grid`).
     pub axes_on_lattice: u32,
 }
 
-/// The mutable columns a move can touch, for rollback. Buffers are reused
-/// across trials (`clone_from` keeps their capacity), so a trial allocates
-/// nothing once warm.
+/// The mutable columns a move can touch, for rollback.
 #[derive(Default)]
 struct Snap {
     x: Vec<i32>,
@@ -144,21 +129,15 @@ impl Snap {
 /// SA state. `nets` is owned because a reshape patches pin offsets in place.
 struct Sa<'a> {
     nets: Nets,
-    /// Cell → net rows it touches (`Nets::cell_nets`), for `Nets::reshape_cell`.
     cell_nets: Vec<Vec<u32>>,
     reqs: &'a Requirements<Layout>,
     /// Read-only during the anneal: Metropolis needs a fixed energy.
     prices: &'a gp::Prices,
-    /// `fixed[i]`: cell `i` keeps its drawn shape and orient; shorter than
-    /// `n` reads as unfixed.
     fixed: &'a [bool],
     /// Per-pair spacing (Arc-backed, cheap to own).
     rules: gp::PlaceRules,
-    /// Placement grid, nm (`rules.grid`); projection snaps to it.
     grid: i32,
-    /// Pre-move columns of the current trial.
     snap: Snap,
-    /// Cells whose box the current trial changed, ascending (scratch).
     moved: Vec<usize>,
     stats: PlaceStats,
 }
@@ -195,8 +174,7 @@ impl<'a> Sa<'a> {
         pex(&self.nets, self.reqs, l, self.prices)
     }
 
-    /// Clearance encroachment of every pair with a member in `self.moved`,
-    /// nm², each pair counted once. O(|moved|² + |moved|·n).
+    /// Clearance encroachment of every pair with a member in `self.moved`.
     fn encroach_moved(&self, l: &Layout) -> f64 {
         let mut t = 0.0;
         for (i, &c) in self.moved.iter().enumerate() {
@@ -228,15 +206,18 @@ impl<'a> Sa<'a> {
 
         let mut phi1 = analog_phi(self.reqs, l);
         if phi1.0 > phi0.0 {
-            legalize::project_violated(self.reqs, l, self.grid);
+            for b in &self.reqs.hard {
+                if b.violations(l) > 0 {
+                    b.project(l, self.grid);
+                }
+            }
             phi1 = analog_phi(self.reqs, l);
         }
 
         let s = &self.snap;
         self.moved.clear();
-        // `|` not `||`: four cheap compares beat three data-dependent branches.
         self.moved.extend((0..l.x.len()).filter(|&i| {
-            (l.x[i] != s.x[i]) | (l.y[i] != s.y[i]) | (l.hw[i] != s.hw[i]) | (l.hh[i] != s.hh[i])
+            l.x[i] != s.x[i] || l.y[i] != s.y[i] || l.hw[i] != s.hw[i] || l.hh[i] != s.hh[i]
         }));
         let ov1 = self.encroach_moved(l);
         self.snap.swap_geometry(l);
@@ -264,16 +245,6 @@ impl<'a> Sa<'a> {
 /// `locks` turns and reshapes matched cells as one set (PLC-03).
 /// `schedule` sets the anneal's window, length and starting temperature
 /// ([`Schedule::cold`] is the gp-refining default).
-///
-/// Rotation runs only when `coarse.orient` covers every cell and reshape only
-/// when `variants` and `coarse.variant` do; `fixed` may be short (missing =
-/// free). `prices` is bound to `reqs` but never stepped (the flow owns the
-/// dual step). Cost: `schedule.max_temps · 60n` trials, each O(n·|moved| +
-/// full rule evaluation), then an O(n²)-per-sweep legalizer.
-///
-/// # Panics
-/// When `coarse`'s geometry columns (`x`, `y`, `hw`, `hh`) differ in length,
-/// or `macros` has a netted cell past `coarse.x.len()`.
 #[allow(clippy::too_many_arguments)]
 pub fn place(
     coarse: &Layout,
@@ -291,7 +262,6 @@ pub fn place(
     let grid = rules.grid;
     let n = coarse.x.len();
     let mut rng = SplitMix64::new(seed);
-    // `Layout` is not `Clone` (its `units` is a shared cache); copy column-wise.
     let mut l = Layout {
         x: coarse.x.clone(),
         y: coarse.y.clone(),
@@ -364,7 +334,7 @@ pub fn place(
     let probe_r = (range * span) as i32 as f32;
     let pex0 = sa.pex(&l);
     let mut sum = 0.0f64;
-    for _ in 0..T0_PROBES {
+    for _ in 0..128 {
         let c = rng.below(n);
         let (ox, oy) = (l.x[c], l.y[c]);
         l.x[c] = clamp_x(ox + rng.centered(probe_r) as i32, l.hw[c]);
@@ -374,7 +344,7 @@ pub fn place(
     }
     // No floor in PEX units (PLC-18: PEX is O(1)); the fallback only covers a
     // layout where no probe changes PEX.
-    let mean = sum / f64::from(T0_PROBES);
+    let mean = sum / 128.0;
     let mut temp = if mean > 0.0 { mean } else { 1.0 } * schedule.t0_scale;
 
     let can_rotate = l.orient.len() == n;
@@ -462,14 +432,8 @@ fn seed_branches(reqs: &Requirements<Layout>, branch: &mut Vec<bool>) -> Vec<Bra
     for b in &reqs.hard {
         b.branches(&mut branch_seeds);
     }
-    // One entry per id; batches that disagree on a seed resolve to isolate
-    // (`true`), the commitment that is legal at any spacing.
-    branch_seeds.sort_unstable_by_key(|&(id, s)| (id.0, s));
-    branch_seeds.dedup_by(|later, kept| {
-        let same = later.0 .0 == kept.0 .0;
-        kept.1 |= same & later.1;
-        same
-    });
+    branch_seeds.sort_unstable_by_key(|&(id, _)| id.0);
+    branch_seeds.dedup();
     if let Some(&(hi, _)) = branch_seeds.last() {
         if branch.len() <= usize::from(hi.0) {
             branch.resize(usize::from(hi.0) + 1, false);
@@ -482,22 +446,27 @@ fn seed_branches(reqs: &Requirements<Layout>, branch: &mut Vec<bool>) -> Vec<Bra
 }
 
 /// Project every violated hard batch onto its feasible set and roll the whole
-/// sweep back (positions and axes) if Φ rose; temperatures are refreshed when
-/// the sweep keeps. No-op when no hard batch is violated.
-fn project_hard(reqs: &Requirements<Layout>, l: &mut Layout, grid: i32) {
+/// sweep back if Φ rose. Returns whether it kept.
+fn project_hard(reqs: &Requirements<Layout>, l: &mut Layout, grid: i32) -> bool {
     let before = analog_phi(reqs, l);
     if before.0 == 0 {
-        return;
+        return false;
     }
     let (px, py, paxis) = (l.x.clone(), l.y.clone(), l.axis.clone());
-    legalize::project_violated(reqs, l, grid);
+    for batch in &reqs.hard {
+        // Re-checked per batch: a satisfied SymmetryGroup would still re-average its axis.
+        if batch.violations(l) > 0 {
+            batch.project(l, grid);
+        }
+    }
     if analog_phi(reqs, l) > before {
         l.x = px;
         l.y = py;
         l.axis = paxis;
-        return;
+        return false;
     }
     l.refresh_temps();
+    true
 }
 
 /// Lexicographic acceptance: a change in the gate key decides outright (lower
@@ -510,7 +479,6 @@ fn accept(before: (usize, f64, f64, f64), after: (usize, f64, f64, f64), d_pex: 
     d_pex <= 0.0 || (temp > 0.0 && rng.f64() < (-d_pex / temp).exp())
 }
 
-/// Move cell `c` to `(nx, ny)` (already clamped) in one trial.
 fn try_move(sa: &mut Sa, l: &mut Layout, rng: &mut SplitMix64, temp: f64, c: usize, nx: i32, ny: i32) -> bool {
     sa.trial(l, rng, temp, |l, _, _| {
         l.x[c] = nx;
@@ -518,8 +486,6 @@ fn try_move(sa: &mut Sa, l: &mut Layout, rng: &mut SplitMix64, temp: f64, c: usi
     })
 }
 
-/// Exchange the centres of cells `c` and `o`, each clamped for its own
-/// extents, in one trial.
 #[allow(clippy::too_many_arguments)]
 fn try_swap(
     sa: &mut Sa,
@@ -541,16 +507,11 @@ fn try_swap(
 /// One symmetry axis and the mirror pairs sharing it (self-pairs `a == b` sit
 /// on the axis).
 struct SymGroup {
-    /// Index into `Layout::axis`.
     axis: usize,
-    /// Mirror pairs `(a, b)` in batch order, cells `< n`.
     pairs: Vec<(usize, usize)>,
-    /// Distinct cells of `pairs`, first-seen order.
     members: Vec<usize>,
 }
 
-/// Mirror pairs of every hard batch grouped by axis, groups in first-seen
-/// order; pairs naming a cell `>= n` are dropped. O(pairs · (groups + members)).
 fn sym_groups(reqs: &Requirements<Layout>, n: usize) -> Vec<SymGroup> {
     let mut raw = Vec::new();
     for b in &reqs.hard {

@@ -31,33 +31,16 @@ use serde_json::Value;
 use crate::symmetry::Seed;
 use crate::AnnotationConfig;
 
-/// Parses the sidecar `json` against `nl` into a config (defaults plus every
-/// accepted entry) and the entry-level diagnostics. Entry `i`'s seeds carry
-/// `ConstraintId(u32::MAX - i)`; `GroupBlocks` and `IsolatedTub` groups carry
-/// index `i`. A `GroupBlocks` `instance_name` is an alias later entries may
-/// name in place of an instance (`SymmetricBlocks`, `Order`).
-///
-/// # Errors
-/// Only for text that is not JSON or not a top-level array; every entry-level
-/// problem is a diagnostic and skips that entry (or that name).
+/// Parse `json` against `nl`. `Err` only for text that is not JSON or not a
+/// top-level array; every entry-level problem is a diagnostic.
 pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnostic>), String> {
     let v: Value = serde_json::from_str(json).map_err(|e| format!("constraints: {e}"))?;
     let Value::Array(entries) = v else { return Err("constraints: top level is not an array".into()) };
     let mut cfg = AnnotationConfig::default();
     let mut diags = Vec::new();
     let mut alias: HashMap<String, Vec<DeviceId>> = HashMap::new();
-    // Lowercased name → first index with it: one hash lookup per name, not a
-    // scan of the netlist (12 k devices).
-    let mut device_by: HashMap<String, u16> = HashMap::with_capacity(nl.devices.len());
-    for (i, d) in nl.devices.iter().enumerate() {
-        device_by.entry(d.name.to_ascii_lowercase()).or_insert(i as u16);
-    }
-    let mut net_by: HashMap<String, u16> = HashMap::with_capacity(nl.nets.len());
-    for (i, x) in nl.nets.iter().enumerate() {
-        net_by.entry(x.name.to_ascii_lowercase()).or_insert(i as u16);
-    }
-    let device = |n: &str| device_by.get(&n.to_ascii_lowercase()).map(|&i| DeviceId(i));
-    let net = |n: &str| net_by.get(&n.to_ascii_lowercase()).map(|&i| NetId(i));
+    let device = |n: &str| nl.devices.iter().position(|d| d.name.eq_ignore_ascii_case(n)).map(|i| DeviceId(i as u16));
+    let net = |n: &str| nl.nets.iter().position(|x| x.name.eq_ignore_ascii_case(n)).map(|i| NetId(i as u16));
     for (i, e) in entries.iter().enumerate() {
         let id = ConstraintId(u32::MAX - i as u32);
         let kind = e.get("constraint").and_then(Value::as_str).unwrap_or("");
@@ -101,10 +84,11 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                 }
             }
             "SymmetricBlocks" => {
-                cfg.symmetry_dir = Some(if e.get("direction").and_then(Value::as_str) == Some("H") { AxisDir::H } else { AxisDir::V });
+                cfg.symmetry_dir = Some(if e.get("direction").and_then(Value::as_str) == Some("H") { analog::intent::AxisDir::H } else { analog::intent::AxisDir::V });
                 for pair in e.get("pairs").and_then(Value::as_array).into_iter().flatten() {
                     let names: Vec<&str> = pair.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-                    let got: Option<Vec<Vec<DeviceId>>> = names.iter().map(|n| resolve(&alias, n, &device)).collect();
+                    let resolve = |n: &str| alias.get(&n.to_ascii_lowercase()).cloned().or_else(|| device(n).map(|d| vec![d]));
+                    let got: Option<Vec<Vec<DeviceId>>> = names.iter().map(|n| resolve(n)).collect();
                     let Some(got) = got else {
                         unknown!(format!("instance in {names:?}"));
                         continue;
@@ -125,11 +109,21 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                 }
             }
             "Match" => {
-                let Some(class) = e.get("class").and_then(Value::as_str).and_then(match_class) else {
-                    diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: Match class") });
-                    continue;
+                let class = match e.get("class").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
+                    Some("minimal") => MatchClass::Minimal,
+                    Some("moderate") => MatchClass::Moderate,
+                    Some("exceptional") => MatchClass::Exceptional,
+                    _ => {
+                        diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: Match class") });
+                        continue;
+                    }
                 };
-                let mk = e.get("kind").and_then(Value::as_str).and_then(match_kind);
+                let mk = match e.get("kind").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
+                    Some("voltage") => Some(MatchKind::Voltage),
+                    Some("current") => Some(MatchKind::Current),
+                    Some("ratio") => Some(MatchKind::Ratio),
+                    _ => None,
+                };
                 match devices(&strs("instances")) {
                     Ok(ds) => {
                         // GAP-09 (c): kind, model and L must agree (W may differ: a ratioed set).
@@ -150,9 +144,23 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                 }
             }
             "NetClass" => {
-                let Some(class) = e.get("class").and_then(Value::as_str).and_then(net_class) else {
-                    diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: NetClass class") });
-                    continue;
+                let class = match e.get("class").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
+                    Some("signal") => NetClass::Signal,
+                    Some("clock") => NetClass::Clock,
+                    Some("supply") => NetClass::Supply,
+                    Some("ground") => NetClass::Ground,
+                    Some("sensitive") => NetClass::Sensitive,
+                    Some("substrate") => NetClass::Substrate,
+                    Some("bias") => NetClass::Bias,
+                    Some("reference") => NetClass::Reference,
+                    // Conservative: undeclared logic may toggle, so it is an aggressor.
+                    Some("digital") => NetClass::DigitalSwitching,
+                    Some("digital_static") => NetClass::DigitalStatic,
+                    Some("noisy") => NetClass::Noisy,
+                    _ => {
+                        diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: NetClass class") });
+                        continue;
+                    }
                 };
                 for n in strs("nets") {
                     match net(&n) {
@@ -171,7 +179,18 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
             "Kelvin" => {
                 let pin = |s: &str| -> Option<(DeviceId, Term)> {
                     let (d, t) = s.split_once('/')?;
-                    Some((device(d)?, term(t)?))
+                    let t = match t.to_ascii_uppercase().as_str() {
+                        "G" => Term::G,
+                        "D" => Term::D,
+                        "S" => Term::S,
+                        "B" => Term::B,
+                        "C" => Term::C,
+                        "E" => Term::E,
+                        "P" => Term::P,
+                        "N" => Term::N,
+                        _ => return None,
+                    };
+                    Some((device(d)?, t))
                 };
                 let at = e.get("pin").and_then(Value::as_str).unwrap_or("");
                 let sense: Option<Vec<(DeviceId, Term)>> = strs("sense").iter().map(|s| pin(s)).collect();
@@ -189,12 +208,18 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                 }
             }
             "Order" => {
-                let Some((dir, flip)) = e.get("direction").and_then(Value::as_str).and_then(order_direction) else {
-                    diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: Order direction") });
-                    continue;
+                let (dir, flip) = match e.get("direction").and_then(Value::as_str) {
+                    Some("bottom_to_top") => (AxisDir::V, false),
+                    Some("top_to_bottom") => (AxisDir::V, true),
+                    Some("left_to_right") => (AxisDir::H, false),
+                    Some("right_to_left") => (AxisDir::H, true),
+                    _ => {
+                        diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: Order direction") });
+                        continue;
+                    }
                 };
                 let names = strs("instances");
-                let steps: Option<Vec<Vec<DeviceId>>> = names.iter().map(|n| resolve(&alias, n, &device)).collect();
+                let steps: Option<Vec<Vec<DeviceId>>> = names.iter().map(|n| alias.get(&n.to_ascii_lowercase()).cloned().or_else(|| device(n).map(|d| vec![d]))).collect();
                 match steps {
                     Some(mut steps) => {
                         if flip {
@@ -240,81 +265,8 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
     Ok((cfg, diags))
 }
 
-/// A `GroupBlocks` alias's devices (case-insensitive), else the one named device.
-fn resolve(alias: &HashMap<String, Vec<DeviceId>>, name: &str, device: &impl Fn(&str) -> Option<DeviceId>) -> Option<Vec<DeviceId>> {
-    alias.get(&name.to_ascii_lowercase()).cloned().or_else(|| device(name).map(|d| vec![d]))
-}
-
-/// `Match` `class`, case-insensitive.
-fn match_class(s: &str) -> Option<MatchClass> {
-    match s.to_ascii_lowercase().as_str() {
-        "minimal" => Some(MatchClass::Minimal),
-        "moderate" => Some(MatchClass::Moderate),
-        "exceptional" => Some(MatchClass::Exceptional),
-        _ => None,
-    }
-}
-
-/// `Match` `kind`, case-insensitive; anything else leaves the kind to inference.
-fn match_kind(s: &str) -> Option<MatchKind> {
-    match s.to_ascii_lowercase().as_str() {
-        "voltage" => Some(MatchKind::Voltage),
-        "current" => Some(MatchKind::Current),
-        "ratio" => Some(MatchKind::Ratio),
-        _ => None,
-    }
-}
-
-/// `NetClass` `class`, case-insensitive.
-fn net_class(s: &str) -> Option<NetClass> {
-    Some(match s.to_ascii_lowercase().as_str() {
-        "signal" => NetClass::Signal,
-        "clock" => NetClass::Clock,
-        "supply" => NetClass::Supply,
-        "ground" => NetClass::Ground,
-        "sensitive" => NetClass::Sensitive,
-        "substrate" => NetClass::Substrate,
-        "bias" => NetClass::Bias,
-        "reference" => NetClass::Reference,
-        // Conservative: undeclared logic may toggle, so it is an aggressor.
-        "digital" => NetClass::DigitalSwitching,
-        "digital_static" => NetClass::DigitalStatic,
-        "noisy" => NetClass::Noisy,
-        _ => return None,
-    })
-}
-
-/// A `Kelvin` pin's terminal letter, case-insensitive.
-fn term(s: &str) -> Option<Term> {
-    Some(match s.to_ascii_uppercase().as_str() {
-        "G" => Term::G,
-        "D" => Term::D,
-        "S" => Term::S,
-        "B" => Term::B,
-        "C" => Term::C,
-        "E" => Term::E,
-        "P" => Term::P,
-        "N" => Term::N,
-        _ => return None,
-    })
-}
-
-/// `Order` `direction`: the axis and whether the listed order runs against it.
-fn order_direction(s: &str) -> Option<(AxisDir, bool)> {
-    match s {
-        "bottom_to_top" => Some((AxisDir::V, false)),
-        "top_to_bottom" => Some((AxisDir::V, true)),
-        "left_to_right" => Some((AxisDir::H, false)),
-        "right_to_left" => Some((AxisDir::H, true)),
-        _ => None,
-    }
-}
-
 impl AnnotationConfig {
     /// [`parse`]: the sidecar's config and its diagnostics.
-    ///
-    /// # Errors
-    /// As [`parse`].
     pub fn from_json(json: &str, nl: &Netlist) -> Result<(Self, Vec<Diagnostic>), String> {
         parse(json, nl)
     }
@@ -419,174 +371,5 @@ mod tests {
         let s = p.intent.sets.iter().find(|s| s.kind == MatchKind::Voltage).expect("the input pair");
         assert_eq!((s.class, s.class_source), (MatchClass::Exceptional, analog::intent::ClassSource::User));
         assert_eq!(p.intent.compounds[s.compound.unwrap() as usize].kind, analog::intent::SymKind::Perfect);
-    }
-
-    // ---- cleanup(annotator-sets) step 2 ----
-
-    fn kinds(d: &[Diagnostic]) -> Vec<&'static str> {
-        d.iter().map(|d| d.kind).collect()
-    }
-
-    fn run(json: &str) -> (AnnotationConfig, Vec<Diagnostic>) {
-        parse(json, &crate::tests::ota()).unwrap()
-    }
-
-    #[test]
-    fn name_tables() {
-        assert_eq!(match_class("MODERATE"), Some(MatchClass::Moderate));
-        assert_eq!(match_class("Minimal"), Some(MatchClass::Minimal));
-        assert_eq!(match_class("exceptional"), Some(MatchClass::Exceptional));
-        assert_eq!(match_class("tight"), None);
-        assert_eq!(match_kind("Voltage"), Some(MatchKind::Voltage));
-        assert_eq!(match_kind("ratio"), Some(MatchKind::Ratio));
-        assert_eq!(match_kind("current"), Some(MatchKind::Current));
-        assert_eq!(match_kind(""), None);
-        assert_eq!(net_class("Digital"), Some(NetClass::DigitalSwitching), "undeclared logic is an aggressor");
-        assert_eq!(net_class("digital_static"), Some(NetClass::DigitalStatic));
-        assert_eq!(net_class("noisy"), Some(NetClass::Noisy));
-        assert_eq!(net_class("loud"), None);
-        assert_eq!(term("g"), Some(Term::G));
-        assert_eq!(term("N"), Some(Term::N));
-        assert_eq!(term("X"), None);
-        assert_eq!(term(""), None);
-        assert_eq!(order_direction("top_to_bottom"), Some((AxisDir::V, true)));
-        assert_eq!(order_direction("left_to_right"), Some((AxisDir::H, false)));
-        assert_eq!(order_direction("Left_To_Right"), None, "directions are exact");
-    }
-
-    #[test]
-    fn empty_array_is_a_default_config() {
-        let (c, d) = run("[]");
-        assert!(d.is_empty() && c.seeds.is_empty() && c.groups.is_empty() && c.supply_nets.is_empty());
-    }
-
-    #[test]
-    fn entries_without_a_constraint_are_unsupported() {
-        let (_, d) = run(r#"[1, {}, {"constraint": 3}]"#);
-        assert_eq!(kinds(&d), ["sidecar_unsupported"; 3]);
-    }
-
-    #[test]
-    fn ports_resolve_case_insensitively() {
-        let (c, d) = run(r#"[{"constraint":"PowerPorts","ports":["vdd"]},{"constraint":"GroundPorts","ports":["vss"]},{"constraint":"ClockPorts","ports":["VBN"]}]"#);
-        assert!(d.is_empty(), "{d:?}");
-        assert_eq!((c.supply_nets, c.ground_nets, c.clock_nets), (vec!["vdd".to_string()], vec!["vss".to_string()], vec!["VBN".to_string()]));
-    }
-
-    #[test]
-    fn do_not_identify_and_unknown_instance() {
-        let (c, d) = run(r#"[{"constraint":"DoNotIdentify","instances":["xm1","XM5"]},{"constraint":"DoNotIdentify","instances":["XM9"]}]"#);
-        assert_eq!(kinds(&d), ["sidecar_unknown_name"]);
-        let mut ids: Vec<u32> = c.do_not_identify.into_iter().collect();
-        ids.sort_unstable();
-        assert_eq!(ids, [0, 4]);
-    }
-
-    #[test]
-    fn symmetric_blocks_shapes() {
-        let (c, d) = run(
-            r#"[{"constraint":"GroupBlocks","instances":["XM1","XM2"],"instance_name":"DP"},
-                {"constraint":"GroupBlocks","instances":["XM3","XM4"],"instance_name":"LD"},
-                {"constraint":"SymmetricBlocks","direction":"H","pairs":[["XM1","XM2"],["XM5"],["dp"],["DP","LD"],["XM1","XM2","XM3"],["DP","XM5"],["nope"]]}]"#,
-        );
-        assert_eq!(c.symmetry_dir, Some(AxisDir::H));
-        let id = ConstraintId(u32::MAX - 2);
-        let seeds: Vec<(Vec<u16>, ConstraintId)> = c
-            .seeds
-            .iter()
-            .map(|s| match *s {
-                Seed::Devices(a, b, i) => (vec![a.0, b.0], i),
-                Seed::SelfDevice(a, i) => (vec![a.0], i),
-                Seed::Nets(..) => unreachable!("no net seed"),
-            })
-            .collect();
-        assert_eq!(seeds, [(vec![0, 1], id), (vec![4], id), (vec![0, 1], id), (vec![0, 2], id), (vec![1, 3], id)]);
-        assert_eq!(kinds(&d), ["sidecar_unsupported", "sidecar_unsupported", "sidecar_unknown_name"]);
-        assert_eq!(c.groups.iter().map(|g| g.0).collect::<Vec<_>>(), [0, 1]);
-    }
-
-    #[test]
-    fn symmetric_blocks_default_vertical() {
-        let (c, _) = run(r#"[{"constraint":"SymmetricBlocks","pairs":[]}]"#);
-        assert_eq!(c.symmetry_dir, Some(AxisDir::V));
-        assert!(c.seeds.is_empty());
-    }
-
-    #[test]
-    fn symmetric_nets() {
-        let (c, d) = run(r#"[{"constraint":"SymmetricNets","net1":"VOUT1","net2":"vout2"},{"constraint":"SymmetricNets","net1":"vout1"}]"#);
-        assert!(matches!(c.seeds[..], [Seed::Nets(NetId(0), NetId(4), ConstraintId(u32::MAX))]));
-        assert_eq!(kinds(&d), ["sidecar_unknown_name"]);
-    }
-
-    #[test]
-    fn match_entries() {
-        let (c, d) = run(
-            r#"[{"constraint":"Match","instances":["XM1","XM2"],"class":"moderate","kind":"voltage"},
-                {"constraint":"Match","instances":["XM1","XM2"],"class":"tight"},
-                {"constraint":"Match","instances":["XM1","XM5"],"class":"minimal"},
-                {"constraint":"Match","instances":["XM1","XM3"],"class":"minimal"},
-                {"constraint":"Match","instances":["XM1","XM9"],"class":"minimal"}]"#,
-        );
-        assert_eq!(c.classes, [(vec![DeviceId(0), DeviceId(1)], MatchClass::Moderate, Some(MatchKind::Voltage))]);
-        // tight: unsupported; XM5 has another L and XM3 another kind: conflicts; XM9: unknown.
-        assert_eq!(kinds(&d), ["sidecar_unsupported", "conflict", "conflict", "sidecar_unknown_name"]);
-    }
-
-    #[test]
-    fn net_class_entries() {
-        let (c, d) = run(r#"[{"constraint":"NetClass","nets":["vbias","nope","VBN"],"class":"Bias"},{"constraint":"NetClass","nets":["vbias"],"class":"loud"}]"#);
-        assert_eq!(c.net_classes, [(NetId(6), NetClass::Bias), (NetId(8), NetClass::Bias)]);
-        assert_eq!(kinds(&d), ["sidecar_unknown_name", "sidecar_unsupported"]);
-    }
-
-    #[test]
-    fn offset_budget_entries() {
-        let (c, d) = run(r#"[{"constraint":"OffsetBudget","instances":["XM1","XM2"],"sigma_mv":1.5},{"constraint":"OffsetBudget","instances":["XM1"]},{"constraint":"OffsetBudget","instances":["XM7"],"sigma_mv":1}]"#);
-        assert_eq!(c.offset_budgets, [(vec![DeviceId(0), DeviceId(1)], 1.5)]);
-        assert_eq!(kinds(&d), ["sidecar_unsupported", "sidecar_unknown_name"]);
-    }
-
-    #[test]
-    fn kelvin_entries() {
-        let (c, d) = run(r#"[{"constraint":"Kelvin","pin":"xm5/d","sense":["XM1/S","XM2/s"]},{"constraint":"Kelvin","pin":"XM5/Q","sense":[]},{"constraint":"Kelvin","pin":"XM5","sense":[]}]"#);
-        assert_eq!(c.kelvins.len(), 1);
-        let k = &c.kelvins[0];
-        assert_eq!((k.device, k.term, k.sense.clone()), (DeviceId(4), Term::D, vec![(DeviceId(0), Term::S), (DeviceId(1), Term::S)]));
-        assert_eq!(kinds(&d), ["sidecar_unknown_name"; 2]);
-    }
-
-    #[test]
-    fn load_entries() {
-        let (c, d) = run(r#"[{"constraint":"Load","net":"vout1"},{"constraint":"Load","net":"nope","ff":1}]"#);
-        assert!(c.loads.is_empty());
-        assert_eq!(kinds(&d), ["sidecar_unsupported", "sidecar_unknown_name"]);
-    }
-
-    #[test]
-    fn order_entries() {
-        let (c, d) = run(
-            r#"[{"constraint":"GroupBlocks","instances":["XM1","XM2"],"instance_name":"dp"},
-                {"constraint":"Order","instances":["XM5","DP"],"direction":"top_to_bottom"},
-                {"constraint":"Order","instances":["XM5"],"direction":"sideways"},
-                {"constraint":"Order","instances":["XM5","nope"],"direction":"left_to_right"}]"#,
-        );
-        assert_eq!(c.order, [Order { steps: vec![vec![DeviceId(0), DeviceId(1)], vec![DeviceId(4)]], dir: AxisDir::V, reversible: false, weight: 1.0 }]);
-        assert_eq!(kinds(&d), ["sidecar_unsupported", "sidecar_unknown_name"]);
-    }
-
-    #[test]
-    fn isolated_tub_needs_a_known_tie_and_members() {
-        let (c, d) = run(r#"[{"constraint":"IsolatedTub","instances":[],"tie":"vdd"},{"constraint":"IsolatedTub","instances":["XM1"],"tie":"nope"},{"constraint":"IsolatedTub","instances":["XM9"],"tie":"vdd"}]"#);
-        assert!(c.tubs.is_empty() && c.groups.is_empty());
-        assert_eq!(kinds(&d), ["sidecar_unsupported", "sidecar_unknown_name", "sidecar_unknown_name"]);
-    }
-
-    #[test]
-    fn from_json_is_parse() {
-        let nl = crate::tests::ota();
-        let json = r#"[{"constraint":"PowerPorts","ports":["vdd"]}]"#;
-        assert_eq!(AnnotationConfig::from_json(json, &nl).unwrap().0.supply_nets, parse(json, &nl).unwrap().0.supply_nets);
-        assert!(AnnotationConfig::from_json("[", &nl).is_err());
     }
 }

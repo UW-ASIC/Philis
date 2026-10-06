@@ -26,15 +26,13 @@ pub struct GroupId(pub u16);
 /// rule scores either the same way.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Target {
-    /// One device (or, after group collapse, one cell).
     Device(DeviceId),
-    /// Every member of a group, scored as their bounding box.
     Group(GroupId),
 }
 
 impl Target {
-    /// Maps a device target through `cell_of[device] = cell` (group collapse).
-    /// Groups, and device ids past the end of `cell_of`, pass through unchanged.
+    /// Map a device target through `cell_of[device] = cell` (group collapse).
+    /// Groups, and device ids past the end of `cell_of`, pass through.
     #[inline]
     #[must_use]
     pub fn retarget(self, cell_of: &[u16]) -> Self {

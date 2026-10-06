@@ -7,25 +7,17 @@ use crate::ids::NetId;
 pub struct LayerId(pub u16);
 
 /// Axis-aligned rectangle in `nm`. `(x, y)` is the lower-left corner.
-///
-/// Extents are expected non-negative; a zero extent is a degenerate (line or
-/// point) rectangle that [`Rect::touches`] still treats as closed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Rect {
-    /// Lower-left x, nm.
     pub x: i32,
-    /// Lower-left y, nm.
     pub y: i32,
-    /// Width, nm (`>= 0`).
     pub w: i32,
-    /// Height, nm (`>= 0`).
     pub h: i32,
 }
 
 impl Rect {
-    /// Returns whether `self` and `o` share at least one point. Intervals are
-    /// closed on both axes: edge or corner contact counts, so two abutting
-    /// shapes on one conductor are connected. Symmetric.
+    /// Closed intervals on both axes: edge or corner contact counts, so two
+    /// abutting shapes on one conductor are connected.
     #[must_use]
     pub fn touches(&self, o: &Rect) -> bool {
         self.x <= o.x + o.w && o.x <= self.x + self.w && self.y <= o.y + o.h && o.y <= self.y + self.h
@@ -37,22 +29,15 @@ impl Rect {
 /// legal for a device is a constraint concern, not this type's.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Orient {
-    /// Identity.
     #[default]
     R0,
-    /// Counter-clockwise quarter turn: `(x, y) ↦ (−y, x)`.
     R90,
-    /// Half turn: `(x, y) ↦ (−x, −y)`.
     R180,
-    /// Clockwise quarter turn: `(x, y) ↦ (y, −x)`.
     R270,
     /// Mirror about the x-axis (`y ↦ −y`), then rotate by the named angle.
     Mx,
-    /// [`Orient::Mx`] then [`Orient::R90`]: `(x, y) ↦ (y, x)`.
     Mx90,
-    /// [`Orient::Mx`] then [`Orient::R180`]: `(x, y) ↦ (−x, y)` (mirror in x).
     Mx180,
-    /// [`Orient::Mx`] then [`Orient::R270`]: `(x, y) ↦ (−y, −x)`.
     Mx270,
 }
 
@@ -79,8 +64,7 @@ impl Orient {
         Orient::ALL.into_iter().find(|o| o.apply(1, 2) == want).expect("D4 is closed")
     }
 
-    /// The member undoing `self`: `self.then(self.inverse()) == R0` (and the
-    /// other way round, D4 being a group).
+    /// The member undoing `self`: `self.then(self.inverse()) == R0`.
     #[must_use]
     pub fn inverse(self) -> Orient {
         Orient::ALL.into_iter().find(|&o| self.then(o) == Orient::R0).expect("D4 has inverses")
@@ -92,8 +76,7 @@ impl Orient {
         matches!(self, Orient::R90 | Orient::R270 | Orient::Mx90 | Orient::Mx270)
     }
 
-    /// Maps a point about the origin. Exact for every input whose negation
-    /// fits `i32` (panics on `i32::MIN` in debug builds).
+    /// Map a point about the origin.
     #[must_use]
     pub fn apply(self, x: i32, y: i32) -> (i32, i32) {
         match self {
@@ -108,9 +91,8 @@ impl Orient {
         }
     }
 
-    /// Maps a rectangle about the origin, renormalised to lower-left `(x, y)`
-    /// with non-negative extents. Grid-preserving: a rect on an `g`-nm grid
-    /// stays on it. The four [`Orient::swaps_axes`] members swap `w` and `h`.
+    /// Map a rectangle about the origin, renormalised to lower-left `(x, y)`.
+    /// Grid-preserving.
     #[must_use]
     pub fn apply_rect(self, r: Rect) -> Rect {
         let (x0, y0) = self.apply(r.x, r.y);
@@ -122,20 +104,15 @@ impl Orient {
 /// One drawn rectangle on one layer — the atom of [`crate::Macro`] geometry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Shape {
-    /// Layer the rectangle is drawn on.
     pub layer: LayerId,
-    /// Drawn extent, nm.
     pub rect: Rect,
 }
 
 /// A physical point where a net attaches to a macro — a routing entry point.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Pin {
-    /// Pin label. Generated cells use `d{owner}:{terminal}` (e.g. `d0:S`).
     pub name: String,
-    /// Net the pin belongs to.
     pub net: NetId,
-    /// Access rectangle, nm (local frame in an unplaced [`crate::Macro`]).
     pub at: Rect,
     /// The layer the pin is drawn on (pin access must not guess it).
     pub layer: LayerId,
@@ -144,11 +121,8 @@ pub struct Pin {
 /// Signal direction of a port.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dir {
-    /// Driven from outside the cell.
     In,
-    /// Driven by the cell.
     Out,
-    /// Either way (supplies, analog ports).
     InOut,
 }
 

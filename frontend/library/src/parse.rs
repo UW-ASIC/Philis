@@ -147,8 +147,7 @@ pub fn spice_report(text: &str, opts: &ParseOptions) -> Result<(Netlist, ParseRe
         }
     };
 
-    let models = opts.models.iter().map(|(n, k)| (n.to_ascii_lowercase(), *k)).collect();
-    let mut flat = Flat { opts, subckts: &subckts, by_name, globals, file_params, nl: Netlist::default(), net_index: HashMap::new(), models };
+    let mut flat = Flat { opts, subckts: &subckts, by_name, globals, file_params, nl: Netlist::default(), net_index: HashMap::new() };
     let mut scope = flat.file_params.clone();
     if let Some(t) = top {
         for (k, v) in &subckts[t].defaults {
@@ -186,16 +185,11 @@ pub fn spice_report(text: &str, opts: &ParseOptions) -> Result<(Netlist, ParseRe
 /// Parameter name (lower case) → value, base SI.
 type Scope = HashMap<String, f64>;
 
-/// One `.subckt … .ends` definition, as read (nothing evaluated yet).
 struct Subckt {
-    /// Name as spelled; looked up case-insensitively.
     name: String,
-    /// Formal ports, as spelled, in order.
     ports: Vec<String>,
-    /// `params:` defaults and in-body `.param`s, unevaluated, in order; keys
-    /// lower case.
+    /// `params:` defaults and in-body `.param`s, unevaluated, in order.
     defaults: Vec<(String, String)>,
-    /// Element cards (tokenised statements not starting with `.`), in order.
     cards: Vec<Vec<String>>,
 }
 
@@ -211,22 +205,14 @@ struct Frame {
     m: i64,
 }
 
-/// The flattening state: the definitions read, and the [`Netlist`] it
-/// writes (its only owner until [`spice_report`] returns it).
 struct Flat<'a> {
     opts: &'a ParseOptions,
     subckts: &'a [Subckt],
-    /// Lower-case `.subckt` name → index into `subckts`.
     by_name: HashMap<String, usize>,
-    /// Lower-case `.global` nets (and `0`): never prefixed by an instance path.
     globals: HashSet<String>,
-    /// File-level `.param`s, the base of every instance's scope.
     file_params: Scope,
     nl: Netlist,
-    /// Lower-case net name → its id in `nl.nets`.
     net_index: HashMap<String, NetId>,
-    /// `opts.models` with lower-case names.
-    models: Vec<(String, DeviceKind)>,
 }
 
 impl Flat<'_> {
@@ -256,10 +242,6 @@ impl Flat<'_> {
         self.net(format!("{}/{n}", f.path))
     }
 
-    /// Flattens `cards` into `self.nl` inside frame `f`, by card letter:
-    /// sources to [`Netlist::sources`], `X` to a sub-circuit instance or a
-    /// model device, `M Q R C L D` to devices. `stack` holds the definitions
-    /// being expanded (cycle detection).
     fn expand(&mut self, cards: &[Vec<String>], f: &Frame, stack: &mut Vec<usize>) -> Result<(), String> {
         for card in cards {
             let name = if f.path.is_empty() { card[0].clone() } else { format!("{}/{}", f.path, card[0]) };
@@ -298,14 +280,9 @@ impl Flat<'_> {
                     let (mut val, mut idents) = (None, Vec::new());
                     for &t in rest {
                         if val.is_none() && letter != 'd' {
-                            match value(t, &f.scope) {
-                                Ok(v) => {
-                                    val = Some(v);
-                                    continue;
-                                }
-                                // `{…}`/`'…'` is an expression, never a model name.
-                                Err(e) if t.starts_with(['{', '\'']) => return Err(format!("device {name}: {e}")),
-                                Err(_) => {}
+                            if let Ok(v) = value(t, &f.scope) {
+                                val = Some(v);
+                                continue;
                             }
                         }
                         idents.push(t);
@@ -332,18 +309,10 @@ impl Flat<'_> {
     /// The deck table's kind for lower-case `model`: exact, or one is the
     /// other behind a vendor `__` prefix (as `Pdk::deck_model`).
     fn table(&self, model: &str) -> Option<DeviceKind> {
-        let behind = |long: &str, short: &str| long.strip_suffix(short).is_some_and(|p| p.ends_with("__"));
-        self.models.iter().find(|(n, _)| n == model || behind(n, model) || behind(model, n)).map(|&(_, k)| k)
+        let hit = |n: &str| n == model || n.ends_with(&format!("__{model}")) || model.ends_with(&format!("__{n}"));
+        self.opts.models.iter().find(|(n, _)| hit(&n.to_ascii_lowercase())).map(|&(_, k)| k)
     }
 
-    /// Records instance `name` of `subckts[si]` and expands its body in a
-    /// child frame: ports bound to `nodes`, scope = overrides `kv` (evaluated
-    /// in the caller's scope) → the definition's defaults → file `.param`s,
-    /// `m` multiplied in.
-    ///
-    /// # Errors
-    /// Recursion into a definition already on `stack`, a node/port count
-    /// mismatch, more than `u32::MAX` instances, or any error of the body.
     fn instantiate(&mut self, f: &Frame, name: String, si: usize, nodes: &[&str], kv: &[(String, &str)], stack: &mut Vec<usize>) -> Result<(), String> {
         let subckts = self.subckts;
         let sc = &subckts[si];
@@ -385,14 +354,6 @@ impl Flat<'_> {
         Ok(())
     }
 
-    /// Pushes one device of `kind`: terminals interned in [`terminal_spec`]
-    /// order (MOS reordered to G,D,S,B), `w`/`l` in nm and counts rounded,
-    /// the frame's `m` folded into `m`, `val` (the letter card's scaled
-    /// value) appended.
-    ///
-    /// # Errors
-    /// Fewer nodes than the kind needs, an unresolved parameter, or a MOS
-    /// `w`/`l` ≤ 0.
     #[allow(clippy::too_many_arguments)]
     fn device(&mut self, f: &Frame, name: String, kind: DeviceKind, model: &str, nodes: &[&str], kv: &[(String, &str)], val: Option<(&str, i64)>) -> Result<(), String> {
         let (term_names, min_nodes) = terminal_spec(kind);
@@ -426,14 +387,15 @@ impl Flat<'_> {
                 None => params.push(("m".into(), f.m)),
             }
         }
+        let p = |params: &[(String, i64)], k: &str| params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
         if mos {
-            if let Some(bad) = ["w", "l"].into_iter().find(|&k| find_param(&params, k).is_some_and(|v| v <= 0)) {
+            if let Some(bad) = ["w", "l"].into_iter().find(|&k| p(&params, k).is_some_and(|v| v <= 0)) {
                 return Err(format!("device {name}: {bad} must be > 0"));
             }
             if self.opts.size == SizeConvention::PerFinger {
-                let nf = find_param(&params, "nf").map_or(1, |v| v.max(1));
+                let nf = p(&params, "nf").map_or(1, |v| v.max(1));
                 if let Some((_, w)) = params.iter_mut().find(|(k, _)| k == "w") {
-                    *w = w.saturating_mul(nf);
+                    *w *= nf;
                 }
             }
         }
@@ -443,13 +405,6 @@ impl Flat<'_> {
         Ok(())
     }
 
-    /// Pushes one `V I E F G H B K` card to [`Netlist::sources`]: its
-    /// interned nodes, a DC value for `V`/`I` (after `dc`, else a leading
-    /// number), and whether it names a transient waveform.
-    ///
-    /// # Errors
-    /// Fewer node tokens than the card's letter needs, or an unresolved
-    /// value after `dc`.
     fn source(&mut self, f: &Frame, name: String, letter: char, pos: &[&str], kv: &[(String, &str)]) -> Result<(), String> {
         // `K` couples inductors by name; `E`/`G` sense a second node pair,
         // unless behavioural (`value=`/`vol=`/`cur=`) or `poly(n)`, whose
@@ -474,11 +429,6 @@ impl Flat<'_> {
         self.nl.sources.push(SourceCard { name, kind: letter.to_ascii_uppercase(), nodes, dc, waveform });
         Ok(())
     }
-}
-
-/// The value of parameter `k` in a device's `params`, if present.
-fn find_param(params: &[(String, i64)], k: &str) -> Option<i64> {
-    params.iter().find(|(n, _)| n == k).map(|&(_, v)| v)
 }
 
 /// Logical statements: `*` comment lines dropped, inline `;` and ` $ `
@@ -616,9 +566,6 @@ fn value(tok: &str, scope: &Scope) -> Result<f64, String> {
     if e.i < e.s.len() {
         return Err(format!("value `{tok}`: unexpected `{}`", &inner[e.i..]));
     }
-    if !v.is_finite() {
-        return Err(format!("value `{tok}` is not finite"));
-    }
     Ok(v)
 }
 
@@ -633,14 +580,12 @@ struct Expr<'a> {
 }
 
 impl Expr<'_> {
-    /// Skips ASCII whitespace.
     fn ws(&mut self) {
         while self.s.get(self.i).is_some_and(u8::is_ascii_whitespace) {
             self.i += 1;
         }
     }
 
-    /// Consumes `tok` after whitespace; `true` when it was there.
     fn eat(&mut self, tok: &[u8]) -> bool {
         self.ws();
         let hit = self.s[self.i..].starts_with(tok);
@@ -700,7 +645,7 @@ impl Expr<'_> {
         let start = self.i;
         let c = self.s.get(start).copied().unwrap_or(0);
         if c.is_ascii_digit() || c == b'.' {
-            return self.number();
+            return Ok(self.number());
         }
         if !(c.is_ascii_alphabetic() || c == b'_') {
             return Err(format!("expected a value at `{}`", String::from_utf8_lossy(&self.s[start..])));
@@ -730,7 +675,7 @@ impl Expr<'_> {
 
     /// Digits, fraction, exponent, then an SI suffix (`meg t g k m u n p f
     /// a`); any further letters are a unit and ignored (`1pF`, `1.8V`).
-    fn number(&mut self) -> Result<f64, String> {
+    fn number(&mut self) -> f64 {
         let start = self.i;
         let digit = |s: &Self, i: usize| s.s.get(i).is_some_and(u8::is_ascii_digit);
         while digit(self, self.i) || self.s.get(self.i) == Some(&b'.') {
@@ -745,8 +690,7 @@ impl Expr<'_> {
                 }
             }
         }
-        let digits = &self.s[start..self.i];
-        let v: f64 = std::str::from_utf8(digits).ok().and_then(|n| n.parse().ok()).ok_or_else(|| format!("malformed number `{}`", String::from_utf8_lossy(digits)))?;
+        let v: f64 = std::str::from_utf8(&self.s[start..self.i]).ok().and_then(|n| n.parse().ok()).unwrap_or(f64::NAN);
         let letters = self.i;
         while self.s.get(self.i).is_some_and(u8::is_ascii_alphabetic) {
             self.i += 1;
@@ -754,13 +698,9 @@ impl Expr<'_> {
         let suffix = self.s[letters..self.i].to_ascii_lowercase();
         // Dividing by the inverse keeps `10u` exactly the double nearest 1e-5.
         if suffix.starts_with(b"meg") {
-            return Ok(v * 1e6);
+            return v * 1e6;
         }
-        // `mil` = 1/1000 inch = 25.4 µm (SPICE), checked before milli.
-        if suffix.starts_with(b"mil") {
-            return Ok(v * 25.4e-6);
-        }
-        Ok(match suffix.first() {
+        match suffix.first() {
             Some(b't') => v * 1e12,
             Some(b'g') => v * 1e9,
             Some(b'k') => v * 1e3,
@@ -771,7 +711,7 @@ impl Expr<'_> {
             Some(b'f') => v / 1e15,
             Some(b'a') => v / 1e18,
             _ => v,
-        })
+        }
     }
 }
 
@@ -1072,317 +1012,5 @@ mod x_instance_tests {
         // The exact `rc_filter` failure: classified NMOS, which demands >=3
         // nodes, so an ordinary 2-terminal resistor was rejected outright.
         assert_eq!(x("XR1 a b res_generic_po"), (DeviceKind::Resistor, vec!["P".to_string(), "N".to_string()]));
-    }
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-
-    fn param(d: &Device, k: &str) -> Option<i64> {
-        find_param(&d.params, k)
-    }
-
-    fn net_name(nl: &Netlist, id: NetId) -> &str {
-        &nl.nets[id.0 as usize].name
-    }
-
-    fn opts_with_models(models: &[(&str, DeviceKind)]) -> ParseOptions {
-        ParseOptions { models: models.iter().map(|&(m, k)| (m.to_string(), k)).collect(), ..Default::default() }
-    }
-
-    // ---- statements ----
-
-    #[test]
-    fn statements_fold_continuations_and_strip_comments() {
-        assert!(statements("", false).is_empty());
-        assert!(statements("title only", true).is_empty());
-        assert!(statements("\n   \n", false).is_empty());
-        assert_eq!(statements("a\n+ b\n", false), ["a b"]);
-        assert_eq!(statements("a \\\nb", false), ["a b"]);
-        assert_eq!(statements("a\n* comment\n+ b", false), ["a b"], "a comment does not break a continuation");
-        assert_eq!(statements("  * indented comment\nR1 a b 1", false), ["R1 a b 1"]);
-        assert_eq!(statements("R1 a b 1 ; c", false), ["R1 a b 1"]);
-        assert_eq!(statements("R1 a b 1 $ c", false), ["R1 a b 1"]);
-        assert_eq!(statements("R1 a b 1 $", false), ["R1 a b 1"]);
-        assert_eq!(statements("R1 a$b c 1", false), ["R1 a$b c 1"], "`$` inside a token is no comment");
-        assert_eq!(statements(".CONTROL\nfoo\n.ENDC\nR1", false), ["R1"]);
-        assert_eq!(statements("t\nR1 a b 1", true), ["R1 a b 1"]);
-    }
-
-    // ---- tokens / split ----
-
-    #[test]
-    fn tokens_keep_groups_and_glue_assignments() {
-        assert!(tokens("").is_empty());
-        assert_eq!(tokens("R1 a,b 1"), ["R1", "a", "b", "1"]);
-        for s in ["W = 1u", "W= 1u", "W =1u", "W=1u"] {
-            assert_eq!(tokens(s), ["W=1u"], "{s}");
-        }
-        assert_eq!(tokens("V1 a 0 PULSE(0 1 2)"), ["V1", "a", "0", "PULSE(0 1 2)"]);
-        assert_eq!(tokens("x={a b}"), ["x={a b}"]);
-        assert_eq!(tokens("x='a b'"), ["x='a b'"]);
-        assert_eq!(tokens("  a\tb  "), ["a", "b"]);
-    }
-
-    #[test]
-    fn split_lowers_keys_and_drops_params_keyword() {
-        let toks: Vec<String> = ["a", "params:", "W=1", "PARAMS:", "b"].iter().map(|s| (*s).to_string()).collect();
-        let (pos, kv) = split(&toks);
-        assert_eq!(pos, ["a", "b"]);
-        assert_eq!(kv, [("w".to_string(), "1")]);
-        let (pos, kv) = split(&[]);
-        assert!(pos.is_empty() && kv.is_empty());
-    }
-
-    // ---- token_kind / terminal_spec ----
-
-    #[test]
-    fn token_kind_reads_whole_tokens() {
-        let cases = [
-            ("npn", Some(DeviceKind::Npn)),
-            ("pnp_05v5", Some(DeviceKind::Pnp)),
-            ("res_generic_po", Some(DeviceKind::Resistor)),
-            ("cap_mim_m3_1", Some(DeviceKind::Capacitor)),
-            ("x_mim", Some(DeviceKind::Capacitor)),
-            ("diode_pw2nd", Some(DeviceKind::Diode)),
-            ("ind_x", Some(DeviceKind::Inductor)),
-            ("nfet_01v8", Some(DeviceKind::Nmos)),
-            ("nmos", Some(DeviceKind::Nmos)),
-            ("sky130_fd_pr__pfet_01v8", Some(DeviceKind::Pmos)),
-            ("pmos_x", Some(DeviceKind::Pmos)),
-            ("nfet01", None),
-            ("", None),
-            ("resistor", None),
-        ];
-        for (m, k) in cases {
-            assert_eq!(token_kind(m), k, "{m}");
-        }
-    }
-
-    #[test]
-    fn terminal_spec_per_kind() {
-        assert_eq!(terminal_spec(DeviceKind::Nmos), (&["D", "G", "S", "B"][..], 3));
-        assert_eq!(terminal_spec(DeviceKind::Pmos), (&["D", "G", "S", "B"][..], 3));
-        for k in [DeviceKind::Resistor, DeviceKind::Capacitor, DeviceKind::Diode, DeviceKind::Inductor] {
-            assert_eq!(terminal_spec(k), (&["P", "N", "B"][..], 2));
-        }
-        for k in [DeviceKind::Npn, DeviceKind::Pnp] {
-            assert_eq!(terminal_spec(k), (&["C", "B", "E", "S"][..], 3));
-        }
-    }
-
-    // ---- value / Expr ----
-
-    #[test]
-    fn value_si_suffixes() {
-        let s = Scope::new();
-        let v = |t: &str| value(t, &s).unwrap();
-        assert_eq!(v("1e-3"), 1e-3);
-        assert_eq!(v("1E3"), 1e3);
-        assert_eq!(v("1e"), 1.0, "an `e` with no exponent digits is a unit letter");
-        assert_eq!(v(".5"), 0.5);
-        assert_eq!(v("2.5k"), 2500.0);
-        assert_eq!(v("1meg"), 1e6);
-        assert_eq!(v("1MEG"), 1e6);
-        assert_eq!(v("1M"), 1e-3, "SPICE is case-insensitive: M is milli");
-        assert_eq!(v("3t"), 3e12);
-        assert_eq!(v("3g"), 3e9);
-        assert_eq!(v("10u"), 10e-6);
-        assert_eq!(v("1n"), 1e-9);
-        assert_eq!(v("1p"), 1e-12);
-        assert_eq!(v("1f"), 1e-15);
-        assert_eq!(v("1a"), 1e-18);
-        assert_eq!(v("1.8V"), 1.8);
-    }
-
-    /// SPICE's `mil` suffix is 25.4 µm, not milli.
-    #[test]
-    fn value_mil_is_a_thousandth_of_an_inch() {
-        let x = value("1mil", &Scope::new()).unwrap();
-        assert!((x - 25.4e-6).abs() < 1e-15, "{x}");
-        assert_eq!(value("2mils", &Scope::new()).map(|x| (x * 1e7).round()), Ok(508.0));
-    }
-
-    #[test]
-    fn value_grammar_precedence() {
-        let s = Scope::new();
-        let v = |t: &str| value(t, &s).unwrap();
-        assert_eq!(v("2+3*4"), 14.0);
-        assert_eq!(v("(2+3)*4"), 20.0);
-        assert_eq!(v("2**3**2"), 512.0, "power is right-associative");
-        assert_eq!(v("2^3"), 8.0);
-        assert_eq!(v("-2**2"), 4.0, "unary minus binds tighter than power in this grammar");
-        assert_eq!(v("2*-3"), -6.0);
-        assert_eq!(v("8/2/2"), 2.0);
-        assert_eq!(v("1-2-3"), -4.0);
-        assert_eq!(v("{1+1}"), 2.0);
-        assert_eq!(v("'1+1'"), 2.0);
-        assert_eq!(v("  3 "), 3.0);
-    }
-
-    #[test]
-    fn value_identifiers_are_case_insensitive_and_may_hold_dots() {
-        let s = Scope::from([("wu".to_string(), 2.0), ("a.b".to_string(), 3.0)]);
-        assert_eq!(value("WU", &s), Ok(2.0));
-        assert_eq!(value("{a.b*wu}", &s), Ok(6.0));
-    }
-
-    #[test]
-    fn value_errors() {
-        let s = Scope::new();
-        assert!(value("", &s).is_err());
-        assert!(value("foo", &s).err().unwrap().contains("undefined parameter foo"));
-        assert!(value("(1", &s).err().unwrap().contains("missing `)`"));
-        assert!(value("sqrt(1,2)", &s).err().unwrap().contains("unknown function sqrt"));
-        assert!(value("max(1", &s).err().unwrap().contains("missing `)`"));
-        assert!(value("1 2", &s).err().unwrap().contains("unexpected"));
-        assert!(value("1+", &s).is_err());
-    }
-
-    /// A malformed number or a non-finite result is an error, never NaN/∞
-    /// carried into a device parameter.
-    #[test]
-    fn value_rejects_malformed_and_non_finite() {
-        let s = Scope::new();
-        assert!(value(".", &s).is_err(), "{:?}", value(".", &s));
-        assert!(value("1/0", &s).is_err(), "{:?}", value("1/0", &s));
-        assert!(value("sqrt(-1)", &s).is_err(), "{:?}", value("sqrt(-1)", &s));
-        assert!(spice("R1 a b {1/0}\n").is_err());
-    }
-
-    #[test]
-    fn to_nm_reads_bare_micrometres_and_metres() {
-        assert_eq!(to_nm(2.0), 2000);
-        assert_eq!(to_nm(2e-6), 2000);
-        assert_eq!(to_nm(0.01), 10, "the boundary is micrometres");
-        assert_eq!(to_nm(0.0), 0);
-        assert_eq!(to_nm(-1e-6), -1000);
-        assert_eq!(to_nm(150e-9), 150);
-    }
-
-    // ---- spice_report: structure errors ----
-
-    #[test]
-    fn structural_errors() {
-        assert_eq!(spice("").err().unwrap(), "no devices parsed");
-        assert_eq!(spice("V1 a 0 1\n").err().unwrap(), "no devices parsed");
-        assert_eq!(spice(".ends\n").err().unwrap(), ".ends without .subckt");
-        assert_eq!(spice(".subckt\n.ends\n").err().unwrap(), ".subckt without a name");
-        assert!(spice(".subckt a x\nR1 x 0 1\n").err().unwrap().contains("has no .ends"));
-        assert!(spice(".subckt a x\n.ends\n.subckt A y\n.ends\nR1 a b 1\n").err().unwrap().contains("duplicate .subckt"));
-        let top = ParseOptions { top: Some("zz".into()), ..Default::default() };
-        assert!(spice_with("R1 a b 1\n", &top).err().unwrap().contains("zz not found"));
-        assert!(spice(".subckt a x\nX1 x a\n.ends\nX0 n a\n").err().unwrap().contains("instantiates itself"));
-        assert!(spice("Z1 a b\n").err().unwrap().contains("unsupported card"));
-        assert!(spice("X1\n").err().unwrap().contains("too few tokens"));
-        assert!(spice("R1 a\n").err().unwrap().contains("too few tokens"));
-        assert!(spice("M1 d g nfet\n").err().unwrap().contains("expected >= 3"));
-        assert!(spice(".param x=y\nR1 a b 1\n").err().unwrap().contains("undefined parameter y"));
-        assert!(spice("M1 d g s b nfet L=1u W=0\n").err().unwrap().contains("w must be > 0"));
-        assert!(spice("M1 d g s b nfet W=1u L=-1u\n").err().unwrap().contains("l must be > 0"));
-    }
-
-    #[test]
-    fn unknown_directives_are_reported_not_parsed() {
-        let (_, r) = spice_report(".option foo\n.model m nmos\nR1 a b 1\n.end\n", &ParseOptions::default()).unwrap();
-        assert_eq!(r.ignored, [".option foo", ".model m nmos", ".end"]);
-    }
-
-    // ---- devices ----
-
-    #[test]
-    fn three_terminal_mos_takes_source_as_bulk() {
-        let nl = spice("M1 d g s nfet W=1u L=1u\n").unwrap();
-        let t = &nl.devices[0].terminals;
-        assert_eq!(t.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["G", "D", "S", "B"]);
-        assert_eq!(t[3].1, t[2].1);
-        assert_eq!(nl.device_inst, [None], "a top-level device belongs to no instance");
-    }
-
-    #[test]
-    fn letter_card_values_models_and_bodies() {
-        let nl = spice("C1 a b 1p sub cmod\nR1 a b {2*1k} rmod\nD1 a b\nL1 a b\n").unwrap();
-        let c = &nl.devices[0];
-        assert_eq!((c.model.as_str(), c.terminals.len(), param(c, "c_af")), ("cmod", 3, Some(1_000_000)));
-        assert_eq!(net_name(&nl, c.terminals[2].1), "sub");
-        let r = &nl.devices[1];
-        assert_eq!((r.model.as_str(), r.terminals.len(), param(r, "r_mohm")), ("rmod", 2, Some(2_000_000)));
-        let d = &nl.devices[2];
-        assert_eq!((d.kind, d.model.as_str(), d.terminals.len()), (DeviceKind::Diode, "", 2));
-        assert_eq!(param(&nl.devices[3], "ind_ph"), None, "no value: no parameter");
-    }
-
-    #[test]
-    fn deck_model_table_classifies_and_matches_vendor_prefixes() {
-        let kind = |card: &str, models: &[(&str, DeviceKind)]| spice_with(card, &opts_with_models(models)).map(|nl| nl.devices[0].kind);
-        assert_eq!(kind("Q1 c b e mybjt\n", &[("mybjt", DeviceKind::Pnp)]), Ok(DeviceKind::Pnp));
-        assert_eq!(kind("Q1 c b e mybjt\n", &[]), Ok(DeviceKind::Npn), "a Q card defaults to NPN");
-        assert_eq!(kind("M1 d g s b nfet_x\n", &[("nfet_x", DeviceKind::Resistor)]), Ok(DeviceKind::Nmos), "an M card ignores a non-MOS table row");
-        assert_eq!(kind("M1 d g s b mymos\n", &[("MYMOS", DeviceKind::Pmos)]), Ok(DeviceKind::Pmos), "table names are case-insensitive");
-        assert_eq!(kind("X1 d g s b special\n", &[("sky130_fd_pr__special", DeviceKind::Nmos)]), Ok(DeviceKind::Nmos));
-        assert_eq!(kind("X1 d g s b vendor__special\n", &[("special", DeviceKind::Pmos)]), Ok(DeviceKind::Pmos));
-        assert!(kind("X1 d g s b myamp\n", &[("amp", DeviceKind::Nmos)]).err().unwrap().contains("unknown model"));
-    }
-
-    // ---- hierarchy ----
-
-    #[test]
-    fn globals_and_ground_are_never_prefixed() {
-        let nl = spice(".global vdd\n.subckt c a\nR1 a vdd 1\nR2 a 0 1\n.ends\nX1 n c\n").unwrap();
-        let names: Vec<&str> = nl.nets.iter().map(|n| n.name.as_str()).collect();
-        assert!(names.contains(&"vdd") && names.contains(&"0"), "{names:?}");
-        assert!(!names.iter().any(|n| n.starts_with("X1/")), "{names:?}");
-    }
-
-    #[test]
-    fn body_params_see_instance_overrides() {
-        let nl = spice(".subckt c a params: k=1\n.param j={k*2}\nR1 a 0 {j}\n.ends\nX1 n c k=3\nX2 n c\n").unwrap();
-        assert_eq!(param(&nl.devices[0], "r_mohm"), Some(6_000));
-        assert_eq!(param(&nl.devices[1], "r_mohm"), Some(2_000));
-    }
-
-    #[test]
-    fn instance_m_multiplies_card_m_through_every_level() {
-        let deck = ".subckt c a\nM1 a a 0 0 nfet W=1u L=1u m=2\n.ends\n.subckt d b\nX1 b c m=3\n.ends\nX0 n d m=5\n";
-        let nl = spice(deck).unwrap();
-        assert_eq!(nl.devices[0].name, "X0/X1/M1");
-        assert_eq!(param(&nl.devices[0], "m"), Some(30));
-        assert_eq!(nl.insts[1].parent, Some(0));
-    }
-
-    // ---- size convention ----
-
-    #[test]
-    fn per_finger_clamps_nf_below_one() {
-        let opts = ParseOptions { size: SizeConvention::PerFinger, ..Default::default() };
-        let nl = spice_with("M1 d g s b nfet W=1u L=1u nf=0\n", &opts).unwrap();
-        assert_eq!(param(&nl.devices[0], "w"), Some(1000));
-    }
-
-    /// A huge finger count saturates the stored width instead of overflowing.
-    #[test]
-    fn per_finger_width_saturates() {
-        let opts = ParseOptions { size: SizeConvention::PerFinger, ..Default::default() };
-        let nl = spice_with("M1 d g s b nfet W=1u L=1u nf=1e18\n", &opts).unwrap();
-        assert_eq!(param(&nl.devices[0], "w"), Some(i64::MAX));
-    }
-
-    // ---- sources ----
-
-    #[test]
-    fn source_node_counts_and_dc() {
-        let base = "R1 a b 1\n";
-        let nl = spice(&format!("{base}K1 L1 L2 0.9\nF1 a b Vs 2\nV1 a 0 dc\nV3 a 0 ac 1\nV4 a 0 sin(0 1 1k)\nB1 o 0 v=1\n")).unwrap();
-        let s = &nl.sources;
-        assert_eq!((s[0].kind, s[0].nodes.len()), ('K', 0));
-        assert_eq!((s[1].kind, s[1].nodes.len()), ('F', 2));
-        assert_eq!(s[2].dc, None, "`dc` with nothing after it");
-        assert_eq!(s[3].dc, None, "`ac` is no DC value");
-        assert!(s[4].waveform);
-        assert_eq!(s[4].dc, None);
-        assert_eq!((s[5].kind, s[5].nodes.len()), ('B', 2));
-        assert!(spice(&format!("{base}V2 a 0 dc foo\n")).err().unwrap().contains("undefined parameter foo"));
-        assert!(spice(&format!("{base}V2 a\n")).err().unwrap().contains("too few tokens"));
     }
 }

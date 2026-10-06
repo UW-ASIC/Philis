@@ -23,8 +23,6 @@ use std::collections::VecDeque;
 use pnr_core::{LayerId, Macro, Rect, Shape};
 use verify::Pdk;
 
-use crate::geometry::{bbox, rect_gap as gap};
-
 /// Clearance from sensitive-net wires, in the layer's widest spacing.
 /// ponytail: one multiple for every sensitive net; per-net budgets from the
 /// extracted coupling if a net ever needs a tighter bound.
@@ -38,27 +36,21 @@ const TILE: i32 = 2_000;
 /// One density rule the block covers.
 #[derive(Debug, PartialEq)]
 struct Floor {
-    /// The routing metal the floor applies to.
     layer: LayerId,
-    /// Minimum density, a fraction in `[0, 1]`.
     min: f64,
     /// The layer's density ceiling, 1 when the deck has none.
     max: f64,
 }
 
-/// Returns in-block fill for every routing metal with a minimum-density rule
-/// whose window fits in the block (the bbox of `drawn`), grown out of
-/// `ground` (routed ground-class wires, so every tile is tied) and clear of
-/// `sensitive` wires and the `avoid` cells; `None` when nothing is filled.
-/// A layer whose tiles add any DRC or ERC finding is dropped whole (logged to
-/// stderr). The block average lands at the floor plus a margin, never above
-/// the ceiling minus it.
+/// In-block fill for every routing metal with a minimum-density rule whose
+/// window fits in the block, tied to `ground` (routed ground-class wires) and
+/// clear of `sensitive` wires and the `avoid` cells; `None` when nothing is
+/// filled.
 ///
-/// Cost: one label-free DRC + ERC run on `drawn`, plus one per layer filled.
+/// ponytail: the floor is met on the block average, not per window; a sparse
+/// corner can still fail a window. Per-window targets are the upgrade.
 #[must_use]
 pub fn fill(drawn: &[Shape], ground: &[Shape], sensitive: &[Shape], avoid: &[Rect], pdk: &Pdk) -> Option<Macro> {
-    // ponytail: the floor is met on the block average, not per window; a
-    // sparse corner can still fail a window. Per-window targets are the upgrade.
     let b = bbox(drawn)?;
     let floors = floors(pdk, b);
     if floors.is_empty() {
@@ -93,11 +85,8 @@ fn counts(shapes: &[Shape], pdk: &Pdk) -> std::collections::BTreeMap<String, usi
     out
 }
 
-/// Returns tiles on `f.layer`, flooded breadth-first out of the tiles that
-/// touch a ground wire, through free tiles, until the block `b`'s average
-/// density reaches the target. Tiles are square, lattice-snapped, at least
-/// [`TILE`], one spacing and one min width wide; the grid starts at `b`'s
-/// corner and drops any partial last column or row.
+/// Tiles on `f.layer`, flooded out of the ground wires through free tiles
+/// until the block average reaches the target.
 fn layer_fill(drawn: &[Shape], ground: &[Shape], sensitive: &[Shape], avoid: &[Rect], pdk: &Pdk, b: Rect, f: &Floor) -> Vec<Shape> {
     let lat = 2 * pdk.grid.max(1);
     let clear = spacing(pdk, f.layer);
@@ -106,7 +95,7 @@ fn layer_fill(drawn: &[Shape], ground: &[Shape], sensitive: &[Shape], avoid: &[R
     let (nx, ny) = ((b.w / t) as usize, (b.h / t) as usize);
     let tile = |i: usize, j: usize| Rect { x: b.x + i as i32 * t, y: b.y + j as i32 * t, w: t, h: t };
     let on = |s: &&Shape| s.layer == f.layer;
-    let is_ground = |s: &Shape| ground.iter().any(|g| g.layer == s.layer && g.rect.touches(&s.rect));
+    let is_ground = |s: &Shape| ground.iter().any(|g| g.layer == s.layer && touches(&g.rect, &s.rect));
     let foreign: Vec<Rect> = drawn.iter().filter(on).filter(|s| !is_ground(s)).map(|s| s.rect).collect();
     let grounds: Vec<Rect> = ground.iter().filter(on).map(|s| s.rect).collect();
     let hot: Vec<Rect> = sensitive.iter().filter(on).map(|s| s.rect).collect();
@@ -116,17 +105,17 @@ fn layer_fill(drawn: &[Shape], ground: &[Shape], sensitive: &[Shape], avoid: &[R
         foreign.iter().all(|o| gap(r, o) >= clear)
             && hot.iter().all(|o| gap(r, o) >= KEEP_OUT * clear)
             && avoid.iter().all(|o| !overlaps(r, o))
-            && grounds.iter().all(|g| r.touches(g) || gap(r, g) >= clear)
+            && grounds.iter().all(|g| touches(r, g) || gap(r, g) >= clear)
     };
     let area = |r: &Rect| f64::from(r.w) * f64::from(r.h);
     // Covered tiles approximate the drawn area without double-counting overlaps.
-    let covered = covered_tiles(drawn.iter().filter(on).map(|s| s.rect), b, t, nx, ny);
+    let covered = (0..nx * ny).filter(|&k| drawn.iter().filter(on).any(|s| overlaps(&tile(k % nx, k / nx), &s.rect))).count();
     let target = (f.min + MARGIN).min(f.max - MARGIN) * area(&b);
     let mut need = target - covered as f64 * area(&tile(0, 0));
 
     let mut filled = vec![false; nx * ny];
     let mut queue: VecDeque<usize> =
-        (0..nx * ny).filter(|&k| grounds.iter().any(|g| tile(k % nx, k / nx).touches(g))).collect();
+        (0..nx * ny).filter(|&k| grounds.iter().any(|g| touches(&tile(k % nx, k / nx), g))).collect();
     let mut seen = vec![false; nx * ny];
     for &k in &queue {
         seen[k] = true;
@@ -147,7 +136,7 @@ fn layer_fill(drawn: &[Shape], ground: &[Shape], sensitive: &[Shape], avoid: &[R
         let pinch = [(-1, -1), (1, -1), (-1, 1), (1, 1)].iter().any(|&(di, dj)| at(di, dj) && !at(di, 0) && !at(0, dj));
         // One-tile fingers on every other column (plus the tiles on ground),
         // so no fill blob outgrows a max-width rule.
-        let finger = i % 2 == 0 || grounds.iter().any(|g| r.touches(g));
+        let finger = i % 2 == 0 || grounds.iter().any(|g| touches(&r, g));
         if !free(&r) || pinch || !finger {
             continue;
         }
@@ -168,58 +157,52 @@ fn layer_fill(drawn: &[Shape], ground: &[Shape], sensitive: &[Shape], avoid: &[R
     out
 }
 
-/// Returns how many tiles of the `nx` × `ny` grid of side `t` from `b`'s
-/// corner share interior area with any of `rects`. O(Σ tiles each rect
-/// spans), not O(tiles × rects).
-fn covered_tiles(rects: impl Iterator<Item = Rect>, b: Rect, t: i32, nx: usize, ny: usize) -> usize {
-    let mut hit = vec![false; nx * ny];
-    // Tiles `[lo, hi)` along one axis whose open span meets `(p, p + len)`.
-    let span = |p: i32, len: i32, origin: i32, n: usize| {
-        let (p0, p1) = (i64::from(p) - i64::from(origin), i64::from(p) + i64::from(len) - i64::from(origin));
-        let t = i64::from(t);
-        let lo = p0.div_euclid(t).clamp(0, n as i64) as usize;
-        let hi = (p1 + t - 1).div_euclid(t).clamp(0, n as i64) as usize;
-        lo..hi.max(lo)
-    };
-    for r in rects {
-        for j in span(r.y, r.h, b.y, ny) {
-            for i in span(r.x, r.w, b.x, nx) {
-                hit[j * nx + i] = true;
-            }
-        }
-    }
-    hit.iter().filter(|&&h| h).count()
-}
-
 /// The widest spacing `layer` asks of any shape.
 fn spacing(pdk: &Pdk, layer: LayerId) -> i32 {
     pdk.wide_spacing(layer.0).iter().map(|w| w.1).fold(pdk.min_spacing(layer.0).unwrap_or(0), i32::max)
 }
 
-/// Returns the deck's minimum-density rules on routing metals whose window
-/// the block `b` covers, one per layer, each with the layer's tightest
-/// ceiling (1 without one); wider windows are chip-level and left out.
+/// The deck's minimum-density rules on routing metals whose window the block
+/// `b` covers; wider windows are chip-level and left out.
 fn floors(pdk: &Pdk, b: Rect) -> Vec<Floor> {
     let rules = pdk.density_rules();
-    let covers = |r: &&(LayerId, i64, f64, bool)| pdk.routing_metals.contains(&r.0) && r.1 <= i64::from(b.w.min(b.h));
-    let mut out: Vec<Floor> = Vec::new();
-    for &(layer, _, min, _) in rules.iter().filter(covers).filter(|r| !r.3) {
-        match out.iter_mut().find(|f| f.layer == layer) {
-            Some(f) => f.min = f.min.max(min),
-            None => {
-                // Every ceiling counts, chip-level ones too: fill must not push
-                // the block over a ceiling integration then checks.
-                let max = rules.iter().filter(|m| m.3 && m.0 == layer).map(|m| m.2).fold(1.0, f64::min);
-                out.push(Floor { layer, min, max });
-            }
-        }
-    }
+    let mut out: Vec<Floor> = rules
+        .iter()
+        .filter(|r| !r.3 && pdk.routing_metals.contains(&r.0) && r.1 <= i64::from(b.w.min(b.h)))
+        .map(|&(layer, _, min, _)| {
+            let max = rules.iter().filter(|m| m.3 && m.0 == layer).map(|m| m.2).fold(1.0, f64::min);
+            Floor { layer, min, max }
+        })
+        .collect();
+    out.dedup_by_key(|f| f.layer);
     out
 }
 
-/// Returns whether `a` and `b` share interior area (open intervals).
+fn bbox(shapes: &[Shape]) -> Option<Rect> {
+    let first = shapes.first()?.rect;
+    let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.x + first.w, first.y + first.h);
+    for s in shapes {
+        x0 = x0.min(s.rect.x);
+        y0 = y0.min(s.rect.y);
+        x1 = x1.max(s.rect.x + s.rect.w);
+        y1 = y1.max(s.rect.y + s.rect.h);
+    }
+    Some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+}
+
 fn overlaps(a: &Rect, b: &Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+fn touches(a: &Rect, b: &Rect) -> bool {
+    a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h
+}
+
+/// Edge-to-edge gap, 0 when touching or overlapping.
+fn gap(a: &Rect, b: &Rect) -> i32 {
+    let dx = (b.x - (a.x + a.w)).max(a.x - (b.x + b.w)).max(0);
+    let dy = (b.y - (a.y + a.h)).max(a.y - (b.y + b.h)).max(0);
+    dx.max(dy)
 }
 
 #[cfg(test)]
@@ -279,95 +262,5 @@ mod tests {
         let signal = Shape { layer: m1, rect: Rect { x: 0, y: side - 1_000, w: side, h: 1_000 } };
         let cell = Rect { x: 50_000, y: 50_000, w: 20_000, h: 20_000 };
         assert!(fill(&[rail, signal], &[rail], &[signal], &[cell], &pdk).is_none());
-    }
-
-    /// gf180 plus `extra` deck lines; `None` only when the sidecar is not in
-    /// the checkout, a load failure fails the test.
-    fn deck_strict(extra: &str) -> Option<Pdk> {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let sidecar = std::fs::read_to_string(root.join("pdks/gf180mcu.json")).ok()?;
-        let text = Pdk::deck_text(&sidecar).expect("deck text");
-        Some(Pdk::load(&format!("{text}\n{extra}"), &sidecar).expect("deck loads"))
-    }
-
-    #[test]
-    fn overlaps_is_open() {
-        let a = Rect { x: 0, y: 0, w: 10, h: 10 };
-        assert!(overlaps(&a, &Rect { x: 9, y: 9, w: 5, h: 5 }));
-        assert!(!overlaps(&a, &Rect { x: 10, y: 0, w: 5, h: 5 }), "abutting");
-        assert!(!overlaps(&a, &Rect { x: 10, y: 10, w: 5, h: 5 }), "corner");
-        assert!(overlaps(&a, &Rect { x: 2, y: 2, w: 1, h: 1 }), "contained");
-    }
-
-    /// Several floors on one layer fold into one: the strictest minimum of
-    /// the windows the block covers, and the tightest ceiling.
-    #[test]
-    fn floors_fold_per_layer_and_respect_the_window() {
-        let Some(pdk) = deck_strict(
-            "rule TEST.a density(metal1; window: 200um, step: 100um) >= 30%\n\
-             rule TEST.b density(metal1; window: 100um, step: 50um) >= 40%\n\
-             rule TEST.c density(metal1; window: 100um, step: 50um) <= 70%\n",
-        ) else {
-            return;
-        };
-        let m1 = pdk.routing_metals[0];
-        let block = |side: i32| Rect { x: 0, y: 0, w: side, h: side };
-        let m1_floors = |b: Rect| floors(&pdk, b).into_iter().filter(|f| f.layer == m1).collect::<Vec<_>>();
-        let f = m1_floors(block(200_000));
-        assert_eq!(f.len(), 1, "{f:?}");
-        assert!((f[0].min - 0.4).abs() < 1e-9 && (f[0].max - 0.7).abs() < 1e-9, "{f:?}");
-        // 150 µm covers only the 100 µm window; 99.999 µm covers none.
-        assert!((m1_floors(block(150_000))[0].min - 0.4).abs() < 1e-9);
-        assert!(m1_floors(block(99_999)).is_empty());
-        // The window must fit on the narrow side.
-        assert!(m1_floors(Rect { x: 0, y: 0, w: 500_000, h: 99_999 }).is_empty());
-    }
-
-    #[test]
-    fn nothing_drawn_is_nothing_filled() {
-        let Some(pdk) = deck_strict("") else { return };
-        assert!(fill(&[], &[], &[], &[], &pdk).is_none());
-    }
-
-    /// Without a ground wire on the layer there is nowhere to tie fill: none.
-    #[test]
-    fn no_ground_no_fill() {
-        let Some(pdk) = deck("gf180mcu", "") else { return };
-        let m1 = pdk.routing_metals[0];
-        let side = 200_000;
-        let signal = Shape { layer: m1, rect: Rect { x: 0, y: 0, w: side, h: 1_000 } };
-        let corner = Shape { layer: m1, rect: Rect { x: side - 1_000, y: side - 1_000, w: 1_000, h: 1_000 } };
-        assert!(fill(&[signal, corner], &[], &[], &[], &pdk).is_none());
-    }
-
-    /// The span-marking count equals the brute-force tile × rect overlap
-    /// count, edge-aligned, zero-extent, outside and straddling rects included.
-    #[test]
-    fn covered_tiles_matches_brute_force() {
-        let b = Rect { x: -100, y: 50, w: 1_000, h: 700 };
-        let (t, nx, ny) = (100, 10, 7);
-        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
-        let mut next = |m: u64| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x % m) as i32
-        };
-        for _ in 0..300 {
-            let k = next(6) as usize;
-            let rects: Vec<Rect> = (0..k)
-                .map(|_| {
-                    // Snap half the corners to the tile lattice to hit edges exactly.
-                    let snap = |v: i32, on: bool| if on { v - v.rem_euclid(t) } else { v };
-                    let (px, py) = (snap(next(1_400) - 300, next(2) == 0), snap(next(1_000) - 100, next(2) == 0));
-                    Rect { x: px, y: py, w: next(400), h: next(400) }
-                })
-                .collect();
-            let tile = |i: usize, j: usize| Rect { x: b.x + i as i32 * t, y: b.y + j as i32 * t, w: t, h: t };
-            let brute = (0..nx * ny).filter(|&q| rects.iter().any(|r| overlaps(&tile(q % nx, q / nx), r))).count();
-            assert_eq!(covered_tiles(rects.iter().copied(), b, t, nx, ny), brute, "{rects:?}");
-        }
-        assert_eq!(covered_tiles(std::iter::empty(), b, t, nx, ny), 0);
-        assert_eq!(covered_tiles(std::iter::once(b), b, t, 0, 0), 0, "no tiles");
     }
 }

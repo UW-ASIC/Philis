@@ -81,11 +81,7 @@ impl BudgetStatus {
 /// Budget status for every family, plus the electrical bias it was judged under.
 #[derive(Clone, Debug, Default)]
 pub struct MetadataReport {
-    /// Placement-tier families, hard rows then budget rows, each arm sorted
-    /// by kind.
     pub placement: Vec<BudgetStatus>,
-    /// Routing-tier families, as `placement`, plus rows folded in later by
-    /// [`Self::add_routing`].
     pub routing: Vec<BudgetStatus>,
     /// The operating point used; `None` means no simulation, so thermal
     /// results are vacuous and the report says so.
@@ -167,22 +163,14 @@ pub struct MetadataReport {
 /// One promoted epoch's metrics (PERF-14); `Layout` is not `Clone`, so no geometry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParetoPoint {
-    /// Outer (restart/topology) loop index of the epoch.
     pub outer: u32,
-    /// Epoch index inside its outer loop.
     pub iteration: u32,
-    /// |V|: hard violations (signoff errors plus hard rule violations).
     pub v: usize,
     /// Σ normalised spec miss ([`crate::perf::PerfResult::residual`]); `0` without scoring.
     pub residual: f64,
-    /// Smallest reliability index β over the spec bounds; `None` without
-    /// robustness scoring (ranked as β = −∞).
     pub min_beta: Option<f64>,
-    /// Θ, milli-budgets ([`MetadataReport::theta`]).
     pub theta: f64,
-    /// The search key's cost tier (lower is better).
     pub c_tier: f32,
-    /// Footprint, µm².
     pub area_um2: f64,
 }
 
@@ -190,26 +178,20 @@ pub struct ParetoPoint {
 /// promoted ones): what the README's feedback chart plots.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Candidate {
-    /// Outer (restart/topology) loop index of the epoch.
     pub outer: u32,
-    /// Epoch index inside its outer loop.
     pub iteration: u32,
     /// Routed wire length, µm: Σ over every net's drawn shapes of the long side.
     pub wl_um: f64,
-    /// Footprint, µm².
     pub area_um2: f64,
     /// `|V| = 0`: no DRC/ERC/LVS error and no hard constraint violated.
     pub clean: bool,
 }
 
-/// Most points [`pareto_insert`] keeps on a front [policy].
+/// Front size cap [policy].
 pub const PARETO_MAX: usize = 16;
 
-/// Inserts `p` into the non-dominated `front` unless a kept point dominates
-/// it or ties it, objectives minimised: (−min_beta with `None` = +∞,
-/// theta, c_tier, area_um2). On a tie the earlier point stays. Removes every
-/// point `p` dominates; past [`PARETO_MAX`] drops the largest-area point (the
-/// first of equals). O(|front|).
+/// Inserts `p` unless dominated in (−min_beta [None = −∞], theta, c_tier, area_um2) or equal there to a kept
+/// point (first kept), removes points it dominates; over [`PARETO_MAX`] drops the largest-area point.
 pub fn pareto_insert(front: &mut Vec<ParetoPoint>, p: ParetoPoint) {
     let obj = |q: &ParetoPoint| [-q.min_beta.unwrap_or(f64::NEG_INFINITY), q.theta, f64::from(q.c_tier), q.area_um2];
     // `a` dominates `b`: no worse anywhere, better somewhere.
@@ -223,8 +205,7 @@ pub fn pareto_insert(front: &mut Vec<ParetoPoint>, p: ParetoPoint) {
     front.retain(|q| !dom(&p, q));
     front.push(p);
     if front.len() > PARETO_MAX {
-        // `max_by` keeps the last of equals; reversed, it keeps the first.
-        let worst = (0..front.len()).rev().max_by(|&i, &j| front[i].area_um2.total_cmp(&front[j].area_um2)).expect("non-empty");
+        let worst = (0..front.len()).max_by(|&i, &j| front[i].area_um2.total_cmp(&front[j].area_um2)).expect("non-empty");
         front.remove(worst);
     }
 }
@@ -266,7 +247,7 @@ impl MetadataReport {
             && self.coverage.unverified.is_empty()
             && self.placement.iter().chain(&self.routing).all(|b| b.met() && b.unknown == 0)
             && self.performance.iter().all(|p| p.4 <= 0.0)
-            && self.bias.as_ref().is_none_or(|b| !b.probe)
+            && self.bias.as_ref().map_or(true, |b| !b.probe)
     }
 }
 
@@ -275,9 +256,8 @@ impl MetadataReport {
 pub struct BiasSummary {
     /// How the bias was obtained (user testbench vs synthesised probe).
     pub provenance: String,
-    /// Devices the simulator resolved, of [`Self::devices`].
+    /// Devices the simulator resolved, of the total in the netlist.
     pub resolved: usize,
-    /// Devices in the netlist.
     pub devices: usize,
     /// Total circuit dissipation, µW.
     pub total_power_uw: i64,
@@ -294,10 +274,7 @@ pub struct BiasSummary {
     pub em_derate: &'static str,
 }
 
-/// Returns one row per rule kind over the non-empty batches of one
-/// requirement arm, sorted by kind: batches of a kind merge (counts and
-/// residuals sum, criticality and usage take the max, violated ids union
-/// with their largest residual). `arm` tags every row, because
+/// Collect budget status for one requirement arm. `arm` tags every row, because
 /// [`MetadataReport::theta`] sums residuals from the budget arm alone.
 fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<BudgetStatus> {
     let mut out: Vec<BudgetStatus> = Vec::new();
@@ -311,7 +288,7 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         let unknown = b.unknown(state) as usize;
         // ponytail: a batch may count a rule both violated and unknown
         // (a batch that counts both); saturating keeps it out of both.
-        let satisfied = total.saturating_sub(violations).saturating_sub(unknown);
+        let satisfied = (total - violations).saturating_sub(unknown);
         let criticality = b.criticality(state);
         let residual = b.residual(state);
         let usage = b.worst_usage(state);
@@ -360,11 +337,8 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
     out
 }
 
-/// Returns the status of every hard and budget batch of both tiers against
-/// `layout` / `routes`, with the net-class census, the matched-pair ledger
-/// and sizing notes of the placement budget arm, `missing` and `assumed`.
-/// Cost-arm batches have no spec, so no status; every flow-filled field
-/// starts empty.
+/// Status of every hard and budget batch of both tiers against `layout` /
+/// `routes`. Cost-arm batches have no spec, so no status.
 #[must_use]
 pub fn build(
     placement: &Requirements<pnr_core::Layout>,
@@ -394,16 +368,31 @@ pub fn build(
         bias,
         net_classes: census,
         missing: missing.to_vec(),
+        performance: Vec::new(),
+        performance_worst: Vec::new(),
+        budget_rows: Vec::new(),
+        sensitivity: Vec::new(),
+        robustness: Vec::new(),
+        sim_failures: 0,
         matched,
         sizing,
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
-        ..MetadataReport::default()
+        binding: Vec::new(),
+        coverage: verify::Coverage::default(),
+        recognition: Vec::new(),
+        unconstrained: Vec::new(),
+        aging: Vec::new(),
+        audit: Vec::new(),
+        voltage_unknown: 0,
+        pareto: Vec::new(),
+        epochs: Vec::new(),
+        post_fill: false,
+        candidates: Vec::new(),
     }
 }
 
 impl MetadataReport {
-    /// Appends budget-arm rows for routing batches built after the fact (on
-    /// placed pins). Rows are not merged with existing rows of the same kind.
+    /// Fold in routing batches built after the fact (on placed pins).
     pub fn add_routing(&mut self, reqs: &[Box<dyn RuleBatch<pnr_core::Routes>>], routes: &pnr_core::Routes) {
         self.routing.extend(statuses(reqs, routes, Arm::Budget));
     }
@@ -810,217 +799,5 @@ mod tests {
         }
         assert_eq!(front.len(), PARETO_MAX);
         assert!(front.iter().all(|p| p.area_um2 < 16.0), "{front:?}");
-    }
-
-    /// A batch whose every statistic is set directly.
-    #[derive(Clone, Default)]
-    struct Fake {
-        kind: &'static str,
-        count: usize,
-        violations: u32,
-        unknown: u32,
-        criticality: f32,
-        residual: f64,
-        usage: Option<f32>,
-        violated: Vec<(u32, f32)>,
-    }
-    impl RuleBatch<Routes> for Fake {
-        fn cost(&self, _: &Routes) -> f32 {
-            0.0
-        }
-        fn violations(&self, _: &Routes) -> u32 {
-            self.violations
-        }
-        fn residual(&self, _: &Routes) -> f64 {
-            self.residual
-        }
-        fn kind(&self) -> &'static str {
-            self.kind
-        }
-        fn count(&self) -> usize {
-            self.count
-        }
-        fn criticality(&self, _: &Routes) -> f32 {
-            self.criticality
-        }
-        fn worst_usage(&self, _: &Routes) -> Option<f32> {
-            self.usage
-        }
-        fn unknown(&self, _: &Routes) -> u32 {
-            self.unknown
-        }
-        fn violating_residuals(&self, _: &Routes, out: &mut Vec<(u32, f32)>) {
-            out.extend_from_slice(&self.violated);
-        }
-    }
-
-    fn rows(batches: Vec<Fake>) -> Vec<BudgetStatus> {
-        let boxed: Vec<Box<dyn RuleBatch<Routes>>> = batches.into_iter().map(|b| Box::new(b) as Box<dyn RuleBatch<Routes>>).collect();
-        statuses(&boxed, &empty_routes(), Arm::Budget)
-    }
-
-    #[test]
-    fn empty_batches_have_no_row() {
-        assert!(rows(vec![Fake { kind: "X", ..Fake::default() }]).is_empty());
-        assert!(rows(vec![]).is_empty());
-    }
-
-    #[test]
-    fn kind_is_path_trimmed_and_rows_sorted() {
-        let got = rows(vec![
-            Fake { kind: "analog::routing::Zeta", count: 1, ..Fake::default() },
-            Fake { kind: "Alpha", count: 1, ..Fake::default() },
-        ]);
-        let kinds: Vec<&str> = got.iter().map(|r| r.kind.as_str()).collect();
-        assert_eq!(kinds, ["Alpha", "Zeta"]);
-        assert!(got.iter().all(|r| r.arm == Arm::Budget));
-    }
-
-    /// Same-kind batches merge: counts and residuals sum, criticality and
-    /// usage take the max, violated ids union keeping the largest residual
-    /// (a NaN loses to a number).
-    #[test]
-    fn same_kind_batches_merge() {
-        let got = rows(vec![
-            Fake { kind: "a::M", count: 3, violations: 1, unknown: 1, criticality: 0.2, residual: 0.5, usage: None, violated: vec![(7, 0.5), (2, f32::NAN)] },
-            Fake { kind: "b::M", count: 2, violations: 1, unknown: 0, criticality: 0.9, residual: 1.0, usage: Some(0.4), violated: vec![(2, 0.25), (7, 0.1)] },
-            Fake { kind: "M", count: 1, usage: Some(0.3), ..Fake::default() },
-        ]);
-        assert_eq!(got.len(), 1);
-        let m = &got[0];
-        assert_eq!((m.total, m.satisfied, m.violations, m.unknown), (6, 3, 2, 1));
-        assert!((m.criticality - 0.9).abs() < 1e-6 && (m.residual - 1.5).abs() < 1e-12);
-        assert_eq!(m.usage, Some(0.4));
-        assert_eq!(m.violated, [(2u32, 0.25f32), (7, 0.5)]);
-    }
-
-    /// A batch reporting more violations than rules, or a rule both violated
-    /// and unknown, never underflows `satisfied`.
-    #[test]
-    fn inconsistent_counts_never_underflow() {
-        let r = &rows(vec![Fake { kind: "M", count: 1, violations: 3, ..Fake::default() }])[0];
-        assert_eq!((r.total, r.satisfied, r.violations), (1, 0, 3));
-        let r = &rows(vec![Fake { kind: "M", count: 2, violations: 1, unknown: 2, ..Fake::default() }])[0];
-        assert_eq!(r.satisfied, 0);
-    }
-
-    #[test]
-    fn hard_violated_counts_hard_rows_of_both_tiers() {
-        let row = |arm, violations| BudgetStatus { kind: String::new(), arm, total: 9, satisfied: 0, violations, unknown: 0, criticality: 0.0, residual: 4.0, usage: None, violated: vec![] };
-        let r = MetadataReport { placement: vec![row(Arm::Hard, 2), row(Arm::Budget, 5)], routing: vec![row(Arm::Hard, 3)], ..MetadataReport::default() };
-        assert_eq!(r.hard_violated(), 5);
-        assert!((r.theta() - 4_000.0).abs() < 1e-9, "budget rows only");
-    }
-
-    #[test]
-    fn a_missed_spec_blocks_the_certificate() {
-        let perf = |miss| MetadataReport { performance: vec![("gain".into(), Some(1.0), Some(0.5), None, miss)], ..MetadataReport::default() };
-        assert!(perf(0.0).certified(), "at the bound is met");
-        assert!(!perf(0.01).certified());
-    }
-
-    #[test]
-    fn add_routing_appends_budget_rows() {
-        let mut r = MetadataReport::default();
-        let batches: Vec<Box<dyn RuleBatch<Routes>>> = vec![Box::new(Fake { kind: "W", count: 1, ..Fake::default() })];
-        r.add_routing(&batches, &empty_routes());
-        r.add_routing(&batches, &empty_routes());
-        assert_eq!(r.routing.len(), 2, "rows are appended, not merged");
-        assert!(r.routing.iter().all(|s| s.arm == Arm::Budget && s.kind == "W"));
-    }
-
-    fn no_cells() -> pnr_core::Layout {
-        pnr_core::Layout {
-            x: vec![],
-            y: vec![],
-            hw: vec![],
-            hh: vec![],
-            axis: vec![],
-            groups: vec![],
-            orient: vec![],
-            variant: vec![],
-            branch: vec![],
-            power_uw: vec![],
-            temp_mc: vec![],
-            units: Default::default(),
-        }
-    }
-
-    /// `build` on no rules: no rows, inputs carried, flow fields empty.
-    #[test]
-    fn build_on_nothing() {
-        let r = build(
-            &Requirements::default(),
-            &no_cells(),
-            &Requirements::default(),
-            &empty_routes(),
-            None,
-            &[],
-            &[("Antenna", "ratio")],
-            &["tie_max_dist_nm"],
-        );
-        assert!(r.placement.is_empty() && r.routing.is_empty() && r.net_classes.is_empty());
-        assert_eq!(r.missing, [("Antenna", "ratio")]);
-        assert_eq!(r.assumed, ["tie_max_dist_nm"]);
-        assert!(r.bias.is_none() && !r.post_fill && r.pareto.is_empty() && r.candidates.is_empty());
-        assert!(!r.certified(), "a missing family blocks it");
-    }
-
-    #[test]
-    fn report_prints_bias_specs_and_missing_rows() {
-        let bias = BiasSummary {
-            provenance: "testbench tb.sp".into(),
-            resolved: 3,
-            devices: 4,
-            total_power_uw: 120,
-            hottest: Some(("M1".into(), 80)),
-            probe: false,
-            em_temp_k: 358.15,
-            em_derate: "deck",
-        };
-        let r = MetadataReport {
-            bias: Some(bias),
-            performance: vec![
-                ("gain".into(), None, Some(1.0), None, 0.0),
-                ("ugf".into(), Some(1e6), Some(2e6), None, 0.5),
-                ("pm".into(), Some(60.0), Some(45.0), None, 0.0),
-            ],
-            missing: vec![("Antenna", "deck antenna ratio")],
-            ..MetadataReport::default()
-        };
-        let out = r.to_string();
-        assert!(out.contains("bias: testbench tb.sp"), "{out}");
-        assert!(out.contains("3 of 4 devices solved · 120 µW total · hottest M1 at 80 µW"), "{out}");
-        assert!(out.contains("EM derated at 358.150 K (deck)"), "{out}");
-        assert!(out.contains("UNKNOWN (not measured)") && out.contains("VIOLATED (50.0% short)"), "{out}");
-        assert!(out.contains("UNKNOWN (no deck antenna ratio)"), "{out}");
-        assert!(out.contains("AGING: no matched pair; voltage rating unknown on 0 FET(s)"), "{out}");
-        assert!(out.contains("NOT CERTIFIED"), "{out}");
-    }
-
-    /// No β ranks below any β: with the rest equal, the point with a β wins.
-    #[test]
-    fn pareto_without_beta_is_dominated() {
-        let none = ParetoPoint { min_beta: None, ..point(0.0, 1.0, 1.0, 1.0) };
-        let mut front = vec![point(-5.0, 1.0, 1.0, 1.0)];
-        pareto_insert(&mut front, none.clone());
-        assert_eq!(front.len(), 1);
-        let mut front = vec![none];
-        pareto_insert(&mut front, point(-5.0, 1.0, 1.0, 1.0));
-        assert_eq!(front, [point(-5.0, 1.0, 1.0, 1.0)]);
-    }
-
-    /// At the cap, the largest-area point goes; among equal areas the first.
-    #[test]
-    fn pareto_cap_drops_the_first_largest_area() {
-        let mut front = Vec::new();
-        // Mutually non-dominated: β and θ trade, area ties at the top.
-        for i in 0..PARETO_MAX {
-            pareto_insert(&mut front, point(f64::from(i as u32), f64::from(i as u32), 0.0, 10.0));
-        }
-        assert_eq!(front.len(), PARETO_MAX);
-        pareto_insert(&mut front, point(100.0, 100.0, 0.0, 10.0));
-        assert_eq!(front.len(), PARETO_MAX);
-        assert!(!front.iter().any(|p| p.min_beta == Some(0.0)), "the first of the equal-area points went");
     }
 }

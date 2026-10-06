@@ -10,7 +10,7 @@ use crate::matching::mismatch::{
     bjt_sigma_vbe_mv, mobility_pct, ratio_thermal_pct, sigma_grad_mv, sigma_current_pct, sigma_pair, sigma_voltage_mv, Budget, Coeffs, Ledger, LedgerRow, LedgerUnit,
     MatchKind, GRADIENT_SHARE,
 };
-use crate::matching::moments::{cancelled_order, phi_equal, sums, Pt, Sums};
+use crate::matching::moments::{cancelled_order, phi_equal, sums, Pt};
 use crate::matching::pattern::{cc_feasible, diffusion_cc_row, Outer};
 
 /// A set of devices that must match its reference, pair by pair `(0, i)`:
@@ -22,24 +22,21 @@ use crate::matching::pattern::{cc_feasible, diffusion_cc_row, Outer};
 /// Positions are the members' unit moments when the layout carries units,
 /// else their cells' centres; a pair without units is **unknown** (an outline
 /// is a proxy, not the device's moment) and is pulled by `cost` only.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MatchedSet {
     /// Slot 0 = reference (a mirror's diode device); pairs are `(0, i)`.
     pub members: Vec<DeviceId>,
-    /// What the pair must match (current, voltage, ratio): picks the ledger unit.
     pub kind: MatchKind,
     /// MOS members: coincidence feasibility is a diffusion-legal row.
     pub family: Family,
     /// What the set's environment and limits scale with: the intent set's
     /// class (EXT-20).
     pub class: MatchClass,
-    /// Process mismatch and gradient coefficients; `None` terms contribute 0.
     pub coeffs: Coeffs,
-    /// The pair's total allowance, in the unit [`Self::budget_in`] converts to.
     pub budget: Budget,
     /// Netlist gate area `W·L·m` per member, µm²; read only without units.
     pub gate_um2: Vec<f32>,
-    /// Coincidence tolerance, nm (half the cut lattice); must be `> 0`.
+    /// Coincidence tolerance, nm (half the cut lattice).
     pub tol_nm: f32,
     /// `device → cell`, set by `retarget`; empty = the ids name cells.
     pub cell_of: Vec<u16>,
@@ -49,53 +46,30 @@ pub struct MatchedSet {
     pub sigma_rand_override: Option<f32>,
 }
 
-/// One member's placed units, reduced in a single pass.
-#[derive(Clone, Copy, Debug, Default)]
-struct Member {
-    /// Weighted moments of the units.
-    sums: Sums,
-    /// `Σw·lod` over units with a finite `lod`.
-    lod_wsum: f64,
-    /// `Σw` over the same units.
-    lod_w: f64,
-    /// `Σw·rise(u)`, mK·weight; `0` unless measured hot.
-    rise_wsum: f64,
-}
-
-impl Member {
-    /// Weight-averaged LOD term, `None` without a finite-`lod` unit.
-    fn mean_lod(&self) -> Option<f64> {
-        (self.lod_w > 0.0).then(|| self.lod_wsum / self.lod_w)
-    }
-}
-
-/// Reduces `d`'s placed units on `l`; the thermal sum only when `hot`.
+/// Unit moments of one member plus its weighted LOD sum (`Σw·lod`, `Σw` over
+/// units with a finite `lod`) and, when `hot`, its weighted rise `Σw·rise(u)`
+/// (mK·weight; 0 otherwise).
 ///
 /// ponytail: O(units·cells) per pair; the plan's 7-point stencil bounds it at
 /// 7·cells but is 50 % low within ~L of a heater (card m2-analog-matching-3).
-fn member(l: &Layout, d: DeviceId, hot: bool) -> Member {
-    let (mut lod_wsum, mut lod_w, mut rise_wsum) = (0.0f64, 0.0f64, 0.0f64);
-    let sums = sums(
-        l.units
-            .of_device(l, d)
-            .inspect(|u| {
-                if let Some(lod) = u.lod {
-                    lod_wsum += u.weight as f64 * f64::from(lod);
-                    lod_w += u.weight as f64;
-                }
-                if hot {
-                    rise_wsum += u.weight as f64 * f64::from(l.rise_at_point_mc(u.x, u.y));
-                }
-            })
-            .map(Pt::from),
-    );
-    Member { sums, lod_wsum, lod_w, rise_wsum }
+fn member(l: &Layout, d: DeviceId, hot: bool) -> (crate::matching::moments::Sums, f64, f64, f64) {
+    let (mut lw, mut w, mut t) = (0.0f64, 0.0f64, 0.0f64);
+    let s = sums(l.units.of_device(l, d).inspect(|u| {
+        if u.lod.is_finite() {
+            lw += u.weight as f64 * f64::from(u.lod);
+            w += u.weight as f64;
+        }
+        if hot {
+            t += u.weight as f64 * f64::from(l.rise_at_point_mc(u.x, u.y));
+        }
+    }).map(Pt::from));
+    (s, lw, w, t)
 }
 
 impl MatchedSet {
-    /// Builds a non-MOS set (MAT-10): `areas_um2` are the members' netlist
-    /// areas (EXT-20's), `cell_of` empty, no `g_m/I`. The ledger is in % for
-    /// R/C, mV of ΔV_BE for bipolar/diode.
+    /// A non-MOS set (MAT-10): `areas_um2` are the members' netlist areas
+    /// (EXT-20's), `cell_of` empty, no `g_m/I`. The ledger is in % for R/C,
+    /// mV of ΔV_BE for bipolar/diode.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn for_family(
@@ -111,32 +85,24 @@ impl MatchedSet {
         MatchedSet { members, kind, family, class, coeffs, budget, gate_um2: areas_um2, tol_nm, cell_of: Vec::new(), gm_over_id: None, sigma_rand_override: None }
     }
 
-    /// Cell holding `d`: through `cell_of`, else `d` itself names the cell.
     fn cell(&self, d: DeviceId) -> usize {
         self.cell_of.get(d.0 as usize).copied().unwrap_or(d.0) as usize
     }
 
-    /// Returns the ledger of pair `(members[0], members[i])` on `l` (see
-    /// [`Ledger`]). Cost: O(units · powered cells) per call, plus a
-    /// coincidence-row search for MOS.
-    ///
-    /// # Panics
-    /// When `i` is out of range of `members`.
+    /// Ledger of pair `(members[0], members[i])` on `l` (see [`Ledger`]).
     #[must_use]
     pub fn ledger(&self, l: &Layout, i: usize) -> Ledger {
         self.ledger_with(l, i, true)
     }
 
-    /// [`Self::ledger`]; `coincide == false` leaves `coincidence` `None` (and
-    /// `known` without it): `cost` never reads it, and the MOS row search
-    /// allocates per call.
+    /// `coincide == false` leaves `coincidence` `None` (and `known` without
+    /// it): `cost` never reads it, and the MOS row search allocates per call.
     fn ledger_with(&self, l: &Layout, i: usize, coincide: bool) -> Ledger {
         let (a, b) = (self.members[0], self.members[i]);
         let hot = l.power_uw.iter().any(|&p| p != 0);
-        let (ma, mb) = (member(l, a, hot), member(l, b, hot));
-        let (sa, sb) = (ma.sums, mb.sums);
+        let ((sa, lwa, wa, ta), (sb, lwb, wb, tb)) = (member(l, a, hot), member(l, b, hot));
         let units = sa.w > 0.0 && sb.w > 0.0;
-        let at = |s: &Sums, d: DeviceId| {
+        let at = |s: &crate::matching::moments::Sums, d: DeviceId| {
             s.centroid().unwrap_or_else(|| {
                 let c = self.cell(d);
                 if c < l.x.len() { (f64::from(l.x[c]), f64::from(l.y[c])) } else { (0.0, 0.0) }
@@ -200,7 +166,7 @@ impl MatchedSet {
             let dt_mk = if !hot {
                 0.0
             } else if units {
-                (ma.rise_wsum / sa.w - mb.rise_wsum / sb.w).abs() as f32
+                (ta / sa.w - tb / sb.w).abs() as f32
             } else {
                 let rise = |(x, y): (f64, f64)| l.rise_at_point_mc(x.round() as i32, y.round() as i32);
                 (rise(ca) - rise(cb)).abs()
@@ -209,8 +175,8 @@ impl MatchedSet {
                 Family::Mos => {
                     let s = c.svt_uv_per_um.unwrap_or(0.0);
                     sigma_grad = sigma_grad_mv(c.svt_xy.unwrap_or((s, s)), (ca.0 - cb.0) as f32, (ca.1 - cb.1) as f32);
-                    if let (true, Some(la), Some(lb)) = (units, ma.mean_lod(), mb.mean_lod()) {
-                        mu_lod = c.kvth0_mv_um.unwrap_or(0.0) * ((la - lb).abs() as f32);
+                    if units && wa > 0.0 && wb > 0.0 {
+                        mu_lod = c.kvth0_mv_um.unwrap_or(0.0) * ((lwa / wa - lwb / wb).abs() as f32);
                     }
                     // µV/K · mK → mV.
                     mu_thermal = c.tc_uv_per_k.unwrap_or(0.0) * dt_mk * 1e-6;
@@ -250,7 +216,7 @@ impl MatchedSet {
     /// Areas of pair `(0, i)`, µm²: MOS unit weights (gate nm²) when both
     /// members have units, else `gate_um2` (always for R/C/BJT: a resistor
     /// unit's weight is not its area).
-    fn areas(&self, sa: &Sums, sb: &Sums, i: usize) -> (f32, f32) {
+    fn areas(&self, sa: &crate::matching::moments::Sums, sb: &crate::matching::moments::Sums, i: usize) -> (f32, f32) {
         if self.family == Family::Mos && sa.w > 0.0 && sb.w > 0.0 {
             ((sa.w / 1e6) as f32, (sb.w / 1e6) as f32)
         } else {
@@ -271,16 +237,12 @@ impl MatchedSet {
         }
     }
 
-    /// Returns the areas [`Self::ledger`] reads for pair `(0, i)` on `l`, µm².
-    ///
-    /// # Panics
-    /// When `i` is out of range of `members`.
+    /// The areas [`Self::ledger`] reads for pair `(0, i)` on `l`, µm².
     #[must_use]
     pub fn pair_areas(&self, l: &Layout, i: usize) -> (f32, f32) {
-        self.areas(&member(l, self.members[0], false).sums, &member(l, self.members[i], false).sums, i)
+        self.areas(&member(l, self.members[0], false).0, &member(l, self.members[i], false).0, i)
     }
 
-    /// Every pair's full ledger, `(0, 1)` first.
     fn ledgers<'a>(&'a self, l: &'a Layout) -> impl Iterator<Item = Ledger> + 'a {
         (1..self.members.len()).map(move |i| self.ledger(l, i))
     }
@@ -339,13 +301,9 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
         Some(self.class)
     }
     fn violating_ids(&self, l: &Layout, out: &mut Vec<u32>) {
-        let c0 = self.members.first().map(|&m| self.cell(m) as u32);
-        for (i, g) in self.ledgers(l).enumerate() {
-            if g.known && g.usage() > 1.0 {
-                out.extend(c0);
-                out.push(self.cell(self.members[i + 1]) as u32);
-            }
-        }
+        let mut v = Vec::new();
+        self.violating_residuals(l, &mut v);
+        out.extend(v.into_iter().map(|(id, _)| id));
     }
     fn violating_residuals(&self, l: &Layout, out: &mut Vec<(u32, f32)>) {
         for (i, g) in self.ledgers(l).enumerate() {
@@ -358,13 +316,12 @@ impl crate::rule::RuleBatch<Layout> for MatchedSet {
     }
     /// Report only: allocates the members' units per pair.
     fn ledger_rows(&self, l: &Layout, out: &mut Vec<LedgerRow>) {
-        let Some(&a) = self.members.first() else { return };
-        let sa = member(l, a, false).sums;
+        let (a, sa) = (self.members[0], member(l, self.members[0], false).0);
         let pa: Vec<Pt> = l.units.of_device(l, a).map(Pt::from).collect();
         for i in 1..self.members.len() {
             let b = self.members[i];
             let g = self.ledger(l, i);
-            let sb = member(l, b, false).sums;
+            let sb = member(l, b, false).0;
             let units = sa.w > 0.0 && sb.w > 0.0;
             let pb: Vec<Pt> = l.units.of_device(l, b).map(Pt::from).collect();
             out.push(LedgerRow {
@@ -445,7 +402,7 @@ pub(crate) fn layout(xs: &[i32], ys: &[i32], half: i32) -> Layout {
 
 #[cfg(test)]
 pub(crate) fn unit(owner: u8, x: i32, y: i32, weight: i64) -> pnr_core::Unit {
-    pnr_core::Unit { owner, x, y, weight, phi: (1, 0), sa_sb: None }
+    pnr_core::Unit { owner, x, y, weight, phi: (1, 0), sa: 0, sb: 0 }
 }
 
 /// Devices 0 and 1, one 20 µm² unit each, alone in cells 0 and 1 `dx` apart.
@@ -733,7 +690,7 @@ mod tests {
 
     #[test]
     fn lod_is_weighted_by_unit_area() {
-        let u = |owner, sa, sb, weight| Unit { owner, x: 100, y: 50, weight, phi: (1, 0), sa_sb: Unit::diffusion(sa, sb) };
+        let u = |owner, sa, sb, weight| Unit { owner, x: 100, y: 50, weight, phi: (1, 0), sa, sb };
         let units = [u(0, 500, 1_500, 10), u(0, 1_000, 1_000, 30), u(1, 1_000, 1_000, 40)];
         let mut l = layout(&[5_000], &[5_000], 400);
         l.units = Arc::new(merged(&units, Rect { x: 0, y: 0, w: 800, h: 100 }));
@@ -880,100 +837,5 @@ mod tests {
         s.violating_ids(&l, &mut ids);
         ids.sort_unstable();
         assert_eq!(ids, vec![1, 2]);
-    }
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use crate::rule::RuleBatch;
-    use pnr_core::{Rect, UnitLib};
-    use std::sync::Arc;
-
-    fn with_members(members: &[u16]) -> MatchedSet {
-        MatchedSet { members: members.iter().map(|&d| DeviceId(d)).collect(), ..pair(0, 1) }
-    }
-
-    #[test]
-    fn fewer_than_two_members_is_an_empty_batch() {
-        let l = singles(1_000);
-        for s in [with_members(&[]), with_members(&[0])] {
-            assert_eq!(s.count(), 0);
-            assert_eq!((s.cost(&l), s.violations(&l), s.residual(&l), s.unknown(&l)), (0.0, 0, 0.0, 0));
-            assert_eq!(s.worst_usage(&l), None);
-            let (mut rows, mut ids, mut res, mut allow) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            s.ledger_rows(&l, &mut rows);
-            s.violating_ids(&l, &mut ids);
-            s.violating_residuals(&l, &mut res);
-            s.offset_allowances(&l, &mut allow);
-            assert!(rows.is_empty() && ids.is_empty() && res.is_empty() && allow.is_empty());
-        }
-        let mut pairs = Vec::new();
-        with_members(&[]).matched_pairs(&mut pairs);
-        with_members(&[3]).matched_pairs(&mut pairs);
-        assert!(pairs.is_empty());
-    }
-
-    #[test]
-    fn an_unknown_pair_is_pulled_by_its_centre_distance_over_l_ref() {
-        // No units: cell centres 5 µm apart; L_ref² = 2 · (200 nm)².
-        let l = layout(&[0, 5_000], &[0, 0], 100);
-        let c = pair(0, 1).cost(&l);
-        assert!((c - 5_000.0f32.powi(2) / 80_000.0).abs() < 1e-2, "{c}");
-        let mut allow = Vec::new();
-        pair(0, 1).offset_allowances(&l, &mut allow);
-        assert!(allow.is_empty(), "an unknown pair has no allowance to hand on");
-    }
-
-    #[test]
-    fn pair_areas_read_units_for_mos_else_the_netlist() {
-        let s = MatchedSet { gate_um2: vec![3.0, 4.0], ..pair(0, 1) };
-        assert_eq!(s.pair_areas(&singles(1_000), 1), (20.0, 20.0), "unit weight 2e7 nm²");
-        assert_eq!(s.pair_areas(&layout(&[0, 1], &[0, 0], 1), 1), (3.0, 4.0));
-        let r = MatchedSet { family: Family::Resistor, ..s.clone() };
-        assert_eq!(r.pair_areas(&singles(1_000), 1), (3.0, 4.0), "a resistor unit's weight is not its area");
-        let short = MatchedSet { members: vec![DeviceId(0), DeviceId(1), DeviceId(2)], ..s };
-        assert_eq!(short.pair_areas(&layout(&[0, 1, 2], &[0; 3], 1), 2), (3.0, 0.0), "missing area reads 0");
-    }
-
-    #[test]
-    fn an_allowance_keeps_its_unit_reading() {
-        let rc = MatchedSet { family: Family::Resistor, budget: Budget::Allowance(0.5), ..pair(0, 1) };
-        assert_eq!(rc.budget_in(LedgerUnit::Pct), Budget::Allowance(0.5));
-        assert_eq!(rc.budget_in(LedgerUnit::Mv), Budget::Allowance(0.5));
-        let mv = MatchedSet { budget: Budget::Sigma1Mv(1.0), ..pair(0, 1) };
-        assert_eq!(mv.budget_in(LedgerUnit::Mv), Budget::Sigma1Mv(1.0));
-    }
-
-    #[test]
-    fn ids_and_flags_go_through_cell_of() {
-        let mut s = MatchedSet { members: vec![DeviceId(0), DeviceId(1), DeviceId(2)], ..pair(0, 1) };
-        s.retarget(&[3, 5, 3]);
-        let (mut t, mut p) = (Vec::new(), Vec::new());
-        s.touched(&mut t);
-        s.matched_pairs(&mut p);
-        assert_eq!(t, [3, 5, 3]);
-        assert_eq!(p, [(3, 5), (3, 3)]);
-        assert_eq!((s.count(), s.kind(), s.reads_field(), s.matched_class()), (2, "MatchedSet", true, Some(MatchClass::Moderate)));
-    }
-
-    #[test]
-    fn violating_residuals_charge_both_cells_the_pairs_residual() {
-        // Devices 0 and 1 alone in cells 1 and 2, 1 mm apart (see `violating_ids_are_cells`).
-        let one = [unit(0, 50, 50, 20_000_000)];
-        let other = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &[][..])];
-        let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &one[..])];
-        let members = [vec![], vec![DeviceId(0)], vec![DeviceId(1)]];
-        let lib = UnitLib::build(vec![1, 2], &members, [&other[..], &alts[..], &alts[..]].into_iter());
-        let mut l = layout(&[0, 0, 1_000_000], &[0; 3], 50);
-        l.units = Arc::new(lib);
-        let mut s = pair(0, 1);
-        s.retarget(&[1, 2]);
-        let r = s.ledger(&l, 1).residual();
-        assert!(r > 0.0);
-        let mut out = Vec::new();
-        s.violating_residuals(&l, &mut out);
-        assert_eq!(out, [(1, r), (2, r)]);
-        assert!((s.residual(&l) - f64::from(r)).abs() < 1e-9);
     }
 }

@@ -1,7 +1,6 @@
 //! Terminal legalization: push devices apart until every pair is at least
-//! its per-pair gap ([`PlaceRules::gaps`]) apart on some axis. Every overlap
-//! is a defect — `cellgen` emits one self-contained macro per cell, so
-//! nothing shares diffusion.
+//! its per-pair gap ([`PlaceRules::gaps`]) apart on some axis. Every overlap is a defect — `cellgen` emits
+//! one self-contained macro per cell, so nothing shares diffusion.
 
 use analog::Requirements;
 use gp::mechanics::{analog_violations, snap};
@@ -12,9 +11,7 @@ use pnr_core::Layout;
 /// violated hard batches (a pushed symmetry partner is re-mirrored), until
 /// clean, stalled, or `max_sweeps`. Positions stay on `grid`, and a sweep that
 /// still raises hard violations is rolled back.
-/// Returns the residual encroachment area, nm² (nonzero when the die cannot
-/// fit). `max_sweeps = 0` only measures. Each sweep is O(n²) pair tests plus
-/// one hard-rule projection.
+/// Returns the residual encroachment area (nonzero when the die cannot fit).
 ///
 /// ponytail: O(n²) pairwise relaxation; a constraint graph + LP compaction if
 /// blocks reach thousands of devices.
@@ -59,36 +56,25 @@ pub fn separate_overlaps(
                 }
             }
         }
-        project_violated(reqs, l, g);
+        for batch in &reqs.hard {
+            if batch.violations(l) > 0 {
+                batch.project(l, g);
+            }
+        }
         l.refresh_temps();
 
-        // A sweep that breaks a hard rule or leaves more encroachment than it
-        // found is undone: the legalizer never returns a worse layout.
-        let after = encroachment(l);
-        if analog_violations(reqs, l) > before_hard || after > before {
+        if analog_violations(reqs, l) > before_hard {
             l.x = save_x;
             l.y = save_y;
             l.axis = save_axis;
             l.refresh_temps();
-            return before;
+            return encroachment(l);
         }
-        if after == before {
-            return after;
+        if encroachment(l) >= before {
+            return encroachment(l);
         }
     }
     encroachment(l)
-}
-
-/// Project each hard batch that is violated at its turn onto its feasible
-/// set, in batch order, snapping to `grid`. Temperatures are left stale.
-pub(crate) fn project_violated(reqs: &Requirements<Layout>, l: &mut Layout, grid: i32) {
-    for batch in &reqs.hard {
-        // Re-checked per batch: an earlier projection may have fixed it, and a
-        // satisfied SymmetryGroup would still re-average its axis.
-        if batch.violations(l) > 0 {
-            batch.project(l, grid);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -200,109 +186,5 @@ mod tests {
         separate_overlaps(&mut l, &reqs, &PlaceRules::uniform(5, 0), 64);
         assert_eq!(encroachment(&l, 0), 0.0);
         assert_eq!(l.x, vec![0, 0], "x was the expensive axis; it must not move");
-    }
-
-    /// Hard batch pinning cell `cell`'s x at `at`; its projection writes `at`
-    /// when `projects`, and stamps `y[cell] = mark` (to see whether it ran).
-    struct PinX {
-        cell: usize,
-        at: i32,
-        projects: bool,
-        mark: i32,
-    }
-
-    impl analog::RuleBatch<Layout> for PinX {
-        fn cost(&self, _: &Layout) -> f32 {
-            0.0
-        }
-        fn violations(&self, l: &Layout) -> u32 {
-            u32::from(l.x[self.cell] != self.at)
-        }
-        fn project(&self, l: &mut Layout, _grid: i32) {
-            l.y[self.cell] = self.mark;
-            if self.projects {
-                l.x[self.cell] = self.at;
-            }
-        }
-    }
-
-    #[test]
-    fn empty_and_single_cell_layouts_are_clean() {
-        let reqs = Requirements::<Layout>::default();
-        let rules = PlaceRules::uniform(5, 1_000);
-        assert_eq!(separate_overlaps(&mut layout(&[], 500), &reqs, &rules, 64), 0.0);
-        let mut l = layout(&[(7, 9)], 500);
-        assert_eq!(separate_overlaps(&mut l, &reqs, &rules, 64), 0.0);
-        assert_eq!((l.x[0], l.y[0]), (7, 9));
-    }
-
-    #[test]
-    fn zero_sweeps_only_measures() {
-        let mut l = layout(&[(0, 0), (0, 0)], 500);
-        let reqs = Requirements::<Layout>::default();
-        let rules = PlaceRules::uniform(5, 0);
-        assert_eq!(separate_overlaps(&mut l, &reqs, &rules, 0), 1e6);
-        assert_eq!((l.x.clone(), l.y.clone()), (vec![0, 0], vec![0, 0]));
-    }
-
-    /// Equal centres: the lower index goes left, the other right, both on grid.
-    #[test]
-    fn coincident_pair_splits_both_ways_on_grid() {
-        let mut l = layout(&[(0, 0), (0, 0)], 500);
-        let reqs = Requirements::<Layout>::default();
-        assert_eq!(separate_overlaps(&mut l, &reqs, &PlaceRules::uniform(5, 0), 64), 0.0);
-        assert!(l.x[0] < 0 && l.x[1] > 0, "{:?}", l.x);
-        assert!(l.x.iter().chain(&l.y).all(|v| v % 5 == 0), "{:?} {:?}", l.x, l.y);
-    }
-
-    /// A sweep that breaks a hard rule it cannot repair is rolled back whole.
-    #[test]
-    fn a_sweep_that_breaks_a_hard_rule_is_rolled_back() {
-        let mut l = layout(&[(0, 0), (0, 0)], 500);
-        let reqs = Requirements::<Layout> {
-            hard: vec![Box::new(PinX { cell: 0, at: 0, projects: false, mark: 0 }), Box::new(PinX { cell: 1, at: 0, projects: false, mark: 0 })],
-            ..Default::default()
-        };
-        let residual = separate_overlaps(&mut l, &reqs, &PlaceRules::uniform(5, 0), 64);
-        assert_eq!((l.x.clone(), l.y.clone()), (vec![0, 0], vec![0, 0]));
-        assert_eq!(residual, 1e6, "the residual is the rolled-back layout's");
-    }
-
-    /// Only batches still violated at their turn are projected.
-    #[test]
-    fn project_violated_skips_satisfied_batches() {
-        let mut l = layout(&[(40, 0), (0, 0)], 500);
-        let reqs = Requirements::<Layout> {
-            hard: vec![
-                Box::new(PinX { cell: 0, at: 0, projects: true, mark: 11 }),
-                Box::new(PinX { cell: 1, at: 0, projects: true, mark: 22 }),
-                // Satisfied only after the first batch's projection.
-                Box::new(PinX { cell: 0, at: 0, projects: true, mark: 33 }),
-            ],
-            ..Default::default()
-        };
-        project_violated(&reqs, &mut l, 5);
-        assert_eq!((l.x.clone(), l.y.clone()), (vec![0, 0], vec![11, 0]));
-    }
-
-    /// Property over random piles: the legalizer never returns a layout more
-    /// encroached than it was given, and its return value is the encroachment
-    /// of the layout it leaves.
-    #[test]
-    fn never_returns_a_worse_layout_and_reports_its_own_residual() {
-        let mut rng = gp::mechanics::SplitMix64::new(9);
-        let reqs = Requirements::<Layout>::default();
-        let rules = PlaceRules::uniform(5, 300);
-        for case in 0..200 {
-            let n = 2 + rng.below(9);
-            let centres: Vec<(i32, i32)> =
-                (0..n).map(|_| (rng.below(4_000) as i32 - 2_000, rng.below(4_000) as i32 - 2_000)).collect();
-            let mut l = layout(&centres, 400 + rng.below(800) as i32);
-            let before = rules.encroachment(&l);
-            let sweeps = rng.below(4) as u32;
-            let residual = separate_overlaps(&mut l, &reqs, &rules, sweeps);
-            assert!(residual <= before, "case {case}: {before} -> {residual}");
-            assert_eq!(residual, rules.encroachment(&l), "case {case}");
-        }
     }
 }

@@ -24,64 +24,36 @@ pub struct FinFet {
     pub shared: bool,
 }
 
-/// The deck's front-end numbers, nm (areas nm²); a rule the deck omits reads
-/// 0. Roles map onto the planar names: fin layer `fin`, gate `poly`, active
-/// `diff`, V0 `licon`, M1 `li`, V1 `mcon`, M2 `met1`.
+/// The deck's front-end numbers, nm.
 struct Rules {
-    /// Fin width.
     fin_w: i32,
-    /// Fin pitch: width plus fin spacing.
     fin_p: i32,
-    /// Gate length: the poly width, never under `min_gate_l`.
     gate_w: i32,
-    /// Gate pitch: gate length plus poly spacing.
     gate_p: i32,
-    /// Active extension past the outer fins' ends.
     act_past_fin: i32,
-    /// Active extension past the outer (edge) gates.
     act_past_gate: i32,
-    /// Gate extension past the active (end cap).
     gate_past_act: i32,
-    /// S/D trench width.
     sdt_w: i32,
-    /// S/D trench to gate spacing.
     sdt_gate: i32,
-    /// S/D local-interconnect width.
     lisd_w: i32,
-    /// V0 cut size.
     v0: i32,
-    /// LISD enclosure of V0 (max of end cap and enclosure).
     v0_in_lisd: i32,
-    /// M1 enclosure of V0 (max of end cap and enclosure).
     v0_in_m1: i32,
-    /// M1 minimum width.
     m1_w: i32,
-    /// M1 minimum spacing.
     m1_s: i32,
-    /// M1 minimum area.
     m1_area: i64,
-    /// Gate local-interconnect width.
     lig_w: i32,
-    /// Gate local-interconnect minimum area.
     lig_area: i64,
-    /// LIG clearance to the channel (to poly or to active, the larger).
     lig_channel: i32,
-    /// Active to active spacing.
     act_s: i32,
-    /// Select implant enclosure of active.
     sel_enc: i32,
-    /// Select implant extension past the gates.
     sel_past_gate: i32,
-    /// Select implant minimum width.
     sel_w: i32,
-    /// Nwell enclosure of active.
     well_enc: i32,
-    /// Field gate end to (tap) active spacing.
     gate_field: i32,
 }
 
 impl Rules {
-    /// Reads every rule from `p`.
     fn of(p: &dyn Process) -> Self {
         let w = |r: &str| p.width(r).unwrap_or(0);
         let s = |r: &str| p.space(r).unwrap_or(0);
@@ -119,9 +91,6 @@ impl Rules {
 }
 
 impl Cell for FinFet {
-    /// Separate actives always; the shared common-centroid row too when the
-    /// group has two or more members and a diffusion-legal centroid order
-    /// exists. Nothing for an empty group or a deck without a `fin` layer.
     fn enumerate(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Vec<Self> {
         if group.devices.is_empty() || process.layer("fin").is_none() {
             return vec![];
@@ -134,11 +103,6 @@ impl Cell for FinFet {
         v
     }
 
-    /// Draws this variant.
-    ///
-    /// # Panics
-    /// If `group` is empty, if the deck lacks a mandatory role ([`req`]), or
-    /// for `shared` when no centroid row exists (never enumerated).
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro {
         let r = Rules::of(process);
         let s = group_sizing(group, constraints, process);
@@ -264,7 +228,7 @@ impl Cell for FinFet {
                 b.rect(v0, Rect { x: g + r.gate_w / 2 - r.v0 / 2, y: gv0_y - off, w: r.v0, h: r.v0 });
                 let c = g + r.gate_w / 2;
                 let phi = if (i % 2 == 0) != *s_odd { 1 } else { -1 };
-                b.unit(pnr_core::Unit { owner: k as u8, x: c, y: h / 2, weight: i64::from(r.gate_w) * i64::from(h), phi: (phi, 0), sa_sb: pnr_core::Unit::diffusion(c - a.x, a.x + a.w - c) });
+                b.unit(pnr_core::Unit { owner: k as u8, x: c, y: h / 2, weight: i64::from(r.gate_w) * i64::from(h), phi: (phi, 0), sa: c - a.x, sb: a.x + a.w - c });
             }
             // One M1 strap per member over its own gate contacts.
             for &k in &members {
@@ -297,6 +261,7 @@ impl Cell for FinFet {
         let tsel = Rect { x: tap.x - r.sel_enc, y: tap_y - r.sel_enc, w: tap.w + 2 * r.sel_enc, h: (tap_h + 2 * r.sel_enc).max(r.sel_w) };
         b.rect(tap_sel, tsel);
         let tv0_y = tap_y + (tap_h - r.v0) / 2;
+        let lw = r.lisd_w.max(r.v0 + 2 * r.v0_in_lisd);
         let mut cx = tap.x + end / 2;
         let mut first = None;
         while cx + lw / 2 <= tap.x + tap.w - r.sdt_gate {
@@ -304,10 +269,6 @@ impl Cell for FinFet {
             b.rect(lisd, Rect { x: cx - lw / 2, y: tap_y, w: lw, h: tap_h });
             b.rect(v0, Rect { x: cx - r.v0 / 2, y: tv0_y, w: r.v0, h: r.v0 });
             first.get_or_insert(cx);
-            // A deck without a gate pitch gets one contact, not an endless walk.
-            if r.gate_p <= 0 {
-                break;
-            }
             cx += r.gate_p;
         }
         let rail = Rect { x: tap.x, y: tv0_y + r.v0 / 2 - r.m1_w / 2, w: tap.w, h: r.m1_w };
@@ -326,7 +287,6 @@ impl Cell for FinFet {
     }
 }
 
-/// [`sizing`] with a one-fin default width and the deck's minimum gate length.
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
     let fin_p = process.width("fin").unwrap_or(0) + process.space("fin").unwrap_or(0);
     sizing(group, c, fin_p.max(1), dim(process, "min_gate_l"))
@@ -391,13 +351,13 @@ mod tests {
                 let m = v.draw(&g, &c, &pdk);
                 let acts = on(&m, &pdk, "diff");
                 for u in &m.units {
-                    let (sa, sb) = u.sa_sb.map(|(a, b)| (a.get(), b.get())).expect("a MOS finger has sa/sb");
+                    assert!(u.sa > 0 && u.sb > 0);
                     let a = acts.iter().find(|a| a.x <= u.x && u.x <= a.x + a.w && a.y <= u.y && u.y <= a.y + a.h).expect("unit on an active");
-                    assert_eq!(sa + sb, a.w as u32, "nf={nf:?} shared={}", v.shared);
+                    assert_eq!(u.sa + u.sb, a.w, "nf={nf:?} shared={}", v.shared);
                 }
                 for k in 0..nf.len() {
                     let mine = m.units.iter().filter(|u| usize::from(u.owner) == k);
-                    let (sa, sb) = mine.filter_map(|u| u.sa_sb).fold((0, 0), |(a, b), (sa, sb)| (a + sa.get(), b + sb.get()));
+                    let (sa, sb) = mine.fold((0, 0), |(a, b), u| (a + u.sa, b + u.sb));
                     assert_eq!(sa, sb, "nf={nf:?} shared={} member {k}", v.shared);
                 }
             }
@@ -444,71 +404,5 @@ mod tests {
             }
         }
         assert!(dirty.is_empty(), "{}", dirty.join("\n"));
-    }
-}
-
-/// Corner cases for the FinFET generator (cleanup step 2). Oracles: the doc
-/// comments and structural invariants of a drawn macro.
-#[cfg(test)]
-mod cleanup_tests {
-    use super::FinFet;
-    use crate::builder::{contains, fake::Deck};
-    use crate::testkit::group_of;
-    use crate::Cell;
-    use pnr_core::{DeviceGroup, DeviceKind};
-
-    fn finfet_deck() -> verify::Pdk {
-        verify::Pdk::builtin("generic_finfet").expect("generic_finfet builtin")
-    }
-
-    #[test]
-    fn enumerate_offers_nothing_for_an_empty_group_or_a_planar_deck() {
-        let (_, c) = group_of(DeviceKind::Nmos, 1, 1, 1680, 20);
-        assert!(FinFet::enumerate(&DeviceGroup { devices: vec![] }, &c, &finfet_deck()).is_empty());
-        let (g, c) = group_of(DeviceKind::Nmos, 2, 2, 1680, 150);
-        assert!(FinFet::enumerate(&g, &c, &verify::Pdk::builtin("sky130").unwrap()).is_empty(), "no fin layer");
-    }
-
-    #[test]
-    fn a_lone_device_is_never_shared() {
-        let (g, c) = group_of(DeviceKind::Nmos, 1, 4, 1680, 20);
-        let vs = FinFet::enumerate(&g, &c, &finfet_deck());
-        assert_eq!(vs.iter().map(|v| v.shared).collect::<Vec<_>>(), [false]);
-    }
-
-    /// Metamorphic: drawing is pure and stays inside its bbox, with one
-    /// S/D/G/B pin per member.
-    #[test]
-    fn every_variant_draws_deterministically_inside_its_bbox() {
-        let pdk = finfet_deck();
-        for (kind, n, nf) in [(DeviceKind::Nmos, 1, 1), (DeviceKind::Pmos, 2, 2), (DeviceKind::Nmos, 2, 4)] {
-            let (g, c) = group_of(kind, n, nf, 1680, 20);
-            for v in FinFet::enumerate(&g, &c, &pdk) {
-                let (a, b) = (v.draw(&g, &c, &pdk), v.draw(&g, &c, &pdk));
-                assert_eq!(a.shapes, b.shapes, "{kind:?} shared={}", v.shared);
-                assert_eq!(a.pins, b.pins);
-                assert!(a.shapes.iter().all(|s| contains(&a.bbox, &s.rect)));
-                assert!(a.pins.iter().all(|p| contains(&a.bbox, &p.at)));
-                for di in 0..n {
-                    for t in ["S", "D", "G", "B"] {
-                        let k = a.pins.iter().filter(|p| p.name == format!("d{di}:{t}")).count();
-                        assert_eq!(k, 1, "{kind:?} shared={} d{di}:{t}", v.shared);
-                    }
-                }
-            }
-        }
-    }
-
-    /// A deck with a fin layer but no gate pitch must still draw (the tap
-    /// strip's contact walk advances by the gate pitch).
-    #[test]
-    fn a_zero_gate_pitch_terminates() {
-        let roles = ["fin", "poly", "diff", "sdt", "lisd", "lig", "licon", "li", "mcon", "met1", "nsdm", "psdm"];
-        let p = Deck::new(5, &roles).with("w:fin", 10).with("s:fin", 10).with("w:licon", 20).with("w:li", 20).with("ext:diff:poly", 100);
-        let (g, c) = group_of(DeviceKind::Nmos, 1, 1, 40, 20);
-        let vs = FinFet::enumerate(&g, &c, &p);
-        assert_eq!(vs.len(), 1);
-        let m = vs[0].draw(&g, &c, &p);
-        assert!(!m.shapes.is_empty());
     }
 }

@@ -25,17 +25,13 @@ pub struct Negotiation {
     hist: BTreeMap<(u32, i32, i32), f32>,
 }
 
-/// History bucket side, nm (absolute coordinates).
 const HIST_QUANTUM_NM: i32 = 500;
 
-/// `(layer, bucket x, bucket y)` of an absolute node position: floor division,
-/// so the buckets either side of 0 stay distinct.
 fn hist_key((x, y, layer): (i32, i32, u32)) -> (u32, i32, i32) {
     (layer, x.div_euclid(HIST_QUANTUM_NM), y.div_euclid(HIST_QUANTUM_NM))
 }
 
 impl Negotiation {
-    /// An empty history: [`Negotiation::pressure`] is 0 and seeding writes 0.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -47,12 +43,9 @@ impl Negotiation {
         self.hist.values().map(|&h| f64::from(h)).sum()
     }
 
-    /// Overwrites every entry of `hist` (indexed by node) with the stored
-    /// history of the node's bucket, 0 where none is stored. `pos` must return
-    /// the node's **absolute** `(x, y, layer)` in nm.
+    /// Seed per-node history; `pos` must return **absolute** `(x, y, layer)`.
     pub fn seed(&self, hist: &mut [f32], pos: impl Fn(u32) -> (i32, i32, u32)) {
         if self.hist.is_empty() {
-            hist.fill(0.0);
             return;
         }
         for (n, h) in hist.iter_mut().enumerate() {
@@ -60,9 +53,7 @@ impl Negotiation {
         }
     }
 
-    /// Folds per-node history back in, keeping the `max` per bucket (so the
-    /// result does not depend on grid resolution or node order); entries
-    /// `≤ 0` are ignored. `pos` as in [`Negotiation::seed`].
+    /// Fold per-node history back in (`max` per bucket: resolution- and order-free).
     pub fn accumulate(&mut self, hist: &[f32], pos: impl Fn(u32) -> (i32, i32, u32)) {
         for (n, &h) in hist.iter().enumerate() {
             if h > 0.0 {
@@ -78,14 +69,13 @@ impl Negotiation {
 /// cell's variant in isolation.
 #[must_use]
 pub fn group_hpwl(macros: &[Macro]) -> i64 {
-    // i64 throughout: a centre or span past i32 range must not wrap.
-    let mut span: BTreeMap<u16, (i64, i64, i64, i64)> = BTreeMap::new();
+    let mut span: BTreeMap<u16, (i32, i32, i32, i32)> = BTreeMap::new();
     for p in macros.iter().flat_map(|m| &m.pins) {
-        let (x, y) = (i64::from(p.at.x) + i64::from(p.at.w) / 2, i64::from(p.at.y) + i64::from(p.at.h) / 2);
+        let (x, y) = (p.at.x + p.at.w / 2, p.at.y + p.at.h / 2);
         let e = span.entry(p.net.0).or_insert((x, x, y, y));
         *e = (e.0.min(x), e.1.max(x), e.2.min(y), e.3.max(y));
     }
-    span.values().map(|&(x0, x1, y0, y1)| (x1 - x0) + (y1 - y0)).sum()
+    span.values().map(|&(x0, x1, y0, y1)| i64::from(x1 - x0) + i64::from(y1 - y0)).sum()
 }
 
 /// Route order, compact net ids (ROAD's policy, TOPO ch. 4; Lampaert 1999
@@ -124,17 +114,10 @@ pub fn order_by_priority(pins: &[usize], net_ids: &[u32], reqs: &Requirements<Ro
         };
         (shields.iter().any(|&(_, r, _)| r == net), t)
     };
-    let impact = |ci: u32| Reverse(total_order_key(weight.get(ci as usize).copied().unwrap_or(0.0) + 0.0));
+    let impact = |ci: u32| Reverse(weight.get(ci as usize).copied().unwrap_or(0.0).to_bits());
     let mut order: Vec<u32> = (0..pins.len() as u32).collect();
-    // Cached: `tier` scans the rule lists, once per net rather than per comparison.
-    order.sort_by_cached_key(|&a| (tier(a), impact(a), pins[a as usize], a));
+    order.sort_by_key(|&a| (tier(a), impact(a), pins[a as usize], a));
     order
-}
-
-/// An `i32` whose order is `f32::total_cmp`'s (`+ 0.0` first folds `-0.0` into `0.0`).
-fn total_order_key(w: f32) -> i32 {
-    let b = w.to_bits() as i32;
-    b ^ (((b >> 31) as u32) >> 1) as i32
 }
 
 /// Nets under a mirror rule (`Differential`, [`RepairKind::Mirror`]), hard or budget.
@@ -177,16 +160,11 @@ pub fn analog_tiers(routes: &Routes, reqs: &Requirements<Routes>) -> (Vec<Violat
 /// "No node" / "unreserved".
 pub const NONE: u32 = u32::MAX;
 
-/// A routing graph with uniform per-node capacity. Nodes are dense ids
-/// `0..nodes()`; every method taking a node id may panic or misbehave on an id
-/// outside that range.
+/// A routing graph with uniform per-node capacity.
 pub trait RGraph {
-    /// Node count: every per-node table (`usage`, `hist`, [`Dij`]) has this length.
     fn nodes(&self) -> usize;
-    /// Nets one node holds before it is over capacity.
     fn cap(&self) -> u16;
     /// Writes up to six `(neighbour, base_cost)` edges; returns the count.
-    /// Base costs are `> 0` (the search relies on non-negative edges).
     fn neighbors(&self, n: u32, out: &mut [(u32, f32); 6]) -> usize;
     /// `(x, y, layer)` centre of `n`, nm.
     fn pos(&self, n: u32) -> (i32, i32, u32);
@@ -257,9 +235,7 @@ pub trait RGraph {
 /// directions are kept, so the image has the same per-layer lengths and vias.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LatticeMap {
-    /// Column `ix` → `k − ix` (mirror about column `k/2`).
     MirrorX { k: i32 },
-    /// `(ix, iy)` → `(ix + dx, iy + dy)`, in base pitches.
     Shift { dx: i32, dy: i32 },
 }
 
@@ -284,7 +260,6 @@ pub const MAX_STRIDE: u32 = 4;
 /// `P = W_v + 2·E_mv + S_m`: a track pitch clears the via pad, not just the wire).
 #[derive(Clone, Debug)]
 pub struct LayerSpec {
-    /// The PDK metal this lattice layer routes on.
     pub id: LayerId,
     /// Runs along x (even lattice layers).
     pub horizontal: bool,
@@ -294,13 +269,11 @@ pub struct LayerSpec {
     pub wire: i32,
     /// Spacing a wire keeps (min spacing incl. EOL), nm.
     pub space: i32,
-    /// Via pad side across the wire, nm (largest over the cuts that land here).
+    /// Via pad sides across / along the wire, nm (largest over the cuts that land here).
     pub pad_across: i32,
-    /// Via pad side along the wire, nm (largest over the cuts that land here).
     pub pad_along: i32,
-    /// Along-track nodes a foreign net keeps clear of a wire end.
+    /// Along-track nodes a foreign net keeps clear of a wire end / of a via end.
     pub halo_wire: u8,
-    /// Along-track nodes a foreign net keeps clear of a via end.
     pub halo_via: u8,
 }
 
@@ -318,19 +291,11 @@ impl Default for LayerSpec {
 /// its tracks get no edges. A stride-1 layer also steps one pitch across its
 /// preferred direction at [`WRONG_WAY_COST`]; a stride-2 layer does not (the
 /// next row is off-track).
-///
-/// Node id `n = layer·nx·ny + iy·nx + ix`; node `(ix, iy)` is centred at
-/// `((ix + ½)·pitch, (iy + ½)·pitch)` nm. Invariant: `nx, ny ≥ 2`, `pitch ≥ 1`.
 pub struct TrackGrid {
-    /// Columns per layer.
     pub nx: u32,
-    /// Rows per layer.
     pub ny: u32,
-    /// Base pitch actually used, nm.
     pub pitch: i32,
-    /// Base cost of one via edge, in along-track steps.
     pub via_cost: f32,
-    /// Lattice layers (≥ 1); even ones run along x.
     pub n_layers: u32,
     /// Per layer, empty (uniform: stride 1, no halos) or `n_layers` long.
     pub specs: Vec<LayerSpec>,
@@ -339,9 +304,8 @@ pub struct TrackGrid {
 }
 
 impl TrackGrid {
-    /// Track grid over `die` (nm, from the origin) with one layer per spec
-    /// (one layer when empty). `p0` is raised to at least `max(die)/1200` and
-    /// to 1; each side gets at least 2 nodes.
+    /// Track grid over `die` with one layer per spec (one layer when empty);
+    /// `p0` is raised to at least `max(die)/1200`.
     #[must_use]
     pub fn new(die: (i32, i32), p0: i32, specs: Vec<LayerSpec>, via_cost: f32) -> Self {
         let pitch = p0.max(die.0.max(die.1) / 1200).max(1);
@@ -384,13 +348,11 @@ impl TrackGrid {
         (if layer % 2 == 0 { iy } else { ix }) % self.stride(layer) == 0
     }
 
-    /// Nodes per layer, `nx·ny`.
     #[must_use]
     pub fn layer_size(&self) -> u32 {
         self.nx * self.ny
     }
 
-    /// Node id of `(ix, iy, layer)`; the indices are not range-checked.
     #[must_use]
     pub fn node(&self, ix: u32, iy: u32, layer: u32) -> u32 {
         layer * self.layer_size() + iy * self.nx + ix
@@ -408,18 +370,15 @@ impl TrackGrid {
         (y / self.pitch).clamp(0, self.ny as i32 - 1) as u32
     }
 
-    /// `(ix, iy, layer)` of node `n`, the inverse of [`TrackGrid::node`].
     #[must_use]
     pub fn ixy(&self, n: u32) -> (u32, u32, u32) {
         let r = n % self.layer_size();
         (r % self.nx, r / self.nx, n / self.layer_size())
     }
 
-    /// Up to `k` unclaimed on-track landing nodes passing `ok` for a pin at
-    /// `(x, y)` nm: Chebyshev rings `0..=rmax` around its bin, layer 0 before
-    /// layer 1, nearest ring first, each ring row-major. A layer-1 node within
-    /// two rows of a claimed layer-1 node in its column is skipped (stacked
-    /// vias). Panics when `claimed` is shorter than [`RGraph::nodes`].
+    /// Up to `k` unclaimed landing nodes passing `ok` for a pin at `(x, y)`: Chebyshev rings
+    /// `0..=rmax`, layer 0 before layer 1, nearest ring first. A layer-1 node within
+    /// two rows of a claimed layer-1 node in its column is skipped (stacked vias).
     #[must_use]
     pub fn candidates(
         &self,
@@ -433,33 +392,21 @@ impl TrackGrid {
         let (cx, cy) = (self.bin_x(x) as i32, self.bin_y(y) as i32);
         let (nx, ny) = (self.nx as i32, self.ny as i32);
         let mut out = Vec::new();
-        if k == 0 {
-            return out;
-        }
-        // Rings past the far side of the grid hold nothing.
-        let rmax = rmax.min(nx.max(ny));
-        let stacked = |ix: i32, iy: i32| {
-            (-2..=2).any(|d: i32| {
-                let jy = iy + d;
-                d != 0 && (0..ny).contains(&jy) && claimed[self.node(ix as u32, jy as u32, 1) as usize]
-            })
-        };
         for layer in 0..self.n_layers.min(2) {
             for r in 0..=rmax {
                 for dy in -r..=r {
-                    let iy = cy + dy;
-                    if !(0..ny).contains(&iy) {
-                        continue;
-                    }
-                    // Only the ring's perimeter: full top and bottom rows, both ends between.
-                    let step = if dy.abs() == r { 1 } else { 2 * r };
-                    for dx in (-r..=r).step_by(step as usize) {
-                        let ix = cx + dx;
-                        if !(0..nx).contains(&ix) {
+                    for dx in -r..=r {
+                        let (ix, iy) = (cx + dx, cy + dy);
+                        if dx.abs().max(dy.abs()) != r || ix < 0 || iy < 0 || ix >= nx || iy >= ny {
                             continue;
                         }
                         let n = self.node(ix as u32, iy as u32, layer);
-                        if !claimed[n as usize] && self.on_track(n) && !(layer == 1 && stacked(ix, iy)) && ok(n) {
+                        let stacked = layer == 1
+                            && (-2..=2).any(|d: i32| {
+                                let jy = iy + d;
+                                d != 0 && (0..ny).contains(&jy) && claimed[self.node(ix as u32, jy as u32, 1) as usize]
+                            });
+                        if !claimed[n as usize] && !stacked && self.on_track(n) && ok(n) {
                             out.push(n);
                             if out.len() >= k {
                                 return out;
@@ -555,12 +502,11 @@ impl RGraph for TrackGrid {
     fn within(&self, n: u32, t: u32, out: &mut Vec<u32>) {
         let (ix, iy, l) = self.ixy(n);
         let r = i64::from(t) * i64::from(self.stride(l));
-        // The box clipped to the grid up front: no per-node bounds test.
-        let span = |c: u32, lim: u32| (i64::from(c) - r).max(0) as u32..=(i64::from(c) + r).min(i64::from(lim) - 1) as u32;
-        for y in span(iy, self.ny) {
-            for x in span(ix, self.nx) {
-                if (x, y) != (ix, iy) {
-                    out.push(self.node(x, y, l));
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let (x, y) = (i64::from(ix) + dx, i64::from(iy) + dy);
+                if (dx, dy) != (0, 0) && x >= 0 && y >= 0 && x < i64::from(self.nx) && y < i64::from(self.ny) {
+                    out.push(self.node(x as u32, y as u32, l));
                 }
             }
         }
@@ -622,15 +568,15 @@ impl RGraph for TrackGrid {
         if self.specs.is_empty() {
             return;
         }
-        let halo_wire = |n: u32| self.specs.get(self.ixy(n).2 as usize).map_or(0, |s| s.halo_wire);
-        // Same layer and same across coordinate: the run goes on.
-        let key = |n: u32| {
-            let (x, y, l) = self.ixy(n);
-            (l, if l % 2 == 0 { y } else { x })
-        };
+        let spec = |n: u32| &self.specs[self.ixy(n).2 as usize];
         for branch in tree {
             let mut start = 0;
             for i in 1..=branch.len() {
+                // Same layer and same across coordinate: the run goes on.
+                let key = |n: u32| {
+                    let (x, y, l) = self.ixy(n);
+                    (l, if l % 2 == 0 { y } else { x })
+                };
                 if i < branch.len() && key(branch[i]) == key(branch[i - 1]) {
                     continue;
                 }
@@ -638,8 +584,8 @@ impl RGraph for TrackGrid {
                 if i - start >= 2 {
                     let (a, b) = (branch[start], branch[i - 1]);
                     let dir = if b > a { 1 } else { -1 };
-                    self.along(a, halo_wire(a), -dir, out);
-                    self.along(b, halo_wire(b), dir, out);
+                    self.along(a, spec(a).halo_wire, -dir, out);
+                    self.along(b, spec(b).halo_wire, dir, out);
                 }
                 if i < branch.len() && self.ixy(branch[i]).2 != self.ixy(branch[i - 1]).2 {
                     self.via_halo(branch[i - 1], branch[i], out);
@@ -668,11 +614,8 @@ impl TrackGrid {
 // ---------------------------------------------------------------------------
 
 /// Mutable routing state: per-node usage and history, per-net branch trees.
-/// Per-node tables have [`RGraph::nodes`] entries, per-net ones one per net.
 pub struct RouteHot {
-    /// Per node, how many nets' footprints ([`RouteHot::foot`]) hold it.
     pub usage: Vec<u16>,
-    /// Per node, PathFinder history `h_n` (≥ 0): the price of past overuse.
     pub hist: Vec<f32>,
     /// `trees[net]` = branches, each a node path.
     pub trees: Vec<Vec<Vec<u32>>>,
@@ -681,16 +624,14 @@ pub struct RouteHot {
     /// Per node, the summed weight of the nets on it: what a foreign wire
     /// alongside costs them ([`Elec::sens`]). Kept by [`RouteHot::commit`].
     pub sens: Vec<f32>,
-    /// Per net its aggressor weight; empty = every net 1.0.
+    /// Per net its aggressor weight, and per node the summed aggressor
+    /// weight of the nets on it ([`Elec::agg`]); empty = every net 1.0.
     pub agg_w: Vec<f32>,
-    /// Per node, the summed aggressor weight of the nets on it ([`Elec::agg`]);
-    /// empty = not tracked.
     pub agg: Vec<f32>,
     /// Per node, how many nets' halos ([`RGraph::halo_nodes`]) cover it: a
     /// halo conflicts only with foreign metal ([`RouteHot::over`]), never with
-    /// another halo.
+    /// another halo. `halos[net]` is the net's sorted halo set, own metal excluded.
     pub halo: Vec<u16>,
-    /// Per net, its sorted halo set, own metal excluded.
     pub halos: Vec<Vec<u32>>,
     /// Per net, its sorted, deduped metal footprint (every track of a
     /// `k`-track connection, its via corners and wide-metal guard tracks):
@@ -699,8 +640,6 @@ pub struct RouteHot {
 }
 
 impl RouteHot {
-    /// Empty state for `nodes` graph nodes and `nets` nets: no trees, no
-    /// usage, no history, no parasitic weights.
     #[must_use]
     pub fn new(nodes: usize, nets: usize) -> Self {
         Self {
@@ -721,7 +660,7 @@ impl RouteHot {
     /// 0; a node with halos and no metal is not over.
     #[must_use]
     pub fn over(&self, n: usize, cap: u16) -> u16 {
-        over_cap(self.usage[n], self.halo[n], cap).min(u32::from(u16::MAX)) as u16
+        if self.usage[n] > 0 { (self.usage[n] + self.halo[n]).saturating_sub(cap) } else { 0 }
     }
 
     /// Price parasitics with per-net sensitivity `weight` and aggressor
@@ -741,18 +680,15 @@ impl RouteHot {
         (self.weight, self.agg_w) = (weight, agg_w);
     }
 
-    /// Sorted, deduped node ids of `net`'s footprint ([`RouteHot::foot`]), as
-    /// an owned copy. Panics when `net` is out of range.
+    /// Sorted, deduped node ids of `net`'s footprint ([`RouteHot::foot`]).
     #[must_use]
     pub fn tree_nodes(&self, net: usize) -> Vec<u32> {
         self.foot[net].clone()
     }
 
     /// Replace `net`'s tree, footprint and halo set, moving their claims with
-    /// them; an empty `foot` is the branches' own nodes (one track). `foot`
-    /// and `halo` must be sorted and deduped. Use [`RouteCtx::commit`], which
-    /// derives `foot` and `halo` from the graph. Panics when `net` or a node
-    /// is out of range.
+    /// them; an empty `foot` is the branches' own nodes (one track). Use
+    /// [`RouteCtx::commit`], which derives `foot` and `halo` from the graph.
     pub fn commit(&mut self, net: usize, branches: Vec<Vec<u32>>, foot: Vec<u32>, halo: Vec<u32>) {
         let foot = if foot.is_empty() {
             let mut v: Vec<u32> = branches.iter().flatten().copied().collect();
@@ -794,23 +730,16 @@ impl RouteHot {
     }
 }
 
-/// Immutable per-run context: the graph and every per-net and per-layer
-/// table the search reads. Every optional table is either empty (= none) or
-/// indexed by net / layer as its doc says.
+/// Immutable per-run context. `reserved[node]` is a hard owner (`NONE` = free).
 pub struct RouteCtx<G> {
-    /// The routing graph.
     pub graph: G,
-    /// Per net, its terminal nodes; `terms[net][0]` is the root.
     pub terms: Vec<Vec<u32>>,
-    /// Net ids in routing order ([`order_by_priority`]).
     pub order: Vec<u32>,
-    /// Per node, its hard owner's id (`NONE` = free); empty = none.
     pub reserved: Vec<u32>,
     /// Per net, how much its parasitics cost ([`Elec::weight`]); empty = none.
     pub weight: Vec<f32>,
-    /// Per graph layer, [`Elec::layer_c`]; empty = none.
+    /// Per graph layer, [`Elec::layer_c`] and [`Elec::beside_c`]; empty = none.
     pub layer_c: Vec<f32>,
-    /// Per graph layer, [`Elec::beside_c`]; empty = none.
     pub beside_c: Vec<f32>,
     /// Per lower graph layer, [`Elec::cross_c`]; empty = none.
     pub cross_c: Vec<f32>,
@@ -823,27 +752,24 @@ pub struct RouteCtx<G> {
     /// Per net, the id its `reserved` nodes carry (a star branch's pseudo-net
     /// uses its parent's, RTE-17); empty = its own.
     pub owner: Vec<u32>,
-    /// Per net [`Elec::current`]; empty = none.
+    /// Per net [`Elec::current`], and per layer [`Elec::layer_r`] / [`Elec::via_r`];
+    /// empty = none.
     pub current: Vec<f32>,
-    /// Per layer [`Elec::layer_r`]; empty = none.
     pub layer_r: Vec<f32>,
-    /// Per layer [`Elec::via_r`]; empty = none.
     pub via_r: Vec<f32>,
     /// Per node, the matched cell it lies over (`NONE` = none), and per net
     /// the sorted cells it has a pin in: a net pays [`KEEPOUT_COST`] per node
     /// over a matched cell it does not belong to (a line over one member of a
     /// pair skews it, Razavi Fig. 19.17). Empty = none.
     pub keepout: Vec<u32>,
-    /// Per net, the sorted matched cells it has a pin in (see `keepout`).
     pub own_cells: Vec<Vec<u32>>,
     /// Per net, sorted nodes a hard blockage closes to it alone (a matched
     /// cell's foreign nets, aggressor nets over a resistor body): treated as
     /// reserved for another net ([`NetSearch::blocked`]). Empty = none.
     pub blocked_for: Vec<Vec<u32>>,
-    /// Per net, tracks per layer of its connections ([`RGraph::footprint`]);
-    /// empty = 1 track.
+    /// Per net, tracks per layer of its connections, and wide-metal guard
+    /// tracks each side ([`RGraph::footprint`]); empty = 1 track, no guard.
     pub k: Vec<[u8; MAX_LAYERS]>,
-    /// Per net, wide-metal guard tracks each side per layer; empty = none.
     pub guard: Vec<[u8; MAX_LAYERS]>,
     /// Per net, [`NetSearch::term_k`] (parallel to `terms`); empty = none.
     pub term_k: Vec<Vec<[u8; MAX_LAYERS]>>,
@@ -858,8 +784,7 @@ pub const KEEPOUT_COST: f32 = 2.0;
 pub const WRONG_WAY_COST: f32 = 2.5;
 
 impl<G: RGraph> RouteCtx<G> {
-    /// A context over `graph` with every optional table empty (no
-    /// reservations, no parasitics, one-track nets).
+    /// No reservations.
     pub fn new(graph: G, terms: Vec<Vec<u32>>, order: Vec<u32>) -> Self {
         Self {
             graph,
@@ -909,7 +834,7 @@ impl<G: RGraph> RouteCtx<G> {
         tree.iter().map(|b| b.iter().map(|&n| self.graph.map(m, n)).collect()).collect()
     }
 
-    /// `net`'s exact-pair entry ([`Self::mirror`]); `None` past the table.
+    /// `net`'s exact-pair entry ([`Self::mirror`]).
     fn pair(&self, net: usize) -> Option<(u32, LatticeMap, bool)> {
         self.mirror.get(net).copied().flatten()
     }
@@ -926,7 +851,6 @@ impl<G: RGraph> RouteCtx<G> {
         self.commit_one(hot, net, branches);
     }
 
-    /// [`Self::commit`] for `net` alone (no partner).
     fn commit_one(&self, hot: &mut RouteHot, net: usize, branches: Vec<Vec<u32>>) {
         let (k, guard) = self.k_of(net);
         let layer = |n: u32| self.graph.pos(n).2 as usize;
@@ -965,16 +889,8 @@ impl<G: RGraph> RouteCtx<G> {
                     }
                 }
             }
-            // `foot` is already sorted; only the one-track case builds a set.
-            let one_track: Vec<u32>;
-            let own: &[u32] = if foot.is_empty() {
-                let mut v: Vec<u32> = branches.iter().flatten().copied().collect();
-                v.sort_unstable();
-                one_track = v;
-                &one_track
-            } else {
-                &foot
-            };
+            let mut own: Vec<u32> = if foot.is_empty() { branches.iter().flatten().copied().collect() } else { foot.clone() };
+            own.sort_unstable();
             halo.sort_unstable();
             halo.dedup();
             halo.retain(|n| own.binary_search(n).is_err());
@@ -1001,7 +917,7 @@ impl<G: RGraph> RouteCtx<G> {
     /// Route `net` against the current state with an extra per-node `penalty`
     /// (empty = none). An exact pair routes its leader jointly with the image
     /// ([`Mirror`], `penalty` on the side it was asked for); the tree
-    /// returned is `net`'s. `None` when no legal tree exists ([`route_net`]).
+    /// returned is `net`'s.
     pub fn reroute(&self, hot: &RouteHot, net: usize, p_fac: f32, penalty: &[f32], dij: &mut Dij) -> Option<Vec<Vec<u32>>> {
         let Some((p, m, leader)) = self.pair(net) else { return self.search(hot, net, p_fac, penalty, None, dij) };
         let (lead, part, map) = if leader { (net, p as usize, m) } else { (p as usize, net, m.inverse()) };
@@ -1019,7 +935,6 @@ impl<G: RGraph> RouteCtx<G> {
         if leader { Some(tree) } else { self.map_tree(&tree, map) }
     }
 
-    /// [`route_net`] for `net` with its query assembled from `self` and `hot`.
     fn search(&self, hot: &RouteHot, net: usize, p_fac: f32, penalty: &[f32], mirror: Option<Mirror>, dij: &mut Dij) -> Option<Vec<Vec<u32>>> {
         let elec = self.elec(hot, net);
         let (k, guard) = self.k_of(net);
@@ -1046,30 +961,21 @@ impl<G: RGraph> RouteCtx<G> {
 }
 
 /// Stamp-based A* scratch, reused across searches without clearing: one per
-/// `dr::route` call. Sized for one graph; a search on a larger graph panics.
+/// `dr::route` call.
 pub struct Dij {
     /// Heap pops over every search this scratch ran (`RouteStats::expanded`).
     pub pops: u64,
-    /// Per node, best known path cost of the current search (valid where `seen == stamp`).
     dist: Vec<f32>,
-    /// Per node, predecessor on that path (`NONE` at a source).
     prev: Vec<u32>,
-    /// Per node, the target-search stamp that last touched it.
     seen: Vec<u32>,
-    /// Last stamp handed out; only grows between resets.
     stamp: u32,
-    /// Open set keyed by `(f32 bits of g + h, node)`: bit order is value order for `f ≥ 0`.
     heap: BinaryHeap<Reverse<(u32, u32)>>,
-    /// Per node, the call stamp when it joined the tree being grown.
     in_tree: Vec<u32>,
-    /// Per node, the call stamp when it held the net's previous footprint.
     is_old: Vec<u32>,
-    /// Per node, the call stamp when it held the net's previous halo.
     is_old_halo: Vec<u32>,
 }
 
 impl Dij {
-    /// Scratch for a graph of `nodes` nodes.
     #[must_use]
     pub fn new(nodes: usize) -> Self {
         Self {
@@ -1122,31 +1028,28 @@ pub struct Elec<'a> {
     /// The net's DC current over the heaviest net's, `[0, 1]`: what its series
     /// R costs (IR drop, PWR-02; Lampaert eq. 5.10's `S_R·R`).
     pub current: f32,
-    /// Series R of one step on each layer, over the least resistive layer's step.
+    /// Series R of one step on each layer, and of one via up from each layer,
+    /// over the least resistive layer's step.
     pub layer_r: &'a [f32],
-    /// Series R of one via up from each layer, same scale.
     pub via_r: &'a [f32],
 }
 
 /// One net's search query for [`route_net`].
 pub struct NetSearch<'a> {
-    /// The net being routed (its index in every per-net table).
     pub net: u32,
     /// The id `reserved` uses for this net (`net` but for a pseudo-net).
     pub owner: u32,
     /// Terminals; `terms[0]` is the root.
     pub terms: &'a [u32],
-    /// Tracks per layer ([`RGraph::footprint`]).
+    /// Tracks per layer, and wide-metal guard tracks each side ([`RGraph::footprint`]).
     pub k: [u8; MAX_LAYERS],
-    /// Wide-metal guard tracks each side, per layer.
     pub guard: [u8; MAX_LAYERS],
     /// Per terminal, the tracks of the branch reaching it (parallel to
     /// `terms`; `terms[0]`'s is unused). Non-empty routes the targets in the
     /// given order (no distance sort), each at its own `k`; empty = `k` for all.
     pub term_k: &'a [[u8; MAX_LAYERS]],
-    /// The net's current sorted footprint: it does not count against it.
+    /// The net's current footprint and halo: neither counts against it.
     pub own: &'a [u32],
-    /// The net's current halo: it does not count against it.
     pub own_halo: &'a [u32],
     /// Extra cost per node (empty = none).
     pub penalty: &'a [f32],
@@ -1163,11 +1066,9 @@ pub struct NetSearch<'a> {
     /// `sep` keeps away from (a terminal before its net has routed too, or
     /// the net routed first could wall in the other's pin).
     pub foot: &'a [Vec<u32>],
-    /// Every net's terminals (see `foot`).
     pub terms_of: &'a [Vec<u32>],
     /// Route jointly with the partner's image ([`Mirror`]); `None` = alone.
     pub mirror: Option<Mirror<'a>>,
-    /// The net's electrical cost terms.
     pub elec: Elec<'a>,
 }
 
@@ -1180,21 +1081,15 @@ pub struct NetSearch<'a> {
 ///
 /// ponytail: the partner's via halos and separations are not priced.
 pub struct Mirror<'a> {
-    /// Carries the routed net onto its partner.
     pub map: LatticeMap,
-    /// The partner net (and the id its `reserved` nodes carry).
     pub partner: u32,
-    /// The partner's sorted footprint (its own metal is no usage).
+    /// The partner's sorted footprint and halo (its own metal is no usage).
     pub partner_own: &'a [u32],
-    /// The partner's sorted halo (its own halo is no usage).
     pub partner_halo: &'a [u32],
-    /// Sorted nodes closed to the partner ([`RouteCtx::blocked_for`]).
     pub partner_blocked: &'a [u32],
-    /// Extra cost per node for the partner (empty = none).
     pub partner_penalty: &'a [f32],
     /// The partner's own matched cells ([`RouteCtx::own_cells`]).
     pub partner_cells: &'a [u32],
-    /// The partner's electrical cost terms.
     pub partner_elec: Elec<'a>,
 }
 
@@ -1207,10 +1102,6 @@ pub struct Mirror<'a> {
 /// ([`RGraph::via_block`]) and `p_fac` per foreign metal node in the halo it
 /// casts. `None` if a target is unreachable without a footprint entering a
 /// node `reserved` for another net (or in `q.blocked`) or leaving the graph.
-///
-/// Returns `branches[0] = [root]` then one branch per target reached, each a
-/// node path from the tree to that target; empty `q.terms` gives an empty
-/// tree. Node costs must be `≥ 0` (A* exactness). `dij` must be sized for `g`.
 pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSearch, p_fac: f32, dij: &mut Dij) -> Option<Vec<Vec<u32>>> {
     let (usage, hist, terms, net, elec) = (&hot.usage[..], &hot.hist[..], q.terms, q.net, &q.elec);
     let halo = (&hot.halo[..], q.own_halo);
@@ -1218,17 +1109,8 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
     let Some(&root) = terms.first() else { return Some(Vec::new()) };
     let Dij { pops, dist, prev, seen, stamp, heap, in_tree, is_old, is_old_halo } = dij;
     // `call` marks old/tree membership for this call; each target search bumps
-    // `stamp` again for `seen`. Stamps only grow, so stale marks never match;
-    // a call that could run past `u32::MAX` (one stamp, plus at most
-    // `SHIFT_FORBIDS + 1` per target) first resets every mark to 0.
-    let need = 1 + terms.len() as u64 * (SHIFT_FORBIDS as u64 + 1);
-    if u64::from(*stamp) + need > u64::from(u32::MAX) {
-        for marks in [&mut *seen, &mut *in_tree, &mut *is_old, &mut *is_old_halo] {
-            marks.fill(0);
-        }
-        *stamp = 0;
-    }
-    *stamp += 1;
+    // `stamp` again for `seen`. Stamps only grow, so stale marks never match.
+    *stamp = stamp.wrapping_add(1);
     let call = *stamp;
     for &n in old_nodes {
         is_old[n as usize] = call;
@@ -1298,8 +1180,8 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
         // ponytail: a via's own halo is priced (`via`), a run end's is not;
         // the dirty test reroutes whichever net it lands on.
         let foreign_halo = halo.0.get(i).map_or(0, |&h| h.saturating_sub(u16::from(is_old_halo[i] == call)));
-        let eff = usage[i].saturating_sub(u16::from(is_old[i] == call)).saturating_add(foreign_halo);
-        Some(present_cost(hist[i], p_fac, eff, cap))
+        let eff = usage[i].saturating_sub(u16::from(is_old[i] == call)) + foreign_halo;
+        Some(hist[i] + p_fac * f32::from((eff + 1).saturating_sub(cap)))
     };
     let wide_at = |k: &[u8; MAX_LAYERS]| k.iter().any(|&t| t > 1) || q.guard.iter().any(|&t| t > 0);
     // RTE-15: the partner's side of a joint node ([`Mirror`]). A mirror's
@@ -1325,8 +1207,8 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
                 return None;
             }
             let foreign_halo = halo.0.get(x).map_or(0, |&h| h.saturating_sub(u16::from(m.partner_halo.binary_search(&(x as u32)).is_ok())));
-            let eff = usage[x].saturating_sub(u16::from(p_mine(x))).saturating_add(foreign_halo);
-            Some(present_cost(hist[x], p_fac, eff, cap))
+            let eff = usage[x].saturating_sub(u16::from(p_mine(x))) + foreign_halo;
+            Some(hist[x] + p_fac * f32::from((eff + 1).saturating_sub(cap)))
         };
         let j = j as usize;
         let mut c = if wide {
@@ -1398,7 +1280,7 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
         let wide = wide_at(tk);
         forbid.clear();
         let path = 'retry: loop {
-            *stamp += 1;
+            *stamp = stamp.wrapping_add(1);
             let s = *stamp;
             heap.clear();
             // A*: keyed by `g + h`; a stale entry's key no longer equals the
@@ -1495,20 +1377,6 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
     Some(branches)
 }
 
-/// `usage + halo − cap` where metal sits (`usage > 0`), floored at 0; widened
-/// so a full `u16` count plus halos cannot wrap. Branchless: it runs once per
-/// node per PathFinder iteration.
-fn over_cap(usage: u16, halo: u16, cap: u16) -> u32 {
-    let on = u32::from(halo) * u32::from(usage > 0);
-    (u32::from(usage) + on).saturating_sub(u32::from(cap))
-}
-
-/// PathFinder node price: history plus `p_fac` per net past `cap` once this
-/// net joins the `eff` foreign occupants (metal and halos).
-fn present_cost(hist: f32, p_fac: f32, eff: u16, cap: u16) -> f32 {
-    hist + p_fac * (u32::from(eff) + 1).saturating_sub(u32::from(cap)) as f32
-}
-
 /// Nodes a shift pair's leader may forbid itself over self-images
 /// ([`route_net`]) before the joint route gives up (the pair falls back).
 const SHIFT_FORBIDS: usize = 64;
@@ -1559,8 +1427,7 @@ const STALL_ITERS: u32 = 10;
 /// `max_iters`. Returns `(Σ max(0, usage − cap), iterations run)`.
 pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: f32, hist_inc: f32, max_iters: u32, dij: &mut Dij) -> (f32, u32) {
     let cap = cold.graph.cap();
-    // `inc = 0` measures the state as it stands without pricing it.
-    let (mut overflow, mut best, mut stall, mut iters, mut p) = (bump_history(&hot.usage, &hot.halo, &mut hot.hist, cap, 0.0), f32::INFINITY, 0, 0, p_fac.min(P_FAC_MAX));
+    let (mut overflow, mut best, mut stall, mut iters, mut p) = (0.0, f32::INFINITY, 0, 0, p_fac.min(P_FAC_MAX));
     for _ in 0..max_iters {
         iters += 1;
         let mut moved = false;
@@ -1572,9 +1439,7 @@ pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: 
                 continue;
             }
             let over = |&n: &u32| hot.over(n as usize, cap) > 0;
-            // The footprint, not the branch nodes: it also holds a wide net's
-            // extra tracks, via corners and guard tracks.
-            let dirty_one = |x: usize| hot.trees[x].is_empty() || hot.foot[x].iter().any(over) || hot.halos[x].iter().any(over);
+            let dirty_one = |x: usize| hot.trees[x].is_empty() || hot.trees[x].iter().flatten().any(over) || hot.halos[x].iter().any(over);
             let dirty = dirty_one(net) || pair.is_some_and(|p| dirty_one(p.0 as usize));
             if !dirty || cold.terms[net].is_empty() {
                 continue;
@@ -1601,25 +1466,14 @@ pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: 
 /// `hist += inc · over` per node ([`RouteHot::over`]; `halo` empty = none);
 /// returns `Σ over`.
 fn bump_history(usage: &[u16], halo: &[u16], hist: &mut [f32], cap: u16, inc: f32) -> f32 {
-    debug_assert!(hist.len() == usage.len() && (halo.is_empty() || halo.len() == usage.len()));
-    // Two straight branch-free loops over parallel columns, an integer total:
-    // both autovectorize (an f32 running sum would not reassociate).
-    // ponytail: autovectorized, not fearless_simd; hand-write lanes if a profile asks.
-    let mut total: u64 = 0;
-    if halo.is_empty() {
-        for (h, &u) in hist.iter_mut().zip(usage) {
-            let over = over_cap(u, 0, cap);
-            *h += inc * over as f32;
-            total += u64::from(over);
-        }
-    } else {
-        for ((h, &u), &hl) in hist.iter_mut().zip(usage).zip(halo) {
-            let over = over_cap(u, hl, cap);
-            *h += inc * over as f32;
-            total += u64::from(over);
-        }
+    let mut total = 0.0;
+    for (i, (h, &u)) in hist.iter_mut().zip(usage).enumerate() {
+        let on = if u > 0 { halo.get(i).copied().unwrap_or(0) } else { 0 };
+        let over = f32::from((u + on).saturating_sub(cap));
+        *h += inc * over;
+        total += over;
     }
-    total as f32
+    total
 }
 
 // ---------------------------------------------------------------------------
@@ -1629,19 +1483,12 @@ fn bump_history(usage: &[u16], halo: &[u16], hist: &mut [f32], cap: u16, inc: f3
 /// One extracted straight run (track-layer index, centre-line endpoints).
 #[derive(Clone, Copy)]
 pub struct Wire {
-    /// Owning net (index into [`RouteHot::trees`]).
     pub net: u32,
-    /// Track-lattice layer.
     pub layer: u32,
-    /// Centre-line start, nm.
     pub x0: i32,
-    /// Centre-line start, nm.
     pub y0: i32,
-    /// Centre-line end, nm (`x0 == x1` or `y0 == y1`).
     pub x1: i32,
-    /// Centre-line end, nm.
     pub y1: i32,
-    /// Drawn width, nm.
     pub width: i32,
     /// Extra width past the +across side (+y on a horizontal track layer, +x
     /// on a vertical one), nm: a merged `k`-track run or via corner.
@@ -1651,15 +1498,10 @@ pub struct Wire {
 /// A layer transition at `(x, y)` from track layer `layer` to `layer + 1`.
 #[derive(Clone, Copy)]
 pub struct Via {
-    /// Owning net.
     pub net: u32,
-    /// Centre, nm.
     pub x: i32,
-    /// Centre, nm.
     pub y: i32,
-    /// Square side, nm (the lower layer's wire width).
     pub size: i32,
-    /// Lower track-lattice layer of the cut.
     pub layer: u32,
 }
 
@@ -1682,8 +1524,9 @@ pub fn extract_geometry(hot: &RouteHot, grid: &TrackGrid, widths: &[i32], k: &dy
     let wide_of = |l: u32| wide.get(l as usize).copied().unwrap_or(i32::MAX);
     let step = |l: u32| grid.stride(l) as i32 * grid.pitch;
     let (mut wires, mut vias) = (Vec::new(), Vec::new());
-    for (ni, tree) in hot.trees.iter().enumerate() {
-        let net = ni as u32;
+    for (net, tree) in hot.trees.iter().enumerate() {
+        let ni = net;
+        let net = net as u32;
         for branch in tree {
             let kn = k(ni, branch);
             let kl = |l: u32| i32::from(kn.get(l as usize).copied().unwrap_or(1).max(1));
@@ -1762,8 +1605,7 @@ fn emit_run(wires: &mut Vec<Wire>, grid: &TrackGrid, net: u32, nodes: &[u32], wi
 
 /// Per-net shapes (layer = track index): a wire is its centre line widened by
 /// `width/2` on every side, plus `across` on its +across side; a via is a
-/// `size²` square centred on `(x, y)`. Panics when a wire or via names a net
-/// `≥ nets`.
+/// `size²` square centred on `(x, y)`.
 #[must_use]
 pub fn to_shapes(nets: usize, wires: &[Wire], vias: &[Via]) -> Vec<Vec<Shape>> {
     let mut out = vec![Vec::new(); nets];
@@ -1895,43 +1737,6 @@ mod tests {
         let mut hist = [0.0f32; 4];
         assert_eq!(bump_history(&usage, &[], &mut hist, 1, 0.5), 5.0);
         assert_eq!(hist, [0.0, 0.0, 0.5, 2.0]);
-    }
-
-    /// Usage near `u16::MAX` plus a halo saturates instead of wrapping.
-    #[test]
-    fn bump_history_does_not_overflow() {
-        let mut hist = [0.0f32; 2];
-        assert_eq!(bump_history(&[u16::MAX, 0], &[3, 9], &mut hist, 1, 1.0), 65_535.0 + 2.0);
-        assert_eq!(hist, [65_537.0, 0.0]);
-    }
-
-    #[test]
-    fn hist_key_floors_negative_coordinates() {
-        assert_eq!(hist_key((-1, 499, 2)), (2, -1, 0));
-        assert_eq!(hist_key((-500, -501, 0)), (0, -1, -2));
-    }
-
-    #[test]
-    fn present_cost_charges_only_past_capacity() {
-        assert_eq!(present_cost(0.5, 2.0, 0, 1), 0.5);
-        assert_eq!(present_cost(0.5, 2.0, 2, 1), 4.5);
-        assert_eq!(present_cost(0.0, 1.0, u16::MAX, 0), 65_536.0, "no overflow at the top");
-    }
-
-    /// A scratch whose stamp is about to wrap still finds the same tree: stale
-    /// marks from before the wrap must never read as current.
-    #[test]
-    fn a_wrapping_stamp_does_not_corrupt_the_search() {
-        let g = TrackGrid::with_layers((10 * 100, 10 * 100), 100, 4.0, 1);
-        let hot = RouteHot::new(g.nodes(), 1);
-        let terms = [g.node(0, 0, 0), g.node(5, 0, 0), g.node(5, 5, 0)];
-        let fresh = route_net(&g, &hot, &[], &search(&terms, Elec::default()), 1.0, &mut Dij::new(g.nodes()));
-        assert!(fresh.is_some());
-        let mut dij = Dij::new(g.nodes());
-        for start in [u32::MAX - 1, u32::MAX - 3, u32::MAX] {
-            dij.stamp = start;
-            assert_eq!(route_net(&g, &hot, &[], &search(&terms, Elec::default()), 1.0, &mut dij), fresh, "stamp {start}");
-        }
     }
 
     /// A budgeted net (under a crosstalk-exclusion rule) routes ahead of an

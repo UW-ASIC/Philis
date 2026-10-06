@@ -1,10 +1,6 @@
 //! `analog` — what good analog layout requires, independent of any algorithm.
 //!
 //! - [`cell`]: structural directives `cells` reads cold ([`Constraints`]).
-//! - [`intent`]: what extraction infers about a circuit (matched sets,
-//!   symmetry, group tree, net and device facts), before it becomes rules.
-//! - [`rule`]: the [`Rule`] trait and its type-erased [`RuleBatch`] view.
-//! - [`requirements`]: the tiered rule-set an algorithm consumes.
 //! - [`placement`]: [`Rule`]s scored against `pnr_core::Layout` (gp, dp).
 //! - [`routing`]: [`Rule`]s scored against `pnr_core::Routes` (gr, dr).
 //! - [`matching`]: unit moments, CC patterns and the mismatch ledger of matched sets.

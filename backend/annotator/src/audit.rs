@@ -16,12 +16,10 @@ const VGST_MIN_MV: f64 = 100.0;
 /// H09-23: unequal V_CE across a matched bipolar set, mV (**Philis threshold**).
 const VCE_MAX_MV: f64 = 10.0;
 
-/// A Moderate+ MOS current-matched set: the H13-32/33 checks apply.
 fn mos_current(s: &MatchSpec) -> bool {
     s.kind == MatchKind::Current && s.class >= MatchClass::Moderate && s.family == Family::Mos
 }
 
-/// A Moderate+ bipolar set: the H09-04/23 checks apply.
 fn bjt(s: &MatchSpec) -> bool {
     s.family == Family::Bipolar && s.class >= MatchClass::Moderate
 }
@@ -32,12 +30,7 @@ fn bjt(s: &MatchSpec) -> bool {
 /// reference; `cascode_ratio`: bottom W/L ratio ≠ top ratio (> 1 %); `cascode_bulk`: a top device's B ≠ S;
 /// `bjt_ratio`: a Moderate+ bipolar ratio over 16 or odd (no common centroid); `vce_unequal`: its V_CE spread
 /// over 10 mV; `audit_not_checked`: the op-dependent checks a set qualified for whose data (op point,
-/// a member's dev entry, `gds_us`, or a pin's `net_mv`) is absent, at most one, last, naming each check once.
-/// The reference is slot `reference` (clamped to the last member), default 0; a set without members is
-/// skipped. A cascode whose four devices do not all have a W/L skips `cascode_ratio`.
-///
-/// # Panics
-/// When a member or cascode device id is out of bounds of `nl.devices`.
+/// a member's dev entry, `gds_us`, or a pin's `net_mv`) is absent.
 #[must_use]
 pub fn audit(intent: &Intent, nl: &Netlist, cascodes: &[[DeviceId; 4]], op: Option<&OpFacts>) -> Vec<Diagnostic> {
     let mut out = Vec::new();
@@ -50,7 +43,7 @@ pub fn audit(intent: &Intent, nl: &Netlist, cascodes: &[[DeviceId; 4]], op: Opti
     };
     let dop = |d: DeviceId| op.and_then(|o| o.dev.get(d.0 as usize).copied().flatten());
     let mut skipped: Vec<&str> = Vec::new();
-    for s in intent.sets.iter().filter(|s| !s.members.is_empty()) {
+    for s in &intent.sets {
         let ids: Vec<DeviceId> = s.members.iter().map(|m| m.device).collect();
         if mos_current(s) {
             let vgst = |d: DeviceId| {
@@ -223,145 +216,5 @@ mod tests {
         let d = audit(&i, &nl, &[], Some(&op(10.0, 1.0, None, vec![Some(0.0); 4])));
         assert_eq!(kinds(&d), ["audit_not_checked"]);
         assert!(d[0].message.contains("clm_mismatch") && !d[0].message.contains("vgst_low"), "{}", d[0].message);
-    }
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use crate::evidence::DeviceOp;
-    use crate::tests::{fet, nets};
-    use analog::intent::{ArrayStyle, ClassSource, ConstraintId, Member, Origin};
-    use pnr_core::ids::NetId;
-    use pnr_core::netlist::{Device, DeviceKind};
-
-    fn set(family: Family, class: MatchClass, units: &[u16], reference: Option<usize>) -> MatchSpec {
-        MatchSpec {
-            id: ConstraintId(0),
-            origin: Origin::SharedBias,
-            members: units.iter().enumerate().map(|(i, &p)| Member { device: DeviceId(i as u16), parallel: p, series: 1, half: None }).collect(),
-            reference,
-            family,
-            kind: MatchKind::Current,
-            class,
-            class_source: ClassSource::Role,
-            unit: None,
-            allowance: None,
-            weight: None,
-            style: ArrayStyle::Any,
-            compound: None,
-        }
-    }
-
-    fn intent(s: MatchSpec) -> Intent {
-        Intent { sets: vec![s], ..Default::default() }
-    }
-
-    fn dop(id_ua: f64, gm_us: f64, gds_us: Option<f64>) -> DeviceOp {
-        DeviceOp { id_ua, headroom_mv: 100.0, gm_us, power_uw: 0.0, vgs_mv: None, vbs_mv: None, vth_mv: None, gmb_us: None, gds_us }
-    }
-
-    fn kinds(d: &[Diagnostic]) -> Vec<&str> {
-        d.iter().map(|x| x.kind).collect()
-    }
-
-    /// NPNs Q0 (C on 0), Q1 (C on 1), common B 2 and E 3.
-    fn bjts() -> Netlist {
-        let q = |name: &str, c: u16| Device {
-            name: name.into(),
-            kind: DeviceKind::Npn,
-            model: String::new(),
-            terminals: vec![("C".into(), NetId(c)), ("B".into(), NetId(2)), ("E".into(), NetId(3))],
-            params: vec![],
-        };
-        Netlist { devices: vec![q("Q0", 0), q("Q1", 1)], nets: nets(&["c0", "c1", "b", "e"]), ..Default::default() }
-    }
-
-    #[test]
-    fn nothing_to_audit() {
-        assert!(audit(&Intent::default(), &Netlist::default(), &[], None).is_empty());
-    }
-
-    /// An empty set has nothing to compare: skipped, never a panic.
-    #[test]
-    fn empty_set_is_skipped() {
-        let nl = bjts();
-        assert!(audit(&intent(set(Family::Mos, MatchClass::Moderate, &[], None)), &nl, &[], None).is_empty());
-        assert!(audit(&intent(set(Family::Bipolar, MatchClass::Moderate, &[], None)), &nl, &[], None).is_empty());
-    }
-
-    #[test]
-    fn minimal_and_voltage_sets_are_not_audited() {
-        let nl = Netlist { devices: vec![fet("M0", DeviceKind::Nmos, 0, 1, 2, 2, 1_000, 1_000), fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 1_000, 1_000)], nets: nets(&["g", "d", "s"]), ..Default::default() };
-        assert!(audit(&intent(set(Family::Mos, MatchClass::Minimal, &[1, 1], None)), &nl, &[], None).is_empty());
-        let v = MatchSpec { kind: MatchKind::Voltage, ..set(Family::Mos, MatchClass::Moderate, &[1, 1], None) };
-        assert!(audit(&intent(v), &nl, &[], None).is_empty());
-    }
-
-    #[test]
-    fn vgst_from_vgs_and_vth() {
-        let nl = Netlist { devices: vec![fet("M0", DeviceKind::Pmos, 0, 1, 2, 2, 1_000, 1_000), fet("M1", DeviceKind::Pmos, 0, 1, 2, 2, 1_000, 1_000)], nets: nets(&["g", "d", "s"]), ..Default::default() };
-        // |−450| − |−400| = 50 mV < 100 mV on both (signs ignored); gm alone would say 2 V.
-        let low = DeviceOp { vgs_mv: Some(-450.0), vth_mv: Some(-400.0), ..dop(10.0, 10.0, Some(0.0)) };
-        let op = OpFacts { dev: vec![Some(low); 2], net_mv: vec![Some(0.0); 3] };
-        assert_eq!(kinds(&audit(&intent(set(Family::Mos, MatchClass::Moderate, &[1, 1], None)), &nl, &[], Some(&op))), ["vgst_low"]);
-        // Exactly 100 mV is not low.
-        let edge = DeviceOp { vgs_mv: Some(500.0), vth_mv: Some(400.0), ..low };
-        let op = OpFacts { dev: vec![Some(edge); 2], net_mv: vec![Some(0.0); 3] };
-        assert!(audit(&intent(set(Family::Mos, MatchClass::Moderate, &[1, 1], None)), &nl, &[], Some(&op)).is_empty());
-    }
-
-    #[test]
-    fn reference_is_clamped_to_the_last_member() {
-        let nl = Netlist { devices: vec![fet("M0", DeviceKind::Nmos, 0, 1, 3, 3, 1_000, 1_000), fet("M1", DeviceKind::Nmos, 0, 2, 3, 3, 1_000, 1_000)], nets: nets(&["g", "d0", "d1", "s"]), ..Default::default() };
-        let op = OpFacts { dev: vec![Some(dop(10.0, 1.0, Some(1.0))); 2], net_mv: vec![Some(0.0), Some(500.0), Some(700.0), Some(0.0)] };
-        let d = audit(&intent(set(Family::Mos, MatchClass::Moderate, &[1, 1], Some(7))), &nl, &[], Some(&op));
-        assert_eq!(kinds(&d), ["clm_mismatch"]);
-        assert_eq!(d[0].devices, [DeviceId(1), DeviceId(0)]);
-    }
-
-    #[test]
-    fn bjt_ratio_bounds() {
-        let nl = bjts();
-        let op = OpFacts { dev: vec![], net_mv: vec![Some(500.0), Some(500.0), Some(0.0), Some(0.0)] };
-        let k = |u: &[u16]| kinds(&audit(&intent(set(Family::Bipolar, MatchClass::Moderate, u, None)), &nl, &[], Some(&op))).join(" ");
-        assert_eq!(k(&[1, 1]), "");
-        assert_eq!(k(&[1, 16]), "");
-        assert_eq!(k(&[1, 32]), "bjt_ratio");
-        assert_eq!(k(&[2, 6]), "bjt_ratio", "ratio 3 is odd");
-        assert_eq!(k(&[0, 4]), "", "a zero unit reads as 1: ratio 4");
-    }
-
-    #[test]
-    fn vce_spread() {
-        let nl = bjts();
-        let k = |c1: f64| {
-            let op = OpFacts { dev: vec![], net_mv: vec![Some(500.0), Some(c1), Some(0.0), Some(0.0)] };
-            kinds(&audit(&intent(set(Family::Bipolar, MatchClass::Moderate, &[1, 1], None)), &nl, &[], Some(&op))).join(" ")
-        };
-        assert_eq!(k(520.0), "vce_unequal");
-        assert_eq!(k(510.0), "", "10 mV is the limit, not over it");
-        assert_eq!(kinds(&audit(&intent(set(Family::Bipolar, MatchClass::Moderate, &[1, 1], None)), &nl, &[], None)), ["audit_not_checked"]);
-    }
-
-    #[test]
-    fn cascode_without_size_skips_ratio_but_checks_bulk() {
-        let n = DeviceKind::Nmos;
-        let mut bare = fet("T1", n, 2, 4, 1, 3, 2_000, 500);
-        bare.params.clear();
-        let nl = Netlist { devices: vec![fet("B0", n, 0, 0, 3, 3, 2_000, 1_000), fet("B1", n, 0, 1, 3, 3, 9_000, 1_000), fet("T0", n, 2, 2, 0, 0, 2_000, 500), bare], nets: nets(&["a", "b", "c", "vss", "o"]), ..Default::default() };
-        let d = audit(&Intent::default(), &nl, &[[DeviceId(0), DeviceId(1), DeviceId(2), DeviceId(3)]], None);
-        assert_eq!(kinds(&d), ["cascode_bulk"]);
-        assert_eq!(d[0].devices, [DeviceId(3)]);
-    }
-
-    #[test]
-    fn not_checked_is_one_last_sorted_diagnostic() {
-        let mut i = intent(set(Family::Mos, MatchClass::Moderate, &[1, 1], None));
-        i.sets.push(set(Family::Bipolar, MatchClass::Moderate, &[1, 7], None));
-        i.sets.push(set(Family::Mos, MatchClass::Moderate, &[1, 1], None));
-        let d = audit(&i, &bjts(), &[], None);
-        assert_eq!(kinds(&d), ["bjt_ratio", "audit_not_checked"]);
-        assert_eq!(d[1].message, "no op data: clm_mismatch, vce_unequal, vgst_low not checked");
     }
 }

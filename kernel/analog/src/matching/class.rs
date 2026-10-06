@@ -37,12 +37,9 @@ impl Family {
 /// no shared poly (Hastings §13.3 rule 22, hastings.txt L42638–42647).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GateStrap {
-    /// A shared poly bar (Minimal).
     #[default]
     PolyBar,
-    /// A shared poly bar ≥ 1 µm from the gates (Moderate).
     PolyBarFar,
-    /// Each gate contacted in metal, no shared poly (Exceptional).
     MetalIsolated,
 }
 
@@ -57,7 +54,6 @@ pub struct MosEnv {
     pub wpe_nm: i32,
     /// Gate poly extension beyond the deck rule (rule 21).
     pub gate_ext_extra_nm: i32,
-    /// How the gates are strapped.
     pub gate_strap: GateStrap,
 }
 
@@ -86,7 +82,6 @@ pub struct PassiveEnv {
     /// Dummies per array end: one on every class; EXC also spans
     /// `dummy_span_nm`, so its count is `ceil(span / pitch)` (the caller's).
     pub min_dummies: u8,
-    /// Width the dummies must span per end, nm (0 = no span requirement).
     pub dummy_span_nm: i32,
     /// Segment width floor, ‰ of the deck's minimum width.
     pub width_floor_permille: i32,
@@ -117,8 +112,7 @@ const TIERS: [(&str, &str); 7] = [
     ("wpe_clearance_nm", "wpe_clearance_nm tier missing"),
 ];
 
-/// `"<key> tier missing"` for each tier key `p` lacks on any class, in key
-/// order.
+/// `"<key> tier missing"` for each tier key `p` lacks on any class.
 pub fn missing_tiers(p: &dyn Process) -> impl Iterator<Item = &'static str> + '_ {
     let classes = [MatchClass::Minimal, MatchClass::Moderate, MatchClass::Exceptional];
     TIERS.iter().filter(move |(k, _)| classes.iter().any(|&c| p.tier(k, c).is_none())).map(|(_, m)| *m)
@@ -139,9 +133,7 @@ pub fn phi_arm(c: MatchClass) -> Option<bool> {
 /// A class limit: an offset in mV or a mismatch in %, both 6σ.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ClassLimit {
-    /// Input-referred offset, mV.
     Mv(f32),
-    /// Current or component-ratio mismatch, %.
     Pct(f32),
 }
 

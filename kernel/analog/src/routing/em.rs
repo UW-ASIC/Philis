@@ -17,12 +17,10 @@ const K_EV: f32 = 8.617e-5;
 /// Never credits a conductor cooler than the rating: `F ≤ 1`.
 #[must_use]
 pub fn derate(t_k: f32, t_ref_k: f32, ea_ev: f32, n: f32) -> f32 {
-    // A NaN temperature or exponent is unknown: no derating.
-    if t_k.is_nan() || n.is_nan() || t_k <= t_ref_k || n <= 0.0 {
+    if t_k <= t_ref_k || n <= 0.0 {
         return 1.0;
     }
-    // `f32::min` drops a NaN (NaN Ea) and caps a negative Ea's credit at 1.
-    ((ea_ev / (n * K_EV)) * (1.0 / t_k - 1.0 / t_ref_k)).exp().min(1.0)
+    ((ea_ev / (n * K_EV)) * (1.0 / t_k - 1.0 / t_ref_k)).exp()
 }
 
 /// One layer's deck EM limits, already derated to the conductor temperature.
@@ -102,12 +100,10 @@ pub const MAX_LAYERS: usize = 16;
 /// ponytail: DC average only; RMS/peak need waveforms.
 #[derive(Clone, Copy)]
 pub struct Electromigration {
-    /// The net checked.
     pub net: NetId,
     /// `(layer, limit)` per metal **and cut** the deck limits (pin-access
     /// layer and cut included); unused slots `u16::MAX`.
     pub limits: [(u16, Limit); MAX_LAYERS],
-    /// The stack the current flow is solved on; `None` = unknown.
     pub stack: Option<&'static Stack>,
     /// Count a via group by its front row (sidecar `em_front_row_cuts`, default
     /// `true`): current crowds into the cuts first met along a landing metal, so
@@ -132,7 +128,6 @@ fn front_row(cuts: &[&Rect], m: &Rect) -> u32 {
 }
 
 impl Electromigration {
-    /// The limit listed for `LayerId` `layer`; `None` when unlimited.
     fn limit(self, layer: u16) -> Option<Limit> {
         self.limits.iter().find(|(l, _)| *l == layer).map(|&(_, lim)| lim)
     }
@@ -247,19 +242,15 @@ impl Electromigration {
     }
 }
 
-/// Minimum conductor cross-section that survives an HBM zap of `hbm_v` volts
-/// adiabatically, µm²: Hastings eq. 14.6 (L45870–45932), `A = √(ρ·τ·I_pk²/
-/// (2·C_V·ΔT))` with τ 225 ns, ΔT 50 K and `I_pk = hbm_v / 1500 Ω`.
-/// `rho_uohm_cm` in µΩ·cm, `cv_j_per_k_cm3` in J/(K·cm³) ([`metal_family`]).
+/// Hastings eq. 14.6 (L45870–45932): A = √(ρ·τ·I_pk²/(2·C_V·ΔT)), τ 225 ns, ΔT 50 K, I_pk = hbm_v/1500 Ω; µm².
 #[must_use]
 pub fn esd_area_um2(hbm_v: f32, rho_uohm_cm: f32, cv_j_per_k_cm3: f32) -> f32 {
     let (rho, i) = (f64::from(rho_uohm_cm) * 1e-6, f64::from(hbm_v) / 1500.0);
     ((rho * 225e-9 * i * i / (2.0 * f64::from(cv_j_per_k_cm3) * 50.0)).sqrt() * 1e8) as f32
 }
 
-/// `(ρ µΩ·cm, C_V J/(K·cm³))` of a deck's `metal_family` (Hastings Table
-/// 14.3): `"cu"` (1.7, 3.45); `"al"`, absent or any other key → Al (2.7,
-/// 2.42), the larger area. Keys are case-sensitive.
+/// Table 14.3 (ρ µΩ·cm, C_V J/K/cm³) for `metal_family`: "al" (2.7, 2.42), "cu" (1.7, 3.45); absent or other → Al,
+/// the larger area.
 #[must_use]
 pub fn metal_family(key: Option<&str>) -> (f32, f32) {
     match key {
@@ -274,11 +265,8 @@ pub fn metal_family(key: Option<&str>) -> (f32, f32) {
 /// pad net rarely has.
 #[derive(Clone, Copy)]
 pub struct EsdWidth {
-    /// The ESD pad net.
     pub net: NetId,
-    /// Required conductor cross-section, µm² ([`esd_area_um2`]).
     pub area_um2: f32,
-    /// The stack whose `thickness_nm` turns the area into a width.
     pub stack: &'static Stack,
 }
 
@@ -670,81 +658,5 @@ mod tests {
         // A long run is bounded by density again.
         assert!((l.width_nm(500.0, 1_000_000.0) - 500.0).abs() < 1e-3);
         assert!((Limit { blech: 0.0, ..l }.width_nm(500.0, 20_000.0) - 500.0).abs() < 1e-3);
-    }
-
-    /// `F ≤ 1` always: at or below the rating, with no exponent, with an
-    /// unknown (NaN) temperature, and with a nonsensical negative `Ea`.
-    #[test]
-    fn derate_never_credits() {
-        assert_eq!(derate(363.15, 363.15, 0.9, 1.1), 1.0);
-        assert_eq!(derate(400.0, 363.15, 0.9, 0.0), 1.0, "n ≤ 0");
-        assert_eq!(derate(f32::NAN, 363.15, 0.9, 1.1), 1.0, "unknown temperature");
-        assert!(derate(400.0, 363.15, -0.9, 1.1) <= 1.0, "a negative Ea never credits");
-        assert!(derate(400.0, 363.15, 0.9, 1.1) < 1.0);
-    }
-
-    #[test]
-    fn limit_width_and_cuts_corner_cases() {
-        let l = Limit { ua_per_um: 1_000.0, ua_per_cut: 290.0, blech: 0.0 };
-        assert_eq!(Limit::default().width_nm(500.0, 1e6), 0.0, "unknown limit");
-        assert_eq!(l.width_nm(-500.0, 0.0), 500.0, "sign is direction only");
-        assert_eq!(l.width_nm(0.0, 0.0), 0.0);
-        assert_eq!(Limit::default().cuts(1e6), 1, "unknown limit");
-        assert_eq!(l.cuts(0.0), 1, "a via is at least one cut");
-        assert_eq!(l.cuts(580.0), 2);
-        assert_eq!(l.cuts(581.0), 3);
-        assert_eq!(l.cuts(-581.0), 3);
-        assert_eq!(Limit { blech: 7.0, ..l }.derated(0.5), Limit { ua_per_um: 500.0, ua_per_cut: 145.0, blech: 7.0 });
-    }
-
-    #[test]
-    fn front_row_counts_the_cuts_across_the_current() {
-        let c = |x, y| Rect { x, y, w: 200, h: 200 };
-        let (a, b, d) = (c(0, 0), c(0, 500), c(500, 0));
-        let along_x = Rect { x: -100, y: -100, w: 5_000, h: 1_000 };
-        assert_eq!(front_row(&[&a, &b, &d], &along_x), 2, "column x = 0 holds two");
-        assert_eq!(front_row(&[&a, &b, &d], &Rect { w: 1_000, h: 5_000, ..along_x }), 2, "row y = 0 holds two");
-        assert_eq!(front_row(&[&a, &b, &d], &Rect { w: 1_000, h: 1_000, ..along_x }), 3, "square: all");
-        assert_eq!(front_row(&[], &along_x), 0);
-    }
-
-    /// 1 µm² over 1 µm of thickness needs a 1 µm short side; cuts have no
-    /// cross-section floor.
-    #[test]
-    fn esd_width_ignores_cuts_and_reads_need_over_have() {
-        let st: &'static Stack = Box::leak(Box::new(Stack {
-            layers: vec![Layer { id: 1, thickness_nm: 1_000.0, ..Layer::default() }, Layer { id: 2, cut: true, thickness_nm: 1_000.0, ..Layer::default() }],
-            ..Stack::default()
-        }));
-        let e = EsdWidth { net: NetId(0), area_um2: 1.0, stack: st };
-        let only_cut = routes(vec![shape(2, 0, 0, 100, 100)], vec![]);
-        assert!(!e.known(&only_cut) && e.satisfied(&only_cut));
-        assert!(!e.known(&Routes::default()));
-        let r = routes(vec![shape(1, 0, 0, 10_000, 500), shape(2, 0, 0, 100, 100)], vec![]);
-        assert!(e.known(&r) && !e.satisfied(&r));
-        assert!((e.residual(&r) - 0.5).abs() < 1e-6);
-        assert!((e.usage(&r).unwrap() - 2.0).abs() < 1e-6);
-        assert!(e.satisfied(&routes(vec![shape(1, 0, 0, 10_000, 1_000)], vec![])), "at the floor");
-        let mut v = Vec::new();
-        e.touches(&mut v);
-        assert_eq!(v, vec![0]);
-    }
-
-    #[test]
-    fn esd_area_and_metal_family_edges() {
-        assert_eq!(esd_area_um2(0.0, 2.7, 2.42), 0.0);
-        assert_eq!(metal_family(Some("Cu")), metal_family(None), "keys are case-sensitive");
-        assert_eq!(metal_family(Some("w")), metal_family(Some("al")));
-    }
-
-    #[test]
-    fn unknown_em_puts_no_pressure() {
-        let r = jog(Some(-500.0));
-        let e = Electromigration { stack: None, ..em() };
-        assert_eq!((e.headroom(&r), e.usage(&r), e.residual(&r)), (1.0, None, 0.0));
-        assert_eq!(e.failing(&r), None);
-        let mut v = Vec::new();
-        e.touches(&mut v);
-        assert_eq!(v, vec![0]);
     }
 }

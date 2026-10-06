@@ -1,10 +1,4 @@
 //! Routing-tier rules, scored against [`pnr_core::Routes`] (gr, dr).
-//!
-//! Every rule is plain data: a `Copy` value (or a batch for the per-layout
-//! ones) whose measurement is a free function of the routes and, where the
-//! deck supplies one, the [`Stack`]. [`stack`] owns the per-layer parasitic
-//! model and the resistor graph, [`current`] the DC current solve; the rule
-//! files only read them.
 
 pub mod antenna;
 pub mod common_node;

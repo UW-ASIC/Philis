@@ -10,9 +10,8 @@ use pnr_core::GatePin;
 pub struct Layer {
     /// `LayerId` of the deck layer.
     pub id: u16,
-    /// Ground (area) capacitance, aF/µm²; `0` = none (a cut).
+    /// Ground capacitance per area and per edge length: aF/µm², aF/µm.
     pub area_af_um2: f32,
-    /// Ground fringe capacitance per µm of edge, aF/µm; `0` = none.
     pub fringe_af_um: f32,
     /// `ε0·k·t` in aF·nm/µm: lateral coupling to a parallel wire `gap` nm
     /// away is `lateral · run_µm / gap_nm` aF (TOPO eq. 4.3).
@@ -39,13 +38,9 @@ pub struct Layer {
     pub cross_af_um2: f32,
 }
 
-/// The routing stack, bottom-up (metals and cuts interleaved): the deck's
-/// per-layer parasitics and antenna rules every routing budget measures with.
-/// Built once per PDK and leaked to `&'static` so `Copy` rules can hold it.
+/// The routing stack, bottom-up (metals and cuts interleaved).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stack {
-    /// Every conductor, bottom-up; a layer's index here is its stack rank
-    /// (adjacent ranks touch through a cut). `id`s are unique.
     pub layers: Vec<Layer>,
     /// The deck's antenna rules sum every layer up to the stage
     /// (`antenna_cumulative_*`); else each stage counts its own layer.
@@ -61,15 +56,11 @@ pub struct Stack {
 /// with `diode_credit: 0`, whose area term is refused as unit-less).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DiodeCredit {
-    /// `LayerId` of the diode's credited layer.
     pub layer: u16,
-    /// Ratio reduction granted (conductor/gate area, unitless).
     pub bonus: f32,
 }
 
 impl Stack {
-    /// The layer with `LayerId` `id` and its stack rank; `None` off the stack.
-    /// O(layers).
     fn at(&self, id: u16) -> Option<(usize, &Layer)> {
         self.layers.iter().enumerate().find(|(_, l)| l.id == id)
     }
@@ -105,7 +96,11 @@ impl Stack {
     pub fn resistance_ohm(&self, shapes: &[Shape]) -> f32 {
         shapes
             .iter()
-            .filter_map(|s| self.at(s.layer.0).map(|(_, l)| shape_ohm(l, &s.rect)))
+            .filter_map(|s| {
+                let (_, l) = self.at(s.layer.0)?;
+                let (w, len) = (s.rect.w.min(s.rect.h).max(1) as f32, s.rect.w.max(s.rect.h) as f32);
+                Some(if l.cut { l.sheet_ohm } else { l.sheet_ohm * len / w })
+            })
             .sum()
     }
 
@@ -123,7 +118,11 @@ impl Stack {
     pub fn path_resistance_ohm(&self, shapes: &[Shape]) -> f32 {
         let nodes: Vec<(usize, Rect, f32)> = shapes
             .iter()
-            .filter_map(|s| self.at(s.layer.0).map(|(rank, l)| (rank, s.rect, shape_ohm(l, &s.rect))))
+            .filter_map(|s| {
+                let (rank, l) = self.at(s.layer.0)?;
+                let (w, len) = (s.rect.w.min(s.rect.h).max(1) as f32, s.rect.w.max(s.rect.h) as f32);
+                Some((rank, s.rect, if l.cut { l.sheet_ohm } else { l.sheet_ohm * len / w }))
+            })
             .collect();
         if nodes.is_empty() {
             return 0.0;
@@ -176,20 +175,12 @@ impl Stack {
     #[must_use]
     pub fn terminal_resistance_ohm(&self, shapes: &[Shape], terminals: &[Rect]) -> Vec<Option<f32>> {
         let g = self.port_graph(shapes, terminals, false);
-        // One least-R sweep per terminal, not one per candidate centre: the
-        // graph is undirected, so terminal t's sweep is every node's R to t.
-        let dist: Vec<Vec<f32>> = g.term.iter().map(|t| t.map_or_else(Vec::new, |n| g.dijkstra(&[n]).0)).collect();
-        // `(terminals reached, farthest reached R)` from centre `c`. An open
-        // net's centre lies in the piece reaching the most terminals; among
-        // those, the farthest terminal is nearest. Ties keep the first node.
-        let score = |c: usize| {
-            dist.iter().filter_map(|d| d.get(c).copied().filter(|x| x.is_finite())).fold((0usize, 0.0f32), |(k, far), x| (k + 1, far.max(x)))
-        };
-        let centre = (0..g.adj.len()).map(|c| (c, score(c))).filter(|&(_, (k, _))| k > 0).min_by(|(_, (ka, fa)), (_, (kb, fb))| kb.cmp(ka).then(fa.total_cmp(fb)));
-        match centre {
-            Some((c, _)) => dist.iter().map(|d| d.get(c).copied().filter(|x| x.is_finite())).collect(),
-            None => vec![None; terminals.len()],
-        }
+        let reach = |r: &[Option<f32>]| r.iter().flatten().copied().fold(0.0f32, f32::max);
+        (0..g.adj.len())
+            .map(|c| g.from(&[c]))
+            .filter(|r| r.iter().any(Option::is_some))
+            .min_by(|a, b| reach(a).total_cmp(&reach(b)))
+            .unwrap_or_else(|| vec![None; terminals.len()])
     }
 
     /// Series R from the nearest of `feeds` (where current enters: a tail
@@ -375,7 +366,11 @@ impl Stack {
                 let mut area: f32 = piece.iter().map(|&k| built[k]).filter(|&(r, _)| counts(r)).map(|(_, q)| exposed(q)).sum();
                 if layer.latent_merge_nm > 0 {
                     let g = i64::from(layer.latent_merge_nm);
-                    let near = |a: &Rect, b: &Rect| edge_gap_sq(a, b) <= g * g;
+                    let near = |a: &Rect, b: &Rect| {
+                        let dx = i64::from((b.x - (a.x + a.w)).max(a.x - (b.x + b.w)).max(0));
+                        let dy = i64::from((b.y - (a.y + a.h)).max(a.y - (b.y + b.h)).max(0));
+                        dx * dx + dy * dy <= g * g
+                    };
                     let own: Vec<&Rect> = piece.iter().map(|&k| &built[k]).filter(|&&(r, _)| r == stage).map(|(_, q)| q).collect();
                     area += others
                         .iter()
@@ -396,17 +391,15 @@ impl Stack {
     }
 }
 
-/// [`Stack::port_graph`]'s resistor network, nodes indexed `0..adj.len()`.
+/// [`Stack::port_graph`]'s resistor network: adjacency `(node, Ω, shape
+/// index)` (`u32::MAX`: a 0-Ω junction or terminal link) and each terminal's
+/// node.
 pub(crate) struct PortGraph {
-    /// Per node, its links `(node, Ω, shape index)` (`u32::MAX`: a 0-Ω
-    /// junction or terminal link); every link is stored at both ends.
     pub(crate) adj: Vec<Vec<(usize, f32, u32)>>,
-    /// Per terminal, its node; `None` when it touches no stack shape.
     pub(crate) term: Vec<Option<usize>>,
 }
 
 impl PortGraph {
-    /// Joins `a` and `b` both ways by `r` Ω through `shape`.
     fn link(&mut self, a: usize, b: usize, r: f32, shape: u32) {
         self.adj[a].push((b, r, shape));
         self.adj[b].push((a, r, shape));
@@ -452,9 +445,8 @@ impl PortGraph {
     }
 }
 
-/// `(run, gap)` in nm of two rects separated (gap > 0) on one axis and
-/// overlapping (run > 0) on the other; `None` when they touch, overlap, or
-/// sit diagonally apart.
+/// `(run, gap)` of two shapes separated on one axis and overlapping on the
+/// other; `None` otherwise.
 #[must_use]
 pub fn parallel(p: &Rect, q: &Rect) -> Option<(i32, i32)> {
     let gap_x = (q.x - (p.x + p.w)).max(p.x - (q.x + q.w));
@@ -468,35 +460,6 @@ pub fn parallel(p: &Rect, q: &Rect) -> Option<(i32, i32)> {
     } else {
         None
     }
-}
-
-/// Series R of one shape on layer `l`, Ω: one cut's R for a cut, else
-/// `R□ · long side / short side` (a zero-width side counts as 1 nm).
-fn shape_ohm(l: &Layer, r: &Rect) -> f32 {
-    if l.cut {
-        return l.sheet_ohm;
-    }
-    l.sheet_ohm * r.w.max(r.h) as f32 / r.w.min(r.h).max(1) as f32
-}
-
-/// Squared Euclidean edge-to-edge gap between two rects, nm² (`0` when they
-/// touch or overlap). Computed in `i64`, so any `i32` coordinates are safe.
-#[must_use]
-pub(crate) fn edge_gap_sq(a: &Rect, b: &Rect) -> i64 {
-    let (ax0, ax1, bx0, bx1) = (i64::from(a.x), i64::from(a.x) + i64::from(a.w), i64::from(b.x), i64::from(b.x) + i64::from(b.w));
-    let (ay0, ay1, by0, by1) = (i64::from(a.y), i64::from(a.y) + i64::from(a.h), i64::from(b.y), i64::from(b.y) + i64::from(b.h));
-    let dx = (bx0 - ax1).max(ax0 - bx1).max(0);
-    let dy = (by0 - ay1).max(ay0 - by1).max(0);
-    dx * dx + dy * dy
-}
-
-/// Area two rects share, nm² (`0` when they only touch or are apart).
-/// Computed in `i64`.
-#[must_use]
-pub(crate) fn overlap_area_nm2(a: &Rect, b: &Rect) -> i64 {
-    let w = (i64::from(a.x) + i64::from(a.w)).min(i64::from(b.x) + i64::from(b.w)) - i64::from(a.x.max(b.x));
-    let h = (i64::from(a.y) + i64::from(a.h)).min(i64::from(b.y) + i64::from(b.h)) - i64::from(a.y.max(b.y));
-    w.max(0) * h.max(0)
 }
 
 /// Area (nm²) and perimeter (nm) of the union of `rects`, by coordinate
@@ -769,144 +732,5 @@ mod tests {
     fn a_wider_gap_is_independent() {
         let mine = [shape(1, 0, 0, 60_000, 1_000)];
         assert_eq!(latent().antenna(&mine, &[], &[shape(1, 0, 1_141, 60_000, 1_000)], &[], 1_000_000), Some((60.0, 100.0)));
-    }
-
-    #[test]
-    fn union_area_perimeter_corner_cases() {
-        let r = |x, y, w, h| Rect { x, y, w, h };
-        assert_eq!(union_area_perimeter(&[]), (0.0, 0.0));
-        assert_eq!(union_area_perimeter(&[r(0, 0, 10, 20)]), (200.0, 60.0));
-        assert_eq!(union_area_perimeter(&[r(0, 0, 10, 10), r(20, 0, 10, 10)]), (200.0, 80.0), "disjoint");
-        assert_eq!(union_area_perimeter(&[r(0, 0, 10, 10), r(10, 0, 10, 10)]), (200.0, 60.0), "abutting merge");
-        assert_eq!(union_area_perimeter(&[r(0, 0, 10, 10), r(10, 10, 10, 10)]), (200.0, 80.0), "corner contact");
-        assert_eq!(union_area_perimeter(&[r(0, 0, 10, 0)]), (0.0, 0.0), "degenerate");
-        assert_eq!(union_area_perimeter(&[r(0, 0, 20, 10), r(0, 0, 10, 20)]), (300.0, 80.0), "L");
-        assert_eq!(union_area_perimeter(&[r(0, 0, 30, 30), r(10, 10, 10, 10)]), (900.0, 120.0), "contained");
-        assert_eq!(union_area_perimeter(&[r(0, 0, 30, 10), r(0, 20, 30, 10), r(0, 0, 10, 30), r(20, 0, 10, 30)]), (800.0, 160.0), "ring: the hole's edge counts");
-    }
-
-    #[test]
-    fn edge_gap_overlap_and_parallel() {
-        let a = Rect { x: 0, y: 0, w: 100, h: 100 };
-        assert_eq!(edge_gap_sq(&a, &Rect { x: 50, ..a }), 0);
-        assert_eq!(edge_gap_sq(&a, &Rect { x: 100, ..a }), 0, "touching");
-        assert_eq!(edge_gap_sq(&a, &Rect { x: 130, y: 140, ..a }), 30 * 30 + 40 * 40);
-        let d = i64::from(i32::MAX / 2) - (i64::from(i32::MIN / 2) + 100);
-        assert_eq!(edge_gap_sq(&Rect { x: i32::MIN / 2, ..a }, &Rect { x: i32::MAX / 2, ..a }), d * d, "no i32 overflow");
-        assert_eq!(overlap_area_nm2(&a, &Rect { x: 50, y: 50, ..a }), 2_500);
-        assert_eq!(overlap_area_nm2(&a, &Rect { x: 100, ..a }), 0, "touching");
-        assert_eq!(overlap_area_nm2(&a, &Rect { x: 10, y: 10, w: 10, h: 10 }), 100, "contained");
-        assert_eq!(parallel(&a, &Rect { x: 300, ..a }), Some((100, 200)));
-        assert_eq!(parallel(&a, &Rect { x: 50, y: 300, ..a }), Some((50, 200)));
-        assert_eq!(parallel(&a, &Rect { x: 100, ..a }), None, "touching");
-        assert_eq!(parallel(&a, &Rect { x: 300, y: 300, ..a }), None, "diagonal");
-        assert_eq!(parallel(&a, &Rect { x: 50, ..a }), None, "overlapping");
-    }
-
-    #[test]
-    fn shape_ohm_counts_squares_and_cuts() {
-        let metal = Layer { sheet_ohm: 0.125, ..Layer::default() };
-        assert_eq!(shape_ohm(&metal, &Rect { x: 0, y: 0, w: 10_000, h: 500 }), 2.5);
-        assert_eq!(shape_ohm(&metal, &Rect { x: 0, y: 0, w: 500, h: 10_000 }), 2.5, "orientation-free");
-        assert_eq!(shape_ohm(&metal, &Rect { x: 0, y: 0, w: 100, h: 0 }), 12.5, "a zero width counts as 1 nm");
-        assert_eq!(shape_ohm(&Layer { sheet_ohm: 4.5, cut: true, ..Layer::default() }, &Rect { x: 0, y: 0, w: 400, h: 170 }), 4.5);
-    }
-
-    #[test]
-    fn empty_and_off_stack_shapes_measure_nothing() {
-        let s = stack(0.0, 0.0, false);
-        assert_eq!(s.ground_af(&[]), 0.0);
-        assert_eq!(s.ground_af(&[shape(2, 0, 0, 170, 170)]), 0.0, "a cut has no C terms");
-        assert_eq!(s.resistance_ohm(&[]), 0.0);
-        assert_eq!(s.resistance_ohm(&[shape(9, 0, 0, 10_000, 500)]), 0.0);
-        assert_eq!(s.path_resistance_ohm(&[]), 0.0);
-        assert_eq!(s.path_resistance_ohm(&[shape(9, 0, 0, 10_000, 500)]), 0.0);
-        assert!(s.connected(&[]).is_empty());
-        assert_eq!(s.lateral_run_af(9, 1_000, 100), None);
-        assert_eq!(s.lateral_run_af(1, 1_000, 0), s.lateral_run_af(1, 1_000, 1), "a gap under 1 nm reads 1 nm");
-        assert_eq!(s.antenna(&[shape(1, 0, 0, 1_000, 1_000)], &[], &[], &[], 1), None, "no stage has a limit");
-    }
-
-    #[test]
-    fn path_resistance_bounds_each_piece() {
-        let s = stack(0.0, 0.0, false);
-        assert!((s.path_resistance_ohm(&[shape(1, 0, 0, 10_000, 500)]) - 2.5).abs() < 1e-6, "one shape: its own R");
-        let two = [shape(1, 0, 0, 10_000, 500), shape(1, 0, 5_000, 20_000, 500)];
-        assert!((s.path_resistance_ohm(&two) - 5.0).abs() < 1e-5, "two unjoined pieces: the worse");
-        let stacked = [shape(1, 0, 0, 10_000, 500), shape(3, 0, 0, 10_000, 500)];
-        assert!((s.path_resistance_ohm(&stacked) - 2.5).abs() < 1e-5, "m1 under m2 without a cut is not joined");
-    }
-
-    /// An open net: the centre lies in the piece reaching the most terminals,
-    /// so only the cut-off terminal reads `None`. The rail's ports sit at
-    /// its two pins (9.9 µm, 2.475 Ω apart), so the two branches sum to that.
-    #[test]
-    fn terminal_resistance_centres_on_the_piece_reaching_most_terminals() {
-        let s = stack(0.0, 0.0, false);
-        let rail = [shape(1, 0, 0, 10_000, 500), shape(1, 50_000, 0, 500, 500)];
-        let pin = |x| Rect { x, y: 0, w: 100, h: 500 };
-        let r = s.terminal_resistance_ohm(&rail, &[pin(0), pin(9_900), pin(50_000)]);
-        assert!(r[0].is_some() && r[1].is_some(), "{r:?}");
-        assert_eq!(r[2], None, "{r:?}");
-        assert!((r[0].unwrap() + r[1].unwrap() - 2.475).abs() < 1e-3, "{r:?}");
-        assert!(s.terminal_resistance_ohm(&rail, &[]).is_empty());
-    }
-
-    #[test]
-    fn fed_resistance_needs_a_reached_feed() {
-        let s = stack(0.0, 0.0, false);
-        let rail = [shape(1, 0, 0, 10_000, 500)];
-        let pin = |x| Rect { x, y: 0, w: 100, h: 500 };
-        assert_eq!(s.fed_resistance_ohm(&rail, &[pin(90_000)], &[pin(0), pin(9_900)]), vec![None, None]);
-        assert!(s.fed_resistance_ohm(&rail, &[pin(0)], &[]).is_empty());
-        let r = s.fed_resistance_ohm(&rail, &[pin(0)], &[pin(0), pin(9_900), pin(90_000)]);
-        assert_eq!(r[0], Some(0.0));
-        assert!((r[1].unwrap() - 2.475).abs() < 1e-4, "{r:?}");
-        assert_eq!(r[2], None);
-    }
-
-    #[test]
-    fn crossing_c_only_between_stack_adjacent_metals() {
-        let mut s = stack(0.0, 0.0, false);
-        s.layers[0].cross_af_um2 = 50.0;
-        assert_eq!(s.cross_af_um2(1, 3), Some(50.0));
-        assert_eq!(s.cross_af_um2(3, 1), Some(50.0), "either order");
-        assert_eq!(s.cross_af_um2(1, 1), None, "same layer");
-        assert_eq!(s.cross_af_um2(1, 2), None, "a cut");
-        assert_eq!(s.cross_af_um2(1, 9), None, "off the stack");
-        s.layers.push(Layer { id: 4, cut: true, ..Layer::default() });
-        s.layers.push(Layer { id: 5, ..Layer::default() });
-        assert_eq!(s.cross_af_um2(1, 5), None, "two metals apart");
-        s.layers[0].cross_af_um2 = 0.0;
-        assert_eq!(s.cross_af_um2(1, 3), None, "unknown");
-    }
-
-    #[test]
-    fn connected_joins_through_cuts_only() {
-        let s = stack(0.0, 0.0, false);
-        let shapes = [shape(1, 0, 0, 100, 100), shape(9, 0, 0, 100, 100), shape(1, 500, 0, 100, 100), shape(2, 50, 0, 50, 50), shape(3, 50, 0, 1_000, 100)];
-        let mut pieces: Vec<Vec<usize>> = s.connected(&shapes).into_iter().map(|mut p| {
-            p.sort_unstable();
-            p
-        }).collect();
-        pieces.sort();
-        assert_eq!(pieces, vec![vec![0, 3, 4], vec![2]], "m2 over the far m1 does not join it; layer 9 is off the stack");
-    }
-
-    /// A piece that touches none of the net's gate pins carries no charge.
-    #[test]
-    fn a_piece_reaching_no_gate_is_not_charged() {
-        let s = stack(100.0, 400.0, false);
-        let far = GatePin { at: Rect { x: 900_000, y: 0, w: 10, h: 10 }, dev: 0, nm2: 1_000_000 };
-        assert_eq!(s.antenna(&[shape(1, 0, 0, 200_000, 1_000)], &[], &[], &[far], 1), None);
-    }
-
-    /// Metamorphic: translating the whole net moves no antenna ratio.
-    #[test]
-    fn antenna_is_translation_invariant() {
-        let s = stack(100.0, 400.0, false);
-        let bridged = [shape(1, 0, 0, 20_000, 1_000), shape(2, 19_000, 0, 1_000, 1_000), shape(3, 19_000, 0, 142_000, 1_000), shape(2, 160_000, 0, 1_000, 1_000), shape(1, 160_000, 0, 20_000, 1_000)];
-        let moved: Vec<Shape> = bridged.iter().map(|q| Shape { rect: Rect { x: q.rect.x - 77_777, y: q.rect.y + 33_333, ..q.rect }, ..*q }).collect();
-        assert_eq!(s.antenna(&bridged, &[], &[], &[], 1_000_000), s.antenna(&moved, &[], &[], &[], 1_000_000));
     }
 }

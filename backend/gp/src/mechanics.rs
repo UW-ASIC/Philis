@@ -1,9 +1,5 @@
 //! Placement primitives shared by `gp` and `dp`: RNG, pin-based nets/HPWL,
 //! overlap, the tiered objective over `Requirements`, canvas and initial layout.
-//!
-//! All coordinates are nm, cell positions are centres (`Layout::x`/`y`), and
-//! every function here is deterministic: the only randomness is the caller's
-//! [`SplitMix64`].
 
 use analog::Requirements;
 use pnr_core::ids::DeviceId;
@@ -11,20 +7,16 @@ use pnr_core::{Layout, Macro, Report, Violation};
 
 use crate::{Prices, VariantSpace};
 
-/// Deterministic SplitMix64 PRNG (Steele, Lea & Flood 2014): same inputs +
-/// seed ⇒ same placement. The field is the raw state, advanced by the golden
-/// gamma on every draw; any `u64`, `0` included, is a valid seed.
+/// Deterministic SplitMix64 PRNG: same inputs + seed ⇒ same placement.
 pub struct SplitMix64(pub u64);
 
 impl SplitMix64 {
-    /// Generator whose first draw is the SplitMix64 output for state `seed`.
     #[inline]
     #[must_use]
     pub fn new(seed: u64) -> Self {
         Self(seed)
     }
 
-    /// Next 64 uniformly distributed bits; full period 2⁶⁴.
     #[inline(always)]
     pub fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -34,20 +26,19 @@ impl SplitMix64 {
         z ^ (z >> 31)
     }
 
-    /// Uniform in `[0, 1)` on the 2⁻⁵³ grid (top 53 bits of one draw).
+    /// Uniform in `[0, 1)`.
     #[inline(always)]
     pub fn f64(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    /// Uniform in `[0, 1)` on the 2⁻²⁴ grid (top 24 bits of one draw).
+    /// Uniform in `[0, 1)`.
     #[inline(always)]
     pub fn f32(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / (1u32 << 24) as f32
     }
 
-    /// Index in `[0, n)` by modulo (bias ≤ n/2⁶⁴, negligible for cell counts);
-    /// `n == 0` ⇒ `0`. Consumes one draw either way.
+    /// Uniform in `[0, n)`; `n == 0` ⇒ `0`.
     #[inline(always)]
     pub fn below(&mut self, n: usize) -> usize {
         if n == 0 {
@@ -57,7 +48,7 @@ impl SplitMix64 {
         }
     }
 
-    /// Uniform in `[-r, r)` for `r ≥ 0` (one [`Self::f32`] draw, scaled).
+    /// Uniform in `[-r, r]`.
     #[inline(always)]
     pub fn centered(&mut self, r: f32) -> f32 {
         (self.f32() * 2.0 - 1.0) * r
@@ -68,15 +59,9 @@ impl SplitMix64 {
 /// Built from macro pins; nets touching < 2 devices are dropped, and a device
 /// with several pins on one net contributes their centroid. Membership is
 /// variant-invariant, so a reshape only patches offsets ([`Nets::reshape_cell`]).
-///
-/// Rows (retained nets) are dense `0..count()`, in ascending `NetId` order;
-/// "item" `k` is one (device, offset) entry of the flat arrays.
 pub struct Nets {
-    /// Row `i`'s items are `start[i]..start[i + 1]`; `len = count() + 1`, `start[0] = 0`.
     start: Vec<u32>,
-    /// Device index of each item, ascending within a row.
     items: Vec<u32>,
-    /// Pin-centroid offset of each item from its device's bbox centre, R0 frame, nm.
     off: Vec<(i32, i32)>,
     /// `NetId` of each retained row.
     net: Vec<u16>,
@@ -85,9 +70,6 @@ pub struct Nets {
 }
 
 impl Nets {
-    /// Nets of `macros`, device `i` = `macros[i]`, all weights `1`. Offsets
-    /// are integer means (truncated toward zero) of pin-rect centres. O(pins +
-    /// max `NetId`).
     #[must_use]
     pub fn from_macros(macros: &[Macro]) -> Self {
         let Some(max_net) = macros.iter().flat_map(|m| &m.pins).map(|p| p.net.0).max() else {
@@ -142,35 +124,27 @@ impl Nets {
     }
 
     /// HPWL weight of net row `i`.
-    ///
-    /// # Panics
-    /// When `i >= count()`.
     #[inline]
     #[must_use]
     pub fn weight(&self, i: usize) -> f32 {
         self.weight[i]
     }
 
-    /// Retained net rows (nets on ≥ 2 devices).
     #[inline]
     #[must_use]
     pub fn count(&self) -> usize {
         self.start.len() - 1
     }
 
-    /// Devices on net `i`, ascending, each once.
+    /// Devices on net `i`.
     #[inline]
     #[must_use]
     pub fn row(&self, i: usize) -> &[u32] {
         &self.items[self.span(i)]
     }
 
-    /// Flat item indices of net `i`, for [`Nets::pin`]; parallel to [`Nets::row`].
-    ///
-    /// # Panics
-    /// When `i >= count()`.
+    /// Flat item indices of net `i`, for [`Nets::pin`].
     #[inline]
-    #[must_use]
     pub fn span(&self, i: usize) -> std::ops::Range<usize> {
         self.start[i] as usize..self.start[i + 1] as usize
     }
@@ -186,22 +160,8 @@ impl Nets {
         (l.x[d] + dx, l.y[d] + dy)
     }
 
-    /// Bounding box `(x0, x1, y0, y1)` of net `i`'s pins under `l`, nm.
-    #[inline]
-    #[must_use]
-    pub fn pin_bbox(&self, i: usize, l: &Layout) -> (i32, i32, i32, i32) {
-        let (mut x0, mut x1, mut y0, mut y1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
-        for k in self.span(i) {
-            let (px, py) = self.pin(k, l);
-            (x0, x1, y0, y1) = (x0.min(px), x1.max(px), y0.min(py), y1.max(py));
-        }
-        (x0, x1, y0, y1)
-    }
-
     /// Repoint cell `c`'s offsets at `m`'s pins on the nets `rows` (= `cell_nets()[c]`).
-    /// A net `m` has no pin for keeps its old offset (a debug assertion: a
-    /// variant must keep every terminal); a row `c` is not on is skipped.
-    /// O(Σ row length + |rows|·pins).
+    /// A net `m` has no pin for keeps its old offset.
     pub fn reshape_cell(&mut self, c: usize, rows: &[u32], m: &Macro) {
         let (cx, cy) = bbox_centre(m);
         for &ni in rows {
@@ -223,8 +183,7 @@ impl Nets {
         }
     }
 
-    /// Device → net rows it touches, ascending; devices past `n_devices` are
-    /// a caller bug (index panic).
+    /// Device → nets it touches.
     #[must_use]
     pub fn cell_nets(&self, n_devices: usize) -> Vec<Vec<u32>> {
         let mut out = vec![Vec::new(); n_devices];
@@ -242,15 +201,20 @@ fn bbox_centre(m: &Macro) -> (i32, i32) {
     (m.bbox.x + m.bbox.w / 2, m.bbox.y + m.bbox.h / 2)
 }
 
-/// Bounding-box HPWL over pin positions, weighted per net ([`Nets::weigh`]),
-/// nm; exact for any `i32` coordinates (no intermediate overflow). O(items).
+/// Bounding-box HPWL over pin positions, weighted per net ([`Nets::weigh`]), nm.
 #[must_use]
 pub fn hpwl(nets: &Nets, l: &Layout) -> f64 {
     let mut total = 0.0f64;
     for ni in 0..nets.count() {
-        let (x0, x1, y0, y1) = nets.pin_bbox(ni, l);
-        let span = (f64::from(x1) - f64::from(x0)) + (f64::from(y1) - f64::from(y0));
-        total += f64::from(nets.weight[ni]) * span;
+        let (mut x0, mut x1, mut y0, mut y1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+        for k in nets.span(ni) {
+            let (px, py) = nets.pin(k, l);
+            x0 = x0.min(px);
+            x1 = x1.max(px);
+            y0 = y0.min(py);
+            y1 = y1.max(py);
+        }
+        total += f64::from(nets.weight[ni]) * f64::from((x1 - x0) + (y1 - y0));
     }
     total
 }
@@ -262,26 +226,23 @@ pub fn hpwl(nets: &Nets, l: &Layout) -> f64 {
 pub fn encroach(l: &Layout, a: usize, b: usize, clearance: i32) -> f64 {
     let ox = (l.hw[a] + l.hw[b] + clearance) - (l.x[a] - l.x[b]).abs();
     let oy = (l.hh[a] + l.hh[b] + clearance) - (l.y[a] - l.y[b]).abs();
-    // Branchless: a non-positive axis zeroes the product.
-    f64::from(ox.max(0)) * f64::from(oy.max(0))
+    if ox > 0 && oy > 0 {
+        f64::from(ox) * f64::from(oy)
+    } else {
+        0.0
+    }
 }
 
 /// [`encroach`] summed over all pairs; `+0.0` with fewer than two cells (an
-/// empty f64 `sum` is `-0.0`, which reports print as "-0"). O(n²).
+/// empty f64 `sum` is `-0.0`, which reports print as "-0").
 #[must_use]
 pub fn encroachment(l: &Layout, clearance: i32) -> f64 {
-    pair_sum(l.x.len(), |a, b| encroach(l, a, b, clearance))
+    let n = l.x.len();
+    (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).fold(0.0, |t, (a, b)| t + encroach(l, a, b, clearance))
 }
 
-/// `Σ f(a, b)` over unordered pairs `a < b < n`, starting from `+0.0`.
-pub(crate) fn pair_sum(n: usize, f: impl Fn(usize, usize) -> f64) -> f64 {
-    (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).fold(0.0, |t, (a, b)| t + f(a, b))
-}
-
-/// PEX-tier objective, dimensionless: `Σ criticality·cost` over `reqs.cost`
-/// plus the priced budget residuals `Σ −λ_b·residual_b` (residual unclamped,
-/// so a slack budget earns a small reward at a nonzero price). Prices must be
-/// bound to `reqs` ([`Prices::bind`]); an unbound batch prices at 0.
+/// PEX-tier objective: `Σ criticality·cost` over `reqs.cost` plus the priced
+/// budget residuals `Σ −λ_b·residual_b`.
 #[inline]
 #[must_use]
 pub fn analog_cost(reqs: &Requirements<Layout>, l: &Layout, prices: &Prices) -> f32 {
@@ -334,7 +295,7 @@ pub fn analog_phi(reqs: &Requirements<Layout>, l: &Layout) -> (usize, f64) {
     (batches, margin)
 }
 
-/// Θ: summed budget residual, as each batch reports it (unclamped).
+/// Θ: summed budget residual.
 #[inline]
 #[must_use]
 pub fn analog_theta(reqs: &Requirements<Layout>, l: &Layout) -> f64 {
@@ -349,9 +310,8 @@ pub fn analog_violations(reqs: &Requirements<Layout>, l: &Layout) -> u32 {
 }
 
 /// Stage report: one hard entry per violating hard batch plus residual device
-/// overlap and clearance-only encroachment (each only above 0.5 nm²), one
-/// budget entry per positive residual, cost = HPWL/L_ref + analog cost
-/// ([`pex`]). O(n²) in cells for the overlap terms.
+/// overlap and clearance-only encroachment, one budget entry per positive
+/// residual, cost = HPWL/L_ref + analog cost ([`pex`]).
 #[must_use]
 pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Prices, rules: &crate::PlaceRules) -> Report {
     let mut hard_violations: Vec<Violation> = reqs
@@ -385,23 +345,19 @@ pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Pri
     Report { hard_violations, budget_violations, cost }
 }
 
-/// Half-extents `(hw, hh)` of a drawn macro, nm, truncated — the
-/// `Layout::variant` ⇒ `hw`/`hh` rule.
+/// Half-extents of a drawn macro — the `Layout::variant` ⇒ `hw`/`hh` rule.
 #[inline]
 #[must_use]
 pub fn variant_extents(m: &Macro) -> (i32, i32) {
     (m.bbox.w / 2, m.bbox.h / 2)
 }
 
-/// [`variant_extents`] of every macro, as the `(hw, hh)` columns of a [`Layout`].
 #[must_use]
 pub fn half_extents(macros: &[Macro]) -> (Vec<i32>, Vec<i32>) {
     macros.iter().map(variant_extents).unzip()
 }
 
-/// Per cell, `variants[i].alternatives[variant[i]]` (cloned); `macros[i]`
-/// when `variants`, `variant` or the alternatives are too short. Output
-/// length is `macros.len()`.
+/// `variants[i].alternatives[variant[i]]`, falling back to `macros[i]`.
 #[must_use]
 pub fn choose_variants(macros: &[Macro], variants: &[VariantSpace], variant: &[u16]) -> Vec<Macro> {
     macros
@@ -410,35 +366,28 @@ pub fn choose_variants(macros: &[Macro], variants: &[VariantSpace], variant: &[u
         .map(|(i, m)| {
             variants
                 .get(i)
-                .zip(variant.get(i))
-                .and_then(|(v, &k)| v.alternatives.get(usize::from(k)))
+                .and_then(|v| v.alternatives.get(variant[i] as usize))
                 .unwrap_or(m)
                 .clone()
         })
         .collect()
 }
 
-/// Square die side (nm): `√(total footprint area / utilization)`, at least
-/// the largest footprint side (1000 nm with no cells), at least 1, rounded up
-/// to `grid` (`grid ≤ 0` reads as 1). `utilization` is clamped to
-/// `[0.05, 0.95]`. Computed in wide arithmetic: no overflow for any extents
-/// whose result fits `i32`.
+/// Square die side (nm): total footprint area / utilization, at least the
+/// largest footprint, rounded up to `grid`.
 #[must_use]
 pub fn canvas_side(hw: &[i32], hh: &[i32], utilization: f32, grid: i32) -> i32 {
-    let total: f64 = hw.iter().zip(hh).map(|(&w, &h)| 2.0 * f64::from(w) * 2.0 * f64::from(h)).sum();
-    let area_side = (total / f64::from(utilization.clamp(0.05, 0.95))).sqrt().ceil() as i64;
-    let largest = hw.iter().zip(hh).map(|(&w, &h)| 2 * i64::from(w.max(h))).max().unwrap_or(1000);
+    let total: f64 = hw.iter().zip(hh).map(|(&w, &h)| f64::from(2 * w) * f64::from(2 * h)).sum();
+    let area_side = (total / f64::from(utilization.clamp(0.05, 0.95))).sqrt().ceil() as i32;
+    let largest = hw.iter().zip(hh).map(|(&w, &h)| (2 * w).max(2 * h)).max().unwrap_or(1000);
     let side = area_side.max(largest).max(1);
-    let g = i64::from(grid.max(1));
-    i32::try_from((side + g - 1) / g * g).unwrap_or(i32::MAX)
+    let g = grid.max(1);
+    (side + g - 1) / g * g
 }
 
-/// Initial layout: devices jittered within `0.15·side` of the die centre
-/// (two [`SplitMix64::centered`] draws per device, x then y), single-device
-/// groups, `n_axes` (at least one) axes at the centre, every branch `false`,
-/// orient `R0`, no power, no units.
-/// `variant` becomes `Layout::variant` as given (callers pass one per cell).
-/// The cell count must fit `u16`: group ids are `DeviceId(u16)`.
+/// Initial layout: devices jittered within `0.15·side` of the die centre,
+/// single-device groups, `n_axes` (at least one) axes at the centre, every
+/// branch `false`, no power.
 #[must_use]
 pub fn initial_layout(macros: &[Macro], variant: Vec<u16>, side: i32, n_axes: usize, rng: &mut SplitMix64) -> Layout {
     let n = macros.len();
@@ -467,23 +416,17 @@ pub fn initial_layout(macros: &[Macro], variant: Vec<u16>, side: i32, n_axes: us
     }
 }
 
-/// Clamp a centre so its footprint stays inside `[0, side]`; a footprint
-/// wider than the die sits at `half` (its low edge on 0).
+/// Clamp a centre so its footprint stays inside `[0, side]`.
 #[inline]
 #[must_use]
 pub fn clamp_to_die(c: i32, half: i32, side: i32) -> i32 {
     c.clamp(half, (side - half).max(half))
 }
 
-/// Snap `v` to the nearest multiple of `grid` (`grid ≤ 0` reads as 1), ties
-/// away from zero; exact integer arithmetic for every `i32`, saturating at
-/// the `i32` range.
+/// Snap `v` to the nearest multiple of `grid`.
 #[inline]
 #[must_use]
 pub fn snap(v: i32, grid: i32) -> i32 {
-    let g = i64::from(grid.max(1));
-    let v = i64::from(v);
-    // Round the magnitude half-up, then restore the sign: ties away from zero.
-    let q = (2 * v.abs() + g) / (2 * g);
-    (v.signum() * q * g).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    let g = grid.max(1);
+    ((v as f32 / g as f32).round() as i32) * g
 }

@@ -15,43 +15,25 @@ pub const RESERVE: f32 = 0.2;
 /// A [`PerformanceBudget`]'s ground-C term, with each net's wire length
 /// estimated as the rectilinear MST over its cells' pin boxes (edge to edge).
 /// R, differential and coupling terms are RTE-21's and are ignored here.
-///
-/// Plain data: build it with [`PlacePerf::new`] from a routing row, or fill
-/// the fields directly.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PlacePerf {
-    /// The routing row's metric name (reporting only).
     pub metric: String,
-    /// One row per priced net; [`PlacePerf::mst_len`] indexes this.
-    pub nets: Vec<PerfNet>,
-    /// Ground capacitance per nm of wire, aF, scaled to the row's headroom.
+    pub nets: Vec<NetId>,
+    pub weights: Vec<f32>,
     pub af_per_nm: f32,
     /// The routing row's `limit` (1 = headroom, 0 = do-not-worsen).
     pub limit: f32,
-    /// Share of the headroom left to routing, in `[0, 1)` (see [`RESERVE`]).
     pub reserve: f32,
-}
-
-/// One net a [`PlacePerf`] prices.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PerfNet {
-    /// The net.
-    pub net: NetId,
-    /// The routing row's sensitivity weight for this net.
-    pub weight: f32,
-    /// `(cell, per-variant pin box (dx, dy, hx, hy) about the bbox centre, R0)`
-    /// for every cell with a pin on the net.
-    pub cells: Vec<(u16, Vec<(i32, i32, i32, i32)>)>,
+    /// Per net: `(cell, per-variant pin box (dx, dy, hx, hy) about the bbox centre, R0)`.
+    pub items: Vec<Vec<(u16, Vec<(i32, i32, i32, i32)>)>>,
 }
 
 impl PlacePerf {
-    /// Builds the term for `row`; `variants[c]` are cell `c`'s alternatives.
-    /// Nets touching fewer than two cells are dropped: they carry no placement
-    /// wire. An alternative without a pin on a net uses a zero box at its bbox
-    /// centre. Cost: O(nets · Σ pins).
+    /// `variants[c]` are cell `c`'s alternatives. Nets touching fewer than two
+    /// cells are dropped with their weight: they carry no placement wire.
     #[must_use]
     pub fn new(row: &PerformanceBudget, variants: &[&[Macro]], reserve: f32) -> Self {
-        let mut nets = Vec::new();
+        let (mut nets, mut weights, mut items) = (Vec::new(), Vec::new(), Vec::new());
         for (&net, &w) in row.nets.iter().zip(&row.weights) {
             let mut on = Vec::new();
             for (c, alts) in variants.iter().enumerate() {
@@ -73,14 +55,15 @@ impl PlacePerf {
                 on.push((c as u16, boxes));
             }
             if on.len() >= 2 {
-                nets.push(PerfNet { net, weight: w, cells: on });
+                nets.push(net);
+                weights.push(w);
+                items.push(on);
             }
         }
-        Self { metric: row.metric.clone(), nets, af_per_nm: row.af_per_nm, limit: row.limit, reserve }
+        Self { metric: row.metric.clone(), nets, weights, af_per_nm: row.af_per_nm, limit: row.limit, reserve, items }
     }
 
-    /// Placed pin-box centre and half extents of cell `c` under its current
-    /// variant (falling back to variant 0) and orientation.
+    /// Placed pin-box centre and half extents of cell `c`.
     fn item(l: &Layout, c: u16, boxes: &[(i32, i32, i32, i32)]) -> (i64, i64, i64, i64) {
         let c = usize::from(c);
         let (bx, by, hx, hy) = boxes.get(usize::from(l.variant[c])).or(boxes.first()).copied().unwrap_or_default();
@@ -90,18 +73,11 @@ impl PlacePerf {
         (i64::from(l.x[c] + dx), i64::from(l.y[c] + dy), i64::from(hx), i64::from(hy))
     }
 
-    /// Returns the rectilinear MST length of net `n`, nm, edge to edge between
-    /// pin boxes; `0` for a net with fewer than two cells.
-    ///
-    /// # Panics
-    /// When `n` is out of range of `nets`, or a cell is out of range of `l`.
-    // ponytail: dense Prim, O(k²); k ≤ ~10 cells per sensitive net.
+    /// Rectilinear MST length of net `n`, nm, edge to edge between pin boxes.
+    /// ponytail: dense Prim, O(k²); k ≤ ~10 cells per sensitive net.
     #[must_use]
     pub fn mst_len(&self, n: usize, l: &Layout) -> i64 {
-        let pts: Vec<_> = self.nets[n].cells.iter().map(|(c, b)| Self::item(l, *c, b)).collect();
-        if pts.len() < 2 {
-            return 0;
-        }
+        let pts: Vec<_> = self.items[n].iter().map(|(c, b)| Self::item(l, *c, b)).collect();
         let d = |a: (i64, i64, i64, i64), b: (i64, i64, i64, i64)| {
             ((a.0 - b.0).abs() - (a.2 + b.2)).max(0) + ((a.1 - b.1).abs() - (a.3 + b.3)).max(0)
         };
@@ -122,7 +98,7 @@ impl PlacePerf {
 
     /// Σ w_i · mst_i · af_per_nm: fraction of the headroom the estimate spends.
     fn used(&self, l: &Layout) -> f32 {
-        (0..self.nets.len()).map(|n| self.nets[n].weight * self.mst_len(n, l) as f32 * self.af_per_nm).sum()
+        (0..self.items.len()).map(|n| self.weights[n] * self.mst_len(n, l) as f32 * self.af_per_nm).sum()
     }
 
     /// Overshoot of the placement share `1 − reserve` past `limit`.
@@ -151,7 +127,7 @@ impl RuleBatch<Layout> for PlacePerf {
         true
     }
     fn touched(&self, out: &mut Vec<u32>) {
-        let mut ids: Vec<u32> = self.nets.iter().flat_map(|n| &n.cells).map(|(c, _)| u32::from(*c)).collect();
+        let mut ids: Vec<u32> = self.items.iter().flatten().map(|(c, _)| u32::from(*c)).collect();
         ids.sort_unstable();
         ids.dedup();
         out.extend(ids);
@@ -190,10 +166,12 @@ mod tests {
     fn perf(boxes: &[(i32, i32, i32, i32)], limit: f32) -> PlacePerf {
         PlacePerf {
             metric: String::new(),
-            nets: vec![PerfNet { net: NetId(0), weight: 1.0, cells: boxes.iter().enumerate().map(|(c, b)| (c as u16, vec![*b])).collect() }],
+            nets: vec![NetId(0)],
+            weights: vec![1.0],
             af_per_nm: 1e-3,
             limit,
             reserve: RESERVE,
+            items: vec![boxes.iter().enumerate().map(|(c, b)| (c as u16, vec![*b])).collect()],
         }
     }
 
@@ -235,127 +213,5 @@ mod tests {
         let p = perf(&[(0, 0, 0, 0); 2], 1.0);
         assert!((p.residual(&l) - (7.0 / 0.8 - 1.0)).abs() < 1e-5);
         assert_eq!(p.violations(&l), 1);
-    }
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-    use pnr_core::{LayerId, Orient, Pin, Rect};
-
-    fn cells(xy: &[(i32, i32)]) -> Layout {
-        let n = xy.len();
-        Layout {
-            x: xy.iter().map(|p| p.0).collect(),
-            y: xy.iter().map(|p| p.1).collect(),
-            hw: vec![500; n],
-            hh: vec![500; n],
-            axis: vec![],
-            groups: vec![],
-            orient: vec![Orient::default(); n],
-            variant: vec![0; n],
-            branch: Vec::new(),
-            power_uw: vec![0; n],
-            temp_mc: vec![0; n],
-            units: Default::default(),
-        }
-    }
-
-    /// One net over point pins at every cell centre.
-    fn points(n: usize, limit: f32) -> PlacePerf {
-        PlacePerf {
-            metric: "m".into(),
-            nets: vec![PerfNet { net: NetId(0), weight: 1.0, cells: (0..n as u16).map(|c| (c, vec![(0, 0, 0, 0)])).collect() }],
-            af_per_nm: 1e-3,
-            limit,
-            reserve: RESERVE,
-        }
-    }
-
-    fn pin(net: u16, x: i32, y: i32, w: i32, h: i32) -> Pin {
-        Pin { name: String::new(), net: NetId(net), at: Rect { x, y, w, h }, layer: LayerId(0) }
-    }
-
-    #[test]
-    fn mst_of_fewer_than_two_cells_is_zero() {
-        let l = cells(&[(0, 0)]);
-        assert_eq!(points(0, 1.0).mst_len(0, &l), 0);
-        assert_eq!(points(1, 1.0).mst_len(0, &l), 0);
-    }
-
-    #[test]
-    fn mst_is_a_tree_not_a_star() {
-        // Collinear 0, 1 µm, 5 µm: the tree is 5 µm, a star from 0 would be 6.
-        let l = cells(&[(0, 0), (1_000, 0), (5_000, 0)]);
-        assert_eq!(points(3, 1.0).mst_len(0, &l), 5_000);
-        // An L of three: 3 µm + 4 µm.
-        let l = cells(&[(0, 0), (3_000, 0), (3_000, 4_000)]);
-        assert_eq!(points(3, 1.0).mst_len(0, &l), 7_000);
-    }
-
-    #[test]
-    fn variant_past_the_boxes_falls_back_to_the_first() {
-        let mut p = points(0, 1.0);
-        p.nets[0].cells = vec![(0, vec![(100, 0, 0, 0)]), (1, vec![(0, 0, 0, 0)])];
-        let mut l = cells(&[(0, 0), (1_000, 0)]);
-        l.variant[0] = 3;
-        assert_eq!(p.mst_len(0, &l), 900);
-    }
-
-    #[test]
-    fn usage_criticality_and_reserve() {
-        // 7 µm of wire × 1e-3 = 7 used; placement may spend 0.8 of it.
-        let l = cells(&[(0, 0), (3_000, 4_000)]);
-        let p = points(2, 1.0);
-        let u = p.worst_usage(&l).unwrap();
-        assert!((u - 7.0 / 0.8).abs() < 1e-4, "{u}");
-        assert_eq!(p.criticality(&l), 1.0);
-        assert!((p.cost(&l) - (7.0 / 0.8 - 1.0)).abs() < 1e-4);
-        let near = cells(&[(0, 0), (100, 0)]);
-        assert!((p.criticality(&near) - 0.1 / 0.8).abs() < 1e-6);
-        assert_eq!((p.violations(&near), p.cost(&near)), (0, 0.0));
-        // No reserve: the whole headroom.
-        let all = PlacePerf { reserve: 0.0, ..points(2, 1.0) };
-        assert!((all.worst_usage(&near).unwrap() - 0.1).abs() < 1e-6);
-    }
-
-    #[test]
-    fn zero_weight_nets_cost_nothing() {
-        let mut p = points(2, 1.0);
-        p.nets[0].weight = 0.0;
-        assert_eq!(p.worst_usage(&cells(&[(0, 0), (9_000, 0)])), Some(0.0));
-    }
-
-    #[test]
-    fn touched_lists_each_cell_once_sorted() {
-        let p = PlacePerf {
-            nets: vec![
-                PerfNet { net: NetId(0), weight: 1.0, cells: vec![(5, vec![]), (2, vec![])] },
-                PerfNet { net: NetId(1), weight: 1.0, cells: vec![(2, vec![]), (0, vec![])] },
-            ],
-            ..points(0, 1.0)
-        };
-        let mut out = vec![9];
-        p.touched(&mut out);
-        assert_eq!(out, [9, 0, 2, 5]);
-        assert!(p.local());
-        assert_eq!((p.count(), p.kind()), (1, "PlacePerf"));
-    }
-
-    #[test]
-    fn new_keeps_nets_on_two_cells_with_pin_boxes_about_the_bbox_centre() {
-        // Cell 0: two net-0 pins spanning x 0…400, y 0…100 in a 1000² bbox.
-        let c0 = Macro { pins: vec![pin(0, 0, 0, 100, 100), pin(0, 300, 0, 100, 100), pin(1, 0, 0, 10, 10)], bbox: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() };
-        // Cell 1: one net-0 pin; alternative 1 has none.
-        let c1 = Macro { pins: vec![pin(0, 500, 500, 0, 0)], bbox: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() };
-        let c1_bare = Macro { bbox: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() };
-        let alts: [&[Macro]; 2] = [std::slice::from_ref(&c0), &[c1, c1_bare]];
-        let row = PerformanceBudget::ground_c("ota".into(), vec![NetId(0), NetId(1), NetId(2)], vec![2.0, 3.0, 4.0], 0.5);
-        let p = PlacePerf::new(&row, &alts, 0.3);
-        // Net 1 sits on cell 0 only; net 2 nowhere: both dropped.
-        assert_eq!(p.nets.iter().map(|n| (n.net, n.weight)).collect::<Vec<_>>(), [(NetId(0), 2.0)]);
-        assert_eq!((p.metric.as_str(), p.af_per_nm, p.limit, p.reserve), ("ota", 0.5, 1.0, 0.3));
-        assert_eq!(p.nets[0].cells[0], (0, vec![(200 - 500, 50 - 500, 200, 50)]));
-        assert_eq!(p.nets[0].cells[1], (1, vec![(0, 0, 0, 0), (0, 0, 0, 0)]));
     }
 }

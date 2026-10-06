@@ -19,7 +19,6 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// One GPU vertex: world (or, for the overlay, NDC) position and RGBA.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct Vertex {
@@ -27,38 +26,25 @@ struct Vertex {
     color: [f32; 4],
 }
 
-/// The camera uniform: NDC = `(world + offset) · scale`, x divided by
-/// `aspect` (width / height).
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct CamUni {
-    /// World translation applied before scaling, database units.
     offset: [f32; 2],
-    /// NDC per database unit.
     scale: f32,
-    /// Window width / height.
     aspect: f32,
 }
 
-/// One flattened polygon on a GDS `(layer, datatype)`.
 #[derive(Clone)]
 pub struct Poly {
-    /// GDS layer number.
     pub layer: u16,
-    /// GDS datatype.
     pub datatype: u16,
-    /// Vertices in database units, open (the closing vertex is not repeated).
     pub pts: Vec<[i32; 2]>,
 }
 
-/// One flattened GDS TEXT label.
 #[derive(Clone)]
 pub struct TextEntry {
-    /// Anchor x, database units.
     pub x: i32,
-    /// Anchor y, database units.
     pub y: i32,
-    /// The label string.
     pub text: String,
 }
 
@@ -90,51 +76,24 @@ fn bounds(polys: &[Poly]) -> Option<(i32, i32, i32, i32)> {
 
 // ── GDS parser: BOUNDARY, BOX, PATH, SREF, AREF, TEXT ──
 
-/// One GDS structure, unflattened (its own frame).
 struct GdsCell {
-    /// Position of the defining ENDSTR in the stream (the top is the last
-    /// unreferenced one).
-    ordinal: usize,
     polys: Vec<Poly>,
     srefs: Vec<SRef>,
     texts: Vec<TextEntry>,
 }
 
-/// An SREF, or an AREF as a `cols × rows` lattice of SREFs.
 struct SRef {
-    /// Referenced structure name.
     name: String,
-    /// Origin of the first placement, parent frame.
     x: i32,
     y: i32,
-    /// Mirror about x before rotating.
     mirror_x: bool,
-    /// Counter-clockwise rotation, degrees.
     angle_deg: f64,
-    /// Lattice size; 1 × 1 for an SREF.
     cols: u16,
     rows: u16,
-    /// Per-column and per-row step, parent frame.
     col_vec: (i32, i32),
     row_vec: (i32, i32),
 }
 
-/// The GDS element whose records are being read.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Element {
-    None,
-    /// BOUNDARY or BOX.
-    Boundary,
-    Path,
-    Sref,
-    Aref,
-    Text,
-}
-
-/// Decodes an 8-byte GDS excess-64 base-16 real.
-///
-/// # Panics
-/// When `b` is shorter than 8 bytes.
 fn gds_real(b: &[u8]) -> f64 {
     let sign = if b[0] & 0x80 != 0 { -1.0 } else { 1.0 };
     let exp = (b[0] & 0x7F) as i32 - 64;
@@ -145,30 +104,26 @@ fn gds_real(b: &[u8]) -> f64 {
     sign * (mant as f64 / (1u64 << 56) as f64) * 16.0f64.powi(exp)
 }
 
-/// Big-endian i16 at `off`. Panics past the end.
 fn read_i16(data: &[u8], off: usize) -> i16 {
     i16::from_be_bytes([data[off], data[off + 1]])
 }
 
-/// Big-endian i32 at `off`. Panics past the end.
 fn read_i32(data: &[u8], off: usize) -> i32 {
     i32::from_be_bytes(data[off..off + 4].try_into().unwrap())
 }
 
-/// `len` bytes at `off` as text, cut at the first NUL (GDS pads to even).
 fn read_string(data: &[u8], off: usize, len: usize) -> String {
     let s = &data[off..off + len];
     let end = s.iter().position(|&b| b == 0).unwrap_or(len);
     String::from_utf8_lossy(&s[..end]).into_owned()
 }
 
-/// A PATH as one quad per segment, `hw` either side of the centre line;
-/// ends are flush (PATHTYPE 0).
-fn path_to_polys(layer: u16, datatype: u16, hw: i32, pts: &[[i32; 2]]) -> Vec<Poly> {
-    let mut out = Vec::with_capacity(pts.len().saturating_sub(1));
+fn path_to_polys(layer: u16, datatype: u16, half_w: i32, pts: &[[i32; 2]]) -> Vec<Poly> {
+    let mut out = Vec::new();
     for seg in pts.windows(2) {
         let [x0, y0] = seg[0];
         let [x1, y1] = seg[1];
+        let hw = half_w;
         let rect = if y0 == y1 {
             let (lx, rx) = (x0.min(x1), x0.max(x1));
             vec![[lx, y0 - hw], [rx, y0 - hw], [rx, y0 + hw], [lx, y0 + hw]]
@@ -179,8 +134,8 @@ fn path_to_polys(layer: u16, datatype: u16, hw: i32, pts: &[[i32; 2]]) -> Vec<Po
             let dx = (x1 - x0) as f64;
             let dy = (y1 - y0) as f64;
             let len = (dx * dx + dy * dy).sqrt();
-            let nx = (-dy / len * f64::from(hw)).round() as i32;
-            let ny = (dx / len * f64::from(hw)).round() as i32;
+            let nx = (-dy / len * hw as f64) as i32;
+            let ny = (dx / len * hw as f64) as i32;
             vec![
                 [x0 + nx, y0 + ny], [x1 + nx, y1 + ny],
                 [x1 - nx, y1 - ny], [x0 - nx, y0 - ny],
@@ -191,8 +146,6 @@ fn path_to_polys(layer: u16, datatype: u16, hw: i32, pts: &[[i32; 2]]) -> Vec<Po
     out
 }
 
-/// Every structure in a GDS stream by name. Reading stops at the first
-/// truncated or malformed record header; unknown records are skipped.
 fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
     let mut cells: HashMap<String, GdsCell> = HashMap::new();
     let mut i = 0;
@@ -202,8 +155,12 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
     let mut cur_srefs: Vec<SRef> = Vec::new();
     let mut cur_texts: Vec<TextEntry> = Vec::new();
 
-    let mut el = Element::None;
-    let mut n_ended = 0usize;
+    // Element state
+    let mut in_boundary = false;
+    let mut in_path = false;
+    let mut in_sref = false;
+    let mut in_aref = false;
+    let mut in_text = false;
     let mut layer: u16 = 0;
     let mut datatype: u16 = 0;
     let mut path_width: i32 = 0;
@@ -237,10 +194,7 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
             0x07 => {
                 // ENDSTR
                 if let Some(name) = cur_name.take() {
-                    let ordinal = n_ended;
-                    n_ended += 1;
                     cells.insert(name, GdsCell {
-                        ordinal,
                         polys: std::mem::take(&mut cur_polys),
                         srefs: std::mem::take(&mut cur_srefs),
                         texts: std::mem::take(&mut cur_texts),
@@ -250,23 +204,23 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
 
             // Element begin
             0x08 | 0x2D => {
-                el = Element::Boundary;
+                in_boundary = true;
                 layer = 0;
                 datatype = 0;
             }
             0x09 => {
-                el = Element::Path;
+                in_path = true;
                 layer = 0;
                 datatype = 0;
                 path_width = 0;
             }
             0x0A => {
-                el = Element::Sref;
+                in_sref = true;
                 sref_mirror = false;
                 sref_angle = 0.0;
             }
             0x0B => {
-                el = Element::Aref;
+                in_aref = true;
                 sref_mirror = false;
                 sref_angle = 0.0;
                 aref_cols = 1;
@@ -274,50 +228,50 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
             }
             0x0C => {
                 // TEXT
-                el = Element::Text;
+                in_text = true;
                 text_string.clear();
                 text_xy = (0, 0);
             }
 
             // LAYER
-            0x0D if matches!(el, Element::Boundary | Element::Path) && len >= 6 => {
+            0x0D if (in_boundary || in_path) && len >= 6 => {
                 layer = read_i16(data, i + 4) as u16;
             }
 
             // DATATYPE
-            0x0E if matches!(el, Element::Boundary | Element::Path) && len >= 6 => {
+            0x0E if (in_boundary || in_path) && len >= 6 => {
                 datatype = read_i16(data, i + 4) as u16;
             }
 
             // WIDTH (path)
-            0x0F if el == Element::Path && len >= 8 => {
+            0x0F if in_path && len >= 8 => {
                 path_width = read_i32(data, i + 4);
             }
 
             // STRING (text content)
-            0x19 if el == Element::Text => {
+            0x19 if in_text => {
                 text_string = read_string(data, i + 4, len - 4);
             }
 
             // SNAME
-            0x12 if matches!(el, Element::Sref | Element::Aref) => {
+            0x12 if in_sref || in_aref => {
                 sref_name = read_string(data, i + 4, len - 4);
             }
 
             // COLROW (aref)
-            0x13 if el == Element::Aref && len >= 8 => {
+            0x13 if in_aref && len >= 8 => {
                 aref_cols = read_i16(data, i + 4) as u16;
                 aref_rows = read_i16(data, i + 6) as u16;
             }
 
             // STRANS
-            0x1A if matches!(el, Element::Sref | Element::Aref) && len >= 6 => {
+            0x1A if (in_sref || in_aref) && len >= 6 => {
                 let flags = u16::from_be_bytes([data[i + 4], data[i + 5]]);
                 sref_mirror = flags & 0x8000 != 0;
             }
 
             // ANGLE
-            0x1C if matches!(el, Element::Sref | Element::Aref) && len >= 12 => {
+            0x1C if (in_sref || in_aref) && len >= 12 => {
                 sref_angle = gds_real(&data[i + 4..i + 12]);
             }
 
@@ -331,51 +285,54 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
                     pts.push([read_i32(data, o), read_i32(data, o + 4)]);
                 }
 
-                match el {
-                    Element::Boundary => {
-                        if pts.len() > 1 && pts.first() == pts.last() { pts.pop(); }
-                        if pts.len() >= 3 {
-                            cur_polys.push(Poly { layer, datatype, pts });
-                        }
+                if in_boundary {
+                    if pts.len() > 1 && pts.first() == pts.last() { pts.pop(); }
+                    if pts.len() >= 3 {
+                        cur_polys.push(Poly { layer, datatype, pts });
                     }
-                    Element::Path if pts.len() >= 2 => {
-                        // A negative WIDTH is absolute (unscaled): same magnitude.
-                        let hw = ((path_width.unsigned_abs() / 2) as i32).max(1);
+                } else if in_path {
+                    if pts.len() >= 2 {
+                        let hw = (path_width / 2).max(1);
                         cur_polys.extend(path_to_polys(layer, datatype, hw, &pts));
                     }
-                    Element::Sref if !pts.is_empty() => cur_srefs.push(SRef {
+                } else if in_sref && !pts.is_empty() {
+                    cur_srefs.push(SRef {
                         name: sref_name.clone(),
                         x: pts[0][0], y: pts[0][1],
                         mirror_x: sref_mirror, angle_deg: sref_angle,
                         cols: 1, rows: 1,
                         col_vec: (0, 0), row_vec: (0, 0),
-                    }),
-                    Element::Aref if pts.len() >= 3 => {
-                        let (x0, y0) = (pts[0][0], pts[0][1]);
-                        let (c, r) = (i32::from(aref_cols.max(1)), i32::from(aref_rows.max(1)));
-                        cur_srefs.push(SRef {
-                            name: sref_name.clone(),
-                            x: x0, y: y0,
-                            mirror_x: sref_mirror, angle_deg: sref_angle,
-                            cols: aref_cols, rows: aref_rows,
-                            col_vec: ((pts[1][0] - x0) / c, (pts[1][1] - y0) / c),
-                            row_vec: ((pts[2][0] - x0) / r, (pts[2][1] - y0) / r),
-                        });
-                    }
-                    Element::Text if !pts.is_empty() => text_xy = (pts[0][0], pts[0][1]),
-                    _ => {}
+                    });
+                } else if in_aref && pts.len() >= 3 {
+                    let (x0, y0) = (pts[0][0], pts[0][1]);
+                    cur_srefs.push(SRef {
+                        name: sref_name.clone(),
+                        x: x0, y: y0,
+                        mirror_x: sref_mirror, angle_deg: sref_angle,
+                        cols: aref_cols, rows: aref_rows,
+                        col_vec: ((pts[1][0] - x0) / aref_cols.max(1) as i32,
+                                  (pts[1][1] - y0) / aref_cols.max(1) as i32),
+                        row_vec: ((pts[2][0] - x0) / aref_rows.max(1) as i32,
+                                  (pts[2][1] - y0) / aref_rows.max(1) as i32),
+                    });
+                } else if in_text && !pts.is_empty() {
+                    text_xy = (pts[0][0], pts[0][1]);
                 }
             }
 
             // ENDEL
             0x11 => {
-                if el == Element::Text && !text_string.is_empty() {
+                if in_text && !text_string.is_empty() {
                     cur_texts.push(TextEntry {
                         x: text_xy.0, y: text_xy.1,
-                        text: std::mem::take(&mut text_string),
+                        text: text_string.clone(),
                     });
                 }
-                el = Element::None;
+                in_boundary = false;
+                in_path = false;
+                in_sref = false;
+                in_aref = false;
+                in_text = false;
             }
             _ => {}
         }
@@ -384,36 +341,14 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
     cells
 }
 
-/// `(sin, cos)` of `angle_deg`, exact for quarter turns so Manhattan layouts
-/// stay integral.
-fn sin_cos_deg(angle_deg: f64) -> (f64, f64) {
-    let a = angle_deg.rem_euclid(360.0);
-    if a == 0.0 {
-        (0.0, 1.0)
-    } else if a == 90.0 {
-        (1.0, 0.0)
-    } else if a == 180.0 {
-        (0.0, -1.0)
-    } else if a == 270.0 {
-        (-1.0, 0.0)
-    } else {
-        a.to_radians().sin_cos()
-    }
-}
-
-/// `(x, y)` mirrored about x (when `mirror_x`), then rotated by the angle
-/// whose `(sin, cos)` is given (one trig evaluation per instance, not per
-/// vertex), rounded to the nearest unit and saturated at the i32 range.
-fn transform_sc(x: i32, y: i32, mirror_x: bool, (s, c): (f64, f64)) -> (i32, i32) {
-    let px = f64::from(x);
-    let py = if mirror_x { -f64::from(y) } else { f64::from(y) };
+fn transform_point(x: i32, y: i32, mirror_x: bool, angle_deg: f64) -> (i32, i32) {
+    let (px, mut py) = (x as f64, y as f64);
+    if mirror_x { py = -py; }
+    let rad = angle_deg.to_radians();
+    let (s, c) = (rad.sin(), rad.cos());
     ((px * c - py * s).round() as i32, (px * s + py * c).round() as i32)
 }
 
-/// Appends `name`'s polygons and labels, and those of everything it
-/// references, under the transform (mirror, rotate, then translate by
-/// `(tx, ty)`). Unknown names and references deeper than 64 are dropped.
-#[allow(clippy::too_many_arguments)]
 fn flatten_cell(
     cells: &HashMap<String, GdsCell>,
     name: &str,
@@ -428,52 +363,43 @@ fn flatten_cell(
         Some(c) => c,
         None => return,
     };
-    let sc = sin_cos_deg(angle);
-    let place = |x: i32, y: i32| {
-        let (rx, ry) = transform_sc(x, y, mirror, sc);
-        [rx.saturating_add(tx), ry.saturating_add(ty)]
-    };
-    out.reserve(cell.polys.len());
     for poly in &cell.polys {
-        let pts = poly.pts.iter().map(|&[x, y]| place(x, y)).collect();
+        let pts: Vec<[i32; 2]> = poly.pts.iter().map(|&[x, y]| {
+            let (rx, ry) = transform_point(x, y, mirror, angle);
+            [rx + tx, ry + ty]
+        }).collect();
         out.push(Poly { layer: poly.layer, datatype: poly.datatype, pts });
     }
     for t in &cell.texts {
-        let [x, y] = place(t.x, t.y);
-        out_texts.push(TextEntry { x, y, text: t.text.clone() });
+        let (rx, ry) = transform_point(t.x, t.y, mirror, angle);
+        out_texts.push(TextEntry { x: rx + tx, y: ry + ty, text: t.text.clone() });
     }
     for sref in &cell.srefs {
-        for row in 0..i32::from(sref.rows) {
-            for col in 0..i32::from(sref.cols) {
-                let step = |o: i32, c: i32, r: i32| o.saturating_add(col.saturating_mul(c)).saturating_add(row.saturating_mul(r));
-                let sx = step(sref.x, sref.col_vec.0, sref.row_vec.0);
-                let sy = step(sref.y, sref.col_vec.1, sref.row_vec.1);
-                let (px, py) = transform_sc(sx, sy, mirror, sc);
+        for row in 0..sref.rows {
+            for col in 0..sref.cols {
+                let sx = sref.x + col as i32 * sref.col_vec.0 + row as i32 * sref.row_vec.0;
+                let sy = sref.y + col as i32 * sref.col_vec.1 + row as i32 * sref.row_vec.1;
+                let (px, py) = transform_point(sx, sy, mirror, angle);
                 let m = mirror ^ sref.mirror_x;
                 let a = if mirror { angle - sref.angle_deg } else { angle + sref.angle_deg };
-                flatten_cell(cells, &sref.name, tx.saturating_add(px), ty.saturating_add(py), m, a, out, out_texts, depth + 1);
+                flatten_cell(cells, &sref.name, tx + px, ty + py, m, a, out, out_texts, depth + 1);
             }
         }
     }
 }
 
-/// A structure nothing references, else any structure; `None` when empty.
 fn find_top_cell(cells: &HashMap<String, GdsCell>) -> Option<String> {
-    let referenced: std::collections::HashSet<&str> =
-        cells.values().flat_map(|c| c.srefs.iter().map(|r| r.name.as_str())).collect();
-    let last = |top_only: bool| {
-        cells
-            .iter()
-            .filter(|(k, _)| !top_only || !referenced.contains(k.as_str()))
-            .max_by_key(|(_, c)| c.ordinal)
-            .map(|(k, _)| k.clone())
-    };
-    last(true).or_else(|| last(false))
+    let mut referenced = std::collections::HashSet::new();
+    for cell in cells.values() {
+        for sref in &cell.srefs {
+            referenced.insert(sref.name.clone());
+        }
+    }
+    cells.keys().find(|k| !referenced.contains(*k)).cloned()
+        .or_else(|| cells.keys().next().cloned())
 }
 
-/// Parses a GDS stream and returns the top cell's polygons and text labels,
-/// hierarchy flattened, in database units. Malformed input yields what was
-/// read before the damage (possibly nothing); it never panics.
+/// Parse a GDS file and return all polygons + text labels (flattened hierarchy).
 pub fn parse_gds(data: &[u8]) -> (Vec<Poly>, Vec<TextEntry>) {
     let cells = parse_gds_cells(data);
     let top = match find_top_cell(&cells) {
@@ -536,13 +462,10 @@ impl Poly {
     }
 }
 
-/// The stroke colour for a fill: 1.5× brighter, opaque.
 fn outline_color(fill: [f32; 4]) -> [f32; 4] {
     [(fill[0] * 1.5).min(1.0), (fill[1] * 1.5).min(1.0), (fill[2] * 1.5).min(1.0), 1.0]
 }
 
-/// Filled layers' polygons as a triangle list (ear clipping); polygons
-/// earcut rejects are skipped.
 fn triangulate(polys: &[Poly], names: &LayerMap) -> Vec<Vertex> {
     let mut verts = Vec::new();
     for p in polys {
@@ -558,7 +481,6 @@ fn triangulate(polys: &[Poly], names: &LayerMap) -> Vec<Vertex> {
     verts
 }
 
-/// Every polygon's closed outline as a line list.
 fn outline_vertices(polys: &[Poly], names: &LayerMap) -> Vec<Vertex> {
     let mut verts = Vec::new();
     for p in polys {
@@ -575,7 +497,6 @@ fn outline_vertices(polys: &[Poly], names: &LayerMap) -> Vec<Vertex> {
 /// Glyphs on a 5×7 grid as line-segment endpoint pairs; a `PEN_UP` pair skips.
 const PEN_UP: (u8, u8) = (255, 255);
 
-/// The stroke pairs for `ch`; unknown characters draw an X.
 fn glyph(ch: char) -> &'static [(u8, u8)] {
     match ch {
         'A' | 'a' => &[(0,0),(0,5),(0,5),(2,7),(2,7),(4,7),(4,7),(4,0), PEN_UP,PEN_UP, (0,3),(4,3)],
@@ -665,7 +586,7 @@ fn push_rect(verts: &mut Vec<Vertex>, x0: f32, y0: f32, x1: f32, y1: f32, color:
 
 /// World-space text labels, sized to the layout's span.
 fn text_vertices(texts: &[TextEntry], polys: &[Poly]) -> Vec<Vertex> {
-    let span = bounds(polys).map_or(7000.0, |b| span_of(b) as f32);
+    let span = bounds(polys).map_or(7000.0, |(x0, y0, x1, y1)| (x1 - x0).max(y1 - y0).max(1) as f32);
     let mut verts = Vec::new();
     for t in texts {
         push_text(&mut verts, &t.text, t.x as f32, t.y as f32, span * 0.025 / 7.0, [1.0, 1.0, 1.0, 0.95]);
@@ -696,58 +617,27 @@ fn build_legend(polys: &[Poly], layer_names: &LayerMap) -> Vec<Vertex> {
     verts
 }
 
-/// The camera that fits every polygon in 90 % of the shorter NDC axis,
-/// centred; the identity when there are none.
 fn fit_view(polys: &[Poly], aspect: f32) -> CamUni {
     let Some((x0, y0, x1, y1)) = bounds(polys) else {
         return CamUni { offset: [0.0; 2], scale: 1.0, aspect };
     };
-    let span = span_of((x0, y0, x1, y1)) as f32;
-    let mid = |a: i32, b: i32| (i64::from(a) + i64::from(b)) as f32 / 2.0;
-    CamUni { offset: [-mid(x0, x1), -mid(y0, y1)], scale: 1.8 / span, aspect }
-}
-
-/// The larger side of `bounds`, at least 1; i64 because a full-range i32
-/// layout spans 2³² units.
-fn span_of((x0, y0, x1, y1): (i32, i32, i32, i32)) -> i64 {
-    (i64::from(x1) - i64::from(x0)).max(i64::from(y1) - i64::from(y0)).max(1)
-}
-
-/// `s` with `& < > "` escaped for XML text and attribute values.
-fn xml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            c => out.push(c),
-        }
-    }
-    out
+    let span = (x1 - x0).max(y1 - y0).max(1) as f32;
+    CamUni { offset: [-(x0 + x1) as f32 / 2.0, -(y0 + y1) as f32 / 2.0], scale: 1.8 / span, aspect }
 }
 
 // ── SVG export (headless) ──
 
-/// Renders a GDS stream as a standalone 800 × 800 SVG in database units
-/// (y flipped so the layout reads upright), one `<g id="{layer}">` per GDS
-/// layer and the labels on top. An empty layout is an empty `<svg/>`.
 #[must_use]
 pub fn export_svg(gds_bytes: &[u8], layer_names: &LayerMap) -> String {
-    use std::fmt::Write as _;
-    let (mut polys, texts) = parse_gds(gds_bytes);
-    let Some(b) = bounds(&polys) else {
+    let (polys, texts) = parse_gds(gds_bytes);
+    let Some((x0, y0, x1, y1)) = bounds(&polys) else {
         return String::from(r#"<svg xmlns="http://www.w3.org/2000/svg"/>"#);
     };
-    let (x0, y0, x1, y1) = (i64::from(b.0), i64::from(b.1), i64::from(b.2), i64::from(b.3));
-    // At least one unit of pad, stroke and font so tiny or zero-width
-    // layouts still render.
-    let pad = (span_of(b) / 40).max(1);
+    let pad = (x1 - x0).max(y1 - y0) / 40;
     let (vx, vy, vw, vh) = (x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad);
-    let stroke = (vw.max(vh) / 1000).max(1);
-    let size = (vw.max(vh) / 60).max(1);
-    polys.sort_by_key(Poly::key);
+    let mut layers: Vec<(u16, u16)> = polys.iter().map(Poly::key).collect();
+    layers.sort_unstable();
+    layers.dedup();
 
     let byte = |v: f32| (v * 255.0) as u8;
     let mut svg = format!(
@@ -755,10 +645,8 @@ pub fn export_svg(gds_bytes: &[u8], layer_names: &LayerMap) -> String {
     );
     // GDS is y-up, SVG y-down.
     let flip = vy * 2 + vh;
-    // `write!` into a String cannot fail.
-    let _ = write!(svg, r#"<g transform="translate(0,{flip}) scale(1,-1)">"#);
-    for group in polys.chunk_by(|a, b| a.key() == b.key()) {
-        let layer = group[0].key();
+    svg.push_str(&format!(r#"<g transform="translate(0,{flip}) scale(1,-1)">"#));
+    for &layer in &layers {
         let (c, fill) = layer_style(layer_names, layer);
         let o = outline_color(c);
         let fill = if fill {
@@ -766,34 +654,30 @@ pub fn export_svg(gds_bytes: &[u8], layer_names: &LayerMap) -> String {
         } else {
             "none".into()
         };
-        let _ = write!(
-            svg,
-            r#"<g id="{}" fill="{fill}" stroke="rgba({},{},{},1)" stroke-width="{stroke}">"#,
-            xml_escape(&layer_label(layer_names, layer)),
+        svg.push_str(&format!(
+            r#"<g id="{}" fill="{fill}" stroke="rgba({},{},{},1)" stroke-width="{}">"#,
+            layer_label(layer_names, layer),
             byte(o[0]),
             byte(o[1]),
             byte(o[2]),
-        );
-        for p in group {
-            svg.push_str(r#"<polygon points=""#);
-            for (i, [x, y]) in p.pts.iter().enumerate() {
-                let sep = if i == 0 { "" } else { " " };
-                let _ = write!(svg, "{sep}{x},{y}");
-            }
-            svg.push_str(r#""/>"#);
+            (vw.max(vh) as f32 * 0.001) as i32,
+        ));
+        for p in polys.iter().filter(|p| p.key() == layer) {
+            let pts: Vec<String> = p.pts.iter().map(|[x, y]| format!("{x},{y}")).collect();
+            svg.push_str(&format!(r#"<polygon points="{}"/>"#, pts.join(" ")));
         }
         svg.push_str("</g>");
     }
     svg.push_str("</g>");
     // Labels outside the flip so the glyphs read upright.
+    let size = vw.max(vh) / 60;
     for t in &texts {
-        let _ = write!(
-            svg,
+        svg.push_str(&format!(
             r#"<text x="{}" y="{}" font-size="{size}" font-family="monospace" fill="white">{}</text>"#,
             t.x,
-            flip - i64::from(t.y),
-            xml_escape(&t.text),
-        );
+            flip - t.y,
+            t.text.replace('&', "&amp;").replace('<', "&lt;"),
+        ));
     }
     svg.push_str("</svg>");
     svg
@@ -833,7 +717,6 @@ struct Mesh {
     n: u32,
 }
 
-/// The window's wgpu state and the three meshes it draws.
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -849,7 +732,6 @@ struct Gpu {
     overlay: Mesh,
 }
 
-/// An alpha-blended pipeline over [`Vertex`] with `vs`/`fs` entry points.
 fn make_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -889,10 +771,6 @@ fn make_pipeline(
 }
 
 impl Gpu {
-    /// Opens a surface on `win`.
-    ///
-    /// # Panics
-    /// When no adapter or device is available.
     fn new(win: std::sync::Arc<Window>) -> Self {
         let sz = win.inner_size();
         let inst = wgpu::Instance::default();
@@ -976,7 +854,6 @@ impl Gpu {
         }
     }
 
-    /// Reconfigures the surface; a zero extent (minimised) is ignored.
     fn resize(&mut self, w: u32, h: u32) {
         if w > 0 && h > 0 {
             self.config.width = w;
@@ -985,7 +862,6 @@ impl Gpu {
         }
     }
 
-    /// Uploads `verts`; an empty slice is a mesh with no buffer.
     fn mesh(&self, verts: &[Vertex]) -> Mesh {
         if verts.is_empty() {
             return Mesh { buf: None, n: 0 };
@@ -1000,7 +876,6 @@ impl Gpu {
         Mesh { buf: Some(buf), n: verts.len() as u32 }
     }
 
-    /// Draws one frame; a lost surface is reconfigured and the frame skipped.
     fn draw(&mut self, cam: &CamUni) {
         self.queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(cam));
         let Ok(frame) = self.surface.get_current_texture() else {
@@ -1045,20 +920,16 @@ impl Gpu {
 
 // ── App: a watched GDS file, or a probe channel ──
 
-/// Where the window's geometry comes from.
 enum Source {
-    /// A GDS file, polled for a new mtime every 500 ms.
     File { path: PathBuf, mtime: Option<SystemTime>, last_poll: Instant },
     Channel(mpsc::Receiver<ProbeMsg>),
 }
 
-/// One update sent to a [`Probe`] window.
 struct ProbeMsg {
     polys: Vec<Poly>,
     title: Option<String>,
 }
 
-/// The winit application: window, GPU, camera and source.
 struct App {
     win: Option<std::sync::Arc<Window>>,
     gpu: Option<Gpu>,
@@ -1089,8 +960,6 @@ impl App {
         }
     }
 
-    /// Displays `polys` (sorted by layer) and `texts`; refits the camera
-    /// when a fit is pending and there is geometry.
     fn show(&mut self, mut polys: Vec<Poly>, texts: Vec<TextEntry>) {
         polys.sort_by_key(Poly::key);
         if self.fit && !polys.is_empty() {
@@ -1107,7 +976,6 @@ impl App {
         self.shown = (polys, texts);
     }
 
-    /// Re-reads the source file; a read error is reported and the view kept.
     fn load_gds(&mut self) {
         let Source::File { path, mtime, .. } = &mut self.source else { return };
         let data = match std::fs::read(&*path) {
@@ -1122,13 +990,12 @@ impl App {
         self.show(polys, texts);
     }
 
-    /// The cursor in NDC (`[-1, 1]`, y up); the origin without a window.
     fn cursor_ndc(&self) -> [f32; 2] {
         self.win.as_ref().map_or([0.0; 2], |w| {
             let s = w.inner_size();
             [
-                2.0 * self.cursor[0] as f32 / s.width.max(1) as f32 - 1.0,
-                -(2.0 * self.cursor[1] as f32 / s.height.max(1) as f32 - 1.0),
+                2.0 * self.cursor[0] as f32 / s.width as f32 - 1.0,
+                -(2.0 * self.cursor[1] as f32 / s.height as f32 - 1.0),
             ]
         })
     }
@@ -1178,8 +1045,8 @@ impl ApplicationHandler for App {
                 if let (true, Some(w)) = (self.drag, &self.win) {
                     let s = w.inner_size();
                     self.cam.offset[0] +=
-                        (2.0 * dx as f32 / s.width.max(1) as f32) * self.cam.aspect / self.cam.scale;
-                    self.cam.offset[1] -= (2.0 * dy as f32 / s.height.max(1) as f32) / self.cam.scale;
+                        (2.0 * dx as f32 / s.width as f32) * self.cam.aspect / self.cam.scale;
+                    self.cam.offset[1] -= (2.0 * dy as f32 / s.height as f32) / self.cam.scale;
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1190,7 +1057,7 @@ impl ApplicationHandler for App {
                 // Zoom about the cursor.
                 let ndc = self.cursor_ndc();
                 let inv_old = 1.0 / self.cam.scale;
-                self.cam.scale *= zoom_factor(d);
+                self.cam.scale *= if d > 0.0 { 1.1 } else { 1.0 / 1.1 };
                 let diff = 1.0 / self.cam.scale - inv_old;
                 self.cam.offset[0] += ndc[0] * self.cam.aspect * diff;
                 self.cam.offset[1] += ndc[1] * diff;
@@ -1245,24 +1112,7 @@ impl ApplicationHandler for App {
     }
 }
 
-/// The scale multiplier for one wheel step of `d` (positive zooms in):
-/// 1.1 per step in, 1 / 1.1 out, 1 for no movement.
-fn zoom_factor(d: f32) -> f32 {
-    if d > 0.0 {
-        1.1
-    } else if d < 0.0 {
-        1.0 / 1.1
-    } else {
-        1.0
-    }
-}
-
-/// Opens a window on a GDS file, reloading it whenever it changes on disk,
-/// and blocks until the window closes. Without a display server the process
-/// exits with status 1.
-///
-/// # Panics
-/// When the event loop fails while running.
+/// Open a window on a GDS file, reloading it whenever it changes on disk.
 pub fn run_viewer(path: PathBuf, layer_names: LayerMap) {
     let el = EventLoop::new().unwrap_or_else(|e| {
         eprintln!("cannot create window (no display server?): {e}");
@@ -1295,8 +1145,6 @@ pub struct Probe {
 }
 
 impl Probe {
-    /// Spawns the window thread titled `title`; a missing display is
-    /// reported on stderr and leaves a probe whose sends are dropped.
     #[must_use]
     pub fn open(title: &str) -> Self {
         let (tx, rx) = mpsc::channel();
@@ -1314,8 +1162,7 @@ impl Probe {
         Probe { tx: Some(tx), handle: Some(handle) }
     }
 
-    /// Stops sending and blocks until the user closes the window; later
-    /// [`Probe::send`]s are no-ops.
+    /// Stop sending and block until the user closes the window.
     pub fn wait(&mut self) {
         self.tx.take();
         if let Some(h) = self.handle.take() {
@@ -1323,8 +1170,6 @@ impl Probe {
         }
     }
 
-    /// Replaces the shown geometry with a copy of `polys`, appending `title`
-    /// to the window title when given. Never blocks; a closed window drops it.
     pub fn send(&self, polys: &[Poly], title: Option<&str>) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(ProbeMsg { polys: polys.to_vec(), title: title.map(String::from) });
@@ -1378,428 +1223,6 @@ mod tests {
         assert_eq!((q.layer, q.datatype), (68, 20));
         let q = &polys_from_shapes(&[s], &[])[0];
         assert_eq!((q.layer, q.datatype), (1, 0), "no table row: layer id, datatype 0");
-    }
-
-    // ── GDS stream builders ──
-
-    fn rec(t: u8, dt: u8, payload: &[u8]) -> Vec<u8> {
-        let len = u16::try_from(4 + payload.len()).unwrap();
-        let mut v = len.to_be_bytes().to_vec();
-        v.extend([t, dt]);
-        v.extend(payload);
-        v
-    }
-    fn s_rec(t: u8, s: &str) -> Vec<u8> {
-        let mut b = s.as_bytes().to_vec();
-        if b.len() % 2 == 1 {
-            b.push(0);
-        }
-        rec(t, 6, &b)
-    }
-    fn i16_rec(t: u8, v: &[i16]) -> Vec<u8> {
-        rec(t, 2, &v.iter().flat_map(|x| x.to_be_bytes()).collect::<Vec<_>>())
-    }
-    fn xy(pts: &[[i32; 2]]) -> Vec<u8> {
-        rec(0x10, 3, &pts.iter().flat_map(|p| p.iter().flat_map(|c| c.to_be_bytes())).collect::<Vec<_>>())
-    }
-    fn bgn(name: &str) -> Vec<u8> {
-        [rec(0x05, 2, &[]), s_rec(0x06, name)].concat()
-    }
-    fn end() -> Vec<u8> {
-        rec(0x07, 0, &[])
-    }
-    fn boundary(layer: i16, dt: i16, pts: &[[i32; 2]]) -> Vec<u8> {
-        [rec(0x08, 0, &[]), i16_rec(0x0D, &[layer]), i16_rec(0x0E, &[dt]), xy(pts), rec(0x11, 0, &[])].concat()
-    }
-    fn path(layer: i16, width: i32, pts: &[[i32; 2]]) -> Vec<u8> {
-        [rec(0x09, 0, &[]), i16_rec(0x0D, &[layer]), rec(0x0F, 3, &width.to_be_bytes()), xy(pts), rec(0x11, 0, &[])]
-            .concat()
-    }
-    /// SREF with optional mirror and angle (90 or 180 only: exact reals).
-    fn sref(name: &str, at: [i32; 2], mirror: bool, angle: u16) -> Vec<u8> {
-        let mut v = [rec(0x0A, 0, &[]), s_rec(0x12, name)].concat();
-        if mirror || angle != 0 {
-            v.extend(rec(0x1A, 1, &(if mirror { 0x8000u16 } else { 0 }).to_be_bytes()));
-        }
-        match angle {
-            0 => {}
-            90 => v.extend(rec(0x1C, 5, &[0x42, 0x5A, 0, 0, 0, 0, 0, 0])),
-            180 => v.extend(rec(0x1C, 5, &[0x42, 0xB4, 0, 0, 0, 0, 0, 0])),
-            _ => unreachable!(),
-        }
-        [v, xy(&[at]), rec(0x11, 0, &[])].concat()
-    }
-    fn square(x: i32, y: i32, s: i32) -> Vec<[i32; 2]> {
-        vec![[x, y], [x + s, y], [x + s, y + s], [x, y + s], [x, y]]
-    }
-    fn sorted_pts(p: &Poly) -> Vec<[i32; 2]> {
-        let mut v = p.pts.clone();
-        v.sort_unstable();
-        v
-    }
-
-    // ── Decoders ──
-
-    #[test]
-    fn gds_real_decodes_excess_64_hex_floats() {
-        assert_eq!(gds_real(&[0x41, 0x10, 0, 0, 0, 0, 0, 0]), 1.0);
-        assert_eq!(gds_real(&[0x42, 0x5A, 0, 0, 0, 0, 0, 0]), 90.0);
-        assert_eq!(gds_real(&[0xC0, 0x80, 0, 0, 0, 0, 0, 0]), -0.5);
-        assert_eq!(gds_real(&[0; 8]), 0.0);
-        // 1e-3 (the usual user unit) to within f64 rounding of 56-bit mantissa.
-        let mm = gds_real(&[0x3E, 0x41, 0x89, 0x37, 0x4B, 0xC6, 0xA7, 0xF0]);
-        assert!((mm - 1e-3).abs() < 1e-15, "{mm}");
-    }
-
-    #[test]
-    fn read_string_stops_at_nul_padding() {
-        assert_eq!(read_string(b"ab\0\0", 0, 4), "ab");
-        assert_eq!(read_string(b"xabc", 1, 3), "abc");
-        assert_eq!(read_string(b"", 0, 0), "");
-    }
-
-    // ── Parser ──
-
-    #[test]
-    fn malformed_streams_parse_to_nothing_without_panicking() {
-        let cases: [&[u8]; 5] = [&[], &[0, 4], &[0, 2, 0x05, 0], &[0, 200, 0x05, 0, 1, 2], &[0xFF; 3]];
-        for data in cases {
-            let (p, t) = parse_gds(data);
-            assert!(p.is_empty() && t.is_empty());
-        }
-        // A structure cut off before ENDSTR is not emitted.
-        let cut = [bgn("A"), boundary(1, 0, &square(0, 0, 10))].concat();
-        assert!(parse_gds(&cut).0.is_empty());
-        // XY with an odd trailing word reads only whole points.
-        let mut odd = bgn("A");
-        odd.extend([rec(0x08, 0, &[]), rec(0x10, 3, &[0, 0, 0, 1, 0, 0, 0, 2, 0, 0])].concat());
-        odd.extend([rec(0x11, 0, &[]), end()].concat());
-        assert!(parse_gds(&odd).0.is_empty(), "one point is no polygon");
-    }
-
-    #[test]
-    fn boundary_drops_closing_vertex_and_degenerate_polygons() {
-        let gds = [
-            bgn("TOP"),
-            boundary(68, 20, &square(0, 0, 10)),
-            boundary(68, 20, &[[0, 0], [5, 5], [0, 0]]),
-            boundary(68, 20, &[[0, 0], [5, 5]]),
-            end(),
-        ]
-        .concat();
-        let (polys, _) = parse_gds(&gds);
-        assert_eq!(polys.len(), 1);
-        assert_eq!((polys[0].layer, polys[0].datatype), (68, 20));
-        assert_eq!(polys[0].pts, vec![[0, 0], [10, 0], [10, 10], [0, 10]]);
-    }
-
-    #[test]
-    fn box_record_is_read_as_a_boundary() {
-        let el = [rec(0x2D, 0, &[]), i16_rec(0x0D, &[5]), xy(&square(0, 0, 4)), rec(0x11, 0, &[])].concat();
-        let (polys, _) = parse_gds(&[bgn("T"), el, end()].concat());
-        assert_eq!(polys.len(), 1);
-        assert_eq!(polys[0].layer, 5);
-    }
-
-    #[test]
-    fn paths_become_one_quad_per_segment() {
-        let gds = [bgn("T"), path(3, 10, &[[0, 0], [100, 0], [100, 50]]), end()].concat();
-        let (polys, _) = parse_gds(&gds);
-        assert_eq!(polys.len(), 2);
-        assert_eq!(sorted_pts(&polys[0]), vec![[0, -5], [0, 5], [100, -5], [100, 5]]);
-        assert_eq!(sorted_pts(&polys[1]), vec![[95, 0], [95, 50], [105, 0], [105, 50]]);
-        // Reversed direction draws the same rectangle.
-        let back = parse_gds(&[bgn("T"), path(3, 10, &[[100, 0], [0, 0]]), end()].concat()).0;
-        assert_eq!(sorted_pts(&back[0]), sorted_pts(&polys[0]));
-    }
-
-    #[test]
-    fn path_width_zero_still_draws_and_negative_width_is_absolute() {
-        let zero = parse_gds(&[bgn("T"), path(3, 0, &[[0, 0], [10, 0]]), end()].concat()).0;
-        assert_eq!(sorted_pts(&zero[0]), vec![[0, -1], [0, 1], [10, -1], [10, 1]]);
-        // GDS: a negative WIDTH is an absolute (unscaled) width of |w|.
-        let neg = parse_gds(&[bgn("T"), path(3, -10, &[[0, 0], [10, 0]]), end()].concat()).0;
-        assert_eq!(sorted_pts(&neg[0]), vec![[0, -5], [0, 5], [10, -5], [10, 5]]);
-    }
-
-    #[test]
-    fn diagonal_path_quads_are_offset_perpendicular() {
-        let quads = path_to_polys(1, 0, 10, &[[0, 0], [100, 100]]);
-        assert_eq!(quads.len(), 1);
-        // Normal (−7, 7) rounded from (−7.07, 7.07).
-        assert_eq!(quads[0].pts, vec![[-7, 7], [93, 107], [107, 93], [7, -7]]);
-        assert!(path_to_polys(1, 0, 10, &[[0, 0]]).is_empty());
-    }
-
-    #[test]
-    fn sref_translates_mirrors_and_rotates() {
-        let child = [bgn("C"), boundary(1, 0, &[[0, 0], [10, 0], [10, 20], [0, 20], [0, 0]]), end()].concat();
-        let top = |r: Vec<u8>| [child.clone(), bgn("TOP"), r, end()].concat();
-
-        let p = parse_gds(&top(sref("C", [100, 200], false, 0))).0;
-        assert_eq!(sorted_pts(&p[0]), vec![[100, 200], [100, 220], [110, 200], [110, 220]]);
-
-        let p = parse_gds(&top(sref("C", [0, 0], true, 0))).0;
-        assert_eq!(sorted_pts(&p[0]), vec![[0, -20], [0, 0], [10, -20], [10, 0]]);
-
-        // 90° CCW: (x, y) ↦ (−y, x).
-        let p = parse_gds(&top(sref("C", [0, 0], false, 90))).0;
-        assert_eq!(sorted_pts(&p[0]), vec![[-20, 0], [-20, 10], [0, 0], [0, 10]]);
-
-        // Mirror then rotate 90: (x, y) ↦ (y, x).
-        let p = parse_gds(&top(sref("C", [0, 0], true, 90))).0;
-        assert_eq!(sorted_pts(&p[0]), vec![[0, 0], [0, 10], [20, 0], [20, 10]]);
-    }
-
-    /// Nested transforms compose as parent ∘ child: a mirrored parent
-    /// reverses the child's rotation sense.
-    #[test]
-    fn nested_transforms_compose_parent_after_child() {
-        let gds = [
-            bgn("LEAF"),
-            boundary(1, 0, &[[10, 0], [20, 0], [20, 5], [10, 5]]),
-            end(),
-            bgn("MID"),
-            sref("LEAF", [0, 0], false, 90),
-            end(),
-            bgn("TOP"),
-            sref("MID", [1000, 0], true, 0),
-            end(),
-        ]
-        .concat();
-        let p = parse_gds(&gds).0;
-        // LEAF point (10, 0) → R90 → (0, 10) → Mx → (0, −10) → +1000.
-        assert!(p[0].pts.contains(&[1000, -10]), "{:?}", p[0].pts);
-        // (20, 5) → (−5, 20) → (−5, −20) → (995, −20).
-        assert!(p[0].pts.contains(&[995, -20]), "{:?}", p[0].pts);
-    }
-
-    #[test]
-    fn aref_expands_to_a_cols_by_rows_lattice() {
-        let aref = [
-            rec(0x0B, 0, &[]),
-            s_rec(0x12, "C"),
-            i16_rec(0x13, &[2, 3]),
-            xy(&[[0, 0], [200, 0], [0, 900]]),
-            rec(0x11, 0, &[]),
-        ]
-        .concat();
-        let gds = [bgn("C"), boundary(1, 0, &square(0, 0, 10)), end(), bgn("TOP"), aref, end()].concat();
-        let polys = parse_gds(&gds).0;
-        assert_eq!(polys.len(), 6);
-        let mut origins: Vec<[i32; 2]> = polys.iter().map(|p| sorted_pts(p)[0]).collect();
-        origins.sort_unstable();
-        assert_eq!(origins, vec![[0, 0], [0, 300], [0, 600], [100, 0], [100, 300], [100, 600]]);
-    }
-
-    #[test]
-    fn texts_follow_their_instance_transform() {
-        let text = [rec(0x0C, 0, &[]), s_rec(0x19, "vout"), xy(&[[5, 7]]), rec(0x11, 0, &[])].concat();
-        let empty_text = [rec(0x0C, 0, &[]), xy(&[[1, 1]]), rec(0x11, 0, &[])].concat();
-        let gds = [bgn("C"), text, empty_text, end(), bgn("TOP"), sref("C", [100, 0], false, 180), end()].concat();
-        let (_, texts) = parse_gds(&gds);
-        assert_eq!(texts.len(), 1, "an empty TEXT is dropped");
-        assert_eq!((texts[0].x, texts[0].y, texts[0].text.as_str()), (95, -7, "vout"));
-    }
-
-    #[test]
-    fn unknown_references_are_dropped_and_cycles_terminate() {
-        let gds = [bgn("TOP"), boundary(1, 0, &square(0, 0, 1)), sref("NOPE", [0, 0], false, 0), end()].concat();
-        assert_eq!(parse_gds(&gds).0.len(), 1);
-        // A ↔ B cycle: neither is a top cell, so either is shown; depth caps it.
-        let cyc = [
-            bgn("A"),
-            boundary(1, 0, &square(0, 0, 1)),
-            sref("B", [1, 0], false, 0),
-            end(),
-            bgn("B"),
-            sref("A", [1, 0], false, 0),
-            end(),
-        ]
-        .concat();
-        let n = parse_gds(&cyc).0.len();
-        assert!(n > 0 && n <= 65, "{n}");
-    }
-
-    /// With several unreferenced structures the last one defined is the top
-    /// (GDS writers emit the top cell last), every time.
-    #[test]
-    fn the_last_unreferenced_structure_is_the_top() {
-        let gds = [
-            bgn("FIRST"),
-            boundary(1, 0, &square(0, 0, 1)),
-            end(),
-            bgn("SECOND"),
-            boundary(2, 0, &square(0, 0, 1)),
-            end(),
-        ]
-        .concat();
-        for _ in 0..16 {
-            let p = parse_gds(&gds).0;
-            assert_eq!(p.len(), 1);
-            assert_eq!(p[0].layer, 2);
-        }
-    }
-
-    // ── Styling and meshes ──
-
-    #[test]
-    fn layer_style_fills_devices_and_outlines_wells_and_implants() {
-        let names = layer_names(&[
-            ("met1".into(), (68, 20)),
-            ("nwell".into(), (64, 20)),
-            ("nsdm".into(), (93, 44)),
-            ("areaid_mk".into(), (81, 4)),
-            ("psd".into(), (94, 20)),
-        ]);
-        assert!(layer_style(&names, (68, 20)).1);
-        for k in [(64, 20), (93, 44), (81, 4), (94, 20)] {
-            assert!(!layer_style(&names, k).1, "{k:?} is outline-only");
-        }
-        // Unknown: hashed, filled, deterministic.
-        let s = layer_style(&names, (7, 3));
-        assert!(s.1);
-        assert_eq!(s, layer_style(&names, (7, 3)));
-    }
-
-    #[test]
-    fn outline_color_is_brighter_and_opaque() {
-        assert_eq!(outline_color([0.5, 0.8, 0.0, 0.25]), [0.75, 1.0, 0.0, 1.0]);
-    }
-
-    #[test]
-    fn meshes_count_vertices_per_polygon() {
-        let names = layer_names(&[("nwell".into(), (64, 20))]);
-        let sq = Poly { layer: 1, datatype: 0, pts: vec![[0, 0], [10, 0], [10, 10], [0, 10]] };
-        let well = Poly { layer: 64, datatype: 20, ..sq.clone() };
-        assert_eq!(triangulate(&[sq.clone()], &names).len(), 6, "two triangles");
-        assert!(triangulate(&[well.clone()], &names).is_empty(), "outline-only layers do not fill");
-        let lines = outline_vertices(&[sq, well], &names);
-        assert_eq!(lines.len(), 16, "four closed edges each");
-        assert_eq!(lines[7].pos, [0.0, 0.0], "the last edge closes on the first vertex");
-        assert!(triangulate(&[], &names).is_empty() && outline_vertices(&[], &names).is_empty());
-    }
-
-    #[test]
-    fn glyphs_are_well_formed_stroke_pairs() {
-        for ch in (' '..='~').chain(['é']) {
-            let g = glyph(ch);
-            assert_eq!(g.len() % 2, 0, "{ch:?}");
-            for seg in g.chunks_exact(2) {
-                let up = seg.iter().filter(|&&p| p == PEN_UP).count();
-                assert!(up == 0 || up == 2, "{ch:?}: half a pen-up");
-                if up == 0 {
-                    assert!(seg.iter().all(|&(x, y)| x <= 5 && y <= 7), "{ch:?} leaves the cell");
-                }
-            }
-        }
-        assert!(glyph(' ').is_empty());
-        assert_eq!(glyph('a'), glyph('A'));
-    }
-
-    #[test]
-    fn push_text_strokes_each_segment_as_two_triangles() {
-        let mut v = Vec::new();
-        push_text(&mut v, " ", 0.0, 0.0, 1.0, [1.0; 4]);
-        assert!(v.is_empty());
-        push_text(&mut v, "I", 0.0, 0.0, 1.0, [1.0; 4]);
-        assert_eq!(v.len(), 3 * 6, "I is three strokes");
-        // The second glyph starts six units right.
-        let mut w = Vec::new();
-        push_text(&mut w, " I", 0.0, 0.0, 1.0, [1.0; 4]);
-        assert!(w.iter().zip(&v).all(|(a, b)| (a.pos[0] - b.pos[0] - 6.0).abs() < 1e-6));
-    }
-
-    #[test]
-    fn a_zero_length_stroke_has_no_nan() {
-        let mut v = Vec::new();
-        stroke_quad(&mut v, [1.0, 1.0], [1.0, 1.0], 0.5, [1.0; 4]);
-        assert_eq!(v.len(), 6);
-        assert!(v.iter().all(|x| x.pos.iter().all(|c| c.is_finite())));
-    }
-
-    #[test]
-    fn legend_has_a_backdrop_and_one_row_per_layer() {
-        let names = LayerMap::new();
-        assert!(build_legend(&[], &names).is_empty());
-        let p = |layer| Poly { layer, datatype: 0, pts: vec![[0, 0], [1, 0], [1, 1]] };
-        let one = build_legend(&[p(1), p(1)], &names);
-        let two = build_legend(&[p(1), p(2)], &names);
-        assert!(two.len() > one.len(), "duplicate layers collapse to one row");
-        assert!(one.iter().all(|v| v.pos.iter().all(|c| (-1.0..=1.0).contains(c))), "legend stays on screen");
-    }
-
-    #[test]
-    fn text_vertices_scale_with_the_layout() {
-        let t = [TextEntry { x: 0, y: 0, text: "I".into() }];
-        let big = Poly { layer: 1, datatype: 0, pts: vec![[0, 0], [70_000, 0], [0, 70_000]] };
-        let height = |v: &[Vertex]| v.iter().map(|x| x.pos[1]).fold(f32::MIN, f32::max);
-        let default = height(&text_vertices(&t, &[]));
-        let scaled = height(&text_vertices(&t, &[big]));
-        assert!((scaled / default - 10.0).abs() < 0.1, "{default} {scaled}");
-        assert!(text_vertices(&[], &[]).is_empty());
-    }
-
-    #[test]
-    fn fit_view_centres_and_fills_the_view() {
-        let id = fit_view(&[], 2.0);
-        assert_eq!((id.offset, id.scale, id.aspect), ([0.0; 2], 1.0, 2.0));
-        let p = Poly { layer: 1, datatype: 0, pts: vec![[100, 0], [300, 0], [300, 100]] };
-        let c = fit_view(&[p], 1.0);
-        assert_eq!(c.offset, [-200.0, -50.0]);
-        assert!((c.scale * 200.0 - 1.8).abs() < 1e-6);
-        // A single point: span floors at one unit.
-        let dot = Poly { layer: 1, datatype: 0, pts: vec![[5, 5]] };
-        assert!((fit_view(&[dot], 1.0).scale - 1.8).abs() < 1e-6);
-    }
-
-    #[test]
-    fn extreme_coordinates_do_not_overflow() {
-        let p = Poly { layer: 1, datatype: 0, pts: vec![[i32::MIN, i32::MIN], [i32::MAX, i32::MIN], [i32::MAX, i32::MAX]] };
-        let c = fit_view(std::slice::from_ref(&p), 1.0);
-        assert!(c.scale > 0.0 && c.scale.is_finite());
-        assert!(c.offset.iter().all(|o| o.abs() <= 1.0), "{:?}", c.offset);
-        assert!(!text_vertices(&[TextEntry { x: 0, y: 0, text: "A".into() }], &[p]).is_empty());
-        let gds = [bgn("T"), boundary(1, 0, &[[i32::MIN, i32::MIN], [i32::MAX, i32::MIN], [i32::MAX, i32::MAX]]), end()].concat();
-        assert!(export_svg(&gds, &LayerMap::new()).contains("<polygon"));
-    }
-
-    #[test]
-    fn zoom_steps_by_ten_percent_and_ignores_no_movement() {
-        assert!((zoom_factor(1.0) - 1.1).abs() < 1e-6);
-        assert!((zoom_factor(-3.0) - 1.0 / 1.1).abs() < 1e-6);
-        assert_eq!(zoom_factor(0.0), 1.0, "a horizontal scroll must not zoom");
-        assert_eq!(zoom_factor(-0.0), 1.0);
-    }
-
-    // ── SVG ──
-
-    #[test]
-    fn svg_groups_layers_and_flips_labels_upright() {
-        let text = [rec(0x0C, 0, &[]), s_rec(0x19, "a&b<c"), xy(&[[0, 100]]), rec(0x11, 0, &[])].concat();
-        let gds = [bgn("T"), boundary(68, 20, &square(0, 0, 400)), boundary(64, 20, &square(0, 0, 800)), text, end()].concat();
-        let names = layer_names(&[("met1".into(), (68, 20)), ("nwell".into(), (64, 20))]);
-        let svg = export_svg(&gds, &names);
-        assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"));
-        // pad = 800 / 40 = 20.
-        assert!(svg.contains(r#"viewBox="-20 -20 840 840""#), "{svg}");
-        assert!(svg.contains(r#"<g id="met1" fill="rgba("#));
-        assert!(svg.contains(r#"<g id="nwell" fill="none""#), "wells are outline-only");
-        // flip = 2·vy + vh = 800; label y = 800 − 100.
-        assert!(svg.contains(r#"<text x="0" y="700""#), "{svg}");
-        assert!(svg.contains(">a&amp;b&lt;c</text>"));
-        assert_eq!(svg.matches("<polygon").count(), 2);
-    }
-
-    #[test]
-    fn svg_attributes_are_escaped_and_never_degenerate() {
-        // A tiny layout still strokes, and a zero-width one keeps a viewBox.
-        let gds = [bgn("T"), boundary(1, 0, &[[0, 0], [0, 10], [0, 20]]), end()].concat();
-        let names = layer_names(&[("a\"b<".into(), (1, 0))]);
-        let svg = export_svg(&gds, &names);
-        assert!(!svg.contains(r#"stroke-width="0""#), "{svg}");
-        assert!(svg.contains(r#"viewBox="-1 -1 2 22""#), "{svg}");
-        assert!(svg.contains(r#"id="a&quot;b&lt;""#), "{svg}");
     }
 
     #[test]
