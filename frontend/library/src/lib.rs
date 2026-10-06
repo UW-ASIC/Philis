@@ -803,9 +803,6 @@ fn topology<'a>(
     // Annotate: placement/routing rules + cell constraints, device-indexed.
     // Per topology: `CellSpace::new` mutates the problem, which is not `Clone`.
     let mut problem = annotator::annotate_with(netlist, ann, ev);
-    if cfg.min_utilization > 0.0 {
-        problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min: cfg.min_utilization }));
-    }
     let (perf_rows, perf_active) = (&perf.rows[..], &perf.active[..]);
     for row in perf_rows {
         problem.routing.budget.push(Box::new(row.clone()));
@@ -850,7 +847,14 @@ fn topology<'a>(
         b.demote_mirrors(&keep);
     }
     let locks = dp::locks::locks(&problem.placement, cells.variants.len(), &cells.variants);
-    let rules = place_rules(pdk, &cells);
+    let rules = place_rules(pdk, &cells, &locks, &match_class(&problem, &cells));
+    // PLC-24: the floor is pushed only now, capped by what these cells and gaps can reach.
+    if cfg.min_utilization > 0.0 {
+        let dims: Vec<(i32, i32)> =
+            cells.variants.iter().map(|v| v.alternatives.first().map_or((0, 0), |m| (m.bbox.w, m.bbox.h))).collect();
+        let u_min = u_eff(cfg.min_utilization, &dims, median_x_gap(&rules));
+        problem.placement.budget.push(Box::new(analog::placement::utilization::Utilization { u_min }));
+    }
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
@@ -969,12 +973,7 @@ fn topology<'a>(
     };
     // Matched cells keep every alternative: a merged group, or a member of a
     // 2-device leaf that emits a `MatchedSet` (annotator emit.rs table).
-    let paired: Vec<DeviceId> = annotator::block::leaves(&flow.problem.blocks)
-        .into_iter()
-        .filter(|l| l.devices.len() == 2 && matches!(l.kind, annotator::BlockKind::DiffPair | annotator::BlockKind::CurrentMirror | annotator::BlockKind::Load | annotator::BlockKind::CascodePair))
-        .flat_map(|l| l.devices.iter().copied())
-        .collect();
-    let matched: Vec<bool> = flow.cells.devices_of.iter().map(|m| m.len() > 1 || m.iter().any(|d| paired.contains(d))).collect();
+    let matched = matched_cells(&flow.problem.blocks, &flow.cells.devices_of);
     // GAP-18: a cell inside an Exceptional unitization lists its alternatives best-matching first.
     let ranked: Vec<bool> = flow
         .cells
@@ -1394,7 +1393,10 @@ pub fn ring_cut_ohm(pdk: &Pdk) -> f32 {
 /// `cell.placement_space`. `fallback` is the old scalar, the widest spacing
 /// of any device layer: unmapped layers and same-role pairs the deck leaves
 /// open still get it.
-fn place_rules(pdk: &Pdk, cells: &CellSpace) -> gp::PlaceRules {
+/// PLC-13: a matched cell (`class[c]`) owes foreign cells outside its orient
+/// set (`locks.orient_of`) the deck's `wpe_clearance_nm` tier and
+/// [`gp::spacing::FOREIGN_POLY_NM`].
+fn place_rules(pdk: &Pdk, cells: &CellSpace, locks: &dp::locks::Locks, class: &[Option<pnr_core::MatchClass>]) -> gp::PlaceRules {
     use gp::spacing::{profile, Profiles, SpacingTable, DECK_ROLE, N, ROLES};
     use pnr_core::Process;
     let fallback = ["nwell", "diff", "tap", "poly", "nsdm", "psdm", "li"]
@@ -1404,7 +1406,10 @@ fn place_rules(pdk: &Pdk, cells: &CellSpace) -> gp::PlaceRules {
         .max()
         .unwrap_or(0);
     let lattice = cells::builder::cut_lattice(pdk);
-    let table = SpacingTable::new(pdk, &placement_space(pdk), fallback, lattice);
+    let mut table = SpacingTable::new(pdk, &placement_space(pdk), fallback, lattice);
+    use pnr_core::MatchClass::{Exceptional, Minimal, Moderate};
+    table.wpe = [Minimal, Moderate, Exceptional].map(|c| analog::matching::class::mos_env(c, pdk).wpe_nm);
+    table.foreign_poly = gp::spacing::FOREIGN_POLY_NM;
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let open: Vec<_> = (0..N - 1)
@@ -1419,17 +1424,89 @@ fn place_rules(pdk: &Pdk, cells: &CellSpace) -> gp::PlaceRules {
     let of = cells
         .variants
         .iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(c, s)| {
             s.alternatives
                 .iter()
                 .map(|m| {
                     let bulk = m.pins.iter().find(|p| p.name.ends_with(":B")).map(|p| p.net);
-                    Profiles::orients(&profile(m, pdk, bulk))
+                    let p = gp::spacing::Profile {
+                        matched: class.get(c).copied().flatten(),
+                        set: locks.orient_of.get(c).copied().flatten(),
+                        ..profile(m, pdk, bulk)
+                    };
+                    Profiles::orients(&p)
                 })
                 .collect()
         })
         .collect();
     gp::PlaceRules::new(lattice, table, Profiles { of })
+}
+
+/// The utilization floor these cells can reach: `min(u_min, 0.9 · ΣA / Σ(w+g)(h+g))`,
+/// each cell (first variant, `w × h`) owing gap `g` on one side per axis. The
+/// 0.9 is policy (room for routing halos). `u_min` when there are no cells.
+fn u_eff(u_min: f32, cells: &[(i32, i32)], g: i32) -> f32 {
+    let (a, padded) = cells.iter().fold((0.0f64, 0.0f64), |(a, p), &(w, h)| {
+        let (w, h, g) = (f64::from(w), f64::from(h), f64::from(g));
+        (a + w * h, p + (w + g) * (h + g))
+    });
+    if padded <= 0.0 {
+        return u_min;
+    }
+    u_min.min((0.9 * a / padded) as f32)
+}
+
+/// Median over ordered cell pairs `a ≠ b` of the x gap `a`'s R face owes `b`
+/// (variant 0, R0); `spacing.fallback` with fewer than 2 profiled cells.
+/// ponytail: O(n²) once per topology (~10⁴ for 100 cells); sample if n grows.
+fn median_x_gap(r: &gp::PlaceRules) -> i32 {
+    let p: Vec<_> = r.profiles.of.iter().filter_map(|v| v.first().map(|o| &o[0])).collect();
+    let mut g: Vec<i32> = p
+        .iter()
+        .enumerate()
+        .flat_map(|(i, a)| p.iter().enumerate().filter(move |&(j, _)| j != i).map(move |(_, b)| r.spacing.gap(a, gp::spacing::Face::R, b).min))
+        .collect();
+    if g.is_empty() {
+        return r.spacing.fallback;
+    }
+    let mid = g.len() / 2;
+    *g.select_nth_unstable(mid).1
+}
+
+/// Matched cells: a merged group, or a member of a 2-device leaf that emits a
+/// `MatchedSet` (annotator emit.rs table).
+fn matched_cells(blocks: &[annotator::Block], devices_of: &[Vec<DeviceId>]) -> Vec<bool> {
+    use annotator::BlockKind::{CascodePair, CurrentMirror, DiffPair, Load};
+    let paired: Vec<DeviceId> = annotator::block::leaves(blocks)
+        .into_iter()
+        .filter(|l| l.devices.len() == 2 && matches!(l.kind, DiffPair | CurrentMirror | Load | CascodePair))
+        .flat_map(|l| l.devices.iter().copied())
+        .collect();
+    devices_of.iter().map(|m| m.len() > 1 || m.iter().any(|d| paired.contains(d))).collect()
+}
+
+/// Each cell's matching class: `Moderate` for a [`matched_cells`] cell, raised
+/// to the highest class of any placement batch pairing it
+/// ([`analog::RuleBatch::matched_class`]); `None` when unmatched.
+fn match_class(problem: &Problem, cells: &CellSpace) -> Vec<Option<pnr_core::MatchClass>> {
+    let mut class: Vec<_> =
+        matched_cells(&problem.blocks, &cells.devices_of).into_iter().map(|m| m.then_some(pnr_core::MatchClass::Moderate)).collect();
+    let p = &problem.placement;
+    let mut pairs = Vec::new();
+    for b in p.hard.iter().chain(&p.budget).chain(&p.cost) {
+        let Some(k) = b.matched_class() else { continue };
+        pairs.clear();
+        b.matched_pairs(&mut pairs);
+        for &(x, y) in &pairs {
+            for c in [x, y] {
+                if let Some(slot) = class.get_mut(c as usize) {
+                    *slot = Some(slot.map_or(k, |v| v.max(k)));
+                }
+            }
+        }
+    }
+    class
 }
 
 /// The sidecar's `cell.placement_space`: `{"role_a,role_b": [nm, "source"]}`.
@@ -2879,6 +2956,15 @@ mod start_tests {
         assert_ne!(pre.caps, sol.caps, "the shipped caps are re-extracted with fill");
     }
 
+    /// PLC-24: the floor is capped by what tiny cells plus their gaps can fill.
+    #[test]
+    fn utilization_floor_is_reachable_for_tiny_cells() {
+        let c = [(2000, 2000); 4];
+        assert!((crate::u_eff(0.6, &c, 270) - 0.6).abs() < 1e-6);
+        assert!((crate::u_eff(0.6, &c, 1270) - 0.3367).abs() < 1e-3);
+        assert_eq!(crate::u_eff(0.6, &[], 0), 0.6);
+    }
+
     /// GAP-04: the substrate kind comes from the deck's `substrate_kind`; a
     /// misspelt key (here or in the sidecar) would silently read Unknown.
     #[test]
@@ -3394,12 +3480,69 @@ mod spacing_tests {
 
     /// The `CellSpace` the flow builds for fixture `name` (as `size_tests`).
     fn cells(name: &str, pdk: &verify::Pdk) -> crate::CellSpace {
+        built(name, pdk).2
+    }
+
+    /// [`cells`] with the device names and the annotated problem.
+    fn built(name: &str, pdk: &verify::Pdk) -> (Vec<String>, crate::Problem, crate::CellSpace) {
         let spice = std::fs::read_to_string(root().join(format!("benchmarks/fixtures/{name}.spice"))).expect("fixture");
         let mut netlist = crate::parse::spice(&spice).expect("parses");
         crate::deck_models(&mut netlist, pdk);
         let mut problem = annotator::annotate(&netlist, &crate::annotation(pdk, &Default::default()));
         let fold = crate::cellgen::folds(&netlist, pdk, &[], &[]);
-        crate::CellSpace::new(&netlist, &Default::default(), &mut problem, pdk, &[], true, &fold)
+        let cs = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, pdk, &[], true, &fold);
+        (netlist.devices.iter().map(|d| d.name.clone()).collect(), problem, cs)
+    }
+
+    /// PLC-13, library side: [`crate::match_class`] marks ota's diff pair and
+    /// loads `Moderate` and dac4's cell 0 `Exceptional`; [`crate::place_rules`]
+    /// stamps that class and the orient set on every profile, and a matched
+    /// cell's halo and gap grow by the keep-out tier. The shipped cells' own
+    /// diffusion insets already cover the tiers (keep-outs are redundant on the
+    /// fixtures), so the halo/gap checks shrink every inset to 0.
+    #[test]
+    fn matched_cells_get_keep_outs() {
+        use gp::spacing::{Face, Profile};
+        use pnr_core::MatchClass::{Exceptional, Moderate};
+        let pdk = pdk("sky130");
+        let (names, problem, cs) = built("ota", &pdk);
+        let class = crate::match_class(&problem, &cs);
+        let of = |n: &str| cs.devices_of.iter().position(|d| d.iter().any(|&x| names[usize::from(x.0)].ends_with(n))).expect(n);
+        for n in ["M1", "M2", "M3", "M4"] {
+            assert_eq!(class[of(n)], Some(Moderate), "ota {n}");
+        }
+        assert_eq!(class[of("M5")], None, "ota M5 (tail) is unmatched");
+        let (_, p, dac) = built("dac4", &pdk);
+        assert_eq!(crate::match_class(&p, &dac)[0], Some(Exceptional), "dac4 cell 0");
+
+        let mut locks = dp::locks::Locks::default();
+        locks.orient_of = (0..cs.variants.len()).map(|c| (c == of("M1") || c == of("M2")).then_some(7)).collect();
+        let (with, without) = (crate::place_rules(&pdk, &cs, &locks, &class), crate::place_rules(&pdk, &cs, &locks, &[]));
+        let t = &with.spacing;
+        let shrink = |p: &Profile| {
+            let mut p = *p;
+            for e in &mut p.edge {
+                for r in (0..gp::spacing::N).filter(|&r| e.present & (1 << r) != 0) {
+                    e.inset[r] = 0;
+                }
+            }
+            p
+        };
+        let tail = shrink(&without.profiles.of[of("M5")][0][0]);
+        for c in 0..cs.variants.len() {
+            let (m, u) = (with.profiles.of[c][0][0], without.profiles.of[c][0][0]);
+            assert_eq!((m.matched, m.set), (class[c], locks.orient_of[c]), "cell {c} profile");
+            assert_eq!((u.matched, u.set), (None, locks.orient_of[c]), "cell {c} unmatched build");
+            let Some(k) = class[c] else { continue };
+            let (ms, us) = (shrink(&m), shrink(&u));
+            let tier = t.wpe[k as usize].max(t.foreign_poly[k as usize]);
+            assert!(tier > 0 && t.halo(&ms) >= tier && t.halo(&ms) > t.halo(&us), "cell {c}: halo {} vs unmatched {}, tier {tier}", t.halo(&ms), t.halo(&us));
+            let (gm, gu) = (t.gap(&ms, Face::R, &tail), t.gap(&us, Face::R, &tail));
+            assert!(gm.min > gu.min, "cell {c}: gap to the tail {gm:?} vs unmatched {gu:?}");
+        }
+        // Orient-set partners are exempt from each other's keep-outs.
+        let s = |r: &gp::PlaceRules, n: &str| shrink(&r.profiles.of[of(n)][0][0]);
+        assert_eq!(t.gap(&s(&with, "M1"), Face::R, &s(&with, "M2")), t.gap(&s(&without, "M1"), Face::R, &s(&without, "M2")), "M1/M2 share an orient set");
     }
 
     const FIXTURES: [&str; 10] = ["ota", "ota_constrained", "tt_ota", "pair", "quad", "chain4", "rc_filter", "dac4", "bjt_mirror", "bgr_core"];
@@ -3509,7 +3652,7 @@ mod spacing_tests {
         let mut uniq: Vec<(Macro, gp::spacing::Profile, Option<analog::cell::GuardRingRequirement>)> = Vec::new();
         for name in ["ota", "dac4", "rc_filter", "chain4", "pair"] {
             let cs = cells(name, &pdk);
-            let rules = crate::place_rules(&pdk, &cs);
+            let rules = crate::place_rules(&pdk, &cs, &Default::default(), &[]);
             for (c, s) in cs.variants.iter().enumerate() {
                 for (v, m) in s.alternatives.iter().enumerate().take(2) {
                     if uniq.iter().any(|(u, ..)| u.shapes == m.shapes && u.bbox == m.bbox) {
@@ -3520,7 +3663,7 @@ mod spacing_tests {
                 }
             }
         }
-        let rules = crate::place_rules(&pdk, &cells("pair", &pdk));
+        let rules = crate::place_rules(&pdk, &cells("pair", &pdk), &Default::default(), &[]);
         let t = &rules.spacing;
         let rings_of = |ids: &[usize]| {
             let mut c = analog::Constraints::default();

@@ -1,0 +1,5 @@
+* rdiv — 1:4 poly divider. Known optimum: RB RB RA RB RB, centroid residual 0.
+.subckt rdiv a m b
+XRA a m res_generic_po W=0.69u L=10u
+XRB m b res_generic_po W=0.69u L=40u
+.ends rdiv
