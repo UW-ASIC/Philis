@@ -153,6 +153,9 @@ pub struct MetadataReport {
     /// PERF-14: every promoted epoch of the winning search, in order;
     /// `v`/`residual` let a caller re-rank under the pre-PERF-14 key.
     pub epochs: Vec<ParetoPoint>,
+    /// FLOW-10: fill was kept, and `RunStats::drc_hard`/`warnings` and
+    /// `Solution::caps` are re-measured on the filled geometry.
+    pub post_fill: bool,
 }
 
 /// One promoted epoch's metrics (PERF-14); `Layout` is not `Clone`, so no geometry.
@@ -368,6 +371,7 @@ pub fn build(
         voltage_unknown: 0,
         pareto: Vec::new(),
         epochs: Vec::new(),
+        post_fill: false,
     }
 }
 
@@ -381,6 +385,7 @@ impl MetadataReport {
 impl std::fmt::Display for MetadataReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "── Constraint budgets ──\n")?;
+        writeln!(f, "  post-fill signoff: {}", if self.post_fill { "yes" } else { "no" })?;
         match &self.bias {
             Some(b) => {
                 writeln!(f, "  bias: {}", b.provenance)?;

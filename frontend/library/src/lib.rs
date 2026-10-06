@@ -265,6 +265,9 @@ pub struct Solution {
     /// ambiguous symmetry, conflicts), in annotator order; the CLI writes one
     /// line each to `report.txt`.
     pub diagnostics: Vec<analog::intent::Diagnostic>,
+    /// The shipped geometry's PEX matrix: post-fill when `metadata.post_fill`,
+    /// else the winning epoch's (PERF-15/22 read it).
+    pub caps: verify::CapMatrix,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -1057,7 +1060,9 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     let matched: Vec<pnr_core::Rect> = pnr_core::place_macros(&macros, &best.layout).iter()
         .filter(|m| m.units.iter().any(|u| u.owner != m.units[0].owner)).map(|m| m.bbox).collect();
     use analog::metadata::NetClass::{Bias, Ground, Reference, Sensitive};
-    macros.extend(fill::fill(&drawn, &wires_of(&[Ground]), &wires_of(&[Sensitive, Bias, Reference]), &matched, pdk));
+    let filled = fill::fill(&drawn, &wires_of(&[Ground]), &wires_of(&[Sensitive, Bias, Reference]), &matched, pdk);
+    let post_fill = filled.is_some();
+    macros.extend(filled);
     let metadata = metadata::build(
         &flow.problem.placement,
         &best.layout,
@@ -1075,6 +1080,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     let mut metadata = metadata;
     metadata.binding = s.binding;
     metadata.epochs = s.epochs;
+    metadata.post_fill = post_fill;
     metadata.audit = flow.problem.intent.diagnostics.iter().filter(|d| annotator::audit::KINDS.contains(&d.kind)).map(|d| format!("{}: {}", d.kind, d.message)).collect();
     let pairs = matched_pairs(&flow.problem.blocks);
     if let Some(op) = &bias.op {
@@ -1140,7 +1146,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     // Inserted devices (antenna diodes) join the schematic LVS reads.
     let mut netlist = flow.netlist.clone();
     netlist.devices.extend(best.extra);
-    Solution {
+    let mut sol = Solution {
         layout: best.layout,
         routes: best.routes,
         macros,
@@ -1158,7 +1164,17 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
         route: best.route,
         route_stats: best.route_stats,
         diagnostics: flow.problem.intent.diagnostics,
+        caps: best.caps,
+    };
+    // FLOW-10: the certificate is of what ships. Budgets are not re-scored:
+    // fill moves no cell and adds no route.
+    if post_fill {
+        let s = drawn_signoff(&sol, pdk);
+        sol.stats.drc_hard = s.report.hard_violations.len();
+        sol.stats.warnings = s.warnings.len() as u32;
+        sol.caps = s.caps;
     }
+    sol
 }
 
 /// Everything an epoch reads that is fixed for the run.
@@ -2308,13 +2324,20 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
 /// errors in `report`, deck warnings and coverage apart ([`verify::Signoff`]).
 #[must_use]
 pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
-    let (shapes, pins, reference) = signoff_inputs(sol, pdk);
-    let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
-    s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.devices_of, &sol.netlist));
+    let mut s = drawn_signoff(sol, pdk);
     if let Some(op) = &sol.op {
         let probe = sol.metadata.bias.as_ref().is_some_and(|b| b.probe);
         s.report.hard_violations.extend(reliability::voltage_findings(&sol.netlist, op, &pdk.fet_voltage_limits(), &sol.pairs, probe).0);
     }
+    s
+}
+
+/// DRC/ERC/LVS over the drawn solution plus undrawable devices — what an
+/// epoch's `RunStats::drc_hard` counts (no operating-point rows).
+fn drawn_signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
+    let (shapes, pins, reference) = signoff_inputs(sol, pdk);
+    let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
+    s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.devices_of, &sol.netlist));
     s
 }
 
@@ -2580,6 +2603,31 @@ pub(crate) fn labeled_pins(
 
 #[cfg(test)]
 mod start_tests {
+    /// FLOW-10 (T7): the shipped `drc_hard` is the signoff of the shipped
+    /// geometry. Without a covered density rule nothing is filled; with a
+    /// 10 µm metal1 floor fill is kept and the stats are re-measured on it.
+    /// 80 %, not 40 %: fill counts a 2 µm tile any metal1 touches as covered,
+    /// which reads ota's metal1 as 69 % (291/420 tiles), so 40 % fills nothing.
+    #[test]
+    fn winner_signoff_matches_its_certificate() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // pair's block is narrower than the window, so ota, on gf180's 3.3 V FETs.
+        let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).expect("fixture");
+        let spice = spice.replace("fet_01v8", "fet_03v3");
+        let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts: 1, ..Default::default() };
+        let pdk = verify::Pdk::builtin("gf180mcu").expect("gf180 loads");
+        let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
+        assert!(!sol.metadata.post_fill);
+        assert_eq!(crate::signoff(&sol, &pdk).report.hard_violations.len(), sol.stats.drc_hard);
+        let sidecar = std::fs::read_to_string(root.join("pdks/gf180mcu.json")).expect("sidecar");
+        let text = verify::Pdk::deck_text(&sidecar).expect("deck");
+        let text = format!("{text}\nrule TEST.m1_density density(metal1; window: 10um, step: 5um) >= 80%\n");
+        let pdk = verify::Pdk::load(&text, &sidecar).expect("deck loads");
+        let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
+        assert!(sol.metadata.post_fill, "ota's block is filled at a 10 µm window");
+        assert_eq!(crate::signoff(&sol, &pdk).report.hard_violations.len(), sol.stats.drc_hard);
+    }
+
     /// GAP-04: the substrate kind comes from the deck's `substrate_kind`; a
     /// misspelt key (here or in the sidecar) would silently read Unknown.
     #[test]
