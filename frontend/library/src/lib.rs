@@ -142,6 +142,9 @@ pub struct Config {
     pub max_wall: Option<std::time::Duration>,
     /// Flat, or each eligible sub-circuit definition solved once as a block (FLOW-11).
     pub hierarchy: Hierarchy,
+    /// PLC-16: price each performance row's MST ground-C estimate on
+    /// placement ([`analog::placement::PlacePerf`]); the T5 A/B switch.
+    pub place_perf: bool,
 }
 
 /// Bottom-up hierarchy (FLOW-11). Opt-in: bottom-up is not globally optimal
@@ -271,6 +274,7 @@ impl Default for Config {
             warm: dp::Schedule::warm(),
             max_wall: None,
             hierarchy: Hierarchy::Flat,
+            place_perf: true,
         }
     }
 }
@@ -928,6 +932,13 @@ fn topology<'a>(
         problem.placement.budget.push(Box::new(island.clone()));
         problem.placement.cost.push(Box::new(island));
     }
+    // PLC-16: each performance row's ground C, estimated on placement.
+    if cfg.place_perf && !perf_rows.is_empty() {
+        let alts: Vec<&[Macro]> = cells.variants.iter().map(|v| &v.alternatives[..]).collect();
+        for row in perf_rows {
+            problem.placement.budget.push(Box::new(analog::placement::PlacePerf::new(row, &alts, analog::placement::perf::RESERVE)));
+        }
+    }
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
@@ -1044,7 +1055,15 @@ fn topology<'a>(
         gp_mode: cfg.gp_mode,
         dp_mode: cfg.dp_mode,
         rules,
+        halo_st: Vec::new(),
+        halo_pins: Vec::new(),
     };
+    // PLC-15: J and w_min of the lowest layer with a wire EM limit.
+    if let Some(&(l, lim)) = flow.d_router.cfg.em.iter().find(|(_, lim)| lim.ua_per_um > 0.0) {
+        let w_min = pdk.min_width(l.0).unwrap_or(0);
+        flow.halo_st = static_halos(&flow.cells.variants, &flow.d_router.cfg.pin_ua, lim.ua_per_um / 1000.0, w_min, flow.rules.grid);
+    }
+    flow.halo_pins = face_pins(&flow.cells.variants);
     // Matched cells keep every alternative: a merged group, or a member of a
     // 2-device leaf that emits a `MatchedSet` (annotator emit.rs table).
     let matched = matched_cells(&flow.problem.blocks, &flow.cells.devices_of);
@@ -1096,6 +1115,9 @@ fn search(t: &Topology, cfg: &Config, seed: u64, deadline: Option<std::time::Ins
     // variants are that assignment's, maybe dp-reshaped); after an escalation
     // a warm start from it would anneal the old assignment instead.
     let (mut k, mut current) = (0u32, false);
+    // PLC-15: congestion halo per cell (placed faces), smoothed across this
+    // start's epochs; search-local because `Flow` is shared by the starts.
+    let mut halo_dyn = vec![[0; 4]; flow.cells.variants.len()];
 
     let n_outer = cfg.outer_iters.max(1);
     'search: for outer in 0..n_outer {
@@ -1123,7 +1145,7 @@ fn search(t: &Topology, cfg: &Config, seed: u64, deadline: Option<std::time::Ins
             // Alternate: dp's reshape trades a squarer variant for HPWL, which
             // the utilization floor cannot see mid-anneal (a 1-row tail cost
             // ota 40% area); the epoch key picks between the two.
-            let mut epoch = flow.epoch(&assignment, iter % 2 == 1, start, &weights, &mut prices, &mut neg, seed);
+            let mut epoch = flow.epoch(&assignment, iter % 2 == 1, start, &weights, &mut prices, &mut neg, seed, &mut halo_dyn);
             stats.warm_epochs += epoch.stats.warm_epochs;
             // Promotion: simulate only a candidate whose hard count can still
             // beat the incumbent; its spec miss then decides against it.
@@ -1198,6 +1220,7 @@ fn search(t: &Topology, cfg: &Config, seed: u64, deadline: Option<std::time::Ins
         stats.variant_escalations += 1;
         assignment = next;
         current = false;
+        halo_dyn.fill([0; 4]);
     }
 
     let best = best.expect("at least one epoch ran");
@@ -1465,6 +1488,11 @@ struct Flow<'a> {
     id_ua: Vec<Option<f64>>,
     gp_mode: GpMode,
     dp_mode: dp::DpMode,
+    /// PLC-15 static halo per cell and variant, R0 faces ([`static_halos`]);
+    /// empty without an op point or an EM-limited layer.
+    halo_st: Vec<Vec<[i32; 4]>>,
+    /// Pins per R0 face per cell and variant ([`face_pins`]).
+    halo_pins: Vec<Vec<[i32; 4]>>,
 }
 
 /// `base` plus what the annotator needs from the deck.
@@ -1799,6 +1827,7 @@ impl Flow<'_> {
         prices: &mut gp::Prices,
         neg: &mut gr::Negotiation,
         seed: u64,
+        halo_dyn: &mut [[i32; 4]],
     ) -> Epoch {
         let unified = {
             let mut a = start.map_or(assignment, |l| &l.variant[..]).to_vec();
@@ -1849,7 +1878,8 @@ impl Flow<'_> {
                 blocks: &cells.groups,
                 rules: self.rules.clone(),
                 locks: &self.locks,
-                halo: &[],
+                halo: &self.halo_st,
+                halo_dyn: &*halo_dyn,
                 net_weight: &w.place,
                 n_axes: self.problem.axis_count,
                 power_uw: &cells.power,
@@ -1996,6 +2026,8 @@ impl Flow<'_> {
         budgets.add_routing(&[Box::new(self.common_nodes(&layout))], &routes);
 
         let c = signoff_c_tier(&signoff, &self.net_names, &self.problem.net_classes, self.perf_rows);
+        // PLC-15: this epoch's congestion steps the next epoch's halo.
+        update_dyn_halo(halo_dyn, &layout, &route_stats.congestion, &self.halo_pins, dr::lattice_spec(&self.d_router.cfg).p0, self.rules.grid);
         let (key, stats) = epoch_score(&place_report, &route_report, &signoff, &budgets, c, layout.footprint_nm2());
         lap(7);
         let stats = RunStats { place, dp: dp_stats, stage_ms: ms, warm_epochs: u32::from(start.is_some()), ..stats };
@@ -2431,6 +2463,105 @@ pub fn signoff_c_tier(
 /// `v` rounded up to a multiple of `grid` (`v ≥ 0`, `grid > 0`).
 fn round_up(v: i32, grid: i32) -> i32 {
     (v + grid - 1) / grid * grid
+}
+
+/// The [`gp::spacing::Face`] (L, B, R, T) nearest pin rect `r`'s centre in
+/// `m`'s R0 frame; ties go to the earlier face.
+fn nearest_face(m: &Macro, r: pnr_core::geom::Rect) -> usize {
+    let (cx, cy, b) = (r.x + r.w / 2, r.y + r.h / 2, m.bbox);
+    let d = [cx - b.x, cy - b.y, b.x + b.w - cx, b.y + b.h - cy];
+    (0..4).min_by_key(|&f| d[f]).expect("four faces")
+}
+
+/// PLC-15 static halo per cell, variant and R0 face: a pin drawing
+/// `I_p = table(pin) × pin_shares` µA past what a minimum-width wire carries
+/// (`I_p > j·w_min`) reserves the extra width, `round_up(⌈I_p/j⌉ − w_min)`,
+/// on its nearest face. Only width beyond one track: minimum-width signals
+/// route over cells (policy; LAMP's static term reserves every terminal
+/// wire's full width, L4012–4024). Empty `pin_ua` = no halo.
+fn static_halos(variants: &[gp::VariantSpace], pin_ua: &[Vec<(String, Option<i32>)>], j_ua_per_nm: f32, w_min: i32, lattice: i32) -> Vec<Vec<[i32; 4]>> {
+    variants
+        .iter()
+        .enumerate()
+        .map(|(c, v)| {
+            v.alternatives
+                .iter()
+                .map(|m| {
+                    let mut h = [0; 4];
+                    let Some(table) = pin_ua.get(c) else { return h };
+                    for (pin, share) in m.pins.iter().zip(pnr_core::pin_shares(m)) {
+                        let Some(ua) = table.iter().find(|(n, _)| *n == pin.name).and_then(|t| t.1) else { continue };
+                        let i = ua as f32 * share;
+                        if j_ua_per_nm > 0.0 && i > j_ua_per_nm * w_min as f32 {
+                            h[nearest_face(m, pin.at)] += round_up((i / j_ua_per_nm).ceil() as i32 - w_min, lattice);
+                        }
+                    }
+                    h
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Pins per R0 face, per cell and variant ([`nearest_face`]): `n_f` of the
+/// congestion halo.
+fn face_pins(variants: &[gp::VariantSpace]) -> Vec<Vec<[i32; 4]>> {
+    variants
+        .iter()
+        .map(|v| {
+            v.alternatives
+                .iter()
+                .map(|m| {
+                    let mut n = [0; 4];
+                    for pin in &m.pins {
+                        n[nearest_face(m, pin.at)] += 1;
+                    }
+                    n
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Congestion halo target for one face: `round_up((d − 1)⁺ · n · p0)`, one
+/// track per pin per unit of demand past capacity (PLC-15, policy).
+fn halo_target(d: f32, n: i32, p0: i32, lattice: i32) -> i32 {
+    round_up(((d - 1.0).max(0.0) * n as f32 * p0 as f32).ceil() as i32, lattice)
+}
+
+/// One smoothing step toward `target`: `round_up(0.5·h + 0.5·target)`, capped
+/// at `4·p0`. β = 0.5 and the cap are policy: BAL2-19 warns that naive
+/// raise/lower updates "could oscillate indefinitely" (L9401–9405).
+fn halo_step(h: i32, target: i32, p0: i32, lattice: i32) -> i32 {
+    round_up(((h as f32 + target as f32) * 0.5).ceil() as i32, lattice).min(4 * p0)
+}
+
+/// Steps each placed face's congestion halo ([`halo_step`]) toward the
+/// demand `d_f` read in the `p0`-wide band just outside it (max over the
+/// regions overlapping the band, 0 if none); `n_pins` per cell and variant,
+/// R0 ([`face_pins`]), turned to the placed frame.
+fn update_dyn_halo(halo: &mut [[i32; 4]], l: &Layout, congestion: &[(pnr_core::geom::Rect, f32)], n_pins: &[Vec<[i32; 4]>], p0: i32, lattice: i32) {
+    use pnr_core::geom::Rect;
+    for (c, h) in halo.iter_mut().enumerate() {
+        let (x, y, hw, hh) = (l.x[c], l.y[c], l.hw[c], l.hh[c]);
+        let bands = [
+            Rect { x: x - hw - p0, y: y - hh, w: p0, h: 2 * hh },
+            Rect { x: x - hw, y: y - hh - p0, w: 2 * hw, h: p0 },
+            Rect { x: x + hw, y: y - hh, w: p0, h: 2 * hh },
+            Rect { x: x - hw, y: y + hh, w: 2 * hw, h: p0 },
+        ];
+        let v = usize::from(l.variant[c]);
+        let n = gp::spacing::oriented_faces(n_pins.get(c).and_then(|p| p.get(v)).copied().unwrap_or_default(), l.orient[c]);
+        for f in 0..4 {
+            let b = bands[f];
+            let d = congestion
+                .iter()
+                .filter(|(r, _)| r.x < b.x + b.w && b.x < r.x + r.w && r.y < b.y + b.h && b.y < r.y + r.h)
+                .map(|&(_, d)| d)
+                .fold(0.0f32, f32::max);
+            h[f] = halo_step(h[f], halo_target(d, n[f].max(1), p0, lattice), p0, lattice);
+        }
+    }
 }
 
 /// Every injected FET macro extracts to exactly one device (the one it
@@ -3222,7 +3353,7 @@ mod start_tests {
         let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0, evidence: None, r_weight: Vec::new(), pair_weight: Vec::new(), beta_key: false };
         let t = crate::topology(&nl, &Default::default(), &pdk, &cfg_warm, &bias, &ann, &Default::default(), &plan, &Default::default(), true).unwrap();
         let f = &t.flow;
-        let epoch = |start: Option<&pnr_core::Layout>, seed: u64| f.epoch(&t.assignment0, false, start, &f.weights, &mut gp::Prices::new(), &mut gr::Negotiation::new(), seed).layout;
+        let epoch = |start: Option<&pnr_core::Layout>, seed: u64| f.epoch(&t.assignment0, false, start, &f.weights, &mut gp::Prices::new(), &mut gr::Negotiation::new(), seed, &mut vec![[0; 4]; f.cells.variants.len()]).layout;
         let pos = |l: &pnr_core::Layout| (l.x.clone(), l.y.clone(), l.variant.clone());
         let inc = epoch(None, 1);
         assert_ne!(pos(&epoch(None, 2)), pos(&inc), "seed 2 places elsewhere cold");
@@ -4180,5 +4311,66 @@ mod environment_tests {
         assert!(missing(None), "ota without a sidecar must miss the drain-only load");
         let loads = r#"[{"constraint":"Load","net":"vout1","ff":100},{"constraint":"Load","net":"vout2","ff":100},{"constraint":"Load","net":"vtail","ff":100}]"#;
         assert!(!missing(Some(loads)), "sidecar loads must satisfy AA-25");
+    }
+}
+
+#[cfg(test)]
+mod halo_tests {
+    use super::{halo_step, halo_target, static_halos, update_dyn_halo};
+    use pnr_core::geom::Rect;
+    use pnr_core::{LayerId, Macro, NetId, Pin};
+
+    fn cell() -> Macro {
+        let pin = |name: &str, x: i32| Pin { name: name.into(), net: NetId(0), at: Rect { x, y: 450, w: 100, h: 100 }, layer: LayerId(0) };
+        Macro { pins: vec![pin("D", 1_900), pin("S", 0)], bbox: Rect { x: 0, y: 0, w: 2_000, h: 1_000 }, ..Default::default() }
+    }
+
+    /// 5 mA at J = 2.8 µA/nm (sky130 met1) needs ⌈1785.7⌉ nm, 140 of them one
+    /// track: 1650 on the right face. 300 µA ≤ I_1 = 392 µA reserves nothing.
+    #[test]
+    fn static_halo_reserves_only_excess_width() {
+        let v = vec![gp::VariantSpace { alternatives: vec![cell()] }];
+        let ua = vec![vec![("D".to_string(), Some(5_000)), ("S".to_string(), Some(300))]];
+        assert_eq!(static_halos(&v, &ua, 2.8, 140, 10), vec![vec![[0, 0, 1_650, 0]]]);
+        assert_eq!(static_halos(&v, &[], 2.8, 140, 10), vec![vec![[0; 4]]]);
+    }
+
+    #[test]
+    fn dynamic_halo_decays_without_overflow() {
+        let h = halo_step(800, halo_target(1.0, 2, 420, 10), 420, 10);
+        assert_eq!(h, 400);
+        assert_eq!(halo_step(h, halo_target(1.0, 2, 420, 10), 420, 10), 200);
+    }
+
+    #[test]
+    fn dynamic_halo_is_capped() {
+        assert_eq!(halo_step(0, halo_target(10.0, 4, 420, 10), 420, 10), 1_680);
+    }
+
+    /// Demand 3 in the region left of the cell, 0.5 everywhere else: only face
+    /// L grows, by half of `(3 − 1)·1·420`.
+    #[test]
+    fn band_reads_only_the_adjacent_region() {
+        let l = pnr_core::Layout {
+            x: vec![10_000],
+            y: vec![10_000],
+            hw: vec![1_000],
+            hh: vec![500],
+            axis: vec![0],
+            groups: vec![],
+            orient: vec![pnr_core::Orient::R0],
+            variant: vec![0],
+            branch: Vec::new(),
+            power_uw: vec![0],
+            temp_mc: vec![0],
+            units: Default::default(),
+        };
+        let congestion = [
+            (Rect { x: 0, y: 0, w: 9_000, h: 20_000 }, 3.0),
+            (Rect { x: 9_000, y: 0, w: 11_000, h: 20_000 }, 0.5),
+        ];
+        let mut halo = vec![[0; 4]];
+        update_dyn_halo(&mut halo, &l, &congestion, &[], 420, 10);
+        assert_eq!(halo, vec![[420, 0, 0, 0]]);
     }
 }

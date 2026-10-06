@@ -326,9 +326,24 @@ pub fn profile(m: &Macro, p: &dyn Process, bulk: Option<NetId>) -> Profile {
 pub fn oriented(p: &Profile, o: Orient) -> Profile {
     let mut out = Profile { edge: [Edge::default(); 4], ..*p };
     for f in Face::ALL {
-        let n = o.apply(f.normal().0, f.normal().1);
-        let to = Face::ALL.iter().position(|g| g.normal() == n).expect("D4 maps axis normals to axis normals");
-        out.edge[to] = p.edge[f as usize];
+        out.edge[face_to(f, o)] = p.edge[f as usize];
+    }
+    out
+}
+
+/// Where R0 face `f` lands under `o`, as a [`Face`] index.
+fn face_to(f: Face, o: Orient) -> usize {
+    let n = o.apply(f.normal().0, f.normal().1);
+    Face::ALL.iter().position(|g| g.normal() == n).expect("D4 maps axis normals to axis normals")
+}
+
+/// Per-face values `h` (L, B, R, T, R0 frame) as placed under `o`: the map
+/// [`oriented`] applies to a profile.
+#[must_use]
+pub fn oriented_faces(h: [i32; 4], o: Orient) -> [i32; 4] {
+    let mut out = [0; 4];
+    for f in Face::ALL {
+        out[face_to(f, o)] = h[f as usize];
     }
     out
 }
@@ -425,6 +440,9 @@ mod tests {
         for (from, to) in [(Face::B, Face::T), (Face::T, Face::B), (Face::L, Face::L), (Face::R, Face::R)] {
             assert_eq!(at(&mx, to), at(&p, from), "Mx {from:?} -> {to:?}");
         }
+        // Halos (PLC-15) follow the same map.
+        assert_eq!(oriented_faces([1, 2, 3, 4], Orient::R90), [4, 1, 2, 3]);
+        assert_eq!(oriented_faces([1, 2, 3, 4], Orient::Mx), [1, 4, 3, 2]);
     }
 
     #[test]

@@ -28,8 +28,11 @@ pub struct PlaceInput<'a> {
     pub blocks: &'a [Vec<DeviceId>],
     pub rules: gp::PlaceRules,
     pub locks: &'a locks::Locks,
-    /// Per cell routing halo by face (PLC-15); empty = zero.
-    pub halo: &'a [[i32; 4]],
+    /// Static routing halo (PLC-15) per cell and variant, by [`gp::spacing::Face`]
+    /// in the R0 frame; re-oriented with the cell. Empty or short = zero.
+    pub halo: &'a [Vec<[i32; 4]>],
+    /// Congestion halo (PLC-15) per cell by face, placed (world) frame; empty = zero.
+    pub halo_dyn: &'a [[i32; 4]],
     pub net_weight: &'a [f32],
     pub n_axes: usize,
     /// Per cell, µW; empty = unpowered.
@@ -130,6 +133,8 @@ struct St<'a> {
     w: Vec<i32>,
     h: Vec<i32>,
     prof: Vec<Option<&'a Profile>>,
+    /// Per cell placed halo: [`PlaceInput::halo`] oriented plus [`PlaceInput::halo_dyn`].
+    halo: Vec<[i32; 4]>,
     l: Layout,
     nets: Nets,
     cell_nets: Vec<Vec<u32>>,
@@ -166,6 +171,9 @@ impl<'a> St<'a> {
         let b = self.macro_of(c, v).bbox;
         (self.w[c], self.h[c]) = if o.swaps_axes() { (b.h, b.w) } else { (b.w, b.h) };
         self.prof[c] = inp.rules.profile_of(c, v, o);
+        let st = gp::spacing::oriented_faces(inp.halo.get(c).and_then(|h| h.get(usize::from(v))).copied().unwrap_or_default(), o);
+        let dy = inp.halo_dyn.get(c).copied().unwrap_or_default();
+        self.halo[c] = std::array::from_fn(|f| st[f] + dy[f]);
     }
 
     /// Mark the nodes the pending move touched for re-decode (also on undo:
@@ -187,7 +195,7 @@ impl<'a> St<'a> {
             w: &self.w,
             h: &self.h,
             prof: &self.prof,
-            halo: self.inp.halo,
+            halo: &self.halo,
             table: &self.inp.rules.spacing,
             lattice: self.inp.rules.grid,
             axis_grid: self.inp.rules.axis_grid,
@@ -462,6 +470,7 @@ fn init<'a>(inp: &'a PlaceInput<'a>, start: &Start, prices: &'a gp::Prices) -> (
         w: vec![0; n],
         h: vec![0; n],
         prof: vec![None; n],
+        halo: vec![[0; 4]; n],
         l,
         cell_nets: nets.cell_nets(n),
         eval,
@@ -647,6 +656,7 @@ mod tests {
             rules: gp::PlaceRules::uniform(10, gap),
             locks,
             halo: &[],
+            halo_dyn: &[],
             net_weight: &[],
             n_axes: 1,
             power_uw: &[],
