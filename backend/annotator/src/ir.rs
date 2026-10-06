@@ -16,7 +16,7 @@ use pnr_core::NetId;
 /// every signal net carrying at least `policy.ir_high_current_share` of the largest
 /// net current. `current_ua` and `headroom_mv` are per net (from the op
 /// point); `supply_mv` sizes the fallback. Nets without a current are skipped:
-/// no current, no drop.
+/// no current, no drop. Rows follow `classes` order.
 #[must_use]
 pub fn budgets(
     classes: &[NetClassification],

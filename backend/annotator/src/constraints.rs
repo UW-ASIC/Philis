@@ -36,6 +36,8 @@ pub(crate) fn fingers(dev: &pnr_core::netlist::Device) -> u16 {
     dev.mos_size().map_or(1, |s| s.fingers().min(u32::from(u16::MAX)) as u16)
 }
 
+/// How a block's units of `kind` combine: a resistor or capacitor drawn
+/// outside a matched set is a series string of units, anything else parallel.
 fn series_parallel(kind: DeviceKind) -> SeriesParallel {
     match kind {
         DeviceKind::Resistor | DeviceKind::Capacitor => SeriesParallel::Series,
@@ -62,6 +64,38 @@ fn split_bridge(netlist: &Netlist, s: &MatchSpec) -> Option<DeviceId> {
     it.next().is_none().then_some(b).flatten()
 }
 
+/// A Unitization outside any matched set (no class, kind, style or series):
+/// one target ratio per device equal to its drawn fingers ([`fingers`]).
+/// `matched` sets both `dummy_required` and `route_matching_required`.
+fn plain_unit(netlist: &Netlist, devices: Vec<DeviceId>, kind: DeviceKind, unit_w: i32, unit_l: i32, series_parallel: SeriesParallel, matched: bool) -> Unitization {
+    let dev_nf: Vec<u16> = devices.iter().map(|&d| fingers(&netlist.devices[d.0 as usize])).collect();
+    Unitization {
+        devices,
+        device_type: kind,
+        target_ratio: dev_nf.clone(),
+        dev_nf,
+        unit_w,
+        unit_l,
+        series_parallel,
+        dummy_required: matched,
+        route_matching_required: matched,
+        class: None,
+        kind: None,
+        series: Vec::new(),
+        style: None,
+    }
+}
+
+/// The cell-tier constraints of the module doc, in three passes: one
+/// Unitization per matched set in `sets` whose banks share one finger W and L
+/// (a set that does not is skipped and falls through), then per non-glue
+/// block one per drawn class of its still-uncovered devices, then one per
+/// group of identical parallel MOS left over. Every device lands in at most
+/// one Unitization. Sizes are clamped to `0..=i32::MAX` nm, an unknown size
+/// drawing as 0.
+///
+/// `drawn` is indexed by device id and must cover every device of
+/// `netlist`; panics otherwise, or when a set or block names a device past it.
 #[must_use]
 pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block], sets: &[MatchSpec]) -> Constraints {
     let mut c = Constraints::default();
@@ -126,26 +160,10 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block], sets: &[Ma
         for class in classes {
             let (kind, _, _, unit_w, unit_l) = class;
             let devices: Vec<DeviceId> = b.devices.iter().copied().filter(|&d| !covered[d.0 as usize] && class_of(d) == class).collect();
-            let dev_nf: Vec<u16> = devices
-                .iter()
-                .map(|&d| fingers(&netlist.devices[d.0 as usize]))
-                .collect();
-            c.unitization.push(Unitization {
-                devices,
-                device_type: kind,
-                target_ratio: dev_nf.clone(),
-                dev_nf,
-                unit_w,
-                unit_l,
-                series_parallel: series_parallel(kind),
-                dummy_required: true,
-                route_matching_required: true,
-                class: None, kind: None, series: Vec::new(), style: None,
-            });
+            c.unitization.push(plain_unit(netlist, devices, kind, unit_w, unit_l, series_parallel(kind), true));
         }
-    }
-    for u in &c.unitization {
-        u.devices.iter().for_each(|d| covered[d.0 as usize] = true);
+        // A device shared by two blocks is drawn once, by the first.
+        b.devices.iter().for_each(|d| covered[d.0 as usize] = true);
     }
     let keyed = netlist.devices.iter().enumerate().filter_map(|(i, d)| {
         if covered[i] || !matches!(d.kind, DeviceKind::Nmos | DeviceKind::Pmos) || drawn[i].w_finger_nm.is_none() {
@@ -157,23 +175,12 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block], sets: &[Ma
     });
     for (key, devices) in crate::sets::group(keyed).into_iter().filter(|(_, v)| v.len() > 1) {
         let kind = netlist.devices[devices[0].0 as usize].kind;
-        let dev_nf: Vec<u16> = devices.iter().map(|&d| fingers(&netlist.devices[d.0 as usize])).collect();
-        c.unitization.push(Unitization {
-            devices,
-            device_type: kind,
-            target_ratio: dev_nf.clone(),
-            dev_nf,
-            unit_w: clamp(key.2),
-            unit_l: clamp(key.3),
-            series_parallel: SeriesParallel::Parallel,
-            dummy_required: false,
-            route_matching_required: false,
-            class: None, kind: None, series: Vec::new(), style: None,
-        });
+        c.unitization.push(plain_unit(netlist, devices, kind, clamp(key.2), clamp(key.3), SeriesParallel::Parallel, false));
     }
     c
 }
 
+/// Greatest common divisor; `gcd(0, 0) = 0`.
 fn gcd(a: u16, b: u16) -> u16 {
     if b == 0 { a } else { gcd(b, a % b) }
 }

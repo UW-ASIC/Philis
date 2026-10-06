@@ -21,6 +21,10 @@ pub(crate) fn diag(ids: &[ConstraintId], devices: Vec<DeviceId>, what: impl std:
 /// whose nets are touched by different device counts: `"asymmetric_net_pair"`,
 /// message names the Differential batch id ("ids <id>: <x>/<y> <nx> vs <ny> devices").
 /// Reported only, nothing dropped: it is a netlist fact, not a rule clash.
+/// Empty when `p` has no Differential batch.
+///
+/// Panics when a terminal's net is outside `nl.nets` or a paired net outside
+/// `p.net_classes` (both hold for a `Problem` annotated from `nl`).
 #[must_use]
 pub fn check(p: &Problem, nl: &Netlist) -> Vec<Diagnostic> {
     let Some(id) = p.routing.budget.iter().find(|b| b.kind().ends_with("::Differential")).and_then(|b| b.meta()).map(|m| m.id) else { return Vec::new() };

@@ -12,8 +12,11 @@ use crate::param;
 /// devices missing W/L are not "identical" (AA-21).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Drawn {
+    /// Width of one finger, nm (`W_total / nf` for a MOS, the `w` param otherwise).
     pub w_finger_nm: Option<i64>,
+    /// Drawn length, nm.
     pub l_nm: Option<i64>,
+    /// Drawn units: `nf·m` for a MOS, `m` (at least 1) otherwise.
     pub fingers: u32,
     /// Index into the `models` table [`drawn`] interns into (case-insensitive).
     pub model: u16,
@@ -23,7 +26,12 @@ pub struct Drawn {
 
 /// MOS: from `dev.mos_size()` (FLOW-01: w_finger = W_total/nf, fingers = nf·m); `None` size → both `None`, fingers 1.
 /// Other kinds: `w`, `l` params as written (`None` when absent), fingers = `m` (default 1).
-/// `model` interns `dev.model` (case-insensitive) into `models`; `bulk` = the FET `B` net, else `None`.
+/// `model` interns `dev.model` (case-insensitive) into `models`, appending a
+/// new lowercase entry on first sight (linear in `models.len()`); `bulk` = the FET `B` net, else `None`.
+///
+/// The index is a `u16`: the netlist's `u16` device id space bounds the number
+/// of distinct models, so it never wraps.
+#[must_use]
 pub fn drawn(dev: &Device, models: &mut Vec<String>) -> Drawn {
     let model = dev.model.to_ascii_lowercase();
     let model = models.iter().position(|m| *m == model).unwrap_or_else(|| {
@@ -48,6 +56,8 @@ fn fixed_geometry(kind: DeviceKind, d: &Drawn) -> bool {
 }
 
 /// The size is unknown: never `ExactAs`, and reported as missing `device W/L`.
+/// A fixed-geometry bipolar or diode (no W and no L) is known by its model.
+#[must_use]
 pub fn unknown_size(kind: DeviceKind, d: &Drawn) -> bool {
     !fixed_geometry(kind, d) && (d.w_finger_nm.is_none() || d.l_nm.is_none())
 }
@@ -56,6 +66,8 @@ pub fn unknown_size(kind: DeviceKind, d: &Drawn) -> bool {
 /// and the same bulk net or both bulks on rails. A bipolar compares its written
 /// W, L and model as they are (EXT-19): its size is the model's emitter, and a
 /// flow may write only a default `l`.
+///
+/// Panics when a bulk net id is outside `roles`.
 pub(crate) fn exact_as(kind: DeviceKind, a: &Drawn, b: &Drawn, roles: &[NetRole]) -> bool {
     if matches!(kind, DeviceKind::Npn | DeviceKind::Pnp) {
         return (a.w_finger_nm, a.l_nm, a.model) == (b.w_finger_nm, b.l_nm, b.model);

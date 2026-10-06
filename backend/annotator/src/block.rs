@@ -6,6 +6,8 @@ use crate::pattern::PatternMatch;
 
 /// One recognised structure (or the glue remainder).
 pub struct Block {
+    /// What the structure implies for placement; `Group` for a composite
+    /// whose constraints live in `sub_blocks`.
     pub kind: BlockKind,
     /// Matched pattern's name (`"glue"` for the remainder); a child carries its parent's.
     pub template: &'static str,
@@ -76,6 +78,9 @@ impl Block {
     /// pair's kind, else `Stack` for a declared prox, else `Group`); a larger one is
     /// a `Group` whose children and selfs are its pattern's declared roles, devices
     /// in slot order.
+    ///
+    /// Device ids are narrowed to `u16`: `annotate` refuses netlists past the
+    /// `u16` id space before matching, so the cast never truncates.
     pub(crate) fn from_match(m: &PatternMatch) -> Self {
         let dev = |s: u8| DeviceId(m.instances[s as usize] as u16);
         let n = m.instances.len();
@@ -110,7 +115,10 @@ impl Block {
     }
 }
 
-/// The hierarchy's leaves: blocks without children, glue excluded.
+/// The hierarchy's leaves: blocks without children, glue excluded, in
+/// depth-first order (a composite's children where the composite stood).
+/// Borrows `blocks`; allocates one `Vec` of references.
+#[must_use]
 pub fn leaves(blocks: &[Block]) -> Vec<&Block> {
     fn walk<'a>(bs: &'a [Block], out: &mut Vec<&'a Block>) {
         for b in bs {

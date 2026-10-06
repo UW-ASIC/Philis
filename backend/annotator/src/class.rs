@@ -10,12 +10,19 @@ use crate::block::BlockKind;
 /// What a set does in the circuit: the evidence of last resort for its class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SetRole {
+    /// The input differential pair (role default Moderate).
     InputPair,
+    /// The load of an input pair (Moderate).
     LoadOfPair,
+    /// A bias current mirror (Minimal).
     BiasMirror,
+    /// A bandgap core's ratioed devices or resistors (Moderate).
     BandgapCore,
+    /// A binary-weighted DAC bank (Exceptional).
     DacBank,
+    /// A feedback divider or capacitor ratio (Moderate).
     FeedbackRatio,
+    /// Anything else (Minimal).
     Other,
 }
 
@@ -25,7 +32,9 @@ pub struct ClassCtx<'a> {
     pub user: Option<MatchClass>,
     /// 6σ target in the unit of `limit(family, kind, _)`: `6·offset_sigma_mv` today.
     pub spec_6sigma: Option<f32>,
+    /// The set's circuit role, the fallback when neither user nor spec decides.
     pub role: SetRole,
+    /// Receives `beyond_exceptional_trim` when the spec needs trim.
     pub diags: &'a mut Vec<Diagnostic>,
 }
 
@@ -50,7 +59,7 @@ pub fn kind_of(set: &MatchSpec, leaf_kinds: &[BlockKind], dk: DeviceKind) -> Mat
 /// at `lim(Moderate) ≤ X`, else Exceptional, with `beyond_exceptional_trim`
 /// below `lim(Exceptional)` (Hastings: that needs trim); Role defaults
 /// (InputPair, LoadOfPair, BandgapCore, FeedbackRatio Moderate; DacBank
-/// Exceptional; BiasMirror, Other Minimal).
+/// Exceptional; BiasMirror, Other Minimal). A NaN spec counts as no spec.
 pub fn class_of(set: &MatchSpec, ctx: &mut ClassCtx) -> (MatchClass, ClassSource) {
     if let Some(c) = ctx.user {
         return (c, ClassSource::User);

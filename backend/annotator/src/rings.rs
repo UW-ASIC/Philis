@@ -11,12 +11,17 @@ use pnr_core::{DeviceKind, Netlist, SubstrateKind};
 /// Which minority carrier a device injects into the substrate.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Carrier {
+    /// An n-type diffusion forward-biasing into p-substrate (collected by an ECGR).
     Electrons,
+    /// A p-type diffusion forward-biasing into an n-well (collected by an HCGR).
     Holes,
 }
 
 /// Plain per-device data, so the policy is table-testable without ports or a PDK.
+/// Every per-device slice is indexed by device id; a shorter slice reads as
+/// `false`/`None` past its end.
 pub struct RingInputs<'a> {
+    /// The devices to ring; a device without a `B` terminal gets none.
     pub netlist: &'a Netlist,
     /// EXT-23 Switching/Capacitive/ImpactIonization; fallback: touches a Clock-class net.
     pub aggressor: &'a [bool],
@@ -24,6 +29,7 @@ pub struct RingInputs<'a> {
     pub victim: &'a [bool],
     /// EXT-23 MinorityElectron/MinorityHole; all `None` without ports.
     pub injector: &'a [Option<Carrier>],
+    /// The wafer's substrate; `EpiOnLowRes` turns off rows 5–6 of [`plan`].
     pub substrate: SubstrateKind,
     /// The victims' own ring return.
     pub quiet_ring_net: Option<NetId>,
@@ -59,11 +65,7 @@ pub struct RingInputs<'a> {
 #[must_use]
 pub fn plan(i: &RingInputs) -> (Vec<GuardRingRequirement>, Vec<(&'static str, &'static str)>) {
     let (mut rings, mut missing) = (Vec::new(), Vec::new());
-    let note = |m: &mut Vec<(&'static str, &'static str)>, why: &'static str| {
-        if !m.contains(&("GuardRing", why)) {
-            m.push(("GuardRing", why));
-        }
-    };
+    let note = |m: &mut Vec<(&'static str, &'static str)>, why: &'static str| note_once(m, ("GuardRing", why));
     let ring = |d: usize, ring_type, role, connection_net, min_width_nm, shareable| GuardRingRequirement {
         device: DeviceId(d as u16),
         ring_type,
@@ -84,10 +86,7 @@ pub fn plan(i: &RingInputs) -> (Vec<GuardRingRequirement>, Vec<(&'static str, &'
                 rings.push(ring(d, GuardRingType::Tub { id: k as u16 }, RingRole::Victim, *tie, w, true));
                 continue;
             }
-            let why = ("IsolatedTub", "deck has no deep n-well: tub drawn as an ordinary ring");
-            if !missing.contains(&why) {
-                missing.push(why);
-            }
+            note_once(&mut missing, ("IsolatedTub", "deck has no deep n-well: tub drawn as an ordinary ring"));
         }
         let r = match i.injector.get(d).copied().flatten() {
             Some(Carrier::Electrons) => match i.highest_supply.filter(|_| i.ecgr_drawable) {
@@ -134,4 +133,12 @@ pub fn plan(i: &RingInputs) -> (Vec<GuardRingRequirement>, Vec<(&'static str, &'
         }
     }
     (rings, missing)
+}
+
+/// Appends `why` unless it is already listed (the notes are a handful, so a
+/// linear scan).
+fn note_once(missing: &mut Vec<(&'static str, &'static str)>, why: (&'static str, &'static str)) {
+    if !missing.contains(&why) {
+        missing.push(why);
+    }
 }

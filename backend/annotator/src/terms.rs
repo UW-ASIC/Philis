@@ -1,8 +1,22 @@
 //! What a terminal is, by its name and its device's kind (AA-16): never by position.
 use pnr_core::DeviceKind;
 
+/// The electrical role of one device terminal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TermRole { FetGate, Channel, Body, BjtBase, Plate, Passive }
+pub enum TermRole {
+    /// A MOS gate: capacitive load, no DC path.
+    FetGate,
+    /// A MOS drain/source or a bipolar collector/emitter: carries the device current.
+    Channel,
+    /// A MOS bulk: a junction to the well or substrate.
+    Body,
+    /// A bipolar base: a DC path carrying base current.
+    BjtBase,
+    /// A capacitor terminal: no DC path.
+    Plate,
+    /// Any other pin (resistor, diode, inductor, unknown names): a passive DC path.
+    Passive,
+}
 
 /// FET `G`/`D`,`S`/`B`; bipolar `B` = base, `C`/`E` = channel; capacitor pins are plates;
 /// anything else (resistor, diode, inductor, unknown pin names) is a passive DC path.

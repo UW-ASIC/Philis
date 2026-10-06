@@ -23,6 +23,7 @@ pub(crate) fn fet(name: &str, kind: DeviceKind, g: u16, d: u16, s: u16, b: u16, 
     }
 }
 
+/// Nets named in order: `names[i]` is `NetId(i)`.
 pub(crate) fn nets(names: &[&str]) -> Vec<Net> {
     names.iter().map(|n| Net { name: (*n).into() }).collect()
 }

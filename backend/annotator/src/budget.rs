@@ -24,6 +24,9 @@ use crate::policy::Policy;
 /// `R_ref`/`C_ref` the resistance/ground C of `rc_ref_len_um` of minimum
 /// lowest-layer wire; without `r_ohm_per_um` the R test is skipped and a net
 /// seen only in `d_r` is not classed (stays Unknown).
+///
+/// Rows follow `sens.specs` order (floor before ceiling); classes are sorted by
+/// net id. `af_per_nm` is the minimum lowest-layer wire's ground C, aF/nm.
 #[must_use]
 pub fn rows(sens: &Sensitivities, af_per_nm: f32, r_ohm_per_um: Option<f32>, policy: &Policy) -> (Vec<PerformanceBudget>, Vec<(NetId, RcClass)>, Vec<Diagnostic>) {
     let c_ref = f64::from(af_per_nm) * 1000.0 * policy.rc_ref_len_um;
