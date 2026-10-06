@@ -11,37 +11,58 @@ use gp::spacing::{Face, Gap, Profile, SpacingTable};
 use pnr_core::ids::AxisId;
 use pnr_core::{DeviceId, Layout};
 
+/// One kid slot of a [`Node`]: a placed cell or a nested node, both by index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kid {
+    /// Cell index into the per-cell arrays ([`Geo::w`], [`Out::x0`], ...).
     Cell(u16),
+    /// Node index into [`Tree::nodes`]; always smaller than the parent's own index.
     Node(u16),
 }
 
-/// A symmetry node's axis and involution: `mate[k]` = partner kid slot,
-/// `mate[k] == k` = self-symmetric (centred on the axis).
+/// A symmetry node's axis and involution over its kid slots.
+///
+/// Invariant: `mate.len()` equals the node's kid count, `mate[mate[k]] == k`;
+/// `mate[k] == k` marks a self-symmetric kid (centred on the axis).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sym {
+    /// The axis this node's mirror pairs share (index into [`Layout::axis`]).
     pub axis: AxisId,
+    /// Partner kid slot per kid slot.
     pub mate: Vec<u16>,
 }
 
-/// `alpha`, `beta`: permutations of kid slots (the node's sequence pair).
+/// One node of the hierarchy: its kids and their sequence pair.
+///
+/// Invariant: `alpha` and `beta` are permutations of `0..kids.len()`; on a
+/// symmetry node the pair is symmetric-feasible ([`Tree::is_sf`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Node {
+    /// The kids, by slot; slot order is fixed by [`Tree::build`].
     pub kids: Vec<Kid>,
+    /// Positive sequence (Γ+), kid slots.
     pub alpha: Vec<u16>,
+    /// Negative sequence (Γ−), kid slots.
     pub beta: Vec<u16>,
+    /// Present on symmetry nodes only.
     pub sym: Option<Sym>,
 }
 
-/// `home[cell] = (node, kid slot)`.
+/// The hierarchical sequence-pair code of one placement.
+///
+/// Invariant: every node kid's index is below its parent's, `root` is the
+/// last node, and every cell is the kid of exactly one node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tree {
+    /// Post-order: symmetry nodes, then proximity nodes, then the root.
     pub nodes: Vec<Node>,
+    /// Index of the root node, `nodes.len() - 1`.
     pub root: u16,
+    /// Per cell: `(node, kid slot)` holding it.
     pub home: Vec<(u16, u16)>,
 }
 
+/// A requirement [`Tree::build`] could not honour; the tree is still valid.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeError {
     /// `cell` is mirrored on axis `a` and again on `b`; `b`'s group was dropped.
@@ -49,6 +70,8 @@ pub enum TreeError {
 }
 
 /// Inverse permutation: `inv[seq[p]] = p`.
+/// `seq` must be a permutation of `0..seq.len()` (else panics on an
+/// out-of-range slot or leaves holes).
 fn inverse(seq: &[u16], inv: &mut Vec<u32>) {
     inv.clear();
     inv.resize(seq.len(), 0);
@@ -65,6 +88,9 @@ impl Tree {
     /// named on a second axis drops that axis's whole group and is reported. A
     /// cell paired twice on one axis keeps its first partner. Every node starts
     /// with α = β = slot order, symmetry nodes then [`Tree::make_sf`].
+    ///
+    /// Pairs naming a cell `≥ n_cells` and block members `≥ n_cells` are
+    /// ignored. `n_cells` must fit the `u16` cell ids (≤ 65 536).
     #[must_use]
     pub fn build(n_cells: usize, pairs: &[(u32, u32, u16)], blocks: &[Vec<DeviceId>]) -> (Tree, Vec<TreeError>) {
         let n = n_cells;
@@ -173,8 +199,8 @@ impl Tree {
         (t, errs)
     }
 
-    /// Same nodes, kids, axes and mates (codes may differ): a warm start's
-    /// tree still fits the inputs (PLC-10).
+    /// Whether `o` has the same nodes, kids, axes and mates (codes may
+    /// differ): a warm start's tree still fits the inputs (PLC-10).
     #[must_use]
     pub fn same_structure(&self, o: &Tree) -> bool {
         self.root == o.root
@@ -182,8 +208,10 @@ impl Tree {
             && self.nodes.iter().zip(&o.nodes).all(|(a, b)| a.kids == b.kids && a.sym == b.sym)
     }
 
-    /// Balasa eq 1.1 for distinct kids `x`, `y` of a symmetry node:
-    /// `(pa[x] < pa[y]) == (pb[mate[y]] < pb[mate[x]])`. `true` off symmetry nodes.
+    /// Whether `node`'s code is symmetric-feasible: Balasa eq 1.1 for distinct
+    /// kids `x`, `y` of a symmetry node,
+    /// `(pa[x] < pa[y]) == (pb[mate[y]] < pb[mate[x]])`. `true` off symmetry
+    /// nodes. O(k²) in the kid count; panics if `node` is out of range.
     #[must_use]
     pub fn is_sf(&self, node: u16) -> bool {
         let nd = &self.nodes[usize::from(node)];
@@ -196,18 +224,21 @@ impl Tree {
         (0..k).all(|x| (0..k).all(|y| x == y || (pa[x] < pa[y]) == (pb[m(y)] < pb[m(x)])))
     }
 
-    /// Rewrite a symmetry node's β as its α reversed through `mate`
+    /// Rewrites a symmetry node's β as its α reversed through `mate`
     /// (Balasa L2389–2390); then [`Tree::is_sf`] holds. No-op elsewhere.
+    /// Reuses β's buffer: no allocation. Panics if `node` is out of range.
     pub fn make_sf(&mut self, node: u16) {
         let nd = &mut self.nodes[usize::from(node)];
         if let Some(s) = &nd.sym {
-            nd.beta = nd.alpha.iter().rev().map(|&g| s.mate[usize::from(g)]).collect();
+            nd.beta.clear();
+            nd.beta.extend(nd.alpha.iter().rev().map(|&g| s.mate[usize::from(g)]));
         }
     }
 
-    /// Embed a coordinate placement: per node, α by `(x − y, slot)` and β by
+    /// Embeds a coordinate placement: per node, α by `(x − y, slot)` and β by
     /// `(x + y, slot)` of each kid's key point (cell centre, mean centre of a
-    /// node's cells), then [`Tree::make_sf`].
+    /// node's cells), then [`Tree::make_sf`]. Panics when `l` has fewer
+    /// cells than the tree.
     pub fn seed_from(&mut self, l: &Layout) {
         let mut key: Vec<(i64, i64, i64)> = vec![(0, 0, 0); self.nodes.len()];
         for ni in 0..self.nodes.len() {
@@ -231,10 +262,11 @@ impl Tree {
         }
     }
 
-    /// Deterministic start: symmetry nodes take Balasa's initial code
+    /// Seeds a deterministic start: symmetry nodes take Balasa's initial code
     /// `α = a_1…a_p c_1…c_s b_p…b_1` (L2375–2405; `a` the lower slot of each
     /// pair), every other node one row α = β by descending kid area (`w·h`
-    /// summed over a node's cells), ties by slot.
+    /// summed over a node's cells), ties by slot. `w`, `h` are per cell (nm)
+    /// and must cover every cell.
     pub fn seed_constructive(&mut self, w: &[i32], h: &[i32]) {
         let mut area: Vec<i64> = vec![0; self.nodes.len()];
         for ni in 0..self.nodes.len() {
@@ -268,12 +300,19 @@ impl Tree {
 /// (empty or short = zero; PLC-15). `axis_grid = Some((p0, P))` puts every axis
 /// on a routing track centreline (PLC-28).
 pub struct Geo<'a> {
+    /// Per cell width, nm, at its current variant and orient.
     pub w: &'a [i32],
+    /// Per cell height, nm.
     pub h: &'a [i32],
+    /// Per cell oriented spacing profile; short = `None` for the rest.
     pub prof: &'a [Option<&'a Profile>],
+    /// Per cell routing halo by [`Face`] discriminant, nm; short = zero.
     pub halo: &'a [[i32; 4]],
+    /// Pairwise gap rules ([`SpacingTable::gap`]).
     pub table: &'a SpacingTable,
+    /// Placement lattice, nm; `≤ 0` reads as 1.
     pub lattice: i32,
+    /// `(p0, P)`, nm: every axis on `p0/2 + k·P` (PLC-28); `None` = free.
     pub axis_grid: Option<(i32, i32)>,
 }
 
@@ -281,17 +320,25 @@ pub struct Geo<'a> {
 /// order, and how many `fix_monotone` passes the decode needed.
 #[derive(Default, Debug)]
 pub struct Out {
+    /// Per cell lower-left x, nm, relative to the root's origin `(0, 0)`.
     pub x0: Vec<i32>,
+    /// Per cell lower-left y, nm.
     pub y0: Vec<i32>,
+    /// `(axis id, absolute axis x in nm)` per symmetry node, node order.
     pub axis: Vec<(AxisId, i32)>,
+    /// Axis-raising passes summed over the nodes this decode re-decoded.
     pub fixes: u32,
 }
 
 /// Why a code has no realisation; payload: node index.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Fail {
+    /// A mirror pair's centre heights could not be equalised.
     SymY(u16),
+    /// No admissible axis: self kids disagree on their width residue, the
+    /// axis grid cannot centre them, or the axis did not settle.
     SymX(u16),
+    /// Merge bands (`0 < gap < min` with abutment allowed) did not close.
     Band(u16),
 }
 
@@ -308,11 +355,13 @@ pub struct Scratch {
     /// whether that kid's profile changed since (its row and column are stale).
     gcn: Vec<Vec<[Option<Gap>; 2]>>,
     stale: Vec<Vec<bool>>,
+    /// Current node: inverse α (`pa[slot]` = position in α).
     pa: Vec<u32>,
-    pb: Vec<u32>,
     /// Per node, per kid slot: position relative to the node's origin.
     rel_x: Vec<Vec<i32>>,
     rel_y: Vec<Vec<i32>>,
+    /// Current node, per kid slot: lower bounds on x and y raised by the
+    /// mirror (y) and merge-band (x, y) repairs.
     lb: Vec<i32>,
     lby: Vec<i32>,
     /// Per node: merged profile (`None` when a member has none), halo, `(W, H)`, `2·axis` relative, origin.
@@ -330,8 +379,10 @@ pub struct Scratch {
 }
 
 impl Scratch {
-    /// Mark `node` and its ancestors for re-decode: its code, or a kid's
-    /// extents or profile, changed (or changed back).
+    /// Marks `node` and its ancestors for re-decode: its code, or a kid's
+    /// extents or profile, changed (or changed back). No-op until `self`
+    /// holds a decode of a tree with `t`'s node count (all nodes are then
+    /// decoded anyway). Cost O(depth).
     pub fn touch(&mut self, t: &Tree, node: u16) {
         if self.parent.len() != t.nodes.len() {
             return;
@@ -346,7 +397,8 @@ impl Scratch {
         }
     }
 
-    /// Cell `c`'s extents or profile changed: re-decode its node, recompute its gaps.
+    /// Records that cell `c`'s extents or profile changed: re-decode its node
+    /// and drop its cached gaps. Panics if `c` is not a cell of `t`.
     pub fn touch_cell(&mut self, t: &Tree, c: usize) {
         if self.parent.len() != t.nodes.len() {
             return;
@@ -358,13 +410,15 @@ impl Scratch {
         self.touch(t, node);
     }
 
-    /// Drop every cached node result (a new tree or a wholesale code change).
+    /// Drops every cached node result. Required before decoding a different
+    /// tree with the same node count, or after a code change not reported
+    /// through [`Scratch::touch`].
     pub fn invalidate(&mut self) {
         self.parent.clear();
     }
 }
 
-/// `table.gap` when both profiles exist, else `fallback` (as `PlaceRules::gaps`).
+/// `table.gap` when both profiles exist, else `fallback` without abutment (as `PlaceRules::gaps`).
 fn gap(g: &Geo, pi: Option<&Profile>, f: Face, pj: Option<&Profile>) -> Gap {
     match (pi, pj) {
         (Some(a), Some(b)) => g.table.gap(a, f, b),
@@ -382,6 +436,7 @@ fn need(gp: Gap, halo: i32) -> i32 {
     if gp.abut && halo == 0 { 0 } else { gp.min + halo }
 }
 
+/// The least multiple of `q` (`≤ 0` reads as 1) at or above `v`.
 fn round_up(v: i32, q: i32) -> i32 {
     let q = q.max(1);
     v.div_euclid(q) * q + if v.rem_euclid(q) == 0 { 0 } else { q }
@@ -408,7 +463,8 @@ impl Kids<'_> {
             gp.abut &= !self.node[i] && !self.node[j];
             gp
         });
-        let halo = if ax == 0 { self.halo[i][2] + self.halo[j][0] } else { self.halo[i][3] + self.halo[j][1] };
+        let (hi, hj) = if ax == 0 { (Face::R, Face::L) } else { (Face::T, Face::B) };
+        let halo = self.halo[i][hi as usize] + self.halo[j][hj as usize];
         (gp, halo)
     }
 
@@ -484,7 +540,6 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
         s.knode.push(is_node);
     }
     inverse(&nd.alpha, &mut s.pa);
-    inverse(&nd.beta, &mut s.pb);
     if s.gcn[ni].len() != k * k {
         s.gcn[ni].clear();
         s.gcn[ni].resize(k * k, [None; 2]);
@@ -509,13 +564,12 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
     y.clear();
     y.resize(k, 0);
 
-    let Scratch { pa, pb, lb, lby, kw, kh, kp, khalo, knode, gcn, has_sym, .. } = s;
+    let Scratch { pa, lb, lby, kw, kh, kp, khalo, knode, gcn, has_sym, .. } = s;
     // PLC-28 step 3: a kid that is or holds a symmetry node starts on a multiple of `P`.
     let on_grid: Vec<bool> = nd.kids.iter().map(|k| matches!(*k, Kid::Node(m) if has_sym[usize::from(m)])).collect();
     let period = g.axis_grid.map(|(_, p)| p);
     let gc = &mut gcn[ni][..];
     let (pa, beta) = (&*pa, &nd.beta);
-    let _ = pb;
     let (kw, kh, kp, khalo, knode): (&[i32], &[i32], &[Option<Profile>], &[[i32; 4]], &[bool]) = (kw, kh, kp, khalo, knode);
     let mate = nd.sym.as_ref().map(|s| &s.mate);
     let pairs: Vec<(usize, usize)> = mate.map_or(Vec::new(), |m| {
@@ -685,9 +739,14 @@ fn axis_snap(v: i32, lattice: i32, self_w: Option<i32>, grid: Option<(i32, i32)>
     }
 }
 
-/// Decode `t` (post-order; only nodes marked by [`Scratch::touch`] once
-/// `s` holds a decode of `t`), then assemble absolute corners (pre-order) into
-/// `out`. `Err` names the first node with no realisation; `out` is then stale.
+/// Decodes `t` (post-order; only nodes marked by [`Scratch::touch`] once
+/// `s` holds a decode of `t`), then assembles absolute corners (pre-order)
+/// into `out`. `Err` names the first node with no realisation; `out` is then
+/// stale and the failing node stays marked. `g` must cover every cell of `t`.
+/// Allocates only when a buffer grows.
+///
+/// # Errors
+/// [`Fail`] with the first node (post-order) that has no realisation.
 pub fn decode(t: &Tree, g: &Geo, s: &mut Scratch, out: &mut Out) -> Result<(), Fail> {
     let nn = t.nodes.len();
     s.rel_x.resize_with(nn, Vec::new);
@@ -758,11 +817,11 @@ pub fn decode(t: &Tree, g: &Geo, s: &mut Scratch, out: &mut Out) -> Result<(), F
     Ok(())
 }
 
-/// Check a decode from scratch on absolute coordinates: in every node, every
+/// Checks a decode from scratch on absolute coordinates: in every node, every
 /// two kids (node kids by their cells' bbox and merged profile) are apart on
 /// some axis by a gap they accept; every mirror pair has `C_l + C_r = 2·ax2`
 /// and equal centre y, every self kid `C_c = ax2`; every corner and `2·axis`
-/// on the lattice.
+/// on the lattice. O(Σ k²); allocates; for tests and audits, not the hot loop.
 #[must_use]
 pub fn verify(t: &Tree, g: &Geo, out: &Out) -> bool {
     let lat = g.lattice.max(1);
@@ -829,8 +888,9 @@ pub fn verify(t: &Tree, g: &Geo, out: &Out) -> bool {
     true
 }
 
-/// Assembly step 8: `x = x0 + w/2`, `hw = w/2` (same for y), and each
-/// symmetry node's axis into `l.axis` (grown when short).
+/// Writes a decode into `l` (assembly step 8): `x = x0 + w/2`, `hw = w/2`
+/// (same for y), and each symmetry node's axis into `l.axis` (grown when
+/// short). Panics when `l`, `w` or `h` are shorter than `out.x0`.
 pub fn to_layout(out: &Out, w: &[i32], h: &[i32], l: &mut Layout) {
     for c in 0..out.x0.len() {
         (l.hw[c], l.hh[c]) = (w[c] / 2, h[c] / 2);

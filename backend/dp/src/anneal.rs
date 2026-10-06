@@ -15,28 +15,39 @@ use crate::eval::Eval;
 use crate::sp::{self, decode, Geo, Out, Scratch, Tree};
 use crate::{locks, quarter_turn, seed_branches, PlaceStats, Schedule};
 
-/// Everything [`place_sp`] reads.
+/// Everything [`place_sp`] reads. Per-cell slices are indexed by cell id;
+/// `macros.len()` is the cell count `n`.
 pub struct PlaceInput<'a> {
+    /// Per cell, the default (variant 0) macro: bbox and pins.
     pub macros: &'a [Macro],
+    /// Per cell shape alternatives; anything but length `n` disables the
+    /// reshape move (M5) and every cell keeps `macros`.
     pub variants: &'a [gp::VariantSpace],
     /// Per cell variant for [`Start::Constructive`] (missing = 0); the other
     /// starts carry their own.
     pub assignment: &'a [u16],
+    /// The analog requirements: hard batches gate, budgets form Θ, costs join E.
     pub reqs: &'a Requirements<Layout>,
+    /// Per cell: orientation and shape frozen (short = free).
     pub fixed: &'a [bool],
     /// Recognition blocks, glue last ([`sp::Tree::build`]).
     pub blocks: &'a [Vec<DeviceId>],
+    /// Lattice, spacing table, profiles and axis grid.
     pub rules: gp::PlaceRules,
+    /// Orient and shape sets that move together.
     pub locks: &'a locks::Locks,
     /// Static routing halo (PLC-15) per cell and variant, by [`gp::spacing::Face`]
     /// in the R0 frame; re-oriented with the cell. Empty or short = zero.
     pub halo: &'a [Vec<[i32; 4]>],
     /// Congestion halo (PLC-15) per cell by face, placed (world) frame; empty = zero.
     pub halo_dyn: &'a [[i32; 4]],
+    /// Per net HPWL weight ([`Nets::weigh`]).
     pub net_weight: &'a [f32],
+    /// Symmetry axes the layout carries (at least one is allocated).
     pub n_axes: usize,
     /// Per cell, µW; empty = unpowered.
     pub power_uw: &'a [i32],
+    /// Unit library the returned [`Layout`] shares.
     pub units: Arc<UnitLib>,
 }
 
@@ -44,8 +55,12 @@ pub struct PlaceInput<'a> {
 /// ([`Tree::seed_from`]), the deterministic [`Tree::seed_constructive`], or an
 /// incumbent's code.
 pub enum Start<'a> {
+    /// Embed this coordinate placement; its variants and orients are kept.
     Cold(&'a Layout),
+    /// [`Tree::seed_constructive`] on [`PlaceInput::assignment`], all R0.
     Constructive,
+    /// Resume an incumbent: its code, per cell variant and orient. Falls back
+    /// to `Constructive` when the tree no longer fits the inputs.
     Warm { tree: &'a Tree, variant: &'a [u16], orient: &'a [Orient] },
 }
 
@@ -70,7 +85,8 @@ fn energy(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &gp::Pri
     gp::mechanics::hpwl(nets, l) / f64::from(l.l_ref()) + area + gp::mechanics::augmented_cost(reqs, l, prices)
 }
 
-/// Two distinct uniform indices below `k` (`k ≥ 2`).
+/// Two distinct uniform indices below `k`. Precondition `k ≥ 2` (`k = 1`
+/// returns `(0, 0)`, `k = 0` panics).
 fn two(rng: &mut SplitMix64, k: usize) -> (usize, usize) {
     let i = rng.below(k);
     let j = (i + 1 + rng.below(k - 1)) % k;
@@ -92,7 +108,8 @@ fn m2(t: &mut Tree, node: usize, rng: &mut SplitMix64) {
     let (i, j) = two(rng, nd.beta.len());
     nd.beta.swap(i, j);
     if let Some(s) = &nd.sym {
-        nd.alpha = nd.beta.iter().rev().map(|&g| s.mate[usize::from(g)]).collect();
+        nd.alpha.clear();
+        nd.alpha.extend(nd.beta.iter().rev().map(|&g| s.mate[usize::from(g)]));
     }
 }
 
@@ -103,11 +120,12 @@ fn m3(t: &mut Tree, node: usize, rng: &mut SplitMix64) -> bool {
     let nd = &mut t.nodes[node];
     let (a, b) = match &nd.sym {
         Some(s) => {
-            let paired: Vec<u16> = (0..s.mate.len() as u16).filter(|&x| s.mate[usize::from(x)] != x).collect();
-            if paired.is_empty() {
+            let paired = |x: &u16| s.mate[usize::from(*x)] != *x;
+            let n_paired = (0..s.mate.len() as u16).filter(paired).count();
+            if n_paired == 0 {
                 return false;
             }
-            let x = paired[rng.below(paired.len())];
+            let x = (0..s.mate.len() as u16).filter(paired).nth(rng.below(n_paired)).unwrap();
             (x, s.mate[usize::from(x)])
         }
         None => {
@@ -130,6 +148,7 @@ struct St<'a> {
     inp: &'a PlaceInput<'a>,
     prices: &'a gp::Prices,
     tree: Tree,
+    /// Per cell extents (nm) and profile at the current variant and orient ([`St::set_geom`]).
     w: Vec<i32>,
     h: Vec<i32>,
     prof: Vec<Option<&'a Profile>>,
@@ -137,7 +156,9 @@ struct St<'a> {
     halo: Vec<[i32; 4]>,
     l: Layout,
     nets: Nets,
+    /// Per cell, the nets it pins (for [`Nets::reshape_cell`]).
     cell_nets: Vec<Vec<u32>>,
+    /// Decode cache and its last output.
     scratch: Scratch,
     out: Out,
     /// Undo: the touched node's code, changed cells' `(cell, variant, orient)`, a flipped branch.
@@ -154,11 +175,13 @@ struct St<'a> {
     eval: Eval,
     /// Nodes with ≥ 2 kids and the running sum of their kid counts.
     pick: Vec<(usize, usize)>,
+    /// Disjunctive branch ids M6 flips.
     branches: Vec<usize>,
     stats: PlaceStats,
 }
 
 impl<'a> St<'a> {
+    /// Cell `c`'s macro at variant `v` (the default macro when `v` has no alternative).
     fn macro_of(&self, c: usize, v: u16) -> &'a Macro {
         let inp = self.inp;
         inp.variants.get(c).and_then(|s| s.alternatives.get(usize::from(v))).unwrap_or(&inp.macros[c])
@@ -236,6 +259,7 @@ impl<'a> St<'a> {
         self.eval.update(&self.moved, self.u_branch.is_some(), inp.reqs, &self.nets, &self.l, self.prices);
     }
 
+    /// Re-score everything from scratch and commit.
     fn rescore_all(&mut self) {
         let inp = self.inp;
         self.eval.full(inp.reqs, &self.nets, &self.l, self.prices);
@@ -245,11 +269,13 @@ impl<'a> St<'a> {
         self.eval.energy(&self.l)
     }
 
+    /// The gate key now; Θ only when `quench`.
     fn key(&self, quench: bool) -> Key {
         let phi = self.eval.phi();
         (phi.0, phi.1, if quench { self.eval.theta() } else { 0.0 })
     }
 
+    /// Record `node`'s code for [`St::undo`] before a code move.
     fn save_code(&mut self, node: usize) {
         self.u_node = Some(node);
         self.u_alpha.clone_from(&self.tree.nodes[node].alpha);
@@ -257,7 +283,10 @@ impl<'a> St<'a> {
     }
 
     /// Apply one random move (plan-04 PLC-09 M1–M6) and record its undo.
-    /// `false`: nothing applicable was drawn (state untouched).
+    /// `false`: nothing applicable was drawn (state untouched). Draw
+    /// fractions: M1 0.30, M2 0.30, M3 0.15 on a node picked ∝ kid count;
+    /// M4 turn 0.08, M5 reshape 0.07, M6 branch flip 0.02; anything not
+    /// applicable falls back to M1 on the root.
     fn propose(&mut self, rng: &mut SplitMix64) -> bool {
         self.u_node = None;
         self.u_cells.clear();
@@ -321,7 +350,10 @@ impl<'a> St<'a> {
         }
     }
 
-    /// M5: the shape set of `c` to one uniformly drawn other variant; pins follow.
+    /// M5: the shape set of `c` to one uniformly drawn other variant; pins
+    /// follow. `false` (state untouched) when `c` has < 2 variants, or a set
+    /// member is fixed or has a different variant count. Requires
+    /// `inp.variants.len() == n`.
     fn reshape(&mut self, c: usize, rng: &mut SplitMix64) -> bool {
         let inp = self.inp;
         let set = inp.locks.members(c, true);
@@ -402,7 +434,8 @@ impl<'a> St<'a> {
     }
 }
 
-/// Snapshot of the best state seen, by `(Φ, Θ, E)`.
+/// Snapshot of the best state seen, by `(Φ, Θ, E)`: the discrete variables
+/// only; geometry is re-derived by decoding.
 struct Best {
     key: (Key, f64),
     tree: Tree,
@@ -521,7 +554,8 @@ fn init<'a>(inp: &'a PlaceInput<'a>, start: &Start, prices: &'a gp::Prices) -> (
 /// alpha·T` after `moves_per_kid·m` moves; stop at `T < 1e-3·T0`, after 5
 /// temperatures that improve the best E by ≤ 0.1 %, or at `max_temps`.
 /// `stats.temps` counts the temperatures before the quench. Prices are bound
-/// once and read only. A cell on two symmetry axes is a hard report row.
+/// once and read only. A cell on two symmetry axes is a hard report row, as
+/// is a start no seed can decode (the layout is then the undecoded start).
 pub fn place_sp(inp: &PlaceInput, start: Start, schedule: Schedule, prices: &mut gp::Prices, seed: u64) -> (Layout, Tree, Report, PlaceStats) {
     let reqs = inp.reqs;
     let n = inp.macros.len();
