@@ -6,10 +6,11 @@
 use pnr_core::{DeviceId, Macro, NetId, Netlist, Pin, Rect, SubcktInst};
 use verify::Pdk;
 
-use crate::{metadata, Bias, Config, FlowError, Hierarchy, Macros, RunStats};
+use crate::{metadata, Bias, Config, FlowError, Hierarchy, Macros};
 
 /// One sub-circuit definition solved once (FLOW-11).
 pub(crate) struct Block {
+    /// The definition's name, as spelled at its first instance.
     pub subckt: String,
     /// Child geometry (cells, rings, routes; no fill) translated so its bbox
     /// corner is the origin; one pin `p{k}` per routed formal port k; `units`,
@@ -18,19 +19,21 @@ pub(crate) struct Block {
     /// The child's LVS reference cards (`signoff_inputs(&child, pdk).2`):
     /// child net names, which are the first instance's parent names.
     pub ref_cards: Vec<verify::RefDeviceIn>,
-    /// First instance's path and actual port names: the name map's source side.
+    /// First instance's path: the name map's source side ([`rename`]).
     pub i0_path: String,
+    /// First instance's actual port net names, by formal port index.
     pub i0_ports: Vec<String>,
+    /// The child solve's report, surfaced as [`crate::Solution::blocks`].
     pub metadata: metadata::MetadataReport,
-    #[allow(dead_code)] // kept for the report; `RunStats::block_solves` counts blocks
-    pub stats: RunStats,
 }
 
 /// The LVS side of placed blocks: cards renamed per instance, and the
 /// schematic devices they replace.
 #[derive(Clone, Default)]
 pub(crate) struct BlockRef {
+    /// Every placed instance's child cards, nets renamed into the parent.
     pub cards: Vec<verify::RefDeviceIn>,
+    /// The parent's schematic devices those cards stand for.
     pub members: Vec<DeviceId>,
 }
 
@@ -38,10 +41,14 @@ pub(crate) struct BlockRef {
 /// bound to its actual nets.
 #[derive(Default)]
 pub(crate) struct Placed {
+    /// Per outermost instance: the parent devices it replaces, and its cell
+    /// (a block's [`Block::mac`] with pins bound to the instance's nets).
     pub cells: Vec<(Vec<DeviceId>, Macro)>,
+    /// The LVS cards of all of `cells`.
     pub refs: BlockRef,
 }
 
+/// Every device under instance `i`, nested instances included.
 fn member_ids(nl: &Netlist, i: u32) -> Vec<DeviceId> {
     annotator::hier::devices(nl, i).into_iter().map(|(d, _)| d).collect()
 }
@@ -127,6 +134,10 @@ pub(crate) fn local(nl: &Netlist, i: u32) -> (Netlist, Vec<DeviceId>, Vec<NetId>
 /// Outermost instances (no ancestor instance also a block) of every
 /// definition in `blocks`: one cell each, pin `p{k}` on actual port k, the
 /// child's cards renamed to this instance.
+///
+/// # Panics
+/// A block pin not named `p{k}` with `k` a port index of the instance (as
+/// [`solve_blocks`] names them).
 pub(crate) fn instantiate(nl: &Netlist, blocks: &[Block]) -> Placed {
     let block = |j: u32| blocks.iter().find(|b| b.subckt == nl.insts[j as usize].subckt);
     let mut out = Placed::default();
@@ -172,6 +183,7 @@ fn rename(name: &str, b: &Block, j_path: &str, j_ports: &[String]) -> String {
 impl Bias {
     /// The bias of a child netlist from [`local`]: per-device tables by
     /// `devs`, per-net by `nets`; no summary or op point (the parent's).
+    /// A table that is empty (not computed) stays empty.
     fn restrict(&self, devs: &[DeviceId], nets: &[NetId]) -> Bias {
         fn by<T: Clone>(v: &[T], ids: impl Iterator<Item = usize>) -> Vec<T> {
             if v.is_empty() {
@@ -220,8 +232,23 @@ fn child_config(cfg: &Config) -> Config {
     }
 }
 
-/// Solve every [`eligible`] definition once, children first, each from its
+/// Translates `mac` so the bbox of its shapes has its corner at the origin,
+/// and sets `bbox` to it; pins and keep-outs move with the shapes.
+fn to_origin(mac: &mut Macro) {
+    let (x0, y0) = mac.shapes.iter().fold((i32::MAX, i32::MAX), |a, s| (a.0.min(s.rect.x), a.1.min(s.rect.y)));
+    let (x1, y1) = mac.shapes.iter().fold((i32::MIN, i32::MIN), |a, s| (a.0.max(s.rect.x + s.rect.w), a.1.max(s.rect.y + s.rect.h)));
+    let shift = |r: &mut Rect| (r.x, r.y) = (r.x - x0, r.y - y0);
+    mac.shapes.iter_mut().for_each(|s| shift(&mut s.rect));
+    mac.pins.iter_mut().for_each(|p| shift(&mut p.at));
+    mac.keepouts.iter_mut().for_each(|k| shift(&mut k.rect));
+    mac.bbox = Rect { x: 0, y: 0, w: (x1 - x0).max(0), h: (y1 - y0).max(0) };
+}
+
+/// Solves every [`eligible`] definition once, children first, each from its
 /// first instance with its nested blocks already placed.
+///
+/// # Errors
+/// The first child solve that fails.
 pub(crate) fn solve_blocks(nl: &Netlist, pdk: &Pdk, cfg: &Config, bias: &Bias, min_devices: usize) -> Result<Vec<Block>, FlowError> {
     let cc = child_config(cfg);
     let mut blocks: Vec<Block> = Vec::new();
@@ -247,13 +274,7 @@ pub(crate) fn solve_blocks(nl: &Netlist, pdk: &Pdk, cfg: &Config, bias: &Bias, m
                 mac.pins.push(Pin { name: format!("p{k}"), net: port, at, layer });
             }
         }
-        let (x0, y0) = mac.shapes.iter().fold((i32::MAX, i32::MAX), |a, s| (a.0.min(s.rect.x), a.1.min(s.rect.y)));
-        let (x1, y1) = mac.shapes.iter().fold((i32::MIN, i32::MIN), |a, s| (a.0.max(s.rect.x + s.rect.w), a.1.max(s.rect.y + s.rect.h)));
-        let shift = |r: &mut Rect| (r.x, r.y) = (r.x - x0, r.y - y0);
-        mac.shapes.iter_mut().for_each(|s| shift(&mut s.rect));
-        mac.pins.iter_mut().for_each(|p| shift(&mut p.at));
-        mac.keepouts.iter_mut().for_each(|k| shift(&mut k.rect));
-        mac.bbox = Rect { x: 0, y: 0, w: (x1 - x0).max(0), h: (y1 - y0).max(0) };
+        to_origin(&mut mac);
         let x = &nl.insts[i0 as usize];
         blocks.push(Block {
             subckt,
@@ -262,7 +283,6 @@ pub(crate) fn solve_blocks(nl: &Netlist, pdk: &Pdk, cfg: &Config, bias: &Bias, m
             i0_path: x.path.clone(),
             i0_ports: x.ports.iter().map(|n| nl.nets[n.0 as usize].name.clone()).collect(),
             metadata: child.metadata,
-            stats: child.stats,
         });
     }
     Ok(blocks)
@@ -299,7 +319,6 @@ mod tests {
             i0_path: "X1".into(),
             i0_ports: vec!["a".into(), "b".into()],
             metadata: Default::default(),
-            stats: RunStats::default(),
         };
         let j = ["c".to_string(), "d".to_string()];
         assert_eq!(rename("a", &b, "X2", &j), "c");

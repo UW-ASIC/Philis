@@ -185,11 +185,16 @@ pub fn spice_report(text: &str, opts: &ParseOptions) -> Result<(Netlist, ParseRe
 /// Parameter name (lower case) → value, base SI.
 type Scope = HashMap<String, f64>;
 
+/// One `.subckt … .ends` definition, as read (nothing evaluated yet).
 struct Subckt {
+    /// Name as spelled; looked up case-insensitively.
     name: String,
+    /// Formal ports, as spelled, in order.
     ports: Vec<String>,
-    /// `params:` defaults and in-body `.param`s, unevaluated, in order.
+    /// `params:` defaults and in-body `.param`s, unevaluated, in order; keys
+    /// lower case.
     defaults: Vec<(String, String)>,
+    /// Element cards (tokenised statements not starting with `.`), in order.
     cards: Vec<Vec<String>>,
 }
 
@@ -205,13 +210,19 @@ struct Frame {
     m: i64,
 }
 
+/// The flattening state: the definitions read, and the [`Netlist`] it
+/// writes (its only owner until [`spice_report`] returns it).
 struct Flat<'a> {
     opts: &'a ParseOptions,
     subckts: &'a [Subckt],
+    /// Lower-case `.subckt` name → index into `subckts`.
     by_name: HashMap<String, usize>,
+    /// Lower-case `.global` nets (and `0`): never prefixed by an instance path.
     globals: HashSet<String>,
+    /// File-level `.param`s, the base of every instance's scope.
     file_params: Scope,
     nl: Netlist,
+    /// Lower-case net name → its id in `nl.nets`.
     net_index: HashMap<String, NetId>,
 }
 
@@ -242,6 +253,10 @@ impl Flat<'_> {
         self.net(format!("{}/{n}", f.path))
     }
 
+    /// Flattens `cards` into `self.nl` inside frame `f`, by card letter:
+    /// sources to [`Netlist::sources`], `X` to a sub-circuit instance or a
+    /// model device, `M Q R C L D` to devices. `stack` holds the definitions
+    /// being expanded (cycle detection).
     fn expand(&mut self, cards: &[Vec<String>], f: &Frame, stack: &mut Vec<usize>) -> Result<(), String> {
         for card in cards {
             let name = if f.path.is_empty() { card[0].clone() } else { format!("{}/{}", f.path, card[0]) };
@@ -313,6 +328,14 @@ impl Flat<'_> {
         self.opts.models.iter().find(|(n, _)| hit(&n.to_ascii_lowercase())).map(|&(_, k)| k)
     }
 
+    /// Records instance `name` of `subckts[si]` and expands its body in a
+    /// child frame: ports bound to `nodes`, scope = overrides `kv` (evaluated
+    /// in the caller's scope) → the definition's defaults → file `.param`s,
+    /// `m` multiplied in.
+    ///
+    /// # Errors
+    /// Recursion into a definition already on `stack`, a node/port count
+    /// mismatch, more than `u32::MAX` instances, or any error of the body.
     fn instantiate(&mut self, f: &Frame, name: String, si: usize, nodes: &[&str], kv: &[(String, &str)], stack: &mut Vec<usize>) -> Result<(), String> {
         let subckts = self.subckts;
         let sc = &subckts[si];
@@ -354,6 +377,14 @@ impl Flat<'_> {
         Ok(())
     }
 
+    /// Pushes one device of `kind`: terminals interned in [`terminal_spec`]
+    /// order (MOS reordered to G,D,S,B), `w`/`l` in nm and counts rounded,
+    /// the frame's `m` folded into `m`, `val` (the letter card's scaled
+    /// value) appended.
+    ///
+    /// # Errors
+    /// Fewer nodes than the kind needs, an unresolved parameter, or a MOS
+    /// `w`/`l` ≤ 0.
     #[allow(clippy::too_many_arguments)]
     fn device(&mut self, f: &Frame, name: String, kind: DeviceKind, model: &str, nodes: &[&str], kv: &[(String, &str)], val: Option<(&str, i64)>) -> Result<(), String> {
         let (term_names, min_nodes) = terminal_spec(kind);
@@ -387,13 +418,12 @@ impl Flat<'_> {
                 None => params.push(("m".into(), f.m)),
             }
         }
-        let p = |params: &[(String, i64)], k: &str| params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
         if mos {
-            if let Some(bad) = ["w", "l"].into_iter().find(|&k| p(&params, k).is_some_and(|v| v <= 0)) {
+            if let Some(bad) = ["w", "l"].into_iter().find(|&k| find_param(&params, k).is_some_and(|v| v <= 0)) {
                 return Err(format!("device {name}: {bad} must be > 0"));
             }
             if self.opts.size == SizeConvention::PerFinger {
-                let nf = p(&params, "nf").map_or(1, |v| v.max(1));
+                let nf = find_param(&params, "nf").map_or(1, |v| v.max(1));
                 if let Some((_, w)) = params.iter_mut().find(|(k, _)| k == "w") {
                     *w *= nf;
                 }
@@ -405,6 +435,13 @@ impl Flat<'_> {
         Ok(())
     }
 
+    /// Pushes one `V I E F G H B K` card to [`Netlist::sources`]: its
+    /// interned nodes, a DC value for `V`/`I` (after `dc`, else a leading
+    /// number), and whether it names a transient waveform.
+    ///
+    /// # Errors
+    /// Fewer node tokens than the card's letter needs, or an unresolved
+    /// value after `dc`.
     fn source(&mut self, f: &Frame, name: String, letter: char, pos: &[&str], kv: &[(String, &str)]) -> Result<(), String> {
         // `K` couples inductors by name; `E`/`G` sense a second node pair,
         // unless behavioural (`value=`/`vol=`/`cur=`) or `poly(n)`, whose
@@ -429,6 +466,11 @@ impl Flat<'_> {
         self.nl.sources.push(SourceCard { name, kind: letter.to_ascii_uppercase(), nodes, dc, waveform });
         Ok(())
     }
+}
+
+/// The value of parameter `k` in a device's `params`, if present.
+fn find_param(params: &[(String, i64)], k: &str) -> Option<i64> {
+    params.iter().find(|(n, _)| n == k).map(|&(_, v)| v)
 }
 
 /// Logical statements: `*` comment lines dropped, inline `;` and ` $ `
@@ -580,12 +622,14 @@ struct Expr<'a> {
 }
 
 impl Expr<'_> {
+    /// Skips ASCII whitespace.
     fn ws(&mut self) {
         while self.s.get(self.i).is_some_and(u8::is_ascii_whitespace) {
             self.i += 1;
         }
     }
 
+    /// Consumes `tok` after whitespace; `true` when it was there.
     fn eat(&mut self, tok: &[u8]) -> bool {
         self.ws();
         let hit = self.s[self.i..].starts_with(tok);

@@ -27,6 +27,7 @@ pub struct Elaborated {
     pub layout: Layout,
     /// Per-instance macros, already at absolute coordinates.
     pub macros: Vec<Macro>,
+    /// The winning epoch's routed wires, by `NetId`.
     pub routes: Routes,
     /// Net names, indexed by `NetId`.
     pub nets: Vec<String>,
@@ -87,15 +88,8 @@ impl Elaborated {
     #[must_use]
     pub fn signoff(&self, pdk: &Pdk) -> Option<Report> {
         let schematic = self.schematic.as_ref()?;
-        Some(crate::signoff_shapes(&verify::Intent::default(),
-            &self.geometry(),
-            &self.macros,
-            &self.nets,
-            schematic,
-            None,
-            &Default::default(),
-            pdk,
-        ).report)
+        let geometry = self.geometry();
+        Some(crate::signoff_shapes(&verify::Intent::default(), &geometry, &self.macros, &self.nets, schematic, None, &Default::default(), pdk).report)
     }
 
     /// The net labels [`Elaborated::signoff`] puts on the geometry, so an
@@ -133,7 +127,12 @@ pub fn elaborate<C: Composition>(
     Ok(route_built(build_composition(comp, pdk)?, pdk, cfg))
 }
 
-/// Route an already-built composition (shared with `emit::elaborate_ir`).
+/// Routes an already-built composition (shared with `emit::elaborate_ir`):
+/// identity placement, `cfg.epochs` (at least one) negotiation epochs, the
+/// lexicographically best [`Report`] kept.
+///
+/// # Panics
+/// When the deck has no usable routing stack ([`routing_stack`] errs).
 pub(crate) fn route_built(
     built: macro_master::BuiltComp,
     pdk: &Pdk,
@@ -205,11 +204,20 @@ pub(crate) type Cut = (LayerId, i32, i32, i32);
 /// The routed stack: metals bottom-up (ids beside their specs, since `dr::route`
 /// and every caller take `&[LayerId]`), the cut joining each adjacent pair, the
 /// split-off pin-access conductor and its cut, and the lattice ([`layer_specs`]).
+///
+/// Invariant: `cuts.len() == layers.len() - 1` and `specs.len() == layers.len()`;
+/// `layers` is never empty.
 pub(crate) struct RoutingStack {
+    /// Routed metals, bottom-up.
     pub layers: Vec<LayerId>,
+    /// `cuts[i]` joins `layers[i]` and `layers[i + 1]`.
     pub cuts: Vec<Cut>,
+    /// A resistive bottom conductor (li) and its cut up to `layers[0]`, when
+    /// split off; cells land on it, the router never runs along it.
     pub pin_access: Option<(LayerId, Cut)>,
+    /// Base lattice pitch, nm.
     pub p0: i32,
+    /// One lattice spec per `layers` entry.
     pub specs: Vec<gr::LayerSpec>,
 }
 
@@ -293,23 +301,22 @@ pub fn stack(pdk: &Pdk) -> analog::routing::Stack {
         layers: order
             .iter()
             .zip(&rules)
-            .map(|(&l, rule)| analog::routing::stack::Layer {
-                id: l.0,
-                area_af_um2: pdk.pex_f32(l, "area_cap_af_um2").unwrap_or(0.0),
-                fringe_af_um: pdk.pex_f32(l, "fringe_cap_af_um").unwrap_or(0.0),
-                lateral: pdk.lateral_af_per_um(l, 1).unwrap_or(0.0),
-                antenna_ratio: rule.map_or(0.0, |r| r.0),
-                antenna_sidewall_nm: rule.map_or(0.0, |r| r.1),
-                sheet_ohm: pdk.pex_f32(l, "sheet_res_ohm_sq").unwrap_or(0.0),
-                cut: pdk.routing_cuts.contains(&l),
-                thickness_nm: pdk.pex_f32(l, "thickness_nm").unwrap_or(0.0),
-                // Metals only: a cut is no lateral conductor.
-                latent_merge_nm: if pdk.routing_cuts.contains(&l) {
-                    0
-                } else {
-                    pdk.cell_f32("latent_merge_nm").map_or_else(|| pdk.min_spacing(l.0).unwrap_or(0), |v| v as i32)
-                },
-                cross_af_um2: pdk.routing_metals.iter().position(|&m| m == l).and_then(|i| pdk.overlap_af_um2(l, *pdk.routing_metals.get(i + 1)?)).unwrap_or(0.0),
+            .map(|(&l, rule)| {
+                let cut = pdk.routing_cuts.contains(&l);
+                analog::routing::stack::Layer {
+                    id: l.0,
+                    area_af_um2: pdk.pex_f32(l, "area_cap_af_um2").unwrap_or(0.0),
+                    fringe_af_um: pdk.pex_f32(l, "fringe_cap_af_um").unwrap_or(0.0),
+                    lateral: pdk.lateral_af_per_um(l, 1).unwrap_or(0.0),
+                    antenna_ratio: rule.map_or(0.0, |r| r.0),
+                    antenna_sidewall_nm: rule.map_or(0.0, |r| r.1),
+                    sheet_ohm: pdk.pex_f32(l, "sheet_res_ohm_sq").unwrap_or(0.0),
+                    cut,
+                    thickness_nm: pdk.pex_f32(l, "thickness_nm").unwrap_or(0.0),
+                    // Metals only: a cut is no lateral conductor.
+                    latent_merge_nm: if cut { 0 } else { pdk.cell_f32("latent_merge_nm").map_or_else(|| pdk.min_spacing(l.0).unwrap_or(0), |v| v as i32) },
+                    cross_af_um2: pdk.routing_metals.iter().position(|&m| m == l).and_then(|i| pdk.overlap_af_um2(l, *pdk.routing_metals.get(i + 1)?)).unwrap_or(0.0),
+                }
             })
             .collect(),
         antenna_cumulative: rules.iter().flatten().any(|r| r.2),
@@ -351,7 +358,7 @@ pub(crate) fn match_class(units: &[analog::cell::Unitization], members: &[pnr_co
 /// keep [`PLATE_AGGRESSOR_NM`] off it on every layer.
 pub(crate) fn blockages(placed: &[Macro], pdk: &Pdk, class_of: impl Fn(usize) -> Option<pnr_core::MatchClass>, layers: &[LayerId]) -> Vec<dr::Blockage> {
     use pnr_core::{KeepWhy, MatchClass, Process, Rect};
-    let all: u16 = if layers.len() >= 16 { u16::MAX } else { (1u16 << layers.len()) - 1 };
+    let all = low_bits(layers.len());
     let s = layers.first().and_then(|l| pdk.route_spacing(l.0)).unwrap_or(0);
     let (poly, diff) = (Process::layer(pdk, "poly"), Process::layer(pdk, "diff"));
     let body_sheet = Process::layer(pdk, "rpoly").and_then(|l| pdk.pex_f32(l, "sheet_res_ohm_sq"));
@@ -390,7 +397,7 @@ pub(crate) fn blockages(placed: &[Macro], pdk: &Pdk, class_of: impl Fn(usize) ->
                 KeepWhy::CapPlate { .. } => {
                     let over = |x: &&Shape| x.rect.x < k.rect.x + k.rect.w && k.rect.x < x.rect.x + x.rect.w && x.rect.y < k.rect.y + k.rect.h && k.rect.y < x.rect.y + x.rect.h;
                     let top = m.shapes.iter().filter(over).filter_map(|x| layers.iter().position(|&l| l == x.layer)).max();
-                    let below: u16 = top.map_or(all, |t| (1u16 << t) - 1);
+                    let below = top.map_or(all, low_bits);
                     if strong && below != 0 {
                         out.push(b(k.rect, below, true, false));
                         if all & !below != 0 {
@@ -405,6 +412,12 @@ pub(crate) fn blockages(placed: &[Macro], pdk: &Pdk, class_of: impl Fn(usize) ->
         }
     }
     out
+}
+
+/// A [`dr::Blockage::layers`] mask of the lowest `n` lattice layers; every
+/// layer when `n` ≥ 16.
+fn low_bits(n: usize) -> u16 {
+    u32::try_from(n).ok().and_then(|n| 1u16.checked_shl(n)).map_or(u16::MAX, |b| b - 1)
 }
 
 /// Design intent for signoff's EM/IR rules: every Supply/Ground-class net at
@@ -490,14 +503,14 @@ pub(crate) fn antenna_diodes(
             p.net = if p.name.ends_with('N') { net } else { ground };
         }
         obstacles.push(m.bbox);
-        let dim = |k: &str, d: i32| (k.to_string(), i64::from(pnr_core::Process::rule(pdk, k, d)));
+        let rule = |k: &str| i64::from(pnr_core::Process::rule(pdk, k, 0));
         let device = pnr_core::Device {
             name: format!("XDANT{}", net.0),
             kind: pnr_core::DeviceKind::Diode,
             // The deck's first diode row: the model `reference_spice` gives LVS, and one ngspice can simulate.
             model: crate::model_table(pdk).into_iter().find(|(_, k)| *k == pnr_core::DeviceKind::Diode).map(|(m, _)| m).unwrap_or_default(),
             terminals: vec![("P".into(), ground), ("N".into(), net)],
-            params: vec![(dim("diode_w", 0).0.replace("diode_", ""), dim("diode_w", 0).1), (dim("diode_l", 0).0.replace("diode_", ""), dim("diode_l", 0).1)],
+            params: vec![("w".into(), rule("diode_w")), ("l".into(), rule("diode_l"))],
         };
         out.push((device, m));
     }
@@ -576,19 +589,9 @@ pub(crate) fn detailed_router(pdk: &Pdk, stack: &RoutingStack) -> dr::DetailedRo
     // Each cut's required enclosure by the metal below and above it.
     let stack_below: Vec<LayerId> = pin_access.map(|(l, _)| l).into_iter().chain(layers.iter().copied()).collect();
     let stack_above = &layers[usize::from(pin_access.is_none()).min(layers.len())..];
-    let all_cuts: Vec<Cut> = pin_access.map(|(_, c)| c).into_iter().chain(cuts.iter().copied()).collect();
-    cfg.cut_enclosure = all_cuts
-        .iter()
-        .zip(&stack_below)
-        .zip(stack_above)
-        .map(|((&(c, ..), &lo), &hi)| (c, pdk.cut_enclosure(lo, c), pdk.cut_enclosure(hi, c)))
-        .collect();
-    cfg.cut_enclosure_pair = all_cuts
-        .iter()
-        .zip(&stack_below)
-        .zip(stack_above)
-        .map(|((&(c, ..), &lo), &hi)| (c, pdk.cut_enclosure_pair(lo, c), pdk.cut_enclosure_pair(hi, c)))
-        .collect();
+    let joins: Vec<(LayerId, LayerId, LayerId)> = pin_access.map(|(_, c)| c).into_iter().chain(cuts.iter().copied()).zip(&stack_below).zip(stack_above).map(|(((c, ..), &lo), &hi)| (c, lo, hi)).collect();
+    cfg.cut_enclosure = joins.iter().map(|&(c, lo, hi)| (c, pdk.cut_enclosure(lo, c), pdk.cut_enclosure(hi, c))).collect();
+    cfg.cut_enclosure_pair = joins.iter().map(|&(c, lo, hi)| (c, pdk.cut_enclosure_pair(lo, c), pdk.cut_enclosure_pair(hi, c))).collect();
     cfg.array_spacing = cuts
         .iter()
         .filter_map(|&(c, ..)| pdk.via_array_spacing(c.0).map(|(n, s)| (c, n, s)))
