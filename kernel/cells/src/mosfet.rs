@@ -1461,24 +1461,38 @@ mod tests {
     }
 
     /// CELL-12 (Hastings §13.2.2): a MOD pair's gate bars sit ≥ 1 µm off the
-    /// diffusion.
+    /// diffusion. Also on a deck with no extra gate overhang, where only the
+    /// `PolyBarFar` floor (not `poly_ext + gate_ext_extra_nm`) holds the gate
+    /// bars off; there the dummy skirt sits at `poly_ext` (rule 21 only), so
+    /// only bars holding a gate pad cut (inside the channel span) are checked.
     #[test]
     fn moderate_bar_sits_a_micron_off() {
-        let Some(pdk) = crate::testkit::pdk() else { return };
-        let (diff, poly) = (pdk.layer("diff").unwrap(), pdk.layer("poly").unwrap());
-        let (_, ms) = class_macros(DeviceKind::Nmos, MatchClass::Moderate, &pdk);
-        let mut bars = 0;
-        for (i, (_, m)) in ms.iter().enumerate() {
-            let diffs: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == diff).map(|s| s.rect).collect();
-            for p in m.shapes.iter().filter(|s| s.layer == poly && s.rect.w > 150).map(|s| s.rect) {
-                for d in diffs.iter().filter(|d| d.x < p.x + p.w && p.x < d.x + d.w) {
-                    let gap = (d.y - (p.y + p.h)).max(p.y - (d.y + d.h));
-                    assert!(gap >= 1000, "#{i}: {p:?} {gap} nm from {d:?}");
+        let Some(base) = crate::testkit::pdk() else { return };
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let json = std::fs::read_to_string(root.join("pdks/sky130.json")).unwrap();
+        let key = "\"gate_ext_extra_nm\": [0, 1000, 1000]";
+        assert!(json.contains(key), "sky130.json spells {key}");
+        let flat = verify::Pdk::from_json(&json.replace(key, "\"gate_ext_extra_nm\": [0, 0, 0]")).unwrap();
+        assert_eq!(mos_env(MatchClass::Moderate, &flat).gate_ext_extra_nm, 0);
+        for (pdk, every_bar) in [(base, true), (flat, false)] {
+            let (diff, poly, licon) = (pdk.layer("diff").unwrap(), pdk.layer("poly").unwrap(), pdk.layer("licon").unwrap());
+            let (_, ms) = class_macros(DeviceKind::Nmos, MatchClass::Moderate, &pdk);
+            let mut bars = 0;
+            for (i, (_, m)) in ms.iter().enumerate() {
+                let diffs: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == diff).map(|s| s.rect).collect();
+                let (ch0, ch1) = (m.units.iter().map(|u| u.x).min().unwrap() - 75, m.units.iter().map(|u| u.x).max().unwrap() + 75);
+                let pad_cuts: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == licon && (ch0..ch1).contains(&(s.rect.x + s.rect.w / 2))).map(|s| s.rect).collect();
+                let holds_pad = |p: &Rect| pad_cuts.iter().any(|c| p.x <= c.x && c.x + c.w <= p.x + p.w && p.y <= c.y && c.y + c.h <= p.y + p.h);
+                for p in m.shapes.iter().filter(|s| s.layer == poly && s.rect.w > 150).map(|s| s.rect).filter(|p| every_bar || holds_pad(p)) {
+                    for d in diffs.iter().filter(|d| d.x < p.x + p.w && p.x < d.x + d.w) {
+                        let gap = (d.y - (p.y + p.h)).max(p.y - (d.y + d.h));
+                        assert!(gap >= 1000, "#{i}: {p:?} {gap} nm from {d:?}");
+                    }
+                    bars += 1;
                 }
-                bars += 1;
             }
+            assert!(bars > 0);
         }
-        assert!(bars > 0);
     }
 
     /// CELL-10 sweep members: 1:2, 1:3, 1:2 at four fingers a unit.
