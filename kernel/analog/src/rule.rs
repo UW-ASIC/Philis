@@ -202,6 +202,13 @@ pub trait RuleBatch<On>: Send + Sync {
     fn repair_kind(&self) -> RepairKind {
         RepairKind::Reroute
     }
+    /// Reads the thermal field ([`pnr_core::Layout::rise_at_point_mc`]),
+    /// which every powered cell's position sets, whatever
+    /// [`RuleBatch::touched`] lists: dp's incremental evaluation (PLC-10)
+    /// re-scores such a batch on every move. Default `false`.
+    fn reads_field(&self) -> bool {
+        false
+    }
     /// Every rule reads only the state of the ids [`RuleBatch::touched`]
     /// lists (see [`Rule::LOCAL`]). Default `false`.
     fn local(&self) -> bool {
@@ -340,6 +347,9 @@ impl<On> RuleBatch<On> for Tagged<On> {
     }
     fn local(&self) -> bool {
         self.inner.local()
+    }
+    fn reads_field(&self) -> bool {
+        self.inner.reads_field()
     }
     fn count(&self) -> usize {
         self.inner.count()

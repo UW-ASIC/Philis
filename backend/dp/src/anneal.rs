@@ -790,11 +790,31 @@ mod tests {
         p
     }
 
+    /// Cell 0's temperature rise, which every powered cell's position sets
+    /// (as `MatchedSet`'s `mu_thermal`); it touches only cell 0.
+    struct Field;
+    impl analog::RuleBatch<Layout> for Field {
+        fn cost(&self, l: &Layout) -> f32 {
+            l.rise_at_point_mc(l.x[0], l.y[0]) / 1_000.0
+        }
+        fn violations(&self, _: &Layout) -> u32 {
+            0
+        }
+        fn touched(&self, out: &mut Vec<u32>) {
+            out.push(0);
+        }
+        fn reads_field(&self) -> bool {
+            true
+        }
+    }
+
     #[test]
     fn incremental_matches_full_evaluation() {
-        let (macros, reqs) = bench14();
+        let (macros, mut reqs) = bench14();
+        reqs.cost.push(Box::new(Field));
         let lk = locks::locks(&reqs, 14, &[]);
-        let inp = input(&macros, &reqs, &lk, 270);
+        let power: Vec<i32> = (0..14).map(|c| if c % 4 == 1 { 20_000 } else { 0 }).collect();
+        let inp = PlaceInput { power_uw: &power, ..input(&macros, &reqs, &lk, 270) };
         let coarse = row(&macros);
         let prices = priced(&reqs, &coarse);
         let (mut st, _, ok) = init(&inp, &Start::Cold(&coarse), &prices);

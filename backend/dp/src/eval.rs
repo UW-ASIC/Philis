@@ -2,7 +2,7 @@
 //! per-batch values cached; a move recomputes only the nets of the cells it
 //! moved and the batches whose [`analog::RuleBatch::touched`] ids it moved,
 //! plus every global batch (no touched ids: `Utilization`,
-//! `LiveEnvironment`, …). Totals are re-summed in the order
+//! `LiveEnvironment`, …; or [`analog::RuleBatch::reads_field`]: `MatchedSet`). Totals are re-summed in the order
 //! [`gp::mechanics`] sums them, so a cached value is bit-identical to a full
 //! evaluation, not merely close.
 
@@ -41,8 +41,9 @@ impl Eval {
             b.touched(&mut ids);
             ids.sort_unstable();
             ids.dedup();
-            if ids.is_empty() {
+            if ids.is_empty() || b.reads_field() {
                 global.push(i as u32);
+                continue;
             }
             for &c in ids.iter().filter(|&&c| (c as usize) < n) {
                 cell_rows[c as usize].push(i as u32);
