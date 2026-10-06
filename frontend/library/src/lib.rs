@@ -425,6 +425,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         ann.classes.extend(side.classes);
         ann.net_classes.extend(side.net_classes);
         ann.offset_budgets.extend(side.offset_budgets);
+        ann.loads.extend(side.loads);
         ann.kelvins.extend(side.kelvins);
         ann.tubs.extend(side.tubs);
         ann.sidecar_diags.extend(diags);
@@ -504,7 +505,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
 }
 
 /// Each spec bound as a shared routing budget from schematic sensitivities
-/// (see [`perf::budget_rows`]): one baseline plus one run per signal net, in
+/// (see [`annotator::budget::rows`]): one baseline plus one run per signal net, in
 /// parallel, once per run. Empty without performance scoring, a simulator, or
 /// the deck's wire capacitance. Also, per declared bound (`"{metric}:min"` /
 /// `":max"`), its row or why it has none ([`metadata::MetadataReport::budget_rows`]).
@@ -527,7 +528,7 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
     let notes = |rows: &[analog::routing::PerformanceBudget], why: &str| -> Vec<String> {
         let notes: Vec<String> = bounds()
             .map(|b| match rows.iter().find(|r| r.metric == b) {
-                Some(r) if r.nets.is_empty() => format!("{b}: row with no measured nets"),
+                Some(r) if r.nets.is_empty() => format!("{b}: row with no adverse measured nets"),
                 Some(r) if r.limit > 0.0 => format!("{b}: row ({} nets)", r.nets.len()),
                 Some(_) => format!("{b}: do-not-worsen row (the schematic misses it)"),
                 None => format!("{b}: no row ({why})"),
@@ -582,11 +583,13 @@ fn performance_rows(netlist: &pnr_core::Netlist, cfg: &Config, ann: &AnnotationC
     });
     match sens {
         Ok((start, active, tables, mut sens_notes)) => {
-            let rows = perf::budget_rows(p, &start, &tables, &nets, af_per_um / 1000.0);
             // PERF-12: EXT-17's evidence and RTE-21's router weights, each
             // bound scaled by its statistical headroom (PERF-06's scale).
             let stats = robust::bound_stats(&tables, &sigma_v, &start, &p.specs, &[], &[]);
             let evidence = perf::to_evidence(p, &tables, &start, &stats, netlist);
+            // EXT-25: R/C classes and `no_layout_margin` are the annotator's,
+            // emitted from the same evidence; dropped here as duplicates.
+            let (rows, _, _) = annotator::budget::rows(&evidence, af_per_um / 1000.0, ann.process.wire_ohm_per_um, &ann.policy);
             // PERF-14: decided once per run so every epoch is keyed alike.
             let beta_key = stats.iter().all(|s| s.sigma_f.is_some());
             let h_bounds: Vec<(usize, f64, usize)> = start
@@ -3350,5 +3353,20 @@ mod environment_tests {
         let rows = |r: &[crate::metadata::BudgetStatus]| r.iter().filter(|b| b.kind == "Environment").count();
         assert_eq!(rows(&sol.metadata.placement), 1);
         assert_eq!(rows(&sol.metadata.routing), 1);
+    }
+
+    /// A sidecar `Load` reaches the annotator: ota's drain-only nets miss AA-25's external load
+    /// until the sidecar gives one each (the merge once dropped `loads`).
+    #[test]
+    fn sidecar_loads_reach_the_annotator() {
+        let spice = std::fs::read_to_string(root().join("benchmarks/fixtures/ota.spice")).expect("fixture");
+        let entry = ("ParasiticBudget", "external load of drain-only nets: sidecar Load (AA-25)");
+        let missing = |constraints: Option<&str>| {
+            let cfg = crate::Config { feedback_iters: 1, outer_iters: 1, starts: 1, constraints: constraints.map(Into::into), ..Default::default() };
+            crate::run(&spice, &pdk(), &Default::default(), &cfg).expect("flow").metadata.missing.contains(&entry)
+        };
+        assert!(missing(None), "ota without a sidecar must miss the drain-only load");
+        let loads = r#"[{"constraint":"Load","net":"vout1","ff":100},{"constraint":"Load","net":"vout2","ff":100},{"constraint":"Load","net":"vtail","ff":100}]"#;
+        assert!(!missing(Some(loads)), "sidecar loads must satisfy AA-25");
     }
 }
