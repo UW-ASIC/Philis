@@ -120,7 +120,7 @@ fn layer_fill(drawn: &[Shape], ground: &[Shape], sensitive: &[Shape], avoid: &[R
     };
     let area = |r: &Rect| f64::from(r.w) * f64::from(r.h);
     // Covered tiles approximate the drawn area without double-counting overlaps.
-    let covered = (0..nx * ny).filter(|&k| drawn.iter().filter(on).any(|s| overlaps(&tile(k % nx, k / nx), &s.rect))).count();
+    let covered = covered_tiles(drawn.iter().filter(on).map(|s| s.rect), b, t, nx, ny);
     let target = (f.min + MARGIN).min(f.max - MARGIN) * area(&b);
     let mut need = target - covered as f64 * area(&tile(0, 0));
 
@@ -168,6 +168,29 @@ fn layer_fill(drawn: &[Shape], ground: &[Shape], sensitive: &[Shape], avoid: &[R
     out
 }
 
+/// Returns how many tiles of the `nx` × `ny` grid of side `t` from `b`'s
+/// corner share interior area with any of `rects`. O(Σ tiles each rect
+/// spans), not O(tiles × rects).
+fn covered_tiles(rects: impl Iterator<Item = Rect>, b: Rect, t: i32, nx: usize, ny: usize) -> usize {
+    let mut hit = vec![false; nx * ny];
+    // Tiles `[lo, hi)` along one axis whose open span meets `(p, p + len)`.
+    let span = |p: i32, len: i32, origin: i32, n: usize| {
+        let (p0, p1) = (i64::from(p) - i64::from(origin), i64::from(p) + i64::from(len) - i64::from(origin));
+        let t = i64::from(t);
+        let lo = p0.div_euclid(t).clamp(0, n as i64) as usize;
+        let hi = (p1 + t - 1).div_euclid(t).clamp(0, n as i64) as usize;
+        lo..hi.max(lo)
+    };
+    for r in rects {
+        for j in span(r.y, r.h, b.y, ny) {
+            for i in span(r.x, r.w, b.x, nx) {
+                hit[j * nx + i] = true;
+            }
+        }
+    }
+    hit.iter().filter(|&&h| h).count()
+}
+
 /// The widest spacing `layer` asks of any shape.
 fn spacing(pdk: &Pdk, layer: LayerId) -> i32 {
     pdk.wide_spacing(layer.0).iter().map(|w| w.1).fold(pdk.min_spacing(layer.0).unwrap_or(0), i32::max)
@@ -178,15 +201,19 @@ fn spacing(pdk: &Pdk, layer: LayerId) -> i32 {
 /// ceiling (1 without one); wider windows are chip-level and left out.
 fn floors(pdk: &Pdk, b: Rect) -> Vec<Floor> {
     let rules = pdk.density_rules();
-    let mut out: Vec<Floor> = rules
-        .iter()
-        .filter(|r| !r.3 && pdk.routing_metals.contains(&r.0) && r.1 <= i64::from(b.w.min(b.h)))
-        .map(|&(layer, _, min, _)| {
-            let max = rules.iter().filter(|m| m.3 && m.0 == layer).map(|m| m.2).fold(1.0, f64::min);
-            Floor { layer, min, max }
-        })
-        .collect();
-    out.dedup_by_key(|f| f.layer);
+    let covers = |r: &&(LayerId, i64, f64, bool)| pdk.routing_metals.contains(&r.0) && r.1 <= i64::from(b.w.min(b.h));
+    let mut out: Vec<Floor> = Vec::new();
+    for &(layer, _, min, _) in rules.iter().filter(covers).filter(|r| !r.3) {
+        match out.iter_mut().find(|f| f.layer == layer) {
+            Some(f) => f.min = f.min.max(min),
+            None => {
+                // Every ceiling counts, chip-level ones too: fill must not push
+                // the block over a ceiling integration then checks.
+                let max = rules.iter().filter(|m| m.3 && m.0 == layer).map(|m| m.2).fold(1.0, f64::min);
+                out.push(Floor { layer, min, max });
+            }
+        }
+    }
     out
 }
 
@@ -272,8 +299,8 @@ mod tests {
         assert!(overlaps(&a, &Rect { x: 2, y: 2, w: 1, h: 1 }), "contained");
     }
 
-    /// Several floors on one layer fold into one: the strictest minimum and
-    /// the tightest ceiling, each only from a window the block covers.
+    /// Several floors on one layer fold into one: the strictest minimum of
+    /// the windows the block covers, and the tightest ceiling.
     #[test]
     fn floors_fold_per_layer_and_respect_the_window() {
         let Some(pdk) = deck_strict(
@@ -311,5 +338,36 @@ mod tests {
         let signal = Shape { layer: m1, rect: Rect { x: 0, y: 0, w: side, h: 1_000 } };
         let corner = Shape { layer: m1, rect: Rect { x: side - 1_000, y: side - 1_000, w: 1_000, h: 1_000 } };
         assert!(fill(&[signal, corner], &[], &[], &[], &pdk).is_none());
+    }
+
+    /// The span-marking count equals the brute-force tile × rect overlap
+    /// count, edge-aligned, zero-extent, outside and straddling rects included.
+    #[test]
+    fn covered_tiles_matches_brute_force() {
+        let b = Rect { x: -100, y: 50, w: 1_000, h: 700 };
+        let (t, nx, ny) = (100, 10, 7);
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % m) as i32
+        };
+        for _ in 0..300 {
+            let k = next(6) as usize;
+            let rects: Vec<Rect> = (0..k)
+                .map(|_| {
+                    // Snap half the corners to the tile lattice to hit edges exactly.
+                    let snap = |v: i32, on: bool| if on { v - v.rem_euclid(t) } else { v };
+                    let (px, py) = (snap(next(1_400) - 300, next(2) == 0), snap(next(1_000) - 100, next(2) == 0));
+                    Rect { x: px, y: py, w: next(400), h: next(400) }
+                })
+                .collect();
+            let tile = |i: usize, j: usize| Rect { x: b.x + i as i32 * t, y: b.y + j as i32 * t, w: t, h: t };
+            let brute = (0..nx * ny).filter(|&q| rects.iter().any(|r| overlaps(&tile(q % nx, q / nx), r))).count();
+            assert_eq!(covered_tiles(rects.iter().copied(), b, t, nx, ny), brute, "{rects:?}");
+        }
+        assert_eq!(covered_tiles(std::iter::empty(), b, t, nx, ny), 0);
+        assert_eq!(covered_tiles(std::iter::once(b), b, t, 0, 0), 0, "no tiles");
     }
 }

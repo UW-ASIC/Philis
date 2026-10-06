@@ -223,7 +223,8 @@ pub fn pareto_insert(front: &mut Vec<ParetoPoint>, p: ParetoPoint) {
     front.retain(|q| !dom(&p, q));
     front.push(p);
     if front.len() > PARETO_MAX {
-        let worst = (0..front.len()).max_by(|&i, &j| front[i].area_um2.total_cmp(&front[j].area_um2)).expect("non-empty");
+        // `max_by` keeps the last of equals; reversed, it keeps the first.
+        let worst = (0..front.len()).rev().max_by(|&i, &j| front[i].area_um2.total_cmp(&front[j].area_um2)).expect("non-empty");
         front.remove(worst);
     }
 }
@@ -310,7 +311,7 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
         let unknown = b.unknown(state) as usize;
         // ponytail: a batch may count a rule both violated and unknown
         // (a batch that counts both); saturating keeps it out of both.
-        let satisfied = (total - violations).saturating_sub(unknown);
+        let satisfied = total.saturating_sub(violations).saturating_sub(unknown);
         let criticality = b.criticality(state);
         let residual = b.residual(state);
         let usage = b.worst_usage(state);

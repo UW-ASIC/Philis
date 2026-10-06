@@ -222,6 +222,9 @@ fn lift(
     // >2 members (quads) still need a patterned quad variant.
     let mut instances = Vec::with_capacity(devices_of.len());
     for (i, members) in devices_of.iter().enumerate() {
+        if members.is_empty() {
+            return Err(EmitError::Unsupported(format!("cell {i} is empty: it draws no device")));
+        }
         if members.len() > 2 {
             return Err(EmitError::Unsupported(format!(
                 "merged matched group of {} devices: no quad variant yet",
@@ -261,81 +264,62 @@ fn lift(
     }
 
     // Placement lift: order by solved bottom-left corner, then express each
-    // instance relative to an earlier neighbour — same row ⇒ Bottom-align +
-    // ToTheRight; new row ⇒ Left-align + Above. Gaps that land on the deck's
-    // `device_gap` (within a grid step) are attributed to the rule.
+    // instance relative to an earlier neighbour. Flush modes set one axis
+    // from the reference and nudge the other by their offset (relative to
+    // the instance's own position), abut modes set their primary axis — so
+    // the flush comes first, the cross-axis nudge second, the abut last:
+    // same row ⇒ Bottom, Left(dy) when the bottoms differ, ToTheRight(gap);
+    // new row ⇒ Left, Bottom(dx) when the left edges differ, Above(gap).
+    // Gaps that land on the deck's `device_gap` (within two grid steps) are
+    // attributed to the rule; any other gap, negative included, is kept as is.
     let l_ = layout;
     let n = instances.len();
     let grid = pdk.grid();
     let device_gap = pdk.rule("device_gap", 0);
-    let corner = |i: usize| (l_.y[i] - l_.hh[i], l_.x[i] - l_.hw[i]);
+    let (left, bottom) = (|i: usize| l_.x[i] - l_.hw[i], |i: usize| l_.y[i] - l_.hh[i]);
+    let (right, top) = (|i: usize| l_.x[i] + l_.hw[i], |i: usize| l_.y[i] + l_.hh[i]);
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by_key(|&i| corner(i));
+    order.sort_by_key(|&i| (bottom(i), left(i)));
 
     let attribute = |gap: i32| -> IrGap {
         if (gap - device_gap).abs() <= 2 * grid {
             IrGap::Rule("device_gap".into(), device_gap)
         } else {
-            IrGap::Nm(gap.max(0))
+            IrGap::Nm(gap)
         }
     };
+    let align = |mode, reference, gap| IrAlign { mode, reference, gap };
 
     let mut place: Vec<IrPlace> = Vec::with_capacity(n);
     for (k, &i) in order.iter().enumerate() {
         if k == 0 {
-            place.push(IrPlace {
-                inst: i,
-                aligns: Vec::new(),
-            });
+            place.push(IrPlace { inst: i, aligns: Vec::new() });
             continue;
         }
         // Same row: a placed cell whose y-range overlaps and that sits left.
         let row_mate = order[..k]
             .iter()
             .copied()
-            .filter(|&j| {
-                (l_.y[j] - l_.hh[j]) < (l_.y[i] + l_.hh[i])
-                    && (l_.y[i] - l_.hh[i]) < (l_.y[j] + l_.hh[j])
-                    && l_.x[j] < l_.x[i]
-            })
+            .filter(|&j| bottom(j) < top(i) && bottom(i) < top(j) && l_.x[j] < l_.x[i])
             .max_by_key(|&j| l_.x[j]);
-        let aligns = if let Some(j) = row_mate {
-            let gap = (l_.x[i] - l_.hw[i]) - (l_.x[j] + l_.hw[j]);
-            vec![
-                IrAlign {
-                    mode: AlignMode::Bottom,
-                    reference: j,
-                    gap: IrGap::Nm((l_.y[i] - l_.hh[i]) - (l_.y[j] - l_.hh[j])),
-                },
-                IrAlign {
-                    mode: AlignMode::ToTheRight,
-                    reference: j,
-                    gap: attribute(gap),
-                },
-            ]
+        let mut aligns = Vec::with_capacity(3);
+        if let Some(j) = row_mate {
+            aligns.push(align(AlignMode::Bottom, j, IrGap::Nm(0)));
+            let dy = bottom(i) - bottom(j);
+            if dy != 0 {
+                aligns.push(align(AlignMode::Left, j, IrGap::Nm(dy)));
+            }
+            aligns.push(align(AlignMode::ToTheRight, j, attribute(left(i) - right(j))));
         } else {
-            // New row: the nearest earlier cell below (any x), else the first anchor.
-            let below = order[..k]
-                .iter()
-                .copied()
-                .filter(|&j| l_.y[j] < l_.y[i])
-                .max_by_key(|&j| l_.y[j])
-                .unwrap_or(order[0]);
-            let j = below;
-            let gap = (l_.y[i] - l_.hh[i]) - (l_.y[j] + l_.hh[j]);
-            vec![
-                IrAlign {
-                    mode: AlignMode::Left,
-                    reference: j,
-                    gap: IrGap::Nm((l_.x[i] - l_.hw[i]) - (l_.x[j] - l_.hw[j])),
-                },
-                IrAlign {
-                    mode: AlignMode::Above,
-                    reference: j,
-                    gap: attribute(gap),
-                },
-            ]
-        };
+            // New row: the nearest earlier cell below (any x), else the anchor.
+            let j = order[..k].iter().copied().filter(|&j| l_.y[j] < l_.y[i]).max_by_key(|&j| l_.y[j]).unwrap_or(order[0]);
+            aligns.push(align(AlignMode::Left, j, IrGap::Nm(0)));
+            let dx = left(i) - left(j);
+            if dx != 0 {
+                aligns.push(align(AlignMode::Bottom, j, IrGap::Nm(dx)));
+            }
+            aligns.push(align(AlignMode::Above, j, attribute(bottom(i) - top(j))));
+        }
         place.push(IrPlace { inst: i, aligns });
     }
 
@@ -350,6 +334,7 @@ fn lift(
     } else {
         netlist.ports.iter().map(|&p| net_name(p)).collect()
     };
+    let is_port: HashSet<&str> = ports.iter().map(String::as_str).collect();
     let mut first: std::collections::HashMap<pnr_core::NetId, String> = std::collections::HashMap::new();
     let mut edges = Vec::new();
     for (inst, members) in instances.iter().zip(devices_of) {
@@ -361,9 +346,9 @@ fn lift(
                     term = format!("{term}{}", o + 1);
                 }
                 let term = format!("{}.{}", inst.name, term);
-                let name = net_name(*net);
-                if ports.contains(&name) {
-                    edges.push((term, name));
+                let name = &netlist.nets[net.0 as usize].name;
+                if is_port.contains(name.as_str()) {
+                    edges.push((term, name.clone()));
                 } else if let Some(f) = first.get(net) {
                     edges.push((term, f.clone()));
                 } else {
@@ -525,7 +510,7 @@ pub fn to_rust(ir: &GenIr) -> String {
     let _ = writeln!(s, "    type Io = EmittedIo;");
     let _ = writeln!(
         s,
-        "    fn name(&self) -> String {{ \"{}\".into() }}\n}}\n",
+        "    fn name(&self) -> String {{ {:?}.into() }}\n}}\n",
         ir.name
     );
     let _ = writeln!(s, "impl Composition for {} {{", ir.name);
@@ -549,7 +534,7 @@ pub fn to_rust(ir: &GenIr) -> String {
         };
         let _ = writeln!(
             s,
-            "        let mut {} = c.instantiate(\"{}\", &{ctor})?;",
+            "        let mut {} = c.instantiate({:?}, &{ctor})?;",
             var(p.inst),
             inst.name
         );
@@ -558,7 +543,7 @@ pub fn to_rust(ir: &GenIr) -> String {
         }
         for a in &p.aligns {
             let gap = match &a.gap {
-                IrGap::Rule(name, d) => format!("c.process().rule(\"{name}\", {d})"),
+                IrGap::Rule(name, d) => format!("c.process().rule({name:?}, {d})"),
                 IrGap::Nm(v) => format!("{v} /* unattributed: PDK-specific residue */"),
             };
             let _ = writeln!(
@@ -578,7 +563,7 @@ pub fn to_rust(ir: &GenIr) -> String {
         let _ = writeln!(s, "        let _ = &{};", var(p.inst));
     }
     for (a, b) in &ir.edges {
-        let _ = writeln!(s, "        c.connect(\"{a}\", \"{b}\");");
+        let _ = writeln!(s, "        c.connect({a:?}, {b:?});");
     }
     let _ = writeln!(s, "        Ok(())\n    }}\n}}");
     s

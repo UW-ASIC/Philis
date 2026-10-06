@@ -69,7 +69,12 @@ pub fn emit(top: &str, shapes: &[Shape], layer_gds: &[(u16, u16)], texts: &[Text
     if !bad.is_empty() {
         return Err(format!("no GDS stream number for layer ids {bad:?} (derived or unmapped)"));
     }
-    let mut out = Vec::new();
+    // A string record's padded payload must fit the u16 length field.
+    if let Some(name) = std::iter::once(top).chain(texts.iter().map(|t| t.name.as_str())).find(|n| n.len() + n.len() % 2 > MAX_PAYLOAD) {
+        return Err(format!("name of {} bytes exceeds one GDS record ({MAX_PAYLOAD} bytes)", name.len()));
+    }
+    // 4 records of 4–6 bytes plus a 44-byte XY per boundary: 68 bytes.
+    let mut out = Vec::with_capacity(256 + 68 * shapes.len() + 64 * texts.len());
 
     rec_i16(&mut out, HEADER, &[GDS_VERSION]);
     rec_i16(&mut out, BGNLIB, &TIMESTAMPS);
@@ -168,6 +173,7 @@ fn rec_real(out: &mut Vec<u8>, rec_datatype: u16, vals: &[f64]) {
 /// On a non-finite `v`, or a magnitude outside the representable
 /// `[16^-65, 16^63)`; only the two UNITS constants are ever encoded.
 fn gds_real(v: f64) -> [u8; 8] {
+    assert!(v.is_finite(), "GDS real of a non-finite {v}");
     if v == 0.0 {
         return [0; 8];
     }
@@ -182,6 +188,7 @@ fn gds_real(v: f64) -> [u8; 8] {
         mant *= 16.0;
         exp -= 1;
     }
+    assert!((-64..64).contains(&exp), "GDS real {v:e} outside the excess-64 exponent range");
     let mut out = [0u8; 8];
     out[0] = (if sign { 0x80 } else { 0 }) | (((exp + 64) as u8) & 0x7f);
     let mut m = mant;

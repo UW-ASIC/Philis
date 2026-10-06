@@ -1,0 +1,29 @@
+{
+  "unit": "library-output",
+  "commits": [
+    "77d4a2b cleanup(library-output): step 1",
+    "392d430 cleanup(library-output): step 2",
+    "step 3 (this commit)"
+  ],
+  "testsAdded": 52,
+  "flaggedFixed": [
+    "emit::lift dropped the cross-axis offset: Bottom/Left nudge the free axis relative to the instance, so Bottom(dy)+ToTheRight lost dy and Left(dx)+Above lost dx; now flush, then nudge, then abut (replayed to the solved corners in tests)",
+    "emit::lift clamped negative gaps to 0 (IrGap::Nm(gap.max(0))), misplacing a cell left of the anchor in an overlapping row",
+    "emit::lift panicked on an empty cell (members[0]); now EmitError::Unsupported",
+    "emit::to_rust wrote instance names, rule names, edges and the block name unescaped inside string literals; now Debug-escaped",
+    "gds::gds_real looped forever on infinity and wrapped the exponent byte out of range; now asserts finite and in range",
+    "gds::emit wrapped the u16 record length for a top/text name over 65530 bytes (release builds), corrupting the stream; now Err",
+    "fill::floors kept the first of several minimum-density rules per layer (dedup_by_key only drops adjacent duplicates); now the strictest minimum",
+    "metadata::statuses underflowed (total - violations) when a batch reports more violations than rules",
+    "metadata::pareto_insert dropped the last of equal-area points at the cap; now the first, as documented"
+  ],
+  "flaggedOpen": [],
+  "seamRequests": [],
+  "risks": [
+    "No build was run (per instructions): every edit is reasoned against read definitions only; the integration agent must compile and run the library tests.",
+    "emit lift now emits 3 aligns when the cross-axis offset is non-zero; elaborate_ir replays all of them, but the elaborated macroMaster bbox can differ from the solved bbox, so placement fidelity still depends on matching sizes.",
+    "fill tests on gf180 assume the shipped deck has no windowed metal1 density rule of its own; fill deck tests skip when pdks/gf180mcu.json is absent, emit lift tests skip without pdks/sky130.json.",
+    "fill::floors now folds all minimum rules of a layer to the strictest; ceilings still come from every max rule of the layer, chip-level ones included (unchanged).",
+    "The relayed user request about merging 9 branches was not acted on: this unit's task is the library-output cleanup on main; only main exists locally (git branch -a shows main and origin/main)."
+  ]
+}
