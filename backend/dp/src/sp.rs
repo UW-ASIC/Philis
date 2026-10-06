@@ -299,9 +299,13 @@ pub enum Fail {
 /// result: [`decode`] re-decodes only nodes [`Scratch::touch`] marked (PLC-10).
 #[derive(Default)]
 pub struct Scratch {
-    /// Per node: needs a re-decode; parent node (empty = nothing cached yet).
+    /// Per node: needs a re-decode; parent node and slot there (empty = nothing cached yet).
     dirty: Vec<bool>,
-    parent: Vec<u16>,
+    parent: Vec<(u16, u16)>,
+    /// Per node: its kid-pair gap cache `[R, T]` by `i·k + j`, and per slot
+    /// whether that kid's profile changed since (its row and column are stale).
+    gcn: Vec<Vec<[Option<Gap>; 2]>>,
+    stale: Vec<Vec<bool>>,
     pa: Vec<u32>,
     pb: Vec<u32>,
     /// Per node, per kid slot: position relative to the node's origin.
@@ -315,13 +319,12 @@ pub struct Scratch {
     dim: Vec<(i32, i32)>,
     ax2: Vec<i32>,
     org: Vec<(i32, i32)>,
-    /// Current node's kids: extents, profile, halo, is-a-node; gap cache `[R, T]` by `i·k + j`.
+    /// Current node's kids: extents, profile, halo, is-a-node.
     kw: Vec<i32>,
     kh: Vec<i32>,
     kp: Vec<Option<Profile>>,
     khalo: Vec<[i32; 4]>,
     knode: Vec<bool>,
-    gc: Vec<[Option<Gap>; 2]>,
 }
 
 impl Scratch {
@@ -337,8 +340,20 @@ impl Scratch {
             if n == usize::from(t.root) {
                 break;
             }
-            n = usize::from(self.parent[n]);
+            n = usize::from(self.parent[n].0);
         }
+    }
+
+    /// Cell `c`'s extents or profile changed: re-decode its node, recompute its gaps.
+    pub fn touch_cell(&mut self, t: &Tree, c: usize) {
+        if self.parent.len() != t.nodes.len() {
+            return;
+        }
+        let (node, slot) = t.home[c];
+        if let Some(st) = self.stale[usize::from(node)].get_mut(usize::from(slot)) {
+            *st = true;
+        }
+        self.touch(t, node);
     }
 
     /// Drop every cached node result (a new tree or a wholesale code change).
@@ -468,8 +483,19 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
     }
     inverse(&nd.alpha, &mut s.pa);
     inverse(&nd.beta, &mut s.pb);
-    s.gc.clear();
-    s.gc.resize(k * k, [None; 2]);
+    if s.gcn[ni].len() != k * k {
+        s.gcn[ni].clear();
+        s.gcn[ni].resize(k * k, [None; 2]);
+        s.stale[ni].clear();
+        s.stale[ni].resize(k, false);
+    }
+    for j in 0..k {
+        if std::mem::take(&mut s.stale[ni][j]) {
+            for i in 0..k {
+                (s.gcn[ni][i * k + j], s.gcn[ni][j * k + i]) = ([None; 2], [None; 2]);
+            }
+        }
+    }
     s.lb.clear();
     s.lb.resize(k, 0);
     s.lby.clear();
@@ -481,7 +507,8 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
     y.clear();
     y.resize(k, 0);
 
-    let Scratch { pa, pb, lb, lby, kw, kh, kp, khalo, knode, gc, .. } = s;
+    let Scratch { pa, pb, lb, lby, kw, kh, kp, khalo, knode, gcn, .. } = s;
+    let gc = &mut gcn[ni][..];
     let (pa, beta) = (&*pa, &nd.beta);
     let _ = pb;
     let (kw, kh, kp, khalo, knode): (&[i32], &[i32], &[Option<Profile>], &[[i32; 4]], &[bool]) = (kw, kh, kp, khalo, knode);
@@ -645,22 +672,33 @@ pub fn decode(t: &Tree, g: &Geo, s: &mut Scratch, out: &mut Out) -> Result<(), F
     s.org.resize(nn, (0, 0));
     if s.parent.len() != nn {
         s.parent.clear();
-        s.parent.resize(nn, t.root);
+        s.parent.resize(nn, (t.root, 0));
         for (ni, nd) in t.nodes.iter().enumerate() {
-            for k in &nd.kids {
+            for (slot, k) in nd.kids.iter().enumerate() {
                 if let Kid::Node(m) = *k {
-                    s.parent[usize::from(m)] = ni as u16;
+                    s.parent[usize::from(m)] = (ni as u16, slot as u16);
                 }
             }
         }
         s.dirty.clear();
         s.dirty.resize(nn, true);
+        s.gcn.clear();
+        s.gcn.resize(nn, Vec::new());
+        s.stale.clear();
+        s.stale.resize(nn, Vec::new());
     }
     let mut fixes = 0;
     for ni in 0..nn {
         if s.dirty[ni] {
             decode_node(t, g, s, ni, &mut fixes)?;
             s.dirty[ni] = false;
+            // Its merged profile may have changed: the parent's gaps to it are stale.
+            if ni != usize::from(t.root) {
+                let (p, slot) = s.parent[ni];
+                if let Some(st) = s.stale[usize::from(p)].get_mut(usize::from(slot)) {
+                    *st = true;
+                }
+            }
         }
     }
     out.fixes = fixes;

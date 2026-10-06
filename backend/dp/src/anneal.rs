@@ -175,8 +175,7 @@ impl<'a> St<'a> {
             self.scratch.touch(&self.tree, nd as u16);
         }
         for i in 0..self.u_cells.len() {
-            let home = self.tree.home[self.u_cells[i].0].0;
-            self.scratch.touch(&self.tree, home);
+            self.scratch.touch_cell(&self.tree, self.u_cells[i].0);
         }
     }
 
@@ -818,11 +817,22 @@ mod tests {
         assert!(accepted > 100 && checked > accepted, "accepted {accepted} of {checked}");
     }
 
+    /// Profiles that differ by face and orient (an n-well on the R0 right face,
+    /// three bulk nets), so a turn changes gaps and a stale cached gap shows.
     #[test]
     fn cached_decode_equals_fresh_decode() {
+        use gp::spacing::{Profile, Profiles, SpacingTable};
         let (macros, reqs) = bench14();
         let lk = locks::locks(&reqs, 14, &[]);
-        let inp = input(&macros, &reqs, &lk, 270);
+        let mut inp = input(&macros, &reqs, &lk, 270);
+        let mut table = SpacingTable::uniform(270, 10);
+        table.rule[0][0] = 1_270; // ROLES[0] = "nwell"
+        let prof = |net: u16| {
+            let mut p = Profile { well_net: Some(pnr_core::NetId(net)), ..Profile::default() };
+            p.edge[2].put(0, 0);
+            p
+        };
+        inp.rules = gp::PlaceRules::new(10, table, Profiles { of: (0..14).map(|c| vec![Profiles::orients(&prof(c % 3))]).collect() });
         let coarse = row(&macros);
         let prices = gp::Prices::new();
         let (mut st, _, _) = init(&inp, &Start::Cold(&coarse), &prices);
@@ -830,7 +840,7 @@ mod tests {
         let mut cur = (st.key(false), st.energy());
         for _ in 0..1_000 {
             st.trial(&mut rng, &mut cur, 0.05, false);
-            let g = Geo { w: &st.w, h: &st.h, prof: &st.prof, halo: &[], table: &inp.rules.spacing, lattice: 10, axis_grid: None };
+            let g = Geo { w: &st.w, h: &st.h, prof: &st.prof, halo: &[], table: &st.inp.rules.spacing, lattice: 10, axis_grid: None };
             let mut fresh = Out::default();
             decode(&st.tree, &g, &mut Scratch::default(), &mut fresh).unwrap();
             let x: Vec<i32> = (0..14).map(|c| fresh.x0[c] + st.w[c] / 2).collect();
